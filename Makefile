@@ -23,6 +23,9 @@ test: l8c0
 	./l8c0 examples/logic.l8 > /tmp/logic.s
 	$(CC) -nostdlib -static -o /tmp/logic /tmp/logic.s runtime.s
 	test "$$(/tmp/logic)" = "YYY"
+	./l8c0 examples/struct.l8 > /tmp/struct.s
+	$(CC) -nostdlib -static -o /tmp/struct /tmp/struct.s runtime.s
+	test "$$(/tmp/struct)" = "3 12"
 	@echo "OK: examples"
 
 # Stage1: bootstrap compiles self-hosted compiler
@@ -38,6 +41,9 @@ selfhost: l8c0
 	./l8c2 examples/hello.l8 > /tmp/hello.s
 	$(CC) -nostdlib -static -o /tmp/hello /tmp/hello.s runtime.s
 	test "$$(/tmp/hello)" = "Hi"
+	./l8c2 examples/struct.l8 > /tmp/struct.s
+	$(CC) -nostdlib -static -o /tmp/struct /tmp/struct.s runtime.s
+	test "$$(/tmp/struct)" = "3 12"
 	@echo "OK: stage2 compiles examples"
 
 clean:
