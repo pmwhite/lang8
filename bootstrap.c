@@ -19,7 +19,8 @@
  *              `p.* = T.Variant { ... }` / `p.* = whole_value` for heap ADTs)
  *              `new T { f: e, ... }` allocates and initializes record fields
  *              `type T = { f: T; ... };` introduces a nominal record type
- *              `type T = A | B { f: T; };` introduces a nominal sum/enum type
+ *              `type T = A | B { f: T; };` or `type T = | A | B { f: T; };`
+ *              introduces a nominal sum/enum type (leading `|` optional)
  *              forward `*T` is fine before `T` is defined (record or sum)
  *              record literals: `T { f: e, ... }` (all fields; e may be uninitialized)
  *              variant construction: `T.A` / `T.B { f: e, ... }`
@@ -1554,7 +1555,7 @@ static void parse_type_def(Token **rest, Token *tok) {
         return;
     }
 
-    /* Sum type: V | W { fields; } | ...
+    /* Sum type: [|] V | W { fields; } | ...
        An incomplete struct stub from an earlier `*Name` forward ref may be
        promoted to this enum (same Type* rebound in place). */
     {
@@ -1564,6 +1565,8 @@ static void parse_type_def(Token **rest, Token *tok) {
             remove_struct(name);
             EnumDef *ed = get_or_create_enum(name);
             if (ed->variants) error("redefinition of type %s", name);
+
+            if (equal(tok, TK_PIPE)) tok = tok->next;
 
             Variant head = {0};
             Variant *cur = &head;
@@ -1592,6 +1595,8 @@ static void parse_type_def(Token **rest, Token *tok) {
     }
     EnumDef *ed = get_or_create_enum(name);
     if (ed->variants) error("redefinition of type %s", name);
+
+    if (equal(tok, TK_PIPE)) tok = tok->next;
 
     Variant head = {0};
     Variant *cur = &head;
