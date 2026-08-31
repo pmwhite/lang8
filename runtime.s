@@ -11,6 +11,7 @@
 .globl open
 .globl close
 .globl exit
+.globl len
 
 .section .bss
 .align 8
@@ -80,6 +81,12 @@ loadb:
 storeb:
     mov %sil, (%rdi)
     mov $0, %rax
+    ret
+
+
+# long len(string s) — length prefix at s-8
+len:
+    mov -8(%rdi), %rax
     ret
 
 # long read(long fd, void *buf, long n)

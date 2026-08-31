@@ -3,13 +3,18 @@
  *
  * Language: C-like subset → x86-64 Linux GAS assembly
  *
- *   Types:     int, named structs (define with `struct Tag { ... }`, use as `Tag` / `Tag *`)
- *   Decls:     int x;  Tag x;  Tag *p;  arrays thereof
+ *   Types:     int, string, named structs, pointers as `*T`, arrays as `T[N]`
+ *   Decls:     name-first: `x: int = expr;`, `p: *Point = uninitialized;`
+ *              locals require `= expr` or `= uninitialized`
+ *   Functions: `name(a: int, b: int): int { ... }`
  *   Control:   if/else, while, return, blocks
- *   Ops:       + - * / %  == != < <= > >=  && ||  =  & * ! -  []  .  ()
- *   Other:     sizeof(Tag), string/char literals, // comments
+ *   Ops:       + - * / %  == != < <= > >=  && ||  =  & ! -  []  .  .*  ()
+ *   Other:     sizeof(T), string/char literals, // comments
+ *              `p.*` dereferences (Zig-style); `*` is multiply / pointer types only
  *              member access: one operator `.` (auto-derefs pointers)
- *   Runtime:   read/write/open/close/exit/malloc/loadb/storeb/syscall
+ *              string literals are length-prefixed (len at -8, data at ptr)
+ *   Runtime:   read/write/open/close/exit/malloc/loadb/storeb/syscall/len
+ *              len(s) reads the length word at s-8
  *
  * Usage:  ./l8c0 file.l8 > file.s
  * Link:   gcc -nostdlib -static -o prog file.s runtime.s
@@ -48,12 +53,12 @@ static char *read_file(char *path) {
 enum {
     TK_EOF, TK_NUM, TK_STR, TK_IDENT,
     TK_INT, TK_IF, TK_ELSE, TK_WHILE, TK_RETURN,
-    TK_STRUCT, TK_SIZEOF,
+    TK_STRUCT, TK_SIZEOF, TK_STRING, TK_UNINITIALIZED,
     TK_EQ, TK_NE, TK_LE, TK_GE,
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PERCENT,
     TK_LT, TK_GT, TK_ASSIGN, TK_NOT, TK_AMP,
     TK_LPAREN, TK_RPAREN, TK_LBRACE, TK_RBRACE,
-    TK_LBRACK, TK_RBRACK, TK_SEMI, TK_COMMA,
+    TK_LBRACK, TK_RBRACK, TK_SEMI, TK_COMMA, TK_COLON,
     TK_AND, TK_OR, TK_DOT
 };
 
@@ -147,6 +152,8 @@ static Token *tokenize(char *p) {
             else if (kw_eq(s, n, "return")) kind = TK_RETURN;
             else if (kw_eq(s, n, "struct")) kind = TK_STRUCT;
             else if (kw_eq(s, n, "sizeof")) kind = TK_SIZEOF;
+            else if (kw_eq(s, n, "string")) kind = TK_STRING;
+            else if (kw_eq(s, n, "uninitialized")) kind = TK_UNINITIALIZED;
             cur = cur->next = new_token(kind, s, n);
             continue;
         }
@@ -170,6 +177,7 @@ static Token *tokenize(char *p) {
         case '!': kind = TK_NOT; break;
         case '&': kind = TK_AMP; break;
         case '.': kind = TK_DOT; break;
+        case ':': kind = TK_COLON; break;
         case '(': kind = TK_LPAREN; break;
         case ')': kind = TK_RPAREN; break;
         case '{': kind = TK_LBRACE; break;
@@ -242,7 +250,7 @@ struct StructDef {
     StructDef *next;
 };
 
-enum { TY_INT, TY_PTR, TY_ARRAY, TY_STRUCT };
+enum { TY_INT, TY_PTR, TY_ARRAY, TY_STRUCT, TY_STRING };
 
 struct Type {
     int kind;
@@ -254,6 +262,7 @@ struct Type {
 
 static StructDef *struct_defs;
 static Type *ty_int;
+static Type *ty_string;
 
 static Type *newtype(int kind) {
     Type *t = calloc(1, sizeof(Type));
@@ -308,6 +317,15 @@ static int is_type_name(Token *tok) {
     return find_struct(name) != 0;
 }
 
+/* True if tok begins a type: int, string, StructName, or *type */
+static int starts_type(Token *tok) {
+    if (equal(tok, TK_INT) || equal(tok, TK_STRING) || is_type_name(tok)) return 1;
+    Token *t = tok;
+    while (equal(t, TK_STAR)) t = t->next;
+    if (t != tok && (equal(t, TK_INT) || equal(t, TK_STRING) || is_type_name(t))) return 1;
+    return 0;
+}
+
 static Member *find_member(StructDef *sd, char *name) {
     for (Member *m = sd->members; m; m = m->next)
         if (!strcmp(m->name, name)) return m;
@@ -317,6 +335,7 @@ static Member *find_member(StructDef *sd, char *name) {
 static int is_pointer(Type *t) { return t && t->kind == TY_PTR; }
 static int is_array(Type *t) { return t && t->kind == TY_ARRAY; }
 static int is_struct(Type *t) { return t && t->kind == TY_STRUCT; }
+static int is_string(Type *t) { return t && t->kind == TY_STRING; }
 
 static Type *decay(Type *t) {
     if (is_array(t)) return ptr_to(t->base);
@@ -438,12 +457,19 @@ static Node *expr(Token **rest, Token *tok);
 static Node *stmt(Token **rest, Token *tok);
 static Node *compound_stmt(Token **rest, Token *tok);
 static Type *decl_spec(Token **rest, Token *tok);
+static Type *parse_type(Token **rest, Token *tok);
+static Type *parse_type_suffix(Token **rest, Token *tok, Type *ty);
 static Obj *parse_decl(Token **rest, Token *tok, int is_local);
 
+/* Base type only: int, string, or StructName */
 static Type *decl_spec(Token **rest, Token *tok) {
     if (equal(tok, TK_INT)) {
         *rest = tok->next;
         return ty_int;
+    }
+    if (equal(tok, TK_STRING)) {
+        *rest = tok->next;
+        return ty_string;
     }
     if (equal(tok, TK_IDENT)) {
         char *name = tokstr(tok);
@@ -455,16 +481,48 @@ static Type *decl_spec(Token **rest, Token *tok) {
     return 0;
 }
 
+/* Full type with pointer prefix: *T is pointer-to-T */
+static Type *parse_type(Token **rest, Token *tok) {
+    if (equal(tok, TK_STAR)) {
+        Type *base = parse_type(&tok, tok->next);
+        *rest = tok;
+        return ptr_to(base);
+    }
+    return decl_spec(rest, tok);
+}
+
+/* Optional array suffix: Type[N] */
+static Type *parse_type_suffix(Token **rest, Token *tok, Type *ty) {
+    if (equal(tok, TK_LBRACK)) {
+        tok = tok->next;
+        if (!equal(tok, TK_NUM)) error("expected array size");
+        ty = array_of(ty, tok->val);
+        tok = skip(tok->next, TK_RBRACK);
+    }
+    *rest = tok;
+    return ty;
+}
+
+/* name: Type  (optional array on type) */
+static Obj *parse_decl(Token **rest, Token *tok, int is_local) {
+    if (!equal(tok, TK_IDENT)) error("expected identifier in declaration");
+    char *name = tokstr(tok);
+    tok = skip(tok->next, TK_COLON);
+    Type *ty = parse_type(&tok, tok);
+    ty = parse_type_suffix(&tok, tok, ty);
+    Obj *o = new_obj(name, is_local);
+    o->ty = ty;
+    *rest = tok;
+    return o;
+}
+
 static Node *primary(Token **rest, Token *tok) {
     if (equal(tok, TK_SIZEOF)) {
         tok = tok->next;
         tok = skip(tok, TK_LPAREN);
-        if (equal(tok, TK_INT) || is_type_name(tok)) {
-            Type *ty = decl_spec(&tok, tok);
-            while (equal(tok, TK_STAR)) {
-                ty = ptr_to(ty);
-                tok = tok->next;
-            }
+        if (starts_type(tok)) {
+            Type *ty = parse_type(&tok, tok);
+            ty = parse_type_suffix(&tok, tok, ty);
             tok = skip(tok, TK_RPAREN);
             *rest = tok;
             return new_num(ty->size);
@@ -496,7 +554,7 @@ static Node *primary(Token **rest, Token *tok) {
         str_lits = s;
         Node *n = new_node(ND_NUM);
         n->str_label = s->label + 1;
-        n->ty = ptr_to(ty_int); /* treat as pointer */
+        n->ty = ty_string;
         *rest = tok->next;
         return n;
     }
@@ -546,6 +604,12 @@ static Node *postfix(Token **rest, Token *tok) {
             continue;
         }
         if (equal(tok, TK_DOT)) {
+            /* p.* — Zig-style dereference */
+            if (equal(tok->next, TK_STAR)) {
+                tok = tok->next->next;
+                n = new_unary(ND_DEREF, n);
+                continue;
+            }
             tok = tok->next;
             if (!equal(tok, TK_IDENT)) error("expected member name");
             char *name = tokstr(tok);
@@ -580,10 +644,6 @@ static Node *unary(Token **rest, Token *tok) {
         n->ty = ty_int;
         return n;
     }
-    if (equal(tok, TK_STAR)) {
-        Node *n = new_unary(ND_DEREF, unary(rest, tok->next));
-        return n;
-    }
     if (equal(tok, TK_AMP)) {
         Node *n = new_unary(ND_ADDR, unary(rest, tok->next));
         return n;
@@ -609,7 +669,7 @@ static void add_type(Node *n) {
 
     switch (n->kind) {
     case ND_NUM:
-        n->ty = ty_int;
+        if (!n->ty) n->ty = ty_int;
         return;
     case ND_VAR:
         n->ty = n->var->ty;
@@ -646,7 +706,9 @@ static void add_type(Node *n) {
             if (is_pointer(t))
                 n->ty = t->base;
             else if (t && t->kind == TY_INT)
-                n->ty = ty_int; /* allow int as opaque pointer */
+                n->ty = ty_int;
+            else if (is_string(t))
+                n->ty = ty_int; /* opaque byte access via int */
             else
                 error("dereferencing non-pointer");
         }
@@ -733,27 +795,6 @@ static Node *expr(Token **rest, Token *tok) {
     return assign(rest, tok);
 }
 
-static Obj *parse_decl(Token **rest, Token *tok, int is_local) {
-    Type *ty = decl_spec(&tok, tok);
-    while (equal(tok, TK_STAR)) {
-        ty = ptr_to(ty);
-        tok = tok->next;
-    }
-    if (!equal(tok, TK_IDENT)) error("expected identifier in declaration");
-    char *name = tokstr(tok);
-    tok = tok->next;
-    if (equal(tok, TK_LBRACK)) {
-        tok = tok->next;
-        if (!equal(tok, TK_NUM)) error("expected array size");
-        ty = array_of(ty, tok->val);
-        tok = skip(tok->next, TK_RBRACK);
-    }
-    Obj *o = new_obj(name, is_local);
-    o->ty = ty;
-    *rest = tok;
-    return o;
-}
-
 static Node *stmt(Token **rest, Token *tok) {
     if (equal(tok, TK_RETURN)) {
         Node *n = new_node(ND_RETURN);
@@ -786,10 +827,26 @@ static Node *stmt(Token **rest, Token *tok) {
     }
     if (equal(tok, TK_LBRACE))
         return compound_stmt(rest, tok);
-    if (equal(tok, TK_INT) || is_type_name(tok)) {
-        parse_decl(&tok, tok, 1);
+    /* name-first local decl: name : type = expr|uninitialized ; */
+    if (equal(tok, TK_IDENT) && equal(tok->next, TK_COLON)) {
+        Obj *o = parse_decl(&tok, tok, 1);
+        if (equal(tok, TK_COMMA))
+            error("only one variable per declaration");
+        tok = skip(tok, TK_ASSIGN);
+        if (equal(tok, TK_UNINITIALIZED)) {
+            tok = tok->next;
+            *rest = skip(tok, TK_SEMI);
+            return new_node(ND_BLOCK);
+        }
+        Node *rhs = expr(&tok, tok);
         *rest = skip(tok, TK_SEMI);
-        return new_node(ND_BLOCK);
+        Node *lhs = new_node(ND_VAR);
+        lhs->var = o;
+        lhs->ty = o->ty;
+        Node *as = new_binary(ND_ASSIGN, lhs, rhs);
+        Node *es = new_node(ND_EXPR_STMT);
+        es->lhs = as;
+        return es;
     }
     Node *n = new_node(ND_EXPR_STMT);
     n->lhs = expr(&tok, tok);
@@ -810,8 +867,7 @@ static Node *compound_stmt(Token **rest, Token *tok) {
     return n;
 }
 
-static Function *parse_function(Token **rest, Token *tok, char *name, Type *ret_unused) {
-    (void)ret_unused;
+static Function *parse_function(Token **rest, Token *tok, char *name) {
     locals = 0;
     Function *fn = calloc(1, sizeof(Function));
     fn->name = name;
@@ -822,6 +878,8 @@ static Function *parse_function(Token **rest, Token *tok, char *name, Type *ret_
         fn->params[fn->nparams++] = parse_decl(&tok, tok, 1);
     }
     tok = tok->next;
+    tok = skip(tok, TK_COLON);
+    parse_type(&tok, tok); /* return type currently unused for codegen */
     fn->body = compound_stmt(&tok, tok);
     fn->locals = locals;
     *rest = tok;
@@ -829,7 +887,6 @@ static Function *parse_function(Token **rest, Token *tok, char *name, Type *ret_
 }
 
 static void parse_struct_def(Token **rest, Token *tok) {
-    /* tok at TK_STRUCT */
     tok = tok->next;
     if (!equal(tok, TK_IDENT)) error("expected struct tag");
     char *name = tokstr(tok);
@@ -841,19 +898,17 @@ static void parse_struct_def(Token **rest, Token *tok) {
     Member *cur = &head;
     int offset = 0;
     while (!equal(tok, TK_RBRACE)) {
-        Type *mty = decl_spec(&tok, tok);
-        while (equal(tok, TK_STAR)) {
-            mty = ptr_to(mty);
-            tok = tok->next;
-        }
         if (!equal(tok, TK_IDENT)) error("expected member name");
         Member *m = calloc(1, sizeof(Member));
         m->name = tokstr(tok);
+        tok = skip(tok->next, TK_COLON);
+        Type *mty = parse_type(&tok, tok);
+        mty = parse_type_suffix(&tok, tok, mty);
         m->offset = offset;
         m->ty = mty;
-        offset += 8; /* all current field types are word-sized */
+        offset += 8;
         cur = cur->next = m;
-        tok = skip(tok->next, TK_SEMI);
+        tok = skip(tok, TK_SEMI);
     }
     sd->members = head.next;
     sd->size = offset;
@@ -869,29 +924,23 @@ static void parse_program(Token *tok) {
             parse_struct_def(&tok, tok);
             continue;
         }
-        Type *basety = decl_spec(&tok, tok);
-        Type *ty = basety;
-        while (equal(tok, TK_STAR)) {
-            ty = ptr_to(ty);
-            tok = tok->next;
-        }
+        /* name-first: name ( ... ) : type { }   or   name : type ; */
         if (!equal(tok, TK_IDENT)) error("expected identifier");
         char *name = tokstr(tok);
         tok = tok->next;
         if (equal(tok, TK_LPAREN)) {
-            Function *fn = parse_function(&tok, tok, name, ty);
+            Function *fn = parse_function(&tok, tok, name);
             *fn_tail = fn;
             fn_tail = &fn->next;
             Obj *o = new_obj(name, 0);
             o->is_func = 1;
-            o->ty = ty;
+            o->ty = ty_int;
         } else {
-            if (equal(tok, TK_LBRACK)) {
-                tok = tok->next;
-                if (!equal(tok, TK_NUM)) error("expected array size");
-                ty = array_of(ty, tok->val);
-                tok = skip(tok->next, TK_RBRACK);
-            }
+            tok = skip(tok, TK_COLON);
+            Type *ty = parse_type(&tok, tok);
+            ty = parse_type_suffix(&tok, tok, ty);
+            if (equal(tok, TK_COMMA))
+                error("only one variable per declaration");
             Obj *o = new_obj(name, 0);
             o->ty = ty;
             tok = skip(tok, TK_SEMI);
@@ -943,14 +992,15 @@ static void gen_expr(Node *n) {
     switch (n->kind) {
     case ND_NUM:
         if (n->str_label)
-            printf("  lea .L.str%d(%%rip), %%rax\n", n->str_label - 1);
+            /* pointer to data; length word lives at -8 */
+            printf("  lea .L.str%d+8(%%rip), %%rax\n", n->str_label - 1);
         else
             printf("  mov $%ld, %%rax\n", n->val);
         return;
     case ND_VAR:
         gen_addr(n);
         if (is_array(n->ty) || is_struct(n->ty))
-            return; /* decay to pointer / address of struct */
+            return;
         printf("  mov (%%rax), %%rax\n");
         return;
     case ND_MEMBER:
@@ -1148,11 +1198,13 @@ static void emit_data(void) {
         printf("%s: .skip %d\n", g->name, sz);
     }
     printf(".section .rodata\n");
+    printf(".align 8\n");
     for (int i = 0; i < str_count; i++) {
         StrLit *s = str_lits;
         while (s && s->label != i) s = s->next;
         if (!s) continue;
         printf(".L.str%d:\n", s->label);
+        printf("  .quad %d\n", s->len);
         printf("  .byte ");
         for (int j = 0; j < s->len; j++) {
             if (j) printf(",");
@@ -1196,6 +1248,8 @@ int main(int argc, char **argv) {
     if (argc != 2) error("usage: l8c0 <file.l8>");
     ty_int = newtype(TY_INT);
     ty_int->size = 8;
+    ty_string = newtype(TY_STRING);
+    ty_string->size = 8;
     source = read_file(argv[1]);
     token = tokenize(source);
     parse_program(token);
