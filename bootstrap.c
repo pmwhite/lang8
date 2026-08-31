@@ -6,7 +6,7 @@
  *   Types:     int, i8 (byte), named structs, pointers as `*T`, arrays as `T[N]`
  *   Decls:     name-first: `x: int = expr;`, `p: *Point = uninitialized;`
  *              locals require `= expr` or `= uninitialized`
- *   Functions: `name(a: int, b: int): int { ... }`
+ *   Functions: `name(a: int, b: int): int { ... }` or `name(a: int) { ... }` (no return)
  *   Control:   if/else, while, return, blocks
  *   Ops:       + - * / %  == != < <= > >=  && ||  =  & ! -  []  .  .*  ()
  *              `e as T` widen/reinterpret; `e trunc T` narrow (e.g. int→i8)
@@ -441,6 +441,7 @@ static Obj *globals;
 static Function *functions;
 static Obj *locals;
 static char *current_fn_name;
+static Type *current_return_ty;
 static int str_count;
 typedef struct StrLit { char *data; int len; int label; struct StrLit *next; } StrLit;
 static StrLit *str_lits;
@@ -849,8 +850,8 @@ static void add_type(Node *n) {
     case ND_FUNCALL:
         {
             Obj *f = find_obj(globals, n->funcname);
-            if (f && f->is_func && f->ty)
-                n->ty = f->ty;
+            if (f && f->is_func)
+                n->ty = f->ty; /* null if function does not return */
             else
                 n->ty = ty_int; /* undeclared/builtin */
             Function *fn = 0;
@@ -870,6 +871,20 @@ static void add_type(Node *n) {
                     }
                 }
             }
+        }
+        return;
+    case ND_RETURN:
+        if (n->lhs) {
+            if (!current_return_ty)
+                error("return with a value in a non-returning function");
+            {
+                Type *rt = decay(current_return_ty);
+                Type *gt = decay(n->lhs->ty);
+                if (!types_equal(gt, rt) && !(is_pointer(rt) && is_null_const(n->lhs)))
+                    error("return type mismatch (use as/trunc)");
+            }
+        } else if (current_return_ty) {
+            error("return missing a value");
         }
         return;
     default:
@@ -1031,8 +1046,11 @@ static Function *parse_function(Token **rest, Token *tok, char *name) {
         fn->params[fn->nparams++] = parse_decl(&tok, tok, 1);
     }
     tok = tok->next;
-    tok = skip(tok, TK_COLON);
-    fn->return_ty = parse_type(&tok, tok);
+    fn->return_ty = 0;
+    if (equal(tok, TK_COLON)) {
+        tok = tok->next;
+        fn->return_ty = parse_type(&tok, tok);
+    }
     fn->body = compound_stmt(&tok, tok);
     fn->locals = locals;
     *rest = tok;
@@ -1087,7 +1105,7 @@ static void parse_program(Token *tok) {
             fn_tail = &fn->next;
             Obj *o = new_obj(name, 0);
             o->is_func = 1;
-            o->ty = fn->return_ty ? fn->return_ty : ty_int;
+            o->ty = fn->return_ty;
         } else {
             tok = skip(tok, TK_COLON);
             Type *ty = parse_type(&tok, tok);
@@ -1310,6 +1328,7 @@ static void gen_expr(Node *n) {
 }
 
 static void gen_stmt(Node *n) {
+    add_type(n);
     switch (n->kind) {
     case ND_RETURN:
         if (n->lhs) gen_expr(n->lhs);
@@ -1397,6 +1416,7 @@ static void emit_text(void) {
     for (Function *fn = functions; fn; fn = fn->next) {
         assign_lvar_offsets(fn);
         current_fn_name = fn->name;
+        current_return_ty = fn->return_ty;
         printf(".globl %s\n", fn->name);
         printf("%s:\n", fn->name);
         printf("  push %%rbp\n");
