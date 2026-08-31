@@ -15,9 +15,10 @@
  *   Other:     sizeof(T), new T uninitialized | new T { f: e, ... },
  *              string/char literals, // comments
  *              `new T` allocates sizeof(T) bytes and yields *T
- *              `new T uninitialized` leaves memory unread (then assign fields or
- *              `p.* = T.Variant { ... }` / `p.* = whole_value` for heap ADTs)
- *              `new T { f: e, ... }` allocates and initializes record fields
+ *              `new T uninitialized` leaves memory unread
+ *              `new T { f: e, ... }` allocates and initializes a record
+ *              `new E.V` / `new E.V { f: e, ... }` allocates and initializes a sum value
+ *              (prefer this over `p: *E = new E uninitialized; p.* = E.V { ... }`)
  *              `type T = { f: T; ... };` introduces a nominal record type
  *              `type T = A | B { f: T; };` or `type T = | A | B { f: T; };`
  *              introduces a nominal sum/enum type (leading `|` optional)
@@ -807,6 +808,29 @@ static Node *parse_struct_field_inits(Token **rest, Token *tok, Type *sty) {
 static Node *primary(Token **rest, Token *tok) {
     if (equal(tok, TK_NEW)) {
         tok = tok->next;
+        /* new Enum.Variant | new Enum.Variant { fields } */
+        if (is_type_name(tok) && equal(tok->next, TK_DOT)) {
+            Type *ety = parse_type(&tok, tok);
+            if (!is_enum(ety)) error("new Enum.Variant requires an enum type");
+            tok = skip(tok, TK_DOT);
+            if (!equal(tok, TK_IDENT)) error("expected variant name after new Enum.");
+            char *vname = tokstr(tok);
+            tok = tok->next;
+            Variant *v = find_variant(ety->enum_def, vname);
+            if (!v) error("unknown variant %s", vname);
+            Node *n = new_node(ND_NEW);
+            n->ty = ptr_to(ety);
+            n->variant = v;
+            n->val = v->tag;
+            if (equal(tok, TK_LBRACE)) {
+                if (!v->fields) error("unit variant does not take fields");
+                n->args = parse_variant_field_inits(&tok, tok, v);
+            } else if (v->fields) {
+                error("variant requires field initializers");
+            }
+            *rest = tok;
+            return n;
+        }
         Type *base = parse_type(&tok, tok);
         base = parse_type_suffix(&tok, tok, base);
         if (is_pointer(base)) error("new expects a non-pointer type");
@@ -818,7 +842,8 @@ static Node *primary(Token **rest, Token *tok) {
             *rest = tok->next;
             return n;
         }
-        if (!equal(tok, TK_LBRACE)) error("expected uninitialized or { after new Type");
+        if (!equal(tok, TK_LBRACE)) error("expected uninitialized, {, or .Variant after new");
+        if (is_enum(base)) error("use new Enum.Variant { ... } for sum types");
         n->args = parse_struct_field_inits(&tok, tok, base);
         n->val = 0;
         *rest = tok;
@@ -1754,7 +1779,21 @@ static void gen_expr(Node *n) {
         Type *base = n->ty->base;
         printf("  mov $%d, %%rdi\n", type_size(base) > 0 ? type_size(base) : 8);
         printf("  call malloc\n");
-        if (!n->val) {
+        if (n->variant) {
+            printf("  push %%rax\n");
+            printf("  mov $%ld, %%rdi\n", n->val);
+            printf("  mov %%rdi, (%%rax)\n");
+            for (Node *init = n->args; init; init = init->next) {
+                if (!init->lhs) continue;
+                printf("  mov (%%rsp), %%rax\n");
+                printf("  add $%d, %%rax\n", enum_field_offset(init->member));
+                printf("  push %%rax\n");
+                gen_expr(init->lhs);
+                printf("  pop %%rdi\n");
+                store_mem(init->member->ty ? init->member->ty : ty_int);
+            }
+            printf("  pop %%rax\n");
+        } else if (!n->val) {
             printf("  push %%rax\n");
             for (Node *init = n->args; init; init = init->next) {
                 if (!init->lhs) continue;

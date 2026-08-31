@@ -1,8 +1,8 @@
 // L8 self-hosted compiler → x86-64 Linux GAS
 // Uses nominal types for AST; Type is a sum over language types.
 //
-// Heap ADTs: `p: *T = new T uninitialized;` then `p.* = T.Variant { ... }`
-//   or `p.* = whole_value`. `new T { fields }` initializes a record on the heap.
+// Heap ADTs: `new T { fields }`, `new E.V`, `new E.V { fields }`, or
+//   `new T uninitialized`. Prefer `new E.V { ... }` over allocate-then-assign.
 // Aggregates are passed/returned by value via a hidden pointer (sret) ABI.
 // Forward `*Name` may later complete as a record or a sum.
 // Match arms may end with `_ -> { ... }`. Field lists accept `;` or `,`.
@@ -303,9 +303,9 @@ init_kinds() {
     ND_VARIANT_LIT = 31; ND_MATCH = 32; ND_MATCH_ARM = 33;
     REG0 = "%rdi"; REG1 = "%rsi"; REG2 = "%rdx";
     REG3 = "%rcx"; REG4 = "%r8"; REG5 = "%r9";
-    ty_int = make_int_type();
-    ty_i8 = make_i8_type();
-    ty_bool = make_bool_type();
+    ty_int = new Type.Int;
+    ty_i8 = new Type.I8;
+    ty_bool = new Type.Bool;
 }
 
 reg_name(i: int): *i8 {
@@ -342,24 +342,6 @@ read_file(path: *i8): *i8 {
         n = n + r;
     }
     return buf;
-}
-
-make_int_type(): *Type {
-    p: *Type = new Type uninitialized;
-    p.* = Type.Int;
-    return p;
-}
-
-make_i8_type(): *Type {
-    p: *Type = new Type uninitialized;
-    p.* = Type.I8;
-    return p;
-}
-
-make_bool_type(): *Type {
-    p: *Type = new Type uninitialized;
-    p.* = Type.Bool;
-    return p;
 }
 
 type_size(t: *Type): int {
@@ -409,23 +391,18 @@ type_enum_def(t: *Type): *EnumDef {
 }
 
 ptr_to(base: *Type): *Type {
-    p: *Type = new Type uninitialized;
-    p.* = Type.Ptr { base: base };
-    return p;
+    return new Type.Ptr { base: base };
 }
 
 array_of(base: *Type, len: int): *Type {
-    p: *Type = new Type uninitialized;
-    p.* = Type.Array { base: base, len: len };
-    return p;
+    return new Type.Array { base: base, len: len };
 }
 
 struct_type(sd: *StructDef): *Type {
     if (sd.ty != 0) {
         return sd.ty;
     }
-    p: *Type = new Type uninitialized;
-    p.* = Type.Record { def: sd };
+    p: *Type = new Type.Record { def: sd };
     sd.ty = p;
     return p;
 }
@@ -434,8 +411,7 @@ enum_type(ed: *EnumDef): *Type {
     if (ed.ty != 0) {
         return ed.ty;
     }
-    p: *Type = new Type uninitialized;
-    p.* = Type.Enum { def: ed };
+    p: *Type = new Type.Enum { def: ed };
     ed.ty = p;
     return p;
 }
@@ -1350,6 +1326,37 @@ parse_variant_field_inits(v: *Variant): *Node {
 parse_primary(): *Node {
     if (equal(TokKind.New)) {
         tok = tok.next;
+        if (is_type_name() && tok.next.kind == TokKind.Dot) {
+            ety: *Type = parse_type();
+            if (!is_enum_ty(ety)) {
+                error("new Enum.Variant requires an enum type");
+            }
+            skip(TokKind.Dot);
+            if (!equal(TokKind.Ident)) {
+                error("expected variant name after new Enum.");
+            }
+            vname: *i8 = cur_tokstr();
+            tok = tok.next;
+            v: *Variant = find_variant(type_enum_def(ety), vname);
+            if (v == 0) {
+                error("unknown variant");
+            }
+            n: *Node = new_node(ND_NEW);
+            n.ty = ptr_to(ety);
+            n.variant = v;
+            n.val = v.tag;
+            if (equal(TokKind.LBrace)) {
+                if (v.fields == 0) {
+                    error("unit variant does not take fields");
+                }
+                n.args = parse_variant_field_inits(v);
+            } else {
+                if (v.fields != 0) {
+                    error("variant requires field initializers");
+                }
+            }
+            return n;
+        }
         base: *Type = parse_type();
         base = parse_type_suffix(base);
         if (is_pointer(base)) {
@@ -1358,7 +1365,7 @@ parse_primary(): *Node {
         if (is_array(base)) {
             error("new of array type not supported yet");
         }
-        n: *Node = new_node(ND_NEW);
+        n = new_node(ND_NEW);
         n.ty = ptr_to(base);
         if (equal(TokKind.Uninitialized)) {
             n.val = 1;
@@ -1366,7 +1373,10 @@ parse_primary(): *Node {
             return n;
         }
         if (!equal(TokKind.LBrace)) {
-            error("expected uninitialized or { after new Type");
+            error("expected uninitialized, {, or .Variant after new");
+        }
+        if (is_enum_ty(base)) {
+            error("use new Enum.Variant { ... } for sum types");
         }
         n.args = parse_struct_field_inits(base);
         n.val = 0;
@@ -2684,10 +2694,20 @@ gen_expr(n: *Node) {
         emit_num(sz);
         emit(", %rdi\n");
         emit("  call malloc\n");
-        if (n.val == 0) {
+        if (n.variant != 0) {
             emit("  push %rax\n");
-            gen_struct_inits(n.args);
+            emit("  mov $");
+            emit_num(n.val);
+            emit(", %rdi\n");
+            emit("  mov %rdi, (%rax)\n");
+            gen_variant_inits(n.args);
             emit("  pop %rax\n");
+        } else {
+            if (n.val == 0) {
+                emit("  push %rax\n");
+                gen_struct_inits(n.args);
+                emit("  pop %rax\n");
+            }
         }
         return;
     }
