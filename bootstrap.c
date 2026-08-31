@@ -14,12 +14,19 @@
  *              bool literals: true, false (values 1 and 0); no implicit numeric casts
  *   Other:     sizeof(T), new T uninitialized | new T { f: e, ... },
  *              string/char literals, // comments
- *              `new T` allocates and yields *T
+ *              `new T` allocates sizeof(T) bytes and yields *T
+ *              `new T uninitialized` leaves memory unread (then assign fields or
+ *              `p.* = T.Variant { ... }` / `p.* = whole_value` for heap ADTs)
+ *              `new T { f: e, ... }` allocates and initializes record fields
  *              `type T = { f: T; ... };` introduces a nominal record type
  *              `type T = A | B { f: T; };` introduces a nominal sum/enum type
+ *              forward `*T` is fine before `T` is defined (record or sum)
  *              record literals: `T { f: e, ... }` (all fields; e may be uninitialized)
  *              variant construction: `T.A` / `T.B { f: e, ... }`
- *              `match e { A -> { ... } B { f } -> { ... } }` (exhaustive)
+ *              `match e { A -> { ... } B { f } -> { ... } _ -> { ... } }`
+ *              (exhaustive, or covered by a final `_` wildcard arm)
+ *              field lists accept `;` or `,` (trailing separator optional)
+ *              aggregates passed/returned by value use a hidden pointer ABI
  *              `p.*` dereferences (Zig-style); `*` is multiply / pointer types only
  *              member access: one operator `.` (auto-derefs pointers)
  *              string literals have type *i8 (length-prefixed: len at -8, data at ptr)
@@ -275,6 +282,7 @@ struct StructDef {
     char *name;
     Member *members;
     int size;
+    Type *ty; /* canonical Type* for this def; shared across uses */
     StructDef *next;
 };
 
@@ -291,6 +299,7 @@ struct EnumDef {
     char *name;
     Variant *variants;
     int size;
+    Type *ty; /* canonical Type* for this def; shared across uses */
     EnumDef *next;
 };
 
@@ -333,16 +342,26 @@ static Type *array_of(Type *base, int len) {
 }
 
 static Type *struct_type(StructDef *sd) {
+    if (sd->ty) {
+        sd->ty->size = sd->size;
+        return sd->ty;
+    }
     Type *t = newtype(TY_STRUCT);
     t->struct_def = sd;
     t->size = sd->size;
+    sd->ty = t;
     return t;
 }
 
 static Type *enum_type(EnumDef *ed) {
+    if (ed->ty) {
+        ed->ty->size = ed->size > 0 ? ed->size : 8;
+        return ed->ty;
+    }
     Type *t = newtype(TY_ENUM);
     t->enum_def = ed;
     t->size = ed->size > 0 ? ed->size : 8;
+    ed->ty = t;
     return t;
 }
 
@@ -356,6 +375,15 @@ static EnumDef *find_enum(char *name) {
     for (EnumDef *e = enum_defs; e; e = e->next)
         if (!strcmp(e->name, name)) return e;
     return 0;
+}
+
+static void remove_struct(char *name) {
+    for (StructDef **pp = &struct_defs; *pp; pp = &(*pp)->next) {
+        if (!strcmp((*pp)->name, name)) {
+            *pp = (*pp)->next;
+            return;
+        }
+    }
 }
 
 static StructDef *get_or_create_struct(char *name) {
@@ -376,6 +404,18 @@ static EnumDef *get_or_create_enum(char *name) {
     ed->next = enum_defs;
     enum_defs = ed;
     return ed;
+}
+
+/* Promote an incomplete struct stub Type into an enum Type in place. */
+static Type *rebind_struct_stub_to_enum(StructDef *sd, EnumDef *ed) {
+    Type *t = sd->ty;
+    if (!t) return 0;
+    t->kind = TY_ENUM;
+    t->struct_def = 0;
+    t->enum_def = ed;
+    t->size = ed->size > 0 ? ed->size : 8;
+    ed->ty = t;
+    return t;
 }
 
 static Variant *find_variant(EnumDef *ed, char *name) {
@@ -432,6 +472,15 @@ static int is_aggregate(Type *t) { return is_struct(t) || is_enum(t); }
 static int is_i8(Type *t) { return t && t->kind == TY_I8; }
 static int is_int_ty(Type *t) { return t && t->kind == TY_INT; }
 static int is_bool_ty(Type *t) { return t && t->kind == TY_BOOL; }
+static int type_size(Type *t) {
+    if (!t) return 0;
+    if (is_struct(t) && t->struct_def) return t->struct_def->size;
+    if (is_enum(t) && t->enum_def)
+        return t->enum_def->size > 0 ? t->enum_def->size : 8;
+    return t->size;
+}
+/* Aggregates are always passed as a pointer to a temporary / local. */
+static int passes_by_ref(Type *t) { return is_aggregate(t); }
 static Type *decay(Type *t);
 
 static int types_equal(Type *a, Type *b) {
@@ -447,12 +496,12 @@ static int types_equal(Type *a, Type *b) {
 
 static int is_word_ty(Type *t) {
     t = decay(t);
-    return t && t->size == 8;
+    return t && type_size(t) == 8;
 }
 
 static int is_byte_sized(Type *t) {
     t = decay(t);
-    return t && t->size == 1;
+    return t && type_size(t) == 1;
 }
 
 static void check_as(Type *from, Type *to) {
@@ -529,6 +578,7 @@ struct Function {
     Node *body;
     int stack_size;
     Type *return_ty;
+    Obj *sret; /* hidden *ReturnTy param when returning an aggregate */
     Function *next;
 };
 
@@ -537,6 +587,7 @@ static Function *functions;
 static Obj *locals;
 static char *current_fn_name;
 static Type *current_return_ty;
+static Obj *current_sret;
 static int str_count;
 typedef struct StrLit { char *data; int len; int label; struct StrLit *next; } StrLit;
 static StrLit *str_lits;
@@ -780,13 +831,13 @@ static Node *primary(Token **rest, Token *tok) {
             ty = parse_type_suffix(&tok, tok, ty);
             tok = skip(tok, TK_RPAREN);
             *rest = tok;
-            return new_num(ty->size);
+            return new_num(type_size(ty));
         }
         Node *n = expr(&tok, tok);
         tok = skip(tok, TK_RPAREN);
         add_type(n);
         *rest = tok;
-        return new_num(n->ty->size);
+        return new_num(type_size(n->ty));
     }
     if (equal(tok, TK_LPAREN)) {
         Node *n = expr(&tok, tok->next);
@@ -896,7 +947,7 @@ static Node *postfix(Token **rest, Token *tok) {
             if (!is_int_ty(decay(idx->ty))) error("array index must be int");
             Type *t = decay(n->ty);
             if (!is_pointer(t)) error("subscript of non-pointer");
-            int elem = t->base->size;
+            int elem = type_size(t->base);
             Node *scaled = new_binary(ND_MUL, idx, new_num(elem));
             n = new_unary(ND_DEREF, new_binary(ND_ADD, n, scaled));
             n->ty = t->base;
@@ -1271,8 +1322,10 @@ static Node *stmt(Token **rest, Token *tok) {
             tok = tok->next;
             Node *arm = new_node(ND_MATCH_ARM);
             arm->ty = et;
+            int is_wild = !strcmp(vname, "_");
             /* Optional: Name(x) -> whole payload, Name { a, b } -> fields, Name -> unit */
             if (equal(tok, TK_LPAREN)) {
+                if (is_wild) error("wildcard match arm cannot bind a payload");
                 tok = tok->next;
                 if (!equal(tok, TK_IDENT)) error("expected payload binding name");
                 Node *b = new_node(ND_VAR);
@@ -1282,6 +1335,7 @@ static Node *stmt(Token **rest, Token *tok) {
                 arm->args = b;
                 arm->val = 1; /* whole-payload bind */
             } else if (equal(tok, TK_LBRACE)) {
+                if (is_wild) error("wildcard match arm cannot bind fields");
                 tok = tok->next;
                 Node bhead = {0};
                 Node *bcur = &bhead;
@@ -1297,6 +1351,11 @@ static Node *stmt(Token **rest, Token *tok) {
                 arm->args = bhead.next;
             }
             tok = skip(tok, TK_ARROW);
+            if (is_wild) {
+                for (Node *a = arms.next; a; a = a->next)
+                    if (!a->variant) error("duplicate wildcard match arm");
+                arm->variant = 0;
+            } else {
             Variant *v = find_variant(et->enum_def, vname);
             if (!v) error("unknown variant %s", vname);
             for (Node *a = arms.next; a; a = a->next)
@@ -1335,14 +1394,24 @@ static Node *stmt(Token **rest, Token *tok) {
             } else if (arm->args) {
                 error("unit variant takes no bindings");
             }
+            }
             arm->body = compound_stmt(&tok, tok);
             acur = acur->next = arm;
+            if (is_wild && !equal(tok, TK_RBRACE))
+                error("wildcard `_` must be the last match arm");
         }
-        for (Variant *v = et->enum_def->variants; v; v = v->next) {
-            int found = 0;
+        {
+            int has_wild = 0;
             for (Node *a = arms.next; a; a = a->next)
-                if (a->variant == v) found = 1;
-            if (!found) error("match not exhaustive: missing %s", v->name);
+                if (!a->variant) has_wild = 1;
+            if (!has_wild) {
+                for (Variant *v = et->enum_def->variants; v; v = v->next) {
+                    int found = 0;
+                    for (Node *a = arms.next; a; a = a->next)
+                        if (a->variant == v) found = 1;
+                    if (!found) error("match not exhaustive: missing %s", v->name);
+                }
+            }
         }
         n->body = arms.next;
         *rest = tok->next;
@@ -1406,6 +1475,11 @@ static Function *parse_function(Token **rest, Token *tok, char *name) {
         tok = tok->next;
         fn->return_ty = parse_type(&tok, tok);
     }
+    if (fn->return_ty && passes_by_ref(fn->return_ty)) {
+        if (fn->nparams >= 6) error("too many parameters (aggregate return needs a hidden sret slot)");
+        fn->sret = new_obj(".sret", 1);
+        fn->sret->ty = ptr_to(fn->return_ty);
+    }
     fn->body = compound_stmt(&tok, tok);
     fn->locals = locals;
     *rest = tok;
@@ -1425,9 +1499,16 @@ static Member *parse_field_list(Token **rest, Token *tok, int base_offset, int *
         mty = parse_type_suffix(&tok, tok, mty);
         m->offset = offset;
         m->ty = mty;
-        offset += 8;
+        {
+            int sz = type_size(mty);
+            if (sz <= 0) sz = 8;
+            offset += (sz + 7) & ~7;
+        }
         cur = cur->next = m;
-        tok = skip(tok, TK_SEMI);
+        if (equal(tok, TK_SEMI) || equal(tok, TK_COMMA))
+            tok = tok->next;
+        else if (!equal(tok, TK_RBRACE))
+            error("expected `;`, `,`, or `}` after field");
     }
     *out_size = offset - base_offset;
     *rest = tok->next; /* skip } */
@@ -1468,12 +1549,47 @@ static void parse_type_def(Token **rest, Token *tok) {
         int sz = 0;
         sd->members = parse_field_list(&tok, tok->next, 0, &sz);
         sd->size = sz;
+        if (sd->ty) sd->ty->size = sz;
         *rest = skip(tok, TK_SEMI);
         return;
     }
 
-    /* Sum type: V | W { fields; } | ... */
-    if (find_struct(name)) error("redefinition of type %s", name);
+    /* Sum type: V | W { fields; } | ...
+       An incomplete struct stub from an earlier `*Name` forward ref may be
+       promoted to this enum (same Type* rebound in place). */
+    {
+        StructDef *stub = find_struct(name);
+        if (stub) {
+            if (stub->members) error("redefinition of type %s", name);
+            remove_struct(name);
+            EnumDef *ed = get_or_create_enum(name);
+            if (ed->variants) error("redefinition of type %s", name);
+
+            Variant head = {0};
+            Variant *cur = &head;
+            int tag = 0;
+            int max_payload = 0;
+            for (;;) {
+                Variant *v = parse_variant(&tok, tok, tag, name);
+                for (Variant *x = head.next; x; x = x->next)
+                    if (!strcmp(x->name, v->name)) error("duplicate variant %s", v->name);
+                if (v->payload_size > max_payload) max_payload = v->payload_size;
+                cur = cur->next = v;
+                tag++;
+                if (!equal(tok, TK_PIPE)) break;
+                tok = tok->next;
+            }
+            if (!head.next) error("enum type needs at least one variant");
+            ed->variants = head.next;
+            ed->size = 8 + max_payload;
+            if (stub->ty)
+                rebind_struct_stub_to_enum(stub, ed);
+            else if (ed->ty)
+                ed->ty->size = ed->size;
+            *rest = skip(tok, TK_SEMI);
+            return;
+        }
+    }
     EnumDef *ed = get_or_create_enum(name);
     if (ed->variants) error("redefinition of type %s", name);
 
@@ -1494,6 +1610,7 @@ static void parse_type_def(Token **rest, Token *tok) {
     if (!head.next) error("enum type needs at least one variant");
     ed->variants = head.next;
     ed->size = 8 + max_payload;
+    if (ed->ty) ed->ty->size = ed->size;
     *rest = skip(tok, TK_SEMI);
 }
 
@@ -1541,7 +1658,7 @@ static void gen_stmt(Node *n);
 
 static char *argreg[] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
 
-static int is_byte_ty(Type *t) { return t && t->size == 1; }
+static int is_byte_ty(Type *t) { return t && type_size(t) == 1; }
 
 static void load_mem(Type *ty) {
     if (is_byte_ty(ty))
@@ -1555,6 +1672,21 @@ static void store_mem(Type *ty) {
         printf("  mov %%al, (%%rdi)\n");
     else
         printf("  mov %%rax, (%%rdi)\n");
+}
+
+/* Copy sz bytes from %rsi to %rdi (clobbers %rax). */
+static void emit_memcpy(int sz) {
+    if (sz <= 0) sz = 8;
+    for (int i = 0; i < sz; i++) {
+        printf("  movzb %d(%%rsi), %%rax\n", i);
+        printf("  mov %%al, %d(%%rdi)\n", i);
+    }
+}
+
+static Function *find_function(char *name) {
+    for (Function *g = functions; g; g = g->next)
+        if (!strcmp(g->name, name)) return g;
+    return 0;
 }
 
 static void gen_addr(Node *n) {
@@ -1602,6 +1734,8 @@ static void gen_expr(Node *n) {
         return;
     case ND_MEMBER:
         gen_addr(n);
+        if (is_array(n->ty) || is_aggregate(n->ty))
+            return;
         load_mem(n->ty);
         return;
     case ND_ADDR:
@@ -1613,7 +1747,7 @@ static void gen_expr(Node *n) {
         return;
     case ND_NEW: {
         Type *base = n->ty->base;
-        printf("  mov $%d, %%rdi\n", base->size > 0 ? base->size : 8);
+        printf("  mov $%d, %%rdi\n", type_size(base) > 0 ? type_size(base) : 8);
         printf("  call malloc\n");
         if (!n->val) {
             printf("  push %%rax\n");
@@ -1632,7 +1766,8 @@ static void gen_expr(Node *n) {
         return;
     }
     case ND_STRUCT_LIT: {
-        int sz = n->ty->size > 0 ? n->ty->size : 8;
+        int sz = type_size(n->ty);
+        if (sz <= 0) sz = 8;
         sz = (sz + 15) / 16 * 16;
         printf("  sub $%d, %%rsp\n", sz);
         printf("  mov %%rsp, %%rax\n");
@@ -1651,7 +1786,8 @@ static void gen_expr(Node *n) {
         return;
     }
     case ND_VARIANT_LIT: {
-        int sz = n->ty->size > 0 ? n->ty->size : 8;
+        int sz = type_size(n->ty);
+        if (sz <= 0) sz = 8;
         sz = (sz + 15) / 16 * 16;
         printf("  sub $%d, %%rsp\n", sz);
         printf("  mov %%rsp, %%rax\n");
@@ -1710,20 +1846,17 @@ static void gen_expr(Node *n) {
             printf("  pop %%rax\n");
             return;
         }
-        gen_addr(n->lhs);
-        printf("  push %%rax\n");
         gen_expr(n->rhs);
-        printf("  pop %%rdi\n");
+        printf("  push %%rax\n");
+        gen_addr(n->lhs);
+        printf("  mov %%rax, %%rdi\n");
+        printf("  pop %%rsi\n");
         if (is_aggregate(n->lhs->ty)) {
-            /* byte-copy aggregate value at %rax into destination %rdi */
-            int sz = n->lhs->ty->size > 0 ? n->lhs->ty->size : 8;
-            printf("  mov %%rax, %%rsi\n");
-            for (int i = 0; i < sz; i++) {
-                printf("  movzb %d(%%rsi), %%rax\n", i);
-                printf("  mov %%al, %d(%%rdi)\n", i);
-            }
+            /* RHS first so a callee sret temp is not buried under the dest push. */
+            emit_memcpy(type_size(n->lhs->ty));
             printf("  mov %%rdi, %%rax\n");
         } else {
+            printf("  mov %%rsi, %%rax\n");
             store_mem(n->lhs->ty);
         }
         return;
@@ -1769,14 +1902,25 @@ static void gen_expr(Node *n) {
         return;
     }
     case ND_FUNCALL: {
+        Function *fn = find_function(n->funcname);
+        int has_sret = fn && fn->sret;
         int nargs = 0;
         for (Node *a = n->args; a; a = a->next) nargs++;
-        if (nargs > 6) error("too many arguments (max 6)");
+        int nregs = nargs + (has_sret ? 1 : 0);
+        if (nregs > 6) error("too many arguments (max 6)");
+        if (has_sret) {
+            int sz = type_size(fn->return_ty);
+            if (sz <= 0) sz = 8;
+            sz = (sz + 15) / 16 * 16;
+            printf("  sub $%d, %%rsp\n", sz);
+            printf("  mov %%rsp, %%rax\n");
+            printf("  push %%rax\n");
+        }
         for (Node *a = n->args; a; a = a->next) {
             gen_expr(a);
             printf("  push %%rax\n");
         }
-        for (int i = nargs - 1; i >= 0; i--)
+        for (int i = nregs - 1; i >= 0; i--)
             printf("  pop %s\n", argreg[i]);
         printf("  sub $8, %%rsp\n");
         printf("  call %s\n", n->funcname);
@@ -1845,8 +1989,18 @@ static void gen_stmt(Node *n) {
     add_type(n);
     switch (n->kind) {
     case ND_RETURN:
-        if (n->lhs) gen_expr(n->lhs);
-        else printf("  mov $0, %%rax\n");
+        if (n->lhs) {
+            gen_expr(n->lhs);
+            if (current_sret) {
+                int sz = type_size(current_return_ty);
+                printf("  mov %%rax, %%rsi\n");
+                printf("  mov %d(%%rbp), %%rdi\n", current_sret->offset);
+                emit_memcpy(sz);
+                printf("  mov %%rdi, %%rax\n");
+            }
+        } else {
+            printf("  mov $0, %%rax\n");
+        }
         printf("  jmp .L.return.%s\n", current_fn_name);
         return;
     case ND_EXPR_STMT:
@@ -1892,9 +2046,11 @@ static void gen_stmt(Node *n) {
         printf("  push %%rax\n");
         for (Node *arm = n->body; arm; arm = arm->next) {
             int la = new_label();
-            printf("  mov (%%rsp), %%rax\n");
-            printf("  cmp $%d, %%rax\n", arm->variant->tag);
-            printf("  jne .L.arm%d\n", la);
+            if (arm->variant) {
+                printf("  mov (%%rsp), %%rax\n");
+                printf("  cmp $%d, %%rax\n", arm->variant->tag);
+                printf("  jne .L.arm%d\n", la);
+            }
             /* bind payload: whole record or individual fields */
             for (Node *b = arm->args; b; b = b->next) {
                 if (!b->member) {
@@ -1903,10 +2059,7 @@ static void gen_stmt(Node *n) {
                     printf("  mov 8(%%rsp), %%rsi\n");
                     printf("  add $8, %%rsi\n");
                     printf("  lea %d(%%rbp), %%rdi\n", b->var->offset);
-                    for (int i = 0; i < psz; i++) {
-                        printf("  movzb %d(%%rsi), %%rax\n", i);
-                        printf("  mov %%al, %d(%%rdi)\n", i);
-                    }
+                    emit_memcpy(psz);
                 } else {
                     printf("  mov 8(%%rsp), %%rax\n");
                     printf("  add $%d, %%rax\n", enum_field_offset(b->member));
@@ -1916,7 +2069,8 @@ static void gen_stmt(Node *n) {
             }
             gen_stmt(arm->body);
             printf("  jmp .L.matchend%d\n", l);
-            printf(".L.arm%d:\n", la);
+            if (arm->variant)
+                printf(".L.arm%d:\n", la);
         }
         printf("  mov $1, %%rdi\n");
         printf("  call exit\n");
@@ -1932,7 +2086,7 @@ static void gen_stmt(Node *n) {
 static void assign_lvar_offsets(Function *fn) {
     int off = 0;
     for (Obj *v = fn->locals; v; v = v->next) {
-        int sz = v->ty->size;
+        int sz = type_size(v->ty);
         if (sz <= 0) sz = 8;
         if (!is_array(v->ty) && sz < 8) sz = 8;
         else sz = (sz + 7) & ~7;
@@ -1947,7 +2101,7 @@ static void emit_data(void) {
     printf(".align 8\n");
     for (Obj *g = globals; g; g = g->next) {
         if (g->is_func) continue;
-        int sz = g->ty ? g->ty->size : 8;
+        int sz = g->ty ? type_size(g->ty) : 8;
         if (sz <= 0) sz = 8;
         printf("%s: .skip %d\n", g->name, sz);
     }
@@ -1976,14 +2130,29 @@ static void emit_text(void) {
         assign_lvar_offsets(fn);
         current_fn_name = fn->name;
         current_return_ty = fn->return_ty;
+        current_sret = fn->sret;
         printf(".globl %s\n", fn->name);
         printf("%s:\n", fn->name);
         printf("  push %%rbp\n");
         printf("  mov %%rsp, %%rbp\n");
         printf("  sub $%d, %%rsp\n", fn->stack_size);
 
-        for (int i = 0; i < fn->nparams; i++)
-            printf("  mov %s, %d(%%rbp)\n", argreg[i], fn->params[i]->offset);
+        int ri = 0;
+        if (fn->sret) {
+            printf("  mov %s, %d(%%rbp)\n", argreg[ri], fn->sret->offset);
+            ri++;
+        }
+        for (int i = 0; i < fn->nparams; i++) {
+            Obj *p = fn->params[i];
+            if (passes_by_ref(p->ty)) {
+                printf("  mov %s, %%rsi\n", argreg[ri]);
+                printf("  lea %d(%%rbp), %%rdi\n", p->offset);
+                emit_memcpy(type_size(p->ty));
+            } else {
+                printf("  mov %s, %d(%%rbp)\n", argreg[ri], p->offset);
+            }
+            ri++;
+        }
 
         gen_stmt(fn->body);
 
