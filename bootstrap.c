@@ -12,6 +12,7 @@
  *   Ops:       + - * / %  == != < <= > >=  && ||  =  & ! -  []  .  .*  ()
  *              `e as T` widen/reinterpret; `e trunc T` narrow (e.g. int→i8/bool)
  *              bool literals: true, false (values 1 and 0); no implicit numeric casts
+ *              null pointer literal: `null` (not integer 0); compare with == / != only
  *   Other:     sizeof(T), new T uninitialized | new T { f: e, ... },
  *              string/char literals, // comments
  *              `new T` allocates sizeof(T) bytes and yields *T
@@ -73,7 +74,7 @@ static char *read_file(char *path) {
 
 enum {
     TK_EOF, TK_NUM, TK_CHAR, TK_STR, TK_IDENT,
-    TK_INT, TK_I8, TK_BOOL, TK_TRUE, TK_FALSE,
+    TK_INT, TK_I8, TK_BOOL, TK_TRUE, TK_FALSE, TK_NULL,
     TK_IF, TK_ELSE, TK_WHILE, TK_RETURN,
     TK_TYPE, TK_MATCH, TK_SIZEOF, TK_UNINITIALIZED, TK_AS, TK_TRUNC, TK_NEW,
     TK_EQ, TK_NE, TK_LE, TK_GE,
@@ -174,6 +175,7 @@ static Token *tokenize(char *p) {
             else if (kw_eq(s, n, "bool")) kind = TK_BOOL;
             else if (kw_eq(s, n, "true")) kind = TK_TRUE;
             else if (kw_eq(s, n, "false")) kind = TK_FALSE;
+            else if (kw_eq(s, n, "null")) kind = TK_NULL;
             else if (kw_eq(s, n, "if")) kind = TK_IF;
             else if (kw_eq(s, n, "else")) kind = TK_ELSE;
             else if (kw_eq(s, n, "while")) kind = TK_WHILE;
@@ -536,7 +538,7 @@ enum {
     ND_ASSIGN, ND_ADDR, ND_DEREF, ND_NOT, ND_NEG,
     ND_FUNCALL, ND_RETURN, ND_IF, ND_WHILE, ND_BLOCK, ND_EXPR_STMT,
     ND_LOGAND, ND_LOGOR, ND_MEMBER, ND_AS, ND_TRUNC, ND_NEW, ND_STRUCT_LIT,
-    ND_VARIANT_LIT, ND_MATCH, ND_MATCH_ARM
+    ND_VARIANT_LIT, ND_MATCH, ND_MATCH_ARM, ND_NULL
 };
 
 typedef struct Node Node;
@@ -558,9 +560,16 @@ struct Node {
     Variant *variant;
 };
 
-/* Integer 0 may be used as a null pointer. */
-static int is_null_const(Node *n) {
-    return n && n->kind == ND_NUM && n->val == 0;
+/* Typed null pointer literal (`null`), not integer 0. */
+static int is_null_node(Node *n) {
+    return n && n->kind == ND_NULL;
+}
+
+/* If `null_n` is null and `pty` is a pointer, give null that pointer type. */
+static int bind_null_to_pointer(Type *pty, Node *null_n) {
+    if (!is_pointer(pty) || !is_null_node(null_n)) return 0;
+    null_n->ty = pty;
+    return 1;
 }
 
 struct Obj {
@@ -750,7 +759,7 @@ static Node *parse_variant_field_inits(Token **rest, Token *tok, Variant *v) {
             add_type(init->lhs);
             Type *lt = decay(m->ty);
             Type *rt = decay(init->lhs->ty);
-            if (!types_equal(lt, rt) && !(is_pointer(lt) && is_null_const(init->lhs)))
+            if (!types_equal(lt, rt) && !(is_pointer(lt) && bind_null_to_pointer(lt, init->lhs)))
                 error("field initializer type mismatch");
         }
         cur = cur->next = init;
@@ -790,7 +799,7 @@ static Node *parse_struct_field_inits(Token **rest, Token *tok, Type *sty) {
             add_type(init->lhs);
             Type *lt = decay(m->ty);
             Type *rt = decay(init->lhs->ty);
-            if (!types_equal(lt, rt) && !(is_pointer(lt) && is_null_const(init->lhs)))
+            if (!types_equal(lt, rt) && !(is_pointer(lt) && bind_null_to_pointer(lt, init->lhs)))
                 error("field initializer type mismatch");
         }
         cur = cur->next = init;
@@ -878,6 +887,11 @@ static Node *primary(Token **rest, Token *tok) {
     if (equal(tok, TK_TRUE) || equal(tok, TK_FALSE)) {
         Node *n = new_num(equal(tok, TK_TRUE) ? 1 : 0);
         n->ty = ty_bool;
+        *rest = tok->next;
+        return n;
+    }
+    if (equal(tok, TK_NULL)) {
+        Node *n = new_node(ND_NULL);
         *rest = tok->next;
         return n;
     }
@@ -1057,6 +1071,9 @@ static void add_type(Node *n) {
     case ND_NUM:
         if (!n->ty) n->ty = ty_int;
         return;
+    case ND_NULL:
+        /* Concrete *T is filled in by assign/compare/call/return checks. */
+        return;
     case ND_VAR:
         n->ty = n->var->ty;
         return;
@@ -1099,6 +1116,18 @@ static void add_type(Node *n) {
         return;
     case ND_EQ:
     case ND_NE:
+        add_type(n->lhs);
+        add_type(n->rhs);
+        {
+            Type *lt = decay(n->lhs->ty);
+            Type *rt = decay(n->rhs->ty);
+            if (!types_equal(lt, rt)) {
+                if (!(bind_null_to_pointer(lt, n->rhs) || bind_null_to_pointer(rt, n->lhs)))
+                    error("comparison type mismatch (use as/trunc)");
+            }
+            n->ty = ty_bool;
+        }
+        return;
     case ND_LT:
     case ND_LE:
     case ND_GT:
@@ -1108,11 +1137,8 @@ static void add_type(Node *n) {
         {
             Type *lt = decay(n->lhs->ty);
             Type *rt = decay(n->rhs->ty);
-            if (!types_equal(lt, rt)) {
-                if (!((is_pointer(lt) && is_null_const(n->rhs)) ||
-                      (is_pointer(rt) && is_null_const(n->lhs))))
-                    error("comparison type mismatch (use as/trunc)");
-            }
+            if (!types_equal(lt, rt))
+                error("comparison type mismatch (use as/trunc)");
             n->ty = ty_bool;
         }
         return;
@@ -1144,7 +1170,7 @@ static void add_type(Node *n) {
             Type *rt = decay(n->rhs->ty);
             if (is_array(n->lhs->ty)) error("cannot assign to array");
             if (!types_equal(lt, rt)) {
-                if (!(is_pointer(lt) && is_null_const(n->rhs)))
+                if (!bind_null_to_pointer(lt, n->rhs))
                     error("assignment type mismatch (use as/trunc)");
             }
             n->ty = n->lhs->ty;
@@ -1193,7 +1219,7 @@ static void add_type(Node *n) {
                     Type *at = decay(a->ty);
                     Type *pt = decay(p->ty);
                     if (!types_equal(at, pt)) {
-                        if (!(is_pointer(pt) && is_null_const(a)))
+                        if (!bind_null_to_pointer(pt, a))
                             error("argument type mismatch");
                     }
                 }
@@ -1207,7 +1233,7 @@ static void add_type(Node *n) {
             {
                 Type *rt = decay(current_return_ty);
                 Type *gt = decay(n->lhs->ty);
-                if (!types_equal(gt, rt) && !(is_pointer(rt) && is_null_const(n->lhs)))
+                if (!types_equal(gt, rt) && !bind_null_to_pointer(rt, n->lhs))
                     error("return type mismatch (use as/trunc)");
             }
         } else if (current_return_ty) {
@@ -1755,6 +1781,9 @@ static void gen_expr(Node *n) {
             printf("  lea .L.str%d+8(%%rip), %%rax\n", n->str_label - 1);
         else
             printf("  mov $%ld, %%rax\n", n->val);
+        return;
+    case ND_NULL:
+        printf("  mov $0, %%rax\n");
         return;
     case ND_VAR:
         gen_addr(n);
