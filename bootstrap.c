@@ -3,11 +3,11 @@
  *
  * Language: C-like subset → x86-64 Linux GAS assembly
  *
- *   Types:     int (64-bit), struct Tag { int fields...; }, pointers, arrays
- *   Decls:     int x;  struct T x;  struct T *p;  T/int a[N];
+ *   Types:     int, named structs (define with `struct Tag { ... }`, use as `Tag` / `Tag *`)
+ *   Decls:     int x;  Tag x;  Tag *p;  arrays thereof
  *   Control:   if/else, while, return, blocks
  *   Ops:       + - * / %  == != < <= > >=  && ||  =  & * ! -  []  .  ()
- *   Other:     sizeof(struct Tag), string/char literals, // comments
+ *   Other:     sizeof(Tag), string/char literals, // comments
  *              member access: one operator `.` (auto-derefs pointers)
  *   Runtime:   read/write/open/close/exit/malloc/loadb/storeb/syscall
  *
@@ -289,6 +289,25 @@ static StructDef *find_struct(char *name) {
     return 0;
 }
 
+static StructDef *get_or_create_struct(char *name) {
+    StructDef *sd = find_struct(name);
+    if (sd) return sd;
+    sd = calloc(1, sizeof(StructDef));
+    sd->name = name;
+    sd->next = struct_defs;
+    struct_defs = sd;
+    return sd;
+}
+
+static int is_type_name(Token *tok) {
+    if (!equal(tok, TK_IDENT)) return 0;
+    char name[256];
+    if (tok->len >= (int)sizeof(name)) return 0;
+    memcpy(name, tok->str, tok->len);
+    name[tok->len] = 0;
+    return find_struct(name) != 0;
+}
+
 static Member *find_member(StructDef *sd, char *name) {
     for (Member *m = sd->members; m; m = m->next)
         if (!strcmp(m->name, name)) return m;
@@ -426,20 +445,10 @@ static Type *decl_spec(Token **rest, Token *tok) {
         *rest = tok->next;
         return ty_int;
     }
-    if (equal(tok, TK_STRUCT)) {
-        tok = tok->next;
-        if (!equal(tok, TK_IDENT)) error("expected struct tag");
+    if (equal(tok, TK_IDENT)) {
         char *name = tokstr(tok);
-        tok = tok->next;
-        StructDef *sd = find_struct(name);
-        if (!sd) {
-            /* incomplete struct type — filled in by a later definition */
-            sd = calloc(1, sizeof(StructDef));
-            sd->name = name;
-            sd->next = struct_defs;
-            struct_defs = sd;
-        }
-        *rest = tok;
+        StructDef *sd = get_or_create_struct(name);
+        *rest = tok->next;
         return struct_type(sd);
     }
     error("expected type");
@@ -450,7 +459,7 @@ static Node *primary(Token **rest, Token *tok) {
     if (equal(tok, TK_SIZEOF)) {
         tok = tok->next;
         tok = skip(tok, TK_LPAREN);
-        if (equal(tok, TK_STRUCT) || equal(tok, TK_INT)) {
+        if (equal(tok, TK_INT) || is_type_name(tok)) {
             Type *ty = decl_spec(&tok, tok);
             while (equal(tok, TK_STAR)) {
                 ty = ptr_to(ty);
@@ -777,7 +786,7 @@ static Node *stmt(Token **rest, Token *tok) {
     }
     if (equal(tok, TK_LBRACE))
         return compound_stmt(rest, tok);
-    if (equal(tok, TK_INT) || equal(tok, TK_STRUCT)) {
+    if (equal(tok, TK_INT) || is_type_name(tok)) {
         parse_decl(&tok, tok, 1);
         *rest = skip(tok, TK_SEMI);
         return new_node(ND_BLOCK);
@@ -825,14 +834,8 @@ static void parse_struct_def(Token **rest, Token *tok) {
     if (!equal(tok, TK_IDENT)) error("expected struct tag");
     char *name = tokstr(tok);
     tok = tok->next;
-    StructDef *sd = find_struct(name);
-    if (sd && sd->members) error("redefinition of struct %s", name);
-    if (!sd) {
-        sd = calloc(1, sizeof(StructDef));
-        sd->name = name;
-        sd->next = struct_defs;
-        struct_defs = sd;
-    }
+    StructDef *sd = get_or_create_struct(name);
+    if (sd->members) error("redefinition of struct %s", name);
     tok = skip(tok, TK_LBRACE);
     Member head = {0};
     Member *cur = &head;
