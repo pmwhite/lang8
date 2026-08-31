@@ -480,8 +480,8 @@ static int type_size(Type *t) {
         return t->enum_def->size > 0 ? t->enum_def->size : 8;
     return t->size;
 }
-/* Aggregates are always passed as a pointer to a temporary / local. */
-static int passes_by_ref(Type *t) { return is_aggregate(t); }
+/* Aggregates larger than a register use a hidden pointer; size <= 8 travel in %rax. */
+static int passes_by_ref(Type *t) { return is_aggregate(t) && type_size(t) > 8; }
 static Type *decay(Type *t);
 
 static int types_equal(Type *a, Type *b) {
@@ -1733,13 +1733,13 @@ static void gen_expr(Node *n) {
         return;
     case ND_VAR:
         gen_addr(n);
-        if (is_array(n->ty) || is_aggregate(n->ty))
+        if (is_array(n->ty) || passes_by_ref(n->ty))
             return;
         load_mem(n->ty);
         return;
     case ND_MEMBER:
         gen_addr(n);
-        if (is_array(n->ty) || is_aggregate(n->ty))
+        if (is_array(n->ty) || passes_by_ref(n->ty))
             return;
         load_mem(n->ty);
         return;
@@ -1793,6 +1793,32 @@ static void gen_expr(Node *n) {
     case ND_VARIANT_LIT: {
         int sz = type_size(n->ty);
         if (sz <= 0) sz = 8;
+        /* Unit (and other ≤8-byte) variants: produce the value in %rax. */
+        if (sz <= 8 && !n->args) {
+            printf("  mov $%ld, %%rax\n", n->val);
+            return;
+        }
+        if (sz <= 8) {
+            /* Small payload: build in a temp, then load. */
+            int asz = 16;
+            printf("  sub $%d, %%rsp\n", asz);
+            printf("  mov %%rsp, %%rax\n");
+            printf("  push %%rax\n");
+            printf("  mov $%ld, %%rdi\n", n->val);
+            printf("  mov %%rdi, (%%rax)\n");
+            for (Node *init = n->args; init; init = init->next) {
+                if (!init->lhs) continue;
+                printf("  mov (%%rsp), %%rax\n");
+                printf("  add $%d, %%rax\n", enum_field_offset(init->member));
+                printf("  push %%rax\n");
+                gen_expr(init->lhs);
+                printf("  pop %%rdi\n");
+                store_mem(init->member->ty ? init->member->ty : ty_int);
+            }
+            printf("  pop %%rax\n");
+            printf("  mov (%%rax), %%rax\n");
+            return;
+        }
         sz = (sz + 15) / 16 * 16;
         printf("  sub $%d, %%rsp\n", sz);
         printf("  mov %%rsp, %%rax\n");
@@ -1856,7 +1882,7 @@ static void gen_expr(Node *n) {
         gen_addr(n->lhs);
         printf("  mov %%rax, %%rdi\n");
         printf("  pop %%rsi\n");
-        if (is_aggregate(n->lhs->ty)) {
+        if (passes_by_ref(n->lhs->ty)) {
             /* RHS first so a callee sret temp is not buried under the dest push. */
             emit_memcpy(type_size(n->lhs->ty));
             printf("  mov %%rdi, %%rax\n");
