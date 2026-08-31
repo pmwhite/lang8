@@ -13,6 +13,7 @@
  *   Other:     sizeof(T), new T uninitialized | new T { f: e, ... },
  *              string/char literals, // comments
  *              `new T` allocates and yields *T
+ *              struct literals: `T { f: e, ... }` (all fields; e may be uninitialized)
  *              `p.*` dereferences (Zig-style); `*` is multiply / pointer types only
  *              member access: one operator `.` (auto-derefs pointers)
  *              string literals have type *i8 (length-prefixed: len at -8, data at ptr)
@@ -394,7 +395,7 @@ enum {
     ND_EQ, ND_NE, ND_LT, ND_LE, ND_GT, ND_GE,
     ND_ASSIGN, ND_ADDR, ND_DEREF, ND_NOT, ND_NEG,
     ND_FUNCALL, ND_RETURN, ND_IF, ND_WHILE, ND_BLOCK, ND_EXPR_STMT,
-    ND_LOGAND, ND_LOGOR, ND_MEMBER, ND_AS, ND_TRUNC, ND_NEW
+    ND_LOGAND, ND_LOGOR, ND_MEMBER, ND_AS, ND_TRUNC, ND_NEW, ND_STRUCT_LIT
 };
 
 typedef struct Node Node;
@@ -568,6 +569,47 @@ static Obj *parse_decl(Token **rest, Token *tok, int is_local) {
     return o;
 }
 
+
+/* Field inits for `Type { f: expr|uninitialized, ... }`. tok at `{`. */
+static Node *parse_struct_field_inits(Token **rest, Token *tok, Type *sty) {
+    if (!is_struct(sty)) error("struct literal requires a struct type");
+    tok = skip(tok, TK_LBRACE);
+    Node head = {0};
+    Node *cur = &head;
+    while (!equal(tok, TK_RBRACE)) {
+        if (cur != &head) tok = skip(tok, TK_COMMA);
+        if (!equal(tok, TK_IDENT)) error("expected field name in struct literal");
+        char *fname = tokstr(tok);
+        tok = skip(tok->next, TK_COLON);
+        Member *m = find_member(sty->struct_def, fname);
+        if (!m) error("unknown field %s", fname);
+        for (Node *i = head.next; i; i = i->next)
+            if (i->member == m) error("duplicate field %s in struct literal", fname);
+        Node *init = new_node(ND_EXPR_STMT);
+        init->member = m;
+        if (equal(tok, TK_UNINITIALIZED)) {
+            init->lhs = 0;
+            tok = tok->next;
+        } else {
+            init->lhs = expr(&tok, tok);
+            add_type(init->lhs);
+            Type *lt = decay(m->ty);
+            Type *rt = decay(init->lhs->ty);
+            if (!types_equal(lt, rt) && !(is_pointer(lt) && is_null_const(init->lhs)))
+                error("field initializer type mismatch");
+        }
+        cur = cur->next = init;
+    }
+    for (Member *m = sty->struct_def->members; m; m = m->next) {
+        int found = 0;
+        for (Node *i = head.next; i; i = i->next)
+            if (i->member == m) found = 1;
+        if (!found) error("struct literal missing field %s", m->name);
+    }
+    *rest = tok->next;
+    return head.next;
+}
+
 static Node *primary(Token **rest, Token *tok) {
     if (equal(tok, TK_NEW)) {
         tok = tok->next;
@@ -583,37 +625,9 @@ static Node *primary(Token **rest, Token *tok) {
             return n;
         }
         if (!equal(tok, TK_LBRACE)) error("expected uninitialized or { after new Type");
-        if (!is_struct(base)) error("struct literal requires a struct type");
-        tok = tok->next;
-        Node head = {0};
-        Node *cur = &head;
-        int nfields = 0;
-        for (Member *m = base->struct_def->members; m; m = m->next) nfields++;
-        int got = 0;
-        while (!equal(tok, TK_RBRACE)) {
-            if (cur != &head) tok = skip(tok, TK_COMMA);
-            if (!equal(tok, TK_IDENT)) error("expected field name in struct literal");
-            char *fname = tokstr(tok);
-            tok = skip(tok->next, TK_COLON);
-            Member *m = find_member(base->struct_def, fname);
-            if (!m) error("unknown field %s", fname);
-            Node *init = new_node(ND_EXPR_STMT);
-            init->member = m;
-            init->lhs = expr(&tok, tok);
-            add_type(init->lhs);
-            {
-                Type *lt = decay(m->ty);
-                Type *rt = decay(init->lhs->ty);
-                if (!types_equal(lt, rt) && !(is_pointer(lt) && is_null_const(init->lhs)))
-                    error("field initializer type mismatch");
-            }
-            cur = cur->next = init;
-            got++;
-        }
-        if (got != nfields) error("struct literal must initialize all fields");
-        n->args = head.next;
+        n->args = parse_struct_field_inits(&tok, tok, base);
         n->val = 0;
-        *rest = tok->next;
+        *rest = tok;
         return n;
     }
     if (equal(tok, TK_SIZEOF)) {
@@ -666,6 +680,15 @@ static Node *primary(Token **rest, Token *tok) {
     if (equal(tok, TK_IDENT)) {
         char *name = tokstr(tok);
         Token *t = tok->next;
+        if (is_type_name(tok) && equal(t, TK_LBRACE)) {
+            Type *sty = parse_type(&tok, tok);
+            if (!is_struct(sty)) error("struct literal requires a struct type");
+            Node *n = new_node(ND_STRUCT_LIT);
+            n->ty = sty;
+            n->args = parse_struct_field_inits(&tok, tok, sty);
+            *rest = tok;
+            return n;
+        }
         if (equal(t, TK_LPAREN)) {
             Node *n = new_node(ND_FUNCALL);
             n->funcname = name;
@@ -1256,9 +1279,9 @@ static void gen_expr(Node *n) {
         printf("  mov $%d, %%rdi\n", base->size > 0 ? base->size : 8);
         printf("  call malloc\n");
         if (!n->val) {
-            /* initialized struct literal */
             printf("  push %%rax\n");
             for (Node *init = n->args; init; init = init->next) {
+                if (!init->lhs) continue;
                 printf("  mov (%%rsp), %%rax\n");
                 if (init->member->offset)
                     printf("  add $%d, %%rax\n", init->member->offset);
@@ -1271,17 +1294,63 @@ static void gen_expr(Node *n) {
         }
         return;
     }
+    case ND_STRUCT_LIT: {
+        int sz = n->ty->size > 0 ? n->ty->size : 8;
+        sz = (sz + 15) / 16 * 16;
+        printf("  sub $%d, %%rsp\n", sz);
+        printf("  mov %%rsp, %%rax\n");
+        printf("  push %%rax\n");
+        for (Node *init = n->args; init; init = init->next) {
+            if (!init->lhs) continue;
+            printf("  mov (%%rsp), %%rax\n");
+            if (init->member->offset)
+                printf("  add $%d, %%rax\n", init->member->offset);
+            printf("  push %%rax\n");
+            gen_expr(init->lhs);
+            printf("  pop %%rdi\n");
+            store_mem(init->member->ty ? init->member->ty : ty_int);
+        }
+        printf("  pop %%rax\n");
+        return;
+    }
     case ND_DEREF:
         gen_expr(n->lhs);
         load_mem(n->ty);
         return;
     case ND_ASSIGN:
         add_type(n->lhs);
+        if (n->rhs->kind == ND_STRUCT_LIT && is_struct(n->lhs->ty)) {
+            gen_addr(n->lhs);
+            printf("  push %%rax\n");
+            for (Node *init = n->rhs->args; init; init = init->next) {
+                if (!init->lhs) continue;
+                printf("  mov (%%rsp), %%rax\n");
+                if (init->member->offset)
+                    printf("  add $%d, %%rax\n", init->member->offset);
+                printf("  push %%rax\n");
+                gen_expr(init->lhs);
+                printf("  pop %%rdi\n");
+                store_mem(init->member->ty ? init->member->ty : ty_int);
+            }
+            printf("  pop %%rax\n");
+            return;
+        }
         gen_addr(n->lhs);
         printf("  push %%rax\n");
         gen_expr(n->rhs);
         printf("  pop %%rdi\n");
-        store_mem(n->lhs->ty);
+        if (is_struct(n->lhs->ty)) {
+            /* byte-copy struct value at %rax into destination %rdi */
+            int sz = n->lhs->ty->size > 0 ? n->lhs->ty->size : 8;
+            printf("  mov %%rax, %%rsi\n");
+            for (int i = 0; i < sz; i++) {
+                printf("  movzb %d(%%rsi), %%rax\n", i);
+                printf("  mov %%al, %d(%%rdi)\n", i);
+            }
+            printf("  mov %%rdi, %%rax\n");
+        } else {
+            store_mem(n->lhs->ty);
+        }
         return;
     case ND_NOT:
         gen_expr(n->lhs);
