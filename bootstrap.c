@@ -6,8 +6,9 @@
  *   Types:     int (64-bit), struct Tag { int fields...; }, pointers, arrays
  *   Decls:     int x;  struct T x;  struct T *p;  T/int a[N];
  *   Control:   if/else, while, return, blocks
- *   Ops:       + - * / %  == != < <= > >=  && ||  =  & * ! -  []  .  ->  ()
+ *   Ops:       + - * / %  == != < <= > >=  && ||  =  & * ! -  []  .  ()
  *   Other:     sizeof(struct Tag), string/char literals, // comments
+ *              member access: one operator `.` (auto-derefs pointers)
  *   Runtime:   read/write/open/close/exit/malloc/loadb/storeb/syscall
  *
  * Usage:  ./l8c0 file.l8 > file.s
@@ -53,7 +54,7 @@ enum {
     TK_LT, TK_GT, TK_ASSIGN, TK_NOT, TK_AMP,
     TK_LPAREN, TK_RPAREN, TK_LBRACE, TK_RBRACE,
     TK_LBRACK, TK_RBRACK, TK_SEMI, TK_COMMA,
-    TK_AND, TK_OR, TK_DOT, TK_ARROW
+    TK_AND, TK_OR, TK_DOT
 };
 
 typedef struct Token {
@@ -155,7 +156,6 @@ static Token *tokenize(char *p) {
         if (p[0] == '>' && p[1] == '=') { cur = cur->next = new_token(TK_GE, p, 2); p += 2; continue; }
         if (p[0] == '&' && p[1] == '&') { cur = cur->next = new_token(TK_AND, p, 2); p += 2; continue; }
         if (p[0] == '|' && p[1] == '|') { cur = cur->next = new_token(TK_OR, p, 2); p += 2; continue; }
-        if (p[0] == '-' && p[1] == '>') { cur = cur->next = new_token(TK_ARROW, p, 2); p += 2; continue; }
 
         int kind;
         switch (*p) {
@@ -330,7 +330,6 @@ struct Node {
     int str_label;
     Type *ty;
     Member *member;
-    int is_arrow;
 };
 
 struct Obj {
@@ -537,31 +536,25 @@ static Node *postfix(Token **rest, Token *tok) {
             n->ty = t->base;
             continue;
         }
-        if (equal(tok, TK_DOT) || equal(tok, TK_ARROW)) {
-            int is_arrow = equal(tok, TK_ARROW);
+        if (equal(tok, TK_DOT)) {
             tok = tok->next;
             if (!equal(tok, TK_IDENT)) error("expected member name");
             char *name = tokstr(tok);
             tok = tok->next;
             add_type(n);
+            Type *t = decay(n->ty);
             Type *sty;
-            if (is_arrow) {
-                Type *t = decay(n->ty);
-                if (!is_pointer(t) || !is_struct(t->base))
-                    error("arrow on non-struct-pointer");
+            if (is_pointer(t) && is_struct(t->base))
                 sty = t->base;
-            } else {
-                Type *t = n->ty;
-                if (is_array(t)) error("dot on array");
-                if (!is_struct(t)) error("dot on non-struct");
-                sty = t;
-            }
+            else if (is_struct(n->ty))
+                sty = n->ty;
+            else
+                error("member access on non-struct");
             Member *m = find_member(sty->struct_def, name);
             if (!m) error("unknown member: %s", name);
             Node *mem = new_node(ND_MEMBER);
             mem->lhs = n;
             mem->member = m;
-            mem->is_arrow = is_arrow;
             mem->ty = m->ty ? m->ty : ty_int;
             n = mem;
             continue;
@@ -929,11 +922,12 @@ static void gen_addr(Node *n) {
         return;
     }
     if (n->kind == ND_MEMBER) {
-        if (n->is_arrow) {
+        add_type(n->lhs);
+        Type *t = decay(n->lhs->ty);
+        if (is_pointer(t) && is_struct(t->base))
             gen_expr(n->lhs);
-        } else {
+        else
             gen_addr(n->lhs);
-        }
         if (n->member->offset)
             printf("  add $%d, %%rax\n", n->member->offset);
         return;
