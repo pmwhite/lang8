@@ -1,5 +1,14 @@
 // L8 self-hosted compiler → x86-64 Linux GAS
-// Uses nominal record types for AST/types; implements the full L8 language.
+// Uses nominal types for AST; Type is a sum over language types.
+
+type Type =
+    Int
+  | I8
+  | Bool
+  | Ptr { base: *Type; }
+  | Array { base: *Type; len: int; }
+  | Record { def: *StructDef; }
+  | Enum { def: *EnumDef; };
 
 type Member = {
     name: *i8;
@@ -29,15 +38,6 @@ type EnumDef = {
     variants: *Variant;
     size: int;
     next: *EnumDef;
-};
-
-type Type = {
-    kind: int;
-    base: *Type;
-    array_len: int;
-    struct_def: *StructDef;
-    enum_def: *EnumDef;
-    size: int;
 };
 
 type Token = {
@@ -98,9 +98,6 @@ type StrLit = {
     label: int;
     next: *StrLit;
 };
-
-// type kinds
-TY_INT: int; TY_I8: int; TY_PTR: int; TY_ARRAY: int; TY_STRUCT: int; TY_BOOL: int; TY_ENUM: int;
 
 // token kinds
 TK_EOF: int; TK_NUM: int; TK_CHAR: int; TK_STR: int; TK_IDENT: int;
@@ -247,7 +244,6 @@ error(msg: *i8) {
 }
 
 init_kinds() {
-    TY_INT = 0; TY_I8 = 1; TY_PTR = 2; TY_ARRAY = 3; TY_STRUCT = 4; TY_BOOL = 5; TY_ENUM = 6;
     TK_EOF = 0; TK_NUM = 1; TK_CHAR = 2; TK_STR = 3; TK_IDENT = 4;
     TK_INT = 5; TK_I8 = 6; TK_BOOL = 7; TK_TRUE = 8; TK_FALSE = 9;
     TK_IF = 10; TK_ELSE = 11; TK_WHILE = 12; TK_RETURN = 13;
@@ -266,30 +262,9 @@ init_kinds() {
     ND_VARIANT_LIT = 31; ND_MATCH = 32; ND_MATCH_ARM = 33;
     REG0 = "%rdi"; REG1 = "%rsi"; REG2 = "%rdx";
     REG3 = "%rcx"; REG4 = "%r8"; REG5 = "%r9";
-    ty_int = new Type {
-        kind: TY_INT,
-        base: 0,
-        array_len: 0,
-        struct_def: 0,
-        enum_def: 0,
-        size: 8
-    };
-    ty_i8 = new Type {
-        kind: TY_I8,
-        base: 0,
-        array_len: 0,
-        struct_def: 0,
-        enum_def: 0,
-        size: 1
-    };
-    ty_bool = new Type {
-        kind: TY_BOOL,
-        base: 0,
-        array_len: 0,
-        struct_def: 0,
-        enum_def: 0,
-        size: 1
-    };
+    ty_int = make_int_type();
+    ty_i8 = make_i8_type();
+    ty_bool = make_bool_type();
 }
 
 reg_name(i: int): *i8 {
@@ -328,52 +303,111 @@ read_file(path: *i8): *i8 {
     return buf;
 }
 
+make_int_type(): *Type {
+    p: *Type = new Type uninitialized;
+    p.* = Type.Int;
+    return p;
+}
+
+make_i8_type(): *Type {
+    p: *Type = new Type uninitialized;
+    p.* = Type.I8;
+    return p;
+}
+
+make_bool_type(): *Type {
+    p: *Type = new Type uninitialized;
+    p.* = Type.Bool;
+    return p;
+}
+
+type_size(t: *Type): int {
+    match t.* {
+        Int -> { return 8; }
+        I8 -> { return 1; }
+        Bool -> { return 1; }
+        Ptr { base } -> { return 8; }
+        Array { base, len } -> { return type_size(base) * len; }
+        Record { def } -> { return def.size; }
+        Enum { def } -> {
+            if (def.size <= 0) {
+                return 8;
+            }
+            return def.size;
+        }
+    }
+}
+
+type_base(t: *Type): *Type {
+    match t.* {
+        Ptr { base } -> { return base; }
+        Array { base, len } -> { return base; }
+        Int -> { error("not a pointer or array"); return 0; }
+        I8 -> { error("not a pointer or array"); return 0; }
+        Bool -> { error("not a pointer or array"); return 0; }
+        Record { def } -> { error("not a pointer or array"); return 0; }
+        Enum { def } -> { error("not a pointer or array"); return 0; }
+    }
+}
+
+type_array_len(t: *Type): int {
+    match t.* {
+        Array { base, len } -> { return len; }
+        Int -> { error("not an array"); return 0; }
+        I8 -> { error("not an array"); return 0; }
+        Bool -> { error("not an array"); return 0; }
+        Ptr { base } -> { error("not an array"); return 0; }
+        Record { def } -> { error("not an array"); return 0; }
+        Enum { def } -> { error("not an array"); return 0; }
+    }
+}
+
+type_struct_def(t: *Type): *StructDef {
+    match t.* {
+        Record { def } -> { return def; }
+        Int -> { error("not a record type"); return 0; }
+        I8 -> { error("not a record type"); return 0; }
+        Bool -> { error("not a record type"); return 0; }
+        Ptr { base } -> { error("not a record type"); return 0; }
+        Array { base, len } -> { error("not a record type"); return 0; }
+        Enum { def } -> { error("not a record type"); return 0; }
+    }
+}
+
+type_enum_def(t: *Type): *EnumDef {
+    match t.* {
+        Enum { def } -> { return def; }
+        Int -> { error("not an enum type"); return 0; }
+        I8 -> { error("not an enum type"); return 0; }
+        Bool -> { error("not an enum type"); return 0; }
+        Ptr { base } -> { error("not an enum type"); return 0; }
+        Array { base, len } -> { error("not an enum type"); return 0; }
+        Record { def } -> { error("not an enum type"); return 0; }
+    }
+}
+
 ptr_to(base: *Type): *Type {
-    return new Type {
-        kind: TY_PTR,
-        base: base,
-        array_len: 0,
-        struct_def: 0,
-        enum_def: 0,
-        size: 8
-    };
+    p: *Type = new Type uninitialized;
+    p.* = Type.Ptr { base: base };
+    return p;
 }
 
 array_of(base: *Type, len: int): *Type {
-    return new Type {
-        kind: TY_ARRAY,
-        base: base,
-        array_len: len,
-        struct_def: 0,
-        enum_def: 0,
-        size: base.size * len
-    };
+    p: *Type = new Type uninitialized;
+    p.* = Type.Array { base: base, len: len };
+    return p;
 }
 
 struct_type(sd: *StructDef): *Type {
-    return new Type {
-        kind: TY_STRUCT,
-        base: 0,
-        array_len: 0,
-        struct_def: sd,
-        enum_def: 0,
-        size: sd.size
-    };
+    p: *Type = new Type uninitialized;
+    p.* = Type.Record { def: sd };
+    return p;
 }
 
 enum_type(ed: *EnumDef): *Type {
-    sz: int = ed.size;
-    if (sz <= 0) {
-        sz = 8;
-    }
-    return new Type {
-        kind: TY_ENUM,
-        base: 0,
-        array_len: 0,
-        struct_def: 0,
-        enum_def: ed,
-        size: sz
-    };
+    p: *Type = new Type uninitialized;
+    p.* = Type.Enum { def: ed };
+    return p;
 }
 
 find_struct(name: *i8): *StructDef {
@@ -514,19 +548,63 @@ find_member(sd: *StructDef, name: *i8): *Member {
 }
 
 is_pointer(t: *Type): bool {
-    return t != 0 && t.kind == TY_PTR;
+    if (t == 0) {
+        return false;
+    }
+    match t.* {
+        Ptr { base } -> { return true; }
+        Int -> { return false; }
+        I8 -> { return false; }
+        Bool -> { return false; }
+        Array { base, len } -> { return false; }
+        Record { def } -> { return false; }
+        Enum { def } -> { return false; }
+    }
 }
 
 is_array(t: *Type): bool {
-    return t != 0 && t.kind == TY_ARRAY;
+    if (t == 0) {
+        return false;
+    }
+    match t.* {
+        Array { base, len } -> { return true; }
+        Int -> { return false; }
+        I8 -> { return false; }
+        Bool -> { return false; }
+        Ptr { base } -> { return false; }
+        Record { def } -> { return false; }
+        Enum { def } -> { return false; }
+    }
 }
 
 is_struct_ty(t: *Type): bool {
-    return t != 0 && t.kind == TY_STRUCT;
+    if (t == 0) {
+        return false;
+    }
+    match t.* {
+        Record { def } -> { return true; }
+        Int -> { return false; }
+        I8 -> { return false; }
+        Bool -> { return false; }
+        Ptr { base } -> { return false; }
+        Array { base, len } -> { return false; }
+        Enum { def } -> { return false; }
+    }
 }
 
 is_enum_ty(t: *Type): bool {
-    return t != 0 && t.kind == TY_ENUM;
+    if (t == 0) {
+        return false;
+    }
+    match t.* {
+        Enum { def } -> { return true; }
+        Int -> { return false; }
+        I8 -> { return false; }
+        Bool -> { return false; }
+        Ptr { base } -> { return false; }
+        Array { base, len } -> { return false; }
+        Record { def } -> { return false; }
+    }
 }
 
 is_aggregate(t: *Type): bool {
@@ -534,15 +612,48 @@ is_aggregate(t: *Type): bool {
 }
 
 is_i8_ty(t: *Type): bool {
-    return t != 0 && t.kind == TY_I8;
+    if (t == 0) {
+        return false;
+    }
+    match t.* {
+        I8 -> { return true; }
+        Int -> { return false; }
+        Bool -> { return false; }
+        Ptr { base } -> { return false; }
+        Array { base, len } -> { return false; }
+        Record { def } -> { return false; }
+        Enum { def } -> { return false; }
+    }
 }
 
 is_int_ty(t: *Type): bool {
-    return t != 0 && t.kind == TY_INT;
+    if (t == 0) {
+        return false;
+    }
+    match t.* {
+        Int -> { return true; }
+        I8 -> { return false; }
+        Bool -> { return false; }
+        Ptr { base } -> { return false; }
+        Array { base, len } -> { return false; }
+        Record { def } -> { return false; }
+        Enum { def } -> { return false; }
+    }
 }
 
 is_bool_ty(t: *Type): bool {
-    return t != 0 && t.kind == TY_BOOL;
+    if (t == 0) {
+        return false;
+    }
+    match t.* {
+        Bool -> { return true; }
+        Int -> { return false; }
+        I8 -> { return false; }
+        Ptr { base } -> { return false; }
+        Array { base, len } -> { return false; }
+        Record { def } -> { return false; }
+        Enum { def } -> { return false; }
+    }
 }
 
 types_equal(a: *Type, b: *Type): bool {
@@ -552,30 +663,36 @@ types_equal(a: *Type, b: *Type): bool {
     if (a == 0 || b == 0) {
         return false;
     }
-    if (a.kind != b.kind) {
-        return false;
+    if (is_int_ty(a) && is_int_ty(b)) {
+        return true;
     }
-    if (a.kind == TY_PTR) {
-        return types_equal(a.base, b.base);
+    if (is_i8_ty(a) && is_i8_ty(b)) {
+        return true;
     }
-    if (a.kind == TY_ARRAY) {
-        if (a.array_len != b.array_len) {
+    if (is_bool_ty(a) && is_bool_ty(b)) {
+        return true;
+    }
+    if (is_pointer(a) && is_pointer(b)) {
+        return types_equal(type_base(a), type_base(b));
+    }
+    if (is_array(a) && is_array(b)) {
+        if (type_array_len(a) != type_array_len(b)) {
             return false;
         }
-        return types_equal(a.base, b.base);
+        return types_equal(type_base(a), type_base(b));
     }
-    if (a.kind == TY_STRUCT) {
-        return a.struct_def == b.struct_def;
+    if (is_struct_ty(a) && is_struct_ty(b)) {
+        return type_struct_def(a) == type_struct_def(b);
     }
-    if (a.kind == TY_ENUM) {
-        return a.enum_def == b.enum_def;
+    if (is_enum_ty(a) && is_enum_ty(b)) {
+        return type_enum_def(a) == type_enum_def(b);
     }
-    return true;
+    return false;
 }
 
 is_word_ty(t: *Type): bool {
     t = decay(t);
-    return t != 0 && t.size == 8;
+    return t != 0 && type_size(t) == 8;
 }
 
 check_as(from: *Type, to: *Type) {
@@ -590,7 +707,7 @@ check_as(from: *Type, to: *Type) {
     if (is_word_ty(from) && is_word_ty(to)) {
         return;
     }
-    if (from.size == 1 && to.size == 1) {
+    if (type_size(from) == 1 && type_size(to) == 1) {
         return;
     }
     error("invalid as conversion");
@@ -607,7 +724,7 @@ check_trunc(from: *Type, to: *Type) {
 
 decay(t: *Type): *Type {
     if (is_array(t)) {
-        return ptr_to(t.base);
+        return ptr_to(type_base(t));
     }
     return t;
 }
@@ -1067,7 +1184,7 @@ parse_struct_field_inits(sty: *Type): *Node {
         fname: *i8 = cur_tokstr();
         tok = tok.next;
         skip(TK_COLON);
-        m: *Member = find_member(sty.struct_def, fname);
+        m: *Member = find_member(type_struct_def(sty), fname);
         if (m == 0) {
             error("unknown field");
         }
@@ -1106,7 +1223,7 @@ parse_struct_field_inits(sty: *Type): *Node {
             cur = init;
         }
     }
-    m = sty.struct_def.members;
+    m = type_struct_def(sty).members;
     while (m != 0) {
         found: int = 0;
         i = head;
@@ -1236,12 +1353,12 @@ parse_primary(): *Node {
             ty: *Type = parse_type();
             ty = parse_type_suffix(ty);
             skip(TK_RPAREN);
-            return new_num(ty.size);
+            return new_num(type_size(ty));
         }
         n: *Node = parse_expr();
         skip(TK_RPAREN);
         add_type(n);
-        return new_num(n.ty.size);
+        return new_num(type_size(n.ty));
     }
     if (equal(TK_LPAREN)) {
         tok = tok.next;
@@ -1291,7 +1408,7 @@ parse_primary(): *Node {
             }
             vname: *i8 = cur_tokstr();
             tok = tok.next;
-            v: *Variant = find_variant(ety.enum_def, vname);
+            v: *Variant = find_variant(type_enum_def(ety), vname);
             if (v == 0) {
                 error("unknown variant");
             }
@@ -1374,9 +1491,9 @@ parse_postfix(): *Node {
             if (!is_pointer(t)) {
                 error("subscript of non-pointer");
             }
-            scaled: *Node = new_binary(ND_MUL, idx, new_num(t.base.size));
+            scaled: *Node = new_binary(ND_MUL, idx, new_num(type_size(type_base(t))));
             n = new_unary(ND_DEREF, new_binary(ND_ADD, n, scaled));
-            n.ty = t.base;
+            n.ty = type_base(t);
         } else {
             if (equal(TK_DOT)) {
                 if (tok.next.kind == TK_STAR) {
@@ -1393,14 +1510,14 @@ parse_postfix(): *Node {
                     add_type(n);
                     t: *Type = decay(n.ty);
                     sty: *Type = n.ty;
-                    if (is_pointer(t) && is_struct_ty(t.base)) {
-                        sty = t.base;
+                    if (is_pointer(t) && is_struct_ty(type_base(t))) {
+                        sty = type_base(t);
                     } else {
                         if (!is_struct_ty(n.ty)) {
                             error("member access on non-struct");
                         }
                     }
-                    m: *Member = find_member(sty.struct_def, name);
+                    m: *Member = find_member(type_struct_def(sty), name);
                     if (m == 0) {
                         error("unknown member");
                     }
@@ -1588,7 +1705,7 @@ add_type(n: *Node) {
     }
     if (n.kind == ND_ADDR) {
         if (is_array(n.lhs.ty)) {
-            n.ty = ptr_to(n.lhs.ty.base);
+            n.ty = ptr_to(type_base(n.lhs.ty));
         } else {
             n.ty = ptr_to(n.lhs.ty);
         }
@@ -1597,7 +1714,7 @@ add_type(n: *Node) {
     if (n.kind == ND_DEREF) {
         t: *Type = decay(n.lhs.ty);
         if (is_pointer(t)) {
-            n.ty = t.base;
+            n.ty = type_base(t);
         } else {
             error("dereferencing non-pointer");
         }
@@ -1939,7 +2056,7 @@ parse_stmt(): *Node {
                 }
             }
             skip(TK_ARROW);
-            v: *Variant = find_variant(et.enum_def, vname);
+            v: *Variant = find_variant(type_enum_def(et), vname);
             if (v == 0) {
                 error("unknown variant");
             }
@@ -2022,7 +2139,7 @@ parse_stmt(): *Node {
                 acur = arm;
             }
         }
-        vv: *Variant = et.enum_def.variants;
+        vv: *Variant = type_enum_def(et).variants;
         while (vv != 0) {
             found2: int = 0;
             a = arms;
@@ -2309,7 +2426,7 @@ new_label(): int {
 }
 
 is_byte_ty(t: *Type): bool {
-    return t != 0 && t.size == 1;
+    return t != 0 && type_size(t) == 1;
 }
 
 load_mem(ty: *Type) {
@@ -2393,7 +2510,7 @@ gen_addr(n: *Node) {
     if (n.kind == ND_MEMBER) {
         add_type(n.lhs);
         t: *Type = decay(n.lhs.ty);
-        if (is_pointer(t) && is_struct_ty(t.base)) {
+        if (is_pointer(t) && is_struct_ty(type_base(t))) {
             gen_expr(n.lhs);
         } else {
             gen_addr(n.lhs);
@@ -2445,8 +2562,8 @@ gen_expr(n: *Node) {
         return;
     }
     if (k == ND_NEW) {
-        base: *Type = n.ty.base;
-        sz: int = base.size;
+        base: *Type = type_base(n.ty);
+        sz: int = type_size(base);
         if (sz <= 0) {
             sz = 8;
         }
@@ -2462,7 +2579,7 @@ gen_expr(n: *Node) {
         return;
     }
     if (k == ND_STRUCT_LIT) {
-        sz: int = n.ty.size;
+        sz: int = type_size(n.ty);
         if (sz <= 0) {
             sz = 8;
         }
@@ -2477,7 +2594,7 @@ gen_expr(n: *Node) {
         return;
     }
     if (k == ND_VARIANT_LIT) {
-        sz: int = n.ty.size;
+        sz: int = type_size(n.ty);
         if (sz <= 0) {
             sz = 8;
         }
@@ -2525,7 +2642,7 @@ gen_expr(n: *Node) {
         gen_expr(n.rhs);
         emit("  pop %rdi\n");
         if (is_aggregate(n.lhs.ty)) {
-            sz: int = n.lhs.ty.size;
+            sz: int = type_size(n.lhs.ty);
             if (sz <= 0) {
                 sz = 8;
             }
@@ -2785,7 +2902,7 @@ assign_lvar_offsets(fn: *Function) {
     off: int = 0;
     v: *Obj = fn.locals;
     while (v != 0) {
-        sz: int = v.ty.size;
+        sz: int = type_size(v.ty);
         if (sz <= 0) {
             sz = 8;
         }
@@ -2811,7 +2928,7 @@ emit_data() {
         if (g.is_func == 0) {
             sz: int = 8;
             if (g.ty != 0) {
-                sz = g.ty.size;
+                sz = type_size(g.ty);
             }
             if (sz <= 0) {
                 sz = 8;
