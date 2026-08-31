@@ -3,7 +3,8 @@
  *
  * Language: C-like subset → x86-64 Linux GAS assembly
  *
- *   Types:     int, i8 (byte), bool, named structs, pointers as `*T`, arrays as `T[N]`
+ *   Types:     int, i8 (byte), bool, nominal record types via `type T = { ... }`,
+ *              pointers as `*T`, arrays as `T[N]`
  *   Decls:     name-first: `x: int = expr;`, `p: *Point = uninitialized;`
  *              locals require `= expr` or `= uninitialized`
  *   Functions: `name(a: int, b: int): int { ... }` or `name(a: int) { ... }` (no return)
@@ -14,7 +15,11 @@
  *   Other:     sizeof(T), new T uninitialized | new T { f: e, ... },
  *              string/char literals, // comments
  *              `new T` allocates and yields *T
- *              struct literals: `T { f: e, ... }` (all fields; e may be uninitialized)
+ *              `type T = { f: T; ... };` introduces a nominal record type
+ *              `type T = A | B { f: T; };` introduces a nominal sum/enum type
+ *              record literals: `T { f: e, ... }` (all fields; e may be uninitialized)
+ *              variant construction: `T.A` / `T.B { f: e, ... }`
+ *              `match e { A -> { ... } B { f } -> { ... } }` (exhaustive)
  *              `p.*` dereferences (Zig-style); `*` is multiply / pointer types only
  *              member access: one operator `.` (auto-derefs pointers)
  *              string literals have type *i8 (length-prefixed: len at -8, data at ptr)
@@ -61,13 +66,13 @@ enum {
     TK_EOF, TK_NUM, TK_CHAR, TK_STR, TK_IDENT,
     TK_INT, TK_I8, TK_BOOL, TK_TRUE, TK_FALSE,
     TK_IF, TK_ELSE, TK_WHILE, TK_RETURN,
-    TK_STRUCT, TK_SIZEOF, TK_UNINITIALIZED, TK_AS, TK_TRUNC, TK_NEW,
+    TK_TYPE, TK_MATCH, TK_SIZEOF, TK_UNINITIALIZED, TK_AS, TK_TRUNC, TK_NEW,
     TK_EQ, TK_NE, TK_LE, TK_GE,
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PERCENT,
     TK_LT, TK_GT, TK_ASSIGN, TK_NOT, TK_AMP,
     TK_LPAREN, TK_RPAREN, TK_LBRACE, TK_RBRACE,
     TK_LBRACK, TK_RBRACK, TK_SEMI, TK_COMMA, TK_COLON,
-    TK_AND, TK_OR, TK_DOT
+    TK_AND, TK_OR, TK_PIPE, TK_ARROW, TK_DOT
 };
 
 typedef struct Token {
@@ -164,7 +169,8 @@ static Token *tokenize(char *p) {
             else if (kw_eq(s, n, "else")) kind = TK_ELSE;
             else if (kw_eq(s, n, "while")) kind = TK_WHILE;
             else if (kw_eq(s, n, "return")) kind = TK_RETURN;
-            else if (kw_eq(s, n, "struct")) kind = TK_STRUCT;
+            else if (kw_eq(s, n, "type")) kind = TK_TYPE;
+            else if (kw_eq(s, n, "match")) kind = TK_MATCH;
             else if (kw_eq(s, n, "sizeof")) kind = TK_SIZEOF;
             else if (kw_eq(s, n, "uninitialized")) kind = TK_UNINITIALIZED;
             else if (kw_eq(s, n, "as")) kind = TK_AS;
@@ -179,6 +185,8 @@ static Token *tokenize(char *p) {
         if (p[0] == '>' && p[1] == '=') { cur = cur->next = new_token(TK_GE, p, 2); p += 2; continue; }
         if (p[0] == '&' && p[1] == '&') { cur = cur->next = new_token(TK_AND, p, 2); p += 2; continue; }
         if (p[0] == '|' && p[1] == '|') { cur = cur->next = new_token(TK_OR, p, 2); p += 2; continue; }
+        if (p[0] == '|') { cur = cur->next = new_token(TK_PIPE, p, 1); p += 1; continue; }
+        if (p[0] == '-' && p[1] == '>') { cur = cur->next = new_token(TK_ARROW, p, 2); p += 2; continue; }
 
         int kind;
         switch (*p) {
@@ -252,6 +260,8 @@ static char *unescape(char *s, int n, int *out_len) {
 
 typedef struct Member Member;
 typedef struct StructDef StructDef;
+typedef struct Variant Variant;
+typedef struct EnumDef EnumDef;
 typedef struct Type Type;
 
 struct Member {
@@ -268,17 +278,34 @@ struct StructDef {
     StructDef *next;
 };
 
-enum { TY_INT, TY_I8, TY_PTR, TY_ARRAY, TY_STRUCT, TY_BOOL };
+struct Variant {
+    char *name;
+    int tag;
+    Member *fields;
+    int payload_size;
+    Variant *next;
+};
+
+struct EnumDef {
+    char *name;
+    Variant *variants;
+    int size;
+    EnumDef *next;
+};
+
+enum { TY_INT, TY_I8, TY_PTR, TY_ARRAY, TY_STRUCT, TY_BOOL, TY_ENUM };
 
 struct Type {
     int kind;
     Type *base;
     int array_len;
     StructDef *struct_def;
+    EnumDef *enum_def;
     int size;
 };
 
 static StructDef *struct_defs;
+static EnumDef *enum_defs;
 static Type *ty_int;
 static Type *ty_i8;
 static Type *ty_bool;
@@ -311,9 +338,22 @@ static Type *struct_type(StructDef *sd) {
     return t;
 }
 
+static Type *enum_type(EnumDef *ed) {
+    Type *t = newtype(TY_ENUM);
+    t->enum_def = ed;
+    t->size = ed->size > 0 ? ed->size : 8;
+    return t;
+}
+
 static StructDef *find_struct(char *name) {
     for (StructDef *s = struct_defs; s; s = s->next)
         if (!strcmp(s->name, name)) return s;
+    return 0;
+}
+
+static EnumDef *find_enum(char *name) {
+    for (EnumDef *e = enum_defs; e; e = e->next)
+        if (!strcmp(e->name, name)) return e;
     return 0;
 }
 
@@ -327,13 +367,29 @@ static StructDef *get_or_create_struct(char *name) {
     return sd;
 }
 
+static EnumDef *get_or_create_enum(char *name) {
+    EnumDef *ed = find_enum(name);
+    if (ed) return ed;
+    ed = calloc(1, sizeof(EnumDef));
+    ed->name = name;
+    ed->next = enum_defs;
+    enum_defs = ed;
+    return ed;
+}
+
+static Variant *find_variant(EnumDef *ed, char *name) {
+    for (Variant *v = ed->variants; v; v = v->next)
+        if (!strcmp(v->name, name)) return v;
+    return 0;
+}
+
 static int is_type_name(Token *tok) {
     if (!equal(tok, TK_IDENT)) return 0;
     char name[256];
     if (tok->len >= (int)sizeof(name)) return 0;
     memcpy(name, tok->str, tok->len);
     name[tok->len] = 0;
-    return find_struct(name) != 0;
+    return find_struct(name) != 0 || find_enum(name) != 0;
 }
 
 /* True if tok begins a type: int, i8, StructName, or *type */
@@ -354,6 +410,8 @@ static Member *find_member(StructDef *sd, char *name) {
 static int is_pointer(Type *t) { return t && t->kind == TY_PTR; }
 static int is_array(Type *t) { return t && t->kind == TY_ARRAY; }
 static int is_struct(Type *t) { return t && t->kind == TY_STRUCT; }
+static int is_enum(Type *t) { return t && t->kind == TY_ENUM; }
+static int is_aggregate(Type *t) { return is_struct(t) || is_enum(t); }
 static int is_i8(Type *t) { return t && t->kind == TY_I8; }
 static int is_int_ty(Type *t) { return t && t->kind == TY_INT; }
 static int is_bool_ty(Type *t) { return t && t->kind == TY_BOOL; }
@@ -366,6 +424,7 @@ static int types_equal(Type *a, Type *b) {
     if (a->kind == TY_PTR) return types_equal(a->base, b->base);
     if (a->kind == TY_ARRAY) return a->array_len == b->array_len && types_equal(a->base, b->base);
     if (a->kind == TY_STRUCT) return a->struct_def == b->struct_def;
+    if (a->kind == TY_ENUM) return a->enum_def == b->enum_def;
     return 1; /* int, i8, bool */
 }
 
@@ -408,7 +467,8 @@ enum {
     ND_EQ, ND_NE, ND_LT, ND_LE, ND_GT, ND_GE,
     ND_ASSIGN, ND_ADDR, ND_DEREF, ND_NOT, ND_NEG,
     ND_FUNCALL, ND_RETURN, ND_IF, ND_WHILE, ND_BLOCK, ND_EXPR_STMT,
-    ND_LOGAND, ND_LOGOR, ND_MEMBER, ND_AS, ND_TRUNC, ND_NEW, ND_STRUCT_LIT
+    ND_LOGAND, ND_LOGOR, ND_MEMBER, ND_AS, ND_TRUNC, ND_NEW, ND_STRUCT_LIT,
+    ND_VARIANT_LIT, ND_MATCH, ND_MATCH_ARM
 };
 
 typedef struct Node Node;
@@ -427,6 +487,7 @@ struct Node {
     int str_label;
     Type *ty;
     Member *member;
+    Variant *variant;
 };
 
 /* Integer 0 may be used as a null pointer. */
@@ -543,6 +604,11 @@ static Type *decl_spec(Token **rest, Token *tok) {
     }
     if (equal(tok, TK_IDENT)) {
         char *name = tokstr(tok);
+        EnumDef *ed = find_enum(name);
+        if (ed) {
+            *rest = tok->next;
+            return enum_type(ed);
+        }
         StructDef *sd = get_or_create_struct(name);
         *rest = tok->next;
         return struct_type(sd);
@@ -586,6 +652,48 @@ static Obj *parse_decl(Token **rest, Token *tok, int is_local) {
     return o;
 }
 
+
+
+/* Field inits for variant payload. tok at `{`. */
+static Node *parse_variant_field_inits(Token **rest, Token *tok, Variant *v) {
+    tok = skip(tok, TK_LBRACE);
+    Node head = {0};
+    Node *cur = &head;
+    while (!equal(tok, TK_RBRACE)) {
+        if (cur != &head) tok = skip(tok, TK_COMMA);
+        if (!equal(tok, TK_IDENT)) error("expected field name in variant literal");
+        char *fname = tokstr(tok);
+        tok = skip(tok->next, TK_COLON);
+        Member *m = 0;
+        for (Member *x = v->fields; x; x = x->next)
+            if (!strcmp(x->name, fname)) { m = x; break; }
+        if (!m) error("unknown field %s", fname);
+        for (Node *i = head.next; i; i = i->next)
+            if (i->member == m) error("duplicate field %s", fname);
+        Node *init = new_node(ND_EXPR_STMT);
+        init->member = m;
+        if (equal(tok, TK_UNINITIALIZED)) {
+            init->lhs = 0;
+            tok = tok->next;
+        } else {
+            init->lhs = expr(&tok, tok);
+            add_type(init->lhs);
+            Type *lt = decay(m->ty);
+            Type *rt = decay(init->lhs->ty);
+            if (!types_equal(lt, rt) && !(is_pointer(lt) && is_null_const(init->lhs)))
+                error("field initializer type mismatch");
+        }
+        cur = cur->next = init;
+    }
+    for (Member *m = v->fields; m; m = m->next) {
+        int found = 0;
+        for (Node *i = head.next; i; i = i->next)
+            if (i->member == m) found = 1;
+        if (!found) error("variant literal missing field %s", m->name);
+    }
+    *rest = tok->next;
+    return head.next;
+}
 
 /* Field inits for `Type { f: expr|uninitialized, ... }`. tok at `{`. */
 static Node *parse_struct_field_inits(Token **rest, Token *tok, Type *sty) {
@@ -703,6 +811,28 @@ static Node *primary(Token **rest, Token *tok) {
     if (equal(tok, TK_IDENT)) {
         char *name = tokstr(tok);
         Token *t = tok->next;
+        if (is_type_name(tok) && equal(t, TK_DOT)) {
+            Type *ety = parse_type(&tok, tok);
+            if (!is_enum(ety)) error("variant construction requires an enum type");
+            tok = skip(tok, TK_DOT);
+            if (!equal(tok, TK_IDENT)) error("expected variant name");
+            char *vname = tokstr(tok);
+            tok = tok->next;
+            Variant *v = find_variant(ety->enum_def, vname);
+            if (!v) error("unknown variant %s", vname);
+            Node *n = new_node(ND_VARIANT_LIT);
+            n->ty = ety;
+            n->variant = v;
+            n->val = v->tag;
+            if (equal(tok, TK_LBRACE)) {
+                if (!v->fields) error("unit variant does not take fields");
+                n->args = parse_variant_field_inits(&tok, tok, v);
+            } else if (v->fields) {
+                error("variant requires field initializers");
+            }
+            *rest = tok;
+            return n;
+        }
         if (is_type_name(tok) && equal(t, TK_LBRACE)) {
             Type *sty = parse_type(&tok, tok);
             if (!is_struct(sty)) error("struct literal requires a struct type");
@@ -995,6 +1125,13 @@ static void add_type(Node *n) {
         if (!n->cond || !is_bool_ty(decay(n->cond->ty)))
             error("condition must be bool");
         return;
+    case ND_VARIANT_LIT:
+        /* ty/variant set at parse */
+        return;
+    case ND_MATCH:
+        return;
+    case ND_MATCH_ARM:
+        return;
     default:
         return;
     }
@@ -1101,6 +1238,81 @@ static Node *stmt(Token **rest, Token *tok) {
         *rest = tok;
         return n;
     }
+    if (equal(tok, TK_MATCH)) {
+        Node *n = new_node(ND_MATCH);
+        tok = tok->next;
+        n->cond = expr(&tok, tok);
+        add_type(n->cond);
+        Type *et = decay(n->cond->ty);
+        if (!is_enum(et)) error("match requires an enum value");
+        tok = skip(tok, TK_LBRACE);
+        Node arms = {0};
+        Node *acur = &arms;
+        while (!equal(tok, TK_RBRACE)) {
+            if (!equal(tok, TK_IDENT)) error("expected variant name in match arm");
+            char *vname = tokstr(tok);
+            tok = tok->next;
+            Node *arm = new_node(ND_MATCH_ARM);
+            arm->ty = et;
+            /* Optional bindings: Name { a, b } -> { ... }  or  Name -> { ... } */
+            if (equal(tok, TK_LBRACE)) {
+                tok = tok->next;
+                Node bhead = {0};
+                Node *bcur = &bhead;
+                while (!equal(tok, TK_RBRACE)) {
+                    if (bcur != &bhead) tok = skip(tok, TK_COMMA);
+                    if (!equal(tok, TK_IDENT)) error("expected field binding");
+                    Node *b = new_node(ND_VAR);
+                    b->funcname = tokstr(tok);
+                    tok = tok->next;
+                    bcur = bcur->next = b;
+                }
+                tok = tok->next;
+                arm->args = bhead.next;
+            }
+            tok = skip(tok, TK_ARROW);
+            Variant *v = find_variant(et->enum_def, vname);
+            if (!v) error("unknown variant %s", vname);
+            for (Node *a = arms.next; a; a = a->next)
+                if (a->variant == v) error("duplicate match arm for %s", vname);
+            arm->variant = v;
+            if (v->fields) {
+                if (!arm->args) error("payload variant requires field bindings before ->");
+                for (Node *b = arm->args; b; b = b->next) {
+                    Member *m = 0;
+                    for (Member *x = v->fields; x; x = x->next)
+                        if (!strcmp(x->name, b->funcname)) { m = x; break; }
+                    if (!m) error("unknown field %s in variant", b->funcname);
+                    for (Node *o = arm->args; o != b; o = o->next)
+                        if (o->member == m) error("duplicate binding for %s", b->funcname);
+                    Obj *obj = new_obj(b->funcname, 1);
+                    obj->ty = m->ty;
+                    b->var = obj;
+                    b->member = m;
+                    b->ty = m->ty;
+                }
+                for (Member *m = v->fields; m; m = m->next) {
+                    int found = 0;
+                    for (Node *b = arm->args; b; b = b->next)
+                        if (b->member == m) found = 1;
+                    if (!found) error("match arm missing binding for %s", m->name);
+                }
+            } else if (arm->args) {
+                error("unit variant takes no field bindings");
+            }
+            arm->body = compound_stmt(&tok, tok);
+            acur = acur->next = arm;
+        }
+        for (Variant *v = et->enum_def->variants; v; v = v->next) {
+            int found = 0;
+            for (Node *a = arms.next; a; a = a->next)
+                if (a->variant == v) found = 1;
+            if (!found) error("match not exhaustive: missing %s", v->name);
+        }
+        n->body = arms.next;
+        *rest = tok->next;
+        return n;
+    }
     if (equal(tok, TK_LBRACE))
         return compound_stmt(rest, tok);
     /* name-first local decl: name : type = expr|uninitialized ; */
@@ -1165,19 +1377,12 @@ static Function *parse_function(Token **rest, Token *tok, char *name) {
     return fn;
 }
 
-static void parse_struct_def(Token **rest, Token *tok) {
-    tok = tok->next;
-    if (!equal(tok, TK_IDENT)) error("expected struct tag");
-    char *name = tokstr(tok);
-    tok = tok->next;
-    StructDef *sd = get_or_create_struct(name);
-    if (sd->members) error("redefinition of struct %s", name);
-    tok = skip(tok, TK_LBRACE);
+static Member *parse_field_list(Token **rest, Token *tok, int base_offset, int *out_size) {
     Member head = {0};
     Member *cur = &head;
-    int offset = 0;
+    int offset = base_offset;
     while (!equal(tok, TK_RBRACE)) {
-        if (!equal(tok, TK_IDENT)) error("expected member name");
+        if (!equal(tok, TK_IDENT)) error("expected field name");
         Member *m = calloc(1, sizeof(Member));
         m->name = tokstr(tok);
         tok = skip(tok->next, TK_COLON);
@@ -1189,9 +1394,66 @@ static void parse_struct_def(Token **rest, Token *tok) {
         cur = cur->next = m;
         tok = skip(tok, TK_SEMI);
     }
-    sd->members = head.next;
-    sd->size = offset;
-    tok = skip(tok, TK_RBRACE);
+    *out_size = offset - base_offset;
+    *rest = tok->next; /* skip } */
+    return head.next;
+}
+
+static Variant *parse_variant(Token **rest, Token *tok, int tag) {
+    if (!equal(tok, TK_IDENT)) error("expected variant name");
+    Variant *v = calloc(1, sizeof(Variant));
+    v->name = tokstr(tok);
+    v->tag = tag;
+    tok = tok->next;
+    if (equal(tok, TK_LBRACE)) {
+        int psz = 0;
+        v->fields = parse_field_list(&tok, tok->next, 8, &psz);
+        v->payload_size = psz;
+    }
+    *rest = tok;
+    return v;
+}
+
+static void parse_type_def(Token **rest, Token *tok) {
+    tok = tok->next; /* type */
+    if (!equal(tok, TK_IDENT)) error("expected type name");
+    char *name = tokstr(tok);
+    tok = tok->next;
+    tok = skip(tok, TK_ASSIGN);
+
+    if (equal(tok, TK_LBRACE)) {
+        if (find_enum(name)) error("redefinition of type %s", name);
+        StructDef *sd = get_or_create_struct(name);
+        if (sd->members) error("redefinition of type %s", name);
+        int sz = 0;
+        sd->members = parse_field_list(&tok, tok->next, 0, &sz);
+        sd->size = sz;
+        *rest = skip(tok, TK_SEMI);
+        return;
+    }
+
+    /* Sum type: V | W { fields; } | ... */
+    if (find_struct(name)) error("redefinition of type %s", name);
+    EnumDef *ed = get_or_create_enum(name);
+    if (ed->variants) error("redefinition of type %s", name);
+
+    Variant head = {0};
+    Variant *cur = &head;
+    int tag = 0;
+    int max_payload = 0;
+    for (;;) {
+        Variant *v = parse_variant(&tok, tok, tag);
+        for (Variant *x = head.next; x; x = x->next)
+            if (!strcmp(x->name, v->name)) error("duplicate variant %s", v->name);
+        if (v->payload_size > max_payload) max_payload = v->payload_size;
+        cur = cur->next = v;
+        tag++;
+        if (!equal(tok, TK_PIPE)) break;
+        tok = tok->next;
+    }
+    if (!head.next) error("enum type needs at least one variant");
+    ed->variants = head.next;
+    ed->size = 8 + max_payload;
     *rest = skip(tok, TK_SEMI);
 }
 
@@ -1199,8 +1461,8 @@ static void parse_program(Token *tok) {
     Function *fn_head = 0;
     Function **fn_tail = &fn_head;
     while (!equal(tok, TK_EOF)) {
-        if (equal(tok, TK_STRUCT) && equal(tok->next, TK_IDENT) && equal(tok->next->next, TK_LBRACE)) {
-            parse_struct_def(&tok, tok);
+        if (equal(tok, TK_TYPE) && equal(tok->next, TK_IDENT) && equal(tok->next->next, TK_ASSIGN)) {
+            parse_type_def(&tok, tok);
             continue;
         }
         /* name-first: name ( ... ) : type { }   or   name : type ; */
@@ -1294,7 +1556,7 @@ static void gen_expr(Node *n) {
         return;
     case ND_VAR:
         gen_addr(n);
-        if (is_array(n->ty) || is_struct(n->ty))
+        if (is_array(n->ty) || is_aggregate(n->ty))
             return;
         load_mem(n->ty);
         return;
@@ -1348,6 +1610,28 @@ static void gen_expr(Node *n) {
         printf("  pop %%rax\n");
         return;
     }
+    case ND_VARIANT_LIT: {
+        int sz = n->ty->size > 0 ? n->ty->size : 8;
+        sz = (sz + 15) / 16 * 16;
+        printf("  sub $%d, %%rsp\n", sz);
+        printf("  mov %%rsp, %%rax\n");
+        printf("  push %%rax\n");
+        /* store tag at offset 0 */
+        printf("  mov $%ld, %%rdi\n", n->val);
+        printf("  mov %%rdi, (%%rax)\n");
+        for (Node *init = n->args; init; init = init->next) {
+            if (!init->lhs) continue;
+            printf("  mov (%%rsp), %%rax\n");
+            if (init->member->offset)
+                printf("  add $%d, %%rax\n", init->member->offset);
+            printf("  push %%rax\n");
+            gen_expr(init->lhs);
+            printf("  pop %%rdi\n");
+            store_mem(init->member->ty ? init->member->ty : ty_int);
+        }
+        printf("  pop %%rax\n");
+        return;
+    }
     case ND_DEREF:
         gen_expr(n->lhs);
         load_mem(n->ty);
@@ -1370,12 +1654,30 @@ static void gen_expr(Node *n) {
             printf("  pop %%rax\n");
             return;
         }
+        if (n->rhs->kind == ND_VARIANT_LIT && is_enum(n->lhs->ty)) {
+            gen_addr(n->lhs);
+            printf("  push %%rax\n");
+            printf("  mov $%ld, %%rdi\n", n->rhs->val);
+            printf("  mov %%rdi, (%%rax)\n");
+            for (Node *init = n->rhs->args; init; init = init->next) {
+                if (!init->lhs) continue;
+                printf("  mov (%%rsp), %%rax\n");
+                if (init->member->offset)
+                    printf("  add $%d, %%rax\n", init->member->offset);
+                printf("  push %%rax\n");
+                gen_expr(init->lhs);
+                printf("  pop %%rdi\n");
+                store_mem(init->member->ty ? init->member->ty : ty_int);
+            }
+            printf("  pop %%rax\n");
+            return;
+        }
         gen_addr(n->lhs);
         printf("  push %%rax\n");
         gen_expr(n->rhs);
         printf("  pop %%rdi\n");
-        if (is_struct(n->lhs->ty)) {
-            /* byte-copy struct value at %rax into destination %rdi */
+        if (is_aggregate(n->lhs->ty)) {
+            /* byte-copy aggregate value at %rax into destination %rdi */
             int sz = n->lhs->ty->size > 0 ? n->lhs->ty->size : 8;
             printf("  mov %%rax, %%rsi\n");
             for (int i = 0; i < sz; i++) {
@@ -1537,6 +1839,40 @@ static void gen_stmt(Node *n) {
         gen_stmt(n->body);
         printf("  jmp .L.begin%d\n", l);
         printf(".L.end%d:\n", l);
+        return;
+    }
+    case ND_MATCH: {
+        int l = new_label();
+        /* address of enum value in %rax */
+        add_type(n->cond);
+        if (n->cond->kind == ND_VAR || n->cond->kind == ND_MEMBER || n->cond->kind == ND_DEREF)
+            gen_addr(n->cond);
+        else
+            gen_expr(n->cond); /* variant lit / other aggregates leave addr */
+        printf("  push %%rax\n");
+        printf("  mov (%%rax), %%rax\n"); /* tag */
+        printf("  push %%rax\n");
+        for (Node *arm = n->body; arm; arm = arm->next) {
+            int la = new_label();
+            printf("  mov (%%rsp), %%rax\n");
+            printf("  cmp $%d, %%rax\n", arm->variant->tag);
+            printf("  jne .L.arm%d\n", la);
+            /* bind payload fields from enum at 8(%rsp) after two pushes: tag at 0(%rsp), addr at 8(%rsp) */
+            for (Node *b = arm->args; b; b = b->next) {
+                printf("  mov 8(%%rsp), %%rax\n");
+                if (b->member->offset)
+                    printf("  add $%d, %%rax\n", b->member->offset);
+                load_mem(b->member->ty ? b->member->ty : ty_int);
+                printf("  mov %%rax, %d(%%rbp)\n", b->var->offset);
+            }
+            gen_stmt(arm->body);
+            printf("  jmp .L.matchend%d\n", l);
+            printf(".L.arm%d:\n", la);
+        }
+        printf("  mov $1, %%rdi\n");
+        printf("  call exit\n");
+        printf(".L.matchend%d:\n", l);
+        printf("  add $16, %%rsp\n");
         return;
     }
     default:
