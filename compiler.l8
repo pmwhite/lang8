@@ -1,0 +1,1378 @@
+// L8 self-hosted compiler → x86-64 Linux GAS
+// Int-only C subset. AST in parallel arrays; helpers keep the code readable.
+
+int TK_EOF; int TK_NUM; int TK_STR; int TK_IDENT;
+int TK_INT; int TK_IF; int TK_ELSE; int TK_WHILE; int TK_RETURN;
+int TK_EQ; int TK_NE; int TK_LE; int TK_GE;
+int TK_PLUS; int TK_MINUS; int TK_STAR; int TK_SLASH; int TK_PERCENT;
+int TK_LT; int TK_GT; int TK_ASSIGN; int TK_NOT; int TK_AMP;
+int TK_LPAREN; int TK_RPAREN; int TK_LBRACE; int TK_RBRACE;
+int TK_LBRACK; int TK_RBRACK; int TK_SEMI; int TK_COMMA;
+
+int ND_NUM; int ND_VAR; int ND_ADD; int ND_SUB; int ND_MUL; int ND_DIV; int ND_MOD;
+int ND_EQ; int ND_NE; int ND_LT; int ND_LE; int ND_GT; int ND_GE;
+int ND_ASSIGN; int ND_ADDR; int ND_DEREF; int ND_NOT; int ND_NEG;
+int ND_FUNCALL; int ND_RETURN; int ND_IF; int ND_WHILE; int ND_BLOCK; int ND_EXPR_STMT;
+
+int source; int source_len; int pos;
+int tk_kind[50000]; int tk_val[50000]; int tk_str[50000]; int tk_len[50000];
+int ntok; int tok;
+
+int nd_kind[30000]; int nd_lhs[30000]; int nd_rhs[30000];
+int nd_cond[30000]; int nd_then[30000]; int nd_els[30000]; int nd_body[30000];
+int nd_next[30000]; int nd_val[30000]; int nd_var[30000];
+int nd_funcname[30000]; int nd_args[30000]; int nd_str_label[30000];
+int nnode;
+
+int ob_name[10000]; int ob_is_local[10000]; int ob_is_func[10000];
+int ob_is_array[10000]; int ob_offset[10000]; int ob_array_size[10000]; int ob_next[10000];
+int nobj; int globals; int locals;
+
+int fn_name[1000]; int fn_body[1000]; int fn_locals[1000]; int fn_stack[1000];
+int fn_next[1000]; int fn_nparams[1000];
+int fn_p0[1000]; int fn_p1[1000]; int fn_p2[1000];
+int fn_p3[1000]; int fn_p4[1000]; int fn_p5[1000];
+int nfn; int functions;
+
+int str_data[20000]; int str_len[20000]; int nstr;
+int label_id; int current_fn_name;
+int REG0; int REG1; int REG2; int REG3; int REG4; int REG5;
+
+int strlen(int s) {
+    int i;
+    i = 0;
+    while (loadb(s + i) != 0) {
+        i = i + 1;
+    }
+    return i;
+}
+
+int streq_n(int a, int b, int n) {
+    int i;
+    i = 0;
+    while (i < n) {
+        if (loadb(a + i) != loadb(b + i)) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+int streq(int a, int b) {
+    int i;
+    int ca;
+    int cb;
+    i = 0;
+    while (1) {
+        ca = loadb(a + i);
+        cb = loadb(b + i);
+        if (ca != cb) {
+            return 0;
+        }
+        if (ca == 0) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+int memcpy(int dst, int src, int n) {
+    int i;
+    i = 0;
+    while (i < n) {
+        storeb(dst + i, loadb(src + i));
+        i = i + 1;
+    }
+    return dst;
+}
+
+int strdup_n(int s, int n) {
+    int d;
+    d = malloc(n + 1);
+    memcpy(d, s, n);
+    storeb(d + n, 0);
+    return d;
+}
+
+int is_space(int c) {
+    if (c == 32) { return 1; }
+    if (c == 10) { return 1; }
+    if (c == 13) { return 1; }
+    if (c == 9) { return 1; }
+    return 0;
+}
+
+int is_digit(int c) {
+    if (c < 48) { return 0; }
+    if (c > 57) { return 0; }
+    return 1;
+}
+
+int is_ident1(int c) {
+    if (c >= 97) { if (c <= 122) { return 1; } }
+    if (c >= 65) { if (c <= 90) { return 1; } }
+    if (c == 95) { return 1; }
+    return 0;
+}
+
+int is_ident2(int c) {
+    if (is_ident1(c)) { return 1; }
+    if (is_digit(c)) { return 1; }
+    return 0;
+}
+
+int emit(int s) {
+    write(1, s, strlen(s));
+    return 0;
+}
+
+int emit_ch(int c) {
+    int ch;
+    ch = c;
+    write(1, &ch, 1);
+    return 0;
+}
+
+int emit_num(int n) {
+    int buf[32];
+    int i;
+    int neg;
+    neg = 0;
+    if (n < 0) {
+        neg = 1;
+        n = 0 - n;
+    }
+    if (n == 0) {
+        emit_ch(48);
+        return 0;
+    }
+    i = 0;
+    while (n > 0) {
+        buf[i] = 48 + (n % 10);
+        n = n / 10;
+        i = i + 1;
+    }
+    if (neg) {
+        emit_ch(45);
+    }
+    while (i > 0) {
+        i = i - 1;
+        emit_ch(buf[i]);
+    }
+    return 0;
+}
+
+int error(int msg) {
+    write(2, "error: ", 7);
+    write(2, msg, strlen(msg));
+    write(2, "\n", 1);
+    exit(1);
+    return 0;
+}
+
+int init_kinds() {
+    TK_EOF = 0; TK_NUM = 1; TK_STR = 2; TK_IDENT = 3;
+    TK_INT = 4; TK_IF = 5; TK_ELSE = 6; TK_WHILE = 7; TK_RETURN = 8;
+    TK_EQ = 9; TK_NE = 10; TK_LE = 11; TK_GE = 12;
+    TK_PLUS = 13; TK_MINUS = 14; TK_STAR = 15; TK_SLASH = 16; TK_PERCENT = 17;
+    TK_LT = 18; TK_GT = 19; TK_ASSIGN = 20; TK_NOT = 21; TK_AMP = 22;
+    TK_LPAREN = 23; TK_RPAREN = 24; TK_LBRACE = 25; TK_RBRACE = 26;
+    TK_LBRACK = 27; TK_RBRACK = 28; TK_SEMI = 29; TK_COMMA = 30;
+    ND_NUM = 0; ND_VAR = 1; ND_ADD = 2; ND_SUB = 3; ND_MUL = 4; ND_DIV = 5; ND_MOD = 6;
+    ND_EQ = 7; ND_NE = 8; ND_LT = 9; ND_LE = 10; ND_GT = 11; ND_GE = 12;
+    ND_ASSIGN = 13; ND_ADDR = 14; ND_DEREF = 15; ND_NOT = 16; ND_NEG = 17;
+    ND_FUNCALL = 18; ND_RETURN = 19; ND_IF = 20; ND_WHILE = 21; ND_BLOCK = 22;
+    ND_EXPR_STMT = 23;
+    REG0 = "%rdi"; REG1 = "%rsi"; REG2 = "%rdx";
+    REG3 = "%rcx"; REG4 = "%r8"; REG5 = "%r9";
+    nnode = 1;
+    nobj = 1;
+    nfn = 1;
+    return 0;
+}
+
+int reg_name(int i) {
+    if (i == 0) { return REG0; }
+    if (i == 1) { return REG1; }
+    if (i == 2) { return REG2; }
+    if (i == 3) { return REG3; }
+    if (i == 4) { return REG4; }
+    return REG5;
+}
+
+int fn_param(int fn, int i) {
+    if (i == 0) { return fn_p0[fn]; }
+    if (i == 1) { return fn_p1[fn]; }
+    if (i == 2) { return fn_p2[fn]; }
+    if (i == 3) { return fn_p3[fn]; }
+    if (i == 4) { return fn_p4[fn]; }
+    return fn_p5[fn];
+}
+
+int set_fn_param(int fn, int i, int p) {
+    if (i == 0) { fn_p0[fn] = p; }
+    if (i == 1) { fn_p1[fn] = p; }
+    if (i == 2) { fn_p2[fn] = p; }
+    if (i == 3) { fn_p3[fn] = p; }
+    if (i == 4) { fn_p4[fn] = p; }
+    if (i == 5) { fn_p5[fn] = p; }
+    return 0;
+}
+
+int read_file(int path) {
+    int fd;
+    int buf;
+    int n;
+    int cap;
+    int r;
+    int tmp;
+    fd = open(path, 0, 0);
+    if (fd < 0) {
+        error("cannot open file");
+    }
+    cap = 65536;
+    buf = malloc(cap);
+    n = 0;
+    while (1) {
+        if (n + 4096 > cap) {
+            cap = cap * 2;
+            tmp = malloc(cap);
+            memcpy(tmp, buf, n);
+            buf = tmp;
+        }
+        r = read(fd, buf + n, 4096);
+        if (r <= 0) {
+            storeb(buf + n, 0);
+            close(fd);
+            source_len = n;
+            return buf;
+        }
+        n = n + r;
+    }
+    return buf;
+}
+
+int new_token(int kind, int start, int len) {
+    int t;
+    t = ntok;
+    ntok = ntok + 1;
+    tk_kind[t] = kind;
+    tk_str[t] = start;
+    tk_len[t] = len;
+    tk_val[t] = 0;
+    return t;
+}
+
+int ident_kind(int s, int n) {
+    if (n == 3) {
+        if (streq_n(s, "int", 3)) { return TK_INT; }
+    }
+    if (n == 2) {
+        if (streq_n(s, "if", 2)) { return TK_IF; }
+    }
+    if (n == 4) {
+        if (streq_n(s, "else", 4)) { return TK_ELSE; }
+    }
+    if (n == 5) {
+        if (streq_n(s, "while", 5)) { return TK_WHILE; }
+    }
+    if (n == 6) {
+        if (streq_n(s, "return", 6)) { return TK_RETURN; }
+    }
+    return TK_IDENT;
+}
+
+int skip_line_comment() {
+    while (pos < source_len) {
+        if (loadb(source + pos) == 10) {
+            return 0;
+        }
+        pos = pos + 1;
+    }
+    return 0;
+}
+
+int skip_block_comment() {
+    while (pos < source_len) {
+        if (loadb(source + pos) == 42) {
+            if (loadb(source + pos + 1) == 47) {
+                pos = pos + 2;
+                return 0;
+            }
+        }
+        pos = pos + 1;
+    }
+    return 0;
+}
+
+int read_number() {
+    int v;
+    v = 0;
+    while (pos < source_len) {
+        if (is_digit(loadb(source + pos)) == 0) {
+            return v;
+        }
+        v = v * 10 + (loadb(source + pos) - 48);
+        pos = pos + 1;
+    }
+    return v;
+}
+
+int esc_char(int c) {
+    if (c == 110) { return 10; }
+    if (c == 116) { return 9; }
+    if (c == 48) { return 0; }
+    if (c == 92) { return 92; }
+    if (c == 39) { return 39; }
+    if (c == 34) { return 34; }
+    return c;
+}
+
+int scan_string_len() {
+    int start;
+    start = pos;
+    while (pos < source_len) {
+        if (loadb(source + pos) == 34) {
+            return pos - start;
+        }
+        if (loadb(source + pos) == 92) {
+            pos = pos + 1;
+        }
+        pos = pos + 1;
+    }
+    error("unterminated string");
+    return 0;
+}
+
+int scan_ident_len() {
+    int start;
+    start = pos;
+    while (pos < source_len) {
+        if (is_ident2(loadb(source + pos)) == 0) {
+            return pos - start;
+        }
+        pos = pos + 1;
+    }
+    return pos - start;
+}
+
+int punct_kind(int c) {
+    if (c == 43) { return TK_PLUS; }
+    if (c == 45) { return TK_MINUS; }
+    if (c == 42) { return TK_STAR; }
+    if (c == 37) { return TK_PERCENT; }
+    if (c == 38) { return TK_AMP; }
+    if (c == 40) { return TK_LPAREN; }
+    if (c == 41) { return TK_RPAREN; }
+    if (c == 123) { return TK_LBRACE; }
+    if (c == 125) { return TK_RBRACE; }
+    if (c == 91) { return TK_LBRACK; }
+    if (c == 93) { return TK_RBRACK; }
+    if (c == 59) { return TK_SEMI; }
+    if (c == 44) { return TK_COMMA; }
+    if (c == 47) { return TK_SLASH; }
+    return 0 - 1;
+}
+
+int tokenize() {
+    int c;
+    int s;
+    int t;
+    int v;
+    int n;
+    int pk;
+    ntok = 0;
+    pos = 0;
+    while (pos < source_len) {
+        c = loadb(source + pos);
+        if (is_space(c)) {
+            pos = pos + 1;
+        } else {
+            if (c == 47) {
+                if (loadb(source + pos + 1) == 47) {
+                    pos = pos + 2;
+                    skip_line_comment();
+                } else {
+                    if (loadb(source + pos + 1) == 42) {
+                        pos = pos + 2;
+                        skip_block_comment();
+                    } else {
+                        new_token(TK_SLASH, source + pos, 1);
+                        pos = pos + 1;
+                    }
+                }
+            } else {
+                if (is_digit(c)) {
+                    s = source + pos;
+                    v = read_number();
+                    t = new_token(TK_NUM, s, (source + pos) - s);
+                    tk_val[t] = v;
+                } else {
+                    if (c == 34) {
+                        pos = pos + 1;
+                        s = source + pos;
+                        n = scan_string_len();
+                        new_token(TK_STR, s, n);
+                        pos = pos + 1;
+                    } else {
+                        if (c == 39) {
+                            pos = pos + 1;
+                            if (loadb(source + pos) == 92) {
+                                pos = pos + 1;
+                                v = esc_char(loadb(source + pos));
+                                pos = pos + 1;
+                            } else {
+                                v = loadb(source + pos);
+                                pos = pos + 1;
+                            }
+                            if (loadb(source + pos) == 39) {
+                                pos = pos + 1;
+                            }
+                            t = new_token(TK_NUM, source + pos, 0);
+                            tk_val[t] = v;
+                        } else {
+                            if (is_ident1(c)) {
+                                s = source + pos;
+                                n = scan_ident_len();
+                                new_token(ident_kind(s, n), s, n);
+                            } else {
+                                if (c == 61) {
+                                    if (loadb(source + pos + 1) == 61) {
+                                        new_token(TK_EQ, source + pos, 2);
+                                        pos = pos + 2;
+                                    } else {
+                                        new_token(TK_ASSIGN, source + pos, 1);
+                                        pos = pos + 1;
+                                    }
+                                } else {
+                                    if (c == 33) {
+                                        if (loadb(source + pos + 1) == 61) {
+                                            new_token(TK_NE, source + pos, 2);
+                                            pos = pos + 2;
+                                        } else {
+                                            new_token(TK_NOT, source + pos, 1);
+                                            pos = pos + 1;
+                                        }
+                                    } else {
+                                        if (c == 60) {
+                                            if (loadb(source + pos + 1) == 61) {
+                                                new_token(TK_LE, source + pos, 2);
+                                                pos = pos + 2;
+                                            } else {
+                                                new_token(TK_LT, source + pos, 1);
+                                                pos = pos + 1;
+                                            }
+                                        } else {
+                                            if (c == 62) {
+                                                if (loadb(source + pos + 1) == 61) {
+                                                    new_token(TK_GE, source + pos, 2);
+                                                    pos = pos + 2;
+                                                } else {
+                                                    new_token(TK_GT, source + pos, 1);
+                                                    pos = pos + 1;
+                                                }
+                                            } else {
+                                                pk = punct_kind(c);
+                                                if (pk < 0) {
+                                                    error("unexpected character");
+                                                }
+                                                new_token(pk, source + pos, 1);
+                                                pos = pos + 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    new_token(TK_EOF, source + pos, 0);
+    return 0;
+}
+
+int equal(int kind) {
+    if (tk_kind[tok] == kind) {
+        return 1;
+    }
+    return 0;
+}
+
+int skip(int kind) {
+    if (equal(kind) == 0) {
+        error("unexpected token");
+    }
+    tok = tok + 1;
+    return 0;
+}
+
+int cur_tokstr() {
+    return strdup_n(tk_str[tok], tk_len[tok]);
+}
+
+int add_string(int s, int n) {
+    int buf;
+    int i;
+    int j;
+    buf = malloc(n + 1);
+    i = 0;
+    j = 0;
+    while (i < n) {
+        if (loadb(s + i) == 92) {
+            if (i + 1 < n) {
+                i = i + 1;
+                storeb(buf + j, esc_char(loadb(s + i)));
+                j = j + 1;
+            }
+        } else {
+            storeb(buf + j, loadb(s + i));
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    storeb(buf + j, 0);
+    str_data[nstr] = buf;
+    str_len[nstr] = j;
+    nstr = nstr + 1;
+    return nstr - 1;
+}
+
+int new_node(int kind) {
+    int n;
+    n = nnode;
+    nnode = nnode + 1;
+    nd_kind[n] = kind;
+    nd_lhs[n] = 0;
+    nd_rhs[n] = 0;
+    nd_cond[n] = 0;
+    nd_then[n] = 0;
+    nd_els[n] = 0;
+    nd_body[n] = 0;
+    nd_next[n] = 0;
+    nd_val[n] = 0;
+    nd_var[n] = 0;
+    nd_funcname[n] = 0;
+    nd_args[n] = 0;
+    nd_str_label[n] = 0;
+    return n;
+}
+
+int new_binary(int kind, int lhs, int rhs) {
+    int n;
+    n = new_node(kind);
+    nd_lhs[n] = lhs;
+    nd_rhs[n] = rhs;
+    return n;
+}
+
+int new_unary(int kind, int lhs) {
+    int n;
+    n = new_node(kind);
+    nd_lhs[n] = lhs;
+    return n;
+}
+
+int new_num(int v) {
+    int n;
+    n = new_node(ND_NUM);
+    nd_val[n] = v;
+    return n;
+}
+
+int find_obj(int list, int name) {
+    int o;
+    o = list;
+    while (o != 0) {
+        if (streq(ob_name[o], name)) {
+            return o;
+        }
+        o = ob_next[o];
+    }
+    return 0;
+}
+
+int find_var(int name) {
+    int o;
+    o = find_obj(locals, name);
+    if (o != 0) {
+        return o;
+    }
+    return find_obj(globals, name);
+}
+
+int new_obj(int name, int is_local) {
+    int o;
+    o = nobj;
+    nobj = nobj + 1;
+    ob_name[o] = name;
+    ob_is_local[o] = is_local;
+    ob_is_func[o] = 0;
+    ob_is_array[o] = 0;
+    ob_offset[o] = 0;
+    ob_array_size[o] = 0;
+    if (is_local) {
+        ob_next[o] = locals;
+        locals = o;
+    } else {
+        ob_next[o] = globals;
+        globals = o;
+    }
+    return o;
+}
+
+int parse_expr() {
+    return parse_assign();
+}
+
+int parse_primary() {
+    int n;
+    int name;
+    int head;
+    int cur;
+    int arg;
+    int label;
+    if (equal(TK_LPAREN)) {
+        tok = tok + 1;
+        n = parse_expr();
+        skip(TK_RPAREN);
+        return n;
+    }
+    if (equal(TK_NUM)) {
+        n = new_num(tk_val[tok]);
+        tok = tok + 1;
+        return n;
+    }
+    if (equal(TK_STR)) {
+        label = add_string(tk_str[tok], tk_len[tok]);
+        tok = tok + 1;
+        n = new_node(ND_NUM);
+        nd_str_label[n] = label + 1;
+        return n;
+    }
+    if (equal(TK_IDENT)) {
+        name = cur_tokstr();
+        tok = tok + 1;
+        if (equal(TK_LPAREN)) {
+            n = new_node(ND_FUNCALL);
+            nd_funcname[n] = name;
+            tok = tok + 1;
+            head = 0;
+            cur = 0;
+            while (equal(TK_RPAREN) == 0) {
+                if (cur != 0) {
+                    skip(TK_COMMA);
+                }
+                arg = parse_expr();
+                if (cur == 0) {
+                    head = arg;
+                    cur = arg;
+                } else {
+                    nd_next[cur] = arg;
+                    cur = arg;
+                }
+            }
+            nd_args[n] = head;
+            skip(TK_RPAREN);
+            return n;
+        }
+        n = new_node(ND_VAR);
+        nd_var[n] = find_var(name);
+        if (nd_var[n] == 0) {
+            error("undefined variable");
+        }
+        return n;
+    }
+    error("expected expression");
+    return 0;
+}
+
+int parse_postfix() {
+    int n;
+    int idx;
+    int scaled;
+    n = parse_primary();
+    while (equal(TK_LBRACK)) {
+        tok = tok + 1;
+        idx = parse_expr();
+        skip(TK_RBRACK);
+        scaled = new_binary(ND_MUL, idx, new_num(8));
+        n = new_unary(ND_DEREF, new_binary(ND_ADD, n, scaled));
+    }
+    return n;
+}
+
+int parse_unary() {
+    if (equal(TK_PLUS)) {
+        tok = tok + 1;
+        return parse_unary();
+    }
+    if (equal(TK_MINUS)) {
+        tok = tok + 1;
+        return new_unary(ND_NEG, parse_unary());
+    }
+    if (equal(TK_STAR)) {
+        tok = tok + 1;
+        return new_unary(ND_DEREF, parse_unary());
+    }
+    if (equal(TK_AMP)) {
+        tok = tok + 1;
+        return new_unary(ND_ADDR, parse_unary());
+    }
+    if (equal(TK_NOT)) {
+        tok = tok + 1;
+        return new_unary(ND_NOT, parse_unary());
+    }
+    return parse_postfix();
+}
+
+int parse_mul() {
+    int n;
+    n = parse_unary();
+    while (1) {
+        if (equal(TK_STAR)) {
+            tok = tok + 1;
+            n = new_binary(ND_MUL, n, parse_unary());
+        } else {
+            if (equal(TK_SLASH)) {
+                tok = tok + 1;
+                n = new_binary(ND_DIV, n, parse_unary());
+            } else {
+                if (equal(TK_PERCENT)) {
+                    tok = tok + 1;
+                    n = new_binary(ND_MOD, n, parse_unary());
+                } else {
+                    return n;
+                }
+            }
+        }
+    }
+    return n;
+}
+
+int parse_add() {
+    int n;
+    n = parse_mul();
+    while (1) {
+        if (equal(TK_PLUS)) {
+            tok = tok + 1;
+            n = new_binary(ND_ADD, n, parse_mul());
+        } else {
+            if (equal(TK_MINUS)) {
+                tok = tok + 1;
+                n = new_binary(ND_SUB, n, parse_mul());
+            } else {
+                return n;
+            }
+        }
+    }
+    return n;
+}
+
+int parse_relational() {
+    int n;
+    n = parse_add();
+    while (1) {
+        if (equal(TK_LT)) {
+            tok = tok + 1;
+            n = new_binary(ND_LT, n, parse_add());
+        } else {
+            if (equal(TK_GT)) {
+                tok = tok + 1;
+                n = new_binary(ND_GT, n, parse_add());
+            } else {
+                if (equal(TK_LE)) {
+                    tok = tok + 1;
+                    n = new_binary(ND_LE, n, parse_add());
+                } else {
+                    if (equal(TK_GE)) {
+                        tok = tok + 1;
+                        n = new_binary(ND_GE, n, parse_add());
+                    } else {
+                        return n;
+                    }
+                }
+            }
+        }
+    }
+    return n;
+}
+
+int parse_equality() {
+    int n;
+    n = parse_relational();
+    while (1) {
+        if (equal(TK_EQ)) {
+            tok = tok + 1;
+            n = new_binary(ND_EQ, n, parse_relational());
+        } else {
+            if (equal(TK_NE)) {
+                tok = tok + 1;
+                n = new_binary(ND_NE, n, parse_relational());
+            } else {
+                return n;
+            }
+        }
+    }
+    return n;
+}
+
+int parse_assign() {
+    int n;
+    n = parse_equality();
+    if (equal(TK_ASSIGN)) {
+        tok = tok + 1;
+        return new_binary(ND_ASSIGN, n, parse_assign());
+    }
+    return n;
+}
+
+int parse_decl(int is_local) {
+    int name;
+    int o;
+    skip(TK_INT);
+    if (equal(TK_IDENT) == 0) {
+        error("expected identifier");
+    }
+    name = cur_tokstr();
+    tok = tok + 1;
+    o = new_obj(name, is_local);
+    if (equal(TK_LBRACK)) {
+        tok = tok + 1;
+        if (equal(TK_NUM) == 0) {
+            error("expected array size");
+        }
+        ob_is_array[o] = 1;
+        ob_array_size[o] = tk_val[tok];
+        tok = tok + 1;
+        skip(TK_RBRACK);
+    }
+    return o;
+}
+
+int parse_compound() {
+    int n;
+    int head;
+    int cur;
+    int s;
+    n = new_node(ND_BLOCK);
+    skip(TK_LBRACE);
+    head = 0;
+    cur = 0;
+    while (equal(TK_RBRACE) == 0) {
+        if (equal(TK_EOF)) {
+            error("unterminated block");
+        }
+        s = parse_stmt();
+        if (cur == 0) {
+            head = s;
+            cur = s;
+        } else {
+            nd_next[cur] = s;
+            cur = s;
+        }
+    }
+    nd_body[n] = head;
+    skip(TK_RBRACE);
+    return n;
+}
+
+int parse_stmt() {
+    int n;
+    if (equal(TK_RETURN)) {
+        n = new_node(ND_RETURN);
+        tok = tok + 1;
+        if (equal(TK_SEMI) == 0) {
+            nd_lhs[n] = parse_expr();
+        }
+        skip(TK_SEMI);
+        return n;
+    }
+    if (equal(TK_IF)) {
+        n = new_node(ND_IF);
+        tok = tok + 1;
+        skip(TK_LPAREN);
+        nd_cond[n] = parse_expr();
+        skip(TK_RPAREN);
+        nd_then[n] = parse_stmt();
+        if (equal(TK_ELSE)) {
+            tok = tok + 1;
+            nd_els[n] = parse_stmt();
+        }
+        return n;
+    }
+    if (equal(TK_WHILE)) {
+        n = new_node(ND_WHILE);
+        tok = tok + 1;
+        skip(TK_LPAREN);
+        nd_cond[n] = parse_expr();
+        skip(TK_RPAREN);
+        nd_body[n] = parse_stmt();
+        return n;
+    }
+    if (equal(TK_LBRACE)) {
+        return parse_compound();
+    }
+    if (equal(TK_INT)) {
+        parse_decl(1);
+        skip(TK_SEMI);
+        return new_node(ND_BLOCK);
+    }
+    n = new_node(ND_EXPR_STMT);
+    nd_lhs[n] = parse_expr();
+    skip(TK_SEMI);
+    return n;
+}
+
+int parse_function(int name) {
+    int fn;
+    int p;
+    int np;
+    locals = 0;
+    fn = nfn;
+    nfn = nfn + 1;
+    fn_name[fn] = name;
+    fn_next[fn] = 0;
+    fn_nparams[fn] = 0;
+    skip(TK_LPAREN);
+    np = 0;
+    while (equal(TK_RPAREN) == 0) {
+        if (np != 0) {
+            skip(TK_COMMA);
+        }
+        if (np >= 6) {
+            error("too many parameters");
+        }
+        p = parse_decl(1);
+        set_fn_param(fn, np, p);
+        np = np + 1;
+    }
+    fn_nparams[fn] = np;
+    skip(TK_RPAREN);
+    fn_body[fn] = parse_compound();
+    fn_locals[fn] = locals;
+    return fn;
+}
+
+int parse_program() {
+    int name;
+    int fn;
+    int o;
+    int tail;
+    functions = 0;
+    tail = 0;
+    while (equal(TK_EOF) == 0) {
+        skip(TK_INT);
+        if (equal(TK_IDENT) == 0) {
+            error("expected identifier");
+        }
+        name = cur_tokstr();
+        tok = tok + 1;
+        if (equal(TK_LPAREN)) {
+            fn = parse_function(name);
+            if (tail == 0) {
+                functions = fn;
+                tail = fn;
+            } else {
+                fn_next[tail] = fn;
+                tail = fn;
+            }
+            o = new_obj(name, 0);
+            ob_is_func[o] = 1;
+        } else {
+            o = new_obj(name, 0);
+            if (equal(TK_LBRACK)) {
+                tok = tok + 1;
+                if (equal(TK_NUM) == 0) {
+                    error("expected array size");
+                }
+                ob_is_array[o] = 1;
+                ob_array_size[o] = tk_val[tok];
+                tok = tok + 1;
+                skip(TK_RBRACK);
+            }
+            skip(TK_SEMI);
+        }
+    }
+    return 0;
+}
+
+int new_label() {
+    int l;
+    l = label_id;
+    label_id = label_id + 1;
+    return l;
+}
+
+int gen_addr(int n) {
+    int v;
+    if (nd_kind[n] == ND_VAR) {
+        v = nd_var[n];
+        if (ob_is_local[v]) {
+            emit("  lea ");
+            emit_num(ob_offset[v]);
+            emit("(%rbp), %rax\n");
+        } else {
+            emit("  lea ");
+            emit(ob_name[v]);
+            emit("(%rip), %rax\n");
+        }
+        return 0;
+    }
+    if (nd_kind[n] == ND_DEREF) {
+        gen_expr(nd_lhs[n]);
+        return 0;
+    }
+    error("not an lvalue");
+    return 0;
+}
+
+int gen_expr(int n) {
+    int nargs;
+    int a;
+    int i;
+    int k;
+    k = nd_kind[n];
+    if (k == ND_NUM) {
+        if (nd_str_label[n] != 0) {
+            emit("  lea .L.str");
+            emit_num(nd_str_label[n] - 1);
+            emit("(%rip), %rax\n");
+        } else {
+            emit("  mov $");
+            emit_num(nd_val[n]);
+            emit(", %rax\n");
+        }
+        return 0;
+    }
+    if (k == ND_VAR) {
+        gen_addr(n);
+        if (ob_is_array[nd_var[n]]) {
+            return 0;
+        }
+        emit("  mov (%rax), %rax\n");
+        return 0;
+    }
+    if (k == ND_ADDR) {
+        gen_addr(nd_lhs[n]);
+        return 0;
+    }
+    if (k == ND_DEREF) {
+        gen_expr(nd_lhs[n]);
+        emit("  mov (%rax), %rax\n");
+        return 0;
+    }
+    if (k == ND_ASSIGN) {
+        gen_addr(nd_lhs[n]);
+        emit("  push %rax\n");
+        gen_expr(nd_rhs[n]);
+        emit("  pop %rdi\n");
+        emit("  mov %rax, (%rdi)\n");
+        return 0;
+    }
+    if (k == ND_NOT) {
+        gen_expr(nd_lhs[n]);
+        emit("  cmp $0, %rax\n");
+        emit("  sete %al\n");
+        emit("  movzb %al, %rax\n");
+        return 0;
+    }
+    if (k == ND_NEG) {
+        gen_expr(nd_lhs[n]);
+        emit("  neg %rax\n");
+        return 0;
+    }
+    if (k == ND_FUNCALL) {
+        nargs = 0;
+        a = nd_args[n];
+        while (a != 0) {
+            nargs = nargs + 1;
+            a = nd_next[a];
+        }
+        if (nargs > 6) {
+            error("too many arguments");
+        }
+        a = nd_args[n];
+        while (a != 0) {
+            gen_expr(a);
+            emit("  push %rax\n");
+            a = nd_next[a];
+        }
+        i = nargs - 1;
+        while (i >= 0) {
+            emit("  pop ");
+            emit(reg_name(i));
+            emit("\n");
+            i = i - 1;
+        }
+        emit("  sub $8, %rsp\n");
+        emit("  call ");
+        emit(nd_funcname[n]);
+        emit("\n");
+        emit("  add $8, %rsp\n");
+        return 0;
+    }
+
+    gen_expr(nd_lhs[n]);
+    emit("  push %rax\n");
+    gen_expr(nd_rhs[n]);
+    emit("  mov %rax, %rdi\n");
+    emit("  pop %rax\n");
+
+    if (k == ND_ADD) { emit("  add %rdi, %rax\n"); return 0; }
+    if (k == ND_SUB) { emit("  sub %rdi, %rax\n"); return 0; }
+    if (k == ND_MUL) { emit("  imul %rdi, %rax\n"); return 0; }
+    if (k == ND_DIV) {
+        emit("  cqo\n");
+        emit("  idiv %rdi\n");
+        return 0;
+    }
+    if (k == ND_MOD) {
+        emit("  cqo\n");
+        emit("  idiv %rdi\n");
+        emit("  mov %rdx, %rax\n");
+        return 0;
+    }
+    if (k == ND_EQ) {
+        emit("  cmp %rdi, %rax\n");
+        emit("  sete %al\n");
+        emit("  movzb %al, %rax\n");
+        return 0;
+    }
+    if (k == ND_NE) {
+        emit("  cmp %rdi, %rax\n");
+        emit("  setne %al\n");
+        emit("  movzb %al, %rax\n");
+        return 0;
+    }
+    if (k == ND_LT) {
+        emit("  cmp %rdi, %rax\n");
+        emit("  setl %al\n");
+        emit("  movzb %al, %rax\n");
+        return 0;
+    }
+    if (k == ND_LE) {
+        emit("  cmp %rdi, %rax\n");
+        emit("  setle %al\n");
+        emit("  movzb %al, %rax\n");
+        return 0;
+    }
+    if (k == ND_GT) {
+        emit("  cmp %rdi, %rax\n");
+        emit("  setg %al\n");
+        emit("  movzb %al, %rax\n");
+        return 0;
+    }
+    if (k == ND_GE) {
+        emit("  cmp %rdi, %rax\n");
+        emit("  setge %al\n");
+        emit("  movzb %al, %rax\n");
+        return 0;
+    }
+    error("invalid expression");
+    return 0;
+}
+
+int gen_stmt(int n) {
+    int s;
+    int l;
+    int k;
+    k = nd_kind[n];
+    if (k == ND_RETURN) {
+        if (nd_lhs[n] != 0) {
+            gen_expr(nd_lhs[n]);
+        } else {
+            emit("  mov $0, %rax\n");
+        }
+        emit("  jmp .L.return.");
+        emit(current_fn_name);
+        emit("\n");
+        return 0;
+    }
+    if (k == ND_EXPR_STMT) {
+        gen_expr(nd_lhs[n]);
+        return 0;
+    }
+    if (k == ND_BLOCK) {
+        s = nd_body[n];
+        while (s != 0) {
+            gen_stmt(s);
+            s = nd_next[s];
+        }
+        return 0;
+    }
+    if (k == ND_IF) {
+        l = new_label();
+        gen_expr(nd_cond[n]);
+        emit("  cmp $0, %rax\n");
+        emit("  je .L.else");
+        emit_num(l);
+        emit("\n");
+        gen_stmt(nd_then[n]);
+        emit("  jmp .L.end");
+        emit_num(l);
+        emit("\n");
+        emit(".L.else");
+        emit_num(l);
+        emit(":\n");
+        if (nd_els[n] != 0) {
+            gen_stmt(nd_els[n]);
+        }
+        emit(".L.end");
+        emit_num(l);
+        emit(":\n");
+        return 0;
+    }
+    if (k == ND_WHILE) {
+        l = new_label();
+        emit(".L.begin");
+        emit_num(l);
+        emit(":\n");
+        gen_expr(nd_cond[n]);
+        emit("  cmp $0, %rax\n");
+        emit("  je .L.end");
+        emit_num(l);
+        emit("\n");
+        gen_stmt(nd_body[n]);
+        emit("  jmp .L.begin");
+        emit_num(l);
+        emit("\n");
+        emit(".L.end");
+        emit_num(l);
+        emit(":\n");
+        return 0;
+    }
+    error("invalid statement");
+    return 0;
+}
+
+int assign_lvar_offsets(int fn) {
+    int off;
+    int v;
+    off = 0;
+    v = fn_locals[fn];
+    while (v != 0) {
+        if (ob_is_array[v]) {
+            off = off + ob_array_size[v] * 8;
+        } else {
+            off = off + 8;
+        }
+        ob_offset[v] = 0 - off;
+        v = ob_next[v];
+    }
+    fn_stack[fn] = (off + 15) / 16 * 16;
+    return 0;
+}
+
+int emit_data() {
+    int g;
+    int i;
+    int j;
+    int b;
+    emit(".section .bss\n");
+    emit(".align 8\n");
+    g = globals;
+    while (g != 0) {
+        if (ob_is_func[g] == 0) {
+            emit(ob_name[g]);
+            emit(": .skip ");
+            if (ob_is_array[g]) {
+                emit_num(ob_array_size[g] * 8);
+            } else {
+                emit_num(8);
+            }
+            emit("\n");
+        }
+        g = ob_next[g];
+    }
+    emit(".section .rodata\n");
+    i = 0;
+    while (i < nstr) {
+        emit(".L.str");
+        emit_num(i);
+        emit(":\n");
+        emit("  .byte ");
+        j = 0;
+        while (j < str_len[i]) {
+            if (j != 0) {
+                emit(",");
+            }
+            b = loadb(str_data[i] + j);
+            emit_num(b);
+            j = j + 1;
+        }
+        if (str_len[i] == 0) {
+            emit("0");
+        } else {
+            emit(",0");
+        }
+        emit("\n");
+        i = i + 1;
+    }
+    return 0;
+}
+
+int emit_text() {
+    int fn;
+    int i;
+    int p;
+    emit(".section .text\n");
+    fn = functions;
+    while (fn != 0) {
+        assign_lvar_offsets(fn);
+        current_fn_name = fn_name[fn];
+        emit(".globl ");
+        emit(fn_name[fn]);
+        emit("\n");
+        emit(fn_name[fn]);
+        emit(":\n");
+        emit("  push %rbp\n");
+        emit("  mov %rsp, %rbp\n");
+        emit("  sub $");
+        emit_num(fn_stack[fn]);
+        emit(", %rsp\n");
+        i = 0;
+        while (i < fn_nparams[fn]) {
+            p = fn_param(fn, i);
+            emit("  mov ");
+            emit(reg_name(i));
+            emit(", ");
+            emit_num(ob_offset[p]);
+            emit("(%rbp)\n");
+            i = i + 1;
+        }
+        gen_stmt(fn_body[fn]);
+        emit(".L.return.");
+        emit(fn_name[fn]);
+        emit(":\n");
+        emit("  mov %rbp, %rsp\n");
+        emit("  pop %rbp\n");
+        emit("  ret\n");
+        fn = fn_next[fn];
+    }
+    return 0;
+}
+
+int codegen() {
+    emit_data();
+    emit_text();
+    return 0;
+}
+
+int main(int argc, int argv) {
+    int path;
+    if (argc != 2) {
+        error("usage: l8c <file.l8>");
+    }
+    path = *(argv + 8);
+    init_kinds();
+    source = read_file(path);
+    tokenize();
+    tok = 0;
+    parse_program();
+    codegen();
+    return 0;
+}
