@@ -84,7 +84,7 @@ example() {
 
 do_clean() {
   rm -f l8c0 l8c1 l8c2
-  rm -f examples/hello examples/fib examples/logic examples/struct examples/string
+  rm -f examples/hello examples/fib examples/logic examples/struct examples/string examples/i8
   rm -f examples/*.s
   rm -rf "$BUILD"
   echo 'cleaned'
@@ -104,6 +104,7 @@ do_examples() {
   step 'example logic  [l8c0]'  example l8c0 logic  examples/logic.l8  'YYY'
   step 'example struct [l8c0]'  example l8c0 struct examples/struct.l8 '3 12'
   step 'example string [l8c0]'  example l8c0 string examples/string.l8 'Hi'
+  step 'example i8     [l8c0]'  example l8c0 i8     examples/i8.l8     'Hi'
 }
 
 do_selfhost() {
@@ -123,6 +124,7 @@ do_selfhost() {
   step 'example hello  [l8c2]'  example l8c2 hello  examples/hello.l8  'Hi'
   step 'example struct [l8c2]'  example l8c2 struct examples/struct.l8 '3 12'
   step 'example string [l8c2]'  example l8c2 string examples/string.l8 'Hi'
+  step 'example i8     [l8c2]'  example l8c2 i8     examples/i8.l8     'Hi'
 }
 
 do_all() {

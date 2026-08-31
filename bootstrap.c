@@ -3,18 +3,21 @@
  *
  * Language: C-like subset → x86-64 Linux GAS assembly
  *
- *   Types:     int, string, named structs, pointers as `*T`, arrays as `T[N]`
+ *   Types:     int, i8 (byte), named structs, pointers as `*T`, arrays as `T[N]`
  *   Decls:     name-first: `x: int = expr;`, `p: *Point = uninitialized;`
  *              locals require `= expr` or `= uninitialized`
  *   Functions: `name(a: int, b: int): int { ... }`
  *   Control:   if/else, while, return, blocks
  *   Ops:       + - * / %  == != < <= > >=  && ||  =  & ! -  []  .  .*  ()
+ *              `e as T` widen/reinterpret; `e trunc T` narrow (e.g. int→i8)
  *   Other:     sizeof(T), string/char literals, // comments
  *              `p.*` dereferences (Zig-style); `*` is multiply / pointer types only
  *              member access: one operator `.` (auto-derefs pointers)
- *              string literals are length-prefixed (len at -8, data at ptr)
- *   Runtime:   read/write/open/close/exit/malloc/loadb/storeb/syscall/len
- *              len(s) reads the length word at s-8
+ *              string literals have type *i8 (length-prefixed: len at -8, data at ptr)
+ *              no implicit casts; char literals have type i8
+ *   Runtime:   read/write/open/close/exit/malloc/syscall/len
+ *              byte memory via i8 / *i8 and [] / .*
+ *              len(p) reads the length word at p-8 (for length-prefixed *i8)
  *
  * Usage:  ./l8c0 file.l8 > file.s
  * Link:   gcc -nostdlib -static -o prog file.s runtime.s
@@ -51,9 +54,9 @@ static char *read_file(char *path) {
 /* ---------- tokens ---------- */
 
 enum {
-    TK_EOF, TK_NUM, TK_STR, TK_IDENT,
-    TK_INT, TK_IF, TK_ELSE, TK_WHILE, TK_RETURN,
-    TK_STRUCT, TK_SIZEOF, TK_STRING, TK_UNINITIALIZED,
+    TK_EOF, TK_NUM, TK_CHAR, TK_STR, TK_IDENT,
+    TK_INT, TK_I8, TK_IF, TK_ELSE, TK_WHILE, TK_RETURN,
+    TK_STRUCT, TK_SIZEOF, TK_UNINITIALIZED, TK_AS, TK_TRUNC,
     TK_EQ, TK_NE, TK_LE, TK_GE,
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PERCENT,
     TK_LT, TK_GT, TK_ASSIGN, TK_NOT, TK_AMP,
@@ -127,16 +130,18 @@ static Token *tokenize(char *p) {
                 p++;
                 if (*p == 'n') v = '\n';
                 else if (*p == 't') v = '\t';
+                else if (*p == 'r') v = '\r';
                 else if (*p == '0') v = 0;
                 else if (*p == '\\') v = '\\';
                 else if (*p == '\'') v = '\'';
+                else if (*p == '"') v = '"';
                 else v = *p;
                 p++;
             } else {
                 v = *p++;
             }
             if (*p == '\'') p++;
-            cur = cur->next = new_token(TK_NUM, p, 0);
+            cur = cur->next = new_token(TK_CHAR, p, 0);
             cur->val = v;
             continue;
         }
@@ -146,14 +151,16 @@ static Token *tokenize(char *p) {
             int n = p - s;
             int kind = TK_IDENT;
             if (kw_eq(s, n, "int")) kind = TK_INT;
+            else if (kw_eq(s, n, "i8")) kind = TK_I8;
             else if (kw_eq(s, n, "if")) kind = TK_IF;
             else if (kw_eq(s, n, "else")) kind = TK_ELSE;
             else if (kw_eq(s, n, "while")) kind = TK_WHILE;
             else if (kw_eq(s, n, "return")) kind = TK_RETURN;
             else if (kw_eq(s, n, "struct")) kind = TK_STRUCT;
             else if (kw_eq(s, n, "sizeof")) kind = TK_SIZEOF;
-            else if (kw_eq(s, n, "string")) kind = TK_STRING;
             else if (kw_eq(s, n, "uninitialized")) kind = TK_UNINITIALIZED;
+            else if (kw_eq(s, n, "as")) kind = TK_AS;
+            else if (kw_eq(s, n, "trunc")) kind = TK_TRUNC;
             cur = cur->next = new_token(kind, s, n);
             continue;
         }
@@ -217,9 +224,11 @@ static char *unescape(char *s, int n, int *out_len) {
             i++;
             if (s[i] == 'n') buf[j++] = '\n';
             else if (s[i] == 't') buf[j++] = '\t';
+            else if (s[i] == 'r') buf[j++] = '\r';
             else if (s[i] == '0') buf[j++] = 0;
             else if (s[i] == '\\') buf[j++] = '\\';
             else if (s[i] == '"') buf[j++] = '"';
+            else if (s[i] == '\'') buf[j++] = '\'';
             else buf[j++] = s[i];
         } else {
             buf[j++] = s[i];
@@ -250,7 +259,7 @@ struct StructDef {
     StructDef *next;
 };
 
-enum { TY_INT, TY_PTR, TY_ARRAY, TY_STRUCT, TY_STRING };
+enum { TY_INT, TY_I8, TY_PTR, TY_ARRAY, TY_STRUCT };
 
 struct Type {
     int kind;
@@ -262,7 +271,7 @@ struct Type {
 
 static StructDef *struct_defs;
 static Type *ty_int;
-static Type *ty_string;
+static Type *ty_i8;
 
 static Type *newtype(int kind) {
     Type *t = calloc(1, sizeof(Type));
@@ -317,12 +326,12 @@ static int is_type_name(Token *tok) {
     return find_struct(name) != 0;
 }
 
-/* True if tok begins a type: int, string, StructName, or *type */
+/* True if tok begins a type: int, i8, StructName, or *type */
 static int starts_type(Token *tok) {
-    if (equal(tok, TK_INT) || equal(tok, TK_STRING) || is_type_name(tok)) return 1;
+    if (equal(tok, TK_INT) || equal(tok, TK_I8) || is_type_name(tok)) return 1;
     Token *t = tok;
     while (equal(t, TK_STAR)) t = t->next;
-    if (t != tok && (equal(t, TK_INT) || equal(t, TK_STRING) || is_type_name(t))) return 1;
+    if (t != tok && (equal(t, TK_INT) || equal(t, TK_I8) || is_type_name(t))) return 1;
     return 0;
 }
 
@@ -335,7 +344,40 @@ static Member *find_member(StructDef *sd, char *name) {
 static int is_pointer(Type *t) { return t && t->kind == TY_PTR; }
 static int is_array(Type *t) { return t && t->kind == TY_ARRAY; }
 static int is_struct(Type *t) { return t && t->kind == TY_STRUCT; }
-static int is_string(Type *t) { return t && t->kind == TY_STRING; }
+static int is_i8(Type *t) { return t && t->kind == TY_I8; }
+static int is_int_ty(Type *t) { return t && t->kind == TY_INT; }
+static Type *decay(Type *t);
+
+static int types_equal(Type *a, Type *b) {
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    if (a->kind != b->kind) return 0;
+    if (a->kind == TY_PTR) return types_equal(a->base, b->base);
+    if (a->kind == TY_ARRAY) return a->array_len == b->array_len && types_equal(a->base, b->base);
+    if (a->kind == TY_STRUCT) return a->struct_def == b->struct_def;
+    return 1; /* int, i8 */
+}
+
+static int is_word_ty(Type *t) {
+    t = decay(t);
+    return t && t->size == 8;
+}
+
+static void check_as(Type *from, Type *to) {
+    from = decay(from);
+    to = decay(to);
+    if (types_equal(from, to)) return;
+    if (is_i8(from) && is_int_ty(to)) return; /* widen */
+    if (is_word_ty(from) && is_word_ty(to)) return; /* same-size reinterpret */
+    error("invalid as conversion");
+}
+
+static void check_trunc(Type *from, Type *to) {
+    from = decay(from);
+    to = decay(to);
+    if (is_int_ty(from) && is_i8(to)) return;
+    error("invalid trunc conversion (expected int trunc i8)");
+}
 
 static Type *decay(Type *t) {
     if (is_array(t)) return ptr_to(t->base);
@@ -349,7 +391,7 @@ enum {
     ND_EQ, ND_NE, ND_LT, ND_LE, ND_GT, ND_GE,
     ND_ASSIGN, ND_ADDR, ND_DEREF, ND_NOT, ND_NEG,
     ND_FUNCALL, ND_RETURN, ND_IF, ND_WHILE, ND_BLOCK, ND_EXPR_STMT,
-    ND_LOGAND, ND_LOGOR, ND_MEMBER
+    ND_LOGAND, ND_LOGOR, ND_MEMBER, ND_AS, ND_TRUNC
 };
 
 typedef struct Node Node;
@@ -370,6 +412,11 @@ struct Node {
     Member *member;
 };
 
+/* Integer 0 may be used as a null pointer. */
+static int is_null_const(Node *n) {
+    return n && n->kind == ND_NUM && n->val == 0;
+}
+
 struct Obj {
     char *name;
     int is_local;
@@ -386,6 +433,7 @@ struct Function {
     Obj *locals;
     Node *body;
     int stack_size;
+    Type *return_ty;
     Function *next;
 };
 
@@ -461,15 +509,15 @@ static Type *parse_type(Token **rest, Token *tok);
 static Type *parse_type_suffix(Token **rest, Token *tok, Type *ty);
 static Obj *parse_decl(Token **rest, Token *tok, int is_local);
 
-/* Base type only: int, string, or StructName */
+/* Base type only: int, i8, or StructName */
 static Type *decl_spec(Token **rest, Token *tok) {
     if (equal(tok, TK_INT)) {
         *rest = tok->next;
         return ty_int;
     }
-    if (equal(tok, TK_STRING)) {
+    if (equal(tok, TK_I8)) {
         *rest = tok->next;
-        return ty_string;
+        return ty_i8;
     }
     if (equal(tok, TK_IDENT)) {
         char *name = tokstr(tok);
@@ -543,6 +591,12 @@ static Node *primary(Token **rest, Token *tok) {
         *rest = tok->next;
         return n;
     }
+    if (equal(tok, TK_CHAR)) {
+        Node *n = new_num(tok->val);
+        n->ty = ty_i8;
+        *rest = tok->next;
+        return n;
+    }
     if (equal(tok, TK_STR)) {
         int len;
         char *data = unescape(tok->str, tok->len, &len);
@@ -554,7 +608,7 @@ static Node *primary(Token **rest, Token *tok) {
         str_lits = s;
         Node *n = new_node(ND_NUM);
         n->str_label = s->label + 1;
-        n->ty = ty_string;
+        n->ty = ptr_to(ty_i8);
         *rest = tok->next;
         return n;
     }
@@ -564,7 +618,6 @@ static Node *primary(Token **rest, Token *tok) {
         if (equal(t, TK_LPAREN)) {
             Node *n = new_node(ND_FUNCALL);
             n->funcname = name;
-            n->ty = ty_int;
             t = t->next;
             Node head = {0};
             Node *cur = &head;
@@ -595,6 +648,8 @@ static Node *postfix(Token **rest, Token *tok) {
             Node *idx = expr(&tok, tok->next);
             tok = skip(tok, TK_RBRACK);
             add_type(n);
+            add_type(idx);
+            if (!is_int_ty(decay(idx->ty))) error("array index must be int");
             Type *t = decay(n->ty);
             if (!is_pointer(t)) error("subscript of non-pointer");
             int elem = t->base->size;
@@ -632,6 +687,18 @@ static Node *postfix(Token **rest, Token *tok) {
             n = mem;
             continue;
         }
+        if (equal(tok, TK_AS) || equal(tok, TK_TRUNC)) {
+            int is_trunc = equal(tok, TK_TRUNC);
+            tok = tok->next;
+            Type *ty = parse_type(&tok, tok);
+            ty = parse_type_suffix(&tok, tok, ty);
+            add_type(n);
+            if (is_trunc) check_trunc(n->ty, ty);
+            else check_as(n->ty, ty);
+            n = new_unary(is_trunc ? ND_TRUNC : ND_AS, n);
+            n->ty = ty;
+            continue;
+        }
         *rest = tok;
         return n;
     }
@@ -641,7 +708,6 @@ static Node *unary(Token **rest, Token *tok) {
     if (equal(tok, TK_PLUS)) return unary(rest, tok->next);
     if (equal(tok, TK_MINUS)) {
         Node *n = new_unary(ND_NEG, unary(rest, tok->next));
-        n->ty = ty_int;
         return n;
     }
     if (equal(tok, TK_AMP)) {
@@ -650,7 +716,6 @@ static Node *unary(Token **rest, Token *tok) {
     }
     if (equal(tok, TK_NOT)) {
         Node *n = new_unary(ND_NOT, unary(rest, tok->next));
-        n->ty = ty_int;
         return n;
     }
     return postfix(rest, tok);
@@ -676,21 +741,90 @@ static void add_type(Node *n) {
         return;
     case ND_ADD:
     case ND_SUB:
+        add_type(n->lhs);
+        add_type(n->rhs);
+        {
+            Type *lt = decay(n->lhs->ty);
+            Type *rt = decay(n->rhs->ty);
+            if (n->kind == ND_ADD && is_pointer(lt) && is_int_ty(rt)) {
+                n->ty = lt; /* ptr + int */
+                return;
+            }
+            if (n->kind == ND_ADD && is_int_ty(lt) && is_pointer(rt)) {
+                n->ty = rt;
+                return;
+            }
+            if (n->kind == ND_SUB && is_pointer(lt) && is_int_ty(rt)) {
+                n->ty = lt;
+                return;
+            }
+            if (n->kind == ND_SUB && is_pointer(lt) && is_pointer(rt) && types_equal(lt, rt)) {
+                n->ty = ty_int; /* ptr - ptr */
+                return;
+            }
+            if (!is_int_ty(lt) || !is_int_ty(rt))
+                error("arithmetic requires int operands (use as/trunc)");
+            n->ty = ty_int;
+        }
+        return;
     case ND_MUL:
     case ND_DIV:
     case ND_MOD:
+        add_type(n->lhs);
+        add_type(n->rhs);
+        if (!is_int_ty(decay(n->lhs->ty)) || !is_int_ty(decay(n->rhs->ty)))
+            error("arithmetic requires int operands (use as/trunc)");
+        n->ty = ty_int;
+        return;
     case ND_EQ:
     case ND_NE:
     case ND_LT:
     case ND_LE:
     case ND_GT:
     case ND_GE:
+        add_type(n->lhs);
+        add_type(n->rhs);
+        {
+            Type *lt = decay(n->lhs->ty);
+            Type *rt = decay(n->rhs->ty);
+            if (!types_equal(lt, rt)) {
+                if (!((is_pointer(lt) && is_null_const(n->rhs)) ||
+                      (is_pointer(rt) && is_null_const(n->lhs))))
+                    error("comparison type mismatch (use as/trunc)");
+            }
+            n->ty = ty_int;
+        }
+        return;
     case ND_LOGAND:
     case ND_LOGOR:
+        add_type(n->lhs);
+        add_type(n->rhs);
+        n->ty = ty_int;
+        return;
     case ND_NOT:
     case ND_NEG:
-    case ND_ASSIGN:
+        add_type(n->lhs);
+        if (!is_int_ty(decay(n->lhs->ty)))
+            error("unary +/- / ! requires int");
         n->ty = ty_int;
+        return;
+    case ND_ASSIGN:
+        add_type(n->lhs);
+        add_type(n->rhs);
+        {
+            Type *lt = decay(n->lhs->ty);
+            Type *rt = decay(n->rhs->ty);
+            if (is_array(n->lhs->ty)) error("cannot assign to array");
+            if (!types_equal(lt, rt)) {
+                if (!(is_pointer(lt) && is_null_const(n->rhs)))
+                    error("assignment type mismatch (use as/trunc)");
+            }
+            n->ty = n->lhs->ty;
+        }
+        return;
+    case ND_AS:
+    case ND_TRUNC:
+        /* type already set when built */
         return;
     case ND_ADDR:
         add_type(n->lhs);
@@ -705,10 +839,6 @@ static void add_type(Node *n) {
             Type *t = decay(n->lhs->ty);
             if (is_pointer(t))
                 n->ty = t->base;
-            else if (t && t->kind == TY_INT)
-                n->ty = ty_int;
-            else if (is_string(t))
-                n->ty = ty_int; /* opaque byte access via int */
             else
                 error("dereferencing non-pointer");
         }
@@ -717,7 +847,30 @@ static void add_type(Node *n) {
         n->ty = n->member->ty ? n->member->ty : ty_int;
         return;
     case ND_FUNCALL:
-        n->ty = ty_int;
+        {
+            Obj *f = find_obj(globals, n->funcname);
+            if (f && f->is_func && f->ty)
+                n->ty = f->ty;
+            else
+                n->ty = ty_int; /* undeclared/builtin */
+            Function *fn = 0;
+            for (Function *g = functions; g; g = g->next)
+                if (!strcmp(g->name, n->funcname)) { fn = g; break; }
+            if (fn) {
+                int i = 0;
+                for (Node *a = n->args; a; a = a->next, i++) {
+                    if (i >= fn->nparams) break;
+                    Obj *p = fn->params[i];
+                    if (!p || !p->ty) continue;
+                    Type *at = decay(a->ty);
+                    Type *pt = decay(p->ty);
+                    if (!types_equal(at, pt)) {
+                        if (!(is_pointer(pt) && is_null_const(a)))
+                            error("argument type mismatch");
+                    }
+                }
+            }
+        }
         return;
     default:
         return;
@@ -879,7 +1032,7 @@ static Function *parse_function(Token **rest, Token *tok, char *name) {
     }
     tok = tok->next;
     tok = skip(tok, TK_COLON);
-    parse_type(&tok, tok); /* return type currently unused for codegen */
+    fn->return_ty = parse_type(&tok, tok);
     fn->body = compound_stmt(&tok, tok);
     fn->locals = locals;
     *rest = tok;
@@ -934,7 +1087,7 @@ static void parse_program(Token *tok) {
             fn_tail = &fn->next;
             Obj *o = new_obj(name, 0);
             o->is_func = 1;
-            o->ty = ty_int;
+            o->ty = fn->return_ty ? fn->return_ty : ty_int;
         } else {
             tok = skip(tok, TK_COLON);
             Type *ty = parse_type(&tok, tok);
@@ -959,6 +1112,22 @@ static void gen_expr(Node *n);
 static void gen_stmt(Node *n);
 
 static char *argreg[] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
+
+static int is_byte_ty(Type *t) { return t && t->size == 1; }
+
+static void load_mem(Type *ty) {
+    if (is_byte_ty(ty))
+        printf("  movzb (%%rax), %%rax\n");
+    else
+        printf("  mov (%%rax), %%rax\n");
+}
+
+static void store_mem(Type *ty) {
+    if (is_byte_ty(ty))
+        printf("  mov %%al, (%%rdi)\n");
+    else
+        printf("  mov %%rax, (%%rdi)\n");
+}
 
 static void gen_addr(Node *n) {
     add_type(n);
@@ -1001,25 +1170,30 @@ static void gen_expr(Node *n) {
         gen_addr(n);
         if (is_array(n->ty) || is_struct(n->ty))
             return;
-        printf("  mov (%%rax), %%rax\n");
+        load_mem(n->ty);
         return;
     case ND_MEMBER:
         gen_addr(n);
-        printf("  mov (%%rax), %%rax\n");
+        load_mem(n->ty);
         return;
     case ND_ADDR:
         gen_addr(n->lhs);
         return;
+    case ND_AS:
+    case ND_TRUNC:
+        gen_expr(n->lhs);
+        return;
     case ND_DEREF:
         gen_expr(n->lhs);
-        printf("  mov (%%rax), %%rax\n");
+        load_mem(n->ty);
         return;
     case ND_ASSIGN:
+        add_type(n->lhs);
         gen_addr(n->lhs);
         printf("  push %%rax\n");
         gen_expr(n->rhs);
         printf("  pop %%rdi\n");
-        printf("  mov %%rax, (%%rdi)\n");
+        store_mem(n->lhs->ty);
         return;
     case ND_NOT:
         gen_expr(n->lhs);
@@ -1182,6 +1356,8 @@ static void assign_lvar_offsets(Function *fn) {
     for (Obj *v = fn->locals; v; v = v->next) {
         int sz = v->ty->size;
         if (sz <= 0) sz = 8;
+        if (!is_array(v->ty) && sz < 8) sz = 8;
+        else sz = (sz + 7) & ~7;
         off += sz;
         v->offset = -off;
     }
@@ -1248,8 +1424,8 @@ int main(int argc, char **argv) {
     if (argc != 2) error("usage: l8c0 <file.l8>");
     ty_int = newtype(TY_INT);
     ty_int->size = 8;
-    ty_string = newtype(TY_STRING);
-    ty_string->size = 8;
+    ty_i8 = newtype(TY_I8);
+    ty_i8->size = 1;
     source = read_file(argv[1]);
     token = tokenize(source);
     parse_program(token);

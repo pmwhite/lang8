@@ -1,11 +1,9 @@
 # L8 minimal runtime for Linux x86-64
-# Provides: _start, syscall, malloc, loadb, storeb, read, write, open, close, exit
+# Provides: _start, syscall, malloc, read, write, open, close, exit, len
 
 .globl _start
 .globl syscall
 .globl malloc
-.globl loadb
-.globl storeb
 .globl read
 .globl write
 .globl open
@@ -72,19 +70,7 @@ malloc:
     mov $0, %rax
     ret
 
-# int loadb(int addr)
-loadb:
-    movzb (%rdi), %rax
-    ret
-
-# int storeb(int addr, int val)
-storeb:
-    mov %sil, (%rdi)
-    mov $0, %rax
-    ret
-
-
-# long len(string s) — length prefix at s-8
+# long len(*i8 s) — length prefix at s-8 (for length-prefixed literals / strdup)
 len:
     mov -8(%rdi), %rax
     ret
