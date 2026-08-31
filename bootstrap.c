@@ -10,7 +10,9 @@
  *   Control:   if/else, while, return, blocks
  *   Ops:       + - * / %  == != < <= > >=  && ||  =  & ! -  []  .  .*  ()
  *              `e as T` widen/reinterpret; `e trunc T` narrow (e.g. int→i8)
- *   Other:     sizeof(T), string/char literals, // comments
+ *   Other:     sizeof(T), new T uninitialized | new T { f: e, ... },
+ *              string/char literals, // comments
+ *              `new T` allocates and yields *T
  *              `p.*` dereferences (Zig-style); `*` is multiply / pointer types only
  *              member access: one operator `.` (auto-derefs pointers)
  *              string literals have type *i8 (length-prefixed: len at -8, data at ptr)
@@ -56,7 +58,7 @@ static char *read_file(char *path) {
 enum {
     TK_EOF, TK_NUM, TK_CHAR, TK_STR, TK_IDENT,
     TK_INT, TK_I8, TK_IF, TK_ELSE, TK_WHILE, TK_RETURN,
-    TK_STRUCT, TK_SIZEOF, TK_UNINITIALIZED, TK_AS, TK_TRUNC,
+    TK_STRUCT, TK_SIZEOF, TK_UNINITIALIZED, TK_AS, TK_TRUNC, TK_NEW,
     TK_EQ, TK_NE, TK_LE, TK_GE,
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PERCENT,
     TK_LT, TK_GT, TK_ASSIGN, TK_NOT, TK_AMP,
@@ -161,6 +163,7 @@ static Token *tokenize(char *p) {
             else if (kw_eq(s, n, "uninitialized")) kind = TK_UNINITIALIZED;
             else if (kw_eq(s, n, "as")) kind = TK_AS;
             else if (kw_eq(s, n, "trunc")) kind = TK_TRUNC;
+            else if (kw_eq(s, n, "new")) kind = TK_NEW;
             cur = cur->next = new_token(kind, s, n);
             continue;
         }
@@ -391,7 +394,7 @@ enum {
     ND_EQ, ND_NE, ND_LT, ND_LE, ND_GT, ND_GE,
     ND_ASSIGN, ND_ADDR, ND_DEREF, ND_NOT, ND_NEG,
     ND_FUNCALL, ND_RETURN, ND_IF, ND_WHILE, ND_BLOCK, ND_EXPR_STMT,
-    ND_LOGAND, ND_LOGOR, ND_MEMBER, ND_AS, ND_TRUNC
+    ND_LOGAND, ND_LOGOR, ND_MEMBER, ND_AS, ND_TRUNC, ND_NEW
 };
 
 typedef struct Node Node;
@@ -566,6 +569,53 @@ static Obj *parse_decl(Token **rest, Token *tok, int is_local) {
 }
 
 static Node *primary(Token **rest, Token *tok) {
+    if (equal(tok, TK_NEW)) {
+        tok = tok->next;
+        Type *base = parse_type(&tok, tok);
+        base = parse_type_suffix(&tok, tok, base);
+        if (is_pointer(base)) error("new expects a non-pointer type");
+        if (is_array(base)) error("new of array type not supported yet");
+        Node *n = new_node(ND_NEW);
+        n->ty = ptr_to(base);
+        if (equal(tok, TK_UNINITIALIZED)) {
+            n->val = 1; /* uninitialized */
+            *rest = tok->next;
+            return n;
+        }
+        if (!equal(tok, TK_LBRACE)) error("expected uninitialized or { after new Type");
+        if (!is_struct(base)) error("struct literal requires a struct type");
+        tok = tok->next;
+        Node head = {0};
+        Node *cur = &head;
+        int nfields = 0;
+        for (Member *m = base->struct_def->members; m; m = m->next) nfields++;
+        int got = 0;
+        while (!equal(tok, TK_RBRACE)) {
+            if (cur != &head) tok = skip(tok, TK_COMMA);
+            if (!equal(tok, TK_IDENT)) error("expected field name in struct literal");
+            char *fname = tokstr(tok);
+            tok = skip(tok->next, TK_COLON);
+            Member *m = find_member(base->struct_def, fname);
+            if (!m) error("unknown field %s", fname);
+            Node *init = new_node(ND_EXPR_STMT);
+            init->member = m;
+            init->lhs = expr(&tok, tok);
+            add_type(init->lhs);
+            {
+                Type *lt = decay(m->ty);
+                Type *rt = decay(init->lhs->ty);
+                if (!types_equal(lt, rt) && !(is_pointer(lt) && is_null_const(init->lhs)))
+                    error("field initializer type mismatch");
+            }
+            cur = cur->next = init;
+            got++;
+        }
+        if (got != nfields) error("struct literal must initialize all fields");
+        n->args = head.next;
+        n->val = 0;
+        *rest = tok->next;
+        return n;
+    }
     if (equal(tok, TK_SIZEOF)) {
         tok = tok->next;
         tok = skip(tok, TK_LPAREN);
@@ -1201,6 +1251,26 @@ static void gen_expr(Node *n) {
     case ND_TRUNC:
         gen_expr(n->lhs);
         return;
+    case ND_NEW: {
+        Type *base = n->ty->base;
+        printf("  mov $%d, %%rdi\n", base->size > 0 ? base->size : 8);
+        printf("  call malloc\n");
+        if (!n->val) {
+            /* initialized struct literal */
+            printf("  push %%rax\n");
+            for (Node *init = n->args; init; init = init->next) {
+                printf("  mov (%%rsp), %%rax\n");
+                if (init->member->offset)
+                    printf("  add $%d, %%rax\n", init->member->offset);
+                printf("  push %%rax\n");
+                gen_expr(init->lhs);
+                printf("  pop %%rdi\n");
+                store_mem(init->member->ty ? init->member->ty : ty_int);
+            }
+            printf("  pop %%rax\n");
+        }
+        return;
+    }
     case ND_DEREF:
         gen_expr(n->lhs);
         load_mem(n->ty);
