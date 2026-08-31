@@ -20,6 +20,9 @@ test: l8c0
 	./l8c0 examples/fib.l8 > /tmp/fib.s
 	$(CC) -nostdlib -static -o /tmp/fib /tmp/fib.s runtime.s
 	test "$$(/tmp/fib)" = "55"
+	./l8c0 examples/logic.l8 > /tmp/logic.s
+	$(CC) -nostdlib -static -o /tmp/logic /tmp/logic.s runtime.s
+	test "$$(/tmp/logic)" = "YYY"
 	@echo "OK: examples"
 
 # Stage1: bootstrap compiles self-hosted compiler

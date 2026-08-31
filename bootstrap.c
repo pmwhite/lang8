@@ -53,7 +53,8 @@ enum {
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PERCENT,
     TK_LT, TK_GT, TK_ASSIGN, TK_NOT, TK_AMP,
     TK_LPAREN, TK_RPAREN, TK_LBRACE, TK_RBRACE,
-    TK_LBRACK, TK_RBRACK, TK_SEMI, TK_COMMA
+    TK_LBRACK, TK_RBRACK, TK_SEMI, TK_COMMA,
+    TK_AND, TK_OR
 };
 
 typedef struct Token {
@@ -151,6 +152,8 @@ static Token *tokenize(char *p) {
         if (p[0] == '!' && p[1] == '=') { cur = cur->next = new_token(TK_NE, p, 2); p += 2; continue; }
         if (p[0] == '<' && p[1] == '=') { cur = cur->next = new_token(TK_LE, p, 2); p += 2; continue; }
         if (p[0] == '>' && p[1] == '=') { cur = cur->next = new_token(TK_GE, p, 2); p += 2; continue; }
+        if (p[0] == '&' && p[1] == '&') { cur = cur->next = new_token(TK_AND, p, 2); p += 2; continue; }
+        if (p[0] == '|' && p[1] == '|') { cur = cur->next = new_token(TK_OR, p, 2); p += 2; continue; }
 
         int kind;
         switch (*p) {
@@ -223,7 +226,8 @@ enum {
     ND_NUM, ND_VAR, ND_ADD, ND_SUB, ND_MUL, ND_DIV, ND_MOD,
     ND_EQ, ND_NE, ND_LT, ND_LE, ND_GT, ND_GE,
     ND_ASSIGN, ND_ADDR, ND_DEREF, ND_NOT, ND_NEG,
-    ND_FUNCALL, ND_RETURN, ND_IF, ND_WHILE, ND_BLOCK, ND_EXPR_STMT
+    ND_FUNCALL, ND_RETURN, ND_IF, ND_WHILE, ND_BLOCK, ND_EXPR_STMT,
+    ND_LOGAND, ND_LOGOR
 };
 
 typedef struct Node Node;
@@ -447,8 +451,24 @@ static Node *equality(Token **rest, Token *tok) {
     }
 }
 
-static Node *assign(Token **rest, Token *tok) {
+static Node *logand(Token **rest, Token *tok) {
     Node *n = equality(&tok, tok);
+    while (equal(tok, TK_AND))
+        n = new_binary(ND_LOGAND, n, equality(&tok, tok->next));
+    *rest = tok;
+    return n;
+}
+
+static Node *logor(Token **rest, Token *tok) {
+    Node *n = logand(&tok, tok);
+    while (equal(tok, TK_OR))
+        n = new_binary(ND_LOGOR, n, logand(&tok, tok->next));
+    *rest = tok;
+    return n;
+}
+
+static Node *assign(Token **rest, Token *tok) {
+    Node *n = logor(&tok, tok);
     if (equal(tok, TK_ASSIGN))
         return new_binary(ND_ASSIGN, n, assign(rest, tok->next));
     *rest = tok;
@@ -649,6 +669,37 @@ static void gen_expr(Node *n) {
         gen_expr(n->lhs);
         printf("  neg %%rax\n");
         return;
+    case ND_LOGAND: {
+        int l = new_label();
+        gen_expr(n->lhs);
+        printf("  cmp $0, %%rax\n");
+        printf("  je .L.false%d\n", l);
+        gen_expr(n->rhs);
+        printf("  cmp $0, %%rax\n");
+        printf("  je .L.false%d\n", l);
+        printf("  mov $1, %%rax\n");
+        printf("  jmp .L.end%d\n", l);
+        printf(".L.false%d:\n", l);
+        printf("  mov $0, %%rax\n");
+        printf(".L.end%d:\n", l);
+        return;
+    }
+    case ND_LOGOR: {
+        int l = new_label();
+        gen_expr(n->lhs);
+        printf("  cmp $0, %%rax\n");
+        printf("  jne .L.true%d\n", l);
+        gen_expr(n->rhs);
+        printf("  cmp $0, %%rax\n");
+        printf("  je .L.false%d\n", l);
+        printf(".L.true%d:\n", l);
+        printf("  mov $1, %%rax\n");
+        printf("  jmp .L.end%d\n", l);
+        printf(".L.false%d:\n", l);
+        printf("  mov $0, %%rax\n");
+        printf(".L.end%d:\n", l);
+        return;
+    }
     case ND_FUNCALL: {
         int nargs = 0;
         for (Node *a = n->args; a; a = a->next) nargs++;
