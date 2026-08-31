@@ -282,6 +282,7 @@ struct Variant {
     char *name;
     int tag;
     Member *fields;
+    Type *payload_ty; /* nominal record type for the payload; null if unit */
     int payload_size;
     Variant *next;
 };
@@ -381,6 +382,22 @@ static Variant *find_variant(EnumDef *ed, char *name) {
     for (Variant *v = ed->variants; v; v = v->next)
         if (!strcmp(v->name, name)) return v;
     return 0;
+}
+
+/* Field offset within an enum value (tag word at 0). */
+static int enum_field_offset(Member *m) {
+    return 8 + m->offset;
+}
+
+static char *variant_payload_name(char *enum_name, char *var_name) {
+    int n1 = strlen(enum_name);
+    int n2 = strlen(var_name);
+    char *s = malloc(n1 + 1 + n2 + 1);
+    memcpy(s, enum_name, n1);
+    s[n1] = '.';
+    memcpy(s + n1 + 1, var_name, n2);
+    s[n1 + 1 + n2] = 0;
+    return s;
 }
 
 static int is_type_name(Token *tok) {
@@ -1254,8 +1271,17 @@ static Node *stmt(Token **rest, Token *tok) {
             tok = tok->next;
             Node *arm = new_node(ND_MATCH_ARM);
             arm->ty = et;
-            /* Optional bindings: Name { a, b } -> { ... }  or  Name -> { ... } */
-            if (equal(tok, TK_LBRACE)) {
+            /* Optional: Name(x) -> whole payload, Name { a, b } -> fields, Name -> unit */
+            if (equal(tok, TK_LPAREN)) {
+                tok = tok->next;
+                if (!equal(tok, TK_IDENT)) error("expected payload binding name");
+                Node *b = new_node(ND_VAR);
+                b->funcname = tokstr(tok);
+                tok = tok->next;
+                tok = skip(tok, TK_RPAREN);
+                arm->args = b;
+                arm->val = 1; /* whole-payload bind */
+            } else if (equal(tok, TK_LBRACE)) {
                 tok = tok->next;
                 Node bhead = {0};
                 Node *bcur = &bhead;
@@ -1276,8 +1302,17 @@ static Node *stmt(Token **rest, Token *tok) {
             for (Node *a = arms.next; a; a = a->next)
                 if (a->variant == v) error("duplicate match arm for %s", vname);
             arm->variant = v;
-            if (v->fields) {
-                if (!arm->args) error("payload variant requires field bindings before ->");
+            if (arm->val) {
+                /* whole payload: Variant(name) */
+                if (!v->payload_ty) error("unit variant cannot bind a payload");
+                if (arm->args->next) error("whole-payload bind takes one name");
+                Obj *obj = new_obj(arm->args->funcname, 1);
+                obj->ty = v->payload_ty;
+                arm->args->var = obj;
+                arm->args->ty = v->payload_ty;
+                arm->args->member = 0;
+            } else if (v->fields) {
+                if (!arm->args) error("payload variant requires Name(x) or Name { fields } before ->");
                 for (Node *b = arm->args; b; b = b->next) {
                     Member *m = 0;
                     for (Member *x = v->fields; x; x = x->next)
@@ -1298,7 +1333,7 @@ static Node *stmt(Token **rest, Token *tok) {
                     if (!found) error("match arm missing binding for %s", m->name);
                 }
             } else if (arm->args) {
-                error("unit variant takes no field bindings");
+                error("unit variant takes no bindings");
             }
             arm->body = compound_stmt(&tok, tok);
             acur = acur->next = arm;
@@ -1399,7 +1434,7 @@ static Member *parse_field_list(Token **rest, Token *tok, int base_offset, int *
     return head.next;
 }
 
-static Variant *parse_variant(Token **rest, Token *tok, int tag) {
+static Variant *parse_variant(Token **rest, Token *tok, int tag, char *enum_name) {
     if (!equal(tok, TK_IDENT)) error("expected variant name");
     Variant *v = calloc(1, sizeof(Variant));
     v->name = tokstr(tok);
@@ -1407,8 +1442,13 @@ static Variant *parse_variant(Token **rest, Token *tok, int tag) {
     tok = tok->next;
     if (equal(tok, TK_LBRACE)) {
         int psz = 0;
-        v->fields = parse_field_list(&tok, tok->next, 8, &psz);
+        v->fields = parse_field_list(&tok, tok->next, 0, &psz);
         v->payload_size = psz;
+        StructDef *sd = calloc(1, sizeof(StructDef));
+        sd->name = variant_payload_name(enum_name, v->name);
+        sd->members = v->fields;
+        sd->size = psz;
+        v->payload_ty = struct_type(sd);
     }
     *rest = tok;
     return v;
@@ -1442,7 +1482,7 @@ static void parse_type_def(Token **rest, Token *tok) {
     int tag = 0;
     int max_payload = 0;
     for (;;) {
-        Variant *v = parse_variant(&tok, tok, tag);
+        Variant *v = parse_variant(&tok, tok, tag, name);
         for (Variant *x = head.next; x; x = x->next)
             if (!strcmp(x->name, v->name)) error("duplicate variant %s", v->name);
         if (v->payload_size > max_payload) max_payload = v->payload_size;
@@ -1622,8 +1662,7 @@ static void gen_expr(Node *n) {
         for (Node *init = n->args; init; init = init->next) {
             if (!init->lhs) continue;
             printf("  mov (%%rsp), %%rax\n");
-            if (init->member->offset)
-                printf("  add $%d, %%rax\n", init->member->offset);
+            printf("  add $%d, %%rax\n", enum_field_offset(init->member));
             printf("  push %%rax\n");
             gen_expr(init->lhs);
             printf("  pop %%rdi\n");
@@ -1662,8 +1701,7 @@ static void gen_expr(Node *n) {
             for (Node *init = n->rhs->args; init; init = init->next) {
                 if (!init->lhs) continue;
                 printf("  mov (%%rsp), %%rax\n");
-                if (init->member->offset)
-                    printf("  add $%d, %%rax\n", init->member->offset);
+                printf("  add $%d, %%rax\n", enum_field_offset(init->member));
                 printf("  push %%rax\n");
                 gen_expr(init->lhs);
                 printf("  pop %%rdi\n");
@@ -1857,13 +1895,24 @@ static void gen_stmt(Node *n) {
             printf("  mov (%%rsp), %%rax\n");
             printf("  cmp $%d, %%rax\n", arm->variant->tag);
             printf("  jne .L.arm%d\n", la);
-            /* bind payload fields from enum at 8(%rsp) after two pushes: tag at 0(%rsp), addr at 8(%rsp) */
+            /* bind payload: whole record or individual fields */
             for (Node *b = arm->args; b; b = b->next) {
-                printf("  mov 8(%%rsp), %%rax\n");
-                if (b->member->offset)
-                    printf("  add $%d, %%rax\n", b->member->offset);
-                load_mem(b->member->ty ? b->member->ty : ty_int);
-                printf("  mov %%rax, %d(%%rbp)\n", b->var->offset);
+                if (!b->member) {
+                    /* whole payload copy into local */
+                    int psz = arm->variant->payload_size;
+                    printf("  mov 8(%%rsp), %%rsi\n");
+                    printf("  add $8, %%rsi\n");
+                    printf("  lea %d(%%rbp), %%rdi\n", b->var->offset);
+                    for (int i = 0; i < psz; i++) {
+                        printf("  movzb %d(%%rsi), %%rax\n", i);
+                        printf("  mov %%al, %d(%%rdi)\n", i);
+                    }
+                } else {
+                    printf("  mov 8(%%rsp), %%rax\n");
+                    printf("  add $%d, %%rax\n", enum_field_offset(b->member));
+                    load_mem(b->member->ty ? b->member->ty : ty_int);
+                    printf("  mov %%rax, %d(%%rbp)\n", b->var->offset);
+                }
             }
             gen_stmt(arm->body);
             printf("  jmp .L.matchend%d\n", l);

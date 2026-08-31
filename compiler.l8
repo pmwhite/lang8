@@ -19,6 +19,7 @@ type Variant = {
     name: *i8;
     tag: int;
     fields: *Member;
+    payload_ty: *Type;
     payload_size: int;
     next: *Variant;
 };
@@ -436,6 +437,33 @@ find_variant(ed: *EnumDef, name: *i8): *Variant {
         v = v.next;
     }
     return 0;
+}
+
+enum_field_offset(m: *Member): int {
+    return 8 + m.offset;
+}
+
+variant_payload_name(enum_name: *i8, var_name: *i8): *i8 {
+    n: int = len(enum_name) + 1 + len(var_name);
+    p: *int = malloc(n + 16) as *int;
+    p.* = n;
+    data: *i8 = (p as *i8) + 8;
+    i: int = 0;
+    j: int = 0;
+    while (i < len(enum_name)) {
+        data[j] = enum_name[i];
+        j = j + 1;
+        i = i + 1;
+    }
+    data[j] = '.';
+    j = j + 1;
+    i = 0;
+    while (i < len(var_name)) {
+        data[j] = var_name[i];
+        j = j + 1;
+        i = i + 1;
+    }
+    return data;
 }
 
 is_type_name(): bool {
@@ -1872,30 +1900,43 @@ parse_stmt(): *Node {
             arm: *Node = new_node(ND_MATCH_ARM);
             arm.ty = et;
             b: *Node = 0;
-            if (equal(TK_LBRACE)) {
+            if (equal(TK_LPAREN)) {
                 tok = tok.next;
-                bhead: *Node = 0;
-                bcur: *Node = 0;
-                while (!equal(TK_RBRACE)) {
-                    if (bcur != 0) {
-                        skip(TK_COMMA);
-                    }
-                    if (!equal(TK_IDENT)) {
-                        error("expected field binding");
-                    }
-                    b = new_node(ND_VAR);
-                    b.funcname = cur_tokstr();
-                    tok = tok.next;
-                    if (bcur == 0) {
-                        bhead = b;
-                        bcur = b;
-                    } else {
-                        bcur.next = b;
-                        bcur = b;
-                    }
+                if (!equal(TK_IDENT)) {
+                    error("expected payload binding name");
                 }
+                b = new_node(ND_VAR);
+                b.funcname = cur_tokstr();
                 tok = tok.next;
-                arm.args = bhead;
+                skip(TK_RPAREN);
+                arm.args = b;
+                arm.val = 1;
+            } else {
+                if (equal(TK_LBRACE)) {
+                    tok = tok.next;
+                    bhead: *Node = 0;
+                    bcur: *Node = 0;
+                    while (!equal(TK_RBRACE)) {
+                        if (bcur != 0) {
+                            skip(TK_COMMA);
+                        }
+                        if (!equal(TK_IDENT)) {
+                            error("expected field binding");
+                        }
+                        b = new_node(ND_VAR);
+                        b.funcname = cur_tokstr();
+                        tok = tok.next;
+                        if (bcur == 0) {
+                            bhead = b;
+                            bcur = b;
+                        } else {
+                            bcur.next = b;
+                            bcur = b;
+                        }
+                    }
+                    tok = tok.next;
+                    arm.args = bhead;
+                }
             }
             skip(TK_ARROW);
             v: *Variant = find_variant(et.enum_def, vname);
@@ -1910,55 +1951,66 @@ parse_stmt(): *Node {
                 a = a.next;
             }
             arm.variant = v;
-            if (v.fields != 0) {
-                if (arm.args == 0) {
-                    error("payload variant requires field bindings before ->");
+            if (arm.val != 0) {
+                if (v.payload_ty == 0) {
+                    error("unit variant cannot bind a payload");
                 }
-                b = arm.args;
-                while (b != 0) {
-                    m: *Member = 0;
-                    x: *Member = v.fields;
-                    while (x != 0) {
-                        if (streq(x.name, b.funcname)) {
-                            m = x;
-                        }
-                        x = x.next;
+                po: *Obj = new_obj(arm.args.funcname, 1);
+                po.ty = v.payload_ty;
+                arm.args.var = po;
+                arm.args.ty = v.payload_ty;
+                arm.args.member = 0;
+            } else {
+                if (v.fields != 0) {
+                    if (arm.args == 0) {
+                        error("payload variant requires Name(x) or Name { fields } before ->");
                     }
-                    if (m == 0) {
-                        error("unknown field in variant");
-                    }
-                    o2: *Node = arm.args;
-                    while (o2 != b) {
-                        if (o2.member == m) {
-                            error("duplicate binding");
-                        }
-                        o2 = o2.next;
-                    }
-                    o: *Obj = new_obj(b.funcname, 1);
-                    o.ty = m.ty;
-                    b.var = o;
-                    b.member = m;
-                    b.ty = m.ty;
-                    b = b.next;
-                }
-                m2: *Member = v.fields;
-                while (m2 != 0) {
-                    found: int = 0;
                     b = arm.args;
                     while (b != 0) {
-                        if (b.member == m2) {
-                            found = 1;
+                        m: *Member = 0;
+                        x: *Member = v.fields;
+                        while (x != 0) {
+                            if (streq(x.name, b.funcname)) {
+                                m = x;
+                            }
+                            x = x.next;
                         }
+                        if (m == 0) {
+                            error("unknown field in variant");
+                        }
+                        o2: *Node = arm.args;
+                        while (o2 != b) {
+                            if (o2.member == m) {
+                                error("duplicate binding");
+                            }
+                            o2 = o2.next;
+                        }
+                        fo: *Obj = new_obj(b.funcname, 1);
+                        fo.ty = m.ty;
+                        b.var = fo;
+                        b.member = m;
+                        b.ty = m.ty;
                         b = b.next;
                     }
-                    if (found == 0) {
-                        error("match arm missing binding");
+                    m2: *Member = v.fields;
+                    while (m2 != 0) {
+                        found: int = 0;
+                        b = arm.args;
+                        while (b != 0) {
+                            if (b.member == m2) {
+                                found = 1;
+                            }
+                            b = b.next;
+                        }
+                        if (found == 0) {
+                            error("match arm missing binding");
+                        }
+                        m2 = m2.next;
                     }
-                    m2 = m2.next;
-                }
-            } else {
-                if (arm.args != 0) {
-                    error("unit variant takes no field bindings");
+                } else {
+                    if (arm.args != 0) {
+                        error("unit variant takes no bindings");
+                    }
                 }
             }
             arm.body = parse_compound();
@@ -2112,7 +2164,7 @@ parse_field_list(base_offset: int): *Member {
     return head;
 }
 
-parse_variant(tag: int): *Variant {
+parse_variant(tag: int, enum_name: *i8): *Variant {
     if (!equal(TK_IDENT)) {
         error("expected variant name");
     }
@@ -2120,14 +2172,22 @@ parse_variant(tag: int): *Variant {
         name: cur_tokstr(),
         tag: tag,
         fields: 0,
+        payload_ty: 0,
         payload_size: 0,
         next: 0
     };
     tok = tok.next;
     if (equal(TK_LBRACE)) {
         tok = tok.next;
-        v.fields = parse_field_list(8);
+        v.fields = parse_field_list(0);
         v.payload_size = field_list_size;
+        sd: *StructDef = new StructDef {
+            name: variant_payload_name(enum_name, v.name),
+            members: v.fields,
+            size: field_list_size,
+            next: 0
+        };
+        v.payload_ty = struct_type(sd);
     }
     return v;
 }
@@ -2170,7 +2230,7 @@ parse_type_def() {
     max_payload: int = 0;
     done: int = 0;
     while (done == 0) {
-        v: *Variant = parse_variant(tag);
+        v: *Variant = parse_variant(tag, name);
         x: *Variant = head;
         while (x != 0) {
             if (streq(x.name, v.name)) {
@@ -2278,6 +2338,27 @@ gen_struct_inits(inits: *Node) {
                 emit_num(init.member.offset);
                 emit(", %rax\n");
             }
+            emit("  push %rax\n");
+            gen_expr(init.lhs);
+            emit("  pop %rdi\n");
+            mty: *Type = ty_int;
+            if (init.member.ty != 0) {
+                mty = init.member.ty;
+            }
+            store_mem(mty);
+        }
+        init = init.next;
+    }
+}
+
+gen_variant_inits(inits: *Node) {
+    init: *Node = inits;
+    while (init != 0) {
+        if (init.lhs != 0) {
+            emit("  mov (%rsp), %rax\n");
+            emit("  add $");
+            emit_num(enum_field_offset(init.member));
+            emit(", %rax\n");
             emit("  push %rax\n");
             gen_expr(init.lhs);
             emit("  pop %rdi\n");
@@ -2410,7 +2491,7 @@ gen_expr(n: *Node) {
         emit_num(n.val);
         emit(", %rdi\n");
         emit("  mov %rdi, (%rax)\n");
-        gen_struct_inits(n.args);
+        gen_variant_inits(n.args);
         emit("  pop %rax\n");
         return;
     }
@@ -2435,7 +2516,7 @@ gen_expr(n: *Node) {
             emit_num(n.rhs.val);
             emit(", %rdi\n");
             emit("  mov %rdi, (%rax)\n");
-            gen_struct_inits(n.rhs.args);
+            gen_variant_inits(n.rhs.args);
             emit("  pop %rax\n");
             return;
         }
@@ -2647,20 +2728,37 @@ gen_stmt(n: *Node) {
             emit("\n");
             b: *Node = arm.args;
             while (b != 0) {
-                emit("  mov 8(%rsp), %rax\n");
-                if (b.member.offset != 0) {
+                if (b.member == 0) {
+                    psz: int = arm.variant.payload_size;
+                    emit("  mov 8(%rsp), %rsi\n");
+                    emit("  add $8, %rsi\n");
+                    emit("  lea ");
+                    emit_num(b.var.offset);
+                    emit("(%rbp), %rdi\n");
+                    i: int = 0;
+                    while (i < psz) {
+                        emit("  movzb ");
+                        emit_num(i);
+                        emit("(%rsi), %rax\n");
+                        emit("  mov %al, ");
+                        emit_num(i);
+                        emit("(%rdi)\n");
+                        i = i + 1;
+                    }
+                } else {
+                    emit("  mov 8(%rsp), %rax\n");
                     emit("  add $");
-                    emit_num(b.member.offset);
+                    emit_num(enum_field_offset(b.member));
                     emit(", %rax\n");
+                    bty: *Type = ty_int;
+                    if (b.member.ty != 0) {
+                        bty = b.member.ty;
+                    }
+                    load_mem(bty);
+                    emit("  mov %rax, ");
+                    emit_num(b.var.offset);
+                    emit("(%rbp)\n");
                 }
-                bty: *Type = ty_int;
-                if (b.member.ty != 0) {
-                    bty = b.member.ty;
-                }
-                load_mem(bty);
-                emit("  mov %rax, ");
-                emit_num(b.var.offset);
-                emit("(%rbp)\n");
                 b = b.next;
             }
             gen_stmt(arm.body);
