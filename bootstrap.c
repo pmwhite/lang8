@@ -3,13 +3,14 @@
  *
  * Language: C-like subset → x86-64 Linux GAS assembly
  *
- *   Types:     int, i8 (byte), named structs, pointers as `*T`, arrays as `T[N]`
+ *   Types:     int, i8 (byte), bool, named structs, pointers as `*T`, arrays as `T[N]`
  *   Decls:     name-first: `x: int = expr;`, `p: *Point = uninitialized;`
  *              locals require `= expr` or `= uninitialized`
  *   Functions: `name(a: int, b: int): int { ... }` or `name(a: int) { ... }` (no return)
- *   Control:   if/else, while, return, blocks
+ *   Control:   if/else, while (conditions must be bool), return, blocks
  *   Ops:       + - * / %  == != < <= > >=  && ||  =  & ! -  []  .  .*  ()
- *              `e as T` widen/reinterpret; `e trunc T` narrow (e.g. int→i8)
+ *              `e as T` widen/reinterpret; `e trunc T` narrow (e.g. int→i8/bool)
+ *              bool literals: true, false (values 1 and 0); no implicit numeric casts
  *   Other:     sizeof(T), new T uninitialized | new T { f: e, ... },
  *              string/char literals, // comments
  *              `new T` allocates and yields *T
@@ -58,7 +59,8 @@ static char *read_file(char *path) {
 
 enum {
     TK_EOF, TK_NUM, TK_CHAR, TK_STR, TK_IDENT,
-    TK_INT, TK_I8, TK_IF, TK_ELSE, TK_WHILE, TK_RETURN,
+    TK_INT, TK_I8, TK_BOOL, TK_TRUE, TK_FALSE,
+    TK_IF, TK_ELSE, TK_WHILE, TK_RETURN,
     TK_STRUCT, TK_SIZEOF, TK_UNINITIALIZED, TK_AS, TK_TRUNC, TK_NEW,
     TK_EQ, TK_NE, TK_LE, TK_GE,
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PERCENT,
@@ -155,6 +157,9 @@ static Token *tokenize(char *p) {
             int kind = TK_IDENT;
             if (kw_eq(s, n, "int")) kind = TK_INT;
             else if (kw_eq(s, n, "i8")) kind = TK_I8;
+            else if (kw_eq(s, n, "bool")) kind = TK_BOOL;
+            else if (kw_eq(s, n, "true")) kind = TK_TRUE;
+            else if (kw_eq(s, n, "false")) kind = TK_FALSE;
             else if (kw_eq(s, n, "if")) kind = TK_IF;
             else if (kw_eq(s, n, "else")) kind = TK_ELSE;
             else if (kw_eq(s, n, "while")) kind = TK_WHILE;
@@ -263,7 +268,7 @@ struct StructDef {
     StructDef *next;
 };
 
-enum { TY_INT, TY_I8, TY_PTR, TY_ARRAY, TY_STRUCT };
+enum { TY_INT, TY_I8, TY_PTR, TY_ARRAY, TY_STRUCT, TY_BOOL };
 
 struct Type {
     int kind;
@@ -276,6 +281,7 @@ struct Type {
 static StructDef *struct_defs;
 static Type *ty_int;
 static Type *ty_i8;
+static Type *ty_bool;
 
 static Type *newtype(int kind) {
     Type *t = calloc(1, sizeof(Type));
@@ -332,10 +338,10 @@ static int is_type_name(Token *tok) {
 
 /* True if tok begins a type: int, i8, StructName, or *type */
 static int starts_type(Token *tok) {
-    if (equal(tok, TK_INT) || equal(tok, TK_I8) || is_type_name(tok)) return 1;
+    if (equal(tok, TK_INT) || equal(tok, TK_I8) || equal(tok, TK_BOOL) || is_type_name(tok)) return 1;
     Token *t = tok;
     while (equal(t, TK_STAR)) t = t->next;
-    if (t != tok && (equal(t, TK_INT) || equal(t, TK_I8) || is_type_name(t))) return 1;
+    if (t != tok && (equal(t, TK_INT) || equal(t, TK_I8) || equal(t, TK_BOOL) || is_type_name(t))) return 1;
     return 0;
 }
 
@@ -350,6 +356,7 @@ static int is_array(Type *t) { return t && t->kind == TY_ARRAY; }
 static int is_struct(Type *t) { return t && t->kind == TY_STRUCT; }
 static int is_i8(Type *t) { return t && t->kind == TY_I8; }
 static int is_int_ty(Type *t) { return t && t->kind == TY_INT; }
+static int is_bool_ty(Type *t) { return t && t->kind == TY_BOOL; }
 static Type *decay(Type *t);
 
 static int types_equal(Type *a, Type *b) {
@@ -359,7 +366,7 @@ static int types_equal(Type *a, Type *b) {
     if (a->kind == TY_PTR) return types_equal(a->base, b->base);
     if (a->kind == TY_ARRAY) return a->array_len == b->array_len && types_equal(a->base, b->base);
     if (a->kind == TY_STRUCT) return a->struct_def == b->struct_def;
-    return 1; /* int, i8 */
+    return 1; /* int, i8, bool */
 }
 
 static int is_word_ty(Type *t) {
@@ -367,20 +374,26 @@ static int is_word_ty(Type *t) {
     return t && t->size == 8;
 }
 
+static int is_byte_sized(Type *t) {
+    t = decay(t);
+    return t && t->size == 1;
+}
+
 static void check_as(Type *from, Type *to) {
     from = decay(from);
     to = decay(to);
     if (types_equal(from, to)) return;
-    if (is_i8(from) && is_int_ty(to)) return; /* widen */
+    if ((is_i8(from) || is_bool_ty(from)) && is_int_ty(to)) return; /* widen */
     if (is_word_ty(from) && is_word_ty(to)) return; /* same-size reinterpret */
+    if (is_byte_sized(from) && is_byte_sized(to)) return; /* i8 ↔ bool */
     error("invalid as conversion");
 }
 
 static void check_trunc(Type *from, Type *to) {
     from = decay(from);
     to = decay(to);
-    if (is_int_ty(from) && is_i8(to)) return;
-    error("invalid trunc conversion (expected int trunc i8)");
+    if (is_int_ty(from) && (is_i8(to) || is_bool_ty(to))) return;
+    error("invalid trunc conversion (expected int trunc i8/bool)");
 }
 
 static Type *decay(Type *t) {
@@ -524,6 +537,10 @@ static Type *decl_spec(Token **rest, Token *tok) {
         *rest = tok->next;
         return ty_i8;
     }
+    if (equal(tok, TK_BOOL)) {
+        *rest = tok->next;
+        return ty_bool;
+    }
     if (equal(tok, TK_IDENT)) {
         char *name = tokstr(tok);
         StructDef *sd = get_or_create_struct(name);
@@ -653,6 +670,12 @@ static Node *primary(Token **rest, Token *tok) {
     }
     if (equal(tok, TK_NUM)) {
         Node *n = new_num(tok->val);
+        *rest = tok->next;
+        return n;
+    }
+    if (equal(tok, TK_TRUE) || equal(tok, TK_FALSE)) {
+        Node *n = new_num(equal(tok, TK_TRUE) ? 1 : 0);
+        n->ty = ty_bool;
         *rest = tok->next;
         return n;
     }
@@ -866,20 +889,27 @@ static void add_type(Node *n) {
                       (is_pointer(rt) && is_null_const(n->lhs))))
                     error("comparison type mismatch (use as/trunc)");
             }
-            n->ty = ty_int;
+            n->ty = ty_bool;
         }
         return;
     case ND_LOGAND:
     case ND_LOGOR:
         add_type(n->lhs);
         add_type(n->rhs);
-        n->ty = ty_int;
+        if (!is_bool_ty(decay(n->lhs->ty)) || !is_bool_ty(decay(n->rhs->ty)))
+            error("&& / || require bool operands");
+        n->ty = ty_bool;
         return;
     case ND_NOT:
+        add_type(n->lhs);
+        if (!is_bool_ty(decay(n->lhs->ty)))
+            error("! requires bool");
+        n->ty = ty_bool;
+        return;
     case ND_NEG:
         add_type(n->lhs);
         if (!is_int_ty(decay(n->lhs->ty)))
-            error("unary +/- / ! requires int");
+            error("unary - requires int");
         n->ty = ty_int;
         return;
     case ND_ASSIGN:
@@ -959,6 +989,11 @@ static void add_type(Node *n) {
         } else if (current_return_ty) {
             error("return missing a value");
         }
+        return;
+    case ND_IF:
+    case ND_WHILE:
+        if (!n->cond || !is_bool_ty(decay(n->cond->ty)))
+            error("condition must be bool");
         return;
     default:
         return;
@@ -1585,6 +1620,8 @@ int main(int argc, char **argv) {
     ty_int->size = 8;
     ty_i8 = newtype(TY_I8);
     ty_i8->size = 1;
+    ty_bool = newtype(TY_BOOL);
+    ty_bool->size = 1;
     source = read_file(argv[1]);
     token = tokenize(source);
     parse_program(token);
