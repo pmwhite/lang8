@@ -11,7 +11,9 @@
  *   Control:   if/else, while, return, blocks
  *              conditions must be bool
  *   Ops:       + - * / %  == != < <= > >=  && ||  =  & ! -  []  .  .*  ()
- *              `e as T` widen/reinterpret; `e trunc T` narrow (e.g. int→i8/bool)
+ *              `e as T` numeric widen (i8/bool→int, i8↔bool), `?*T as *T` unwrap,
+ *              or `*A as *B` pointer reinterpret; never int↔pointer/aggregate
+ *              `e trunc T` narrow (int→i8/bool)
  *              bool literals: true, false (values 1 and 0); no implicit numeric casts
  *              null pointer literal: `null` (only for `?*T`); compare with == / != only
  *              `*T` coerces to `?*T`; `.` / `.*` require non-null `*T`
@@ -24,12 +26,14 @@
  *              bindings (locals, match arms) are block-scoped
  *              loops: `while (s != null) { ...; s = s.next; }`
  *   Other:     sizeof(T), new T uninitialized | new T { f: e, ... },
+ *              new E.V | new E.V { ... }, new T[n] (heap array → *T),
  *              string/char literals, // comments
  *              `new T` allocates sizeof(T) bytes and yields *T
  *              `new T uninitialized` leaves memory unread
  *              `new T { f: e, ... }` allocates and initializes a record
  *              `new E.V` / `new E.V { f: e, ... }` allocates and initializes a sum value
  *              (prefer this over `p: *E = new E uninitialized; p.* = E.V { ... }`)
+ *              `new T[n]` allocates n·sizeof(T) bytes, yields *T (uninitialized)
  *              `type T = { f: T; ... };` introduces a nominal record type
  *              `type T = A | B { f: T; };` or `type T = | A | B { f: T; };`
  *              introduces a nominal sum/enum type (leading `|` optional)
@@ -44,7 +48,8 @@
  *              member access: one operator `.` (auto-derefs pointers)
  *              string literals have type *i8 (length-prefixed: len at -8, data at ptr)
  *              no implicit casts; char literals have type i8
- *   Runtime:   read/write/open/close/exit/malloc/syscall/len
+ *   Runtime:   read/write/open/close/exit/syscall/len
+ *              (heap via `new`; libc malloc is only used by codegen)
  *              byte memory via i8 / *i8 and [] / .*
  *              len(p) reads the length word at p-8 (for length-prefixed *i8)
  *
@@ -552,25 +557,32 @@ static int types_compatible(Type *from, Type *to) {
     return 0;
 }
 
-static int is_word_ty(Type *t) {
-    t = decay(t);
-    return t && type_size(t) == 8;
-}
-
 static int is_byte_sized(Type *t) {
     t = decay(t);
     return t && type_size(t) == 1;
+}
+
+static int is_numeric_ty(Type *t) {
+    t = decay(t);
+    return is_int_ty(t) || is_i8(t) || is_bool_ty(t);
 }
 
 static void check_as(Type *from, Type *to) {
     from = decay(from);
     to = decay(to);
     if (types_equal(from, to)) return;
-    if ((is_i8(from) || is_bool_ty(from)) && is_int_ty(to)) return; /* widen */
+    /* Numeric: widen i8/bool→int, or i8↔bool. Narrowing int→i8/bool uses trunc. */
+    if (is_numeric_ty(from) && is_numeric_ty(to)) {
+        if ((is_i8(from) || is_bool_ty(from)) && is_int_ty(to)) return;
+        if (is_byte_sized(from) && is_byte_sized(to)) return;
+        error("invalid as conversion (use trunc to narrow int→i8/bool)");
+    }
+    /* Explicit optional unwrap */
     if (is_opt_pointer(from) && is_pointer(to) && types_equal(from->base, to->base))
-        return; /* explicit ?*T as *T unwrap */
-    if (is_word_ty(from) && is_word_ty(to)) return; /* same-size reinterpret */
-    if (is_byte_sized(from) && is_byte_sized(to)) return; /* i8 ↔ bool */
+        return;
+    /* Pointer reinterpret (*A as *B), e.g. allocator length headers */
+    if (is_pointer(from) && is_pointer(to))
+        return;
     error("invalid as conversion");
 }
 
@@ -1011,9 +1023,23 @@ static Node *primary(Token **rest, Token *tok) {
             return n;
         }
         Type *base = parse_type(&tok, tok);
-        base = parse_type_suffix(&tok, tok, base);
+        /* new T[count] — runtime-sized heap array, type *T */
+        if (equal(tok, TK_LBRACK)) {
+            tok = tok->next;
+            Node *len = expr(&tok, tok);
+            tok = skip(tok, TK_RBRACK);
+            add_type(len);
+            if (!is_int_ty(decay(len->ty))) error("array length must be int");
+            if (is_pointer(base) || is_opt_pointer(base))
+                error("new expects a non-pointer type");
+            Node *n = new_node(ND_NEW);
+            n->ty = ptr_to(base);
+            n->lhs = len;
+            n->val = 1; /* uninitialized */
+            *rest = tok;
+            return n;
+        }
         if (is_pointer(base)) error("new expects a non-pointer type");
-        if (is_array(base)) error("new of array type not supported yet");
         Node *n = new_node(ND_NEW);
         n->ty = ptr_to(base);
         if (equal(tok, TK_UNINITIALIZED)) {
@@ -1021,7 +1047,7 @@ static Node *primary(Token **rest, Token *tok) {
             *rest = tok->next;
             return n;
         }
-        if (!equal(tok, TK_LBRACE)) error("expected uninitialized, {, or .Variant after new");
+        if (!equal(tok, TK_LBRACE)) error("expected uninitialized, {, [, or .Variant after new");
         if (is_enum(base)) error("use new Enum.Variant { ... } for sum types");
         n->args = parse_struct_field_inits(&tok, tok, base);
         n->val = 0;
@@ -2063,7 +2089,17 @@ static void gen_expr(Node *n) {
         return;
     case ND_NEW: {
         Type *base = n->ty->base;
-        printf("  mov $%d, %%rdi\n", type_size(base) > 0 ? type_size(base) : 8);
+        int esz = type_size(base) > 0 ? type_size(base) : 8;
+        if (n->lhs) {
+            /* new T[count] */
+            gen_expr(n->lhs);
+            if (esz != 1)
+                printf("  imul $%d, %%rax\n", esz);
+            printf("  mov %%rax, %%rdi\n");
+            printf("  call malloc\n");
+            return;
+        }
+        printf("  mov $%d, %%rdi\n", esz);
         printf("  call malloc\n");
         if (n->variant) {
             printf("  push %%rax\n");

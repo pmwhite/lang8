@@ -1,8 +1,9 @@
 // L8 self-hosted compiler → x86-64 Linux GAS
 // Uses nominal types for AST; Type is a sum over language types.
 //
-// Heap ADTs: `new T { fields }`, `new E.V`, `new E.V { fields }`, or
-//   `new T uninitialized`. Prefer `new E.V { ... }` over allocate-then-assign.
+// Heap ADTs: `new T { fields }`, `new E.V`, `new E.V { fields }`,
+//   `new T uninitialized`, or `new T[n]` (heap array → *T).
+// Prefer `new E.V { ... }` over allocate-then-assign.
 // Aggregates are passed/returned by value via a hidden pointer (sret) ABI.
 // Forward `*Name` may later complete as a record or a sum.
 // Match arms may end with `_ -> { ... }`. Field lists accept `;` or `,`.
@@ -11,6 +12,8 @@
 // `*T` is non-null; `?*T` is optional. `*T` coerces to `?*T`.
 // Flow narrowing: `if (p != null)` / `while (p != null)` / AND-conjuncts (not bare `if (p)`).
 // Bindings (locals, match arms) are block-scoped.
+// `as`: numeric widen (i8/bool→int, i8↔bool), `?*T as *T`, or `*A as *B`; not int↔aggregate.
+// `new T[n]` allocates n·sizeof(T) bytes and yields *T.
 
 type Type =
     | Int
@@ -243,9 +246,10 @@ memcpy(dst: *i8, src: *i8, n: int): *i8 {
 }
 
 strdup_n(s: *i8, n: int): *i8 {
-    p: *int = malloc(n + 16) as *int;
+    raw: *i8 = new i8[n + 16];
+    p: *int = raw as *int;
     p.* = n;
-    data: *i8 = (p as *i8) + 8;
+    data: *i8 = raw + 8;
     memcpy(data, s, n);
     data[n] = 0 trunc i8;
     return data;
@@ -339,12 +343,12 @@ read_file(path: *i8): *i8 {
         error("cannot open file");
     }
     cap: int = 65536;
-    buf: *i8 = malloc(cap) as *i8;
+    buf: *i8 = new i8[cap];
     n: int = 0;
     while (true) {
         if (n + 4096 > cap) {
             cap = cap * 2;
-            tmp: *i8 = malloc(cap) as *i8;
+            tmp: *i8 = new i8[cap];
             memcpy(tmp, buf, n);
             buf = tmp;
         }
@@ -555,9 +559,10 @@ enum_field_offset(m: *Member): int {
 
 variant_payload_name(enum_name: *i8, var_name: *i8): *i8 {
     n: int = len(enum_name) + 1 + len(var_name);
-    p: *int = malloc(n + 16) as *int;
+    raw: *i8 = new i8[n + 16];
+    p: *int = raw as *int;
     p.* = n;
-    data: *i8 = (p as *i8) + 8;
+    data: *i8 = raw + 8;
     i: int = 0;
     j: int = 0;
     while (i < len(enum_name)) {
@@ -822,9 +827,9 @@ types_equal(a: ?*Type, b: ?*Type): bool {
     return false;
 }
 
-is_word_ty(t: ?*Type): bool {
+is_numeric_ty(t: ?*Type): bool {
     t = decay(t);
-    return t != null && type_size(t) == 8;
+    return is_int_ty(t) || is_i8_ty(t) || is_bool_ty(t);
 }
 
 check_as(from: ?*Type, to: ?*Type) {
@@ -833,16 +838,19 @@ check_as(from: ?*Type, to: ?*Type) {
     if (types_equal(from, to)) {
         return;
     }
-    if ((is_i8_ty(from) || is_bool_ty(from)) && is_int_ty(to)) {
-        return;
+    if (is_numeric_ty(from) && is_numeric_ty(to)) {
+        if ((is_i8_ty(from) || is_bool_ty(from)) && is_int_ty(to)) {
+            return;
+        }
+        if (type_size(from) == 1 && type_size(to) == 1) {
+            return;
+        }
+        error("invalid as conversion (use trunc to narrow int→i8/bool)");
     }
     if (is_opt_pointer(from) && is_pointer(to) && types_equal(type_base(from), type_base(to))) {
         return;
     }
-    if (is_word_ty(from) && is_word_ty(to)) {
-        return;
-    }
-    if (type_size(from) == 1 && type_size(to) == 1) {
+    if (is_pointer(from) && is_pointer(to)) {
         return;
     }
     error("invalid as conversion");
@@ -1154,7 +1162,7 @@ cur_tokstr(): *i8 {
 }
 
 add_string(s: *i8, n: int): int {
-    buf: *i8 = malloc(n + 1) as *i8;
+    buf: *i8 = new i8[n + 1];
     i: int = 0;
     j: int = 0;
     while (i < n) {
@@ -1636,12 +1644,25 @@ parse_primary(): *Node {
             return n;
         }
         base: *Type = parse_type();
-        base = parse_type_suffix(base);
+        if (equal(TokKind.LBrack)) {
+            tok = tok.next as *Token;
+            len: *Node = parse_expr();
+            skip(TokKind.RBrack);
+            add_type(len);
+            if (!is_int_ty(decay(len.ty))) {
+                error("array length must be int");
+            }
+            if (is_pointer(base) || is_opt_pointer(base)) {
+                error("new expects a non-pointer type");
+            }
+            n = new_node(ND_NEW);
+            n.ty = ptr_to(base);
+            n.lhs = len;
+            n.val = 1;
+            return n;
+        }
         if (is_pointer(base)) {
             error("new expects a non-pointer type");
-        }
-        if (is_array(base)) {
-            error("new of array type not supported yet");
         }
         n = new_node(ND_NEW);
         n.ty = ptr_to(base);
@@ -1651,7 +1672,7 @@ parse_primary(): *Node {
             return n;
         }
         if (!equal(TokKind.LBrace)) {
-            error("expected uninitialized, {, or .Variant after new");
+            error("expected uninitialized, {, [, or .Variant after new");
         }
         if (is_enum_ty(base)) {
             error("use new Enum.Variant { ... } for sum types");
@@ -3099,12 +3120,23 @@ gen_expr(n: *Node) {
     }
     if (k == ND_NEW) {
         base: *Type = type_base(n.ty);
-        sz: int = type_size(base);
-        if (sz <= 0) {
-            sz = 8;
+        esz: int = type_size(base);
+        if (esz <= 0) {
+            esz = 8;
+        }
+        if (n.lhs != null) {
+            gen_expr(n.lhs as *Node);
+            if (esz != 1) {
+                emit("  imul $");
+                emit_num(esz);
+                emit(", %rax\n");
+            }
+            emit("  mov %rax, %rdi\n");
+            emit("  call malloc\n");
+            return;
         }
         emit("  mov $");
-        emit_num(sz);
+        emit_num(esz);
         emit(", %rdi\n");
         emit("  call malloc\n");
         if (n.variant != null) {
@@ -3630,11 +3662,11 @@ codegen() {
     emit_text();
 }
 
-main(argc: int, argv: *int): int {
+main(argc: int, argv: **i8): int {
     if (argc != 2) {
         error("usage: l8c <file.l8>");
     }
-    path: *i8 = (argv + 8).* as *i8;
+    path: *i8 = (argv + 8).*;
     init_kinds();
     source = read_file(path);
     tok = tokenize();
