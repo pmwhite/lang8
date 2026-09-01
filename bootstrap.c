@@ -2045,6 +2045,44 @@ static void emit_memcpy(int sz) {
     }
 }
 
+/* Store value in %rax into (%rdi). By-ref aggregates: %rax holds a source pointer. */
+static void store_value(Type *ty) {
+    if (passes_by_ref(ty)) {
+        printf("  mov %%rax, %%rsi\n");
+        emit_memcpy(type_size(ty));
+    } else {
+        store_mem(ty);
+    }
+}
+
+/*
+ * Field inits for struct/new. Object base address is in %rbx (absolute).
+ * Evaluate each RHS before computing the dest so a large aggregate temp
+ * from gen_expr cannot bury a pushed destination address.
+ */
+static void gen_struct_inits(Node *inits) {
+    for (Node *init = inits; init; init = init->next) {
+        if (!init->lhs) continue;
+        Type *mty = init->member->ty ? init->member->ty : ty_int;
+        gen_expr(init->lhs);
+        printf("  mov %%rbx, %%rdi\n");
+        if (init->member->offset)
+            printf("  add $%d, %%rdi\n", init->member->offset);
+        store_value(mty);
+    }
+}
+
+static void gen_variant_inits(Node *inits) {
+    for (Node *init = inits; init; init = init->next) {
+        if (!init->lhs) continue;
+        Type *mty = init->member->ty ? init->member->ty : ty_int;
+        gen_expr(init->lhs);
+        printf("  mov %%rbx, %%rdi\n");
+        printf("  add $%d, %%rdi\n", enum_field_offset(init->member));
+        store_value(mty);
+    }
+}
+
 static Function *find_function(char *name) {
     for (Function *g = functions; g; g = g->next)
         if (!strcmp(g->name, name)) return g;
@@ -2125,32 +2163,19 @@ static void gen_expr(Node *n) {
         printf("  mov $%d, %%rdi\n", esz);
         printf("  call malloc\n");
         if (n->variant) {
-            printf("  push %%rax\n");
+            printf("  push %%rbx\n");
+            printf("  mov %%rax, %%rbx\n");
             printf("  mov $%ld, %%rdi\n", n->val);
             printf("  mov %%rdi, (%%rax)\n");
-            for (Node *init = n->args; init; init = init->next) {
-                if (!init->lhs) continue;
-                printf("  mov (%%rsp), %%rax\n");
-                printf("  add $%d, %%rax\n", enum_field_offset(init->member));
-                printf("  push %%rax\n");
-                gen_expr(init->lhs);
-                printf("  pop %%rdi\n");
-                store_mem(init->member->ty ? init->member->ty : ty_int);
-            }
-            printf("  pop %%rax\n");
+            gen_variant_inits(n->args);
+            printf("  mov %%rbx, %%rax\n");
+            printf("  pop %%rbx\n");
         } else if (!n->val) {
-            printf("  push %%rax\n");
-            for (Node *init = n->args; init; init = init->next) {
-                if (!init->lhs) continue;
-                printf("  mov (%%rsp), %%rax\n");
-                if (init->member->offset)
-                    printf("  add $%d, %%rax\n", init->member->offset);
-                printf("  push %%rax\n");
-                gen_expr(init->lhs);
-                printf("  pop %%rdi\n");
-                store_mem(init->member->ty ? init->member->ty : ty_int);
-            }
-            printf("  pop %%rax\n");
+            printf("  push %%rbx\n");
+            printf("  mov %%rax, %%rbx\n");
+            gen_struct_inits(n->args);
+            printf("  mov %%rbx, %%rax\n");
+            printf("  pop %%rbx\n");
         }
         return;
     }
@@ -2159,19 +2184,11 @@ static void gen_expr(Node *n) {
         if (sz <= 0) sz = 8;
         sz = (sz + 15) / 16 * 16;
         printf("  sub $%d, %%rsp\n", sz);
-        printf("  mov %%rsp, %%rax\n");
-        printf("  push %%rax\n");
-        for (Node *init = n->args; init; init = init->next) {
-            if (!init->lhs) continue;
-            printf("  mov (%%rsp), %%rax\n");
-            if (init->member->offset)
-                printf("  add $%d, %%rax\n", init->member->offset);
-            printf("  push %%rax\n");
-            gen_expr(init->lhs);
-            printf("  pop %%rdi\n");
-            store_mem(init->member->ty ? init->member->ty : ty_int);
-        }
-        printf("  pop %%rax\n");
+        printf("  push %%rbx\n");
+        printf("  lea 8(%%rsp), %%rbx\n");
+        gen_struct_inits(n->args);
+        printf("  mov %%rbx, %%rax\n");
+        printf("  pop %%rbx\n");
         return;
     }
     case ND_VARIANT_LIT: {
@@ -2186,40 +2203,25 @@ static void gen_expr(Node *n) {
             /* Small payload: build in a temp, then load. */
             int asz = 16;
             printf("  sub $%d, %%rsp\n", asz);
-            printf("  mov %%rsp, %%rax\n");
-            printf("  push %%rax\n");
+            printf("  push %%rbx\n");
+            printf("  lea 8(%%rsp), %%rbx\n");
             printf("  mov $%ld, %%rdi\n", n->val);
-            printf("  mov %%rdi, (%%rax)\n");
-            for (Node *init = n->args; init; init = init->next) {
-                if (!init->lhs) continue;
-                printf("  mov (%%rsp), %%rax\n");
-                printf("  add $%d, %%rax\n", enum_field_offset(init->member));
-                printf("  push %%rax\n");
-                gen_expr(init->lhs);
-                printf("  pop %%rdi\n");
-                store_mem(init->member->ty ? init->member->ty : ty_int);
-            }
-            printf("  pop %%rax\n");
-            printf("  mov (%%rax), %%rax\n");
+            printf("  mov %%rdi, (%%rbx)\n");
+            gen_variant_inits(n->args);
+            printf("  mov (%%rbx), %%rax\n");
+            printf("  pop %%rbx\n");
             return;
         }
         sz = (sz + 15) / 16 * 16;
         printf("  sub $%d, %%rsp\n", sz);
-        printf("  mov %%rsp, %%rax\n");
-        printf("  push %%rax\n");
+        printf("  push %%rbx\n");
+        printf("  lea 8(%%rsp), %%rbx\n");
         /* store tag at offset 0 */
         printf("  mov $%ld, %%rdi\n", n->val);
-        printf("  mov %%rdi, (%%rax)\n");
-        for (Node *init = n->args; init; init = init->next) {
-            if (!init->lhs) continue;
-            printf("  mov (%%rsp), %%rax\n");
-            printf("  add $%d, %%rax\n", enum_field_offset(init->member));
-            printf("  push %%rax\n");
-            gen_expr(init->lhs);
-            printf("  pop %%rdi\n");
-            store_mem(init->member->ty ? init->member->ty : ty_int);
-        }
-        printf("  pop %%rax\n");
+        printf("  mov %%rdi, (%%rbx)\n");
+        gen_variant_inits(n->args);
+        printf("  mov %%rbx, %%rax\n");
+        printf("  pop %%rbx\n");
         return;
     }
     case ND_DEREF:
@@ -2230,35 +2232,22 @@ static void gen_expr(Node *n) {
         add_type(n->lhs);
         if (n->rhs->kind == ND_STRUCT_LIT && is_struct(n->lhs->ty)) {
             gen_addr(n->lhs);
-            printf("  push %%rax\n");
-            for (Node *init = n->rhs->args; init; init = init->next) {
-                if (!init->lhs) continue;
-                printf("  mov (%%rsp), %%rax\n");
-                if (init->member->offset)
-                    printf("  add $%d, %%rax\n", init->member->offset);
-                printf("  push %%rax\n");
-                gen_expr(init->lhs);
-                printf("  pop %%rdi\n");
-                store_mem(init->member->ty ? init->member->ty : ty_int);
-            }
-            printf("  pop %%rax\n");
+            printf("  push %%rbx\n");
+            printf("  mov %%rax, %%rbx\n");
+            gen_struct_inits(n->rhs->args);
+            printf("  mov %%rbx, %%rax\n");
+            printf("  pop %%rbx\n");
             return;
         }
         if (n->rhs->kind == ND_VARIANT_LIT && is_enum(n->lhs->ty)) {
             gen_addr(n->lhs);
-            printf("  push %%rax\n");
+            printf("  push %%rbx\n");
+            printf("  mov %%rax, %%rbx\n");
             printf("  mov $%ld, %%rdi\n", n->rhs->val);
             printf("  mov %%rdi, (%%rax)\n");
-            for (Node *init = n->rhs->args; init; init = init->next) {
-                if (!init->lhs) continue;
-                printf("  mov (%%rsp), %%rax\n");
-                printf("  add $%d, %%rax\n", enum_field_offset(init->member));
-                printf("  push %%rax\n");
-                gen_expr(init->lhs);
-                printf("  pop %%rdi\n");
-                store_mem(init->member->ty ? init->member->ty : ty_int);
-            }
-            printf("  pop %%rax\n");
+            gen_variant_inits(n->rhs->args);
+            printf("  mov %%rbx, %%rax\n");
+            printf("  pop %%rbx\n");
             return;
         }
         gen_expr(n->rhs);
