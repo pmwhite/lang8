@@ -11,20 +11,19 @@
  *   Control:   if/else, while, return, blocks
  *              conditions must be bool
  *   Ops:       + - * / %  == != < <= > >=  && ||  =  & ! -  []  .  .*  ()
- *              `e as T` numeric widen (i8/bool→int, i8↔bool), `?*T as *T` unwrap,
- *              or `*A as *B` pointer reinterpret; never int↔pointer/aggregate
+ *              `e as T` numeric widen (i8/bool→int, i8↔bool), or `*A as *B`;
+ *              never `?*T as *T` (narrow a local) or int↔pointer/aggregate
  *              `e trunc T` narrow (int→i8/bool)
  *              bool literals: true, false (values 1 and 0); no implicit numeric casts
  *              null pointer literal: `null` (only for `?*T`); compare with == / != only
  *              `*T` coerces to `?*T`; `.` / `.*` require non-null `*T`
- *              flow narrowing: for a local `?*T` variable `p`, these type `p` as `*T`:
+ *              flow narrowing (locals only): for a local `?*T` variable `p`, these type `p` as `*T`:
  *                `if (p != null)` / `while (p != null)` (and `null != p`);
  *                `if (p == null)` narrows in the else branch;
  *                `while (p != null && …)` / `if (p != null && …)` narrow from an AND conjunct
  *              bare `if (p)` on `?*T` is not allowed — write `p != null`
  *              assignments to `p` use storage type `?*T` so `p = p.next` works while narrowed
- *              bindings (locals, match arms) are block-scoped
- *              loops: `while (s != null) { ...; s = s.next; }`
+ *              no `?*T as *T` escape hatch — bind a local and narrow instead
  *   Other:     sizeof(T), new T uninitialized | new T { f: e, ... },
  *              new E.V | new E.V { ... }, new T[n] (heap array → *T),
  *              string/char literals, // comments
@@ -577,9 +576,9 @@ static void check_as(Type *from, Type *to) {
         if (is_byte_sized(from) && is_byte_sized(to)) return;
         error("invalid as conversion (use trunc to narrow int→i8/bool)");
     }
-    /* Explicit optional unwrap */
-    if (is_opt_pointer(from) && is_pointer(to) && types_equal(from->base, to->base))
-        return;
+    /* No ?*T as *T — narrow a local with if (p != null) instead. */
+    if (is_opt_pointer(from) && is_pointer(to))
+        error("cannot cast ?*T to *T (bind a local and use if (p != null))");
     /* Pointer reinterpret (*A as *B), e.g. allocator length headers */
     if (is_pointer(from) && is_pointer(to))
         return;

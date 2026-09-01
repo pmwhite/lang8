@@ -10,9 +10,10 @@
 // Sum defs allow a leading `|` before the first variant.
 // Null pointers use the `null` literal (only for `?*T`, not integer 0).
 // `*T` is non-null; `?*T` is optional. `*T` coerces to `?*T`.
-// Flow narrowing: `if (p != null)` / `while (p != null)` / AND-conjuncts (not bare `if (p)`).
+// Flow narrowing (locals only): `if (p != null)` / `while (p != null)` / AND-conjuncts (not bare `if (p)`).
+// No `?*T as *T` — bind a local and narrow, or use expect_*.
 // Bindings (locals, match arms) are block-scoped.
-// `as`: numeric widen (i8/bool→int, i8↔bool), `?*T as *T`, or `*A as *B`; not int↔aggregate.
+// `as`: numeric widen (i8/bool→int, i8↔bool), or `*A as *B`; not `?*T as *T` (narrow a local instead).
 // `new T[n]` allocates n·sizeof(T) bytes and yields *T.
 
 type Type =
@@ -115,7 +116,7 @@ type Token = {
     val: int;
     str: *i8;
     len: int;
-    next: ?*Token;
+    next: *Token;
 };
 
 type Node = {
@@ -313,6 +314,142 @@ error(msg: *i8) {
     write(2, "\n", len("\n"));
     exit(1);
 }
+
+dummy_node: *Node;
+dummy_obj: *Obj;
+dummy_type: *Type;
+dummy_member: *Member;
+dummy_variant: *Variant;
+dummy_function: *Function;
+dummy_i8: *i8;
+token_eof: *Token;
+
+init_dummies() {
+    dummy_i8 = "";
+    dummy_type = ty_int;
+    token_eof = new Token {
+        kind: TokKind.Eof,
+        val: 0,
+        str: "",
+        len: 0,
+        next: uninitialized
+    };
+    token_eof.next = token_eof;
+    dummy_node = new Node {
+        kind: ND_NUM,
+        next: null,
+        lhs: null,
+        rhs: null,
+        cond: null,
+        then: null,
+        els: null,
+        body: null,
+        val: 0,
+        var: null,
+        funcname: null,
+        args: null,
+        str_label: 0,
+        ty: null,
+        member: null,
+        variant: null
+    };
+    dummy_obj = new Obj {
+        name: "",
+        is_local: 0,
+        is_func: 0,
+        offset: 0,
+        scope_depth: 0,
+        ty: null,
+        next: null
+    };
+    dummy_member = new Member {
+        name: "",
+        offset: 0,
+        ty: null,
+        next: null
+    };
+    dummy_variant = new Variant {
+        name: "",
+        tag: 0,
+        fields: null,
+        payload_ty: null,
+        payload_size: 0,
+        next: null
+    };
+    dummy_function = new Function {
+        name: "",
+        nparams: 0,
+        p0: null,
+        p1: null,
+        p2: null,
+        p3: null,
+        p4: null,
+        p5: null,
+        locals: null,
+        body: null,
+        stack_size: 0,
+        return_ty: null,
+        sret: null,
+        next: null
+    };
+}
+
+expect_node(n: ?*Node, msg: *i8): *Node {
+    if (n != null) {
+        return n;
+    }
+    error(msg);
+    return dummy_node;
+}
+
+expect_obj(o: ?*Obj, msg: *i8): *Obj {
+    if (o != null) {
+        return o;
+    }
+    error(msg);
+    return dummy_obj;
+}
+
+expect_type(t: ?*Type, msg: *i8): *Type {
+    if (t != null) {
+        return t;
+    }
+    error(msg);
+    return dummy_type;
+}
+
+expect_member(m: ?*Member, msg: *i8): *Member {
+    if (m != null) {
+        return m;
+    }
+    error(msg);
+    return dummy_member;
+}
+
+expect_variant(v: ?*Variant, msg: *i8): *Variant {
+    if (v != null) {
+        return v;
+    }
+    error(msg);
+    return dummy_variant;
+}
+
+expect_function(f: ?*Function, msg: *i8): *Function {
+    if (f != null) {
+        return f;
+    }
+    error(msg);
+    return dummy_function;
+}
+
+expect_str(s: ?*i8, msg: *i8): *i8 {
+    if (s != null) {
+        return s;
+    }
+    error(msg);
+    return dummy_i8;
+}
+
 
 init_kinds() {
     ND_NUM = 0; ND_VAR = 1; ND_ADD = 2; ND_SUB = 3; ND_MUL = 4; ND_DIV = 5; ND_MOD = 6;
@@ -585,7 +722,7 @@ is_type_name(): bool {
     if (!equal(TokKind.Ident)) {
         return false;
     }
-    name: *i8 = strdup_n(tok.str as *i8, tok.len);
+    name: *i8 = strdup_n(tok.str, tok.len);
     if (find_struct(name) != null) {
         return true;
     }
@@ -705,7 +842,7 @@ is_aggregate(t: ?*Type): bool {
     return is_struct_ty(t) || is_enum_ty(t);
 }
 
-passes_by_ref(t: ?*Type): bool {
+passes_by_ref(t: *Type): bool {
     return is_aggregate(t) && type_size(t) > 8;
 }
 
@@ -847,8 +984,8 @@ check_as(from: ?*Type, to: ?*Type) {
         }
         error("invalid as conversion (use trunc to narrow int→i8/bool)");
     }
-    if (is_opt_pointer(from) && is_pointer(to) && types_equal(type_base(from), type_base(to))) {
-        return;
+    if (is_opt_pointer(from) && is_pointer(to)) {
+        error("cannot cast ?*T to *T (bind a local and use if (p != null))");
     }
     if (is_pointer(from) && is_pointer(to)) {
         return;
@@ -878,7 +1015,7 @@ new_token(kind: TokKind, start: *i8, len: int): *Token {
         val: 0,
         str: start,
         len: len,
-        next: null
+        next: token_eof
     };
 }
 
@@ -999,7 +1136,7 @@ tokenize(): *Token {
         val: 0,
         str: "",
         len: 0,
-        next: null
+        next: token_eof
     };
     cur: *Token = head;
     t: *Token = uninitialized;
@@ -1142,8 +1279,9 @@ tokenize(): *Token {
     }
     }
     t = new_token(TokKind.Eof, source + pos, 0);
+    t.next = t;
     cur.next = t;
-    return head.next as *Token;
+    return head.next;
 }
 
 equal(kind: TokKind): bool {
@@ -1154,7 +1292,7 @@ skip(kind: TokKind) {
     if (!equal(kind)) {
         error("unexpected token");
     }
-    tok = tok.next as *Token;
+    tok = tok.next;
 }
 
 cur_tokstr(): *i8 {
@@ -1413,25 +1551,25 @@ null_eq_var(cond: ?*Node): ?*Obj {
 
 decl_spec(): *Type {
     if (equal(TokKind.Int)) {
-        tok = tok.next as *Token;
+        tok = tok.next;
         return ty_int;
     }
     if (equal(TokKind.I8)) {
-        tok = tok.next as *Token;
+        tok = tok.next;
         return ty_i8;
     }
     if (equal(TokKind.Bool)) {
-        tok = tok.next as *Token;
+        tok = tok.next;
         return ty_bool;
     }
     if (equal(TokKind.Ident)) {
         name: *i8 = cur_tokstr();
         ed: ?*EnumDef = find_enum(name);
         if (ed != null) {
-            tok = tok.next as *Token;
-            return enum_type(ed as *EnumDef);
+            tok = tok.next;
+            return enum_type(ed);
         }
-        tok = tok.next as *Token;
+        tok = tok.next;
         sd: *StructDef = get_or_create_struct(name);
         return struct_type(sd);
     }
@@ -1441,16 +1579,16 @@ decl_spec(): *Type {
 
 parse_type(): *Type {
     if (equal(TokKind.Question)) {
-        tok = tok.next as *Token;
+        tok = tok.next;
         if (!equal(TokKind.Star)) {
             error("expected * after ? in optional pointer type");
         }
-        tok = tok.next as *Token;
+        tok = tok.next;
         base: *Type = parse_type();
         return opt_ptr_to(base);
     }
     if (equal(TokKind.Star)) {
-        tok = tok.next as *Token;
+        tok = tok.next;
         base: *Type = parse_type();
         return ptr_to(base);
     }
@@ -1478,13 +1616,13 @@ parse_struct_field_inits(sty: *Type): *Node {
             error("expected field name in struct literal");
         }
         fname: *i8 = cur_tokstr();
-        tok = tok.next as *Token;
+        tok = tok.next;
         skip(TokKind.Colon);
         m = find_member(type_struct_def(sty), fname);
         if (m == null) {
             error("unknown field");
         }
-        mu: *Member = m as *Member;
+        mu: *Member = expect_member(m, "null member");
         i = head;
         while (i != null) {
             if (i.member == mu) {
@@ -1496,7 +1634,7 @@ parse_struct_field_inits(sty: *Type): *Node {
         init.member = mu;
         if (equal(TokKind.Uninitialized)) {
             init.lhs = null;
-            tok = tok.next as *Token;
+            tok = tok.next;
         } else {
             init.lhs = parse_expr();
             add_type(init.lhs);
@@ -1529,7 +1667,7 @@ parse_struct_field_inits(sty: *Type): *Node {
         m = m.next;
     }
     skip(TokKind.RBrace);
-    return head as *Node;
+    return expect_node(head, "empty list");
 }
 
 parse_variant_field_inits(v: *Variant): *Node {
@@ -1546,7 +1684,7 @@ parse_variant_field_inits(v: *Variant): *Node {
             error("expected field name in variant literal");
         }
         fname: *i8 = cur_tokstr();
-        tok = tok.next as *Token;
+        tok = tok.next;
         skip(TokKind.Colon);
         m = null;
         x: ?*Member = v.fields;
@@ -1559,7 +1697,7 @@ parse_variant_field_inits(v: *Variant): *Node {
         if (m == null) {
             error("unknown field");
         }
-        mu: *Member = m as *Member;
+        mu: *Member = expect_member(m, "null member");
         i = head;
         while (i != null) {
             if (i.member == mu) {
@@ -1571,7 +1709,7 @@ parse_variant_field_inits(v: *Variant): *Node {
         init.member = mu;
         if (equal(TokKind.Uninitialized)) {
             init.lhs = null;
-            tok = tok.next as *Token;
+            tok = tok.next;
         } else {
             init.lhs = parse_expr();
             add_type(init.lhs);
@@ -1604,14 +1742,14 @@ parse_variant_field_inits(v: *Variant): *Node {
         m = m.next;
     }
     skip(TokKind.RBrace);
-    return head as *Node;
+    return expect_node(head, "empty list");
 }
 
 parse_primary(): *Node {
     n: *Node = uninitialized;
     if (equal(TokKind.New)) {
-        tok = tok.next as *Token;
-        if (is_type_name() && (tok.next as *Token).kind == TokKind.Dot) {
+        tok = tok.next;
+        if (is_type_name() && (tok.next).kind == TokKind.Dot) {
             ety: *Type = parse_type();
             if (!is_enum_ty(ety)) {
                 error("new Enum.Variant requires an enum type");
@@ -1621,12 +1759,12 @@ parse_primary(): *Node {
                 error("expected variant name after new Enum.");
             }
             vname: *i8 = cur_tokstr();
-            tok = tok.next as *Token;
+            tok = tok.next;
             vo: ?*Variant = find_variant(type_enum_def(ety), vname);
             if (vo == null) {
                 error("unknown variant");
             }
-            v: *Variant = vo as *Variant;
+            v: *Variant = expect_variant(vo, "null variant");
             n = new_node(ND_NEW);
             n.ty = ptr_to(ety);
             n.variant = v;
@@ -1645,7 +1783,7 @@ parse_primary(): *Node {
         }
         base: *Type = parse_type();
         if (equal(TokKind.LBrack)) {
-            tok = tok.next as *Token;
+            tok = tok.next;
             len: *Node = parse_expr();
             skip(TokKind.RBrack);
             add_type(len);
@@ -1668,7 +1806,7 @@ parse_primary(): *Node {
         n.ty = ptr_to(base);
         if (equal(TokKind.Uninitialized)) {
             n.val = 1;
-            tok = tok.next as *Token;
+            tok = tok.next;
             return n;
         }
         if (!equal(TokKind.LBrace)) {
@@ -1682,7 +1820,7 @@ parse_primary(): *Node {
         return n;
     }
     if (equal(TokKind.Sizeof)) {
-        tok = tok.next as *Token;
+        tok = tok.next;
         skip(TokKind.LParen);
         if (starts_type()) {
             ty: *Type = parse_type();
@@ -1696,14 +1834,14 @@ parse_primary(): *Node {
         return new_num(type_size(n.ty));
     }
     if (equal(TokKind.LParen)) {
-        tok = tok.next as *Token;
+        tok = tok.next;
         n = parse_expr();
         skip(TokKind.RParen);
         return n;
     }
     if (equal(TokKind.Num)) {
         n = new_num(tok.val);
-        tok = tok.next as *Token;
+        tok = tok.next;
         return n;
     }
     if (equal(TokKind.True) || equal(TokKind.False)) {
@@ -1713,23 +1851,23 @@ parse_primary(): *Node {
         }
         n = new_num(bv);
         n.ty = ty_bool;
-        tok = tok.next as *Token;
+        tok = tok.next;
         return n;
     }
     if (equal(TokKind.Null)) {
         n = new_node(ND_NULL);
-        tok = tok.next as *Token;
+        tok = tok.next;
         return n;
     }
     if (equal(TokKind.Char)) {
         n = new_num(tok.val);
         n.ty = ty_i8;
-        tok = tok.next as *Token;
+        tok = tok.next;
         return n;
     }
     if (equal(TokKind.Str)) {
-        label: int = add_string(tok.str as *i8, tok.len);
-        tok = tok.next as *Token;
+        label: int = add_string(tok.str, tok.len);
+        tok = tok.next;
         n = new_node(ND_NUM);
         n.str_label = label + 1;
         n.ty = ptr_to(ty_i8);
@@ -1737,7 +1875,7 @@ parse_primary(): *Node {
     }
     if (equal(TokKind.Ident)) {
         name: *i8 = cur_tokstr();
-        if (is_type_name() && (tok.next as *Token).kind == TokKind.Dot) {
+        if (is_type_name() && (tok.next).kind == TokKind.Dot) {
             ety: *Type = parse_type();
             if (!is_enum_ty(ety)) {
                 error("variant construction requires an enum type");
@@ -1747,12 +1885,12 @@ parse_primary(): *Node {
                 error("expected variant name");
             }
             vname: *i8 = cur_tokstr();
-            tok = tok.next as *Token;
+            tok = tok.next;
             vo: ?*Variant = find_variant(type_enum_def(ety), vname);
             if (vo == null) {
                 error("unknown variant");
             }
-            v: *Variant = vo as *Variant;
+            v: *Variant = expect_variant(vo, "null variant");
             n = new_node(ND_VARIANT_LIT);
             n.ty = ety;
             n.variant = v;
@@ -1769,7 +1907,7 @@ parse_primary(): *Node {
             }
             return n;
         }
-        if (is_type_name() && (tok.next as *Token).kind == TokKind.LBrace) {
+        if (is_type_name() && (tok.next).kind == TokKind.LBrace) {
             sty: *Type = parse_type();
             if (!is_struct_ty(sty)) {
                 error("struct literal requires a struct type");
@@ -1779,11 +1917,11 @@ parse_primary(): *Node {
             n.args = parse_struct_field_inits(sty);
             return n;
         }
-        tok = tok.next as *Token;
+        tok = tok.next;
         if (equal(TokKind.LParen)) {
             n = new_node(ND_FUNCALL);
             n.funcname = name;
-            tok = tok.next as *Token;
+            tok = tok.next;
             head: ?*Node = null;
             cur: ?*Node = null;
             while (!equal(TokKind.RParen)) {
@@ -1807,7 +1945,7 @@ parse_primary(): *Node {
         if (varo == null) {
             error("undefined variable");
         }
-        var: *Obj = varo as *Obj;
+        var: *Obj = expect_obj(varo, "null var");
         n = new_node(ND_VAR);
         n.var = var;
         n.ty = var.ty;
@@ -1821,7 +1959,7 @@ parse_postfix(): *Node {
     n: *Node = parse_primary();
     while (true) {
         if (equal(TokKind.LBrack)) {
-            tok = tok.next as *Token;
+            tok = tok.next;
             idx: *Node = parse_expr();
             skip(TokKind.RBrack);
             add_type(n);
@@ -1838,20 +1976,20 @@ parse_postfix(): *Node {
             n.ty = type_base(t);
         } else {
             if (equal(TokKind.Dot)) {
-                if ((tok.next as *Token).kind == TokKind.Star) {
-                    tok = tok.next as *Token;
-                    tok = tok.next as *Token;
+                if ((tok.next).kind == TokKind.Star) {
+                    tok = tok.next;
+                    tok = tok.next;
                     n = new_unary(ND_DEREF, n);
                 } else {
-                    tok = tok.next as *Token;
+                    tok = tok.next;
                     if (!equal(TokKind.Ident)) {
                         error("expected member name");
                     }
                     name: *i8 = cur_tokstr();
-                    tok = tok.next as *Token;
+                    tok = tok.next;
                     add_type(n);
                     t: ?*Type = decay(n.ty);
-                    sty: *Type = n.ty as *Type;
+                    sty: *Type = expect_type(n.ty, "missing type");
                     if (is_opt_pointer(t)) {
                         error("member access on optional pointer (use if (p != null) / while (p != null) to narrow)");
                     }
@@ -1866,7 +2004,7 @@ parse_postfix(): *Node {
                     if (m == null) {
                         error("unknown member");
                     }
-                    mu: *Member = m as *Member;
+                    mu: *Member = expect_member(m, "null member");
                     mem: *Node = new_node(ND_MEMBER);
                     mem.lhs = n;
                     mem.member = mu;
@@ -1880,7 +2018,7 @@ parse_postfix(): *Node {
             } else {
                 if (equal(TokKind.As) || equal(TokKind.Trunc)) {
                     is_trunc: bool = equal(TokKind.Trunc);
-                    tok = tok.next as *Token;
+                    tok = tok.next;
                     ty: *Type = parse_type();
                     ty = parse_type_suffix(ty);
                     add_type(n);
@@ -1906,20 +2044,20 @@ parse_postfix(): *Node {
 
 parse_unary(): *Node {
     if (equal(TokKind.Plus)) {
-        tok = tok.next as *Token;
+        tok = tok.next;
         return parse_unary();
     }
     if (equal(TokKind.Minus)) {
-        tok = tok.next as *Token;
+        tok = tok.next;
         n: *Node = new_unary(ND_NEG, parse_unary());
         return n;
     }
     if (equal(TokKind.Amp)) {
-        tok = tok.next as *Token;
+        tok = tok.next;
         return new_unary(ND_ADDR, parse_unary());
     }
     if (equal(TokKind.Not)) {
-        tok = tok.next as *Token;
+        tok = tok.next;
         n = new_unary(ND_NOT, parse_unary());
         return n;
     }
@@ -1927,10 +2065,12 @@ parse_unary(): *Node {
 }
 
 add_type(n: ?*Node) {
-    if (n == null) {
-        return;
+    if (n != null) {
+        add_type_node(n);
     }
-    p: *Node = n as *Node;
+}
+
+add_type_node(p: *Node) {
     if (p.kind == ND_VAR) {
         p.ty = var_view_ty(p.var);
         return;
@@ -2012,8 +2152,8 @@ add_type(n: ?*Node) {
         return;
     }
     if (p.kind == ND_ADD || p.kind == ND_SUB) {
-        lhs: *Node = p.lhs as *Node;
-        rhs: *Node = p.rhs as *Node;
+        lhs: *Node = expect_node(p.lhs, "missing lhs");
+        rhs: *Node = expect_node(p.rhs, "missing rhs");
         lt: ?*Type = decay(lhs.ty);
         rt: ?*Type = decay(rhs.ty);
         if (p.kind == ND_ADD && is_pointer(lt) && is_int_ty(rt)) {
@@ -2041,8 +2181,8 @@ add_type(n: ?*Node) {
         return;
     }
     if (p.kind == ND_MUL || p.kind == ND_DIV || p.kind == ND_MOD) {
-        lhs: *Node = p.lhs as *Node;
-        rhs: *Node = p.rhs as *Node;
+        lhs: *Node = expect_node(p.lhs, "missing lhs");
+        rhs: *Node = expect_node(p.rhs, "missing rhs");
         if (!is_int_ty(decay(lhs.ty)) || !is_int_ty(decay(rhs.ty))) {
             error("arithmetic requires int operands");
         }
@@ -2050,8 +2190,8 @@ add_type(n: ?*Node) {
         return;
     }
     if (p.kind == ND_EQ || p.kind == ND_NE) {
-        lhs: *Node = p.lhs as *Node;
-        rhs: *Node = p.rhs as *Node;
+        lhs: *Node = expect_node(p.lhs, "missing lhs");
+        rhs: *Node = expect_node(p.rhs, "missing rhs");
         lt: ?*Type = decay(lhs.ty);
         rt: ?*Type = decay(rhs.ty);
         if (!types_equal(lt, rt)) {
@@ -2067,8 +2207,8 @@ add_type(n: ?*Node) {
         return;
     }
     if (p.kind == ND_LT || p.kind == ND_LE || p.kind == ND_GT || p.kind == ND_GE) {
-        lhs: *Node = p.lhs as *Node;
-        rhs: *Node = p.rhs as *Node;
+        lhs: *Node = expect_node(p.lhs, "missing lhs");
+        rhs: *Node = expect_node(p.rhs, "missing rhs");
         if (!types_equal(decay(lhs.ty), decay(rhs.ty))) {
             error("comparison type mismatch");
         }
@@ -2076,8 +2216,8 @@ add_type(n: ?*Node) {
         return;
     }
     if (p.kind == ND_LOGAND || p.kind == ND_LOGOR) {
-        lhs: *Node = p.lhs as *Node;
-        rhs: *Node = p.rhs as *Node;
+        lhs: *Node = expect_node(p.lhs, "missing lhs");
+        rhs: *Node = expect_node(p.rhs, "missing rhs");
         if (!is_bool_ty(decay(lhs.ty)) || !is_bool_ty(decay(rhs.ty))) {
             error("&& / || require bool operands");
         }
@@ -2085,7 +2225,7 @@ add_type(n: ?*Node) {
         return;
     }
     if (p.kind == ND_NOT) {
-        lhs: *Node = p.lhs as *Node;
+        lhs: *Node = expect_node(p.lhs, "missing lhs");
         if (!is_bool_ty(decay(lhs.ty))) {
             error("! requires bool");
         }
@@ -2093,7 +2233,7 @@ add_type(n: ?*Node) {
         return;
     }
     if (p.kind == ND_NEG) {
-        lhs: *Node = p.lhs as *Node;
+        lhs: *Node = expect_node(p.lhs, "missing lhs");
         if (!is_int_ty(decay(lhs.ty))) {
             error("unary - requires int");
         }
@@ -2101,8 +2241,8 @@ add_type(n: ?*Node) {
         return;
     }
     if (p.kind == ND_ASSIGN) {
-        lhs: *Node = p.lhs as *Node;
-        rhs: *Node = p.rhs as *Node;
+        lhs: *Node = expect_node(p.lhs, "missing lhs");
+        rhs: *Node = expect_node(p.rhs, "missing rhs");
         lt: ?*Type = null;
         storage: ?*Type = lhs.ty;
         if (lhs.kind == ND_VAR) {
@@ -2129,16 +2269,16 @@ add_type(n: ?*Node) {
         return;
     }
     if (p.kind == ND_ADDR) {
-        lhs: *Node = p.lhs as *Node;
+        lhs: *Node = expect_node(p.lhs, "missing lhs");
         if (is_array(lhs.ty)) {
             p.ty = ptr_to(type_base(lhs.ty));
         } else {
-            p.ty = ptr_to(lhs.ty as *Type);
+            p.ty = ptr_to(expect_type(lhs.ty, "missing type"));
         }
         return;
     }
     if (p.kind == ND_DEREF) {
-        lhs: *Node = p.lhs as *Node;
+        lhs: *Node = expect_node(p.lhs, "missing lhs");
         t: ?*Type = decay(lhs.ty);
         if (is_opt_pointer(t)) {
             error("dereferencing optional pointer (use if (p != null) / while (p != null) to narrow)");
@@ -2162,7 +2302,7 @@ add_type(n: ?*Node) {
         return;
     }
     if (p.kind == ND_FUNCALL) {
-        fo: ?*Obj = find_obj(globals, p.funcname as *i8);
+        fo: ?*Obj = find_obj(globals, expect_str(p.funcname, "missing funcname"));
         if (fo != null) {
             if (fo.is_func != 0) {
                 p.ty = fo.ty;
@@ -2172,7 +2312,7 @@ add_type(n: ?*Node) {
         } else {
             p.ty = ty_int;
         }
-        fno: ?*Function = find_function(p.funcname as *i8);
+        fno: ?*Function = find_function(expect_str(p.funcname, "missing funcname"));
         if (fno != null) {
             a = p.args;
             ai: int = 0;
@@ -2234,15 +2374,15 @@ parse_mul(): *Node {
     n: *Node = parse_unary();
     while (true) {
         if (equal(TokKind.Star)) {
-            tok = tok.next as *Token;
+            tok = tok.next;
             n = new_binary(ND_MUL, n, parse_unary());
         } else {
             if (equal(TokKind.Slash)) {
-                tok = tok.next as *Token;
+                tok = tok.next;
                 n = new_binary(ND_DIV, n, parse_unary());
             } else {
                 if (equal(TokKind.Percent)) {
-                    tok = tok.next as *Token;
+                    tok = tok.next;
                     n = new_binary(ND_MOD, n, parse_unary());
                 } else {
                     return n;
@@ -2257,11 +2397,11 @@ parse_add(): *Node {
     n: *Node = parse_mul();
     while (true) {
         if (equal(TokKind.Plus)) {
-            tok = tok.next as *Token;
+            tok = tok.next;
             n = new_binary(ND_ADD, n, parse_mul());
         } else {
             if (equal(TokKind.Minus)) {
-                tok = tok.next as *Token;
+                tok = tok.next;
                 n = new_binary(ND_SUB, n, parse_mul());
             } else {
                 return n;
@@ -2275,19 +2415,19 @@ parse_relational(): *Node {
     n: *Node = parse_add();
     while (true) {
         if (equal(TokKind.Lt)) {
-            tok = tok.next as *Token;
+            tok = tok.next;
             n = new_binary(ND_LT, n, parse_add());
         } else {
             if (equal(TokKind.Gt)) {
-                tok = tok.next as *Token;
+                tok = tok.next;
                 n = new_binary(ND_GT, n, parse_add());
             } else {
                 if (equal(TokKind.Le)) {
-                    tok = tok.next as *Token;
+                    tok = tok.next;
                     n = new_binary(ND_LE, n, parse_add());
                 } else {
                     if (equal(TokKind.Ge)) {
-                        tok = tok.next as *Token;
+                        tok = tok.next;
                         n = new_binary(ND_GE, n, parse_add());
                     } else {
                         return n;
@@ -2303,11 +2443,11 @@ parse_equality(): *Node {
     n: *Node = parse_relational();
     while (true) {
         if (equal(TokKind.Eq)) {
-            tok = tok.next as *Token;
+            tok = tok.next;
             n = new_binary(ND_EQ, n, parse_relational());
         } else {
             if (equal(TokKind.Ne)) {
-                tok = tok.next as *Token;
+                tok = tok.next;
                 n = new_binary(ND_NE, n, parse_relational());
             } else {
                 return n;
@@ -2320,7 +2460,7 @@ parse_equality(): *Node {
 parse_logand(): *Node {
     n: *Node = parse_equality();
     while (equal(TokKind.And)) {
-        tok = tok.next as *Token;
+        tok = tok.next;
         n = new_binary(ND_LOGAND, n, parse_equality());
     }
     return n;
@@ -2329,7 +2469,7 @@ parse_logand(): *Node {
 parse_logor(): *Node {
     n: *Node = parse_logand();
     while (equal(TokKind.Or)) {
-        tok = tok.next as *Token;
+        tok = tok.next;
         n = new_binary(ND_LOGOR, n, parse_logand());
     }
     return n;
@@ -2338,7 +2478,7 @@ parse_logor(): *Node {
 parse_assign(): *Node {
     n: *Node = parse_logor();
     if (equal(TokKind.Assign)) {
-        tok = tok.next as *Token;
+        tok = tok.next;
         return new_binary(ND_ASSIGN, n, parse_assign());
     }
     return n;
@@ -2346,12 +2486,12 @@ parse_assign(): *Node {
 
 parse_type_suffix(ty: *Type): *Type {
     if (equal(TokKind.LBrack)) {
-        tok = tok.next as *Token;
+        tok = tok.next;
         if (!equal(TokKind.Num)) {
             error("expected array size");
         }
         ty = array_of(ty, tok.val);
-        tok = tok.next as *Token;
+        tok = tok.next;
         skip(TokKind.RBrack);
     }
     return ty;
@@ -2362,7 +2502,7 @@ parse_decl(is_local: int): *Obj {
         error("expected identifier");
     }
     name: *i8 = cur_tokstr();
-    tok = tok.next as *Token;
+    tok = tok.next;
     skip(TokKind.Colon);
     ty: *Type = parse_type();
     ty = parse_type_suffix(ty);
@@ -2400,7 +2540,7 @@ parse_stmt(): *Node {
     n: *Node = uninitialized;
     if (equal(TokKind.Return)) {
         n = new_node(ND_RETURN);
-        tok = tok.next as *Token;
+        tok = tok.next;
         if (!equal(TokKind.Semi)) {
             n.lhs = parse_expr();
         }
@@ -2409,7 +2549,7 @@ parse_stmt(): *Node {
     }
     if (equal(TokKind.If)) {
         n = new_node(ND_IF);
-        tok = tok.next as *Token;
+        tok = tok.next;
         skip(TokKind.LParen);
         n.cond = parse_expr();
         skip(TokKind.RParen);
@@ -2425,7 +2565,7 @@ parse_stmt(): *Node {
         n.then = parse_stmt();
         narrow_reset(save);
         if (equal(TokKind.Else)) {
-            tok = tok.next as *Token;
+            tok = tok.next;
             if (eqv != null) {
                 narrow_push(eqv, ptr_to(type_base(eqv.ty)));
             }
@@ -2436,7 +2576,7 @@ parse_stmt(): *Node {
     }
     if (equal(TokKind.While)) {
         n = new_node(ND_WHILE);
-        tok = tok.next as *Token;
+        tok = tok.next;
         skip(TokKind.LParen);
         n.cond = parse_expr();
         skip(TokKind.RParen);
@@ -2451,10 +2591,10 @@ parse_stmt(): *Node {
     }
     if (equal(TokKind.Match)) {
         n = new_node(ND_MATCH);
-        tok = tok.next as *Token;
+        tok = tok.next;
         n.cond = parse_expr();
         add_type(n.cond);
-        et: ?*Type = decay((n.cond as *Node).ty);
+        et: ?*Type = decay((expect_node(n.cond, "missing cond")).ty);
         if (!is_enum_ty(et)) {
             error("match requires an enum value");
         }
@@ -2466,7 +2606,7 @@ parse_stmt(): *Node {
                 error("expected variant name in match arm");
             }
             vname: *i8 = cur_tokstr();
-            tok = tok.next as *Token;
+            tok = tok.next;
             arm: *Node = new_node(ND_MATCH_ARM);
             arm.next = null;
             arm.ty = et;
@@ -2476,13 +2616,13 @@ parse_stmt(): *Node {
                 if (is_wild) {
                     error("wildcard match arm cannot bind a payload");
                 }
-                tok = tok.next as *Token;
+                tok = tok.next;
                 if (!equal(TokKind.Ident)) {
                     error("expected payload binding name");
                 }
                 bn: *Node = new_node(ND_VAR);
                 bn.funcname = cur_tokstr();
-                tok = tok.next as *Token;
+                tok = tok.next;
                 skip(TokKind.RParen);
                 arm.args = bn;
                 arm.val = 1;
@@ -2491,7 +2631,7 @@ parse_stmt(): *Node {
                     if (is_wild) {
                         error("wildcard match arm cannot bind fields");
                     }
-                    tok = tok.next as *Token;
+                    tok = tok.next;
                     bhead: ?*Node = null;
                     bcur: ?*Node = null;
                     while (!equal(TokKind.RBrace)) {
@@ -2503,7 +2643,7 @@ parse_stmt(): *Node {
                         }
                         bn: *Node = new_node(ND_VAR);
                         bn.funcname = cur_tokstr();
-                        tok = tok.next as *Token;
+                        tok = tok.next;
                         if (bcur != null) {
                             bcur.next = bn;
                             bcur = bn;
@@ -2512,7 +2652,7 @@ parse_stmt(): *Node {
                             bcur = bn;
                         }
                     }
-                    tok = tok.next as *Token;
+                    tok = tok.next;
                     arm.args = bhead;
                 }
             }
@@ -2532,7 +2672,7 @@ parse_stmt(): *Node {
                 if (vo == null) {
                     error("unknown variant");
                 }
-                v: *Variant = vo as *Variant;
+                v: *Variant = expect_variant(vo, "null variant");
                 chk: ?*Node = arms;
                 while (chk != null) {
                     if (chk.variant == v) {
@@ -2545,8 +2685,8 @@ parse_stmt(): *Node {
                     if (v.payload_ty == null) {
                         error("unit variant cannot bind a payload");
                     }
-                    args0: *Node = arm.args as *Node;
-                    po: *Obj = new_obj(args0.funcname as *i8, 1);
+                    args0: *Node = expect_node(arm.args, "missing args");
+                    po: *Obj = new_obj(expect_str(args0.funcname, "missing funcname"), 1);
                     po.ty = v.payload_ty;
                     args0.var = po;
                     args0.ty = v.payload_ty;
@@ -2561,7 +2701,7 @@ parse_stmt(): *Node {
                             m: ?*Member = null;
                             x: ?*Member = v.fields;
                             while (x != null) {
-                                if (streq(x.name, b.funcname as *i8)) {
+                                if (streq(x.name, expect_str(b.funcname, "missing funcname"))) {
                                     m = x;
                                 }
                                 x = x.next;
@@ -2569,7 +2709,7 @@ parse_stmt(): *Node {
                             if (m == null) {
                                 error("unknown field in variant");
                             }
-                            mu: *Member = m as *Member;
+                            mu: *Member = expect_member(m, "null member");
                             o2: ?*Node = arm.args;
                             while (o2 != null) {
                                 if (o2 == b) {
@@ -2581,7 +2721,7 @@ parse_stmt(): *Node {
                                     o2 = o2.next;
                                 }
                             }
-                            fo: *Obj = new_obj(b.funcname as *i8, 1);
+                            fo: *Obj = new_obj(expect_str(b.funcname, "missing funcname"), 1);
                             fo.ty = mu.ty;
                             b.var = fo;
                             b.member = mu;
@@ -2651,20 +2791,20 @@ parse_stmt(): *Node {
             }
         }
         n.body = arms;
-        tok = tok.next as *Token;
+        tok = tok.next;
         return n;
     }
     if (equal(TokKind.LBrace)) {
         return parse_compound();
     }
-    if (equal(TokKind.Ident) && (tok.next as *Token).kind == TokKind.Colon) {
+    if (equal(TokKind.Ident) && (tok.next).kind == TokKind.Colon) {
         o: *Obj = parse_decl(1);
         if (equal(TokKind.Comma)) {
             error("only one variable per declaration");
         }
         skip(TokKind.Assign);
         if (equal(TokKind.Uninitialized)) {
-            tok = tok.next as *Token;
+            tok = tok.next;
             skip(TokKind.Semi);
             return new_node(ND_BLOCK);
         }
@@ -2738,16 +2878,18 @@ parse_function(name: *i8): *Function {
     fn.nparams = np;
     skip(TokKind.RParen);
     if (equal(TokKind.Colon)) {
-        tok = tok.next as *Token;
+        tok = tok.next;
         fn.return_ty = parse_type();
     }
-    if (fn.return_ty != null) {
-        if (passes_by_ref(fn.return_ty)) {
+    rt: ?*Type = fn.return_ty;
+    if (rt != null) {
+        if (passes_by_ref(rt)) {
             if (fn.nparams >= 6) {
                 error("too many parameters");
             }
-            fn.sret = new_obj(".sret", 1);
-            (fn.sret as *Obj).ty = ptr_to(fn.return_ty as *Type);
+            sret: *Obj = new_obj(".sret", 1);
+            sret.ty = ptr_to(rt);
+            fn.sret = sret;
         }
     }
     fn.body = parse_compound();
@@ -2764,7 +2906,7 @@ parse_field_list(base_offset: int): *Member {
             error("expected field name");
         }
         mname: *i8 = cur_tokstr();
-        tok = tok.next as *Token;
+        tok = tok.next;
         skip(TokKind.Colon);
         mty: *Type = parse_type();
         mty = parse_type_suffix(mty);
@@ -2787,7 +2929,7 @@ parse_field_list(base_offset: int): *Member {
             cur = m;
         }
         if (equal(TokKind.Semi) || equal(TokKind.Comma)) {
-            tok = tok.next as *Token;
+            tok = tok.next;
         } else {
             if (!equal(TokKind.RBrace)) {
                 error("expected `;`, `,`, or `}` after field");
@@ -2795,8 +2937,8 @@ parse_field_list(base_offset: int): *Member {
         }
     }
     field_list_size = offset - base_offset;
-    tok = tok.next as *Token;
-    return head as *Member;
+    tok = tok.next;
+    return expect_member(head, "empty members");
 }
 
 parse_variant(tag: int, enum_name: *i8): *Variant {
@@ -2811,9 +2953,9 @@ parse_variant(tag: int, enum_name: *i8): *Variant {
         payload_size: 0,
         next: null
     };
-    tok = tok.next as *Token;
+    tok = tok.next;
     if (equal(TokKind.LBrace)) {
-        tok = tok.next as *Token;
+        tok = tok.next;
         v.fields = parse_field_list(0);
         v.payload_size = field_list_size;
         sd: *StructDef = new StructDef {
@@ -2829,12 +2971,12 @@ parse_variant(tag: int, enum_name: *i8): *Variant {
 }
 
 parse_type_def() {
-    tok = tok.next as *Token;
+    tok = tok.next;
     if (!equal(TokKind.Ident)) {
         error("expected type name");
     }
     name: *i8 = cur_tokstr();
-    tok = tok.next as *Token;
+    tok = tok.next;
     skip(TokKind.Assign);
 
     if (equal(TokKind.LBrace)) {
@@ -2845,7 +2987,7 @@ parse_type_def() {
         if (sd.members != null) {
             error("redefinition of type");
         }
-        tok = tok.next as *Token;
+        tok = tok.next;
         sd.members = parse_field_list(0);
         sd.size = field_list_size;
         skip(TokKind.Semi);
@@ -2865,7 +3007,7 @@ parse_type_def() {
     }
 
     if (equal(TokKind.Pipe)) {
-        tok = tok.next as *Token;
+        tok = tok.next;
     }
 
     head: ?*Variant = null;
@@ -2894,7 +3036,7 @@ parse_type_def() {
         }
         tag = tag + 1;
         if (equal(TokKind.Pipe)) {
-            tok = tok.next as *Token;
+            tok = tok.next;
         } else {
             done = 1;
         }
@@ -2916,14 +3058,14 @@ parse_program() {
     tail: ?*Function = null;
     functions = null;
     while (!equal(TokKind.Eof)) {
-        if (equal(TokKind.TypeKw) && (tok.next as *Token).kind == TokKind.Ident && ((tok.next as *Token).next as *Token).kind == TokKind.Assign) {
+        if (equal(TokKind.TypeKw) && (tok.next).kind == TokKind.Ident && ((tok.next).next).kind == TokKind.Assign) {
             parse_type_def();
         } else {
             if (!equal(TokKind.Ident)) {
                 error("expected identifier");
             }
             name: *i8 = cur_tokstr();
-            tok = tok.next as *Token;
+            tok = tok.next;
             if (equal(TokKind.LParen)) {
                 fn: *Function = parse_function(name);
                 if (tail != null) {
@@ -2997,7 +3139,7 @@ gen_struct_inits(inits: ?*Node) {
     init: ?*Node = inits;
     while (init != null) {
         if (init.lhs != null) {
-            mem: *Member = init.member as *Member;
+            mem: *Member = expect_member(init.member, "missing member");
             emit("  mov (%rsp), %rax\n");
             if (mem.offset != 0) {
                 emit("  add $");
@@ -3005,11 +3147,11 @@ gen_struct_inits(inits: ?*Node) {
                 emit(", %rax\n");
             }
             emit("  push %rax\n");
-            gen_expr(init.lhs as *Node);
+            gen_expr(expect_node(init.lhs, "missing lhs"));
             emit("  pop %rdi\n");
             mty: *Type = ty_int;
             if (mem.ty != null) {
-                mty = mem.ty as *Type;
+                mty = expect_type(mem.ty, "missing type");
             }
             store_mem(mty);
         }
@@ -3021,17 +3163,17 @@ gen_variant_inits(inits: ?*Node) {
     init: ?*Node = inits;
     while (init != null) {
         if (init.lhs != null) {
-            mem: *Member = init.member as *Member;
+            mem: *Member = expect_member(init.member, "missing member");
             emit("  mov (%rsp), %rax\n");
             emit("  add $");
             emit_num(enum_field_offset(mem));
             emit(", %rax\n");
             emit("  push %rax\n");
-            gen_expr(init.lhs as *Node);
+            gen_expr(expect_node(init.lhs, "missing lhs"));
             emit("  pop %rdi\n");
             mty: *Type = ty_int;
             if (mem.ty != null) {
-                mty = mem.ty as *Type;
+                mty = expect_type(mem.ty, "missing type");
             }
             store_mem(mty);
         }
@@ -3042,32 +3184,32 @@ gen_variant_inits(inits: ?*Node) {
 gen_addr(n: *Node) {
     add_type(n);
     if (n.kind == ND_VAR) {
-        if ((n.var as *Obj).is_local != 0) {
+        if ((expect_obj(n.var, "missing var")).is_local != 0) {
             emit("  lea ");
-            emit_num((n.var as *Obj).offset);
+            emit_num((expect_obj(n.var, "missing var")).offset);
             emit("(%rbp), %rax\n");
         } else {
             emit("  lea ");
-            emit((n.var as *Obj).name);
+            emit((expect_obj(n.var, "missing var")).name);
             emit("(%rip), %rax\n");
         }
         return;
     }
     if (n.kind == ND_DEREF) {
-        gen_expr(n.lhs as *Node);
+        gen_expr(expect_node(n.lhs, "missing lhs"));
         return;
     }
     if (n.kind == ND_MEMBER) {
         add_type(n.lhs);
-        t: ?*Type = decay((n.lhs as *Node).ty);
+        t: ?*Type = decay((expect_node(n.lhs, "missing lhs")).ty);
         if (is_pointer(t) && is_struct_ty(type_base(t))) {
-            gen_expr(n.lhs as *Node);
+            gen_expr(expect_node(n.lhs, "missing lhs"));
         } else {
-            gen_addr(n.lhs as *Node);
+            gen_addr(expect_node(n.lhs, "missing lhs"));
         }
-        if ((n.member as *Member).offset != 0) {
+        if ((expect_member(n.member, "missing member")).offset != 0) {
             emit("  add $");
-            emit_num((n.member as *Member).offset);
+            emit_num((expect_member(n.member, "missing member")).offset);
             emit(", %rax\n");
         }
         return;
@@ -3096,26 +3238,28 @@ gen_expr(n: *Node) {
     }
     if (k == ND_VAR) {
         gen_addr(n);
-        if (is_array(n.ty) || passes_by_ref(n.ty)) {
+        ty: *Type = expect_type(n.ty, "missing type");
+        if (is_array(ty) || passes_by_ref(ty)) {
             return;
         }
-        load_mem(n.ty as *Type);
+        load_mem(ty);
         return;
     }
     if (k == ND_MEMBER) {
         gen_addr(n);
-        if (is_array(n.ty) || passes_by_ref(n.ty)) {
+        ty2: *Type = expect_type(n.ty, "missing type");
+        if (is_array(ty2) || passes_by_ref(ty2)) {
             return;
         }
-        load_mem(n.ty as *Type);
+        load_mem(ty2);
         return;
     }
     if (k == ND_ADDR) {
-        gen_addr(n.lhs as *Node);
+        gen_addr(expect_node(n.lhs, "missing lhs"));
         return;
     }
     if (k == ND_AS || k == ND_TRUNC) {
-        gen_expr(n.lhs as *Node);
+        gen_expr(expect_node(n.lhs, "missing lhs"));
         return;
     }
     if (k == ND_NEW) {
@@ -3125,7 +3269,7 @@ gen_expr(n: *Node) {
             esz = 8;
         }
         if (n.lhs != null) {
-            gen_expr(n.lhs as *Node);
+            gen_expr(expect_node(n.lhs, "missing lhs"));
             if (esz != 1) {
                 emit("  imul $");
                 emit_num(esz);
@@ -3210,62 +3354,64 @@ gen_expr(n: *Node) {
         return;
     }
     if (k == ND_DEREF) {
-        gen_expr(n.lhs as *Node);
-        load_mem(n.ty as *Type);
+        gen_expr(expect_node(n.lhs, "missing lhs"));
+        load_mem(expect_type(n.ty, "missing type"));
         return;
     }
     if (k == ND_ASSIGN) {
-        add_type(n.lhs as *Node);
-        if ((n.rhs as *Node).kind == ND_STRUCT_LIT && is_struct_ty((n.lhs as *Node).ty)) {
-            gen_addr(n.lhs as *Node);
+        add_type(expect_node(n.lhs, "missing lhs"));
+        if ((expect_node(n.rhs, "missing rhs")).kind == ND_STRUCT_LIT && is_struct_ty((expect_node(n.lhs, "missing lhs")).ty)) {
+            gen_addr(expect_node(n.lhs, "missing lhs"));
             emit("  push %rax\n");
-            gen_struct_inits((n.rhs as *Node).args);
+            gen_struct_inits((expect_node(n.rhs, "missing rhs")).args);
             emit("  pop %rax\n");
             return;
         }
-        if ((n.rhs as *Node).kind == ND_VARIANT_LIT && is_enum_ty((n.lhs as *Node).ty)) {
-            gen_addr(n.lhs as *Node);
+        if ((expect_node(n.rhs, "missing rhs")).kind == ND_VARIANT_LIT && is_enum_ty((expect_node(n.lhs, "missing lhs")).ty)) {
+            gen_addr(expect_node(n.lhs, "missing lhs"));
             emit("  push %rax\n");
             emit("  mov $");
-            emit_num((n.rhs as *Node).val);
+            emit_num((expect_node(n.rhs, "missing rhs")).val);
             emit(", %rdi\n");
             emit("  mov %rdi, (%rax)\n");
-            gen_variant_inits((n.rhs as *Node).args);
+            gen_variant_inits((expect_node(n.rhs, "missing rhs")).args);
             emit("  pop %rax\n");
             return;
         }
-        gen_expr(n.rhs as *Node);
+        gen_expr(expect_node(n.rhs, "missing rhs"));
         emit("  push %rax\n");
-        gen_addr(n.lhs as *Node);
+        lhs: *Node = expect_node(n.lhs, "missing lhs");
+        gen_addr(lhs);
         emit("  mov %rax, %rdi\n");
         emit("  pop %rsi\n");
-        if (passes_by_ref((n.lhs as *Node).ty)) {
-            emit_memcpy(type_size((n.lhs as *Node).ty));
+        lhs_ty: *Type = expect_type(lhs.ty, "missing lhs type");
+        if (passes_by_ref(lhs_ty)) {
+            emit_memcpy(type_size(lhs_ty));
             emit("  mov %rdi, %rax\n");
         } else {
             emit("  mov %rsi, %rax\n");
-            store_mem((n.lhs as *Node).ty as *Type);
+            store_mem(lhs_ty);
         }
         return;
     }
     if (k == ND_NOT) {
-        gen_expr(n.lhs as *Node);
+        gen_expr(expect_node(n.lhs, "missing lhs"));
         emit("  cmp $0, %rax\n");
         emit("  sete %al\n");
         emit("  movzb %al, %rax\n");
         return;
     }
     if (k == ND_NEG) {
-        gen_expr(n.lhs as *Node);
+        gen_expr(expect_node(n.lhs, "missing lhs"));
         emit("  neg %rax\n");
         return;
     }
     if (k == ND_LOGAND) {
         l: int = new_label();
-        gen_expr(n.lhs as *Node);
+        gen_expr(expect_node(n.lhs, "missing lhs"));
         emit("  cmp $0, %rax\n");
         emit("  je .L.false"); emit_num(l); emit("\n");
-        gen_expr(n.rhs as *Node);
+        gen_expr(expect_node(n.rhs, "missing rhs"));
         emit("  cmp $0, %rax\n");
         emit("  je .L.false"); emit_num(l); emit("\n");
         emit("  mov $1, %rax\n");
@@ -3277,10 +3423,10 @@ gen_expr(n: *Node) {
     }
     if (k == ND_LOGOR) {
         l = new_label();
-        gen_expr(n.lhs as *Node);
+        gen_expr(expect_node(n.lhs, "missing lhs"));
         emit("  cmp $0, %rax\n");
         emit("  jne .L.true"); emit_num(l); emit("\n");
-        gen_expr(n.rhs as *Node);
+        gen_expr(expect_node(n.rhs, "missing rhs"));
         emit("  cmp $0, %rax\n");
         emit("  je .L.false"); emit_num(l); emit("\n");
         emit(".L.true"); emit_num(l); emit(":\n");
@@ -3292,7 +3438,7 @@ gen_expr(n: *Node) {
         return;
     }
     if (k == ND_FUNCALL) {
-        fno: ?*Function = find_function(n.funcname as *i8);
+        fno: ?*Function = find_function(expect_str(n.funcname, "missing funcname"));
         has_sret: int = 0;
         if (fno != null) {
             if (fno.sret != null) {
@@ -3310,7 +3456,7 @@ gen_expr(n: *Node) {
             error("too many arguments");
         }
         if (has_sret != 0) {
-            sz: int = type_size((fno as *Function).return_ty);
+            sz: int = type_size((expect_function(fno, "missing function")).return_ty);
             if (sz <= 0) {
                 sz = 8;
             }
@@ -3336,15 +3482,15 @@ gen_expr(n: *Node) {
         }
         emit("  sub $8, %rsp\n");
         emit("  call ");
-        emit(n.funcname as *i8);
+        emit(expect_str(n.funcname, "missing funcname"));
         emit("\n");
         emit("  add $8, %rsp\n");
         return;
     }
 
-    gen_expr(n.lhs as *Node);
+    gen_expr(expect_node(n.lhs, "missing lhs"));
     emit("  push %rax\n");
-    gen_expr(n.rhs as *Node);
+    gen_expr(expect_node(n.rhs, "missing rhs"));
     emit("  mov %rax, %rdi\n");
     emit("  pop %rax\n");
 
@@ -3381,11 +3527,11 @@ gen_stmt(n: *Node) {
     k: int = n.kind;
     if (k == ND_RETURN) {
         if (n.lhs != null) {
-            gen_expr(n.lhs as *Node);
+            gen_expr(expect_node(n.lhs, "missing lhs"));
             if (current_sret != null) {
                 emit("  mov %rax, %rsi\n");
                 emit("  mov ");
-                emit_num((current_sret as *Obj).offset);
+                emit_num((expect_obj(current_sret, "missing sret")).offset);
                 emit("(%rbp), %rdi\n");
                 emit_memcpy(type_size(current_return_ty));
                 emit("  mov %rdi, %rax\n");
@@ -3394,12 +3540,12 @@ gen_stmt(n: *Node) {
             emit("  mov $0, %rax\n");
         }
         emit("  jmp .L.return.");
-        emit(current_fn_name as *i8);
+        emit(expect_str(current_fn_name, "missing fn name"));
         emit("\n");
         return;
     }
     if (k == ND_EXPR_STMT) {
-        gen_expr(n.lhs as *Node);
+        gen_expr(expect_node(n.lhs, "missing lhs"));
         return;
     }
     if (k == ND_BLOCK) {
@@ -3412,17 +3558,17 @@ gen_stmt(n: *Node) {
     }
     if (k == ND_IF) {
         l: int = new_label();
-        gen_expr(n.cond as *Node);
+        gen_expr(expect_node(n.cond, "missing cond"));
         emit("  cmp $0, %rax\n");
         emit("  je .L.else"); emit_num(l); emit("\n");
         nd1: ?*NarrowFrame = narrow_from_cond(n.cond, 0);
-        gen_stmt(n.then as *Node);
+        gen_stmt(expect_node(n.then, "missing then"));
         narrow_reset(nd1);
         emit("  jmp .L.end"); emit_num(l); emit("\n");
         emit(".L.else"); emit_num(l); emit(":\n");
         if (n.els != null) {
             nd2: ?*NarrowFrame = narrow_from_cond(n.cond, 1);
-            gen_stmt(n.els as *Node);
+            gen_stmt(expect_node(n.els, "missing els"));
             narrow_reset(nd2);
         }
         emit(".L.end"); emit_num(l); emit(":\n");
@@ -3431,11 +3577,11 @@ gen_stmt(n: *Node) {
     if (k == ND_WHILE) {
         l = new_label();
         emit(".L.begin"); emit_num(l); emit(":\n");
-        gen_expr(n.cond as *Node);
+        gen_expr(expect_node(n.cond, "missing cond"));
         emit("  cmp $0, %rax\n");
         emit("  je .L.end"); emit_num(l); emit("\n");
         nd3: ?*NarrowFrame = narrow_from_cond(n.cond, 0);
-        gen_stmt(n.body as *Node);
+        gen_stmt(expect_node(n.body, "missing body"));
         narrow_reset(nd3);
         emit("  jmp .L.begin"); emit_num(l); emit("\n");
         emit(".L.end"); emit_num(l); emit(":\n");
@@ -3443,11 +3589,11 @@ gen_stmt(n: *Node) {
     }
     if (k == ND_MATCH) {
         l = new_label();
-        add_type(n.cond as *Node);
-        if ((n.cond as *Node).kind == ND_VAR || (n.cond as *Node).kind == ND_MEMBER || (n.cond as *Node).kind == ND_DEREF) {
-            gen_addr(n.cond as *Node);
+        add_type(expect_node(n.cond, "missing cond"));
+        if ((expect_node(n.cond, "missing cond")).kind == ND_VAR || (expect_node(n.cond, "missing cond")).kind == ND_MEMBER || (expect_node(n.cond, "missing cond")).kind == ND_DEREF) {
+            gen_addr(expect_node(n.cond, "missing cond"));
         } else {
-            gen_expr(n.cond as *Node);
+            gen_expr(expect_node(n.cond, "missing cond"));
         }
         emit("  push %rax\n");
         emit("  mov (%rax), %rax\n");
@@ -3458,7 +3604,7 @@ gen_stmt(n: *Node) {
             if (arm.variant != null) {
                 emit("  mov (%rsp), %rax\n");
                 emit("  cmp $");
-                emit_num((arm.variant as *Variant).tag);
+                emit_num((expect_variant(arm.variant, "missing variant")).tag);
                 emit(", %rax\n");
                 emit("  jne .L.arm");
                 emit_num(la);
@@ -3467,30 +3613,30 @@ gen_stmt(n: *Node) {
             b: ?*Node = arm.args;
             while (b != null) {
                 if (b.member == null) {
-                    psz: int = (arm.variant as *Variant).payload_size;
+                    psz: int = (expect_variant(arm.variant, "missing variant")).payload_size;
                     emit("  mov 8(%rsp), %rsi\n");
                     emit("  add $8, %rsi\n");
                     emit("  lea ");
-                    emit_num((b.var as *Obj).offset);
+                    emit_num((expect_obj(b.var, "missing bind var")).offset);
                     emit("(%rbp), %rdi\n");
                     emit_memcpy(psz);
                 } else {
                     emit("  mov 8(%rsp), %rax\n");
                     emit("  add $");
-                    emit_num(enum_field_offset(b.member as *Member));
+                    emit_num(enum_field_offset(expect_member(b.member, "missing member")));
                     emit(", %rax\n");
                     bty: *Type = ty_int;
-                    if ((b.member as *Member).ty != null) {
-                        bty = (b.member as *Member).ty as *Type;
+                    if ((expect_member(b.member, "missing member")).ty != null) {
+                        bty = expect_type((expect_member(b.member, "missing member")).ty, "missing member type");
                     }
                     load_mem(bty);
                     emit("  mov %rax, ");
-                    emit_num((b.var as *Obj).offset);
+                    emit_num((expect_obj(b.var, "missing bind var")).offset);
                     emit("(%rbp)\n");
                 }
                 b = b.next;
             }
-            gen_stmt(arm.body as *Node);
+            gen_stmt(expect_node(arm.body, "missing body"));
             emit("  jmp .L.matchend");
             emit_num(l);
             emit("\n");
@@ -3620,22 +3766,23 @@ emit_text() {
             emit("  mov ");
             emit(reg_name(ri));
             emit(", ");
-            emit_num((fn.sret as *Obj).offset);
+            emit_num((expect_obj(fn.sret, "missing sret")).offset);
             emit("(%rbp)\n");
             ri = ri + 1;
         }
         i: int = 0;
         while (i < fn.nparams) {
             po: ?*Obj = fn_param(fn, i);
-            p: *Obj = po as *Obj;
-            if (passes_by_ref(p.ty)) {
+            p: *Obj = expect_obj(po, "null obj");
+            pty: *Type = expect_type(p.ty, "missing param type");
+            if (passes_by_ref(pty)) {
                 emit("  mov ");
                 emit(reg_name(ri));
                 emit(", %rsi\n");
                 emit("  lea ");
                 emit_num(p.offset);
                 emit("(%rbp), %rdi\n");
-                emit_memcpy(type_size(p.ty));
+                emit_memcpy(type_size(pty));
             } else {
                 emit("  mov ");
                 emit(reg_name(ri));
@@ -3646,7 +3793,7 @@ emit_text() {
             ri = ri + 1;
             i = i + 1;
         }
-        gen_stmt(fn.body as *Node);
+        gen_stmt(expect_node(fn.body, "missing body"));
         emit(".L.return.");
         emit(fn.name);
         emit(":\n");
@@ -3668,6 +3815,7 @@ main(argc: int, argv: **i8): int {
     }
     path: *i8 = (argv + 8).*;
     init_kinds();
+    init_dummies();
     source = read_file(path);
     tok = tokenize();
     parse_program();
