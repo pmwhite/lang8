@@ -111,7 +111,7 @@ do_examples() {
   step 'example null   [l8c0]'  example l8c0 null   examples/null.l8   'YYYY'
   step 'example newarr [l8c0]'  example l8c0 newarr examples/newarr.l8 'Hi'
   step 'example narrow [l8c0]'  example l8c0 narrow examples/narrow.l8 'YYYY'
-  step 'example nestsum[l8c0]'  example l8c0 nestsum examples/nestsum.l8 '1 2 3 9'
+  step 'example nestsum[l8c0]'  example l8c0 nestsum examples/nestsum.l8 '1 2 3 9 4 5 6 7'
   step 'example noreturn[l8c0]' example l8c0 noreturn examples/noreturn.l8 'Hi'
   step 'example exc     [l8c0]' example l8c0 exc     examples/exc.l8     'Hi'
 }
@@ -140,7 +140,7 @@ do_selfhost() {
   step 'example null   [l8c2]'  example l8c2 null   examples/null.l8   'YYYY'
   step 'example newarr [l8c2]'  example l8c2 newarr examples/newarr.l8 'Hi'
   step 'example narrow [l8c2]'  example l8c2 narrow examples/narrow.l8 'YYYY'
-  step 'example nestsum[l8c2]'  example l8c2 nestsum examples/nestsum.l8 '1 2 3 9'
+  step 'example nestsum[l8c2]'  example l8c2 nestsum examples/nestsum.l8 '1 2 3 9 4 5 6 7'
   step 'example noreturn[l8c2]' example l8c2 noreturn examples/noreturn.l8 'Hi'
   step 'example exc     [l8c2]' example l8c2 exc     examples/exc.l8     'Hi'
 }

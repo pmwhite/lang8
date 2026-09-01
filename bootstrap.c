@@ -13,6 +13,7 @@
  *              after a noreturn call, later statements in the same block are unreachable
  *              `name(...) raises E1, E2: Ret { ... }` — checked exceptions (aborting; no resume)
  *              Order: `) [raises T(, T)*] [: RetTy] {`
+ *              `raises` must be exact: each listed exception must escape the body.
  *   Exceptions: `exception Empty;` / `exception Empty` then `;`
  *              `exception NotFound { name: *i8 };` (fields like structs; `;` or `,`)
  *              Each exception is a nominal type with a unique runtime tag
@@ -370,6 +371,7 @@ struct ExnDef {
 
 struct ExnList {
     ExnDef *exn;
+    int seen; /* set during typing if this exception actually escapes */
     ExnList *next;
 };
 
@@ -779,15 +781,21 @@ static int exn_is_caught(ExnDef *ed) {
     return 0;
 }
 
-static int exn_is_allowed(ExnDef *ed) {
-    if (!ed) return 0;
-    if (exn_is_caught(ed)) return 1;
-    if (current_fn && exn_in_list(current_fn->raises, ed)) return 1;
+/* Mark ed as observed in current_fn's raises list. Returns 1 if listed. */
+static int mark_raises_seen(ExnDef *ed) {
+    if (!current_fn) return 0;
+    for (ExnList *e = current_fn->raises; e; e = e->next) {
+        if (e->exn == ed) {
+            e->seen = 1;
+            return 1;
+        }
+    }
     return 0;
 }
 
 static void check_exn_allowed(ExnDef *ed, char *what) {
-    if (exn_is_allowed(ed)) return;
+    if (exn_is_caught(ed)) return;
+    if (mark_raises_seen(ed)) return;
     error("%s exception %s is not in raises and not caught", what, ed->name);
 }
 
@@ -1497,6 +1505,18 @@ static void add_type(Node *n) {
         return;
     }
 
+    /* Match arms carry the statements that may raise. */
+    if (n->kind == ND_MATCH) {
+        add_type(n->cond);
+        for (Node *arm = n->body; arm; arm = arm->next)
+            add_type(arm->body);
+        return;
+    }
+    if (n->kind == ND_MATCH_ARM) {
+        add_type(n->body);
+        return;
+    }
+
     /* Short-circuit narrowing: type RHS under facts implied by LHS. */
     if (n->kind == ND_LOGAND) {
         add_type(n->lhs);
@@ -1739,10 +1759,6 @@ static void add_type(Node *n) {
         return;
     case ND_VARIANT_LIT:
         /* ty/variant set at parse */
-        return;
-    case ND_MATCH:
-        return;
-    case ND_MATCH_ARM:
         return;
     default:
         return;
@@ -2378,6 +2394,31 @@ static void check_noreturn_functions(void) {
     current_fn = 0;
 }
 
+/* Every exception in `raises` must actually escape the body (raise or call). */
+static void check_raises_functions(void) {
+    int bad = 0;
+    for (Function *fn = functions; fn; fn = fn->next) {
+        if (!fn->raises) continue;
+        for (ExnList *e = fn->raises; e; e = e->next)
+            e->seen = 0;
+        current_fn = fn;
+        current_return_ty = fn->return_ty;
+        catch_depth = 0;
+        narrow_depth = 0;
+        add_type(fn->body);
+        for (ExnList *e = fn->raises; e; e = e->next) {
+            if (!e->seen) {
+                fprintf(stderr, "error: %s raises %s but never raises it\n",
+                        fn->name, e->exn->name);
+                bad = 1;
+            }
+        }
+    }
+    current_fn = 0;
+    current_return_ty = 0;
+    if (bad) exit(1);
+}
+
 /* ---------- codegen ---------- */
 
 static int label_id;
@@ -2981,14 +3022,23 @@ static void emit_text(void) {
             printf("  mov %s, %d(%%rbp)\n", argreg[ri], fn->sret->offset);
             ri++;
         }
+        /* Spill every incoming argreg to its stack home before any by-ref
+         * memcpy (which clobbers %rsi/%rdi/%rax and would destroy later args).
+         * By-ref params receive a pointer: spill that pointer into the first
+         * 8 bytes of the local aggregate, then memcpy from it afterward. */
+        int base_ri = ri;
+        for (int i = 0; i < fn->nparams; i++) {
+            Obj *p = fn->params[i];
+            printf("  mov %s, %d(%%rbp)\n", argreg[ri], p->offset);
+            ri++;
+        }
+        ri = base_ri;
         for (int i = 0; i < fn->nparams; i++) {
             Obj *p = fn->params[i];
             if (passes_by_ref(p->ty)) {
-                printf("  mov %s, %%rsi\n", argreg[ri]);
+                printf("  mov %d(%%rbp), %%rsi\n", p->offset);
                 printf("  lea %d(%%rbp), %%rdi\n", p->offset);
                 emit_memcpy(type_size(p->ty));
-            } else {
-                printf("  mov %s, %d(%%rbp)\n", argreg[ri], p->offset);
             }
             ri++;
         }
@@ -3020,6 +3070,7 @@ int main(int argc, char **argv) {
     source = read_file(argv[1]);
     token = tokenize(source);
     parse_program(token);
+    check_raises_functions();
     check_noreturn_functions();
     codegen();
     return 0;
