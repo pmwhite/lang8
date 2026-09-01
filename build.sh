@@ -84,7 +84,7 @@ example() {
 
 do_clean() {
   rm -f l8c0 l8c1 l8c2
-  rm -f examples/hello examples/fib examples/logic examples/struct examples/string examples/i8 examples/bool examples/enum examples/forward examples/null examples/newarr examples/narrow examples/nestsum examples/noreturn
+  rm -f examples/hello examples/fib examples/logic examples/struct examples/string examples/i8 examples/bool examples/enum examples/forward examples/null examples/newarr examples/narrow examples/nestsum examples/noreturn examples/exc
   rm -f examples/*.s
   rm -rf "$BUILD"
   echo 'cleaned'
@@ -113,6 +113,7 @@ do_examples() {
   step 'example narrow [l8c0]'  example l8c0 narrow examples/narrow.l8 'YYYY'
   step 'example nestsum[l8c0]'  example l8c0 nestsum examples/nestsum.l8 '1 2 3 9'
   step 'example noreturn[l8c0]' example l8c0 noreturn examples/noreturn.l8 'Hi'
+  step 'example exc     [l8c0]' example l8c0 exc     examples/exc.l8     'Hi'
 }
 
 do_selfhost() {
@@ -141,6 +142,7 @@ do_selfhost() {
   step 'example narrow [l8c2]'  example l8c2 narrow examples/narrow.l8 'YYYY'
   step 'example nestsum[l8c2]'  example l8c2 nestsum examples/nestsum.l8 '1 2 3 9'
   step 'example noreturn[l8c2]' example l8c2 noreturn examples/noreturn.l8 'Hi'
+  step 'example exc     [l8c2]' example l8c2 exc     examples/exc.l8     'Hi'
 }
 
 do_all() {

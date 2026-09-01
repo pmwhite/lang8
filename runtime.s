@@ -1,5 +1,6 @@
 # L8 minimal runtime for Linux x86-64
 # Provides: _start, syscall, malloc, read, write, open, close, exit, len
+# Exceptions: l8_try_begin, l8_try_end, l8_raise, l8_exc_tag, l8_exc_ptr
 
 .globl _start
 .globl syscall
@@ -10,12 +11,36 @@
 .globl close
 .globl exit
 .globl len
+.globl l8_try_begin
+.globl l8_try_end
+.globl l8_raise
+.globl l8_exc_tag
+.globl l8_exc_ptr
 
 .section .bss
 .align 8
 heap_ptr:  .skip 8
 heap_end:  .skip 8
 .equ HEAP_SIZE, 64*1024*1024
+
+# Current exception (set by l8_raise, read by catch codegen)
+l8_exc_tag: .skip 8
+l8_exc_ptr: .skip 8
+# Top of handler stack (pointer to jmp_buf), or 0
+l8_handler_top: .skip 8
+
+#
+# l8_jmp_buf layout (72 bytes), pointed to by l8_handler_top:
+#   offset  0: rbx
+#   offset  8: rbp
+#   offset 16: r12
+#   offset 24: r13
+#   offset 32: r14
+#   offset 40: r15
+#   offset 48: rsp   (value after returning from l8_try_begin)
+#   offset 56: rip   (return address into caller of l8_try_begin)
+#   offset 64: prev  (previous l8_handler_top)
+#
 
 .section .text
 
@@ -101,5 +126,64 @@ close:
 
 # void exit(long code) — does not return
 exit:
+    mov $60, %rax
+    syscall
+
+# int l8_try_begin(void *buf) — like setjmp; returns 0 first time, nonzero on catch
+# rdi = buf (l8_jmp_buf)
+l8_try_begin:
+    mov %rbx, 0(%rdi)
+    mov %rbp, 8(%rdi)
+    mov %r12, 16(%rdi)
+    mov %r13, 24(%rdi)
+    mov %r14, 32(%rdi)
+    mov %r15, 40(%rdi)
+    # rsp after ret = current rsp + 8
+    lea 8(%rsp), %rax
+    mov %rax, 48(%rdi)
+    # return address
+    mov (%rsp), %rax
+    mov %rax, 56(%rdi)
+    # push onto handler stack
+    mov l8_handler_top(%rip), %rax
+    mov %rax, 64(%rdi)
+    mov %rdi, l8_handler_top(%rip)
+    mov $0, %rax
+    ret
+
+# void l8_try_end(void) — pop handler if still on top
+l8_try_end:
+    mov l8_handler_top(%rip), %rdi
+    test %rdi, %rdi
+    jz 1f
+    mov 64(%rdi), %rax
+    mov %rax, l8_handler_top(%rip)
+1:
+    ret
+
+# void l8_raise(long tag, void *ptr) — noreturn
+# Sets globals and longjmps to top handler; if none, exit(1).
+l8_raise:
+    mov %rdi, l8_exc_tag(%rip)
+    mov %rsi, l8_exc_ptr(%rip)
+    mov l8_handler_top(%rip), %rdi
+    test %rdi, %rdi
+    jz 2f
+    # pop this handler
+    mov 64(%rdi), %rax
+    mov %rax, l8_handler_top(%rip)
+    # restore callee-saved + stack
+    mov 0(%rdi), %rbx
+    mov 8(%rdi), %rbp
+    mov 16(%rdi), %r12
+    mov 24(%rdi), %r13
+    mov 32(%rdi), %r14
+    mov 40(%rdi), %r15
+    mov 56(%rdi), %rcx       # rip
+    mov 48(%rdi), %rsp
+    mov $1, %rax             # nonzero = catch
+    jmp *%rcx
+2:
+    mov $1, %rdi
     mov $60, %rax
     syscall

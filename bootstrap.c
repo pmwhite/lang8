@@ -11,7 +11,15 @@
  *   Functions: `name(a: int, b: int): int { ... }` or `name(a: int) { ... }` (no return)
  *              `name(...): noreturn { ... }` never returns; `exit` is a noreturn builtin
  *              after a noreturn call, later statements in the same block are unreachable
- *   Control:   if/else, while, return, blocks
+ *              `name(...) raises E1, E2: Ret { ... }` — checked exceptions (aborting; no resume)
+ *              Order: `) [raises T(, T)*] [: RetTy] {`
+ *   Exceptions: `exception Empty;` / `exception Empty` then `;`
+ *              `exception NotFound { name: *i8 };` (fields like structs; `;` or `,`)
+ *              Each exception is a nominal type with a unique runtime tag
+ *              `raise Empty;` / `raise NotFound { name: s };` (diverges)
+ *              `try { ... } with NotFound(e) -> { ... } with Empty -> { ... }`
+ *              (at least one `with`; catching E allows raise/call of E in the try body)
+ *   Control:   if/else, while, return, try/with, blocks
  *              conditions must be bool
  *   Ops:       + - * / %  == != < <= > >=  && ||  =  & ! -  []  .  .*  ()
  *              `e as T` numeric widen (i8/bool→int, i8↔bool), or `*A as *B`;
@@ -54,6 +62,7 @@
  *              string literals have type *i8 (length-prefixed: len at -8, data at ptr)
  *              no implicit casts; char literals have type i8
  *   Runtime:   read/write/open/close/exit/syscall/len
+ *              l8_try_begin / l8_try_end / l8_raise / l8_exc_tag / l8_exc_ptr
  *              (heap via `new`; libc malloc is only used by codegen)
  *              byte memory via i8 / *i8 and [] / .*
  *              len(p) reads the length word at p-8 (for length-prefixed *i8)
@@ -90,6 +99,7 @@ enum {
     TK_INT, TK_I8, TK_BOOL, TK_TRUE, TK_FALSE, TK_NULL, TK_NORETURN,
     TK_IF, TK_ELSE, TK_WHILE, TK_RETURN,
     TK_TYPE, TK_MATCH, TK_SIZEOF, TK_UNINITIALIZED, TK_AS, TK_TRUNC, TK_NEW,
+    TK_EXCEPTION, TK_RAISES, TK_RAISE, TK_TRY, TK_WITH,
     TK_EQ, TK_NE, TK_LE, TK_GE,
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PERCENT,
     TK_LT, TK_GT, TK_ASSIGN, TK_NOT, TK_AMP,
@@ -220,6 +230,11 @@ static Token *tokenize(char *p) {
             else if (kw_eq(s, n, "as")) kind = TK_AS;
             else if (kw_eq(s, n, "trunc")) kind = TK_TRUNC;
             else if (kw_eq(s, n, "new")) kind = TK_NEW;
+            else if (kw_eq(s, n, "exception")) kind = TK_EXCEPTION;
+            else if (kw_eq(s, n, "raises")) kind = TK_RAISES;
+            else if (kw_eq(s, n, "raise")) kind = TK_RAISE;
+            else if (kw_eq(s, n, "try")) kind = TK_TRY;
+            else if (kw_eq(s, n, "with")) kind = TK_WITH;
             cur = cur->next = new_token(kind, s, n);
             continue;
         }
@@ -307,6 +322,8 @@ typedef struct Member Member;
 typedef struct StructDef StructDef;
 typedef struct Variant Variant;
 typedef struct EnumDef EnumDef;
+typedef struct ExnDef ExnDef;
+typedef struct ExnList ExnList;
 typedef struct Type Type;
 
 struct Member {
@@ -341,7 +358,22 @@ struct EnumDef {
     EnumDef *next;
 };
 
-enum { TY_INT, TY_I8, TY_PTR, TY_OPT_PTR, TY_ARRAY, TY_STRUCT, TY_BOOL, TY_ENUM, TY_NORETURN };
+/* Checked exception definition (nominal type + unique runtime tag). */
+struct ExnDef {
+    char *name;
+    int tag;
+    Member *members;
+    int size; /* 0 for unit exceptions */
+    Type *ty;
+    ExnDef *next;
+};
+
+struct ExnList {
+    ExnDef *exn;
+    ExnList *next;
+};
+
+enum { TY_INT, TY_I8, TY_PTR, TY_OPT_PTR, TY_ARRAY, TY_STRUCT, TY_BOOL, TY_ENUM, TY_NORETURN, TY_EXN };
 
 struct Type {
     int kind;
@@ -349,15 +381,21 @@ struct Type {
     int array_len;
     StructDef *struct_def;
     EnumDef *enum_def;
+    ExnDef *exn_def;
     int size;
 };
 
 static StructDef *struct_defs;
 static EnumDef *enum_defs;
+static ExnDef *exn_defs;
+static int next_exn_tag = 1; /* 0 unused */
 static Type *ty_int;
 static Type *ty_i8;
 static Type *ty_bool;
 static Type *ty_noreturn;
+
+/* jmp_buf for l8_try_begin: 72 bytes (see runtime.s) */
+enum { L8_JMP_BUF_SIZE = 72 };
 
 static Type *newtype(int kind) {
     Type *t = calloc(1, sizeof(Type));
@@ -411,6 +449,18 @@ static Type *enum_type(EnumDef *ed) {
     return t;
 }
 
+static Type *exn_type(ExnDef *ed) {
+    if (ed->ty) {
+        ed->ty->size = ed->size;
+        return ed->ty;
+    }
+    Type *t = newtype(TY_EXN);
+    t->exn_def = ed;
+    t->size = ed->size;
+    ed->ty = t;
+    return t;
+}
+
 static StructDef *find_struct(char *name) {
     for (StructDef *s = struct_defs; s; s = s->next)
         if (!strcmp(s->name, name)) return s;
@@ -419,6 +469,12 @@ static StructDef *find_struct(char *name) {
 
 static EnumDef *find_enum(char *name) {
     for (EnumDef *e = enum_defs; e; e = e->next)
+        if (!strcmp(e->name, name)) return e;
+    return 0;
+}
+
+static ExnDef *find_exn(char *name) {
+    for (ExnDef *e = exn_defs; e; e = e->next)
         if (!strcmp(e->name, name)) return e;
     return 0;
 }
@@ -492,7 +548,7 @@ static int is_type_name(Token *tok) {
     if (tok->len >= (int)sizeof(name)) return 0;
     memcpy(name, tok->str, tok->len);
     name[tok->len] = 0;
-    return find_struct(name) != 0 || find_enum(name) != 0;
+    return find_struct(name) != 0 || find_enum(name) != 0 || find_exn(name) != 0;
 }
 
 /* True if tok begins a type: int, i8, StructName, *type, or ?*type */
@@ -522,13 +578,20 @@ static Member *find_member(StructDef *sd, char *name) {
     return 0;
 }
 
+static Member *find_exn_member(ExnDef *ed, char *name) {
+    for (Member *m = ed->members; m; m = m->next)
+        if (!strcmp(m->name, name)) return m;
+    return 0;
+}
+
 static int is_pointer(Type *t) { return t && t->kind == TY_PTR; }
 static int is_opt_pointer(Type *t) { return t && t->kind == TY_OPT_PTR; }
 static int is_any_pointer(Type *t) { return is_pointer(t) || is_opt_pointer(t); }
 static int is_array(Type *t) { return t && t->kind == TY_ARRAY; }
 static int is_struct(Type *t) { return t && t->kind == TY_STRUCT; }
 static int is_enum(Type *t) { return t && t->kind == TY_ENUM; }
-static int is_aggregate(Type *t) { return is_struct(t) || is_enum(t); }
+static int is_exn(Type *t) { return t && t->kind == TY_EXN; }
+static int is_aggregate(Type *t) { return is_struct(t) || is_enum(t) || is_exn(t); }
 static int is_i8(Type *t) { return t && t->kind == TY_I8; }
 static int is_int_ty(Type *t) { return t && t->kind == TY_INT; }
 static int is_bool_ty(Type *t) { return t && t->kind == TY_BOOL; }
@@ -538,6 +601,7 @@ static int type_size(Type *t) {
     if (is_struct(t) && t->struct_def) return t->struct_def->size;
     if (is_enum(t) && t->enum_def)
         return t->enum_def->size > 0 ? t->enum_def->size : 8;
+    if (is_exn(t) && t->exn_def) return t->exn_def->size;
     return t->size;
 }
 /* Aggregates larger than a register use a hidden pointer; size <= 8 travel in %rax. */
@@ -552,6 +616,7 @@ static int types_equal(Type *a, Type *b) {
     if (a->kind == TY_ARRAY) return a->array_len == b->array_len && types_equal(a->base, b->base);
     if (a->kind == TY_STRUCT) return a->struct_def == b->struct_def;
     if (a->kind == TY_ENUM) return a->enum_def == b->enum_def;
+    if (a->kind == TY_EXN) return a->exn_def == b->exn_def;
     return 1; /* int, i8, bool, noreturn */
 }
 
@@ -614,7 +679,8 @@ enum {
     ND_ASSIGN, ND_ADDR, ND_DEREF, ND_NOT, ND_NEG,
     ND_FUNCALL, ND_RETURN, ND_IF, ND_WHILE, ND_BLOCK, ND_EXPR_STMT,
     ND_LOGAND, ND_LOGOR, ND_MEMBER, ND_AS, ND_TRUNC, ND_NEW, ND_STRUCT_LIT,
-    ND_VARIANT_LIT, ND_MATCH, ND_MATCH_ARM, ND_NULL
+    ND_VARIANT_LIT, ND_MATCH, ND_MATCH_ARM, ND_NULL,
+    ND_RAISE, ND_TRY, ND_CATCH_ARM
 };
 
 typedef struct Node Node;
@@ -634,6 +700,7 @@ struct Node {
     Type *ty;
     Member *member;
     Variant *variant;
+    ExnDef *exn; /* ND_RAISE / ND_CATCH_ARM */
 };
 
 /* Typed null pointer literal (`null`), not integer 0. */
@@ -675,6 +742,7 @@ struct Function {
     int stack_size;
     Type *return_ty;
     Obj *sret; /* hidden *ReturnTy param when returning an aggregate */
+    ExnList *raises; /* checked exceptions this function may raise */
     Function *next;
 };
 
@@ -690,9 +758,47 @@ static int narrow_depth;
 static char *current_fn_name;
 static Type *current_return_ty;
 static Obj *current_sret;
+static Function *current_fn;
+/* Exceptions caught by enclosing try arms in the current function. */
+enum { CATCH_MAX = 64 };
+static ExnDef *catch_stack[CATCH_MAX];
+static int catch_depth;
 static int str_count;
 typedef struct StrLit { char *data; int len; int label; struct StrLit *next; } StrLit;
 static StrLit *str_lits;
+
+static int exn_in_list(ExnList *list, ExnDef *ed) {
+    for (ExnList *e = list; e; e = e->next)
+        if (e->exn == ed) return 1;
+    return 0;
+}
+
+static int exn_is_caught(ExnDef *ed) {
+    for (int i = 0; i < catch_depth; i++)
+        if (catch_stack[i] == ed) return 1;
+    return 0;
+}
+
+static int exn_is_allowed(ExnDef *ed) {
+    if (!ed) return 0;
+    if (exn_is_caught(ed)) return 1;
+    if (current_fn && exn_in_list(current_fn->raises, ed)) return 1;
+    return 0;
+}
+
+static void check_exn_allowed(ExnDef *ed, char *what) {
+    if (exn_is_allowed(ed)) return;
+    error("%s exception %s is not in raises and not caught", what, ed->name);
+}
+
+static void catch_push(ExnDef *ed) {
+    if (catch_depth >= CATCH_MAX) error("too many nested catch arms");
+    catch_stack[catch_depth++] = ed;
+}
+
+static void catch_reset(int depth) {
+    catch_depth = depth;
+}
 
 static Obj *find_obj(Obj *list, char *name) {
     for (Obj *o = list; o; o = o->next)
@@ -892,6 +998,11 @@ static Type *decl_spec(Token **rest, Token *tok) {
             *rest = tok->next;
             return enum_type(ed);
         }
+        ExnDef *xd = find_exn(name);
+        if (xd) {
+            *rest = tok->next;
+            return exn_type(xd);
+        }
         StructDef *sd = get_or_create_struct(name);
         *rest = tok->next;
         return struct_type(sd);
@@ -1024,6 +1135,45 @@ static Node *parse_struct_field_inits(Token **rest, Token *tok, Type *sty) {
         for (Node *i = head.next; i; i = i->next)
             if (i->member == m) found = 1;
         if (!found) error("struct literal missing field %s", m->name);
+    }
+    *rest = tok->next;
+    return head.next;
+}
+
+/* Field inits for `raise Exn { f: expr, ... }`. tok at `{`. */
+static Node *parse_exn_field_inits(Token **rest, Token *tok, ExnDef *ed) {
+    if (!ed->members) error("unit exception does not take fields");
+    tok = skip(tok, TK_LBRACE);
+    Node head = {0};
+    Node *cur = &head;
+    while (!equal(tok, TK_RBRACE)) {
+        if (cur != &head) tok = skip(tok, TK_COMMA);
+        if (!equal(tok, TK_IDENT)) error("expected field name in exception payload");
+        char *fname = tokstr(tok);
+        tok = skip(tok->next, TK_COLON);
+        Member *m = find_exn_member(ed, fname);
+        if (!m) error("unknown field %s", fname);
+        for (Node *i = head.next; i; i = i->next)
+            if (i->member == m) error("duplicate field %s", fname);
+        Node *init = new_node(ND_EXPR_STMT);
+        init->member = m;
+        if (equal(tok, TK_UNINITIALIZED)) {
+            init->lhs = 0;
+            tok = tok->next;
+        } else {
+            init->lhs = expr(&tok, tok);
+            add_type(init->lhs);
+            Type *lt = decay(m->ty);
+            if (!assignable(lt, init->lhs))
+                error("field initializer type mismatch");
+        }
+        cur = cur->next = init;
+    }
+    for (Member *m = ed->members; m; m = m->next) {
+        int found = 0;
+        for (Node *i = head.next; i; i = i->next)
+            if (i->member == m) found = 1;
+        if (!found) error("exception payload missing field %s", m->name);
     }
     *rest = tok->next;
     return head.next;
@@ -1242,11 +1392,17 @@ static Node *postfix(Token **rest, Token *tok) {
             }
             if (is_pointer(t) && is_struct(t->base))
                 sty = t->base;
-            else if (is_struct(n->ty))
+            else if (is_pointer(t) && is_exn(t->base))
+                sty = t->base;
+            else if (is_struct(n->ty) || is_exn(n->ty))
                 sty = n->ty;
             else
                 error("member access on non-struct");
-            Member *m = find_member(sty->struct_def, name);
+            Member *m = 0;
+            if (is_exn(sty))
+                m = find_exn_member(sty->exn_def, name);
+            else
+                m = find_member(sty->struct_def, name);
             if (!m) error("unknown member: %s", name);
             Node *mem = new_node(ND_MEMBER);
             mem->lhs = n;
@@ -1324,6 +1480,20 @@ static void add_type(Node *n) {
                 narrow_reset(nd);
             }
         }
+        return;
+    }
+
+    /* try body sees catch arms as handled; type arms afterward. */
+    if (n->kind == ND_TRY) {
+        int cd = catch_depth;
+        for (Node *arm = n->args; arm; arm = arm->next) {
+            if (!arm->exn) error("catch arm missing exception");
+            catch_push(arm->exn);
+        }
+        add_type(n->body);
+        catch_reset(cd);
+        for (Node *arm = n->args; arm; arm = arm->next)
+            add_type(arm);
         return;
     }
 
@@ -1513,12 +1683,12 @@ static void add_type(Node *n) {
                 if (!strcmp(g->name, n->funcname)) { fn = g; break; }
             if (fn && fn->return_ty)
                 n->ty = fn->return_ty;
-            else if (f && f->is_func)
-                n->ty = f->ty; /* null if function does not return */
+            else if (f && f->is_func && f->ty)
+                n->ty = f->ty;
             else if (!strcmp(n->funcname, "exit"))
                 n->ty = ty_noreturn;
             else
-                n->ty = ty_int; /* undeclared/builtin */
+                n->ty = ty_int; /* void / undeclared / builtin — non-null marks typed */
             if (fn) {
                 int i = 0;
                 for (Node *a = n->args; a; a = a->next, i++) {
@@ -1530,8 +1700,23 @@ static void add_type(Node *n) {
                         error("argument type mismatch");
                     }
                 }
+                for (ExnList *e = fn->raises; e; e = e->next)
+                    check_exn_allowed(e->exn, "call raises");
             }
         }
+        return;
+    case ND_RAISE:
+        if (!n->exn) error("raise missing exception");
+        check_exn_allowed(n->exn, "raise");
+        for (Node *a = n->args; a; a = a->next) {
+            if (a->lhs) add_type(a->lhs);
+        }
+        n->ty = ty_noreturn;
+        return;
+    case ND_TRY:
+        return;
+    case ND_CATCH_ARM:
+        add_type(n->body);
         return;
     case ND_RETURN:
         if (is_noreturn_ty(current_return_ty))
@@ -1643,6 +1828,71 @@ static Node *stmt(Token **rest, Token *tok) {
         else
             tok = tok->next;
         *rest = skip(tok, TK_SEMI);
+        return n;
+    }
+    if (equal(tok, TK_RAISE)) {
+        tok = tok->next;
+        if (!equal(tok, TK_IDENT)) error("expected exception name after raise");
+        char *ename = tokstr(tok);
+        ExnDef *ed = find_exn(ename);
+        if (!ed) error("unknown exception %s", ename);
+        tok = tok->next;
+        Node *n = new_node(ND_RAISE);
+        n->exn = ed;
+        if (equal(tok, TK_LBRACE)) {
+            n->args = parse_exn_field_inits(&tok, tok, ed);
+        } else if (ed->members) {
+            error("exception %s requires field initializers", ename);
+        }
+        *rest = skip(tok, TK_SEMI);
+        return n;
+    }
+    if (equal(tok, TK_TRY)) {
+        Node *n = new_node(ND_TRY);
+        tok = tok->next;
+        n->body = compound_stmt(&tok, tok);
+        Node arms = {0};
+        Node *acur = &arms;
+        if (!equal(tok, TK_WITH)) error("try requires at least one with arm");
+        while (equal(tok, TK_WITH)) {
+            tok = tok->next;
+            if (!equal(tok, TK_IDENT)) error("expected exception name in with arm");
+            char *ename = tokstr(tok);
+            ExnDef *ed = find_exn(ename);
+            if (!ed) error("unknown exception %s", ename);
+            tok = tok->next;
+            Node *arm = new_node(ND_CATCH_ARM);
+            arm->exn = ed;
+            for (Node *a = arms.next; a; a = a->next)
+                if (a->exn == ed) error("duplicate with arm for %s", ename);
+            enter_scope();
+            if (equal(tok, TK_LPAREN)) {
+                tok = tok->next;
+                if (!equal(tok, TK_IDENT)) error("expected binder name");
+                char *bname = tokstr(tok);
+                tok = tok->next;
+                tok = skip(tok, TK_RPAREN);
+                Obj *obj = new_obj(bname, 1);
+                obj->ty = exn_type(ed);
+                arm->var = obj;
+            } else if (ed->members) {
+                /* allow unit-style `Name ->` only for unit exceptions;
+                   payload exceptions should bind Name(x) */
+                error("payload exception %s requires Name(x) binder", ename);
+            }
+            tok = skip(tok, TK_ARROW);
+            arm->body = compound_stmt(&tok, tok);
+            leave_scope();
+            acur = acur->next = arm;
+        }
+        n->args = arms.next;
+        /* jmp_buf local for this try */
+        {
+            Obj *buf = new_obj(".trybuf", 1);
+            buf->ty = array_of(ty_i8, L8_JMP_BUF_SIZE);
+            n->var = buf;
+        }
+        *rest = tok;
         return n;
     }
     if (equal(tok, TK_IF)) {
@@ -1835,12 +2085,13 @@ static Node *compound_stmt(Token **rest, Token *tok) {
     return n;
 }
 
-/* True if executing n never falls through (return or noreturn call). */
+/* True if executing n never falls through (return, raise, or noreturn call). */
 static int stmt_diverges(Node *n) {
     if (!n) return 0;
     add_type(n);
     switch (n->kind) {
     case ND_RETURN:
+    case ND_RAISE:
         return 1;
     case ND_EXPR_STMT:
         return n->lhs && is_noreturn_ty(n->lhs->ty);
@@ -1856,6 +2107,12 @@ static int stmt_diverges(Node *n) {
             if (!stmt_diverges(arm->body)) return 0;
         }
         return 1;
+    case ND_TRY:
+        if (!stmt_diverges(n->body)) return 0;
+        for (Node *arm = n->args; arm; arm = arm->next) {
+            if (!stmt_diverges(arm->body)) return 0;
+        }
+        return 1;
     default:
         return 0;
     }
@@ -1865,8 +2122,10 @@ static Function *parse_function(Token **rest, Token *tok, char *name) {
     locals = 0;
     scope_depth = 0;
     narrow_depth = 0;
+    catch_depth = 0;
     Function *fn = calloc(1, sizeof(Function));
     fn->name = name;
+    current_fn = fn;
     tok = skip(tok, TK_LPAREN);
     while (!equal(tok, TK_RPAREN)) {
         if (fn->nparams) tok = skip(tok, TK_COMMA);
@@ -1874,6 +2133,25 @@ static Function *parse_function(Token **rest, Token *tok, char *name) {
         fn->params[fn->nparams++] = parse_decl(&tok, tok, 1);
     }
     tok = tok->next;
+    /* raises T(, T)* */
+    if (equal(tok, TK_RAISES)) {
+        tok = tok->next;
+        ExnList **tail = &fn->raises;
+        for (;;) {
+            if (!equal(tok, TK_IDENT)) error("expected exception type after raises");
+            char *ename = tokstr(tok);
+            ExnDef *ed = find_exn(ename);
+            if (!ed) error("unknown exception %s", ename);
+            if (exn_in_list(fn->raises, ed)) error("duplicate raises %s", ename);
+            ExnList *e = calloc(1, sizeof(ExnList));
+            e->exn = ed;
+            *tail = e;
+            tail = &e->next;
+            tok = tok->next;
+            if (!equal(tok, TK_COMMA)) break;
+            tok = tok->next;
+        }
+    }
     fn->return_ty = 0;
     if (equal(tok, TK_COLON)) {
         tok = tok->next;
@@ -1886,6 +2164,7 @@ static Function *parse_function(Token **rest, Token *tok, char *name) {
     }
     fn->body = compound_stmt(&tok, tok);
     fn->locals = locals;
+    current_fn = 0;
     *rest = tok;
     return fn;
 }
@@ -1938,6 +2217,32 @@ static Variant *parse_variant(Token **rest, Token *tok, int tag, char *enum_name
     }
     *rest = tok;
     return v;
+}
+
+static void parse_exception_def(Token **rest, Token *tok) {
+    tok = tok->next; /* exception */
+    if (!equal(tok, TK_IDENT)) error("expected exception name");
+    char *name = tokstr(tok);
+    tok = tok->next;
+    if (find_exn(name) || find_struct(name) || find_enum(name))
+        error("redefinition of %s", name);
+    ExnDef *ed = calloc(1, sizeof(ExnDef));
+    ed->name = name;
+    ed->tag = next_exn_tag++;
+    ed->next = exn_defs;
+    exn_defs = ed;
+    if (equal(tok, TK_LBRACE)) {
+        int sz = 0;
+        ed->members = parse_field_list(&tok, tok->next, 0, &sz);
+        ed->size = sz;
+        tok = skip(tok, TK_SEMI);
+    } else {
+        tok = skip(tok, TK_SEMI);
+        ed->members = 0;
+        ed->size = 0;
+    }
+    exn_type(ed);
+    *rest = tok;
 }
 
 static void parse_type_def(Token **rest, Token *tok) {
@@ -2031,6 +2336,10 @@ static void parse_program(Token *tok) {
             parse_type_def(&tok, tok);
             continue;
         }
+        if (equal(tok, TK_EXCEPTION)) {
+            parse_exception_def(&tok, tok);
+            continue;
+        }
         /* name-first: name ( ... ) : type { }   or   name : type ; */
         if (!equal(tok, TK_IDENT)) error("expected identifier");
         char *name = tokstr(tok);
@@ -2061,10 +2370,12 @@ static void check_noreturn_functions(void) {
     for (Function *fn = functions; fn; fn = fn->next) {
         if (!is_noreturn_ty(fn->return_ty)) continue;
         current_return_ty = fn->return_ty;
+        current_fn = fn;
         if (!stmt_diverges(fn->body))
             error("noreturn function may return");
     }
     current_return_ty = 0;
+    current_fn = 0;
 }
 
 /* ---------- codegen ---------- */
@@ -2163,7 +2474,7 @@ static void gen_addr(Node *n) {
     if (n->kind == ND_MEMBER) {
         add_type(n->lhs);
         Type *t = decay(n->lhs->ty);
-        if (is_pointer(t) && is_struct(t->base))
+        if (is_pointer(t) && (is_struct(t->base) || is_exn(t->base)))
             gen_expr(n->lhs);
         else
             gen_addr(n->lhs);
@@ -2552,6 +2863,59 @@ static void gen_stmt(Node *n) {
         printf("  add $16, %%rsp\n");
         return;
     }
+    case ND_RAISE: {
+        ExnDef *ed = n->exn;
+        if (ed->members) {
+            int esz = ed->size > 0 ? ed->size : 8;
+            printf("  mov $%d, %%rdi\n", esz);
+            printf("  call malloc\n");
+            printf("  push %%rbx\n");
+            printf("  mov %%rax, %%rbx\n");
+            gen_struct_inits(n->args);
+            printf("  mov %%rbx, %%rsi\n");
+            printf("  pop %%rbx\n");
+        } else {
+            printf("  mov $0, %%rsi\n");
+        }
+        printf("  mov $%d, %%rdi\n", ed->tag);
+        printf("  call l8_raise\n");
+        return;
+    }
+    case ND_TRY: {
+        int l = new_label();
+        /* l8_try_begin(buf) */
+        printf("  lea %d(%%rbp), %%rdi\n", n->var->offset);
+        printf("  call l8_try_begin\n");
+        printf("  cmp $0, %%rax\n");
+        printf("  jne .L.catch%d\n", l);
+        gen_stmt(n->body);
+        printf("  call l8_try_end\n");
+        printf("  jmp .L.tryend%d\n", l);
+        printf(".L.catch%d:\n", l);
+        for (Node *arm = n->args; arm; arm = arm->next) {
+            int la = new_label();
+            printf("  mov l8_exc_tag(%%rip), %%rax\n");
+            printf("  cmp $%d, %%rax\n", arm->exn->tag);
+            printf("  jne .L.arm%d\n", la);
+            if (arm->var) {
+                int psz = arm->exn->size;
+                if (psz > 0) {
+                    printf("  mov l8_exc_ptr(%%rip), %%rsi\n");
+                    printf("  lea %d(%%rbp), %%rdi\n", arm->var->offset);
+                    emit_memcpy(psz);
+                }
+            }
+            gen_stmt(arm->body);
+            printf("  jmp .L.tryend%d\n", l);
+            printf(".L.arm%d:\n", la);
+        }
+        /* no matching arm: re-raise */
+        printf("  mov l8_exc_tag(%%rip), %%rdi\n");
+        printf("  mov l8_exc_ptr(%%rip), %%rsi\n");
+        printf("  call l8_raise\n");
+        printf(".L.tryend%d:\n", l);
+        return;
+    }
     default:
         error("invalid statement");
     }
@@ -2605,6 +2969,7 @@ static void emit_text(void) {
         current_fn_name = fn->name;
         current_return_ty = fn->return_ty;
         current_sret = fn->sret;
+        current_fn = fn;
         printf(".globl %s\n", fn->name);
         printf("%s:\n", fn->name);
         printf("  push %%rbp\n");

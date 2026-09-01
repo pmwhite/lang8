@@ -18,6 +18,13 @@
 // `new T[n]` allocates n·sizeof(T) bytes and yields *T.
 // `noreturn` is only valid as a function return type; `exit` is a noreturn builtin.
 // A noreturn function's body must diverge (return is illegal; call exit/another noreturn).
+// Checked exceptions (aborting; no resume):
+//   `exception Empty;` / `exception NotFound { name: *i8 };`
+//   `name(...) raises E1, E2: Ret { ... }` — Order: `) [raises T(, T)*] [: RetTy] {`
+//   `raise Empty;` / `raise NotFound { name: s };`
+//   `try { ... } with NotFound(e) -> { ... } with Empty -> { ... }`
+// Runtime: l8_try_begin / l8_try_end / l8_raise / l8_exc_tag / l8_exc_ptr
+// The self-hosted compiler reports failures via `exception Error` (caught in main), not exit.
 
 type Type =
     | Int
@@ -28,7 +35,8 @@ type Type =
     | OptPtr { base: *Type; }
     | Array { base: *Type; len: int; }
     | Record { def: *StructDef; }
-    | Enum { def: *EnumDef; };
+    | Enum { def: *EnumDef; }
+    | Exn { def: *ExnDef; };
 
 type Member = {
     name: *i8;
@@ -60,6 +68,20 @@ type EnumDef = {
     size: int;
     ty: ?*Type;
     next: ?*EnumDef;
+};
+
+type ExnDef = {
+    name: *i8;
+    tag: int;
+    members: ?*Member;
+    size: int;
+    ty: ?*Type;
+    next: ?*ExnDef;
+};
+
+type ExnList = {
+    exn: *ExnDef;
+    next: ?*ExnList;
 };
 
 type TokKind =
@@ -114,7 +136,12 @@ type TokKind =
     | Match
     | Pipe
     | Arrow
-    | Question;
+    | Question
+    | Exception
+    | Raises
+    | Raise
+    | Try
+    | With;
 
 type Token = {
     kind: TokKind;
@@ -160,7 +187,10 @@ type NodeKind =
     | StructLit { args: ?*Node; }
     | VariantLit { variant: *Variant; val: int; args: ?*Node; }
     | Match { cond: *Node; body: ?*Node; }
-    | MatchArm { variant: ?*Variant; args: ?*Node; body: *Node; };
+    | MatchArm { variant: ?*Variant; args: ?*Node; body: *Node; }
+    | Raise { exn: *ExnDef; args: ?*Node; }
+    | Try { body: *Node; arms: ?*Node; buf: *Obj; }
+    | CatchArm { exn: *ExnDef; binder: ?*Obj; body: *Node; };
 
 type Node = {
     kind: NodeKind;
@@ -192,6 +222,7 @@ type Function = {
     stack_size: int;
     return_ty: ?*Type;
     sret: ?*Obj;
+    raises_list: ?*ExnList;
     next: ?*Function;
 };
 
@@ -210,6 +241,8 @@ scope_depth: int;
 functions: ?*Function;
 struct_defs: ?*StructDef;
 enum_defs: ?*EnumDef;
+exn_defs: ?*ExnDef;
+next_exn_tag: int;
 field_list_size: int;
 ty_int: *Type;
 ty_i8: *Type;
@@ -221,6 +254,7 @@ label_id: int;
 current_fn_name: ?*i8;
 current_return_ty: ?*Type;
 current_sret: ?*Obj;
+current_fn: ?*Function;
 type NarrowFrame = {
     var: ?*Obj;
     ty: ?*Type;
@@ -229,7 +263,18 @@ type NarrowFrame = {
 
 narrow_top: ?*NarrowFrame;
 
-streq_n(a: *i8, b: *i8, n: int): bool {
+type CatchFrame = {
+    exn: *ExnDef;
+    next: ?*CatchFrame;
+};
+
+catch_top: ?*CatchFrame;
+
+L8_JMP_BUF_SIZE: int;
+
+exception Error { msg: *i8 };
+
+streq_n(a: *i8, b: *i8, n: int) raises Error: bool {
     i: int = 0;
     while (i < n) {
         if (a[i] != b[i]) {
@@ -240,7 +285,7 @@ streq_n(a: *i8, b: *i8, n: int): bool {
     return true;
 }
 
-streq(a: *i8, b: *i8): bool {
+streq(a: *i8, b: *i8) raises Error: bool {
     i: int = 0;
     while (true) {
         if (a[i] != b[i]) {
@@ -254,7 +299,7 @@ streq(a: *i8, b: *i8): bool {
     return false;
 }
 
-memcpy(dst: *i8, src: *i8, n: int): *i8 {
+memcpy(dst: *i8, src: *i8, n: int) raises Error: *i8 {
     i: int = 0;
     while (i < n) {
         dst[i] = src[i];
@@ -263,7 +308,7 @@ memcpy(dst: *i8, src: *i8, n: int): *i8 {
     return dst;
 }
 
-strdup_n(s: *i8, n: int): *i8 {
+strdup_n(s: *i8, n: int) raises Error: *i8 {
     raw: *i8 = new i8[n + 16];
     p: *int = raw as *int;
     p.* = n;
@@ -273,33 +318,33 @@ strdup_n(s: *i8, n: int): *i8 {
     return data;
 }
 
-is_space(c: i8): bool {
+is_space(c: i8) raises Error: bool {
     return c == ' ' || c == '\n' || c == '\r' || c == '\t';
 }
 
-is_digit(c: i8): bool {
+is_digit(c: i8) raises Error: bool {
     return c >= '0' && c <= '9';
 }
 
-is_ident1(c: i8): bool {
+is_ident1(c: i8) raises Error: bool {
     if (c >= 'a' && c <= 'z') { return true; }
     if (c >= 'A' && c <= 'Z') { return true; }
     return c == '_';
 }
 
-is_ident2(c: i8): bool {
+is_ident2(c: i8) raises Error: bool {
     return is_ident1(c) || is_digit(c);
 }
 
-emit(s: *i8) {
+emit(s: *i8)  raises Error {
     write(1, s, len(s));
 }
 
-emit_ch(c: i8) {
+emit_ch(c: i8)  raises Error {
     write(1, &c, 1);
 }
 
-emit_num(n: int) {
+emit_num(n: int)  raises Error {
     buf: i8[32] = uninitialized;
     neg: int = 0;
     if (n < 0) {
@@ -325,16 +370,13 @@ emit_num(n: int) {
     }
 }
 
-error(msg: *i8): noreturn {
-    write(2, "error: ", len("error: "));
-    write(2, msg, len(msg));
-    write(2, "\n", len("\n"));
-    exit(1);
+error(msg: *i8) raises Error: noreturn {
+    raise Error { msg: msg };
 }
 
 token_eof: *Token;
 
-init_dummies() {
+init_dummies()  raises Error {
     token_eof = new Token {
         kind: TokKind.Eof,
         val: 0,
@@ -345,63 +387,75 @@ init_dummies() {
     token_eof.next = token_eof;
 }
 
-expect_node(n: ?*Node, msg: *i8): *Node {
+expect_node(n: ?*Node, msg: *i8) raises Error: *Node {
     if (n != null) {
         return n;
     }
     error(msg);
 }
 
-expect_obj(o: ?*Obj, msg: *i8): *Obj {
+expect_obj(o: ?*Obj, msg: *i8) raises Error: *Obj {
     if (o != null) {
         return o;
     }
     error(msg);
 }
 
-expect_type(t: ?*Type, msg: *i8): *Type {
+expect_type(t: ?*Type, msg: *i8) raises Error: *Type {
     if (t != null) {
         return t;
     }
     error(msg);
 }
 
-expect_member(m: ?*Member, msg: *i8): *Member {
+expect_member(m: ?*Member, msg: *i8) raises Error: *Member {
     if (m != null) {
         return m;
     }
     error(msg);
 }
 
-expect_variant(v: ?*Variant, msg: *i8): *Variant {
+expect_exn(e: ?*ExnDef, msg: *i8) raises Error: *ExnDef {
+    if (e != null) {
+        return e;
+    }
+    error(msg);
+}
+
+expect_variant(v: ?*Variant, msg: *i8) raises Error: *Variant {
     if (v != null) {
         return v;
     }
     error(msg);
 }
 
-expect_function(f: ?*Function, msg: *i8): *Function {
+expect_function(f: ?*Function, msg: *i8) raises Error: *Function {
     if (f != null) {
         return f;
     }
     error(msg);
 }
 
-expect_str(s: ?*i8, msg: *i8): *i8 {
+expect_str(s: ?*i8, msg: *i8) raises Error: *i8 {
     if (s != null) {
         return s;
     }
     error(msg);
 }
 
-init_runtime() {
+init_runtime()  raises Error {
     ty_int = new Type.Int;
     ty_i8 = new Type.I8;
     ty_bool = new Type.Bool;
     ty_noreturn = new Type.Noreturn;
+    exn_defs = null;
+    next_exn_tag = 1;
+    catch_top = null;
+    current_fn = null;
+    L8_JMP_BUF_SIZE = 72;
 }
 
-reg_name(i: int): *i8 {
+reg_name(i: int) raises Error: *i8 {
     if (i == 0) { return "%rdi"; }
     if (i == 1) { return "%rsi"; }
     if (i == 2) { return "%rdx"; }
@@ -410,7 +464,7 @@ reg_name(i: int): *i8 {
     return "%r9";
 }
 
-read_file(path: *i8): *i8 {
+read_file(path: *i8) raises Error: *i8 {
     fd: int = open(path, 0, 0);
     if (fd < 0) {
         error("cannot open file");
@@ -437,7 +491,7 @@ read_file(path: *i8): *i8 {
     return buf;
 }
 
-type_size(t: ?*Type): int {
+type_size(t: ?*Type) raises Error: int {
     if (t != null) {
         match t.* {
             Int -> { return 8; }
@@ -453,13 +507,14 @@ type_size(t: ?*Type): int {
                 }
                 return def.size;
             }
+            Exn { def } -> { return def.size; }
             Noreturn -> { return 0; }
         }
     }
     return 0;
 }
 
-type_base(t: ?*Type): *Type {
+type_base(t: ?*Type) raises Error: *Type {
     if (t != null) {
         match t.* {
             Ptr { base } -> { return base; }
@@ -471,7 +526,7 @@ type_base(t: ?*Type): *Type {
     error("not a pointer or array");
 }
 
-type_array_len(t: ?*Type): int {
+type_array_len(t: ?*Type) raises Error: int {
     if (t != null) {
         match t.* {
             Array { base, len } -> { return len; }
@@ -481,7 +536,7 @@ type_array_len(t: ?*Type): int {
     error("not an array");
 }
 
-type_struct_def(t: ?*Type): *StructDef {
+type_struct_def(t: ?*Type) raises Error: *StructDef {
     if (t != null) {
         match t.* {
             Record { def } -> { return def; }
@@ -491,7 +546,7 @@ type_struct_def(t: ?*Type): *StructDef {
     error("not a record type");
 }
 
-type_enum_def(t: ?*Type): *EnumDef {
+type_enum_def(t: ?*Type) raises Error: *EnumDef {
     if (t != null) {
         match t.* {
             Enum { def } -> { return def; }
@@ -501,19 +556,29 @@ type_enum_def(t: ?*Type): *EnumDef {
     error("not an enum type");
 }
 
-ptr_to(base: *Type): *Type {
+type_exn_def(t: ?*Type) raises Error: *ExnDef {
+    if (t != null) {
+        match t.* {
+            Exn { def } -> { return def; }
+            _ -> { error("not an exception type"); }
+        }
+    }
+    error("not an exception type");
+}
+
+ptr_to(base: *Type) raises Error: *Type {
     return new Type.Ptr { base: base };
 }
 
-opt_ptr_to(base: *Type): *Type {
+opt_ptr_to(base: *Type) raises Error: *Type {
     return new Type.OptPtr { base: base };
 }
 
-array_of(base: *Type, len: int): *Type {
+array_of(base: *Type, len: int) raises Error: *Type {
     return new Type.Array { base: base, len: len };
 }
 
-struct_type(sd: *StructDef): *Type {
+struct_type(sd: *StructDef) raises Error: *Type {
     existing: ?*Type = sd.ty;
     if (existing != null) {
         return existing;
@@ -523,7 +588,7 @@ struct_type(sd: *StructDef): *Type {
     return p;
 }
 
-enum_type(ed: *EnumDef): *Type {
+enum_type(ed: *EnumDef) raises Error: *Type {
     existing: ?*Type = ed.ty;
     if (existing != null) {
         return existing;
@@ -533,7 +598,17 @@ enum_type(ed: *EnumDef): *Type {
     return p;
 }
 
-find_struct(name: *i8): ?*StructDef {
+exn_type(ed: *ExnDef) raises Error: *Type {
+    existing: ?*Type = ed.ty;
+    if (existing != null) {
+        return existing;
+    }
+    p: *Type = new Type.Exn { def: ed };
+    ed.ty = p;
+    return p;
+}
+
+find_struct(name: *i8) raises Error: ?*StructDef {
     s: ?*StructDef = struct_defs;
     while (s != null) {
         if (streq(s.name, name)) {
@@ -544,7 +619,7 @@ find_struct(name: *i8): ?*StructDef {
     return null;
 }
 
-find_enum(name: *i8): ?*EnumDef {
+find_enum(name: *i8) raises Error: ?*EnumDef {
     e: ?*EnumDef = enum_defs;
     while (e != null) {
         if (streq(e.name, name)) {
@@ -555,7 +630,18 @@ find_enum(name: *i8): ?*EnumDef {
     return null;
 }
 
-remove_struct(name: *i8) {
+find_exn(name: *i8) raises Error: ?*ExnDef {
+    e: ?*ExnDef = exn_defs;
+    while (e != null) {
+        if (streq(e.name, name)) {
+            return e;
+        }
+        e = e.next;
+    }
+    return null;
+}
+
+remove_struct(name: *i8)  raises Error {
     prev: ?*StructDef = null;
     s: ?*StructDef = struct_defs;
     while (s != null) {
@@ -572,7 +658,7 @@ remove_struct(name: *i8) {
     }
 }
 
-get_or_create_struct(name: *i8): *StructDef {
+get_or_create_struct(name: *i8) raises Error: *StructDef {
     sd: ?*StructDef = find_struct(name);
     if (sd != null) {
         return sd;
@@ -588,7 +674,7 @@ get_or_create_struct(name: *i8): *StructDef {
     return created;
 }
 
-get_or_create_enum(name: *i8): *EnumDef {
+get_or_create_enum(name: *i8) raises Error: *EnumDef {
     ed: ?*EnumDef = find_enum(name);
     if (ed != null) {
         return ed;
@@ -604,7 +690,7 @@ get_or_create_enum(name: *i8): *EnumDef {
     return created;
 }
 
-rebind_struct_stub_to_enum(sd: *StructDef, ed: *EnumDef) {
+rebind_struct_stub_to_enum(sd: *StructDef, ed: *EnumDef)  raises Error {
     t: ?*Type = sd.ty;
     if (t != null) {
         t.* = Type.Enum { def: ed };
@@ -612,7 +698,7 @@ rebind_struct_stub_to_enum(sd: *StructDef, ed: *EnumDef) {
     }
 }
 
-find_variant(ed: *EnumDef, name: *i8): ?*Variant {
+find_variant(ed: *EnumDef, name: *i8) raises Error: ?*Variant {
     v: ?*Variant = ed.variants;
     while (v != null) {
         if (streq(v.name, name)) {
@@ -623,11 +709,11 @@ find_variant(ed: *EnumDef, name: *i8): ?*Variant {
     return null;
 }
 
-enum_field_offset(m: *Member): int {
+enum_field_offset(m: *Member) raises Error: int {
     return 8 + m.offset;
 }
 
-variant_payload_name(enum_name: *i8, var_name: *i8): *i8 {
+variant_payload_name(enum_name: *i8, var_name: *i8) raises Error: *i8 {
     n: int = len(enum_name) + 1 + len(var_name);
     raw: *i8 = new i8[n + 16];
     p: *int = raw as *int;
@@ -651,7 +737,7 @@ variant_payload_name(enum_name: *i8, var_name: *i8): *i8 {
     return data;
 }
 
-is_type_name(): bool {
+is_type_name() raises Error: bool {
     if (!equal(TokKind.Ident)) {
         return false;
     }
@@ -662,10 +748,13 @@ is_type_name(): bool {
     if (find_enum(name) != null) {
         return true;
     }
+    if (find_exn(name) != null) {
+        return true;
+    }
     return false;
 }
 
-starts_type(): bool {
+starts_type() raises Error: bool {
     if (equal(TokKind.Int) || equal(TokKind.I8) || equal(TokKind.Bool) || is_type_name()) {
         return true;
     }
@@ -697,7 +786,7 @@ starts_type(): bool {
             }
             if (t.kind == TokKind.Ident) {
                 n: *i8 = strdup_n(t.str, t.len);
-                if (find_struct(n) != null || find_enum(n) != null) {
+                if (find_struct(n) != null || find_enum(n) != null || find_exn(n) != null) {
                     return true;
                 }
             }
@@ -706,7 +795,7 @@ starts_type(): bool {
     return false;
 }
 
-find_member(sd: *StructDef, name: *i8): ?*Member {
+find_member(sd: *StructDef, name: *i8) raises Error: ?*Member {
     m: ?*Member = sd.members;
     while (m != null) {
         if (streq(m.name, name)) {
@@ -717,7 +806,69 @@ find_member(sd: *StructDef, name: *i8): ?*Member {
     return null;
 }
 
-is_pointer(t: ?*Type): bool {
+find_exn_member(ed: *ExnDef, name: *i8) raises Error: ?*Member {
+    m: ?*Member = ed.members;
+    while (m != null) {
+        if (streq(m.name, name)) {
+            return m;
+        }
+        m = m.next;
+    }
+    return null;
+}
+
+exn_in_list(list: ?*ExnList, ed: *ExnDef) raises Error: bool {
+    e: ?*ExnList = list;
+    while (e != null) {
+        if (e.exn == ed) {
+            return true;
+        }
+        e = e.next;
+    }
+    return false;
+}
+
+exn_is_caught(ed: *ExnDef) raises Error: bool {
+    f: ?*CatchFrame = catch_top;
+    while (f != null) {
+        if (f.exn == ed) {
+            return true;
+        }
+        f = f.next;
+    }
+    return false;
+}
+
+exn_is_allowed(ed: *ExnDef) raises Error: bool {
+    if (exn_is_caught(ed)) {
+        return true;
+    }
+    fn: ?*Function = current_fn;
+    if (fn != null) {
+        if (exn_in_list(fn.raises_list, ed)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+check_exn_allowed(ed: *ExnDef, what: *i8)  raises Error {
+    if (exn_is_allowed(ed)) {
+        return;
+    }
+    error("exception not in raises and not caught");
+}
+
+catch_push(ed: *ExnDef)  raises Error {
+    f: *CatchFrame = new CatchFrame { exn: ed, next: catch_top };
+    catch_top = f;
+}
+
+catch_reset(saved: ?*CatchFrame)  raises Error {
+    catch_top = saved;
+}
+
+is_pointer(t: ?*Type) raises Error: bool {
     if (t != null) {
         match t.* {
             Ptr { base } -> { return true; }
@@ -727,7 +878,7 @@ is_pointer(t: ?*Type): bool {
     return false;
 }
 
-is_opt_pointer(t: ?*Type): bool {
+is_opt_pointer(t: ?*Type) raises Error: bool {
     if (t != null) {
         match t.* {
             OptPtr { base } -> { return true; }
@@ -737,11 +888,11 @@ is_opt_pointer(t: ?*Type): bool {
     return false;
 }
 
-is_any_pointer(t: ?*Type): bool {
+is_any_pointer(t: ?*Type) raises Error: bool {
     return is_pointer(t) || is_opt_pointer(t);
 }
 
-is_array(t: ?*Type): bool {
+is_array(t: ?*Type) raises Error: bool {
     if (t != null) {
         match t.* {
             Array { base, len } -> { return true; }
@@ -751,7 +902,7 @@ is_array(t: ?*Type): bool {
     return false;
 }
 
-is_struct_ty(t: ?*Type): bool {
+is_struct_ty(t: ?*Type) raises Error: bool {
     if (t != null) {
         match t.* {
             Record { def } -> { return true; }
@@ -761,7 +912,7 @@ is_struct_ty(t: ?*Type): bool {
     return false;
 }
 
-is_enum_ty(t: ?*Type): bool {
+is_enum_ty(t: ?*Type) raises Error: bool {
     if (t != null) {
         match t.* {
             Enum { def } -> { return true; }
@@ -771,12 +922,22 @@ is_enum_ty(t: ?*Type): bool {
     return false;
 }
 
-passes_by_ref(t: *Type): bool {
-    return (is_struct_ty(t) || is_enum_ty(t)) && type_size(t) > 8;
+is_exn_ty(t: ?*Type) raises Error: bool {
+    if (t != null) {
+        match t.* {
+            Exn { def } -> { return true; }
+            _ -> { return false; }
+        }
+    }
+    return false;
+}
+
+passes_by_ref(t: *Type) raises Error: bool {
+    return (is_struct_ty(t) || is_enum_ty(t) || is_exn_ty(t)) && type_size(t) > 8;
 }
 
 
-is_null_node(n: ?*Node): bool {
+is_null_node(n: ?*Node) raises Error: bool {
     if (n != null) {
         match n.kind {
             Null -> { return true; }
@@ -786,68 +947,83 @@ is_null_node(n: ?*Node): bool {
     return false;
 }
 
-binder_name(n: *Node): *i8 {
+binder_name(n: *Node) raises Error: *i8 {
     match n.kind {
         Var { var, name, member } -> { return expect_str(name, "missing binder name"); }
         _ -> { error("expected binder"); }
     }
 }
 
-node_var(n: *Node): ?*Obj {
+node_var(n: *Node) raises Error: ?*Obj {
     match n.kind {
         Var { var, name, member } -> { return var; }
         _ -> { return null; }
     }
 }
 
-node_var_member(n: *Node): ?*Member {
+node_var_member(n: *Node) raises Error: ?*Member {
     match n.kind {
         Var { var, name, member } -> { return member; }
         _ -> { return null; }
     }
 }
 
-resolve_binder(n: *Node, o: *Obj, m: ?*Member) {
+resolve_binder(n: *Node, o: *Obj, m: ?*Member)  raises Error {
     n.kind = NodeKind.Var { var: o, name: null, member: m };
     n.ty = o.ty;
 }
 
-field_init_member(n: *Node): *Member {
+field_init_member(n: *Node) raises Error: *Member {
     match n.kind {
         FieldInit { member, lhs } -> { return member; }
         _ -> { error("expected field init"); }
     }
 }
 
-field_init_lhs(n: *Node): ?*Node {
+field_init_lhs(n: *Node) raises Error: ?*Node {
     match n.kind {
         FieldInit { member, lhs } -> { return lhs; }
         _ -> { return null; }
     }
 }
 
-arm_variant(n: *Node): ?*Variant {
+arm_variant(n: *Node) raises Error: ?*Variant {
     match n.kind {
         MatchArm { variant, args, body } -> { return variant; }
         _ -> { return null; }
     }
 }
 
-arm_args(n: *Node): ?*Node {
+arm_args(n: *Node) raises Error: ?*Node {
     match n.kind {
         MatchArm { variant, args, body } -> { return args; }
         _ -> { return null; }
     }
 }
 
-arm_body(n: *Node): *Node {
+arm_body(n: *Node) raises Error: *Node {
     match n.kind {
         MatchArm { variant, args, body } -> { return body; }
-        _ -> { error("expected match arm"); }
+        CatchArm { exn, binder, body } -> { return body; }
+        _ -> { error("expected arm"); }
     }
 }
 
-bind_null_to_pointer(pty: ?*Type, null_n: ?*Node): bool {
+catch_arm_exn(n: *Node) raises Error: *ExnDef {
+    match n.kind {
+        CatchArm { exn, binder, body } -> { return exn; }
+        _ -> { error("expected catch arm"); }
+    }
+}
+
+catch_arm_binder(n: *Node) raises Error: ?*Obj {
+    match n.kind {
+        CatchArm { exn, binder, body } -> { return binder; }
+        _ -> { return null; }
+    }
+}
+
+bind_null_to_pointer(pty: ?*Type, null_n: ?*Node) raises Error: bool {
     if (!is_opt_pointer(pty) || !is_null_node(null_n)) {
         return false;
     }
@@ -858,7 +1034,7 @@ bind_null_to_pointer(pty: ?*Type, null_n: ?*Node): bool {
     return false;
 }
 
-assignable(to: ?*Type, from_n: ?*Node): bool {
+assignable(to: ?*Type, from_n: ?*Node) raises Error: bool {
     ft: ?*Type = null;
     if (from_n != null) {
         fty: ?*Type = from_n.ty;
@@ -885,7 +1061,7 @@ assignable(to: ?*Type, from_n: ?*Node): bool {
 
 
 
-is_i8_ty(t: ?*Type): bool {
+is_i8_ty(t: ?*Type) raises Error: bool {
     if (t != null) {
         match t.* {
             I8 -> { return true; }
@@ -895,7 +1071,7 @@ is_i8_ty(t: ?*Type): bool {
     return false;
 }
 
-is_int_ty(t: ?*Type): bool {
+is_int_ty(t: ?*Type) raises Error: bool {
     if (t != null) {
         match t.* {
             Int -> { return true; }
@@ -905,7 +1081,7 @@ is_int_ty(t: ?*Type): bool {
     return false;
 }
 
-is_bool_ty(t: ?*Type): bool {
+is_bool_ty(t: ?*Type) raises Error: bool {
     if (t != null) {
         match t.* {
             Bool -> { return true; }
@@ -915,7 +1091,7 @@ is_bool_ty(t: ?*Type): bool {
     return false;
 }
 
-is_noreturn_ty(t: ?*Type): bool {
+is_noreturn_ty(t: ?*Type) raises Error: bool {
     if (t != null) {
         match t.* {
             Noreturn -> { return true; }
@@ -925,7 +1101,7 @@ is_noreturn_ty(t: ?*Type): bool {
     return false;
 }
 
-types_equal(a: ?*Type, b: ?*Type): bool {
+types_equal(a: ?*Type, b: ?*Type) raises Error: bool {
     if (a == b) {
         return true;
     }
@@ -962,15 +1138,18 @@ types_equal(a: ?*Type, b: ?*Type): bool {
     if (is_enum_ty(a) && is_enum_ty(b)) {
         return type_enum_def(a) == type_enum_def(b);
     }
+    if (is_exn_ty(a) && is_exn_ty(b)) {
+        return type_exn_def(a) == type_exn_def(b);
+    }
     return false;
 }
 
-is_numeric_ty(t: ?*Type): bool {
+is_numeric_ty(t: ?*Type) raises Error: bool {
     t = decay(t);
     return is_int_ty(t) || is_i8_ty(t) || is_bool_ty(t);
 }
 
-check_as(from: ?*Type, to: ?*Type) {
+check_as(from: ?*Type, to: ?*Type)  raises Error {
     from = decay(from);
     to = decay(to);
     if (types_equal(from, to)) {
@@ -994,7 +1173,7 @@ check_as(from: ?*Type, to: ?*Type) {
     error("invalid as conversion");
 }
 
-check_trunc(from: ?*Type, to: ?*Type) {
+check_trunc(from: ?*Type, to: ?*Type)  raises Error {
     from = decay(from);
     to = decay(to);
     if (is_int_ty(from) && (is_i8_ty(to) || is_bool_ty(to))) {
@@ -1003,14 +1182,14 @@ check_trunc(from: ?*Type, to: ?*Type) {
     error("invalid trunc conversion");
 }
 
-decay(t: ?*Type): ?*Type {
+decay(t: ?*Type) raises Error: ?*Type {
     if (is_array(t)) {
         return ptr_to(type_base(t));
     }
     return t;
 }
 
-new_token(kind: TokKind, start: *i8, len: int): *Token {
+new_token(kind: TokKind, start: *i8, len: int) raises Error: *Token {
     return new Token {
         kind: kind,
         val: 0,
@@ -1020,7 +1199,7 @@ new_token(kind: TokKind, start: *i8, len: int): *Token {
     };
 }
 
-ident_kind(s: *i8, n: int): TokKind {
+ident_kind(s: *i8, n: int) raises Error: TokKind {
     if (n == 3 && streq_n(s, "int", 3)) { return TokKind.Int; }
     if (n == 2 && streq_n(s, "i8", 2)) { return TokKind.I8; }
     if (n == 4 && streq_n(s, "bool", 4)) { return TokKind.Bool; }
@@ -1039,10 +1218,15 @@ ident_kind(s: *i8, n: int): TokKind {
     if (n == 5 && streq_n(s, "trunc", 5)) { return TokKind.Trunc; }
     if (n == 3 && streq_n(s, "new", 3)) { return TokKind.New; }
     if (n == 5 && streq_n(s, "match", 5)) { return TokKind.Match; }
+    if (n == 9 && streq_n(s, "exception", 9)) { return TokKind.Exception; }
+    if (n == 6 && streq_n(s, "raises", 6)) { return TokKind.Raises; }
+    if (n == 5 && streq_n(s, "raise", 5)) { return TokKind.Raise; }
+    if (n == 3 && streq_n(s, "try", 3)) { return TokKind.Try; }
+    if (n == 4 && streq_n(s, "with", 4)) { return TokKind.With; }
     return TokKind.Ident;
 }
 
-skip_line_comment() {
+skip_line_comment()  raises Error {
     while (pos < source_len) {
         if (source[pos] == '\n') {
             return;
@@ -1051,7 +1235,7 @@ skip_line_comment() {
     }
 }
 
-skip_block_comment() {
+skip_block_comment()  raises Error {
     while (pos < source_len) {
         if (source[pos] == '*' && source[pos + 1] == '/') {
             pos = pos + 2;
@@ -1061,7 +1245,7 @@ skip_block_comment() {
     }
 }
 
-read_number(): int {
+read_number() raises Error: int {
     v: int = 0;
     while (pos < source_len) {
         if (!is_digit(source[pos])) {
@@ -1073,7 +1257,7 @@ read_number(): int {
     return v;
 }
 
-esc_char(c: i8): i8 {
+esc_char(c: i8) raises Error: i8 {
     if (c == 'n') { return '\n'; }
     if (c == 't') { return '\t'; }
     if (c == 'r') { return '\r'; }
@@ -1084,7 +1268,7 @@ esc_char(c: i8): i8 {
     return c;
 }
 
-scan_string_len(): int {
+scan_string_len() raises Error: int {
     start: int = pos;
     while (pos < source_len) {
         if (source[pos] == '"') {
@@ -1098,7 +1282,7 @@ scan_string_len(): int {
     error("unterminated string");
 }
 
-scan_ident_len(): int {
+scan_ident_len() raises Error: int {
     start: int = pos;
     while (pos < source_len) {
         if (!is_ident2(source[pos])) {
@@ -1109,7 +1293,7 @@ scan_ident_len(): int {
     return pos - start;
 }
 
-punct_kind(c: i8): TokKind {
+punct_kind(c: i8) raises Error: TokKind {
     if (c == '+') { return TokKind.Plus; }
     if (c == '-') { return TokKind.Minus; }
     if (c == '*') { return TokKind.Star; }
@@ -1131,7 +1315,7 @@ punct_kind(c: i8): TokKind {
     return TokKind.Eof;
 }
 
-tokenize(): *Token {
+tokenize() raises Error: *Token {
     head: *Token = new Token {
         kind: TokKind.Eof,
         val: 0,
@@ -1285,22 +1469,22 @@ tokenize(): *Token {
     return head.next;
 }
 
-equal(kind: TokKind): bool {
+equal(kind: TokKind) raises Error: bool {
     return tok.kind == kind;
 }
 
-skip(kind: TokKind) {
+skip(kind: TokKind)  raises Error {
     if (!equal(kind)) {
         error("unexpected token");
     }
     tok = tok.next;
 }
 
-cur_tokstr(): *i8 {
+cur_tokstr() raises Error: *i8 {
     return strdup_n(tok.str, tok.len);
 }
 
-add_string(s: *i8, n: int): int {
+add_string(s: *i8, n: int) raises Error: int {
     buf: *i8 = new i8[n + 1];
     i: int = 0;
     j: int = 0;
@@ -1327,7 +1511,7 @@ add_string(s: *i8, n: int): int {
     return lit.label;
 }
 
-mk_node(k: NodeKind): *Node {
+mk_node(k: NodeKind) raises Error: *Node {
     return new Node {
         kind: k,
         next: null,
@@ -1335,145 +1519,154 @@ mk_node(k: NodeKind): *Node {
     };
 }
 
-new_num(v: int): *Node {
+new_num(v: int) raises Error: *Node {
     n: *Node = mk_node(NodeKind.Num { val: v, str_label: 0 });
     n.ty = ty_int;
     return n;
 }
 
-new_str_num(label: int): *Node {
+new_str_num(label: int) raises Error: *Node {
     n: *Node = mk_node(NodeKind.Num { val: 0, str_label: label });
     n.ty = ptr_to(ty_i8);
     return n;
 }
 
-new_null_node(): *Node {
+new_null_node() raises Error: *Node {
     return mk_node(NodeKind.Null);
 }
 
-new_var_node(var: *Obj): *Node {
+new_var_node(var: *Obj) raises Error: *Node {
     n: *Node = mk_node(NodeKind.Var { var: var, name: null, member: null });
     n.ty = var.ty;
     return n;
 }
 
-new_binder(name: *i8): *Node {
+new_binder(name: *i8) raises Error: *Node {
     return mk_node(NodeKind.Var { var: null, name: name, member: null });
 }
 
-new_add(lhs: *Node, rhs: *Node): *Node {
+new_add(lhs: *Node, rhs: *Node) raises Error: *Node {
     return mk_node(NodeKind.Add { lhs: lhs, rhs: rhs });
 }
-new_sub(lhs: *Node, rhs: *Node): *Node {
+new_sub(lhs: *Node, rhs: *Node) raises Error: *Node {
     return mk_node(NodeKind.Sub { lhs: lhs, rhs: rhs });
 }
-new_mul(lhs: *Node, rhs: *Node): *Node {
+new_mul(lhs: *Node, rhs: *Node) raises Error: *Node {
     return mk_node(NodeKind.Mul { lhs: lhs, rhs: rhs });
 }
-new_div(lhs: *Node, rhs: *Node): *Node {
+new_div(lhs: *Node, rhs: *Node) raises Error: *Node {
     return mk_node(NodeKind.Div { lhs: lhs, rhs: rhs });
 }
-new_mod(lhs: *Node, rhs: *Node): *Node {
+new_mod(lhs: *Node, rhs: *Node) raises Error: *Node {
     return mk_node(NodeKind.Mod { lhs: lhs, rhs: rhs });
 }
-new_eq(lhs: *Node, rhs: *Node): *Node {
+new_eq(lhs: *Node, rhs: *Node) raises Error: *Node {
     return mk_node(NodeKind.Eq { lhs: lhs, rhs: rhs });
 }
-new_ne(lhs: *Node, rhs: *Node): *Node {
+new_ne(lhs: *Node, rhs: *Node) raises Error: *Node {
     return mk_node(NodeKind.Ne { lhs: lhs, rhs: rhs });
 }
-new_lt(lhs: *Node, rhs: *Node): *Node {
+new_lt(lhs: *Node, rhs: *Node) raises Error: *Node {
     return mk_node(NodeKind.Lt { lhs: lhs, rhs: rhs });
 }
-new_le(lhs: *Node, rhs: *Node): *Node {
+new_le(lhs: *Node, rhs: *Node) raises Error: *Node {
     return mk_node(NodeKind.Le { lhs: lhs, rhs: rhs });
 }
-new_gt(lhs: *Node, rhs: *Node): *Node {
+new_gt(lhs: *Node, rhs: *Node) raises Error: *Node {
     return mk_node(NodeKind.Gt { lhs: lhs, rhs: rhs });
 }
-new_ge(lhs: *Node, rhs: *Node): *Node {
+new_ge(lhs: *Node, rhs: *Node) raises Error: *Node {
     return mk_node(NodeKind.Ge { lhs: lhs, rhs: rhs });
 }
-new_assign(lhs: *Node, rhs: *Node): *Node {
+new_assign(lhs: *Node, rhs: *Node) raises Error: *Node {
     return mk_node(NodeKind.Assign { lhs: lhs, rhs: rhs });
 }
-new_logand(lhs: *Node, rhs: *Node): *Node {
+new_logand(lhs: *Node, rhs: *Node) raises Error: *Node {
     return mk_node(NodeKind.LogAnd { lhs: lhs, rhs: rhs });
 }
-new_logor(lhs: *Node, rhs: *Node): *Node {
+new_logor(lhs: *Node, rhs: *Node) raises Error: *Node {
     return mk_node(NodeKind.LogOr { lhs: lhs, rhs: rhs });
 }
-new_addr(lhs: *Node): *Node {
+new_addr(lhs: *Node) raises Error: *Node {
     return mk_node(NodeKind.Addr { lhs: lhs });
 }
-new_deref(lhs: *Node): *Node {
+new_deref(lhs: *Node) raises Error: *Node {
     return mk_node(NodeKind.Deref { lhs: lhs });
 }
-new_not(lhs: *Node): *Node {
+new_not(lhs: *Node) raises Error: *Node {
     return mk_node(NodeKind.Not { lhs: lhs });
 }
-new_neg(lhs: *Node): *Node {
+new_neg(lhs: *Node) raises Error: *Node {
     return mk_node(NodeKind.Neg { lhs: lhs });
 }
-new_as(lhs: *Node, ty: *Type): *Node {
+new_as(lhs: *Node, ty: *Type) raises Error: *Node {
     n: *Node = mk_node(NodeKind.As { lhs: lhs });
     n.ty = ty;
     return n;
 }
-new_trunc(lhs: *Node, ty: *Type): *Node {
+new_trunc(lhs: *Node, ty: *Type) raises Error: *Node {
     n: *Node = mk_node(NodeKind.Trunc { lhs: lhs });
     n.ty = ty;
     return n;
 }
-new_member_access(lhs: *Node, m: *Member): *Node {
+new_member_access(lhs: *Node, m: *Member) raises Error: *Node {
     n: *Node = mk_node(NodeKind.MemberAccess { lhs: lhs, member: m });
     n.ty = m.ty;
     return n;
 }
-new_funcall(name: *i8, args: ?*Node): *Node {
+new_funcall(name: *i8, args: ?*Node) raises Error: *Node {
     return mk_node(NodeKind.Funcall { funcname: name, args: args });
 }
-new_return(lhs: ?*Node): *Node {
+new_return(lhs: ?*Node) raises Error: *Node {
     return mk_node(NodeKind.Return { lhs: lhs });
 }
-new_if(cond: *Node, then: *Node, els: ?*Node): *Node {
+new_if(cond: *Node, then: *Node, els: ?*Node) raises Error: *Node {
     return mk_node(NodeKind.If { cond: cond, then: then, els: els });
 }
-new_while(cond: *Node, body: *Node): *Node {
+new_while(cond: *Node, body: *Node) raises Error: *Node {
     return mk_node(NodeKind.While { cond: cond, body: body });
 }
-new_block(body: ?*Node): *Node {
+new_block(body: ?*Node) raises Error: *Node {
     return mk_node(NodeKind.Block { body: body });
 }
-new_expr_stmt(lhs: *Node): *Node {
+new_expr_stmt(lhs: *Node) raises Error: *Node {
     return mk_node(NodeKind.ExprStmt { lhs: lhs });
 }
-new_field_init(m: *Member, lhs: ?*Node): *Node {
+new_field_init(m: *Member, lhs: ?*Node) raises Error: *Node {
     return mk_node(NodeKind.FieldInit { member: m, lhs: lhs });
 }
-new_heap_node(lhs: ?*Node, val: int, args: ?*Node, variant: ?*Variant, ty: *Type): *Node {
+new_heap_node(lhs: ?*Node, val: int, args: ?*Node, variant: ?*Variant, ty: *Type) raises Error: *Node {
     n: *Node = mk_node(NodeKind.New { lhs: lhs, val: val, args: args, variant: variant });
     n.ty = ty;
     return n;
 }
-new_struct_lit(args: ?*Node, ty: *Type): *Node {
+new_struct_lit(args: ?*Node, ty: *Type) raises Error: *Node {
     n: *Node = mk_node(NodeKind.StructLit { args: args });
     n.ty = ty;
     return n;
 }
-new_variant_lit(v: *Variant, val: int, args: ?*Node, ty: *Type): *Node {
+new_variant_lit(v: *Variant, val: int, args: ?*Node, ty: *Type) raises Error: *Node {
     n: *Node = mk_node(NodeKind.VariantLit { variant: v, val: val, args: args });
     n.ty = ty;
     return n;
 }
-new_match(cond: *Node, body: ?*Node): *Node {
+new_match(cond: *Node, body: ?*Node) raises Error: *Node {
     return mk_node(NodeKind.Match { cond: cond, body: body });
 }
-new_match_arm(variant: ?*Variant, args: ?*Node, body: *Node): *Node {
+new_match_arm(variant: ?*Variant, args: ?*Node, body: *Node) raises Error: *Node {
     return mk_node(NodeKind.MatchArm { variant: variant, args: args, body: body });
 }
+new_raise(exn: *ExnDef, args: ?*Node) raises Error: *Node {
+    return mk_node(NodeKind.Raise { exn: exn, args: args });
+}
+new_try(body: *Node, arms: ?*Node, buf: *Obj) raises Error: *Node {
+    return mk_node(NodeKind.Try { body: body, arms: arms, buf: buf });
+}
+new_catch_arm(exn: *ExnDef, binder: ?*Obj, body: *Node) raises Error: *Node {
+    return mk_node(NodeKind.CatchArm { exn: exn, binder: binder, body: body });
+}
 
-find_function(name: *i8): ?*Function {
+find_function(name: *i8) raises Error: ?*Function {
     fn: ?*Function = functions;
     while (fn != null) {
         if (streq(fn.name, name)) {
@@ -1484,7 +1677,7 @@ find_function(name: *i8): ?*Function {
     return null;
 }
 
-find_obj(list: ?*Obj, name: *i8): ?*Obj {
+find_obj(list: ?*Obj, name: *i8) raises Error: ?*Obj {
     o: ?*Obj = list;
     while (o != null) {
         if (streq(o.name, name)) {
@@ -1495,7 +1688,7 @@ find_obj(list: ?*Obj, name: *i8): ?*Obj {
     return null;
 }
 
-find_local(name: *i8): ?*Obj {
+find_local(name: *i8) raises Error: ?*Obj {
     o: ?*Obj = locals;
     while (o != null) {
         if (o.scope_depth <= scope_depth) {
@@ -1508,7 +1701,7 @@ find_local(name: *i8): ?*Obj {
     return null;
 }
 
-find_var(name: *i8): ?*Obj {
+find_var(name: *i8) raises Error: ?*Obj {
     o: ?*Obj = find_local(name);
     if (o != null) {
         return o;
@@ -1516,18 +1709,18 @@ find_var(name: *i8): ?*Obj {
     return find_obj(globals, name);
 }
 
-enter_scope() {
+enter_scope()  raises Error {
     scope_depth = scope_depth + 1;
 }
 
-leave_scope() {
+leave_scope()  raises Error {
     if (scope_depth <= 0) {
         error("internal: leave_scope");
     }
     scope_depth = scope_depth - 1;
 }
 
-new_obj(name: *i8, is_local: int): *Obj {
+new_obj(name: *i8, is_local: int) raises Error: *Obj {
     o: *Obj = new Obj {
         name: name,
         is_local: is_local,
@@ -1548,7 +1741,7 @@ new_obj(name: *i8, is_local: int): *Obj {
     return o;
 }
 
-var_view_ty(var: ?*Obj): ?*Type {
+var_view_ty(var: ?*Obj) raises Error: ?*Type {
     f: ?*NarrowFrame = narrow_top;
     while (f != null) {
         if (f.var == var) {
@@ -1562,7 +1755,7 @@ var_view_ty(var: ?*Obj): ?*Type {
     return null;
 }
 
-narrow_push(var: ?*Obj, ty: ?*Type) {
+narrow_push(var: ?*Obj, ty: ?*Type)  raises Error {
     f: *NarrowFrame = new NarrowFrame {
         var: var,
         ty: ty,
@@ -1571,11 +1764,11 @@ narrow_push(var: ?*Obj, ty: ?*Type) {
     narrow_top = f;
 }
 
-narrow_reset(saved: ?*NarrowFrame) {
+narrow_reset(saved: ?*NarrowFrame)  raises Error {
     narrow_top = saved;
 }
 
-narrow_from_cond(cond: ?*Node, for_else: int): ?*NarrowFrame {
+narrow_from_cond(cond: ?*Node, for_else: int) raises Error: ?*NarrowFrame {
     saved: ?*NarrowFrame = narrow_top;
     if (for_else != 0) {
         narrow_push_eq_nulls(cond);
@@ -1585,7 +1778,7 @@ narrow_from_cond(cond: ?*Node, for_else: int): ?*NarrowFrame {
     return saved;
 }
 
-opt_local_var(n: ?*Node): ?*Obj {
+opt_local_var(n: ?*Node) raises Error: ?*Obj {
     if (n != null) {
         match n.kind {
             Var { var, name, member } -> {
@@ -1607,7 +1800,7 @@ opt_local_var(n: ?*Node): ?*Obj {
     return null;
 }
 
-null_check_var(cond: ?*Node): ?*Obj {
+null_check_var(cond: ?*Node) raises Error: ?*Obj {
     if (cond != null) {
         match cond.kind {
             Ne { lhs, rhs } -> {
@@ -1625,7 +1818,7 @@ null_check_var(cond: ?*Node): ?*Obj {
     return null;
 }
 
-null_eq_var(cond: ?*Node): ?*Obj {
+null_eq_var(cond: ?*Node) raises Error: ?*Obj {
     if (cond != null) {
         match cond.kind {
             Eq { lhs, rhs } -> {
@@ -1643,7 +1836,7 @@ null_eq_var(cond: ?*Node): ?*Obj {
     return null;
 }
 
-narrow_push_ne_nulls(cond: ?*Node) {
+narrow_push_ne_nulls(cond: ?*Node)  raises Error {
     if (cond != null) {
         match cond.kind {
             LogAnd { lhs, rhs } -> {
@@ -1661,7 +1854,7 @@ narrow_push_ne_nulls(cond: ?*Node) {
     }
 }
 
-narrow_push_eq_nulls(cond: ?*Node) {
+narrow_push_eq_nulls(cond: ?*Node)  raises Error {
     if (cond != null) {
         match cond.kind {
             LogOr { lhs, rhs } -> {
@@ -1679,7 +1872,7 @@ narrow_push_eq_nulls(cond: ?*Node) {
     }
 }
 
-decl_spec(): *Type {
+decl_spec() raises Error: *Type {
     if (equal(TokKind.Int)) {
         tok = tok.next;
         return ty_int;
@@ -1703,6 +1896,11 @@ decl_spec(): *Type {
             tok = tok.next;
             return enum_type(ed);
         }
+        xd: ?*ExnDef = find_exn(name);
+        if (xd != null) {
+            tok = tok.next;
+            return exn_type(xd);
+        }
         tok = tok.next;
         sd: *StructDef = get_or_create_struct(name);
         return struct_type(sd);
@@ -1710,7 +1908,7 @@ decl_spec(): *Type {
     error("expected type");
 }
 
-parse_type(): *Type {
+parse_type() raises Error: *Type {
     if (equal(TokKind.Question)) {
         tok = tok.next;
         if (!equal(TokKind.Star)) {
@@ -1734,11 +1932,11 @@ parse_type(): *Type {
     return decl_spec();
 }
 
-parse_expr(): *Node {
+parse_expr() raises Error: *Node {
     return parse_assign();
 }
 
-parse_struct_field_inits(sty: *Type): *Node {
+parse_struct_field_inits(sty: *Type) raises Error: *Node {
     if (!is_struct_ty(sty)) {
         error("struct literal requires a struct type");
     }
@@ -1808,7 +2006,75 @@ parse_struct_field_inits(sty: *Type): *Node {
     return expect_node(head, "empty list");
 }
 
-parse_variant_field_inits(v: *Variant): *Node {
+parse_exn_field_inits(ed: *ExnDef) raises Error: *Node {
+    if (ed.members == null) {
+        error("unit exception does not take fields");
+    }
+    skip(TokKind.LBrace);
+    head: ?*Node = null;
+    cur: ?*Node = null;
+    while (!equal(TokKind.RBrace)) {
+        if (cur != null) {
+            skip(TokKind.Comma);
+        }
+        if (!equal(TokKind.Ident)) {
+            error("expected field name in exception payload");
+        }
+        fname: *i8 = cur_tokstr();
+        tok = tok.next;
+        skip(TokKind.Colon);
+        m: ?*Member = find_exn_member(ed, fname);
+        if (m == null) {
+            error("unknown field");
+        }
+        mu: *Member = expect_member(m, "null member");
+        i: ?*Node = head;
+        while (i != null) {
+            if (field_init_member(i) == mu) {
+                error("duplicate field");
+            }
+            i = i.next;
+        }
+        lhs: ?*Node = null;
+        if (equal(TokKind.Uninitialized)) {
+            tok = tok.next;
+        } else {
+            lhs = parse_expr();
+            add_type(lhs);
+            lt: ?*Type = decay(mu.ty);
+            if (!assignable(lt, lhs)) {
+                error("field initializer type mismatch");
+            }
+        }
+        init: *Node = new_field_init(mu, lhs);
+        if (cur != null) {
+            cur.next = init;
+            cur = init;
+        } else {
+            head = init;
+            cur = init;
+        }
+    }
+    m2: ?*Member = ed.members;
+    while (m2 != null) {
+        found: int = 0;
+        i2: ?*Node = head;
+        while (i2 != null) {
+            if (field_init_member(i2) == m2) {
+                found = 1;
+            }
+            i2 = i2.next;
+        }
+        if (found == 0) {
+            error("exception payload missing field");
+        }
+        m2 = m2.next;
+    }
+    skip(TokKind.RBrace);
+    return expect_node(head, "empty list");
+}
+
+parse_variant_field_inits(v: *Variant) raises Error: *Node {
     skip(TokKind.LBrace);
     head: ?*Node = null;
     cur: ?*Node = null;
@@ -1882,7 +2148,7 @@ parse_variant_field_inits(v: *Variant): *Node {
     return expect_node(head, "empty list");
 }
 
-parse_primary(): *Node {
+parse_primary() raises Error: *Node {
     n: *Node = uninitialized;
     if (equal(TokKind.New)) {
         tok = tok.next;
@@ -2064,7 +2330,7 @@ parse_primary(): *Node {
     return new_num(0);
 }
 
-parse_postfix(): *Node {
+parse_postfix() raises Error: *Node {
     n: *Node = parse_primary();
     while (true) {
         if (equal(TokKind.LBrack)) {
@@ -2105,11 +2371,20 @@ parse_postfix(): *Node {
                     if (is_pointer(t) && is_struct_ty(type_base(t))) {
                         sty = type_base(t);
                     } else {
-                        if (!is_struct_ty(n.ty)) {
-                            error("member access on non-struct");
+                        if (is_pointer(t) && is_exn_ty(type_base(t))) {
+                            sty = type_base(t);
+                        } else {
+                            if (!is_struct_ty(n.ty) && !is_exn_ty(n.ty)) {
+                                error("member access on non-struct");
+                            }
                         }
                     }
-                    m: ?*Member = find_member(type_struct_def(sty), name);
+                    m: ?*Member = null;
+                    if (is_exn_ty(sty)) {
+                        m = find_exn_member(type_exn_def(sty), name);
+                    } else {
+                        m = find_member(type_struct_def(sty), name);
+                    }
                     if (m == null) {
                         error("unknown member");
                     }
@@ -2142,7 +2417,7 @@ parse_postfix(): *Node {
     return n;
 }
 
-parse_unary(): *Node {
+parse_unary() raises Error: *Node {
     if (equal(TokKind.Plus)) {
         tok = tok.next;
         return parse_unary();
@@ -2162,13 +2437,13 @@ parse_unary(): *Node {
     return parse_postfix();
 }
 
-add_type(n: ?*Node) {
+add_type(n: ?*Node)  raises Error {
     if (n != null) {
         add_type_node(n);
     }
 }
 
-add_type_node(p: *Node) {
+add_type_node(p: *Node)  raises Error {
     match p.kind {
         Var { var, name, member } -> {
             p.ty = var_view_ty(var);
@@ -2205,6 +2480,36 @@ add_type_node(p: *Node) {
             narrow_push_ne_nulls(cond);
             add_type(body);
             narrow_reset(save2);
+            return;
+        }
+        Try { body, arms, buf } -> {
+            saved_c: ?*CatchFrame = catch_top;
+            arm: ?*Node = arms;
+            while (arm != null) {
+                catch_push(catch_arm_exn(arm));
+                arm = arm.next;
+            }
+            add_type(body);
+            catch_reset(saved_c);
+            arm = arms;
+            while (arm != null) {
+                add_type(arm);
+                arm = arm.next;
+            }
+            return;
+        }
+        CatchArm { exn, binder, body } -> {
+            add_type(body);
+            return;
+        }
+        Raise { exn, args } -> {
+            check_exn_allowed(exn, "raise");
+            a0: ?*Node = args;
+            while (a0 != null) {
+                add_type(field_init_lhs(a0));
+                a0 = a0.next;
+            }
+            p.ty = ty_noreturn;
             return;
         }
         LogAnd { lhs, rhs } -> {
@@ -2477,12 +2782,16 @@ add_type_node(p: *Node) {
                 if (fno.return_ty != null) {
                     p.ty = fno.return_ty;
                 } else {
-                    p.ty = null;
+                    p.ty = ty_int;
                 }
             } else {
                 if (fo != null) {
                     if (fo.is_func != 0) {
-                        p.ty = fo.ty;
+                        if (fo.ty != null) {
+                            p.ty = fo.ty;
+                        } else {
+                            p.ty = ty_int;
+                        }
                     } else {
                         p.ty = ty_int;
                     }
@@ -2517,6 +2826,11 @@ add_type_node(p: *Node) {
                     }
                     ai = ai + 1;
                     a = a.next;
+                }
+                er: ?*ExnList = fno.raises_list;
+                while (er != null) {
+                    check_exn_allowed(er.exn, "call raises");
+                    er = er.next;
                 }
             }
             return;
@@ -2596,7 +2910,7 @@ add_type_node(p: *Node) {
     }
 }
 
-parse_mul(): *Node {
+parse_mul() raises Error: *Node {
     n: *Node = parse_unary();
     while (true) {
         if (equal(TokKind.Star)) {
@@ -2619,7 +2933,7 @@ parse_mul(): *Node {
     return n;
 }
 
-parse_add(): *Node {
+parse_add() raises Error: *Node {
     n: *Node = parse_mul();
     while (true) {
         if (equal(TokKind.Plus)) {
@@ -2637,7 +2951,7 @@ parse_add(): *Node {
     return n;
 }
 
-parse_relational(): *Node {
+parse_relational() raises Error: *Node {
     n: *Node = parse_add();
     while (true) {
         if (equal(TokKind.Lt)) {
@@ -2665,7 +2979,7 @@ parse_relational(): *Node {
     return n;
 }
 
-parse_equality(): *Node {
+parse_equality() raises Error: *Node {
     n: *Node = parse_relational();
     while (true) {
         if (equal(TokKind.Eq)) {
@@ -2683,7 +2997,7 @@ parse_equality(): *Node {
     return n;
 }
 
-parse_logand(): *Node {
+parse_logand() raises Error: *Node {
     n: *Node = parse_equality();
     while (equal(TokKind.And)) {
         tok = tok.next;
@@ -2692,7 +3006,7 @@ parse_logand(): *Node {
     return n;
 }
 
-parse_logor(): *Node {
+parse_logor() raises Error: *Node {
     n: *Node = parse_logand();
     while (equal(TokKind.Or)) {
         tok = tok.next;
@@ -2701,7 +3015,7 @@ parse_logor(): *Node {
     return n;
 }
 
-parse_assign(): *Node {
+parse_assign() raises Error: *Node {
     n: *Node = parse_logor();
     if (equal(TokKind.Assign)) {
         tok = tok.next;
@@ -2710,7 +3024,7 @@ parse_assign(): *Node {
     return n;
 }
 
-parse_type_suffix(ty: *Type): *Type {
+parse_type_suffix(ty: *Type) raises Error: *Type {
     if (equal(TokKind.LBrack)) {
         if (is_noreturn_ty(ty)) {
             error("noreturn cannot be an array element");
@@ -2726,7 +3040,7 @@ parse_type_suffix(ty: *Type): *Type {
     return ty;
 }
 
-parse_decl(is_local: int): *Obj {
+parse_decl(is_local: int) raises Error: *Obj {
     if (!equal(TokKind.Ident)) {
         error("expected identifier");
     }
@@ -2743,7 +3057,7 @@ parse_decl(is_local: int): *Obj {
     return o;
 }
 
-parse_compound(): *Node {
+parse_compound() raises Error: *Node {
     enter_scope();
     skip(TokKind.LBrace);
     head: ?*Node = null;
@@ -2766,7 +3080,7 @@ parse_compound(): *Node {
     return new_block(head);
 }
 
-parse_stmt(): *Node {
+parse_stmt() raises Error: *Node {
     if (equal(TokKind.Return)) {
         tok = tok.next;
         lhs: ?*Node = null;
@@ -2775,6 +3089,90 @@ parse_stmt(): *Node {
         }
         skip(TokKind.Semi);
         return new_return(lhs);
+    }
+    if (equal(TokKind.Raise)) {
+        tok = tok.next;
+        if (!equal(TokKind.Ident)) {
+            error("expected exception name after raise");
+        }
+        ename: *i8 = cur_tokstr();
+        ed: ?*ExnDef = find_exn(ename);
+        if (ed == null) {
+            error("unknown exception");
+        }
+        edu: *ExnDef = expect_exn(ed, "unknown exception");
+        tok = tok.next;
+        rargs: ?*Node = null;
+        if (equal(TokKind.LBrace)) {
+            rargs = parse_exn_field_inits(edu);
+        } else {
+            if (edu.members != null) {
+                error("exception requires field initializers");
+            }
+        }
+        skip(TokKind.Semi);
+        return new_raise(edu, rargs);
+    }
+    if (equal(TokKind.Try)) {
+        tok = tok.next;
+        tbody: *Node = parse_compound();
+        arms_h: ?*Node = null;
+        arms_c: ?*Node = null;
+        if (!equal(TokKind.With)) {
+            error("try requires at least one with arm");
+        }
+        while (equal(TokKind.With)) {
+            tok = tok.next;
+            if (!equal(TokKind.Ident)) {
+                error("expected exception name in with arm");
+            }
+            cname: *i8 = cur_tokstr();
+            ced: ?*ExnDef = find_exn(cname);
+            if (ced == null) {
+                error("unknown exception");
+            }
+            cedu: *ExnDef = expect_exn(ced, "unknown exception");
+            tok = tok.next;
+            a: ?*Node = arms_h;
+            while (a != null) {
+                if (catch_arm_exn(a) == cedu) {
+                    error("duplicate with arm");
+                }
+                a = a.next;
+            }
+            enter_scope();
+            binder: ?*Obj = null;
+            if (equal(TokKind.LParen)) {
+                tok = tok.next;
+                if (!equal(TokKind.Ident)) {
+                    error("expected binder name");
+                }
+                bname: *i8 = cur_tokstr();
+                tok = tok.next;
+                skip(TokKind.RParen);
+                bo: *Obj = new_obj(bname, 1);
+                bo.ty = exn_type(cedu);
+                binder = bo;
+            } else {
+                if (cedu.members != null) {
+                    error("payload exception requires Name(x) binder");
+                }
+            }
+            skip(TokKind.Arrow);
+            abody: *Node = parse_compound();
+            leave_scope();
+            armn: *Node = new_catch_arm(cedu, binder, abody);
+            if (arms_c != null) {
+                arms_c.next = armn;
+                arms_c = armn;
+            } else {
+                arms_h = armn;
+                arms_c = armn;
+            }
+        }
+        buf: *Obj = new_obj(".trybuf", 1);
+        buf.ty = array_of(ty_i8, L8_JMP_BUF_SIZE);
+        return new_try(tbody, arms_h, buf);
     }
     if (equal(TokKind.If)) {
         tok = tok.next;
@@ -3025,7 +3423,7 @@ parse_stmt(): *Node {
     return new_expr_stmt(e);
 }
 
-fn_param(fn: *Function, i: int): ?*Obj {
+fn_param(fn: *Function, i: int) raises Error: ?*Obj {
     if (i == 0) { return fn.p0; }
     if (i == 1) { return fn.p1; }
     if (i == 2) { return fn.p2; }
@@ -3034,7 +3432,7 @@ fn_param(fn: *Function, i: int): ?*Obj {
     return fn.p5;
 }
 
-set_fn_param(fn: *Function, i: int, p: *Obj) {
+set_fn_param(fn: *Function, i: int, p: *Obj)  raises Error {
     if (i == 0) { fn.p0 = p; }
     if (i == 1) { fn.p1 = p; }
     if (i == 2) { fn.p2 = p; }
@@ -3043,7 +3441,7 @@ set_fn_param(fn: *Function, i: int, p: *Obj) {
     if (i == 5) { fn.p5 = p; }
 }
 
-parse_function(name: *i8): *Function {
+parse_function(name: *i8) raises Error: *Function {
     fn: *Function = new Function {
         name: name,
         nparams: 0,
@@ -3058,11 +3456,14 @@ parse_function(name: *i8): *Function {
         stack_size: 0,
         return_ty: null,
         sret: null,
+        raises_list: null,
         next: null
     };
     locals = null;
     scope_depth = 0;
     narrow_top = null;
+    catch_top = null;
+    current_fn = fn;
     skip(TokKind.LParen);
     np: int = 0;
     while (!equal(TokKind.RParen)) {
@@ -3078,6 +3479,39 @@ parse_function(name: *i8): *Function {
     }
     fn.nparams = np;
     skip(TokKind.RParen);
+    if (equal(TokKind.Raises)) {
+        tok = tok.next;
+        rtail: ?*ExnList = null;
+        rdone: int = 0;
+        while (rdone == 0) {
+            if (!equal(TokKind.Ident)) {
+                error("expected exception type after raises");
+            }
+            ename: *i8 = cur_tokstr();
+            ed: ?*ExnDef = find_exn(ename);
+            if (ed == null) {
+                error("unknown exception");
+            }
+            edu: *ExnDef = expect_exn(ed, "unknown exception");
+            if (exn_in_list(fn.raises_list, edu)) {
+                error("duplicate raises");
+            }
+            el: *ExnList = new ExnList { exn: edu, next: null };
+            if (rtail != null) {
+                rtail.next = el;
+                rtail = el;
+            } else {
+                fn.raises_list = el;
+                rtail = el;
+            }
+            tok = tok.next;
+            if (equal(TokKind.Comma)) {
+                tok = tok.next;
+            } else {
+                rdone = 1;
+            }
+        }
+    }
     if (equal(TokKind.Colon)) {
         tok = tok.next;
         fn.return_ty = parse_type();
@@ -3093,10 +3527,11 @@ parse_function(name: *i8): *Function {
     }
     fn.body = parse_compound();
     fn.locals = locals;
+    current_fn = null;
     return fn;
 }
 
-parse_field_list(base_offset: int): *Member {
+parse_field_list(base_offset: int) raises Error: *Member {
     head: ?*Member = null;
     cur: ?*Member = null;
     offset: int = base_offset;
@@ -3143,7 +3578,7 @@ parse_field_list(base_offset: int): *Member {
     return expect_member(head, "empty members");
 }
 
-parse_variant(tag: int, enum_name: *i8): *Variant {
+parse_variant(tag: int, enum_name: *i8) raises Error: *Variant {
     if (!equal(TokKind.Ident)) {
         error("expected variant name");
     }
@@ -3172,7 +3607,38 @@ parse_variant(tag: int, enum_name: *i8): *Variant {
     return v;
 }
 
-parse_type_def() {
+parse_exception_def()  raises Error {
+    tok = tok.next;
+    if (!equal(TokKind.Ident)) {
+        error("expected exception name");
+    }
+    name: *i8 = cur_tokstr();
+    tok = tok.next;
+    if (find_exn(name) != null || find_struct(name) != null || find_enum(name) != null) {
+        error("redefinition");
+    }
+    ed: *ExnDef = new ExnDef {
+        name: name,
+        tag: next_exn_tag,
+        members: null,
+        size: 0,
+        ty: null,
+        next: exn_defs
+    };
+    next_exn_tag = next_exn_tag + 1;
+    exn_defs = ed;
+    if (equal(TokKind.LBrace)) {
+        tok = tok.next;
+        ed.members = parse_field_list(0);
+        ed.size = field_list_size;
+        skip(TokKind.Semi);
+    } else {
+        skip(TokKind.Semi);
+    }
+    ignore: *Type = exn_type(ed);
+}
+
+parse_type_def()  raises Error {
     tok = tok.next;
     if (!equal(TokKind.Ident)) {
         error("expected type name");
@@ -3256,13 +3722,16 @@ parse_type_def() {
     skip(TokKind.Semi);
 }
 
-parse_program() {
+parse_program()  raises Error {
     tail: ?*Function = null;
     functions = null;
     while (!equal(TokKind.Eof)) {
         if (equal(TokKind.TypeKw) && (tok.next).kind == TokKind.Ident && ((tok.next).next).kind == TokKind.Assign) {
             parse_type_def();
         } else {
+            if (equal(TokKind.Exception)) {
+                parse_exception_def();
+            } else {
             if (!equal(TokKind.Ident)) {
                 error("expected identifier");
             }
@@ -3294,14 +3763,16 @@ parse_program() {
                 o2.ty = ty;
                 skip(TokKind.Semi);
             }
+            }
         }
     }
 }
 
-stmt_diverges(n: *Node): bool {
+stmt_diverges(n: *Node) raises Error: bool {
     add_type(n);
     match n.kind {
         Return { lhs } -> { return true; }
+        Raise { exn, args } -> { return true; }
         ExprStmt { lhs } -> { return is_noreturn_ty(lhs.ty); }
         Block { body } -> {
             s: ?*Node = body;
@@ -3335,15 +3806,29 @@ stmt_diverges(n: *Node): bool {
             }
             return true;
         }
+        Try { body, arms, buf } -> {
+            if (!stmt_diverges(body)) {
+                return false;
+            }
+            arm2: ?*Node = arms;
+            while (arm2 != null) {
+                if (!stmt_diverges(arm_body(arm2))) {
+                    return false;
+                }
+                arm2 = arm2.next;
+            }
+            return true;
+        }
         _ -> { return false; }
     }
 }
 
-check_noreturn_functions() {
+check_noreturn_functions()  raises Error {
     fn: ?*Function = functions;
     while (fn != null) {
         if (is_noreturn_ty(fn.return_ty)) {
             current_return_ty = fn.return_ty;
+            current_fn = fn;
             if (fn.body == null || !stmt_diverges(expect_node(fn.body, "missing body"))) {
                 error("noreturn function may return");
             }
@@ -3351,19 +3836,20 @@ check_noreturn_functions() {
         fn = fn.next;
     }
     current_return_ty = null;
+    current_fn = null;
 }
 
-new_label(): int {
+new_label() raises Error: int {
     l: int = label_id;
     label_id = label_id + 1;
     return l;
 }
 
-is_byte_ty(t: ?*Type): bool {
+is_byte_ty(t: ?*Type) raises Error: bool {
     return t != null && type_size(t) == 1;
 }
 
-load_mem(ty: ?*Type) {
+load_mem(ty: ?*Type)  raises Error {
     if (is_byte_ty(ty)) {
         emit("  movzb (%rax), %rax\n");
     } else {
@@ -3371,7 +3857,7 @@ load_mem(ty: ?*Type) {
     }
 }
 
-store_mem(ty: ?*Type) {
+store_mem(ty: ?*Type)  raises Error {
     if (is_byte_ty(ty)) {
         emit("  mov %al, (%rdi)\n");
     } else {
@@ -3379,7 +3865,7 @@ store_mem(ty: ?*Type) {
     }
 }
 
-emit_memcpy(sz: int) {
+emit_memcpy(sz: int)  raises Error {
     if (sz <= 0) {
         sz = 8;
     }
@@ -3396,7 +3882,7 @@ emit_memcpy(sz: int) {
 }
 
 /* Store value in %rax into (%rdi). By-ref aggregates: %rax is a source pointer. */
-store_value(ty: *Type) {
+store_value(ty: *Type)  raises Error {
     if (passes_by_ref(ty)) {
         emit("  mov %rax, %rsi\n");
         emit_memcpy(type_size(ty));
@@ -3409,7 +3895,7 @@ store_value(ty: *Type) {
  * Object base in %rbx (absolute). Eval RHS first so a large aggregate stack
  * temp from gen_expr cannot bury a pushed destination address.
  */
-gen_struct_inits(inits: ?*Node) {
+gen_struct_inits(inits: ?*Node)  raises Error {
     init: ?*Node = inits;
     while (init != null) {
         lhs: ?*Node = field_init_lhs(init);
@@ -3432,7 +3918,7 @@ gen_struct_inits(inits: ?*Node) {
     }
 }
 
-gen_variant_inits(inits: ?*Node) {
+gen_variant_inits(inits: ?*Node)  raises Error {
     init: ?*Node = inits;
     while (init != null) {
         lhs: ?*Node = field_init_lhs(init);
@@ -3453,7 +3939,7 @@ gen_variant_inits(inits: ?*Node) {
     }
 }
 
-gen_addr(n: *Node) {
+gen_addr(n: *Node)  raises Error {
     add_type(n);
     match n.kind {
         Var { var, name, member } -> {
@@ -3476,7 +3962,7 @@ gen_addr(n: *Node) {
         MemberAccess { lhs, member } -> {
             add_type(lhs);
             t: ?*Type = decay(lhs.ty);
-            if (is_pointer(t) && is_struct_ty(type_base(t))) {
+            if (is_pointer(t) && (is_struct_ty(type_base(t)) || is_exn_ty(type_base(t)))) {
                 gen_expr(lhs);
             } else {
                 gen_addr(lhs);
@@ -3494,7 +3980,7 @@ gen_addr(n: *Node) {
     }
 }
 
-gen_expr(n: *Node) {
+gen_expr(n: *Node)  raises Error {
     add_type(n);
     match n.kind {
         Num { val, str_label } -> {
@@ -3904,7 +4390,7 @@ gen_expr(n: *Node) {
     }
 }
 
-gen_stmt(n: *Node) {
+gen_stmt(n: *Node)  raises Error {
     add_type(n);
     match n.kind {
         Return { lhs } -> {
@@ -4040,13 +4526,94 @@ gen_stmt(n: *Node) {
             emit("  add $16, %rsp\n");
             return;
         }
+        Raise { exn, args } -> {
+            if (exn.members != null) {
+                esz: int = exn.size;
+                if (esz <= 0) {
+                    esz = 8;
+                }
+                emit("  mov $");
+                emit_num(esz);
+                emit(", %rdi\n");
+                emit("  call malloc\n");
+                emit("  push %rbx\n");
+                emit("  mov %rax, %rbx\n");
+                gen_struct_inits(args);
+                emit("  mov %rbx, %rsi\n");
+                emit("  pop %rbx\n");
+            } else {
+                emit("  mov $0, %rsi\n");
+            }
+            emit("  mov $");
+            emit_num(exn.tag);
+            emit(", %rdi\n");
+            emit("  call l8_raise\n");
+            return;
+        }
+        Try { body, arms, buf } -> {
+            l4: int = new_label();
+            emit("  lea ");
+            emit_num(buf.offset);
+            emit("(%rbp), %rdi\n");
+            emit("  call l8_try_begin\n");
+            emit("  cmp $0, %rax\n");
+            emit("  jne .L.catch");
+            emit_num(l4);
+            emit("\n");
+            gen_stmt(body);
+            emit("  call l8_try_end\n");
+            emit("  jmp .L.tryend");
+            emit_num(l4);
+            emit("\n");
+            emit(".L.catch");
+            emit_num(l4);
+            emit(":\n");
+            arm2: ?*Node = arms;
+            while (arm2 != null) {
+                la2: int = new_label();
+                ced: *ExnDef = catch_arm_exn(arm2);
+                emit("  mov l8_exc_tag(%rip), %rax\n");
+                emit("  cmp $");
+                emit_num(ced.tag);
+                emit(", %rax\n");
+                emit("  jne .L.arm");
+                emit_num(la2);
+                emit("\n");
+                binder: ?*Obj = catch_arm_binder(arm2);
+                if (binder != null) {
+                    psz2: int = ced.size;
+                    if (psz2 > 0) {
+                        emit("  mov l8_exc_ptr(%rip), %rsi\n");
+                        emit("  lea ");
+                        emit_num(binder.offset);
+                        emit("(%rbp), %rdi\n");
+                        emit_memcpy(psz2);
+                    }
+                }
+                gen_stmt(arm_body(arm2));
+                emit("  jmp .L.tryend");
+                emit_num(l4);
+                emit("\n");
+                emit(".L.arm");
+                emit_num(la2);
+                emit(":\n");
+                arm2 = arm2.next;
+            }
+            emit("  mov l8_exc_tag(%rip), %rdi\n");
+            emit("  mov l8_exc_ptr(%rip), %rsi\n");
+            emit("  call l8_raise\n");
+            emit(".L.tryend");
+            emit_num(l4);
+            emit(":\n");
+            return;
+        }
         _ -> {
             error("invalid statement");
         }
     }
 }
 
-assign_lvar_offsets(fn: *Function) {
+assign_lvar_offsets(fn: *Function)  raises Error {
     off: int = 0;
     v: ?*Obj = fn.locals;
     while (v != null) {
@@ -4068,7 +4635,7 @@ assign_lvar_offsets(fn: *Function) {
     fn.stack_size = (off + 15) / 16 * 16;
 }
 
-emit_data() {
+emit_data()  raises Error {
     g: ?*Obj = globals;
     emit(".section .bss\n");
     emit(".align 8\n");
@@ -4131,7 +4698,7 @@ emit_data() {
     }
 }
 
-emit_text() {
+emit_text()  raises Error {
     fn: ?*Function = functions;
     emit(".section .text\n");
     while (fn != null) {
@@ -4139,6 +4706,7 @@ emit_text() {
         current_fn_name = fn.name;
         current_return_ty = fn.return_ty;
         current_sret = fn.sret;
+        current_fn = fn;
         emit(".globl ");
         emit(fn.name);
         emit("\n");
@@ -4192,22 +4760,29 @@ emit_text() {
     }
 }
 
-codegen() {
+codegen()  raises Error {
     emit_data();
     emit_text();
 }
 
 main(argc: int, argv: **i8): int {
-    if (argc != 2) {
-        error("usage: l8c <file.l8>");
+    try {
+        if (argc != 2) {
+            error("usage: l8c <file.l8>");
+        }
+        path: *i8 = (argv + 8).*;
+        init_runtime();
+        init_dummies();
+        source = read_file(path);
+        tok = tokenize();
+        parse_program();
+        check_noreturn_functions();
+        codegen();
+        return 0;
+    } with Error(e) -> {
+        write(2, "error: ", len("error: "));
+        write(2, e.msg, len(e.msg));
+        write(2, "\n", len("\n"));
+        return 1;
     }
-    path: *i8 = (argv + 8).*;
-    init_runtime();
-    init_dummies();
-    source = read_file(path);
-    tok = tokenize();
-    parse_program();
-    check_noreturn_functions();
-    codegen();
-    return 0;
 }
