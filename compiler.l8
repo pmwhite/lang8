@@ -7,13 +7,17 @@
 // Forward `*Name` may later complete as a record or a sum.
 // Match arms may end with `_ -> { ... }`. Field lists accept `;` or `,`.
 // Sum defs allow a leading `|` before the first variant.
-// Null pointers use the `null` literal (not integer 0).
+// Null pointers use the `null` literal (only for `?*T`, not integer 0).
+// `*T` is non-null; `?*T` is optional. `*T` coerces to `?*T`.
+// Flow narrowing: `if (p != null)` / `while (p != null)` / AND-conjuncts (not bare `if (p)`).
+// Bindings (locals, match arms) are block-scoped.
 
 type Type =
     | Int
     | I8
     | Bool
     | Ptr { base: *Type; }
+    | OptPtr { base: *Type; }
     | Array { base: *Type; len: int; }
     | Record { def: *StructDef; }
     | Enum { def: *EnumDef; };
@@ -21,33 +25,33 @@ type Type =
 type Member = {
     name: *i8;
     offset: int;
-    ty: *Type;
-    next: *Member;
+    ty: ?*Type;
+    next: ?*Member;
 };
 
 type StructDef = {
     name: *i8;
-    members: *Member;
+    members: ?*Member;
     size: int;
-    ty: *Type;
-    next: *StructDef;
+    ty: ?*Type;
+    next: ?*StructDef;
 };
 
 type Variant = {
     name: *i8;
     tag: int;
-    fields: *Member;
-    payload_ty: *Type;
+    fields: ?*Member;
+    payload_ty: ?*Type;
     payload_size: int;
-    next: *Variant;
+    next: ?*Variant;
 };
 
 type EnumDef = {
     name: *i8;
-    variants: *Variant;
+    variants: ?*Variant;
     size: int;
-    ty: *Type;
-    next: *EnumDef;
+    ty: ?*Type;
+    next: ?*EnumDef;
 };
 
 type TokKind =
@@ -100,33 +104,34 @@ type TokKind =
     | Dot
     | Match
     | Pipe
-    | Arrow;
+    | Arrow
+    | Question;
 
 type Token = {
     kind: TokKind;
     val: int;
     str: *i8;
     len: int;
-    next: *Token;
+    next: ?*Token;
 };
 
 type Node = {
     kind: int;
-    next: *Node;
-    lhs: *Node;
-    rhs: *Node;
-    cond: *Node;
-    then: *Node;
-    els: *Node;
-    body: *Node;
+    next: ?*Node;
+    lhs: ?*Node;
+    rhs: ?*Node;
+    cond: ?*Node;
+    then: ?*Node;
+    els: ?*Node;
+    body: ?*Node;
     val: int;
-    var: *Obj;
-    funcname: *i8;
-    args: *Node;
+    var: ?*Obj;
+    funcname: ?*i8;
+    args: ?*Node;
     str_label: int;
-    ty: *Type;
-    member: *Member;
-    variant: *Variant;
+    ty: ?*Type;
+    member: ?*Member;
+    variant: ?*Variant;
 };
 
 type Obj = {
@@ -134,32 +139,33 @@ type Obj = {
     is_local: int;
     is_func: int;
     offset: int;
-    ty: *Type;
-    next: *Obj;
+    scope_depth: int;
+    ty: ?*Type;
+    next: ?*Obj;
 };
 
 type Function = {
     name: *i8;
     nparams: int;
-    p0: *Obj;
-    p1: *Obj;
-    p2: *Obj;
-    p3: *Obj;
-    p4: *Obj;
-    p5: *Obj;
-    locals: *Obj;
-    body: *Node;
+    p0: ?*Obj;
+    p1: ?*Obj;
+    p2: ?*Obj;
+    p3: ?*Obj;
+    p4: ?*Obj;
+    p5: ?*Obj;
+    locals: ?*Obj;
+    body: ?*Node;
     stack_size: int;
-    return_ty: *Type;
-    sret: *Obj;
-    next: *Function;
+    return_ty: ?*Type;
+    sret: ?*Obj;
+    next: ?*Function;
 };
 
 type StrLit = {
     data: *i8;
     len: int;
     label: int;
-    next: *StrLit;
+    next: ?*StrLit;
 };
 
 // node kinds
@@ -172,21 +178,29 @@ ND_VARIANT_LIT: int; ND_MATCH: int; ND_MATCH_ARM: int; ND_NULL: int;
 
 source: *i8; source_len: int; pos: int;
 tok: *Token;
-globals: *Obj;
-locals: *Obj;
-functions: *Function;
-struct_defs: *StructDef;
-enum_defs: *EnumDef;
+globals: ?*Obj;
+locals: ?*Obj;
+scope_depth: int;
+functions: ?*Function;
+struct_defs: ?*StructDef;
+enum_defs: ?*EnumDef;
 field_list_size: int;
 ty_int: *Type;
 ty_i8: *Type;
 ty_bool: *Type;
-str_lits: *StrLit;
+str_lits: ?*StrLit;
 str_count: int;
 label_id: int;
-current_fn_name: *i8;
-current_return_ty: *Type;
-current_sret: *Obj;
+current_fn_name: ?*i8;
+current_return_ty: ?*Type;
+current_sret: ?*Obj;
+type NarrowFrame = {
+    var: ?*Obj;
+    ty: ?*Type;
+    next: ?*NarrowFrame;
+};
+
+narrow_top: ?*NarrowFrame;
 REG0: *i8; REG1: *i8; REG2: *i8; REG3: *i8; REG4: *i8; REG5: *i8;
 
 
@@ -346,54 +360,79 @@ read_file(path: *i8): *i8 {
     return buf;
 }
 
-type_size(t: *Type): int {
-    match t.* {
-        Int -> { return 8; }
-        I8 -> { return 1; }
-        Bool -> { return 1; }
-        Ptr { base } -> { return 8; }
-        Array { base, len } -> { return type_size(base) * len; }
-        Record { def } -> { return def.size; }
-        Enum { def } -> {
-            if (def.size <= 0) {
-                return 8;
+type_size(t: ?*Type): int {
+    if (t != null) {
+        match t.* {
+            Int -> { return 8; }
+            I8 -> { return 1; }
+            Bool -> { return 1; }
+            Ptr { base } -> { return 8; }
+            OptPtr { base } -> { return 8; }
+            Array { base, len } -> { return type_size(base) * len; }
+            Record { def } -> { return def.size; }
+            Enum { def } -> {
+                if (def.size <= 0) {
+                    return 8;
+                }
+                return def.size;
             }
-            return def.size;
         }
     }
+    return 0;
 }
 
-type_base(t: *Type): *Type {
-    match t.* {
-        Ptr { base } -> { return base; }
-        Array { base, len } -> { return base; }
-        _ -> { error("not a pointer or array"); return null; }
+type_base(t: ?*Type): *Type {
+    if (t != null) {
+        match t.* {
+            Ptr { base } -> { return base; }
+            OptPtr { base } -> { return base; }
+            Array { base, len } -> { return base; }
+            _ -> { error("not a pointer or array"); return ty_int; }
+        }
     }
+    error("not a pointer or array");
+    return ty_int;
 }
 
-type_array_len(t: *Type): int {
-    match t.* {
-        Array { base, len } -> { return len; }
-        _ -> { error("not an array"); return 0; }
+type_array_len(t: ?*Type): int {
+    if (t != null) {
+        match t.* {
+            Array { base, len } -> { return len; }
+            _ -> { error("not an array"); return 0; }
+        }
     }
+    error("not an array");
+    return 0;
 }
 
-type_struct_def(t: *Type): *StructDef {
-    match t.* {
-        Record { def } -> { return def; }
-        _ -> { error("not a record type"); return null; }
+type_struct_def(t: ?*Type): *StructDef {
+    if (t != null) {
+        match t.* {
+            Record { def } -> { return def; }
+            _ -> { error("not a record type"); return get_or_create_struct("?"); }
+        }
     }
+    error("not a record type");
+    return get_or_create_struct("?");
 }
 
-type_enum_def(t: *Type): *EnumDef {
-    match t.* {
-        Enum { def } -> { return def; }
-        _ -> { error("not an enum type"); return null; }
+type_enum_def(t: ?*Type): *EnumDef {
+    if (t != null) {
+        match t.* {
+            Enum { def } -> { return def; }
+            _ -> { error("not an enum type"); return get_or_create_enum("?"); }
+        }
     }
+    error("not an enum type");
+    return get_or_create_enum("?");
 }
 
 ptr_to(base: *Type): *Type {
     return new Type.Ptr { base: base };
+}
+
+opt_ptr_to(base: *Type): *Type {
+    return new Type.OptPtr { base: base };
 }
 
 array_of(base: *Type, len: int): *Type {
@@ -401,8 +440,9 @@ array_of(base: *Type, len: int): *Type {
 }
 
 struct_type(sd: *StructDef): *Type {
-    if (sd.ty != null) {
-        return sd.ty;
+    existing: ?*Type = sd.ty;
+    if (existing != null) {
+        return existing;
     }
     p: *Type = new Type.Record { def: sd };
     sd.ty = p;
@@ -410,16 +450,17 @@ struct_type(sd: *StructDef): *Type {
 }
 
 enum_type(ed: *EnumDef): *Type {
-    if (ed.ty != null) {
-        return ed.ty;
+    existing: ?*Type = ed.ty;
+    if (existing != null) {
+        return existing;
     }
     p: *Type = new Type.Enum { def: ed };
     ed.ty = p;
     return p;
 }
 
-find_struct(name: *i8): *StructDef {
-    s: *StructDef = struct_defs;
+find_struct(name: *i8): ?*StructDef {
+    s: ?*StructDef = struct_defs;
     while (s != null) {
         if (streq(s.name, name)) {
             return s;
@@ -429,8 +470,8 @@ find_struct(name: *i8): *StructDef {
     return null;
 }
 
-find_enum(name: *i8): *EnumDef {
-    e: *EnumDef = enum_defs;
+find_enum(name: *i8): ?*EnumDef {
+    e: ?*EnumDef = enum_defs;
     while (e != null) {
         if (streq(e.name, name)) {
             return e;
@@ -441,14 +482,14 @@ find_enum(name: *i8): *EnumDef {
 }
 
 remove_struct(name: *i8) {
-    prev: *StructDef = null;
-    s: *StructDef = struct_defs;
+    prev: ?*StructDef = null;
+    s: ?*StructDef = struct_defs;
     while (s != null) {
         if (streq(s.name, name)) {
-            if (prev == null) {
-                struct_defs = s.next;
-            } else {
+            if (prev != null) {
                 prev.next = s.next;
+            } else {
+                struct_defs = s.next;
             }
             return;
         }
@@ -458,48 +499,47 @@ remove_struct(name: *i8) {
 }
 
 get_or_create_struct(name: *i8): *StructDef {
-    sd: *StructDef = find_struct(name);
+    sd: ?*StructDef = find_struct(name);
     if (sd != null) {
         return sd;
     }
-    sd = new StructDef {
+    created: *StructDef = new StructDef {
         name: name,
         members: null,
         size: 0,
         ty: null,
         next: struct_defs
     };
-    struct_defs = sd;
-    return sd;
+    struct_defs = created;
+    return created;
 }
 
 get_or_create_enum(name: *i8): *EnumDef {
-    ed: *EnumDef = find_enum(name);
+    ed: ?*EnumDef = find_enum(name);
     if (ed != null) {
         return ed;
     }
-    ed = new EnumDef {
+    created: *EnumDef = new EnumDef {
         name: name,
         variants: null,
         size: 0,
         ty: null,
         next: enum_defs
     };
-    enum_defs = ed;
-    return ed;
+    enum_defs = created;
+    return created;
 }
 
 rebind_struct_stub_to_enum(sd: *StructDef, ed: *EnumDef) {
-    t: *Type = sd.ty;
-    if (t == null) {
-        return;
+    t: ?*Type = sd.ty;
+    if (t != null) {
+        t.* = Type.Enum { def: ed };
+        ed.ty = t;
     }
-    t.* = Type.Enum { def: ed };
-    ed.ty = t;
 }
 
-find_variant(ed: *EnumDef, name: *i8): *Variant {
-    v: *Variant = ed.variants;
+find_variant(ed: *EnumDef, name: *i8): ?*Variant {
+    v: ?*Variant = ed.variants;
     while (v != null) {
         if (streq(v.name, name)) {
             return v;
@@ -540,7 +580,7 @@ is_type_name(): bool {
     if (!equal(TokKind.Ident)) {
         return false;
     }
-    name: *i8 = strdup_n(tok.str, tok.len);
+    name: *i8 = strdup_n(tok.str as *i8, tok.len);
     if (find_struct(name) != null) {
         return true;
     }
@@ -554,26 +594,45 @@ starts_type(): bool {
     if (equal(TokKind.Int) || equal(TokKind.I8) || equal(TokKind.Bool) || is_type_name()) {
         return true;
     }
-    t: *Token = tok;
-    while (t.kind == TokKind.Star) {
-        t = t.next;
-    }
-    if (t != tok) {
-        if (t.kind == TokKind.Int || t.kind == TokKind.I8 || t.kind == TokKind.Bool) {
-            return true;
+    t: ?*Token = tok;
+    done: int = 0;
+    while (t != null && done == 0) {
+        if (t.kind == TokKind.Question) {
+            n1: ?*Token = t.next;
+            if (n1 != null) {
+                if (n1.kind != TokKind.Star) {
+                    return false;
+                }
+                t = n1.next;
+            } else {
+                return false;
+            }
+        } else {
+            if (t.kind == TokKind.Star) {
+                t = t.next;
+            } else {
+                done = 1;
+            }
         }
-        if (t.kind == TokKind.Ident) {
-            n: *i8 = strdup_n(t.str, t.len);
-            if (find_struct(n) != null || find_enum(n) != null) {
+    }
+    if (t != null) {
+        if (t != tok) {
+            if (t.kind == TokKind.Int || t.kind == TokKind.I8 || t.kind == TokKind.Bool) {
                 return true;
+            }
+            if (t.kind == TokKind.Ident) {
+                n: *i8 = strdup_n(t.str, t.len);
+                if (find_struct(n) != null || find_enum(n) != null) {
+                    return true;
+                }
             }
         }
     }
     return false;
 }
 
-find_member(sd: *StructDef, name: *i8): *Member {
-    m: *Member = sd.members;
+find_member(sd: *StructDef, name: *i8): ?*Member {
+    m: ?*Member = sd.members;
     while (m != null) {
         if (streq(m.name, name)) {
             return m;
@@ -583,100 +642,150 @@ find_member(sd: *StructDef, name: *i8): *Member {
     return null;
 }
 
-is_pointer(t: *Type): bool {
-    if (t == null) {
-        return false;
+is_pointer(t: ?*Type): bool {
+    if (t != null) {
+        match t.* {
+            Ptr { base } -> { return true; }
+            _ -> { return false; }
+        }
     }
-    match t.* {
-        Ptr { base } -> { return true; }
-        _ -> { return false; }
-    }
+    return false;
 }
 
-is_array(t: *Type): bool {
-    if (t == null) {
-        return false;
+is_opt_pointer(t: ?*Type): bool {
+    if (t != null) {
+        match t.* {
+            OptPtr { base } -> { return true; }
+            _ -> { return false; }
+        }
     }
-    match t.* {
-        Array { base, len } -> { return true; }
-        _ -> { return false; }
-    }
+    return false;
 }
 
-is_struct_ty(t: *Type): bool {
-    if (t == null) {
-        return false;
-    }
-    match t.* {
-        Record { def } -> { return true; }
-        _ -> { return false; }
-    }
+is_any_pointer(t: ?*Type): bool {
+    return is_pointer(t) || is_opt_pointer(t);
 }
 
-is_enum_ty(t: *Type): bool {
-    if (t == null) {
-        return false;
+is_array(t: ?*Type): bool {
+    if (t != null) {
+        match t.* {
+            Array { base, len } -> { return true; }
+            _ -> { return false; }
+        }
     }
-    match t.* {
-        Enum { def } -> { return true; }
-        _ -> { return false; }
-    }
+    return false;
 }
 
-is_aggregate(t: *Type): bool {
+is_struct_ty(t: ?*Type): bool {
+    if (t != null) {
+        match t.* {
+            Record { def } -> { return true; }
+            _ -> { return false; }
+        }
+    }
+    return false;
+}
+
+is_enum_ty(t: ?*Type): bool {
+    if (t != null) {
+        match t.* {
+            Enum { def } -> { return true; }
+            _ -> { return false; }
+        }
+    }
+    return false;
+}
+
+is_aggregate(t: ?*Type): bool {
     return is_struct_ty(t) || is_enum_ty(t);
 }
 
-passes_by_ref(t: *Type): bool {
+passes_by_ref(t: ?*Type): bool {
     return is_aggregate(t) && type_size(t) > 8;
 }
 
 
-is_null_node(n: *Node): bool {
-    return n != null && n.kind == ND_NULL;
+is_null_node(n: ?*Node): bool {
+    if (n != null) {
+        return n.kind == ND_NULL;
+    }
+    return false;
 }
 
-bind_null_to_pointer(pty: *Type, null_n: *Node): bool {
-    if (!is_pointer(pty) || !is_null_node(null_n)) {
+bind_null_to_pointer(pty: ?*Type, null_n: ?*Node): bool {
+    if (!is_opt_pointer(pty) || !is_null_node(null_n)) {
         return false;
     }
-    null_n.ty = pty;
-    return true;
+    if (null_n != null) {
+        null_n.ty = pty;
+        return true;
+    }
+    return false;
+}
+
+types_compatible(from: ?*Type, to: ?*Type): bool {
+    from = decay(from);
+    to = decay(to);
+    if (types_equal(from, to)) {
+        return true;
+    }
+    if (is_opt_pointer(to) && is_pointer(from) && types_equal(type_base(from), type_base(to))) {
+        return true;
+    }
+    return false;
+}
+
+assignable(to: ?*Type, from_n: ?*Node): bool {
+    ft: ?*Type = null;
+    if (from_n != null) {
+        fty: ?*Type = from_n.ty;
+        if (fty != null) {
+            ft = decay(fty);
+        }
+    }
+    tt: ?*Type = decay(to);
+    if (ft != null && types_compatible(ft, tt)) {
+        return true;
+    }
+    if (bind_null_to_pointer(tt, from_n)) {
+        return true;
+    }
+    return false;
 }
 
 
 
-is_i8_ty(t: *Type): bool {
-    if (t == null) {
-        return false;
+is_i8_ty(t: ?*Type): bool {
+    if (t != null) {
+        match t.* {
+            I8 -> { return true; }
+            _ -> { return false; }
+        }
     }
-    match t.* {
-        I8 -> { return true; }
-        _ -> { return false; }
-    }
+    return false;
 }
 
-is_int_ty(t: *Type): bool {
-    if (t == null) {
-        return false;
+is_int_ty(t: ?*Type): bool {
+    if (t != null) {
+        match t.* {
+            Int -> { return true; }
+            _ -> { return false; }
+        }
     }
-    match t.* {
-        Int -> { return true; }
-        _ -> { return false; }
-    }
+    return false;
 }
 
-is_bool_ty(t: *Type): bool {
-    if (t == null) {
-        return false;
+is_bool_ty(t: ?*Type): bool {
+    if (t != null) {
+        match t.* {
+            Bool -> { return true; }
+            _ -> { return false; }
+        }
     }
-    match t.* {
-        Bool -> { return true; }
-        _ -> { return false; }
-    }
+    return false;
 }
 
-types_equal(a: *Type, b: *Type): bool {
+types_equal(a: ?*Type, b: ?*Type): bool {
     if (a == b) {
         return true;
     }
@@ -695,6 +804,9 @@ types_equal(a: *Type, b: *Type): bool {
     if (is_pointer(a) && is_pointer(b)) {
         return types_equal(type_base(a), type_base(b));
     }
+    if (is_opt_pointer(a) && is_opt_pointer(b)) {
+        return types_equal(type_base(a), type_base(b));
+    }
     if (is_array(a) && is_array(b)) {
         if (type_array_len(a) != type_array_len(b)) {
             return false;
@@ -710,18 +822,21 @@ types_equal(a: *Type, b: *Type): bool {
     return false;
 }
 
-is_word_ty(t: *Type): bool {
+is_word_ty(t: ?*Type): bool {
     t = decay(t);
     return t != null && type_size(t) == 8;
 }
 
-check_as(from: *Type, to: *Type) {
+check_as(from: ?*Type, to: ?*Type) {
     from = decay(from);
     to = decay(to);
     if (types_equal(from, to)) {
         return;
     }
     if ((is_i8_ty(from) || is_bool_ty(from)) && is_int_ty(to)) {
+        return;
+    }
+    if (is_opt_pointer(from) && is_pointer(to) && types_equal(type_base(from), type_base(to))) {
         return;
     }
     if (is_word_ty(from) && is_word_ty(to)) {
@@ -733,7 +848,7 @@ check_as(from: *Type, to: *Type) {
     error("invalid as conversion");
 }
 
-check_trunc(from: *Type, to: *Type) {
+check_trunc(from: ?*Type, to: ?*Type) {
     from = decay(from);
     to = decay(to);
     if (is_int_ty(from) && (is_i8_ty(to) || is_bool_ty(to))) {
@@ -742,7 +857,7 @@ check_trunc(from: *Type, to: *Type) {
     error("invalid trunc conversion");
 }
 
-decay(t: *Type): *Type {
+decay(t: ?*Type): ?*Type {
     if (is_array(t)) {
         return ptr_to(type_base(t));
     }
@@ -865,6 +980,7 @@ punct_kind(c: i8): TokKind {
     if (c == ';') { return TokKind.Semi; }
     if (c == ',') { return TokKind.Comma; }
     if (c == '/') { return TokKind.Slash; }
+    if (c == '?') { return TokKind.Question; }
     error("unexpected character");
     return TokKind.Eof;
 }
@@ -873,14 +989,21 @@ tokenize(): *Token {
     head: *Token = new Token {
         kind: TokKind.Eof,
         val: 0,
-        str: null,
+        str: "",
         len: 0,
         next: null
     };
     cur: *Token = head;
+    t: *Token = uninitialized;
+    s: *i8 = uninitialized;
+    n: int = 0;
+    v: int = 0;
+    c: i8 = 0 trunc i8;
+    ch: i8 = 0 trunc i8;
+    pk: TokKind = TokKind.Eof;
     pos = 0;
     while (pos < source_len) {
-        c: i8 = source[pos];
+        c = source[pos];
         if (is_space(c)) {
             pos = pos + 1;
         } else {
@@ -893,9 +1016,9 @@ tokenize(): *Token {
                     skip_block_comment();
                 } else {
                     if (is_digit(c)) {
-                        s: *i8 = source + pos;
-                        v: int = read_number();
-                        t: *Token = new_token(TokKind.Num, s, (source + pos) - s);
+                        s = source + pos;
+                        v = read_number();
+                        t = new_token(TokKind.Num, s, (source + pos) - s);
                         t.val = v;
                         cur.next = t;
                         cur = t;
@@ -903,7 +1026,7 @@ tokenize(): *Token {
                         if (c == '"') {
                             pos = pos + 1;
                             s = source + pos;
-                            n: int = scan_string_len();
+                            n = scan_string_len();
                             t = new_token(TokKind.Str, s, n);
                             cur.next = t;
                             cur = t;
@@ -911,7 +1034,6 @@ tokenize(): *Token {
                         } else {
                             if (c == '\'') {
                                 pos = pos + 1;
-                                ch: i8 = uninitialized;
                                 if (source[pos] == '\\') {
                                     pos = pos + 1;
                                     ch = esc_char(source[pos]);
@@ -963,6 +1085,10 @@ tokenize(): *Token {
                                                                 t = new_token(TokKind.Pipe, source + pos, 1);
                                                                 cur.next = t; cur = t; pos = pos + 1;
                                                             } else {
+                                                            if (c == '?') {
+                                                                t = new_token(TokKind.Question, source + pos, 1);
+                                                                cur.next = t; cur = t; pos = pos + 1;
+                                                            } else {
                                                                 if (c == '-' && source[pos + 1] == '>') {
                                                                     t = new_token(TokKind.Arrow, source + pos, 2);
                                                                     cur.next = t; cur = t; pos = pos + 2;
@@ -983,7 +1109,7 @@ tokenize(): *Token {
                                                                                     t = new_token(TokKind.Gt, source + pos, 1);
                                                                                     cur.next = t; cur = t; pos = pos + 1;
                                                                                 } else {
-                                                                                    pk: TokKind = punct_kind(c);
+                                                                                    pk = punct_kind(c);
                                                                                     t = new_token(pk, source + pos, 1);
                                                                                     cur.next = t; cur = t; pos = pos + 1;
                                                                                 }
@@ -1006,9 +1132,10 @@ tokenize(): *Token {
             }
         }
     }
+    }
     t = new_token(TokKind.Eof, source + pos, 0);
     cur.next = t;
-    return head.next;
+    return head.next as *Token;
 }
 
 equal(kind: TokKind): bool {
@@ -1019,7 +1146,7 @@ skip(kind: TokKind) {
     if (!equal(kind)) {
         error("unexpected token");
     }
-    tok = tok.next;
+    tok = tok.next as *Token;
 }
 
 cur_tokstr(): *i8 {
@@ -1094,8 +1221,8 @@ new_num(v: int): *Node {
     return n;
 }
 
-find_function(name: *i8): *Function {
-    fn: *Function = functions;
+find_function(name: *i8): ?*Function {
+    fn: ?*Function = functions;
     while (fn != null) {
         if (streq(fn.name, name)) {
             return fn;
@@ -1105,8 +1232,8 @@ find_function(name: *i8): *Function {
     return null;
 }
 
-find_obj(list: *Obj, name: *i8): *Obj {
-    o: *Obj = list;
+find_obj(list: ?*Obj, name: *i8): ?*Obj {
+    o: ?*Obj = list;
     while (o != null) {
         if (streq(o.name, name)) {
             return o;
@@ -1116,66 +1243,206 @@ find_obj(list: *Obj, name: *i8): *Obj {
     return null;
 }
 
-find_var(name: *i8): *Obj {
-    o: *Obj = find_obj(locals, name);
+find_local(name: *i8): ?*Obj {
+    o: ?*Obj = locals;
+    while (o != null) {
+        if (o.scope_depth <= scope_depth) {
+            if (streq(o.name, name)) {
+                return o;
+            }
+        }
+        o = o.next;
+    }
+    return null;
+}
+
+find_var(name: *i8): ?*Obj {
+    o: ?*Obj = find_local(name);
     if (o != null) {
         return o;
     }
     return find_obj(globals, name);
 }
 
-new_obj(name: *i8, is_local: int): *Obj {
-    nxt: *Obj = globals;
-    if (is_local != 0) {
-        nxt = locals;
+enter_scope() {
+    scope_depth = scope_depth + 1;
+}
+
+leave_scope() {
+    if (scope_depth <= 0) {
+        error("internal: leave_scope");
     }
+    scope_depth = scope_depth - 1;
+}
+
+new_obj(name: *i8, is_local: int): *Obj {
     o: *Obj = new Obj {
         name: name,
         is_local: is_local,
         is_func: 0,
         offset: 0,
+        scope_depth: 0,
         ty: null,
-        next: nxt
+        next: null
     };
     if (is_local != 0) {
+        o.scope_depth = scope_depth;
+        o.next = locals;
         locals = o;
     } else {
+        o.next = globals;
         globals = o;
     }
     return o;
 }
 
+var_view_ty(var: ?*Obj): ?*Type {
+    f: ?*NarrowFrame = narrow_top;
+    while (f != null) {
+        if (f.var == var) {
+            return f.ty;
+        }
+        f = f.next;
+    }
+    if (var != null) {
+        return var.ty;
+    }
+    return null;
+}
+
+narrow_push(var: ?*Obj, ty: ?*Type) {
+    f: *NarrowFrame = new NarrowFrame {
+        var: var,
+        ty: ty,
+        next: narrow_top
+    };
+    narrow_top = f;
+}
+
+narrow_reset(saved: ?*NarrowFrame) {
+    narrow_top = saved;
+}
+
+narrow_from_cond(cond: ?*Node, for_else: int): ?*NarrowFrame {
+    saved: ?*NarrowFrame = narrow_top;
+    if (for_else != 0) {
+        eqv: ?*Obj = null_eq_var(cond);
+        if (eqv != null) {
+            narrow_push(eqv, ptr_to(type_base(eqv.ty)));
+        }
+    } else {
+        eqv2: ?*Obj = null_eq_var(cond);
+        nv: ?*Obj = null;
+        if (eqv2 == null) {
+            nv = null_check_var(cond);
+        }
+        if (nv != null) {
+            narrow_push(nv, ptr_to(type_base(nv.ty)));
+        }
+    }
+    return saved;
+}
+
+opt_local_var(n: ?*Node): ?*Obj {
+    if (n != null) {
+        if (n.kind != ND_VAR) {
+            return null;
+        }
+        v: ?*Obj = n.var;
+        if (v != null) {
+            if (v.is_local == 0) {
+                return null;
+            }
+            t: ?*Type = decay(v.ty);
+            if (is_opt_pointer(t)) {
+                return v;
+            }
+            return null;
+        }
+        return null;
+    }
+    return null;
+}
+
+null_check_var(cond: ?*Node): ?*Obj {
+    if (cond != null) {
+        if (cond.kind == ND_NE) {
+            if (is_null_node(cond.rhs)) {
+                return opt_local_var(cond.lhs);
+            }
+            if (is_null_node(cond.lhs)) {
+                return opt_local_var(cond.rhs);
+            }
+            return null;
+        }
+        if (cond.kind == ND_LOGAND) {
+            v: ?*Obj = null_check_var(cond.lhs);
+            if (v != null) {
+                return v;
+            }
+            return null_check_var(cond.rhs);
+        }
+        return null;
+    }
+    return null;
+}
+
+null_eq_var(cond: ?*Node): ?*Obj {
+    if (cond != null) {
+        if (cond.kind != ND_EQ) {
+            return null;
+        }
+        if (is_null_node(cond.rhs)) {
+            return opt_local_var(cond.lhs);
+        }
+        if (is_null_node(cond.lhs)) {
+            return opt_local_var(cond.rhs);
+        }
+        return null;
+    }
+    return null;
+}
+
 decl_spec(): *Type {
     if (equal(TokKind.Int)) {
-        tok = tok.next;
+        tok = tok.next as *Token;
         return ty_int;
     }
     if (equal(TokKind.I8)) {
-        tok = tok.next;
+        tok = tok.next as *Token;
         return ty_i8;
     }
     if (equal(TokKind.Bool)) {
-        tok = tok.next;
+        tok = tok.next as *Token;
         return ty_bool;
     }
     if (equal(TokKind.Ident)) {
         name: *i8 = cur_tokstr();
-        ed: *EnumDef = find_enum(name);
+        ed: ?*EnumDef = find_enum(name);
         if (ed != null) {
-            tok = tok.next;
-            return enum_type(ed);
+            tok = tok.next as *Token;
+            return enum_type(ed as *EnumDef);
         }
-        tok = tok.next;
+        tok = tok.next as *Token;
         sd: *StructDef = get_or_create_struct(name);
         return struct_type(sd);
     }
     error("expected type");
-    return null;
+    return ty_int;
 }
 
 parse_type(): *Type {
+    if (equal(TokKind.Question)) {
+        tok = tok.next as *Token;
+        if (!equal(TokKind.Star)) {
+            error("expected * after ? in optional pointer type");
+        }
+        tok = tok.next as *Token;
+        base: *Type = parse_type();
+        return opt_ptr_to(base);
+    }
     if (equal(TokKind.Star)) {
-        tok = tok.next;
+        tok = tok.next as *Token;
         base: *Type = parse_type();
         return ptr_to(base);
     }
@@ -1191,8 +1458,10 @@ parse_struct_field_inits(sty: *Type): *Node {
         error("struct literal requires a struct type");
     }
     skip(TokKind.LBrace);
-    head: *Node = null;
-    cur: *Node = null;
+    head: ?*Node = null;
+    cur: ?*Node = null;
+    m: ?*Member = null;
+    i: ?*Node = null;
     while (!equal(TokKind.RBrace)) {
         if (cur != null) {
             skip(TokKind.Comma);
@@ -1201,40 +1470,38 @@ parse_struct_field_inits(sty: *Type): *Node {
             error("expected field name in struct literal");
         }
         fname: *i8 = cur_tokstr();
-        tok = tok.next;
+        tok = tok.next as *Token;
         skip(TokKind.Colon);
-        m: *Member = find_member(type_struct_def(sty), fname);
+        m = find_member(type_struct_def(sty), fname);
         if (m == null) {
             error("unknown field");
         }
-        i: *Node = head;
+        mu: *Member = m as *Member;
+        i = head;
         while (i != null) {
-            if (i.member == m) {
+            if (i.member == mu) {
                 error("duplicate field in struct literal");
             }
             i = i.next;
         }
         init: *Node = new_node(ND_EXPR_STMT);
-        init.member = m;
+        init.member = mu;
         if (equal(TokKind.Uninitialized)) {
             init.lhs = null;
-            tok = tok.next;
+            tok = tok.next as *Token;
         } else {
             init.lhs = parse_expr();
             add_type(init.lhs);
-            lt: *Type = decay(m.ty);
-            rt: *Type = decay(init.lhs.ty);
-            if (!types_equal(lt, rt)) {
-                if (!bind_null_to_pointer(lt, init.lhs)) {
-                    error("field initializer type mismatch");
-                }
+            lt: ?*Type = decay(mu.ty);
+            if (!assignable(lt, init.lhs)) {
+                error("field initializer type mismatch");
             }
         }
-        if (cur == null) {
-            head = init;
+        if (cur != null) {
+            cur.next = init;
             cur = init;
         } else {
-            cur.next = init;
+            head = init;
             cur = init;
         }
     }
@@ -1254,13 +1521,15 @@ parse_struct_field_inits(sty: *Type): *Node {
         m = m.next;
     }
     skip(TokKind.RBrace);
-    return head;
+    return head as *Node;
 }
 
 parse_variant_field_inits(v: *Variant): *Node {
     skip(TokKind.LBrace);
-    head: *Node = null;
-    cur: *Node = null;
+    head: ?*Node = null;
+    cur: ?*Node = null;
+    m: ?*Member = null;
+    i: ?*Node = null;
     while (!equal(TokKind.RBrace)) {
         if (cur != null) {
             skip(TokKind.Comma);
@@ -1269,10 +1538,10 @@ parse_variant_field_inits(v: *Variant): *Node {
             error("expected field name in variant literal");
         }
         fname: *i8 = cur_tokstr();
-        tok = tok.next;
+        tok = tok.next as *Token;
         skip(TokKind.Colon);
-        m: *Member = null;
-        x: *Member = v.fields;
+        m = null;
+        x: ?*Member = v.fields;
         while (x != null) {
             if (streq(x.name, fname)) {
                 m = x;
@@ -1282,34 +1551,32 @@ parse_variant_field_inits(v: *Variant): *Node {
         if (m == null) {
             error("unknown field");
         }
-        i: *Node = head;
+        mu: *Member = m as *Member;
+        i = head;
         while (i != null) {
-            if (i.member == m) {
+            if (i.member == mu) {
                 error("duplicate field");
             }
             i = i.next;
         }
         init: *Node = new_node(ND_EXPR_STMT);
-        init.member = m;
+        init.member = mu;
         if (equal(TokKind.Uninitialized)) {
             init.lhs = null;
-            tok = tok.next;
+            tok = tok.next as *Token;
         } else {
             init.lhs = parse_expr();
             add_type(init.lhs);
-            lt: *Type = decay(m.ty);
-            rt: *Type = decay(init.lhs.ty);
-            if (!types_equal(lt, rt)) {
-                if (!bind_null_to_pointer(lt, init.lhs)) {
-                    error("field initializer type mismatch");
-                }
+            lt: ?*Type = decay(mu.ty);
+            if (!assignable(lt, init.lhs)) {
+                error("field initializer type mismatch");
             }
         }
-        if (cur == null) {
-            head = init;
+        if (cur != null) {
+            cur.next = init;
             cur = init;
         } else {
-            cur.next = init;
+            head = init;
             cur = init;
         }
     }
@@ -1329,13 +1596,14 @@ parse_variant_field_inits(v: *Variant): *Node {
         m = m.next;
     }
     skip(TokKind.RBrace);
-    return head;
+    return head as *Node;
 }
 
 parse_primary(): *Node {
+    n: *Node = uninitialized;
     if (equal(TokKind.New)) {
-        tok = tok.next;
-        if (is_type_name() && tok.next.kind == TokKind.Dot) {
+        tok = tok.next as *Token;
+        if (is_type_name() && (tok.next as *Token).kind == TokKind.Dot) {
             ety: *Type = parse_type();
             if (!is_enum_ty(ety)) {
                 error("new Enum.Variant requires an enum type");
@@ -1345,12 +1613,13 @@ parse_primary(): *Node {
                 error("expected variant name after new Enum.");
             }
             vname: *i8 = cur_tokstr();
-            tok = tok.next;
-            v: *Variant = find_variant(type_enum_def(ety), vname);
-            if (v == null) {
+            tok = tok.next as *Token;
+            vo: ?*Variant = find_variant(type_enum_def(ety), vname);
+            if (vo == null) {
                 error("unknown variant");
             }
-            n: *Node = new_node(ND_NEW);
+            v: *Variant = vo as *Variant;
+            n = new_node(ND_NEW);
             n.ty = ptr_to(ety);
             n.variant = v;
             n.val = v.tag;
@@ -1378,7 +1647,7 @@ parse_primary(): *Node {
         n.ty = ptr_to(base);
         if (equal(TokKind.Uninitialized)) {
             n.val = 1;
-            tok = tok.next;
+            tok = tok.next as *Token;
             return n;
         }
         if (!equal(TokKind.LBrace)) {
@@ -1392,7 +1661,7 @@ parse_primary(): *Node {
         return n;
     }
     if (equal(TokKind.Sizeof)) {
-        tok = tok.next;
+        tok = tok.next as *Token;
         skip(TokKind.LParen);
         if (starts_type()) {
             ty: *Type = parse_type();
@@ -1400,46 +1669,46 @@ parse_primary(): *Node {
             skip(TokKind.RParen);
             return new_num(type_size(ty));
         }
-        n: *Node = parse_expr();
+        n = parse_expr();
         skip(TokKind.RParen);
         add_type(n);
         return new_num(type_size(n.ty));
     }
     if (equal(TokKind.LParen)) {
-        tok = tok.next;
+        tok = tok.next as *Token;
         n = parse_expr();
         skip(TokKind.RParen);
         return n;
     }
     if (equal(TokKind.Num)) {
         n = new_num(tok.val);
-        tok = tok.next;
+        tok = tok.next as *Token;
         return n;
     }
     if (equal(TokKind.True) || equal(TokKind.False)) {
-        v: int = 0;
+        bv: int = 0;
         if (equal(TokKind.True)) {
-            v = 1;
+            bv = 1;
         }
-        n = new_num(v);
+        n = new_num(bv);
         n.ty = ty_bool;
-        tok = tok.next;
+        tok = tok.next as *Token;
         return n;
     }
     if (equal(TokKind.Null)) {
         n = new_node(ND_NULL);
-        tok = tok.next;
+        tok = tok.next as *Token;
         return n;
     }
     if (equal(TokKind.Char)) {
         n = new_num(tok.val);
         n.ty = ty_i8;
-        tok = tok.next;
+        tok = tok.next as *Token;
         return n;
     }
     if (equal(TokKind.Str)) {
-        label: int = add_string(tok.str, tok.len);
-        tok = tok.next;
+        label: int = add_string(tok.str as *i8, tok.len);
+        tok = tok.next as *Token;
         n = new_node(ND_NUM);
         n.str_label = label + 1;
         n.ty = ptr_to(ty_i8);
@@ -1447,7 +1716,7 @@ parse_primary(): *Node {
     }
     if (equal(TokKind.Ident)) {
         name: *i8 = cur_tokstr();
-        if (is_type_name() && tok.next.kind == TokKind.Dot) {
+        if (is_type_name() && (tok.next as *Token).kind == TokKind.Dot) {
             ety: *Type = parse_type();
             if (!is_enum_ty(ety)) {
                 error("variant construction requires an enum type");
@@ -1457,11 +1726,12 @@ parse_primary(): *Node {
                 error("expected variant name");
             }
             vname: *i8 = cur_tokstr();
-            tok = tok.next;
-            v: *Variant = find_variant(type_enum_def(ety), vname);
-            if (v == null) {
+            tok = tok.next as *Token;
+            vo: ?*Variant = find_variant(type_enum_def(ety), vname);
+            if (vo == null) {
                 error("unknown variant");
             }
+            v: *Variant = vo as *Variant;
             n = new_node(ND_VARIANT_LIT);
             n.ty = ety;
             n.variant = v;
@@ -1478,7 +1748,7 @@ parse_primary(): *Node {
             }
             return n;
         }
-        if (is_type_name() && tok.next.kind == TokKind.LBrace) {
+        if (is_type_name() && (tok.next as *Token).kind == TokKind.LBrace) {
             sty: *Type = parse_type();
             if (!is_struct_ty(sty)) {
                 error("struct literal requires a struct type");
@@ -1488,23 +1758,23 @@ parse_primary(): *Node {
             n.args = parse_struct_field_inits(sty);
             return n;
         }
-        tok = tok.next;
+        tok = tok.next as *Token;
         if (equal(TokKind.LParen)) {
             n = new_node(ND_FUNCALL);
             n.funcname = name;
-            tok = tok.next;
-            head: *Node = null;
-            cur: *Node = null;
+            tok = tok.next as *Token;
+            head: ?*Node = null;
+            cur: ?*Node = null;
             while (!equal(TokKind.RParen)) {
                 if (cur != null) {
                     skip(TokKind.Comma);
                 }
                 arg: *Node = parse_expr();
-                if (cur == null) {
-                    head = arg;
+                if (cur != null) {
+                    cur.next = arg;
                     cur = arg;
                 } else {
-                    cur.next = arg;
+                    head = arg;
                     cur = arg;
                 }
             }
@@ -1512,24 +1782,25 @@ parse_primary(): *Node {
             skip(TokKind.RParen);
             return n;
         }
-        var: *Obj = find_var(name);
-        if (var == null) {
+        varo: ?*Obj = find_var(name);
+        if (varo == null) {
             error("undefined variable");
         }
+        var: *Obj = varo as *Obj;
         n = new_node(ND_VAR);
         n.var = var;
         n.ty = var.ty;
         return n;
     }
     error("expected expression");
-    return null;
+    return new_node(ND_NUM);
 }
 
 parse_postfix(): *Node {
     n: *Node = parse_primary();
     while (true) {
         if (equal(TokKind.LBrack)) {
-            tok = tok.next;
+            tok = tok.next as *Token;
             idx: *Node = parse_expr();
             skip(TokKind.RBrack);
             add_type(n);
@@ -1537,7 +1808,7 @@ parse_postfix(): *Node {
             if (!is_int_ty(decay(idx.ty))) {
                 error("array index must be int");
             }
-            t: *Type = decay(n.ty);
+            t: ?*Type = decay(n.ty);
             if (!is_pointer(t)) {
                 error("subscript of non-pointer");
             }
@@ -1546,20 +1817,23 @@ parse_postfix(): *Node {
             n.ty = type_base(t);
         } else {
             if (equal(TokKind.Dot)) {
-                if (tok.next.kind == TokKind.Star) {
-                    tok = tok.next;
-                    tok = tok.next;
+                if ((tok.next as *Token).kind == TokKind.Star) {
+                    tok = tok.next as *Token;
+                    tok = tok.next as *Token;
                     n = new_unary(ND_DEREF, n);
                 } else {
-                    tok = tok.next;
+                    tok = tok.next as *Token;
                     if (!equal(TokKind.Ident)) {
                         error("expected member name");
                     }
                     name: *i8 = cur_tokstr();
-                    tok = tok.next;
+                    tok = tok.next as *Token;
                     add_type(n);
-                    t: *Type = decay(n.ty);
-                    sty: *Type = n.ty;
+                    t: ?*Type = decay(n.ty);
+                    sty: *Type = n.ty as *Type;
+                    if (is_opt_pointer(t)) {
+                        error("member access on optional pointer (use if (p != null) / while (p != null) to narrow)");
+                    }
                     if (is_pointer(t) && is_struct_ty(type_base(t))) {
                         sty = type_base(t);
                     } else {
@@ -1567,15 +1841,16 @@ parse_postfix(): *Node {
                             error("member access on non-struct");
                         }
                     }
-                    m: *Member = find_member(type_struct_def(sty), name);
+                    m: ?*Member = find_member(type_struct_def(sty), name);
                     if (m == null) {
                         error("unknown member");
                     }
+                    mu: *Member = m as *Member;
                     mem: *Node = new_node(ND_MEMBER);
                     mem.lhs = n;
-                    mem.member = m;
-                    if (m.ty != null) {
-                        mem.ty = m.ty;
+                    mem.member = mu;
+                    if (mu.ty != null) {
+                        mem.ty = mu.ty;
                     } else {
                         mem.ty = ty_int;
                     }
@@ -1584,7 +1859,7 @@ parse_postfix(): *Node {
             } else {
                 if (equal(TokKind.As) || equal(TokKind.Trunc)) {
                     is_trunc: bool = equal(TokKind.Trunc);
-                    tok = tok.next;
+                    tok = tok.next as *Token;
                     ty: *Type = parse_type();
                     ty = parse_type_suffix(ty);
                     add_type(n);
@@ -1610,196 +1885,291 @@ parse_postfix(): *Node {
 
 parse_unary(): *Node {
     if (equal(TokKind.Plus)) {
-        tok = tok.next;
+        tok = tok.next as *Token;
         return parse_unary();
     }
     if (equal(TokKind.Minus)) {
-        tok = tok.next;
+        tok = tok.next as *Token;
         n: *Node = new_unary(ND_NEG, parse_unary());
         return n;
     }
     if (equal(TokKind.Amp)) {
-        tok = tok.next;
+        tok = tok.next as *Token;
         return new_unary(ND_ADDR, parse_unary());
     }
     if (equal(TokKind.Not)) {
-        tok = tok.next;
+        tok = tok.next as *Token;
         n = new_unary(ND_NOT, parse_unary());
         return n;
     }
     return parse_postfix();
 }
 
-add_type(n: *Node) {
-    if (n == null || n.ty != null) {
+add_type(n: ?*Node) {
+    if (n == null) {
         return;
     }
-    add_type(n.lhs);
-    add_type(n.rhs);
-    add_type(n.cond);
-    add_type(n.then);
-    add_type(n.els);
-    a: *Node = n.args;
+    p: *Node = n as *Node;
+    if (p.kind == ND_VAR) {
+        p.ty = var_view_ty(p.var);
+        return;
+    }
+    if (p.ty != null) {
+        return;
+    }
+    if (p.kind == ND_IF || p.kind == ND_WHILE) {
+        add_type(p.cond);
+        ct: ?*Type = null;
+        c: ?*Node = p.cond;
+        if (c != null) {
+            ct = decay(c.ty);
+        }
+        if (ct == null || !is_bool_ty(ct)) {
+            error("condition must be bool");
+        }
+        save: ?*NarrowFrame = narrow_top;
+        eqv: ?*Obj = null_eq_var(p.cond);
+        nv: ?*Obj = null;
+        if (eqv == null) {
+            nv = null_check_var(p.cond);
+        }
+        if (p.kind == ND_IF) {
+            if (nv != null) {
+                narrow_push(nv, ptr_to(type_base(nv.ty)));
+                add_type(p.then);
+                narrow_reset(save);
+                add_type(p.els);
+            } else {
+                if (eqv != null) {
+                    add_type(p.then);
+                    narrow_push(eqv, ptr_to(type_base(eqv.ty)));
+                    add_type(p.els);
+                    narrow_reset(save);
+                } else {
+                    add_type(p.then);
+                    add_type(p.els);
+                }
+            }
+        } else {
+            if (nv != null) {
+                narrow_push(nv, ptr_to(type_base(nv.ty)));
+                add_type(p.body);
+                narrow_reset(save);
+            } else {
+                add_type(p.body);
+            }
+        }
+        return;
+    }
+    add_type(p.lhs);
+    add_type(p.rhs);
+    add_type(p.cond);
+    add_type(p.then);
+    add_type(p.els);
+    add_type(p.body);
+    a: ?*Node = p.args;
     while (a != null) {
         add_type(a);
         a = a.next;
     }
-    if (n.kind == ND_BLOCK) {
-        a = n.body;
+    if (p.kind == ND_BLOCK) {
+        a = p.body;
         while (a != null) {
             add_type(a);
             a = a.next;
         }
     }
-    if (n.kind == ND_NUM) {
-        n.ty = ty_int;
+    if (p.kind == ND_NUM) {
+        p.ty = ty_int;
         return;
     }
-    if (n.kind == ND_NULL) {
+    if (p.kind == ND_NULL) {
         return;
     }
-    if (n.kind == ND_VAR) {
-        n.ty = n.var.ty;
+    if (p.kind == ND_VAR) {
+        p.ty = var_view_ty(p.var);
         return;
     }
-    if (n.kind == ND_ADD || n.kind == ND_SUB) {
-        lt: *Type = decay(n.lhs.ty);
-        rt: *Type = decay(n.rhs.ty);
-        if (n.kind == ND_ADD && is_pointer(lt) && is_int_ty(rt)) {
-            n.ty = lt;
+    if (p.kind == ND_ADD || p.kind == ND_SUB) {
+        lhs: *Node = p.lhs as *Node;
+        rhs: *Node = p.rhs as *Node;
+        lt: ?*Type = decay(lhs.ty);
+        rt: ?*Type = decay(rhs.ty);
+        if (p.kind == ND_ADD && is_pointer(lt) && is_int_ty(rt)) {
+            p.ty = lt;
             return;
         }
-        if (n.kind == ND_ADD && is_int_ty(lt) && is_pointer(rt)) {
-            n.ty = rt;
+        if (p.kind == ND_ADD && is_int_ty(lt) && is_pointer(rt)) {
+            p.ty = rt;
             return;
         }
-        if (n.kind == ND_SUB && is_pointer(lt) && is_int_ty(rt)) {
-            n.ty = lt;
+        if (p.kind == ND_SUB && is_pointer(lt) && is_int_ty(rt)) {
+            p.ty = lt;
             return;
         }
-        if (n.kind == ND_SUB && is_pointer(lt) && is_pointer(rt)) {
+        if (p.kind == ND_SUB && is_pointer(lt) && is_pointer(rt)) {
             if (types_equal(lt, rt)) {
-                n.ty = ty_int;
+                p.ty = ty_int;
                 return;
             }
         }
         if (!is_int_ty(lt) || !is_int_ty(rt)) {
             error("arithmetic requires int operands");
         }
-        n.ty = ty_int;
+        p.ty = ty_int;
         return;
     }
-    if (n.kind == ND_MUL || n.kind == ND_DIV || n.kind == ND_MOD) {
-        if (!is_int_ty(decay(n.lhs.ty)) || !is_int_ty(decay(n.rhs.ty))) {
+    if (p.kind == ND_MUL || p.kind == ND_DIV || p.kind == ND_MOD) {
+        lhs: *Node = p.lhs as *Node;
+        rhs: *Node = p.rhs as *Node;
+        if (!is_int_ty(decay(lhs.ty)) || !is_int_ty(decay(rhs.ty))) {
             error("arithmetic requires int operands");
         }
-        n.ty = ty_int;
+        p.ty = ty_int;
         return;
     }
-    if (n.kind == ND_EQ || n.kind == ND_NE) {
-        lt: *Type = decay(n.lhs.ty);
-        rt: *Type = decay(n.rhs.ty);
+    if (p.kind == ND_EQ || p.kind == ND_NE) {
+        lhs: *Node = p.lhs as *Node;
+        rhs: *Node = p.rhs as *Node;
+        lt: ?*Type = decay(lhs.ty);
+        rt: ?*Type = decay(rhs.ty);
         if (!types_equal(lt, rt)) {
-            if (!bind_null_to_pointer(lt, n.rhs)) {
-                if (!bind_null_to_pointer(rt, n.lhs)) {
+            if (bind_null_to_pointer(lt, rhs) || bind_null_to_pointer(rt, lhs)) {
+            } else {
+                if (is_any_pointer(lt) && is_any_pointer(rt) && types_equal(type_base(lt), type_base(rt))) {
+                } else {
                     error("comparison type mismatch");
                 }
             }
         }
-        n.ty = ty_bool;
+        p.ty = ty_bool;
         return;
     }
-    if (n.kind == ND_LT || n.kind == ND_LE || n.kind == ND_GT || n.kind == ND_GE) {
-        lt2: *Type = decay(n.lhs.ty);
-        rt2: *Type = decay(n.rhs.ty);
-        if (!types_equal(lt2, rt2)) {
+    if (p.kind == ND_LT || p.kind == ND_LE || p.kind == ND_GT || p.kind == ND_GE) {
+        lhs: *Node = p.lhs as *Node;
+        rhs: *Node = p.rhs as *Node;
+        if (!types_equal(decay(lhs.ty), decay(rhs.ty))) {
             error("comparison type mismatch");
         }
-        n.ty = ty_bool;
+        p.ty = ty_bool;
         return;
     }
-    if (n.kind == ND_LOGAND || n.kind == ND_LOGOR) {
-        if (!is_bool_ty(decay(n.lhs.ty)) || !is_bool_ty(decay(n.rhs.ty))) {
+    if (p.kind == ND_LOGAND || p.kind == ND_LOGOR) {
+        lhs: *Node = p.lhs as *Node;
+        rhs: *Node = p.rhs as *Node;
+        if (!is_bool_ty(decay(lhs.ty)) || !is_bool_ty(decay(rhs.ty))) {
             error("&& / || require bool operands");
         }
-        n.ty = ty_bool;
+        p.ty = ty_bool;
         return;
     }
-    if (n.kind == ND_NOT) {
-        if (!is_bool_ty(decay(n.lhs.ty))) {
+    if (p.kind == ND_NOT) {
+        lhs: *Node = p.lhs as *Node;
+        if (!is_bool_ty(decay(lhs.ty))) {
             error("! requires bool");
         }
-        n.ty = ty_bool;
+        p.ty = ty_bool;
         return;
     }
-    if (n.kind == ND_NEG) {
-        if (!is_int_ty(decay(n.lhs.ty))) {
+    if (p.kind == ND_NEG) {
+        lhs: *Node = p.lhs as *Node;
+        if (!is_int_ty(decay(lhs.ty))) {
             error("unary - requires int");
         }
-        n.ty = ty_int;
+        p.ty = ty_int;
         return;
     }
-    if (n.kind == ND_ASSIGN) {
-        lt: *Type = decay(n.lhs.ty);
-        rt: *Type = decay(n.rhs.ty);
-        if (is_array(n.lhs.ty)) {
+    if (p.kind == ND_ASSIGN) {
+        lhs: *Node = p.lhs as *Node;
+        rhs: *Node = p.rhs as *Node;
+        lt: ?*Type = null;
+        storage: ?*Type = lhs.ty;
+        if (lhs.kind == ND_VAR) {
+            lv: ?*Obj = lhs.var;
+            if (lv != null) {
+                storage = lv.ty;
+                lt = decay(lv.ty);
+            } else {
+                lt = decay(lhs.ty);
+            }
+        } else {
+            lt = decay(lhs.ty);
+        }
+        if (is_array(storage)) {
             error("cannot assign to array");
         }
-        if (!types_equal(lt, rt)) {
-            if (!bind_null_to_pointer(lt, n.rhs)) {
-                error("assignment type mismatch");
-            }
+        if (!assignable(lt, rhs)) {
+            error("assignment type mismatch");
         }
-        n.ty = n.lhs.ty;
+        p.ty = storage;
         return;
     }
-    if (n.kind == ND_AS || n.kind == ND_TRUNC) {
+    if (p.kind == ND_AS || p.kind == ND_TRUNC) {
         return;
     }
-    if (n.kind == ND_ADDR) {
-        if (is_array(n.lhs.ty)) {
-            n.ty = ptr_to(type_base(n.lhs.ty));
+    if (p.kind == ND_ADDR) {
+        lhs: *Node = p.lhs as *Node;
+        if (is_array(lhs.ty)) {
+            p.ty = ptr_to(type_base(lhs.ty));
         } else {
-            n.ty = ptr_to(n.lhs.ty);
+            p.ty = ptr_to(lhs.ty as *Type);
         }
         return;
     }
-    if (n.kind == ND_DEREF) {
-        t: *Type = decay(n.lhs.ty);
+    if (p.kind == ND_DEREF) {
+        lhs: *Node = p.lhs as *Node;
+        t: ?*Type = decay(lhs.ty);
+        if (is_opt_pointer(t)) {
+            error("dereferencing optional pointer (use if (p != null) / while (p != null) to narrow)");
+        }
         if (is_pointer(t)) {
-            n.ty = type_base(t);
+            p.ty = type_base(t);
         } else {
             error("dereferencing non-pointer");
         }
         return;
     }
-    if (n.kind == ND_MEMBER) {
-        if (n.member.ty != null) {
-            n.ty = n.member.ty;
-        } else {
-            n.ty = ty_int;
+    if (p.kind == ND_MEMBER) {
+        mem: ?*Member = p.member;
+        if (mem != null) {
+            if (mem.ty != null) {
+                p.ty = mem.ty;
+            } else {
+                p.ty = ty_int;
+            }
         }
         return;
     }
-    if (n.kind == ND_FUNCALL) {
-        f: *Obj = find_obj(globals, n.funcname);
-        if (f != null && f.is_func != 0) {
-            n.ty = f.ty;
+    if (p.kind == ND_FUNCALL) {
+        fo: ?*Obj = find_obj(globals, p.funcname as *i8);
+        if (fo != null) {
+            if (fo.is_func != 0) {
+                p.ty = fo.ty;
+            } else {
+                p.ty = ty_int;
+            }
         } else {
-            n.ty = ty_int;
+            p.ty = ty_int;
         }
-        fn: *Function = find_function(n.funcname);
-        if (fn != null) {
-            a = n.args;
+        fno: ?*Function = find_function(p.funcname as *i8);
+        if (fno != null) {
+            a = p.args;
             ai: int = 0;
             while (a != null) {
-                p: *Obj = fn_param(fn, ai);
-                if (p != null && p.ty != null) {
-                    at: *Type = decay(a.ty);
-                    pt: *Type = decay(p.ty);
-                    if (!types_equal(at, pt)) {
-                        if (!bind_null_to_pointer(pt, a)) {
-                            error("argument type mismatch");
+                if (ai < fno.nparams) {
+                    po: ?*Obj = null;
+                    if (ai == 0) { po = fno.p0; }
+                    if (ai == 1) { po = fno.p1; }
+                    if (ai == 2) { po = fno.p2; }
+                    if (ai == 3) { po = fno.p3; }
+                    if (ai == 4) { po = fno.p4; }
+                    if (ai == 5) { po = fno.p5; }
+                    if (po != null) {
+                        if (po.ty != null) {
+                            pt: ?*Type = decay(po.ty);
+                            if (!assignable(pt, a)) {
+                                error("argument type mismatch");
+                            }
                         }
                     }
                 }
@@ -1809,17 +2179,14 @@ add_type(n: *Node) {
         }
         return;
     }
-    if (n.kind == ND_RETURN) {
-        if (n.lhs != null) {
+    if (p.kind == ND_RETURN) {
+        if (p.lhs != null) {
             if (current_return_ty == null) {
                 error("return with a value in a non-returning function");
             }
-            rt: *Type = decay(current_return_ty);
-            gt: *Type = decay(n.lhs.ty);
-            if (!types_equal(gt, rt)) {
-                if (!bind_null_to_pointer(rt, n.lhs)) {
-                    error("return type mismatch");
-                }
+            rt: ?*Type = decay(current_return_ty);
+            if (!assignable(rt, p.lhs)) {
+                error("return type mismatch");
             }
         } else {
             if (current_return_ty != null) {
@@ -1828,19 +2195,16 @@ add_type(n: *Node) {
         }
         return;
     }
-    if (n.kind == ND_IF || n.kind == ND_WHILE) {
-        if (n.cond == null || !is_bool_ty(decay(n.cond.ty))) {
-            error("condition must be bool");
-        }
+    if (p.kind == ND_IF || p.kind == ND_WHILE) {
         return;
     }
-    if (n.kind == ND_VARIANT_LIT) {
+    if (p.kind == ND_VARIANT_LIT) {
         return;
     }
-    if (n.kind == ND_MATCH) {
+    if (p.kind == ND_MATCH) {
         return;
     }
-    if (n.kind == ND_MATCH_ARM) {
+    if (p.kind == ND_MATCH_ARM) {
         return;
     }
 }
@@ -1849,15 +2213,15 @@ parse_mul(): *Node {
     n: *Node = parse_unary();
     while (true) {
         if (equal(TokKind.Star)) {
-            tok = tok.next;
+            tok = tok.next as *Token;
             n = new_binary(ND_MUL, n, parse_unary());
         } else {
             if (equal(TokKind.Slash)) {
-                tok = tok.next;
+                tok = tok.next as *Token;
                 n = new_binary(ND_DIV, n, parse_unary());
             } else {
                 if (equal(TokKind.Percent)) {
-                    tok = tok.next;
+                    tok = tok.next as *Token;
                     n = new_binary(ND_MOD, n, parse_unary());
                 } else {
                     return n;
@@ -1872,11 +2236,11 @@ parse_add(): *Node {
     n: *Node = parse_mul();
     while (true) {
         if (equal(TokKind.Plus)) {
-            tok = tok.next;
+            tok = tok.next as *Token;
             n = new_binary(ND_ADD, n, parse_mul());
         } else {
             if (equal(TokKind.Minus)) {
-                tok = tok.next;
+                tok = tok.next as *Token;
                 n = new_binary(ND_SUB, n, parse_mul());
             } else {
                 return n;
@@ -1890,19 +2254,19 @@ parse_relational(): *Node {
     n: *Node = parse_add();
     while (true) {
         if (equal(TokKind.Lt)) {
-            tok = tok.next;
+            tok = tok.next as *Token;
             n = new_binary(ND_LT, n, parse_add());
         } else {
             if (equal(TokKind.Gt)) {
-                tok = tok.next;
+                tok = tok.next as *Token;
                 n = new_binary(ND_GT, n, parse_add());
             } else {
                 if (equal(TokKind.Le)) {
-                    tok = tok.next;
+                    tok = tok.next as *Token;
                     n = new_binary(ND_LE, n, parse_add());
                 } else {
                     if (equal(TokKind.Ge)) {
-                        tok = tok.next;
+                        tok = tok.next as *Token;
                         n = new_binary(ND_GE, n, parse_add());
                     } else {
                         return n;
@@ -1918,11 +2282,11 @@ parse_equality(): *Node {
     n: *Node = parse_relational();
     while (true) {
         if (equal(TokKind.Eq)) {
-            tok = tok.next;
+            tok = tok.next as *Token;
             n = new_binary(ND_EQ, n, parse_relational());
         } else {
             if (equal(TokKind.Ne)) {
-                tok = tok.next;
+                tok = tok.next as *Token;
                 n = new_binary(ND_NE, n, parse_relational());
             } else {
                 return n;
@@ -1935,7 +2299,7 @@ parse_equality(): *Node {
 parse_logand(): *Node {
     n: *Node = parse_equality();
     while (equal(TokKind.And)) {
-        tok = tok.next;
+        tok = tok.next as *Token;
         n = new_binary(ND_LOGAND, n, parse_equality());
     }
     return n;
@@ -1944,7 +2308,7 @@ parse_logand(): *Node {
 parse_logor(): *Node {
     n: *Node = parse_logand();
     while (equal(TokKind.Or)) {
-        tok = tok.next;
+        tok = tok.next as *Token;
         n = new_binary(ND_LOGOR, n, parse_logand());
     }
     return n;
@@ -1953,7 +2317,7 @@ parse_logor(): *Node {
 parse_assign(): *Node {
     n: *Node = parse_logor();
     if (equal(TokKind.Assign)) {
-        tok = tok.next;
+        tok = tok.next as *Token;
         return new_binary(ND_ASSIGN, n, parse_assign());
     }
     return n;
@@ -1961,12 +2325,12 @@ parse_assign(): *Node {
 
 parse_type_suffix(ty: *Type): *Type {
     if (equal(TokKind.LBrack)) {
-        tok = tok.next;
+        tok = tok.next as *Token;
         if (!equal(TokKind.Num)) {
             error("expected array size");
         }
         ty = array_of(ty, tok.val);
-        tok = tok.next;
+        tok = tok.next as *Token;
         skip(TokKind.RBrack);
     }
     return ty;
@@ -1977,7 +2341,7 @@ parse_decl(is_local: int): *Obj {
         error("expected identifier");
     }
     name: *i8 = cur_tokstr();
-    tok = tok.next;
+    tok = tok.next as *Token;
     skip(TokKind.Colon);
     ty: *Type = parse_type();
     ty = parse_type_suffix(ty);
@@ -1988,31 +2352,34 @@ parse_decl(is_local: int): *Obj {
 
 parse_compound(): *Node {
     n: *Node = new_node(ND_BLOCK);
+    enter_scope();
     skip(TokKind.LBrace);
-    head: *Node = null;
-    cur: *Node = null;
+    head: ?*Node = null;
+    cur: ?*Node = null;
     while (!equal(TokKind.RBrace)) {
         if (equal(TokKind.Eof)) {
             error("unterminated block");
         }
         s: *Node = parse_stmt();
-        if (cur == null) {
-            head = s;
+        if (cur != null) {
+            cur.next = s;
             cur = s;
         } else {
-            cur.next = s;
+            head = s;
             cur = s;
         }
     }
     n.body = head;
     skip(TokKind.RBrace);
+    leave_scope();
     return n;
 }
 
 parse_stmt(): *Node {
+    n: *Node = uninitialized;
     if (equal(TokKind.Return)) {
-        n: *Node = new_node(ND_RETURN);
-        tok = tok.next;
+        n = new_node(ND_RETURN);
+        tok = tok.next as *Token;
         if (!equal(TokKind.Semi)) {
             n.lhs = parse_expr();
         }
@@ -2021,71 +2388,91 @@ parse_stmt(): *Node {
     }
     if (equal(TokKind.If)) {
         n = new_node(ND_IF);
-        tok = tok.next;
+        tok = tok.next as *Token;
         skip(TokKind.LParen);
         n.cond = parse_expr();
         skip(TokKind.RParen);
+        save: ?*NarrowFrame = narrow_top;
+        eqv: ?*Obj = null_eq_var(n.cond);
+        nv: ?*Obj = null;
+        if (eqv == null) {
+            nv = null_check_var(n.cond);
+        }
+        if (nv != null) {
+            narrow_push(nv, ptr_to(type_base(nv.ty)));
+        }
         n.then = parse_stmt();
+        narrow_reset(save);
         if (equal(TokKind.Else)) {
-            tok = tok.next;
+            tok = tok.next as *Token;
+            if (eqv != null) {
+                narrow_push(eqv, ptr_to(type_base(eqv.ty)));
+            }
             n.els = parse_stmt();
+            narrow_reset(save);
         }
         return n;
     }
     if (equal(TokKind.While)) {
         n = new_node(ND_WHILE);
-        tok = tok.next;
+        tok = tok.next as *Token;
         skip(TokKind.LParen);
         n.cond = parse_expr();
         skip(TokKind.RParen);
+        save2: ?*NarrowFrame = narrow_top;
+        nv2: ?*Obj = null_check_var(n.cond);
+        if (nv2 != null) {
+            narrow_push(nv2, ptr_to(type_base(nv2.ty)));
+        }
         n.body = parse_stmt();
+        narrow_reset(save2);
         return n;
     }
     if (equal(TokKind.Match)) {
         n = new_node(ND_MATCH);
-        tok = tok.next;
+        tok = tok.next as *Token;
         n.cond = parse_expr();
         add_type(n.cond);
-        et: *Type = decay(n.cond.ty);
+        et: ?*Type = decay((n.cond as *Node).ty);
         if (!is_enum_ty(et)) {
             error("match requires an enum value");
         }
         skip(TokKind.LBrace);
-        arms: *Node = null;
-        acur: *Node = null;
+        arms: ?*Node = null;
+        acur: ?*Node = null;
         while (!equal(TokKind.RBrace)) {
             if (!equal(TokKind.Ident)) {
                 error("expected variant name in match arm");
             }
             vname: *i8 = cur_tokstr();
-            tok = tok.next;
+            tok = tok.next as *Token;
             arm: *Node = new_node(ND_MATCH_ARM);
+            arm.next = null;
             arm.ty = et;
             is_wild: bool = streq(vname, "_");
-            b: *Node = null;
-            a: *Node = null;
+            b: ?*Node = null;
             if (equal(TokKind.LParen)) {
                 if (is_wild) {
                     error("wildcard match arm cannot bind a payload");
                 }
-                tok = tok.next;
+                tok = tok.next as *Token;
                 if (!equal(TokKind.Ident)) {
                     error("expected payload binding name");
                 }
-                b = new_node(ND_VAR);
-                b.funcname = cur_tokstr();
-                tok = tok.next;
+                bn: *Node = new_node(ND_VAR);
+                bn.funcname = cur_tokstr();
+                tok = tok.next as *Token;
                 skip(TokKind.RParen);
-                arm.args = b;
+                arm.args = bn;
                 arm.val = 1;
             } else {
                 if (equal(TokKind.LBrace)) {
                     if (is_wild) {
                         error("wildcard match arm cannot bind fields");
                     }
-                    tok = tok.next;
-                    bhead: *Node = null;
-                    bcur: *Node = null;
+                    tok = tok.next as *Token;
+                    bhead: ?*Node = null;
+                    bcur: ?*Node = null;
                     while (!equal(TokKind.RBrace)) {
                         if (bcur != null) {
                             skip(TokKind.Comma);
@@ -2093,53 +2480,56 @@ parse_stmt(): *Node {
                         if (!equal(TokKind.Ident)) {
                             error("expected field binding");
                         }
-                        b = new_node(ND_VAR);
-                        b.funcname = cur_tokstr();
-                        tok = tok.next;
-                        if (bcur == null) {
-                            bhead = b;
-                            bcur = b;
+                        bn: *Node = new_node(ND_VAR);
+                        bn.funcname = cur_tokstr();
+                        tok = tok.next as *Token;
+                        if (bcur != null) {
+                            bcur.next = bn;
+                            bcur = bn;
                         } else {
-                            bcur.next = b;
-                            bcur = b;
+                            bhead = bn;
+                            bcur = bn;
                         }
                     }
-                    tok = tok.next;
+                    tok = tok.next as *Token;
                     arm.args = bhead;
                 }
             }
             skip(TokKind.Arrow);
+            enter_scope();
             if (is_wild) {
-                a = arms;
-                while (a != null) {
-                    if (a.variant == null) {
+                chk: ?*Node = arms;
+                while (chk != null) {
+                    if (chk.variant == null) {
                         error("duplicate wildcard match arm");
                     }
-                    a = a.next;
+                    chk = chk.next;
                 }
                 arm.variant = null;
             } else {
-                v: *Variant = find_variant(type_enum_def(et), vname);
-                if (v == null) {
+                vo: ?*Variant = find_variant(type_enum_def(et), vname);
+                if (vo == null) {
                     error("unknown variant");
                 }
-                a = arms;
-                while (a != null) {
-                    if (a.variant == v) {
+                v: *Variant = vo as *Variant;
+                chk: ?*Node = arms;
+                while (chk != null) {
+                    if (chk.variant == v) {
                         error("duplicate match arm");
                     }
-                    a = a.next;
+                    chk = chk.next;
                 }
                 arm.variant = v;
                 if (arm.val != 0) {
                     if (v.payload_ty == null) {
                         error("unit variant cannot bind a payload");
                     }
-                    po: *Obj = new_obj(arm.args.funcname, 1);
+                    args0: *Node = arm.args as *Node;
+                    po: *Obj = new_obj(args0.funcname as *i8, 1);
                     po.ty = v.payload_ty;
-                    arm.args.var = po;
-                    arm.args.ty = v.payload_ty;
-                    arm.args.member = null;
+                    args0.var = po;
+                    args0.ty = v.payload_ty;
+                    args0.member = null;
                 } else {
                     if (v.fields != null) {
                         if (arm.args == null) {
@@ -2147,10 +2537,10 @@ parse_stmt(): *Node {
                         }
                         b = arm.args;
                         while (b != null) {
-                            m: *Member = null;
-                            x: *Member = v.fields;
+                            m: ?*Member = null;
+                            x: ?*Member = v.fields;
                             while (x != null) {
-                                if (streq(x.name, b.funcname)) {
+                                if (streq(x.name, b.funcname as *i8)) {
                                     m = x;
                                 }
                                 x = x.next;
@@ -2158,21 +2548,26 @@ parse_stmt(): *Node {
                             if (m == null) {
                                 error("unknown field in variant");
                             }
-                            o2: *Node = arm.args;
-                            while (o2 != b) {
-                                if (o2.member == m) {
-                                    error("duplicate binding");
+                            mu: *Member = m as *Member;
+                            o2: ?*Node = arm.args;
+                            while (o2 != null) {
+                                if (o2 == b) {
+                                    o2 = null;
+                                } else {
+                                    if (o2.member == mu) {
+                                        error("duplicate binding");
+                                    }
+                                    o2 = o2.next;
                                 }
-                                o2 = o2.next;
                             }
-                            fo: *Obj = new_obj(b.funcname, 1);
-                            fo.ty = m.ty;
+                            fo: *Obj = new_obj(b.funcname as *i8, 1);
+                            fo.ty = mu.ty;
                             b.var = fo;
-                            b.member = m;
-                            b.ty = m.ty;
+                            b.member = mu;
+                            b.ty = mu.ty;
                             b = b.next;
                         }
-                        m2: *Member = v.fields;
+                        m2: ?*Member = v.fields;
                         while (m2 != null) {
                             found: int = 0;
                             b = arm.args;
@@ -2195,11 +2590,12 @@ parse_stmt(): *Node {
                 }
             }
             arm.body = parse_compound();
-            if (acur == null) {
-                arms = arm;
+            leave_scope();
+            if (acur != null) {
+                acur.next = arm;
                 acur = arm;
             } else {
-                acur.next = arm;
+                arms = arm;
                 acur = arm;
             }
             if (is_wild) {
@@ -2209,23 +2605,23 @@ parse_stmt(): *Node {
             }
         }
         has_wild: int = 0;
-        a = arms;
-        while (a != null) {
-            if (a.variant == null) {
+        walk: ?*Node = arms;
+        while (walk != null) {
+            if (walk.variant == null) {
                 has_wild = 1;
             }
-            a = a.next;
+            walk = walk.next;
         }
         if (has_wild == 0) {
-            vv: *Variant = type_enum_def(et).variants;
+            vv: ?*Variant = type_enum_def(et).variants;
             while (vv != null) {
                 found2: int = 0;
-                a = arms;
-                while (a != null) {
-                    if (a.variant == vv) {
+                walk2: ?*Node = arms;
+                while (walk2 != null) {
+                    if (walk2.variant == vv) {
                         found2 = 1;
                     }
-                    a = a.next;
+                    walk2 = walk2.next;
                 }
                 if (found2 == 0) {
                     error("match not exhaustive");
@@ -2234,20 +2630,20 @@ parse_stmt(): *Node {
             }
         }
         n.body = arms;
-        tok = tok.next;
+        tok = tok.next as *Token;
         return n;
     }
     if (equal(TokKind.LBrace)) {
         return parse_compound();
     }
-    if (equal(TokKind.Ident) && tok.next.kind == TokKind.Colon) {
+    if (equal(TokKind.Ident) && (tok.next as *Token).kind == TokKind.Colon) {
         o: *Obj = parse_decl(1);
         if (equal(TokKind.Comma)) {
             error("only one variable per declaration");
         }
         skip(TokKind.Assign);
         if (equal(TokKind.Uninitialized)) {
-            tok = tok.next;
+            tok = tok.next as *Token;
             skip(TokKind.Semi);
             return new_node(ND_BLOCK);
         }
@@ -2267,7 +2663,7 @@ parse_stmt(): *Node {
     return n;
 }
 
-fn_param(fn: *Function, i: int): *Obj {
+fn_param(fn: *Function, i: int): ?*Obj {
     if (i == 0) { return fn.p0; }
     if (i == 1) { return fn.p1; }
     if (i == 2) { return fn.p2; }
@@ -2303,6 +2699,8 @@ parse_function(name: *i8): *Function {
         next: null
     };
     locals = null;
+    scope_depth = 0;
+    narrow_top = null;
     skip(TokKind.LParen);
     np: int = 0;
     while (!equal(TokKind.RParen)) {
@@ -2319,7 +2717,7 @@ parse_function(name: *i8): *Function {
     fn.nparams = np;
     skip(TokKind.RParen);
     if (equal(TokKind.Colon)) {
-        tok = tok.next;
+        tok = tok.next as *Token;
         fn.return_ty = parse_type();
     }
     if (fn.return_ty != null) {
@@ -2328,7 +2726,7 @@ parse_function(name: *i8): *Function {
                 error("too many parameters");
             }
             fn.sret = new_obj(".sret", 1);
-            fn.sret.ty = ptr_to(fn.return_ty);
+            (fn.sret as *Obj).ty = ptr_to(fn.return_ty as *Type);
         }
     }
     fn.body = parse_compound();
@@ -2337,15 +2735,15 @@ parse_function(name: *i8): *Function {
 }
 
 parse_field_list(base_offset: int): *Member {
-    head: *Member = null;
-    cur: *Member = null;
+    head: ?*Member = null;
+    cur: ?*Member = null;
     offset: int = base_offset;
     while (!equal(TokKind.RBrace)) {
         if (!equal(TokKind.Ident)) {
             error("expected field name");
         }
         mname: *i8 = cur_tokstr();
-        tok = tok.next;
+        tok = tok.next as *Token;
         skip(TokKind.Colon);
         mty: *Type = parse_type();
         mty = parse_type_suffix(mty);
@@ -2360,15 +2758,15 @@ parse_field_list(base_offset: int): *Member {
             sz = 8;
         }
         offset = offset + ((sz + 7) / 8 * 8);
-        if (cur == null) {
-            head = m;
+        if (cur != null) {
+            cur.next = m;
             cur = m;
         } else {
-            cur.next = m;
+            head = m;
             cur = m;
         }
         if (equal(TokKind.Semi) || equal(TokKind.Comma)) {
-            tok = tok.next;
+            tok = tok.next as *Token;
         } else {
             if (!equal(TokKind.RBrace)) {
                 error("expected `;`, `,`, or `}` after field");
@@ -2376,8 +2774,8 @@ parse_field_list(base_offset: int): *Member {
         }
     }
     field_list_size = offset - base_offset;
-    tok = tok.next;
-    return head;
+    tok = tok.next as *Token;
+    return head as *Member;
 }
 
 parse_variant(tag: int, enum_name: *i8): *Variant {
@@ -2392,9 +2790,9 @@ parse_variant(tag: int, enum_name: *i8): *Variant {
         payload_size: 0,
         next: null
     };
-    tok = tok.next;
+    tok = tok.next as *Token;
     if (equal(TokKind.LBrace)) {
-        tok = tok.next;
+        tok = tok.next as *Token;
         v.fields = parse_field_list(0);
         v.payload_size = field_list_size;
         sd: *StructDef = new StructDef {
@@ -2410,12 +2808,12 @@ parse_variant(tag: int, enum_name: *i8): *Variant {
 }
 
 parse_type_def() {
-    tok = tok.next;
+    tok = tok.next as *Token;
     if (!equal(TokKind.Ident)) {
         error("expected type name");
     }
     name: *i8 = cur_tokstr();
-    tok = tok.next;
+    tok = tok.next as *Token;
     skip(TokKind.Assign);
 
     if (equal(TokKind.LBrace)) {
@@ -2426,14 +2824,14 @@ parse_type_def() {
         if (sd.members != null) {
             error("redefinition of type");
         }
-        tok = tok.next;
+        tok = tok.next as *Token;
         sd.members = parse_field_list(0);
         sd.size = field_list_size;
         skip(TokKind.Semi);
         return;
     }
 
-    stub: *StructDef = find_struct(name);
+    stub: ?*StructDef = find_struct(name);
     if (stub != null) {
         if (stub.members != null) {
             error("redefinition of type");
@@ -2446,17 +2844,17 @@ parse_type_def() {
     }
 
     if (equal(TokKind.Pipe)) {
-        tok = tok.next;
+        tok = tok.next as *Token;
     }
 
-    head: *Variant = null;
-    cur: *Variant = null;
+    head: ?*Variant = null;
+    cur: ?*Variant = null;
     tag: int = 0;
     max_payload: int = 0;
     done: int = 0;
     while (done == 0) {
         v: *Variant = parse_variant(tag, name);
-        x: *Variant = head;
+        x: ?*Variant = head;
         while (x != null) {
             if (streq(x.name, v.name)) {
                 error("duplicate variant");
@@ -2466,16 +2864,16 @@ parse_type_def() {
         if (v.payload_size > max_payload) {
             max_payload = v.payload_size;
         }
-        if (cur == null) {
-            head = v;
+        if (cur != null) {
+            cur.next = v;
             cur = v;
         } else {
-            cur.next = v;
+            head = v;
             cur = v;
         }
         tag = tag + 1;
         if (equal(TokKind.Pipe)) {
-            tok = tok.next;
+            tok = tok.next as *Token;
         } else {
             done = 1;
         }
@@ -2494,24 +2892,24 @@ parse_type_def() {
 }
 
 parse_program() {
-    tail: *Function = null;
+    tail: ?*Function = null;
     functions = null;
     while (!equal(TokKind.Eof)) {
-        if (equal(TokKind.TypeKw) && tok.next.kind == TokKind.Ident && tok.next.next.kind == TokKind.Assign) {
+        if (equal(TokKind.TypeKw) && (tok.next as *Token).kind == TokKind.Ident && ((tok.next as *Token).next as *Token).kind == TokKind.Assign) {
             parse_type_def();
         } else {
             if (!equal(TokKind.Ident)) {
                 error("expected identifier");
             }
             name: *i8 = cur_tokstr();
-            tok = tok.next;
+            tok = tok.next as *Token;
             if (equal(TokKind.LParen)) {
                 fn: *Function = parse_function(name);
-                if (tail == null) {
-                    functions = fn;
+                if (tail != null) {
+                    tail.next = fn;
                     tail = fn;
                 } else {
-                    tail.next = fn;
+                    functions = fn;
                     tail = fn;
                 }
                 o: *Obj = new_obj(name, 0);
@@ -2524,8 +2922,8 @@ parse_program() {
                 if (equal(TokKind.Comma)) {
                     error("only one variable per declaration");
                 }
-                o = new_obj(name, 0);
-                o.ty = ty;
+                o2: *Obj = new_obj(name, 0);
+                o2.ty = ty;
                 skip(TokKind.Semi);
             }
         }
@@ -2538,11 +2936,11 @@ new_label(): int {
     return l;
 }
 
-is_byte_ty(t: *Type): bool {
+is_byte_ty(t: ?*Type): bool {
     return t != null && type_size(t) == 1;
 }
 
-load_mem(ty: *Type) {
+load_mem(ty: ?*Type) {
     if (is_byte_ty(ty)) {
         emit("  movzb (%rax), %rax\n");
     } else {
@@ -2550,7 +2948,7 @@ load_mem(ty: *Type) {
     }
 }
 
-store_mem(ty: *Type) {
+store_mem(ty: ?*Type) {
     if (is_byte_ty(ty)) {
         emit("  mov %al, (%rdi)\n");
     } else {
@@ -2574,22 +2972,23 @@ emit_memcpy(sz: int) {
     }
 }
 
-gen_struct_inits(inits: *Node) {
-    init: *Node = inits;
+gen_struct_inits(inits: ?*Node) {
+    init: ?*Node = inits;
     while (init != null) {
         if (init.lhs != null) {
+            mem: *Member = init.member as *Member;
             emit("  mov (%rsp), %rax\n");
-            if (init.member.offset != 0) {
+            if (mem.offset != 0) {
                 emit("  add $");
-                emit_num(init.member.offset);
+                emit_num(mem.offset);
                 emit(", %rax\n");
             }
             emit("  push %rax\n");
-            gen_expr(init.lhs);
+            gen_expr(init.lhs as *Node);
             emit("  pop %rdi\n");
             mty: *Type = ty_int;
-            if (init.member.ty != null) {
-                mty = init.member.ty;
+            if (mem.ty != null) {
+                mty = mem.ty as *Type;
             }
             store_mem(mty);
         }
@@ -2597,20 +2996,21 @@ gen_struct_inits(inits: *Node) {
     }
 }
 
-gen_variant_inits(inits: *Node) {
-    init: *Node = inits;
+gen_variant_inits(inits: ?*Node) {
+    init: ?*Node = inits;
     while (init != null) {
         if (init.lhs != null) {
+            mem: *Member = init.member as *Member;
             emit("  mov (%rsp), %rax\n");
             emit("  add $");
-            emit_num(enum_field_offset(init.member));
+            emit_num(enum_field_offset(mem));
             emit(", %rax\n");
             emit("  push %rax\n");
-            gen_expr(init.lhs);
+            gen_expr(init.lhs as *Node);
             emit("  pop %rdi\n");
             mty: *Type = ty_int;
-            if (init.member.ty != null) {
-                mty = init.member.ty;
+            if (mem.ty != null) {
+                mty = mem.ty as *Type;
             }
             store_mem(mty);
         }
@@ -2621,32 +3021,32 @@ gen_variant_inits(inits: *Node) {
 gen_addr(n: *Node) {
     add_type(n);
     if (n.kind == ND_VAR) {
-        if (n.var.is_local != 0) {
+        if ((n.var as *Obj).is_local != 0) {
             emit("  lea ");
-            emit_num(n.var.offset);
+            emit_num((n.var as *Obj).offset);
             emit("(%rbp), %rax\n");
         } else {
             emit("  lea ");
-            emit(n.var.name);
+            emit((n.var as *Obj).name);
             emit("(%rip), %rax\n");
         }
         return;
     }
     if (n.kind == ND_DEREF) {
-        gen_expr(n.lhs);
+        gen_expr(n.lhs as *Node);
         return;
     }
     if (n.kind == ND_MEMBER) {
         add_type(n.lhs);
-        t: *Type = decay(n.lhs.ty);
+        t: ?*Type = decay((n.lhs as *Node).ty);
         if (is_pointer(t) && is_struct_ty(type_base(t))) {
-            gen_expr(n.lhs);
+            gen_expr(n.lhs as *Node);
         } else {
-            gen_addr(n.lhs);
+            gen_addr(n.lhs as *Node);
         }
-        if (n.member.offset != 0) {
+        if ((n.member as *Member).offset != 0) {
             emit("  add $");
-            emit_num(n.member.offset);
+            emit_num((n.member as *Member).offset);
             emit(", %rax\n");
         }
         return;
@@ -2678,7 +3078,7 @@ gen_expr(n: *Node) {
         if (is_array(n.ty) || passes_by_ref(n.ty)) {
             return;
         }
-        load_mem(n.ty);
+        load_mem(n.ty as *Type);
         return;
     }
     if (k == ND_MEMBER) {
@@ -2686,15 +3086,15 @@ gen_expr(n: *Node) {
         if (is_array(n.ty) || passes_by_ref(n.ty)) {
             return;
         }
-        load_mem(n.ty);
+        load_mem(n.ty as *Type);
         return;
     }
     if (k == ND_ADDR) {
-        gen_addr(n.lhs);
+        gen_addr(n.lhs as *Node);
         return;
     }
     if (k == ND_AS || k == ND_TRUNC) {
-        gen_expr(n.lhs);
+        gen_expr(n.lhs as *Node);
         return;
     }
     if (k == ND_NEW) {
@@ -2778,62 +3178,62 @@ gen_expr(n: *Node) {
         return;
     }
     if (k == ND_DEREF) {
-        gen_expr(n.lhs);
-        load_mem(n.ty);
+        gen_expr(n.lhs as *Node);
+        load_mem(n.ty as *Type);
         return;
     }
     if (k == ND_ASSIGN) {
-        add_type(n.lhs);
-        if (n.rhs.kind == ND_STRUCT_LIT && is_struct_ty(n.lhs.ty)) {
-            gen_addr(n.lhs);
+        add_type(n.lhs as *Node);
+        if ((n.rhs as *Node).kind == ND_STRUCT_LIT && is_struct_ty((n.lhs as *Node).ty)) {
+            gen_addr(n.lhs as *Node);
             emit("  push %rax\n");
-            gen_struct_inits(n.rhs.args);
+            gen_struct_inits((n.rhs as *Node).args);
             emit("  pop %rax\n");
             return;
         }
-        if (n.rhs.kind == ND_VARIANT_LIT && is_enum_ty(n.lhs.ty)) {
-            gen_addr(n.lhs);
+        if ((n.rhs as *Node).kind == ND_VARIANT_LIT && is_enum_ty((n.lhs as *Node).ty)) {
+            gen_addr(n.lhs as *Node);
             emit("  push %rax\n");
             emit("  mov $");
-            emit_num(n.rhs.val);
+            emit_num((n.rhs as *Node).val);
             emit(", %rdi\n");
             emit("  mov %rdi, (%rax)\n");
-            gen_variant_inits(n.rhs.args);
+            gen_variant_inits((n.rhs as *Node).args);
             emit("  pop %rax\n");
             return;
         }
-        gen_expr(n.rhs);
+        gen_expr(n.rhs as *Node);
         emit("  push %rax\n");
-        gen_addr(n.lhs);
+        gen_addr(n.lhs as *Node);
         emit("  mov %rax, %rdi\n");
         emit("  pop %rsi\n");
-        if (passes_by_ref(n.lhs.ty)) {
-            emit_memcpy(type_size(n.lhs.ty));
+        if (passes_by_ref((n.lhs as *Node).ty)) {
+            emit_memcpy(type_size((n.lhs as *Node).ty));
             emit("  mov %rdi, %rax\n");
         } else {
             emit("  mov %rsi, %rax\n");
-            store_mem(n.lhs.ty);
+            store_mem((n.lhs as *Node).ty as *Type);
         }
         return;
     }
     if (k == ND_NOT) {
-        gen_expr(n.lhs);
+        gen_expr(n.lhs as *Node);
         emit("  cmp $0, %rax\n");
         emit("  sete %al\n");
         emit("  movzb %al, %rax\n");
         return;
     }
     if (k == ND_NEG) {
-        gen_expr(n.lhs);
+        gen_expr(n.lhs as *Node);
         emit("  neg %rax\n");
         return;
     }
     if (k == ND_LOGAND) {
         l: int = new_label();
-        gen_expr(n.lhs);
+        gen_expr(n.lhs as *Node);
         emit("  cmp $0, %rax\n");
         emit("  je .L.false"); emit_num(l); emit("\n");
-        gen_expr(n.rhs);
+        gen_expr(n.rhs as *Node);
         emit("  cmp $0, %rax\n");
         emit("  je .L.false"); emit_num(l); emit("\n");
         emit("  mov $1, %rax\n");
@@ -2845,10 +3245,10 @@ gen_expr(n: *Node) {
     }
     if (k == ND_LOGOR) {
         l = new_label();
-        gen_expr(n.lhs);
+        gen_expr(n.lhs as *Node);
         emit("  cmp $0, %rax\n");
         emit("  jne .L.true"); emit_num(l); emit("\n");
-        gen_expr(n.rhs);
+        gen_expr(n.rhs as *Node);
         emit("  cmp $0, %rax\n");
         emit("  je .L.false"); emit_num(l); emit("\n");
         emit(".L.true"); emit_num(l); emit(":\n");
@@ -2860,15 +3260,15 @@ gen_expr(n: *Node) {
         return;
     }
     if (k == ND_FUNCALL) {
-        fn: *Function = find_function(n.funcname);
+        fno: ?*Function = find_function(n.funcname as *i8);
         has_sret: int = 0;
-        if (fn != null) {
-            if (fn.sret != null) {
+        if (fno != null) {
+            if (fno.sret != null) {
                 has_sret = 1;
             }
         }
         nargs: int = 0;
-        a: *Node = n.args;
+        a: ?*Node = n.args;
         while (a != null) {
             nargs = nargs + 1;
             a = a.next;
@@ -2878,7 +3278,7 @@ gen_expr(n: *Node) {
             error("too many arguments");
         }
         if (has_sret != 0) {
-            sz: int = type_size(fn.return_ty);
+            sz: int = type_size((fno as *Function).return_ty);
             if (sz <= 0) {
                 sz = 8;
             }
@@ -2904,15 +3304,15 @@ gen_expr(n: *Node) {
         }
         emit("  sub $8, %rsp\n");
         emit("  call ");
-        emit(n.funcname);
+        emit(n.funcname as *i8);
         emit("\n");
         emit("  add $8, %rsp\n");
         return;
     }
 
-    gen_expr(n.lhs);
+    gen_expr(n.lhs as *Node);
     emit("  push %rax\n");
-    gen_expr(n.rhs);
+    gen_expr(n.rhs as *Node);
     emit("  mov %rax, %rdi\n");
     emit("  pop %rax\n");
 
@@ -2949,11 +3349,11 @@ gen_stmt(n: *Node) {
     k: int = n.kind;
     if (k == ND_RETURN) {
         if (n.lhs != null) {
-            gen_expr(n.lhs);
+            gen_expr(n.lhs as *Node);
             if (current_sret != null) {
                 emit("  mov %rax, %rsi\n");
                 emit("  mov ");
-                emit_num(current_sret.offset);
+                emit_num((current_sret as *Obj).offset);
                 emit("(%rbp), %rdi\n");
                 emit_memcpy(type_size(current_return_ty));
                 emit("  mov %rdi, %rax\n");
@@ -2962,16 +3362,16 @@ gen_stmt(n: *Node) {
             emit("  mov $0, %rax\n");
         }
         emit("  jmp .L.return.");
-        emit(current_fn_name);
+        emit(current_fn_name as *i8);
         emit("\n");
         return;
     }
     if (k == ND_EXPR_STMT) {
-        gen_expr(n.lhs);
+        gen_expr(n.lhs as *Node);
         return;
     }
     if (k == ND_BLOCK) {
-        s: *Node = n.body;
+        s: ?*Node = n.body;
         while (s != null) {
             gen_stmt(s);
             s = s.next;
@@ -2980,14 +3380,18 @@ gen_stmt(n: *Node) {
     }
     if (k == ND_IF) {
         l: int = new_label();
-        gen_expr(n.cond);
+        gen_expr(n.cond as *Node);
         emit("  cmp $0, %rax\n");
         emit("  je .L.else"); emit_num(l); emit("\n");
-        gen_stmt(n.then);
+        nd1: ?*NarrowFrame = narrow_from_cond(n.cond, 0);
+        gen_stmt(n.then as *Node);
+        narrow_reset(nd1);
         emit("  jmp .L.end"); emit_num(l); emit("\n");
         emit(".L.else"); emit_num(l); emit(":\n");
         if (n.els != null) {
-            gen_stmt(n.els);
+            nd2: ?*NarrowFrame = narrow_from_cond(n.cond, 1);
+            gen_stmt(n.els as *Node);
+            narrow_reset(nd2);
         }
         emit(".L.end"); emit_num(l); emit(":\n");
         return;
@@ -2995,64 +3399,66 @@ gen_stmt(n: *Node) {
     if (k == ND_WHILE) {
         l = new_label();
         emit(".L.begin"); emit_num(l); emit(":\n");
-        gen_expr(n.cond);
+        gen_expr(n.cond as *Node);
         emit("  cmp $0, %rax\n");
         emit("  je .L.end"); emit_num(l); emit("\n");
-        gen_stmt(n.body);
+        nd3: ?*NarrowFrame = narrow_from_cond(n.cond, 0);
+        gen_stmt(n.body as *Node);
+        narrow_reset(nd3);
         emit("  jmp .L.begin"); emit_num(l); emit("\n");
         emit(".L.end"); emit_num(l); emit(":\n");
         return;
     }
     if (k == ND_MATCH) {
         l = new_label();
-        add_type(n.cond);
-        if (n.cond.kind == ND_VAR || n.cond.kind == ND_MEMBER || n.cond.kind == ND_DEREF) {
-            gen_addr(n.cond);
+        add_type(n.cond as *Node);
+        if ((n.cond as *Node).kind == ND_VAR || (n.cond as *Node).kind == ND_MEMBER || (n.cond as *Node).kind == ND_DEREF) {
+            gen_addr(n.cond as *Node);
         } else {
-            gen_expr(n.cond);
+            gen_expr(n.cond as *Node);
         }
         emit("  push %rax\n");
         emit("  mov (%rax), %rax\n");
         emit("  push %rax\n");
-        arm: *Node = n.body;
+        arm: ?*Node = n.body;
         while (arm != null) {
             la: int = new_label();
             if (arm.variant != null) {
                 emit("  mov (%rsp), %rax\n");
                 emit("  cmp $");
-                emit_num(arm.variant.tag);
+                emit_num((arm.variant as *Variant).tag);
                 emit(", %rax\n");
                 emit("  jne .L.arm");
                 emit_num(la);
                 emit("\n");
             }
-            b: *Node = arm.args;
+            b: ?*Node = arm.args;
             while (b != null) {
                 if (b.member == null) {
-                    psz: int = arm.variant.payload_size;
+                    psz: int = (arm.variant as *Variant).payload_size;
                     emit("  mov 8(%rsp), %rsi\n");
                     emit("  add $8, %rsi\n");
                     emit("  lea ");
-                    emit_num(b.var.offset);
+                    emit_num((b.var as *Obj).offset);
                     emit("(%rbp), %rdi\n");
                     emit_memcpy(psz);
                 } else {
                     emit("  mov 8(%rsp), %rax\n");
                     emit("  add $");
-                    emit_num(enum_field_offset(b.member));
+                    emit_num(enum_field_offset(b.member as *Member));
                     emit(", %rax\n");
                     bty: *Type = ty_int;
-                    if (b.member.ty != null) {
-                        bty = b.member.ty;
+                    if ((b.member as *Member).ty != null) {
+                        bty = (b.member as *Member).ty as *Type;
                     }
                     load_mem(bty);
                     emit("  mov %rax, ");
-                    emit_num(b.var.offset);
+                    emit_num((b.var as *Obj).offset);
                     emit("(%rbp)\n");
                 }
                 b = b.next;
             }
-            gen_stmt(arm.body);
+            gen_stmt(arm.body as *Node);
             emit("  jmp .L.matchend");
             emit_num(l);
             emit("\n");
@@ -3076,7 +3482,7 @@ gen_stmt(n: *Node) {
 
 assign_lvar_offsets(fn: *Function) {
     off: int = 0;
-    v: *Obj = fn.locals;
+    v: ?*Obj = fn.locals;
     while (v != null) {
         sz: int = type_size(v.ty);
         if (sz <= 0) {
@@ -3097,7 +3503,7 @@ assign_lvar_offsets(fn: *Function) {
 }
 
 emit_data() {
-    g: *Obj = globals;
+    g: ?*Obj = globals;
     emit(".section .bss\n");
     emit(".align 8\n");
     while (g != null) {
@@ -3120,27 +3526,35 @@ emit_data() {
     emit(".align 8\n");
     i: int = 0;
     while (i < str_count) {
-        s: *StrLit = str_lits;
-        while (s != null && s.label != i) {
-            s = s.next;
+        s: ?*StrLit = str_lits;
+        found: ?*StrLit = null;
+        while (s != null) {
+            if (s.label == i) {
+                found = s;
+            }
+            if (found == null) {
+                s = s.next;
+            } else {
+                s = null;
+            }
         }
-        if (s != null) {
+        if (found != null) {
             emit(".L.str");
             emit_num(i);
             emit(":\n");
             emit("  .quad ");
-            emit_num(s.len);
+            emit_num(found.len);
             emit("\n");
             emit("  .byte ");
             j: int = 0;
-            while (j < s.len) {
+            while (j < found.len) {
                 if (j != 0) {
                     emit(",");
                 }
-                emit_num(s.data[j] as int);
+                emit_num(found.data[j] as int);
                 j = j + 1;
             }
-            if (s.len == 0) {
+            if (found.len == 0) {
                 emit("0");
             } else {
                 emit(",0");
@@ -3152,7 +3566,7 @@ emit_data() {
 }
 
 emit_text() {
-    fn: *Function = functions;
+    fn: ?*Function = functions;
     emit(".section .text\n");
     while (fn != null) {
         assign_lvar_offsets(fn);
@@ -3174,13 +3588,14 @@ emit_text() {
             emit("  mov ");
             emit(reg_name(ri));
             emit(", ");
-            emit_num(fn.sret.offset);
+            emit_num((fn.sret as *Obj).offset);
             emit("(%rbp)\n");
             ri = ri + 1;
         }
         i: int = 0;
         while (i < fn.nparams) {
-            p: *Obj = fn_param(fn, i);
+            po: ?*Obj = fn_param(fn, i);
+            p: *Obj = po as *Obj;
             if (passes_by_ref(p.ty)) {
                 emit("  mov ");
                 emit(reg_name(ri));
@@ -3199,7 +3614,7 @@ emit_text() {
             ri = ri + 1;
             i = i + 1;
         }
-        gen_stmt(fn.body);
+        gen_stmt(fn.body as *Node);
         emit(".L.return.");
         emit(fn.name);
         emit(":\n");

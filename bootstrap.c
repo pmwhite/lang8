@@ -4,15 +4,25 @@
  * Language: C-like subset → x86-64 Linux GAS assembly
  *
  *   Types:     int, i8 (byte), bool, nominal record types via `type T = { ... }`,
- *              pointers as `*T`, arrays as `T[N]`
+ *              non-null pointers `*T`, optional pointers `?*T`, arrays as `T[N]`
  *   Decls:     name-first: `x: int = expr;`, `p: *Point = uninitialized;`
  *              locals require `= expr` or `= uninitialized`
  *   Functions: `name(a: int, b: int): int { ... }` or `name(a: int) { ... }` (no return)
- *   Control:   if/else, while (conditions must be bool), return, blocks
+ *   Control:   if/else, while, return, blocks
+ *              conditions must be bool
  *   Ops:       + - * / %  == != < <= > >=  && ||  =  & ! -  []  .  .*  ()
  *              `e as T` widen/reinterpret; `e trunc T` narrow (e.g. int→i8/bool)
  *              bool literals: true, false (values 1 and 0); no implicit numeric casts
- *              null pointer literal: `null` (not integer 0); compare with == / != only
+ *              null pointer literal: `null` (only for `?*T`); compare with == / != only
+ *              `*T` coerces to `?*T`; `.` / `.*` require non-null `*T`
+ *              flow narrowing: for a local `?*T` variable `p`, these type `p` as `*T`:
+ *                `if (p != null)` / `while (p != null)` (and `null != p`);
+ *                `if (p == null)` narrows in the else branch;
+ *                `while (p != null && …)` / `if (p != null && …)` narrow from an AND conjunct
+ *              bare `if (p)` on `?*T` is not allowed — write `p != null`
+ *              assignments to `p` use storage type `?*T` so `p = p.next` works while narrowed
+ *              bindings (locals, match arms) are block-scoped
+ *              loops: `while (s != null) { ...; s = s.next; }`
  *   Other:     sizeof(T), new T uninitialized | new T { f: e, ... },
  *              string/char literals, // comments
  *              `new T` allocates sizeof(T) bytes and yields *T
@@ -48,14 +58,7 @@
 #include <ctype.h>
 #include <stdarg.h>
 
-static void error(char *fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
-    fprintf(stderr, "\n");
-    va_end(ap);
-    exit(1);
-}
+static void error(char *fmt, ...);
 
 static char *read_file(char *path) {
     FILE *fp = fopen(path, "r");
@@ -82,7 +85,7 @@ enum {
     TK_LT, TK_GT, TK_ASSIGN, TK_NOT, TK_AMP,
     TK_LPAREN, TK_RPAREN, TK_LBRACE, TK_RBRACE,
     TK_LBRACK, TK_RBRACK, TK_SEMI, TK_COMMA, TK_COLON,
-    TK_AND, TK_OR, TK_PIPE, TK_ARROW, TK_DOT
+    TK_AND, TK_OR, TK_PIPE, TK_ARROW, TK_DOT, TK_QUESTION
 };
 
 typedef struct Token {
@@ -95,6 +98,25 @@ typedef struct Token {
 
 static char *source;
 static Token *token;
+
+static void error(char *fmt, ...) {
+    if (token && source && token->str) {
+        int line = 1;
+        for (char *p = source; p < token->str; p++)
+            if (*p == '\n') line++;
+        char *ls = token->str;
+        while (ls > source && ls[-1] != '\n') ls--;
+        char *le = token->str;
+        while (*le && *le != '\n') le++;
+        fprintf(stderr, "line %d: %.*s\n", line, (int)(le - ls), ls);
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    fprintf(stderr, "\n");
+    va_end(ap);
+    exit(1);
+}
 
 static int is_ident1(char c) { return isalpha(c) || c == '_'; }
 static int is_ident2(char c) { return is_ident1(c) || isdigit(c); }
@@ -197,6 +219,7 @@ static Token *tokenize(char *p) {
         if (p[0] == '&' && p[1] == '&') { cur = cur->next = new_token(TK_AND, p, 2); p += 2; continue; }
         if (p[0] == '|' && p[1] == '|') { cur = cur->next = new_token(TK_OR, p, 2); p += 2; continue; }
         if (p[0] == '|') { cur = cur->next = new_token(TK_PIPE, p, 1); p += 1; continue; }
+        if (p[0] == '?') { cur = cur->next = new_token(TK_QUESTION, p, 1); p += 1; continue; }
         if (p[0] == '-' && p[1] == '>') { cur = cur->next = new_token(TK_ARROW, p, 2); p += 2; continue; }
 
         int kind;
@@ -307,7 +330,7 @@ struct EnumDef {
     EnumDef *next;
 };
 
-enum { TY_INT, TY_I8, TY_PTR, TY_ARRAY, TY_STRUCT, TY_BOOL, TY_ENUM };
+enum { TY_INT, TY_I8, TY_PTR, TY_OPT_PTR, TY_ARRAY, TY_STRUCT, TY_BOOL, TY_ENUM };
 
 struct Type {
     int kind;
@@ -332,6 +355,13 @@ static Type *newtype(int kind) {
 
 static Type *ptr_to(Type *base) {
     Type *t = newtype(TY_PTR);
+    t->base = base;
+    t->size = 8;
+    return t;
+}
+
+static Type *opt_ptr_to(Type *base) {
+    Type *t = newtype(TY_OPT_PTR);
     t->base = base;
     t->size = 8;
     return t;
@@ -453,11 +483,23 @@ static int is_type_name(Token *tok) {
     return find_struct(name) != 0 || find_enum(name) != 0;
 }
 
-/* True if tok begins a type: int, i8, StructName, or *type */
+/* True if tok begins a type: int, i8, StructName, *type, or ?*type */
 static int starts_type(Token *tok) {
     if (equal(tok, TK_INT) || equal(tok, TK_I8) || equal(tok, TK_BOOL) || is_type_name(tok)) return 1;
     Token *t = tok;
-    while (equal(t, TK_STAR)) t = t->next;
+    for (;;) {
+        if (equal(t, TK_QUESTION)) {
+            t = t->next;
+            if (!equal(t, TK_STAR)) return 0;
+            t = t->next;
+            continue;
+        }
+        if (equal(t, TK_STAR)) {
+            t = t->next;
+            continue;
+        }
+        break;
+    }
     if (t != tok && (equal(t, TK_INT) || equal(t, TK_I8) || equal(t, TK_BOOL) || is_type_name(t))) return 1;
     return 0;
 }
@@ -469,6 +511,8 @@ static Member *find_member(StructDef *sd, char *name) {
 }
 
 static int is_pointer(Type *t) { return t && t->kind == TY_PTR; }
+static int is_opt_pointer(Type *t) { return t && t->kind == TY_OPT_PTR; }
+static int is_any_pointer(Type *t) { return is_pointer(t) || is_opt_pointer(t); }
 static int is_array(Type *t) { return t && t->kind == TY_ARRAY; }
 static int is_struct(Type *t) { return t && t->kind == TY_STRUCT; }
 static int is_enum(Type *t) { return t && t->kind == TY_ENUM; }
@@ -491,11 +535,21 @@ static int types_equal(Type *a, Type *b) {
     if (a == b) return 1;
     if (!a || !b) return 0;
     if (a->kind != b->kind) return 0;
-    if (a->kind == TY_PTR) return types_equal(a->base, b->base);
+    if (a->kind == TY_PTR || a->kind == TY_OPT_PTR) return types_equal(a->base, b->base);
     if (a->kind == TY_ARRAY) return a->array_len == b->array_len && types_equal(a->base, b->base);
     if (a->kind == TY_STRUCT) return a->struct_def == b->struct_def;
     if (a->kind == TY_ENUM) return a->enum_def == b->enum_def;
     return 1; /* int, i8, bool */
+}
+
+/* from may be assigned/passed where to is expected (*T coerces to ?*T). */
+static int types_compatible(Type *from, Type *to) {
+    from = decay(from);
+    to = decay(to);
+    if (types_equal(from, to)) return 1;
+    if (is_opt_pointer(to) && is_pointer(from) && types_equal(from->base, to->base))
+        return 1;
+    return 0;
 }
 
 static int is_word_ty(Type *t) {
@@ -513,6 +567,8 @@ static void check_as(Type *from, Type *to) {
     to = decay(to);
     if (types_equal(from, to)) return;
     if ((is_i8(from) || is_bool_ty(from)) && is_int_ty(to)) return; /* widen */
+    if (is_opt_pointer(from) && is_pointer(to) && types_equal(from->base, to->base))
+        return; /* explicit ?*T as *T unwrap */
     if (is_word_ty(from) && is_word_ty(to)) return; /* same-size reinterpret */
     if (is_byte_sized(from) && is_byte_sized(to)) return; /* i8 ↔ bool */
     error("invalid as conversion");
@@ -565,11 +621,19 @@ static int is_null_node(Node *n) {
     return n && n->kind == ND_NULL;
 }
 
-/* If `null_n` is null and `pty` is a pointer, give null that pointer type. */
+/* If `null_n` is null and `pty` is optional pointer, give null that type. */
 static int bind_null_to_pointer(Type *pty, Node *null_n) {
-    if (!is_pointer(pty) || !is_null_node(null_n)) return 0;
+    if (!is_opt_pointer(pty) || !is_null_node(null_n)) return 0;
     null_n->ty = pty;
     return 1;
+}
+
+static int assignable(Type *to, Node *from_n) {
+    Type *tt = decay(to);
+    Type *ft = from_n->ty ? decay(from_n->ty) : 0;
+    if (ft && types_compatible(ft, tt)) return 1;
+    if (bind_null_to_pointer(tt, from_n)) return 1;
+    return 0;
 }
 
 struct Obj {
@@ -577,6 +641,7 @@ struct Obj {
     int is_local;
     int is_func;
     int offset;
+    int scope_depth; /* visible while current scope_depth >= this */
     Type *ty;
     Obj *next;
 };
@@ -596,6 +661,12 @@ struct Function {
 static Obj *globals;
 static Function *functions;
 static Obj *locals;
+static int scope_depth;
+/* Flow narrowing stack: optional locals currently viewed as non-null *T. */
+enum { NARROW_MAX = 32 };
+static Obj *narrowed_objs[NARROW_MAX];
+static Type *narrowed_tys[NARROW_MAX];
+static int narrow_depth;
 static char *current_fn_name;
 static Type *current_return_ty;
 static Obj *current_sret;
@@ -609,10 +680,24 @@ static Obj *find_obj(Obj *list, char *name) {
     return 0;
 }
 
+/* Locals: first match among objs with scope_depth <= current (block scoping). */
+static Obj *find_local(char *name) {
+    for (Obj *o = locals; o; o = o->next)
+        if (o->scope_depth <= scope_depth && !strcmp(o->name, name))
+            return o;
+    return 0;
+}
+
 static Obj *find_var(char *name) {
-    Obj *o = find_obj(locals, name);
+    Obj *o = find_local(name);
     if (o) return o;
     return find_obj(globals, name);
+}
+
+static void enter_scope(void) { scope_depth++; }
+static void leave_scope(void) {
+    if (scope_depth <= 0) error("internal: leave_scope");
+    scope_depth--;
 }
 
 static Obj *new_obj(char *name, int is_local) {
@@ -620,6 +705,7 @@ static Obj *new_obj(char *name, int is_local) {
     o->name = name;
     o->is_local = is_local;
     if (is_local) {
+        o->scope_depth = scope_depth;
         o->next = locals;
         locals = o;
     } else {
@@ -627,6 +713,83 @@ static Obj *new_obj(char *name, int is_local) {
         globals = o;
     }
     return o;
+}
+
+static Type *var_view_ty(Obj *var) {
+    if (!var)
+        return 0;
+    for (int i = narrow_depth - 1; i >= 0; i--)
+        if (narrowed_objs[i] == var)
+            return narrowed_tys[i];
+    return var->ty;
+}
+
+static void narrow_push(Obj *var, Type *ty) {
+    if (narrow_depth >= NARROW_MAX)
+        error("too many nested pointer narrowings");
+    narrowed_objs[narrow_depth] = var;
+    narrowed_tys[narrow_depth] = ty;
+    narrow_depth++;
+}
+
+static void narrow_reset(int depth) {
+    narrow_depth = depth;
+}
+
+static Obj *opt_local_var(Node *n) {
+    if (!n || n->kind != ND_VAR || !n->var || !n->var->is_local)
+        return 0;
+    Type *t = decay(n->var->ty);
+    if (is_opt_pointer(t))
+        return n->var;
+    return 0;
+}
+
+/* Positive check: `p != null` (or AND of those). Narrows then/body. */
+static Obj *null_check_var(Node *cond) {
+    if (!cond)
+        return 0;
+    if (cond->kind == ND_NE) {
+        if (is_null_node(cond->rhs))
+            return opt_local_var(cond->lhs);
+        if (is_null_node(cond->lhs))
+            return opt_local_var(cond->rhs);
+        return 0;
+    }
+    if (cond->kind == ND_LOGAND) {
+        Obj *v = null_check_var(cond->lhs);
+        if (v)
+            return v;
+        return null_check_var(cond->rhs);
+    }
+    return 0;
+}
+
+/* `p == null` / `null == p`: narrow in the else branch. */
+static Obj *null_eq_var(Node *cond) {
+    if (!cond || cond->kind != ND_EQ)
+        return 0;
+    if (is_null_node(cond->rhs))
+        return opt_local_var(cond->lhs);
+    if (is_null_node(cond->lhs))
+        return opt_local_var(cond->rhs);
+    return 0;
+}
+
+/* Push narrowing implied by cond; returns prior depth for narrow_reset. */
+static int narrow_from_cond(Node *cond, int for_else) {
+    int nd = narrow_depth;
+    if (for_else) {
+        Obj *eqv = null_eq_var(cond);
+        if (eqv)
+            narrow_push(eqv, ptr_to(decay(eqv->ty)->base));
+    } else {
+        Obj *eqv = null_eq_var(cond);
+        Obj *nv = eqv ? 0 : null_check_var(cond);
+        if (nv)
+            narrow_push(nv, ptr_to(decay(nv->ty)->base));
+    }
+    return nd;
 }
 
 static Node *new_node(int kind) {
@@ -696,8 +859,15 @@ static Type *decl_spec(Token **rest, Token *tok) {
     return 0;
 }
 
-/* Full type with pointer prefix: *T is pointer-to-T */
+/* Full type: ?*T optional pointer, *T non-null pointer, or base */
 static Type *parse_type(Token **rest, Token *tok) {
+    if (equal(tok, TK_QUESTION)) {
+        tok = tok->next;
+        if (!equal(tok, TK_STAR)) error("expected * after ? in optional pointer type");
+        Type *base = parse_type(&tok, tok->next);
+        *rest = tok;
+        return opt_ptr_to(base);
+    }
     if (equal(tok, TK_STAR)) {
         Type *base = parse_type(&tok, tok->next);
         *rest = tok;
@@ -758,8 +928,7 @@ static Node *parse_variant_field_inits(Token **rest, Token *tok, Variant *v) {
             init->lhs = expr(&tok, tok);
             add_type(init->lhs);
             Type *lt = decay(m->ty);
-            Type *rt = decay(init->lhs->ty);
-            if (!types_equal(lt, rt) && !(is_pointer(lt) && bind_null_to_pointer(lt, init->lhs)))
+            if (!assignable(lt, init->lhs))
                 error("field initializer type mismatch");
         }
         cur = cur->next = init;
@@ -798,9 +967,10 @@ static Node *parse_struct_field_inits(Token **rest, Token *tok, Type *sty) {
             init->lhs = expr(&tok, tok);
             add_type(init->lhs);
             Type *lt = decay(m->ty);
-            Type *rt = decay(init->lhs->ty);
-            if (!types_equal(lt, rt) && !(is_pointer(lt) && bind_null_to_pointer(lt, init->lhs)))
-                error("field initializer type mismatch");
+            if (!assignable(lt, init->lhs)) {
+                token = tok; /* for location */
+                error("field initializer type mismatch for %s", fname);
+            }
         }
         cur = cur->next = init;
     }
@@ -965,14 +1135,14 @@ static Node *primary(Token **rest, Token *tok) {
             return n;
         }
         Obj *var = find_var(name);
-        if (!var) error("undefined variable: %s", name);
+        if (!var) { token = t; error("undefined variable: %s", name); }
         Node *n = new_node(ND_VAR);
         n->var = var;
         n->ty = var->ty;
         *rest = t;
         return n;
     }
-    error("expected expression");
+    token = tok; error("expected expression");
     return 0;
 }
 
@@ -1007,6 +1177,10 @@ static Node *postfix(Token **rest, Token *tok) {
             add_type(n);
             Type *t = decay(n->ty);
             Type *sty;
+            if (is_opt_pointer(t)) {
+                token = tok;
+                error("member access on optional pointer (use if (p != null) / while (p != null) to narrow)");
+            }
             if (is_pointer(t) && is_struct(t->base))
                 sty = t->base;
             else if (is_struct(n->ty))
@@ -1056,8 +1230,58 @@ static Node *unary(Token **rest, Token *tok) {
     return postfix(rest, tok);
 }
 
+
 static void add_type(Node *n) {
-    if (!n || n->ty) return;
+    if (!n)
+        return;
+    /* Always refresh VAR views so narrowing applies even if previously typed. */
+    if (n->kind == ND_VAR) {
+        n->ty = var_view_ty(n->var);
+        return;
+    }
+    if (n->ty)
+        return;
+
+    /* Narrow optional locals across if/while branches. */
+    if (n->kind == ND_IF || n->kind == ND_WHILE) {
+        add_type(n->cond);
+        {
+            Type *ct = n->cond ? decay(n->cond->ty) : 0;
+            if (!ct || !is_bool_ty(ct))
+                error("condition must be bool");
+        }
+        {
+            int nd = narrow_depth;
+            Obj *eqv = null_eq_var(n->cond);
+            Obj *nv = eqv ? 0 : null_check_var(n->cond);
+            if (n->kind == ND_IF) {
+                if (nv) {
+                    narrow_push(nv, ptr_to(decay(nv->ty)->base));
+                    add_type(n->then);
+                    narrow_reset(nd);
+                    add_type(n->els);
+                } else if (eqv) {
+                    add_type(n->then);
+                    narrow_push(eqv, ptr_to(decay(eqv->ty)->base));
+                    add_type(n->els);
+                    narrow_reset(nd);
+                } else {
+                    add_type(n->then);
+                    add_type(n->els);
+                }
+            } else {
+                if (nv) {
+                    narrow_push(nv, ptr_to(decay(nv->ty)->base));
+                    add_type(n->body);
+                    narrow_reset(nd);
+                } else {
+                    add_type(n->body);
+                }
+            }
+        }
+        return;
+    }
+
     add_type(n->lhs);
     add_type(n->rhs);
     add_type(n->cond);
@@ -1072,10 +1296,10 @@ static void add_type(Node *n) {
         if (!n->ty) n->ty = ty_int;
         return;
     case ND_NULL:
-        /* Concrete *T is filled in by assign/compare/call/return checks. */
+        /* Concrete ?*T is filled in by assign/compare/call/return checks. */
         return;
     case ND_VAR:
-        n->ty = n->var->ty;
+        n->ty = var_view_ty(n->var);
         return;
     case ND_ADD:
     case ND_SUB:
@@ -1122,7 +1346,11 @@ static void add_type(Node *n) {
             Type *lt = decay(n->lhs->ty);
             Type *rt = decay(n->rhs->ty);
             if (!types_equal(lt, rt)) {
-                if (!(bind_null_to_pointer(lt, n->rhs) || bind_null_to_pointer(rt, n->lhs)))
+                if (bind_null_to_pointer(lt, n->rhs) || bind_null_to_pointer(rt, n->lhs))
+                    ;
+                else if (is_any_pointer(lt) && is_any_pointer(rt) && types_equal(lt->base, rt->base))
+                    ;
+                else
                     error("comparison type mismatch (use as/trunc)");
             }
             n->ty = ty_bool;
@@ -1166,14 +1394,19 @@ static void add_type(Node *n) {
         add_type(n->lhs);
         add_type(n->rhs);
         {
-            Type *lt = decay(n->lhs->ty);
-            Type *rt = decay(n->rhs->ty);
-            if (is_array(n->lhs->ty)) error("cannot assign to array");
-            if (!types_equal(lt, rt)) {
-                if (!bind_null_to_pointer(lt, n->rhs))
-                    error("assignment type mismatch (use as/trunc)");
+            Type *storage = n->lhs->ty;
+            Type *lt;
+            if (n->lhs->kind == ND_VAR && n->lhs->var) {
+                storage = n->lhs->var->ty;
+                lt = decay(storage);
+            } else {
+                lt = decay(n->lhs->ty);
             }
-            n->ty = n->lhs->ty;
+            if (is_array(storage)) error("cannot assign to array");
+            if (!assignable(lt, n->rhs)) {
+                error("assignment type mismatch (use as/trunc)");
+            }
+            n->ty = storage;
         }
         return;
     case ND_AS:
@@ -1191,6 +1424,9 @@ static void add_type(Node *n) {
         add_type(n->lhs);
         {
             Type *t = decay(n->lhs->ty);
+            if (is_opt_pointer(t)) {
+                error("dereferencing optional pointer (use if (p != null) / while (p != null) to narrow)");
+            }
             if (is_pointer(t))
                 n->ty = t->base;
             else
@@ -1216,11 +1452,9 @@ static void add_type(Node *n) {
                     if (i >= fn->nparams) break;
                     Obj *p = fn->params[i];
                     if (!p || !p->ty) continue;
-                    Type *at = decay(a->ty);
                     Type *pt = decay(p->ty);
-                    if (!types_equal(at, pt)) {
-                        if (!bind_null_to_pointer(pt, a))
-                            error("argument type mismatch");
+                    if (!assignable(pt, a)) {
+                        error("argument type mismatch");
                     }
                 }
             }
@@ -1232,9 +1466,9 @@ static void add_type(Node *n) {
                 error("return with a value in a non-returning function");
             {
                 Type *rt = decay(current_return_ty);
-                Type *gt = decay(n->lhs->ty);
-                if (!types_equal(gt, rt) && !bind_null_to_pointer(rt, n->lhs))
+                if (!assignable(rt, n->lhs)) {
                     error("return type mismatch (use as/trunc)");
+                }
             }
         } else if (current_return_ty) {
             error("return missing a value");
@@ -1242,8 +1476,6 @@ static void add_type(Node *n) {
         return;
     case ND_IF:
     case ND_WHILE:
-        if (!n->cond || !is_bool_ty(decay(n->cond->ty)))
-            error("condition must be bool");
         return;
     case ND_VARIANT_LIT:
         /* ty/variant set at parse */
@@ -1343,9 +1575,21 @@ static Node *stmt(Token **rest, Token *tok) {
         tok = skip(tok->next, TK_LPAREN);
         n->cond = expr(&tok, tok);
         tok = skip(tok, TK_RPAREN);
-        n->then = stmt(&tok, tok);
-        if (equal(tok, TK_ELSE))
-            n->els = stmt(&tok, tok->next);
+        {
+            int nd = narrow_depth;
+            Obj *eqv = null_eq_var(n->cond);
+            Obj *nv = eqv ? 0 : null_check_var(n->cond);
+            if (nv)
+                narrow_push(nv, ptr_to(decay(nv->ty)->base));
+            n->then = stmt(&tok, tok);
+            narrow_reset(nd);
+            if (equal(tok, TK_ELSE)) {
+                if (eqv)
+                    narrow_push(eqv, ptr_to(decay(eqv->ty)->base));
+                n->els = stmt(&tok, tok->next);
+                narrow_reset(nd);
+            }
+        }
         *rest = tok;
         return n;
     }
@@ -1354,7 +1598,14 @@ static Node *stmt(Token **rest, Token *tok) {
         tok = skip(tok->next, TK_LPAREN);
         n->cond = expr(&tok, tok);
         tok = skip(tok, TK_RPAREN);
-        n->body = stmt(&tok, tok);
+        {
+            int nd = narrow_depth;
+            Obj *nv = null_check_var(n->cond);
+            if (nv)
+                narrow_push(nv, ptr_to(decay(nv->ty)->base));
+            n->body = stmt(&tok, tok);
+            narrow_reset(nd);
+        }
         *rest = tok;
         return n;
     }
@@ -1403,6 +1654,7 @@ static Node *stmt(Token **rest, Token *tok) {
                 arm->args = bhead.next;
             }
             tok = skip(tok, TK_ARROW);
+            enter_scope(); /* arm binders + body */
             if (is_wild) {
                 for (Node *a = arms.next; a; a = a->next)
                     if (!a->variant) error("duplicate wildcard match arm");
@@ -1448,6 +1700,7 @@ static Node *stmt(Token **rest, Token *tok) {
             }
             }
             arm->body = compound_stmt(&tok, tok);
+            leave_scope();
             acur = acur->next = arm;
             if (is_wild && !equal(tok, TK_RBRACE))
                 error("wildcard `_` must be the last match arm");
@@ -1500,6 +1753,7 @@ static Node *stmt(Token **rest, Token *tok) {
 
 static Node *compound_stmt(Token **rest, Token *tok) {
     Node *n = new_node(ND_BLOCK);
+    enter_scope();
     tok = skip(tok, TK_LBRACE);
     Node head = {0};
     Node *cur = &head;
@@ -1508,11 +1762,14 @@ static Node *compound_stmt(Token **rest, Token *tok) {
     }
     n->body = head.next;
     *rest = skip(tok, TK_RBRACE);
+    leave_scope();
     return n;
 }
 
 static Function *parse_function(Token **rest, Token *tok, char *name) {
     locals = 0;
+    scope_depth = 0;
+    narrow_depth = 0;
     Function *fn = calloc(1, sizeof(Function));
     fn->name = name;
     tok = skip(tok, TK_LPAREN);
@@ -2114,10 +2371,18 @@ static void gen_stmt(Node *n) {
         gen_expr(n->cond);
         printf("  cmp $0, %%rax\n");
         printf("  je .L.else%d\n", l);
-        gen_stmt(n->then);
+        {
+            int nd = narrow_from_cond(n->cond, 0);
+            gen_stmt(n->then);
+            narrow_reset(nd);
+        }
         printf("  jmp .L.end%d\n", l);
         printf(".L.else%d:\n", l);
-        if (n->els) gen_stmt(n->els);
+        if (n->els) {
+            int nd = narrow_from_cond(n->cond, 1);
+            gen_stmt(n->els);
+            narrow_reset(nd);
+        }
         printf(".L.end%d:\n", l);
         return;
     }
@@ -2127,7 +2392,11 @@ static void gen_stmt(Node *n) {
         gen_expr(n->cond);
         printf("  cmp $0, %%rax\n");
         printf("  je .L.end%d\n", l);
-        gen_stmt(n->body);
+        {
+            int nd = narrow_from_cond(n->cond, 0);
+            gen_stmt(n->body);
+            narrow_reset(nd);
+        }
         printf("  jmp .L.begin%d\n", l);
         printf(".L.end%d:\n", l);
         return;
