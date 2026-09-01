@@ -574,17 +574,13 @@ static int starts_type(Token *tok) {
     return 0;
 }
 
-static Member *find_member(StructDef *sd, char *name) {
-    for (Member *m = sd->members; m; m = m->next)
+static Member *find_field(Member *m, char *name) {
+    for (; m; m = m->next)
         if (!strcmp(m->name, name)) return m;
     return 0;
 }
-
-static Member *find_exn_member(ExnDef *ed, char *name) {
-    for (Member *m = ed->members; m; m = m->next)
-        if (!strcmp(m->name, name)) return m;
-    return 0;
-}
+static Member *find_member(StructDef *sd, char *name) { return find_field(sd->members, name); }
+static Member *find_exn_member(ExnDef *ed, char *name) { return find_field(ed->members, name); }
 
 static int is_pointer(Type *t) { return t && t->kind == TY_PTR; }
 static int is_opt_pointer(Type *t) { return t && t->kind == TY_OPT_PTR; }
@@ -1068,17 +1064,17 @@ static Obj *parse_decl(Token **rest, Token *tok, int is_local) {
 
 
 /* Field inits for variant payload. tok at `{`. */
-static Node *parse_variant_field_inits(Token **rest, Token *tok, Variant *v) {
+static Node *parse_field_inits(Token **rest, Token *tok, Member *members) {
     tok = skip(tok, TK_LBRACE);
     Node head = {0};
     Node *cur = &head;
     while (!equal(tok, TK_RBRACE)) {
         if (cur != &head) tok = skip(tok, TK_COMMA);
-        if (!equal(tok, TK_IDENT)) error("expected field name in variant literal");
+        if (!equal(tok, TK_IDENT)) error("expected field name");
         char *fname = tokstr(tok);
         tok = skip(tok->next, TK_COLON);
         Member *m = 0;
-        for (Member *x = v->fields; x; x = x->next)
+        for (Member *x = members; x; x = x->next)
             if (!strcmp(x->name, fname)) { m = x; break; }
         if (!m) error("unknown field %s", fname);
         for (Node *i = head.next; i; i = i->next)
@@ -1091,101 +1087,35 @@ static Node *parse_variant_field_inits(Token **rest, Token *tok, Variant *v) {
         } else {
             init->lhs = expr(&tok, tok);
             add_type(init->lhs);
-            Type *lt = decay(m->ty);
-            if (!assignable(lt, init->lhs))
+            if (!assignable(decay(m->ty), init->lhs))
                 error("field initializer type mismatch");
         }
         cur = cur->next = init;
     }
-    for (Member *m = v->fields; m; m = m->next) {
+    for (Member *m = members; m; m = m->next) {
         int found = 0;
         for (Node *i = head.next; i; i = i->next)
             if (i->member == m) found = 1;
-        if (!found) error("variant literal missing field %s", m->name);
+        if (!found) error("missing field %s", m->name);
     }
     *rest = tok->next;
     return head.next;
 }
 
-/* Field inits for `Type { f: expr|uninitialized, ... }`. tok at `{`. */
+static Node *parse_variant_field_inits(Token **rest, Token *tok, Variant *v) {
+    return parse_field_inits(rest, tok, v->fields);
+}
+
 static Node *parse_struct_field_inits(Token **rest, Token *tok, Type *sty) {
     if (!is_struct(sty)) error("struct literal requires a struct type");
-    tok = skip(tok, TK_LBRACE);
-    Node head = {0};
-    Node *cur = &head;
-    while (!equal(tok, TK_RBRACE)) {
-        if (cur != &head) tok = skip(tok, TK_COMMA);
-        if (!equal(tok, TK_IDENT)) error("expected field name in struct literal");
-        char *fname = tokstr(tok);
-        tok = skip(tok->next, TK_COLON);
-        Member *m = find_member(sty->struct_def, fname);
-        if (!m) error("unknown field %s", fname);
-        for (Node *i = head.next; i; i = i->next)
-            if (i->member == m) error("duplicate field %s in struct literal", fname);
-        Node *init = new_node(ND_EXPR_STMT);
-        init->member = m;
-        if (equal(tok, TK_UNINITIALIZED)) {
-            init->lhs = 0;
-            tok = tok->next;
-        } else {
-            init->lhs = expr(&tok, tok);
-            add_type(init->lhs);
-            Type *lt = decay(m->ty);
-            if (!assignable(lt, init->lhs)) {
-                token = tok; /* for location */
-                error("field initializer type mismatch for %s", fname);
-            }
-        }
-        cur = cur->next = init;
-    }
-    for (Member *m = sty->struct_def->members; m; m = m->next) {
-        int found = 0;
-        for (Node *i = head.next; i; i = i->next)
-            if (i->member == m) found = 1;
-        if (!found) error("struct literal missing field %s", m->name);
-    }
-    *rest = tok->next;
-    return head.next;
+    return parse_field_inits(rest, tok, sty->struct_def->members);
 }
 
-/* Field inits for `raise Exn { f: expr, ... }`. tok at `{`. */
 static Node *parse_exn_field_inits(Token **rest, Token *tok, ExnDef *ed) {
     if (!ed->members) error("unit exception does not take fields");
-    tok = skip(tok, TK_LBRACE);
-    Node head = {0};
-    Node *cur = &head;
-    while (!equal(tok, TK_RBRACE)) {
-        if (cur != &head) tok = skip(tok, TK_COMMA);
-        if (!equal(tok, TK_IDENT)) error("expected field name in exception payload");
-        char *fname = tokstr(tok);
-        tok = skip(tok->next, TK_COLON);
-        Member *m = find_exn_member(ed, fname);
-        if (!m) error("unknown field %s", fname);
-        for (Node *i = head.next; i; i = i->next)
-            if (i->member == m) error("duplicate field %s", fname);
-        Node *init = new_node(ND_EXPR_STMT);
-        init->member = m;
-        if (equal(tok, TK_UNINITIALIZED)) {
-            init->lhs = 0;
-            tok = tok->next;
-        } else {
-            init->lhs = expr(&tok, tok);
-            add_type(init->lhs);
-            Type *lt = decay(m->ty);
-            if (!assignable(lt, init->lhs))
-                error("field initializer type mismatch");
-        }
-        cur = cur->next = init;
-    }
-    for (Member *m = ed->members; m; m = m->next) {
-        int found = 0;
-        for (Node *i = head.next; i; i = i->next)
-            if (i->member == m) found = 1;
-        if (!found) error("exception payload missing field %s", m->name);
-    }
-    *rest = tok->next;
-    return head.next;
+    return parse_field_inits(rest, tok, ed->members);
 }
+
 
 static Node *primary(Token **rest, Token *tok) {
     if (equal(tok, TK_NEW)) {
