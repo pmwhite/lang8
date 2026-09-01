@@ -20,7 +20,10 @@
  *              flow narrowing (locals only): for a local `?*T` variable `p`, these type `p` as `*T`:
  *                `if (p != null)` / `while (p != null)` (and `null != p`);
  *                `if (p == null)` narrows in the else branch;
- *                `while (p != null && …)` / `if (p != null && …)` narrow from an AND conjunct
+ *                `while (p != null && …)` / `if (p != null && …)` narrow from AND conjuncts
+ *                (including the RHS of `&&`: `p != null && use(p)`);
+ *                `p == null || use(p)` narrows `p` on the RHS of `||`;
+ *                `if (p == null || q == null) … else` narrows both in the else branch
  *              bare `if (p)` on `?*T` is not allowed — write `p != null`
  *              assignments to `p` use storage type `?*T` so `p = p.next` works while narrowed
  *              no `?*T as *T` escape hatch — bind a local and narrow instead
@@ -756,7 +759,7 @@ static Obj *opt_local_var(Node *n) {
     return 0;
 }
 
-/* Positive check: `p != null` (or AND of those). Narrows then/body. */
+/* Positive check: `p != null` (single NE). */
 static Obj *null_check_var(Node *cond) {
     if (!cond)
         return 0;
@@ -767,16 +770,10 @@ static Obj *null_check_var(Node *cond) {
             return opt_local_var(cond->rhs);
         return 0;
     }
-    if (cond->kind == ND_LOGAND) {
-        Obj *v = null_check_var(cond->lhs);
-        if (v)
-            return v;
-        return null_check_var(cond->rhs);
-    }
     return 0;
 }
 
-/* `p == null` / `null == p`: narrow in the else branch. */
+/* `p == null` / `null == p` (single EQ). */
 static Obj *null_eq_var(Node *cond) {
     if (!cond || cond->kind != ND_EQ)
         return 0;
@@ -787,19 +784,42 @@ static Obj *null_eq_var(Node *cond) {
     return 0;
 }
 
+/* Push *T for every `p != null` leaf in an AND-tree (or a single NE). */
+static void narrow_push_ne_nulls(Node *cond) {
+    if (!cond)
+        return;
+    if (cond->kind == ND_LOGAND) {
+        narrow_push_ne_nulls(cond->lhs);
+        narrow_push_ne_nulls(cond->rhs);
+        return;
+    }
+    Obj *v = null_check_var(cond);
+    if (v)
+        narrow_push(v, ptr_to(decay(v->ty)->base));
+}
+
+/* Push *T for every `p == null` leaf in an OR-tree (or a single EQ).
+ * Used when that OR is false (else) or when typing the RHS of ||. */
+static void narrow_push_eq_nulls(Node *cond) {
+    if (!cond)
+        return;
+    if (cond->kind == ND_LOGOR) {
+        narrow_push_eq_nulls(cond->lhs);
+        narrow_push_eq_nulls(cond->rhs);
+        return;
+    }
+    Obj *v = null_eq_var(cond);
+    if (v)
+        narrow_push(v, ptr_to(decay(v->ty)->base));
+}
+
 /* Push narrowing implied by cond; returns prior depth for narrow_reset. */
 static int narrow_from_cond(Node *cond, int for_else) {
     int nd = narrow_depth;
-    if (for_else) {
-        Obj *eqv = null_eq_var(cond);
-        if (eqv)
-            narrow_push(eqv, ptr_to(decay(eqv->ty)->base));
-    } else {
-        Obj *eqv = null_eq_var(cond);
-        Obj *nv = eqv ? 0 : null_check_var(cond);
-        if (nv)
-            narrow_push(nv, ptr_to(decay(nv->ty)->base));
-    }
+    if (for_else)
+        narrow_push_eq_nulls(cond);
+    else
+        narrow_push_ne_nulls(cond);
     return nd;
 }
 
@@ -1277,33 +1297,47 @@ static void add_type(Node *n) {
         }
         {
             int nd = narrow_depth;
-            Obj *eqv = null_eq_var(n->cond);
-            Obj *nv = eqv ? 0 : null_check_var(n->cond);
             if (n->kind == ND_IF) {
-                if (nv) {
-                    narrow_push(nv, ptr_to(decay(nv->ty)->base));
-                    add_type(n->then);
-                    narrow_reset(nd);
-                    add_type(n->els);
-                } else if (eqv) {
-                    add_type(n->then);
-                    narrow_push(eqv, ptr_to(decay(eqv->ty)->base));
-                    add_type(n->els);
-                    narrow_reset(nd);
-                } else {
-                    add_type(n->then);
-                    add_type(n->els);
-                }
+                narrow_push_ne_nulls(n->cond);
+                add_type(n->then);
+                narrow_reset(nd);
+                narrow_push_eq_nulls(n->cond);
+                add_type(n->els);
+                narrow_reset(nd);
             } else {
-                if (nv) {
-                    narrow_push(nv, ptr_to(decay(nv->ty)->base));
-                    add_type(n->body);
-                    narrow_reset(nd);
-                } else {
-                    add_type(n->body);
-                }
+                narrow_push_ne_nulls(n->cond);
+                add_type(n->body);
+                narrow_reset(nd);
             }
         }
+        return;
+    }
+
+    /* Short-circuit narrowing: type RHS under facts implied by LHS. */
+    if (n->kind == ND_LOGAND) {
+        add_type(n->lhs);
+        {
+            int nd = narrow_depth;
+            narrow_push_ne_nulls(n->lhs);
+            add_type(n->rhs);
+            narrow_reset(nd);
+        }
+        if (!is_bool_ty(decay(n->lhs->ty)) || !is_bool_ty(decay(n->rhs->ty)))
+            error("&& / || require bool operands");
+        n->ty = ty_bool;
+        return;
+    }
+    if (n->kind == ND_LOGOR) {
+        add_type(n->lhs);
+        {
+            int nd = narrow_depth;
+            narrow_push_eq_nulls(n->lhs);
+            add_type(n->rhs);
+            narrow_reset(nd);
+        }
+        if (!is_bool_ty(decay(n->lhs->ty)) || !is_bool_ty(decay(n->rhs->ty)))
+            error("&& / || require bool operands");
+        n->ty = ty_bool;
         return;
     }
 
@@ -1397,11 +1431,7 @@ static void add_type(Node *n) {
         return;
     case ND_LOGAND:
     case ND_LOGOR:
-        add_type(n->lhs);
-        add_type(n->rhs);
-        if (!is_bool_ty(decay(n->lhs->ty)) || !is_bool_ty(decay(n->rhs->ty)))
-            error("&& / || require bool operands");
-        n->ty = ty_bool;
+        /* typed in early short-circuit handling above */
         return;
     case ND_NOT:
         add_type(n->lhs);
@@ -1602,15 +1632,11 @@ static Node *stmt(Token **rest, Token *tok) {
         tok = skip(tok, TK_RPAREN);
         {
             int nd = narrow_depth;
-            Obj *eqv = null_eq_var(n->cond);
-            Obj *nv = eqv ? 0 : null_check_var(n->cond);
-            if (nv)
-                narrow_push(nv, ptr_to(decay(nv->ty)->base));
+            narrow_push_ne_nulls(n->cond);
             n->then = stmt(&tok, tok);
             narrow_reset(nd);
             if (equal(tok, TK_ELSE)) {
-                if (eqv)
-                    narrow_push(eqv, ptr_to(decay(eqv->ty)->base));
+                narrow_push_eq_nulls(n->cond);
                 n->els = stmt(&tok, tok->next);
                 narrow_reset(nd);
             }
@@ -1625,9 +1651,7 @@ static Node *stmt(Token **rest, Token *tok) {
         tok = skip(tok, TK_RPAREN);
         {
             int nd = narrow_depth;
-            Obj *nv = null_check_var(n->cond);
-            if (nv)
-                narrow_push(nv, ptr_to(decay(nv->ty)->base));
+            narrow_push_ne_nulls(n->cond);
             n->body = stmt(&tok, tok);
             narrow_reset(nd);
         }

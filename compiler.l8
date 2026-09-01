@@ -10,7 +10,8 @@
 // Sum defs allow a leading `|` before the first variant.
 // Null pointers use the `null` literal (only for `?*T`, not integer 0).
 // `*T` is non-null; `?*T` is optional. `*T` coerces to `?*T`.
-// Flow narrowing (locals only): `if (p != null)` / `while (p != null)` / AND-conjuncts (not bare `if (p)`).
+// Flow narrowing (locals only): `if (p != null)` / `while (p != null)` / AND-conjuncts
+//   (RHS of `&&` / `||` included); `if (p == null)` else; OR-of-`== null` else.
 // No `?*T as *T` — bind a local and narrow, or use expect_*.
 // Bindings (locals, match arms) are block-scoped.
 // `as`: numeric widen (i8/bool→int, i8↔bool), or `*A as *B`; not `?*T as *T` (narrow a local instead).
@@ -1472,19 +1473,9 @@ narrow_reset(saved: ?*NarrowFrame) {
 narrow_from_cond(cond: ?*Node, for_else: int): ?*NarrowFrame {
     saved: ?*NarrowFrame = narrow_top;
     if (for_else != 0) {
-        eqv: ?*Obj = null_eq_var(cond);
-        if (eqv != null) {
-            narrow_push(eqv, ptr_to(type_base(eqv.ty)));
-        }
+        narrow_push_eq_nulls(cond);
     } else {
-        eqv2: ?*Obj = null_eq_var(cond);
-        nv: ?*Obj = null;
-        if (eqv2 == null) {
-            nv = null_check_var(cond);
-        }
-        if (nv != null) {
-            narrow_push(nv, ptr_to(type_base(nv.ty)));
-        }
+        narrow_push_ne_nulls(cond);
     }
     return saved;
 }
@@ -1521,13 +1512,6 @@ null_check_var(cond: ?*Node): ?*Obj {
             }
             return null;
         }
-        if (cond.kind == ND_LOGAND) {
-            v: ?*Obj = null_check_var(cond.lhs);
-            if (v != null) {
-                return v;
-            }
-            return null_check_var(cond.rhs);
-        }
         return null;
     }
     return null;
@@ -1547,6 +1531,34 @@ null_eq_var(cond: ?*Node): ?*Obj {
         return null;
     }
     return null;
+}
+
+narrow_push_ne_nulls(cond: ?*Node) {
+    if (cond != null) {
+        if (cond.kind == ND_LOGAND) {
+            narrow_push_ne_nulls(cond.lhs);
+            narrow_push_ne_nulls(cond.rhs);
+            return;
+        }
+        v: ?*Obj = null_check_var(cond);
+        if (v != null) {
+            narrow_push(v, ptr_to(type_base(v.ty)));
+        }
+    }
+}
+
+narrow_push_eq_nulls(cond: ?*Node) {
+    if (cond != null) {
+        if (cond.kind == ND_LOGOR) {
+            narrow_push_eq_nulls(cond.lhs);
+            narrow_push_eq_nulls(cond.rhs);
+            return;
+        }
+        v: ?*Obj = null_eq_var(cond);
+        if (v != null) {
+            narrow_push(v, ptr_to(type_base(v.ty)));
+        }
+    }
 }
 
 decl_spec(): *Type {
@@ -2089,37 +2101,46 @@ add_type_node(p: *Node) {
             error("condition must be bool");
         }
         save: ?*NarrowFrame = narrow_top;
-        eqv: ?*Obj = null_eq_var(p.cond);
-        nv: ?*Obj = null;
-        if (eqv == null) {
-            nv = null_check_var(p.cond);
-        }
         if (p.kind == ND_IF) {
-            if (nv != null) {
-                narrow_push(nv, ptr_to(type_base(nv.ty)));
-                add_type(p.then);
-                narrow_reset(save);
-                add_type(p.els);
-            } else {
-                if (eqv != null) {
-                    add_type(p.then);
-                    narrow_push(eqv, ptr_to(type_base(eqv.ty)));
-                    add_type(p.els);
-                    narrow_reset(save);
-                } else {
-                    add_type(p.then);
-                    add_type(p.els);
-                }
-            }
+            narrow_push_ne_nulls(p.cond);
+            add_type(p.then);
+            narrow_reset(save);
+            narrow_push_eq_nulls(p.cond);
+            add_type(p.els);
+            narrow_reset(save);
         } else {
-            if (nv != null) {
-                narrow_push(nv, ptr_to(type_base(nv.ty)));
-                add_type(p.body);
-                narrow_reset(save);
-            } else {
-                add_type(p.body);
-            }
+            narrow_push_ne_nulls(p.cond);
+            add_type(p.body);
+            narrow_reset(save);
         }
+        return;
+    }
+    if (p.kind == ND_LOGAND) {
+        add_type(p.lhs);
+        save_and: ?*NarrowFrame = narrow_top;
+        narrow_push_ne_nulls(p.lhs);
+        add_type(p.rhs);
+        narrow_reset(save_and);
+        lhs_a: *Node = expect_node(p.lhs, "missing lhs");
+        rhs_a: *Node = expect_node(p.rhs, "missing rhs");
+        if (!is_bool_ty(decay(lhs_a.ty)) || !is_bool_ty(decay(rhs_a.ty))) {
+            error("&& / || require bool operands");
+        }
+        p.ty = ty_bool;
+        return;
+    }
+    if (p.kind == ND_LOGOR) {
+        add_type(p.lhs);
+        save_or: ?*NarrowFrame = narrow_top;
+        narrow_push_eq_nulls(p.lhs);
+        add_type(p.rhs);
+        narrow_reset(save_or);
+        lhs_o: *Node = expect_node(p.lhs, "missing lhs");
+        rhs_o: *Node = expect_node(p.rhs, "missing rhs");
+        if (!is_bool_ty(decay(lhs_o.ty)) || !is_bool_ty(decay(rhs_o.ty))) {
+            error("&& / || require bool operands");
+        }
+        p.ty = ty_bool;
         return;
     }
     add_type(p.lhs);
@@ -2216,12 +2237,6 @@ add_type_node(p: *Node) {
         return;
     }
     if (p.kind == ND_LOGAND || p.kind == ND_LOGOR) {
-        lhs: *Node = expect_node(p.lhs, "missing lhs");
-        rhs: *Node = expect_node(p.rhs, "missing rhs");
-        if (!is_bool_ty(decay(lhs.ty)) || !is_bool_ty(decay(rhs.ty))) {
-            error("&& / || require bool operands");
-        }
-        p.ty = ty_bool;
         return;
     }
     if (p.kind == ND_NOT) {
@@ -2554,21 +2569,12 @@ parse_stmt(): *Node {
         n.cond = parse_expr();
         skip(TokKind.RParen);
         save: ?*NarrowFrame = narrow_top;
-        eqv: ?*Obj = null_eq_var(n.cond);
-        nv: ?*Obj = null;
-        if (eqv == null) {
-            nv = null_check_var(n.cond);
-        }
-        if (nv != null) {
-            narrow_push(nv, ptr_to(type_base(nv.ty)));
-        }
+        narrow_push_ne_nulls(n.cond);
         n.then = parse_stmt();
         narrow_reset(save);
         if (equal(TokKind.Else)) {
             tok = tok.next;
-            if (eqv != null) {
-                narrow_push(eqv, ptr_to(type_base(eqv.ty)));
-            }
+            narrow_push_eq_nulls(n.cond);
             n.els = parse_stmt();
             narrow_reset(save);
         }
@@ -2581,10 +2587,7 @@ parse_stmt(): *Node {
         n.cond = parse_expr();
         skip(TokKind.RParen);
         save2: ?*NarrowFrame = narrow_top;
-        nv2: ?*Obj = null_check_var(n.cond);
-        if (nv2 != null) {
-            narrow_push(nv2, ptr_to(type_base(nv2.ty)));
-        }
+        narrow_push_ne_nulls(n.cond);
         n.body = parse_stmt();
         narrow_reset(save2);
         return n;
@@ -2882,15 +2885,13 @@ parse_function(name: *i8): *Function {
         fn.return_ty = parse_type();
     }
     rt: ?*Type = fn.return_ty;
-    if (rt != null) {
-        if (passes_by_ref(rt)) {
-            if (fn.nparams >= 6) {
-                error("too many parameters");
-            }
-            sret: *Obj = new_obj(".sret", 1);
-            sret.ty = ptr_to(rt);
-            fn.sret = sret;
+    if (rt != null && passes_by_ref(rt)) {
+        if (fn.nparams >= 6) {
+            error("too many parameters");
         }
+        sret: *Obj = new_obj(".sret", 1);
+        sret.ty = ptr_to(rt);
+        fn.sret = sret;
     }
     fn.body = parse_compound();
     fn.locals = locals;
