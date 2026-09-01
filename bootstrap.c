@@ -3,11 +3,14 @@
  *
  * Language: C-like subset → x86-64 Linux GAS assembly
  *
- *   Types:     int, i8 (byte), bool, nominal record types via `type T = { ... }`,
+ *   Types:     int, i8 (byte), bool, noreturn (only as a function return type),
+ *              nominal record types via `type T = { ... }`,
  *              non-null pointers `*T`, optional pointers `?*T`, arrays as `T[N]`
  *   Decls:     name-first: `x: int = expr;`, `p: *Point = uninitialized;`
  *              locals require `= expr` or `= uninitialized`
  *   Functions: `name(a: int, b: int): int { ... }` or `name(a: int) { ... }` (no return)
+ *              `name(...): noreturn { ... }` never returns; `exit` is a noreturn builtin
+ *              after a noreturn call, later statements in the same block are unreachable
  *   Control:   if/else, while, return, blocks
  *              conditions must be bool
  *   Ops:       + - * / %  == != < <= > >=  && ||  =  & ! -  []  .  .*  ()
@@ -84,7 +87,7 @@ static char *read_file(char *path) {
 
 enum {
     TK_EOF, TK_NUM, TK_CHAR, TK_STR, TK_IDENT,
-    TK_INT, TK_I8, TK_BOOL, TK_TRUE, TK_FALSE, TK_NULL,
+    TK_INT, TK_I8, TK_BOOL, TK_TRUE, TK_FALSE, TK_NULL, TK_NORETURN,
     TK_IF, TK_ELSE, TK_WHILE, TK_RETURN,
     TK_TYPE, TK_MATCH, TK_SIZEOF, TK_UNINITIALIZED, TK_AS, TK_TRUNC, TK_NEW,
     TK_EQ, TK_NE, TK_LE, TK_GE,
@@ -205,6 +208,7 @@ static Token *tokenize(char *p) {
             else if (kw_eq(s, n, "true")) kind = TK_TRUE;
             else if (kw_eq(s, n, "false")) kind = TK_FALSE;
             else if (kw_eq(s, n, "null")) kind = TK_NULL;
+            else if (kw_eq(s, n, "noreturn")) kind = TK_NORETURN;
             else if (kw_eq(s, n, "if")) kind = TK_IF;
             else if (kw_eq(s, n, "else")) kind = TK_ELSE;
             else if (kw_eq(s, n, "while")) kind = TK_WHILE;
@@ -337,7 +341,7 @@ struct EnumDef {
     EnumDef *next;
 };
 
-enum { TY_INT, TY_I8, TY_PTR, TY_OPT_PTR, TY_ARRAY, TY_STRUCT, TY_BOOL, TY_ENUM };
+enum { TY_INT, TY_I8, TY_PTR, TY_OPT_PTR, TY_ARRAY, TY_STRUCT, TY_BOOL, TY_ENUM, TY_NORETURN };
 
 struct Type {
     int kind;
@@ -353,6 +357,7 @@ static EnumDef *enum_defs;
 static Type *ty_int;
 static Type *ty_i8;
 static Type *ty_bool;
+static Type *ty_noreturn;
 
 static Type *newtype(int kind) {
     Type *t = calloc(1, sizeof(Type));
@@ -527,6 +532,7 @@ static int is_aggregate(Type *t) { return is_struct(t) || is_enum(t); }
 static int is_i8(Type *t) { return t && t->kind == TY_I8; }
 static int is_int_ty(Type *t) { return t && t->kind == TY_INT; }
 static int is_bool_ty(Type *t) { return t && t->kind == TY_BOOL; }
+static int is_noreturn_ty(Type *t) { return t && t->kind == TY_NORETURN; }
 static int type_size(Type *t) {
     if (!t) return 0;
     if (is_struct(t) && t->struct_def) return t->struct_def->size;
@@ -546,7 +552,7 @@ static int types_equal(Type *a, Type *b) {
     if (a->kind == TY_ARRAY) return a->array_len == b->array_len && types_equal(a->base, b->base);
     if (a->kind == TY_STRUCT) return a->struct_def == b->struct_def;
     if (a->kind == TY_ENUM) return a->enum_def == b->enum_def;
-    return 1; /* int, i8, bool */
+    return 1; /* int, i8, bool, noreturn */
 }
 
 /* from may be assigned/passed where to is expected (*T coerces to ?*T). */
@@ -861,7 +867,7 @@ static Type *parse_type(Token **rest, Token *tok);
 static Type *parse_type_suffix(Token **rest, Token *tok, Type *ty);
 static Obj *parse_decl(Token **rest, Token *tok, int is_local);
 
-/* Base type only: int, i8, or StructName */
+/* Base type only: int, i8, bool, noreturn, or StructName */
 static Type *decl_spec(Token **rest, Token *tok) {
     if (equal(tok, TK_INT)) {
         *rest = tok->next;
@@ -874,6 +880,10 @@ static Type *decl_spec(Token **rest, Token *tok) {
     if (equal(tok, TK_BOOL)) {
         *rest = tok->next;
         return ty_bool;
+    }
+    if (equal(tok, TK_NORETURN)) {
+        *rest = tok->next;
+        return ty_noreturn;
     }
     if (equal(tok, TK_IDENT)) {
         char *name = tokstr(tok);
@@ -896,11 +906,13 @@ static Type *parse_type(Token **rest, Token *tok) {
         tok = tok->next;
         if (!equal(tok, TK_STAR)) error("expected * after ? in optional pointer type");
         Type *base = parse_type(&tok, tok->next);
+        if (is_noreturn_ty(base)) error("noreturn cannot be pointed to");
         *rest = tok;
         return opt_ptr_to(base);
     }
     if (equal(tok, TK_STAR)) {
         Type *base = parse_type(&tok, tok->next);
+        if (is_noreturn_ty(base)) error("noreturn cannot be pointed to");
         *rest = tok;
         return ptr_to(base);
     }
@@ -910,6 +922,7 @@ static Type *parse_type(Token **rest, Token *tok) {
 /* Optional array suffix: Type[N] */
 static Type *parse_type_suffix(Token **rest, Token *tok, Type *ty) {
     if (equal(tok, TK_LBRACK)) {
+        if (is_noreturn_ty(ty)) error("noreturn cannot be an array element");
         tok = tok->next;
         if (!equal(tok, TK_NUM)) error("expected array size");
         ty = array_of(ty, tok->val);
@@ -926,6 +939,7 @@ static Obj *parse_decl(Token **rest, Token *tok, int is_local) {
     tok = skip(tok->next, TK_COLON);
     Type *ty = parse_type(&tok, tok);
     ty = parse_type_suffix(&tok, tok, ty);
+    if (is_noreturn_ty(ty)) error("noreturn is only valid as a function return type");
     Obj *o = new_obj(name, is_local);
     o->ty = ty;
     *rest = tok;
@@ -1494,13 +1508,17 @@ static void add_type(Node *n) {
     case ND_FUNCALL:
         {
             Obj *f = find_obj(globals, n->funcname);
-            if (f && f->is_func)
-                n->ty = f->ty; /* null if function does not return */
-            else
-                n->ty = ty_int; /* undeclared/builtin */
             Function *fn = 0;
             for (Function *g = functions; g; g = g->next)
                 if (!strcmp(g->name, n->funcname)) { fn = g; break; }
+            if (fn && fn->return_ty)
+                n->ty = fn->return_ty;
+            else if (f && f->is_func)
+                n->ty = f->ty; /* null if function does not return */
+            else if (!strcmp(n->funcname, "exit"))
+                n->ty = ty_noreturn;
+            else
+                n->ty = ty_int; /* undeclared/builtin */
             if (fn) {
                 int i = 0;
                 for (Node *a = n->args; a; a = a->next, i++) {
@@ -1516,6 +1534,8 @@ static void add_type(Node *n) {
         }
         return;
     case ND_RETURN:
+        if (is_noreturn_ty(current_return_ty))
+            error("noreturn function cannot return");
         if (n->lhs) {
             if (!current_return_ty)
                 error("return with a value in a non-returning function");
@@ -1815,6 +1835,32 @@ static Node *compound_stmt(Token **rest, Token *tok) {
     return n;
 }
 
+/* True if executing n never falls through (return or noreturn call). */
+static int stmt_diverges(Node *n) {
+    if (!n) return 0;
+    add_type(n);
+    switch (n->kind) {
+    case ND_RETURN:
+        return 1;
+    case ND_EXPR_STMT:
+        return n->lhs && is_noreturn_ty(n->lhs->ty);
+    case ND_BLOCK:
+        for (Node *s = n->body; s; s = s->next)
+            if (stmt_diverges(s)) return 1;
+        return 0;
+    case ND_IF:
+        return stmt_diverges(n->then) && n->els && stmt_diverges(n->els);
+    case ND_MATCH:
+        if (!n->body) return 0;
+        for (Node *arm = n->body; arm; arm = arm->next) {
+            if (!stmt_diverges(arm->body)) return 0;
+        }
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static Function *parse_function(Token **rest, Token *tok, char *name) {
     locals = 0;
     scope_depth = 0;
@@ -1855,6 +1901,7 @@ static Member *parse_field_list(Token **rest, Token *tok, int base_offset, int *
         tok = skip(tok->next, TK_COLON);
         Type *mty = parse_type(&tok, tok);
         mty = parse_type_suffix(&tok, tok, mty);
+        if (is_noreturn_ty(mty)) error("noreturn cannot be a field type");
         m->offset = offset;
         m->ty = mty;
         {
@@ -1999,6 +2046,7 @@ static void parse_program(Token *tok) {
             tok = skip(tok, TK_COLON);
             Type *ty = parse_type(&tok, tok);
             ty = parse_type_suffix(&tok, tok, ty);
+            if (is_noreturn_ty(ty)) error("noreturn is only valid as a function return type");
             if (equal(tok, TK_COMMA))
                 error("only one variable per declaration");
             Obj *o = new_obj(name, 0);
@@ -2007,6 +2055,16 @@ static void parse_program(Token *tok) {
         }
     }
     functions = fn_head;
+}
+
+static void check_noreturn_functions(void) {
+    for (Function *fn = functions; fn; fn = fn->next) {
+        if (!is_noreturn_ty(fn->return_ty)) continue;
+        current_return_ty = fn->return_ty;
+        if (!stmt_diverges(fn->body))
+            error("noreturn function may return");
+    }
+    current_return_ty = 0;
 }
 
 /* ---------- codegen ---------- */
@@ -2592,9 +2650,12 @@ int main(int argc, char **argv) {
     ty_i8->size = 1;
     ty_bool = newtype(TY_BOOL);
     ty_bool->size = 1;
+    ty_noreturn = newtype(TY_NORETURN);
+    ty_noreturn->size = 0;
     source = read_file(argv[1]);
     token = tokenize(source);
     parse_program(token);
+    check_noreturn_functions();
     codegen();
     return 0;
 }
