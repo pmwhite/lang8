@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Build, test, and self-host the L8 compiler. Prints per-step timings.
+# Build, test, self-host, and promote L8 bootstrap snapshots.
+# See BOOTSTRAP.md for the two-stage source model.
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-CC="${CC:-gcc}"
-CFLAGS="${CFLAGS:--Wall -Wextra -std=c11 -O2}"
 BUILD="${BUILD:-.build}"
+FORCE=0
 
 declare -a STEP_NAMES=()
 declare -a STEP_MS=()
@@ -15,7 +15,6 @@ now_ms() {
   echo $(( $(date +%s%N) / 1000000 ))
 }
 
-# Time a named step. Runs the remaining args as a command.
 step() {
   local name="$1"
   shift
@@ -54,17 +53,14 @@ ensure_build_dir() {
 }
 
 compile_l8() {
-  # compile_l8 <compiler> <src.l8> <out.s>
   "./$1" "$2" >"$3"
 }
 
 link_l8() {
-  # link_l8 <asm.s> <binary>
   gcc -nostdlib -static -o "$2" "$1" runtime.s
 }
 
 run_expect() {
-  # run_expect <binary> <expected-stdout>
   local got
   got="$("$1")"
   if [[ "$got" != "$2" ]]; then
@@ -72,14 +68,16 @@ run_expect() {
   fi
 }
 
-# Compile + link + run an example, checking stdout.
 example() {
   local compiler="$1" name="$2" src="$3" expected="$4"
   local asm="$BUILD/${name}.s" bin="$BUILD/${name}"
-
   compile_l8 "$compiler" "$src" "$asm"
   link_l8 "$asm" "$bin"
   run_expect "$bin" "$expected"
+}
+
+require_bootstrap_s() {
+  [[ -f bootstrap.s ]] || die "bootstrap.s missing (see BOOTSTRAP.md)"
 }
 
 do_clean() {
@@ -91,8 +89,8 @@ do_clean() {
 }
 
 do_bootstrap() {
-  # shellcheck disable=SC2086
-  step 'build bootstrap (l8c0)' $CC $CFLAGS -o l8c0 bootstrap.c
+  require_bootstrap_s
+  step 'link bootstrap (l8c0)' link_l8 bootstrap.s l8c0
 }
 
 do_examples() {
@@ -116,19 +114,22 @@ do_examples() {
   step 'example exc     [l8c0]' example l8c0 exc     examples/exc.l8     'Hi'
 }
 
+# Stage-1: bootstrap compiles compiler.l8
+# Stage-2: that compiler compiles compiler2.l8
+# Fixpoint: stage-2 compiler recompiles compiler2.l8
 do_selfhost() {
   ensure_build_dir
   [[ -x ./l8c0 ]] || do_bootstrap
+  [[ -f compiler2.l8 ]] || die "compiler2.l8 missing"
 
-  step 'stage1 compile (l8c0 → compiler.l8)' compile_l8 l8c0 compiler.l8 "$BUILD/l8c1.s"
-  step 'stage1 link    (l8c1)'              link_l8 "$BUILD/l8c1.s" l8c1
+  step 'stage1 compile (l8c0 → compiler.l8)'  compile_l8 l8c0 compiler.l8 "$BUILD/l8c1.s"
+  step 'stage1 link    (l8c1)'               link_l8 "$BUILD/l8c1.s" l8c1
 
-  step 'stage2 compile (l8c1 → compiler.l8)' compile_l8 l8c1 compiler.l8 "$BUILD/l8c2.s"
-  step 'stage2 link    (l8c2)'              link_l8 "$BUILD/l8c2.s" l8c2
+  step 'stage2 compile (l8c1 → compiler2.l8)' compile_l8 l8c1 compiler2.l8 "$BUILD/l8c2.s"
+  step 'stage2 link    (l8c2)'               link_l8 "$BUILD/l8c2.s" l8c2
 
-  step 'stage3 compile (l8c2 → compiler.l8)' compile_l8 l8c2 compiler.l8 "$BUILD/l8c3.s"
-
-  step 'verify stage2 == stage3'            diff -q "$BUILD/l8c2.s" "$BUILD/l8c3.s"
+  step 'stage3 compile (l8c2 → compiler2.l8)' compile_l8 l8c2 compiler2.l8 "$BUILD/l8c3.s"
+  step 'verify stage2 == stage3'             diff -q "$BUILD/l8c2.s" "$BUILD/l8c3.s"
 
   step 'example hello  [l8c2]'  example l8c2 hello  examples/hello.l8  'Hi'
   step 'example struct [l8c2]'  example l8c2 struct examples/struct.l8 '3 12 13'
@@ -145,6 +146,60 @@ do_selfhost() {
   step 'example exc     [l8c2]' example l8c2 exc     examples/exc.l8     'Hi'
 }
 
+confirm_promote() {
+  local what="$1"
+  if [[ "$FORCE" -eq 1 ]]; then
+    return 0
+  fi
+  echo "About to update $what in the working tree."
+  echo "Promotes are meant for an isolated commit — not every change."
+  read -r -p "Continue? [y/N] " ans
+  [[ "$ans" == "y" || "$ans" == "Y" ]] || die "aborted"
+}
+
+need_artifact() {
+  local path="$1" hint="$2"
+  if [[ ! -f "$path" ]]; then
+    if [[ "$FORCE" -eq 1 ]]; then
+      die "$path missing (cannot --force without building first)"
+    fi
+    die "$path missing; run: $hint"
+  fi
+}
+
+do_promote_asm1() {
+  need_artifact "$BUILD/l8c1.s" "./build.sh selfhost"
+  confirm_promote "bootstrap.s (from stage-1 / compiler.l8)"
+  cp "$BUILD/l8c1.s" bootstrap.s
+  echo "updated bootstrap.s from $BUILD/l8c1.s"
+  echo "Next: review diff, then commit only the snapshot (see BOOTSTRAP.md)."
+}
+
+do_promote_asm2() {
+  need_artifact "$BUILD/l8c2.s" "./build.sh selfhost"
+  confirm_promote "bootstrap.s (from stage-2 / compiler2.l8)"
+  cp "$BUILD/l8c2.s" bootstrap.s
+  echo "updated bootstrap.s from $BUILD/l8c2.s"
+  echo "Next: review diff, then commit only the snapshot (see BOOTSTRAP.md)."
+}
+
+do_promote_source() {
+  [[ -f compiler2.l8 ]] || die "compiler2.l8 missing"
+  confirm_promote "compiler.l8 (from compiler2.l8)"
+  cp compiler2.l8 compiler.l8
+  echo "updated compiler.l8 from compiler2.l8"
+  echo "Asm was not changed. Use promote-asm2 or promote if the bootstrap should move too."
+}
+
+do_promote() {
+  need_artifact "$BUILD/l8c2.s" "./build.sh selfhost"
+  confirm_promote "compiler.l8 and bootstrap.s (full stage-2 promote)"
+  cp compiler2.l8 compiler.l8
+  cp "$BUILD/l8c2.s" bootstrap.s
+  echo "updated compiler.l8 and bootstrap.s from stage-2"
+  echo "Next: review diff, then commit this promote alone."
+}
+
 do_all() {
   do_bootstrap
   do_examples
@@ -155,24 +210,51 @@ do_all() {
 
 usage() {
   cat <<'EOF'
-Usage: ./build.sh [command]
+Usage: ./build.sh [command] [--force]
 
 Commands:
-  all        Build bootstrap, run examples, self-host (default)
-  bootstrap  Build l8c0 only
-  examples   Run example programs via bootstrap
-  selfhost   Three-stage self-host + stage2 examples
-  clean      Remove build artifacts
-  help       Show this help
+  all             Link bootstrap.s, examples, two-stage self-host (default)
+  bootstrap       Link bootstrap.s + runtime.s → l8c0
+  examples        Run example programs via l8c0
+  selfhost        compiler.l8 → l8c1; compiler2.l8 → l8c2; fixpoint; examples
+  promote-asm1    Copy stage-1 asm → bootstrap.s (isolated snapshot commit)
+  promote-asm2    Copy stage-2 asm → bootstrap.s
+  promote-source  Copy compiler2.l8 → compiler.l8 (no asm change)
+  promote         promote-source + promote-asm2
+  clean           Remove build artifacts
+  help            Show this help
+
+--force   Skip the interactive promote confirmation (still requires artifacts).
+
+See BOOTSTRAP.md for the dual-source bootstrap model.
 EOF
 }
 
-cmd="${1:-all}"
+# Parse args: command plus optional --force anywhere
+cmd="all"
+args=()
+for a in "$@"; do
+  case "$a" in
+    --force) FORCE=1 ;;
+    *) args+=("$a") ;;
+  esac
+done
+if [[ ${#args[@]} -gt 0 ]]; then
+  cmd="${args[0]}"
+fi
+if [[ ${#args[@]} -gt 1 ]]; then
+  die "unexpected args (try ./build.sh help)"
+fi
+
 case "$cmd" in
   all)              do_all ;;
   bootstrap)        do_bootstrap; print_summary ;;
   examples)         do_examples; print_summary ;;
   selfhost)         do_selfhost; print_summary ;;
+  promote-asm1)     do_promote_asm1 ;;
+  promote-asm2)     do_promote_asm2 ;;
+  promote-source)   do_promote_source ;;
+  promote)          do_promote ;;
   clean)            do_clean ;;
   help|-h|--help)   usage ;;
   *)                die "unknown command: $cmd (try ./build.sh help)" ;;
