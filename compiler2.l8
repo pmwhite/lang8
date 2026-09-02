@@ -19,7 +19,7 @@ type Type =
 type Member = {
     name: *i8;
     offset: int;
-    ty: ?*Type;
+    ty: *Type;
     next: ?*Member;
 };
 
@@ -127,6 +127,7 @@ type Token = {
     val: int;
     str: *i8;
     len: int;
+    pos: int;
     next: *Token;
 };
 
@@ -219,17 +220,13 @@ type Obj = {
     scope_depth: int;
     ty: ?*Type;
     next: ?*Obj;
+    param_next: ?*Obj;
 };
 
 type Function = {
     name: *i8;
     nparams: int;
-    p0: ?*Obj;
-    p1: ?*Obj;
-    p2: ?*Obj;
-    p3: ?*Obj;
-    p4: ?*Obj;
-    p5: ?*Obj;
+    params: ?*Obj;
     locals: ?*Obj;
     body: ?*Stmt;
     stack_size: int;
@@ -285,7 +282,7 @@ catch_top: ?*CatchFrame;
 
 L8_JMP_BUF_SIZE: int;
 
-exception Error { msg: *i8 };
+exception Error { msg: *i8; pos: int; };
 
 streq_n(a: *i8, b: *i8, n: int): bool {
     i: int = 0;
@@ -366,7 +363,56 @@ emit_num(n: int) {
 }
 
 error(msg: *i8) raises Error: noreturn {
-    raise Error { msg: msg };
+    raise Error { msg: msg, pos: tok.pos };
+}
+
+print_error_at(pos: int, msg: *i8) {
+    line: int = 1;
+    col: int = 1;
+    i: int = 0;
+    while (i < pos && i < source_len) {
+        if (source[i] == '\n') {
+            line = line + 1;
+            col = 1;
+        } else { col = col + 1; }
+        i = i + 1;
+    }
+    write(2, "error: ", len("error: "));
+    emit_num_fd(2, line);
+    write(2, ":", len(":"));
+    emit_num_fd(2, col);
+    write(2, ": ", len(": "));
+    write(2, msg, len(msg));
+    write(2, "\n", len("\n"));
+}
+
+emit_num_fd(fd: int, n: int) {
+    buf: i8[32] = uninitialized;
+    neg: int = 0;
+    if (n < 0) {
+        neg = 1;
+        n = 0 - n;
+    }
+    if (n == 0) {
+        z: i8 = '0';
+        write(fd, &z, 1);
+        return;
+    }
+    i: int = 0;
+    while (n > 0) {
+        buf[i] = (('0' as int) + (n % 10)) trunc i8;
+        n = n / 10;
+        i = i + 1;
+    }
+    if (neg != 0) {
+        m: i8 = '-';
+        write(fd, &m, 1);
+    }
+    while (i > 0) {
+        i = i - 1;
+        ch: i8 = buf[i];
+        write(fd, &ch, 1);
+    }
 }
 
 token_eof: *Token;
@@ -377,6 +423,7 @@ init_dummies() {
         val: 0,
         str: "",
         len: 0,
+        pos: 0,
         next: uninitialized
     };
     token_eof.next = token_eof;
@@ -993,11 +1040,13 @@ decay(t: ?*Type) raises Error: ?*Type {
 }
 
 new_token(kind: TokKind, start: *i8, len: int): *Token {
+    p: int = start - source;
     return new Token {
         kind: kind,
         val: 0,
         str: start,
         len: len,
+        pos: p,
         next: token_eof
     };
 }
@@ -1114,6 +1163,7 @@ tokenize() raises Error: *Token {
         val: 0,
         str: "",
         len: 0,
+        pos: 0,
         next: token_eof
     };
     cur: *Token = head;
@@ -1398,7 +1448,8 @@ new_obj(name: *i8, is_local: int): *Obj {
         offset: 0,
         scope_depth: 0,
         ty: null,
-        next: null
+        next: null,
+        param_next: null
     };
     if (is_local != 0) {
         o.scope_depth = scope_depth;
@@ -1594,7 +1645,7 @@ parse_field_inits(members: ?*Member) raises Error: *FieldInit {
         skip(TokKind.Colon);
         m: ?*Member = find_field(members, fname);
         if (m == null) { error("unknown field"); }
-        mu: *Member = expect_member(m, "null member");
+        mu: *Member = m;
         i: ?*FieldInit = head;
         while (i != null) {
             if (i.member == mu) { error("duplicate field"); }
@@ -1657,7 +1708,7 @@ parse_primary() raises Error: *Expr {
             tok = tok.next;
             vo: ?*Variant = find_variant(type_enum_def(ety), vname);
             if (vo == null) { error("unknown variant"); }
-            v: *Variant = expect_variant(vo, "null variant");
+            v: *Variant = vo;
             args: ?*FieldInit = null;
             if (equal(TokKind.LBrace)) {
                 if (v.fields == null) { error("unit variant does not take fields"); }
@@ -1749,7 +1800,7 @@ parse_primary() raises Error: *Expr {
             tok = tok.next;
             vo: ?*Variant = find_variant(type_enum_def(ety), vname);
             if (vo == null) { error("unknown variant"); }
-            v: *Variant = expect_variant(vo, "null variant");
+            v: *Variant = vo;
             args: ?*FieldInit = null;
             if (equal(TokKind.LBrace)) {
                 if (v.fields == null) { error("unit variant does not take fields"); }
@@ -1785,7 +1836,7 @@ parse_primary() raises Error: *Expr {
         }
         varo: ?*Obj = find_var(name);
         if (varo == null) { error("undefined variable"); }
-        var: *Obj = expect_obj(varo, "null var");
+        var: *Obj = varo;
         return new_var_node(var);
     }
     error("expected expression");
@@ -1838,7 +1889,7 @@ parse_postfix() raises Error: *Expr {
                         m = find_exn_member(type_exn_def(sty), name);
                     } else { m = find_member(type_struct_def(sty), name); }
                     if (m == null) { error("unknown member"); }
-                    mu: *Member = expect_member(m, "null member");
+                    mu: *Member = m;
                     n = new_member_access(n, mu);
                 }
             } else {
@@ -2051,9 +2102,7 @@ add_type_expr(p: *Expr) raises Error {
         }
         MemberAccess { lhs, member } -> {
             add_type(lhs);
-            if (member.ty != null) {
-                p.ty = member.ty;
-            } else { p.ty = ty_int; }
+            p.ty = member.ty;
             return;
         }
         Funcall { funcname, args } -> {
@@ -2083,24 +2132,15 @@ add_type_expr(p: *Expr) raises Error {
             }
             if (fno != null) {
                 a = args;
-                ai: int = 0;
+                po: ?*Obj = fno.params;
                 while (a != null) {
-                    if (ai < fno.nparams) {
-                        po: ?*Obj = null;
-                        if (ai == 0) { po = fno.p0; }
-                        if (ai == 1) { po = fno.p1; }
-                        if (ai == 2) { po = fno.p2; }
-                        if (ai == 3) { po = fno.p3; }
-                        if (ai == 4) { po = fno.p4; }
-                        if (ai == 5) { po = fno.p5; }
-                        if (po != null) {
-                            if (po.ty != null) {
-                                pt: ?*Type = decay(po.ty);
-                                if (!assignable(pt, a)) { error("argument type mismatch"); }
-                            }
+                    if (po != null) {
+                        if (po.ty != null) {
+                            pt: ?*Type = decay(po.ty);
+                            if (!assignable(pt, a)) { error("argument type mismatch"); }
                         }
+                        po = po.param_next;
                     }
-                    ai = ai + 1;
                     a = a.next;
                 }
                 er: ?*ExnList = fno.raises_list;
@@ -2138,9 +2178,11 @@ add_type_stmt_node(p: *Stmt) raises Error {
             narrow_push_ne_nulls(cond);
             add_type_stmt(then);
             narrow_reset(save);
-            narrow_push_eq_nulls(cond);
-            add_type_stmt(els);
-            narrow_reset(save);
+            if (els != null) {
+                narrow_push_eq_nulls(cond);
+                add_type_stmt(els);
+                narrow_reset(save);
+            }
             return;
         }
         While { cond, body } -> {
@@ -2175,11 +2217,23 @@ add_type_stmt_node(p: *Stmt) raises Error {
             return;
         }
         Block { body } -> {
+            saved_b: ?*NarrowFrame = narrow_top;
             a: ?*Stmt = body;
             while (a != null) {
                 add_type_stmt(a);
+                match a.kind {
+                    If { cond, then, els } -> {
+                        if (els == null) {
+                            if (stmt_always_diverges(then)) {
+                                narrow_push_eq_nulls(cond);
+                            }
+                        }
+                    }
+                    _ -> {}
+                }
                 a = a.next;
             }
+            narrow_reset(saved_b);
             return;
         }
         Return { lhs } -> {
@@ -2363,7 +2417,7 @@ parse_stmt() raises Error: *Stmt {
         ename: *i8 = cur_tokstr();
         ed: ?*ExnDef = find_exn(ename);
         if (ed == null) { error("unknown exception"); }
-        edu: *ExnDef = expect_exn(ed, "unknown exception");
+        edu: *ExnDef = ed;
         tok = tok.next;
         rargs: ?*FieldInit = null;
         if (equal(TokKind.LBrace)) {
@@ -2386,7 +2440,7 @@ parse_stmt() raises Error: *Stmt {
             cname: *i8 = cur_tokstr();
             ced: ?*ExnDef = find_exn(cname);
             if (ced == null) { error("unknown exception"); }
-            cedu: *ExnDef = expect_exn(ced, "unknown exception");
+            cedu: *ExnDef = ced;
             tok = tok.next;
             a: ?*CatchArm = arms_h;
             while (a != null) {
@@ -2438,6 +2492,11 @@ parse_stmt() raises Error: *Stmt {
             narrow_push_eq_nulls(cond);
             els = parse_stmt();
             narrow_reset(save);
+        } else {
+            /* if (x == null) { return/error/...; } → x is non-null afterward */
+            if (stmt_parse_diverges(then)) {
+                narrow_push_eq_nulls(cond);
+            }
         }
         return new_if(cond, then, els);
     }
@@ -2512,7 +2571,7 @@ parse_stmt() raises Error: *Stmt {
             } else {
                 vo: ?*Variant = find_variant(type_enum_def(et), vname);
                 if (vo == null) { error("unknown variant"); }
-                v: *Variant = expect_variant(vo, "null variant");
+                v: *Variant = vo;
                 chk2: ?*MatchArm = arms;
                 while (chk2 != null) {
                     if (chk2.variant == v) { error("duplicate match arm"); }
@@ -2539,7 +2598,7 @@ parse_stmt() raises Error: *Stmt {
                                 x = x.next;
                             }
                             if (m == null) { error("unknown field in variant"); }
-                            mu: *Member = expect_member(m, "null member");
+                            mu: *Member = m;
                             o2: ?*Binder = arm_binders;
                             while (o2 != null) {
                                 if (o2 == b) {
@@ -2626,33 +2685,37 @@ parse_stmt() raises Error: *Stmt {
 }
 
 fn_param(fn: *Function, i: int): ?*Obj {
-    if (i == 0) { return fn.p0; }
-    if (i == 1) { return fn.p1; }
-    if (i == 2) { return fn.p2; }
-    if (i == 3) { return fn.p3; }
-    if (i == 4) { return fn.p4; }
-    return fn.p5;
+    p: ?*Obj = fn.params;
+    n: int = 0;
+    while (p != null) {
+        if (n == i) { return p; }
+        n = n + 1;
+        p = p.param_next;
+    }
+    return null;
 }
 
-set_fn_param(fn: *Function, i: int, p: *Obj) {
-    if (i == 0) { fn.p0 = p; }
-    if (i == 1) { fn.p1 = p; }
-    if (i == 2) { fn.p2 = p; }
-    if (i == 3) { fn.p3 = p; }
-    if (i == 4) { fn.p4 = p; }
-    if (i == 5) { fn.p5 = p; }
+append_fn_param(fn: *Function, p: *Obj) {
+    p.param_next = null;
+    if (fn.params == null) {
+        fn.params = p;
+        return;
+    }
+    cur: ?*Obj = fn.params;
+    while (cur != null) {
+        if (cur.param_next == null) {
+            cur.param_next = p;
+            return;
+        }
+        cur = cur.param_next;
+    }
 }
 
 parse_function(name: *i8) raises Error: *Function {
     fn: *Function = new Function {
         name: name,
         nparams: 0,
-        p0: null,
-        p1: null,
-        p2: null,
-        p3: null,
-        p4: null,
-        p5: null,
+        params: null,
         locals: null,
         body: null,
         stack_size: 0,
@@ -2672,7 +2735,7 @@ parse_function(name: *i8) raises Error: *Function {
         if (np != 0) { skip(TokKind.Comma); }
         if (np >= 6) { error("too many parameters"); }
         p: *Obj = parse_decl(1);
-        set_fn_param(fn, np, p);
+        append_fn_param(fn, p);
         np = np + 1;
     }
     fn.nparams = np;
@@ -2686,7 +2749,7 @@ parse_function(name: *i8) raises Error: *Function {
             ename: *i8 = cur_tokstr();
             ed: ?*ExnDef = find_exn(ename);
             if (ed == null) { error("unknown exception"); }
-            edu: *ExnDef = expect_exn(ed, "unknown exception");
+            edu: *ExnDef = ed;
             if (exn_in_list(fn.raises_list, edu)) { error("duplicate raises"); }
             el: *ExnList = new ExnList { exn: edu, seen: 0, next: null };
             if (rtail != null) {
@@ -2715,6 +2778,8 @@ parse_function(name: *i8) raises Error: *Function {
     }
     fn.body = parse_compound();
     fn.locals = locals;
+    narrow_top = null;
+    catch_top = null;
     current_fn = null;
     return fn;
 }
@@ -2912,6 +2977,102 @@ parse_program() raises Error {
     }
 }
 
+/* Assumes n is already typed. True if execution cannot fall through. */
+/* Syntactic divergence for parse-time early-exit narrowing (no full typing). */
+stmt_parse_diverges(n: *Stmt): bool {
+    match n.kind {
+        Return { lhs } -> { return true; }
+        Raise { exn, inits } -> { return true; }
+        ExprStmt { lhs } -> {
+            match lhs.kind {
+                Funcall { funcname, args } -> {
+                    if (streq(funcname, "exit")) { return true; }
+                    fno: ?*Function = find_function(funcname);
+                    if (fno != null) {
+                        if (is_noreturn_ty(fno.return_ty)) { return true; }
+                    }
+                    return false;
+                }
+                _ -> { return false; }
+            }
+        }
+        Block { body } -> {
+            s: ?*Stmt = body;
+            while (s != null) {
+                if (stmt_parse_diverges(s)) { return true; }
+                s = s.next;
+            }
+            return false;
+        }
+        If { cond, then, els } -> {
+            if (els != null) {
+                return stmt_parse_diverges(then) && stmt_parse_diverges(els);
+            }
+            return false;
+        }
+        Match { cond, arms } -> {
+            if (arms == null) { return false; }
+            arm: ?*MatchArm = arms;
+            while (arm != null) {
+                if (!stmt_parse_diverges(arm.body)) { return false; }
+                arm = arm.next;
+            }
+            return true;
+        }
+        Try { body, arms, buf } -> {
+            if (!stmt_parse_diverges(body)) { return false; }
+            arm2: ?*CatchArm = arms;
+            while (arm2 != null) {
+                if (!stmt_parse_diverges(arm2.body)) { return false; }
+                arm2 = arm2.next;
+            }
+            return true;
+        }
+        _ -> { return false; }
+    }
+}
+
+stmt_always_diverges(n: *Stmt): bool {
+    match n.kind {
+        Return { lhs } -> { return true; }
+        Raise { exn, inits } -> { return true; }
+        ExprStmt { lhs } -> { return is_noreturn_ty(lhs.ty); }
+        Block { body } -> {
+            s: ?*Stmt = body;
+            while (s != null) {
+                if (stmt_always_diverges(s)) { return true; }
+                s = s.next;
+            }
+            return false;
+        }
+        If { cond, then, els } -> {
+            if (els != null) {
+                return stmt_always_diverges(then) && stmt_always_diverges(els);
+            }
+            return false;
+        }
+        Match { cond, arms } -> {
+            if (arms == null) { return false; }
+            arm: ?*MatchArm = arms;
+            while (arm != null) {
+                if (!stmt_always_diverges(arm.body)) { return false; }
+                arm = arm.next;
+            }
+            return true;
+        }
+        Try { body, arms, buf } -> {
+            if (!stmt_always_diverges(body)) { return false; }
+            arm2: ?*CatchArm = arms;
+            while (arm2 != null) {
+                if (!stmt_always_diverges(arm2.body)) { return false; }
+                arm2 = arm2.next;
+            }
+            return true;
+        }
+        _ -> { return false; }
+    }
+}
+
 stmt_diverges(n: *Stmt) raises Error: bool {
     add_type_stmt(n);
     match n.kind {
@@ -3038,20 +3199,21 @@ store_value(ty: *Type) raises Error {
 /*
  * Object base in %rbx (absolute). Eval RHS first so a large aggregate stack
  * temp from gen_expr cannot bury a pushed destination address.
+ * base_off is added to each field offset (0 for structs, 8 for enum payloads).
  */
-gen_struct_inits(inits: ?*FieldInit) raises Error {
+gen_field_inits(inits: ?*FieldInit, base_off: int) raises Error {
     init: ?*FieldInit = inits;
     while (init != null) {
         lhs: ?*Expr = init.lhs;
         if (lhs != null) {
             mem: *Member = init.member;
-            mty: *Type = ty_int;
-            if (mem.ty != null) { mty = expect_type(mem.ty, "missing type"); }
+            mty: *Type = mem.ty;
             gen_expr(expect_expr(lhs, "missing lhs"));
             emit("  mov %rbx, %rdi\n");
-            if (mem.offset != 0) {
+            off: int = base_off + mem.offset;
+            if (off != 0) {
                 emit("  add $");
-                emit_num(mem.offset);
+                emit_num(off);
                 emit(", %rdi\n");
             }
             store_value(mty);
@@ -3060,24 +3222,8 @@ gen_struct_inits(inits: ?*FieldInit) raises Error {
     }
 }
 
-gen_variant_inits(inits: ?*FieldInit) raises Error {
-    init: ?*FieldInit = inits;
-    while (init != null) {
-        lhs: ?*Expr = init.lhs;
-        if (lhs != null) {
-            mem: *Member = init.member;
-            mty: *Type = ty_int;
-            if (mem.ty != null) { mty = expect_type(mem.ty, "missing type"); }
-            gen_expr(expect_expr(lhs, "missing lhs"));
-            emit("  mov %rbx, %rdi\n");
-            emit("  add $");
-            emit_num(enum_field_offset(mem));
-            emit(", %rdi\n");
-            store_value(mty);
-        }
-        init = init.next;
-    }
-}
+gen_struct_inits(inits: ?*FieldInit) raises Error { gen_field_inits(inits, 0); }
+gen_variant_inits(inits: ?*FieldInit) raises Error { gen_field_inits(inits, 8); }
 
 gen_addr(n: *Expr) raises Error {
     add_type(n);
@@ -3443,11 +3589,23 @@ gen_stmt(n: *Stmt) raises Error {
             return;
         }
         Block { body } -> {
+            saved_g: ?*NarrowFrame = narrow_top;
             s: ?*Stmt = body;
             while (s != null) {
                 gen_stmt(s);
+                match s.kind {
+                    If { cond, then, els } -> {
+                        if (els == null) {
+                            if (stmt_always_diverges(then)) {
+                                narrow_push_eq_nulls(cond);
+                            }
+                        }
+                    }
+                    _ -> {}
+                }
                 s = s.next;
             }
+            narrow_reset(saved_g);
             return;
         }
         If { cond, then, els } -> {
@@ -3522,8 +3680,7 @@ gen_stmt(n: *Stmt) raises Error {
                         emit("  add $");
                         emit_num(enum_field_offset(bm));
                         emit(", %rax\n");
-                        bty: *Type = ty_int;
-                        if (bm.ty != null) { bty = expect_type(bm.ty, "missing member type"); }
+                        bty: *Type = bm.ty;
                         load_mem(bty);
                         emit("  mov %rax, ");
                         emit_num((expect_obj(b.var, "missing bind var")).offset);
@@ -3702,6 +3859,8 @@ emit_text() raises Error {
     fn: ?*Function = functions;
     emit(".section .text\n");
     while (fn != null) {
+        narrow_top = null;
+        catch_top = null;
         assign_lvar_offsets(fn);
         current_fn_name = fn.name;
         current_return_ty = fn.return_ty;
@@ -3788,9 +3947,7 @@ main(argc: int, argv: **i8): int {
         codegen();
         return 0;
     } with Error(e) -> {
-        write(2, "error: ", len("error: "));
-        write(2, e.msg, len(e.msg));
-        write(2, "\n", len("\n"));
+        print_error_at(e.pos, e.msg);
         return 1;
     }
 }
