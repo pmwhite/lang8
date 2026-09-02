@@ -233,6 +233,7 @@ type Function = {
     return_ty: ?*Type;
     sret: ?*Obj;
     raises_list: ?*ExnList;
+    used: int;
     next: ?*Function;
 };
 
@@ -386,6 +387,12 @@ print_error_at(pos: int, msg: *i8) {
     write(2, "\n", len("\n"));
 }
 
+warn_unused_function(name: *i8) {
+    write(2, "warning: unused function ", len("warning: unused function "));
+    write(2, name, len(name));
+    write(2, "\n", len("\n"));
+}
+
 emit_num_fd(fd: int, n: int) {
     buf: i8[32] = uninitialized;
     neg: int = 0;
@@ -429,28 +436,8 @@ init_dummies() {
     token_eof.next = token_eof;
 }
 
-expect_expr(n: ?*Expr, msg: *i8) raises Error: *Expr {
-    if (n != null) { return n; }
-    error(msg);
-}
-
-expect_stmt(n: ?*Stmt, msg: *i8) raises Error: *Stmt {
-    if (n != null) { return n; }
-    error(msg);
-}
-
 expect_field_init(n: ?*FieldInit, msg: *i8) raises Error: *FieldInit {
     if (n != null) { return n; }
-    error(msg);
-}
-
-expect_binder(n: ?*Binder, msg: *i8) raises Error: *Binder {
-    if (n != null) { return n; }
-    error(msg);
-}
-
-expect_obj(o: ?*Obj, msg: *i8) raises Error: *Obj {
-    if (o != null) { return o; }
     error(msg);
 }
 
@@ -461,26 +448,6 @@ expect_type(t: ?*Type, msg: *i8) raises Error: *Type {
 
 expect_member(m: ?*Member, msg: *i8) raises Error: *Member {
     if (m != null) { return m; }
-    error(msg);
-}
-
-expect_exn(e: ?*ExnDef, msg: *i8) raises Error: *ExnDef {
-    if (e != null) { return e; }
-    error(msg);
-}
-
-expect_variant(v: ?*Variant, msg: *i8) raises Error: *Variant {
-    if (v != null) { return v; }
-    error(msg);
-}
-
-expect_function(f: ?*Function, msg: *i8) raises Error: *Function {
-    if (f != null) { return f; }
-    error(msg);
-}
-
-expect_str(s: ?*i8, msg: *i8) raises Error: *i8 {
-    if (s != null) { return s; }
     error(msg);
 }
 
@@ -2727,6 +2694,7 @@ parse_function(name: *i8) raises Error: *Function {
         return_ty: null,
         sret: null,
         raises_list: null,
+        used: 0,
         next: null
     };
     locals = null;
@@ -3132,6 +3100,144 @@ check_noreturn_functions() raises Error {
     }
     current_return_ty = null;
     current_fn = null;
+}
+
+mark_calls_field_inits(inits: ?*FieldInit) {
+    a: ?*FieldInit = inits;
+    while (a != null) {
+        mark_calls_expr(a.lhs);
+        a = a.next;
+    }
+}
+
+mark_calls_expr(n: ?*Expr) {
+    if (n == null) { return; }
+    match n.kind {
+        Num { val, str_label } -> { return; }
+        Null -> { return; }
+        Var { var, name, member } -> { return; }
+        Binary { op, lhs, rhs } -> {
+            mark_calls_expr(lhs);
+            mark_calls_expr(rhs);
+            return;
+        }
+        Assign { lhs, rhs } -> {
+            mark_calls_expr(lhs);
+            mark_calls_expr(rhs);
+            return;
+        }
+        Addr { lhs } -> { mark_calls_expr(lhs); return; }
+        Deref { lhs } -> { mark_calls_expr(lhs); return; }
+        Not { lhs } -> { mark_calls_expr(lhs); return; }
+        Neg { lhs } -> { mark_calls_expr(lhs); return; }
+        LogAnd { lhs, rhs } -> {
+            mark_calls_expr(lhs);
+            mark_calls_expr(rhs);
+            return;
+        }
+        LogOr { lhs, rhs } -> {
+            mark_calls_expr(lhs);
+            mark_calls_expr(rhs);
+            return;
+        }
+        Funcall { funcname, args } -> {
+            callee: ?*Function = find_function(funcname);
+            if (callee != null) { mark_reachable(callee); }
+            a: ?*Expr = args;
+            while (a != null) {
+                mark_calls_expr(a);
+                a = a.next;
+            }
+            return;
+        }
+        MemberAccess { lhs, member } -> { mark_calls_expr(lhs); return; }
+        As { lhs } -> { mark_calls_expr(lhs); return; }
+        Trunc { lhs } -> { mark_calls_expr(lhs); return; }
+        New { lhs, val, inits, variant } -> {
+            mark_calls_expr(lhs);
+            mark_calls_field_inits(inits);
+            return;
+        }
+        StructLit { inits } -> {
+            mark_calls_field_inits(inits);
+            return;
+        }
+        VariantLit { variant, val, inits } -> {
+            mark_calls_field_inits(inits);
+            return;
+        }
+    }
+}
+
+mark_calls_stmt(n: ?*Stmt) {
+    if (n == null) { return; }
+    match n.kind {
+        Return { lhs } -> { mark_calls_expr(lhs); return; }
+        ExprStmt { lhs } -> { mark_calls_expr(lhs); return; }
+        Block { body } -> {
+            s: ?*Stmt = body;
+            while (s != null) {
+                mark_calls_stmt(s);
+                s = s.next;
+            }
+            return;
+        }
+        If { cond, then, els } -> {
+            mark_calls_expr(cond);
+            mark_calls_stmt(then);
+            mark_calls_stmt(els);
+            return;
+        }
+        While { cond, body } -> {
+            mark_calls_expr(cond);
+            mark_calls_stmt(body);
+            return;
+        }
+        Match { cond, arms } -> {
+            mark_calls_expr(cond);
+            arm: ?*MatchArm = arms;
+            while (arm != null) {
+                mark_calls_stmt(arm.body);
+                arm = arm.next;
+            }
+            return;
+        }
+        Raise { exn, inits } -> {
+            mark_calls_field_inits(inits);
+            return;
+        }
+        Try { body, arms, buf } -> {
+            mark_calls_stmt(body);
+            arm2: ?*CatchArm = arms;
+            while (arm2 != null) {
+                mark_calls_stmt(arm2.body);
+                arm2 = arm2.next;
+            }
+            return;
+        }
+    }
+}
+
+mark_reachable(fn: *Function) {
+    if (fn.used != 0) { return; }
+    fn.used = 1;
+    mark_calls_stmt(fn.body);
+}
+
+check_unused_functions() {
+    fn: ?*Function = functions;
+    while (fn != null) {
+        fn.used = 0;
+        fn = fn.next;
+    }
+    main_fn: ?*Function = find_function("main");
+    if (main_fn == null) { return; }
+    mark_reachable(main_fn);
+    fn = functions;
+    while (fn != null) {
+        if (fn.used == 0) { warn_unused_function(fn.name); }
+        fn = fn.next;
+    }
 }
 
 check_raises_functions() raises Error {
@@ -3962,6 +4068,7 @@ main(argc: int, argv: **i8): int {
         source = read_file(path);
         tok = tokenize();
         parse_program();
+        check_unused_functions();
         check_raises_functions();
         check_noreturn_functions();
         codegen();
