@@ -2,6 +2,7 @@
 // Nominal AST; Type is a sum; Expr/Stmt are typed envelopes.
 // Heap ADTs via new; aggregates by sret; *T vs ?*T with flow narrowing.
 // noreturn return type; checked exceptions (exception/raises/raise/try/with).
+// Pipeline: parse → typecheck → unused/raises/noreturn checks → codegen.
 // This compiler reports failures via `exception Error` (caught in main).
 
 type Type =
@@ -1616,14 +1617,6 @@ narrow_push(var: ?*Obj, ty: ?*Type) {
 
 narrow_reset(saved: ?*NarrowFrame) { narrow_top = saved; }
 
-narrow_from_cond(cond: ?*Expr, for_else: int) raises Error: ?*NarrowFrame {
-    saved: ?*NarrowFrame = narrow_top;
-    if (for_else != 0) {
-        narrow_push_eq_nulls(cond);
-    } else { narrow_push_ne_nulls(cond); }
-    return saved;
-}
-
 opt_local_var(n: ?*Expr) raises Error: ?*Obj {
     if (n != null) {
         match n.kind {
@@ -1790,10 +1783,6 @@ parse_field_inits(members: ?*Member) raises Error: *FieldInit {
         } else {
             e: *Expr = parse_expr();
             lhs = e;
-            add_type(e);
-            if (!assignable(decay(mu.ty), e)) {
-                error_have_want("field initializer type mismatch", decay(e.ty), decay(mu.ty));
-            }
         }
         init: *FieldInit = new_field_init(mu, lhs);
         if (cur != null) {
@@ -1859,8 +1848,6 @@ parse_primary() raises Error: *Expr {
             tok = tok.next;
             len: *Expr = parse_expr();
             skip(TokKind.RBrack);
-            add_type(len);
-            if (!is_int_ty(decay(len.ty))) { error("array length must be int"); }
             if (is_pointer(base) || is_opt_pointer(base)) { error("new expects a non-pointer type"); }
             return new_heap_node(len, 1, null, null, ptr_to(base));
         }
@@ -2034,10 +2021,6 @@ parse_postfix() raises Error: *Expr {
                     tok = tok.next;
                     ty: *Type = parse_type();
                     ty = parse_type_suffix(ty);
-                    add_type(n);
-                    if (is_trunc) {
-                        check_trunc(n.ty, ty);
-                    } else { check_as(n.ty, ty); }
                     if (is_trunc) {
                         n = new_trunc(n, ty);
                     } else { n = new_as(n, ty); }
@@ -2080,6 +2063,11 @@ add_type_field_inits(inits: ?*FieldInit) raises Error {
     a: ?*FieldInit = inits;
     while (a != null) {
         add_type(a.lhs);
+        if (a.lhs != null) {
+            if (!assignable(decay(a.member.ty), a.lhs)) {
+                error_have_expr_want("field initializer type mismatch", a.lhs, decay(a.member.ty));
+            }
+        }
         a = a.next;
     }
 }
@@ -2179,6 +2167,43 @@ add_type_expr(p: *Expr) raises Error {
             p.ty = var_view_ty(var);
             return;
         }
+        As { lhs } -> {
+            add_type(lhs);
+            check_as(lhs.ty, p.ty);
+            return;
+        }
+        Trunc { lhs } -> {
+            add_type(lhs);
+            check_trunc(lhs.ty, p.ty);
+            return;
+        }
+        New { lhs, val, inits, variant } -> {
+            add_type(lhs);
+            if (lhs != null) {
+                if (!is_int_ty(decay(lhs.ty))) {
+                    error_ty("array length must be int", decay(lhs.ty));
+                }
+            }
+            add_type_field_inits(inits);
+            return;
+        }
+        StructLit { inits } -> {
+            add_type_field_inits(inits);
+            return;
+        }
+        VariantLit { variant, val, inits } -> {
+            add_type_field_inits(inits);
+            return;
+        }
+        MemberAccess { lhs, member } -> {
+            add_type(lhs);
+            t0: ?*Type = decay(lhs.ty);
+            if (is_opt_pointer(t0)) {
+                error_ty("member access on optional pointer (use if (p != null) / while (p != null) to narrow)", t0);
+            }
+            p.ty = member.ty;
+            return;
+        }
         _ -> {}
     }
     if (p.ty != null) { return; }
@@ -2224,14 +2249,6 @@ add_type_expr(p: *Expr) raises Error {
             p.ty = storage;
             return;
         }
-        As { lhs } -> {
-            add_type(lhs);
-            return;
-        }
-        Trunc { lhs } -> {
-            add_type(lhs);
-            return;
-        }
         Addr { lhs } -> {
             add_type(lhs);
             if (is_array(lhs.ty)) {
@@ -2248,11 +2265,6 @@ add_type_expr(p: *Expr) raises Error {
             if (is_pointer(t)) {
                 p.ty = type_base(t);
             } else { error_ty("dereferencing non-pointer", t); }
-            return;
-        }
-        MemberAccess { lhs, member } -> {
-            add_type(lhs);
-            p.ty = member.ty;
             return;
         }
         Funcall { funcname, args } -> {
@@ -2301,19 +2313,6 @@ add_type_expr(p: *Expr) raises Error {
                     er = er.next;
                 }
             }
-            return;
-        }
-        New { lhs, val, inits, variant } -> {
-            add_type(lhs);
-            add_type_field_inits(inits);
-            return;
-        }
-        StructLit { inits } -> {
-            add_type_field_inits(inits);
-            return;
-        }
-        VariantLit { variant, val, inits } -> {
-            add_type_field_inits(inits);
             return;
         }
         _ -> {}
@@ -2369,7 +2368,6 @@ add_type_stmt_node(p: *Stmt) raises Error {
             return;
         }
         Block { body } -> {
-            saved_b: ?*NarrowFrame = narrow_top;
             a: ?*Stmt = body;
             while (a != null) {
                 add_type_stmt(a);
@@ -2385,7 +2383,6 @@ add_type_stmt_node(p: *Stmt) raises Error {
                 }
                 a = a.next;
             }
-            narrow_reset(saved_b);
             return;
         }
         Return { lhs } -> {
@@ -3231,60 +3228,19 @@ stmt_always_diverges(n: *Stmt): bool {
     }
 }
 
-stmt_diverges(n: *Stmt) raises Error: bool {
-    add_type_stmt(n);
-    match n.kind {
-        Return { lhs } -> { return true; }
-        Raise { exn, inits } -> { return true; }
-        ExprStmt { lhs } -> { return is_noreturn_ty(lhs.ty); }
-        Block { body } -> {
-            s: ?*Stmt = body;
-            while (s != null) {
-                if (stmt_diverges(s)) { return true; }
-                s = s.next;
-            }
-            return false;
-        }
-        If { cond, then, els } -> {
-            if (!stmt_diverges(then)) { return false; }
-            if (els == null) { return false; }
-            return stmt_diverges(els);
-        }
-        Match { cond, arms } -> {
-            if (arms == null) { return false; }
-            arm: ?*MatchArm = arms;
-            while (arm != null) {
-                if (!stmt_diverges(arm.body)) { return false; }
-                arm = arm.next;
-            }
-            return true;
-        }
-        Try { body, arms, buf } -> {
-            if (!stmt_diverges(body)) { return false; }
-            arm2: ?*CatchArm = arms;
-            while (arm2 != null) {
-                if (!stmt_diverges(arm2.body)) { return false; }
-                arm2 = arm2.next;
-            }
-            return true;
-        }
-        _ -> { return false; }
-    }
+stmt_diverges(n: *Stmt): bool {
+    return stmt_always_diverges(n);
 }
 
 check_noreturn_functions() raises Error {
     fn: ?*Function = functions;
     while (fn != null) {
         if (is_noreturn_ty(fn.return_ty)) {
-            current_return_ty = fn.return_ty;
-            current_fn = fn;
             body: ?*Stmt = fn.body;
             if (body == null || !stmt_diverges(body)) { error("noreturn function may return"); }
         }
         fn = fn.next;
     }
-    current_return_ty = null;
-    current_fn = null;
 }
 
 mark_calls_field_inits(inits: ?*FieldInit) {
@@ -3425,21 +3381,32 @@ check_unused_functions() {
     }
 }
 
+typecheck_program() raises Error {
+    fn: ?*Function = functions;
+    while (fn != null) {
+        e: ?*ExnList = fn.raises_list;
+        while (e != null) {
+            e.seen = 0;
+            e = e.next;
+        }
+        current_fn = fn;
+        current_return_ty = fn.return_ty;
+        catch_top = null;
+        narrow_top = null;
+        add_type_stmt(fn.body);
+        fn = fn.next;
+    }
+    current_fn = null;
+    current_return_ty = null;
+    catch_top = null;
+    narrow_top = null;
+}
+
 check_raises_functions() raises Error {
     fn: ?*Function = functions;
     while (fn != null) {
         if (fn.raises_list != null) {
             e: ?*ExnList = fn.raises_list;
-            while (e != null) {
-                e.seen = 0;
-                e = e.next;
-            }
-            current_fn = fn;
-            current_return_ty = fn.return_ty;
-            catch_top = null;
-            narrow_top = null;
-            add_type_stmt(fn.body);
-            e = fn.raises_list;
             while (e != null) {
                 if (e.seen == 0) { error("raises lists an exception that is never raised"); }
                 e = e.next;
@@ -3447,8 +3414,6 @@ check_raises_functions() raises Error {
         }
         fn = fn.next;
     }
-    current_return_ty = null;
-    current_fn = null;
 }
 
 new_label(): int {
@@ -3523,7 +3488,6 @@ gen_struct_inits(inits: ?*FieldInit) raises Error { gen_field_inits(inits, 0); }
 gen_variant_inits(inits: ?*FieldInit) raises Error { gen_field_inits(inits, 8); }
 
 gen_addr(n: *Expr) raises Error {
-    add_type(n);
     match n.kind {
         Var { var, name, member } -> {
             if (var == null) { error("missing var"); }
@@ -3544,7 +3508,6 @@ gen_addr(n: *Expr) raises Error {
             return;
         }
         MemberAccess { lhs, member } -> {
-            add_type(lhs);
             t: ?*Type = decay(lhs.ty);
             if (is_pointer(t) && (is_struct_ty(type_base(t)) || is_exn_ty(type_base(t)))) {
                 gen_expr(lhs);
@@ -3612,7 +3575,6 @@ gen_binary(op: BinOp, lhs: *Expr, rhs: *Expr) raises Error {
 }
 
 gen_expr(n: *Expr) raises Error {
-    add_type(n);
     match n.kind {
         Num { val, str_label } -> {
             if (str_label != 0) {
@@ -3729,7 +3691,6 @@ gen_expr(n: *Expr) raises Error {
             return;
         }
         Assign { lhs, rhs } -> {
-            add_type(lhs);
             match rhs.kind {
                 StructLit { inits } -> {
                     if (is_struct_ty(lhs.ty)) {
@@ -3864,7 +3825,6 @@ gen_expr(n: *Expr) raises Error {
 }
 
 gen_stmt(n: *Stmt) raises Error {
-    add_type_stmt(n);
     match n.kind {
         Return { lhs } -> {
             if (lhs != null) {
@@ -3891,23 +3851,11 @@ gen_stmt(n: *Stmt) raises Error {
             return;
         }
         Block { body } -> {
-            saved_g: ?*NarrowFrame = narrow_top;
             s: ?*Stmt = body;
             while (s != null) {
                 gen_stmt(s);
-                match s.kind {
-                    If { cond, then, els } -> {
-                        if (els == null) {
-                            if (stmt_always_diverges(then)) {
-                                narrow_push_eq_nulls(cond);
-                            }
-                        }
-                    }
-                    _ -> {}
-                }
                 s = s.next;
             }
-            narrow_reset(saved_g);
             return;
         }
         If { cond, then, els } -> {
@@ -3915,15 +3863,11 @@ gen_stmt(n: *Stmt) raises Error {
             gen_expr(cond);
             emit("  cmp $0, %rax\n");
             emit("  je .L.else"); emit_num(l); emit("\n");
-            nd1: ?*NarrowFrame = narrow_from_cond(cond, 0);
             gen_stmt(then);
-            narrow_reset(nd1);
             emit("  jmp .L.end"); emit_num(l); emit("\n");
             emit(".L.else"); emit_num(l); emit(":\n");
             if (els != null) {
-                nd2: ?*NarrowFrame = narrow_from_cond(cond, 1);
                 gen_stmt(els);
-                narrow_reset(nd2);
             }
             emit(".L.end"); emit_num(l); emit(":\n");
             return;
@@ -3934,16 +3878,13 @@ gen_stmt(n: *Stmt) raises Error {
             gen_expr(cond);
             emit("  cmp $0, %rax\n");
             emit("  je .L.end"); emit_num(l2); emit("\n");
-            nd3: ?*NarrowFrame = narrow_from_cond(cond, 0);
             gen_stmt(body);
-            narrow_reset(nd3);
             emit("  jmp .L.begin"); emit_num(l2); emit("\n");
             emit(".L.end"); emit_num(l2); emit(":\n");
             return;
         }
         Match { cond, arms } -> {
             l3: int = new_label();
-            add_type(cond);
             match cond.kind {
                 Var { var, name, member } -> { gen_addr(cond); }
                 MemberAccess { lhs, member } -> { gen_addr(cond); }
@@ -4253,6 +4194,7 @@ main(argc: int, argv: **i8): int {
         source = read_file(path);
         tok = tokenize();
         parse_program();
+        typecheck_program();
         check_unused_functions();
         check_raises_functions();
         check_noreturn_functions();
