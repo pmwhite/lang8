@@ -393,6 +393,166 @@ warn_unused_function(name: *i8) {
     write(2, "\n", len("\n"));
 }
 
+type StrBuf = {
+    data: *i8;
+    len: int;
+    cap: int;
+};
+
+sb_new(): *StrBuf {
+    return new StrBuf {
+        data: new i8[64],
+        len: 0,
+        cap: 64
+    };
+}
+
+sb_grow(sb: *StrBuf, need: int) {
+    if (sb.len + need <= sb.cap) { return; }
+    ncap: int = sb.cap;
+    while (ncap < sb.len + need) {
+        ncap = ncap * 2;
+    }
+    nd: *i8 = new i8[ncap];
+    memcpy(nd, sb.data, sb.len);
+    sb.data = nd;
+    sb.cap = ncap;
+}
+
+sb_putc(sb: *StrBuf, c: i8) {
+    sb_grow(sb, 1);
+    sb.data[sb.len] = c;
+    sb.len = sb.len + 1;
+}
+
+sb_puts(sb: *StrBuf, s: *i8) {
+    n: int = len(s);
+    sb_grow(sb, n);
+    memcpy(sb.data + sb.len, s, n);
+    sb.len = sb.len + n;
+}
+
+sb_put_num(sb: *StrBuf, n: int) {
+    if (n < 0) {
+        sb_putc(sb, '-');
+        n = 0 - n;
+    }
+    if (n == 0) {
+        sb_putc(sb, '0');
+        return;
+    }
+    buf: i8[32] = uninitialized;
+    i: int = 0;
+    while (n > 0) {
+        buf[i] = (('0' as int) + (n % 10)) trunc i8;
+        n = n / 10;
+        i = i + 1;
+    }
+    while (i > 0) {
+        i = i - 1;
+        sb_putc(sb, buf[i]);
+    }
+}
+
+sb_finish(sb: *StrBuf): *i8 { return strdup_n(sb.data, sb.len); }
+
+append_type(sb: *StrBuf, t: ?*Type) raises Error {
+    if (t == null) {
+        sb_puts(sb, "<unknown>");
+        return;
+    }
+    match t.* {
+        Int -> { sb_puts(sb, "int"); return; }
+        I8 -> { sb_puts(sb, "i8"); return; }
+        Bool -> { sb_puts(sb, "bool"); return; }
+        Noreturn -> { sb_puts(sb, "noreturn"); return; }
+        Ptr { base } -> {
+            sb_putc(sb, '*');
+            append_type(sb, base);
+            return;
+        }
+        OptPtr { base } -> {
+            sb_puts(sb, "?*");
+            append_type(sb, base);
+            return;
+        }
+        Array { base, len } -> {
+            append_type(sb, base);
+            sb_putc(sb, '[');
+            sb_put_num(sb, len);
+            sb_putc(sb, ']');
+            return;
+        }
+        Record { def } -> { sb_puts(sb, def.name); return; }
+        Enum { def } -> { sb_puts(sb, def.name); return; }
+        Exn { def } -> { sb_puts(sb, def.name); return; }
+    }
+}
+
+error_ty(msg: *i8, t: ?*Type) raises Error: noreturn {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, msg);
+    sb_puts(sb, ": ");
+    append_type(sb, t);
+    error(sb_finish(sb));
+}
+
+error_ty_vs(msg: *i8, a: ?*Type, b: ?*Type) raises Error: noreturn {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, msg);
+    sb_puts(sb, ": ");
+    append_type(sb, a);
+    sb_puts(sb, " vs ");
+    append_type(sb, b);
+    error(sb_finish(sb));
+}
+
+error_have_want(msg: *i8, have: ?*Type, want: ?*Type) raises Error: noreturn {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, msg);
+    sb_puts(sb, ": have ");
+    append_type(sb, have);
+    sb_puts(sb, ", want ");
+    append_type(sb, want);
+    error(sb_finish(sb));
+}
+
+error_have_and(msg: *i8, a: ?*Type, b: ?*Type) raises Error: noreturn {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, msg);
+    sb_puts(sb, ": have ");
+    append_type(sb, a);
+    sb_puts(sb, " and ");
+    append_type(sb, b);
+    error(sb_finish(sb));
+}
+
+append_expr_ty(sb: *StrBuf, e: ?*Expr) raises Error {
+    if (e == null) {
+        append_type(sb, null);
+        return;
+    }
+    if (e.ty != null) {
+        append_type(sb, decay(e.ty));
+        return;
+    }
+    if (is_null_expr(e)) {
+        sb_puts(sb, "null");
+        return;
+    }
+    append_type(sb, null);
+}
+
+error_have_expr_want(msg: *i8, have: ?*Expr, want: ?*Type) raises Error: noreturn {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, msg);
+    sb_puts(sb, ": have ");
+    append_expr_ty(sb, have);
+    sb_puts(sb, ", want ");
+    append_type(sb, want);
+    error(sb_finish(sb));
+}
+
 emit_num_fd(fd: int, n: int) {
     buf: i8[32] = uninitialized;
     neg: int = 0;
@@ -991,18 +1151,20 @@ check_as(from: ?*Type, to: ?*Type) raises Error {
     if (is_numeric_ty(from) && is_numeric_ty(to)) {
         if ((is_i8_ty(from) || is_bool_ty(from)) && is_int_ty(to)) { return; }
         if (type_size(from) == 1 && type_size(to) == 1) { return; }
-        error("invalid as conversion (use trunc to narrow int→i8/bool)");
+        error_have_want("invalid as conversion (use trunc to narrow int→i8/bool)", from, to);
     }
-    if (is_opt_pointer(from) && is_pointer(to)) { error("cannot cast ?*T to *T (bind a local and use if (p != null))"); }
+    if (is_opt_pointer(from) && is_pointer(to)) {
+        error_have_want("cannot cast optional pointer to non-optional (bind a local and use if (p != null))", from, to);
+    }
     if (is_pointer(from) && is_pointer(to)) { return; }
-    error("invalid as conversion");
+    error_have_want("invalid as conversion", from, to);
 }
 
 check_trunc(from: ?*Type, to: ?*Type) raises Error {
     from = decay(from);
     to = decay(to);
     if (is_int_ty(from) && (is_i8_ty(to) || is_bool_ty(to))) { return; }
-    error("invalid trunc conversion");
+    error_have_want("invalid trunc conversion", from, to);
 }
 
 decay(t: ?*Type) raises Error: ?*Type {
@@ -1626,9 +1788,12 @@ parse_field_inits(members: ?*Member) raises Error: *FieldInit {
         if (equal(TokKind.Uninitialized)) {
             tok = tok.next;
         } else {
-            lhs = parse_expr();
-            add_type(lhs);
-            if (!assignable(decay(mu.ty), lhs)) { error("field initializer type mismatch"); }
+            e: *Expr = parse_expr();
+            lhs = e;
+            add_type(e);
+            if (!assignable(decay(mu.ty), e)) {
+                error_have_want("field initializer type mismatch", decay(e.ty), decay(mu.ty));
+            }
         }
         init: *FieldInit = new_field_init(mu, lhs);
         if (cur != null) {
@@ -1825,7 +1990,7 @@ parse_postfix() raises Error: *Expr {
             add_type(idx);
             if (!is_int_ty(decay(idx.ty))) { error("array index must be int"); }
             t: ?*Type = decay(n.ty);
-            if (!is_pointer(t)) { error("subscript of non-pointer"); }
+            if (!is_pointer(t)) { error_ty("subscript of non-pointer", t); }
             scaled: *Expr = new_binary(BinOp.Mul, idx, new_num(type_size(type_base(t))));
             n = new_deref(new_binary(BinOp.Add, n, scaled));
             n.ty = type_base(t);
@@ -1844,7 +2009,7 @@ parse_postfix() raises Error: *Expr {
                     t: ?*Type = decay(n.ty);
                     sty: *Type = expect_type(n.ty, "missing type");
                     if (is_opt_pointer(t)) {
-                        error("member access on optional pointer (use if (p != null) / while (p != null) to narrow)");
+                        error_ty("member access on optional pointer (use if (p != null) / while (p != null) to narrow)", t);
                     }
                     if (is_pointer(t) && is_struct_ty(type_base(t))) {
                         sty = type_base(t);
@@ -1852,7 +2017,7 @@ parse_postfix() raises Error: *Expr {
                         if (is_pointer(t) && is_exn_ty(type_base(t))) {
                             sty = type_base(t);
                         } else {
-                            if (!is_struct_ty(n.ty) && !is_exn_ty(n.ty)) { error("member access on non-struct"); }
+                            if (!is_struct_ty(n.ty) && !is_exn_ty(n.ty)) { error_ty("member access on non-struct", n.ty); }
                         }
                     }
                     m: ?*Member = null;
@@ -1927,14 +2092,18 @@ type_log(p: *Expr, lhs: *Expr, rhs: *Expr, and_op: int) raises Error {
     } else { narrow_push_eq_nulls(lhs); }
     add_type(rhs);
     narrow_reset(save);
-    if (!is_bool_ty(decay(lhs.ty)) || !is_bool_ty(decay(rhs.ty))) { error("&& / || require bool operands"); }
+    if (!is_bool_ty(decay(lhs.ty)) || !is_bool_ty(decay(rhs.ty))) {
+        error_have_and("&& / || require bool operands", decay(lhs.ty), decay(rhs.ty));
+    }
     p.ty = ty_bool;
 }
 
 type_int_arith(p: *Expr, lhs: *Expr, rhs: *Expr) raises Error {
     add_type(lhs);
     add_type(rhs);
-    if (!is_int_ty(decay(lhs.ty)) || !is_int_ty(decay(rhs.ty))) { error("arithmetic requires int operands"); }
+    if (!is_int_ty(decay(lhs.ty)) || !is_int_ty(decay(rhs.ty))) {
+        error_have_and("arithmetic requires int operands", decay(lhs.ty), decay(rhs.ty));
+    }
     p.ty = ty_int;
 }
 
@@ -1946,7 +2115,7 @@ type_eq_cmp(p: *Expr, lhs: *Expr, rhs: *Expr) raises Error {
     if (!types_equal(lt, rt)) {
         if (!(bind_null_to_pointer(lt, rhs) || bind_null_to_pointer(rt, lhs))) {
             if (!(is_any_pointer(lt) && is_any_pointer(rt) && types_equal(type_base(lt), type_base(rt)))) {
-                error("comparison type mismatch");
+                error_ty_vs("comparison type mismatch", lt, rt);
             }
         }
     }
@@ -1956,7 +2125,9 @@ type_eq_cmp(p: *Expr, lhs: *Expr, rhs: *Expr) raises Error {
 type_ord_cmp(p: *Expr, lhs: *Expr, rhs: *Expr) raises Error {
     add_type(lhs);
     add_type(rhs);
-    if (!types_equal(decay(lhs.ty), decay(rhs.ty))) { error("comparison type mismatch"); }
+    if (!types_equal(decay(lhs.ty), decay(rhs.ty))) {
+        error_ty_vs("comparison type mismatch", decay(lhs.ty), decay(rhs.ty));
+    }
     p.ty = ty_bool;
 }
 
@@ -1969,7 +2140,9 @@ type_binary(p: *Expr, op: BinOp, lhs: *Expr, rhs: *Expr) raises Error {
             rt: ?*Type = decay(rhs.ty);
             if (is_pointer(lt) && is_int_ty(rt)) { p.ty = lt; return; }
             if (is_int_ty(lt) && is_pointer(rt)) { p.ty = rt; return; }
-            if (!is_int_ty(lt) || !is_int_ty(rt)) { error("arithmetic requires int operands"); }
+            if (!is_int_ty(lt) || !is_int_ty(rt)) {
+                error_have_and("arithmetic requires int operands", lt, rt);
+            }
             p.ty = ty_int;
             return;
         }
@@ -1982,7 +2155,9 @@ type_binary(p: *Expr, op: BinOp, lhs: *Expr, rhs: *Expr) raises Error {
             if (is_pointer(lt) && is_pointer(rt)) {
                 if (types_equal(lt, rt)) { p.ty = ty_int; return; }
             }
-            if (!is_int_ty(lt) || !is_int_ty(rt)) { error("arithmetic requires int operands"); }
+            if (!is_int_ty(lt) || !is_int_ty(rt)) {
+                error_have_and("arithmetic requires int operands", lt, rt);
+            }
             p.ty = ty_int;
             return;
         }
@@ -2018,13 +2193,13 @@ add_type_expr(p: *Expr) raises Error {
         Binary { op, lhs, rhs } -> { type_binary(p, op, lhs, rhs); return; }
         Not { lhs } -> {
             add_type(lhs);
-            if (!is_bool_ty(decay(lhs.ty))) { error("! requires bool"); }
+            if (!is_bool_ty(decay(lhs.ty))) { error_ty("! requires bool", decay(lhs.ty)); }
             p.ty = ty_bool;
             return;
         }
         Neg { lhs } -> {
             add_type(lhs);
-            if (!is_int_ty(decay(lhs.ty))) { error("unary - requires int"); }
+            if (!is_int_ty(decay(lhs.ty))) { error_ty("unary - requires int", decay(lhs.ty)); }
             p.ty = ty_int;
             return;
         }
@@ -2043,7 +2218,9 @@ add_type_expr(p: *Expr) raises Error {
                 _ -> { lt = decay(lhs.ty); }
             }
             if (is_array(storage)) { error("cannot assign to array"); }
-            if (!assignable(lt, rhs)) { error("assignment type mismatch"); }
+            if (!assignable(lt, rhs)) {
+                error_have_expr_want("assignment type mismatch", rhs, lt);
+            }
             p.ty = storage;
             return;
         }
@@ -2065,10 +2242,12 @@ add_type_expr(p: *Expr) raises Error {
         Deref { lhs } -> {
             add_type(lhs);
             t: ?*Type = decay(lhs.ty);
-            if (is_opt_pointer(t)) { error("dereferencing optional pointer (use if (p != null) / while (p != null) to narrow)"); }
+            if (is_opt_pointer(t)) {
+                error_ty("dereferencing optional pointer (use if (p != null) / while (p != null) to narrow)", t);
+            }
             if (is_pointer(t)) {
                 p.ty = type_base(t);
-            } else { error("dereferencing non-pointer"); }
+            } else { error_ty("dereferencing non-pointer", t); }
             return;
         }
         MemberAccess { lhs, member } -> {
@@ -2108,7 +2287,9 @@ add_type_expr(p: *Expr) raises Error {
                     if (po != null) {
                         if (po.ty != null) {
                             pt: ?*Type = decay(po.ty);
-                            if (!assignable(pt, a)) { error("argument type mismatch"); }
+                            if (!assignable(pt, a)) {
+                                error_have_expr_want("argument type mismatch", a, pt);
+                            }
                         }
                         po = po.param_next;
                     }
@@ -2144,7 +2325,7 @@ add_type_stmt_node(p: *Stmt) raises Error {
         If { cond, then, els } -> {
             add_type(cond);
             ct: ?*Type = decay(cond.ty);
-            if (ct == null || !is_bool_ty(ct)) { error("condition must be bool"); }
+            if (ct == null || !is_bool_ty(ct)) { error_ty("condition must be bool", ct); }
             save: ?*NarrowFrame = narrow_top;
             narrow_push_ne_nulls(cond);
             add_type_stmt(then);
@@ -2159,7 +2340,7 @@ add_type_stmt_node(p: *Stmt) raises Error {
         While { cond, body } -> {
             add_type(cond);
             ct2: ?*Type = decay(cond.ty);
-            if (ct2 == null || !is_bool_ty(ct2)) { error("condition must be bool"); }
+            if (ct2 == null || !is_bool_ty(ct2)) { error_ty("condition must be bool", ct2); }
             save2: ?*NarrowFrame = narrow_top;
             narrow_push_ne_nulls(cond);
             add_type_stmt(body);
@@ -2213,9 +2394,13 @@ add_type_stmt_node(p: *Stmt) raises Error {
             if (lhs != null) {
                 if (current_return_ty == null) { error("return with a value in a non-returning function"); }
                 rt: ?*Type = decay(current_return_ty);
-                if (!assignable(rt, lhs)) { error("return type mismatch"); }
+                if (!assignable(rt, lhs)) {
+                    error_have_expr_want("return type mismatch", lhs, rt);
+                }
             } else {
-                if (current_return_ty != null) { error("return missing a value"); }
+                if (current_return_ty != null) {
+                    error_ty("return missing a value", current_return_ty);
+                }
             }
             return;
         }
@@ -2487,7 +2672,7 @@ parse_stmt() raises Error: *Stmt {
         mcond: *Expr = parse_expr();
         add_type(mcond);
         et: ?*Type = decay(mcond.ty);
-        if (!is_enum_ty(et)) { error("match requires an enum value"); }
+        if (!is_enum_ty(et)) { error_ty("match requires an enum value", et); }
         skip(TokKind.LBrace);
         arms: ?*MatchArm = null;
         acur: ?*MatchArm = null;
