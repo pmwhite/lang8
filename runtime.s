@@ -16,6 +16,7 @@
 .globl l8_raise
 .globl l8_exc_tag
 .globl l8_exc_ptr
+.globl rdtsc
 
 .section .bss
 .align 8
@@ -187,3 +188,11 @@ l8_raise:
     mov $1, %rdi
     mov $60, %rax
     syscall
+
+# int rdtsc(): invariant TSC in rax. Encoded with .byte so older assemblers can
+# parse this file.  rdtsc; shl $32, %rdx; or %rdx, %rax
+rdtsc:
+    .byte 15,49
+    .byte 72,193,226,32
+    .byte 72,9,208
+    ret
