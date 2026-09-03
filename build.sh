@@ -52,34 +52,6 @@ ensure_build_dir() {
   mkdir -p "$BUILD"
 }
 
-compile_l8() {
-  "./$1" compile "$2" >"$3"
-}
-
-# Assemble program + runtime into one .o (no undefs), then pack it as ET_EXEC.
-assemble_rt() {
-  local tool="$1" asm="$2" obj="$3"
-  "./$tool" as -o "$obj" "$asm" runtime.s
-}
-
-obj_for() {
-  echo "$BUILD/$(basename "$1").o"
-}
-
-pack_l8() {
-  local tool="$1" obj="$2" bin="$3"
-  "./$tool" elfpack "$obj" -o "$bin"
-}
-
-# Convenience for examples (timing is batched at the suite level).
-link_l8() {
-  local tool="$1" asm="$2" bin="$3"
-  local obj
-  obj="$(obj_for "$bin")"
-  assemble_rt "$tool" "$asm" "$obj"
-  pack_l8 "$tool" "$obj" "$bin"
-}
-
 run_expect() {
   local got
   got="$("$1")"
@@ -88,12 +60,10 @@ run_expect() {
   fi
 }
 
-# compile + link + run.
 example() {
   local tool="$1" name="$2" src="$3" expected="$4"
-  local asm="$BUILD/${name}.s" bin="$BUILD/${name}"
-  compile_l8 "$tool" "$src" "$asm"
-  link_l8 "$tool" "$asm" "$bin"
+  local bin="$BUILD/${name}"
+  "./$tool" build "$src" -o "$bin"
   run_expect "$bin" "$expected"
 }
 
@@ -118,40 +88,12 @@ run_examples() {
   example "$tool" imports examples/imports/main.l8 'Hi'
 }
 
-direct_example() {
-  local tool="$1" name="$2" src="$3" expected="$4"
-  local bin="$BUILD/build-${name}"
-  "./$tool" build "$src" -o "$bin"
-  run_expect "$bin" "$expected"
-}
-
-# Exercise the typed AST→assembler→ET_EXEC path independently of compile/as/elfpack.
-run_build_examples() {
-  local tool="$1"
-  direct_example "$tool" hello   examples/hello.l8   'Hi'
-  direct_example "$tool" fib     examples/fib.l8     '55'
-  direct_example "$tool" logic   examples/logic.l8   'YYYY'
-  direct_example "$tool" struct  examples/struct.l8  '3 12 13'
-  direct_example "$tool" string  examples/string.l8  'Hi'
-  direct_example "$tool" i8      examples/i8.l8      'Hi'
-  direct_example "$tool" bool    examples/bool.l8    'TY10'
-  direct_example "$tool" enum    examples/enum.l8    '9 10 0 3 0'
-  direct_example "$tool" forward examples/forward.l8 '7'
-  direct_example "$tool" null    examples/null.l8    'YYYY'
-  direct_example "$tool" newarr  examples/newarr.l8  'Hi'
-  direct_example "$tool" narrow  examples/narrow.l8  'YYYY'
-  direct_example "$tool" nestsum examples/nestsum.l8 '1 2 3 9 4 5 6 7'
-  direct_example "$tool" noreturn examples/noreturn.l8 'Hi'
-  direct_example "$tool" exc     examples/exc.l8     'Hi'
-  direct_example "$tool" imports examples/imports/main.l8 'Hi'
-}
-
 require_bootstrap() {
   [[ -f bootstrap ]] || die "bootstrap executable missing (see BOOTSTRAP.md)"
 }
 
 do_clean() {
-  rm -f l8c0 l8c1 l8c2 l8c3 l8c4 l8
+  rm -f l8c0 l8c1 l8c2 l8c3 l8
   rm -f examples/hello examples/fib examples/logic examples/struct examples/string examples/i8 examples/bool examples/enum examples/forward examples/null examples/newarr examples/narrow examples/nestsum examples/noreturn examples/exc
   rm -f examples/*.s
   rm -rf "$BUILD"
@@ -175,30 +117,19 @@ do_examples() {
   step 'examples [l8c0]' run_examples l8c0
 }
 
-# Stage-1: bootstrap compiles the stable src1 tree → l8c1.
-# Stage-2: l8c1 builds src2 through the legacy pipeline → l8c2.
-# Fixpoint: stage-2 binaries rebuild src2 directly with no .s/.o intermediates.
+# Every stage builds directly with no generated .s or .o intermediates.
 do_selfhost() {
   ensure_build_dir
   [[ -x ./l8c0 ]] || do_bootstrap
   [[ -f src1/main.l8 ]] || die "src1/main.l8 missing"
   [[ -f src2/main.l8 ]] || die "src2/main.l8 missing"
 
-  step 'stage1 compile  (l8c0 → src1)' compile_l8 l8c0 src1/main.l8 "$BUILD/l8c1.s"
-  step 'stage1 assemble (l8c1)'         assemble_rt l8c0 "$BUILD/l8c1.s" "$(obj_for l8c1)"
-  step 'stage1 elfpack  (l8c1)'         pack_l8 l8c0 "$(obj_for l8c1)" l8c1
-
-  step 'stage2 compile  (l8c1 → src2)' compile_l8 l8c1 src2/main.l8 "$BUILD/l8c2.s"
-  step 'stage2 assemble (l8c2)'        assemble_rt l8c1 "$BUILD/l8c2.s" "$(obj_for l8c2)"
-  step 'stage2 elfpack  (l8c2)'        pack_l8 l8c1 "$(obj_for l8c2)" l8c2
-
-  step 'stage3 direct   (l8c2 → src2)' ./l8c2 build src2/main.l8 -o l8c3
-  step 'stage4 direct   (l8c3 → src2)' ./l8c3 build src2/main.l8 -o l8c4
+  step 'stage1 direct (l8c0 → src1)' ./l8c0 build src1/main.l8 -o l8c1
+  step 'stage2 direct (l8c1 → src2)' ./l8c1 build src2/main.l8 -o l8c2
+  step 'stage3 direct (l8c2 → src2)' ./l8c2 build src2/main.l8 -o l8c3
   step 'verify stage2 exe == stage3 exe' cmp -s l8c2 l8c3
-  step 'verify stage3 exe == stage4 exe' cmp -s l8c3 l8c4
 
   step 'examples [l8c3]' run_examples l8c3
-  step 'build examples [l8c3]' run_build_examples l8c3
   cp l8c3 l8
 }
 
@@ -277,7 +208,7 @@ Commands:
   all             Install bootstrap, examples, two-stage self-host (default)
   bootstrap       Copy the saved bootstrap executable → l8c0
   examples        Run example programs via l8c0
-  selfhost        src1 → l8c1; src2 → l8c2; direct fixpoint l8c3==l8c4; examples
+  selfhost        direct src1 → l8c1; src2 → l8c2; fixpoint l8c2==l8c3; examples
   promote-bin1    Copy the stage-1 executable → bootstrap
   promote-bin2    Copy the stage-2 fixpoint executable → bootstrap
   promote-source  Replace src1/ with src2/ (no bootstrap change)
@@ -288,7 +219,7 @@ Commands:
 --force   Skip the interactive promote confirmation (still requires artifacts).
 
 Compilation, assembly, ELF packing, and direct executable building are
-subcommands of stage-2 binaries. Stage 1 remains bootstrap-compatible.
+subcommands of every stage binary. The build script uses the direct path.
 The saved bootstrap is directly executable; cold start needs no host compiler.
 EOF
 }

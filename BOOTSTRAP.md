@@ -2,8 +2,8 @@
 
 `bootstrap` is a checked-in x86-64 Linux executable containing the complete `l8`
 tool, including its runtime. Cold start simply copies it to `l8c0`; no host compiler,
-assembler, or linker is required. The seed provides `compile`, `as`, and `elfpack`
-subcommands. Stage-2 tools additionally provide the direct `build` command.
+assembler, or linker is required. Every stage provides `compile`, `as`, `elfpack`,
+and direct `build` subcommands.
 
 ## Two source trees
 
@@ -46,8 +46,8 @@ assembly and ET_REL are never serialized or reparsed.
 | Command | What it does |
 |---------|--------------|
 | `bootstrap` | Copy the saved bootstrap executable to `l8c0` |
-| `examples` | Compile, assemble, pack, and run examples with `l8c0` |
-| `selfhost` | Build unified `l8c1` from `src1/`, build `l8c2/l8c3/l8c4` from `src2/`, require stage assembly and executable fixpoints, and run examples through both legacy and direct pipelines |
+| `examples` | Build and run examples directly with `l8c0` |
+| `selfhost` | Directly build `l8c1` from `src1/`, build `l8c2/l8c3` from `src2/`, require the `l8c2 == l8c3` executable fixpoint, and run examples |
 | `promote-bin1` | Promote the stage-1 executable to `bootstrap` |
 | `promote-bin2` | Promote the stage-2 fixpoint executable to `bootstrap` |
 | `promote-source` | Replace `src1/` with `src2/` without changing the bootstrap |
