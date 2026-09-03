@@ -8,6 +8,7 @@ current_fn: .skip 8
 current_sret: .skip 8
 current_return_ty: .skip 8
 current_fn_name: .skip 8
+do_profile: .skip 8
 emit_cap: .skip 8
 emit_len: .skip 8
 emit_buf: .skip 8
@@ -1618,8 +1619,86 @@ source: .skip 8
   .quad 6
   .byte 32,32,114,101,116,10,0
 .L.str526:
-  .quad 20
-  .byte 117,115,97,103,101,58,32,108,56,99,32,60,102,105,108,101,46,108,56,62,0
+  .quad 9
+  .byte 112,114,111,102,105,108,101,58,32,0
+.L.str527:
+  .quad 9
+  .byte 112,114,111,102,105,108,101,58,32,0
+.L.str528:
+  .quad 1
+  .byte 32,0
+.L.str529:
+  .quad 1
+  .byte 32,0
+.L.str530:
+  .quad 1
+  .byte 46,0
+.L.str531:
+  .quad 1
+  .byte 46,0
+.L.str532:
+  .quad 1
+  .byte 48,0
+.L.str533:
+  .quad 1
+  .byte 48,0
+.L.str534:
+  .quad 1
+  .byte 48,0
+.L.str535:
+  .quad 1
+  .byte 48,0
+.L.str536:
+  .quad 4
+  .byte 32,109,115,10,0
+.L.str537:
+  .quad 4
+  .byte 32,109,115,10,0
+.L.str538:
+  .quad 43
+  .byte 101,114,114,111,114,58,32,117,115,97,103,101,58,32,108,56,99,32,91,45,45,112,114,111,102,105,108,101,124,45,112,93,32,60,102,105,108,101,46,108,56,62,10,0
+.L.str539:
+  .quad 43
+  .byte 101,114,114,111,114,58,32,117,115,97,103,101,58,32,108,56,99,32,91,45,45,112,114,111,102,105,108,101,124,45,112,93,32,60,102,105,108,101,46,108,56,62,10,0
+.L.str540:
+  .quad 43
+  .byte 101,114,114,111,114,58,32,117,115,97,103,101,58,32,108,56,99,32,91,45,45,112,114,111,102,105,108,101,124,45,112,93,32,60,102,105,108,101,46,108,56,62,10,0
+.L.str541:
+  .quad 43
+  .byte 101,114,114,111,114,58,32,117,115,97,103,101,58,32,108,56,99,32,91,45,45,112,114,111,102,105,108,101,124,45,112,93,32,60,102,105,108,101,46,108,56,62,10,0
+.L.str542:
+  .quad 4
+  .byte 105,110,105,116,0
+.L.str543:
+  .quad 9
+  .byte 114,101,97,100,95,102,105,108,101,0
+.L.str544:
+  .quad 8
+  .byte 116,111,107,101,110,105,122,101,0
+.L.str545:
+  .quad 5
+  .byte 112,97,114,115,101,0
+.L.str546:
+  .quad 9
+  .byte 116,121,112,101,99,104,101,99,107,0
+.L.str547:
+  .quad 10
+  .byte 117,110,117,115,101,100,95,102,110,115,0
+.L.str548:
+  .quad 13
+  .byte 117,110,117,115,101,100,95,108,111,99,97,108,115,0
+.L.str549:
+  .quad 6
+  .byte 114,97,105,115,101,115,0
+.L.str550:
+  .quad 8
+  .byte 110,111,114,101,116,117,114,110,0
+.L.str551:
+  .quad 7
+  .byte 99,111,100,101,103,101,110,0
+.L.str552:
+  .quad 5
+  .byte 84,79,84,65,76,0
 .section .text
 .globl streq_n
 streq_n:
@@ -34452,90 +34531,1164 @@ codegen:
   mov %rbp, %rsp
   pop %rbp
   ret
+.globl mono_ns
+mono_ns:
+  push %rbp
+  mov %rsp, %rbp
+  sub $16, %rsp
+  mov $228, %rax
+  push %rax
+  mov $1, %rax
+  push %rax
+  lea -16(%rbp), %rax
+  push %rax
+  mov $0, %rax
+  push %rax
+  mov $0, %rax
+  push %rax
+  mov $0, %rax
+  push %rax
+  pop %r9
+  pop %r8
+  pop %rcx
+  pop %rdx
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call syscall
+  add $8, %rsp
+  lea -16(%rbp), %rax
+  mov (%rax), %rax
+  push %rax
+  mov $1000000000, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  push %rax
+  lea -16(%rbp), %rax
+  add $8, %rax
+  mov (%rax), %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  jmp .L.return.mono_ns
+.L.return.mono_ns:
+  mov %rbp, %rsp
+  pop %rbp
+  ret
+.globl profile_print
+profile_print:
+  push %rbp
+  mov %rsp, %rbp
+  sub $32, %rsp
+  mov %rdi, -32(%rbp)
+  mov %rsi, -24(%rbp)
+  mov $2, %rax
+  push %rax
+  lea .L.str526+8(%rip), %rax
+  push %rax
+  lea .L.str527+8(%rip), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call len
+  add $8, %rsp
+  push %rax
+  pop %rdx
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call write
+  add $8, %rsp
+  mov $2, %rax
+  push %rax
+  mov -32(%rbp), %rax
+  push %rax
+  mov -32(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call len
+  add $8, %rsp
+  push %rax
+  pop %rdx
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call write
+  add $8, %rsp
+  mov $2, %rax
+  push %rax
+  lea .L.str528+8(%rip), %rax
+  push %rax
+  lea .L.str529+8(%rip), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call len
+  add $8, %rsp
+  push %rax
+  pop %rdx
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call write
+  add $8, %rsp
+  mov -24(%rbp), %rax
+  push %rax
+  mov $1000000, %rax
+  mov %rax, %rdi
+  pop %rax
+  cqo
+  idiv %rdi
+  mov %rax, -16(%rbp)
+  mov -24(%rbp), %rax
+  push %rax
+  mov $1000, %rax
+  mov %rax, %rdi
+  pop %rax
+  cqo
+  idiv %rdi
+  push %rax
+  mov $1000, %rax
+  mov %rax, %rdi
+  pop %rax
+  cqo
+  idiv %rdi
+  mov %rdx, %rax
+  mov %rax, -8(%rbp)
+  mov $2, %rax
+  push %rax
+  mov -16(%rbp), %rax
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call emit_num_fd
+  add $8, %rsp
+  mov $2, %rax
+  push %rax
+  lea .L.str530+8(%rip), %rax
+  push %rax
+  lea .L.str531+8(%rip), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call len
+  add $8, %rsp
+  push %rax
+  pop %rdx
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call write
+  add $8, %rsp
+  mov -8(%rbp), %rax
+  push %rax
+  mov $100, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setl %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else1099
+  mov $2, %rax
+  push %rax
+  lea .L.str532+8(%rip), %rax
+  push %rax
+  lea .L.str533+8(%rip), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call len
+  add $8, %rsp
+  push %rax
+  pop %rdx
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call write
+  add $8, %rsp
+  jmp .L.end1099
+.L.else1099:
+.L.end1099:
+  mov -8(%rbp), %rax
+  push %rax
+  mov $10, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setl %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else1100
+  mov $2, %rax
+  push %rax
+  lea .L.str534+8(%rip), %rax
+  push %rax
+  lea .L.str535+8(%rip), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call len
+  add $8, %rsp
+  push %rax
+  pop %rdx
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call write
+  add $8, %rsp
+  jmp .L.end1100
+.L.else1100:
+.L.end1100:
+  mov $2, %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call emit_num_fd
+  add $8, %rsp
+  mov $2, %rax
+  push %rax
+  lea .L.str536+8(%rip), %rax
+  push %rax
+  lea .L.str537+8(%rip), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call len
+  add $8, %rsp
+  push %rax
+  pop %rdx
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call write
+  add $8, %rsp
+.L.return.profile_print:
+  mov %rbp, %rsp
+  pop %rbp
+  ret
+.globl is_profile_flag
+is_profile_flag:
+  push %rbp
+  mov %rsp, %rbp
+  sub $16, %rsp
+  mov %rdi, -8(%rbp)
+  mov -8(%rbp), %rax
+  push %rax
+  mov $0, %rax
+  push %rax
+  mov $1, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  movzb (%rax), %rax
+  push %rax
+  mov $45, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.false1103
+  mov -8(%rbp), %rax
+  push %rax
+  mov $1, %rax
+  push %rax
+  mov $1, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  movzb (%rax), %rax
+  push %rax
+  mov $112, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.false1103
+  mov $1, %rax
+  jmp .L.end1103
+.L.false1103:
+  mov $0, %rax
+.L.end1103:
+  cmp $0, %rax
+  je .L.false1102
+  mov -8(%rbp), %rax
+  push %rax
+  mov $2, %rax
+  push %rax
+  mov $1, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  movzb (%rax), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.false1102
+  mov $1, %rax
+  jmp .L.end1102
+.L.false1102:
+  mov $0, %rax
+.L.end1102:
+  cmp $0, %rax
+  je .L.else1101
+  mov $1, %rax
+  jmp .L.return.is_profile_flag
+  jmp .L.end1101
+.L.else1101:
+.L.end1101:
+  mov -8(%rbp), %rax
+  push %rax
+  mov $0, %rax
+  push %rax
+  mov $1, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  movzb (%rax), %rax
+  push %rax
+  mov $45, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.false1113
+  mov -8(%rbp), %rax
+  push %rax
+  mov $1, %rax
+  push %rax
+  mov $1, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  movzb (%rax), %rax
+  push %rax
+  mov $45, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.false1113
+  mov $1, %rax
+  jmp .L.end1113
+.L.false1113:
+  mov $0, %rax
+.L.end1113:
+  cmp $0, %rax
+  je .L.false1112
+  mov -8(%rbp), %rax
+  push %rax
+  mov $2, %rax
+  push %rax
+  mov $1, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  movzb (%rax), %rax
+  push %rax
+  mov $112, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.false1112
+  mov $1, %rax
+  jmp .L.end1112
+.L.false1112:
+  mov $0, %rax
+.L.end1112:
+  cmp $0, %rax
+  je .L.false1111
+  mov -8(%rbp), %rax
+  push %rax
+  mov $3, %rax
+  push %rax
+  mov $1, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  movzb (%rax), %rax
+  push %rax
+  mov $114, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.false1111
+  mov $1, %rax
+  jmp .L.end1111
+.L.false1111:
+  mov $0, %rax
+.L.end1111:
+  cmp $0, %rax
+  je .L.false1110
+  mov -8(%rbp), %rax
+  push %rax
+  mov $4, %rax
+  push %rax
+  mov $1, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  movzb (%rax), %rax
+  push %rax
+  mov $111, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.false1110
+  mov $1, %rax
+  jmp .L.end1110
+.L.false1110:
+  mov $0, %rax
+.L.end1110:
+  cmp $0, %rax
+  je .L.false1109
+  mov -8(%rbp), %rax
+  push %rax
+  mov $5, %rax
+  push %rax
+  mov $1, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  movzb (%rax), %rax
+  push %rax
+  mov $102, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.false1109
+  mov $1, %rax
+  jmp .L.end1109
+.L.false1109:
+  mov $0, %rax
+.L.end1109:
+  cmp $0, %rax
+  je .L.false1108
+  mov -8(%rbp), %rax
+  push %rax
+  mov $6, %rax
+  push %rax
+  mov $1, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  movzb (%rax), %rax
+  push %rax
+  mov $105, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.false1108
+  mov $1, %rax
+  jmp .L.end1108
+.L.false1108:
+  mov $0, %rax
+.L.end1108:
+  cmp $0, %rax
+  je .L.false1107
+  mov -8(%rbp), %rax
+  push %rax
+  mov $7, %rax
+  push %rax
+  mov $1, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  movzb (%rax), %rax
+  push %rax
+  mov $108, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.false1107
+  mov $1, %rax
+  jmp .L.end1107
+.L.false1107:
+  mov $0, %rax
+.L.end1107:
+  cmp $0, %rax
+  je .L.false1106
+  mov -8(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  push %rax
+  mov $1, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  movzb (%rax), %rax
+  push %rax
+  mov $101, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.false1106
+  mov $1, %rax
+  jmp .L.end1106
+.L.false1106:
+  mov $0, %rax
+.L.end1106:
+  cmp $0, %rax
+  je .L.false1105
+  mov -8(%rbp), %rax
+  push %rax
+  mov $9, %rax
+  push %rax
+  mov $1, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  movzb (%rax), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.false1105
+  mov $1, %rax
+  jmp .L.end1105
+.L.false1105:
+  mov $0, %rax
+.L.end1105:
+  cmp $0, %rax
+  je .L.else1104
+  mov $1, %rax
+  jmp .L.return.is_profile_flag
+  jmp .L.end1104
+.L.else1104:
+.L.end1104:
+  mov $0, %rax
+  jmp .L.return.is_profile_flag
+.L.return.is_profile_flag:
+  mov %rbp, %rsp
+  pop %rbp
+  ret
 .globl main
 main:
   push %rbp
   mov %rsp, %rbp
-  sub $112, %rsp
-  mov %rdi, -112(%rbp)
-  mov %rsi, -104(%rbp)
+  sub $160, %rsp
+  mov %rdi, -160(%rbp)
+  mov %rsi, -152(%rbp)
   lea -72(%rbp), %rdi
   call l8_try_begin
   cmp $0, %rax
-  jne .L.catch1099
-  mov -112(%rbp), %rax
+  jne .L.catch1114
+  mov $0, %rax
+  mov %rax, do_profile(%rip)
+  mov $0, %rax
+  mov %rax, -144(%rbp)
+  mov $1, %rax
+  mov %rax, -136(%rbp)
+.L.begin1115:
+  mov -136(%rbp), %rax
   push %rax
-  mov $2, %rax
+  mov -160(%rbp), %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setl %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.end1115
+  mov -152(%rbp), %rax
+  push %rax
+  mov -136(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov (%rax), %rax
+  mov %rax, -128(%rbp)
+  mov -128(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_profile_flag
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.else1116
+  mov $1, %rax
+  mov %rax, do_profile(%rip)
+  jmp .L.end1116
+.L.else1116:
+  mov -144(%rbp), %rax
+  push %rax
+  mov $0, %rax
   mov %rax, %rdi
   pop %rax
   cmp %rdi, %rax
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1100
-  lea .L.str526+8(%rip), %rax
+  je .L.else1117
+  mov $2, %rax
+  push %rax
+  lea .L.str538+8(%rip), %rax
+  push %rax
+  lea .L.str539+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
-  call error
+  call len
   add $8, %rsp
-  jmp .L.end1100
-.L.else1100:
-.L.end1100:
-  mov -104(%rbp), %rax
   push %rax
-  mov $8, %rax
+  pop %rdx
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call write
+  add $8, %rsp
+  mov $1, %rax
+  jmp .L.return.main
+  jmp .L.end1117
+.L.else1117:
+.L.end1117:
+  mov -128(%rbp), %rax
+  mov %rax, -144(%rbp)
+.L.end1116:
+  mov -136(%rbp), %rax
+  push %rax
+  mov $1, %rax
   mov %rax, %rdi
   pop %rax
   add %rdi, %rax
-  mov (%rax), %rax
+  mov %rax, -136(%rbp)
+  jmp .L.begin1115
+.L.end1115:
+  mov -144(%rbp), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else1118
+  mov $2, %rax
+  push %rax
+  lea .L.str540+8(%rip), %rax
+  push %rax
+  lea .L.str541+8(%rip), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call len
+  add $8, %rsp
+  push %rax
+  pop %rdx
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call write
+  add $8, %rsp
+  mov $1, %rax
+  jmp .L.return.main
+  jmp .L.end1118
+.L.else1118:
+.L.end1118:
+  mov -144(%rbp), %rax
+  mov %rax, -120(%rbp)
+  mov $0, %rax
+  mov %rax, -112(%rbp)
+  mov $0, %rax
+  mov %rax, -104(%rbp)
+  mov $0, %rax
   mov %rax, -96(%rbp)
+  mov do_profile(%rip), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setne %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else1119
+  sub $8, %rsp
+  call mono_ns
+  add $8, %rsp
+  mov %rax, -112(%rbp)
+  mov -112(%rbp), %rax
+  mov %rax, -96(%rbp)
+  jmp .L.end1119
+.L.else1119:
+.L.end1119:
   sub $8, %rsp
   call init_runtime
   add $8, %rsp
   sub $8, %rsp
   call init_dummies
   add $8, %rsp
+  mov do_profile(%rip), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setne %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else1120
+  sub $8, %rsp
+  call mono_ns
+  add $8, %rsp
+  mov %rax, -104(%rbp)
+  lea .L.str542+8(%rip), %rax
+  push %rax
+  mov -104(%rbp), %rax
+  push %rax
   mov -96(%rbp), %rax
+  mov %rax, %rdi
+  pop %rax
+  sub %rdi, %rax
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call profile_print
+  add $8, %rsp
+  mov -104(%rbp), %rax
+  mov %rax, -96(%rbp)
+  jmp .L.end1120
+.L.else1120:
+.L.end1120:
+  mov -120(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call read_file
   add $8, %rsp
   mov %rax, source(%rip)
+  mov do_profile(%rip), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setne %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else1121
+  sub $8, %rsp
+  call mono_ns
+  add $8, %rsp
+  mov %rax, -104(%rbp)
+  lea .L.str543+8(%rip), %rax
+  push %rax
+  mov -104(%rbp), %rax
+  push %rax
+  mov -96(%rbp), %rax
+  mov %rax, %rdi
+  pop %rax
+  sub %rdi, %rax
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call profile_print
+  add $8, %rsp
+  mov -104(%rbp), %rax
+  mov %rax, -96(%rbp)
+  jmp .L.end1121
+.L.else1121:
+.L.end1121:
   sub $8, %rsp
   call tokenize
   add $8, %rsp
   mov %rax, tok(%rip)
+  mov do_profile(%rip), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setne %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else1122
+  sub $8, %rsp
+  call mono_ns
+  add $8, %rsp
+  mov %rax, -104(%rbp)
+  lea .L.str544+8(%rip), %rax
+  push %rax
+  mov -104(%rbp), %rax
+  push %rax
+  mov -96(%rbp), %rax
+  mov %rax, %rdi
+  pop %rax
+  sub %rdi, %rax
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call profile_print
+  add $8, %rsp
+  mov -104(%rbp), %rax
+  mov %rax, -96(%rbp)
+  jmp .L.end1122
+.L.else1122:
+.L.end1122:
   sub $8, %rsp
   call parse_program
   add $8, %rsp
+  mov do_profile(%rip), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setne %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else1123
+  sub $8, %rsp
+  call mono_ns
+  add $8, %rsp
+  mov %rax, -104(%rbp)
+  lea .L.str545+8(%rip), %rax
+  push %rax
+  mov -104(%rbp), %rax
+  push %rax
+  mov -96(%rbp), %rax
+  mov %rax, %rdi
+  pop %rax
+  sub %rdi, %rax
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call profile_print
+  add $8, %rsp
+  mov -104(%rbp), %rax
+  mov %rax, -96(%rbp)
+  jmp .L.end1123
+.L.else1123:
+.L.end1123:
   sub $8, %rsp
   call typecheck_program
   add $8, %rsp
+  mov do_profile(%rip), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setne %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else1124
+  sub $8, %rsp
+  call mono_ns
+  add $8, %rsp
+  mov %rax, -104(%rbp)
+  lea .L.str546+8(%rip), %rax
+  push %rax
+  mov -104(%rbp), %rax
+  push %rax
+  mov -96(%rbp), %rax
+  mov %rax, %rdi
+  pop %rax
+  sub %rdi, %rax
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call profile_print
+  add $8, %rsp
+  mov -104(%rbp), %rax
+  mov %rax, -96(%rbp)
+  jmp .L.end1124
+.L.else1124:
+.L.end1124:
   sub $8, %rsp
   call check_unused_functions
   add $8, %rsp
+  mov do_profile(%rip), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setne %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else1125
+  sub $8, %rsp
+  call mono_ns
+  add $8, %rsp
+  mov %rax, -104(%rbp)
+  lea .L.str547+8(%rip), %rax
+  push %rax
+  mov -104(%rbp), %rax
+  push %rax
+  mov -96(%rbp), %rax
+  mov %rax, %rdi
+  pop %rax
+  sub %rdi, %rax
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call profile_print
+  add $8, %rsp
+  mov -104(%rbp), %rax
+  mov %rax, -96(%rbp)
+  jmp .L.end1125
+.L.else1125:
+.L.end1125:
   sub $8, %rsp
   call check_unused_locals
   add $8, %rsp
+  mov do_profile(%rip), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setne %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else1126
+  sub $8, %rsp
+  call mono_ns
+  add $8, %rsp
+  mov %rax, -104(%rbp)
+  lea .L.str548+8(%rip), %rax
+  push %rax
+  mov -104(%rbp), %rax
+  push %rax
+  mov -96(%rbp), %rax
+  mov %rax, %rdi
+  pop %rax
+  sub %rdi, %rax
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call profile_print
+  add $8, %rsp
+  mov -104(%rbp), %rax
+  mov %rax, -96(%rbp)
+  jmp .L.end1126
+.L.else1126:
+.L.end1126:
   sub $8, %rsp
   call check_raises_functions
   add $8, %rsp
+  mov do_profile(%rip), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setne %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else1127
+  sub $8, %rsp
+  call mono_ns
+  add $8, %rsp
+  mov %rax, -104(%rbp)
+  lea .L.str549+8(%rip), %rax
+  push %rax
+  mov -104(%rbp), %rax
+  push %rax
+  mov -96(%rbp), %rax
+  mov %rax, %rdi
+  pop %rax
+  sub %rdi, %rax
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call profile_print
+  add $8, %rsp
+  mov -104(%rbp), %rax
+  mov %rax, -96(%rbp)
+  jmp .L.end1127
+.L.else1127:
+.L.end1127:
   sub $8, %rsp
   call check_noreturn_functions
   add $8, %rsp
+  mov do_profile(%rip), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setne %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else1128
+  sub $8, %rsp
+  call mono_ns
+  add $8, %rsp
+  mov %rax, -104(%rbp)
+  lea .L.str550+8(%rip), %rax
+  push %rax
+  mov -104(%rbp), %rax
+  push %rax
+  mov -96(%rbp), %rax
+  mov %rax, %rdi
+  pop %rax
+  sub %rdi, %rax
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call profile_print
+  add $8, %rsp
+  mov -104(%rbp), %rax
+  mov %rax, -96(%rbp)
+  jmp .L.end1128
+.L.else1128:
+.L.end1128:
   sub $8, %rsp
   call codegen
   add $8, %rsp
+  mov do_profile(%rip), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setne %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else1129
+  sub $8, %rsp
+  call mono_ns
+  add $8, %rsp
+  mov %rax, -104(%rbp)
+  lea .L.str551+8(%rip), %rax
+  push %rax
+  mov -104(%rbp), %rax
+  push %rax
+  mov -96(%rbp), %rax
+  mov %rax, %rdi
+  pop %rax
+  sub %rdi, %rax
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call profile_print
+  add $8, %rsp
+  lea .L.str552+8(%rip), %rax
+  push %rax
+  mov -104(%rbp), %rax
+  push %rax
+  mov -112(%rbp), %rax
+  mov %rax, %rdi
+  pop %rax
+  sub %rdi, %rax
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call profile_print
+  add $8, %rsp
+  jmp .L.end1129
+.L.else1129:
+.L.end1129:
   mov $0, %rax
   jmp .L.return.main
   call l8_try_end
-  jmp .L.tryend1099
-.L.catch1099:
+  jmp .L.tryend1114
+.L.catch1114:
   mov l8_exc_tag(%rip), %rax
   cmp $1, %rax
-  jne .L.arm1101
+  jne .L.arm1130
   mov l8_exc_ptr(%rip), %rsi
   lea -88(%rbp), %rdi
   mov 0(%rsi), %rax
@@ -34556,12 +35709,12 @@ main:
   add $8, %rsp
   mov $1, %rax
   jmp .L.return.main
-  jmp .L.tryend1099
-.L.arm1101:
+  jmp .L.tryend1114
+.L.arm1130:
   mov l8_exc_tag(%rip), %rdi
   mov l8_exc_ptr(%rip), %rsi
   call l8_raise
-.L.tryend1099:
+.L.tryend1114:
 .L.return.main:
   mov %rbp, %rsp
   pop %rbp
