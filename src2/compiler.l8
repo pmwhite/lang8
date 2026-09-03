@@ -4105,12 +4105,20 @@ gen_binary(op: BinOp, lhs: *Expr, rhs: *Expr) raises Error {
         Mul -> {
             if (imm_operand(rhs) != 0 && fits_imm32(imm_value(rhs))) {
                 gen_expr(lhs);
-                cg_imul_imm(imm_value(rhs), 0);
+                mv: int = imm_value(rhs);
+                if (mv == 0) { cg_mov_imm(0, 0); return; }
+                if (mv == 1) { return; }
+                if (mv == 2) { cg_alu_rr(1, 0, 0); return; }
+                cg_imul_imm(mv, 0);
                 return;
             }
             if (imm_operand(lhs) != 0 && fits_imm32(imm_value(lhs))) {
                 gen_expr(rhs);
-                cg_imul_imm(imm_value(lhs), 0);
+                mv2: int = imm_value(lhs);
+                if (mv2 == 0) { cg_mov_imm(0, 0); return; }
+                if (mv2 == 1) { return; }
+                if (mv2 == 2) { cg_alu_rr(1, 0, 0); return; }
+                cg_imul_imm(mv2, 0);
                 return;
             }
             gen_binop_setup(lhs, rhs);
@@ -4374,6 +4382,19 @@ gen_expr(n: *Expr) raises Error {
             }
             nregs: int = nargs + has_sret;
             if (nregs > 6) { error("too many arguments"); }
+            if (has_sret == 0 && nargs <= 1) {
+                a = k.args;
+                if (a != null) {
+                    if (imm_operand(a) != 0 && fits_imm32(imm_value(a))) {
+                        cg_mov_imm(imm_value(a), cg_arg_reg(0));
+                    } else {
+                        gen_expr(a);
+                        cg_mov_rr(0, cg_arg_reg(0));
+                    }
+                }
+                cg_call(k.funcname);
+                return;
+            }
             if (has_sret != 0) {
                 if (fno == null) { error("missing function"); }
                 sz: int = type_size(expect_type(fno.return_ty, "missing return type"));
@@ -4394,9 +4415,7 @@ gen_expr(n: *Expr) raises Error {
                 cg_pop(cg_arg_reg(i));
                 i = i - 1;
             }
-            cg_alu_imm(5, 8, 4);
             cg_call(k.funcname);
-            cg_alu_imm(0, 8, 4);
             return;
         }
         Binary k -> { gen_binary(k.op, k.lhs, k.rhs); return; }
@@ -4439,14 +4458,18 @@ gen_stmt(n: *Stmt) raises Error {
             l: int = new_label();
             gen_expr(k.cond);
             cg_alu_imm(7, 0, 0);
+            els: ?*Stmt = k.els;
+            if (els == null) {
+                cg_jump(4, cg_name_num(".L.end", l));
+                gen_stmt(k.then);
+                cg_label(cg_name_num(".L.end", l));
+                return;
+            }
             cg_jump(4, cg_name_num(".L.else", l));
             gen_stmt(k.then);
             cg_jump(0 - 1, cg_name_num(".L.end", l));
             cg_label(cg_name_num(".L.else", l));
-            els: ?*Stmt = k.els;
-            if (els != null) {
-                gen_stmt(els);
-            }
+            gen_stmt(els);
             cg_label(cg_name_num(".L.end", l));
             return;
         }
@@ -4574,7 +4597,7 @@ assign_lvar_offsets(fn: *Function) raises Error {
         v.offset = 0 - off;
         v = v.next;
     }
-    fn.stack_size = (off + 15) / 16 * 16;
+    fn.stack_size = (off + 7) / 16 * 16 + 8;
 }
 
 emit_data() raises Error {
@@ -4626,6 +4649,7 @@ emit_text() raises Error {
         current_fn = fn;
         cg_global(fn.name);
         cg_label(fn.name);
+        cg_rsp_off = 0;
         cg_push(5);
         cg_mov_rr(4, 5);
         cg_alu_imm(5, fn.stack_size, 4);
@@ -4687,6 +4711,9 @@ mono_ns(): int {
     return ts.sec * 1000000000 + ts.nsec;
 }
 
+profile_t0: int;
+profile_prev: int;
+
 profile_print(label: *i8, dt_ns: int) {
     write(2, "profile: ", len("profile: "));
     write(2, label, len(label));
@@ -4701,6 +4728,24 @@ profile_print(label: *i8, dt_ns: int) {
     write(2, " ms\n", len(" ms\n"));
 }
 
+profile_start() {
+    if (do_profile == 0) { return; }
+    profile_t0 = mono_ns();
+    profile_prev = profile_t0;
+}
+
+profile_mark(label: *i8) {
+    if (do_profile == 0) { return; }
+    t: int = mono_ns();
+    profile_print(label, t - profile_prev);
+    profile_prev = t;
+}
+
+profile_end() {
+    if (do_profile == 0) { return; }
+    profile_print("TOTAL", profile_prev - profile_t0);
+}
+
 is_profile_flag(s: *i8): bool {
     if (s[0] == '-' && s[1] == 'p' && s[2] == 0 trunc i8) { return true; }
     if (s[0] == '-' && s[1] == '-' && s[2] == 'p' && s[3] == 'r' && s[4] == 'o'
@@ -4710,25 +4755,38 @@ is_profile_flag(s: *i8): bool {
     return false;
 }
 
+compiler_frontend(src_path: *i8) raises Error {
+    profile_start();
+    as_init();
+    init_runtime();
+    init_dummies();
+    profile_mark("init");
+    source = "";
+    source_len = 0;
+    source_path = src_path;
+    tok = token_eof;
+    parse_program(src_path);
+    profile_mark("load_parse");
+    typecheck_program();
+    profile_mark("typecheck");
+    check_unused_functions();
+    profile_mark("unused_fns");
+    check_unused_locals();
+    profile_mark("unused_locals");
+    check_raises_functions();
+    profile_mark("raises");
+    check_noreturn_functions();
+    profile_mark("noreturn");
+    codegen();
+    profile_mark("codegen");
+}
+
 compiler_build_direct(src_path: *i8): int {
     try {
-        do_profile = 0;
         cg_direct_mode = 1;
-        as_init();
-        init_runtime();
-        init_dummies();
-        source = "";
-        source_len = 0;
-        source_path = src_path;
-        tok = token_eof;
-        parse_program(src_path);
-        typecheck_program();
-        check_unused_functions();
-        check_unused_locals();
-        check_raises_functions();
-        check_noreturn_functions();
-        codegen();
+        compiler_frontend(src_path);
         as_assemble_file_append("runtime.s");
+        profile_mark("runtime");
         return 0;
     } with Error e -> {
         print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);
@@ -4760,67 +4818,8 @@ compiler_main(argc: int, argv: **i8): int {
             return 1;
         }
         src_path: *i8 = path;
-        t0: int = 0;
-        t: int = 0;
-        prev: int = 0;
-        if (do_profile != 0) {
-            t0 = mono_ns();
-            prev = t0;
-        }
-        as_init();
-        init_runtime();
-        init_dummies();
-        if (do_profile != 0) {
-            t = mono_ns();
-            profile_print("init", t - prev);
-            prev = t;
-        }
-        source = "";
-        source_len = 0;
-        source_path = src_path;
-        tok = token_eof;
-        parse_program(src_path);
-        if (do_profile != 0) {
-            t = mono_ns();
-            profile_print("load_parse", t - prev);
-            prev = t;
-        }
-        typecheck_program();
-        if (do_profile != 0) {
-            t = mono_ns();
-            profile_print("typecheck", t - prev);
-            prev = t;
-        }
-        check_unused_functions();
-        if (do_profile != 0) {
-            t = mono_ns();
-            profile_print("unused_fns", t - prev);
-            prev = t;
-        }
-        check_unused_locals();
-        if (do_profile != 0) {
-            t = mono_ns();
-            profile_print("unused_locals", t - prev);
-            prev = t;
-        }
-        check_raises_functions();
-        if (do_profile != 0) {
-            t = mono_ns();
-            profile_print("raises", t - prev);
-            prev = t;
-        }
-        check_noreturn_functions();
-        if (do_profile != 0) {
-            t = mono_ns();
-            profile_print("noreturn", t - prev);
-            prev = t;
-        }
-        codegen();
-        if (do_profile != 0) {
-            t = mono_ns();
-            profile_print("codegen", t - prev);
-            profile_print("TOTAL", t - t0);
-        }
+        compiler_frontend(src_path);
+        profile_end();
         return 0;
     } with Error e -> {
         print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);

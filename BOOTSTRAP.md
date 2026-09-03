@@ -33,7 +33,7 @@ Typical evolution for a breaking language change:
 l8 compile [--profile|-p] file.l8 > file.s
 l8 as [-p|--profile] -o file.o file.s runtime.s
 l8 elfpack file.o -o file
-l8 build file.l8 -o file
+l8 build [--profile|-p] file.l8 -o file
 ```
 
 `build` sends typed compiler operations directly to the assembler's in-memory
@@ -47,7 +47,7 @@ assembly and ET_REL are never serialized or reparsed.
 |---------|--------------|
 | `bootstrap` | Copy the saved bootstrap executable to `l8c0` |
 | `examples` | Build and run examples directly with `l8c0` |
-| `selfhost` | Directly build `l8c1` from `src1/`, build `l8c2/l8c3` from `src2/`, require the `l8c2 == l8c3` executable fixpoint, and run examples |
+| `selfhost` | Directly build `l8c1` from `src1/`, build `l8c2/l8c3` from `src2/`, require the `l8c2 == l8c3` executable fixpoint, run examples, and print compiler phase timings |
 | `promote-bin1` | Promote the stage-1 executable to `bootstrap` |
 | `promote-bin2` | Promote the stage-2 fixpoint executable to `bootstrap` |
 | `promote-source` | Replace `src1/` with `src2/` without changing the bootstrap |

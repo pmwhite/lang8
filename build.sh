@@ -117,6 +117,10 @@ do_examples() {
   step 'examples [l8c0]' run_examples l8c0
 }
 
+print_compiler_phases() {
+  ./l8c3 build -p src2/main.l8 -o "$BUILD/l8-profile" 2>&1
+}
+
 # Every stage builds directly with no generated .s or .o intermediates.
 do_selfhost() {
   ensure_build_dir
@@ -130,6 +134,7 @@ do_selfhost() {
   step 'verify stage2 exe == stage3 exe' cmp -s l8c2 l8c3
 
   step 'examples [l8c3]' run_examples l8c3
+  step 'compiler phases [l8c3]' print_compiler_phases
   cp l8c3 l8
 }
 
@@ -208,7 +213,7 @@ Commands:
   all             Install bootstrap, examples, two-stage self-host (default)
   bootstrap       Copy the saved bootstrap executable → l8c0
   examples        Run example programs via l8c0
-  selfhost        direct src1 → l8c1; src2 → l8c2; fixpoint l8c2==l8c3; examples
+  selfhost        direct src1 → l8c1; src2 → l8c2; fixpoint l8c2==l8c3; examples; phases
   promote-bin1    Copy the stage-1 executable → bootstrap
   promote-bin2    Copy the stage-2 fixpoint executable → bootstrap
   promote-source  Replace src1/ with src2/ (no bootstrap change)
