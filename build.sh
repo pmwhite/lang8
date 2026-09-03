@@ -81,7 +81,7 @@ require_bootstrap_s() {
 }
 
 do_clean() {
-  rm -f l8c0 l8c1 l8c2
+  rm -f l8c0 l8c1 l8c2 l8c3
   rm -f examples/hello examples/fib examples/logic examples/struct examples/string examples/i8 examples/bool examples/enum examples/forward examples/null examples/newarr examples/narrow examples/nestsum examples/noreturn examples/exc
   rm -f examples/*.s
   rm -rf "$BUILD"
@@ -114,9 +114,12 @@ do_examples() {
   step 'example exc     [l8c0]' example l8c0 exc     examples/exc.l8     'Hi'
 }
 
-# Stage-1: bootstrap compiles compiler.l8
-# Stage-2: that compiler compiles compiler2.l8
-# Fixpoint: stage-2 compiler recompiles compiler2.l8
+# Stage-1: bootstrap compiles compiler.l8 → l8c1
+# Stage-2: l8c1 compiles compiler2.l8 → l8c2
+# Fixpoint: l8c2 recompiles compiler2.l8 → l8c3, then l8c3 recompiles → l8c4;
+#           require l8c3.s == l8c4.s (stage-2 compiler converges on compiler2.l8).
+# Note: l8c2.s may differ from l8c3.s while compiler.l8 and compiler2.l8 diverge
+# (e.g. codegen work in stage-2 only); that is expected until promote.
 do_selfhost() {
   ensure_build_dir
   [[ -x ./l8c0 ]] || do_bootstrap
@@ -129,21 +132,24 @@ do_selfhost() {
   step 'stage2 link    (l8c2)'               link_l8 "$BUILD/l8c2.s" l8c2
 
   step 'stage3 compile (l8c2 → compiler2.l8)' compile_l8 l8c2 compiler2.l8 "$BUILD/l8c3.s"
-  step 'verify stage2 == stage3'             diff -q "$BUILD/l8c2.s" "$BUILD/l8c3.s"
+  step 'stage3 link    (l8c3)'               link_l8 "$BUILD/l8c3.s" l8c3
 
-  step 'example hello  [l8c2]'  example l8c2 hello  examples/hello.l8  'Hi'
-  step 'example struct [l8c2]'  example l8c2 struct examples/struct.l8 '3 12 13'
-  step 'example string [l8c2]'  example l8c2 string examples/string.l8 'Hi'
-  step 'example i8     [l8c2]'  example l8c2 i8     examples/i8.l8     'Hi'
-  step 'example bool   [l8c2]'  example l8c2 bool   examples/bool.l8   'TY10'
-  step 'example enum   [l8c2]'  example l8c2 enum   examples/enum.l8   '9 10 0 3 0'
-  step 'example forward[l8c2]'  example l8c2 forward examples/forward.l8 '7'
-  step 'example null   [l8c2]'  example l8c2 null   examples/null.l8   'YYYY'
-  step 'example newarr [l8c2]'  example l8c2 newarr examples/newarr.l8 'Hi'
-  step 'example narrow [l8c2]'  example l8c2 narrow examples/narrow.l8 'YYYY'
-  step 'example nestsum[l8c2]'  example l8c2 nestsum examples/nestsum.l8 '1 2 3 9 4 5 6 7'
-  step 'example noreturn[l8c2]' example l8c2 noreturn examples/noreturn.l8 'Hi'
-  step 'example exc     [l8c2]' example l8c2 exc     examples/exc.l8     'Hi'
+  step 'stage4 compile (l8c3 → compiler2.l8)' compile_l8 l8c3 compiler2.l8 "$BUILD/l8c4.s"
+  step 'verify stage3 == stage4'             diff -q "$BUILD/l8c3.s" "$BUILD/l8c4.s"
+
+  step 'example hello  [l8c3]'  example l8c3 hello  examples/hello.l8  'Hi'
+  step 'example struct [l8c3]'  example l8c3 struct examples/struct.l8 '3 12 13'
+  step 'example string [l8c3]'  example l8c3 string examples/string.l8 'Hi'
+  step 'example i8     [l8c3]'  example l8c3 i8     examples/i8.l8     'Hi'
+  step 'example bool   [l8c3]'  example l8c3 bool   examples/bool.l8   'TY10'
+  step 'example enum   [l8c3]'  example l8c3 enum   examples/enum.l8   '9 10 0 3 0'
+  step 'example forward[l8c3]'  example l8c3 forward examples/forward.l8 '7'
+  step 'example null   [l8c3]'  example l8c3 null   examples/null.l8   'YYYY'
+  step 'example newarr [l8c3]'  example l8c3 newarr examples/newarr.l8 'Hi'
+  step 'example narrow [l8c3]'  example l8c3 narrow examples/narrow.l8 'YYYY'
+  step 'example nestsum[l8c3]'  example l8c3 nestsum examples/nestsum.l8 '1 2 3 9 4 5 6 7'
+  step 'example noreturn[l8c3]' example l8c3 noreturn examples/noreturn.l8 'Hi'
+  step 'example exc     [l8c3]' example l8c3 exc     examples/exc.l8     'Hi'
 }
 
 confirm_promote() {
@@ -176,10 +182,10 @@ do_promote_asm1() {
 }
 
 do_promote_asm2() {
-  need_artifact "$BUILD/l8c2.s" "./build.sh selfhost"
-  confirm_promote "bootstrap.s (from stage-2 / compiler2.l8)"
-  cp "$BUILD/l8c2.s" bootstrap.s
-  echo "updated bootstrap.s from $BUILD/l8c2.s"
+  need_artifact "$BUILD/l8c3.s" "./build.sh selfhost"
+  confirm_promote "bootstrap.s (from stage-2 fixpoint / compiler2.l8)"
+  cp "$BUILD/l8c3.s" bootstrap.s
+  echo "updated bootstrap.s from $BUILD/l8c3.s"
   echo "Next: review diff, then commit only the snapshot (see BOOTSTRAP.md)."
 }
 
@@ -192,11 +198,11 @@ do_promote_source() {
 }
 
 do_promote() {
-  need_artifact "$BUILD/l8c2.s" "./build.sh selfhost"
+  need_artifact "$BUILD/l8c3.s" "./build.sh selfhost"
   confirm_promote "compiler.l8 and bootstrap.s (full stage-2 promote)"
   cp compiler2.l8 compiler.l8
-  cp "$BUILD/l8c2.s" bootstrap.s
-  echo "updated compiler.l8 and bootstrap.s from stage-2"
+  cp "$BUILD/l8c3.s" bootstrap.s
+  echo "updated compiler.l8 and bootstrap.s from stage-2 fixpoint"
   echo "Next: review diff, then commit this promote alone."
 }
 
@@ -216,9 +222,9 @@ Commands:
   all             Link bootstrap.s, examples, two-stage self-host (default)
   bootstrap       Link bootstrap.s + runtime.s → l8c0
   examples        Run example programs via l8c0
-  selfhost        compiler.l8 → l8c1; compiler2.l8 → l8c2; fixpoint; examples
+  selfhost        compiler.l8 → l8c1; compiler2.l8 → l8c2; fixpoint l8c3==l8c4; examples
   promote-asm1    Copy stage-1 asm → bootstrap.s (isolated snapshot commit)
-  promote-asm2    Copy stage-2 asm → bootstrap.s
+  promote-asm2    Copy stage-2 fixpoint asm (l8c3.s) → bootstrap.s
   promote-source  Copy compiler2.l8 → compiler.l8 (no asm change)
   promote         promote-source + promote-asm2
   clean           Remove build artifacts

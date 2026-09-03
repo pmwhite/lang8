@@ -31,9 +31,9 @@ Typical evolution for a breaking language change:
 |---------|----------------|
 | `bootstrap` | Link `bootstrap.s` + `runtime.s` → `l8c0` |
 | `examples` | Run examples with `l8c0` |
-| `selfhost` | `l8c0`→`compiler.l8`→`l8c1`, then `l8c1`→`compiler2.l8`→`l8c2`, fixpoint on `compiler2.l8`, examples |
+| `selfhost` | `l8c0`→`compiler.l8`→`l8c1`, then `l8c1`→`compiler2.l8`→`l8c2`, then fixpoint `l8c2`→`l8c3`→`l8c4` (`l8c3.s` == `l8c4.s`), examples |
 | `promote-asm1` | After a successful stage‑1 build, copy that asm over `bootstrap.s` |
-| `promote-asm2` | After a successful stage‑2 build, copy that asm over `bootstrap.s` |
+| `promote-asm2` | Copy stage‑2 fixpoint asm (`l8c3.s`) → `bootstrap.s` |
 | `promote-source` | Copy `compiler2.l8` over `compiler.l8` (does **not** touch asm) |
 | `promote` | `promote-source` + `promote-asm2` (usual “stage‑2 is ready” commit prep) |
 
