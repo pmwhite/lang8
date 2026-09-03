@@ -751,15 +751,6 @@ init_runtime() {
     clear_sym_tables();
 }
 
-reg_name(i: int): *i8 {
-    if (i == 0) { return "%rdi"; }
-    if (i == 1) { return "%rsi"; }
-    if (i == 2) { return "%rdx"; }
-    if (i == 3) { return "%rcx"; }
-    if (i == 4) { return "%r8"; }
-    return "%r9";
-}
-
 read_file(path: *i8) raises Error: *i8 {
     fd: int = open(path, 0, 0);
     if (fd < 0) { error("cannot open file"); }
@@ -3864,35 +3855,27 @@ new_label(): int {
 
 load_mem(ty: *Type) raises Error {
     if (is_byte_ty(ty)) {
-        emit("  movzb (%rax), %rax\n");
-    } else { emit("  mov (%rax), %rax\n"); }
+        cg_movzb_mr(0, 0, 0);
+    } else { cg_mov_mr(0, 0, 0); }
 }
 
 store_mem(ty: *Type) raises Error {
     if (is_byte_ty(ty)) {
-        emit("  mov %al, (%rdi)\n");
-    } else { emit("  mov %rax, (%rdi)\n"); }
+        cg_movb_rm(0, 7, 0);
+    } else { cg_mov_rm(0, 7, 0); }
 }
 
 emit_memcpy(sz: int) {
     if (sz <= 0) { sz = 8; }
     i: int = 0;
     while (i + 8 <= sz) {
-        emit("  mov ");
-        emit_num(i);
-        emit("(%rsi), %rax\n");
-        emit("  mov %rax, ");
-        emit_num(i);
-        emit("(%rdi)\n");
+        cg_mov_mr(6, i, 0);
+        cg_mov_rm(0, 7, i);
         i = i + 8;
     }
     while (i < sz) {
-        emit("  movzb ");
-        emit_num(i);
-        emit("(%rsi), %rax\n");
-        emit("  mov %al, ");
-        emit_num(i);
-        emit("(%rdi)\n");
+        cg_movzb_mr(6, i, 0);
+        cg_movb_rm(0, 7, i);
         i = i + 1;
     }
 }
@@ -3900,7 +3883,7 @@ emit_memcpy(sz: int) {
 /* Store value in %rax into (%rdi). By-ref aggregates: %rax is a source pointer. */
 store_value(ty: *Type) raises Error {
     if (passes_by_ref(ty)) {
-        emit("  mov %rax, %rsi\n");
+        cg_mov_rr(0, 6);
         emit_memcpy(type_size(ty));
     } else { store_mem(ty); }
 }
@@ -3918,12 +3901,10 @@ gen_field_inits(inits: ?*FieldInit, base_off: int) raises Error {
             mem: *Member = init.member;
             mty: *Type = mem.ty;
             gen_expr(lhs);
-            emit("  mov %rbx, %rdi\n");
+            cg_mov_rr(3, 7);
             off: int = base_off + mem.offset;
             if (off != 0) {
-                emit("  add $");
-                emit_num(off);
-                emit(", %rdi\n");
+                cg_alu_imm(0, off, 7);
             }
             store_value(mty);
         }
@@ -3941,13 +3922,9 @@ gen_addr(n: *Expr) raises Error {
             if (var == null) { error("missing var"); }
             vo: *Obj = var;
             if (vo.is_local != 0) {
-                emit("  lea ");
-                emit_num(vo.offset);
-                emit("(%rbp), %rax\n");
+                cg_lea_mr(5, vo.offset, 0);
             } else {
-                emit("  lea ");
-                emit(vo.name);
-                emit("(%rip), %rax\n");
+                cg_lea_rip(vo.name, 0, 0);
             }
             return;
         }
@@ -3962,9 +3939,7 @@ gen_addr(n: *Expr) raises Error {
             } else { gen_addr(k.lhs); }
             mem: *Member = k.member;
             if (mem.offset != 0) {
-                emit("  add $");
-                emit_num(mem.offset);
-                emit(", %rax\n");
+                cg_alu_imm(0, mem.offset, 0);
             }
             return;
         }
@@ -3974,33 +3949,21 @@ gen_addr(n: *Expr) raises Error {
 
 /* Scalar load of a variable into %rax without lea+deref. */
 emit_load_var(vo: *Obj, ty: *Type) raises Error {
-    if (is_byte_ty(ty)) {
-        emit("  movzb ");
-    } else {
-        emit("  mov ");
-    }
     if (vo.is_local != 0) {
-        emit_num(vo.offset);
-        emit("(%rbp), %rax\n");
+        if (is_byte_ty(ty)) { cg_movzb_mr(5, vo.offset, 0); }
+        else { cg_mov_mr(5, vo.offset, 0); }
     } else {
-        emit(vo.name);
-        emit("(%rip), %rax\n");
+        cg_mov_rip_r(vo.name, 0, 0);
     }
 }
 
 /* Scalar store of %rax into a variable. */
 emit_store_var(vo: *Obj, ty: *Type) raises Error {
-    if (is_byte_ty(ty)) {
-        emit("  mov %al, ");
-    } else {
-        emit("  mov %rax, ");
-    }
     if (vo.is_local != 0) {
-        emit_num(vo.offset);
-        emit("(%rbp)\n");
+        if (is_byte_ty(ty)) { cg_movb_rm(0, 5, vo.offset); }
+        else { cg_mov_rm(0, 5, vo.offset); }
     } else {
-        emit(vo.name);
-        emit("(%rip)\n");
+        cg_mov_r_rip(0, vo.name, 0);
     }
 }
 
@@ -4015,19 +3978,12 @@ fits_imm32(v: int): bool {
 
 /* Store an immediate into a scalar variable (no %rax round-trip). */
 emit_store_imm(vo: *Obj, ty: *Type, v: int) raises Error {
-    if (is_byte_ty(ty)) {
-        emit("  movb $");
-    } else {
-        emit("  movq $");
-    }
-    emit_num(v);
-    emit(", ");
     if (vo.is_local != 0) {
-        emit_num(vo.offset);
-        emit("(%rbp)\n");
+        if (is_byte_ty(ty)) { cg_movb_imm_m(v, 5, vo.offset); }
+        else { cg_movq_imm_m(v, 5, vo.offset); }
     } else {
-        emit(vo.name);
-        emit("(%rip)\n");
+        if (is_byte_ty(ty)) { cg_movb_imm_rip(v, vo.name); }
+        else { cg_movq_imm_rip(v, vo.name); }
     }
 }
 
@@ -4053,10 +4009,10 @@ gen_load(n: *Expr) raises Error {
 
 gen_binop_setup(lhs: *Expr, rhs: *Expr) raises Error {
     gen_expr(lhs);
-    emit("  push %rax\n");
+    cg_push(0);
     gen_expr(rhs);
-    emit("  mov %rax, %rdi\n");
-    emit("  pop %rax\n");
+    cg_mov_rr(0, 7);
+    cg_pop(0);
 }
 
 /* Immediate integer operand for codegen (numeric literal or null). */
@@ -4080,33 +4036,33 @@ imm_value(n: *Expr): int {
 }
 
 gen_cmp_set(setcc: *i8) {
-    emit("  ");
-    emit(setcc);
-    emit(" %al\n");
-    emit("  movzb %al, %rax\n");
+    cc: int = 4;
+    if (cli_streq(setcc, "setne")) { cc = 5; }
+    if (cli_streq(setcc, "setl")) { cc = 12; }
+    if (cli_streq(setcc, "setge")) { cc = 13; }
+    if (cli_streq(setcc, "setle")) { cc = 14; }
+    if (cli_streq(setcc, "setg")) { cc = 15; }
+    cg_setcc(cc);
+    cg_movzb_al_rax();
 }
 
 gen_cmp(lhs: *Expr, rhs: *Expr, setcc: *i8) raises Error {
     if (imm_operand(rhs) != 0 && fits_imm32(imm_value(rhs))) {
         gen_expr(lhs);
-        emit("  cmp $");
-        emit_num(imm_value(rhs));
-        emit(", %rax\n");
+        cg_alu_imm(7, imm_value(rhs), 0);
         gen_cmp_set(setcc);
         return;
     }
     if (imm_operand(lhs) != 0 && fits_imm32(imm_value(lhs))) {
         gen_expr(rhs);
-        emit("  mov %rax, %rdi\n");
-        emit("  mov $");
-        emit_num(imm_value(lhs));
-        emit(", %rax\n");
-        emit("  cmp %rdi, %rax\n");
+        cg_mov_rr(0, 7);
+        cg_mov_imm(imm_value(lhs), 0);
+        cg_alu_rr(57, 7, 0);
         gen_cmp_set(setcc);
         return;
     }
     gen_binop_setup(lhs, rhs);
-    emit("  cmp %rdi, %rax\n");
+    cg_alu_rr(57, 7, 0);
     gen_cmp_set(setcc);
 }
 
@@ -4117,9 +4073,7 @@ gen_binary(op: BinOp, lhs: *Expr, rhs: *Expr) raises Error {
                 gen_expr(lhs);
                 v: int = imm_value(rhs);
                 if (v != 0) {
-                    emit("  add $");
-                    emit_num(v);
-                    emit(", %rax\n");
+                    cg_alu_imm(0, v, 0);
                 }
                 return;
             }
@@ -4127,14 +4081,12 @@ gen_binary(op: BinOp, lhs: *Expr, rhs: *Expr) raises Error {
                 gen_expr(rhs);
                 v2: int = imm_value(lhs);
                 if (v2 != 0) {
-                    emit("  add $");
-                    emit_num(v2);
-                    emit(", %rax\n");
+                    cg_alu_imm(0, v2, 0);
                 }
                 return;
             }
             gen_binop_setup(lhs, rhs);
-            emit("  add %rdi, %rax\n");
+            cg_alu_rr(1, 7, 0);
             return;
         }
         Sub -> {
@@ -4142,65 +4094,55 @@ gen_binary(op: BinOp, lhs: *Expr, rhs: *Expr) raises Error {
                 gen_expr(lhs);
                 v3: int = imm_value(rhs);
                 if (v3 != 0) {
-                    emit("  sub $");
-                    emit_num(v3);
-                    emit(", %rax\n");
+                    cg_alu_imm(5, v3, 0);
                 }
                 return;
             }
             gen_binop_setup(lhs, rhs);
-            emit("  sub %rdi, %rax\n");
+            cg_alu_rr(41, 7, 0);
             return;
         }
         Mul -> {
             if (imm_operand(rhs) != 0 && fits_imm32(imm_value(rhs))) {
                 gen_expr(lhs);
-                emit("  imul $");
-                emit_num(imm_value(rhs));
-                emit(", %rax\n");
+                cg_imul_imm(imm_value(rhs), 0);
                 return;
             }
             if (imm_operand(lhs) != 0 && fits_imm32(imm_value(lhs))) {
                 gen_expr(rhs);
-                emit("  imul $");
-                emit_num(imm_value(lhs));
-                emit(", %rax\n");
+                cg_imul_imm(imm_value(lhs), 0);
                 return;
             }
             gen_binop_setup(lhs, rhs);
-            emit("  imul %rdi, %rax\n");
+            cg_imul_rr(7, 0);
             return;
         }
         Div -> {
             if (imm_operand(rhs) != 0) {
                 gen_expr(lhs);
-                emit("  mov $");
-                emit_num(imm_value(rhs));
-                emit(", %rdi\n");
-                emit("  cqo\n");
-                emit("  idiv %rdi\n");
+                cg_mov_imm(imm_value(rhs), 7);
+                cg_cqo();
+                cg_idiv(7);
                 return;
             }
             gen_binop_setup(lhs, rhs);
-            emit("  cqo\n");
-            emit("  idiv %rdi\n");
+            cg_cqo();
+            cg_idiv(7);
             return;
         }
         Mod -> {
             if (imm_operand(rhs) != 0) {
                 gen_expr(lhs);
-                emit("  mov $");
-                emit_num(imm_value(rhs));
-                emit(", %rdi\n");
-                emit("  cqo\n");
-                emit("  idiv %rdi\n");
-                emit("  mov %rdx, %rax\n");
+                cg_mov_imm(imm_value(rhs), 7);
+                cg_cqo();
+                cg_idiv(7);
+                cg_mov_rr(2, 0);
                 return;
             }
             gen_binop_setup(lhs, rhs);
-            emit("  cqo\n");
-            emit("  idiv %rdi\n");
-            emit("  mov %rdx, %rax\n");
+            cg_cqo();
+            cg_idiv(7);
+            cg_mov_rr(2, 0);
             return;
         }
         Eq -> { gen_cmp(lhs, rhs, "sete"); return; }
@@ -4216,17 +4158,13 @@ gen_expr(n: *Expr) raises Error {
     match n.kind {
         Num k -> {
             if (k.str_label != 0) {
-                emit("  lea .L.str");
-                emit_num(k.str_label - 1);
-                emit("+8(%rip), %rax\n");
+                cg_lea_rip(cg_name_num(".L.str", k.str_label - 1), 8, 0);
             } else {
-                emit("  mov $");
-                emit_num(k.val);
-                emit(", %rax\n");
+                cg_mov_imm(k.val, 0);
             }
             return;
         }
-        Null -> { emit("  mov $0, %rax\n"); return; }
+        Null -> { cg_mov_imm(0, 0); return; }
         Var _p -> { gen_load(n); return; }
         MemberAccess _p -> { gen_load(n); return; }
         Addr k -> { gen_addr(k.lhs); return; }
@@ -4240,36 +4178,30 @@ gen_expr(n: *Expr) raises Error {
             if (lhs != null) {
                 gen_expr(lhs);
                 if (esz != 1) {
-                    emit("  imul $");
-                    emit_num(esz);
-                    emit(", %rax\n");
+                    cg_imul_imm(esz, 0);
                 }
-                emit("  mov %rax, %rdi\n");
-                emit("  call malloc\n");
+                cg_mov_rr(0, 7);
+                cg_call("malloc");
                 return;
             }
-            emit("  mov $");
-            emit_num(esz);
-            emit(", %rdi\n");
-            emit("  call malloc\n");
+            cg_mov_imm(esz, 7);
+            cg_call("malloc");
             variant: ?*Variant = k.variant;
             if (variant != null) {
-                emit("  push %rbx\n");
-                emit("  mov %rax, %rbx\n");
-                emit("  mov $");
-                emit_num(k.val);
-                emit(", %rdi\n");
-                emit("  mov %rdi, (%rax)\n");
+                cg_push(3);
+                cg_mov_rr(0, 3);
+                cg_mov_imm(k.val, 7);
+                cg_mov_rm(7, 0, 0);
                 gen_variant_inits(k.inits);
-                emit("  mov %rbx, %rax\n");
-                emit("  pop %rbx\n");
+                cg_mov_rr(3, 0);
+                cg_pop(3);
             } else {
                 if (k.val == 0) {
-                    emit("  push %rbx\n");
-                    emit("  mov %rax, %rbx\n");
+                    cg_push(3);
+                    cg_mov_rr(0, 3);
                     gen_struct_inits(k.inits);
-                    emit("  mov %rbx, %rax\n");
-                    emit("  pop %rbx\n");
+                    cg_mov_rr(3, 0);
+                    cg_pop(3);
                 }
             }
             return;
@@ -4278,14 +4210,12 @@ gen_expr(n: *Expr) raises Error {
             sz: int = type_size(expect_type(n.ty, "missing type"));
             if (sz <= 0) { sz = 8; }
             sz = (sz + 15) / 16 * 16;
-            emit("  sub $");
-            emit_num(sz);
-            emit(", %rsp\n");
-            emit("  push %rbx\n");
-            emit("  lea 8(%rsp), %rbx\n");
+            cg_alu_imm(5, sz, 4);
+            cg_push(3);
+            cg_lea_mr(4, 8, 3);
             gen_struct_inits(k.inits);
-            emit("  mov %rbx, %rax\n");
-            emit("  pop %rbx\n");
+            cg_mov_rr(3, 0);
+            cg_pop(3);
             return;
         }
         VariantLit k -> {
@@ -4293,36 +4223,28 @@ gen_expr(n: *Expr) raises Error {
             if (sz <= 0) { sz = 8; }
             if (sz <= 8) {
                 if (k.inits == null) {
-                    emit("  mov $");
-                    emit_num(k.val);
-                    emit(", %rax\n");
+                    cg_mov_imm(k.val, 0);
                     return;
                 }
-                emit("  sub $16, %rsp\n");
-                emit("  push %rbx\n");
-                emit("  lea 8(%rsp), %rbx\n");
-                emit("  mov $");
-                emit_num(k.val);
-                emit(", %rdi\n");
-                emit("  mov %rdi, (%rbx)\n");
+                cg_alu_imm(5, 16, 4);
+                cg_push(3);
+                cg_lea_mr(4, 8, 3);
+                cg_mov_imm(k.val, 7);
+                cg_mov_rm(7, 3, 0);
                 gen_variant_inits(k.inits);
-                emit("  mov (%rbx), %rax\n");
-                emit("  pop %rbx\n");
+                cg_mov_mr(3, 0, 0);
+                cg_pop(3);
                 return;
             }
             sz = (sz + 15) / 16 * 16;
-            emit("  sub $");
-            emit_num(sz);
-            emit(", %rsp\n");
-            emit("  push %rbx\n");
-            emit("  lea 8(%rsp), %rbx\n");
-            emit("  mov $");
-            emit_num(k.val);
-            emit(", %rdi\n");
-            emit("  mov %rdi, (%rbx)\n");
+            cg_alu_imm(5, sz, 4);
+            cg_push(3);
+            cg_lea_mr(4, 8, 3);
+            cg_mov_imm(k.val, 7);
+            cg_mov_rm(7, 3, 0);
             gen_variant_inits(k.inits);
-            emit("  mov %rbx, %rax\n");
-            emit("  pop %rbx\n");
+            cg_mov_rr(3, 0);
+            cg_pop(3);
             return;
         }
         Deref k -> {
@@ -4336,11 +4258,11 @@ gen_expr(n: *Expr) raises Error {
                     lty: ?*Type = q.lhs.ty;
                     if (lty != null && is_struct_ty(lty)) {
                         gen_addr(q.lhs);
-                        emit("  push %rbx\n");
-                        emit("  mov %rax, %rbx\n");
+                        cg_push(3);
+                        cg_mov_rr(0, 3);
                         gen_struct_inits(k.inits);
-                        emit("  mov %rbx, %rax\n");
-                        emit("  pop %rbx\n");
+                        cg_mov_rr(3, 0);
+                        cg_pop(3);
                         return;
                     }
                 }
@@ -4348,15 +4270,13 @@ gen_expr(n: *Expr) raises Error {
                     lty2: ?*Type = q.lhs.ty;
                     if (lty2 != null && is_enum_ty(lty2)) {
                         gen_addr(q.lhs);
-                        emit("  push %rbx\n");
-                        emit("  mov %rax, %rbx\n");
-                        emit("  mov $");
-                        emit_num(k.val);
-                        emit(", %rdi\n");
-                        emit("  mov %rdi, (%rax)\n");
+                        cg_push(3);
+                        cg_mov_rr(0, 3);
+                        cg_mov_imm(k.val, 7);
+                        cg_mov_rm(7, 0, 0);
                         gen_variant_inits(k.inits);
-                        emit("  mov %rbx, %rax\n");
-                        emit("  pop %rbx\n");
+                        cg_mov_rr(3, 0);
+                        cg_pop(3);
                         return;
                     }
                 }
@@ -4388,56 +4308,56 @@ gen_expr(n: *Expr) raises Error {
                     _ -> {}
                 }
             }
-            emit("  push %rax\n");
+            cg_push(0);
             gen_addr(q.lhs);
-            emit("  mov %rax, %rdi\n");
-            emit("  pop %rsi\n");
+            cg_mov_rr(0, 7);
+            cg_pop(6);
             if (passes_by_ref(lhs_ty)) {
                 emit_memcpy(type_size(lhs_ty));
-                emit("  mov %rdi, %rax\n");
+                cg_mov_rr(7, 0);
             } else {
-                emit("  mov %rsi, %rax\n");
+                cg_mov_rr(6, 0);
                 store_mem(lhs_ty);
             }
             return;
         }
         Not k -> {
             gen_expr(k.lhs);
-            emit("  cmp $0, %rax\n");
-            emit("  sete %al\n");
-            emit("  movzb %al, %rax\n");
+            cg_alu_imm(7, 0, 0);
+            cg_setcc(4);
+            cg_movzb_al_rax();
             return;
         }
-        Neg k -> { gen_expr(k.lhs); emit("  neg %rax\n"); return; }
+        Neg k -> { gen_expr(k.lhs); cg_neg(0); return; }
         LogAnd k -> {
             l: int = new_label();
             gen_expr(k.lhs);
-            emit("  cmp $0, %rax\n");
-            emit("  je .L.false"); emit_num(l); emit("\n");
+            cg_alu_imm(7, 0, 0);
+            cg_jump(4, cg_name_num(".L.false", l));
             gen_expr(k.rhs);
-            emit("  cmp $0, %rax\n");
-            emit("  je .L.false"); emit_num(l); emit("\n");
-            emit("  mov $1, %rax\n");
-            emit("  jmp .L.end"); emit_num(l); emit("\n");
-            emit(".L.false"); emit_num(l); emit(":\n");
-            emit("  mov $0, %rax\n");
-            emit(".L.end"); emit_num(l); emit(":\n");
+            cg_alu_imm(7, 0, 0);
+            cg_jump(4, cg_name_num(".L.false", l));
+            cg_mov_imm(1, 0);
+            cg_jump(0 - 1, cg_name_num(".L.end", l));
+            cg_label(cg_name_num(".L.false", l));
+            cg_mov_imm(0, 0);
+            cg_label(cg_name_num(".L.end", l));
             return;
         }
         LogOr k -> {
             l2: int = new_label();
             gen_expr(k.lhs);
-            emit("  cmp $0, %rax\n");
-            emit("  jne .L.true"); emit_num(l2); emit("\n");
+            cg_alu_imm(7, 0, 0);
+            cg_jump(5, cg_name_num(".L.true", l2));
             gen_expr(k.rhs);
-            emit("  cmp $0, %rax\n");
-            emit("  je .L.false"); emit_num(l2); emit("\n");
-            emit(".L.true"); emit_num(l2); emit(":\n");
-            emit("  mov $1, %rax\n");
-            emit("  jmp .L.end"); emit_num(l2); emit("\n");
-            emit(".L.false"); emit_num(l2); emit(":\n");
-            emit("  mov $0, %rax\n");
-            emit(".L.end"); emit_num(l2); emit(":\n");
+            cg_alu_imm(7, 0, 0);
+            cg_jump(4, cg_name_num(".L.false", l2));
+            cg_label(cg_name_num(".L.true", l2));
+            cg_mov_imm(1, 0);
+            cg_jump(0 - 1, cg_name_num(".L.end", l2));
+            cg_label(cg_name_num(".L.false", l2));
+            cg_mov_imm(0, 0);
+            cg_label(cg_name_num(".L.end", l2));
             return;
         }
         Funcall k -> {
@@ -4459,30 +4379,24 @@ gen_expr(n: *Expr) raises Error {
                 sz: int = type_size(expect_type(fno.return_ty, "missing return type"));
                 if (sz <= 0) { sz = 8; }
                 sz = (sz + 15) / 16 * 16;
-                emit("  sub $");
-                emit_num(sz);
-                emit(", %rsp\n");
-                emit("  mov %rsp, %rax\n");
-                emit("  push %rax\n");
+                cg_alu_imm(5, sz, 4);
+                cg_mov_rr(4, 0);
+                cg_push(0);
             }
             a = k.args;
             while (a != null) {
                 gen_expr(a);
-                emit("  push %rax\n");
+                cg_push(0);
                 a = a.next;
             }
             i: int = nregs - 1;
             while (i >= 0) {
-                emit("  pop ");
-                emit(reg_name(i));
-                emit("\n");
+                cg_pop(cg_arg_reg(i));
                 i = i - 1;
             }
-            emit("  sub $8, %rsp\n");
-            emit("  call ");
-            emit(k.funcname);
-            emit("\n");
-            emit("  add $8, %rsp\n");
+            cg_alu_imm(5, 8, 4);
+            cg_call(k.funcname);
+            cg_alu_imm(0, 8, 4);
             return;
         }
         Binary k -> { gen_binary(k.op, k.lhs, k.rhs); return; }
@@ -4498,19 +4412,15 @@ gen_stmt(n: *Stmt) raises Error {
                 gen_expr(lhs);
                 sret: ?*Obj = current_sret;
                 if (sret != null) {
-                    emit("  mov %rax, %rsi\n");
-                    emit("  mov ");
-                    emit_num(sret.offset);
-                    emit("(%rbp), %rdi\n");
+                    cg_mov_rr(0, 6);
+                    cg_mov_mr(5, sret.offset, 7);
                     emit_memcpy(type_size(expect_type(current_return_ty, "missing return type")));
-                    emit("  mov %rdi, %rax\n");
+                    cg_mov_rr(7, 0);
                 }
-            } else { emit("  mov $0, %rax\n"); }
-            emit("  jmp .L.return.");
+            } else { cg_mov_imm(0, 0); }
             fname: ?*i8 = current_fn_name;
             if (fname == null) { error("missing fn name"); }
-            emit(fname);
-            emit("\n");
+            cg_jump(0 - 1, cg_name_pair(".L.return.", fname));
             return;
         }
         ExprStmt k -> {
@@ -4528,27 +4438,27 @@ gen_stmt(n: *Stmt) raises Error {
         If k -> {
             l: int = new_label();
             gen_expr(k.cond);
-            emit("  cmp $0, %rax\n");
-            emit("  je .L.else"); emit_num(l); emit("\n");
+            cg_alu_imm(7, 0, 0);
+            cg_jump(4, cg_name_num(".L.else", l));
             gen_stmt(k.then);
-            emit("  jmp .L.end"); emit_num(l); emit("\n");
-            emit(".L.else"); emit_num(l); emit(":\n");
+            cg_jump(0 - 1, cg_name_num(".L.end", l));
+            cg_label(cg_name_num(".L.else", l));
             els: ?*Stmt = k.els;
             if (els != null) {
                 gen_stmt(els);
             }
-            emit(".L.end"); emit_num(l); emit(":\n");
+            cg_label(cg_name_num(".L.end", l));
             return;
         }
         While k -> {
             l2: int = new_label();
-            emit(".L.begin"); emit_num(l2); emit(":\n");
+            cg_label(cg_name_num(".L.begin", l2));
             gen_expr(k.cond);
-            emit("  cmp $0, %rax\n");
-            emit("  je .L.end"); emit_num(l2); emit("\n");
+            cg_alu_imm(7, 0, 0);
+            cg_jump(4, cg_name_num(".L.end", l2));
             gen_stmt(k.body);
-            emit("  jmp .L.begin"); emit_num(l2); emit("\n");
-            emit(".L.end"); emit_num(l2); emit(":\n");
+            cg_jump(0 - 1, cg_name_num(".L.begin", l2));
+            cg_label(cg_name_num(".L.end", l2));
             return;
         }
         Match k -> {
@@ -4559,127 +4469,91 @@ gen_stmt(n: *Stmt) raises Error {
                 Deref _p -> { gen_addr(k.cond); }
                 _ -> { gen_expr(k.cond); }
             }
-            emit("  push %rax\n");
-            emit("  mov (%rax), %rax\n");
-            emit("  push %rax\n");
+            cg_push(0);
+            cg_mov_mr(0, 0, 0);
+            cg_push(0);
             arm: ?*MatchArm = k.arms;
             while (arm != null) {
                 la: int = new_label();
                 av: ?*Variant = arm.variant;
                 if (av != null) {
-                    emit("  mov (%rsp), %rax\n");
-                    emit("  cmp $");
-                    emit_num(av.tag);
-                    emit(", %rax\n");
-                    emit("  jne .L.arm");
-                    emit_num(la);
-                    emit("\n");
+                    cg_mov_mr(4, 0, 0);
+                    cg_alu_imm(7, av.tag, 0);
+                    cg_jump(5, cg_name_num(".L.arm", la));
                 }
                 bv: ?*Obj = arm.binder;
                 if (bv != null) {
                     if (av == null) { error("missing variant"); }
                     psz: int = av.payload_size;
-                    emit("  mov 8(%rsp), %rsi\n");
-                    emit("  add $8, %rsi\n");
-                    emit("  lea ");
-                    emit_num(bv.offset);
-                    emit("(%rbp), %rdi\n");
+                    cg_mov_mr(4, 8, 6);
+                    cg_alu_imm(0, 8, 6);
+                    cg_lea_mr(5, bv.offset, 7);
                     emit_memcpy(psz);
                 }
                 gen_stmt(arm.body);
-                emit("  jmp .L.matchend");
-                emit_num(l3);
-                emit("\n");
+                cg_jump(0 - 1, cg_name_num(".L.matchend", l3));
                 if (av != null) {
-                    emit(".L.arm");
-                    emit_num(la);
-                    emit(":\n");
+                    cg_label(cg_name_num(".L.arm", la));
                 }
                 arm = arm.next;
             }
-            emit("  mov $1, %rdi\n");
-            emit("  call exit\n");
-            emit(".L.matchend");
-            emit_num(l3);
-            emit(":\n");
-            emit("  add $16, %rsp\n");
+            cg_mov_imm(1, 7);
+            cg_call("exit");
+            cg_label(cg_name_num(".L.matchend", l3));
+            cg_alu_imm(0, 16, 4);
             return;
         }
         Raise k -> {
             if (k.exn.members != null) {
                 esz: int = k.exn.size;
                 if (esz <= 0) { esz = 8; }
-                emit("  mov $");
-                emit_num(esz);
-                emit(", %rdi\n");
-                emit("  call malloc\n");
-                emit("  push %rbx\n");
-                emit("  mov %rax, %rbx\n");
+                cg_mov_imm(esz, 7);
+                cg_call("malloc");
+                cg_push(3);
+                cg_mov_rr(0, 3);
                 gen_struct_inits(k.inits);
-                emit("  mov %rbx, %rsi\n");
-                emit("  pop %rbx\n");
-            } else { emit("  mov $0, %rsi\n"); }
-            emit("  mov $");
-            emit_num(k.exn.tag);
-            emit(", %rdi\n");
-            emit("  call l8_raise\n");
+                cg_mov_rr(3, 6);
+                cg_pop(3);
+            } else { cg_mov_imm(0, 6); }
+            cg_mov_imm(k.exn.tag, 7);
+            cg_call("l8_raise");
             return;
         }
         Try k -> {
             l4: int = new_label();
-            emit("  lea ");
-            emit_num(k.buf.offset);
-            emit("(%rbp), %rdi\n");
-            emit("  call l8_try_begin\n");
-            emit("  cmp $0, %rax\n");
-            emit("  jne .L.catch");
-            emit_num(l4);
-            emit("\n");
+            cg_lea_mr(5, k.buf.offset, 7);
+            cg_call("l8_try_begin");
+            cg_alu_imm(7, 0, 0);
+            cg_jump(5, cg_name_num(".L.catch", l4));
             gen_stmt(k.body);
-            emit("  call l8_try_end\n");
-            emit("  jmp .L.tryend");
-            emit_num(l4);
-            emit("\n");
-            emit(".L.catch");
-            emit_num(l4);
-            emit(":\n");
+            cg_call("l8_try_end");
+            cg_jump(0 - 1, cg_name_num(".L.tryend", l4));
+            cg_label(cg_name_num(".L.catch", l4));
             arm2: ?*CatchArm = k.arms;
             while (arm2 != null) {
                 la2: int = new_label();
                 ced: *ExnDef = arm2.exn;
-                emit("  mov l8_exc_tag(%rip), %rax\n");
-                emit("  cmp $");
-                emit_num(ced.tag);
-                emit(", %rax\n");
-                emit("  jne .L.arm");
-                emit_num(la2);
-                emit("\n");
+                cg_mov_rip_r("l8_exc_tag", 0, 0);
+                cg_alu_imm(7, ced.tag, 0);
+                cg_jump(5, cg_name_num(".L.arm", la2));
                 binder: ?*Obj = arm2.binder;
                 if (binder != null) {
                     psz2: int = ced.size;
                     if (psz2 > 0) {
-                        emit("  mov l8_exc_ptr(%rip), %rsi\n");
-                        emit("  lea ");
-                        emit_num(binder.offset);
-                        emit("(%rbp), %rdi\n");
+                        cg_mov_rip_r("l8_exc_ptr", 0, 6);
+                        cg_lea_mr(5, binder.offset, 7);
                         emit_memcpy(psz2);
                     }
                 }
                 gen_stmt(arm2.body);
-                emit("  jmp .L.tryend");
-                emit_num(l4);
-                emit("\n");
-                emit(".L.arm");
-                emit_num(la2);
-                emit(":\n");
+                cg_jump(0 - 1, cg_name_num(".L.tryend", l4));
+                cg_label(cg_name_num(".L.arm", la2));
                 arm2 = arm2.next;
             }
-            emit("  mov l8_exc_tag(%rip), %rdi\n");
-            emit("  mov l8_exc_ptr(%rip), %rsi\n");
-            emit("  call l8_raise\n");
-            emit(".L.tryend");
-            emit_num(l4);
-            emit(":\n");
+            cg_mov_rip_r("l8_exc_tag", 0, 7);
+            cg_mov_rip_r("l8_exc_ptr", 0, 6);
+            cg_call("l8_raise");
+            cg_label(cg_name_num(".L.tryend", l4));
             return;
         }
         _ -> { error("invalid statement"); }
@@ -4705,23 +4579,21 @@ assign_lvar_offsets(fn: *Function) raises Error {
 
 emit_data() raises Error {
     g: ?*Obj = globals;
-    emit(".section .bss\n");
-    emit(".align 8\n");
+    cg_section(as_SEC_BSS);
+    cg_align(8);
     while (g != null) {
         if (g.is_func == 0) {
             sz: int = 8;
             gty: ?*Type = g.ty;
             if (gty != null) { sz = type_size(gty); }
             if (sz <= 0) { sz = 8; }
-            emit(g.name);
-            emit(": .skip ");
-            emit_num(sz);
-            emit("\n");
+            cg_label(g.name);
+            cg_skip(sz);
         }
         g = g.next;
     }
-    emit(".section .rodata\n");
-    emit(".align 8\n");
+    cg_section(as_SEC_RODATA);
+    cg_align(8);
     i: int = 0;
     while (i < str_count) {
         s: ?*StrLit = str_lits;
@@ -4733,23 +4605,9 @@ emit_data() raises Error {
             } else { s = null; }
         }
         if (found != null) {
-            emit(".L.str");
-            emit_num(i);
-            emit(":\n");
-            emit("  .quad ");
-            emit_num(found.len);
-            emit("\n");
-            emit("  .byte ");
-            j: int = 0;
-            while (j < found.len) {
-                if (j != 0) { emit(","); }
-                emit_num(found.data[j] as int);
-                j = j + 1;
-            }
-            if (found.len == 0) {
-                emit("0");
-            } else { emit(",0"); }
-            emit("\n");
+            cg_label(cg_name_num(".L.str", i));
+            cg_quad(found.len);
+            cg_bytes(found.data, found.len);
         }
         i = i + 1;
     }
@@ -4757,7 +4615,7 @@ emit_data() raises Error {
 
 emit_text() raises Error {
     fn: ?*Function = functions;
-    emit(".section .text\n");
+    cg_section(as_SEC_TEXT);
     while (fn != null) {
         narrow_top = null;
         catch_top = null;
@@ -4766,24 +4624,15 @@ emit_text() raises Error {
         current_return_ty = fn.return_ty;
         current_sret = fn.sret;
         current_fn = fn;
-        emit(".globl ");
-        emit(fn.name);
-        emit("\n");
-        emit(fn.name);
-        emit(":\n");
-        emit("  push %rbp\n");
-        emit("  mov %rsp, %rbp\n");
-        emit("  sub $");
-        emit_num(fn.stack_size);
-        emit(", %rsp\n");
+        cg_global(fn.name);
+        cg_label(fn.name);
+        cg_push(5);
+        cg_mov_rr(4, 5);
+        cg_alu_imm(5, fn.stack_size, 4);
         ri: int = 0;
         sret: ?*Obj = fn.sret;
         if (sret != null) {
-            emit("  mov ");
-            emit(reg_name(ri));
-            emit(", ");
-            emit_num(sret.offset);
-            emit("(%rbp)\n");
+            cg_mov_rm(cg_arg_reg(ri), 5, sret.offset);
             ri = ri + 1;
         }
         /* Spill all argregs first; by-ref memcpy clobbers %rsi/%rdi/%rax. */
@@ -4793,11 +4642,7 @@ emit_text() raises Error {
             po: ?*Obj = fn_param(fn, i);
             if (po == null) { error("null obj"); }
             p: *Obj = po;
-            emit("  mov ");
-            emit(reg_name(ri));
-            emit(", ");
-            emit_num(p.offset);
-            emit("(%rbp)\n");
+            cg_mov_rm(cg_arg_reg(ri), 5, p.offset);
             ri = ri + 1;
             i = i + 1;
         }
@@ -4810,12 +4655,8 @@ emit_text() raises Error {
             pty: ?*Type = p2.ty;
             if (pty == null) { error("missing param type"); }
             if (passes_by_ref(pty)) {
-                emit("  mov ");
-                emit_num(p2.offset);
-                emit("(%rbp), %rsi\n");
-                emit("  lea ");
-                emit_num(p2.offset);
-                emit("(%rbp), %rdi\n");
+                cg_mov_mr(5, p2.offset, 6);
+                cg_lea_mr(5, p2.offset, 7);
                 emit_memcpy(type_size(pty));
             }
             ri = ri + 1;
@@ -4824,12 +4665,10 @@ emit_text() raises Error {
         body: ?*Stmt = fn.body;
         if (body == null) { error("missing body"); }
         gen_stmt(body);
-        emit(".L.return.");
-        emit(fn.name);
-        emit(":\n");
-        emit("  mov %rbp, %rsp\n");
-        emit("  pop %rbp\n");
-        emit("  ret\n");
+        cg_label(cg_name_pair(".L.return.", fn.name));
+        cg_mov_rr(5, 4);
+        cg_pop(5);
+        cg_ret();
         fn = fn.next;
     }
 }
@@ -4837,7 +4676,7 @@ emit_text() raises Error {
 codegen() raises Error {
     emit_data();
     emit_text();
-    emit_flush();
+    if (cg_direct_mode == 0) { emit_flush(); }
 }
 
 type Timespec = { sec: int; nsec: int; };
@@ -4871,8 +4710,35 @@ is_profile_flag(s: *i8): bool {
     return false;
 }
 
+compiler_build_direct(src_path: *i8): int {
+    try {
+        do_profile = 0;
+        cg_direct_mode = 1;
+        as_init();
+        init_runtime();
+        init_dummies();
+        source = "";
+        source_len = 0;
+        source_path = src_path;
+        tok = token_eof;
+        parse_program(src_path);
+        typecheck_program();
+        check_unused_functions();
+        check_unused_locals();
+        check_raises_functions();
+        check_noreturn_functions();
+        codegen();
+        as_assemble_file_append("runtime.s");
+        return 0;
+    } with Error e -> {
+        print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);
+        return 1;
+    }
+}
+
 compiler_main(argc: int, argv: **i8): int {
     try {
+        cg_direct_mode = 0;
         do_profile = 0;
         path: ?*i8 = null;
         ai: int = 1;
@@ -4901,6 +4767,7 @@ compiler_main(argc: int, argv: **i8): int {
             t0 = mono_ns();
             prev = t0;
         }
+        as_init();
         init_runtime();
         init_dummies();
         if (do_profile != 0) {

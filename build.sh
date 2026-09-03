@@ -118,12 +118,40 @@ run_examples() {
   example "$tool" imports examples/imports/main.l8 'Hi'
 }
 
+direct_example() {
+  local tool="$1" name="$2" src="$3" expected="$4"
+  local bin="$BUILD/build-${name}"
+  "./$tool" build "$src" -o "$bin"
+  run_expect "$bin" "$expected"
+}
+
+# Exercise the typed AST→assembler→ET_EXEC path independently of compile/as/elfpack.
+run_build_examples() {
+  local tool="$1"
+  direct_example "$tool" hello   examples/hello.l8   'Hi'
+  direct_example "$tool" fib     examples/fib.l8     '55'
+  direct_example "$tool" logic   examples/logic.l8   'YYYY'
+  direct_example "$tool" struct  examples/struct.l8  '3 12 13'
+  direct_example "$tool" string  examples/string.l8  'Hi'
+  direct_example "$tool" i8      examples/i8.l8      'Hi'
+  direct_example "$tool" bool    examples/bool.l8    'TY10'
+  direct_example "$tool" enum    examples/enum.l8    '9 10 0 3 0'
+  direct_example "$tool" forward examples/forward.l8 '7'
+  direct_example "$tool" null    examples/null.l8    'YYYY'
+  direct_example "$tool" newarr  examples/newarr.l8  'Hi'
+  direct_example "$tool" narrow  examples/narrow.l8  'YYYY'
+  direct_example "$tool" nestsum examples/nestsum.l8 '1 2 3 9 4 5 6 7'
+  direct_example "$tool" noreturn examples/noreturn.l8 'Hi'
+  direct_example "$tool" exc     examples/exc.l8     'Hi'
+  direct_example "$tool" imports examples/imports/main.l8 'Hi'
+}
+
 require_bootstrap() {
   [[ -f bootstrap ]] || die "bootstrap executable missing (see BOOTSTRAP.md)"
 }
 
 do_clean() {
-  rm -f l8c0 l8c1 l8c2 l8c3 l8
+  rm -f l8c0 l8c1 l8c2 l8c3 l8c4 l8
   rm -f examples/hello examples/fib examples/logic examples/struct examples/string examples/i8 examples/bool examples/enum examples/forward examples/null examples/newarr examples/narrow examples/nestsum examples/noreturn examples/exc
   rm -f examples/*.s
   rm -rf "$BUILD"
@@ -147,9 +175,9 @@ do_examples() {
   step 'examples [l8c0]' run_examples l8c0
 }
 
-# Stage-1: bootstrap compiles the unified src1 tree → l8c1.
-# Stage-2: l8c1 compiles the unified src2 tree → l8c2.
-# Fixpoint: l8c2 and l8c3 recompile src2; require identical assembly.
+# Stage-1: bootstrap compiles the stable src1 tree → l8c1.
+# Stage-2: l8c1 builds src2 through the legacy pipeline → l8c2.
+# Fixpoint: stage-2 binaries rebuild src2 directly with no .s/.o intermediates.
 do_selfhost() {
   ensure_build_dir
   [[ -x ./l8c0 ]] || do_bootstrap
@@ -164,15 +192,13 @@ do_selfhost() {
   step 'stage2 assemble (l8c2)'        assemble_rt l8c1 "$BUILD/l8c2.s" "$(obj_for l8c2)"
   step 'stage2 elfpack  (l8c2)'        pack_l8 l8c1 "$(obj_for l8c2)" l8c2
 
-  step 'stage3 compile  (l8c2 → src2)' compile_l8 l8c2 src2/main.l8 "$BUILD/l8c3.s"
-  step 'stage3 assemble (l8c3)'        assemble_rt l8c2 "$BUILD/l8c3.s" "$(obj_for l8c3)"
-  step 'stage3 elfpack  (l8c3)'        pack_l8 l8c2 "$(obj_for l8c3)" l8c3
-
-  step 'stage4 compile  (l8c3 → src2)' compile_l8 l8c3 src2/main.l8 "$BUILD/l8c4.s"
-  step 'verify stage3 == stage4'               diff -q "$BUILD/l8c3.s" "$BUILD/l8c4.s"
-  step 'verify stage2 exe == stage3 exe'       cmp -s l8c2 l8c3
+  step 'stage3 direct   (l8c2 → src2)' ./l8c2 build src2/main.l8 -o l8c3
+  step 'stage4 direct   (l8c3 → src2)' ./l8c3 build src2/main.l8 -o l8c4
+  step 'verify stage2 exe == stage3 exe' cmp -s l8c2 l8c3
+  step 'verify stage3 exe == stage4 exe' cmp -s l8c3 l8c4
 
   step 'examples [l8c3]' run_examples l8c3
+  step 'build examples [l8c3]' run_build_examples l8c3
   cp l8c3 l8
 }
 
@@ -251,7 +277,7 @@ Commands:
   all             Install bootstrap, examples, two-stage self-host (default)
   bootstrap       Copy the saved bootstrap executable → l8c0
   examples        Run example programs via l8c0
-  selfhost        src1 → l8c1; src2 → l8c2; fixpoint l8c3==l8c4; examples
+  selfhost        src1 → l8c1; src2 → l8c2; direct fixpoint l8c3==l8c4; examples
   promote-bin1    Copy the stage-1 executable → bootstrap
   promote-bin2    Copy the stage-2 fixpoint executable → bootstrap
   promote-source  Replace src1/ with src2/ (no bootstrap change)
@@ -261,7 +287,8 @@ Commands:
 
 --force   Skip the interactive promote confirmation (still requires artifacts).
 
-Compilation, assembly, and ELF packing are subcommands of each stage binary.
+Compilation, assembly, ELF packing, and direct executable building are
+subcommands of stage-2 binaries. Stage 1 remains bootstrap-compatible.
 The saved bootstrap is directly executable; cold start needs no host compiler.
 EOF
 }

@@ -143,6 +143,136 @@ pack_is_dash_o(pack_s: *i8): bool {
     return pack_s[0] == '-' && pack_s[1] == 'o' && pack_s[2] == 0 trunc i8;
 }
 
+// Pack the assembler builder directly. No ET_REL bytes are produced or parsed.
+pack_assembler_exec(pack_out_p: *i8) {
+    pack_PAGE = 4096;
+    pack_LOAD_BASE = 4194304;
+    pack_O_WRONLY = 1;
+    pack_O_CREAT = 64;
+    pack_O_TRUNC = 512;
+    pack_MODE_755 = 493;
+    pack_ET_EXEC = 2;
+    pack_EM_X86_64 = 62;
+    pack_PT_LOAD = 1;
+    pack_PF_X = 1;
+    pack_PF_W = 2;
+    pack_PF_R = 4;
+
+    pack_rx_off: int = pack_PAGE;
+    pack_text_off: int = pack_rx_off;
+    pack_rodata_off: int = pack_align_up(pack_text_off + as_text_len, 16);
+    pack_rx_end: int = pack_rodata_off + as_rodata_len;
+    pack_data_off: int = pack_align_up(pack_rx_end, pack_PAGE);
+    pack_file_end: int = pack_data_off + as_data_len;
+
+    pack_text_vma: int = pack_LOAD_BASE + pack_text_off;
+    pack_rodata_vma: int = pack_LOAD_BASE + pack_rodata_off;
+    pack_data_vma: int = pack_LOAD_BASE + pack_data_off;
+    pack_bss_vma: int = pack_align_up(pack_data_vma + as_data_len, 8);
+
+    pack_sym_addr: *int = new int[as_nsyms + 1];
+    pack_entry: int = 0;
+    pack_i: int = 0;
+    while (pack_i < as_nsyms) {
+        if (as_syms[pack_i].as_defined == 0) {
+            write(2, "elfpack: undefined symbol: ", len("elfpack: undefined symbol: "));
+            write(2, as_syms[pack_i].as_name, as_strlen0(as_syms[pack_i].as_name));
+            write(2, "\n", len("\n"));
+            exit(1);
+        }
+        pack_addr: int = as_syms[pack_i].as_val;
+        if (as_syms[pack_i].as_sec == as_SEC_TEXT) { pack_addr = pack_addr + pack_text_vma; }
+        else {
+            if (as_syms[pack_i].as_sec == as_SEC_RODATA) { pack_addr = pack_addr + pack_rodata_vma; }
+            else {
+                if (as_syms[pack_i].as_sec == as_SEC_DATA) { pack_addr = pack_addr + pack_data_vma; }
+                else {
+                    if (as_syms[pack_i].as_sec == as_SEC_BSS) { pack_addr = pack_addr + pack_bss_vma; }
+                    else {
+                        if (as_syms[pack_i].as_sec != as_SEC_ABS) { pack_fail("bad symbol section"); }
+                    }
+                }
+            }
+        }
+        pack_sym_addr[pack_i] = pack_addr;
+        if (pack_streq(as_syms[pack_i].as_name, "_start")) { pack_entry = pack_addr; }
+        pack_i = pack_i + 1;
+    }
+    if (pack_entry == 0) { pack_fail("missing _start"); }
+
+    pack_text: *i8 = new i8[as_text_len + 1];
+    pack_memcpy(pack_text, as_text_buf, as_text_len);
+    pack_i = 0;
+    while (pack_i < as_nrels) {
+        pack_rel: *as_Rel = &as_rels[pack_i];
+        if (pack_rel.as_typ != as_R_X86_64_PC32 && pack_rel.as_typ != as_R_X86_64_PLT32) {
+            pack_fail("unsupported reloc type");
+        }
+        if (pack_rel.as_off < 0 || pack_rel.as_off + 4 > as_text_len) { pack_fail("reloc out of range"); }
+        if (pack_rel.as_sym < 0 || pack_rel.as_sym >= as_nsyms) { pack_fail("bad reloc symbol"); }
+        pack_S: int = pack_sym_addr[pack_rel.as_sym];
+        pack_P: int = pack_text_vma + pack_rel.as_off;
+        pack_wr32(pack_text, pack_rel.as_off, pack_S + pack_rel.as_addend - pack_P);
+        pack_i = pack_i + 1;
+    }
+
+    pack_out: *i8 = new i8[pack_file_end];
+    pack_memset0(pack_out, pack_file_end);
+    pack_out[0] = 127 trunc i8;
+    pack_out[1] = 'E';
+    pack_out[2] = 'L';
+    pack_out[3] = 'F';
+    pack_out[4] = 2 trunc i8;
+    pack_out[5] = 1 trunc i8;
+    pack_out[6] = 1 trunc i8;
+    pack_wr16(pack_out, 16, pack_ET_EXEC);
+    pack_wr16(pack_out, 18, pack_EM_X86_64);
+    pack_wr32(pack_out, 20, 1);
+    pack_wr64(pack_out, 24, pack_entry);
+    pack_wr64(pack_out, 32, 64);
+    pack_wr16(pack_out, 52, 64);
+    pack_wr16(pack_out, 54, 56);
+    pack_nph: int = 1;
+    if (as_data_len > 0 || as_bss_size > 0) { pack_nph = 2; }
+    pack_wr16(pack_out, 56, pack_nph);
+
+    pack_ph0: int = 64;
+    pack_wr32(pack_out, pack_ph0 + 0, pack_PT_LOAD);
+    pack_wr32(pack_out, pack_ph0 + 4, pack_PF_R + pack_PF_X);
+    pack_wr64(pack_out, pack_ph0 + 8, pack_rx_off);
+    pack_wr64(pack_out, pack_ph0 + 16, pack_LOAD_BASE + pack_rx_off);
+    pack_wr64(pack_out, pack_ph0 + 24, pack_LOAD_BASE + pack_rx_off);
+    pack_wr64(pack_out, pack_ph0 + 32, pack_rx_end - pack_rx_off);
+    pack_wr64(pack_out, pack_ph0 + 40, pack_rx_end - pack_rx_off);
+    pack_wr64(pack_out, pack_ph0 + 48, pack_PAGE);
+
+    if (pack_nph == 2) {
+        pack_ph1: int = 120;
+        pack_wr32(pack_out, pack_ph1 + 0, pack_PT_LOAD);
+        pack_wr32(pack_out, pack_ph1 + 4, pack_PF_R + pack_PF_W);
+        pack_wr64(pack_out, pack_ph1 + 8, pack_data_off);
+        pack_wr64(pack_out, pack_ph1 + 16, pack_data_vma);
+        pack_wr64(pack_out, pack_ph1 + 24, pack_data_vma);
+        pack_wr64(pack_out, pack_ph1 + 32, as_data_len);
+        pack_wr64(pack_out, pack_ph1 + 40, (pack_bss_vma + as_bss_size) - pack_data_vma);
+        pack_wr64(pack_out, pack_ph1 + 48, pack_PAGE);
+    }
+
+    pack_memcpy(pack_out + pack_text_off, pack_text, as_text_len);
+    if (as_rodata_len > 0) { pack_memcpy(pack_out + pack_rodata_off, as_rodata_buf, as_rodata_len); }
+    if (as_data_len > 0) { pack_memcpy(pack_out + pack_data_off, as_data_buf, as_data_len); }
+
+    pack_fd: int = open(pack_out_p, pack_O_WRONLY + pack_O_CREAT + pack_O_TRUNC, pack_MODE_755);
+    if (pack_fd < 0) { pack_fail("cannot create output"); }
+    pack_w: int = 0;
+    while (pack_w < pack_file_end) {
+        pack_n: int = write(pack_fd, pack_out + pack_w, pack_file_end - pack_w);
+        if (pack_n <= 0) { pack_fail("write failed"); }
+        pack_w = pack_w + pack_n;
+    }
+    close(pack_fd);
+}
+
 elfpack_main(pack_argc: int, pack_argv: **i8): int {
     pack_PAGE = 4096;
     pack_LOAD_BASE = 4194304;

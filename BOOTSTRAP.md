@@ -3,7 +3,7 @@
 `bootstrap` is a checked-in x86-64 Linux executable containing the complete `l8`
 tool, including its runtime. Cold start simply copies it to `l8c0`; no host compiler,
 assembler, or linker is required. The seed provides `compile`, `as`, and `elfpack`
-subcommands.
+subcommands. Stage-2 tools additionally provide the direct `build` command.
 
 ## Two source trees
 
@@ -33,7 +33,13 @@ Typical evolution for a breaking language change:
 l8 compile [--profile|-p] file.l8 > file.s
 l8 as [-p|--profile] -o file.o file.s runtime.s
 l8 elfpack file.o -o file
+l8 build file.l8 -o file
 ```
+
+`build` sends typed compiler operations directly to the assembler's in-memory
+section, symbol, relocation, and instruction encoders. It parses only the static
+`runtime.s` input, then writes ET_EXEC directly from that builder state; generated
+assembly and ET_REL are never serialized or reparsed.
 
 ## Scripts (`./build.sh`)
 
@@ -41,7 +47,7 @@ l8 elfpack file.o -o file
 |---------|--------------|
 | `bootstrap` | Copy the saved bootstrap executable to `l8c0` |
 | `examples` | Compile, assemble, pack, and run examples with `l8c0` |
-| `selfhost` | Build unified `l8c1` from `src1/`, build `l8c2/l8c3/l8c4` from `src2/`, require stage assembly and executable fixpoints, and run examples |
+| `selfhost` | Build unified `l8c1` from `src1/`, build `l8c2/l8c3/l8c4` from `src2/`, require stage assembly and executable fixpoints, and run examples through both legacy and direct pipelines |
 | `promote-bin1` | Promote the stage-1 executable to `bootstrap` |
 | `promote-bin2` | Promote the stage-2 fixpoint executable to `bootstrap` |
 | `promote-source` | Replace `src1/` with `src2/` without changing the bootstrap |
