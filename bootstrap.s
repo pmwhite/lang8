@@ -20,6 +20,12 @@ ty_i8: .skip 8
 ty_int: .skip 8
 field_list_size: .skip 8
 next_exn_tag: .skip 8
+exn_buckets: .skip 8
+enum_buckets: .skip 8
+struct_buckets: .skip 8
+global_buckets: .skip 8
+fn_buckets: .skip 8
+SYM_SIZE: .skip 8
 exn_defs: .skip 8
 enum_defs: .skip 8
 struct_defs: .skip 8
@@ -1779,6 +1785,291 @@ streq:
   mov %rbp, %rsp
   pop %rbp
   ret
+.globl name_eq_span
+name_eq_span:
+  push %rbp
+  mov %rsp, %rbp
+  sub $32, %rsp
+  mov %rdi, -24(%rbp)
+  mov %rsi, -16(%rbp)
+  mov %rdx, -8(%rbp)
+  mov -24(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call len
+  add $8, %rsp
+  push %rax
+  mov -8(%rbp), %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setne %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else5
+  mov $0, %rax
+  jmp .L.return.name_eq_span
+  jmp .L.end5
+.L.else5:
+.L.end5:
+  mov -24(%rbp), %rax
+  push %rax
+  mov -16(%rbp), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdx
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call streq_n
+  add $8, %rsp
+  jmp .L.return.name_eq_span
+.L.return.name_eq_span:
+  mov %rbp, %rsp
+  pop %rbp
+  ret
+.globl hash_n
+hash_n:
+  push %rbp
+  mov %rsp, %rbp
+  sub $32, %rsp
+  mov %rdi, -32(%rbp)
+  mov %rsi, -24(%rbp)
+  mov $5381, %rax
+  mov %rax, -16(%rbp)
+  mov $0, %rax
+  mov %rax, -8(%rbp)
+.L.begin6:
+  mov -8(%rbp), %rax
+  push %rax
+  mov -24(%rbp), %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setl %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.end6
+  mov -16(%rbp), %rax
+  push %rax
+  mov $33, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  push %rax
+  mov -32(%rbp), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  mov $1, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  movzb (%rax), %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov %rax, -16(%rbp)
+  mov -8(%rbp), %rax
+  push %rax
+  mov $1, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov %rax, -8(%rbp)
+  jmp .L.begin6
+.L.end6:
+  mov -16(%rbp), %rax
+  jmp .L.return.hash_n
+.L.return.hash_n:
+  mov %rbp, %rsp
+  pop %rbp
+  ret
+.globl hash_str
+hash_str:
+  push %rbp
+  mov %rsp, %rbp
+  sub $16, %rsp
+  mov %rdi, -8(%rbp)
+  mov -8(%rbp), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call len
+  add $8, %rsp
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call hash_n
+  add $8, %rsp
+  jmp .L.return.hash_str
+.L.return.hash_str:
+  mov %rbp, %rsp
+  pop %rbp
+  ret
+.globl sym_bucket
+sym_bucket:
+  push %rbp
+  mov %rsp, %rbp
+  sub $16, %rsp
+  mov %rdi, -8(%rbp)
+  mov -8(%rbp), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setl %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else7
+  mov $0, %rax
+  push %rax
+  mov -8(%rbp), %rax
+  mov %rax, %rdi
+  pop %rax
+  sub %rdi, %rax
+  mov %rax, -8(%rbp)
+  jmp .L.end7
+.L.else7:
+.L.end7:
+  mov -8(%rbp), %rax
+  push %rax
+  mov SYM_SIZE(%rip), %rax
+  mov %rax, %rdi
+  pop %rax
+  cqo
+  idiv %rdi
+  mov %rdx, %rax
+  jmp .L.return.sym_bucket
+.L.return.sym_bucket:
+  mov %rbp, %rsp
+  pop %rbp
+  ret
+.globl clear_sym_tables
+clear_sym_tables:
+  push %rbp
+  mov %rsp, %rbp
+  sub $16, %rsp
+  mov $0, %rax
+  mov %rax, -8(%rbp)
+.L.begin8:
+  mov -8(%rbp), %rax
+  push %rax
+  mov SYM_SIZE(%rip), %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setl %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.end8
+  mov $0, %rax
+  push %rax
+  mov fn_buckets(%rip), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov %rax, %rdi
+  pop %rsi
+  mov %rsi, %rax
+  mov %rax, (%rdi)
+  mov $0, %rax
+  push %rax
+  mov global_buckets(%rip), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov %rax, %rdi
+  pop %rsi
+  mov %rsi, %rax
+  mov %rax, (%rdi)
+  mov $0, %rax
+  push %rax
+  mov struct_buckets(%rip), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov %rax, %rdi
+  pop %rsi
+  mov %rsi, %rax
+  mov %rax, (%rdi)
+  mov $0, %rax
+  push %rax
+  mov enum_buckets(%rip), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov %rax, %rdi
+  pop %rsi
+  mov %rsi, %rax
+  mov %rax, (%rdi)
+  mov $0, %rax
+  push %rax
+  mov exn_buckets(%rip), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov %rax, %rdi
+  pop %rsi
+  mov %rsi, %rax
+  mov %rax, (%rdi)
+  mov -8(%rbp), %rax
+  push %rax
+  mov $1, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov %rax, -8(%rbp)
+  jmp .L.begin8
+.L.end8:
+.L.return.clear_sym_tables:
+  mov %rbp, %rsp
+  pop %rbp
+  ret
 .globl memcpy
 memcpy:
   push %rbp
@@ -1789,7 +2080,7 @@ memcpy:
   mov %rdx, -16(%rbp)
   mov $0, %rax
   mov %rax, -8(%rbp)
-.L.begin5:
+.L.begin9:
   mov -8(%rbp), %rax
   push %rax
   mov -16(%rbp), %rax
@@ -1799,7 +2090,7 @@ memcpy:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end5
+  je .L.end9
   mov -24(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -1835,8 +2126,8 @@ memcpy:
   pop %rax
   add %rdi, %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin5
-.L.end5:
+  jmp .L.begin9
+.L.end9:
   mov -32(%rbp), %rax
   jmp .L.return.memcpy
 .L.return.memcpy:
@@ -1925,7 +2216,7 @@ is_space:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  jne .L.true8
+  jne .L.true12
   movzb -8(%rbp), %rax
   push %rax
   mov $10, %rax
@@ -1935,15 +2226,15 @@ is_space:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false8
-.L.true8:
+  je .L.false12
+.L.true12:
   mov $1, %rax
-  jmp .L.end8
-.L.false8:
+  jmp .L.end12
+.L.false12:
   mov $0, %rax
-.L.end8:
+.L.end12:
   cmp $0, %rax
-  jne .L.true7
+  jne .L.true11
   movzb -8(%rbp), %rax
   push %rax
   mov $13, %rax
@@ -1953,15 +2244,15 @@ is_space:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false7
-.L.true7:
+  je .L.false11
+.L.true11:
   mov $1, %rax
-  jmp .L.end7
-.L.false7:
+  jmp .L.end11
+.L.false11:
   mov $0, %rax
-.L.end7:
+.L.end11:
   cmp $0, %rax
-  jne .L.true6
+  jne .L.true10
   movzb -8(%rbp), %rax
   push %rax
   mov $9, %rax
@@ -1971,13 +2262,13 @@ is_space:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false6
-.L.true6:
+  je .L.false10
+.L.true10:
   mov $1, %rax
-  jmp .L.end6
-.L.false6:
+  jmp .L.end10
+.L.false10:
   mov $0, %rax
-.L.end6:
+.L.end10:
   jmp .L.return.is_space
 .L.return.is_space:
   mov %rbp, %rsp
@@ -1998,7 +2289,7 @@ is_digit:
   setge %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false9
+  je .L.false13
   movzb -8(%rbp), %rax
   push %rax
   mov $57, %rax
@@ -2008,12 +2299,12 @@ is_digit:
   setle %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false9
+  je .L.false13
   mov $1, %rax
-  jmp .L.end9
-.L.false9:
+  jmp .L.end13
+.L.false13:
   mov $0, %rax
-.L.end9:
+.L.end13:
   jmp .L.return.is_digit
 .L.return.is_digit:
   mov %rbp, %rsp
@@ -2034,7 +2325,7 @@ is_ident1:
   setge %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false11
+  je .L.false15
   movzb -8(%rbp), %rax
   push %rax
   mov $122, %rax
@@ -2044,19 +2335,19 @@ is_ident1:
   setle %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false11
+  je .L.false15
   mov $1, %rax
-  jmp .L.end11
-.L.false11:
+  jmp .L.end15
+.L.false15:
   mov $0, %rax
-.L.end11:
+.L.end15:
   cmp $0, %rax
-  je .L.else10
+  je .L.else14
   mov $1, %rax
   jmp .L.return.is_ident1
-  jmp .L.end10
-.L.else10:
-.L.end10:
+  jmp .L.end14
+.L.else14:
+.L.end14:
   movzb -8(%rbp), %rax
   push %rax
   mov $65, %rax
@@ -2066,7 +2357,7 @@ is_ident1:
   setge %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false13
+  je .L.false17
   movzb -8(%rbp), %rax
   push %rax
   mov $90, %rax
@@ -2076,19 +2367,19 @@ is_ident1:
   setle %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false13
+  je .L.false17
   mov $1, %rax
-  jmp .L.end13
-.L.false13:
+  jmp .L.end17
+.L.false17:
   mov $0, %rax
-.L.end13:
+.L.end17:
   cmp $0, %rax
-  je .L.else12
+  je .L.else16
   mov $1, %rax
   jmp .L.return.is_ident1
-  jmp .L.end12
-.L.else12:
-.L.end12:
+  jmp .L.end16
+.L.else16:
+.L.end16:
   movzb -8(%rbp), %rax
   push %rax
   mov $95, %rax
@@ -2115,7 +2406,7 @@ is_ident2:
   call is_ident1
   add $8, %rsp
   cmp $0, %rax
-  jne .L.true14
+  jne .L.true18
   movzb -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -2123,13 +2414,13 @@ is_ident2:
   call is_digit
   add $8, %rsp
   cmp $0, %rax
-  je .L.false14
-.L.true14:
+  je .L.false18
+.L.true18:
   mov $1, %rax
-  jmp .L.end14
-.L.false14:
+  jmp .L.end18
+.L.false18:
   mov $0, %rax
-.L.end14:
+.L.end18:
   jmp .L.return.is_ident2
 .L.return.is_ident2:
   mov %rbp, %rsp
@@ -2149,7 +2440,7 @@ emit_flush:
   setg %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else15
+  je .L.else19
   mov $1, %rax
   push %rax
   mov emit_buf(%rip), %rax
@@ -2164,9 +2455,9 @@ emit_flush:
   add $8, %rsp
   mov $0, %rax
   mov %rax, emit_len(%rip)
-  jmp .L.end15
-.L.else15:
-.L.end15:
+  jmp .L.end19
+.L.else19:
+.L.end19:
 .L.return.emit_flush:
   mov %rbp, %rsp
   pop %rbp
@@ -2193,12 +2484,12 @@ emit:
   setle %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else16
+  je .L.else20
   mov $0, %rax
   jmp .L.return.emit
-  jmp .L.end16
-.L.else16:
-.L.end16:
+  jmp .L.end20
+.L.else20:
+.L.end20:
   mov -8(%rbp), %rax
   push %rax
   mov emit_cap(%rip), %rax
@@ -2208,7 +2499,7 @@ emit:
   setg %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else17
+  je .L.else21
   sub $8, %rsp
   call emit_flush
   add $8, %rsp
@@ -2226,9 +2517,9 @@ emit:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.emit
-  jmp .L.end17
-.L.else17:
-.L.end17:
+  jmp .L.end21
+.L.else21:
+.L.end21:
   mov emit_len(%rip), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -2243,13 +2534,13 @@ emit:
   setg %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else18
+  je .L.else22
   sub $8, %rsp
   call emit_flush
   add $8, %rsp
-  jmp .L.end18
-.L.else18:
-.L.end18:
+  jmp .L.end22
+.L.else22:
+.L.end22:
   mov emit_buf(%rip), %rax
   push %rax
   mov emit_len(%rip), %rax
@@ -2293,13 +2584,13 @@ emit_ch:
   setge %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else19
+  je .L.else23
   sub $8, %rsp
   call emit_flush
   add $8, %rsp
-  jmp .L.end19
-.L.else19:
-.L.end19:
+  jmp .L.end23
+.L.else23:
+.L.end23:
   movzb -8(%rbp), %rax
   push %rax
   mov emit_buf(%rip), %rax
@@ -2345,7 +2636,7 @@ emit_num:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else20
+  je .L.else24
   mov $1, %rax
   mov %rax, -16(%rbp)
   mov $0, %rax
@@ -2355,9 +2646,9 @@ emit_num:
   pop %rax
   sub %rdi, %rax
   mov %rax, -56(%rbp)
-  jmp .L.end20
-.L.else20:
-.L.end20:
+  jmp .L.end24
+.L.else24:
+.L.end24:
   mov -56(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -2367,7 +2658,7 @@ emit_num:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else21
+  je .L.else25
   mov $48, %rax
   push %rax
   pop %rdi
@@ -2376,12 +2667,12 @@ emit_num:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.emit_num
-  jmp .L.end21
-.L.else21:
-.L.end21:
+  jmp .L.end25
+.L.else25:
+.L.end25:
   mov $0, %rax
   mov %rax, -8(%rbp)
-.L.begin22:
+.L.begin26:
   mov -56(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -2391,7 +2682,7 @@ emit_num:
   setg %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end22
+  je .L.end26
   mov $48, %rax
   push %rax
   mov -56(%rbp), %rax
@@ -2436,8 +2727,8 @@ emit_num:
   pop %rax
   add %rdi, %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin22
-.L.end22:
+  jmp .L.begin26
+.L.end26:
   mov -16(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -2447,17 +2738,17 @@ emit_num:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else23
+  je .L.else27
   mov $45, %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit_ch
   add $8, %rsp
-  jmp .L.end23
-.L.else23:
-.L.end23:
-.L.begin24:
+  jmp .L.end27
+.L.else27:
+.L.end27:
+.L.begin28:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -2467,7 +2758,7 @@ emit_num:
   setg %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end24
+  je .L.end28
   mov -8(%rbp), %rax
   push %rax
   mov $1, %rax
@@ -2492,8 +2783,8 @@ emit_num:
   sub $8, %rsp
   call emit_ch
   add $8, %rsp
-  jmp .L.begin24
-.L.end24:
+  jmp .L.begin28
+.L.end28:
 .L.return.emit_num:
   mov %rbp, %rsp
   pop %rbp
@@ -2538,7 +2829,7 @@ print_error_at:
   mov %rax, -16(%rbp)
   mov $0, %rax
   mov %rax, -8(%rbp)
-.L.begin25:
+.L.begin29:
   mov -8(%rbp), %rax
   push %rax
   mov -40(%rbp), %rax
@@ -2548,7 +2839,7 @@ print_error_at:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false26
+  je .L.false30
   mov -8(%rbp), %rax
   push %rax
   mov source_len(%rip), %rax
@@ -2558,14 +2849,14 @@ print_error_at:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false26
+  je .L.false30
   mov $1, %rax
-  jmp .L.end26
-.L.false26:
+  jmp .L.end30
+.L.false30:
   mov $0, %rax
-.L.end26:
+.L.end30:
   cmp $0, %rax
-  je .L.end25
+  je .L.end29
   mov source(%rip), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -2586,7 +2877,7 @@ print_error_at:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else27
+  je .L.else31
   mov -24(%rbp), %rax
   push %rax
   mov $1, %rax
@@ -2596,8 +2887,8 @@ print_error_at:
   mov %rax, -24(%rbp)
   mov $1, %rax
   mov %rax, -16(%rbp)
-  jmp .L.end27
-.L.else27:
+  jmp .L.end31
+.L.else31:
   mov -16(%rbp), %rax
   push %rax
   mov $1, %rax
@@ -2605,7 +2896,7 @@ print_error_at:
   pop %rax
   add %rdi, %rax
   mov %rax, -16(%rbp)
-.L.end27:
+.L.end31:
   mov -8(%rbp), %rax
   push %rax
   mov $1, %rax
@@ -2613,8 +2904,8 @@ print_error_at:
   pop %rax
   add %rdi, %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin25
-.L.end25:
+  jmp .L.begin29
+.L.end29:
   mov $2, %rax
   push %rax
   lea .L.str0+8(%rip), %rax
@@ -2907,7 +3198,7 @@ ignore_unused_local_name:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  jne .L.true28
+  jne .L.true32
   movzb -8(%rbp), %rax
   push %rax
   mov $95, %rax
@@ -2917,13 +3208,13 @@ ignore_unused_local_name:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false28
-.L.true28:
+  je .L.false32
+.L.true32:
   mov $1, %rax
-  jmp .L.end28
-.L.false28:
+  jmp .L.end32
+.L.false32:
   mov $0, %rax
-.L.end28:
+.L.end32:
   jmp .L.return.ignore_unused_local_name
 .L.return.ignore_unused_local_name:
   mov %rbp, %rsp
@@ -2983,17 +3274,17 @@ sb_grow:
   setle %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else29
+  je .L.else33
   mov $0, %rax
   jmp .L.return.sb_grow
-  jmp .L.end29
-.L.else29:
-.L.end29:
+  jmp .L.end33
+.L.else33:
+.L.end33:
   mov -32(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   mov %rax, -16(%rbp)
-.L.begin30:
+.L.begin34:
   mov -16(%rbp), %rax
   push %rax
   mov -32(%rbp), %rax
@@ -3010,7 +3301,7 @@ sb_grow:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end30
+  je .L.end34
   mov -16(%rbp), %rax
   push %rax
   mov $2, %rax
@@ -3018,8 +3309,8 @@ sb_grow:
   pop %rax
   imul %rdi, %rax
   mov %rax, -16(%rbp)
-  jmp .L.begin30
-.L.end30:
+  jmp .L.begin34
+.L.end34:
   mov -16(%rbp), %rax
   mov %rax, %rdi
   call malloc
@@ -3191,7 +3482,7 @@ sb_put_num:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else31
+  je .L.else35
   mov -56(%rbp), %rax
   push %rax
   mov $45, %rax
@@ -3208,9 +3499,9 @@ sb_put_num:
   pop %rax
   sub %rdi, %rax
   mov %rax, -48(%rbp)
-  jmp .L.end31
-.L.else31:
-.L.end31:
+  jmp .L.end35
+.L.else35:
+.L.end35:
   mov -48(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -3220,7 +3511,7 @@ sb_put_num:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else32
+  je .L.else36
   mov -56(%rbp), %rax
   push %rax
   mov $48, %rax
@@ -3232,12 +3523,12 @@ sb_put_num:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.sb_put_num
-  jmp .L.end32
-.L.else32:
-.L.end32:
+  jmp .L.end36
+.L.else36:
+.L.end36:
   mov $0, %rax
   mov %rax, -8(%rbp)
-.L.begin33:
+.L.begin37:
   mov -48(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -3247,7 +3538,7 @@ sb_put_num:
   setg %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end33
+  je .L.end37
   mov $48, %rax
   push %rax
   mov -48(%rbp), %rax
@@ -3292,9 +3583,9 @@ sb_put_num:
   pop %rax
   add %rdi, %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin33
-.L.end33:
-.L.begin34:
+  jmp .L.begin37
+.L.end37:
+.L.begin38:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -3304,7 +3595,7 @@ sb_put_num:
   setg %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end34
+  je .L.end38
   mov -8(%rbp), %rax
   push %rax
   mov $1, %rax
@@ -3332,8 +3623,8 @@ sb_put_num:
   sub $8, %rsp
   call sb_putc
   add $8, %rsp
-  jmp .L.begin34
-.L.end34:
+  jmp .L.begin38
+.L.end38:
 .L.return.sb_put_num:
   mov %rbp, %rsp
   pop %rbp
@@ -3377,7 +3668,7 @@ append_type:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else35
+  je .L.else39
   mov -72(%rbp), %rax
   push %rax
   lea .L.str18+8(%rip), %rax
@@ -3389,16 +3680,16 @@ append_type:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.append_type
-  jmp .L.end35
-.L.else35:
-.L.end35:
+  jmp .L.end39
+.L.else39:
+.L.end39:
   mov -64(%rbp), %rax
   push %rax
   mov (%rax), %rax
   push %rax
   mov (%rsp), %rax
   cmp $0, %rax
-  jne .L.arm37
+  jne .L.arm41
   mov -72(%rbp), %rax
   push %rax
   lea .L.str19+8(%rip), %rax
@@ -3410,11 +3701,11 @@ append_type:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.append_type
-  jmp .L.matchend36
-.L.arm37:
+  jmp .L.matchend40
+.L.arm41:
   mov (%rsp), %rax
   cmp $1, %rax
-  jne .L.arm38
+  jne .L.arm42
   mov -72(%rbp), %rax
   push %rax
   lea .L.str20+8(%rip), %rax
@@ -3426,11 +3717,11 @@ append_type:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.append_type
-  jmp .L.matchend36
-.L.arm38:
+  jmp .L.matchend40
+.L.arm42:
   mov (%rsp), %rax
   cmp $2, %rax
-  jne .L.arm39
+  jne .L.arm43
   mov -72(%rbp), %rax
   push %rax
   lea .L.str21+8(%rip), %rax
@@ -3442,11 +3733,11 @@ append_type:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.append_type
-  jmp .L.matchend36
-.L.arm39:
+  jmp .L.matchend40
+.L.arm43:
   mov (%rsp), %rax
   cmp $3, %rax
-  jne .L.arm40
+  jne .L.arm44
   mov -72(%rbp), %rax
   push %rax
   lea .L.str22+8(%rip), %rax
@@ -3458,11 +3749,11 @@ append_type:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.append_type
-  jmp .L.matchend36
-.L.arm40:
+  jmp .L.matchend40
+.L.arm44:
   mov (%rsp), %rax
   cmp $4, %rax
-  jne .L.arm41
+  jne .L.arm45
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -56(%rbp), %rdi
@@ -3489,11 +3780,11 @@ append_type:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.append_type
-  jmp .L.matchend36
-.L.arm41:
+  jmp .L.matchend40
+.L.arm45:
   mov (%rsp), %rax
   cmp $5, %rax
-  jne .L.arm42
+  jne .L.arm46
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -48(%rbp), %rdi
@@ -3520,11 +3811,11 @@ append_type:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.append_type
-  jmp .L.matchend36
-.L.arm42:
+  jmp .L.matchend40
+.L.arm46:
   mov (%rsp), %rax
   cmp $6, %rax
-  jne .L.arm43
+  jne .L.arm47
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -40(%rbp), %rdi
@@ -3573,11 +3864,11 @@ append_type:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.append_type
-  jmp .L.matchend36
-.L.arm43:
+  jmp .L.matchend40
+.L.arm47:
   mov (%rsp), %rax
   cmp $7, %rax
-  jne .L.arm44
+  jne .L.arm48
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -24(%rbp), %rdi
@@ -3596,11 +3887,11 @@ append_type:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.append_type
-  jmp .L.matchend36
-.L.arm44:
+  jmp .L.matchend40
+.L.arm48:
   mov (%rsp), %rax
   cmp $8, %rax
-  jne .L.arm45
+  jne .L.arm49
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -16(%rbp), %rdi
@@ -3619,11 +3910,11 @@ append_type:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.append_type
-  jmp .L.matchend36
-.L.arm45:
+  jmp .L.matchend40
+.L.arm49:
   mov (%rsp), %rax
   cmp $9, %rax
-  jne .L.arm46
+  jne .L.arm50
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -8(%rbp), %rdi
@@ -3642,11 +3933,11 @@ append_type:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.append_type
-  jmp .L.matchend36
-.L.arm46:
+  jmp .L.matchend40
+.L.arm50:
   mov $1, %rdi
   call exit
-.L.matchend36:
+.L.matchend40:
   add $16, %rsp
 .L.return.append_type:
   mov %rbp, %rsp
@@ -3937,7 +4228,7 @@ append_expr_ty:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else47
+  je .L.else51
   mov -16(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -3949,9 +4240,9 @@ append_expr_ty:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.append_expr_ty
-  jmp .L.end47
-.L.else47:
-.L.end47:
+  jmp .L.end51
+.L.else51:
+.L.end51:
   mov -8(%rbp), %rax
   add $48, %rax
   mov (%rax), %rax
@@ -3963,7 +4254,7 @@ append_expr_ty:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else48
+  je .L.else52
   mov -16(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -3982,9 +4273,9 @@ append_expr_ty:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.append_expr_ty
-  jmp .L.end48
-.L.else48:
-.L.end48:
+  jmp .L.end52
+.L.else52:
+.L.end52:
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -3992,7 +4283,7 @@ append_expr_ty:
   call is_null_expr
   add $8, %rsp
   cmp $0, %rax
-  je .L.else49
+  je .L.else53
   mov -16(%rbp), %rax
   push %rax
   lea .L.str31+8(%rip), %rax
@@ -4004,9 +4295,9 @@ append_expr_ty:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.append_expr_ty
-  jmp .L.end49
-.L.else49:
-.L.end49:
+  jmp .L.end53
+.L.else53:
+.L.end53:
   mov -16(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -4110,7 +4401,7 @@ emit_num_fd:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else50
+  je .L.else54
   mov $1, %rax
   mov %rax, -40(%rbp)
   mov $0, %rax
@@ -4120,9 +4411,9 @@ emit_num_fd:
   pop %rax
   sub %rdi, %rax
   mov %rax, -80(%rbp)
-  jmp .L.end50
-.L.else50:
-.L.end50:
+  jmp .L.end54
+.L.else54:
+.L.end54:
   mov -80(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -4132,7 +4423,7 @@ emit_num_fd:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else51
+  je .L.else55
   mov $48, %rax
   mov %al, -32(%rbp)
   mov -88(%rbp), %rax
@@ -4149,12 +4440,12 @@ emit_num_fd:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.emit_num_fd
-  jmp .L.end51
-.L.else51:
-.L.end51:
+  jmp .L.end55
+.L.else55:
+.L.end55:
   mov $0, %rax
   mov %rax, -24(%rbp)
-.L.begin52:
+.L.begin56:
   mov -80(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -4164,7 +4455,7 @@ emit_num_fd:
   setg %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end52
+  je .L.end56
   mov $48, %rax
   push %rax
   mov -80(%rbp), %rax
@@ -4209,8 +4500,8 @@ emit_num_fd:
   pop %rax
   add %rdi, %rax
   mov %rax, -24(%rbp)
-  jmp .L.begin52
-.L.end52:
+  jmp .L.begin56
+.L.end56:
   mov -40(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -4220,7 +4511,7 @@ emit_num_fd:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else53
+  je .L.else57
   mov $45, %rax
   mov %al, -16(%rbp)
   mov -88(%rbp), %rax
@@ -4235,10 +4526,10 @@ emit_num_fd:
   sub $8, %rsp
   call write
   add $8, %rsp
-  jmp .L.end53
-.L.else53:
-.L.end53:
-.L.begin54:
+  jmp .L.end57
+.L.else57:
+.L.end57:
+.L.begin58:
   mov -24(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -4248,7 +4539,7 @@ emit_num_fd:
   setg %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end54
+  je .L.end58
   mov -24(%rbp), %rax
   push %rax
   mov $1, %rax
@@ -4281,8 +4572,8 @@ emit_num_fd:
   sub $8, %rsp
   call write
   add $8, %rsp
-  jmp .L.begin54
-.L.end54:
+  jmp .L.begin58
+.L.end58:
 .L.return.emit_num_fd:
   mov %rbp, %rsp
   pop %rbp
@@ -4346,12 +4637,12 @@ expect_field_init:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else55
+  je .L.else59
   mov -16(%rbp), %rax
   jmp .L.return.expect_field_init
-  jmp .L.end55
-.L.else55:
-.L.end55:
+  jmp .L.end59
+.L.else59:
+.L.end59:
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -4378,12 +4669,12 @@ expect_type:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else56
+  je .L.else60
   mov -16(%rbp), %rax
   jmp .L.return.expect_type
-  jmp .L.end56
-.L.else56:
-.L.end56:
+  jmp .L.end60
+.L.else60:
+.L.end60:
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -4410,12 +4701,12 @@ expect_member:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else57
+  je .L.else61
   mov -16(%rbp), %rax
   jmp .L.return.expect_member
-  jmp .L.end57
-.L.else57:
-.L.end57:
+  jmp .L.end61
+.L.else61:
+.L.end61:
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -4485,6 +4776,36 @@ init_runtime:
   mov %rax, emit_buf(%rip)
   mov $0, %rax
   mov %rax, emit_len(%rip)
+  mov $256, %rax
+  mov %rax, SYM_SIZE(%rip)
+  mov $256, %rax
+  imul $8, %rax
+  mov %rax, %rdi
+  call malloc
+  mov %rax, fn_buckets(%rip)
+  mov $256, %rax
+  imul $8, %rax
+  mov %rax, %rdi
+  call malloc
+  mov %rax, global_buckets(%rip)
+  mov $256, %rax
+  imul $8, %rax
+  mov %rax, %rdi
+  call malloc
+  mov %rax, struct_buckets(%rip)
+  mov $256, %rax
+  imul $8, %rax
+  mov %rax, %rdi
+  call malloc
+  mov %rax, enum_buckets(%rip)
+  mov $256, %rax
+  imul $8, %rax
+  mov %rax, %rdi
+  call malloc
+  mov %rax, exn_buckets(%rip)
+  sub $8, %rsp
+  call clear_sym_tables
+  add $8, %rsp
 .L.return.init_runtime:
   mov %rbp, %rsp
   pop %rbp
@@ -4504,12 +4825,12 @@ reg_name:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else58
+  je .L.else62
   lea .L.str35+8(%rip), %rax
   jmp .L.return.reg_name
-  jmp .L.end58
-.L.else58:
-.L.end58:
+  jmp .L.end62
+.L.else62:
+.L.end62:
   mov -8(%rbp), %rax
   push %rax
   mov $1, %rax
@@ -4519,12 +4840,12 @@ reg_name:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else59
+  je .L.else63
   lea .L.str36+8(%rip), %rax
   jmp .L.return.reg_name
-  jmp .L.end59
-.L.else59:
-.L.end59:
+  jmp .L.end63
+.L.else63:
+.L.end63:
   mov -8(%rbp), %rax
   push %rax
   mov $2, %rax
@@ -4534,12 +4855,12 @@ reg_name:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else60
+  je .L.else64
   lea .L.str37+8(%rip), %rax
   jmp .L.return.reg_name
-  jmp .L.end60
-.L.else60:
-.L.end60:
+  jmp .L.end64
+.L.else64:
+.L.end64:
   mov -8(%rbp), %rax
   push %rax
   mov $3, %rax
@@ -4549,12 +4870,12 @@ reg_name:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else61
+  je .L.else65
   lea .L.str38+8(%rip), %rax
   jmp .L.return.reg_name
-  jmp .L.end61
-.L.else61:
-.L.end61:
+  jmp .L.end65
+.L.else65:
+.L.end65:
   mov -8(%rbp), %rax
   push %rax
   mov $4, %rax
@@ -4564,12 +4885,12 @@ reg_name:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else62
+  je .L.else66
   lea .L.str39+8(%rip), %rax
   jmp .L.return.reg_name
-  jmp .L.end62
-.L.else62:
-.L.end62:
+  jmp .L.end66
+.L.else66:
+.L.end66:
   lea .L.str40+8(%rip), %rax
   jmp .L.return.reg_name
 .L.return.reg_name:
@@ -4604,16 +4925,16 @@ read_file:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else63
+  je .L.else67
   lea .L.str41+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end63
-.L.else63:
-.L.end63:
+  jmp .L.end67
+.L.else67:
+.L.end67:
   mov $65536, %rax
   mov %rax, -40(%rbp)
   mov -40(%rbp), %rax
@@ -4622,10 +4943,10 @@ read_file:
   mov %rax, -32(%rbp)
   mov $0, %rax
   mov %rax, -24(%rbp)
-.L.begin64:
+.L.begin68:
   mov $1, %rax
   cmp $0, %rax
-  je .L.end64
+  je .L.end68
   mov -24(%rbp), %rax
   push %rax
   mov $4096, %rax
@@ -4640,7 +4961,7 @@ read_file:
   setg %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else65
+  je .L.else69
   mov -40(%rbp), %rax
   push %rax
   mov $2, %rax
@@ -4666,9 +4987,9 @@ read_file:
   add $8, %rsp
   mov -16(%rbp), %rax
   mov %rax, -32(%rbp)
-  jmp .L.end65
-.L.else65:
-.L.end65:
+  jmp .L.end69
+.L.else69:
+.L.end69:
   mov -48(%rbp), %rax
   push %rax
   mov -32(%rbp), %rax
@@ -4696,7 +5017,7 @@ read_file:
   setle %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else66
+  je .L.else70
   mov $0, %rax
   push %rax
   mov -32(%rbp), %rax
@@ -4724,9 +5045,9 @@ read_file:
   mov %rax, source_len(%rip)
   mov -32(%rbp), %rax
   jmp .L.return.read_file
-  jmp .L.end66
-.L.else66:
-.L.end66:
+  jmp .L.end70
+.L.else70:
+.L.end70:
   mov -24(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -4734,8 +5055,8 @@ read_file:
   pop %rax
   add %rdi, %rax
   mov %rax, -24(%rbp)
-  jmp .L.begin64
-.L.end64:
+  jmp .L.begin68
+.L.end68:
   mov -32(%rbp), %rax
   jmp .L.return.read_file
 .L.return.read_file:
@@ -4754,28 +5075,28 @@ type_size:
   push %rax
   mov (%rsp), %rax
   cmp $0, %rax
-  jne .L.arm68
+  jne .L.arm72
   mov $8, %rax
   jmp .L.return.type_size
-  jmp .L.matchend67
-.L.arm68:
+  jmp .L.matchend71
+.L.arm72:
   mov (%rsp), %rax
   cmp $1, %rax
-  jne .L.arm69
+  jne .L.arm73
   mov $1, %rax
   jmp .L.return.type_size
-  jmp .L.matchend67
-.L.arm69:
+  jmp .L.matchend71
+.L.arm73:
   mov (%rsp), %rax
   cmp $2, %rax
-  jne .L.arm70
+  jne .L.arm74
   mov $1, %rax
   jmp .L.return.type_size
-  jmp .L.matchend67
-.L.arm70:
+  jmp .L.matchend71
+.L.arm74:
   mov (%rsp), %rax
   cmp $4, %rax
-  jne .L.arm71
+  jne .L.arm75
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -56(%rbp), %rdi
@@ -4783,11 +5104,11 @@ type_size:
   mov %rax, 0(%rdi)
   mov $8, %rax
   jmp .L.return.type_size
-  jmp .L.matchend67
-.L.arm71:
+  jmp .L.matchend71
+.L.arm75:
   mov (%rsp), %rax
   cmp $5, %rax
-  jne .L.arm72
+  jne .L.arm76
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -48(%rbp), %rdi
@@ -4795,11 +5116,11 @@ type_size:
   mov %rax, 0(%rdi)
   mov $8, %rax
   jmp .L.return.type_size
-  jmp .L.matchend67
-.L.arm72:
+  jmp .L.matchend71
+.L.arm76:
   mov (%rsp), %rax
   cmp $6, %rax
-  jne .L.arm73
+  jne .L.arm77
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -40(%rbp), %rdi
@@ -4822,11 +5143,11 @@ type_size:
   pop %rax
   imul %rdi, %rax
   jmp .L.return.type_size
-  jmp .L.matchend67
-.L.arm73:
+  jmp .L.matchend71
+.L.arm77:
   mov (%rsp), %rax
   cmp $7, %rax
-  jne .L.arm74
+  jne .L.arm78
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -24(%rbp), %rdi
@@ -4837,11 +5158,11 @@ type_size:
   add $16, %rax
   mov (%rax), %rax
   jmp .L.return.type_size
-  jmp .L.matchend67
-.L.arm74:
+  jmp .L.matchend71
+.L.arm78:
   mov (%rsp), %rax
   cmp $8, %rax
-  jne .L.arm75
+  jne .L.arm79
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -16(%rbp), %rdi
@@ -4859,22 +5180,22 @@ type_size:
   setle %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else76
+  je .L.else80
   mov $8, %rax
   jmp .L.return.type_size
-  jmp .L.end76
-.L.else76:
-.L.end76:
+  jmp .L.end80
+.L.else80:
+.L.end80:
   lea -16(%rbp), %rax
   mov (%rax), %rax
   add $16, %rax
   mov (%rax), %rax
   jmp .L.return.type_size
-  jmp .L.matchend67
-.L.arm75:
+  jmp .L.matchend71
+.L.arm79:
   mov (%rsp), %rax
   cmp $9, %rax
-  jne .L.arm77
+  jne .L.arm81
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -8(%rbp), %rdi
@@ -4885,18 +5206,18 @@ type_size:
   add $24, %rax
   mov (%rax), %rax
   jmp .L.return.type_size
-  jmp .L.matchend67
-.L.arm77:
+  jmp .L.matchend71
+.L.arm81:
   mov (%rsp), %rax
   cmp $3, %rax
-  jne .L.arm78
+  jne .L.arm82
   mov $0, %rax
   jmp .L.return.type_size
-  jmp .L.matchend67
-.L.arm78:
+  jmp .L.matchend71
+.L.arm82:
   mov $1, %rdi
   call exit
-.L.matchend67:
+.L.matchend71:
   add $16, %rsp
 .L.return.type_size:
   mov %rbp, %rsp
@@ -4914,7 +5235,7 @@ type_base:
   push %rax
   mov (%rsp), %rax
   cmp $4, %rax
-  jne .L.arm80
+  jne .L.arm84
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -32(%rbp), %rdi
@@ -4923,11 +5244,11 @@ type_base:
   lea -32(%rbp), %rax
   mov (%rax), %rax
   jmp .L.return.type_base
-  jmp .L.matchend79
-.L.arm80:
+  jmp .L.matchend83
+.L.arm84:
   mov (%rsp), %rax
   cmp $5, %rax
-  jne .L.arm81
+  jne .L.arm85
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -24(%rbp), %rdi
@@ -4936,11 +5257,11 @@ type_base:
   lea -24(%rbp), %rax
   mov (%rax), %rax
   jmp .L.return.type_base
-  jmp .L.matchend79
-.L.arm81:
+  jmp .L.matchend83
+.L.arm85:
   mov (%rsp), %rax
   cmp $6, %rax
-  jne .L.arm82
+  jne .L.arm86
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -16(%rbp), %rdi
@@ -4951,18 +5272,18 @@ type_base:
   lea -16(%rbp), %rax
   mov (%rax), %rax
   jmp .L.return.type_base
-  jmp .L.matchend79
-.L.arm82:
+  jmp .L.matchend83
+.L.arm86:
   lea .L.str42+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.matchend79
+  jmp .L.matchend83
   mov $1, %rdi
   call exit
-.L.matchend79:
+.L.matchend83:
   add $16, %rsp
 .L.return.type_base:
   mov %rbp, %rsp
@@ -4980,7 +5301,7 @@ type_array_len:
   push %rax
   mov (%rsp), %rax
   cmp $6, %rax
-  jne .L.arm85
+  jne .L.arm89
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -16(%rbp), %rdi
@@ -4992,18 +5313,18 @@ type_array_len:
   add $8, %rax
   mov (%rax), %rax
   jmp .L.return.type_array_len
-  jmp .L.matchend84
-.L.arm85:
+  jmp .L.matchend88
+.L.arm89:
   lea .L.str43+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.matchend84
+  jmp .L.matchend88
   mov $1, %rdi
   call exit
-.L.matchend84:
+.L.matchend88:
   add $16, %rsp
 .L.return.type_array_len:
   mov %rbp, %rsp
@@ -5021,7 +5342,7 @@ type_struct_def:
   push %rax
   mov (%rsp), %rax
   cmp $7, %rax
-  jne .L.arm88
+  jne .L.arm92
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -8(%rbp), %rdi
@@ -5030,18 +5351,18 @@ type_struct_def:
   lea -8(%rbp), %rax
   mov (%rax), %rax
   jmp .L.return.type_struct_def
-  jmp .L.matchend87
-.L.arm88:
+  jmp .L.matchend91
+.L.arm92:
   lea .L.str44+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.matchend87
+  jmp .L.matchend91
   mov $1, %rdi
   call exit
-.L.matchend87:
+.L.matchend91:
   add $16, %rsp
 .L.return.type_struct_def:
   mov %rbp, %rsp
@@ -5059,7 +5380,7 @@ type_enum_def:
   push %rax
   mov (%rsp), %rax
   cmp $8, %rax
-  jne .L.arm91
+  jne .L.arm95
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -8(%rbp), %rdi
@@ -5068,18 +5389,18 @@ type_enum_def:
   lea -8(%rbp), %rax
   mov (%rax), %rax
   jmp .L.return.type_enum_def
-  jmp .L.matchend90
-.L.arm91:
+  jmp .L.matchend94
+.L.arm95:
   lea .L.str45+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.matchend90
+  jmp .L.matchend94
   mov $1, %rdi
   call exit
-.L.matchend90:
+.L.matchend94:
   add $16, %rsp
 .L.return.type_enum_def:
   mov %rbp, %rsp
@@ -5097,7 +5418,7 @@ type_exn_def:
   push %rax
   mov (%rsp), %rax
   cmp $9, %rax
-  jne .L.arm94
+  jne .L.arm98
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -8(%rbp), %rdi
@@ -5106,18 +5427,18 @@ type_exn_def:
   lea -8(%rbp), %rax
   mov (%rax), %rax
   jmp .L.return.type_exn_def
-  jmp .L.matchend93
-.L.arm94:
+  jmp .L.matchend97
+.L.arm98:
   lea .L.str46+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.matchend93
+  jmp .L.matchend97
   mov $1, %rdi
   call exit
-.L.matchend93:
+.L.matchend97:
   add $16, %rsp
 .L.return.type_exn_def:
   mov %rbp, %rsp
@@ -5216,12 +5537,12 @@ struct_type:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else96
+  je .L.else100
   mov -16(%rbp), %rax
   jmp .L.return.struct_type
-  jmp .L.end96
-.L.else96:
-.L.end96:
+  jmp .L.end100
+.L.else100:
+.L.end100:
   mov $24, %rdi
   call malloc
   push %rbx
@@ -5268,12 +5589,12 @@ enum_type:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else97
+  je .L.else101
   mov -16(%rbp), %rax
   jmp .L.return.enum_type
-  jmp .L.end97
-.L.else97:
-.L.end97:
+  jmp .L.end101
+.L.else101:
+.L.end101:
   mov $24, %rdi
   call malloc
   push %rbx
@@ -5320,12 +5641,12 @@ exn_type:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else98
+  je .L.else102
   mov -16(%rbp), %rax
   jmp .L.return.exn_type
-  jmp .L.end98
-.L.else98:
-.L.end98:
+  jmp .L.end102
+.L.else102:
+.L.end102:
   mov $24, %rdi
   call malloc
   push %rbx
@@ -5353,109 +5674,40 @@ exn_type:
   mov %rbp, %rsp
   pop %rbp
   ret
-.globl find_struct
-find_struct:
+.globl find_struct_span
+find_struct_span:
   push %rbp
   mov %rsp, %rbp
-  sub $16, %rsp
-  mov %rdi, -16(%rbp)
-  mov struct_defs(%rip), %rax
-  mov %rax, -8(%rbp)
-.L.begin99:
-  mov -8(%rbp), %rax
+  sub $32, %rsp
+  mov %rdi, -32(%rbp)
+  mov %rsi, -24(%rbp)
+  mov -32(%rbp), %rax
   push %rax
-  mov $0, %rax
-  mov %rax, %rdi
-  pop %rax
-  cmp %rdi, %rax
-  setne %al
-  movzb %al, %rax
-  cmp $0, %rax
-  je .L.end99
-  mov -8(%rbp), %rax
-  mov (%rax), %rax
-  push %rax
-  mov -16(%rbp), %rax
+  mov -24(%rbp), %rax
   push %rax
   pop %rsi
   pop %rdi
   sub $8, %rsp
-  call streq
+  call hash_n
   add $8, %rsp
-  cmp $0, %rax
-  je .L.else100
-  mov -8(%rbp), %rax
-  jmp .L.return.find_struct
-  jmp .L.end100
-.L.else100:
-.L.end100:
-  mov -8(%rbp), %rax
-  add $32, %rax
-  mov (%rax), %rax
-  mov %rax, -8(%rbp)
-  jmp .L.begin99
-.L.end99:
-  mov $0, %rax
-  jmp .L.return.find_struct
-.L.return.find_struct:
-  mov %rbp, %rsp
-  pop %rbp
-  ret
-.globl find_enum
-find_enum:
-  push %rbp
-  mov %rsp, %rbp
-  sub $16, %rsp
-  mov %rdi, -16(%rbp)
-  mov enum_defs(%rip), %rax
-  mov %rax, -8(%rbp)
-.L.begin101:
-  mov -8(%rbp), %rax
   push %rax
-  mov $0, %rax
-  mov %rax, %rdi
-  pop %rax
-  cmp %rdi, %rax
-  setne %al
-  movzb %al, %rax
-  cmp $0, %rax
-  je .L.end101
-  mov -8(%rbp), %rax
-  mov (%rax), %rax
+  pop %rdi
+  sub $8, %rsp
+  call sym_bucket
+  add $8, %rsp
+  mov %rax, -16(%rbp)
+  mov struct_buckets(%rip), %rax
   push %rax
   mov -16(%rbp), %rax
   push %rax
-  pop %rsi
-  pop %rdi
-  sub $8, %rsp
-  call streq
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.else102
-  mov -8(%rbp), %rax
-  jmp .L.return.find_enum
-  jmp .L.end102
-.L.else102:
-.L.end102:
-  mov -8(%rbp), %rax
-  add $32, %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
   mov (%rax), %rax
-  mov %rax, -8(%rbp)
-  jmp .L.begin101
-.L.end101:
-  mov $0, %rax
-  jmp .L.return.find_enum
-.L.return.find_enum:
-  mov %rbp, %rsp
-  pop %rbp
-  ret
-.globl find_exn
-find_exn:
-  push %rbp
-  mov %rsp, %rbp
-  sub $16, %rsp
-  mov %rdi, -16(%rbp)
-  mov exn_defs(%rip), %rax
   mov %rax, -8(%rbp)
 .L.begin103:
   mov -8(%rbp), %rax
@@ -5471,17 +5723,20 @@ find_exn:
   mov -8(%rbp), %rax
   mov (%rax), %rax
   push %rax
-  mov -16(%rbp), %rax
+  mov -32(%rbp), %rax
   push %rax
+  mov -24(%rbp), %rax
+  push %rax
+  pop %rdx
   pop %rsi
   pop %rdi
   sub $8, %rsp
-  call streq
+  call name_eq_span
   add $8, %rsp
   cmp $0, %rax
   je .L.else104
   mov -8(%rbp), %rax
-  jmp .L.return.find_exn
+  jmp .L.return.find_struct_span
   jmp .L.end104
 .L.else104:
 .L.end104:
@@ -5492,20 +5747,70 @@ find_exn:
   jmp .L.begin103
 .L.end103:
   mov $0, %rax
-  jmp .L.return.find_exn
-.L.return.find_exn:
+  jmp .L.return.find_struct_span
+.L.return.find_struct_span:
   mov %rbp, %rsp
   pop %rbp
   ret
-.globl remove_struct
-remove_struct:
+.globl find_struct
+find_struct:
+  push %rbp
+  mov %rsp, %rbp
+  sub $16, %rsp
+  mov %rdi, -8(%rbp)
+  mov -8(%rbp), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call len
+  add $8, %rsp
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call find_struct_span
+  add $8, %rsp
+  jmp .L.return.find_struct
+.L.return.find_struct:
+  mov %rbp, %rsp
+  pop %rbp
+  ret
+.globl find_enum_span
+find_enum_span:
   push %rbp
   mov %rsp, %rbp
   sub $32, %rsp
-  mov %rdi, -24(%rbp)
-  mov $0, %rax
+  mov %rdi, -32(%rbp)
+  mov %rsi, -24(%rbp)
+  mov -32(%rbp), %rax
+  push %rax
+  mov -24(%rbp), %rax
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call hash_n
+  add $8, %rsp
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call sym_bucket
+  add $8, %rsp
   mov %rax, -16(%rbp)
-  mov struct_defs(%rip), %rax
+  mov enum_buckets(%rip), %rax
+  push %rax
+  mov -16(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov (%rax), %rax
   mov %rax, -8(%rbp)
 .L.begin105:
   mov -8(%rbp), %rax
@@ -5521,7 +5826,506 @@ remove_struct:
   mov -8(%rbp), %rax
   mov (%rax), %rax
   push %rax
+  mov -32(%rbp), %rax
+  push %rax
   mov -24(%rbp), %rax
+  push %rax
+  pop %rdx
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call name_eq_span
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.else106
+  mov -8(%rbp), %rax
+  jmp .L.return.find_enum_span
+  jmp .L.end106
+.L.else106:
+.L.end106:
+  mov -8(%rbp), %rax
+  add $40, %rax
+  mov (%rax), %rax
+  mov %rax, -8(%rbp)
+  jmp .L.begin105
+.L.end105:
+  mov $0, %rax
+  jmp .L.return.find_enum_span
+.L.return.find_enum_span:
+  mov %rbp, %rsp
+  pop %rbp
+  ret
+.globl find_enum
+find_enum:
+  push %rbp
+  mov %rsp, %rbp
+  sub $16, %rsp
+  mov %rdi, -8(%rbp)
+  mov -8(%rbp), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call len
+  add $8, %rsp
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call find_enum_span
+  add $8, %rsp
+  jmp .L.return.find_enum
+.L.return.find_enum:
+  mov %rbp, %rsp
+  pop %rbp
+  ret
+.globl find_exn_span
+find_exn_span:
+  push %rbp
+  mov %rsp, %rbp
+  sub $32, %rsp
+  mov %rdi, -32(%rbp)
+  mov %rsi, -24(%rbp)
+  mov -32(%rbp), %rax
+  push %rax
+  mov -24(%rbp), %rax
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call hash_n
+  add $8, %rsp
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call sym_bucket
+  add $8, %rsp
+  mov %rax, -16(%rbp)
+  mov exn_buckets(%rip), %rax
+  push %rax
+  mov -16(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov (%rax), %rax
+  mov %rax, -8(%rbp)
+.L.begin107:
+  mov -8(%rbp), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setne %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.end107
+  mov -8(%rbp), %rax
+  mov (%rax), %rax
+  push %rax
+  mov -32(%rbp), %rax
+  push %rax
+  mov -24(%rbp), %rax
+  push %rax
+  pop %rdx
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call name_eq_span
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.else108
+  mov -8(%rbp), %rax
+  jmp .L.return.find_exn_span
+  jmp .L.end108
+.L.else108:
+.L.end108:
+  mov -8(%rbp), %rax
+  add $48, %rax
+  mov (%rax), %rax
+  mov %rax, -8(%rbp)
+  jmp .L.begin107
+.L.end107:
+  mov $0, %rax
+  jmp .L.return.find_exn_span
+.L.return.find_exn_span:
+  mov %rbp, %rsp
+  pop %rbp
+  ret
+.globl find_exn
+find_exn:
+  push %rbp
+  mov %rsp, %rbp
+  sub $16, %rsp
+  mov %rdi, -8(%rbp)
+  mov -8(%rbp), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call len
+  add $8, %rsp
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call find_exn_span
+  add $8, %rsp
+  jmp .L.return.find_exn
+.L.return.find_exn:
+  mov %rbp, %rsp
+  pop %rbp
+  ret
+.globl hash_put_struct
+hash_put_struct:
+  push %rbp
+  mov %rsp, %rbp
+  sub $16, %rsp
+  mov %rdi, -16(%rbp)
+  mov -16(%rbp), %rax
+  mov (%rax), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call hash_str
+  add $8, %rsp
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call sym_bucket
+  add $8, %rsp
+  mov %rax, -8(%rbp)
+  mov struct_buckets(%rip), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov (%rax), %rax
+  push %rax
+  mov -16(%rbp), %rax
+  add $40, %rax
+  mov %rax, %rdi
+  pop %rsi
+  mov %rsi, %rax
+  mov %rax, (%rdi)
+  mov -16(%rbp), %rax
+  push %rax
+  mov struct_buckets(%rip), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov %rax, %rdi
+  pop %rsi
+  mov %rsi, %rax
+  mov %rax, (%rdi)
+.L.return.hash_put_struct:
+  mov %rbp, %rsp
+  pop %rbp
+  ret
+.globl hash_put_enum
+hash_put_enum:
+  push %rbp
+  mov %rsp, %rbp
+  sub $16, %rsp
+  mov %rdi, -16(%rbp)
+  mov -16(%rbp), %rax
+  mov (%rax), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call hash_str
+  add $8, %rsp
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call sym_bucket
+  add $8, %rsp
+  mov %rax, -8(%rbp)
+  mov enum_buckets(%rip), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov (%rax), %rax
+  push %rax
+  mov -16(%rbp), %rax
+  add $40, %rax
+  mov %rax, %rdi
+  pop %rsi
+  mov %rsi, %rax
+  mov %rax, (%rdi)
+  mov -16(%rbp), %rax
+  push %rax
+  mov enum_buckets(%rip), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov %rax, %rdi
+  pop %rsi
+  mov %rsi, %rax
+  mov %rax, (%rdi)
+.L.return.hash_put_enum:
+  mov %rbp, %rsp
+  pop %rbp
+  ret
+.globl hash_put_exn
+hash_put_exn:
+  push %rbp
+  mov %rsp, %rbp
+  sub $16, %rsp
+  mov %rdi, -16(%rbp)
+  mov -16(%rbp), %rax
+  mov (%rax), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call hash_str
+  add $8, %rsp
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call sym_bucket
+  add $8, %rsp
+  mov %rax, -8(%rbp)
+  mov exn_buckets(%rip), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov (%rax), %rax
+  push %rax
+  mov -16(%rbp), %rax
+  add $48, %rax
+  mov %rax, %rdi
+  pop %rsi
+  mov %rsi, %rax
+  mov %rax, (%rdi)
+  mov -16(%rbp), %rax
+  push %rax
+  mov exn_buckets(%rip), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov %rax, %rdi
+  pop %rsi
+  mov %rsi, %rax
+  mov %rax, (%rdi)
+.L.return.hash_put_exn:
+  mov %rbp, %rsp
+  pop %rbp
+  ret
+.globl hash_put_fn
+hash_put_fn:
+  push %rbp
+  mov %rsp, %rbp
+  sub $16, %rsp
+  mov %rdi, -16(%rbp)
+  mov -16(%rbp), %rax
+  mov (%rax), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call hash_str
+  add $8, %rsp
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call sym_bucket
+  add $8, %rsp
+  mov %rax, -8(%rbp)
+  mov fn_buckets(%rip), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov (%rax), %rax
+  push %rax
+  mov -16(%rbp), %rax
+  add $88, %rax
+  mov %rax, %rdi
+  pop %rsi
+  mov %rsi, %rax
+  mov %rax, (%rdi)
+  mov -16(%rbp), %rax
+  push %rax
+  mov fn_buckets(%rip), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov %rax, %rdi
+  pop %rsi
+  mov %rsi, %rax
+  mov %rax, (%rdi)
+.L.return.hash_put_fn:
+  mov %rbp, %rsp
+  pop %rbp
+  ret
+.globl hash_put_global
+hash_put_global:
+  push %rbp
+  mov %rsp, %rbp
+  sub $16, %rsp
+  mov %rdi, -16(%rbp)
+  mov -16(%rbp), %rax
+  mov (%rax), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call hash_str
+  add $8, %rsp
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call sym_bucket
+  add $8, %rsp
+  mov %rax, -8(%rbp)
+  mov global_buckets(%rip), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov (%rax), %rax
+  push %rax
+  mov -16(%rbp), %rax
+  add $72, %rax
+  mov %rax, %rdi
+  pop %rsi
+  mov %rsi, %rax
+  mov %rax, (%rdi)
+  mov -16(%rbp), %rax
+  push %rax
+  mov global_buckets(%rip), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov %rax, %rdi
+  pop %rsi
+  mov %rsi, %rax
+  mov %rax, (%rdi)
+.L.return.hash_put_global:
+  mov %rbp, %rsp
+  pop %rbp
+  ret
+.globl hash_remove_struct
+hash_remove_struct:
+  push %rbp
+  mov %rsp, %rbp
+  sub $32, %rsp
+  mov %rdi, -32(%rbp)
+  mov -32(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call hash_str
+  add $8, %rsp
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call sym_bucket
+  add $8, %rsp
+  mov %rax, -24(%rbp)
+  mov $0, %rax
+  mov %rax, -16(%rbp)
+  mov struct_buckets(%rip), %rax
+  push %rax
+  mov -24(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov (%rax), %rax
+  mov %rax, -8(%rbp)
+.L.begin109:
+  mov -8(%rbp), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setne %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.end109
+  mov -8(%rbp), %rax
+  mov (%rax), %rax
+  push %rax
+  mov -32(%rbp), %rax
   push %rax
   pop %rsi
   pop %rdi
@@ -5529,7 +6333,7 @@ remove_struct:
   call streq
   add $8, %rsp
   cmp $0, %rax
-  je .L.else106
+  je .L.else110
   mov -16(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -5539,7 +6343,105 @@ remove_struct:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else107
+  je .L.else111
+  mov -8(%rbp), %rax
+  add $40, %rax
+  mov (%rax), %rax
+  push %rax
+  mov -16(%rbp), %rax
+  add $40, %rax
+  mov %rax, %rdi
+  pop %rsi
+  mov %rsi, %rax
+  mov %rax, (%rdi)
+  jmp .L.end111
+.L.else111:
+  mov -8(%rbp), %rax
+  add $40, %rax
+  mov (%rax), %rax
+  push %rax
+  mov struct_buckets(%rip), %rax
+  push %rax
+  mov -24(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov %rax, %rdi
+  pop %rsi
+  mov %rsi, %rax
+  mov %rax, (%rdi)
+.L.end111:
+  mov $0, %rax
+  jmp .L.return.hash_remove_struct
+  jmp .L.end110
+.L.else110:
+.L.end110:
+  mov -8(%rbp), %rax
+  mov %rax, -16(%rbp)
+  mov -8(%rbp), %rax
+  add $40, %rax
+  mov (%rax), %rax
+  mov %rax, -8(%rbp)
+  jmp .L.begin109
+.L.end109:
+.L.return.hash_remove_struct:
+  mov %rbp, %rsp
+  pop %rbp
+  ret
+.globl remove_struct
+remove_struct:
+  push %rbp
+  mov %rsp, %rbp
+  sub $32, %rsp
+  mov %rdi, -24(%rbp)
+  mov -24(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call hash_remove_struct
+  add $8, %rsp
+  mov $0, %rax
+  mov %rax, -16(%rbp)
+  mov struct_defs(%rip), %rax
+  mov %rax, -8(%rbp)
+.L.begin112:
+  mov -8(%rbp), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setne %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.end112
+  mov -8(%rbp), %rax
+  mov (%rax), %rax
+  push %rax
+  mov -24(%rbp), %rax
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call streq
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.else113
+  mov -16(%rbp), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setne %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else114
   mov -8(%rbp), %rax
   add $32, %rax
   mov (%rax), %rax
@@ -5550,26 +6452,26 @@ remove_struct:
   pop %rsi
   mov %rsi, %rax
   mov %rax, (%rdi)
-  jmp .L.end107
-.L.else107:
+  jmp .L.end114
+.L.else114:
   mov -8(%rbp), %rax
   add $32, %rax
   mov (%rax), %rax
   mov %rax, struct_defs(%rip)
-.L.end107:
+.L.end114:
   mov $0, %rax
   jmp .L.return.remove_struct
-  jmp .L.end106
-.L.else106:
-.L.end106:
+  jmp .L.end113
+.L.else113:
+.L.end113:
   mov -8(%rbp), %rax
   mov %rax, -16(%rbp)
   mov -8(%rbp), %rax
   add $32, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin105
-.L.end105:
+  jmp .L.begin112
+.L.end112:
 .L.return.remove_struct:
   mov %rbp, %rsp
   pop %rbp
@@ -5596,13 +6498,13 @@ get_or_create_struct:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else108
+  je .L.else115
   mov -16(%rbp), %rax
   jmp .L.return.get_or_create_struct
-  jmp .L.end108
-.L.else108:
-.L.end108:
-  mov $40, %rdi
+  jmp .L.end115
+.L.else115:
+.L.end115:
+  mov $48, %rdi
   call malloc
   push %rbx
   mov %rax, %rbx
@@ -5625,11 +6527,21 @@ get_or_create_struct:
   mov %rbx, %rdi
   add $32, %rdi
   mov %rax, (%rdi)
+  mov $0, %rax
+  mov %rbx, %rdi
+  add $40, %rdi
+  mov %rax, (%rdi)
   mov %rbx, %rax
   pop %rbx
   mov %rax, -8(%rbp)
   mov -8(%rbp), %rax
   mov %rax, struct_defs(%rip)
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call hash_put_struct
+  add $8, %rsp
   mov -8(%rbp), %rax
   jmp .L.return.get_or_create_struct
 .L.return.get_or_create_struct:
@@ -5658,13 +6570,13 @@ get_or_create_enum:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else109
+  je .L.else116
   mov -16(%rbp), %rax
   jmp .L.return.get_or_create_enum
-  jmp .L.end109
-.L.else109:
-.L.end109:
-  mov $40, %rdi
+  jmp .L.end116
+.L.else116:
+.L.end116:
+  mov $48, %rdi
   call malloc
   push %rbx
   mov %rax, %rbx
@@ -5687,11 +6599,21 @@ get_or_create_enum:
   mov %rbx, %rdi
   add $32, %rdi
   mov %rax, (%rdi)
+  mov $0, %rax
+  mov %rbx, %rdi
+  add $40, %rdi
+  mov %rax, (%rdi)
   mov %rbx, %rax
   pop %rbx
   mov %rax, -8(%rbp)
   mov -8(%rbp), %rax
   mov %rax, enum_defs(%rip)
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call hash_put_enum
+  add $8, %rsp
   mov -8(%rbp), %rax
   jmp .L.return.get_or_create_enum
 .L.return.get_or_create_enum:
@@ -5718,7 +6640,7 @@ rebind_struct_stub_to_enum:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else110
+  je .L.else117
   mov -8(%rbp), %rax
   push %rbx
   mov %rax, %rbx
@@ -5738,9 +6660,9 @@ rebind_struct_stub_to_enum:
   pop %rsi
   mov %rsi, %rax
   mov %rax, (%rdi)
-  jmp .L.end110
-.L.else110:
-.L.end110:
+  jmp .L.end117
+.L.else117:
+.L.end117:
 .L.return.rebind_struct_stub_to_enum:
   mov %rbp, %rsp
   pop %rbp
@@ -5756,7 +6678,7 @@ find_variant:
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-.L.begin111:
+.L.begin118:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -5766,7 +6688,7 @@ find_variant:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end111
+  je .L.end118
   mov -8(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -5778,18 +6700,18 @@ find_variant:
   call streq
   add $8, %rsp
   cmp $0, %rax
-  je .L.else112
+  je .L.else119
   mov -8(%rbp), %rax
   jmp .L.return.find_variant
-  jmp .L.end112
-.L.else112:
-.L.end112:
+  jmp .L.end119
+.L.else119:
+.L.end119:
   mov -8(%rbp), %rax
   add $40, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin111
-.L.end111:
+  jmp .L.begin118
+.L.end118:
   mov $0, %rax
   jmp .L.return.find_variant
 .L.return.find_variant:
@@ -5854,7 +6776,7 @@ variant_payload_name:
   mov %rax, -16(%rbp)
   mov $0, %rax
   mov %rax, -8(%rbp)
-.L.begin113:
+.L.begin120:
   mov -16(%rbp), %rax
   push %rax
   mov -64(%rbp), %rax
@@ -5869,7 +6791,7 @@ variant_payload_name:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end113
+  je .L.end120
   mov -64(%rbp), %rax
   push %rax
   mov -16(%rbp), %rax
@@ -5912,8 +6834,8 @@ variant_payload_name:
   pop %rax
   add %rdi, %rax
   mov %rax, -16(%rbp)
-  jmp .L.begin113
-.L.end113:
+  jmp .L.begin120
+.L.end120:
   mov $46, %rax
   push %rax
   mov -24(%rbp), %rax
@@ -5940,7 +6862,7 @@ variant_payload_name:
   mov %rax, -8(%rbp)
   mov $0, %rax
   mov %rax, -16(%rbp)
-.L.begin114:
+.L.begin121:
   mov -16(%rbp), %rax
   push %rax
   mov -56(%rbp), %rax
@@ -5955,7 +6877,7 @@ variant_payload_name:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end114
+  je .L.end121
   mov -56(%rbp), %rax
   push %rax
   mov -16(%rbp), %rax
@@ -5998,8 +6920,8 @@ variant_payload_name:
   pop %rax
   add %rdi, %rax
   mov %rax, -16(%rbp)
-  jmp .L.begin114
-.L.end114:
+  jmp .L.begin121
+.L.end121:
   mov -24(%rbp), %rax
   jmp .L.return.variant_payload_name
 .L.return.variant_payload_name:
@@ -6010,7 +6932,7 @@ variant_payload_name:
 is_type_name:
   push %rbp
   mov %rsp, %rbp
-  sub $16, %rsp
+  sub $0, %rsp
   mov $4, %rax
   push %rax
   pop %rdi
@@ -6021,12 +6943,12 @@ is_type_name:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else115
+  je .L.else122
   mov $0, %rax
   jmp .L.return.is_type_name
-  jmp .L.end115
-.L.else115:
-.L.end115:
+  jmp .L.end122
+.L.else122:
+.L.end122:
   mov tok(%rip), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -6038,14 +6960,7 @@ is_type_name:
   pop %rsi
   pop %rdi
   sub $8, %rsp
-  call strdup_n
-  add $8, %rsp
-  mov %rax, -8(%rbp)
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call find_struct
+  call find_struct_span
   add $8, %rsp
   push %rax
   mov $0, %rax
@@ -6055,17 +6970,24 @@ is_type_name:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else116
+  je .L.else123
   mov $1, %rax
   jmp .L.return.is_type_name
-  jmp .L.end116
-.L.else116:
-.L.end116:
-  mov -8(%rbp), %rax
+  jmp .L.end123
+.L.else123:
+.L.end123:
+  mov tok(%rip), %rax
+  add $16, %rax
+  mov (%rax), %rax
   push %rax
+  mov tok(%rip), %rax
+  add $24, %rax
+  mov (%rax), %rax
+  push %rax
+  pop %rsi
   pop %rdi
   sub $8, %rsp
-  call find_enum
+  call find_enum_span
   add $8, %rsp
   push %rax
   mov $0, %rax
@@ -6075,17 +6997,24 @@ is_type_name:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else117
+  je .L.else124
   mov $1, %rax
   jmp .L.return.is_type_name
-  jmp .L.end117
-.L.else117:
-.L.end117:
-  mov -8(%rbp), %rax
+  jmp .L.end124
+.L.else124:
+.L.end124:
+  mov tok(%rip), %rax
+  add $16, %rax
+  mov (%rax), %rax
   push %rax
+  mov tok(%rip), %rax
+  add $24, %rax
+  mov (%rax), %rax
+  push %rax
+  pop %rsi
   pop %rdi
   sub $8, %rsp
-  call find_exn
+  call find_exn_span
   add $8, %rsp
   push %rax
   mov $0, %rax
@@ -6095,12 +7024,12 @@ is_type_name:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else118
+  je .L.else125
   mov $1, %rax
   jmp .L.return.is_type_name
-  jmp .L.end118
-.L.else118:
-.L.end118:
+  jmp .L.end125
+.L.else125:
+.L.end125:
   mov $0, %rax
   jmp .L.return.is_type_name
 .L.return.is_type_name:
@@ -6119,7 +7048,7 @@ starts_type:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  jne .L.true122
+  jne .L.true129
   mov $6, %rax
   push %rax
   pop %rdi
@@ -6127,15 +7056,15 @@ starts_type:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.false122
-.L.true122:
+  je .L.false129
+.L.true129:
   mov $1, %rax
-  jmp .L.end122
-.L.false122:
+  jmp .L.end129
+.L.false129:
   mov $0, %rax
-.L.end122:
+.L.end129:
   cmp $0, %rax
-  jne .L.true121
+  jne .L.true128
   mov $7, %rax
   push %rax
   pop %rdi
@@ -6143,39 +7072,39 @@ starts_type:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.false121
-.L.true121:
+  je .L.false128
+.L.true128:
   mov $1, %rax
-  jmp .L.end121
-.L.false121:
+  jmp .L.end128
+.L.false128:
   mov $0, %rax
-.L.end121:
+.L.end128:
   cmp $0, %rax
-  jne .L.true120
+  jne .L.true127
   sub $8, %rsp
   call is_type_name
   add $8, %rsp
   cmp $0, %rax
-  je .L.false120
-.L.true120:
+  je .L.false127
+.L.true127:
   mov $1, %rax
-  jmp .L.end120
-.L.false120:
+  jmp .L.end127
+.L.false127:
   mov $0, %rax
-.L.end120:
+.L.end127:
   cmp $0, %rax
-  je .L.else119
+  je .L.else126
   mov $1, %rax
   jmp .L.return.starts_type
-  jmp .L.end119
-.L.else119:
-.L.end119:
+  jmp .L.end126
+.L.else126:
+.L.end126:
   mov tok(%rip), %rax
-  mov %rax, -32(%rbp)
-  mov $0, %rax
   mov %rax, -24(%rbp)
-.L.begin123:
-  mov -32(%rbp), %rax
+  mov $0, %rax
+  mov %rax, -16(%rbp)
+.L.begin130:
+  mov -24(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -6184,8 +7113,8 @@ starts_type:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false124
-  mov -24(%rbp), %rax
+  je .L.false131
+  mov -16(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -6194,15 +7123,15 @@ starts_type:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false124
+  je .L.false131
   mov $1, %rax
-  jmp .L.end124
-.L.false124:
+  jmp .L.end131
+.L.false131:
   mov $0, %rax
-.L.end124:
+.L.end131:
   cmp $0, %rax
-  je .L.end123
-  mov -32(%rbp), %rax
+  je .L.end130
+  mov -24(%rbp), %rax
   mov (%rax), %rax
   push %rax
   mov $51, %rax
@@ -6212,12 +7141,12 @@ starts_type:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else125
-  mov -32(%rbp), %rax
+  je .L.else132
+  mov -24(%rbp), %rax
   add $40, %rax
   mov (%rax), %rax
-  mov %rax, -16(%rbp)
-  mov -16(%rbp), %rax
+  mov %rax, -8(%rbp)
+  mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -6226,8 +7155,8 @@ starts_type:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else126
-  mov -16(%rbp), %rax
+  je .L.else133
+  mov -8(%rbp), %rax
   mov (%rax), %rax
   push %rax
   mov $28, %rax
@@ -6237,24 +7166,24 @@ starts_type:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else127
+  je .L.else134
   mov $0, %rax
   jmp .L.return.starts_type
-  jmp .L.end127
-.L.else127:
-.L.end127:
-  mov -16(%rbp), %rax
+  jmp .L.end134
+.L.else134:
+.L.end134:
+  mov -8(%rbp), %rax
   add $40, %rax
   mov (%rax), %rax
-  mov %rax, -32(%rbp)
-  jmp .L.end126
-.L.else126:
+  mov %rax, -24(%rbp)
+  jmp .L.end133
+.L.else133:
   mov $0, %rax
   jmp .L.return.starts_type
-.L.end126:
-  jmp .L.end125
-.L.else125:
-  mov -32(%rbp), %rax
+.L.end133:
+  jmp .L.end132
+.L.else132:
+  mov -24(%rbp), %rax
   mov (%rax), %rax
   push %rax
   mov $28, %rax
@@ -6264,20 +7193,20 @@ starts_type:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else128
-  mov -32(%rbp), %rax
+  je .L.else135
+  mov -24(%rbp), %rax
   add $40, %rax
   mov (%rax), %rax
-  mov %rax, -32(%rbp)
-  jmp .L.end128
-.L.else128:
-  mov $1, %rax
   mov %rax, -24(%rbp)
-.L.end128:
-.L.end125:
-  jmp .L.begin123
-.L.end123:
-  mov -32(%rbp), %rax
+  jmp .L.end135
+.L.else135:
+  mov $1, %rax
+  mov %rax, -16(%rbp)
+.L.end135:
+.L.end132:
+  jmp .L.begin130
+.L.end130:
+  mov -24(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -6286,8 +7215,8 @@ starts_type:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else129
-  mov -32(%rbp), %rax
+  je .L.else136
+  mov -24(%rbp), %rax
   push %rax
   mov tok(%rip), %rax
   mov %rax, %rdi
@@ -6296,8 +7225,8 @@ starts_type:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else130
-  mov -32(%rbp), %rax
+  je .L.else137
+  mov -24(%rbp), %rax
   mov (%rax), %rax
   push %rax
   mov $5, %rax
@@ -6307,8 +7236,8 @@ starts_type:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  jne .L.true133
-  mov -32(%rbp), %rax
+  jne .L.true140
+  mov -24(%rbp), %rax
   mov (%rax), %rax
   push %rax
   mov $6, %rax
@@ -6318,16 +7247,16 @@ starts_type:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false133
-.L.true133:
+  je .L.false140
+.L.true140:
   mov $1, %rax
-  jmp .L.end133
-.L.false133:
+  jmp .L.end140
+.L.false140:
   mov $0, %rax
-.L.end133:
+.L.end140:
   cmp $0, %rax
-  jne .L.true132
-  mov -32(%rbp), %rax
+  jne .L.true139
+  mov -24(%rbp), %rax
   mov (%rax), %rax
   push %rax
   mov $7, %rax
@@ -6337,21 +7266,21 @@ starts_type:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false132
-.L.true132:
+  je .L.false139
+.L.true139:
   mov $1, %rax
-  jmp .L.end132
-.L.false132:
+  jmp .L.end139
+.L.false139:
   mov $0, %rax
-.L.end132:
+.L.end139:
   cmp $0, %rax
-  je .L.else131
+  je .L.else138
   mov $1, %rax
   jmp .L.return.starts_type
-  jmp .L.end131
-.L.else131:
-.L.end131:
-  mov -32(%rbp), %rax
+  jmp .L.end138
+.L.else138:
+.L.end138:
+  mov -24(%rbp), %rax
   mov (%rax), %rax
   push %rax
   mov $4, %rax
@@ -6361,26 +7290,19 @@ starts_type:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else134
-  mov -32(%rbp), %rax
+  je .L.else141
+  mov -24(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   push %rax
-  mov -32(%rbp), %rax
+  mov -24(%rbp), %rax
   add $24, %rax
   mov (%rax), %rax
   push %rax
   pop %rsi
   pop %rdi
   sub $8, %rsp
-  call strdup_n
-  add $8, %rsp
-  mov %rax, -8(%rbp)
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call find_struct
+  call find_struct_span
   add $8, %rsp
   push %rax
   mov $0, %rax
@@ -6390,67 +7312,75 @@ starts_type:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  jne .L.true137
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call find_enum
-  add $8, %rsp
-  push %rax
-  mov $0, %rax
-  mov %rax, %rdi
-  pop %rax
-  cmp %rdi, %rax
-  setne %al
-  movzb %al, %rax
-  cmp $0, %rax
-  je .L.false137
-.L.true137:
-  mov $1, %rax
-  jmp .L.end137
-.L.false137:
-  mov $0, %rax
-.L.end137:
-  cmp $0, %rax
-  jne .L.true136
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call find_exn
-  add $8, %rsp
-  push %rax
-  mov $0, %rax
-  mov %rax, %rdi
-  pop %rax
-  cmp %rdi, %rax
-  setne %al
-  movzb %al, %rax
-  cmp $0, %rax
-  je .L.false136
-.L.true136:
-  mov $1, %rax
-  jmp .L.end136
-.L.false136:
-  mov $0, %rax
-.L.end136:
-  cmp $0, %rax
-  je .L.else135
+  je .L.else142
   mov $1, %rax
   jmp .L.return.starts_type
-  jmp .L.end135
-.L.else135:
-.L.end135:
-  jmp .L.end134
-.L.else134:
-.L.end134:
-  jmp .L.end130
-.L.else130:
-.L.end130:
-  jmp .L.end129
-.L.else129:
-.L.end129:
+  jmp .L.end142
+.L.else142:
+.L.end142:
+  mov -24(%rbp), %rax
+  add $16, %rax
+  mov (%rax), %rax
+  push %rax
+  mov -24(%rbp), %rax
+  add $24, %rax
+  mov (%rax), %rax
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call find_enum_span
+  add $8, %rsp
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setne %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else143
+  mov $1, %rax
+  jmp .L.return.starts_type
+  jmp .L.end143
+.L.else143:
+.L.end143:
+  mov -24(%rbp), %rax
+  add $16, %rax
+  mov (%rax), %rax
+  push %rax
+  mov -24(%rbp), %rax
+  add $24, %rax
+  mov (%rax), %rax
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call find_exn_span
+  add $8, %rsp
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setne %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else144
+  mov $1, %rax
+  jmp .L.return.starts_type
+  jmp .L.end144
+.L.else144:
+.L.end144:
+  jmp .L.end141
+.L.else141:
+.L.end141:
+  jmp .L.end137
+.L.else137:
+.L.end137:
+  jmp .L.end136
+.L.else136:
+.L.end136:
   mov $0, %rax
   jmp .L.return.starts_type
 .L.return.starts_type:
@@ -6466,7 +7396,7 @@ find_field:
   mov %rsi, -16(%rbp)
   mov -24(%rbp), %rax
   mov %rax, -8(%rbp)
-.L.begin138:
+.L.begin145:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -6476,7 +7406,7 @@ find_field:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end138
+  je .L.end145
   mov -8(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -6488,18 +7418,18 @@ find_field:
   call streq
   add $8, %rsp
   cmp $0, %rax
-  je .L.else139
+  je .L.else146
   mov -8(%rbp), %rax
   jmp .L.return.find_field
-  jmp .L.end139
-.L.else139:
-.L.end139:
+  jmp .L.end146
+.L.else146:
+.L.end146:
   mov -8(%rbp), %rax
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin138
-.L.end138:
+  jmp .L.begin145
+.L.end145:
   mov $0, %rax
   jmp .L.return.find_field
 .L.return.find_field:
@@ -6561,7 +7491,7 @@ exn_in_list:
   mov %rsi, -16(%rbp)
   mov -24(%rbp), %rax
   mov %rax, -8(%rbp)
-.L.begin140:
+.L.begin147:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -6571,7 +7501,7 @@ exn_in_list:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end140
+  je .L.end147
   mov -8(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -6582,18 +7512,18 @@ exn_in_list:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else141
+  je .L.else148
   mov $1, %rax
   jmp .L.return.exn_in_list
-  jmp .L.end141
-.L.else141:
-.L.end141:
+  jmp .L.end148
+.L.else148:
+.L.end148:
   mov -8(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin140
-.L.end140:
+  jmp .L.begin147
+.L.end147:
   mov $0, %rax
   jmp .L.return.exn_in_list
 .L.return.exn_in_list:
@@ -6608,7 +7538,7 @@ exn_is_caught:
   mov %rdi, -16(%rbp)
   mov catch_top(%rip), %rax
   mov %rax, -8(%rbp)
-.L.begin142:
+.L.begin149:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -6618,7 +7548,7 @@ exn_is_caught:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end142
+  je .L.end149
   mov -8(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -6629,18 +7559,18 @@ exn_is_caught:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else143
+  je .L.else150
   mov $1, %rax
   jmp .L.return.exn_is_caught
-  jmp .L.end143
-.L.else143:
-.L.end143:
+  jmp .L.end150
+.L.else150:
+.L.end150:
   mov -8(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin142
-.L.end142:
+  jmp .L.begin149
+.L.end149:
   mov $0, %rax
   jmp .L.return.exn_is_caught
 .L.return.exn_is_caught:
@@ -6664,12 +7594,12 @@ mark_raises_seen:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else144
+  je .L.else151
   mov -16(%rbp), %rax
   add $64, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-.L.begin145:
+.L.begin152:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -6679,7 +7609,7 @@ mark_raises_seen:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end145
+  je .L.end152
   mov -8(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -6690,7 +7620,7 @@ mark_raises_seen:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else146
+  je .L.else153
   mov $1, %rax
   push %rax
   mov -8(%rbp), %rax
@@ -6701,18 +7631,18 @@ mark_raises_seen:
   mov %rax, (%rdi)
   mov $1, %rax
   jmp .L.return.mark_raises_seen
-  jmp .L.end146
-.L.else146:
-.L.end146:
+  jmp .L.end153
+.L.else153:
+.L.end153:
   mov -8(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin145
-.L.end145:
-  jmp .L.end144
-.L.else144:
-.L.end144:
+  jmp .L.begin152
+.L.end152:
+  jmp .L.end151
+.L.else151:
+.L.end151:
   mov $0, %rax
   jmp .L.return.mark_raises_seen
 .L.return.mark_raises_seen:
@@ -6733,12 +7663,12 @@ check_exn_allowed:
   call exn_is_caught
   add $8, %rsp
   cmp $0, %rax
-  je .L.else147
+  je .L.else154
   mov $0, %rax
   jmp .L.return.check_exn_allowed
-  jmp .L.end147
-.L.else147:
-.L.end147:
+  jmp .L.end154
+.L.else154:
+.L.end154:
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -6746,12 +7676,12 @@ check_exn_allowed:
   call mark_raises_seen
   add $8, %rsp
   cmp $0, %rax
-  je .L.else148
+  je .L.else155
   mov $0, %rax
   jmp .L.return.check_exn_allowed
-  jmp .L.end148
-.L.else148:
-.L.end148:
+  jmp .L.end155
+.L.else155:
+.L.end155:
   lea .L.str47+8(%rip), %rax
   push %rax
   pop %rdi
@@ -6812,7 +7742,7 @@ is_pointer:
   push %rax
   mov (%rsp), %rax
   cmp $4, %rax
-  jne .L.arm150
+  jne .L.arm157
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -8(%rbp), %rdi
@@ -6820,14 +7750,14 @@ is_pointer:
   mov %rax, 0(%rdi)
   mov $1, %rax
   jmp .L.return.is_pointer
-  jmp .L.matchend149
-.L.arm150:
+  jmp .L.matchend156
+.L.arm157:
   mov $0, %rax
   jmp .L.return.is_pointer
-  jmp .L.matchend149
+  jmp .L.matchend156
   mov $1, %rdi
   call exit
-.L.matchend149:
+.L.matchend156:
   add $16, %rsp
 .L.return.is_pointer:
   mov %rbp, %rsp
@@ -6845,7 +7775,7 @@ is_opt_pointer:
   push %rax
   mov (%rsp), %rax
   cmp $5, %rax
-  jne .L.arm153
+  jne .L.arm160
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -8(%rbp), %rdi
@@ -6853,14 +7783,14 @@ is_opt_pointer:
   mov %rax, 0(%rdi)
   mov $1, %rax
   jmp .L.return.is_opt_pointer
-  jmp .L.matchend152
-.L.arm153:
+  jmp .L.matchend159
+.L.arm160:
   mov $0, %rax
   jmp .L.return.is_opt_pointer
-  jmp .L.matchend152
+  jmp .L.matchend159
   mov $1, %rdi
   call exit
-.L.matchend152:
+.L.matchend159:
   add $16, %rsp
 .L.return.is_opt_pointer:
   mov %rbp, %rsp
@@ -6879,7 +7809,7 @@ is_any_pointer:
   call is_pointer
   add $8, %rsp
   cmp $0, %rax
-  jne .L.true155
+  jne .L.true162
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -6887,13 +7817,13 @@ is_any_pointer:
   call is_opt_pointer
   add $8, %rsp
   cmp $0, %rax
-  je .L.false155
-.L.true155:
+  je .L.false162
+.L.true162:
   mov $1, %rax
-  jmp .L.end155
-.L.false155:
+  jmp .L.end162
+.L.false162:
   mov $0, %rax
-.L.end155:
+.L.end162:
   jmp .L.return.is_any_pointer
 .L.return.is_any_pointer:
   mov %rbp, %rsp
@@ -6911,7 +7841,7 @@ is_array:
   push %rax
   mov (%rsp), %rax
   cmp $6, %rax
-  jne .L.arm157
+  jne .L.arm164
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -16(%rbp), %rdi
@@ -6921,14 +7851,14 @@ is_array:
   mov %rax, 8(%rdi)
   mov $1, %rax
   jmp .L.return.is_array
-  jmp .L.matchend156
-.L.arm157:
+  jmp .L.matchend163
+.L.arm164:
   mov $0, %rax
   jmp .L.return.is_array
-  jmp .L.matchend156
+  jmp .L.matchend163
   mov $1, %rdi
   call exit
-.L.matchend156:
+.L.matchend163:
   add $16, %rsp
 .L.return.is_array:
   mov %rbp, %rsp
@@ -6946,7 +7876,7 @@ is_struct_ty:
   push %rax
   mov (%rsp), %rax
   cmp $7, %rax
-  jne .L.arm160
+  jne .L.arm167
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -8(%rbp), %rdi
@@ -6954,14 +7884,14 @@ is_struct_ty:
   mov %rax, 0(%rdi)
   mov $1, %rax
   jmp .L.return.is_struct_ty
-  jmp .L.matchend159
-.L.arm160:
+  jmp .L.matchend166
+.L.arm167:
   mov $0, %rax
   jmp .L.return.is_struct_ty
-  jmp .L.matchend159
+  jmp .L.matchend166
   mov $1, %rdi
   call exit
-.L.matchend159:
+.L.matchend166:
   add $16, %rsp
 .L.return.is_struct_ty:
   mov %rbp, %rsp
@@ -6979,7 +7909,7 @@ is_enum_ty:
   push %rax
   mov (%rsp), %rax
   cmp $8, %rax
-  jne .L.arm163
+  jne .L.arm170
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -8(%rbp), %rdi
@@ -6987,14 +7917,14 @@ is_enum_ty:
   mov %rax, 0(%rdi)
   mov $1, %rax
   jmp .L.return.is_enum_ty
-  jmp .L.matchend162
-.L.arm163:
+  jmp .L.matchend169
+.L.arm170:
   mov $0, %rax
   jmp .L.return.is_enum_ty
-  jmp .L.matchend162
+  jmp .L.matchend169
   mov $1, %rdi
   call exit
-.L.matchend162:
+.L.matchend169:
   add $16, %rsp
 .L.return.is_enum_ty:
   mov %rbp, %rsp
@@ -7012,7 +7942,7 @@ is_exn_ty:
   push %rax
   mov (%rsp), %rax
   cmp $9, %rax
-  jne .L.arm166
+  jne .L.arm173
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -8(%rbp), %rdi
@@ -7020,14 +7950,14 @@ is_exn_ty:
   mov %rax, 0(%rdi)
   mov $1, %rax
   jmp .L.return.is_exn_ty
-  jmp .L.matchend165
-.L.arm166:
+  jmp .L.matchend172
+.L.arm173:
   mov $0, %rax
   jmp .L.return.is_exn_ty
-  jmp .L.matchend165
+  jmp .L.matchend172
   mov $1, %rdi
   call exit
-.L.matchend165:
+.L.matchend172:
   add $16, %rsp
 .L.return.is_exn_ty:
   mov %rbp, %rsp
@@ -7046,7 +7976,7 @@ passes_by_ref:
   call is_struct_ty
   add $8, %rsp
   cmp $0, %rax
-  jne .L.true170
+  jne .L.true177
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -7054,15 +7984,15 @@ passes_by_ref:
   call is_enum_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.false170
-.L.true170:
+  je .L.false177
+.L.true177:
   mov $1, %rax
-  jmp .L.end170
-.L.false170:
+  jmp .L.end177
+.L.false177:
   mov $0, %rax
-.L.end170:
+.L.end177:
   cmp $0, %rax
-  jne .L.true169
+  jne .L.true176
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -7070,15 +8000,15 @@ passes_by_ref:
   call is_exn_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.false169
-.L.true169:
+  je .L.false176
+.L.true176:
   mov $1, %rax
-  jmp .L.end169
-.L.false169:
+  jmp .L.end176
+.L.false176:
   mov $0, %rax
-.L.end169:
+.L.end176:
   cmp $0, %rax
-  je .L.false168
+  je .L.false175
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -7093,12 +8023,12 @@ passes_by_ref:
   setg %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false168
+  je .L.false175
   mov $1, %rax
-  jmp .L.end168
-.L.false168:
+  jmp .L.end175
+.L.false175:
   mov $0, %rax
-.L.end168:
+.L.end175:
   jmp .L.return.passes_by_ref
 .L.return.passes_by_ref:
   mov %rbp, %rsp
@@ -7119,28 +8049,28 @@ is_null_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else171
+  je .L.else178
   mov -8(%rbp), %rax
   push %rax
   mov (%rax), %rax
   push %rax
   mov (%rsp), %rax
   cmp $1, %rax
-  jne .L.arm173
+  jne .L.arm180
   mov $1, %rax
   jmp .L.return.is_null_expr
-  jmp .L.matchend172
-.L.arm173:
+  jmp .L.matchend179
+.L.arm180:
   mov $0, %rax
   jmp .L.return.is_null_expr
-  jmp .L.matchend172
+  jmp .L.matchend179
   mov $1, %rdi
   call exit
-.L.matchend172:
+.L.matchend179:
   add $16, %rsp
-  jmp .L.end171
-.L.else171:
-.L.end171:
+  jmp .L.end178
+.L.else178:
+.L.end178:
   mov $0, %rax
   jmp .L.return.is_null_expr
 .L.return.is_null_expr:
@@ -7163,12 +8093,12 @@ bind_null_to_pointer:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else175
+  je .L.else182
   mov $0, %rax
   jmp .L.return.bind_null_to_pointer
-  jmp .L.end175
-.L.else175:
-.L.end175:
+  jmp .L.end182
+.L.else182:
+.L.end182:
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -7179,7 +8109,7 @@ bind_null_to_pointer:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  jne .L.true177
+  jne .L.true184
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -7190,20 +8120,20 @@ bind_null_to_pointer:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false177
-.L.true177:
+  je .L.false184
+.L.true184:
   mov $1, %rax
-  jmp .L.end177
-.L.false177:
+  jmp .L.end184
+.L.false184:
   mov $0, %rax
-.L.end177:
+.L.end184:
   cmp $0, %rax
-  je .L.else176
+  je .L.else183
   mov $0, %rax
   jmp .L.return.bind_null_to_pointer
-  jmp .L.end176
-.L.else176:
-.L.end176:
+  jmp .L.end183
+.L.else183:
+.L.end183:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -7213,7 +8143,7 @@ bind_null_to_pointer:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else178
+  je .L.else185
   mov -16(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -7224,9 +8154,9 @@ bind_null_to_pointer:
   mov %rax, (%rdi)
   mov $1, %rax
   jmp .L.return.bind_null_to_pointer
-  jmp .L.end178
-.L.else178:
-.L.end178:
+  jmp .L.end185
+.L.else185:
+.L.end185:
   mov $0, %rax
   jmp .L.return.bind_null_to_pointer
 .L.return.bind_null_to_pointer:
@@ -7251,7 +8181,7 @@ assignable:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else179
+  je .L.else186
   mov -48(%rbp), %rax
   add $48, %rax
   mov (%rax), %rax
@@ -7265,7 +8195,7 @@ assignable:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else180
+  je .L.else187
   mov -32(%rbp), %rax
   push %rax
   pop %rdi
@@ -7273,12 +8203,12 @@ assignable:
   call decay
   add $8, %rsp
   mov %rax, -40(%rbp)
-  jmp .L.end180
-.L.else180:
-.L.end180:
-  jmp .L.end179
-.L.else179:
-.L.end179:
+  jmp .L.end187
+.L.else187:
+.L.end187:
+  jmp .L.end186
+.L.else186:
+.L.end186:
   mov -56(%rbp), %rax
   push %rax
   pop %rdi
@@ -7295,7 +8225,7 @@ assignable:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else181
+  je .L.else188
   mov -40(%rbp), %rax
   push %rax
   pop %rdi
@@ -7319,7 +8249,7 @@ assignable:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false183
+  je .L.false190
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -7329,14 +8259,14 @@ assignable:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false183
+  je .L.false190
   mov $1, %rax
-  jmp .L.end183
-.L.false183:
+  jmp .L.end190
+.L.false190:
   mov $0, %rax
-.L.end183:
+.L.end190:
   cmp $0, %rax
-  je .L.else182
+  je .L.else189
   mov -16(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -7347,12 +8277,12 @@ assignable:
   call types_equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else184
+  je .L.else191
   mov $1, %rax
   jmp .L.return.assignable
-  jmp .L.end184
-.L.else184:
-.L.end184:
+  jmp .L.end191
+.L.else191:
+.L.end191:
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -7360,7 +8290,7 @@ assignable:
   call is_opt_pointer
   add $8, %rsp
   cmp $0, %rax
-  je .L.false187
+  je .L.false194
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -7368,14 +8298,14 @@ assignable:
   call is_pointer
   add $8, %rsp
   cmp $0, %rax
-  je .L.false187
+  je .L.false194
   mov $1, %rax
-  jmp .L.end187
-.L.false187:
+  jmp .L.end194
+.L.false194:
   mov $0, %rax
-.L.end187:
+.L.end194:
   cmp $0, %rax
-  je .L.false186
+  je .L.false193
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -7396,25 +8326,25 @@ assignable:
   call types_equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.false186
+  je .L.false193
   mov $1, %rax
-  jmp .L.end186
-.L.false186:
+  jmp .L.end193
+.L.false193:
   mov $0, %rax
-.L.end186:
+.L.end193:
   cmp $0, %rax
-  je .L.else185
+  je .L.else192
   mov $1, %rax
   jmp .L.return.assignable
-  jmp .L.end185
-.L.else185:
-.L.end185:
-  jmp .L.end182
-.L.else182:
-.L.end182:
-  jmp .L.end181
-.L.else181:
-.L.end181:
+  jmp .L.end192
+.L.else192:
+.L.end192:
+  jmp .L.end189
+.L.else189:
+.L.end189:
+  jmp .L.end188
+.L.else188:
+.L.end188:
   mov -24(%rbp), %rax
   push %rax
   mov -48(%rbp), %rax
@@ -7425,12 +8355,12 @@ assignable:
   call bind_null_to_pointer
   add $8, %rsp
   cmp $0, %rax
-  je .L.else188
+  je .L.else195
   mov $1, %rax
   jmp .L.return.assignable
-  jmp .L.end188
-.L.else188:
-.L.end188:
+  jmp .L.end195
+.L.else195:
+.L.end195:
   mov $0, %rax
   jmp .L.return.assignable
 .L.return.assignable:
@@ -7449,17 +8379,17 @@ is_i8_ty:
   push %rax
   mov (%rsp), %rax
   cmp $1, %rax
-  jne .L.arm190
+  jne .L.arm197
   mov $1, %rax
   jmp .L.return.is_i8_ty
-  jmp .L.matchend189
-.L.arm190:
+  jmp .L.matchend196
+.L.arm197:
   mov $0, %rax
   jmp .L.return.is_i8_ty
-  jmp .L.matchend189
+  jmp .L.matchend196
   mov $1, %rdi
   call exit
-.L.matchend189:
+.L.matchend196:
   add $16, %rsp
 .L.return.is_i8_ty:
   mov %rbp, %rsp
@@ -7477,17 +8407,17 @@ is_int_ty:
   push %rax
   mov (%rsp), %rax
   cmp $0, %rax
-  jne .L.arm193
+  jne .L.arm200
   mov $1, %rax
   jmp .L.return.is_int_ty
-  jmp .L.matchend192
-.L.arm193:
+  jmp .L.matchend199
+.L.arm200:
   mov $0, %rax
   jmp .L.return.is_int_ty
-  jmp .L.matchend192
+  jmp .L.matchend199
   mov $1, %rdi
   call exit
-.L.matchend192:
+.L.matchend199:
   add $16, %rsp
 .L.return.is_int_ty:
   mov %rbp, %rsp
@@ -7505,17 +8435,17 @@ is_bool_ty:
   push %rax
   mov (%rsp), %rax
   cmp $2, %rax
-  jne .L.arm196
+  jne .L.arm203
   mov $1, %rax
   jmp .L.return.is_bool_ty
-  jmp .L.matchend195
-.L.arm196:
+  jmp .L.matchend202
+.L.arm203:
   mov $0, %rax
   jmp .L.return.is_bool_ty
-  jmp .L.matchend195
+  jmp .L.matchend202
   mov $1, %rdi
   call exit
-.L.matchend195:
+.L.matchend202:
   add $16, %rsp
 .L.return.is_bool_ty:
   mov %rbp, %rsp
@@ -7533,17 +8463,17 @@ is_noreturn_ty:
   push %rax
   mov (%rsp), %rax
   cmp $3, %rax
-  jne .L.arm199
+  jne .L.arm206
   mov $1, %rax
   jmp .L.return.is_noreturn_ty
-  jmp .L.matchend198
-.L.arm199:
+  jmp .L.matchend205
+.L.arm206:
   mov $0, %rax
   jmp .L.return.is_noreturn_ty
-  jmp .L.matchend198
+  jmp .L.matchend205
   mov $1, %rdi
   call exit
-.L.matchend198:
+.L.matchend205:
   add $16, %rsp
 .L.return.is_noreturn_ty:
   mov %rbp, %rsp
@@ -7565,118 +8495,6 @@ types_equal:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else201
-  mov $1, %rax
-  jmp .L.return.types_equal
-  jmp .L.end201
-.L.else201:
-.L.end201:
-  mov -16(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_int_ty
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false203
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_int_ty
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false203
-  mov $1, %rax
-  jmp .L.end203
-.L.false203:
-  mov $0, %rax
-.L.end203:
-  cmp $0, %rax
-  je .L.else202
-  mov $1, %rax
-  jmp .L.return.types_equal
-  jmp .L.end202
-.L.else202:
-.L.end202:
-  mov -16(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_i8_ty
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false205
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_i8_ty
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false205
-  mov $1, %rax
-  jmp .L.end205
-.L.false205:
-  mov $0, %rax
-.L.end205:
-  cmp $0, %rax
-  je .L.else204
-  mov $1, %rax
-  jmp .L.return.types_equal
-  jmp .L.end204
-.L.else204:
-.L.end204:
-  mov -16(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_bool_ty
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false207
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_bool_ty
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false207
-  mov $1, %rax
-  jmp .L.end207
-.L.false207:
-  mov $0, %rax
-.L.end207:
-  cmp $0, %rax
-  je .L.else206
-  mov $1, %rax
-  jmp .L.return.types_equal
-  jmp .L.end206
-.L.else206:
-.L.end206:
-  mov -16(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_noreturn_ty
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false209
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_noreturn_ty
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false209
-  mov $1, %rax
-  jmp .L.end209
-.L.false209:
-  mov $0, %rax
-.L.end209:
-  cmp $0, %rax
   je .L.else208
   mov $1, %rax
   jmp .L.return.types_equal
@@ -7687,71 +8505,137 @@ types_equal:
   push %rax
   pop %rdi
   sub $8, %rsp
-  call is_pointer
+  call is_int_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.false211
+  je .L.false210
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
-  call is_pointer
+  call is_int_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.false211
+  je .L.false210
   mov $1, %rax
-  jmp .L.end211
-.L.false211:
-  mov $0, %rax
-.L.end211:
-  cmp $0, %rax
-  je .L.else210
-  mov -16(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call type_base
-  add $8, %rsp
-  push %rax
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call type_base
-  add $8, %rsp
-  push %rax
-  pop %rsi
-  pop %rdi
-  sub $8, %rsp
-  call types_equal
-  add $8, %rsp
-  jmp .L.return.types_equal
   jmp .L.end210
-.L.else210:
+.L.false210:
+  mov $0, %rax
 .L.end210:
+  cmp $0, %rax
+  je .L.else209
+  mov $1, %rax
+  jmp .L.return.types_equal
+  jmp .L.end209
+.L.else209:
+.L.end209:
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
-  call is_opt_pointer
+  call is_i8_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.false213
+  je .L.false212
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
-  call is_opt_pointer
+  call is_i8_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.false213
+  je .L.false212
   mov $1, %rax
-  jmp .L.end213
-.L.false213:
+  jmp .L.end212
+.L.false212:
   mov $0, %rax
-.L.end213:
+.L.end212:
   cmp $0, %rax
-  je .L.else212
+  je .L.else211
+  mov $1, %rax
+  jmp .L.return.types_equal
+  jmp .L.end211
+.L.else211:
+.L.end211:
+  mov -16(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_bool_ty
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false214
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_bool_ty
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false214
+  mov $1, %rax
+  jmp .L.end214
+.L.false214:
+  mov $0, %rax
+.L.end214:
+  cmp $0, %rax
+  je .L.else213
+  mov $1, %rax
+  jmp .L.return.types_equal
+  jmp .L.end213
+.L.else213:
+.L.end213:
+  mov -16(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_noreturn_ty
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false216
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_noreturn_ty
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false216
+  mov $1, %rax
+  jmp .L.end216
+.L.false216:
+  mov $0, %rax
+.L.end216:
+  cmp $0, %rax
+  je .L.else215
+  mov $1, %rax
+  jmp .L.return.types_equal
+  jmp .L.end215
+.L.else215:
+.L.end215:
+  mov -16(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_pointer
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false218
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_pointer
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false218
+  mov $1, %rax
+  jmp .L.end218
+.L.false218:
+  mov $0, %rax
+.L.end218:
+  cmp $0, %rax
+  je .L.else217
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -7772,9 +8656,55 @@ types_equal:
   call types_equal
   add $8, %rsp
   jmp .L.return.types_equal
-  jmp .L.end212
-.L.else212:
-.L.end212:
+  jmp .L.end217
+.L.else217:
+.L.end217:
+  mov -16(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_opt_pointer
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false220
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_opt_pointer
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false220
+  mov $1, %rax
+  jmp .L.end220
+.L.false220:
+  mov $0, %rax
+.L.end220:
+  cmp $0, %rax
+  je .L.else219
+  mov -16(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call type_base
+  add $8, %rsp
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call type_base
+  add $8, %rsp
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call types_equal
+  add $8, %rsp
+  jmp .L.return.types_equal
+  jmp .L.end219
+.L.else219:
+.L.end219:
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -7782,7 +8712,7 @@ types_equal:
   call is_array
   add $8, %rsp
   cmp $0, %rax
-  je .L.false215
+  je .L.false222
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -7790,14 +8720,14 @@ types_equal:
   call is_array
   add $8, %rsp
   cmp $0, %rax
-  je .L.false215
+  je .L.false222
   mov $1, %rax
-  jmp .L.end215
-.L.false215:
+  jmp .L.end222
+.L.false222:
   mov $0, %rax
-.L.end215:
+.L.end222:
   cmp $0, %rax
-  je .L.else214
+  je .L.else221
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -7817,12 +8747,12 @@ types_equal:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else216
+  je .L.else223
   mov $0, %rax
   jmp .L.return.types_equal
-  jmp .L.end216
-.L.else216:
-.L.end216:
+  jmp .L.end223
+.L.else223:
+.L.end223:
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -7843,144 +8773,144 @@ types_equal:
   call types_equal
   add $8, %rsp
   jmp .L.return.types_equal
-  jmp .L.end214
-.L.else214:
-.L.end214:
-  mov -16(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_struct_ty
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false218
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_struct_ty
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false218
-  mov $1, %rax
-  jmp .L.end218
-.L.false218:
-  mov $0, %rax
-.L.end218:
-  cmp $0, %rax
-  je .L.else217
-  mov -16(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call type_struct_def
-  add $8, %rsp
-  push %rax
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call type_struct_def
-  add $8, %rsp
-  mov %rax, %rdi
-  pop %rax
-  cmp %rdi, %rax
-  sete %al
-  movzb %al, %rax
-  jmp .L.return.types_equal
-  jmp .L.end217
-.L.else217:
-.L.end217:
-  mov -16(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_enum_ty
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false220
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_enum_ty
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false220
-  mov $1, %rax
-  jmp .L.end220
-.L.false220:
-  mov $0, %rax
-.L.end220:
-  cmp $0, %rax
-  je .L.else219
-  mov -16(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call type_enum_def
-  add $8, %rsp
-  push %rax
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call type_enum_def
-  add $8, %rsp
-  mov %rax, %rdi
-  pop %rax
-  cmp %rdi, %rax
-  sete %al
-  movzb %al, %rax
-  jmp .L.return.types_equal
-  jmp .L.end219
-.L.else219:
-.L.end219:
-  mov -16(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_exn_ty
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false222
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_exn_ty
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false222
-  mov $1, %rax
-  jmp .L.end222
-.L.false222:
-  mov $0, %rax
-.L.end222:
-  cmp $0, %rax
-  je .L.else221
-  mov -16(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call type_exn_def
-  add $8, %rsp
-  push %rax
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call type_exn_def
-  add $8, %rsp
-  mov %rax, %rdi
-  pop %rax
-  cmp %rdi, %rax
-  sete %al
-  movzb %al, %rax
-  jmp .L.return.types_equal
   jmp .L.end221
 .L.else221:
 .L.end221:
+  mov -16(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_struct_ty
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false225
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_struct_ty
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false225
+  mov $1, %rax
+  jmp .L.end225
+.L.false225:
+  mov $0, %rax
+.L.end225:
+  cmp $0, %rax
+  je .L.else224
+  mov -16(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call type_struct_def
+  add $8, %rsp
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call type_struct_def
+  add $8, %rsp
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  jmp .L.return.types_equal
+  jmp .L.end224
+.L.else224:
+.L.end224:
+  mov -16(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_enum_ty
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false227
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_enum_ty
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false227
+  mov $1, %rax
+  jmp .L.end227
+.L.false227:
+  mov $0, %rax
+.L.end227:
+  cmp $0, %rax
+  je .L.else226
+  mov -16(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call type_enum_def
+  add $8, %rsp
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call type_enum_def
+  add $8, %rsp
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  jmp .L.return.types_equal
+  jmp .L.end226
+.L.else226:
+.L.end226:
+  mov -16(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_exn_ty
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false229
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_exn_ty
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false229
+  mov $1, %rax
+  jmp .L.end229
+.L.false229:
+  mov $0, %rax
+.L.end229:
+  cmp $0, %rax
+  je .L.else228
+  mov -16(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call type_exn_def
+  add $8, %rsp
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call type_exn_def
+  add $8, %rsp
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  jmp .L.return.types_equal
+  jmp .L.end228
+.L.else228:
+.L.end228:
   mov $0, %rax
   jmp .L.return.types_equal
 .L.return.types_equal:
@@ -8000,7 +8930,7 @@ is_numeric_ty:
   call is_int_ty
   add $8, %rsp
   cmp $0, %rax
-  jne .L.true224
+  jne .L.true231
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -8008,15 +8938,15 @@ is_numeric_ty:
   call is_i8_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.false224
-.L.true224:
+  je .L.false231
+.L.true231:
   mov $1, %rax
-  jmp .L.end224
-.L.false224:
+  jmp .L.end231
+.L.false231:
   mov $0, %rax
-.L.end224:
+.L.end231:
   cmp $0, %rax
-  jne .L.true223
+  jne .L.true230
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -8024,13 +8954,13 @@ is_numeric_ty:
   call is_bool_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.false223
-.L.true223:
+  je .L.false230
+.L.true230:
   mov $1, %rax
-  jmp .L.end223
-.L.false223:
+  jmp .L.end230
+.L.false230:
   mov $0, %rax
-.L.end223:
+.L.end230:
   jmp .L.return.is_numeric_ty
 .L.return.is_numeric_ty:
   mov %rbp, %rsp
@@ -8066,16 +8996,16 @@ check_as:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else225
+  je .L.else232
   lea .L.str48+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end225
-.L.else225:
-.L.end225:
+  jmp .L.end232
+.L.else232:
+.L.end232:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -8085,16 +9015,16 @@ check_as:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else226
+  je .L.else233
   lea .L.str49+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end226
-.L.else226:
-.L.end226:
+  jmp .L.end233
+.L.else233:
+.L.end233:
   mov -16(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -8105,141 +9035,17 @@ check_as:
   call types_equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else227
+  je .L.else234
   mov $0, %rax
   jmp .L.return.check_as
-  jmp .L.end227
-.L.else227:
-.L.end227:
-  mov -16(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_numeric_ty
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false229
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_numeric_ty
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false229
-  mov $1, %rax
-  jmp .L.end229
-.L.false229:
-  mov $0, %rax
-.L.end229:
-  cmp $0, %rax
-  je .L.else228
-  mov -16(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_i8_ty
-  add $8, %rsp
-  cmp $0, %rax
-  jne .L.true232
-  mov -16(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_bool_ty
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false232
-.L.true232:
-  mov $1, %rax
-  jmp .L.end232
-.L.false232:
-  mov $0, %rax
-.L.end232:
-  cmp $0, %rax
-  je .L.false231
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_int_ty
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false231
-  mov $1, %rax
-  jmp .L.end231
-.L.false231:
-  mov $0, %rax
-.L.end231:
-  cmp $0, %rax
-  je .L.else230
-  mov $0, %rax
-  jmp .L.return.check_as
-  jmp .L.end230
-.L.else230:
-.L.end230:
-  mov -16(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call type_size
-  add $8, %rsp
-  push %rax
-  mov $1, %rax
-  mov %rax, %rdi
-  pop %rax
-  cmp %rdi, %rax
-  sete %al
-  movzb %al, %rax
-  cmp $0, %rax
-  je .L.false234
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call type_size
-  add $8, %rsp
-  push %rax
-  mov $1, %rax
-  mov %rax, %rdi
-  pop %rax
-  cmp %rdi, %rax
-  sete %al
-  movzb %al, %rax
-  cmp $0, %rax
-  je .L.false234
-  mov $1, %rax
   jmp .L.end234
-.L.false234:
-  mov $0, %rax
+.L.else234:
 .L.end234:
-  cmp $0, %rax
-  je .L.else233
-  mov $0, %rax
-  jmp .L.return.check_as
-  jmp .L.end233
-.L.else233:
-.L.end233:
-  lea .L.str50+8(%rip), %rax
-  push %rax
-  mov -16(%rbp), %rax
-  push %rax
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdx
-  pop %rsi
-  pop %rdi
-  sub $8, %rsp
-  call error_have_want
-  add $8, %rsp
-  jmp .L.end228
-.L.else228:
-.L.end228:
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
-  call is_opt_pointer
+  call is_numeric_ty
   add $8, %rsp
   cmp $0, %rax
   je .L.false236
@@ -8247,7 +9053,7 @@ check_as:
   push %rax
   pop %rdi
   sub $8, %rsp
-  call is_pointer
+  call is_numeric_ty
   add $8, %rsp
   cmp $0, %rax
   je .L.false236
@@ -8258,7 +9064,93 @@ check_as:
 .L.end236:
   cmp $0, %rax
   je .L.else235
-  lea .L.str51+8(%rip), %rax
+  mov -16(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_i8_ty
+  add $8, %rsp
+  cmp $0, %rax
+  jne .L.true239
+  mov -16(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_bool_ty
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false239
+.L.true239:
+  mov $1, %rax
+  jmp .L.end239
+.L.false239:
+  mov $0, %rax
+.L.end239:
+  cmp $0, %rax
+  je .L.false238
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_int_ty
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false238
+  mov $1, %rax
+  jmp .L.end238
+.L.false238:
+  mov $0, %rax
+.L.end238:
+  cmp $0, %rax
+  je .L.else237
+  mov $0, %rax
+  jmp .L.return.check_as
+  jmp .L.end237
+.L.else237:
+.L.end237:
+  mov -16(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call type_size
+  add $8, %rsp
+  push %rax
+  mov $1, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.false241
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call type_size
+  add $8, %rsp
+  push %rax
+  mov $1, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.false241
+  mov $1, %rax
+  jmp .L.end241
+.L.false241:
+  mov $0, %rax
+.L.end241:
+  cmp $0, %rax
+  je .L.else240
+  mov $0, %rax
+  jmp .L.return.check_as
+  jmp .L.end240
+.L.else240:
+.L.end240:
+  lea .L.str50+8(%rip), %rax
   push %rax
   mov -16(%rbp), %rax
   push %rax
@@ -8277,10 +9169,10 @@ check_as:
   push %rax
   pop %rdi
   sub $8, %rsp
-  call is_pointer
+  call is_opt_pointer
   add $8, %rsp
   cmp $0, %rax
-  je .L.false238
+  je .L.false243
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -8288,19 +9180,57 @@ check_as:
   call is_pointer
   add $8, %rsp
   cmp $0, %rax
-  je .L.false238
+  je .L.false243
   mov $1, %rax
-  jmp .L.end238
-.L.false238:
+  jmp .L.end243
+.L.false243:
   mov $0, %rax
-.L.end238:
+.L.end243:
   cmp $0, %rax
-  je .L.else237
+  je .L.else242
+  lea .L.str51+8(%rip), %rax
+  push %rax
+  mov -16(%rbp), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdx
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call error_have_want
+  add $8, %rsp
+  jmp .L.end242
+.L.else242:
+.L.end242:
+  mov -16(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_pointer
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false245
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_pointer
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false245
+  mov $1, %rax
+  jmp .L.end245
+.L.false245:
+  mov $0, %rax
+.L.end245:
+  cmp $0, %rax
+  je .L.else244
   mov $0, %rax
   jmp .L.return.check_as
-  jmp .L.end237
-.L.else237:
-.L.end237:
+  jmp .L.end244
+.L.else244:
+.L.end244:
   lea .L.str52+8(%rip), %rax
   push %rax
   mov -16(%rbp), %rax
@@ -8347,16 +9277,16 @@ check_trunc:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else239
+  je .L.else246
   lea .L.str53+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end239
-.L.else239:
-.L.end239:
+  jmp .L.end246
+.L.else246:
+.L.end246:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -8366,16 +9296,16 @@ check_trunc:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else240
+  je .L.else247
   lea .L.str54+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end240
-.L.else240:
-.L.end240:
+  jmp .L.end247
+.L.else247:
+.L.end247:
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -8383,7 +9313,7 @@ check_trunc:
   call is_int_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.false242
+  je .L.false249
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -8391,7 +9321,7 @@ check_trunc:
   call is_i8_ty
   add $8, %rsp
   cmp $0, %rax
-  jne .L.true243
+  jne .L.true250
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -8399,27 +9329,27 @@ check_trunc:
   call is_bool_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.false243
-.L.true243:
+  je .L.false250
+.L.true250:
   mov $1, %rax
-  jmp .L.end243
-.L.false243:
+  jmp .L.end250
+.L.false250:
   mov $0, %rax
-.L.end243:
+.L.end250:
   cmp $0, %rax
-  je .L.false242
+  je .L.false249
   mov $1, %rax
-  jmp .L.end242
-.L.false242:
+  jmp .L.end249
+.L.false249:
   mov $0, %rax
-.L.end242:
+.L.end249:
   cmp $0, %rax
-  je .L.else241
+  je .L.else248
   mov $0, %rax
   jmp .L.return.check_trunc
-  jmp .L.end241
-.L.else241:
-.L.end241:
+  jmp .L.end248
+.L.else248:
+.L.end248:
   lea .L.str55+8(%rip), %rax
   push %rax
   mov -16(%rbp), %rax
@@ -8451,7 +9381,7 @@ decay:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else244
+  je .L.else251
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -8459,7 +9389,7 @@ decay:
   call is_array
   add $8, %rsp
   cmp $0, %rax
-  je .L.else245
+  je .L.else252
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -8472,12 +9402,12 @@ decay:
   call ptr_to
   add $8, %rsp
   jmp .L.return.decay
-  jmp .L.end245
-.L.else245:
-.L.end245:
-  jmp .L.end244
-.L.else244:
-.L.end244:
+  jmp .L.end252
+.L.else252:
+.L.end252:
+  jmp .L.end251
+.L.else251:
+.L.end251:
   mov -8(%rbp), %rax
   jmp .L.return.decay
 .L.return.decay:
@@ -8573,7 +9503,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false247
+  je .L.false254
   mov -16(%rbp), %rax
   push %rax
   lea .L.str56+8(%rip), %rax
@@ -8587,19 +9517,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false247
+  je .L.false254
   mov $1, %rax
-  jmp .L.end247
-.L.false247:
+  jmp .L.end254
+.L.false254:
   mov $0, %rax
-.L.end247:
+.L.end254:
   cmp $0, %rax
-  je .L.else246
+  je .L.else253
   mov $5, %rax
   jmp .L.return.ident_kind
-  jmp .L.end246
-.L.else246:
-.L.end246:
+  jmp .L.end253
+.L.else253:
+.L.end253:
   mov -8(%rbp), %rax
   push %rax
   mov $2, %rax
@@ -8609,7 +9539,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false249
+  je .L.false256
   mov -16(%rbp), %rax
   push %rax
   lea .L.str57+8(%rip), %rax
@@ -8623,19 +9553,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false249
+  je .L.false256
   mov $1, %rax
-  jmp .L.end249
-.L.false249:
+  jmp .L.end256
+.L.false256:
   mov $0, %rax
-.L.end249:
+.L.end256:
   cmp $0, %rax
-  je .L.else248
+  je .L.else255
   mov $6, %rax
   jmp .L.return.ident_kind
-  jmp .L.end248
-.L.else248:
-.L.end248:
+  jmp .L.end255
+.L.else255:
+.L.end255:
   mov -8(%rbp), %rax
   push %rax
   mov $4, %rax
@@ -8645,7 +9575,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false251
+  je .L.false258
   mov -16(%rbp), %rax
   push %rax
   lea .L.str58+8(%rip), %rax
@@ -8659,19 +9589,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false251
+  je .L.false258
   mov $1, %rax
-  jmp .L.end251
-.L.false251:
+  jmp .L.end258
+.L.false258:
   mov $0, %rax
-.L.end251:
+.L.end258:
   cmp $0, %rax
-  je .L.else250
+  je .L.else257
   mov $7, %rax
   jmp .L.return.ident_kind
-  jmp .L.end250
-.L.else250:
-.L.end250:
+  jmp .L.end257
+.L.else257:
+.L.end257:
   mov -8(%rbp), %rax
   push %rax
   mov $4, %rax
@@ -8681,7 +9611,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false253
+  je .L.false260
   mov -16(%rbp), %rax
   push %rax
   lea .L.str59+8(%rip), %rax
@@ -8695,19 +9625,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false253
+  je .L.false260
   mov $1, %rax
-  jmp .L.end253
-.L.false253:
+  jmp .L.end260
+.L.false260:
   mov $0, %rax
-.L.end253:
+.L.end260:
   cmp $0, %rax
-  je .L.else252
+  je .L.else259
   mov $8, %rax
   jmp .L.return.ident_kind
-  jmp .L.end252
-.L.else252:
-.L.end252:
+  jmp .L.end259
+.L.else259:
+.L.end259:
   mov -8(%rbp), %rax
   push %rax
   mov $5, %rax
@@ -8717,7 +9647,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false255
+  je .L.false262
   mov -16(%rbp), %rax
   push %rax
   lea .L.str60+8(%rip), %rax
@@ -8731,19 +9661,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false255
+  je .L.false262
   mov $1, %rax
-  jmp .L.end255
-.L.false255:
+  jmp .L.end262
+.L.false262:
   mov $0, %rax
-.L.end255:
+.L.end262:
   cmp $0, %rax
-  je .L.else254
+  je .L.else261
   mov $9, %rax
   jmp .L.return.ident_kind
-  jmp .L.end254
-.L.else254:
-.L.end254:
+  jmp .L.end261
+.L.else261:
+.L.end261:
   mov -8(%rbp), %rax
   push %rax
   mov $4, %rax
@@ -8753,7 +9683,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false257
+  je .L.false264
   mov -16(%rbp), %rax
   push %rax
   lea .L.str61+8(%rip), %rax
@@ -8767,19 +9697,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false257
+  je .L.false264
   mov $1, %rax
-  jmp .L.end257
-.L.false257:
+  jmp .L.end264
+.L.false264:
   mov $0, %rax
-.L.end257:
+.L.end264:
   cmp $0, %rax
-  je .L.else256
+  je .L.else263
   mov $10, %rax
   jmp .L.return.ident_kind
-  jmp .L.end256
-.L.else256:
-.L.end256:
+  jmp .L.end263
+.L.else263:
+.L.end263:
   mov -8(%rbp), %rax
   push %rax
   mov $8, %rax
@@ -8789,7 +9719,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false259
+  je .L.false266
   mov -16(%rbp), %rax
   push %rax
   lea .L.str62+8(%rip), %rax
@@ -8803,19 +9733,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false259
+  je .L.false266
   mov $1, %rax
-  jmp .L.end259
-.L.false259:
+  jmp .L.end266
+.L.false266:
   mov $0, %rax
-.L.end259:
+.L.end266:
   cmp $0, %rax
-  je .L.else258
+  je .L.else265
   mov $11, %rax
   jmp .L.return.ident_kind
-  jmp .L.end258
-.L.else258:
-.L.end258:
+  jmp .L.end265
+.L.else265:
+.L.end265:
   mov -8(%rbp), %rax
   push %rax
   mov $2, %rax
@@ -8825,7 +9755,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false261
+  je .L.false268
   mov -16(%rbp), %rax
   push %rax
   lea .L.str63+8(%rip), %rax
@@ -8839,19 +9769,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false261
+  je .L.false268
   mov $1, %rax
-  jmp .L.end261
-.L.false261:
+  jmp .L.end268
+.L.false268:
   mov $0, %rax
-.L.end261:
+.L.end268:
   cmp $0, %rax
-  je .L.else260
+  je .L.else267
   mov $12, %rax
   jmp .L.return.ident_kind
-  jmp .L.end260
-.L.else260:
-.L.end260:
+  jmp .L.end267
+.L.else267:
+.L.end267:
   mov -8(%rbp), %rax
   push %rax
   mov $4, %rax
@@ -8861,7 +9791,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false263
+  je .L.false270
   mov -16(%rbp), %rax
   push %rax
   lea .L.str64+8(%rip), %rax
@@ -8875,19 +9805,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false263
+  je .L.false270
   mov $1, %rax
-  jmp .L.end263
-.L.false263:
+  jmp .L.end270
+.L.false270:
   mov $0, %rax
-.L.end263:
+.L.end270:
   cmp $0, %rax
-  je .L.else262
+  je .L.else269
   mov $13, %rax
   jmp .L.return.ident_kind
-  jmp .L.end262
-.L.else262:
-.L.end262:
+  jmp .L.end269
+.L.else269:
+.L.end269:
   mov -8(%rbp), %rax
   push %rax
   mov $5, %rax
@@ -8897,7 +9827,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false265
+  je .L.false272
   mov -16(%rbp), %rax
   push %rax
   lea .L.str65+8(%rip), %rax
@@ -8911,19 +9841,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false265
+  je .L.false272
   mov $1, %rax
-  jmp .L.end265
-.L.false265:
+  jmp .L.end272
+.L.false272:
   mov $0, %rax
-.L.end265:
+.L.end272:
   cmp $0, %rax
-  je .L.else264
+  je .L.else271
   mov $14, %rax
   jmp .L.return.ident_kind
-  jmp .L.end264
-.L.else264:
-.L.end264:
+  jmp .L.end271
+.L.else271:
+.L.end271:
   mov -8(%rbp), %rax
   push %rax
   mov $6, %rax
@@ -8933,7 +9863,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false267
+  je .L.false274
   mov -16(%rbp), %rax
   push %rax
   lea .L.str66+8(%rip), %rax
@@ -8947,19 +9877,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false267
+  je .L.false274
   mov $1, %rax
-  jmp .L.end267
-.L.false267:
+  jmp .L.end274
+.L.false274:
   mov $0, %rax
-.L.end267:
+.L.end274:
   cmp $0, %rax
-  je .L.else266
+  je .L.else273
   mov $15, %rax
   jmp .L.return.ident_kind
-  jmp .L.end266
-.L.else266:
-.L.end266:
+  jmp .L.end273
+.L.else273:
+.L.end273:
   mov -8(%rbp), %rax
   push %rax
   mov $4, %rax
@@ -8969,7 +9899,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false269
+  je .L.false276
   mov -16(%rbp), %rax
   push %rax
   lea .L.str67+8(%rip), %rax
@@ -8983,19 +9913,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false269
+  je .L.false276
   mov $1, %rax
-  jmp .L.end269
-.L.false269:
+  jmp .L.end276
+.L.false276:
   mov $0, %rax
-.L.end269:
+.L.end276:
   cmp $0, %rax
-  je .L.else268
+  je .L.else275
   mov $16, %rax
   jmp .L.return.ident_kind
-  jmp .L.end268
-.L.else268:
-.L.end268:
+  jmp .L.end275
+.L.else275:
+.L.end275:
   mov -8(%rbp), %rax
   push %rax
   mov $6, %rax
@@ -9005,7 +9935,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false271
+  je .L.false278
   mov -16(%rbp), %rax
   push %rax
   lea .L.str68+8(%rip), %rax
@@ -9019,19 +9949,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false271
+  je .L.false278
   mov $1, %rax
-  jmp .L.end271
-.L.false271:
+  jmp .L.end278
+.L.false278:
   mov $0, %rax
-.L.end271:
+.L.end278:
   cmp $0, %rax
-  je .L.else270
+  je .L.else277
   mov $17, %rax
   jmp .L.return.ident_kind
-  jmp .L.end270
-.L.else270:
-.L.end270:
+  jmp .L.end277
+.L.else277:
+.L.end277:
   mov -8(%rbp), %rax
   push %rax
   mov $13, %rax
@@ -9041,7 +9971,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false273
+  je .L.false280
   mov -16(%rbp), %rax
   push %rax
   lea .L.str69+8(%rip), %rax
@@ -9055,19 +9985,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false273
+  je .L.false280
   mov $1, %rax
-  jmp .L.end273
-.L.false273:
+  jmp .L.end280
+.L.false280:
   mov $0, %rax
-.L.end273:
+.L.end280:
   cmp $0, %rax
-  je .L.else272
+  je .L.else279
   mov $18, %rax
   jmp .L.return.ident_kind
-  jmp .L.end272
-.L.else272:
-.L.end272:
+  jmp .L.end279
+.L.else279:
+.L.end279:
   mov -8(%rbp), %rax
   push %rax
   mov $2, %rax
@@ -9077,7 +10007,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false275
+  je .L.false282
   mov -16(%rbp), %rax
   push %rax
   lea .L.str70+8(%rip), %rax
@@ -9091,19 +10021,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false275
+  je .L.false282
   mov $1, %rax
-  jmp .L.end275
-.L.false275:
+  jmp .L.end282
+.L.false282:
   mov $0, %rax
-.L.end275:
+.L.end282:
   cmp $0, %rax
-  je .L.else274
+  je .L.else281
   mov $19, %rax
   jmp .L.return.ident_kind
-  jmp .L.end274
-.L.else274:
-.L.end274:
+  jmp .L.end281
+.L.else281:
+.L.end281:
   mov -8(%rbp), %rax
   push %rax
   mov $5, %rax
@@ -9113,7 +10043,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false277
+  je .L.false284
   mov -16(%rbp), %rax
   push %rax
   lea .L.str71+8(%rip), %rax
@@ -9127,19 +10057,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false277
+  je .L.false284
   mov $1, %rax
-  jmp .L.end277
-.L.false277:
+  jmp .L.end284
+.L.false284:
   mov $0, %rax
-.L.end277:
+.L.end284:
   cmp $0, %rax
-  je .L.else276
+  je .L.else283
   mov $20, %rax
   jmp .L.return.ident_kind
-  jmp .L.end276
-.L.else276:
-.L.end276:
+  jmp .L.end283
+.L.else283:
+.L.end283:
   mov -8(%rbp), %rax
   push %rax
   mov $3, %rax
@@ -9149,7 +10079,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false279
+  je .L.false286
   mov -16(%rbp), %rax
   push %rax
   lea .L.str72+8(%rip), %rax
@@ -9163,19 +10093,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false279
+  je .L.false286
   mov $1, %rax
-  jmp .L.end279
-.L.false279:
+  jmp .L.end286
+.L.false286:
   mov $0, %rax
-.L.end279:
+.L.end286:
   cmp $0, %rax
-  je .L.else278
+  je .L.else285
   mov $21, %rax
   jmp .L.return.ident_kind
-  jmp .L.end278
-.L.else278:
-.L.end278:
+  jmp .L.end285
+.L.else285:
+.L.end285:
   mov -8(%rbp), %rax
   push %rax
   mov $5, %rax
@@ -9185,7 +10115,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false281
+  je .L.false288
   mov -16(%rbp), %rax
   push %rax
   lea .L.str73+8(%rip), %rax
@@ -9199,19 +10129,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false281
+  je .L.false288
   mov $1, %rax
-  jmp .L.end281
-.L.false281:
+  jmp .L.end288
+.L.false288:
   mov $0, %rax
-.L.end281:
+.L.end288:
   cmp $0, %rax
-  je .L.else280
+  je .L.else287
   mov $48, %rax
   jmp .L.return.ident_kind
-  jmp .L.end280
-.L.else280:
-.L.end280:
+  jmp .L.end287
+.L.else287:
+.L.end287:
   mov -8(%rbp), %rax
   push %rax
   mov $9, %rax
@@ -9221,7 +10151,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false283
+  je .L.false290
   mov -16(%rbp), %rax
   push %rax
   lea .L.str74+8(%rip), %rax
@@ -9235,19 +10165,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false283
+  je .L.false290
   mov $1, %rax
-  jmp .L.end283
-.L.false283:
+  jmp .L.end290
+.L.false290:
   mov $0, %rax
-.L.end283:
+.L.end290:
   cmp $0, %rax
-  je .L.else282
+  je .L.else289
   mov $52, %rax
   jmp .L.return.ident_kind
-  jmp .L.end282
-.L.else282:
-.L.end282:
+  jmp .L.end289
+.L.else289:
+.L.end289:
   mov -8(%rbp), %rax
   push %rax
   mov $6, %rax
@@ -9257,7 +10187,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false285
+  je .L.false292
   mov -16(%rbp), %rax
   push %rax
   lea .L.str75+8(%rip), %rax
@@ -9271,19 +10201,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false285
+  je .L.false292
   mov $1, %rax
-  jmp .L.end285
-.L.false285:
+  jmp .L.end292
+.L.false292:
   mov $0, %rax
-.L.end285:
+.L.end292:
   cmp $0, %rax
-  je .L.else284
+  je .L.else291
   mov $53, %rax
   jmp .L.return.ident_kind
-  jmp .L.end284
-.L.else284:
-.L.end284:
+  jmp .L.end291
+.L.else291:
+.L.end291:
   mov -8(%rbp), %rax
   push %rax
   mov $5, %rax
@@ -9293,7 +10223,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false287
+  je .L.false294
   mov -16(%rbp), %rax
   push %rax
   lea .L.str76+8(%rip), %rax
@@ -9307,19 +10237,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false287
+  je .L.false294
   mov $1, %rax
-  jmp .L.end287
-.L.false287:
+  jmp .L.end294
+.L.false294:
   mov $0, %rax
-.L.end287:
+.L.end294:
   cmp $0, %rax
-  je .L.else286
+  je .L.else293
   mov $54, %rax
   jmp .L.return.ident_kind
-  jmp .L.end286
-.L.else286:
-.L.end286:
+  jmp .L.end293
+.L.else293:
+.L.end293:
   mov -8(%rbp), %rax
   push %rax
   mov $3, %rax
@@ -9329,7 +10259,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false289
+  je .L.false296
   mov -16(%rbp), %rax
   push %rax
   lea .L.str77+8(%rip), %rax
@@ -9343,19 +10273,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false289
+  je .L.false296
   mov $1, %rax
-  jmp .L.end289
-.L.false289:
+  jmp .L.end296
+.L.false296:
   mov $0, %rax
-.L.end289:
+.L.end296:
   cmp $0, %rax
-  je .L.else288
+  je .L.else295
   mov $55, %rax
   jmp .L.return.ident_kind
-  jmp .L.end288
-.L.else288:
-.L.end288:
+  jmp .L.end295
+.L.else295:
+.L.end295:
   mov -8(%rbp), %rax
   push %rax
   mov $4, %rax
@@ -9365,7 +10295,7 @@ ident_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false291
+  je .L.false298
   mov -16(%rbp), %rax
   push %rax
   lea .L.str78+8(%rip), %rax
@@ -9379,19 +10309,19 @@ ident_kind:
   call streq_n
   add $8, %rsp
   cmp $0, %rax
-  je .L.false291
+  je .L.false298
   mov $1, %rax
-  jmp .L.end291
-.L.false291:
+  jmp .L.end298
+.L.false298:
   mov $0, %rax
-.L.end291:
+.L.end298:
   cmp $0, %rax
-  je .L.else290
+  je .L.else297
   mov $56, %rax
   jmp .L.return.ident_kind
-  jmp .L.end290
-.L.else290:
-.L.end290:
+  jmp .L.end297
+.L.else297:
+.L.end297:
   mov $4, %rax
   jmp .L.return.ident_kind
 .L.return.ident_kind:
@@ -9403,7 +10333,7 @@ skip_line_comment:
   push %rbp
   mov %rsp, %rbp
   sub $0, %rsp
-.L.begin292:
+.L.begin299:
   mov pos(%rip), %rax
   push %rax
   mov source_len(%rip), %rax
@@ -9413,7 +10343,7 @@ skip_line_comment:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end292
+  je .L.end299
   mov source(%rip), %rax
   push %rax
   mov pos(%rip), %rax
@@ -9434,12 +10364,12 @@ skip_line_comment:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else293
+  je .L.else300
   mov $0, %rax
   jmp .L.return.skip_line_comment
-  jmp .L.end293
-.L.else293:
-.L.end293:
+  jmp .L.end300
+.L.else300:
+.L.end300:
   mov pos(%rip), %rax
   push %rax
   mov $1, %rax
@@ -9447,8 +10377,8 @@ skip_line_comment:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.begin292
-.L.end292:
+  jmp .L.begin299
+.L.end299:
 .L.return.skip_line_comment:
   mov %rbp, %rsp
   pop %rbp
@@ -9458,7 +10388,7 @@ skip_block_comment:
   push %rbp
   mov %rsp, %rbp
   sub $0, %rsp
-.L.begin294:
+.L.begin301:
   mov pos(%rip), %rax
   push %rax
   mov source_len(%rip), %rax
@@ -9468,7 +10398,7 @@ skip_block_comment:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end294
+  je .L.end301
   mov source(%rip), %rax
   push %rax
   mov pos(%rip), %rax
@@ -9489,7 +10419,7 @@ skip_block_comment:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false296
+  je .L.false303
   mov source(%rip), %rax
   push %rax
   mov pos(%rip), %rax
@@ -9515,14 +10445,14 @@ skip_block_comment:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false296
+  je .L.false303
   mov $1, %rax
-  jmp .L.end296
-.L.false296:
+  jmp .L.end303
+.L.false303:
   mov $0, %rax
-.L.end296:
+.L.end303:
   cmp $0, %rax
-  je .L.else295
+  je .L.else302
   mov pos(%rip), %rax
   push %rax
   mov $2, %rax
@@ -9532,9 +10462,9 @@ skip_block_comment:
   mov %rax, pos(%rip)
   mov $0, %rax
   jmp .L.return.skip_block_comment
-  jmp .L.end295
-.L.else295:
-.L.end295:
+  jmp .L.end302
+.L.else302:
+.L.end302:
   mov pos(%rip), %rax
   push %rax
   mov $1, %rax
@@ -9542,8 +10472,8 @@ skip_block_comment:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.begin294
-.L.end294:
+  jmp .L.begin301
+.L.end301:
 .L.return.skip_block_comment:
   mov %rbp, %rsp
   pop %rbp
@@ -9555,7 +10485,7 @@ read_number:
   sub $16, %rsp
   mov $0, %rax
   mov %rax, -8(%rbp)
-.L.begin297:
+.L.begin304:
   mov pos(%rip), %rax
   push %rax
   mov source_len(%rip), %rax
@@ -9565,7 +10495,7 @@ read_number:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end297
+  je .L.end304
   mov source(%rip), %rax
   push %rax
   mov pos(%rip), %rax
@@ -9587,12 +10517,12 @@ read_number:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else298
+  je .L.else305
   mov -8(%rbp), %rax
   jmp .L.return.read_number
-  jmp .L.end298
-.L.else298:
-.L.end298:
+  jmp .L.end305
+.L.else305:
+.L.end305:
   mov -8(%rbp), %rax
   push %rax
   mov $10, %rax
@@ -9628,8 +10558,8 @@ read_number:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.begin297
-.L.end297:
+  jmp .L.begin304
+.L.end304:
   mov -8(%rbp), %rax
   jmp .L.return.read_number
 .L.return.read_number:
@@ -9651,12 +10581,12 @@ esc_char:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else299
+  je .L.else306
   mov $10, %rax
   jmp .L.return.esc_char
-  jmp .L.end299
-.L.else299:
-.L.end299:
+  jmp .L.end306
+.L.else306:
+.L.end306:
   movzb -8(%rbp), %rax
   push %rax
   mov $116, %rax
@@ -9666,12 +10596,12 @@ esc_char:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else300
+  je .L.else307
   mov $9, %rax
   jmp .L.return.esc_char
-  jmp .L.end300
-.L.else300:
-.L.end300:
+  jmp .L.end307
+.L.else307:
+.L.end307:
   movzb -8(%rbp), %rax
   push %rax
   mov $114, %rax
@@ -9681,12 +10611,12 @@ esc_char:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else301
+  je .L.else308
   mov $13, %rax
   jmp .L.return.esc_char
-  jmp .L.end301
-.L.else301:
-.L.end301:
+  jmp .L.end308
+.L.else308:
+.L.end308:
   movzb -8(%rbp), %rax
   push %rax
   mov $48, %rax
@@ -9696,12 +10626,12 @@ esc_char:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else302
+  je .L.else309
   mov $0, %rax
   jmp .L.return.esc_char
-  jmp .L.end302
-.L.else302:
-.L.end302:
+  jmp .L.end309
+.L.else309:
+.L.end309:
   movzb -8(%rbp), %rax
   push %rax
   mov $92, %rax
@@ -9711,12 +10641,12 @@ esc_char:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else303
+  je .L.else310
   mov $92, %rax
   jmp .L.return.esc_char
-  jmp .L.end303
-.L.else303:
-.L.end303:
+  jmp .L.end310
+.L.else310:
+.L.end310:
   movzb -8(%rbp), %rax
   push %rax
   mov $39, %rax
@@ -9726,12 +10656,12 @@ esc_char:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else304
+  je .L.else311
   mov $39, %rax
   jmp .L.return.esc_char
-  jmp .L.end304
-.L.else304:
-.L.end304:
+  jmp .L.end311
+.L.else311:
+.L.end311:
   movzb -8(%rbp), %rax
   push %rax
   mov $34, %rax
@@ -9741,12 +10671,12 @@ esc_char:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else305
+  je .L.else312
   mov $34, %rax
   jmp .L.return.esc_char
-  jmp .L.end305
-.L.else305:
-.L.end305:
+  jmp .L.end312
+.L.else312:
+.L.end312:
   movzb -8(%rbp), %rax
   jmp .L.return.esc_char
 .L.return.esc_char:
@@ -9760,7 +10690,7 @@ scan_string_len:
   sub $16, %rsp
   mov pos(%rip), %rax
   mov %rax, -8(%rbp)
-.L.begin306:
+.L.begin313:
   mov pos(%rip), %rax
   push %rax
   mov source_len(%rip), %rax
@@ -9770,7 +10700,7 @@ scan_string_len:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end306
+  je .L.end313
   mov source(%rip), %rax
   push %rax
   mov pos(%rip), %rax
@@ -9791,7 +10721,7 @@ scan_string_len:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else307
+  je .L.else314
   mov pos(%rip), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -9799,9 +10729,9 @@ scan_string_len:
   pop %rax
   sub %rdi, %rax
   jmp .L.return.scan_string_len
-  jmp .L.end307
-.L.else307:
-.L.end307:
+  jmp .L.end314
+.L.else314:
+.L.end314:
   mov source(%rip), %rax
   push %rax
   mov pos(%rip), %rax
@@ -9822,7 +10752,7 @@ scan_string_len:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else308
+  je .L.else315
   mov pos(%rip), %rax
   push %rax
   mov $1, %rax
@@ -9830,9 +10760,9 @@ scan_string_len:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.end308
-.L.else308:
-.L.end308:
+  jmp .L.end315
+.L.else315:
+.L.end315:
   mov pos(%rip), %rax
   push %rax
   mov $1, %rax
@@ -9840,8 +10770,8 @@ scan_string_len:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.begin306
-.L.end306:
+  jmp .L.begin313
+.L.end313:
   lea .L.str79+8(%rip), %rax
   push %rax
   pop %rdi
@@ -9859,7 +10789,7 @@ scan_ident_len:
   sub $16, %rsp
   mov pos(%rip), %rax
   mov %rax, -8(%rbp)
-.L.begin309:
+.L.begin316:
   mov pos(%rip), %rax
   push %rax
   mov source_len(%rip), %rax
@@ -9869,7 +10799,7 @@ scan_ident_len:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end309
+  je .L.end316
   mov source(%rip), %rax
   push %rax
   mov pos(%rip), %rax
@@ -9891,7 +10821,7 @@ scan_ident_len:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else310
+  je .L.else317
   mov pos(%rip), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -9899,9 +10829,9 @@ scan_ident_len:
   pop %rax
   sub %rdi, %rax
   jmp .L.return.scan_ident_len
-  jmp .L.end310
-.L.else310:
-.L.end310:
+  jmp .L.end317
+.L.else317:
+.L.end317:
   mov pos(%rip), %rax
   push %rax
   mov $1, %rax
@@ -9909,8 +10839,8 @@ scan_ident_len:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.begin309
-.L.end309:
+  jmp .L.begin316
+.L.end316:
   mov pos(%rip), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -9937,12 +10867,12 @@ punct_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else311
+  je .L.else318
   mov $26, %rax
   jmp .L.return.punct_kind
-  jmp .L.end311
-.L.else311:
-.L.end311:
+  jmp .L.end318
+.L.else318:
+.L.end318:
   movzb -8(%rbp), %rax
   push %rax
   mov $45, %rax
@@ -9952,12 +10882,12 @@ punct_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else312
+  je .L.else319
   mov $27, %rax
   jmp .L.return.punct_kind
-  jmp .L.end312
-.L.else312:
-.L.end312:
+  jmp .L.end319
+.L.else319:
+.L.end319:
   movzb -8(%rbp), %rax
   push %rax
   mov $42, %rax
@@ -9967,12 +10897,12 @@ punct_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else313
+  je .L.else320
   mov $28, %rax
   jmp .L.return.punct_kind
-  jmp .L.end313
-.L.else313:
-.L.end313:
+  jmp .L.end320
+.L.else320:
+.L.end320:
   movzb -8(%rbp), %rax
   push %rax
   mov $37, %rax
@@ -9982,12 +10912,12 @@ punct_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else314
+  je .L.else321
   mov $30, %rax
   jmp .L.return.punct_kind
-  jmp .L.end314
-.L.else314:
-.L.end314:
+  jmp .L.end321
+.L.else321:
+.L.end321:
   movzb -8(%rbp), %rax
   push %rax
   mov $38, %rax
@@ -9997,12 +10927,12 @@ punct_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else315
+  je .L.else322
   mov $35, %rax
   jmp .L.return.punct_kind
-  jmp .L.end315
-.L.else315:
-.L.end315:
+  jmp .L.end322
+.L.else322:
+.L.end322:
   movzb -8(%rbp), %rax
   push %rax
   mov $46, %rax
@@ -10012,12 +10942,12 @@ punct_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else316
+  je .L.else323
   mov $47, %rax
   jmp .L.return.punct_kind
-  jmp .L.end316
-.L.else316:
-.L.end316:
+  jmp .L.end323
+.L.else323:
+.L.end323:
   movzb -8(%rbp), %rax
   push %rax
   mov $58, %rax
@@ -10027,12 +10957,12 @@ punct_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else317
+  je .L.else324
   mov $44, %rax
   jmp .L.return.punct_kind
-  jmp .L.end317
-.L.else317:
-.L.end317:
+  jmp .L.end324
+.L.else324:
+.L.end324:
   movzb -8(%rbp), %rax
   push %rax
   mov $40, %rax
@@ -10042,12 +10972,12 @@ punct_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else318
+  je .L.else325
   mov $36, %rax
   jmp .L.return.punct_kind
-  jmp .L.end318
-.L.else318:
-.L.end318:
+  jmp .L.end325
+.L.else325:
+.L.end325:
   movzb -8(%rbp), %rax
   push %rax
   mov $41, %rax
@@ -10057,12 +10987,12 @@ punct_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else319
+  je .L.else326
   mov $37, %rax
   jmp .L.return.punct_kind
-  jmp .L.end319
-.L.else319:
-.L.end319:
+  jmp .L.end326
+.L.else326:
+.L.end326:
   movzb -8(%rbp), %rax
   push %rax
   mov $123, %rax
@@ -10072,12 +11002,12 @@ punct_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else320
+  je .L.else327
   mov $38, %rax
   jmp .L.return.punct_kind
-  jmp .L.end320
-.L.else320:
-.L.end320:
+  jmp .L.end327
+.L.else327:
+.L.end327:
   movzb -8(%rbp), %rax
   push %rax
   mov $125, %rax
@@ -10087,12 +11017,12 @@ punct_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else321
+  je .L.else328
   mov $39, %rax
   jmp .L.return.punct_kind
-  jmp .L.end321
-.L.else321:
-.L.end321:
+  jmp .L.end328
+.L.else328:
+.L.end328:
   movzb -8(%rbp), %rax
   push %rax
   mov $91, %rax
@@ -10102,12 +11032,12 @@ punct_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else322
+  je .L.else329
   mov $40, %rax
   jmp .L.return.punct_kind
-  jmp .L.end322
-.L.else322:
-.L.end322:
+  jmp .L.end329
+.L.else329:
+.L.end329:
   movzb -8(%rbp), %rax
   push %rax
   mov $93, %rax
@@ -10117,12 +11047,12 @@ punct_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else323
+  je .L.else330
   mov $41, %rax
   jmp .L.return.punct_kind
-  jmp .L.end323
-.L.else323:
-.L.end323:
+  jmp .L.end330
+.L.else330:
+.L.end330:
   movzb -8(%rbp), %rax
   push %rax
   mov $59, %rax
@@ -10132,12 +11062,12 @@ punct_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else324
+  je .L.else331
   mov $42, %rax
   jmp .L.return.punct_kind
-  jmp .L.end324
-.L.else324:
-.L.end324:
+  jmp .L.end331
+.L.else331:
+.L.end331:
   movzb -8(%rbp), %rax
   push %rax
   mov $44, %rax
@@ -10147,12 +11077,12 @@ punct_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else325
+  je .L.else332
   mov $43, %rax
   jmp .L.return.punct_kind
-  jmp .L.end325
-.L.else325:
-.L.end325:
+  jmp .L.end332
+.L.else332:
+.L.end332:
   movzb -8(%rbp), %rax
   push %rax
   mov $47, %rax
@@ -10162,12 +11092,12 @@ punct_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else326
+  je .L.else333
   mov $29, %rax
   jmp .L.return.punct_kind
-  jmp .L.end326
-.L.else326:
-.L.end326:
+  jmp .L.end333
+.L.else333:
+.L.end333:
   movzb -8(%rbp), %rax
   push %rax
   mov $63, %rax
@@ -10177,12 +11107,12 @@ punct_kind:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else327
+  je .L.else334
   mov $51, %rax
   jmp .L.return.punct_kind
-  jmp .L.end327
-.L.else327:
-.L.end327:
+  jmp .L.end334
+.L.else334:
+.L.end334:
   lea .L.str80+8(%rip), %rax
   push %rax
   pop %rdi
@@ -10249,7 +11179,7 @@ tokenize:
   pop %rbx
   mov $0, %rax
   mov %rax, pos(%rip)
-.L.begin328:
+.L.begin335:
   mov pos(%rip), %rax
   push %rax
   mov source_len(%rip), %rax
@@ -10259,7 +11189,7 @@ tokenize:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end328
+  je .L.end335
   mov source(%rip), %rax
   push %rax
   mov pos(%rip), %rax
@@ -10280,7 +11210,7 @@ tokenize:
   call is_space
   add $8, %rsp
   cmp $0, %rax
-  je .L.else329
+  je .L.else336
   mov pos(%rip), %rax
   push %rax
   mov $1, %rax
@@ -10288,8 +11218,8 @@ tokenize:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.end329
-.L.else329:
+  jmp .L.end336
+.L.else336:
   movzb -24(%rbp), %rax
   push %rax
   mov $47, %rax
@@ -10299,7 +11229,7 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false331
+  je .L.false338
   mov source(%rip), %rax
   push %rax
   mov pos(%rip), %rax
@@ -10325,14 +11255,14 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false331
+  je .L.false338
   mov $1, %rax
-  jmp .L.end331
-.L.false331:
+  jmp .L.end338
+.L.false338:
   mov $0, %rax
-.L.end331:
+.L.end338:
   cmp $0, %rax
-  je .L.else330
+  je .L.else337
   mov pos(%rip), %rax
   push %rax
   mov $2, %rax
@@ -10343,8 +11273,8 @@ tokenize:
   sub $8, %rsp
   call skip_line_comment
   add $8, %rsp
-  jmp .L.end330
-.L.else330:
+  jmp .L.end337
+.L.else337:
   movzb -24(%rbp), %rax
   push %rax
   mov $47, %rax
@@ -10354,7 +11284,7 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false333
+  je .L.false340
   mov source(%rip), %rax
   push %rax
   mov pos(%rip), %rax
@@ -10380,14 +11310,14 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false333
+  je .L.false340
   mov $1, %rax
-  jmp .L.end333
-.L.false333:
+  jmp .L.end340
+.L.false340:
   mov $0, %rax
-.L.end333:
+.L.end340:
   cmp $0, %rax
-  je .L.else332
+  je .L.else339
   mov pos(%rip), %rax
   push %rax
   mov $2, %rax
@@ -10398,8 +11328,8 @@ tokenize:
   sub $8, %rsp
   call skip_block_comment
   add $8, %rsp
-  jmp .L.end332
-.L.else332:
+  jmp .L.end339
+.L.else339:
   movzb -24(%rbp), %rax
   push %rax
   pop %rdi
@@ -10407,7 +11337,7 @@ tokenize:
   call is_digit
   add $8, %rsp
   cmp $0, %rax
-  je .L.else334
+  je .L.else341
   mov source(%rip), %rax
   push %rax
   mov pos(%rip), %rax
@@ -10460,8 +11390,8 @@ tokenize:
   mov %rax, (%rdi)
   mov -56(%rbp), %rax
   mov %rax, -64(%rbp)
-  jmp .L.end334
-.L.else334:
+  jmp .L.end341
+.L.else341:
   movzb -24(%rbp), %rax
   push %rax
   mov $34, %rax
@@ -10471,7 +11401,7 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else335
+  je .L.else342
   mov pos(%rip), %rax
   push %rax
   mov $1, %rax
@@ -10520,8 +11450,8 @@ tokenize:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.end335
-.L.else335:
+  jmp .L.end342
+.L.else342:
   movzb -24(%rbp), %rax
   push %rax
   mov $39, %rax
@@ -10531,7 +11461,7 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else336
+  je .L.else343
   mov pos(%rip), %rax
   push %rax
   mov $1, %rax
@@ -10559,7 +11489,7 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else337
+  je .L.else344
   mov pos(%rip), %rax
   push %rax
   mov $1, %rax
@@ -10592,8 +11522,8 @@ tokenize:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.end337
-.L.else337:
+  jmp .L.end344
+.L.else344:
   mov source(%rip), %rax
   push %rax
   mov pos(%rip), %rax
@@ -10614,7 +11544,7 @@ tokenize:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-.L.end337:
+.L.end344:
   mov source(%rip), %rax
   push %rax
   mov pos(%rip), %rax
@@ -10635,7 +11565,7 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else338
+  je .L.else345
   mov pos(%rip), %rax
   push %rax
   mov $1, %rax
@@ -10643,9 +11573,9 @@ tokenize:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.end338
-.L.else338:
-.L.end338:
+  jmp .L.end345
+.L.else345:
+.L.end345:
   mov $2, %rax
   push %rax
   mov source(%rip), %rax
@@ -10682,8 +11612,8 @@ tokenize:
   mov %rax, (%rdi)
   mov -56(%rbp), %rax
   mov %rax, -64(%rbp)
-  jmp .L.end336
-.L.else336:
+  jmp .L.end343
+.L.else343:
   movzb -24(%rbp), %rax
   push %rax
   pop %rdi
@@ -10691,7 +11621,7 @@ tokenize:
   call is_ident1
   add $8, %rsp
   cmp $0, %rax
-  je .L.else339
+  je .L.else346
   mov source(%rip), %rax
   push %rax
   mov pos(%rip), %rax
@@ -10734,8 +11664,8 @@ tokenize:
   mov %rax, (%rdi)
   mov -56(%rbp), %rax
   mov %rax, -64(%rbp)
-  jmp .L.end339
-.L.else339:
+  jmp .L.end346
+.L.else346:
   movzb -24(%rbp), %rax
   push %rax
   mov $61, %rax
@@ -10745,7 +11675,7 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false341
+  je .L.false348
   mov source(%rip), %rax
   push %rax
   mov pos(%rip), %rax
@@ -10771,14 +11701,14 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false341
+  je .L.false348
   mov $1, %rax
-  jmp .L.end341
-.L.false341:
+  jmp .L.end348
+.L.false348:
   mov $0, %rax
-.L.end341:
+.L.end348:
   cmp $0, %rax
-  je .L.else340
+  je .L.else347
   mov $22, %rax
   push %rax
   mov source(%rip), %rax
@@ -10814,8 +11744,8 @@ tokenize:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.end340
-.L.else340:
+  jmp .L.end347
+.L.else347:
   movzb -24(%rbp), %rax
   push %rax
   mov $33, %rax
@@ -10825,7 +11755,7 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false343
+  je .L.false350
   mov source(%rip), %rax
   push %rax
   mov pos(%rip), %rax
@@ -10851,14 +11781,14 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false343
+  je .L.false350
   mov $1, %rax
-  jmp .L.end343
-.L.false343:
+  jmp .L.end350
+.L.false350:
   mov $0, %rax
-.L.end343:
+.L.end350:
   cmp $0, %rax
-  je .L.else342
+  je .L.else349
   mov $23, %rax
   push %rax
   mov source(%rip), %rax
@@ -10894,8 +11824,8 @@ tokenize:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.end342
-.L.else342:
+  jmp .L.end349
+.L.else349:
   movzb -24(%rbp), %rax
   push %rax
   mov $60, %rax
@@ -10905,7 +11835,7 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false345
+  je .L.false352
   mov source(%rip), %rax
   push %rax
   mov pos(%rip), %rax
@@ -10931,14 +11861,14 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false345
+  je .L.false352
   mov $1, %rax
-  jmp .L.end345
-.L.false345:
+  jmp .L.end352
+.L.false352:
   mov $0, %rax
-.L.end345:
+.L.end352:
   cmp $0, %rax
-  je .L.else344
+  je .L.else351
   mov $24, %rax
   push %rax
   mov source(%rip), %rax
@@ -10974,8 +11904,8 @@ tokenize:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.end344
-.L.else344:
+  jmp .L.end351
+.L.else351:
   movzb -24(%rbp), %rax
   push %rax
   mov $62, %rax
@@ -10985,7 +11915,7 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false347
+  je .L.false354
   mov source(%rip), %rax
   push %rax
   mov pos(%rip), %rax
@@ -11011,14 +11941,14 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false347
+  je .L.false354
   mov $1, %rax
-  jmp .L.end347
-.L.false347:
+  jmp .L.end354
+.L.false354:
   mov $0, %rax
-.L.end347:
+.L.end354:
   cmp $0, %rax
-  je .L.else346
+  je .L.else353
   mov $25, %rax
   push %rax
   mov source(%rip), %rax
@@ -11054,8 +11984,8 @@ tokenize:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.end346
-.L.else346:
+  jmp .L.end353
+.L.else353:
   movzb -24(%rbp), %rax
   push %rax
   mov $38, %rax
@@ -11065,7 +11995,7 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false349
+  je .L.false356
   mov source(%rip), %rax
   push %rax
   mov pos(%rip), %rax
@@ -11091,14 +12021,14 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false349
+  je .L.false356
   mov $1, %rax
-  jmp .L.end349
-.L.false349:
+  jmp .L.end356
+.L.false356:
   mov $0, %rax
-.L.end349:
+.L.end356:
   cmp $0, %rax
-  je .L.else348
+  je .L.else355
   mov $45, %rax
   push %rax
   mov source(%rip), %rax
@@ -11134,8 +12064,8 @@ tokenize:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.end348
-.L.else348:
+  jmp .L.end355
+.L.else355:
   movzb -24(%rbp), %rax
   push %rax
   mov $124, %rax
@@ -11145,7 +12075,7 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false351
+  je .L.false358
   mov source(%rip), %rax
   push %rax
   mov pos(%rip), %rax
@@ -11171,14 +12101,14 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false351
+  je .L.false358
   mov $1, %rax
-  jmp .L.end351
-.L.false351:
+  jmp .L.end358
+.L.false358:
   mov $0, %rax
-.L.end351:
+.L.end358:
   cmp $0, %rax
-  je .L.else350
+  je .L.else357
   mov $46, %rax
   push %rax
   mov source(%rip), %rax
@@ -11214,8 +12144,8 @@ tokenize:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.end350
-.L.else350:
+  jmp .L.end357
+.L.else357:
   movzb -24(%rbp), %rax
   push %rax
   mov $45, %rax
@@ -11225,7 +12155,7 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false353
+  je .L.false360
   mov source(%rip), %rax
   push %rax
   mov pos(%rip), %rax
@@ -11251,14 +12181,14 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false353
+  je .L.false360
   mov $1, %rax
-  jmp .L.end353
-.L.false353:
+  jmp .L.end360
+.L.false360:
   mov $0, %rax
-.L.end353:
+.L.end360:
   cmp $0, %rax
-  je .L.else352
+  je .L.else359
   mov $50, %rax
   push %rax
   mov source(%rip), %rax
@@ -11294,8 +12224,8 @@ tokenize:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.end352
-.L.else352:
+  jmp .L.end359
+.L.else359:
   movzb -24(%rbp), %rax
   push %rax
   mov $124, %rax
@@ -11305,7 +12235,7 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else354
+  je .L.else361
   mov $49, %rax
   push %rax
   mov source(%rip), %rax
@@ -11341,8 +12271,8 @@ tokenize:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.end354
-.L.else354:
+  jmp .L.end361
+.L.else361:
   movzb -24(%rbp), %rax
   push %rax
   mov $60, %rax
@@ -11352,7 +12282,7 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else355
+  je .L.else362
   mov $31, %rax
   push %rax
   mov source(%rip), %rax
@@ -11388,8 +12318,8 @@ tokenize:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.end355
-.L.else355:
+  jmp .L.end362
+.L.else362:
   movzb -24(%rbp), %rax
   push %rax
   mov $62, %rax
@@ -11399,7 +12329,7 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else356
+  je .L.else363
   mov $32, %rax
   push %rax
   mov source(%rip), %rax
@@ -11435,8 +12365,8 @@ tokenize:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.end356
-.L.else356:
+  jmp .L.end363
+.L.else363:
   movzb -24(%rbp), %rax
   push %rax
   mov $61, %rax
@@ -11446,7 +12376,7 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else357
+  je .L.else364
   mov $33, %rax
   push %rax
   mov source(%rip), %rax
@@ -11482,8 +12412,8 @@ tokenize:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.end357
-.L.else357:
+  jmp .L.end364
+.L.else364:
   movzb -24(%rbp), %rax
   push %rax
   mov $33, %rax
@@ -11493,7 +12423,7 @@ tokenize:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else358
+  je .L.else365
   mov $34, %rax
   push %rax
   mov source(%rip), %rax
@@ -11529,8 +12459,8 @@ tokenize:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-  jmp .L.end358
-.L.else358:
+  jmp .L.end365
+.L.else365:
   movzb -24(%rbp), %rax
   push %rax
   pop %rdi
@@ -11573,27 +12503,27 @@ tokenize:
   pop %rax
   add %rdi, %rax
   mov %rax, pos(%rip)
-.L.end358:
+.L.end365:
+.L.end364:
+.L.end363:
+.L.end362:
+.L.end361:
+.L.end359:
 .L.end357:
-.L.end356:
 .L.end355:
-.L.end354:
-.L.end352:
-.L.end350:
-.L.end348:
+.L.end353:
+.L.end351:
+.L.end349:
+.L.end347:
 .L.end346:
-.L.end344:
+.L.end343:
 .L.end342:
-.L.end340:
+.L.end341:
 .L.end339:
+.L.end337:
 .L.end336:
+  jmp .L.begin335
 .L.end335:
-.L.end334:
-.L.end332:
-.L.end330:
-.L.end329:
-  jmp .L.begin328
-.L.end328:
   mov $0, %rax
   push %rax
   mov source(%rip), %rax
@@ -11672,16 +12602,16 @@ skip:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else359
+  je .L.else366
   lea .L.str82+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end359
-.L.else359:
-.L.end359:
+  jmp .L.end366
+.L.else366:
+.L.end366:
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -11733,7 +12663,7 @@ add_string:
   mov %rax, -24(%rbp)
   mov $0, %rax
   mov %rax, -16(%rbp)
-.L.begin360:
+.L.begin367:
   mov -24(%rbp), %rax
   push %rax
   mov -40(%rbp), %rax
@@ -11743,7 +12673,7 @@ add_string:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end360
+  je .L.end367
   mov -48(%rbp), %rax
   push %rax
   mov -24(%rbp), %rax
@@ -11764,7 +12694,7 @@ add_string:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false362
+  je .L.false369
   mov -24(%rbp), %rax
   push %rax
   mov $1, %rax
@@ -11779,14 +12709,14 @@ add_string:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false362
+  je .L.false369
   mov $1, %rax
-  jmp .L.end362
-.L.false362:
+  jmp .L.end369
+.L.false369:
   mov $0, %rax
-.L.end362:
+.L.end369:
   cmp $0, %rax
-  je .L.else361
+  je .L.else368
   mov -24(%rbp), %rax
   push %rax
   mov $1, %rax
@@ -11834,8 +12764,8 @@ add_string:
   pop %rax
   add %rdi, %rax
   mov %rax, -16(%rbp)
-  jmp .L.end361
-.L.else361:
+  jmp .L.end368
+.L.else368:
   mov -48(%rbp), %rax
   push %rax
   mov -24(%rbp), %rax
@@ -11871,7 +12801,7 @@ add_string:
   pop %rax
   add %rdi, %rax
   mov %rax, -16(%rbp)
-.L.end361:
+.L.end368:
   mov -24(%rbp), %rax
   push %rax
   mov $1, %rax
@@ -11879,8 +12809,8 @@ add_string:
   pop %rax
   add %rdi, %rax
   mov %rax, -24(%rbp)
-  jmp .L.begin360
-.L.end360:
+  jmp .L.begin367
+.L.end367:
   mov $0, %rax
   push %rax
   mov -32(%rbp), %rax
@@ -12566,6 +13496,10 @@ new_funcall:
   mov %rbx, %rdi
   add $16, %rdi
   mov %rax, (%rdi)
+  mov $0, %rax
+  mov %rbx, %rdi
+  add $24, %rdi
+  mov %rax, (%rdi)
   mov %rbx, %rax
   pop %rbx
   push %rax
@@ -13069,11 +14003,34 @@ new_catch_arm:
 find_function:
   push %rbp
   mov %rsp, %rbp
-  sub $16, %rsp
-  mov %rdi, -16(%rbp)
-  mov functions(%rip), %rax
+  sub $32, %rsp
+  mov %rdi, -24(%rbp)
+  mov -24(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call hash_str
+  add $8, %rsp
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call sym_bucket
+  add $8, %rsp
+  mov %rax, -16(%rbp)
+  mov fn_buckets(%rip), %rax
+  push %rax
+  mov -16(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov (%rax), %rax
   mov %rax, -8(%rbp)
-.L.begin363:
+.L.begin370:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -13083,11 +14040,11 @@ find_function:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end363
+  je .L.end370
   mov -8(%rbp), %rax
   mov (%rax), %rax
   push %rax
-  mov -16(%rbp), %rax
+  mov -24(%rbp), %rax
   push %rax
   pop %rsi
   pop %rdi
@@ -13095,21 +14052,92 @@ find_function:
   call streq
   add $8, %rsp
   cmp $0, %rax
-  je .L.else364
+  je .L.else371
   mov -8(%rbp), %rax
   jmp .L.return.find_function
-  jmp .L.end364
-.L.else364:
-.L.end364:
+  jmp .L.end371
+.L.else371:
+.L.end371:
   mov -8(%rbp), %rax
-  add $80, %rax
+  add $88, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin363
-.L.end363:
+  jmp .L.begin370
+.L.end370:
   mov $0, %rax
   jmp .L.return.find_function
 .L.return.find_function:
+  mov %rbp, %rsp
+  pop %rbp
+  ret
+.globl find_global
+find_global:
+  push %rbp
+  mov %rsp, %rbp
+  sub $32, %rsp
+  mov %rdi, -24(%rbp)
+  mov -24(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call hash_str
+  add $8, %rsp
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call sym_bucket
+  add $8, %rsp
+  mov %rax, -16(%rbp)
+  mov global_buckets(%rip), %rax
+  push %rax
+  mov -16(%rbp), %rax
+  push %rax
+  mov $8, %rax
+  mov %rax, %rdi
+  pop %rax
+  imul %rdi, %rax
+  mov %rax, %rdi
+  pop %rax
+  add %rdi, %rax
+  mov (%rax), %rax
+  mov %rax, -8(%rbp)
+.L.begin372:
+  mov -8(%rbp), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  setne %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.end372
+  mov -8(%rbp), %rax
+  mov (%rax), %rax
+  push %rax
+  mov -24(%rbp), %rax
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call streq
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.else373
+  mov -8(%rbp), %rax
+  jmp .L.return.find_global
+  jmp .L.end373
+.L.else373:
+.L.end373:
+  mov -8(%rbp), %rax
+  add $72, %rax
+  mov (%rax), %rax
+  mov %rax, -8(%rbp)
+  jmp .L.begin372
+.L.end372:
+  mov $0, %rax
+  jmp .L.return.find_global
+.L.return.find_global:
   mov %rbp, %rsp
   pop %rbp
   ret
@@ -13121,8 +14149,28 @@ find_obj:
   mov %rdi, -24(%rbp)
   mov %rsi, -16(%rbp)
   mov -24(%rbp), %rax
+  push %rax
+  mov globals(%rip), %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else374
+  mov -16(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call find_global
+  add $8, %rsp
+  jmp .L.return.find_obj
+  jmp .L.end374
+.L.else374:
+.L.end374:
+  mov -24(%rbp), %rax
   mov %rax, -8(%rbp)
-.L.begin365:
+.L.begin375:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -13132,7 +14180,7 @@ find_obj:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end365
+  je .L.end375
   mov -8(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -13144,18 +14192,18 @@ find_obj:
   call streq
   add $8, %rsp
   cmp $0, %rax
-  je .L.else366
+  je .L.else376
   mov -8(%rbp), %rax
   jmp .L.return.find_obj
-  jmp .L.end366
-.L.else366:
-.L.end366:
+  jmp .L.end376
+.L.else376:
+.L.end376:
   mov -8(%rbp), %rax
   add $56, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin365
-.L.end365:
+  jmp .L.begin375
+.L.end375:
   mov $0, %rax
   jmp .L.return.find_obj
 .L.return.find_obj:
@@ -13170,7 +14218,7 @@ find_local:
   mov %rdi, -16(%rbp)
   mov locals(%rip), %rax
   mov %rax, -8(%rbp)
-.L.begin367:
+.L.begin377:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -13180,7 +14228,7 @@ find_local:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end367
+  je .L.end377
   mov -8(%rbp), %rax
   add $32, %rax
   mov (%rax), %rax
@@ -13192,7 +14240,7 @@ find_local:
   setle %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else368
+  je .L.else378
   mov -8(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -13204,21 +14252,21 @@ find_local:
   call streq
   add $8, %rsp
   cmp $0, %rax
-  je .L.else369
+  je .L.else379
   mov -8(%rbp), %rax
   jmp .L.return.find_local
-  jmp .L.end369
-.L.else369:
-.L.end369:
-  jmp .L.end368
-.L.else368:
-.L.end368:
+  jmp .L.end379
+.L.else379:
+.L.end379:
+  jmp .L.end378
+.L.else378:
+.L.end378:
   mov -8(%rbp), %rax
   add $56, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin367
-.L.end367:
+  jmp .L.begin377
+.L.end377:
   mov $0, %rax
   jmp .L.return.find_local
 .L.return.find_local:
@@ -13247,20 +14295,17 @@ find_var:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else370
+  je .L.else380
   mov -8(%rbp), %rax
   jmp .L.return.find_var
-  jmp .L.end370
-.L.else370:
-.L.end370:
-  mov globals(%rip), %rax
-  push %rax
+  jmp .L.end380
+.L.else380:
+.L.end380:
   mov -16(%rbp), %rax
   push %rax
-  pop %rsi
   pop %rdi
   sub $8, %rsp
-  call find_obj
+  call find_global
   add $8, %rsp
   jmp .L.return.find_var
 .L.return.find_var:
@@ -13297,16 +14342,16 @@ leave_scope:
   setle %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else371
+  je .L.else381
   lea .L.str83+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end371
-.L.else371:
-.L.end371:
+  jmp .L.end381
+.L.else381:
+.L.end381:
   mov scope_depth(%rip), %rax
   push %rax
   mov $1, %rax
@@ -13325,7 +14370,7 @@ new_obj:
   sub $32, %rsp
   mov %rdi, -24(%rbp)
   mov %rsi, -16(%rbp)
-  mov $72, %rdi
+  mov $80, %rdi
   call malloc
   push %rbx
   mov %rax, %rbx
@@ -13364,6 +14409,10 @@ new_obj:
   mov %rbx, %rdi
   add $64, %rdi
   mov %rax, (%rdi)
+  mov $0, %rax
+  mov %rbx, %rdi
+  add $72, %rdi
+  mov %rax, (%rdi)
   mov %rbx, %rax
   pop %rbx
   mov %rax, -8(%rbp)
@@ -13376,7 +14425,7 @@ new_obj:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else372
+  je .L.else382
   mov scope_depth(%rip), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -13395,8 +14444,8 @@ new_obj:
   mov %rax, (%rdi)
   mov -8(%rbp), %rax
   mov %rax, locals(%rip)
-  jmp .L.end372
-.L.else372:
+  jmp .L.end382
+.L.else382:
   mov globals(%rip), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -13407,7 +14456,13 @@ new_obj:
   mov %rax, (%rdi)
   mov -8(%rbp), %rax
   mov %rax, globals(%rip)
-.L.end372:
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call hash_put_global
+  add $8, %rsp
+.L.end382:
   mov -8(%rbp), %rax
   jmp .L.return.new_obj
 .L.return.new_obj:
@@ -13422,7 +14477,7 @@ var_view_ty:
   mov %rdi, -16(%rbp)
   mov narrow_top(%rip), %rax
   mov %rax, -8(%rbp)
-.L.begin373:
+.L.begin383:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -13432,7 +14487,7 @@ var_view_ty:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end373
+  je .L.end383
   mov -8(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -13443,20 +14498,20 @@ var_view_ty:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else374
+  je .L.else384
   mov -8(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   jmp .L.return.var_view_ty
-  jmp .L.end374
-.L.else374:
-.L.end374:
+  jmp .L.end384
+.L.else384:
+.L.end384:
   mov -8(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin373
-.L.end373:
+  jmp .L.begin383
+.L.end383:
   mov -16(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -13466,14 +14521,14 @@ var_view_ty:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else375
+  je .L.else385
   mov -16(%rbp), %rax
   add $40, %rax
   mov (%rax), %rax
   jmp .L.return.var_view_ty
-  jmp .L.end375
-.L.else375:
-.L.end375:
+  jmp .L.end385
+.L.else385:
+.L.end385:
   mov $0, %rax
   jmp .L.return.var_view_ty
 .L.return.var_view_ty:
@@ -13538,14 +14593,14 @@ opt_local_var:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else376
+  je .L.else386
   mov -48(%rbp), %rax
   push %rax
   mov (%rax), %rax
   push %rax
   mov (%rsp), %rax
   cmp $2, %rax
-  jne .L.arm378
+  jne .L.arm388
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -40(%rbp), %rdi
@@ -13567,7 +14622,7 @@ opt_local_var:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else379
+  je .L.else389
   mov -16(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
@@ -13579,12 +14634,12 @@ opt_local_var:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else380
+  je .L.else390
   mov $0, %rax
   jmp .L.return.opt_local_var
-  jmp .L.end380
-.L.else380:
-.L.end380:
+  jmp .L.end390
+.L.else390:
+.L.end390:
   mov -16(%rbp), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -13603,7 +14658,7 @@ opt_local_var:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false382
+  je .L.false392
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -13611,38 +14666,38 @@ opt_local_var:
   call is_opt_pointer
   add $8, %rsp
   cmp $0, %rax
-  je .L.false382
+  je .L.false392
   mov $1, %rax
-  jmp .L.end382
-.L.false382:
+  jmp .L.end392
+.L.false392:
   mov $0, %rax
-.L.end382:
+.L.end392:
   cmp $0, %rax
-  je .L.else381
+  je .L.else391
   mov -16(%rbp), %rax
   jmp .L.return.opt_local_var
-  jmp .L.end381
-.L.else381:
-.L.end381:
+  jmp .L.end391
+.L.else391:
+.L.end391:
   mov $0, %rax
   jmp .L.return.opt_local_var
-  jmp .L.end379
-.L.else379:
-.L.end379:
+  jmp .L.end389
+.L.else389:
+.L.end389:
   mov $0, %rax
   jmp .L.return.opt_local_var
-  jmp .L.matchend377
-.L.arm378:
+  jmp .L.matchend387
+.L.arm388:
   mov $0, %rax
   jmp .L.return.opt_local_var
-  jmp .L.matchend377
+  jmp .L.matchend387
   mov $1, %rdi
   call exit
-.L.matchend377:
+.L.matchend387:
   add $16, %rsp
-  jmp .L.end376
-.L.else376:
-.L.end376:
+  jmp .L.end386
+.L.else386:
+.L.end386:
   mov $0, %rax
   jmp .L.return.opt_local_var
 .L.return.opt_local_var:
@@ -13663,7 +14718,7 @@ null_sides:
   call is_null_expr
   add $8, %rsp
   cmp $0, %rax
-  je .L.else384
+  je .L.else394
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -13671,9 +14726,9 @@ null_sides:
   call opt_local_var
   add $8, %rsp
   jmp .L.return.null_sides
-  jmp .L.end384
-.L.else384:
-.L.end384:
+  jmp .L.end394
+.L.else394:
+.L.end394:
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -13681,7 +14736,7 @@ null_sides:
   call is_null_expr
   add $8, %rsp
   cmp $0, %rax
-  je .L.else385
+  je .L.else395
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -13689,9 +14744,9 @@ null_sides:
   call opt_local_var
   add $8, %rsp
   jmp .L.return.null_sides
-  jmp .L.end385
-.L.else385:
-.L.end385:
+  jmp .L.end395
+.L.else395:
+.L.end395:
   mov $0, %rax
   jmp .L.return.null_sides
 .L.return.null_sides:
@@ -13713,14 +14768,14 @@ null_check_var:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else386
+  je .L.else396
   mov -32(%rbp), %rax
   push %rax
   mov (%rax), %rax
   push %rax
   mov (%rsp), %rax
   cmp $3, %rax
-  jne .L.arm388
+  jne .L.arm398
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -24(%rbp), %rdi
@@ -13736,7 +14791,7 @@ null_check_var:
   push %rax
   mov (%rsp), %rax
   cmp $6, %rax
-  jne .L.arm390
+  jne .L.arm400
   lea -24(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
@@ -13751,27 +14806,27 @@ null_check_var:
   call null_sides
   add $8, %rsp
   jmp .L.return.null_check_var
-  jmp .L.matchend389
-.L.arm390:
+  jmp .L.matchend399
+.L.arm400:
   mov $0, %rax
   jmp .L.return.null_check_var
-  jmp .L.matchend389
+  jmp .L.matchend399
   mov $1, %rdi
   call exit
-.L.matchend389:
+.L.matchend399:
   add $16, %rsp
-  jmp .L.matchend387
-.L.arm388:
+  jmp .L.matchend397
+.L.arm398:
   mov $0, %rax
   jmp .L.return.null_check_var
-  jmp .L.matchend387
+  jmp .L.matchend397
   mov $1, %rdi
   call exit
-.L.matchend387:
+.L.matchend397:
   add $16, %rsp
-  jmp .L.end386
-.L.else386:
-.L.end386:
+  jmp .L.end396
+.L.else396:
+.L.end396:
   mov $0, %rax
   jmp .L.return.null_check_var
 .L.return.null_check_var:
@@ -13793,14 +14848,14 @@ null_eq_var:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else393
+  je .L.else403
   mov -32(%rbp), %rax
   push %rax
   mov (%rax), %rax
   push %rax
   mov (%rsp), %rax
   cmp $3, %rax
-  jne .L.arm395
+  jne .L.arm405
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -24(%rbp), %rdi
@@ -13816,7 +14871,7 @@ null_eq_var:
   push %rax
   mov (%rsp), %rax
   cmp $5, %rax
-  jne .L.arm397
+  jne .L.arm407
   lea -24(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
@@ -13831,27 +14886,27 @@ null_eq_var:
   call null_sides
   add $8, %rsp
   jmp .L.return.null_eq_var
-  jmp .L.matchend396
-.L.arm397:
+  jmp .L.matchend406
+.L.arm407:
   mov $0, %rax
   jmp .L.return.null_eq_var
-  jmp .L.matchend396
+  jmp .L.matchend406
   mov $1, %rdi
   call exit
-.L.matchend396:
+.L.matchend406:
   add $16, %rsp
-  jmp .L.matchend394
-.L.arm395:
+  jmp .L.matchend404
+.L.arm405:
   mov $0, %rax
   jmp .L.return.null_eq_var
-  jmp .L.matchend394
+  jmp .L.matchend404
   mov $1, %rdi
   call exit
-.L.matchend394:
+.L.matchend404:
   add $16, %rsp
-  jmp .L.end393
-.L.else393:
-.L.end393:
+  jmp .L.end403
+.L.else403:
+.L.end403:
   mov $0, %rax
   jmp .L.return.null_eq_var
 .L.return.null_eq_var:
@@ -13873,14 +14928,14 @@ narrow_push_ne_nulls:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else400
+  je .L.else410
   mov -40(%rbp), %rax
   push %rax
   mov (%rax), %rax
   push %rax
   mov (%rsp), %rax
   cmp $9, %rax
-  jne .L.arm402
+  jne .L.arm412
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -32(%rbp), %rdi
@@ -13905,8 +14960,8 @@ narrow_push_ne_nulls:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.narrow_push_ne_nulls
-  jmp .L.matchend401
-.L.arm402:
+  jmp .L.matchend411
+.L.arm412:
   mov -40(%rbp), %rax
   push %rax
   pop %rdi
@@ -13923,7 +14978,7 @@ narrow_push_ne_nulls:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else404
+  je .L.else414
   mov -16(%rbp), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -13942,16 +14997,16 @@ narrow_push_ne_nulls:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else405
+  je .L.else415
   lea .L.str84+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end405
-.L.else405:
-.L.end405:
+  jmp .L.end415
+.L.else415:
+.L.end415:
   mov -16(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -13971,17 +15026,17 @@ narrow_push_ne_nulls:
   sub $8, %rsp
   call narrow_push
   add $8, %rsp
-  jmp .L.end404
-.L.else404:
-.L.end404:
-  jmp .L.matchend401
+  jmp .L.end414
+.L.else414:
+.L.end414:
+  jmp .L.matchend411
   mov $1, %rdi
   call exit
-.L.matchend401:
+.L.matchend411:
   add $16, %rsp
-  jmp .L.end400
-.L.else400:
-.L.end400:
+  jmp .L.end410
+.L.else410:
+.L.end410:
 .L.return.narrow_push_ne_nulls:
   mov %rbp, %rsp
   pop %rbp
@@ -14001,14 +15056,14 @@ narrow_push_eq_nulls:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else406
+  je .L.else416
   mov -40(%rbp), %rax
   push %rax
   mov (%rax), %rax
   push %rax
   mov (%rsp), %rax
   cmp $10, %rax
-  jne .L.arm408
+  jne .L.arm418
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -32(%rbp), %rdi
@@ -14033,8 +15088,8 @@ narrow_push_eq_nulls:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.narrow_push_eq_nulls
-  jmp .L.matchend407
-.L.arm408:
+  jmp .L.matchend417
+.L.arm418:
   mov -40(%rbp), %rax
   push %rax
   pop %rdi
@@ -14051,7 +15106,7 @@ narrow_push_eq_nulls:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else410
+  je .L.else420
   mov -16(%rbp), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -14070,16 +15125,16 @@ narrow_push_eq_nulls:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else411
+  je .L.else421
   lea .L.str85+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end411
-.L.else411:
-.L.end411:
+  jmp .L.end421
+.L.else421:
+.L.end421:
   mov -16(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -14099,17 +15154,17 @@ narrow_push_eq_nulls:
   sub $8, %rsp
   call narrow_push
   add $8, %rsp
-  jmp .L.end410
-.L.else410:
-.L.end410:
-  jmp .L.matchend407
+  jmp .L.end420
+.L.else420:
+.L.end420:
+  jmp .L.matchend417
   mov $1, %rdi
   call exit
-.L.matchend407:
+.L.matchend417:
   add $16, %rsp
-  jmp .L.end406
-.L.else406:
-.L.end406:
+  jmp .L.end416
+.L.else416:
+.L.end416:
 .L.return.narrow_push_eq_nulls:
   mov %rbp, %rsp
   pop %rbp
@@ -14126,16 +15181,16 @@ decl_spec:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else412
+  je .L.else422
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
   mov %rax, tok(%rip)
   mov ty_int(%rip), %rax
   jmp .L.return.decl_spec
-  jmp .L.end412
-.L.else412:
-.L.end412:
+  jmp .L.end422
+.L.else422:
+.L.end422:
   mov $6, %rax
   push %rax
   pop %rdi
@@ -14143,16 +15198,16 @@ decl_spec:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else413
+  je .L.else423
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
   mov %rax, tok(%rip)
   mov ty_i8(%rip), %rax
   jmp .L.return.decl_spec
-  jmp .L.end413
-.L.else413:
-.L.end413:
+  jmp .L.end423
+.L.else423:
+.L.end423:
   mov $7, %rax
   push %rax
   pop %rdi
@@ -14160,16 +15215,16 @@ decl_spec:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else414
+  je .L.else424
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
   mov %rax, tok(%rip)
   mov ty_bool(%rip), %rax
   jmp .L.return.decl_spec
-  jmp .L.end414
-.L.else414:
-.L.end414:
+  jmp .L.end424
+.L.else424:
+.L.end424:
   mov $11, %rax
   push %rax
   pop %rdi
@@ -14177,16 +15232,16 @@ decl_spec:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else415
+  je .L.else425
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
   mov %rax, tok(%rip)
   mov ty_noreturn(%rip), %rax
   jmp .L.return.decl_spec
-  jmp .L.end415
-.L.else415:
-.L.end415:
+  jmp .L.end425
+.L.else425:
+.L.end425:
   mov $4, %rax
   push %rax
   pop %rdi
@@ -14194,7 +15249,7 @@ decl_spec:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else416
+  je .L.else426
   sub $8, %rsp
   call cur_tokstr
   add $8, %rsp
@@ -14215,7 +15270,7 @@ decl_spec:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else417
+  je .L.else427
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -14227,9 +15282,9 @@ decl_spec:
   call enum_type
   add $8, %rsp
   jmp .L.return.decl_spec
-  jmp .L.end417
-.L.else417:
-.L.end417:
+  jmp .L.end427
+.L.else427:
+.L.end427:
   mov -32(%rbp), %rax
   push %rax
   pop %rdi
@@ -14246,7 +15301,7 @@ decl_spec:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else418
+  je .L.else428
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -14258,9 +15313,9 @@ decl_spec:
   call exn_type
   add $8, %rsp
   jmp .L.return.decl_spec
-  jmp .L.end418
-.L.else418:
-.L.end418:
+  jmp .L.end428
+.L.else428:
+.L.end428:
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -14279,9 +15334,9 @@ decl_spec:
   call struct_type
   add $8, %rsp
   jmp .L.return.decl_spec
-  jmp .L.end416
-.L.else416:
-.L.end416:
+  jmp .L.end426
+.L.else426:
+.L.end426:
   lea .L.str86+8(%rip), %rax
   push %rax
   pop %rdi
@@ -14304,7 +15359,7 @@ parse_type:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else419
+  je .L.else429
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -14319,16 +15374,16 @@ parse_type:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else420
+  je .L.else430
   lea .L.str87+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end420
-.L.else420:
-.L.end420:
+  jmp .L.end430
+.L.else430:
+.L.end430:
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -14344,16 +15399,16 @@ parse_type:
   call is_noreturn_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.else421
+  je .L.else431
   lea .L.str88+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end421
-.L.else421:
-.L.end421:
+  jmp .L.end431
+.L.else431:
+.L.end431:
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -14361,9 +15416,9 @@ parse_type:
   call opt_ptr_to
   add $8, %rsp
   jmp .L.return.parse_type
-  jmp .L.end419
-.L.else419:
-.L.end419:
+  jmp .L.end429
+.L.else429:
+.L.end429:
   mov $28, %rax
   push %rax
   pop %rdi
@@ -14371,7 +15426,7 @@ parse_type:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else422
+  je .L.else432
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -14387,16 +15442,16 @@ parse_type:
   call is_noreturn_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.else423
+  je .L.else433
   lea .L.str89+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end423
-.L.else423:
-.L.end423:
+  jmp .L.end433
+.L.else433:
+.L.end433:
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -14404,9 +15459,9 @@ parse_type:
   call ptr_to
   add $8, %rsp
   jmp .L.return.parse_type
-  jmp .L.end422
-.L.else422:
-.L.end422:
+  jmp .L.end432
+.L.else432:
+.L.end432:
   sub $8, %rsp
   call decl_spec
   add $8, %rsp
@@ -14444,7 +15499,7 @@ parse_field_inits:
   mov %rax, -96(%rbp)
   mov $0, %rax
   mov %rax, -88(%rbp)
-.L.begin424:
+.L.begin434:
   mov $39, %rax
   push %rax
   pop %rdi
@@ -14455,7 +15510,7 @@ parse_field_inits:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end424
+  je .L.end434
   mov -88(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -14465,16 +15520,16 @@ parse_field_inits:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else425
+  je .L.else435
   mov $43, %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call skip
   add $8, %rsp
-  jmp .L.end425
-.L.else425:
-.L.end425:
+  jmp .L.end435
+.L.else435:
+.L.end435:
   mov $4, %rax
   push %rax
   pop %rdi
@@ -14485,16 +15540,16 @@ parse_field_inits:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else426
+  je .L.else436
   lea .L.str90+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end426
-.L.else426:
-.L.end426:
+  jmp .L.end436
+.L.else436:
+.L.end436:
   sub $8, %rsp
   call cur_tokstr
   add $8, %rsp
@@ -14528,21 +15583,21 @@ parse_field_inits:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else427
+  je .L.else437
   lea .L.str91+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end427
-.L.else427:
-.L.end427:
+  jmp .L.end437
+.L.else437:
+.L.end437:
   mov -72(%rbp), %rax
   mov %rax, -64(%rbp)
   mov -96(%rbp), %rax
   mov %rax, -56(%rbp)
-.L.begin428:
+.L.begin438:
   mov -56(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -14552,7 +15607,7 @@ parse_field_inits:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end428
+  je .L.end438
   mov -56(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -14563,22 +15618,22 @@ parse_field_inits:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else429
+  je .L.else439
   lea .L.str92+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end429
-.L.else429:
-.L.end429:
+  jmp .L.end439
+.L.else439:
+.L.end439:
   mov -56(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   mov %rax, -56(%rbp)
-  jmp .L.begin428
-.L.end428:
+  jmp .L.begin438
+.L.end438:
   mov $0, %rax
   mov %rax, -48(%rbp)
   mov $18, %rax
@@ -14588,20 +15643,20 @@ parse_field_inits:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else430
+  je .L.else440
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
   mov %rax, tok(%rip)
-  jmp .L.end430
-.L.else430:
+  jmp .L.end440
+.L.else440:
   sub $8, %rsp
   call parse_expr
   add $8, %rsp
   mov %rax, -40(%rbp)
   mov -40(%rbp), %rax
   mov %rax, -48(%rbp)
-.L.end430:
+.L.end440:
   mov -64(%rbp), %rax
   push %rax
   mov -48(%rbp), %rax
@@ -14621,7 +15676,7 @@ parse_field_inits:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else431
+  je .L.else441
   mov -32(%rbp), %rax
   push %rax
   mov -88(%rbp), %rax
@@ -14632,18 +15687,18 @@ parse_field_inits:
   mov %rax, (%rdi)
   mov -32(%rbp), %rax
   mov %rax, -88(%rbp)
-  jmp .L.end431
-.L.else431:
+  jmp .L.end441
+.L.else441:
   mov -32(%rbp), %rax
   mov %rax, -96(%rbp)
   mov -32(%rbp), %rax
   mov %rax, -88(%rbp)
-.L.end431:
-  jmp .L.begin424
-.L.end424:
+.L.end441:
+  jmp .L.begin434
+.L.end434:
   mov -104(%rbp), %rax
   mov %rax, -24(%rbp)
-.L.begin432:
+.L.begin442:
   mov -24(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -14653,12 +15708,12 @@ parse_field_inits:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end432
+  je .L.end442
   mov $0, %rax
   mov %rax, -16(%rbp)
   mov -96(%rbp), %rax
   mov %rax, -8(%rbp)
-.L.begin433:
+.L.begin443:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -14668,7 +15723,7 @@ parse_field_inits:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end433
+  je .L.end443
   mov -8(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -14679,18 +15734,18 @@ parse_field_inits:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else434
+  je .L.else444
   mov $1, %rax
   mov %rax, -16(%rbp)
-  jmp .L.end434
-.L.else434:
-.L.end434:
+  jmp .L.end444
+.L.else444:
+.L.end444:
   mov -8(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin433
-.L.end433:
+  jmp .L.begin443
+.L.end443:
   mov -16(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -14700,22 +15755,22 @@ parse_field_inits:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else435
+  je .L.else445
   lea .L.str93+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end435
-.L.else435:
-.L.end435:
+  jmp .L.end445
+.L.else445:
+.L.end445:
   mov -24(%rbp), %rax
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -24(%rbp)
-  jmp .L.begin432
-.L.end432:
+  jmp .L.begin442
+.L.end442:
   mov $39, %rax
   push %rax
   pop %rdi
@@ -14752,16 +15807,16 @@ parse_struct_field_inits:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else436
+  je .L.else446
   lea .L.str95+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end436
-.L.else436:
-.L.end436:
+  jmp .L.end446
+.L.else446:
+.L.end446:
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -14797,16 +15852,16 @@ parse_exn_field_inits:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else437
+  je .L.else447
   lea .L.str96+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end437
-.L.else437:
-.L.end437:
+  jmp .L.end447
+.L.else447:
+.L.end447:
   mov -8(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -14851,7 +15906,7 @@ parse_primary:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else438
+  je .L.else448
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -14860,7 +15915,7 @@ parse_primary:
   call is_type_name
   add $8, %rsp
   cmp $0, %rax
-  je .L.false440
+  je .L.false450
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -14873,14 +15928,14 @@ parse_primary:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false440
+  je .L.false450
   mov $1, %rax
-  jmp .L.end440
-.L.false440:
+  jmp .L.end450
+.L.false450:
   mov $0, %rax
-.L.end440:
+.L.end450:
   cmp $0, %rax
-  je .L.else439
+  je .L.else449
   sub $8, %rsp
   call parse_type
   add $8, %rsp
@@ -14895,16 +15950,16 @@ parse_primary:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else441
+  je .L.else451
   lea .L.str97+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end441
-.L.else441:
-.L.end441:
+  jmp .L.end451
+.L.else451:
+.L.end451:
   mov $47, %rax
   push %rax
   pop %rdi
@@ -14921,16 +15976,16 @@ parse_primary:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else442
+  je .L.else452
   lea .L.str98+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end442
-.L.else442:
-.L.end442:
+  jmp .L.end452
+.L.else452:
+.L.end452:
   sub $8, %rsp
   call cur_tokstr
   add $8, %rsp
@@ -14963,16 +16018,16 @@ parse_primary:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else443
+  je .L.else453
   lea .L.str99+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end443
-.L.else443:
-.L.end443:
+  jmp .L.end453
+.L.else453:
+.L.end453:
   mov -160(%rbp), %rax
   mov %rax, -152(%rbp)
   mov $0, %rax
@@ -14984,7 +16039,7 @@ parse_primary:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else444
+  je .L.else454
   mov -152(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -14996,16 +16051,16 @@ parse_primary:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else445
+  je .L.else455
   lea .L.str100+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end445
-.L.else445:
-.L.end445:
+  jmp .L.end455
+.L.else455:
+.L.end455:
   mov -152(%rbp), %rax
   push %rax
   pop %rdi
@@ -15013,8 +16068,8 @@ parse_primary:
   call parse_variant_field_inits
   add $8, %rsp
   mov %rax, -144(%rbp)
-  jmp .L.end444
-.L.else444:
+  jmp .L.end454
+.L.else454:
   mov -152(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -15026,17 +16081,17 @@ parse_primary:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else446
+  je .L.else456
   lea .L.str101+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end446
-.L.else446:
-.L.end446:
-.L.end444:
+  jmp .L.end456
+.L.else456:
+.L.end456:
+.L.end454:
   mov $0, %rax
   push %rax
   mov -152(%rbp), %rax
@@ -15063,9 +16118,9 @@ parse_primary:
   call new_heap_node
   add $8, %rsp
   jmp .L.return.parse_primary
-  jmp .L.end439
-.L.else439:
-.L.end439:
+  jmp .L.end449
+.L.else449:
+.L.end449:
   sub $8, %rsp
   call parse_type
   add $8, %rsp
@@ -15077,7 +16132,7 @@ parse_primary:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else447
+  je .L.else457
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -15099,7 +16154,7 @@ parse_primary:
   call is_pointer
   add $8, %rsp
   cmp $0, %rax
-  jne .L.true449
+  jne .L.true459
   mov -136(%rbp), %rax
   push %rax
   pop %rdi
@@ -15107,24 +16162,24 @@ parse_primary:
   call is_opt_pointer
   add $8, %rsp
   cmp $0, %rax
-  je .L.false449
-.L.true449:
+  je .L.false459
+.L.true459:
   mov $1, %rax
-  jmp .L.end449
-.L.false449:
+  jmp .L.end459
+.L.false459:
   mov $0, %rax
-.L.end449:
+.L.end459:
   cmp $0, %rax
-  je .L.else448
+  je .L.else458
   lea .L.str102+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end448
-.L.else448:
-.L.end448:
+  jmp .L.end458
+.L.else458:
+.L.end458:
   mov -128(%rbp), %rax
   push %rax
   mov $1, %rax
@@ -15149,9 +16204,9 @@ parse_primary:
   call new_heap_node
   add $8, %rsp
   jmp .L.return.parse_primary
-  jmp .L.end447
-.L.else447:
-.L.end447:
+  jmp .L.end457
+.L.else457:
+.L.end457:
   mov -136(%rbp), %rax
   push %rax
   pop %rdi
@@ -15159,16 +16214,16 @@ parse_primary:
   call is_pointer
   add $8, %rsp
   cmp $0, %rax
-  je .L.else450
+  je .L.else460
   lea .L.str103+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end450
-.L.else450:
-.L.end450:
+  jmp .L.end460
+.L.else460:
+.L.end460:
   mov $18, %rax
   push %rax
   pop %rdi
@@ -15176,7 +16231,7 @@ parse_primary:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else451
+  je .L.else461
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -15205,9 +16260,9 @@ parse_primary:
   call new_heap_node
   add $8, %rsp
   jmp .L.return.parse_primary
-  jmp .L.end451
-.L.else451:
-.L.end451:
+  jmp .L.end461
+.L.else461:
+.L.end461:
   mov $38, %rax
   push %rax
   pop %rdi
@@ -15218,16 +16273,16 @@ parse_primary:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else452
+  je .L.else462
   lea .L.str104+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end452
-.L.else452:
-.L.end452:
+  jmp .L.end462
+.L.else462:
+.L.end462:
   mov -136(%rbp), %rax
   push %rax
   pop %rdi
@@ -15235,16 +16290,16 @@ parse_primary:
   call is_enum_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.else453
+  je .L.else463
   lea .L.str105+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end453
-.L.else453:
-.L.end453:
+  jmp .L.end463
+.L.else463:
+.L.end463:
   mov $0, %rax
   push %rax
   mov $0, %rax
@@ -15274,9 +16329,9 @@ parse_primary:
   call new_heap_node
   add $8, %rsp
   jmp .L.return.parse_primary
-  jmp .L.end438
-.L.else438:
-.L.end438:
+  jmp .L.end448
+.L.else448:
+.L.end448:
   mov $17, %rax
   push %rax
   pop %rdi
@@ -15284,7 +16339,7 @@ parse_primary:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else454
+  je .L.else464
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -15299,7 +16354,7 @@ parse_primary:
   call starts_type
   add $8, %rsp
   cmp $0, %rax
-  je .L.else455
+  je .L.else465
   sub $8, %rsp
   call parse_type
   add $8, %rsp
@@ -15329,9 +16384,9 @@ parse_primary:
   call new_num
   add $8, %rsp
   jmp .L.return.parse_primary
-  jmp .L.end455
-.L.else455:
-.L.end455:
+  jmp .L.end465
+.L.else465:
+.L.end465:
   sub $8, %rsp
   call parse_expr
   add $8, %rsp
@@ -15370,9 +16425,9 @@ parse_primary:
   call new_num
   add $8, %rsp
   jmp .L.return.parse_primary
-  jmp .L.end454
-.L.else454:
-.L.end454:
+  jmp .L.end464
+.L.else464:
+.L.end464:
   mov $36, %rax
   push %rax
   pop %rdi
@@ -15380,7 +16435,7 @@ parse_primary:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else456
+  je .L.else466
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -15397,9 +16452,9 @@ parse_primary:
   add $8, %rsp
   mov -184(%rbp), %rax
   jmp .L.return.parse_primary
-  jmp .L.end456
-.L.else456:
-.L.end456:
+  jmp .L.end466
+.L.else466:
+.L.end466:
   mov $1, %rax
   push %rax
   pop %rdi
@@ -15407,7 +16462,7 @@ parse_primary:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else457
+  je .L.else467
   mov tok(%rip), %rax
   add $8, %rax
   mov (%rax), %rax
@@ -15423,9 +16478,9 @@ parse_primary:
   mov %rax, tok(%rip)
   mov -184(%rbp), %rax
   jmp .L.return.parse_primary
-  jmp .L.end457
-.L.else457:
-.L.end457:
+  jmp .L.end467
+.L.else467:
+.L.end467:
   mov $8, %rax
   push %rax
   pop %rdi
@@ -15433,7 +16488,7 @@ parse_primary:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  jne .L.true459
+  jne .L.true469
   mov $9, %rax
   push %rax
   pop %rdi
@@ -15441,15 +16496,15 @@ parse_primary:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.false459
-.L.true459:
+  je .L.false469
+.L.true469:
   mov $1, %rax
-  jmp .L.end459
-.L.false459:
+  jmp .L.end469
+.L.false469:
   mov $0, %rax
-.L.end459:
+.L.end469:
   cmp $0, %rax
-  je .L.else458
+  je .L.else468
   mov $0, %rax
   mov %rax, -112(%rbp)
   mov $8, %rax
@@ -15459,12 +16514,12 @@ parse_primary:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else460
+  je .L.else470
   mov $1, %rax
   mov %rax, -112(%rbp)
-  jmp .L.end460
-.L.else460:
-.L.end460:
+  jmp .L.end470
+.L.else470:
+.L.end470:
   mov -112(%rbp), %rax
   push %rax
   pop %rdi
@@ -15486,9 +16541,9 @@ parse_primary:
   mov %rax, tok(%rip)
   mov -184(%rbp), %rax
   jmp .L.return.parse_primary
-  jmp .L.end458
-.L.else458:
-.L.end458:
+  jmp .L.end468
+.L.else468:
+.L.end468:
   mov $10, %rax
   push %rax
   pop %rdi
@@ -15496,7 +16551,7 @@ parse_primary:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else461
+  je .L.else471
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -15505,9 +16560,9 @@ parse_primary:
   call new_null_expr
   add $8, %rsp
   jmp .L.return.parse_primary
-  jmp .L.end461
-.L.else461:
-.L.end461:
+  jmp .L.end471
+.L.else471:
+.L.end471:
   mov $2, %rax
   push %rax
   pop %rdi
@@ -15515,7 +16570,7 @@ parse_primary:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else462
+  je .L.else472
   mov tok(%rip), %rax
   add $8, %rax
   mov (%rax), %rax
@@ -15539,9 +16594,9 @@ parse_primary:
   mov %rax, tok(%rip)
   mov -184(%rbp), %rax
   jmp .L.return.parse_primary
-  jmp .L.end462
-.L.else462:
-.L.end462:
+  jmp .L.end472
+.L.else472:
+.L.end472:
   mov $3, %rax
   push %rax
   pop %rdi
@@ -15549,7 +16604,7 @@ parse_primary:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else463
+  je .L.else473
   mov tok(%rip), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -15580,9 +16635,9 @@ parse_primary:
   call new_str_num
   add $8, %rsp
   jmp .L.return.parse_primary
-  jmp .L.end463
-.L.else463:
-.L.end463:
+  jmp .L.end473
+.L.else473:
+.L.end473:
   mov $4, %rax
   push %rax
   pop %rdi
@@ -15590,7 +16645,7 @@ parse_primary:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else464
+  je .L.else474
   sub $8, %rsp
   call cur_tokstr
   add $8, %rsp
@@ -15599,7 +16654,7 @@ parse_primary:
   call is_type_name
   add $8, %rsp
   cmp $0, %rax
-  je .L.false466
+  je .L.false476
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -15612,14 +16667,14 @@ parse_primary:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false466
+  je .L.false476
   mov $1, %rax
-  jmp .L.end466
-.L.false466:
+  jmp .L.end476
+.L.false476:
   mov $0, %rax
-.L.end466:
+.L.end476:
   cmp $0, %rax
-  je .L.else465
+  je .L.else475
   sub $8, %rsp
   call parse_type
   add $8, %rsp
@@ -15634,16 +16689,16 @@ parse_primary:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else467
+  je .L.else477
   lea .L.str107+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end467
-.L.else467:
-.L.end467:
+  jmp .L.end477
+.L.else477:
+.L.end477:
   mov $47, %rax
   push %rax
   pop %rdi
@@ -15660,16 +16715,16 @@ parse_primary:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else468
+  je .L.else478
   lea .L.str108+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end468
-.L.else468:
-.L.end468:
+  jmp .L.end478
+.L.else478:
+.L.end478:
   sub $8, %rsp
   call cur_tokstr
   add $8, %rsp
@@ -15702,16 +16757,16 @@ parse_primary:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else469
+  je .L.else479
   lea .L.str109+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end469
-.L.else469:
-.L.end469:
+  jmp .L.end479
+.L.else479:
+.L.end479:
   mov -72(%rbp), %rax
   mov %rax, -64(%rbp)
   mov $0, %rax
@@ -15723,7 +16778,7 @@ parse_primary:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else470
+  je .L.else480
   mov -64(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -15735,16 +16790,16 @@ parse_primary:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else471
+  je .L.else481
   lea .L.str110+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end471
-.L.else471:
-.L.end471:
+  jmp .L.end481
+.L.else481:
+.L.end481:
   mov -64(%rbp), %rax
   push %rax
   pop %rdi
@@ -15752,8 +16807,8 @@ parse_primary:
   call parse_variant_field_inits
   add $8, %rsp
   mov %rax, -56(%rbp)
-  jmp .L.end470
-.L.else470:
+  jmp .L.end480
+.L.else480:
   mov -64(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -15765,17 +16820,17 @@ parse_primary:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else472
+  je .L.else482
   lea .L.str111+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end472
-.L.else472:
-.L.end472:
-.L.end470:
+  jmp .L.end482
+.L.else482:
+.L.end482:
+.L.end480:
   mov -64(%rbp), %rax
   push %rax
   mov -64(%rbp), %rax
@@ -15794,14 +16849,14 @@ parse_primary:
   call new_variant_lit
   add $8, %rsp
   jmp .L.return.parse_primary
-  jmp .L.end465
-.L.else465:
-.L.end465:
+  jmp .L.end475
+.L.else475:
+.L.end475:
   sub $8, %rsp
   call is_type_name
   add $8, %rsp
   cmp $0, %rax
-  je .L.false474
+  je .L.false484
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -15814,14 +16869,14 @@ parse_primary:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false474
+  je .L.false484
   mov $1, %rax
-  jmp .L.end474
-.L.false474:
+  jmp .L.end484
+.L.false484:
   mov $0, %rax
-.L.end474:
+.L.end484:
   cmp $0, %rax
-  je .L.else473
+  je .L.else483
   sub $8, %rsp
   call parse_type
   add $8, %rsp
@@ -15836,16 +16891,16 @@ parse_primary:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else475
+  je .L.else485
   lea .L.str112+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end475
-.L.else475:
-.L.end475:
+  jmp .L.end485
+.L.else485:
+.L.end485:
   mov -48(%rbp), %rax
   push %rax
   pop %rdi
@@ -15861,9 +16916,9 @@ parse_primary:
   call new_struct_lit
   add $8, %rsp
   jmp .L.return.parse_primary
-  jmp .L.end473
-.L.else473:
-.L.end473:
+  jmp .L.end483
+.L.else483:
+.L.end483:
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -15875,7 +16930,7 @@ parse_primary:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else476
+  je .L.else486
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -15884,7 +16939,7 @@ parse_primary:
   mov %rax, -40(%rbp)
   mov $0, %rax
   mov %rax, -32(%rbp)
-.L.begin477:
+.L.begin487:
   mov $37, %rax
   push %rax
   pop %rdi
@@ -15895,7 +16950,7 @@ parse_primary:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end477
+  je .L.end487
   mov -32(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -15905,16 +16960,16 @@ parse_primary:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else478
+  je .L.else488
   mov $43, %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call skip
   add $8, %rsp
-  jmp .L.end478
-.L.else478:
-.L.end478:
+  jmp .L.end488
+.L.else488:
+.L.end488:
   sub $8, %rsp
   call parse_expr
   add $8, %rsp
@@ -15928,7 +16983,7 @@ parse_primary:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else479
+  je .L.else489
   mov -24(%rbp), %rax
   push %rax
   mov -32(%rbp), %rax
@@ -15939,15 +16994,15 @@ parse_primary:
   mov %rax, (%rdi)
   mov -24(%rbp), %rax
   mov %rax, -32(%rbp)
-  jmp .L.end479
-.L.else479:
+  jmp .L.end489
+.L.else489:
   mov -24(%rbp), %rax
   mov %rax, -40(%rbp)
   mov -24(%rbp), %rax
   mov %rax, -32(%rbp)
-.L.end479:
-  jmp .L.begin477
-.L.end477:
+.L.end489:
+  jmp .L.begin487
+.L.end487:
   mov $37, %rax
   push %rax
   pop %rdi
@@ -15964,9 +17019,9 @@ parse_primary:
   call new_funcall
   add $8, %rsp
   jmp .L.return.parse_primary
-  jmp .L.end476
-.L.else476:
-.L.end476:
+  jmp .L.end486
+.L.else486:
+.L.end486:
   mov -96(%rbp), %rax
   push %rax
   pop %rdi
@@ -15983,16 +17038,16 @@ parse_primary:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else480
+  je .L.else490
   lea .L.str113+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end480
-.L.else480:
-.L.end480:
+  jmp .L.end490
+.L.else490:
+.L.end490:
   mov -16(%rbp), %rax
   mov %rax, -8(%rbp)
   mov -8(%rbp), %rax
@@ -16002,9 +17057,9 @@ parse_primary:
   call new_var_node
   add $8, %rsp
   jmp .L.return.parse_primary
-  jmp .L.end464
-.L.else464:
-.L.end464:
+  jmp .L.end474
+.L.else474:
+.L.end474:
   lea .L.str114+8(%rip), %rax
   push %rax
   pop %rdi
@@ -16031,10 +17086,10 @@ parse_postfix:
   call parse_primary
   add $8, %rsp
   mov %rax, -96(%rbp)
-.L.begin481:
+.L.begin491:
   mov $1, %rax
   cmp $0, %rax
-  je .L.end481
+  je .L.end491
   mov $40, %rax
   push %rax
   pop %rdi
@@ -16042,7 +17097,7 @@ parse_postfix:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else482
+  je .L.else492
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -16087,16 +17142,16 @@ parse_postfix:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else483
+  je .L.else493
   lea .L.str115+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end483
-.L.else483:
-.L.end483:
+  jmp .L.end493
+.L.else493:
+.L.end493:
   mov -80(%rbp), %rax
   push %rax
   pop %rdi
@@ -16107,16 +17162,16 @@ parse_postfix:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else484
+  je .L.else494
   lea .L.str116+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end484
-.L.else484:
-.L.end484:
+  jmp .L.end494
+.L.else494:
+.L.end494:
   mov -96(%rbp), %rax
   add $48, %rax
   mov (%rax), %rax
@@ -16135,7 +17190,7 @@ parse_postfix:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else485
+  je .L.else495
   lea .L.str117+8(%rip), %rax
   push %rax
   mov -72(%rbp), %rax
@@ -16145,9 +17200,9 @@ parse_postfix:
   sub $8, %rsp
   call error_ty
   add $8, %rsp
-  jmp .L.end485
-.L.else485:
-.L.end485:
+  jmp .L.end495
+.L.else495:
+.L.end495:
   mov -72(%rbp), %rax
   push %rax
   pop %rdi
@@ -16158,7 +17213,7 @@ parse_postfix:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else486
+  je .L.else496
   lea .L.str118+8(%rip), %rax
   push %rax
   mov -72(%rbp), %rax
@@ -16168,9 +17223,9 @@ parse_postfix:
   sub $8, %rsp
   call error_ty
   add $8, %rsp
-  jmp .L.end486
-.L.else486:
-.L.end486:
+  jmp .L.end496
+.L.else496:
+.L.end496:
   mov $2, %rax
   push %rax
   mov -88(%rbp), %rax
@@ -16230,8 +17285,8 @@ parse_postfix:
   pop %rsi
   mov %rsi, %rax
   mov %rax, (%rdi)
-  jmp .L.end482
-.L.else482:
+  jmp .L.end492
+.L.else492:
   mov $47, %rax
   push %rax
   pop %rdi
@@ -16239,7 +17294,7 @@ parse_postfix:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else487
+  je .L.else497
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -16252,7 +17307,7 @@ parse_postfix:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else488
+  je .L.else498
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -16268,8 +17323,8 @@ parse_postfix:
   call new_deref
   add $8, %rsp
   mov %rax, -96(%rbp)
-  jmp .L.end488
-.L.else488:
+  jmp .L.end498
+.L.else498:
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -16284,16 +17339,16 @@ parse_postfix:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else489
+  je .L.else499
   lea .L.str119+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end489
-.L.else489:
-.L.end489:
+  jmp .L.end499
+.L.else499:
+.L.end499:
   sub $8, %rsp
   call cur_tokstr
   add $8, %rsp
@@ -16338,7 +17393,7 @@ parse_postfix:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false491
+  je .L.false501
   mov -48(%rbp), %rax
   push %rax
   pop %rdi
@@ -16346,14 +17401,14 @@ parse_postfix:
   call is_opt_pointer
   add $8, %rsp
   cmp $0, %rax
-  je .L.false491
+  je .L.false501
   mov $1, %rax
-  jmp .L.end491
-.L.false491:
+  jmp .L.end501
+.L.false501:
   mov $0, %rax
-.L.end491:
+.L.end501:
   cmp $0, %rax
-  je .L.else490
+  je .L.else500
   lea .L.str121+8(%rip), %rax
   push %rax
   mov -48(%rbp), %rax
@@ -16363,9 +17418,9 @@ parse_postfix:
   sub $8, %rsp
   call error_ty
   add $8, %rsp
-  jmp .L.end490
-.L.else490:
-.L.end490:
+  jmp .L.end500
+.L.else500:
+.L.end500:
   mov -48(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -16375,7 +17430,7 @@ parse_postfix:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false494
+  je .L.false504
   mov -48(%rbp), %rax
   push %rax
   pop %rdi
@@ -16383,14 +17438,14 @@ parse_postfix:
   call is_pointer
   add $8, %rsp
   cmp $0, %rax
-  je .L.false494
+  je .L.false504
   mov $1, %rax
-  jmp .L.end494
-.L.false494:
+  jmp .L.end504
+.L.false504:
   mov $0, %rax
-.L.end494:
+.L.end504:
   cmp $0, %rax
-  je .L.false493
+  je .L.false503
   mov -48(%rbp), %rax
   push %rax
   pop %rdi
@@ -16403,14 +17458,14 @@ parse_postfix:
   call is_struct_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.false493
+  je .L.false503
   mov $1, %rax
-  jmp .L.end493
-.L.false493:
+  jmp .L.end503
+.L.false503:
   mov $0, %rax
-.L.end493:
+.L.end503:
   cmp $0, %rax
-  je .L.else492
+  je .L.else502
   mov -48(%rbp), %rax
   push %rax
   pop %rdi
@@ -16418,8 +17473,8 @@ parse_postfix:
   call type_base
   add $8, %rsp
   mov %rax, -40(%rbp)
-  jmp .L.end492
-.L.else492:
+  jmp .L.end502
+.L.else502:
   mov -48(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -16429,7 +17484,7 @@ parse_postfix:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false497
+  je .L.false507
   mov -48(%rbp), %rax
   push %rax
   pop %rdi
@@ -16437,14 +17492,14 @@ parse_postfix:
   call is_pointer
   add $8, %rsp
   cmp $0, %rax
-  je .L.false497
+  je .L.false507
   mov $1, %rax
-  jmp .L.end497
-.L.false497:
+  jmp .L.end507
+.L.false507:
   mov $0, %rax
-.L.end497:
+.L.end507:
   cmp $0, %rax
-  je .L.false496
+  je .L.false506
   mov -48(%rbp), %rax
   push %rax
   pop %rdi
@@ -16457,14 +17512,14 @@ parse_postfix:
   call is_exn_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.false496
+  je .L.false506
   mov $1, %rax
-  jmp .L.end496
-.L.false496:
+  jmp .L.end506
+.L.false506:
   mov $0, %rax
-.L.end496:
+.L.end506:
   cmp $0, %rax
-  je .L.else495
+  je .L.else505
   mov -48(%rbp), %rax
   push %rax
   pop %rdi
@@ -16472,8 +17527,8 @@ parse_postfix:
   call type_base
   add $8, %rsp
   mov %rax, -40(%rbp)
-  jmp .L.end495
-.L.else495:
+  jmp .L.end505
+.L.else505:
   mov -40(%rbp), %rax
   push %rax
   pop %rdi
@@ -16484,7 +17539,7 @@ parse_postfix:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false499
+  je .L.false509
   mov -40(%rbp), %rax
   push %rax
   pop %rdi
@@ -16495,14 +17550,14 @@ parse_postfix:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false499
+  je .L.false509
   mov $1, %rax
-  jmp .L.end499
-.L.false499:
+  jmp .L.end509
+.L.false509:
   mov $0, %rax
-.L.end499:
+.L.end509:
   cmp $0, %rax
-  je .L.else498
+  je .L.else508
   lea .L.str122+8(%rip), %rax
   push %rax
   mov -96(%rbp), %rax
@@ -16514,11 +17569,11 @@ parse_postfix:
   sub $8, %rsp
   call error_ty
   add $8, %rsp
-  jmp .L.end498
-.L.else498:
-.L.end498:
-.L.end495:
-.L.end492:
+  jmp .L.end508
+.L.else508:
+.L.end508:
+.L.end505:
+.L.end502:
   mov $0, %rax
   mov %rax, -32(%rbp)
   mov -40(%rbp), %rax
@@ -16528,7 +17583,7 @@ parse_postfix:
   call is_exn_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.else500
+  je .L.else510
   mov -40(%rbp), %rax
   push %rax
   pop %rdi
@@ -16544,8 +17599,8 @@ parse_postfix:
   call find_exn_member
   add $8, %rsp
   mov %rax, -32(%rbp)
-  jmp .L.end500
-.L.else500:
+  jmp .L.end510
+.L.else510:
   mov -40(%rbp), %rax
   push %rax
   pop %rdi
@@ -16561,7 +17616,7 @@ parse_postfix:
   call find_member
   add $8, %rsp
   mov %rax, -32(%rbp)
-.L.end500:
+.L.end510:
   mov -32(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -16571,16 +17626,16 @@ parse_postfix:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else501
+  je .L.else511
   lea .L.str123+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end501
-.L.else501:
-.L.end501:
+  jmp .L.end511
+.L.else511:
+.L.end511:
   mov -32(%rbp), %rax
   mov %rax, -24(%rbp)
   mov -96(%rbp), %rax
@@ -16593,9 +17648,9 @@ parse_postfix:
   call new_member_access
   add $8, %rsp
   mov %rax, -96(%rbp)
-.L.end488:
-  jmp .L.end487
-.L.else487:
+.L.end498:
+  jmp .L.end497
+.L.else497:
   mov $19, %rax
   push %rax
   pop %rdi
@@ -16603,7 +17658,7 @@ parse_postfix:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  jne .L.true503
+  jne .L.true513
   mov $20, %rax
   push %rax
   pop %rdi
@@ -16611,15 +17666,15 @@ parse_postfix:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.false503
-.L.true503:
+  je .L.false513
+.L.true513:
   mov $1, %rax
-  jmp .L.end503
-.L.false503:
+  jmp .L.end513
+.L.false513:
   mov $0, %rax
-.L.end503:
+.L.end513:
   cmp $0, %rax
-  je .L.else502
+  je .L.else512
   mov $20, %rax
   push %rax
   pop %rdi
@@ -16644,7 +17699,7 @@ parse_postfix:
   mov %rax, -8(%rbp)
   movzb -16(%rbp), %rax
   cmp $0, %rax
-  je .L.else504
+  je .L.else514
   mov -96(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -16655,8 +17710,8 @@ parse_postfix:
   call new_trunc
   add $8, %rsp
   mov %rax, -96(%rbp)
-  jmp .L.end504
-.L.else504:
+  jmp .L.end514
+.L.else514:
   mov -96(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -16667,16 +17722,16 @@ parse_postfix:
   call new_as
   add $8, %rsp
   mov %rax, -96(%rbp)
-.L.end504:
-  jmp .L.end502
-.L.else502:
+.L.end514:
+  jmp .L.end512
+.L.else512:
   mov -96(%rbp), %rax
   jmp .L.return.parse_postfix
-.L.end502:
-.L.end487:
-.L.end482:
-  jmp .L.begin481
-.L.end481:
+.L.end512:
+.L.end497:
+.L.end492:
+  jmp .L.begin491
+.L.end491:
   mov -96(%rbp), %rax
   jmp .L.return.parse_postfix
 .L.return.parse_postfix:
@@ -16695,7 +17750,7 @@ parse_unary:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else505
+  je .L.else515
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -16704,9 +17759,9 @@ parse_unary:
   call parse_unary
   add $8, %rsp
   jmp .L.return.parse_unary
-  jmp .L.end505
-.L.else505:
-.L.end505:
+  jmp .L.end515
+.L.else515:
+.L.end515:
   mov $27, %rax
   push %rax
   pop %rdi
@@ -16714,7 +17769,7 @@ parse_unary:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else506
+  je .L.else516
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -16728,9 +17783,9 @@ parse_unary:
   call new_neg
   add $8, %rsp
   jmp .L.return.parse_unary
-  jmp .L.end506
-.L.else506:
-.L.end506:
+  jmp .L.end516
+.L.else516:
+.L.end516:
   mov $35, %rax
   push %rax
   pop %rdi
@@ -16738,7 +17793,7 @@ parse_unary:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else507
+  je .L.else517
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -16752,9 +17807,9 @@ parse_unary:
   call new_addr
   add $8, %rsp
   jmp .L.return.parse_unary
-  jmp .L.end507
-.L.else507:
-.L.end507:
+  jmp .L.end517
+.L.else517:
+.L.end517:
   mov $34, %rax
   push %rax
   pop %rdi
@@ -16762,7 +17817,7 @@ parse_unary:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else508
+  je .L.else518
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -16776,9 +17831,9 @@ parse_unary:
   call new_not
   add $8, %rsp
   jmp .L.return.parse_unary
-  jmp .L.end508
-.L.else508:
-.L.end508:
+  jmp .L.end518
+.L.else518:
+.L.end518:
   sub $8, %rsp
   call parse_postfix
   add $8, %rsp
@@ -16802,16 +17857,16 @@ add_type:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else509
+  je .L.else519
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call add_type_expr
   add $8, %rsp
-  jmp .L.end509
-.L.else509:
-.L.end509:
+  jmp .L.end519
+.L.else519:
+.L.end519:
 .L.return.add_type:
   mov %rbp, %rsp
   pop %rbp
@@ -16831,16 +17886,16 @@ add_type_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else510
+  je .L.else520
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call add_type_stmt_node
   add $8, %rsp
-  jmp .L.end510
-.L.else510:
-.L.end510:
+  jmp .L.end520
+.L.else520:
+.L.end520:
 .L.return.add_type_stmt:
   mov %rbp, %rsp
   pop %rbp
@@ -16853,7 +17908,7 @@ add_type_field_inits:
   mov %rdi, -16(%rbp)
   mov -16(%rbp), %rax
   mov %rax, -8(%rbp)
-.L.begin511:
+.L.begin521:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -16863,7 +17918,7 @@ add_type_field_inits:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end511
+  je .L.end521
   mov -8(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
@@ -16883,7 +17938,7 @@ add_type_field_inits:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else512
+  je .L.else522
   mov -8(%rbp), %rax
   mov (%rax), %rax
   add $16, %rax
@@ -16907,7 +17962,7 @@ add_type_field_inits:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else513
+  je .L.else523
   lea .L.str124+8(%rip), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -16930,18 +17985,18 @@ add_type_field_inits:
   sub $8, %rsp
   call error_have_expr_want
   add $8, %rsp
-  jmp .L.end513
-.L.else513:
-.L.end513:
-  jmp .L.end512
-.L.else512:
-.L.end512:
+  jmp .L.end523
+.L.else523:
+.L.end523:
+  jmp .L.end522
+.L.else522:
+.L.end522:
   mov -8(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin511
-.L.end511:
+  jmp .L.begin521
+.L.end521:
 .L.return.add_type_field_inits:
   mov %rbp, %rsp
   pop %rbp
@@ -16972,22 +18027,22 @@ type_log:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else514
+  je .L.else524
   mov -48(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call narrow_push_ne_nulls
   add $8, %rsp
-  jmp .L.end514
-.L.else514:
+  jmp .L.end524
+.L.else524:
   mov -48(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call narrow_push_eq_nulls
   add $8, %rsp
-.L.end514:
+.L.end524:
   mov -40(%rbp), %rax
   push %rax
   pop %rdi
@@ -17027,7 +18082,7 @@ type_log:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else515
+  je .L.else525
   lea .L.str125+8(%rip), %rax
   push %rax
   mov -16(%rbp), %rax
@@ -17040,9 +18095,9 @@ type_log:
   sub $8, %rsp
   call error_have_and
   add $8, %rsp
-  jmp .L.end515
-.L.else515:
-.L.end515:
+  jmp .L.end525
+.L.else525:
+.L.end525:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -17052,7 +18107,7 @@ type_log:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else516
+  je .L.else526
   lea .L.str126+8(%rip), %rax
   push %rax
   mov -16(%rbp), %rax
@@ -17065,9 +18120,9 @@ type_log:
   sub $8, %rsp
   call error_have_and
   add $8, %rsp
-  jmp .L.end516
-.L.else516:
-.L.end516:
+  jmp .L.end526
+.L.else526:
+.L.end526:
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -17078,7 +18133,7 @@ type_log:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  jne .L.true518
+  jne .L.true528
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -17089,15 +18144,15 @@ type_log:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false518
-.L.true518:
+  je .L.false528
+.L.true528:
   mov $1, %rax
-  jmp .L.end518
-.L.false518:
+  jmp .L.end528
+.L.false528:
   mov $0, %rax
-.L.end518:
+.L.end528:
   cmp $0, %rax
-  je .L.else517
+  je .L.else527
   lea .L.str127+8(%rip), %rax
   push %rax
   mov -16(%rbp), %rax
@@ -17110,9 +18165,9 @@ type_log:
   sub $8, %rsp
   call error_have_and
   add $8, %rsp
-  jmp .L.end517
-.L.else517:
-.L.end517:
+  jmp .L.end527
+.L.else527:
+.L.end527:
   mov ty_bool(%rip), %rax
   push %rax
   mov -56(%rbp), %rax
@@ -17172,7 +18227,7 @@ type_int_arith:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else519
+  je .L.else529
   lea .L.str128+8(%rip), %rax
   push %rax
   mov -16(%rbp), %rax
@@ -17185,9 +18240,9 @@ type_int_arith:
   sub $8, %rsp
   call error_have_and
   add $8, %rsp
-  jmp .L.end519
-.L.else519:
-.L.end519:
+  jmp .L.end529
+.L.else529:
+.L.end529:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -17197,7 +18252,7 @@ type_int_arith:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else520
+  je .L.else530
   lea .L.str129+8(%rip), %rax
   push %rax
   mov -16(%rbp), %rax
@@ -17210,9 +18265,9 @@ type_int_arith:
   sub $8, %rsp
   call error_have_and
   add $8, %rsp
-  jmp .L.end520
-.L.else520:
-.L.end520:
+  jmp .L.end530
+.L.else530:
+.L.end530:
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -17223,7 +18278,7 @@ type_int_arith:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  jne .L.true522
+  jne .L.true532
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -17234,15 +18289,15 @@ type_int_arith:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false522
-.L.true522:
+  je .L.false532
+.L.true532:
   mov $1, %rax
-  jmp .L.end522
-.L.false522:
+  jmp .L.end532
+.L.false532:
   mov $0, %rax
-.L.end522:
+.L.end532:
   cmp $0, %rax
-  je .L.else521
+  je .L.else531
   lea .L.str130+8(%rip), %rax
   push %rax
   mov -16(%rbp), %rax
@@ -17255,9 +18310,9 @@ type_int_arith:
   sub $8, %rsp
   call error_have_and
   add $8, %rsp
-  jmp .L.end521
-.L.else521:
-.L.end521:
+  jmp .L.end531
+.L.else531:
+.L.end531:
   mov ty_int(%rip), %rax
   push %rax
   mov -40(%rbp), %rax
@@ -17317,7 +18372,7 @@ type_eq_cmp:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false524
+  je .L.false534
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -17327,14 +18382,14 @@ type_eq_cmp:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false524
+  je .L.false534
   mov $1, %rax
-  jmp .L.end524
-.L.false524:
+  jmp .L.end534
+.L.false534:
   mov $0, %rax
-.L.end524:
+.L.end534:
   cmp $0, %rax
-  je .L.else523
+  je .L.else533
   mov -16(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -17345,7 +18400,7 @@ type_eq_cmp:
   call types_equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else525
+  je .L.else535
   mov ty_bool(%rip), %rax
   push %rax
   mov -40(%rbp), %rax
@@ -17356,9 +18411,9 @@ type_eq_cmp:
   mov %rax, (%rdi)
   mov $0, %rax
   jmp .L.return.type_eq_cmp
-  jmp .L.end525
-.L.else525:
-.L.end525:
+  jmp .L.end535
+.L.else535:
+.L.end535:
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -17366,7 +18421,7 @@ type_eq_cmp:
   call is_any_pointer
   add $8, %rsp
   cmp $0, %rax
-  je .L.false528
+  je .L.false538
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -17374,14 +18429,14 @@ type_eq_cmp:
   call is_any_pointer
   add $8, %rsp
   cmp $0, %rax
-  je .L.false528
+  je .L.false538
   mov $1, %rax
-  jmp .L.end528
-.L.false528:
+  jmp .L.end538
+.L.false538:
   mov $0, %rax
-.L.end528:
+.L.end538:
   cmp $0, %rax
-  je .L.false527
+  je .L.false537
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -17402,14 +18457,14 @@ type_eq_cmp:
   call types_equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.false527
+  je .L.false537
   mov $1, %rax
-  jmp .L.end527
-.L.false527:
+  jmp .L.end537
+.L.false537:
   mov $0, %rax
-.L.end527:
+.L.end537:
   cmp $0, %rax
-  je .L.else526
+  je .L.else536
   mov ty_bool(%rip), %rax
   push %rax
   mov -40(%rbp), %rax
@@ -17420,12 +18475,12 @@ type_eq_cmp:
   mov %rax, (%rdi)
   mov $0, %rax
   jmp .L.return.type_eq_cmp
-  jmp .L.end526
-.L.else526:
-.L.end526:
-  jmp .L.end523
-.L.else523:
-.L.end523:
+  jmp .L.end536
+.L.else536:
+.L.end536:
+  jmp .L.end533
+.L.else533:
+.L.end533:
   mov -16(%rbp), %rax
   push %rax
   mov -24(%rbp), %rax
@@ -17436,7 +18491,7 @@ type_eq_cmp:
   call bind_null_to_pointer
   add $8, %rsp
   cmp $0, %rax
-  jne .L.true530
+  jne .L.true540
   mov -8(%rbp), %rax
   push %rax
   mov -32(%rbp), %rax
@@ -17447,15 +18502,15 @@ type_eq_cmp:
   call bind_null_to_pointer
   add $8, %rsp
   cmp $0, %rax
-  je .L.false530
-.L.true530:
+  je .L.false540
+.L.true540:
   mov $1, %rax
-  jmp .L.end530
-.L.false530:
+  jmp .L.end540
+.L.false540:
   mov $0, %rax
-.L.end530:
+.L.end540:
   cmp $0, %rax
-  je .L.else529
+  je .L.else539
   mov ty_bool(%rip), %rax
   push %rax
   mov -40(%rbp), %rax
@@ -17466,9 +18521,9 @@ type_eq_cmp:
   mov %rax, (%rdi)
   mov $0, %rax
   jmp .L.return.type_eq_cmp
-  jmp .L.end529
-.L.else529:
-.L.end529:
+  jmp .L.end539
+.L.else539:
+.L.end539:
   lea .L.str131+8(%rip), %rax
   push %rax
   mov -16(%rbp), %rax
@@ -17532,7 +18587,7 @@ type_ord_cmp:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else531
+  je .L.else541
   lea .L.str132+8(%rip), %rax
   push %rax
   mov -16(%rbp), %rax
@@ -17545,9 +18600,9 @@ type_ord_cmp:
   sub $8, %rsp
   call error_ty_vs
   add $8, %rsp
-  jmp .L.end531
-.L.else531:
-.L.end531:
+  jmp .L.end541
+.L.else541:
+.L.end541:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -17557,7 +18612,7 @@ type_ord_cmp:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else532
+  je .L.else542
   lea .L.str133+8(%rip), %rax
   push %rax
   mov -16(%rbp), %rax
@@ -17570,9 +18625,9 @@ type_ord_cmp:
   sub $8, %rsp
   call error_ty_vs
   add $8, %rsp
-  jmp .L.end532
-.L.else532:
-.L.end532:
+  jmp .L.end542
+.L.else542:
+.L.end542:
   mov -16(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -17586,7 +18641,7 @@ type_ord_cmp:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else533
+  je .L.else543
   lea .L.str134+8(%rip), %rax
   push %rax
   mov -16(%rbp), %rax
@@ -17599,9 +18654,9 @@ type_ord_cmp:
   sub $8, %rsp
   call error_ty_vs
   add $8, %rsp
-  jmp .L.end533
-.L.else533:
-.L.end533:
+  jmp .L.end543
+.L.else543:
+.L.end543:
   mov ty_bool(%rip), %rax
   push %rax
   mov -40(%rbp), %rax
@@ -17629,7 +18684,7 @@ type_binary:
   push %rax
   mov (%rsp), %rax
   cmp $0, %rax
-  jne .L.arm535
+  jne .L.arm545
   mov -48(%rbp), %rax
   push %rax
   pop %rdi
@@ -17669,7 +18724,7 @@ type_binary:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else536
+  je .L.else546
   lea .L.str135+8(%rip), %rax
   push %rax
   mov -32(%rbp), %rax
@@ -17682,9 +18737,9 @@ type_binary:
   sub $8, %rsp
   call error_have_and
   add $8, %rsp
-  jmp .L.end536
-.L.else536:
-.L.end536:
+  jmp .L.end546
+.L.else546:
+.L.end546:
   mov -24(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -17694,7 +18749,7 @@ type_binary:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else537
+  je .L.else547
   lea .L.str136+8(%rip), %rax
   push %rax
   mov -32(%rbp), %rax
@@ -17707,292 +18762,33 @@ type_binary:
   sub $8, %rsp
   call error_have_and
   add $8, %rsp
-  jmp .L.end537
-.L.else537:
-.L.end537:
-  mov -32(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_pointer
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false539
-  mov -24(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_int_ty
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false539
-  mov $1, %rax
-  jmp .L.end539
-.L.false539:
-  mov $0, %rax
-.L.end539:
-  cmp $0, %rax
-  je .L.else538
-  mov -32(%rbp), %rax
-  push %rax
-  mov -64(%rbp), %rax
-  add $48, %rax
-  mov %rax, %rdi
-  pop %rsi
-  mov %rsi, %rax
-  mov %rax, (%rdi)
-  mov $0, %rax
-  jmp .L.return.type_binary
-  jmp .L.end538
-.L.else538:
-.L.end538:
-  mov -32(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_int_ty
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false541
-  mov -24(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_pointer
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false541
-  mov $1, %rax
-  jmp .L.end541
-.L.false541:
-  mov $0, %rax
-.L.end541:
-  cmp $0, %rax
-  je .L.else540
-  mov -24(%rbp), %rax
-  push %rax
-  mov -64(%rbp), %rax
-  add $48, %rax
-  mov %rax, %rdi
-  pop %rsi
-  mov %rsi, %rax
-  mov %rax, (%rdi)
-  mov $0, %rax
-  jmp .L.return.type_binary
-  jmp .L.end540
-.L.else540:
-.L.end540:
-  mov -32(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_int_ty
-  add $8, %rsp
-  cmp $0, %rax
-  sete %al
-  movzb %al, %rax
-  cmp $0, %rax
-  jne .L.true543
-  mov -24(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_int_ty
-  add $8, %rsp
-  cmp $0, %rax
-  sete %al
-  movzb %al, %rax
-  cmp $0, %rax
-  je .L.false543
-.L.true543:
-  mov $1, %rax
-  jmp .L.end543
-.L.false543:
-  mov $0, %rax
-.L.end543:
-  cmp $0, %rax
-  je .L.else542
-  lea .L.str137+8(%rip), %rax
-  push %rax
-  mov -32(%rbp), %rax
-  push %rax
-  mov -24(%rbp), %rax
-  push %rax
-  pop %rdx
-  pop %rsi
-  pop %rdi
-  sub $8, %rsp
-  call error_have_and
-  add $8, %rsp
-  jmp .L.end542
-.L.else542:
-.L.end542:
-  mov ty_int(%rip), %rax
-  push %rax
-  mov -64(%rbp), %rax
-  add $48, %rax
-  mov %rax, %rdi
-  pop %rsi
-  mov %rsi, %rax
-  mov %rax, (%rdi)
-  mov $0, %rax
-  jmp .L.return.type_binary
-  jmp .L.matchend534
-.L.arm535:
-  mov (%rsp), %rax
-  cmp $1, %rax
-  jne .L.arm544
-  mov -48(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call add_type
-  add $8, %rsp
-  mov -40(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call add_type
-  add $8, %rsp
-  mov -48(%rbp), %rax
-  add $48, %rax
-  mov (%rax), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call decay
-  add $8, %rsp
-  mov %rax, -16(%rbp)
-  mov -40(%rbp), %rax
-  add $48, %rax
-  mov (%rax), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call decay
-  add $8, %rsp
-  mov %rax, -8(%rbp)
-  mov -16(%rbp), %rax
-  push %rax
-  mov $0, %rax
-  mov %rax, %rdi
-  pop %rax
-  cmp %rdi, %rax
-  sete %al
-  movzb %al, %rax
-  cmp $0, %rax
-  je .L.else545
-  lea .L.str138+8(%rip), %rax
-  push %rax
-  mov -16(%rbp), %rax
-  push %rax
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdx
-  pop %rsi
-  pop %rdi
-  sub $8, %rsp
-  call error_have_and
-  add $8, %rsp
-  jmp .L.end545
-.L.else545:
-.L.end545:
-  mov -8(%rbp), %rax
-  push %rax
-  mov $0, %rax
-  mov %rax, %rdi
-  pop %rax
-  cmp %rdi, %rax
-  sete %al
-  movzb %al, %rax
-  cmp $0, %rax
-  je .L.else546
-  lea .L.str139+8(%rip), %rax
-  push %rax
-  mov -16(%rbp), %rax
-  push %rax
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdx
-  pop %rsi
-  pop %rdi
-  sub $8, %rsp
-  call error_have_and
-  add $8, %rsp
-  jmp .L.end546
-.L.else546:
-.L.end546:
-  mov -16(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_pointer
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false548
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call is_int_ty
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.false548
-  mov $1, %rax
-  jmp .L.end548
-.L.false548:
-  mov $0, %rax
-.L.end548:
-  cmp $0, %rax
-  je .L.else547
-  mov -16(%rbp), %rax
-  push %rax
-  mov -64(%rbp), %rax
-  add $48, %rax
-  mov %rax, %rdi
-  pop %rsi
-  mov %rsi, %rax
-  mov %rax, (%rdi)
-  mov $0, %rax
-  jmp .L.return.type_binary
   jmp .L.end547
 .L.else547:
 .L.end547:
-  mov -16(%rbp), %rax
+  mov -32(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call is_pointer
   add $8, %rsp
   cmp $0, %rax
-  je .L.false550
-  mov -8(%rbp), %rax
+  je .L.false549
+  mov -24(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
-  call is_pointer
+  call is_int_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.false550
+  je .L.false549
   mov $1, %rax
-  jmp .L.end550
-.L.false550:
+  jmp .L.end549
+.L.false549:
   mov $0, %rax
-.L.end550:
+.L.end549:
   cmp $0, %rax
-  je .L.else549
-  mov -16(%rbp), %rax
-  push %rax
-  mov -8(%rbp), %rax
-  push %rax
-  pop %rsi
-  pop %rdi
-  sub $8, %rsp
-  call types_equal
-  add $8, %rsp
-  cmp $0, %rax
-  je .L.else551
-  mov ty_int(%rip), %rax
+  je .L.else548
+  mov -32(%rbp), %rax
   push %rax
   mov -64(%rbp), %rax
   add $48, %rax
@@ -18002,13 +18798,46 @@ type_binary:
   mov %rax, (%rdi)
   mov $0, %rax
   jmp .L.return.type_binary
+  jmp .L.end548
+.L.else548:
+.L.end548:
+  mov -32(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_int_ty
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false551
+  mov -24(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_pointer
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false551
+  mov $1, %rax
   jmp .L.end551
-.L.else551:
+.L.false551:
+  mov $0, %rax
 .L.end551:
-  jmp .L.end549
-.L.else549:
-.L.end549:
-  mov -16(%rbp), %rax
+  cmp $0, %rax
+  je .L.else550
+  mov -24(%rbp), %rax
+  push %rax
+  mov -64(%rbp), %rax
+  add $48, %rax
+  mov %rax, %rdi
+  pop %rsi
+  mov %rsi, %rax
+  mov %rax, (%rdi)
+  mov $0, %rax
+  jmp .L.return.type_binary
+  jmp .L.end550
+.L.else550:
+.L.end550:
+  mov -32(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -18019,7 +18848,7 @@ type_binary:
   movzb %al, %rax
   cmp $0, %rax
   jne .L.true553
-  mov -8(%rbp), %rax
+  mov -24(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -18038,11 +18867,11 @@ type_binary:
 .L.end553:
   cmp $0, %rax
   je .L.else552
-  lea .L.str140+8(%rip), %rax
+  lea .L.str137+8(%rip), %rax
   push %rax
-  mov -16(%rbp), %rax
+  mov -32(%rbp), %rax
   push %rax
-  mov -8(%rbp), %rax
+  mov -24(%rbp), %rax
   push %rax
   pop %rdx
   pop %rsi
@@ -18063,30 +18892,237 @@ type_binary:
   mov %rax, (%rdi)
   mov $0, %rax
   jmp .L.return.type_binary
-  jmp .L.matchend534
-.L.arm544:
+  jmp .L.matchend544
+.L.arm545:
   mov (%rsp), %rax
-  cmp $2, %rax
+  cmp $1, %rax
   jne .L.arm554
-  mov -64(%rbp), %rax
-  push %rax
   mov -48(%rbp), %rax
   push %rax
+  pop %rdi
+  sub $8, %rsp
+  call add_type
+  add $8, %rsp
   mov -40(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call add_type
+  add $8, %rsp
+  mov -48(%rbp), %rax
+  add $48, %rax
+  mov (%rax), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call decay
+  add $8, %rsp
+  mov %rax, -16(%rbp)
+  mov -40(%rbp), %rax
+  add $48, %rax
+  mov (%rax), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call decay
+  add $8, %rsp
+  mov %rax, -8(%rbp)
+  mov -16(%rbp), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else555
+  lea .L.str138+8(%rip), %rax
+  push %rax
+  mov -16(%rbp), %rax
+  push %rax
+  mov -8(%rbp), %rax
   push %rax
   pop %rdx
   pop %rsi
   pop %rdi
   sub $8, %rsp
-  call type_int_arith
+  call error_have_and
   add $8, %rsp
+  jmp .L.end555
+.L.else555:
+.L.end555:
+  mov -8(%rbp), %rax
+  push %rax
+  mov $0, %rax
+  mov %rax, %rdi
+  pop %rax
+  cmp %rdi, %rax
+  sete %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.else556
+  lea .L.str139+8(%rip), %rax
+  push %rax
+  mov -16(%rbp), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdx
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call error_have_and
+  add $8, %rsp
+  jmp .L.end556
+.L.else556:
+.L.end556:
+  mov -16(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_pointer
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false558
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_int_ty
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false558
+  mov $1, %rax
+  jmp .L.end558
+.L.false558:
+  mov $0, %rax
+.L.end558:
+  cmp $0, %rax
+  je .L.else557
+  mov -16(%rbp), %rax
+  push %rax
+  mov -64(%rbp), %rax
+  add $48, %rax
+  mov %rax, %rdi
+  pop %rsi
+  mov %rsi, %rax
+  mov %rax, (%rdi)
   mov $0, %rax
   jmp .L.return.type_binary
-  jmp .L.matchend534
+  jmp .L.end557
+.L.else557:
+.L.end557:
+  mov -16(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_pointer
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false560
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_pointer
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.false560
+  mov $1, %rax
+  jmp .L.end560
+.L.false560:
+  mov $0, %rax
+.L.end560:
+  cmp $0, %rax
+  je .L.else559
+  mov -16(%rbp), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call types_equal
+  add $8, %rsp
+  cmp $0, %rax
+  je .L.else561
+  mov ty_int(%rip), %rax
+  push %rax
+  mov -64(%rbp), %rax
+  add $48, %rax
+  mov %rax, %rdi
+  pop %rsi
+  mov %rsi, %rax
+  mov %rax, (%rdi)
+  mov $0, %rax
+  jmp .L.return.type_binary
+  jmp .L.end561
+.L.else561:
+.L.end561:
+  jmp .L.end559
+.L.else559:
+.L.end559:
+  mov -16(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_int_ty
+  add $8, %rsp
+  cmp $0, %rax
+  sete %al
+  movzb %al, %rax
+  cmp $0, %rax
+  jne .L.true563
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call is_int_ty
+  add $8, %rsp
+  cmp $0, %rax
+  sete %al
+  movzb %al, %rax
+  cmp $0, %rax
+  je .L.false563
+.L.true563:
+  mov $1, %rax
+  jmp .L.end563
+.L.false563:
+  mov $0, %rax
+.L.end563:
+  cmp $0, %rax
+  je .L.else562
+  lea .L.str140+8(%rip), %rax
+  push %rax
+  mov -16(%rbp), %rax
+  push %rax
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdx
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call error_have_and
+  add $8, %rsp
+  jmp .L.end562
+.L.else562:
+.L.end562:
+  mov ty_int(%rip), %rax
+  push %rax
+  mov -64(%rbp), %rax
+  add $48, %rax
+  mov %rax, %rdi
+  pop %rsi
+  mov %rsi, %rax
+  mov %rax, (%rdi)
+  mov $0, %rax
+  jmp .L.return.type_binary
+  jmp .L.matchend544
 .L.arm554:
   mov (%rsp), %rax
-  cmp $3, %rax
-  jne .L.arm555
+  cmp $2, %rax
+  jne .L.arm564
   mov -64(%rbp), %rax
   push %rax
   mov -48(%rbp), %rax
@@ -18101,11 +19137,30 @@ type_binary:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.type_binary
-  jmp .L.matchend534
-.L.arm555:
+  jmp .L.matchend544
+.L.arm564:
+  mov (%rsp), %rax
+  cmp $3, %rax
+  jne .L.arm565
+  mov -64(%rbp), %rax
+  push %rax
+  mov -48(%rbp), %rax
+  push %rax
+  mov -40(%rbp), %rax
+  push %rax
+  pop %rdx
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call type_int_arith
+  add $8, %rsp
+  mov $0, %rax
+  jmp .L.return.type_binary
+  jmp .L.matchend544
+.L.arm565:
   mov (%rsp), %rax
   cmp $4, %rax
-  jne .L.arm556
+  jne .L.arm566
   mov -64(%rbp), %rax
   push %rax
   mov -48(%rbp), %rax
@@ -18120,11 +19175,11 @@ type_binary:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.type_binary
-  jmp .L.matchend534
-.L.arm556:
+  jmp .L.matchend544
+.L.arm566:
   mov (%rsp), %rax
   cmp $5, %rax
-  jne .L.arm557
+  jne .L.arm567
   mov -64(%rbp), %rax
   push %rax
   mov -48(%rbp), %rax
@@ -18139,11 +19194,11 @@ type_binary:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.type_binary
-  jmp .L.matchend534
-.L.arm557:
+  jmp .L.matchend544
+.L.arm567:
   mov (%rsp), %rax
   cmp $6, %rax
-  jne .L.arm558
+  jne .L.arm568
   mov -64(%rbp), %rax
   push %rax
   mov -48(%rbp), %rax
@@ -18158,11 +19213,11 @@ type_binary:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.type_binary
-  jmp .L.matchend534
-.L.arm558:
+  jmp .L.matchend544
+.L.arm568:
   mov (%rsp), %rax
   cmp $7, %rax
-  jne .L.arm559
+  jne .L.arm569
   mov -64(%rbp), %rax
   push %rax
   mov -48(%rbp), %rax
@@ -18177,11 +19232,11 @@ type_binary:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.type_binary
-  jmp .L.matchend534
-.L.arm559:
+  jmp .L.matchend544
+.L.arm569:
   mov (%rsp), %rax
   cmp $8, %rax
-  jne .L.arm560
+  jne .L.arm570
   mov -64(%rbp), %rax
   push %rax
   mov -48(%rbp), %rax
@@ -18196,11 +19251,11 @@ type_binary:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.type_binary
-  jmp .L.matchend534
-.L.arm560:
+  jmp .L.matchend544
+.L.arm570:
   mov (%rsp), %rax
   cmp $9, %rax
-  jne .L.arm561
+  jne .L.arm571
   mov -64(%rbp), %rax
   push %rax
   mov -48(%rbp), %rax
@@ -18215,11 +19270,11 @@ type_binary:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.type_binary
-  jmp .L.matchend534
-.L.arm561:
+  jmp .L.matchend544
+.L.arm571:
   mov (%rsp), %rax
   cmp $10, %rax
-  jne .L.arm562
+  jne .L.arm572
   mov -64(%rbp), %rax
   push %rax
   mov -48(%rbp), %rax
@@ -18234,11 +19289,11 @@ type_binary:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.type_binary
-  jmp .L.matchend534
-.L.arm562:
+  jmp .L.matchend544
+.L.arm572:
   mov $1, %rdi
   call exit
-.L.matchend534:
+.L.matchend544:
   add $16, %rsp
 .L.return.type_binary:
   mov %rbp, %rsp
@@ -18249,24 +19304,24 @@ add_type_expr:
   push %rbp
   mov %rsp, %rbp
   sub $432, %rsp
-  mov %rdi, -424(%rbp)
-  mov -424(%rbp), %rax
+  mov %rdi, -432(%rbp)
+  mov -432(%rbp), %rax
   push %rax
   mov (%rax), %rax
   push %rax
   mov (%rsp), %rax
   cmp $2, %rax
-  jne .L.arm564
+  jne .L.arm574
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -416(%rbp), %rdi
+  lea -424(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
   mov 16(%rsi), %rax
   mov %rax, 16(%rdi)
-  lea -416(%rbp), %rax
+  lea -424(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
@@ -18274,7 +19329,7 @@ add_type_expr:
   call var_view_ty
   add $8, %rsp
   push %rax
-  mov -424(%rbp), %rax
+  mov -432(%rbp), %rax
   add $48, %rax
   mov %rax, %rdi
   pop %rsi
@@ -18282,11 +19337,44 @@ add_type_expr:
   mov %rax, (%rdi)
   mov $0, %rax
   jmp .L.return.add_type_expr
-  jmp .L.matchend563
-.L.arm564:
+  jmp .L.matchend573
+.L.arm574:
   mov (%rsp), %rax
   cmp $13, %rax
-  jne .L.arm565
+  jne .L.arm575
+  mov 8(%rsp), %rsi
+  add $8, %rsi
+  lea -400(%rbp), %rdi
+  mov 0(%rsi), %rax
+  mov %rax, 0(%rdi)
+  lea -400(%rbp), %rax
+  mov (%rax), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call add_type
+  add $8, %rsp
+  lea -400(%rbp), %rax
+  mov (%rax), %rax
+  add $48, %rax
+  mov (%rax), %rax
+  push %rax
+  mov -432(%rbp), %rax
+  add $48, %rax
+  mov (%rax), %rax
+  push %rax
+  pop %rsi
+  pop %rdi
+  sub $8, %rsp
+  call check_as
+  add $8, %rsp
+  mov $0, %rax
+  jmp .L.return.add_type_expr
+  jmp .L.matchend573
+.L.arm575:
+  mov (%rsp), %rax
+  cmp $14, %rax
+  jne .L.arm576
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -392(%rbp), %rdi
@@ -18304,40 +19392,7 @@ add_type_expr:
   add $48, %rax
   mov (%rax), %rax
   push %rax
-  mov -424(%rbp), %rax
-  add $48, %rax
-  mov (%rax), %rax
-  push %rax
-  pop %rsi
-  pop %rdi
-  sub $8, %rsp
-  call check_as
-  add $8, %rsp
-  mov $0, %rax
-  jmp .L.return.add_type_expr
-  jmp .L.matchend563
-.L.arm565:
-  mov (%rsp), %rax
-  cmp $14, %rax
-  jne .L.arm566
-  mov 8(%rsp), %rsi
-  add $8, %rsi
-  lea -384(%rbp), %rdi
-  mov 0(%rsi), %rax
-  mov %rax, 0(%rdi)
-  lea -384(%rbp), %rax
-  mov (%rax), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call add_type
-  add $8, %rsp
-  lea -384(%rbp), %rax
-  mov (%rax), %rax
-  add $48, %rax
-  mov (%rax), %rax
-  push %rax
-  mov -424(%rbp), %rax
+  mov -432(%rbp), %rax
   add $48, %rax
   mov (%rax), %rax
   push %rax
@@ -18348,14 +19403,14 @@ add_type_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.add_type_expr
-  jmp .L.matchend563
-.L.arm566:
+  jmp .L.matchend573
+.L.arm576:
   mov (%rsp), %rax
   cmp $15, %rax
-  jne .L.arm567
+  jne .L.arm577
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -376(%rbp), %rdi
+  lea -384(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
@@ -18364,16 +19419,16 @@ add_type_expr:
   mov %rax, 16(%rdi)
   mov 24(%rsi), %rax
   mov %rax, 24(%rdi)
-  lea -376(%rbp), %rax
+  lea -384(%rbp), %rax
   mov (%rax), %rax
-  mov %rax, -344(%rbp)
-  mov -344(%rbp), %rax
+  mov %rax, -352(%rbp)
+  mov -352(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call add_type
   add $8, %rsp
-  mov -344(%rbp), %rax
+  mov -352(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -18382,8 +19437,8 @@ add_type_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else568
-  mov -344(%rbp), %rax
+  je .L.else578
+  mov -352(%rbp), %rax
   add $48, %rax
   mov (%rax), %rax
   push %rax
@@ -18391,8 +19446,8 @@ add_type_expr:
   sub $8, %rsp
   call decay
   add $8, %rsp
-  mov %rax, -336(%rbp)
-  mov -336(%rbp), %rax
+  mov %rax, -344(%rbp)
+  mov -344(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -18401,20 +19456,20 @@ add_type_expr:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else569
+  je .L.else579
   lea .L.str141+8(%rip), %rax
   push %rax
-  mov -336(%rbp), %rax
+  mov -344(%rbp), %rax
   push %rax
   pop %rsi
   pop %rdi
   sub $8, %rsp
   call error_ty
   add $8, %rsp
-  jmp .L.end569
-.L.else569:
-.L.end569:
-  mov -336(%rbp), %rax
+  jmp .L.end579
+.L.else579:
+.L.end579:
+  mov -344(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -18424,23 +19479,23 @@ add_type_expr:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else570
+  je .L.else580
   lea .L.str142+8(%rip), %rax
   push %rax
-  mov -336(%rbp), %rax
+  mov -344(%rbp), %rax
   push %rax
   pop %rsi
   pop %rdi
   sub $8, %rsp
   call error_ty
   add $8, %rsp
-  jmp .L.end570
-.L.else570:
-.L.end570:
-  jmp .L.end568
-.L.else568:
-.L.end568:
-  lea -376(%rbp), %rax
+  jmp .L.end580
+.L.else580:
+.L.end580:
+  jmp .L.end578
+.L.else578:
+.L.end578:
+  lea -384(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   push %rax
@@ -18450,17 +19505,17 @@ add_type_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.add_type_expr
-  jmp .L.matchend563
-.L.arm567:
+  jmp .L.matchend573
+.L.arm577:
   mov (%rsp), %rax
   cmp $16, %rax
-  jne .L.arm571
+  jne .L.arm581
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -328(%rbp), %rdi
+  lea -336(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
-  lea -328(%rbp), %rax
+  lea -336(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
@@ -18469,21 +19524,21 @@ add_type_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.add_type_expr
-  jmp .L.matchend563
-.L.arm571:
+  jmp .L.matchend573
+.L.arm581:
   mov (%rsp), %rax
   cmp $17, %rax
-  jne .L.arm572
+  jne .L.arm582
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -320(%rbp), %rdi
+  lea -328(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
   mov 16(%rsi), %rax
   mov %rax, 16(%rdi)
-  lea -320(%rbp), %rax
+  lea -328(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   push %rax
@@ -18493,26 +19548,26 @@ add_type_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.add_type_expr
-  jmp .L.matchend563
-.L.arm572:
+  jmp .L.matchend573
+.L.arm582:
   mov (%rsp), %rax
   cmp $12, %rax
-  jne .L.arm573
+  jne .L.arm583
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -296(%rbp), %rdi
+  lea -304(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
-  lea -296(%rbp), %rax
+  lea -304(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call add_type
   add $8, %rsp
-  lea -296(%rbp), %rax
+  lea -304(%rbp), %rax
   mov (%rax), %rax
   add $48, %rax
   mov (%rax), %rax
@@ -18521,8 +19576,8 @@ add_type_expr:
   sub $8, %rsp
   call decay
   add $8, %rsp
-  mov %rax, -280(%rbp)
-  mov -280(%rbp), %rax
+  mov %rax, -288(%rbp)
+  mov -288(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -18531,43 +19586,43 @@ add_type_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false575
-  mov -280(%rbp), %rax
+  je .L.false585
+  mov -288(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call is_opt_pointer
   add $8, %rsp
   cmp $0, %rax
-  je .L.false575
+  je .L.false585
   mov $1, %rax
-  jmp .L.end575
-.L.false575:
+  jmp .L.end585
+.L.false585:
   mov $0, %rax
-.L.end575:
+.L.end585:
   cmp $0, %rax
-  je .L.else574
+  je .L.else584
   lea .L.str143+8(%rip), %rax
   push %rax
-  mov -280(%rbp), %rax
+  mov -288(%rbp), %rax
   push %rax
   pop %rsi
   pop %rdi
   sub $8, %rsp
   call error_ty
   add $8, %rsp
-  jmp .L.end574
-.L.else574:
-.L.end574:
-  lea -296(%rbp), %rax
+  jmp .L.end584
+.L.else584:
+.L.end584:
+  lea -304(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
-  mov %rax, -272(%rbp)
-  mov -272(%rbp), %rax
+  mov %rax, -280(%rbp)
+  mov -280(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   push %rax
-  mov -424(%rbp), %rax
+  mov -432(%rbp), %rax
   add $48, %rax
   mov %rax, %rdi
   pop %rsi
@@ -18575,14 +19630,14 @@ add_type_expr:
   mov %rax, (%rdi)
   mov $0, %rax
   jmp .L.return.add_type_expr
-  jmp .L.matchend563
-.L.arm573:
-  jmp .L.matchend563
+  jmp .L.matchend573
+.L.arm583:
+  jmp .L.matchend573
   mov $1, %rdi
   call exit
-.L.matchend563:
+.L.matchend573:
   add $16, %rsp
-  mov -424(%rbp), %rax
+  mov -432(%rbp), %rax
   add $48, %rax
   mov (%rax), %rax
   push %rax
@@ -18593,32 +19648,32 @@ add_type_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else577
+  je .L.else587
   mov $0, %rax
   jmp .L.return.add_type_expr
-  jmp .L.end577
-.L.else577:
-.L.end577:
-  mov -424(%rbp), %rax
+  jmp .L.end587
+.L.else587:
+.L.end587:
+  mov -432(%rbp), %rax
   push %rax
   mov (%rax), %rax
   push %rax
   mov (%rsp), %rax
   cmp $9, %rax
-  jne .L.arm579
+  jne .L.arm589
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -264(%rbp), %rdi
+  lea -272(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
-  mov -424(%rbp), %rax
+  mov -432(%rbp), %rax
   push %rax
-  lea -264(%rbp), %rax
+  lea -272(%rbp), %rax
   mov (%rax), %rax
   push %rax
-  lea -264(%rbp), %rax
+  lea -272(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -18633,24 +19688,24 @@ add_type_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.add_type_expr
-  jmp .L.matchend578
-.L.arm579:
+  jmp .L.matchend588
+.L.arm589:
   mov (%rsp), %rax
   cmp $10, %rax
-  jne .L.arm580
+  jne .L.arm590
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -248(%rbp), %rdi
+  lea -256(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
-  mov -424(%rbp), %rax
+  mov -432(%rbp), %rax
   push %rax
-  lea -248(%rbp), %rax
+  lea -256(%rbp), %rax
   mov (%rax), %rax
   push %rax
-  lea -248(%rbp), %rax
+  lea -256(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -18665,21 +19720,21 @@ add_type_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.add_type_expr
-  jmp .L.matchend578
-.L.arm580:
+  jmp .L.matchend588
+.L.arm590:
   mov (%rsp), %rax
   cmp $0, %rax
-  jne .L.arm581
+  jne .L.arm591
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -232(%rbp), %rdi
+  lea -240(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
   mov ty_int(%rip), %rax
   push %rax
-  mov -424(%rbp), %rax
+  mov -432(%rbp), %rax
   add $48, %rax
   mov %rax, %rdi
   pop %rsi
@@ -18687,37 +19742,37 @@ add_type_expr:
   mov %rax, (%rdi)
   mov $0, %rax
   jmp .L.return.add_type_expr
-  jmp .L.matchend578
-.L.arm581:
+  jmp .L.matchend588
+.L.arm591:
   mov (%rsp), %rax
   cmp $1, %rax
-  jne .L.arm582
+  jne .L.arm592
   mov $0, %rax
   jmp .L.return.add_type_expr
-  jmp .L.matchend578
-.L.arm582:
+  jmp .L.matchend588
+.L.arm592:
   mov (%rsp), %rax
   cmp $3, %rax
-  jne .L.arm583
+  jne .L.arm593
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -216(%rbp), %rdi
+  lea -224(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
   mov 16(%rsi), %rax
   mov %rax, 16(%rdi)
-  mov -424(%rbp), %rax
+  mov -432(%rbp), %rax
   push %rax
-  lea -216(%rbp), %rax
+  lea -224(%rbp), %rax
   mov (%rax), %rax
   push %rax
-  lea -216(%rbp), %rax
+  lea -224(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
-  lea -216(%rbp), %rax
+  lea -224(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   push %rax
@@ -18730,24 +19785,24 @@ add_type_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.add_type_expr
-  jmp .L.matchend578
-.L.arm583:
+  jmp .L.matchend588
+.L.arm593:
   mov (%rsp), %rax
   cmp $7, %rax
-  jne .L.arm584
+  jne .L.arm594
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -192(%rbp), %rdi
+  lea -200(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
-  lea -192(%rbp), %rax
+  lea -200(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call add_type
   add $8, %rsp
-  lea -192(%rbp), %rax
+  lea -200(%rbp), %rax
   mov (%rax), %rax
   add $48, %rax
   mov (%rax), %rax
@@ -18756,8 +19811,8 @@ add_type_expr:
   sub $8, %rsp
   call decay
   add $8, %rsp
-  mov %rax, -184(%rbp)
-  mov -184(%rbp), %rax
+  mov %rax, -192(%rbp)
+  mov -192(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -18766,20 +19821,20 @@ add_type_expr:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else585
+  je .L.else595
   lea .L.str144+8(%rip), %rax
   push %rax
-  mov -184(%rbp), %rax
+  mov -192(%rbp), %rax
   push %rax
   pop %rsi
   pop %rdi
   sub $8, %rsp
   call error_ty
   add $8, %rsp
-  jmp .L.end585
-.L.else585:
-.L.end585:
-  mov -184(%rbp), %rax
+  jmp .L.end595
+.L.else595:
+.L.end595:
+  mov -192(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -18789,22 +19844,22 @@ add_type_expr:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else586
+  je .L.else596
   lea .L.str145+8(%rip), %rax
   push %rax
-  mov -184(%rbp), %rax
+  mov -192(%rbp), %rax
   push %rax
   pop %rsi
   pop %rdi
   sub $8, %rsp
   call error_ty
   add $8, %rsp
-  jmp .L.end586
-.L.else586:
-.L.end586:
+  jmp .L.end596
+.L.else596:
+.L.end596:
   mov ty_bool(%rip), %rax
   push %rax
-  mov -424(%rbp), %rax
+  mov -432(%rbp), %rax
   add $48, %rax
   mov %rax, %rdi
   pop %rsi
@@ -18812,24 +19867,24 @@ add_type_expr:
   mov %rax, (%rdi)
   mov $0, %rax
   jmp .L.return.add_type_expr
-  jmp .L.matchend578
-.L.arm584:
+  jmp .L.matchend588
+.L.arm594:
   mov (%rsp), %rax
   cmp $8, %rax
-  jne .L.arm587
+  jne .L.arm597
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -176(%rbp), %rdi
+  lea -184(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
-  lea -176(%rbp), %rax
+  lea -184(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call add_type
   add $8, %rsp
-  lea -176(%rbp), %rax
+  lea -184(%rbp), %rax
   mov (%rax), %rax
   add $48, %rax
   mov (%rax), %rax
@@ -18838,8 +19893,8 @@ add_type_expr:
   sub $8, %rsp
   call decay
   add $8, %rsp
-  mov %rax, -168(%rbp)
-  mov -168(%rbp), %rax
+  mov %rax, -176(%rbp)
+  mov -176(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -18848,20 +19903,20 @@ add_type_expr:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else588
+  je .L.else598
   lea .L.str146+8(%rip), %rax
   push %rax
-  mov -168(%rbp), %rax
+  mov -176(%rbp), %rax
   push %rax
   pop %rsi
   pop %rdi
   sub $8, %rsp
   call error_ty
   add $8, %rsp
-  jmp .L.end588
-.L.else588:
-.L.end588:
-  mov -168(%rbp), %rax
+  jmp .L.end598
+.L.else598:
+.L.end598:
+  mov -176(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -18871,22 +19926,22 @@ add_type_expr:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else589
+  je .L.else599
   lea .L.str147+8(%rip), %rax
   push %rax
-  mov -168(%rbp), %rax
+  mov -176(%rbp), %rax
   push %rax
   pop %rsi
   pop %rdi
   sub $8, %rsp
   call error_ty
   add $8, %rsp
-  jmp .L.end589
-.L.else589:
-.L.end589:
+  jmp .L.end599
+.L.else599:
+.L.end599:
   mov ty_int(%rip), %rax
   push %rax
-  mov -424(%rbp), %rax
+  mov -432(%rbp), %rax
   add $48, %rax
   mov %rax, %rdi
   pop %rsi
@@ -18894,26 +19949,26 @@ add_type_expr:
   mov %rax, (%rdi)
   mov $0, %rax
   jmp .L.return.add_type_expr
-  jmp .L.matchend578
-.L.arm587:
+  jmp .L.matchend588
+.L.arm597:
   mov (%rsp), %rax
   cmp $4, %rax
-  jne .L.arm590
+  jne .L.arm600
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -160(%rbp), %rdi
+  lea -168(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
-  lea -160(%rbp), %rax
+  lea -168(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call add_type
   add $8, %rsp
-  lea -160(%rbp), %rax
+  lea -168(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -18922,33 +19977,33 @@ add_type_expr:
   call add_type
   add $8, %rsp
   mov $0, %rax
-  mov %rax, -144(%rbp)
-  lea -160(%rbp), %rax
+  mov %rax, -152(%rbp)
+  lea -168(%rbp), %rax
   mov (%rax), %rax
   add $48, %rax
   mov (%rax), %rax
-  mov %rax, -136(%rbp)
-  lea -160(%rbp), %rax
+  mov %rax, -144(%rbp)
+  lea -168(%rbp), %rax
   mov (%rax), %rax
   push %rax
   mov (%rax), %rax
   push %rax
   mov (%rsp), %rax
   cmp $2, %rax
-  jne .L.arm592
+  jne .L.arm602
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -128(%rbp), %rdi
+  lea -136(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
   mov 16(%rsi), %rax
   mov %rax, 16(%rdi)
-  lea -128(%rbp), %rax
+  lea -136(%rbp), %rax
   mov (%rax), %rax
-  mov %rax, -104(%rbp)
-  mov -104(%rbp), %rax
+  mov %rax, -112(%rbp)
+  mov -112(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -18957,12 +20012,12 @@ add_type_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else593
-  mov -104(%rbp), %rax
+  je .L.else603
+  mov -112(%rbp), %rax
   add $40, %rax
   mov (%rax), %rax
-  mov %rax, -136(%rbp)
-  mov -104(%rbp), %rax
+  mov %rax, -144(%rbp)
+  mov -112(%rbp), %rax
   add $40, %rax
   mov (%rax), %rax
   push %rax
@@ -18970,10 +20025,10 @@ add_type_expr:
   sub $8, %rsp
   call decay
   add $8, %rsp
-  mov %rax, -144(%rbp)
-  jmp .L.end593
-.L.else593:
-  lea -160(%rbp), %rax
+  mov %rax, -152(%rbp)
+  jmp .L.end603
+.L.else603:
+  lea -168(%rbp), %rax
   mov (%rax), %rax
   add $48, %rax
   mov (%rax), %rax
@@ -18982,11 +20037,11 @@ add_type_expr:
   sub $8, %rsp
   call decay
   add $8, %rsp
-  mov %rax, -144(%rbp)
-.L.end593:
-  jmp .L.matchend591
-.L.arm592:
-  lea -160(%rbp), %rax
+  mov %rax, -152(%rbp)
+.L.end603:
+  jmp .L.matchend601
+.L.arm602:
+  lea -168(%rbp), %rax
   mov (%rax), %rax
   add $48, %rax
   mov (%rax), %rax
@@ -18995,13 +20050,13 @@ add_type_expr:
   sub $8, %rsp
   call decay
   add $8, %rsp
-  mov %rax, -144(%rbp)
-  jmp .L.matchend591
+  mov %rax, -152(%rbp)
+  jmp .L.matchend601
   mov $1, %rdi
   call exit
-.L.matchend591:
+.L.matchend601:
   add $16, %rsp
-  mov -136(%rbp), %rax
+  mov -144(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -19010,34 +20065,34 @@ add_type_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false596
-  mov -136(%rbp), %rax
+  je .L.false606
+  mov -144(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call is_array
   add $8, %rsp
   cmp $0, %rax
-  je .L.false596
+  je .L.false606
   mov $1, %rax
-  jmp .L.end596
-.L.false596:
+  jmp .L.end606
+.L.false606:
   mov $0, %rax
-.L.end596:
+.L.end606:
   cmp $0, %rax
-  je .L.else595
+  je .L.else605
   lea .L.str148+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end595
-.L.else595:
-.L.end595:
-  mov -144(%rbp), %rax
+  jmp .L.end605
+.L.else605:
+.L.end605:
+  mov -152(%rbp), %rax
   push %rax
-  lea -160(%rbp), %rax
+  lea -168(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -19050,14 +20105,14 @@ add_type_expr:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else597
+  je .L.else607
   lea .L.str149+8(%rip), %rax
   push %rax
-  lea -160(%rbp), %rax
+  lea -168(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
-  mov -144(%rbp), %rax
+  mov -152(%rbp), %rax
   push %rax
   pop %rdx
   pop %rsi
@@ -19065,12 +20120,12 @@ add_type_expr:
   sub $8, %rsp
   call error_have_expr_want
   add $8, %rsp
-  jmp .L.end597
-.L.else597:
-.L.end597:
-  mov -136(%rbp), %rax
+  jmp .L.end607
+.L.else607:
+.L.end607:
+  mov -144(%rbp), %rax
   push %rax
-  mov -424(%rbp), %rax
+  mov -432(%rbp), %rax
   add $48, %rax
   mov %rax, %rdi
   pop %rsi
@@ -19078,29 +20133,29 @@ add_type_expr:
   mov %rax, (%rdi)
   mov $0, %rax
   jmp .L.return.add_type_expr
-  jmp .L.matchend578
-.L.arm590:
+  jmp .L.matchend588
+.L.arm600:
   mov (%rsp), %rax
   cmp $5, %rax
-  jne .L.arm598
+  jne .L.arm608
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -96(%rbp), %rdi
+  lea -104(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
-  lea -96(%rbp), %rax
+  lea -104(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call add_type
   add $8, %rsp
-  lea -96(%rbp), %rax
+  lea -104(%rbp), %rax
   mov (%rax), %rax
   add $48, %rax
   mov (%rax), %rax
-  mov %rax, -88(%rbp)
-  mov -88(%rbp), %rax
+  mov %rax, -96(%rbp)
+  mov -96(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -19109,23 +20164,23 @@ add_type_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false600
-  mov -88(%rbp), %rax
+  je .L.false610
+  mov -96(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call is_array
   add $8, %rsp
   cmp $0, %rax
-  je .L.false600
+  je .L.false610
   mov $1, %rax
-  jmp .L.end600
-.L.false600:
+  jmp .L.end610
+.L.false610:
   mov $0, %rax
-.L.end600:
+.L.end610:
   cmp $0, %rax
-  je .L.else599
-  mov -88(%rbp), %rax
+  je .L.else609
+  mov -96(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -19137,15 +20192,15 @@ add_type_expr:
   call ptr_to
   add $8, %rsp
   push %rax
-  mov -424(%rbp), %rax
+  mov -432(%rbp), %rax
   add $48, %rax
   mov %rax, %rdi
   pop %rsi
   mov %rsi, %rax
   mov %rax, (%rdi)
-  jmp .L.end599
-.L.else599:
-  mov -88(%rbp), %rax
+  jmp .L.end609
+.L.else609:
+  mov -96(%rbp), %rax
   push %rax
   lea .L.str150+8(%rip), %rax
   push %rax
@@ -19160,33 +20215,33 @@ add_type_expr:
   call ptr_to
   add $8, %rsp
   push %rax
-  mov -424(%rbp), %rax
+  mov -432(%rbp), %rax
   add $48, %rax
   mov %rax, %rdi
   pop %rsi
   mov %rsi, %rax
   mov %rax, (%rdi)
-.L.end599:
+.L.end609:
   mov $0, %rax
   jmp .L.return.add_type_expr
-  jmp .L.matchend578
-.L.arm598:
+  jmp .L.matchend588
+.L.arm608:
   mov (%rsp), %rax
   cmp $6, %rax
-  jne .L.arm601
+  jne .L.arm611
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -80(%rbp), %rdi
+  lea -88(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
-  lea -80(%rbp), %rax
+  lea -88(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call add_type
   add $8, %rsp
-  lea -80(%rbp), %rax
+  lea -88(%rbp), %rax
   mov (%rax), %rax
   add $48, %rax
   mov (%rax), %rax
@@ -19195,8 +20250,8 @@ add_type_expr:
   sub $8, %rsp
   call decay
   add $8, %rsp
-  mov %rax, -72(%rbp)
-  mov -72(%rbp), %rax
+  mov %rax, -80(%rbp)
+  mov -80(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -19205,91 +20260,93 @@ add_type_expr:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else602
+  je .L.else612
   lea .L.str151+8(%rip), %rax
   push %rax
-  mov -72(%rbp), %rax
+  mov -80(%rbp), %rax
   push %rax
   pop %rsi
   pop %rdi
   sub $8, %rsp
   call error_ty
   add $8, %rsp
-  jmp .L.end602
-.L.else602:
-.L.end602:
-  mov -72(%rbp), %rax
+  jmp .L.end612
+.L.else612:
+.L.end612:
+  mov -80(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call is_opt_pointer
   add $8, %rsp
   cmp $0, %rax
-  je .L.else603
+  je .L.else613
   lea .L.str152+8(%rip), %rax
   push %rax
-  mov -72(%rbp), %rax
+  mov -80(%rbp), %rax
   push %rax
   pop %rsi
   pop %rdi
   sub $8, %rsp
   call error_ty
   add $8, %rsp
-  jmp .L.end603
-.L.else603:
-.L.end603:
-  mov -72(%rbp), %rax
+  jmp .L.end613
+.L.else613:
+.L.end613:
+  mov -80(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call is_pointer
   add $8, %rsp
   cmp $0, %rax
-  je .L.else604
-  mov -72(%rbp), %rax
+  je .L.else614
+  mov -80(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call type_base
   add $8, %rsp
   push %rax
-  mov -424(%rbp), %rax
+  mov -432(%rbp), %rax
   add $48, %rax
   mov %rax, %rdi
   pop %rsi
   mov %rsi, %rax
   mov %rax, (%rdi)
-  jmp .L.end604
-.L.else604:
+  jmp .L.end614
+.L.else614:
   lea .L.str153+8(%rip), %rax
   push %rax
-  mov -72(%rbp), %rax
+  mov -80(%rbp), %rax
   push %rax
   pop %rsi
   pop %rdi
   sub $8, %rsp
   call error_ty
   add $8, %rsp
-.L.end604:
+.L.end614:
   mov $0, %rax
   jmp .L.return.add_type_expr
-  jmp .L.matchend578
-.L.arm601:
+  jmp .L.matchend588
+.L.arm611:
   mov (%rsp), %rax
   cmp $11, %rax
-  jne .L.arm605
+  jne .L.arm615
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -64(%rbp), %rdi
+  lea -72(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
-  lea -64(%rbp), %rax
+  mov 16(%rsi), %rax
+  mov %rax, 16(%rdi)
+  lea -72(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -48(%rbp)
-.L.begin606:
+.L.begin616:
   mov -48(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -19299,7 +20356,7 @@ add_type_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end606
+  je .L.end616
   mov -48(%rbp), %rax
   push %rax
   pop %rdi
@@ -19310,9 +20367,9 @@ add_type_expr:
   add $40, %rax
   mov (%rax), %rax
   mov %rax, -48(%rbp)
-  jmp .L.begin606
-.L.end606:
-  lea -64(%rbp), %rax
+  jmp .L.begin616
+.L.end616:
+  lea -72(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
@@ -19320,9 +20377,31 @@ add_type_expr:
   call find_function
   add $8, %rsp
   mov %rax, -40(%rbp)
+  mov -432(%rbp), %rax
+  push %rbx
+  mov %rax, %rbx
+  mov $11, %rdi
+  mov %rdi, (%rax)
+  lea -72(%rbp), %rax
+  mov (%rax), %rax
+  mov %rbx, %rdi
+  add $8, %rdi
+  mov %rax, (%rdi)
+  lea -72(%rbp), %rax
+  add $8, %rax
+  mov (%rax), %rax
+  mov %rbx, %rdi
+  add $16, %rdi
+  mov %rax, (%rdi)
+  mov -40(%rbp), %rax
+  mov %rbx, %rdi
+  add $24, %rdi
+  mov %rax, (%rdi)
+  mov %rbx, %rax
+  pop %rbx
   mov globals(%rip), %rax
   push %rax
-  lea -64(%rbp), %rax
+  lea -72(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rsi
@@ -19340,7 +20419,7 @@ add_type_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else607
+  je .L.else617
   mov -40(%rbp), %rax
   add $48, %rax
   mov (%rax), %rax
@@ -19352,30 +20431,30 @@ add_type_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else608
+  je .L.else618
   mov -40(%rbp), %rax
   add $48, %rax
   mov (%rax), %rax
   push %rax
-  mov -424(%rbp), %rax
+  mov -432(%rbp), %rax
   add $48, %rax
   mov %rax, %rdi
   pop %rsi
   mov %rsi, %rax
   mov %rax, (%rdi)
-  jmp .L.end608
-.L.else608:
+  jmp .L.end618
+.L.else618:
   mov ty_int(%rip), %rax
   push %rax
-  mov -424(%rbp), %rax
+  mov -432(%rbp), %rax
   add $48, %rax
   mov %rax, %rdi
   pop %rsi
   mov %rsi, %rax
   mov %rax, (%rdi)
-.L.end608:
-  jmp .L.end607
-.L.else607:
+.L.end618:
+  jmp .L.end617
+.L.else617:
   mov -32(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -19385,7 +20464,7 @@ add_type_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else609
+  je .L.else619
   mov -32(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -19397,7 +20476,7 @@ add_type_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else610
+  je .L.else620
   mov -32(%rbp), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -19409,42 +20488,42 @@ add_type_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else611
+  je .L.else621
   mov -32(%rbp), %rax
   add $40, %rax
   mov (%rax), %rax
   push %rax
-  mov -424(%rbp), %rax
+  mov -432(%rbp), %rax
   add $48, %rax
   mov %rax, %rdi
   pop %rsi
   mov %rsi, %rax
   mov %rax, (%rdi)
-  jmp .L.end611
-.L.else611:
+  jmp .L.end621
+.L.else621:
   mov ty_int(%rip), %rax
   push %rax
-  mov -424(%rbp), %rax
+  mov -432(%rbp), %rax
   add $48, %rax
   mov %rax, %rdi
   pop %rsi
   mov %rsi, %rax
   mov %rax, (%rdi)
-.L.end611:
-  jmp .L.end610
-.L.else610:
+.L.end621:
+  jmp .L.end620
+.L.else620:
   mov ty_int(%rip), %rax
   push %rax
-  mov -424(%rbp), %rax
+  mov -432(%rbp), %rax
   add $48, %rax
   mov %rax, %rdi
   pop %rsi
   mov %rsi, %rax
   mov %rax, (%rdi)
-.L.end610:
-  jmp .L.end609
-.L.else609:
-  lea -64(%rbp), %rax
+.L.end620:
+  jmp .L.end619
+.L.else619:
+  lea -72(%rbp), %rax
   mov (%rax), %rax
   push %rax
   lea .L.str154+8(%rip), %rax
@@ -19455,28 +20534,28 @@ add_type_expr:
   call streq
   add $8, %rsp
   cmp $0, %rax
-  je .L.else612
+  je .L.else622
   mov ty_noreturn(%rip), %rax
   push %rax
-  mov -424(%rbp), %rax
+  mov -432(%rbp), %rax
   add $48, %rax
   mov %rax, %rdi
   pop %rsi
   mov %rsi, %rax
   mov %rax, (%rdi)
-  jmp .L.end612
-.L.else612:
+  jmp .L.end622
+.L.else622:
   mov ty_int(%rip), %rax
   push %rax
-  mov -424(%rbp), %rax
+  mov -432(%rbp), %rax
   add $48, %rax
   mov %rax, %rdi
   pop %rsi
   mov %rsi, %rax
   mov %rax, (%rdi)
-.L.end612:
-.L.end609:
-.L.end607:
+.L.end622:
+.L.end619:
+.L.end617:
   mov -40(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -19486,8 +20565,8 @@ add_type_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else613
-  lea -64(%rbp), %rax
+  je .L.else623
+  lea -72(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -48(%rbp)
@@ -19495,7 +20574,7 @@ add_type_expr:
   add $16, %rax
   mov (%rax), %rax
   mov %rax, -24(%rbp)
-.L.begin614:
+.L.begin624:
   mov -48(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -19505,7 +20584,7 @@ add_type_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end614
+  je .L.end624
   mov -24(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -19515,7 +20594,7 @@ add_type_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else615
+  je .L.else625
   mov -24(%rbp), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -19527,7 +20606,7 @@ add_type_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else616
+  je .L.else626
   mov -24(%rbp), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -19550,7 +20629,7 @@ add_type_expr:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else617
+  je .L.else627
   lea .L.str155+8(%rip), %rax
   push %rax
   mov -48(%rbp), %rax
@@ -19563,30 +20642,30 @@ add_type_expr:
   sub $8, %rsp
   call error_have_expr_want
   add $8, %rsp
-  jmp .L.end617
-.L.else617:
-.L.end617:
-  jmp .L.end616
-.L.else616:
-.L.end616:
+  jmp .L.end627
+.L.else627:
+.L.end627:
+  jmp .L.end626
+.L.else626:
+.L.end626:
   mov -24(%rbp), %rax
   add $64, %rax
   mov (%rax), %rax
   mov %rax, -24(%rbp)
-  jmp .L.end615
-.L.else615:
-.L.end615:
+  jmp .L.end625
+.L.else625:
+.L.end625:
   mov -48(%rbp), %rax
   add $40, %rax
   mov (%rax), %rax
   mov %rax, -48(%rbp)
-  jmp .L.begin614
-.L.end614:
+  jmp .L.begin624
+.L.end624:
   mov -40(%rbp), %rax
   add $64, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-.L.begin618:
+.L.begin628:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -19596,7 +20675,7 @@ add_type_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end618
+  je .L.end628
   mov -8(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -19611,19 +20690,19 @@ add_type_expr:
   add $16, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin618
-.L.end618:
-  jmp .L.end613
-.L.else613:
-.L.end613:
+  jmp .L.begin628
+.L.end628:
+  jmp .L.end623
+.L.else623:
+.L.end623:
   mov $0, %rax
   jmp .L.return.add_type_expr
-  jmp .L.matchend578
-.L.arm605:
-  jmp .L.matchend578
+  jmp .L.matchend588
+.L.arm615:
+  jmp .L.matchend588
   mov $1, %rdi
   call exit
-.L.matchend578:
+.L.matchend588:
   add $16, %rsp
 .L.return.add_type_expr:
   mov %rbp, %rsp
@@ -19641,7 +20720,7 @@ add_type_stmt_node:
   push %rax
   mov (%rsp), %rax
   cmp $1, %rax
-  jne .L.arm621
+  jne .L.arm631
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -240(%rbp), %rdi
@@ -19677,7 +20756,7 @@ add_type_stmt_node:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  jne .L.true623
+  jne .L.true633
   mov -216(%rbp), %rax
   push %rax
   pop %rdi
@@ -19688,15 +20767,15 @@ add_type_stmt_node:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false623
-.L.true623:
+  je .L.false633
+.L.true633:
   mov $1, %rax
-  jmp .L.end623
-.L.false623:
+  jmp .L.end633
+.L.false633:
   mov $0, %rax
-.L.end623:
+.L.end633:
   cmp $0, %rax
-  je .L.else622
+  je .L.else632
   lea .L.str157+8(%rip), %rax
   push %rax
   mov -216(%rbp), %rax
@@ -19706,9 +20785,9 @@ add_type_stmt_node:
   sub $8, %rsp
   call error_ty
   add $8, %rsp
-  jmp .L.end622
-.L.else622:
-.L.end622:
+  jmp .L.end632
+.L.else632:
+.L.end632:
   mov narrow_top(%rip), %rax
   mov %rax, -208(%rbp)
   lea -240(%rbp), %rax
@@ -19745,7 +20824,7 @@ add_type_stmt_node:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else624
+  je .L.else634
   lea -240(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -19765,16 +20844,16 @@ add_type_stmt_node:
   sub $8, %rsp
   call narrow_reset
   add $8, %rsp
-  jmp .L.end624
-.L.else624:
-.L.end624:
+  jmp .L.end634
+.L.else634:
+.L.end634:
   mov $0, %rax
   jmp .L.return.add_type_stmt_node
-  jmp .L.matchend620
-.L.arm621:
+  jmp .L.matchend630
+.L.arm631:
   mov (%rsp), %rax
   cmp $2, %rax
-  jne .L.arm625
+  jne .L.arm635
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -192(%rbp), %rdi
@@ -19808,7 +20887,7 @@ add_type_stmt_node:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  jne .L.true627
+  jne .L.true637
   mov -176(%rbp), %rax
   push %rax
   pop %rdi
@@ -19819,15 +20898,15 @@ add_type_stmt_node:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false627
-.L.true627:
+  je .L.false637
+.L.true637:
   mov $1, %rax
-  jmp .L.end627
-.L.false627:
+  jmp .L.end637
+.L.false637:
   mov $0, %rax
-.L.end627:
+.L.end637:
   cmp $0, %rax
-  je .L.else626
+  je .L.else636
   lea .L.str158+8(%rip), %rax
   push %rax
   mov -176(%rbp), %rax
@@ -19837,9 +20916,9 @@ add_type_stmt_node:
   sub $8, %rsp
   call error_ty
   add $8, %rsp
-  jmp .L.end626
-.L.else626:
-.L.end626:
+  jmp .L.end636
+.L.else636:
+.L.end636:
   mov narrow_top(%rip), %rax
   mov %rax, -168(%rbp)
   lea -192(%rbp), %rax
@@ -19865,11 +20944,11 @@ add_type_stmt_node:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.add_type_stmt_node
-  jmp .L.matchend620
-.L.arm625:
+  jmp .L.matchend630
+.L.arm635:
   mov (%rsp), %rax
   cmp $7, %rax
-  jne .L.arm628
+  jne .L.arm638
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -160(%rbp), %rdi
@@ -19885,7 +20964,7 @@ add_type_stmt_node:
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -128(%rbp)
-.L.begin629:
+.L.begin639:
   mov -128(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -19895,7 +20974,7 @@ add_type_stmt_node:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end629
+  je .L.end639
   mov -128(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -19907,8 +20986,8 @@ add_type_stmt_node:
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -128(%rbp)
-  jmp .L.begin629
-.L.end629:
+  jmp .L.begin639
+.L.end639:
   lea -160(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -19926,7 +21005,7 @@ add_type_stmt_node:
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -128(%rbp)
-.L.begin630:
+.L.begin640:
   mov -128(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -19936,7 +21015,7 @@ add_type_stmt_node:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end630
+  je .L.end640
   mov -128(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -19949,15 +21028,15 @@ add_type_stmt_node:
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -128(%rbp)
-  jmp .L.begin630
-.L.end630:
+  jmp .L.begin640
+.L.end640:
   mov $0, %rax
   jmp .L.return.add_type_stmt_node
-  jmp .L.matchend620
-.L.arm628:
+  jmp .L.matchend630
+.L.arm638:
   mov (%rsp), %rax
   cmp $6, %rax
-  jne .L.arm631
+  jne .L.arm641
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -120(%rbp), %rdi
@@ -19985,11 +21064,11 @@ add_type_stmt_node:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.add_type_stmt_node
-  jmp .L.matchend620
-.L.arm631:
+  jmp .L.matchend630
+.L.arm641:
   mov (%rsp), %rax
   cmp $3, %rax
-  jne .L.arm632
+  jne .L.arm642
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -104(%rbp), %rdi
@@ -19998,7 +21077,7 @@ add_type_stmt_node:
   lea -104(%rbp), %rax
   mov (%rax), %rax
   mov %rax, -96(%rbp)
-.L.begin633:
+.L.begin643:
   mov -96(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -20008,7 +21087,7 @@ add_type_stmt_node:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end633
+  je .L.end643
   mov -96(%rbp), %rax
   push %rax
   pop %rdi
@@ -20021,7 +21100,7 @@ add_type_stmt_node:
   push %rax
   mov (%rsp), %rax
   cmp $1, %rax
-  jne .L.arm635
+  jne .L.arm645
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -88(%rbp), %rdi
@@ -20042,7 +21121,7 @@ add_type_stmt_node:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else636
+  je .L.else646
   lea -88(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
@@ -20052,7 +21131,7 @@ add_type_stmt_node:
   call stmt_always_diverges
   add $8, %rsp
   cmp $0, %rax
-  je .L.else637
+  je .L.else647
   lea -88(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -20060,32 +21139,32 @@ add_type_stmt_node:
   sub $8, %rsp
   call narrow_push_eq_nulls
   add $8, %rsp
-  jmp .L.end637
-.L.else637:
-.L.end637:
-  jmp .L.end636
-.L.else636:
-.L.end636:
-  jmp .L.matchend634
-.L.arm635:
-  jmp .L.matchend634
+  jmp .L.end647
+.L.else647:
+.L.end647:
+  jmp .L.end646
+.L.else646:
+.L.end646:
+  jmp .L.matchend644
+.L.arm645:
+  jmp .L.matchend644
   mov $1, %rdi
   call exit
-.L.matchend634:
+.L.matchend644:
   add $16, %rsp
   mov -96(%rbp), %rax
   add $32, %rax
   mov (%rax), %rax
   mov %rax, -96(%rbp)
-  jmp .L.begin633
-.L.end633:
+  jmp .L.begin643
+.L.end643:
   mov $0, %rax
   jmp .L.return.add_type_stmt_node
-  jmp .L.matchend620
-.L.arm632:
+  jmp .L.matchend630
+.L.arm642:
   mov (%rsp), %rax
   cmp $0, %rax
-  jne .L.arm639
+  jne .L.arm649
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -64(%rbp), %rdi
@@ -20102,7 +21181,7 @@ add_type_stmt_node:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false641
+  je .L.false651
   mov -56(%rbp), %rax
   push %rax
   pop %rdi
@@ -20110,23 +21189,23 @@ add_type_stmt_node:
   call is_noreturn_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.false641
+  je .L.false651
   mov $1, %rax
-  jmp .L.end641
-.L.false641:
+  jmp .L.end651
+.L.false651:
   mov $0, %rax
-.L.end641:
+.L.end651:
   cmp $0, %rax
-  je .L.else640
+  je .L.else650
   lea .L.str160+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end640
-.L.else640:
-.L.end640:
+  jmp .L.end650
+.L.else650:
+.L.end650:
   lea -64(%rbp), %rax
   mov (%rax), %rax
   mov %rax, -48(%rbp)
@@ -20145,7 +21224,7 @@ add_type_stmt_node:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else642
+  je .L.else652
   mov current_return_ty(%rip), %rax
   push %rax
   mov $0, %rax
@@ -20155,16 +21234,16 @@ add_type_stmt_node:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else643
+  je .L.else653
   lea .L.str161+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end643
-.L.else643:
-.L.end643:
+  jmp .L.end653
+.L.else653:
+.L.end653:
   mov current_return_ty(%rip), %rax
   push %rax
   pop %rdi
@@ -20185,7 +21264,7 @@ add_type_stmt_node:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else644
+  je .L.else654
   lea .L.str162+8(%rip), %rax
   push %rax
   mov -48(%rbp), %rax
@@ -20198,11 +21277,11 @@ add_type_stmt_node:
   sub $8, %rsp
   call error_have_expr_want
   add $8, %rsp
-  jmp .L.end644
-.L.else644:
-.L.end644:
-  jmp .L.end642
-.L.else642:
+  jmp .L.end654
+.L.else654:
+.L.end654:
+  jmp .L.end652
+.L.else652:
   mov current_return_ty(%rip), %rax
   push %rax
   mov $0, %rax
@@ -20212,7 +21291,7 @@ add_type_stmt_node:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else645
+  je .L.else655
   lea .L.str163+8(%rip), %rax
   push %rax
   mov current_return_ty(%rip), %rax
@@ -20222,17 +21301,17 @@ add_type_stmt_node:
   sub $8, %rsp
   call error_ty
   add $8, %rsp
-  jmp .L.end645
-.L.else645:
-.L.end645:
-.L.end642:
+  jmp .L.end655
+.L.else655:
+.L.end655:
+.L.end652:
   mov $0, %rax
   jmp .L.return.add_type_stmt_node
-  jmp .L.matchend620
-.L.arm639:
+  jmp .L.matchend630
+.L.arm649:
   mov (%rsp), %rax
   cmp $4, %rax
-  jne .L.arm646
+  jne .L.arm656
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -32(%rbp), %rdi
@@ -20247,11 +21326,11 @@ add_type_stmt_node:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.add_type_stmt_node
-  jmp .L.matchend620
-.L.arm646:
+  jmp .L.matchend630
+.L.arm656:
   mov (%rsp), %rax
   cmp $5, %rax
-  jne .L.arm647
+  jne .L.arm657
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -24(%rbp), %rdi
@@ -20270,7 +21349,7 @@ add_type_stmt_node:
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-.L.begin648:
+.L.begin658:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -20280,7 +21359,7 @@ add_type_stmt_node:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end648
+  je .L.end658
   mov -8(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -20293,16 +21372,16 @@ add_type_stmt_node:
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin648
-.L.end648:
+  jmp .L.begin658
+.L.end658:
   mov $0, %rax
   jmp .L.return.add_type_stmt_node
-  jmp .L.matchend620
-.L.arm647:
-  jmp .L.matchend620
+  jmp .L.matchend630
+.L.arm657:
+  jmp .L.matchend630
   mov $1, %rdi
   call exit
-.L.matchend620:
+.L.matchend630:
   add $16, %rsp
 .L.return.add_type_stmt_node:
   mov %rbp, %rsp
@@ -20317,10 +21396,10 @@ parse_mul:
   call parse_unary
   add $8, %rsp
   mov %rax, -8(%rbp)
-.L.begin650:
+.L.begin660:
   mov $1, %rax
   cmp $0, %rax
-  je .L.end650
+  je .L.end660
   mov $28, %rax
   push %rax
   pop %rdi
@@ -20328,7 +21407,7 @@ parse_mul:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else651
+  je .L.else661
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -20348,8 +21427,8 @@ parse_mul:
   call new_binary
   add $8, %rsp
   mov %rax, -8(%rbp)
-  jmp .L.end651
-.L.else651:
+  jmp .L.end661
+.L.else661:
   mov $29, %rax
   push %rax
   pop %rdi
@@ -20357,7 +21436,7 @@ parse_mul:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else652
+  je .L.else662
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -20377,8 +21456,8 @@ parse_mul:
   call new_binary
   add $8, %rsp
   mov %rax, -8(%rbp)
-  jmp .L.end652
-.L.else652:
+  jmp .L.end662
+.L.else662:
   mov $30, %rax
   push %rax
   pop %rdi
@@ -20386,7 +21465,7 @@ parse_mul:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else653
+  je .L.else663
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -20406,15 +21485,15 @@ parse_mul:
   call new_binary
   add $8, %rsp
   mov %rax, -8(%rbp)
-  jmp .L.end653
-.L.else653:
+  jmp .L.end663
+.L.else663:
   mov -8(%rbp), %rax
   jmp .L.return.parse_mul
-.L.end653:
-.L.end652:
-.L.end651:
-  jmp .L.begin650
-.L.end650:
+.L.end663:
+.L.end662:
+.L.end661:
+  jmp .L.begin660
+.L.end660:
   mov -8(%rbp), %rax
   jmp .L.return.parse_mul
 .L.return.parse_mul:
@@ -20430,10 +21509,10 @@ parse_add:
   call parse_mul
   add $8, %rsp
   mov %rax, -8(%rbp)
-.L.begin654:
+.L.begin664:
   mov $1, %rax
   cmp $0, %rax
-  je .L.end654
+  je .L.end664
   mov $26, %rax
   push %rax
   pop %rdi
@@ -20441,7 +21520,7 @@ parse_add:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else655
+  je .L.else665
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -20461,8 +21540,8 @@ parse_add:
   call new_binary
   add $8, %rsp
   mov %rax, -8(%rbp)
-  jmp .L.end655
-.L.else655:
+  jmp .L.end665
+.L.else665:
   mov $27, %rax
   push %rax
   pop %rdi
@@ -20470,7 +21549,7 @@ parse_add:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else656
+  je .L.else666
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -20490,14 +21569,14 @@ parse_add:
   call new_binary
   add $8, %rsp
   mov %rax, -8(%rbp)
-  jmp .L.end656
-.L.else656:
+  jmp .L.end666
+.L.else666:
   mov -8(%rbp), %rax
   jmp .L.return.parse_add
-.L.end656:
-.L.end655:
-  jmp .L.begin654
-.L.end654:
+.L.end666:
+.L.end665:
+  jmp .L.begin664
+.L.end664:
   mov -8(%rbp), %rax
   jmp .L.return.parse_add
 .L.return.parse_add:
@@ -20513,10 +21592,10 @@ parse_relational:
   call parse_add
   add $8, %rsp
   mov %rax, -8(%rbp)
-.L.begin657:
+.L.begin667:
   mov $1, %rax
   cmp $0, %rax
-  je .L.end657
+  je .L.end667
   mov $31, %rax
   push %rax
   pop %rdi
@@ -20524,7 +21603,7 @@ parse_relational:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else658
+  je .L.else668
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -20544,8 +21623,8 @@ parse_relational:
   call new_binary
   add $8, %rsp
   mov %rax, -8(%rbp)
-  jmp .L.end658
-.L.else658:
+  jmp .L.end668
+.L.else668:
   mov $32, %rax
   push %rax
   pop %rdi
@@ -20553,7 +21632,7 @@ parse_relational:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else659
+  je .L.else669
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -20573,8 +21652,8 @@ parse_relational:
   call new_binary
   add $8, %rsp
   mov %rax, -8(%rbp)
-  jmp .L.end659
-.L.else659:
+  jmp .L.end669
+.L.else669:
   mov $24, %rax
   push %rax
   pop %rdi
@@ -20582,7 +21661,7 @@ parse_relational:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else660
+  je .L.else670
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -20602,8 +21681,8 @@ parse_relational:
   call new_binary
   add $8, %rsp
   mov %rax, -8(%rbp)
-  jmp .L.end660
-.L.else660:
+  jmp .L.end670
+.L.else670:
   mov $25, %rax
   push %rax
   pop %rdi
@@ -20611,7 +21690,7 @@ parse_relational:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else661
+  je .L.else671
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -20631,16 +21710,16 @@ parse_relational:
   call new_binary
   add $8, %rsp
   mov %rax, -8(%rbp)
-  jmp .L.end661
-.L.else661:
+  jmp .L.end671
+.L.else671:
   mov -8(%rbp), %rax
   jmp .L.return.parse_relational
-.L.end661:
-.L.end660:
-.L.end659:
-.L.end658:
-  jmp .L.begin657
-.L.end657:
+.L.end671:
+.L.end670:
+.L.end669:
+.L.end668:
+  jmp .L.begin667
+.L.end667:
   mov -8(%rbp), %rax
   jmp .L.return.parse_relational
 .L.return.parse_relational:
@@ -20656,10 +21735,10 @@ parse_equality:
   call parse_relational
   add $8, %rsp
   mov %rax, -8(%rbp)
-.L.begin662:
+.L.begin672:
   mov $1, %rax
   cmp $0, %rax
-  je .L.end662
+  je .L.end672
   mov $22, %rax
   push %rax
   pop %rdi
@@ -20667,7 +21746,7 @@ parse_equality:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else663
+  je .L.else673
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -20687,8 +21766,8 @@ parse_equality:
   call new_binary
   add $8, %rsp
   mov %rax, -8(%rbp)
-  jmp .L.end663
-.L.else663:
+  jmp .L.end673
+.L.else673:
   mov $23, %rax
   push %rax
   pop %rdi
@@ -20696,7 +21775,7 @@ parse_equality:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else664
+  je .L.else674
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -20716,14 +21795,14 @@ parse_equality:
   call new_binary
   add $8, %rsp
   mov %rax, -8(%rbp)
-  jmp .L.end664
-.L.else664:
+  jmp .L.end674
+.L.else674:
   mov -8(%rbp), %rax
   jmp .L.return.parse_equality
-.L.end664:
-.L.end663:
-  jmp .L.begin662
-.L.end662:
+.L.end674:
+.L.end673:
+  jmp .L.begin672
+.L.end672:
   mov -8(%rbp), %rax
   jmp .L.return.parse_equality
 .L.return.parse_equality:
@@ -20739,7 +21818,7 @@ parse_logand:
   call parse_equality
   add $8, %rsp
   mov %rax, -8(%rbp)
-.L.begin665:
+.L.begin675:
   mov $45, %rax
   push %rax
   pop %rdi
@@ -20747,7 +21826,7 @@ parse_logand:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.end665
+  je .L.end675
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -20764,8 +21843,8 @@ parse_logand:
   call new_logand
   add $8, %rsp
   mov %rax, -8(%rbp)
-  jmp .L.begin665
-.L.end665:
+  jmp .L.begin675
+.L.end675:
   mov -8(%rbp), %rax
   jmp .L.return.parse_logand
 .L.return.parse_logand:
@@ -20781,7 +21860,7 @@ parse_logor:
   call parse_logand
   add $8, %rsp
   mov %rax, -8(%rbp)
-.L.begin666:
+.L.begin676:
   mov $46, %rax
   push %rax
   pop %rdi
@@ -20789,7 +21868,7 @@ parse_logor:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.end666
+  je .L.end676
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -20806,8 +21885,8 @@ parse_logor:
   call new_logor
   add $8, %rsp
   mov %rax, -8(%rbp)
-  jmp .L.begin666
-.L.end666:
+  jmp .L.begin676
+.L.end676:
   mov -8(%rbp), %rax
   jmp .L.return.parse_logor
 .L.return.parse_logor:
@@ -20830,7 +21909,7 @@ parse_assign:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else667
+  je .L.else677
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -20847,9 +21926,9 @@ parse_assign:
   call new_assign
   add $8, %rsp
   jmp .L.return.parse_assign
-  jmp .L.end667
-.L.else667:
-.L.end667:
+  jmp .L.end677
+.L.else677:
+.L.end677:
   mov -8(%rbp), %rax
   jmp .L.return.parse_assign
 .L.return.parse_assign:
@@ -20869,7 +21948,7 @@ parse_type_suffix:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else668
+  je .L.else678
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -20877,16 +21956,16 @@ parse_type_suffix:
   call is_noreturn_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.else669
+  je .L.else679
   lea .L.str164+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end669
-.L.else669:
-.L.end669:
+  jmp .L.end679
+.L.else679:
+.L.end679:
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -20901,16 +21980,16 @@ parse_type_suffix:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else670
+  je .L.else680
   lea .L.str165+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end670
-.L.else670:
-.L.end670:
+  jmp .L.end680
+.L.else680:
+.L.end680:
   mov -8(%rbp), %rax
   push %rax
   mov tok(%rip), %rax
@@ -20933,9 +22012,9 @@ parse_type_suffix:
   sub $8, %rsp
   call skip
   add $8, %rsp
-  jmp .L.end668
-.L.else668:
-.L.end668:
+  jmp .L.end678
+.L.else678:
+.L.end678:
   mov -8(%rbp), %rax
   jmp .L.return.parse_type_suffix
 .L.return.parse_type_suffix:
@@ -20958,16 +22037,16 @@ parse_decl:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else671
+  je .L.else681
   lea .L.str166+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end671
-.L.else671:
-.L.end671:
+  jmp .L.end681
+.L.else681:
+.L.end681:
   sub $8, %rsp
   call cur_tokstr
   add $8, %rsp
@@ -21000,16 +22079,16 @@ parse_decl:
   call is_noreturn_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.else672
+  je .L.else682
   lea .L.str167+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end672
-.L.else672:
-.L.end672:
+  jmp .L.end682
+.L.else682:
+.L.end682:
   mov -24(%rbp), %rax
   push %rax
   mov -32(%rbp), %rax
@@ -21052,7 +22131,7 @@ parse_compound:
   mov %rax, -24(%rbp)
   mov $0, %rax
   mov %rax, -16(%rbp)
-.L.begin673:
+.L.begin683:
   mov $39, %rax
   push %rax
   pop %rdi
@@ -21063,7 +22142,7 @@ parse_compound:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end673
+  je .L.end683
   mov $0, %rax
   push %rax
   pop %rdi
@@ -21071,16 +22150,16 @@ parse_compound:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else674
+  je .L.else684
   lea .L.str168+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end674
-.L.else674:
-.L.end674:
+  jmp .L.end684
+.L.else684:
+.L.end684:
   sub $8, %rsp
   call parse_stmt
   add $8, %rsp
@@ -21094,7 +22173,7 @@ parse_compound:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else675
+  je .L.else685
   mov -8(%rbp), %rax
   push %rax
   mov -16(%rbp), %rax
@@ -21105,15 +22184,15 @@ parse_compound:
   mov %rax, (%rdi)
   mov -8(%rbp), %rax
   mov %rax, -16(%rbp)
-  jmp .L.end675
-.L.else675:
+  jmp .L.end685
+.L.else685:
   mov -8(%rbp), %rax
   mov %rax, -24(%rbp)
   mov -8(%rbp), %rax
   mov %rax, -16(%rbp)
-.L.end675:
-  jmp .L.begin673
-.L.end673:
+.L.end685:
+  jmp .L.begin683
+.L.end683:
   mov $39, %rax
   push %rax
   pop %rdi
@@ -21146,7 +22225,7 @@ parse_stmt:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else676
+  je .L.else686
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -21163,14 +22242,14 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else677
+  je .L.else687
   sub $8, %rsp
   call parse_expr
   add $8, %rsp
   mov %rax, -416(%rbp)
-  jmp .L.end677
-.L.else677:
-.L.end677:
+  jmp .L.end687
+.L.else687:
+.L.end687:
   mov $42, %rax
   push %rax
   pop %rdi
@@ -21184,9 +22263,9 @@ parse_stmt:
   call new_return
   add $8, %rsp
   jmp .L.return.parse_stmt
-  jmp .L.end676
-.L.else676:
-.L.end676:
+  jmp .L.end686
+.L.else686:
+.L.end686:
   mov $54, %rax
   push %rax
   pop %rdi
@@ -21194,7 +22273,7 @@ parse_stmt:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else678
+  je .L.else688
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -21209,16 +22288,16 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else679
+  je .L.else689
   lea .L.str169+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end679
-.L.else679:
-.L.end679:
+  jmp .L.end689
+.L.else689:
+.L.end689:
   sub $8, %rsp
   call cur_tokstr
   add $8, %rsp
@@ -21239,16 +22318,16 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else680
+  je .L.else690
   lea .L.str170+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end680
-.L.else680:
-.L.end680:
+  jmp .L.end690
+.L.else690:
+.L.end690:
   mov -400(%rbp), %rax
   mov %rax, -392(%rbp)
   mov tok(%rip), %rax
@@ -21264,7 +22343,7 @@ parse_stmt:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else681
+  je .L.else691
   mov -392(%rbp), %rax
   push %rax
   pop %rdi
@@ -21272,8 +22351,8 @@ parse_stmt:
   call parse_exn_field_inits
   add $8, %rsp
   mov %rax, -384(%rbp)
-  jmp .L.end681
-.L.else681:
+  jmp .L.end691
+.L.else691:
   mov -392(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -21285,17 +22364,17 @@ parse_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else682
+  je .L.else692
   lea .L.str171+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end682
-.L.else682:
-.L.end682:
-.L.end681:
+  jmp .L.end692
+.L.else692:
+.L.end692:
+.L.end691:
   mov $42, %rax
   push %rax
   pop %rdi
@@ -21312,9 +22391,9 @@ parse_stmt:
   call new_raise
   add $8, %rsp
   jmp .L.return.parse_stmt
-  jmp .L.end678
-.L.else678:
-.L.end678:
+  jmp .L.end688
+.L.else688:
+.L.end688:
   mov $55, %rax
   push %rax
   pop %rdi
@@ -21322,7 +22401,7 @@ parse_stmt:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else683
+  je .L.else693
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -21345,17 +22424,17 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else684
+  je .L.else694
   lea .L.str172+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end684
-.L.else684:
-.L.end684:
-.L.begin685:
+  jmp .L.end694
+.L.else694:
+.L.end694:
+.L.begin695:
   mov $56, %rax
   push %rax
   pop %rdi
@@ -21363,7 +22442,7 @@ parse_stmt:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.end685
+  je .L.end695
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -21378,16 +22457,16 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else686
+  je .L.else696
   lea .L.str173+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end686
-.L.else686:
-.L.end686:
+  jmp .L.end696
+.L.else696:
+.L.end696:
   sub $8, %rsp
   call cur_tokstr
   add $8, %rsp
@@ -21408,16 +22487,16 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else687
+  je .L.else697
   lea .L.str174+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end687
-.L.else687:
-.L.end687:
+  jmp .L.end697
+.L.else697:
+.L.end697:
   mov -344(%rbp), %rax
   mov %rax, -336(%rbp)
   mov tok(%rip), %rax
@@ -21426,7 +22505,7 @@ parse_stmt:
   mov %rax, tok(%rip)
   mov -368(%rbp), %rax
   mov %rax, -328(%rbp)
-.L.begin688:
+.L.begin698:
   mov -328(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -21436,7 +22515,7 @@ parse_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end688
+  je .L.end698
   mov -328(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -21447,22 +22526,22 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else689
+  je .L.else699
   lea .L.str175+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end689
-.L.else689:
-.L.end689:
+  jmp .L.end699
+.L.else699:
+.L.end699:
   mov -328(%rbp), %rax
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -328(%rbp)
-  jmp .L.begin688
-.L.end688:
+  jmp .L.begin698
+.L.end698:
   sub $8, %rsp
   call enter_scope
   add $8, %rsp
@@ -21475,7 +22554,7 @@ parse_stmt:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else690
+  je .L.else700
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -21490,16 +22569,16 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else691
+  je .L.else701
   lea .L.str176+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end691
-.L.else691:
-.L.end691:
+  jmp .L.end701
+.L.else701:
+.L.end701:
   sub $8, %rsp
   call cur_tokstr
   add $8, %rsp
@@ -21539,8 +22618,8 @@ parse_stmt:
   mov %rax, (%rdi)
   mov -304(%rbp), %rax
   mov %rax, -320(%rbp)
-  jmp .L.end690
-.L.else690:
+  jmp .L.end700
+.L.else700:
   mov $4, %rax
   push %rax
   pop %rdi
@@ -21548,7 +22627,7 @@ parse_stmt:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else692
+  je .L.else702
   sub $8, %rsp
   call cur_tokstr
   add $8, %rsp
@@ -21582,8 +22661,8 @@ parse_stmt:
   mov %rax, (%rdi)
   mov -288(%rbp), %rax
   mov %rax, -320(%rbp)
-  jmp .L.end692
-.L.else692:
+  jmp .L.end702
+.L.else702:
   mov -336(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -21595,18 +22674,18 @@ parse_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else693
+  je .L.else703
   lea .L.str177+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end693
-.L.else693:
-.L.end693:
-.L.end692:
-.L.end690:
+  jmp .L.end703
+.L.else703:
+.L.end703:
+.L.end702:
+.L.end700:
   mov $50, %rax
   push %rax
   pop %rdi
@@ -21642,7 +22721,7 @@ parse_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else694
+  je .L.else704
   mov -272(%rbp), %rax
   push %rax
   mov -360(%rbp), %rax
@@ -21653,15 +22732,15 @@ parse_stmt:
   mov %rax, (%rdi)
   mov -272(%rbp), %rax
   mov %rax, -360(%rbp)
-  jmp .L.end694
-.L.else694:
+  jmp .L.end704
+.L.else704:
   mov -272(%rbp), %rax
   mov %rax, -368(%rbp)
   mov -272(%rbp), %rax
   mov %rax, -360(%rbp)
-.L.end694:
-  jmp .L.begin685
-.L.end685:
+.L.end704:
+  jmp .L.begin695
+.L.end695:
   lea .L.str178+8(%rip), %rax
   push %rax
   mov $1, %rax
@@ -21701,9 +22780,9 @@ parse_stmt:
   call new_try
   add $8, %rsp
   jmp .L.return.parse_stmt
-  jmp .L.end683
-.L.else683:
-.L.end683:
+  jmp .L.end693
+.L.else693:
+.L.end693:
   mov $12, %rax
   push %rax
   pop %rdi
@@ -21711,7 +22790,7 @@ parse_stmt:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else695
+  je .L.else705
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -21759,7 +22838,7 @@ parse_stmt:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else696
+  je .L.else706
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -21780,8 +22859,8 @@ parse_stmt:
   sub $8, %rsp
   call narrow_reset
   add $8, %rsp
-  jmp .L.end696
-.L.else696:
+  jmp .L.end706
+.L.else706:
   mov -240(%rbp), %rax
   push %rax
   pop %rdi
@@ -21789,17 +22868,17 @@ parse_stmt:
   call stmt_parse_diverges
   add $8, %rsp
   cmp $0, %rax
-  je .L.else697
+  je .L.else707
   mov -256(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call narrow_push_eq_nulls
   add $8, %rsp
-  jmp .L.end697
-.L.else697:
-.L.end697:
-.L.end696:
+  jmp .L.end707
+.L.else707:
+.L.end707:
+.L.end706:
   mov -256(%rbp), %rax
   push %rax
   mov -240(%rbp), %rax
@@ -21813,9 +22892,9 @@ parse_stmt:
   call new_if
   add $8, %rsp
   jmp .L.return.parse_stmt
-  jmp .L.end695
-.L.else695:
-.L.end695:
+  jmp .L.end705
+.L.else705:
+.L.end705:
   mov $14, %rax
   push %rax
   pop %rdi
@@ -21823,7 +22902,7 @@ parse_stmt:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else698
+  je .L.else708
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -21872,9 +22951,9 @@ parse_stmt:
   call new_while
   add $8, %rsp
   jmp .L.return.parse_stmt
-  jmp .L.end698
-.L.else698:
-.L.end698:
+  jmp .L.end708
+.L.else708:
+.L.end708:
   mov $48, %rax
   push %rax
   pop %rdi
@@ -21882,7 +22961,7 @@ parse_stmt:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else699
+  je .L.else709
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -21915,7 +22994,7 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else700
+  je .L.else710
   lea .L.str179+8(%rip), %rax
   push %rax
   mov -192(%rbp), %rax
@@ -21925,9 +23004,9 @@ parse_stmt:
   sub $8, %rsp
   call error_ty
   add $8, %rsp
-  jmp .L.end700
-.L.else700:
-.L.end700:
+  jmp .L.end710
+.L.else710:
+.L.end710:
   mov -192(%rbp), %rax
   push %rax
   pop %rdi
@@ -21938,7 +23017,7 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else701
+  je .L.else711
   lea .L.str180+8(%rip), %rax
   push %rax
   mov -192(%rbp), %rax
@@ -21948,9 +23027,9 @@ parse_stmt:
   sub $8, %rsp
   call error_ty
   add $8, %rsp
-  jmp .L.end701
-.L.else701:
-.L.end701:
+  jmp .L.end711
+.L.else711:
+.L.end711:
   mov $38, %rax
   push %rax
   pop %rdi
@@ -21961,7 +23040,7 @@ parse_stmt:
   mov %rax, -184(%rbp)
   mov $0, %rax
   mov %rax, -176(%rbp)
-.L.begin702:
+.L.begin712:
   mov $39, %rax
   push %rax
   pop %rdi
@@ -21972,7 +23051,7 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end702
+  je .L.end712
   mov $4, %rax
   push %rax
   pop %rdi
@@ -21983,16 +23062,16 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else703
+  je .L.else713
   lea .L.str181+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end703
-.L.else703:
-.L.end703:
+  jmp .L.end713
+.L.else713:
+.L.end713:
   sub $8, %rsp
   call cur_tokstr
   add $8, %rsp
@@ -22020,19 +23099,19 @@ parse_stmt:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else704
+  je .L.else714
   movzb -160(%rbp), %rax
   cmp $0, %rax
-  je .L.else705
+  je .L.else715
   lea .L.str183+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end705
-.L.else705:
-.L.end705:
+  jmp .L.end715
+.L.else715:
+.L.end715:
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -22047,16 +23126,16 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else706
+  je .L.else716
   lea .L.str184+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end706
-.L.else706:
-.L.end706:
+  jmp .L.end716
+.L.else716:
+.L.end716:
   sub $8, %rsp
   call cur_tokstr
   add $8, %rsp
@@ -22071,8 +23150,8 @@ parse_stmt:
   sub $8, %rsp
   call skip
   add $8, %rsp
-  jmp .L.end704
-.L.else704:
+  jmp .L.end714
+.L.else714:
   mov $4, %rax
   push %rax
   pop %rdi
@@ -22080,19 +23159,19 @@ parse_stmt:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else707
+  je .L.else717
   movzb -160(%rbp), %rax
   cmp $0, %rax
-  je .L.else708
+  je .L.else718
   lea .L.str185+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end708
-.L.else708:
-.L.end708:
+  jmp .L.end718
+.L.else718:
+.L.end718:
   sub $8, %rsp
   call cur_tokstr
   add $8, %rsp
@@ -22101,8 +23180,8 @@ parse_stmt:
   add $40, %rax
   mov (%rax), %rax
   mov %rax, tok(%rip)
-  jmp .L.end707
-.L.else707:
+  jmp .L.end717
+.L.else717:
   mov $38, %rax
   push %rax
   pop %rdi
@@ -22110,18 +23189,18 @@ parse_stmt:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else709
+  je .L.else719
   lea .L.str186+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end709
-.L.else709:
-.L.end709:
-.L.end707:
-.L.end704:
+  jmp .L.end719
+.L.else719:
+.L.end719:
+.L.end717:
+.L.end714:
   mov $50, %rax
   push %rax
   pop %rdi
@@ -22137,10 +23216,10 @@ parse_stmt:
   mov %rax, -136(%rbp)
   movzb -160(%rbp), %rax
   cmp $0, %rax
-  je .L.else710
+  je .L.else720
   mov -184(%rbp), %rax
   mov %rax, -128(%rbp)
-.L.begin711:
+.L.begin721:
   mov -128(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -22150,7 +23229,7 @@ parse_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end711
+  je .L.end721
   mov -128(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -22161,22 +23240,22 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else712
+  je .L.else722
   lea .L.str187+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end712
-.L.else712:
-.L.end712:
+  jmp .L.end722
+.L.else722:
+.L.end722:
   mov -128(%rbp), %rax
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -128(%rbp)
-  jmp .L.begin711
-.L.end711:
+  jmp .L.begin721
+.L.end721:
   mov -152(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -22186,18 +23265,18 @@ parse_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else713
+  je .L.else723
   lea .L.str188+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end713
-.L.else713:
-.L.end713:
-  jmp .L.end710
-.L.else710:
+  jmp .L.end723
+.L.else723:
+.L.end723:
+  jmp .L.end720
+.L.else720:
   mov -192(%rbp), %rax
   push %rax
   pop %rdi
@@ -22222,21 +23301,21 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else714
+  je .L.else724
   lea .L.str189+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end714
-.L.else714:
-.L.end714:
+  jmp .L.end724
+.L.else724:
+.L.end724:
   mov -120(%rbp), %rax
   mov %rax, -112(%rbp)
   mov -184(%rbp), %rax
   mov %rax, -104(%rbp)
-.L.begin715:
+.L.begin725:
   mov -104(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -22246,7 +23325,7 @@ parse_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end715
+  je .L.end725
   mov -104(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -22257,22 +23336,22 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else716
+  je .L.else726
   lea .L.str190+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end716
-.L.else716:
-.L.end716:
+  jmp .L.end726
+.L.else726:
+.L.end726:
   mov -104(%rbp), %rax
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -104(%rbp)
-  jmp .L.begin715
-.L.end715:
+  jmp .L.begin725
+.L.end725:
   mov -112(%rbp), %rax
   mov %rax, -144(%rbp)
   mov -152(%rbp), %rax
@@ -22284,7 +23363,7 @@ parse_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else717
+  je .L.else727
   mov -112(%rbp), %rax
   add $24, %rax
   mov (%rax), %rax
@@ -22296,16 +23375,16 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else718
+  je .L.else728
   lea .L.str191+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end718
-.L.else718:
-.L.end718:
+  jmp .L.end728
+.L.else728:
+.L.end728:
   mov -152(%rbp), %rax
   mov %rax, -96(%rbp)
   mov -96(%rbp), %rax
@@ -22330,10 +23409,10 @@ parse_stmt:
   mov %rax, (%rdi)
   mov -88(%rbp), %rax
   mov %rax, -136(%rbp)
-  jmp .L.end717
-.L.else717:
-.L.end717:
-.L.end710:
+  jmp .L.end727
+.L.else727:
+.L.end727:
+.L.end720:
   sub $8, %rsp
   call parse_compound
   add $8, %rsp
@@ -22363,7 +23442,7 @@ parse_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else719
+  je .L.else729
   mov -72(%rbp), %rax
   push %rax
   mov -176(%rbp), %rax
@@ -22374,16 +23453,16 @@ parse_stmt:
   mov %rax, (%rdi)
   mov -72(%rbp), %rax
   mov %rax, -176(%rbp)
-  jmp .L.end719
-.L.else719:
+  jmp .L.end729
+.L.else729:
   mov -72(%rbp), %rax
   mov %rax, -184(%rbp)
   mov -72(%rbp), %rax
   mov %rax, -176(%rbp)
-.L.end719:
+.L.end729:
   movzb -160(%rbp), %rax
   cmp $0, %rax
-  je .L.else720
+  je .L.else730
   mov $39, %rax
   push %rax
   pop %rdi
@@ -22394,26 +23473,26 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else721
+  je .L.else731
   lea .L.str192+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end721
-.L.else721:
-.L.end721:
-  jmp .L.end720
-.L.else720:
-.L.end720:
-  jmp .L.begin702
-.L.end702:
+  jmp .L.end731
+.L.else731:
+.L.end731:
+  jmp .L.end730
+.L.else730:
+.L.end730:
+  jmp .L.begin712
+.L.end712:
   mov $0, %rax
   mov %rax, -64(%rbp)
   mov -184(%rbp), %rax
   mov %rax, -56(%rbp)
-.L.begin722:
+.L.begin732:
   mov -56(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -22423,7 +23502,7 @@ parse_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end722
+  je .L.end732
   mov -56(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -22434,18 +23513,18 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else723
+  je .L.else733
   mov $1, %rax
   mov %rax, -64(%rbp)
-  jmp .L.end723
-.L.else723:
-.L.end723:
+  jmp .L.end733
+.L.else733:
+.L.end733:
   mov -56(%rbp), %rax
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -56(%rbp)
-  jmp .L.begin722
-.L.end722:
+  jmp .L.begin732
+.L.end732:
   mov -64(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -22455,7 +23534,7 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else724
+  je .L.else734
   mov -192(%rbp), %rax
   push %rax
   pop %rdi
@@ -22465,7 +23544,7 @@ parse_stmt:
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -48(%rbp)
-.L.begin725:
+.L.begin735:
   mov -48(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -22475,12 +23554,12 @@ parse_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end725
+  je .L.end735
   mov $0, %rax
   mov %rax, -40(%rbp)
   mov -184(%rbp), %rax
   mov %rax, -32(%rbp)
-.L.begin726:
+.L.begin736:
   mov -32(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -22490,7 +23569,7 @@ parse_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end726
+  je .L.end736
   mov -32(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -22501,18 +23580,18 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else727
+  je .L.else737
   mov $1, %rax
   mov %rax, -40(%rbp)
-  jmp .L.end727
-.L.else727:
-.L.end727:
+  jmp .L.end737
+.L.else737:
+.L.end737:
   mov -32(%rbp), %rax
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -32(%rbp)
-  jmp .L.begin726
-.L.end726:
+  jmp .L.begin736
+.L.end736:
   mov -40(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -22522,25 +23601,25 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else728
+  je .L.else738
   lea .L.str193+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end728
-.L.else728:
-.L.end728:
+  jmp .L.end738
+.L.else738:
+.L.end738:
   mov -48(%rbp), %rax
   add $40, %rax
   mov (%rax), %rax
   mov %rax, -48(%rbp)
-  jmp .L.begin725
-.L.end725:
-  jmp .L.end724
-.L.else724:
-.L.end724:
+  jmp .L.begin735
+.L.end735:
+  jmp .L.end734
+.L.else734:
+.L.end734:
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -22555,9 +23634,9 @@ parse_stmt:
   call new_match
   add $8, %rsp
   jmp .L.return.parse_stmt
-  jmp .L.end699
-.L.else699:
-.L.end699:
+  jmp .L.end709
+.L.else709:
+.L.end709:
   mov $38, %rax
   push %rax
   pop %rdi
@@ -22565,14 +23644,14 @@ parse_stmt:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else729
+  je .L.else739
   sub $8, %rsp
   call parse_compound
   add $8, %rsp
   jmp .L.return.parse_stmt
-  jmp .L.end729
-.L.else729:
-.L.end729:
+  jmp .L.end739
+.L.else739:
+.L.end739:
   mov $4, %rax
   push %rax
   pop %rdi
@@ -22580,7 +23659,7 @@ parse_stmt:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.false731
+  je .L.false741
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -22593,14 +23672,14 @@ parse_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false731
+  je .L.false741
   mov $1, %rax
-  jmp .L.end731
-.L.false731:
+  jmp .L.end741
+.L.false741:
   mov $0, %rax
-.L.end731:
+.L.end741:
   cmp $0, %rax
-  je .L.else730
+  je .L.else740
   mov $1, %rax
   push %rax
   pop %rdi
@@ -22615,16 +23694,16 @@ parse_stmt:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else732
+  je .L.else742
   lea .L.str194+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end732
-.L.else732:
-.L.end732:
+  jmp .L.end742
+.L.else742:
+.L.end742:
   mov $33, %rax
   push %rax
   pop %rdi
@@ -22638,7 +23717,7 @@ parse_stmt:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else733
+  je .L.else743
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -22656,9 +23735,9 @@ parse_stmt:
   call new_block
   add $8, %rsp
   jmp .L.return.parse_stmt
-  jmp .L.end733
-.L.else733:
-.L.end733:
+  jmp .L.end743
+.L.else743:
+.L.end743:
   sub $8, %rsp
   call parse_expr
   add $8, %rsp
@@ -22689,9 +23768,9 @@ parse_stmt:
   call new_expr_stmt
   add $8, %rsp
   jmp .L.return.parse_stmt
-  jmp .L.end730
-.L.else730:
-.L.end730:
+  jmp .L.end740
+.L.else740:
+.L.end740:
   sub $8, %rsp
   call parse_expr
   add $8, %rsp
@@ -22726,7 +23805,7 @@ fn_param:
   mov %rax, -16(%rbp)
   mov $0, %rax
   mov %rax, -8(%rbp)
-.L.begin734:
+.L.begin744:
   mov -16(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -22736,7 +23815,7 @@ fn_param:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end734
+  je .L.end744
   mov -8(%rbp), %rax
   push %rax
   mov -24(%rbp), %rax
@@ -22746,12 +23825,12 @@ fn_param:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else735
+  je .L.else745
   mov -16(%rbp), %rax
   jmp .L.return.fn_param
-  jmp .L.end735
-.L.else735:
-.L.end735:
+  jmp .L.end745
+.L.else745:
+.L.end745:
   mov -8(%rbp), %rax
   push %rax
   mov $1, %rax
@@ -22763,8 +23842,8 @@ fn_param:
   add $64, %rax
   mov (%rax), %rax
   mov %rax, -16(%rbp)
-  jmp .L.begin734
-.L.end734:
+  jmp .L.begin744
+.L.end744:
   mov $0, %rax
   jmp .L.return.fn_param
 .L.return.fn_param:
@@ -22797,7 +23876,7 @@ append_fn_param:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else736
+  je .L.else746
   mov -16(%rbp), %rax
   push %rax
   mov -24(%rbp), %rax
@@ -22808,14 +23887,14 @@ append_fn_param:
   mov %rax, (%rdi)
   mov $0, %rax
   jmp .L.return.append_fn_param
-  jmp .L.end736
-.L.else736:
-.L.end736:
+  jmp .L.end746
+.L.else746:
+.L.end746:
   mov -24(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-.L.begin737:
+.L.begin747:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -22825,7 +23904,7 @@ append_fn_param:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end737
+  je .L.end747
   mov -8(%rbp), %rax
   add $64, %rax
   mov (%rax), %rax
@@ -22837,7 +23916,7 @@ append_fn_param:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else738
+  je .L.else748
   mov -16(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -22848,15 +23927,15 @@ append_fn_param:
   mov %rax, (%rdi)
   mov $0, %rax
   jmp .L.return.append_fn_param
-  jmp .L.end738
-.L.else738:
-.L.end738:
+  jmp .L.end748
+.L.else748:
+.L.end748:
   mov -8(%rbp), %rax
   add $64, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin737
-.L.end737:
+  jmp .L.begin747
+.L.end747:
 .L.return.append_fn_param:
   mov %rbp, %rsp
   pop %rbp
@@ -22867,7 +23946,7 @@ parse_function:
   mov %rsp, %rbp
   sub $96, %rsp
   mov %rdi, -96(%rbp)
-  mov $88, %rdi
+  mov $96, %rdi
   call malloc
   push %rbx
   mov %rax, %rbx
@@ -22914,6 +23993,10 @@ parse_function:
   mov %rbx, %rdi
   add $80, %rdi
   mov %rax, (%rdi)
+  mov $0, %rax
+  mov %rbx, %rdi
+  add $88, %rdi
+  mov %rax, (%rdi)
   mov %rbx, %rax
   pop %rbx
   mov %rax, -88(%rbp)
@@ -22935,7 +24018,7 @@ parse_function:
   add $8, %rsp
   mov $0, %rax
   mov %rax, -80(%rbp)
-.L.begin739:
+.L.begin749:
   mov $37, %rax
   push %rax
   pop %rdi
@@ -22946,7 +24029,7 @@ parse_function:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end739
+  je .L.end749
   mov -80(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -22956,16 +24039,16 @@ parse_function:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else740
+  je .L.else750
   mov $43, %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call skip
   add $8, %rsp
-  jmp .L.end740
-.L.else740:
-.L.end740:
+  jmp .L.end750
+.L.else750:
+.L.end750:
   mov -80(%rbp), %rax
   push %rax
   mov $6, %rax
@@ -22975,16 +24058,16 @@ parse_function:
   setge %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else741
+  je .L.else751
   lea .L.str195+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end741
-.L.else741:
-.L.end741:
+  jmp .L.end751
+.L.else751:
+.L.end751:
   mov $1, %rax
   push %rax
   pop %rdi
@@ -23008,8 +24091,8 @@ parse_function:
   pop %rax
   add %rdi, %rax
   mov %rax, -80(%rbp)
-  jmp .L.begin739
-.L.end739:
+  jmp .L.begin749
+.L.end749:
   mov -80(%rbp), %rax
   push %rax
   mov -88(%rbp), %rax
@@ -23031,7 +24114,7 @@ parse_function:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else742
+  je .L.else752
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -23040,7 +24123,7 @@ parse_function:
   mov %rax, -64(%rbp)
   mov $0, %rax
   mov %rax, -56(%rbp)
-.L.begin743:
+.L.begin753:
   mov -56(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -23050,7 +24133,7 @@ parse_function:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end743
+  je .L.end753
   mov $4, %rax
   push %rax
   pop %rdi
@@ -23061,16 +24144,16 @@ parse_function:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else744
+  je .L.else754
   lea .L.str196+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end744
-.L.else744:
-.L.end744:
+  jmp .L.end754
+.L.else754:
+.L.end754:
   sub $8, %rsp
   call cur_tokstr
   add $8, %rsp
@@ -23091,16 +24174,16 @@ parse_function:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else745
+  je .L.else755
   lea .L.str197+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end745
-.L.else745:
-.L.end745:
+  jmp .L.end755
+.L.else755:
+.L.end755:
   mov -40(%rbp), %rax
   mov %rax, -32(%rbp)
   mov -88(%rbp), %rax
@@ -23115,16 +24198,16 @@ parse_function:
   call exn_in_list
   add $8, %rsp
   cmp $0, %rax
-  je .L.else746
+  je .L.else756
   lea .L.str198+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end746
-.L.else746:
-.L.end746:
+  jmp .L.end756
+.L.else756:
+.L.end756:
   mov $24, %rdi
   call malloc
   push %rbx
@@ -23152,7 +24235,7 @@ parse_function:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else747
+  je .L.else757
   mov -24(%rbp), %rax
   push %rax
   mov -64(%rbp), %rax
@@ -23163,8 +24246,8 @@ parse_function:
   mov %rax, (%rdi)
   mov -24(%rbp), %rax
   mov %rax, -64(%rbp)
-  jmp .L.end747
-.L.else747:
+  jmp .L.end757
+.L.else757:
   mov -24(%rbp), %rax
   push %rax
   mov -88(%rbp), %rax
@@ -23175,7 +24258,7 @@ parse_function:
   mov %rax, (%rdi)
   mov -24(%rbp), %rax
   mov %rax, -64(%rbp)
-.L.end747:
+.L.end757:
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -23187,21 +24270,21 @@ parse_function:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else748
+  je .L.else758
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
   mov %rax, tok(%rip)
-  jmp .L.end748
-.L.else748:
+  jmp .L.end758
+.L.else758:
   mov $1, %rax
   mov %rax, -56(%rbp)
-.L.end748:
-  jmp .L.begin743
-.L.end743:
-  jmp .L.end742
-.L.else742:
-.L.end742:
+.L.end758:
+  jmp .L.begin753
+.L.end753:
+  jmp .L.end752
+.L.else752:
+.L.end752:
   mov $44, %rax
   push %rax
   pop %rdi
@@ -23209,7 +24292,7 @@ parse_function:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else749
+  je .L.else759
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -23224,9 +24307,9 @@ parse_function:
   pop %rsi
   mov %rsi, %rax
   mov %rax, (%rdi)
-  jmp .L.end749
-.L.else749:
-.L.end749:
+  jmp .L.end759
+.L.else759:
+.L.end759:
   mov -88(%rbp), %rax
   add $48, %rax
   mov (%rax), %rax
@@ -23240,7 +24323,7 @@ parse_function:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false751
+  je .L.false761
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -23248,14 +24331,14 @@ parse_function:
   call passes_by_ref
   add $8, %rsp
   cmp $0, %rax
-  je .L.false751
+  je .L.false761
   mov $1, %rax
-  jmp .L.end751
-.L.false751:
+  jmp .L.end761
+.L.false761:
   mov $0, %rax
-.L.end751:
+.L.end761:
   cmp $0, %rax
-  je .L.else750
+  je .L.else760
   mov -88(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
@@ -23267,16 +24350,16 @@ parse_function:
   setge %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else752
+  je .L.else762
   lea .L.str199+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end752
-.L.else752:
-.L.end752:
+  jmp .L.end762
+.L.else762:
+.L.end762:
   lea .L.str200+8(%rip), %rax
   push %rax
   mov $1, %rax
@@ -23308,9 +24391,9 @@ parse_function:
   pop %rsi
   mov %rsi, %rax
   mov %rax, (%rdi)
-  jmp .L.end750
-.L.else750:
-.L.end750:
+  jmp .L.end760
+.L.else760:
+.L.end760:
   sub $8, %rsp
   call parse_compound
   add $8, %rsp
@@ -23353,7 +24436,7 @@ parse_field_list:
   mov %rax, -48(%rbp)
   mov -64(%rbp), %rax
   mov %rax, -40(%rbp)
-.L.begin753:
+.L.begin763:
   mov $39, %rax
   push %rax
   pop %rdi
@@ -23364,7 +24447,7 @@ parse_field_list:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end753
+  je .L.end763
   mov $4, %rax
   push %rax
   pop %rdi
@@ -23375,16 +24458,16 @@ parse_field_list:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else754
+  je .L.else764
   lea .L.str201+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end754
-.L.else754:
-.L.end754:
+  jmp .L.end764
+.L.else764:
+.L.end764:
   sub $8, %rsp
   call cur_tokstr
   add $8, %rsp
@@ -23417,16 +24500,16 @@ parse_field_list:
   call is_noreturn_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.else755
+  je .L.else765
   lea .L.str202+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end755
-.L.else755:
-.L.end755:
+  jmp .L.end765
+.L.else765:
+.L.end765:
   mov $32, %rdi
   call malloc
   push %rbx
@@ -23465,12 +24548,12 @@ parse_field_list:
   setle %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else756
+  je .L.else766
   mov $8, %rax
   mov %rax, -8(%rbp)
-  jmp .L.end756
-.L.else756:
-.L.end756:
+  jmp .L.end766
+.L.else766:
+.L.end766:
   mov -40(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -23503,7 +24586,7 @@ parse_field_list:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else757
+  je .L.else767
   mov -16(%rbp), %rax
   push %rax
   mov -48(%rbp), %rax
@@ -23514,13 +24597,13 @@ parse_field_list:
   mov %rax, (%rdi)
   mov -16(%rbp), %rax
   mov %rax, -48(%rbp)
-  jmp .L.end757
-.L.else757:
+  jmp .L.end767
+.L.else767:
   mov -16(%rbp), %rax
   mov %rax, -56(%rbp)
   mov -16(%rbp), %rax
   mov %rax, -48(%rbp)
-.L.end757:
+.L.end767:
   mov $42, %rax
   push %rax
   pop %rdi
@@ -23528,7 +24611,7 @@ parse_field_list:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  jne .L.true759
+  jne .L.true769
   mov $43, %rax
   push %rax
   pop %rdi
@@ -23536,21 +24619,21 @@ parse_field_list:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.false759
-.L.true759:
+  je .L.false769
+.L.true769:
   mov $1, %rax
-  jmp .L.end759
-.L.false759:
+  jmp .L.end769
+.L.false769:
   mov $0, %rax
-.L.end759:
+.L.end769:
   cmp $0, %rax
-  je .L.else758
+  je .L.else768
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
   mov %rax, tok(%rip)
-  jmp .L.end758
-.L.else758:
+  jmp .L.end768
+.L.else768:
   mov $39, %rax
   push %rax
   pop %rdi
@@ -23561,19 +24644,19 @@ parse_field_list:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else760
+  je .L.else770
   lea .L.str203+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end760
-.L.else760:
-.L.end760:
-.L.end758:
-  jmp .L.begin753
-.L.end753:
+  jmp .L.end770
+.L.else770:
+.L.end770:
+.L.end768:
+  jmp .L.begin763
+.L.end763:
   mov -40(%rbp), %rax
   push %rax
   mov -64(%rbp), %rax
@@ -23616,16 +24699,16 @@ parse_variant:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else761
+  je .L.else771
   lea .L.str205+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end761
-.L.else761:
-.L.end761:
+  jmp .L.end771
+.L.else771:
+.L.end771:
   mov $48, %rdi
   call malloc
   push %rbx
@@ -23669,7 +24752,7 @@ parse_variant:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else762
+  je .L.else772
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -23695,7 +24778,7 @@ parse_variant:
   pop %rsi
   mov %rsi, %rax
   mov %rax, (%rdi)
-  mov $40, %rdi
+  mov $48, %rdi
   call malloc
   push %rbx
   mov %rax, %rbx
@@ -23729,6 +24812,10 @@ parse_variant:
   mov %rbx, %rdi
   add $32, %rdi
   mov %rax, (%rdi)
+  mov $0, %rax
+  mov %rbx, %rdi
+  add $40, %rdi
+  mov %rax, (%rdi)
   mov %rbx, %rax
   pop %rbx
   mov %rax, -8(%rbp)
@@ -23745,9 +24832,9 @@ parse_variant:
   pop %rsi
   mov %rsi, %rax
   mov %rax, (%rdi)
-  jmp .L.end762
-.L.else762:
-.L.end762:
+  jmp .L.end772
+.L.else772:
+.L.end772:
   mov -16(%rbp), %rax
   jmp .L.return.parse_variant
 .L.return.parse_variant:
@@ -23773,16 +24860,16 @@ parse_exception_def:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else763
+  je .L.else773
   lea .L.str206+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end763
-.L.else763:
-.L.end763:
+  jmp .L.end773
+.L.else773:
+.L.end773:
   sub $8, %rsp
   call cur_tokstr
   add $8, %rsp
@@ -23805,7 +24892,7 @@ parse_exception_def:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  jne .L.true766
+  jne .L.true776
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -23820,15 +24907,15 @@ parse_exception_def:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false766
-.L.true766:
+  je .L.false776
+.L.true776:
   mov $1, %rax
-  jmp .L.end766
-.L.false766:
+  jmp .L.end776
+.L.false776:
   mov $0, %rax
-.L.end766:
+.L.end776:
   cmp $0, %rax
-  jne .L.true765
+  jne .L.true775
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -23843,25 +24930,25 @@ parse_exception_def:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false765
-.L.true765:
+  je .L.false775
+.L.true775:
   mov $1, %rax
-  jmp .L.end765
-.L.false765:
+  jmp .L.end775
+.L.false775:
   mov $0, %rax
-.L.end765:
+.L.end775:
   cmp $0, %rax
-  je .L.else764
+  je .L.else774
   lea .L.str207+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end764
-.L.else764:
-.L.end764:
-  mov $48, %rdi
+  jmp .L.end774
+.L.else774:
+.L.end774:
+  mov $56, %rdi
   call malloc
   push %rbx
   mov %rax, %rbx
@@ -23888,6 +24975,10 @@ parse_exception_def:
   mov %rbx, %rdi
   add $40, %rdi
   mov %rax, (%rdi)
+  mov $0, %rax
+  mov %rbx, %rdi
+  add $48, %rdi
+  mov %rax, (%rdi)
   mov %rbx, %rax
   pop %rbx
   mov %rax, -8(%rbp)
@@ -23900,6 +24991,12 @@ parse_exception_def:
   mov %rax, next_exn_tag(%rip)
   mov -8(%rbp), %rax
   mov %rax, exn_defs(%rip)
+  mov -8(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call hash_put_exn
+  add $8, %rsp
   mov $38, %rax
   push %rax
   pop %rdi
@@ -23907,7 +25004,7 @@ parse_exception_def:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else767
+  je .L.else777
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -23939,15 +25036,15 @@ parse_exception_def:
   sub $8, %rsp
   call skip
   add $8, %rsp
-  jmp .L.end767
-.L.else767:
+  jmp .L.end777
+.L.else777:
   mov $42, %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call skip
   add $8, %rsp
-.L.end767:
+.L.end777:
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -23977,16 +25074,16 @@ parse_type_def:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else768
+  je .L.else778
   lea .L.str208+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end768
-.L.else768:
-.L.end768:
+  jmp .L.end778
+.L.else778:
+.L.end778:
   sub $8, %rsp
   call cur_tokstr
   add $8, %rsp
@@ -24008,7 +25105,7 @@ parse_type_def:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else769
+  je .L.else779
   mov -88(%rbp), %rax
   push %rax
   pop %rdi
@@ -24023,16 +25120,16 @@ parse_type_def:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else770
+  je .L.else780
   lea .L.str209+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end770
-.L.else770:
-.L.end770:
+  jmp .L.end780
+.L.else780:
+.L.end780:
   mov -88(%rbp), %rax
   push %rax
   pop %rdi
@@ -24051,16 +25148,16 @@ parse_type_def:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else771
+  je .L.else781
   lea .L.str210+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end771
-.L.else771:
-.L.end771:
+  jmp .L.end781
+.L.else781:
+.L.end781:
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -24094,9 +25191,9 @@ parse_type_def:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.parse_type_def
-  jmp .L.end769
-.L.else769:
-.L.end769:
+  jmp .L.end779
+.L.else779:
+.L.end779:
   mov -88(%rbp), %rax
   push %rax
   pop %rdi
@@ -24113,7 +25210,7 @@ parse_type_def:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else772
+  je .L.else782
   mov -72(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
@@ -24125,25 +25222,25 @@ parse_type_def:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else773
+  je .L.else783
   lea .L.str211+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end773
-.L.else773:
-.L.end773:
+  jmp .L.end783
+.L.else783:
+.L.end783:
   mov -88(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call remove_struct
   add $8, %rsp
-  jmp .L.end772
-.L.else772:
-.L.end772:
+  jmp .L.end782
+.L.else782:
+.L.end782:
   mov -88(%rbp), %rax
   push %rax
   pop %rdi
@@ -24162,16 +25259,16 @@ parse_type_def:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else774
+  je .L.else784
   lea .L.str212+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end774
-.L.else774:
-.L.end774:
+  jmp .L.end784
+.L.else784:
+.L.end784:
   mov $49, %rax
   push %rax
   pop %rdi
@@ -24179,14 +25276,14 @@ parse_type_def:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else775
+  je .L.else785
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
   mov %rax, tok(%rip)
-  jmp .L.end775
-.L.else775:
-.L.end775:
+  jmp .L.end785
+.L.else785:
+.L.end785:
   mov $0, %rax
   mov %rax, -56(%rbp)
   mov $0, %rax
@@ -24197,7 +25294,7 @@ parse_type_def:
   mov %rax, -32(%rbp)
   mov $0, %rax
   mov %rax, -24(%rbp)
-.L.begin776:
+.L.begin786:
   mov -24(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -24207,7 +25304,7 @@ parse_type_def:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end776
+  je .L.end786
   mov -40(%rbp), %rax
   push %rax
   mov -88(%rbp), %rax
@@ -24220,7 +25317,7 @@ parse_type_def:
   mov %rax, -16(%rbp)
   mov -56(%rbp), %rax
   mov %rax, -8(%rbp)
-.L.begin777:
+.L.begin787:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -24230,7 +25327,7 @@ parse_type_def:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end777
+  je .L.end787
   mov -8(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -24243,22 +25340,22 @@ parse_type_def:
   call streq
   add $8, %rsp
   cmp $0, %rax
-  je .L.else778
+  je .L.else788
   lea .L.str213+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end778
-.L.else778:
-.L.end778:
+  jmp .L.end788
+.L.else788:
+.L.end788:
   mov -8(%rbp), %rax
   add $40, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin777
-.L.end777:
+  jmp .L.begin787
+.L.end787:
   mov -16(%rbp), %rax
   add $32, %rax
   mov (%rax), %rax
@@ -24270,14 +25367,14 @@ parse_type_def:
   setg %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else779
+  je .L.else789
   mov -16(%rbp), %rax
   add $32, %rax
   mov (%rax), %rax
   mov %rax, -32(%rbp)
-  jmp .L.end779
-.L.else779:
-.L.end779:
+  jmp .L.end789
+.L.else789:
+.L.end789:
   mov -48(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -24287,7 +25384,7 @@ parse_type_def:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else780
+  je .L.else790
   mov -16(%rbp), %rax
   push %rax
   mov -48(%rbp), %rax
@@ -24298,13 +25395,13 @@ parse_type_def:
   mov %rax, (%rdi)
   mov -16(%rbp), %rax
   mov %rax, -48(%rbp)
-  jmp .L.end780
-.L.else780:
+  jmp .L.end790
+.L.else790:
   mov -16(%rbp), %rax
   mov %rax, -56(%rbp)
   mov -16(%rbp), %rax
   mov %rax, -48(%rbp)
-.L.end780:
+.L.end790:
   mov -40(%rbp), %rax
   push %rax
   mov $1, %rax
@@ -24319,18 +25416,18 @@ parse_type_def:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else781
+  je .L.else791
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
   mov %rax, tok(%rip)
-  jmp .L.end781
-.L.else781:
+  jmp .L.end791
+.L.else791:
   mov $1, %rax
   mov %rax, -24(%rbp)
-.L.end781:
-  jmp .L.begin776
-.L.end776:
+.L.end791:
+  jmp .L.begin786
+.L.end786:
   mov -56(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -24340,16 +25437,16 @@ parse_type_def:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else782
+  je .L.else792
   lea .L.str214+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end782
-.L.else782:
-.L.end782:
+  jmp .L.end792
+.L.else792:
+.L.end792:
   mov -56(%rbp), %rax
   push %rax
   mov -64(%rbp), %rax
@@ -24380,7 +25477,7 @@ parse_type_def:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else783
+  je .L.else793
   mov -72(%rbp), %rax
   add $24, %rax
   mov (%rax), %rax
@@ -24392,7 +25489,7 @@ parse_type_def:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else784
+  je .L.else794
   mov -72(%rbp), %rax
   push %rax
   mov -64(%rbp), %rax
@@ -24402,12 +25499,12 @@ parse_type_def:
   sub $8, %rsp
   call rebind_struct_stub_to_enum
   add $8, %rsp
-  jmp .L.end784
-.L.else784:
-.L.end784:
-  jmp .L.end783
-.L.else783:
-.L.end783:
+  jmp .L.end794
+.L.else794:
+.L.end794:
+  jmp .L.end793
+.L.else793:
+.L.end793:
   mov $42, %rax
   push %rax
   pop %rdi
@@ -24427,7 +25524,20 @@ parse_program:
   mov %rax, -48(%rbp)
   mov $0, %rax
   mov %rax, functions(%rip)
-.L.begin785:
+  mov $0, %rax
+  mov %rax, globals(%rip)
+  mov $0, %rax
+  mov %rax, struct_defs(%rip)
+  mov $0, %rax
+  mov %rax, enum_defs(%rip)
+  mov $0, %rax
+  mov %rax, exn_defs(%rip)
+  mov $1, %rax
+  mov %rax, next_exn_tag(%rip)
+  sub $8, %rsp
+  call clear_sym_tables
+  add $8, %rsp
+.L.begin795:
   mov $0, %rax
   push %rax
   pop %rdi
@@ -24438,7 +25548,7 @@ parse_program:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end785
+  je .L.end795
   mov $16, %rax
   push %rax
   pop %rdi
@@ -24446,7 +25556,7 @@ parse_program:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.false788
+  je .L.false798
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -24459,14 +25569,14 @@ parse_program:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false788
+  je .L.false798
   mov $1, %rax
-  jmp .L.end788
-.L.false788:
+  jmp .L.end798
+.L.false798:
   mov $0, %rax
-.L.end788:
+.L.end798:
   cmp $0, %rax
-  je .L.false787
+  je .L.false797
   mov tok(%rip), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -24481,19 +25591,19 @@ parse_program:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false787
+  je .L.false797
   mov $1, %rax
-  jmp .L.end787
-.L.false787:
+  jmp .L.end797
+.L.false797:
   mov $0, %rax
-.L.end787:
+.L.end797:
   cmp $0, %rax
-  je .L.else786
+  je .L.else796
   sub $8, %rsp
   call parse_type_def
   add $8, %rsp
-  jmp .L.end786
-.L.else786:
+  jmp .L.end796
+.L.else796:
   mov $52, %rax
   push %rax
   pop %rdi
@@ -24501,12 +25611,12 @@ parse_program:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else789
+  je .L.else799
   sub $8, %rsp
   call parse_exception_def
   add $8, %rsp
-  jmp .L.end789
-.L.else789:
+  jmp .L.end799
+.L.else799:
   mov $4, %rax
   push %rax
   pop %rdi
@@ -24517,16 +25627,16 @@ parse_program:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else790
+  je .L.else800
   lea .L.str215+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end790
-.L.else790:
-.L.end790:
+  jmp .L.end800
+.L.else800:
+.L.end800:
   sub $8, %rsp
   call cur_tokstr
   add $8, %rsp
@@ -24542,7 +25652,7 @@ parse_program:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else791
+  je .L.else801
   mov -40(%rbp), %rax
   push %rax
   pop %rdi
@@ -24559,7 +25669,7 @@ parse_program:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else792
+  je .L.else802
   mov -32(%rbp), %rax
   push %rax
   mov -48(%rbp), %rax
@@ -24570,13 +25680,19 @@ parse_program:
   mov %rax, (%rdi)
   mov -32(%rbp), %rax
   mov %rax, -48(%rbp)
-  jmp .L.end792
-.L.else792:
+  jmp .L.end802
+.L.else802:
   mov -32(%rbp), %rax
   mov %rax, functions(%rip)
   mov -32(%rbp), %rax
   mov %rax, -48(%rbp)
-.L.end792:
+.L.end802:
+  mov -32(%rbp), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call hash_put_fn
+  add $8, %rsp
   mov -40(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -24605,8 +25721,8 @@ parse_program:
   pop %rsi
   mov %rsi, %rax
   mov %rax, (%rdi)
-  jmp .L.end791
-.L.else791:
+  jmp .L.end801
+.L.else801:
   mov $44, %rax
   push %rax
   pop %rdi
@@ -24631,16 +25747,16 @@ parse_program:
   call is_noreturn_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.else793
+  je .L.else803
   lea .L.str216+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end793
-.L.else793:
-.L.end793:
+  jmp .L.end803
+.L.else803:
+.L.end803:
   mov $43, %rax
   push %rax
   pop %rdi
@@ -24648,16 +25764,16 @@ parse_program:
   call equal
   add $8, %rsp
   cmp $0, %rax
-  je .L.else794
+  je .L.else804
   lea .L.str217+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end794
-.L.else794:
-.L.end794:
+  jmp .L.end804
+.L.else804:
+.L.end804:
   mov -40(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -24682,11 +25798,11 @@ parse_program:
   sub $8, %rsp
   call skip
   add $8, %rsp
-.L.end791:
-.L.end789:
-.L.end786:
-  jmp .L.begin785
-.L.end785:
+.L.end801:
+.L.end799:
+.L.end796:
+  jmp .L.begin795
+.L.end795:
 .L.return.parse_program:
   mov %rbp, %rsp
   pop %rbp
@@ -24695,62 +25811,64 @@ parse_program:
 stmt_parse_diverges:
   push %rbp
   mov %rsp, %rbp
-  sub $176, %rsp
-  mov %rdi, -176(%rbp)
-  mov -176(%rbp), %rax
+  sub $192, %rsp
+  mov %rdi, -184(%rbp)
+  mov -184(%rbp), %rax
   push %rax
   mov (%rax), %rax
   push %rax
   mov (%rsp), %rax
   cmp $0, %rax
-  jne .L.arm796
+  jne .L.arm806
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -168(%rbp), %rdi
+  lea -176(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov $1, %rax
   jmp .L.return.stmt_parse_diverges
-  jmp .L.matchend795
-.L.arm796:
+  jmp .L.matchend805
+.L.arm806:
   mov (%rsp), %rax
   cmp $6, %rax
-  jne .L.arm797
+  jne .L.arm807
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -160(%rbp), %rdi
+  lea -168(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
   mov $1, %rax
   jmp .L.return.stmt_parse_diverges
-  jmp .L.matchend795
-.L.arm797:
+  jmp .L.matchend805
+.L.arm807:
   mov (%rsp), %rax
   cmp $4, %rax
-  jne .L.arm798
+  jne .L.arm808
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -144(%rbp), %rdi
+  lea -152(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
-  lea -144(%rbp), %rax
+  lea -152(%rbp), %rax
   mov (%rax), %rax
   push %rax
   mov (%rax), %rax
   push %rax
   mov (%rsp), %rax
   cmp $11, %rax
-  jne .L.arm800
+  jne .L.arm810
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -136(%rbp), %rdi
+  lea -144(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
-  lea -136(%rbp), %rax
+  mov 16(%rsi), %rax
+  mov %rax, 16(%rdi)
+  lea -144(%rbp), %rax
   mov (%rax), %rax
   push %rax
   lea .L.str218+8(%rip), %rax
@@ -24761,13 +25879,13 @@ stmt_parse_diverges:
   call streq
   add $8, %rsp
   cmp $0, %rax
-  je .L.else801
+  je .L.else811
   mov $1, %rax
   jmp .L.return.stmt_parse_diverges
-  jmp .L.end801
-.L.else801:
-.L.end801:
-  lea -136(%rbp), %rax
+  jmp .L.end811
+.L.else811:
+.L.end811:
+  lea -144(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
@@ -24784,7 +25902,7 @@ stmt_parse_diverges:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else802
+  je .L.else812
   mov -120(%rbp), %rax
   add $48, %rax
   mov (%rax), %rax
@@ -24798,7 +25916,7 @@ stmt_parse_diverges:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false804
+  je .L.false814
   mov -112(%rbp), %rax
   push %rax
   pop %rdi
@@ -24806,38 +25924,38 @@ stmt_parse_diverges:
   call is_noreturn_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.false804
+  je .L.false814
   mov $1, %rax
-  jmp .L.end804
-.L.false804:
+  jmp .L.end814
+.L.false814:
   mov $0, %rax
-.L.end804:
+.L.end814:
   cmp $0, %rax
-  je .L.else803
+  je .L.else813
   mov $1, %rax
   jmp .L.return.stmt_parse_diverges
-  jmp .L.end803
-.L.else803:
-.L.end803:
-  jmp .L.end802
-.L.else802:
-.L.end802:
+  jmp .L.end813
+.L.else813:
+.L.end813:
+  jmp .L.end812
+.L.else812:
+.L.end812:
   mov $0, %rax
   jmp .L.return.stmt_parse_diverges
-  jmp .L.matchend799
-.L.arm800:
+  jmp .L.matchend809
+.L.arm810:
   mov $0, %rax
   jmp .L.return.stmt_parse_diverges
-  jmp .L.matchend799
+  jmp .L.matchend809
   mov $1, %rdi
   call exit
-.L.matchend799:
+.L.matchend809:
   add $16, %rsp
-  jmp .L.matchend795
-.L.arm798:
+  jmp .L.matchend805
+.L.arm808:
   mov (%rsp), %rax
   cmp $3, %rax
-  jne .L.arm806
+  jne .L.arm816
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -104(%rbp), %rdi
@@ -24846,7 +25964,7 @@ stmt_parse_diverges:
   lea -104(%rbp), %rax
   mov (%rax), %rax
   mov %rax, -96(%rbp)
-.L.begin807:
+.L.begin817:
   mov -96(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -24856,7 +25974,7 @@ stmt_parse_diverges:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end807
+  je .L.end817
   mov -96(%rbp), %rax
   push %rax
   pop %rdi
@@ -24864,25 +25982,25 @@ stmt_parse_diverges:
   call stmt_parse_diverges
   add $8, %rsp
   cmp $0, %rax
-  je .L.else808
+  je .L.else818
   mov $1, %rax
   jmp .L.return.stmt_parse_diverges
-  jmp .L.end808
-.L.else808:
-.L.end808:
+  jmp .L.end818
+.L.else818:
+.L.end818:
   mov -96(%rbp), %rax
   add $32, %rax
   mov (%rax), %rax
   mov %rax, -96(%rbp)
-  jmp .L.begin807
-.L.end807:
+  jmp .L.begin817
+.L.end817:
   mov $0, %rax
   jmp .L.return.stmt_parse_diverges
-  jmp .L.matchend795
-.L.arm806:
+  jmp .L.matchend805
+.L.arm816:
   mov (%rsp), %rax
   cmp $1, %rax
-  jne .L.arm809
+  jne .L.arm819
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -88(%rbp), %rdi
@@ -24905,7 +26023,7 @@ stmt_parse_diverges:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else810
+  je .L.else820
   lea -88(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
@@ -24915,7 +26033,7 @@ stmt_parse_diverges:
   call stmt_parse_diverges
   add $8, %rsp
   cmp $0, %rax
-  je .L.false811
+  je .L.false821
   mov -64(%rbp), %rax
   push %rax
   pop %rdi
@@ -24923,23 +26041,23 @@ stmt_parse_diverges:
   call stmt_parse_diverges
   add $8, %rsp
   cmp $0, %rax
-  je .L.false811
+  je .L.false821
   mov $1, %rax
-  jmp .L.end811
-.L.false811:
+  jmp .L.end821
+.L.false821:
   mov $0, %rax
-.L.end811:
+.L.end821:
   jmp .L.return.stmt_parse_diverges
-  jmp .L.end810
-.L.else810:
-.L.end810:
+  jmp .L.end820
+.L.else820:
+.L.end820:
   mov $0, %rax
   jmp .L.return.stmt_parse_diverges
-  jmp .L.matchend795
-.L.arm809:
+  jmp .L.matchend805
+.L.arm819:
   mov (%rsp), %rax
   cmp $5, %rax
-  jne .L.arm812
+  jne .L.arm822
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -56(%rbp), %rdi
@@ -24958,17 +26076,17 @@ stmt_parse_diverges:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else813
+  je .L.else823
   mov $0, %rax
   jmp .L.return.stmt_parse_diverges
-  jmp .L.end813
-.L.else813:
-.L.end813:
+  jmp .L.end823
+.L.else823:
+.L.end823:
   lea -56(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -40(%rbp)
-.L.begin814:
+.L.begin824:
   mov -40(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -24978,7 +26096,7 @@ stmt_parse_diverges:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end814
+  je .L.end824
   mov -40(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -24991,25 +26109,25 @@ stmt_parse_diverges:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else815
+  je .L.else825
   mov $0, %rax
   jmp .L.return.stmt_parse_diverges
-  jmp .L.end815
-.L.else815:
-.L.end815:
+  jmp .L.end825
+.L.else825:
+.L.end825:
   mov -40(%rbp), %rax
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -40(%rbp)
-  jmp .L.begin814
-.L.end814:
+  jmp .L.begin824
+.L.end824:
   mov $1, %rax
   jmp .L.return.stmt_parse_diverges
-  jmp .L.matchend795
-.L.arm812:
+  jmp .L.matchend805
+.L.arm822:
   mov (%rsp), %rax
   cmp $7, %rax
-  jne .L.arm816
+  jne .L.arm826
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -32(%rbp), %rdi
@@ -25030,17 +26148,17 @@ stmt_parse_diverges:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else817
+  je .L.else827
   mov $0, %rax
   jmp .L.return.stmt_parse_diverges
-  jmp .L.end817
-.L.else817:
-.L.end817:
+  jmp .L.end827
+.L.else827:
+.L.end827:
   lea -32(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-.L.begin818:
+.L.begin828:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -25050,7 +26168,7 @@ stmt_parse_diverges:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end818
+  je .L.end828
   mov -8(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -25063,28 +26181,28 @@ stmt_parse_diverges:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else819
+  je .L.else829
   mov $0, %rax
   jmp .L.return.stmt_parse_diverges
-  jmp .L.end819
-.L.else819:
-.L.end819:
+  jmp .L.end829
+.L.else829:
+.L.end829:
   mov -8(%rbp), %rax
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin818
-.L.end818:
+  jmp .L.begin828
+.L.end828:
   mov $1, %rax
   jmp .L.return.stmt_parse_diverges
-  jmp .L.matchend795
-.L.arm816:
+  jmp .L.matchend805
+.L.arm826:
   mov $0, %rax
   jmp .L.return.stmt_parse_diverges
-  jmp .L.matchend795
+  jmp .L.matchend805
   mov $1, %rdi
   call exit
-.L.matchend795:
+.L.matchend805:
   add $16, %rsp
 .L.return.stmt_parse_diverges:
   mov %rbp, %rsp
@@ -25102,7 +26220,7 @@ stmt_always_diverges:
   push %rax
   mov (%rsp), %rax
   cmp $0, %rax
-  jne .L.arm822
+  jne .L.arm832
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -144(%rbp), %rdi
@@ -25110,11 +26228,11 @@ stmt_always_diverges:
   mov %rax, 0(%rdi)
   mov $1, %rax
   jmp .L.return.stmt_always_diverges
-  jmp .L.matchend821
-.L.arm822:
+  jmp .L.matchend831
+.L.arm832:
   mov (%rsp), %rax
   cmp $6, %rax
-  jne .L.arm823
+  jne .L.arm833
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -136(%rbp), %rdi
@@ -25124,11 +26242,11 @@ stmt_always_diverges:
   mov %rax, 8(%rdi)
   mov $1, %rax
   jmp .L.return.stmt_always_diverges
-  jmp .L.matchend821
-.L.arm823:
+  jmp .L.matchend831
+.L.arm833:
   mov (%rsp), %rax
   cmp $4, %rax
-  jne .L.arm824
+  jne .L.arm834
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -120(%rbp), %rdi
@@ -25148,7 +26266,7 @@ stmt_always_diverges:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false825
+  je .L.false835
   mov -112(%rbp), %rax
   push %rax
   pop %rdi
@@ -25156,18 +26274,18 @@ stmt_always_diverges:
   call is_noreturn_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.false825
+  je .L.false835
   mov $1, %rax
-  jmp .L.end825
-.L.false825:
+  jmp .L.end835
+.L.false835:
   mov $0, %rax
-.L.end825:
+.L.end835:
   jmp .L.return.stmt_always_diverges
-  jmp .L.matchend821
-.L.arm824:
+  jmp .L.matchend831
+.L.arm834:
   mov (%rsp), %rax
   cmp $3, %rax
-  jne .L.arm826
+  jne .L.arm836
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -104(%rbp), %rdi
@@ -25176,7 +26294,7 @@ stmt_always_diverges:
   lea -104(%rbp), %rax
   mov (%rax), %rax
   mov %rax, -96(%rbp)
-.L.begin827:
+.L.begin837:
   mov -96(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -25186,7 +26304,7 @@ stmt_always_diverges:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end827
+  je .L.end837
   mov -96(%rbp), %rax
   push %rax
   pop %rdi
@@ -25194,25 +26312,25 @@ stmt_always_diverges:
   call stmt_always_diverges
   add $8, %rsp
   cmp $0, %rax
-  je .L.else828
+  je .L.else838
   mov $1, %rax
   jmp .L.return.stmt_always_diverges
-  jmp .L.end828
-.L.else828:
-.L.end828:
+  jmp .L.end838
+.L.else838:
+.L.end838:
   mov -96(%rbp), %rax
   add $32, %rax
   mov (%rax), %rax
   mov %rax, -96(%rbp)
-  jmp .L.begin827
-.L.end827:
+  jmp .L.begin837
+.L.end837:
   mov $0, %rax
   jmp .L.return.stmt_always_diverges
-  jmp .L.matchend821
-.L.arm826:
+  jmp .L.matchend831
+.L.arm836:
   mov (%rsp), %rax
   cmp $1, %rax
-  jne .L.arm829
+  jne .L.arm839
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -88(%rbp), %rdi
@@ -25235,7 +26353,7 @@ stmt_always_diverges:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else830
+  je .L.else840
   lea -88(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
@@ -25245,7 +26363,7 @@ stmt_always_diverges:
   call stmt_always_diverges
   add $8, %rsp
   cmp $0, %rax
-  je .L.false831
+  je .L.false841
   mov -64(%rbp), %rax
   push %rax
   pop %rdi
@@ -25253,23 +26371,23 @@ stmt_always_diverges:
   call stmt_always_diverges
   add $8, %rsp
   cmp $0, %rax
-  je .L.false831
+  je .L.false841
   mov $1, %rax
-  jmp .L.end831
-.L.false831:
+  jmp .L.end841
+.L.false841:
   mov $0, %rax
-.L.end831:
+.L.end841:
   jmp .L.return.stmt_always_diverges
-  jmp .L.end830
-.L.else830:
-.L.end830:
+  jmp .L.end840
+.L.else840:
+.L.end840:
   mov $0, %rax
   jmp .L.return.stmt_always_diverges
-  jmp .L.matchend821
-.L.arm829:
+  jmp .L.matchend831
+.L.arm839:
   mov (%rsp), %rax
   cmp $5, %rax
-  jne .L.arm832
+  jne .L.arm842
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -56(%rbp), %rdi
@@ -25288,17 +26406,17 @@ stmt_always_diverges:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else833
+  je .L.else843
   mov $0, %rax
   jmp .L.return.stmt_always_diverges
-  jmp .L.end833
-.L.else833:
-.L.end833:
+  jmp .L.end843
+.L.else843:
+.L.end843:
   lea -56(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -40(%rbp)
-.L.begin834:
+.L.begin844:
   mov -40(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -25308,7 +26426,7 @@ stmt_always_diverges:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end834
+  je .L.end844
   mov -40(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -25321,25 +26439,25 @@ stmt_always_diverges:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else835
+  je .L.else845
   mov $0, %rax
   jmp .L.return.stmt_always_diverges
-  jmp .L.end835
-.L.else835:
-.L.end835:
+  jmp .L.end845
+.L.else845:
+.L.end845:
   mov -40(%rbp), %rax
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -40(%rbp)
-  jmp .L.begin834
-.L.end834:
+  jmp .L.begin844
+.L.end844:
   mov $1, %rax
   jmp .L.return.stmt_always_diverges
-  jmp .L.matchend821
-.L.arm832:
+  jmp .L.matchend831
+.L.arm842:
   mov (%rsp), %rax
   cmp $7, %rax
-  jne .L.arm836
+  jne .L.arm846
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -32(%rbp), %rdi
@@ -25360,17 +26478,17 @@ stmt_always_diverges:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else837
+  je .L.else847
   mov $0, %rax
   jmp .L.return.stmt_always_diverges
-  jmp .L.end837
-.L.else837:
-.L.end837:
+  jmp .L.end847
+.L.else847:
+.L.end847:
   lea -32(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-.L.begin838:
+.L.begin848:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -25380,7 +26498,7 @@ stmt_always_diverges:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end838
+  je .L.end848
   mov -8(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -25393,28 +26511,28 @@ stmt_always_diverges:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else839
+  je .L.else849
   mov $0, %rax
   jmp .L.return.stmt_always_diverges
-  jmp .L.end839
-.L.else839:
-.L.end839:
+  jmp .L.end849
+.L.else849:
+.L.end849:
   mov -8(%rbp), %rax
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin838
-.L.end838:
+  jmp .L.begin848
+.L.end848:
   mov $1, %rax
   jmp .L.return.stmt_always_diverges
-  jmp .L.matchend821
-.L.arm836:
+  jmp .L.matchend831
+.L.arm846:
   mov $0, %rax
   jmp .L.return.stmt_always_diverges
-  jmp .L.matchend821
+  jmp .L.matchend831
   mov $1, %rdi
   call exit
-.L.matchend821:
+.L.matchend831:
   add $16, %rsp
 .L.return.stmt_always_diverges:
   mov %rbp, %rsp
@@ -25444,7 +26562,7 @@ check_noreturn_functions:
   sub $32, %rsp
   mov functions(%rip), %rax
   mov %rax, -24(%rbp)
-.L.begin841:
+.L.begin851:
   mov -24(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -25454,7 +26572,7 @@ check_noreturn_functions:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end841
+  je .L.end851
   mov -24(%rbp), %rax
   add $48, %rax
   mov (%rax), %rax
@@ -25468,7 +26586,7 @@ check_noreturn_functions:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false843
+  je .L.false853
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -25476,14 +26594,14 @@ check_noreturn_functions:
   call is_noreturn_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.false843
+  je .L.false853
   mov $1, %rax
-  jmp .L.end843
-.L.false843:
+  jmp .L.end853
+.L.false853:
   mov $0, %rax
-.L.end843:
+.L.end853:
   cmp $0, %rax
-  je .L.else842
+  je .L.else852
   mov -24(%rbp), %rax
   add $32, %rax
   mov (%rax), %rax
@@ -25497,7 +26615,7 @@ check_noreturn_functions:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  jne .L.true845
+  jne .L.true855
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -25508,33 +26626,33 @@ check_noreturn_functions:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false845
-.L.true845:
+  je .L.false855
+.L.true855:
   mov $1, %rax
-  jmp .L.end845
-.L.false845:
+  jmp .L.end855
+.L.false855:
   mov $0, %rax
-.L.end845:
+.L.end855:
   cmp $0, %rax
-  je .L.else844
+  je .L.else854
   lea .L.str219+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end844
-.L.else844:
-.L.end844:
-  jmp .L.end842
-.L.else842:
-.L.end842:
+  jmp .L.end854
+.L.else854:
+.L.end854:
+  jmp .L.end852
+.L.else852:
+.L.end852:
   mov -24(%rbp), %rax
   add $80, %rax
   mov (%rax), %rax
   mov %rax, -24(%rbp)
-  jmp .L.begin841
-.L.end841:
+  jmp .L.begin851
+.L.end851:
 .L.return.check_noreturn_functions:
   mov %rbp, %rsp
   pop %rbp
@@ -25547,7 +26665,7 @@ mark_calls_field_inits:
   mov %rdi, -16(%rbp)
   mov -16(%rbp), %rax
   mov %rax, -8(%rbp)
-.L.begin846:
+.L.begin856:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -25557,7 +26675,7 @@ mark_calls_field_inits:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end846
+  je .L.end856
   mov -8(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
@@ -25570,8 +26688,8 @@ mark_calls_field_inits:
   add $16, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin846
-.L.end846:
+  jmp .L.begin856
+.L.end856:
 .L.return.mark_calls_field_inits:
   mov %rbp, %rsp
   pop %rbp
@@ -25581,8 +26699,8 @@ mark_calls_expr:
   push %rbp
   mov %rsp, %rbp
   sub $288, %rsp
-  mov %rdi, -280(%rbp)
-  mov -280(%rbp), %rax
+  mov %rdi, -288(%rbp)
+  mov -288(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -25591,43 +26709,43 @@ mark_calls_expr:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else847
+  je .L.else857
   mov $0, %rax
   jmp .L.return.mark_calls_expr
-  jmp .L.end847
-.L.else847:
-.L.end847:
-  mov -280(%rbp), %rax
+  jmp .L.end857
+.L.else857:
+.L.end857:
+  mov -288(%rbp), %rax
   push %rax
   mov (%rax), %rax
   push %rax
   mov (%rsp), %rax
   cmp $0, %rax
-  jne .L.arm849
+  jne .L.arm859
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -272(%rbp), %rdi
+  lea -280(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
   mov $0, %rax
   jmp .L.return.mark_calls_expr
-  jmp .L.matchend848
-.L.arm849:
+  jmp .L.matchend858
+.L.arm859:
   mov (%rsp), %rax
   cmp $1, %rax
-  jne .L.arm850
+  jne .L.arm860
   mov $0, %rax
   jmp .L.return.mark_calls_expr
-  jmp .L.matchend848
-.L.arm850:
+  jmp .L.matchend858
+.L.arm860:
   mov (%rsp), %rax
   cmp $2, %rax
-  jne .L.arm851
+  jne .L.arm861
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -256(%rbp), %rdi
+  lea -264(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
@@ -25636,21 +26754,21 @@ mark_calls_expr:
   mov %rax, 16(%rdi)
   mov $0, %rax
   jmp .L.return.mark_calls_expr
-  jmp .L.matchend848
-.L.arm851:
+  jmp .L.matchend858
+.L.arm861:
   mov (%rsp), %rax
   cmp $3, %rax
-  jne .L.arm852
+  jne .L.arm862
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -232(%rbp), %rdi
+  lea -240(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
   mov 16(%rsi), %rax
   mov %rax, 16(%rdi)
-  lea -232(%rbp), %rax
+  lea -240(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -25658,7 +26776,7 @@ mark_calls_expr:
   sub $8, %rsp
   call mark_calls_expr
   add $8, %rsp
-  lea -232(%rbp), %rax
+  lea -240(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   push %rax
@@ -25668,26 +26786,26 @@ mark_calls_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_calls_expr
-  jmp .L.matchend848
-.L.arm852:
+  jmp .L.matchend858
+.L.arm862:
   mov (%rsp), %rax
   cmp $4, %rax
-  jne .L.arm853
+  jne .L.arm863
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -208(%rbp), %rdi
+  lea -216(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
-  lea -208(%rbp), %rax
+  lea -216(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call mark_calls_expr
   add $8, %rsp
-  lea -208(%rbp), %rax
+  lea -216(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -25697,11 +26815,30 @@ mark_calls_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_calls_expr
-  jmp .L.matchend848
-.L.arm853:
+  jmp .L.matchend858
+.L.arm863:
   mov (%rsp), %rax
   cmp $5, %rax
-  jne .L.arm854
+  jne .L.arm864
+  mov 8(%rsp), %rsi
+  add $8, %rsi
+  lea -200(%rbp), %rdi
+  mov 0(%rsi), %rax
+  mov %rax, 0(%rdi)
+  lea -200(%rbp), %rax
+  mov (%rax), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call mark_calls_expr
+  add $8, %rsp
+  mov $0, %rax
+  jmp .L.return.mark_calls_expr
+  jmp .L.matchend858
+.L.arm864:
+  mov (%rsp), %rax
+  cmp $6, %rax
+  jne .L.arm865
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -192(%rbp), %rdi
@@ -25716,11 +26853,11 @@ mark_calls_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_calls_expr
-  jmp .L.matchend848
-.L.arm854:
+  jmp .L.matchend858
+.L.arm865:
   mov (%rsp), %rax
-  cmp $6, %rax
-  jne .L.arm855
+  cmp $7, %rax
+  jne .L.arm866
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -184(%rbp), %rdi
@@ -25735,11 +26872,11 @@ mark_calls_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_calls_expr
-  jmp .L.matchend848
-.L.arm855:
+  jmp .L.matchend858
+.L.arm866:
   mov (%rsp), %rax
-  cmp $7, %rax
-  jne .L.arm856
+  cmp $8, %rax
+  jne .L.arm867
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -176(%rbp), %rdi
@@ -25754,16 +26891,18 @@ mark_calls_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_calls_expr
-  jmp .L.matchend848
-.L.arm856:
+  jmp .L.matchend858
+.L.arm867:
   mov (%rsp), %rax
-  cmp $8, %rax
-  jne .L.arm857
+  cmp $9, %rax
+  jne .L.arm868
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -168(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
+  mov 8(%rsi), %rax
+  mov %rax, 8(%rdi)
   lea -168(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -25771,28 +26910,7 @@ mark_calls_expr:
   sub $8, %rsp
   call mark_calls_expr
   add $8, %rsp
-  mov $0, %rax
-  jmp .L.return.mark_calls_expr
-  jmp .L.matchend848
-.L.arm857:
-  mov (%rsp), %rax
-  cmp $9, %rax
-  jne .L.arm858
-  mov 8(%rsp), %rsi
-  add $8, %rsi
-  lea -160(%rbp), %rdi
-  mov 0(%rsi), %rax
-  mov %rax, 0(%rdi)
-  mov 8(%rsi), %rax
-  mov %rax, 8(%rdi)
-  lea -160(%rbp), %rax
-  mov (%rax), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call mark_calls_expr
-  add $8, %rsp
-  lea -160(%rbp), %rax
+  lea -168(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -25802,26 +26920,26 @@ mark_calls_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_calls_expr
-  jmp .L.matchend848
-.L.arm858:
+  jmp .L.matchend858
+.L.arm868:
   mov (%rsp), %rax
   cmp $10, %rax
-  jne .L.arm859
+  jne .L.arm869
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -144(%rbp), %rdi
+  lea -152(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
-  lea -144(%rbp), %rax
+  lea -152(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call mark_calls_expr
   add $8, %rsp
-  lea -144(%rbp), %rax
+  lea -152(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -25831,25 +26949,23 @@ mark_calls_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_calls_expr
-  jmp .L.matchend848
-.L.arm859:
+  jmp .L.matchend858
+.L.arm869:
   mov (%rsp), %rax
   cmp $11, %rax
-  jne .L.arm860
+  jne .L.arm870
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -128(%rbp), %rdi
+  lea -136(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
-  lea -128(%rbp), %rax
+  mov 16(%rsi), %rax
+  mov %rax, 16(%rdi)
+  lea -136(%rbp), %rax
+  add $16, %rax
   mov (%rax), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call find_function
-  add $8, %rsp
   mov %rax, -112(%rbp)
   mov -112(%rbp), %rax
   push %rax
@@ -25860,21 +26976,21 @@ mark_calls_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else861
+  je .L.else871
   mov -112(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call mark_reachable
   add $8, %rsp
-  jmp .L.end861
-.L.else861:
-.L.end861:
-  lea -128(%rbp), %rax
+  jmp .L.end871
+.L.else871:
+.L.end871:
+  lea -136(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -104(%rbp)
-.L.begin862:
+.L.begin872:
   mov -104(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -25884,7 +27000,7 @@ mark_calls_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end862
+  je .L.end872
   mov -104(%rbp), %rax
   push %rax
   pop %rdi
@@ -25895,15 +27011,15 @@ mark_calls_expr:
   add $40, %rax
   mov (%rax), %rax
   mov %rax, -104(%rbp)
-  jmp .L.begin862
-.L.end862:
+  jmp .L.begin872
+.L.end872:
   mov $0, %rax
   jmp .L.return.mark_calls_expr
-  jmp .L.matchend848
-.L.arm860:
+  jmp .L.matchend858
+.L.arm870:
   mov (%rsp), %rax
   cmp $12, %rax
-  jne .L.arm863
+  jne .L.arm873
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -96(%rbp), %rdi
@@ -25920,11 +27036,11 @@ mark_calls_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_calls_expr
-  jmp .L.matchend848
-.L.arm863:
+  jmp .L.matchend858
+.L.arm873:
   mov (%rsp), %rax
   cmp $13, %rax
-  jne .L.arm864
+  jne .L.arm874
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -80(%rbp), %rdi
@@ -25939,11 +27055,11 @@ mark_calls_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_calls_expr
-  jmp .L.matchend848
-.L.arm864:
+  jmp .L.matchend858
+.L.arm874:
   mov (%rsp), %rax
   cmp $14, %rax
-  jne .L.arm865
+  jne .L.arm875
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -72(%rbp), %rdi
@@ -25958,11 +27074,11 @@ mark_calls_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_calls_expr
-  jmp .L.matchend848
-.L.arm865:
+  jmp .L.matchend858
+.L.arm875:
   mov (%rsp), %rax
   cmp $15, %rax
-  jne .L.arm866
+  jne .L.arm876
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -64(%rbp), %rdi
@@ -25991,11 +27107,11 @@ mark_calls_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_calls_expr
-  jmp .L.matchend848
-.L.arm866:
+  jmp .L.matchend858
+.L.arm876:
   mov (%rsp), %rax
   cmp $16, %rax
-  jne .L.arm867
+  jne .L.arm877
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -32(%rbp), %rdi
@@ -26010,11 +27126,11 @@ mark_calls_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_calls_expr
-  jmp .L.matchend848
-.L.arm867:
+  jmp .L.matchend858
+.L.arm877:
   mov (%rsp), %rax
   cmp $17, %rax
-  jne .L.arm868
+  jne .L.arm878
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -24(%rbp), %rdi
@@ -26034,11 +27150,11 @@ mark_calls_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_calls_expr
-  jmp .L.matchend848
-.L.arm868:
+  jmp .L.matchend858
+.L.arm878:
   mov $1, %rdi
   call exit
-.L.matchend848:
+.L.matchend858:
   add $16, %rsp
 .L.return.mark_calls_expr:
   mov %rbp, %rsp
@@ -26059,19 +27175,19 @@ mark_calls_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else869
+  je .L.else879
   mov $0, %rax
   jmp .L.return.mark_calls_stmt
-  jmp .L.end869
-.L.else869:
-.L.end869:
+  jmp .L.end879
+.L.else879:
+.L.end879:
   mov -152(%rbp), %rax
   push %rax
   mov (%rax), %rax
   push %rax
   mov (%rsp), %rax
   cmp $0, %rax
-  jne .L.arm871
+  jne .L.arm881
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -144(%rbp), %rdi
@@ -26086,11 +27202,11 @@ mark_calls_stmt:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_calls_stmt
-  jmp .L.matchend870
-.L.arm871:
+  jmp .L.matchend880
+.L.arm881:
   mov (%rsp), %rax
   cmp $4, %rax
-  jne .L.arm872
+  jne .L.arm882
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -136(%rbp), %rdi
@@ -26105,11 +27221,11 @@ mark_calls_stmt:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_calls_stmt
-  jmp .L.matchend870
-.L.arm872:
+  jmp .L.matchend880
+.L.arm882:
   mov (%rsp), %rax
   cmp $3, %rax
-  jne .L.arm873
+  jne .L.arm883
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -128(%rbp), %rdi
@@ -26118,7 +27234,7 @@ mark_calls_stmt:
   lea -128(%rbp), %rax
   mov (%rax), %rax
   mov %rax, -120(%rbp)
-.L.begin874:
+.L.begin884:
   mov -120(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -26128,7 +27244,7 @@ mark_calls_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end874
+  je .L.end884
   mov -120(%rbp), %rax
   push %rax
   pop %rdi
@@ -26139,15 +27255,15 @@ mark_calls_stmt:
   add $32, %rax
   mov (%rax), %rax
   mov %rax, -120(%rbp)
-  jmp .L.begin874
-.L.end874:
+  jmp .L.begin884
+.L.end884:
   mov $0, %rax
   jmp .L.return.mark_calls_stmt
-  jmp .L.matchend870
-.L.arm873:
+  jmp .L.matchend880
+.L.arm883:
   mov (%rsp), %rax
   cmp $1, %rax
-  jne .L.arm875
+  jne .L.arm885
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -112(%rbp), %rdi
@@ -26182,11 +27298,11 @@ mark_calls_stmt:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_calls_stmt
-  jmp .L.matchend870
-.L.arm875:
+  jmp .L.matchend880
+.L.arm885:
   mov (%rsp), %rax
   cmp $2, %rax
-  jne .L.arm876
+  jne .L.arm886
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -88(%rbp), %rdi
@@ -26211,11 +27327,11 @@ mark_calls_stmt:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_calls_stmt
-  jmp .L.matchend870
-.L.arm876:
+  jmp .L.matchend880
+.L.arm886:
   mov (%rsp), %rax
   cmp $5, %rax
-  jne .L.arm877
+  jne .L.arm887
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -72(%rbp), %rdi
@@ -26234,7 +27350,7 @@ mark_calls_stmt:
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -56(%rbp)
-.L.begin878:
+.L.begin888:
   mov -56(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -26244,7 +27360,7 @@ mark_calls_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end878
+  je .L.end888
   mov -56(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -26257,15 +27373,15 @@ mark_calls_stmt:
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -56(%rbp)
-  jmp .L.begin878
-.L.end878:
+  jmp .L.begin888
+.L.end888:
   mov $0, %rax
   jmp .L.return.mark_calls_stmt
-  jmp .L.matchend870
-.L.arm877:
+  jmp .L.matchend880
+.L.arm887:
   mov (%rsp), %rax
   cmp $6, %rax
-  jne .L.arm879
+  jne .L.arm889
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -48(%rbp), %rdi
@@ -26283,11 +27399,11 @@ mark_calls_stmt:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_calls_stmt
-  jmp .L.matchend870
-.L.arm879:
+  jmp .L.matchend880
+.L.arm889:
   mov (%rsp), %rax
   cmp $7, %rax
-  jne .L.arm880
+  jne .L.arm890
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -32(%rbp), %rdi
@@ -26308,7 +27424,7 @@ mark_calls_stmt:
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-.L.begin881:
+.L.begin891:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -26318,7 +27434,7 @@ mark_calls_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end881
+  je .L.end891
   mov -8(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -26331,15 +27447,15 @@ mark_calls_stmt:
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin881
-.L.end881:
+  jmp .L.begin891
+.L.end891:
   mov $0, %rax
   jmp .L.return.mark_calls_stmt
-  jmp .L.matchend870
-.L.arm880:
+  jmp .L.matchend880
+.L.arm890:
   mov $1, %rdi
   call exit
-.L.matchend870:
+.L.matchend880:
   add $16, %rsp
 .L.return.mark_calls_stmt:
   mov %rbp, %rsp
@@ -26362,12 +27478,12 @@ mark_reachable:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else882
+  je .L.else892
   mov $0, %rax
   jmp .L.return.mark_reachable
-  jmp .L.end882
-.L.else882:
-.L.end882:
+  jmp .L.end892
+.L.else892:
+.L.end892:
   mov $1, %rax
   push %rax
   mov -8(%rbp), %rax
@@ -26395,7 +27511,7 @@ check_unused_functions:
   sub $16, %rsp
   mov functions(%rip), %rax
   mov %rax, -16(%rbp)
-.L.begin883:
+.L.begin893:
   mov -16(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -26405,7 +27521,7 @@ check_unused_functions:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end883
+  je .L.end893
   mov $0, %rax
   push %rax
   mov -16(%rbp), %rax
@@ -26418,8 +27534,8 @@ check_unused_functions:
   add $80, %rax
   mov (%rax), %rax
   mov %rax, -16(%rbp)
-  jmp .L.begin883
-.L.end883:
+  jmp .L.begin893
+.L.end893:
   lea .L.str220+8(%rip), %rax
   push %rax
   pop %rdi
@@ -26436,12 +27552,12 @@ check_unused_functions:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else884
+  je .L.else894
   mov $0, %rax
   jmp .L.return.check_unused_functions
-  jmp .L.end884
-.L.else884:
-.L.end884:
+  jmp .L.end894
+.L.else894:
+.L.end894:
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -26450,7 +27566,7 @@ check_unused_functions:
   add $8, %rsp
   mov functions(%rip), %rax
   mov %rax, -16(%rbp)
-.L.begin885:
+.L.begin895:
   mov -16(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -26460,7 +27576,7 @@ check_unused_functions:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end885
+  je .L.end895
   mov -16(%rbp), %rax
   add $72, %rax
   mov (%rax), %rax
@@ -26472,7 +27588,7 @@ check_unused_functions:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else886
+  je .L.else896
   mov -16(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -26480,15 +27596,15 @@ check_unused_functions:
   sub $8, %rsp
   call warn_unused_function
   add $8, %rsp
-  jmp .L.end886
-.L.else886:
-.L.end886:
+  jmp .L.end896
+.L.else896:
+.L.end896:
   mov -16(%rbp), %rax
   add $80, %rax
   mov (%rax), %rax
   mov %rax, -16(%rbp)
-  jmp .L.begin885
-.L.end885:
+  jmp .L.begin895
+.L.end895:
 .L.return.check_unused_functions:
   mov %rbp, %rsp
   pop %rbp
@@ -26508,7 +27624,7 @@ mark_var_use:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else887
+  je .L.else897
   mov $1, %rax
   push %rax
   mov -8(%rbp), %rax
@@ -26517,9 +27633,9 @@ mark_var_use:
   pop %rsi
   mov %rsi, %rax
   mov %rax, (%rdi)
-  jmp .L.end887
-.L.else887:
-.L.end887:
+  jmp .L.end897
+.L.else897:
+.L.end897:
 .L.return.mark_var_use:
   mov %rbp, %rsp
   pop %rbp
@@ -26532,7 +27648,7 @@ mark_uses_field_inits:
   mov %rdi, -16(%rbp)
   mov -16(%rbp), %rax
   mov %rax, -8(%rbp)
-.L.begin888:
+.L.begin898:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -26542,7 +27658,7 @@ mark_uses_field_inits:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end888
+  je .L.end898
   mov -8(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
@@ -26555,8 +27671,8 @@ mark_uses_field_inits:
   add $16, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin888
-.L.end888:
+  jmp .L.begin898
+.L.end898:
 .L.return.mark_uses_field_inits:
   mov %rbp, %rsp
   pop %rbp
@@ -26566,8 +27682,8 @@ mark_uses_expr:
   push %rbp
   mov %rsp, %rbp
   sub $304, %rsp
-  mov %rdi, -296(%rbp)
-  mov -296(%rbp), %rax
+  mov %rdi, -304(%rbp)
+  mov -304(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -26576,50 +27692,50 @@ mark_uses_expr:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else889
+  je .L.else899
   mov $0, %rax
   jmp .L.return.mark_uses_expr
-  jmp .L.end889
-.L.else889:
-.L.end889:
-  mov -296(%rbp), %rax
+  jmp .L.end899
+.L.else899:
+.L.end899:
+  mov -304(%rbp), %rax
   push %rax
   mov (%rax), %rax
   push %rax
   mov (%rsp), %rax
   cmp $0, %rax
-  jne .L.arm891
+  jne .L.arm901
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -288(%rbp), %rdi
+  lea -296(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
   mov $0, %rax
   jmp .L.return.mark_uses_expr
-  jmp .L.matchend890
-.L.arm891:
+  jmp .L.matchend900
+.L.arm901:
   mov (%rsp), %rax
   cmp $1, %rax
-  jne .L.arm892
+  jne .L.arm902
   mov $0, %rax
   jmp .L.return.mark_uses_expr
-  jmp .L.matchend890
-.L.arm892:
+  jmp .L.matchend900
+.L.arm902:
   mov (%rsp), %rax
   cmp $2, %rax
-  jne .L.arm893
+  jne .L.arm903
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -272(%rbp), %rdi
+  lea -280(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
   mov 16(%rsi), %rax
   mov %rax, 16(%rdi)
-  lea -272(%rbp), %rax
+  lea -280(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
@@ -26628,21 +27744,21 @@ mark_uses_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_uses_expr
-  jmp .L.matchend890
-.L.arm893:
+  jmp .L.matchend900
+.L.arm903:
   mov (%rsp), %rax
   cmp $3, %rax
-  jne .L.arm894
+  jne .L.arm904
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -248(%rbp), %rdi
+  lea -256(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
   mov 16(%rsi), %rax
   mov %rax, 16(%rdi)
-  lea -248(%rbp), %rax
+  lea -256(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -26650,7 +27766,7 @@ mark_uses_expr:
   sub $8, %rsp
   call mark_uses_expr
   add $8, %rsp
-  lea -248(%rbp), %rax
+  lea -256(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   push %rax
@@ -26660,19 +27776,19 @@ mark_uses_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_uses_expr
-  jmp .L.matchend890
-.L.arm894:
+  jmp .L.matchend900
+.L.arm904:
   mov (%rsp), %rax
   cmp $4, %rax
-  jne .L.arm895
+  jne .L.arm905
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -224(%rbp), %rdi
+  lea -232(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
-  lea -224(%rbp), %rax
+  lea -232(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -26680,17 +27796,17 @@ mark_uses_expr:
   sub $8, %rsp
   call mark_uses_expr
   add $8, %rsp
-  lea -224(%rbp), %rax
+  lea -232(%rbp), %rax
   mov (%rax), %rax
   push %rax
   mov (%rax), %rax
   push %rax
   mov (%rsp), %rax
   cmp $2, %rax
-  jne .L.arm897
+  jne .L.arm907
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -208(%rbp), %rdi
+  lea -216(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
@@ -26699,9 +27815,9 @@ mark_uses_expr:
   mov %rax, 16(%rdi)
   mov $0, %rax
   jmp .L.return.mark_uses_expr
-  jmp .L.matchend896
-.L.arm897:
-  lea -224(%rbp), %rax
+  jmp .L.matchend906
+.L.arm907:
+  lea -232(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
@@ -26710,16 +27826,35 @@ mark_uses_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_uses_expr
-  jmp .L.matchend896
+  jmp .L.matchend906
   mov $1, %rdi
   call exit
-.L.matchend896:
+.L.matchend906:
   add $16, %rsp
-  jmp .L.matchend890
-.L.arm895:
+  jmp .L.matchend900
+.L.arm905:
   mov (%rsp), %rax
   cmp $5, %rax
-  jne .L.arm899
+  jne .L.arm909
+  mov 8(%rsp), %rsi
+  add $8, %rsi
+  lea -192(%rbp), %rdi
+  mov 0(%rsi), %rax
+  mov %rax, 0(%rdi)
+  lea -192(%rbp), %rax
+  mov (%rax), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call mark_uses_expr
+  add $8, %rsp
+  mov $0, %rax
+  jmp .L.return.mark_uses_expr
+  jmp .L.matchend900
+.L.arm909:
+  mov (%rsp), %rax
+  cmp $6, %rax
+  jne .L.arm910
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -184(%rbp), %rdi
@@ -26734,11 +27869,11 @@ mark_uses_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_uses_expr
-  jmp .L.matchend890
-.L.arm899:
+  jmp .L.matchend900
+.L.arm910:
   mov (%rsp), %rax
-  cmp $6, %rax
-  jne .L.arm900
+  cmp $7, %rax
+  jne .L.arm911
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -176(%rbp), %rdi
@@ -26753,11 +27888,11 @@ mark_uses_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_uses_expr
-  jmp .L.matchend890
-.L.arm900:
+  jmp .L.matchend900
+.L.arm911:
   mov (%rsp), %rax
-  cmp $7, %rax
-  jne .L.arm901
+  cmp $8, %rax
+  jne .L.arm912
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -168(%rbp), %rdi
@@ -26772,16 +27907,18 @@ mark_uses_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_uses_expr
-  jmp .L.matchend890
-.L.arm901:
+  jmp .L.matchend900
+.L.arm912:
   mov (%rsp), %rax
-  cmp $8, %rax
-  jne .L.arm902
+  cmp $9, %rax
+  jne .L.arm913
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -160(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
+  mov 8(%rsi), %rax
+  mov %rax, 8(%rdi)
   lea -160(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -26789,28 +27926,7 @@ mark_uses_expr:
   sub $8, %rsp
   call mark_uses_expr
   add $8, %rsp
-  mov $0, %rax
-  jmp .L.return.mark_uses_expr
-  jmp .L.matchend890
-.L.arm902:
-  mov (%rsp), %rax
-  cmp $9, %rax
-  jne .L.arm903
-  mov 8(%rsp), %rsi
-  add $8, %rsi
-  lea -152(%rbp), %rdi
-  mov 0(%rsi), %rax
-  mov %rax, 0(%rdi)
-  mov 8(%rsi), %rax
-  mov %rax, 8(%rdi)
-  lea -152(%rbp), %rax
-  mov (%rax), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call mark_uses_expr
-  add $8, %rsp
-  lea -152(%rbp), %rax
+  lea -160(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -26820,26 +27936,26 @@ mark_uses_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_uses_expr
-  jmp .L.matchend890
-.L.arm903:
+  jmp .L.matchend900
+.L.arm913:
   mov (%rsp), %rax
   cmp $10, %rax
-  jne .L.arm904
+  jne .L.arm914
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -136(%rbp), %rdi
+  lea -144(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
-  lea -136(%rbp), %rax
+  lea -144(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call mark_uses_expr
   add $8, %rsp
-  lea -136(%rbp), %rax
+  lea -144(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -26849,23 +27965,25 @@ mark_uses_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_uses_expr
-  jmp .L.matchend890
-.L.arm904:
+  jmp .L.matchend900
+.L.arm914:
   mov (%rsp), %rax
   cmp $11, %rax
-  jne .L.arm905
+  jne .L.arm915
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -120(%rbp), %rdi
+  lea -128(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
-  lea -120(%rbp), %rax
+  mov 16(%rsi), %rax
+  mov %rax, 16(%rdi)
+  lea -128(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -104(%rbp)
-.L.begin906:
+.L.begin916:
   mov -104(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -26875,7 +27993,7 @@ mark_uses_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end906
+  je .L.end916
   mov -104(%rbp), %rax
   push %rax
   pop %rdi
@@ -26886,15 +28004,15 @@ mark_uses_expr:
   add $40, %rax
   mov (%rax), %rax
   mov %rax, -104(%rbp)
-  jmp .L.begin906
-.L.end906:
+  jmp .L.begin916
+.L.end916:
   mov $0, %rax
   jmp .L.return.mark_uses_expr
-  jmp .L.matchend890
-.L.arm905:
+  jmp .L.matchend900
+.L.arm915:
   mov (%rsp), %rax
   cmp $12, %rax
-  jne .L.arm907
+  jne .L.arm917
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -96(%rbp), %rdi
@@ -26911,11 +28029,11 @@ mark_uses_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_uses_expr
-  jmp .L.matchend890
-.L.arm907:
+  jmp .L.matchend900
+.L.arm917:
   mov (%rsp), %rax
   cmp $13, %rax
-  jne .L.arm908
+  jne .L.arm918
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -80(%rbp), %rdi
@@ -26930,11 +28048,11 @@ mark_uses_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_uses_expr
-  jmp .L.matchend890
-.L.arm908:
+  jmp .L.matchend900
+.L.arm918:
   mov (%rsp), %rax
   cmp $14, %rax
-  jne .L.arm909
+  jne .L.arm919
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -72(%rbp), %rdi
@@ -26949,11 +28067,11 @@ mark_uses_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_uses_expr
-  jmp .L.matchend890
-.L.arm909:
+  jmp .L.matchend900
+.L.arm919:
   mov (%rsp), %rax
   cmp $15, %rax
-  jne .L.arm910
+  jne .L.arm920
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -64(%rbp), %rdi
@@ -26982,11 +28100,11 @@ mark_uses_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_uses_expr
-  jmp .L.matchend890
-.L.arm910:
+  jmp .L.matchend900
+.L.arm920:
   mov (%rsp), %rax
   cmp $16, %rax
-  jne .L.arm911
+  jne .L.arm921
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -32(%rbp), %rdi
@@ -27001,11 +28119,11 @@ mark_uses_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_uses_expr
-  jmp .L.matchend890
-.L.arm911:
+  jmp .L.matchend900
+.L.arm921:
   mov (%rsp), %rax
   cmp $17, %rax
-  jne .L.arm912
+  jne .L.arm922
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -24(%rbp), %rdi
@@ -27025,11 +28143,11 @@ mark_uses_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_uses_expr
-  jmp .L.matchend890
-.L.arm912:
+  jmp .L.matchend900
+.L.arm922:
   mov $1, %rdi
   call exit
-.L.matchend890:
+.L.matchend900:
   add $16, %rsp
 .L.return.mark_uses_expr:
   mov %rbp, %rsp
@@ -27050,19 +28168,19 @@ mark_uses_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else913
+  je .L.else923
   mov $0, %rax
   jmp .L.return.mark_uses_stmt
-  jmp .L.end913
-.L.else913:
-.L.end913:
+  jmp .L.end923
+.L.else923:
+.L.end923:
   mov -152(%rbp), %rax
   push %rax
   mov (%rax), %rax
   push %rax
   mov (%rsp), %rax
   cmp $0, %rax
-  jne .L.arm915
+  jne .L.arm925
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -144(%rbp), %rdi
@@ -27077,11 +28195,11 @@ mark_uses_stmt:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_uses_stmt
-  jmp .L.matchend914
-.L.arm915:
+  jmp .L.matchend924
+.L.arm925:
   mov (%rsp), %rax
   cmp $4, %rax
-  jne .L.arm916
+  jne .L.arm926
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -136(%rbp), %rdi
@@ -27096,11 +28214,11 @@ mark_uses_stmt:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_uses_stmt
-  jmp .L.matchend914
-.L.arm916:
+  jmp .L.matchend924
+.L.arm926:
   mov (%rsp), %rax
   cmp $3, %rax
-  jne .L.arm917
+  jne .L.arm927
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -128(%rbp), %rdi
@@ -27109,7 +28227,7 @@ mark_uses_stmt:
   lea -128(%rbp), %rax
   mov (%rax), %rax
   mov %rax, -120(%rbp)
-.L.begin918:
+.L.begin928:
   mov -120(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -27119,7 +28237,7 @@ mark_uses_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end918
+  je .L.end928
   mov -120(%rbp), %rax
   push %rax
   pop %rdi
@@ -27130,15 +28248,15 @@ mark_uses_stmt:
   add $32, %rax
   mov (%rax), %rax
   mov %rax, -120(%rbp)
-  jmp .L.begin918
-.L.end918:
+  jmp .L.begin928
+.L.end928:
   mov $0, %rax
   jmp .L.return.mark_uses_stmt
-  jmp .L.matchend914
-.L.arm917:
+  jmp .L.matchend924
+.L.arm927:
   mov (%rsp), %rax
   cmp $1, %rax
-  jne .L.arm919
+  jne .L.arm929
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -112(%rbp), %rdi
@@ -27173,11 +28291,11 @@ mark_uses_stmt:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_uses_stmt
-  jmp .L.matchend914
-.L.arm919:
+  jmp .L.matchend924
+.L.arm929:
   mov (%rsp), %rax
   cmp $2, %rax
-  jne .L.arm920
+  jne .L.arm930
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -88(%rbp), %rdi
@@ -27202,11 +28320,11 @@ mark_uses_stmt:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_uses_stmt
-  jmp .L.matchend914
-.L.arm920:
+  jmp .L.matchend924
+.L.arm930:
   mov (%rsp), %rax
   cmp $5, %rax
-  jne .L.arm921
+  jne .L.arm931
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -72(%rbp), %rdi
@@ -27225,7 +28343,7 @@ mark_uses_stmt:
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -56(%rbp)
-.L.begin922:
+.L.begin932:
   mov -56(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -27235,7 +28353,7 @@ mark_uses_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end922
+  je .L.end932
   mov -56(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -27248,15 +28366,15 @@ mark_uses_stmt:
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -56(%rbp)
-  jmp .L.begin922
-.L.end922:
+  jmp .L.begin932
+.L.end932:
   mov $0, %rax
   jmp .L.return.mark_uses_stmt
-  jmp .L.matchend914
-.L.arm921:
+  jmp .L.matchend924
+.L.arm931:
   mov (%rsp), %rax
   cmp $6, %rax
-  jne .L.arm923
+  jne .L.arm933
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -48(%rbp), %rdi
@@ -27274,11 +28392,11 @@ mark_uses_stmt:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.mark_uses_stmt
-  jmp .L.matchend914
-.L.arm923:
+  jmp .L.matchend924
+.L.arm933:
   mov (%rsp), %rax
   cmp $7, %rax
-  jne .L.arm924
+  jne .L.arm934
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -32(%rbp), %rdi
@@ -27299,7 +28417,7 @@ mark_uses_stmt:
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-.L.begin925:
+.L.begin935:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -27309,7 +28427,7 @@ mark_uses_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end925
+  je .L.end935
   mov -8(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -27322,15 +28440,15 @@ mark_uses_stmt:
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin925
-.L.end925:
+  jmp .L.begin935
+.L.end935:
   mov $0, %rax
   jmp .L.return.mark_uses_stmt
-  jmp .L.matchend914
-.L.arm924:
+  jmp .L.matchend924
+.L.arm934:
   mov $1, %rdi
   call exit
-.L.matchend914:
+.L.matchend924:
   add $16, %rsp
 .L.return.mark_uses_stmt:
   mov %rbp, %rsp
@@ -27343,7 +28461,7 @@ check_unused_locals:
   sub $16, %rsp
   mov functions(%rip), %rax
   mov %rax, -16(%rbp)
-.L.begin926:
+.L.begin936:
   mov -16(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -27353,7 +28471,7 @@ check_unused_locals:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end926
+  je .L.end936
   mov -16(%rbp), %rax
   add $72, %rax
   mov (%rax), %rax
@@ -27365,12 +28483,12 @@ check_unused_locals:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else927
+  je .L.else937
   mov -16(%rbp), %rax
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-.L.begin928:
+.L.begin938:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -27380,7 +28498,7 @@ check_unused_locals:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end928
+  je .L.end938
   mov $0, %rax
   push %rax
   mov -8(%rbp), %rax
@@ -27393,8 +28511,8 @@ check_unused_locals:
   add $56, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin928
-.L.end928:
+  jmp .L.begin938
+.L.end938:
   mov -16(%rbp), %rax
   add $32, %rax
   mov (%rax), %rax
@@ -27407,7 +28525,7 @@ check_unused_locals:
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-.L.begin929:
+.L.begin939:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -27417,7 +28535,7 @@ check_unused_locals:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end929
+  je .L.end939
   mov -8(%rbp), %rax
   add $48, %rax
   mov (%rax), %rax
@@ -27429,7 +28547,7 @@ check_unused_locals:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false931
+  je .L.false941
   mov -8(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -27441,14 +28559,14 @@ check_unused_locals:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false931
+  je .L.false941
   mov $1, %rax
-  jmp .L.end931
-.L.false931:
+  jmp .L.end941
+.L.false941:
   mov $0, %rax
-.L.end931:
+.L.end941:
   cmp $0, %rax
-  je .L.else930
+  je .L.else940
   mov -16(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -27460,24 +28578,24 @@ check_unused_locals:
   sub $8, %rsp
   call warn_unused_local
   add $8, %rsp
-  jmp .L.end930
-.L.else930:
-.L.end930:
+  jmp .L.end940
+.L.else940:
+.L.end940:
   mov -8(%rbp), %rax
   add $56, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin929
-.L.end929:
-  jmp .L.end927
-.L.else927:
-.L.end927:
+  jmp .L.begin939
+.L.end939:
+  jmp .L.end937
+.L.else937:
+.L.end937:
   mov -16(%rbp), %rax
   add $80, %rax
   mov (%rax), %rax
   mov %rax, -16(%rbp)
-  jmp .L.begin926
-.L.end926:
+  jmp .L.begin936
+.L.end936:
 .L.return.check_unused_locals:
   mov %rbp, %rsp
   pop %rbp
@@ -27489,7 +28607,7 @@ typecheck_program:
   sub $16, %rsp
   mov functions(%rip), %rax
   mov %rax, -16(%rbp)
-.L.begin932:
+.L.begin942:
   mov -16(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -27499,12 +28617,12 @@ typecheck_program:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end932
+  je .L.end942
   mov -16(%rbp), %rax
   add $64, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-.L.begin933:
+.L.begin943:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -27514,7 +28632,7 @@ typecheck_program:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end933
+  je .L.end943
   mov $0, %rax
   push %rax
   mov -8(%rbp), %rax
@@ -27527,8 +28645,8 @@ typecheck_program:
   add $16, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin933
-.L.end933:
+  jmp .L.begin943
+.L.end943:
   mov -16(%rbp), %rax
   mov %rax, current_fn(%rip)
   mov -16(%rbp), %rax
@@ -27551,8 +28669,8 @@ typecheck_program:
   add $80, %rax
   mov (%rax), %rax
   mov %rax, -16(%rbp)
-  jmp .L.begin932
-.L.end932:
+  jmp .L.begin942
+.L.end942:
   mov $0, %rax
   mov %rax, current_fn(%rip)
   mov $0, %rax
@@ -27572,7 +28690,7 @@ check_raises_functions:
   sub $16, %rsp
   mov functions(%rip), %rax
   mov %rax, -16(%rbp)
-.L.begin934:
+.L.begin944:
   mov -16(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -27582,7 +28700,7 @@ check_raises_functions:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end934
+  je .L.end944
   mov -16(%rbp), %rax
   add $64, %rax
   mov (%rax), %rax
@@ -27594,12 +28712,12 @@ check_raises_functions:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else935
+  je .L.else945
   mov -16(%rbp), %rax
   add $64, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-.L.begin936:
+.L.begin946:
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -27609,7 +28727,7 @@ check_raises_functions:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end936
+  je .L.end946
   mov -8(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
@@ -27621,31 +28739,31 @@ check_raises_functions:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else937
+  je .L.else947
   lea .L.str221+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end937
-.L.else937:
-.L.end937:
+  jmp .L.end947
+.L.else947:
+.L.end947:
   mov -8(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin936
-.L.end936:
-  jmp .L.end935
-.L.else935:
-.L.end935:
+  jmp .L.begin946
+.L.end946:
+  jmp .L.end945
+.L.else945:
+.L.end945:
   mov -16(%rbp), %rax
   add $80, %rax
   mov (%rax), %rax
   mov %rax, -16(%rbp)
-  jmp .L.begin934
-.L.end934:
+  jmp .L.begin944
+.L.end944:
 .L.return.check_raises_functions:
   mov %rbp, %rsp
   pop %rbp
@@ -27683,22 +28801,22 @@ load_mem:
   call is_byte_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.else938
+  je .L.else948
   lea .L.str222+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end938
-.L.else938:
+  jmp .L.end948
+.L.else948:
   lea .L.str223+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-.L.end938:
+.L.end948:
 .L.return.load_mem:
   mov %rbp, %rsp
   pop %rbp
@@ -27716,22 +28834,22 @@ store_mem:
   call is_byte_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.else939
+  je .L.else949
   lea .L.str224+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end939
-.L.else939:
+  jmp .L.end949
+.L.else949:
   lea .L.str225+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-.L.end939:
+.L.end949:
 .L.return.store_mem:
   mov %rbp, %rsp
   pop %rbp
@@ -27751,15 +28869,15 @@ emit_memcpy:
   setle %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else940
+  je .L.else950
   mov $8, %rax
   mov %rax, -16(%rbp)
-  jmp .L.end940
-.L.else940:
-.L.end940:
+  jmp .L.end950
+.L.else950:
+.L.end950:
   mov $0, %rax
   mov %rax, -8(%rbp)
-.L.begin941:
+.L.begin951:
   mov -8(%rbp), %rax
   push %rax
   mov $8, %rax
@@ -27774,7 +28892,7 @@ emit_memcpy:
   setle %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end941
+  je .L.end951
   lea .L.str226+8(%rip), %rax
   push %rax
   pop %rdi
@@ -27818,9 +28936,9 @@ emit_memcpy:
   pop %rax
   add %rdi, %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin941
-.L.end941:
-.L.begin942:
+  jmp .L.begin951
+.L.end951:
+.L.begin952:
   mov -8(%rbp), %rax
   push %rax
   mov -16(%rbp), %rax
@@ -27830,7 +28948,7 @@ emit_memcpy:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end942
+  je .L.end952
   lea .L.str230+8(%rip), %rax
   push %rax
   pop %rdi
@@ -27874,8 +28992,8 @@ emit_memcpy:
   pop %rax
   add %rdi, %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin942
-.L.end942:
+  jmp .L.begin952
+.L.end952:
 .L.return.emit_memcpy:
   mov %rbp, %rsp
   pop %rbp
@@ -27893,7 +29011,7 @@ store_value:
   call passes_by_ref
   add $8, %rsp
   cmp $0, %rax
-  je .L.else943
+  je .L.else953
   lea .L.str234+8(%rip), %rax
   push %rax
   pop %rdi
@@ -27911,15 +29029,15 @@ store_value:
   sub $8, %rsp
   call emit_memcpy
   add $8, %rsp
-  jmp .L.end943
-.L.else943:
+  jmp .L.end953
+.L.else953:
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call store_mem
   add $8, %rsp
-.L.end943:
+.L.end953:
 .L.return.store_value:
   mov %rbp, %rsp
   pop %rbp
@@ -27933,7 +29051,7 @@ gen_field_inits:
   mov %rsi, -48(%rbp)
   mov -56(%rbp), %rax
   mov %rax, -40(%rbp)
-.L.begin944:
+.L.begin954:
   mov -40(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -27943,7 +29061,7 @@ gen_field_inits:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end944
+  je .L.end954
   mov -40(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
@@ -27957,7 +29075,7 @@ gen_field_inits:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else945
+  je .L.else955
   mov -40(%rbp), %rax
   mov (%rax), %rax
   mov %rax, -24(%rbp)
@@ -27995,7 +29113,7 @@ gen_field_inits:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else946
+  je .L.else956
   lea .L.str236+8(%rip), %rax
   push %rax
   pop %rdi
@@ -28014,24 +29132,24 @@ gen_field_inits:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end946
-.L.else946:
-.L.end946:
+  jmp .L.end956
+.L.else956:
+.L.end956:
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call store_value
   add $8, %rsp
-  jmp .L.end945
-.L.else945:
-.L.end945:
+  jmp .L.end955
+.L.else955:
+.L.end955:
   mov -40(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   mov %rax, -40(%rbp)
-  jmp .L.begin944
-.L.end944:
+  jmp .L.begin954
+.L.end954:
 .L.return.gen_field_inits:
   mov %rbp, %rsp
   pop %rbp
@@ -28086,7 +29204,7 @@ gen_addr:
   push %rax
   mov (%rsp), %rax
   cmp $2, %rax
-  jne .L.arm948
+  jne .L.arm958
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -80(%rbp), %rdi
@@ -28108,16 +29226,16 @@ gen_addr:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else949
+  je .L.else959
   lea .L.str238+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end949
-.L.else949:
-.L.end949:
+  jmp .L.end959
+.L.else959:
+.L.end959:
   mov -56(%rbp), %rax
   mov %rax, -48(%rbp)
   mov -48(%rbp), %rax
@@ -28131,7 +29249,7 @@ gen_addr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else950
+  je .L.else960
   lea .L.str239+8(%rip), %rax
   push %rax
   pop %rdi
@@ -28152,8 +29270,8 @@ gen_addr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end950
-.L.else950:
+  jmp .L.end960
+.L.else960:
   lea .L.str241+8(%rip), %rax
   push %rax
   pop %rdi
@@ -28173,14 +29291,14 @@ gen_addr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-.L.end950:
+.L.end960:
   mov $0, %rax
   jmp .L.return.gen_addr
-  jmp .L.matchend947
-.L.arm948:
+  jmp .L.matchend957
+.L.arm958:
   mov (%rsp), %rax
   cmp $6, %rax
-  jne .L.arm951
+  jne .L.arm961
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -40(%rbp), %rdi
@@ -28195,11 +29313,11 @@ gen_addr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_addr
-  jmp .L.matchend947
-.L.arm951:
+  jmp .L.matchend957
+.L.arm961:
   mov (%rsp), %rax
   cmp $12, %rax
-  jne .L.arm952
+  jne .L.arm962
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -32(%rbp), %rdi
@@ -28226,7 +29344,7 @@ gen_addr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false955
+  je .L.false965
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -28234,14 +29352,14 @@ gen_addr:
   call is_pointer
   add $8, %rsp
   cmp $0, %rax
-  je .L.false955
+  je .L.false965
   mov $1, %rax
-  jmp .L.end955
-.L.false955:
+  jmp .L.end965
+.L.false965:
   mov $0, %rax
-.L.end955:
+.L.end965:
   cmp $0, %rax
-  je .L.false954
+  je .L.false964
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -28254,7 +29372,7 @@ gen_addr:
   call is_struct_ty
   add $8, %rsp
   cmp $0, %rax
-  jne .L.true956
+  jne .L.true966
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -28267,22 +29385,22 @@ gen_addr:
   call is_exn_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.false956
-.L.true956:
+  je .L.false966
+.L.true966:
   mov $1, %rax
-  jmp .L.end956
-.L.false956:
+  jmp .L.end966
+.L.false966:
   mov $0, %rax
-.L.end956:
+.L.end966:
   cmp $0, %rax
-  je .L.false954
+  je .L.false964
   mov $1, %rax
-  jmp .L.end954
-.L.false954:
+  jmp .L.end964
+.L.false964:
   mov $0, %rax
-.L.end954:
+.L.end964:
   cmp $0, %rax
-  je .L.else953
+  je .L.else963
   lea -32(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -28290,8 +29408,8 @@ gen_addr:
   sub $8, %rsp
   call gen_expr
   add $8, %rsp
-  jmp .L.end953
-.L.else953:
+  jmp .L.end963
+.L.else963:
   lea -32(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -28299,7 +29417,7 @@ gen_addr:
   sub $8, %rsp
   call gen_addr
   add $8, %rsp
-.L.end953:
+.L.end963:
   lea -32(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
@@ -28315,7 +29433,7 @@ gen_addr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else957
+  je .L.else967
   lea .L.str243+8(%rip), %rax
   push %rax
   pop %rdi
@@ -28336,23 +29454,23 @@ gen_addr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end957
-.L.else957:
-.L.end957:
+  jmp .L.end967
+.L.else967:
+.L.end967:
   mov $0, %rax
   jmp .L.return.gen_addr
-  jmp .L.matchend947
-.L.arm952:
+  jmp .L.matchend957
+.L.arm962:
   lea .L.str245+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.matchend947
+  jmp .L.matchend957
   mov $1, %rdi
   call exit
-.L.matchend947:
+.L.matchend957:
   add $16, %rsp
 .L.return.gen_addr:
   mov %rbp, %rsp
@@ -28372,22 +29490,22 @@ emit_load_var:
   call is_byte_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.else959
+  je .L.else969
   lea .L.str246+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end959
-.L.else959:
+  jmp .L.end969
+.L.else969:
   lea .L.str247+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-.L.end959:
+.L.end969:
   mov -16(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
@@ -28399,7 +29517,7 @@ emit_load_var:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else960
+  je .L.else970
   mov -16(%rbp), %rax
   add $24, %rax
   mov (%rax), %rax
@@ -28414,8 +29532,8 @@ emit_load_var:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end960
-.L.else960:
+  jmp .L.end970
+.L.else970:
   mov -16(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -28429,7 +29547,7 @@ emit_load_var:
   sub $8, %rsp
   call emit
   add $8, %rsp
-.L.end960:
+.L.end970:
 .L.return.emit_load_var:
   mov %rbp, %rsp
   pop %rbp
@@ -28448,22 +29566,22 @@ emit_store_var:
   call is_byte_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.else961
+  je .L.else971
   lea .L.str250+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end961
-.L.else961:
+  jmp .L.end971
+.L.else971:
   lea .L.str251+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-.L.end961:
+.L.end971:
   mov -16(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
@@ -28475,7 +29593,7 @@ emit_store_var:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else962
+  je .L.else972
   mov -16(%rbp), %rax
   add $24, %rax
   mov (%rax), %rax
@@ -28490,8 +29608,8 @@ emit_store_var:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end962
-.L.else962:
+  jmp .L.end972
+.L.else972:
   mov -16(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -28505,7 +29623,7 @@ emit_store_var:
   sub $8, %rsp
   call emit
   add $8, %rsp
-.L.end962:
+.L.end972:
 .L.return.emit_store_var:
   mov %rbp, %rsp
   pop %rbp
@@ -28535,7 +29653,7 @@ gen_load:
   call is_array
   add $8, %rsp
   cmp $0, %rax
-  jne .L.true964
+  jne .L.true974
   mov -40(%rbp), %rax
   push %rax
   pop %rdi
@@ -28543,15 +29661,15 @@ gen_load:
   call passes_by_ref
   add $8, %rsp
   cmp $0, %rax
-  je .L.false964
-.L.true964:
+  je .L.false974
+.L.true974:
   mov $1, %rax
-  jmp .L.end964
-.L.false964:
+  jmp .L.end974
+.L.false974:
   mov $0, %rax
-.L.end964:
+.L.end974:
   cmp $0, %rax
-  je .L.else963
+  je .L.else973
   mov -48(%rbp), %rax
   push %rax
   pop %rdi
@@ -28560,16 +29678,16 @@ gen_load:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_load
-  jmp .L.end963
-.L.else963:
-.L.end963:
+  jmp .L.end973
+.L.else973:
+.L.end973:
   mov -48(%rbp), %rax
   push %rax
   mov (%rax), %rax
   push %rax
   mov (%rsp), %rax
   cmp $2, %rax
-  jne .L.arm966
+  jne .L.arm976
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -32(%rbp), %rdi
@@ -28591,7 +29709,7 @@ gen_load:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else967
+  je .L.else977
   mov -8(%rbp), %rax
   push %rax
   mov -40(%rbp), %rax
@@ -28603,15 +29721,15 @@ gen_load:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_load
-  jmp .L.end967
-.L.else967:
-.L.end967:
-  jmp .L.matchend965
-.L.arm966:
-  jmp .L.matchend965
+  jmp .L.end977
+.L.else977:
+.L.end977:
+  jmp .L.matchend975
+.L.arm976:
+  jmp .L.matchend975
   mov $1, %rdi
   call exit
-.L.matchend965:
+.L.matchend975:
   add $16, %rsp
   mov -48(%rbp), %rax
   push %rax
@@ -28735,7 +29853,7 @@ gen_binary:
   push %rax
   mov (%rsp), %rax
   cmp $0, %rax
-  jne .L.arm970
+  jne .L.arm980
   mov -16(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -28753,11 +29871,11 @@ gen_binary:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_binary
-  jmp .L.matchend969
-.L.arm970:
+  jmp .L.matchend979
+.L.arm980:
   mov (%rsp), %rax
   cmp $1, %rax
-  jne .L.arm971
+  jne .L.arm981
   mov -16(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -28775,11 +29893,11 @@ gen_binary:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_binary
-  jmp .L.matchend969
-.L.arm971:
+  jmp .L.matchend979
+.L.arm981:
   mov (%rsp), %rax
   cmp $2, %rax
-  jne .L.arm972
+  jne .L.arm982
   mov -16(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -28797,11 +29915,11 @@ gen_binary:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_binary
-  jmp .L.matchend969
-.L.arm972:
+  jmp .L.matchend979
+.L.arm982:
   mov (%rsp), %rax
   cmp $3, %rax
-  jne .L.arm973
+  jne .L.arm983
   mov -16(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -28825,11 +29943,11 @@ gen_binary:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_binary
-  jmp .L.matchend969
-.L.arm973:
+  jmp .L.matchend979
+.L.arm983:
   mov (%rsp), %rax
   cmp $4, %rax
-  jne .L.arm974
+  jne .L.arm984
   mov -16(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -28859,11 +29977,11 @@ gen_binary:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_binary
-  jmp .L.matchend969
-.L.arm974:
+  jmp .L.matchend979
+.L.arm984:
   mov (%rsp), %rax
   cmp $5, %rax
-  jne .L.arm975
+  jne .L.arm985
   mov -16(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -28878,11 +29996,11 @@ gen_binary:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_binary
-  jmp .L.matchend969
-.L.arm975:
+  jmp .L.matchend979
+.L.arm985:
   mov (%rsp), %rax
   cmp $6, %rax
-  jne .L.arm976
+  jne .L.arm986
   mov -16(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -28897,11 +30015,11 @@ gen_binary:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_binary
-  jmp .L.matchend969
-.L.arm976:
+  jmp .L.matchend979
+.L.arm986:
   mov (%rsp), %rax
   cmp $7, %rax
-  jne .L.arm977
+  jne .L.arm987
   mov -16(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -28916,11 +30034,11 @@ gen_binary:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_binary
-  jmp .L.matchend969
-.L.arm977:
+  jmp .L.matchend979
+.L.arm987:
   mov (%rsp), %rax
   cmp $8, %rax
-  jne .L.arm978
+  jne .L.arm988
   mov -16(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -28935,11 +30053,11 @@ gen_binary:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_binary
-  jmp .L.matchend969
-.L.arm978:
+  jmp .L.matchend979
+.L.arm988:
   mov (%rsp), %rax
   cmp $9, %rax
-  jne .L.arm979
+  jne .L.arm989
   mov -16(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -28954,11 +30072,11 @@ gen_binary:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_binary
-  jmp .L.matchend969
-.L.arm979:
+  jmp .L.matchend979
+.L.arm989:
   mov (%rsp), %rax
   cmp $10, %rax
-  jne .L.arm980
+  jne .L.arm990
   mov -16(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -28973,11 +30091,11 @@ gen_binary:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_binary
-  jmp .L.matchend969
-.L.arm980:
+  jmp .L.matchend979
+.L.arm990:
   mov $1, %rdi
   call exit
-.L.matchend969:
+.L.matchend979:
   add $16, %rsp
 .L.return.gen_binary:
   mov %rbp, %rsp
@@ -28988,22 +30106,22 @@ gen_expr:
   push %rbp
   mov %rsp, %rbp
   sub $480, %rsp
-  mov %rdi, -472(%rbp)
-  mov -472(%rbp), %rax
+  mov %rdi, -480(%rbp)
+  mov -480(%rbp), %rax
   push %rax
   mov (%rax), %rax
   push %rax
   mov (%rsp), %rax
   cmp $0, %rax
-  jne .L.arm982
+  jne .L.arm992
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -464(%rbp), %rdi
+  lea -472(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
-  lea -464(%rbp), %rax
+  lea -472(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -29014,14 +30132,14 @@ gen_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else983
+  je .L.else993
   lea .L.str276+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-  lea -464(%rbp), %rax
+  lea -472(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -29040,15 +30158,15 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end983
-.L.else983:
+  jmp .L.end993
+.L.else993:
   lea .L.str278+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-  lea -464(%rbp), %rax
+  lea -472(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
@@ -29061,14 +30179,14 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-.L.end983:
+.L.end993:
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.matchend981
-.L.arm982:
+  jmp .L.matchend991
+.L.arm992:
   mov (%rsp), %rax
   cmp $1, %rax
-  jne .L.arm984
+  jne .L.arm994
   lea .L.str280+8(%rip), %rax
   push %rax
   pop %rdi
@@ -29077,21 +30195,21 @@ gen_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.matchend981
-.L.arm984:
+  jmp .L.matchend991
+.L.arm994:
   mov (%rsp), %rax
   cmp $2, %rax
-  jne .L.arm985
+  jne .L.arm995
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -448(%rbp), %rdi
+  lea -456(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
   mov 16(%rsi), %rax
   mov %rax, 16(%rdi)
-  mov -472(%rbp), %rax
+  mov -480(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -29099,19 +30217,19 @@ gen_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.matchend981
-.L.arm985:
+  jmp .L.matchend991
+.L.arm995:
   mov (%rsp), %rax
   cmp $12, %rax
-  jne .L.arm986
+  jne .L.arm996
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -424(%rbp), %rdi
+  lea -432(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
-  mov -472(%rbp), %rax
+  mov -480(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -29119,11 +30237,30 @@ gen_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.matchend981
-.L.arm986:
+  jmp .L.matchend991
+.L.arm996:
   mov (%rsp), %rax
   cmp $5, %rax
-  jne .L.arm987
+  jne .L.arm997
+  mov 8(%rsp), %rsi
+  add $8, %rsi
+  lea -416(%rbp), %rdi
+  mov 0(%rsi), %rax
+  mov %rax, 0(%rdi)
+  lea -416(%rbp), %rax
+  mov (%rax), %rax
+  push %rax
+  pop %rdi
+  sub $8, %rsp
+  call gen_addr
+  add $8, %rsp
+  mov $0, %rax
+  jmp .L.return.gen_expr
+  jmp .L.matchend991
+.L.arm997:
+  mov (%rsp), %rax
+  cmp $13, %rax
+  jne .L.arm998
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -408(%rbp), %rdi
@@ -29134,15 +30271,15 @@ gen_expr:
   push %rax
   pop %rdi
   sub $8, %rsp
-  call gen_addr
+  call gen_expr
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.matchend981
-.L.arm987:
+  jmp .L.matchend991
+.L.arm998:
   mov (%rsp), %rax
-  cmp $13, %rax
-  jne .L.arm988
+  cmp $14, %rax
+  jne .L.arm999
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -400(%rbp), %rdi
@@ -29157,33 +30294,14 @@ gen_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.matchend981
-.L.arm988:
+  jmp .L.matchend991
+.L.arm999:
   mov (%rsp), %rax
-  cmp $14, %rax
-  jne .L.arm989
+  cmp $15, %rax
+  jne .L.arm1000
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -392(%rbp), %rdi
-  mov 0(%rsi), %rax
-  mov %rax, 0(%rdi)
-  lea -392(%rbp), %rax
-  mov (%rax), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call gen_expr
-  add $8, %rsp
-  mov $0, %rax
-  jmp .L.return.gen_expr
-  jmp .L.matchend981
-.L.arm989:
-  mov (%rsp), %rax
-  cmp $15, %rax
-  jne .L.arm990
-  mov 8(%rsp), %rsi
-  add $8, %rsi
-  lea -384(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
@@ -29192,7 +30310,7 @@ gen_expr:
   mov %rax, 16(%rdi)
   mov 24(%rsi), %rax
   mov %rax, 24(%rdi)
-  mov -472(%rbp), %rax
+  mov -480(%rbp), %rax
   add $48, %rax
   mov (%rax), %rax
   push %rax
@@ -29208,15 +30326,15 @@ gen_expr:
   sub $8, %rsp
   call type_base
   add $8, %rsp
-  mov %rax, -352(%rbp)
-  mov -352(%rbp), %rax
+  mov %rax, -360(%rbp)
+  mov -360(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call type_size
   add $8, %rsp
-  mov %rax, -344(%rbp)
-  mov -344(%rbp), %rax
+  mov %rax, -352(%rbp)
+  mov -352(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -29225,16 +30343,16 @@ gen_expr:
   setle %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else991
+  je .L.else1001
   mov $8, %rax
-  mov %rax, -344(%rbp)
-  jmp .L.end991
-.L.else991:
-.L.end991:
-  lea -384(%rbp), %rax
+  mov %rax, -352(%rbp)
+  jmp .L.end1001
+.L.else1001:
+.L.end1001:
+  lea -392(%rbp), %rax
   mov (%rax), %rax
-  mov %rax, -336(%rbp)
-  mov -336(%rbp), %rax
+  mov %rax, -344(%rbp)
+  mov -344(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -29243,14 +30361,14 @@ gen_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else992
-  mov -336(%rbp), %rax
+  je .L.else1002
+  mov -344(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call gen_expr
   add $8, %rsp
-  mov -344(%rbp), %rax
+  mov -352(%rbp), %rax
   push %rax
   mov $1, %rax
   mov %rax, %rdi
@@ -29259,14 +30377,14 @@ gen_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else993
+  je .L.else1003
   lea .L.str282+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-  mov -344(%rbp), %rax
+  mov -352(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -29278,9 +30396,9 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end993
-.L.else993:
-.L.end993:
+  jmp .L.end1003
+.L.else1003:
+.L.end1003:
   lea .L.str284+8(%rip), %rax
   push %rax
   pop %rdi
@@ -29295,16 +30413,16 @@ gen_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.end992
-.L.else992:
-.L.end992:
+  jmp .L.end1002
+.L.else1002:
+.L.end1002:
   lea .L.str286+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-  mov -344(%rbp), %rax
+  mov -352(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -29322,11 +30440,11 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  lea -384(%rbp), %rax
+  lea -392(%rbp), %rax
   add $24, %rax
   mov (%rax), %rax
-  mov %rax, -328(%rbp)
-  mov -328(%rbp), %rax
+  mov %rax, -336(%rbp)
+  mov -336(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -29335,7 +30453,7 @@ gen_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else994
+  je .L.else1004
   lea .L.str289+8(%rip), %rax
   push %rax
   pop %rdi
@@ -29354,7 +30472,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  lea -384(%rbp), %rax
+  lea -392(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -29374,7 +30492,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  lea -384(%rbp), %rax
+  lea -392(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   push %rax
@@ -29394,9 +30512,9 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end994
-.L.else994:
-  lea -384(%rbp), %rax
+  jmp .L.end1004
+.L.else1004:
+  lea -392(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -29407,7 +30525,7 @@ gen_expr:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else995
+  je .L.else1005
   lea .L.str296+8(%rip), %rax
   push %rax
   pop %rdi
@@ -29420,7 +30538,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  lea -384(%rbp), %rax
+  lea -392(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   push %rax
@@ -29440,23 +30558,23 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end995
-.L.else995:
-.L.end995:
-.L.end994:
+  jmp .L.end1005
+.L.else1005:
+.L.end1005:
+.L.end1004:
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.matchend981
-.L.arm990:
+  jmp .L.matchend991
+.L.arm1000:
   mov (%rsp), %rax
   cmp $16, %rax
-  jne .L.arm996
+  jne .L.arm1006
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -320(%rbp), %rdi
+  lea -328(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
-  mov -472(%rbp), %rax
+  mov -480(%rbp), %rax
   add $48, %rax
   mov (%rax), %rax
   push %rax
@@ -29472,8 +30590,8 @@ gen_expr:
   sub $8, %rsp
   call type_size
   add $8, %rsp
-  mov %rax, -312(%rbp)
-  mov -312(%rbp), %rax
+  mov %rax, -320(%rbp)
+  mov -320(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -29482,13 +30600,13 @@ gen_expr:
   setle %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else997
+  je .L.else1007
   mov $8, %rax
-  mov %rax, -312(%rbp)
-  jmp .L.end997
-.L.else997:
-.L.end997:
-  mov -312(%rbp), %rax
+  mov %rax, -320(%rbp)
+  jmp .L.end1007
+.L.else1007:
+.L.end1007:
+  mov -320(%rbp), %rax
   push %rax
   mov $15, %rax
   mov %rax, %rdi
@@ -29505,14 +30623,14 @@ gen_expr:
   mov %rax, %rdi
   pop %rax
   imul %rdi, %rax
-  mov %rax, -312(%rbp)
+  mov %rax, -320(%rbp)
   lea .L.str301+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-  mov -312(%rbp), %rax
+  mov -320(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -29536,7 +30654,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  lea -320(%rbp), %rax
+  lea -328(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
@@ -29557,21 +30675,21 @@ gen_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.matchend981
-.L.arm996:
+  jmp .L.matchend991
+.L.arm1006:
   mov (%rsp), %rax
   cmp $17, %rax
-  jne .L.arm998
+  jne .L.arm1008
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -304(%rbp), %rdi
+  lea -312(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
   mov 16(%rsi), %rax
   mov %rax, 16(%rdi)
-  mov -472(%rbp), %rax
+  mov -480(%rbp), %rax
   add $48, %rax
   mov (%rax), %rax
   push %rax
@@ -29587,8 +30705,8 @@ gen_expr:
   sub $8, %rsp
   call type_size
   add $8, %rsp
-  mov %rax, -280(%rbp)
-  mov -280(%rbp), %rax
+  mov %rax, -288(%rbp)
+  mov -288(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -29597,13 +30715,13 @@ gen_expr:
   setle %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else999
+  je .L.else1009
   mov $8, %rax
-  mov %rax, -280(%rbp)
-  jmp .L.end999
-.L.else999:
-.L.end999:
-  mov -280(%rbp), %rax
+  mov %rax, -288(%rbp)
+  jmp .L.end1009
+.L.else1009:
+.L.end1009:
+  mov -288(%rbp), %rax
   push %rax
   mov $8, %rax
   mov %rax, %rdi
@@ -29612,8 +30730,8 @@ gen_expr:
   setle %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1000
-  lea -304(%rbp), %rax
+  je .L.else1010
+  lea -312(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   push %rax
@@ -29624,14 +30742,14 @@ gen_expr:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1001
+  je .L.else1011
   lea .L.str308+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-  lea -304(%rbp), %rax
+  lea -312(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -29647,9 +30765,9 @@ gen_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.end1001
-.L.else1001:
-.L.end1001:
+  jmp .L.end1011
+.L.else1011:
+.L.end1011:
   lea .L.str310+8(%rip), %rax
   push %rax
   pop %rdi
@@ -29674,7 +30792,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  lea -304(%rbp), %rax
+  lea -312(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -29694,7 +30812,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  lea -304(%rbp), %rax
+  lea -312(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   push %rax
@@ -29716,10 +30834,10 @@ gen_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.end1000
-.L.else1000:
-.L.end1000:
-  mov -280(%rbp), %rax
+  jmp .L.end1010
+.L.else1010:
+.L.end1010:
+  mov -288(%rbp), %rax
   push %rax
   mov $15, %rax
   mov %rax, %rdi
@@ -29736,14 +30854,14 @@ gen_expr:
   mov %rax, %rdi
   pop %rax
   imul %rdi, %rax
-  mov %rax, -280(%rbp)
+  mov %rax, -288(%rbp)
   lea .L.str318+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-  mov -280(%rbp), %rax
+  mov -288(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -29773,7 +30891,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  lea -304(%rbp), %rax
+  lea -312(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -29793,7 +30911,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  lea -304(%rbp), %rax
+  lea -312(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   push %rax
@@ -29815,24 +30933,24 @@ gen_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.matchend981
-.L.arm998:
+  jmp .L.matchend991
+.L.arm1008:
   mov (%rsp), %rax
   cmp $6, %rax
-  jne .L.arm1002
+  jne .L.arm1012
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -272(%rbp), %rdi
+  lea -280(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
-  lea -272(%rbp), %rax
+  lea -280(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call gen_expr
   add $8, %rsp
-  mov -472(%rbp), %rax
+  mov -480(%rbp), %rax
   add $48, %rax
   mov (%rax), %rax
   push %rax
@@ -29850,19 +30968,19 @@ gen_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.matchend981
-.L.arm1002:
+  jmp .L.matchend991
+.L.arm1012:
   mov (%rsp), %rax
   cmp $4, %rax
-  jne .L.arm1003
+  jne .L.arm1013
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -264(%rbp), %rdi
+  lea -272(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
-  lea -264(%rbp), %rax
+  lea -272(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -29870,18 +30988,18 @@ gen_expr:
   push %rax
   mov (%rsp), %rax
   cmp $16, %rax
-  jne .L.arm1005
+  jne .L.arm1015
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -248(%rbp), %rdi
+  lea -256(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
-  lea -264(%rbp), %rax
+  lea -272(%rbp), %rax
   mov (%rax), %rax
   add $48, %rax
   mov (%rax), %rax
-  mov %rax, -240(%rbp)
-  mov -240(%rbp), %rax
+  mov %rax, -248(%rbp)
+  mov -248(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -29890,23 +31008,23 @@ gen_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false1007
-  mov -240(%rbp), %rax
+  je .L.false1017
+  mov -248(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call is_struct_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.false1007
+  je .L.false1017
   mov $1, %rax
-  jmp .L.end1007
-.L.false1007:
+  jmp .L.end1017
+.L.false1017:
   mov $0, %rax
-.L.end1007:
+.L.end1017:
   cmp $0, %rax
-  je .L.else1006
-  lea -264(%rbp), %rax
+  je .L.else1016
+  lea -272(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
@@ -29925,7 +31043,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  lea -248(%rbp), %rax
+  lea -256(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
@@ -29946,29 +31064,29 @@ gen_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.end1006
-.L.else1006:
-.L.end1006:
-  jmp .L.matchend1004
-.L.arm1005:
+  jmp .L.end1016
+.L.else1016:
+.L.end1016:
+  jmp .L.matchend1014
+.L.arm1015:
   mov (%rsp), %rax
   cmp $17, %rax
-  jne .L.arm1008
+  jne .L.arm1018
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -232(%rbp), %rdi
+  lea -240(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
   mov 16(%rsi), %rax
   mov %rax, 16(%rdi)
-  lea -264(%rbp), %rax
+  lea -272(%rbp), %rax
   mov (%rax), %rax
   add $48, %rax
   mov (%rax), %rax
-  mov %rax, -208(%rbp)
-  mov -208(%rbp), %rax
+  mov %rax, -216(%rbp)
+  mov -216(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -29977,23 +31095,23 @@ gen_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.false1010
-  mov -208(%rbp), %rax
+  je .L.false1020
+  mov -216(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call is_enum_ty
   add $8, %rsp
   cmp $0, %rax
-  je .L.false1010
+  je .L.false1020
   mov $1, %rax
-  jmp .L.end1010
-.L.false1010:
+  jmp .L.end1020
+.L.false1020:
   mov $0, %rax
-.L.end1010:
+.L.end1020:
   cmp $0, %rax
-  je .L.else1009
-  lea -264(%rbp), %rax
+  je .L.else1019
+  lea -272(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
@@ -30018,7 +31136,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  lea -232(%rbp), %rax
+  lea -240(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -30038,7 +31156,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  lea -232(%rbp), %rax
+  lea -240(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
   push %rax
@@ -30060,17 +31178,17 @@ gen_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.end1009
-.L.else1009:
-.L.end1009:
-  jmp .L.matchend1004
-.L.arm1008:
-  jmp .L.matchend1004
+  jmp .L.end1019
+.L.else1019:
+.L.end1019:
+  jmp .L.matchend1014
+.L.arm1018:
+  jmp .L.matchend1014
   mov $1, %rdi
   call exit
-.L.matchend1004:
+.L.matchend1014:
   add $16, %rsp
-  lea -264(%rbp), %rax
+  lea -272(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -30078,7 +31196,7 @@ gen_expr:
   sub $8, %rsp
   call gen_expr
   add $8, %rsp
-  lea -264(%rbp), %rax
+  lea -272(%rbp), %rax
   mov (%rax), %rax
   add $48, %rax
   mov (%rax), %rax
@@ -30090,8 +31208,8 @@ gen_expr:
   sub $8, %rsp
   call expect_type
   add $8, %rsp
-  mov %rax, -200(%rbp)
-  mov -200(%rbp), %rax
+  mov %rax, -208(%rbp)
+  mov -208(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -30101,28 +31219,28 @@ gen_expr:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1012
-  lea -264(%rbp), %rax
+  je .L.else1022
+  lea -272(%rbp), %rax
   mov (%rax), %rax
   push %rax
   mov (%rax), %rax
   push %rax
   mov (%rsp), %rax
   cmp $2, %rax
-  jne .L.arm1014
+  jne .L.arm1024
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -192(%rbp), %rdi
+  lea -200(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
   mov 16(%rsi), %rax
   mov %rax, 16(%rdi)
-  lea -192(%rbp), %rax
+  lea -200(%rbp), %rax
   mov (%rax), %rax
-  mov %rax, -168(%rbp)
-  mov -168(%rbp), %rax
+  mov %rax, -176(%rbp)
+  mov -176(%rbp), %rax
   push %rax
   mov $0, %rax
   mov %rax, %rdi
@@ -30131,10 +31249,10 @@ gen_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1015
-  mov -168(%rbp), %rax
+  je .L.else1025
+  mov -176(%rbp), %rax
   push %rax
-  mov -200(%rbp), %rax
+  mov -208(%rbp), %rax
   push %rax
   pop %rsi
   pop %rdi
@@ -30143,26 +31261,26 @@ gen_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.end1015
-.L.else1015:
-.L.end1015:
-  jmp .L.matchend1013
-.L.arm1014:
-  jmp .L.matchend1013
+  jmp .L.end1025
+.L.else1025:
+.L.end1025:
+  jmp .L.matchend1023
+.L.arm1024:
+  jmp .L.matchend1023
   mov $1, %rdi
   call exit
-.L.matchend1013:
+.L.matchend1023:
   add $16, %rsp
-  jmp .L.end1012
-.L.else1012:
-.L.end1012:
+  jmp .L.end1022
+.L.else1022:
+.L.end1022:
   lea .L.str340+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-  lea -264(%rbp), %rax
+  lea -272(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
@@ -30181,15 +31299,15 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  mov -200(%rbp), %rax
+  mov -208(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call passes_by_ref
   add $8, %rsp
   cmp $0, %rax
-  je .L.else1017
-  mov -200(%rbp), %rax
+  je .L.else1027
+  mov -208(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -30206,34 +31324,34 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end1017
-.L.else1017:
+  jmp .L.end1027
+.L.else1027:
   lea .L.str344+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-  mov -200(%rbp), %rax
+  mov -208(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call store_mem
   add $8, %rsp
-.L.end1017:
+.L.end1027:
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.matchend981
-.L.arm1003:
+  jmp .L.matchend991
+.L.arm1013:
   mov (%rsp), %rax
   cmp $7, %rax
-  jne .L.arm1018
+  jne .L.arm1028
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -160(%rbp), %rdi
+  lea -168(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
-  lea -160(%rbp), %rax
+  lea -168(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
@@ -30260,17 +31378,17 @@ gen_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.matchend981
-.L.arm1018:
+  jmp .L.matchend991
+.L.arm1028:
   mov (%rsp), %rax
   cmp $8, %rax
-  jne .L.arm1019
+  jne .L.arm1029
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -152(%rbp), %rdi
+  lea -160(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
-  lea -152(%rbp), %rax
+  lea -160(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
@@ -30285,14 +31403,14 @@ gen_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.matchend981
-.L.arm1019:
+  jmp .L.matchend991
+.L.arm1029:
   mov (%rsp), %rax
   cmp $9, %rax
-  jne .L.arm1020
+  jne .L.arm1030
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -144(%rbp), %rdi
+  lea -152(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
@@ -30300,8 +31418,8 @@ gen_expr:
   sub $8, %rsp
   call new_label
   add $8, %rsp
-  mov %rax, -128(%rbp)
-  lea -144(%rbp), %rax
+  mov %rax, -136(%rbp)
+  lea -152(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
@@ -30320,7 +31438,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  mov -128(%rbp), %rax
+  mov -136(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -30332,7 +31450,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  lea -144(%rbp), %rax
+  lea -152(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -30352,7 +31470,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  mov -128(%rbp), %rax
+  mov -136(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -30376,7 +31494,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  mov -128(%rbp), %rax
+  mov -136(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -30394,7 +31512,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  mov -128(%rbp), %rax
+  mov -136(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -30418,7 +31536,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  mov -128(%rbp), %rax
+  mov -136(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -30432,14 +31550,14 @@ gen_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.matchend981
-.L.arm1020:
+  jmp .L.matchend991
+.L.arm1030:
   mov (%rsp), %rax
   cmp $10, %rax
-  jne .L.arm1021
+  jne .L.arm1031
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -120(%rbp), %rdi
+  lea -128(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
@@ -30447,8 +31565,8 @@ gen_expr:
   sub $8, %rsp
   call new_label
   add $8, %rsp
-  mov %rax, -104(%rbp)
-  lea -120(%rbp), %rax
+  mov %rax, -112(%rbp)
+  lea -128(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
@@ -30467,7 +31585,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  mov -104(%rbp), %rax
+  mov -112(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -30479,7 +31597,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  lea -120(%rbp), %rax
+  lea -128(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   push %rax
@@ -30499,7 +31617,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  mov -104(%rbp), %rax
+  mov -112(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -30517,7 +31635,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  mov -104(%rbp), %rax
+  mov -112(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -30541,7 +31659,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  mov -104(%rbp), %rax
+  mov -112(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -30559,7 +31677,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  mov -104(%rbp), %rax
+  mov -112(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -30583,7 +31701,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  mov -104(%rbp), %rax
+  mov -112(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
@@ -30597,25 +31715,23 @@ gen_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.matchend981
-.L.arm1021:
+  jmp .L.matchend991
+.L.arm1031:
   mov (%rsp), %rax
   cmp $11, %rax
-  jne .L.arm1022
+  jne .L.arm1032
   mov 8(%rsp), %rsi
   add $8, %rsi
-  lea -96(%rbp), %rdi
+  lea -104(%rbp), %rdi
   mov 0(%rsi), %rax
   mov %rax, 0(%rdi)
   mov 8(%rsi), %rax
   mov %rax, 8(%rdi)
-  lea -96(%rbp), %rax
+  mov 16(%rsi), %rax
+  mov %rax, 16(%rdi)
+  lea -104(%rbp), %rax
+  add $16, %rax
   mov (%rax), %rax
-  push %rax
-  pop %rdi
-  sub $8, %rsp
-  call find_function
-  add $8, %rsp
   mov %rax, -80(%rbp)
   mov $0, %rax
   mov %rax, -72(%rbp)
@@ -30628,7 +31744,7 @@ gen_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1023
+  je .L.else1033
   mov -80(%rbp), %rax
   add $56, %rax
   mov (%rax), %rax
@@ -30640,22 +31756,22 @@ gen_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1024
+  je .L.else1034
   mov $1, %rax
   mov %rax, -72(%rbp)
-  jmp .L.end1024
-.L.else1024:
-.L.end1024:
-  jmp .L.end1023
-.L.else1023:
-.L.end1023:
+  jmp .L.end1034
+.L.else1034:
+.L.end1034:
+  jmp .L.end1033
+.L.else1033:
+.L.end1033:
   mov $0, %rax
   mov %rax, -64(%rbp)
-  lea -96(%rbp), %rax
+  lea -104(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -56(%rbp)
-.L.begin1025:
+.L.begin1035:
   mov -56(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -30665,7 +31781,7 @@ gen_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end1025
+  je .L.end1035
   mov -64(%rbp), %rax
   push %rax
   mov $1, %rax
@@ -30677,8 +31793,8 @@ gen_expr:
   add $40, %rax
   mov (%rax), %rax
   mov %rax, -56(%rbp)
-  jmp .L.begin1025
-.L.end1025:
+  jmp .L.begin1035
+.L.end1035:
   mov -64(%rbp), %rax
   push %rax
   mov -72(%rbp), %rax
@@ -30695,16 +31811,16 @@ gen_expr:
   setg %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1026
+  je .L.else1036
   lea .L.str379+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end1026
-.L.else1026:
-.L.end1026:
+  jmp .L.end1036
+.L.else1036:
+.L.end1036:
   mov -72(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -30714,7 +31830,7 @@ gen_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1027
+  je .L.else1037
   mov -80(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -30724,16 +31840,16 @@ gen_expr:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1028
+  je .L.else1038
   lea .L.str380+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end1028
-.L.else1028:
-.L.end1028:
+  jmp .L.end1038
+.L.else1038:
+.L.end1038:
   mov -80(%rbp), %rax
   add $48, %rax
   mov (%rax), %rax
@@ -30760,12 +31876,12 @@ gen_expr:
   setle %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1029
+  je .L.else1039
   mov $8, %rax
   mov %rax, -40(%rbp)
-  jmp .L.end1029
-.L.else1029:
-.L.end1029:
+  jmp .L.end1039
+.L.else1039:
+.L.end1039:
   mov -40(%rbp), %rax
   push %rax
   mov $15, %rax
@@ -30814,14 +31930,14 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end1027
-.L.else1027:
-.L.end1027:
-  lea -96(%rbp), %rax
+  jmp .L.end1037
+.L.else1037:
+.L.end1037:
+  lea -104(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -56(%rbp)
-.L.begin1030:
+.L.begin1040:
   mov -56(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -30831,7 +31947,7 @@ gen_expr:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end1030
+  je .L.end1040
   mov -56(%rbp), %rax
   push %rax
   pop %rdi
@@ -30848,8 +31964,8 @@ gen_expr:
   add $40, %rax
   mov (%rax), %rax
   mov %rax, -56(%rbp)
-  jmp .L.begin1030
-.L.end1030:
+  jmp .L.begin1040
+.L.end1040:
   mov -48(%rbp), %rax
   push %rax
   mov $1, %rax
@@ -30857,7 +31973,7 @@ gen_expr:
   pop %rax
   sub %rdi, %rax
   mov %rax, -32(%rbp)
-.L.begin1031:
+.L.begin1041:
   mov -32(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -30867,7 +31983,7 @@ gen_expr:
   setge %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end1031
+  je .L.end1041
   lea .L.str387+8(%rip), %rax
   push %rax
   pop %rdi
@@ -30898,8 +32014,8 @@ gen_expr:
   pop %rax
   sub %rdi, %rax
   mov %rax, -32(%rbp)
-  jmp .L.begin1031
-.L.end1031:
+  jmp .L.begin1041
+.L.end1041:
   lea .L.str389+8(%rip), %rax
   push %rax
   pop %rdi
@@ -30912,7 +32028,7 @@ gen_expr:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  lea -96(%rbp), %rax
+  lea -104(%rbp), %rax
   mov (%rax), %rax
   push %rax
   pop %rdi
@@ -30933,11 +32049,11 @@ gen_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.matchend981
-.L.arm1022:
+  jmp .L.matchend991
+.L.arm1032:
   mov (%rsp), %rax
   cmp $3, %rax
-  jne .L.arm1032
+  jne .L.arm1042
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -24(%rbp), %rdi
@@ -30966,18 +32082,18 @@ gen_expr:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_expr
-  jmp .L.matchend981
-.L.arm1032:
+  jmp .L.matchend991
+.L.arm1042:
   lea .L.str393+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.matchend981
+  jmp .L.matchend991
   mov $1, %rdi
   call exit
-.L.matchend981:
+.L.matchend991:
   add $16, %rsp
 .L.return.gen_expr:
   mov %rbp, %rsp
@@ -30995,7 +32111,7 @@ gen_stmt:
   push %rax
   mov (%rsp), %rax
   cmp $0, %rax
-  jne .L.arm1035
+  jne .L.arm1045
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -328(%rbp), %rdi
@@ -31013,7 +32129,7 @@ gen_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1036
+  je .L.else1046
   mov -320(%rbp), %rax
   push %rax
   pop %rdi
@@ -31031,7 +32147,7 @@ gen_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1037
+  je .L.else1047
   lea .L.str394+8(%rip), %rax
   push %rax
   pop %rdi
@@ -31083,18 +32199,18 @@ gen_stmt:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end1037
-.L.else1037:
-.L.end1037:
-  jmp .L.end1036
-.L.else1036:
+  jmp .L.end1047
+.L.else1047:
+.L.end1047:
+  jmp .L.end1046
+.L.else1046:
   lea .L.str399+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-.L.end1036:
+.L.end1046:
   lea .L.str400+8(%rip), %rax
   push %rax
   pop %rdi
@@ -31112,16 +32228,16 @@ gen_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1038
+  je .L.else1048
   lea .L.str401+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end1038
-.L.else1038:
-.L.end1038:
+  jmp .L.end1048
+.L.else1048:
+.L.end1048:
   mov -304(%rbp), %rax
   push %rax
   pop %rdi
@@ -31136,11 +32252,11 @@ gen_stmt:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_stmt
-  jmp .L.matchend1034
-.L.arm1035:
+  jmp .L.matchend1044
+.L.arm1045:
   mov (%rsp), %rax
   cmp $4, %rax
-  jne .L.arm1039
+  jne .L.arm1049
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -296(%rbp), %rdi
@@ -31155,11 +32271,11 @@ gen_stmt:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_stmt
-  jmp .L.matchend1034
-.L.arm1039:
+  jmp .L.matchend1044
+.L.arm1049:
   mov (%rsp), %rax
   cmp $3, %rax
-  jne .L.arm1040
+  jne .L.arm1050
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -288(%rbp), %rdi
@@ -31168,7 +32284,7 @@ gen_stmt:
   lea -288(%rbp), %rax
   mov (%rax), %rax
   mov %rax, -280(%rbp)
-.L.begin1041:
+.L.begin1051:
   mov -280(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -31178,7 +32294,7 @@ gen_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end1041
+  je .L.end1051
   mov -280(%rbp), %rax
   push %rax
   pop %rdi
@@ -31189,15 +32305,15 @@ gen_stmt:
   add $32, %rax
   mov (%rax), %rax
   mov %rax, -280(%rbp)
-  jmp .L.begin1041
-.L.end1041:
+  jmp .L.begin1051
+.L.end1051:
   mov $0, %rax
   jmp .L.return.gen_stmt
-  jmp .L.matchend1034
-.L.arm1040:
+  jmp .L.matchend1044
+.L.arm1050:
   mov (%rsp), %rax
   cmp $1, %rax
-  jne .L.arm1042
+  jne .L.arm1052
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -272(%rbp), %rdi
@@ -31299,16 +32415,16 @@ gen_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1043
+  je .L.else1053
   mov -240(%rbp), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call gen_stmt
   add $8, %rsp
-  jmp .L.end1043
-.L.else1043:
-.L.end1043:
+  jmp .L.end1053
+.L.else1053:
+.L.end1053:
   lea .L.str410+8(%rip), %rax
   push %rax
   pop %rdi
@@ -31329,11 +32445,11 @@ gen_stmt:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_stmt
-  jmp .L.matchend1034
-.L.arm1042:
+  jmp .L.matchend1044
+.L.arm1052:
   mov (%rsp), %rax
   cmp $2, %rax
-  jne .L.arm1044
+  jne .L.arm1054
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -232(%rbp), %rdi
@@ -31440,11 +32556,11 @@ gen_stmt:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_stmt
-  jmp .L.matchend1034
-.L.arm1044:
+  jmp .L.matchend1044
+.L.arm1054:
   mov (%rsp), %rax
   cmp $5, %rax
-  jne .L.arm1045
+  jne .L.arm1055
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -208(%rbp), %rdi
@@ -31463,7 +32579,7 @@ gen_stmt:
   push %rax
   mov (%rsp), %rax
   cmp $2, %rax
-  jne .L.arm1047
+  jne .L.arm1057
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -184(%rbp), %rdi
@@ -31480,11 +32596,11 @@ gen_stmt:
   sub $8, %rsp
   call gen_addr
   add $8, %rsp
-  jmp .L.matchend1046
-.L.arm1047:
+  jmp .L.matchend1056
+.L.arm1057:
   mov (%rsp), %rax
   cmp $12, %rax
-  jne .L.arm1048
+  jne .L.arm1058
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -160(%rbp), %rdi
@@ -31499,11 +32615,11 @@ gen_stmt:
   sub $8, %rsp
   call gen_addr
   add $8, %rsp
-  jmp .L.matchend1046
-.L.arm1048:
+  jmp .L.matchend1056
+.L.arm1058:
   mov (%rsp), %rax
   cmp $6, %rax
-  jne .L.arm1049
+  jne .L.arm1059
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -144(%rbp), %rdi
@@ -31516,8 +32632,8 @@ gen_stmt:
   sub $8, %rsp
   call gen_addr
   add $8, %rsp
-  jmp .L.matchend1046
-.L.arm1049:
+  jmp .L.matchend1056
+.L.arm1059:
   lea -208(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -31525,10 +32641,10 @@ gen_stmt:
   sub $8, %rsp
   call gen_expr
   add $8, %rsp
-  jmp .L.matchend1046
+  jmp .L.matchend1056
   mov $1, %rdi
   call exit
-.L.matchend1046:
+.L.matchend1056:
   add $16, %rsp
   lea .L.str421+8(%rip), %rax
   push %rax
@@ -31552,7 +32668,7 @@ gen_stmt:
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -136(%rbp)
-.L.begin1051:
+.L.begin1061:
   mov -136(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -31562,7 +32678,7 @@ gen_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end1051
+  je .L.end1061
   sub $8, %rsp
   call new_label
   add $8, %rsp
@@ -31579,7 +32695,7 @@ gen_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1052
+  je .L.else1062
   lea .L.str424+8(%rip), %rax
   push %rax
   pop %rdi
@@ -31624,9 +32740,9 @@ gen_stmt:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end1052
-.L.else1052:
-.L.end1052:
+  jmp .L.end1062
+.L.else1062:
+.L.end1062:
   mov -136(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
@@ -31640,7 +32756,7 @@ gen_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1053
+  je .L.else1063
   mov -120(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -31650,16 +32766,16 @@ gen_stmt:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1054
+  je .L.else1064
   lea .L.str429+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end1054
-.L.else1054:
-.L.end1054:
+  jmp .L.end1064
+.L.else1064:
+.L.end1064:
   mov -120(%rbp), %rax
   add $32, %rax
   mov (%rax), %rax
@@ -31702,9 +32818,9 @@ gen_stmt:
   sub $8, %rsp
   call emit_memcpy
   add $8, %rsp
-  jmp .L.end1053
-.L.else1053:
-.L.end1053:
+  jmp .L.end1063
+.L.else1063:
+.L.end1063:
   mov -136(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -31740,7 +32856,7 @@ gen_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1055
+  je .L.else1065
   lea .L.str436+8(%rip), %rax
   push %rax
   pop %rdi
@@ -31759,15 +32875,15 @@ gen_stmt:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end1055
-.L.else1055:
-.L.end1055:
+  jmp .L.end1065
+.L.else1065:
+.L.end1065:
   mov -136(%rbp), %rax
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -136(%rbp)
-  jmp .L.begin1051
-.L.end1051:
+  jmp .L.begin1061
+.L.end1061:
   lea .L.str438+8(%rip), %rax
   push %rax
   pop %rdi
@@ -31806,11 +32922,11 @@ gen_stmt:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_stmt
-  jmp .L.matchend1034
-.L.arm1045:
+  jmp .L.matchend1044
+.L.arm1055:
   mov (%rsp), %rax
   cmp $6, %rax
-  jne .L.arm1056
+  jne .L.arm1066
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -96(%rbp), %rdi
@@ -31830,7 +32946,7 @@ gen_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1057
+  je .L.else1067
   lea -96(%rbp), %rax
   mov (%rax), %rax
   add $24, %rax
@@ -31845,12 +32961,12 @@ gen_stmt:
   setle %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1058
+  je .L.else1068
   mov $8, %rax
   mov %rax, -80(%rbp)
-  jmp .L.end1058
-.L.else1058:
-.L.end1058:
+  jmp .L.end1068
+.L.else1068:
+.L.end1068:
   lea .L.str443+8(%rip), %rax
   push %rax
   pop %rdi
@@ -31907,15 +33023,15 @@ gen_stmt:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end1057
-.L.else1057:
+  jmp .L.end1067
+.L.else1067:
   lea .L.str450+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-.L.end1057:
+.L.end1067:
   lea .L.str451+8(%rip), %rax
   push %rax
   pop %rdi
@@ -31945,11 +33061,11 @@ gen_stmt:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_stmt
-  jmp .L.matchend1034
-.L.arm1056:
+  jmp .L.matchend1044
+.L.arm1066:
   mov (%rsp), %rax
   cmp $7, %rax
-  jne .L.arm1059
+  jne .L.arm1069
   mov 8(%rsp), %rsi
   add $8, %rsi
   lea -72(%rbp), %rdi
@@ -32068,7 +33184,7 @@ gen_stmt:
   add $8, %rax
   mov (%rax), %rax
   mov %rax, -40(%rbp)
-.L.begin1060:
+.L.begin1070:
   mov -40(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -32078,7 +33194,7 @@ gen_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end1060
+  je .L.end1070
   sub $8, %rsp
   call new_label
   add $8, %rsp
@@ -32143,7 +33259,7 @@ gen_stmt:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1061
+  je .L.else1071
   mov -24(%rbp), %rax
   add $24, %rax
   mov (%rax), %rax
@@ -32157,7 +33273,7 @@ gen_stmt:
   setg %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1062
+  je .L.else1072
   lea .L.str470+8(%rip), %rax
   push %rax
   pop %rdi
@@ -32190,12 +33306,12 @@ gen_stmt:
   sub $8, %rsp
   call emit_memcpy
   add $8, %rsp
-  jmp .L.end1062
-.L.else1062:
-.L.end1062:
-  jmp .L.end1061
-.L.else1061:
-.L.end1061:
+  jmp .L.end1072
+.L.else1072:
+.L.end1072:
+  jmp .L.end1071
+.L.else1071:
+.L.end1071:
   mov -40(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -32244,8 +33360,8 @@ gen_stmt:
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -40(%rbp)
-  jmp .L.begin1060
-.L.end1060:
+  jmp .L.begin1070
+.L.end1070:
   lea .L.str477+8(%rip), %rax
   push %rax
   pop %rdi
@@ -32284,18 +33400,18 @@ gen_stmt:
   add $8, %rsp
   mov $0, %rax
   jmp .L.return.gen_stmt
-  jmp .L.matchend1034
-.L.arm1059:
+  jmp .L.matchend1044
+.L.arm1069:
   lea .L.str482+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.matchend1034
+  jmp .L.matchend1044
   mov $1, %rdi
   call exit
-.L.matchend1034:
+.L.matchend1044:
   add $16, %rsp
 .L.return.gen_stmt:
   mov %rbp, %rsp
@@ -32313,7 +33429,7 @@ assign_lvar_offsets:
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -24(%rbp)
-.L.begin1064:
+.L.begin1074:
   mov -24(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -32323,7 +33439,7 @@ assign_lvar_offsets:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end1064
+  je .L.end1074
   mov -24(%rbp), %rax
   add $40, %rax
   mov (%rax), %rax
@@ -32352,12 +33468,12 @@ assign_lvar_offsets:
   setle %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1065
+  je .L.else1075
   mov $8, %rax
   mov %rax, -8(%rbp)
-  jmp .L.end1065
-.L.else1065:
-.L.end1065:
+  jmp .L.end1075
+.L.else1075:
+.L.end1075:
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -32368,7 +33484,7 @@ assign_lvar_offsets:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1066
+  je .L.else1076
   mov -8(%rbp), %rax
   push %rax
   mov $8, %rax
@@ -32378,14 +33494,14 @@ assign_lvar_offsets:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1067
+  je .L.else1077
   mov $8, %rax
   mov %rax, -8(%rbp)
-  jmp .L.end1067
-.L.else1067:
-.L.end1067:
-  jmp .L.end1066
-.L.else1066:
+  jmp .L.end1077
+.L.else1077:
+.L.end1077:
+  jmp .L.end1076
+.L.else1076:
   mov -8(%rbp), %rax
   push %rax
   mov $7, %rax
@@ -32404,7 +33520,7 @@ assign_lvar_offsets:
   pop %rax
   imul %rdi, %rax
   mov %rax, -8(%rbp)
-.L.end1066:
+.L.end1076:
   mov -32(%rbp), %rax
   push %rax
   mov -8(%rbp), %rax
@@ -32429,8 +33545,8 @@ assign_lvar_offsets:
   add $56, %rax
   mov (%rax), %rax
   mov %rax, -24(%rbp)
-  jmp .L.begin1064
-.L.end1064:
+  jmp .L.begin1074
+.L.end1074:
   mov -32(%rbp), %rax
   push %rax
   mov $15, %rax
@@ -32478,7 +33594,7 @@ emit_data:
   sub $8, %rsp
   call emit
   add $8, %rsp
-.L.begin1068:
+.L.begin1078:
   mov -56(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -32488,7 +33604,7 @@ emit_data:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end1068
+  je .L.end1078
   mov -56(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -32500,7 +33616,7 @@ emit_data:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1069
+  je .L.else1079
   mov $8, %rax
   mov %rax, -48(%rbp)
   mov -56(%rbp), %rax
@@ -32516,7 +33632,7 @@ emit_data:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1070
+  je .L.else1080
   mov -40(%rbp), %rax
   push %rax
   pop %rdi
@@ -32524,9 +33640,9 @@ emit_data:
   call type_size
   add $8, %rsp
   mov %rax, -48(%rbp)
-  jmp .L.end1070
-.L.else1070:
-.L.end1070:
+  jmp .L.end1080
+.L.else1080:
+.L.end1080:
   mov -48(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -32536,12 +33652,12 @@ emit_data:
   setle %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1071
+  je .L.else1081
   mov $8, %rax
   mov %rax, -48(%rbp)
-  jmp .L.end1071
-.L.else1071:
-.L.end1071:
+  jmp .L.end1081
+.L.else1081:
+.L.end1081:
   mov -56(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -32567,15 +33683,15 @@ emit_data:
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end1069
-.L.else1069:
-.L.end1069:
+  jmp .L.end1079
+.L.else1079:
+.L.end1079:
   mov -56(%rbp), %rax
   add $56, %rax
   mov (%rax), %rax
   mov %rax, -56(%rbp)
-  jmp .L.begin1068
-.L.end1068:
+  jmp .L.begin1078
+.L.end1078:
   lea .L.str488+8(%rip), %rax
   push %rax
   pop %rdi
@@ -32590,7 +33706,7 @@ emit_data:
   add $8, %rsp
   mov $0, %rax
   mov %rax, -32(%rbp)
-.L.begin1072:
+.L.begin1082:
   mov -32(%rbp), %rax
   push %rax
   mov str_count(%rip), %rax
@@ -32600,12 +33716,12 @@ emit_data:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end1072
+  je .L.end1082
   mov str_lits(%rip), %rax
   mov %rax, -24(%rbp)
   mov $0, %rax
   mov %rax, -16(%rbp)
-.L.begin1073:
+.L.begin1083:
   mov -24(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -32615,7 +33731,7 @@ emit_data:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end1073
+  je .L.end1083
   mov -24(%rbp), %rax
   add $16, %rax
   mov (%rax), %rax
@@ -32627,12 +33743,12 @@ emit_data:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1074
+  je .L.else1084
   mov -24(%rbp), %rax
   mov %rax, -16(%rbp)
-  jmp .L.end1074
-.L.else1074:
-.L.end1074:
+  jmp .L.end1084
+.L.else1084:
+.L.end1084:
   mov -16(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -32642,18 +33758,18 @@ emit_data:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1075
+  je .L.else1085
   mov -24(%rbp), %rax
   add $24, %rax
   mov (%rax), %rax
   mov %rax, -24(%rbp)
-  jmp .L.end1075
-.L.else1075:
+  jmp .L.end1085
+.L.else1085:
   mov $0, %rax
   mov %rax, -24(%rbp)
-.L.end1075:
-  jmp .L.begin1073
-.L.end1073:
+.L.end1085:
+  jmp .L.begin1083
+.L.end1083:
   mov -16(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -32663,7 +33779,7 @@ emit_data:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1076
+  je .L.else1086
   lea .L.str490+8(%rip), %rax
   push %rax
   pop %rdi
@@ -32710,7 +33826,7 @@ emit_data:
   add $8, %rsp
   mov $0, %rax
   mov %rax, -8(%rbp)
-.L.begin1077:
+.L.begin1087:
   mov -8(%rbp), %rax
   push %rax
   mov -16(%rbp), %rax
@@ -32722,7 +33838,7 @@ emit_data:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end1077
+  je .L.end1087
   mov -8(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -32732,16 +33848,16 @@ emit_data:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1078
+  je .L.else1088
   lea .L.str495+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end1078
-.L.else1078:
-.L.end1078:
+  jmp .L.end1088
+.L.else1088:
+.L.end1088:
   mov -16(%rbp), %rax
   mov (%rax), %rax
   push %rax
@@ -32767,8 +33883,8 @@ emit_data:
   pop %rax
   add %rdi, %rax
   mov %rax, -8(%rbp)
-  jmp .L.begin1077
-.L.end1077:
+  jmp .L.begin1087
+.L.end1087:
   mov -16(%rbp), %rax
   add $8, %rax
   mov (%rax), %rax
@@ -32780,31 +33896,31 @@ emit_data:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1079
+  je .L.else1089
   lea .L.str496+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end1079
-.L.else1079:
+  jmp .L.end1089
+.L.else1089:
   lea .L.str497+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-.L.end1079:
+.L.end1089:
   lea .L.str498+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call emit
   add $8, %rsp
-  jmp .L.end1076
-.L.else1076:
-.L.end1076:
+  jmp .L.end1086
+.L.else1086:
+.L.end1086:
   mov -32(%rbp), %rax
   push %rax
   mov $1, %rax
@@ -32812,8 +33928,8 @@ emit_data:
   pop %rax
   add %rdi, %rax
   mov %rax, -32(%rbp)
-  jmp .L.begin1072
-.L.end1072:
+  jmp .L.begin1082
+.L.end1082:
 .L.return.emit_data:
   mov %rbp, %rsp
   pop %rbp
@@ -32831,7 +33947,7 @@ emit_text:
   sub $8, %rsp
   call emit
   add $8, %rsp
-.L.begin1080:
+.L.begin1090:
   mov -88(%rbp), %rax
   push %rax
   mov $0, %rax
@@ -32841,7 +33957,7 @@ emit_text:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end1080
+  je .L.end1090
   mov $0, %rax
   mov %rax, narrow_top(%rip)
   mov $0, %rax
@@ -32944,7 +34060,7 @@ emit_text:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1081
+  je .L.else1091
   lea .L.str507+8(%rip), %rax
   push %rax
   pop %rdi
@@ -32989,14 +34105,14 @@ emit_text:
   pop %rax
   add %rdi, %rax
   mov %rax, -80(%rbp)
-  jmp .L.end1081
-.L.else1081:
-.L.end1081:
+  jmp .L.end1091
+.L.else1091:
+.L.end1091:
   mov -80(%rbp), %rax
   mov %rax, -64(%rbp)
   mov $0, %rax
   mov %rax, -56(%rbp)
-.L.begin1082:
+.L.begin1092:
   mov -56(%rbp), %rax
   push %rax
   mov -88(%rbp), %rax
@@ -33008,7 +34124,7 @@ emit_text:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end1082
+  je .L.end1092
   mov -88(%rbp), %rax
   push %rax
   mov -56(%rbp), %rax
@@ -33028,16 +34144,16 @@ emit_text:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1083
+  je .L.else1093
   lea .L.str510+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end1083
-.L.else1083:
-.L.end1083:
+  jmp .L.end1093
+.L.else1093:
+.L.end1093:
   mov -48(%rbp), %rax
   mov %rax, -40(%rbp)
   lea .L.str511+8(%rip), %rax
@@ -33091,13 +34207,13 @@ emit_text:
   pop %rax
   add %rdi, %rax
   mov %rax, -56(%rbp)
-  jmp .L.begin1082
-.L.end1082:
+  jmp .L.begin1092
+.L.end1092:
   mov -64(%rbp), %rax
   mov %rax, -80(%rbp)
   mov $0, %rax
   mov %rax, -56(%rbp)
-.L.begin1084:
+.L.begin1094:
   mov -56(%rbp), %rax
   push %rax
   mov -88(%rbp), %rax
@@ -33109,7 +34225,7 @@ emit_text:
   setl %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.end1084
+  je .L.end1094
   mov -88(%rbp), %rax
   push %rax
   mov -56(%rbp), %rax
@@ -33129,16 +34245,16 @@ emit_text:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1085
+  je .L.else1095
   lea .L.str514+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end1085
-.L.else1085:
-.L.end1085:
+  jmp .L.end1095
+.L.else1095:
+.L.end1095:
   mov -32(%rbp), %rax
   mov %rax, -24(%rbp)
   mov -24(%rbp), %rax
@@ -33154,16 +34270,16 @@ emit_text:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1086
+  je .L.else1096
   lea .L.str515+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end1086
-.L.else1086:
-.L.end1086:
+  jmp .L.end1096
+.L.else1096:
+.L.end1096:
   mov -16(%rbp), %rax
   push %rax
   pop %rdi
@@ -33171,7 +34287,7 @@ emit_text:
   call passes_by_ref
   add $8, %rsp
   cmp $0, %rax
-  je .L.else1087
+  je .L.else1097
   lea .L.str516+8(%rip), %rax
   push %rax
   pop %rdi
@@ -33223,9 +34339,9 @@ emit_text:
   sub $8, %rsp
   call emit_memcpy
   add $8, %rsp
-  jmp .L.end1087
-.L.else1087:
-.L.end1087:
+  jmp .L.end1097
+.L.else1097:
+.L.end1097:
   mov -80(%rbp), %rax
   push %rax
   mov $1, %rax
@@ -33240,8 +34356,8 @@ emit_text:
   pop %rax
   add %rdi, %rax
   mov %rax, -56(%rbp)
-  jmp .L.begin1084
-.L.end1084:
+  jmp .L.begin1094
+.L.end1094:
   mov -88(%rbp), %rax
   add $32, %rax
   mov (%rax), %rax
@@ -33255,16 +34371,16 @@ emit_text:
   sete %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1088
+  je .L.else1098
   lea .L.str520+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end1088
-.L.else1088:
-.L.end1088:
+  jmp .L.end1098
+.L.else1098:
+.L.end1098:
   mov -8(%rbp), %rax
   push %rax
   pop %rdi
@@ -33312,8 +34428,8 @@ emit_text:
   add $80, %rax
   mov (%rax), %rax
   mov %rax, -88(%rbp)
-  jmp .L.begin1080
-.L.end1080:
+  jmp .L.begin1090
+.L.end1090:
 .L.return.emit_text:
   mov %rbp, %rsp
   pop %rbp
@@ -33346,7 +34462,7 @@ main:
   lea -72(%rbp), %rdi
   call l8_try_begin
   cmp $0, %rax
-  jne .L.catch1089
+  jne .L.catch1099
   mov -112(%rbp), %rax
   push %rax
   mov $2, %rax
@@ -33356,16 +34472,16 @@ main:
   setne %al
   movzb %al, %rax
   cmp $0, %rax
-  je .L.else1090
+  je .L.else1100
   lea .L.str526+8(%rip), %rax
   push %rax
   pop %rdi
   sub $8, %rsp
   call error
   add $8, %rsp
-  jmp .L.end1090
-.L.else1090:
-.L.end1090:
+  jmp .L.end1100
+.L.else1100:
+.L.end1100:
   mov -104(%rbp), %rax
   push %rax
   mov $8, %rax
@@ -33415,11 +34531,11 @@ main:
   mov $0, %rax
   jmp .L.return.main
   call l8_try_end
-  jmp .L.tryend1089
-.L.catch1089:
+  jmp .L.tryend1099
+.L.catch1099:
   mov l8_exc_tag(%rip), %rax
   cmp $1, %rax
-  jne .L.arm1091
+  jne .L.arm1101
   mov l8_exc_ptr(%rip), %rsi
   lea -88(%rbp), %rdi
   mov 0(%rsi), %rax
@@ -33440,12 +34556,12 @@ main:
   add $8, %rsp
   mov $1, %rax
   jmp .L.return.main
-  jmp .L.tryend1089
-.L.arm1091:
+  jmp .L.tryend1099
+.L.arm1101:
   mov l8_exc_tag(%rip), %rdi
   mov l8_exc_ptr(%rip), %rsi
   call l8_raise
-.L.tryend1089:
+.L.tryend1099:
 .L.return.main:
   mov %rbp, %rsp
   pop %rbp
