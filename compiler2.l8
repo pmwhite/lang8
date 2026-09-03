@@ -356,6 +356,12 @@ clear_sym_tables() {
 
 memcpy(dst: *i8, src: *i8, n: int): *i8 {
     i: int = 0;
+    while (i + 8 <= n) {
+        d: *int = (dst + i) as *int;
+        s: *int = (src + i) as *int;
+        d.* = s.*;
+        i = i + 8;
+    }
     while (i < n) {
         dst[i] = src[i];
         i = i + 1;
@@ -428,10 +434,16 @@ emit_num(n: int) {
         n = n / 10;
         i = i + 1;
     }
-    if (neg != 0) { emit_ch('-'); }
+    need: int = i + neg;
+    if (emit_len + need > emit_cap) { emit_flush(); }
+    if (neg != 0) {
+        emit_buf[emit_len] = '-';
+        emit_len = emit_len + 1;
+    }
     while (i > 0) {
         i = i - 1;
-        emit_ch(buf[i]);
+        emit_buf[emit_len] = buf[i];
+        emit_len = emit_len + 1;
     }
 }
 
@@ -3843,6 +3855,33 @@ emit_store_var(vo: *Obj, ty: *Type) raises Error {
     }
 }
 
+fits_imm32(v: int): bool {
+    lo: int = 0 - 2147483647;
+    lo = lo - 1;
+    hi: int = 2147483647;
+    if (v < lo) { return false; }
+    if (v > hi) { return false; }
+    return true;
+}
+
+/* Store an immediate into a scalar variable (no %rax round-trip). */
+emit_store_imm(vo: *Obj, ty: *Type, v: int) raises Error {
+    if (is_byte_ty(ty)) {
+        emit("  movb $");
+    } else {
+        emit("  movq $");
+    }
+    emit_num(v);
+    emit(", ");
+    if (vo.is_local != 0) {
+        emit_num(vo.offset);
+        emit("(%rbp)\n");
+    } else {
+        emit(vo.name);
+        emit("(%rip)\n");
+    }
+}
+
 gen_load(n: *Expr) raises Error {
     ty: *Type = expect_type(n.ty, "missing type");
     if (is_array(ty) || passes_by_ref(ty)) {
@@ -3871,27 +3910,144 @@ gen_binop_setup(lhs: *Expr, rhs: *Expr) raises Error {
     emit("  pop %rax\n");
 }
 
-gen_cmp(lhs: *Expr, rhs: *Expr, setcc: *i8) raises Error {
-    gen_binop_setup(lhs, rhs);
-    emit("  cmp %rdi, %rax\n");
+/* Immediate integer operand for codegen (numeric literal or null). */
+imm_operand(n: *Expr): int {
+    match n.kind {
+        Num k -> {
+            if (k.str_label != 0) { return 0; }
+            return 1;
+        }
+        Null -> { return 1; }
+        _ -> { return 0; }
+    }
+}
+
+imm_value(n: *Expr): int {
+    match n.kind {
+        Num k -> { return k.val; }
+        Null -> { return 0; }
+        _ -> { return 0; }
+    }
+}
+
+gen_cmp_set(setcc: *i8) {
     emit("  ");
     emit(setcc);
     emit(" %al\n");
     emit("  movzb %al, %rax\n");
 }
 
+gen_cmp(lhs: *Expr, rhs: *Expr, setcc: *i8) raises Error {
+    if (imm_operand(rhs) != 0 && fits_imm32(imm_value(rhs))) {
+        gen_expr(lhs);
+        emit("  cmp $");
+        emit_num(imm_value(rhs));
+        emit(", %rax\n");
+        gen_cmp_set(setcc);
+        return;
+    }
+    if (imm_operand(lhs) != 0 && fits_imm32(imm_value(lhs))) {
+        gen_expr(rhs);
+        emit("  mov %rax, %rdi\n");
+        emit("  mov $");
+        emit_num(imm_value(lhs));
+        emit(", %rax\n");
+        emit("  cmp %rdi, %rax\n");
+        gen_cmp_set(setcc);
+        return;
+    }
+    gen_binop_setup(lhs, rhs);
+    emit("  cmp %rdi, %rax\n");
+    gen_cmp_set(setcc);
+}
+
 gen_binary(op: BinOp, lhs: *Expr, rhs: *Expr) raises Error {
     match op {
-        Add -> { gen_binop_setup(lhs, rhs); emit("  add %rdi, %rax\n"); return; }
-        Sub -> { gen_binop_setup(lhs, rhs); emit("  sub %rdi, %rax\n"); return; }
-        Mul -> { gen_binop_setup(lhs, rhs); emit("  imul %rdi, %rax\n"); return; }
+        Add -> {
+            if (imm_operand(rhs) != 0 && fits_imm32(imm_value(rhs))) {
+                gen_expr(lhs);
+                v: int = imm_value(rhs);
+                if (v != 0) {
+                    emit("  add $");
+                    emit_num(v);
+                    emit(", %rax\n");
+                }
+                return;
+            }
+            if (imm_operand(lhs) != 0 && fits_imm32(imm_value(lhs))) {
+                gen_expr(rhs);
+                v2: int = imm_value(lhs);
+                if (v2 != 0) {
+                    emit("  add $");
+                    emit_num(v2);
+                    emit(", %rax\n");
+                }
+                return;
+            }
+            gen_binop_setup(lhs, rhs);
+            emit("  add %rdi, %rax\n");
+            return;
+        }
+        Sub -> {
+            if (imm_operand(rhs) != 0 && fits_imm32(imm_value(rhs))) {
+                gen_expr(lhs);
+                v3: int = imm_value(rhs);
+                if (v3 != 0) {
+                    emit("  sub $");
+                    emit_num(v3);
+                    emit(", %rax\n");
+                }
+                return;
+            }
+            gen_binop_setup(lhs, rhs);
+            emit("  sub %rdi, %rax\n");
+            return;
+        }
+        Mul -> {
+            if (imm_operand(rhs) != 0 && fits_imm32(imm_value(rhs))) {
+                gen_expr(lhs);
+                emit("  imul $");
+                emit_num(imm_value(rhs));
+                emit(", %rax\n");
+                return;
+            }
+            if (imm_operand(lhs) != 0 && fits_imm32(imm_value(lhs))) {
+                gen_expr(rhs);
+                emit("  imul $");
+                emit_num(imm_value(lhs));
+                emit(", %rax\n");
+                return;
+            }
+            gen_binop_setup(lhs, rhs);
+            emit("  imul %rdi, %rax\n");
+            return;
+        }
         Div -> {
+            if (imm_operand(rhs) != 0) {
+                gen_expr(lhs);
+                emit("  mov $");
+                emit_num(imm_value(rhs));
+                emit(", %rdi\n");
+                emit("  cqo\n");
+                emit("  idiv %rdi\n");
+                return;
+            }
             gen_binop_setup(lhs, rhs);
             emit("  cqo\n");
             emit("  idiv %rdi\n");
             return;
         }
         Mod -> {
+            if (imm_operand(rhs) != 0) {
+                gen_expr(lhs);
+                emit("  mov $");
+                emit_num(imm_value(rhs));
+                emit(", %rdi\n");
+                emit("  cqo\n");
+                emit("  idiv %rdi\n");
+                emit("  mov %rdx, %rax\n");
+                return;
+            }
             gen_binop_setup(lhs, rhs);
             emit("  cqo\n");
             emit("  idiv %rdi\n");
@@ -4057,8 +4213,20 @@ gen_expr(n: *Expr) raises Error {
                 }
                 _ -> {}
             }
-            gen_expr(q.rhs);
             lhs_ty: *Type = expect_type(q.lhs.ty, "missing lhs type");
+            if (!passes_by_ref(lhs_ty) && imm_operand(q.rhs) != 0 && fits_imm32(imm_value(q.rhs))) {
+                match q.lhs.kind {
+                    Var k -> {
+                        vo0: ?*Obj = k.var;
+                        if (vo0 != null) {
+                            emit_store_imm(vo0, lhs_ty, imm_value(q.rhs));
+                            return;
+                        }
+                    }
+                    _ -> {}
+                }
+            }
+            gen_expr(q.rhs);
             if (!passes_by_ref(lhs_ty)) {
                 match q.lhs.kind {
                     Var k -> {
