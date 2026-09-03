@@ -1,0 +1,432 @@
+// elfpack: one fully-resolved ELF64 .o → static ET_EXEC (no ld).
+// Supports R_X86_64_PC32 and R_X86_64_PLT32 only.
+// Usage: elfpack <in.o> -o <out>
+
+PAGE: int;
+LOAD_BASE: int;
+O_RDONLY: int;
+O_WRONLY: int;
+O_CREAT: int;
+O_TRUNC: int;
+MODE_755: int;
+SHN_UNDEF: int;
+SHN_ABS: int;
+SHT_NULL: int;
+ET_REL: int;
+ET_EXEC: int;
+EM_X86_64: int;
+R_X86_64_PC32: int;
+R_X86_64_PLT32: int;
+PT_LOAD: int;
+PF_X: int;
+PF_W: int;
+PF_R: int;
+STB_GLOBAL: int;
+
+fail(msg: *i8): noreturn {
+    write(2, "elfpack: ", len("elfpack: "));
+    write(2, msg, len(msg));
+    write(2, "\n", len("\n"));
+    exit(1);
+}
+
+memcpy(dst: *i8, src: *i8, n: int): *i8 {
+    i: int = 0;
+    while (i + 8 <= n) {
+        d: *int = (dst + i) as *int;
+        s: *int = (src + i) as *int;
+        d.* = s.*;
+        i = i + 8;
+    }
+    while (i < n) {
+        dst[i] = src[i];
+        i = i + 1;
+    }
+    return dst;
+}
+
+memset0(dst: *i8, n: int) {
+    i: int = 0;
+    while (i < n) {
+        dst[i] = 0 trunc i8;
+        i = i + 1;
+    }
+}
+
+streq(a: *i8, b: *i8): bool {
+    i: int = 0;
+    while (true) {
+        if (a[i] != b[i]) { return false; }
+        if (a[i] == 0 trunc i8) { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
+align_up(x: int, a: int): int {
+    return ((x + a - 1) / a) * a;
+}
+
+rd16(b: *i8, o: int): int {
+    tmp: int = 0;
+    p: *int = &tmp;
+    s: *i8 = p as *i8;
+    memcpy(s, b + o, 2);
+    return tmp;
+}
+
+rd32(b: *i8, o: int): int {
+    tmp: int = 0;
+    p: *int = &tmp;
+    s: *i8 = p as *i8;
+    memcpy(s, b + o, 4);
+    return tmp;
+}
+
+rd64(b: *i8, o: int): int {
+    tmp: int = 0;
+    p: *int = &tmp;
+    s: *i8 = p as *i8;
+    memcpy(s, b + o, 8);
+    return tmp;
+}
+
+wr16(b: *i8, o: int, v: int) {
+    tmp: int = v;
+    p: *int = &tmp;
+    s: *i8 = p as *i8;
+    memcpy(b + o, s, 2);
+}
+
+wr32(b: *i8, o: int, v: int) {
+    tmp: int = v;
+    p: *int = &tmp;
+    s: *i8 = p as *i8;
+    memcpy(b + o, s, 4);
+}
+
+wr64(b: *i8, o: int, v: int) {
+    tmp: int = v;
+    p: *int = &tmp;
+    s: *i8 = p as *i8;
+    memcpy(b + o, s, 8);
+}
+
+in_len: int;
+in_buf: *i8;
+
+load_file(path: *i8) {
+    fd: int = open(path, O_RDONLY, 0);
+    if (fd < 0) { fail("cannot open input"); }
+    cap: int = 65536;
+    buf: *i8 = new i8[cap];
+    n: int = 0;
+    while (true) {
+        if (n + 4096 > cap) {
+            cap = cap * 2;
+            tmp: *i8 = new i8[cap];
+            memcpy(tmp, buf, n);
+            buf = tmp;
+        }
+        r: int = read(fd, buf + n, 4096);
+        if (r <= 0) {
+            close(fd);
+            in_buf = buf;
+            in_len = n;
+            return;
+        }
+        n = n + r;
+    }
+}
+
+is_dash_o(s: *i8): bool {
+    return s[0] == '-' && s[1] == 'o' && s[2] == 0 trunc i8;
+}
+
+main(argc: int, argv: **i8): int {
+    PAGE = 4096;
+    LOAD_BASE = 4194304;
+    O_RDONLY = 0;
+    O_WRONLY = 1;
+    O_CREAT = 64;
+    O_TRUNC = 512;
+    MODE_755 = 493;
+    SHN_UNDEF = 0;
+    SHN_ABS = 65521;
+    ET_REL = 1;
+    ET_EXEC = 2;
+    EM_X86_64 = 62;
+    R_X86_64_PC32 = 2;
+    R_X86_64_PLT32 = 4;
+    PT_LOAD = 1;
+    PF_X = 1;
+    PF_W = 2;
+    PF_R = 4;
+    STB_GLOBAL = 1;
+
+    if (argc != 4) { fail("usage: elfpack <in.o> -o <out>"); }
+    arg1: *i8 = (argv + 8).*;
+    arg2: *i8 = (argv + 16).*;
+    arg3: *i8 = (argv + 24).*;
+    if (!is_dash_o(arg2)) { fail("usage: elfpack <in.o> -o <out>"); }
+    in_p: *i8 = arg1;
+    out_p: *i8 = arg3;
+
+    load_file(in_p);
+    b: *i8 = in_buf;
+    if (in_len < 64) { fail("input too small"); }
+    if (b[0] != 127 trunc i8 || b[1] != 'E' || b[2] != 'L' || b[3] != 'F') { fail("not ELF"); }
+    if (b[4] != 2 trunc i8 || b[5] != 1 trunc i8) { fail("need ELF64 LE"); }
+    if (rd16(b, 16) != ET_REL) { fail("need relocatable ET_REL"); }
+    if (rd16(b, 18) != EM_X86_64) { fail("need EM_X86_64"); }
+
+    e_shoff: int = rd64(b, 40);
+    e_shentsize: int = rd16(b, 58);
+    e_shnum: int = rd16(b, 60);
+    e_shstrndx: int = rd16(b, 62);
+    if (e_shentsize != 64 || e_shnum == 0) { fail("bad section headers"); }
+
+    shstr_off: int = rd64(b, e_shoff + e_shstrndx * 64 + 24);
+    shstr: *i8 = b + shstr_off;
+
+    text_i: int = 0 - 1;
+    rodata_i: int = 0 - 1;
+    data_i: int = 0 - 1;
+    bss_i: int = 0 - 1;
+    symtab_i: int = 0 - 1;
+    rela_text_i: int = 0 - 1;
+
+    si: int = 0;
+    while (si < e_shnum) {
+        sh: int = e_shoff + si * 64;
+        name: *i8 = shstr + rd32(b, sh + 0);
+        if (streq(name, ".text")) { text_i = si; }
+        if (streq(name, ".rodata")) { rodata_i = si; }
+        if (streq(name, ".data")) { data_i = si; }
+        if (streq(name, ".bss")) { bss_i = si; }
+        if (streq(name, ".symtab")) { symtab_i = si; }
+        if (streq(name, ".rela.text")) { rela_text_i = si; }
+        if (name[0] == '.' && name[1] == 'r' && name[2] == 'e' && name[3] == 'l' && name[4] == 'a'
+            && name[5] == '.' && !streq(name, ".rela.text")) {
+            fail("unsupported relocation section");
+        }
+        si = si + 1;
+    }
+    if (text_i < 0) { fail("missing .text"); }
+    if (symtab_i < 0) { fail("missing .symtab"); }
+
+    text_sh: int = e_shoff + text_i * 64;
+    text_fileoff: int = rd64(b, text_sh + 24);
+    text_sz: int = rd64(b, text_sh + 32);
+
+    rodata_sz: int = 0;
+    rodata_fileoff: int = 0;
+    if (rodata_i >= 0) {
+        rsh: int = e_shoff + rodata_i * 64;
+        rodata_fileoff = rd64(b, rsh + 24);
+        rodata_sz = rd64(b, rsh + 32);
+    }
+
+    data_sz: int = 0;
+    data_fileoff: int = 0;
+    if (data_i >= 0) {
+        dsh: int = e_shoff + data_i * 64;
+        data_fileoff = rd64(b, dsh + 24);
+        data_sz = rd64(b, dsh + 32);
+    }
+
+    bss_sz: int = 0;
+    if (bss_i >= 0) {
+        bsh: int = e_shoff + bss_i * 64;
+        bss_sz = rd64(b, bsh + 32);
+    }
+
+    sym_sh: int = e_shoff + symtab_i * 64;
+    sym_off: int = rd64(b, sym_sh + 24);
+    sym_sz: int = rd64(b, sym_sh + 32);
+    sym_link: int = rd32(b, sym_sh + 40);
+    str_sh: int = e_shoff + sym_link * 64;
+    str_off: int = rd64(b, str_sh + 24);
+    strtab: *i8 = b + str_off;
+    nsym: int = sym_sz / 24;
+
+    /* reject undefined globals */
+    zi: int = 0;
+    while (zi < nsym) {
+        so: int = sym_off + zi * 24;
+        st_name: int = rd32(b, so + 0);
+        st_info: int = b[so + 4] as int;
+        if (st_info < 0) { st_info = st_info + 256; }
+        st_shndx: int = rd16(b, so + 6);
+        bind: int = st_info / 16;
+        if (st_shndx == SHN_UNDEF && bind == STB_GLOBAL && st_name != 0) {
+            fail("undefined symbol");
+        }
+        zi = zi + 1;
+    }
+
+    rx_off: int = PAGE;
+    text_off: int = rx_off;
+    rodata_off: int = align_up(text_off + text_sz, 16);
+    rx_end: int = rodata_off + rodata_sz;
+    data_off: int = align_up(rx_end, PAGE);
+    file_end: int = data_off + data_sz;
+
+    text_vma: int = LOAD_BASE + text_off;
+    rodata_vma: int = LOAD_BASE + rodata_off;
+    data_vma: int = LOAD_BASE + data_off;
+    bss_vma: int = align_up(data_vma + data_sz, 8);
+
+    sec_vma: *int = new int[e_shnum];
+    sj: int = 0;
+    while (sj < e_shnum) {
+        sec_vma[sj] = 0;
+        sj = sj + 1;
+    }
+    sec_vma[text_i] = text_vma;
+    if (rodata_i >= 0) { sec_vma[rodata_i] = rodata_vma; }
+    if (data_i >= 0) { sec_vma[data_i] = data_vma; }
+    if (bss_i >= 0) { sec_vma[bss_i] = bss_vma; }
+
+    text: *i8 = new i8[text_sz + 1];
+    memcpy(text, b + text_fileoff, text_sz);
+    rodata_ptr: *i8 = text;
+    if (rodata_sz > 0) {
+        rodata_ptr = new i8[rodata_sz];
+        memcpy(rodata_ptr, b + rodata_fileoff, rodata_sz);
+    }
+    data_ptr: *i8 = text;
+    if (data_sz > 0) {
+        data_ptr = new i8[data_sz];
+        memcpy(data_ptr, b + data_fileoff, data_sz);
+    }
+
+    sym_addr: *int = new int[nsym];
+    zi = 0;
+    while (zi < nsym) {
+        sy: int = sym_off + zi * 24;
+        st_shndx2: int = rd16(b, sy + 6);
+        st_value: int = rd64(b, sy + 8);
+        if (st_shndx2 == SHN_UNDEF) {
+            sym_addr[zi] = 0;
+        } else {
+            if (st_shndx2 == SHN_ABS) {
+                sym_addr[zi] = st_value;
+            } else {
+                if (st_shndx2 < e_shnum) {
+                    sym_addr[zi] = sec_vma[st_shndx2] + st_value;
+                } else { fail("bad symbol shndx"); }
+            }
+        }
+        zi = zi + 1;
+    }
+
+    entry: int = 0;
+    zi = 0;
+    while (zi < nsym) {
+        so2: int = sym_off + zi * 24;
+        st_name2: int = rd32(b, so2 + 0);
+        if (st_name2 != 0) {
+            if (streq(strtab + st_name2, "_start")) {
+                entry = sym_addr[zi];
+            }
+        }
+        zi = zi + 1;
+    }
+    if (entry == 0) { fail("missing _start"); }
+
+    if (rela_text_i >= 0) {
+        rsh2: int = e_shoff + rela_text_i * 64;
+        rela_off: int = rd64(b, rsh2 + 24);
+        rela_sz: int = rd64(b, rsh2 + 32);
+        nrela: int = rela_sz / 24;
+        ri: int = 0;
+        while (ri < nrela) {
+            ro: int = rela_off + ri * 24;
+            r_offset: int = rd64(b, ro + 0);
+            r_type: int = rd32(b, ro + 8);
+            r_sym: int = rd32(b, ro + 12);
+            r_addend: int = rd64(b, ro + 16);
+            if (r_type != R_X86_64_PC32 && r_type != R_X86_64_PLT32) {
+                fail("unsupported reloc type");
+            }
+            if (r_sym >= nsym) { fail("bad reloc symbol"); }
+            if (r_offset + 4 > text_sz) { fail("reloc out of range"); }
+            S: int = sym_addr[r_sym];
+            P: int = text_vma + r_offset;
+            disp: int = S + r_addend - P;
+            wr32(text, r_offset, disp);
+            ri = ri + 1;
+        }
+    }
+
+    out: *i8 = new i8[file_end];
+    memset0(out, file_end);
+
+    elf_mag: i8 = 127 trunc i8;
+    out[0] = elf_mag;
+    out[1] = 'E';
+    out[2] = 'L';
+    out[3] = 'F';
+    two: i8 = 2 trunc i8;
+    one: i8 = 1 trunc i8;
+    out[4] = two;
+    out[5] = one;
+    out[6] = one;
+    wr16(out, 16, ET_EXEC);
+    wr16(out, 18, EM_X86_64);
+    wr32(out, 20, 1);
+    wr64(out, 24, entry);
+    wr64(out, 32, 64);
+    wr64(out, 40, 0);
+    wr32(out, 48, 0);
+    wr16(out, 52, 64);
+    wr16(out, 54, 56);
+    nph: int = 1;
+    if (data_sz > 0 || bss_sz > 0) { nph = 2; }
+    wr16(out, 56, nph);
+    wr16(out, 58, 0);
+    wr16(out, 60, 0);
+    wr16(out, 62, 0);
+
+    /* phdr 0: RX text+rodata */
+    ph0: int = 64;
+    wr32(out, ph0 + 0, PT_LOAD);
+    wr32(out, ph0 + 4, PF_R + PF_X);
+    wr64(out, ph0 + 8, rx_off);
+    wr64(out, ph0 + 16, LOAD_BASE + rx_off);
+    wr64(out, ph0 + 24, LOAD_BASE + rx_off);
+    wr64(out, ph0 + 32, rx_end - rx_off);
+    wr64(out, ph0 + 40, rx_end - rx_off);
+    wr64(out, ph0 + 48, PAGE);
+
+    if (nph == 2) {
+        ph1: int = 64 + 56;
+        wr32(out, ph1 + 0, PT_LOAD);
+        wr32(out, ph1 + 4, PF_R + PF_W);
+        wr64(out, ph1 + 8, data_off);
+        wr64(out, ph1 + 16, data_vma);
+        wr64(out, ph1 + 24, data_vma);
+        wr64(out, ph1 + 32, data_sz);
+        wr64(out, ph1 + 40, (bss_vma + bss_sz) - data_vma);
+        wr64(out, ph1 + 48, PAGE);
+    }
+
+    memcpy(out + text_off, text, text_sz);
+    if (rodata_sz > 0) { memcpy(out + rodata_off, rodata_ptr, rodata_sz); }
+    if (data_sz > 0) { memcpy(out + data_off, data_ptr, data_sz); }
+
+    flags: int = O_WRONLY + O_CREAT + O_TRUNC;
+    ofd: int = open(out_p, flags, MODE_755);
+    if (ofd < 0) { fail("cannot create output"); }
+    w: int = 0;
+    while (w < file_end) {
+        chunk: int = file_end - w;
+        if (chunk > 65536) { chunk = 65536; }
+        wn: int = write(ofd, out + w, chunk);
+        if (wn <= 0) { fail("write failed"); }
+        w = w + wn;
+    }
+    close(ofd);
+    return 0;
+}

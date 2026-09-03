@@ -56,8 +56,52 @@ compile_l8() {
   "./$1" "$2" >"$3"
 }
 
+# Assemble program + runtime into one .o (no undefs). Pack with elfpack → ET_EXEC.
+# Host gcc is only used to link bootstrap.s → l8c0 and the first elfpack binary.
+assemble_rt() {
+  local asm="$1" obj="$2"
+  as -o "$obj" "$asm" runtime.s
+}
+
+host_gcc_link() {
+  local obj="$1" bin="$2"
+  gcc -nostdlib -static -o "$bin" "$obj"
+}
+
+obj_for() {
+  echo "$BUILD/$(basename "$1").o"
+}
+
+pack_l8() {
+  local obj="$1" bin="$2"
+  ensure_elfpack
+  ./elfpack "$obj" -o "$bin"
+}
+
+# Convenience for examples (timing is batched at the suite level).
 link_l8() {
-  gcc -nostdlib -static -o "$2" "$1" runtime.s
+  local asm="$1" bin="$2"
+  local obj
+  obj="$(obj_for "$bin")"
+  assemble_rt "$asm" "$obj"
+  pack_l8 "$obj" "$bin"
+}
+
+build_elfpack() {
+  [[ -f elfpack.l8 ]] || die "elfpack.l8 missing"
+  [[ -x ./l8c0 ]] || die "l8c0 missing (run bootstrap first)"
+  ./l8c0 elfpack.l8 >"$BUILD/elfpack.s"
+  assemble_rt "$BUILD/elfpack.s" "$BUILD/elfpack.o"
+  host_gcc_link "$BUILD/elfpack.o" elfpack
+}
+
+ensure_elfpack() {
+  if [[ -x ./elfpack ]]; then
+    return 0
+  fi
+  ensure_build_dir
+  [[ -x ./l8c0 ]] || do_bootstrap
+  build_elfpack
 }
 
 run_expect() {
@@ -68,8 +112,7 @@ run_expect() {
   fi
 }
 
-# compile + link + run. Most of the wall time on tiny programs is gcc link,
-# not the L8 compiler (hello compiles in well under 1ms).
+# compile + link + run.
 example() {
   local compiler="$1" name="$2" src="$3" expected="$4"
   local asm="$BUILD/${name}.s" bin="$BUILD/${name}"
@@ -103,7 +146,7 @@ require_bootstrap_s() {
 }
 
 do_clean() {
-  rm -f l8c0 l8c1 l8c2 l8c3
+  rm -f l8c0 l8c1 l8c2 l8c3 elfpack
   rm -f examples/hello examples/fib examples/logic examples/struct examples/string examples/i8 examples/bool examples/enum examples/forward examples/null examples/newarr examples/narrow examples/nestsum examples/noreturn examples/exc
   rm -f examples/*.s
   rm -rf "$BUILD"
@@ -112,7 +155,13 @@ do_clean() {
 
 do_bootstrap() {
   require_bootstrap_s
-  step 'link bootstrap (l8c0)' link_l8 bootstrap.s l8c0
+  ensure_build_dir
+  step 'link bootstrap (l8c0)' bootstrap_link_l8c0
+}
+
+bootstrap_link_l8c0() {
+  assemble_rt bootstrap.s "$BUILD/l8c0.o"
+  host_gcc_link "$BUILD/l8c0.o" l8c0
 }
 
 do_examples() {
@@ -131,18 +180,22 @@ do_selfhost() {
   ensure_build_dir
   [[ -x ./l8c0 ]] || do_bootstrap
   [[ -f compiler2.l8 ]] || die "compiler2.l8 missing"
+  step 'ensure elfpack' ensure_elfpack
 
-  step 'stage1 compile (l8c0 → compiler.l8)'  compile_l8 l8c0 compiler.l8 "$BUILD/l8c1.s"
-  step 'stage1 link    (l8c1)'               link_l8 "$BUILD/l8c1.s" l8c1
+  step 'stage1 compile  (l8c0 → compiler.l8)' compile_l8 l8c0 compiler.l8 "$BUILD/l8c1.s"
+  step 'stage1 assemble (l8c1)'               assemble_rt "$BUILD/l8c1.s" "$(obj_for l8c1)"
+  step 'stage1 elfpack  (l8c1)'               pack_l8 "$(obj_for l8c1)" l8c1
 
-  step 'stage2 compile (l8c1 → compiler2.l8)' compile_l8 l8c1 compiler2.l8 "$BUILD/l8c2.s"
-  step 'stage2 link    (l8c2)'               link_l8 "$BUILD/l8c2.s" l8c2
+  step 'stage2 compile  (l8c1 → compiler2.l8)' compile_l8 l8c1 compiler2.l8 "$BUILD/l8c2.s"
+  step 'stage2 assemble (l8c2)'                assemble_rt "$BUILD/l8c2.s" "$(obj_for l8c2)"
+  step 'stage2 elfpack  (l8c2)'                pack_l8 "$(obj_for l8c2)" l8c2
 
-  step 'stage3 compile (l8c2 → compiler2.l8)' compile_l8 l8c2 compiler2.l8 "$BUILD/l8c3.s"
-  step 'stage3 link    (l8c3)'               link_l8 "$BUILD/l8c3.s" l8c3
+  step 'stage3 compile  (l8c2 → compiler2.l8)' compile_l8 l8c2 compiler2.l8 "$BUILD/l8c3.s"
+  step 'stage3 assemble (l8c3)'                assemble_rt "$BUILD/l8c3.s" "$(obj_for l8c3)"
+  step 'stage3 elfpack  (l8c3)'                pack_l8 "$(obj_for l8c3)" l8c3
 
-  step 'stage4 compile (l8c3 → compiler2.l8)' compile_l8 l8c3 compiler2.l8 "$BUILD/l8c4.s"
-  step 'verify stage3 == stage4'             diff -q "$BUILD/l8c3.s" "$BUILD/l8c4.s"
+  step 'stage4 compile  (l8c3 → compiler2.l8)' compile_l8 l8c3 compiler2.l8 "$BUILD/l8c4.s"
+  step 'verify stage3 == stage4'               diff -q "$BUILD/l8c3.s" "$BUILD/l8c4.s"
 
   step 'examples [l8c3]' run_examples l8c3
 }
@@ -227,7 +280,8 @@ Commands:
 
 --force   Skip the interactive promote confirmation (still requires artifacts).
 
-See BOOTSTRAP.md for the dual-source bootstrap model.
+Linking uses as + elfpack (see BOOTSTRAP.md). Host gcc is only needed to
+link bootstrap.s → l8c0 and the first elfpack binary.
 EOF
 }
 
