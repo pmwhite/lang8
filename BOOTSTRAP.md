@@ -1,48 +1,51 @@
-# Bootstrap model
+# Unified bootstrap model
 
-Cold start needs only a C toolchain (and the assembler/linker that come with it):
+`bootstrap` is a checked-in x86-64 Linux executable containing the complete `l8`
+tool, including its runtime. Cold start simply copies it to `l8c0`; no host compiler,
+assembler, or linker is required. The seed provides `compile`, `as`, and `elfpack`
+subcommands.
 
-```
-gcc -nostdlib -static -o l8c0 bootstrap.s runtime.s
-```
+## Two source trees
 
-`bootstrap.s` is a checked-in snapshot of the compiler’s own asm. It is **not**
-updated on every commit — promotion is an intentional, isolated change.
+| Directory | Role |
+|-----------|------|
+| `src1/` | Stage-1 unified source. It must be accepted by the current `bootstrap` executable. |
+| `src2/` | Stage-2 unified source. It is compiled by the tool built from `src1/`, so it may use features implemented by stage 1. |
 
-## Two source copies
+Both trees keep the compiler, assembler, ELF packer, common helpers, and command
+dispatcher in separate `.l8` files. `main.l8` combines them with top-level imports.
+Imports are relative to the importing file, share one namespace, include each
+normalized path once, and permit cycles.
 
-| File | Role |
-|------|------|
-| `compiler.l8` | Stage‑1 source. Must be accepted by the **current** `bootstrap.s`. Implement new language features here first (without yet *using* them in this file). |
-| `compiler2.l8` | Stage‑2 source. Compiled by a compiler built from `compiler.l8`, so it may **use** features that stage‑1 only implemented. |
+`runtime.s` remains source input when building programs and successor compiler
+stages, but it is already embedded in the saved bootstrap executable.
 
 Typical evolution for a breaking language change:
 
-1. Teach `compiler.l8` to parse/typecheck/codegen the new feature (still written in the old dialect).
-2. Rebuild; use the resulting compiler to develop `compiler2.l8` (may use the new feature).
-3. When stage‑2 is exercising the feature enough to trust it, **promote** in a dedicated commit:
-   - `compiler2.l8` → `compiler.l8`
-   - asm built from stage‑2 → `bootstrap.s`
-4. Optionally promote **only** stage‑1 asm earlier if stage‑1 alone is already worth shipping and you need a faster bootstrap bump.
+1. Implement the feature in `src1/` without relying on it elsewhere in that tree.
+2. Use the stage-1 tool to develop `src2/`, which may exercise the feature.
+3. After the stage-2 fixpoint passes, promote `src2/` over `src1/` and promote the
+   deterministic stage-3 executable to `bootstrap`.
+
+## Unified command line
+
+```
+l8 compile [--profile|-p] file.l8 > file.s
+l8 as [-p|--profile] -o file.o file.s runtime.s
+l8 elfpack file.o -o file
+```
 
 ## Scripts (`./build.sh`)
 
 | Command | What it does |
-|---------|----------------|
-| `bootstrap` | Link `bootstrap.s` + `runtime.s` → `l8c0` |
-| `examples` | Run examples with `l8c0` |
-| `selfhost` | `l8c0`→`compiler.l8`→`l8c1`, then `l8c1`→`compiler2.l8`→`l8c2`, then fixpoint `l8c2`→`l8c3`→`l8c4` (`l8c3.s` == `l8c4.s`), examples |
-| `promote-asm1` | After a successful stage‑1 build, copy that asm over `bootstrap.s` |
-| `promote-asm2` | Copy stage‑2 fixpoint asm (`l8c3.s`) → `bootstrap.s` |
-| `promote-source` | Copy `compiler2.l8` over `compiler.l8` (does **not** touch asm) |
-| `promote` | `promote-source` + `promote-asm2` (usual “stage‑2 is ready” commit prep) |
+|---------|--------------|
+| `bootstrap` | Copy the saved bootstrap executable to `l8c0` |
+| `examples` | Compile, assemble, pack, and run examples with `l8c0` |
+| `selfhost` | Build unified `l8c1` from `src1/`, build `l8c2/l8c3/l8c4` from `src2/`, require stage assembly and executable fixpoints, and run examples |
+| `promote-bin1` | Promote the stage-1 executable to `bootstrap` |
+| `promote-bin2` | Promote the stage-2 fixpoint executable to `bootstrap` |
+| `promote-source` | Replace `src1/` with `src2/` without changing the bootstrap |
+| `promote` | Promote both source tree and bootstrap executable |
 
-## Linking
-
-L8 programs are assembled together with [`runtime.s`](runtime.s) by [`l8as.l8`](l8as.l8)
-(`l8as -o prog.o prog.s runtime.s`), then turned into a static ELF executable by
-[`elfpack.l8`](elfpack.l8) (no `ld`). Cold start still uses the host `as`/`gcc` once each to
-link `l8c0` from `bootstrap.s` and to build the first `l8as` and `elfpack` binaries; after
-that, stage links and examples use `l8as` + `elfpack` only.
-
-Promotes refuse to run unless the corresponding `./build.sh selfhost` artifacts exist (or you pass `--force`). They only update the working tree; **you** create the git commit.
+Promotes require the corresponding self-host artifacts unless `--force` is used.
+They update only the working tree; create the commit separately.

@@ -67,6 +67,11 @@ type ExnList = {
     next: ?*ExnList;
 };
 
+type ImportedFile = {
+    path: *i8;
+    next: ?*ImportedFile;
+};
+
 type TokKind =
     | Eof
     | Num
@@ -124,7 +129,8 @@ type TokKind =
     | Raises
     | Raise
     | Try
-    | With;
+    | With
+    | Import;
 
 type Token = {
     kind: TokKind;
@@ -251,11 +257,14 @@ type StrLit = {
 };
 
 source: *i8; source_len: int; pos: int;
+source_path: *i8;
 tok: *Token;
 globals: ?*Obj;
 locals: ?*Obj;
 scope_depth: int;
 functions: ?*Function;
+function_tail: ?*Function;
+imported_files: ?*ImportedFile;
 struct_defs: ?*StructDef;
 enum_defs: ?*EnumDef;
 exn_defs: ?*ExnDef;
@@ -299,7 +308,7 @@ catch_top: ?*CatchFrame;
 
 L8_JMP_BUF_SIZE: int;
 
-exception Error { msg: *i8; pos: int; };
+exception Error { msg: *i8; pos: int; path: *i8; src: *i8; src_len: int; };
 
 streq_n(a: *i8, b: *i8, n: int): bool {
     i: int = 0;
@@ -318,6 +327,12 @@ streq(a: *i8, b: *i8): bool {
         i = i + 1;
     }
     return false;
+}
+
+cstr_len(s: *i8): int {
+    n: int = 0;
+    while (s[n] != 0 trunc i8) { n = n + 1; }
+    return n;
 }
 
 name_eq_span(name: *i8, s: *i8, n: int): bool {
@@ -448,21 +463,27 @@ emit_num(n: int) {
 }
 
 error(msg: *i8) raises Error: noreturn {
-    raise Error { msg: msg, pos: tok.pos };
+    raise Error { msg: msg, pos: tok.pos, path: source_path, src: source, src_len: source_len };
 }
 
-print_error_at(pos: int, msg: *i8) {
+error_at(p: int, msg: *i8) raises Error: noreturn {
+    raise Error { msg: msg, pos: p, path: source_path, src: source, src_len: source_len };
+}
+
+print_error_at(path: *i8, src: *i8, src_len: int, pos: int, msg: *i8) {
     line: int = 1;
     col: int = 1;
     i: int = 0;
-    while (i < pos && i < source_len) {
-        if (source[i] == '\n') {
+    while (i < pos && i < src_len) {
+        if (src[i] == '\n') {
             line = line + 1;
             col = 1;
         } else { col = col + 1; }
         i = i + 1;
     }
     write(2, "error: ", len("error: "));
+    write(2, path, cstr_len(path));
+    write(2, ":", len(":"));
     emit_num_fd(2, line);
     write(2, ":", len(":"));
     emit_num_fd(2, col);
@@ -762,6 +783,93 @@ read_file(path: *i8) raises Error: *i8 {
         n = n + r;
     }
     return buf;
+}
+
+normalize_path(path: *i8): *i8 {
+    n: int = cstr_len(path);
+    out: *i8 = new i8[n + 2];
+    starts: *int = new int[n + 1];
+    out_len: int = 0;
+    nseg: int = 0;
+    absolute: bool = n > 0 && path[0] == '/';
+    if (absolute) {
+        out[0] = '/';
+        out_len = 1;
+    }
+    i: int = 0;
+    while (i < n) {
+        while (i < n && path[i] == '/') { i = i + 1; }
+        if (i >= n) {
+            i = n;
+        } else {
+            start: int = i;
+            while (i < n && path[i] != '/') { i = i + 1; }
+            part_len: int = i - start;
+            is_dot: bool = part_len == 1 && path[start] == '.';
+            is_dotdot: bool = part_len == 2 && path[start] == '.' && path[start + 1] == '.';
+            if (is_dot) {
+                /* nothing */
+            } else if (is_dotdot && nseg > 0) {
+                nseg = nseg - 1;
+                out_len = starts[nseg];
+            } else {
+                starts[nseg] = out_len;
+                nseg = nseg + 1;
+                if (out_len > 0 && out[out_len - 1] != '/') {
+                    out[out_len] = '/';
+                    out_len = out_len + 1;
+                }
+                j: int = 0;
+                while (j < part_len) {
+                    out[out_len] = path[start + j];
+                    out_len = out_len + 1;
+                    j = j + 1;
+                }
+            }
+        }
+    }
+    if (out_len == 0) {
+        out[0] = '.';
+        out_len = 1;
+    }
+    out[out_len] = 0 trunc i8;
+    return out;
+}
+
+resolve_import_path(base: *i8, imported: *i8): *i8 {
+    if (imported[0] == '/') { return normalize_path(imported); }
+    base_len: int = cstr_len(base);
+    slash: int = 0 - 1;
+    i: int = 0;
+    while (i < base_len) {
+        if (base[i] == '/') { slash = i; }
+        i = i + 1;
+    }
+    if (slash < 0) { return normalize_path(imported); }
+    joined: *i8 = new i8[slash + 2 + cstr_len(imported)];
+    j: int = 0;
+    while (j <= slash) {
+        joined[j] = base[j];
+        j = j + 1;
+    }
+    k: int = 0;
+    while (imported[k] != 0 trunc i8) {
+        joined[j] = imported[k];
+        j = j + 1;
+        k = k + 1;
+    }
+    joined[j] = 0 trunc i8;
+    return normalize_path(joined);
+}
+
+mark_imported(path: *i8): bool {
+    f: ?*ImportedFile = imported_files;
+    while (f != null) {
+        if (streq(f.path, path)) { return false; }
+        f = f.next;
+    }
+    imported_files = new ImportedFile { path: path, next: imported_files };
+    return true;
 }
 
 type_size(t: *Type) raises Error: int {
@@ -1320,6 +1428,7 @@ ident_kind(s: *i8, n: int): TokKind {
     if (n == 5 && streq_n(s, "raise", 5)) { return TokKind.Raise; }
     if (n == 3 && streq_n(s, "try", 3)) { return TokKind.Try; }
     if (n == 4 && streq_n(s, "with", 4)) { return TokKind.With; }
+    if (n == 6 && streq_n(s, "import", 6)) { return TokKind.Import; }
     return TokKind.Ident;
 }
 
@@ -1398,7 +1507,7 @@ punct_kind(c: i8) raises Error: TokKind {
     if (c == ',') { return TokKind.Comma; }
     if (c == '/') { return TokKind.Slash; }
     if (c == '?') { return TokKind.Question; }
-    error("unexpected character");
+    error_at(pos, "unexpected character");
     return TokKind.Eof;
 }
 
@@ -3226,17 +3335,50 @@ parse_type_def() raises Error {
     skip(TokKind.Semi);
 }
 
-parse_program() raises Error {
-    tail: ?*Function = null;
-    functions = null;
-    globals = null;
-    struct_defs = null;
-    enum_defs = null;
-    exn_defs = null;
-    next_exn_tag = 1;
-    clear_sym_tables();
+parse_source_file(path: *i8) raises Error {
+    if (!mark_imported(path)) { return; }
+    saved_source: *i8 = source;
+    saved_source_len: int = source_len;
+    saved_pos: int = pos;
+    saved_tok: *Token = tok;
+    saved_path: *i8 = source_path;
+    source_path = path;
+    source = read_file(path);
+    tok = tokenize();
+    parse_program_unit();
+    source = saved_source;
+    source_len = saved_source_len;
+    pos = saved_pos;
+    tok = saved_tok;
+    source_path = saved_path;
+}
+
+parse_import() raises Error {
+    tok = tok.next;
+    if (!equal(TokKind.Str)) { error("expected string path after import"); }
+    relative: *i8 = cur_tokstr();
+    tok = tok.next;
+    skip(TokKind.Semi);
+    path: *i8 = resolve_import_path(source_path, relative);
+    parse_source_file(path);
+}
+
+append_function(fn: *Function) {
+    tail: ?*Function = function_tail;
+    if (tail != null) {
+        tail.next = fn;
+        function_tail = fn;
+    } else {
+        functions = fn;
+        function_tail = fn;
+    }
+}
+
+parse_program_unit() raises Error {
     while (!equal(TokKind.Eof)) {
-        if (equal(TokKind.TypeKw) && (tok.next).kind == TokKind.Ident && ((tok.next).next).kind == TokKind.Assign) {
+        if (equal(TokKind.Import)) {
+            parse_import();
+        } else if (equal(TokKind.TypeKw) && (tok.next).kind == TokKind.Ident && ((tok.next).next).kind == TokKind.Assign) {
             parse_type_def();
         } else {
             if (equal(TokKind.Exception)) {
@@ -3247,13 +3389,7 @@ parse_program() raises Error {
             tok = tok.next;
             if (equal(TokKind.LParen)) {
                 fn: *Function = parse_function(name);
-                if (tail != null) {
-                    tail.next = fn;
-                    tail = fn;
-                } else {
-                    functions = fn;
-                    tail = fn;
-                }
+                append_function(fn);
                 hash_put_fn(fn);
                 o: *Obj = new_obj(name, 0);
                 o.is_func = 1;
@@ -3271,6 +3407,19 @@ parse_program() raises Error {
             }
         }
     }
+}
+
+parse_program(entry_path: *i8) raises Error {
+    functions = null;
+    function_tail = null;
+    globals = null;
+    struct_defs = null;
+    enum_defs = null;
+    exn_defs = null;
+    imported_files = null;
+    next_exn_tag = 1;
+    clear_sym_tables();
+    parse_source_file(normalize_path(entry_path));
 }
 
 /* Assumes n is already typed. True if execution cannot fall through. */
@@ -4722,7 +4871,7 @@ is_profile_flag(s: *i8): bool {
     return false;
 }
 
-main(argc: int, argv: **i8): int {
+compiler_main(argc: int, argv: **i8): int {
     try {
         do_profile = 0;
         path: ?*i8 = null;
@@ -4733,7 +4882,7 @@ main(argc: int, argv: **i8): int {
                 do_profile = 1;
             } else {
                 if (path != null) {
-                    write(2, "error: usage: l8c [--profile|-p] <file.l8>\n", len("error: usage: l8c [--profile|-p] <file.l8>\n"));
+                    write(2, "error: usage: l8 compile [--profile|-p] <file.l8>\n", len("error: usage: l8 compile [--profile|-p] <file.l8>\n"));
                     return 1;
                 }
                 path = arg;
@@ -4741,7 +4890,7 @@ main(argc: int, argv: **i8): int {
             ai = ai + 1;
         }
         if (path == null) {
-            write(2, "error: usage: l8c [--profile|-p] <file.l8>\n", len("error: usage: l8c [--profile|-p] <file.l8>\n"));
+            write(2, "error: usage: l8 compile [--profile|-p] <file.l8>\n", len("error: usage: l8 compile [--profile|-p] <file.l8>\n"));
             return 1;
         }
         src_path: *i8 = path;
@@ -4759,22 +4908,14 @@ main(argc: int, argv: **i8): int {
             profile_print("init", t - prev);
             prev = t;
         }
-        source = read_file(src_path);
+        source = "";
+        source_len = 0;
+        source_path = src_path;
+        tok = token_eof;
+        parse_program(src_path);
         if (do_profile != 0) {
             t = mono_ns();
-            profile_print("read_file", t - prev);
-            prev = t;
-        }
-        tok = tokenize();
-        if (do_profile != 0) {
-            t = mono_ns();
-            profile_print("tokenize", t - prev);
-            prev = t;
-        }
-        parse_program();
-        if (do_profile != 0) {
-            t = mono_ns();
-            profile_print("parse", t - prev);
+            profile_print("load_parse", t - prev);
             prev = t;
         }
         typecheck_program();
@@ -4815,7 +4956,7 @@ main(argc: int, argv: **i8): int {
         }
         return 0;
     } with Error e -> {
-        print_error_at(e.pos, e.msg);
+        print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);
         return 1;
     }
 }

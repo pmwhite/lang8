@@ -1,0 +1,432 @@
+// elfpack: one fully-resolved ELF64 .o → static ET_EXEC (no ld).
+// Supports R_X86_64_PC32 and R_X86_64_PLT32 only.
+// Usage: elfpack <in.o> -o <out>
+
+pack_PAGE: int;
+pack_LOAD_BASE: int;
+pack_O_RDONLY: int;
+pack_O_WRONLY: int;
+pack_O_CREAT: int;
+pack_O_TRUNC: int;
+pack_MODE_755: int;
+pack_SHN_UNDEF: int;
+pack_SHN_ABS: int;
+pack_SHT_NULL: int;
+pack_ET_REL: int;
+pack_ET_EXEC: int;
+pack_EM_X86_64: int;
+pack_R_X86_64_PC32: int;
+pack_R_X86_64_PLT32: int;
+pack_PT_LOAD: int;
+pack_PF_X: int;
+pack_PF_W: int;
+pack_PF_R: int;
+pack_STB_GLOBAL: int;
+
+pack_fail(pack_msg: *i8): noreturn {
+    write(2, "elfpack: ", len("elfpack: "));
+    write(2, pack_msg, len(pack_msg));
+    write(2, "\n", len("\n"));
+    exit(1);
+}
+
+pack_memcpy(pack_dst: *i8, pack_src: *i8, pack_n: int): *i8 {
+    pack_i: int = 0;
+    while (pack_i + 8 <= pack_n) {
+        pack_d: *int = (pack_dst + pack_i) as *int;
+        pack_s: *int = (pack_src + pack_i) as *int;
+        pack_d.* = pack_s.*;
+        pack_i = pack_i + 8;
+    }
+    while (pack_i < pack_n) {
+        pack_dst[pack_i] = pack_src[pack_i];
+        pack_i = pack_i + 1;
+    }
+    return pack_dst;
+}
+
+pack_memset0(pack_dst: *i8, pack_n: int) {
+    pack_i: int = 0;
+    while (pack_i < pack_n) {
+        pack_dst[pack_i] = 0 trunc i8;
+        pack_i = pack_i + 1;
+    }
+}
+
+pack_streq(pack_a: *i8, pack_b: *i8): bool {
+    pack_i: int = 0;
+    while (true) {
+        if (pack_a[pack_i] != pack_b[pack_i]) { return false; }
+        if (pack_a[pack_i] == 0 trunc i8) { return true; }
+        pack_i = pack_i + 1;
+    }
+    return false;
+}
+
+pack_align_up(pack_x: int, pack_a: int): int {
+    return ((pack_x + pack_a - 1) / pack_a) * pack_a;
+}
+
+pack_rd16(pack_b: *i8, pack_o: int): int {
+    pack_tmp: int = 0;
+    pack_p: *int = &pack_tmp;
+    pack_s: *i8 = pack_p as *i8;
+    pack_memcpy(pack_s, pack_b + pack_o, 2);
+    return pack_tmp;
+}
+
+pack_rd32(pack_b: *i8, pack_o: int): int {
+    pack_tmp: int = 0;
+    pack_p: *int = &pack_tmp;
+    pack_s: *i8 = pack_p as *i8;
+    pack_memcpy(pack_s, pack_b + pack_o, 4);
+    return pack_tmp;
+}
+
+pack_rd64(pack_b: *i8, pack_o: int): int {
+    pack_tmp: int = 0;
+    pack_p: *int = &pack_tmp;
+    pack_s: *i8 = pack_p as *i8;
+    pack_memcpy(pack_s, pack_b + pack_o, 8);
+    return pack_tmp;
+}
+
+pack_wr16(pack_b: *i8, pack_o: int, pack_v: int) {
+    pack_tmp: int = pack_v;
+    pack_p: *int = &pack_tmp;
+    pack_s: *i8 = pack_p as *i8;
+    pack_memcpy(pack_b + pack_o, pack_s, 2);
+}
+
+pack_wr32(pack_b: *i8, pack_o: int, pack_v: int) {
+    pack_tmp: int = pack_v;
+    pack_p: *int = &pack_tmp;
+    pack_s: *i8 = pack_p as *i8;
+    pack_memcpy(pack_b + pack_o, pack_s, 4);
+}
+
+pack_wr64(pack_b: *i8, pack_o: int, pack_v: int) {
+    pack_tmp: int = pack_v;
+    pack_p: *int = &pack_tmp;
+    pack_s: *i8 = pack_p as *i8;
+    pack_memcpy(pack_b + pack_o, pack_s, 8);
+}
+
+pack_in_len: int;
+pack_in_buf: *i8;
+
+pack_load_file(pack_path: *i8) {
+    pack_fd: int = open(pack_path, pack_O_RDONLY, 0);
+    if (pack_fd < 0) { pack_fail("cannot open input"); }
+    pack_cap: int = 65536;
+    pack_buf: *i8 = new i8[pack_cap];
+    pack_n: int = 0;
+    while (true) {
+        if (pack_n + 4096 > pack_cap) {
+            pack_cap = pack_cap * 2;
+            pack_tmp: *i8 = new i8[pack_cap];
+            pack_memcpy(pack_tmp, pack_buf, pack_n);
+            pack_buf = pack_tmp;
+        }
+        pack_r: int = read(pack_fd, pack_buf + pack_n, 4096);
+        if (pack_r <= 0) {
+            close(pack_fd);
+            pack_in_buf = pack_buf;
+            pack_in_len = pack_n;
+            return;
+        }
+        pack_n = pack_n + pack_r;
+    }
+}
+
+pack_is_dash_o(pack_s: *i8): bool {
+    return pack_s[0] == '-' && pack_s[1] == 'o' && pack_s[2] == 0 trunc i8;
+}
+
+elfpack_main(pack_argc: int, pack_argv: **i8): int {
+    pack_PAGE = 4096;
+    pack_LOAD_BASE = 4194304;
+    pack_O_RDONLY = 0;
+    pack_O_WRONLY = 1;
+    pack_O_CREAT = 64;
+    pack_O_TRUNC = 512;
+    pack_MODE_755 = 493;
+    pack_SHN_UNDEF = 0;
+    pack_SHN_ABS = 65521;
+    pack_ET_REL = 1;
+    pack_ET_EXEC = 2;
+    pack_EM_X86_64 = 62;
+    pack_R_X86_64_PC32 = 2;
+    pack_R_X86_64_PLT32 = 4;
+    pack_PT_LOAD = 1;
+    pack_PF_X = 1;
+    pack_PF_W = 2;
+    pack_PF_R = 4;
+    pack_STB_GLOBAL = 1;
+
+    if (pack_argc != 4) { pack_fail("usage: l8 elfpack <in.o> -o <out>"); }
+    pack_arg1: *i8 = (pack_argv + 8).*;
+    pack_arg2: *i8 = (pack_argv + 16).*;
+    pack_arg3: *i8 = (pack_argv + 24).*;
+    if (!pack_is_dash_o(pack_arg2)) { pack_fail("usage: l8 elfpack <in.o> -o <out>"); }
+    pack_in_p: *i8 = pack_arg1;
+    pack_out_p: *i8 = pack_arg3;
+
+    pack_load_file(pack_in_p);
+    pack_b: *i8 = pack_in_buf;
+    if (pack_in_len < 64) { pack_fail("input too small"); }
+    if (pack_b[0] != 127 trunc i8 || pack_b[1] != 'E' || pack_b[2] != 'L' || pack_b[3] != 'F') { pack_fail("not ELF"); }
+    if (pack_b[4] != 2 trunc i8 || pack_b[5] != 1 trunc i8) { pack_fail("need ELF64 LE"); }
+    if (pack_rd16(pack_b, 16) != pack_ET_REL) { pack_fail("need relocatable ET_REL"); }
+    if (pack_rd16(pack_b, 18) != pack_EM_X86_64) { pack_fail("need EM_X86_64"); }
+
+    pack_e_shoff: int = pack_rd64(pack_b, 40);
+    pack_e_shentsize: int = pack_rd16(pack_b, 58);
+    pack_e_shnum: int = pack_rd16(pack_b, 60);
+    pack_e_shstrndx: int = pack_rd16(pack_b, 62);
+    if (pack_e_shentsize != 64 || pack_e_shnum == 0) { pack_fail("bad section headers"); }
+
+    pack_shstr_off: int = pack_rd64(pack_b, pack_e_shoff + pack_e_shstrndx * 64 + 24);
+    pack_shstr: *i8 = pack_b + pack_shstr_off;
+
+    pack_text_i: int = 0 - 1;
+    pack_rodata_i: int = 0 - 1;
+    pack_data_i: int = 0 - 1;
+    pack_bss_i: int = 0 - 1;
+    pack_symtab_i: int = 0 - 1;
+    pack_rela_text_i: int = 0 - 1;
+
+    pack_si: int = 0;
+    while (pack_si < pack_e_shnum) {
+        pack_sh: int = pack_e_shoff + pack_si * 64;
+        pack_name: *i8 = pack_shstr + pack_rd32(pack_b, pack_sh + 0);
+        if (pack_streq(pack_name, ".text")) { pack_text_i = pack_si; }
+        if (pack_streq(pack_name, ".rodata")) { pack_rodata_i = pack_si; }
+        if (pack_streq(pack_name, ".data")) { pack_data_i = pack_si; }
+        if (pack_streq(pack_name, ".bss")) { pack_bss_i = pack_si; }
+        if (pack_streq(pack_name, ".symtab")) { pack_symtab_i = pack_si; }
+        if (pack_streq(pack_name, ".rela.text")) { pack_rela_text_i = pack_si; }
+        if (pack_name[0] == '.' && pack_name[1] == 'r' && pack_name[2] == 'e' && pack_name[3] == 'l' && pack_name[4] == 'a'
+            && pack_name[5] == '.' && !pack_streq(pack_name, ".rela.text")) {
+            pack_fail("unsupported relocation section");
+        }
+        pack_si = pack_si + 1;
+    }
+    if (pack_text_i < 0) { pack_fail("missing .text"); }
+    if (pack_symtab_i < 0) { pack_fail("missing .symtab"); }
+
+    pack_text_sh: int = pack_e_shoff + pack_text_i * 64;
+    pack_text_fileoff: int = pack_rd64(pack_b, pack_text_sh + 24);
+    pack_text_sz: int = pack_rd64(pack_b, pack_text_sh + 32);
+
+    pack_rodata_sz: int = 0;
+    pack_rodata_fileoff: int = 0;
+    if (pack_rodata_i >= 0) {
+        pack_rsh: int = pack_e_shoff + pack_rodata_i * 64;
+        pack_rodata_fileoff = pack_rd64(pack_b, pack_rsh + 24);
+        pack_rodata_sz = pack_rd64(pack_b, pack_rsh + 32);
+    }
+
+    pack_data_sz: int = 0;
+    pack_data_fileoff: int = 0;
+    if (pack_data_i >= 0) {
+        pack_dsh: int = pack_e_shoff + pack_data_i * 64;
+        pack_data_fileoff = pack_rd64(pack_b, pack_dsh + 24);
+        pack_data_sz = pack_rd64(pack_b, pack_dsh + 32);
+    }
+
+    pack_bss_sz: int = 0;
+    if (pack_bss_i >= 0) {
+        pack_bsh: int = pack_e_shoff + pack_bss_i * 64;
+        pack_bss_sz = pack_rd64(pack_b, pack_bsh + 32);
+    }
+
+    pack_sym_sh: int = pack_e_shoff + pack_symtab_i * 64;
+    pack_sym_off: int = pack_rd64(pack_b, pack_sym_sh + 24);
+    pack_sym_sz: int = pack_rd64(pack_b, pack_sym_sh + 32);
+    pack_sym_link: int = pack_rd32(pack_b, pack_sym_sh + 40);
+    pack_str_sh: int = pack_e_shoff + pack_sym_link * 64;
+    pack_str_off: int = pack_rd64(pack_b, pack_str_sh + 24);
+    pack_strtab: *i8 = pack_b + pack_str_off;
+    pack_nsym: int = pack_sym_sz / 24;
+
+    /* reject undefined globals */
+    pack_zi: int = 0;
+    while (pack_zi < pack_nsym) {
+        pack_so: int = pack_sym_off + pack_zi * 24;
+        pack_st_name: int = pack_rd32(pack_b, pack_so + 0);
+        pack_st_info: int = pack_b[pack_so + 4] as int;
+        if (pack_st_info < 0) { pack_st_info = pack_st_info + 256; }
+        pack_st_shndx: int = pack_rd16(pack_b, pack_so + 6);
+        pack_bind: int = pack_st_info / 16;
+        if (pack_st_shndx == pack_SHN_UNDEF && pack_bind == pack_STB_GLOBAL && pack_st_name != 0) {
+            pack_fail("undefined symbol");
+        }
+        pack_zi = pack_zi + 1;
+    }
+
+    pack_rx_off: int = pack_PAGE;
+    pack_text_off: int = pack_rx_off;
+    pack_rodata_off: int = pack_align_up(pack_text_off + pack_text_sz, 16);
+    pack_rx_end: int = pack_rodata_off + pack_rodata_sz;
+    pack_data_off: int = pack_align_up(pack_rx_end, pack_PAGE);
+    pack_file_end: int = pack_data_off + pack_data_sz;
+
+    pack_text_vma: int = pack_LOAD_BASE + pack_text_off;
+    pack_rodata_vma: int = pack_LOAD_BASE + pack_rodata_off;
+    pack_data_vma: int = pack_LOAD_BASE + pack_data_off;
+    pack_bss_vma: int = pack_align_up(pack_data_vma + pack_data_sz, 8);
+
+    pack_sec_vma: *int = new int[pack_e_shnum];
+    pack_sj: int = 0;
+    while (pack_sj < pack_e_shnum) {
+        pack_sec_vma[pack_sj] = 0;
+        pack_sj = pack_sj + 1;
+    }
+    pack_sec_vma[pack_text_i] = pack_text_vma;
+    if (pack_rodata_i >= 0) { pack_sec_vma[pack_rodata_i] = pack_rodata_vma; }
+    if (pack_data_i >= 0) { pack_sec_vma[pack_data_i] = pack_data_vma; }
+    if (pack_bss_i >= 0) { pack_sec_vma[pack_bss_i] = pack_bss_vma; }
+
+    pack_text: *i8 = new i8[pack_text_sz + 1];
+    pack_memcpy(pack_text, pack_b + pack_text_fileoff, pack_text_sz);
+    pack_rodata_ptr: *i8 = pack_text;
+    if (pack_rodata_sz > 0) {
+        pack_rodata_ptr = new i8[pack_rodata_sz];
+        pack_memcpy(pack_rodata_ptr, pack_b + pack_rodata_fileoff, pack_rodata_sz);
+    }
+    pack_data_ptr: *i8 = pack_text;
+    if (pack_data_sz > 0) {
+        pack_data_ptr = new i8[pack_data_sz];
+        pack_memcpy(pack_data_ptr, pack_b + pack_data_fileoff, pack_data_sz);
+    }
+
+    pack_sym_addr: *int = new int[pack_nsym];
+    pack_zi = 0;
+    while (pack_zi < pack_nsym) {
+        pack_sy: int = pack_sym_off + pack_zi * 24;
+        pack_st_shndx2: int = pack_rd16(pack_b, pack_sy + 6);
+        pack_st_value: int = pack_rd64(pack_b, pack_sy + 8);
+        if (pack_st_shndx2 == pack_SHN_UNDEF) {
+            pack_sym_addr[pack_zi] = 0;
+        } else {
+            if (pack_st_shndx2 == pack_SHN_ABS) {
+                pack_sym_addr[pack_zi] = pack_st_value;
+            } else {
+                if (pack_st_shndx2 < pack_e_shnum) {
+                    pack_sym_addr[pack_zi] = pack_sec_vma[pack_st_shndx2] + pack_st_value;
+                } else { pack_fail("bad symbol shndx"); }
+            }
+        }
+        pack_zi = pack_zi + 1;
+    }
+
+    pack_entry: int = 0;
+    pack_zi = 0;
+    while (pack_zi < pack_nsym) {
+        pack_so2: int = pack_sym_off + pack_zi * 24;
+        pack_st_name2: int = pack_rd32(pack_b, pack_so2 + 0);
+        if (pack_st_name2 != 0) {
+            if (pack_streq(pack_strtab + pack_st_name2, "_start")) {
+                pack_entry = pack_sym_addr[pack_zi];
+            }
+        }
+        pack_zi = pack_zi + 1;
+    }
+    if (pack_entry == 0) { pack_fail("missing _start"); }
+
+    if (pack_rela_text_i >= 0) {
+        pack_rsh2: int = pack_e_shoff + pack_rela_text_i * 64;
+        pack_rela_off: int = pack_rd64(pack_b, pack_rsh2 + 24);
+        pack_rela_sz: int = pack_rd64(pack_b, pack_rsh2 + 32);
+        pack_nrela: int = pack_rela_sz / 24;
+        pack_ri: int = 0;
+        while (pack_ri < pack_nrela) {
+            pack_ro: int = pack_rela_off + pack_ri * 24;
+            pack_r_offset: int = pack_rd64(pack_b, pack_ro + 0);
+            pack_r_type: int = pack_rd32(pack_b, pack_ro + 8);
+            pack_r_sym: int = pack_rd32(pack_b, pack_ro + 12);
+            pack_r_addend: int = pack_rd64(pack_b, pack_ro + 16);
+            if (pack_r_type != pack_R_X86_64_PC32 && pack_r_type != pack_R_X86_64_PLT32) {
+                pack_fail("unsupported reloc type");
+            }
+            if (pack_r_sym >= pack_nsym) { pack_fail("bad reloc symbol"); }
+            if (pack_r_offset + 4 > pack_text_sz) { pack_fail("reloc out of range"); }
+            pack_S: int = pack_sym_addr[pack_r_sym];
+            pack_P: int = pack_text_vma + pack_r_offset;
+            pack_disp: int = pack_S + pack_r_addend - pack_P;
+            pack_wr32(pack_text, pack_r_offset, pack_disp);
+            pack_ri = pack_ri + 1;
+        }
+    }
+
+    pack_out: *i8 = new i8[pack_file_end];
+    pack_memset0(pack_out, pack_file_end);
+
+    pack_elf_mag: i8 = 127 trunc i8;
+    pack_out[0] = pack_elf_mag;
+    pack_out[1] = 'E';
+    pack_out[2] = 'L';
+    pack_out[3] = 'F';
+    pack_two: i8 = 2 trunc i8;
+    pack_one: i8 = 1 trunc i8;
+    pack_out[4] = pack_two;
+    pack_out[5] = pack_one;
+    pack_out[6] = pack_one;
+    pack_wr16(pack_out, 16, pack_ET_EXEC);
+    pack_wr16(pack_out, 18, pack_EM_X86_64);
+    pack_wr32(pack_out, 20, 1);
+    pack_wr64(pack_out, 24, pack_entry);
+    pack_wr64(pack_out, 32, 64);
+    pack_wr64(pack_out, 40, 0);
+    pack_wr32(pack_out, 48, 0);
+    pack_wr16(pack_out, 52, 64);
+    pack_wr16(pack_out, 54, 56);
+    pack_nph: int = 1;
+    if (pack_data_sz > 0 || pack_bss_sz > 0) { pack_nph = 2; }
+    pack_wr16(pack_out, 56, pack_nph);
+    pack_wr16(pack_out, 58, 0);
+    pack_wr16(pack_out, 60, 0);
+    pack_wr16(pack_out, 62, 0);
+
+    /* phdr 0: RX text+rodata */
+    pack_ph0: int = 64;
+    pack_wr32(pack_out, pack_ph0 + 0, pack_PT_LOAD);
+    pack_wr32(pack_out, pack_ph0 + 4, pack_PF_R + pack_PF_X);
+    pack_wr64(pack_out, pack_ph0 + 8, pack_rx_off);
+    pack_wr64(pack_out, pack_ph0 + 16, pack_LOAD_BASE + pack_rx_off);
+    pack_wr64(pack_out, pack_ph0 + 24, pack_LOAD_BASE + pack_rx_off);
+    pack_wr64(pack_out, pack_ph0 + 32, pack_rx_end - pack_rx_off);
+    pack_wr64(pack_out, pack_ph0 + 40, pack_rx_end - pack_rx_off);
+    pack_wr64(pack_out, pack_ph0 + 48, pack_PAGE);
+
+    if (pack_nph == 2) {
+        pack_ph1: int = 64 + 56;
+        pack_wr32(pack_out, pack_ph1 + 0, pack_PT_LOAD);
+        pack_wr32(pack_out, pack_ph1 + 4, pack_PF_R + pack_PF_W);
+        pack_wr64(pack_out, pack_ph1 + 8, pack_data_off);
+        pack_wr64(pack_out, pack_ph1 + 16, pack_data_vma);
+        pack_wr64(pack_out, pack_ph1 + 24, pack_data_vma);
+        pack_wr64(pack_out, pack_ph1 + 32, pack_data_sz);
+        pack_wr64(pack_out, pack_ph1 + 40, (pack_bss_vma + pack_bss_sz) - pack_data_vma);
+        pack_wr64(pack_out, pack_ph1 + 48, pack_PAGE);
+    }
+
+    pack_memcpy(pack_out + pack_text_off, pack_text, pack_text_sz);
+    if (pack_rodata_sz > 0) { pack_memcpy(pack_out + pack_rodata_off, pack_rodata_ptr, pack_rodata_sz); }
+    if (pack_data_sz > 0) { pack_memcpy(pack_out + pack_data_off, pack_data_ptr, pack_data_sz); }
+
+    pack_flags: int = pack_O_WRONLY + pack_O_CREAT + pack_O_TRUNC;
+    pack_ofd: int = open(pack_out_p, pack_flags, pack_MODE_755);
+    if (pack_ofd < 0) { pack_fail("cannot create output"); }
+    pack_w: int = 0;
+    while (pack_w < pack_file_end) {
+        pack_chunk: int = pack_file_end - pack_w;
+        if (pack_chunk > 65536) { pack_chunk = 65536; }
+        pack_wn: int = write(pack_ofd, pack_out + pack_w, pack_chunk);
+        if (pack_wn <= 0) { pack_fail("write failed"); }
+        pack_w = pack_w + pack_wn;
+    }
+    close(pack_ofd);
+    return 0;
+}
