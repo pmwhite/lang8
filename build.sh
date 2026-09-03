@@ -7,6 +7,8 @@ cd "$(dirname "$0")"
 
 BUILD="${BUILD:-.build}"
 FORCE=0
+REPEAT=1
+BENCH_REPEAT=10
 
 declare -a STEP_NAMES=()
 declare -a STEP_MS=()
@@ -16,15 +18,23 @@ now_ms() {
 }
 
 # Record a timed step. Progress is one line; timings go to the final summary.
+# With --bench, run the command REPEAT times and record the average.
 step() {
   local name="$1"
   shift
-  local start end elapsed
+  local start end elapsed i total=0
   printf '→ %s\n' "$name"
-  start=$(now_ms)
-  "$@"
-  end=$(now_ms)
-  elapsed=$((end - start))
+  for ((i = 1; i <= REPEAT; i++)); do
+    start=$(now_ms)
+    if [[ "$i" -eq 1 ]]; then
+      "$@"
+    else
+      "$@" >/dev/null
+    fi
+    end=$(now_ms)
+    total=$((total + end - start))
+  done
+  elapsed=$(( (total + REPEAT / 2) / REPEAT ))
   STEP_NAMES+=("$name")
   STEP_MS+=("$elapsed")
 }
@@ -32,7 +42,11 @@ step() {
 print_summary() {
   local i width=0 name ms total=0
   echo
-  echo '========== timings =========='
+  if [[ "$REPEAT" -gt 1 ]]; then
+    echo "========== timings (avg of ${REPEAT}) =========="
+  else
+    echo '========== timings =========='
+  fi
   for name in "${STEP_NAMES[@]}"; do
     (( ${#name} > width )) && width=${#name}
   done
@@ -207,7 +221,7 @@ do_all() {
 
 usage() {
   cat <<'EOF'
-Usage: ./build.sh [command] [--force]
+Usage: ./build.sh [command] [--force] [--bench]
 
 Commands:
   all             Install bootstrap, examples, two-stage self-host (default)
@@ -222,6 +236,7 @@ Commands:
   help            Show this help
 
 --force   Skip the interactive promote confirmation (still requires artifacts).
+--bench   Run each timed step 10 times and report average milliseconds.
 
 Compilation, assembly, ELF packing, and direct executable building are
 subcommands of every stage binary. The build script uses the direct path.
@@ -229,12 +244,13 @@ The saved bootstrap is directly executable; cold start needs no host compiler.
 EOF
 }
 
-# Parse args: command plus optional --force anywhere
+# Parse args: command plus optional --force / --bench anywhere
 cmd="all"
 args=()
 for a in "$@"; do
   case "$a" in
     --force) FORCE=1 ;;
+    --bench) REPEAT=$BENCH_REPEAT ;;
     *) args+=("$a") ;;
   esac
 done

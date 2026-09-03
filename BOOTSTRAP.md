@@ -55,3 +55,5 @@ assembly and ET_REL are never serialized or reparsed.
 
 Promotes require the corresponding self-host artifacts unless `--force` is used.
 They update only the working tree; create the commit separately.
+
+`--bench` runs each timed step ten times and reports average milliseconds.
