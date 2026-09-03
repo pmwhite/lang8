@@ -30,6 +30,7 @@ type StructDef = {
     size: int;
     ty: ?*Type;
     next: ?*StructDef;
+    hash_next: ?*StructDef;
 };
 
 type Variant = {
@@ -47,6 +48,7 @@ type EnumDef = {
     size: int;
     ty: ?*Type;
     next: ?*EnumDef;
+    hash_next: ?*EnumDef;
 };
 
 type ExnDef = {
@@ -56,6 +58,7 @@ type ExnDef = {
     size: int;
     ty: ?*Type;
     next: ?*ExnDef;
+    hash_next: ?*ExnDef;
 };
 
 type ExnList = {
@@ -177,7 +180,7 @@ type ExprKind =
     | Neg { lhs: *Expr; }
     | LogAnd { lhs: *Expr; rhs: *Expr; }
     | LogOr { lhs: *Expr; rhs: *Expr; }
-    | Funcall { funcname: *i8; args: ?*Expr; }
+    | Funcall { funcname: *i8; args: ?*Expr; fn: ?*Function; }
     | MemberAccess { lhs: *Expr; member: *Member; }
     | As { lhs: *Expr; }
     | Trunc { lhs: *Expr; }
@@ -216,6 +219,7 @@ type Obj = {
     used: int;
     next: ?*Obj;
     param_next: ?*Obj;
+    hash_next: ?*Obj;
 };
 
 type Function = {
@@ -230,7 +234,14 @@ type Function = {
     raises_list: ?*ExnList;
     used: int;
     next: ?*Function;
+    hash_next: ?*Function;
 };
+
+type FnBucket = { head: ?*Function; };
+type ObjBucket = { head: ?*Obj; };
+type StructBucket = { head: ?*StructDef; };
+type EnumBucket = { head: ?*EnumDef; };
+type ExnBucket = { head: ?*ExnDef; };
 
 type StrLit = {
     data: *i8;
@@ -248,6 +259,12 @@ functions: ?*Function;
 struct_defs: ?*StructDef;
 enum_defs: ?*EnumDef;
 exn_defs: ?*ExnDef;
+SYM_SIZE: int;
+fn_buckets: *FnBucket;
+global_buckets: *ObjBucket;
+struct_buckets: *StructBucket;
+enum_buckets: *EnumBucket;
+exn_buckets: *ExnBucket;
 next_exn_tag: int;
 field_list_size: int;
 ty_int: *Type;
@@ -300,6 +317,40 @@ streq(a: *i8, b: *i8): bool {
         i = i + 1;
     }
     return false;
+}
+
+name_eq_span(name: *i8, s: *i8, n: int): bool {
+    if (len(name) != n) { return false; }
+    return streq_n(name, s, n);
+}
+
+hash_n(s: *i8, n: int): int {
+    h: int = 5381;
+    i: int = 0;
+    while (i < n) {
+        h = h * 33 + (s[i] as int);
+        i = i + 1;
+    }
+    return h;
+}
+
+hash_str(s: *i8): int { return hash_n(s, len(s)); }
+
+sym_bucket(h: int): int {
+    if (h < 0) { h = 0 - h; }
+    return h % SYM_SIZE;
+}
+
+clear_sym_tables() {
+    i: int = 0;
+    while (i < SYM_SIZE) {
+        fn_buckets[i].head = null;
+        global_buckets[i].head = null;
+        struct_buckets[i].head = null;
+        enum_buckets[i].head = null;
+        exn_buckets[i].head = null;
+        i = i + 1;
+    }
 }
 
 memcpy(dst: *i8, src: *i8, n: int): *i8 {
@@ -657,6 +708,13 @@ init_runtime() {
     emit_cap = 65536;
     emit_buf = new i8[65536];
     emit_len = 0;
+    SYM_SIZE = 256;
+    fn_buckets = new FnBucket[256];
+    global_buckets = new ObjBucket[256];
+    struct_buckets = new StructBucket[256];
+    enum_buckets = new EnumBucket[256];
+    exn_buckets = new ExnBucket[256];
+    clear_sym_tables();
 }
 
 reg_name(i: int): *i8 {
@@ -784,34 +842,90 @@ exn_type(ed: *ExnDef): *Type {
     return p;
 }
 
-find_struct(name: *i8): ?*StructDef {
-    s: ?*StructDef = struct_defs;
+find_struct_span(s: *i8, n: int): ?*StructDef {
+    b: int = sym_bucket(hash_n(s, n));
+    sd: ?*StructDef = struct_buckets[b].head;
+    while (sd != null) {
+        if (name_eq_span(sd.name, s, n)) { return sd; }
+        sd = sd.hash_next;
+    }
+    return null;
+}
+
+find_struct(name: *i8): ?*StructDef { return find_struct_span(name, len(name)); }
+
+find_enum_span(s: *i8, n: int): ?*EnumDef {
+    b: int = sym_bucket(hash_n(s, n));
+    e: ?*EnumDef = enum_buckets[b].head;
+    while (e != null) {
+        if (name_eq_span(e.name, s, n)) { return e; }
+        e = e.hash_next;
+    }
+    return null;
+}
+
+find_enum(name: *i8): ?*EnumDef { return find_enum_span(name, len(name)); }
+
+find_exn_span(s: *i8, n: int): ?*ExnDef {
+    b: int = sym_bucket(hash_n(s, n));
+    e: ?*ExnDef = exn_buckets[b].head;
+    while (e != null) {
+        if (name_eq_span(e.name, s, n)) { return e; }
+        e = e.hash_next;
+    }
+    return null;
+}
+
+find_exn(name: *i8): ?*ExnDef { return find_exn_span(name, len(name)); }
+
+hash_put_struct(sd: *StructDef) {
+    b: int = sym_bucket(hash_str(sd.name));
+    sd.hash_next = struct_buckets[b].head;
+    struct_buckets[b].head = sd;
+}
+
+hash_put_enum(ed: *EnumDef) {
+    b: int = sym_bucket(hash_str(ed.name));
+    ed.hash_next = enum_buckets[b].head;
+    enum_buckets[b].head = ed;
+}
+
+hash_put_exn(ed: *ExnDef) {
+    b: int = sym_bucket(hash_str(ed.name));
+    ed.hash_next = exn_buckets[b].head;
+    exn_buckets[b].head = ed;
+}
+
+hash_put_fn(fn: *Function) {
+    b: int = sym_bucket(hash_str(fn.name));
+    fn.hash_next = fn_buckets[b].head;
+    fn_buckets[b].head = fn;
+}
+
+hash_put_global(o: *Obj) {
+    b: int = sym_bucket(hash_str(o.name));
+    o.hash_next = global_buckets[b].head;
+    global_buckets[b].head = o;
+}
+
+hash_remove_struct(name: *i8) {
+    b: int = sym_bucket(hash_str(name));
+    prev: ?*StructDef = null;
+    s: ?*StructDef = struct_buckets[b].head;
     while (s != null) {
-        if (streq(s.name, name)) { return s; }
-        s = s.next;
+        if (streq(s.name, name)) {
+            if (prev != null) {
+                prev.hash_next = s.hash_next;
+            } else { struct_buckets[b].head = s.hash_next; }
+            return;
+        }
+        prev = s;
+        s = s.hash_next;
     }
-    return null;
-}
-
-find_enum(name: *i8): ?*EnumDef {
-    e: ?*EnumDef = enum_defs;
-    while (e != null) {
-        if (streq(e.name, name)) { return e; }
-        e = e.next;
-    }
-    return null;
-}
-
-find_exn(name: *i8): ?*ExnDef {
-    e: ?*ExnDef = exn_defs;
-    while (e != null) {
-        if (streq(e.name, name)) { return e; }
-        e = e.next;
-    }
-    return null;
 }
 
 remove_struct(name: *i8) {
+    hash_remove_struct(name);
     prev: ?*StructDef = null;
     s: ?*StructDef = struct_defs;
     while (s != null) {
@@ -830,9 +944,10 @@ get_or_create_struct(name: *i8): *StructDef {
     sd: ?*StructDef = find_struct(name);
     if (sd != null) { return sd; }
     created: *StructDef = new StructDef {
-        name: name, members: null, size: 0, ty: null, next: struct_defs
+        name: name, members: null, size: 0, ty: null, next: struct_defs, hash_next: null
     };
     struct_defs = created;
+    hash_put_struct(created);
     return created;
 }
 
@@ -840,9 +955,10 @@ get_or_create_enum(name: *i8): *EnumDef {
     ed: ?*EnumDef = find_enum(name);
     if (ed != null) { return ed; }
     created: *EnumDef = new EnumDef {
-        name: name, variants: null, size: 0, ty: null, next: enum_defs
+        name: name, variants: null, size: 0, ty: null, next: enum_defs, hash_next: null
     };
     enum_defs = created;
+    hash_put_enum(created);
     return created;
 }
 
@@ -889,10 +1005,9 @@ variant_payload_name(enum_name: *i8, var_name: *i8): *i8 {
 
 is_type_name(): bool {
     if (!equal(TokKind.Ident)) { return false; }
-    name: *i8 = strdup_n(tok.str, tok.len);
-    if (find_struct(name) != null) { return true; }
-    if (find_enum(name) != null) { return true; }
-    if (find_exn(name) != null) { return true; }
+    if (find_struct_span(tok.str, tok.len) != null) { return true; }
+    if (find_enum_span(tok.str, tok.len) != null) { return true; }
+    if (find_exn_span(tok.str, tok.len) != null) { return true; }
     return false;
 }
 
@@ -917,8 +1032,9 @@ starts_type(): bool {
         if (t != tok) {
             if (t.kind == TokKind.Int || t.kind == TokKind.I8 || t.kind == TokKind.Bool) { return true; }
             if (t.kind == TokKind.Ident) {
-                n: *i8 = strdup_n(t.str, t.len);
-                if (find_struct(n) != null || find_enum(n) != null || find_exn(n) != null) { return true; }
+                if (find_struct_span(t.str, t.len) != null) { return true; }
+                if (find_enum_span(t.str, t.len) != null) { return true; }
+                if (find_exn_span(t.str, t.len) != null) { return true; }
             }
         }
     }
@@ -1476,7 +1592,9 @@ new_member_access(lhs: *Expr, m: *Member): *Expr {
     n.ty = m.ty;
     return n;
 }
-new_funcall(name: *i8, args: ?*Expr): *Expr { return mk_expr(ExprKind.Funcall { funcname: name, args: args }); }
+new_funcall(name: *i8, args: ?*Expr): *Expr {
+    return mk_expr(ExprKind.Funcall { funcname: name, args: args, fn: null });
+}
 new_return(lhs: ?*Expr): *Stmt { return mk_stmt(StmtKind.Return { lhs: lhs }); }
 new_if(cond: *Expr, then: *Stmt, els: ?*Stmt): *Stmt { return mk_stmt(StmtKind.If { cond: cond, then: then, els: els }); }
 new_while(cond: *Expr, body: *Stmt): *Stmt { return mk_stmt(StmtKind.While { cond: cond, body: body }); }
@@ -1511,15 +1629,27 @@ new_catch_arm(exn: *ExnDef, binder: ?*Obj, body: *Stmt): *CatchArm {
 }
 
 find_function(name: *i8): ?*Function {
-    fn: ?*Function = functions;
+    b: int = sym_bucket(hash_str(name));
+    fn: ?*Function = fn_buckets[b].head;
     while (fn != null) {
         if (streq(fn.name, name)) { return fn; }
-        fn = fn.next;
+        fn = fn.hash_next;
+    }
+    return null;
+}
+
+find_global(name: *i8): ?*Obj {
+    b: int = sym_bucket(hash_str(name));
+    o: ?*Obj = global_buckets[b].head;
+    while (o != null) {
+        if (streq(o.name, name)) { return o; }
+        o = o.hash_next;
     }
     return null;
 }
 
 find_obj(list: ?*Obj, name: *i8): ?*Obj {
+    if (list == globals) { return find_global(name); }
     o: ?*Obj = list;
     while (o != null) {
         if (streq(o.name, name)) { return o; }
@@ -1542,7 +1672,7 @@ find_local(name: *i8): ?*Obj {
 find_var(name: *i8): ?*Obj {
     o: ?*Obj = find_local(name);
     if (o != null) { return o; }
-    return find_obj(globals, name);
+    return find_global(name);
 }
 
 enter_scope() { scope_depth = scope_depth + 1; }
@@ -1562,7 +1692,8 @@ new_obj(name: *i8, is_local: int): *Obj {
         ty: null,
         used: 0,
         next: null,
-        param_next: null
+        param_next: null,
+        hash_next: null
     };
     if (is_local != 0) {
         o.scope_depth = scope_depth;
@@ -1571,6 +1702,7 @@ new_obj(name: *i8, is_local: int): *Obj {
     } else {
         o.next = globals;
         globals = o;
+        hash_put_global(o);
     }
     return o;
 }
@@ -2299,6 +2431,7 @@ add_type_expr(p: *Expr) raises Error {
                 a = a.next;
             }
             fno: ?*Function = find_function(q.funcname);
+            p.kind = ExprKind.Funcall { funcname: q.funcname, args: q.args, fn: fno };
             fo: ?*Obj = find_obj(globals, q.funcname);
             if (fno != null) {
                 if (fno.return_ty != null) {
@@ -2861,7 +2994,8 @@ parse_function(name: *i8) raises Error: *Function {
         sret: null,
         raises_list: null,
         used: 0,
-        next: null
+        next: null,
+        hash_next: null
     };
     locals = null;
     scope_depth = 0;
@@ -2982,7 +3116,8 @@ parse_variant(tag: int, enum_name: *i8) raises Error: *Variant {
             members: v.fields,
             size: field_list_size,
             ty: null,
-            next: null
+            next: null,
+            hash_next: null
         };
         v.payload_ty = struct_type(sd);
     }
@@ -3001,10 +3136,12 @@ parse_exception_def() raises Error {
         members: null,
         size: 0,
         ty: null,
-        next: exn_defs
+        next: exn_defs,
+        hash_next: null
     };
     next_exn_tag = next_exn_tag + 1;
     exn_defs = ed;
+    hash_put_exn(ed);
     if (equal(TokKind.LBrace)) {
         tok = tok.next;
         ed.members = parse_field_list(0);
@@ -3079,6 +3216,12 @@ parse_type_def() raises Error {
 parse_program() raises Error {
     tail: ?*Function = null;
     functions = null;
+    globals = null;
+    struct_defs = null;
+    enum_defs = null;
+    exn_defs = null;
+    next_exn_tag = 1;
+    clear_sym_tables();
     while (!equal(TokKind.Eof)) {
         if (equal(TokKind.TypeKw) && (tok.next).kind == TokKind.Ident && ((tok.next).next).kind == TokKind.Assign) {
             parse_type_def();
@@ -3098,6 +3241,7 @@ parse_program() raises Error {
                     functions = fn;
                     tail = fn;
                 }
+                hash_put_fn(fn);
                 o: *Obj = new_obj(name, 0);
                 o.is_func = 1;
                 o.ty = fn.return_ty;
@@ -3273,7 +3417,7 @@ mark_calls_expr(n: ?*Expr) {
             return;
         }
         Funcall k -> {
-            callee: ?*Function = find_function(k.funcname);
+            callee: ?*Function = k.fn;
             if (callee != null) { mark_reachable(callee); }
             a: ?*Expr = k.args;
             while (a != null) {
@@ -3979,7 +4123,7 @@ gen_expr(n: *Expr) raises Error {
             return;
         }
         Funcall k -> {
-            fno: ?*Function = find_function(k.funcname);
+            fno: ?*Function = k.fn;
             has_sret: int = 0;
             if (fno != null) {
                 if (fno.sret != null) { has_sret = 1; }
