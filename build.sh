@@ -57,10 +57,16 @@ compile_l8() {
 }
 
 # Assemble program + runtime into one .o (no undefs). Pack with elfpack → ET_EXEC.
-# Host gcc is only used to link bootstrap.s → l8c0 and the first elfpack binary.
-assemble_rt() {
+# Host as/gcc only for: bootstrap.s → l8c0, and first l8as + elfpack binaries.
+host_assemble_rt() {
   local asm="$1" obj="$2"
   as -o "$obj" "$asm" runtime.s
+}
+
+assemble_rt() {
+  local asm="$1" obj="$2"
+  ensure_l8as
+  ./l8as -o "$obj" "$asm" runtime.s
 }
 
 host_gcc_link() {
@@ -87,11 +93,28 @@ link_l8() {
   pack_l8 "$obj" "$bin"
 }
 
+build_l8as() {
+  [[ -f l8as.l8 ]] || die "l8as.l8 missing"
+  [[ -x ./l8c0 ]] || die "l8c0 missing (run bootstrap first)"
+  ./l8c0 l8as.l8 >"$BUILD/l8as.s"
+  host_assemble_rt "$BUILD/l8as.s" "$BUILD/l8as.o"
+  host_gcc_link "$BUILD/l8as.o" l8as
+}
+
+ensure_l8as() {
+  if [[ -x ./l8as ]]; then
+    return 0
+  fi
+  ensure_build_dir
+  [[ -x ./l8c0 ]] || do_bootstrap
+  build_l8as
+}
+
 build_elfpack() {
   [[ -f elfpack.l8 ]] || die "elfpack.l8 missing"
   [[ -x ./l8c0 ]] || die "l8c0 missing (run bootstrap first)"
   ./l8c0 elfpack.l8 >"$BUILD/elfpack.s"
-  assemble_rt "$BUILD/elfpack.s" "$BUILD/elfpack.o"
+  host_assemble_rt "$BUILD/elfpack.s" "$BUILD/elfpack.o"
   host_gcc_link "$BUILD/elfpack.o" elfpack
 }
 
@@ -146,7 +169,7 @@ require_bootstrap_s() {
 }
 
 do_clean() {
-  rm -f l8c0 l8c1 l8c2 l8c3 elfpack
+  rm -f l8c0 l8c1 l8c2 l8c3 elfpack l8as
   rm -f examples/hello examples/fib examples/logic examples/struct examples/string examples/i8 examples/bool examples/enum examples/forward examples/null examples/newarr examples/narrow examples/nestsum examples/noreturn examples/exc
   rm -f examples/*.s
   rm -rf "$BUILD"
@@ -160,7 +183,7 @@ do_bootstrap() {
 }
 
 bootstrap_link_l8c0() {
-  assemble_rt bootstrap.s "$BUILD/l8c0.o"
+  host_assemble_rt bootstrap.s "$BUILD/l8c0.o"
   host_gcc_link "$BUILD/l8c0.o" l8c0
 }
 
@@ -180,6 +203,7 @@ do_selfhost() {
   ensure_build_dir
   [[ -x ./l8c0 ]] || do_bootstrap
   [[ -f compiler2.l8 ]] || die "compiler2.l8 missing"
+  step 'ensure l8as' ensure_l8as
   step 'ensure elfpack' ensure_elfpack
 
   step 'stage1 compile  (l8c0 → compiler.l8)' compile_l8 l8c0 compiler.l8 "$BUILD/l8c1.s"
@@ -280,8 +304,8 @@ Commands:
 
 --force   Skip the interactive promote confirmation (still requires artifacts).
 
-Linking uses as + elfpack (see BOOTSTRAP.md). Host gcc is only needed to
-link bootstrap.s → l8c0 and the first elfpack binary.
+Linking uses l8as + elfpack (see BOOTSTRAP.md). Host as/gcc are only needed to
+link bootstrap.s → l8c0 and the first l8as / elfpack binaries.
 EOF
 }
 

@@ -39,6 +39,10 @@ Typical evolution for a breaking language change:
 
 ## Linking
 
-L8 programs are assembled together with [`runtime.s`](runtime.s) (`as prog.s runtime.s -o prog.o`), then turned into a static ELF executable by [`elfpack.l8`](elfpack.l8) (no `ld`). Cold start still uses the host `gcc` driver once to link `l8c0` from `bootstrap.s` and once to link the first `elfpack` binary; after that, stage links and examples use `as` + `elfpack` only.
+L8 programs are assembled together with [`runtime.s`](runtime.s) by [`l8as.l8`](l8as.l8)
+(`l8as -o prog.o prog.s runtime.s`), then turned into a static ELF executable by
+[`elfpack.l8`](elfpack.l8) (no `ld`). Cold start still uses the host `as`/`gcc` once each to
+link `l8c0` from `bootstrap.s` and to build the first `l8as` and `elfpack` binaries; after
+that, stage links and examples use `l8as` + `elfpack` only.
 
 Promotes refuse to run unless the corresponding `./build.sh selfhost` artifacts exist (or you pass `--force`). They only update the working tree; **you** create the git commit.
