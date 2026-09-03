@@ -256,6 +256,10 @@ type StrLit = {
     next: ?*StrLit;
 };
 
+type InternEnt = { s: *i8; n: int; next: ?*InternEnt; };
+type InternBucket = { head: ?*InternEnt; };
+type TyEnt = { base: *Type; ty: *Type; next: ?*TyEnt; };
+
 source: *i8; source_len: int; pos: int;
 source_path: *i8;
 tok: *Token;
@@ -274,6 +278,18 @@ global_buckets: *ObjBucket;
 struct_buckets: *StructBucket;
 enum_buckets: *EnumBucket;
 exn_buckets: *ExnBucket;
+tok_pool: *Token;
+tok_pool_i: int;
+tok_pool_n: int;
+expr_pool: *Expr;
+expr_pool_i: int;
+expr_pool_n: int;
+stmt_pool: *Stmt;
+stmt_pool_i: int;
+stmt_pool_n: int;
+intern_buckets: *InternBucket;
+ptr_cache: ?*TyEnt;
+opt_ptr_cache: ?*TyEnt;
 next_exn_tag: int;
 field_list_size: int;
 ty_int: *Type;
@@ -281,6 +297,7 @@ ty_i8: *Type;
 ty_bool: *Type;
 ty_noreturn: *Type;
 str_lits: ?*StrLit;
+str_lit_tail: ?*StrLit;
 str_count: int;
 label_id: int;
 emit_buf: *i8;
@@ -288,6 +305,7 @@ emit_len: int;
 emit_cap: int;
 do_profile: int;
 current_fn_name: ?*i8;
+current_return_lab: int;
 current_return_ty: ?*Type;
 current_sret: ?*Obj;
 current_fn: ?*Function;
@@ -320,6 +338,7 @@ streq_n(a: *i8, b: *i8, n: int): bool {
 }
 
 streq(a: *i8, b: *i8): bool {
+    if (a == b) { return true; }
     i: int = 0;
     while (true) {
         if (a[i] != b[i]) { return false; }
@@ -393,18 +412,6 @@ strdup_n(s: *i8, n: int): *i8 {
     data[n] = 0 trunc i8;
     return data;
 }
-
-is_space(c: i8): bool { return c == ' ' || c == '\n' || c == '\r' || c == '\t'; }
-
-is_digit(c: i8): bool { return c >= '0' && c <= '9'; }
-
-is_ident1(c: i8): bool {
-    if (c >= 'a' && c <= 'z') { return true; }
-    if (c >= 'A' && c <= 'Z') { return true; }
-    return c == '_';
-}
-
-is_ident2(c: i8): bool { return is_ident1(c) || is_digit(c); }
 
 emit_flush() {
     if (emit_len > 0) {
@@ -742,12 +749,24 @@ init_runtime() {
     emit_cap = 65536;
     emit_buf = new i8[65536];
     emit_len = 0;
-    SYM_SIZE = 256;
-    fn_buckets = new FnBucket[256];
-    global_buckets = new ObjBucket[256];
-    struct_buckets = new StructBucket[256];
-    enum_buckets = new EnumBucket[256];
-    exn_buckets = new ExnBucket[256];
+    SYM_SIZE = 1024;
+    fn_buckets = new FnBucket[1024];
+    global_buckets = new ObjBucket[1024];
+    struct_buckets = new StructBucket[1024];
+    enum_buckets = new EnumBucket[1024];
+    exn_buckets = new ExnBucket[1024];
+    intern_buckets = new InternBucket[4096];
+    i: int = 0;
+    while (i < 4096) {
+        intern_buckets[i].head = null;
+        i = i + 1;
+    }
+    ptr_cache = null;
+    opt_ptr_cache = null;
+    cg_labbuf = new i8[64];
+    str_lits = null;
+    str_lit_tail = null;
+    str_count = 0;
     clear_sym_tables();
 }
 
@@ -758,13 +777,13 @@ read_file(path: *i8) raises Error: *i8 {
     buf: *i8 = new i8[cap];
     n: int = 0;
     while (true) {
-        if (n + 4096 > cap) {
+        if (n + 65536 > cap) {
             cap = cap * 2;
             tmp: *i8 = new i8[cap];
             memcpy(tmp, buf, n);
             buf = tmp;
         }
-        r: int = read(fd, buf + n, 4096);
+        r: int = read(fd, buf + n, 65536);
         if (r <= 0) {
             buf[n] = 0 trunc i8;
             close(fd);
@@ -919,11 +938,25 @@ type_exn_def(t: *Type) raises Error: *ExnDef {
 }
 
 ptr_to(base: *Type): *Type {
-    return new Type.Ptr { base: base };
+    e: ?*TyEnt = ptr_cache;
+    while (e != null) {
+        if (e.base == base) { return e.ty; }
+        e = e.next;
+    }
+    t: *Type = new Type.Ptr { base: base };
+    ptr_cache = new TyEnt { base: base, ty: t, next: ptr_cache };
+    return t;
 }
 
 opt_ptr_to(base: *Type): *Type {
-    return new Type.OptPtr { base: base };
+    e: ?*TyEnt = opt_ptr_cache;
+    while (e != null) {
+        if (e.base == base) { return e.ty; }
+        e = e.next;
+    }
+    t: *Type = new Type.OptPtr { base: base };
+    opt_ptr_cache = new TyEnt { base: base, ty: t, next: opt_ptr_cache };
+    return t;
 }
 
 array_of(base: *Type, len: int): *Type {
@@ -1384,42 +1417,81 @@ decay(t: ?*Type) raises Error: ?*Type {
 is_byte_ty(t: *Type) raises Error: bool { return type_size(t) == 1; }
 
 new_token(kind: TokKind, start: *i8, len: int): *Token {
+    if (tok_pool_i >= tok_pool_n) {
+        tok_pool_n = 2048;
+        tok_pool = new Token[2048];
+        tok_pool_i = 0;
+    }
+    t: *Token = &tok_pool[tok_pool_i];
+    tok_pool_i = tok_pool_i + 1;
     p: int = start - source;
-    return new Token {
-        kind: kind,
-        val: 0,
-        str: start,
-        len: len,
-        pos: p,
-        next: token_eof
-    };
+    t.kind = kind;
+    t.val = 0;
+    t.str = start;
+    t.len = len;
+    t.pos = p;
+    t.next = token_eof;
+    return t;
 }
 
 ident_kind(s: *i8, n: int): TokKind {
-    if (n == 3 && streq_n(s, "int", 3)) { return TokKind.Int; }
-    if (n == 2 && streq_n(s, "i8", 2)) { return TokKind.I8; }
-    if (n == 4 && streq_n(s, "bool", 4)) { return TokKind.Bool; }
-    if (n == 4 && streq_n(s, "true", 4)) { return TokKind.True; }
-    if (n == 5 && streq_n(s, "false", 5)) { return TokKind.False; }
-    if (n == 4 && streq_n(s, "null", 4)) { return TokKind.Null; }
-    if (n == 8 && streq_n(s, "noreturn", 8)) { return TokKind.Noreturn; }
-    if (n == 2 && streq_n(s, "if", 2)) { return TokKind.If; }
-    if (n == 4 && streq_n(s, "else", 4)) { return TokKind.Else; }
-    if (n == 5 && streq_n(s, "while", 5)) { return TokKind.While; }
-    if (n == 6 && streq_n(s, "return", 6)) { return TokKind.Return; }
-    if (n == 4 && streq_n(s, "type", 4)) { return TokKind.TypeKw; }
-    if (n == 6 && streq_n(s, "sizeof", 6)) { return TokKind.Sizeof; }
-    if (n == 13 && streq_n(s, "uninitialized", 13)) { return TokKind.Uninitialized; }
-    if (n == 2 && streq_n(s, "as", 2)) { return TokKind.As; }
-    if (n == 5 && streq_n(s, "trunc", 5)) { return TokKind.Trunc; }
-    if (n == 3 && streq_n(s, "new", 3)) { return TokKind.New; }
-    if (n == 5 && streq_n(s, "match", 5)) { return TokKind.Match; }
-    if (n == 9 && streq_n(s, "exception", 9)) { return TokKind.Exception; }
-    if (n == 6 && streq_n(s, "raises", 6)) { return TokKind.Raises; }
-    if (n == 5 && streq_n(s, "raise", 5)) { return TokKind.Raise; }
-    if (n == 3 && streq_n(s, "try", 3)) { return TokKind.Try; }
-    if (n == 4 && streq_n(s, "with", 4)) { return TokKind.With; }
-    if (n == 6 && streq_n(s, "import", 6)) { return TokKind.Import; }
+    if (n == 2) {
+        if (s[0] == 'i') {
+            if (s[1] == 'f') { return TokKind.If; }
+            if (s[1] == '8') { return TokKind.I8; }
+        }
+        if (s[0] == 'a' && s[1] == 's') { return TokKind.As; }
+        return TokKind.Ident;
+    }
+    if (n == 3) {
+        if (s[0] == 'i' && s[1] == 'n' && s[2] == 't') { return TokKind.Int; }
+        if (s[0] == 'n' && s[1] == 'e' && s[2] == 'w') { return TokKind.New; }
+        if (s[0] == 't' && s[1] == 'r' && s[2] == 'y') { return TokKind.Try; }
+        return TokKind.Ident;
+    }
+    if (n == 4) {
+        c0: i8 = s[0];
+        if (c0 == 'b' && s[1] == 'o' && s[2] == 'o' && s[3] == 'l') { return TokKind.Bool; }
+        if (c0 == 't') {
+            if (s[1] == 'r' && s[2] == 'u' && s[3] == 'e') { return TokKind.True; }
+            if (s[1] == 'y' && s[2] == 'p' && s[3] == 'e') { return TokKind.TypeKw; }
+        }
+        if (c0 == 'n' && s[1] == 'u' && s[2] == 'l' && s[3] == 'l') { return TokKind.Null; }
+        if (c0 == 'e' && s[1] == 'l' && s[2] == 's' && s[3] == 'e') { return TokKind.Else; }
+        if (c0 == 'w' && s[1] == 'i' && s[2] == 't' && s[3] == 'h') { return TokKind.With; }
+        return TokKind.Ident;
+    }
+    if (n == 5) {
+        c1: i8 = s[0];
+        if (c1 == 'f' && s[1] == 'a' && s[2] == 'l' && s[3] == 's' && s[4] == 'e') { return TokKind.False; }
+        if (c1 == 'w' && s[1] == 'h' && s[2] == 'i' && s[3] == 'l' && s[4] == 'e') { return TokKind.While; }
+        if (c1 == 't' && s[1] == 'r' && s[2] == 'u' && s[3] == 'n' && s[4] == 'c') { return TokKind.Trunc; }
+        if (c1 == 'm' && s[1] == 'a' && s[2] == 't' && s[3] == 'c' && s[4] == 'h') { return TokKind.Match; }
+        if (c1 == 'r' && s[1] == 'a' && s[2] == 'i' && s[3] == 's' && s[4] == 'e') { return TokKind.Raise; }
+        return TokKind.Ident;
+    }
+    if (n == 6) {
+        c2: i8 = s[0];
+        if (c2 == 'r') {
+            if (s[1] == 'e' && s[2] == 't' && s[3] == 'u' && s[4] == 'r' && s[5] == 'n') { return TokKind.Return; }
+            if (s[1] == 'a' && s[2] == 'i' && s[3] == 's' && s[4] == 'e' && s[5] == 's') { return TokKind.Raises; }
+        }
+        if (c2 == 's' && s[1] == 'i' && s[2] == 'z' && s[3] == 'e' && s[4] == 'o' && s[5] == 'f') { return TokKind.Sizeof; }
+        if (c2 == 'i' && s[1] == 'm' && s[2] == 'p' && s[3] == 'o' && s[4] == 'r' && s[5] == 't') { return TokKind.Import; }
+        return TokKind.Ident;
+    }
+    if (n == 8) {
+        if (s[0] == 'n' && streq_n(s, "noreturn", 8)) { return TokKind.Noreturn; }
+        return TokKind.Ident;
+    }
+    if (n == 9) {
+        if (s[0] == 'e' && streq_n(s, "exception", 9)) { return TokKind.Exception; }
+        return TokKind.Ident;
+    }
+    if (n == 13) {
+        if (s[0] == 'u' && streq_n(s, "uninitialized", 13)) { return TokKind.Uninitialized; }
+        return TokKind.Ident;
+    }
     return TokKind.Ident;
 }
 
@@ -1443,8 +1515,9 @@ skip_block_comment() {
 read_number(): int {
     v: int = 0;
     while (pos < source_len) {
-        if (!is_digit(source[pos])) { return v; }
-        v = v * 10 + ((source[pos] as int) - ('0' as int));
+        d: i8 = source[pos];
+        if (d < '0' || d > '9') { return v; }
+        v = v * 10 + ((d as int) - ('0' as int));
         pos = pos + 1;
     }
     return v;
@@ -1474,8 +1547,10 @@ scan_string_len() raises Error: int {
 scan_ident_len(): int {
     start: int = pos;
     while (pos < source_len) {
-        if (!is_ident2(source[pos])) { return pos - start; }
-        pos = pos + 1;
+        d: i8 = source[pos];
+        if ((d >= 'a' && d <= 'z') || (d >= 'A' && d <= 'Z') || d == '_' || (d >= '0' && d <= '9')) {
+            pos = pos + 1;
+        } else { return pos - start; }
     }
     return pos - start;
 }
@@ -1522,7 +1597,7 @@ tokenize() raises Error: *Token {
     pos = 0;
     while (pos < source_len) {
         c = source[pos];
-        if (is_space(c)) {
+        if (c == ' ' || c == '\n' || c == '\t' || c == '\r') {
             pos = pos + 1;
         } else if (c == '/' && source[pos + 1] == '/') {
             pos = pos + 2;
@@ -1530,7 +1605,7 @@ tokenize() raises Error: *Token {
         } else if (c == '/' && source[pos + 1] == '*') {
             pos = pos + 2;
             skip_block_comment();
-        } else if (is_digit(c)) {
+        } else if (c >= '0' && c <= '9') {
             s = source + pos;
             v = read_number();
             t = new_token(TokKind.Num, s, (source + pos) - s);
@@ -1560,10 +1635,10 @@ tokenize() raises Error: *Token {
             t.val = ch as int;
             cur.next = t;
             cur = t;
-        } else if (is_ident1(c)) {
+        } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
             s = source + pos;
             n = scan_ident_len();
-            t = new_token(ident_kind(s, n), s, n);
+            t = new_token(ident_kind(s, n), intern(s, n), n);
             cur.next = t;
             cur = t;
         } else if (c == '=' && source[pos + 1] == '=') {
@@ -1623,7 +1698,27 @@ skip(kind: TokKind) raises Error {
     tok = tok.next;
 }
 
-cur_tokstr(): *i8 { return strdup_n(tok.str, tok.len); }
+cur_tokstr(): *i8 {
+    if (tok.kind == TokKind.Ident) { return tok.str; }
+    return intern(tok.str, tok.len);
+}
+
+intern(s: *i8, n: int): *i8 {
+    b: int = hash_n(s, n);
+    if (b < 0) { b = 0 - b; }
+    b = b % 4096;
+    e: ?*InternEnt = intern_buckets[b].head;
+    while (e != null) {
+        if (e.n == n) {
+            if (streq_n(e.s, s, n)) { return e.s; }
+        }
+        e = e.next;
+    }
+    d: *i8 = strdup_n(s, n);
+    ne: *InternEnt = new InternEnt { s: d, n: n, next: intern_buckets[b].head };
+    intern_buckets[b].head = ne;
+    return d;
+}
 
 add_string(s: *i8, n: int): int {
     buf: *i8 = new i8[n + 1];
@@ -1645,19 +1740,44 @@ add_string(s: *i8, n: int): int {
         data: buf,
         len: j,
         label: str_count,
-        next: str_lits
+        next: null
     };
     str_count = str_count + 1;
-    str_lits = lit;
+    t: ?*StrLit = str_lit_tail;
+    if (t != null) {
+        t.next = lit;
+    } else {
+        str_lits = lit;
+    }
+    str_lit_tail = lit;
     return lit.label;
 }
 
 mk_expr(k: ExprKind): *Expr {
-    return new Expr { kind: k, next: null, ty: null };
+    if (expr_pool_i >= expr_pool_n) {
+        expr_pool_n = 1024;
+        expr_pool = new Expr[1024];
+        expr_pool_i = 0;
+    }
+    n: *Expr = &expr_pool[expr_pool_i];
+    expr_pool_i = expr_pool_i + 1;
+    n.kind = k;
+    n.next = null;
+    n.ty = null;
+    return n;
 }
 
 mk_stmt(k: StmtKind): *Stmt {
-    return new Stmt { kind: k, next: null };
+    if (stmt_pool_i >= stmt_pool_n) {
+        stmt_pool_n = 512;
+        stmt_pool = new Stmt[512];
+        stmt_pool_i = 0;
+    }
+    n: *Stmt = &stmt_pool[stmt_pool_i];
+    stmt_pool_i = stmt_pool_i + 1;
+    n.kind = k;
+    n.next = null;
+    return n;
 }
 
 new_num(v: int): *Expr {
@@ -4338,34 +4458,37 @@ gen_expr(n: *Expr) raises Error {
         }
         Neg k -> { gen_expr(k.lhs); cg_neg(0); return; }
         LogAnd k -> {
-            l: int = new_label();
+            lf: int = new_label();
+            le: int = new_label();
             gen_expr(k.lhs);
             cg_alu_imm(7, 0, 0);
-            cg_jump(4, cg_name_num(".L.false", l));
+            cg_jump_id(4, lf);
             gen_expr(k.rhs);
             cg_alu_imm(7, 0, 0);
-            cg_jump(4, cg_name_num(".L.false", l));
+            cg_jump_id(4, lf);
             cg_mov_imm(1, 0);
-            cg_jump(0 - 1, cg_name_num(".L.end", l));
-            cg_label(cg_name_num(".L.false", l));
+            cg_jump_id(0 - 1, le);
+            cg_label_id(lf);
             cg_mov_imm(0, 0);
-            cg_label(cg_name_num(".L.end", l));
+            cg_label_id(le);
             return;
         }
         LogOr k -> {
-            l2: int = new_label();
+            lt: int = new_label();
+            lf2: int = new_label();
+            le2: int = new_label();
             gen_expr(k.lhs);
             cg_alu_imm(7, 0, 0);
-            cg_jump(5, cg_name_num(".L.true", l2));
+            cg_jump_id(5, lt);
             gen_expr(k.rhs);
             cg_alu_imm(7, 0, 0);
-            cg_jump(4, cg_name_num(".L.false", l2));
-            cg_label(cg_name_num(".L.true", l2));
+            cg_jump_id(4, lf2);
+            cg_label_id(lt);
             cg_mov_imm(1, 0);
-            cg_jump(0 - 1, cg_name_num(".L.end", l2));
-            cg_label(cg_name_num(".L.false", l2));
+            cg_jump_id(0 - 1, le2);
+            cg_label_id(lf2);
             cg_mov_imm(0, 0);
-            cg_label(cg_name_num(".L.end", l2));
+            cg_label_id(le2);
             return;
         }
         Funcall k -> {
@@ -4437,9 +4560,7 @@ gen_stmt(n: *Stmt) raises Error {
                     cg_mov_rr(7, 0);
                 }
             } else { cg_mov_imm(0, 0); }
-            fname: ?*i8 = current_fn_name;
-            if (fname == null) { error("missing fn name"); }
-            cg_jump(0 - 1, cg_name_pair(".L.return.", fname));
+            cg_jump_id(0 - 1, current_return_lab);
             return;
         }
         ExprStmt k -> {
@@ -4455,37 +4576,39 @@ gen_stmt(n: *Stmt) raises Error {
             return;
         }
         If k -> {
-            l: int = new_label();
+            le: int = new_label();
             gen_expr(k.cond);
             cg_alu_imm(7, 0, 0);
             els: ?*Stmt = k.els;
             if (els == null) {
-                cg_jump(4, cg_name_num(".L.end", l));
+                cg_jump_id(4, le);
                 gen_stmt(k.then);
-                cg_label(cg_name_num(".L.end", l));
+                cg_label_id(le);
                 return;
             }
-            cg_jump(4, cg_name_num(".L.else", l));
+            lelse: int = new_label();
+            cg_jump_id(4, lelse);
             gen_stmt(k.then);
-            cg_jump(0 - 1, cg_name_num(".L.end", l));
-            cg_label(cg_name_num(".L.else", l));
+            cg_jump_id(0 - 1, le);
+            cg_label_id(lelse);
             gen_stmt(els);
-            cg_label(cg_name_num(".L.end", l));
+            cg_label_id(le);
             return;
         }
         While k -> {
-            l2: int = new_label();
-            cg_label(cg_name_num(".L.begin", l2));
+            lb: int = new_label();
+            le2: int = new_label();
+            cg_label_id(lb);
             gen_expr(k.cond);
             cg_alu_imm(7, 0, 0);
-            cg_jump(4, cg_name_num(".L.end", l2));
+            cg_jump_id(4, le2);
             gen_stmt(k.body);
-            cg_jump(0 - 1, cg_name_num(".L.begin", l2));
-            cg_label(cg_name_num(".L.end", l2));
+            cg_jump_id(0 - 1, lb);
+            cg_label_id(le2);
             return;
         }
         Match k -> {
-            l3: int = new_label();
+            lend: int = new_label();
             match k.cond.kind {
                 Var _p -> { gen_addr(k.cond); }
                 MemberAccess _p -> { gen_addr(k.cond); }
@@ -4502,7 +4625,7 @@ gen_stmt(n: *Stmt) raises Error {
                 if (av != null) {
                     cg_mov_mr(4, 0, 0);
                     cg_alu_imm(7, av.tag, 0);
-                    cg_jump(5, cg_name_num(".L.arm", la));
+                    cg_jump_id(5, la);
                 }
                 bv: ?*Obj = arm.binder;
                 if (bv != null) {
@@ -4514,15 +4637,15 @@ gen_stmt(n: *Stmt) raises Error {
                     emit_memcpy(psz);
                 }
                 gen_stmt(arm.body);
-                cg_jump(0 - 1, cg_name_num(".L.matchend", l3));
+                cg_jump_id(0 - 1, lend);
                 if (av != null) {
-                    cg_label(cg_name_num(".L.arm", la));
+                    cg_label_id(la);
                 }
                 arm = arm.next;
             }
             cg_mov_imm(1, 7);
             cg_call("exit");
-            cg_label(cg_name_num(".L.matchend", l3));
+            cg_label_id(lend);
             cg_alu_imm(0, 16, 4);
             return;
         }
@@ -4543,22 +4666,23 @@ gen_stmt(n: *Stmt) raises Error {
             return;
         }
         Try k -> {
-            l4: int = new_label();
+            lcatch: int = new_label();
+            ltryend: int = new_label();
             cg_lea_mr(5, k.buf.offset, 7);
             cg_call("l8_try_begin");
             cg_alu_imm(7, 0, 0);
-            cg_jump(5, cg_name_num(".L.catch", l4));
+            cg_jump_id(5, lcatch);
             gen_stmt(k.body);
             cg_call("l8_try_end");
-            cg_jump(0 - 1, cg_name_num(".L.tryend", l4));
-            cg_label(cg_name_num(".L.catch", l4));
+            cg_jump_id(0 - 1, ltryend);
+            cg_label_id(lcatch);
             arm2: ?*CatchArm = k.arms;
             while (arm2 != null) {
                 la2: int = new_label();
                 ced: *ExnDef = arm2.exn;
                 cg_mov_rip_r("l8_exc_tag", 0, 0);
                 cg_alu_imm(7, ced.tag, 0);
-                cg_jump(5, cg_name_num(".L.arm", la2));
+                cg_jump_id(5, la2);
                 binder: ?*Obj = arm2.binder;
                 if (binder != null) {
                     psz2: int = ced.size;
@@ -4569,14 +4693,14 @@ gen_stmt(n: *Stmt) raises Error {
                     }
                 }
                 gen_stmt(arm2.body);
-                cg_jump(0 - 1, cg_name_num(".L.tryend", l4));
-                cg_label(cg_name_num(".L.arm", la2));
+                cg_jump_id(0 - 1, ltryend);
+                cg_label_id(la2);
                 arm2 = arm2.next;
             }
             cg_mov_rip_r("l8_exc_tag", 0, 7);
             cg_mov_rip_r("l8_exc_ptr", 0, 6);
             cg_call("l8_raise");
-            cg_label(cg_name_num(".L.tryend", l4));
+            cg_label_id(ltryend);
             return;
         }
         _ -> { error("invalid statement"); }
@@ -4617,22 +4741,12 @@ emit_data() raises Error {
     }
     cg_section(as_SEC_RODATA);
     cg_align(8);
-    i: int = 0;
-    while (i < str_count) {
-        s: ?*StrLit = str_lits;
-        found: ?*StrLit = null;
-        while (s != null) {
-            if (s.label == i) { found = s; }
-            if (found == null) {
-                s = s.next;
-            } else { s = null; }
-        }
-        if (found != null) {
-            cg_label(cg_name_num(".L.str", i));
-            cg_quad(found.len);
-            cg_bytes(found.data, found.len);
-        }
-        i = i + 1;
+    s: ?*StrLit = str_lits;
+    while (s != null) {
+        cg_label(cg_name_num(".L.str", s.label));
+        cg_quad(s.len);
+        cg_bytes(s.data, s.len);
+        s = s.next;
     }
 }
 
@@ -4647,6 +4761,7 @@ emit_text() raises Error {
         current_return_ty = fn.return_ty;
         current_sret = fn.sret;
         current_fn = fn;
+        current_return_lab = new_label();
         cg_global(fn.name);
         cg_label(fn.name);
         cg_rsp_off = 0;
@@ -4689,7 +4804,7 @@ emit_text() raises Error {
         body: ?*Stmt = fn.body;
         if (body == null) { error("missing body"); }
         gen_stmt(body);
-        cg_label(cg_name_pair(".L.return.", fn.name));
+        cg_label_id(current_return_lab);
         cg_mov_rr(5, 4);
         cg_pop(5);
         cg_ret();
@@ -4711,7 +4826,26 @@ mono_ns(): int {
     return ts.sec * 1000000000 + ts.nsec;
 }
 
-profile_print(label: *i8, dt_ns: int) {
+profile_t0: int;
+profile_prev: int;
+profile_cyc0: int;
+profile_cyc_prev: int;
+profile_flt0: int;
+profile_flt_prev: int;
+profile_rbuf: *i8;
+
+profile_faults(): int {
+    syscall(98, 0, profile_rbuf, 0, 0, 0);
+    p: *int = (profile_rbuf + 64) as *int;
+    return p.*;
+}
+
+profile_rss_kb(): int {
+    p: *int = (profile_rbuf + 32) as *int;
+    return p.*;
+}
+
+profile_print(label: *i8, dt_ns: int, dt_cyc: int, dt_flt: int) {
     write(2, "profile: ", len("profile: "));
     write(2, label, len(label));
     write(2, " ", len(" "));
@@ -4722,7 +4856,41 @@ profile_print(label: *i8, dt_ns: int) {
     if (us < 100) { write(2, "0", len("0")); }
     if (us < 10) { write(2, "0", len("0")); }
     emit_num_fd(2, us);
-    write(2, " ms\n", len(" ms\n"));
+    write(2, " ms  ", len(" ms  "));
+    emit_num_fd(2, dt_cyc);
+    write(2, " cyc  ", len(" cyc  "));
+    emit_num_fd(2, dt_flt);
+    write(2, " flt\n", len(" flt\n"));
+}
+
+profile_start() {
+    if (do_profile == 0) { return; }
+    profile_rbuf = new i8[256];
+    profile_t0 = mono_ns();
+    profile_prev = profile_t0;
+    profile_cyc0 = rdtsc();
+    profile_cyc_prev = profile_cyc0;
+    profile_flt0 = profile_faults();
+    profile_flt_prev = profile_flt0;
+}
+
+profile_mark(label: *i8) {
+    if (do_profile == 0) { return; }
+    t: int = mono_ns();
+    c: int = rdtsc();
+    f: int = profile_faults();
+    profile_print(label, t - profile_prev, c - profile_cyc_prev, f - profile_flt_prev);
+    profile_prev = t;
+    profile_cyc_prev = c;
+    profile_flt_prev = f;
+}
+
+profile_end() {
+    if (do_profile == 0) { return; }
+    profile_print("TOTAL", profile_prev - profile_t0, profile_cyc_prev - profile_cyc0, profile_flt_prev - profile_flt0);
+    write(2, "profile: rss ", len("profile: rss "));
+    emit_num_fd(2, profile_rss_kb());
+    write(2, " kb\n", len(" kb\n"));
 }
 
 is_profile_flag(s: *i8): bool {
@@ -4734,25 +4902,38 @@ is_profile_flag(s: *i8): bool {
     return false;
 }
 
+compiler_frontend(src_path: *i8) raises Error {
+    profile_start();
+    as_init();
+    init_runtime();
+    init_dummies();
+    profile_mark("init");
+    source = "";
+    source_len = 0;
+    source_path = src_path;
+    tok = token_eof;
+    parse_program(src_path);
+    profile_mark("load_parse");
+    typecheck_program();
+    profile_mark("typecheck");
+    check_unused_functions();
+    profile_mark("unused_fns");
+    check_unused_locals();
+    profile_mark("unused_locals");
+    check_raises_functions();
+    profile_mark("raises");
+    check_noreturn_functions();
+    profile_mark("noreturn");
+    codegen();
+    profile_mark("codegen");
+}
+
 compiler_build_direct(src_path: *i8): int {
     try {
-        do_profile = 0;
         cg_direct_mode = 1;
-        as_init();
-        init_runtime();
-        init_dummies();
-        source = "";
-        source_len = 0;
-        source_path = src_path;
-        tok = token_eof;
-        parse_program(src_path);
-        typecheck_program();
-        check_unused_functions();
-        check_unused_locals();
-        check_raises_functions();
-        check_noreturn_functions();
-        codegen();
+        compiler_frontend(src_path);
         as_assemble_file_append("runtime.s");
+        profile_mark("runtime");
         return 0;
     } with Error e -> {
         print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);
@@ -4784,67 +4965,8 @@ compiler_main(argc: int, argv: **i8): int {
             return 1;
         }
         src_path: *i8 = path;
-        t0: int = 0;
-        t: int = 0;
-        prev: int = 0;
-        if (do_profile != 0) {
-            t0 = mono_ns();
-            prev = t0;
-        }
-        as_init();
-        init_runtime();
-        init_dummies();
-        if (do_profile != 0) {
-            t = mono_ns();
-            profile_print("init", t - prev);
-            prev = t;
-        }
-        source = "";
-        source_len = 0;
-        source_path = src_path;
-        tok = token_eof;
-        parse_program(src_path);
-        if (do_profile != 0) {
-            t = mono_ns();
-            profile_print("load_parse", t - prev);
-            prev = t;
-        }
-        typecheck_program();
-        if (do_profile != 0) {
-            t = mono_ns();
-            profile_print("typecheck", t - prev);
-            prev = t;
-        }
-        check_unused_functions();
-        if (do_profile != 0) {
-            t = mono_ns();
-            profile_print("unused_fns", t - prev);
-            prev = t;
-        }
-        check_unused_locals();
-        if (do_profile != 0) {
-            t = mono_ns();
-            profile_print("unused_locals", t - prev);
-            prev = t;
-        }
-        check_raises_functions();
-        if (do_profile != 0) {
-            t = mono_ns();
-            profile_print("raises", t - prev);
-            prev = t;
-        }
-        check_noreturn_functions();
-        if (do_profile != 0) {
-            t = mono_ns();
-            profile_print("noreturn", t - prev);
-            prev = t;
-        }
-        codegen();
-        if (do_profile != 0) {
-            t = mono_ns();
-            profile_print("codegen", t - prev);
-            profile_print("TOTAL", t - t0);
-        }
+        compiler_frontend(src_path);
+        profile_end();
         return 0;
     } with Error e -> {
         print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);
