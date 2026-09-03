@@ -15,6 +15,7 @@ now_ms() {
   echo $(( $(date +%s%N) / 1000000 ))
 }
 
+# Record a timed step. Progress is one line; timings go to the final summary.
 step() {
   local name="$1"
   shift
@@ -26,7 +27,6 @@ step() {
   elapsed=$((end - start))
   STEP_NAMES+=("$name")
   STEP_MS+=("$elapsed")
-  printf '  %d ms\n' "$elapsed"
 }
 
 print_summary() {
@@ -68,12 +68,34 @@ run_expect() {
   fi
 }
 
+# compile + link + run. Most of the wall time on tiny programs is gcc link,
+# not the L8 compiler (hello compiles in well under 1ms).
 example() {
   local compiler="$1" name="$2" src="$3" expected="$4"
   local asm="$BUILD/${name}.s" bin="$BUILD/${name}"
   compile_l8 "$compiler" "$src" "$asm"
   link_l8 "$asm" "$bin"
   run_expect "$bin" "$expected"
+}
+
+# All examples as one timed step (avoids a noisy per-file timing table).
+run_examples() {
+  local c="$1"
+  example "$c" hello   examples/hello.l8   'Hi'
+  example "$c" fib     examples/fib.l8     '55'
+  example "$c" logic   examples/logic.l8   'YYYY'
+  example "$c" struct  examples/struct.l8  '3 12 13'
+  example "$c" string  examples/string.l8  'Hi'
+  example "$c" i8      examples/i8.l8      'Hi'
+  example "$c" bool    examples/bool.l8    'TY10'
+  example "$c" enum    examples/enum.l8    '9 10 0 3 0'
+  example "$c" forward examples/forward.l8 '7'
+  example "$c" null    examples/null.l8    'YYYY'
+  example "$c" newarr  examples/newarr.l8  'Hi'
+  example "$c" narrow  examples/narrow.l8  'YYYY'
+  example "$c" nestsum examples/nestsum.l8 '1 2 3 9 4 5 6 7'
+  example "$c" noreturn examples/noreturn.l8 'Hi'
+  example "$c" exc     examples/exc.l8     'Hi'
 }
 
 require_bootstrap_s() {
@@ -96,22 +118,7 @@ do_bootstrap() {
 do_examples() {
   ensure_build_dir
   [[ -x ./l8c0 ]] || do_bootstrap
-
-  step 'example hello  [l8c0]'  example l8c0 hello  examples/hello.l8  'Hi'
-  step 'example fib    [l8c0]'  example l8c0 fib    examples/fib.l8    '55'
-  step 'example logic  [l8c0]'  example l8c0 logic  examples/logic.l8  'YYYY'
-  step 'example struct [l8c0]'  example l8c0 struct examples/struct.l8 '3 12 13'
-  step 'example string [l8c0]'  example l8c0 string examples/string.l8 'Hi'
-  step 'example i8     [l8c0]'  example l8c0 i8     examples/i8.l8     'Hi'
-  step 'example bool   [l8c0]'  example l8c0 bool   examples/bool.l8   'TY10'
-  step 'example enum   [l8c0]'  example l8c0 enum   examples/enum.l8   '9 10 0 3 0'
-  step 'example forward[l8c0]' example l8c0 forward examples/forward.l8 '7'
-  step 'example null   [l8c0]'  example l8c0 null   examples/null.l8   'YYYY'
-  step 'example newarr [l8c0]'  example l8c0 newarr examples/newarr.l8 'Hi'
-  step 'example narrow [l8c0]'  example l8c0 narrow examples/narrow.l8 'YYYY'
-  step 'example nestsum[l8c0]'  example l8c0 nestsum examples/nestsum.l8 '1 2 3 9 4 5 6 7'
-  step 'example noreturn[l8c0]' example l8c0 noreturn examples/noreturn.l8 'Hi'
-  step 'example exc     [l8c0]' example l8c0 exc     examples/exc.l8     'Hi'
+  step 'examples [l8c0]' run_examples l8c0
 }
 
 # Stage-1: bootstrap compiles compiler.l8 → l8c1
@@ -137,19 +144,7 @@ do_selfhost() {
   step 'stage4 compile (l8c3 → compiler2.l8)' compile_l8 l8c3 compiler2.l8 "$BUILD/l8c4.s"
   step 'verify stage3 == stage4'             diff -q "$BUILD/l8c3.s" "$BUILD/l8c4.s"
 
-  step 'example hello  [l8c3]'  example l8c3 hello  examples/hello.l8  'Hi'
-  step 'example struct [l8c3]'  example l8c3 struct examples/struct.l8 '3 12 13'
-  step 'example string [l8c3]'  example l8c3 string examples/string.l8 'Hi'
-  step 'example i8     [l8c3]'  example l8c3 i8     examples/i8.l8     'Hi'
-  step 'example bool   [l8c3]'  example l8c3 bool   examples/bool.l8   'TY10'
-  step 'example enum   [l8c3]'  example l8c3 enum   examples/enum.l8   '9 10 0 3 0'
-  step 'example forward[l8c3]'  example l8c3 forward examples/forward.l8 '7'
-  step 'example null   [l8c3]'  example l8c3 null   examples/null.l8   'YYYY'
-  step 'example newarr [l8c3]'  example l8c3 newarr examples/newarr.l8 'Hi'
-  step 'example narrow [l8c3]'  example l8c3 narrow examples/narrow.l8 'YYYY'
-  step 'example nestsum[l8c3]'  example l8c3 nestsum examples/nestsum.l8 '1 2 3 9 4 5 6 7'
-  step 'example noreturn[l8c3]' example l8c3 noreturn examples/noreturn.l8 'Hi'
-  step 'example exc     [l8c3]' example l8c3 exc     examples/exc.l8     'Hi'
+  step 'examples [l8c3]' run_examples l8c3
 }
 
 confirm_promote() {
