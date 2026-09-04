@@ -2,6 +2,7 @@
 // Nominal AST; Type is a sum; Expr/Stmt are typed envelopes.
 // Heap ADTs via new; aggregates by sret; *T vs ?*T with flow narrowing; `e or alt` unwraps ?*T.
 // Byte literals: 'A' and Ni8 (0..255); i8 arithmetic wraps, no mixed promotion.
+// Pointer offsets: p[i] and &p[i] only; no p+i, p-q, or p as int.
 // noreturn return type; checked exceptions (exception/raises/raise/try/with).
 // Pipeline: parse → typecheck → unused fn/local + raises/noreturn checks → codegen.
 // This compiler reports failures via `exception Error` (caught in main).
@@ -394,8 +395,8 @@ clear_sym_tables() {
 memcpy(dst: *i8, src: *i8, n: int): *i8 {
     i: int = 0;
     while (i + 8 <= n) {
-        d: *int = (dst + i) as *int;
-        s: *int = (src + i) as *int;
+        d: *int = (&dst[i]) as *int;
+        s: *int = (&src[i]) as *int;
         d.* = s.*;
         i = i + 8;
     }
@@ -410,7 +411,7 @@ strdup_n(s: *i8, n: int): *i8 {
     raw: *i8 = new i8[n + 16];
     p: *int = raw as *int;
     p.* = n;
-    data: *i8 = raw + 8;
+    data: *i8 = &raw[8];
     memcpy(data, s, n);
     data[n] = 0i8;
     return data;
@@ -432,7 +433,7 @@ emit(s: *i8) {
         return;
     }
     if (emit_len + n > emit_cap) { emit_flush(); }
-    memcpy(emit_buf + emit_len, s, n);
+    memcpy(&emit_buf[emit_len], s, n);
     emit_len = emit_len + n;
 }
 
@@ -556,7 +557,7 @@ sb_putc(sb: *StrBuf, c: i8) {
 sb_puts(sb: *StrBuf, s: *i8) {
     n: int = len(s);
     sb_grow(sb, n);
-    memcpy(sb.data + sb.len, s, n);
+    memcpy(&sb.data[sb.len], s, n);
     sb.len = sb.len + n;
 }
 
@@ -771,7 +772,7 @@ read_file(path: *i8) raises Error: *i8 {
             memcpy(tmp, buf, n);
             buf = tmp;
         }
-        r: int = read(fd, buf + n, 65536);
+        r: int = read(fd, &buf[n], 65536);
         if (r <= 0) {
             buf[n] = 0i8;
             close(fd);
@@ -1117,7 +1118,7 @@ variant_payload_name(enum_name: *i8, var_name: *i8): *i8 {
     raw: *i8 = new i8[n + 16];
     p: *int = raw as *int;
     p.* = n;
-    data: *i8 = raw + 8;
+    data: *i8 = &raw[8];
     i: int = 0;
     j: int = 0;
     while (i < len(enum_name)) {
@@ -1404,7 +1405,7 @@ decay(t: ?*Type) raises Error: ?*Type {
 
 is_byte_ty(t: *Type) raises Error: bool { return type_size(t) == 1; }
 
-new_token(kind: TokKind, start: *i8, len: int): *Token {
+new_token(kind: TokKind, start: *i8, len: int, tokpos: int): *Token {
     if (tok_pool_i >= tok_pool_n) {
         tok_pool_n = 2048;
         tok_pool = new Token[2048];
@@ -1412,12 +1413,11 @@ new_token(kind: TokKind, start: *i8, len: int): *Token {
     }
     t: *Token = &tok_pool[tok_pool_i];
     tok_pool_i = tok_pool_i + 1;
-    p: int = start - source;
     t.kind = kind;
     t.val = 0;
     t.str = start;
     t.len = len;
-    t.pos = p;
+    t.pos = tokpos;
     t.next = token_eof;
     return t;
 }
@@ -1595,21 +1595,23 @@ tokenize() raises Error: *Token {
             pos = pos + 2;
             skip_block_comment();
         } else if (c >= '0' && c <= '9') {
-            s = source + pos;
+            s = &source[pos];
+            n = pos;
             v = read_number();
-            t = new_token(TokKind.Num, s, (source + pos) - s);
+            t = new_token(TokKind.Num, s, pos - n, n);
             t.val = v;
             cur.next = t;
             cur = t;
         } else if (c == '"') {
             pos = pos + 1;
-            s = source + pos;
+            s = &source[pos];
             n = scan_string_len();
-            t = new_token(TokKind.Str, s, n);
+            t = new_token(TokKind.Str, s, n, pos);
             cur.next = t;
             cur = t;
             pos = pos + 1;
         } else if (c == '\'') {
+            n = pos;
             pos = pos + 1;
             if (source[pos] == '\\') {
                 pos = pos + 1;
@@ -1620,61 +1622,61 @@ tokenize() raises Error: *Token {
                 pos = pos + 1;
             }
             if (source[pos] == '\'') { pos = pos + 1; }
-            t = new_token(TokKind.Char, source + pos, 0);
+            t = new_token(TokKind.Char, &source[pos], 0, n);
             t.val = ch as int;
             cur.next = t;
             cur = t;
         } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
-            s = source + pos;
+            s = &source[pos];
             n = scan_ident_len();
-            t = new_token(ident_kind(s, n), intern(s, n), n);
+            t = new_token(ident_kind(s, n), intern(s, n), n, pos - n);
             cur.next = t;
             cur = t;
         } else if (c == '=' && source[pos + 1] == '=') {
-            t = new_token(TokKind.Eq, source + pos, 2);
+            t = new_token(TokKind.Eq, &source[pos], 2, pos);
             cur.next = t; cur = t; pos = pos + 2;
         } else if (c == '!' && source[pos + 1] == '=') {
-            t = new_token(TokKind.Ne, source + pos, 2);
+            t = new_token(TokKind.Ne, &source[pos], 2, pos);
             cur.next = t; cur = t; pos = pos + 2;
         } else if (c == '<' && source[pos + 1] == '=') {
-            t = new_token(TokKind.Le, source + pos, 2);
+            t = new_token(TokKind.Le, &source[pos], 2, pos);
             cur.next = t; cur = t; pos = pos + 2;
         } else if (c == '>' && source[pos + 1] == '=') {
-            t = new_token(TokKind.Ge, source + pos, 2);
+            t = new_token(TokKind.Ge, &source[pos], 2, pos);
             cur.next = t; cur = t; pos = pos + 2;
         } else if (c == '&' && source[pos + 1] == '&') {
-            t = new_token(TokKind.And, source + pos, 2);
+            t = new_token(TokKind.And, &source[pos], 2, pos);
             cur.next = t; cur = t; pos = pos + 2;
         } else if (c == '|' && source[pos + 1] == '|') {
-            t = new_token(TokKind.Or, source + pos, 2);
+            t = new_token(TokKind.Or, &source[pos], 2, pos);
             cur.next = t; cur = t; pos = pos + 2;
         } else if (c == '-' && source[pos + 1] == '>') {
-            t = new_token(TokKind.Arrow, source + pos, 2);
+            t = new_token(TokKind.Arrow, &source[pos], 2, pos);
             cur.next = t; cur = t; pos = pos + 2;
         } else if (c == '|') {
-            t = new_token(TokKind.Pipe, source + pos, 1);
+            t = new_token(TokKind.Pipe, &source[pos], 1, pos);
             cur.next = t; cur = t; pos = pos + 1;
         } else if (c == '<') {
-            t = new_token(TokKind.Lt, source + pos, 1);
+            t = new_token(TokKind.Lt, &source[pos], 1, pos);
             cur.next = t; cur = t; pos = pos + 1;
         } else if (c == '>') {
-            t = new_token(TokKind.Gt, source + pos, 1);
+            t = new_token(TokKind.Gt, &source[pos], 1, pos);
             cur.next = t; cur = t; pos = pos + 1;
         } else if (c == '=') {
-            t = new_token(TokKind.Assign, source + pos, 1);
+            t = new_token(TokKind.Assign, &source[pos], 1, pos);
             cur.next = t; cur = t; pos = pos + 1;
         } else if (c == '!') {
-            t = new_token(TokKind.Not, source + pos, 1);
+            t = new_token(TokKind.Not, &source[pos], 1, pos);
             cur.next = t; cur = t; pos = pos + 1;
         } else {
             pk = punct_kind(c);
-            t = new_token(pk, source + pos, 1);
+            t = new_token(pk, &source[pos], 1, pos);
             cur.next = t;
             cur = t;
             pos = pos + 1;
         }
     }
-    t = new_token(TokKind.Eof, source + pos, 0);
+    t = new_token(TokKind.Eof, &source[pos], 0, pos);
     t.next = t;
     cur.next = t;
     return head.next;
@@ -2333,7 +2335,9 @@ parse_postfix() raises Error: *Expr {
             if (t == null) { error_ty("subscript of non-pointer", t); }
             if (!is_pointer(t)) { error_ty("subscript of non-pointer", t); }
             scaled: *Expr = new_binary(BinOp.Mul, idx, new_num(type_size(type_base(t))));
-            n = new_deref(new_binary(BinOp.Add, n, scaled));
+            add: *Expr = new_binary(BinOp.Add, n, scaled);
+            add.ty = t;
+            n = new_deref(add);
             n.ty = type_base(t);
         } else {
             if (equal(TokKind.Dot)) {
@@ -2525,8 +2529,6 @@ type_binary(p: *Expr, op: BinOp, lhs: *Expr, rhs: *Expr) raises Error {
             rt: ?*Type = decay(rhs.ty);
             if (lt == null) { error_have_and("arithmetic requires int or i8 operands", lt, rt); }
             if (rt == null) { error_have_and("arithmetic requires int or i8 operands", lt, rt); }
-            if (is_pointer(lt) && is_int_ty(rt)) { p.ty = lt; return; }
-            if (is_int_ty(lt) && is_pointer(rt)) { p.ty = rt; return; }
             type_int_arith(p, lhs, rhs);
             return;
         }
@@ -2537,10 +2539,6 @@ type_binary(p: *Expr, op: BinOp, lhs: *Expr, rhs: *Expr) raises Error {
             rt: ?*Type = decay(rhs.ty);
             if (lt == null) { error_have_and("arithmetic requires int or i8 operands", lt, rt); }
             if (rt == null) { error_have_and("arithmetic requires int or i8 operands", lt, rt); }
-            if (is_pointer(lt) && is_int_ty(rt)) { p.ty = lt; return; }
-            if (is_pointer(lt) && is_pointer(rt)) {
-                if (types_equal(lt, rt)) { p.ty = ty_int; return; }
-            }
             type_int_arith(p, lhs, rhs);
             return;
         }
@@ -4897,12 +4895,12 @@ profile_rbuf: *i8;
 
 profile_faults(): int {
     syscall(98, 0, profile_rbuf, 0, 0, 0);
-    p: *int = (profile_rbuf + 64) as *int;
+    p: *int = (&profile_rbuf[64]) as *int;
     return p.*;
 }
 
 profile_rss_kb(): int {
-    p: *int = (profile_rbuf + 32) as *int;
+    p: *int = (&profile_rbuf[32]) as *int;
     return p.*;
 }
 
@@ -5009,7 +5007,7 @@ compiler_main(argc: int, argv: **i8): int {
         path: ?*i8 = null;
         ai: int = 1;
         while (ai < argc) {
-            arg: *i8 = (argv + ai * 8).*;
+            arg: *i8 = argv[ai];
             if (is_profile_flag(arg)) {
                 do_profile = 1;
             } else {
