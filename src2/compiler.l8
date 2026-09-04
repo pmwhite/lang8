@@ -3,6 +3,7 @@
 // Heap ADTs via new; aggregates by sret; *T vs ?*T with flow narrowing; `e or alt` unwraps ?*T.
 // Byte literals: 'A' and Ni8 (0..255); i8 arithmetic wraps, no mixed promotion.
 // Pointer offsets: p[i] and &p[i] only; no p+i, p-q, or p as int.
+// Globals: `name: type = const` writes .data; bare `name: type;` stays BSS.
 // noreturn return type; checked exceptions (exception/raises/raise/try/with).
 // Pipeline: parse → typecheck → unused fn/local + raises/noreturn checks → codegen.
 // This compiler reports failures via `exception Error` (caught in main).
@@ -227,6 +228,7 @@ type Obj = {
     scope_depth: int;
     ty: ?*Type;
     used: int;
+    init: ?*Expr;
     next: ?*Obj;
     param_next: ?*Obj;
     hash_next: ?*Obj;
@@ -276,7 +278,7 @@ imported_files: ?*ImportedFile;
 struct_defs: ?*StructDef;
 enum_defs: ?*EnumDef;
 exn_defs: ?*ExnDef;
-SYM_SIZE: int;
+SYM_SIZE: int = 1024;
 fn_buckets: *FnBucket;
 global_buckets: *ObjBucket;
 struct_buckets: *StructBucket;
@@ -306,7 +308,7 @@ str_count: int;
 label_id: int;
 emit_buf: *i8;
 emit_len: int;
-emit_cap: int;
+emit_cap: int = 65536;
 do_profile: int;
 current_fn_name: ?*i8;
 current_return_lab: int;
@@ -328,7 +330,7 @@ type CatchFrame = {
 
 catch_top: ?*CatchFrame;
 
-L8_JMP_BUF_SIZE: int;
+L8_JMP_BUF_SIZE: int = 72;
 
 exception Error { msg: *i8; pos: int; path: *i8; src: *i8; src_len: int; };
 
@@ -734,11 +736,8 @@ init_runtime() {
     next_exn_tag = 1;
     catch_top = null;
     current_fn = null;
-    L8_JMP_BUF_SIZE = 72;
-    emit_cap = 65536;
-    emit_buf = new i8[65536];
+    emit_buf = new i8[emit_cap];
     emit_len = 0;
-    SYM_SIZE = 1024;
     fn_buckets = new FnBucket[1024];
     global_buckets = new ObjBucket[1024];
     struct_buckets = new StructBucket[1024];
@@ -1916,6 +1915,7 @@ new_obj(name: *i8, is_local: int): *Obj {
         scope_depth: 0,
         ty: null,
         used: 0,
+        init: null,
         next: null,
         param_next: null,
         hash_next: null
@@ -3538,6 +3538,14 @@ parse_program_unit() raises Error {
                 if (equal(TokKind.Comma)) { error("only one variable per declaration"); }
                 o2: *Obj = new_obj(name, 0);
                 o2.ty = ty;
+                if (equal(TokKind.Assign)) {
+                    tok = tok.next;
+                    if (equal(TokKind.Uninitialized)) {
+                        tok = tok.next;
+                    } else {
+                        o2.init = parse_expr();
+                    }
+                }
                 skip(TokKind.Semi);
             }
             }
@@ -3967,7 +3975,92 @@ check_unused_locals() {
     }
 }
 
+is_const_init(n: *Expr): bool {
+    match n.kind {
+        Num k -> {
+            if (k.str_label != 0) { return false; }
+            return true;
+        }
+        Null -> { return true; }
+        Neg q -> { return is_const_init(q.lhs); }
+        As q -> { return is_const_init(q.lhs); }
+        Trunc q -> { return is_const_init(q.lhs); }
+        Not q -> { return is_const_init(q.lhs); }
+        Binary q -> { return is_const_init(q.lhs) && is_const_init(q.rhs); }
+        _ -> { return false; }
+    }
+}
+
+wrap_u8(v: int): int {
+    while (v < 0) { v = v + 256; }
+    while (v >= 256) { v = v - 256; }
+    return v;
+}
+
+const_value(n: *Expr) raises Error: int {
+    match n.kind {
+        Num k -> { return k.val; }
+        Null -> { return 0; }
+        Neg q -> { return 0 - const_value(q.lhs); }
+        As q -> { return const_value(q.lhs); }
+        Trunc q -> { return wrap_u8(const_value(q.lhs)); }
+        Not q -> {
+            if (const_value(q.lhs) == 0) { return 1; }
+            return 0;
+        }
+        Binary q -> {
+            l: int = const_value(q.lhs);
+            r: int = const_value(q.rhs);
+            v: int = 0;
+            match q.op {
+                Add -> { v = l + r; }
+                Sub -> { v = l - r; }
+                Mul -> { v = l * r; }
+                Div -> {
+                    if (r == 0) { error("division by zero in global initializer"); }
+                    v = l / r;
+                }
+                Mod -> {
+                    if (r == 0) { error("division by zero in global initializer"); }
+                    v = l % r;
+                }
+                Eq -> { if (l == r) { v = 1; } }
+                Ne -> { if (l != r) { v = 1; } }
+                Lt -> { if (l < r) { v = 1; } }
+                Le -> { if (l <= r) { v = 1; } }
+                Gt -> { if (l > r) { v = 1; } }
+                Ge -> { if (l >= r) { v = 1; } }
+            }
+            nty: ?*Type = n.ty;
+            if (nty != null) {
+                if (is_i8_ty(nty)) { return wrap_u8(v); }
+            }
+            return v;
+        }
+        _ -> { error("global initializer must be a constant"); }
+    }
+    return 0;
+}
+
+typecheck_global_inits() raises Error {
+    g: ?*Obj = globals;
+    while (g != null) {
+        if (g.is_func == 0) {
+            init: ?*Expr = g.init;
+            if (init != null) {
+                add_type(init);
+                if (!assignable(g.ty, init)) {
+                    error_have_expr_want("global initializer type mismatch", init, g.ty);
+                }
+                if (!is_const_init(init)) { error("global initializer must be a constant"); }
+            }
+        }
+        g = g.next;
+    }
+}
+
 typecheck_program() raises Error {
+    typecheck_global_inits();
     fn: ?*Function = functions;
     while (fn != null) {
         e: ?*ExnList = fn.raises_list;
@@ -4783,16 +4876,45 @@ assign_lvar_offsets(fn: *Function) raises Error {
     fn.stack_size = (off + 7) / 16 * 16 + 8;
 }
 
+emit_global_init(g: *Obj) raises Error {
+    init: *Expr = g.init or error("missing global initializer");
+    gty: *Type = g.ty or error("missing global type");
+    sz: int = type_size(gty);
+    if (sz <= 0) { sz = 8; }
+    v: int = const_value(init);
+    cg_label(g.name);
+    if (sz > 8) { error("global initializer must be a scalar constant"); }
+    cg_quad(v);
+}
+
 emit_data() raises Error {
     g: ?*Obj = globals;
-    cg_section(as_SEC_BSS);
-    cg_align(8);
+    any_data: int = 0;
     while (g != null) {
-        if (g.is_func == 0) {
+        if (g.is_func == 0 && g.init != null) {
+            if (any_data == 0) {
+                cg_section(as_SEC_DATA);
+                cg_align(8);
+                any_data = 1;
+            }
+            emit_global_init(g);
+        }
+        g = g.next;
+    }
+    g = globals;
+    any_bss: int = 0;
+    while (g != null) {
+        if (g.is_func == 0 && g.init == null) {
+            if (any_bss == 0) {
+                cg_section(as_SEC_BSS);
+                cg_align(8);
+                any_bss = 1;
+            }
             sz: int = 8;
             gty: ?*Type = g.ty;
             if (gty != null) { sz = type_size(gty); }
             if (sz <= 0) { sz = 8; }
+            if (gty != null && !is_array(gty) && sz < 8) { sz = 8; }
             cg_label(g.name);
             cg_skip(sz);
         }

@@ -151,6 +151,7 @@ do_selfhost() {
   step 'or example [l8c3]' example l8c3 or examples/or.l8 'YYYY'
   step 'byte example [l8c3]' example l8c3 byte examples/byte.l8 'YYYYY'
   step 'offset example [l8c3]' example l8c3 offset examples/offset.l8 'YYY'
+  step 'global example [l8c3]' example l8c3 global examples/global.l8 'YYYYYY'
   step 'compiler phases [l8c3]' print_compiler_phases
   cp l8c3 l8
 }
