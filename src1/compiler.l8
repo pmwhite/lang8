@@ -1,6 +1,7 @@
 // L8 self-hosted compiler → x86-64 Linux GAS
 // Nominal AST; Type is a sum; Expr/Stmt are typed envelopes.
 // Heap ADTs via new; aggregates by sret; *T vs ?*T with flow narrowing; `e or alt` unwraps ?*T.
+// Byte literals: 'A' and Ni8 (0..255); i8 arithmetic wraps, no mixed promotion.
 // noreturn return type; checked exceptions (exception/raises/raise/try/with).
 // Pipeline: parse → typecheck → unused fn/local + raises/noreturn checks → codegen.
 // This compiler reports failures via `exception Error` (caught in main).
@@ -2227,8 +2228,16 @@ parse_primary() raises Error: *Expr {
         return n;
     }
     if (equal(TokKind.Num)) {
-        n = new_num(tok.val);
+        ival: int = tok.val;
         tok = tok.next;
+        if (equal(TokKind.I8)) {
+            if (ival < 0 || ival > 255) { error("i8 literal out of range"); }
+            tok = tok.next;
+            n = new_num(ival);
+            n.ty = ty_i8;
+            return n;
+        }
+        n = new_num(ival);
         return n;
     }
     if (equal(TokKind.True) || equal(TokKind.False)) {
@@ -2459,12 +2468,17 @@ type_int_arith(p: *Expr, lhs: *Expr, rhs: *Expr) raises Error {
     add_type(rhs);
     lt: ?*Type = decay(lhs.ty);
     rt: ?*Type = decay(rhs.ty);
-    if (lt == null) { error_have_and("arithmetic requires int operands", lt, rt); }
-    if (rt == null) { error_have_and("arithmetic requires int operands", lt, rt); }
-    if (!is_int_ty(lt) || !is_int_ty(rt)) {
-        error_have_and("arithmetic requires int operands", lt, rt);
+    if (lt == null) { error_have_and("arithmetic requires int or i8 operands", lt, rt); }
+    if (rt == null) { error_have_and("arithmetic requires int or i8 operands", lt, rt); }
+    if (is_int_ty(lt) && is_int_ty(rt)) {
+        p.ty = ty_int;
+        return;
     }
-    p.ty = ty_int;
+    if (is_i8_ty(lt) && is_i8_ty(rt)) {
+        p.ty = ty_i8;
+        return;
+    }
+    error_have_and("arithmetic type mismatch", lt, rt);
 }
 
 type_eq_cmp(p: *Expr, lhs: *Expr, rhs: *Expr) raises Error {
@@ -2509,14 +2523,11 @@ type_binary(p: *Expr, op: BinOp, lhs: *Expr, rhs: *Expr) raises Error {
             add_type(rhs);
             lt: ?*Type = decay(lhs.ty);
             rt: ?*Type = decay(rhs.ty);
-            if (lt == null) { error_have_and("arithmetic requires int operands", lt, rt); }
-            if (rt == null) { error_have_and("arithmetic requires int operands", lt, rt); }
+            if (lt == null) { error_have_and("arithmetic requires int or i8 operands", lt, rt); }
+            if (rt == null) { error_have_and("arithmetic requires int or i8 operands", lt, rt); }
             if (is_pointer(lt) && is_int_ty(rt)) { p.ty = lt; return; }
             if (is_int_ty(lt) && is_pointer(rt)) { p.ty = rt; return; }
-            if (!is_int_ty(lt) || !is_int_ty(rt)) {
-                error_have_and("arithmetic requires int operands", lt, rt);
-            }
-            p.ty = ty_int;
+            type_int_arith(p, lhs, rhs);
             return;
         }
         Sub -> {
@@ -2524,16 +2535,13 @@ type_binary(p: *Expr, op: BinOp, lhs: *Expr, rhs: *Expr) raises Error {
             add_type(rhs);
             lt: ?*Type = decay(lhs.ty);
             rt: ?*Type = decay(rhs.ty);
-            if (lt == null) { error_have_and("arithmetic requires int operands", lt, rt); }
-            if (rt == null) { error_have_and("arithmetic requires int operands", lt, rt); }
+            if (lt == null) { error_have_and("arithmetic requires int or i8 operands", lt, rt); }
+            if (rt == null) { error_have_and("arithmetic requires int or i8 operands", lt, rt); }
             if (is_pointer(lt) && is_int_ty(rt)) { p.ty = lt; return; }
             if (is_pointer(lt) && is_pointer(rt)) {
                 if (types_equal(lt, rt)) { p.ty = ty_int; return; }
             }
-            if (!is_int_ty(lt) || !is_int_ty(rt)) {
-                error_have_and("arithmetic requires int operands", lt, rt);
-            }
-            p.ty = ty_int;
+            type_int_arith(p, lhs, rhs);
             return;
         }
         Mul -> { type_int_arith(p, lhs, rhs); return; }
@@ -2619,8 +2627,9 @@ add_type_expr(p: *Expr) raises Error {
         Neg q -> {
             add_type(q.lhs);
             nt: ?*Type = decay(q.lhs.ty);
-            if (nt == null) { error_ty("unary - requires int", nt); }
-            if (!is_int_ty(nt)) { error_ty("unary - requires int", nt); }
+            if (nt == null) { error_ty("unary - requires int or i8", nt); }
+            if (is_i8_ty(nt)) { p.ty = ty_i8; return; }
+            if (!is_int_ty(nt)) { error_ty("unary - requires int or i8", nt); }
             p.ty = ty_int;
             return;
         }
@@ -4484,7 +4493,15 @@ gen_expr(n: *Expr) raises Error {
             cg_movzb_al_rax();
             return;
         }
-        Neg k -> { gen_expr(k.lhs); cg_neg(0); return; }
+        Neg k -> {
+            gen_expr(k.lhs);
+            cg_neg(0);
+            nty: ?*Type = n.ty;
+            if (nty != null) {
+                if (is_i8_ty(nty)) { cg_movzb_al_rax(); }
+            }
+            return;
+        }
         LogAnd k -> {
             lf: int = new_label();
             le: int = new_label();
@@ -4578,7 +4595,14 @@ gen_expr(n: *Expr) raises Error {
             cg_call(k.funcname);
             return;
         }
-        Binary k -> { gen_binary(k.op, k.lhs, k.rhs); return; }
+        Binary k -> {
+            gen_binary(k.op, k.lhs, k.rhs);
+            bty: ?*Type = n.ty;
+            if (bty != null) {
+                if (is_i8_ty(bty)) { cg_movzb_al_rax(); }
+            }
+            return;
+        }
         _ -> { error("invalid expression"); }
     }
 }
