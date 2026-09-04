@@ -6,7 +6,7 @@
 // Globals: `name: type = const` writes .data; bare `name: type;` stays BSS.
 // Bitwise: `~ & ^ | << >>` on int/i8 (same type; >> is arithmetic; shift count is int).
 // `if`/`match`/`{ }` are expressions; a block's last statement is its value (`;` does not discard).
-// Function body uses that rule when a return type is declared; `return` is still early exit.
+// Function body uses that rule when a return type is declared; last-statement and `return` share assignable.
 // Semicolon after statements and non-brace decls; not after `}`.
 // noreturn return type; checked exceptions (exception/raises/raise/try/with).
 // Pipeline: parse → typecheck → unused fn/local + raises/noreturn checks → codegen.
@@ -1308,7 +1308,7 @@ is_null_expr(n: ?*Expr): bool {
 
 bind_null_to_pointer(pty: ?*Type, null_n: ?*Expr): bool {
     if (pty == null) { return false; }
-    if (!is_opt_pointer(pty) || !is_null_expr(null_n)) { return false; }
+    if (!is_opt_pointer(pty) || !is_null_value_expr(null_n)) { return false; }
     if (null_n != null) {
         null_n.ty = pty;
         return true;
@@ -2750,8 +2750,33 @@ unify_value_ty(a: ?*Type, b: ?*Type) raises Error: ?*Type {
     da: ?*Type = decay(au);
     db: ?*Type = decay(bu);
     if (da != null && db != null && types_equal(da, db)) { return da; }
+    if (da != null && db != null && is_opt_pointer(da) && is_pointer(db) && types_equal(type_base(da), type_base(db))) { return da; }
+    if (da != null && db != null && is_opt_pointer(db) && is_pointer(da) && types_equal(type_base(db), type_base(da))) { return db; }
     error_ty_vs("branch type mismatch", da, db);
     return null;
+}
+
+opt_ptr_of(t: ?*Type) raises Error: *Type {
+    if (t == null) { error("null requires a pointer type"); }
+    d: ?*Type = decay(t);
+    if (d == null) { error("null requires a pointer type"); }
+    if (is_opt_pointer(d)) { return d; }
+    if (is_pointer(d)) { return opt_ptr_to(type_base(d)); }
+    error_ty("null requires a pointer type", d);
+    return d;
+}
+
+unify_value_results(a: ?*Type, a_null: bool, b: ?*Type, b_null: bool) raises Error: ?*Type {
+    if (a_null && b_null) { return null; }
+    if (a_null) {
+        if (b != null && is_noreturn_ty(b)) { return null; }
+        return opt_ptr_of(b);
+    }
+    if (b_null) {
+        if (a != null && is_noreturn_ty(a)) { return null; }
+        return opt_ptr_of(a);
+    }
+    return unify_value_ty(a, b);
 }
 
 last_stmt(head: ?*Stmt): ?*Stmt {
@@ -2764,14 +2789,92 @@ last_stmt(head: ?*Stmt): ?*Stmt {
     return last;
 }
 
+is_null_value_expr(n: ?*Expr): bool {
+    if (n == null) { return false; }
+    match n.kind {
+        Null -> { return true; }
+        Block q -> { return stmt_is_null_value(last_stmt(q.body)); }
+        If q -> {
+            then_n: bool = is_null_value_expr(q.then);
+            els_n: bool = is_null_value_expr(q.els);
+            then_d: bool = false;
+            tty: ?*Type = q.then.ty;
+            if (tty != null && is_noreturn_ty(tty)) { then_d = true; }
+            els_d: bool = false;
+            ety: ?*Type = q.els.ty;
+            if (ety != null && is_noreturn_ty(ety)) { els_d = true; }
+            if (!then_n && !then_d) { return false; }
+            if (!els_n && !els_d) { return false; }
+            return then_n || els_n;
+        }
+        Match q -> { return match_arms_null_like(q.arms); }
+        _ -> { return false; }
+    }
+}
+
+stmt_is_null_value(s: ?*Stmt): bool {
+    if (s == null) { return false; }
+    match s.kind {
+        ExprStmt k -> { return is_null_value_expr(k.lhs); }
+        Block k -> { return stmt_is_null_value(last_stmt(k.body)); }
+        If k -> {
+            els: ?*Stmt = k.els;
+            if (els == null) { return false; }
+            then_n: bool = stmt_is_null_value(k.then);
+            els_n: bool = stmt_is_null_value(els);
+            then_d: bool = stmt_always_diverges(k.then);
+            els_d: bool = stmt_always_diverges(els);
+            if (!then_n && !then_d) { return false; }
+            if (!els_n && !els_d) { return false; }
+            return then_n || els_n;
+        }
+        Match k -> { return match_arms_null_like(k.arms); }
+        Try k -> {
+            if (!stmt_is_null_value(k.body) && !stmt_always_diverges(k.body)) { return false; }
+            any_null: bool = stmt_is_null_value(k.body);
+            arm: ?*CatchArm = k.arms;
+            while (arm != null) {
+                if (stmt_is_null_value(arm.body)) { any_null = true; }
+                else {
+                    if (!stmt_always_diverges(arm.body)) { return false; }
+                }
+                arm = arm.next;
+            }
+            return any_null;
+        }
+        _ -> { return false; }
+    }
+}
+
+match_arms_null_like(arms: ?*MatchArm): bool {
+    any_null: bool = false;
+    arm: ?*MatchArm = arms;
+    while (arm != null) {
+        if (stmt_is_null_value(arm.body)) { any_null = true; }
+        else {
+            if (!stmt_always_diverges(arm.body)) { return false; }
+        }
+        arm = arm.next;
+    }
+    return any_null;
+}
+
 match_result_ty(arms: ?*MatchArm) raises Error: ?*Type {
     t: ?*Type = ty_noreturn;
+    t_null: bool = false;
     saw: int = 0;
     arm: ?*MatchArm = arms;
     while (arm != null) {
         at: ?*Type = stmt_result_ty(arm.body);
-        if (saw == 0) { t = at; }
-        else { t = unify_value_ty(t, at); }
+        an: bool = stmt_is_null_value(arm.body);
+        if (saw == 0) {
+            t = at;
+            t_null = an;
+        } else {
+            t = unify_value_results(t, t_null, at, an);
+            t_null = false;
+            if (t == null) { t_null = true; }
+        }
         saw = 1;
         arm = arm.next;
     }
@@ -2788,14 +2891,17 @@ stmt_result_ty(s: ?*Stmt) raises Error: ?*Type {
         If k -> {
             els: ?*Stmt = k.els;
             if (els == null) { return null; }
-            return unify_value_ty(stmt_result_ty(k.then), stmt_result_ty(els));
+            return unify_value_results(stmt_result_ty(k.then), stmt_is_null_value(k.then), stmt_result_ty(els), stmt_is_null_value(els));
         }
         Match k -> { return match_result_ty(k.arms); }
         Try k -> {
             t: ?*Type = stmt_result_ty(k.body);
+            t_null: bool = stmt_is_null_value(k.body);
             arm: ?*CatchArm = k.arms;
             while (arm != null) {
-                t = unify_value_ty(t, stmt_result_ty(arm.body));
+                t = unify_value_results(t, t_null, stmt_result_ty(arm.body), stmt_is_null_value(arm.body));
+                t_null = false;
+                if (t == null) { t_null = true; }
                 arm = arm.next;
             }
             return t;
@@ -2804,14 +2910,45 @@ stmt_result_ty(s: ?*Stmt) raises Error: ?*Type {
     }
 }
 
-result_fits(got: ?*Type, want: *Type) raises Error: bool {
-    if (got == null) { return false; }
-    if (is_noreturn_ty(got)) { return true; }
-    g: ?*Type = decay(got);
-    w: ?*Type = decay(want);
-    if (g != null && w != null && types_equal(g, w)) { return true; }
-    if (g != null && w != null && is_opt_pointer(w) && is_pointer(g) && types_equal(type_base(g), type_base(w))) { return true; }
-    return false;
+check_stmt_result(s: ?*Stmt, want: *Type) raises Error: bool {
+    if (s == null) { return false; }
+    match s.kind {
+        Return _p -> { return true; }
+        Raise _p -> { return true; }
+        ExprStmt k -> {
+            lty: ?*Type = k.lhs.ty;
+            if (lty != null && is_noreturn_ty(lty)) { return true; }
+            if (assignable(want, k.lhs)) { return true; }
+            error_have_expr_want("return type mismatch", k.lhs, want);
+            return false;
+        }
+        Block k -> { return check_stmt_result(last_stmt(k.body), want); }
+        If k -> {
+            els: ?*Stmt = k.els;
+            if (els == null) { return false; }
+            if (!check_stmt_result(k.then, want)) { return false; }
+            return check_stmt_result(els, want);
+        }
+        Match k -> {
+            if (k.arms == null) { return false; }
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                if (!check_stmt_result(arm.body, want)) { return false; }
+                arm = arm.next;
+            }
+            return true;
+        }
+        Try k -> {
+            if (!check_stmt_result(k.body, want)) { return false; }
+            arm2: ?*CatchArm = k.arms;
+            while (arm2 != null) {
+                if (!check_stmt_result(arm2.body, want)) { return false; }
+                arm2 = arm2.next;
+            }
+            return true;
+        }
+        _ -> { return false; }
+    }
 }
 
 type_if_expr(p: *Expr, cond: *Expr, then: *Expr, els: *Expr) raises Error {
@@ -2827,10 +2964,17 @@ type_if_expr(p: *Expr, cond: *Expr, then: *Expr, els: *Expr) raises Error {
     narrow_reset(save);
     tt: ?*Type = decay(then.ty);
     et: ?*Type = decay(els.ty);
-    if (tt == null && (et == null || !is_noreturn_ty(et))) { error("if expression branch must produce a value"); }
-    if (et == null && (tt == null || !is_noreturn_ty(tt))) { error("if expression branch must produce a value"); }
-    p.ty = unify_value_ty(tt, et);
-    if (p.ty == null) { error("if expression branch must produce a value"); }
+    tn: bool = is_null_value_expr(then);
+    en: bool = is_null_value_expr(els);
+    if (tt == null && !tn && (et == null || !is_noreturn_ty(et))) { error("if expression branch must produce a value"); }
+    if (et == null && !en && (tt == null || !is_noreturn_ty(tt))) { error("if expression branch must produce a value"); }
+    p.ty = unify_value_results(tt, tn, et, en);
+    if (p.ty == null) {
+        if (tn || en) { return; }
+        error("if expression branch must produce a value");
+    }
+    if (tn) { bind_null_to_pointer(p.ty, then); }
+    if (en) { bind_null_to_pointer(p.ty, els); }
 }
 
 type_match_expr(p: *Expr, cond: *Expr, arms: ?*MatchArm) raises Error {
@@ -2841,7 +2985,13 @@ type_match_expr(p: *Expr, cond: *Expr, arms: ?*MatchArm) raises Error {
         arm = arm.next;
     }
     t: ?*Type = match_result_ty(arms);
-    if (t == null) { error("match expression arm must produce a value"); }
+    if (t == null) {
+        if (match_arms_null_like(arms)) {
+            p.ty = null;
+            return;
+        }
+        error("match expression arm must produce a value");
+    }
     p.ty = t;
 }
 
@@ -4531,15 +4681,11 @@ check_fn_result(fn: *Function) raises Error {
     if (rt == null) { return; }
     if (is_noreturn_ty(rt)) { return; }
     want: *Type = rt;
-    got: ?*Type = stmt_result_ty(fn.body);
-    if (result_fits(got, want)) { return; }
-    if (got == null) {
-        sb: *StrBuf = sb_new();
-        sb_puts(sb, "missing return value in ");
-        sb_puts(sb, fn.name);
-        error(sb_finish(sb));
-    }
-    error_have_want("return type mismatch", got, want);
+    if (check_stmt_result(fn.body, want)) { return; }
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, "missing return value in ");
+    sb_puts(sb, fn.name);
+    error(sb_finish(sb));
 }
 
 check_raises_functions() raises Error {
