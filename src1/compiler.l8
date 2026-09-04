@@ -1,6 +1,6 @@
 // L8 self-hosted compiler → x86-64 Linux GAS
 // Nominal AST; Type is a sum; Expr/Stmt are typed envelopes.
-// Heap ADTs via new; aggregates by sret; *T vs ?*T with flow narrowing.
+// Heap ADTs via new; aggregates by sret; *T vs ?*T with flow narrowing; `e or alt` unwraps ?*T.
 // noreturn return type; checked exceptions (exception/raises/raise/try/with).
 // Pipeline: parse → typecheck → unused fn/local + raises/noreturn checks → codegen.
 // This compiler reports failures via `exception Error` (caught in main).
@@ -120,6 +120,7 @@ type TokKind =
     | Colon
     | And
     | Or
+    | OrKw
     | Dot
     | Match
     | Pipe
@@ -186,6 +187,7 @@ type ExprKind =
     | Neg { lhs: *Expr; }
     | LogAnd { lhs: *Expr; rhs: *Expr; }
     | LogOr { lhs: *Expr; rhs: *Expr; }
+    | OrElse { lhs: *Expr; rhs: *Expr; }
     | Funcall { funcname: *i8; args: ?*Expr; fn: ?*Function; }
     | MemberAccess { lhs: *Expr; member: *Member; }
     | As { lhs: *Expr; }
@@ -1441,6 +1443,7 @@ ident_kind(s: *i8, n: int): TokKind {
             if (s[1] == '8') { return TokKind.I8; }
         }
         if (s[0] == 'a' && s[1] == 's') { return TokKind.As; }
+        if (s[0] == 'o' && s[1] == 'r') { return TokKind.OrKw; }
         return TokKind.Ident;
     }
     if (n == 3) {
@@ -1806,6 +1809,7 @@ new_binary(op: BinOp, lhs: *Expr, rhs: *Expr): *Expr {
 new_assign(lhs: *Expr, rhs: *Expr): *Expr { return mk_expr(ExprKind.Assign { lhs: lhs, rhs: rhs }); }
 new_logand(lhs: *Expr, rhs: *Expr): *Expr { return mk_expr(ExprKind.LogAnd { lhs: lhs, rhs: rhs }); }
 new_logor(lhs: *Expr, rhs: *Expr): *Expr { return mk_expr(ExprKind.LogOr { lhs: lhs, rhs: rhs }); }
+new_or_else(lhs: *Expr, rhs: *Expr): *Expr { return mk_expr(ExprKind.OrElse { lhs: lhs, rhs: rhs }); }
 new_addr(lhs: *Expr): *Expr { return mk_expr(ExprKind.Addr { lhs: lhs }); }
 new_deref(lhs: *Expr): *Expr { return mk_expr(ExprKind.Deref { lhs: lhs }); }
 new_not(lhs: *Expr): *Expr { return mk_expr(ExprKind.Not { lhs: lhs }); }
@@ -2446,6 +2450,25 @@ type_log(p: *Expr, lhs: *Expr, rhs: *Expr, and_op: int) raises Error {
     p.ty = ty_bool;
 }
 
+type_or_else(p: *Expr, lhs: *Expr, rhs: *Expr) raises Error {
+    add_type(lhs);
+    add_type(rhs);
+    lt: ?*Type = decay(lhs.ty);
+    rt: ?*Type = decay(rhs.ty);
+    if (lt == null) { error_ty("or requires an optional pointer on the left", lt); }
+    if (!is_opt_pointer(lt)) { error_ty("or requires an optional pointer on the left", lt); }
+    unwrapped: *Type = ptr_to(type_base(lt));
+    if (rt != null && is_noreturn_ty(rt)) {
+        p.ty = unwrapped;
+        return;
+    }
+    if (rt != null && is_pointer(rt) && types_equal(type_base(rt), type_base(lt))) {
+        p.ty = unwrapped;
+        return;
+    }
+    error_have_want("or right-hand side must be *T or noreturn", rt, unwrapped);
+}
+
 type_int_arith(p: *Expr, lhs: *Expr, rhs: *Expr) raises Error {
     add_type(lhs);
     add_type(rhs);
@@ -2593,6 +2616,7 @@ add_type_expr(p: *Expr) raises Error {
     match p.kind {
         LogAnd q -> { type_log(p, q.lhs, q.rhs, 1); return; }
         LogOr q -> { type_log(p, q.lhs, q.rhs, 0); return; }
+        OrElse q -> { type_or_else(p, q.lhs, q.rhs); return; }
         Num _p -> {
             p.ty = ty_int;
             return;
@@ -2897,8 +2921,17 @@ parse_logor() raises Error: *Expr {
     return n;
 }
 
-parse_assign() raises Error: *Expr {
+parse_or_else() raises Error: *Expr {
     n: *Expr = parse_logor();
+    if (equal(TokKind.OrKw)) {
+        tok = tok.next;
+        return new_or_else(n, parse_or_else());
+    }
+    return n;
+}
+
+parse_assign() raises Error: *Expr {
+    n: *Expr = parse_or_else();
     if (equal(TokKind.Assign)) {
         tok = tok.next;
         return new_assign(n, parse_assign());
@@ -3689,6 +3722,11 @@ mark_calls_expr(n: ?*Expr) {
             mark_calls_expr(k.rhs);
             return;
         }
+        OrElse k -> {
+            mark_calls_expr(k.lhs);
+            mark_calls_expr(k.rhs);
+            return;
+        }
         Funcall k -> {
             callee: ?*Function = k.fn;
             if (callee != null) { mark_reachable(callee); }
@@ -3829,6 +3867,11 @@ mark_uses_expr(n: ?*Expr) {
             return;
         }
         LogOr k -> {
+            mark_uses_expr(k.lhs);
+            mark_uses_expr(k.rhs);
+            return;
+        }
+        OrElse k -> {
             mark_uses_expr(k.lhs);
             mark_uses_expr(k.rhs);
             return;
@@ -4489,6 +4532,15 @@ gen_expr(n: *Expr) raises Error {
             cg_label_id(lf2);
             cg_mov_imm(0, 0);
             cg_label_id(le2);
+            return;
+        }
+        OrElse k -> {
+            end: int = new_label();
+            gen_expr(k.lhs);
+            cg_alu_imm(7, 0, 0);
+            cg_jump_id(5, end);
+            gen_expr(k.rhs);
+            cg_label_id(end);
             return;
         }
         Funcall k -> {
