@@ -100,6 +100,16 @@ run_examples() {
   example "$tool" noreturn examples/noreturn.l8 'Hi'
   example "$tool" exc     examples/exc.l8     'Hi'
   example "$tool" imports examples/imports/main.l8 'Hi'
+  example "$tool" or      examples/or.l8      'YYYY'
+  example "$tool" byte    examples/byte.l8    'YYYYY'
+  example "$tool" offset  examples/offset.l8  'YYY'
+}
+
+# Examples that need stage-2 syntax (not yet in bootstrap).
+run_examples_selfhost() {
+  local tool="$1"
+  run_examples "$tool"
+  example "$tool" global examples/global.l8 'YYYYYY'
 }
 
 require_bootstrap() {
@@ -147,11 +157,7 @@ do_selfhost() {
   step 'stage3 direct (l8c2 → src2)' ./l8c2 build src2/main.l8 -o l8c3
   step 'verify stage2 exe == stage3 exe' cmp -s l8c2 l8c3
 
-  step 'examples [l8c3]' run_examples l8c3
-  step 'or example [l8c3]' example l8c3 or examples/or.l8 'YYYY'
-  step 'byte example [l8c3]' example l8c3 byte examples/byte.l8 'YYYYY'
-  step 'offset example [l8c3]' example l8c3 offset examples/offset.l8 'YYY'
-  step 'global example [l8c3]' example l8c3 global examples/global.l8 'YYYYYY'
+  step 'examples [l8c3]' run_examples_selfhost l8c3
   step 'compiler phases [l8c3]' print_compiler_phases
   cp l8c3 l8
 }
