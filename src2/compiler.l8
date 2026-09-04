@@ -4,6 +4,7 @@
 // Byte literals: 'A' and Ni8 (0..255); i8 arithmetic wraps, no mixed promotion.
 // Pointer offsets: p[i] and &p[i] only; no p+i, p-q, or p as int.
 // Globals: `name: type = const` writes .data; bare `name: type;` stays BSS.
+// Bitwise: `~ & ^ | << >>` on int/i8 (same type; >> is arithmetic; shift count is int).
 // Semicolon after statements and non-brace decls; not after `}`.
 // noreturn return type; checked exceptions (exception/raises/raise/try/with).
 // Pipeline: parse → typecheck → unused fn/local + raises/noreturn checks → codegen.
@@ -103,6 +104,10 @@ type TokKind =
     | Ne
     | Le
     | Ge
+    | Shl
+    | Shr
+    | Caret
+    | Tilde
     | Plus
     | Minus
     | Star
@@ -172,6 +177,11 @@ type BinOp =
     | Mul
     | Div
     | Mod
+    | Shl
+    | Shr
+    | And
+    | Xor
+    | Or
     | Eq
     | Ne
     | Lt
@@ -189,6 +199,7 @@ type ExprKind =
     | Deref { lhs: *Expr; }
     | Not { lhs: *Expr; }
     | Neg { lhs: *Expr; }
+    | BitNot { lhs: *Expr; }
     | LogAnd { lhs: *Expr; rhs: *Expr; }
     | LogOr { lhs: *Expr; rhs: *Expr; }
     | OrElse { lhs: *Expr; rhs: *Expr; }
@@ -380,7 +391,7 @@ hash_str(s: *i8): int { return hash_n(s, len(s)); }
 
 sym_bucket(h: int): int {
     if (h < 0) { h = 0 - h; }
-    return h % SYM_SIZE;
+    return h & (SYM_SIZE - 1);
 }
 
 clear_sym_tables() {
@@ -1562,6 +1573,8 @@ punct_kind(c: i8) raises Error: TokKind {
     if (c == ',') { return TokKind.Comma; }
     if (c == '/') { return TokKind.Slash; }
     if (c == '?') { return TokKind.Question; }
+    if (c == '^') { return TokKind.Caret; }
+    if (c == '~') { return TokKind.Tilde; }
     error_at(pos, "unexpected character");
     return TokKind.Eof;
 }
@@ -1638,8 +1651,14 @@ tokenize() raises Error: *Token {
         } else if (c == '!' && source[pos + 1] == '=') {
             t = new_token(TokKind.Ne, &source[pos], 2, pos);
             cur.next = t; cur = t; pos = pos + 2;
+        } else if (c == '<' && source[pos + 1] == '<') {
+            t = new_token(TokKind.Shl, &source[pos], 2, pos);
+            cur.next = t; cur = t; pos = pos + 2;
         } else if (c == '<' && source[pos + 1] == '=') {
             t = new_token(TokKind.Le, &source[pos], 2, pos);
+            cur.next = t; cur = t; pos = pos + 2;
+        } else if (c == '>' && source[pos + 1] == '>') {
+            t = new_token(TokKind.Shr, &source[pos], 2, pos);
             cur.next = t; cur = t; pos = pos + 2;
         } else if (c == '>' && source[pos + 1] == '=') {
             t = new_token(TokKind.Ge, &source[pos], 2, pos);
@@ -1699,7 +1718,7 @@ cur_tokstr(): *i8 {
 intern(s: *i8, n: int): *i8 {
     b: int = hash_n(s, n);
     if (b < 0) { b = 0 - b; }
-    b = b % 4096;
+    b = b & 4095;
     e: ?*InternEnt = intern_buckets[b].head;
     while (e != null) {
         if (e.n == n) {
@@ -1804,6 +1823,7 @@ new_addr(lhs: *Expr): *Expr { return mk_expr(ExprKind.Addr { lhs: lhs }); }
 new_deref(lhs: *Expr): *Expr { return mk_expr(ExprKind.Deref { lhs: lhs }); }
 new_not(lhs: *Expr): *Expr { return mk_expr(ExprKind.Not { lhs: lhs }); }
 new_neg(lhs: *Expr): *Expr { return mk_expr(ExprKind.Neg { lhs: lhs }); }
+new_bitnot(lhs: *Expr): *Expr { return mk_expr(ExprKind.BitNot { lhs: lhs }); }
 new_as(lhs: *Expr, ty: *Type): *Expr {
     n: *Expr = mk_expr(ExprKind.As { lhs: lhs });
     n.ty = ty;
@@ -2409,6 +2429,10 @@ parse_unary() raises Error: *Expr {
         tok = tok.next;
         return new_not(parse_unary());
     }
+    if (tok.kind == TokKind.Tilde) {
+        tok = tok.next;
+        return new_bitnot(parse_unary());
+    }
     return parse_postfix();
 }
 
@@ -2488,6 +2512,25 @@ type_int_arith(p: *Expr, lhs: *Expr, rhs: *Expr) raises Error {
     error_have_and("arithmetic type mismatch", lt, rt);
 }
 
+type_shift(p: *Expr, lhs: *Expr, rhs: *Expr) raises Error {
+    add_type(lhs);
+    add_type(rhs);
+    lt: ?*Type = decay(lhs.ty);
+    rt: ?*Type = decay(rhs.ty);
+    if (lt == null) { error_have_and("shift requires int or i8 left operand", lt, rt); }
+    if (rt == null) { error_have_and("shift count requires int", lt, rt); }
+    if (!is_int_ty(rt)) { error_have_and("shift count requires int", lt, rt); }
+    if (is_i8_ty(lt)) {
+        p.ty = ty_i8;
+        return;
+    }
+    if (is_int_ty(lt)) {
+        p.ty = ty_int;
+        return;
+    }
+    error_have_and("shift requires int or i8 left operand", lt, rt);
+}
+
 type_eq_cmp(p: *Expr, lhs: *Expr, rhs: *Expr) raises Error {
     add_type(lhs);
     add_type(rhs);
@@ -2548,6 +2591,11 @@ type_binary(p: *Expr, op: BinOp, lhs: *Expr, rhs: *Expr) raises Error {
         Mul -> { type_int_arith(p, lhs, rhs); return; }
         Div -> { type_int_arith(p, lhs, rhs); return; }
         Mod -> { type_int_arith(p, lhs, rhs); return; }
+        And -> { type_int_arith(p, lhs, rhs); return; }
+        Or -> { type_int_arith(p, lhs, rhs); return; }
+        Xor -> { type_int_arith(p, lhs, rhs); return; }
+        Shl -> { type_shift(p, lhs, rhs); return; }
+        Shr -> { type_shift(p, lhs, rhs); return; }
         Eq -> { type_eq_cmp(p, lhs, rhs); return; }
         Ne -> { type_eq_cmp(p, lhs, rhs); return; }
         Lt -> { type_ord_cmp(p, lhs, rhs); return; }
@@ -2631,6 +2679,15 @@ add_type_expr(p: *Expr) raises Error {
             if (nt == null) { error_ty("unary - requires int or i8", nt); }
             if (is_i8_ty(nt)) { p.ty = ty_i8; return; }
             if (!is_int_ty(nt)) { error_ty("unary - requires int or i8", nt); }
+            p.ty = ty_int;
+            return;
+        }
+        BitNot q -> {
+            add_type(q.lhs);
+            nt: ?*Type = decay(q.lhs.ty);
+            if (nt == null) { error_ty("~ requires int or i8", nt); }
+            if (is_i8_ty(nt)) { p.ty = ty_i8; return; }
+            if (!is_int_ty(nt)) { error_ty("~ requires int or i8", nt); }
             p.ty = ty_int;
             return;
         }
@@ -2864,21 +2921,35 @@ parse_add() raises Error: *Expr {
     return n;
 }
 
-parse_relational() raises Error: *Expr {
+parse_shift() raises Error: *Expr {
     n: *Expr = parse_add();
+    while (true) {
+        if (tok.kind == TokKind.Shl) {
+            tok = tok.next;
+            n = new_binary(BinOp.Shl, n, parse_add());
+        } else if (tok.kind == TokKind.Shr) {
+            tok = tok.next;
+            n = new_binary(BinOp.Shr, n, parse_add());
+        } else { return n; }
+    }
+    return n;
+}
+
+parse_relational() raises Error: *Expr {
+    n: *Expr = parse_shift();
     while (true) {
         if (tok.kind == TokKind.Lt) {
             tok = tok.next;
-            n = new_binary(BinOp.Lt, n, parse_add());
+            n = new_binary(BinOp.Lt, n, parse_shift());
         } else if (tok.kind == TokKind.Gt) {
             tok = tok.next;
-            n = new_binary(BinOp.Gt, n, parse_add());
+            n = new_binary(BinOp.Gt, n, parse_shift());
         } else if (tok.kind == TokKind.Le) {
             tok = tok.next;
-            n = new_binary(BinOp.Le, n, parse_add());
+            n = new_binary(BinOp.Le, n, parse_shift());
         } else if (tok.kind == TokKind.Ge) {
             tok = tok.next;
-            n = new_binary(BinOp.Ge, n, parse_add());
+            n = new_binary(BinOp.Ge, n, parse_shift());
         } else { return n; }
     }
     return n;
@@ -2898,11 +2969,38 @@ parse_equality() raises Error: *Expr {
     return n;
 }
 
-parse_logand() raises Error: *Expr {
+parse_bitand() raises Error: *Expr {
     n: *Expr = parse_equality();
+    while (tok.kind == TokKind.Amp) {
+        tok = tok.next;
+        n = new_binary(BinOp.And, n, parse_equality());
+    }
+    return n;
+}
+
+parse_bitxor() raises Error: *Expr {
+    n: *Expr = parse_bitand();
+    while (tok.kind == TokKind.Caret) {
+        tok = tok.next;
+        n = new_binary(BinOp.Xor, n, parse_bitand());
+    }
+    return n;
+}
+
+parse_bitor() raises Error: *Expr {
+    n: *Expr = parse_bitxor();
+    while (tok.kind == TokKind.Pipe) {
+        tok = tok.next;
+        n = new_binary(BinOp.Or, n, parse_bitxor());
+    }
+    return n;
+}
+
+parse_logand() raises Error: *Expr {
+    n: *Expr = parse_bitor();
     while (tok.kind == TokKind.And) {
         tok = tok.next;
-        n = new_logand(n, parse_equality());
+        n = new_logand(n, parse_bitor());
     }
     return n;
 }
@@ -3338,7 +3436,7 @@ parse_field_list(base_offset: int) raises Error: *Member {
         };
         sz: int = type_size(mty);
         if (sz <= 0) { sz = 8; }
-        offset = offset + ((sz + 7) / 8 * 8);
+        offset = offset + ((sz + 7) & (0 - 8));
         if (cur != null) {
             cur.next = m;
             cur = m;
@@ -3715,6 +3813,7 @@ mark_calls_expr(n: ?*Expr) {
         Deref k -> { mark_calls_expr(k.lhs); return; }
         Not k -> { mark_calls_expr(k.lhs); return; }
         Neg k -> { mark_calls_expr(k.lhs); return; }
+        BitNot k -> { mark_calls_expr(k.lhs); return; }
         LogAnd k -> {
             mark_calls_expr(k.lhs);
             mark_calls_expr(k.rhs);
@@ -3864,6 +3963,7 @@ mark_uses_expr(n: ?*Expr) {
         Deref k -> { mark_uses_expr(k.lhs); return; }
         Not k -> { mark_uses_expr(k.lhs); return; }
         Neg k -> { mark_uses_expr(k.lhs); return; }
+        BitNot k -> { mark_uses_expr(k.lhs); return; }
         LogAnd k -> {
             mark_uses_expr(k.lhs);
             mark_uses_expr(k.rhs);
@@ -3986,6 +4086,7 @@ is_const_init(n: *Expr): bool {
         }
         Null -> { return true; }
         Neg q -> { return is_const_init(q.lhs); }
+        BitNot q -> { return is_const_init(q.lhs); }
         As q -> { return is_const_init(q.lhs); }
         Trunc q -> { return is_const_init(q.lhs); }
         Not q -> { return is_const_init(q.lhs); }
@@ -4000,11 +4101,129 @@ wrap_u8(v: int): int {
     return v;
 }
 
+and8(x: int, y: int): int {
+    r: int = 0;
+    p: int = 1;
+    while (p != 256) {
+        if (x % 2 != 0) {
+            if (y % 2 != 0) { r = r + p; }
+        }
+        x = x / 2;
+        y = y / 2;
+        p = p * 2;
+    }
+    return r;
+}
+
+or8(x: int, y: int): int {
+    r: int = 0;
+    p: int = 1;
+    while (p != 256) {
+        if (x % 2 != 0) { r = r + p; }
+        else {
+            if (y % 2 != 0) { r = r + p; }
+        }
+        x = x / 2;
+        y = y / 2;
+        p = p * 2;
+    }
+    return r;
+}
+
+xor8(x: int, y: int): int {
+    r: int = 0;
+    p: int = 1;
+    while (p != 256) {
+        if (x % 2 != 0) {
+            if (y % 2 == 0) { r = r + p; }
+        } else {
+            if (y % 2 != 0) { r = r + p; }
+        }
+        x = x / 2;
+        y = y / 2;
+        p = p * 2;
+    }
+    return r;
+}
+
+const_bit(a: int, b: int, kind: int): int {
+    tmpa: int = a;
+    tmpb: int = b;
+    pa: *i8 = (&tmpa) as *i8;
+    pb: *i8 = (&tmpb) as *i8;
+    i: int = 0;
+    while (i < 8) {
+        xa: int = pa[i] as int;
+        xb: int = pb[i] as int;
+        if (xa < 0) { xa = xa + 256; }
+        if (xb < 0) { xb = xb + 256; }
+        r: int = 0;
+        if (kind == 0) { r = and8(xa, xb); }
+        if (kind == 1) { r = or8(xa, xb); }
+        if (kind == 2) { r = xor8(xa, xb); }
+        pa[i] = r trunc i8;
+        i = i + 1;
+    }
+    return tmpa;
+}
+
+const_shl(a: int, n: int) raises Error: int {
+    if (n < 0) { error("negative shift in global initializer"); }
+    if (n >= 64) { return 0; }
+    i: int = 0;
+    while (i < n) {
+        a = a + a;
+        i = i + 1;
+    }
+    return a;
+}
+
+const_sar1(a: int): int {
+    tmp: int = a;
+    p: *i8 = (&tmp) as *i8;
+    carry: int = 0;
+    if (a < 0) { carry = 1; }
+    i: int = 7;
+    while (i >= 0) {
+        b: int = p[i] as int;
+        if (b < 0) { b = b + 256; }
+        next: int = b % 2;
+        b = b / 2;
+        if (carry != 0) { b = b + 128; }
+        p[i] = b trunc i8;
+        carry = next;
+        i = i - 1;
+    }
+    return tmp;
+}
+
+const_sar(a: int, n: int) raises Error: int {
+    if (n < 0) { error("negative shift in global initializer"); }
+    if (n >= 64) {
+        if (a < 0) { return 0 - 1; }
+        return 0;
+    }
+    i: int = 0;
+    while (i < n) {
+        a = const_sar1(a);
+        i = i + 1;
+    }
+    return a;
+}
+
 const_value(n: *Expr) raises Error: int {
     match n.kind {
         Num k -> { return k.val; }
         Null -> { return 0; }
         Neg q -> { return 0 - const_value(q.lhs); }
+        BitNot q -> {
+            v0: int = 0 - 1 - const_value(q.lhs);
+            nty0: ?*Type = n.ty;
+            if (nty0 != null) {
+                if (is_i8_ty(nty0)) { return wrap_u8(v0); }
+            }
+            return v0;
+        }
         As q -> { return const_value(q.lhs); }
         Trunc q -> { return wrap_u8(const_value(q.lhs)); }
         Not q -> {
@@ -4027,6 +4246,11 @@ const_value(n: *Expr) raises Error: int {
                     if (r == 0) { error("division by zero in global initializer"); }
                     v = l % r;
                 }
+                And -> { v = const_bit(l, r, 0); }
+                Or -> { v = const_bit(l, r, 1); }
+                Xor -> { v = const_bit(l, r, 2); }
+                Shl -> { v = const_shl(l, r); }
+                Shr -> { v = const_sar(l, r); }
                 Eq -> { if (l == r) { v = 1; } }
                 Ne -> { if (l != r) { v = 1; } }
                 Lt -> { if (l < r) { v = 1; } }
@@ -4410,6 +4634,67 @@ gen_binary(op: BinOp, lhs: *Expr, rhs: *Expr) raises Error {
         Le -> { gen_cmp(lhs, rhs, "setle"); return; }
         Gt -> { gen_cmp(lhs, rhs, "setg"); return; }
         Ge -> { gen_cmp(lhs, rhs, "setge"); return; }
+        And -> {
+            if (imm_operand(rhs) != 0 && fits_imm32(imm_value(rhs))) {
+                gen_expr(lhs);
+                cg_alu_imm(4, imm_value(rhs), 0);
+            } else if (imm_operand(lhs) != 0 && fits_imm32(imm_value(lhs))) {
+                gen_expr(rhs);
+                cg_alu_imm(4, imm_value(lhs), 0);
+            } else {
+                gen_binop_setup(lhs, rhs);
+                cg_alu_rr(33, 7, 0);
+            }
+            return;
+        }
+        Or -> {
+            if (imm_operand(rhs) != 0 && fits_imm32(imm_value(rhs))) {
+                gen_expr(lhs);
+                cg_alu_imm(1, imm_value(rhs), 0);
+            } else if (imm_operand(lhs) != 0 && fits_imm32(imm_value(lhs))) {
+                gen_expr(rhs);
+                cg_alu_imm(1, imm_value(lhs), 0);
+            } else {
+                gen_binop_setup(lhs, rhs);
+                cg_alu_rr(9, 7, 0);
+            }
+            return;
+        }
+        Xor -> {
+            if (imm_operand(rhs) != 0 && fits_imm32(imm_value(rhs))) {
+                gen_expr(lhs);
+                cg_alu_imm(6, imm_value(rhs), 0);
+            } else if (imm_operand(lhs) != 0 && fits_imm32(imm_value(lhs))) {
+                gen_expr(rhs);
+                cg_alu_imm(6, imm_value(lhs), 0);
+            } else {
+                gen_binop_setup(lhs, rhs);
+                cg_alu_rr(49, 7, 0);
+            }
+            return;
+        }
+        Shl -> {
+            if (imm_operand(rhs) != 0) {
+                gen_expr(lhs);
+                cg_shift_imm(4, imm_value(rhs), 0);
+            } else {
+                gen_binop_setup(lhs, rhs);
+                cg_mov_rr(7, 1);
+                cg_shift_cl(4, 0);
+            }
+            return;
+        }
+        Shr -> {
+            if (imm_operand(rhs) != 0) {
+                gen_expr(lhs);
+                cg_shift_imm(7, imm_value(rhs), 0);
+            } else {
+                gen_binop_setup(lhs, rhs);
+                cg_mov_rr(7, 1);
+                cg_shift_cl(7, 0);
+            }
+            return;
+        }
     }
 }
 
@@ -4468,7 +4753,7 @@ gen_expr(n: *Expr) raises Error {
         StructLit k -> {
             sz: int = type_size(n.ty or error("missing type"));
             if (sz <= 0) { sz = 8; }
-            sz = (sz + 15) / 16 * 16;
+            sz = (sz + 15) & (0 - 16);
             cg_alu_imm(5, sz, 4);
             cg_push(3);
             cg_lea_mr(4, 8, 3);
@@ -4495,7 +4780,7 @@ gen_expr(n: *Expr) raises Error {
                 cg_pop(3);
                 return;
             }
-            sz = (sz + 15) / 16 * 16;
+            sz = (sz + 15) & (0 - 16);
             cg_alu_imm(5, sz, 4);
             cg_push(3);
             cg_lea_mr(4, 8, 3);
@@ -4596,6 +4881,15 @@ gen_expr(n: *Expr) raises Error {
             }
             return;
         }
+        BitNot k -> {
+            gen_expr(k.lhs);
+            cg_not(0);
+            nty2: ?*Type = n.ty;
+            if (nty2 != null) {
+                if (is_i8_ty(nty2)) { cg_movzb_al_rax(); }
+            }
+            return;
+        }
         LogAnd k -> {
             lf: int = new_label();
             le: int = new_label();
@@ -4670,7 +4964,7 @@ gen_expr(n: *Expr) raises Error {
                 if (fno == null) { error("missing function"); }
                 sz: int = type_size(fno.return_ty or error("missing return type"));
                 if (sz <= 0) { sz = 8; }
-                sz = (sz + 15) / 16 * 16;
+                sz = (sz + 15) & (0 - 16);
                 cg_alu_imm(5, sz, 4);
                 cg_mov_rr(4, 0);
                 cg_push(0);
@@ -4871,7 +5165,7 @@ assign_lvar_offsets(fn: *Function) raises Error {
         if (sz <= 0) { sz = 8; }
         if (!is_array(vty)) {
             if (sz < 8) { sz = 8; }
-        } else { sz = (sz + 7) / 8 * 8; }
+        } else { sz = (sz + 7) & (0 - 8); }
         off = off + sz;
         v.offset = 0 - off;
         v = v.next;

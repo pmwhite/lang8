@@ -110,6 +110,7 @@ run_examples_selfhost() {
   local tool="$1"
   run_examples "$tool"
   example "$tool" global examples/global.l8 'YYYYYY'
+  example "$tool" bitwise examples/bitwise.l8 'YYYYYYYYYYYY'
 }
 
 require_bootstrap() {
