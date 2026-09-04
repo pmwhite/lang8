@@ -5,6 +5,8 @@
 // Pointer offsets: p[i] and &p[i] only; no p+i, p-q, or p as int.
 // Globals: `name: type = const` writes .data; bare `name: type;` stays BSS.
 // Bitwise: `~ & ^ | << >>` on int/i8 (same type; >> is arithmetic; shift count is int).
+// `if`/`match`/`{ }` are expressions; a block's last statement is its value (`;` does not discard).
+// Function body uses that rule when a return type is declared; `return` is still early exit.
 // Semicolon after statements and non-brace decls; not after `}`.
 // noreturn return type; checked exceptions (exception/raises/raise/try/with).
 // Pipeline: parse → typecheck → unused fn/local + raises/noreturn checks → codegen.
@@ -209,7 +211,10 @@ type ExprKind =
     | Trunc { lhs: *Expr; }
     | New { lhs: ?*Expr; val: int; inits: ?*FieldInit; variant: ?*Variant; }
     | StructLit { inits: ?*FieldInit; }
-    | VariantLit { variant: *Variant; val: int; inits: ?*FieldInit; };
+    | VariantLit { variant: *Variant; val: int; inits: ?*FieldInit; }
+    | If { cond: *Expr; then: *Expr; els: *Expr; }
+    | Match { cond: *Expr; arms: ?*MatchArm; }
+    | Block { body: ?*Stmt; };
 
 type Expr = {
     kind: ExprKind;
@@ -1865,6 +1870,9 @@ new_variant_lit(v: *Variant, val: int, inits: ?*FieldInit, ty: *Type): *Expr {
     n.ty = ty;
     return n;
 }
+new_if_expr(cond: *Expr, then: *Expr, els: *Expr): *Expr { return mk_expr(ExprKind.If { cond: cond, then: then, els: els }); }
+new_match_expr(cond: *Expr, arms: ?*MatchArm): *Expr { return mk_expr(ExprKind.Match { cond: cond, arms: arms }); }
+new_block_expr(body: ?*Stmt): *Expr { return mk_expr(ExprKind.Block { body: body }); }
 new_match(cond: *Expr, arms: ?*MatchArm): *Stmt { return mk_stmt(StmtKind.Match { cond: cond, arms: arms }); }
 new_match_arm(variant: ?*Variant, binder: ?*Obj, body: *Stmt): *MatchArm {
     return new MatchArm { variant: variant, binder: binder, body: body, next: null };
@@ -2338,8 +2346,128 @@ parse_primary() raises Error: *Expr {
         var: *Obj = varo;
         return new_var_node(var);
     }
+    if (tok.kind == TokKind.If) { return parse_if_expr(); }
+    if (tok.kind == TokKind.Match) { return parse_match_expr(); }
+    if (tok.kind == TokKind.LBrace) { return new_block_expr(parse_brace_stmts()); }
     error("expected expression");
     return new_num(0);
+}
+
+parse_if_expr() raises Error: *Expr {
+    skip(TokKind.If);
+    skip(TokKind.LParen);
+    cond: *Expr = parse_expr();
+    skip(TokKind.RParen);
+    then: *Expr = parse_expr();
+    if (tok.kind != TokKind.Else) { error("if expression requires else"); }
+    tok = tok.next;
+    els: *Expr = parse_expr();
+    return new_if_expr(cond, then, els);
+}
+
+parse_match_expr() raises Error: *Expr {
+    skip(TokKind.Match);
+    mcond: *Expr = parse_expr();
+    return new_match_expr(mcond, parse_match_arms(mcond));
+}
+
+parse_match_arms(mcond: *Expr) raises Error: ?*MatchArm {
+    add_type(mcond);
+    et: ?*Type = decay(mcond.ty);
+    if (et == null) { error_ty("match requires an enum value", et); }
+    if (!is_enum_ty(et)) { error_ty("match requires an enum value", et); }
+    skip(TokKind.LBrace);
+    arms: ?*MatchArm = null;
+    acur: ?*MatchArm = null;
+    while (tok.kind != TokKind.RBrace) {
+        if (tok.kind != TokKind.Ident) { error("expected variant name in match arm"); }
+        vname: *i8 = cur_tokstr();
+        tok = tok.next;
+        is_wild: bool = streq(vname, "_");
+        binder_name: ?*i8 = null;
+        if (tok.kind == TokKind.LParen) {
+            /* Legacy Variant(name); prefer Variant name. */
+            if (is_wild) { error("wildcard match arm cannot bind a payload"); }
+            tok = tok.next;
+            if (tok.kind != TokKind.Ident) { error("expected payload binding name"); }
+            binder_name = cur_tokstr();
+            tok = tok.next;
+            skip(TokKind.RParen);
+        } else {
+            if (tok.kind == TokKind.Ident) {
+                if (is_wild) { error("wildcard match arm cannot bind a payload"); }
+                binder_name = cur_tokstr();
+                tok = tok.next;
+            } else {
+                if (tok.kind == TokKind.LBrace) {
+                    error("match field destructuring is not supported; use Variant name and field access");
+                }
+            }
+        }
+        skip(TokKind.Arrow);
+        enter_scope();
+        arm_variant_n: ?*Variant = null;
+        arm_binder: ?*Obj = null;
+        if (is_wild) {
+            chk: ?*MatchArm = arms;
+            while (chk != null) {
+                if (chk.variant == null) { error("duplicate wildcard match arm"); }
+                chk = chk.next;
+            }
+            if (binder_name != null) { error("wildcard match arm cannot bind a payload"); }
+        } else {
+            vo: ?*Variant = find_variant(type_enum_def(et), vname);
+            if (vo == null) { error("unknown variant"); }
+            v: *Variant = vo;
+            chk2: ?*MatchArm = arms;
+            while (chk2 != null) {
+                if (chk2.variant == v) { error("duplicate match arm"); }
+                chk2 = chk2.next;
+            }
+            arm_variant_n = v;
+            if (binder_name != null) {
+                if (v.payload_ty == null) { error("unit variant cannot bind a payload"); }
+                bname: *i8 = binder_name;
+                bo: *Obj = new_obj(bname, 1);
+                bo.ty = v.payload_ty;
+                arm_binder = bo;
+            }
+        }
+        arm_body_n: *Stmt = parse_compound();
+        leave_scope();
+        arm: *MatchArm = new_match_arm(arm_variant_n, arm_binder, arm_body_n);
+        if (acur != null) {
+            acur.next = arm;
+            acur = arm;
+        } else {
+            arms = arm;
+            acur = arm;
+        }
+        if (is_wild) {
+            if (tok.kind != TokKind.RBrace) { error("wildcard `_` must be the last match arm"); }
+        }
+    }
+    has_wild: int = 0;
+    walk: ?*MatchArm = arms;
+    while (walk != null) {
+        if (walk.variant == null) { has_wild = 1; }
+        walk = walk.next;
+    }
+    if (has_wild == 0) {
+        vv: ?*Variant = type_enum_def(et).variants;
+        while (vv != null) {
+            found2: int = 0;
+            walk2: ?*MatchArm = arms;
+            while (walk2 != null) {
+                if (walk2.variant == vv) { found2 = 1; }
+                walk2 = walk2.next;
+            }
+            if (found2 == 0) { error("match not exhaustive"); }
+            vv = vv.next;
+        }
+    }
+    tok = tok.next;
+    return arms;
 }
 
 parse_postfix() raises Error: *Expr {
@@ -2605,6 +2733,137 @@ type_binary(p: *Expr, op: BinOp, lhs: *Expr, rhs: *Expr) raises Error {
     }
 }
 
+unify_value_ty(a: ?*Type, b: ?*Type) raises Error: ?*Type {
+    if (a == null && b == null) { return null; }
+    if (a == null) {
+        if (b != null && is_noreturn_ty(b)) { return null; }
+        error_ty_vs("branch type mismatch", a, b);
+    }
+    if (b == null) {
+        if (is_noreturn_ty(a)) { return null; }
+        error_ty_vs("branch type mismatch", a, b);
+    }
+    au: *Type = a;
+    bu: *Type = b;
+    if (is_noreturn_ty(au)) { return bu; }
+    if (is_noreturn_ty(bu)) { return au; }
+    da: ?*Type = decay(au);
+    db: ?*Type = decay(bu);
+    if (da != null && db != null && types_equal(da, db)) { return da; }
+    error_ty_vs("branch type mismatch", da, db);
+    return null;
+}
+
+last_stmt(head: ?*Stmt): ?*Stmt {
+    s: ?*Stmt = head;
+    last: ?*Stmt = null;
+    while (s != null) {
+        last = s;
+        s = s.next;
+    }
+    return last;
+}
+
+match_result_ty(arms: ?*MatchArm) raises Error: ?*Type {
+    t: ?*Type = ty_noreturn;
+    saw: int = 0;
+    arm: ?*MatchArm = arms;
+    while (arm != null) {
+        at: ?*Type = stmt_result_ty(arm.body);
+        if (saw == 0) { t = at; }
+        else { t = unify_value_ty(t, at); }
+        saw = 1;
+        arm = arm.next;
+    }
+    return t;
+}
+
+stmt_result_ty(s: ?*Stmt) raises Error: ?*Type {
+    if (s == null) { return null; }
+    match s.kind {
+        ExprStmt k -> { return decay(k.lhs.ty); }
+        Return _p -> { return ty_noreturn; }
+        Raise _p -> { return ty_noreturn; }
+        Block k -> { return stmt_result_ty(last_stmt(k.body)); }
+        If k -> {
+            els: ?*Stmt = k.els;
+            if (els == null) { return null; }
+            return unify_value_ty(stmt_result_ty(k.then), stmt_result_ty(els));
+        }
+        Match k -> { return match_result_ty(k.arms); }
+        Try k -> {
+            t: ?*Type = stmt_result_ty(k.body);
+            arm: ?*CatchArm = k.arms;
+            while (arm != null) {
+                t = unify_value_ty(t, stmt_result_ty(arm.body));
+                arm = arm.next;
+            }
+            return t;
+        }
+        _ -> { return null; }
+    }
+}
+
+result_fits(got: ?*Type, want: *Type) raises Error: bool {
+    if (got == null) { return false; }
+    if (is_noreturn_ty(got)) { return true; }
+    g: ?*Type = decay(got);
+    w: ?*Type = decay(want);
+    if (g != null && w != null && types_equal(g, w)) { return true; }
+    if (g != null && w != null && is_opt_pointer(w) && is_pointer(g) && types_equal(type_base(g), type_base(w))) { return true; }
+    return false;
+}
+
+type_if_expr(p: *Expr, cond: *Expr, then: *Expr, els: *Expr) raises Error {
+    add_type(cond);
+    ct: ?*Type = decay(cond.ty);
+    if (ct == null || !is_bool_ty(ct)) { error_ty("condition must be bool", ct); }
+    save: ?*NarrowFrame = narrow_top;
+    narrow_push_ne_nulls(cond);
+    add_type(then);
+    narrow_reset(save);
+    narrow_push_eq_nulls(cond);
+    add_type(els);
+    narrow_reset(save);
+    tt: ?*Type = decay(then.ty);
+    et: ?*Type = decay(els.ty);
+    if (tt == null && (et == null || !is_noreturn_ty(et))) { error("if expression branch must produce a value"); }
+    if (et == null && (tt == null || !is_noreturn_ty(tt))) { error("if expression branch must produce a value"); }
+    p.ty = unify_value_ty(tt, et);
+    if (p.ty == null) { error("if expression branch must produce a value"); }
+}
+
+type_match_expr(p: *Expr, cond: *Expr, arms: ?*MatchArm) raises Error {
+    add_type(cond);
+    arm: ?*MatchArm = arms;
+    while (arm != null) {
+        add_type_stmt(arm.body);
+        arm = arm.next;
+    }
+    t: ?*Type = match_result_ty(arms);
+    if (t == null) { error("match expression arm must produce a value"); }
+    p.ty = t;
+}
+
+type_block_expr(p: *Expr, body: ?*Stmt) raises Error {
+    s: ?*Stmt = body;
+    while (s != null) {
+        add_type_stmt(s);
+        match s.kind {
+            If k -> {
+                if (k.els == null) {
+                    if (stmt_always_diverges(k.then)) {
+                        narrow_push_eq_nulls(k.cond);
+                    }
+                }
+            }
+            _ -> {}
+        }
+        s = s.next;
+    }
+    p.ty = stmt_result_ty(last_stmt(body));
+}
+
 add_type_expr(p: *Expr) raises Error {
     match p.kind {
         Var q -> {
@@ -2659,6 +2918,9 @@ add_type_expr(p: *Expr) raises Error {
         LogAnd q -> { type_log(p, q.lhs, q.rhs, 1); return; }
         LogOr q -> { type_log(p, q.lhs, q.rhs, 0); return; }
         OrElse q -> { type_or_else(p, q.lhs, q.rhs); return; }
+        If q -> { type_if_expr(p, q.cond, q.then, q.els); return; }
+        Match q -> { type_match_expr(p, q.cond, q.arms); return; }
+        Block q -> { type_block_expr(p, q.body); return; }
         Num _p -> {
             p.ty = ty_int;
             return;
@@ -3058,6 +3320,10 @@ parse_decl(is_local: int) raises Error: *Obj {
 }
 
 parse_compound() raises Error: *Stmt {
+    return new_block(parse_brace_stmts());
+}
+
+parse_brace_stmts() raises Error: ?*Stmt {
     enter_scope();
     skip(TokKind.LBrace);
     head: ?*Stmt = null;
@@ -3075,7 +3341,7 @@ parse_compound() raises Error: *Stmt {
     }
     skip(TokKind.RBrace);
     leave_scope();
-    return new_block(head);
+    return head;
 }
 
 parse_stmt() raises Error: *Stmt {
@@ -3198,102 +3464,7 @@ parse_stmt() raises Error: *Stmt {
     if (tok.kind == TokKind.Match) {
         tok = tok.next;
         mcond: *Expr = parse_expr();
-        add_type(mcond);
-        et: ?*Type = decay(mcond.ty);
-        if (et == null) { error_ty("match requires an enum value", et); }
-        if (!is_enum_ty(et)) { error_ty("match requires an enum value", et); }
-        skip(TokKind.LBrace);
-        arms: ?*MatchArm = null;
-        acur: ?*MatchArm = null;
-        while (tok.kind != TokKind.RBrace) {
-            if (tok.kind != TokKind.Ident) { error("expected variant name in match arm"); }
-            vname: *i8 = cur_tokstr();
-            tok = tok.next;
-            is_wild: bool = streq(vname, "_");
-            binder_name: ?*i8 = null;
-            if (tok.kind == TokKind.LParen) {
-                /* Legacy Variant(name); prefer Variant name. */
-                if (is_wild) { error("wildcard match arm cannot bind a payload"); }
-                tok = tok.next;
-                if (tok.kind != TokKind.Ident) { error("expected payload binding name"); }
-                binder_name = cur_tokstr();
-                tok = tok.next;
-                skip(TokKind.RParen);
-            } else {
-                if (tok.kind == TokKind.Ident) {
-                    if (is_wild) { error("wildcard match arm cannot bind a payload"); }
-                    binder_name = cur_tokstr();
-                    tok = tok.next;
-                } else {
-                    if (tok.kind == TokKind.LBrace) {
-                        error("match field destructuring is not supported; use Variant name and field access");
-                    }
-                }
-            }
-            skip(TokKind.Arrow);
-            enter_scope();
-            arm_variant_n: ?*Variant = null;
-            arm_binder: ?*Obj = null;
-            if (is_wild) {
-                chk: ?*MatchArm = arms;
-                while (chk != null) {
-                    if (chk.variant == null) { error("duplicate wildcard match arm"); }
-                    chk = chk.next;
-                }
-                if (binder_name != null) { error("wildcard match arm cannot bind a payload"); }
-            } else {
-                vo: ?*Variant = find_variant(type_enum_def(et), vname);
-                if (vo == null) { error("unknown variant"); }
-                v: *Variant = vo;
-                chk2: ?*MatchArm = arms;
-                while (chk2 != null) {
-                    if (chk2.variant == v) { error("duplicate match arm"); }
-                    chk2 = chk2.next;
-                }
-                arm_variant_n = v;
-                if (binder_name != null) {
-                    if (v.payload_ty == null) { error("unit variant cannot bind a payload"); }
-                    bname: *i8 = binder_name;
-                    bo: *Obj = new_obj(bname, 1);
-                    bo.ty = v.payload_ty;
-                    arm_binder = bo;
-                }
-            }
-            arm_body_n: *Stmt = parse_compound();
-            leave_scope();
-            arm: *MatchArm = new_match_arm(arm_variant_n, arm_binder, arm_body_n);
-            if (acur != null) {
-                acur.next = arm;
-                acur = arm;
-            } else {
-                arms = arm;
-                acur = arm;
-            }
-            if (is_wild) {
-                if (tok.kind != TokKind.RBrace) { error("wildcard `_` must be the last match arm"); }
-            }
-        }
-        has_wild: int = 0;
-        walk: ?*MatchArm = arms;
-        while (walk != null) {
-            if (walk.variant == null) { has_wild = 1; }
-            walk = walk.next;
-        }
-        if (has_wild == 0) {
-            vv: ?*Variant = type_enum_def(et).variants;
-            while (vv != null) {
-                found2: int = 0;
-                walk2: ?*MatchArm = arms;
-                while (walk2 != null) {
-                    if (walk2.variant == vv) { found2 = 1; }
-                    walk2 = walk2.next;
-                }
-                if (found2 == 0) { error("match not exhaustive"); }
-                vv = vv.next;
-            }
-        }
-        tok = tok.next;
-        return new_match(mcond, arms);
+        return new_match(mcond, parse_match_arms(mcond));
     }
     if (tok.kind == TokKind.LBrace) { return parse_compound(); }
     if (tok.kind == TokKind.Ident && (tok.next).kind == TokKind.Colon) {
@@ -3855,6 +4026,29 @@ mark_calls_expr(n: ?*Expr) {
             mark_calls_field_inits(k.inits);
             return;
         }
+        If k -> {
+            mark_calls_expr(k.cond);
+            mark_calls_expr(k.then);
+            mark_calls_expr(k.els);
+            return;
+        }
+        Match k -> {
+            mark_calls_expr(k.cond);
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                mark_calls_stmt(arm.body);
+                arm = arm.next;
+            }
+            return;
+        }
+        Block k -> {
+            bs: ?*Stmt = k.body;
+            while (bs != null) {
+                mark_calls_stmt(bs);
+                bs = bs.next;
+            }
+            return;
+        }
     }
 }
 
@@ -4001,6 +4195,29 @@ mark_uses_expr(n: ?*Expr) {
         }
         VariantLit k -> {
             mark_uses_field_inits(k.inits);
+            return;
+        }
+        If k -> {
+            mark_uses_expr(k.cond);
+            mark_uses_expr(k.then);
+            mark_uses_expr(k.els);
+            return;
+        }
+        Match k -> {
+            mark_uses_expr(k.cond);
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                mark_uses_stmt(arm.body);
+                arm = arm.next;
+            }
+            return;
+        }
+        Block k -> {
+            bs: ?*Stmt = k.body;
+            while (bs != null) {
+                mark_uses_stmt(bs);
+                bs = bs.next;
+            }
             return;
         }
     }
@@ -4300,12 +4517,29 @@ typecheck_program() raises Error {
         catch_top = null;
         narrow_top = null;
         add_type_stmt(fn.body);
+        check_fn_result(fn);
         fn = fn.next;
     }
     current_fn = null;
     current_return_ty = null;
     catch_top = null;
     narrow_top = null;
+}
+
+check_fn_result(fn: *Function) raises Error {
+    rt: ?*Type = fn.return_ty;
+    if (rt == null) { return; }
+    if (is_noreturn_ty(rt)) { return; }
+    want: *Type = rt;
+    got: ?*Type = stmt_result_ty(fn.body);
+    if (result_fits(got, want)) { return; }
+    if (got == null) {
+        sb: *StrBuf = sb_new();
+        sb_puts(sb, "missing return value in ");
+        sb_puts(sb, fn.name);
+        error(sb_finish(sb));
+    }
+    error_have_want("return type mismatch", got, want);
 }
 
 check_raises_functions() raises Error {
@@ -4991,8 +5225,75 @@ gen_expr(n: *Expr) raises Error {
             }
             return;
         }
+        If k -> {
+            le: int = new_label();
+            lelse: int = new_label();
+            gen_expr(k.cond);
+            cg_alu_imm(7, 0, 0);
+            cg_jump_id(4, lelse);
+            gen_expr(k.then);
+            cg_jump_id(0 - 1, le);
+            cg_label_id(lelse);
+            gen_expr(k.els);
+            cg_label_id(le);
+            return;
+        }
+        Match k -> {
+            gen_match(k.cond, k.arms);
+            return;
+        }
+        Block k -> {
+            s: ?*Stmt = k.body;
+            while (s != null) {
+                gen_stmt(s);
+                s = s.next;
+            }
+            return;
+        }
         _ -> { error("invalid expression"); }
     }
+}
+
+gen_match(cond: *Expr, arms: ?*MatchArm) raises Error {
+    lend: int = new_label();
+    match cond.kind {
+        Var _p -> { gen_addr(cond); }
+        MemberAccess _p -> { gen_addr(cond); }
+        Deref _p -> { gen_addr(cond); }
+        _ -> { gen_expr(cond); }
+    }
+    cg_push(0);
+    cg_mov_mr(0, 0, 0);
+    cg_push(0);
+    arm: ?*MatchArm = arms;
+    while (arm != null) {
+        la: int = new_label();
+        av: ?*Variant = arm.variant;
+        if (av != null) {
+            cg_mov_mr(4, 0, 0);
+            cg_alu_imm(7, av.tag, 0);
+            cg_jump_id(5, la);
+        }
+        bv: ?*Obj = arm.binder;
+        if (bv != null) {
+            if (av == null) { error("missing variant"); }
+            psz: int = av.payload_size;
+            cg_mov_mr(4, 8, 6);
+            cg_alu_imm(0, 8, 6);
+            cg_lea_mr(5, bv.offset, 7);
+            emit_memcpy(psz);
+        }
+        gen_stmt(arm.body);
+        cg_jump_id(0 - 1, lend);
+        if (av != null) {
+            cg_label_id(la);
+        }
+        arm = arm.next;
+    }
+    cg_mov_imm(1, 7);
+    cg_call("exit");
+    cg_label_id(lend);
+    cg_alu_imm(0, 16, 4);
 }
 
 gen_stmt(n: *Stmt) raises Error {
@@ -5057,45 +5358,7 @@ gen_stmt(n: *Stmt) raises Error {
             return;
         }
         Match k -> {
-            lend: int = new_label();
-            match k.cond.kind {
-                Var _p -> { gen_addr(k.cond); }
-                MemberAccess _p -> { gen_addr(k.cond); }
-                Deref _p -> { gen_addr(k.cond); }
-                _ -> { gen_expr(k.cond); }
-            }
-            cg_push(0);
-            cg_mov_mr(0, 0, 0);
-            cg_push(0);
-            arm: ?*MatchArm = k.arms;
-            while (arm != null) {
-                la: int = new_label();
-                av: ?*Variant = arm.variant;
-                if (av != null) {
-                    cg_mov_mr(4, 0, 0);
-                    cg_alu_imm(7, av.tag, 0);
-                    cg_jump_id(5, la);
-                }
-                bv: ?*Obj = arm.binder;
-                if (bv != null) {
-                    if (av == null) { error("missing variant"); }
-                    psz: int = av.payload_size;
-                    cg_mov_mr(4, 8, 6);
-                    cg_alu_imm(0, 8, 6);
-                    cg_lea_mr(5, bv.offset, 7);
-                    emit_memcpy(psz);
-                }
-                gen_stmt(arm.body);
-                cg_jump_id(0 - 1, lend);
-                if (av != null) {
-                    cg_label_id(la);
-                }
-                arm = arm.next;
-            }
-            cg_mov_imm(1, 7);
-            cg_call("exit");
-            cg_label_id(lend);
-            cg_alu_imm(0, 16, 4);
+            gen_match(k.cond, k.arms);
             return;
         }
         Raise k -> {
@@ -5282,6 +5545,13 @@ emit_text() raises Error {
         body: ?*Stmt = fn.body;
         if (body == null) { error("missing body"); }
         gen_stmt(body);
+        sret2: ?*Obj = current_sret;
+        if (sret2 != null) {
+            cg_mov_rr(0, 6);
+            cg_mov_mr(5, sret2.offset, 7);
+            emit_memcpy(type_size(current_return_ty or error("missing return type")));
+            cg_mov_rr(7, 0);
+        }
         cg_label_id(current_return_lab);
         cg_mov_rr(5, 4);
         cg_pop(5);
