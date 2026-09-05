@@ -94,7 +94,6 @@ run_examples() {
   example "$tool" enum    examples/enum.l8    '9 10 0 3 0'
   example "$tool" forward examples/forward.l8 '7'
   example "$tool" null    examples/null.l8    'YYYY'
-  example "$tool" newarr  examples/newarr.l8  'Hi'
   example "$tool" narrow  examples/narrow.l8  'YYYY'
   example "$tool" nestsum examples/nestsum.l8 '1 2 3 9 4 5 6 7'
   example "$tool" noreturn examples/noreturn.l8 'Hi'
@@ -102,7 +101,22 @@ run_examples() {
   example "$tool" imports examples/imports/main.l8 'Hi'
   example "$tool" or      examples/or.l8      'YYYY'
   example "$tool" byte    examples/byte.l8    'YYYYY'
-  example "$tool" offset  examples/offset.l8  'YYY'
+}
+
+example_compile_fail() {
+  local tool="$1" name="$2" src="$3" needle="$4"
+  if "./$tool" compile "$src" >"$BUILD/${name}.s" 2>"$BUILD/${name}.err"; then
+    die "$name should fail to compile"
+  fi
+  grep -q "$needle" "$BUILD/${name}.err" || die "expected '$needle' in $name"
+}
+
+example_exit() {
+  local tool="$1" name="$2" src="$3" want="$4"
+  "./$tool" build "$src" -o "$BUILD/${name}"
+  local rc=0
+  "$BUILD/${name}" || rc=$?
+  if [[ "$rc" -ne "$want" ]]; then die "$name exited $rc, expected $want"; fi
 }
 
 # Examples that need stage-2 syntax (not yet in bootstrap).
@@ -114,6 +128,11 @@ run_examples_selfhost() {
   example "$tool" expr examples/expr.l8 'YYYYYYYYYYY'
   check_retwarn "$tool"
   example "$tool" retwarn examples/retwarn.l8 'YYYYYYY'
+  example "$tool" newarr examples/newarr.l8 'Hi'
+  example "$tool" offset examples/offset.l8 'YYY'
+  example "$tool" counted examples/counted.l8 'YYYYYYY'
+  example_compile_fail "$tool" ptrindex examples/ptrindex.l8 'pointer indexing is not allowed'
+  example_exit "$tool" sliceoob examples/sliceoob.l8 1
 }
 
 check_retwarn() {

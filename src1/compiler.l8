@@ -2,7 +2,9 @@
 // Nominal AST; Type is a sum; Expr/Stmt are typed envelopes.
 // Heap ADTs via new; aggregates by sret; *T vs ?*T with flow narrowing; `e or alt` unwraps ?*T.
 // Byte literals: 'A' and Ni8 (0..255); i8 arithmetic wraps, no mixed promotion.
-// Pointer offsets: p[i] and &p[i] only; no p+i, p-q, or p as int.
+// *T is one object: p.* only, no p[i]. []T is a thin pointer with len at -8.
+// T[n] is a value array; T[n] in a param (n another param) is a view.
+// [:0]T is a C-string; s[i] only if walked from 0. &s[i] on [:0]T stays [:0]T.
 // Globals: `name: type = const` writes .data; bare `name: type;` stays BSS.
 // Bitwise: `~ & ^ | << >>` on int/i8 (same type; >> is arithmetic; shift count is int).
 // `if`/`match`/`{ }` are expressions; a block's last statement is its value (`;` does not discard).
@@ -21,6 +23,9 @@ type Type =
     | Ptr { base: *Type; }
     | OptPtr { base: *Type; }
     | Array { base: *Type; len: int; }
+    | Slice { base: *Type; }
+    | ZPtr { base: *Type; }
+    | View { base: *Type; bound: *i8; }
     | Record { def: *StructDef; }
     | Enum { def: *EnumDef; }
     | Exn { def: *ExnDef; };
@@ -200,6 +205,7 @@ type ExprKind =
     | Assign { lhs: *Expr; rhs: *Expr; }
     | Addr { lhs: *Expr; }
     | Deref { lhs: *Expr; }
+    | Index { lhs: *Expr; idx: *Expr; }
     | Not { lhs: *Expr; }
     | Neg { lhs: *Expr; }
     | BitNot { lhs: *Expr; }
@@ -314,6 +320,11 @@ stmt_pool_n: int;
 intern_buckets: *InternBucket;
 ptr_cache: ?*TyEnt;
 opt_ptr_cache: ?*TyEnt;
+slice_cache: ?*TyEnt;
+zptr_cache: ?*TyEnt;
+type ViewEnt = { base: *Type; bound: *i8; ty: *Type; next: ?*ViewEnt; }
+view_cache: ?*ViewEnt;
+oob_lab: int;
 next_exn_tag: int;
 field_list_size: int;
 ty_int: *Type;
@@ -340,6 +351,16 @@ type NarrowFrame = {
 }
 
 narrow_top: ?*NarrowFrame;
+
+type WalkFrame = {
+    str: ?*Obj;
+    hi: int;
+    cursor: ?*Obj;
+    next: ?*WalkFrame;
+}
+
+walk_top: ?*WalkFrame;
+zero_top: ?*WalkFrame;
 
 type CatchFrame = {
     exn: *ExnDef;
@@ -643,6 +664,23 @@ append_type(sb: *StrBuf, t: ?*Type) raises Error {
             sb_putc(sb, ']');
             return;
         }
+        Slice k -> {
+            sb_puts(sb, "[]");
+            append_type(sb, k.base);
+            return;
+        }
+        ZPtr k -> {
+            sb_puts(sb, "[:0]");
+            append_type(sb, k.base);
+            return;
+        }
+        View k -> {
+            append_type(sb, k.base);
+            sb_putc(sb, '[');
+            sb_puts(sb, k.bound);
+            sb_putc(sb, ']');
+            return;
+        }
         Record k -> { sb_puts(sb, k.def.name); return; }
         Enum k -> { sb_puts(sb, k.def.name); return; }
         Exn k -> { sb_puts(sb, k.def.name); return; }
@@ -780,6 +818,11 @@ init_runtime() {
     }
     ptr_cache = null;
     opt_ptr_cache = null;
+    slice_cache = null;
+    zptr_cache = null;
+    view_cache = null;
+    walk_top = null;
+    zero_top = null;
     cg_labbuf = new i8[64];
     str_lits = null;
     str_lit_tail = null;
@@ -907,6 +950,9 @@ type_size(t: *Type) raises Error: int {
         Ptr _p -> { 8; }
         OptPtr _p -> { 8; }
         Array k -> { type_size(k.base) * k.len; }
+        Slice _p -> { 8; }
+        ZPtr _p -> { 8; }
+        View _p -> { 8; }
         Record k -> { k.def.size; }
         Enum k -> {
             if (k.def.size <= 0) { 8; } else { k.def.size; }
@@ -921,7 +967,10 @@ type_base(t: *Type) raises Error: *Type {
         Ptr k -> { k.base; }
         OptPtr k -> { k.base; }
         Array k -> { k.base; }
-        _ -> { error("not a pointer or array"); }
+        Slice k -> { k.base; }
+        ZPtr k -> { k.base; }
+        View k -> { k.base; }
+        _ -> { error("not a pointer, array, or slice"); }
     }
 }
 
@@ -977,6 +1026,39 @@ opt_ptr_to(base: *Type): *Type {
 
 array_of(base: *Type, len: int): *Type {
     new Type.Array { base: base, len: len };
+}
+
+slice_of(base: *Type): *Type {
+    e: ?*TyEnt = slice_cache;
+    while (e != null) {
+        if (e.base == base) { return e.ty; }
+        e = e.next;
+    }
+    t: *Type = new Type.Slice { base: base };
+    slice_cache = new TyEnt { base: base, ty: t, next: slice_cache };
+    t;
+}
+
+zptr_of(base: *Type): *Type {
+    e: ?*TyEnt = zptr_cache;
+    while (e != null) {
+        if (e.base == base) { return e.ty; }
+        e = e.next;
+    }
+    t: *Type = new Type.ZPtr { base: base };
+    zptr_cache = new TyEnt { base: base, ty: t, next: zptr_cache };
+    t;
+}
+
+view_of(base: *Type, bound: *i8): *Type {
+    e: ?*ViewEnt = view_cache;
+    while (e != null) {
+        if (e.base == base && streq(e.bound, bound)) { return e.ty; }
+        e = e.next;
+    }
+    t: *Type = new Type.View { base: base, bound: bound };
+    view_cache = new ViewEnt { base: base, bound: bound, ty: t, next: view_cache };
+    t;
 }
 
 struct_type(sd: *StructDef): *Type {
@@ -1289,6 +1371,29 @@ is_array(t: *Type): bool {
     }
 }
 
+is_slice(t: *Type): bool {
+    match t.* {
+        Slice _p -> { true; }
+        _ -> { false; }
+    }
+}
+
+is_zptr(t: *Type): bool {
+    match t.* {
+        ZPtr _p -> { true; }
+        _ -> { false; }
+    }
+}
+
+is_view(t: *Type): bool {
+    match t.* {
+        View _p -> { true; }
+        _ -> { false; }
+    }
+}
+
+is_indexable(t: *Type): bool { is_array(t) || is_slice(t) || is_zptr(t) || is_view(t); }
+
 is_struct_ty(t: *Type): bool {
     match t.* {
         Record _p -> { true; }
@@ -1342,7 +1447,20 @@ assignable(to: ?*Type, from_n: ?*Expr) raises Error: bool {
         to2: ?*Type = decay(tt);
         if (from2 != null && to2 != null) {
             if (types_equal(from2, to2)) { return true; }
-            if (is_opt_pointer(to2) && is_pointer(from2) && types_equal(type_base(from2), type_base(to2))) { return true; }
+            if (is_opt_pointer(to2) && (is_pointer(from2) || is_zptr(from2) || is_slice(from2)) && types_equal(type_base(from2), type_base(to2))) { return true; }
+            if (is_pointer(to2) && (is_slice(from2) || is_zptr(from2) || is_view(from2) || is_array(from2))) {
+                if (types_equal(type_base(from2), type_base(to2))) { return true; }
+            }
+            if (is_zptr(to2) && (is_slice(from2) || is_zptr(from2) || is_view(from2) || is_pointer(from2))) {
+                if (types_equal(type_base(from2), type_base(to2))) { return true; }
+            }
+            if (is_slice(to2) && is_slice(from2) && types_equal(type_base(from2), type_base(to2))) { return true; }
+            if (is_slice(to2) && (is_pointer(from2) || is_zptr(from2))) {
+                if (types_equal(type_base(from2), type_base(to2))) { return true; }
+            }
+            if (is_view(to2) && (is_slice(from2) || is_view(from2) || is_zptr(from2) || is_pointer(from2) || is_array(from2))) {
+                if (types_equal(type_base(from2), type_base(to2))) { return true; }
+            }
         }
     }
     bind_null_to_pointer(tt, from_n);
@@ -1388,6 +1506,19 @@ types_equal(a: *Type, b: *Type) raises Error: bool {
         if (type_array_len(a) != type_array_len(b)) { false; }
         else { types_equal(type_base(a), type_base(b)); }
     }
+    else if (is_slice(a) && is_slice(b)) { types_equal(type_base(a), type_base(b)); }
+    else if (is_zptr(a) && is_zptr(b)) { types_equal(type_base(a), type_base(b)); }
+    else if (is_view(a) && is_view(b)) {
+        match a.* {
+            View ka -> {
+                match b.* {
+                    View kb -> { streq(ka.bound, kb.bound) && types_equal(ka.base, kb.base); }
+                    _ -> { false; }
+                }
+            }
+            _ -> { false; }
+        }
+    }
     else if (is_struct_ty(a) && is_struct_ty(b)) { type_struct_def(a) == type_struct_def(b); }
     else if (is_enum_ty(a) && is_enum_ty(b)) { type_enum_def(a) == type_enum_def(b); }
     else if (is_exn_ty(a) && is_exn_ty(b)) { type_exn_def(a) == type_exn_def(b); }
@@ -1413,6 +1544,11 @@ check_as(from: ?*Type, to: ?*Type) raises Error {
         error_have_want("cannot cast optional pointer to non-optional (bind a local and use if (p != null))", from, to);
     }
     if (is_pointer(from) && is_pointer(to)) { return; }
+    if (is_pointer(to) && (is_slice(from) || is_zptr(from) || is_view(from))) { return; }
+    if (is_slice(to) && is_pointer(from)) { return; }
+    if (is_zptr(to) && (is_slice(from) || is_pointer(from) || is_view(from) || is_zptr(from))) { return; }
+    if (is_slice(to) && is_slice(from)) { return; }
+    if (is_view(to) && (is_slice(from) || is_view(from) || is_zptr(from) || is_pointer(from) || is_array(from))) { return; }
     error_have_want("invalid as conversion", from, to);
 }
 
@@ -1837,6 +1973,7 @@ new_logor(lhs: *Expr, rhs: *Expr): *Expr { mk_expr(ExprKind.LogOr { lhs: lhs, rh
 new_or_else(lhs: *Expr, rhs: *Expr): *Expr { mk_expr(ExprKind.OrElse { lhs: lhs, rhs: rhs }); }
 new_addr(lhs: *Expr): *Expr { mk_expr(ExprKind.Addr { lhs: lhs }); }
 new_deref(lhs: *Expr): *Expr { mk_expr(ExprKind.Deref { lhs: lhs }); }
+new_index(lhs: *Expr, idx: *Expr): *Expr { mk_expr(ExprKind.Index { lhs: lhs, idx: idx }); }
 new_not(lhs: *Expr): *Expr { mk_expr(ExprKind.Not { lhs: lhs }); }
 new_neg(lhs: *Expr): *Expr { mk_expr(ExprKind.Neg { lhs: lhs }); }
 new_bitnot(lhs: *Expr): *Expr { mk_expr(ExprKind.BitNot { lhs: lhs }); }
@@ -1941,6 +2078,22 @@ find_var(name: *i8): ?*Obj {
     find_global(name);
 }
 
+find_fn_bound(name: *i8): ?*Obj {
+    fn: ?*Function = current_fn;
+    if (fn == null) { return null; }
+    o: ?*Obj = fn.locals;
+    while (o != null) {
+        if (streq(o.name, name)) { return o; }
+        o = o.next;
+    }
+    p: ?*Obj = fn.params;
+    while (p != null) {
+        if (streq(p.name, name)) { return p; }
+        p = p.param_next;
+    }
+    null;
+}
+
 enter_scope() { scope_depth = scope_depth + 1; }
 
 leave_scope() raises Error {
@@ -1994,6 +2147,151 @@ narrow_push(var: ?*Obj, ty: ?*Type) {
 }
 
 narrow_reset(saved: ?*NarrowFrame) { narrow_top = saved; }
+
+walk_reset(saved: ?*WalkFrame) { walk_top = saved; }
+
+walk_fact(str: ?*Obj): ?*WalkFrame {
+    f: ?*WalkFrame = walk_top;
+    while (f != null) {
+        if (f.str == str) { return f; }
+        f = f.next;
+    }
+    null;
+}
+
+walk_hi(str: ?*Obj): int {
+    f: ?*WalkFrame = walk_fact(str);
+    if (f != null) { f.hi; }
+    else { 0; }
+}
+
+walk_cursor(str: ?*Obj): ?*Obj {
+    f: ?*WalkFrame = walk_fact(str);
+    if (f != null) { f.cursor; }
+    else { null; }
+}
+
+walk_push(str: ?*Obj, hi: int, cursor: ?*Obj) {
+    f: *WalkFrame = new WalkFrame { str: str, hi: hi, cursor: cursor, next: walk_top };
+    walk_top = f;
+}
+
+is_zero_var(var: ?*Obj): bool {
+    f: ?*WalkFrame = zero_top;
+    while (f != null) {
+        if (f.cursor == var) { return true; }
+        f = f.next;
+    }
+    false;
+}
+
+mark_zero_var(var: ?*Obj) {
+    f: *WalkFrame = new WalkFrame { str: null, hi: 0, cursor: var, next: zero_top };
+    zero_top = f;
+}
+
+index_lhs_var(n: *Expr): ?*Obj {
+    match n.kind {
+        Var k -> { k.var; }
+        _ -> { null; }
+    }
+}
+
+index_idx_num(n: *Expr): int {
+    match n.kind {
+        Num k -> { if (k.str_label == 0) { k.val; } else { 0 - 1; } }
+        _ -> { 0 - 1; }
+    }
+}
+
+index_idx_var(n: *Expr): ?*Obj {
+    match n.kind {
+        Var k -> { k.var; }
+        _ -> { null; }
+    }
+}
+
+zindex_ok(str: ?*Obj, idx: *Expr): bool {
+    kn: int = index_idx_num(idx);
+    if (kn >= 0) {
+        if (kn <= walk_hi(str)) { return true; }
+        return false;
+    }
+    iv: ?*Obj = index_idx_var(idx);
+    if (iv == null) { return false; }
+    if (walk_cursor(str) == iv) { return true; }
+    if (is_zero_var(iv) && walk_hi(str) >= 0) {
+        walk_push(str, walk_hi(str), iv);
+        return true;
+    }
+    false;
+}
+
+walk_advance_index(lhs: *Expr, idx: *Expr) {
+    raw: ?*Type = lhs.ty;
+    if (raw == null || !is_zptr(raw)) { return; }
+    sv: ?*Obj = index_lhs_var(lhs);
+    kn: int = index_idx_num(idx);
+    if (kn >= 0) {
+        walk_push(sv, kn + 1, walk_cursor(sv));
+        return;
+    }
+    iv: ?*Obj = index_idx_var(idx);
+    if (iv != null) {
+        walk_push(sv, walk_hi(sv), iv);
+    }
+}
+
+is_nonzero_byte_expr(n: *Expr): bool {
+    match n.kind {
+        Num k -> { k.str_label == 0 && k.val != 0; }
+        _ -> { false; }
+    }
+}
+
+expr_is_zero_lit(n: *Expr): bool {
+    match n.kind {
+        Num k -> { k.str_label == 0 && k.val == 0; }
+        _ -> { false; }
+    }
+}
+
+walk_advance_cond(cond: ?*Expr) {
+    if (cond == null) { return; }
+    match cond.kind {
+        LogAnd k -> {
+            walk_advance_cond(k.lhs);
+            walk_advance_cond(k.rhs);
+            return;
+        }
+        Binary k -> {
+            ix: ?*Expr = null;
+            other: ?*Expr = null;
+            match k.lhs.kind {
+                Index _p -> { ix = k.lhs; other = k.rhs; }
+                _ -> {}
+            }
+            if (ix == null) {
+                match k.rhs.kind {
+                    Index _p2 -> { ix = k.rhs; other = k.lhs; }
+                    _ -> {}
+                }
+            }
+            if (ix == null || other == null) { return; }
+            match ix.kind {
+                Index q -> {
+                    match k.op {
+                        Ne -> { if (expr_is_zero_lit(other)) { walk_advance_index(q.lhs, q.idx); } }
+                        Eq -> { if (is_nonzero_byte_expr(other)) { walk_advance_index(q.lhs, q.idx); } }
+                        _ -> {}
+                    }
+                }
+                _ -> {}
+            }
+        }
+        _ -> {}
+    }
+}
 
 opt_local_var(n: ?*Expr) raises Error: ?*Obj {
     if (n != null) {
@@ -2127,6 +2425,25 @@ decl_spec() raises Error: *Type {
 }
 
 parse_type() raises Error: *Type {
+    if (tok.kind == TokKind.LBrack) {
+        tok = tok.next;
+        if (tok.kind == TokKind.RBrack) {
+            tok = tok.next;
+            base0: *Type = parse_type();
+            if (is_noreturn_ty(base0)) { error("noreturn cannot be a slice element"); }
+            return slice_of(base0);
+        }
+        if (tok.kind == TokKind.Colon) {
+            tok = tok.next;
+            if (tok.kind != TokKind.Num || tok.val != 0) { error("expected 0 in [:0] type"); }
+            tok = tok.next;
+            skip(TokKind.RBrack);
+            base1: *Type = parse_type();
+            if (is_noreturn_ty(base1)) { error("noreturn cannot be a C-string element"); }
+            return zptr_of(base1);
+        }
+        error("expected []T or [:0]T");
+    }
     if (tok.kind == TokKind.Question) {
         tok = tok.next;
         if (tok.kind != TokKind.Star) { error("expected * after ? in optional pointer type"); }
@@ -2235,8 +2552,10 @@ parse_primary() raises Error: *Expr {
             tok = tok.next;
             len: *Expr = parse_expr();
             skip(TokKind.RBrack);
-            if (is_pointer(base) || is_opt_pointer(base)) { error("new expects a non-pointer type"); }
-            return new_heap_node(len, 1, null, null, ptr_to(base));
+            if (is_pointer(base) || is_opt_pointer(base) || is_slice(base) || is_zptr(base) || is_view(base)) {
+                error("new expects a non-pointer type");
+            }
+            return new_heap_node(len, 1, null, null, slice_of(base));
         }
         if (is_pointer(base)) { error("new expects a non-pointer type"); }
         if (tok.kind == TokKind.Uninitialized) {
@@ -2488,19 +2807,7 @@ parse_postfix() raises Error: *Expr {
             tok = tok.next;
             idx: *Expr = parse_expr();
             skip(TokKind.RBrack);
-            add_type(n);
-            add_type(idx);
-            idt: ?*Type = decay(idx.ty);
-            if (idt == null) { error("array index must be int"); }
-            if (!is_int_ty(idt)) { error("array index must be int"); }
-            t: ?*Type = decay(n.ty);
-            if (t == null) { error_ty("subscript of non-pointer", t); }
-            if (!is_pointer(t)) { error_ty("subscript of non-pointer", t); }
-            scaled: *Expr = new_binary(BinOp.Mul, idx, new_num(type_size(type_base(t))));
-            add: *Expr = new_binary(BinOp.Add, n, scaled);
-            add.ty = t;
-            n = new_deref(add);
-            n.ty = type_base(t);
+            n = new_index(n, idx);
         } else {
             if (tok.kind == TokKind.Dot) {
                 if ((tok.next).kind == TokKind.Star) {
@@ -2596,14 +2903,39 @@ add_type_field_inits(inits: ?*FieldInit) raises Error {
     }
 }
 
+type_index_expr(p: *Expr, lhs: *Expr, idx: *Expr) raises Error {
+    add_type(lhs);
+    add_type(idx);
+    idt: ?*Type = decay(idx.ty);
+    if (idt == null || !is_int_ty(idt)) { error("array index must be int"); }
+    raw: ?*Type = lhs.ty;
+    if (raw == null) { error_ty("index of untyped expression", raw); }
+    if (is_opt_pointer(raw)) {
+        error_ty("index of optional pointer (use if (p != null) to narrow)", raw);
+    }
+    if (is_pointer(raw)) {
+        error_ty("pointer indexing is not allowed (use []T, T[n], or [:0]T)", raw);
+    }
+    if (!is_indexable(raw)) { error_ty("index of non-array", raw); }
+    if (is_zptr(raw)) {
+        if (!zindex_ok(index_lhs_var(lhs), idx)) {
+            error("C-string index not walked");
+        }
+    }
+    p.ty = type_base(raw);
+}
+
 type_log(p: *Expr, lhs: *Expr, rhs: *Expr, and_op: int) raises Error {
     add_type(lhs);
     save: ?*NarrowFrame = narrow_top;
+    wsave: ?*WalkFrame = walk_top;
     if (and_op != 0) {
         narrow_push_ne_nulls(lhs);
+        walk_advance_cond(lhs);
     } else { narrow_push_eq_nulls(lhs); }
     add_type(rhs);
     narrow_reset(save);
+    walk_reset(wsave);
     lt: ?*Type = decay(lhs.ty);
     rt: ?*Type = decay(rhs.ty);
     if (lt == null) { error_have_and("&& / || require bool operands", lt, rt); }
@@ -2967,12 +3299,16 @@ type_if_expr(p: *Expr, cond: *Expr, then: *Expr, els: *Expr) raises Error {
     ct: ?*Type = decay(cond.ty);
     if (ct == null || !is_bool_ty(ct)) { error_ty("condition must be bool", ct); }
     save: ?*NarrowFrame = narrow_top;
+    wsave: ?*WalkFrame = walk_top;
     narrow_push_ne_nulls(cond);
+    walk_advance_cond(cond);
     add_type(then);
     narrow_reset(save);
+    walk_reset(wsave);
     narrow_push_eq_nulls(cond);
     add_type(els);
     narrow_reset(save);
+    walk_reset(wsave);
     tt: ?*Type = decay(then.ty);
     et: ?*Type = decay(els.ty);
     tn: bool = is_null_value_expr(then);
@@ -3082,10 +3418,12 @@ add_type_expr(p: *Expr) raises Error {
         If q -> { type_if_expr(p, q.cond, q.then, q.els); return; }
         Match q -> { type_match_expr(p, q.cond, q.arms); return; }
         Block q -> { type_block_expr(p, q.body); return; }
-        Num _p -> {
+        Num k -> {
+            if (k.str_label != 0) { p.ty = slice_of(ty_i8); return; }
             p.ty = ty_int;
             return;
         }
+        Index q -> { type_index_expr(p, q.lhs, q.idx); return; }
         Null -> { return; }
         Binary q -> { type_binary(p, q.op, q.lhs, q.rhs); return; }
         Not q -> {
@@ -3133,11 +3471,31 @@ add_type_expr(p: *Expr) raises Error {
             if (!assignable(lt, q.rhs)) {
                 error_have_expr_want("assignment type mismatch", q.rhs, lt);
             }
+            match q.lhs.kind {
+                Var vp -> {
+                    if (expr_is_zero_lit(q.rhs)) { mark_zero_var(vp.var); }
+                }
+                _ -> {}
+            }
             p.ty = storage;
             return;
         }
         Addr q -> {
             add_type(q.lhs);
+            match q.lhs.kind {
+                Index ik -> {
+                    ilt: ?*Type = ik.lhs.ty;
+                    if (ilt != null && is_zptr(ilt)) {
+                        p.ty = ilt;
+                        return;
+                    }
+                    if (ilt != null && is_indexable(ilt)) {
+                        p.ty = ptr_to(type_base(ilt));
+                        return;
+                    }
+                }
+                _ -> {}
+            }
             aty: ?*Type = q.lhs.ty;
             if (aty != null && is_array(aty)) {
                 p.ty = ptr_to(type_base(aty));
@@ -3161,6 +3519,32 @@ add_type_expr(p: *Expr) raises Error {
             while (a != null) {
                 add_type(a);
                 a = a.next;
+            }
+            lenarg: ?*Expr = q.args;
+            if (streq(q.funcname, "len") && lenarg != null) {
+              if (lenarg.next == null) {
+                at: ?*Type = lenarg.ty;
+                if (at != null && is_array(at)) {
+                    p.kind = ExprKind.Num { val: type_array_len(at), str_label: 0 };
+                    p.ty = ty_int;
+                    return;
+                }
+                if (at != null && is_view(at)) {
+                    bn: *i8 = uninitialized;
+                    match at.* {
+                        View vk -> { bn = vk.bound; }
+                        _ -> { error("not a view"); }
+                    }
+                    bo: ?*Obj = find_var(bn);
+                    if (bo == null) { error("view bound is not in scope"); }
+                    p.kind = ExprKind.Var { var: bo, name: bn, member: null };
+                    p.ty = ty_int;
+                    return;
+                }
+                if (at != null && is_zptr(at)) {
+                    error("len is not defined on [:0]T (walk with cstr_len)");
+                }
+              }
             }
             fno: ?*Function = find_function(q.funcname);
             p.kind = ExprKind.Funcall { funcname: q.funcname, args: q.args, fn: fno };
@@ -3216,14 +3600,18 @@ add_type_stmt_node(p: *Stmt) raises Error {
             ct: ?*Type = decay(k.cond.ty);
             if (ct == null || !is_bool_ty(ct)) { error_ty("condition must be bool", ct); }
             save: ?*NarrowFrame = narrow_top;
+            wsave: ?*WalkFrame = walk_top;
             narrow_push_ne_nulls(k.cond);
+            walk_advance_cond(k.cond);
             add_type_stmt(k.then);
             narrow_reset(save);
+            walk_reset(wsave);
             els: ?*Stmt = k.els;
             if (els != null) {
                 narrow_push_eq_nulls(k.cond);
                 add_type_stmt(els);
                 narrow_reset(save);
+                walk_reset(wsave);
             }
             return;
         }
@@ -3232,9 +3620,12 @@ add_type_stmt_node(p: *Stmt) raises Error {
             ct2: ?*Type = decay(k.cond.ty);
             if (ct2 == null || !is_bool_ty(ct2)) { error_ty("condition must be bool", ct2); }
             save2: ?*NarrowFrame = narrow_top;
+            wsave2: ?*WalkFrame = walk_top;
             narrow_push_ne_nulls(k.cond);
+            walk_advance_cond(k.cond);
             add_type_stmt(k.body);
             narrow_reset(save2);
+            walk_reset(wsave2);
             return;
         }
         Try k -> {
@@ -3459,9 +3850,14 @@ parse_type_suffix(ty: *Type) raises Error: *Type {
     if (tok.kind == TokKind.LBrack) {
         if (is_noreturn_ty(ty)) { error("noreturn cannot be an array element"); }
         tok = tok.next;
-        if (tok.kind != TokKind.Num) { error("expected array size"); }
-        ty = array_of(ty, tok.val);
-        tok = tok.next;
+        if (tok.kind == TokKind.Num) {
+            ty = array_of(ty, tok.val);
+            tok = tok.next;
+        } else {
+            if (tok.kind != TokKind.Ident) { error("expected array size or bound name"); }
+            ty = view_of(ty, intern(cur_tokstr(), tok.len));
+            tok = tok.next;
+        }
         skip(TokKind.RBrack);
     }
     ty;
@@ -4141,6 +4537,7 @@ mark_calls_expr(n: ?*Expr) {
         }
         Addr k -> { mark_calls_expr(k.lhs); return; }
         Deref k -> { mark_calls_expr(k.lhs); return; }
+        Index k -> { mark_calls_expr(k.lhs); mark_calls_expr(k.idx); return; }
         Not k -> { mark_calls_expr(k.lhs); return; }
         Neg k -> { mark_calls_expr(k.lhs); return; }
         BitNot k -> { mark_calls_expr(k.lhs); return; }
@@ -4314,6 +4711,7 @@ mark_uses_expr(n: ?*Expr) {
         }
         Addr k -> { mark_uses_expr(k.lhs); return; }
         Deref k -> { mark_uses_expr(k.lhs); return; }
+        Index k -> { mark_uses_expr(k.lhs); mark_uses_expr(k.idx); return; }
         Not k -> { mark_uses_expr(k.lhs); return; }
         Neg k -> { mark_uses_expr(k.lhs); return; }
         BitNot k -> { mark_uses_expr(k.lhs); return; }
@@ -4787,6 +5185,8 @@ typecheck_program() raises Error {
         current_return_ty = fn.return_ty;
         catch_top = null;
         narrow_top = null;
+        walk_top = null;
+        zero_top = null;
         add_type_stmt(fn.body);
         check_fn_result(fn);
         fn = fn.next;
@@ -4888,6 +5288,80 @@ gen_field_inits(inits: ?*FieldInit, base_off: int) raises Error {
     }
 }
 
+emit_exit1() {
+    cg_mov_imm(1, 7);
+    cg_call("exit");
+}
+
+emit_check_idx() {
+    cg_alu_rr(57, 2, 1);
+    cg_jump_id(3, oob_lab);
+}
+
+emit_scale_offset(esz: int) {
+    if (esz == 1) {
+        cg_alu_rr(1, 1, 6);
+        cg_mov_rr(6, 0);
+    } else {
+        cg_mov_rr(1, 0);
+        if (esz != 0) {
+            cg_imul_imm(esz, 0);
+        }
+        cg_alu_rr(1, 6, 0);
+    }
+}
+
+gen_index_addr(lhs: *Expr, idx: *Expr) raises Error {
+    raw: *Type = lhs.ty or error("missing type");
+    esz: int = type_size(type_base(raw));
+    cg_push(3);
+    if (is_array(raw)) {
+        gen_addr(lhs);
+        cg_mov_rr(0, 6);
+        cg_mov_imm(type_array_len(raw), 2);
+        cg_push(6);
+        cg_push(2);
+        gen_expr(idx);
+        cg_mov_rr(0, 1);
+        cg_pop(2);
+        cg_pop(6);
+        emit_check_idx();
+    } else {
+        if (is_zptr(raw)) {
+            gen_expr(lhs);
+            cg_mov_rr(0, 6);
+            cg_push(6);
+            gen_expr(idx);
+            cg_mov_rr(0, 1);
+            cg_pop(6);
+        } else {
+            gen_expr(lhs);
+            cg_mov_rr(0, 6);
+            if (is_slice(raw)) {
+                cg_mov_mr(6, 0 - 8, 2);
+            } else {
+                bo: ?*Obj = null;
+                match raw.* {
+                    View vk -> { bo = find_fn_bound(vk.bound); }
+                    _ -> {}
+                }
+                if (bo == null) { error("view bound is not in scope"); }
+                emit_load_var(bo, ty_int);
+                cg_mov_rr(0, 2);
+            }
+            cg_push(6);
+            cg_push(2);
+            gen_expr(idx);
+            cg_mov_rr(0, 1);
+            cg_pop(2);
+            cg_pop(6);
+            emit_check_idx();
+        }
+    }
+    emit_scale_offset(esz);
+    cg_pop(3);
+}
+
 gen_struct_inits(inits: ?*FieldInit) raises Error { gen_field_inits(inits, 0); }
 gen_variant_inits(inits: ?*FieldInit) raises Error { gen_field_inits(inits, 8); }
 
@@ -4906,6 +5380,10 @@ gen_addr(n: *Expr) raises Error {
         }
         Deref k -> {
             gen_expr(k.lhs);
+            return;
+        }
+        Index k -> {
+            gen_index_addr(k.lhs, k.idx);
             return;
         }
         MemberAccess k -> {
@@ -5221,11 +5699,16 @@ gen_expr(n: *Expr) raises Error {
             lhs: ?*Expr = k.lhs;
             if (lhs != null) {
                 gen_expr(lhs);
+                cg_push(0);
                 if (esz != 1) {
                     cg_imul_imm(esz, 0);
                 }
+                cg_alu_imm(0, 8, 0);
                 cg_mov_rr(0, 7);
                 cg_call("malloc");
+                cg_pop(1);
+                cg_mov_rm(1, 0, 0);
+                cg_alu_imm(0, 8, 0);
                 return;
             }
             cg_mov_imm(esz, 7);
@@ -5293,6 +5776,11 @@ gen_expr(n: *Expr) raises Error {
         }
         Deref k -> {
             gen_expr(k.lhs);
+            load_mem(n.ty or error("missing type"));
+            return;
+        }
+        Index _p -> {
+            gen_addr(n);
             load_mem(n.ty or error("missing type"));
             return;
         }
@@ -5760,6 +6248,7 @@ emit_data() raises Error {
 emit_text() raises Error {
     fn: ?*Function = functions;
     cg_section(as_SEC_TEXT);
+    oob_lab = new_label();
     while (fn != null) {
         narrow_top = null;
         catch_top = null;
@@ -5824,6 +6313,8 @@ emit_text() raises Error {
         cg_ret();
         fn = fn.next;
     }
+    cg_label_id(oob_lab);
+    emit_exit1();
 }
 
 codegen() raises Error {
