@@ -11,6 +11,7 @@
 .globl close
 .globl exit
 .globl len
+.globl l8_memcpy
 .globl l8_try_begin
 .globl l8_try_end
 .globl l8_raise
@@ -129,6 +130,34 @@ malloc:
 # long len(*i8 s) — length prefix at s-8 (for length-prefixed literals / strdup)
 len:
     mov -8(%rdi), %rax
+    ret
+
+# void l8_memcpy(void *dst, void *src, long n) — rdi, rsi, rdx
+# Word then byte. ja after cmp $7 so n>=8 without jae (bootstrap as has no jae).
+# Named l8_memcpy so it does not collide with a user memcpy in src1.
+l8_memcpy:
+    mov %rdx, %rcx
+.Lmemcpy_words:
+    cmp $7, %rcx
+    ja .Lmemcpy_word
+    jmp .Lmemcpy_bytes
+.Lmemcpy_word:
+    mov 0(%rsi), %rax
+    mov %rax, 0(%rdi)
+    add $8, %rsi
+    add $8, %rdi
+    sub $8, %rcx
+    jmp .Lmemcpy_words
+.Lmemcpy_bytes:
+    cmp $0, %rcx
+    je .Lmemcpy_done
+    movzb 0(%rsi), %rax
+    mov %al, 0(%rdi)
+    add $1, %rsi
+    add $1, %rdi
+    sub $1, %rcx
+    jmp .Lmemcpy_bytes
+.Lmemcpy_done:
     ret
 
 # long read(long fd, void *buf, long n)
