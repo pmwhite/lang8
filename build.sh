@@ -96,10 +96,8 @@ run_examples() {
   example "$tool" null    examples/null.l8    'YYYY'
   example "$tool" narrow  examples/narrow.l8  'YYYY'
   example "$tool" nestsum examples/nestsum.l8 '1 2 3 9 4 5 6 7'
-  example "$tool" noreturn examples/noreturn.l8 'Hi'
   example "$tool" exc     examples/exc.l8     'Hi'
   example "$tool" imports examples/imports/main.l8 'Hi'
-  example "$tool" or      examples/or.l8      'YYYY'
   example "$tool" byte    examples/byte.l8    'YYYYY'
 }
 
@@ -123,6 +121,8 @@ example_exit() {
 run_examples_selfhost() {
   local tool="$1"
   run_examples "$tool"
+  example "$tool" or examples/or.l8 'YYYY'
+  example "$tool" noreturn examples/noreturn.l8 'Hi'
   example "$tool" global examples/global.l8 'YYYYYY'
   example "$tool" bitwise examples/bitwise.l8 'YYYYYYYYYYYY'
   example "$tool" expr examples/expr.l8 'YYYYYYYYYYY'
@@ -142,6 +142,13 @@ run_examples_selfhost() {
   example_compile_fail "$tool" nullalias examples/nullalias.l8 'dereferencing optional pointer'
   example_compile_fail "$tool" walkalias examples/walkalias.l8 'C-string index not walked'
   example_compile_fail "$tool" zstore examples/zstore.l8 'cannot assign through C-string'
+  example_compile_fail "$tool" unknownfn examples/unknownfn.l8 'unknown function'
+  example_compile_fail "$tool" syscall examples/syscall.l8 'unknown function'
+  example_compile_fail "$tool" badopen examples/badopen.l8 'argument type mismatch'
+  example "$tool" local examples/local.l8 'YYYYY'
+  example_compile_fail "$tool" localesc examples/localesc.l8 'address of local cannot escape'
+  example_compile_fail "$tool" localbox examples/localbox.l8 'address of local cannot escape'
+  example_compile_fail "$tool" localparam examples/localparam.l8 'local mode is only valid on parameters'
   example_exit "$tool" sliceoob examples/sliceoob.l8 1
   example_exit "$tool" writeoob examples/writeoob.l8 1
   example_exit "$tool" newwrap examples/newwrap.l8 1

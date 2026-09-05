@@ -1,5 +1,6 @@
 # L8 minimal runtime for Linux x86-64
-# Provides: _start, syscall, malloc, read, write, open, close, exit, len
+# Provides: _start, syscall, malloc, read, write, open, open_nul, close, exit, len
+#           clock_gettime, getrusage, rdtsc
 # Exceptions: l8_try_begin, l8_try_end, l8_raise, l8_exc_tag, l8_exc_ptr
 
 .globl _start
@@ -8,9 +9,12 @@
 .globl read
 .globl write
 .globl open
+.globl open_nul
 .globl close
 .globl exit
 .globl len
+.globl clock_gettime
+.globl getrusage
 .globl l8_memcpy
 .globl l8_try_begin
 .globl l8_try_end
@@ -175,6 +179,24 @@ write:
 # long open(char *path, long flags, long mode)
 open:
     mov $2, %rax
+    syscall
+    ret
+
+# long open_nul(char *path, long flags, long mode) — same as open; []i8 data pointer
+open_nul:
+    jmp open
+
+# long clock_gettime(long clk, struct timespec *ts)
+clock_gettime:
+    mov $228, %rax
+    syscall
+    ret
+
+# long getrusage(void *buf) — RUSAGE_SELF into buf (struct rusage)
+getrusage:
+    mov %rdi, %rsi
+    mov $0, %rdi
+    mov $98, %rax
     syscall
     ret
 
