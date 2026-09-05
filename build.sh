@@ -127,7 +127,6 @@ run_examples_selfhost() {
   example "$tool" bitwise examples/bitwise.l8 'YYYYYYYYYYYY'
   example "$tool" expr examples/expr.l8 'YYYYYYYYYYY'
   check_retwarn "$tool"
-  example "$tool" retwarn examples/retwarn.l8 'YYYYYYY'
   example "$tool" newarr examples/newarr.l8 'Hi'
   example "$tool" offset examples/offset.l8 'YYY'
   example "$tool" counted examples/counted.l8 'YYYYYYY'
@@ -138,7 +137,8 @@ run_examples_selfhost() {
 check_retwarn() {
   local tool="$1"
   local err="$BUILD/retwarn.err"
-  "./$tool" compile examples/retwarn.l8 >"$BUILD/retwarn.s" 2>"$err" || die "retwarn compile failed"
+  local bin="$BUILD/retwarn"
+  "./$tool" build examples/retwarn.l8 -o "$bin" 2>"$err" || die "retwarn compile failed"
   grep -q 'warning: unnecessary return in id' "$err" || die "expected unnecessary return in id"
   grep -q 'warning: ignored return value in drop' "$err" || die "expected ignored return value in drop"
   grep -q 'warning: unnecessary return in both' "$err" || die "expected unnecessary return in both"
@@ -146,6 +146,7 @@ check_retwarn() {
   if grep -q 'ignored return value in side' "$err"; then die "unexpected ignored value on assignment"; fi
   if grep -q 'ignored return value in callp' "$err"; then die "unexpected ignored value on procedure call"; fi
   if grep -q 'ignored return value in id2' "$err"; then die "unexpected ignored value on last statement"; fi
+  run_expect "$bin" 'YYYYYYY'
 }
 
 require_bootstrap() {
