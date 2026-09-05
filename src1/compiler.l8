@@ -14,6 +14,7 @@
 // Semicolon after statements and non-brace decls; not after `}`.
 // noreturn return type; checked exceptions (exception/raises/raise/try/with).
 // Locals: `x: T;` is unassigned; use before assign on all paths is an error. No `uninitialized`.
+// `new T[n](v)` fills every slot with v (evaluated once). No implicit element default.
 // Pipeline: parse → typecheck → unused fn/local + raises/noreturn checks → codegen.
 // This compiler reports failures via `exception Error` (caught in main).
 
@@ -218,7 +219,7 @@ type ExprKind =
     | MemberAccess { lhs: *Expr; member: *Member; }
     | As { lhs: *Expr; }
     | Trunc { lhs: *Expr; }
-    | New { lhs: ?*Expr; val: int; inits: ?*FieldInit; variant: ?*Variant; }
+    | New { lhs: ?*Expr; val: int; inits: ?*FieldInit; variant: ?*Variant; fill: ?*Expr; }
     | StructLit { inits: ?*FieldInit; }
     | VariantLit { variant: *Variant; val: int; inits: ?*FieldInit; }
     | If { cond: *Expr; then: *Expr; els: *Expr; }
@@ -814,17 +815,19 @@ init_runtime() {
 read_file(path: []i8) raises Error: []i8 {
     fd: int = open_path(path, 0, 0);
     if (fd < 0) { error("cannot open file"); }
-    cap: int = 65536;
+    cap: int = 262144;
     buf: []i8 = new i8[cap];
     n: int = 0;
     while (true) {
-        if (n + 65536 > cap) {
+        room: int = cap - n;
+        if (room <= 1) {
             cap = cap * 2;
             tmp: []i8 = new i8[cap];
             memcpy(tmp, 0, buf, 0, n);
             buf = tmp;
+            room = cap - n;
         }
-        r: int = read(fd, &buf[n], 65536);
+        r: int = read(fd, &buf[n], room - 1);
         if (r <= 0) {
             buf[n] = 0i8;
             close(fd);
@@ -1977,8 +1980,8 @@ new_expr_stmt(lhs: *Expr): *Stmt { mk_stmt(StmtKind.ExprStmt { lhs: lhs }); }
 new_field_init(m: *Member, lhs: ?*Expr): *FieldInit {
     new FieldInit { member: m, lhs: lhs, next: null };
 }
-new_heap_node(lhs: ?*Expr, val: int, inits: ?*FieldInit, variant: ?*Variant, ty: *Type): *Expr {
-    n: *Expr = mk_expr(ExprKind.New { lhs: lhs, val: val, inits: inits, variant: variant });
+new_heap_node(lhs: ?*Expr, val: int, inits: ?*FieldInit, variant: ?*Variant, fill: ?*Expr, ty: *Type): *Expr {
+    n: *Expr = mk_expr(ExprKind.New { lhs: lhs, val: val, inits: inits, variant: variant, fill: fill });
     n.ty = ty;
     n;
 }
@@ -2524,7 +2527,7 @@ parse_primary() raises Error: *Expr {
             } else {
                 if (v.fields != null) { error("variant requires field initializers"); }
             }
-            return new_heap_node(null, v.tag, args, v, ptr_to(ety));
+            return new_heap_node(null, v.tag, args, v, null, ptr_to(ety));
         }
         base: *Type = parse_type();
         if (tok.kind == TokKind.LBrack) {
@@ -2534,7 +2537,13 @@ parse_primary() raises Error: *Expr {
             if (is_view(base) || is_noreturn_ty(base)) {
                 error("new [n] element type cannot be a view or noreturn");
             }
-            return new_heap_node(len, 1, null, null, slice_of(base));
+            if (tok.kind != TokKind.LParen) {
+                error("new T[n] requires an initial value (new T[n](v))");
+            }
+            tok = tok.next;
+            fill: *Expr = parse_expr();
+            skip(TokKind.RParen);
+            return new_heap_node(len, 1, null, null, fill, slice_of(base));
         }
         if (is_pointer(base)) { error("new expects a non-pointer type"); }
         if (tok.kind == TokKind.Uninitialized) {
@@ -2546,7 +2555,7 @@ parse_primary() raises Error: *Expr {
         if (is_enum_ty(base)) {
             error("use new Enum.Variant { ... } for sum types");
         }
-        return new_heap_node(null, 0, parse_struct_field_inits(base), null, ptr_to(base));
+        return new_heap_node(null, 0, parse_struct_field_inits(base), null, null, ptr_to(base));
     }
     if (tok.kind == TokKind.Sizeof) {
         tok = tok.next;
@@ -3365,6 +3374,13 @@ add_type_expr(p: *Expr) raises Error {
                 if (lht == null) { error_ty("array length must be int", lht); }
                 if (!is_int_ty(lht)) {
                     error_ty("array length must be int", lht);
+                }
+                fill: ?*Expr = k.fill;
+                if (fill == null) { error("new T[n] requires an initial value (new T[n](v))"); }
+                add_type(fill);
+                elem: *Type = type_base(p.ty or error("missing type"));
+                if (!assignable(elem, fill)) {
+                    error_have_expr_want("new T[n] fill type mismatch", fill, elem);
                 }
             }
             add_type_field_inits(k.inits);
@@ -4549,6 +4565,7 @@ mark_calls_expr(n: ?*Expr) {
         Trunc k -> { mark_calls_expr(k.lhs); return; }
         New k -> {
             mark_calls_expr(k.lhs);
+            mark_calls_expr(k.fill);
             mark_calls_field_inits(k.inits);
             return;
         }
@@ -4721,6 +4738,7 @@ mark_uses_expr(n: ?*Expr) {
         Trunc k -> { mark_uses_expr(k.lhs); return; }
         New k -> {
             mark_uses_expr(k.lhs);
+            mark_uses_expr(k.fill);
             mark_uses_field_inits(k.inits);
             return;
         }
@@ -5234,6 +5252,7 @@ da_expr(n: ?*Expr) raises Error: bool {
         Trunc k -> { da_expr(k.lhs); }
         New k -> {
             _nl: bool = da_expr(k.lhs);
+            _nf: bool = da_expr(k.fill);
             da_field_inits(k.inits);
             false;
         }
@@ -5504,6 +5523,25 @@ store_value(ty: *Type) raises Error {
         cg_mov_rr(0, 6);
         emit_memcpy(type_size(ty));
     } else { store_mem(ty); }
+}
+
+/* Fill in %r8, dest in %rdi. Struct/enum/exn literals are addresses. */
+store_array_fill(fill: *Expr, base: *Type) raises Error {
+    if (is_struct_ty(base) || is_enum_ty(base) || is_exn_ty(base)) {
+        lit: int = 0;
+        match fill.kind {
+            StructLit _ -> { lit = 1; }
+            VariantLit _ -> { lit = 1; }
+            _ -> {}
+        }
+        if (lit != 0 || passes_by_ref(base)) {
+            cg_mov_rr(8, 6);
+            emit_memcpy(type_size(base));
+            return;
+        }
+    }
+    cg_mov_rr(8, 0);
+    store_mem(base);
 }
 
 /*
@@ -5960,17 +5998,62 @@ gen_expr(n: *Expr) raises Error {
             if (esz <= 0) { esz = 8; }
             lhs: ?*Expr = k.lhs;
             if (lhs != null) {
+                fill: ?*Expr = k.fill;
+                if (fill == null) { error("new T[n] requires an initial value (new T[n](v))"); }
                 gen_expr(lhs);
-                cg_push(0);
+                cg_push(12);
+                cg_mov_rr(0, 12);
+                gen_expr(fill);
+                cg_push(13);
+                cg_mov_rr(0, 13);
+                cg_mov_rr(12, 0);
                 if (esz != 1) {
                     cg_imul_imm(esz, 0);
                 }
                 cg_alu_imm(0, 8, 0);
                 cg_mov_rr(0, 7);
                 cg_call("malloc");
-                cg_pop(1);
-                cg_mov_rm(1, 0, 0);
+                cg_mov_rm(12, 0, 0);
                 cg_alu_imm(0, 8, 0);
+                cg_push(3);
+                cg_mov_rr(0, 3);
+                agg: int = 0;
+                if (is_struct_ty(base) || is_enum_ty(base) || is_exn_ty(base)) { agg = 1; }
+                if (esz == 1) {
+                    cg_mov_rr(0, 7);
+                    cg_mov_rr(12, 1);
+                    cg_mov_rr(13, 0);
+                    cg_cld();
+                    cg_rep_stosb();
+                } else {
+                    if (esz == 8) {
+                        cg_mov_rr(0, 7);
+                        cg_mov_rr(12, 1);
+                        if (agg != 0) { cg_mov_mr(13, 0, 0); }
+                        else { cg_mov_rr(13, 0); }
+                        cg_cld();
+                        cg_rep_stosq();
+                    } else {
+                        cg_mov_rr(0, 9);
+                        cg_mov_rr(12, 1);
+                        cg_mov_rr(13, 8);
+                        loop: int = new_label();
+                        done: int = new_label();
+                        cg_label_id(loop);
+                        cg_alu_imm(7, 0, 1);
+                        cg_jump_id(4, done);
+                        cg_mov_rr(9, 7);
+                        store_array_fill(fill, base);
+                        cg_alu_imm(0, esz, 9);
+                        cg_alu_imm(5, 1, 1);
+                        cg_jump_id(0 - 1, loop);
+                        cg_label_id(done);
+                    }
+                }
+                cg_mov_rr(3, 0);
+                cg_pop(3);
+                cg_pop(13);
+                cg_pop(12);
                 return;
             }
             cg_mov_imm(esz, 7);
