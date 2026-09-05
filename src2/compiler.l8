@@ -1,12 +1,15 @@
 // L8 self-hosted compiler → x86-64 Linux GAS
 // Nominal AST; Type is a sum; Expr/Stmt are typed envelopes.
 // Heap ADTs via new; aggregates by sret; *T vs ?*T with flow narrowing; `e or alt` unwraps ?*T.
+// Assignment and taking a name's address kill narrowing and [z]T walk facts for that name.
 // Byte literals: 'A' and Ni8 (0..255); i8 arithmetic wraps, no mixed promotion.
 // *T is one object: p.* only, no p[i]. []T is a thin pointer with len at -8.
-// [z]T is a C-string; s[i] only if walked from 0. &s[i] on [z]T stays [z]T.
-// `as` only forgets a claim (same pointee): []T/[z]T/*T → *T or ?*T. It cannot invent [] or [z].
+// [z]T is a read-only C-string; s[i] only if walked from 0. &s[i] on [z]T stays [z]T.
+// `as` only forgets a claim (same pointee): []T/*T → *T or ?*T. It cannot invent or strip [z].
 // A span of an existing []T is the array plus a start index, not a [n]T view.
 // Globals: `name: type = e` is required. Constants go in .data; other inits run once before main.
+// write/read take []i8 (optional off/n, checked) or *i8 (exactly one byte).
+// Address of a local cannot be stored, returned, or passed except to write/read/syscall.
 // Bitwise: `~ & ^ | << >>` on int/i8 (same type; >> is arithmetic; shift count is int).
 // `if`/`match`/`{ }` are expressions; a block's last statement is its value (`;` does not discard).
 // Function body uses that rule when a return type is declared; last-statement and `return` share assignable.
@@ -15,6 +18,7 @@
 // noreturn return type; checked exceptions (exception/raises/raise/try/with).
 // Locals: `x: T;` is unassigned; use before assign on all paths is an error. No `uninitialized`.
 // `new T[n](v)` fills every slot with v (evaluated once). No implicit element default.
+// n must fit the 64MiB heap: negative or wrapping n * size is rejected.
 // Pipeline: parse → typecheck → unused fn/local + raises/noreturn checks → codegen.
 // This compiler reports failures via `exception Error` (caught in main).
 
@@ -379,6 +383,8 @@ type InitFrame = {
 }
 
 init_top: ?*InitFrame = null;
+taint_top: ?*InitFrame = null;
+addr_top: ?*InitFrame = null;
 
 L8_JMP_BUF_SIZE: int = 72;
 
@@ -826,7 +832,7 @@ read_file(path: []i8) raises Error: []i8 {
             buf = tmp;
             room = cap - n;
         }
-        r: int = read(fd, &buf[n], room - 1);
+        r: int = read(fd, buf, n, room - 1);
         if (r <= 0) {
             buf[n] = 0i8;
             close(fd);
@@ -1404,8 +1410,8 @@ assignable(to: ?*Type, from_n: ?*Expr) raises Error: bool {
         to2: ?*Type = decay(tt);
         if (from2 != null && to2 != null) {
             if (types_equal(from2, to2)) { return true; }
-            if (is_opt_pointer(to2) && (is_pointer(from2) || is_zptr(from2) || is_slice(from2)) && types_equal(type_base(from2), type_base(to2))) { return true; }
-            if (is_pointer(to2) && (is_slice(from2) || is_zptr(from2) || is_array(from2))) {
+            if (is_opt_pointer(to2) && (is_pointer(from2) || is_slice(from2)) && types_equal(type_base(from2), type_base(to2))) { return true; }
+            if (is_pointer(to2) && (is_slice(from2) || is_array(from2))) {
                 if (types_equal(type_base(from2), type_base(to2))) { return true; }
             }
         }
@@ -1490,10 +1496,62 @@ check_as(from: ?*Type, to: ?*Type) raises Error {
     if (is_opt_pointer(from) && is_pointer(to)) {
         error_have_want("cannot cast optional pointer to non-optional (bind a local and use if (p != null))", from, to);
     }
-    if ((is_pointer(to) || is_opt_pointer(to)) && (is_pointer(from) || is_slice(from) || is_zptr(from) || is_opt_pointer(from))) {
+    if ((is_pointer(to) || is_opt_pointer(to)) && (is_pointer(from) || is_slice(from) || is_opt_pointer(from))) {
         if (types_equal(type_base(from), type_base(to))) { return; }
     }
     error_have_want("invalid as conversion", from, to);
+}
+
+is_const_one(n: ?*Expr): bool {
+    if (n == null) { return false; }
+    match n.kind {
+        Num k -> { k.str_label == 0 && k.val == 1; }
+        _ -> { false; }
+    }
+}
+
+io_err(name: []i8, rest: []i8) raises Error: noreturn {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, name);
+    sb_puts(sb, rest);
+    error(sb_finish(sb));
+}
+
+check_io_args(name: []i8, args: ?*Expr) raises Error {
+    a0: ?*Expr = args;
+    if (a0 == null) { io_err(name, " takes fd and a buffer"); }
+    a0u: *Expr = a0;
+    a1: ?*Expr = a0u.next;
+    if (a1 == null) { io_err(name, " takes fd and a buffer"); }
+    a1u: *Expr = a1;
+    t0: ?*Type = decay(a0u.ty);
+    t1: ?*Type = decay(a1u.ty);
+    if (t0 == null || !is_int_ty(t0)) { error_ty("fd must be int", t0); }
+    if (t1 == null) { io_err(name, " buf must be []i8 or *i8"); }
+    a2: ?*Expr = a1u.next;
+    if (is_slice(t1) && is_i8_ty(type_base(t1))) {
+        if (a2 == null) { return; }
+        a2u: *Expr = a2;
+        t2: ?*Type = decay(a2u.ty);
+        if (t2 == null || !is_int_ty(t2)) { error_ty("I/O count must be int", t2); }
+        a3: ?*Expr = a2u.next;
+        if (a3 == null) { return; }
+        a3u: *Expr = a3;
+        t3: ?*Type = decay(a3u.ty);
+        if (t3 == null || !is_int_ty(t3)) { error_ty("I/O count must be int", t3); }
+        if (a3u.next != null) { io_err(name, " takes at most fd, []i8, off, n"); }
+        return;
+    }
+    if (is_pointer(t1) && is_i8_ty(type_base(t1))) {
+        if (a2 == null) { return; }
+        a2p: *Expr = a2;
+        if (a2p.next != null) { io_err(name, " of *i8 is one byte"); }
+        t2p: ?*Type = decay(a2p.ty);
+        if (t2p == null || !is_int_ty(t2p)) { error_ty("I/O count must be int", t2p); }
+        if (!is_const_one(a2p)) { io_err(name, " of *i8 is one byte"); }
+        return;
+    }
+    error_have_want("I/O buf must be []i8 or *i8", t1, slice_of(ty_i8));
 }
 
 check_memcpy_args(args: ?*Expr) raises Error {
@@ -2153,17 +2211,300 @@ walk_push(str: ?*Obj, hi: int, cursor: ?*Obj) {
 }
 
 is_zero_var(var: ?*Obj): bool {
+    if (is_addr_taken(var)) { return false; }
     f: ?*WalkFrame = zero_top;
     while (f != null) {
-        if (f.cursor == var) { return true; }
+        if (f.cursor == var) { return f.hi >= 0; }
         f = f.next;
     }
     false;
 }
 
+kill_var_facts(o: ?*Obj) {
+    if (o == null) { return; }
+    if (o.ty != null) { narrow_push(o, o.ty); }
+    zero_top = new WalkFrame { str: null, hi: 0 - 1, cursor: o, next: zero_top };
+    walk_push(o, 0, null);
+    f: ?*WalkFrame = walk_top;
+    while (f != null) {
+        if (f.cursor == o && f.str != null) {
+            if (f.str != o) { walk_push(f.str, f.hi, null); }
+        }
+        f = f.next;
+    }
+}
+
 mark_zero_var(var: ?*Obj) {
+    if (var == null) { return; }
+    if (is_addr_taken(var)) { return; }
     f: *WalkFrame = new WalkFrame { str: null, hi: 0, cursor: var, next: zero_top };
     zero_top = f;
+}
+
+is_stack_object(n: *Expr): bool {
+    match n.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) { return false; }
+            v.is_local != 0 && v.is_func == 0;
+        }
+        MemberAccess k -> {
+            lt: ?*Type = k.lhs.ty;
+            if (lt != null && (is_pointer(lt) || is_opt_pointer(lt) || is_slice(lt))) { return false; }
+            is_stack_object(k.lhs);
+        }
+        Index k -> {
+            lt2: ?*Type = k.lhs.ty;
+            if (lt2 != null && (is_slice(lt2) || is_zptr(lt2) || is_view(lt2))) { return false; }
+            is_stack_object(k.lhs);
+        }
+        _ -> { false; }
+    }
+}
+
+is_stack_addr_stmt(s: ?*Stmt): bool {
+    if (s == null) { return false; }
+    match s.kind {
+        Return k -> { is_stack_addr(k.lhs); }
+        ExprStmt k -> { is_stack_addr(k.lhs); }
+        Block k -> { is_stack_addr_stmt(last_stmt(k.body)); }
+        If k -> { is_stack_addr_stmt(k.then) || is_stack_addr_stmt(k.els); }
+        Match k -> {
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                if (is_stack_addr_stmt(arm.body)) { return true; }
+                arm = arm.next;
+            }
+            false;
+        }
+        Try k -> {
+            if (is_stack_addr_stmt(k.body)) { return true; }
+            a: ?*CatchArm = k.arms;
+            while (a != null) {
+                if (is_stack_addr_stmt(a.body)) { return true; }
+                a = a.next;
+            }
+            false;
+        }
+        _ -> { false; }
+    }
+}
+
+is_stack_addr(n: ?*Expr): bool {
+    if (n == null) { return false; }
+    match n.kind {
+        Addr k -> { is_stack_object(k.lhs); }
+        As k -> { is_stack_addr(k.lhs); }
+        Trunc k -> { is_stack_addr(k.lhs); }
+        If k -> { is_stack_addr(k.then) || is_stack_addr(k.els); }
+        OrElse k -> { is_stack_addr(k.lhs) || is_stack_addr(k.rhs); }
+        Block k -> { is_stack_addr_stmt(last_stmt(k.body)); }
+        Match k -> {
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                if (is_stack_addr_stmt(arm.body)) { return true; }
+                arm = arm.next;
+            }
+            false;
+        }
+        _ -> { false; }
+    }
+}
+
+check_no_stack_addr(n: ?*Expr) raises Error {
+    if (is_tainted_expr(n)) { error("address of local cannot escape"); }
+}
+
+is_tainted_obj(o: ?*Obj): bool {
+    if (o == null) { return false; }
+    f: ?*InitFrame = taint_top;
+    while (f != null) {
+        if (f.var == o) { return true; }
+        f = f.next;
+    }
+    false;
+}
+
+mark_tainted(o: *Obj) {
+    if (is_tainted_obj(o)) { return; }
+    taint_top = new InitFrame { var: o, next: taint_top };
+}
+
+is_addr_taken(o: ?*Obj): bool {
+    if (o == null) { return false; }
+    f: ?*InitFrame = addr_top;
+    while (f != null) {
+        if (f.var == o) { return true; }
+        f = f.next;
+    }
+    false;
+}
+
+mark_addr_taken(o: *Obj) {
+    if (is_addr_taken(o)) { return; }
+    addr_top = new InitFrame { var: o, next: addr_top };
+    kill_var_facts(o);
+}
+
+is_tainted_expr(n: ?*Expr): bool {
+    if (n == null) { return false; }
+    if (is_stack_addr(n)) { return true; }
+    match n.kind {
+        Var k -> { is_tainted_obj(k.var); }
+        StructLit k -> { field_inits_tainted(k.inits); }
+        New k -> { field_inits_tainted(k.inits); }
+        VariantLit k -> { field_inits_tainted(k.inits); }
+        As k -> { is_tainted_expr(k.lhs); }
+        If k -> { is_tainted_expr(k.then) || is_tainted_expr(k.els); }
+        OrElse k -> { is_tainted_expr(k.lhs) || is_tainted_expr(k.rhs); }
+        Block k -> { is_stack_addr_stmt(last_stmt(k.body)); }
+        Match _m -> { is_stack_addr(n); }
+        _ -> { false; }
+    }
+}
+
+field_inits_tainted(inits: ?*FieldInit): bool {
+    a: ?*FieldInit = inits;
+    while (a != null) {
+        if (is_tainted_expr(a.lhs)) { return true; }
+        a = a.next;
+    }
+    false;
+}
+
+io_allows_stack(name: []i8): bool {
+    streq(name, "write") || streq(name, "read") || streq(name, "syscall");
+}
+
+expr_is_obj(n: ?*Expr, o: *Obj): bool {
+    if (n == null) { return false; }
+    match n.kind {
+        Var k -> { k.var == o; }
+        _ -> { false; }
+    }
+}
+
+expr_uses_obj(n: ?*Expr, o: *Obj): bool {
+    if (n == null) { return false; }
+    match n.kind {
+        Var k -> { k.var == o; }
+        Binary k -> {
+            eqnull: int = 0;
+            match k.op {
+                Eq -> { eqnull = 1; }
+                Ne -> { eqnull = 1; }
+                _ -> {}
+            }
+            if (eqnull != 0) {
+                if (is_null_expr(k.lhs) && expr_is_obj(k.rhs, o)) { return false; }
+                if (is_null_expr(k.rhs) && expr_is_obj(k.lhs, o)) { return false; }
+            }
+            expr_uses_obj(k.lhs, o) || expr_uses_obj(k.rhs, o);
+        }
+        Assign k -> { expr_uses_obj(k.lhs, o) || expr_uses_obj(k.rhs, o); }
+        Addr k -> { expr_uses_obj(k.lhs, o); }
+        Deref _p -> { false; }
+        Index k -> { expr_uses_obj(k.idx, o); }
+        Not k -> { expr_uses_obj(k.lhs, o); }
+        Neg k -> { expr_uses_obj(k.lhs, o); }
+        BitNot k -> { expr_uses_obj(k.lhs, o); }
+        LogAnd k -> { expr_uses_obj(k.lhs, o) || expr_uses_obj(k.rhs, o); }
+        LogOr k -> { expr_uses_obj(k.lhs, o) || expr_uses_obj(k.rhs, o); }
+        OrElse k -> { expr_uses_obj(k.lhs, o) || expr_uses_obj(k.rhs, o); }
+        Funcall k -> {
+            if (io_allows_stack(k.funcname)) { return false; }
+            a: ?*Expr = k.args;
+            while (a != null) {
+                if (expr_uses_obj(a, o)) { return true; }
+                a = a.next;
+            }
+            false;
+        }
+        MemberAccess _p -> { false; }
+        As k -> { expr_uses_obj(k.lhs, o); }
+        Trunc k -> { expr_uses_obj(k.lhs, o); }
+        New k -> { expr_uses_obj(k.lhs, o) || expr_uses_obj(k.fill, o) || field_inits_use_obj(k.inits, o); }
+        StructLit k -> { field_inits_use_obj(k.inits, o); }
+        VariantLit k -> { field_inits_use_obj(k.inits, o); }
+        If k -> { expr_uses_obj(k.cond, o) || expr_uses_obj(k.then, o) || expr_uses_obj(k.els, o); }
+        Match k -> {
+            if (expr_uses_obj(k.cond, o)) { return true; }
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                if (stmt_uses_obj(arm.body, o)) { return true; }
+                arm = arm.next;
+            }
+            false;
+        }
+        Block k -> { stmt_list_uses_obj(k.body, o); }
+        _ -> { false; }
+    }
+}
+
+field_inits_use_obj(inits: ?*FieldInit, o: *Obj): bool {
+    a: ?*FieldInit = inits;
+    while (a != null) {
+        if (expr_uses_obj(a.lhs, o)) { return true; }
+        a = a.next;
+    }
+    false;
+}
+
+stmt_uses_obj(s: ?*Stmt, o: *Obj): bool {
+    if (s == null) { return false; }
+    match s.kind {
+        Return k -> { expr_uses_obj(k.lhs, o); }
+        ExprStmt k -> { expr_uses_obj(k.lhs, o); }
+        Block k -> { stmt_list_uses_obj(k.body, o); }
+        If k -> { expr_uses_obj(k.cond, o) || stmt_uses_obj(k.then, o) || stmt_uses_obj(k.els, o); }
+        While k -> { expr_uses_obj(k.cond, o) || stmt_uses_obj(k.body, o); }
+        Match k -> {
+            if (expr_uses_obj(k.cond, o)) { return true; }
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                if (stmt_uses_obj(arm.body, o)) { return true; }
+                arm = arm.next;
+            }
+            false;
+        }
+        Raise k -> { field_inits_use_obj(k.inits, o); }
+        Try k -> {
+            if (stmt_uses_obj(k.body, o)) { return true; }
+            a: ?*CatchArm = k.arms;
+            while (a != null) {
+                if (stmt_uses_obj(a.body, o)) { return true; }
+                a = a.next;
+            }
+            false;
+        }
+        _ -> { false; }
+    }
+}
+
+stmt_list_uses_obj(s: ?*Stmt, o: *Obj): bool {
+    while (s != null) {
+        if (stmt_uses_obj(s, o)) { return true; }
+        s = s.next;
+    }
+    false;
+}
+
+param_escapes(fn: *Function, po: *Obj): bool { stmt_uses_obj(fn.body, po); }
+
+check_call_stack_addrs(name: []i8, args: ?*Expr, fno: ?*Function) raises Error {
+    if (io_allows_stack(name)) { return; }
+    a: ?*Expr = args;
+    po: ?*Obj = null;
+    if (fno != null) { po = fno.params; }
+    while (a != null) {
+        if (is_tainted_expr(a)) {
+            if (fno == null) { error("address of local cannot escape"); }
+            if (po == null) { error("address of local cannot escape"); }
+            if (param_escapes(fno, po)) { error("address of local cannot escape"); }
+        }
+        if (po != null) { po = po.param_next; }
+        a = a.next;
+    }
 }
 
 index_lhs_var(n: *Expr): ?*Obj {
@@ -2188,6 +2529,10 @@ index_idx_var(n: *Expr): ?*Obj {
 }
 
 zindex_ok(str: ?*Obj, idx: *Expr): bool {
+    if (is_addr_taken(str)) {
+        kn0: int = index_idx_num(idx);
+        return kn0 == 0;
+    }
     kn: int = index_idx_num(idx);
     if (kn >= 0) {
         if (kn <= walk_hi(str)) { return true; }
@@ -2195,6 +2540,7 @@ zindex_ok(str: ?*Obj, idx: *Expr): bool {
     }
     iv: ?*Obj = index_idx_var(idx);
     if (iv == null) { return false; }
+    if (is_addr_taken(iv)) { return false; }
     if (walk_cursor(str) == iv) { return true; }
     if (is_zero_var(iv) && walk_hi(str) >= 0) {
         walk_push(str, walk_hi(str), iv);
@@ -2207,6 +2553,7 @@ walk_advance_index(lhs: *Expr, idx: *Expr) {
     raw: ?*Type = lhs.ty;
     if (raw == null || !is_zptr(raw)) { return; }
     sv: ?*Obj = index_lhs_var(lhs);
+    if (is_addr_taken(sv)) { return; }
     kn: int = index_idx_num(idx);
     if (kn >= 0) {
         walk_push(sv, kn + 1, walk_cursor(sv));
@@ -2274,8 +2621,9 @@ opt_local_var(n: ?*Expr) raises Error: ?*Obj {
         match n.kind {
             Var k -> {
                 var: ?*Obj = k.var;
-                if (var != null) {
+                    if (var != null) {
                     if (var.is_local == 0) { return null; }
+                    if (is_addr_taken(var)) { return null; }
                     t: ?*Type = decay(var.ty);
                     if (t != null && is_opt_pointer(t)) { return var; }
                     return null;
@@ -2879,6 +3227,14 @@ add_type_stmt(s: ?*Stmt) raises Error {
 }
 
 add_type_field_inits(inits: ?*FieldInit) raises Error {
+    add_type_field_inits_opt(inits, 0);
+}
+
+add_type_field_inits_heap(inits: ?*FieldInit) raises Error {
+    add_type_field_inits_opt(inits, 1);
+}
+
+add_type_field_inits_opt(inits: ?*FieldInit, heap: int) raises Error {
     a: ?*FieldInit = inits;
     while (a != null) {
         add_type(a.lhs);
@@ -2886,6 +3242,7 @@ add_type_field_inits(inits: ?*FieldInit) raises Error {
             if (!assignable(decay(a.member.ty), a.lhs)) {
                 error_have_expr_want("field initializer type mismatch", a.lhs, decay(a.member.ty));
             }
+            if (heap != 0) { check_no_stack_addr(a.lhs); }
         }
         a = a.next;
     }
@@ -3249,7 +3606,10 @@ check_stmt_result(s: ?*Stmt, want: *Type) raises Error: bool {
         ExprStmt k -> {
             lty: ?*Type = k.lhs.ty;
             if (lty != null && is_noreturn_ty(lty)) { return true; }
-            if (assignable(want, k.lhs)) { return true; }
+            if (assignable(want, k.lhs)) {
+                check_no_stack_addr(k.lhs);
+                return true;
+            }
             error_have_expr_want("return type mismatch", k.lhs, want);
             false;
         }
@@ -3382,7 +3742,7 @@ add_type_expr(p: *Expr) raises Error {
                     error_have_expr_want("new T[n] fill type mismatch", fill, elem);
                 }
             }
-            add_type_field_inits(k.inits);
+            add_type_field_inits_heap(k.inits);
             return;
         }
         StructLit k -> {
@@ -3466,9 +3826,25 @@ add_type_expr(p: *Expr) raises Error {
             if (!assignable(lt, q.rhs)) {
                 error_have_expr_want("assignment type mismatch", q.rhs, lt);
             }
+            if (is_tainted_expr(q.rhs)) {
+                match q.lhs.kind {
+                    Var vp -> {
+                        dest: ?*Obj = vp.var;
+                        if (dest == null) { error("address of local cannot escape"); }
+                        if (dest.is_local == 0) { error("address of local cannot escape"); }
+                        mark_tainted(dest);
+                    }
+                    _ -> { error("address of local cannot escape"); }
+                }
+            }
             match q.lhs.kind {
                 Var vp -> {
+                    kill_var_facts(vp.var);
                     if (expr_is_zero_lit(q.rhs)) { mark_zero_var(vp.var); }
+                }
+                Index ik -> {
+                    ilt: ?*Type = ik.lhs.ty;
+                    if (ilt != null && is_zptr(ilt)) { error("cannot assign through C-string index"); }
                 }
                 _ -> {}
             }
@@ -3478,6 +3854,10 @@ add_type_expr(p: *Expr) raises Error {
         Addr q -> {
             add_type(q.lhs);
             match q.lhs.kind {
+                Var vk -> {
+                    vo: ?*Obj = vk.var;
+                    if (vo != null) { mark_addr_taken(vo); }
+                }
                 Index ik -> {
                     ilt: ?*Type = ik.lhs.ty;
                     if (ilt != null && is_zptr(ilt)) {
@@ -3550,7 +3930,14 @@ add_type_expr(p: *Expr) raises Error {
                 p.ty = ty_int;
                 return;
             }
+            if (streq(q.funcname, "write") || streq(q.funcname, "read")) {
+                check_io_args(q.funcname, q.args);
+                p.kind = ExprKind.Funcall { funcname: q.funcname, args: q.args, fn: null };
+                p.ty = ty_int;
+                return;
+            }
             fno: ?*Function = find_function(q.funcname);
+            check_call_stack_addrs(q.funcname, q.args, fno);
             p.kind = ExprKind.Funcall { funcname: q.funcname, args: q.args, fn: fno };
             fo: ?*Obj = find_obj(globals, q.funcname);
             if (fno != null) {
@@ -3650,7 +4037,7 @@ add_type_stmt_node(p: *Stmt) raises Error {
         }
         Raise k -> {
             check_exn_allowed(k.exn, "raise");
-            add_type_field_inits(k.inits);
+            add_type_field_inits_heap(k.inits);
             return;
         }
         Block q -> {
@@ -3684,6 +4071,7 @@ add_type_stmt_node(p: *Stmt) raises Error {
                 if (!assignable(rt, lhs)) {
                     error_have_expr_want("return type mismatch", lhs, rt);
                 }
+                check_no_stack_addr(lhs);
             } else {
                 if (current_return_ty != null) {
                     error_ty("return missing a value", current_return_ty);
@@ -5446,6 +5834,8 @@ typecheck_program() raises Error {
         narrow_top = null;
         walk_top = null;
         zero_top = null;
+        taint_top = null;
+        addr_top = null;
         add_type_stmt(fn.body);
         check_fn_result(fn);
         check_fn_inited(fn);
@@ -5572,22 +5962,41 @@ emit_exit1() {
     cg_call("exit");
 }
 
+/* Heap is 64MiB. n * esz + 8 must not wrap; negative n is huge unsigned. */
+emit_check_new_count(nreg: int, esz: int) {
+    max_n: int = 67108856 / esz;
+    if (max_n <= 0) { max_n = 0; }
+    cg_alu_imm(7, max_n, nreg);
+    cg_jump_id(7, oob_lab);
+}
+
+emit_malloc() {
+    cg_call("malloc");
+    cg_alu_imm(7, 0, 0);
+    cg_jump_id(4, oob_lab);
+}
+
 emit_check_idx() {
     cg_alu_rr(57, 2, 1);
     cg_jump_id(3, oob_lab);
 }
 
 /* Args already in rdi=dst, rsi=di, rdx=src, rcx=si, r8=n. Check ends, then
- * call runtime memcpy(dst+di, src+si, n). ja: di+n > len is OOB. */
+ * call runtime memcpy(dst+di, src+si, n). ja: di+n > len is OOB.
+ * di/si are also compared to len first so a negative index cannot wrap. */
 emit_memcpy_call() {
+    cg_mov_mr(7, 0 - 8, 0);
+    cg_alu_rr(57, 0, 6);
+    cg_jump_id(7, oob_lab);
     cg_mov_rr(6, 10);
     cg_alu_rr(1, 8, 10);
-    cg_mov_mr(7, 0 - 8, 0);
     cg_alu_rr(57, 0, 10);
+    cg_jump_id(7, oob_lab);
+    cg_mov_mr(2, 0 - 8, 0);
+    cg_alu_rr(57, 0, 1);
     cg_jump_id(7, oob_lab);
     cg_mov_rr(1, 10);
     cg_alu_rr(1, 8, 10);
-    cg_mov_mr(2, 0 - 8, 0);
     cg_alu_rr(57, 0, 10);
     cg_jump_id(7, oob_lab);
     cg_alu_rr(1, 6, 7);
@@ -5595,6 +6004,43 @@ emit_memcpy_call() {
     cg_mov_rr(2, 6);
     cg_mov_rr(8, 2);
     cg_call("l8_memcpy");
+}
+
+/* Args already in registers. []i8 uses the length prefix; *i8 is one byte. */
+emit_io_call(name: []i8, args: ?*Expr) raises Error {
+    a0: ?*Expr = args;
+    if (a0 == null) { error("missing I/O args"); }
+    a1: ?*Expr = a0.next;
+    if (a1 == null) { error("missing I/O args"); }
+    t1: ?*Type = decay(a1.ty);
+    a2: ?*Expr = a1.next;
+    if (t1 != null && is_pointer(t1)) {
+        cg_mov_imm(1, 2);
+        cg_call(name);
+        return;
+    }
+    if (a2 == null) {
+        cg_mov_mr(6, 0 - 8, 2);
+        cg_call(name);
+        return;
+    }
+    if (a2.next == null) {
+        cg_mov_mr(6, 0 - 8, 0);
+        cg_alu_rr(57, 0, 2);
+        cg_jump_id(7, oob_lab);
+        cg_call(name);
+        return;
+    }
+    cg_mov_mr(6, 0 - 8, 0);
+    cg_alu_rr(57, 0, 2);
+    cg_jump_id(7, oob_lab);
+    cg_mov_rr(2, 10);
+    cg_alu_rr(1, 1, 10);
+    cg_alu_rr(57, 0, 10);
+    cg_jump_id(7, oob_lab);
+    cg_alu_rr(1, 2, 6);
+    cg_mov_rr(1, 2);
+    cg_call(name);
 }
 
 emit_scale_offset(esz: int) {
@@ -6002,6 +6448,7 @@ gen_expr(n: *Expr) raises Error {
                 gen_expr(lhs);
                 cg_push(12);
                 cg_mov_rr(0, 12);
+                emit_check_new_count(12, esz);
                 gen_expr(fill);
                 cg_push(13);
                 cg_mov_rr(0, 13);
@@ -6011,7 +6458,7 @@ gen_expr(n: *Expr) raises Error {
                 }
                 cg_alu_imm(0, 8, 0);
                 cg_mov_rr(0, 7);
-                cg_call("malloc");
+                emit_malloc();
                 cg_mov_rm(12, 0, 0);
                 cg_alu_imm(0, 8, 0);
                 cg_push(3);
@@ -6056,7 +6503,7 @@ gen_expr(n: *Expr) raises Error {
                 return;
             }
             cg_mov_imm(esz, 7);
-            cg_call("malloc");
+            emit_malloc();
             variant: ?*Variant = k.variant;
             if (variant != null) {
                 cg_push(3);
@@ -6316,6 +6763,10 @@ gen_expr(n: *Expr) raises Error {
                 emit_memcpy_call();
                 return;
             }
+            if (streq(k.funcname, "write") || streq(k.funcname, "read")) {
+                emit_io_call(k.funcname, k.args);
+                return;
+            }
             cg_call(k.funcname);
             return;
         }
@@ -6468,7 +6919,7 @@ gen_stmt(n: *Stmt) raises Error {
                 esz: int = k.exn.size;
                 if (esz <= 0) { esz = 8; }
                 cg_mov_imm(esz, 7);
-                cg_call("malloc");
+                emit_malloc();
                 cg_push(3);
                 cg_mov_rr(0, 3);
                 gen_struct_inits(k.inits);

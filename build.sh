@@ -134,7 +134,17 @@ run_examples_selfhost() {
   example_compile_fail "$tool" usebefore examples/usebefore.l8 'use of uninitialized local'
   example_compile_fail "$tool" newnofill examples/newnofill.l8 'requires an initial value'
   example_compile_fail "$tool" bareglobal examples/bareglobal.l8 'global requires an initializer'
+  example_compile_fail "$tool" writeptr examples/writeptr.l8 'of \*i8 is one byte'
+  example_compile_fail "$tool" stackaddr examples/stackaddr.l8 'address of local cannot escape'
+  example_compile_fail "$tool" stash examples/stash.l8 'address of local cannot escape'
+  example_compile_fail "$tool" stalenarrow examples/stalenarrow.l8 'dereferencing optional pointer'
+  example_compile_fail "$tool" stalewalk examples/stalewalk.l8 'C-string index not walked'
+  example_compile_fail "$tool" nullalias examples/nullalias.l8 'dereferencing optional pointer'
+  example_compile_fail "$tool" walkalias examples/walkalias.l8 'C-string index not walked'
+  example_compile_fail "$tool" zstore examples/zstore.l8 'cannot assign through C-string'
   example_exit "$tool" sliceoob examples/sliceoob.l8 1
+  example_exit "$tool" writeoob examples/writeoob.l8 1
+  example_exit "$tool" newwrap examples/newwrap.l8 1
 }
 
 check_retwarn() {
