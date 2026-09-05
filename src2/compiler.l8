@@ -13,6 +13,7 @@
 // `return expr` in tail position and ignored values in returning functions are warnings.
 // Semicolon after statements and non-brace decls; not after `}`.
 // noreturn return type; checked exceptions (exception/raises/raise/try/with).
+// Locals: `x: T;` is unassigned; use before assign on all paths is an error. No `uninitialized`.
 // Pipeline: parse → typecheck → unused fn/local + raises/noreturn checks → codegen.
 // This compiler reports failures via `exception Error` (caught in main).
 
@@ -369,6 +370,13 @@ type CatchFrame = {
 }
 
 catch_top: ?*CatchFrame;
+
+type InitFrame = {
+    var: *Obj;
+    next: ?*InitFrame;
+}
+
+init_top: ?*InitFrame;
 
 L8_JMP_BUF_SIZE: int = 72;
 
@@ -762,7 +770,7 @@ init_dummies() {
         str: "",
         len: 0,
         pos: 0,
-        next: uninitialized
+        next: token_eof
     };
     token_eof.next = token_eof;
 }
@@ -1708,8 +1716,8 @@ tokenize() raises Error: *Token {
         next: token_eof
     };
     cur: *Token = head;
-    t: *Token = uninitialized;
-    s: *i8 = uninitialized;
+    t: *Token;
+    s: *i8;
     n: int = 0;
     v: int = 0;
     c: i8 = 0i8;
@@ -2454,13 +2462,11 @@ parse_field_inits(members: ?*Member) raises Error: *FieldInit {
             if (i.member == mu) { error("duplicate field"); }
             i = i.next;
         }
-        lhs: ?*Expr = null;
         if (tok.kind == TokKind.Uninitialized) {
-            tok = tok.next;
-        } else {
-            e: *Expr = parse_expr();
-            lhs = e;
+            error("uninitialized is not supported; every field needs a value");
         }
+        e: *Expr = parse_expr();
+        lhs: ?*Expr = e;
         init: *FieldInit = new_field_init(mu, lhs);
         if (cur != null) {
             cur.next = init;
@@ -2498,7 +2504,7 @@ parse_exn_field_inits(ed: *ExnDef) raises Error: *FieldInit {
 parse_variant_field_inits(v: *Variant) raises Error: *FieldInit { parse_field_inits(v.fields); }
 
 parse_primary() raises Error: *Expr {
-    n: *Expr = uninitialized;
+    n: *Expr;
     if (tok.kind == TokKind.New) {
         tok = tok.next;
         if (is_type_name() && (tok.next).kind == TokKind.Dot) {
@@ -2532,11 +2538,10 @@ parse_primary() raises Error: *Expr {
         }
         if (is_pointer(base)) { error("new expects a non-pointer type"); }
         if (tok.kind == TokKind.Uninitialized) {
-            tok = tok.next;
-            return new_heap_node(null, 1, null, null, ptr_to(base));
+            error("new T uninitialized is not supported; use new T { ... }");
         }
         if (tok.kind != TokKind.LBrace) {
-            error("expected uninitialized, {, [, or .Variant after new");
+            error("expected {, [, or .Variant after new");
         }
         if (is_enum_ty(base)) {
             error("use new Enum.Variant { ... } for sum types");
@@ -3999,15 +4004,17 @@ parse_stmt() raises Error: *Stmt {
     if (tok.kind == TokKind.Ident && (tok.next).kind == TokKind.Colon) {
         o: *Obj = parse_decl(1);
         if (tok.kind == TokKind.Comma) { error("only one variable per declaration"); }
-        skip(TokKind.Assign);
-        if (tok.kind == TokKind.Uninitialized) {
+        if (tok.kind == TokKind.Assign) {
             tok = tok.next;
+            if (tok.kind == TokKind.Uninitialized) {
+                error("uninitialized is not supported; declare x: T; and assign before use");
+            }
+            rhs: *Expr = parse_expr();
             skip(TokKind.Semi);
-            return new_block(null);
+            return new_expr_stmt(new_assign(new_var_node(o), rhs));
         }
-        rhs: *Expr = parse_expr();
         skip(TokKind.Semi);
-        return new_expr_stmt(new_assign(new_var_node(o), rhs));
+        return new_block(null);
     }
     e: *Expr = parse_expr();
     skip(TokKind.Semi);
@@ -4342,10 +4349,9 @@ parse_program_unit() raises Error {
                 if (tok.kind == TokKind.Assign) {
                     tok = tok.next;
                     if (tok.kind == TokKind.Uninitialized) {
-                        tok = tok.next;
-                    } else {
-                        o2.init = parse_expr();
+                        error("uninitialized is not supported; use a bare global or an initializer");
                     }
+                    o2.init = parse_expr();
                 }
                 skip(TokKind.Semi);
             }
@@ -5067,6 +5073,346 @@ typecheck_global_inits() raises Error {
     }
 }
 
+error_uninit(name: []i8) raises Error: noreturn {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, "use of uninitialized local ");
+    sb_puts(sb, name);
+    error(sb_finish(sb));
+}
+
+init_has(o: *Obj): bool {
+    f: ?*InitFrame = init_top;
+    while (f != null) {
+        if (f.var == o) { return true; }
+        f = f.next;
+    }
+    false;
+}
+
+init_mark(o: *Obj) {
+    if (init_has(o)) { return; }
+    init_top = new InitFrame { var: o, next: init_top };
+}
+
+init_use(o: ?*Obj) raises Error {
+    if (o == null) { return; }
+    if (o.is_local == 0) { return; }
+    if (init_has(o)) { return; }
+    error_uninit(o.name);
+}
+
+init_has_since(top: ?*InitFrame, save: ?*InitFrame, o: *Obj): bool {
+    f: ?*InitFrame = top;
+    while (f != null) {
+        if (f == save) { return false; }
+        if (f.var == o) { return true; }
+        f = f.next;
+    }
+    false;
+}
+
+init_meet(then_top: ?*InitFrame, else_top: ?*InitFrame, save: ?*InitFrame) {
+    init_top = save;
+    f: ?*InitFrame = then_top;
+    while (f != null) {
+        if (f == save) { return; }
+        v: *Obj = f.var;
+        if (init_has_since(else_top, save, v)) { init_mark(v); }
+        f = f.next;
+    }
+}
+
+init_mark_fn(fn: *Function) {
+    init_top = null;
+    p: ?*Obj = fn.params;
+    while (p != null) {
+        init_mark(p);
+        p = p.param_next;
+    }
+    o: ?*Obj = fn.locals;
+    while (o != null) {
+        if (len(o.name) > 0 && o.name[0] == '.') { init_mark(o); }
+        o = o.next;
+    }
+}
+
+da_field_inits(inits: ?*FieldInit) raises Error {
+    a: ?*FieldInit = inits;
+    while (a != null) {
+        _e: bool = da_expr(a.lhs);
+        a = a.next;
+    }
+}
+
+da_write(n: *Expr) raises Error {
+    match n.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v != null) { init_mark(v); }
+        }
+        MemberAccess k -> { _e: bool = da_expr(k.lhs); }
+        Index k -> {
+            _a: bool = da_expr(k.lhs);
+            _i: bool = da_expr(k.idx);
+        }
+        Deref k -> { _d: bool = da_expr(k.lhs); }
+        _ -> { _n: bool = da_expr(n); }
+    }
+}
+
+da_expr(n: ?*Expr) raises Error: bool {
+    if (n == null) { return false; }
+    p: *Expr = n;
+    match p.kind {
+        Num _k -> { false; }
+        Null -> { false; }
+        Var k -> {
+            init_use(k.var);
+            false;
+        }
+        Binary k -> {
+            _bl: bool = da_expr(k.lhs);
+            _br: bool = da_expr(k.rhs);
+            false;
+        }
+        Assign k -> {
+            _ar: bool = da_expr(k.rhs);
+            da_write(k.lhs);
+            false;
+        }
+        Addr k -> {
+            _ad: bool = da_expr(k.lhs);
+            false;
+        }
+        Deref k -> {
+            _dr: bool = da_expr(k.lhs);
+            false;
+        }
+        Index k -> {
+            _il: bool = da_expr(k.lhs);
+            _ii: bool = da_expr(k.idx);
+            false;
+        }
+        Not k -> { da_expr(k.lhs); }
+        Neg k -> { da_expr(k.lhs); }
+        BitNot k -> { da_expr(k.lhs); }
+        LogAnd k -> {
+            _al: bool = da_expr(k.lhs);
+            save: ?*InitFrame = init_top;
+            _ar2: bool = da_expr(k.rhs);
+            init_top = save;
+            false;
+        }
+        LogOr k -> {
+            _ol: bool = da_expr(k.lhs);
+            save2: ?*InitFrame = init_top;
+            _or: bool = da_expr(k.rhs);
+            init_top = save2;
+            false;
+        }
+        OrElse k -> {
+            _xl: bool = da_expr(k.lhs);
+            save3: ?*InitFrame = init_top;
+            _xr: bool = da_expr(k.rhs);
+            init_top = save3;
+            false;
+        }
+        Funcall k -> {
+            a: ?*Expr = k.args;
+            while (a != null) {
+                _fa: bool = da_expr(a);
+                a = a.next;
+            }
+            rt: ?*Type = p.ty;
+            rt != null && is_noreturn_ty(rt);
+        }
+        MemberAccess k -> {
+            _ma: bool = da_expr(k.lhs);
+            false;
+        }
+        As k -> { da_expr(k.lhs); }
+        Trunc k -> { da_expr(k.lhs); }
+        New k -> {
+            _nl: bool = da_expr(k.lhs);
+            da_field_inits(k.inits);
+            false;
+        }
+        StructLit k -> {
+            da_field_inits(k.inits);
+            false;
+        }
+        VariantLit k -> {
+            da_field_inits(k.inits);
+            false;
+        }
+        If k -> {
+            _ic: bool = da_expr(k.cond);
+            savei: ?*InitFrame = init_top;
+            dt: bool = da_expr(k.then);
+            then_top: ?*InitFrame = init_top;
+            init_top = savei;
+            de: bool = da_expr(k.els);
+            else_top: ?*InitFrame = init_top;
+            if (dt && de) { return true; }
+            if (dt) { init_top = else_top; return false; }
+            if (de) { init_top = then_top; return false; }
+            init_meet(then_top, else_top, savei);
+            false;
+        }
+        Match k -> {
+            _mc: bool = da_expr(k.cond);
+            savem: ?*InitFrame = init_top;
+            arm: ?*MatchArm = k.arms;
+            any: int = 0;
+            live: int = 0;
+            acc: ?*InitFrame = null;
+            while (arm != null) {
+                init_top = savem;
+                b: ?*Obj = arm.binder;
+                if (b != null) { init_mark(b); }
+                d: bool = da_stmt(arm.body);
+                if (!d) {
+                    if (live == 0) {
+                        acc = init_top;
+                    } else {
+                        init_meet(acc, init_top, savem);
+                        acc = init_top;
+                    }
+                    live = live + 1;
+                }
+                any = 1;
+                arm = arm.next;
+            }
+            if (any == 0) { return false; }
+            if (live == 0) { return true; }
+            init_top = acc;
+            false;
+        }
+        Block k -> { da_stmt_list(k.body); }
+    }
+}
+
+da_stmt_list(s: ?*Stmt) raises Error: bool {
+    a: ?*Stmt = s;
+    d: bool = false;
+    while (a != null) {
+        if (da_stmt(a)) { d = true; }
+        a = a.next;
+    }
+    d;
+}
+
+da_stmt(s: ?*Stmt) raises Error: bool {
+    if (s == null) { return false; }
+    match s.kind {
+        Return k -> {
+            _re: bool = da_expr(k.lhs);
+            true;
+        }
+        Raise k -> {
+            da_field_inits(k.inits);
+            true;
+        }
+        ExprStmt k -> { da_expr(k.lhs); }
+        Block k -> { da_stmt_list(k.body); }
+        If k -> {
+            _sc: bool = da_expr(k.cond);
+            save: ?*InitFrame = init_top;
+            dt: bool = da_stmt(k.then);
+            then_top: ?*InitFrame = init_top;
+            els: ?*Stmt = k.els;
+            if (els == null) {
+                init_top = save;
+                false;
+            } else {
+                init_top = save;
+                de: bool = da_stmt(els);
+                else_top: ?*InitFrame = init_top;
+                if (dt && de) { return true; }
+                if (dt) { init_top = else_top; return false; }
+                if (de) { init_top = then_top; return false; }
+                init_meet(then_top, else_top, save);
+                false;
+            }
+        }
+        While k -> {
+            _wc: bool = da_expr(k.cond);
+            savew: ?*InitFrame = init_top;
+            _wb: bool = da_stmt(k.body);
+            init_top = savew;
+            false;
+        }
+        Match k -> {
+            _sm: bool = da_expr(k.cond);
+            savem: ?*InitFrame = init_top;
+            arm: ?*MatchArm = k.arms;
+            any: int = 0;
+            live: int = 0;
+            acc: ?*InitFrame = null;
+            while (arm != null) {
+                init_top = savem;
+                b: ?*Obj = arm.binder;
+                if (b != null) { init_mark(b); }
+                d: bool = da_stmt(arm.body);
+                if (!d) {
+                    if (live == 0) {
+                        acc = init_top;
+                    } else {
+                        init_meet(acc, init_top, savem);
+                        acc = init_top;
+                    }
+                    live = live + 1;
+                }
+                any = 1;
+                arm = arm.next;
+            }
+            if (any == 0) { return false; }
+            if (live == 0) { return true; }
+            init_top = acc;
+            false;
+        }
+        Try k -> {
+            savet: ?*InitFrame = init_top;
+            dtry: bool = da_stmt(k.body);
+            try_top: ?*InitFrame = init_top;
+            live: int = 0;
+            acc: ?*InitFrame = null;
+            if (!dtry) {
+                acc = try_top;
+                live = 1;
+            }
+            arm: ?*CatchArm = k.arms;
+            all_div: bool = dtry;
+            while (arm != null) {
+                init_top = savet;
+                b: ?*Obj = arm.binder;
+                if (b != null) { init_mark(b); }
+                dc: bool = da_stmt(arm.body);
+                if (!dc) {
+                    if (live == 0) {
+                        acc = init_top;
+                    } else {
+                        init_meet(acc, init_top, savet);
+                        acc = init_top;
+                    }
+                    live = live + 1;
+                    all_div = false;
+                }
+                arm = arm.next;
+            }
+            if (all_div && live == 0) { return true; }
+            init_top = acc;
+            false;
+        }
+    }
+}
+
+check_fn_inited(fn: *Function) raises Error {
+    init_mark_fn(fn);
+    _fn: bool = da_stmt(fn.body);
+    init_top = null;
+}
+
 typecheck_program() raises Error {
     typecheck_global_inits();
     fn: ?*Function = functions;
@@ -5084,6 +5430,7 @@ typecheck_program() raises Error {
         zero_top = null;
         add_type_stmt(fn.body);
         check_fn_result(fn);
+        check_fn_inited(fn);
         fn = fn.next;
     }
     current_fn = null;
@@ -6245,7 +6592,7 @@ codegen() raises Error {
 type Timespec = { sec: int; nsec: int; }
 
 mono_ns(): int {
-    ts: Timespec = uninitialized;
+    ts: Timespec = Timespec { sec: 0, nsec: 0 };
     syscall(228, 1, &ts, 0, 0, 0);
     ts.sec * 1000000000 + ts.nsec;
 }
@@ -6380,7 +6727,11 @@ compiler_main(argc: int, argv: [][z]i8): int {
         cg_direct_mode = 0;
         do_profile = 0;
         have: int = 0;
-        path: [z]i8 = uninitialized;
+        if (argc < 1) {
+            write(2, "error: usage: l8 compile [--profile|-p] <file.l8>\n", len("error: usage: l8 compile [--profile|-p] <file.l8>\n"));
+            return 1;
+        }
+        path: [z]i8 = argv[0];
         ai: int = 1;
         while (ai < argc) {
             arg: [z]i8 = argv[ai];

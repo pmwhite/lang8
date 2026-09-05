@@ -131,6 +131,7 @@ run_examples_selfhost() {
   example "$tool" offset examples/offset.l8 'YYY'
   example "$tool" counted examples/counted.l8 'YYYYYYY'
   example_compile_fail "$tool" ptrindex examples/ptrindex.l8 'pointer indexing is not allowed'
+  example_compile_fail "$tool" usebefore examples/usebefore.l8 'use of uninitialized local'
   example_exit "$tool" sliceoob examples/sliceoob.l8 1
 }
 
