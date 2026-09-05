@@ -34,7 +34,6 @@ type Type =
     | Array { base: *Type; len: int; }
     | Slice { base: *Type; }
     | ZPtr { base: *Type; }
-    | View { base: *Type; bound: []i8; }
     | Record { def: *StructDef; }
     | Enum { def: *EnumDef; }
     | Exn { def: *ExnDef; };
@@ -115,7 +114,6 @@ type TokKind =
     | Return
     | TypeKw
     | Sizeof
-    | Uninitialized
     | As
     | Trunc
     | New
@@ -339,8 +337,6 @@ ptr_cache: ?*TyEnt = null;
 opt_ptr_cache: ?*TyEnt = null;
 slice_cache: ?*TyEnt = null;
 zptr_cache: ?*TyEnt = null;
-type ViewEnt = { base: *Type; bound: []i8; ty: *Type; next: ?*ViewEnt; }
-view_cache: ?*ViewEnt = null;
 oob_lab: int = 0;
 next_exn_tag: int = 0;
 field_list_size: int = 0;
@@ -672,13 +668,6 @@ append_type(sb: *StrBuf, t: ?*Type) raises Error {
             append_type(sb, k.base);
             return;
         }
-        View k -> {
-            sb_putc(sb, '[');
-            sb_puts(sb, k.bound);
-            sb_putc(sb, ']');
-            append_type(sb, k.base);
-            return;
-        }
         Record k -> { sb_puts(sb, k.def.name); return; }
         Enum k -> { sb_puts(sb, k.def.name); return; }
         Exn k -> { sb_puts(sb, k.def.name); return; }
@@ -816,7 +805,6 @@ init_runtime() {
     opt_ptr_cache = null;
     slice_cache = null;
     zptr_cache = null;
-    view_cache = null;
     walk_top = null;
     zero_top = null;
     cg_labbuf = new i8[64](0i8);
@@ -947,7 +935,6 @@ type_size(t: *Type) raises Error: int {
         Array k -> { type_size(k.base) * k.len; }
         Slice _p -> { 8; }
         ZPtr _p -> { 8; }
-        View _p -> { 8; }
         Record k -> { k.def.size; }
         Enum k -> {
             if (k.def.size <= 0) { 8; } else { k.def.size; }
@@ -964,7 +951,6 @@ type_base(t: *Type) raises Error: *Type {
         Array k -> { k.base; }
         Slice k -> { k.base; }
         ZPtr k -> { k.base; }
-        View k -> { k.base; }
         _ -> { error("not a pointer, array, or slice"); }
     }
 }
@@ -1357,14 +1343,7 @@ is_zptr(t: *Type): bool {
     }
 }
 
-is_view(t: *Type): bool {
-    match t.* {
-        View _p -> { true; }
-        _ -> { false; }
-    }
-}
-
-is_indexable(t: *Type): bool { is_array(t) || is_slice(t) || is_zptr(t) || is_view(t); }
+is_indexable(t: *Type): bool { is_array(t) || is_slice(t) || is_zptr(t); }
 
 is_struct_ty(t: *Type): bool {
     match t.* {
@@ -1492,7 +1471,6 @@ type_has_pointers(t: ?*Type): bool {
         OptPtr _p -> { true; }
         Slice _p -> { true; }
         ZPtr _p -> { true; }
-        View _p -> { true; }
         Array k -> { type_has_pointers(k.base); }
         Record k -> { struct_has_pointers(k.def); }
         Enum k -> { enum_has_pointers(k.def); }
@@ -1515,17 +1493,6 @@ types_equal(a: *Type, b: *Type) raises Error: bool {
     }
     else if (is_slice(a) && is_slice(b)) { types_equal(type_base(a), type_base(b)); }
     else if (is_zptr(a) && is_zptr(b)) { types_equal(type_base(a), type_base(b)); }
-    else if (is_view(a) && is_view(b)) {
-        match a.* {
-            View ka -> {
-                match b.* {
-                    View kb -> { streq(ka.bound, kb.bound) && types_equal(ka.base, kb.base); }
-                    _ -> { false; }
-                }
-            }
-            _ -> { false; }
-        }
-    }
     else if (is_struct_ty(a) && is_struct_ty(b)) { type_struct_def(a) == type_struct_def(b); }
     else if (is_enum_ty(a) && is_enum_ty(b)) { type_enum_def(a) == type_enum_def(b); }
     else if (is_exn_ty(a) && is_exn_ty(b)) { type_exn_def(a) == type_exn_def(b); }
@@ -1729,10 +1696,6 @@ ident_kind(s: []i8, off: int, n: int): TokKind {
     }
     if (n == 9) {
         if (s[off] == 'e' && streq_n(s, off, "exception", 0, 9)) { return TokKind.Exception; }
-        return TokKind.Ident;
-    }
-    if (n == 13) {
-        if (s[off] == 'u' && streq_n(s, off, "uninitialized", 0, 13)) { return TokKind.Uninitialized; }
         return TokKind.Ident;
     }
     TokKind.Ident;
@@ -2158,22 +2121,6 @@ find_var(name: []i8): ?*Obj {
     find_global(name);
 }
 
-find_fn_bound(name: []i8): ?*Obj {
-    fn: ?*Function = current_fn;
-    if (fn == null) { return null; }
-    o: ?*Obj = fn.locals;
-    while (o != null) {
-        if (streq(o.name, name)) { return o; }
-        o = o.next;
-    }
-    p: ?*Obj = fn.params;
-    while (p != null) {
-        if (streq(p.name, name)) { return p; }
-        p = p.param_next;
-    }
-    null;
-}
-
 enter_scope() { scope_depth = scope_depth + 1; }
 
 leave_scope() raises Error {
@@ -2303,7 +2250,7 @@ is_stack_object(n: *Expr): bool {
         }
         Index k -> {
             lt2: ?*Type = k.lhs.ty;
-            if (lt2 != null && (is_slice(lt2) || is_zptr(lt2) || is_view(lt2))) { return false; }
+            if (lt2 != null && (is_slice(lt2) || is_zptr(lt2))) { return false; }
             is_stack_object(k.lhs);
         }
         _ -> { false; }
@@ -2846,15 +2793,6 @@ parse_type() raises Error: *Type {
             if (is_noreturn_ty(base0)) { error("noreturn cannot be a slice element"); }
             return slice_of(base0);
         }
-        if (tok.kind == TokKind.Colon) {
-            tok = tok.next;
-            if (tok.kind != TokKind.Num || tok.val != 0) { error("expected 0 in [:0] type"); }
-            tok = tok.next;
-            skip(TokKind.RBrack);
-            base1: *Type = parse_type();
-            if (is_noreturn_ty(base1)) { error("noreturn cannot be a C-string element"); }
-            return zptr_of(base1);
-        }
         if (tok.kind == TokKind.Ident && streq(cur_tokstr(), "z")) {
             tok = tok.next;
             skip(TokKind.RBrack);
@@ -2862,7 +2800,7 @@ parse_type() raises Error: *Type {
             if (is_noreturn_ty(base3)) { error("noreturn cannot be a C-string element"); }
             return zptr_of(base3);
         }
-        error("expected []T or [z]T");
+        error("expected a slice or C-string type");
     }
     if (tok.kind == TokKind.Question) {
         tok = tok.next;
@@ -2900,9 +2838,6 @@ parse_field_inits(members: ?*Member) raises Error: *FieldInit {
         while (i != null) {
             if (i.member == mu) { error("duplicate field"); }
             i = i.next;
-        }
-        if (tok.kind == TokKind.Uninitialized) {
-            error("uninitialized is not supported; every field needs a value");
         }
         e: *Expr = parse_expr();
         lhs: ?*Expr = e;
@@ -2970,8 +2905,8 @@ parse_primary() raises Error: *Expr {
             tok = tok.next;
             len: *Expr = parse_expr();
             skip(TokKind.RBrack);
-            if (is_view(base) || is_noreturn_ty(base)) {
-                error("new [n] element type cannot be a view or noreturn");
+            if (is_noreturn_ty(base)) {
+                error("new [n] element type cannot be noreturn");
             }
             if (tok.kind != TokKind.LParen) {
                 error("new T[n] requires an initial value (new T[n](v))");
@@ -2982,9 +2917,6 @@ parse_primary() raises Error: *Expr {
             return new_heap_node(len, 1, null, null, fill, slice_of(base));
         }
         if (is_pointer(base)) { error("new expects a non-pointer type"); }
-        if (tok.kind == TokKind.Uninitialized) {
-            error("new T uninitialized is not supported; use new T { ... }");
-        }
         if (tok.kind != TokKind.LBrace) {
             error("expected {, [, or .Variant after new");
         }
@@ -3994,18 +3926,6 @@ add_type_expr(p: *Expr) raises Error {
                     p.ty = ty_int;
                     return;
                 }
-                if (at != null && is_view(at)) {
-                    bn: []i8 = "";
-                    match at.* {
-                        View vk -> { bn = vk.bound; }
-                        _ -> { error("not a view"); }
-                    }
-                    bo: ?*Obj = find_var(bn);
-                    if (bo == null) { error("view bound is not in scope"); }
-                    p.kind = ExprKind.Var { var: bo, name: bn, member: null };
-                    p.ty = ty_int;
-                    return;
-                }
                 if (at != null && is_slice(at)) {
                     p.kind = ExprKind.Funcall { funcname: q.funcname, args: q.args, fn: null };
                     p.ty = ty_int;
@@ -4502,9 +4422,6 @@ parse_stmt() raises Error: *Stmt {
         if (tok.kind == TokKind.Comma) { error("only one variable per declaration"); }
         if (tok.kind == TokKind.Assign) {
             tok = tok.next;
-            if (tok.kind == TokKind.Uninitialized) {
-                error("uninitialized is not supported; declare x: T; and assign before use");
-            }
             rhs: *Expr = parse_expr();
             skip(TokKind.Semi);
             return new_expr_stmt(new_assign(new_var_node(o), rhs));
@@ -4885,9 +4802,6 @@ parse_program_unit() raises Error {
                     error("global requires an initializer (name: T = e)");
                 }
                 tok = tok.next;
-                if (tok.kind == TokKind.Uninitialized) {
-                    error("uninitialized is not supported; use name: T = e");
-                }
                 o2.init = parse_expr();
                 skip(TokKind.Semi);
             }
@@ -6226,20 +6140,10 @@ gen_index_addr(lhs: *Expr, idx: *Expr) raises Error {
             cg_mov_rr(0, 1);
             cg_pop(6);
         } else {
+            if (!is_slice(raw)) { error("index requires []T, [z]T, or an array"); }
             gen_expr(lhs);
             cg_mov_rr(0, 6);
-            if (is_slice(raw)) {
-                cg_mov_mr(6, 0 - 8, 2);
-            } else {
-                bo: ?*Obj = null;
-                match raw.* {
-                    View vk -> { bo = find_fn_bound(vk.bound); }
-                    _ -> {}
-                }
-                if (bo == null) { error("view bound is not in scope"); }
-                emit_load_var(bo, ty_int);
-                cg_mov_rr(0, 2);
-            }
+            cg_mov_mr(6, 0 - 8, 2);
             cg_push(6);
             cg_push(2);
             gen_expr(idx);

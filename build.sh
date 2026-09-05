@@ -149,6 +149,8 @@ run_examples_selfhost() {
   example_compile_fail "$tool" localesc examples/localesc.l8 'address of local cannot escape'
   example_compile_fail "$tool" localbox examples/localbox.l8 'address of local cannot escape'
   example_compile_fail "$tool" localparam examples/localparam.l8 'local mode is only valid on parameters'
+  example_compile_fail "$tool" colonz examples/colonz.l8 'expected a slice or C-string type'
+  example_compile_fail "$tool" uninitkw examples/uninitkw.l8 'undefined variable'
   example_exit "$tool" sliceoob examples/sliceoob.l8 1
   example_exit "$tool" writeoob examples/writeoob.l8 1
   example_exit "$tool" newwrap examples/newwrap.l8 1

@@ -69,7 +69,6 @@ _start:
     pop %rsi
     pop %rdi
     # Counted argv: length word at -8 so main(argc, argv: [][z]i8) can use len.
-    # View-style [argc][z]i8 still works; it ignores the prefix and uses argc.
     push %rdi
     push %rsi
     mov %rdi, %rax
