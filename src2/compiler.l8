@@ -3,9 +3,8 @@
 // Heap ADTs via new; aggregates by sret; *T vs ?*T with flow narrowing; `e or alt` unwraps ?*T.
 // Byte literals: 'A' and Ni8 (0..255); i8 arithmetic wraps, no mixed promotion.
 // *T is one object: p.* only, no p[i]. []T is a thin pointer with len at -8.
-// [n]T is a value array; [n]T in a param (n another param) is a view.
 // [z]T is a C-string; s[i] only if walked from 0. &s[i] on [z]T stays [z]T.
-// Suffix T[n] and [:0]T still parse. [z] in brackets is the sentinel, not a bound.
+// A span of an existing []T is the array plus a start index, not a [n]T view.
 // Globals: `name: type = const` writes .data; bare `name: type;` stays BSS.
 // Bitwise: `~ & ^ | << >>` on int/i8 (same type; >> is arithmetic; shift count is int).
 // `if`/`match`/`{ }` are expressions; a block's last statement is its value (`;` does not discard).
@@ -374,10 +373,10 @@ L8_JMP_BUF_SIZE: int = 72;
 
 exception Error { msg: *i8; pos: int; path: *i8; src: *i8; src_len: int; }
 
-streq_n(a: [n]i8, b: [n]i8, n: int): bool {
+streq_n(a: []i8, ai: int, b: []i8, bi: int, n: int): bool {
     i: int = 0;
     while (i < n) {
-        if (a[i] != b[i]) { return false; }
+        if (a[ai + i] != b[bi + i]) { return false; }
         i = i + 1;
     }
     true;
@@ -400,22 +399,22 @@ cstr_len(s: [z]i8): int {
     n;
 }
 
-name_eq_span(name: *i8, s: [n]i8, n: int): bool {
+name_eq_span(name: *i8, s: []i8, off: int, n: int): bool {
     if (len(name) != n) { false; }
-    else { streq_n(name, s, n); }
+    else { streq_n(name as []i8, 0, s, off, n); }
 }
 
-hash_n(s: [n]i8, n: int): int {
+hash_n(s: []i8, off: int, n: int): int {
     h: int = 5381;
     i: int = 0;
     while (i < n) {
-        h = h * 33 + (s[i] as int);
+        h = h * 33 + (s[off + i] as int);
         i = i + 1;
     }
     h;
 }
 
-hash_str(s: *i8): int { hash_n(s, len(s)); }
+hash_str(s: *i8): int { hash_n(s as []i8, 0, len(s)); }
 
 sym_bucket(h: int): int {
     if (h < 0) { h = 0 - h; }
@@ -434,25 +433,25 @@ clear_sym_tables() {
     }
 }
 
-memcpy(dst: [n]i8, src: [n]i8, n: int) {
+memcpy(dst: []i8, di: int, src: []i8, si: int, n: int) {
     i: int = 0;
     while (i + 8 <= n) {
-        d: *int = (&dst[i]) as *int;
-        s: *int = (&src[i]) as *int;
+        d: *int = (&dst[di + i]) as *int;
+        s: *int = (&src[si + i]) as *int;
         d.* = s.*;
         i = i + 8;
     }
     while (i < n) {
-        dst[i] = src[i];
+        dst[di + i] = src[si + i];
         i = i + 1;
     }
 }
 
-strdup_n(s: [n]i8, n: int): *i8 {
+strdup_n(s: []i8, off: int, n: int): *i8 {
     raw: []i8 = new i8[n + 16];
     p: *int = raw as *int;
     p.* = n;
-    memcpy(&raw[8], s, n);
+    memcpy(raw, 8, s, off, n);
     raw[8 + n] = 0i8;
     &raw[8];
 }
@@ -465,7 +464,8 @@ emit_flush() {
 }
 
 emit(s: [z]i8) {
-    n: int = cstr_len(s);
+    n: int = 0;
+    while (s[n] != 0i8) { n = n + 1; }
     if (n <= 0) { return; }
     if (n > emit_cap) {
         emit_flush();
@@ -473,7 +473,11 @@ emit(s: [z]i8) {
         return;
     }
     if (emit_len + n > emit_cap) { emit_flush(); }
-    memcpy(&emit_buf[emit_len], s, n);
+    i: int = 0;
+    while (s[i] != 0i8) {
+        emit_buf[emit_len + i] = s[i];
+        i = i + 1;
+    }
     emit_len = emit_len + n;
 }
 
@@ -484,7 +488,7 @@ emit_ch(c: i8) {
 }
 
 emit_num(n: int) {
-    buf: [32]i8 = uninitialized;
+    buf: []i8 = new i8[32];
     neg: int = 0;
     if (n < 0) {
         neg = 1;
@@ -521,7 +525,7 @@ error_at(p: int, msg: *i8) raises Error: noreturn {
     raise Error { msg: msg, pos: p, path: source_path, src: source, src_len: source_len };
 }
 
-print_error_at(path: *i8, src: [src_len]i8, src_len: int, pos: int, msg: *i8) {
+print_error_at(path: *i8, src: []i8, src_len: int, pos: int, msg: *i8) {
     line: int = 1;
     col: int = 1;
     i: int = 0;
@@ -595,7 +599,7 @@ sb_grow(sb: *StrBuf, need: int) {
         ncap = ncap * 2;
     }
     nd: []i8 = new i8[ncap];
-    memcpy(nd, sb.data, sb.len);
+    memcpy(nd, 0, sb.data, 0, sb.len);
     sb.data = nd;
     sb.cap = ncap;
 }
@@ -609,7 +613,7 @@ sb_putc(sb: *StrBuf, c: i8) {
 sb_puts(sb: *StrBuf, s: *i8) {
     n: int = len(s);
     sb_grow(sb, n);
-    memcpy(&sb.data[sb.len], s, n);
+    memcpy(sb.data, sb.len, s as []i8, 0, n);
     sb.len = sb.len + n;
 }
 
@@ -622,7 +626,7 @@ sb_put_num(sb: *StrBuf, n: int) {
         sb_putc(sb, '0');
         return;
     }
-    buf: [32]i8 = uninitialized;
+    buf: []i8 = new i8[32];
     i: int = 0;
     while (n > 0) {
         buf[i] = '0' + (n % 10) trunc i8;
@@ -635,7 +639,7 @@ sb_put_num(sb: *StrBuf, n: int) {
     }
 }
 
-sb_finish(sb: *StrBuf): *i8 { strdup_n(sb.data, sb.len); }
+sb_finish(sb: *StrBuf): *i8 { strdup_n(sb.data, 0, sb.len); }
 
 append_type(sb: *StrBuf, t: ?*Type) raises Error {
     if (t == null) {
@@ -752,7 +756,7 @@ error_have_expr_want(msg: *i8, have: ?*Expr, want: ?*Type) raises Error: noretur
 }
 
 emit_num_fd(fd: int, n: int) {
-    buf: [32]i8 = uninitialized;
+    buf: []i8 = new i8[32];
     neg: int = 0;
     if (n < 0) {
         neg = 1;
@@ -840,7 +844,7 @@ read_file(path: *i8) raises Error: []i8 {
         if (n + 65536 > cap) {
             cap = cap * 2;
             tmp: []i8 = new i8[cap];
-            memcpy(tmp, buf, n);
+            memcpy(tmp, 0, buf, 0, n);
             buf = tmp;
         }
         r: int = read(fd, &buf[n], 65536);
@@ -856,8 +860,8 @@ read_file(path: *i8) raises Error: []i8 {
 }
 
 normalize_path(path: [z]i8): *i8 {
-    n: int = cstr_len(path);
-    p: [n]i8 = path;
+    p: []i8 = zslice(path);
+    n: int = len(p);
     out: []i8 = new i8[n + 2];
     starts: []int = new int[n + 1];
     out_len: int = 0;
@@ -909,8 +913,8 @@ normalize_path(path: [z]i8): *i8 {
 
 resolve_import_path(base: [z]i8, imported: [z]i8): *i8 {
     if (imported[0] == '/') { return normalize_path(imported); }
-    base_len: int = cstr_len(base);
-    b: [base_len]i8 = base;
+    b: []i8 = zslice(base);
+    base_len: int = len(b);
     slash: int = 0 - 1;
     i: int = 0;
     while (i < base_len) {
@@ -1053,17 +1057,6 @@ zptr_of(base: *Type): *Type {
     t;
 }
 
-view_of(base: *Type, bound: *i8): *Type {
-    e: ?*ViewEnt = view_cache;
-    while (e != null) {
-        if (e.base == base && streq(e.bound, bound)) { return e.ty; }
-        e = e.next;
-    }
-    t: *Type = new Type.View { base: base, bound: bound };
-    view_cache = new ViewEnt { base: base, bound: bound, ty: t, next: view_cache };
-    t;
-}
-
 struct_type(sd: *StructDef): *Type {
     existing: ?*Type = sd.ty;
     if (existing != null) { existing; }
@@ -1094,41 +1087,41 @@ exn_type(ed: *ExnDef): *Type {
     }
 }
 
-find_struct_span(s: *i8, n: int): ?*StructDef {
-    b: int = sym_bucket(hash_n(s, n));
+find_struct_span(s: []i8, off: int, n: int): ?*StructDef {
+    b: int = sym_bucket(hash_n(s, off, n));
     sd: ?*StructDef = struct_buckets[b].head;
     while (sd != null) {
-        if (name_eq_span(sd.name, s, n)) { return sd; }
+        if (name_eq_span(sd.name, s, off, n)) { return sd; }
         sd = sd.hash_next;
     }
     null;
 }
 
-find_struct(name: *i8): ?*StructDef { find_struct_span(name, len(name)); }
+find_struct(name: *i8): ?*StructDef { find_struct_span(name as []i8, 0, len(name)); }
 
-find_enum_span(s: *i8, n: int): ?*EnumDef {
-    b: int = sym_bucket(hash_n(s, n));
+find_enum_span(s: []i8, off: int, n: int): ?*EnumDef {
+    b: int = sym_bucket(hash_n(s, off, n));
     e: ?*EnumDef = enum_buckets[b].head;
     while (e != null) {
-        if (name_eq_span(e.name, s, n)) { return e; }
+        if (name_eq_span(e.name, s, off, n)) { return e; }
         e = e.hash_next;
     }
     null;
 }
 
-find_enum(name: *i8): ?*EnumDef { find_enum_span(name, len(name)); }
+find_enum(name: *i8): ?*EnumDef { find_enum_span(name as []i8, 0, len(name)); }
 
-find_exn_span(s: *i8, n: int): ?*ExnDef {
-    b: int = sym_bucket(hash_n(s, n));
+find_exn_span(s: []i8, off: int, n: int): ?*ExnDef {
+    b: int = sym_bucket(hash_n(s, off, n));
     e: ?*ExnDef = exn_buckets[b].head;
     while (e != null) {
-        if (name_eq_span(e.name, s, n)) { return e; }
+        if (name_eq_span(e.name, s, off, n)) { return e; }
         e = e.hash_next;
     }
     null;
 }
 
-find_exn(name: *i8): ?*ExnDef { find_exn_span(name, len(name)); }
+find_exn(name: *i8): ?*ExnDef { find_exn_span(name as []i8, 0, len(name)); }
 
 hash_put_struct(sd: *StructDef) {
     b: int = sym_bucket(hash_str(sd.name));
@@ -1232,36 +1225,24 @@ find_variant(ed: *EnumDef, name: *i8): ?*Variant {
 }
 
 variant_payload_name(enum_name: [z]i8, var_name: [z]i8): *i8 {
-    ea: int = cstr_len(enum_name);
-    va: int = cstr_len(var_name);
+    a: []i8 = zslice(enum_name);
+    b: []i8 = zslice(var_name);
+    ea: int = len(a);
+    va: int = len(b);
     n: int = ea + 1 + va;
     raw: []i8 = new i8[n + 16];
     p: *int = raw as *int;
     p.* = n;
-    a: [ea]i8 = enum_name;
-    b: [va]i8 = var_name;
-    i: int = 0;
-    j: int = 0;
-    while (i < ea) {
-        raw[8 + j] = a[i];
-        j = j + 1;
-        i = i + 1;
-    }
-    raw[8 + j] = '.';
-    j = j + 1;
-    i = 0;
-    while (i < va) {
-        raw[8 + j] = b[i];
-        j = j + 1;
-        i = i + 1;
-    }
+    memcpy(raw, 8, a, 0, ea);
+    raw[8 + ea] = '.';
+    memcpy(raw, 8 + ea + 1, b, 0, va);
     &raw[8];
 }
 
 is_type_name(): bool {
     if (tok.kind != TokKind.Ident) { false; }
     else {
-        find_struct_span(tok.str, tok.len) != null || find_enum_span(tok.str, tok.len) != null || find_exn_span(tok.str, tok.len) != null;
+        find_struct_span(source, tok.pos, tok.len) != null || find_enum_span(source, tok.pos, tok.len) != null || find_exn_span(source, tok.pos, tok.len) != null;
     }
 }
 
@@ -1287,9 +1268,9 @@ starts_type(): bool {
         if (t != tok) {
             if (t.kind == TokKind.Int || t.kind == TokKind.I8 || t.kind == TokKind.Bool) { return true; }
             if (t.kind == TokKind.Ident) {
-                if (find_struct_span(t.str, t.len) != null) { return true; }
-                if (find_enum_span(t.str, t.len) != null) { return true; }
-                if (find_exn_span(t.str, t.len) != null) { return true; }
+                if (find_struct_span(source, t.pos, t.len) != null) { return true; }
+                if (find_enum_span(source, t.pos, t.len) != null) { return true; }
+                if (find_exn_span(source, t.pos, t.len) != null) { return true; }
             }
         }
     }
@@ -1592,63 +1573,63 @@ new_token(kind: TokKind, start: *i8, len: int, tokpos: int): *Token {
     t;
 }
 
-ident_kind(s: [n]i8, n: int): TokKind {
+ident_kind(s: []i8, off: int, n: int): TokKind {
     if (n == 2) {
-        if (s[0] == 'i') {
-            if (s[1] == 'f') { return TokKind.If; }
-            if (s[1] == '8') { return TokKind.I8; }
+        if (s[off + 0] == 'i') {
+            if (s[off + 1] == 'f') { return TokKind.If; }
+            if (s[off + 1] == '8') { return TokKind.I8; }
         }
-        if (s[0] == 'a' && s[1] == 's') { return TokKind.As; }
-        if (s[0] == 'o' && s[1] == 'r') { return TokKind.OrKw; }
+        if (s[off + 0] == 'a' && s[off + 1] == 's') { return TokKind.As; }
+        if (s[off + 0] == 'o' && s[off + 1] == 'r') { return TokKind.OrKw; }
         return TokKind.Ident;
     }
     if (n == 3) {
-        if (s[0] == 'i' && s[1] == 'n' && s[2] == 't') { return TokKind.Int; }
-        if (s[0] == 'n' && s[1] == 'e' && s[2] == 'w') { return TokKind.New; }
-        if (s[0] == 't' && s[1] == 'r' && s[2] == 'y') { return TokKind.Try; }
+        if (s[off + 0] == 'i' && s[off + 1] == 'n' && s[off + 2] == 't') { return TokKind.Int; }
+        if (s[off + 0] == 'n' && s[off + 1] == 'e' && s[off + 2] == 'w') { return TokKind.New; }
+        if (s[off + 0] == 't' && s[off + 1] == 'r' && s[off + 2] == 'y') { return TokKind.Try; }
         return TokKind.Ident;
     }
     if (n == 4) {
-        c0: i8 = s[0];
-        if (c0 == 'b' && s[1] == 'o' && s[2] == 'o' && s[3] == 'l') { return TokKind.Bool; }
+        c0: i8 = s[off + 0];
+        if (c0 == 'b' && s[off + 1] == 'o' && s[off + 2] == 'o' && s[off + 3] == 'l') { return TokKind.Bool; }
         if (c0 == 't') {
-            if (s[1] == 'r' && s[2] == 'u' && s[3] == 'e') { return TokKind.True; }
-            if (s[1] == 'y' && s[2] == 'p' && s[3] == 'e') { return TokKind.TypeKw; }
+            if (s[off + 1] == 'r' && s[off + 2] == 'u' && s[off + 3] == 'e') { return TokKind.True; }
+            if (s[off + 1] == 'y' && s[off + 2] == 'p' && s[off + 3] == 'e') { return TokKind.TypeKw; }
         }
-        if (c0 == 'n' && s[1] == 'u' && s[2] == 'l' && s[3] == 'l') { return TokKind.Null; }
-        if (c0 == 'e' && s[1] == 'l' && s[2] == 's' && s[3] == 'e') { return TokKind.Else; }
-        if (c0 == 'w' && s[1] == 'i' && s[2] == 't' && s[3] == 'h') { return TokKind.With; }
+        if (c0 == 'n' && s[off + 1] == 'u' && s[off + 2] == 'l' && s[off + 3] == 'l') { return TokKind.Null; }
+        if (c0 == 'e' && s[off + 1] == 'l' && s[off + 2] == 's' && s[off + 3] == 'e') { return TokKind.Else; }
+        if (c0 == 'w' && s[off + 1] == 'i' && s[off + 2] == 't' && s[off + 3] == 'h') { return TokKind.With; }
         return TokKind.Ident;
     }
     if (n == 5) {
-        c1: i8 = s[0];
-        if (c1 == 'f' && s[1] == 'a' && s[2] == 'l' && s[3] == 's' && s[4] == 'e') { return TokKind.False; }
-        if (c1 == 'w' && s[1] == 'h' && s[2] == 'i' && s[3] == 'l' && s[4] == 'e') { return TokKind.While; }
-        if (c1 == 't' && s[1] == 'r' && s[2] == 'u' && s[3] == 'n' && s[4] == 'c') { return TokKind.Trunc; }
-        if (c1 == 'm' && s[1] == 'a' && s[2] == 't' && s[3] == 'c' && s[4] == 'h') { return TokKind.Match; }
-        if (c1 == 'r' && s[1] == 'a' && s[2] == 'i' && s[3] == 's' && s[4] == 'e') { return TokKind.Raise; }
+        c1: i8 = s[off + 0];
+        if (c1 == 'f' && s[off + 1] == 'a' && s[off + 2] == 'l' && s[off + 3] == 's' && s[off + 4] == 'e') { return TokKind.False; }
+        if (c1 == 'w' && s[off + 1] == 'h' && s[off + 2] == 'i' && s[off + 3] == 'l' && s[off + 4] == 'e') { return TokKind.While; }
+        if (c1 == 't' && s[off + 1] == 'r' && s[off + 2] == 'u' && s[off + 3] == 'n' && s[off + 4] == 'c') { return TokKind.Trunc; }
+        if (c1 == 'm' && s[off + 1] == 'a' && s[off + 2] == 't' && s[off + 3] == 'c' && s[off + 4] == 'h') { return TokKind.Match; }
+        if (c1 == 'r' && s[off + 1] == 'a' && s[off + 2] == 'i' && s[off + 3] == 's' && s[off + 4] == 'e') { return TokKind.Raise; }
         return TokKind.Ident;
     }
     if (n == 6) {
-        c2: i8 = s[0];
+        c2: i8 = s[off + 0];
         if (c2 == 'r') {
-            if (s[1] == 'e' && s[2] == 't' && s[3] == 'u' && s[4] == 'r' && s[5] == 'n') { return TokKind.Return; }
-            if (s[1] == 'a' && s[2] == 'i' && s[3] == 's' && s[4] == 'e' && s[5] == 's') { return TokKind.Raises; }
+            if (s[off + 1] == 'e' && s[off + 2] == 't' && s[off + 3] == 'u' && s[off + 4] == 'r' && s[off + 5] == 'n') { return TokKind.Return; }
+            if (s[off + 1] == 'a' && s[off + 2] == 'i' && s[off + 3] == 's' && s[off + 4] == 'e' && s[off + 5] == 's') { return TokKind.Raises; }
         }
-        if (c2 == 's' && s[1] == 'i' && s[2] == 'z' && s[3] == 'e' && s[4] == 'o' && s[5] == 'f') { return TokKind.Sizeof; }
-        if (c2 == 'i' && s[1] == 'm' && s[2] == 'p' && s[3] == 'o' && s[4] == 'r' && s[5] == 't') { return TokKind.Import; }
+        if (c2 == 's' && s[off + 1] == 'i' && s[off + 2] == 'z' && s[off + 3] == 'e' && s[off + 4] == 'o' && s[off + 5] == 'f') { return TokKind.Sizeof; }
+        if (c2 == 'i' && s[off + 1] == 'm' && s[off + 2] == 'p' && s[off + 3] == 'o' && s[off + 4] == 'r' && s[off + 5] == 't') { return TokKind.Import; }
         return TokKind.Ident;
     }
     if (n == 8) {
-        if (s[0] == 'n' && streq_n(s, "noreturn", 8)) { return TokKind.Noreturn; }
+        if (s[off] == 'n' && streq_n(s, off, "noreturn", 0, 8)) { return TokKind.Noreturn; }
         return TokKind.Ident;
     }
     if (n == 9) {
-        if (s[0] == 'e' && streq_n(s, "exception", 9)) { return TokKind.Exception; }
+        if (s[off] == 'e' && streq_n(s, off, "exception", 0, 9)) { return TokKind.Exception; }
         return TokKind.Ident;
     }
     if (n == 13) {
-        if (s[0] == 'u' && streq_n(s, "uninitialized", 13)) { return TokKind.Uninitialized; }
+        if (s[off] == 'u' && streq_n(s, off, "uninitialized", 0, 13)) { return TokKind.Uninitialized; }
         return TokKind.Ident;
     }
     TokKind.Ident;
@@ -1777,8 +1758,8 @@ tokenize() raises Error: *Token {
         } else if (c == '"') {
             pos = pos + 1;
             s = &source[pos];
-            n = scan_string_len();
-            t = new_token(TokKind.Str, s, n, pos);
+            n = pos;
+            t = new_token(TokKind.Str, s, scan_string_len(), n);
             cur.next = t;
             cur = t;
             pos = pos + 1;
@@ -1801,7 +1782,7 @@ tokenize() raises Error: *Token {
         } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
             s = &source[pos];
             n = scan_ident_len();
-            t = new_token(ident_kind(s, n), intern(s, n), n, pos - n);
+            t = new_token(ident_kind(source, pos - n, n), intern(source, pos - n, n), n, pos - n);
             cur.next = t;
             cur = t;
         } else if (c == '=' && source[pos + 1] == '=') {
@@ -1871,37 +1852,37 @@ skip_optional_semi() {
 
 cur_tokstr(): *i8 {
     if (tok.kind == TokKind.Ident) { tok.str; }
-    else { intern(tok.str, tok.len); }
+    else { intern(source, tok.pos, tok.len); }
 }
 
-intern(s: [n]i8, n: int): *i8 {
-    b: int = hash_n(s, n);
+intern(s: []i8, off: int, n: int): *i8 {
+    b: int = hash_n(s, off, n);
     if (b < 0) { b = 0 - b; }
     b = b & 4095;
     e: ?*InternEnt = intern_buckets[b].head;
     while (e != null) {
         if (e.n == n) {
-            if (streq_n(e.s, s, n)) { return e.s; }
+            if (streq_n(e.s as []i8, 0, s, off, n)) { return e.s; }
         }
         e = e.next;
     }
-    d: *i8 = strdup_n(s, n);
+    d: *i8 = strdup_n(s, off, n);
     ne: *InternEnt = new InternEnt { s: d, n: n, next: intern_buckets[b].head };
     intern_buckets[b].head = ne;
     d;
 }
 
-add_string(s: [n]i8, n: int): int {
+add_string(s: []i8, off: int, n: int): int {
     buf: []i8 = new i8[n + 1];
     i: int = 0;
     j: int = 0;
     while (i < n) {
-        if (s[i] == '\\' && i + 1 < n) {
+        if (s[off + i] == '\\' && i + 1 < n) {
             i = i + 1;
-            buf[j] = esc_char(s[i]);
+            buf[j] = esc_char(s[off + i]);
             j = j + 1;
         } else {
-            buf[j] = s[i];
+            buf[j] = s[off + i];
             j = j + 1;
         }
         i = i + 1;
@@ -2449,30 +2430,14 @@ parse_type() raises Error: *Type {
             if (is_noreturn_ty(base1)) { error("noreturn cannot be a C-string element"); }
             return zptr_of(base1);
         }
-        if (tok.kind == TokKind.Num) {
-            nlen: int = tok.val;
+        if (tok.kind == TokKind.Ident && streq(cur_tokstr(), "z")) {
             tok = tok.next;
             skip(TokKind.RBrack);
-            base2: *Type = parse_type();
-            if (is_noreturn_ty(base2)) { error("noreturn cannot be an array element"); }
-            return array_of(base2, nlen);
+            base3: *Type = parse_type();
+            if (is_noreturn_ty(base3)) { error("noreturn cannot be a C-string element"); }
+            return zptr_of(base3);
         }
-        if (tok.kind == TokKind.Ident) {
-            if (streq(cur_tokstr(), "z")) {
-                tok = tok.next;
-                skip(TokKind.RBrack);
-                base3: *Type = parse_type();
-                if (is_noreturn_ty(base3)) { error("noreturn cannot be a C-string element"); }
-                return zptr_of(base3);
-            }
-            bound: *i8 = intern(cur_tokstr(), tok.len);
-            tok = tok.next;
-            skip(TokKind.RBrack);
-            base4: *Type = parse_type();
-            if (is_noreturn_ty(base4)) { error("noreturn cannot be an array element"); }
-            return view_of(base4, bound);
-        }
-        error("expected []T, [n]T, or [z]T");
+        error("expected []T or [z]T");
     }
     if (tok.kind == TokKind.Question) {
         tok = tok.next;
@@ -2652,7 +2617,7 @@ parse_primary() raises Error: *Expr {
         return n;
     }
     if (tok.kind == TokKind.Str) {
-        label: int = add_string(tok.str, tok.len);
+        label: int = add_string(source, tok.pos, tok.len);
         tok = tok.next;
         return new_str_num(label + 1);
     }
@@ -2944,7 +2909,7 @@ type_index_expr(p: *Expr, lhs: *Expr, idx: *Expr) raises Error {
         error_ty("index of optional pointer (use if (p != null) to narrow)", raw);
     }
     if (is_pointer(raw)) {
-        error_ty("pointer indexing is not allowed (use []T, [n]T, or [z]T)", raw);
+        error_ty("pointer indexing is not allowed (use []T or [z]T)", raw);
     }
     if (!is_indexable(raw)) { error_ty("index of non-array", raw); }
     if (is_zptr(raw)) {
@@ -3877,19 +3842,7 @@ parse_assign() raises Error: *Expr {
 }
 
 parse_type_suffix(ty: *Type) raises Error: *Type {
-    if (tok.kind == TokKind.LBrack) {
-        if (is_noreturn_ty(ty)) { error("noreturn cannot be an array element"); }
-        tok = tok.next;
-        if (tok.kind == TokKind.Num) {
-            ty = array_of(ty, tok.val);
-            tok = tok.next;
-        } else {
-            if (tok.kind != TokKind.Ident) { error("expected array size or bound name"); }
-            ty = view_of(ty, intern(cur_tokstr(), tok.len));
-            tok = tok.next;
-        }
-        skip(TokKind.RBrack);
-    }
+    if (tok.kind == TokKind.LBrack) { error("[n]T is not supported (use []T)"); }
     ty;
 }
 
@@ -5017,71 +4970,10 @@ wrap_u8(v: int): int {
     v;
 }
 
-and8(x: int, y: int): int {
-    r: int = 0;
-    p: int = 1;
-    while (p != 256) {
-        if (x % 2 != 0) {
-            if (y % 2 != 0) { r = r + p; }
-        }
-        x = x / 2;
-        y = y / 2;
-        p = p * 2;
-    }
-    r;
-}
-
-or8(x: int, y: int): int {
-    r: int = 0;
-    p: int = 1;
-    while (p != 256) {
-        if (x % 2 != 0) { r = r + p; }
-        else {
-            if (y % 2 != 0) { r = r + p; }
-        }
-        x = x / 2;
-        y = y / 2;
-        p = p * 2;
-    }
-    r;
-}
-
-xor8(x: int, y: int): int {
-    r: int = 0;
-    p: int = 1;
-    while (p != 256) {
-        if (x % 2 != 0) {
-            if (y % 2 == 0) { r = r + p; }
-        } else {
-            if (y % 2 != 0) { r = r + p; }
-        }
-        x = x / 2;
-        y = y / 2;
-        p = p * 2;
-    }
-    r;
-}
-
 const_bit(a: int, b: int, kind: int): int {
-    tmpa: int = a;
-    tmpb: int = b;
-    bn: int = 8;
-    pa: [bn]i8 = (&tmpa) as *i8;
-    pb: [bn]i8 = (&tmpb) as *i8;
-    i: int = 0;
-    while (i < bn) {
-        xa: int = pa[i] as int;
-        xb: int = pb[i] as int;
-        if (xa < 0) { xa = xa + 256; }
-        if (xb < 0) { xb = xb + 256; }
-        r: int = 0;
-        if (kind == 0) { r = and8(xa, xb); }
-        if (kind == 1) { r = or8(xa, xb); }
-        if (kind == 2) { r = xor8(xa, xb); }
-        pa[i] = r trunc i8;
-        i = i + 1;
-    }
-    tmpa;
+    if (kind == 0) { a & b; }
+    else if (kind == 1) { a | b; }
+    else { a ^ b; }
 }
 
 const_shl(a: int, n: int) raises Error: int {
@@ -5095,25 +4987,7 @@ const_shl(a: int, n: int) raises Error: int {
     a;
 }
 
-const_sar1(a: int): int {
-    tmp: int = a;
-    _n: int = 8;
-    p: [_n]i8 = (&tmp) as *i8;
-    carry: int = 0;
-    if (a < 0) { carry = 1; }
-    i: int = 7;
-    while (i >= 0) {
-        b: int = p[i] as int;
-        if (b < 0) { b = b + 256; }
-        next: int = b % 2;
-        b = b / 2;
-        if (carry != 0) { b = b + 128; }
-        p[i] = b trunc i8;
-        carry = next;
-        i = i - 1;
-    }
-    tmp;
-}
+const_sar1(a: int): int { a >> 1; }
 
 const_sar(a: int, n: int) raises Error: int {
     if (n < 0) { error("negative shift in global initializer"); }
@@ -6272,7 +6146,7 @@ emit_data() raises Error {
     while (s != null) {
         cg_label(cg_name_num(".L.str", s.label));
         cg_quad(s.len);
-        cg_bytes(s.data, s.len);
+        cg_bytes(s.data, 0, s.len);
         s = s.next;
     }
 }
@@ -6479,7 +6353,7 @@ compiler_build_direct(src_path: *i8): int {
     }
 }
 
-compiler_main(argc: int, argv: [argc][z]i8): int {
+compiler_main(argc: int, argv: [][z]i8): int {
     try {
         cg_direct_mode = 0;
         do_profile = 0;

@@ -63,6 +63,36 @@ _start:
 
     pop %rsi
     pop %rdi
+    # Counted argv: length word at -8 so main(argc, argv: [][z]i8) can use len.
+    # View-style [argc][z]i8 still works; it ignores the prefix and uses argc.
+    push %rdi
+    push %rsi
+    mov %rdi, %rax
+    add %rax, %rax
+    add %rax, %rax
+    add %rax, %rax
+    add $8, %rax
+    mov %rax, %rdi
+    call malloc
+    pop %rsi
+    pop %rdi
+    mov %rdi, 0(%rax)
+    lea 8(%rax), %rdx
+    push %rdi
+    push %rdx
+    mov %rdi, %rcx
+.Largv_copy:
+    cmp $0, %rcx
+    je .Largv_done
+    mov 0(%rsi), %r8
+    mov %r8, 0(%rdx)
+    add $8, %rsi
+    add $8, %rdx
+    sub $1, %rcx
+    jmp .Largv_copy
+.Largv_done:
+    pop %rsi
+    pop %rdi
     call main
     mov %rax, %rdi
     mov $60, %rax          # exit
