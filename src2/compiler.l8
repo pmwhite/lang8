@@ -21,6 +21,7 @@
 // Locals: `x: T;` is unassigned; use before assign on all paths is an error. No `uninitialized`.
 // `new T[n](v)` fills every slot with v (evaluated once). No implicit element default.
 // n must fit the 64MiB heap: negative or wrapping n * size is rejected.
+// Calls follow SysV: six argument registers, then the stack. Hidden sret is the first incoming slot.
 // Pipeline: parse → typecheck → unused fn/local + raises/noreturn checks → codegen.
 // This compiler reports failures via `exception Error` (caught in main).
 
@@ -4486,7 +4487,6 @@ parse_function(name: []i8, is_extern: int) raises Error: *Function {
     np: int = 0;
     while (tok.kind != TokKind.RParen) {
         if (np != 0) { skip(TokKind.Comma); }
-        if (np >= 6) { error("too many parameters"); }
         p: *Obj = parse_decl(1, 1);
         append_fn_param(fn, p);
         np = np + 1;
@@ -4537,7 +4537,6 @@ parse_function(name: []i8, is_extern: int) raises Error: *Function {
         return fn;
     }
     if (rt != null && passes_by_ref(rt)) {
-        if (fn.nparams >= 6) { error("too many parameters"); }
         sret: *Obj = new_obj(".sret", 1);
         sret.ty = ptr_to(rt);
         fn.sret = sret;
@@ -6775,7 +6774,8 @@ gen_expr(n: *Expr) raises Error {
                 a = a.next;
             }
             nregs: int = nargs + has_sret;
-            if (nregs > 6) { error("too many arguments"); }
+            nstack: int = nregs - 6;
+            if (nstack < 0) { nstack = 0; }
             if (has_sret == 0 && nargs <= 1) {
                 a = k.args;
                 if (a != null) {
@@ -6789,6 +6789,10 @@ gen_expr(n: *Expr) raises Error {
                 cg_call(k.funcname);
                 return;
             }
+            /* Sret first, then alignment pad, then incoming slots.
+             * After the call, stack args sit above the pad, which sits
+             * above the sret buffer, so popping nstack then pad leaves
+             * the return value in place. */
             if (has_sret != 0) {
                 if (fno == null) { error("missing function"); }
                 sz: int = type_size(fno.return_ty or error("missing return type"));
@@ -6796,6 +6800,15 @@ gen_expr(n: *Expr) raises Error {
                 sz = (sz + 15) & (0 - 16);
                 cg_alu_imm(5, sz, 4);
                 cg_mov_rr(4, 0);
+            }
+            call_pad: int = 0;
+            if (nstack > 0) {
+                if ((cg_rsp_off + 8 * nstack) % 16 != 0) {
+                    cg_alu_imm(5, 8, 4);
+                    call_pad = 8;
+                }
+            }
+            if (has_sret != 0) {
                 cg_push(0);
             }
             a = k.args;
@@ -6804,11 +6817,7 @@ gen_expr(n: *Expr) raises Error {
                 cg_push(0);
                 a = a.next;
             }
-            i: int = nregs - 1;
-            while (i >= 0) {
-                cg_pop(cg_arg_reg(i));
-                i = i - 1;
-            }
+            emit_place_call_regs(nregs);
             if (streq(k.funcname, "memcpy")) {
                 emit_memcpy_call();
                 return;
@@ -6818,6 +6827,8 @@ gen_expr(n: *Expr) raises Error {
                 return;
             }
             cg_call(k.funcname);
+            if (nstack > 0) { cg_alu_imm(0, 8 * nstack, 4); }
+            if (call_pad != 0) { cg_alu_imm(0, call_pad, 4); }
             return;
         }
         Binary k -> {
@@ -7022,6 +7033,46 @@ gen_stmt(n: *Stmt) raises Error {
     }
 }
 
+emit_reverse_stack(n: int) {
+    if (n <= 1) { return; }
+    l: int = 0;
+    r: int = n - 1;
+    while (l < r) {
+        cg_mov_mr(4, 8 * l, 10);
+        cg_mov_mr(4, 8 * r, 0);
+        cg_mov_rm(0, 4, 8 * l);
+        cg_mov_rm(10, 4, 8 * r);
+        l = l + 1;
+        r = r - 1;
+    }
+}
+
+emit_place_call_regs(nslots: int) {
+    if (nslots <= 6) {
+        i: int = nslots - 1;
+        while (i >= 0) {
+            cg_pop(cg_arg_reg(i));
+            i = i - 1;
+        }
+        return;
+    }
+    emit_reverse_stack(nslots);
+    i2: int = 0;
+    while (i2 < 6) {
+        cg_pop(cg_arg_reg(i2));
+        i2 = i2 + 1;
+    }
+}
+
+emit_store_incoming(slot: int, dest_off: int) {
+    if (slot < 6) {
+        cg_mov_rm(cg_arg_reg(slot), 5, dest_off);
+        return;
+    }
+    cg_mov_mr(5, 16 + 8 * (slot - 6), 0);
+    cg_mov_rm(0, 5, dest_off);
+}
+
 assign_lvar_offsets(fn: *Function) raises Error {
     off: int = 0;
     v: ?*Obj = fn.locals;
@@ -7160,17 +7211,17 @@ emit_text() raises Error {
         ri: int = 0;
         sret: ?*Obj = fn.sret;
         if (sret != null) {
-            cg_mov_rm(cg_arg_reg(ri), 5, sret.offset);
+            emit_store_incoming(ri, sret.offset);
             ri = ri + 1;
         }
-        /* Spill all argregs first; by-ref memcpy clobbers %rsi/%rdi/%rax. */
+        /* Spill incoming args first; by-ref memcpy clobbers %rsi/%rdi/%rax. */
         base_ri: int = ri;
         i: int = 0;
         while (i < fn.nparams) {
             po: ?*Obj = fn_param(fn, i);
             if (po == null) { error("null obj"); }
             p: *Obj = po;
-            cg_mov_rm(cg_arg_reg(ri), 5, p.offset);
+            emit_store_incoming(ri, p.offset);
             ri = ri + 1;
             i = i + 1;
         }

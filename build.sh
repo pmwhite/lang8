@@ -146,6 +146,7 @@ run_examples_selfhost() {
   example_compile_fail "$tool" syscall examples/syscall.l8 'unknown function'
   example_compile_fail "$tool" badopen examples/badopen.l8 'argument type mismatch'
   example "$tool" local examples/local.l8 'YYYYY'
+  example "$tool" manyargs examples/manyargs.l8 'YYYY'
   example_compile_fail "$tool" localesc examples/localesc.l8 'address of local cannot escape'
   example_compile_fail "$tool" localbox examples/localbox.l8 'address of local cannot escape'
   example_compile_fail "$tool" localparam examples/localparam.l8 'local mode is only valid on parameters'
