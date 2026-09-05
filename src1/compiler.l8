@@ -6,7 +6,7 @@
 // [z]T is a C-string; s[i] only if walked from 0. &s[i] on [z]T stays [z]T.
 // `as` only forgets a claim (same pointee): []T/[z]T/*T → *T or ?*T. It cannot invent [] or [z].
 // A span of an existing []T is the array plus a start index, not a [n]T view.
-// Globals: `name: type = const` writes .data; bare `name: type;` stays BSS.
+// Globals: `name: type = e` is required. Constants go in .data; other inits run once before main.
 // Bitwise: `~ & ^ | << >>` on int/i8 (same type; >> is arithmetic; shift count is int).
 // `if`/`match`/`{ }` are expressions; a block's last statement is its value (`;` does not discard).
 // Function body uses that rule when a return type is declared; last-statement and `return` share assignable.
@@ -4362,13 +4362,14 @@ parse_program_unit() raises Error {
                 if (tok.kind == TokKind.Comma) { error("only one variable per declaration"); }
                 o2: *Obj = new_obj(name, 0);
                 o2.ty = ty;
-                if (tok.kind == TokKind.Assign) {
-                    tok = tok.next;
-                    if (tok.kind == TokKind.Uninitialized) {
-                        error("uninitialized is not supported; use a bare global or an initializer");
-                    }
-                    o2.init = parse_expr();
+                if (tok.kind != TokKind.Assign) {
+                    error("global requires an initializer (name: T = e)");
                 }
+                tok = tok.next;
+                if (tok.kind == TokKind.Uninitialized) {
+                    error("uninitialized is not supported; use name: T = e");
+                }
+                o2.init = parse_expr();
                 skip(TokKind.Semi);
             }
             }
@@ -4963,7 +4964,8 @@ check_return_style() {
     }
 }
 
-is_const_init(n: *Expr): bool {
+is_const_init(n: ?*Expr): bool {
+    if (n == null) { return false; }
     match n.kind {
         Num k -> { k.str_label == 0; }
         Null -> { true; }
@@ -5079,12 +5081,10 @@ typecheck_global_inits() raises Error {
     while (g != null) {
         if (g.is_func == 0) {
             init: ?*Expr = g.init;
-            if (init != null) {
-                add_type(init);
-                if (!assignable(g.ty, init)) {
-                    error_have_expr_want("global initializer type mismatch", init, g.ty);
-                }
-                if (!is_const_init(init)) { error("global initializer must be a constant"); }
+            if (init == null) { error("global requires an initializer (name: T = e)"); }
+            add_type(init);
+            if (!assignable(g.ty, init)) {
+                error_have_expr_want("global initializer type mismatch", init, g.ty);
             }
         }
         g = g.next;
@@ -6550,11 +6550,21 @@ emit_global_init(g: *Obj) raises Error {
     cg_quad(v);
 }
 
+emit_bss_global(g: *Obj) raises Error {
+    sz: int = 8;
+    gty: ?*Type = g.ty;
+    if (gty != null) { sz = type_size(gty); }
+    if (sz <= 0) { sz = 8; }
+    if (gty != null && !is_array(gty) && sz < 8) { sz = 8; }
+    cg_label(g.name);
+    cg_skip(sz);
+}
+
 emit_data() raises Error {
     g: ?*Obj = globals;
     any_data: int = 0;
     while (g != null) {
-        if (g.is_func == 0 && g.init != null) {
+        if (g.is_func == 0 && is_const_init(g.init)) {
             if (any_data == 0) {
                 cg_section(as_SEC_DATA);
                 cg_align(8);
@@ -6567,22 +6577,23 @@ emit_data() raises Error {
     g = globals;
     any_bss: int = 0;
     while (g != null) {
-        if (g.is_func == 0 && g.init == null) {
+        if (g.is_func == 0 && !is_const_init(g.init)) {
             if (any_bss == 0) {
                 cg_section(as_SEC_BSS);
                 cg_align(8);
                 any_bss = 1;
             }
-            sz: int = 8;
-            gty: ?*Type = g.ty;
-            if (gty != null) { sz = type_size(gty); }
-            if (sz <= 0) { sz = 8; }
-            if (gty != null && !is_array(gty) && sz < 8) { sz = 8; }
-            cg_label(g.name);
-            cg_skip(sz);
+            emit_bss_global(g);
         }
         g = g.next;
     }
+    if (any_bss == 0) {
+        cg_section(as_SEC_BSS);
+        cg_align(8);
+    }
+    cg_global("l8_init_done");
+    cg_label("l8_init_done");
+    cg_skip(8);
     cg_section(as_SEC_RODATA);
     cg_align(8);
     s: ?*StrLit = str_lits;
@@ -6594,10 +6605,42 @@ emit_data() raises Error {
     }
 }
 
+emit_dyn_global_inits(g: ?*Obj) raises Error {
+    if (g == null) { return; }
+    emit_dyn_global_inits(g.next);
+    if (g.is_func != 0) { return; }
+    init: ?*Expr = g.init;
+    if (is_const_init(init)) { return; }
+    e: *Expr = init or error("missing global initializer");
+    ty: *Type = g.ty or error("missing global type");
+    gen_expr(e);
+    emit_store_var(g, ty);
+}
+
+emit_l8_init_globals_fn() raises Error {
+    already: int = new_label();
+    cg_global("l8_init_globals");
+    cg_label("l8_init_globals");
+    cg_rsp_off = 0;
+    cg_push(5);
+    cg_mov_rr(4, 5);
+    cg_mov_rip_r("l8_init_done", 0, 0);
+    cg_alu_imm(7, 0, 0);
+    cg_jump_id(5, already);
+    cg_mov_imm(1, 0);
+    cg_mov_r_rip(0, "l8_init_done", 0);
+    emit_dyn_global_inits(globals);
+    cg_label_id(already);
+    cg_mov_rr(5, 4);
+    cg_pop(5);
+    cg_ret();
+}
+
 emit_text() raises Error {
     fn: ?*Function = functions;
     cg_section(as_SEC_TEXT);
     oob_lab = new_label();
+    emit_l8_init_globals_fn();
     while (fn != null) {
         narrow_top = null;
         catch_top = null;
@@ -6646,6 +6689,7 @@ emit_text() raises Error {
             ri = ri + 1;
             i = i + 1;
         }
+        if (streq(fn.name, "main")) { cg_call("l8_init_globals"); }
         body: ?*Stmt = fn.body;
         if (body == null) { error("missing body"); }
         gen_stmt(body);

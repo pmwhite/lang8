@@ -133,6 +133,7 @@ run_examples_selfhost() {
   example_compile_fail "$tool" ptrindex examples/ptrindex.l8 'pointer indexing is not allowed'
   example_compile_fail "$tool" usebefore examples/usebefore.l8 'use of uninitialized local'
   example_compile_fail "$tool" newnofill examples/newnofill.l8 'requires an initial value'
+  example_compile_fail "$tool" bareglobal examples/bareglobal.l8 'global requires an initializer'
   example_exit "$tool" sliceoob examples/sliceoob.l8 1
 }
 
