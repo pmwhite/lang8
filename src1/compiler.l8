@@ -10,7 +10,10 @@
 // Globals: `name: type = e` is required. Constants go in .data; other inits run once before main.
 // write/read take []i8 (optional off/n, checked) or *i8 (exactly one byte).
 // Address of a local cannot be stored, returned, or passed except to write/read
-// or a parameter marked `local T` (addresses inside T must not escape the callee).
+// or a parameter marked `T@` / `T@p` (addresses inside T must not escape).
+// `region { }` saves the bump pointer and restores it on exit. `new` inside is
+// in that heap generation. Nested regions nest. `@` on params/returns names a
+// lifetime (`@` self, `@p`, `@new`). Long-lived storage cannot hold a shorter pointer.
 // Unknown names are an error. OS functions are `extern name(params): T` backed by runtime.s.
 // Bitwise: `~ & ^ | << >>` on int/i8 (same type; >> is arithmetic; shift count is int).
 // `if`/`match`/`{ }` are expressions; a block's last statement is its value (`;` does not discard).
@@ -160,7 +163,8 @@ type TokKind =
     | With
     | Import
     | Extern
-    | Local;
+    | Region
+    | At;
 
 type Token = {
     kind: TokKind;
@@ -249,7 +253,8 @@ type StmtKind =
     | ExprStmt { lhs: *Expr; }
     | Match { cond: *Expr; arms: ?*MatchArm; }
     | Raise { exn: *ExnDef; inits: ?*FieldInit; }
-    | Try { body: *Stmt; arms: ?*CatchArm; buf: *Obj; };
+    | Try { body: *Stmt; arms: ?*CatchArm; buf: *Obj; }
+    | Region { body: *Stmt; mark: *Obj; };
 
 type Stmt = {
     kind: StmtKind;
@@ -268,8 +273,10 @@ type Obj = {
     next: ?*Obj;
     param_next: ?*Obj;
     hash_next: ?*Obj;
-    local_mode: int;
     escape_walk: int;
+    life: int;
+    storage_life: int;
+    life_bound: []i8;
 }
 
 type Function = {
@@ -286,6 +293,9 @@ type Function = {
     is_extern: int;
     next: ?*Function;
     hash_next: ?*Function;
+    ret_bound: []i8;
+    ret_life: int;
+    need_imm_heap: int;
 }
 
 type FnBucket = { head: ?*Function; }
@@ -312,7 +322,23 @@ tok: *Token = new Token { kind: TokKind.Eof, val: 0, str: "", len: 0, pos: 0, ne
 globals: ?*Obj = null;
 locals: ?*Obj = null;
 scope_depth: int = 0;
+region_depth: int = 0;
 functions: ?*Function = null;
+LIFE_IMM: int = 0;
+LIFE_HEAPTOP: int = 1;
+LIFE_SELF: int = 2;
+LIFE_MAX: int = 256;
+LIFE_KIND_PARAM: int = 3;
+life_n: int = 3;
+life_heap: int = 0;
+life_cur: int = 2;
+life_region_tc: int = 1;
+life_parent: []int = new int[0](0);
+life_kind: []int = new int[0](0);
+life_depth_frames: []int = new int[0](0);
+life_edge_long: []int = new int[0](0);
+life_edge_short: []int = new int[0](0);
+life_edge_n: int = 0;
 function_tail: ?*Function = null;
 imported_files: ?*ImportedFile = null;
 struct_defs: ?*StructDef = null;
@@ -802,6 +828,11 @@ init_runtime() {
         intern_buckets[i].head = null;
         i = i + 1;
     }
+    life_parent = new int[256](0 - 1);
+    life_kind = new int[256](0);
+    life_depth_frames = new int[256](0);
+    life_edge_long = new int[256](0);
+    life_edge_short = new int[256](0);
     ptr_cache = null;
     opt_ptr_cache = null;
     slice_cache = null;
@@ -1677,13 +1708,15 @@ ident_kind(s: []i8, off: int, n: int): TokKind {
         if (c1 == 't' && s[off + 1] == 'r' && s[off + 2] == 'u' && s[off + 3] == 'n' && s[off + 4] == 'c') { return TokKind.Trunc; }
         if (c1 == 'm' && s[off + 1] == 'a' && s[off + 2] == 't' && s[off + 3] == 'c' && s[off + 4] == 'h') { return TokKind.Match; }
         if (c1 == 'r' && s[off + 1] == 'a' && s[off + 2] == 'i' && s[off + 3] == 's' && s[off + 4] == 'e') { return TokKind.Raise; }
-        if (c1 == 'l' && s[off + 1] == 'o' && s[off + 2] == 'c' && s[off + 3] == 'a' && s[off + 4] == 'l') { return TokKind.Local; }
         return TokKind.Ident;
     }
     if (n == 6) {
         c2: i8 = s[off + 0];
         if (c2 == 'r') {
-            if (s[off + 1] == 'e' && s[off + 2] == 't' && s[off + 3] == 'u' && s[off + 4] == 'r' && s[off + 5] == 'n') { return TokKind.Return; }
+            if (s[off + 1] == 'e') {
+                if (s[off + 2] == 't' && s[off + 3] == 'u' && s[off + 4] == 'r' && s[off + 5] == 'n') { return TokKind.Return; }
+                if (s[off + 2] == 'g' && s[off + 3] == 'i' && s[off + 4] == 'o' && s[off + 5] == 'n') { return TokKind.Region; }
+            }
             if (s[off + 1] == 'a' && s[off + 2] == 'i' && s[off + 3] == 's' && s[off + 4] == 'e' && s[off + 5] == 's') { return TokKind.Raises; }
         }
         if (c2 == 's' && s[off + 1] == 'i' && s[off + 2] == 'z' && s[off + 3] == 'e' && s[off + 4] == 'o' && s[off + 5] == 'f') { return TokKind.Sizeof; }
@@ -1782,6 +1815,7 @@ punct_kind(c: i8) raises Error: TokKind {
     if (c == '?') { return TokKind.Question; }
     if (c == '^') { return TokKind.Caret; }
     if (c == '~') { return TokKind.Tilde; }
+    if (c == '@') { return TokKind.At; }
     error_at(pos, "unexpected character");
     TokKind.Eof;
 }
@@ -2081,6 +2115,7 @@ new_match_arm(variant: ?*Variant, binder: ?*Obj, body: *Stmt): *MatchArm {
 }
 new_raise(exn: *ExnDef, inits: ?*FieldInit): *Stmt { mk_stmt(StmtKind.Raise { exn: exn, inits: inits }); }
 new_try(body: *Stmt, arms: ?*CatchArm, buf: *Obj): *Stmt { mk_stmt(StmtKind.Try { body: body, arms: arms, buf: buf }); }
+new_region(body: *Stmt, mark: *Obj): *Stmt { mk_stmt(StmtKind.Region { body: body, mark: mark }); }
 new_catch_arm(exn: *ExnDef, binder: ?*Obj, body: *Stmt): *CatchArm {
     new CatchArm { exn: exn, binder: binder, body: body, next: null };
 }
@@ -2142,11 +2177,15 @@ new_obj(name: []i8, is_local: int): *Obj {
         next: null,
         param_next: null,
         hash_next: null,
-        local_mode: 0,
-        escape_walk: 0
+        escape_walk: 0,
+        life: 0,
+        storage_life: 0,
+        life_bound: ""
     };
     if (is_local != 0) {
         o.scope_depth = scope_depth;
+        if (region_depth == 0) { o.storage_life = 1; }
+        else { o.storage_life = region_depth + 1; }
         o.next = locals;
         locals = o;
     } else {
@@ -2155,6 +2194,173 @@ new_obj(name: []i8, is_local: int): *Obj {
         hash_put_global(o);
     }
     o;
+}
+
+life_reset_imm() {
+    life_n = 3;
+    life_parent[0] = 0 - 1;
+    life_kind[0] = 0;
+    life_parent[1] = 0 - 1;
+    life_kind[1] = 2;
+    life_parent[2] = 0 - 1;
+    life_kind[2] = 1;
+    life_heap = LIFE_IMM;
+    life_cur = LIFE_SELF;
+    life_region_tc = 1;
+    life_depth_frames[1] = LIFE_SELF;
+    life_edge_n = 0;
+}
+
+life_alloc_frame(parent: int, kind: int) raises Error: int {
+    if (life_n >= LIFE_MAX) { error("too many lifetime frames"); }
+    id: int = life_n;
+    life_parent[id] = parent;
+    life_kind[id] = kind;
+    life_n = life_n + 1;
+    id;
+}
+
+life_add_edge(longer: int, shorter: int) {
+    if (life_edge_n >= LIFE_MAX) { return; }
+    life_edge_long[life_edge_n] = longer;
+    life_edge_short[life_edge_n] = shorter;
+    life_edge_n = life_edge_n + 1;
+}
+
+life_is_param(id: int): bool {
+    id >= 3 && life_kind[id] == LIFE_KIND_PARAM;
+}
+
+life_parent_reaches(from: int, anc: int): bool {
+    x: int = from;
+    steps: int = 0;
+    while (x >= 0 && steps < 64) {
+        if (x == anc) { return true; }
+        x = life_parent[x];
+        steps = steps + 1;
+    }
+    false;
+}
+
+life_outlives_lim(a: int, b: int, depth: int): bool {
+    if (depth > 32) { return false; }
+    if (a == b) { return true; }
+    if (a == LIFE_IMM) { return true; }
+    if (b == LIFE_IMM) {
+        if (a == LIFE_HEAPTOP) {
+            fn: ?*Function = current_fn;
+            if (fn != null) {
+                fu: *Function = fn;
+                if (fu.need_imm_heap != 0) { return true; }
+            }
+        }
+        return false;
+    }
+    if (life_parent_reaches(b, a)) { return true; }
+    if (b == LIFE_SELF) {
+        if (a == LIFE_HEAPTOP) { return true; }
+        if (life_is_param(a)) { return true; }
+        return false;
+    }
+    i: int = 0;
+    while (i < life_edge_n) {
+        if (life_edge_long[i] == a) {
+            if (life_outlives_lim(life_edge_short[i], b, depth + 1)) { return true; }
+        }
+        i = i + 1;
+    }
+    if (a == LIFE_HEAPTOP && life_outlives_lim(LIFE_SELF, b, depth + 1)) { return true; }
+    if (life_is_param(a) && life_outlives_lim(LIFE_SELF, b, depth + 1)) { return true; }
+    false;
+}
+
+life_outlives(a: int, b: int): bool {
+    life_outlives_lim(a, b, 0);
+}
+
+obj_storage_life(o: *Obj): int {
+    if (o.is_local == 0) { return LIFE_IMM; }
+    d: int = o.storage_life;
+    if (d <= 1) { return LIFE_SELF; }
+    if (d < LIFE_MAX) {
+        f: int = life_depth_frames[d];
+        if (f != 0) { return f; }
+    }
+    LIFE_SELF;
+}
+
+find_fn_param(fn: *Function, name: []i8): ?*Obj {
+    p: ?*Obj = fn.params;
+    while (p != null) {
+        if (streq(p.name, name)) { return p; }
+        p = p.param_next;
+    }
+    null;
+}
+
+resolve_fn_bounds(fn: *Function) raises Error {
+    p: ?*Obj = fn.params;
+    while (p != null) {
+        if (len(p.life_bound) == 0) { p.life = LIFE_IMM; }
+        else { p.life = life_alloc_frame(0 - 1, LIFE_KIND_PARAM); }
+        p = p.param_next;
+    }
+    p = fn.params;
+    while (p != null) {
+        b: []i8 = p.life_bound;
+        if (len(b) != 0) {
+            if (streq(b, "new")) {
+                life_add_edge(p.life, LIFE_HEAPTOP);
+            } else {
+                q: ?*Obj = find_fn_param(fn, b);
+                if (q == null) { error("unknown lifetime bound"); }
+                qu: *Obj = q;
+                if (qu.life == LIFE_IMM) { p.life = LIFE_IMM; }
+                else { life_add_edge(p.life, qu.life); }
+            }
+        }
+        p = p.param_next;
+    }
+    if (len(fn.ret_bound) == 0) {
+        fn.ret_life = LIFE_IMM;
+    } else if (streq(fn.ret_bound, "new")) {
+        fn.ret_life = LIFE_HEAPTOP;
+    } else {
+        r: ?*Obj = find_fn_param(fn, fn.ret_bound);
+        if (r == null) { error("unknown lifetime bound"); }
+        fn.ret_life = r.life;
+    }
+}
+
+life_init_fn(fn: *Function) raises Error {
+    life_n = 3;
+    life_parent[0] = 0 - 1;
+    life_kind[0] = 0;
+    life_parent[1] = 0 - 1;
+    life_kind[1] = 2;
+    life_parent[2] = 0 - 1;
+    life_kind[2] = 1;
+    life_heap = LIFE_HEAPTOP;
+    life_cur = LIFE_SELF;
+    life_region_tc = 1;
+    life_depth_frames[1] = LIFE_SELF;
+    life_edge_n = 0;
+    resolve_fn_bounds(fn);
+}
+
+life_enter_region() raises Error: int {
+    f: int = life_alloc_frame(life_cur, 2);
+    life_cur = f;
+    life_heap = f;
+    life_region_tc = life_region_tc + 1;
+    if (life_region_tc < LIFE_MAX) { life_depth_frames[life_region_tc] = f; }
+    f;
+}
+
+life_leave_region(old_cur: int, old_heap: int) {
+    life_cur = old_cur;
+    life_heap = old_heap;
+    life_region_tc = life_region_tc - 1;
 }
 
 var_view_ty(var: ?*Obj): ?*Type {
@@ -2282,6 +2488,7 @@ is_stack_addr_stmt(s: ?*Stmt): bool {
             }
             false;
         }
+        Region k -> { is_stack_addr_stmt(k.body); }
         _ -> { false; }
     }
 }
@@ -2305,10 +2512,6 @@ is_stack_addr(n: ?*Expr): bool {
         }
         _ -> { false; }
     }
-}
-
-check_no_stack_addr(n: ?*Expr) raises Error {
-    if (is_tainted_expr(n)) { error("address of local cannot escape"); }
 }
 
 is_tainted_obj(o: ?*Obj): bool {
@@ -2505,6 +2708,7 @@ stmt_uses_obj(s: ?*Stmt, o: *Obj): bool {
             }
             false;
         }
+        Region k -> { stmt_uses_obj(k.body, o); }
         _ -> { false; }
     }
 }
@@ -2518,7 +2722,6 @@ stmt_list_uses_obj(s: ?*Stmt, o: *Obj): bool {
 }
 
 param_escapes(fn: *Function, po: *Obj): bool {
-    if (po.local_mode != 0) { return false; }
     if (fn.is_extern != 0) { return true; }
     if (!type_has_pointers(po.ty)) { return false; }
     if (po.escape_walk != 0) { return false; }
@@ -2528,18 +2731,213 @@ param_escapes(fn: *Function, po: *Obj): bool {
     r;
 }
 
-check_call_stack_addrs(name: []i8, args: ?*Expr, fno: ?*Function) raises Error {
-    if (io_allows_stack(name)) { return; }
-    a: ?*Expr = args;
-    po: ?*Obj = null;
-    if (fno != null) { po = fno.params; }
-    while (a != null) {
-        if (is_tainted_expr(a)) {
-            if (fno == null) { error("address of local cannot escape"); }
-            if (po == null) { error("address of local cannot escape"); }
-            if (param_escapes(fno, po)) { error("address of local cannot escape"); }
+life_meet(a: int, b: int) raises Error: int {
+    if (life_outlives(a, b)) { return b; }
+    if (life_outlives(b, a)) { return a; }
+    error("incomparable lifetimes");
+    a;
+}
+
+object_storage_life(n: *Expr) raises Error: int {
+    match n.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) { return LIFE_IMM; }
+            obj_storage_life(v);
         }
-        if (po != null) { po = po.param_next; }
+        Deref k -> { expr_life(k.lhs); }
+        Index k -> {
+            lt: ?*Type = k.lhs.ty;
+            if (lt != null && (is_slice(lt) || is_zptr(lt))) { return expr_life(k.lhs); }
+            object_storage_life(k.lhs);
+        }
+        MemberAccess k -> {
+            lt2: ?*Type = decay(k.lhs.ty);
+            if (lt2 != null && (is_pointer(lt2) || is_opt_pointer(lt2) || is_slice(lt2))) {
+                return expr_life(k.lhs);
+            }
+            object_storage_life(k.lhs);
+        }
+        _ -> { LIFE_SELF; }
+    }
+}
+
+field_inits_life(inits: ?*FieldInit) raises Error: int {
+    a: ?*FieldInit = inits;
+    l: int = LIFE_IMM;
+    while (a != null) {
+        if (a.lhs != null) { l = life_meet(l, expr_life(a.lhs)); }
+        a = a.next;
+    }
+    l;
+}
+
+stmt_result_life(s: ?*Stmt) raises Error: int {
+    if (s == null) { return LIFE_IMM; }
+    match s.kind {
+        ExprStmt k -> { expr_life(k.lhs); }
+        Block k -> { stmt_result_life(last_stmt(k.body)); }
+        If k -> {
+            els: ?*Stmt = k.els;
+            if (els == null) { return stmt_result_life(k.then); }
+            life_meet(stmt_result_life(k.then), stmt_result_life(els));
+        }
+        Match k -> {
+            arm: ?*MatchArm = k.arms;
+            l: int = LIFE_IMM;
+            saw: int = 0;
+            while (arm != null) {
+                al: int = stmt_result_life(arm.body);
+                if (saw == 0) { l = al; }
+                else { l = life_meet(l, al); }
+                saw = 1;
+                arm = arm.next;
+            }
+            l;
+        }
+        Try k -> {
+            l2: int = stmt_result_life(k.body);
+            a: ?*CatchArm = k.arms;
+            while (a != null) {
+                l2 = life_meet(l2, stmt_result_life(a.body));
+                a = a.next;
+            }
+            l2;
+        }
+        Region k -> { stmt_result_life(k.body); }
+        _ -> { LIFE_IMM; }
+    }
+}
+
+instantiate_bound(fn: *Function, bound: []i8, args: ?*Expr) raises Error: int {
+    if (len(bound) == 0) { return LIFE_IMM; }
+    if (streq(bound, "new")) { return life_heap; }
+    p: ?*Obj = fn.params;
+    a: ?*Expr = args;
+    while (p != null && a != null) {
+        if (streq(p.name, bound)) { return expr_life(a); }
+        p = p.param_next;
+        a = a.next;
+    }
+    error("unknown lifetime bound");
+    LIFE_IMM;
+}
+
+expr_life(n: ?*Expr) raises Error: int {
+    if (n == null) { return LIFE_IMM; }
+    match n.kind {
+        Addr k -> { object_storage_life(k.lhs); }
+        New _k -> { life_heap; }
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) { return LIFE_IMM; }
+            v.life;
+        }
+        Deref k -> { expr_life(k.lhs); }
+        MemberAccess k -> { expr_life(k.lhs); }
+        Index k -> { expr_life(k.lhs); }
+        Assign k -> { expr_life(k.rhs); }
+        As k -> { expr_life(k.lhs); }
+        Trunc k -> { expr_life(k.lhs); }
+        If k -> { life_meet(expr_life(k.then), expr_life(k.els)); }
+        OrElse k -> { life_meet(expr_life(k.lhs), expr_life(k.rhs)); }
+        Block k -> { stmt_result_life(last_stmt(k.body)); }
+        Match k -> {
+            arm: ?*MatchArm = k.arms;
+            l: int = LIFE_IMM;
+            saw: int = 0;
+            while (arm != null) {
+                al: int = stmt_result_life(arm.body);
+                if (saw == 0) { l = al; }
+                else { l = life_meet(l, al); }
+                saw = 1;
+                arm = arm.next;
+            }
+            l;
+        }
+        Funcall k -> {
+            if (io_allows_stack(k.funcname)) { return LIFE_IMM; }
+            if (streq(k.funcname, "len") || streq(k.funcname, "memcpy")) { return LIFE_IMM; }
+            fno: ?*Function = k.fn;
+            if (fno == null) { fno = find_function(k.funcname); }
+            if (fno == null) { return LIFE_IMM; }
+            instantiate_bound(fno, fno.ret_bound, k.args);
+        }
+        StructLit k -> { field_inits_life(k.inits); }
+        VariantLit k -> { field_inits_life(k.inits); }
+        Null -> { LIFE_IMM; }
+        _ -> { LIFE_IMM; }
+    }
+}
+
+dest_life(n: *Expr) raises Error: int {
+    match n.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) { return LIFE_IMM; }
+            obj_storage_life(v);
+        }
+        Deref k -> { expr_life(k.lhs); }
+        MemberAccess k -> {
+            lt: ?*Type = decay(k.lhs.ty);
+            if (lt != null && (is_pointer(lt) || is_opt_pointer(lt) || is_slice(lt))) {
+                return expr_life(k.lhs);
+            }
+            dest_life(k.lhs);
+        }
+        Index k -> {
+            lt2: ?*Type = k.lhs.ty;
+            if (lt2 != null && (is_slice(lt2) || is_zptr(lt2))) { return expr_life(k.lhs); }
+            dest_life(k.lhs);
+        }
+        _ -> { LIFE_SELF; }
+    }
+}
+
+escape_error(n: ?*Expr) raises Error {
+    if (is_tainted_expr(n) || is_stack_addr(n)) { error("address of local cannot escape"); }
+    error("region pointer cannot escape");
+}
+
+note_imm_heap() {
+    fn: ?*Function = current_fn;
+    if (fn != null) { fn.need_imm_heap = 1; }
+}
+
+check_store(src: ?*Expr, dest: int) raises Error {
+    if (src == null) { return; }
+    if (!type_has_pointers(src.ty) && !is_tainted_expr(src) && !is_stack_addr(src)) { return; }
+    sl: int = expr_life(src);
+    if (life_outlives(sl, dest)) { return; }
+    if (dest == LIFE_IMM && sl == LIFE_HEAPTOP) {
+        note_imm_heap();
+        return;
+    }
+    escape_error(src);
+}
+
+check_call_lifetimes(fno: *Function, args: ?*Expr) raises Error {
+    a: ?*Expr = args;
+    po: ?*Obj = fno.params;
+    while (a != null) {
+        if (po != null) {
+            sl: int = expr_life(a);
+            if (len(po.life_bound) == 0) {
+                if (!life_outlives(sl, LIFE_IMM)) {
+                    if (sl == LIFE_HEAPTOP) { note_imm_heap(); }
+                    else {
+                        if (param_escapes(fno, po)) { escape_error(a); }
+                    }
+                }
+            } else {
+                need: int = instantiate_bound(fno, po.life_bound, args);
+                if (!life_outlives(sl, need)) {
+                    if (sl == LIFE_HEAPTOP && need == LIFE_IMM) { note_imm_heap(); }
+                    else { escape_error(a); }
+                }
+            }
+            po = po.param_next;
+        }
         a = a.next;
     }
 }
@@ -3264,7 +3662,8 @@ add_type_field_inits_opt(inits: ?*FieldInit, heap: int) raises Error {
             if (!assignable(decay(a.member.ty), a.lhs)) {
                 error_have_expr_want("field initializer type mismatch", a.lhs, decay(a.member.ty));
             }
-            if (heap != 0) { check_no_stack_addr(a.lhs); }
+            if (heap == 1) { check_store(a.lhs, life_heap); }
+            if (heap == 2) { check_store(a.lhs, LIFE_IMM); }
         }
         a = a.next;
     }
@@ -3616,6 +4015,7 @@ stmt_result_ty(s: ?*Stmt) raises Error: ?*Type {
             }
             t;
         }
+        Region k -> { stmt_result_ty(k.body); }
         _ -> { null; }
     }
 }
@@ -3629,7 +4029,10 @@ check_stmt_result(s: ?*Stmt, want: *Type) raises Error: bool {
             lty: ?*Type = k.lhs.ty;
             if (lty != null && is_noreturn_ty(lty)) { return true; }
             if (assignable(want, k.lhs)) {
-                check_no_stack_addr(k.lhs);
+                rl: int = LIFE_IMM;
+                cfn: ?*Function = current_fn;
+                if (cfn != null) { rl = cfn.ret_life; }
+                check_store(k.lhs, rl);
                 return true;
             }
             error_have_expr_want("return type mismatch", k.lhs, want);
@@ -3660,6 +4063,7 @@ check_stmt_result(s: ?*Stmt, want: *Type) raises Error: bool {
             }
             true;
         }
+        Region k -> { check_stmt_result(k.body, want); }
         _ -> { false; }
     }
 }
@@ -3763,6 +4167,7 @@ add_type_expr(p: *Expr) raises Error {
                 if (!assignable(elem, fill)) {
                     error_have_expr_want("new T[n] fill type mismatch", fill, elem);
                 }
+                check_store(fill, life_heap);
             }
             add_type_field_inits_heap(k.inits);
             return;
@@ -3848,6 +4253,7 @@ add_type_expr(p: *Expr) raises Error {
             if (!assignable(lt, q.rhs)) {
                 error_have_expr_want("assignment type mismatch", q.rhs, lt);
             }
+            check_store(q.rhs, dest_life(q.lhs));
             if (is_tainted_expr(q.rhs)) {
                 match q.lhs.kind {
                     Var vp -> {
@@ -3856,8 +4262,20 @@ add_type_expr(p: *Expr) raises Error {
                         if (dest.is_local == 0) { error("address of local cannot escape"); }
                         mark_tainted(dest);
                     }
-                    _ -> { error("address of local cannot escape"); }
+                    _ -> {}
                 }
+            }
+            match q.lhs.kind {
+                Var vp2 -> {
+                    vo: ?*Obj = vp2.var;
+                    if (vo != null) {
+                        vu: *Obj = vo;
+                        if (type_has_pointers(vu.ty) || is_tainted_expr(q.rhs)) {
+                            vu.life = life_meet(vu.life, expr_life(q.rhs));
+                        }
+                    }
+                }
+                _ -> {}
             }
             match q.lhs.kind {
                 Var vp -> {
@@ -3954,7 +4372,7 @@ add_type_expr(p: *Expr) raises Error {
                 error(sb_finish(sb));
             }
             fnu: *Function = fno;
-            check_call_stack_addrs(q.funcname, q.args, fnu);
+            check_call_lifetimes(fnu, q.args);
             p.kind = ExprKind.Funcall { funcname: q.funcname, args: q.args, fn: fnu };
             if (fnu.return_ty != null) {
                 p.ty = fnu.return_ty;
@@ -4044,7 +4462,7 @@ add_type_stmt_node(p: *Stmt) raises Error {
         }
         Raise k -> {
             check_exn_allowed(k.exn, "raise");
-            add_type_field_inits_heap(k.inits);
+            add_type_field_inits_opt(k.inits, 2);
             return;
         }
         Block q -> {
@@ -4078,7 +4496,10 @@ add_type_stmt_node(p: *Stmt) raises Error {
                 if (!assignable(rt, lhs)) {
                     error_have_expr_want("return type mismatch", lhs, rt);
                 }
-                check_no_stack_addr(lhs);
+                rl: int = LIFE_IMM;
+                cfn: ?*Function = current_fn;
+                if (cfn != null) { rl = cfn.ret_life; }
+                check_store(lhs, rl);
             } else {
                 if (current_return_ty != null) {
                     error_ty("return missing a value", current_return_ty);
@@ -4097,6 +4518,14 @@ add_type_stmt_node(p: *Stmt) raises Error {
                 add_type_stmt(a5.body);
                 a5 = a5.next;
             }
+            return;
+        }
+        Region k -> {
+            old_cur: int = life_cur;
+            old_heap: int = life_heap;
+            _rf: int = life_enter_region();
+            add_type_stmt(k.body);
+            life_leave_region(old_cur, old_heap);
             return;
         }
         _ -> {}
@@ -4250,23 +4679,46 @@ parse_type_suffix(ty: *Type) raises Error: *Type {
     ty;
 }
 
-parse_decl(is_local: int, allow_local_mode: int) raises Error: *Obj {
+parse_at_bound() raises Error: []i8 {
+    skip(TokKind.At);
+    if (tok.kind == TokKind.New) {
+        tok = tok.next;
+        return "new";
+    }
+    if (tok.kind == TokKind.Ident) {
+        s: []i8 = cur_tokstr();
+        tok = tok.next;
+        return s;
+    }
+    error("expected lifetime bound after @");
+    "";
+}
+
+parse_decl(is_local: int, allow_at: int) raises Error: *Obj {
     if (tok.kind != TokKind.Ident) { error("expected identifier"); }
     name: []i8 = cur_tokstr();
     tok = tok.next;
     skip(TokKind.Colon);
-    local_mode: int = 0;
-    if (tok.kind == TokKind.Local) {
-        if (allow_local_mode == 0) { error("local mode is only valid on parameters"); }
-        tok = tok.next;
-        local_mode = 1;
-    }
     ty: *Type = parse_type();
     ty = parse_type_suffix(ty);
     if (is_noreturn_ty(ty)) { error("noreturn is only valid as a function return type"); }
+    bound: []i8 = "";
+    if (tok.kind == TokKind.At) {
+        if (allow_at == 0) { error("@ is only valid on parameters and returns"); }
+        tok = tok.next;
+        if (tok.kind == TokKind.New) {
+            tok = tok.next;
+            bound = "new";
+        } else if (tok.kind == TokKind.Ident) {
+            bound = cur_tokstr();
+            tok = tok.next;
+        } else {
+            bound = name;
+        }
+    }
     o: *Obj = new_obj(name, is_local);
     o.ty = ty;
-    o.local_mode = local_mode;
+    o.life_bound = bound;
     o;
 }
 
@@ -4378,6 +4830,15 @@ parse_stmt() raises Error: *Stmt {
         buf.ty = array_of(ty_i8, L8_JMP_BUF_SIZE);
         return new_try(tbody, arms_h, buf);
     }
+    if (tok.kind == TokKind.Region) {
+        tok = tok.next;
+        mark: *Obj = new_obj(".hmark", 1);
+        mark.ty = ty_int;
+        region_depth = region_depth + 1;
+        rbody: *Stmt = parse_compound();
+        region_depth = region_depth - 1;
+        return new_region(rbody, mark);
+    }
     if (tok.kind == TokKind.If) {
         tok = tok.next;
         skip(TokKind.LParen);
@@ -4476,10 +4937,14 @@ parse_function(name: []i8, is_extern: int) raises Error: *Function {
         used: 0,
         is_extern: 0,
         next: null,
-        hash_next: null
+        hash_next: null,
+        ret_bound: "",
+        ret_life: 0,
+        need_imm_heap: 0
     };
     locals = null;
     scope_depth = 0;
+    region_depth = 0;
     narrow_top = null;
     catch_top = null;
     current_fn = fn;
@@ -4522,6 +4987,7 @@ parse_function(name: []i8, is_extern: int) raises Error: *Function {
     if (tok.kind == TokKind.Colon) {
         tok = tok.next;
         fn.return_ty = parse_type();
+        if (tok.kind == TokKind.At) { fn.ret_bound = parse_at_bound(); }
     }
     rt: ?*Type = fn.return_ty;
     if (is_extern != 0) {
@@ -4919,6 +5385,7 @@ stmt_always_diverges(n: *Stmt): bool {
             }
             true;
         }
+        Region k -> { stmt_always_diverges(k.body); }
         _ -> { false; }
     }
 }
@@ -5081,6 +5548,10 @@ mark_calls_stmt(n: ?*Stmt) {
                 mark_calls_stmt(arm2.body);
                 arm2 = arm2.next;
             }
+            return;
+        }
+        Region k -> {
+            mark_calls_stmt(k.body);
             return;
         }
     }
@@ -5254,6 +5725,10 @@ mark_uses_stmt(n: ?*Stmt) {
                 mark_uses_stmt(arm2.body);
                 arm2 = arm2.next;
             }
+            return;
+        }
+        Region k -> {
+            mark_uses_stmt(k.body);
             return;
         }
     }
@@ -5511,6 +5986,7 @@ const_value(n: *Expr) raises Error: int {
 }
 
 typecheck_global_inits() raises Error {
+    life_reset_imm();
     g: ?*Obj = globals;
     while (g != null) {
         if (g.is_func == 0) {
@@ -5520,6 +5996,7 @@ typecheck_global_inits() raises Error {
             if (!assignable(g.ty, init)) {
                 error_have_expr_want("global initializer type mismatch", init, g.ty);
             }
+            check_store(init, LIFE_IMM);
         }
         g = g.next;
     }
@@ -5857,6 +6334,7 @@ da_stmt(s: ?*Stmt) raises Error: bool {
             init_top = acc;
             false;
         }
+        Region k -> { da_stmt(k.body); }
     }
 }
 
@@ -5869,8 +6347,261 @@ check_fn_inited(fn: *Function) raises Error {
 mark_local_params(fn: *Function) {
     p: ?*Obj = fn.params;
     while (p != null) {
-        if (p.local_mode != 0 && type_has_pointers(p.ty)) { mark_tainted(p); }
+        if (len(p.life_bound) != 0 && streq(p.life_bound, p.name) && type_has_pointers(p.ty)) {
+            mark_tainted(p);
+        }
         p = p.param_next;
+    }
+}
+
+expr_calls_need_imm(n: ?*Expr): bool {
+    if (n == null) { return false; }
+    match n.kind {
+        Funcall k -> {
+            fno: ?*Function = k.fn;
+            if (fno == null) { fno = find_function(k.funcname); }
+            if (fno != null) {
+                fu: *Function = fno;
+                if (fu.need_imm_heap != 0) { return true; }
+            }
+            a: ?*Expr = k.args;
+            while (a != null) {
+                if (expr_calls_need_imm(a)) { return true; }
+                a = a.next;
+            }
+            false;
+        }
+        Binary k -> { expr_calls_need_imm(k.lhs) || expr_calls_need_imm(k.rhs); }
+        Assign k -> { expr_calls_need_imm(k.lhs) || expr_calls_need_imm(k.rhs); }
+        Addr k -> { expr_calls_need_imm(k.lhs); }
+        Deref k -> { expr_calls_need_imm(k.lhs); }
+        Index k -> { expr_calls_need_imm(k.lhs) || expr_calls_need_imm(k.idx); }
+        Not k -> { expr_calls_need_imm(k.lhs); }
+        Neg k -> { expr_calls_need_imm(k.lhs); }
+        BitNot k -> { expr_calls_need_imm(k.lhs); }
+        LogAnd k -> { expr_calls_need_imm(k.lhs) || expr_calls_need_imm(k.rhs); }
+        LogOr k -> { expr_calls_need_imm(k.lhs) || expr_calls_need_imm(k.rhs); }
+        OrElse k -> { expr_calls_need_imm(k.lhs) || expr_calls_need_imm(k.rhs); }
+        MemberAccess k -> { expr_calls_need_imm(k.lhs); }
+        As k -> { expr_calls_need_imm(k.lhs); }
+        Trunc k -> { expr_calls_need_imm(k.lhs); }
+        New k -> { expr_calls_need_imm(k.lhs) || expr_calls_need_imm(k.fill) || field_inits_calls_need_imm(k.inits); }
+        StructLit k -> { field_inits_calls_need_imm(k.inits); }
+        VariantLit k -> { field_inits_calls_need_imm(k.inits); }
+        If k -> { expr_calls_need_imm(k.cond) || expr_calls_need_imm(k.then) || expr_calls_need_imm(k.els); }
+        Match k -> {
+            if (expr_calls_need_imm(k.cond)) { return true; }
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                if (stmt_calls_need_imm(arm.body)) { return true; }
+                arm = arm.next;
+            }
+            false;
+        }
+        Block k -> { stmt_list_calls_need_imm(k.body); }
+        _ -> { false; }
+    }
+}
+
+field_inits_calls_need_imm(inits: ?*FieldInit): bool {
+    a: ?*FieldInit = inits;
+    while (a != null) {
+        if (expr_calls_need_imm(a.lhs)) { return true; }
+        a = a.next;
+    }
+    false;
+}
+
+stmt_calls_need_imm(s: ?*Stmt): bool {
+    if (s == null) { return false; }
+    match s.kind {
+        Return k -> { expr_calls_need_imm(k.lhs); }
+        ExprStmt k -> { expr_calls_need_imm(k.lhs); }
+        Block k -> { stmt_list_calls_need_imm(k.body); }
+        If k -> { expr_calls_need_imm(k.cond) || stmt_calls_need_imm(k.then) || stmt_calls_need_imm(k.els); }
+        While k -> { expr_calls_need_imm(k.cond) || stmt_calls_need_imm(k.body); }
+        Match k -> {
+            if (expr_calls_need_imm(k.cond)) { return true; }
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                if (stmt_calls_need_imm(arm.body)) { return true; }
+                arm = arm.next;
+            }
+            false;
+        }
+        Raise k -> { field_inits_calls_need_imm(k.inits); }
+        Try k -> {
+            if (stmt_calls_need_imm(k.body)) { return true; }
+            a: ?*CatchArm = k.arms;
+            while (a != null) {
+                if (stmt_calls_need_imm(a.body)) { return true; }
+                a = a.next;
+            }
+            false;
+        }
+        Region k -> { stmt_calls_need_imm(k.body); }
+        _ -> { false; }
+    }
+}
+
+stmt_list_calls_need_imm(s: ?*Stmt): bool {
+    while (s != null) {
+        if (stmt_calls_need_imm(s)) { return true; }
+        s = s.next;
+    }
+    false;
+}
+
+propagate_need_imm_heap() {
+    changed: int = 1;
+    while (changed != 0) {
+        changed = 0;
+        fn: ?*Function = functions;
+        while (fn != null) {
+            if (fn.is_extern == 0 && fn.need_imm_heap == 0) {
+                if (stmt_calls_need_imm(fn.body)) {
+                    fn.need_imm_heap = 1;
+                    changed = 1;
+                }
+            }
+            fn = fn.next;
+        }
+    }
+}
+
+check_region_calls_expr(n: ?*Expr) raises Error {
+    if (n == null) { return; }
+    match n.kind {
+        Funcall k -> {
+            fno: ?*Function = k.fn;
+            if (fno == null) { fno = find_function(k.funcname); }
+            if (fno != null) {
+                fu: *Function = fno;
+                if (fu.need_imm_heap != 0) {
+                    if (life_heap != LIFE_HEAPTOP && life_heap != LIFE_IMM) {
+                        error("cannot call from a region");
+                    }
+                }
+            }
+            a: ?*Expr = k.args;
+            while (a != null) {
+                check_region_calls_expr(a);
+                a = a.next;
+            }
+            return;
+        }
+        Binary k -> { check_region_calls_expr(k.lhs); check_region_calls_expr(k.rhs); return; }
+        Assign k -> { check_region_calls_expr(k.lhs); check_region_calls_expr(k.rhs); return; }
+        Addr k -> { check_region_calls_expr(k.lhs); return; }
+        Deref k -> { check_region_calls_expr(k.lhs); return; }
+        Index k -> { check_region_calls_expr(k.lhs); check_region_calls_expr(k.idx); return; }
+        Not k -> { check_region_calls_expr(k.lhs); return; }
+        Neg k -> { check_region_calls_expr(k.lhs); return; }
+        BitNot k -> { check_region_calls_expr(k.lhs); return; }
+        LogAnd k -> { check_region_calls_expr(k.lhs); check_region_calls_expr(k.rhs); return; }
+        LogOr k -> { check_region_calls_expr(k.lhs); check_region_calls_expr(k.rhs); return; }
+        OrElse k -> { check_region_calls_expr(k.lhs); check_region_calls_expr(k.rhs); return; }
+        MemberAccess k -> { check_region_calls_expr(k.lhs); return; }
+        As k -> { check_region_calls_expr(k.lhs); return; }
+        Trunc k -> { check_region_calls_expr(k.lhs); return; }
+        New k -> {
+            check_region_calls_expr(k.lhs);
+            check_region_calls_expr(k.fill);
+            check_region_calls_inits(k.inits);
+            return;
+        }
+        StructLit k -> { check_region_calls_inits(k.inits); return; }
+        VariantLit k -> { check_region_calls_inits(k.inits); return; }
+        If k -> {
+            check_region_calls_expr(k.cond);
+            check_region_calls_expr(k.then);
+            check_region_calls_expr(k.els);
+            return;
+        }
+        Match k -> {
+            check_region_calls_expr(k.cond);
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                check_region_calls_stmt(arm.body);
+                arm = arm.next;
+            }
+            return;
+        }
+        Block k -> { check_region_calls_stmt_list(k.body); return; }
+        _ -> { return; }
+    }
+}
+
+check_region_calls_inits(inits: ?*FieldInit) raises Error {
+    a: ?*FieldInit = inits;
+    while (a != null) {
+        check_region_calls_expr(a.lhs);
+        a = a.next;
+    }
+}
+
+check_region_calls_stmt(s: ?*Stmt) raises Error {
+    if (s == null) { return; }
+    match s.kind {
+        Return k -> { check_region_calls_expr(k.lhs); return; }
+        ExprStmt k -> { check_region_calls_expr(k.lhs); return; }
+        Block k -> { check_region_calls_stmt_list(k.body); return; }
+        If k -> {
+            check_region_calls_expr(k.cond);
+            check_region_calls_stmt(k.then);
+            check_region_calls_stmt(k.els);
+            return;
+        }
+        While k -> {
+            check_region_calls_expr(k.cond);
+            check_region_calls_stmt(k.body);
+            return;
+        }
+        Match k -> {
+            check_region_calls_expr(k.cond);
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                check_region_calls_stmt(arm.body);
+                arm = arm.next;
+            }
+            return;
+        }
+        Raise k -> { check_region_calls_inits(k.inits); return; }
+        Try k -> {
+            check_region_calls_stmt(k.body);
+            a: ?*CatchArm = k.arms;
+            while (a != null) {
+                check_region_calls_stmt(a.body);
+                a = a.next;
+            }
+            return;
+        }
+        Region k -> {
+            old_heap: int = life_heap;
+            life_heap = 99;
+            check_region_calls_stmt(k.body);
+            life_heap = old_heap;
+            return;
+        }
+        _ -> { return; }
+    }
+}
+
+check_region_calls_stmt_list(s: ?*Stmt) raises Error {
+    while (s != null) {
+        check_region_calls_stmt(s);
+        s = s.next;
+    }
+}
+
+check_region_calls_all() raises Error {
+    fn: ?*Function = functions;
+    while (fn != null) {
+        if (fn.is_extern == 0) {
+            life_heap = LIFE_HEAPTOP;
+            check_region_calls_stmt(fn.body);
+        }
+        fn = fn.next;
     }
 }
 
@@ -5892,6 +6623,7 @@ typecheck_program() raises Error {
         zero_top = null;
         taint_top = null;
         addr_top = null;
+        life_init_fn(fn);
         mark_local_params(fn);
         add_type_stmt(fn.body);
         check_fn_result(fn);
@@ -5899,6 +6631,8 @@ typecheck_program() raises Error {
         }
         fn = fn.next;
     }
+    propagate_need_imm_heap();
+    check_region_calls_all();
     current_fn = null;
     current_return_ty = null;
     catch_top = null;
@@ -7027,6 +7761,15 @@ gen_stmt(n: *Stmt) raises Error {
             cg_mov_rip_r("l8_exc_ptr", 0, 6);
             cg_call("l8_raise");
             cg_label_id(ltryend);
+            return;
+        }
+        Region k -> {
+            cg_call("l8_heap_mark");
+            emit_store_var(k.mark, ty_int);
+            gen_stmt(k.body);
+            emit_load_var(k.mark, ty_int);
+            cg_mov_rr(0, cg_arg_reg(0));
+            cg_call("l8_heap_reset");
             return;
         }
         _ -> { error("invalid statement"); }

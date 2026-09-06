@@ -21,6 +21,8 @@
 .globl l8_raise
 .globl l8_exc_tag
 .globl l8_exc_ptr
+.globl l8_heap_mark
+.globl l8_heap_reset
 .globl rdtsc
 
 .section .bss
@@ -113,6 +115,16 @@ syscall:
     mov %r9, %r8
     mov $0, %r9
     syscall
+    ret
+
+# long l8_heap_mark(void) — current bump pointer
+l8_heap_mark:
+    mov heap_ptr(%rip), %rax
+    ret
+
+# void l8_heap_reset(long mark) — rewind the bump allocator
+l8_heap_reset:
+    mov %rdi, heap_ptr(%rip)
     ret
 
 # void *malloc(long size) — bump allocator, 8-byte aligned
