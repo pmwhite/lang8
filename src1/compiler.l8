@@ -9,11 +9,13 @@
 // A span of an existing []T is the array plus a start index, not a [n]T view.
 // Globals: `name: type = e` is required. Constants go in .data; other inits run once before main.
 // write/read take []i8 (optional off/n, checked) or *i8 (exactly one byte).
-// Address of a local cannot be stored, returned, or passed except to write/read
-// or a parameter marked `T@` / `T@p` (addresses inside T must not escape).
+// An omitted bound on *T / ?*T / []T / [z]T is self-bound (same as `T@` / `T@p`).
+// `@immortal` is process lifetime. Address of a local cannot be stored, returned,
+// or passed except to write/read or a self-bound parameter.
 // `region { }` saves the bump pointer and restores it on exit. `new` inside is
 // in that heap generation. Nested regions nest. `@` on params/returns names a
-// lifetime (`@` self, `@p`, `@new`). Long-lived storage cannot hold a shorter pointer.
+// lifetime (`@`/`@p` self, `@q`, `@new`, `@immortal`). Long-lived storage cannot
+// hold a shorter pointer.
 // Unknown names are an error. OS functions are `extern name(params): T` backed by runtime.s.
 // Bitwise: `~ & ^ | << >>` on int/i8 (same type; >> is arithmetic; shift count is int).
 // `if`/`match`/`{ }` are expressions; a block's last statement is its value (`;` does not discard).
@@ -1377,6 +1379,11 @@ is_zptr(t: *Type): bool {
 
 is_indexable(t: *Type): bool { is_array(t) || is_slice(t) || is_zptr(t); }
 
+type_is_ref(t: ?*Type): bool {
+    if (t == null) { return false; }
+    is_any_pointer(t) || is_slice(t) || is_zptr(t);
+}
+
 is_struct_ty(t: *Type): bool {
     match t.* {
         Record _p -> { true; }
@@ -2298,30 +2305,39 @@ find_fn_param(fn: *Function, name: []i8): ?*Obj {
     null;
 }
 
+life_bound_immortal(b: []i8): bool {
+    streq(b, "immortal");
+}
+
+life_is_self_bound(p: *Obj): bool {
+    if (life_bound_immortal(p.life_bound)) { return false; }
+    if (streq(p.life_bound, "new")) { return false; }
+    len(p.life_bound) == 0 || streq(p.life_bound, p.name);
+}
+
 resolve_fn_bounds(fn: *Function) raises Error {
     p: ?*Obj = fn.params;
     while (p != null) {
-        if (len(p.life_bound) == 0) { p.life = LIFE_IMM; }
+        if (life_bound_immortal(p.life_bound)) { p.life = LIFE_IMM; }
+        else if (len(p.life_bound) == 0 && !type_is_ref(p.ty)) { p.life = LIFE_IMM; }
         else { p.life = life_alloc_frame(0 - 1, LIFE_KIND_PARAM); }
         p = p.param_next;
     }
     p = fn.params;
     while (p != null) {
         b: []i8 = p.life_bound;
-        if (len(b) != 0) {
-            if (streq(b, "new")) {
-                life_add_edge(p.life, LIFE_HEAPTOP);
-            } else {
-                q: ?*Obj = find_fn_param(fn, b);
-                if (q == null) { error("unknown lifetime bound"); }
-                qu: *Obj = q;
-                if (qu.life == LIFE_IMM) { p.life = LIFE_IMM; }
-                else { life_add_edge(p.life, qu.life); }
-            }
+        if (streq(b, "new")) {
+            life_add_edge(p.life, LIFE_HEAPTOP);
+        } else if (len(b) != 0 && !life_bound_immortal(b) && !streq(b, p.name)) {
+            q: ?*Obj = find_fn_param(fn, b);
+            if (q == null) { error("unknown lifetime bound"); }
+            qu: *Obj = q;
+            if (qu.life == LIFE_IMM) { p.life = LIFE_IMM; }
+            else { life_add_edge(p.life, qu.life); }
         }
         p = p.param_next;
     }
-    if (len(fn.ret_bound) == 0) {
+    if (len(fn.ret_bound) == 0 || life_bound_immortal(fn.ret_bound)) {
         fn.ret_life = LIFE_IMM;
     } else if (streq(fn.ret_bound, "new")) {
         fn.ret_life = LIFE_HEAPTOP;
@@ -2591,146 +2607,6 @@ io_allows_stack(name: []i8): bool {
     streq(name, "write") || streq(name, "read");
 }
 
-expr_is_obj(n: ?*Expr, o: *Obj): bool {
-    if (n == null) { return false; }
-    match n.kind {
-        Var k -> { k.var == o; }
-        _ -> { false; }
-    }
-}
-
-expr_uses_obj(n: ?*Expr, o: *Obj): bool {
-    if (n == null) { return false; }
-    match n.kind {
-        Var k -> { k.var == o; }
-        Binary k -> {
-            eqnull: int = 0;
-            match k.op {
-                Eq -> { eqnull = 1; }
-                Ne -> { eqnull = 1; }
-                _ -> {}
-            }
-            if (eqnull != 0) {
-                if (is_null_expr(k.lhs) && expr_is_obj(k.rhs, o)) { return false; }
-                if (is_null_expr(k.rhs) && expr_is_obj(k.lhs, o)) { return false; }
-            }
-            expr_uses_obj(k.lhs, o) || expr_uses_obj(k.rhs, o);
-        }
-        Assign k -> { expr_uses_obj(k.lhs, o) || expr_uses_obj(k.rhs, o); }
-        Addr k -> { expr_uses_obj(k.lhs, o); }
-        Deref _p -> { false; }
-        Index k -> {
-            if (expr_uses_obj(k.idx, o)) { return true; }
-            et: ?*Type = n.ty;
-            if (et == null) { et = o.ty; }
-            if (type_has_pointers(et)) { expr_uses_obj(k.lhs, o); } else { false; }
-        }
-        Not k -> { expr_uses_obj(k.lhs, o); }
-        Neg k -> { expr_uses_obj(k.lhs, o); }
-        BitNot k -> { expr_uses_obj(k.lhs, o); }
-        LogAnd k -> { expr_uses_obj(k.lhs, o) || expr_uses_obj(k.rhs, o); }
-        LogOr k -> { expr_uses_obj(k.lhs, o) || expr_uses_obj(k.rhs, o); }
-        OrElse k -> { expr_uses_obj(k.lhs, o) || expr_uses_obj(k.rhs, o); }
-        Funcall k -> {
-            if (io_allows_stack(k.funcname)) { return false; }
-            fno: ?*Function = find_function(k.funcname);
-            a: ?*Expr = k.args;
-            po: ?*Obj = null;
-            if (fno != null) { po = fno.params; }
-            while (a != null) {
-                if (expr_uses_obj(a, o)) {
-                    if (fno == null) { return true; }
-                    if (po == null) { return true; }
-                    if (param_escapes(fno, po)) { return true; }
-                }
-                if (po != null) { po = po.param_next; }
-                a = a.next;
-            }
-            false;
-        }
-        MemberAccess k -> {
-            if (!type_has_pointers(k.member.ty)) { return false; }
-            expr_uses_obj(k.lhs, o);
-        }
-        As k -> { expr_uses_obj(k.lhs, o); }
-        Trunc k -> { expr_uses_obj(k.lhs, o); }
-        New k -> { expr_uses_obj(k.lhs, o) || expr_uses_obj(k.fill, o) || field_inits_use_obj(k.inits, o); }
-        StructLit k -> { field_inits_use_obj(k.inits, o); }
-        VariantLit k -> { field_inits_use_obj(k.inits, o); }
-        If k -> { expr_uses_obj(k.cond, o) || expr_uses_obj(k.then, o) || expr_uses_obj(k.els, o); }
-        Match k -> {
-            if (expr_uses_obj(k.cond, o)) { return true; }
-            arm: ?*MatchArm = k.arms;
-            while (arm != null) {
-                if (stmt_uses_obj(arm.body, o)) { return true; }
-                arm = arm.next;
-            }
-            false;
-        }
-        Block k -> { stmt_list_uses_obj(k.body, o); }
-        _ -> { false; }
-    }
-}
-
-field_inits_use_obj(inits: ?*FieldInit, o: *Obj): bool {
-    a: ?*FieldInit = inits;
-    while (a != null) {
-        if (expr_uses_obj(a.lhs, o)) { return true; }
-        a = a.next;
-    }
-    false;
-}
-
-stmt_uses_obj(s: ?*Stmt, o: *Obj): bool {
-    if (s == null) { return false; }
-    match s.kind {
-        Return k -> { expr_uses_obj(k.lhs, o); }
-        ExprStmt k -> { expr_uses_obj(k.lhs, o); }
-        Block k -> { stmt_list_uses_obj(k.body, o); }
-        If k -> { expr_uses_obj(k.cond, o) || stmt_uses_obj(k.then, o) || stmt_uses_obj(k.els, o); }
-        While k -> { expr_uses_obj(k.cond, o) || stmt_uses_obj(k.body, o); }
-        Match k -> {
-            if (expr_uses_obj(k.cond, o)) { return true; }
-            arm: ?*MatchArm = k.arms;
-            while (arm != null) {
-                if (stmt_uses_obj(arm.body, o)) { return true; }
-                arm = arm.next;
-            }
-            false;
-        }
-        Raise k -> { field_inits_use_obj(k.inits, o); }
-        Try k -> {
-            if (stmt_uses_obj(k.body, o)) { return true; }
-            a: ?*CatchArm = k.arms;
-            while (a != null) {
-                if (stmt_uses_obj(a.body, o)) { return true; }
-                a = a.next;
-            }
-            false;
-        }
-        Region k -> { stmt_uses_obj(k.body, o); }
-        _ -> { false; }
-    }
-}
-
-stmt_list_uses_obj(s: ?*Stmt, o: *Obj): bool {
-    while (s != null) {
-        if (stmt_uses_obj(s, o)) { return true; }
-        s = s.next;
-    }
-    false;
-}
-
-param_escapes(fn: *Function, po: *Obj): bool {
-    if (fn.is_extern != 0) { return true; }
-    if (!type_has_pointers(po.ty)) { return false; }
-    if (po.escape_walk != 0) { return false; }
-    po.escape_walk = 1;
-    r: bool = stmt_uses_obj(fn.body, po);
-    po.escape_walk = 0;
-    r;
-}
-
 life_meet(a: int, b: int) raises Error: int {
     if (life_outlives(a, b)) { return b; }
     if (life_outlives(b, a)) { return a; }
@@ -2810,7 +2686,7 @@ stmt_result_life(s: ?*Stmt) raises Error: int {
 }
 
 instantiate_bound(fn: *Function, bound: []i8, args: ?*Expr) raises Error: int {
-    if (len(bound) == 0) { return LIFE_IMM; }
+    if (len(bound) == 0 || life_bound_immortal(bound)) { return LIFE_IMM; }
     if (streq(bound, "new")) { return life_heap; }
     p: ?*Obj = fn.params;
     a: ?*Expr = args;
@@ -2895,7 +2771,22 @@ dest_life(n: *Expr) raises Error: int {
 }
 
 escape_error(n: ?*Expr) raises Error {
-    if (is_tainted_expr(n) || is_stack_addr(n)) { error("address of local cannot escape"); }
+    fn: ?*Function = current_fn;
+    if (is_tainted_expr(n) || is_stack_addr(n)) {
+        if (fn != null) {
+            sb: *StrBuf = sb_new();
+            sb_puts(sb, "address of local cannot escape in ");
+            sb_puts(sb, fn.name);
+            error(sb_finish(sb));
+        }
+        error("address of local cannot escape");
+    }
+    if (fn != null) {
+        sb2: *StrBuf = sb_new();
+        sb_puts(sb2, "region pointer cannot escape in ");
+        sb_puts(sb2, fn.name);
+        error(sb_finish(sb2));
+    }
     error("region pointer cannot escape");
 }
 
@@ -2922,14 +2813,7 @@ check_call_lifetimes(fno: *Function, args: ?*Expr) raises Error {
     while (a != null) {
         if (po != null) {
             sl: int = expr_life(a);
-            if (len(po.life_bound) == 0) {
-                if (!life_outlives(sl, LIFE_IMM)) {
-                    if (sl == LIFE_HEAPTOP) { note_imm_heap(); }
-                    else {
-                        if (param_escapes(fno, po)) { escape_error(a); }
-                    }
-                }
-            } else {
+            if (!life_is_self_bound(po)) {
                 need: int = instantiate_bound(fno, po.life_bound, args);
                 if (!life_outlives(sl, need)) {
                     if (sl == LIFE_HEAPTOP && need == LIFE_IMM) { note_imm_heap(); }
@@ -4686,6 +4570,10 @@ parse_at_bound() raises Error: []i8 {
         return "new";
     }
     if (tok.kind == TokKind.Ident) {
+        if (streq(cur_tokstr(), "immortal")) {
+            tok = tok.next;
+            return "immortal";
+        }
         s: []i8 = cur_tokstr();
         tok = tok.next;
         return s;
@@ -6347,9 +6235,7 @@ check_fn_inited(fn: *Function) raises Error {
 mark_local_params(fn: *Function) {
     p: ?*Obj = fn.params;
     while (p != null) {
-        if (len(p.life_bound) != 0 && streq(p.life_bound, p.name) && type_has_pointers(p.ty)) {
-            mark_tainted(p);
-        }
+        if (life_is_self_bound(p) && type_has_pointers(p.ty)) { mark_tainted(p); }
         p = p.param_next;
     }
 }
