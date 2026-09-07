@@ -57,6 +57,10 @@ type Member = {
     offset: int;
     ty: *Type;
     next: ?*Member;
+    browse_id: int;
+    browse_pos: int;
+    browse_file: int;
+    browse_len: int;
 }
 
 type StructDef = {
@@ -67,6 +71,10 @@ type StructDef = {
     next: ?*StructDef;
     hash_next: ?*StructDef;
     ptr_walk: int;
+    browse_id: int;
+    browse_pos: int;
+    browse_file: int;
+    browse_len: int;
 }
 
 type Variant = {
@@ -76,6 +84,10 @@ type Variant = {
     payload_ty: ?*Type;
     payload_size: int;
     next: ?*Variant;
+    browse_id: int;
+    browse_pos: int;
+    browse_file: int;
+    browse_len: int;
 }
 
 type EnumDef = {
@@ -86,6 +98,10 @@ type EnumDef = {
     next: ?*EnumDef;
     hash_next: ?*EnumDef;
     ptr_walk: int;
+    browse_id: int;
+    browse_pos: int;
+    browse_file: int;
+    browse_len: int;
 }
 
 type ExnDef = {
@@ -96,6 +112,10 @@ type ExnDef = {
     ty: ?*Type;
     next: ?*ExnDef;
     hash_next: ?*ExnDef;
+    browse_id: int;
+    browse_pos: int;
+    browse_file: int;
+    browse_len: int;
 }
 
 type ExnList = {
@@ -106,8 +126,25 @@ type ExnList = {
 
 type ImportedFile = {
     path: []i8;
+    src: []i8;
+    src_len: int;
+    id: int;
     next: ?*ImportedFile;
 }
+
+type BrowseOcc = {
+    file: int;
+    pos: int;
+    len: int;
+    sym: int;
+    is_def: int;
+    cls: int;
+    typ: []i8;
+    next: ?*BrowseOcc;
+    hash_next: ?*BrowseOcc;
+}
+
+type BrowseBucket = { head: ?*BrowseOcc; }
 
 type TokKind =
     | Eof
@@ -192,6 +229,9 @@ type FieldInit = {
     member: *Member;
     lhs: ?*Expr;
     next: ?*FieldInit;
+    pos: int;
+    file: int;
+    toklen: int;
 }
 
 type MatchArm = {
@@ -199,6 +239,9 @@ type MatchArm = {
     binder: ?*Obj;
     body: *Stmt;
     next: ?*MatchArm;
+    pos: int;
+    file: int;
+    toklen: int;
 }
 
 type CatchArm = {
@@ -206,6 +249,9 @@ type CatchArm = {
     binder: ?*Obj;
     body: *Stmt;
     next: ?*CatchArm;
+    pos: int;
+    file: int;
+    toklen: int;
 }
 
 type BinOp =
@@ -256,6 +302,9 @@ type Expr = {
     kind: ExprKind;
     next: ?*Expr;
     ty: ?*Type;
+    pos: int;
+    file: int;
+    toklen: int;
 }
 
 type StmtKind =
@@ -291,6 +340,10 @@ type Obj = {
     life: int;
     storage_life: int;
     life_bound: []i8;
+    browse_id: int;
+    browse_pos: int;
+    browse_file: int;
+    browse_len: int;
 }
 
 type Function = {
@@ -312,6 +365,10 @@ type Function = {
     need_imm_heap: int;
     imm_heap_direct: int;
     decl_imm_heap: int;
+    browse_id: int;
+    browse_pos: int;
+    browse_file: int;
+    browse_len: int;
 }
 
 type FnBucket = { head: ?*Function; }
@@ -357,6 +414,19 @@ life_edge_short: []int = new int[0](0);
 life_edge_n: int = 0;
 function_tail: ?*Function = null;
 imported_files: ?*ImportedFile = null;
+current_file_id: int = 0;
+browse_file_n: int = 0;
+browse_next_id: int = 1;
+browse_tok_pos: int = 0;
+browse_tok_len: int = 0;
+browse_tok_file: int = 0;
+browse_occs: ?*BrowseOcc = null;
+BROWSE_BUCK: int = 4096;
+browse_buckets: []BrowseBucket = new BrowseBucket[0](BrowseBucket { head: null });
+BROWSE_VAR: int = 0;
+BROWSE_FN: int = 1;
+BROWSE_TY: int = 2;
+BROWSE_FIELD: int = 3;
 struct_defs: ?*StructDef = null;
 enum_defs: ?*EnumDef = null;
 exn_defs: ?*ExnDef = null;
@@ -369,7 +439,7 @@ exn_buckets: []ExnBucket = new ExnBucket[0](ExnBucket { head: null });
 tok_pool: []Token = new Token[0](Token { kind: TokKind.Eof, val: 0, str: "", len: 0, pos: 0, next: token_eof });
 tok_pool_i: int = 0;
 tok_pool_n: int = 0;
-expr_pool: []Expr = new Expr[0](Expr { kind: ExprKind.Null, next: null, ty: null });
+expr_pool: []Expr = new Expr[0](Expr { kind: ExprKind.Null, next: null, ty: null, pos: 0, file: 0, toklen: 0 });
 expr_pool_i: int = 0;
 expr_pool_n: int = 0;
 stmt_pool: []Stmt = new Stmt[0](Stmt { kind: StmtKind.Block { body: null }, next: null });
@@ -654,6 +724,96 @@ sb_puts(sb: *StrBuf@immortal, s: []i8) @immortal {
 
 sb_finish(sb: *StrBuf@immortal) @immortal: []i8 { strdup_n(sb.data, 0, sb.len); }
 
+browse_fresh(): int {
+    id: int = browse_next_id;
+    browse_next_id = browse_next_id + 1;
+    id;
+}
+
+browse_note() {
+    browse_tok_pos = tok.pos;
+    browse_tok_len = tok.len;
+    browse_tok_file = current_file_id;
+}
+
+browse_hash(file: int, pos: int): int {
+    h: int = file * 1000003 + pos;
+    if (h < 0) { h = 0 - h; }
+    h % BROWSE_BUCK;
+}
+
+browse_find(file: int, pos: int): ?*BrowseOcc {
+    if (len(browse_buckets) == 0) { return null; }
+    o: ?*BrowseOcc = browse_buckets[browse_hash(file, pos)].head;
+    while (o != null) {
+        if (o.file == file && o.pos == pos) { return o; }
+        o = o.hash_next;
+    }
+    null;
+}
+
+browse_add(file: int, pos: int, n: int, sym: int, is_def: int, cls: int, typ: []i8@immortal) @immortal {
+    if (n <= 0) { return; }
+    if (browse_find(file, pos) != null) { return; }
+    if (len(browse_buckets) == 0) {
+        browse_buckets = new BrowseBucket[4096](BrowseBucket { head: null });
+    }
+    o: *BrowseOcc = new BrowseOcc {
+        file: file,
+        pos: pos,
+        len: n,
+        sym: sym,
+        is_def: is_def,
+        cls: cls,
+        typ: typ,
+        next: browse_occs,
+        hash_next: browse_buckets[browse_hash(file, pos)].head
+    };
+    browse_occs = o;
+    browse_buckets[browse_hash(file, pos)].head = o;
+}
+
+browse_type_str(t: ?*Type) @immortal raises Error: []i8 {
+    sb: *StrBuf = sb_new();
+    append_type(sb, t);
+    sb_finish(sb);
+}
+
+browse_fn_str(fn: *Function@immortal) @immortal raises Error: []i8 {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, "fn ");
+    sb_puts(sb, fn.name);
+    sb_putc(sb, '(');
+    p: ?*Obj = fn.params;
+    first: int = 1;
+    while (p != null) {
+        if (first == 0) { sb_puts(sb, ", "); }
+        first = 0;
+        sb_puts(sb, p.name);
+        sb_puts(sb, ": ");
+        append_type(sb, p.ty);
+        p = p.param_next;
+    }
+    sb_putc(sb, ')');
+    if (fn.decl_imm_heap != 0) { sb_puts(sb, " @immortal"); }
+    if (fn.return_ty != null) {
+        sb_puts(sb, ": ");
+        append_type(sb, fn.return_ty);
+    }
+    sb_finish(sb);
+}
+
+browse_reset() @immortal {
+    browse_occs = null;
+    browse_next_id = 1;
+    browse_file_n = 0;
+    current_file_id = 0;
+    browse_tok_pos = 0;
+    browse_tok_len = 0;
+    browse_tok_file = 0;
+    browse_buckets = new BrowseBucket[4096](BrowseBucket { head: null });
+}
+
 append_type(sb: *StrBuf@immortal, t: ?*Type) @immortal raises Error {
     if (t == null) {
         sb_puts(sb, "<unknown>");
@@ -807,7 +967,11 @@ init_runtime() @immortal {
         ty: null,
         next: null,
         hash_next: null,
-        ptr_walk: 0
+        ptr_walk: 0,
+        browse_id: 0,
+        browse_pos: 0,
+        browse_file: 0,
+        browse_len: 0
     };
     ty_jmpbuf = struct_type(jd);
     exn_defs = null;
@@ -950,7 +1114,14 @@ mark_imported(path: []i8@immortal) @immortal: bool {
         if (streq(f.path, path)) { return false; }
         f = f.next;
     }
-    imported_files = new ImportedFile { path: path, next: imported_files };
+    imported_files = new ImportedFile {
+        path: path,
+        src: "",
+        src_len: 0,
+        id: browse_file_n,
+        next: imported_files
+    };
+    browse_file_n = browse_file_n + 1;
     true;
 }
 
@@ -1179,7 +1350,8 @@ get_or_create_struct(name: []i8@immortal) @immortal: *StructDef {
     sd: ?*StructDef = find_struct(name);
     if (sd != null) { return sd; }
     created: *StructDef = new StructDef {
-        name: name, members: null, size: 0, ty: null, next: struct_defs, hash_next: null, ptr_walk: 0
+        name: name, members: null, size: 0, ty: null, next: struct_defs, hash_next: null, ptr_walk: 0,
+        browse_id: browse_fresh(), browse_pos: 0, browse_file: 0, browse_len: 0
     };
     struct_defs = created;
     hash_put_struct(created);
@@ -1190,7 +1362,8 @@ get_or_create_enum(name: []i8@immortal) @immortal: *EnumDef {
     ed: ?*EnumDef = find_enum(name);
     if (ed != null) { return ed; }
     created: *EnumDef = new EnumDef {
-        name: name, variants: null, size: 0, ty: null, next: enum_defs, hash_next: null, ptr_walk: 0
+        name: name, variants: null, size: 0, ty: null, next: enum_defs, hash_next: null, ptr_walk: 0,
+        browse_id: browse_fresh(), browse_pos: 0, browse_file: 0, browse_len: 0
     };
     enum_defs = created;
     hash_put_enum(created);
@@ -1987,7 +2160,7 @@ add_string(s: []i8, off: int, n: int) @immortal: int {
 mk_expr(k: ExprKind) @immortal: *Expr {
     if (expr_pool_i >= expr_pool_n) {
         expr_pool_n = 1024;
-        expr_pool = new Expr[1024](Expr { kind: ExprKind.Null, next: null, ty: null });
+        expr_pool = new Expr[1024](Expr { kind: ExprKind.Null, next: null, ty: null, pos: 0, file: 0, toklen: 0 });
         expr_pool_i = 0;
     }
     n: *Expr = &expr_pool[expr_pool_i];
@@ -1995,6 +2168,9 @@ mk_expr(k: ExprKind) @immortal: *Expr {
     n.kind = k;
     n.next = null;
     n.ty = null;
+    n.pos = 0;
+    n.file = 0;
+    n.toklen = 0;
     n;
 }
 
@@ -2071,7 +2247,7 @@ new_for(item: *Obj@immortal, coll: ?*Obj@immortal, idx: ?*Obj@immortal, n: *Obj@
 new_block(body: ?*Stmt@immortal) @immortal: *Stmt { mk_stmt(StmtKind.Block { body: body }); }
 new_expr_stmt(lhs: *Expr@immortal) @immortal: *Stmt { mk_stmt(StmtKind.ExprStmt { lhs: lhs }); }
 new_field_init(m: *Member@immortal, lhs: ?*Expr@immortal) @immortal: *FieldInit {
-    new FieldInit { member: m, lhs: lhs, next: null };
+    new FieldInit { member: m, lhs: lhs, next: null, pos: browse_tok_pos, file: browse_tok_file, toklen: browse_tok_len };
 }
 new_heap_node(lhs: ?*Expr@immortal, val: int, inits: ?*FieldInit@immortal, variant: ?*Variant@immortal, fill: ?*Expr@immortal, ty: *Type@immortal) @immortal: *Expr {
     n: *Expr = mk_expr(ExprKind.New { lhs: lhs, val: val, inits: inits, variant: variant, fill: fill });
@@ -2093,13 +2269,13 @@ new_match_expr(cond: *Expr@immortal, arms: ?*MatchArm@immortal) @immortal: *Expr
 new_block_expr(body: ?*Stmt@immortal) @immortal: *Expr { mk_expr(ExprKind.Block { body: body }); }
 new_match(cond: *Expr@immortal, arms: ?*MatchArm@immortal) @immortal: *Stmt { mk_stmt(StmtKind.Match { cond: cond, arms: arms }); }
 new_match_arm(variant: ?*Variant@immortal, binder: ?*Obj@immortal, body: *Stmt@immortal) @immortal: *MatchArm {
-    new MatchArm { variant: variant, binder: binder, body: body, next: null };
+    new MatchArm { variant: variant, binder: binder, body: body, next: null, pos: 0, file: 0, toklen: 0 };
 }
 new_raise(exn: *ExnDef@immortal, inits: ?*FieldInit@immortal) @immortal: *Stmt { mk_stmt(StmtKind.Raise { exn: exn, inits: inits }); }
 new_try(body: *Stmt@immortal, arms: ?*CatchArm@immortal, buf: *Obj@immortal) @immortal: *Stmt { mk_stmt(StmtKind.Try { body: body, arms: arms, buf: buf }); }
 new_region(body: *Stmt@immortal, mark: *Obj@immortal) @immortal: *Stmt { mk_stmt(StmtKind.Region { body: body, mark: mark }); }
 new_catch_arm(exn: *ExnDef@immortal, binder: ?*Obj@immortal, body: *Stmt@immortal) @immortal: *CatchArm {
-    new CatchArm { exn: exn, binder: binder, body: body, next: null };
+    new CatchArm { exn: exn, binder: binder, body: body, next: null, pos: 0, file: 0, toklen: 0 };
 }
 
 find_function(name: []i8) @immortal: ?*Function {
@@ -2162,7 +2338,11 @@ new_obj(name: []i8@immortal, is_local: int) @immortal: *Obj {
         escape_walk: 0,
         life: 0,
         storage_life: 0,
-        life_bound: ""
+        life_bound: "",
+        browse_id: browse_fresh(),
+        browse_pos: browse_tok_pos,
+        browse_file: browse_tok_file,
+        browse_len: browse_tok_len
     };
     if (is_local != 0) {
         o.scope_depth = scope_depth;
@@ -3043,18 +3223,22 @@ decl_spec() @immortal raises Error: *Type {
     }
     if (tok.kind == TokKind.Ident) {
         name: []i8 = cur_tokstr();
+        browse_note();
         ed: ?*EnumDef = find_enum(name);
         if (ed != null) {
             tok = tok.next;
+            browse_add(browse_tok_file, browse_tok_pos, browse_tok_len, ed.browse_id, 0, BROWSE_TY, name);
             return enum_type(ed);
         }
         xd: ?*ExnDef = find_exn(name);
         if (xd != null) {
             tok = tok.next;
+            browse_add(browse_tok_file, browse_tok_pos, browse_tok_len, xd.browse_id, 0, BROWSE_TY, name);
             return exn_type(xd);
         }
         tok = tok.next;
         sd: *StructDef = get_or_create_struct(name);
+        browse_add(browse_tok_file, browse_tok_pos, browse_tok_len, sd.browse_id, 0, BROWSE_TY, name);
         return struct_type(sd);
     }
     error("expected type");
@@ -3105,6 +3289,7 @@ parse_field_inits(members: ?*Member@immortal) @immortal raises Error: *FieldInit
         if (cur != null) { skip(TokKind.Comma); }
         if (tok.kind != TokKind.Ident) { error("expected field name"); }
         fname: []i8 = cur_tokstr();
+        browse_note();
         tok = tok.next;
         skip(TokKind.Colon);
         m: ?*Member = find_field(members, fname);
@@ -3163,6 +3348,10 @@ parse_primary() @immortal raises Error: *Expr {
             skip(TokKind.Dot);
             if (tok.kind != TokKind.Ident) { error("expected variant name after new Enum."); }
             vname: []i8 = cur_tokstr();
+            browse_note();
+            hvpos: int = browse_tok_pos;
+            hvlen: int = browse_tok_len;
+            hvfile: int = browse_tok_file;
             tok = tok.next;
             vo: ?*Variant = find_variant(type_enum_def(ety), vname);
             if (vo == null) { error("unknown variant"); }
@@ -3174,7 +3363,11 @@ parse_primary() @immortal raises Error: *Expr {
             } else {
                 if (v.fields != null) { error("variant requires field initializers"); }
             }
-            return new_heap_node(null, v.tag, args, v, null, ptr_to(ety));
+            hn: *Expr = new_heap_node(null, v.tag, args, v, null, ptr_to(ety));
+            hn.pos = hvpos;
+            hn.file = hvfile;
+            hn.toklen = hvlen;
+            return hn;
         }
         base: *Type = parse_type();
         if (tok.kind == TokKind.LBrack) {
@@ -3258,12 +3451,17 @@ parse_primary() @immortal raises Error: *Expr {
     }
     if (tok.kind == TokKind.Ident) {
         name: []i8 = cur_tokstr();
+        browse_note();
         if (is_type_name() && (tok.next).kind == TokKind.Dot) {
             ety: *Type = parse_type();
             if (!is_enum_ty(ety)) { error("variant construction requires an enum type"); }
             skip(TokKind.Dot);
             if (tok.kind != TokKind.Ident) { error("expected variant name"); }
             vname: []i8 = cur_tokstr();
+            browse_note();
+            vpos: int = browse_tok_pos;
+            vlen: int = browse_tok_len;
+            vfile: int = browse_tok_file;
             tok = tok.next;
             vo: ?*Variant = find_variant(type_enum_def(ety), vname);
             if (vo == null) { error("unknown variant"); }
@@ -3275,13 +3473,20 @@ parse_primary() @immortal raises Error: *Expr {
             } else {
                 if (v.fields != null) { error("variant requires field initializers"); }
             }
-            return new_variant_lit(v, v.tag, args, ety);
+            vl: *Expr = new_variant_lit(v, v.tag, args, ety);
+            vl.pos = vpos;
+            vl.file = vfile;
+            vl.toklen = vlen;
+            return vl;
         }
         if (is_type_name() && (tok.next).kind == TokKind.LBrace) {
             sty: *Type = parse_type();
             if (!is_struct_ty(sty)) { error("struct literal requires a struct type"); }
             return new_struct_lit(parse_struct_field_inits(sty), sty);
         }
+        npos: int = browse_tok_pos;
+        nlen: int = browse_tok_len;
+        nfile: int = browse_tok_file;
         tok = tok.next;
         if (tok.kind == TokKind.LParen) {
             tok = tok.next;
@@ -3299,12 +3504,20 @@ parse_primary() @immortal raises Error: *Expr {
                 }
             }
             skip(TokKind.RParen);
-            return new_funcall(name, head);
+            fe: *Expr = new_funcall(name, head);
+            fe.pos = npos;
+            fe.file = nfile;
+            fe.toklen = nlen;
+            return fe;
         }
         varo: ?*Obj = find_var(name);
         if (varo == null) { error("undefined variable"); }
         var: *Obj = varo;
-        return new_var_node(var);
+        ve: *Expr = new_var_node(var);
+        ve.pos = npos;
+        ve.file = nfile;
+        ve.toklen = nlen;
+        return ve;
     }
     if (tok.kind == TokKind.If) { return parse_if_expr(); }
     if (tok.kind == TokKind.Match) { return parse_match_expr(); }
@@ -3342,6 +3555,9 @@ parse_match_arms(mcond: *Expr@immortal) @immortal raises Error: ?*MatchArm {
     while (tok.kind != TokKind.RBrace) {
         if (tok.kind != TokKind.Ident) { error("expected variant name in match arm"); }
         vname: []i8 = cur_tokstr();
+        vpos: int = tok.pos;
+        vlen: int = tok.len;
+        vfile: int = current_file_id;
         tok = tok.next;
         is_wild: bool = streq(vname, "_");
         binder_name: []i8 = "";
@@ -3352,6 +3568,7 @@ parse_match_arms(mcond: *Expr@immortal) @immortal raises Error: ?*MatchArm {
             tok = tok.next;
             if (tok.kind != TokKind.Ident) { error("expected payload binding name"); }
             binder_name = cur_tokstr();
+            browse_note();
             have_binder = 1;
             tok = tok.next;
             skip(TokKind.RParen);
@@ -3359,6 +3576,7 @@ parse_match_arms(mcond: *Expr@immortal) @immortal raises Error: ?*MatchArm {
             if (tok.kind == TokKind.Ident) {
                 if (is_wild) { error("wildcard match arm cannot bind a payload"); }
                 binder_name = cur_tokstr();
+                browse_note();
                 have_binder = 1;
                 tok = tok.next;
             } else {
@@ -3398,6 +3616,9 @@ parse_match_arms(mcond: *Expr@immortal) @immortal raises Error: ?*MatchArm {
         arm_body_n: *Stmt = parse_compound();
         leave_scope();
         arm: *MatchArm = new_match_arm(arm_variant_n, arm_binder, arm_body_n);
+        arm.pos = vpos;
+        arm.file = vfile;
+        arm.toklen = vlen;
         if (acur != null) {
             acur.next = arm;
             acur = arm;
@@ -3450,6 +3671,10 @@ parse_postfix() @immortal raises Error: *Expr {
                     tok = tok.next;
                     if (tok.kind != TokKind.Ident) { error("expected member name"); }
                     name: []i8 = cur_tokstr();
+                    browse_note();
+                    mpos: int = browse_tok_pos;
+                    mlen: int = browse_tok_len;
+                    mfile: int = browse_tok_file;
                     tok = tok.next;
                     add_type(n);
                     t: ?*Type = decay(n.ty);
@@ -3473,6 +3698,9 @@ parse_postfix() @immortal raises Error: *Expr {
                     if (m == null) { error("unknown member"); }
                     mu: *Member = m;
                     n = new_member_access(n, mu);
+                    n.pos = mpos;
+                    n.file = mfile;
+                    n.toklen = mlen;
                 }
             } else {
                 if (tok.kind == TokKind.As || tok.kind == TokKind.Trunc) {
@@ -4595,6 +4823,7 @@ parse_at_bound() @immortal raises Error: []i8 {
 parse_decl(is_local: int, allow_at: int) @immortal raises Error: *Obj {
     if (tok.kind != TokKind.Ident) { error("expected identifier"); }
     name: []i8 = cur_tokstr();
+    browse_note();
     tok = tok.next;
     skip(TokKind.Colon);
     ty: *Type = parse_type();
@@ -4656,9 +4885,11 @@ parse_stmt() @immortal raises Error: *Stmt {
         tok = tok.next;
         if (tok.kind != TokKind.Ident) { error("expected exception name after raise"); }
         ename: []i8 = cur_tokstr();
+        browse_note();
         ed: ?*ExnDef = find_exn(ename);
         if (ed == null) { error("unknown exception"); }
         edu: *ExnDef = ed;
+        browse_add(browse_tok_file, browse_tok_pos, browse_tok_len, edu.browse_id, 0, BROWSE_TY, ename);
         tok = tok.next;
         rargs: ?*FieldInit = null;
         if (tok.kind == TokKind.LBrace) {
@@ -4679,9 +4910,14 @@ parse_stmt() @immortal raises Error: *Stmt {
             tok = tok.next;
             if (tok.kind != TokKind.Ident) { error("expected exception name in with arm"); }
             cname: []i8 = cur_tokstr();
+            browse_note();
             ced: ?*ExnDef = find_exn(cname);
             if (ced == null) { error("unknown exception"); }
             cedu: *ExnDef = ced;
+            cpos: int = browse_tok_pos;
+            clen: int = browse_tok_len;
+            cfile: int = browse_tok_file;
+            browse_add(cfile, cpos, clen, cedu.browse_id, 0, BROWSE_TY, cname);
             tok = tok.next;
             a: ?*CatchArm = arms_h;
             while (a != null) {
@@ -4695,6 +4931,7 @@ parse_stmt() @immortal raises Error: *Stmt {
                 tok = tok.next;
                 if (tok.kind != TokKind.Ident) { error("expected binder name"); }
                 bname: []i8 = cur_tokstr();
+                browse_note();
                 tok = tok.next;
                 skip(TokKind.RParen);
                 bo: *Obj = new_obj(bname, 1);
@@ -4703,6 +4940,7 @@ parse_stmt() @immortal raises Error: *Stmt {
             } else {
                 if (tok.kind == TokKind.Ident) {
                     bname2: []i8 = cur_tokstr();
+                    browse_note();
                     tok = tok.next;
                     bo2: *Obj = new_obj(bname2, 1);
                     bo2.ty = exn_type(cedu);
@@ -4715,6 +4953,9 @@ parse_stmt() @immortal raises Error: *Stmt {
             abody: *Stmt = parse_compound();
             leave_scope();
             armn: *CatchArm = new_catch_arm(cedu, binder, abody);
+            armn.pos = cpos;
+            armn.file = cfile;
+            armn.toklen = clen;
             if (arms_c != null) {
                 arms_c.next = armn;
                 arms_c = armn;
@@ -4774,6 +5015,9 @@ parse_stmt() @immortal raises Error: *Stmt {
         tok = tok.next;
         if (tok.kind != TokKind.Ident) { error("expected name after for"); }
         iname: []i8 = cur_tokstr();
+        ipos: int = tok.pos;
+        ilen: int = tok.len;
+        ifile: int = current_file_id;
         tok = tok.next;
         if (tok.kind != TokKind.In) { error("expected in"); }
         tok = tok.next;
@@ -4795,6 +5039,9 @@ parse_stmt() @immortal raises Error: *Stmt {
             fidx = ix0;
         }
         fitem: *Obj = new_obj(iname, 1);
+        fitem.browse_pos = ipos;
+        fitem.browse_file = ifile;
+        fitem.browse_len = ilen;
         if (fhi != null) { fitem.ty = ty_int; }
         fbody: *Stmt = parse_stmt();
         leave_scope();
@@ -4869,7 +5116,11 @@ parse_function(name: []i8@immortal, is_extern: int) @immortal raises Error: *Fun
         ret_life: 0,
         need_imm_heap: 0,
         imm_heap_direct: 0,
-        decl_imm_heap: 0
+        decl_imm_heap: 0,
+        browse_id: browse_fresh(),
+        browse_pos: browse_tok_pos,
+        browse_file: browse_tok_file,
+        browse_len: browse_tok_len
     };
     locals = null;
     scope_depth = 0;
@@ -4900,9 +5151,11 @@ parse_function(name: []i8@immortal, is_extern: int) @immortal raises Error: *Fun
         while (rdone == 0) {
             if (tok.kind != TokKind.Ident) { error("expected exception type after raises"); }
             ename: []i8 = cur_tokstr();
+            browse_note();
             ed: ?*ExnDef = find_exn(ename);
             if (ed == null) { error("unknown exception"); }
             edu: *ExnDef = ed;
+            browse_add(browse_tok_file, browse_tok_pos, browse_tok_len, edu.browse_id, 0, BROWSE_TY, ename);
             if (exn_in_list(fn.raises_list, edu)) { error("duplicate raises"); }
             el: *ExnList = new ExnList { exn: edu, seen: 0, next: null };
             if (rtail != null) {
@@ -4956,6 +5209,7 @@ parse_field_list(base_offset: int) @immortal raises Error: *Member {
     while (tok.kind != TokKind.RBrace) {
         if (tok.kind != TokKind.Ident) { error("expected field name"); }
         mname: []i8 = cur_tokstr();
+        browse_note();
         tok = tok.next;
         skip(TokKind.Colon);
         mty: *Type = parse_type();
@@ -4964,7 +5218,11 @@ parse_field_list(base_offset: int) @immortal raises Error: *Member {
             name: mname,
             offset: offset,
             ty: mty,
-            next: null
+            next: null,
+            browse_id: browse_fresh(),
+            browse_pos: browse_tok_pos,
+            browse_file: browse_tok_file,
+            browse_len: browse_tok_len
         };
         sz: int = type_size(mty);
         if (sz <= 0) { sz = 8; }
@@ -4995,7 +5253,11 @@ parse_variant(tag: int, enum_name: []i8@immortal) @immortal raises Error: *Varia
         fields: null,
         payload_ty: null,
         payload_size: 0,
-        next: null
+        next: null,
+        browse_id: browse_fresh(),
+        browse_pos: tok.pos,
+        browse_file: current_file_id,
+        browse_len: tok.len
     };
     tok = tok.next;
     if (tok.kind == TokKind.LBrace) {
@@ -5009,7 +5271,11 @@ parse_variant(tag: int, enum_name: []i8@immortal) @immortal raises Error: *Varia
             ty: null,
             next: null,
             hash_next: null,
-            ptr_walk: 0
+            ptr_walk: 0,
+            browse_id: 0,
+            browse_pos: 0,
+            browse_file: 0,
+            browse_len: 0
         };
         v.payload_ty = struct_type(sd);
     }
@@ -5020,6 +5286,7 @@ parse_exception_def() @immortal raises Error {
     tok = tok.next;
     if (tok.kind != TokKind.Ident) { error("expected exception name"); }
     name: []i8 = cur_tokstr();
+    browse_note();
     tok = tok.next;
     if (find_exn(name) != null || find_struct(name) != null || find_enum(name) != null) { error("redefinition"); }
     ed: *ExnDef = new ExnDef {
@@ -5029,7 +5296,11 @@ parse_exception_def() @immortal raises Error {
         size: 0,
         ty: null,
         next: exn_defs,
-        hash_next: null
+        hash_next: null,
+        browse_id: browse_fresh(),
+        browse_pos: browse_tok_pos,
+        browse_file: browse_tok_file,
+        browse_len: browse_tok_len
     };
     next_exn_tag = next_exn_tag + 1;
     exn_defs = ed;
@@ -5047,12 +5318,19 @@ parse_type_def() @immortal raises Error {
     tok = tok.next;
     if (tok.kind != TokKind.Ident) { error("expected type name"); }
     name: []i8 = cur_tokstr();
+    browse_note();
+    npos: int = browse_tok_pos;
+    nlen: int = browse_tok_len;
+    nfile: int = browse_tok_file;
     tok = tok.next;
     skip(TokKind.Assign);
 
     if (tok.kind == TokKind.LBrace) {
         if (find_enum(name) != null) { error("redefinition of type"); }
         sd: *StructDef = get_or_create_struct(name);
+        sd.browse_pos = npos;
+        sd.browse_file = nfile;
+        sd.browse_len = nlen;
         if (sd.members != null) { error("redefinition of type"); }
         tok = tok.next;
         sd.members = parse_field_list(0);
@@ -5067,6 +5345,9 @@ parse_type_def() @immortal raises Error {
         remove_struct(name);
     }
     ed: *EnumDef = get_or_create_enum(name);
+    ed.browse_pos = npos;
+    ed.browse_file = nfile;
+    ed.browse_len = nlen;
     if (ed.variants != null) { error("redefinition of type"); }
 
     if (tok.kind == TokKind.Pipe) { tok = tok.next; }
@@ -5107,13 +5388,20 @@ parse_type_def() @immortal raises Error {
 
 parse_source_file(path: []i8@immortal) @immortal raises Error {
     if (!mark_imported(path)) { return; }
+    f: ?*ImportedFile = imported_files;
     saved_source: []i8 = source;
     saved_source_len: int = source_len;
     saved_pos: int = pos;
     saved_tok: *Token = tok;
     saved_path: []i8 = source_path;
+    saved_file: int = current_file_id;
     source_path = path;
     source = read_file(path);
+    if (f != null) {
+        f.src = source;
+        f.src_len = source_len;
+        current_file_id = f.id;
+    }
     tok = tokenize();
     parse_program_unit();
     source = saved_source;
@@ -5121,6 +5409,7 @@ parse_source_file(path: []i8@immortal) @immortal raises Error {
     pos = saved_pos;
     tok = saved_tok;
     source_path = saved_path;
+    current_file_id = saved_file;
 }
 
 parse_import() @immortal raises Error {
@@ -5150,6 +5439,10 @@ bind_function(name: []i8@immortal, fn: *Function@immortal) @immortal raises Erro
     o: *Obj = new_obj(name, 0);
     o.is_func = 1;
     o.ty = fn.return_ty;
+    o.browse_id = fn.browse_id;
+    o.browse_pos = fn.browse_pos;
+    o.browse_file = fn.browse_file;
+    o.browse_len = fn.browse_len;
 }
 
 append_function(fn: *Function@immortal) {
@@ -5177,6 +5470,7 @@ parse_program_unit() @immortal raises Error {
                 tok = tok.next;
                 if (tok.kind != TokKind.Ident) { error("expected function name after extern"); }
                 ename: []i8 = cur_tokstr();
+                browse_note();
                 tok = tok.next;
                 if (tok.kind != TokKind.LParen) { error("expected `(` after extern name"); }
                 efn: *Function = parse_function(ename, 1);
@@ -5184,6 +5478,10 @@ parse_program_unit() @immortal raises Error {
             } else {
             if (tok.kind != TokKind.Ident) { error("expected identifier"); }
             name: []i8 = cur_tokstr();
+            browse_note();
+            gpos: int = browse_tok_pos;
+            glen: int = browse_tok_len;
+            gfile: int = browse_tok_file;
             tok = tok.next;
             if (tok.kind == TokKind.LParen) {
                 fn: *Function = parse_function(name, 0);
@@ -5194,6 +5492,9 @@ parse_program_unit() @immortal raises Error {
                 if (is_noreturn_ty(ty)) { error("noreturn is only valid as a function return type"); }
                 if (tok.kind == TokKind.Comma) { error("only one variable per declaration"); }
                 o2: *Obj = new_obj(name, 0);
+                o2.browse_pos = gpos;
+                o2.browse_file = gfile;
+                o2.browse_len = glen;
                 o2.ty = ty;
                 if (tok.kind != TokKind.Assign) {
                     error("global requires an initializer (name: T = e)");
@@ -5217,6 +5518,7 @@ parse_program(entry_path: []i8) @immortal raises Error {
     exn_defs = null;
     imported_files = null;
     next_exn_tag = 1;
+    browse_reset();
     clear_sym_tables();
     parse_source_file(normalize_path(entry_path));
 }
@@ -8137,7 +8439,7 @@ is_profile_flag(s: [z]i8): bool {
     false;
 }
 
-compiler_frontend(src_path: []i8@immortal) @immortal raises Error {
+compiler_analyze(src_path: []i8@immortal) @immortal raises Error {
     profile_start();
     as_init();
     init_runtime();
@@ -8161,6 +8463,10 @@ compiler_frontend(src_path: []i8@immortal) @immortal raises Error {
     profile_mark("raises");
     check_noreturn_functions();
     profile_mark("noreturn");
+}
+
+compiler_frontend(src_path: []i8@immortal) @immortal raises Error {
+    compiler_analyze(src_path);
     codegen();
     profile_mark("codegen");
 }

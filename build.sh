@@ -191,6 +191,23 @@ check_retwarn() {
   run_expect "$bin" 'YYYYYYY'
 }
 
+check_browse() {
+  local tool="$1"
+  local hello="$BUILD/browse-hello.html"
+  local html="$BUILD/l8.html"
+  "./$tool" browse examples/hello.l8 -o "$hello" || die "browse hello failed"
+  grep -q 'id="files"' "$hello" || die "browse html missing file list"
+  grep -q 'class="file' "$hello" || die "browse html missing code view"
+  grep -q 'data-s=' "$hello" || die "browse html missing symbol spans"
+  grep -q 'data-t=' "$hello" || die "browse html missing hover types"
+  grep -q 'Go to definition' "$hello" || die "browse html missing go to definition"
+  grep -q 'Find references' "$hello" || die "browse html missing find references"
+  grep -q 'putchar' "$hello" || die "browse html missing hello source"
+  "./$tool" browse src2/main.l8 -o "$html" || die "browse compiler failed"
+  grep -q 'src2/compiler.l8' "$html" || die "browse compiler html missing compiler.l8"
+  grep -q 'src2/browse.l8' "$html" || die "browse compiler html missing browse.l8"
+}
+
 require_bootstrap() {
   [[ -f bootstrap ]] || die "bootstrap executable missing (see BOOTSTRAP.md)"
 }
@@ -237,6 +254,7 @@ do_selfhost() {
   step 'verify stage2 exe == stage3 exe' cmp -s l8c2 l8c3
 
   step 'examples [l8c3]' run_examples_selfhost l8c3
+  step 'browse [l8c3]' check_browse l8c3
   step 'compiler phases [l8c3]' print_compiler_phases
   cp l8c3 l8
 }
@@ -316,7 +334,7 @@ Commands:
   all             Install bootstrap, examples, two-stage self-host (default)
   bootstrap       Copy the saved bootstrap executable → l8c0
   examples        Run example programs via l8c0
-  selfhost        direct src1 → l8c1; src2 → l8c2; fixpoint l8c2==l8c3; examples; phases
+  selfhost        direct src1 → l8c1; src2 → l8c2; fixpoint l8c2==l8c3; examples; browse; phases
   promote-bin1    Copy the stage-1 executable → bootstrap
   promote-bin2    Copy the stage-2 fixpoint executable → bootstrap
   promote-source  Replace src1/ with src2/ (no bootstrap change)
