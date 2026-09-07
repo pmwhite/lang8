@@ -123,6 +123,7 @@ run_examples_selfhost() {
   example "$tool" global examples/global.l8 'YYYYYY'
   example "$tool" bitwise examples/bitwise.l8 'YYYYYYYYYYYY'
   example "$tool" expr examples/expr.l8 'YYYYYYYYYYY'
+  example "$tool" mlstr examples/mlstr.l8 $'A\nB\nxy'
   check_retwarn "$tool"
   example "$tool" newarr examples/newarr.l8 'Hi'
   example "$tool" offset examples/offset.l8 'YYY'
