@@ -12,10 +12,17 @@
 // An omitted bound on *T / ?*T / []T / [z]T is self-bound (same as `T@` / `T@p`).
 // `@immortal` is process lifetime. Address of a local cannot be stored, returned,
 // or passed except to write/read or a self-bound parameter.
-// `region { }` saves the bump pointer and restores it on exit. `new` inside is
-// in that heap generation. Nested regions nest. `@` on params/returns names a
-// lifetime (`@`/`@p` self, `@q`, `@new`, `@immortal`). Long-lived storage cannot
-// hold a shorter pointer.
+// `region { }` saves the bump pointer and restores it on exit, return, and
+// exception unwind. `new` inside is in that heap generation. Nested regions nest.
+// Exception payloads are allocated off the rewindable heap. A payload may hold
+// immortal pointers, or heaptop pointers. A function that stashes `new` into
+// immortal storage (global, exception, or a return typed as immortal) must be
+// marked `@immortal` after `)`. Writing it is exact and transitive: a caller of
+// an `@immortal` function must be `@immortal` too. Those functions cannot be
+// called from a region.
+// Region pointers and `&local` cannot be raised.
+// `@` on params/returns names a lifetime (`@`/`@p` self, `@q`, `@new`,
+// `@immortal`). Long-lived storage cannot hold a shorter pointer.
 // Unknown names are an error. OS functions are `extern name(params): T` backed by runtime.s.
 // Bitwise: `~ & ^ | << >>` on int/i8 (same type; >> is arithmetic; shift count is int).
 // `for i in a..b` is exclusive over int; `for x in xs` walks `[]T` (not `[z]T`).
@@ -303,6 +310,8 @@ type Function = {
     ret_bound: []i8;
     ret_life: int;
     need_imm_heap: int;
+    imm_heap_direct: int;
+    decl_imm_heap: int;
 }
 
 type FnBucket = { head: ?*Function; }
@@ -383,6 +392,7 @@ str_lits: ?*StrLit = null;
 str_lit_tail: ?*StrLit = null;
 str_count: int = 0;
 label_id: int = 0;
+cg_region_depth: int = 0;
 emit_buf: []i8 = "";
 emit_len: int = 0;
 emit_cap: int = 65536;
@@ -2757,7 +2767,10 @@ escape_error(n: ?*Expr@immortal) raises Error {
 
 note_imm_heap() {
     fn: ?*Function = current_fn;
-    if (fn != null) { fn.need_imm_heap = 1; }
+    if (fn != null) {
+        fn.need_imm_heap = 1;
+        fn.imm_heap_direct = 1;
+    }
 }
 
 check_store(src: ?*Expr@immortal, dest: int) raises Error {
@@ -2770,6 +2783,21 @@ check_store(src: ?*Expr@immortal, dest: int) raises Error {
         return;
     }
     escape_error(src);
+}
+
+check_exc_payload(src: ?*Expr@immortal) raises Error {
+    if (src == null) { return; }
+    if (!type_has_pointers(src.ty) && !is_tainted_expr(src) && !is_stack_addr(src)) { return; }
+    sl: int = expr_life(src);
+    if (life_outlives(sl, LIFE_IMM)) { return; }
+    if (sl == LIFE_HEAPTOP) {
+        note_imm_heap();
+        return;
+    }
+    if (is_tainted_expr(src) || is_stack_addr(src)) {
+        error("exception payload cannot hold the address of a local");
+    }
+    error("exception payload cannot hold a region pointer");
 }
 
 check_call_lifetimes(fno: *Function@immortal, args: ?*Expr@immortal) raises Error {
@@ -3510,7 +3538,7 @@ add_type_field_inits_opt(inits: ?*FieldInit@immortal, heap: int) raises Error {
                 error_have_expr_want("field initializer type mismatch", a.lhs, decay(a.member.ty));
             }
             if (heap == 1) { check_store(a.lhs, life_heap); }
-            if (heap == 2) { check_store(a.lhs, LIFE_IMM); }
+            if (heap == 2) { check_exc_payload(a.lhs); }
         }
         a = a.next;
     }
@@ -4839,7 +4867,9 @@ parse_function(name: []i8@immortal, is_extern: int) raises Error: *Function {
         hash_next: null,
         ret_bound: "",
         ret_life: 0,
-        need_imm_heap: 0
+        need_imm_heap: 0,
+        imm_heap_direct: 0,
+        decl_imm_heap: 0
     };
     locals = null;
     scope_depth = 0;
@@ -4857,6 +4887,11 @@ parse_function(name: []i8@immortal, is_extern: int) raises Error: *Function {
     }
     fn.nparams = np;
     skip(TokKind.RParen);
+    if (tok.kind == TokKind.At) {
+        ab: []i8 = parse_at_bound();
+        if (!streq(ab, "immortal")) { error("expected @immortal"); }
+        fn.decl_imm_heap = 1;
+    }
     if (tok.kind == TokKind.Raises) {
         if (is_extern != 0) { error("extern function cannot raise"); }
         tok = tok.next;
@@ -6586,6 +6621,27 @@ check_raises_functions() raises Error {
     }
 }
 
+check_imm_heap_functions() raises Error {
+    fn: ?*Function = functions;
+    while (fn != null) {
+        if (fn.is_extern == 0) {
+            if (fn.need_imm_heap != 0 && fn.decl_imm_heap == 0) {
+                sb: *StrBuf = sb_new();
+                sb_puts(sb, "missing @immortal on ");
+                sb_puts(sb, fn.name);
+                error(sb_finish(sb));
+            }
+            if (fn.need_imm_heap == 0 && fn.decl_imm_heap != 0) {
+                sb2: *StrBuf = sb_new();
+                sb_puts(sb2, "unnecessary @immortal on ");
+                sb_puts(sb2, fn.name);
+                error(sb_finish(sb2));
+            }
+        }
+        fn = fn.next;
+    }
+}
+
 new_label(): int {
     l: int = label_id;
     label_id = label_id + 1;
@@ -6685,6 +6741,12 @@ emit_check_new_count(nreg: int, esz: int) {
 
 emit_malloc() {
     cg_call("malloc");
+    cg_alu_imm(7, 0, 0);
+    cg_jump_id(4, oob_lab);
+}
+
+emit_exc_malloc() {
+    cg_call("l8_exc_malloc");
     cg_alu_imm(7, 0, 0);
     cg_jump_id(4, oob_lab);
 }
@@ -7565,6 +7627,11 @@ gen_stmt(n: *Stmt) raises Error {
                     cg_mov_rr(7, 0);
                 }
             } else { cg_mov_imm(0, 0); }
+            rd: int = cg_region_depth;
+            while (rd > 0) {
+                cg_call("l8_region_pop");
+                rd = rd - 1;
+            }
             cg_jump_id(0 - 1, current_return_lab);
             return;
         }
@@ -7685,7 +7752,7 @@ gen_stmt(n: *Stmt) raises Error {
                 esz: int = k.exn.size;
                 if (esz <= 0) { esz = 8; }
                 cg_mov_imm(esz, 7);
-                emit_malloc();
+                emit_exc_malloc();
                 cg_push(3);
                 cg_mov_rr(0, 3);
                 gen_struct_inits(k.inits);
@@ -7737,10 +7804,13 @@ gen_stmt(n: *Stmt) raises Error {
         Region k -> {
             cg_call("l8_heap_mark");
             emit_store_var(k.mark, ty_int);
-            gen_stmt(k.body);
             emit_load_var(k.mark, ty_int);
             cg_mov_rr(0, cg_arg_reg(0));
-            cg_call("l8_heap_reset");
+            cg_call("l8_region_push");
+            cg_region_depth = cg_region_depth + 1;
+            gen_stmt(k.body);
+            cg_region_depth = cg_region_depth - 1;
+            cg_call("l8_region_pop");
             return;
         }
         _ -> { error("invalid statement"); }
@@ -7914,6 +7984,7 @@ emit_text() raises Error {
         current_sret = fn.sret;
         current_fn = fn;
         current_return_lab = new_label();
+        cg_region_depth = 0;
         cg_global(fn.name);
         cg_label(fn.name);
         cg_rsp_off = 0;
@@ -8086,6 +8157,7 @@ compiler_frontend(src_path: []i8@immortal) raises Error {
     profile_mark("unused_locals");
     check_return_style();
     check_raises_functions();
+    check_imm_heap_functions();
     profile_mark("raises");
     check_noreturn_functions();
     profile_mark("noreturn");

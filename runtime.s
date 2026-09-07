@@ -23,6 +23,9 @@
 .globl l8_exc_ptr
 .globl l8_heap_mark
 .globl l8_heap_reset
+.globl l8_region_push
+.globl l8_region_pop
+.globl l8_exc_malloc
 .globl rdtsc
 
 .section .bss
@@ -36,6 +39,13 @@ l8_exc_tag: .skip 8
 l8_exc_ptr: .skip 8
 # Top of handler stack (pointer to jmp_buf), or 0
 l8_handler_top: .skip 8
+# Nested region marks (heap_ptr at each enter). Raise pops down to the
+# catcher's snapshot so a caught exception still rewinds those heaps.
+l8_region_n: .skip 8
+l8_region_marks: .skip 512
+# region_n at each try_begin, parallel to the handler stack (jmp_buf stays 72)
+l8_try_rn: .skip 8
+l8_try_regions: .skip 512
 
 #
 # l8_jmp_buf layout (72 bytes), pointed to by l8_handler_top:
@@ -125,6 +135,56 @@ l8_heap_mark:
 # void l8_heap_reset(long mark) — rewind the bump allocator
 l8_heap_reset:
     mov %rdi, heap_ptr(%rip)
+    ret
+
+# void l8_region_push(long mark) — record a region enter
+l8_region_push:
+    mov l8_region_n(%rip), %rax
+    cmp $63, %rax
+    ja 1f
+    lea l8_region_marks(%rip), %rcx
+    mov %rax, %rdx
+    shl $3, %rdx
+    add %rdx, %rcx
+    mov %rdi, 0(%rcx)
+    add $1, %rax
+    mov %rax, l8_region_n(%rip)
+    ret
+1:
+    mov $1, %rdi
+    mov $60, %rax
+    syscall
+
+# void l8_region_pop(void) — leave one region and rewind
+l8_region_pop:
+    mov l8_region_n(%rip), %rax
+    test %rax, %rax
+    jz 1f
+    sub $1, %rax
+    mov %rax, l8_region_n(%rip)
+    lea l8_region_marks(%rip), %rcx
+    mov %rax, %rdx
+    shl $3, %rdx
+    add %rdx, %rcx
+    mov 0(%rcx), %rdi
+    mov %rdi, heap_ptr(%rip)
+1:
+    ret
+
+# void *l8_exc_malloc(long size) — bump down from heap_end so region rewind
+# cannot free an in-flight exception payload.
+l8_exc_malloc:
+    add $7, %rdi
+    and $-8, %rdi
+    mov heap_end(%rip), %rax
+    sub %rdi, %rax
+    mov heap_ptr(%rip), %rcx
+    cmp %rax, %rcx
+    ja 1f
+    mov %rax, heap_end(%rip)
+    ret
+1:
+    mov $0, %rax
     ret
 
 # void *malloc(long size) — bump allocator, 8-byte aligned
@@ -237,12 +297,28 @@ l8_try_begin:
     # return address
     mov (%rsp), %rax
     mov %rax, 56(%rdi)
+    # region depth at this try — raise pops regions entered after it
+    mov l8_try_rn(%rip), %rax
+    cmp $63, %rax
+    ja 2f
+    lea l8_try_regions(%rip), %rcx
+    mov %rax, %rdx
+    shl $3, %rdx
+    add %rdx, %rcx
+    mov l8_region_n(%rip), %rdx
+    mov %rdx, 0(%rcx)
+    add $1, %rax
+    mov %rax, l8_try_rn(%rip)
     # push onto handler stack
     mov l8_handler_top(%rip), %rax
     mov %rax, 64(%rdi)
     mov %rdi, l8_handler_top(%rip)
     mov $0, %rax
     ret
+2:
+    mov $1, %rdi
+    mov $60, %rax
+    syscall
 
 # void l8_try_end(void) — pop handler if still on top
 l8_try_end:
@@ -251,6 +327,11 @@ l8_try_end:
     jz 1f
     mov 64(%rdi), %rax
     mov %rax, l8_handler_top(%rip)
+    mov l8_try_rn(%rip), %rax
+    test %rax, %rax
+    jz 1f
+    sub $1, %rax
+    mov %rax, l8_try_rn(%rip)
 1:
     ret
 
@@ -262,6 +343,33 @@ l8_raise:
     mov l8_handler_top(%rip), %rdi
     test %rdi, %rdi
     jz 2f
+    # rewind regions entered after this try (payload lives at heap_end)
+    mov l8_try_rn(%rip), %rax
+    test %rax, %rax
+    jz .Lraise_unw_done
+    sub $1, %rax
+    mov %rax, l8_try_rn(%rip)
+    lea l8_try_regions(%rip), %rcx
+    mov %rax, %rdx
+    shl $3, %rdx
+    add %rdx, %rcx
+    mov 0(%rcx), %r8
+.Lraise_unw:
+    mov l8_region_n(%rip), %rax
+    cmp %r8, %rax
+    ja .Lraise_unw_pop
+    jmp .Lraise_unw_done
+.Lraise_unw_pop:
+    sub $1, %rax
+    mov %rax, l8_region_n(%rip)
+    lea l8_region_marks(%rip), %rcx
+    mov %rax, %rdx
+    shl $3, %rdx
+    add %rdx, %rcx
+    mov 0(%rcx), %r9
+    mov %r9, heap_ptr(%rip)
+    jmp .Lraise_unw
+.Lraise_unw_done:
     # pop this handler
     mov 64(%rdi), %rax
     mov %rax, l8_handler_top(%rip)
