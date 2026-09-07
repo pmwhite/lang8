@@ -1,0 +1,761 @@
+// Static HTML source browser. Emits one self-contained page after analyze.
+
+browse_O_WRONLY: int = 1;
+browse_O_CREAT: int = 64;
+browse_O_TRUNC: int = 512;
+browse_MODE: int = 420;
+browse_line: int = 1;
+
+browse_hidden(name: []i8): bool {
+    len(name) > 0 && name[0] == '.';
+}
+
+sb_put_uint(sb: *StrBuf@immortal, n: int) noregion {
+    if (n >= 10) { sb_put_uint(sb, n / 10); }
+    sb_putc(sb, '0' + ((n % 10) trunc i8));
+}
+
+sb_put_int(sb: *StrBuf@immortal, n: int) noregion {
+    if (n < 0) {
+        sb_putc(sb, '-');
+        sb_put_uint(sb, 0 - n);
+        return;
+    }
+    sb_put_uint(sb, n);
+}
+
+browse_collect_inits(inits: ?*FieldInit@immortal) noregion raises Error {
+    i: ?*FieldInit = inits;
+    while (i != null) {
+        if (i.toklen > 0) {
+            browse_add(i.file, i.pos, i.toklen, i.member.browse_id, 0, BROWSE_FIELD, browse_type_str(i.member.ty));
+        }
+        browse_collect_expr(i.lhs);
+        i = i.next;
+    }
+}
+
+browse_collect_expr(e: ?*Expr@immortal) noregion raises Error {
+    if (e == null) { return; }
+    n: *Expr = e;
+    match n.kind {
+        Var k -> {
+            vo: ?*Obj = k.var;
+            if (vo != null) {
+                if (n.toklen > 0) {
+                    browse_add(n.file, n.pos, n.toklen, vo.browse_id, 0, BROWSE_VAR, browse_type_str(n.ty));
+                }
+            }
+            return;
+        }
+        Funcall k -> {
+            if (n.toklen > 0) {
+                fo: ?*Function = k.fn;
+                if (fo != null) {
+                    fu: *Function = fo;
+                    browse_add(n.file, n.pos, n.toklen, fu.browse_id, 0, BROWSE_FN, browse_fn_str(fu));
+                } else {
+                    browse_add(n.file, n.pos, n.toklen, 0, 0, BROWSE_FN, k.funcname);
+                }
+            }
+            a: ?*Expr = k.args;
+            while (a != null) {
+                browse_collect_expr(a);
+                a = a.next;
+            }
+            return;
+        }
+        MemberAccess k -> {
+            if (n.toklen > 0) {
+                browse_add(n.file, n.pos, n.toklen, k.member.browse_id, 0, BROWSE_FIELD, browse_type_str(k.member.ty));
+            }
+            browse_collect_expr(k.lhs);
+            return;
+        }
+        VariantLit k -> {
+            if (n.toklen > 0) {
+                browse_add(n.file, n.pos, n.toklen, k.variant.browse_id, 0, BROWSE_FIELD, k.variant.name);
+            }
+            browse_collect_inits(k.inits);
+            return;
+        }
+        New k -> {
+            nv: ?*Variant = k.variant;
+            if (nv != null) {
+                if (n.toklen > 0) {
+                    browse_add(n.file, n.pos, n.toklen, nv.browse_id, 0, BROWSE_FIELD, nv.name);
+                }
+            }
+            browse_collect_expr(k.lhs);
+            browse_collect_expr(k.fill);
+            browse_collect_inits(k.inits);
+            return;
+        }
+        Binary k -> { browse_collect_expr(k.lhs); browse_collect_expr(k.rhs); return; }
+        Assign k -> { browse_collect_expr(k.lhs); browse_collect_expr(k.rhs); return; }
+        LogAnd k -> { browse_collect_expr(k.lhs); browse_collect_expr(k.rhs); return; }
+        LogOr k -> { browse_collect_expr(k.lhs); browse_collect_expr(k.rhs); return; }
+        OrElse k -> { browse_collect_expr(k.lhs); browse_collect_expr(k.rhs); return; }
+        Addr k -> { browse_collect_expr(k.lhs); return; }
+        Deref k -> { browse_collect_expr(k.lhs); return; }
+        Index k -> { browse_collect_expr(k.lhs); browse_collect_expr(k.idx); return; }
+        Not k -> { browse_collect_expr(k.lhs); return; }
+        Neg k -> { browse_collect_expr(k.lhs); return; }
+        BitNot k -> { browse_collect_expr(k.lhs); return; }
+        As k -> { browse_collect_expr(k.lhs); return; }
+        Trunc k -> { browse_collect_expr(k.lhs); return; }
+        StructLit k -> { browse_collect_inits(k.inits); return; }
+        If k -> { browse_collect_expr(k.cond); browse_collect_expr(k.then); browse_collect_expr(k.els); return; }
+        Match k -> { browse_collect_expr(k.cond); browse_collect_arms(k.arms); return; }
+        Block k -> { browse_collect_stmts(k.body); return; }
+        Num _k -> { return; }
+        Null -> { return; }
+    }
+}
+
+browse_collect_arms(arms: ?*MatchArm@immortal) noregion raises Error {
+    a: ?*MatchArm = arms;
+    while (a != null) {
+        av: ?*Variant = a.variant;
+        if (av != null) {
+            if (a.toklen > 0) {
+                browse_add(a.file, a.pos, a.toklen, av.browse_id, 0, BROWSE_FIELD, av.name);
+            }
+        }
+        browse_collect_stmt(a.body);
+        a = a.next;
+    }
+}
+
+browse_collect_catch(arms: ?*CatchArm@immortal) noregion raises Error {
+    a: ?*CatchArm = arms;
+    while (a != null) {
+        browse_collect_stmt(a.body);
+        a = a.next;
+    }
+}
+
+browse_collect_stmt(s: ?*Stmt@immortal) noregion raises Error {
+    if (s == null) { return; }
+    n: *Stmt = s;
+    match n.kind {
+        Return k -> { browse_collect_expr(k.lhs); return; }
+        If k -> { browse_collect_expr(k.cond); browse_collect_stmt(k.then); browse_collect_stmt(k.els); return; }
+        While k -> { browse_collect_expr(k.cond); browse_collect_stmt(k.body); return; }
+        For k -> { browse_collect_expr(k.iter); browse_collect_expr(k.hi); browse_collect_stmt(k.body); return; }
+        Block k -> { browse_collect_stmts(k.body); return; }
+        ExprStmt k -> { browse_collect_expr(k.lhs); return; }
+        Match k -> { browse_collect_expr(k.cond); browse_collect_arms(k.arms); return; }
+        Raise k -> { browse_collect_inits(k.inits); return; }
+        Try k -> { browse_collect_stmt(k.body); browse_collect_catch(k.arms); return; }
+        Region k -> { browse_collect_stmt(k.body); return; }
+    }
+}
+
+browse_collect_stmts(s: ?*Stmt@immortal) noregion raises Error {
+    x: ?*Stmt = s;
+    while (x != null) {
+        browse_collect_stmt(x);
+        x = x.next;
+    }
+}
+
+browse_obj_def(o: *Obj@immortal) noregion raises Error {
+    if (browse_hidden(o.name)) { return; }
+    if (o.is_func != 0) { return; }
+    browse_add(o.browse_file, o.browse_pos, o.browse_len, o.browse_id, 1, BROWSE_VAR, browse_type_str(o.ty));
+}
+
+browse_collect_members(m: ?*Member@immortal) noregion raises Error {
+    x: ?*Member = m;
+    while (x != null) {
+        if (x.browse_len > 0) {
+            browse_add(x.browse_file, x.browse_pos, x.browse_len, x.browse_id, 1, BROWSE_FIELD, browse_type_str(x.ty));
+        }
+        x = x.next;
+    }
+}
+
+browse_collect() noregion raises Error {
+    fn: ?*Function = functions;
+    while (fn != null) {
+        if (!browse_hidden(fn.name) && fn.browse_len > 0) {
+            browse_add(fn.browse_file, fn.browse_pos, fn.browse_len, fn.browse_id, 1, BROWSE_FN, browse_fn_str(fn));
+        }
+        loc: ?*Obj = fn.locals;
+        while (loc != null) {
+            browse_obj_def(loc);
+            loc = loc.next;
+        }
+        browse_collect_stmt(fn.body);
+        fn = fn.next;
+    }
+    g: ?*Obj = globals;
+    while (g != null) {
+        browse_obj_def(g);
+        browse_collect_expr(g.init);
+        g = g.next;
+    }
+    sd: ?*StructDef = struct_defs;
+    while (sd != null) {
+        if (!browse_hidden(sd.name) && sd.browse_len > 0) {
+            browse_add(sd.browse_file, sd.browse_pos, sd.browse_len, sd.browse_id, 1, BROWSE_TY, sd.name);
+        }
+        browse_collect_members(sd.members);
+        sd = sd.next;
+    }
+    ed: ?*EnumDef = enum_defs;
+    while (ed != null) {
+        if (ed.browse_len > 0) {
+            browse_add(ed.browse_file, ed.browse_pos, ed.browse_len, ed.browse_id, 1, BROWSE_TY, ed.name);
+        }
+        v: ?*Variant = ed.variants;
+        while (v != null) {
+            if (v.browse_len > 0) {
+                browse_add(v.browse_file, v.browse_pos, v.browse_len, v.browse_id, 1, BROWSE_FIELD, v.name);
+            }
+            browse_collect_members(v.fields);
+            v = v.next;
+        }
+        ed = ed.next;
+    }
+    xd: ?*ExnDef = exn_defs;
+    while (xd != null) {
+        if (xd.browse_len > 0) {
+            browse_add(xd.browse_file, xd.browse_pos, xd.browse_len, xd.browse_id, 1, BROWSE_TY, xd.name);
+        }
+        browse_collect_members(xd.members);
+        xd = xd.next;
+    }
+}
+
+browse_esc(sb: *StrBuf@immortal, s: []i8, off: int, n: int) noregion {
+    i: int = 0;
+    while (i < n) {
+        c: i8 = s[off + i];
+        if (c == '<') { sb_puts(sb, "&lt;"); }
+        else {
+            if (c == '>') { sb_puts(sb, "&gt;"); }
+            else {
+                if (c == '&') { sb_puts(sb, "&amp;"); }
+                else {
+                    if (c == '"') { sb_puts(sb, "&quot;"); }
+                    else { sb_putc(sb, c); }
+                }
+            }
+        }
+        i = i + 1;
+    }
+}
+
+browse_emit_nl(sb: *StrBuf@immortal, fid: int) noregion {
+    sb_putc(sb, '\n');
+    browse_line = browse_line + 1;
+    sb_puts(sb, "<span class=\"ln\" id=\"L");
+    sb_put_int(sb, fid);
+    sb_putc(sb, '_');
+    sb_put_int(sb, browse_line);
+    sb_puts(sb, "\">");
+    sb_put_int(sb, browse_line);
+    sb_puts(sb, "</span>");
+}
+
+browse_emit_gap(sb: *StrBuf@immortal, src: []i8, src_len: int, a: int, b: int, fid: int) noregion {
+    i: int = a;
+    if (i < 0) { i = 0; }
+    if (b > src_len) { b = src_len; }
+    while (i < b) {
+        if (src[i] == '/' && i + 1 < b && src[i + 1] == '/') {
+            j: int = i + 2;
+            while (j < b && src[j] != '\n') { j = j + 1; }
+            sb_puts(sb, "<span class=\"cm\">");
+            browse_esc(sb, src, i, j - i);
+            sb_puts(sb, "</span>");
+            i = j;
+        } else {
+            if (src[i] == '/' && i + 1 < b && src[i + 1] == '*') {
+                j2: int = i + 2;
+                while (j2 + 1 < b && !(src[j2] == '*' && src[j2 + 1] == '/')) {
+                    j2 = j2 + 1;
+                }
+                if (j2 + 1 < b) { j2 = j2 + 2; }
+                k: int = i;
+                while (k < j2 && k < b) {
+                    if (src[k] == '\n') {
+                        sb_puts(sb, "<span class=\"cm\">");
+                        browse_esc(sb, src, i, k - i);
+                        sb_puts(sb, "</span>");
+                        browse_emit_nl(sb, fid);
+                        i = k + 1;
+                        k = i;
+                    } else { k = k + 1; }
+                }
+                if (i < j2 && i < b) {
+                    end: int = j2;
+                    if (end > b) { end = b; }
+                    sb_puts(sb, "<span class=\"cm\">");
+                    browse_esc(sb, src, i, end - i);
+                    sb_puts(sb, "</span>");
+                    i = end;
+                }
+            } else {
+                if (src[i] == '\n') {
+                    browse_emit_nl(sb, fid);
+                    i = i + 1;
+                } else {
+                    browse_esc(sb, src, i, 1);
+                    i = i + 1;
+                }
+            }
+        }
+    }
+}
+
+browse_tok_start(src: []i8, t: *Token@immortal): int {
+    p: int = t.pos;
+    if (t.kind == TokKind.Str) {
+        if (t.val != 0) {
+            if (t.val == 2 && p > 0) { p = p - 1; }
+            if (p >= 3) { p = p - 3; }
+        } else {
+            if (p > 0 && src[p - 1] == '"') { p = p - 1; }
+        }
+    }
+    p;
+}
+
+browse_tok_end(src: []i8, src_len: int, t: *Token@immortal): int {
+    if (t.kind == TokKind.Str) {
+        if (t.val != 0) { return t.pos + t.len + 3; }
+        p: int = browse_tok_start(src, t);
+        n: int = t.len + (t.pos - p);
+        if (p + n < src_len && src[p + n] == '"') { n = n + 1; }
+        return p + n;
+    }
+    if (t.kind == TokKind.Char) {
+        p2: int = t.pos;
+        j: int = p2 + 1;
+        if (j < src_len && src[j] == '\\') { j = j + 2; }
+        else { j = j + 1; }
+        if (j < src_len && src[j] == '\'') { j = j + 1; }
+        return j;
+    }
+    t.pos + t.len;
+}
+
+browse_emit_token(sb: *StrBuf@immortal, src: []i8, src_len: int, t: *Token@immortal, fid: int) noregion {
+    a: int = browse_tok_start(src, t);
+    b: int = browse_tok_end(src, src_len, t);
+    if (a < 0) { a = 0; }
+    if (b > src_len) { b = src_len; }
+    if (b <= a) { return; }
+    occ: ?*BrowseOcc = browse_find(fid, t.pos);
+    cls: []i8 = "op";
+    if (t.kind == TokKind.Num) { cls = "nu"; }
+    else {
+        if (t.kind == TokKind.Str || t.kind == TokKind.Char) { cls = "st"; }
+        else {
+            if (t.kind == TokKind.Ident) {
+                cls = "id";
+                if (occ != null) {
+                    if (occ.cls == BROWSE_TY) { cls = "ty"; }
+                    else {
+                        if (occ.cls == BROWSE_FN) { cls = "fn"; }
+                    }
+                }
+            } else {
+                c: i8 = src[a];
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') { cls = "kw"; }
+            }
+        }
+    }
+    first: int = 1;
+    i: int = a;
+    while (i < b) {
+        j: int = i;
+        while (j < b && src[j] != '\n') { j = j + 1; }
+        if (j > i) {
+            sb_puts(sb, "<span class=\"");
+            sb_puts(sb, cls);
+            if (occ != null) {
+                sb_puts(sb, " sym");
+                if (occ.is_def != 0) { sb_puts(sb, " def"); }
+                sb_puts(sb, "\" data-s=\"");
+                sb_put_int(sb, occ.sym);
+                sb_puts(sb, "\" data-ln=\"");
+                sb_put_int(sb, browse_line);
+                if (len(occ.typ) > 0) {
+                    sb_puts(sb, "\" data-t=\"");
+                    browse_esc(sb, occ.typ, 0, len(occ.typ));
+                }
+                if (first != 0 && occ.is_def != 0 && occ.sym != 0) {
+                    sb_puts(sb, "\" id=\"D");
+                    sb_put_int(sb, occ.sym);
+                }
+            }
+            sb_puts(sb, "\">");
+            browse_esc(sb, src, i, j - i);
+            sb_puts(sb, "</span>");
+            first = 0;
+        }
+        if (j < b) {
+            browse_emit_nl(sb, fid);
+            i = j + 1;
+        } else {
+            i = j;
+        }
+    }
+}
+
+browse_emit_file(sb: *StrBuf@immortal, f: *ImportedFile@immortal) noregion raises Error {
+    saved_source: []i8 = source;
+    saved_len: int = source_len;
+    saved_pos: int = pos;
+    source = f.src;
+    source_len = f.src_len;
+    pos = 0;
+    ts: *Token = tokenize();
+    browse_line = 1;
+    sb_puts(sb, "<pre class=\"file");
+    if (f.next == null) { sb_puts(sb, " on"); }
+    sb_puts(sb, "\" id=\"F");
+    sb_put_int(sb, f.id);
+    sb_puts(sb, "\" data-path=\"");
+    browse_esc(sb, f.path, 0, len(f.path));
+    sb_puts(sb, "\"><span class=\"ln\" id=\"L");
+    sb_put_int(sb, f.id);
+    sb_puts(sb, "_1\">1</span>");
+    i: int = 0;
+    t: *Token = ts;
+    while (t.kind != TokKind.Eof) {
+        a: int = browse_tok_start(f.src, t);
+        browse_emit_gap(sb, f.src, f.src_len, i, a, f.id);
+        browse_emit_token(sb, f.src, f.src_len, t, f.id);
+        i = browse_tok_end(f.src, f.src_len, t);
+        t = t.next;
+    }
+    browse_emit_gap(sb, f.src, f.src_len, i, f.src_len, f.id);
+    sb_puts(sb, "</pre>\n");
+    source = saved_source;
+    source_len = saved_len;
+    pos = saved_pos;
+}
+
+browse_emit_files_rec(sb: *StrBuf@immortal, f: ?*ImportedFile@immortal) noregion raises Error {
+    if (f == null) { return; }
+    browse_emit_files_rec(sb, f.next);
+    browse_emit_file(sb, f);
+}
+
+browse_emit_nav_rec(sb: *StrBuf@immortal, f: ?*ImportedFile@immortal) noregion {
+    if (f == null) { return; }
+    browse_emit_nav_rec(sb, f.next);
+    on: int = 0;
+    if (f.next == null) { on = 1; }
+    sb_puts(sb, "<a href=\"#F");
+    sb_put_int(sb, f.id);
+    if (on != 0) { sb_puts(sb, "\" class=\"on"); }
+    sb_puts(sb, "\" data-f=\"");
+    sb_put_int(sb, f.id);
+    sb_puts(sb, "\">");
+    browse_esc(sb, f.path, 0, len(f.path));
+    sb_puts(sb, "</a>");
+}
+
+browse_css(): []i8 {
+    """
+:root {
+  --bg: #1e1e1e;
+  --bg2: #252526;
+  --fg: #d4d4d4;
+  --dim: #858585;
+  --kw: #569cd6;
+  --str: #ce9178;
+  --num: #b5cea8;
+  --com: #6a9955;
+  --id: #9cdcfe;
+  --ty: #4ec9b0;
+  --fn: #dcdcaa;
+  --sel: #264f78;
+  --def: #2d4a2d;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+#app { display: flex; height: 100%; }
+#files {
+  width: 260px;
+  overflow: auto;
+  background: var(--bg2);
+  border-right: 1px solid #333;
+  padding: 8px 0;
+  flex-shrink: 0;
+}
+#files h2 {
+  margin: 0;
+  padding: 8px 14px;
+  font-size: 11px;
+  color: var(--dim);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+#files a {
+  display: block;
+  padding: 4px 14px;
+  color: var(--fg);
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+}
+#files a:hover, #files a.on { background: #37373d; }
+#main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+#bar {
+  padding: 6px 12px;
+  background: var(--bg2);
+  border-bottom: 1px solid #333;
+  color: var(--dim);
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+#bar button {
+  background: #333;
+  color: var(--fg);
+  border: 1px solid #555;
+  padding: 3px 9px;
+  cursor: pointer;
+  font: inherit;
+}
+#bar button:hover { background: #444; }
+#cur { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#codewrap { flex: 1; overflow: auto; }
+pre.file { display: none; margin: 0; padding: 8px 0 24px; }
+pre.file.on { display: block; }
+.ln {
+  display: inline-block;
+  width: 3.6em;
+  text-align: right;
+  color: var(--dim);
+  padding-right: 1.2em;
+  user-select: none;
+}
+.kw { color: var(--kw); }
+.st { color: var(--str); }
+.nu { color: var(--num); }
+.cm { color: var(--com); }
+.ty { color: var(--ty); }
+.fn { color: var(--fn); }
+.id { color: var(--id); }
+.op { color: var(--fg); }
+.sym { cursor: pointer; border-radius: 2px; }
+.sym:hover { outline: 1px solid #6e6e6e; }
+.hit { background: var(--sel); }
+.defhit { background: var(--def); }
+#tip {
+  display: none;
+  position: fixed;
+  background: #1c1c1c;
+  border: 1px solid #555;
+  padding: 5px 8px;
+  pointer-events: none;
+  z-index: 5;
+  max-width: 42em;
+  white-space: pre-wrap;
+}
+#refs {
+  max-height: 22%;
+  overflow: auto;
+  border-top: 1px solid #333;
+  padding: 8px 12px;
+  display: none;
+  background: var(--bg2);
+}
+#refs h3 { margin: 0 0 6px; font-size: 12px; color: var(--dim); }
+#refs div { cursor: pointer; padding: 1px 0; }
+#refs div:hover { background: #2a2d2e; }
+""";
+}
+
+browse_js(): []i8 {
+    """
+function showFile(id) {
+  document.querySelectorAll('pre.file').forEach(function(p) {
+    p.classList.toggle('on', p.id === id);
+  });
+  document.querySelectorAll('#files a').forEach(function(a) {
+    a.classList.toggle('on', a.getAttribute('href') === '#' + id);
+  });
+  var p = document.getElementById(id);
+  var c = document.getElementById('cur');
+  if (p && c) c.textContent = p.dataset.path || '';
+}
+var sel = null;
+function spans(sym) {
+  if (!sym || sym === '0') return [];
+  return Array.prototype.slice.call(document.querySelectorAll('.sym[data-s="' + sym + '"]'));
+}
+function clearHit() {
+  document.querySelectorAll('.hit, .defhit').forEach(function(x) {
+    x.classList.remove('hit', 'defhit');
+  });
+}
+function mark(sym) {
+  spans(sym).forEach(function(x) {
+    x.classList.add(x.classList.contains('def') ? 'defhit' : 'hit');
+  });
+}
+function gotoDef(sym) {
+  if (!sym || sym === '0') return;
+  var d = document.getElementById('D' + sym);
+  if (!d) return;
+  var pre = d.closest('pre');
+  if (pre) showFile(pre.id);
+  d.scrollIntoView({ block: 'center' });
+}
+function findRefs(sym) {
+  var box = document.getElementById('refs');
+  if (!sym || sym === '0') { box.style.display = 'none'; return; }
+  var xs = spans(sym);
+  box.style.display = 'block';
+  box.innerHTML = '<h3>References (' + xs.length + ')</h3>';
+  xs.forEach(function(sp) {
+    var pre = sp.closest('pre');
+    var path = pre ? pre.dataset.path : '';
+    var ln = sp.dataset.ln || '?';
+    var row = document.createElement('div');
+    row.textContent = path + ':' + ln + '  ' + sp.textContent;
+    row.onclick = function() {
+      if (pre) showFile(pre.id);
+      sp.scrollIntoView({ block: 'center' });
+    };
+    box.appendChild(row);
+  });
+}
+document.getElementById('files').onclick = function(e) {
+  var a = e.target.closest('a');
+  if (!a) return;
+  e.preventDefault();
+  showFile(a.getAttribute('href').slice(1));
+};
+document.getElementById('codewrap').onclick = function(e) {
+  var t = e.target.closest('.sym');
+  if (!t) return;
+  sel = t.dataset.s || null;
+  clearHit();
+  if (!sel || sel === '0') return;
+  mark(sel);
+  if (e.altKey || e.metaKey || e.ctrlKey) gotoDef(sel);
+};
+document.getElementById('gdef').onclick = function() { if (sel) gotoDef(sel); };
+document.getElementById('fref').onclick = function() { if (sel) findRefs(sel); };
+document.addEventListener('mousemove', function(e) {
+  var t = e.target.closest ? e.target.closest('.sym') : null;
+  var tip = document.getElementById('tip');
+  if (!t || !t.dataset.t) { tip.style.display = 'none'; return; }
+  tip.textContent = t.dataset.t;
+  tip.style.display = 'block';
+  var x = e.clientX + 12, y = e.clientY + 16;
+  if (x + 240 > window.innerWidth) x = e.clientX - 250;
+  if (y + 40 > window.innerHeight) y = e.clientY - 40;
+  tip.style.left = x + 'px';
+  tip.style.top = y + 'px';
+});
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'F12' || (e.key === 'g' && (e.metaKey || e.ctrlKey))) {
+    e.preventDefault();
+    if (sel) gotoDef(sel);
+  }
+  if (e.shiftKey && e.key === 'F12') {
+    e.preventDefault();
+    if (sel) findRefs(sel);
+  }
+});
+""";
+}
+
+browse_entry_path(): []i8@new {
+    f: ?*ImportedFile = imported_files;
+    last: []i8 = "program";
+    while (f != null) {
+        last = f.path;
+        f = f.next;
+    }
+    last;
+}
+
+browse_build_html() noregion raises Error: []i8@new {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>L8 — ");
+    browse_esc(sb, browse_entry_path(), 0, len(browse_entry_path()));
+    sb_puts(sb, "</title><style>");
+    sb_puts(sb, browse_css());
+    sb_puts(sb, "</style></head><body><div id=\"app\"><nav id=\"files\"><h2>Files</h2>");
+    browse_emit_nav_rec(sb, imported_files);
+    sb_puts(sb, "</nav><div id=\"main\"><div id=\"bar\"><span id=\"cur\">");
+    browse_esc(sb, browse_entry_path(), 0, len(browse_entry_path()));
+    sb_puts(sb, "</span><button type=\"button\" id=\"gdef\">Go to definition</button><button type=\"button\" id=\"fref\">Find references</button></div><div id=\"codewrap\">");
+    browse_emit_files_rec(sb, imported_files);
+    sb_puts(sb, "</div><div id=\"refs\"></div></div></div><div id=\"tip\"></div><script>");
+    sb_puts(sb, browse_js());
+    sb_puts(sb, "</script></body></html>\n");
+    sb_finish(sb);
+}
+
+browse_write_html(path: []i8@immortal) noregion raises Error {
+    html: []i8 = browse_build_html();
+    fd: int = open_path(path, browse_O_WRONLY + browse_O_CREAT + browse_O_TRUNC, browse_MODE);
+    if (fd < 0) { error("cannot write browse html"); }
+    write(fd, html, len(html));
+    close(fd);
+}
+
+browse_usage(): int {
+    write(2, "error: usage: l8 browse <source.l8> -o <out.html>\n", len("error: usage: l8 browse <source.l8> -o <out.html>\n"));
+    1;
+}
+
+compiler_browse_main(argc: int, argv: [][z]i8@immortal) noregion: int {
+    have_s: int = 0;
+    have_o: int = 0;
+    if (argc < 1) { return browse_usage(); }
+    source: [z]i8 = argv[0];
+    output: [z]i8 = argv[0];
+    want_o: int = 0;
+    ai: int = 1;
+    while (ai < argc) {
+        arg: [z]i8 = argv[ai];
+        if (want_o != 0) {
+            if (have_o != 0) { return browse_usage(); }
+            output = arg;
+            have_o = 1;
+            want_o = 0;
+        } else {
+            if (cli_streq(arg, "-o")) {
+                want_o = 1;
+            } else {
+                if (have_s != 0) { return browse_usage(); }
+                source = arg;
+                have_s = 1;
+            }
+        }
+        ai = ai + 1;
+    }
+    if (have_s == 0) { return browse_usage(); }
+    if (have_o == 0) { return browse_usage(); }
+    if (want_o != 0) { return browse_usage(); }
+    try {
+        compiler_analyze(zslice(source));
+        browse_collect();
+        browse_write_html(zslice(output));
+        profile_end();
+        0;
+    } with Error e -> {
+        print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);
+        1;
+    }
+}
