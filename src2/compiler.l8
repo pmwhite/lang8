@@ -479,6 +479,7 @@ source_path: []i8 = "";
 token_eof: *Token = new Token { kind: TokKind.Eof, val: 0, str: "", len: 0, pos: 0, next: token_eof };
 tok: *Token = new Token { kind: TokKind.Eof, val: 0, str: "", len: 0, pos: 0, next: token_eof };
 parse_follow_imports: int = 1;
+parse_resolve: int = 1;
 file_items: ?*Item = null;
 file_items_tail: ?*Item = null;
 file_coms: ?*Com = null;
@@ -1504,6 +1505,57 @@ is_named_type(name: []i8): bool {
     find_struct(name) != null || find_enum(name) != null || find_exn(name) != null;
 }
 
+/* Ident.Ident { field: expr } even when the type is not in this file. */
+syntax_variant_fields(): bool {
+    if (parse_resolve != 0) { return false; }
+    d: *Token = tok.next;
+    if (d.kind != TokKind.Dot) { return false; }
+    id: *Token = d.next;
+    if (id.kind != TokKind.Ident) { return false; }
+    b: *Token = id.next;
+    if (b.kind != TokKind.LBrace) { return false; }
+    syntax_fields_after_brace(b.next);
+}
+
+/* Ident { field: expr }. Not `for x in xs { y: T = e; }` or `match x {`. */
+syntax_struct_lit(): bool {
+    if (parse_resolve != 0) { return false; }
+    b: *Token = tok.next;
+    if (b.kind != TokKind.LBrace) { return false; }
+    syntax_fields_after_brace(b.next);
+}
+
+syntax_fields_after_brace(inner: *Token): bool {
+    if (inner.kind != TokKind.Ident) { return false; }
+    if ((inner.next).kind != TokKind.Colon) { return false; }
+    v: *Token = (inner.next).next;
+    if (v.kind == TokKind.Int || v.kind == TokKind.I8 || v.kind == TokKind.Bool || v.kind == TokKind.Noreturn) { return false; }
+    if (v.kind == TokKind.Star || v.kind == TokKind.Question || v.kind == TokKind.LBrack) { return false; }
+    if (v.kind == TokKind.Ident) {
+        n: TokKind = (v.next).kind;
+        if (n == TokKind.Assign || n == TokKind.Semi) { return false; }
+    }
+    true;
+}
+
+exn_stub(name: []i8@new): *ExnDef@new {
+    new ExnDef {
+        name: name,
+        tag: 0,
+        members: null,
+        size: 0,
+        ty: null,
+        next: null,
+        hash_next: null,
+        lead: null,
+        trail: null,
+        browse_id: 0,
+        browse_pos: 0,
+        browse_file: 0,
+        browse_len: 0
+    };
+}
+
 starts_type(): bool {
     if (tok.kind == TokKind.LBrack) { return true; }
     if (tok.kind == TokKind.Int || tok.kind == TokKind.I8 || tok.kind == TokKind.Bool || is_type_name()) { return true; }
@@ -1643,6 +1695,21 @@ is_enum_ty(t: *Type): bool {
         Enum _p -> { true; }
         _ -> { false; }
     }
+}
+
+/* Syntax-only parse: a forward/imported name was a struct stub; treat as enum. */
+syntax_as_enum(t: *Type) noregion raises Error: *Type@t {
+    if (is_enum_ty(t)) { return t; }
+    if (parse_resolve == 0 && is_struct_ty(t)) {
+        sd: *StructDef = type_struct_def(t);
+        if (sd.members == null) {
+            ed: *EnumDef = get_or_create_enum(sd.name);
+            rebind_struct_stub_to_enum(sd, ed);
+            return t;
+        }
+    }
+    error("variant construction requires an enum type");
+    t;
 }
 
 is_exn_ty(t: *Type): bool {
@@ -3853,6 +3920,7 @@ null_eq_var(cond: ?*Expr): ?*Obj {
 }
 
 narrow_push_ne_nulls(cond: ?*Expr) noregion raises Error {
+    if (parse_resolve == 0) { return; }
     if (cond != null) {
         match cond.kind {
             LogAnd k -> {
@@ -3873,6 +3941,7 @@ narrow_push_ne_nulls(cond: ?*Expr) noregion raises Error {
 }
 
 narrow_push_eq_nulls(cond: ?*Expr) noregion raises Error {
+    if (parse_resolve == 0) { return; }
     if (cond != null) {
         match cond.kind {
             LogOr k -> {
@@ -3969,7 +4038,7 @@ parse_type() noregion raises Error: *Type@new {
 
 parse_expr() noregion raises Error: *Expr@new { parse_assign(); }
 
-parse_field_inits(members: ?*Member@new) noregion raises Error: *FieldInit {
+parse_field_inits(members: ?*Member@new) noregion raises Error: ?*FieldInit@new {
     skip(TokKind.LBrace);
     head: ?*FieldInit = null;
     cur: ?*FieldInit = null;
@@ -3981,16 +4050,15 @@ parse_field_inits(members: ?*Member@new) noregion raises Error: *FieldInit {
         tok = tok.next;
         skip(TokKind.Colon);
         m: ?*Member = find_field(members, fname);
-        if (m == null) { error("unknown field"); }
-        mu: *Member = m;
+        if (m == null && parse_resolve != 0 && members != null) { error("unknown field"); }
         i: ?*FieldInit = head;
         while (i != null) {
-            if (i.member == mu) { error("duplicate field"); }
+            if (streq(i.name, fname)) { error("duplicate field"); }
             i = i.next;
         }
         e: *Expr = parse_expr();
         lhs: ?*Expr = e;
-        init: *FieldInit = new_field_init(fname, mu, lhs);
+        init: *FieldInit = new_field_init(fname, m, lhs);
         if (cur != null) {
             cur.next = init;
             cur = init;
@@ -3999,40 +4067,47 @@ parse_field_inits(members: ?*Member@new) noregion raises Error: *FieldInit {
             cur = init;
         }
     }
-    m2: ?*Member = members;
-    while (m2 != null) {
-        found: int = 0;
-        i2: ?*FieldInit = head;
-        while (i2 != null) {
-            if (i2.member == m2) { found = 1; }
-            i2 = i2.next;
+    if (parse_resolve != 0) {
+        m2: ?*Member = members;
+        while (m2 != null) {
+            found: int = 0;
+            i2: ?*FieldInit = head;
+            while (i2 != null) {
+                if (i2.member == m2) { found = 1; }
+                i2 = i2.next;
+            }
+            if (found == 0) { error("missing field"); }
+            m2 = m2.next;
         }
-        if (found == 0) { error("missing field"); }
-        m2 = m2.next;
     }
     skip(TokKind.RBrace);
-    head or error("empty list");
+    if (parse_resolve != 0 && head == null) { error("empty list"); }
+    head;
 }
 
-parse_struct_field_inits(sty: *Type) noregion raises Error: *FieldInit {
-    if (!is_struct_ty(sty)) { error("struct literal requires a struct type"); }
-    parse_field_inits(type_struct_def(sty).members);
+parse_struct_field_inits(sty: *Type) noregion raises Error: ?*FieldInit@new {
+    if (parse_resolve != 0 && !is_struct_ty(sty)) { error("struct literal requires a struct type"); }
+    ms: ?*Member = null;
+    if (is_struct_ty(sty)) { ms = type_struct_def(sty).members; }
+    parse_field_inits(ms);
 }
 
-parse_exn_field_inits(ed: *ExnDef@new) noregion raises Error: *FieldInit {
-    if (ed.members == null) { error("unit exception does not take fields"); }
+parse_exn_field_inits(ed: *ExnDef@new) noregion raises Error: ?*FieldInit@new {
+    if (ed.members == null) {
+        if (parse_resolve != 0) { error("unit exception does not take fields"); }
+        if (tok.kind != TokKind.LBrace) { return null; }
+    }
     parse_field_inits(ed.members);
 }
 
-parse_variant_field_inits(v: *Variant@new) noregion raises Error: *FieldInit { parse_field_inits(v.fields); }
+parse_variant_field_inits(v: *Variant@new) noregion raises Error: ?*FieldInit@new { parse_field_inits(v.fields); }
 
 parse_primary() noregion raises Error: *Expr@new {
     n: *Expr;
     if (tok.kind == TokKind.New) {
         tok = tok.next;
-        if ((tok.next).kind == TokKind.Dot && is_type_name()) {
-            ety: *Type = parse_type();
-            if (!is_enum_ty(ety)) { error("new Enum.Variant requires an enum type"); }
+        if ((tok.next).kind == TokKind.Dot && (is_type_name() || parse_resolve == 0)) {
+            ety: *Type = syntax_as_enum(parse_type());
             skip(TokKind.Dot);
             if (tok.kind != TokKind.Ident) { error("expected variant name after new Enum."); }
             vname: []i8 = cur_tokstr();
@@ -4042,16 +4117,22 @@ parse_primary() noregion raises Error: *Expr@new {
             hvfile: int = browse_tok_file;
             tok = tok.next;
             vo: ?*Variant = find_variant(type_enum_def(ety), vname);
-            if (vo == null) { error("unknown variant"); }
-            v: *Variant = vo;
+            if (vo == null && parse_resolve != 0) { error("unknown variant"); }
             args: ?*FieldInit = null;
-            if (tok.kind == TokKind.LBrace) {
-                if (v.fields == null) { error("unit variant does not take fields"); }
-                args = parse_variant_field_inits(v);
+            tag: int = 0;
+            if (vo != null) {
+                v: *Variant = vo;
+                tag = v.tag;
+                if (tok.kind == TokKind.LBrace) {
+                    if (v.fields == null) { error("unit variant does not take fields"); }
+                    args = parse_variant_field_inits(v);
+                } else {
+                    if (v.fields != null) { error("variant requires field initializers"); }
+                }
             } else {
-                if (v.fields != null) { error("variant requires field initializers"); }
+                if (tok.kind == TokKind.LBrace) { args = parse_field_inits(null); }
             }
-            hn: *Expr = new_heap_node(null, v.tag, args, v, null, vname, ptr_to(ety));
+            hn: *Expr = new_heap_node(null, tag, args, vo, null, vname, ptr_to(ety));
             hn.pos = hvpos;
             hn.file = hvfile;
             hn.toklen = hvlen;
@@ -4146,9 +4227,8 @@ parse_primary() noregion raises Error: *Expr@new {
         name: []i8 = cur_tokstr();
         browse_note();
         nk: TokKind = (tok.next).kind;
-        if (nk == TokKind.Dot && is_named_type(name)) {
-            ety: *Type = parse_type();
-            if (!is_enum_ty(ety)) { error("variant construction requires an enum type"); }
+        if (nk == TokKind.Dot && (is_named_type(name) || syntax_variant_fields())) {
+            ety: *Type = syntax_as_enum(parse_type());
             skip(TokKind.Dot);
             if (tok.kind != TokKind.Ident) { error("expected variant name"); }
             vname: []i8 = cur_tokstr();
@@ -4158,24 +4238,30 @@ parse_primary() noregion raises Error: *Expr@new {
             vfile: int = browse_tok_file;
             tok = tok.next;
             vo: ?*Variant = find_variant(type_enum_def(ety), vname);
-            if (vo == null) { error("unknown variant"); }
-            v: *Variant = vo;
+            if (vo == null && parse_resolve != 0) { error("unknown variant"); }
             args: ?*FieldInit = null;
-            if (tok.kind == TokKind.LBrace) {
-                if (v.fields == null) { error("unit variant does not take fields"); }
-                args = parse_variant_field_inits(v);
+            tag: int = 0;
+            if (vo != null) {
+                v: *Variant = vo;
+                tag = v.tag;
+                if (tok.kind == TokKind.LBrace) {
+                    if (v.fields == null) { error("unit variant does not take fields"); }
+                    args = parse_variant_field_inits(v);
+                } else {
+                    if (v.fields != null) { error("variant requires field initializers"); }
+                }
             } else {
-                if (v.fields != null) { error("variant requires field initializers"); }
+                if (tok.kind == TokKind.LBrace) { args = parse_field_inits(null); }
             }
-            vl: *Expr = new_variant_lit(name, vname, v, v.tag, args, ety);
+            vl: *Expr = new_variant_lit(name, vname, vo, tag, args, ety);
             vl.pos = vpos;
             vl.file = vfile;
             vl.toklen = vlen;
             return vl;
         }
-        if (nk == TokKind.LBrace && is_named_type(name)) {
+        if (nk == TokKind.LBrace && (is_named_type(name) || syntax_struct_lit())) {
             sty: *Type = parse_type();
-            if (!is_struct_ty(sty)) { error("struct literal requires a struct type"); }
+            if (parse_resolve != 0 && !is_struct_ty(sty)) { error("struct literal requires a struct type"); }
             return new_struct_lit(name, parse_struct_field_inits(sty), sty);
         }
         npos: int = browse_tok_pos;
@@ -4205,7 +4291,14 @@ parse_primary() noregion raises Error: *Expr@new {
             return fe;
         }
         varo: ?*Obj = find_var(name);
-        if (varo == null) { error("undefined variable"); }
+        if (varo == null) {
+            if (parse_resolve != 0) { error("undefined variable"); }
+            ve0: *Expr = mk_expr(ExprKind.Var { var: null, name: name, member: null });
+            ve0.pos = npos;
+            ve0.file = nfile;
+            ve0.toklen = nlen;
+            return ve0;
+        }
         var: *Obj = varo;
         ve: *Expr = new_var_node(var);
         ve.pos = npos;
@@ -4241,8 +4334,11 @@ parse_match_expr() noregion raises Error: *Expr@new {
 parse_match_arms(mcond: *Expr@new) noregion raises Error: ?*MatchArm@new {
     add_type(mcond);
     et: ?*Type = decay(mcond.ty);
-    if (et == null) { error_ty("match requires an enum value", et); }
-    if (!is_enum_ty(et)) { error_ty("match requires an enum value", et); }
+    if (parse_resolve != 0) {
+        if (et == null) { error_ty("match requires an enum value", et); }
+        etu0: *Type = et;
+        if (!is_enum_ty(etu0)) { error_ty("match requires an enum value", et); }
+    }
     skip(TokKind.LBrace);
     arms: ?*MatchArm = null;
     acur: ?*MatchArm = null;
@@ -4288,25 +4384,32 @@ parse_match_arms(mcond: *Expr@new) noregion raises Error: ?*MatchArm@new {
         if (is_wild) {
             chk: ?*MatchArm = arms;
             while (chk != null) {
-                if (chk.variant == null) { error("duplicate wildcard match arm"); }
+                if (streq(chk.name, "_")) { error("duplicate wildcard match arm"); }
                 chk = chk.next;
             }
             if (have_binder != 0) { error("wildcard match arm cannot bind a payload"); }
         } else {
-            vo: ?*Variant = find_variant(type_enum_def(et), vname);
-            if (vo == null) { error("unknown variant"); }
-            v: *Variant = vo;
-            chk2: ?*MatchArm = arms;
-            while (chk2 != null) {
-                if (chk2.variant == v) { error("duplicate match arm"); }
-                chk2 = chk2.next;
-            }
-            arm_variant_n = v;
-            if (have_binder != 0) {
-                if (v.payload_ty == null) { error("unit variant cannot bind a payload"); }
-                bo: *Obj = new_obj(binder_name, 1);
-                bo.ty = v.payload_ty;
-                arm_binder = bo;
+            if (parse_resolve != 0) {
+                etu: *Type = et or error("match requires an enum value");
+                vo: ?*Variant = find_variant(type_enum_def(etu), vname);
+                if (vo == null) { error("unknown variant"); }
+                v: *Variant = vo;
+                chk2: ?*MatchArm = arms;
+                while (chk2 != null) {
+                    if (chk2.variant == v) { error("duplicate match arm"); }
+                    chk2 = chk2.next;
+                }
+                arm_variant_n = v;
+                if (have_binder != 0) {
+                    if (v.payload_ty == null) { error("unit variant cannot bind a payload"); }
+                    bo: *Obj = new_obj(binder_name, 1);
+                    bo.ty = v.payload_ty;
+                    arm_binder = bo;
+                }
+            } else {
+                if (have_binder != 0) {
+                    arm_binder = new_obj(binder_name, 1);
+                }
             }
         }
         arm_body_n: *Stmt = parse_compound();
@@ -4329,11 +4432,12 @@ parse_match_arms(mcond: *Expr@new) noregion raises Error: ?*MatchArm@new {
     has_wild: int = 0;
     walk: ?*MatchArm = arms;
     while (walk != null) {
-        if (walk.variant == null) { has_wild = 1; }
+        if (streq(walk.name, "_")) { has_wild = 1; }
         walk = walk.next;
     }
-    if (has_wild == 0) {
-        vv: ?*Variant = type_enum_def(et).variants;
+    if (has_wild == 0 && parse_resolve != 0) {
+        etu2: *Type = et or error("match requires an enum value");
+        vv: ?*Variant = type_enum_def(etu2).variants;
         while (vv != null) {
             found2: int = 0;
             walk2: ?*MatchArm = arms;
@@ -4372,6 +4476,12 @@ parse_postfix() noregion raises Error: *Expr@new {
                     mlen: int = browse_tok_len;
                     mfile: int = browse_tok_file;
                     tok = tok.next;
+                    if (parse_resolve == 0) {
+                        n = new_member_access(n, name, null);
+                        n.pos = mpos;
+                        n.file = mfile;
+                        n.toklen = mlen;
+                    } else {
                     add_type(n);
                     t: ?*Type = decay(n.ty);
                     sty: *Type = n.ty or error("missing type");
@@ -4397,6 +4507,7 @@ parse_postfix() noregion raises Error: *Expr@new {
                     n.pos = mpos;
                     n.file = mfile;
                     n.toklen = mlen;
+                    }
                 }
             } else {
                 if (tok.kind == TokKind.As || tok.kind == TokKind.Trunc) {
@@ -4438,10 +4549,12 @@ parse_unary() noregion raises Error: *Expr@new {
 }
 
 add_type(n: ?*Expr@new) noregion raises Error {
+    if (parse_resolve == 0) { return; }
     if (n != null) { add_type_expr(n); }
 }
 
 add_type_stmt(s: ?*Stmt) noregion raises Error {
+    if (parse_resolve == 0) { return; }
     if (s != null) { add_type_stmt_node(s); }
 }
 
@@ -5613,8 +5726,11 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
         ename: []i8 = cur_tokstr();
         browse_note();
         ed: ?*ExnDef = find_exn(ename);
-        if (ed == null) { error("unknown exception"); }
-        edu: *ExnDef = ed;
+        if (ed == null) {
+            if (parse_resolve != 0) { error("unknown exception"); }
+            ed = exn_stub(ename);
+        }
+        edu: *ExnDef = ed or error("unknown exception");
         browse_add(browse_tok_file, browse_tok_pos, browse_tok_len, edu.browse_id, 0, BROWSE_TY, ename);
         tok = tok.next;
         rargs: ?*FieldInit = null;
@@ -5640,8 +5756,11 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
             cname: []i8 = cur_tokstr();
             browse_note();
             ced: ?*ExnDef = find_exn(cname);
-            if (ced == null) { error("unknown exception"); }
-            cedu: *ExnDef = ced;
+            if (ced == null) {
+                if (parse_resolve != 0) { error("unknown exception"); }
+                ced = exn_stub(cname);
+            }
+            cedu: *ExnDef = ced or error("unknown exception");
             cpos: int = browse_tok_pos;
             clen: int = browse_tok_len;
             cfile: int = browse_tok_file;
@@ -5894,8 +6013,11 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error: *Function@
             ename: []i8 = cur_tokstr();
             browse_note();
             ed: ?*ExnDef = find_exn(ename);
-            if (ed == null) { error("unknown exception"); }
-            edu: *ExnDef = ed;
+            if (ed == null) {
+                if (parse_resolve != 0) { error("unknown exception"); }
+                ed = exn_stub(ename);
+            }
+            edu: *ExnDef = ed or error("unknown exception");
             browse_add(browse_tok_file, browse_tok_pos, browse_tok_len, edu.browse_id, 0, BROWSE_TY, ename);
             if (exn_in_list(fn.raises_list, edu)) { error("duplicate raises"); }
             el: *ExnList = new ExnList { exn: edu, seen: 0, next: null };
@@ -6192,8 +6314,10 @@ parse_import() noregion raises Error {
     tok = tok.next;
     skip(TokKind.Semi);
     append_item(new_item(ItemKind.Import { path: relative, tag: 0 }, ipos));
-    path: []i8 = resolve_import_path(source_path, relative);
-    parse_source_file(path, 0);
+    if (parse_follow_imports != 0) {
+        path: []i8 = resolve_import_path(source_path, relative);
+        parse_source_file(path, 0);
+    }
 }
 
 is_builtin_fname(name: []i8): bool {
