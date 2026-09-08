@@ -231,6 +231,9 @@ check_browse() {
   grep -q 'putchar' "$hello" || die "browse html missing hello source"
   "./$tool" browse src2/main.l8 -o "$html" || die "browse compiler failed"
   grep -q 'src2/compiler.l8' "$html" || die "browse compiler html missing compiler.l8"
+  grep -q 'src2/parse.l8' "$html" || die "browse compiler html missing parse.l8"
+  grep -q 'src2/check.l8' "$html" || die "browse compiler html missing check.l8"
+  grep -q 'src2/codegen.l8' "$html" || die "browse compiler html missing codegen.l8"
   grep -q 'src2/browse.l8' "$html" || die "browse compiler html missing browse.l8"
 }
 
