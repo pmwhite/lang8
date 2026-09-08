@@ -85,6 +85,23 @@ example() {
   run_expect "$bin" "$expected"
 }
 
+fmt_src2() {
+  local tool="$1"
+  local f
+  for f in src2/*.l8; do
+    "./$tool" fmt -w "$f"
+  done
+}
+
+check_fmt_src2() {
+  local tool="$1"
+  local f
+  for f in src2/*.l8; do
+    "./$tool" fmt "$f" >"$BUILD/fmt.check"
+    cmp -s "$f" "$BUILD/fmt.check" || die "fmt is not stable: $f"
+  done
+}
+
 # All examples as one timed step (avoids a noisy per-file timing table).
 run_examples() {
   local tool="$1"
@@ -259,6 +276,8 @@ do_selfhost() {
 
   step 'stage1 direct (l8c0 → src1)' ./l8c0 build src1/main.l8 -o l8c1
   step 'stage2 direct (l8c1 → src2)' ./l8c1 build src2/main.l8 -o l8c2
+  step 'fmt src2 [l8c2]' fmt_src2 l8c2
+  step 'fmt src2 stable [l8c2]' check_fmt_src2 l8c2
   step 'stage3 direct (l8c2 → src2)' ./l8c2 build src2/main.l8 -o l8c3
   step 'stage4 direct (l8c3 → src2)' ./l8c3 build src2/main.l8 -o l8c4
   step 'verify stage3 exe == stage4 exe' verify_same l8c3 l8c4
@@ -344,7 +363,7 @@ Commands:
   all             Install bootstrap, examples, two-stage self-host (default)
   bootstrap       Copy the saved bootstrap executable → l8c0
   examples        Run example programs via l8c0
-  selfhost        direct src1 → l8c1; src2 → l8c2/l8c3/l8c4; fixpoint l8c3==l8c4; examples; browse; phases
+  selfhost        direct src1 → l8c1; src2 → l8c2; fmt src2; src2 → l8c3/l8c4; fixpoint l8c3==l8c4; examples; browse; phases
   promote-bin1    Copy the stage-1 executable → bootstrap
   promote-bin2    Copy the stage-2 fixpoint executable → bootstrap
   promote-source  Replace src1/ with src2/ (no bootstrap change)
