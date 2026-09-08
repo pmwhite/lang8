@@ -1372,15 +1372,27 @@ parse_type() noregion raises Error: *Type@new {
     }
     if (tok.kind == TokKind.Question) {
         tok = tok.next;
-        if (tok.kind != TokKind.Star) {
-            error("expected * after ? in optional pointer type");
+        if (tok.kind == TokKind.Star) {
+            tok = tok.next;
+            base: *Type = parse_type();
+            if (is_noreturn_ty(base)) {
+                error("noreturn cannot be pointed to");
+            }
+            return opt_ptr_to(base);
         }
-        tok = tok.next;
-        base: *Type = parse_type();
-        if (is_noreturn_ty(base)) {
-            error("noreturn cannot be pointed to");
+        if (tok.kind == TokKind.LBrack) {
+            tok = tok.next;
+            if (tok.kind != TokKind.RBrack) {
+                error("expected [] after ? in optional slice type");
+            }
+            tok = tok.next;
+            sbase: *Type = parse_type();
+            if (is_noreturn_ty(sbase)) {
+                error("noreturn cannot be a slice element");
+            }
+            return opt_slice_of(sbase);
         }
-        return opt_ptr_to(base);
+        error("expected * or [] after ?");
     }
     if (tok.kind == TokKind.Star) {
         tok = tok.next;
@@ -2074,6 +2086,9 @@ type_index_expr(p: *Expr, lhs: *Expr@new, idx: *Expr@new) noregion raises Error 
     if (is_opt_pointer(raw)) {
         error_ty("index of optional pointer (use if (p != null) to narrow)", raw);
     }
+    if (is_opt_slice(raw)) {
+        error_ty("index of optional slice (use if (s != null) to narrow)", raw);
+    }
     if (is_pointer(raw)) {
         error_ty("pointer indexing is not allowed (use []T or [z]T)", raw);
     }
@@ -2126,21 +2141,28 @@ type_or_else(p: *Expr@new, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error
     lt: ?*Type = decay(lhs.ty);
     rt: ?*Type = decay(rhs.ty);
     if (lt == null) {
-        error_ty("or requires an optional pointer on the left", lt);
+        error_ty("or requires an optional pointer or slice on the left", lt);
     }
-    if (!is_opt_pointer(lt)) {
-        error_ty("or requires an optional pointer on the left", lt);
+    if (!is_optional(lt)) {
+        error_ty("or requires an optional pointer or slice on the left", lt);
     }
-    unwrapped: *Type = ptr_to(type_base(lt));
+    unwrapped: *Type = unwrap_optional(lt);
     if (rt != null && is_noreturn_ty(rt)) {
         p.ty = unwrapped;
         return;
     }
-    if (rt != null && is_pointer(rt) && types_equal(type_base(rt), type_base(lt))) {
+    if (is_opt_pointer(lt)) {
+        if (rt != null && is_pointer(rt) && types_equal(type_base(rt), type_base(lt))) {
+            p.ty = unwrapped;
+            return;
+        }
+        error_have_want("or right-hand side must be *T or noreturn", rt, unwrapped);
+    }
+    if (rt != null && is_slice(rt) && types_equal(type_base(rt), type_base(lt))) {
         p.ty = unwrapped;
         return;
     }
-    error_have_want("or right-hand side must be *T or noreturn", rt, unwrapped);
+    error_have_want("or right-hand side must be []T or noreturn", rt, unwrapped);
 }
 
 type_int_arith(p: *Expr, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error {
@@ -2201,6 +2223,11 @@ type_eq_cmp(p: *Expr, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error {
             return;
         }
         if (is_any_pointer(lt) && is_any_pointer(rt) && types_equal(type_base(lt),
+            type_base(rt))) {
+            p.ty = ty_bool;
+            return;
+        }
+        if ((is_slice(lt) || is_opt_slice(lt)) && (is_slice(rt) || is_opt_slice(rt)) && types_equal(type_base(lt),
             type_base(rt))) {
             p.ty = ty_bool;
             return;
@@ -2361,25 +2388,36 @@ unify_value_ty(a: ?*Type, b: ?*Type) noregion raises Error: ?*Type@b {
         type_base(da))) {
         return db;
     }
+    if (da != null && db != null && is_opt_slice(da) && is_slice(db) && types_equal(type_base(da),
+        type_base(db))) {
+        return da;
+    }
+    if (da != null && db != null && is_opt_slice(db) && is_slice(da) && types_equal(type_base(db),
+        type_base(da))) {
+        return db;
+    }
     error_ty_vs("branch type mismatch", da, db);
     null;
 }
 
 opt_ptr_of(t: ?*Type) noregion raises Error: *Type@new {
     if (t == null) {
-        error("null requires a pointer type");
+        error("null requires a pointer or slice type");
     }
     d: ?*Type = decay(t);
     if (d == null) {
-        error("null requires a pointer type");
+        error("null requires a pointer or slice type");
     }
-    if (is_opt_pointer(d)) {
+    if (is_opt_pointer(d) || is_opt_slice(d)) {
         return d;
     }
     if (is_pointer(d)) {
         return opt_ptr_to(type_base(d));
     }
-    error_ty("null requires a pointer type", d);
+    if (is_slice(d)) {
+        return opt_slice_of(type_base(d));
+    }
+    error_ty("null requires a pointer or slice type", d);
     d;
 }
 
@@ -3058,6 +3096,10 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                     error("len takes one argument");
                 }
                 at: ?*Type = lenarg.ty;
+                if (at != null && is_opt_slice(at)) {
+                    error_ty("len of optional slice (use if (s != null) to narrow)",
+                        at);
+                }
                 if (at != null && is_slice(at)) {
                     p.kind = ExprKind.Funcall { funcname: q.funcname, args: q.args, fn: null };
                     p.ty = ty_int;
@@ -3187,6 +3229,10 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
                 return;
             }
             it: ?*Type = decay(k.iter.ty);
+            if (it != null && is_opt_slice(it)) {
+                error_ty("for requires a counted array ([]T); narrow ?[]T first",
+                    it);
+            }
             if (it == null || !is_slice(it)) {
                 error_ty("for requires a counted array ([]T) or int range (a..b)",
                     it);
