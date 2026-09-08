@@ -476,6 +476,7 @@ emit_buf: []i8 = "";
 emit_len: int = 0;
 emit_cap: int = 65536;
 do_profile: int = 0;
+mark_nerr: int = 0;
 current_fn_name: []i8 = "";
 current_return_lab: int = 0;
 current_return_ty: ?*Type = null;
@@ -5821,6 +5822,7 @@ parse_program_unit() noregion raises Error {
 }
 
 parse_program(entry_path: []i8) noregion raises Error {
+    mark_nerr = 0;
     functions = null;
     function_tail = null;
     globals = null;
@@ -7226,7 +7228,21 @@ check_raises_functions() raises Error {
     }
 }
 
-check_imm_heap_functions() noregion raises Error {
+mark_print_at(file: int, pos: int, msg: []i8@immortal) {
+    f: ?*ImportedFile = imported_files;
+    while (f != null) {
+        if (f.id == file) {
+            print_error_at(f.path, f.src, f.src_len, pos, msg);
+            mark_nerr = mark_nerr + 1;
+            return;
+        }
+        f = f.next;
+    }
+    print_error_at(source_path, source, source_len, pos, msg);
+    mark_nerr = mark_nerr + 1;
+}
+
+check_imm_heap_functions() noregion {
     fn: ?*Function = functions;
     while (fn != null) {
         if (fn.is_extern == 0) {
@@ -7234,13 +7250,13 @@ check_imm_heap_functions() noregion raises Error {
                 sb: *StrBuf = sb_new();
                 sb_puts(sb, "missing noregion on ");
                 sb_puts(sb, fn.name);
-                error(sb_finish(sb));
+                mark_print_at(fn.browse_file, fn.browse_pos, sb_finish(sb));
             }
             if (fn.need_imm_heap == 0 && fn.decl_imm_heap != 0) {
                 sb2: *StrBuf = sb_new();
                 sb_puts(sb2, "unnecessary noregion on ");
                 sb_puts(sb2, fn.name);
-                error(sb_finish(sb2));
+                mark_print_at(fn.browse_file, fn.browse_pos, sb_finish(sb2));
             }
         }
         fn = fn.next;
@@ -7280,29 +7296,57 @@ inferred_ret_kind(fn: *Function): int {
     BOUND_OMIT;
 }
 
-bound_err(msg: []i8@immortal, fn: *Function@immortal) noregion raises Error: noreturn {
+bound_err(msg: []i8@immortal, fn: *Function@immortal) noregion {
     sb: *StrBuf = sb_new();
     sb_puts(sb, msg);
     sb_puts(sb, fn.name);
-    error(sb_finish(sb));
+    mark_print_at(fn.browse_file, fn.browse_pos, sb_finish(sb));
 }
 
-bound_use_named(fn: *Function@immortal, p: ?*Obj@immortal) noregion raises Error: noreturn {
-    if (p == null) { bound_err("omit bound on ", fn); }
+bound_err_param(msg: []i8@immortal, fn: *Function@immortal, p: *Obj@immortal) noregion {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, msg);
+    sb_puts(sb, p.name);
+    sb_puts(sb, " in ");
+    sb_puts(sb, fn.name);
+    mark_print_at(p.browse_file, p.browse_pos, sb_finish(sb));
+}
+
+bound_use_named(fn: *Function@immortal, p: ?*Obj@immortal) noregion {
+    if (p == null) {
+        bound_err("omit bound on ", fn);
+        return;
+    }
     pu: *Obj = p;
     sb: *StrBuf = sb_new();
     sb_puts(sb, "use @");
     sb_puts(sb, pu.name);
     sb_puts(sb, " on ");
     sb_puts(sb, fn.name);
-    error(sb_finish(sb));
+    mark_print_at(fn.browse_file, fn.browse_pos, sb_finish(sb));
+}
+
+bound_use_named_param(fn: *Function@immortal, p: *Obj@immortal, inf: ?*Obj@immortal) noregion {
+    if (inf == null) {
+        bound_err_param("omit bound on ", fn, p);
+        return;
+    }
+    iu: *Obj = inf;
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, "use @");
+    sb_puts(sb, iu.name);
+    sb_puts(sb, " on ");
+    sb_puts(sb, p.name);
+    sb_puts(sb, " in ");
+    sb_puts(sb, fn.name);
+    mark_print_at(p.browse_file, p.browse_pos, sb_finish(sb));
 }
 
 param_needs_bound(p: *Obj): bool {
     type_is_ref(p.ty) || type_has_pointers(p.ty);
 }
 
-check_written_param(fn: *Function@immortal, p: *Obj@immortal) noregion raises Error {
+check_written_param(fn: *Function@immortal, p: *Obj@immortal) noregion {
     if (!param_needs_bound(p)) { return; }
     have: int = written_param_kind(p);
     want: int = inferred_param_kind(p);
@@ -7310,17 +7354,17 @@ check_written_param(fn: *Function@immortal, p: *Obj@immortal) noregion raises Er
         if (have == BOUND_NAMED) {
             inf: ?*Obj = p.bound_named;
             if (inf == null) { return; }
-            if (!streq(p.life_bound, inf.name)) { bound_use_named(fn, inf); }
+            if (!streq(p.life_bound, inf.name)) { bound_use_named_param(fn, p, inf); }
         }
         return;
     }
-    if (want == BOUND_IMM) { bound_err("use @immortal on ", fn); }
-    if (want == BOUND_NEW) { bound_err("use @new on ", fn); }
-    if (want == BOUND_NAMED) { bound_use_named(fn, p.bound_named); }
-    bound_err("omit bound on ", fn);
+    if (want == BOUND_IMM) { bound_err_param("use @immortal on ", fn, p); return; }
+    if (want == BOUND_NEW) { bound_err_param("use @new on ", fn, p); return; }
+    if (want == BOUND_NAMED) { bound_use_named_param(fn, p, p.bound_named); return; }
+    bound_err_param("omit bound on ", fn, p);
 }
 
-check_written_ret(fn: *Function@immortal) noregion raises Error {
+check_written_ret(fn: *Function@immortal) noregion {
     if (!type_is_ref(fn.return_ty)) { return; }
     have: int = written_ret_kind(fn);
     want: int = inferred_ret_kind(fn);
@@ -7332,9 +7376,9 @@ check_written_ret(fn: *Function@immortal) noregion raises Error {
         }
         return;
     }
-    if (want == BOUND_NEW) { bound_err("return of new requires @new on ", fn); }
-    if (have == BOUND_NEW) { bound_err("return bound is @new on ", fn); }
-    if (want == BOUND_NAMED) { bound_use_named(fn, fn.bound_ret_param); }
+    if (want == BOUND_NEW) { bound_err("return of new requires @new on ", fn); return; }
+    if (have == BOUND_NEW) { bound_err("return bound is @new on ", fn); return; }
+    if (want == BOUND_NAMED) { bound_use_named(fn, fn.bound_ret_param); return; }
     bound_err("omit bound on ", fn);
 }
 
@@ -7374,6 +7418,7 @@ check_written_bounds() noregion raises Error {
         }
         fn = fn.next;
     }
+    if (mark_nerr != 0) { error("lifetime marks do not match"); }
 }
 
 new_label(): int {
