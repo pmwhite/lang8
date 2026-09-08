@@ -361,6 +361,11 @@ type BoundCall = {
     next: ?*BoundCall;
 }
 
+type CallEdge = {
+    callee: *Function;
+    next: ?*CallEdge;
+}
+
 type Function = {
     name: []i8;
     nparams: int;
@@ -383,6 +388,7 @@ type Function = {
     bound_ret_need_new: int;
     bound_ret_param: ?*Obj;
     bound_calls: ?*BoundCall;
+    callees: ?*CallEdge;
     browse_id: int;
     browse_pos: int;
     browse_file: int;
@@ -412,6 +418,7 @@ token_eof: *Token = new Token { kind: TokKind.Eof, val: 0, str: "", len: 0, pos:
 tok: *Token = new Token { kind: TokKind.Eof, val: 0, str: "", len: 0, pos: 0, next: token_eof };
 globals: ?*Obj = null;
 locals: ?*Obj = null;
+scope_locals: ?*Obj = null;
 scope_depth: int = 0;
 region_depth: int = 0;
 functions: ?*Function = null;
@@ -482,6 +489,7 @@ current_return_lab: int = 0;
 current_return_ty: ?*Type = null;
 current_sret: ?*Obj = null;
 current_fn: ?*Function = null;
+count_var_use: int = 1;
 type NarrowFrame = {
     var: ?*Obj;
     ty: ?*Type;
@@ -540,8 +548,10 @@ name_eq_span(name: []i8, s: []i8, off: int, n: int): bool {
 
 hash_n(s: []i8, off: int, n: int): int {
     h: int = 5381;
-    for i in 0..n {
-        h = h * 33 + (s[off + i] as int);
+    i: int = 0;
+    while (i < n) {
+        h = ((h << 5) + h) + (s[off + i] as int);
+        i = i + 1;
     }
     h;
 }
@@ -549,7 +559,7 @@ hash_n(s: []i8, off: int, n: int): int {
 hash_str(s: []i8): int {
     h: int = 5381;
     for c in s {
-        h = h * 33 + (c as int);
+        h = ((h << 5) + h) + (c as int);
     }
     h;
 }
@@ -996,9 +1006,6 @@ init_runtime() noregion {
     enum_buckets = new EnumBucket[1024](EnumBucket { head: null });
     exn_buckets = new ExnBucket[1024](ExnBucket { head: null });
     intern_buckets = new InternBucket[4096](InternBucket { head: null });
-    for i in 0..4096 {
-        intern_buckets[i].head = null;
-    }
     life_parent = new int[256](0 - 1);
     life_kind = new int[256](0);
     life_depth_frames = new int[256](0);
@@ -1014,13 +1021,12 @@ init_runtime() noregion {
     str_lits = null;
     str_lit_tail = null;
     str_count = 0;
-    clear_sym_tables();
 }
 
 read_file(path: []i8) raises Error: []i8@new {
     fd: int = open_path(path, 0, 0);
     if (fd < 0) { error("cannot open file"); }
-    cap: int = 262144;
+    cap: int = 524288;
     buf: []i8 = new i8[cap](0i8);
     n: int = 0;
     while (true) {
@@ -1413,6 +1419,10 @@ is_type_name(): bool {
     else {
         find_struct_span(source, tok.pos, tok.len) != null || find_enum_span(source, tok.pos, tok.len) != null || find_exn_span(source, tok.pos, tok.len) != null;
     }
+}
+
+is_named_type(name: []i8): bool {
+    find_struct(name) != null || find_enum(name) != null || find_exn(name) != null;
 }
 
 starts_type(): bool {
@@ -1825,6 +1835,7 @@ new_token(kind: TokKind, start: *i8@new, len: int, tokpos: int): *Token@new {
 }
 
 ident_kind(s: []i8, off: int, n: int): TokKind {
+    if (n < 2 || n == 7 || n > 9) { return TokKind.Ident; }
     if (n == 2) {
         if (s[off + 0] == 'i') {
             if (s[off + 1] == 'f') { return TokKind.If; }
@@ -1987,7 +1998,7 @@ punct_kind(c: i8) raises Error: TokKind {
     TokKind.Eof;
 }
 
-tokenize() noregion raises Error: *Token@new {
+tokenize() raises Error: *Token@new {
     head: *Token = new Token {
         kind: TokKind.Eof,
         val: 0,
@@ -2009,6 +2020,13 @@ tokenize() noregion raises Error: *Token@new {
         c = source[pos];
         if (c == ' ' || c == '\n' || c == '\t' || c == '\r') {
             pos = pos + 1;
+            more: int = 1;
+            while (pos < source_len && more != 0) {
+                c = source[pos];
+                if (c == ' ' || c == '\n' || c == '\t' || c == '\r') {
+                    pos = pos + 1;
+                } else { more = 0; }
+            }
         } else if (c == '/' && source[pos + 1] == '/') {
             pos = pos + 2;
             skip_line_comment();
@@ -2066,7 +2084,7 @@ tokenize() noregion raises Error: *Token@new {
         } else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
             s = &source[pos];
             n = scan_ident_len();
-            t = new_token(ident_kind(source, pos - n, n), intern(source, pos - n, n), n, pos - n);
+            t = new_token(ident_kind(source, pos - n, n), s, n, pos - n);
             cur.next = t;
             cur = t;
         } else if (c == '=' && source[pos + 1] == '=') {
@@ -2142,9 +2160,7 @@ cur_tokstr() noregion: []i8@new {
 }
 
 intern(s: []i8, off: int, n: int) noregion: []i8@new {
-    b: int = hash_n(s, off, n);
-    if (b < 0) { b = 0 - b; }
-    b = b & 4095;
+    b: int = hash_n(s, off, n) & 4095;
     e: ?*InternEnt = intern_buckets[b].head;
     while (e != null) {
         if (e.n == n) {
@@ -2311,12 +2327,10 @@ find_global(name: []i8): ?*Obj {
 }
 
 find_local(name: []i8): ?*Obj {
-    o: ?*Obj = locals;
+    o: ?*Obj = scope_locals;
     while (o != null) {
-        if (o.scope_depth <= scope_depth) {
-            if (streq(o.name, name)) { return o; }
-        }
-        o = o.next;
+        if (streq(o.name, name)) { return o; }
+        o = o.hash_next;
     }
     null;
 }
@@ -2332,6 +2346,15 @@ enter_scope() { scope_depth = scope_depth + 1; }
 leave_scope() raises Error {
     if (scope_depth <= 0) { error("internal: leave_scope"); }
     scope_depth = scope_depth - 1;
+    o: ?*Obj = scope_locals;
+    while (o != null) {
+        if (o.scope_depth <= scope_depth) {
+            scope_locals = o;
+            return;
+        }
+        o = o.hash_next;
+    }
+    scope_locals = null;
 }
 
 new_obj(name: []i8@new, is_local: int) noregion: *Obj@new {
@@ -2365,6 +2388,8 @@ new_obj(name: []i8@new, is_local: int) noregion: *Obj@new {
         else { o.storage_life = region_depth + 1; }
         o.next = locals;
         locals = o;
+        o.hash_next = scope_locals;
+        scope_locals = o;
     } else {
         o.next = globals;
         globals = o;
@@ -3659,7 +3684,7 @@ parse_primary() noregion raises Error: *Expr@new {
     n: *Expr;
     if (tok.kind == TokKind.New) {
         tok = tok.next;
-        if (is_type_name() && (tok.next).kind == TokKind.Dot) {
+        if ((tok.next).kind == TokKind.Dot && is_type_name()) {
             ety: *Type = parse_type();
             if (!is_enum_ty(ety)) { error("new Enum.Variant requires an enum type"); }
             skip(TokKind.Dot);
@@ -3769,7 +3794,8 @@ parse_primary() noregion raises Error: *Expr@new {
     if (tok.kind == TokKind.Ident) {
         name: []i8 = cur_tokstr();
         browse_note();
-        if (is_type_name() && (tok.next).kind == TokKind.Dot) {
+        nk: TokKind = (tok.next).kind;
+        if (nk == TokKind.Dot && is_named_type(name)) {
             ety: *Type = parse_type();
             if (!is_enum_ty(ety)) { error("variant construction requires an enum type"); }
             skip(TokKind.Dot);
@@ -3796,7 +3822,7 @@ parse_primary() noregion raises Error: *Expr@new {
             vl.toklen = vlen;
             return vl;
         }
-        if (is_type_name() && (tok.next).kind == TokKind.LBrace) {
+        if (nk == TokKind.LBrace && is_named_type(name)) {
             sty: *Type = parse_type();
             if (!is_struct_ty(sty)) { error("struct literal requires a struct type"); }
             return new_struct_lit(parse_struct_field_inits(sty), sty);
@@ -4555,6 +4581,7 @@ type_block_expr(p: *Expr@new, body: ?*Stmt) noregion raises Error {
 add_type_expr(p: *Expr@new) noregion raises Error {
     match p.kind {
         Var q -> {
+            if (count_var_use != 0) { mark_var_use(q.var); }
             p.ty = var_view_ty(q.var);
             return;
         }
@@ -4652,7 +4679,15 @@ add_type_expr(p: *Expr@new) noregion raises Error {
             return;
         }
         Assign q -> {
-            add_type(q.lhs);
+            match q.lhs.kind {
+                Var _p -> {
+                    saveu: int = count_var_use;
+                    count_var_use = 0;
+                    add_type(q.lhs);
+                    count_var_use = saveu;
+                }
+                _ -> { add_type(q.lhs); }
+            }
             add_type(q.rhs);
             lt: ?*Type = null;
             storage: ?*Type = q.lhs.ty;
@@ -4785,6 +4820,7 @@ add_type_expr(p: *Expr@new) noregion raises Error {
             fnu: *Function = fno;
             check_call_lifetimes(fnu, q.args);
             p.kind = ExprKind.Funcall { funcname: q.funcname, args: q.args, fn: fnu };
+            add_callee(fnu);
             if (fnu.return_ty != null) {
                 p.ty = fnu.return_ty;
             } else { p.ty = ty_int; }
@@ -5433,12 +5469,14 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error: *Function@
         bound_ret_need_new: 0,
         bound_ret_param: null,
         bound_calls: null,
+        callees: null,
         browse_id: browse_fresh(),
         browse_pos: browse_tok_pos,
         browse_file: browse_tok_file,
         browse_len: browse_tok_len
     };
     locals = null;
+    scope_locals = null;
     scope_depth = 0;
     region_depth = 0;
     narrow_top = null;
@@ -5958,167 +5996,25 @@ check_noreturn_functions() raises Error {
     }
 }
 
-mark_calls_field_inits(inits: ?*FieldInit) {
-    a: ?*FieldInit = inits;
-    while (a != null) {
-        mark_calls_expr(a.lhs);
-        a = a.next;
-    }
+mark_var_use(var: ?*Obj) {
+    if (var != null) { var.used = 1; }
 }
 
-mark_calls_expr(n: ?*Expr) {
-    if (n == null) { return; }
-    match n.kind {
-        Num _p -> { return; }
-        Null -> { return; }
-        Var _p -> { return; }
-        Binary k -> {
-            mark_calls_expr(k.lhs);
-            mark_calls_expr(k.rhs);
-            return;
-        }
-        Assign k -> {
-            mark_calls_expr(k.lhs);
-            mark_calls_expr(k.rhs);
-            return;
-        }
-        Addr k -> { mark_calls_expr(k.lhs); return; }
-        Deref k -> { mark_calls_expr(k.lhs); return; }
-        Index k -> { mark_calls_expr(k.lhs); mark_calls_expr(k.idx); return; }
-        Not k -> { mark_calls_expr(k.lhs); return; }
-        Neg k -> { mark_calls_expr(k.lhs); return; }
-        BitNot k -> { mark_calls_expr(k.lhs); return; }
-        LogAnd k -> {
-            mark_calls_expr(k.lhs);
-            mark_calls_expr(k.rhs);
-            return;
-        }
-        LogOr k -> {
-            mark_calls_expr(k.lhs);
-            mark_calls_expr(k.rhs);
-            return;
-        }
-        OrElse k -> {
-            mark_calls_expr(k.lhs);
-            mark_calls_expr(k.rhs);
-            return;
-        }
-        Funcall k -> {
-            callee: ?*Function = k.fn;
-            if (callee != null) { mark_reachable(callee); }
-            a: ?*Expr = k.args;
-            while (a != null) {
-                mark_calls_expr(a);
-                a = a.next;
-            }
-            return;
-        }
-        MemberAccess k -> { mark_calls_expr(k.lhs); return; }
-        As k -> { mark_calls_expr(k.lhs); return; }
-        Trunc k -> { mark_calls_expr(k.lhs); return; }
-        New k -> {
-            mark_calls_expr(k.lhs);
-            mark_calls_expr(k.fill);
-            mark_calls_field_inits(k.inits);
-            return;
-        }
-        StructLit k -> {
-            mark_calls_field_inits(k.inits);
-            return;
-        }
-        VariantLit k -> {
-            mark_calls_field_inits(k.inits);
-            return;
-        }
-        If k -> {
-            mark_calls_expr(k.cond);
-            mark_calls_expr(k.then);
-            mark_calls_expr(k.els);
-            return;
-        }
-        Match k -> {
-            mark_calls_expr(k.cond);
-            arm: ?*MatchArm = k.arms;
-            while (arm != null) {
-                mark_calls_stmt(arm.body);
-                arm = arm.next;
-            }
-            return;
-        }
-        Block k -> {
-            bs: ?*Stmt = k.body;
-            while (bs != null) {
-                mark_calls_stmt(bs);
-                bs = bs.next;
-            }
-            return;
-        }
-    }
-}
-
-mark_calls_stmt(n: ?*Stmt) {
-    if (n == null) { return; }
-    match n.kind {
-        Return k -> { mark_calls_expr(k.lhs); return; }
-        ExprStmt k -> { mark_calls_expr(k.lhs); return; }
-        Block k -> {
-            s: ?*Stmt = k.body;
-            while (s != null) {
-                mark_calls_stmt(s);
-                s = s.next;
-            }
-            return;
-        }
-        If k -> {
-            mark_calls_expr(k.cond);
-            mark_calls_stmt(k.then);
-            mark_calls_stmt(k.els);
-            return;
-        }
-        While k -> {
-            mark_calls_expr(k.cond);
-            mark_calls_stmt(k.body);
-            return;
-        }
-        For k -> {
-            mark_calls_expr(k.iter);
-            mark_calls_expr(k.hi);
-            mark_calls_stmt(k.body);
-            return;
-        }
-        Match k -> {
-            mark_calls_expr(k.cond);
-            arm: ?*MatchArm = k.arms;
-            while (arm != null) {
-                mark_calls_stmt(arm.body);
-                arm = arm.next;
-            }
-            return;
-        }
-        Raise k -> {
-            mark_calls_field_inits(k.inits);
-            return;
-        }
-        Try k -> {
-            mark_calls_stmt(k.body);
-            arm2: ?*CatchArm = k.arms;
-            while (arm2 != null) {
-                mark_calls_stmt(arm2.body);
-                arm2 = arm2.next;
-            }
-            return;
-        }
-        Region k -> {
-            mark_calls_stmt(k.body);
-            return;
-        }
-    }
+add_callee(callee: *Function@immortal) noregion {
+    fn: ?*Function = current_fn;
+    if (fn == null) { return; }
+    fu: *Function = fn;
+    fu.callees = new CallEdge { callee: callee, next: fu.callees };
 }
 
 mark_reachable(fn: *Function) {
     if (fn.used != 0) { return; }
     fn.used = 1;
-    mark_calls_stmt(fn.body);
+    e: ?*CallEdge = fn.callees;
+    while (e != null) {
+        mark_reachable(e.callee);
+        e = e.next;
+    }
 }
 
 check_unused_functions() {
@@ -6137,179 +6033,12 @@ check_unused_functions() {
     }
 }
 
-mark_var_use(var: ?*Obj) {
-    if (var != null) { var.used = 1; }
-}
-
-mark_uses_field_inits(inits: ?*FieldInit) {
-    a: ?*FieldInit = inits;
-    while (a != null) {
-        mark_uses_expr(a.lhs);
-        a = a.next;
-    }
-}
-
-mark_uses_expr(n: ?*Expr) {
-    if (n == null) { return; }
-    match n.kind {
-        Num _p -> { return; }
-        Null -> { return; }
-        Var k -> { mark_var_use(k.var); return; }
-        Binary k -> {
-            mark_uses_expr(k.lhs);
-            mark_uses_expr(k.rhs);
-            return;
-        }
-        Assign k -> {
-            mark_uses_expr(k.rhs);
-            match k.lhs.kind {
-                Var _p -> { return; }
-                _ -> { mark_uses_expr(k.lhs); return; }
-            }
-        }
-        Addr k -> { mark_uses_expr(k.lhs); return; }
-        Deref k -> { mark_uses_expr(k.lhs); return; }
-        Index k -> { mark_uses_expr(k.lhs); mark_uses_expr(k.idx); return; }
-        Not k -> { mark_uses_expr(k.lhs); return; }
-        Neg k -> { mark_uses_expr(k.lhs); return; }
-        BitNot k -> { mark_uses_expr(k.lhs); return; }
-        LogAnd k -> {
-            mark_uses_expr(k.lhs);
-            mark_uses_expr(k.rhs);
-            return;
-        }
-        LogOr k -> {
-            mark_uses_expr(k.lhs);
-            mark_uses_expr(k.rhs);
-            return;
-        }
-        OrElse k -> {
-            mark_uses_expr(k.lhs);
-            mark_uses_expr(k.rhs);
-            return;
-        }
-        Funcall k -> {
-            a: ?*Expr = k.args;
-            while (a != null) {
-                mark_uses_expr(a);
-                a = a.next;
-            }
-            return;
-        }
-        MemberAccess k -> { mark_uses_expr(k.lhs); return; }
-        As k -> { mark_uses_expr(k.lhs); return; }
-        Trunc k -> { mark_uses_expr(k.lhs); return; }
-        New k -> {
-            mark_uses_expr(k.lhs);
-            mark_uses_expr(k.fill);
-            mark_uses_field_inits(k.inits);
-            return;
-        }
-        StructLit k -> {
-            mark_uses_field_inits(k.inits);
-            return;
-        }
-        VariantLit k -> {
-            mark_uses_field_inits(k.inits);
-            return;
-        }
-        If k -> {
-            mark_uses_expr(k.cond);
-            mark_uses_expr(k.then);
-            mark_uses_expr(k.els);
-            return;
-        }
-        Match k -> {
-            mark_uses_expr(k.cond);
-            arm: ?*MatchArm = k.arms;
-            while (arm != null) {
-                mark_uses_stmt(arm.body);
-                arm = arm.next;
-            }
-            return;
-        }
-        Block k -> {
-            bs: ?*Stmt = k.body;
-            while (bs != null) {
-                mark_uses_stmt(bs);
-                bs = bs.next;
-            }
-            return;
-        }
-    }
-}
-
-mark_uses_stmt(n: ?*Stmt) {
-    if (n == null) { return; }
-    match n.kind {
-        Return k -> { mark_uses_expr(k.lhs); return; }
-        ExprStmt k -> { mark_uses_expr(k.lhs); return; }
-        Block k -> {
-            s: ?*Stmt = k.body;
-            while (s != null) {
-                mark_uses_stmt(s);
-                s = s.next;
-            }
-            return;
-        }
-        If k -> {
-            mark_uses_expr(k.cond);
-            mark_uses_stmt(k.then);
-            mark_uses_stmt(k.els);
-            return;
-        }
-        While k -> {
-            mark_uses_expr(k.cond);
-            mark_uses_stmt(k.body);
-            return;
-        }
-        For k -> {
-            mark_uses_expr(k.iter);
-            mark_uses_expr(k.hi);
-            mark_uses_stmt(k.body);
-            return;
-        }
-        Match k -> {
-            mark_uses_expr(k.cond);
-            arm: ?*MatchArm = k.arms;
-            while (arm != null) {
-                mark_uses_stmt(arm.body);
-                arm = arm.next;
-            }
-            return;
-        }
-        Raise k -> {
-            mark_uses_field_inits(k.inits);
-            return;
-        }
-        Try k -> {
-            mark_uses_stmt(k.body);
-            arm2: ?*CatchArm = k.arms;
-            while (arm2 != null) {
-                mark_uses_stmt(arm2.body);
-                arm2 = arm2.next;
-            }
-            return;
-        }
-        Region k -> {
-            mark_uses_stmt(k.body);
-            return;
-        }
-    }
-}
-
 check_unused_locals() {
     /* Names starting with `_` or `.` are ignored. Bare assignment does not count as a use. */
     fn: ?*Function = functions;
     while (fn != null) {
         if (fn.used != 0 && fn.is_extern == 0) {
             o: ?*Obj = fn.locals;
-            while (o != null) {
-                o.used = 0;
-                o = o.next;
-            }
-            mark_uses_stmt(fn.body);
-            o = fn.locals;
             while (o != null) {
                 if (o.used == 0 && !ignore_unused_local_name(o.name)) {
                     warn_unused_local(fn.name, o.name);
@@ -7615,9 +7344,82 @@ emit_scale_offset(esz: int) noregion {
     }
 }
 
+index_atom(n: *Expr): bool {
+    match n.kind {
+        Num k -> { k.str_label == 0; }
+        Var _p -> { true; }
+        _ -> { false; }
+    }
+}
+
+index_simple(n: *Expr): bool {
+    match n.kind {
+        Num k -> { k.str_label == 0; }
+        Var _p -> { true; }
+        Binary k -> {
+            match k.op {
+                Add -> { index_atom(k.lhs) && index_atom(k.rhs); }
+                _ -> { false; }
+            }
+        }
+        _ -> { false; }
+    }
+}
+
+gen_simple_idx(n: *Expr) noregion raises Error {
+    match n.kind {
+        Num k -> { cg_mov_imm(k.val, 0); return; }
+        Var k -> {
+            vo: ?*Obj = k.var;
+            if (vo == null) { error("missing var"); }
+            vu: *Obj = vo;
+            emit_load_var(vu, vu.ty or error("missing type"));
+            return;
+        }
+        Binary k -> {
+            kn: int = index_idx_num(k.rhs);
+            if (kn >= 0) {
+                gen_simple_idx(k.lhs);
+                if (kn != 0) { cg_alu_imm(0, kn, 0); }
+                return;
+            }
+            knl: int = index_idx_num(k.lhs);
+            if (knl >= 0) {
+                gen_simple_idx(k.rhs);
+                if (knl != 0) { cg_alu_imm(0, knl, 0); }
+                return;
+            }
+            gen_simple_idx(k.lhs);
+            cg_mov_rr(0, 1);
+            gen_simple_idx(k.rhs);
+            cg_alu_rr(1, 1, 0);
+            return;
+        }
+        _ -> { error("internal: gen_simple_idx"); }
+    }
+}
+
 gen_index_addr(lhs: *Expr, idx: *Expr) noregion raises Error {
     raw: *Type = lhs.ty or error("missing type");
     esz: int = type_size(type_base(raw));
+    lv: ?*Obj = index_lhs_var(lhs);
+    if (lv != null && index_simple(idx)) {
+        gen_simple_idx(idx);
+        cg_mov_rr(0, 1);
+        lvo: *Obj = lv;
+        lty: *Type = lvo.ty or error("missing type");
+        emit_load_var(lvo, lty);
+        cg_mov_rr(0, 6);
+        if (is_zptr(raw)) {
+            emit_scale_offset(esz);
+            return;
+        }
+        if (!is_slice(raw)) { error("index requires []T or [z]T"); }
+        cg_mov_mr(6, 0 - 8, 2);
+        emit_check_idx();
+        emit_scale_offset(esz);
+        return;
+    }
     cg_push(3);
     if (is_zptr(raw)) {
         gen_expr(lhs);
@@ -8897,11 +8699,9 @@ profile_mark(label: []i8) {
     if (do_profile == 0) { return; }
     t: int = mono_ns();
     c: int = rdtsc();
-    f: int = profile_faults();
-    profile_print(label, t - profile_prev, c - profile_cyc_prev, f - profile_flt_prev);
+    profile_print(label, t - profile_prev, c - profile_cyc_prev, 0);
     profile_prev = t;
     profile_cyc_prev = c;
-    profile_flt_prev = f;
 }
 
 profile_end() {

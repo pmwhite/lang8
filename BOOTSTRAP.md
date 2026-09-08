@@ -24,8 +24,8 @@ Typical evolution for a breaking language change:
 
 1. Implement the feature in `src1/` without relying on it elsewhere in that tree.
 2. Use the stage-1 tool to develop `src2/`, which may exercise the feature.
-3. After the stage-2 fixpoint passes, promote `src2/` over `src1/` and promote the
-   deterministic stage-3 executable to `bootstrap`.
+3. After the stage-2 fixpoint passes (`l8c3 == l8c4`), promote `src2/` over `src1/`
+   and promote that executable to `bootstrap`.
 
 ## Unified command line
 
@@ -47,7 +47,7 @@ assembly and ET_REL are never serialized or reparsed.
 |---------|--------------|
 | `bootstrap` | Copy the saved bootstrap executable to `l8c0` |
 | `examples` | Build and run examples directly with `l8c0` |
-| `selfhost` | Directly build `l8c1` from `src1/`, build `l8c2/l8c3` from `src2/`, require the `l8c2 == l8c3` executable fixpoint, run examples, and print compiler phase timings |
+| `selfhost` | Directly build `l8c1` from `src1/`, build `l8c2/l8c3/l8c4` from `src2/`, require the `l8c3 == l8c4` executable fixpoint, run examples, and print compiler phase timings |
 | `promote-bin1` | Promote the stage-1 executable to `bootstrap` |
 | `promote-bin2` | Promote the stage-2 fixpoint executable to `bootstrap` |
 | `promote-source` | Replace `src1/` with `src2/` without changing the bootstrap |

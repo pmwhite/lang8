@@ -62,6 +62,10 @@ print_summary() {
 
 die() { echo "error: $*" >&2; exit 1; }
 
+verify_same() {
+  cmp -s "$1" "$2" || die "$1 and $2 differ (src2 is not at fixpoint)"
+}
+
 ensure_build_dir() {
   mkdir -p "$BUILD"
 }
@@ -218,7 +222,7 @@ require_bootstrap() {
 }
 
 do_clean() {
-  rm -f l8c0 l8c1 l8c2 l8c3 l8
+  rm -f l8c0 l8c1 l8c2 l8c3 l8c4 l8 l8new l8new2
   rm -f examples/hello examples/fib examples/logic examples/struct examples/string examples/i8 examples/bool examples/enum examples/forward examples/null examples/newarr examples/narrow examples/nestsum examples/noreturn examples/exc
   rm -f examples/*.s
   rm -rf "$BUILD"
@@ -256,7 +260,8 @@ do_selfhost() {
   step 'stage1 direct (l8c0 → src1)' ./l8c0 build src1/main.l8 -o l8c1
   step 'stage2 direct (l8c1 → src2)' ./l8c1 build src2/main.l8 -o l8c2
   step 'stage3 direct (l8c2 → src2)' ./l8c2 build src2/main.l8 -o l8c3
-  step 'verify stage2 exe == stage3 exe' cmp -s l8c2 l8c3
+  step 'stage4 direct (l8c3 → src2)' ./l8c3 build src2/main.l8 -o l8c4
+  step 'verify stage3 exe == stage4 exe' verify_same l8c3 l8c4
 
   step 'examples [l8c3]' run_examples_selfhost l8c3
   step 'browse [l8c3]' check_browse l8c3
@@ -339,7 +344,7 @@ Commands:
   all             Install bootstrap, examples, two-stage self-host (default)
   bootstrap       Copy the saved bootstrap executable → l8c0
   examples        Run example programs via l8c0
-  selfhost        direct src1 → l8c1; src2 → l8c2; fixpoint l8c2==l8c3; examples; browse; phases
+  selfhost        direct src1 → l8c1; src2 → l8c2/l8c3/l8c4; fixpoint l8c3==l8c4; examples; browse; phases
   promote-bin1    Copy the stage-1 executable → bootstrap
   promote-bin2    Copy the stage-2 fixpoint executable → bootstrap
   promote-source  Replace src1/ with src2/ (no bootstrap change)
