@@ -1,0 +1,1747 @@
+// Emit x86-64 from the typed AST.
+new_label(): int {
+    l: int = label_id;
+    label_id = label_id + 1;
+    l;
+}
+
+load_mem(ty: *Type) noregion {
+    if (is_byte_ty(ty)) {
+        cg_movzb_mr(0, 0, 0);
+    } else {
+        cg_mov_mr(0, 0, 0);
+    }
+}
+
+store_mem(ty: *Type) noregion {
+    if (is_byte_ty(ty)) {
+        cg_movb_rm(0, 7, 0);
+    } else {
+        cg_mov_rm(0, 7, 0);
+    }
+}
+
+emit_memcpy(sz: int) noregion {
+    if (sz <= 0) {
+        sz = 8;
+    }
+    i: int = 0;
+    while (i + 8 <= sz) {
+        cg_mov_mr(6, i, 0);
+        cg_mov_rm(0, 7, i);
+        i = i + 8;
+    }
+    while (i < sz) {
+        cg_movzb_mr(6, i, 0);
+        cg_movb_rm(0, 7, i);
+        i = i + 1;
+    }
+}
+
+/* Store value in %rax into (%rdi). By-ref aggregates: %rax is a source pointer. */
+store_value(ty: *Type) noregion {
+    if (passes_by_ref(ty)) {
+        cg_mov_rr(0, 6);
+        emit_memcpy(type_size(ty));
+    } else {
+        store_mem(ty);
+    }
+}
+
+/* Fill in %r8, dest in %rdi. Struct/enum/exn literals are addresses. */
+store_array_fill(fill: *Expr, base: *Type) noregion {
+    if (is_struct_ty(base) || is_enum_ty(base) || is_exn_ty(base)) {
+        lit: int = 0;
+        match fill.kind {
+            StructLit _ -> {
+                lit = 1;
+            }
+            VariantLit _ -> {
+                lit = 1;
+            }
+            _ -> { }
+        }
+        if (lit != 0 || passes_by_ref(base)) {
+            cg_mov_rr(8, 6);
+            emit_memcpy(type_size(base));
+            return;
+        }
+    }
+    cg_mov_rr(8, 0);
+    store_mem(base);
+}
+
+/*
+ * Object base in %rbx (absolute). Eval RHS first so a large aggregate stack
+ * temp from gen_expr cannot bury a pushed destination address.
+ * base_off is added to each field offset (0 for structs, 8 for enum payloads).
+ */
+gen_field_inits(inits: ?*FieldInit, base_off: int) noregion raises Error {
+    init: ?*FieldInit = inits;
+    while (init != null) {
+        lhs: ?*Expr = init.lhs;
+        if (lhs != null) {
+            mem: *Member = init.member or error("internal");
+            mty: *Type = mem.ty;
+            gen_expr(lhs);
+            cg_mov_rr(3, 7);
+            off: int = base_off + mem.offset;
+            if (off != 0) {
+                cg_alu_imm(0, off, 7);
+            }
+            store_value(mty);
+        }
+        init = init.next;
+    }
+}
+
+emit_exit1() noregion {
+    cg_mov_imm(1, 7);
+    cg_call("exit");
+}
+
+/* Heap is 64MiB. n * esz + 8 must not wrap; negative n is huge unsigned. */
+emit_check_new_count(nreg: int, esz: int) noregion {
+    max_n: int = 67108856 / esz;
+    if (max_n <= 0) {
+        max_n = 0;
+    }
+    cg_alu_imm(7, max_n, nreg);
+    cg_jump_id(7, oob_lab);
+}
+
+emit_malloc() noregion {
+    cg_call("malloc");
+    cg_alu_imm(7, 0, 0);
+    cg_jump_id(4, oob_lab);
+}
+
+emit_exc_malloc() noregion {
+    cg_call("l8_exc_malloc");
+    cg_alu_imm(7, 0, 0);
+    cg_jump_id(4, oob_lab);
+}
+
+emit_check_idx() noregion {
+    cg_alu_rr(57, 2, 1);
+    cg_jump_id(3, oob_lab);
+}
+
+/* Args already in rdi=dst, rsi=di, rdx=src, rcx=si, r8=n. Check ends, then
+ * call runtime memcpy(dst+di, src+si, n). ja: di+n > len is OOB.
+ * di/si are also compared to len first so a negative index cannot wrap. */
+emit_memcpy_call() noregion {
+    cg_mov_mr(7, 0 - 8, 0);
+    cg_alu_rr(57, 0, 6);
+    cg_jump_id(7, oob_lab);
+    cg_mov_rr(6, 10);
+    cg_alu_rr(1, 8, 10);
+    cg_alu_rr(57, 0, 10);
+    cg_jump_id(7, oob_lab);
+    cg_mov_mr(2, 0 - 8, 0);
+    cg_alu_rr(57, 0, 1);
+    cg_jump_id(7, oob_lab);
+    cg_mov_rr(1, 10);
+    cg_alu_rr(1, 8, 10);
+    cg_alu_rr(57, 0, 10);
+    cg_jump_id(7, oob_lab);
+    cg_alu_rr(1, 6, 7);
+    cg_alu_rr(1, 1, 2);
+    cg_mov_rr(2, 6);
+    cg_mov_rr(8, 2);
+    cg_call("l8_memcpy");
+}
+
+/* Args already in registers. []i8 uses the length prefix; *i8 is one byte. */
+emit_io_call(name: []i8@immortal, args: ?*Expr) noregion raises Error {
+    a0: ?*Expr = args;
+    if (a0 == null) {
+        error("missing I/O args");
+    }
+    a1: ?*Expr = a0.next;
+    if (a1 == null) {
+        error("missing I/O args");
+    }
+    t1: ?*Type = decay(a1.ty);
+    a2: ?*Expr = a1.next;
+    if (t1 != null && is_pointer(t1)) {
+        cg_mov_imm(1, 2);
+        cg_call(name);
+        return;
+    }
+    if (a2 == null) {
+        cg_mov_mr(6, 0 - 8, 2);
+        cg_call(name);
+        return;
+    }
+    if (a2.next == null) {
+        cg_mov_mr(6, 0 - 8, 0);
+        cg_alu_rr(57, 0, 2);
+        cg_jump_id(7, oob_lab);
+        cg_call(name);
+        return;
+    }
+    cg_mov_mr(6, 0 - 8, 0);
+    cg_alu_rr(57, 0, 2);
+    cg_jump_id(7, oob_lab);
+    cg_mov_rr(2, 10);
+    cg_alu_rr(1, 1, 10);
+    cg_alu_rr(57, 0, 10);
+    cg_jump_id(7, oob_lab);
+    cg_alu_rr(1, 2, 6);
+    cg_mov_rr(1, 2);
+    cg_call(name);
+}
+
+emit_scale_offset(esz: int) noregion {
+    if (esz == 1) {
+        cg_alu_rr(1, 1, 6);
+        cg_mov_rr(6, 0);
+    } else {
+        cg_mov_rr(1, 0);
+        if (esz != 0) {
+            cg_imul_imm(esz, 0);
+        }
+        cg_alu_rr(1, 6, 0);
+    }
+}
+
+index_atom(n: *Expr): bool {
+    match n.kind {
+        Num k -> {
+            k.str_label == 0;
+        }
+        Var _p -> {
+            true;
+        }
+        _ -> {
+            false;
+        }
+    }
+}
+
+index_simple(n: *Expr): bool {
+    match n.kind {
+        Num k -> {
+            k.str_label == 0;
+        }
+        Var _p -> {
+            true;
+        }
+        Binary k -> {
+            match k.op {
+                Add -> {
+                    index_atom(k.lhs) && index_atom(k.rhs);
+                }
+                _ -> {
+                    false;
+                }
+            }
+        }
+        _ -> {
+            false;
+        }
+    }
+}
+
+gen_simple_idx(n: *Expr) noregion raises Error {
+    match n.kind {
+        Num k -> {
+            cg_mov_imm(k.val, 0);
+            return;
+        }
+        Var k -> {
+            vo: ?*Obj = k.var;
+            if (vo == null) {
+                error("missing var");
+            }
+            vu: *Obj = vo;
+            emit_load_var(vu, vu.ty or error("missing type"));
+            return;
+        }
+        Binary k -> {
+            kn: int = index_idx_num(k.rhs);
+            if (kn >= 0) {
+                gen_simple_idx(k.lhs);
+                if (kn != 0) {
+                    cg_alu_imm(0, kn, 0);
+                }
+                return;
+            }
+            knl: int = index_idx_num(k.lhs);
+            if (knl >= 0) {
+                gen_simple_idx(k.rhs);
+                if (knl != 0) {
+                    cg_alu_imm(0, knl, 0);
+                }
+                return;
+            }
+            gen_simple_idx(k.lhs);
+            cg_mov_rr(0, 1);
+            gen_simple_idx(k.rhs);
+            cg_alu_rr(1, 1, 0);
+            return;
+        }
+        _ -> {
+            error("internal: gen_simple_idx");
+        }
+    }
+}
+
+gen_index_addr(lhs: *Expr, idx: *Expr) noregion raises Error {
+    raw: *Type = lhs.ty or error("missing type");
+    esz: int = type_size(type_base(raw));
+    lv: ?*Obj = index_lhs_var(lhs);
+    if (lv != null && index_simple(idx)) {
+        gen_simple_idx(idx);
+        cg_mov_rr(0, 1);
+        lvo: *Obj = lv;
+        lty: *Type = lvo.ty or error("missing type");
+        emit_load_var(lvo, lty);
+        cg_mov_rr(0, 6);
+        if (is_zptr(raw)) {
+            emit_scale_offset(esz);
+            return;
+        }
+        if (!is_slice(raw)) {
+            error("index requires []T or [z]T");
+        }
+        cg_mov_mr(6, 0 - 8, 2);
+        emit_check_idx();
+        emit_scale_offset(esz);
+        return;
+    }
+    cg_push(3);
+    if (is_zptr(raw)) {
+        gen_expr(lhs);
+        cg_mov_rr(0, 6);
+        cg_push(6);
+        gen_expr(idx);
+        cg_mov_rr(0, 1);
+        cg_pop(6);
+    } else {
+        if (!is_slice(raw)) {
+            error("index requires []T or [z]T");
+        }
+        gen_expr(lhs);
+        cg_mov_rr(0, 6);
+        cg_mov_mr(6, 0 - 8, 2);
+        cg_push(6);
+        cg_push(2);
+        gen_expr(idx);
+        cg_mov_rr(0, 1);
+        cg_pop(2);
+        cg_pop(6);
+        emit_check_idx();
+    }
+    emit_scale_offset(esz);
+    cg_pop(3);
+}
+
+gen_struct_inits(inits: ?*FieldInit) noregion raises Error {
+    gen_field_inits(inits, 0);
+}
+
+gen_variant_inits(inits: ?*FieldInit) noregion raises Error {
+    gen_field_inits(inits, 8);
+}
+
+gen_addr(n: *Expr) noregion raises Error {
+    match n.kind {
+        Var k -> {
+            var: ?*Obj = k.var;
+            if (var == null) {
+                error("missing var");
+            }
+            vo: *Obj = var;
+            if (vo.is_local != 0) {
+                cg_lea_mr(5, vo.offset, 0);
+            } else {
+                cg_lea_rip(vo.name, 0, 0);
+            }
+            return;
+        }
+        Deref k -> {
+            gen_expr(k.lhs);
+            return;
+        }
+        Index k -> {
+            gen_index_addr(k.lhs, k.idx);
+            return;
+        }
+        MemberAccess k -> {
+            t: ?*Type = decay(k.lhs.ty);
+            if (t != null && is_pointer(t) && (is_struct_ty(type_base(t)) || is_exn_ty(type_base(t)))) {
+                gen_expr(k.lhs);
+            } else {
+                gen_addr(k.lhs);
+            }
+            mem: *Member = k.member or error("internal");
+            if (mem.offset != 0) {
+                cg_alu_imm(0, mem.offset, 0);
+            }
+            return;
+        }
+        _ -> {
+            error("not an lvalue");
+        }
+    }
+}
+
+/* Scalar load of a variable into %rax without lea+deref. */
+emit_load_var(vo: *Obj, ty: *Type) noregion {
+    if (vo.is_local != 0) {
+        if (is_byte_ty(ty)) {
+            cg_movzb_mr(5, vo.offset, 0);
+        } else {
+            cg_mov_mr(5, vo.offset, 0);
+        }
+    } else {
+        cg_mov_rip_r(vo.name, 0, 0);
+    }
+}
+
+/* Scalar store of %rax into a variable. */
+emit_store_var(vo: *Obj, ty: *Type) noregion {
+    if (vo.is_local != 0) {
+        if (is_byte_ty(ty)) {
+            cg_movb_rm(0, 5, vo.offset);
+        } else {
+            cg_mov_rm(0, 5, vo.offset);
+        }
+    } else {
+        cg_mov_r_rip(0, vo.name, 0);
+    }
+}
+
+fits_imm32(v: int): bool {
+    lo: int = 0 - 2147483647;
+    lo = lo - 1;
+    hi: int = 2147483647;
+    if (v < lo) {
+        return false;
+    }
+    if (v > hi) {
+        return false;
+    }
+    true;
+}
+
+/* Store an immediate into a scalar variable (no %rax round-trip). */
+emit_store_imm(vo: *Obj, ty: *Type, v: int) noregion {
+    if (vo.is_local != 0) {
+        if (is_byte_ty(ty)) {
+            cg_movb_imm_m(v, 5, vo.offset);
+        } else {
+            cg_movq_imm_m(v, 5, vo.offset);
+        }
+    } else {
+        if (is_byte_ty(ty)) {
+            cg_movb_imm_rip(v, vo.name);
+        } else {
+            cg_movq_imm_rip(v, vo.name);
+        }
+    }
+}
+
+gen_load(n: *Expr) noregion raises Error {
+    ty: *Type = n.ty or error("missing type");
+    if (passes_by_ref(ty)) {
+        gen_addr(n);
+        return;
+    }
+    match n.kind {
+        Var k -> {
+            vo: ?*Obj = k.var;
+            if (vo != null) {
+                emit_load_var(vo, ty);
+                return;
+            }
+        }
+        _ -> { }
+    }
+    gen_addr(n);
+    load_mem(ty);
+}
+
+gen_binop_setup(lhs: *Expr, rhs: *Expr) noregion raises Error {
+    gen_expr(lhs);
+    cg_push(0);
+    gen_expr(rhs);
+    cg_mov_rr(0, 7);
+    cg_pop(0);
+}
+
+/* Immediate integer operand for codegen (numeric literal or null). */
+imm_operand(n: *Expr): int {
+    match n.kind {
+        Num k -> {
+            if (k.str_label != 0) {
+                0;
+            } else {
+                1;
+            }
+        }
+        Null -> {
+            1;
+        }
+        _ -> {
+            0;
+        }
+    }
+}
+
+imm_value(n: *Expr): int {
+    match n.kind {
+        Num k -> {
+            k.val;
+        }
+        Null -> {
+            0;
+        }
+        _ -> {
+            0;
+        }
+    }
+}
+
+gen_cmp_set(setcc: []i8) noregion {
+    cc: int = 4;
+    if (streq(setcc, "setne")) {
+        cc = 5;
+    }
+    if (streq(setcc, "setl")) {
+        cc = 12;
+    }
+    if (streq(setcc, "setge")) {
+        cc = 13;
+    }
+    if (streq(setcc, "setle")) {
+        cc = 14;
+    }
+    if (streq(setcc, "setg")) {
+        cc = 15;
+    }
+    cg_setcc(cc);
+    cg_movzb_al_rax();
+}
+
+gen_cmp(lhs: *Expr, rhs: *Expr, setcc: []i8) noregion raises Error {
+    if (imm_operand(rhs) != 0 && fits_imm32(imm_value(rhs))) {
+        gen_expr(lhs);
+        cg_alu_imm(7, imm_value(rhs), 0);
+        gen_cmp_set(setcc);
+        return;
+    }
+    if (imm_operand(lhs) != 0 && fits_imm32(imm_value(lhs))) {
+        gen_expr(rhs);
+        cg_mov_rr(0, 7);
+        cg_mov_imm(imm_value(lhs), 0);
+        cg_alu_rr(57, 7, 0);
+        gen_cmp_set(setcc);
+        return;
+    }
+    gen_binop_setup(lhs, rhs);
+    cg_alu_rr(57, 7, 0);
+    gen_cmp_set(setcc);
+}
+
+gen_binary(op: BinOp, lhs: *Expr, rhs: *Expr) noregion raises Error {
+    match op {
+        Add -> {
+            if (imm_operand(rhs) != 0 && fits_imm32(imm_value(rhs))) {
+                gen_expr(lhs);
+                v: int = imm_value(rhs);
+                if (v != 0) {
+                    cg_alu_imm(0, v, 0);
+                }
+                return;
+            }
+            if (imm_operand(lhs) != 0 && fits_imm32(imm_value(lhs))) {
+                gen_expr(rhs);
+                v2: int = imm_value(lhs);
+                if (v2 != 0) {
+                    cg_alu_imm(0, v2, 0);
+                }
+                return;
+            }
+            gen_binop_setup(lhs, rhs);
+            cg_alu_rr(1, 7, 0);
+            return;
+        }
+        Sub -> {
+            if (imm_operand(rhs) != 0 && fits_imm32(imm_value(rhs))) {
+                gen_expr(lhs);
+                v3: int = imm_value(rhs);
+                if (v3 != 0) {
+                    cg_alu_imm(5, v3, 0);
+                }
+                return;
+            }
+            gen_binop_setup(lhs, rhs);
+            cg_alu_rr(41, 7, 0);
+            return;
+        }
+        Mul -> {
+            if (imm_operand(rhs) != 0 && fits_imm32(imm_value(rhs))) {
+                gen_expr(lhs);
+                mv: int = imm_value(rhs);
+                if (mv == 0) {
+                    cg_mov_imm(0, 0);
+                    return;
+                }
+                if (mv == 1) {
+                    return;
+                }
+                if (mv == 2) {
+                    cg_alu_rr(1, 0, 0);
+                    return;
+                }
+                cg_imul_imm(mv, 0);
+                return;
+            }
+            if (imm_operand(lhs) != 0 && fits_imm32(imm_value(lhs))) {
+                gen_expr(rhs);
+                mv2: int = imm_value(lhs);
+                if (mv2 == 0) {
+                    cg_mov_imm(0, 0);
+                    return;
+                }
+                if (mv2 == 1) {
+                    return;
+                }
+                if (mv2 == 2) {
+                    cg_alu_rr(1, 0, 0);
+                    return;
+                }
+                cg_imul_imm(mv2, 0);
+                return;
+            }
+            gen_binop_setup(lhs, rhs);
+            cg_imul_rr(7, 0);
+            return;
+        }
+        Div -> {
+            if (imm_operand(rhs) != 0) {
+                gen_expr(lhs);
+                cg_mov_imm(imm_value(rhs), 7);
+                cg_cqo();
+                cg_idiv(7);
+                return;
+            }
+            gen_binop_setup(lhs, rhs);
+            cg_cqo();
+            cg_idiv(7);
+            return;
+        }
+        Mod -> {
+            if (imm_operand(rhs) != 0) {
+                gen_expr(lhs);
+                cg_mov_imm(imm_value(rhs), 7);
+                cg_cqo();
+                cg_idiv(7);
+                cg_mov_rr(2, 0);
+                return;
+            }
+            gen_binop_setup(lhs, rhs);
+            cg_cqo();
+            cg_idiv(7);
+            cg_mov_rr(2, 0);
+            return;
+        }
+        Eq -> {
+            gen_cmp(lhs, rhs, "sete");
+            return;
+        }
+        Ne -> {
+            gen_cmp(lhs, rhs, "setne");
+            return;
+        }
+        Lt -> {
+            gen_cmp(lhs, rhs, "setl");
+            return;
+        }
+        Le -> {
+            gen_cmp(lhs, rhs, "setle");
+            return;
+        }
+        Gt -> {
+            gen_cmp(lhs, rhs, "setg");
+            return;
+        }
+        Ge -> {
+            gen_cmp(lhs, rhs, "setge");
+            return;
+        }
+        And -> {
+            if (imm_operand(rhs) != 0 && fits_imm32(imm_value(rhs))) {
+                gen_expr(lhs);
+                cg_alu_imm(4, imm_value(rhs), 0);
+            } else if (imm_operand(lhs) != 0 && fits_imm32(imm_value(lhs))) {
+                gen_expr(rhs);
+                cg_alu_imm(4, imm_value(lhs), 0);
+            } else {
+                gen_binop_setup(lhs, rhs);
+                cg_alu_rr(33, 7, 0);
+            }
+            return;
+        }
+        Or -> {
+            if (imm_operand(rhs) != 0 && fits_imm32(imm_value(rhs))) {
+                gen_expr(lhs);
+                cg_alu_imm(1, imm_value(rhs), 0);
+            } else if (imm_operand(lhs) != 0 && fits_imm32(imm_value(lhs))) {
+                gen_expr(rhs);
+                cg_alu_imm(1, imm_value(lhs), 0);
+            } else {
+                gen_binop_setup(lhs, rhs);
+                cg_alu_rr(9, 7, 0);
+            }
+            return;
+        }
+        Xor -> {
+            if (imm_operand(rhs) != 0 && fits_imm32(imm_value(rhs))) {
+                gen_expr(lhs);
+                cg_alu_imm(6, imm_value(rhs), 0);
+            } else if (imm_operand(lhs) != 0 && fits_imm32(imm_value(lhs))) {
+                gen_expr(rhs);
+                cg_alu_imm(6, imm_value(lhs), 0);
+            } else {
+                gen_binop_setup(lhs, rhs);
+                cg_alu_rr(49, 7, 0);
+            }
+            return;
+        }
+        Shl -> {
+            if (imm_operand(rhs) != 0) {
+                gen_expr(lhs);
+                cg_shift_imm(4, imm_value(rhs), 0);
+            } else {
+                gen_binop_setup(lhs, rhs);
+                cg_mov_rr(7, 1);
+                cg_shift_cl(4, 0);
+            }
+            return;
+        }
+        Shr -> {
+            if (imm_operand(rhs) != 0) {
+                gen_expr(lhs);
+                cg_shift_imm(7, imm_value(rhs), 0);
+            } else {
+                gen_binop_setup(lhs, rhs);
+                cg_mov_rr(7, 1);
+                cg_shift_cl(7, 0);
+            }
+            return;
+        }
+    }
+}
+
+gen_expr(n: *Expr) noregion raises Error {
+    match n.kind {
+        Num k -> {
+            if (k.str_label != 0) {
+                cg_lea_rip(cg_name_num(".L.str", k.str_label - 1), 8, 0);
+            } else {
+                cg_mov_imm(k.val, 0);
+            }
+            return;
+        }
+        Null -> {
+            cg_mov_imm(0, 0);
+            return;
+        }
+        Var _p -> {
+            gen_load(n);
+            return;
+        }
+        MemberAccess _p -> {
+            gen_load(n);
+            return;
+        }
+        Addr k -> {
+            gen_addr(k.lhs);
+            return;
+        }
+        As k -> {
+            gen_expr(k.lhs);
+            return;
+        }
+        Trunc k -> {
+            gen_expr(k.lhs);
+            return;
+        }
+        New k -> {
+            base: *Type = type_base(n.ty or error("missing type"));
+            esz: int = type_size(base);
+            if (esz <= 0) {
+                esz = 8;
+            }
+            lhs: ?*Expr = k.lhs;
+            if (lhs != null) {
+                fill: ?*Expr = k.fill;
+                if (fill == null) {
+                    error("new T[n] requires an initial value (new T[n](v))");
+                }
+                gen_expr(lhs);
+                cg_push(12);
+                cg_mov_rr(0, 12);
+                emit_check_new_count(12, esz);
+                gen_expr(fill);
+                cg_push(13);
+                cg_mov_rr(0, 13);
+                cg_mov_rr(12, 0);
+                if (esz != 1) {
+                    cg_imul_imm(esz, 0);
+                }
+                cg_alu_imm(0, 8, 0);
+                cg_mov_rr(0, 7);
+                emit_malloc();
+                cg_mov_rm(12, 0, 0);
+                cg_alu_imm(0, 8, 0);
+                cg_push(3);
+                cg_mov_rr(0, 3);
+                agg: int = 0;
+                if (is_struct_ty(base) || is_enum_ty(base) || is_exn_ty(base)) {
+                    agg = 1;
+                }
+                if (esz == 1) {
+                    cg_mov_rr(0, 7);
+                    cg_mov_rr(12, 1);
+                    cg_mov_rr(13, 0);
+                    cg_cld();
+                    cg_rep_stosb();
+                } else {
+                    if (esz == 8) {
+                        cg_mov_rr(0, 7);
+                        cg_mov_rr(12, 1);
+                        if (agg != 0) {
+                            cg_mov_mr(13, 0, 0);
+                        } else {
+                            cg_mov_rr(13, 0);
+                        }
+                        cg_cld();
+                        cg_rep_stosq();
+                    } else {
+                        cg_mov_rr(0, 9);
+                        cg_mov_rr(12, 1);
+                        cg_mov_rr(13, 8);
+                        loop: int = new_label();
+                        done: int = new_label();
+                        cg_label_id(loop);
+                        cg_alu_imm(7, 0, 1);
+                        cg_jump_id(4, done);
+                        cg_mov_rr(9, 7);
+                        store_array_fill(fill, base);
+                        cg_alu_imm(0, esz, 9);
+                        cg_alu_imm(5, 1, 1);
+                        cg_jump_id(0 - 1, loop);
+                        cg_label_id(done);
+                    }
+                }
+                cg_mov_rr(3, 0);
+                cg_pop(3);
+                cg_pop(13);
+                cg_pop(12);
+                return;
+            }
+            cg_mov_imm(esz, 7);
+            emit_malloc();
+            variant: ?*Variant = k.variant;
+            if (variant != null) {
+                cg_push(3);
+                cg_mov_rr(0, 3);
+                cg_mov_imm(k.val, 7);
+                cg_mov_rm(7, 0, 0);
+                gen_variant_inits(k.inits);
+                cg_mov_rr(3, 0);
+                cg_pop(3);
+            } else {
+                if (k.val == 0) {
+                    cg_push(3);
+                    cg_mov_rr(0, 3);
+                    gen_struct_inits(k.inits);
+                    cg_mov_rr(3, 0);
+                    cg_pop(3);
+                }
+            }
+            return;
+        }
+        StructLit k -> {
+            sz: int = type_size(n.ty or error("missing type"));
+            if (sz <= 0) {
+                sz = 8;
+            }
+            sz = sz + 15 & 0 - 16;
+            cg_alu_imm(5, sz, 4);
+            cg_push(3);
+            cg_lea_mr(4, 8, 3);
+            gen_struct_inits(k.inits);
+            cg_mov_rr(3, 0);
+            cg_pop(3);
+            return;
+        }
+        VariantLit k -> {
+            sz: int = type_size(n.ty or error("missing type"));
+            if (sz <= 0) {
+                sz = 8;
+            }
+            if (sz <= 8) {
+                if (k.inits == null) {
+                    cg_mov_imm(k.val, 0);
+                    return;
+                }
+                cg_alu_imm(5, 16, 4);
+                cg_push(3);
+                cg_lea_mr(4, 8, 3);
+                cg_mov_imm(k.val, 7);
+                cg_mov_rm(7, 3, 0);
+                gen_variant_inits(k.inits);
+                cg_mov_mr(3, 0, 0);
+                cg_pop(3);
+                return;
+            }
+            sz = sz + 15 & 0 - 16;
+            cg_alu_imm(5, sz, 4);
+            cg_push(3);
+            cg_lea_mr(4, 8, 3);
+            cg_mov_imm(k.val, 7);
+            cg_mov_rm(7, 3, 0);
+            gen_variant_inits(k.inits);
+            cg_mov_rr(3, 0);
+            cg_pop(3);
+            return;
+        }
+        Deref k -> {
+            gen_expr(k.lhs);
+            load_mem(n.ty or error("missing type"));
+            return;
+        }
+        Index _p -> {
+            gen_addr(n);
+            load_mem(n.ty or error("missing type"));
+            return;
+        }
+        Assign q -> {
+            match q.rhs.kind {
+                StructLit k -> {
+                    lty: ?*Type = q.lhs.ty;
+                    if (lty != null && is_struct_ty(lty)) {
+                        gen_addr(q.lhs);
+                        cg_push(3);
+                        cg_mov_rr(0, 3);
+                        gen_struct_inits(k.inits);
+                        cg_mov_rr(3, 0);
+                        cg_pop(3);
+                        return;
+                    }
+                }
+                VariantLit k -> {
+                    lty2: ?*Type = q.lhs.ty;
+                    if (lty2 != null && is_enum_ty(lty2)) {
+                        gen_addr(q.lhs);
+                        cg_push(3);
+                        cg_mov_rr(0, 3);
+                        cg_mov_imm(k.val, 7);
+                        cg_mov_rm(7, 0, 0);
+                        gen_variant_inits(k.inits);
+                        cg_mov_rr(3, 0);
+                        cg_pop(3);
+                        return;
+                    }
+                }
+                _ -> { }
+            }
+            lhs_ty: *Type = q.lhs.ty or error("missing lhs type");
+            if (!passes_by_ref(lhs_ty) && imm_operand(q.rhs) != 0 && fits_imm32(imm_value(q.rhs))) {
+                match q.lhs.kind {
+                    Var k -> {
+                        vo0: ?*Obj = k.var;
+                        if (vo0 != null) {
+                            emit_store_imm(vo0, lhs_ty, imm_value(q.rhs));
+                            return;
+                        }
+                    }
+                    _ -> { }
+                }
+            }
+            gen_expr(q.rhs);
+            if (!passes_by_ref(lhs_ty)) {
+                match q.lhs.kind {
+                    Var k -> {
+                        vo: ?*Obj = k.var;
+                        if (vo != null) {
+                            emit_store_var(vo, lhs_ty);
+                            return;
+                        }
+                    }
+                    _ -> { }
+                }
+            }
+            cg_push(0);
+            gen_addr(q.lhs);
+            cg_mov_rr(0, 7);
+            cg_pop(6);
+            if (passes_by_ref(lhs_ty)) {
+                emit_memcpy(type_size(lhs_ty));
+                cg_mov_rr(7, 0);
+            } else {
+                cg_mov_rr(6, 0);
+                store_mem(lhs_ty);
+            }
+            return;
+        }
+        Not k -> {
+            gen_expr(k.lhs);
+            cg_alu_imm(7, 0, 0);
+            cg_setcc(4);
+            cg_movzb_al_rax();
+            return;
+        }
+        Neg k -> {
+            gen_expr(k.lhs);
+            cg_neg(0);
+            nty: ?*Type = n.ty;
+            if (nty != null) {
+                if (is_i8_ty(nty)) {
+                    cg_movzb_al_rax();
+                }
+            }
+            return;
+        }
+        BitNot k -> {
+            gen_expr(k.lhs);
+            cg_not(0);
+            nty2: ?*Type = n.ty;
+            if (nty2 != null) {
+                if (is_i8_ty(nty2)) {
+                    cg_movzb_al_rax();
+                }
+            }
+            return;
+        }
+        LogAnd k -> {
+            lf: int = new_label();
+            le: int = new_label();
+            gen_expr(k.lhs);
+            cg_alu_imm(7, 0, 0);
+            cg_jump_id(4, lf);
+            gen_expr(k.rhs);
+            cg_alu_imm(7, 0, 0);
+            cg_jump_id(4, lf);
+            cg_mov_imm(1, 0);
+            cg_jump_id(0 - 1, le);
+            cg_label_id(lf);
+            cg_mov_imm(0, 0);
+            cg_label_id(le);
+            return;
+        }
+        LogOr k -> {
+            lt: int = new_label();
+            lf2: int = new_label();
+            le2: int = new_label();
+            gen_expr(k.lhs);
+            cg_alu_imm(7, 0, 0);
+            cg_jump_id(5, lt);
+            gen_expr(k.rhs);
+            cg_alu_imm(7, 0, 0);
+            cg_jump_id(4, lf2);
+            cg_label_id(lt);
+            cg_mov_imm(1, 0);
+            cg_jump_id(0 - 1, le2);
+            cg_label_id(lf2);
+            cg_mov_imm(0, 0);
+            cg_label_id(le2);
+            return;
+        }
+        OrElse k -> {
+            end: int = new_label();
+            gen_expr(k.lhs);
+            cg_alu_imm(7, 0, 0);
+            cg_jump_id(5, end);
+            gen_expr(k.rhs);
+            cg_label_id(end);
+            return;
+        }
+        Funcall k -> {
+            fno: ?*Function = k.fn;
+            has_sret: int = 0;
+            if (fno != null) {
+                if (fno.sret != null) {
+                    has_sret = 1;
+                }
+            }
+            nargs: int = 0;
+            a: ?*Expr = k.args;
+            while (a != null) {
+                nargs = nargs + 1;
+                a = a.next;
+            }
+            nregs: int = nargs + has_sret;
+            nstack: int = nregs - 6;
+            if (nstack < 0) {
+                nstack = 0;
+            }
+            if (has_sret == 0 && nargs <= 1) {
+                a = k.args;
+                if (a != null) {
+                    if (imm_operand(a) != 0 && fits_imm32(imm_value(a))) {
+                        cg_mov_imm(imm_value(a), cg_arg_reg(0));
+                    } else {
+                        gen_expr(a);
+                        cg_mov_rr(0, cg_arg_reg(0));
+                    }
+                }
+                cg_call(k.funcname);
+                return;
+            }
+            /* Sret first, then alignment pad, then incoming slots.
+             * After the call, stack args sit above the pad, which sits
+             * above the sret buffer, so popping nstack then pad leaves
+             * the return value in place. */
+            if (has_sret != 0) {
+                if (fno == null) {
+                    error("missing function");
+                }
+                sz: int = type_size(fno.return_ty or error("missing return type"));
+                if (sz <= 0) {
+                    sz = 8;
+                }
+                sz = sz + 15 & 0 - 16;
+                cg_alu_imm(5, sz, 4);
+                cg_mov_rr(4, 0);
+            }
+            call_pad: int = 0;
+            if (nstack > 0) {
+                if ((cg_rsp_off + 8 * nstack) % 16 != 0) {
+                    cg_alu_imm(5, 8, 4);
+                    call_pad = 8;
+                }
+            }
+            if (has_sret != 0) {
+                cg_push(0);
+            }
+            a = k.args;
+            while (a != null) {
+                gen_expr(a);
+                cg_push(0);
+                a = a.next;
+            }
+            emit_place_call_regs(nregs);
+            if (streq(k.funcname, "memcpy")) {
+                emit_memcpy_call();
+                return;
+            }
+            if (streq(k.funcname, "write") || streq(k.funcname, "read")) {
+                emit_io_call(k.funcname, k.args);
+                return;
+            }
+            cg_call(k.funcname);
+            if (nstack > 0) {
+                cg_alu_imm(0, 8 * nstack, 4);
+            }
+            if (call_pad != 0) {
+                cg_alu_imm(0, call_pad, 4);
+            }
+            return;
+        }
+        Binary k -> {
+            gen_binary(k.op, k.lhs, k.rhs);
+            bty: ?*Type = n.ty;
+            if (bty != null) {
+                if (is_i8_ty(bty)) {
+                    cg_movzb_al_rax();
+                }
+            }
+            return;
+        }
+        If k -> {
+            le: int = new_label();
+            lelse: int = new_label();
+            gen_expr(k.cond);
+            cg_alu_imm(7, 0, 0);
+            cg_jump_id(4, lelse);
+            gen_expr(k.then);
+            cg_jump_id(0 - 1, le);
+            cg_label_id(lelse);
+            gen_expr(k.els);
+            cg_label_id(le);
+            return;
+        }
+        Match k -> {
+            gen_match(k.cond, k.arms);
+            return;
+        }
+        Block k -> {
+            s: ?*Stmt = k.body;
+            while (s != null) {
+                gen_stmt(s);
+                s = s.next;
+            }
+            return;
+        }
+        Sizeof k -> {
+            sty: ?*Type = k.ty;
+            if (sty == null) {
+                se: ?*Expr = k.e;
+                if (se == null) {
+                    error("sizeof");
+                }
+                sty = se.ty;
+            }
+            cg_mov_imm(type_size(sty or error("sizeof")), 0);
+            return;
+        }
+        _ -> {
+            error("invalid expression");
+        }
+    }
+}
+
+gen_match(cond: *Expr, arms: ?*MatchArm) noregion raises Error {
+    lend: int = new_label();
+    match cond.kind {
+        Var _p -> {
+            gen_addr(cond);
+        }
+        MemberAccess _p -> {
+            gen_addr(cond);
+        }
+        Deref _p -> {
+            gen_addr(cond);
+        }
+        _ -> {
+            gen_expr(cond);
+        }
+    }
+    cg_push(0);
+    cg_mov_mr(0, 0, 0);
+    cg_push(0);
+    arm: ?*MatchArm = arms;
+    while (arm != null) {
+        la: int = new_label();
+        av: ?*Variant = arm.variant;
+        if (av != null) {
+            cg_mov_mr(4, 0, 0);
+            cg_alu_imm(7, av.tag, 0);
+            cg_jump_id(5, la);
+        }
+        bv: ?*Obj = arm.binder;
+        if (bv != null) {
+            if (av == null) {
+                error("missing variant");
+            }
+            psz: int = av.payload_size;
+            cg_mov_mr(4, 8, 6);
+            cg_alu_imm(0, 8, 6);
+            cg_lea_mr(5, bv.offset, 7);
+            emit_memcpy(psz);
+        }
+        gen_stmt(arm.body);
+        cg_jump_id(0 - 1, lend);
+        if (av != null) {
+            cg_label_id(la);
+        }
+        arm = arm.next;
+    }
+    cg_mov_imm(1, 7);
+    cg_call("exit");
+    cg_label_id(lend);
+    cg_alu_imm(0, 16, 4);
+}
+
+gen_stmt(n: *Stmt) noregion raises Error {
+    match n.kind {
+        Return k -> {
+            lhs: ?*Expr = k.lhs;
+            if (lhs != null) {
+                gen_expr(lhs);
+                sret: ?*Obj = current_sret;
+                if (sret != null) {
+                    cg_mov_rr(0, 6);
+                    cg_mov_mr(5, sret.offset, 7);
+                    emit_memcpy(type_size(current_return_ty or error("missing return type")));
+                    cg_mov_rr(7, 0);
+                }
+            } else {
+                cg_mov_imm(0, 0);
+            }
+            rd: int = cg_region_depth;
+            while (rd > 0) {
+                cg_call("l8_region_pop");
+                rd = rd - 1;
+            }
+            cg_jump_id(0 - 1, current_return_lab);
+            return;
+        }
+        ExprStmt k -> {
+            gen_expr(k.lhs);
+            return;
+        }
+        Block k -> {
+            s: ?*Stmt = k.body;
+            while (s != null) {
+                gen_stmt(s);
+                s = s.next;
+            }
+            return;
+        }
+        If k -> {
+            le: int = new_label();
+            gen_expr(k.cond);
+            cg_alu_imm(7, 0, 0);
+            els: ?*Stmt = k.els;
+            if (els == null) {
+                cg_jump_id(4, le);
+                gen_stmt(k.then);
+                cg_label_id(le);
+                return;
+            }
+            lelse: int = new_label();
+            cg_jump_id(4, lelse);
+            gen_stmt(k.then);
+            cg_jump_id(0 - 1, le);
+            cg_label_id(lelse);
+            gen_stmt(els);
+            cg_label_id(le);
+            return;
+        }
+        While k -> {
+            lb: int = new_label();
+            le2: int = new_label();
+            cg_label_id(lb);
+            gen_expr(k.cond);
+            cg_alu_imm(7, 0, 0);
+            cg_jump_id(4, le2);
+            gen_stmt(k.body);
+            cg_jump_id(0 - 1, lb);
+            cg_label_id(le2);
+            return;
+        }
+        For k -> {
+            lb3: int = new_label();
+            le3: int = new_label();
+            hu3: ?*Expr = k.hi;
+            if (hu3 != null) {
+                gen_expr(k.iter);
+                emit_store_var(k.item, ty_int);
+                gen_expr(hu3);
+                emit_store_var(k.n, ty_int);
+                cg_label_id(lb3);
+                emit_load_var(k.item, ty_int);
+                cg_mov_rr(0, 1);
+                emit_load_var(k.n, ty_int);
+                cg_alu_rr(57, 0, 1);
+                cg_jump_id(13, le3);
+                gen_stmt(k.body);
+                emit_load_var(k.item, ty_int);
+                cg_alu_imm(0, 1, 0);
+                emit_store_var(k.item, ty_int);
+                cg_jump_id(0 - 1, lb3);
+                cg_label_id(le3);
+                return;
+            }
+            co2: ?*Obj = k.coll;
+            ix2: ?*Obj = k.idx;
+            if (co2 == null || ix2 == null) {
+                error("internal: for array missing temps");
+            }
+            cu2: *Obj = co2;
+            iu2: *Obj = ix2;
+            sty: *Type = cu2.ty or error("missing type");
+            ity: *Type = k.item.ty or error("missing type");
+            esz: int = type_size(ity);
+            gen_expr(k.iter);
+            emit_store_var(cu2, sty);
+            emit_store_imm(iu2, ty_int, 0);
+            emit_load_var(cu2, sty);
+            cg_mov_mr(0, 0 - 8, 0);
+            emit_store_var(k.n, ty_int);
+            cg_label_id(lb3);
+            emit_load_var(iu2, ty_int);
+            cg_mov_rr(0, 1);
+            emit_load_var(k.n, ty_int);
+            cg_alu_rr(57, 0, 1);
+            cg_jump_id(3, le3);
+            emit_load_var(cu2, sty);
+            cg_mov_rr(0, 6);
+            emit_load_var(iu2, ty_int);
+            cg_mov_rr(0, 1);
+            emit_scale_offset(esz);
+            if (passes_by_ref(ity)) {
+                cg_mov_rr(0, 6);
+                cg_lea_mr(5, k.item.offset, 7);
+                emit_memcpy(esz);
+            } else {
+                load_mem(ity);
+                emit_store_var(k.item, ity);
+            }
+            gen_stmt(k.body);
+            emit_load_var(iu2, ty_int);
+            cg_alu_imm(0, 1, 0);
+            emit_store_var(iu2, ty_int);
+            cg_jump_id(0 - 1, lb3);
+            cg_label_id(le3);
+            return;
+        }
+        Match k -> {
+            gen_match(k.cond, k.arms);
+            return;
+        }
+        Raise k -> {
+            ex: *ExnDef = k.exn or error("internal");
+            if (ex.members != null) {
+                esz: int = ex.size;
+                if (esz <= 0) {
+                    esz = 8;
+                }
+                cg_mov_imm(esz, 7);
+                emit_exc_malloc();
+                cg_push(3);
+                cg_mov_rr(0, 3);
+                gen_struct_inits(k.inits);
+                cg_mov_rr(3, 6);
+                cg_pop(3);
+            } else {
+                cg_mov_imm(0, 6);
+            }
+            cg_mov_imm(ex.tag, 7);
+            cg_call("l8_raise");
+            return;
+        }
+        Try k -> {
+            lcatch: int = new_label();
+            ltryend: int = new_label();
+            cg_lea_mr(5, k.buf.offset, 7);
+            cg_call("l8_try_begin");
+            cg_alu_imm(7, 0, 0);
+            cg_jump_id(5, lcatch);
+            gen_stmt(k.body);
+            cg_call("l8_try_end");
+            cg_jump_id(0 - 1, ltryend);
+            cg_label_id(lcatch);
+            arm2: ?*CatchArm = k.arms;
+            while (arm2 != null) {
+                la2: int = new_label();
+                ced: *ExnDef = arm2.exn or error("internal");
+                cg_mov_rip_r("l8_exc_tag", 0, 0);
+                cg_alu_imm(7, ced.tag, 0);
+                cg_jump_id(5, la2);
+                binder: ?*Obj = arm2.binder;
+                if (binder != null) {
+                    psz2: int = ced.size;
+                    if (psz2 > 0) {
+                        cg_mov_rip_r("l8_exc_ptr", 0, 6);
+                        cg_lea_mr(5, binder.offset, 7);
+                        emit_memcpy(psz2);
+                    }
+                }
+                gen_stmt(arm2.body);
+                cg_jump_id(0 - 1, ltryend);
+                cg_label_id(la2);
+                arm2 = arm2.next;
+            }
+            cg_mov_rip_r("l8_exc_tag", 0, 7);
+            cg_mov_rip_r("l8_exc_ptr", 0, 6);
+            cg_call("l8_raise");
+            cg_label_id(ltryend);
+            return;
+        }
+        Region k -> {
+            cg_call("l8_heap_mark");
+            emit_store_var(k.mark, ty_int);
+            emit_load_var(k.mark, ty_int);
+            cg_mov_rr(0, cg_arg_reg(0));
+            cg_call("l8_region_push");
+            cg_region_depth = cg_region_depth + 1;
+            gen_stmt(k.body);
+            cg_region_depth = cg_region_depth - 1;
+            cg_call("l8_region_pop");
+            return;
+        }
+        Comment _c -> {
+            return;
+        }
+        Decl k -> {
+            vo: ?*Obj = k.var;
+            init: ?*Expr = k.init;
+            if (init != null && vo != null) {
+                ae: *Expr = new_assign(new_var_node(vo), init);
+                gen_expr(ae);
+            }
+            return;
+        }
+        _ -> {
+            error("invalid statement");
+        }
+    }
+}
+
+emit_reverse_stack(n: int) noregion {
+    if (n <= 1) {
+        return;
+    }
+    l: int = 0;
+    r: int = n - 1;
+    while (l < r) {
+        cg_mov_mr(4, 8 * l, 10);
+        cg_mov_mr(4, 8 * r, 0);
+        cg_mov_rm(0, 4, 8 * l);
+        cg_mov_rm(10, 4, 8 * r);
+        l = l + 1;
+        r = r - 1;
+    }
+}
+
+emit_place_call_regs(nslots: int) noregion {
+    if (nslots <= 6) {
+        i: int = nslots - 1;
+        while (i >= 0) {
+            cg_pop(cg_arg_reg(i));
+            i = i - 1;
+        }
+        return;
+    }
+    emit_reverse_stack(nslots);
+    i2: int = 0;
+    while (i2 < 6) {
+        cg_pop(cg_arg_reg(i2));
+        i2 = i2 + 1;
+    }
+}
+
+emit_store_incoming(slot: int, dest_off: int) noregion {
+    if (slot < 6) {
+        cg_mov_rm(cg_arg_reg(slot), 5, dest_off);
+        return;
+    }
+    cg_mov_mr(5, 16 + 8 * (slot - 6), 0);
+    cg_mov_rm(0, 5, dest_off);
+}
+
+assign_lvar_offsets(fn: *Function) raises Error {
+    off: int = 0;
+    v: ?*Obj = fn.locals;
+    while (v != null) {
+        vty: *Type = v.ty or error("missing local type");
+        sz: int = type_size(vty);
+        if (sz <= 0) {
+            sz = 8;
+        }
+        if (sz < 8) {
+            sz = 8;
+        }
+        off = off + sz;
+        v.offset = 0 - off;
+        v = v.next;
+    }
+    fn.stack_size = (off + 7) / 16 * 16 + 8;
+}
+
+emit_global_init(g: *Obj) noregion raises Error {
+    init: *Expr = g.init or error("missing global initializer");
+    gty: *Type = g.ty or error("missing global type");
+    sz: int = type_size(gty);
+    if (sz <= 0) {
+        sz = 8;
+    }
+    v: int = const_value(init);
+    cg_label(g.name);
+    if (sz > 8) {
+        error("global initializer must be a scalar constant");
+    }
+    cg_quad(v);
+}
+
+emit_bss_global(g: *Obj) noregion {
+    sz: int = 8;
+    gty: ?*Type = g.ty;
+    if (gty != null) {
+        sz = type_size(gty);
+    }
+    if (sz <= 0) {
+        sz = 8;
+    }
+    if (gty != null && sz < 8) {
+        sz = 8;
+    }
+    cg_label(g.name);
+    cg_skip(sz);
+}
+
+emit_data() noregion raises Error {
+    g: ?*Obj = globals;
+    any_data: int = 0;
+    while (g != null) {
+        if (g.is_func == 0 && is_const_init(g.init)) {
+            if (any_data == 0) {
+                cg_section(as_SEC_DATA);
+                cg_align(8);
+                any_data = 1;
+            }
+            emit_global_init(g);
+        }
+        g = g.next;
+    }
+    g = globals;
+    any_bss: int = 0;
+    while (g != null) {
+        if (g.is_func == 0 && !is_const_init(g.init)) {
+            if (any_bss == 0) {
+                cg_section(as_SEC_BSS);
+                cg_align(8);
+                any_bss = 1;
+            }
+            emit_bss_global(g);
+        }
+        g = g.next;
+    }
+    if (any_bss == 0) {
+        cg_section(as_SEC_BSS);
+        cg_align(8);
+    }
+    cg_global("l8_init_done");
+    cg_label("l8_init_done");
+    cg_skip(8);
+    cg_section(as_SEC_RODATA);
+    cg_align(8);
+    s: ?*StrLit = str_lits;
+    while (s != null) {
+        cg_label(cg_name_num(".L.str", s.label));
+        cg_quad(s.len);
+        cg_bytes(s.data, 0, s.len);
+        s = s.next;
+    }
+}
+
+emit_dyn_global_inits(g: ?*Obj) noregion raises Error {
+    if (g == null) {
+        return;
+    }
+    emit_dyn_global_inits(g.next);
+    if (g.is_func != 0) {
+        return;
+    }
+    init: ?*Expr = g.init;
+    if (is_const_init(init)) {
+        return;
+    }
+    e: *Expr = init or error("missing global initializer");
+    ty: *Type = g.ty or error("missing global type");
+    gen_expr(e);
+    emit_store_var(g, ty);
+}
+
+emit_l8_init_globals_fn() noregion raises Error {
+    already: int = new_label();
+    cg_global("l8_init_globals");
+    cg_label("l8_init_globals");
+    cg_rsp_off = 0;
+    cg_push(5);
+    cg_mov_rr(4, 5);
+    cg_mov_rip_r("l8_init_done", 0, 0);
+    cg_alu_imm(7, 0, 0);
+    cg_jump_id(5, already);
+    cg_mov_imm(1, 0);
+    cg_mov_r_rip(0, "l8_init_done", 0);
+    emit_dyn_global_inits(globals);
+    cg_label_id(already);
+    cg_mov_rr(5, 4);
+    cg_pop(5);
+    cg_ret();
+}
+
+emit_text() noregion raises Error {
+    fn: ?*Function = functions;
+    cg_section(as_SEC_TEXT);
+    oob_lab = new_label();
+    emit_l8_init_globals_fn();
+    while (fn != null) {
+        if (fn.is_extern == 0) {
+            narrow_top = null;
+            catch_top = null;
+            assign_lvar_offsets(fn);
+            current_fn_name = fn.name;
+            current_return_ty = fn.return_ty;
+            current_sret = fn.sret;
+            current_fn = fn;
+            current_return_lab = new_label();
+            cg_region_depth = 0;
+            cg_global(fn.name);
+            cg_label(fn.name);
+            cg_rsp_off = 0;
+            cg_push(5);
+            cg_mov_rr(4, 5);
+            cg_alu_imm(5, fn.stack_size, 4);
+            ri: int = 0;
+            sret: ?*Obj = fn.sret;
+            if (sret != null) {
+                emit_store_incoming(ri, sret.offset);
+                ri = ri + 1;
+            }
+            /* Spill incoming args first; by-ref memcpy clobbers %rsi/%rdi/%rax. */
+            base_ri: int = ri;
+            i: int = 0;
+            while (i < fn.nparams) {
+                po: ?*Obj = fn_param(fn, i);
+                if (po == null) {
+                    error("null obj");
+                }
+                p: *Obj = po;
+                emit_store_incoming(ri, p.offset);
+                ri = ri + 1;
+                i = i + 1;
+            }
+            ri = base_ri;
+            i = 0;
+            while (i < fn.nparams) {
+                po2: ?*Obj = fn_param(fn, i);
+                if (po2 == null) {
+                    error("null obj");
+                }
+                p2: *Obj = po2;
+                pty: ?*Type = p2.ty;
+                if (pty == null) {
+                    error("missing param type");
+                }
+                if (passes_by_ref(pty)) {
+                    cg_mov_mr(5, p2.offset, 6);
+                    cg_lea_mr(5, p2.offset, 7);
+                    emit_memcpy(type_size(pty));
+                }
+                ri = ri + 1;
+                i = i + 1;
+            }
+            if (streq(fn.name, "main")) {
+                cg_call("l8_init_globals");
+            }
+            body: ?*Stmt = fn.body;
+            if (body == null) {
+                error("missing body");
+            }
+            gen_stmt(body);
+            sret2: ?*Obj = current_sret;
+            if (sret2 != null) {
+                cg_mov_rr(0, 6);
+                cg_mov_mr(5, sret2.offset, 7);
+                emit_memcpy(type_size(current_return_ty or error("missing return type")));
+                cg_mov_rr(7, 0);
+            }
+            cg_label_id(current_return_lab);
+            cg_mov_rr(5, 4);
+            cg_pop(5);
+            cg_ret();
+        }
+        fn = fn.next;
+    }
+    cg_label_id(oob_lab);
+    emit_exit1();
+}
+
+codegen() noregion raises Error {
+    emit_data();
+    emit_text();
+    if (cg_direct_mode == 0) {
+        emit_flush();
+    }
+}
