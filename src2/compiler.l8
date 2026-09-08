@@ -42,7 +42,10 @@
 // `new T[n](v)` fills every slot with v (evaluated once). No implicit element default.
 // n must fit the 64MiB heap: negative or wrapping n * size is rejected.
 // Calls follow SysV: six argument registers, then the stack. Hidden sret is the first incoming slot.
-// Pipeline: parse → typecheck → unused fn/local + raises/noreturn checks → codegen.
+// Pipeline: parse (syntax, including comments) → typecheck (fills Obj/Member/Function) →
+// unused fn/local + raises/noreturn checks → codegen.
+// Parse does not load imports or require types; a later pass follows imports for compile.
+// Fmt prints the same tree with one canonical layout.
 // This compiler reports failures via `exception Error` (caught in main).
 
 type Type =
@@ -58,11 +61,20 @@ type Type =
     | Enum { def: *EnumDef; }
     | Exn { def: *ExnDef; };
 
+type Com = {
+    text: []i8;
+    pos: int;
+    nls: int;
+    next: ?*Com;
+}
+
 type Member = {
     name: []i8;
     offset: int;
     ty: *Type;
     next: ?*Member;
+    lead: ?*Com;
+    trail: ?*Com;
     browse_id: int;
     browse_pos: int;
     browse_file: int;
@@ -77,6 +89,8 @@ type StructDef = {
     next: ?*StructDef;
     hash_next: ?*StructDef;
     ptr_walk: int;
+    lead: ?*Com;
+    trail: ?*Com;
     browse_id: int;
     browse_pos: int;
     browse_file: int;
@@ -90,6 +104,8 @@ type Variant = {
     payload_ty: ?*Type;
     payload_size: int;
     next: ?*Variant;
+    lead: ?*Com;
+    trail: ?*Com;
     browse_id: int;
     browse_pos: int;
     browse_file: int;
@@ -104,6 +120,8 @@ type EnumDef = {
     next: ?*EnumDef;
     hash_next: ?*EnumDef;
     ptr_walk: int;
+    lead: ?*Com;
+    trail: ?*Com;
     browse_id: int;
     browse_pos: int;
     browse_file: int;
@@ -118,6 +136,8 @@ type ExnDef = {
     ty: ?*Type;
     next: ?*ExnDef;
     hash_next: ?*ExnDef;
+    lead: ?*Com;
+    trail: ?*Com;
     browse_id: int;
     browse_pos: int;
     browse_file: int;
@@ -220,7 +240,8 @@ type TokKind =
     | Import
     | Extern
     | Region
-    | At;
+    | At
+    | Comment;
 
 type Token = {
     kind: TokKind;
@@ -232,29 +253,42 @@ type Token = {
 }
 
 type FieldInit = {
-    member: *Member;
+    name: []i8;
+    member: ?*Member;
     lhs: ?*Expr;
     next: ?*FieldInit;
+    lead: ?*Com;
+    trail: ?*Com;
     pos: int;
     file: int;
     toklen: int;
 }
 
 type MatchArm = {
+    name: []i8;
     variant: ?*Variant;
     binder: ?*Obj;
+    binder_name: []i8;
+    paren: int;
     body: *Stmt;
     next: ?*MatchArm;
+    lead: ?*Com;
+    trail: ?*Com;
     pos: int;
     file: int;
     toklen: int;
 }
 
 type CatchArm = {
-    exn: *ExnDef;
+    name: []i8;
+    exn: ?*ExnDef;
     binder: ?*Obj;
+    binder_name: []i8;
+    paren: int;
     body: *Stmt;
     next: ?*CatchArm;
+    lead: ?*Com;
+    trail: ?*Com;
     pos: int;
     file: int;
     toklen: int;
@@ -279,9 +313,9 @@ type BinOp =
     | Ge;
 
 type ExprKind =
-    | Num { val: int; str_label: int; }
+    | Num { val: int; str_label: int; form: int; }
     | Null
-    | Var { var: ?*Obj; name: ?*i8; member: ?*Member; }
+    | Var { var: ?*Obj; name: []i8; member: ?*Member; }
     | Binary { op: BinOp; lhs: *Expr; rhs: *Expr; }
     | Assign { lhs: *Expr; rhs: *Expr; }
     | Addr { lhs: *Expr; }
@@ -294,15 +328,16 @@ type ExprKind =
     | LogOr { lhs: *Expr; rhs: *Expr; }
     | OrElse { lhs: *Expr; rhs: *Expr; }
     | Funcall { funcname: []i8; args: ?*Expr; fn: ?*Function; }
-    | MemberAccess { lhs: *Expr; member: *Member; }
+    | MemberAccess { lhs: *Expr; name: []i8; member: ?*Member; }
     | As { lhs: *Expr; }
     | Trunc { lhs: *Expr; }
-    | New { lhs: ?*Expr; val: int; inits: ?*FieldInit; variant: ?*Variant; fill: ?*Expr; }
-    | StructLit { inits: ?*FieldInit; }
-    | VariantLit { variant: *Variant; val: int; inits: ?*FieldInit; }
+    | New { lhs: ?*Expr; val: int; inits: ?*FieldInit; variant: ?*Variant; fill: ?*Expr; vname: []i8; }
+    | StructLit { name: []i8; inits: ?*FieldInit; }
+    | VariantLit { tyname: []i8; name: []i8; variant: ?*Variant; val: int; inits: ?*FieldInit; }
     | If { cond: *Expr; then: *Expr; els: *Expr; }
     | Match { cond: *Expr; arms: ?*MatchArm; }
-    | Block { body: ?*Stmt; };
+    | Block { body: ?*Stmt; }
+    | Sizeof { ty: ?*Type; e: ?*Expr; };
 
 type Expr = {
     kind: ExprKind;
@@ -320,14 +355,20 @@ type StmtKind =
     | For { item: *Obj; coll: ?*Obj; idx: ?*Obj; n: *Obj; iter: *Expr; hi: ?*Expr; body: *Stmt; }
     | Block { body: ?*Stmt; }
     | ExprStmt { lhs: *Expr; }
+    | Decl { name: []i8; ty: *Type; init: ?*Expr; var: ?*Obj; }
     | Match { cond: *Expr; arms: ?*MatchArm; }
-    | Raise { exn: *ExnDef; inits: ?*FieldInit; }
+    | Raise { name: []i8; exn: ?*ExnDef; inits: ?*FieldInit; has: int; }
     | Try { body: *Stmt; arms: ?*CatchArm; buf: *Obj; }
-    | Region { body: *Stmt; mark: *Obj; };
+    | Region { body: *Stmt; mark: *Obj; }
+    | Comment { text: []i8; };
 
 type Stmt = {
     kind: StmtKind;
     next: ?*Stmt;
+    lead: ?*Com;
+    trail: ?*Com;
+    pos: int;
+    end: int;
 }
 
 type Obj = {
@@ -353,6 +394,8 @@ type Obj = {
     browse_pos: int;
     browse_file: int;
     browse_len: int;
+    lead: ?*Com;
+    trail: ?*Com;
 }
 
 type BoundCall = {
@@ -393,6 +436,25 @@ type Function = {
     browse_pos: int;
     browse_file: int;
     browse_len: int;
+    lead: ?*Com;
+    trail: ?*Com;
+}
+
+type ItemKind =
+    | Import { path: []i8; tag: int; }
+    | Struct { def: *StructDef; }
+    | Enum { def: *EnumDef; }
+    | Exn { def: *ExnDef; }
+    | Func { fn: *Function; }
+    | Global { var: *Obj; }
+    | Comment { text: []i8; };
+
+type Item = {
+    kind: ItemKind;
+    next: ?*Item;
+    lead: ?*Com;
+    trail: ?*Com;
+    pos: int;
 }
 
 type FnBucket = { head: ?*Function; }
@@ -416,6 +478,19 @@ source: []i8 = ""; source_len: int = 0; pos: int = 0;
 source_path: []i8 = "";
 token_eof: *Token = new Token { kind: TokKind.Eof, val: 0, str: "", len: 0, pos: 0, next: token_eof };
 tok: *Token = new Token { kind: TokKind.Eof, val: 0, str: "", len: 0, pos: 0, next: token_eof };
+parse_follow_imports: int = 1;
+file_items: ?*Item = null;
+file_items_tail: ?*Item = null;
+file_coms: ?*Com = null;
+file_coms_tail: ?*Com = null;
+com_cur: ?*Com = null;
+file_trail: ?*Com = null;
+last_close_pos: int = 0;
+LIT_INT: int = 0;
+LIT_I8: int = 1;
+LIT_CHAR: int = 2;
+LIT_TRUE: int = 3;
+LIT_FALSE: int = 4;
 globals: ?*Obj = null;
 locals: ?*Obj = null;
 scope_locals: ?*Obj = null;
@@ -988,6 +1063,8 @@ init_runtime() noregion {
         next: null,
         hash_next: null,
         ptr_walk: 0,
+        lead: null,
+        trail: null,
         browse_id: 0,
         browse_pos: 0,
         browse_file: 0,
@@ -1367,6 +1444,7 @@ get_or_create_struct(name: []i8@new) noregion: *StructDef@new {
     if (sd != null) { return sd; }
     created: *StructDef = new StructDef {
         name: name, members: null, size: 0, ty: null, next: struct_defs, hash_next: null, ptr_walk: 0,
+        lead: null, trail: null,
         browse_id: browse_fresh(), browse_pos: 0, browse_file: 0, browse_len: 0
     };
     struct_defs = created;
@@ -1379,6 +1457,7 @@ get_or_create_enum(name: []i8@new) noregion: *EnumDef@new {
     if (ed != null) { return ed; }
     created: *EnumDef = new EnumDef {
         name: name, variants: null, size: 0, ty: null, next: enum_defs, hash_next: null, ptr_walk: 0,
+        lead: null, trail: null,
         browse_id: browse_fresh(), browse_pos: 0, browse_file: 0, browse_len: 0
     };
     enum_defs = created;
@@ -1916,6 +1995,88 @@ skip_block_comment() {
     }
 }
 
+nls_since(at: int): int {
+    i: int = at - 1;
+    n: int = 0;
+    while (i >= 0) {
+        ch: i8 = source[i];
+        if (ch == '\n') {
+            n = n + 1;
+        } else {
+            if (ch != ' ' && ch != '\t' && ch != '\r') { return n; }
+        }
+        i = i - 1;
+    }
+    n;
+}
+
+append_file_com(text: []i8@new, cpos: int, nls: int) noregion {
+    c: *Com = new Com { text: text, pos: cpos, nls: nls, next: null };
+    t: ?*Com = file_coms_tail;
+    if (t != null) {
+        t.next = c;
+    } else { file_coms = c; }
+    file_coms_tail = c;
+}
+
+com_take_until(lim: int) raises Error: ?*Com {
+    head: ?*Com = null;
+    tail: ?*Com = null;
+    while (com_cur != null) {
+        c: *Com = com_cur or error("internal");
+        if (c.pos >= lim) { return head; }
+        nxt: ?*Com = c.next;
+        c.next = null;
+        if (tail != null) {
+            tail.next = c;
+            tail = c;
+        } else {
+            head = c;
+            tail = c;
+        }
+        com_cur = nxt;
+    }
+    head;
+}
+
+com_take_trail(lim: int) raises Error: ?*Com {
+    head: ?*Com = null;
+    tail: ?*Com = null;
+    while (com_cur != null) {
+        c: *Com = com_cur or error("internal");
+        if (c.pos >= lim) { return head; }
+        if (c.nls != 0) { return head; }
+        nxt: ?*Com = c.next;
+        c.next = null;
+        if (tail != null) {
+            tail.next = c;
+            tail = c;
+        } else {
+            head = c;
+            tail = c;
+        }
+        com_cur = nxt;
+    }
+    head;
+}
+
+com_last(h: ?*Com): ?*Com@h {
+    c: ?*Com = h;
+    last: ?*Com = null;
+    while (c != null) {
+        last = c;
+        c = c.next;
+    }
+    last;
+}
+
+com_concat(a: ?*Com, b: ?*Com@a) raises Error: ?*Com@b {
+    if (a == null) { return b; }
+    t: *Com = com_last(a) or error("internal");
+    t.next = b;
+    a;
+}
+
 read_number(): int {
     v: int = 0;
     while (pos < source_len) {
@@ -1998,7 +2159,7 @@ punct_kind(c: i8) raises Error: TokKind {
     TokKind.Eof;
 }
 
-tokenize() raises Error: *Token@new {
+tokenize() noregion raises Error: *Token@new {
     head: *Token = new Token {
         kind: TokKind.Eof,
         val: 0,
@@ -2016,6 +2177,8 @@ tokenize() raises Error: *Token@new {
     ch: i8 = 0i8;
     pk: TokKind = TokKind.Eof;
     pos = 0;
+    file_coms = null;
+    file_coms_tail = null;
     while (pos < source_len) {
         c = source[pos];
         if (c == ' ' || c == '\n' || c == '\t' || c == '\r') {
@@ -2028,11 +2191,17 @@ tokenize() raises Error: *Token@new {
                 } else { more = 0; }
             }
         } else if (c == '/' && source[pos + 1] == '/') {
+            cstart: int = pos;
+            cnls: int = nls_since(cstart);
             pos = pos + 2;
             skip_line_comment();
+            append_file_com(intern(source, cstart, pos - cstart), cstart, cnls);
         } else if (c == '/' && source[pos + 1] == '*') {
+            bstart: int = pos;
+            bnls: int = nls_since(bstart);
             pos = pos + 2;
             skip_block_comment();
+            append_file_com(intern(source, bstart, pos - bstart), bstart, bnls);
         } else if (c >= '0' && c <= '9') {
             s = &source[pos];
             n = pos;
@@ -2155,6 +2324,170 @@ skip_optional_semi() {
     if (tok.kind == TokKind.Semi) { tok = tok.next; }
 }
 
+new_item(k: ItemKind@new, ipos: int): *Item@new {
+    new Item { kind: k, next: null, lead: null, trail: null, pos: ipos };
+}
+
+append_item(it: *Item@immortal) {
+    t: ?*Item = file_items_tail;
+    if (t != null) {
+        t.next = it;
+    } else { file_items = it; }
+    file_items_tail = it;
+}
+
+attach_stmt_inner(s: *Stmt, end_pos: int) raises Error {
+    match s.kind {
+        Block k -> {
+            lim: int = end_pos;
+            if (s.end != 0) { lim = s.end; }
+            k.body = attach_stmts(k.body, lim);
+            s.trail = com_concat(s.trail, com_take_until(lim));
+            return;
+        }
+        If k -> {
+            k.then = attach_one_stmt(k.then, end_pos);
+            els: ?*Stmt = k.els;
+            if (els != null) { k.els = attach_one_stmt(els, end_pos); }
+            return;
+        }
+        While k -> { k.body = attach_one_stmt(k.body, end_pos); return; }
+        For k -> { k.body = attach_one_stmt(k.body, end_pos); return; }
+        Match k -> {
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                arm.lead = com_concat(arm.lead, com_take_until(arm.pos));
+                nxt: ?*MatchArm = arm.next;
+                np: int = end_pos;
+                if (nxt != null) { np = nxt.pos; }
+                arm.body = attach_one_stmt(arm.body, np);
+                arm.trail = com_concat(arm.trail, com_take_trail(np));
+                arm = nxt;
+            }
+            return;
+        }
+        Try k -> {
+            k.body = attach_one_stmt(k.body, end_pos);
+            a: ?*CatchArm = k.arms;
+            while (a != null) {
+                a.lead = com_concat(a.lead, com_take_until(a.pos));
+                nxt2: ?*CatchArm = a.next;
+                np2: int = end_pos;
+                if (nxt2 != null) { np2 = nxt2.pos; }
+                a.body = attach_one_stmt(a.body, np2);
+                a.trail = com_concat(a.trail, com_take_trail(np2));
+                a = nxt2;
+            }
+            return;
+        }
+        Region k -> { k.body = attach_one_stmt(k.body, end_pos); return; }
+        _ -> { return; }
+    }
+}
+
+attach_one_stmt(s: *Stmt, end_pos: int) raises Error: *Stmt@s {
+    nxt: ?*Stmt = s.next;
+    s.next = null;
+    s.lead = com_concat(s.lead, com_take_until(s.pos));
+    lim: int = end_pos;
+    if (s.end != 0) { lim = s.end; }
+    attach_stmt_inner(s, lim);
+    s.trail = com_concat(s.trail, com_take_trail(lim));
+    s.next = nxt;
+    s;
+}
+
+attach_stmts(head: ?*Stmt, end_pos: int) raises Error: ?*Stmt@head {
+    s: ?*Stmt = head;
+    while (s != null) {
+        cur: *Stmt = s;
+        nxt: ?*Stmt = cur.next;
+        next_pos: int = end_pos;
+        if (nxt != null) { next_pos = nxt.pos; }
+        cur.lead = com_concat(cur.lead, com_take_until(cur.pos));
+        attach_stmt_inner(cur, next_pos);
+        cur.trail = com_concat(cur.trail, com_take_trail(next_pos));
+        s = nxt;
+    }
+    head;
+}
+
+attach_members(head: ?*Member, end_pos: int) raises Error {
+    m: ?*Member = head;
+    while (m != null) {
+        nxt: ?*Member = m.next;
+        np: int = end_pos;
+        if (nxt != null) { np = nxt.browse_pos; }
+        m.lead = com_concat(m.lead, com_take_until(m.browse_pos));
+        m.trail = com_concat(m.trail, com_take_trail(np));
+        m = nxt;
+    }
+}
+
+attach_variants(head: ?*Variant, end_pos: int) raises Error {
+    v: ?*Variant = head;
+    while (v != null) {
+        nxt: ?*Variant = v.next;
+        np: int = end_pos;
+        if (nxt != null) { np = nxt.browse_pos; }
+        v.lead = com_concat(v.lead, com_take_until(v.browse_pos));
+        attach_members(v.fields, np);
+        v.trail = com_concat(v.trail, com_take_trail(np));
+        v = nxt;
+    }
+}
+
+attach_items(head: ?*Item@immortal, end_pos: int) raises Error: ?*Item@head {
+    it: ?*Item = head;
+    while (it != null) {
+        cur: *Item = it;
+        nxt: ?*Item = cur.next;
+        next_pos: int = end_pos;
+        if (nxt != null) { next_pos = nxt.pos; }
+        lead: ?*Com = com_take_until(cur.pos);
+        cur.lead = lead;
+        match cur.kind {
+            Func k -> {
+                k.fn.lead = lead;
+                b: ?*Stmt = k.fn.body;
+                if (b != null) { _b: *Stmt = attach_one_stmt(b, next_pos); }
+            }
+            Struct k -> {
+                k.def.lead = lead;
+                attach_members(k.def.members, next_pos);
+            }
+            Enum k -> {
+                k.def.lead = lead;
+                attach_variants(k.def.variants, next_pos);
+            }
+            Exn k -> {
+                k.def.lead = lead;
+                attach_members(k.def.members, next_pos);
+            }
+            Global k -> { k.var.lead = lead; }
+            _ -> {}
+        }
+        cur.trail = com_take_trail(next_pos);
+        match cur.kind {
+            Func k2 -> { k2.fn.trail = cur.trail; }
+            Struct k2 -> { k2.def.trail = cur.trail; }
+            Enum k2 -> { k2.def.trail = cur.trail; }
+            Exn k2 -> { k2.def.trail = cur.trail; }
+            Global k2 -> { k2.var.trail = cur.trail; }
+            _ -> {}
+        }
+        it = nxt;
+    }
+    file_trail = com_take_until(end_pos);
+    head;
+}
+
+attach_parsed_file() raises Error {
+    com_cur = file_coms;
+    file_trail = null;
+    file_items = attach_items(file_items, source_len);
+}
+
 cur_tokstr() noregion: []i8@new {
     intern(source, tok.pos, tok.len);
 }
@@ -2212,17 +2545,17 @@ mk_expr(k: ExprKind@new): *Expr@new {
 }
 
 mk_stmt(k: StmtKind@new): *Stmt@new {
-    new Stmt { kind: k, next: null };
+    new Stmt { kind: k, next: null, lead: null, trail: null, pos: 0, end: 0 };
 }
 
 new_num(v: int): *Expr@new {
-    n: *Expr = mk_expr(ExprKind.Num { val: v, str_label: 0 });
+    n: *Expr = mk_expr(ExprKind.Num { val: v, str_label: 0, form: LIT_INT });
     n.ty = ty_int;
     n;
 }
 
 new_str_num(label: int) noregion: *Expr@new {
-    n: *Expr = mk_expr(ExprKind.Num { val: 0, str_label: label });
+    n: *Expr = mk_expr(ExprKind.Num { val: 0, str_label: label, form: LIT_INT });
     n.ty = slice_of(ty_i8);
     n;
 }
@@ -2230,7 +2563,7 @@ new_str_num(label: int) noregion: *Expr@new {
 new_null_expr(): *Expr@new { mk_expr(ExprKind.Null); }
 
 new_var_node(var: *Obj@new): *Expr@new {
-    n: *Expr = mk_expr(ExprKind.Var { var: var, name: null, member: null });
+    n: *Expr = mk_expr(ExprKind.Var { var: var, name: var.name, member: null });
     n.ty = var.ty;
     n;
 }
@@ -2258,9 +2591,9 @@ new_trunc(lhs: *Expr@new, ty: *Type@new): *Expr@new {
     n.ty = ty;
     n;
 }
-new_member_access(lhs: *Expr@new, m: *Member@new): *Expr@new {
-    n: *Expr = mk_expr(ExprKind.MemberAccess { lhs: lhs, member: m });
-    n.ty = m.ty;
+new_member_access(lhs: *Expr@new, name: []i8@new, m: ?*Member@new): *Expr@new {
+    n: *Expr = mk_expr(ExprKind.MemberAccess { lhs: lhs, name: name, member: m });
+    if (m != null) { n.ty = m.ty; }
     n;
 }
 new_funcall(name: []i8@new, args: ?*Expr@new): *Expr@new {
@@ -2274,36 +2607,43 @@ new_for(item: *Obj@new, coll: ?*Obj@new, idx: ?*Obj@new, n: *Obj@new, iter: *Exp
 }
 new_block(body: ?*Stmt@new): *Stmt@new { mk_stmt(StmtKind.Block { body: body }); }
 new_expr_stmt(lhs: *Expr@new): *Stmt@new { mk_stmt(StmtKind.ExprStmt { lhs: lhs }); }
-new_field_init(m: *Member@new, lhs: ?*Expr@new): *FieldInit@new {
-    new FieldInit { member: m, lhs: lhs, next: null, pos: browse_tok_pos, file: browse_tok_file, toklen: browse_tok_len };
+new_decl(name: []i8@new, ty: *Type@new, init: ?*Expr@new, var: ?*Obj@new): *Stmt@new {
+    mk_stmt(StmtKind.Decl { name: name, ty: ty, init: init, var: var });
 }
-new_heap_node(lhs: ?*Expr@new, val: int, inits: ?*FieldInit@new, variant: ?*Variant@new, fill: ?*Expr@new, ty: *Type@new): *Expr@new {
-    n: *Expr = mk_expr(ExprKind.New { lhs: lhs, val: val, inits: inits, variant: variant, fill: fill });
+new_field_init(name: []i8@new, m: ?*Member@new, lhs: ?*Expr@new): *FieldInit@new {
+    new FieldInit { name: name, member: m, lhs: lhs, next: null, lead: null, trail: null, pos: browse_tok_pos, file: browse_tok_file, toklen: browse_tok_len };
+}
+new_heap_node(lhs: ?*Expr@new, val: int, inits: ?*FieldInit@new, variant: ?*Variant@new, fill: ?*Expr@new, vname: []i8@new, ty: *Type@new): *Expr@new {
+    n: *Expr = mk_expr(ExprKind.New { lhs: lhs, val: val, inits: inits, variant: variant, fill: fill, vname: vname });
     n.ty = ty;
     n;
 }
-new_struct_lit(inits: ?*FieldInit@new, ty: *Type@new): *Expr@new {
-    n: *Expr = mk_expr(ExprKind.StructLit { inits: inits });
+new_struct_lit(name: []i8@new, inits: ?*FieldInit@new, ty: ?*Type@new): *Expr@new {
+    n: *Expr = mk_expr(ExprKind.StructLit { name: name, inits: inits });
     n.ty = ty;
     n;
 }
-new_variant_lit(v: *Variant@new, val: int, inits: ?*FieldInit@new, ty: *Type@new): *Expr@new {
-    n: *Expr = mk_expr(ExprKind.VariantLit { variant: v, val: val, inits: inits });
+new_variant_lit(tyname: []i8@new, name: []i8@new, v: ?*Variant@new, val: int, inits: ?*FieldInit@new, ty: ?*Type@new): *Expr@new {
+    n: *Expr = mk_expr(ExprKind.VariantLit { tyname: tyname, name: name, variant: v, val: val, inits: inits });
     n.ty = ty;
     n;
 }
+new_sizeof_ty(ty: *Type@new): *Expr@new { mk_expr(ExprKind.Sizeof { ty: ty, e: null }); }
+new_sizeof_e(e: *Expr@new): *Expr@new { mk_expr(ExprKind.Sizeof { ty: null, e: e }); }
 new_if_expr(cond: *Expr@new, then: *Expr@new, els: *Expr@new): *Expr@new { mk_expr(ExprKind.If { cond: cond, then: then, els: els }); }
 new_match_expr(cond: *Expr@new, arms: ?*MatchArm@new): *Expr@new { mk_expr(ExprKind.Match { cond: cond, arms: arms }); }
 new_block_expr(body: ?*Stmt@new): *Expr@new { mk_expr(ExprKind.Block { body: body }); }
 new_match(cond: *Expr@new, arms: ?*MatchArm@new): *Stmt@new { mk_stmt(StmtKind.Match { cond: cond, arms: arms }); }
-new_match_arm(variant: ?*Variant@new, binder: ?*Obj@new, body: *Stmt@new): *MatchArm@new {
-    new MatchArm { variant: variant, binder: binder, body: body, next: null, pos: 0, file: 0, toklen: 0 };
+new_match_arm(name: []i8@new, variant: ?*Variant@new, binder: ?*Obj@new, binder_name: []i8@new, paren: int, body: *Stmt@new): *MatchArm@new {
+    new MatchArm { name: name, variant: variant, binder: binder, binder_name: binder_name, paren: paren, body: body, next: null, lead: null, trail: null, pos: 0, file: 0, toklen: 0 };
 }
-new_raise(exn: *ExnDef@new, inits: ?*FieldInit@new): *Stmt@new { mk_stmt(StmtKind.Raise { exn: exn, inits: inits }); }
+new_raise(name: []i8@new, exn: ?*ExnDef@new, inits: ?*FieldInit@new, has: int): *Stmt@new {
+    mk_stmt(StmtKind.Raise { name: name, exn: exn, inits: inits, has: has });
+}
 new_try(body: *Stmt@new, arms: ?*CatchArm@new, buf: *Obj@new): *Stmt@new { mk_stmt(StmtKind.Try { body: body, arms: arms, buf: buf }); }
 new_region(body: *Stmt@new, mark: *Obj@new): *Stmt@new { mk_stmt(StmtKind.Region { body: body, mark: mark }); }
-new_catch_arm(exn: *ExnDef@new, binder: ?*Obj@new, body: *Stmt@new): *CatchArm@new {
-    new CatchArm { exn: exn, binder: binder, body: body, next: null, pos: 0, file: 0, toklen: 0 };
+new_catch_arm(name: []i8@new, exn: ?*ExnDef@new, binder: ?*Obj@new, binder_name: []i8@new, paren: int, body: *Stmt@new): *CatchArm@new {
+    new CatchArm { name: name, exn: exn, binder: binder, binder_name: binder_name, paren: paren, body: body, next: null, lead: null, trail: null, pos: 0, file: 0, toklen: 0 };
 }
 
 find_function(name: []i8): ?*Function {
@@ -2380,7 +2720,9 @@ new_obj(name: []i8@new, is_local: int) noregion: *Obj@new {
         browse_id: browse_fresh(),
         browse_pos: browse_tok_pos,
         browse_file: browse_tok_file,
-        browse_len: browse_tok_len
+        browse_len: browse_tok_len,
+        lead: null,
+        trail: null
     };
     if (is_local != 0) {
         o.scope_depth = scope_depth;
@@ -2762,7 +3104,11 @@ mark_addr_taken(o: *Obj@immortal) noregion {
 taint_result_ty(n: *Expr): ?*Type@n {
     if (n.ty != null) { return n.ty; }
     match n.kind {
-        MemberAccess k -> { k.member.ty; }
+        MemberAccess k -> {
+            mo: ?*Member = k.member;
+            if (mo == null) { return null; }
+            mo.ty;
+        }
         _ -> { null; }
     }
 }
@@ -3644,7 +3990,7 @@ parse_field_inits(members: ?*Member@new) noregion raises Error: *FieldInit {
         }
         e: *Expr = parse_expr();
         lhs: ?*Expr = e;
-        init: *FieldInit = new_field_init(mu, lhs);
+        init: *FieldInit = new_field_init(fname, mu, lhs);
         if (cur != null) {
             cur.next = init;
             cur = init;
@@ -3705,7 +4051,7 @@ parse_primary() noregion raises Error: *Expr@new {
             } else {
                 if (v.fields != null) { error("variant requires field initializers"); }
             }
-            hn: *Expr = new_heap_node(null, v.tag, args, v, null, ptr_to(ety));
+            hn: *Expr = new_heap_node(null, v.tag, args, v, null, vname, ptr_to(ety));
             hn.pos = hvpos;
             hn.file = hvfile;
             hn.toklen = hvlen;
@@ -3725,7 +4071,7 @@ parse_primary() noregion raises Error: *Expr@new {
             tok = tok.next;
             fill: *Expr = parse_expr();
             skip(TokKind.RParen);
-            return new_heap_node(len, 1, null, null, fill, slice_of(base));
+            return new_heap_node(len, 1, null, null, fill, "", slice_of(base));
         }
         if (is_pointer(base)) { error("new expects a non-pointer type"); }
         if (tok.kind != TokKind.LBrace) {
@@ -3734,7 +4080,7 @@ parse_primary() noregion raises Error: *Expr@new {
         if (is_enum_ty(base)) {
             error("use new Enum.Variant { ... } for sum types");
         }
-        return new_heap_node(null, 0, parse_struct_field_inits(base), null, null, ptr_to(base));
+        return new_heap_node(null, 0, parse_struct_field_inits(base), null, null, "", ptr_to(base));
     }
     if (tok.kind == TokKind.Sizeof) {
         tok = tok.next;
@@ -3742,12 +4088,13 @@ parse_primary() noregion raises Error: *Expr@new {
         if (starts_type()) {
             ty: *Type = parse_type();
             skip(TokKind.RParen);
-            return new_num(type_size(ty));
+            sn: *Expr = new_sizeof_ty(ty);
+            sn.ty = ty_int;
+            return sn;
         }
         n = parse_expr();
         skip(TokKind.RParen);
-        add_type(n);
-        return new_num(type_size(n.ty or error("missing type")));
+        return new_sizeof_e(n);
     }
     if (tok.kind == TokKind.LParen) {
         tok = tok.next;
@@ -3761,7 +4108,7 @@ parse_primary() noregion raises Error: *Expr@new {
         if (tok.kind == TokKind.I8) {
             if (ival < 0 || ival > 255) { error("i8 literal out of range"); }
             tok = tok.next;
-            n = new_num(ival);
+            n = mk_expr(ExprKind.Num { val: ival, str_label: 0, form: LIT_I8 });
             n.ty = ty_i8;
             return n;
         }
@@ -3770,8 +4117,12 @@ parse_primary() noregion raises Error: *Expr@new {
     }
     if (tok.kind == TokKind.True || tok.kind == TokKind.False) {
         bv: int = 0;
-        if (tok.kind == TokKind.True) { bv = 1; }
-        n = new_num(bv);
+        form: int = LIT_FALSE;
+        if (tok.kind == TokKind.True) {
+            bv = 1;
+            form = LIT_TRUE;
+        }
+        n = mk_expr(ExprKind.Num { val: bv, str_label: 0, form: form });
         n.ty = ty_bool;
         tok = tok.next;
         return n;
@@ -3781,7 +4132,7 @@ parse_primary() noregion raises Error: *Expr@new {
         return new_null_expr();
     }
     if (tok.kind == TokKind.Char) {
-        n = new_num(tok.val);
+        n = mk_expr(ExprKind.Num { val: tok.val, str_label: 0, form: LIT_CHAR });
         n.ty = ty_i8;
         tok = tok.next;
         return n;
@@ -3816,7 +4167,7 @@ parse_primary() noregion raises Error: *Expr@new {
             } else {
                 if (v.fields != null) { error("variant requires field initializers"); }
             }
-            vl: *Expr = new_variant_lit(v, v.tag, args, ety);
+            vl: *Expr = new_variant_lit(name, vname, v, v.tag, args, ety);
             vl.pos = vpos;
             vl.file = vfile;
             vl.toklen = vlen;
@@ -3825,7 +4176,7 @@ parse_primary() noregion raises Error: *Expr@new {
         if (nk == TokKind.LBrace && is_named_type(name)) {
             sty: *Type = parse_type();
             if (!is_struct_ty(sty)) { error("struct literal requires a struct type"); }
-            return new_struct_lit(parse_struct_field_inits(sty), sty);
+            return new_struct_lit(name, parse_struct_field_inits(sty), sty);
         }
         npos: int = browse_tok_pos;
         nlen: int = browse_tok_len;
@@ -3905,6 +4256,7 @@ parse_match_arms(mcond: *Expr@new) noregion raises Error: ?*MatchArm@new {
         is_wild: bool = streq(vname, "_");
         binder_name: []i8 = "";
         have_binder: int = 0;
+        have_paren: int = 0;
         if (tok.kind == TokKind.LParen) {
             /* Legacy Variant(name); prefer Variant name. */
             if (is_wild) { error("wildcard match arm cannot bind a payload"); }
@@ -3913,6 +4265,7 @@ parse_match_arms(mcond: *Expr@new) noregion raises Error: ?*MatchArm@new {
             binder_name = cur_tokstr();
             browse_note();
             have_binder = 1;
+            have_paren = 1;
             tok = tok.next;
             skip(TokKind.RParen);
         } else {
@@ -3958,7 +4311,7 @@ parse_match_arms(mcond: *Expr@new) noregion raises Error: ?*MatchArm@new {
         }
         arm_body_n: *Stmt = parse_compound();
         leave_scope();
-        arm: *MatchArm = new_match_arm(arm_variant_n, arm_binder, arm_body_n);
+        arm: *MatchArm = new_match_arm(vname, arm_variant_n, arm_binder, binder_name, have_paren, arm_body_n);
         arm.pos = vpos;
         arm.file = vfile;
         arm.toklen = vlen;
@@ -4040,7 +4393,7 @@ parse_postfix() noregion raises Error: *Expr@new {
                     } else { m = find_member(type_struct_def(sty), name); }
                     if (m == null) { error("unknown member"); }
                     mu: *Member = m;
-                    n = new_member_access(n, mu);
+                    n = new_member_access(n, name, mu);
                     n.pos = mpos;
                     n.file = mfile;
                     n.toklen = mlen;
@@ -4105,8 +4458,9 @@ add_type_field_inits_opt(inits: ?*FieldInit@new, heap: int) noregion raises Erro
     while (a != null) {
         add_type(a.lhs);
         if (a.lhs != null) {
-            if (!assignable(decay(a.member.ty), a.lhs)) {
-                error_have_expr_want("field initializer type mismatch", a.lhs, decay(a.member.ty));
+            mem: *Member = a.member or error("internal");
+            if (!assignable(decay(mem.ty), a.lhs)) {
+                error_have_expr_want("field initializer type mismatch", a.lhs, decay(mem.ty));
             }
             if (heap == 1) { check_store(a.lhs, life_heap); }
             if (heap == 2) { check_exc_payload(a.lhs); }
@@ -4630,8 +4984,13 @@ add_type_expr(p: *Expr@new) noregion raises Error {
             if (t0 != null && is_opt_pointer(t0)) {
                 error_ty("member access on optional pointer (use if (p != null) / while (p != null) to narrow)", t0);
             }
-            mem: *Member = q.member;
+            mem: *Member = q.member or error("internal");
             p.ty = mem.ty;
+            return;
+        }
+        Sizeof k -> {
+            add_type(k.e);
+            p.ty = ty_int;
             return;
         }
         _ -> {}
@@ -4927,7 +5286,7 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
             saved_c: ?*CatchFrame = catch_top;
             arm: ?*CatchArm = k.arms;
             while (arm != null) {
-                catch_push(arm.exn);
+                catch_push(arm.exn or error("internal"));
                 arm = arm.next;
             }
             add_type_stmt(k.body);
@@ -4940,7 +5299,7 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
             return;
         }
         Raise k -> {
-            check_exn_allowed(k.exn, "raise");
+            check_exn_allowed(k.exn or error("internal"), "raise");
             add_type_field_inits_opt(k.inits, 2);
             return;
         }
@@ -5002,6 +5361,14 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
             _rf: int = life_enter_region();
             add_type_stmt(k.body);
             life_leave_region(old_cur, old_heap);
+            return;
+        }
+        Decl k -> {
+            vo: ?*Obj = k.var;
+            init: ?*Expr = k.init;
+            if (init != null && vo != null) {
+                add_type(new_assign(new_var_node(vo), init));
+            }
             return;
         }
         _ -> {}
@@ -5198,7 +5565,9 @@ parse_decl(is_local: int, allow_at: int) noregion raises Error: *Obj@new {
 }
 
 parse_compound() noregion raises Error: *Stmt@new {
-    new_block(parse_brace_stmts());
+    s: *Stmt = new_block(parse_brace_stmts());
+    s.end = last_close_pos;
+    s;
 }
 
 parse_brace_stmts() noregion raises Error: ?*Stmt@new {
@@ -5217,12 +5586,20 @@ parse_brace_stmts() noregion raises Error: ?*Stmt@new {
             cur = s;
         }
     }
+    last_close_pos = tok.pos;
     skip(TokKind.RBrace);
     leave_scope();
     head;
 }
 
 parse_stmt() noregion raises Error: *Stmt@new {
+    spos: int = tok.pos;
+    s: *Stmt = parse_stmt_body();
+    s.pos = spos;
+    s;
+}
+
+parse_stmt_body() noregion raises Error: *Stmt@new {
     if (tok.kind == TokKind.Return) {
         tok = tok.next;
         lhs: ?*Expr = null;
@@ -5241,13 +5618,15 @@ parse_stmt() noregion raises Error: *Stmt@new {
         browse_add(browse_tok_file, browse_tok_pos, browse_tok_len, edu.browse_id, 0, BROWSE_TY, ename);
         tok = tok.next;
         rargs: ?*FieldInit = null;
+        rhas: int = 0;
         if (tok.kind == TokKind.LBrace) {
             rargs = parse_exn_field_inits(edu);
+            rhas = 1;
         } else {
             if (edu.members != null) { error("exception requires field initializers"); }
         }
         skip(TokKind.Semi);
-        return new_raise(edu, rargs);
+        return new_raise(ename, edu, rargs, rhas);
     }
     if (tok.kind == TokKind.Try) {
         tok = tok.next;
@@ -5274,6 +5653,7 @@ parse_stmt() noregion raises Error: *Stmt@new {
                 a = a.next;
             }
             enter_scope();
+            cparen: int = 0;
             binder: ?*Obj = null;
             if (tok.kind == TokKind.LParen) {
                 /* Legacy Name(x); prefer Name x. */
@@ -5286,6 +5666,7 @@ parse_stmt() noregion raises Error: *Stmt@new {
                 bo: *Obj = new_obj(bname, 1);
                 bo.ty = exn_type(cedu);
                 binder = bo;
+                cparen = 1;
             } else {
                 if (tok.kind == TokKind.Ident) {
                     bname2: []i8 = cur_tokstr();
@@ -5301,7 +5682,9 @@ parse_stmt() noregion raises Error: *Stmt@new {
             skip(TokKind.Arrow);
             abody: *Stmt = parse_compound();
             leave_scope();
-            armn: *CatchArm = new_catch_arm(cedu, binder, abody);
+            bnm: []i8 = "";
+            if (binder != null) { bnm = binder.name; }
+            armn: *CatchArm = new_catch_arm(cname, cedu, binder, bnm, cparen, abody);
             armn.pos = cpos;
             armn.file = cfile;
             armn.toklen = clen;
@@ -5405,14 +5788,15 @@ parse_stmt() noregion raises Error: *Stmt@new {
     if (tok.kind == TokKind.Ident && (tok.next).kind == TokKind.Colon) {
         o: *Obj = parse_decl(1, 0);
         if (tok.kind == TokKind.Comma) { error("only one variable per declaration"); }
+        dty: *Type = o.ty or error("missing type");
         if (tok.kind == TokKind.Assign) {
             tok = tok.next;
             rhs: *Expr = parse_expr();
             skip(TokKind.Semi);
-            return new_expr_stmt(new_assign(new_var_node(o), rhs));
+            return new_decl(o.name, dty, rhs, o);
         }
         skip(TokKind.Semi);
-        return new_block(null);
+        return new_decl(o.name, dty, null, o);
     }
     e: *Expr = parse_expr();
     skip(TokKind.Semi);
@@ -5473,7 +5857,9 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error: *Function@
         browse_id: browse_fresh(),
         browse_pos: browse_tok_pos,
         browse_file: browse_tok_file,
-        browse_len: browse_tok_len
+        browse_len: browse_tok_len,
+        lead: null,
+        trail: null
     };
     locals = null;
     scope_locals = null;
@@ -5574,6 +5960,8 @@ parse_field_list(base_offset: int) noregion raises Error: *Member {
             offset: offset,
             ty: mty,
             next: null,
+            lead: null,
+            trail: null,
             browse_id: browse_fresh(),
             browse_pos: browse_tok_pos,
             browse_file: browse_tok_file,
@@ -5609,6 +5997,8 @@ parse_variant(tag: int, enum_name: []i8) noregion raises Error: *Variant@new {
         payload_ty: null,
         payload_size: 0,
         next: null,
+        lead: null,
+        trail: null,
         browse_id: browse_fresh(),
         browse_pos: tok.pos,
         browse_file: current_file_id,
@@ -5627,6 +6017,8 @@ parse_variant(tag: int, enum_name: []i8) noregion raises Error: *Variant@new {
             next: null,
             hash_next: null,
             ptr_walk: 0,
+            lead: null,
+            trail: null,
             browse_id: 0,
             browse_pos: 0,
             browse_file: 0,
@@ -5652,6 +6044,8 @@ parse_exception_def() noregion raises Error {
         ty: null,
         next: exn_defs,
         hash_next: null,
+        lead: null,
+        trail: null,
         browse_id: browse_fresh(),
         browse_pos: browse_tok_pos,
         browse_file: browse_tok_file,
@@ -5667,6 +6061,7 @@ parse_exception_def() noregion raises Error {
         skip_optional_semi();
     } else { skip(TokKind.Semi); }
     exn_type(ed);
+    append_item(new_item(ItemKind.Exn { def: ed }, ed.browse_pos));
 }
 
 parse_type_def() noregion raises Error {
@@ -5691,6 +6086,7 @@ parse_type_def() noregion raises Error {
         sd.members = parse_field_list(0);
         sd.size = field_list_size;
         skip_optional_semi();
+        append_item(new_item(ItemKind.Struct { def: sd }, npos));
         return;
     }
 
@@ -5739,9 +6135,10 @@ parse_type_def() noregion raises Error {
         if (stub.ty != null) { rebind_struct_stub_to_enum(stub, ed); }
     }
     skip(TokKind.Semi);
+    append_item(new_item(ItemKind.Enum { def: ed }, npos));
 }
 
-parse_source_file(path: []i8@immortal) noregion raises Error {
+parse_source_file(path: []i8@immortal, keep_items: int) noregion raises Error {
     if (!mark_imported(path)) { return; }
     f: ?*ImportedFile = imported_files;
     saved_source: []i8 = source;
@@ -5750,6 +6147,13 @@ parse_source_file(path: []i8@immortal) noregion raises Error {
     saved_tok: *Token = tok;
     saved_path: []i8 = source_path;
     saved_file: int = current_file_id;
+    saved_items: ?*Item = file_items;
+    saved_items_tail: ?*Item = file_items_tail;
+    saved_coms: ?*Com = file_coms;
+    saved_coms_tail: ?*Com = file_coms_tail;
+    saved_trail: ?*Com = file_trail;
+    file_items = null;
+    file_items_tail = null;
     source_path = path;
     source = read_file(path);
     if (f != null) {
@@ -5759,22 +6163,37 @@ parse_source_file(path: []i8@immortal) noregion raises Error {
     }
     tok = tokenize();
     parse_program_unit();
+    attach_parsed_file();
+    kept_items: ?*Item = file_items;
+    kept_tail: ?*Item = file_items_tail;
     source = saved_source;
     source_len = saved_source_len;
     pos = saved_pos;
     tok = saved_tok;
     source_path = saved_path;
     current_file_id = saved_file;
+    file_coms = saved_coms;
+    file_coms_tail = saved_coms_tail;
+    if (keep_items != 0) {
+        file_items = kept_items;
+        file_items_tail = kept_tail;
+    } else {
+        file_items = saved_items;
+        file_items_tail = saved_items_tail;
+        file_trail = saved_trail;
+    }
 }
 
 parse_import() noregion raises Error {
+    ipos: int = tok.pos;
     tok = tok.next;
     if (tok.kind != TokKind.Str) { error("expected string path after import"); }
     relative: []i8 = cur_tokstr();
     tok = tok.next;
     skip(TokKind.Semi);
+    append_item(new_item(ItemKind.Import { path: relative, tag: 0 }, ipos));
     path: []i8 = resolve_import_path(source_path, relative);
-    parse_source_file(path);
+    parse_source_file(path, 0);
 }
 
 is_builtin_fname(name: []i8): bool {
@@ -5830,6 +6249,7 @@ parse_program_unit() noregion raises Error {
                 if (tok.kind != TokKind.LParen) { error("expected `(` after extern name"); }
                 efn: *Function = parse_function(ename, 1);
                 bind_function(ename, efn);
+                append_item(new_item(ItemKind.Func { fn: efn }, efn.browse_pos));
             } else {
             if (tok.kind != TokKind.Ident) { error("expected identifier"); }
             name: []i8 = cur_tokstr();
@@ -5841,6 +6261,7 @@ parse_program_unit() noregion raises Error {
             if (tok.kind == TokKind.LParen) {
                 fn: *Function = parse_function(name, 0);
                 bind_function(name, fn);
+                append_item(new_item(ItemKind.Func { fn: fn }, fn.browse_pos));
             } else {
                 skip(TokKind.Colon);
                 ty: *Type = parse_type();
@@ -5857,6 +6278,7 @@ parse_program_unit() noregion raises Error {
                 tok = tok.next;
                 o2.init = parse_expr();
                 skip(TokKind.Semi);
+                append_item(new_item(ItemKind.Global { var: o2 }, gpos));
             }
             }
             }
@@ -5876,7 +6298,9 @@ parse_program(entry_path: []i8) noregion raises Error {
     next_exn_tag = 1;
     browse_reset();
     clear_sym_tables();
-    parse_source_file(normalize_path(entry_path));
+    file_items = null;
+    file_items_tail = null;
+    parse_source_file(normalize_path(entry_path), 1);
 }
 
 /* Assumes n is already typed. True if execution cannot fall through. */
@@ -6509,6 +6933,7 @@ da_expr(n: ?*Expr) noregion raises Error: bool {
             false;
         }
         Block k -> { da_stmt_list(k.body); }
+        Sizeof k -> { da_expr(k.e); }
     }
 }
 
@@ -6634,6 +7059,13 @@ da_stmt(s: ?*Stmt) noregion raises Error: bool {
             false;
         }
         Region k -> { da_stmt(k.body); }
+        Decl k -> {
+            _di: bool = da_expr(k.init);
+            vo: ?*Obj = k.var;
+            if (k.init != null && vo != null) { init_mark(vo); }
+            false;
+        }
+        Comment _c -> { false; }
     }
 }
 
@@ -6688,6 +7120,7 @@ expr_calls_need_imm(n: ?*Expr): bool {
             false;
         }
         Block k -> { stmt_list_calls_need_imm(k.body); }
+        Sizeof k -> { expr_calls_need_imm(k.e); }
         _ -> { false; }
     }
 }
@@ -6730,6 +7163,7 @@ stmt_calls_need_imm(s: ?*Stmt): bool {
             false;
         }
         Region k -> { stmt_calls_need_imm(k.body); }
+        Decl k -> { expr_calls_need_imm(k.init); }
         _ -> { false; }
     }
 }
@@ -6879,6 +7313,7 @@ check_region_calls_stmt(s: ?*Stmt) raises Error {
             life_heap = old_heap;
             return;
         }
+        Decl k -> { check_region_calls_expr(k.init); return; }
         _ -> { return; }
     }
 }
@@ -7225,7 +7660,7 @@ gen_field_inits(inits: ?*FieldInit, base_off: int) noregion raises Error {
     while (init != null) {
         lhs: ?*Expr = init.lhs;
         if (lhs != null) {
-            mem: *Member = init.member;
+            mem: *Member = init.member or error("internal");
             mty: *Type = mem.ty;
             gen_expr(lhs);
             cg_mov_rr(3, 7);
@@ -7474,7 +7909,7 @@ gen_addr(n: *Expr) noregion raises Error {
             if (t != null && is_pointer(t) && (is_struct_ty(type_base(t)) || is_exn_ty(type_base(t)))) {
                 gen_expr(k.lhs);
             } else { gen_addr(k.lhs); }
-            mem: *Member = k.member;
+            mem: *Member = k.member or error("internal");
             if (mem.offset != 0) {
                 cg_alu_imm(0, mem.offset, 0);
             }
@@ -8153,6 +8588,16 @@ gen_expr(n: *Expr) noregion raises Error {
             }
             return;
         }
+        Sizeof k -> {
+            sty: ?*Type = k.ty;
+            if (sty == null) {
+                se: ?*Expr = k.e;
+                if (se == null) { error("sizeof"); }
+                sty = se.ty;
+            }
+            cg_mov_imm(type_size(sty or error("sizeof")), 0);
+            return;
+        }
         _ -> { error("invalid expression"); }
     }
 }
@@ -8334,8 +8779,9 @@ gen_stmt(n: *Stmt) noregion raises Error {
             return;
         }
         Raise k -> {
-            if (k.exn.members != null) {
-                esz: int = k.exn.size;
+            ex: *ExnDef = k.exn or error("internal");
+            if (ex.members != null) {
+                esz: int = ex.size;
                 if (esz <= 0) { esz = 8; }
                 cg_mov_imm(esz, 7);
                 emit_exc_malloc();
@@ -8345,7 +8791,7 @@ gen_stmt(n: *Stmt) noregion raises Error {
                 cg_mov_rr(3, 6);
                 cg_pop(3);
             } else { cg_mov_imm(0, 6); }
-            cg_mov_imm(k.exn.tag, 7);
+            cg_mov_imm(ex.tag, 7);
             cg_call("l8_raise");
             return;
         }
@@ -8363,7 +8809,7 @@ gen_stmt(n: *Stmt) noregion raises Error {
             arm2: ?*CatchArm = k.arms;
             while (arm2 != null) {
                 la2: int = new_label();
-                ced: *ExnDef = arm2.exn;
+                ced: *ExnDef = arm2.exn or error("internal");
                 cg_mov_rip_r("l8_exc_tag", 0, 0);
                 cg_alu_imm(7, ced.tag, 0);
                 cg_jump_id(5, la2);
@@ -8397,6 +8843,16 @@ gen_stmt(n: *Stmt) noregion raises Error {
             gen_stmt(k.body);
             cg_region_depth = cg_region_depth - 1;
             cg_call("l8_region_pop");
+            return;
+        }
+        Comment _c -> { return; }
+        Decl k -> {
+            vo: ?*Obj = k.var;
+            init: ?*Expr = k.init;
+            if (init != null && vo != null) {
+                ae: *Expr = new_assign(new_var_node(vo), init);
+                gen_expr(ae);
+            }
             return;
         }
         _ -> { error("invalid statement"); }
