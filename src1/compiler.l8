@@ -1,10 +1,11 @@
 // L8 self-hosted compiler → x86-64 Linux GAS
 // Nominal AST; Type is a sum; Expr/Stmt are typed envelopes.
-// Heap ADTs via new; aggregates by sret; *T vs ?*T with flow narrowing; `e or alt` unwraps ?*T.
+// Heap ADTs via new; aggregates by sret; *T vs ?*T with flow narrowing; `e or alt` unwraps ?*T and ?[]T.
 // Assignment and taking a name's address kill narrowing and [z]T walk facts for that name.
 // Strings: "..." or """...""" (newlines kept; a newline right after """ is dropped).
 // Same escapes in both. Byte literals: 'A' and Ni8 (0..255); i8 arithmetic wraps, no mixed promotion.
 // *T is one object: p.* only, no p[i]. []T is a thin pointer with len at -8.
+// ?*T / ?[]T are null or the non-optional form; `if (x != null)` and `x or y` unwrap.
 // [z]T is a read-only C-string; s[i] only if walked from 0. &s[i] on [z]T stays [z]T.
 // `as` only forgets a claim (same pointee): []T/*T → *T or ?*T. It cannot invent or strip [z].
 // A span of an existing []T is the array plus a start index.
@@ -55,6 +56,7 @@ type Type =
     | Ptr { base: *Type }
     | OptPtr { base: *Type }
     | Slice { base: *Type }
+    | OptSlice { base: *Type }
     | ZPtr { base: *Type }
     | Record { def: *StructDef }
     | Enum { def: *EnumDef }
@@ -684,6 +686,8 @@ opt_ptr_cache: ?*TyEnt = null;
 
 slice_cache: ?*TyEnt = null;
 
+opt_slice_cache: ?*TyEnt = null;
+
 zptr_cache: ?*TyEnt = null;
 
 oob_lab: int = 0;
@@ -1198,6 +1202,11 @@ append_type(sb: *StrBuf@immortal, t: ?*Type) raises Error {
             append_type(sb, k.base);
             return;
         }
+        OptSlice k -> {
+            sb_puts(sb, "?[]");
+            append_type(sb, k.base);
+            return;
+        }
         ZPtr k -> {
             sb_puts(sb, "[z]");
             append_type(sb, k.base);
@@ -1364,6 +1373,7 @@ init_runtime() noregion {
     ptr_cache = null;
     opt_ptr_cache = null;
     slice_cache = null;
+    opt_slice_cache = null;
     zptr_cache = null;
     walk_top = null;
     zero_top = null;
@@ -1525,6 +1535,9 @@ type_size(t: *Type): int {
         Slice _p -> {
             8;
         }
+        OptSlice _p -> {
+            8;
+        }
         ZPtr _p -> {
             8;
         }
@@ -1556,6 +1569,9 @@ type_base(t: *Type) raises Error: *Type {
             k.base;
         }
         Slice k -> {
+            k.base;
+        }
+        OptSlice k -> {
             k.base;
         }
         ZPtr k -> {
@@ -1636,6 +1652,19 @@ slice_of(base: *Type@immortal) noregion: *Type@new {
     }
     t: *Type = new Type.Slice { base: base };
     slice_cache = new TyEnt { base: base, ty: t, next: slice_cache };
+    t;
+}
+
+opt_slice_of(base: *Type@immortal) noregion: *Type@new {
+    e: ?*TyEnt = opt_slice_cache;
+    while (e != null) {
+        if (e.base == base) {
+            return e.ty;
+        }
+        e = e.next;
+    }
+    t: *Type = new Type.OptSlice { base: base };
+    opt_slice_cache = new TyEnt { base: base, ty: t, next: opt_slice_cache };
     t;
 }
 
@@ -1978,10 +2007,23 @@ starts_type(): bool {
         if (t.kind == TokKind.Question) {
             n1: ?*Token = t.next;
             if (n1 != null) {
-                if (n1.kind != TokKind.Star) {
-                    return false;
+                if (n1.kind == TokKind.Star) {
+                    t = n1.next;
+                } else {
+                    if (n1.kind == TokKind.LBrack) {
+                        n2: ?*Token = n1.next;
+                        if (n2 != null) {
+                            if (n2.kind != TokKind.RBrack) {
+                                return false;
+                            }
+                            t = n2.next;
+                        } else {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
                 }
-                t = n1.next;
             } else {
                 return false;
             }
@@ -2126,6 +2168,31 @@ is_slice(t: *Type): bool {
     }
 }
 
+is_opt_slice(t: *Type): bool {
+    match t.* {
+        OptSlice _p -> {
+            true;
+        }
+        _ -> {
+            false;
+        }
+    }
+}
+
+is_optional(t: *Type): bool {
+    is_opt_pointer(t) || is_opt_slice(t);
+}
+
+unwrap_optional(t: *Type) noregion raises Error: *Type@new {
+    if (is_opt_slice(t)) {
+        return slice_of(type_base(t));
+    }
+    if (!is_opt_pointer(t)) {
+        error("internal: unwrap_optional");
+    }
+    ptr_to(type_base(t));
+}
+
 is_zptr(t: *Type): bool {
     match t.* {
         ZPtr _p -> {
@@ -2145,7 +2212,7 @@ type_is_ref(t: ?*Type): bool {
     if (t == null) {
         return false;
     }
-    is_any_pointer(t) || is_slice(t) || is_zptr(t);
+    is_any_pointer(t) || is_slice(t) || is_opt_slice(t) || is_zptr(t);
 }
 
 is_struct_ty(t: *Type): bool {
@@ -2220,7 +2287,7 @@ is_null_expr(n: ?*Expr): bool {
 bind_null_to_pointer(pty: ?*Type@null_n, null_n: ?*Expr): bool {
     if (pty == null) {
         false;
-    } else if (!is_opt_pointer(pty) || !is_null_value_expr(null_n)) {
+    } else if (!is_optional(pty) || !is_null_value_expr(null_n)) {
         false;
     } else if (null_n != null) {
         null_n.ty = pty;
@@ -2247,6 +2314,10 @@ assignable(to: ?*Type@from_n, from_n: ?*Expr) raises Error: bool {
                 return true;
             }
             if (is_opt_pointer(to2) && (is_pointer(from2) || is_slice(from2)) && types_equal(type_base(from2),
+                type_base(to2))) {
+                return true;
+            }
+            if (is_opt_slice(to2) && is_slice(from2) && types_equal(type_base(from2),
                 type_base(to2))) {
                 return true;
             }
@@ -2355,6 +2426,9 @@ type_has_pointers(t: ?*Type): bool {
         Slice _p -> {
             true;
         }
+        OptSlice _p -> {
+            true;
+        }
         ZPtr _p -> {
             true;
         }
@@ -2389,6 +2463,8 @@ types_equal(a: *Type, b: *Type) raises Error: bool {
     } else if (is_opt_pointer(a) && is_opt_pointer(b)) {
         types_equal(type_base(a), type_base(b));
     } else if (is_slice(a) && is_slice(b)) {
+        types_equal(type_base(a), type_base(b));
+    } else if (is_opt_slice(a) && is_opt_slice(b)) {
         types_equal(type_base(a), type_base(b));
     } else if (is_zptr(a) && is_zptr(b)) {
         types_equal(type_base(a), type_base(b));
@@ -2433,7 +2509,20 @@ check_as(from: ?*Type, to: ?*Type) noregion raises Error {
         error_have_want("cannot cast optional pointer to non-optional (bind a local and use if (p != null))",
             from, to);
     }
-    if ((is_pointer(to) || is_opt_pointer(to)) && (is_pointer(from) || is_slice(from) || is_opt_pointer(from))) {
+    if (is_opt_slice(from) && is_slice(to)) {
+        error_have_want("cannot cast optional slice to non-optional (bind a local and use if (s != null))",
+            from, to);
+    }
+    if ((is_pointer(to) || is_opt_pointer(to)) && (is_pointer(from) || is_slice(from) || is_opt_pointer(from) || is_opt_slice(from))) {
+        if (is_pointer(to) && is_opt_slice(from)) {
+            error_have_want("cannot cast optional slice to non-optional (bind a local and use if (s != null))",
+                from, to);
+        }
+        if (types_equal(type_base(from), type_base(to))) {
+            return;
+        }
+    }
+    if ((is_slice(to) || is_opt_slice(to)) && (is_slice(from) || is_opt_slice(from))) {
         if (types_equal(type_base(from), type_base(to))) {
             return;
         }
