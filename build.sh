@@ -150,6 +150,8 @@ run_examples_selfhost() {
   example "$tool" offset examples/offset.l8 'YYY'
   example "$tool" counted examples/counted.l8 'YYYYYYY'
   example "$tool" optslice examples/optslice.l8 'YYYYY'
+  example "$tool" narrowfill examples/narrowfill.l8 'YYYY'
+  example_compile_fail "$tool" narrowasgn examples/narrowasgn.l8 'assignment type mismatch'
   example_compile_fail "$tool" optsliceidx examples/optsliceidx.l8 'index of optional slice'
   example_compile_fail "$tool" optslicelen examples/optslicelen.l8 'len of optional slice'
   example "$tool" for examples/for.l8 'YYYYYYY'
