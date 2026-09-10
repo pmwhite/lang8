@@ -4,6 +4,8 @@
 // Assignment and taking a name's address kill narrowing and [z]T walk facts for that name.
 // Strings: "..." or """...""" (newlines kept; a newline right after """ is dropped).
 // Same escapes in both. Byte literals: 'A' and Ni8 (0..255); i8 arithmetic wraps, no mixed promotion.
+// i32/u32/f32/f64 are same-type arithmetic too (no mixed promotion; widen with as, narrow ints with trunc).
+// Unsuffixed 1.0 is f32; write 1.0f64 for double. Floats use xmm0?xmm7 at calls. Struct fields stay 8-byte padded.
 // *T is one object: p.* only, no p[i]. []T is a thin pointer with len at -8.
 // ?*T / ?[]T are null or the non-optional form; `if (x != null)` and `x or y` unwrap.
 // [z]T is a read-only C-string; s[i] only if walked from 0. &s[i] on [z]T stays [z]T.
@@ -32,7 +34,7 @@
 // Long-lived storage cannot hold a shorter pointer.
 // Unknown names are an error. OS functions are `extern name(params): T` backed by runtime.s.
 // Shared libraries: top-level `need "libfoo.so";` plus `extern` names not defined in runtime.s.
-// Bitwise: `~ & ^ | << >>` on int/i8 (same type; >> is arithmetic; shift count is int).
+// Bitwise: `~ & ^ | << >>` on int/i8/i32/u32 (same type; >> is arithmetic except u32; shift count is int).
 // `for i in a..b` is exclusive over int; `for x in xs` walks `[]T` (not `[z]T`).
 // The item is a per-iteration copy (array) or the induction variable (range).
 // `if`/`match`/`{ }` are expressions; a block's last statement is its value (`;` does not discard).
@@ -43,7 +45,7 @@
 // Locals: `x: T;` is unassigned; use before assign on all paths is an error. No `uninitialized`.
 // `new T[n](v)` fills every slot with v (evaluated once). No implicit element default.
 // n must fit the 64MiB heap: negative or wrapping n * size is rejected.
-// Calls follow SysV: six argument registers, then the stack. Hidden sret is the first incoming slot.
+// Calls follow SysV: six integer registers, eight xmm registers, then the stack. Hidden sret is the first incoming integer slot.
 // Pipeline: parse (syntax, including comments) â†’ typecheck (fills Obj/Member/Function) â†’
 // unused fn/local + raises/noreturn checks â†’ codegen.
 // Parse does not load imports or require types; a later pass follows imports for compile.
@@ -52,6 +54,10 @@
 type Type =
     | Int
     | I8
+    | I32
+    | U32
+    | F32
+    | F64
     | Bool
     | Noreturn
     | Ptr { base: *Type }
@@ -184,6 +190,11 @@ type TokKind =
     | Ident
     | Int
     | I8
+    | I32
+    | U32
+    | F32
+    | F64
+    | Float
     | Bool
     | True
     | False
@@ -317,7 +328,12 @@ type BinOp =
     | Ge;
 
 type ExprKind =
-    | Num { val: int, str_label: int, form: int }
+    | Num {
+        val: int,
+        str_label: int,
+        form: int,
+        spell: []i8
+    }
     | Null
     | Var { var: ?*Obj, name: []i8, member: ?*Member }
     | Binary { op: BinOp, lhs: *Expr, rhs: *Expr }
@@ -599,6 +615,14 @@ LIT_TRUE: int = 3;
 
 LIT_FALSE: int = 4;
 
+LIT_I32: int = 5;
+
+LIT_U32: int = 6;
+
+LIT_F32: int = 7;
+
+LIT_F64: int = 8;
+
 globals: ?*Obj = null;
 
 locals: ?*Obj = null;
@@ -710,6 +734,14 @@ field_list_size: int = 0;
 ty_int: *Type = new Type.Int;
 
 ty_i8: *Type = new Type.I8;
+
+ty_i32: *Type = new Type.I32;
+
+ty_u32: *Type = new Type.U32;
+
+ty_f32: *Type = new Type.F32;
+
+ty_f64: *Type = new Type.F64;
 
 ty_bool: *Type = new Type.Bool;
 
@@ -1208,6 +1240,22 @@ append_type(sb: *StrBuf@immortal, t: ?*Type) raises Error {
             sb_puts(sb, "i8");
             return;
         }
+        I32 -> {
+            sb_puts(sb, "i32");
+            return;
+        }
+        U32 -> {
+            sb_puts(sb, "u32");
+            return;
+        }
+        F32 -> {
+            sb_puts(sb, "f32");
+            return;
+        }
+        F64 -> {
+            sb_puts(sb, "f64");
+            return;
+        }
         Bool -> {
             sb_puts(sb, "bool");
             return;
@@ -1364,6 +1412,10 @@ init_dummies() noregion {
 init_runtime() noregion {
     ty_int = new Type.Int;
     ty_i8 = new Type.I8;
+    ty_i32 = new Type.I32;
+    ty_u32 = new Type.U32;
+    ty_f32 = new Type.F32;
+    ty_f64 = new Type.F64;
     ty_bool = new Type.Bool;
     ty_noreturn = new Type.Noreturn;
     jd: *StructDef = new StructDef {
@@ -1551,6 +1603,18 @@ type_size(t: *Type): int {
         }
         I8 -> {
             1;
+        }
+        I32 -> {
+            4;
+        }
+        U32 -> {
+            4;
+        }
+        F32 -> {
+            4;
+        }
+        F64 -> {
+            8;
         }
         Bool -> {
             1;
@@ -1990,7 +2054,7 @@ syntax_fields_after_brace(inner: *Token): bool {
         return false;
     }
     v: *Token = inner.next.next;
-    if (v.kind == TokKind.Int || v.kind == TokKind.I8 || v.kind == TokKind.Bool || v.kind == TokKind.Noreturn) {
+    if (v.kind == TokKind.Int || v.kind == TokKind.I8 || v.kind == TokKind.I32 || v.kind == TokKind.U32 || v.kind == TokKind.F32 || v.kind == TokKind.F64 || v.kind == TokKind.Bool || v.kind == TokKind.Noreturn) {
         return false;
     }
     if (v.kind == TokKind.Star || v.kind == TokKind.Question || v.kind == TokKind.LBrack) {
@@ -2027,7 +2091,7 @@ starts_type(): bool {
     if (tok.kind == TokKind.LBrack) {
         return true;
     }
-    if (tok.kind == TokKind.Int || tok.kind == TokKind.I8 || tok.kind == TokKind.Bool || is_type_name()) {
+    if (tok.kind == TokKind.Int || tok.kind == TokKind.I8 || tok.kind == TokKind.I32 || tok.kind == TokKind.U32 || tok.kind == TokKind.F32 || tok.kind == TokKind.F64 || tok.kind == TokKind.Bool || is_type_name()) {
         return true;
     }
     t: ?*Token = tok;
@@ -2066,7 +2130,7 @@ starts_type(): bool {
     }
     if (t != null) {
         if (t != tok) {
-            if (t.kind == TokKind.Int || t.kind == TokKind.I8 || t.kind == TokKind.Bool) {
+            if (t.kind == TokKind.Int || t.kind == TokKind.I8 || t.kind == TokKind.I32 || t.kind == TokKind.U32 || t.kind == TokKind.F32 || t.kind == TokKind.F64 || t.kind == TokKind.Bool) {
                 return true;
             }
             if (t.kind == TokKind.Ident) {
@@ -2360,7 +2424,10 @@ assignable(to: ?*Type@from_n, from_n: ?*Expr) raises Error: bool {
     bind_null_to_pointer(tt, from_n);
 }
 
-is_i8_ty(t: *Type): bool {
+is_i8_ty(t: ?*Type): bool {
+    if (t == null) {
+        return false;
+    }
     match t.* {
         I8 -> {
             true;
@@ -2371,7 +2438,77 @@ is_i8_ty(t: *Type): bool {
     }
 }
 
-is_int_ty(t: *Type): bool {
+is_i32_ty(t: ?*Type): bool {
+    if (t == null) {
+        return false;
+    }
+    match t.* {
+        I32 -> {
+            true;
+        }
+        _ -> {
+            false;
+        }
+    }
+}
+
+is_u32_ty(t: ?*Type): bool {
+    if (t == null) {
+        return false;
+    }
+    match t.* {
+        U32 -> {
+            true;
+        }
+        _ -> {
+            false;
+        }
+    }
+}
+
+is_f32_ty(t: ?*Type): bool {
+    if (t == null) {
+        return false;
+    }
+    match t.* {
+        F32 -> {
+            true;
+        }
+        _ -> {
+            false;
+        }
+    }
+}
+
+is_f64_ty(t: ?*Type): bool {
+    if (t == null) {
+        return false;
+    }
+    match t.* {
+        F64 -> {
+            true;
+        }
+        _ -> {
+            false;
+        }
+    }
+}
+
+is_float_ty(t: ?*Type): bool {
+    is_f32_ty(t) || is_f64_ty(t);
+}
+
+is_int_width_ty(t: ?*Type): bool {
+    if (t == null) {
+        return false;
+    }
+    is_int_ty(t) || is_i8_ty(t) || is_i32_ty(t) || is_u32_ty(t);
+}
+
+is_int_ty(t: ?*Type): bool {
+    if (t == null) {
+        return false;
+    }
     match t.* {
         Int -> {
             true;
@@ -2382,7 +2519,10 @@ is_int_ty(t: *Type): bool {
     }
 }
 
-is_bool_ty(t: *Type): bool {
+is_bool_ty(t: ?*Type): bool {
+    if (t == null) {
+        return false;
+    }
     match t.* {
         Bool -> {
             true;
@@ -2483,6 +2623,14 @@ types_equal(a: *Type, b: *Type) raises Error: bool {
         true;
     } else if (is_i8_ty(a) && is_i8_ty(b)) {
         true;
+    } else if (is_i32_ty(a) && is_i32_ty(b)) {
+        true;
+    } else if (is_u32_ty(a) && is_u32_ty(b)) {
+        true;
+    } else if (is_f32_ty(a) && is_f32_ty(b)) {
+        true;
+    } else if (is_f64_ty(a) && is_f64_ty(b)) {
+        true;
     } else if (is_bool_ty(a) && is_bool_ty(b)) {
         true;
     } else if (is_noreturn_ty(a) && is_noreturn_ty(b)) {
@@ -2509,7 +2657,7 @@ types_equal(a: *Type, b: *Type) raises Error: bool {
 }
 
 is_numeric_ty(t: *Type): bool {
-    is_int_ty(t) || is_i8_ty(t) || is_bool_ty(t);
+    is_int_ty(t) || is_i8_ty(t) || is_i32_ty(t) || is_u32_ty(t) || is_f32_ty(t) || is_f64_ty(t) || is_bool_ty(t);
 }
 
 check_as(from: ?*Type, to: ?*Type) noregion raises Error {
@@ -2525,13 +2673,22 @@ check_as(from: ?*Type, to: ?*Type) noregion raises Error {
         return;
     }
     if (is_numeric_ty(from) && is_numeric_ty(to)) {
-        if ((is_i8_ty(from) || is_bool_ty(from)) && is_int_ty(to)) {
+        if ((is_i8_ty(from) || is_i32_ty(from) || is_u32_ty(from) || is_bool_ty(from)) && is_int_ty(to)) {
+            return;
+        }
+        if (is_int_width_ty(from) && is_float_ty(to)) {
+            return;
+        }
+        if (is_float_ty(from) && is_int_ty(to)) {
+            return;
+        }
+        if (is_float_ty(from) && is_float_ty(to)) {
             return;
         }
         if (type_size(from) == 1 && type_size(to) == 1) {
             return;
         }
-        error_have_want("invalid as conversion (use trunc to narrow int\â\†\’i8/bool)",
+        error_have_want("invalid as conversion (use trunc to narrow int to i8/i32/u32/bool)",
             from, to);
     }
     if (is_opt_pointer(from) && is_pointer(to)) {
@@ -2703,7 +2860,7 @@ check_trunc(from: ?*Type, to: ?*Type) noregion raises Error {
     if (to == null) {
         error("invalid trunc conversion");
     }
-    if (is_int_ty(from) && (is_i8_ty(to) || is_bool_ty(to))) {
+    if (is_int_ty(from) && (is_i8_ty(to) || is_i32_ty(to) || is_u32_ty(to) || is_bool_ty(to))) {
         return;
     }
     error_have_want("invalid trunc conversion", from, to);

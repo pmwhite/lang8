@@ -143,6 +143,10 @@ run_examples_selfhost() {
   example "$tool" noreturn examples/noreturn.l8 'Hi'
   example "$tool" global examples/global.l8 'YYYYYY'
   example "$tool" bitwise examples/bitwise.l8 'YYYYYYYYYYYY'
+  example "$tool" float examples/float.l8 'YYYYYYYYYYYYYY'
+  example "$tool" i32 examples/i32.l8 'YYYYYYYYYYYYY'
+  example_compile_fail "$tool" mixfloat examples/mixfloat.l8 'arithmetic type mismatch'
+  example_compile_fail "$tool" mixnum examples/mixnum.l8 'arithmetic type mismatch'
   example "$tool" expr examples/expr.l8 'YYYYYYYYYYY'
   example "$tool" mlstr examples/mlstr.l8 $'A\nB\nxy'
   check_retwarn "$tool"
