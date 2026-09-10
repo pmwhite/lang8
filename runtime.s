@@ -27,6 +27,9 @@
 .globl l8_region_pop
 .globl l8_exc_malloc
 .globl rdtsc
+.globl l8_as_int
+.globl l8_call
+.globl l8_load64
 
 .section .bss
 .align 8
@@ -69,14 +72,21 @@ _start:
     push %rdi
     push %rsi
 
-    mov $12, %rax          # brk
+    # mmap, not brk: libc malloc also uses the program break, and a
+    # dynlinked need "libX11" / libGL process will corrupt Mesa's
+    # FBConfig list if we steal brk for the bump heap.
     mov $0, %rdi
+    mov $0, %rsi
+    lea HEAP_SIZE(%rsi), %rsi
+    mov $3, %rdx           # PROT_READ|PROT_WRITE
+    mov $34, %r10          # MAP_PRIVATE|MAP_ANONYMOUS
+    mov $-1, %r8
+    mov $0, %r9
+    mov $9, %rax           # mmap
     syscall
     mov %rax, heap_ptr(%rip)
     lea HEAP_SIZE(%rax), %rdi
     mov %rdi, heap_end(%rip)
-    mov $12, %rax
-    syscall
 
     pop %rsi
     pop %rdi
@@ -396,3 +406,27 @@ rdtsc:
     .byte 72,193,226,32
     .byte 72,9,208
     ret
+
+# int l8_as_int(*i8): identity, so a slice data pointer can be stored in int
+# (glShaderSource's const char **, GLX proc addresses, …).
+l8_as_int:
+    mov %rdi, %rax
+    ret
+
+# int l8_load64(*i8, off): *(int *)(p + off)
+l8_load64:
+    add %rsi, %rdi
+    mov (%rdi), %rax
+    ret
+
+# l8_call(fn, a0, a1, a2, a3, a4): tail-call fn with those five GPRs.
+# For addresses from glXGetProcAddress. Extra args are not supported.
+l8_call:
+    mov %rdi, %r11
+    mov %rsi, %rdi
+    mov %rdx, %rsi
+    mov %rcx, %rdx
+    mov %r8, %rcx
+    mov %r9, %r8
+    mov $0, %r9
+    jmp *%r11

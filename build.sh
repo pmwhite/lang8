@@ -184,6 +184,8 @@ run_examples_selfhost() {
   example_compile_fail "$tool" immparam examples/immparam.l8 'omit bound'
   example_compile_fail "$tool" retbound examples/retbound.l8 'return bound is @new'
   example "$tool" struct examples/struct.l8 '3 12 13'
+  example "$tool" aggcopy examples/aggcopy.l8 'YYYYY'
+  example "$tool" dynpid examples/dynpid.l8 'Y'
   example "$tool" nestsum examples/nestsum.l8 '1 2 3 9 4 5 6 7'
   example "$tool" exc examples/exc.l8 'Hi'
   example "$tool" immheap examples/immheap.l8 'Y'

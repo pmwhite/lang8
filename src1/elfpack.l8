@@ -1,5 +1,8 @@
-// elfpack: one fully-resolved ELF64 .o → static ET_EXEC (no ld).
-// Supports R_X86_64_PC32 and R_X86_64_PLT32 only.
+// elfpack: assembler → ET_EXEC (no ld).
+// Static when every symbol is defined. Undefined `extern`s plus `need "lib.so"`
+// emit a dynamic ELF (PT_INTERP, PLT/GOT, DT_NEEDED). Defined runtime symbols
+// stay local and are not exported in .dynsym.
+// Relocs: R_X86_64_PC32 and R_X86_64_PLT32. PC32 to an import is an error.
 // Usage: elfpack <in.o> -o <out>
 pack_PAGE: int = 4096;
 
@@ -33,6 +36,14 @@ pack_R_X86_64_PLT32: int = 4;
 
 pack_PT_LOAD: int = 1;
 
+pack_PT_DYNAMIC: int = 2;
+
+pack_PT_INTERP: int = 3;
+
+pack_PT_PHDR: int = 6;
+
+pack_PT_GNU_STACK: int = 1685382481;
+
 pack_PF_X: int = 1;
 
 pack_PF_W: int = 2;
@@ -40,6 +51,36 @@ pack_PF_W: int = 2;
 pack_PF_R: int = 4;
 
 pack_STB_GLOBAL: int = 1;
+
+pack_STT_FUNC: int = 2;
+
+pack_R_X86_64_JUMP_SLOT: int = 7;
+
+pack_DT_NULL: int = 0;
+
+pack_DT_NEEDED: int = 1;
+
+pack_DT_PLTRELSZ: int = 2;
+
+pack_DT_PLTGOT: int = 3;
+
+pack_DT_HASH: int = 4;
+
+pack_DT_STRTAB: int = 5;
+
+pack_DT_SYMTAB: int = 6;
+
+pack_DT_RELA: int = 7;
+
+pack_DT_STRSZ: int = 10;
+
+pack_DT_SYMENT: int = 11;
+
+pack_DT_PLTREL: int = 20;
+
+pack_DT_JMPREL: int = 23;
+
+pack_SYMENT: int = 24;
 
 pack_fail(pack_msg: []i8): noreturn {
     write(2, "elfpack: ", len("elfpack: "));
@@ -138,6 +179,135 @@ pack_wr64(pack_b: []i8, pack_o: int, pack_v: int) {
     pack_wr_le(pack_b, pack_o, pack_v, 8);
 }
 
+pack_phdr(
+    pack_b: []i8,
+    pack_o: int,
+    pack_type: int,
+    pack_flags: int,
+    pack_off: int,
+    pack_va: int,
+    pack_filesz: int,
+    pack_memsz: int,
+    pack_align: int
+) {
+    pack_wr32(pack_b, pack_o + 0, pack_type);
+    pack_wr32(pack_b, pack_o + 4, pack_flags);
+    pack_wr64(pack_b, pack_o + 8, pack_off);
+    pack_wr64(pack_b, pack_o + 16, pack_va);
+    pack_wr64(pack_b, pack_o + 24, pack_va);
+    pack_wr64(pack_b, pack_o + 32, pack_filesz);
+    pack_wr64(pack_b, pack_o + 40, pack_memsz);
+    pack_wr64(pack_b, pack_o + 48, pack_align);
+}
+
+pack_ds_buf: []i8 = "";
+
+pack_ds_n: int = 0;
+
+pack_ds_cap: int = 0;
+
+pack_ds_init() noregion {
+    pack_ds_cap = 4096;
+    pack_ds_buf = new i8[pack_ds_cap](0i8);
+    pack_ds_n = 1;
+    pack_ds_buf[0] = 0i8;
+}
+
+pack_ds_add(pack_s: []i8): int {
+    pack_off: int = pack_ds_n;
+    pack_i: int = 0;
+    pack_n: int = len(pack_s);
+    while (pack_i < pack_n) {
+        pack_c: i8 = pack_s[pack_i];
+        if (pack_c == 0i8) {
+            pack_i = pack_n;
+        } else {
+            if (pack_ds_n + 2 > pack_ds_cap) {
+                pack_fail("dynstr overflow");
+            }
+            pack_ds_buf[pack_ds_n] = pack_c;
+            pack_ds_n = pack_ds_n + 1;
+            pack_i = pack_i + 1;
+        }
+    }
+    if (pack_ds_n + 1 > pack_ds_cap) {
+        pack_fail("dynstr overflow");
+    }
+    pack_ds_buf[pack_ds_n] = 0i8;
+    pack_ds_n = pack_ds_n + 1;
+    pack_off;
+}
+
+pack_elf_hash(pack_name: []i8): int {
+    pack_h: int = 0;
+    pack_i: int = 0;
+    pack_n: int = len(pack_name);
+    while (pack_i < pack_n) {
+        pack_c: int = pack_name[pack_i] as int & 255;
+        if (pack_c == 0) {
+            return pack_h;
+        }
+        pack_h = (pack_h << 4) + pack_c;
+        pack_g: int = pack_h & 4026531840;
+        if (pack_g != 0) {
+            pack_h = pack_h ^ (pack_g >> 24);
+        }
+        pack_h = pack_h & ~pack_g;
+        pack_i = pack_i + 1;
+    }
+    pack_h;
+}
+
+pack_sym_is_dyn(pack_i: int): bool {
+    if (as_syms[pack_i].as_defined != 0) {
+        return false;
+    }
+    pack_n: []i8 = as_syms[pack_i].as_name;
+    if (len(pack_n) == 0) {
+        return false;
+    }
+    if (len(pack_n) >= 2 && pack_n[0] == '.' && pack_n[1] == 'L') {
+        return false;
+    }
+    true;
+}
+
+pack_count_need(): int {
+    pack_n: int = 0;
+    pack_p: ?*NeedLib = g_need;
+    while (pack_p != null) {
+        pack_n = pack_n + 1;
+        pack_p = pack_p.next;
+    }
+    pack_n;
+}
+
+pack_count_dyn(): int {
+    pack_n: int = 0;
+    pack_i: int = 0;
+    while (pack_i < as_nsyms) {
+        if (pack_sym_is_dyn(pack_i)) {
+            pack_n = pack_n + 1;
+        }
+        pack_i = pack_i + 1;
+    }
+    pack_n;
+}
+
+pack_undef_msg(pack_i: int): noreturn {
+    write(2, "elfpack: undefined symbol: ", len("elfpack: undefined symbol: "));
+    write(2, as_syms[pack_i].as_name, len(as_syms[pack_i].as_name));
+    write(2, "\n", len("\n"));
+    exit(1);
+}
+
+pack_need_hint(pack_i: int): noreturn {
+    write(2, "elfpack: dynamic import ", len("elfpack: dynamic import "));
+    write(2, as_syms[pack_i].as_name, len(as_syms[pack_i].as_name));
+    write(2, "; add need \"libfoo.so\"\n", len("; add need \"libfoo.so\"\n"));
+    exit(1);
+}
+
 pack_in_len: int = 0;
 
 pack_in_buf: []i8 = "";
@@ -174,8 +344,322 @@ pack_is_dash_o(pack_s: [z]i8): bool {
     pack_s[0] == '-' && pack_s[1] == 'o' && pack_s[2] == 0i8;
 }
 
+// Pack a dynamic ET_EXEC: PT_INTERP + PLT/GOT + DT_NEEDED. Defined symbols
+// (malloc, write, …) are resolved internally and omitted from .dynsym.
+pack_assembler_exec_dyn(pack_out_p: [z]i8, pack_nimp: int) noregion {
+    pack_nneed: int = pack_count_need();
+    if (pack_nneed == 0) {
+        pack_i0: int = 0;
+        while (pack_i0 < as_nsyms) {
+            if (pack_sym_is_dyn(pack_i0)) {
+                pack_need_hint(pack_i0);
+            }
+            pack_i0 = pack_i0 + 1;
+        }
+        pack_fail("dynamic import without need");
+    }
+    pack_imp_of: []int = new int[as_nsyms + 1](0 - 1);
+    pack_imp_sym: []int = new int[pack_nimp](0);
+    pack_k: int = 0;
+    pack_i: int = 0;
+    while (pack_i < as_nsyms) {
+        if (as_syms[pack_i].as_defined == 0 && !pack_sym_is_dyn(pack_i)) {
+            pack_undef_msg(pack_i);
+        }
+        if (pack_sym_is_dyn(pack_i)) {
+            pack_imp_of[pack_i] = pack_k;
+            pack_imp_sym[pack_k] = pack_i;
+            pack_k = pack_k + 1;
+        }
+        pack_i = pack_i + 1;
+    }
+    pack_ds_init();
+    pack_need_off: []int = new int[pack_nneed](0);
+    pack_ni: int = 0;
+    pack_np: ?*NeedLib = g_need;
+    while (pack_np != null) {
+        pack_need_off[pack_ni] = pack_ds_add(pack_np.name);
+        pack_ni = pack_ni + 1;
+        pack_np = pack_np.next;
+    }
+    pack_imp_str: []int = new int[pack_nimp](0);
+    pack_j: int = 0;
+    while (pack_j < pack_nimp) {
+        pack_imp_str[pack_j] = pack_ds_add(as_syms[pack_imp_sym[pack_j]].as_name);
+        pack_j = pack_j + 1;
+    }
+    pack_dynstr_sz: int = pack_ds_n;
+    pack_nph: int = 6;
+    pack_interp_s: []i8 = "/lib64/ld-linux-x86-64.so.2";
+    pack_interp_n: int = len(pack_interp_s) + 1;
+    pack_interp_off: int = 64 + pack_nph * 56;
+    pack_text_off: int = pack_PAGE;
+    pack_rodata_off: int = pack_align_up(pack_text_off + as_text_len, 16);
+    pack_plt_off: int = pack_align_up(pack_rodata_off + as_rodata_len, 16);
+    pack_plt_sz: int = 16 * (1 + pack_nimp);
+    pack_hash_off: int = pack_align_up(pack_plt_off + pack_plt_sz, 8);
+    pack_nbucket: int = pack_nimp + 1;
+    pack_nchain: int = pack_nimp + 1;
+    pack_hash_sz: int = 8 + 4 * pack_nbucket + 4 * pack_nchain;
+    pack_dynsym_off: int = pack_align_up(pack_hash_off + pack_hash_sz, 8);
+    pack_dynsym_sz: int = pack_SYMENT * (pack_nimp + 1);
+    pack_dynstr_off: int = pack_align_up(pack_dynsym_off + pack_dynsym_sz, 8);
+    pack_rela_off: int = pack_align_up(pack_dynstr_off + pack_dynstr_sz, 8);
+    pack_rela_sz: int = 24 * pack_nimp;
+    pack_rx_end: int = pack_rela_off + pack_rela_sz;
+    pack_rw_off: int = pack_align_up(pack_rx_end, pack_PAGE);
+    pack_got_off: int = pack_rw_off;
+    pack_got_sz: int = 8 * (3 + pack_nimp);
+    pack_dyn_off: int = pack_align_up(pack_got_off + pack_got_sz, 8);
+    pack_ndyn: int = pack_nneed + 10;
+    pack_dyn_sz: int = 16 * pack_ndyn;
+    pack_data_off: int = pack_align_up(pack_dyn_off + pack_dyn_sz, 8);
+    pack_file_end: int = pack_data_off + as_data_len;
+    pack_text_vma: int = pack_LOAD_BASE + pack_text_off;
+    pack_rodata_vma: int = pack_LOAD_BASE + pack_rodata_off;
+    pack_plt_vma: int = pack_LOAD_BASE + pack_plt_off;
+    pack_hash_vma: int = pack_LOAD_BASE + pack_hash_off;
+    pack_dynsym_vma: int = pack_LOAD_BASE + pack_dynsym_off;
+    pack_dynstr_vma: int = pack_LOAD_BASE + pack_dynstr_off;
+    pack_rela_vma: int = pack_LOAD_BASE + pack_rela_off;
+    pack_got_vma: int = pack_LOAD_BASE + pack_got_off;
+    pack_dyn_vma: int = pack_LOAD_BASE + pack_dyn_off;
+    pack_data_vma: int = pack_LOAD_BASE + pack_data_off;
+    pack_rw_vma: int = pack_LOAD_BASE + pack_rw_off;
+    pack_bss_vma: int = pack_align_up(pack_data_vma + as_data_len, 8);
+    pack_sym_addr: []int = new int[as_nsyms + 1](0);
+    pack_entry: int = 0;
+    pack_i = 0;
+    while (pack_i < as_nsyms) {
+        if (pack_sym_is_dyn(pack_i)) {
+            pack_imp: int = pack_imp_of[pack_i];
+            pack_sym_addr[pack_i] = pack_plt_vma + 16 * (pack_imp + 1);
+        } else {
+            pack_addr: int = as_syms[pack_i].as_val;
+            if (as_syms[pack_i].as_sec == as_SEC_TEXT) {
+                pack_addr = pack_addr + pack_text_vma;
+            } else {
+                if (as_syms[pack_i].as_sec == as_SEC_RODATA) {
+                    pack_addr = pack_addr + pack_rodata_vma;
+                } else {
+                    if (as_syms[pack_i].as_sec == as_SEC_DATA) {
+                        pack_addr = pack_addr + pack_data_vma;
+                    } else {
+                        if (as_syms[pack_i].as_sec == as_SEC_BSS) {
+                            pack_addr = pack_addr + pack_bss_vma;
+                        } else {
+                            if (as_syms[pack_i].as_sec != as_SEC_ABS && as_syms[pack_i].as_sec != as_SEC_UND) {
+                                pack_fail("bad symbol section");
+                            }
+                        }
+                    }
+                }
+            }
+            pack_sym_addr[pack_i] = pack_addr;
+        }
+        if (pack_streq(as_syms[pack_i].as_name, "_start")) {
+            pack_entry = pack_sym_addr[pack_i];
+        }
+        pack_i = pack_i + 1;
+    }
+    if (pack_entry == 0) {
+        pack_fail("missing _start");
+    }
+    pack_i = 0;
+    while (pack_i < as_nrels) {
+        pack_rel: *as_Rel = &as_rels[pack_i];
+        if (pack_rel.as_typ != as_R_X86_64_PC32 && pack_rel.as_typ != as_R_X86_64_PLT32) {
+            pack_fail("unsupported reloc type");
+        }
+        if (pack_rel.as_off < 0 || pack_rel.as_off + 4 > as_text_len) {
+            pack_fail("reloc out of range");
+        }
+        if (pack_rel.as_sym < 0 || pack_rel.as_sym >= as_nsyms) {
+            pack_fail("bad reloc symbol");
+        }
+        if (pack_sym_is_dyn(pack_rel.as_sym) && pack_rel.as_typ != as_R_X86_64_PLT32) {
+            pack_fail("PC reloc to imported symbol");
+        }
+        pack_S: int = pack_sym_addr[pack_rel.as_sym];
+        pack_P: int = pack_text_vma + pack_rel.as_off;
+        pack_wr32(as_text_buf, pack_rel.as_off, pack_S + pack_rel.as_addend - pack_P);
+        pack_i = pack_i + 1;
+    }
+    pack_out: []i8 = new i8[pack_file_end](0i8);
+    pack_out[0] = 127i8;
+    pack_out[1] = 'E';
+    pack_out[2] = 'L';
+    pack_out[3] = 'F';
+    pack_out[4] = 2i8;
+    pack_out[5] = 1i8;
+    pack_out[6] = 1i8;
+    pack_wr16(pack_out, 16, pack_ET_EXEC);
+    pack_wr16(pack_out, 18, pack_EM_X86_64);
+    pack_wr32(pack_out, 20, 1);
+    pack_wr64(pack_out, 24, pack_entry);
+    pack_wr64(pack_out, 32, 64);
+    pack_wr16(pack_out, 52, 64);
+    pack_wr16(pack_out, 54, 56);
+    pack_wr16(pack_out, 56, pack_nph);
+    pack_phdr(pack_out, 64, pack_PT_PHDR, pack_PF_R, 64, pack_LOAD_BASE + 64, pack_nph * 56, pack_nph * 56, 8);
+    pack_phdr(pack_out, 120, pack_PT_INTERP, pack_PF_R, pack_interp_off, pack_LOAD_BASE + pack_interp_off, pack_interp_n,
+        pack_interp_n, 1);
+    pack_phdr(pack_out, 176, pack_PT_LOAD, pack_PF_R + pack_PF_X, 0, pack_LOAD_BASE, pack_rx_end, pack_rx_end, pack_PAGE);
+    pack_rw_memsz: int = pack_bss_vma + as_bss_size - pack_rw_vma;
+    pack_phdr(pack_out, 232, pack_PT_LOAD, pack_PF_R + pack_PF_W, pack_rw_off, pack_rw_vma, pack_file_end - pack_rw_off,
+        pack_rw_memsz, pack_PAGE);
+    pack_phdr(pack_out, 288, pack_PT_DYNAMIC, pack_PF_R + pack_PF_W, pack_dyn_off, pack_dyn_vma, pack_dyn_sz, pack_dyn_sz,
+        8);
+    pack_phdr(pack_out, 344, pack_PT_GNU_STACK, pack_PF_R + pack_PF_W, 0, 0, 0, 0, 16);
+    memcpy(pack_out, pack_interp_off, pack_interp_s, 0, len(pack_interp_s));
+    memcpy(pack_out, pack_text_off, as_text_buf, 0, as_text_len);
+    if (as_rodata_len > 0) {
+        memcpy(pack_out, pack_rodata_off, as_rodata_buf, 0, as_rodata_len);
+    }
+    pack_push_d: int = pack_got_vma + 8 - (pack_plt_vma + 6);
+    pack_jmp0_d: int = pack_got_vma + 16 - (pack_plt_vma + 12);
+    pack_out[pack_plt_off + 0] = 255i8;
+    pack_out[pack_plt_off + 1] = 53i8;
+    pack_wr32(pack_out, pack_plt_off + 2, pack_push_d);
+    pack_out[pack_plt_off + 6] = 255i8;
+    pack_out[pack_plt_off + 7] = 37i8;
+    pack_wr32(pack_out, pack_plt_off + 8, pack_jmp0_d);
+    pack_out[pack_plt_off + 12] = 15i8;
+    pack_out[pack_plt_off + 13] = 31i8;
+    pack_out[pack_plt_off + 14] = 64i8;
+    pack_out[pack_plt_off + 15] = 0i8;
+    pack_j = 0;
+    while (pack_j < pack_nimp) {
+        pack_po: int = pack_plt_off + 16 * (pack_j + 1);
+        pack_pv: int = pack_plt_vma + 16 * (pack_j + 1);
+        pack_got_ent: int = pack_got_vma + 8 * (3 + pack_j);
+        pack_out[pack_po + 0] = 255i8;
+        pack_out[pack_po + 1] = 37i8;
+        pack_wr32(pack_out, pack_po + 2, pack_got_ent - (pack_pv + 6));
+        pack_out[pack_po + 6] = 104i8;
+        pack_wr32(pack_out, pack_po + 7, pack_j);
+        pack_out[pack_po + 11] = 233i8;
+        pack_wr32(pack_out, pack_po + 12, pack_plt_vma - (pack_pv + 16));
+        pack_j = pack_j + 1;
+    }
+    pack_bucket: []int = new int[pack_nbucket](0);
+    pack_chain: []int = new int[pack_nchain](0);
+    pack_j = 0;
+    while (pack_j < pack_nimp) {
+        pack_h: int = pack_elf_hash(as_syms[pack_imp_sym[pack_j]].as_name);
+        pack_b: int = pack_h % pack_nbucket;
+        if (pack_b < 0) {
+            pack_b = 0 - pack_b;
+        }
+        pack_b = pack_b % pack_nbucket;
+        pack_si: int = pack_j + 1;
+        pack_chain[pack_si] = pack_bucket[pack_b];
+        pack_bucket[pack_b] = pack_si;
+        pack_j = pack_j + 1;
+    }
+    pack_wr32(pack_out, pack_hash_off + 0, pack_nbucket);
+    pack_wr32(pack_out, pack_hash_off + 4, pack_nchain);
+    pack_j = 0;
+    while (pack_j < pack_nbucket) {
+        pack_wr32(pack_out, pack_hash_off + 8 + 4 * pack_j, pack_bucket[pack_j]);
+        pack_j = pack_j + 1;
+    }
+    pack_j = 0;
+    while (pack_j < pack_nchain) {
+        pack_wr32(pack_out, pack_hash_off + 8 + 4 * pack_nbucket + 4 * pack_j, pack_chain[pack_j]);
+        pack_j = pack_j + 1;
+    }
+    pack_st_info: i8 = 18i8;
+    pack_j = 0;
+    while (pack_j < pack_nimp) {
+        pack_so: int = pack_dynsym_off + pack_SYMENT * (pack_j + 1);
+        pack_wr32(pack_out, pack_so + 0, pack_imp_str[pack_j]);
+        pack_out[pack_so + 4] = pack_st_info;
+        pack_out[pack_so + 5] = 0i8;
+        pack_wr16(pack_out, pack_so + 6, 0);
+        pack_wr64(pack_out, pack_so + 8, 0);
+        pack_wr64(pack_out, pack_so + 16, 0);
+        pack_j = pack_j + 1;
+    }
+    memcpy(pack_out, pack_dynstr_off, pack_ds_buf, 0, pack_dynstr_sz);
+    pack_j = 0;
+    while (pack_j < pack_nimp) {
+        pack_ro: int = pack_rela_off + 24 * pack_j;
+        pack_wr64(pack_out, pack_ro + 0, pack_got_vma + 8 * (3 + pack_j));
+        pack_wr64(pack_out, pack_ro + 8, (pack_j + 1) * 4294967296 + pack_R_X86_64_JUMP_SLOT);
+        pack_wr64(pack_out, pack_ro + 16, 0);
+        pack_j = pack_j + 1;
+    }
+    pack_wr64(pack_out, pack_got_off + 0, pack_dyn_vma);
+    pack_wr64(pack_out, pack_got_off + 8, 0);
+    pack_wr64(pack_out, pack_got_off + 16, 0);
+    pack_j = 0;
+    while (pack_j < pack_nimp) {
+        pack_wr64(pack_out, pack_got_off + 24 + 8 * pack_j, pack_plt_vma + 16 * (pack_j + 1) + 6);
+        pack_j = pack_j + 1;
+    }
+    pack_dt: int = pack_dyn_off;
+    pack_j = 0;
+    while (pack_j < pack_nneed) {
+        pack_wr64(pack_out, pack_dt + 0, pack_DT_NEEDED);
+        pack_wr64(pack_out, pack_dt + 8, pack_need_off[pack_j]);
+        pack_dt = pack_dt + 16;
+        pack_j = pack_j + 1;
+    }
+    pack_wr64(pack_out, pack_dt + 0, pack_DT_HASH);
+    pack_wr64(pack_out, pack_dt + 8, pack_hash_vma);
+    pack_dt = pack_dt + 16;
+    pack_wr64(pack_out, pack_dt + 0, pack_DT_STRTAB);
+    pack_wr64(pack_out, pack_dt + 8, pack_dynstr_vma);
+    pack_dt = pack_dt + 16;
+    pack_wr64(pack_out, pack_dt + 0, pack_DT_SYMTAB);
+    pack_wr64(pack_out, pack_dt + 8, pack_dynsym_vma);
+    pack_dt = pack_dt + 16;
+    pack_wr64(pack_out, pack_dt + 0, pack_DT_STRSZ);
+    pack_wr64(pack_out, pack_dt + 8, pack_dynstr_sz);
+    pack_dt = pack_dt + 16;
+    pack_wr64(pack_out, pack_dt + 0, pack_DT_SYMENT);
+    pack_wr64(pack_out, pack_dt + 8, pack_SYMENT);
+    pack_dt = pack_dt + 16;
+    pack_wr64(pack_out, pack_dt + 0, pack_DT_PLTGOT);
+    pack_wr64(pack_out, pack_dt + 8, pack_got_vma);
+    pack_dt = pack_dt + 16;
+    pack_wr64(pack_out, pack_dt + 0, pack_DT_PLTRELSZ);
+    pack_wr64(pack_out, pack_dt + 8, pack_rela_sz);
+    pack_dt = pack_dt + 16;
+    pack_wr64(pack_out, pack_dt + 0, pack_DT_PLTREL);
+    pack_wr64(pack_out, pack_dt + 8, pack_DT_RELA);
+    pack_dt = pack_dt + 16;
+    pack_wr64(pack_out, pack_dt + 0, pack_DT_JMPREL);
+    pack_wr64(pack_out, pack_dt + 8, pack_rela_vma);
+    pack_dt = pack_dt + 16;
+    pack_wr64(pack_out, pack_dt + 0, pack_DT_NULL);
+    pack_wr64(pack_out, pack_dt + 8, 0);
+    if (as_data_len > 0) {
+        memcpy(pack_out, pack_data_off, as_data_buf, 0, as_data_len);
+    }
+    pack_fd: int = open(pack_out_p, pack_O_WRONLY + pack_O_CREAT + pack_O_TRUNC, pack_MODE_755);
+    if (pack_fd < 0) {
+        pack_fail("cannot create output");
+    }
+    pack_w: int = 0;
+    while (pack_w < pack_file_end) {
+        pack_n: int = write(pack_fd, pack_out, pack_w, pack_file_end - pack_w);
+        if (pack_n <= 0) {
+            pack_fail("write failed");
+        }
+        pack_w = pack_w + pack_n;
+    }
+    close(pack_fd);
+}
+
 // Pack the assembler builder directly. No ET_REL bytes are produced or parsed.
-pack_assembler_exec(pack_out_p: [z]i8) {
+pack_assembler_exec(pack_out_p: [z]i8) noregion {
+    pack_nimp: int = pack_count_dyn();
+    if (pack_nimp > 0) {
+        pack_assembler_exec_dyn(pack_out_p, pack_nimp);
+        return;
+    }
     pack_rx_off: int = pack_PAGE;
     pack_text_off: int = pack_rx_off;
     pack_rodata_off: int = pack_align_up(pack_text_off + as_text_len, 16);
