@@ -1,0 +1,833 @@
+// Port of blog/block-game.html play mode. No text, no editor.
+// Arrows move, Shift+Left/Right jump checkpoints, q/Escape/close quits.
+import "gl.l8";
+
+import "level.l8";
+
+extern exit(code: int): noreturn;
+
+extern clock_gettime(clk: int, ts: *Timespec): int;
+
+type Timespec = {
+    sec: int;
+    nsec: int;
+};
+
+die(msg: []i8): noreturn {
+    write(2, msg, len(msg));
+    write(2, "\n", 1);
+    exit(1);
+}
+
+mono_ms(): int {
+    ts: Timespec = Timespec { sec: 0, nsec: 0 };
+    clock_gettime(1, &ts);
+    ts.sec * 1000 + ts.nsec / 1000000;
+}
+
+compile_shader(kind: int, src: []i8): int {
+    sh: int = glCreateShader(kind);
+    sp: *i8 = src;
+    ln: []i32 = new i32[1](len(src) trunc i32);
+    glShaderSource(sh, 1, &sp, ln);
+    glCompileShader(sh);
+    st: []i32 = new i32[1](0i32);
+    glGetShaderiv(sh, 35713, st);
+    if (st[0] == 0i32) {
+        logn: []i32 = new i32[1](0i32);
+        glGetShaderiv(sh, 35716, logn);
+        n: int = logn[0] as int;
+        if (n < 1) {
+            n = 1;
+        }
+        if (n > 4096) {
+            n = 4096;
+        }
+        buf: []i8 = new i8[n](0i8);
+        glGetShaderInfoLog(sh, n, null, buf);
+        write(2, buf, n);
+        die("shader compile failed");
+    }
+    sh;
+}
+
+link_program(vs: []i8, fs: []i8, attrib: []i8): int {
+    vsh: int = compile_shader(35633, vs);
+    fsh: int = compile_shader(35632, fs);
+    prog: int = glCreateProgram();
+    glAttachShader(prog, vsh);
+    glAttachShader(prog, fsh);
+    glBindAttribLocation(prog, 0, cstr(attrib));
+    glLinkProgram(prog);
+    lst: []i32 = new i32[1](0i32);
+    glGetProgramiv(prog, 35714, lst);
+    if (lst[0] == 0i32) {
+        die("program link failed");
+    }
+    prog;
+}
+
+lerp(a: f32, b: f32, t: f32): f32 {
+    a + (b - a) * t;
+}
+
+in_bounds(column: int, row: int): bool {
+    column >= 0 && row >= 0 && row < 9;
+}
+
+is_check(checks: []int, ncheck: int, column: int): bool {
+    i: int = 0;
+    while (i < ncheck) {
+        if (checks[i] == column) {
+            return true;
+        }
+        i = i + 1;
+    }
+    false;
+}
+
+find_prev_check(checks: []int, ncheck: int, column: int): int {
+    prev: int = 0;
+    i: int = 0;
+    while (i < ncheck) {
+        c: int = checks[i];
+        if (c < column && c > prev) {
+            prev = c;
+        }
+        i = i + 1;
+    }
+    prev;
+}
+
+find_prev_or_same_check(checks: []int, ncheck: int, column: int): int {
+    prev: int = 0;
+    i: int = 0;
+    while (i < ncheck) {
+        c: int = checks[i];
+        if (c <= column && c > prev) {
+            prev = c;
+        }
+        i = i + 1;
+    }
+    prev;
+}
+
+find_next_check(checks: []int, ncheck: int, column: int): int {
+    nxt: int = 0;
+    i: int = 0;
+    while (i < ncheck) {
+        c: int = checks[i];
+        if (c > nxt) {
+            nxt = c;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < ncheck) {
+        c2: int = checks[i];
+        if (c2 > column && c2 < nxt || nxt == 0) {
+            nxt = c2;
+        }
+        i = i + 1;
+    }
+    nxt;
+}
+
+block_at(
+    blocks: []Block,
+    n: int,
+    column: int,
+    row: int
+): int {
+    i: int = 0;
+    while (i < n) {
+        b: Block = blocks[i];
+        if (b.column == column && b.row == row) {
+            return i;
+        }
+        i = i + 1;
+    }
+    0 - 1;
+}
+
+block_id(
+    blocks: []Block,
+    off: int,
+    n: int,
+    id: int
+): int {
+    i: int = 0;
+    while (i < n) {
+        if (blocks[off + i].id == id) {
+            return i;
+        }
+        i = i + 1;
+    }
+    0 - 1;
+}
+
+copy_blocks(
+    dst: []Block,
+    doff: int,
+    src: []Block,
+    soff: int,
+    n: int
+) {
+    i: int = 0;
+    while (i < n) {
+        dst[doff + i] = src[soff + i];
+        i = i + 1;
+    }
+}
+
+hist_off(hstart: int, i: int): int {
+    (hstart + i) % 8 * 1024;
+}
+
+can_move_block(
+    blocks: []Block,
+    n: int,
+    checks: []int,
+    ncheck: int,
+    bi: int,
+    dc: int,
+    dr: int
+): bool {
+    b: Block = blocks[bi];
+    tc: int = b.column + dc;
+    tr: int = b.row + dr;
+    ok: bool = in_bounds(tc, tr);
+    i: int = 0;
+    while (i < n) {
+        o: Block = blocks[i];
+        if (o.column == tc && o.row == tr) {
+            if (b.shape != 0) {
+                ok = o.shape == b.shape;
+            } else {
+                ok = false;
+            }
+        }
+        i = i + 1;
+    }
+    if (is_check(checks, ncheck, tc)) {
+        ok = false;
+    }
+    ok;
+}
+
+move_player(
+    blocks: []Block,
+    n: int,
+    checks: []int,
+    ncheck: int,
+    pc: int,
+    pr: int,
+    dc: int,
+    dr: int
+): int {
+    tc: int = pc + dc;
+    tr: int = pr + dr;
+    if (!in_bounds(tc, tr)) {
+        return pc * 16 + pr;
+    }
+    prevc: int = find_prev_or_same_check(checks, ncheck, pc);
+    nextc: int = find_next_check(checks, ncheck, pc);
+    space: bool = true;
+    hit: int = block_at(blocks, n, tc, tr);
+    if (hit >= 0) {
+        space = false;
+        if (can_move_block(blocks, n, checks, ncheck, hit, dc, dr)) {
+            hb: Block = blocks[hit];
+            can: bool = true;
+            if (hb.shape != 0) {
+                i: int = 0;
+                while (i < n) {
+                    s: Block = blocks[i];
+                    if (s.column > prevc && s.column < nextc && s.shape == hb.shape) {
+                        if (!can_move_block(blocks, n, checks, ncheck, i, dc, dr)) {
+                            can = false;
+                        }
+                    }
+                    i = i + 1;
+                }
+                if (can) {
+                    space = true;
+                    i = 0;
+                    while (i < n) {
+                        s2: Block = blocks[i];
+                        if (s2.column > prevc && s2.column < nextc && s2.shape == hb.shape) {
+                            s2.column = s2.column + dc;
+                            s2.row = s2.row + dr;
+                            blocks[i] = s2;
+                        }
+                        i = i + 1;
+                    }
+                }
+            } else {
+                space = true;
+                hb.column = hb.column + dc;
+                hb.row = hb.row + dr;
+                blocks[hit] = hb;
+            }
+        }
+    }
+    if (space) {
+        pc = tc;
+        pr = tr;
+    }
+    pc * 16 + pr;
+}
+
+viewport_left_target(
+    checks: []int,
+    ncheck: int,
+    from_c: int,
+    to_c: int,
+    t: f32,
+    cell: f32
+): f32 {
+    vmin: f32 = 10.0 * cell;
+    player_x: f32 = cell * lerp(from_c as f32, to_c as f32, t);
+    start: f32 = cell * lerp(find_prev_or_same_check(checks, ncheck, from_c) as f32,
+        find_prev_or_same_check(checks, ncheck, to_c) as f32, t);
+    end: f32 = cell * lerp(find_next_check(checks, ncheck, from_c) as f32, find_next_check(checks,
+        ncheck, to_c) as f32, t) - 19.0 * cell;
+    x: f32 = player_x - vmin;
+    if (x < start) {
+        x = start;
+    }
+    if (x > end) {
+        x = end;
+    }
+    x;
+}
+
+draw_rect(
+    u_center: int,
+    u_scale: int,
+    u_color: int,
+    px: f32,
+    py: f32,
+    w: f32,
+    h: f32,
+    cr: f32,
+    cg: f32,
+    cb: f32,
+    win_w: f32,
+    win_h: f32
+) {
+    glUniform2f(u_center, (px + w * 0.5) / (win_w * 0.5) - 1.0, 1.0 - (py + h * 0.5) / (win_h * 0.5));
+    glUniform2f(u_scale, w / win_w, h / win_h);
+    glUniform3f(u_color, cr, cg, cb);
+    glDrawArrays(5, 0, 4);
+}
+
+unit_xy(n: int, i: int, which: int): f32 {
+    a: f32 = 6.283185 * i as f32 / n as f32 - 1.570796;
+    c: f32 = 1.0;
+    s: f32 = 0.0;
+    if (n == 3) {
+        if (i == 0) {
+            c = 0.0;
+            s = 0.0 - 1.0;
+        } else if (i == 1) {
+            c = 0.866025;
+            s = 0.5;
+        } else {
+            c = 0.0 - 0.866025;
+            s = 0.5;
+        }
+    } else if (n == 4) {
+        if (i == 0) {
+            c = 0.0;
+            s = 0.0 - 1.0;
+        } else if (i == 1) {
+            c = 1.0;
+            s = 0.0;
+        } else if (i == 2) {
+            c = 0.0;
+            s = 1.0;
+        } else {
+            c = 0.0 - 1.0;
+            s = 0.0;
+        }
+    } else if (n == 5) {
+        if (i == 0) {
+            c = 0.0;
+            s = 0.0 - 1.0;
+        } else if (i == 1) {
+            c = 0.951057;
+            s = 0.0 - 0.309017;
+        } else if (i == 2) {
+            c = 0.587785;
+            s = 0.809017;
+        } else if (i == 3) {
+            c = 0.0 - 0.587785;
+            s = 0.809017;
+        } else {
+            c = 0.0 - 0.951057;
+            s = 0.0 - 0.309017;
+        }
+    } else if (n == 6) {
+        if (i == 0) {
+            c = 0.0;
+            s = 0.0 - 1.0;
+        } else if (i == 1) {
+            c = 0.866025;
+            s = 0.0 - 0.5;
+        } else if (i == 2) {
+            c = 0.866025;
+            s = 0.5;
+        } else if (i == 3) {
+            c = 0.0;
+            s = 1.0;
+        } else if (i == 4) {
+            c = 0.0 - 0.866025;
+            s = 0.5;
+        } else {
+            c = 0.0 - 0.866025;
+            s = 0.0 - 0.5;
+        }
+    } else {
+        t: f32 = a;
+        k: int = 0;
+        u: f32 = 1.0;
+        p: f32 = 1.0;
+        c = 0.0;
+        s = 0.0;
+        while (k < 8) {
+            if (k % 4 == 0) {
+                c = c + p / u;
+            } else if (k % 4 == 1) {
+                s = s + p / u;
+            } else if (k % 4 == 2) {
+                c = c - p / u;
+            } else {
+                s = s - p / u;
+            }
+            p = p * t;
+            u = u * (k + 1) as f32;
+            k = k + 1;
+        }
+    }
+    if (which == 0) {
+        c;
+    } else {
+        s;
+    }
+}
+
+draw_shape(
+    poly_color: int,
+    verts: []f32,
+    col: f32,
+    row: f32,
+    sides: int,
+    cell: f32,
+    origin_x: f32,
+    origin_y: f32,
+    win_w: f32,
+    win_h: f32
+) {
+    if (sides < 3) {
+        return;
+    }
+    cx: f32 = origin_x + (col + 0.5) * cell;
+    cy: f32 = origin_y + (row + 0.5) * cell;
+    rad: f32 = cell / 3.0;
+    hx: f32 = win_w * 0.5;
+    hy: f32 = win_h * 0.5;
+    verts[0] = cx / hx - 1.0;
+    verts[1] = 1.0 - cy / hy;
+    i: int = 0;
+    while (i <= sides) {
+        ii: int = i;
+        if (ii == sides) {
+            ii = 0;
+        }
+        px: f32 = cx + unit_xy(sides, ii, 0) * rad;
+        py: f32 = cy + unit_xy(sides, ii, 1) * rad;
+        verts[2 + i * 2] = px / hx - 1.0;
+        verts[3 + i * 2] = 1.0 - py / hy;
+        i = i + 1;
+    }
+    glUniform3f(poly_color, 0.988, 0.827, 0.302);
+    glBufferData(34962, (sides + 2) * 8, verts, 35040);
+    glDrawArrays(6, 0, sides + 2);
+}
+
+main(): int {
+    d0: ?*i8 = XOpenDisplay(null);
+    if (d0 == null) {
+        write(2, "XOpenDisplay failed (need DISPLAY / XWayland)\n", len("XOpenDisplay failed (need DISPLAY / XWayland)\n"));
+        return 1;
+    }
+    dpy: *i8 = d0;
+    screen: int = XDefaultScreen(dpy);
+    attr: []i32 = [4i32, 5i32, 8i32, 8i32, 9i32, 8i32, 10i32, 8i32, 12i32, 16i32,
+        0i32];
+    vis0: ?*XVisualInfo = glXChooseVisual(dpy, screen, attr);
+    if (vis0 == null) {
+        die("glXChooseVisual failed");
+    }
+    vis: *XVisualInfo = vis0;
+    root: int = XRootWindow(dpy, screen);
+    cmap: int = XCreateColormap(dpy, root, vis.visual, 0);
+    wa: XSetWindowAttributes = XSetWindowAttributes {
+        background_pixmap: 0,
+        background_pixel: 0,
+        border_pixmap: 0,
+        border_pixel: 0,
+        bit_gravity: 0i32,
+        win_gravity: 0i32,
+        backing_store: 0i32,
+        backing_planes: 0,
+        backing_pixel: 0,
+        save_under: 0i32,
+        event_mask: 163843,
+        do_not_propagate_mask: 0,
+        override_redirect: 0i32,
+        colormap: cmap,
+        cursor: 0
+    };
+    win_w: f32 = 1200.0;
+    win_h: f32 = 540.0;
+    cell: f32 = 60.0;
+    win: int = XCreateWindow(dpy, root, 0, 0, 1200, 540, 0, vis.depth as int, 1, vis.visual,
+        10248, &wa);
+    if (win == 0) {
+        die("XCreateWindow failed");
+    }
+    XStoreName(dpy, win, cstr("L8 block game"));
+    proto: []int = new int[1](0);
+    proto[0] = XInternAtom(dpy, cstr("WM_DELETE_WINDOW"), 0);
+    XSetWMProtocols(dpy, win, &proto[0], 1);
+    XMapRaised(dpy, win);
+    XkbSetDetectableAutoRepeat(dpy, 1, null);
+    XFlush(dpy);
+    write(2, "L8 block game (arrows move, Shift+arrows jump, q quits)\n", len("L8 block game (arrows move, Shift+arrows jump, q quits)\n"));
+    ctx0: ?*i8 = glXCreateContext(dpy, vis, null, 1);
+    if (ctx0 == null) {
+        die("glXCreateContext failed");
+    }
+    ctx: *i8 = ctx0;
+    if (glXMakeCurrent(dpy, win, ctx) == 0) {
+        die("glXMakeCurrent failed");
+    }
+    rect_vs: []i8 = """
+#version 120
+attribute vec2 pos;
+uniform vec2 center;
+uniform vec2 scale;
+void main() {
+  gl_Position = vec4(center + pos * scale, 0.0, 1.0);
+}
+""";
+    poly_vs: []i8 = """
+#version 120
+attribute vec2 pos;
+void main() {
+  gl_Position = vec4(pos, 0.0, 1.0);
+}
+""";
+    solid_fs: []i8 = """
+#version 120
+uniform vec3 color;
+void main() {
+  gl_FragColor = vec4(color, 1.0);
+}
+""";
+    rect_prog: int = link_program(rect_vs, solid_fs, "pos");
+    poly_prog: int = link_program(poly_vs, solid_fs, "pos");
+    glUseProgram(rect_prog);
+    u_center: int = glGetUniformLocation(rect_prog, cstr("center"));
+    u_scale: int = glGetUniformLocation(rect_prog, cstr("scale"));
+    u_color: int = glGetUniformLocation(rect_prog, cstr("color"));
+    glUseProgram(poly_prog);
+    poly_color: int = glGetUniformLocation(poly_prog, cstr("color"));
+    va: []u32 = new u32[1](0u32);
+    glGenVertexArrays(1, va);
+    glBindVertexArray(va[0]);
+    quad: []f32 = [0.0 - 1.0, 0.0 - 1.0, 1.0, 0.0 - 1.0, 0.0 - 1.0, 1.0, 1.0, 1.0];
+    ids: []u32 = new u32[1](0u32);
+    glGenBuffers(1, ids);
+    glBindBuffer(34962, ids[0]);
+    glBufferData(34962, len(quad) * 4, quad, 35044);
+    glVertexAttribPointer(0, 2, 5126, 0, 8, 0);
+    glEnableVertexAttribArray(0);
+    glViewport(0, 0, 1200, 540);
+    glClearColor(0.267, 0.251, 0.235, 1.0);
+    empty: Block = Block {
+        id: 0 - 1,
+        column: 0,
+        row: 0,
+        shape: 0
+    };
+    blocks: []Block = new Block[1024](empty);
+    n: int = fill_level(blocks);
+    checks: []int = new int[32](0);
+    ncheck: int = fill_checkpoints(checks);
+    hist: []Block = new Block[8192](empty);
+    hpc: []int = new int[8](0);
+    hpr: []int = new int[8](0);
+    hn: int = 0;
+    hstart: int = 0;
+    pc: int = 0;
+    pr: int = 0;
+    pc = find_prev_or_same_check(checks, ncheck, pc);
+    copy_blocks(hist, 0, blocks, 0, n);
+    hpc[0] = pc;
+    hpr[0] = pr;
+    hn = 1;
+    started: int = mono_ms();
+    vleft: f32 = viewport_left_target(checks, ncheck, pc, pc, 0.0, cell);
+    vstate: int = 0;
+    vbase: f32 = vleft;
+    vvec: f32 = 0.0;
+    vstarted: int = started;
+    held_l: int = 0;
+    held_r: int = 0;
+    held_u: int = 0;
+    held_d: int = 0;
+    shift: int = 0;
+    shape_verts: []f32 = new f32[40](0.0);
+    ev: XEvent = XEvent.Other;
+    running: int = 1;
+    alive: int = 1;
+    while (running != 0) {
+        while (XPending(dpy) != 0) {
+            XNextEvent(dpy, &ev);
+            match ev {
+                KeyPress -> {
+                    ks: int = XLookupKeysym(&ev, 0);
+                    if (ks == 65505 || ks == 65506) {
+                        shift = 1;
+                    } else if (ks == 113 || ks == 81 || ks == 65307) {
+                        running = 0;
+                    } else if (ks == 65361 || ks == 65362 || ks == 65363 || ks == 65364) {
+                        is_rep: int = 0;
+                        if (ks == 65361 && held_l != 0) {
+                            is_rep = 1;
+                        }
+                        if (ks == 65363 && held_r != 0) {
+                            is_rep = 1;
+                        }
+                        if (ks == 65362 && held_u != 0) {
+                            is_rep = 1;
+                        }
+                        if (ks == 65364 && held_d != 0) {
+                            is_rep = 1;
+                        }
+                        if (ks == 65361) {
+                            held_l = 1;
+                        }
+                        if (ks == 65363) {
+                            held_r = 1;
+                        }
+                        if (ks == 65362) {
+                            held_u = 1;
+                        }
+                        if (ks == 65364) {
+                            held_d = 1;
+                        }
+                        if (shift != 0 && (ks == 65361 || ks == 65363)) {
+                            dest: int = pc;
+                            if (ks == 65361) {
+                                dest = find_prev_check(checks, ncheck, pc);
+                            } else {
+                                dest = find_next_check(checks, ncheck, pc);
+                            }
+                            hstart = 0;
+                            copy_blocks(hist, 0, blocks, 0, n);
+                            hpc[0] = pc;
+                            hpr[0] = pr;
+                            n = fill_level(blocks);
+                            pc = dest;
+                            copy_blocks(hist, 1024, blocks, 0, n);
+                            hpc[1] = pc;
+                            hpr[1] = pr;
+                            hn = 2;
+                            started = mono_ms();
+                        } else if (shift == 0) {
+                            gated: int = 0;
+                            if (hn < 2) {
+                                gated = 1;
+                            } else if (hn < 5 && is_rep == 0) {
+                                gated = 1;
+                            }
+                            if (gated != 0) {
+                                dc: int = 0;
+                                dr: int = 0;
+                                if (ks == 65361) {
+                                    dc = 0 - 1;
+                                } else if (ks == 65363) {
+                                    dc = 1;
+                                } else if (ks == 65362) {
+                                    dr = 0 - 1;
+                                } else {
+                                    dr = 1;
+                                }
+                                packed: int = move_player(blocks, n, checks, ncheck,
+                                    pc, pr, dc, dr);
+                                pc = packed / 16;
+                                pr = packed - pc * 16;
+                                if (hn == 1) {
+                                    started = mono_ms();
+                                }
+                                if (hn >= 8) {
+                                    hstart = (hstart + 1) % 8;
+                                    hn = hn - 1;
+                                }
+                                slot: int = (hstart + hn) % 8;
+                                copy_blocks(hist, slot * 1024, blocks, 0, n);
+                                hpc[slot] = pc;
+                                hpr[slot] = pr;
+                                hn = hn + 1;
+                            }
+                        }
+                    }
+                }
+                KeyRelease -> {
+                    kr: int = XLookupKeysym(&ev, 0);
+                    if (kr == 65505 || kr == 65506) {
+                        shift = 0;
+                    } else if (kr == 65361) {
+                        held_l = 0;
+                    } else if (kr == 65363) {
+                        held_r = 0;
+                    } else if (kr == 65362) {
+                        held_u = 0;
+                    } else if (kr == 65364) {
+                        held_d = 0;
+                    }
+                }
+                DestroyNotify -> {
+                    running = 0;
+                    alive = 0;
+                }
+                ClientMessage c -> {
+                    if (c.l0 == proto[0]) {
+                        running = 0;
+                    }
+                }
+                _ -> { }
+            }
+        }
+        if (running != 0) {
+            now: int = mono_ms();
+            while (hn > 1 && now - started >= 200) {
+                hstart = (hstart + 1) % 8;
+                hn = hn - 1;
+                started = started + 200;
+            }
+            t: f32 = 0.0;
+            if (hn > 1) {
+                t = (now - started) as f32 / 200.0;
+                if (t > 1.0) {
+                    t = 1.0;
+                }
+            }
+            fi: int = 0;
+            ti: int = 0;
+            if (hn > 1) {
+                ti = 1;
+            }
+            foff: int = hist_off(hstart, fi);
+            toff: int = hist_off(hstart, ti);
+            fc: int = hpc[(hstart + fi) % 8];
+            fr: int = hpr[(hstart + fi) % 8];
+            tc2: int = hpc[(hstart + ti) % 8];
+            tr2: int = hpr[(hstart + ti) % 8];
+            target: f32 = viewport_left_target(checks, ncheck, fc, tc2, t, cell);
+            if (vstate == 0) {
+                speed: f32 = 0.2;
+                if (find_prev_or_same_check(checks, ncheck, fc) != find_prev_or_same_check(checks,
+                    ncheck, tc2)) {
+                    speed = 2.0;
+                }
+                if (target < vleft) {
+                    vstate = 1;
+                    vbase = vleft;
+                    vvec = 0.0 - speed;
+                    vstarted = now;
+                } else if (target > vleft) {
+                    vstate = 1;
+                    vbase = vleft;
+                    vvec = speed;
+                    vstarted = now;
+                }
+            } else {
+                nv: f32 = vbase + vvec * (now - vstarted) as f32;
+                if (vvec > 0.0 && nv > target || vvec < 0.0 && nv < target) {
+                    vleft = target;
+                    vstate = 0;
+                } else {
+                    vleft = nv;
+                }
+            }
+            left_m: f32 = (win_w - 20.0 * cell) * 0.5;
+            top_m: f32 = (win_h - 9.0 * cell) * 0.5;
+            ox: f32 = left_m - vleft;
+            oy: f32 = top_m;
+            glClear(16384);
+            glUseProgram(rect_prog);
+            glBindBuffer(34962, ids[0]);
+            glBufferData(34962, len(quad) * 4, quad, 35044);
+            glVertexAttribPointer(0, 2, 5126, 0, 8, 0);
+            ci: int = 0;
+            while (ci < ncheck) {
+                cc: f32 = checks[ci] as f32;
+                draw_rect(u_center, u_scale, u_color, ox + cc * cell, oy, cell, 9.0 * cell,
+                    0.302, 0.486, 0.059, win_w, win_h);
+                ci = ci + 1;
+            }
+            px: f32 = lerp(fc as f32, tc2 as f32, t);
+            py: f32 = lerp(fr as f32, tr2 as f32, t);
+            draw_rect(u_center, u_scale, u_color, ox + px * cell, oy + py * cell,
+                cell, cell, 0.957, 0.247, 0.369, win_w, win_h);
+            bi: int = 0;
+            while (bi < n) {
+                tb: Block = hist[toff + bi];
+                bc: f32 = tb.column as f32;
+                br: f32 = tb.row as f32;
+                fi2: int = block_id(hist, foff, n, tb.id);
+                if (fi2 >= 0) {
+                    fb: Block = hist[foff + fi2];
+                    bc = lerp(fb.column as f32, tb.column as f32, t);
+                    br = lerp(fb.row as f32, tb.row as f32, t);
+                }
+                draw_rect(u_center, u_scale, u_color, ox + bc * cell, oy + br * cell,
+                    cell, cell, 0.659, 0.635, 0.620, win_w, win_h);
+                bi = bi + 1;
+            }
+            glUseProgram(poly_prog);
+            glBindBuffer(34962, ids[0]);
+            glVertexAttribPointer(0, 2, 5126, 0, 8, 0);
+            bi = 0;
+            while (bi < n) {
+                tb2: Block = hist[toff + bi];
+                if (tb2.shape != 0) {
+                    sc: f32 = tb2.column as f32;
+                    sr: f32 = tb2.row as f32;
+                    fi3: int = block_id(hist, foff, n, tb2.id);
+                    if (fi3 >= 0) {
+                        fb2: Block = hist[foff + fi3];
+                        sc = lerp(fb2.column as f32, tb2.column as f32, t);
+                        sr = lerp(fb2.row as f32, tb2.row as f32, t);
+                    }
+                    draw_shape(poly_color, shape_verts, sc, sr, tb2.shape, cell, ox,
+                        oy, win_w, win_h);
+                }
+                bi = bi + 1;
+            }
+            glXSwapBuffers(dpy, win);
+        }
+    }
+    glXMakeCurrent(dpy, 0, null);
+    glXDestroyContext(dpy, ctx);
+    if (alive != 0) {
+        XDestroyWindow(dpy, win);
+    }
+    XCloseDisplay(dpy);
+    0;
+}
