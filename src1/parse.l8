@@ -4464,7 +4464,41 @@ parse_field_list(base_offset: int) noregion raises Error: *Member {
     head or error("empty members");
 }
 
-parse_variant(tag: int, enum_name: []i8) noregion raises Error: *Variant@new {
+check_enum_tag(tag: int, tag_ty: *Type) raises Error {
+    if (is_i8_ty(tag_ty)) {
+        if (tag < 0 || tag > 255) {
+            error("enum tag out of range for i8");
+        }
+    } else if (is_i32_ty(tag_ty)) {
+        lo: int = 0 - 2147483647 - 1;
+        if (tag < lo || tag > 2147483647) {
+            error("enum tag out of range for i32");
+        }
+    } else if (is_u32_ty(tag_ty)) {
+        if (tag < 0 || tag > 4294967295) {
+            error("enum tag out of range for u32");
+        }
+    }
+}
+
+parse_enum_tag() raises Error: int {
+    neg: int = 0;
+    if (tok.kind == TokKind.Minus) {
+        tok = tok.next;
+        neg = 1;
+    }
+    if (tok.kind != TokKind.Num) {
+        error("expected variant tag");
+    }
+    tag: int = tok.val;
+    if (neg != 0) {
+        tag = 0 - tag;
+    }
+    tok = tok.next;
+    tag;
+}
+
+parse_variant(tag: int, enum_name: []i8, tag_size: int) noregion raises Error: *Variant@new {
     if (tok.kind != TokKind.Ident) {
         error("expected variant name");
     }
@@ -4474,6 +4508,7 @@ parse_variant(tag: int, enum_name: []i8) noregion raises Error: *Variant@new {
         fields: null,
         payload_ty: null,
         payload_size: 0,
+        payload_offset: tag_size,
         next: null,
         lead: null,
         trail: null,
@@ -4487,6 +4522,8 @@ parse_variant(tag: int, enum_name: []i8) noregion raises Error: *Variant@new {
         tok = tok.next;
         v.fields = parse_field_list(0);
         v.payload_size = field_list_size;
+        pa: int = members_align(v.fields);
+        v.payload_offset = align_up(tag_size, pa);
         sd: *StructDef = new StructDef {
             name: variant_payload_name(enum_name, v.name),
             members: v.fields,
@@ -4559,8 +4596,33 @@ parse_type_def() noregion raises Error {
     nlen: int = browse_tok_len;
     nfile: int = browse_tok_file;
     tok = tok.next;
+    tag_ty: *Type = ty_int;
+    min_size: int = 0;
+    has_ann: int = 0;
+    if (tok.kind == TokKind.Colon) {
+        has_ann = 1;
+        tok = tok.next;
+        tag_ty = parse_type();
+        if (!is_int_width_ty(tag_ty)) {
+            error("enum tag type must be int, i8, i32, or u32");
+        }
+        if (tok.kind == TokKind.Comma) {
+            tok = tok.next;
+            if (tok.kind != TokKind.Num) {
+                error("expected enum size");
+            }
+            min_size = tok.val;
+            if (min_size <= 0) {
+                error("enum size must be positive");
+            }
+            tok = tok.next;
+        }
+    }
     skip(TokKind.Assign);
     if (tok.kind == TokKind.LBrace) {
+        if (has_ann != 0) {
+            error("struct type cannot have a tag type or size");
+        }
         if (find_enum(name) != null) {
             error("redefinition of type");
         }
@@ -4597,20 +4659,35 @@ parse_type_def() noregion raises Error {
     }
     head: ?*Variant = null;
     cur: ?*Variant = null;
-    tag: int = 0;
-    max_payload: int = 0;
+    next_tag: int = 0;
+    tag_size: int = type_size(tag_ty);
+    enum_align: int = type_align(tag_ty);
+    max_end: int = tag_size;
     done: int = 0;
     while (done == 0) {
-        v: *Variant = parse_variant(tag, name);
+        tag: int = next_tag;
+        if (tok.kind == TokKind.Minus || tok.kind == TokKind.Num) {
+            tag = parse_enum_tag();
+        }
+        check_enum_tag(tag, tag_ty);
+        v: *Variant = parse_variant(tag, name, tag_size);
         x: ?*Variant = head;
         while (x != null) {
             if (streq(x.name, v.name)) {
                 error("duplicate variant");
             }
+            if (x.tag == v.tag) {
+                error("duplicate variant tag");
+            }
             x = x.next;
         }
-        if (v.payload_size > max_payload) {
-            max_payload = v.payload_size;
+        end: int = v.payload_offset + v.payload_size;
+        if (end > max_end) {
+            max_end = end;
+        }
+        va: int = members_align(v.fields);
+        if (va > enum_align) {
+            enum_align = va;
         }
         if (cur != null) {
             cur.next = v;
@@ -4619,7 +4696,7 @@ parse_type_def() noregion raises Error {
             head = v;
             cur = v;
         }
-        tag = tag + 1;
+        next_tag = tag + 1;
         if (tok.kind == TokKind.Pipe) {
             tok = tok.next;
         } else {
@@ -4629,8 +4706,14 @@ parse_type_def() noregion raises Error {
     if (head == null) {
         error("enum type needs at least one variant");
     }
+    if (min_size > max_end) {
+        max_end = min_size;
+    }
     ed.variants = head;
-    ed.size = align_up(8 + max_payload, 8);
+    ed.tag_ty = tag_ty;
+    ed.min_size = min_size;
+    ed.align = enum_align;
+    ed.size = align_up(max_end, enum_align);
     if (stub != null) {
         if (stub.ty != null) {
             rebind_struct_stub_to_enum(stub, ed);
@@ -4745,7 +4828,7 @@ parse_program_unit() noregion raises Error {
     while (tok.kind != TokKind.Eof) {
         if (tok.kind == TokKind.Import) {
             parse_import();
-        } else if (tok.kind == TokKind.TypeKw && tok.next.kind == TokKind.Ident && tok.next.next.kind == TokKind.Assign) {
+        } else if (tok.kind == TokKind.TypeKw && tok.next.kind == TokKind.Ident && (tok.next.next.kind == TokKind.Assign || tok.next.next.kind == TokKind.Colon)) {
             parse_type_def();
         } else {
             if (tok.kind == TokKind.Exception) {

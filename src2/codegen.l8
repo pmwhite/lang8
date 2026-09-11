@@ -5,11 +5,20 @@ new_label(): int {
     l;
 }
 
+enum_mem_size(ty: *Type): int {
+    if (!is_enum_ty(ty) || passes_by_ref(ty)) {
+        0;
+    } else {
+        type_size(ty);
+    }
+}
+
 load_mem(ty: *Type) noregion {
-    if (is_byte_ty(ty)) {
+    esz: int = enum_mem_size(ty);
+    if (esz == 1 || is_byte_ty(ty)) {
         cg_movzb_mr(0, 0, 0);
     } else {
-        if (is_i32_ty(ty)) {
+        if (esz == 4 || is_i32_ty(ty)) {
             cg_movsxd_mr(0, 0, 0);
         } else {
             if (is_u32_ty(ty) || is_f32_ty(ty)) {
@@ -22,14 +31,37 @@ load_mem(ty: *Type) noregion {
 }
 
 store_mem(ty: *Type) noregion {
-    if (is_byte_ty(ty)) {
+    esz: int = enum_mem_size(ty);
+    if (esz == 1 || is_byte_ty(ty)) {
         cg_movb_rm(0, 7, 0);
     } else {
-        if (is_i32_ty(ty) || is_u32_ty(ty) || is_f32_ty(ty)) {
+        if (esz == 4 || is_i32_ty(ty) || is_u32_ty(ty) || is_f32_ty(ty)) {
             cg_movl_rm(0, 7, 0);
         } else {
             cg_mov_rm(0, 7, 0);
         }
+    }
+}
+
+/* Write tag into (%rax). Width follows the enum's tag type. */
+store_enum_tag(tag: int, tag_ty: *Type) noregion {
+    cg_mov_imm(tag, 7);
+    if (is_i8_ty(tag_ty)) {
+        cg_movb_rm(7, 0, 0);
+    } else {
+        if (is_i32_ty(tag_ty) || is_u32_ty(tag_ty)) {
+            cg_movl_rm(7, 0, 0);
+        } else {
+            cg_mov_rm(7, 0, 0);
+        }
+    }
+}
+
+variant_payload_off(v: ?*Variant): int {
+    if (v == null) {
+        8;
+    } else {
+        v.payload_offset;
     }
 }
 
@@ -354,8 +386,8 @@ gen_struct_inits(inits: ?*FieldInit) noregion raises Error {
     gen_field_inits(inits, 0);
 }
 
-gen_variant_inits(inits: ?*FieldInit) noregion raises Error {
-    gen_field_inits(inits, 8);
+gen_variant_inits(inits: ?*FieldInit, base_off: int) noregion raises Error {
+    gen_field_inits(inits, base_off);
 }
 
 gen_addr(n: *Expr) noregion raises Error {
@@ -402,11 +434,12 @@ gen_addr(n: *Expr) noregion raises Error {
 
 /* Scalar load of a variable into %rax without lea+deref. */
 emit_load_var(vo: *Obj, ty: *Type) noregion {
+    esz: int = enum_mem_size(ty);
     if (vo.is_local != 0) {
-        if (is_byte_ty(ty)) {
+        if (esz == 1 || is_byte_ty(ty)) {
             cg_movzb_mr(5, vo.offset, 0);
         } else {
-            if (is_i32_ty(ty)) {
+            if (esz == 4 || is_i32_ty(ty)) {
                 cg_movsxd_mr(5, vo.offset, 0);
             } else {
                 if (is_u32_ty(ty) || is_f32_ty(ty)) {
@@ -418,7 +451,7 @@ emit_load_var(vo: *Obj, ty: *Type) noregion {
         }
     } else {
         cg_mov_rip_r(vo.name, 0, 0);
-        if (is_i32_ty(ty)) {
+        if (esz == 4 || is_i32_ty(ty)) {
             cg_movsxd_eax();
         }
         if (is_u32_ty(ty) || is_f32_ty(ty)) {
@@ -428,11 +461,12 @@ emit_load_var(vo: *Obj, ty: *Type) noregion {
 }
 
 emit_store_var(vo: *Obj, ty: *Type) noregion {
+    esz: int = enum_mem_size(ty);
     if (vo.is_local != 0) {
-        if (is_byte_ty(ty)) {
+        if (esz == 1 || is_byte_ty(ty)) {
             cg_movb_rm(0, 5, vo.offset);
         } else {
-            if (is_i32_ty(ty) || is_u32_ty(ty) || is_f32_ty(ty)) {
+            if (esz == 4 || is_i32_ty(ty) || is_u32_ty(ty) || is_f32_ty(ty)) {
                 cg_movl_rm(0, 5, vo.offset);
             } else {
                 cg_mov_rm(0, 5, vo.offset);
@@ -458,18 +492,19 @@ fits_imm32(v: int): bool {
 
 /* Store an immediate into a scalar variable (no %rax round-trip). */
 emit_store_imm(vo: *Obj, ty: *Type, v: int) noregion {
+    esz: int = enum_mem_size(ty);
     if (vo.is_local != 0) {
-        if (is_byte_ty(ty)) {
+        if (esz == 1 || is_byte_ty(ty)) {
             cg_movb_imm_m(v, 5, vo.offset);
         } else {
-            if (is_i32_ty(ty) || is_u32_ty(ty) || is_f32_ty(ty)) {
+            if (esz == 4 || is_i32_ty(ty) || is_u32_ty(ty) || is_f32_ty(ty)) {
                 cg_movl_imm_m(v, 5, vo.offset);
             } else {
                 cg_movq_imm_m(v, 5, vo.offset);
             }
         }
     } else {
-        if (is_byte_ty(ty)) {
+        if (esz == 1 || is_byte_ty(ty)) {
             cg_movb_imm_rip(v, vo.name);
         } else {
             cg_movq_imm_rip(v, vo.name);
@@ -1155,9 +1190,8 @@ gen_expr(n: *Expr) noregion raises Error {
             if (variant != null) {
                 cg_push(3);
                 cg_mov_rr(0, 3);
-                cg_mov_imm(k.val, 7);
-                cg_mov_rm(7, 0, 0);
-                gen_variant_inits(k.inits);
+                store_enum_tag(k.val, enum_tag_type(base));
+                gen_variant_inits(k.inits, variant_payload_off(variant));
                 cg_mov_rr(3, 0);
                 cg_pop(3);
             } else {
@@ -1190,7 +1224,8 @@ gen_expr(n: *Expr) noregion raises Error {
             return;
         }
         VariantLit k -> {
-            sz: int = type_size(n.ty or error("missing type"));
+            ety: *Type = n.ty or error("missing type");
+            sz: int = type_size(ety);
             if (sz <= 0) {
                 sz = 8;
             }
@@ -1202,9 +1237,9 @@ gen_expr(n: *Expr) noregion raises Error {
                 cg_alu_imm(5, 16, 4);
                 cg_push(3);
                 cg_lea_mr(4, 8, 3);
-                cg_mov_imm(k.val, 7);
-                cg_mov_rm(7, 3, 0);
-                gen_variant_inits(k.inits);
+                cg_mov_rr(3, 0);
+                store_enum_tag(k.val, enum_tag_type(ety));
+                gen_variant_inits(k.inits, variant_payload_off(k.variant));
                 cg_mov_mr(3, 0, 0);
                 cg_pop(3);
                 return;
@@ -1213,9 +1248,9 @@ gen_expr(n: *Expr) noregion raises Error {
             cg_alu_imm(5, sz, 4);
             cg_push(3);
             cg_lea_mr(4, 8, 3);
-            cg_mov_imm(k.val, 7);
-            cg_mov_rm(7, 3, 0);
-            gen_variant_inits(k.inits);
+            cg_mov_rr(3, 0);
+            store_enum_tag(k.val, enum_tag_type(ety));
+            gen_variant_inits(k.inits, variant_payload_off(k.variant));
             cg_mov_rr(3, 0);
             cg_pop(3);
             return;
@@ -1248,9 +1283,8 @@ gen_expr(n: *Expr) noregion raises Error {
                         gen_addr(q.lhs);
                         cg_push(3);
                         cg_mov_rr(0, 3);
-                        cg_mov_imm(k.val, 7);
-                        cg_mov_rm(7, 0, 0);
-                        gen_variant_inits(k.inits);
+                        store_enum_tag(k.val, enum_tag_type(lty2));
+                        gen_variant_inits(k.inits, variant_payload_off(k.variant));
                         cg_mov_rr(3, 0);
                         cg_pop(3);
                         return;
@@ -1586,7 +1620,12 @@ gen_match(cond: *Expr, arms: ?*MatchArm) noregion raises Error {
         }
     }
     cg_push(0);
-    cg_mov_mr(0, 0, 0);
+    cty: ?*Type = cond.ty;
+    if (cty != null && is_enum_ty(cty)) {
+        load_mem(enum_tag_type(cty));
+    } else {
+        cg_mov_mr(0, 0, 0);
+    }
     cg_push(0);
     arm: ?*MatchArm = arms;
     while (arm != null) {
@@ -1603,8 +1642,11 @@ gen_match(cond: *Expr, arms: ?*MatchArm) noregion raises Error {
                 error("missing variant");
             }
             psz: int = av.payload_size;
+            poff: int = av.payload_offset;
             cg_mov_mr(4, 8, 6);
-            cg_alu_imm(0, 8, 6);
+            if (poff != 0) {
+                cg_alu_imm(0, poff, 6);
+            }
             cg_lea_mr(5, bv.offset, 7);
             emit_memcpy(psz);
         }
