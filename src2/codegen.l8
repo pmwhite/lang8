@@ -340,6 +340,17 @@ gen_index_addr(lhs: *Expr, idx: *Expr) noregion raises Error {
         gen_simple_idx(idx);
         cg_mov_rr(0, 1);
         lvo: *Obj = lv;
+        if (is_array(raw)) {
+            if (lvo.is_local != 0) {
+                cg_lea_mr(5, lvo.offset, 6);
+            } else {
+                cg_lea_rip(lvo.name, 0, 6);
+            }
+            cg_mov_imm(array_len(raw), 2);
+            emit_check_idx();
+            emit_scale_offset(esz);
+            return;
+        }
         lty: *Type = lvo.ty or error("missing type");
         emit_load_var(lvo, lty);
         cg_mov_rr(0, 6);
@@ -348,7 +359,7 @@ gen_index_addr(lhs: *Expr, idx: *Expr) noregion raises Error {
             return;
         }
         if (!is_slice(raw)) {
-            error("index requires []T or [z]T");
+            error("index requires []T, [N]T, or [z]T");
         }
         cg_mov_mr(6, 0 - 8, 2);
         emit_check_idx();
@@ -363,9 +374,18 @@ gen_index_addr(lhs: *Expr, idx: *Expr) noregion raises Error {
         gen_expr(idx);
         cg_mov_rr(0, 1);
         cg_pop(6);
+    } else if (is_array(raw)) {
+        gen_expr(lhs);
+        cg_mov_rr(0, 6);
+        cg_push(6);
+        gen_expr(idx);
+        cg_mov_rr(0, 1);
+        cg_pop(6);
+        cg_mov_imm(array_len(raw), 2);
+        emit_check_idx();
     } else {
         if (!is_slice(raw)) {
-            error("index requires []T or [z]T");
+            error("index requires []T, [N]T, or [z]T");
         }
         gen_expr(lhs);
         cg_mov_rr(0, 6);
@@ -1074,6 +1094,33 @@ gen_binary(op: BinOp, lhs: *Expr, rhs: *Expr) noregion raises Error {
     }
 }
 
+/* Dest address in %rax. Fill a [N]T or heap-slot run from a list of elements. */
+gen_fill_array(elems: ?*Expr, base: *Type) noregion raises Error {
+    esz: int = type_size(base);
+    if (esz <= 0) {
+        esz = 8;
+    }
+    cg_alu_imm(5, 24, 4);
+    cg_mov_rm(12, 4, 0);
+    cg_mov_rm(13, 4, 8);
+    cg_mov_rm(3, 4, 16);
+    cg_mov_rr(4, 13);
+    cg_mov_rr(0, 12);
+    cg_mov_rr(12, 3);
+    ae: ?*Expr = elems;
+    while (ae != null) {
+        gen_expr(ae);
+        cg_mov_rr(3, 7);
+        store_value(base);
+        cg_alu_imm(0, esz, 3);
+        ae = ae.next;
+    }
+    cg_mov_rr(12, 0);
+    cg_mov_mr(13, 16, 3);
+    cg_mov_mr(13, 0, 12);
+    cg_mov_mr(13, 8, 13);
+}
+
 gen_expr(n: *Expr) noregion raises Error {
     match n.kind {
         Num k -> {
@@ -1287,6 +1334,14 @@ gen_expr(n: *Expr) noregion raises Error {
                         gen_variant_inits(k.inits, variant_payload_off(k.variant));
                         cg_mov_rr(3, 0);
                         cg_pop(3);
+                        return;
+                    }
+                }
+                ArrayLit k -> {
+                    lty3: ?*Type = q.lhs.ty;
+                    if (lty3 != null && is_array(lty3)) {
+                        gen_addr(q.lhs);
+                        gen_fill_array(k.elems, type_base(lty3));
                         return;
                     }
                 }
@@ -1598,7 +1653,19 @@ gen_expr(n: *Expr) noregion raises Error {
             return;
         }
         ArrayLit k -> {
-            base: *Type = type_base(n.ty or error("missing type"));
+            nty: *Type = n.ty or error("missing type");
+            if (is_array(nty)) {
+                sz2: int = type_size(nty);
+                if (sz2 <= 0) {
+                    sz2 = 8;
+                }
+                asz2: int = sz2 + 15 & 0 - 16;
+                cg_alu_imm(5, asz2, 4);
+                cg_mov_rr(4, 0);
+                gen_fill_array(k.elems, type_base(nty));
+                return;
+            }
+            base: *Type = type_base(nty);
             esz: int = type_size(base);
             if (esz <= 0) {
                 esz = 8;
@@ -1809,6 +1876,39 @@ gen_stmt(n: *Stmt) noregion raises Error {
             sty: *Type = cu2.ty or error("missing type");
             ity: *Type = k.item.ty or error("missing type");
             esz: int = type_size(ity);
+            if (is_array(sty)) {
+                gen_expr(k.iter);
+                cg_lea_mr(5, cu2.offset, 7);
+                cg_mov_rr(0, 6);
+                emit_memcpy(type_size(sty));
+                emit_store_imm(iu2, ty_int, 0);
+                emit_store_imm(k.n, ty_int, array_len(sty));
+                cg_label_id(lb3);
+                emit_load_var(iu2, ty_int);
+                cg_mov_rr(0, 1);
+                emit_load_var(k.n, ty_int);
+                cg_alu_rr(57, 0, 1);
+                cg_jump_id(3, le3);
+                cg_lea_mr(5, cu2.offset, 6);
+                emit_load_var(iu2, ty_int);
+                cg_mov_rr(0, 1);
+                emit_scale_offset(esz);
+                if (passes_by_ref(ity)) {
+                    cg_mov_rr(0, 6);
+                    cg_lea_mr(5, k.item.offset, 7);
+                    emit_memcpy(esz);
+                } else {
+                    load_mem(ity);
+                    emit_store_var(k.item, ity);
+                }
+                gen_stmt(k.body);
+                emit_load_var(iu2, ty_int);
+                cg_alu_imm(0, 1, 0);
+                emit_store_var(iu2, ty_int);
+                cg_jump_id(0 - 1, lb3);
+                cg_label_id(le3);
+                return;
+            }
             gen_expr(k.iter);
             emit_store_var(cu2, sty);
             emit_store_imm(iu2, ty_int, 0);
@@ -2105,7 +2205,13 @@ emit_dyn_global_inits(g: ?*Obj) noregion raises Error {
     e: *Expr = init or error("missing global initializer");
     ty: *Type = g.ty or error("missing global type");
     gen_expr(e);
-    emit_store_var(g, ty);
+    if (passes_by_ref(ty)) {
+        cg_lea_rip(g.name, 0, 7);
+        cg_mov_rr(0, 6);
+        emit_memcpy(type_size(ty));
+    } else {
+        emit_store_var(g, ty);
+    }
 }
 
 emit_l8_init_globals_fn() noregion raises Error {

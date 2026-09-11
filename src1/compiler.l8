@@ -39,7 +39,7 @@
 // Unknown names are an error. OS functions are `extern name(params): T` backed by runtime.s.
 // Shared libraries: top-level `need "libfoo.so";` plus `extern` names not defined in runtime.s.
 // Bitwise: `~ & ^ | << >>` on int/i8/i32/u32 (same type; >> is arithmetic except u32; shift count is int).
-// `for i in a..b` is exclusive over int; `for x in xs` walks `[]T` (not `[z]T`).
+// `for i in a..b` is exclusive over int; `for x in xs` walks `[]T` or `[N]T` (not `[z]T`).
 // The item is a per-iteration copy (array) or the induction variable (range).
 // `if`/`match`/`{ }` are expressions; a block's last statement is its value (`;` does not discard).
 // Function body uses that rule when a return type is declared; last-statement and `return` share assignable.
@@ -49,6 +49,8 @@
 // Locals: `x: T;` is unassigned; use before assign on all paths is an error. No `uninitialized`.
 // `new T[n](v)` fills every slot with v (evaluated once). No implicit element default.
 // `[a, b, c]` is a heap `[]T`; every element must have the same type. Empty `[]` is not allowed.
+// `[N]T` is a fixed-length array: inline storage, sizeof N * size(T), C layout. Index, len, and
+// `for x in a` work. `[a, b, c]` assigned to `[N]T` fills it (length must match).
 // n must fit the 64MiB heap: negative or wrapping n * size is rejected.
 // Calls follow SysV: six integer registers, eight xmm registers, then the stack. Hidden sret is the first incoming integer slot.
 // Pipeline: parse (syntax, including comments) → typecheck (fills Obj/Member/Function) →
@@ -70,6 +72,7 @@ type Type =
     | Slice { base: *Type }
     | OptSlice { base: *Type }
     | ZPtr { base: *Type }
+    | Array { base: *Type, n: int }
     | Record { def: *StructDef }
     | Enum { def: *EnumDef }
     | Exn { def: *ExnDef };
@@ -567,6 +570,13 @@ type TyEnt = {
     next: ?*TyEnt;
 };
 
+type ArrEnt = {
+    base: *Type;
+    n: int;
+    ty: *Type;
+    next: ?*ArrEnt;
+};
+
 source: []i8 = "";
 
 source_len: int = 0;
@@ -734,6 +744,8 @@ slice_cache: ?*TyEnt = null;
 opt_slice_cache: ?*TyEnt = null;
 
 zptr_cache: ?*TyEnt = null;
+
+array_cache: ?*ArrEnt = null;
 
 oob_lab: int = 0;
 
@@ -1120,6 +1132,18 @@ sb_puts(sb: *StrBuf@new, s: []i8) {
     sb.len = sb.len + n;
 }
 
+sb_uint(sb: *StrBuf@new, n: int) {
+    if (n < 0) {
+        sb_putc(sb, '-');
+        n = 0 - n;
+    }
+    if (n >= 10) {
+        sb_uint(sb, n / 10);
+    }
+    d: int = n % 10;
+    sb_putc(sb, ('0' as int + d) trunc i8);
+}
+
 sb_finish(sb: *StrBuf): []i8@new {
     strdup_n(sb.data, 0, sb.len);
 }
@@ -1299,6 +1323,13 @@ append_type(sb: *StrBuf@immortal, t: ?*Type) raises Error {
             append_type(sb, k.base);
             return;
         }
+        Array k -> {
+            sb_putc(sb, '[');
+            sb_uint(sb, k.n);
+            sb_putc(sb, ']');
+            append_type(sb, k.base);
+            return;
+        }
         Record k -> {
             sb_puts(sb, k.def.name);
             return;
@@ -1466,6 +1497,7 @@ init_runtime() noregion {
     slice_cache = null;
     opt_slice_cache = null;
     zptr_cache = null;
+    array_cache = null;
     walk_top = null;
     zero_top = null;
     cg_labbuf = new i8[64](0i8);
@@ -1656,6 +1688,9 @@ type_align(t: *Type): int {
         Exn k -> {
             members_align(k.def.members);
         }
+        Array k -> {
+            type_align(k.base);
+        }
         Noreturn -> {
             1;
         }
@@ -1703,6 +1738,9 @@ type_size(t: *Type): int {
         ZPtr _p -> {
             8;
         }
+        Array k -> {
+            type_size(k.base) * k.n;
+        }
         Record k -> {
             k.def.size;
         }
@@ -1737,6 +1775,9 @@ type_base(t: *Type) raises Error: *Type {
             k.base;
         }
         ZPtr k -> {
+            k.base;
+        }
+        Array k -> {
             k.base;
         }
         _ -> {
@@ -1840,6 +1881,24 @@ zptr_of(base: *Type@immortal) noregion: *Type@new {
     }
     t: *Type = new Type.ZPtr { base: base };
     zptr_cache = new TyEnt { base: base, ty: t, next: zptr_cache };
+    t;
+}
+
+array_of(base: *Type@immortal, n: int) noregion: *Type@new {
+    e: ?*ArrEnt = array_cache;
+    while (e != null) {
+        if (e.base == base && e.n == n) {
+            return e.ty;
+        }
+        e = e.next;
+    }
+    t: *Type = new Type.Array { base: base, n: n };
+    array_cache = new ArrEnt {
+        base: base,
+        n: n,
+        ty: t,
+        next: array_cache
+    };
     t;
 }
 
@@ -2369,8 +2428,30 @@ is_zptr(t: *Type): bool {
     }
 }
 
+is_array(t: *Type): bool {
+    match t.* {
+        Array _p -> {
+            true;
+        }
+        _ -> {
+            false;
+        }
+    }
+}
+
+array_len(t: *Type): int {
+    match t.* {
+        Array k -> {
+            k.n;
+        }
+        _ -> {
+            0;
+        }
+    }
+}
+
 is_indexable(t: *Type): bool {
-    is_slice(t) || is_zptr(t);
+    is_slice(t) || is_zptr(t) || is_array(t);
 }
 
 type_is_ref(t: ?*Type): bool {
@@ -2431,7 +2512,9 @@ is_exn_ty(t: *Type): bool {
 }
 
 passes_by_ref(t: *Type): bool {
-    if (is_enum_ty(t)) {
+    if (is_array(t)) {
+        true;
+    } else if (is_enum_ty(t)) {
         sz: int = type_size(t);
         sz != 1 && sz != 4 && sz != 8;
     } else {
@@ -2510,6 +2593,27 @@ assignable(to: ?*Type@from_n, from_n: ?*Expr) raises Error: bool {
             if (is_pointer(to2) && is_slice(from2)) {
                 if (types_equal(type_base(from2), type_base(to2))) {
                     return true;
+                }
+            }
+            if (is_array(to2) && from_n != null) {
+                match from_n.kind {
+                    ArrayLit k -> {
+                        want: int = array_len(to2);
+                        got: int = 0;
+                        e: ?*Expr = k.elems;
+                        while (e != null) {
+                            got = got + 1;
+                            e = e.next;
+                        }
+                        if (got != want) {
+                            error("array literal length must match [N]T");
+                        }
+                        if (is_slice(from2) && types_equal(type_base(from2), type_base(to2))) {
+                            from_n.ty = to;
+                            return true;
+                        }
+                    }
+                    _ -> { }
                 }
             }
         }
@@ -2694,6 +2798,9 @@ type_has_pointers(t: ?*Type): bool {
         ZPtr _p -> {
             true;
         }
+        Array k -> {
+            type_has_pointers(k.base);
+        }
         Record k -> {
             struct_has_pointers(k.def);
         }
@@ -2738,6 +2845,8 @@ types_equal(a: *Type, b: *Type) raises Error: bool {
         types_equal(type_base(a), type_base(b));
     } else if (is_zptr(a) && is_zptr(b)) {
         types_equal(type_base(a), type_base(b));
+    } else if (is_array(a) && is_array(b)) {
+        array_len(a) == array_len(b) && types_equal(type_base(a), type_base(b));
     } else if (is_struct_ty(a) && is_struct_ty(b)) {
         type_struct_def(a) == type_struct_def(b);
     } else if (is_enum_ty(a) && is_enum_ty(b)) {

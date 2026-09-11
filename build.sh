@@ -194,6 +194,9 @@ run_examples_selfhost() {
   example "$tool" arrlit examples/arrlit.l8 'YYYYY'
   example_compile_fail "$tool" arrlitempty examples/arrlitempty.l8 'array literal cannot be empty'
   example_compile_fail "$tool" arrlitmix examples/arrlitmix.l8 'array element type mismatch'
+  example "$tool" fixarr examples/fixarr.l8 'YYYYYYYYYYYYYY'
+  example_compile_fail "$tool" fixarr0 examples/fixarr0.l8 'array length must be positive'
+  example_compile_fail "$tool" fixarrlen examples/fixarrlen.l8 'array literal length must match'
   example "$tool" aggcopy examples/aggcopy.l8 'YYYYY'
   example "$tool" dynpid examples/dynpid.l8 'Y'
   example "$tool" nestsum examples/nestsum.l8 '1 2 3 9 4 5 6 7'
@@ -212,7 +215,7 @@ run_examples_selfhost() {
   example_compile_fail "$tool" region_callimm examples/region_callimm.l8 'cannot call from a region'
   example_compile_fail "$tool" region_badchild examples/region_badchild.l8 'region pointer cannot escape'
   example_compile_fail "$tool" region_wrapstack examples/region_wrapstack.l8 'address of local cannot escape'
-  example_compile_fail "$tool" colonz examples/colonz.l8 'expected a slice or C-string type'
+  example_compile_fail "$tool" colonz examples/colonz.l8 'expected a slice, C-string, or fixed-array type'
   example_compile_fail "$tool" uninitkw examples/uninitkw.l8 'undefined variable'
   example_exit "$tool" sliceoob examples/sliceoob.l8 1
   example_exit "$tool" writeoob examples/writeoob.l8 1
