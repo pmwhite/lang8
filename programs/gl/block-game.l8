@@ -6,6 +6,10 @@ import "level.l8";
 
 extern exit(code: int): noreturn;
 
+extern l8_exit(code: int): noreturn;
+
+g_dpy: ?*i8 = null;
+
 extern clock_gettime(clk: int, ts: *Timespec): int;
 
 type Timespec = {
@@ -16,7 +20,11 @@ type Timespec = {
 die(msg: []i8): noreturn {
     write(2, msg, len(msg));
     write(2, "\n", 1);
-    exit(1);
+    d: ?*i8 = g_dpy;
+    if (d != null) {
+        glXMakeCurrent(d, 0, null);
+    }
+    l8_exit(1);
 }
 
 mono_ms(): int {
@@ -46,6 +54,7 @@ compile_shader(kind: int, src: []i8): int {
         buf: []i8 = new i8[n](0i8);
         glGetShaderInfoLog(sh, n, null, buf);
         write(2, buf, n);
+        write(2, "\n", 1);
         die("shader compile failed");
     }
     sh;
@@ -708,6 +717,86 @@ draw_box(
     glDrawArrays(4, 0, n);
 }
 
+soft_step(
+    topx: []f32,
+    topz: []f32,
+    vx: []f32,
+    vz: []f32,
+    i: int,
+    tx: f32,
+    tz: f32,
+    dt: f32
+) {
+    dx: f32 = tx - topx[i];
+    dz: f32 = tz - topz[i];
+    if (dx * dx + dz * dz > 4.0) {
+        topx[i] = tx;
+        topz[i] = tz;
+        vx[i] = 0.0;
+        vz[i] = 0.0;
+        return;
+    }
+    ax: f32 = dx * 1100.0 - vx[i] * 64.0;
+    az: f32 = dz * 1100.0 - vz[i] * 64.0;
+    nvx: f32 = vx[i] + ax * dt;
+    nvz: f32 = vz[i] + az * dt;
+    topx[i] = topx[i] + nvx * dt;
+    topz[i] = topz[i] + nvz * dt;
+    vx[i] = nvx;
+    vz[i] = nvz;
+}
+
+tick_soft(
+    hist: []Block,
+    foff: int,
+    toff: int,
+    n: int,
+    t: f32,
+    px: f32,
+    pz: f32,
+    topx: []f32,
+    topz: []f32,
+    vx: []f32,
+    vz: []f32,
+    lagx: []f32,
+    lagz: []f32,
+    now: int,
+    last_ms: []int
+) {
+    dt: f32 = 0.016;
+    if (last_ms[0] != 0) {
+        dt = (now - last_ms[0]) as f32 * 0.001;
+    }
+    if (dt < 0.008) {
+        dt = 0.008;
+    }
+    if (dt > 0.04) {
+        dt = 0.04;
+    }
+    last_ms[0] = now;
+    bi: int = 0;
+    while (bi < n) {
+        tb: Block = hist[toff + bi];
+        bc: f32 = tb.column as f32;
+        br: f32 = tb.row as f32;
+        fi: int = block_id(hist, foff, n, tb.id);
+        if (fi >= 0) {
+            fb: Block = hist[foff + fi];
+            bc = lerp(fb.column as f32, tb.column as f32, t);
+            br = lerp(fb.row as f32, tb.row as f32, t);
+        }
+        tx: f32 = bc + 0.5;
+        tz: f32 = br + 0.5;
+        soft_step(topx, topz, vx, vz, bi, tx, tz, dt);
+        lagx[bi] = topx[bi] - tx;
+        lagz[bi] = topz[bi] - tz;
+        bi = bi + 1;
+    }
+    soft_step(topx, topz, vx, vz, 1023, px + 0.5, pz + 0.5, dt);
+    lagx[1023] = topx[1023] - (px + 0.5);
+    lagz[1023] = topz[1023] - (pz + 0.5);
+}
+
 draw_casters(
     u_origin: int,
     u_scale: int,
@@ -722,7 +811,10 @@ draw_casters(
     px: f32,
     pz: f32,
     t: f32,
-    shape_verts: []f32
+    shape_verts: []f32,
+    u_lag: int,
+    lagx: []f32,
+    lagz: []f32
 ) {
     bind_mesh(chamfer_buf);
     bi: int = 0;
@@ -736,14 +828,15 @@ draw_casters(
             bc = lerp(fb.column as f32, tb.column as f32, t);
             br = lerp(fb.row as f32, tb.row as f32, t);
         }
+        glUniform2f(u_lag, lagx[bi], lagz[bi]);
         draw_box(u_origin, u_scale, u_color, bc + 0.5, 0.5, br + 0.5, 0.92, 1.0, 0.92,
             0.659, 0.635, 0.620, chamfer_n / 6);
         bi = bi + 1;
     }
+    glUniform2f(u_lag, lagx[1023], lagz[1023]);
     draw_box(u_origin, u_scale, u_color, px + 0.5, 0.55, pz + 0.5, 0.86, 1.1, 0.86,
         0.957, 0.247, 0.369, chamfer_n / 6);
     bind_mesh(prism_buf);
-    glUniform3f(u_origin, 0.0, 0.0, 0.0);
     glUniform3f(u_scale, 1.0, 1.0, 1.0);
     glUniform3f(u_color, 0.988, 0.827, 0.302);
     bi = 0;
@@ -758,7 +851,9 @@ draw_casters(
                 sc = lerp(fb2.column as f32, tb2.column as f32, t);
                 sr = lerp(fb2.row as f32, tb2.row as f32, t);
             }
-            nf: int = fill_prism(shape_verts, sc, sr, tb2.shape);
+            glUniform2f(u_lag, lagx[bi], lagz[bi]);
+            glUniform3f(u_origin, sc + 0.5, 0.5, sr + 0.5);
+            nf: int = fill_prism(shape_verts, tb2.shape);
             if (nf > 0) {
                 glBufferData(34962, nf * 4, shape_verts, 35040);
                 glDrawArrays(4, 0, nf / 6);
@@ -863,40 +958,33 @@ unit_xy(n: int, i: int, which: int): f32 {
     }
 }
 
-fill_prism(
-    dst: []f32,
-    col: f32,
-    row: f32,
-    sides: int
-): int {
+fill_prism(dst: []f32, sides: int): int {
     if (sides < 3) {
         return 0;
     }
     if (sides > 15) {
         sides = 15;
     }
-    cx: f32 = col + 0.5;
-    cz: f32 = row + 0.5;
-    y0: f32 = 1.0;
-    y1: f32 = 1.22;
+    y0: f32 = 0.5;
+    y1: f32 = 0.72;
     rad: f32 = 0.32;
     i: int = 0;
     k: int = 0;
     while (k < sides) {
-        x0: f32 = cx + unit_xy(sides, k, 0) * rad;
-        z0: f32 = cz + unit_xy(sides, k, 1) * rad;
+        x0: f32 = unit_xy(sides, k, 0) * rad;
+        z0: f32 = unit_xy(sides, k, 1) * rad;
         k1: int = k + 1;
         if (k1 == sides) {
             k1 = 0;
         }
-        x1: f32 = cx + unit_xy(sides, k1, 0) * rad;
-        z1: f32 = cz + unit_xy(sides, k1, 1) * rad;
+        x1: f32 = unit_xy(sides, k1, 0) * rad;
+        z1: f32 = unit_xy(sides, k1, 1) * rad;
         enx: f32 = z1 - z0;
         enz: f32 = x0 - x1;
-        i = put_vn(dst, i, cx, y1, cz, 0.0, 1.0, 0.0);
+        i = put_vn(dst, i, 0.0, y1, 0.0, 0.0, 1.0, 0.0);
         i = put_vn(dst, i, x0, y1, z0, 0.0, 1.0, 0.0);
         i = put_vn(dst, i, x1, y1, z1, 0.0, 1.0, 0.0);
-        i = put_vn(dst, i, cx, y0, cz, 0.0, 0.0 - 1.0, 0.0);
+        i = put_vn(dst, i, 0.0, y0, 0.0, 0.0, 0.0 - 1.0, 0.0);
         i = put_vn(dst, i, x1, y0, z1, 0.0, 0.0 - 1.0, 0.0);
         i = put_vn(dst, i, x0, y0, z0, 0.0, 0.0 - 1.0, 0.0);
         i = put_vn(dst, i, x0, y0, z0, enx, 0.0, enz);
@@ -917,6 +1005,7 @@ main(): int {
         return 1;
     }
     dpy: *i8 = d0;
+    g_dpy = dpy;
     screen: int = XDefaultScreen(dpy);
     attr: []i32 = [4i32, 5i32, 8i32, 8i32, 9i32, 8i32, 10i32, 8i32, 12i32, 16i32,
         0i32];
@@ -975,13 +1064,30 @@ attribute vec3 nrm;
 uniform mat4 vp;
 uniform vec3 origin;
 uniform vec3 scale;
+uniform vec2 lag;
 varying vec3 vworld;
 varying vec3 vnrm;
 void main() {
-  vec3 w = origin + pos * scale;
+  vec3 lp = pos * scale;
+  float sy = max(scale.y, 0.0001);
+  float yb = lp.y + 0.5 * sy;
+  float t = clamp(yb / sy, 0.0, 1.0);
+  float extra = yb - t * sy;
+  float L = length(lag);
+  vec2 lg = lag * min(1.0, 0.18 / max(L, 0.0001));
+  vec2 off = lg * (t * t);
+  vec2 slope = lg * (0.7 * t);
+  float ytilt = 0.0 - (lp.x * slope.x + lp.z * slope.y) / sy;
+  vec3 spine = vec3(2.0 * t * lg.x, sy, 2.0 * t * lg.y);
+  vec3 up = spine * inversesqrt(max(dot(spine, spine), 0.00000001));
+  vec3 w = origin + vec3(lp.x + off.x, 0.0 - 0.5 * sy + t * sy + ytilt, lp.z + off.y);
+  w += up * extra;
   gl_Position = vp * vec4(w, 1.0);
   vworld = w;
-  vnrm = nrm / scale;
+  vec3 nn = nrm / scale;
+  nn.x = nn.x - nn.y * slope.x / sy;
+  nn.z = nn.z - nn.y * slope.y / sy;
+  vnrm = nn;
 }
 """;
     fs: []i8 = """
@@ -1022,8 +1128,23 @@ attribute vec3 pos;
 uniform mat4 vp;
 uniform vec3 origin;
 uniform vec3 scale;
+uniform vec2 lag;
 void main() {
-  gl_Position = vp * vec4(origin + pos * scale, 1.0);
+  vec3 lp = pos * scale;
+  float sy = max(scale.y, 0.0001);
+  float yb = lp.y + 0.5 * sy;
+  float t = clamp(yb / sy, 0.0, 1.0);
+  float extra = yb - t * sy;
+  float L = length(lag);
+  vec2 lg = lag * min(1.0, 0.18 / max(L, 0.0001));
+  vec2 off = lg * (t * t);
+  vec2 slope = lg * (0.7 * t);
+  float ytilt = 0.0 - (lp.x * slope.x + lp.z * slope.y) / sy;
+  vec3 spine = vec3(2.0 * t * lg.x, sy, 2.0 * t * lg.y);
+  vec3 up = spine * inversesqrt(max(dot(spine, spine), 0.00000001));
+  vec3 w = origin + vec3(lp.x + off.x, 0.0 - 0.5 * sy + t * sy + ytilt, lp.z + off.y);
+  w += up * extra;
+  gl_Position = vp * vec4(w, 1.0);
 }
 """;
     dfs: []i8 = """
@@ -1042,10 +1163,12 @@ void main() {
     u_light_vp: int = glGetUniformLocation(prog, cstr("light_vp"));
     u_shadow: int = glGetUniformLocation(prog, cstr("shadow_map"));
     glUniform1i(u_shadow, 0);
+    u_lag: int = glGetUniformLocation(prog, cstr("lag"));
     d_vp: int = glGetUniformLocation(dprog, cstr("vp"));
     d_origin: int = glGetUniformLocation(dprog, cstr("origin"));
     d_scale: int = glGetUniformLocation(dprog, cstr("scale"));
     d_color: int = glGetUniformLocation(dprog, cstr("color"));
+    d_lag: int = glGetUniformLocation(dprog, cstr("lag"));
     va: []u32 = new u32[1](0u32);
     glGenVertexArrays(1, va);
     glBindVertexArray(va[0]);
@@ -1131,6 +1254,13 @@ void main() {
     held_d: int = 0;
     shift: int = 0;
     shape_verts: []f32 = new f32[1200](0.0);
+    topx: []f32 = new f32[1024](0.0);
+    topz: []f32 = new f32[1024](0.0);
+    velx: []f32 = new f32[1024](0.0);
+    velz: []f32 = new f32[1024](0.0);
+    lagx: []f32 = new f32[1024](0.0);
+    lagz: []f32 = new f32[1024](0.0);
+    last_ms: []int = new int[1](0);
     ev: XEvent = XEvent.Other;
     running: int = 1;
     alive: int = 1;
@@ -1318,6 +1448,8 @@ void main() {
             mat_mul(lvp, lbias, lcam, mtmp);
             px: f32 = lerp(fc as f32, tc2 as f32, t);
             pz: f32 = lerp(fr as f32, tr2 as f32, t);
+            tick_soft(hist, foff, toff, n, t, px, pz, topx, topz, velx, velz, lagx,
+                lagz, now, last_ms);
             glBindFramebuffer(36160, fbos[0]);
             glViewport(0, 0, 2048, 2048);
             glClear(256);
@@ -1326,7 +1458,7 @@ void main() {
             glUseProgram(dprog);
             glUniformMatrix4fv(d_vp, 1, 0, lcam);
             draw_casters(d_origin, d_scale, d_color, ids[2], ids[1], chamfer_n, hist,
-                foff, toff, n, px, pz, t, shape_verts);
+                foff, toff, n, px, pz, t, shape_verts, d_lag, lagx, lagz);
             glDisable(32823);
             glBindFramebuffer(36160, 0u32);
             glDrawBuffer(1029);
@@ -1338,6 +1470,7 @@ void main() {
             glUniformMatrix4fv(u_vp, 1, 0, vp);
             glUniformMatrix4fv(u_light_vp, 1, 0, lvp);
             glUniform3f(u_light, lx, ly, lz);
+            glUniform2f(u_lag, 0.0, 0.0);
             bind_mesh(ids[0]);
             draw_box(u_origin, u_scale, u_color, 126.0, 0.0 - 0.08, 4.5, 256.0, 0.12,
                 11.0, 0.22, 0.20, 0.18, 36);
@@ -1349,7 +1482,7 @@ void main() {
                 ci = ci + 1;
             }
             draw_casters(u_origin, u_scale, u_color, ids[2], ids[1], chamfer_n, hist,
-                foff, toff, n, px, pz, t, shape_verts);
+                foff, toff, n, px, pz, t, shape_verts, u_lag, lagx, lagz);
             glXSwapBuffers(dpy, win);
         }
     }

@@ -292,6 +292,12 @@ exit:
     mov $60, %rax
     syscall
 
+# void l8_exit(long code) — same syscall; name does not collide with libc exit
+l8_exit:
+    mov $60, %rax
+    syscall
+    jmp l8_exit
+
 # int l8_try_begin(void *buf) — like setjmp; returns 0 first time, nonzero on catch
 # rdi = buf (l8_jmp_buf)
 l8_try_begin:
