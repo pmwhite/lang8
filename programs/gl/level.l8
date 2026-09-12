@@ -1,11 +1,16 @@
 // Shared block-game level I/O and rules.
-// Numeric format (programs/gl/levels.txt):
-//   c <column> [title]
+// Numeric format:
+//   room x0 y0 x1 y1 Title
+//   g <column> <row>          finish point (visual)
+//   w <column> <row>          brick (solid)
+//   p <column> <row>          player start
 //   b <column> <row> [layer]
 //   s <column> <row> <sides> [layer]
 //   r <column> <row> <dir> [layer]   ramp; dir 1=+col 2=-col 3=+row 4=-row
+// Old `c <column> [title]` files migrate: each pair of columns + rows 0-8
+// becomes a room; a goal is placed on the right-hand column, middle row.
 // Grid format (programs/gl/puzzles.map): rooms under `= Title` lines.
-//   . empty   # block   @ player   | checkpoint column
+//   . empty   # block   @ player   | ignored (legacy checkpoint)
 //   3-6 linked toppings   F or 7 = 15-gon
 //   > < v ^  ramp (mount by walking that way)
 extern open(path: [z]i8, flags: int, mode: int): int;
@@ -24,7 +29,21 @@ LEVEL_MODE: int = 420;
 
 LEVEL_MAX_BLOCKS: int = 1024;
 
-LEVEL_MAX_CHECKS: int = 64;
+LEVEL_MAX_ROOMS: int = 64;
+
+LEVEL_MAX_GOALS: int = 64;
+
+LEVEL_MAX_BRICKS: int = 2048;
+
+LEVEL_SOFT_CAP: int = 4096;
+
+LEVEL_PACK_BIAS: int = 4096;
+
+LEVEL_PACK_SPAN: int = 8193;
+
+LEVEL_PACK_ROW: int = 16;
+
+LEVEL_PACK_COL: int = 131088;
 
 LEVEL_DEFAULT_PATH: []i8 = "programs/gl/levels.txt";
 
@@ -40,6 +59,23 @@ type Block = {
     layer: int;
     ramp: int;
     mounted: int;
+};
+
+type Room = {
+    x0: int;
+    y0: int;
+    x1: int;
+    y1: int;
+};
+
+type Goal = {
+    column: int;
+    row: int;
+};
+
+type Brick = {
+    column: int;
+    row: int;
 };
 
 zslice_z(s: [z]i8): []i8@new {
@@ -91,13 +127,85 @@ open_path(path: []i8, flags: int, mode: int): int {
 }
 
 in_bounds(column: int, row: int): bool {
-    column >= 0 && row >= 0 && row < 9;
+    column >= 0 - LEVEL_SOFT_CAP && column <= LEVEL_SOFT_CAP && row >= 0 - LEVEL_SOFT_CAP && row <= LEVEL_SOFT_CAP;
 }
 
-is_check(checks: []int, ncheck: int, column: int): bool {
+norm_room(x0: int, y0: int, x1: int, y1: int): Room {
+    if (x1 < x0) {
+        t: int = x0;
+        x0 = x1;
+        x1 = t;
+    }
+    if (y1 < y0) {
+        t2: int = y0;
+        y0 = y1;
+        y1 = t2;
+    }
+    Room {
+        x0: x0,
+        y0: y0,
+        x1: x1,
+        y1: y1
+    };
+}
+
+room_contains(r: Room, column: int, row: int): bool {
+    column >= r.x0 && column <= r.x1 && row >= r.y0 && row <= r.y1;
+}
+
+room_area(r: Room): int {
+    (r.x1 - r.x0 + 1) * (r.y1 - r.y0 + 1);
+}
+
+room_at(rooms: []Room, nroom: int, column: int, row: int): int {
+    best: int = 0 - 1;
+    best_a: int = 0;
     i: int = 0;
-    while (i < ncheck) {
-        if (checks[i] == column) {
+    while (i < nroom) {
+        r: Room = rooms[i];
+        if (room_contains(r, column, row)) {
+            a: int = room_area(r);
+            if (best < 0 || a < best_a) {
+                best = i;
+                best_a = a;
+            }
+        }
+        i = i + 1;
+    }
+    best;
+}
+
+same_room(
+    rooms: []Room,
+    nroom: int,
+    ac: int,
+    ar: int,
+    bc: int,
+    br: int
+): bool {
+    ia: int = room_at(rooms, nroom, ac, ar);
+    ia >= 0 && ia == room_at(rooms, nroom, bc, br);
+}
+
+is_room_border(rooms: []Room, nroom: int, column: int, row: int): bool {
+    i: int = 0;
+    while (i < nroom) {
+        r: Room = rooms[i];
+        if (room_contains(r, column, row)) {
+            if (column == r.x0 || column == r.x1 || row == r.y0 || row == r.y1) {
+                return true;
+            }
+        }
+        i = i + 1;
+    }
+    false;
+}
+
+is_brick(bricks: []Brick, nbrick: int, column: int, row: int): bool {
+    i: int = 0;
+    while (i < nbrick) {
+        b: Brick = bricks[i];
+        if (b.column == column && b.row == row) {
             return true;
         }
         i = i + 1;
@@ -105,51 +213,112 @@ is_check(checks: []int, ncheck: int, column: int): bool {
     false;
 }
 
-find_prev_check(checks: []int, ncheck: int, column: int): int {
-    prev: int = 0;
+is_goal(goals: []Goal, ngoal: int, column: int, row: int): bool {
     i: int = 0;
-    while (i < ncheck) {
-        c: int = checks[i];
-        if (c < column && c > prev) {
-            prev = c;
+    while (i < ngoal) {
+        g: Goal = goals[i];
+        if (g.column == column && g.row == row) {
+            return true;
         }
         i = i + 1;
     }
-    prev;
+    false;
 }
 
-find_prev_or_same_check(checks: []int, ncheck: int, column: int): int {
-    prev: int = 0;
+find_room_rect(rooms: []Room, nroom: int, want: Room): int {
     i: int = 0;
-    while (i < ncheck) {
-        c: int = checks[i];
-        if (c <= column && c > prev) {
-            prev = c;
+    while (i < nroom) {
+        r: Room = rooms[i];
+        if (r.x0 == want.x0 && r.y0 == want.y0 && r.x1 == want.x1 && r.y1 == want.y1) {
+            return i;
         }
         i = i + 1;
     }
-    prev;
+    0 - 1;
 }
 
-find_next_check(checks: []int, ncheck: int, column: int): int {
-    nxt: int = 0;
+delete_room_at(rooms: []Room, titles: [][]i8, nroom: int, i: int): int {
+    if (i < 0 || i >= nroom) {
+        return nroom;
+    }
+    rooms[i] = rooms[nroom - 1];
+    titles[i] = titles[nroom - 1];
+    nroom - 1;
+}
+
+add_room(
+    rooms: []Room,
+    titles: [][]i8,
+    nroom: int,
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+    title: []i8@titles
+): int {
+    if (nroom >= LEVEL_MAX_ROOMS) {
+        return nroom;
+    }
+    rooms[nroom] = norm_room(x0, y0, x1, y1);
+    titles[nroom] = title;
+    nroom + 1;
+}
+
+toggle_room_rect(
+    rooms: []Room,
+    titles: [][]i8,
+    nroom: int,
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int
+): int {
+    want: Room = norm_room(x0, y0, x1, y1);
+    hit: int = find_room_rect(rooms, nroom, want);
+    if (hit >= 0) {
+        return delete_room_at(rooms, titles, nroom, hit);
+    }
+    add_room(rooms, titles, nroom, want.x0, want.y0, want.x1, want.y1, "");
+}
+
+toggle_goal(goals: []Goal, ngoal: int, column: int, row: int): int {
     i: int = 0;
-    while (i < ncheck) {
-        c: int = checks[i];
-        if (c > nxt) {
-            nxt = c;
+    while (i < ngoal) {
+        g: Goal = goals[i];
+        if (g.column == column && g.row == row) {
+            goals[i] = goals[ngoal - 1];
+            return ngoal - 1;
         }
         i = i + 1;
     }
-    i = 0;
-    while (i < ncheck) {
-        c2: int = checks[i];
-        if (c2 > column && c2 < nxt || nxt == 0) {
-            nxt = c2;
+    if (ngoal >= LEVEL_MAX_GOALS || !in_bounds(column, row)) {
+        return ngoal;
+    }
+    goals[ngoal] = Goal {
+        column: column,
+        row: row
+    };
+    ngoal + 1;
+}
+
+toggle_brick(bricks: []Brick, nbrick: int, column: int, row: int): int {
+    i: int = 0;
+    while (i < nbrick) {
+        b: Brick = bricks[i];
+        if (b.column == column && b.row == row) {
+            bricks[i] = bricks[nbrick - 1];
+            return nbrick - 1;
         }
         i = i + 1;
     }
-    nxt;
+    if (nbrick >= LEVEL_MAX_BRICKS || !in_bounds(column, row)) {
+        return nbrick;
+    }
+    bricks[nbrick] = Brick {
+        column: column,
+        row: row
+    };
+    nbrick + 1;
 }
 
 block_at(
@@ -309,19 +478,19 @@ is_mount_face(ramp: int, dc: int, dr: int): bool {
 }
 
 pack_pos(column: int, row: int, layer: int, mounted: int): int {
-    column * 512 + row * 32 + layer * 2 + mounted;
+    (column + LEVEL_PACK_BIAS) * LEVEL_PACK_COL + (row + LEVEL_PACK_BIAS) * LEVEL_PACK_ROW + layer * 2 + mounted;
 }
 
 pos_col(p: int): int {
-    p / 512;
+    p / LEVEL_PACK_COL - LEVEL_PACK_BIAS;
 }
 
 pos_row(p: int): int {
-    p / 32 - p / 512 * 16;
+    p / LEVEL_PACK_ROW - p / LEVEL_PACK_COL * LEVEL_PACK_SPAN - LEVEL_PACK_BIAS;
 }
 
 pos_layer(p: int): int {
-    p / 2 - p / 32 * 16;
+    p / 2 - p / LEVEL_PACK_ROW * 8;
 }
 
 pos_mounted(p: int): int {
@@ -502,17 +671,6 @@ toggle_ramp(
     add_block_at(blocks, n, col, row, layer, 0, 1);
 }
 
-title_idx(checks: []int, ncheck: int, col: int): int {
-    i: int = 0;
-    while (i < ncheck) {
-        if (checks[i] == col) {
-            return i;
-        }
-        i = i + 1;
-    }
-    0 - 1;
-}
-
 titles_eq(a: []i8, b: []i8): bool {
     if (len(a) != len(b)) {
         return false;
@@ -527,39 +685,50 @@ titles_eq(a: []i8, b: []i8): bool {
     true;
 }
 
-toggle_check(
-    blocks: []Block,
-    n: int,
-    checks: []int,
-    titles: [][]i8,
-    ncheck: int,
-    col: int
-): int {
+shift_rooms_insert(rooms: []Room, nroom: int, col: int) {
     i: int = 0;
-    while (i < ncheck) {
-        if (checks[i] == col) {
-            checks[i] = checks[ncheck - 1];
-            titles[i] = titles[ncheck - 1];
-            return ncheck - 1;
+    while (i < nroom) {
+        r: Room = rooms[i];
+        if (r.x1 >= col) {
+            r.x1 = r.x1 + 1;
+        }
+        if (r.x0 >= col) {
+            r.x0 = r.x0 + 1;
+        }
+        rooms[i] = r;
+        i = i + 1;
+    }
+}
+
+shift_goals_insert(goals: []Goal, ngoal: int, col: int) {
+    i: int = 0;
+    while (i < ngoal) {
+        if (goals[i].column >= col) {
+            goals[i].column = goals[i].column + 1;
         }
         i = i + 1;
     }
-    if (column_has_block(blocks, n, col)) {
-        return ncheck;
+}
+
+shift_bricks_insert(bricks: []Brick, nbrick: int, col: int) {
+    i: int = 0;
+    while (i < nbrick) {
+        if (bricks[i].column >= col) {
+            bricks[i].column = bricks[i].column + 1;
+        }
+        i = i + 1;
     }
-    if (ncheck >= LEVEL_MAX_CHECKS) {
-        return ncheck;
-    }
-    checks[ncheck] = col;
-    titles[ncheck] = "";
-    ncheck + 1;
 }
 
 insert_col(
     blocks: []Block,
     n: int,
-    checks: []int,
-    ncheck: int,
+    rooms: []Room,
+    nroom: int,
+    goals: []Goal,
+    ngoal: int,
+    bricks: []Brick,
+    nbrick: int,
     col: int
 ) {
     i: int = 0;
@@ -569,24 +738,23 @@ insert_col(
         }
         i = i + 1;
     }
-    i = 0;
-    while (i < ncheck) {
-        if (checks[i] >= col) {
-            checks[i] = checks[i] + 1;
-        }
-        i = i + 1;
-    }
+    shift_rooms_insert(rooms, nroom, col);
+    shift_goals_insert(goals, ngoal, col);
+    shift_bricks_insert(bricks, nbrick, col);
 }
 
 delete_col(
     blocks: []Block,
     n: int,
-    checks: []int,
+    rooms: []Room,
     titles: [][]i8,
-    ncheck: int,
+    nroom: int,
+    goals: []Goal,
+    ngoal: int,
+    bricks: []Brick,
+    nbrick: int,
     col: int,
-    out_n: []int,
-    out_nc: []int
+    out_n: []int
 ) {
     i: int = n - 1;
     while (i >= 0) {
@@ -597,19 +765,46 @@ delete_col(
         }
         i = i - 1;
     }
-    i = ncheck - 1;
+    i = nroom - 1;
     while (i >= 0) {
-        if (checks[i] == col) {
-            checks[i] = checks[ncheck - 1];
-            titles[i] = titles[ncheck - 1];
-            ncheck = ncheck - 1;
-        } else if (checks[i] > col) {
-            checks[i] = checks[i] - 1;
+        r: Room = rooms[i];
+        if (r.x0 == r.x1 && r.x0 == col) {
+            nroom = delete_room_at(rooms, titles, nroom, i);
+        } else {
+            if (r.x1 >= col) {
+                r.x1 = r.x1 - 1;
+            }
+            if (r.x0 > col) {
+                r.x0 = r.x0 - 1;
+            }
+            rooms[i] = r;
+        }
+        i = i - 1;
+    }
+    i = ngoal - 1;
+    while (i >= 0) {
+        if (goals[i].column == col) {
+            goals[i] = goals[ngoal - 1];
+            ngoal = ngoal - 1;
+        } else if (goals[i].column > col) {
+            goals[i].column = goals[i].column - 1;
+        }
+        i = i - 1;
+    }
+    i = nbrick - 1;
+    while (i >= 0) {
+        if (bricks[i].column == col) {
+            bricks[i] = bricks[nbrick - 1];
+            nbrick = nbrick - 1;
+        } else if (bricks[i].column > col) {
+            bricks[i].column = bricks[i].column - 1;
         }
         i = i - 1;
     }
     out_n[0] = n;
-    out_nc[0] = ncheck;
+    out_n[1] = nroom;
+    out_n[2] = ngoal;
+    out_n[3] = nbrick;
 }
 
 skip_spaces(src: []i8, i: int): int {
@@ -633,6 +828,24 @@ parse_uint(src: []i8, i: int, out: []int): int {
         i = i + 1;
     }
     out[0] = v;
+    i;
+}
+
+parse_int(src: []i8, i: int, out: []int): int {
+    n: int = len(src);
+    i = skip_spaces(src, i);
+    sign: int = 1;
+    if (i < n && src[i] == '-') {
+        sign = 0 - 1;
+        i = i + 1;
+    }
+    i = parse_uint(src, i, out);
+    if (out[0] < 0) {
+        out[1] = 0;
+        return i;
+    }
+    out[0] = out[0] * sign;
+    out[1] = 1;
     i;
 }
 
@@ -670,6 +883,14 @@ put_uint(dst: []i8, i: int, n: int): int {
     put_ch(dst, i, '0' + (n % 10) trunc i8);
 }
 
+put_int(dst: []i8, i: int, n: int): int {
+    if (n < 0) {
+        i = put_ch(dst, i, '-');
+        n = 0 - n;
+    }
+    put_uint(dst, i, n);
+}
+
 slurp_path(path: []i8): []i8@new {
     fd: int = open_path(path, 0, 0);
     if (fd < 0) {
@@ -699,18 +920,96 @@ slurp_path(path: []i8): []i8@new {
     src;
 }
 
+take_title(src: []i8, i: int): []i8@new {
+    n: int = len(src);
+    i = skip_spaces(src, i);
+    ts: int = i;
+    te: int = i;
+    while (te < n && src[te] != '\n' && src[te] != '\r') {
+        te = te + 1;
+    }
+    while (te > ts && (src[te - 1] == ' ' || src[te - 1] == '\t')) {
+        te = te - 1;
+    }
+    tn: int = te - ts;
+    tbuf: []i8 = new i8[tn](0i8);
+    if (tn > 0) {
+        memcpy(tbuf, 0, src, ts, tn);
+    }
+    tbuf;
+}
+
+sort_checks(checks: []int, titles: [][]i8, nc: int) {
+    a: int = 0;
+    while (a < nc) {
+        b: int = a + 1;
+        while (b < nc) {
+            if (checks[b] < checks[a]) {
+                tc: int = checks[a];
+                checks[a] = checks[b];
+                checks[b] = tc;
+                tt: []i8 = titles[a];
+                titles[a] = titles[b];
+                titles[b] = tt;
+            }
+            b = b + 1;
+        }
+        a = a + 1;
+    }
+}
+
+migrate_old_checks(
+    checks: []int,
+    titles: [][]i8@room_titles,
+    nc: int,
+    rooms: []Room,
+    room_titles: [][]i8,
+    nroom: []int,
+    goals: []Goal,
+    ngoal: []int
+) {
+    sort_checks(checks, titles, nc);
+    nr: int = nroom[0];
+    ng: int = ngoal[0];
+    i: int = 0;
+    while (i + 1 < nc) {
+        left: int = checks[i];
+        right: int = checks[i + 1];
+        title: []i8 = titles[i];
+        nr = add_room(rooms, room_titles, nr, left, 0, right, 8, title);
+        if (!is_goal(goals, ng, right, 4)) {
+            ng = toggle_goal(goals, ng, right, 4);
+        }
+        i = i + 1;
+    }
+    nroom[0] = nr;
+    ngoal[0] = ng;
+}
+
 parse_level_src(
     src: []i8,
     blocks: []Block,
-    checks: []int,
-    titles: [][]i8@new,
-    ncheck: []int
+    rooms: []Room,
+    titles: [][]i8,
+    nroom: []int,
+    goals: []Goal,
+    ngoal: []int,
+    bricks: []Brick,
+    nbrick: []int,
+    start: []int
 ): int {
     n: int = len(src);
     nb: int = 0;
+    nr: int = 0;
+    ng: int = 0;
+    nw: int = 0;
     nc: int = 0;
+    old_c: []int = new int[64](0);
+    old_t: [][]i8 = new []i8[64](new i8[0](0i8));
     i: int = 0;
-    val: []int = new int[1](0);
+    val: []int = new int[2](0);
+    start[0] = 0;
+    start[1] = 0;
     while (i < n) {
         i = skip_spaces(src, i);
         if (i >= n) {
@@ -719,38 +1018,67 @@ parse_level_src(
             i = i + 1;
         } else if (src[i] == '#') {
             i = skip_line(src, i);
+        } else if (i + 4 <= n && src[i] == 'r' && src[i + 1] == 'o' && src[i + 2] == 'o' && src[i + 3] == 'm') {
+            i = i + 4;
+            i = parse_int(src, i, val);
+            x0: int = val[0];
+            ok0: int = val[1];
+            i = parse_int(src, i, val);
+            y0: int = val[0];
+            ok1: int = val[1];
+            i = parse_int(src, i, val);
+            x1: int = val[0];
+            ok2: int = val[1];
+            i = parse_int(src, i, val);
+            y1: int = val[0];
+            if (ok0 == 0 || ok1 == 0 || ok2 == 0 || val[1] == 0 || !in_bounds(x0, y0) || !in_bounds(x1, y1)) {
+                return 0 - 1;
+            }
+            nr = add_room(rooms, titles, nr, x0, y0, x1, y1, take_title(src, i));
+            i = skip_line(src, i);
         } else {
             cmd: i8 = src[i];
             i = i + 1;
             if (cmd == 'c') {
-                i = parse_uint(src, i, val);
-                if (val[0] < 0) {
+                i = parse_int(src, i, val);
+                if (val[1] == 0 || !in_bounds(val[0], 0)) {
                     return 0 - 1;
                 }
-                if (nc < len(checks) && !is_check(checks, nc, val[0])) {
-                    checks[nc] = val[0];
-                    i = skip_spaces(src, i);
-                    ts: int = i;
-                    te: int = i;
-                    while (te < n && src[te] != '\n' && src[te] != '\r') {
-                        te = te + 1;
-                    }
-                    while (te > ts && (src[te - 1] == ' ' || src[te - 1] == '\t')) {
-                        te = te - 1;
-                    }
-                    tn: int = te - ts;
-                    tbuf: []i8 = new i8[tn](0i8);
-                    if (tn > 0) {
-                        memcpy(tbuf, 0, src, ts, tn);
-                    }
-                    titles[nc] = tbuf;
+                if (nc < 64) {
+                    old_c[nc] = val[0];
+                    old_t[nc] = take_title(src, i);
                     nc = nc + 1;
                 }
+            } else if (cmd == 'g' || cmd == 'w' || cmd == 'p') {
+                i = parse_int(src, i, val);
+                colg: int = val[0];
+                okg: int = val[1];
+                i = parse_int(src, i, val);
+                rowg: int = val[0];
+                if (okg == 0 || val[1] == 0 || !in_bounds(colg, rowg)) {
+                    return 0 - 1;
+                }
+                if (cmd == 'p') {
+                    start[0] = colg;
+                    start[1] = rowg;
+                } else if (cmd == 'g') {
+                    if (!is_goal(goals, ng, colg, rowg)) {
+                        ng = toggle_goal(goals, ng, colg, rowg);
+                    }
+                } else {
+                    if (!is_brick(bricks, nw, colg, rowg)) {
+                        nw = toggle_brick(bricks, nw, colg, rowg);
+                    }
+                }
             } else if (cmd == 'b' || cmd == 's' || cmd == 'r') {
-                i = parse_uint(src, i, val);
+                i = parse_int(src, i, val);
                 col: int = val[0];
-                i = parse_uint(src, i, val);
+                okc: int = val[1];
+                i = parse_int(src, i, val);
                 row: int = val[0];
+                if (okc == 0 || val[1] == 0) {
+                    return 0 - 1;
+                }
                 shape: int = 0;
                 ramp: int = 0;
                 layer: int = 0;
@@ -775,7 +1103,7 @@ parse_level_src(
                     i = parse_uint(src, i, val);
                     mounted = val[0];
                 }
-                if (col < 0 || row < 0 || row > 8 || layer < 0 || layer >= LEVEL_MAX_LAYER) {
+                if (!in_bounds(col, row) || layer < 0 || layer >= LEVEL_MAX_LAYER) {
                     return 0 - 1;
                 }
                 if (nb < len(blocks)) {
@@ -796,16 +1124,26 @@ parse_level_src(
             i = skip_line(src, i);
         }
     }
-    ncheck[0] = nc;
+    nroom[0] = nr;
+    ngoal[0] = ng;
+    nbrick[0] = nw;
+    if (nr == 0 && nc > 0) {
+        migrate_old_checks(old_c, old_t, nc, rooms, titles, nroom, goals, ngoal);
+    }
     nb;
 }
 
 load_level(
     path: []i8,
     blocks: []Block,
-    checks: []int,
-    titles: [][]i8@new,
-    ncheck: []int
+    rooms: []Room,
+    titles: [][]i8,
+    nroom: []int,
+    goals: []Goal,
+    ngoal: []int,
+    bricks: []Brick,
+    nbrick: []int,
+    start: []int
 ): int {
     src: []i8 = slurp_path(path);
     if (len(src) == 0) {
@@ -815,33 +1153,48 @@ load_level(
         }
         close(fd);
     }
-    parse_level_src(src, blocks, checks, titles, ncheck);
+    parse_level_src(src, blocks, rooms, titles, nroom, goals, ngoal, bricks, nbrick, start);
 }
 
 save_level(
     path: []i8,
     blocks: []Block,
     n: int,
-    checks: []int,
+    rooms: []Room,
     titles: [][]i8,
-    ncheck: int
+    nroom: int,
+    goals: []Goal,
+    ngoal: int,
+    bricks: []Brick,
+    nbrick: int,
+    pc: int,
+    pr: int
 ): int {
     cap: int = 65536;
     dst: []i8 = new i8[cap](0i8);
     i: int = 0;
     i = put_str(dst, i, "# L8 block-game level\n");
-    i = put_str(dst, i, "# c <column> [title]\n");
-    i = put_str(dst, i, "# b <column> <row> [layer]\n");
+    i = put_str(dst, i, "# room x0 y0 x1 y1 Title\n");
+    i = put_str(dst, i, "# g <column> <row>\n");
+    i = put_str(dst, i, "# w <column> <row>\n");
+    i = put_str(dst, i, "# p <column> <row>\n");
     i = put_str(dst, i, """
+# b <column> <row> [layer]
 # s <column> <row> <sides> [layer]
 # r <column> <row> <dir> [layer]
 
 """);
     k: int = 0;
-    while (k < ncheck) {
-        i = put_ch(dst, i, 'c');
+    while (k < nroom) {
+        r: Room = rooms[k];
+        i = put_str(dst, i, "room ");
+        i = put_int(dst, i, r.x0);
         i = put_ch(dst, i, ' ');
-        i = put_uint(dst, i, checks[k]);
+        i = put_int(dst, i, r.y0);
+        i = put_ch(dst, i, ' ');
+        i = put_int(dst, i, r.x1);
+        i = put_ch(dst, i, ' ');
+        i = put_int(dst, i, r.y1);
         if (k < len(titles) && len(titles[k]) > 0) {
             i = put_ch(dst, i, ' ');
             i = put_str(dst, i, titles[k]);
@@ -849,6 +1202,32 @@ save_level(
         i = put_ch(dst, i, '\n');
         k = k + 1;
     }
+    k = 0;
+    while (k < ngoal) {
+        i = put_ch(dst, i, 'g');
+        i = put_ch(dst, i, ' ');
+        i = put_int(dst, i, goals[k].column);
+        i = put_ch(dst, i, ' ');
+        i = put_int(dst, i, goals[k].row);
+        i = put_ch(dst, i, '\n');
+        k = k + 1;
+    }
+    k = 0;
+    while (k < nbrick) {
+        i = put_ch(dst, i, 'w');
+        i = put_ch(dst, i, ' ');
+        i = put_int(dst, i, bricks[k].column);
+        i = put_ch(dst, i, ' ');
+        i = put_int(dst, i, bricks[k].row);
+        i = put_ch(dst, i, '\n');
+        k = k + 1;
+    }
+    i = put_ch(dst, i, 'p');
+    i = put_ch(dst, i, ' ');
+    i = put_int(dst, i, pc);
+    i = put_ch(dst, i, ' ');
+    i = put_int(dst, i, pr);
+    i = put_ch(dst, i, '\n');
     i = put_ch(dst, i, '\n');
     k = 0;
     while (k < n) {
@@ -856,9 +1235,9 @@ save_level(
         if (b.ramp != 0) {
             i = put_ch(dst, i, 'r');
             i = put_ch(dst, i, ' ');
-            i = put_uint(dst, i, b.column);
+            i = put_int(dst, i, b.column);
             i = put_ch(dst, i, ' ');
-            i = put_uint(dst, i, b.row);
+            i = put_int(dst, i, b.row);
             i = put_ch(dst, i, ' ');
             i = put_uint(dst, i, b.ramp);
             if (b.layer != 0 || b.mounted != 0) {
@@ -873,9 +1252,9 @@ save_level(
         } else if (b.shape != 0) {
             i = put_ch(dst, i, 's');
             i = put_ch(dst, i, ' ');
-            i = put_uint(dst, i, b.column);
+            i = put_int(dst, i, b.column);
             i = put_ch(dst, i, ' ');
-            i = put_uint(dst, i, b.row);
+            i = put_int(dst, i, b.row);
             i = put_ch(dst, i, ' ');
             i = put_uint(dst, i, b.shape);
             if (b.layer != 0 || b.mounted != 0) {
@@ -890,9 +1269,9 @@ save_level(
         } else {
             i = put_ch(dst, i, 'b');
             i = put_ch(dst, i, ' ');
-            i = put_uint(dst, i, b.column);
+            i = put_int(dst, i, b.column);
             i = put_ch(dst, i, ' ');
-            i = put_uint(dst, i, b.row);
+            i = put_int(dst, i, b.row);
             if (b.layer != 0 || b.mounted != 0) {
                 i = put_ch(dst, i, ' ');
                 i = put_uint(dst, i, b.layer);
@@ -941,14 +1320,16 @@ occupant_blocks(
     row: int,
     layer: int,
     skip_shape: int,
-    prevc: int,
-    nextc: int
+    rooms: []Room,
+    nroom: int,
+    refc: int,
+    refr: int
 ): int {
     i: int = 0;
     while (i < n) {
         o: Block = blocks[i];
         if (o.column == column && o.row == row && o.layer == layer) {
-            if (skip_shape != 0 && o.shape == skip_shape && o.column > prevc && o.column < nextc) {
+            if (skip_shape != 0 && o.shape == skip_shape && same_room(rooms, nroom, o.column, o.row, refc, refr)) {
                 i = i + 1;
             } else {
                 return i;
@@ -967,14 +1348,16 @@ occupant_bodies(
     row: int,
     layer: int,
     skip_shape: int,
-    prevc: int,
-    nextc: int
+    rooms: []Room,
+    nroom: int,
+    refc: int,
+    refr: int
 ): int {
     i: int = 0;
     while (i < n) {
         o: Block = blocks[i];
         if (o.column == column && o.row == row && o.layer == layer && (o.ramp == 0 || o.mounted != 0)) {
-            if (skip_shape != 0 && o.shape == skip_shape && o.column > prevc && o.column < nextc) {
+            if (skip_shape != 0 && o.shape == skip_shape && same_room(rooms, nroom, o.column, o.row, refc, refr)) {
                 i = i + 1;
             } else {
                 return i;
@@ -995,10 +1378,12 @@ dest_clear(
     dc: int,
     dr: int,
     skip: int,
-    prevc: int,
-    nextc: int
+    rooms: []Room,
+    nroom: int,
+    refc: int,
+    refr: int
 ): bool {
-    if (occupant_bodies(blocks, n, tc, tr, tl, skip, prevc, nextc) >= 0) {
+    if (occupant_bodies(blocks, n, tc, tr, tl, skip, rooms, nroom, refc, refr) >= 0) {
         return false;
     }
     rp: int = ramp_at_layer(blocks, n, tc, tr, tl);
@@ -1032,16 +1417,16 @@ mark_push_group(
     blocks: []Block,
     n: int,
     hit: int,
-    prevc: int,
-    nextc: int,
+    rooms: []Room,
+    nroom: int,
     marks: []int
 ) {
     hb: Block = blocks[hit];
     i: int = 0;
-    if (hb.shape != 0) {
+    if (hb.shape != 0 && room_at(rooms, nroom, hb.column, hb.row) >= 0) {
         while (i < n) {
             s: Block = blocks[i];
-            if (s.column > prevc && s.column < nextc && s.shape == hb.shape) {
+            if (s.shape == hb.shape && same_room(rooms, nroom, s.column, s.row, hb.column, hb.row)) {
                 marks[i] = 1;
             }
             i = i + 1;
@@ -1093,8 +1478,8 @@ lowest_marked(
 can_move_marked(
     blocks: []Block,
     n: int,
-    checks: []int,
-    ncheck: int,
+    bricks: []Brick,
+    nbrick: int,
     marks: []int,
     dc: int,
     dr: int
@@ -1105,7 +1490,7 @@ can_move_marked(
             b: Block = blocks[i];
             tc: int = b.column + dc;
             tr: int = b.row + dr;
-            if (!in_bounds(tc, tr) || is_check(checks, ncheck, tc)) {
+            if (!in_bounds(tc, tr) || is_brick(bricks, nbrick, tc, tr)) {
                 return false;
             }
             lo: int = lowest_marked(blocks, n, marks, b.column, b.row);
@@ -1166,17 +1551,15 @@ slide_marked(
 can_move_block(
     blocks: []Block,
     n: int,
-    checks: []int,
-    ncheck: int,
+    bricks: []Brick,
+    nbrick: int,
     bi: int,
     dc: int,
-    dr: int,
-    prevc: int,
-    nextc: int
+    dr: int
 ): bool {
     marks: []int = new int[n](0);
     marks[bi] = 1;
-    can_move_marked(blocks, n, checks, ncheck, marks, dc, dr);
+    can_move_marked(blocks, n, bricks, nbrick, marks, dc, dr);
 }
 
 apply_gravity(blocks: []Block, n: int) {
@@ -1229,17 +1612,17 @@ slide_one(
 try_push(
     blocks: []Block,
     n: int,
-    checks: []int,
-    ncheck: int,
+    rooms: []Room,
+    nroom: int,
+    bricks: []Brick,
+    nbrick: int,
     hit: int,
     dc: int,
-    dr: int,
-    prevc: int,
-    nextc: int
+    dr: int
 ): bool {
     marks: []int = new int[n](0);
-    mark_push_group(blocks, n, hit, prevc, nextc, marks);
-    if (!can_move_marked(blocks, n, checks, ncheck, marks, dc, dr)) {
+    mark_push_group(blocks, n, hit, rooms, nroom, marks);
+    if (!can_move_marked(blocks, n, bricks, nbrick, marks, dc, dr)) {
         return false;
     }
     slide_marked(blocks, n, marks, dc, dr);
@@ -1264,16 +1647,19 @@ finish_move(
 enter_at(
     blocks: []Block,
     n: int,
-    checks: []int,
-    ncheck: int,
+    rooms: []Room,
+    nroom: int,
+    bricks: []Brick,
+    nbrick: int,
     tc: int,
     tr: int,
     ph: int,
     dc: int,
-    dr: int,
-    prevc: int,
-    nextc: int
+    dr: int
 ): int {
+    if (is_brick(bricks, nbrick, tc, tr)) {
+        return 0 - 1;
+    }
     dest_body: int = body_at_layer(blocks, n, tc, tr, ph);
     dest_ramp: int = ramp_at_layer(blocks, n, tc, tr, ph);
     if (dest_ramp >= 0 && dest_body < 0 && is_mount_face(blocks[dest_ramp].ramp, dc, dr)) {
@@ -1287,7 +1673,7 @@ enter_at(
         hit = dest_ramp;
     }
     if (hit >= 0) {
-        if (!try_push(blocks, n, checks, ncheck, hit, dc, dr, prevc, nextc)) {
+        if (!try_push(blocks, n, rooms, nroom, bricks, nbrick, hit, dc, dr)) {
             return 0 - 1;
         }
     }
@@ -1297,8 +1683,10 @@ enter_at(
 move_player(
     blocks: []Block,
     n: int,
-    checks: []int,
-    ncheck: int,
+    rooms: []Room,
+    nroom: int,
+    bricks: []Brick,
+    nbrick: int,
     pc: int,
     pr: int,
     ph: int,
@@ -1308,24 +1696,21 @@ move_player(
     stay: int = pack_pos(pc, pr, ph, pose_mounted(blocks, n, pc, pr, ph, 0 - 1));
     tc: int = pc + dc;
     tr: int = pr + dr;
-    if (!in_bounds(tc, tr)) {
+    if (!in_bounds(tc, tr) || is_brick(bricks, nbrick, tc, tr)) {
         return stay;
     }
-    prevc: int = find_prev_or_same_check(checks, ncheck, pc);
-    nextc: int = find_next_check(checks, ncheck, pc);
     dest_flat: int = flat_at_layer(blocks, n, tc, tr, ph);
     home: int = ramp_at_layer(blocks, n, pc, pr, ph);
     if (home >= 0 && is_mount_face(blocks[home].ramp, dc, dr) && dest_flat >= 0) {
         if (ph + 1 < LEVEL_MAX_LAYER) {
-            landed: int = enter_at(blocks, n, checks, ncheck, tc, tr, ph + 1, dc, dr, prevc,
-                nextc);
+            landed: int = enter_at(blocks, n, rooms, nroom, bricks, nbrick, tc, tr, ph + 1, dc, dr);
             if (landed >= 0) {
                 return landed;
             }
         }
         return stay;
     }
-    landed2: int = enter_at(blocks, n, checks, ncheck, tc, tr, ph, dc, dr, prevc, nextc);
+    landed2: int = enter_at(blocks, n, rooms, nroom, bricks, nbrick, tc, tr, ph, dc, dr);
     if (landed2 < 0) {
         return stay;
     }
@@ -1385,7 +1770,7 @@ add_grid_piece(
     layer: int,
     ramp: int
 ): int {
-    if (nb >= len(blocks) || row < 0 || row > 8) {
+    if (nb >= len(blocks) || !in_bounds(col, row)) {
         return nb;
     }
     blocks[nb] = Block {
@@ -1437,14 +1822,19 @@ copy_title(src: []i8, a: int, b: int): []i8@new {
 load_grid_src(
     src: []i8,
     blocks: []Block,
-    checks: []int,
-    titles: [][]i8@new,
-    ncheck: []int,
+    rooms: []Room,
+    titles: [][]i8,
+    nroom: []int,
+    goals: []Goal,
+    ngoal: []int,
+    bricks: []Brick,
+    nbrick: []int,
     start: []int
 ): int {
     n: int = len(src);
     nb: int = 0;
-    nc: int = 0;
+    nr: int = 0;
+    ng: int = 0;
     col0: int = 0;
     title: []i8 = new i8[0](0i8);
     start[0] = 0;
@@ -1464,7 +1854,7 @@ load_grid_src(
             }
             title = copy_title(src, ts, i);
             rows: [][]i8 = new []i8[9](new i8[0](0i8));
-            nr: int = 0;
+            nrow: int = 0;
             width: int = 0;
             if (i < n && src[i] == '\r') {
                 i = i + 1;
@@ -1484,14 +1874,14 @@ load_grid_src(
                         i = i + 1;
                     }
                     rl: int = i - rs;
-                    if (nr < 9) {
+                    if (nrow < 9) {
                         row: []i8 = new i8[rl](0i8);
                         memcpy(row, 0, src, rs, rl);
-                        rows[nr] = row;
+                        rows[nrow] = row;
                         if (rl > width) {
                             width = rl;
                         }
-                        nr = nr + 1;
+                        nrow = nrow + 1;
                     }
                     if (i < n && src[i] == '\r') {
                         i = i + 1;
@@ -1501,33 +1891,26 @@ load_grid_src(
                     }
                 }
             }
-            if (width < 1 || nr < 1) {
+            if (width < 1 || nrow < 1) {
                 return 0 - 1;
             }
-            marked: int = 0;
             c: int = 0;
             while (c < width) {
                 wc: int = col0 + c;
-                is_ck: int = 0;
-                if (c == 0) {
-                    is_ck = 1;
-                }
                 r: int = 0;
-                while (r < nr) {
+                while (r < nrow) {
                     row2: []i8 = rows[r];
                     ch: i8 = '.';
                     if (c < len(row2)) {
                         ch = row2[c];
                     }
-                    if (ch == '|') {
-                        is_ck = 1;
-                    } else if (ch == '@') {
+                    if (ch == '@') {
                         start[0] = wc;
                         start[1] = r;
                         have_start = 1;
                     } else if (ch == '#') {
                         nb = add_grid_block(blocks, nb, wc, r, 0);
-                    } else {
+                    } else if (ch != '|') {
                         rp: int = grid_ramp(ch);
                         if (rp != 0) {
                             nb = add_grid_piece(blocks, nb, wc, r, 0, 0, rp);
@@ -1540,39 +1923,43 @@ load_grid_src(
                     }
                     r = r + 1;
                 }
-                if (is_ck != 0) {
-                    if (nc < len(checks) && !is_check(checks, nc, wc)) {
-                        checks[nc] = wc;
-                        if (marked == 0) {
-                            titles[nc] = title;
-                            marked = 1;
-                        } else {
-                            titles[nc] = new i8[0](0i8);
-                        }
-                        nc = nc + 1;
-                    }
-                }
                 c = c + 1;
+            }
+            x1: int = col0 + width - 1;
+            y1: int = nrow - 1;
+            nr = add_room(rooms, titles, nr, col0, 0, x1, y1, title);
+            mid: int = y1 / 2;
+            if (!is_goal(goals, ng, x1, mid)) {
+                ng = toggle_goal(goals, ng, x1, mid);
             }
             col0 = col0 + width;
         } else {
             return 0 - 1;
         }
     }
-    if (have_start == 0 && nc > 0) {
-        start[0] = checks[0];
-        start[1] = 0;
+    if (have_start == 0 && nr > 0) {
+        start[0] = rooms[0].x0;
+        start[1] = rooms[0].y0;
     }
-    ncheck[0] = nc;
+    nroom[0] = nr;
+    ngoal[0] = ng;
+    nbrick[0] = 0;
+    if (len(bricks) < 0) {
+        nbrick[0] = 0;
+    }
     nb;
 }
 
 load_any(
     path: []i8,
     blocks: []Block,
-    checks: []int,
-    titles: [][]i8@new,
-    ncheck: []int,
+    rooms: []Room,
+    titles: [][]i8,
+    nroom: []int,
+    goals: []Goal,
+    ngoal: []int,
+    bricks: []Brick,
+    nbrick: []int,
     start: []int
 ): int {
     src: []i8 = slurp_path(path);
@@ -1585,8 +1972,11 @@ load_any(
     }
     start[0] = 0;
     start[1] = 0;
+    nroom[0] = 0;
+    ngoal[0] = 0;
+    nbrick[0] = 0;
     if (looks_like_grid(src)) {
-        return load_grid_src(src, blocks, checks, titles, ncheck, start);
+        return load_grid_src(src, blocks, rooms, titles, nroom, goals, ngoal, bricks, nbrick, start);
     }
-    parse_level_src(src, blocks, checks, titles, ncheck);
+    parse_level_src(src, blocks, rooms, titles, nroom, goals, ngoal, bricks, nbrick, start);
 }
