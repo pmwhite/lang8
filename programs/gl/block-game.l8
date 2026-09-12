@@ -12,6 +12,8 @@ extern exit(code: int): noreturn;
 
 extern l8_exit(code: int): noreturn;
 
+extern l8_heap_used(): int;
+
 g_dpy: ?*i8 = null;
 
 extern clock_gettime(clk: int, ts: *Timespec): int;
@@ -51,7 +53,7 @@ wall_us(): int {
 
 FRAME_US: int = 16667;
 
-FPS_CAP: int = 240;
+FPS_CAP: int = 4096;
 
 FPS_SPAN_US: int = 4000000;
 
@@ -2211,7 +2213,10 @@ type FpsMeter = {
     mhi: f32;
     f_step: f32;
     m_step: f32;
+    h_step: f32;
     x_step: f32;
+    hlo: f32;
+    hhi: f32;
 };
 
 is_fps_key(ks: int): int {
@@ -2221,11 +2226,27 @@ is_fps_key(ks: int): int {
     0;
 }
 
+is_vsync_key(ks: int): int {
+    if (ks == 118 || ks == 86) {
+        return 1;
+    }
+    0;
+}
+
+set_vsync(dpy: *i8, win: int, on: int): int {
+    iv: int = 0;
+    if (on != 0) {
+        iv = 1;
+    }
+    glXSwapIntervalEXT(dpy, win, iv);
+    iv;
+}
+
 fps_ring(head: int, n: int, k: int): int {
     (head + FPS_CAP - n + k) % FPS_CAP;
 }
 
-tick_fps(m: FpsMeter, times: []int, works: []int, rates: []f32, stall_us: int): FpsMeter {
+tick_fps(m: FpsMeter, times: []int, works: []int, rates: []f32, heaps: []int, stall_us: int): FpsMeter {
     now: int = mono_us();
     if (m.work0 > 0) {
         work: int = now - m.work0 - stall_us;
@@ -2235,6 +2256,7 @@ tick_fps(m: FpsMeter, times: []int, works: []int, rates: []f32, stall_us: int): 
         slot: int = m.i;
         times[slot] = now;
         works[slot] = work;
+        heaps[slot] = l8_heap_used();
         m.i = (m.i + 1) % FPS_CAP;
         if (m.n < FPS_CAP) {
             m.n = m.n + 1;
@@ -2259,7 +2281,10 @@ toggle_fps(m: FpsMeter): FpsMeter {
     m.mhi = 0.0;
     m.f_step = 0.0;
     m.m_step = 0.0;
+    m.h_step = 0.0;
     m.x_step = 0.0;
+    m.hlo = 0.0;
+    m.hhi = 0.0;
     m;
 }
 
@@ -2270,6 +2295,10 @@ fps_after_swap(m: FpsMeter): FpsMeter {
 
 ms_of_us(us: int): f32 {
     us as f32 * 0.001;
+}
+
+mb_of_bytes(n: int): f32 {
+    n as f32 / 1048576.0;
 }
 
 plot_y(v: f32, lo: f32, hi: f32, y0: f32, y1: f32): f32 {
@@ -2349,7 +2378,10 @@ window_fps(times: []int, head: int, n: int, k: int): f32 {
     }
     span: int = t1 - times[fps_ring(head, n, j)];
     count: int = k - j;
-    if (count < 2 || span < 750000) {
+    if (count < 2 || span < 16000) {
+        return 0.0;
+    }
+    if (n < FPS_CAP && span < 750000) {
         return 0.0;
     }
     count as f32 * 1000000.0 / span as f32;
@@ -2759,6 +2791,20 @@ draw_x_lines(
     draw_solid(prog, u_screen, u_color, u_alpha, vbo, verts, n, 0.22, 0.70, 0.34, 0.55);
 }
 
+hud_scissor(x0: f32, y0: f32, x1: f32, y1: f32) {
+    w: int = (x1 - x0) as int;
+    h: int = (y1 - y0) as int;
+    if (w < 1 || h < 1) {
+        return;
+    }
+    glEnable(3089);
+    glScissor(x0 as int, 720 - (y1 as int), w, h);
+}
+
+hud_unscissor() {
+    glDisable(3089);
+}
+
 draw_x_labels(
     font: Font,
     prog: int,
@@ -2826,6 +2872,7 @@ draw_fps(
     times: []int,
     works: []int,
     rates: []f32,
+    heaps: []int,
     lab: []i8
 ): FpsMeter {
     if (m.on == 0 || m.n < 1) {
@@ -2833,10 +2880,12 @@ draw_fps(
     }
     py0: f32 = 28.0;
     py1: f32 = 100.0;
-    fx0: f32 = 48.0;
-    fx1: f32 = 586.0;
-    mx0: f32 = 644.0;
-    mx1: f32 = 1182.0;
+    fx0: f32 = 46.0;
+    fx1: f32 = 386.0;
+    mx0: f32 = 440.0;
+    mx1: f32 = 780.0;
+    hx0: f32 = 834.0;
+    hx1: f32 = 1182.0;
     last: int = fps_ring(m.i, m.n, m.n - 1);
     t1: int = times[last];
     t0: int = t1 - FPS_SPAN_US;
@@ -2846,8 +2895,11 @@ draw_fps(
     have_f: int = 0;
     last_ms: f32 = ms_of_us(works[last]);
     last_fps: f32 = rates[last];
+    last_mb: f32 = mb_of_bytes(heaps[last]);
     mlo: f32 = last_ms;
     mhi: f32 = last_ms;
+    hlo: f32 = last_mb;
+    hhi: f32 = last_mb;
     k: int = 0;
     while (k < m.n) {
         ms: f32 = ms_of_us(works[fps_ring(m.i, m.n, k)]);
@@ -2856,6 +2908,13 @@ draw_fps(
         }
         if (ms > mhi) {
             mhi = ms;
+        }
+        hb: f32 = mb_of_bytes(heaps[fps_ring(m.i, m.n, k)]);
+        if (hb < hlo) {
+            hlo = hb;
+        }
+        if (hb > hhi) {
+            hhi = hb;
         }
         fpsv: f32 = rates[fps_ring(m.i, m.n, k)];
         if (fpsv > 0.001) {
@@ -2885,43 +2944,61 @@ draw_fps(
     raw_mhi: f32 = mhi;
     mlo = axis_pad(raw_mlo, raw_mhi, 0.2, 0);
     mhi = axis_pad(raw_mlo, raw_mhi, 0.2, 1);
+    raw_hlo: f32 = hlo;
+    raw_hhi: f32 = hhi;
+    hlo = axis_pad(raw_hlo, raw_hhi, 0.05, 0);
+    hhi = axis_pad(raw_hlo, raw_hhi, 0.05, 1);
     ready: int = 0;
-    if (m.fhi > m.flo + 0.001 && m.mhi > m.mlo + 0.001) {
+    if (m.fhi > m.flo + 0.001 && m.mhi > m.mlo + 0.001 && m.hhi > m.hlo + 0.001) {
         ready = 1;
     }
     flo = follow_lo(m.flo, flo, ready);
     fhi = follow_hi(m.fhi, fhi, ready);
     mlo = follow_lo(m.mlo, mlo, ready);
     mhi = follow_hi(m.mhi, mhi, ready);
+    hlo = follow_lo(m.hlo, hlo, ready);
+    hhi = follow_hi(m.hhi, hhi, ready);
     if (fhi <= flo) {
         fhi = flo + 0.8;
     }
     if (mhi <= mlo) {
         mhi = mlo + 0.2;
     }
+    if (hhi <= hlo) {
+        hhi = hlo + 0.05;
+    }
     fps_unit: f32 = hold_step(m.f_step, fhi - flo);
     ms_unit: f32 = hold_step(m.m_step, mhi - mlo);
+    heap_unit: f32 = hold_step(m.h_step, hhi - hlo);
     x_span: f32 = span as f32 / 1000000.0;
     x_unit: f32 = hold_step(m.x_step, x_span);
     m.flo = flo;
     m.fhi = fhi;
     m.mlo = mlo;
     m.mhi = mhi;
+    m.hlo = hlo;
+    m.hhi = hhi;
     m.f_step = fps_unit;
     m.m_step = ms_unit;
+    m.h_step = heap_unit;
     m.x_step = x_unit;
     fps_major: f32 = tick_major_span(fps_unit);
     ms_major: f32 = tick_major_span(ms_unit);
+    heap_major: f32 = tick_major_span(heap_unit);
     x_us: int = x_step_us(x_unit);
     wall_off: int = wall_us() - mono_us();
-    draw_crt_panel(gprog, u_gscreen, u_gcolor, u_galpha, gvbo, gverts, 10.0, 10.0, 594.0, 118.0);
-    draw_crt_panel(gprog, u_gscreen, u_gcolor, u_galpha, gvbo, gverts, 606.0, 10.0, 1190.0, 118.0);
+    draw_crt_panel(gprog, u_gscreen, u_gcolor, u_galpha, gvbo, gverts, 10.0, 10.0, 394.0, 118.0);
+    draw_crt_panel(gprog, u_gscreen, u_gcolor, u_galpha, gvbo, gverts, 404.0, 10.0, 788.0, 118.0);
+    draw_crt_panel(gprog, u_gscreen, u_gcolor, u_galpha, gvbo, gverts, 798.0, 10.0, 1190.0, 118.0);
     draw_unit_lines(gprog, u_gscreen, u_gcolor, u_galpha, gvbo, gverts, fx0, py0, fx1, py1, flo, fhi,
         fps_unit, fps_major);
     draw_unit_lines(gprog, u_gscreen, u_gcolor, u_galpha, gvbo, gverts, mx0, py0, mx1, py1, mlo, mhi,
         ms_unit, ms_major);
+    draw_unit_lines(gprog, u_gscreen, u_gcolor, u_galpha, gvbo, gverts, hx0, py0, hx1, py1, hlo, hhi,
+        heap_unit, heap_major);
     draw_x_lines(gprog, u_gscreen, u_gcolor, u_galpha, gvbo, gverts, fx0, py1, fx1, t0, t1, x_us);
     draw_x_lines(gprog, u_gscreen, u_gcolor, u_galpha, gvbo, gverts, mx0, py1, mx1, t0, t1, x_us);
+    draw_x_lines(gprog, u_gscreen, u_gcolor, u_galpha, gvbo, gverts, hx0, py1, hx1, t0, t1, x_us);
     n: int = 0;
     k = 0;
     px: f32 = 0.0;
@@ -2942,6 +3019,7 @@ draw_fps(
         }
         k = k + 1;
     }
+    hud_scissor(fx0, py0, fx1, py1);
     draw_solid(gprog, u_gscreen, u_gcolor, u_galpha, gvbo, gverts, n, 0.40, 1.0, 0.50, 0.95);
     n = 0;
     k = 0;
@@ -2952,7 +3030,28 @@ draw_fps(
         n = put_quad(gverts, n, x - 1.3, y - 1.3, x + 1.3, y + 1.3);
         k = k + 1;
     }
+    hud_scissor(mx0, py0, mx1, py1);
     draw_solid(gprog, u_gscreen, u_gcolor, u_galpha, gvbo, gverts, n, 0.62, 1.0, 0.42, 0.92);
+    n = 0;
+    k = 0;
+    px = 0.0;
+    py = 0.0;
+    have = 0;
+    while (k < m.n) {
+        ix3: int = fps_ring(m.i, m.n, k);
+        x3: f32 = hx0 + (times[ix3] - t0) as f32 / span as f32 * (hx1 - hx0);
+        y3: f32 = plot_y(mb_of_bytes(heaps[ix3]), hlo, hhi, py0, py1);
+        if (have != 0) {
+            n = put_line(gverts, n, px, py, x3, y3, 1.6);
+        }
+        px = x3;
+        py = y3;
+        have = 1;
+        k = k + 1;
+    }
+    hud_scissor(hx0, py0, hx1, py1);
+    draw_solid(gprog, u_gscreen, u_gcolor, u_galpha, gvbo, gverts, n, 0.95, 0.85, 0.28, 0.95);
+    hud_unscissor();
     glEnableVertexAttribArray(1);
     clear_label(lab);
     i: int = put_str(lab, 0, "FPS ");
@@ -2963,7 +3062,12 @@ draw_fps(
     clear_label(lab);
     i = put_str(lab, 0, "MS ");
     i = put_tenths(lab, i, last_ms);
-    draw_hud_text(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex, tvbo, tverts, 614.0, 22.0, lab, 0.95);
+    draw_hud_text(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex, tvbo, tverts, 412.0, 22.0, lab, 0.95);
+    clear_label(lab);
+    i = put_str(lab, 0, "MEM ");
+    i = put_tenths(lab, i, last_mb);
+    i = put_ch(lab, i, 'M');
+    draw_hud_text(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex, tvbo, tverts, 806.0, 22.0, lab, 0.95);
     fps_dec: int = 0;
     if (fps_unit < 0.95) {
         fps_dec = 1;
@@ -2972,13 +3076,21 @@ draw_fps(
     if (ms_unit < 0.95) {
         ms_dec = 1;
     }
-    draw_unit_labels(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex, tvbo, tverts, lab, 16.0, py0,
+    heap_dec: int = 0;
+    if (heap_unit < 0.95) {
+        heap_dec = 1;
+    }
+    draw_unit_labels(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex, tvbo, tverts, lab, 14.0, py0,
         py1, flo, fhi, fps_unit, fps_major, fps_dec);
-    draw_unit_labels(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex, tvbo, tverts, lab, 612.0, py0,
+    draw_unit_labels(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex, tvbo, tverts, lab, 408.0, py0,
         py1, mlo, mhi, ms_unit, ms_major, ms_dec);
+    draw_unit_labels(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex, tvbo, tverts, lab, 802.0, py0,
+        py1, hlo, hhi, heap_unit, heap_major, heap_dec);
     draw_x_labels(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex, tvbo, tverts, lab, fx0, fx1, 114.0,
         t0, t1, x_us, wall_off);
     draw_x_labels(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex, tvbo, tverts, lab, mx0, mx1, 114.0,
+        t0, t1, x_us, wall_off);
+    draw_x_labels(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex, tvbo, tverts, lab, hx0, hx1, 114.0,
         t0, t1, x_us, wall_off);
     m;
 }
@@ -3509,6 +3621,7 @@ main(argc: int, argv: [][z]i8): int {
     if (glXMakeCurrent(dpy, win, ctx) == 0) {
         die("glXMakeCurrent failed");
     }
+    vsync: int = set_vsync(dpy, win, 1);
     vs: []i8 = """
 #version 120
 attribute vec3 pos;
@@ -3803,7 +3916,7 @@ void main() {
     font: Font = load_default_font();
     hud: Font = load_mono_font();
     tverts: []f32 = new f32[2048](0.0);
-    gverts: []f32 = new f32[16384](0.0);
+    gverts: []f32 = new f32[65536](0.0);
     if (font.ok != 0) {
         write(2, "freetype: DejaVuSans 32px overlay\n", len("freetype: DejaVuSans 32px overlay\n"));
     }
@@ -3932,11 +4045,15 @@ void main() {
         mhi: 0.0,
         f_step: 0.0,
         m_step: 0.0,
-        x_step: 0.0
+        h_step: 0.0,
+        x_step: 0.0,
+        hlo: 0.0,
+        hhi: 0.0
     };
     fps_t: []int = new int[FPS_CAP](0);
     fps_work: []int = new int[FPS_CAP](0);
     fps_rate: []f32 = new f32[FPS_CAP](0.0);
+    fps_mem: []int = new int[FPS_CAP](0);
     fps_lab: []i8 = new i8[24](0i8);
     present_us: []int = new int[1](0);
     mask_cache: []int = new int[3](0);
@@ -4002,6 +4119,8 @@ void main() {
                             shift = 1;
                         } else if (is_fps_key(ks) != 0) {
                             fps = toggle_fps(fps);
+                        } else if (is_vsync_key(ks) != 0) {
+                            vsync = set_vsync(dpy, win, 1 - vsync);
                         } else if (ks == 113 || ks == 81) {
                             running = 0;
                         } else if (ks == 65307 || ((ks == 101 || ks == 69 || ks == 65289) && edit_view != 0 && is_world != 0)) {
@@ -4437,10 +4556,10 @@ void main() {
                     draw_help(font, tprog, u_tscreen, u_tcolor, u_talpha, ftex[0], tbuf[0], tverts,
                         20.0, level_name);
                 }
-                fps = tick_fps(fps, fps_t, fps_work, fps_rate, present_us[0]);
+                fps = tick_fps(fps, fps_t, fps_work, fps_rate, fps_mem, present_us[0]);
                 fps = draw_fps(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex[0], tbuf[0], tverts,
                     gprog, u_gscreen, u_gcolor, u_galpha, gbuf[0], gverts, fps, fps_t, fps_work,
-                    fps_rate, fps_lab);
+                    fps_rate, fps_mem, fps_lab);
                 glDisable(3042);
                 glEnable(2929);
                 glXSwapBuffers(dpy, win);
@@ -4494,6 +4613,8 @@ void main() {
                             shift = 1;
                         } else if (is_fps_key(ks) != 0) {
                             fps = toggle_fps(fps);
+                        } else if (is_vsync_key(ks) != 0) {
+                            vsync = set_vsync(dpy, win, 1 - vsync);
                         } else if (ks == 113 || ks == 81 || ks == 65307) {
                             running = 0;
                         } else if (ks == 65361 || ks == 65362 || ks == 65363 || ks == 65364) {
@@ -4737,10 +4858,10 @@ void main() {
                     draw_title(font, tprog, u_tscreen, u_tcolor, u_talpha, ftex[0],
                         tbuf[0], tverts, 40.0, 676.0, to_title, t);
                 }
-                fps = tick_fps(fps, fps_t, fps_work, fps_rate, present_us[0]);
+                fps = tick_fps(fps, fps_t, fps_work, fps_rate, fps_mem, present_us[0]);
                 fps = draw_fps(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex[0], tbuf[0], tverts,
                     gprog, u_gscreen, u_gcolor, u_galpha, gbuf[0], gverts, fps, fps_t, fps_work,
-                    fps_rate, fps_lab);
+                    fps_rate, fps_mem, fps_lab);
                 glDisable(3042);
                 glEnable(2929);
                 glXSwapBuffers(dpy, win);

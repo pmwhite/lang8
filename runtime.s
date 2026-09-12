@@ -22,6 +22,7 @@
 .globl l8_exc_tag
 .globl l8_exc_ptr
 .globl l8_heap_mark
+.globl l8_heap_used
 .globl l8_heap_reset
 .globl l8_region_push
 .globl l8_region_pop
@@ -34,6 +35,7 @@
 .section .bss
 .align 8
 heap_ptr:  .skip 8
+heap_base: .skip 8
 heap_end:  .skip 8
 .equ HEAP_SIZE, 64*1024*1024
 
@@ -85,6 +87,7 @@ _start:
     mov $9, %rax           # mmap
     syscall
     mov %rax, heap_ptr(%rip)
+    mov %rax, heap_base(%rip)
     lea HEAP_SIZE(%rax), %rdi
     mov %rdi, heap_end(%rip)
 
@@ -140,6 +143,13 @@ syscall:
 # long l8_heap_mark(void) — current bump pointer
 l8_heap_mark:
     mov heap_ptr(%rip), %rax
+    ret
+
+# long l8_heap_used(void) — bytes allocated from the bump base
+l8_heap_used:
+    mov heap_ptr(%rip), %rax
+    mov heap_base(%rip), %rcx
+    sub %rcx, %rax
     ret
 
 # void l8_heap_reset(long mark) — rewind the bump allocator
