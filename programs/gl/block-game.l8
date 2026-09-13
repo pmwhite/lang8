@@ -1,6 +1,6 @@
 // Port of blog/block-game.html. One binary, two sub-commands:
 //   .build/block-game [play] [path]   play a world or a lone level
-//   .build/block-game edit [path]     layout + drill-in editor
+//   .build/block-game edit [path]     unified world/level editor
 // Default path is programs/gl/world.txt. Arrows move, q quits.
 import "gl.l8";
 
@@ -58,6 +58,27 @@ FPS_CAP: int = 4096;
 FPS_SPAN_US: int = 4000000;
 
 FPS_RATE_US: int = 1000000;
+
+text_push(s: []i8, c: i8): []i8@new {
+    out: []i8 = new i8[len(s) + 1](0i8);
+    if (len(s) > 0) {
+        memcpy(out, 0, s, 0, len(s));
+    }
+    out[len(s)] = c;
+    out;
+}
+
+text_pop(s: []i8): []i8@new {
+    n: int = len(s) - 1;
+    if (n < 0) {
+        n = 0;
+    }
+    out: []i8 = new i8[n](0i8);
+    if (n > 0) {
+        memcpy(out, 0, s, 0, n);
+    }
+    out;
+}
 
 compile_shader(kind: int, src: []i8): int {
     sh: int = glCreateShader(kind);
@@ -1165,29 +1186,40 @@ fill_brick_cells(
     i;
 }
 
-room_mask_key(rooms: []Room, nroom: int): int {
-    k: int = nroom * 10007;
+ground_mask_key(ground_cells: []GroundCell, nground: int): int {
+    k: int = nground * 10007;
     i: int = 0;
-    while (i < nroom) {
-        r: Room = rooms[i];
-        k = k + r.x0 + r.y0 * 17 + r.x1 * 31 + r.y1 * 47;
+    while (i < nground) {
+        f: GroundCell = ground_cells[i];
+        k = k + f.column * 17 + f.row * 31 + f.style * 47;
         i = i + 1;
     }
     k;
 }
 
-mark_mask_cell(cmask: []i8, origin_c: int, origin_r: int, column: int, row: int) {
+mark_ground_cell(
+    cmask: []i8,
+    origin_c: int,
+    origin_r: int,
+    column: int,
+    row: int,
+    style: int
+) {
     u: int = column - origin_c;
     v: int = row - origin_r;
     if (u >= 0 && u < MASK_SIZE && v >= 0 && v < MASK_SIZE) {
-        cmask[v * MASK_SIZE + u] = 0i8 - 1i8;
+        if (style == GROUND_GRASS) {
+            cmask[v * MASK_SIZE + u] = 127i8;
+        } else if (style == GROUND_STONE) {
+            cmask[v * MASK_SIZE + u] = 0i8 - 1i8;
+        }
     }
 }
 
-fill_border_mask(
+fill_ground_mask(
     cmask: []i8,
-    rooms: []Room,
-    nroom: int,
+    ground_cells: []GroundCell,
+    nground: int,
     origin_c: int,
     origin_r: int
 ) {
@@ -1196,19 +1228,11 @@ fill_border_mask(
         cmask[i] = 0i8;
         i = i + 1;
     }
-    ri: int = 0;
-    while (ri < nroom) {
-        r: Room = rooms[ri];
-        c: int = r.x0 + 1;
-        while (c < r.x1) {
-            row: int = r.y0 + 1;
-            while (row < r.y1) {
-                mark_mask_cell(cmask, origin_c, origin_r, c, row);
-                row = row + 1;
-            }
-            c = c + 1;
-        }
-        ri = ri + 1;
+    i = 0;
+    while (i < nground) {
+        f: GroundCell = ground_cells[i];
+        mark_ground_cell(cmask, origin_c, origin_r, f.column, f.row, f.style);
+        i = i + 1;
     }
 }
 
@@ -3786,12 +3810,39 @@ copy_bricks(dst: []Brick, src: []Brick, n: int) {
     }
 }
 
-copy_titles(dst: [][]i8, src: [][]i8@dst, n: int) {
-    i: int = 0;
-    while (i < n) {
-        dst[i] = src[i];
-        i = i + 1;
-    }
+preview_room_transform(
+    src_blocks: []Block,
+    n: int,
+    src_rooms: []Room,
+    nroom: int,
+    src_goals: []Goal,
+    ngoal: int,
+    src_bricks: []Brick,
+    nbrick: int,
+    src_ground: []GroundCell,
+    nground: int,
+    src_start: []int,
+    blocks: []Block,
+    rooms: []Room,
+    goals: []Goal,
+    bricks: []Brick,
+    ground: []GroundCell,
+    start: []int,
+    sel: int,
+    dc: int,
+    dr: int,
+    rot: int,
+    xy: []int
+) {
+    copy_blocks(blocks, 0, src_blocks, 0, n);
+    copy_rooms(rooms, src_rooms, nroom);
+    copy_goals(goals, src_goals, ngoal);
+    copy_bricks(bricks, src_bricks, nbrick);
+    copy_ground(ground, src_ground, nground);
+    start[0] = src_start[0];
+    start[1] = src_start[1];
+    transform_room_contents(blocks, n, goals, ngoal, bricks, nbrick, ground, nground, rooms, sel,
+        dc, dr, rot, start, xy);
 }
 
 draw_hedges(
@@ -3839,6 +3890,8 @@ draw_frame(
     stex: u32,
     ctex: u32,
     cmask: []i8,
+    ground_cells: []GroundCell,
+    nground: int,
     rooms: []Room,
     nroom: int,
     goals: []Goal,
@@ -3868,6 +3921,10 @@ draw_frame(
     cur_r: int,
     cur_l: int,
     want_cursor: int,
+    ground_brush: int,
+    move_mode: int,
+    move_sel: int,
+    move_ok: int,
     pend_c: int,
     pend_r: int,
     want_pend: int,
@@ -3989,7 +4046,7 @@ draw_frame(
     origin_r: int = mask_cache[1];
     fc: int = floor_i(focus_x);
     fr: int = floor_i(focus_z);
-    mkey: int = room_mask_key(rooms, nroom);
+    mkey: int = ground_mask_key(ground_cells, nground);
     need_mask: int = 0;
     if (origin_c < 0 - 999998 || mkey != mask_cache[2]) {
         need_mask = 1;
@@ -4001,7 +4058,7 @@ draw_frame(
     if (need_mask != 0) {
         origin_c = fc - MASK_HALF;
         origin_r = fr - MASK_HALF;
-        fill_border_mask(cmask, rooms, nroom, origin_c, origin_r);
+        fill_ground_mask(cmask, ground_cells, nground, origin_c, origin_r);
         mask_cache[0] = origin_c;
         mask_cache[1] = origin_r;
         mask_cache[2] = mkey;
@@ -4033,23 +4090,48 @@ draw_frame(
         ri: int = 0;
         while (ri < nroom) {
             rr: Room = rooms[ri];
+            room_r: f32 = 0.22;
+            room_g: f32 = 0.44;
+            room_b: f32 = 0.26;
+            if (move_mode != 0 && ri == move_sel) {
+                room_r = 0.34;
+                room_g = 0.72;
+                room_b = 0.42;
+                if (move_ok == 0) {
+                    room_r = 0.82;
+                    room_g = 0.18;
+                    room_b = 0.14;
+                }
+            }
             rcx: f32 = (rr.x0 + rr.x1 + 1) as f32 * 0.5;
             rcz: f32 = (rr.y0 + rr.y1 + 1) as f32 * 0.5;
             rww: f32 = (rr.x1 - rr.x0 + 1) as f32;
             rhh: f32 = (rr.y1 - rr.y0 + 1) as f32;
             draw_box(u_origin, u_scale, u_color, rcx, 0.03, rr.y0 as f32 + 0.5, rww, 0.04,
-                0.10, 0.22, 0.44, 0.26, 36);
+                0.10, room_r, room_g, room_b, 36);
             draw_box(u_origin, u_scale, u_color, rcx, 0.03, rr.y1 as f32 + 0.5, rww, 0.04,
-                0.10, 0.22, 0.44, 0.26, 36);
+                0.10, room_r, room_g, room_b, 36);
             draw_box(u_origin, u_scale, u_color, rr.x0 as f32 + 0.5, 0.03, rcz, 0.10, 0.04,
-                rhh, 0.22, 0.44, 0.26, 36);
+                rhh, room_r, room_g, room_b, 36);
             draw_box(u_origin, u_scale, u_color, rr.x1 as f32 + 0.5, 0.03, rcz, 0.10, 0.04,
-                rhh, 0.22, 0.44, 0.26, 36);
+                rhh, room_r, room_g, room_b, 36);
             ri = ri + 1;
         }
         if (want_pend != 0) {
+            anchor_r: f32 = 0.55;
+            anchor_g: f32 = 0.36;
+            anchor_b: f32 = 0.18;
+            if (ground_brush == GROUND_GRASS) {
+                anchor_r = 0.34;
+                anchor_g = 0.58;
+                anchor_b = 0.22;
+            } else if (ground_brush == GROUND_STONE) {
+                anchor_r = 0.58;
+                anchor_g = 0.58;
+                anchor_b = 0.55;
+            }
             draw_box(u_origin, u_scale, u_color, pend_c as f32 + 0.5, 0.08, pend_r as f32 + 0.5,
-                0.86, 0.08, 0.86, 0.70, 0.78, 0.32, 36);
+                0.86, 0.08, 0.86, anchor_r, anchor_g, anchor_b, 36);
             pcx: f32 = (pend_c + cur_c + 1) as f32 * 0.5;
             pcz: f32 = (pend_r + cur_r + 1) as f32 * 0.5;
             pww: f32 = (pend_c - cur_c) as f32;
@@ -4063,13 +4145,13 @@ draw_frame(
             }
             phh = phh + 1.0;
             draw_box(u_origin, u_scale, u_color, pcx, 0.05, pend_r as f32 + 0.5, pww, 0.04,
-                0.08, 0.70, 0.78, 0.32, 36);
+                0.08, anchor_r, anchor_g, anchor_b, 36);
             draw_box(u_origin, u_scale, u_color, pcx, 0.05, cur_r as f32 + 0.5, pww, 0.04,
-                0.08, 0.70, 0.78, 0.32, 36);
+                0.08, anchor_r, anchor_g, anchor_b, 36);
             draw_box(u_origin, u_scale, u_color, pend_c as f32 + 0.5, 0.05, pcz, 0.08, 0.04,
-                phh, 0.70, 0.78, 0.32, 36);
+                phh, anchor_r, anchor_g, anchor_b, 36);
             draw_box(u_origin, u_scale, u_color, cur_c as f32 + 0.5, 0.05, pcz, 0.08, 0.04,
-                phh, 0.70, 0.78, 0.32, 36);
+                phh, anchor_r, anchor_g, anchor_b, 36);
         }
     }
     if (want_cursor != 0) {
@@ -4096,8 +4178,24 @@ draw_frame(
             cy = cur_l as f32 + 1.02 + lean_along(lx0, lz0, lk, 1);
             cz = cz + lean_along(lx0, lz0, lk, 2);
         }
-        draw_box(u_origin, u_scale, u_color, cx, cy, cz, 0.98, 0.06, 0.98, 0.020,
-            0.588, 0.412, 36);
+        cursor_r: f32 = 0.020;
+        cursor_g: f32 = 0.588;
+        cursor_b: f32 = 0.412;
+        if (ground_brush == GROUND_DIRT) {
+            cursor_r = 0.55;
+            cursor_g = 0.36;
+            cursor_b = 0.18;
+        } else if (ground_brush == GROUND_GRASS) {
+            cursor_r = 0.34;
+            cursor_g = 0.58;
+            cursor_b = 0.22;
+        } else if (ground_brush == GROUND_STONE) {
+            cursor_r = 0.58;
+            cursor_g = 0.58;
+            cursor_b = 0.55;
+        }
+        draw_box(u_origin, u_scale, u_color, cx, cy, cz, 0.98, 0.06, 0.98, cursor_r,
+            cursor_g, cursor_b, 36);
     }
     if (split_hist != 0) {
         draw_casters(u_origin, u_scale, u_color, chamfer_buf, prism_buf, ramp_buf, chamfer_n,
@@ -4161,28 +4259,28 @@ main(argc: int, argv: [][z]i8): int {
         column: 0,
         row: 0
     };
+    empty_ground: GroundCell = GroundCell {
+        column: 0,
+        row: 0,
+        style: GROUND_DIRT
+    };
     rooms: []Room = new Room[64](empty_room);
     titles: [][]i8 = new []i8[64](new i8[0](0i8));
     goals: []Goal = new Goal[64](empty_goal);
     bricks: []Brick = new Brick[2048](empty_brick);
+    ground_cells: []GroundCell = new GroundCell[LEVEL_MAX_GROUND](empty_ground);
     nroom_slot: []int = new int[1](0);
     ngoal_slot: []int = new int[1](0);
     nbrick_slot: []int = new int[1](0);
+    nground_slot: []int = new int[1](0);
     n: int = 0;
     nroom: int = 0;
     ngoal: int = 0;
     nbrick: int = 0;
+    nground: int = 0;
     startp: []int = new int[2](0);
     is_world: int = 0;
-    edit_view: int = 1;
-    empty_place: Placement = Placement {
-        x: 0,
-        y: 0,
-        rot: 0
-    };
-    places: []Placement = new Placement[64](empty_place);
     pnames: [][]i8 = new []i8[64](new i8[0](0i8));
-    nplace: int = 0;
     dones: [][]i8 = new []i8[64](new i8[0](0i8));
     ndone: int = 0;
     ndone_slot: []int = new int[1](0);
@@ -4208,11 +4306,6 @@ main(argc: int, argv: [][z]i8): int {
     stream_until: []int = new int[64](0);
     stream_tx: []f32 = new f32[64](0.0);
     stream_tz: []f32 = new f32[64](0.0);
-    catalog: [][]i8 = new []i8[64](new i8[0](0i8));
-    ncat: int = 0;
-    ncat_slot: []int = new int[1](0);
-    hand: int = 0;
-    over_name: []i8 = "";
     fd0: int = open_path(path, 0, 0);
     if (fd0 < 0) {
         if (edit_mode == 0) {
@@ -4223,7 +4316,6 @@ main(argc: int, argv: [][z]i8): int {
         }
         if (titles_eq(path, LEVEL_DEFAULT_PATH)) {
             is_world = 1;
-            edit_view = 0;
         } else {
             nroom = set_room_size(rooms, titles, 0, 12, 9);
         }
@@ -4235,27 +4327,23 @@ main(argc: int, argv: [][z]i8): int {
         raw: []i8 = slurp_path(path);
         if (looks_like_world(raw)) {
             is_world = 1;
-            edit_view = 0;
-            np_slot: []int = new int[1](0);
-            if (load_world(path, places, pnames, np_slot, startp, dones, ndone_slot) < 0) {
+            n = load_unified_world(path, pnames, rooms, titles, nroom_slot, src, goals,
+                ngoal_slot, bricks, nbrick_slot, ground_cells, nground_slot, startp, dones,
+                ndone_slot);
+            if (n < 0) {
                 write(2, "cannot load world ", len("cannot load world "));
                 write(2, path, len(path));
                 write(2, "\n", 1);
                 return 1;
             }
-            nplace = np_slot[0];
             ndone = ndone_slot[0];
-            cout: []int = new int[4](0);
-            n = compose_world(path, places, pnames, nplace, "", src, 0, rooms, titles, 0, goals, 0,
-                bricks, 0, src, rooms, titles, goals, bricks, cout);
-            nroom = cout[1];
-            ngoal = cout[2];
-            nbrick = cout[3];
-            load_index(path, catalog, ncat_slot);
-            ncat = ncat_slot[0];
+            nroom = nroom_slot[0];
+            ngoal = ngoal_slot[0];
+            nbrick = nbrick_slot[0];
+            nground = nground_slot[0];
         } else {
             n = load_any(path, src, rooms, titles, nroom_slot, goals, ngoal_slot, bricks,
-                nbrick_slot, startp);
+                nbrick_slot, ground_cells, nground_slot, startp);
             if (n < 0) {
                 write(2, "cannot load level ", len("cannot load level "));
                 write(2, path, len(path));
@@ -4265,12 +4353,13 @@ main(argc: int, argv: [][z]i8): int {
             nroom = nroom_slot[0];
             ngoal = ngoal_slot[0];
             nbrick = nbrick_slot[0];
+            nground = nground_slot[0];
             if (nroom < 1) {
                 nroom = set_room_size(rooms, titles, 0, 12, 9);
             }
         }
         apply_gravity(src, n);
-        apply_solved(pnames, nplace, dones, ndone, solved, nroom);
+        apply_solved(pnames, nroom, dones, ndone, solved, nroom);
     }
     d0: ?*i8 = XOpenDisplay(null);
     if (d0 == null) {
@@ -4411,7 +4500,7 @@ vec2 hash2(vec2 p) {
   p3 += dot(p3, p3.yzx + 33.33);
   return fract((p3.xx + p3.yz) * p3.zy);
 }
-float paved_at(vec2 cell) {
+float ground_style_at(vec2 cell) {
   vec2 tc = (cell - mask_origin + 0.5) / 256.0;
   if (tc.x < 0.0 || tc.x > 1.0 || tc.y < 0.0 || tc.y > 1.0) {
     return 0.0;
@@ -4425,6 +4514,7 @@ void main() {
     vec2 p = vworld.xz;
     vec2 cell = floor(p);
     vec2 f = fract(p);
+    float ground_style = ground_style_at(cell);
     float md = 8.0;
     float md2 = 8.0;
     vec2 mr = vec2(0.0);
@@ -4449,7 +4539,7 @@ void main() {
     }
     vec2 hv = hash2(mc);
     float edge = sqrt(md2) - sqrt(md);
-    float stone_m = smoothstep(0.055, 0.125, edge) * paved_at(mc);
+    float stone_m = smoothstep(0.055, 0.125, edge);
     vec3 stone = mix(vec3(0.38, 0.36, 0.33), vec3(0.48, 0.45, 0.41), hv.x);
     vec2 gv = hash2(floor(p * 9.0));
     stone *= 0.94 + 0.06 * gv.x;
@@ -4457,9 +4547,17 @@ void main() {
     vec2 gh = hash2(floor(p * 6.0 + 19.0));
     vec3 grass = mix(vec3(0.26, 0.30, 0.20), vec3(0.32, 0.35, 0.22), gh.x);
     grass *= 0.92 + 0.06 * gh.y;
-    albedo = mix(grass, stone, stone_m);
-    n = normalize(mix(n, normalize(vec3(-mr.x, 0.78, -mr.y)), stone_m * 0.32));
-    albedo *= mix(0.80, 0.86, stone_m);
+    vec3 dirt = mix(vec3(0.255, 0.205, 0.145), vec3(0.305, 0.250, 0.175), gh.x);
+    dirt *= 0.91 + 0.08 * gh.y;
+    albedo = dirt;
+    if (ground_style > 0.25 && ground_style < 0.75) {
+      albedo = grass * 0.83;
+    } else if (ground_style >= 0.75) {
+      vec3 joint = vec3(0.22, 0.20, 0.16) * (0.92 + 0.05 * gh.y);
+      albedo = mix(joint, stone, stone_m);
+      n = normalize(mix(n, normalize(vec3(-mr.x, 0.78, -mr.y)), stone_m * 0.32));
+      albedo *= mix(0.80, 0.86, stone_m);
+    }
   } else if (cut > 0.5) {
     vec3 an = abs(n);
     vec2 uv = vworld.xz;
@@ -4649,7 +4747,7 @@ varying vec3 vnrm;
 varying float vroot;
 varying float vrand;
 varying float valive;
-float room_blend(vec2 p) {
+float ground_style_at(vec2 p) {
   vec2 tc = (p - mask_origin) / 256.0;
   if (tc.x < 0.0 || tc.x > 1.0 || tc.y < 0.0 || tc.y > 1.0) {
     return 0.0;
@@ -4662,21 +4760,25 @@ void main() {
   }
   vec2 grass_cell = floor(vworld.xz);
   vec2 in_cell = fract(vworld.xz);
-  float room_cell = room_blend(grass_cell + 0.5);
-  if (room_cell > 0.5) {
+  float cell_style = ground_style_at(grass_cell + 0.5);
+  if (cell_style < 0.25 || cell_style > 0.75) {
     discard;
   }
   float edge_distance = 1.0;
-  if (room_blend(grass_cell + vec2(-0.5, 0.5)) > 0.5) {
+  float neighbor_style = ground_style_at(grass_cell + vec2(-0.5, 0.5));
+  if (neighbor_style < 0.25 || neighbor_style > 0.75) {
     edge_distance = min(edge_distance, in_cell.x);
   }
-  if (room_blend(grass_cell + vec2(1.5, 0.5)) > 0.5) {
+  neighbor_style = ground_style_at(grass_cell + vec2(1.5, 0.5));
+  if (neighbor_style < 0.25 || neighbor_style > 0.75) {
     edge_distance = min(edge_distance, 1.0 - in_cell.x);
   }
-  if (room_blend(grass_cell + vec2(0.5, -0.5)) > 0.5) {
+  neighbor_style = ground_style_at(grass_cell + vec2(0.5, -0.5));
+  if (neighbor_style < 0.25 || neighbor_style > 0.75) {
     edge_distance = min(edge_distance, in_cell.y);
   }
-  if (room_blend(grass_cell + vec2(0.5, 1.5)) > 0.5) {
+  neighbor_style = ground_style_at(grass_cell + vec2(0.5, 1.5));
+  if (neighbor_style < 0.25 || neighbor_style > 0.75) {
     edge_distance = min(edge_distance, 1.0 - in_cell.y);
   }
   float grass_amount = smoothstep(0.0, 1.0, edge_distance);
@@ -4976,8 +5078,8 @@ void main() {
     cmask: []i8 = new i8[65536](0i8);
     glGenTextures(1, ctex);
     glBindTexture(3553, ctex[0]);
-    glTexParameteri(3553, 10241, 9729);
-    glTexParameteri(3553, 10240, 9729);
+    glTexParameteri(3553, 10241, 9728);
+    glTexParameteri(3553, 10240, 9728);
     glTexParameteri(3553, 10242, 33071);
     glTexParameteri(3553, 10243, 33071);
     glTexImage2D(3553, 0, 6409, MASK_SIZE, MASK_SIZE, 0, 6409, 5121, cmask);
@@ -5057,25 +5159,34 @@ void main() {
         cl = cursor_layer_at(blocks, n, cc, cr);
         dirty_level: int = 0;
         dirty_world: int = 0;
-        need_world: int = 0;
         need_mesh: int = 0;
-        counts: []int = new int[4](0);
-        cout: []int = new int[4](0);
+        counts: []int = new int[5](0);
         xy: []int = new int[2](0);
-        lvl_start: []int = new int[2](0);
         focus_x: f32 = 0.5;
         focus_z: f32 = 0.5;
-        lblocks: []Block = new Block[2048](empty);
-        lrooms: []Room = new Room[4](empty_room);
-        ltitles: [][]i8 = new []i8[4](new i8[0](0i8));
-        lgoals: []Goal = new Goal[64](empty_goal);
-        lbricks: []Brick = new Brick[2048](empty_brick);
-        ln: int = 0;
-        lnroom: int = 0;
-        lngoal: int = 0;
-        lnbrick: int = 0;
-        level_name: []i8 = "";
-        level_path: []i8 = path;
+        ground_brush: int = GROUND_DIRT;
+        paint_anchor: int = 0;
+        paint_c: int = 0;
+        paint_r: int = 0;
+        name_mode: int = 0;
+        new_name: []i8 = "";
+        name_error: []i8 = "";
+        key_text: []i8 = new i8[8](0i8);
+        move_mode: int = 0;
+        move_sel: int = 0 - 1;
+        move_dc: int = 0;
+        move_dr: int = 0;
+        move_rot: int = 0;
+        move_ok: int = 1;
+        move_cursor_c: int = 0;
+        move_cursor_r: int = 0;
+        move_blocks: []Block = new Block[LEVEL_MAX_BLOCKS](empty);
+        move_rooms: []Room = new Room[LEVEL_MAX_ROOMS](empty_room);
+        move_goals: []Goal = new Goal[LEVEL_MAX_GOALS](empty_goal);
+        move_bricks: []Brick = new Brick[LEVEL_MAX_BRICKS](empty_brick);
+        move_ground: []GroundCell = new GroundCell[LEVEL_MAX_GROUND](empty_ground);
+        move_start: []int = new int[2](0);
+        move_counts: []int = new int[4](0);
         help1: []i8 = "";
         help2: []i8 = "";
         held_l: int = 0;
@@ -5097,42 +5208,183 @@ void main() {
                 match ev {
                     KeyPress -> {
                         ks: int = XLookupKeysym(&ev, 0);
-                        if (ks == 65505 || ks == 65506) {
+                        if (move_mode != 0) {
+                            changed: int = 0;
+                            if (ks == 65307) {
+                                copy_blocks(blocks, 0, move_blocks, 0, move_counts[0]);
+                                copy_rooms(rooms, move_rooms, nroom);
+                                copy_goals(goals, move_goals, move_counts[1]);
+                                copy_bricks(bricks, move_bricks, move_counts[2]);
+                                copy_ground(ground_cells, move_ground, move_counts[3]);
+                                n = move_counts[0];
+                                ngoal = move_counts[1];
+                                nbrick = move_counts[2];
+                                nground = move_counts[3];
+                                startp[0] = move_start[0];
+                                startp[1] = move_start[1];
+                                cc = move_cursor_c;
+                                cr = move_cursor_r;
+                                move_mode = 0;
+                                prep_cache[7] = 0;
+                                mask_cache[0] = 0 - 999999;
+                                need_mesh = 1;
+                            } else if (ks == 65293 || ks == 65421) {
+                                if (move_ok != 0) {
+                                    copy_blocks(blocks, 0, move_blocks, 0, move_counts[0]);
+                                    copy_rooms(rooms, move_rooms, nroom);
+                                    copy_goals(goals, move_goals, move_counts[1]);
+                                    copy_bricks(bricks, move_bricks, move_counts[2]);
+                                    copy_ground(ground_cells, move_ground, move_counts[3]);
+                                    n = move_counts[0];
+                                    ngoal = move_counts[1];
+                                    nbrick = move_counts[2];
+                                    nground = move_counts[3];
+                                    startp[0] = move_start[0];
+                                    startp[1] = move_start[1];
+                                    old_room: Room = move_rooms[move_sel];
+                                    new_room: Room = transform_room_rect(old_room, move_dc, move_dr,
+                                        move_rot);
+                                    clear_room_destination(blocks, n, goals, ngoal, bricks, nbrick,
+                                        ground_cells, nground, old_room, new_room, move_counts);
+                                    n = move_counts[0];
+                                    ngoal = move_counts[1];
+                                    nbrick = move_counts[2];
+                                    nground = move_counts[3];
+                                    transform_room_contents(blocks, n, goals, ngoal, bricks, nbrick,
+                                        ground_cells, nground, rooms, move_sel, move_dc, move_dr,
+                                        move_rot, startp, xy);
+                                    dirty_world = 1;
+                                    move_mode = 0;
+                                    prep_cache[7] = 0;
+                                    mask_cache[0] = 0 - 999999;
+                                    need_mesh = 1;
+                                    clear_sparks(sparks);
+                                }
+                            } else if (ks == 65361) {
+                                move_dc = move_dc - 1;
+                                cc = cc - 1;
+                                changed = 1;
+                            } else if (ks == 65363) {
+                                move_dc = move_dc + 1;
+                                cc = cc + 1;
+                                changed = 1;
+                            } else if (ks == 65362) {
+                                move_dr = move_dr - 1;
+                                cr = cr - 1;
+                                changed = 1;
+                            } else if (ks == 65364) {
+                                move_dr = move_dr + 1;
+                                cr = cr + 1;
+                                changed = 1;
+                            } else if (ks == 111 || ks == 79) {
+                                move_rot = (move_rot + 1) % 4;
+                                changed = 1;
+                            }
+                            if (changed != 0) {
+                                candidate: Room = transform_room_rect(move_rooms[move_sel], move_dc,
+                                    move_dr, move_rot);
+                                move_ok = 0;
+                                if (in_bounds(candidate.x0, candidate.y0) &&
+                                    in_bounds(candidate.x1, candidate.y1) &&
+                                    room_overlaps_other(move_rooms, nroom, move_sel, candidate) == 0) {
+                                    move_ok = 1;
+                                }
+                                preview_room_transform(move_blocks, move_counts[0], move_rooms,
+                                    nroom, move_goals, move_counts[1], move_bricks, move_counts[2],
+                                    move_ground, move_counts[3], move_start, blocks, rooms, goals,
+                                    bricks, ground_cells, startp, move_sel, move_dc, move_dr,
+                                    move_rot, xy);
+                                prep_cache[7] = 0;
+                                mask_cache[0] = 0 - 999999;
+                                need_mesh = 1;
+                            }
+                        } else if (name_mode != 0) {
+                            if (ks == 65307) {
+                                name_mode = 0;
+                                new_name = "";
+                                name_error = "";
+                            } else if (ks == 65288) {
+                                new_name = text_pop(new_name);
+                                name_error = "";
+                            } else if (ks == 65293 || ks == 65421) {
+                                want: Room = Room {
+                                    x0: cc,
+                                    y0: cr,
+                                    x1: cc + 11,
+                                    y1: cr + 8
+                                };
+                                if (nroom >= LEVEL_MAX_ROOMS) {
+                                    name_error = "world is full";
+                                } else if (valid_level_name(new_name) == 0) {
+                                    name_error = "use lowercase letters, numbers, and -";
+                                } else if (name_listed(pnames, nroom, new_name) != 0) {
+                                    name_error = "that level already exists";
+                                } else if (!in_bounds(want.x0, want.y0) ||
+                                    !in_bounds(want.x1, want.y1)) {
+                                    name_error = "that boundary is outside the world";
+                                } else if (room_overlaps_other(rooms, nroom, 0 - 1, want) != 0) {
+                                    name_error = "that boundary overlaps another level";
+                                } else {
+                                    pnames[nroom] = new_name;
+                                    solved[nroom] = 0;
+                                    nroom = add_room(rooms, titles, nroom, want.x0, want.y0,
+                                        want.x1, want.y1, new_name);
+                                    dirty_world = 1;
+                                    paint_anchor = 0;
+                                    name_mode = 0;
+                                    name_error = "";
+                                }
+                            } else {
+                                key_text[0] = 0i8;
+                                got: int = XLookupString(&ev, key_text, len(key_text), null, null);
+                                if (got > 0 && len(new_name) < 40) {
+                                    ch: i8 = key_text[0];
+                                    if (ch >= 'A' && ch <= 'Z') {
+                                        ch = ch + 32i8;
+                                    }
+                                    if ((ch >= 'a' && ch <= 'z') ||
+                                        (ch >= '0' && ch <= '9') || ch == '-') {
+                                        new_name = text_push(new_name, ch);
+                                        name_error = "";
+                                    }
+                                }
+                            }
+                        } else if (ks == 65505 || ks == 65506) {
                             shift = 1;
+                        } else if (ks == 102 || ks == 70) {
+                            ground_brush = (ground_brush + 1) % 3;
                         } else if (is_fps_key(ks) != 0) {
                             fps = toggle_fps(fps);
                         } else if (is_vsync_key(ks) != 0) {
                             vsync = set_vsync(dpy, win, 1 - vsync);
                         } else if (ks == 113 || ks == 81) {
                             running = 0;
-                        } else if (ks == 65307 || ((ks == 101 || ks == 69 || ks == 65289) && edit_view != 0 && is_world != 0)) {
-                            if (edit_view != 0 && is_world != 0) {
-                                copy_blocks(lblocks, 0, blocks, 0, n);
-                                ln = n;
-                                copy_rooms(lrooms, rooms, nroom);
-                                copy_titles(ltitles, titles, nroom);
-                                copy_goals(lgoals, goals, ngoal);
-                                copy_bricks(lbricks, bricks, nbrick);
-                                lnroom = nroom;
-                                lngoal = ngoal;
-                                lnbrick = nbrick;
-                                over_name = level_name;
-                                if (lnroom > 0 && len(level_name) > 0) {
-                                    ri: int = 0;
-                                    while (ri < nplace) {
-                                        if (titles_eq(pnames[ri], level_name)) {
-                                            xform_local(cc, cr, room_size_w(lrooms[0]),
-                                                room_size_h(lrooms[0]), places[ri].rot, xy);
-                                            cc = places[ri].x + xy[0];
-                                            cr = places[ri].y + xy[1];
-                                            ri = nplace;
-                                        } else {
-                                            ri = ri + 1;
-                                        }
-                                    }
+                        } else if (ks == 65307) {
+                            paint_anchor = 0;
+                        } else if (ks == 32) {
+                            if (shift != 0) {
+                                paint_anchor = 1;
+                                paint_c = cc;
+                                paint_r = cr;
+                            } else {
+                                c0: int = cc;
+                                r0: int = cr;
+                                if (paint_anchor != 0) {
+                                    c0 = paint_c;
+                                    r0 = paint_r;
                                 }
-                                need_world = 1;
-                                edit_view = 0;
+                                if (is_world != 0) {
+                                    nground = paint_ground_rect(ground_cells, nground, c0, r0, cc,
+                                        cr, ground_brush, 0);
+                                    dirty_world = 1;
+                                    mask_cache[0] = 0 - 999999;
+                                } else {
+                                    nground = paint_ground_rect(ground_cells, nground, c0, r0, cc,
+                                        cr, ground_brush, 0);
+                                    dirty_level = 1;
+                                    mask_cache[0] = 0 - 999999;
+                                }
+                                paint_anchor = 0;
                             }
                         } else if (ks == 65361 || ks == 65362 || ks == 65363 || ks == 65364) {
                             is_rep: int = 0;
@@ -5178,79 +5430,117 @@ void main() {
                                     step_dr = 1;
                                 }
                             }
-                        } else if (edit_view == 0) {
+                        } else if (is_world != 0) {
                             sel: int = room_at(rooms, nroom, cc, cr);
-                            if (ks == 114 || ks == 82) {
-                                if (sel >= 0 && sel < nplace) {
-                                    places[sel].rot = (places[sel].rot + 1) % 4;
-                                    dirty_world = 1;
-                                    need_world = 1;
+                            if (ks == 109 || ks == 77) {
+                                if (sel >= 0 && sel < nroom) {
+                                    copy_blocks(move_blocks, 0, blocks, 0, n);
+                                    copy_rooms(move_rooms, rooms, nroom);
+                                    copy_goals(move_goals, goals, ngoal);
+                                    copy_bricks(move_bricks, bricks, nbrick);
+                                    copy_ground(move_ground, ground_cells, nground);
+                                    move_counts[0] = n;
+                                    move_counts[1] = ngoal;
+                                    move_counts[2] = nbrick;
+                                    move_counts[3] = nground;
+                                    move_start[0] = startp[0];
+                                    move_start[1] = startp[1];
+                                    move_sel = sel;
+                                    move_cursor_c = cc;
+                                    move_cursor_r = cr;
+                                    move_dc = 0;
+                                    move_dr = 0;
+                                    move_rot = 0;
+                                    move_ok = 1;
+                                    move_mode = 1;
+                                    paint_anchor = 0;
                                 }
                             } else if (ks == 110 || ks == 78) {
-                                if (ncat > 0) {
-                                    if (ks == 78) {
-                                        hand = hand + ncat - 1;
-                                    } else {
-                                        hand = hand + 1;
-                                    }
-                                    hand = hand % ncat;
-                                }
-                            } else if (ks == 32) {
-                                if (ncat > 0 && nplace < LEVEL_MAX_PLACES) {
-                                    pnames[nplace] = catalog[hand];
-                                    places[nplace] = Placement {
-                                        x: cc,
-                                        y: cr,
-                                        rot: 0
-                                    };
-                                    nplace = nplace + 1;
+                                name_mode = 1;
+                                new_name = "";
+                                name_error = "";
+                            } else if (ks == 98 || ks == 66) {
+                                wl: int = free_layer_at(blocks, n, cc, cr, 0);
+                                wn2: int = add_block_at(blocks, n, cc, cr, wl, 0, 0);
+                                if (wn2 != n) {
+                                    n = wn2;
+                                    apply_gravity(blocks, n);
                                     dirty_world = 1;
-                                    need_world = 1;
                                 }
-                            } else if (ks == 120 || ks == 88) {
-                                if (sel >= 0 && sel < nplace) {
-                                    places[sel] = places[nplace - 1];
-                                    pnames[sel] = pnames[nplace - 1];
-                                    nplace = nplace - 1;
+                            } else if (ks == 114 || ks == 82) {
+                                wt: int = highest_layer_at(blocks, n, cc, cr);
+                                wi: int = 0 - 1;
+                                if (wt >= 0) {
+                                    wi = block_at_layer(blocks, n, cc, cr, wt);
+                                }
+                                if (wi >= 0 && blocks[wi].ramp != 0) {
+                                    n = toggle_ramp(blocks, n, cc, cr, wt);
+                                    apply_gravity(blocks, n);
                                     dirty_world = 1;
-                                    need_world = 1;
-                                }
-                            } else if (ks == 65293 || ks == 65421 || ks == 65289 || ks == 101 || ks == 69) {
-                                if (sel >= 0 && sel < nplace) {
-                                    level_name = pnames[sel];
-                                    level_path = join_level_path(path, level_name);
-                                    n2: int = load_any(level_path, blocks, rooms, titles,
-                                        nroom_slot, goals, ngoal_slot, bricks, nbrick_slot,
-                                        lvl_start);
-                                    if (n2 >= 0) {
-                                        n = n2;
-                                        nroom = nroom_slot[0];
-                                        ngoal = ngoal_slot[0];
-                                        nbrick = nbrick_slot[0];
-                                        if (nroom < 1) {
-                                            nroom = set_room_size(rooms, titles, 0, 12, 9);
-                                        }
-                                        if (nroom > 0) {
-                                            unxform_local(cc - places[sel].x, cr - places[sel].y,
-                                                room_size_w(rooms[0]), room_size_h(rooms[0]),
-                                                places[sel].rot, xy);
-                                            cc = xy[0];
-                                            cr = xy[1];
-                                        }
-                                        brick_n = upload_brick_mesh(ids[4], wall_verts, chamfer,
-                                            bricks, nbrick, brick_used);
+                                } else {
+                                    wl: int = free_layer_at(blocks, n, cc, cr, 0);
+                                    wn2: int = add_block_at(blocks, n, cc, cr, wl, 0, 1);
+                                    if (wn2 != n) {
+                                        n = wn2;
                                         apply_gravity(blocks, n);
-                                        si: int = 0;
-                                        mark: int = 0;
-                                        if (name_listed(dones, ndone, level_name) != 0) {
-                                            mark = 1;
-                                        }
-                                        while (si < nroom && si < len(solved)) {
-                                            solved[si] = mark;
-                                            si = si + 1;
-                                        }
-                                        clear_sparks(sparks);
-                                        edit_view = 1;
+                                        dirty_world = 1;
+                                    }
+                                }
+                            } else if (ks == 119 || ks == 87) {
+                                if (held_w == 0) {
+                                    held_w = 1;
+                                    nbrick = toggle_brick(bricks, nbrick, cc, cr);
+                                    dirty_world = 1;
+                                    need_mesh = 1;
+                                }
+                            } else if (ks == 99 || ks == 67) {
+                                if (sel >= 0) {
+                                    ngoal = toggle_goal(goals, ngoal, cc, cr);
+                                    dirty_world = 1;
+                                }
+                            } else if (ks == 51 || ks == 52 || ks == 53 || ks == 54 || ks == 55) {
+                                sh: int = ks - 48;
+                                if (ks == 55) {
+                                    sh = 15;
+                                }
+                                wl: int = free_layer_at(blocks, n, cc, cr, 0);
+                                wn2: int = add_block_at(blocks, n, cc, cr, wl, sh, 0);
+                                if (wn2 != n) {
+                                    n = wn2;
+                                    apply_gravity(blocks, n);
+                                    dirty_world = 1;
+                                }
+                            } else if (ks == 120 || ks == 88 || ks == 65288) {
+                                wn0: int = n;
+                                n = erase_top_at(blocks, n, cc, cr);
+                                if (wn0 == n && is_brick(bricks, nbrick, cc, cr)) {
+                                    nbrick = toggle_brick(bricks, nbrick, cc, cr);
+                                    need_mesh = 1;
+                                }
+                                dirty_world = 1;
+                            } else if (ks == 65535) {
+                                if (sel >= 0 && sel < nroom) {
+                                    solved[sel] = solved[nroom - 1];
+                                    nroom = delete_level_boundary(rooms, titles, pnames, nroom, sel);
+                                    dirty_world = 1;
+                                }
+                            } else if (ks == 91 || ks == 93 || ks == 59 || ks == 39) {
+                                if (sel >= 0 && sel < nroom) {
+                                    want: Room = rooms[sel];
+                                    if (ks == 91 && want.x1 > want.x0) {
+                                        want.x1 = want.x1 - 1;
+                                    } else if (ks == 93) {
+                                        want.x1 = want.x1 + 1;
+                                    } else if (ks == 59 && want.y1 > want.y0) {
+                                        want.y1 = want.y1 - 1;
+                                    } else if (ks == 39) {
+                                        want.y1 = want.y1 + 1;
+                                    }
+                                    if (in_bounds(want.x0, want.y0) &&
+                                        in_bounds(want.x1, want.y1) &&
+                                        room_overlaps_other(rooms, nroom, sel, want) == 0) {
+                                        rooms[sel] = want;
+                                        dirty_world = 1;
                                     }
                                 }
                             } else if (ks == 112 || ks == 80) {
@@ -5258,8 +5548,9 @@ void main() {
                                 startp[1] = cr;
                                 dirty_world = 1;
                             } else if (ks == 115 || ks == 83) {
-                                if (save_world(path, places, pnames, nplace, startp[0],
-                                    startp[1]) != 0) {
+                                if (save_world(path, pnames, rooms, titles, nroom, blocks, n,
+                                    goals, ngoal, bricks, nbrick, ground_cells, nground, dones,
+                                    ndone, startp[0], startp[1]) != 0) {
                                     write(2, "save failed\n", len("save failed\n"));
                                 } else {
                                     dirty_world = 0;
@@ -5318,13 +5609,8 @@ void main() {
                                 dirty_level = 1;
                             }
                         } else if (ks == 112 || ks == 80) {
-                            if (is_world != 0) {
-                                lvl_start[0] = cc;
-                                lvl_start[1] = cr;
-                            } else {
-                                startp[0] = cc;
-                                startp[1] = cr;
-                            }
+                            startp[0] = cc;
+                            startp[1] = cr;
                             dirty_level = 1;
                         } else if (ks == 99 || ks == 67) {
                             nroom = grow_room_to(rooms, titles, nroom, cc, cr);
@@ -5359,34 +5645,32 @@ void main() {
                             nroom = set_room_size(rooms, titles, nroom, rw, rh);
                             dirty_level = 1;
                         } else if (ks == 105 || ks == 73) {
-                            insert_col(blocks, n, rooms, nroom, goals, ngoal, bricks, nbrick, cc);
+                            insert_col(blocks, n, rooms, nroom, goals, ngoal, bricks, nbrick,
+                                ground_cells, nground, cc);
                             apply_gravity(blocks, n);
                             need_mesh = 1;
                             dirty_level = 1;
                         } else if (ks == 100 || ks == 68) {
                             delete_col(blocks, n, rooms, titles, nroom, goals, ngoal, bricks,
-                                nbrick, cc, counts);
+                                nbrick, ground_cells, nground, cc, counts);
                             n = counts[0];
                             nroom = counts[1];
                             ngoal = counts[2];
                             nbrick = counts[3];
+                            nground = counts[4];
+                            mask_cache[0] = 0 - 999999;
                             apply_gravity(blocks, n);
                             need_mesh = 1;
                             dirty_level = 1;
                         } else if (ks == 115 || ks == 83) {
-                            spc: int = startp[0];
-                            spr: int = startp[1];
-                            if (is_world != 0) {
-                                spc = lvl_start[0];
-                                spr = lvl_start[1];
-                            }
-                            if (save_level(level_path, blocks, n, rooms, titles, nroom, goals,
-                                ngoal, bricks, nbrick, spc, spr) != 0) {
+                            if (save_level(path, blocks, n, rooms, titles, nroom, goals,
+                                ngoal, bricks, nbrick, ground_cells, nground, startp[0],
+                                startp[1]) != 0) {
                                 write(2, "save failed\n", len("save failed\n"));
                             } else {
                                 dirty_level = 0;
                                 write(2, "saved ", len("saved "));
-                                write(2, level_path, len(level_path));
+                                write(2, path, len(path));
                                 write(2, "\n", 1);
                             }
                         }
@@ -5440,44 +5724,14 @@ void main() {
                 }
             }
             if (need_step != 0) {
-                selm: int = room_at(rooms, nroom, cc, cr);
-                if (edit_view == 0 && shift != 0 && selm >= 0 && selm < nplace) {
-                    rm: Room = rooms[selm];
-                    shift_room_contents(blocks, n, goals, ngoal, bricks, nbrick, rm.x0, rm.y0,
-                        rm.x1, rm.y1, step_dc, step_dr);
-                    rm.x0 = rm.x0 + step_dc;
-                    rm.y0 = rm.y0 + step_dr;
-                    rm.x1 = rm.x1 + step_dc;
-                    rm.y1 = rm.y1 + step_dr;
-                    rooms[selm] = rm;
-                    places[selm].x = places[selm].x + step_dc;
-                    places[selm].y = places[selm].y + step_dr;
-                    cc = cc + step_dc;
-                    cr = cr + step_dr;
-                    dirty_world = 1;
-                    need_mesh = 1;
-                } else {
-                    tc: int = cc + step_dc;
-                    tr: int = cr + step_dr;
-                    if (in_bounds(tc, tr)) {
-                        cc = tc;
-                        cr = tr;
-                    }
+                tc: int = cc + step_dc;
+                tr: int = cr + step_dr;
+                if (in_bounds(tc, tr)) {
+                    cc = tc;
+                    cr = tr;
                 }
             }
-            if (need_world != 0 && edit_view == 0) {
-                n = compose_world(path, places, pnames, nplace, over_name, lblocks, ln, lrooms,
-                    ltitles, lnroom, lgoals, lngoal, lbricks, lnbrick, blocks, rooms, titles, goals,
-                    bricks, cout);
-                nroom = cout[1];
-                ngoal = cout[2];
-                nbrick = cout[3];
-                brick_n = upload_brick_mesh(ids[4], wall_verts, chamfer, bricks, nbrick, brick_used);
-                apply_solved(pnames, nplace, dones, ndone, solved, nroom);
-                clear_sparks(sparks);
-                need_world = 0;
-                need_mesh = 0;
-            } else if (need_mesh != 0) {
+            if (need_mesh != 0) {
                 brick_n = upload_brick_mesh(ids[4], wall_verts, chamfer, bricks, nbrick, brick_used);
                 need_mesh = 0;
             }
@@ -5498,10 +5752,6 @@ void main() {
                 mat_mul(lvp, lbias, lcam, mtmp);
                 sc: int = startp[0];
                 sr: int = startp[1];
-                if (edit_view != 0 && is_world != 0) {
-                    sc = lvl_start[0];
-                    sr = lvl_start[1];
-                }
                 st_top: int = highest_layer_at(blocks, n, sc, sr);
                 st_y: f32 = 0.55;
                 if (st_top >= 0) {
@@ -5515,26 +5765,34 @@ void main() {
                 draw_frame(prog, dprog, u_vp, u_origin, u_scale, u_color, u_light,
                     u_light_vp, u_lag, d_vp, d_origin, d_scale, d_color, d_lag, ids[0],
                     ids[1], ids[2], ids[3], chamfer_n, ids[4], brick_n, fbos[0], stex[0],
-                    ctex[0], cmask, rooms, nroom, goals, ngoal, focus_x, focus_z, u_mask_origin,
+                    ctex[0], cmask, ground_cells, nground, rooms, nroom, goals, ngoal, focus_x,
+                    focus_z, u_mask_origin,
                     vp, lcam, lvp, lx, ly, lz, blocks, 0, 0, n, sc as f32, st_y, sr as f32,
-                    0.0, shape_verts, lagx, lagz, 1, cc, cr, cl, 1, 0, 0, 0, u_ramp, u_ground,
+                    0.0, shape_verts, lagx, lagz, 1, cc, cr, cl, 1, ground_brush, move_mode,
+                    move_sel, move_ok, paint_c, paint_r, paint_anchor, u_ramp, u_ground,
                     u_cut, u_brick, d_ramp, 0.0, 0.0, present_us, mask_cache, lean_to,
                     lean_from, id_to, id_from, cell_head, cell_link, prep_cache, sparks,
                     bprog, b_u, bbuf[0], bdprog, bd_u, grass_prog, grass_u, grass_ids[0],
                     grass_ids[1], grass_blade_n);
-                if (edit_view == 0) {
-                    help1 = "walk onto a level, then press e";
-                    help2 = "e edit  shift+arrows move  r rotate  n stamp  p start  x delete  s save  q quit";
-                    on_sel: int = room_at(rooms, nroom, cc, cr);
-                    if (on_sel >= 0 && on_sel < nroom) {
-                        help1 = "press e to edit this level";
-                    }
+                if (is_world != 0) {
+                    help1 = "b block  r ramp  w brick  c goal  3-7 shape  x erase  f floor";
+                    help2 = "space paint  shift+space rect  m move level  del boundary  n new  p start  s save";
                 } else {
-                    help1 = "arrows move  b block  r ramp  w brick  c goal  p start  3-7 topping  x erase";
-                    help2 = "[ ] width  ; ' height  i/d column  s save level  q quit";
+                    help1 = "arrows  b block  r ramp  w brick  c goal  f floor  space paint";
+                    help2 = "shift+space rect  p start  3-7 shape  x erase  [ ] ; ' size  i/d column  s save";
                     if (is_world != 0) {
                         help1 = "press e to return to the layout";
-                        help2 = "e layout  b/r/w/c/p pieces  [ ] size  s save this level  q quit";
+                        help2 = "e layout  b/r/w/c/p pieces  f floor  space paint  s save  q quit";
+                    }
+                }
+                if (name_mode != 0) {
+                    help1 = "new level: type a lowercase name, Enter creates it, Escape cancels";
+                    help2 = name_error;
+                } else if (move_mode != 0) {
+                    help1 = "moving level: arrows move  o rotates  Enter confirms  Escape cancels";
+                    help2 = "clear to place";
+                    if (move_ok == 0) {
+                        help2 = "blocked: level boundaries cannot overlap";
                     }
                 }
                 glDisable(2929);
@@ -5544,18 +5802,31 @@ void main() {
                     648.0, help1);
                 draw_help(font, tprog, u_tscreen, u_tcolor, u_talpha, ftex[0], tbuf[0], tverts,
                     680.0, help2);
-                if (edit_view == 0) {
+                if (is_world != 0) {
                     on2: int = room_at(rooms, nroom, cc, cr);
                     if (on2 >= 0 && on2 < nroom && len(titles[on2]) > 0) {
                         draw_help(font, tprog, u_tscreen, u_tcolor, u_talpha, ftex[0], tbuf[0],
                             tverts, 20.0, titles[on2]);
-                    } else if (ncat > 0) {
-                        draw_help(font, tprog, u_tscreen, u_tcolor, u_talpha, ftex[0], tbuf[0],
-                            tverts, 20.0, catalog[hand]);
                     }
-                } else if (len(level_name) > 0) {
+                } else if (nroom > 0 && len(titles[0]) > 0) {
                     draw_help(font, tprog, u_tscreen, u_tcolor, u_talpha, ftex[0], tbuf[0], tverts,
-                        20.0, level_name);
+                        20.0, titles[0]);
+                }
+                if (edit_mode != 0 && name_mode == 0 && move_mode == 0) {
+                    brush_label: []i8 = "floor: dirt";
+                    if (ground_brush == GROUND_GRASS) {
+                        brush_label = "floor: grass";
+                    } else if (ground_brush == GROUND_STONE) {
+                        brush_label = "floor: flagstone";
+                    }
+                    draw_help(font, tprog, u_tscreen, u_tcolor, u_talpha, ftex[0], tbuf[0], tverts,
+                        52.0, brush_label);
+                }
+                if (name_mode != 0) {
+                    draw_help(font, tprog, u_tscreen, u_tcolor, u_talpha, ftex[0], tbuf[0], tverts,
+                        320.0, "name:");
+                    draw_help(font, tprog, u_tscreen, u_tcolor, u_talpha, ftex[0], tbuf[0], tverts,
+                        352.0, new_name);
                 }
                 fps = tick_fps(fps, fps_t, fps_work, fps_rate, fps_mem, present_us[0]);
                 fps = draw_fps(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex[0], tbuf[0], tverts,
@@ -5859,9 +6130,11 @@ void main() {
                 draw_frame(prog, dprog, u_vp, u_origin, u_scale, u_color, u_light,
                     u_light_vp, u_lag, d_vp, d_origin, d_scale, d_color, d_lag, ids[0],
                     ids[1], ids[2], ids[3], chamfer_n, ids[4], brick_n, fbos[0], stex[0],
-                    ctex[0], cmask, rooms, nroom, goals, ngoal, focus_x, focus_z, u_mask_origin,
+                    ctex[0], cmask, ground_cells, nground, rooms, nroom, goals, ngoal, focus_x,
+                    focus_z, u_mask_origin,
                     vp, lcam, lvp, lx, ly, lz, hist, foff, toff, n, px, py, pz, t,
-                    shape_verts, lagx, lagz, 1, 0, 0, 0, 0, 0, 0, 0, u_ramp, u_ground,
+                    shape_verts, lagx, lagz, 1, 0, 0, 0, 0, GROUND_DIRT, 0, 0, 1, 0, 0, 0,
+                    u_ramp, u_ground,
                     u_cut, u_brick, d_ramp, pru_x, pru_z, present_us, mask_cache, lean_to,
                     lean_from, id_to, id_from, cell_head, cell_link, prep_cache, sparks,
                     bprog, b_u, bbuf[0], bdprog, bd_u, grass_prog, grass_u, grass_ids[0],

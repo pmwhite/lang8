@@ -4,8 +4,12 @@
 //   size <w> <h>              room is (0,0)..(w-1,h-1)
 //   g / w / p / b / s / r     as below
 // World file:
+//   world
 //   p <column> <row>
-//   place <name> <x> <y> <rot>   rot 0..3 quarter-turns CW; AABB min at x,y
+//   level <name> <x0> <y0> <x1> <y1> <title>
+//   g / b / s / r / w / f         world-space contents
+// Legacy world:
+//   place <name> <x> <y> <rot>   composed once, then flattened on save
 // Legacy numeric: room / c-column migrate. Grid: `= Title` maps.
 extern open(path: [z]i8, flags: int, mode: int): int;
 
@@ -29,6 +33,8 @@ LEVEL_MAX_GOALS: int = 64;
 
 LEVEL_MAX_BRICKS: int = 2048;
 
+LEVEL_MAX_GROUND: int = 8192;
+
 LEVEL_MAX_PLACES: int = 64;
 
 LEVEL_SOFT_CAP: int = 4096;
@@ -46,6 +52,12 @@ LEVEL_DEFAULT_PATH: []i8 = "programs/gl/world.txt";
 LEVEL_MAP_PATH: []i8 = "programs/gl/puzzles.map";
 
 LEVEL_MAX_LAYER: int = 8;
+
+GROUND_DIRT: int = 0;
+
+GROUND_GRASS: int = 1;
+
+GROUND_STONE: int = 2;
 
 type Block = {
     id: int;
@@ -74,6 +86,12 @@ type Brick = {
     row: int;
 };
 
+type GroundCell = {
+    column: int;
+    row: int;
+    style: int;
+};
+
 type Placement = {
     x: int;
     y: int;
@@ -87,6 +105,8 @@ shift_room_contents(
     ngoal: int,
     bricks: []Brick,
     nbrick: int,
+    ground: []GroundCell,
+    nground: int,
     x0: int,
     y0: int,
     x1: int,
@@ -121,6 +141,16 @@ shift_room_contents(
             w.column = w.column + dc;
             w.row = w.row + dr;
             bricks[i] = w;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < nground) {
+        f: GroundCell = ground[i];
+        if (f.column >= x0 && f.column <= x1 && f.row >= y0 && f.row <= y1) {
+            f.column = f.column + dc;
+            f.row = f.row + dr;
+            ground[i] = f;
         }
         i = i + 1;
     }
@@ -273,6 +303,117 @@ is_goal(goals: []Goal, ngoal: int, column: int, row: int): bool {
     false;
 }
 
+ground_style_at(ground: []GroundCell, nground: int, column: int, row: int): int {
+    i: int = 0;
+    while (i < nground) {
+        f: GroundCell = ground[i];
+        if (f.column == column && f.row == row) {
+            return f.style;
+        }
+        i = i + 1;
+    }
+    GROUND_DIRT;
+}
+
+set_ground_style(
+    ground: []GroundCell,
+    nground: int,
+    column: int,
+    row: int,
+    style: int
+): int {
+    i: int = 0;
+    while (i < nground) {
+        f: GroundCell = ground[i];
+        if (f.column == column && f.row == row) {
+            if (style == GROUND_DIRT) {
+                ground[i] = ground[nground - 1];
+                return nground - 1;
+            }
+            f.style = style;
+            ground[i] = f;
+            return nground;
+        }
+        i = i + 1;
+    }
+    if (style == GROUND_DIRT || nground >= LEVEL_MAX_GROUND || !in_bounds(column, row)) {
+        return nground;
+    }
+    ground[nground] = GroundCell {
+        column: column,
+        row: row,
+        style: style
+    };
+    nground + 1;
+}
+
+set_world_ground_style(
+    ground: []GroundCell,
+    nground: int,
+    column: int,
+    row: int,
+    style: int
+): int {
+    i: int = 0;
+    while (i < nground) {
+        f: GroundCell = ground[i];
+        if (f.column == column && f.row == row) {
+            f.style = style;
+            ground[i] = f;
+            return nground;
+        }
+        i = i + 1;
+    }
+    if (nground >= LEVEL_MAX_GROUND || !in_bounds(column, row)) {
+        return nground;
+    }
+    ground[nground] = GroundCell {
+        column: column,
+        row: row,
+        style: style
+    };
+    nground + 1;
+}
+
+paint_ground_rect(
+    ground: []GroundCell,
+    nground: int,
+    c0: int,
+    r0: int,
+    c1: int,
+    r1: int,
+    style: int,
+    explicit_dirt: int
+): int {
+    if (c1 < c0) {
+        t: int = c0;
+        c0 = c1;
+        c1 = t;
+    }
+    if (r1 < r0) {
+        t: int = r0;
+        r0 = r1;
+        r1 = t;
+    }
+    if ((c1 - c0 + 1) * (r1 - r0 + 1) > LEVEL_MAX_GROUND) {
+        return nground;
+    }
+    r: int = r0;
+    while (r <= r1) {
+        c: int = c0;
+        while (c <= c1) {
+            if (explicit_dirt != 0) {
+                nground = set_world_ground_style(ground, nground, c, r, style);
+            } else {
+                nground = set_ground_style(ground, nground, c, r, style);
+            }
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    nground;
+}
+
 find_room_rect(rooms: []Room, nroom: int, want: Room): int {
     i: int = 0;
     while (i < nroom) {
@@ -291,6 +432,22 @@ delete_room_at(rooms: []Room, titles: [][]i8, nroom: int, i: int): int {
     }
     rooms[i] = rooms[nroom - 1];
     titles[i] = titles[nroom - 1];
+    nroom - 1;
+}
+
+delete_level_boundary(
+    rooms: []Room,
+    titles: [][]i8,
+    names: [][]i8,
+    nroom: int,
+    i: int
+): int {
+    if (i < 0 || i >= nroom) {
+        return nroom;
+    }
+    rooms[i] = rooms[nroom - 1];
+    titles[i] = titles[nroom - 1];
+    names[i] = names[nroom - 1];
     nroom - 1;
 }
 
@@ -820,6 +977,16 @@ shift_bricks_insert(bricks: []Brick, nbrick: int, col: int) {
     }
 }
 
+shift_ground_insert(ground: []GroundCell, nground: int, col: int) {
+    i: int = 0;
+    while (i < nground) {
+        if (ground[i].column >= col) {
+            ground[i].column = ground[i].column + 1;
+        }
+        i = i + 1;
+    }
+}
+
 insert_col(
     blocks: []Block,
     n: int,
@@ -829,6 +996,8 @@ insert_col(
     ngoal: int,
     bricks: []Brick,
     nbrick: int,
+    ground: []GroundCell,
+    nground: int,
     col: int
 ) {
     i: int = 0;
@@ -841,6 +1010,7 @@ insert_col(
     shift_rooms_insert(rooms, nroom, col);
     shift_goals_insert(goals, ngoal, col);
     shift_bricks_insert(bricks, nbrick, col);
+    shift_ground_insert(ground, nground, col);
 }
 
 delete_col(
@@ -853,6 +1023,8 @@ delete_col(
     ngoal: int,
     bricks: []Brick,
     nbrick: int,
+    ground: []GroundCell,
+    nground: int,
     col: int,
     out_n: []int
 ) {
@@ -901,10 +1073,21 @@ delete_col(
         }
         i = i - 1;
     }
+    i = nground - 1;
+    while (i >= 0) {
+        if (ground[i].column == col) {
+            ground[i] = ground[nground - 1];
+            nground = nground - 1;
+        } else if (ground[i].column > col) {
+            ground[i].column = ground[i].column - 1;
+        }
+        i = i - 1;
+    }
     out_n[0] = n;
     out_n[1] = nroom;
     out_n[2] = ngoal;
     out_n[3] = nbrick;
+    out_n[4] = nground;
 }
 
 skip_spaces(src: []i8, i: int): int {
@@ -1117,21 +1300,58 @@ join_level_path(world: []i8, name: []i8): []i8@new {
     out;
 }
 
-join_index_path(world: []i8): []i8@new {
-    parent: []i8 = parent_dir(world);
-    n: int = len(parent) + 14;
-    out: []i8 = new i8[n](0i8);
-    i: int = put_str(out, 0, parent);
-    i = put_str(out, i, "/levels/index");
-    out;
-}
-
 room_size_w(r: Room): int {
     r.x1 - r.x0 + 1;
 }
 
 room_size_h(r: Room): int {
     r.y1 - r.y0 + 1;
+}
+
+rooms_overlap(a: Room, b: Room): bool {
+    !(a.x1 < b.x0 || b.x1 < a.x0 || a.y1 < b.y0 || b.y1 < a.y0);
+}
+
+room_overlaps_other(rooms: []Room, nroom: int, skip: int, want: Room): int {
+    i: int = 0;
+    while (i < nroom) {
+        if (i != skip && rooms_overlap(rooms[i], want)) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    0;
+}
+
+separate_legacy_rooms(rooms: []Room, nroom: int): int {
+    i: int = 0;
+    while (i < nroom) {
+        r: Room = rooms[i];
+        j: int = 0;
+        while (j < i) {
+            o: Room = rooms[j];
+            if (rooms_overlap(r, o)) {
+                if (r.x0 >= o.x0 && r.x0 <= o.x1 && r.x1 > o.x1) {
+                    r.x0 = o.x1 + 1;
+                } else if (r.y0 >= o.y0 && r.y0 <= o.y1 && r.y1 > o.y1) {
+                    r.y0 = o.y1 + 1;
+                } else if (r.x1 >= o.x0 && r.x1 <= o.x1 && r.x0 < o.x0) {
+                    r.x1 = o.x0 - 1;
+                } else if (r.y1 >= o.y0 && r.y1 <= o.y1 && r.y0 < o.y0) {
+                    r.y1 = o.y0 - 1;
+                } else {
+                    return 0 - 1;
+                }
+            }
+            j = j + 1;
+        }
+        if (r.x0 > r.x1 || r.y0 > r.y1) {
+            return 0 - 1;
+        }
+        rooms[i] = r;
+        i = i + 1;
+    }
+    0;
 }
 
 place_aabb_w(w: int, h: int, rot: int): int {
@@ -1200,6 +1420,142 @@ xform_ramp(dir: int, rot: int): int {
         k = k + 1;
     }
     d;
+}
+
+transform_room_rect(src: Room, dc: int, dr: int, rot: int): Room {
+    w: int = room_size_w(src);
+    h: int = room_size_h(src);
+    Room {
+        x0: src.x0 + dc,
+        y0: src.y0 + dr,
+        x1: src.x0 + dc + place_aabb_w(w, h, rot) - 1,
+        y1: src.y0 + dr + place_aabb_h(w, h, rot) - 1
+    };
+}
+
+transform_room_contents(
+    blocks: []Block,
+    n: int,
+    goals: []Goal,
+    ngoal: int,
+    bricks: []Brick,
+    nbrick: int,
+    ground: []GroundCell,
+    nground: int,
+    rooms: []Room,
+    sel: int,
+    dc: int,
+    dr: int,
+    rot: int,
+    start: []int,
+    xy: []int
+) {
+    src: Room = rooms[sel];
+    w: int = room_size_w(src);
+    h: int = room_size_h(src);
+    dst: Room = transform_room_rect(src, dc, dr, rot);
+    i: int = 0;
+    while (i < n) {
+        b: Block = blocks[i];
+        if (room_contains(src, b.column, b.row)) {
+            xform_local(b.column - src.x0, b.row - src.y0, w, h, rot, xy);
+            b.column = dst.x0 + xy[0];
+            b.row = dst.y0 + xy[1];
+            if (b.ramp != 0) {
+                b.ramp = xform_ramp(b.ramp, rot);
+            }
+            blocks[i] = b;
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < ngoal) {
+        if (room_contains(src, goals[i].column, goals[i].row)) {
+            xform_local(goals[i].column - src.x0, goals[i].row - src.y0, w, h, rot, xy);
+            goals[i].column = dst.x0 + xy[0];
+            goals[i].row = dst.y0 + xy[1];
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < nbrick) {
+        if (room_contains(src, bricks[i].column, bricks[i].row)) {
+            xform_local(bricks[i].column - src.x0, bricks[i].row - src.y0, w, h, rot, xy);
+            bricks[i].column = dst.x0 + xy[0];
+            bricks[i].row = dst.y0 + xy[1];
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < nground) {
+        if (room_contains(src, ground[i].column, ground[i].row)) {
+            xform_local(ground[i].column - src.x0, ground[i].row - src.y0, w, h, rot, xy);
+            ground[i].column = dst.x0 + xy[0];
+            ground[i].row = dst.y0 + xy[1];
+        }
+        i = i + 1;
+    }
+    if (room_contains(src, start[0], start[1])) {
+        xform_local(start[0] - src.x0, start[1] - src.y0, w, h, rot, xy);
+        start[0] = dst.x0 + xy[0];
+        start[1] = dst.y0 + xy[1];
+    }
+    rooms[sel] = dst;
+}
+
+clear_room_destination(
+    blocks: []Block,
+    n: int,
+    goals: []Goal,
+    ngoal: int,
+    bricks: []Brick,
+    nbrick: int,
+    ground: []GroundCell,
+    nground: int,
+    src: Room,
+    dst: Room,
+    out: []int
+) {
+    i: int = n - 1;
+    while (i >= 0) {
+        if (room_contains(dst, blocks[i].column, blocks[i].row) &&
+            !room_contains(src, blocks[i].column, blocks[i].row)) {
+            blocks[i] = blocks[n - 1];
+            n = n - 1;
+        }
+        i = i - 1;
+    }
+    i = ngoal - 1;
+    while (i >= 0) {
+        if (room_contains(dst, goals[i].column, goals[i].row) &&
+            !room_contains(src, goals[i].column, goals[i].row)) {
+            goals[i] = goals[ngoal - 1];
+            ngoal = ngoal - 1;
+        }
+        i = i - 1;
+    }
+    i = nbrick - 1;
+    while (i >= 0) {
+        if (room_contains(dst, bricks[i].column, bricks[i].row) &&
+            !room_contains(src, bricks[i].column, bricks[i].row)) {
+            bricks[i] = bricks[nbrick - 1];
+            nbrick = nbrick - 1;
+        }
+        i = i - 1;
+    }
+    i = nground - 1;
+    while (i >= 0) {
+        if (room_contains(dst, ground[i].column, ground[i].row) &&
+            !room_contains(src, ground[i].column, ground[i].row)) {
+            ground[i] = ground[nground - 1];
+            nground = nground - 1;
+        }
+        i = i - 1;
+    }
+    out[0] = n;
+    out[1] = ngoal;
+    out[2] = nbrick;
+    out[3] = nground;
 }
 
 place_hit(
@@ -1280,6 +1636,8 @@ parse_level_src(
     ngoal: []int,
     bricks: []Brick,
     nbrick: []int,
+    ground: []GroundCell,
+    nground: []int,
     start: []int
 ): int {
     n: int = len(src);
@@ -1287,6 +1645,7 @@ parse_level_src(
     nr: int = 0;
     ng: int = 0;
     nw: int = 0;
+    nf: int = 0;
     nc: int = 0;
     old_c: []int = new int[64](0);
     old_t: [][]i8 = new []i8[64](new i8[0](0i8));
@@ -1354,6 +1713,31 @@ parse_level_src(
                     old_t[nc] = take_title(src, i);
                     nc = nc + 1;
                 }
+            } else if (cmd == 'f') {
+                i = parse_int(src, i, val);
+                colf: int = val[0];
+                okf: int = val[1];
+                i = parse_int(src, i, val);
+                rowf: int = val[0];
+                if (okf == 0 || val[1] == 0 || !in_bounds(colf, rowf)) {
+                    return 0 - 1;
+                }
+                i = skip_spaces(src, i);
+                style: int = 0 - 1;
+                if (word_at(src, i, "dirt")) {
+                    style = GROUND_DIRT;
+                    i = i + 4;
+                } else if (word_at(src, i, "grass")) {
+                    style = GROUND_GRASS;
+                    i = i + 5;
+                } else if (word_at(src, i, "stone")) {
+                    style = GROUND_STONE;
+                    i = i + 5;
+                }
+                if (style < 0) {
+                    return 0 - 1;
+                }
+                nf = set_ground_style(ground, nf, colf, rowf, style);
             } else if (cmd == 'g' || cmd == 'w' || cmd == 'p') {
                 i = parse_int(src, i, val);
                 colg: int = val[0];
@@ -1432,6 +1816,7 @@ parse_level_src(
     nroom[0] = nr;
     ngoal[0] = ng;
     nbrick[0] = nw;
+    nground[0] = nf;
     if (nr == 0 && nc > 0) {
         migrate_old_checks(old_c, old_t, nc, rooms, titles, nroom, goals, ngoal);
     } else if (nr == 0 && have_size != 0) {
@@ -1452,6 +1837,8 @@ load_level(
     ngoal: []int,
     bricks: []Brick,
     nbrick: []int,
+    ground: []GroundCell,
+    nground: []int,
     start: []int
 ): int {
     src: []i8 = slurp_path(path);
@@ -1462,7 +1849,8 @@ load_level(
         }
         close(fd);
     }
-    parse_level_src(src, blocks, rooms, titles, nroom, goals, ngoal, bricks, nbrick, start);
+    parse_level_src(src, blocks, rooms, titles, nroom, goals, ngoal, bricks, nbrick, ground,
+        nground, start);
 }
 
 save_level(
@@ -1476,10 +1864,12 @@ save_level(
     ngoal: int,
     bricks: []Brick,
     nbrick: int,
+    ground: []GroundCell,
+    nground: int,
     pc: int,
     pr: int
 ): int {
-    cap: int = 65536;
+    cap: int = 524288;
     dst: []i8 = new i8[cap](0i8);
     i: int = 0;
     i = put_str(dst, i, "# L8 block-game level\n");
@@ -1487,6 +1877,7 @@ save_level(
     i = put_str(dst, i, "# size <w> <h>\n");
     i = put_str(dst, i, "# g <column> <row>\n");
     i = put_str(dst, i, "# w <column> <row>\n");
+    i = put_str(dst, i, "# f <column> <row> <grass|stone>\n");
     i = put_str(dst, i, "# p <column> <row>\n");
     i = put_str(dst, i, """
 # b <column> <row> [layer]
@@ -1532,6 +1923,23 @@ save_level(
         i = put_int(dst, i, bricks[k].column - ox);
         i = put_ch(dst, i, ' ');
         i = put_int(dst, i, bricks[k].row - oy);
+        i = put_ch(dst, i, '\n');
+        k = k + 1;
+    }
+    k = 0;
+    while (k < nground) {
+        f: GroundCell = ground[k];
+        i = put_ch(dst, i, 'f');
+        i = put_ch(dst, i, ' ');
+        i = put_int(dst, i, f.column - ox);
+        i = put_ch(dst, i, ' ');
+        i = put_int(dst, i, f.row - oy);
+        i = put_ch(dst, i, ' ');
+        if (f.style == GROUND_GRASS) {
+            i = put_str(dst, i, "grass");
+        } else {
+            i = put_str(dst, i, "stone");
+        }
         i = put_ch(dst, i, '\n');
         k = k + 1;
     }
@@ -1622,6 +2030,22 @@ copy_blocks(
     i: int = 0;
     while (i < n) {
         dst[doff + i] = src[soff + i];
+        i = i + 1;
+    }
+}
+
+copy_ground(dst: []GroundCell, src: []GroundCell, n: int) {
+    i: int = 0;
+    while (i < n) {
+        dst[i] = src[i];
+        i = i + 1;
+    }
+}
+
+copy_brick_cells(dst: []Brick, src: []Brick, n: int) {
+    i: int = 0;
+    while (i < n) {
+        dst[i] = src[i];
         i = i + 1;
     }
 }
@@ -2306,7 +2730,8 @@ looks_like_world(src: []i8): bool {
             i = i + 1;
         } else if (src[i] == '#') {
             i = skip_line(src, i);
-        } else if (word_at(src, i, "place")) {
+        } else if (word_at(src, i, "world") || word_at(src, i, "place") ||
+            word_at(src, i, "level")) {
             return true;
         } else if (src[i] == '=') {
             return false;
@@ -2317,30 +2742,18 @@ looks_like_world(src: []i8): bool {
     false;
 }
 
-load_index(world: []i8, names: [][]i8@new, nname: []int): int {
-    path: []i8 = join_index_path(world);
-    src: []i8 = slurp_path(path);
-    n: int = 0;
+world_has_places(src: []i8): int {
     i: int = 0;
     while (i < len(src)) {
         i = skip_spaces(src, i);
-        if (i >= len(src)) {
-            i = len(src);
-        } else if (src[i] == '\n' || src[i] == '\r') {
-            i = i + 1;
-        } else if (src[i] == '#') {
-            i = skip_line(src, i);
-        } else {
-            w: []i8 = take_word(src, i);
-            if (len(w) > 0 && n < len(names)) {
-                names[n] = w;
-                n = n + 1;
+        if (i < len(src) && src[i] != '#') {
+            if (word_at(src, i, "place")) {
+                return 1;
             }
-            i = skip_line(src, i);
         }
+        i = skip_line(src, i);
     }
-    nname[0] = n;
-    n;
+    0;
 }
 
 name_listed(names: [][]i8, n: int, s: []i8): int {
@@ -2352,6 +2765,21 @@ name_listed(names: [][]i8, n: int, s: []i8): int {
         i = i + 1;
     }
     0;
+}
+
+valid_level_name(name: []i8): int {
+    if (len(name) < 1 || len(name) > 40) {
+        return 0;
+    }
+    i: int = 0;
+    while (i < len(name)) {
+        c: i8 = name[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    1;
 }
 
 apply_solved(
@@ -2377,18 +2805,39 @@ load_world(
     places: []Placement,
     names: [][]i8@new,
     nplace: []int,
+    rooms: []Room,
+    titles: [][]i8,
+    nroom: []int,
+    goals: []Goal,
+    ngoal: []int,
     start: []int,
     dones: [][]i8@new,
-    ndone: []int
+    ndone: []int,
+    blocks: []Block,
+    nblock: []int,
+    bricks: []Brick,
+    nbrick: []int,
+    ground: []GroundCell,
+    nground: []int
 ): int {
     src: []i8 = slurp_path(path);
     n: int = 0;
     nd: int = 0;
+    nb: int = 0;
+    nw: int = 0;
+    nf: int = 0;
+    nr: int = 0;
+    ng: int = 0;
     i: int = 0;
     val: []int = new int[2](0);
     start[0] = 0;
     start[1] = 0;
     ndone[0] = 0;
+    nroom[0] = 0;
+    ngoal[0] = 0;
+    nblock[0] = 0;
+    nbrick[0] = 0;
+    nground[0] = 0;
     while (i < len(src)) {
         i = skip_spaces(src, i);
         if (i >= len(src)) {
@@ -2396,6 +2845,35 @@ load_world(
         } else if (src[i] == '\n' || src[i] == '\r') {
             i = i + 1;
         } else if (src[i] == '#') {
+            i = skip_line(src, i);
+        } else if (word_at(src, i, "world")) {
+            i = skip_line(src, i);
+        } else if (word_at(src, i, "level")) {
+            i = i + 5;
+            slug: []i8 = take_word(src, i);
+            i = skip_word(src, i);
+            i = parse_int(src, i, val);
+            x0: int = val[0];
+            ok0: int = val[1];
+            i = parse_int(src, i, val);
+            y0: int = val[0];
+            ok1: int = val[1];
+            i = parse_int(src, i, val);
+            x1: int = val[0];
+            ok2: int = val[1];
+            i = parse_int(src, i, val);
+            y1: int = val[0];
+            want: Room = norm_room(x0, y0, x1, y1);
+            if (ok0 == 0 || ok1 == 0 || ok2 == 0 || val[1] == 0 || len(slug) == 0 ||
+                !in_bounds(x0, y0) || !in_bounds(x1, y1) ||
+                name_listed(names, nr, slug) != 0 || room_overlaps_other(rooms, nr, 0 - 1, want) != 0) {
+                return 0 - 1;
+            }
+            if (nr < LEVEL_MAX_ROOMS) {
+                names[nr] = slug;
+                nr = add_room(rooms, titles, nr, want.x0, want.y0, want.x1, want.y1,
+                    take_title(src, i));
+            }
             i = skip_line(src, i);
         } else if (word_at(src, i, "place")) {
             i = i + 5;
@@ -2445,28 +2923,151 @@ load_world(
             start[0] = col;
             start[1] = val[0];
             i = skip_line(src, i);
+        } else if (src[i] == 'g') {
+            i = i + 1;
+            i = parse_int(src, i, val);
+            gc: int = val[0];
+            okg: int = val[1];
+            i = parse_int(src, i, val);
+            gr: int = val[0];
+            if (okg == 0 || val[1] == 0 || !in_bounds(gc, gr)) {
+                return 0 - 1;
+            }
+            if (!is_goal(goals, ng, gc, gr)) {
+                ng = toggle_goal(goals, ng, gc, gr);
+            }
+            i = skip_line(src, i);
+        } else if (src[i] == 'w') {
+            i = i + 1;
+            i = parse_int(src, i, val);
+            wc: int = val[0];
+            okw: int = val[1];
+            i = parse_int(src, i, val);
+            wr: int = val[0];
+            if (okw == 0 || val[1] == 0 || !in_bounds(wc, wr)) {
+                return 0 - 1;
+            }
+            if (!is_brick(bricks, nw, wc, wr)) {
+                nw = toggle_brick(bricks, nw, wc, wr);
+            }
+            i = skip_line(src, i);
+        } else if (src[i] == 'f') {
+            i = i + 1;
+            i = parse_int(src, i, val);
+            fc: int = val[0];
+            okf: int = val[1];
+            i = parse_int(src, i, val);
+            fr: int = val[0];
+            if (okf == 0 || val[1] == 0 || !in_bounds(fc, fr)) {
+                return 0 - 1;
+            }
+            i = skip_spaces(src, i);
+            fs: int = 0 - 1;
+            if (word_at(src, i, "dirt")) {
+                fs = GROUND_DIRT;
+            } else if (word_at(src, i, "grass")) {
+                fs = GROUND_GRASS;
+            } else if (word_at(src, i, "stone")) {
+                fs = GROUND_STONE;
+            }
+            if (fs < 0) {
+                return 0 - 1;
+            }
+            nf = set_world_ground_style(ground, nf, fc, fr, fs);
+            i = skip_line(src, i);
+        } else if (src[i] == 'b' || src[i] == 's' || src[i] == 'r') {
+            cmd: i8 = src[i];
+            i = i + 1;
+            i = parse_int(src, i, val);
+            bc: int = val[0];
+            okb: int = val[1];
+            i = parse_int(src, i, val);
+            br: int = val[0];
+            if (okb == 0 || val[1] == 0) {
+                return 0 - 1;
+            }
+            shape: int = 0;
+            ramp: int = 0;
+            layer: int = 0;
+            if (cmd == 's') {
+                i = parse_uint(src, i, val);
+                shape = val[0];
+                if (val[1] == 0) {
+                    return 0 - 1;
+                }
+            } else if (cmd == 'r') {
+                i = parse_uint(src, i, val);
+                ramp = val[0];
+                if (val[1] == 0 || ramp < 1 || ramp > 4) {
+                    return 0 - 1;
+                }
+            }
+            i = skip_spaces(src, i);
+            if (i < len(src) && src[i] >= '0' && src[i] <= '9') {
+                i = parse_uint(src, i, val);
+                layer = val[0];
+            }
+            mounted: int = 0;
+            i = skip_spaces(src, i);
+            if (i < len(src) && src[i] >= '0' && src[i] <= '9') {
+                i = parse_uint(src, i, val);
+                mounted = val[0];
+            }
+            if (!in_bounds(bc, br) || layer < 0 || layer >= LEVEL_MAX_LAYER) {
+                return 0 - 1;
+            }
+            if (nb < len(blocks)) {
+                blocks[nb] = Block {
+                    id: nb,
+                    column: bc,
+                    row: br,
+                    shape: shape,
+                    layer: layer,
+                    ramp: ramp,
+                    mounted: mounted
+                };
+                nb = nb + 1;
+            }
+            i = skip_line(src, i);
         } else {
             return 0 - 1;
         }
     }
     nplace[0] = n;
     ndone[0] = nd;
+    nroom[0] = nr;
+    ngoal[0] = ng;
+    nblock[0] = nb;
+    nbrick[0] = nw;
+    nground[0] = nf;
     n;
 }
 
 save_world(
     path: []i8,
-    places: []Placement,
     names: [][]i8,
-    nplace: int,
+    rooms: []Room,
+    titles: [][]i8,
+    nroom: int,
+    blocks: []Block,
+    nblock: int,
+    goals: []Goal,
+    ngoal: int,
+    bricks: []Brick,
+    nbrick: int,
+    ground: []GroundCell,
+    nground: int,
+    dones: [][]i8,
+    ndone: int,
     pc: int,
     pr: int
 ): int {
-    cap: int = 16384;
+    cap: int = 524288;
     dst: []i8 = new i8[cap](0i8);
     i: int = 0;
-    i = put_str(dst, i, "# L8 world\n");
-    i = put_str(dst, i, "# place <name> <x> <y> <rot>\n");
+    i = put_str(dst, i, "# L8 canonical world\n");
+    i = put_str(dst, i, "# level <name> <x0> <y0> <x1> <y1> <title>\n");
+    i = put_str(dst, i, "world\n");
     i = put_ch(dst, i, 'p');
     i = put_ch(dst, i, ' ');
     i = put_int(dst, i, pc);
@@ -2474,15 +3075,98 @@ save_world(
     i = put_int(dst, i, pr);
     i = put_ch(dst, i, '\n');
     k: int = 0;
-    while (k < nplace) {
-        i = put_str(dst, i, "place ");
+    while (k < nroom) {
+        i = put_str(dst, i, "level ");
         i = put_str(dst, i, names[k]);
         i = put_ch(dst, i, ' ');
-        i = put_int(dst, i, places[k].x);
+        i = put_int(dst, i, rooms[k].x0);
         i = put_ch(dst, i, ' ');
-        i = put_int(dst, i, places[k].y);
+        i = put_int(dst, i, rooms[k].y0);
         i = put_ch(dst, i, ' ');
-        i = put_int(dst, i, places[k].rot);
+        i = put_int(dst, i, rooms[k].x1);
+        i = put_ch(dst, i, ' ');
+        i = put_int(dst, i, rooms[k].y1);
+        if (len(titles[k]) > 0) {
+            i = put_ch(dst, i, ' ');
+            i = put_str(dst, i, titles[k]);
+        }
+        i = put_ch(dst, i, '\n');
+        k = k + 1;
+    }
+    k = 0;
+    while (k < ndone) {
+        i = put_str(dst, i, "done ");
+        i = put_str(dst, i, dones[k]);
+        i = put_ch(dst, i, '\n');
+        k = k + 1;
+    }
+    k = 0;
+    while (k < ngoal) {
+        i = put_str(dst, i, "g ");
+        i = put_int(dst, i, goals[k].column);
+        i = put_ch(dst, i, ' ');
+        i = put_int(dst, i, goals[k].row);
+        i = put_ch(dst, i, '\n');
+        k = k + 1;
+    }
+    k = 0;
+    while (k < nbrick) {
+        i = put_str(dst, i, "w ");
+        i = put_int(dst, i, bricks[k].column);
+        i = put_ch(dst, i, ' ');
+        i = put_int(dst, i, bricks[k].row);
+        i = put_ch(dst, i, '\n');
+        k = k + 1;
+    }
+    k = 0;
+    while (k < nground) {
+        f: GroundCell = ground[k];
+        i = put_str(dst, i, "f ");
+        i = put_int(dst, i, f.column);
+        i = put_ch(dst, i, ' ');
+        i = put_int(dst, i, f.row);
+        i = put_ch(dst, i, ' ');
+        if (f.style == GROUND_DIRT) {
+            i = put_str(dst, i, "dirt");
+        } else if (f.style == GROUND_GRASS) {
+            i = put_str(dst, i, "grass");
+        } else {
+            i = put_str(dst, i, "stone");
+        }
+        i = put_ch(dst, i, '\n');
+        k = k + 1;
+    }
+    k = 0;
+    while (k < nblock) {
+        b: Block = blocks[k];
+        if (b.ramp != 0) {
+            i = put_str(dst, i, "r ");
+            i = put_int(dst, i, b.column);
+            i = put_ch(dst, i, ' ');
+            i = put_int(dst, i, b.row);
+            i = put_ch(dst, i, ' ');
+            i = put_uint(dst, i, b.ramp);
+        } else if (b.shape != 0) {
+            i = put_str(dst, i, "s ");
+            i = put_int(dst, i, b.column);
+            i = put_ch(dst, i, ' ');
+            i = put_int(dst, i, b.row);
+            i = put_ch(dst, i, ' ');
+            i = put_uint(dst, i, b.shape);
+        } else {
+            i = put_str(dst, i, "b ");
+            i = put_int(dst, i, b.column);
+            i = put_ch(dst, i, ' ');
+            i = put_int(dst, i, b.row);
+        }
+        if (b.layer != 0 || b.mounted != 0) {
+            i = put_ch(dst, i, ' ');
+            i = put_uint(dst, i, b.layer);
+        }
+        if (b.mounted != 0) {
+            i = put_ch(dst, i, ' ');
+            i = put_uint(dst, i, b.mounted);
+        }
         i = put_ch(dst, i, '\n');
         k = k + 1;
     }
@@ -2511,6 +3195,8 @@ stamp_level(
     sng: int,
     sw: []Brick,
     snw: int,
+    sf: []GroundCell,
+    snf: int,
     px: int,
     py: int,
     rot: int,
@@ -2523,6 +3209,8 @@ stamp_level(
     dng: int,
     dw: []Brick,
     dnw: int,
+    df: []GroundCell,
+    dnf: int,
     out: []int,
     xy: []int
 ): int {
@@ -2531,6 +3219,7 @@ stamp_level(
         out[1] = dnr;
         out[2] = dng;
         out[3] = dnw;
+        out[4] = dnf;
         return dn;
     }
     base: Room = sr[0];
@@ -2557,6 +3246,12 @@ stamp_level(
         if (!is_brick(dw, dnw, px + xy[0], py + xy[1])) {
             dnw = toggle_brick(dw, dnw, px + xy[0], py + xy[1]);
         }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < snf) {
+        xform_local(sf[i].column - base.x0, sf[i].row - base.y0, w, h, rot, xy);
+        dnf = set_ground_style(df, dnf, px + xy[0], py + xy[1], sf[i].style);
         i = i + 1;
     }
     i = 0;
@@ -2587,6 +3282,7 @@ stamp_level(
     out[1] = dnr;
     out[2] = dng;
     out[3] = dnw;
+    out[4] = dnf;
     dn;
 }
 
@@ -2605,11 +3301,20 @@ compose_world(
     ong: int,
     ow: []Brick,
     onw: int,
+    of: []GroundCell,
+    onf: int,
+    wb: []Block,
+    wbn: int,
+    ww: []Brick,
+    wwn: int,
+    wf: []GroundCell,
+    wfn: int,
     db: []Block,
     dr: []Room,
     dt: [][]i8,
     dg: []Goal,
     dw: []Brick,
+    df: []GroundCell,
     out: []int
 ): int {
     empty: Block = Block {
@@ -2625,10 +3330,12 @@ compose_world(
     dnr: int = 0;
     dng: int = 0;
     dnw: int = 0;
+    dnf: int = 0;
     xy: []int = new int[2](0);
     nroom_s: []int = new int[1](0);
     ngoal_s: []int = new int[1](0);
     nbrick_s: []int = new int[1](0);
+    nground_s: []int = new int[1](0);
     start_s: []int = new int[2](0);
     sb: []Block = new Block[LEVEL_MAX_BLOCKS](empty);
     sr: []Room = new Room[4](Room {
@@ -2646,35 +3353,129 @@ compose_world(
         column: 0,
         row: 0
     });
+    sf: []GroundCell = new GroundCell[LEVEL_MAX_GROUND](GroundCell {
+        column: 0,
+        row: 0,
+        style: GROUND_DIRT
+    });
     k: int = 0;
     while (k < nplace) {
         p: Placement = places[k];
         if (len(over_name) > 0 && titles_eq(names[k], over_name)) {
-            stamp_level(ob, on, orr, ot, onr, og, ong, ow, onw, p.x, p.y, p.rot, db, dn, dr, dt, dnr,
-                dg, dng, dw, dnw, out, xy);
+            stamp_level(ob, on, orr, ot, onr, og, ong, ow, onw, of, onf, p.x, p.y, p.rot, db, dn,
+                dr, dt, dnr, dg, dng, dw, dnw, df, dnf, out, xy);
         } else {
             lp: []i8 = join_level_path(world, names[k]);
             nroom_s[0] = 0;
             ngoal_s[0] = 0;
             nbrick_s[0] = 0;
-            sn: int = load_any(lp, sb, sr, st, nroom_s, sg, ngoal_s, sw, nbrick_s, start_s);
+            nground_s[0] = 0;
+            sn: int = load_any(lp, sb, sr, st, nroom_s, sg, ngoal_s, sw, nbrick_s, sf, nground_s,
+                start_s);
             if (sn < 0) {
                 sn = 0;
             }
-            stamp_level(sb, sn, sr, st, nroom_s[0], sg, ngoal_s[0], sw, nbrick_s[0], p.x, p.y, p.rot,
-                db, dn, dr, dt, dnr, dg, dng, dw, dnw, out, xy);
+            stamp_level(sb, sn, sr, st, nroom_s[0], sg, ngoal_s[0], sw, nbrick_s[0], sf,
+                nground_s[0], p.x, p.y, p.rot, db, dn, dr, dt, dnr, dg, dng, dw, dnw, df, dnf,
+                out, xy);
         }
         dn = out[0];
         dnr = out[1];
         dng = out[2];
         dnw = out[3];
+        dnf = out[4];
+        k = k + 1;
+    }
+    k = 0;
+    while (k < wwn) {
+        if (!is_brick(dw, dnw, ww[k].column, ww[k].row)) {
+            dnw = toggle_brick(dw, dnw, ww[k].column, ww[k].row);
+        }
+        k = k + 1;
+    }
+    k = 0;
+    while (k < wfn) {
+        dnf = set_ground_style(df, dnf, wf[k].column, wf[k].row, wf[k].style);
+        k = k + 1;
+    }
+    k = 0;
+    while (k < wbn && dn < len(db)) {
+        b: Block = wb[k];
+        b.id = dn;
+        db[dn] = b;
+        dn = dn + 1;
         k = k + 1;
     }
     out[0] = dn;
     out[1] = dnr;
     out[2] = dng;
     out[3] = dnw;
+    out[4] = dnf;
     dn;
+}
+
+load_unified_world(
+    path: []i8,
+    names: [][]i8@new,
+    rooms: []Room,
+    titles: [][]i8,
+    nroom: []int,
+    blocks: []Block,
+    goals: []Goal,
+    ngoal: []int,
+    bricks: []Brick,
+    nbrick: []int,
+    ground: []GroundCell,
+    nground: []int,
+    start: []int,
+    dones: [][]i8@new,
+    ndone: []int
+): int {
+    world_src: []i8 = slurp_path(path);
+    legacy: int = world_has_places(world_src);
+    ep: Placement = Placement { x: 0, y: 0, rot: 0 };
+    eb: Block = Block {
+        id: 0 - 1, column: 0, row: 0, shape: 0, layer: 0, ramp: 0, mounted: 0
+    };
+    ew: Brick = Brick { column: 0, row: 0 };
+    ef: GroundCell = GroundCell { column: 0, row: 0, style: GROUND_DIRT };
+    places: []Placement = new Placement[LEVEL_MAX_PLACES](ep);
+    np: []int = new int[1](0);
+    wb: []Block = new Block[LEVEL_MAX_BLOCKS](eb);
+    ww: []Brick = new Brick[LEVEL_MAX_BRICKS](ew);
+    wf: []GroundCell = new GroundCell[LEVEL_MAX_GROUND](ef);
+    wbn: []int = new int[1](0);
+    wwn: []int = new int[1](0);
+    wfn: []int = new int[1](0);
+    if (load_world(path, places, names, np, rooms, titles, nroom, goals, ngoal, start, dones,
+        ndone, wb, wbn, ww, wwn, wf, wfn) < 0) {
+        return 0 - 1;
+    }
+    if (legacy == 0) {
+        copy_blocks(blocks, 0, wb, 0, wbn[0]);
+        copy_brick_cells(bricks, ww, wwn[0]);
+        gn: int = 0;
+        gi: int = 0;
+        while (gi < wfn[0]) {
+            gn = set_ground_style(ground, gn, wf[gi].column, wf[gi].row, wf[gi].style);
+            gi = gi + 1;
+        }
+        nbrick[0] = wwn[0];
+        nground[0] = gn;
+        return wbn[0];
+    }
+    out: []int = new int[5](0);
+    n: int = compose_world(path, places, names, np[0], "", new Block[1](eb), 0, rooms, titles,
+        0, goals, 0, bricks, 0, ground, 0, wb, wbn[0], ww, wwn[0], wf, wfn[0], blocks, rooms,
+        titles, goals, bricks, ground, out);
+    nroom[0] = out[1];
+    ngoal[0] = out[2];
+    nbrick[0] = out[3];
+    nground[0] = out[4];
+    if (separate_legacy_rooms(rooms, nroom[0]) != 0) {
+        return 0 - 1;
+    }
+    n;
 }
 
 load_any(
@@ -2687,6 +3488,8 @@ load_any(
     ngoal: []int,
     bricks: []Brick,
     nbrick: []int,
+    ground: []GroundCell,
+    nground: []int,
     start: []int
 ): int {
     src: []i8 = slurp_path(path);
@@ -2702,39 +3505,17 @@ load_any(
     nroom[0] = 0;
     ngoal[0] = 0;
     nbrick[0] = 0;
+    nground[0] = 0;
     if (looks_like_grid(src)) {
         return load_grid_src(src, blocks, rooms, titles, nroom, goals, ngoal, bricks, nbrick, start);
     }
     if (looks_like_world(src)) {
-        empty_p: Placement = Placement {
-            x: 0,
-            y: 0,
-            rot: 0
-        };
-        places: []Placement = new Placement[LEVEL_MAX_PLACES](empty_p);
         names: [][]i8 = new []i8[LEVEL_MAX_PLACES](new i8[0](0i8));
-        np: []int = new int[1](0);
         dones: [][]i8 = new []i8[LEVEL_MAX_PLACES](new i8[0](0i8));
         nd: []int = new int[1](0);
-        if (load_world(path, places, names, np, start, dones, nd) < 0) {
-            return 0 - 1;
-        }
-        out: []int = new int[4](0);
-        empty_b: Block = Block {
-            id: 0 - 1,
-            column: 0,
-            row: 0,
-            shape: 0,
-            layer: 0,
-            ramp: 0,
-            mounted: 0
-        };
-        n: int = compose_world(path, places, names, np[0], "", new Block[1](empty_b), 0, rooms,
-            titles, 0, goals, 0, bricks, 0, blocks, rooms, titles, goals, bricks, out);
-        nroom[0] = out[1];
-        ngoal[0] = out[2];
-        nbrick[0] = out[3];
-        return n;
+        return load_unified_world(path, names, rooms, titles, nroom, blocks, goals, ngoal, bricks,
+            nbrick, ground, nground, start, dones, nd);
     }
-    parse_level_src(src, blocks, rooms, titles, nroom, goals, ngoal, bricks, nbrick, start);
+    parse_level_src(src, blocks, rooms, titles, nroom, goals, ngoal, bricks, nbrick, ground,
+        nground, start);
 }
