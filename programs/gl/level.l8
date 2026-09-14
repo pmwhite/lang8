@@ -58,6 +58,12 @@ REWIND_MAX: int = 128;
 
 REWIND_HOME: int = 80;
 
+REWIND_LEAVE: int = 1;
+
+REWIND_RESET: int = 2;
+
+CRATE_HIST: int = 8;
+
 RESET_SINK_MS: int = 320;
 
 RESET_EMERGE_MS: int = 320;
@@ -1998,51 +2004,383 @@ pose_step_dur(p0: int, p1: int): int {
     ms;
 }
 
-rewind_pair_dur(
+rewind_dest_step(cur: int): int {
+    dest: int = cur - 1;
+    if (dest < 0) {
+        dest = 0;
+    }
+    dest;
+}
+
+rewind_finish(
+    blocks: []Block,
     room: int,
     room_ids: []int,
     room_hn: []int,
     snap: []int,
-    ghosts: []int,
-    from_step: int,
-    to_step: int
-): int {
-    if (room < 0 || room >= LEVEL_MAX_ROOMS) {
-        return 0;
+    rewind_n: []int,
+    rewind_cur: []int,
+    room_ghosting: []int
+) {
+    rewind_capture(blocks, room, room_ids, room_hn, snap, 0);
+    room_ghosting[room] = 0;
+    rewind_n[room] = 1;
+    rewind_cur[room] = 0;
+}
+
+rewind_apply_snap(
+    blocks: []Block,
+    room: int,
+    room_ids: []int,
+    room_hn: []int,
+    snap: []int,
+    step: int
+) {
+    if (room < 0 || room >= LEVEL_MAX_ROOMS || step < 0 || step >= REWIND_MAX) {
+        return;
     }
-    ms: int = 0;
     k: int = 0;
     hn: int = room_hn[room];
     while (k < hn) {
         i: int = room_ids[room * REWIND_HOME + k];
-        if (ghosts[i] == 1) {
-            p0: int = snap[rewind_slot(room, from_step, k)];
-            p1: int = snap[rewind_slot(room, to_step, k)];
-            d: int = pose_step_dur(p0, p1);
-            if (d > ms) {
-                ms = d;
-            }
+        blocks[i] = apply_packed(blocks[i], snap[rewind_slot(room, step, k)]);
+        k = k + 1;
+    }
+}
+
+rewind_step_legal(
+    room: int,
+    room_hn: []int,
+    snap: []int,
+    rewind_cur: []int,
+    pc: int,
+    pr: int
+): int {
+    if (room < 0 || room >= LEVEL_MAX_ROOMS) {
+        return 0;
+    }
+    cur: int = rewind_cur[room];
+    if (cur <= 0) {
+        return 0;
+    }
+    dest: int = rewind_dest_step(cur);
+    k: int = 0;
+    hn: int = room_hn[room];
+    while (k < hn) {
+        p0: int = snap[rewind_slot(room, cur, k)];
+        p1: int = snap[rewind_slot(room, dest, k)];
+        if (p0 != p1 && pos_col(p1) == pc && pos_row(p1) == pr) {
+            return 0;
         }
         k = k + 1;
     }
-    ms;
+    1;
 }
 
-rewind_home_rest(
+rewind_try_step(
+    blocks: []Block,
     room: int,
-    k: int,
+    room_ids: []int,
+    room_hn: []int,
     snap: []int,
-    dest: int
+    rewind_n: []int,
+    rewind_cur: []int,
+    room_ghosting: []int,
+    pc: int,
+    pr: int
 ): int {
-    home: int = snap[rewind_slot(room, 0, k)];
-    s: int = 0;
-    while (s <= dest) {
-        if (snap[rewind_slot(room, s, k)] != home) {
-            return 0;
-        }
-        s = s + 1;
+    if (room < 0 || room >= LEVEL_MAX_ROOMS) {
+        return 0;
+    }
+    if (room_ghosting[room] == 0) {
+        return 0;
+    }
+    if (rewind_cur[room] <= 0) {
+        rewind_finish(blocks, room, room_ids, room_hn, snap, rewind_n, rewind_cur, room_ghosting);
+        return 0;
+    }
+    if (rewind_step_legal(room, room_hn, snap, rewind_cur, pc, pr) == 0) {
+        return 0;
+    }
+    dest: int = rewind_dest_step(rewind_cur[room]);
+    rewind_apply_snap(blocks, room, room_ids, room_hn, snap, dest);
+    rewind_cur[room] = dest;
+    if (dest <= 0) {
+        rewind_finish(blocks, room, room_ids, room_hn, snap, rewind_n, rewind_cur, room_ghosting);
     }
     1;
+}
+
+rewind_feed(
+    blocks: []Block,
+    nroom: int,
+    room_ids: []int,
+    room_hn: []int,
+    snap: []int,
+    rewind_n: []int,
+    rewind_cur: []int,
+    room_ghosting: []int,
+    pc: int,
+    pr: int
+): int {
+    dirty: int = 0;
+    r: int = 0;
+    while (r < nroom) {
+        if (rewind_try_step(blocks, r, room_ids, room_hn, snap, rewind_n, rewind_cur, room_ghosting,
+            pc, pr) != 0) {
+            dirty = 1;
+        }
+        r = r + 1;
+    }
+    dirty;
+}
+
+crate_idx(i: int, slot: int): int {
+    i * CRATE_HIST + slot;
+}
+
+crate_boot(
+    blocks: []Block,
+    n: int,
+    pose: []int,
+    hs: []int,
+    hn: []int,
+    t0: []int
+) {
+    i: int = 0;
+    while (i < n) {
+        pose[crate_idx(i, 0)] = pack_pos(blocks[i].column, blocks[i].row, blocks[i].layer,
+            blocks[i].mounted);
+        hs[i] = 0;
+        hn[i] = 1;
+        t0[i] = 0;
+        i = i + 1;
+    }
+}
+
+crate_tail(i: int, pose: []int, hs: []int, hn: []int): int {
+    pose[crate_idx(i, (hs[i] + hn[i] - 1) % CRATE_HIST)];
+}
+
+crate_append(
+    i: int,
+    packed: int,
+    now: int,
+    pose: []int,
+    ms: []int,
+    hs: []int,
+    hn: []int,
+    t0: []int
+) {
+    prev: int = crate_tail(i, pose, hs, hn);
+    if (packed == prev) {
+        return;
+    }
+    hnv: int = hn[i];
+    hsv: int = hs[i];
+    if (hnv == 1) {
+        t0[i] = now;
+    }
+    if (hnv >= CRATE_HIST) {
+        hsv = (hsv + 1) % CRATE_HIST;
+        hnv = hnv - 1;
+        hs[i] = hsv;
+    }
+    slot: int = (hsv + hnv) % CRATE_HIST;
+    pose[crate_idx(i, slot)] = packed;
+    d: int = pose_step_dur(prev, packed);
+    if (d < 200) {
+        d = 200;
+    }
+    ms[crate_idx(i, slot)] = d;
+    hn[i] = hnv + 1;
+}
+
+crate_commit_changed(
+    blocks: []Block,
+    n: int,
+    now: int,
+    pose: []int,
+    ms: []int,
+    hs: []int,
+    hn: []int,
+    t0: []int
+) {
+    i: int = 0;
+    while (i < n) {
+        p: int = pack_pos(blocks[i].column, blocks[i].row, blocks[i].layer, blocks[i].mounted);
+        crate_append(i, p, now, pose, ms, hs, hn, t0);
+        i = i + 1;
+    }
+}
+
+crate_drain(
+    n: int,
+    now: int,
+    ms: []int,
+    hs: []int,
+    hn: []int,
+    t0: []int
+) {
+    i: int = 0;
+    while (i < n) {
+        hnv: int = hn[i];
+        hsv: int = hs[i];
+        started: int = t0[i];
+        keep: int = 1;
+        while (hnv > 1 && keep != 0) {
+            dur: int = ms[crate_idx(i, (hsv + 1) % CRATE_HIST)];
+            if (dur < 200) {
+                dur = 200;
+            }
+            if (now - started < dur) {
+                keep = 0;
+            } else {
+                hsv = (hsv + 1) % CRATE_HIST;
+                hnv = hnv - 1;
+                started = started + dur;
+            }
+        }
+        hs[i] = hsv;
+        hn[i] = hnv;
+        t0[i] = started;
+        i = i + 1;
+    }
+}
+
+rewind_room_busy(
+    room: int,
+    room_ids: []int,
+    room_hn: []int,
+    crate_hn: []int,
+    n: int
+): int {
+    if (room < 0 || room >= LEVEL_MAX_ROOMS) {
+        return 0;
+    }
+    k: int = 0;
+    hn: int = room_hn[room];
+    while (k < hn) {
+        i: int = room_ids[room * REWIND_HOME + k];
+        if (i >= 0 && i < n && crate_hn[i] > 1) {
+            return 1;
+        }
+        k = k + 1;
+    }
+    0;
+}
+
+any_crate_anim(crate_hn: []int, n: int): int {
+    i: int = 0;
+    while (i < n) {
+        if (crate_hn[i] > 1) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    0;
+}
+
+rewind_progress(dur: int, remain: int): f32 {
+    if (dur <= 0) {
+        return 1.0;
+    }
+    t: f32 = (dur - remain) as f32 / dur as f32;
+    if (t < 0.0) {
+        t = 0.0;
+    }
+    if (t > 1.0) {
+        t = 1.0;
+    }
+    t;
+}
+
+rewind_tick(
+    blocks: []Block,
+    n: int,
+    nroom: int,
+    room_ids: []int,
+    room_hn: []int,
+    snap: []int,
+    rewind_n: []int,
+    rewind_cur: []int,
+    room_ghosting: []int,
+    crate_pose: []int,
+    crate_ms: []int,
+    crate_hs: []int,
+    crate_hn: []int,
+    crate_t0: []int,
+    now: int,
+    pc: int,
+    pr: int
+): int {
+    crate_drain(n, now, crate_ms, crate_hs, crate_hn, crate_t0);
+    crate_commit_changed(blocks, n, now, crate_pose, crate_ms, crate_hs, crate_hn, crate_t0);
+    dirty: int = 0;
+    r: int = 0;
+    while (r < nroom) {
+        if (room_ghosting[r] != 0 && rewind_room_busy(r, room_ids, room_hn, crate_hn, n) == 0) {
+            if (rewind_try_step(blocks, r, room_ids, room_hn, snap, rewind_n, rewind_cur,
+                room_ghosting, pc, pr) != 0) {
+                crate_commit_changed(blocks, n, now, crate_pose, crate_ms, crate_hs, crate_hn,
+                    crate_t0);
+                dirty = 1;
+            }
+        }
+        r = r + 1;
+    }
+    dirty;
+}
+
+overlay_crate_anims(
+    hist: []Block,
+    foff: int,
+    toff: int,
+    n: int,
+    crate_pose: []int,
+    crate_ms: []int,
+    crate_hs: []int,
+    crate_hn: []int,
+    crate_t0: []int,
+    block_t: []f32,
+    now: int
+) {
+    i: int = 0;
+    while (i < n) {
+        hsv: int = crate_hs[i];
+        hnv: int = crate_hn[i];
+        from_p: int = crate_tail(i, crate_pose, crate_hs, crate_hn);
+        to_p: int = from_p;
+        bt: f32 = 1.0;
+        if (hnv > 1) {
+            from_p = crate_pose[crate_idx(i, hsv)];
+            to_p = crate_pose[crate_idx(i, (hsv + 1) % CRATE_HIST)];
+            dur: int = crate_ms[crate_idx(i, (hsv + 1) % CRATE_HIST)];
+            if (dur < 200) {
+                dur = 200;
+            }
+            bt = rewind_progress(dur, dur - (now - crate_t0[i]));
+        }
+        hist[foff + i] = apply_packed(hist[foff + i], from_p);
+        hist[toff + i] = apply_packed(hist[toff + i], to_p);
+        block_t[i] = bt;
+        i = i + 1;
+    }
+}
+
+restore_crate_anims(
+    hist: []Block,
+    foff: int,
+    toff: int,
+    blocks: []Block,
+    n: int
+) {
+    i: int = 0;
+    while (i < n) {
+        hist[foff + i] = blocks[i];
+        hist[toff + i] = blocks[i];
+        i = i + 1;
+    }
 }
 
 rewind_changed(
@@ -2068,369 +2406,6 @@ rewind_changed(
         k = k + 1;
     }
     0;
-}
-
-park_room_ghosts(
-    blocks: []Block,
-    ghosts: []int,
-    room: int,
-    room_ids: []int,
-    room_hn: []int,
-    snap: []int
-): int {
-    parked: int = 0;
-    if (room < 0 || room >= LEVEL_MAX_ROOMS) {
-        return 0;
-    }
-    k: int = 0;
-    hn: int = room_hn[room];
-    while (k < hn) {
-        i: int = room_ids[room * REWIND_HOME + k];
-        b: Block = blocks[i];
-        if (ghosts[i] != 2) {
-            live: int = pack_pos(b.column, b.row, b.layer, b.mounted);
-            home: int = snap[rewind_slot(room, 0, k)];
-            if (live != home) {
-                ghosts[i] = 1;
-                parked = parked + 1;
-            } else {
-                ghosts[i] = 0;
-            }
-        }
-        k = k + 1;
-    }
-    parked;
-}
-
-clear_room_ghosts(
-    ghosts: []int,
-    room: int,
-    room_ids: []int,
-    room_hn: []int
-) {
-    if (room < 0 || room >= LEVEL_MAX_ROOMS) {
-        return;
-    }
-    k: int = 0;
-    hn: int = room_hn[room];
-    while (k < hn) {
-        i: int = room_ids[room * REWIND_HOME + k];
-        ghosts[i] = 0;
-        k = k + 1;
-    }
-}
-
-unghost_settled(
-    blocks: []Block,
-    ghosts: []int,
-    hist: []Block,
-    foff: int,
-    toff: int,
-    room: int,
-    room_ids: []int,
-    room_hn: []int,
-    snap: []int,
-    dest: int
-): int {
-    left: int = 0;
-    if (room < 0 || room >= LEVEL_MAX_ROOMS) {
-        return 0;
-    }
-    k: int = 0;
-    hn: int = room_hn[room];
-    while (k < hn) {
-        i: int = room_ids[room * REWIND_HOME + k];
-        if (ghosts[i] == 1) {
-            if (rewind_home_rest(room, k, snap, dest) != 0) {
-                b: Block = apply_packed(blocks[i], snap[rewind_slot(room, 0, k)]);
-                blocks[i] = b;
-                ghosts[i] = 0;
-                hist[foff + i] = b;
-                hist[toff + i] = b;
-            } else {
-                left = left + 1;
-            }
-        }
-        k = k + 1;
-    }
-    left;
-}
-
-finish_room_rewind(
-    blocks: []Block,
-    ghosts: []int,
-    hist: []Block,
-    foff: int,
-    toff: int,
-    room: int,
-    room_ids: []int,
-    room_hn: []int,
-    snap: []int,
-    rewind_n: []int,
-    rewind_cur: []int,
-    room_ghosting: []int
-) {
-    unghost_settled(blocks, ghosts, hist, foff, toff, room, room_ids, room_hn, snap, 0);
-    clear_room_ghosts(ghosts, room, room_ids, room_hn);
-    rewind_capture(blocks, room, room_ids, room_hn, snap, 0);
-    room_ghosting[room] = 0;
-    rewind_n[room] = 1;
-    rewind_cur[room] = 0;
-}
-
-rewind_apply_live(
-    blocks: []Block,
-    ghosts: []int,
-    room: int,
-    room_ids: []int,
-    room_hn: []int,
-    snap: []int,
-    step: int
-) {
-    if (room < 0 || room >= LEVEL_MAX_ROOMS || step < 0 || step >= REWIND_MAX) {
-        return;
-    }
-    k: int = 0;
-    hn: int = room_hn[room];
-    while (k < hn) {
-        i: int = room_ids[room * REWIND_HOME + k];
-        if (ghosts[i] == 1) {
-            blocks[i] = apply_packed(blocks[i], snap[rewind_slot(room, step, k)]);
-        }
-        k = k + 1;
-    }
-}
-
-rewind_room_left(
-    ghosts: []int,
-    room: int,
-    room_ids: []int,
-    room_hn: []int
-): int {
-    left: int = 0;
-    if (room < 0 || room >= LEVEL_MAX_ROOMS) {
-        return 0;
-    }
-    k: int = 0;
-    hn: int = room_hn[room];
-    while (k < hn) {
-        i: int = room_ids[room * REWIND_HOME + k];
-        if (ghosts[i] == 1) {
-            left = left + 1;
-        }
-        k = k + 1;
-    }
-    left;
-}
-
-rewind_clear_holds(ghosts: []int, n: int) {
-    i: int = 0;
-    while (i < n) {
-        if (ghosts[i] == 2) {
-            ghosts[i] = 1;
-        }
-        i = i + 1;
-    }
-}
-
-rewind_room_held(
-    ghosts: []int,
-    room: int,
-    room_ids: []int,
-    room_hn: []int
-): int {
-    held: int = 0;
-    if (room < 0 || room >= LEVEL_MAX_ROOMS) {
-        return 0;
-    }
-    k: int = 0;
-    hn: int = room_hn[room];
-    while (k < hn) {
-        i: int = room_ids[room * REWIND_HOME + k];
-        if (ghosts[i] == 2) {
-            held = held + 1;
-        }
-        k = k + 1;
-    }
-    held;
-}
-
-rewind_dest_step(cur: int): int {
-    dest: int = cur - 1;
-    if (dest < 0) {
-        dest = 0;
-    }
-    dest;
-}
-
-rewind_snap_hits(
-    ghosts: []int,
-    room: int,
-    room_ids: []int,
-    room_hn: []int,
-    snap: []int,
-    step: int,
-    column: int,
-    row: int
-): int {
-    if (room < 0 || room >= LEVEL_MAX_ROOMS || step < 0 || step >= REWIND_MAX) {
-        return 0;
-    }
-    k: int = 0;
-    hn: int = room_hn[room];
-    while (k < hn) {
-        i: int = room_ids[room * REWIND_HOME + k];
-        if (ghosts[i] == 1) {
-            p: int = snap[rewind_slot(room, step, k)];
-            if (pos_col(p) == column && pos_row(p) == row) {
-                return 1;
-            }
-        }
-        k = k + 1;
-    }
-    0;
-}
-
-rewind_dest_hits_player(
-    ghosts: []int,
-    room: int,
-    room_ids: []int,
-    room_hn: []int,
-    snap: []int,
-    rewind_cur: []int,
-    pc: int,
-    pr: int
-): int {
-    rewind_snap_hits(ghosts, room, room_ids, room_hn, snap, rewind_dest_step(rewind_cur[room]), pc,
-        pr);
-}
-
-rewind_step_dur(
-    room: int,
-    room_ids: []int,
-    room_hn: []int,
-    snap: []int,
-    ghosts: []int,
-    rewind_cur: []int
-): int {
-    from_step: int = rewind_cur[room];
-    rewind_pair_dur(room, room_ids, room_hn, snap, ghosts, from_step, rewind_dest_step(from_step));
-}
-
-rewind_pause(
-    blocks: []Block,
-    ghosts: []int,
-    room: int,
-    room_ids: []int,
-    room_hn: []int,
-    snap: []int,
-    rewind_cur: []int,
-    rewind_dur: []int,
-    rewind_remain: []int
-) {
-    rewind_dur[room] = 0;
-    rewind_remain[room] = 0;
-    rewind_apply_live(blocks, ghosts, room, room_ids, room_hn, snap, rewind_cur[room]);
-}
-
-rewind_arm_step(
-    blocks: []Block,
-    ghosts: []int,
-    room: int,
-    room_ids: []int,
-    room_hn: []int,
-    snap: []int,
-    rewind_cur: []int,
-    rewind_dur: []int,
-    rewind_remain: []int
-) {
-    d: int = rewind_step_dur(room, room_ids, room_hn, snap, ghosts, rewind_cur);
-    rewind_dur[room] = d;
-    rewind_remain[room] = d;
-    rewind_apply_live(blocks, ghosts, room, room_ids, room_hn, snap, rewind_cur[room]);
-}
-
-rewind_complete_step(
-    blocks: []Block,
-    ghosts: []int,
-    hist: []Block,
-    foff: int,
-    toff: int,
-    room: int,
-    room_ids: []int,
-    room_hn: []int,
-    snap: []int,
-    rewind_cur: []int
-) {
-    dest: int = rewind_dest_step(rewind_cur[room]);
-    rewind_apply_live(blocks, ghosts, room, room_ids, room_hn, snap, dest);
-    unghost_settled(blocks, ghosts, hist, foff, toff, room, room_ids, room_hn, snap, dest);
-    rewind_cur[room] = dest;
-}
-
-rewind_done(
-    ghosts: []int,
-    room: int,
-    room_ids: []int,
-    room_hn: []int,
-    rewind_cur: []int
-): int {
-    if (rewind_room_left(ghosts, room, room_ids, room_hn) == 0) {
-        return 1;
-    }
-    if (rewind_cur[room] <= 0) {
-        return 1;
-    }
-    0;
-}
-
-rewind_pump(
-    blocks: []Block,
-    ghosts: []int,
-    hist: []Block,
-    foff: int,
-    toff: int,
-    room: int,
-    room_ids: []int,
-    room_hn: []int,
-    snap: []int,
-    rewind_n: []int,
-    rewind_cur: []int,
-    rewind_dur: []int,
-    rewind_remain: []int,
-    room_ghosting: []int,
-    pc: int,
-    pr: int
-): int {
-    dirty: int = 0;
-    while (room_ghosting[room] != 0) {
-        if (rewind_room_held(ghosts, room, room_ids, room_hn) > 0) {
-            rewind_dur[room] = 0;
-            rewind_remain[room] = 0;
-            return dirty;
-        }
-        if (rewind_done(ghosts, room, room_ids, room_hn, rewind_cur) != 0) {
-            finish_room_rewind(blocks, ghosts, hist, foff, toff, room, room_ids, room_hn, snap,
-                rewind_n, rewind_cur, room_ghosting);
-            return 1;
-        }
-        if (rewind_dest_hits_player(ghosts, room, room_ids, room_hn, snap, rewind_cur, pc,
-            pr) != 0) {
-            rewind_pause(blocks, ghosts, room, room_ids, room_hn, snap, rewind_cur, rewind_dur,
-                rewind_remain);
-            return dirty;
-        }
-        if (rewind_step_dur(room, room_ids, room_hn, snap, ghosts, rewind_cur) == 0) {
-            rewind_complete_step(blocks, ghosts, hist, foff, toff, room, room_ids, room_hn, snap,
-                rewind_cur);
-            dirty = 1;
-        } else {
-            rewind_arm_step(blocks, ghosts, room, room_ids, room_hn, snap, rewind_cur, rewind_dur,
-                rewind_remain);
-            return 1;
-        }
-    }
-    dirty;
 }
 
 rewind_record(
@@ -2466,14 +2441,12 @@ rewind_record(
 
 rewind_extend(
     blocks: []Block,
-    ghosts: []int,
     room: int,
     room_ids: []int,
     room_hn: []int,
     snap: []int,
     rewind_n: []int,
-    rewind_cur: []int,
-    rewind_dur: []int
+    rewind_cur: []int
 ) {
     if (room < 0 || room >= LEVEL_MAX_ROOMS) {
         return;
@@ -2489,54 +2462,13 @@ rewind_extend(
     rewind_capture(blocks, room, room_ids, room_hn, snap, nxt);
     rewind_n[room] = nxt + 1;
     rewind_cur[room] = nxt;
-    rewind_dur[room] = 0;
-    park_room_ghosts(blocks, ghosts, room, room_ids, room_hn, snap);
-}
-
-rewind_after_move(
-    blocks: []Block,
-    ghosts: []int,
-    nroom: int,
-    here: int,
-    slot: int,
-    room_ids: []int,
-    room_hn: []int,
-    snap: []int,
-    rewind_n: []int,
-    rewind_cur: []int,
-    rewind_dur: []int,
-    rewind_remain: []int,
-    room_ghosting: []int,
-    rewind_pending: []int,
-    rewind_wait_slot: []int,
-    room_force: []int
-) {
-    r: int = 0;
-    while (r < nroom) {
-        if (room_ghosting[r] == 0) {
-            rewind_record(blocks, r, room_ids, room_hn, snap, rewind_n, rewind_cur,
-                room_ghosting);
-        }
-        r = r + 1;
-    }
 }
 
 rewind_begin(
-    blocks: []Block,
-    ghosts: []int,
     room: int,
-    room_ids: []int,
-    room_hn: []int,
-    snap: []int,
     rewind_n: []int,
     rewind_cur: []int,
-    rewind_ms: []int,
-    rewind_dur: []int,
-    rewind_remain: []int,
-    room_ghosting: []int,
-    now: int,
-    pc: int,
-    pr: int
+    room_ghosting: []int
 ) {
     if (room < 0 || room >= LEVEL_MAX_ROOMS) {
         return;
@@ -2547,209 +2479,79 @@ rewind_begin(
     if (rewind_n[room] <= 1) {
         return;
     }
-    parked: int = park_room_ghosts(blocks, ghosts, room, room_ids, room_hn, snap);
-    if (parked < 1) {
+    room_ghosting[room] = REWIND_LEAVE;
+    rewind_cur[room] = rewind_n[room] - 1;
+}
+
+rewind_begin_reset(
+    room: int,
+    rewind_n: []int,
+    rewind_cur: []int,
+    room_ghosting: []int
+) {
+    if (room < 0 || room >= LEVEL_MAX_ROOMS) {
         return;
     }
-    room_ghosting[room] = 1;
-    rewind_cur[room] = rewind_n[room] - 1;
-    rewind_ms[room] = now;
-    rewind_dur[room] = 0;
-    rewind_remain[room] = 0;
-    if (rewind_dest_hits_player(ghosts, room, room_ids, room_hn, snap, rewind_cur, pc, pr) != 0) {
-        rewind_pause(blocks, ghosts, room, room_ids, room_hn, snap, rewind_cur, rewind_dur,
-            rewind_remain);
-    } else if (rewind_step_dur(room, room_ids, room_hn, snap, ghosts, rewind_cur) > 0) {
-        rewind_arm_step(blocks, ghosts, room, room_ids, room_hn, snap, rewind_cur, rewind_dur,
-            rewind_remain);
+    if (rewind_n[room] <= 1) {
+        return;
     }
+    if (room_ghosting[room] == 0) {
+        rewind_cur[room] = rewind_n[room] - 1;
+    }
+    room_ghosting[room] = REWIND_RESET;
 }
 
-hist_slot_due(hstart: int, hn: int, wait: int): int {
-    if (hn < 1) {
-        return 1;
-    }
-    if (hstart == wait) {
-        return 1;
-    }
-    k: int = 0;
-    while (k < hn) {
-        if ((hstart + k) % 8 == wait) {
-            return 0;
-        }
-        k = k + 1;
-    }
-    1;
-}
-
-start_pending_rewinds(
+rewind_stop_leave(
     blocks: []Block,
-    ghosts: []int,
-    nroom: int,
-    hstart: int,
-    hn: int,
+    room: int,
     room_ids: []int,
     room_hn: []int,
     snap: []int,
     rewind_n: []int,
     rewind_cur: []int,
-    rewind_ms: []int,
-    rewind_dur: []int,
-    rewind_remain: []int,
-    room_ghosting: []int,
-    rewind_pending: []int,
-    rewind_wait_slot: []int,
-    now: int,
-    pc: int,
-    pr: int
-): int {
-    dirty: int = 0;
-    r: int = 0;
-    while (r < nroom) {
-        if (rewind_pending[r] != 0 && room_ghosting[r] == 0 && hist_slot_due(hstart, hn, rewind_wait_slot[r]) != 0) {
-            rewind_begin(blocks, ghosts, r, room_ids, room_hn, snap, rewind_n, rewind_cur,
-                rewind_ms, rewind_dur, rewind_remain, room_ghosting, now, pc, pr);
-            rewind_pending[r] = 0;
-            dirty = 1;
-        }
-        r = r + 1;
-    }
-    dirty;
-}
-
-tick_room_rewinds(
-    blocks: []Block,
-    rooms: []Room,
-    nroom: int,
-    hist: []Block,
-    foff: int,
-    toff: int,
-    pc: int,
-    pr: int,
-    now: int,
-    room_ids: []int,
-    room_hn: []int,
-    snap: []int,
-    rewind_n: []int,
-    rewind_cur: []int,
-    rewind_ms: []int,
-    rewind_dur: []int,
-    rewind_remain: []int,
-    room_ghosting: []int,
-    ghosts: []int,
-    room_force: []int,
-    reset_room: []int
-): int {
-    dirty: int = 0;
-    r: int = 0;
-    while (r < nroom) {
-        if (room_ghosting[r] != 0) {
-            if (r < len(room_force) && (room_force[r] != 0 || rewind_room_held(ghosts, r, room_ids,
-                room_hn) > 0 || (len(reset_room) > 0 && reset_room[0] == r))) {
-                room_force[r] = 1;
-            }
-            if (rewind_dur[r] <= 0) {
-                if (rewind_pump(blocks, ghosts, hist, foff, toff, r, room_ids, room_hn, snap,
-                    rewind_n, rewind_cur, rewind_dur, rewind_remain, room_ghosting, pc, pr) != 0) {
-                    dirty = 1;
-                }
-            } else if (rewind_dest_hits_player(ghosts, r, room_ids, room_hn, snap, rewind_cur, pc,
-                pr) != 0) {
-                rewind_pause(blocks, ghosts, r, room_ids, room_hn, snap, rewind_cur, rewind_dur,
-                    rewind_remain);
-                rewind_ms[r] = now;
-                dirty = 1;
-            } else {
-                dt: int = now - rewind_ms[r];
-                rewind_ms[r] = now;
-                if (dt < 0) {
-                    dt = 0;
-                }
-                if (dt > 80) {
-                    dt = 80;
-                }
-                rewind_remain[r] = rewind_remain[r] - dt;
-                while (room_ghosting[r] != 0 && rewind_dur[r] > 0 && rewind_remain[r] <= 0) {
-                    rewind_complete_step(blocks, ghosts, hist, foff, toff, r, room_ids, room_hn,
-                        snap, rewind_cur);
-                    dirty = 1;
-                    if (rewind_pump(blocks, ghosts, hist, foff, toff, r, room_ids, room_hn, snap,
-                        rewind_n, rewind_cur, rewind_dur, rewind_remain, room_ghosting, pc,
-                        pr) != 0) {
-                        dirty = 1;
-                    }
-                }
-            }
-        }
-        r = r + 1;
-    }
-    dirty;
-}
-
-rewind_progress(dur: int, remain: int): f32 {
-    if (dur <= 0) {
-        return 1.0;
-    }
-    t: f32 = (dur - remain) as f32 / dur as f32;
-    if (t < 0.0) {
-        t = 0.0;
-    }
-    if (t > 1.0) {
-        t = 1.0;
-    }
-    t;
-}
-
-overlay_ghost_hist(
-    hist: []Block,
-    foff: int,
-    toff: int,
-    n: int,
-    ghosts: []int,
-    blocks: []Block,
-    nroom: int,
-    room_ids: []int,
-    room_hn: []int,
-    snap: []int,
-    rewind_cur: []int,
-    rewind_remain: []int,
-    rewind_dur: []int,
-    room_ghosting: []int,
-    block_t: []f32,
-    player_t: f32
+    room_ghosting: []int
 ) {
-    i: int = 0;
-    while (i < n) {
-        block_t[i] = player_t;
-        i = i + 1;
+    if (room < 0 || room >= LEVEL_MAX_ROOMS) {
+        return;
     }
+    if (room_ghosting[room] != REWIND_LEAVE) {
+        return;
+    }
+    k: int = rewind_cur[room];
+    if (k < 0) {
+        k = 0;
+    }
+    rewind_capture(blocks, room, room_ids, room_hn, snap, k);
+    rewind_n[room] = k + 1;
+    rewind_cur[room] = k;
+    room_ghosting[room] = 0;
+}
+
+rewind_after_move(
+    blocks: []Block,
+    nroom: int,
+    old_room: int,
+    new_room: int,
+    room_ids: []int,
+    room_hn: []int,
+    snap: []int,
+    rewind_n: []int,
+    rewind_cur: []int,
+    room_ghosting: []int
+) {
     r: int = 0;
     while (r < nroom) {
-        if (room_ghosting[r] != 0) {
-            from_step: int = rewind_cur[r];
-            to_step: int = from_step;
-            rt: f32 = 1.0;
-            if (rewind_dur[r] > 0) {
-                to_step = from_step - 1;
-                if (to_step < 0) {
-                    to_step = 0;
-                }
-                rt = rewind_progress(rewind_dur[r], rewind_remain[r]);
-            }
-            k: int = 0;
-            hn: int = room_hn[r];
-            while (k < hn) {
-                gi: int = room_ids[r * REWIND_HOME + k];
-                if (ghosts[gi] == 1) {
-                    src: Block = blocks[gi];
-                    hist[foff + gi] = apply_packed(src, snap[rewind_slot(r, from_step, k)]);
-                    hist[toff + gi] = apply_packed(src, snap[rewind_slot(r, to_step, k)]);
-                    block_t[gi] = rt;
-                }
-                k = k + 1;
-            }
+        if (room_ghosting[r] == 0) {
+            rewind_record(blocks, r, room_ids, room_hn, snap, rewind_n, rewind_cur, room_ghosting);
         }
         r = r + 1;
+    }
+    if (old_room != new_room) {
+        if (old_room >= 0 && old_room < LEVEL_MAX_ROOMS) {
+            rewind_begin(old_room, rewind_n, rewind_cur, room_ghosting);
+        }
+        rewind_stop_leave(blocks, new_room, room_ids, room_hn, snap, rewind_n, rewind_cur,
+            room_ghosting);
     }
 }
 
@@ -3218,13 +3020,11 @@ try_push(
     hit: int,
     dc: int,
     dr: int,
-    ghosts: []int,
     room_ids: []int,
     room_hn: []int,
     snap: []int,
     rewind_n: []int,
     rewind_cur: []int,
-    rewind_dur: []int,
     room_ghosting: []int
 ): int {
     ok: int = 0;
@@ -3242,15 +3042,8 @@ try_push(
                         hn: int = room_hn[ri];
                         while (k < hn) {
                             if (room_ids[ri * REWIND_HOME + k] == hit) {
-                                rewind_extend(blocks, ghosts, ri, room_ids, room_hn, snap,
-                                    rewind_n, rewind_cur, rewind_dur);
-                                mi: int = 0;
-                                while (mi < n) {
-                                    if (marks[mi] != 0) {
-                                        ghosts[mi] = 2;
-                                    }
-                                    mi = mi + 1;
-                                }
+                                rewind_extend(blocks, ri, room_ids, room_hn, snap, rewind_n,
+                                    rewind_cur);
                                 k = hn;
                                 ri = nroom;
                             }
@@ -3271,15 +3064,7 @@ finish_move(
     n: int,
     pc: int,
     pr: int,
-    ph: int,
-    ghosts: []int,
-    nroom: int,
-    room_ids: []int,
-    room_hn: []int,
-    snap: []int,
-    rewind_cur: []int,
-    rewind_dur: []int,
-    room_ghosting: []int
+    ph: int
 ): int {
     ph = settle_layer(blocks, n, pc, pr, ph, 0 - 1);
     if (body_at_layer(blocks, n, pc, pr, ph) >= 0) {
@@ -3300,13 +3085,11 @@ enter_at(
     ph: int,
     dc: int,
     dr: int,
-    ghosts: []int,
     room_ids: []int,
     room_hn: []int,
     snap: []int,
     rewind_n: []int,
     rewind_cur: []int,
-    rewind_dur: []int,
     room_ghosting: []int
 ): int {
     if (is_brick(bricks, nbrick, tc, tr)) {
@@ -3315,8 +3098,7 @@ enter_at(
     dest_body: int = body_at_layer(blocks, n, tc, tr, ph);
     dest_ramp: int = ramp_at_layer(blocks, n, tc, tr, ph);
     if (dest_ramp >= 0 && dest_body < 0 && is_mount_face(blocks[dest_ramp].ramp, dc, dr)) {
-        return finish_move(blocks, n, tc, tr, ph, ghosts, nroom, room_ids, room_hn, snap, rewind_cur,
-            rewind_dur, room_ghosting);
+        return finish_move(blocks, n, tc, tr, ph);
     }
     hit: int = dest_body;
     if (hit >= 0 && dest_ramp >= 0 && !is_mount_face(blocks[dest_ramp].ramp, dc, dr)) {
@@ -3326,17 +3108,13 @@ enter_at(
         hit = dest_ramp;
     }
     if (hit >= 0) {
-        pushed: int = try_push(blocks, n, rooms, nroom, bricks, nbrick, hit, dc, dr, ghosts,
-            room_ids, room_hn, snap, rewind_n, rewind_cur, rewind_dur, room_ghosting);
-        if (pushed == 2) {
-            return 0 - 2;
-        }
+        pushed: int = try_push(blocks, n, rooms, nroom, bricks, nbrick, hit, dc, dr, room_ids,
+            room_hn, snap, rewind_n, rewind_cur, room_ghosting);
         if (pushed == 0) {
             return 0 - 1;
         }
     }
-    finish_move(blocks, n, tc, tr, ph, ghosts, nroom, room_ids, room_hn, snap, rewind_cur,
-        rewind_dur, room_ghosting);
+    finish_move(blocks, n, tc, tr, ph);
 }
 
 move_player(
@@ -3351,17 +3129,13 @@ move_player(
     ph: int,
     dc: int,
     dr: int,
-    ghosts: []int,
     room_ids: []int,
     room_hn: []int,
     snap: []int,
     rewind_n: []int,
     rewind_cur: []int,
-    rewind_dur: []int,
-    room_ghosting: []int,
-    wait: []int
+    room_ghosting: []int
 ): int {
-    wait[0] = 0;
     stay: int = pack_pos(pc, pr, ph, pose_mounted(blocks, n, pc, pr, ph, 0 - 1));
     tc: int = pc + dc;
     tr: int = pr + dr;
@@ -3372,24 +3146,16 @@ move_player(
     home: int = ramp_at_layer(blocks, n, pc, pr, ph);
     if (home >= 0 && is_mount_face(blocks[home].ramp, dc, dr) && dest_flat >= 0) {
         if (ph + 1 < LEVEL_MAX_LAYER) {
-            landed: int = enter_at(blocks, n, rooms, nroom, bricks, nbrick, tc, tr, ph + 1, dc,
-                dr, ghosts, room_ids, room_hn, snap, rewind_n, rewind_cur, rewind_dur, room_ghosting);
-            if (landed == 0 - 2) {
-                wait[0] = 1;
-                return stay;
-            }
+            landed: int = enter_at(blocks, n, rooms, nroom, bricks, nbrick, tc, tr, ph + 1, dc, dr,
+                room_ids, room_hn, snap, rewind_n, rewind_cur, room_ghosting);
             if (landed >= 0) {
                 return landed;
             }
         }
         return stay;
     }
-    landed2: int = enter_at(blocks, n, rooms, nroom, bricks, nbrick, tc, tr, ph, dc, dr, ghosts,
-        room_ids, room_hn, snap, rewind_n, rewind_cur, rewind_dur, room_ghosting);
-    if (landed2 == 0 - 2) {
-        wait[0] = 1;
-        return stay;
-    }
+    landed2: int = enter_at(blocks, n, rooms, nroom, bricks, nbrick, tc, tr, ph, dc, dr, room_ids,
+        room_hn, snap, rewind_n, rewind_cur, room_ghosting);
     if (landed2 < 0) {
         return stay;
     }
