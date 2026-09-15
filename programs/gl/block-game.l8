@@ -1,7 +1,8 @@
 // Port of blog/block-game.html. One binary, two sub-commands:
 //   .build/block-game [play] [path]   play a world or a lone level
 //   .build/block-game edit [path]     unified world/level editor
-// Default path is programs/gl/world.txt. Arrows move, r restarts the room, q quits.
+// Default path is programs/gl/world.txt. Arrows move, j picks a visited finish,
+// r restarts the room, and q quits.
 import "gl.l8";
 
 import "level.l8";
@@ -506,6 +507,54 @@ play_try_dir(
         ngoal, solved, stream_until, stream_tx, stream_tz, sparks, spark_rng, spark_xy);
 }
 
+play_jump_to_finish(
+    blocks: []Block,
+    n: int,
+    rooms: []Room,
+    nroom: int,
+    bricks: []Brick,
+    nbrick: int,
+    goals: []Goal,
+    ngoal: int,
+    solved: []int,
+    hist: []Block,
+    hpc: []int,
+    hpr: []int,
+    hph: []int,
+    hpm: []int,
+    clock: []int,
+    pose: []int,
+    pend: []int,
+    room_ids: []int,
+    room_hn: []int,
+    rewind_snap: []int,
+    rewind_n: []int,
+    rewind_cur: []int,
+    room_ghosting: []int,
+    target: int
+): int {
+    if (target < 0 || target >= ngoal) {
+        return 0;
+    }
+    goal: Goal = goals[target];
+    target_room: int = room_at(rooms, nroom, goal.column, goal.row);
+    if (target_room < 0 || target_room >= len(solved) || solved[target_room] == 0) {
+        return 0;
+    }
+    packed: int = finish_move(blocks, n, bricks, nbrick, goal.column, goal.row,
+        LEVEL_MAX_LAYER - 1);
+    if (packed < 0 || pos_col(packed) == pose[0] && pos_row(packed) == pose[1]) {
+        return 0;
+    }
+    old_room: int = room_at(rooms, nroom, pose[0], pose[1]);
+    rewind_after_move(blocks, nroom, old_room, target_room, room_ids, room_hn, rewind_snap,
+        rewind_n, rewind_cur, room_ghosting);
+    play_snap_pose(blocks, n, hist, hpc, hpr, hph, hpm, clock, pose, packed);
+    pend[0] = 0;
+    pend[1] = 0;
+    1;
+}
+
 tick_reset_sink(
     blocks: []Block,
     n: int,
@@ -597,6 +646,8 @@ MASK_PAD: int = 32;
 CAM_EYE_Y: f32 = 13.2;
 
 CAM_BACK: f32 = 13.5;
+
+TRAVEL_CAM_BACK: f32 = 17.5;
 
 GRASS_NX: int = 512;
 
@@ -2496,7 +2547,8 @@ apply_editor_brush_rect(
     out: []int,
     start_c: []int,
     start_r: []int,
-    has_start: []int
+    has_start: []int,
+    cell: []int
 ) {
     if (c1 < c0) {
         t: int = c0;
@@ -2510,7 +2562,6 @@ apply_editor_brush_rect(
     }
     mesh: int = 0;
     mask: int = 0;
-    cell: []int = new int[7](0);
     r: int = r0;
     while (r <= r1) {
         c: int = c0;
@@ -2589,10 +2640,13 @@ upload_brick_mesh(
     nbrick: int,
     used: []int
 ): int {
-    sn: int = fill_chamfer_cube(chamfer);
-    n: int = fill_brick_cells(verts, 7000000, chamfer, sn, bricks, nbrick, used);
-    glBindBuffer(34962, buf);
-    glBufferData(34962, n * 4, verts, 35044);
+    n: int = 0;
+    region {
+        sn: int = fill_chamfer_cube(chamfer);
+        n = fill_brick_cells(verts, 7000000, chamfer, sn, bricks, nbrick, used);
+        glBindBuffer(34962, buf);
+        glBufferData(34962, n * 4, verts, 35044);
+    }
     n;
 }
 
@@ -3342,7 +3396,12 @@ spawn_finish_spark(
 ) {
     jx: f32 = (spark_rand(rng) - 0.5) * 0.70;
     jz: f32 = (spark_rand(rng) - 0.5) * 0.70;
-    if (kind == 2) {
+    if (kind == 4) {
+        put_spark(sparks, gx + jx * 0.24, 0.10 + spark_rand(rng) * 0.12,
+            gz + jz * 0.24, (spark_rand(rng) - 0.5) * 0.30,
+            10.0 + spark_rand(rng) * 4.0, (spark_rand(rng) - 0.5) * 0.30,
+            1.45 + spark_rand(rng) * 0.35, 4, room, blue);
+    } else if (kind == 2) {
         put_spark(sparks, gx + jx * 0.42, 0.10 + spark_rand(rng) * 0.16, gz + jz * 0.42,
             (spark_rand(rng) - 0.5) * 0.48, 6.0 + spark_rand(rng) * 2.8,
             (spark_rand(rng) - 0.5) * 0.48, 0.82 + spark_rand(rng) * 0.28, 2, room, blue);
@@ -3377,7 +3436,8 @@ step_sparks(
     nbrick: int,
     blocks: []Block,
     n: int,
-    finish_acc: []f32
+    finish_acc: []f32,
+    selector_goal: int
 ) {
     if (dt <= 0.0) {
         return;
@@ -3420,7 +3480,11 @@ step_sparks(
         gc: int = goals[gi].column;
         gr: int = goals[gi].row;
         if (in_view_cell(gc, gr, focus_x, focus_z, 4.0) != 0) {
-            finish_acc[gi] = finish_acc[gi] + dt * 5.0;
+            finish_rate: f32 = 5.0;
+            if (gi == selector_goal) {
+                finish_rate = 30.0;
+            }
+            finish_acc[gi] = finish_acc[gi] + dt * finish_rate;
             while (finish_acc[gi] >= 1.0) {
                 finish_acc[gi] = finish_acc[gi] - 1.0;
                 gri: int = room_at(rooms, nroom, gc, gr);
@@ -3428,7 +3492,12 @@ step_sparks(
                 if (gri >= 0 && gri < len(solved) && solved[gri] != 0) {
                     b0 = 1.0;
                 }
-                spawn_finish_spark(sparks, rng, gc as f32 + 0.5, gr as f32 + 0.5, gri, b0, 3);
+                finish_kind: int = 3;
+                if (gi == selector_goal) {
+                    finish_kind = 4;
+                }
+                spawn_finish_spark(sparks, rng, gc as f32 + 0.5, gr as f32 + 0.5, gri, b0,
+                    finish_kind);
             }
         } else {
             finish_acc[gi] = 0.0;
@@ -3472,8 +3541,12 @@ step_sparks(
                     p.vy = dy / d * sp + 0.55;
                     p.vz = dz / d * sp;
                 }
-            } else if (p.kind == 2) {
-                p.vy = p.vy - 7.0 * dt;
+            } else if (p.kind == 2 || p.kind == 4) {
+                gravity: f32 = 7.0;
+                if (p.kind == 4) {
+                    gravity = 4.5;
+                }
+                p.vy = p.vy - gravity * dt;
             } else {
                 p.vy = p.vy + 0.12 * dt;
                 p.vx = p.vx + (spark_rand(rng) - 0.5) * 0.35 * dt;
@@ -3570,7 +3643,7 @@ draw_sparks(
                     cg = 1.06;
                     cb = 0.30;
                     rad = 0.096 + fade * 0.032;
-                } else if (p.kind == 2 || p.kind == 3) {
+                } else if (p.kind == 2 || p.kind == 3 || p.kind == 4) {
                     cr = 0.95;
                     cg = 0.82;
                     cb = 0.26;
@@ -6604,8 +6677,8 @@ main(argc: int, argv: [][z]i8): int {
     if (edit_mode != 0) {
         write(2, "L8 editor (keys on screen, q quits)\n", len("L8 editor (keys on screen, q quits)\n"));
     } else {
-        write(2, "L8 block game (arrows move, r restarts room, q quits)\n",
-            len("L8 block game (arrows move, r restarts room, q quits)\n"));
+        write(2, "L8 block game (arrows move, j travels, r restarts, q quits)\n",
+            len("L8 block game (arrows move, j travels, r restarts, q quits)\n"));
     }
     write(2, "level: ", len("level: "));
     write(2, path, len(path));
@@ -7436,6 +7509,7 @@ void main() {
         paint_brush: int = BRUSH_BLOCK;
         brush_shape: int = 0;
         paint_out: []int = new int[7](0);
+        paint_cell: []int = new int[7](0);
         icon_proj: []f32 = new f32[16](0.0);
         icon_view: []f32 = new f32[16](0.0);
         icon_vp: []f32 = new f32[16](0.0);
@@ -7763,7 +7837,7 @@ void main() {
                                 apply_editor_brush_rect(blocks, n, bricks, nbrick, goals, ngoal,
                                     ground_cells, nground, rooms, titles, nroom, startp, c0, r0, cc,
                                     cr, paint_brush, brush_shape, 0, is_world, paint_out, room_sc,
-                                    room_sr, room_has);
+                                    room_sr, room_has, paint_cell);
                                 n = paint_out[0];
                                 nbrick = paint_out[1];
                                 ngoal = paint_out[2];
@@ -7792,7 +7866,7 @@ void main() {
                             apply_editor_brush_rect(blocks, n, bricks, nbrick, goals, ngoal,
                                 ground_cells, nground, rooms, titles, nroom, startp, c0e, r0e, cc,
                                 cr, paint_brush, brush_shape, 1, is_world, paint_out, room_sc,
-                                room_sr, room_has);
+                                room_sr, room_has, paint_cell);
                             n = paint_out[0];
                             nbrick = paint_out[1];
                             ngoal = paint_out[2];
@@ -7906,9 +7980,14 @@ void main() {
                                     }
                                 }
                             } else if (ks == 115 || ks == 83) {
-                                if (save_world(path, pnames, rooms, titles, nroom, blocks, n,
-                                    goals, ngoal, bricks, nbrick, ground_cells, nground, dones,
-                                    ndone, startp[0], startp[1], room_sc, room_sr, room_has) != 0) {
+                                save_failed: int = 0;
+                                region {
+                                    save_failed = save_world(path, pnames, rooms, titles, nroom,
+                                        blocks, n, goals, ngoal, bricks, nbrick, ground_cells,
+                                        nground, dones, ndone, startp[0], startp[1], room_sc,
+                                        room_sr, room_has);
+                                }
+                                if (save_failed != 0) {
                                     write(2, "save failed\n", len("save failed\n"));
                                 } else {
                                     dirty_world = 0;
@@ -7956,9 +8035,13 @@ void main() {
                             need_mesh = 1;
                             dirty_level = 1;
                         } else if (ks == 115 || ks == 83) {
-                            if (save_level(path, blocks, n, rooms, titles, nroom, goals,
-                                ngoal, bricks, nbrick, ground_cells, nground, startp[0],
-                                startp[1], room_sc, room_sr, room_has) != 0) {
+                            save_failed2: int = 0;
+                            region {
+                                save_failed2 = save_level(path, blocks, n, rooms, titles, nroom,
+                                    goals, ngoal, bricks, nbrick, ground_cells, nground, startp[0],
+                                    startp[1], room_sc, room_sr, room_has);
+                            }
+                            if (save_failed2 != 0) {
                                 write(2, "save failed\n", len("save failed\n"));
                             } else {
                                 dirty_level = 0;
@@ -8093,7 +8176,7 @@ void main() {
                 dt_e: f32 = spark_dt(spark_last, now_e);
                 step_sparks(sparks, spark_rng, spark_acc, spark_xy, rooms, 0, solved,
                     stream_until, stream_tx, stream_tz, focus_x, focus_z, now_e, dt_e, 0, 0.0,
-                    0.0, goals, ngoal, bricks, nbrick, blocks, n, finish_acc);
+                    0.0, goals, ngoal, bricks, nbrick, blocks, n, finish_acc, 0 - 1);
                 draw_frame(prog, dprog, u_vp, u_origin, u_scale, u_color, u_light,
                     u_light_vp, u_lag, d_vp, d_origin, d_scale, d_color, d_lag, ids[0],
                     ids[1], ids[2], ids[3], chamfer_n, ids[4], brick_n, fbos[0], stex[0],
@@ -8234,6 +8317,10 @@ void main() {
         held_r: int = 0;
         held_u: int = 0;
         held_d: int = 0;
+        travel_mode: int = 0;
+        travel_goal: int = 0 - 1;
+        play_camera_dist: f32 = CAM_BACK;
+        play_camera_ms: int = started;
         topx: []f32 = new f32[1024](0.0);
         topz: []f32 = new f32[1024](0.0);
         velx: []f32 = new f32[1024](0.0);
@@ -8251,8 +8338,64 @@ void main() {
                             fps = toggle_fps(fps);
                         } else if (is_vsync_key(ks) != 0) {
                             vsync = set_vsync(dpy, win, 1 - vsync);
-                        } else if (ks == 113 || ks == 81 || ks == 65307) {
+                        } else if (ks == 113 || ks == 81) {
                             running = 0;
+                        } else if (travel_mode != 0) {
+                            if (ks == 65307) {
+                                travel_mode = 0;
+                            } else if (ks == 65293 || ks == 65421) {
+                                play_pose[0] = pc;
+                                play_pose[1] = pr;
+                                play_pose[2] = ph;
+                                play_pose[3] = pm;
+                                play_clock[0] = hstart;
+                                play_clock[1] = hn;
+                                play_clock[2] = started;
+                                if (play_jump_to_finish(blocks, n, rooms, nroom, bricks, nbrick,
+                                    goals, ngoal, solved, hist, hpc, hpr, hph, hpm, play_clock,
+                                    play_pose, play_pend, room_ids, room_hn, rewind_snap, rewind_n,
+                                    rewind_cur, room_ghosting, travel_goal) != 0) {
+                                    pc = play_pose[0];
+                                    pr = play_pose[1];
+                                    ph = play_pose[2];
+                                    pm = play_pose[3];
+                                    hstart = play_clock[0];
+                                    hn = play_clock[1];
+                                    started = play_clock[2];
+                                    crate_boot(blocks, n, crate_pose, crate_hs, crate_hn, crate_t0);
+                                    prep_cache[7] = 0;
+                                    clear_sparks(sparks);
+                                }
+                                travel_mode = 0;
+                            } else if (ks == 65361 || ks == 65362 || ks == 65363 ||
+                                ks == 65364) {
+                                tdc: int = 0;
+                                tdr: int = 0;
+                                if (ks == 65361) {
+                                    tdc = 0 - 1;
+                                } else if (ks == 65363) {
+                                    tdc = 1;
+                                } else if (ks == 65362) {
+                                    tdr = 0 - 1;
+                                } else {
+                                    tdr = 1;
+                                }
+                                next_travel_goal: int = visited_finish_in_direction(rooms, nroom,
+                                    goals, ngoal, solved, travel_goal, tdc, tdr);
+                                if (next_travel_goal != travel_goal) {
+                                    travel_goal = next_travel_goal;
+                                }
+                            }
+                        } else if (ks == 65307) {
+                            running = 0;
+                        } else if ((ks == 106 || ks == 74) && reset_phase[0] == 0) {
+                            travel_goal = closest_visited_finish(rooms, nroom, goals, ngoal,
+                                solved, pc, pr);
+                            if (travel_goal >= 0) {
+                                travel_mode = 1;
+                                play_pend[0] = 0;
+                                play_pend[1] = 0;
+                            }
                         } else if (ks == 114 || ks == 82 || ks == 65288) {
                             begin_room_reset(rooms, nroom, pc, pr, rewind_n, room_ghosting, room_sc,
                                 room_sr, reset_phase, reset_t0, reset_room, play_pend, mono_ms());
@@ -8458,9 +8601,41 @@ void main() {
                 camera_focus(tc2, tr2, rooms, nroom, cam2);
                 want_fx: f32 = lerp(cam[0], cam2[0], t);
                 want_fz: f32 = lerp(cam[1], cam2[1], t);
-                focus_x = focus_x + (want_fx - focus_x) * 0.25;
-                focus_z = focus_z + (want_fz - focus_z) * 0.25;
-                mat_look(view, focus_x, CAM_EYE_Y, focus_z + CAM_BACK, focus_x, 0.0, focus_z,
+                if (travel_mode != 0 && travel_goal >= 0 && travel_goal < ngoal) {
+                    travel: Goal = goals[travel_goal];
+                    camera_focus(travel.column, travel.row, rooms, nroom, cam2);
+                    want_fx = cam2[0];
+                    want_fz = cam2[1];
+                }
+                camera_dt: f32 = (now - play_camera_ms) as f32 * 0.001;
+                if (camera_dt < 0.0) {
+                    camera_dt = 0.0;
+                }
+                if (camera_dt > 0.05) {
+                    camera_dt = 0.05;
+                }
+                play_camera_ms = now;
+                camera_smooth: f32 = 0.20;
+                camera_want_dist: f32 = CAM_BACK;
+                if (travel_mode != 0) {
+                    camera_smooth = 0.42;
+                    camera_want_dist = TRAVEL_CAM_BACK;
+                }
+                camera_k: f32 = camera_dt / camera_smooth;
+                if (camera_k > 1.0) {
+                    camera_k = 1.0;
+                }
+                focus_x = focus_x + (want_fx - focus_x) * camera_k;
+                focus_z = focus_z + (want_fz - focus_z) * camera_k;
+                zoom_k: f32 = camera_dt / 0.48;
+                if (zoom_k > 1.0) {
+                    zoom_k = 1.0;
+                }
+                play_camera_dist = play_camera_dist +
+                    (camera_want_dist - play_camera_dist) * zoom_k;
+                play_camera_y: f32 = play_camera_dist * (CAM_EYE_Y / CAM_BACK);
+                mat_look(view, focus_x, play_camera_y, focus_z + play_camera_dist, focus_x, 0.0,
+                    focus_z,
                     0.0, 1.0, 0.0);
                 mat_mul(vp, proj, view, mtmp);
                 lx: f32 = focus_x + 4.0;
@@ -8531,14 +8706,18 @@ void main() {
                     on_g = 1;
                 }
                 dt_p: f32 = spark_dt(spark_last, now);
+                selector_goal: int = 0 - 1;
+                if (travel_mode != 0) {
+                    selector_goal = travel_goal;
+                }
                 step_sparks(sparks, spark_rng, spark_acc, spark_xy, rooms, nroom, solved,
                     stream_until, stream_tx, stream_tz, focus_x, focus_z, now, dt_p, on_g, gx_f,
-                    gz_f, goals, ngoal, bricks, nbrick, blocks, n, finish_acc);
+                    gz_f, goals, ngoal, bricks, nbrick, blocks, n, finish_acc, selector_goal);
                 draw_frame(prog, dprog, u_vp, u_origin, u_scale, u_color, u_light,
                     u_light_vp, u_lag, d_vp, d_origin, d_scale, d_color, d_lag, ids[0],
                     ids[1], ids[2], ids[3], chamfer_n, ids[4], brick_n, fbos[0], stex[0],
                     ctex[0], cmask, ground_cells, nground, rooms, nroom, focus_x,
-                    focus_z, focus_x, CAM_EYE_Y, focus_z + CAM_BACK, u_mask_origin,
+                    focus_z, focus_x, play_camera_y, focus_z + play_camera_dist, u_mask_origin,
                     vp, lcam, lvp, lx, ly, lz, hist, foff, toff, n, px, py, pz, t,
                     shape_verts, lagx, lagz, 1, 0, 0, 0.0, 0.0, 0.0, 0, GROUND_DIRT, 0, 0, 0, 1,
                     0, 0, 0,
@@ -8556,6 +8735,14 @@ void main() {
                 }
                 if (ti_t >= 0) {
                     to_title = titles[ti_t];
+                }
+                if (travel_mode != 0 && travel_goal >= 0 && travel_goal < ngoal) {
+                    travel_room: int = room_at(rooms, nroom, goals[travel_goal].column,
+                        goals[travel_goal].row);
+                    if (travel_room >= 0) {
+                        from_title = titles[travel_room];
+                        to_title = from_title;
+                    }
                 }
                 glDisable(2929);
                 glEnable(3042);
