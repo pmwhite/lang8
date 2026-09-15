@@ -2,7 +2,7 @@
 //   .build/block-game [play] [path]   play a world or a lone level
 //   .build/block-game edit [path]     unified world/level editor
 // Default path is programs/gl/world.txt. Arrows move, j picks a visited finish,
-// r restarts the room, and q quits.
+// Backspace undoes, Shift+Backspace restarts the room, and q quits.
 import "gl.l8";
 
 import "level.l8";
@@ -329,6 +329,167 @@ hist_off(hstart: int, i: int): int {
     (hstart + i) % 8 * 1024;
 }
 
+PLAY_UNDO_MAX: int = 128;
+
+play_undo_slot(step: int, k: int): int {
+    step * REWIND_HOME + k;
+}
+
+play_undo_clear(state: []int) {
+    state[0] = 0;
+    state[1] = 0;
+}
+
+play_undo_capture(
+    blocks: []Block,
+    room: int,
+    room_ids: []int,
+    room_hn: []int,
+    pose: []int,
+    snap: []int,
+    upc: []int,
+    upr: []int,
+    uph: []int,
+    upm: []int,
+    uroom: []int,
+    state: []int
+): int {
+    if (room < 0 || room >= LEVEL_MAX_ROOMS) {
+        return 0;
+    }
+    start: int = state[0];
+    count: int = state[1];
+    if (count >= PLAY_UNDO_MAX) {
+        start = (start + 1) % PLAY_UNDO_MAX;
+        count = count - 1;
+    }
+    slot: int = (start + count) % PLAY_UNDO_MAX;
+    k: int = 0;
+    while (k < room_hn[room]) {
+        i: int = room_ids[room * REWIND_HOME + k];
+        b: Block = blocks[i];
+        snap[play_undo_slot(slot, k)] = pack_pos(b.column, b.row, b.layer, b.mounted);
+        k = k + 1;
+    }
+    upc[slot] = pose[0];
+    upr[slot] = pose[1];
+    uph[slot] = pose[2];
+    upm[slot] = pose[3];
+    uroom[slot] = room;
+    state[0] = start;
+    state[1] = count + 1;
+    1;
+}
+
+play_undo_blocks_changed(
+    blocks: []Block,
+    room: int,
+    room_ids: []int,
+    room_hn: []int,
+    snap: []int,
+    state: []int
+): int {
+    if (state[1] < 1 || room < 0 || room >= LEVEL_MAX_ROOMS) {
+        return 0;
+    }
+    slot: int = (state[0] + state[1] - 1) % PLAY_UNDO_MAX;
+    k: int = 0;
+    while (k < room_hn[room]) {
+        i: int = room_ids[room * REWIND_HOME + k];
+        b: Block = blocks[i];
+        p: int = pack_pos(b.column, b.row, b.layer, b.mounted);
+        if (p != snap[play_undo_slot(slot, k)]) {
+            return 1;
+        }
+        k = k + 1;
+    }
+    0;
+}
+
+play_undo_discard(state: []int) {
+    if (state[1] > 0) {
+        state[1] = state[1] - 1;
+    }
+}
+
+play_undo_step(
+    blocks: []Block,
+    n: int,
+    rooms: []Room,
+    nroom: int,
+    hist: []Block,
+    hpc: []int,
+    hpr: []int,
+    hph: []int,
+    hpm: []int,
+    hms: []int,
+    clock: []int,
+    pose: []int,
+    pend: []int,
+    room_ids: []int,
+    room_hn: []int,
+    rewind_snap: []int,
+    rewind_n: []int,
+    rewind_cur: []int,
+    room_ghosting: []int,
+    snap: []int,
+    upc: []int,
+    upr: []int,
+    uph: []int,
+    upm: []int,
+    uroom: []int,
+    state: []int,
+    now: int
+): int {
+    if (state[1] < 1) {
+        return 0;
+    }
+    slot: int = (state[0] + state[1] - 1) % PLAY_UNDO_MAX;
+    room: int = uroom[slot];
+    here: int = room_at(rooms, nroom, pose[0], pose[1]);
+    if (room < 0 || room >= LEVEL_MAX_ROOMS || room != here || room_ghosting[room] != 0) {
+        play_undo_clear(state);
+        return 0;
+    }
+    copy_blocks(hist, 0, blocks, 0, n);
+    hpc[0] = pose[0];
+    hpr[0] = pose[1];
+    hph[0] = pose[2];
+    hpm[0] = pose[3];
+    k: int = 0;
+    while (k < room_hn[room]) {
+        i: int = room_ids[room * REWIND_HOME + k];
+        blocks[i] = apply_packed(blocks[i], snap[play_undo_slot(slot, k)]);
+        k = k + 1;
+    }
+    copy_blocks(hist, 1024, blocks, 0, n);
+    pose[0] = upc[slot];
+    pose[1] = upr[slot];
+    pose[2] = uph[slot];
+    pose[3] = upm[slot];
+    hpc[1] = pose[0];
+    hpr[1] = pose[1];
+    hph[1] = pose[2];
+    hpm[1] = pose[3];
+    step_ms: int = step_dur(sit_y(hist, 0, n, hpc[0], hpr[0], hph[0]),
+        sit_y(hist, 1024, n, hpc[1], hpr[1], hph[1]),
+        sit_at(hist, 0, n, hpc[0], hpr[0], hph[0]),
+        sit_at(hist, 1024, n, hpc[1], hpr[1], hph[1]));
+    hms[1] = block_step_dur(hist, 0, 1024, n, step_ms);
+    clock[0] = 0;
+    clock[1] = 2;
+    clock[2] = now;
+    pend[0] = 0;
+    pend[1] = 0;
+    state[1] = state[1] - 1;
+    cur: int = rewind_cur[room];
+    if (cur > 0 && rewind_changed(blocks, room, room_ids, room_hn, rewind_snap, cur - 1) == 0) {
+        rewind_cur[room] = cur - 1;
+        rewind_n[room] = cur;
+    }
+    1;
+}
+
 play_commit_pose(
     blocks: []Block,
     n: int,
@@ -496,10 +657,36 @@ play_try_dir(
     stream_tz: []f32,
     sparks: []Spark,
     spark_rng: []int,
-    spark_xy: []int
+    spark_xy: []int,
+    undo_snap: []int,
+    undo_pc: []int,
+    undo_pr: []int,
+    undo_ph: []int,
+    undo_pm: []int,
+    undo_room: []int,
+    undo_state: []int
 ) {
+    old_room: int = room_at(rooms, nroom, pose[0], pose[1]);
+    captured: int = play_undo_capture(blocks, old_room, room_ids, room_hn, pose, undo_snap,
+        undo_pc, undo_pr, undo_ph, undo_pm, undo_room, undo_state);
     packed: int = move_player(blocks, n, rooms, nroom, bricks, nbrick, pose[0], pose[1], pose[2],
         dc, dr, room_ids, room_hn, rewind_snap, rewind_n, rewind_cur, room_ghosting);
+    moved: int = 0;
+    if (pos_col(packed) != pose[0] || pos_row(packed) != pose[1] ||
+        pos_layer(packed) != pose[2] || pos_mounted(packed) != pose[3]) {
+        moved = 1;
+    } else if (captured != 0 && play_undo_blocks_changed(blocks, old_room, room_ids, room_hn,
+        undo_snap, undo_state) != 0) {
+        moved = 1;
+    }
+    if (captured != 0) {
+        new_room: int = room_at(rooms, nroom, pos_col(packed), pos_row(packed));
+        if (moved == 0) {
+            play_undo_discard(undo_state);
+        } else if (new_room != old_room) {
+            play_undo_clear(undo_state);
+        }
+    }
     pend[0] = 0;
     pend[1] = 0;
     play_commit_move(blocks, n, rooms, nroom, bricks, nbrick, hist, hpc, hpr, hph, hpm, hms, clock,
@@ -6677,8 +6864,8 @@ main(argc: int, argv: [][z]i8): int {
     if (edit_mode != 0) {
         write(2, "L8 editor (keys on screen, q quits)\n", len("L8 editor (keys on screen, q quits)\n"));
     } else {
-        write(2, "L8 block game (arrows move, j travels, r restarts, q quits)\n",
-            len("L8 block game (arrows move, j travels, r restarts, q quits)\n"));
+        write(2, "L8 block game (arrows move, j travels, Backspace undoes, Shift+Backspace restarts, q quits)\n",
+            len("L8 block game (arrows move, j travels, Backspace undoes, Shift+Backspace restarts, q quits)\n"));
     }
     write(2, "level: ", len("level: "));
     write(2, path, len(path));
@@ -8287,6 +8474,14 @@ void main() {
         rewind_n: []int = new int[LEVEL_MAX_ROOMS](0);
         rewind_cur: []int = new int[LEVEL_MAX_ROOMS](0);
         room_ghosting: []int = new int[LEVEL_MAX_ROOMS](0);
+        undo_snap: []int = new int[PLAY_UNDO_MAX * REWIND_HOME](0);
+        undo_pc: []int = new int[PLAY_UNDO_MAX](0);
+        undo_pr: []int = new int[PLAY_UNDO_MAX](0);
+        undo_ph: []int = new int[PLAY_UNDO_MAX](0);
+        undo_pm: []int = new int[PLAY_UNDO_MAX](0);
+        undo_room: []int = new int[PLAY_UNDO_MAX](0 - 1);
+        undo_state: []int = new int[2](0);
+        undo_pending: int = 0;
         crate_pose: []int = new int[2048 * 8](0);
         crate_ms: []int = new int[2048 * 8](0);
         crate_hs: []int = new int[2048](0);
@@ -8340,6 +8535,22 @@ void main() {
                             vsync = set_vsync(dpy, win, 1 - vsync);
                         } else if (ks == 113 || ks == 81) {
                             running = 0;
+                        } else if (ks == 65288 && shift != 0) {
+                            if (reset_phase[0] == 0) {
+                                travel_mode = 0;
+                                undo_pending = 0;
+                                play_undo_clear(undo_state);
+                                begin_room_reset(rooms, nroom, pc, pr, rewind_n, room_ghosting,
+                                    room_sc, room_sr, reset_phase, reset_t0, reset_room, play_pend,
+                                    mono_ms());
+                            }
+                        } else if (ks == 65288) {
+                            if (reset_phase[0] == 0) {
+                                travel_mode = 0;
+                                undo_pending = 1;
+                                play_pend[0] = 0;
+                                play_pend[1] = 0;
+                            }
                         } else if (travel_mode != 0) {
                             if (ks == 65307) {
                                 travel_mode = 0;
@@ -8365,6 +8576,8 @@ void main() {
                                     crate_boot(blocks, n, crate_pose, crate_hs, crate_hn, crate_t0);
                                     prep_cache[7] = 0;
                                     clear_sparks(sparks);
+                                    play_undo_clear(undo_state);
+                                    undo_pending = 0;
                                 }
                                 travel_mode = 0;
                             } else if (ks == 65361 || ks == 65362 || ks == 65363 ||
@@ -8388,7 +8601,8 @@ void main() {
                             }
                         } else if (ks == 65307) {
                             running = 0;
-                        } else if ((ks == 106 || ks == 74) && reset_phase[0] == 0) {
+                        } else if ((ks == 106 || ks == 74) && reset_phase[0] == 0 &&
+                            undo_pending == 0) {
                             travel_goal = closest_visited_finish(rooms, nroom, goals, ngoal,
                                 solved, pc, pr);
                             if (travel_goal >= 0) {
@@ -8396,9 +8610,6 @@ void main() {
                                 play_pend[0] = 0;
                                 play_pend[1] = 0;
                             }
-                        } else if (ks == 114 || ks == 82 || ks == 65288) {
-                            begin_room_reset(rooms, nroom, pc, pr, rewind_n, room_ghosting, room_sc,
-                                room_sr, reset_phase, reset_t0, reset_room, play_pend, mono_ms());
                         } else if (ks == 65361 || ks == 65362 || ks == 65363 || ks == 65364) {
                             is_rep: int = 0;
                             if (ks == 65361 && held_l != 0) {
@@ -8425,7 +8636,7 @@ void main() {
                             if (ks == 65364) {
                                 held_d = 1;
                             }
-                            if (shift == 0 && reset_phase[0] == 0) {
+                            if (shift == 0 && reset_phase[0] == 0 && undo_pending == 0) {
                                 gated: int = 0;
                                 if (hn < 2) {
                                     gated = 1;
@@ -8456,7 +8667,8 @@ void main() {
                                         play_pend, room_ids, room_hn, rewind_snap, rewind_n,
                                         rewind_cur, room_ghosting, goals, ngoal, solved,
                                         stream_until, stream_tx, stream_tz, sparks, spark_rng,
-                                        spark_xy);
+                                        spark_xy, undo_snap, undo_pc, undo_pr, undo_ph, undo_pm,
+                                        undo_room, undo_state);
                                     pc = play_pose[0];
                                     pr = play_pose[1];
                                     ph = play_pose[2];
@@ -8515,6 +8727,31 @@ void main() {
                         }
                     }
                 }
+                if (undo_pending != 0 && hn == 1 && reset_phase[0] == 0) {
+                    play_pose[0] = pc;
+                    play_pose[1] = pr;
+                    play_pose[2] = ph;
+                    play_pose[3] = pm;
+                    play_clock[0] = hstart;
+                    play_clock[1] = hn;
+                    play_clock[2] = started;
+                    if (play_undo_step(blocks, n, rooms, nroom, hist, hpc, hpr, hph, hpm, hms,
+                        play_clock, play_pose, play_pend, room_ids, room_hn, rewind_snap, rewind_n,
+                        rewind_cur, room_ghosting, undo_snap, undo_pc, undo_pr, undo_ph, undo_pm,
+                        undo_room, undo_state, now) != 0) {
+                        pc = play_pose[0];
+                        pr = play_pose[1];
+                        ph = play_pose[2];
+                        pm = play_pose[3];
+                        hstart = play_clock[0];
+                        hn = play_clock[1];
+                        started = play_clock[2];
+                        crate_commit_changed(blocks, n, now, crate_pose, crate_ms, crate_hs,
+                            crate_hn, crate_t0);
+                        prep_cache[7] = 0;
+                    }
+                    undo_pending = 0;
+                }
                 t: f32 = 0.0;
                 if (hn > 1) {
                     t = (now - started) as f32 / dur as f32;
@@ -8554,7 +8791,8 @@ void main() {
                 hstart = play_clock[0];
                 hn = play_clock[1];
                 started = play_clock[2];
-                if (reset_phase[0] == 0 && (play_pend[0] != 0 || play_pend[1] != 0) && hn < 5) {
+                if (reset_phase[0] == 0 && undo_pending == 0 &&
+                    (play_pend[0] != 0 || play_pend[1] != 0) && hn < 5) {
                     play_pose[0] = pc;
                     play_pose[1] = pr;
                     play_pose[2] = ph;
@@ -8565,7 +8803,8 @@ void main() {
                     play_try_dir(blocks, n, rooms, nroom, bricks, nbrick, hist, hpc, hpr, hph, hpm,
                         hms, play_clock, play_pose, play_pend[0], play_pend[1], play_pend, room_ids,
                         room_hn, rewind_snap, rewind_n, rewind_cur, room_ghosting, goals, ngoal,
-                        solved, stream_until, stream_tx, stream_tz, sparks, spark_rng, spark_xy);
+                        solved, stream_until, stream_tx, stream_tz, sparks, spark_rng, spark_xy,
+                        undo_snap, undo_pc, undo_pr, undo_ph, undo_pm, undo_room, undo_state);
                     pc = play_pose[0];
                     pr = play_pose[1];
                     ph = play_pose[2];
