@@ -1,0 +1,647 @@
+// Player movement, animation, undo, and room-transition logic.
+
+lerp(a: f32, b: f32, t: f32): f32 {
+    a + (b - a) * t;
+}
+
+smooth_u(u: f32): f32 {
+    u * u * (3.0 - 2.0 * u);
+}
+
+clamp_along(a: f32): f32 {
+    if (a > 0.5) {
+        return 0.5;
+    }
+    if (a < 0.0 - 0.5) {
+        return 0.0 - 0.5;
+    }
+    a;
+}
+
+slope_y(
+    base: f32,
+    x: f32,
+    z: f32,
+    column: int,
+    row: int,
+    rux: f32,
+    ruz: f32
+): f32 {
+    along: f32 = (x - column as f32) * rux + (z - row as f32) * ruz;
+    base + clamp_along(along);
+}
+
+fall_t(
+    from_y: f32,
+    to_y: f32,
+    from_sit: int,
+    to_sit: int,
+    t: f32
+): f32 {
+    leave: bool = from_sit != 0 && to_sit == 0;
+    mount: bool = from_sit == 0 && to_sit != 0;
+    drop: bool = to_y + 0.15 < from_y;
+    if (!leave && !mount && !drop) {
+        return t;
+    }
+    lip: f32 = 0.55;
+    if (t <= lip) {
+        return 0.0;
+    }
+    smooth_u((t - lip) / (1.0 - lip));
+}
+
+anim_y(
+    y0: f32,
+    y1: f32,
+    x: f32,
+    z: f32,
+    c0: int,
+    r0: int,
+    c1: int,
+    r1: int,
+    ux0: f32,
+    uz0: f32,
+    ux1: f32,
+    uz1: f32,
+    from_sit: int,
+    to_sit: int,
+    t: f32
+): f32 {
+    leave: int = 0;
+    if (from_sit != 0 && to_sit == 0) {
+        leave = 1;
+    }
+    drop: int = 0;
+    if (y1 + 0.15 < y0) {
+        drop = 1;
+    }
+    lip: f32 = 0.55;
+    if (leave != 0 || from_sit != 0 && drop != 0) {
+        if (t <= lip) {
+            return slope_y(y0, x, z, c0, r0, ux0, uz0);
+        }
+        lx: f32 = lerp(c0 as f32, c1 as f32, lip);
+        lz: f32 = lerp(r0 as f32, r1 as f32, lip);
+        ylip: f32 = slope_y(y0, lx, lz, c0, r0, ux0, uz0);
+        lerp(ylip, y1, smooth_u((t - lip) / (1.0 - lip)));
+    } else if (from_sit == 0 && to_sit != 0) {
+        if (t <= lip) {
+            return y0;
+        }
+        yride: f32 = slope_y(y1, x, z, c1, r1, ux1, uz1);
+        lerp(y0, yride, smooth_u((t - lip) / (1.0 - lip)));
+    } else if (from_sit != 0 && to_sit != 0) {
+        if (t <= lip) {
+            return slope_y(y0, x, z, c0, r0, ux0, uz0);
+        }
+        slope_y(y1, x, z, c1, r1, ux1, uz1);
+    } else if (drop != 0) {
+        if (t <= lip) {
+            return y0;
+        }
+        lerp(y0, y1, smooth_u((t - lip) / (1.0 - lip)));
+    } else {
+        lerp(y0, y1, t);
+    }
+}
+
+step_dur(
+    y0: f32,
+    y1: f32,
+    from_sit: int,
+    to_sit: int
+): int {
+    ms: int = 200;
+    dy: f32 = y0 - y1;
+    if (from_sit != 0 && to_sit == 0 || from_sit == 0 && to_sit != 0) {
+        ms = 260;
+        if (dy < 0.0) {
+            dy = 0.0 - dy;
+        }
+        if (dy < 0.3) {
+            dy = 0.3;
+        }
+    }
+    if (dy > 0.1) {
+        ms = ms + (dy * 160.0) as int;
+    }
+    ms;
+}
+
+cargo_sit(b: Block): int {
+    if (b.mounted != 0) {
+        return 1;
+    }
+    0;
+}
+
+block_step_dur(
+    hist: []Block,
+    foff: int,
+    toff: int,
+    n: int,
+    ms: int
+): int {
+    for i in 0..n {
+        tb: Block = hist[toff + i];
+        fb: Block = hist[foff + i];
+        if (fb.id == tb.id) {
+            d: int = step_dur(fb.layer as f32 + 0.5, tb.layer as f32 + 0.5, cargo_sit(fb),
+                cargo_sit(tb));
+            if (d > ms) {
+                ms = d;
+            }
+        }
+    }
+    ms;
+}
+
+hist_off(hstart: int, i: int): int {
+    (hstart + i) % 8 * 1024;
+}
+
+PLAY_UNDO_MAX: int = 128;
+
+play_undo_slot(step: int, k: int): int {
+    step * REWIND_HOME + k;
+}
+
+play_undo_clear(state: []int) {
+    state[0] = 0;
+    state[1] = 0;
+}
+
+play_undo_capture(
+    blocks: []Block,
+    room: int,
+    room_ids: []int,
+    room_hn: []int,
+    pose: []int,
+    snap: []int,
+    upc: []int,
+    upr: []int,
+    uph: []int,
+    upm: []int,
+    uroom: []int,
+    state: []int
+): bool {
+    if (room < 0 || room >= LEVEL_MAX_ROOMS) {
+        return false;
+    }
+    start: int = state[0];
+    count: int = state[1];
+    if (count >= PLAY_UNDO_MAX) {
+        start = (start + 1) % PLAY_UNDO_MAX;
+        count = count - 1;
+    }
+    slot: int = (start + count) % PLAY_UNDO_MAX;
+    k: int = 0;
+    while (k < room_hn[room]) {
+        i: int = room_ids[room * REWIND_HOME + k];
+        b: Block = blocks[i];
+        snap[play_undo_slot(slot, k)] = pack_pos(b.column, b.row, b.layer, b.mounted);
+        k = k + 1;
+    }
+    upc[slot] = pose[0];
+    upr[slot] = pose[1];
+    uph[slot] = pose[2];
+    upm[slot] = pose[3];
+    uroom[slot] = room;
+    state[0] = start;
+    state[1] = count + 1;
+    true;
+}
+
+play_undo_blocks_changed(
+    blocks: []Block,
+    room: int,
+    room_ids: []int,
+    room_hn: []int,
+    snap: []int,
+    state: []int
+): bool {
+    if (state[1] < 1 || room < 0 || room >= LEVEL_MAX_ROOMS) {
+        return false;
+    }
+    slot: int = (state[0] + state[1] - 1) % PLAY_UNDO_MAX;
+    k: int = 0;
+    while (k < room_hn[room]) {
+        i: int = room_ids[room * REWIND_HOME + k];
+        b: Block = blocks[i];
+        p: int = pack_pos(b.column, b.row, b.layer, b.mounted);
+        if (p != snap[play_undo_slot(slot, k)]) {
+            return true;
+        }
+        k = k + 1;
+    }
+    false;
+}
+
+play_undo_discard(state: []int) {
+    if (state[1] > 0) {
+        state[1] = state[1] - 1;
+    }
+}
+
+play_undo_step(
+    blocks: []Block,
+    n: int,
+    rooms: []Room,
+    nroom: int,
+    hist: []Block,
+    hpc: []int,
+    hpr: []int,
+    hph: []int,
+    hpm: []int,
+    hms: []int,
+    clock: []int,
+    pose: []int,
+    pend: []int,
+    room_ids: []int,
+    room_hn: []int,
+    rewind_snap: []int,
+    rewind_n: []int,
+    rewind_cur: []int,
+    room_ghosting: []int,
+    snap: []int,
+    upc: []int,
+    upr: []int,
+    uph: []int,
+    upm: []int,
+    uroom: []int,
+    state: []int,
+    now: int
+): int {
+    if (state[1] < 1) {
+        return 0;
+    }
+    slot: int = (state[0] + state[1] - 1) % PLAY_UNDO_MAX;
+    room: int = uroom[slot];
+    here: int = room_at(rooms, nroom, pose[0], pose[1]);
+    if (room < 0 || room >= LEVEL_MAX_ROOMS || room != here || room_ghosting[room] != 0) {
+        play_undo_clear(state);
+        return 0;
+    }
+    copy_blocks(hist, 0, blocks, 0, n);
+    hpc[0] = pose[0];
+    hpr[0] = pose[1];
+    hph[0] = pose[2];
+    hpm[0] = pose[3];
+    k: int = 0;
+    while (k < room_hn[room]) {
+        i: int = room_ids[room * REWIND_HOME + k];
+        blocks[i] = apply_packed(blocks[i], snap[play_undo_slot(slot, k)]);
+        k = k + 1;
+    }
+    copy_blocks(hist, 1024, blocks, 0, n);
+    pose[0] = upc[slot];
+    pose[1] = upr[slot];
+    pose[2] = uph[slot];
+    pose[3] = upm[slot];
+    hpc[1] = pose[0];
+    hpr[1] = pose[1];
+    hph[1] = pose[2];
+    hpm[1] = pose[3];
+    step_ms: int = step_dur(sit_y(hist, 0, n, hpc[0], hpr[0], hph[0]), sit_y(hist,
+        1024, n, hpc[1], hpr[1], hph[1]), sit_at(hist, 0, n, hpc[0], hpr[0], hph[0]),
+        sit_at(hist, 1024, n, hpc[1], hpr[1], hph[1]));
+    hms[1] = block_step_dur(hist, 0, 1024, n, step_ms);
+    clock[0] = 0;
+    clock[1] = 2;
+    clock[2] = now;
+    pend[0] = 0;
+    pend[1] = 0;
+    state[1] = state[1] - 1;
+    cur: int = rewind_cur[room];
+    if (cur > 0 && rewind_changed(blocks, room, room_ids, room_hn, rewind_snap, cur - 1) == 0) {
+        rewind_cur[room] = cur - 1;
+        rewind_n[room] = cur;
+    }
+    1;
+}
+
+play_commit_pose(
+    blocks: []Block,
+    n: int,
+    hist: []Block,
+    hpc: []int,
+    hpr: []int,
+    hph: []int,
+    hpm: []int,
+    hms: []int,
+    clock: []int,
+    pose: []int,
+    packed: int,
+    step_ms: int
+) {
+    hstart: int = clock[0];
+    hn: int = clock[1];
+    prevs: int = (hstart + hn - 1) % 8;
+    yfrom: f32 = sit_y(hist, prevs * 1024, n, hpc[prevs], hpr[prevs], hph[prevs]);
+    sfrom: int = sit_at(hist, prevs * 1024, n, hpc[prevs], hpr[prevs], hph[prevs]);
+    pose[0] = pos_col(packed);
+    pose[1] = pos_row(packed);
+    pose[2] = pos_layer(packed);
+    pose[3] = pos_mounted(packed);
+    if (hn == 1) {
+        clock[2] = mono_ms();
+    }
+    if (hn >= 8) {
+        hstart = (hstart + 1) % 8;
+        hn = hn - 1;
+    }
+    slot: int = (hstart + hn) % 8;
+    copy_blocks(hist, slot * 1024, blocks, 0, n);
+    hpc[slot] = pose[0];
+    hpr[slot] = pose[1];
+    hph[slot] = pose[2];
+    hpm[slot] = pose[3];
+    ms: int = step_ms;
+    if (ms <= 0) {
+        ms = block_step_dur(hist, prevs * 1024, slot * 1024, n, step_dur(yfrom, sit_y(hist,
+            slot * 1024, n, pose[0], pose[1], pose[2]), sfrom, sit_at(hist, slot * 1024,
+            n, pose[0], pose[1], pose[2])));
+    }
+    hms[slot] = ms;
+    hn = hn + 1;
+    clock[0] = hstart;
+    clock[1] = hn;
+}
+
+play_snap_pose(
+    blocks: []Block,
+    n: int,
+    hist: []Block,
+    hpc: []int,
+    hpr: []int,
+    hph: []int,
+    hpm: []int,
+    clock: []int,
+    pose: []int,
+    packed: int
+) {
+    pose[0] = pos_col(packed);
+    pose[1] = pos_row(packed);
+    pose[2] = pos_layer(packed);
+    pose[3] = pos_mounted(packed);
+    copy_blocks(hist, 0, blocks, 0, n);
+    copy_blocks(hist, 1024, blocks, 0, n);
+    hpc[0] = pose[0];
+    hpr[0] = pose[1];
+    hph[0] = pose[2];
+    hpm[0] = pose[3];
+    hpc[1] = pose[0];
+    hpr[1] = pose[1];
+    hph[1] = pose[2];
+    hpm[1] = pose[3];
+    clock[0] = 0;
+    clock[1] = 1;
+}
+
+play_commit_move(
+    blocks: []Block,
+    n: int,
+    rooms: []Room,
+    nroom: int,
+    bricks: []Brick,
+    nbrick: int,
+    hist: []Block,
+    hpc: []int,
+    hpr: []int,
+    hph: []int,
+    hpm: []int,
+    hms: []int,
+    clock: []int,
+    pose: []int,
+    packed: int,
+    room_ids: []int,
+    room_hn: []int,
+    rewind_snap: []int,
+    rewind_n: []int,
+    rewind_cur: []int,
+    room_ghosting: []int,
+    goals: []Goal,
+    ngoal: int,
+    solved: []int,
+    stream_until: []int,
+    stream_tx: []f32,
+    stream_tz: []f32,
+    sparks: []Spark,
+    spark_rng: []int,
+    spark_xy: []int
+) {
+    old_c: int = pose[0];
+    old_r: int = pose[1];
+    old_room: int = room_at(rooms, nroom, old_c, old_r);
+    nc: int = pos_col(packed);
+    nr: int = pos_row(packed);
+    new_room: int = room_at(rooms, nroom, nc, nr);
+    rewind_after_move(blocks, nroom, old_room, new_room, room_ids, room_hn, rewind_snap,
+        rewind_n, rewind_cur, room_ghosting);
+    play_commit_pose(blocks, n, hist, hpc, hpr, hph, hpm, hms, clock, pose, packed,
+        0);
+    if (is_goal(goals, ngoal, pose[0], pose[1]) && (pose[0] != old_c || pose[1] != old_r)) {
+        if (!is_goal(goals, ngoal, old_c, old_r)) {
+            ri_g: int = room_at(rooms, nroom, pose[0], pose[1]);
+            if (ri_g >= 0 && ri_g < len(solved) && solved[ri_g] == 0) {
+                solved[ri_g] = 1;
+                stream_until[ri_g] = mono_ms() + 1600;
+                stream_tx[ri_g] = pose[0] as f32 + 0.5;
+                stream_tz[ri_g] = pose[1] as f32 + 0.5;
+                redirect_sparks(sparks, ri_g);
+                burst_stream(sparks, spark_rng, spark_xy, rooms[ri_g], ri_g, 90, bricks,
+                    nbrick, blocks, n);
+            }
+        }
+    }
+}
+
+play_try_dir(
+    blocks: []Block,
+    n: int,
+    rooms: []Room,
+    nroom: int,
+    bricks: []Brick,
+    nbrick: int,
+    hist: []Block,
+    hpc: []int,
+    hpr: []int,
+    hph: []int,
+    hpm: []int,
+    hms: []int,
+    clock: []int,
+    pose: []int,
+    dc: int,
+    dr: int,
+    pend: []int,
+    room_ids: []int,
+    room_hn: []int,
+    rewind_snap: []int,
+    rewind_n: []int,
+    rewind_cur: []int,
+    room_ghosting: []int,
+    goals: []Goal,
+    ngoal: int,
+    solved: []int,
+    stream_until: []int,
+    stream_tx: []f32,
+    stream_tz: []f32,
+    sparks: []Spark,
+    spark_rng: []int,
+    spark_xy: []int,
+    undo_snap: []int,
+    undo_pc: []int,
+    undo_pr: []int,
+    undo_ph: []int,
+    undo_pm: []int,
+    undo_room: []int,
+    undo_state: []int
+) {
+    old_room: int = room_at(rooms, nroom, pose[0], pose[1]);
+    captured: bool = play_undo_capture(blocks, old_room, room_ids, room_hn, pose, undo_snap,
+        undo_pc, undo_pr, undo_ph, undo_pm, undo_room, undo_state);
+    packed: int = move_player(blocks, n, rooms, nroom, bricks, nbrick, pose[0], pose[1],
+        pose[2], dc, dr, room_ids, room_hn, rewind_snap, rewind_n, rewind_cur, room_ghosting);
+    moved: bool = false;
+    if (pos_col(packed) != pose[0] || pos_row(packed) != pose[1] || pos_layer(packed) != pose[2] || pos_mounted(packed) != pose[3]) {
+        moved = true;
+    } else if (captured && play_undo_blocks_changed(blocks, old_room, room_ids, room_hn,
+        undo_snap, undo_state)) {
+        moved = true;
+    }
+    if (captured) {
+        new_room: int = room_at(rooms, nroom, pos_col(packed), pos_row(packed));
+        if (!moved) {
+            play_undo_discard(undo_state);
+        } else if (new_room != old_room) {
+            play_undo_clear(undo_state);
+        }
+    }
+    pend[0] = 0;
+    pend[1] = 0;
+    play_commit_move(blocks, n, rooms, nroom, bricks, nbrick, hist, hpc, hpr, hph,
+        hpm, hms, clock, pose, packed, room_ids, room_hn, rewind_snap, rewind_n, rewind_cur,
+        room_ghosting, goals, ngoal, solved, stream_until, stream_tx, stream_tz, sparks,
+        spark_rng, spark_xy);
+}
+
+play_jump_to_finish(
+    blocks: []Block,
+    n: int,
+    rooms: []Room,
+    nroom: int,
+    bricks: []Brick,
+    nbrick: int,
+    goals: []Goal,
+    ngoal: int,
+    solved: []int,
+    hist: []Block,
+    hpc: []int,
+    hpr: []int,
+    hph: []int,
+    hpm: []int,
+    clock: []int,
+    pose: []int,
+    pend: []int,
+    room_ids: []int,
+    room_hn: []int,
+    rewind_snap: []int,
+    rewind_n: []int,
+    rewind_cur: []int,
+    room_ghosting: []int,
+    target: int
+): int {
+    if (target < 0 || target >= ngoal) {
+        return 0;
+    }
+    goal: Goal = goals[target];
+    target_room: int = room_at(rooms, nroom, goal.column, goal.row);
+    if (target_room < 0 || target_room >= len(solved) || solved[target_room] == 0) {
+        return 0;
+    }
+    packed: int = finish_move(blocks, n, bricks, nbrick, goal.column, goal.row, LEVEL_MAX_LAYER - 1);
+    if (packed < 0 || pos_col(packed) == pose[0] && pos_row(packed) == pose[1]) {
+        return 0;
+    }
+    old_room: int = room_at(rooms, nroom, pose[0], pose[1]);
+    rewind_after_move(blocks, nroom, old_room, target_room, room_ids, room_hn, rewind_snap,
+        rewind_n, rewind_cur, room_ghosting);
+    play_snap_pose(blocks, n, hist, hpc, hpr, hph, hpm, clock, pose, packed);
+    pend[0] = 0;
+    pend[1] = 0;
+    1;
+}
+
+tick_reset_sink(
+    blocks: []Block,
+    n: int,
+    hist: []Block,
+    hpc: []int,
+    hpr: []int,
+    hph: []int,
+    hpm: []int,
+    clock: []int,
+    pose: []int,
+    now: int,
+    rewind_n: []int,
+    rewind_cur: []int,
+    room_ghosting: []int,
+    start_c: []int,
+    start_r: []int,
+    reset_phase: []int,
+    reset_t0: []int,
+    reset_room: []int
+): int {
+    here: int = reset_room[0];
+    if (reset_phase[0] == 0) {
+        if (here >= 0 && here < LEVEL_MAX_ROOMS && room_ghosting[here] == 0) {
+            reset_room[0] = 0 - 1;
+        }
+        return 0;
+    }
+    if (reset_phase[0] == 1 && now - reset_t0[0] >= RESET_SINK_MS) {
+        if (here >= 0 && here < LEVEL_MAX_ROOMS) {
+            play_snap_pose(blocks, n, hist, hpc, hpr, hph, hpm, clock, pose, pack_pos(start_c[here],
+                start_r[here], 0, 0));
+            rewind_begin_reset(here, rewind_n, rewind_cur, room_ghosting);
+        }
+        reset_phase[0] = 2;
+        reset_t0[0] = now;
+        return 1;
+    }
+    if (reset_phase[0] == 2 && now - reset_t0[0] >= RESET_EMERGE_MS) {
+        reset_phase[0] = 0;
+    }
+    if (reset_phase[0] == 0 && here >= 0 && here < LEVEL_MAX_ROOMS) {
+        if (room_ghosting[here] == 0) {
+            reset_room[0] = 0 - 1;
+        }
+    }
+    0;
+}
+
+reset_sink_k(phase: int, t0: int, now: int): f32 {
+    if (phase == 1) {
+        k: f32 = (now - t0) as f32 / RESET_SINK_MS as f32;
+        if (k < 0.0) {
+            k = 0.0;
+        }
+        if (k > 1.0) {
+            k = 1.0;
+        }
+        return k;
+    }
+    if (phase == 2) {
+        k2: f32 = 1.0 - (now - t0) as f32 / RESET_EMERGE_MS as f32;
+        if (k2 < 0.0) {
+            k2 = 0.0;
+        }
+        if (k2 > 1.0) {
+            k2 = 1.0;
+        }
+        return k2;
+    }
+    0.0;
+}
+

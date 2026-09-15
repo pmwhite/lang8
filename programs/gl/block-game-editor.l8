@@ -1,0 +1,741 @@
+// Editor input, world mutations, previews, and room transforms.
+
+text_push(s: []i8, c: i8): []i8@new {
+    out: []i8 = new i8[len(s) + 1](0i8);
+    if (len(s) > 0) {
+        memcpy(out, 0, s, 0, len(s));
+    }
+    out[len(s)] = c;
+    out;
+}
+
+text_pop(s: []i8): []i8@new {
+    n: int = len(s) - 1;
+    if (n < 0) {
+        n = 0;
+    }
+    out: []i8 = new i8[n](0i8);
+    if (n > 0) {
+        memcpy(out, 0, s, 0, n);
+    }
+    out;
+}
+
+editor_arrow_step(ks: int, camera_turn: int, out: []int) {
+    dc: int = 0;
+    dr: int = 0;
+    if (ks == 65361) {
+        dc = 0 - 1;
+    } else if (ks == 65363) {
+        dc = 1;
+    } else if (ks == 65362) {
+        dr = 0 - 1;
+    } else if (ks == 65364) {
+        dr = 1;
+    }
+    turn: int = camera_turn % 4;
+    if (turn == 1) {
+        out[0] = dr;
+        out[1] = 0 - dc;
+    } else if (turn == 2) {
+        out[0] = 0 - dc;
+        out[1] = 0 - dr;
+    } else if (turn == 3) {
+        out[0] = 0 - dr;
+        out[1] = dc;
+    } else {
+        out[0] = dc;
+        out[1] = dr;
+    }
+}
+
+editor_cursor_pose(
+    hist: []Block,
+    n: int,
+    col: int,
+    row: int,
+    out: []f32
+) {
+    out[0] = 0.0;
+    out[1] = 0.02;
+    out[2] = 0.0;
+    top: int = highest_layer_at(hist, n, col, row);
+    if (top < 0) {
+        return;
+    }
+    seated: int = 0;
+    hi: int = body_at_layer(hist, n, col, row, top);
+    if (hi < 0) {
+        hi = block_at_layer(hist, n, col, row, top);
+    }
+    if (hi >= 0) {
+        hb: Block = hist[hi];
+        seated = hb.mounted;
+    }
+    lp: int = stack_lean(hist, 0, n, col, row, top, seated);
+    ld: int = lean_dir(lp);
+    lk: f32 = lean_k(lp) as f32;
+    lx0: f32 = ramp_face_x(ld);
+    lz0: f32 = ramp_face_z(ld);
+    layer: int = cursor_layer_at(hist, n, col, row);
+    out[0] = lean_along(lx0, lz0, lk, 0);
+    out[1] = layer as f32 + 1.02 + lean_along(lx0, lz0, lk, 1);
+    out[2] = lean_along(lx0, lz0, lk, 2);
+}
+
+type Brush =
+    | Dirt
+    | Grass
+    | Stone
+    | Block
+    | Ramp
+    | Brick
+    | Goal
+    | Start
+    | RoomStart;
+
+BRUSH_DIRT: Brush = Brush.Dirt;
+
+BRUSH_GRASS: Brush = Brush.Grass;
+
+BRUSH_STONE: Brush = Brush.Stone;
+
+BRUSH_BLOCK: Brush = Brush.Block;
+
+BRUSH_RAMP: Brush = Brush.Ramp;
+
+BRUSH_BRICK: Brush = Brush.Brick;
+
+BRUSH_GOAL: Brush = Brush.Goal;
+
+BRUSH_START: Brush = Brush.Start;
+
+BRUSH_ROOM_START: Brush = Brush.RoomStart;
+
+BRUSH_SLOT_N: int = 14;
+
+brush_shape_from_key(ks: int): int {
+    if (ks == 55) {
+        return 15;
+    }
+    ks - 48;
+}
+
+set_brick_at(
+    bricks: []Brick,
+    nbrick: int,
+    column: int,
+    row: int,
+    want: bool
+): int {
+    have: bool = is_brick(bricks, nbrick, column, row);
+    if (have == want) {
+        return nbrick;
+    }
+    toggle_brick(bricks, nbrick, column, row);
+}
+
+set_goal_at(
+    goals: []Goal,
+    ngoal: int,
+    column: int,
+    row: int,
+    want: bool
+): int {
+    have: bool = is_goal(goals, ngoal, column, row);
+    if (have == want) {
+        return ngoal;
+    }
+    toggle_goal(goals, ngoal, column, row);
+}
+
+erase_block_aspect(
+    blocks: []Block,
+    n: int,
+    col: int,
+    row: int
+): int {
+    layer: int = highest_layer_at(blocks, n, col, row);
+    while (layer >= 0) {
+        hit: int = body_at_layer(blocks, n, col, row, layer);
+        if (hit < 0) {
+            hit = block_at_layer(blocks, n, col, row, layer);
+        }
+        if (hit >= 0 && blocks[hit].ramp == 0) {
+            n = delete_at(blocks, n, hit);
+            apply_gravity(blocks, n);
+            return n;
+        }
+        layer = layer - 1;
+    }
+    n;
+}
+
+erase_ramp_aspect(
+    blocks: []Block,
+    n: int,
+    col: int,
+    row: int
+): int {
+    layer: int = highest_layer_at(blocks, n, col, row);
+    while (layer >= 0) {
+        hit: int = block_at_layer(blocks, n, col, row, layer);
+        if (hit >= 0 && blocks[hit].ramp != 0) {
+            n = delete_at(blocks, n, hit);
+            apply_gravity(blocks, n);
+            return n;
+        }
+        layer = layer - 1;
+    }
+    n;
+}
+
+paint_ramp_aspect(
+    blocks: []Block,
+    n: int,
+    col: int,
+    row: int,
+    dir: int
+): int {
+    if (dir < 1 || dir > 4) {
+        dir = 1;
+    }
+    top: int = highest_layer_at(blocks, n, col, row);
+    wl: int = 0;
+    if (top >= 0) {
+        wl = top + 1;
+    }
+    wn: int = add_block_at(blocks, n, col, row, wl, 0, dir);
+    if (wn != n) {
+        n = wn;
+        apply_gravity(blocks, n);
+    }
+    n;
+}
+
+apply_editor_brush(
+    blocks: []Block,
+    n: int,
+    bricks: []Brick,
+    nbrick: int,
+    goals: []Goal,
+    ngoal: int,
+    ground: []GroundCell,
+    nground: int,
+    rooms: []Room,
+    titles: [][]i8,
+    nroom: int,
+    start: []int,
+    col: int,
+    row: int,
+    brush: Brush,
+    shape: int,
+    erase: int,
+    is_world: int,
+    out: []int,
+    start_c: []int,
+    start_r: []int,
+    has_start: []int
+) {
+    mesh: int = 0;
+    mask: int = 0;
+    if (is_world == 0 && (brush == BRUSH_BLOCK || brush == BRUSH_RAMP || brush == BRUSH_BRICK || brush == BRUSH_GOAL)) {
+        nroom = grow_room_to(rooms, titles, nroom, col, row);
+    }
+    if (brush == BRUSH_DIRT || brush == BRUSH_GRASS || brush == BRUSH_STONE) {
+        kind: int = GROUND_DIRT;
+        if (brush == BRUSH_GRASS) {
+            kind = GROUND_GRASS;
+        } else if (brush == BRUSH_STONE) {
+            kind = GROUND_STONE;
+        }
+        if (erase != 0) {
+            if (brush == BRUSH_GRASS) {
+                kind = GROUND_DIRT;
+            } else if (brush == BRUSH_STONE) {
+                kind = GROUND_CLEAR_STONE;
+            }
+        }
+        if (erase == 0 || brush != BRUSH_DIRT) {
+            nground = paint_ground_cell(ground, nground, col, row, kind, 0);
+            mask = 1;
+        }
+    } else if (brush == BRUSH_BLOCK) {
+        if (erase != 0) {
+            n = erase_block_aspect(blocks, n, col, row);
+        } else {
+            wl: int = free_layer_at(blocks, n, col, row, 0);
+            wn: int = add_block_at(blocks, n, col, row, wl, shape, 0);
+            if (wn != n) {
+                n = wn;
+                apply_gravity(blocks, n);
+            }
+        }
+    } else if (brush == BRUSH_RAMP) {
+        if (erase != 0) {
+            n = erase_ramp_aspect(blocks, n, col, row);
+        } else {
+            n = paint_ramp_aspect(blocks, n, col, row, shape);
+        }
+    } else if (brush == BRUSH_BRICK) {
+        if (erase != 0) {
+            nbrick = set_brick_at(bricks, nbrick, col, row, false);
+        } else {
+            nbrick = set_brick_at(bricks, nbrick, col, row, true);
+        }
+        mesh = 1;
+    } else if (brush == BRUSH_GOAL) {
+        if (erase != 0) {
+            ngoal = set_goal_at(goals, ngoal, col, row, false);
+        } else if (is_world == 0 || room_at(rooms, nroom, col, row) >= 0) {
+            ngoal = set_goal_at(goals, ngoal, col, row, true);
+        }
+    } else if (brush == BRUSH_START) {
+        if (erase == 0) {
+            start[0] = col;
+            start[1] = row;
+        }
+    } else if (brush == BRUSH_ROOM_START) {
+        ri_s: int = room_at(rooms, nroom, col, row);
+        if (ri_s >= 0 && ri_s < LEVEL_MAX_ROOMS) {
+            if (erase == 0) {
+                start_c[ri_s] = col;
+                start_r[ri_s] = row;
+                has_start[ri_s] = 1;
+            } else {
+                has_start[ri_s] = 0;
+            }
+        }
+    }
+    out[0] = n;
+    out[1] = nbrick;
+    out[2] = ngoal;
+    out[3] = nground;
+    out[4] = nroom;
+    out[5] = mesh;
+    out[6] = mask;
+}
+
+apply_editor_brush_rect(
+    blocks: []Block,
+    n: int,
+    bricks: []Brick,
+    nbrick: int,
+    goals: []Goal,
+    ngoal: int,
+    ground: []GroundCell,
+    nground: int,
+    rooms: []Room,
+    titles: [][]i8,
+    nroom: int,
+    start: []int,
+    c0: int,
+    r0: int,
+    c1: int,
+    r1: int,
+    brush: Brush,
+    shape: int,
+    erase: int,
+    is_world: int,
+    out: []int,
+    start_c: []int,
+    start_r: []int,
+    has_start: []int,
+    cell: []int
+) {
+    if (c1 < c0) {
+        t: int = c0;
+        c0 = c1;
+        c1 = t;
+    }
+    if (r1 < r0) {
+        t: int = r0;
+        r0 = r1;
+        r1 = t;
+    }
+    mesh: int = 0;
+    mask: int = 0;
+    r: int = r0;
+    while (r <= r1) {
+        c: int = c0;
+        while (c <= c1) {
+            apply_editor_brush(blocks, n, bricks, nbrick, goals, ngoal, ground, nground,
+                rooms, titles, nroom, start, c, r, brush, shape, erase, is_world,
+                cell, start_c, start_r, has_start);
+            n = cell[0];
+            nbrick = cell[1];
+            ngoal = cell[2];
+            nground = cell[3];
+            nroom = cell[4];
+            if (cell[5] != 0) {
+                mesh = 1;
+            }
+            if (cell[6] != 0) {
+                mask = 1;
+            }
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    out[0] = n;
+    out[1] = nbrick;
+    out[2] = ngoal;
+    out[3] = nground;
+    out[4] = nroom;
+    out[5] = mesh;
+    out[6] = mask;
+}
+
+in_view_cell(
+    column: int,
+    row: int,
+    fx: f32,
+    fz: f32,
+    pad: f32
+): bool {
+    wx: f32 = column as f32 + 0.5;
+    wz: f32 = row as f32 + 0.5;
+    dx: f32 = wx - fx;
+    dz: f32 = wz - fz;
+    if (dx < 0.0) {
+        dx = 0.0 - dx;
+    }
+    if (dz < 0.0) {
+        dz = 0.0 - dz;
+    }
+    if (dx > 34.0 + pad || dz > 34.0 + pad) {
+        return false;
+    }
+    true;
+}
+
+same_hist_slot(
+    hist: []Block,
+    a: int,
+    b: int,
+    n: int
+): bool {
+    i: int = 0;
+    while (i < n) {
+        x: Block = hist[a + i];
+        y: Block = hist[b + i];
+        if (x.id != y.id || x.column != y.column || x.row != y.row || x.layer != y.layer || x.ramp != y.ramp || x.mounted != y.mounted) {
+            return false;
+        }
+        i = i + 1;
+    }
+    true;
+}
+
+hist_shifted(
+    hist: []Block,
+    foff: int,
+    toff: int,
+    i: int
+): bool {
+    a: Block = hist[foff + i];
+    b: Block = hist[toff + i];
+    if (a.column != b.column || a.row != b.row || a.layer != b.layer || a.mounted != b.mounted) {
+        return true;
+    }
+    false;
+}
+
+upload_brick_mesh(
+    buf: u32,
+    verts: []f32,
+    chamfer: []f32,
+    bricks: []Brick,
+    nbrick: int,
+    used: []int
+): int {
+    n: int = 0;
+    region {
+        sn: int = fill_chamfer_cube(chamfer);
+        n = fill_brick_cells(verts, 7000000, chamfer, sn, bricks, nbrick, used);
+        glBindBuffer(34962, buf);
+        glBufferData(34962, n * 4, verts, 35044);
+    }
+    n;
+}
+
+copy_rooms(dst: []Room, src: []Room, n: int) {
+    for i in 0..n {
+        dst[i] = src[i];
+    }
+}
+
+copy_goals(dst: []Goal, src: []Goal, n: int) {
+    for i in 0..n {
+        dst[i] = src[i];
+    }
+}
+
+copy_bricks(dst: []Brick, src: []Brick, n: int) {
+    for i in 0..n {
+        dst[i] = src[i];
+    }
+}
+
+copy_room_starts(
+    dst_c: []int,
+    dst_r: []int,
+    dst_h: []int,
+    src_c: []int,
+    src_r: []int,
+    src_h: []int
+) {
+    for i in 0..LEVEL_MAX_ROOMS {
+        dst_c[i] = src_c[i];
+        dst_r[i] = src_r[i];
+        dst_h[i] = src_h[i];
+    }
+}
+
+preview_room_transform(
+    src_blocks: []Block,
+    n: int,
+    src_rooms: []Room,
+    nroom: int,
+    src_goals: []Goal,
+    ngoal: int,
+    src_bricks: []Brick,
+    nbrick: int,
+    src_ground: []GroundCell,
+    nground: int,
+    src_start: []int,
+    src_sc: []int,
+    src_sr: []int,
+    src_has: []int,
+    blocks: []Block,
+    rooms: []Room,
+    goals: []Goal,
+    bricks: []Brick,
+    ground: []GroundCell,
+    start: []int,
+    start_c: []int,
+    start_r: []int,
+    has_start: []int,
+    sel: int,
+    dc: int,
+    dr: int,
+    rot: int,
+    xy: []int
+) {
+    copy_blocks(blocks, 0, src_blocks, 0, n);
+    copy_rooms(rooms, src_rooms, nroom);
+    copy_goals(goals, src_goals, ngoal);
+    copy_bricks(bricks, src_bricks, nbrick);
+    copy_ground(ground, src_ground, nground);
+    start[0] = src_start[0];
+    start[1] = src_start[1];
+    copy_room_starts(start_c, start_r, has_start, src_sc, src_sr, src_has);
+    transform_room_contents(blocks, n, goals, ngoal, bricks, nbrick, ground, nground,
+        rooms, sel, dc, dr, rot, start, xy, start_c, start_r, has_start);
+}
+
+paint_stamp_layer(
+    blocks: []Block,
+    n: int,
+    col: int,
+    row: int,
+    brush: Brush
+): int {
+    if (brush == BRUSH_BLOCK) {
+        return free_layer_at(blocks, n, col, row, 0);
+    }
+    if (brush == BRUSH_RAMP) {
+        top: int = highest_layer_at(blocks, n, col, row);
+        if (top < 0) {
+            return 0;
+        }
+        top + 1;
+    } else {
+        0;
+    }
+}
+
+draw_paint_stamp(
+    u_origin: int,
+    u_scale: int,
+    u_color: int,
+    u_cut: int,
+    cube_buf: u32,
+    chamfer_buf: u32,
+    ramp_buf: u32,
+    prism_buf: u32,
+    chamfer_n: int,
+    shape_verts: []f32,
+    px: f32,
+    py: f32,
+    pz: f32,
+    brush: Brush,
+    shape: int
+) {
+    y: f32 = py;
+    if (brush == BRUSH_DIRT) {
+        bind_mesh(cube_buf);
+        draw_box(u_origin, u_scale, u_color, px, 0.06, pz, 0.96, 0.08, 0.96, 0.55,
+            0.36, 0.18, 36);
+    } else if (brush == BRUSH_GRASS) {
+        bind_mesh(cube_buf);
+        draw_box(u_origin, u_scale, u_color, px, 0.06, pz, 0.96, 0.08, 0.96, 0.34,
+            0.58, 0.22, 36);
+    } else if (brush == BRUSH_STONE) {
+        bind_mesh(cube_buf);
+        draw_box(u_origin, u_scale, u_color, px, 0.06, pz, 0.96, 0.08, 0.96, 0.58,
+            0.58, 0.55, 36);
+    } else if (brush == BRUSH_BLOCK) {
+        if (shape == 0) {
+            bind_mesh(chamfer_buf);
+            glUniform1f(u_cut, 1.0);
+            draw_box(u_origin, u_scale, u_color, px, y, pz, 0.92, 1.0, 0.92, 0.18,
+                0.62, 0.48, chamfer_n / 6);
+            glUniform1f(u_cut, 0.0);
+        } else {
+            bind_mesh(prism_buf);
+            glUniform3f(u_origin, px, y, pz);
+            glUniform3f(u_scale, 1.0, 1.0, 1.0);
+            glUniform3f(u_color, 0.988, 0.827, 0.302);
+            nf: int = fill_prism(shape_verts, shape);
+            if (nf > 0) {
+                glBufferData(34962, nf * 4, shape_verts, 35040);
+                glDrawArrays(4, 0, nf / 6);
+            }
+        }
+    } else if (brush == BRUSH_RAMP) {
+        rd: int = shape;
+        if (rd < 1 || rd > 4) {
+            rd = 1;
+        }
+        bind_mesh(ramp_buf);
+        glUniform1f(u_cut, 1.0);
+        glUniform3f(u_scale, 0.92, 1.0, 0.92);
+        glUniform3f(u_color, 0.82, 0.48, 0.22);
+        glUniform3f(u_origin, px, y, pz);
+        glDrawArrays(4, (rd - 1) * (chamfer_n / 6), chamfer_n / 6);
+        glUniform1f(u_cut, 0.0);
+    } else if (brush == BRUSH_BRICK) {
+        bind_mesh(cube_buf);
+        draw_box(u_origin, u_scale, u_color, px, 0.42, pz, 0.22, 0.84, 0.96, 0.62,
+            0.32, 0.26, 36);
+    } else if (brush == BRUSH_GOAL) {
+        bind_mesh(chamfer_buf);
+        glUniform1f(u_cut, 1.0);
+        draw_box(u_origin, u_scale, u_color, px, 0.16, pz, 0.62, 0.18, 0.62, 0.90,
+            0.74, 0.28, chamfer_n / 6);
+        draw_box(u_origin, u_scale, u_color, px, 0.42, pz, 0.22, 0.22, 0.22, 0.96,
+            0.82, 0.32, chamfer_n / 6);
+        glUniform1f(u_cut, 0.0);
+    } else if (brush == BRUSH_START) {
+        bind_mesh(chamfer_buf);
+        glUniform1f(u_cut, 1.0);
+        draw_box(u_origin, u_scale, u_color, px, 0.55, pz, 0.86, 1.1, 0.86, 0.80,
+            0.30, 0.24, chamfer_n / 6);
+        glUniform1f(u_cut, 0.0);
+    } else if (brush == BRUSH_ROOM_START) {
+        bind_mesh(chamfer_buf);
+        glUniform1f(u_cut, 1.0);
+        draw_box(u_origin, u_scale, u_color, px, 0.42, pz, 0.70, 0.84, 0.70, 0.22,
+            0.66, 0.72, chamfer_n / 6);
+        glUniform1f(u_cut, 0.0);
+    }
+}
+
+draw_paint_previews(
+    u_origin: int,
+    u_scale: int,
+    u_color: int,
+    u_cut: int,
+    u_ramp: int,
+    u_lag: int,
+    u_brick: int,
+    cube_buf: u32,
+    chamfer_buf: u32,
+    ramp_buf: u32,
+    prism_buf: u32,
+    chamfer_n: int,
+    shape_verts: []f32,
+    blocks: []Block,
+    n: int,
+    cur_c: int,
+    cur_r: int,
+    vis_x: f32,
+    vis_y: f32,
+    vis_z: f32,
+    pend_c: int,
+    pend_r: int,
+    want_pend: int,
+    brush: Brush,
+    shape: int
+) {
+    c0: int = cur_c;
+    r0: int = cur_r;
+    c1: int = cur_c;
+    r1: int = cur_r;
+    if (want_pend != 0) {
+        c0 = pend_c;
+        r0 = pend_r;
+    }
+    if (c1 < c0) {
+        t: int = c0;
+        c0 = c1;
+        c1 = t;
+    }
+    if (r1 < r0) {
+        t2: int = r0;
+        r0 = r1;
+        r1 = t2;
+    }
+    glUniform2f(u_ramp, 0.0, 0.0);
+    glUniform2f(u_lag, 0.0, 0.0);
+    r: int = r0;
+    while (r <= r1) {
+        c: int = c0;
+        while (c <= c1) {
+            px: f32 = c as f32 + 0.5;
+            pz: f32 = r as f32 + 0.5;
+            if (c == cur_c && r == cur_r) {
+                px = vis_x;
+                pz = vis_z;
+            }
+            layer: int = paint_stamp_layer(blocks, n, c, r, brush);
+            py: f32 = layer as f32 + 0.5;
+            if (c == cur_c && r == cur_r && (brush == BRUSH_BLOCK || brush == BRUSH_RAMP)) {
+                py = vis_y + 0.48;
+            }
+            if (layer >= 0 && layer < LEVEL_MAX_LAYER) {
+                draw_paint_stamp(u_origin, u_scale, u_color, u_cut, cube_buf, chamfer_buf,
+                    ramp_buf, prism_buf, chamfer_n, shape_verts, px, py, pz, brush,
+                    shape);
+            }
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    bind_mesh(cube_buf);
+    glUniform1f(u_cut, 0.0);
+    glUniform1f(u_brick, 0.0);
+}
+
+draw_room_start_pads(
+    u_origin: int,
+    u_scale: int,
+    u_color: int,
+    cube_buf: u32,
+    start_c: []int,
+    start_r: []int,
+    has: []int,
+    nroom: int
+) {
+    bind_mesh(cube_buf);
+    i: int = 0;
+    while (i < nroom) {
+        if (i < LEVEL_MAX_ROOMS && has[i] != 0) {
+            draw_box(u_origin, u_scale, u_color, start_c[i] as f32 + 0.5, 0.08, start_r[i] as f32 + 0.5,
+                0.62, 0.10, 0.62, 0.22, 0.66, 0.72, 36);
+        }
+        i = i + 1;
+    }
+}
+
