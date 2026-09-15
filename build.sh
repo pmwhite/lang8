@@ -287,6 +287,21 @@ do_examples() {
   step 'examples [l8c0]' run_examples l8c0
 }
 
+build_game() {
+  local tool="$1"
+  "./$tool" build programs/gl/block-game.l8 -o "$BUILD/block-game"
+}
+
+do_game() {
+  ensure_build_dir
+  local tool="l8"
+  if [[ ! -x "./$tool" ]]; then
+    [[ -x ./l8c0 ]] || do_bootstrap
+    tool="l8c0"
+  fi
+  step "block game [$tool]" build_game "$tool"
+}
+
 print_compiler_phases() {
   ./l8c3 build -p src2/main.l8 -o "$BUILD/l8-profile" 2>&1
 }
@@ -375,6 +390,7 @@ do_all() {
   do_bootstrap
   do_examples
   do_selfhost
+  step 'block game [l8]' build_game l8
   print_summary
   echo 'OK'
 }
@@ -387,6 +403,7 @@ Commands:
   all             Install bootstrap, examples, two-stage self-host (default)
   bootstrap       Copy the saved bootstrap executable → l8c0
   examples        Run example programs via l8c0
+  game            Build programs/gl/block-game.l8 → .build/block-game
   selfhost        direct src1 → l8c1; src2 → l8c2; fmt src2; src2 → l8c3/l8c4; fixpoint l8c3==l8c4; examples; browse; phases
   promote-bin1    Copy the stage-1 executable → bootstrap
   promote-bin2    Copy the stage-2 fixpoint executable → bootstrap
@@ -425,6 +442,7 @@ case "$cmd" in
   all)              do_all ;;
   bootstrap)        do_bootstrap; print_summary ;;
   examples)         do_examples; print_summary ;;
+  game)             do_game; print_summary ;;
   selfhost)         do_selfhost; print_summary ;;
   promote-bin1)     do_promote_bin1 ;;
   promote-bin2)     do_promote_bin2 ;;
