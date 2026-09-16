@@ -1,0 +1,388 @@
+// Undo entries own copies of the live room timelines: revisiting a room may
+// overwrite its replay buffer while an older player action is still undoable.
+PLAY_UNDO_MAX: int = 128;
+
+// One spare slot stages an attempted move without evicting history on a bump.
+PLAY_UNDO_CAP: int = PLAY_UNDO_MAX + 1;
+
+PLAY_UNDO_DONE: int = 1;
+
+PLAY_UNDO_WAIT: int = 2;
+
+UNDO_ROUTE_MAX: int = REWIND_MAX * 2 + 1;
+
+type UndoTimeline = {
+    home: []int;
+    deps: []int;
+    changed: []int;
+    history: [][]int;
+    offsets: []int;
+    selected: []int;
+    syncing: []int;
+    route: []int;
+    route_base: []int;
+    route_n: []int;
+    route_cur: []int;
+    route_ms: []int;
+};
+
+new_undo_timeline(home: []int@new, n: int, room_hn: []int): *UndoTimeline@new {
+    u: *UndoTimeline = new UndoTimeline {
+        home: home,
+        deps: new int[PLAY_UNDO_CAP * LEVEL_MAX_ROOMS](0),
+        changed: new int[PLAY_UNDO_CAP * LEVEL_MAX_BLOCKS](0),
+        history: new []int[PLAY_UNDO_CAP * 2](new int[0](0)),
+        offsets: new int[PLAY_UNDO_CAP * 2 * LEVEL_MAX_ROOMS](0),
+        selected: new int[LEVEL_MAX_ROOMS](0),
+        syncing: new int[LEVEL_MAX_ROOMS](0),
+        route: new int[n * UNDO_ROUTE_MAX](0),
+        route_base: new int[LEVEL_MAX_ROOMS](0),
+        route_n: new int[LEVEL_MAX_ROOMS](0),
+        route_cur: new int[LEVEL_MAX_ROOMS](0),
+        route_ms: new int[LEVEL_MAX_ROOMS](0)
+    };
+    base: int = 0;
+    for r in 0..LEVEL_MAX_ROOMS {
+        u.route_base[r] = base;
+        base = base + room_hn[r] * UNDO_ROUTE_MAX;
+    }
+    u;
+}
+
+undo_save_history(
+    u: *UndoTimeline@new,
+    slot: int,
+    phase: int,
+    nroom: int,
+    room_hn: []int,
+    snap: []int,
+    counts: []int,
+    cursors: []int,
+    ghost: []int
+) {
+    entry: int = slot * 2 + phase;
+    needed: int = 0;
+    for r in 0..nroom {
+        u.offsets[entry * LEVEL_MAX_ROOMS + r] = needed;
+        needed = needed + 3 + counts[r] * room_hn[r];
+    }
+    if (len(u.history[entry]) < needed) {
+        capacity: int = len(u.history[entry]);
+        if (capacity < 64) {
+            capacity = 64;
+        }
+        while (capacity < needed) {
+            capacity = capacity * 2;
+        }
+        u.history[entry] = new int[capacity](0);
+    }
+    data: []int = u.history[entry];
+    for r in 0..nroom {
+        off: int = u.offsets[entry * LEVEL_MAX_ROOMS + r];
+        data[off] = counts[r];
+        data[off + 1] = cursors[r];
+        data[off + 2] = ghost[r];
+        for s in 0..counts[r] {
+            for k in 0..room_hn[r] {
+                data[off + 3 + s * room_hn[r] + k] = snap[rewind_slot(r, s, k)];
+            }
+        }
+    }
+}
+
+undo_depend(u: *UndoTimeline, slot: int, room: int) {
+    if (room >= 0 && room < LEVEL_MAX_ROOMS) {
+        u.deps[play_undo_room_slot(slot, room)] = 1;
+    }
+}
+
+// Reading a block as support, a ramp, or an obstacle also couples its clock.
+undo_read_cell(
+    u: *UndoTimeline,
+    slot: int,
+    blocks: []Block,
+    n: int,
+    c: int,
+    r: int,
+    h: int
+) {
+    for i in 0..n {
+        b: Block = blocks[i];
+        if (b.column == c && b.row == r && b.layer >= h - 1 && b.layer <= h + 1) {
+            undo_depend(u, slot, u.home[i]);
+        }
+    }
+}
+
+// Vacating the destination of a pending rewind step is an interaction even
+// without touching a block. Use the pre-move archive: the move itself can
+// change the live room history, and the obstruction may be gone by undo time.
+undo_record_rewind_release(
+    u: *UndoTimeline,
+    slot: int,
+    nroom: int,
+    room_hn: []int,
+    pc: int,
+    pr: int,
+    nc: int,
+    nr: int
+) {
+    if (pc == nc && pr == nr) {
+        return;
+    }
+    entry: int = slot * 2;
+    data: []int = u.history[entry];
+    for r in 0..nroom {
+        off: int = u.offsets[entry * LEVEL_MAX_ROOMS + r];
+        cur: int = data[off + 1];
+        ghost: int = data[off + 2];
+        if ((ghost == REWIND_LEAVE || ghost == REWIND_RESET) && cur > 0) {
+            width: int = room_hn[r];
+            from: int = off + 3 + cur * width;
+            dest: int = off + 3 + rewind_dest_step(cur) * width;
+            if (rewind_frame_legal(data, from, dest, width, pc, pr) == 0 && rewind_frame_legal(data, from, dest, width, nc, nr) != 0) {
+                undo_depend(u, slot, r);
+            }
+        }
+    }
+}
+
+undo_record_action(
+    u: *UndoTimeline,
+    slot: int,
+    blocks: []Block,
+    n: int,
+    rooms: []Room,
+    nroom: int,
+    room_hn: []int,
+    before: []int,
+    pc: int,
+    pr: int,
+    ph: int,
+    nc: int,
+    nr: int,
+    nh: int
+) {
+    undo_depend(u, slot, room_at(rooms, nroom, pc, pr));
+    undo_depend(u, slot, room_at(rooms, nroom, nc, nr));
+    undo_read_cell(u, slot, blocks, n, nc, nr, nh);
+    undo_record_rewind_release(u, slot, nroom, room_hn, pc, pr, nc, nr);
+    for i in 0..n {
+        p: int = before[play_undo_slot(slot, i)];
+        b: Block = blocks[i];
+        if (p != pack_pos(b.column, b.row, b.layer, b.mounted)) {
+            u.changed[play_undo_slot(slot, i)] = 1;
+            undo_depend(u, slot, u.home[i]);
+        }
+        if ((pos_col(p) == pc && pos_row(p) == pr || pos_col(p) == nc && pos_row(p) == nr) && pos_layer(p) >= ph - 1 && pos_layer(p) <= ph + 1) {
+            undo_depend(u, slot, u.home[i]);
+        }
+    }
+}
+
+undo_room_frame_equal(
+    a: []int,
+    ao: int,
+    b: []int,
+    bo: int,
+    width: int
+): bool {
+    for k in 0..width {
+        if (a[ao + k] != b[bo + k]) {
+            return false;
+        }
+    }
+    true;
+}
+
+undo_route_append(
+    u: *UndoTimeline,
+    room: int,
+    width: int,
+    data: []int,
+    off: int
+) {
+    dest: int = u.route_base[room] + u.route_n[room] * width;
+    for k in 0..width {
+        u.route[dest + k] = data[off + k];
+    }
+    u.route_n[room] = u.route_n[room] + 1;
+}
+
+undo_build_route(
+    u: *UndoTimeline,
+    slot: int,
+    room: int,
+    blocks: []Block,
+    room_ids: []int,
+    room_hn: []int,
+    live: []int,
+    cursors: []int
+) {
+    width: int = room_hn[room];
+    entry: int = slot * 2 + 1;
+    data: []int = u.history[entry];
+    off: int = u.offsets[entry * LEVEL_MAX_ROOMS + room];
+    target: int = data[off + 1];
+    u.route_n[room] = 0;
+    u.route_cur[room] = 0;
+    // Find the current configuration on the retained branch first.
+    match_step: int = 0 - 1;
+    s: int = target;
+    while (s >= 0 && match_step < 0) {
+        same: bool = true;
+        for k in 0..width {
+            b: Block = blocks[room_ids[room * REWIND_HOME + k]];
+            if (pack_pos(b.column, b.row, b.layer, b.mounted) != data[off + 3 + s * width + k]) {
+                same = false;
+            }
+        }
+        if (same) {
+            match_step = s;
+        }
+        s = s - 1;
+    }
+    if (match_step < 0) {
+        // A later visit can have created a different branch. Walk back to the
+        // shared configuration before traversing the retained branch forward.
+        a: int = cursors[room];
+        common: int = 0 - 1;
+        while (a >= 0 && common < 0) {
+            s = target;
+            while (s >= 0 && common < 0) {
+                if (undo_room_frame_equal(live, rewind_slot(room, a, 0), data, off + 3 + s * width,
+                    width)) {
+                    common = a;
+                    match_step = s;
+                }
+                s = s - 1;
+            }
+            a = a - 1;
+        }
+        if (common >= 0) {
+            a = cursors[room] - 1;
+            while (a >= common) {
+                undo_route_append(u, room, width, live, rewind_slot(room, a, 0));
+                a = a - 1;
+            }
+        }
+    }
+    s = match_step + 1;
+    while (s <= target) {
+        undo_route_append(u, room, width, data, off + 3 + s * width);
+        s = s + 1;
+    }
+    u.route_ms[room] = rewind_return_step_ms(u.route_n[room]);
+}
+
+undo_select_rooms(
+    u: *UndoTimeline,
+    slot: int,
+    blocks: []Block,
+    n: int,
+    snap: []int,
+    pc: int,
+    pr: int,
+    ph: int
+) {
+    // New obstructions/support can appear while an unrelated clock runs.
+    for i in 0..n {
+        b: Block = blocks[i];
+        if (b.column == pc && b.row == pr && b.layer >= ph - 1 && b.layer <= ph + 1) {
+            if (u.home[i] >= 0) {
+                u.selected[u.home[i]] = 1;
+            }
+        }
+    }
+    grown: bool = true;
+    while (grown) {
+        grown = false;
+        for i in 0..n {
+            owner: int = u.home[i];
+            restore: bool = owner < 0 && u.changed[play_undo_slot(slot, i)] != 0;
+            if (owner >= 0 && u.selected[owner] != 0) {
+                restore = true;
+            }
+            if (restore) {
+                p: int = snap[play_undo_slot(slot, i)];
+                for j in 0..n {
+                    other: int = u.home[j];
+                    b: Block = blocks[j];
+                    if (other >= 0 && u.selected[other] == 0) {
+                        at_target: bool = b.column == pos_col(p) && b.row == pos_row(p) && b.layer >= pos_layer(p) - 1 && b.layer <= pos_layer(p) + 1;
+                        on_moving: bool = b.column == blocks[i].column && b.row == blocks[i].row && b.layer >= blocks[i].layer && b.layer <= blocks[i].layer + 1;
+                        if (at_target || on_moving) {
+                            u.selected[other] = 1;
+                            grown = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+undo_sync_tick(
+    u: *UndoTimeline,
+    blocks: []Block,
+    n: int,
+    nroom: int,
+    room_ids: []int,
+    room_hn: []int,
+    crate_pose: []int,
+    crate_ms: []int,
+    crate_hs: []int,
+    crate_hn: []int,
+    crate_t0: []int,
+    now: int
+): bool {
+    crate_drain(n, now, crate_ms, crate_hs, crate_hn, crate_t0);
+    waiting: bool = false;
+    for r in 0..nroom {
+        if (u.selected[r] != 0) {
+            if (rewind_room_busy(r, room_ids, room_hn, crate_hn, n)) {
+                waiting = true;
+            } else if (u.route_cur[r] < u.route_n[r]) {
+                width: int = room_hn[r];
+                off: int = u.route_base[r] + u.route_cur[r] * width;
+                for k in 0..width {
+                    i: int = room_ids[r * REWIND_HOME + k];
+                    p: int = u.route[off + k];
+                    blocks[i] = apply_packed(blocks[i], p);
+                    crate_append(i, p, now, crate_pose, crate_ms, crate_hs, crate_hn,
+                        crate_t0);
+                    if (crate_hn[i] > 1) {
+                        tail: int = (crate_hs[i] + crate_hn[i] - 1) % CRATE_HIST;
+                        crate_ms[crate_idx(i, tail)] = u.route_ms[r];
+                    }
+                }
+                u.route_cur[r] = u.route_cur[r] + 1;
+                waiting = true;
+            }
+        }
+    }
+    waiting;
+}
+
+undo_restore_history(
+    u: *UndoTimeline,
+    slot: int,
+    room: int,
+    room_hn: []int,
+    snap: []int,
+    counts: []int,
+    cursors: []int,
+    ghost: []int
+) {
+    entry: int = slot * 2;
+    off: int = u.offsets[entry * LEVEL_MAX_ROOMS + room];
+    data: []int = u.history[entry];
+    counts[room] = data[off];
+    cursors[room] = data[off + 1];
+    ghost[room] = data[off + 2];
+    for s in 0..counts[room] {
+        for k in 0..room_hn[room] {
+            snap[rewind_slot(room, s, k)] = data[off + 3 + s * room_hn[room] + k];
+        }
+    }
+}
