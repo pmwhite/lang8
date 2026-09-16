@@ -8,7 +8,7 @@ new_token(
     new Token {
         kind: kind,
         val: 0,
-        str: start,
+        text: start,
         len: len,
         pos: tokpos,
         next: token_eof
@@ -584,7 +584,7 @@ tokenize() noregion raises Error: *Token@new {
     head: *Token = new Token {
         kind: TokKind.Eof,
         val: 0,
-        str: "",
+        text: null,
         len: 0,
         pos: 0,
         next: token_eof
@@ -1599,15 +1599,6 @@ parse_type() noregion raises Error: *Type@new {
             }
             return slice_of(base0);
         }
-        if (tok.kind == TokKind.Ident && streq(cur_tokstr(), "z")) {
-            tok = tok.next;
-            skip(TokKind.RBrack);
-            base3: *Type = parse_type();
-            if (is_noreturn_ty(base3)) {
-                error("noreturn cannot be a C-string element");
-            }
-            return zptr_of(base3);
-        }
         if (tok.kind == TokKind.Num) {
             n: int = tok.val;
             if (n <= 0) {
@@ -1621,7 +1612,7 @@ parse_type() noregion raises Error: *Type@new {
             }
             return array_of(base4, n);
         }
-        error("expected a slice, C-string, or fixed-array type");
+        error("expected a slice or fixed-array type");
     }
     if (tok.kind == TokKind.Question) {
         tok = tok.next;
@@ -2480,15 +2471,10 @@ type_index_expr(p: *Expr, lhs: *Expr@new, idx: *Expr@new) noregion raises Error 
         error_ty("index of optional str (use if (s != null) to narrow)", raw);
     }
     if (is_pointer(raw)) {
-        error_ty("pointer indexing is not allowed (use []T, [N]T, or [z]T)", raw);
+        error_ty("pointer indexing is not allowed (use []T, [N]T, or str)", raw);
     }
     if (!is_indexable(raw)) {
         error_ty("index of non-array", raw);
-    }
-    if (is_zptr(raw)) {
-        if (!zindex_ok(index_lhs_var(lhs), idx)) {
-            error("C-string index not walked");
-        }
     }
     p.ty = type_base(raw);
 }
@@ -2501,16 +2487,13 @@ type_log(
 ) noregion raises Error {
     add_type(lhs);
     save: ?*NarrowFrame = narrow_top;
-    wsave: ?*WalkFrame = walk_top;
     if (and_op != 0) {
         narrow_push_ne_nulls(lhs);
-        walk_advance_cond(lhs);
     } else {
         narrow_push_eq_nulls(lhs);
     }
     add_type(rhs);
     narrow_reset(save);
-    walk_reset(wsave);
     lt: ?*Type = decay(lhs.ty);
     rt: ?*Type = decay(rhs.ty);
     if (lt == null) {
@@ -3171,16 +3154,12 @@ type_if_expr(
         error_ty("condition must be bool", ct);
     }
     save: ?*NarrowFrame = narrow_top;
-    wsave: ?*WalkFrame = walk_top;
     narrow_push_ne_nulls(cond);
-    walk_advance_cond(cond);
     add_type(then);
     narrow_reset(save);
-    walk_reset(wsave);
     narrow_push_eq_nulls(cond);
     add_type(els);
     narrow_reset(save);
-    walk_reset(wsave);
     tt: ?*Type = decay(then.ty);
     et: ?*Type = decay(els.ty);
     tn: bool = is_null_value_expr(then);
@@ -3517,17 +3496,11 @@ add_type_expr(p: *Expr@new) noregion raises Error {
             match q.lhs.kind {
                 Var vp -> {
                     kill_var_facts(vp.var);
-                    if (expr_is_zero_lit(q.rhs)) {
-                        mark_zero_var(vp.var);
-                    }
                 }
                 Index ik -> {
                     ilt: ?*Type = ik.lhs.ty;
                     if (ilt != null && is_str(ilt)) {
                         error("cannot assign through str index");
-                    }
-                    if (ilt != null && is_zptr(ilt)) {
-                        error("cannot assign through C-string index");
                     }
                 }
                 _ -> { }
@@ -3548,10 +3521,6 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                     ilt: ?*Type = ik.lhs.ty;
                     if (ilt != null && is_str(ilt)) {
                         error("cannot take the address of a str byte");
-                    }
-                    if (ilt != null && is_zptr(ilt)) {
-                        p.ty = ilt;
-                        return;
                     }
                     if (ilt != null && is_indexable(ilt)) {
                         p.ty = ptr_to(type_base(ilt));
@@ -3601,7 +3570,8 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                         at);
                 }
                 if (at != null && is_opt_str(at)) {
-                    error_ty("len of optional str (use if (s != null) to narrow)", at);
+                    error_ty("len of optional str (use if (s != null) to narrow)",
+                        at);
                 }
                 if (at != null && (is_slice(at) || is_str(at))) {
                     p.kind = ExprKind.Funcall { funcname: q.funcname, args: q.args, fn: null };
@@ -3721,9 +3691,7 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
                 error_ty("condition must be bool", ct);
             }
             save: ?*NarrowFrame = narrow_top;
-            wsave: ?*WalkFrame = walk_top;
             narrow_push_ne_nulls(k.cond);
-            walk_advance_cond(k.cond);
             add_type_stmt(k.then);
             then_nn: ?*Obj = null;
             els: ?*Stmt = k.els;
@@ -3736,12 +3704,10 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
                 }
             }
             narrow_reset(save);
-            walk_reset(wsave);
             if (els != null) {
                 narrow_push_eq_nulls(k.cond);
                 add_type_stmt(els);
                 narrow_reset(save);
-                walk_reset(wsave);
             } else {
                 if (then_nn != null) {
                     dt: ?*Type = decay(then_nn.ty);
@@ -3759,12 +3725,9 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
                 error_ty("condition must be bool", ct2);
             }
             save2: ?*NarrowFrame = narrow_top;
-            wsave2: ?*WalkFrame = walk_top;
             narrow_push_ne_nulls(k.cond);
-            walk_advance_cond(k.cond);
             add_type_stmt(k.body);
             narrow_reset(save2);
-            walk_reset(wsave2);
             return;
         }
         For k -> {

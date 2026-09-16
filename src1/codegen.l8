@@ -354,12 +354,8 @@ gen_index_addr(lhs: *Expr, idx: *Expr) noregion raises Error {
         lty: *Type = lvo.ty or error("missing type");
         emit_load_var(lvo, lty);
         cg_mov_rr(0, 6);
-        if (is_zptr(raw)) {
-            emit_scale_offset(esz);
-            return;
-        }
         if (!is_slice(raw) && !is_str(raw)) {
-            error("index requires str, []T, [N]T, or [z]T");
+            error("index requires str, []T, or [N]T");
         }
         cg_mov_mr(6, 0 - 8, 2);
         emit_check_idx();
@@ -367,14 +363,7 @@ gen_index_addr(lhs: *Expr, idx: *Expr) noregion raises Error {
         return;
     }
     cg_push(3);
-    if (is_zptr(raw)) {
-        gen_expr(lhs);
-        cg_mov_rr(0, 6);
-        cg_push(6);
-        gen_expr(idx);
-        cg_mov_rr(0, 1);
-        cg_pop(6);
-    } else if (is_array(raw)) {
+    if (is_array(raw)) {
         gen_expr(lhs);
         cg_mov_rr(0, 6);
         cg_push(6);
@@ -385,7 +374,7 @@ gen_index_addr(lhs: *Expr, idx: *Expr) noregion raises Error {
         emit_check_idx();
     } else {
         if (!is_slice(raw) && !is_str(raw)) {
-            error("index requires str, []T, [N]T, or [z]T");
+            error("index requires str, []T, or [N]T");
         }
         gen_expr(lhs);
         cg_mov_rr(0, 6);
@@ -1580,6 +1569,38 @@ gen_expr(n: *Expr) noregion raises Error {
                 emit_ret_to_rax(n.ty);
                 return;
             }
+            /* Pad before stack-passed SSE/int extras so cg_call does not
+             * insert alignment bytes between those extras and the return
+             * address. The callee reads the first stack arg at 16(%rbp). */
+            nint_pred: int = has_sret;
+            nsse_pred: int = 0;
+            nst_pred: int = 0;
+            a = k.args;
+            while (a != null) {
+                if (is_sse_ty(a.ty) != 0) {
+                    if (nsse_pred < 8) {
+                        nsse_pred = nsse_pred + 1;
+                    } else {
+                        nst_pred = nst_pred + 1;
+                    }
+                } else {
+                    if (nint_pred < 6) {
+                        nint_pred = nint_pred + 1;
+                    } else {
+                        nst_pred = nst_pred + 1;
+                    }
+                }
+                a = a.next;
+            }
+            call_pad_f: int = 0;
+            if (nst_pred > 0) {
+                if ((cg_rsp_off + 8 * nst_pred + 8) % 16 != 0) {
+                    cg_alu_imm(5, 8, 4);
+                    call_pad_f = 8;
+                }
+                cg_alu_imm(5, 8 * nst_pred, 4);
+                cg_mov_rr(4, 11);
+            }
             if (has_sret != 0) {
                 cg_push(0);
             }
@@ -1593,7 +1614,6 @@ gen_expr(n: *Expr) noregion raises Error {
             emit_reverse_stack(npushed);
             nint: int = 0;
             nsse: int = 0;
-            nst: int = 0;
             if (has_sret != 0) {
                 cg_pop(0);
                 cg_mov_rr(0, cg_arg_reg(0));
@@ -1601,35 +1621,42 @@ gen_expr(n: *Expr) noregion raises Error {
             }
             a = k.args;
             while (a != null) {
-                cg_pop(0);
+                extra: int = 0;
                 if (is_sse_ty(a.ty) != 0) {
-                    fw: int = 0;
-                    aty: ?*Type = a.ty;
-                    if (aty != null && is_f64_ty(aty)) {
-                        fw = 1;
+                    if (nsse >= 8) {
+                        extra = 1;
                     }
-                    if (nsse < 8) {
+                } else {
+                    if (nint >= 6) {
+                        extra = 1;
+                    }
+                }
+                cg_pop(0);
+                if (extra != 0) {
+                    cg_mov_rm(0, 11, 0);
+                    cg_alu_imm(0, 8, 11);
+                } else {
+                    if (is_sse_ty(a.ty) != 0) {
+                        fw: int = 0;
+                        aty: ?*Type = a.ty;
+                        if (aty != null && is_f64_ty(aty)) {
+                            fw = 1;
+                        }
                         bits_to_xmm(nsse, fw);
                         nsse = nsse + 1;
                     } else {
-                        cg_push(0);
-                        nst = nst + 1;
-                    }
-                } else {
-                    if (nint < 6) {
                         cg_mov_rr(0, cg_arg_reg(nint));
                         nint = nint + 1;
-                    } else {
-                        cg_push(0);
-                        nst = nst + 1;
                     }
                 }
                 a = a.next;
             }
-            emit_reverse_stack(nst);
             cg_call(k.funcname);
-            if (nst > 0) {
-                cg_alu_imm(0, 8 * nst, 4);
+            if (nst_pred > 0) {
+                cg_alu_imm(0, 8 * nst_pred, 4);
+            }
+            if (call_pad_f != 0) {
+                cg_alu_imm(0, call_pad_f, 4);
             }
             emit_ret_to_rax(n.ty);
             return;
