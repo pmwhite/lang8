@@ -1,5 +1,6 @@
 # L8 minimal runtime for Linux x86-64
 # Provides: _start, syscall, malloc, read, write, open, open_nul, close, exit, len
+#           l8_str_eq, l8_opt_str_eq, l8_cstr, l8_bytes
 #           clock_gettime, getrusage, rdtsc
 # Exceptions: l8_try_begin, l8_try_end, l8_raise, l8_exc_tag, l8_exc_ptr
 
@@ -31,6 +32,10 @@
 .globl l8_as_int
 .globl l8_call
 .globl l8_load64
+.globl l8_str_eq
+.globl l8_opt_str_eq
+.globl l8_cstr
+.globl l8_bytes
 
 .section .bss
 .align 8
@@ -91,40 +96,74 @@ _start:
     lea HEAP_SIZE(%rax), %rdi
     mov %rdi, heap_end(%rip)
 
-    pop %rsi
-    pop %rdi
-    # Counted argv: length word at -8 so main(argc, argv: [][z]i8) can use len.
-    push %rdi
-    push %rsi
-    mov %rdi, %rax
+    pop %r13              # raw argv
+    pop %r12              # argc
+
+    # Build []str argv. Each element has its own length prefix and trailing NUL;
+    # the outer slice has the usual length prefix.
+    mov %r12, %rax
     add %rax, %rax
     add %rax, %rax
     add %rax, %rax
     add $8, %rax
     mov %rax, %rdi
     call malloc
-    pop %rsi
-    pop %rdi
-    mov %rdi, 0(%rax)
-    lea 8(%rax), %rdx
-    push %rdi
-    push %rdx
-    mov %rdi, %rcx
-.Largv_copy:
-    cmp $0, %rcx
+    test %rax, %rax
+    jz .Lalloc_fail
+    mov %r12, 0(%rax)
+    lea 8(%rax), %r15     # argv slice data
+    xor %rbx, %rbx
+.Largv_next:
+    cmp %r12, %rbx
     je .Largv_done
-    mov 0(%rsi), %r8
-    mov %r8, 0(%rdx)
-    add $8, %rsi
-    add $8, %rdx
-    sub $1, %rcx
-    jmp .Largv_copy
+    mov 0(%r13), %r10
+    add $8, %r13
+    xor %r11, %r11
+    mov %r10, %r8
+.Largv_len:
+    movzb 0(%r8), %rax
+    cmp $0, %rax
+    je .Largv_have_len
+    add $1, %r8
+    add $1, %r11
+    jmp .Largv_len
+.Largv_have_len:
+    lea 9(%r11), %rdi
+    call malloc
+    test %rax, %rax
+    jz .Lalloc_fail
+    mov %r11, 0(%rax)
+    lea 8(%rax), %r9
+    mov %r9, 0(%r15)
+    add $8, %r15
+    xor %rdx, %rdx
+.Largv_string_copy:
+    movzb 0(%r10), %rax
+    mov %al, 0(%r9)
+    cmp %r11, %rdx
+    je .Largv_string_done
+    add $1, %r10
+    add $1, %r9
+    add $1, %rdx
+    jmp .Largv_string_copy
+.Largv_string_done:
+    add $1, %rbx
+    jmp .Largv_next
 .Largv_done:
-    pop %rsi
-    pop %rdi
+    mov %r12, %rdi
+    mov %r15, %rsi
+    mov %r12, %rax
+    add %rax, %rax
+    add %rax, %rax
+    add %rax, %rax
+    sub %rax, %rsi
     call main
     mov %rax, %rdi
     mov $60, %rax          # exit
+    syscall
+.Lalloc_fail:
+    mov $1, %rdi
+    mov $60, %rax
     syscall
 
 # long syscall(long nr, long a1, long a2, long a3, long a4, long a5)
@@ -227,6 +266,117 @@ len:
     mov -8(%rdi), %rax
     ret
 
+# bool l8_opt_str_eq(?str a, ?str b) — null-aware string value equality
+l8_opt_str_eq:
+    test %rdi, %rdi
+    jz .Lopt_str_left_null
+    test %rsi, %rsi
+    jz .Lstr_ne
+    jmp l8_str_eq
+.Lopt_str_left_null:
+    test %rsi, %rsi
+    jz .Lstr_yes
+    jmp .Lstr_ne
+
+# bool l8_str_eq(str a, str b) — content equality for counted strings
+l8_str_eq:
+    mov -8(%rdi), %rcx
+    mov -8(%rsi), %rdx
+    cmp %rdx, %rcx
+    jne .Lstr_ne
+.Lstr_eq_loop:
+    cmp $0, %rcx
+    je .Lstr_yes
+    movzb 0(%rdi), %rax
+    movzb 0(%rsi), %rdx
+    cmp %rdx, %rax
+    jne .Lstr_ne
+    add $1, %rdi
+    add $1, %rsi
+    sub $1, %rcx
+    jmp .Lstr_eq_loop
+.Lstr_yes:
+    mov $1, %rax
+    ret
+.Lstr_ne:
+    mov $0, %rax
+    ret
+
+# str l8_cstr([]i8 bytes) — validate, copy, and append a trailing NUL.
+l8_cstr:
+    push %rbx
+    mov %rdi, %rbx
+    mov -8(%rbx), %rdx
+    mov %rbx, %r8
+    mov %rdx, %r9
+.Lcstr_validate:
+    cmp $0, %r9
+    je .Lcstr_alloc
+    movzb 0(%r8), %rax
+    cmp $0, %rax
+    je .Lcstr_invalid
+    add $1, %r8
+    sub $1, %r9
+    jmp .Lcstr_validate
+.Lcstr_alloc:
+    lea 9(%rdx), %rdi
+    call malloc
+    test %rax, %rax
+    jz .Lcstr_invalid
+    mov %rdx, 0(%rax)
+    lea 8(%rax), %rcx
+    mov %rcx, %r8
+    mov %rdx, %r9
+.Lcstr_copy:
+    cmp $0, %r9
+    je .Lcstr_done
+    movzb 0(%rbx), %rax
+    mov %al, 0(%r8)
+    add $1, %rbx
+    add $1, %r8
+    sub $1, %r9
+    jmp .Lcstr_copy
+.Lcstr_done:
+    movb $0, 0(%r8)
+    mov %rcx, %rax
+    pop %rbx
+    ret
+.Lcstr_invalid:
+    mov $1, %rdi
+    mov $60, %rax
+    syscall
+
+# []i8 l8_bytes(str s) — make a mutable counted copy without the sentinel.
+l8_bytes:
+    push %rbx
+    mov %rdi, %rbx
+    mov -8(%rbx), %rdx
+    lea 8(%rdx), %rdi
+    call malloc
+    test %rax, %rax
+    jz .Lbytes_invalid
+    mov %rdx, 0(%rax)
+    lea 8(%rax), %rcx
+    mov %rcx, %r8
+    mov %rdx, %r9
+.Lbytes_copy:
+    cmp $0, %r9
+    je .Lbytes_done
+    movzb 0(%rbx), %rax
+    mov %al, 0(%r8)
+    add $1, %rbx
+    add $1, %r8
+    sub $1, %r9
+    jmp .Lbytes_copy
+.Lbytes_done:
+    mov %rcx, %rax
+    pop %rbx
+    ret
+.Lbytes_invalid:
+    mov $1, %rdi
+    mov $60, %rax
+    syscall
+
 # void l8_memcpy(void *dst, void *src, long n) — rdi, rsi, rdx
 # Word then byte. ja after cmp $7 so n>=8 without jae (bootstrap as has no jae).
 # Named l8_memcpy so it does not collide with a user memcpy in src1.
@@ -273,7 +423,7 @@ open:
     syscall
     ret
 
-# long open_nul(char *path, long flags, long mode) — same as open; []i8 data pointer
+# Legacy stage-1 bootstrap shim. Stage 2 uses open(str, ...) directly.
 open_nul:
     jmp open
 

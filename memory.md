@@ -46,3 +46,23 @@ region. The main reason for this is if it does a dynamic allocation and then
 uses that value in an immortal context. This may not be exposed in any way by
 parameters or the return type, so we have it as an piece of information that
 analysis of a function must determine.
+
+## Strings and byte slices
+
+`str` is the language's string and C-string boundary type. It is immutable,
+contains a byte length, and guarantees one trailing NUL byte that is not part of
+that length. Interior NUL bytes are forbidden. String literals default to `str`
+and process arguments are `str`; equality compares their bytes, and indexing
+and iteration use the stored length rather than searching for the sentinel.
+`?str` is the nullable form.
+
+`[]i8` is an ordinary mutable byte slice and carries no termination guarantee.
+`cstr(bytes)` validates and copies a byte slice into a `str`, while `bytes(s)`
+makes a mutable copy of a `str`. Foreign functions that consume a C string use
+`str` (or `?str` when null is meaningful), making the termination requirement
+part of their signatures. General zero-terminated array types are intentionally
+not part of the language.
+
+For source compatibility, a literal can be contextually typed as `[]i8` when it
+directly initializes or is passed to a byte-slice slot. An existing `str` never
+converts implicitly; use `bytes(s)` when mutation is intended.

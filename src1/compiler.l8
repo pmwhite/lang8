@@ -1,7 +1,7 @@
 // L8 self-hosted compiler → x86-64 Linux GAS
 // Nominal AST; Type is a sum; Expr/Stmt are typed envelopes.
 // Heap ADTs via new; aggregates by sret; *T vs ?*T with flow narrowing; `e or alt` unwraps ?*T and ?[]T.
-// Assignment and taking a name's address kill narrowing and [z]T walk facts for that name.
+// Assignment and taking a name's address kill narrowing and legacy [z]T walk facts for that name.
 // Strings: "..." or """...""" (newlines kept; a newline right after """ is dropped).
 // Same escapes in both. Byte literals: 'A' and Ni8 (0..255); i8 arithmetic wraps, no mixed promotion.
 // i32/u32/f32/f64 are same-type arithmetic too (no mixed promotion; widen with as, narrow ints with trunc).
@@ -12,7 +12,7 @@
 // `type E: i32, 192 = ...` sets a minimum size (C union tail padding). Match still enforces the arm.
 // *T is one object: p.* only, no p[i]. []T is a thin pointer with len at -8.
 // ?*T / ?[]T are null or the non-optional form; `if (x != null)` and `x or y` unwrap.
-// [z]T is a read-only C-string; s[i] only if walked from 0. &s[i] on [z]T stays [z]T.
+// str is a counted, NUL-terminated byte string. [z]T remains temporarily for bootstrap compatibility.
 // `as` only forgets a claim (same pointee): []T/*T → *T or ?*T. It cannot invent or strip [z].
 // A span of an existing []T is the array plus a start index.
 // Globals: `name: type = e` is required. Constants go in .data; other inits run once before main.
@@ -66,6 +66,8 @@ type Type =
     | F64
     | Bool
     | Noreturn
+    | Str
+    | OptStr
     | Ptr { base: *Type }
     | OptPtr { base: *Type }
     | Slice { base: *Type }
@@ -198,6 +200,7 @@ type TokKind =
     | Num
     | Char
     | Str
+    | StrTy
     | Ident
     | Int
     | I8
@@ -768,6 +771,10 @@ ty_bool: *Type = new Type.Bool;
 
 ty_noreturn: *Type = new Type.Noreturn;
 
+ty_str: *Type = new Type.Str;
+
+ty_opt_str: *Type = new Type.OptStr;
+
 ty_jmpbuf: *Type = new Type.Int;
 
 str_lits: ?*StrLit = null;
@@ -1297,6 +1304,14 @@ append_type(sb: *StrBuf@immortal, t: ?*Type) raises Error {
             sb_puts(sb, "noreturn");
             return;
         }
+        Str -> {
+            sb_puts(sb, "str");
+            return;
+        }
+        OptStr -> {
+            sb_puts(sb, "?str");
+            return;
+        }
         Ptr k -> {
             sb_putc(sb, '*');
             append_type(sb, k.base);
@@ -1734,6 +1749,12 @@ type_size(t: *Type): int {
         OptSlice _p -> {
             8;
         }
+        Str -> {
+            8;
+        }
+        OptStr -> {
+            8;
+        }
         ZPtr _p -> {
             8;
         }
@@ -1772,6 +1793,12 @@ type_base(t: *Type) raises Error: *Type {
         }
         OptSlice k -> {
             k.base;
+        }
+        Str -> {
+            ty_i8;
+        }
+        OptStr -> {
+            ty_i8;
         }
         ZPtr k -> {
             k.base;
@@ -2221,7 +2248,7 @@ starts_type(): bool {
     if (tok.kind == TokKind.LBrack) {
         return true;
     }
-    if (tok.kind == TokKind.Int || tok.kind == TokKind.I8 || tok.kind == TokKind.I32 || tok.kind == TokKind.U32 || tok.kind == TokKind.F32 || tok.kind == TokKind.F64 || tok.kind == TokKind.Bool || is_type_name()) {
+    if (tok.kind == TokKind.StrTy || tok.kind == TokKind.Int || tok.kind == TokKind.I8 || tok.kind == TokKind.I32 || tok.kind == TokKind.U32 || tok.kind == TokKind.F32 || tok.kind == TokKind.F64 || tok.kind == TokKind.Bool || is_type_name()) {
         return true;
     }
     t: ?*Token = tok;
@@ -2230,7 +2257,10 @@ starts_type(): bool {
         if (t.kind == TokKind.Question) {
             n1: ?*Token = t.next;
             if (n1 != null) {
-                if (n1.kind == TokKind.Star) {
+                if (n1.kind == TokKind.StrTy) {
+                    t = n1;
+                    done = 1;
+                } else if (n1.kind == TokKind.Star) {
                     t = n1.next;
                 } else {
                     if (n1.kind == TokKind.LBrack) {
@@ -2260,7 +2290,7 @@ starts_type(): bool {
     }
     if (t != null) {
         if (t != tok) {
-            if (t.kind == TokKind.Int || t.kind == TokKind.I8 || t.kind == TokKind.I32 || t.kind == TokKind.U32 || t.kind == TokKind.F32 || t.kind == TokKind.F64 || t.kind == TokKind.Bool) {
+            if (t.kind == TokKind.StrTy || t.kind == TokKind.Int || t.kind == TokKind.I8 || t.kind == TokKind.I32 || t.kind == TokKind.U32 || t.kind == TokKind.F32 || t.kind == TokKind.F64 || t.kind == TokKind.Bool) {
                 return true;
             }
             if (t.kind == TokKind.Ident) {
@@ -2403,10 +2433,13 @@ is_opt_slice(t: *Type): bool {
 }
 
 is_optional(t: *Type): bool {
-    is_opt_pointer(t) || is_opt_slice(t);
+    is_opt_pointer(t) || is_opt_slice(t) || is_opt_str(t);
 }
 
 unwrap_optional(t: *Type) noregion raises Error: *Type@new {
+    if (is_opt_str(t)) {
+        return ty_str;
+    }
     if (is_opt_slice(t)) {
         return slice_of(type_base(t));
     }
@@ -2414,6 +2447,20 @@ unwrap_optional(t: *Type) noregion raises Error: *Type@new {
         error("internal: unwrap_optional");
     }
     ptr_to(type_base(t));
+}
+
+is_str(t: *Type): bool {
+    match t.* {
+        Str -> { true; }
+        _ -> { false; }
+    }
+}
+
+is_opt_str(t: *Type): bool {
+    match t.* {
+        OptStr -> { true; }
+        _ -> { false; }
+    }
 }
 
 is_zptr(t: *Type): bool {
@@ -2450,14 +2497,14 @@ array_len(t: *Type): int {
 }
 
 is_indexable(t: *Type): bool {
-    is_slice(t) || is_zptr(t) || is_array(t);
+    is_slice(t) || is_str(t) || is_zptr(t) || is_array(t);
 }
 
 type_is_ref(t: ?*Type): bool {
     if (t == null) {
         return false;
     }
-    is_any_pointer(t) || is_slice(t) || is_opt_slice(t) || is_zptr(t);
+    is_any_pointer(t) || is_slice(t) || is_opt_slice(t) || is_str(t) || is_opt_str(t) || is_zptr(t);
 }
 
 is_struct_ty(t: *Type): bool {
@@ -2565,6 +2612,16 @@ bind_null_to_pointer(pty: ?*Type@null_n, null_n: ?*Expr): bool {
     }
 }
 
+is_string_literal_expr(n: ?*Expr): bool {
+    if (n == null) {
+        return false;
+    }
+    match n.kind {
+        Num k -> { k.str_label != 0; }
+        _ -> { false; }
+    }
+}
+
 assignable(to: ?*Type@from_n, from_n: ?*Expr) raises Error: bool {
     ft: ?*Type = null;
     if (from_n != null) {
@@ -2579,6 +2636,18 @@ assignable(to: ?*Type@from_n, from_n: ?*Expr) raises Error: bool {
         to2: ?*Type = decay(tt);
         if (from2 != null && to2 != null) {
             if (types_equal(from2, to2)) {
+                return true;
+            }
+            if (is_slice(to2) && is_i8_ty(type_base(to2)) && is_str(from2)) {
+                if (is_string_literal_expr(from_n)) {
+                    if (from_n != null) {
+                        from_n.ty = to;
+                    }
+                    return true;
+                }
+                return false;
+            }
+            if (is_opt_str(to2) && is_str(from2)) {
                 return true;
             }
             if (is_opt_pointer(to2) && (is_pointer(from2) || is_slice(from2)) && types_equal(type_base(from2),
@@ -2794,6 +2863,12 @@ type_has_pointers(t: ?*Type): bool {
         OptSlice _p -> {
             true;
         }
+        Str -> {
+            true;
+        }
+        OptStr -> {
+            true;
+        }
         ZPtr _p -> {
             true;
         }
@@ -2842,6 +2917,8 @@ types_equal(a: *Type, b: *Type) raises Error: bool {
         types_equal(type_base(a), type_base(b));
     } else if (is_opt_slice(a) && is_opt_slice(b)) {
         types_equal(type_base(a), type_base(b));
+    } else if (is_str(a) && is_str(b) || is_opt_str(a) && is_opt_str(b)) {
+        true;
     } else if (is_zptr(a) && is_zptr(b)) {
         types_equal(type_base(a), type_base(b));
     } else if (is_array(a) && is_array(b)) {
@@ -2955,7 +3032,10 @@ check_io_args(name: []i8, args: ?*Expr) noregion raises Error {
         io_err(name, " buf must be []i8 or *i8");
     }
     a2: ?*Expr = a1u.next;
-    if (is_slice(t1) && is_i8_ty(type_base(t1))) {
+    if (is_str(t1) && streq(name, "read")) {
+        io_err(name, " buf must be mutable []i8 or *i8");
+    }
+    if (is_str(t1) || is_slice(t1) && is_i8_ty(type_base(t1))) {
         if (a2 == null) {
             return;
         }
@@ -2995,7 +3075,7 @@ check_io_args(name: []i8, args: ?*Expr) noregion raises Error {
         }
         return;
     }
-    error_have_want("I/O buf must be []i8 or *i8", t1, slice_of(ty_i8));
+    error_have_want("I/O buf must be str, []i8, or *i8", t1, slice_of(ty_i8));
 }
 
 check_memcpy_args(args: ?*Expr) noregion raises Error {
@@ -3038,8 +3118,8 @@ check_memcpy_args(args: ?*Expr) noregion raises Error {
     if (t1 == null || !is_int_ty(t1)) {
         error_ty("memcpy di must be int", t1);
     }
-    if (t2 == null || !is_slice(t2) || !is_i8_ty(type_base(t2))) {
-        error_have_want("memcpy src must be []i8", t2, slice_of(ty_i8));
+    if (t2 == null || !is_str(t2) && (!is_slice(t2) || !is_i8_ty(type_base(t2)))) {
+        error_have_want("memcpy src must be str or []i8", t2, slice_of(ty_i8));
     }
     if (t3 == null || !is_int_ty(t3)) {
         error_ty("memcpy si must be int", t3);

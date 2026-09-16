@@ -40,6 +40,9 @@ ident_kind(s: []i8, off: int, n: int): TokKind {
         return TokKind.Ident;
     }
     if (n == 3) {
+        if (s[off + 0] == 's' && s[off + 1] == 't' && s[off + 2] == 'r') {
+            return TokKind.StrTy;
+        }
         if (s[off + 0] == 'i' && s[off + 1] == 'n' && s[off + 2] == 't') {
             return TokKind.Int;
         }
@@ -1043,7 +1046,7 @@ intern(s: []i8, off: int, n: int) noregion: []i8@new {
     d;
 }
 
-add_string(s: []i8, off: int, n: int) noregion: int {
+add_string(s: []i8, off: int, n: int) noregion raises Error: int {
     buf: []i8 = new i8[n + 1](0i8);
     i: int = 0;
     j: int = 0;
@@ -1051,6 +1054,9 @@ add_string(s: []i8, off: int, n: int) noregion: int {
         if (s[off + i] == '\\' && i + 1 < n) {
             i = i + 1;
             buf[j] = esc_char(s[off + i]);
+            if (buf[j] == 0i8) {
+                error("string literal cannot contain NUL");
+            }
             j = j + 1;
         } else {
             buf[j] = s[off + i];
@@ -1109,14 +1115,14 @@ new_num(v: int): *Expr@new {
     n;
 }
 
-new_str_num(label: int) noregion: *Expr@new {
+new_str_num(label: int): *Expr@new {
     n: *Expr = mk_expr(ExprKind.Num {
         val: 0,
         str_label: label,
         form: LIT_INT,
         spell: ""
     });
-    n.ty = slice_of(ty_i8);
+    n.ty = ty_str;
     n;
 }
 
@@ -1520,6 +1526,10 @@ new_obj(name: []i8@new, is_local: int) noregion: *Obj@new {
 }
 
 decl_spec() noregion raises Error: *Type@new {
+    if (tok.kind == TokKind.StrTy) {
+        tok = tok.next;
+        return ty_str;
+    }
     if (tok.kind == TokKind.Int) {
         tok = tok.next;
         return ty_int;
@@ -1615,6 +1625,10 @@ parse_type() noregion raises Error: *Type@new {
     }
     if (tok.kind == TokKind.Question) {
         tok = tok.next;
+        if (tok.kind == TokKind.StrTy) {
+            tok = tok.next;
+            return ty_opt_str;
+        }
         if (tok.kind == TokKind.Star) {
             tok = tok.next;
             base: *Type = parse_type();
@@ -1635,7 +1649,7 @@ parse_type() noregion raises Error: *Type@new {
             }
             return opt_slice_of(sbase);
         }
-        error("expected * or [] after ?");
+        error("expected str, *, or [] after ?");
     }
     if (tok.kind == TokKind.Star) {
         tok = tok.next;
@@ -2462,6 +2476,9 @@ type_index_expr(p: *Expr, lhs: *Expr@new, idx: *Expr@new) noregion raises Error 
     if (is_opt_slice(raw)) {
         error_ty("index of optional slice (use if (s != null) to narrow)", raw);
     }
+    if (is_opt_str(raw)) {
+        error_ty("index of optional str (use if (s != null) to narrow)", raw);
+    }
     if (is_pointer(raw)) {
         error_ty("pointer indexing is not allowed (use []T, [N]T, or [z]T)", raw);
     }
@@ -2534,6 +2551,13 @@ type_or_else(p: *Expr@new, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error
             return;
         }
         error_have_want("or right-hand side must be *T or noreturn", rt, unwrapped);
+    }
+    if (is_opt_str(lt) || is_str(lt)) {
+        if (rt != null && is_str(rt)) {
+            p.ty = ty_str;
+            return;
+        }
+        error_have_want("or right-hand side must be str or noreturn", rt, ty_str);
     }
     if (rt != null && is_slice(rt) && types_equal(type_base(rt), type_base(lt))) {
         p.ty = unwrapped;
@@ -2809,6 +2833,12 @@ unify_value_ty(a: ?*Type, b: ?*Type) noregion raises Error: ?*Type@b {
         type_base(da))) {
         return db;
     }
+    if (da != null && db != null && is_opt_str(da) && is_str(db)) {
+        return da;
+    }
+    if (da != null && db != null && is_opt_str(db) && is_str(da)) {
+        return db;
+    }
     error_ty_vs("branch type mismatch", da, db);
     null;
 }
@@ -2821,7 +2851,7 @@ opt_ptr_of(t: ?*Type) noregion raises Error: *Type@new {
     if (d == null) {
         error("null requires a pointer or slice type");
     }
-    if (is_opt_pointer(d) || is_opt_slice(d)) {
+    if (is_optional(d)) {
         return d;
     }
     if (is_pointer(d)) {
@@ -2830,7 +2860,10 @@ opt_ptr_of(t: ?*Type) noregion raises Error: *Type@new {
     if (is_slice(d)) {
         return opt_slice_of(type_base(d));
     }
-    error_ty("null requires a pointer or slice type", d);
+    if (is_str(d)) {
+        return ty_opt_str;
+    }
+    error_ty("null requires str, a pointer, or a slice type", d);
     d;
 }
 
@@ -3334,7 +3367,7 @@ add_type_expr(p: *Expr@new) noregion raises Error {
         }
         Num k -> {
             if (k.str_label != 0) {
-                p.ty = slice_of(ty_i8);
+                p.ty = ty_str;
                 return;
             }
             p.ty = ty_int;
@@ -3490,6 +3523,9 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                 }
                 Index ik -> {
                     ilt: ?*Type = ik.lhs.ty;
+                    if (ilt != null && is_str(ilt)) {
+                        error("cannot assign through str index");
+                    }
                     if (ilt != null && is_zptr(ilt)) {
                         error("cannot assign through C-string index");
                     }
@@ -3510,6 +3546,9 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                 }
                 Index ik -> {
                     ilt: ?*Type = ik.lhs.ty;
+                    if (ilt != null && is_str(ilt)) {
+                        error("cannot take the address of a str byte");
+                    }
                     if (ilt != null && is_zptr(ilt)) {
                         p.ty = ilt;
                         return;
@@ -3561,7 +3600,10 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                     error_ty("len of optional slice (use if (s != null) to narrow)",
                         at);
                 }
-                if (at != null && is_slice(at)) {
+                if (at != null && is_opt_str(at)) {
+                    error_ty("len of optional str (use if (s != null) to narrow)", at);
+                }
+                if (at != null && (is_slice(at) || is_str(at))) {
                     p.kind = ExprKind.Funcall { funcname: q.funcname, args: q.args, fn: null };
                     p.ty = ty_int;
                     return;
@@ -3576,7 +3618,37 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                     p.ty = ty_int;
                     return;
                 }
-                error_ty("len requires []T or [N]T", at);
+                error_ty("len requires str, []T, or [N]T", at);
+            }
+            if (streq(q.funcname, "cstr")) {
+                if (lenarg == null) {
+                    error("cstr takes one argument");
+                }
+                if (lenarg.next != null) {
+                    error("cstr takes one argument");
+                }
+                ct: ?*Type = decay(lenarg.ty);
+                if (ct == null || !is_slice(ct) || !is_i8_ty(type_base(ct))) {
+                    error_ty("cstr requires []i8", ct);
+                }
+                p.kind = ExprKind.Funcall { funcname: "l8_cstr", args: q.args, fn: null };
+                p.ty = ty_str;
+                return;
+            }
+            if (streq(q.funcname, "bytes")) {
+                if (lenarg == null) {
+                    error("bytes takes one argument");
+                }
+                if (lenarg.next != null) {
+                    error("bytes takes one argument");
+                }
+                bt: ?*Type = decay(lenarg.ty);
+                if (bt == null || !is_str(bt)) {
+                    error_ty("bytes requires str", bt);
+                }
+                p.kind = ExprKind.Funcall { funcname: "l8_bytes", args: q.args, fn: null };
+                p.ty = slice_of(ty_i8);
+                return;
             }
             if (streq(q.funcname, "memcpy")) {
                 check_memcpy_args(q.args);
@@ -3716,12 +3788,12 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
                 return;
             }
             it: ?*Type = decay(k.iter.ty);
-            if (it != null && is_opt_slice(it)) {
+            if (it != null && (is_opt_slice(it) || is_opt_str(it))) {
                 error_ty("for requires a counted array ([]T); narrow ?[]T first",
                     it);
             }
-            if (it == null || !is_slice(it) && !is_array(it)) {
-                error_ty("for requires a counted array ([]T or [N]T) or int range (a..b)",
+            if (it == null || !is_slice(it) && !is_str(it) && !is_array(it)) {
+                error_ty("for requires str, a counted array ([]T or [N]T), or int range (a..b)",
                     it);
             }
             itu: *Type = it;
@@ -4876,7 +4948,7 @@ parse_import() noregion raises Error {
 
 is_builtin_fname(name: []i8): bool {
     streq(name, "len") || streq(name, "memcpy") || streq(name, "write") || streq(name,
-        "read");
+        "read") || streq(name, "cstr") || streq(name, "bytes");
 }
 
 bind_function(name: []i8@new, fn: *Function@immortal) noregion raises Error {
