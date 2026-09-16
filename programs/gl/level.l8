@@ -108,6 +108,88 @@ type GroundCell = {
     stone: int;
 };
 
+type Cell = {
+    column: int;
+    row: int;
+};
+
+type RoomStart = {
+    column: int;
+    row: int;
+    present: bool;
+};
+
+// The backing arrays and their active lengths form one value.  Keeping them
+// together makes snapshots, loading, saving, and editor previews difficult to
+// accidentally wire up with mismatched counts.
+type LevelState = {
+    blocks: []Block;
+    nblocks: int;
+    rooms: []Room;
+    titles: [][]i8;
+    nrooms: int;
+    goals: []Goal;
+    ngoals: int;
+    bricks: []Brick;
+    nbricks: int;
+    ground: []GroundCell;
+    nground: int;
+    spawn: Cell;
+    room_starts: []RoomStart;
+};
+
+type WorldState = {
+    names: [][]i8;
+    dones: [][]i8;
+    ndone: int;
+    solved: []int;
+};
+
+new_level_state(): *LevelState@new {
+    new LevelState {
+        blocks: new Block[LEVEL_MAX_BLOCKS](Block {
+            id: 0 - 1,
+            column: 0,
+            row: 0,
+            shape: 0,
+            layer: 0,
+            ramp: 0,
+            mounted: 0
+        }),
+        nblocks: 0,
+        rooms: new Room[LEVEL_MAX_ROOMS](Room {
+            x0: 0,
+            y0: 0,
+            x1: 0,
+            y1: 0
+        }),
+        titles: new []i8[LEVEL_MAX_ROOMS](new i8[0](0i8)),
+        nrooms: 0,
+        goals: new Goal[LEVEL_MAX_GOALS](Goal { column: 0, row: 0 }),
+        ngoals: 0,
+        bricks: new Brick[LEVEL_MAX_BRICKS](Brick { column: 0, row: 0 }),
+        nbricks: 0,
+        ground: new GroundCell[LEVEL_MAX_GROUND](GroundCell {
+            column: 0,
+            row: 0,
+            style: GROUND_DIRT,
+            stone: 0
+        }),
+        nground: 0,
+        spawn: Cell { column: 0, row: 0 },
+        room_starts: new RoomStart[LEVEL_MAX_ROOMS](RoomStart { column: 0, row: 0, present: false })
+    };
+}
+
+new_world_state(): *WorldState@new {
+    new WorldState {
+        names: new []i8[LEVEL_MAX_ROOMS](new i8[0](0i8)),
+        dones: new []i8[LEVEL_MAX_ROOMS](new i8[0](0i8)),
+        ndone: 0,
+        solved: new int[LEVEL_MAX_ROOMS](0)
+    };
+}
+
 type Placement = {
     x: int;
     y: int;
@@ -1287,9 +1369,7 @@ transform_room_contents(
     rot: int,
     start: []int,
     xy: []int,
-    start_c: []int,
-    start_r: []int,
-    has_start: []int
+    room_starts: []RoomStart
 ) {
     src: Room = rooms[sel];
     w: int = room_size_w(src);
@@ -1344,14 +1424,31 @@ transform_room_contents(
         start[0] = dst.x0 + xy[0];
         start[1] = dst.y0 + xy[1];
     }
-    if (sel >= 0 && sel < LEVEL_MAX_ROOMS && has_start[sel] != 0) {
-        if (room_contains(src, start_c[sel], start_r[sel])) {
-            xform_local(start_c[sel] - src.x0, start_r[sel] - src.y0, w, h, rot, xy);
-            start_c[sel] = dst.x0 + xy[0];
-            start_r[sel] = dst.y0 + xy[1];
+    if (sel >= 0 && sel < LEVEL_MAX_ROOMS && room_starts[sel].present) {
+        rs: RoomStart = room_starts[sel];
+        if (room_contains(src, rs.column, rs.row)) {
+            xform_local(rs.column - src.x0, rs.row - src.y0, w, h, rot, xy);
+            rs.column = dst.x0 + xy[0];
+            rs.row = dst.y0 + xy[1];
+            room_starts[sel] = rs;
         }
     }
     rooms[sel] = dst;
+}
+
+transform_level_room(
+    state: *LevelState,
+    sel: int,
+    dc: int,
+    dr: int,
+    rot: int,
+    xy: []int
+) {
+    start: []int = [state.spawn.column, state.spawn.row];
+    transform_room_contents(state.blocks, state.nblocks, state.goals, state.ngoals,
+        state.bricks, state.nbricks, state.ground, state.nground, state.rooms, sel,
+        dc, dr, rot, start, xy, state.room_starts);
+    state.spawn = Cell { column: start[0], row: start[1] };
 }
 
 clear_room_destination(
@@ -1665,9 +1762,7 @@ save_level(
     nground: int,
     pc: int,
     pr: int,
-    start_c: []int,
-    start_r: []int,
-    has_start: []int
+    room_starts: []RoomStart
 ): int {
     cap: int = 524288;
     dst: []i8 = new i8[cap](0i8);
@@ -1745,12 +1840,12 @@ save_level(
     i = put_ch(dst, i, ' ');
     i = put_int(dst, i, pr - oy);
     i = put_ch(dst, i, '\n');
-    if (nroom > 0 && 0 < len(has_start) && has_start[0] != 0) {
+    if (nroom > 0 && 0 < len(room_starts) && room_starts[0].present) {
         i = put_ch(dst, i, 'e');
         i = put_ch(dst, i, ' ');
-        i = put_int(dst, i, start_c[0] - ox);
+        i = put_int(dst, i, room_starts[0].column - ox);
         i = put_ch(dst, i, ' ');
-        i = put_int(dst, i, start_r[0] - oy);
+        i = put_int(dst, i, room_starts[0].row - oy);
         i = put_ch(dst, i, '\n');
     }
     i = put_ch(dst, i, '\n');
@@ -1840,6 +1935,48 @@ copy_ground(dst: []GroundCell, src: []GroundCell, n: int) {
     for i in 0..n {
         dst[i] = src[i];
     }
+}
+
+copy_rooms(dst: []Room, src: []Room, n: int) {
+    for i in 0..n {
+        dst[i] = src[i];
+    }
+}
+
+copy_goals(dst: []Goal, src: []Goal, n: int) {
+    for i in 0..n {
+        dst[i] = src[i];
+    }
+}
+
+copy_bricks(dst: []Brick, src: []Brick, n: int) {
+    for i in 0..n {
+        dst[i] = src[i];
+    }
+}
+
+copy_room_starts(dst: []RoomStart, src: []RoomStart) {
+    for i in 0..LEVEL_MAX_ROOMS {
+        dst[i] = src[i];
+    }
+}
+
+copy_level_state(dst: *LevelState, src: *LevelState@dst) {
+    copy_blocks(dst.blocks, 0, src.blocks, 0, src.nblocks);
+    copy_rooms(dst.rooms, src.rooms, src.nrooms);
+    for i in 0..src.nrooms {
+        dst.titles[i] = src.titles[i];
+    }
+    copy_goals(dst.goals, src.goals, src.ngoals);
+    copy_bricks(dst.bricks, src.bricks, src.nbricks);
+    copy_ground(dst.ground, src.ground, src.nground);
+    copy_room_starts(dst.room_starts, src.room_starts);
+    dst.nblocks = src.nblocks;
+    dst.nrooms = src.nrooms;
+    dst.ngoals = src.ngoals;
+    dst.nbricks = src.nbricks;
+    dst.nground = src.nground;
+    dst.spawn = src.spawn;
 }
 
 rewind_slot(room: int, step: int, k: int): int {
@@ -2543,17 +2680,13 @@ room_start_fallback(
 mark_room_start(
     rooms: []Room,
     nroom: int,
-    start_c: []int,
-    start_r: []int,
-    has: []int,
+    room_starts: []RoomStart,
     column: int,
     row: int
 ) {
     ri: int = room_at(rooms, nroom, column, row);
     if (ri >= 0 && ri < LEVEL_MAX_ROOMS) {
-        start_c[ri] = column;
-        start_r[ri] = row;
-        has[ri] = 1;
+        room_starts[ri] = RoomStart { column: column, row: row, present: true };
     }
 }
 
@@ -2561,9 +2694,7 @@ bind_starts_from_src(
     src: []i8,
     rooms: []Room,
     nroom: int,
-    start_c: []int,
-    start_r: []int,
-    has: []int
+    room_starts: []RoomStart
 ) {
     n: int = len(src);
     i: int = 0;
@@ -2588,13 +2719,11 @@ bind_starts_from_src(
                 i = parse_int(src, i, val);
                 if (okc != 0 && val[1] != 0) {
                     if (kind == 'e') {
-                        mark_room_start(rooms, nroom, start_c, start_r, has, col,
-                            val[0]);
+                        mark_room_start(rooms, nroom, room_starts, col, val[0]);
                     } else if (saw_spawn == 0) {
                         saw_spawn = 1;
                     } else {
-                        mark_room_start(rooms, nroom, start_c, start_r, has, col,
-                            val[0]);
+                        mark_room_start(rooms, nroom, room_starts, col, val[0]);
                     }
                 }
             }
@@ -2612,18 +2741,14 @@ fill_missing_room_starts(
     nbrick: int,
     goals: []Goal,
     ngoal: int,
-    start_c: []int,
-    start_r: []int,
-    has: []int
+    room_starts: []RoomStart
 ) {
     i: int = 0;
     while (i < nroom) {
-        if (has[i] == 0) {
+        if (!room_starts[i].present) {
             cell: []int = new int[2](0);
             room_start_fallback(rooms, nroom, bricks, nbrick, goals, ngoal, i, cell);
-            start_c[i] = cell[0];
-            start_r[i] = cell[1];
-            has[i] = 1;
+            room_starts[i] = RoomStart { column: cell[0], row: cell[1], present: true };
         }
         i = i + 1;
     }
@@ -2637,20 +2762,15 @@ prepare_room_starts(
     nbrick: int,
     goals: []Goal,
     ngoal: int,
-    start_c: []int,
-    start_r: []int,
-    has: []int
+    room_starts: []RoomStart
 ) {
     i: int = 0;
     while (i < LEVEL_MAX_ROOMS) {
-        start_c[i] = 0;
-        start_r[i] = 0;
-        has[i] = 0;
+        room_starts[i] = RoomStart { column: 0, row: 0, present: false };
         i = i + 1;
     }
-    bind_starts_from_src(src, rooms, nroom, start_c, start_r, has);
-    fill_missing_room_starts(rooms, nroom, bricks, nbrick, goals, ngoal, start_c,
-        start_r, has);
+    bind_starts_from_src(src, rooms, nroom, room_starts);
+    fill_missing_room_starts(rooms, nroom, bricks, nbrick, goals, ngoal, room_starts);
 }
 
 begin_room_reset(
@@ -2660,8 +2780,7 @@ begin_room_reset(
     pr: int,
     rewind_n: []int,
     room_ghosting: []int,
-    start_c: []int,
-    start_r: []int,
+    room_starts: []RoomStart,
     reset_phase: []int,
     reset_t0: []int,
     reset_room: []int,
@@ -2680,7 +2799,7 @@ begin_room_reset(
         need_blocks = 1;
     }
     need_player: int = 0;
-    if (pc != start_c[here] || pr != start_r[here]) {
+    if (pc != room_starts[here].column || pr != room_starts[here].row) {
         need_player = 1;
     }
     if (need_blocks == 0 && need_player == 0) {
@@ -3732,9 +3851,7 @@ save_world(
     ndone: int,
     pc: int,
     pr: int,
-    start_c: []int,
-    start_r: []int,
-    has_start: []int
+    room_starts: []RoomStart
 ): int {
     cap: int = 524288;
     dst: []i8 = new i8[cap](0i8);
@@ -3750,12 +3867,12 @@ save_world(
     i = put_ch(dst, i, '\n');
     k: int = 0;
     while (k < nroom) {
-        if (k < len(has_start) && has_start[k] != 0) {
+        if (k < len(room_starts) && room_starts[k].present) {
             i = put_ch(dst, i, 'e');
             i = put_ch(dst, i, ' ');
-            i = put_int(dst, i, start_c[k]);
+            i = put_int(dst, i, room_starts[k].column);
             i = put_ch(dst, i, ' ');
-            i = put_int(dst, i, start_r[k]);
+            i = put_int(dst, i, room_starts[k].row);
             i = put_ch(dst, i, '\n');
         }
         k = k + 1;
@@ -4208,4 +4325,62 @@ load_any(
     }
     parse_level_src(src, blocks, rooms, titles, nroom, goals, ngoal, bricks, nbrick,
         ground, nground, start);
+}
+
+load_level_state(path: []i8, state: *LevelState@new): int {
+    nroom: []int = new int[1](0);
+    ngoal: []int = new int[1](0);
+    nbrick: []int = new int[1](0);
+    nground: []int = new int[1](0);
+    start: []int = new int[2](0);
+    n: int = load_any(path, state.blocks, state.rooms, state.titles, nroom, state.goals,
+        ngoal, state.bricks, nbrick, state.ground, nground, start);
+    if (n >= 0) {
+        state.nblocks = n;
+        state.nrooms = nroom[0];
+        state.ngoals = ngoal[0];
+        state.nbricks = nbrick[0];
+        state.nground = nground[0];
+        state.spawn = Cell { column: start[0], row: start[1] };
+        prepare_room_starts(slurp_path(path), state.rooms, state.nrooms, state.bricks,
+            state.nbricks, state.goals, state.ngoals, state.room_starts);
+    }
+    n;
+}
+
+load_world_state(path: []i8, world: *WorldState@new, state: *LevelState): int {
+    nroom: []int = new int[1](0);
+    ngoal: []int = new int[1](0);
+    nbrick: []int = new int[1](0);
+    nground: []int = new int[1](0);
+    ndone: []int = new int[1](0);
+    start: []int = new int[2](0);
+    n: int = load_unified_world(path, world.names, state.rooms, state.titles, nroom,
+        state.blocks, state.goals, ngoal, state.bricks, nbrick, state.ground, nground,
+        start, world.dones, ndone);
+    if (n >= 0) {
+        state.nblocks = n;
+        state.nrooms = nroom[0];
+        state.ngoals = ngoal[0];
+        state.nbricks = nbrick[0];
+        state.nground = nground[0];
+        state.spawn = Cell { column: start[0], row: start[1] };
+        world.ndone = ndone[0];
+        prepare_room_starts(slurp_path(path), state.rooms, state.nrooms, state.bricks,
+            state.nbricks, state.goals, state.ngoals, state.room_starts);
+    }
+    n;
+}
+
+save_level_state(path: []i8, state: *LevelState): int {
+    save_level(path, state.blocks, state.nblocks, state.rooms, state.titles, state.nrooms,
+        state.goals, state.ngoals, state.bricks, state.nbricks, state.ground, state.nground,
+        state.spawn.column, state.spawn.row, state.room_starts);
+}
+
+save_world_state(path: []i8, world: *WorldState, state: *LevelState): int {
+    save_world(path, world.names, state.rooms, state.titles, state.nrooms, state.blocks,
+        state.nblocks, state.goals, state.ngoals, state.bricks, state.nbricks, state.ground,
+        state.nground, world.dones, world.ndone, state.spawn.column, state.spawn.row,
+        state.room_starts);
 }
