@@ -13,7 +13,11 @@ def build():
     if _BUILT:
         return
     BUILD.mkdir(parents=True, exist_ok=True)
-    compiler = os.environ.get('L8C', str(ROOT / 'bootstrap'))
+    compiler = os.environ.get('L8C')
+    if compiler is None:
+        compiler = str(BUILD / 'l8c1')
+        subprocess.run([str(ROOT / 'bootstrap'), 'build', str(ROOT / 'src1/main.l8'),
+                        '-o', compiler], cwd=ROOT, check=True)
     for name in ('probe', 'unit', 'session', 'date', 'server', 'client'):
         source = ('tests/' if name in ('probe', 'unit', 'session', 'date') else '') + name + '.l8'
         result = subprocess.run([compiler, 'build', str(ROOT / 'programs/http' / source),

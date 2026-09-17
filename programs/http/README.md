@@ -3,8 +3,10 @@
 An HTTP/1.1 origin-server and client library written in L8. Import `http.l8`.
 The parser, serializer, chunk decoder, conditional-request evaluator, and range
 implementation are L8 code. Only sockets, DNS, clocks, calendar conversion, and
-process management use libc. It builds with the checked-in `bootstrap`, without
-a C compiler or third-party HTTP package, on x86-64 Linux with glibc.
+process management use libc. The build and test commands build a tag-aware
+stage-1 compiler using the checked-in `bootstrap`, without a C compiler or
+third-party HTTP package, on x86-64 Linux with glibc. Library declarations carry
+the `http` tag; callers activate it with `use_tag http;`.
 
 The selected protocol scope is **HTTP/1.1 over TCP**, with HTTP/1.0 compatibility.
 The reference set includes RFC 9110, RFC 9112, their verified-errata snapshots,
@@ -93,7 +95,9 @@ or null on connection/setup failure.
 ## Buffered client
 
 ```l8
+tag application;
 import "http.l8";
+use_tag http;
 
 main(): int {
     optional: ?*HttpClient = http_client("127.0.0.1", "8080");

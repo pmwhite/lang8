@@ -38,6 +38,7 @@ separate tag declaration required.
 ## Bringing names into scope
 
 ```l8
+tag application;
 import "parser.l8";
 
 use_tag parser;
@@ -84,11 +85,17 @@ definitions cannot have the same global name even if their tags are disjoint.
 Several qualified spellings of one definition resolve to the same type, function,
 global storage, and linker symbol. Extern names retain their foreign linker names.
 
-Untagged declarations remain globally accessible, preserving existing programs
-and permitting incremental adoption. Builtins remain available without tags and
-cannot be qualified. Access checks apply to explicit global-name references;
-tags do not restrict passing values, inferring their types, or accessing their
-fields. An API may refer to types from another tag without duplicating those
+Untagged declarations are valid but are not visible to any source-level reference,
+even from their own file or body. There is no default global visibility. Add a
+file tag or declaration tag to make a declaration accessible; `use_tag` alone
+does not give declarations any tags. Unreferenced functions receive the existing
+unused-function warning. The runtime entry point `main` is still selected by name,
+so it needs no tag unless source code references it. Unused types, globals,
+exceptions, and externs retain the existing warning behavior (no unused warning).
+
+Builtins remain available without tags and cannot be qualified. Access checks
+apply to explicit global-name references; tags do not restrict passing values,
+inferring their types, or accessing their fields. An API may refer to types from another tag without duplicating those
 types into every tag on the API.
 
 ## Files and vendored libraries
@@ -122,6 +129,8 @@ the declaration's available tags.
 
 The implementation is present in both compiler stages. Stage 1 uses the existing
 language so the checked-in bootstrap can build it; stage 2 uses a `compiler_tags`
-tag for the tag implementation itself. Run `./build.sh selfhost` to build `./l8`,
-verify the executable fixpoint, and run the positive, negative, formatting,
-browsing, and assembly/direct-backend tests in `examples/tags/`.
+tag for the tag implementation itself and `compiler_internal` for the rest of the
+tool. Stage-1 sources remain untagged because the saved bootstrap predates tags;
+its generated compiler enforces the new visibility rule. Run `./build.sh selfhost`
+to build `./l8`, verify the executable fixpoint, and run the positive, negative,
+formatting, browsing, and assembly/direct-backend tests in `examples/tags/`.

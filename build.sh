@@ -230,6 +230,23 @@ run_examples_selfhost() {
 
 check_tags() {
   local tool="$1" name f
+  example "$tool" tags-declaration-only examples/tags/declaration_only.l8 'declaration'
+  example "$tool" tags-import-only examples/tags/import_only.l8 'declaration'
+  example "$tool" tags-late-file examples/tags/late_file.l8 'late'
+  example "$tool" tags-untagged-unused examples/tags/untagged_unused.l8 'unused' 2>"$BUILD/tags-unused.err"
+  grep -q 'warning: unused function unused' "$BUILD/tags-unused.err" || die 'expected unused untagged function warning'
+  for name in call import use global type enum extern exception recursive; do
+    example_compile_fail "$tool" "tags-untagged-$name" "examples/tags/untagged_$name.l8" 'declaration has no tags'
+  done
+  example_compile_fail "$tool" tags-untagged-qualified examples/tags/untagged_qualified.l8 'does not have tag app'
+  if "./$tool" build examples/tags/untagged_call.l8 -o "$BUILD/tags-invalid" 2>"$BUILD/tags-build.err"; then
+    die 'build accepted an untagged reference'
+  fi
+  grep -q 'declaration has no tags' "$BUILD/tags-build.err" || die 'missing build tag diagnostic'
+  if "./$tool" browse examples/tags/untagged_import.l8 -o "$BUILD/tags-invalid.html" 2>"$BUILD/tags-browse.err"; then
+    die 'browse accepted an untagged reference'
+  fi
+  grep -q 'untagged_import.l8:3:' "$BUILD/tags-browse.err" || die 'missing referring source location'
   example "$tool" tags-main examples/tags/main.l8 'tags'
   example "$tool" tags-used examples/tags/used.l8 'used'
   example "$tool" tags-implicit examples/tags/implicit.l8 'implicit'
@@ -262,6 +279,9 @@ check_tags() {
     "./$tool" fmt "$BUILD/tags-fmt/$name" >"$BUILD/tags-fmt/check"
     cmp -s "$BUILD/tags-fmt/$name" "$BUILD/tags-fmt/check" || die "tag formatting is not stable: $f"
   done
+  example "$tool" tags-fmt-declaration "$BUILD/tags-fmt/declaration_only.l8" 'declaration'
+  example "$tool" tags-fmt-late "$BUILD/tags-fmt/late_file.l8" 'late'
+  example "$tool" tags-fmt-unused "$BUILD/tags-fmt/untagged_unused.l8" 'unused'
   example "$tool" tags-fmt-main "$BUILD/tags-fmt/main.l8" 'tags'
   example "$tool" tags-fmt-used "$BUILD/tags-fmt/used.l8" 'used'
   example "$tool" tags-fmt-implicit "$BUILD/tags-fmt/implicit.l8" 'implicit'
@@ -336,10 +356,15 @@ bootstrap_install_l8c0() {
   chmod +x l8c0
 }
 
+build_stage1() {
+  require_bootstrap
+  step 'stage1 direct (bootstrap → src1)' ./bootstrap build src1/main.l8 -o l8c1
+}
+
 do_examples() {
   ensure_build_dir
-  [[ -x ./l8c0 ]] || do_bootstrap
-  step 'examples [l8c0]' run_examples l8c0
+  build_stage1
+  step 'examples [l8c1]' run_examples l8c1
 }
 
 build_game() {
@@ -351,14 +376,14 @@ do_game() {
   ensure_build_dir
   local tool="l8"
   if [[ ! -x "./$tool" ]]; then
-    [[ -x ./l8c0 ]] || do_bootstrap
-    tool="l8c0"
+    build_stage1
+    tool="l8c1"
   fi
   step "block game [$tool]" build_game "$tool"
 }
 
 build_http() {
-  local tool="${L8C:-./bootstrap}"
+  local tool="${L8C:-./l8c1}"
   mkdir -p "$BUILD/http"
   "$tool" build programs/http/server.l8 -o "$BUILD/http/server"
   "$tool" build programs/http/client.l8 -o "$BUILD/http/client"
@@ -366,6 +391,7 @@ build_http() {
 
 do_http() {
   ensure_build_dir
+  if [[ -z "${L8C:-}" ]]; then build_stage1; fi
   step 'HTTP client and server' build_http
 }
 
@@ -475,7 +501,7 @@ Usage: ./build.sh [command] [--force] [--bench]
 Commands:
   all             Install bootstrap, examples, two-stage self-host (default)
   bootstrap       Copy the saved bootstrap executable → l8c0
-  examples        Run example programs via l8c0
+  examples        Build stage 1 and run example programs via l8c1
   game            Build programs/gl/block-game.l8 → .build/block-game
   http            Build programs/http client and server → .build/http/
   http-test       Verify downloaded specifications and run the HTTP test suite

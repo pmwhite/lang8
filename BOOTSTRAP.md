@@ -21,7 +21,10 @@ Declarations can carry overlapping [tags](tags.md) that control unqualified
 visibility. `tag x;` tags a file's definitions and implicitly enables `use_tag x;`;
 `tag x` before a definition adds a declaration-local tag. `use_tag x;` brings
 tagged names into scope, while `x::name` accesses a single declaration explicitly.
-Tags do not change global symbol identity or relative import resolution.
+Untagged declarations are valid but invisible to source references, including
+references in their own file. Tags do not change global symbol identity or
+relative import resolution. The saved bootstrap predates tags, so `src1/` stays
+untagged; tools built from it enforce tag visibility in `src2/` and programs.
 
 `runtime.s` remains source input when building programs and successor compiler
 stages, but it is already embedded in the saved bootstrap executable.
@@ -52,7 +55,7 @@ assembly and ET_REL are never serialized or reparsed.
 | Command | What it does |
 |---------|--------------|
 | `bootstrap` | Copy the saved bootstrap executable to `l8c0` |
-| `examples` | Build and run examples directly with `l8c0` |
+| `examples` | Build stage 1, then build and run examples with `l8c1` |
 | `http` | Build the L8 HTTP/1.1 client and server in `.build/http/` (see `programs/http/README.md`) |
 | `http-test` | Verify the downloaded RFCs and run the HTTP protocol, API, and socket tests |
 | `selfhost` | Directly build `l8c1` from `src1/`, build `l8c2/l8c3/l8c4` from `src2/`, require the `l8c3 == l8c4` executable fixpoint, run examples, and print compiler phase timings |
