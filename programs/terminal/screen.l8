@@ -2,7 +2,8 @@ tag terminal;
 
 // Bounded storage avoids allocating on output or resize. Each buffer has its own cursor.
 type Screen = {
-    text: []i8;
+    text: []int;
+    comb: []int;
     fg: []int;
     bg: []int;
     cols: int;
@@ -25,11 +26,15 @@ type Screen = {
     params: []int;
     count: int;
     private: bool;
+    utf8_value: int;
+    utf8_need: int;
+    utf8_min: int;
 };
 
 terminal_screen(cols: int, rows: int): *Screen@new {
     new Screen {
-        text: new i8[28800](32i8),
+        text: new int[28800](32),
+        comb: new int[28800](0),
         fg: new int[28800](7),
         bg: new int[28800](0),
         cols: cols,
@@ -51,7 +56,10 @@ terminal_screen(cols: int, rows: int): *Screen@new {
         state: 0,
         params: new int[16](0),
         count: 0,
-        private: false
+        private: false,
+        utf8_value: 0,
+        utf8_need: 0,
+        utf8_min: 0
     };
 }
 
@@ -66,9 +74,16 @@ terminal_clamp(n: int, lo: int, hi: int): int {
 }
 
 terminal_clear(s: *Screen, start: int, end: int) {
+    if (start > 0 && start % 240 != 0 && s.text[start] == -1) {
+        start = start - 1;
+    }
+    if (end < 28800 && end % 240 != 0 && s.text[end] == -1) {
+        end = end + 1;
+    }
     i: int = start;
     while (i < end) {
-        s.text[i] = 32i8;
+        s.text[i] = 32;
+        s.comb[i] = 0;
         s.fg[i] = s.color;
         s.bg[i] = s.back;
         i = i + 1;
@@ -96,6 +111,11 @@ terminal_resize(s: *Screen, cols: int, rows: int) {
     s.x = terminal_clamp(s.x, 0, cols - 1);
     s.y = terminal_clamp(s.y, 0, rows - 1);
     s.wrap = false;
+    y = 0;
+    while (y < rows) {
+        terminal_repair_row(s, y);
+        y = y + 1;
+    }
 }
 
 terminal_scroll(
@@ -117,6 +137,7 @@ terminal_scroll(
             a: int = dst * 240 + x;
             b: int = src * 240 + x;
             s.text[a] = s.text[b];
+            s.comb[a] = s.comb[b];
             s.fg[a] = s.fg[b];
             s.bg[a] = s.bg[b];
             x = x + 1;
@@ -268,6 +289,7 @@ terminal_csi(s: *Screen, c: int): int {
                 b = a - n;
             }
             s.text[a] = s.text[b];
+            s.comb[a] = s.comb[b];
             s.fg[a] = s.fg[b];
             s.bg[a] = s.bg[b];
             i = i + 1;
@@ -277,6 +299,7 @@ terminal_csi(s: *Screen, c: int): int {
         } else {
             terminal_clear(s, s.y * 240 + s.cols - n, s.y * 240 + s.cols);
         }
+        terminal_repair_row(s, s.y);
     }
     if (c == 76 || c == 77 || c == 83 || c == 84) {
         top: int = s.top;
@@ -381,10 +404,137 @@ terminal_csi(s: *Screen, c: int): int {
     0;
 }
 
+terminal_combining(code: int): bool {
+    code >= 768 && code <= 879 || code >= 1155 && code <= 1161 || code >= 1425 && code <= 1469 || code >= 1471 && code <= 1479 || code >= 1552 && code <= 1562 || code >= 1611 && code <= 1631 || code >= 1750 && code <= 1773 || code >= 2304 && code <= 2307 || code >= 2362 && code <= 2364 || code >= 2385 && code <= 2391 || code >= 7616 && code <= 7679 || code >= 8204 && code <= 8205 || code >= 8400 && code <= 8432 || code >= 65024 && code <= 65039 || code >= 65056 && code <= 65071 || code >= 127995 && code <= 127999 || code >= 917760 && code <= 917999;
+}
+
+// A compact wcwidth approximation covering the East Asian and emoji ranges
+// used by current terminal applications. Unlisted printable codepoints occupy
+// one cell; combining marks occupy none.
+terminal_codepoint_width(code: int): int {
+    if (terminal_combining(code)) {
+        return 0;
+    }
+    if (code >= 4352 && code <= 4447 || code == 9001 || code == 9002 || code >= 11904 && code <= 42191 && code != 12351 || code >= 44032 && code <= 55203 || code >= 63744 && code <= 64255 || code >= 65040 && code <= 65049 || code >= 65072 && code <= 65135 || code >= 65281 && code <= 65376 || code >= 65504 && code <= 65510 || code >= 127744 && code <= 129791 || code >= 131072 && code <= 262141) {
+        return 2;
+    }
+    1;
+}
+
+terminal_repair_row(s: *Screen, row: int) {
+    x: int = 0;
+    while (x < s.cols) {
+        pos: int = row * 240 + x;
+        if (s.text[pos] == -1) {
+            if (x == 0 || terminal_codepoint_width(s.text[pos - 1]) != 2) {
+                terminal_plain_cell(s, pos);
+            }
+        } else {
+            if (terminal_codepoint_width(s.text[pos]) == 2 && (x + 1 >= s.cols || s.text[pos + 1] != -1)) {
+                terminal_plain_cell(s, pos);
+            }
+        }
+        x = x + 1;
+    }
+}
+
+terminal_plain_cell(s: *Screen, pos: int) {
+    s.text[pos] = 32;
+    s.comb[pos] = 0;
+    s.fg[pos] = s.color;
+    s.bg[pos] = s.back;
+}
+
+terminal_unlink_cell(s: *Screen, pos: int) {
+    col: int = pos % 240;
+    if (s.text[pos] == -1 && col > 0) {
+        terminal_plain_cell(s, pos - 1);
+    }
+    if (col + 1 < s.cols && s.text[pos + 1] == -1) {
+        terminal_plain_cell(s, pos + 1);
+    }
+    terminal_plain_cell(s, pos);
+}
+
+terminal_put(s: *Screen, code: int) {
+    width: int = terminal_codepoint_width(code);
+    if (width == 0) {
+        pos: int = s.y * 240 + s.x;
+        if (!s.wrap && s.x > 0) {
+            pos = pos - 1;
+        }
+        if (s.text[pos] == -1 && pos % 240 > 0) {
+            pos = pos - 1;
+        }
+        s.comb[pos] = code;
+        return;
+    }
+    if (s.wrap && s.autowrap) {
+        s.x = 0;
+        terminal_lf(s);
+    }
+    if (width == 2 && s.x == s.cols - 1 && s.autowrap) {
+        s.x = 0;
+        terminal_lf(s);
+    }
+    if (width == 2 && s.x == s.cols - 1) {
+        code = 65533;
+        width = 1;
+    }
+    pos: int = s.y * 240 + s.x;
+    terminal_unlink_cell(s, pos);
+    if (width == 2) {
+        terminal_unlink_cell(s, pos + 1);
+    }
+    s.text[pos] = code;
+    fg: int = s.color;
+    bg: int = s.back;
+    if (s.bold && fg < 8) {
+        fg = fg + 8;
+    }
+    if (s.inverse) {
+        s.fg[pos] = bg;
+        s.bg[pos] = fg;
+    } else {
+        s.fg[pos] = fg;
+        s.bg[pos] = bg;
+    }
+    if (width == 2) {
+        s.text[pos + 1] = -1;
+        s.comb[pos + 1] = 0;
+        s.fg[pos + 1] = s.fg[pos];
+        s.bg[pos + 1] = s.bg[pos];
+    }
+    if (s.x + width >= s.cols) {
+        s.x = s.cols - 1;
+        s.wrap = true;
+    } else {
+        s.x = s.x + width;
+        s.wrap = false;
+    }
+}
+
 terminal_byte(s: *Screen, byte: i8): int {
     c: int = byte as int;
     if (c < 0) {
         c = c + 256;
+    }
+    if (s.state == 0 && s.utf8_need > 0) {
+        if (c >= 128 && c <= 191) {
+            s.utf8_value = s.utf8_value * 64 + c - 128;
+            s.utf8_need = s.utf8_need - 1;
+            if (s.utf8_need == 0) {
+                code: int = s.utf8_value;
+                if (code < s.utf8_min || code > 1114111 || code >= 55296 && code <= 57343) {
+                    code = 65533;
+                }
+                terminal_put(s, code);
+            }
+            return 0;
+        }
+        s.utf8_need = 0;
+        terminal_put(s, 65533);
+        return terminal_byte(s, byte);
     }
     if (s.state == 3) {
         if (c == 7) {
@@ -526,31 +676,28 @@ terminal_byte(s: *Screen, byte: i8): int {
         s.state = 6;
         return 0;
     }
-    if (s.wrap && s.autowrap) {
-        s.x = 0;
-        terminal_lf(s);
+    if (c >= 194 && c <= 223) {
+        s.utf8_value = c - 192;
+        s.utf8_need = 1;
+        s.utf8_min = 128;
+        return 0;
     }
-    pos: int = s.y * 240 + s.x;
-    if (c > 126) {
-        c = 63;
+    if (c >= 224 && c <= 239) {
+        s.utf8_value = c - 224;
+        s.utf8_need = 2;
+        s.utf8_min = 2048;
+        return 0;
     }
-    s.text[pos] = c trunc i8;
-    fg: int = s.color;
-    bg: int = s.back;
-    if (s.bold && fg < 8) {
-        fg = fg + 8;
+    if (c >= 240 && c <= 244) {
+        s.utf8_value = c - 240;
+        s.utf8_need = 3;
+        s.utf8_min = 65536;
+        return 0;
     }
-    if (s.inverse) {
-        s.fg[pos] = bg;
-        s.bg[pos] = fg;
-    } else {
-        s.fg[pos] = fg;
-        s.bg[pos] = bg;
+    if (c >= 128) {
+        terminal_put(s, 65533);
+        return 0;
     }
-    if (s.x == s.cols - 1) {
-        s.wrap = true;
-    } else {
-        s.x = s.x + 1;
-    }
+    terminal_put(s, c);
     0;
 }

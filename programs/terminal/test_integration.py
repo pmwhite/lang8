@@ -174,6 +174,7 @@ signal.signal(signal.SIGWINCH, size)
 size()
 (p / 'ready').write_text(json.dumps([os.isatty(0), os.tcgetpgrp(0) == os.getpgrp(), os.environ['TERM'], os.environ['COLORTERM']]))
 os.write(1, b'\\x1b[2J\\x1b[HHello from L8 Terminal\\r\\n\\x1b[31mRED \\x1b[32mGREEN \\x1b[38;5;81mNVIM256 \\x1b[38;2;255;120;190mTRUECOLOR\\x1b[0m\\r\\n')
+os.write(1, 'Unicode: café λ Ж € ✓ é 😀\\r\\n'.encode())
 data = b''
 while len(data) < 6:
     data += os.read(0, 6 - len(data))
