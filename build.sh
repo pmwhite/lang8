@@ -225,6 +225,57 @@ run_examples_selfhost() {
   example_exit "$tool" sliceoob examples/sliceoob.l8 1
   example_exit "$tool" writeoob examples/writeoob.l8 1
   example_exit "$tool" newwrap examples/newwrap.l8 1
+  check_tags "$tool"
+}
+
+check_tags() {
+  local tool="$1" name f
+  example "$tool" tags-main examples/tags/main.l8 'tags'
+  example "$tool" tags-used examples/tags/used.l8 'used'
+  example "$tool" tags-implicit examples/tags/implicit.l8 'implicit'
+  example "$tool" tags-global examples/tags/global.l8 'global'
+  example "$tool" tags-shadow examples/tags/shadow.l8 'shadow'
+  for name in hidden_call hidden_global hidden_type hidden_literal hidden_enum \
+      hidden_new hidden_sizeof hidden_raises hidden_raise hidden_catch local_leak \
+      import_leak qualified_leak forward_hidden; do
+    example_compile_fail "$tool" "tags-$name" "examples/tags/$name.l8" 'is not in scope'
+  done
+  example_compile_fail "$tool" tags-wrong_tag examples/tags/wrong_tag.l8 'does not have tag parser'
+  example_compile_fail "$tool" tags-duplicate examples/tags/duplicate.l8 'duplicate declaration same_name'
+  example_compile_fail "$tool" tags-duplicate_kind examples/tags/duplicate_kind.l8 'duplicate declaration SameName'
+  example_compile_fail "$tool" tags-qualified_local examples/tags/qualified_local.l8 'undefined variable'
+  example_compile_fail "$tool" tags-qualified_builtin examples/tags/qualified_builtin.l8 'does not have tag missing'
+  example_compile_fail "$tool" tags-nested examples/tags/nested.l8 'exactly two names'
+  example_compile_fail "$tool" tags-qualified_definition examples/tags/qualified_definition.l8 'expected unqualified declaration name'
+  example_compile_fail "$tool" tags-builtin_collision examples/tags/builtin_collision.l8 'cannot declare a builtin'
+  example_compile_fail "$tool" tags-invalid_modifier examples/tags/invalid_modifier.l8 'must precede a definition'
+  example_compile_fail "$tool" tags-dangling_modifier examples/tags/dangling_modifier.l8 'must precede a definition'
+
+  # Format each file without following imports, then compile the formatted graph.
+  mkdir -p "$BUILD/tags-fmt"
+  for f in examples/tags/*.l8; do
+    name="${f##*/}"
+    case "$name" in
+      nested.l8|qualified_definition.l8|duplicate.l8|duplicate_kind.l8|builtin_collision.l8|invalid_modifier.l8|dangling_modifier.l8) continue ;;
+    esac
+    "./$tool" fmt "$f" >"$BUILD/tags-fmt/$name"
+    "./$tool" fmt "$BUILD/tags-fmt/$name" >"$BUILD/tags-fmt/check"
+    cmp -s "$BUILD/tags-fmt/$name" "$BUILD/tags-fmt/check" || die "tag formatting is not stable: $f"
+  done
+  example "$tool" tags-fmt-main "$BUILD/tags-fmt/main.l8" 'tags'
+  example "$tool" tags-fmt-used "$BUILD/tags-fmt/used.l8" 'used'
+  example "$tool" tags-fmt-implicit "$BUILD/tags-fmt/implicit.l8" 'implicit'
+  example "$tool" tags-fmt-global "$BUILD/tags-fmt/global.l8" 'global'
+  example "$tool" tags-fmt-shadow "$BUILD/tags-fmt/shadow.l8" 'shadow'
+  "./$tool" browse examples/tags/main.l8 -o "$BUILD/tags-browse.html"
+  grep -q 'parser::' "$BUILD/tags-browse.html" || die 'browse lost tag qualifier'
+  grep -q 'data-s=' "$BUILD/tags-browse.html" || die 'tag browse missing references'
+
+  # Qualified calls retain the same link names in both compiler backends.
+  "./$tool" compile examples/tags/main.l8 >"$BUILD/tags-main.s"
+  "./$tool" as -o "$BUILD/tags-main.o" "$BUILD/tags-main.s" runtime.s
+  "./$tool" elfpack "$BUILD/tags-main.o" -o "$BUILD/tags-asm"
+  run_expect "$BUILD/tags-asm" 'tags'
 }
 
 check_retwarn() {

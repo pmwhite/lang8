@@ -17,6 +17,12 @@ dispatcher in separate `.l8` files. `main.l8` combines them with top-level impor
 Imports are relative to the importing file, share one namespace, include each
 normalized path once, and permit cycles.
 
+Declarations can carry overlapping [tags](tags.md) that control unqualified
+visibility. `tag x;` tags a file's definitions and implicitly enables `use_tag x;`;
+`tag x` before a definition adds a declaration-local tag. `use_tag x;` brings
+tagged names into scope, while `x::name` accesses a single declaration explicitly.
+Tags do not change global symbol identity or relative import resolution.
+
 `runtime.s` remains source input when building programs and successor compiler
 stages, but it is already embedded in the saved bootstrap executable.
 

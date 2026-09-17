@@ -1,0 +1,220 @@
+// Access is checked after the complete import closure has been parsed. File
+// directives apply to the whole file, and imports never inherit the caller's tags.
+tag_has(tags: ?*TagSet, name: []i8): bool {
+    t: ?*TagSet = tags;
+    while (t != null) {
+        if (streq(t.name, name)) {
+            return true;
+        }
+        t = t.next;
+    }
+    false;
+}
+
+tag_add(tags: ?*TagSet@new, name: []i8@new): *TagSet@new {
+    new TagSet { name: name, next: tags };
+}
+
+tag_union(a: ?*TagSet@new, b: ?*TagSet@new): ?*TagSet@new {
+    reversed: ?*TagSet = null;
+    t: ?*TagSet = b;
+    while (t != null) {
+        reversed = tag_add(reversed, t.name);
+        t = t.next;
+    }
+    result: ?*TagSet = a;
+    t = reversed;
+    while (t != null) {
+        if (!tag_has(result, t.name)) {
+            result = tag_add(result, t.name);
+        }
+        t = t.next;
+    }
+    result;
+}
+
+tag_intersects(a: ?*TagSet, b: ?*TagSet): bool {
+    t: ?*TagSet = a;
+    while (t != null) {
+        if (tag_has(b, t.name)) {
+            return true;
+        }
+        t = t.next;
+    }
+    false;
+}
+
+tag_find(name: []i8): ?*TaggedDef {
+    d: ?*TaggedDef = tag_buckets[hash_str(name) & 4095].head;
+    while (d != null) {
+        if (streq(d.name, name)) {
+            return d;
+        }
+        d = d.next;
+    }
+    null;
+}
+
+tag_register(t: *Token@immortal) noregion raises Error {
+    if (t.kind != TokKind.Ident || len(t.qualifier) != 0) {
+        error_at(t.pos, "expected unqualified declaration name");
+    }
+    name: []i8 = intern(source, t.pos, t.len);
+    if (is_builtin_fname(name)) {
+        error_at(t.pos, "cannot declare a builtin as a global name");
+    }
+    if (tag_find(name) != null) {
+        sb: *StrBuf = sb_new();
+        sb_puts(sb, "duplicate declaration ");
+        sb_puts(sb, name);
+        error_at(t.pos, sb_finish(sb));
+    }
+    scope: *TagScope = tag_scope or error("missing tag scope");
+    b: int = hash_str(name) & 4095;
+    tag_buckets[b].head = new TaggedDef {
+        name: name,
+        tags: tag_local,
+        scope: scope,
+        pos: t.pos,
+        next: tag_buckets[b].head
+    };
+}
+
+note_tag_reference() noregion raises Error {
+    if (parse_resolve == 0) {
+        return;
+    }
+    scope: *TagScope = tag_scope or error("missing tag scope");
+    tag_refs = new TagRef {
+        name: intern(source, tok.pos, tok.len),
+        qualifier: tok.qualifier,
+        tags: tag_local,
+        scope: scope,
+        pos: tok.pos,
+        next: tag_refs
+    };
+}
+
+// Compile uses the bare global identity. Syntax-only formatting preserves the
+// written access path, including qualified types and exceptions.
+reference_name() noregion: []i8@new {
+    name: []i8 = intern(source, tok.pos, tok.len);
+    if (parse_resolve == 0 && len(tok.qualifier) != 0) {
+        sb: *StrBuf = sb_new();
+        sb_puts(sb, tok.qualifier);
+        sb_puts(sb, "::");
+        sb_puts(sb, name);
+        return sb_finish(sb);
+    }
+    name;
+}
+
+reference_tokstr() noregion raises Error: []i8@new {
+    note_tag_reference();
+    reference_name();
+}
+
+tag_check_references() noregion raises Error {
+    r: ?*TagRef = tag_refs;
+    while (r != null) {
+        d: ?*TaggedDef = tag_find(r.name);
+        allowed: bool = true;
+        if (len(r.qualifier) != 0) {
+            allowed = false;
+            if (d != null) {
+                allowed = tag_has(d.tags, r.qualifier) || tag_has(d.scope.tags, r.qualifier);
+            }
+        } else if (d != null) {
+            // Untagged declarations retain the legacy global visibility.
+            if (d.tags != null || d.scope.tags != null) {
+                allowed = tag_intersects(d.tags, r.tags) || tag_intersects(d.scope.tags,
+                    r.tags) || tag_intersects(d.tags, r.scope.tags) || tag_intersects(d.scope.tags,
+                    r.scope.tags) || tag_intersects(d.tags, r.scope.uses) || tag_intersects(d.scope.tags,
+                    r.scope.uses);
+            }
+        }
+        if (!allowed) {
+            sb: *StrBuf = sb_new();
+            if (len(r.qualifier) != 0) {
+                sb_puts(sb, "declaration ");
+                sb_puts(sb, r.name);
+                sb_puts(sb, " does not have tag ");
+                sb_puts(sb, r.qualifier);
+            } else {
+                sb_puts(sb, "declaration ");
+                sb_puts(sb, r.name);
+                sb_puts(sb, " is not in scope; use_tag or qualify with one of: ");
+                def: *TaggedDef = d or error("missing tagged declaration");
+                tags: ?*TagSet = tag_union(def.tags, def.scope.tags);
+                while (tags != null) {
+                    sb_puts(sb, tags.name);
+                    tags = tags.next;
+                    if (tags != null) {
+                        sb_puts(sb, ", ");
+                    }
+                }
+            }
+            f: *ImportedFile = r.scope.file;
+            raise Error {
+                msg: sb_finish(sb),
+                pos: r.pos,
+                path: f.path,
+                src: f.src,
+                src_len: f.src_len
+            };
+        }
+        r = r.next;
+    }
+}
+
+tag_is_directive(name: []i8): bool {
+    tok.kind == TokKind.Ident && len(tok.qualifier) == 0 && name_eq_span(name, source,
+        tok.pos, tok.len) && tok.next.kind == TokKind.Ident;
+}
+
+parse_tag_names() noregion raises Error: ?*TagSet@new {
+    names: ?*TagSet = null;
+    done: int = 0;
+    while (done == 0) {
+        if (tok.kind != TokKind.Ident) {
+            error("expected tag name");
+        }
+        name: []i8 = cur_tokstr();
+        if (tag_has(names, name)) {
+            error("duplicate tag in list");
+        }
+        names = tag_add(names, name);
+        tok = tok.next;
+        if (tok.kind == TokKind.Comma) {
+            tok = tok.next;
+        } else {
+            done = 1;
+        }
+    }
+    names;
+}
+
+// Fold a qualified reference into one identifier token. Keep the declaration's
+// source span for browsing, and reject qualification outside reference positions.
+tag_qualify_tokens(head: *Token@new) noregion raises Error {
+    t: *Token = head;
+    while (t.kind != TokKind.Eof) {
+        if (t.kind == TokKind.Ident && t.next.kind == TokKind.ColonColon) {
+            name: *Token = t.next.next;
+            if (name.kind != TokKind.Ident) {
+                error_at(name.pos, "expected declaration name after ::");
+            }
+            if (name.next.kind == TokKind.ColonColon) {
+                error_at(name.pos, "tag qualification has exactly two names");
+            }
+            t.qualifier = intern(source, t.pos, t.len);
+            t.pos = name.pos;
+            t.len = name.len;
+            t.text = name.text;
+            t.next = name.next;
+        } else if (t.kind == TokKind.ColonColon) {
+            error_at(t.pos, "expected tag before ::");
+        }
+        t = t.next;
+    }
+}
