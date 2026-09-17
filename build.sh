@@ -410,9 +410,9 @@ do_terminal_test() {
   step 'terminal screen build' "./$tool" build programs/terminal/test.l8 -o "$BUILD/terminal-test"
   step 'terminal screen tests' "$BUILD/terminal-test"
   step 'terminal PTY build' "./$tool" build programs/terminal/test_pty.l8 -o "$BUILD/terminal-pty-test"
-  step 'terminal system-shell PTY tests' env SHELL=/bin/bash L8_EXPECT_BASH=yes L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= "$BUILD/terminal-pty-test"
-  step 'terminal shell-fallback PTY tests' env SHELL=/definitely/missing L8_EXPECT_BASH= L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= "$BUILD/terminal-pty-test"
-  step 'terminal closed-stdio PTY tests' env SHELL=/bin/sh L8_EXPECT_BASH= L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= "$BUILD/terminal-pty-test" --closed-stdio
+  step 'terminal system-shell PTY tests' env SHELL=/bin/bash LC_ALL=C.UTF-8 L8_EXPECT_BASH=yes L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= "$BUILD/terminal-pty-test"
+  step 'terminal shell-fallback PTY tests' env SHELL=/definitely/missing LC_ALL=C.UTF-8 L8_EXPECT_BASH= L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= "$BUILD/terminal-pty-test"
+  step 'terminal closed-stdio PTY tests' env SHELL=/bin/sh LC_ALL=C.UTF-8 L8_EXPECT_BASH= L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= "$BUILD/terminal-pty-test" --closed-stdio
   step 'terminal X11/PTY tests' python3 programs/terminal/test_integration.py "$BUILD/terminal"
 }
 

@@ -17,6 +17,8 @@ extern FT_Set_Pixel_Sizes(face: *FT_FaceRec, pixel_width: u32, pixel_height: u32
 
 extern FT_Load_Char(face: *FT_FaceRec, char_code: int, load_flags: int): int;
 
+extern FT_Get_Char_Index(face: *FT_FaceRec, char_code: int): u32;
+
 extern FT_Done_Face(face: *FT_FaceRec): int;
 
 extern FT_Done_FreeType(library: *i8): int;
@@ -85,6 +87,27 @@ type Font = {
     ok: int;
 };
 
+// An open face and bounded on-demand atlas for applications whose character set
+// is not known at startup. The optional fallback face shares the atlas.
+tag freetype
+type CachedFont = {
+    library: *i8;
+    face: *FT_FaceRec;
+    fallback_face: ?*FT_FaceRec;
+    atlas: []i8;
+    width: int;
+    height: int;
+    glyphs: []Glyph;
+    keys: []int;
+    values: []int;
+    count: int;
+    x: int;
+    y: int;
+    row_height: int;
+    missing: int;
+    dirty: bool;
+};
+
 empty_glyph(): Glyph {
     Glyph {
         u0: 0.0,
@@ -124,6 +147,172 @@ copy_glyph_rows(
         memcpy(atlas, (ay + r) * aw + ax, src, r * pitch, width);
         r = r + 1;
     }
+}
+
+cached_font_slot(font: *CachedFont, code: int): int {
+    slot: int = code % len(font.keys);
+    while (font.keys[slot] != 0 && font.keys[slot] != code) {
+        slot = (slot + 1) % len(font.keys);
+    }
+    slot;
+}
+
+cached_font_alias(font: *CachedFont, code: int, index: int): int {
+    slot: int = cached_font_slot(font, code);
+    font.keys[slot] = code;
+    font.values[slot] = index + 1;
+    index;
+}
+
+tag freetype
+cached_font_glyph(font: *CachedFont, code: int): int {
+    slot_index: int = cached_font_slot(font, code);
+    if (font.keys[slot_index] == code) {
+        return font.values[slot_index] - 1;
+    }
+    face: *FT_FaceRec = font.face;
+    if (FT_Get_Char_Index(face, code) == 0u32) {
+        fallback0: ?*FT_FaceRec = font.fallback_face;
+        if (fallback0 != null) {
+            fallback: *FT_FaceRec = fallback0;
+            if (FT_Get_Char_Index(fallback, code) != 0u32) {
+                face = fallback;
+            }
+        }
+    }
+    if (font.count >= len(font.glyphs) || FT_Get_Char_Index(face, code) == 0u32 || FT_Load_Char(face,
+        code, FT_LOAD_RENDER) != 0) {
+        return cached_font_alias(font, code, font.missing);
+    }
+    slot: *FT_Slot = face.glyph;
+    gw: int = slot.width as int;
+    gh: int = slot.rows as int;
+    pitch: int = slot.pitch as int;
+    if (pitch < 0) {
+        pitch = 0 - pitch;
+    }
+    if (font.x + gw + 2 > font.width) {
+        font.x = 2;
+        font.y = font.y + font.row_height + 2;
+        font.row_height = 0;
+    }
+    if (font.y + gh + 2 > font.height) {
+        return cached_font_alias(font, code, font.missing);
+    }
+    buffer: ?*i8 = slot.buffer;
+    if (gw > 0 && gh > 0 && pitch > 0 && buffer != null) {
+        data: []i8 = new i8[pitch * gh](0i8);
+        l8_memcpy(data, buffer, len(data));
+        copy_glyph_rows(font.atlas, font.width, font.x, font.y, data, pitch, gw, gh);
+        font.dirty = true;
+    }
+    aw: f32 = font.width as f32;
+    ah: f32 = font.height as f32;
+    index: int = font.count;
+    font.glyphs[index] = Glyph {
+        u0: font.x as f32 / aw,
+        v0: font.y as f32 / ah,
+        u1: (font.x + gw) as f32 / aw,
+        v1: (font.y + gh) as f32 / ah,
+        w: gw as f32,
+        h: gh as f32,
+        left: slot.bitmap_left as f32,
+        top: slot.bitmap_top as f32,
+        adv: (slot.advance_x / 64) as f32
+    };
+    font.count = font.count + 1;
+    font.x = font.x + gw + 2;
+    if (gh > font.row_height) {
+        font.row_height = gh;
+    }
+    cached_font_alias(font, code, index);
+}
+
+tag freetype
+load_cached_font(
+    path: str,
+    fallback_path: ?str,
+    px: int,
+    atlas_width: int,
+    atlas_height: int,
+    capacity: int
+): ?*CachedFont@new {
+    if (sizeof(FT_FaceRec) != 160 || sizeof(FT_Slot) != 200 || px < 8 || atlas_width < 64 || atlas_height < 64 || capacity < 128) {
+        return null;
+    }
+    library_slot: []?*i8 = new ?*i8[1](null);
+    if (FT_Init_FreeType(&library_slot[0]) != 0) {
+        return null;
+    }
+    library0: ?*i8 = library_slot[0];
+    if (library0 == null) {
+        return null;
+    }
+    library: *i8 = library0;
+    face_slot: []?*FT_FaceRec = new ?*FT_FaceRec[1](null);
+    if (FT_New_Face(library, path, 0, &face_slot[0]) != 0) {
+        FT_Done_FreeType(library);
+        return null;
+    }
+    face0: ?*FT_FaceRec = face_slot[0];
+    if (face0 == null) {
+        FT_Done_FreeType(library);
+        return null;
+    }
+    face: *FT_FaceRec = face0;
+    if (FT_Set_Pixel_Sizes(face, 0u32, px trunc u32) != 0) {
+        FT_Done_Face(face);
+        FT_Done_FreeType(library);
+        return null;
+    }
+    fallback_face: ?*FT_FaceRec = null;
+    if (fallback_path != null) {
+        fallback_slot: []?*FT_FaceRec = new ?*FT_FaceRec[1](null);
+        if (FT_New_Face(library, fallback_path, 0, &fallback_slot[0]) == 0) {
+            fallback0: ?*FT_FaceRec = fallback_slot[0];
+            if (fallback0 != null) {
+                fallback: *FT_FaceRec = fallback0;
+                if (FT_Set_Pixel_Sizes(fallback, 0u32, px trunc u32) == 0) {
+                    fallback_face = fallback;
+                } else {
+                    FT_Done_Face(fallback);
+                }
+            }
+        }
+    }
+    hash_size: int = 256;
+    while (hash_size < capacity * 2) {
+        hash_size = hash_size * 2;
+    }
+    font: *CachedFont = new CachedFont {
+        library: library,
+        face: face,
+        fallback_face: fallback_face,
+        atlas: new i8[atlas_width * atlas_height](0i8),
+        width: atlas_width,
+        height: atlas_height,
+        glyphs: new Glyph[capacity](empty_glyph()),
+        keys: new int[hash_size](0),
+        values: new int[hash_size](0),
+        count: 0,
+        x: 2,
+        y: 2,
+        row_height: 0,
+        missing: 0,
+        dirty: false
+    };
+    font.missing = cached_font_glyph(font, 63);
+    font;
+}
+
+tag freetype
+close_cached_font(font: *CachedFont) {
+    fallback0: ?*FT_FaceRec = font.fallback_face;
+    if (fallback0 != null) {
+        FT_Done_Face(fallback0);
+    }
+    FT_Done_Face(font.face);
+    FT_Done_FreeType(font.library);
 }
 
 tag freetype
