@@ -1,0 +1,94 @@
+tag terminal;
+
+import "screen.l8";
+
+// A redraw can straddle PTY writes, even briefly showing the paint cursor on a
+// status row between them. Wait 4 ms for a quiet stream, capped at 16 ms so a
+// continuously writing child cannot starve presentation or input handling.
+type TerminalOutputBatch = {
+    pending: bool;
+    first: int;
+    last: int;
+};
+
+terminal_output_batch(): *TerminalOutputBatch@new {
+    new TerminalOutputBatch { pending: false, first: 0, last: 0 };
+}
+
+terminal_output_received(b: *TerminalOutputBatch, now: int) {
+    if (!b.pending) {
+        b.first = now;
+        b.pending = true;
+    }
+    b.last = now;
+}
+
+terminal_output_delay(b: *TerminalOutputBatch, now: int): int {
+    if (!b.pending) {
+        return 0;
+    }
+    quiet: int = b.last + 4 - now;
+    deadline: int = b.first + 16 - now;
+    if (deadline < quiet) {
+        quiet = deadline;
+    }
+    terminal_clamp(quiet, 0, 4);
+}
+
+type TerminalCursor = {
+    cursor_x: f32;
+    cursor_y: f32;
+    cursor_from_x: f32;
+    cursor_from_y: f32;
+    cursor_to_x: int;
+    cursor_to_y: int;
+    cursor_started: int;
+    cursor_active: bool;
+    cursor_on: bool;
+};
+
+terminal_cursor(): *TerminalCursor@new {
+    new TerminalCursor {
+        cursor_x: 0.0,
+        cursor_y: 0.0,
+        cursor_from_x: 0.0,
+        cursor_from_y: 0.0,
+        cursor_to_x: 0,
+        cursor_to_y: 0,
+        cursor_started: 0,
+        cursor_active: false,
+        cursor_on: true
+    };
+}
+
+terminal_cursor_update(s: *Screen, r: *TerminalCursor, now: int) {
+    if (r.cursor_active) {
+        elapsed: int = now - r.cursor_started;
+        if (elapsed >= 75) {
+            r.cursor_x = r.cursor_to_x as f32;
+            r.cursor_y = r.cursor_to_y as f32;
+            r.cursor_active = false;
+        } else {
+            t: f32 = elapsed as f32 / 75.0;
+            remaining: f32 = 1.0 - t;
+            eased: f32 = 1.0 - remaining * remaining * remaining;
+            r.cursor_x = r.cursor_from_x + (r.cursor_to_x as f32 - r.cursor_from_x) * eased;
+            r.cursor_y = r.cursor_from_y + (r.cursor_to_y as f32 - r.cursor_from_y) * eased;
+        }
+    }
+    // Hidden and incomplete parser positions are paint addresses, not a visible
+    // cursor destination. Continue any committed movement without retargeting it.
+    if (!s.visible || s.state != 0 || s.utf8_need != 0) {
+        return;
+    }
+    if (s.x != r.cursor_to_x || s.y != r.cursor_to_y) {
+        r.cursor_to_x = s.x;
+        r.cursor_to_y = s.y;
+        // Retarget from the position that was actually being rendered. This keeps
+        // large editor jumps continuous instead of teleporting near the destination.
+        r.cursor_from_x = r.cursor_x;
+        r.cursor_from_y = r.cursor_y;
+        r.cursor_started = now;
+        r.cursor_active = true;
+    }
+}

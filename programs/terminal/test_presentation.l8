@@ -1,0 +1,91 @@
+tag terminal_presentation_tests;
+
+use_tag terminal;
+
+import "presentation.l8";
+
+failures: int = 0;
+
+check(ok: bool, label: str) {
+    if (!ok) {
+        failures = failures + 1;
+        write(2, label, len(label));
+        write(2, "\n", 1);
+    }
+}
+
+// A caret denotes ESC in these protocol fixtures.
+feed(s: *Screen, text: str) {
+    for c in text {
+        if (c == 94i8) {
+            _escape: int = terminal_byte(s, 27i8);
+        } else {
+            _action: int = terminal_byte(s, c);
+        }
+    }
+}
+
+present(
+    s: *Screen,
+    c: *TerminalCursor,
+    b: *TerminalOutputBatch,
+    now: int
+) {
+    if (terminal_output_delay(b, now) == 0) {
+        terminal_cursor_update(s, c, now);
+        b.pending = false;
+    }
+}
+
+main(): int {
+    s: *Screen = terminal_screen(80, 24);
+    c: *TerminalCursor = terminal_cursor();
+    b: *TerminalOutputBatch = terminal_output_batch();
+    terminal_cursor_update(s, c, 0);
+    // Neovim's insert-mode redraw can briefly SHOW the cursor on the status
+    // row, then return it to the buffer in a separate write a fraction later.
+    terminal_output_received(b, 100);
+    feed(s, "^[?25l^[24;1H-- INSERT --^[?25h");
+    check(s.visible && s.y == 23, "fixture contains visible intermediate paint cursor");
+    present(s, c, b, 101);
+    check(c.cursor_to_y == 0 && !c.cursor_active, "intermediate write does not retarget cursor");
+    terminal_output_received(b, 102);
+    feed(s, "^[?25l^[1;2H^[?25h");
+    present(s, c, b, 104);
+    check(!c.cursor_active, "wait for quiet after final write");
+    present(s, c, b, 106);
+    check(c.cursor_active && c.cursor_to_x == 1 && c.cursor_to_y == 0 && !b.pending,
+        "only final visible cursor becomes animation target");
+    terminal_cursor_update(s, c, 140);
+    check(c.cursor_y == 0.0 && c.cursor_x > 0.0 && c.cursor_x < 1.0, "insert-mode cursor moves horizontally without a detour");
+    terminal_cursor_update(s, c, 200);
+    feed(s, "^[?25l^[24;40Hhidden repaint");
+    terminal_cursor_update(s, c, 300);
+    check(c.cursor_to_y == 0 && c.cursor_to_x == 1 && c.cursor_y == 0.0, "hidden paint position never becomes a cursor target");
+    feed(s, "^[1;3H^[?25h");
+    terminal_cursor_update(s, c, 320);
+    check(c.cursor_from_y == 0.0 && c.cursor_to_y == 0 && c.cursor_to_x == 2, "unhiding starts at last displayed cursor location");
+    // A partial escape can span a quiet period without presenting its cursor.
+    feed(s, "^[20;10H^[");
+    terminal_cursor_update(s, c, 330);
+    check(c.cursor_to_y == 0, "partial escape does not commit a paint cursor");
+    feed(s, "4;5H");
+    terminal_cursor_update(s, c, 335);
+    check(c.cursor_to_y == 3 && c.cursor_to_x == 4, "completed visible movement still animates");
+    // Continuous output is bounded, and a drawn batch starts a fresh deadline.
+    terminal_output_received(b, 400);
+    for now in 401..416 {
+        terminal_output_received(b, now);
+        check(terminal_output_delay(b, now) > 0, "continuous batch waits within deadline");
+    }
+    terminal_output_received(b, 416);
+    check(terminal_output_delay(b, 416) == 0, "continuous output cannot defer a frame past 16 ms");
+    b.pending = false;
+    check(terminal_output_delay(b, 417) == 0, "idle animation frames incur no settling delay");
+    terminal_output_received(b, 500);
+    check(b.first == 500 && terminal_output_delay(b, 500) == 4, "next output batch gets a fresh deadline");
+    if (failures == 0) {
+        write(1, "terminal presentation tests passed\n", len("terminal presentation tests passed\n"));
+    }
+    failures;
+}

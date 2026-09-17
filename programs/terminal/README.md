@@ -38,16 +38,31 @@ first appear. If installed, Symbola supplies monochrome fallback glyphs for
 symbols and emoji absent from the primary font. `--font` can select a font with
 other script coverage. Cell backgrounds and glyphs are batched into one vertex
 upload and OpenGL draw per changed frame. The renderer retains the previous grid
-and animates changes over 120 ms. It consumes terminal scroll-region operations
-when available and otherwise detects row shifts, treating either as rigid vertical
-planes. Unchanged styled rows at the contiguous edges bound an inferred scroll
-region, keeping editor chrome such as status lines fixed without splitting the
-content plane. It uses a longest-common-subsequence match within changed rows so
-surviving text slides
-apart or together around insertions and deletions. New cells and non-scroll
-deletions fade at the inferred edit location. Rows entering or leaving a scroll
-region remain opaque and are clipped at its edge. Interrupted animations continue
-from their currently displayed positions.
+and animates changes over 120 ms. It compares vertical shifts within rectangular
+regions and recursively splits them when independent motion explains more of the changed
+text. This handles side-by-side, stacked, and nested panes, including multiple
+panes scrolling in different directions, without requiring specific divider
+characters. Shift scoring compares only surviving rows: incoming text and shared
+prefixes cannot favor a stationary fragment just because it has more rows to
+match. Stationary neighbors and styled status lines remain fixed; status counters
+and mode labels update in place even when their text changes. Blank or
+coincidentally repeated lines inside a scrolling pane remain part of its rigid
+plane. Terminal scroll-region operations provide a fallback when too little
+text survives to infer motion.
+
+Within non-scrolling regions, a longest-common-subsequence match makes surviving
+text slide apart or together around insertions and deletions. New cells and
+non-scroll deletions fade at the inferred edit location. Scrolling cells remain
+opaque, and both incoming and departing glyphs are clipped to their own pane's
+rectangle. Interrupted animations continue from their currently displayed
+positions and retain their clipping boundaries through unrelated repaints.
+Resizing resets animation geometry to the new grid.
+
+PTY output waits for a 4 ms quiet interval before presentation, with a 16 ms cap
+for continuously arriving output. This joins redraws split across writes, such
+as an editor painting its insert-mode label before restoring the cursor. Hidden
+cursor positions and incomplete escape sequences do not become animation targets;
+ordinary visible cursor moves still animate over 75 ms.
 
 PTY handling remains independent of libc and libutil. `pty.l8` opens
 `/dev/ptmx`, unlocks and opens its slave with ioctls, forks, creates the child's
@@ -97,14 +112,23 @@ selection/clipboard, mouse reporting, Alt-key encoding, custom tab stops, or DEC
 graphics character set. The width table covers common current terminal ranges
 rather than every historical Unicode width exception. Missing font glyphs use
 the primary font's replacement glyph, and unsupported control sequences are
-ignored. `screen.l8` owns UTF-8 decoding and the codepoint grid, `render.l8` owns
-OpenGL and the dynamic font atlas, `pty.l8` owns PTY setup and shell execution,
+ignored. `screen.l8` owns UTF-8 decoding and the codepoint grid, `scene.l8` owns
+region inference and animation state, `presentation.l8` owns redraw settling and
+cursor motion, `render.l8` owns OpenGL, pane clipping, and the dynamic font atlas, `pty.l8` owns PTY setup and shell execution,
 and `terminal.l8` connects window events, keyboard encoding, output parsing, and
 cleanup. The `terminal` tag is internal to this application and its tests.
 
 `test.l8` runs without a display and checks screen operations, fragmented and
 malformed escapes and UTF-8, combining/wide cells, resize behavior, and 100,000
 deterministic arbitrary bytes.
+`test_scene.l8` also runs without a display. It checks full-screen and split-pane
+scrolling, nested and borderless layouts, independent directions, stationary
+chrome, protocol hints, interrupted motion, wide/combining cells, ordinary edits,
+and resizing, including sixteen panes at the maximum grid size. Regression cases
+also cover repeated prefixes, coincidentally identical incoming code lines, and
+changing status counters.
+`test_presentation.l8` checks split insert-mode redraws, hidden and incomplete
+cursor updates, smooth final movement, and the bounded output settling delay.
 `test_pty.l8` builds as a static executable and checks PTY setup, environment
 inheritance/overrides, canonical input, dimensions, exit status, and startup with
 closed standard streams, without a display or shared libraries.
