@@ -1,0 +1,88 @@
+tag terminal_pty_tests;
+
+use_tag terminal;
+
+import "pty.l8";
+
+main(argc: int, argv: []str): int {
+    // The same PTY path works without any shared libraries or display.
+    // Environment checks exercise the runtime's counted copy, filtering and execve ABI.
+    env: []str = l8_environment();
+    found: bool = false;
+    for entry in env {
+        if (entry == "L8_TERMINAL_TEST=value with spaces") {
+            found = true;
+        }
+    }
+    if (!found) {
+        return 1;
+    }
+    if (argc == 2 && argv[1] == "--closed-stdio") {
+        close(0);
+        close(1);
+        close(2);
+    }
+    pty: TerminalPty = terminal_spawn("""
+test -t 0 || exit 1
+test -t 1 || exit 1
+test -t 2 || exit 1
+test "$TERM" = xterm-256color || exit 1
+test "$LC_ALL" = C || exit 1
+test "$COLORTERM" = truecolor || exit 1
+test "$L8_TERMINAL_TEST" = 'value with spaces' || exit 1
+test "${L8_EMPTY_TEST+x}" = x || exit 1
+test -z "$L8_EMPTY_TEST" || exit 1
+if test "$L8_EXPECT_BASH" = yes; then test -n "$BASH_VERSION" || exit 1; fi
+stty size && printf 'ready
+' && read word && test "$word" = hello && exit 42
+exit 1
+""", -1, 80, 24);
+    if (pty.child < 0) {
+        return 2;
+    }
+    poll: TerminalPoll = TerminalPoll { fd: pty.master trunc i32, events: 1i32 };
+    data: []i8 = new i8[128](0i8);
+    output: []i8 = new i8[1024](0i8);
+    size: int = 0;
+    sent: bool = false;
+    done: bool = false;
+    loops: int = 0;
+    while (!done && loops < 200) {
+        l8_poll(&poll, 1, 20i32);
+        n: int = read(pty.master, data, len(data));
+        if (n > 0) {
+            if (size + n > len(output)) {
+                done = true;
+            } else {
+                for i in 0..n {
+                    output[size] = data[i];
+                    size = size + 1;
+                }
+            }
+            if (!sent && size >= 14) {
+                if (write(pty.master, "hello\n", len("hello\n")) != 6) {
+                    done = true;
+                }
+                sent = true;
+            }
+        } else {
+            if (n != -4 && n != -11) {
+                done = true;
+            }
+        }
+        loops = loops + 1;
+    }
+    close(pty.master);
+    status: i32 = 0i32;
+    if (loops == 200) {
+        l8_kill(pty.child, 9);
+    }
+    l8_waitpid(pty.child trunc i32, &status, 0i32);
+    if (status != 10752i32 || !sent || size < 14) {
+        return 3;
+    }
+    if (output[0] != '2' || output[1] != '4' || output[2] != ' ' || output[3] != '8' || output[4] != '0') {
+        return 4;
+    }
+    0;
+}

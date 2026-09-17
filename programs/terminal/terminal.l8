@@ -1,0 +1,358 @@
+tag terminal;
+
+use_tag x11;
+
+import "screen.l8";
+
+import "pty.l8";
+
+import "render.l8";
+
+extern XConnectionNumber(dpy: *i8): int;
+
+extern XGetGeometry(
+    dpy: *i8,
+    window: int,
+    root: *int,
+    x: *i32,
+    y: *i32,
+    width: *i32,
+    height: *i32,
+    border: *i32,
+    depth: *i32
+): int;
+
+// A bounded queue preserves partial writes and keeps X11 responsive under PTY backpressure.
+type TerminalInput = {
+    data: []i8;
+    size: int;
+};
+
+terminal_queue(q: *TerminalInput, data: []i8, size: int) {
+    if (q.size + size <= len(q.data)) {
+        i: int = 0;
+        while (i < size) {
+            q.data[q.size] = data[i];
+            q.size = q.size + 1;
+            i = i + 1;
+        }
+    }
+}
+
+terminal_send(q: *TerminalInput, text: str) {
+    if (q.size + len(text) <= len(q.data)) {
+        for c in text {
+            q.data[q.size] = c;
+            q.size = q.size + 1;
+        }
+    }
+}
+
+terminal_escape(q: *TerminalInput, text: str) {
+    if (q.size + len(text) + 1 <= len(q.data)) {
+        q.data[q.size] = 27i8;
+        q.size = q.size + 1;
+        terminal_send(q, text);
+    }
+}
+
+terminal_number(q: *TerminalInput, n: int) {
+    if (n >= 10) {
+        terminal_number(q, n / 10);
+    }
+    // Do not mutate string literals.
+    if (q.size < len(q.data)) {
+        q.data[q.size] = (48 + n % 10) trunc i8;
+        q.size = q.size + 1;
+    }
+}
+
+terminal_key(
+    s: *Screen,
+    q: *TerminalInput,
+    ev: *XEvent,
+    buf: []i8
+) {
+    if (q.size > len(q.data) - 64) {
+        return;
+    }
+    sym: int = 0;
+    n: int = XLookupString(ev, buf, len(buf), &sym, null);
+    if (sym >= 65361 && sym <= 65364) {
+        if (s.application) {
+            terminal_escape(q, "O");
+        } else {
+            terminal_escape(q, "[");
+        }
+        if (sym == 65361) {
+            terminal_send(q, "D");
+        }
+        if (sym == 65362) {
+            terminal_send(q, "A");
+        }
+        if (sym == 65363) {
+            terminal_send(q, "C");
+        }
+        if (sym == 65364) {
+            terminal_send(q, "B");
+        }
+    } else {
+        if (sym == 65288) {
+            q.data[q.size] = 127i8;
+            q.size = q.size + 1;
+        } else {
+            if (sym == 65535) {
+                terminal_escape(q, "[3~");
+            } else {
+                if (sym == 65360) {
+                    terminal_escape(q, "[H");
+                } else {
+                    if (sym == 65367) {
+                        terminal_escape(q, "[F");
+                    } else {
+                        if (sym == 65365) {
+                            terminal_escape(q, "[5~");
+                        } else {
+                            if (sym == 65366) {
+                                terminal_escape(q, "[6~");
+                            } else {
+                                if (sym == 65379) {
+                                    terminal_escape(q, "[2~");
+                                } else {
+                                    if (sym >= 65470 && sym <= 65473) {
+                                        terminal_escape(q, "O");
+                                        if (q.size < len(q.data)) {
+                                            q.data[q.size] = (80 + sym - 65470) trunc i8;
+                                            q.size = q.size + 1;
+                                        }
+                                    } else {
+                                        terminal_queue(q, buf, n);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+main(argc: int, argv: []str@new): int {
+    font_path: str = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf";
+    font_size: int = 18;
+    command: ?str = null;
+    arg: int = 1;
+    while (arg < argc) {
+        if (argv[arg] == "--help") {
+            write(1, "Usage: terminal [--font path.ttf] [--font-size 8..32] [shell-command]\n",
+                len("Usage: terminal [--font path.ttf] [--font-size 8..32] [shell-command]\n"));
+            return 0;
+        }
+        if (argv[arg] == "--font" || argv[arg] == "--font-size") {
+            if (arg + 1 >= argc) {
+                return 2;
+            }
+            if (argv[arg] == "--font") {
+                font_path = argv[arg + 1];
+            } else {
+                font_size = 0;
+                for c in argv[arg + 1] {
+                    if (c < '0' || c > '9' || font_size > 32) {
+                        return 2;
+                    }
+                    font_size = font_size * 10 + c as int - 48;
+                }
+                if (font_size < 8 || font_size > 32) {
+                    return 2;
+                }
+            }
+            arg = arg + 2;
+        } else {
+            if (command != null) {
+                return 2;
+            }
+            command = argv[arg];
+            arg = arg + 1;
+        }
+    }
+    display: ?*i8 = XOpenDisplay(null);
+    if (display == null) {
+        write(2, "terminal: cannot open X11 display\n", len("terminal: cannot open X11 display\n"));
+        return 1;
+    }
+    dpy: *i8 = display;
+    renderer0: ?*TerminalRenderer = terminal_renderer(dpy, font_path, font_size);
+    if (renderer0 == null) {
+        XCloseDisplay(dpy);
+        write(2, "terminal: OpenGL/font setup failed\n", len("terminal: OpenGL/font setup failed\n"));
+        return 1;
+    }
+    renderer: *TerminalRenderer = renderer0;
+    win: int = renderer.win;
+    root: int = XRootWindow(dpy, XDefaultScreen(dpy));
+    XStoreName(dpy, win, "L8 Terminal");
+    wm_delete: int = XInternAtom(dpy, "WM_DELETE_WINDOW", 0);
+    wm_protocols: int = XInternAtom(dpy, "WM_PROTOCOLS", 0);
+    XSetWMProtocols(dpy, win, &wm_delete, 1);
+    main_screen: *Screen = terminal_screen(80, 24);
+    alt_screen: *Screen = terminal_screen(80, 24);
+    s: *Screen = main_screen;
+    pty: TerminalPty = terminal_spawn(command, XConnectionNumber(dpy), 80, 24);
+    if (pty.child < 0) {
+        terminal_renderer_close(renderer, false);
+        XCloseDisplay(dpy);
+        write(2, "terminal: PTY setup failed\n", len("terminal: PTY setup failed\n"));
+        return 1;
+    }
+    master: int = pty.master;
+    child: i32 = pty.child trunc i32;
+    XMapRaised(dpy, win);
+    XFlush(dpy);
+    q: *TerminalInput = new TerminalInput { data: new i8[65536](0i8), size: 0 };
+    buf: []i8 = new i8[8192](0i8);
+    keys: []i8 = new i8[64](0i8);
+    polls: []TerminalPoll = new TerminalPoll[2](TerminalPoll { fd: 0i32, events: 0i32 });
+    ev: XEvent = XEvent.Other;
+    running: bool = true;
+    dirty: bool = true;
+    destroyed: bool = false;
+    status: i32 = 0i32;
+    reaped: bool = false;
+    while (running) {
+        while (XPending(dpy) > 0) {
+            XNextEvent(dpy, &ev);
+            dirty = true;
+            match ev {
+                KeyPress -> {
+                    terminal_key(s, q, &ev, keys);
+                }
+                DestroyNotify -> {
+                    running = false;
+                    destroyed = true;
+                }
+                ClientMessage message -> {
+                    if (message.message_type == wm_protocols && message.format == 32i32 && message.l0 == wm_delete) {
+                        running = false;
+                    }
+                }
+                _ -> { }
+            }
+        }
+        if (running) {
+            if (dirty) {
+                gx: i32 = 0i32;
+                gy: i32 = 0i32;
+                w: i32 = 0i32;
+                h: i32 = 0i32;
+                border: i32 = 0i32;
+                depth: i32 = 0i32;
+                XGetGeometry(dpy, win, &root, &gx, &gy, &w, &h, &border, &depth);
+                renderer.width = w as int;
+                renderer.height = h as int;
+                cols: int = terminal_clamp((w as int - 16) / renderer.cw, 2, 240);
+                rows: int = terminal_clamp((h as int - 16) / renderer.ch, 2, 120);
+                if (cols != s.cols || rows != s.rows) {
+                    terminal_resize(main_screen, cols, rows);
+                    terminal_resize(alt_screen, cols, rows);
+                    if (!terminal_pty_size(master, cols, rows)) {
+                        running = false;
+                    }
+                }
+            }
+            polls[0].fd = master trunc i32;
+            polls[0].events = 1i32;
+            if (q.size > 0) {
+                polls[0].events = 5i32;
+            }
+            polls[1].fd = XConnectionNumber(dpy) trunc i32;
+            polls[1].events = 1i32;
+            timeout: i32 = 50i32;
+            if (dirty) {
+                timeout = 0i32;
+            }
+            l8_poll(&polls[0], 2, timeout);
+            // Reads and writes are nonblocking, so races with readiness are harmless.
+            if (q.size > 0) {
+                sent: int = write(master, q.data, q.size);
+                if (sent > 0) {
+                    i: int = sent;
+                    while (i < q.size) {
+                        q.data[i - sent] = q.data[i];
+                        i = i + 1;
+                    }
+                    q.size = q.size - sent;
+                } else {
+                    if (sent != -4 && sent != -11) {
+                        running = false;
+                    }
+                }
+            }
+            n: int = read(master, buf, len(buf));
+            if (n > 0) {
+                dirty = true;
+                i: int = 0;
+                while (i < n) {
+                    action: int = terminal_byte(s, buf[i]);
+                    if (action == 1 && s == main_screen) {
+                        terminal_clear(alt_screen, 0, 28800);
+                        alt_screen.x = 0;
+                        alt_screen.y = 0;
+                        alt_screen.wrap = false;
+                        s = alt_screen;
+                    }
+                    if (action == 2) {
+                        s = main_screen;
+                    }
+                    if (action == 3 && q.size <= len(q.data) - 16) {
+                        terminal_escape(q, "[");
+                        terminal_number(q, s.y + 1);
+                        terminal_send(q, ";");
+                        terminal_number(q, s.x + 1);
+                        terminal_send(q, "R");
+                    }
+                    if (action == 4) {
+                        terminal_escape(q, "[0n");
+                    }
+                    i = i + 1;
+                }
+            } else {
+                if (n == 0 || n < 0 && n != -4 && n != -11) {
+                    running = false;
+                }
+            }
+            if (dirty) {
+                terminal_draw(s, renderer);
+                dirty = false;
+            }
+            if (!reaped) {
+                if (l8_waitpid(child, &status, 1i32) == child as int) {
+                    reaped = true;
+                }
+            }
+        }
+    }
+    close(master);
+    if (!reaped) {
+        l8_kill(child as int, 1);
+        // Closing the terminal must not hang on a shell which ignores SIGHUP.
+        tries: int = 0;
+        while (tries < 20 && !reaped) {
+            if (l8_waitpid(child, &status, 1i32) == child as int) {
+                reaped = true;
+            } else {
+                polls[0].fd = -1i32;
+                polls[0].events = 0i32;
+                l8_poll(&polls[0], 1, 10i32);
+            }
+            tries = tries + 1;
+        }
+        if (!reaped) {
+            l8_kill(child as int, 9);
+            l8_waitpid(child, &status, 0i32);
+        }
+    }
+    terminal_renderer_close(renderer, destroyed);
+    XCloseDisplay(dpy);
+    0;
+}

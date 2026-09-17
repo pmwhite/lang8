@@ -58,6 +58,8 @@ assembly and ET_REL are never serialized or reparsed.
 | `examples` | Build stage 1, then build and run examples with `l8c1` |
 | `http` | Build the L8 HTTP/1.1 client and server in `.build/http/` (see `programs/http/README.md`) |
 | `http-test` | Verify the downloaded RFCs and run the HTTP protocol, API, and socket tests |
+| `terminal` | Build the OpenGL/FreeType terminal emulator in `.build/terminal` |
+| `terminal-test` | Run terminal parser and static PTY tests, plus graphical integration tests when a display is available |
 | `selfhost` | Directly build `l8c1` from `src1/`, build `l8c2/l8c3/l8c4` from `src2/`, require the `l8c3 == l8c4` executable fixpoint, run examples, and print compiler phase timings |
 | `promote-bin1` | Promote the stage-1 executable to `bootstrap` |
 | `promote-bin2` | Promote the stage-2 fixpoint executable to `bootstrap` |

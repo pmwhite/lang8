@@ -11,6 +11,7 @@ Each directory owns one library or application. Runnable demonstrations live in
 | `http/` | `http.l8` | `http` | HTTP/1.1 client, server, and streaming APIs |
 | `websocket/` | `websocket.l8` | `websocket` | RFC 6455 client, server, and message APIs; imports HTTP |
 | `block-game/` | `block-game.l8` | — | Game, editor, level model, and assets |
+| `terminal/` | `terminal.l8` | — | OpenGL/FreeType terminal with a syscall-backed PTY shell |
 
 Import the entry point relative to your source file, then activate the public
 tag with `use_tag`. Tags do not propagate through imports: GL applications using
@@ -31,14 +32,19 @@ layouts, atlas defaults, and construction helpers remain internal. See
 
 HTTP uses direct Linux x86-64 system calls and builds as a static executable with
 no libc dependency. FreeType, X11, and OpenGL remain shared-library integrations;
-the executable does not request libc directly, though those system libraries
-normally depend on it themselves.
+programs using these bindings do not need to request libc directly, though those
+system libraries normally depend on it themselves. The terminal uses these
+graphics libraries and direct syscalls for PTY setup and shell execution; see its
+[`README`](terminal/README.md) for usage and supported terminal features.
 
 From the repository root:
 
 ```sh
 ./build.sh game
 .build/block-game                         # programs/block-game/world.txt
+./build.sh terminal
+.build/terminal
+./build.sh terminal-test
 ./build.sh http
 ./build.sh http-test
 ./build.sh websocket

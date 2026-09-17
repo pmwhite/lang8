@@ -1,0 +1,344 @@
+tag terminal;
+
+use_tag gl, x11, freetype;
+
+import "../gl/gl.l8";
+
+import "../freetype/ft.l8";
+
+import "screen.l8";
+
+extern XFree(data: *XVisualInfo): int;
+
+extern XFreeColormap(dpy: *i8, cmap: int): int;
+
+extern glDeleteShader(shader: int): int;
+
+extern glDeleteProgram(program: int): int;
+
+extern glDeleteBuffers(n: int, buffers: *u32): int;
+
+extern glDeleteTextures(n: int, textures: *u32): int;
+
+type TerminalRenderer = {
+    dpy: *i8;
+    win: int;
+    cmap: int;
+    ctx: *i8;
+    font: Font;
+    cw: int;
+    ch: int;
+    ascent: int;
+    width: int;
+    height: int;
+    program: int;
+    viewport: int;
+    buffer: u32;
+    texture: u32;
+    vertices: []f32;
+    palette: []int;
+};
+
+terminal_shader(kind: int, text: []i8): int {
+    shader: int = glCreateShader(kind);
+    ptr: *i8 = text;
+    size: i32 = len(text) trunc i32;
+    glShaderSource(shader, 1, &ptr, &size);
+    glCompileShader(shader);
+    ok: i32 = 0i32;
+    glGetShaderiv(shader, 35713, &ok);
+    if (ok == 0i32) {
+        log: []i8 = new i8[2048](0i8);
+        count: i32 = 0i32;
+        glGetShaderInfoLog(shader, len(log), &count, log);
+        write(2, log, terminal_clamp(count as int, 0, len(log)));
+        glDeleteShader(shader);
+        return 0;
+    }
+    shader;
+}
+
+terminal_renderer_close(r: *TerminalRenderer, destroyed: bool) {
+    glDeleteBuffers(1, &r.buffer);
+    glDeleteTextures(1, &r.texture);
+    glDeleteProgram(r.program);
+    glXMakeCurrent(r.dpy, 0, null);
+    glXDestroyContext(r.dpy, r.ctx);
+    if (!destroyed) {
+        XDestroyWindow(r.dpy, r.win);
+    }
+    XFreeColormap(r.dpy, r.cmap);
+}
+
+terminal_renderer(dpy: *i8@new, path: str, px: int): ?*TerminalRenderer@new {
+    font: Font = load_font(path, px, 512, 512);
+    if (font.ok == 0) {
+        return null;
+    }
+    cw: int = font.glyphs[77 - FT_FIRST].adv as int;
+    top: int = 0;
+    bottom: int = 0;
+    for index in 0..len(font.glyphs) {
+        g: Glyph = font.glyphs[index];
+        if (g.adv as int != cw || cw < 1) {
+            write(2, "terminal: font must contain fixed-width ASCII glyphs\n", len("terminal: font must contain fixed-width ASCII glyphs\n"));
+            return null;
+        }
+        if (g.top as int > top) {
+            top = g.top as int;
+        }
+        if ((g.h - g.top) as int > bottom) {
+            bottom = (g.h - g.top) as int;
+        }
+    }
+    ch: int = top + bottom + 4;
+    screen: int = XDefaultScreen(dpy);
+    attr: []i32 = [4i32, 5i32, 8i32, 8i32, 9i32, 8i32, 10i32, 8i32, 0i32];
+    visual0: ?*XVisualInfo = glXChooseVisual(dpy, screen, attr);
+    if (visual0 == null) {
+        return null;
+    }
+    visual: *XVisualInfo = visual0;
+    cmap: int = XCreateColormap(dpy, XRootWindow(dpy, screen), visual.visual, 0);
+    wa: XSetWindowAttributes = XSetWindowAttributes {
+        background_pixmap: 0,
+        background_pixel: 0,
+        border_pixmap: 0,
+        border_pixel: 0,
+        bit_gravity: 0i32,
+        win_gravity: 0i32,
+        backing_store: 0i32,
+        backing_planes: 0,
+        backing_pixel: 0,
+        save_under: 0i32,
+        event_mask: 163841,
+        do_not_propagate_mask: 0,
+        override_redirect: 0i32,
+        colormap: cmap,
+        cursor: 0
+    };
+    win: int = XCreateWindow(dpy, XRootWindow(dpy, screen), 0, 0, 80 * cw + 16, 24 * ch + 16,
+        0, visual.depth as int, 1, visual.visual, 10248, &wa);
+    ctx0: ?*i8 = glXCreateContext(dpy, visual, null, 1);
+    XFree(visual);
+    if (ctx0 == null) {
+        XDestroyWindow(dpy, win);
+        XFreeColormap(dpy, cmap);
+        return null;
+    }
+    ctx: *i8 = ctx0;
+    if (glXMakeCurrent(dpy, win, ctx) == 0) {
+        glXDestroyContext(dpy, ctx);
+        XDestroyWindow(dpy, win);
+        XFreeColormap(dpy, cmap);
+        return null;
+    }
+    r: *TerminalRenderer = new TerminalRenderer {
+        dpy: dpy,
+        win: win,
+        cmap: cmap,
+        ctx: ctx,
+        font: font,
+        cw: cw,
+        ch: ch,
+        ascent: top + 2,
+        width: 80 * cw + 16,
+        height: 24 * ch + 16,
+        program: 0,
+        viewport: -1,
+        buffer: 0u32,
+        texture: 0u32,
+        vertices: new f32[2419200](0.0),
+        palette: new int[256](0)
+    };
+    base: []int = [1579032, 13391189, 5614165, 13412949, 5601228, 11163050, 5614250,
+        13421772, 7829367, 16742263, 7855479, 16768375, 7838207, 14514141, 7855581,
+        16777215];
+    for color in 0..16 {
+        r.palette[color] = base[color];
+    }
+    for color in 16..232 {
+        cube: int = color - 16;
+        red: int = cube / 36;
+        green: int = cube / 6 % 6;
+        blue: int = cube % 6;
+        if (red > 0) {
+            red = 55 + red * 40;
+        }
+        if (green > 0) {
+            green = 55 + green * 40;
+        }
+        if (blue > 0) {
+            blue = 55 + blue * 40;
+        }
+        r.palette[color] = red * 65536 + green * 256 + blue;
+    }
+    for color in 232..256 {
+        gray: int = 8 + (color - 232) * 10;
+        r.palette[color] = gray * 65536 + gray * 256 + gray;
+    }
+    vs: []i8 = """
+#version 120
+attribute vec2 position;
+attribute vec2 uv;
+attribute vec3 color;
+uniform vec2 viewport;
+varying vec2 texcoord;
+varying vec3 ink;
+void main() {
+    gl_Position = vec4(position.x * 2.0 / viewport.x - 1.0,
+                       1.0 - position.y * 2.0 / viewport.y, 0.0, 1.0);
+    texcoord = uv;
+    ink = color;
+}
+""";
+    fs: []i8 = """
+#version 120
+uniform sampler2D atlas;
+varying vec2 texcoord;
+varying vec3 ink;
+void main() {
+    float coverage = texcoord.x < 0.0 ? 1.0 : texture2D(atlas, texcoord).a;
+    gl_FragColor = vec4(ink, coverage);
+}
+""";
+    vsh: int = terminal_shader(35633, vs);
+    fsh: int = terminal_shader(35632, fs);
+    if (vsh == 0 || fsh == 0) {
+        glDeleteShader(vsh);
+        glDeleteShader(fsh);
+        terminal_renderer_close(r, false);
+        return null;
+    }
+    r.program = glCreateProgram();
+    glAttachShader(r.program, vsh);
+    glAttachShader(r.program, fsh);
+    glBindAttribLocation(r.program, 0, "position");
+    glBindAttribLocation(r.program, 1, "uv");
+    glBindAttribLocation(r.program, 2, "color");
+    glLinkProgram(r.program);
+    glDeleteShader(vsh);
+    glDeleteShader(fsh);
+    ok: i32 = 0i32;
+    glGetProgramiv(r.program, 35714, &ok);
+    if (ok == 0i32) {
+        terminal_renderer_close(r, false);
+        return null;
+    }
+    glUseProgram(r.program);
+    r.viewport = glGetUniformLocation(r.program, "viewport");
+    glUniform1i(glGetUniformLocation(r.program, "atlas"), 0);
+    glGenBuffers(1, &r.buffer);
+    glBindBuffer(34962, r.buffer);
+    glVertexAttribPointer(0, 2, 5126, 0, 28, 0);
+    glVertexAttribPointer(1, 2, 5126, 0, 28, 8);
+    glVertexAttribPointer(2, 3, 5126, 0, 28, 16);
+    glEnableVertexAttribArray(0);
+    glEnableVertexAttribArray(1);
+    glEnableVertexAttribArray(2);
+    glGenTextures(1, &r.texture);
+    glBindTexture(3553, r.texture);
+    glTexParameteri(3553, 10241, 9729);
+    glTexParameteri(3553, 10240, 9729);
+    glTexParameteri(3553, 10242, 33071);
+    glTexParameteri(3553, 10243, 33071);
+    glPixelStorei(3317, 1);
+    glTexImage2D(3553, 0, 6406, font.w, font.h, 0, 6406, 5121, font.atlas);
+    glEnable(3042);
+    glBlendFunc(770, 771);
+    glClearColor(24.0 / 255.0, 24.0 / 255.0, 24.0 / 255.0, 1.0);
+    r;
+}
+
+terminal_quad(
+    r: *TerminalRenderer,
+    offset: int,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
+    color: int
+): int {
+    i: int = offset;
+    corner: int = 0;
+    rgb: int = color - 256;
+    if (color < 256) {
+        rgb = r.palette[color];
+    }
+    red: f32 = (rgb / 65536) as f32 / 255.0;
+    green: f32 = (rgb / 256 % 256) as f32 / 255.0;
+    blue: f32 = (rgb % 256) as f32 / 255.0;
+    while (corner < 6) {
+        right: bool = corner == 1 || corner == 3 || corner == 5;
+        lower: bool = corner == 2 || corner == 4 || corner == 5;
+        r.vertices[i] = x;
+        r.vertices[i + 1] = y;
+        r.vertices[i + 2] = u0;
+        r.vertices[i + 3] = v0;
+        if (right) {
+            r.vertices[i] = x + w;
+            r.vertices[i + 2] = u1;
+        }
+        if (lower) {
+            r.vertices[i + 1] = y + h;
+            r.vertices[i + 3] = v1;
+        }
+        r.vertices[i + 4] = red;
+        r.vertices[i + 5] = green;
+        r.vertices[i + 6] = blue;
+        i = i + 7;
+        corner = corner + 1;
+    }
+    i;
+}
+
+terminal_draw(s: *Screen, r: *TerminalRenderer) {
+    glViewport(0, 0, r.width, r.height);
+    glUniform2f(r.viewport, r.width as f32, r.height as f32);
+    glClear(16384);
+    n: int = 0;
+    pass: int = 0;
+    // Backgrounds first, then glyphs; one upload and draw for the entire screen.
+    while (pass < 2) {
+        y: int = 0;
+        while (y < s.rows) {
+            x: int = 0;
+            while (x < s.cols) {
+                pos: int = y * 240 + x;
+                fg: int = s.fg[pos];
+                bg: int = s.bg[pos];
+                if (s.visible && x == s.x && y == s.y) {
+                    tmp: int = fg;
+                    fg = bg;
+                    bg = tmp;
+                }
+                px: f32 = (8 + x * r.cw) as f32;
+                py: f32 = (8 + y * r.ch) as f32;
+                if (pass == 0 && bg != 0) {
+                    n = terminal_quad(r, n, px, py, r.cw as f32, r.ch as f32, -1.0,
+                        -1.0, -1.0, -1.0, bg);
+                }
+                code: int = s.text[pos] as int;
+                if (pass == 1 && code > FT_FIRST && code <= FT_LAST) {
+                    g: Glyph = r.font.glyphs[code - FT_FIRST];
+                    if (g.w > 0.0 && g.h > 0.0) {
+                        n = terminal_quad(r, n, px + g.left, py + r.ascent as f32 - g.top,
+                            g.w, g.h, g.u0, g.v0, g.u1, g.v1, fg);
+                    }
+                }
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+        pass = pass + 1;
+    }
+    if (n > 0) {
+        glBufferData(34962, n * 4, r.vertices, 35040);
+        glDrawArrays(4, 0, n / 7);
+    }
+    glXSwapBuffers(r.dpy, r.win);
+}

@@ -382,6 +382,37 @@ do_game() {
   step "block game [$tool]" build_game "$tool"
 }
 
+do_terminal() {
+  ensure_build_dir
+  local tool="l8"
+  if [[ ! -x "./$tool" ]]; then
+    build_stage1
+    tool="l8c1"
+  fi
+  step "terminal [$tool]" build_terminal_binary "$tool"
+}
+
+build_terminal_binary() {
+  local tool="$1"
+  # A terminal may be running from the previous output. Build beside it and
+  # atomically replace the directory entry instead of rewriting its live inode.
+  "./$tool" build programs/terminal/terminal.l8 -o "$BUILD/terminal.next"
+  mv -f "$BUILD/terminal.next" "$BUILD/terminal"
+}
+
+do_terminal_test() {
+  do_terminal
+  local tool="l8"
+  [[ -x "./$tool" ]] || tool="l8c1"
+  step 'terminal screen build' "./$tool" build programs/terminal/test.l8 -o "$BUILD/terminal-test"
+  step 'terminal screen tests' "$BUILD/terminal-test"
+  step 'terminal PTY build' "./$tool" build programs/terminal/test_pty.l8 -o "$BUILD/terminal-pty-test"
+  step 'terminal system-shell PTY tests' env SHELL=/bin/bash L8_EXPECT_BASH=yes L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= "$BUILD/terminal-pty-test"
+  step 'terminal shell-fallback PTY tests' env SHELL=/definitely/missing L8_EXPECT_BASH= L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= "$BUILD/terminal-pty-test"
+  step 'terminal closed-stdio PTY tests' env SHELL=/bin/sh L8_EXPECT_BASH= L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= "$BUILD/terminal-pty-test" --closed-stdio
+  step 'terminal X11/PTY tests' python3 programs/terminal/test_integration.py "$BUILD/terminal"
+}
+
 build_http() {
   local tool="${L8C:-./l8c1}"
   mkdir -p "$BUILD/http"
@@ -525,6 +556,8 @@ Commands:
   bootstrap       Copy the saved bootstrap executable → l8c0
   examples        Build stage 1 and run example programs via l8c1
   game            Build programs/block-game/block-game.l8 → .build/block-game
+  terminal        Build programs/terminal/terminal.l8 → .build/terminal
+  terminal-test   Run terminal screen tests and X11/PTY tests (when DISPLAY is set)
   http            Build programs/http client and server → .build/http/
   http-test       Verify downloaded specifications and run the HTTP test suite
   websocket       Build WebSocket client and server → .build/websocket/
@@ -568,6 +601,8 @@ case "$cmd" in
   bootstrap)        do_bootstrap; print_summary ;;
   examples)         do_examples; print_summary ;;
   game)             do_game; print_summary ;;
+  terminal)         do_terminal; print_summary ;;
+  terminal-test)    do_terminal_test; print_summary ;;
   http)             do_http; print_summary ;;
   http-test)        do_http_test; print_summary ;;
   websocket)        do_websocket; print_summary ;;

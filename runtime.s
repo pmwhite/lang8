@@ -32,6 +32,14 @@
 .globl l8_getsockopt
 .globl l8_fork
 .globl l8_waitpid
+.globl l8_ioctl
+.globl l8_ioctl_value
+.globl l8_fcntl
+.globl l8_setsid
+.globl l8_dup2
+.globl l8_execve
+.globl l8_kill
+.globl l8_environment
 .globl l8_time
 .globl l8_try_begin
 .globl l8_try_end
@@ -58,6 +66,7 @@
 heap_ptr:  .skip 8
 heap_base: .skip 8
 heap_end:  .skip 8
+initial_envp: .skip 8
 .equ HEAP_SIZE, 512*1024*1024
 
 # Current exception (set by l8_raise, read by catch codegen)
@@ -92,6 +101,11 @@ l8_try_regions: .skip 512
 _start:
     mov (%rsp), %rdi       # argc
     lea 8(%rsp), %rsi      # argv
+    mov %rdi, %rax
+    shl $3, %rax
+    add %rsp, %rax
+    add $16, %rax
+    mov %rax, initial_envp(%rip)
     push %rdi
     push %rsi
 
@@ -267,6 +281,111 @@ l8_waitpid:
     xor %r10, %r10         # wait4(pid, status, options, NULL)
     mov $61, %rax
     syscall
+    ret
+l8_ioctl:
+l8_ioctl_value:
+    mov $16, %rax
+    syscall
+    ret
+l8_fcntl:
+    mov $72, %rax
+    syscall
+    ret
+l8_setsid:
+    mov $112, %rax
+    syscall
+    ret
+l8_dup2:
+    mov $33, %rax
+    syscall
+    ret
+l8_execve:
+    mov $59, %rax
+    syscall
+    ret
+l8_kill:
+    mov $62, %rax
+    syscall
+    ret
+
+# []str l8_environment() -- counted copies of the initial process environment.
+# Caller owns the result in its current region; raw envp remains on the initial stack.
+l8_environment:
+    push %rbx
+    push %r12
+    push %r13
+    push %r14
+    push %r15
+    mov initial_envp(%rip), %r12
+    xor %r13, %r13
+.Lenv_count:
+    mov %r13, %rax
+    shl $3, %rax
+    add %r12, %rax
+    mov 0(%rax), %rax
+    test %rax, %rax
+    jz .Lenv_alloc
+    add $1, %r13
+    jmp .Lenv_count
+.Lenv_alloc:
+    mov %r13, %rdi
+    shl $3, %rdi
+    add $8, %rdi
+    call malloc
+    test %rax, %rax
+    jz .Lalloc_fail
+    mov %r13, 0(%rax)
+    lea 8(%rax), %r14
+    xor %r15, %r15
+.Lenv_next:
+    cmp %r13, %r15
+    je .Lenv_done
+    mov %r15, %rbx
+    shl $3, %rbx
+    add %r12, %rbx
+    mov 0(%rbx), %rbx
+    xor %rdx, %rdx
+.Lenv_length:
+    mov %rbx, %rax
+    add %rdx, %rax
+    movzb 0(%rax), %rax
+    test %rax, %rax
+    jz .Lenv_string
+    add $1, %rdx
+    jmp .Lenv_length
+.Lenv_string:
+    lea 9(%rdx), %rdi
+    call malloc
+    test %rax, %rax
+    jz .Lalloc_fail
+    mov %rdx, 0(%rax)
+    lea 8(%rax), %rcx
+    mov %r15, %rax
+    shl $3, %rax
+    add %r14, %rax
+    mov %rcx, 0(%rax)
+    xor %r8, %r8
+.Lenv_copy:
+    mov %rbx, %r9
+    add %r8, %r9
+    movzb 0(%r9), %rax
+    mov %rcx, %r9
+    add %r8, %r9
+    mov %al, 0(%r9)
+    cmp %rdx, %r8
+    je .Lenv_copied
+    add $1, %r8
+    jmp .Lenv_copy
+.Lenv_copied:
+    add $1, %r15
+    jmp .Lenv_next
+.Lenv_done:
+    mov %r14, %rax
+    pop %r15
+    pop %r14
+    pop %r13
+    pop %r12
+    pop %rbx
     ret
 l8_time:
     xor %rdi, %rdi

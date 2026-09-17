@@ -1,0 +1,170 @@
+tag terminal;
+
+// Linux x86-64 adapters in runtime.s return negative errno, not libc's -1/errno.
+extern l8_ioctl(fd: int, request: int, value: *i32): int;
+
+extern l8_ioctl_value(fd: int, request: int, value: int): int;
+
+extern l8_fcntl(fd: int, cmd: int, value: int): int;
+
+extern l8_setsid(): int;
+
+extern l8_dup2(oldfd: int, newfd: int): int;
+
+extern l8_execve(path: str, argv: []?str, envp: []?str): int;
+
+extern l8_kill(pid: int, signal: int): int;
+
+extern l8_fork(): int;
+
+extern l8_waitpid(pid: i32, status: *i32, options: i32): int;
+
+extern l8_exit(code: int): noreturn;
+
+extern l8_environment(): []str@new;
+
+extern close(fd: int): int;
+
+extern open(path: str, flags: int, mode: int): int;
+
+type TerminalPoll = {
+    fd: i32;
+    events: i32;
+};
+
+extern l8_poll(fds: *TerminalPoll, count: int, timeout: i32): int;
+
+type TerminalPty = {
+    master: int;
+    child: int;
+};
+
+// SHELL is the portable process-level spelling of the user's configured shell.
+// execve does not search PATH, so require an absolute pathname. A copied string
+// also gives execve the trailing NUL expected by the kernel.
+terminal_system_shell(): str@new {
+    source: []str = l8_environment();
+    for value in source {
+        if (len(value) > 6 && value[0] == 'S' && value[1] == 'H' && value[2] == 'E' && value[3] == 'L' && value[4] == 'L' && value[5] == '=' && value[6] == '/') {
+            data: []i8 = new i8[len(value) - 6](0i8);
+            for i in 6..len(value) {
+                data[i - 6] = value[i];
+            }
+            return cstr(data);
+        }
+    }
+    "/bin/sh";
+}
+
+terminal_environment(): []?str@new {
+    source: []str = l8_environment();
+    env: []?str = new ?str[len(source) + 4](null);
+    n: int = 0;
+    for value in source {
+        replaced: bool = false;
+        if (len(value) >= 5) {
+            replaced = value[0] == 'T' && value[1] == 'E' && value[2] == 'R' && value[3] == 'M' && value[4] == '=';
+        }
+        if (len(value) >= 7) {
+            if (value[0] == 'L' && value[1] == 'C' && value[2] == '_' && value[3] == 'A' && value[4] == 'L' && value[5] == 'L' && value[6] == '=') {
+                replaced = true;
+            }
+        }
+        if (len(value) >= 10) {
+            if (value[0] == 'C' && value[1] == 'O' && value[2] == 'L' && value[3] == 'O' && value[4] == 'R' && value[5] == 'T' && value[6] == 'E' && value[7] == 'R' && value[8] == 'M' && value[9] == '=') {
+                replaced = true;
+            }
+        }
+        if (!replaced) {
+            env[n] = value;
+            n = n + 1;
+        }
+    }
+    env[n] = "TERM=xterm-256color";
+    env[n + 1] = "LC_ALL=C";
+    env[n + 2] = "COLORTERM=truecolor";
+    env;
+}
+
+terminal_pty_size(master: int, cols: int, rows: int): bool {
+    // struct winsize: four unsigned shorts, packed into two i32 fields.
+    size: [2]i32 = [(cols * 65536 + rows) trunc i32, 0i32];
+    l8_ioctl(master, 21524, &size[0]) == 0;
+}
+
+// Keep PTY descriptors out of 0..2 even if launched with closed standard streams.
+terminal_high_fd(fd: int): int {
+    if (fd < 0 || fd >= 3) {
+        return fd;
+    }
+    moved: int = l8_fcntl(fd, 1030, 3); // F_DUPFD_CLOEXEC
+    close(fd);
+    moved;
+}
+
+terminal_spawn(
+    command: ?str@new,
+    xfd: int,
+    cols: int,
+    rows: int
+): TerminalPty {
+    failed: TerminalPty = TerminalPty { master: -1, child: -1 };
+    // O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC.
+    master: int = terminal_high_fd(open("/dev/ptmx", 526594, 0));
+    if (master < 0) {
+        return failed;
+    }
+    unlock: i32 = 0i32;
+    // TIOCSPTLCK unlocks the slave. TIOCGPTPEER opens it without a pathname race.
+    if (l8_ioctl(master, 1074025521, &unlock) < 0) {
+        close(master);
+        return failed;
+    }
+    slave: int = terminal_high_fd(l8_ioctl_value(master, 21569, 524546));
+    if (slave < 0) {
+        close(master);
+        return failed;
+    }
+    if (!terminal_pty_size(slave, cols, rows)) {
+        close(slave);
+        close(master);
+        return failed;
+    }
+    args: []?str = new ?str[5](null);
+    shell: str = terminal_system_shell();
+    args[0] = shell;
+    args[1] = "-i";
+    if (command != null) {
+        args[1] = "-c";
+        args[2] = command;
+    }
+    env: []?str = terminal_environment();
+    child: int = l8_fork();
+    if (child == 0) {
+        // Only raw syscalls after fork: safe even if a graphics driver has threads.
+        close(master);
+        if (xfd >= 0) {
+            close(xfd);
+        }
+        if (l8_setsid() < 0 || l8_ioctl_value(slave, 21518, 0) < 0) {
+            l8_exit(126);
+        }
+        if (l8_dup2(slave, 0) < 0 || l8_dup2(slave, 1) < 0 || l8_dup2(slave, 2) < 0) {
+            l8_exit(126);
+        }
+        close(slave);
+        l8_execve(shell, args, env);
+        // SHELL can name a file which disappeared or cannot be executed. Keep the
+        // terminal usable in that case, without consulting PATH or a C library.
+        args[0] = "/bin/sh";
+        l8_execve("/bin/sh", args, env);
+        write(2, "terminal: shell exec failed\n", len("terminal: shell exec failed\n"));
+        l8_exit(127);
+    }
+    close(slave);
+    if (child < 0) {
+        close(master);
+        return failed;
+    }
+    TerminalPty { master: master, child: child };
+}
