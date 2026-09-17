@@ -121,7 +121,7 @@ class Client:
         self.request(self.keyboard, 2, [Arg(u=0), Arg(u=0), Arg(u=0), Arg(u=0)])
         self.roundtrip()
 
-    def screenshot(self, path):
+    def screenshot(self, path, region=None):
         manager_type = interface('zwlr_screencopy_manager_v1', [('capture_output', 'nio'), ('capture_output_region', 'nioiiii'), ('destroy', '')])
         frame_type = interface('zwlr_screencopy_frame_v1', [('copy', 'o'), ('destroy', '')],
                                [('buffer', 'uuuu'), ('flags', 'u'), ('ready', 'uuu'), ('failed', '')])
@@ -163,6 +163,20 @@ class Client:
         self.request(result['buffer'], 0, destroy=True)
         self.request(result['pool'], 1, destroy=True)
         result['memory'].close()
+        if region is not None:
+            x, y, w, h = region
+            assert 0 <= x < x + w <= width and 0 <= y < y + h <= height
+            pixels = set()
+            ink = 0
+            for row in range(y, y + h):
+                if result.get('flags', 0) & 1:
+                    row = height - row - 1
+                start = row * stride + x * 4
+                for i in range(start, start + w * 4, 4):
+                    pixel = raw[i:i+3]
+                    pixels.add(pixel)
+                    ink += max(pixel) > 64
+            return {'colors': len(pixels), 'ink_fraction': ink / (w * h)}
         return len(set(raw[i:i+3] for i in range(0, len(raw), 4)))
 
     def close(self):

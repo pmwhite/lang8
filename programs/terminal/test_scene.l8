@@ -86,7 +86,212 @@ put_row(s: *Screen, row: int, text: str) {
     }
 }
 
+// Dense text should cover each cell center exactly once throughout a scroll, using the
+// same interpolated positions and clipping rectangles as the renderer.
+cover(
+    covered: []int,
+    clip: TerminalSceneRegion,
+    x: f32,
+    y: f32
+) {
+    col: int = (x + 0.5) as int;
+    row: int = (y + 0.5) as int;
+    if (col >= clip.left && col < clip.right && row >= clip.top && row < clip.bottom && x <= col as f32 + 0.5 && x + 1.0 > col as f32 + 0.5 && y <= row as f32 + 0.5 && y + 1.0 > row as f32 + 0.5) {
+        covered[row * 240 + col] = covered[row * 240 + col] + 1;
+    }
+}
+
+scene_covered(s: *Screen, r: *TerminalScene, now: int): bool {
+    good: bool = true;
+    region {
+        covered: []int = new int[28800](0);
+        ease: f32 = terminal_scene_ease(r, now);
+        for y in 0..s.rows {
+            for x in 0..s.cols {
+                pos: int = y * 240 + x;
+                clip: TerminalSceneRegion = r.scene_regions[r.scene_region[pos]];
+                visual_x: f32 = r.scene_from_x[pos] + (x as f32 - r.scene_from_x[pos]) * ease;
+                visual_y: f32 = r.scene_from_y[pos] + (y as f32 - r.scene_from_y[pos]) * ease;
+                if (s.text[pos] > 32 && r.scene_from_alpha[pos] >= 0.99) {
+                    cover(covered, clip, visual_x, visual_y);
+                }
+            }
+        }
+        for g in 0..r.ghost_count {
+            visual_x: f32 = r.ghost_from_x[g] + (r.ghost_to_x[g] - r.ghost_from_x[g]) * ease;
+            visual_y: f32 = r.ghost_from_y[g] + (r.ghost_to_y[g] - r.ghost_from_y[g]) * ease;
+            if (r.ghost_text[g] > 32 && r.ghost_fade[g] == 0 && r.ghost_from_alpha[g] >= 0.99) {
+                clip: TerminalSceneRegion = r.ghost_clip[g];
+                cover(covered, clip, visual_x, visual_y);
+            }
+        }
+        for y in 0..s.rows {
+            for x in 0..s.cols {
+                good = good && covered[y * 240 + x] == 1;
+            }
+        }
+    }
+    good;
+}
+
+rapid_scroll(
+    cols: int,
+    rows: int,
+    left: int,
+    top: int,
+    right: int,
+    bottom: int,
+    shift: int,
+    interval: int,
+    edits: bool
+) {
+    s: *Screen = terminal_screen(cols, rows);
+    r: *TerminalScene = terminal_scene();
+    fill(s);
+    terminal_scene_prepare(s, r, 0);
+    visible: bool = true;
+    bounded: bool = true;
+    for frame in 0..16 {
+        now: int = 200 + frame * interval;
+        scroll(s, r, left, top, right, bottom, shift);
+        // Unique incoming pages avoid accidentally encoding another displacement
+        // in the fixture's generated codepoints.
+        for y in top..bottom {
+            if (y - shift < top || y - shift >= bottom) {
+                for x in left..right {
+                    s.text[y * 240 + x] = 200000 + frame * 30000 + y * 240 + x;
+                }
+            }
+        }
+        if (shift <= top - bottom || shift >= bottom - top) {
+            s.scroll_hint_top = top;
+            s.scroll_hint_bottom = bottom - 1;
+            s.scroll_hint_delta = shift;
+        }
+        if (edits) {
+            // A repaint can update digits or annotations while the text scrolls.
+            for y in top..bottom {
+                s.text[y * 240 + left + 2] = 65 + frame % 26;
+            }
+        }
+        terminal_scene_prepare(s, r, now);
+        for index in 0..r.scene_region_count {
+            box: TerminalSceneRegion = r.scene_regions[index];
+            span: f32 = (box.bottom - box.top) as f32;
+            bounded = bounded && box.from_y <= span && box.from_y >= 0.0 - span;
+        }
+        visible = visible && scene_covered(s, r, now) && scene_covered(s, r, now + interval / 2) && scene_covered(s,
+            r, now + interval - 1);
+        if (edits) {
+            // A second write changes text without scrolling again.
+            s.text[(top + 2) * 240 + left + 5] = 90 + frame;
+            terminal_scene_prepare(s, r, now + interval / 2);
+            visible = visible && scene_covered(s, r, now + interval / 2) && scene_covered(s,
+                r, now + interval - 1);
+        }
+    }
+    check(bounded, "held scroll cannot accumulate more than a pane of animation lag");
+    check(visible, "held scroll keeps exactly one opaque glyph per cell throughout each frame");
+    // Once key repeat stops, the latest screen must settle normally.
+    now: int = 200 + 15 * interval;
+    if (edits) {
+        now = now + interval / 2;
+    }
+    check(scene_covered(s, r, now + 60) && scene_covered(s, r, now + 119), "release has no gap while catching up");
+    terminal_scene_prepare(s, r, now + 120);
+    check(!r.scene_active && r.ghost_count == 0 && scene_covered(s, r, now + 120),
+        "held scroll settles to current text on release");
+}
+
 main(): int {
+    region {
+        // An inferred edge expands into a previously stationary column. Its
+        // corner no longer represents the displacement of the moving pane.
+        s: *Screen = terminal_screen(40, 16);
+        r: *TerminalScene = terminal_scene();
+        fill(s);
+        terminal_scene_prepare(s, r, 0);
+        scroll(s, r, 1, 0, 40, 16, -8);
+        terminal_scene_prepare(s, r, 200);
+        scroll(s, r, 0, 0, 40, 16, -8);
+        terminal_scene_prepare(s, r, 220);
+        check(scene_covered(s, r, 220) && scene_covered(s, r, 230) && scene_covered(s,
+            r, 280), "expanding pane edge keeps old and new rows aligned without overlap");
+        scroll(s, r, 0, 0, 40, 16, 8);
+        terminal_scene_prepare(s, r, 240);
+        check(scene_covered(s, r, 240) && scene_covered(s, r, 250) && scene_covered(s,
+            r, 300), "reversal replaces returning ghosts with the current plane");
+    }
+    region {
+        // A relative-number gutter stops moving independently of the code,
+        // while both still have unfinished animation above a styled status row.
+        s: *Screen = terminal_screen(40, 18);
+        r: *TerminalScene = terminal_scene();
+        fill(s);
+        for x in 0..40 {
+            s.bg[16 * 240 + x] = 4;
+        }
+        terminal_scene_prepare(s, r, 0);
+        scroll(s, r, 0, 0, 40, 16, -8);
+        s.text[16 * 240 + 20] = 88;
+        terminal_scene_prepare(s, r, 200);
+        scroll(s, r, 4, 0, 40, 16, -8);
+        s.text[8 * 240 + 2] = 57;
+        s.text[16 * 240 + 20] = 89;
+        terminal_scene_prepare(s, r, 220);
+        check(scene_covered(s, r, 220) && scene_covered(s, r, 240) && scene_covered(s,
+            r, 280), "gutter repaint cannot carry moving digits over the fixed status line");
+    }
+    region {
+        rapid_scroll(80, 24, 0, 0, 80, 24, -12, 16, true);
+    }
+    region {
+        rapid_scroll(80, 40, 10, 5, 40, 25, -10, 24, true);
+    }
+    region {
+        s: *Screen = terminal_screen(40, 18);
+        r: *TerminalScene = terminal_scene();
+        fill(s);
+        for y in 0..16 {
+            s.text[y * 240] = 49;
+            s.text[y * 240 + 1] = 48 + y / 10;
+            s.text[y * 240 + 2] = 48 + y % 10;
+            s.fg[y * 240] = 8;
+        }
+        s.fg[7 * 240] = 3;
+        for x in 0..40 {
+            s.bg[16 * 240 + x] = 4;
+        }
+        terminal_scene_prepare(s, r, 0);
+        scroll(s, r, 0, 0, 40, 16, -8);
+        for y in 0..16 {
+            s.text[y * 240] = 49;
+            s.text[y * 240 + 1] = 48 + (y + 8) / 10;
+            s.text[y * 240 + 2] = 48 + (y + 8) % 10;
+            s.fg[y * 240] = 8;
+        }
+        s.fg[7 * 240] = 3;
+        s.text[16 * 240 + 20] = 88;
+        terminal_scene_prepare(s, r, 200);
+        expect_shift(r, 0, 0, 40, 16, -8, "unchanged leading line-number digit scrolls despite cursor-line styling");
+        check(r.scene_region[0] == r.scene_region[3], "line-number gutter remains in the text plane");
+        expect_shift(r, 0, 16, 40, 18, 0, "status and command rows do not anchor the gutter");
+    }
+    region {
+        rapid_scroll(80, 24, 0, 0, 80, 24, -12, 16, false);
+    }
+    region {
+        rapid_scroll(80, 24, 0, 0, 80, 24, 12, 33, false);
+    }
+    region {
+        rapid_scroll(80, 24, 0, 0, 80, 24, -24, 20, false);
+    }
+    region {
+        rapid_scroll(80, 40, 10, 5, 40, 25, -10, 24, false);
+    }
+    region {
+        rapid_scroll(240, 120, 0, 0, 240, 120, -60, 16, false);
+    }
     region {
         s: *Screen = terminal_screen(40, 16);
         r: *TerminalScene = terminal_scene();

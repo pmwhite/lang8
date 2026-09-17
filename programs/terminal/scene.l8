@@ -2,6 +2,11 @@ tag terminal;
 
 import "screen.l8";
 
+// A clipped fractional row may straddle a pane edge. Two grids cover all visible
+// departing cells, including those edge rows; the second half of the storage is
+// scratch space so rebuilding ghosts never overwrites the retained snapshot.
+TERMINAL_GHOST_CAPACITY: int = 57600;
+
 // Bounds are half-open cell coordinates. Each leaf owns its matching and clip
 // rectangle, so neighboring panes never share source cells or departing glyphs.
 type TerminalSceneRegion = {
@@ -99,16 +104,16 @@ terminal_scene(): *TerminalScene@new {
         scene_started: 0,
         scene_active: false,
         scene_has_shift: false,
-        ghost_text: new int[28800](32),
-        ghost_comb: new int[28800](0),
-        ghost_fg: new int[28800](7),
-        ghost_from_x: new f32[28800](0.0),
-        ghost_from_y: new f32[28800](0.0),
-        ghost_to_x: new f32[28800](0.0),
-        ghost_to_y: new f32[28800](0.0),
-        ghost_from_alpha: new f32[28800](0.0),
-        ghost_fade: new int[28800](1),
-        ghost_clip: new TerminalSceneRegion[28800](empty),
+        ghost_text: new int[TERMINAL_GHOST_CAPACITY * 2](32),
+        ghost_comb: new int[TERMINAL_GHOST_CAPACITY * 2](0),
+        ghost_fg: new int[TERMINAL_GHOST_CAPACITY * 2](7),
+        ghost_from_x: new f32[TERMINAL_GHOST_CAPACITY * 2](0.0),
+        ghost_from_y: new f32[TERMINAL_GHOST_CAPACITY * 2](0.0),
+        ghost_to_x: new f32[TERMINAL_GHOST_CAPACITY * 2](0.0),
+        ghost_to_y: new f32[TERMINAL_GHOST_CAPACITY * 2](0.0),
+        ghost_from_alpha: new f32[TERMINAL_GHOST_CAPACITY * 2](0.0),
+        ghost_fade: new int[TERMINAL_GHOST_CAPACITY * 2](1),
+        ghost_clip: new TerminalSceneRegion[TERMINAL_GHOST_CAPACITY * 2](empty),
         ghost_count: 0
     };
 }
@@ -311,15 +316,21 @@ terminal_scene_column_boundary(
 terminal_scene_column_varies(
     s: *Screen,
     r: *TerminalScene,
-    x: int,
-    top: int,
-    bottom: int
+    box: TerminalSceneRegion,
+    x: int
 ): bool {
-    first: int = top * 240 + x;
-    for y in top + 1..bottom {
+    first: int = -1;
+    for y in box.top..box.bottom {
         pos: int = y * 240 + x;
-        if (s.text[pos] != s.text[first] || s.comb[pos] != s.comb[first] || s.fg[pos] != s.fg[first] || s.bg[pos] != s.bg[first] || r.scene_text[pos] != r.scene_text[first] || r.scene_comb[pos] != r.scene_comb[first] || r.scene_fg[pos] != r.scene_fg[first] || r.scene_bg[pos] != r.scene_bg[first]) {
-            return true;
+        // Cursor-line styling cannot distinguish the motion of a repeated
+        // gutter digit. Nor should a status label below the gutter anchor it.
+        if (first < 0 || s.text[pos] != s.text[first] || s.comb[pos] != s.comb[first] || r.scene_text[pos] != r.scene_text[first] || r.scene_comb[pos] != r.scene_comb[first]) {
+            if (!terminal_scene_row_is_chrome(s, r, box, y)) {
+                if (first >= 0) {
+                    return true;
+                }
+                first = pos;
+            }
         }
     }
     false;
@@ -384,24 +395,28 @@ terminal_scene_partition(
         }
     }
     if (left >= right) {
-        terminal_scene_add_region(r, box);
+        terminal_scene_add_bordered_region(s, r, box, budget);
         return;
     }
-    // A column identical on every row cannot distinguish scrolling from staying
-    // still. Keep repeated prefixes/indentation with their neighboring content.
-    while (left > box.left && !terminal_scene_column_varies(s, r, left - 1, box.top,
-        box.bottom)) {
+    // A column identical on every content row cannot distinguish scrolling
+    // from staying still. Exclude unchanged rows outside the repaint, as well as
+    // status bands, when keeping repeated prefixes with neighboring content.
+    columns: TerminalSceneRegion = box;
+    columns.top = top;
+    columns.bottom = bottom;
+    while (left > box.left && !terminal_scene_column_varies(s, r, columns, left - 1)) {
         left = left - 1;
     }
-    while (right < box.right && !terminal_scene_column_varies(s, r, right, box.top,
-        box.bottom)) {
+    while (right < box.right && !terminal_scene_column_varies(s, r, columns, right)) {
         right = right + 1;
     }
     // Isolate a changed corner before comparing cuts. Otherwise a small moving
     // pane can lose to the stationary majority on BOTH sides of every first cut.
     // Only retain this subdivision if it actually exposes scrolling; ordinary
     // edits still diff the entire row and keep their surrounding text anchors.
-    if (trim && budget >= 5 && (left > box.left || right < box.right || top > box.top || bottom < box.bottom)) {
+    // Reserve three leaves per surrounding band so its status rows stay clipped
+    // separately even when the band inherits unfinished vertical motion.
+    if (trim && budget >= 13 && (left > box.left || right < box.right || top > box.top || bottom < box.bottom)) {
         // Never place a boundary between the halves of an old or new wide cell.
         while (left > box.left && !terminal_scene_column_boundary(s, r, left, box.top,
             box.bottom)) {
@@ -414,7 +429,7 @@ terminal_scene_partition(
         first: int = r.scene_region_count;
         changed_box: TerminalSceneRegion = terminal_scene_region(left, top, right,
             bottom);
-        terminal_scene_partition(s, r, changed_box, depth, budget - 4, false);
+        terminal_scene_partition(s, r, changed_box, depth, budget - 12, false);
         moving: bool = false;
         for index in first..r.scene_region_count {
             moving = moving || r.scene_regions[index].shift != 0;
@@ -428,13 +443,13 @@ terminal_scene_partition(
                 bottom);
             after: TerminalSceneRegion = terminal_scene_region(right, top, box.right,
                 bottom);
-            terminal_scene_add_region(r, upper);
-            terminal_scene_add_region(r, lower);
-            terminal_scene_add_region(r, before);
-            terminal_scene_add_region(r, after);
+            terminal_scene_add_bordered_region(s, r, upper, 3);
+            terminal_scene_add_bordered_region(s, r, lower, 3);
+            terminal_scene_add_bordered_region(s, r, before, 3);
+            terminal_scene_add_bordered_region(s, r, after, 3);
         } else {
             r.scene_region_count = first;
-            terminal_scene_add_region(r, box);
+            terminal_scene_add_bordered_region(s, r, box, budget);
         }
         return;
     }
@@ -669,7 +684,7 @@ terminal_scene_partition(
             }
             if (!moving) {
                 r.scene_region_count = first;
-                terminal_scene_add_region(r, box);
+                terminal_scene_add_bordered_region(s, r, box, budget);
             }
         }
         return;
@@ -677,9 +692,21 @@ terminal_scene_partition(
     if (best_score >= 8 && best_score >= zero_score + 4) {
         box.shift = best_shift;
     }
-    if (box.shift != 0 && budget >= 3) {
-        // Preserve the existing styled edge heuristic for status lines, including
-        // mostly blank chrome that supplies little meaningful-character evidence.
+    terminal_scene_add_bordered_region(s, r, box, budget);
+}
+
+terminal_scene_add_bordered_region(
+    s: *Screen,
+    r: *TerminalScene,
+    box: TerminalSceneRegion,
+    budget: int
+) {
+    if (box.left >= box.right || box.top >= box.bottom) {
+        return;
+    }
+    if (budget >= 3) {
+        // Status rows need their own clip even when the neighboring text only
+        // repaints while finishing an earlier scroll.
         top: int = box.top;
         bottom: int = box.bottom;
         while (top < bottom && terminal_scene_row_is_border(s, r, box, top)) {
@@ -713,6 +740,13 @@ terminal_ghost_copy(r: *TerminalScene, to: int, from: int) {
     r.ghost_from_alpha[to] = r.ghost_from_alpha[from];
     r.ghost_fade[to] = r.ghost_fade[from];
     r.ghost_clip[to] = r.ghost_clip[from];
+}
+
+terminal_ghost_visible(r: *TerminalScene, g: int): bool {
+    clip: TerminalSceneRegion = r.ghost_clip[g];
+    x: f32 = r.ghost_from_x[g];
+    y: f32 = r.ghost_from_y[g];
+    clip.left < clip.right && clip.top < clip.bottom && x < clip.right as f32 && x + 2.0 > clip.left as f32 && y < clip.bottom as f32 && y + 1.0 > clip.top as f32;
 }
 
 terminal_scene_prepare(s: *Screen, r: *TerminalScene, now: int) {
@@ -755,15 +789,13 @@ terminal_scene_prepare(s: *Screen, r: *TerminalScene, now: int) {
         return;
     }
     old_ease: f32 = terminal_scene_ease(r, now);
-    // Preserve a few rows of already-departing glyphs when output interrupts an
-    // animation. Rapid scrolling should carry them across the viewport edge.
+    // Sample departing text before rebuilding the scene. Selecting the first
+    // few rows loses the older glyphs that are actually still on screen during
+    // key repeat. Keep a separate snapshot, then cull it after pane rebasing.
     carry_count: int = r.ghost_count;
-    if (carry_count > 960) {
-        carry_count = 960;
-    }
-    carry_start: int = 28800 - carry_count;
-    carry: int = carry_count - 1;
-    while (carry >= 0) {
+    carry_start: int = TERMINAL_GHOST_CAPACITY;
+    carry: int = 0;
+    while (carry < carry_count) {
         saved: int = carry_start + carry;
         terminal_ghost_copy(r, saved, carry);
         r.ghost_from_x[saved] = r.ghost_from_x[carry] + (r.ghost_to_x[carry] - r.ghost_from_x[carry]) * old_ease;
@@ -773,7 +805,7 @@ terminal_scene_prepare(s: *Screen, r: *TerminalScene, now: int) {
         } else {
             r.ghost_from_alpha[saved] = 1.0;
         }
-        carry = carry - 1;
+        carry = carry + 1;
     }
     old_y: int = 0;
     while (old_y < r.scene_rows) {
@@ -854,36 +886,94 @@ terminal_scene_prepare(s: *Screen, r: *TerminalScene, now: int) {
             }
         }
         box.from_y = (0 - box.shift) as f32;
-        if (box.shift != 0) {
-            r.scene_has_shift = true;
-            source: int = box.top - box.shift;
-            dest: int = box.top;
-            if (source < box.top) {
-                source = box.top;
-                dest = source + box.shift;
+        if (!box.fixed) {
+            // A repaint without another scroll still belongs to the plane that
+            // is already moving. Give replacement cells that same displacement.
+            // Inferred edges can move as gutter digits and blank tails change.
+            // One corner may have belonged to a stationary strip in the previous
+            // frame, so inherit the displacement of the largest overlapping
+            // previous region instead of sampling that single cell.
+            overlap: int = 0;
+            for previous in 0..previous_count {
+                old: TerminalSceneRegion = r.scene_previous[previous];
+                left: int = terminal_clamp(old.left, box.left, box.right);
+                right: int = terminal_clamp(old.right, box.left, box.right);
+                top: int = terminal_clamp(old.top, box.top, box.bottom);
+                bottom: int = terminal_clamp(old.bottom, box.top, box.bottom);
+                area: int = (right - left) * (bottom - top);
+                if (area > overlap) {
+                    overlap = area;
+                    box.from_y = old.from_y * (1.0 - old_ease) - box.shift as f32;
+                }
             }
-            if (source < box.bottom && dest < box.bottom) {
-                box.from_y = r.scene_visual_y[source * 240 + box.left] - dest as f32;
+            // Repeated half-pages arrive faster than a 120 ms animation finishes.
+            // Bound their accumulated lag to this pane's height. Advance the
+            // whole old plane by the excess, including its departing glyphs, so
+            // the newest text meets the old text without a hole at their seam.
+            limit: f32 = (box.bottom - box.top) as f32;
+            if (box.from_y > limit) {
+                box.from_y = limit;
+            }
+            if (box.from_y < 0.0 - limit) {
+                box.from_y = 0.0 - limit;
+            }
+            if (box.shift != 0 || box.from_y != 0.0) {
+                for y in box.top..box.bottom {
+                    for x in box.left..box.right {
+                        pos: int = y * 240 + x;
+                        // All retained rows use the same plane, including a
+                        // newly absorbed gutter or formerly stationary edge.
+                        r.scene_visual_x[pos] = x as f32;
+                        r.scene_visual_y[pos] = (y + box.shift) as f32 + box.from_y;
+                        r.scene_visual_alpha[pos] = 1.0;
+                    }
+                }
             }
         }
+        r.scene_has_shift = r.scene_has_shift || box.shift != 0 || box.from_y != 0.0;
         r.scene_regions[index] = box;
     }
-    // A departing glyph retains its own clip bounds across interrupted frames.
-    // Only carry it further if the same pane still owns its old destination.
+    // Retain the visible part of the old snapshot, with the same catch-up as
+    // its current plane. Intersect clips so small inferred boundary changes do
+    // not discard visible text, while neighboring panes remain isolated.
     carry = 0;
+    retained: int = 0;
     while (carry < carry_count) {
         saved: int = carry_start + carry;
         clip: TerminalSceneRegion = r.ghost_clip[saved];
         x: int = terminal_clamp(r.ghost_to_x[saved] as int, clip.left, clip.right - 1);
         y: int = terminal_clamp(r.ghost_to_y[saved] as int, clip.top, clip.bottom - 1);
         box: TerminalSceneRegion = r.scene_regions[r.scene_region[y * 240 + x]];
-        if (box.left == clip.left && box.right == clip.right && box.top == clip.top && box.bottom == clip.bottom) {
-            r.ghost_to_y[saved] = r.ghost_to_y[saved] + box.shift as f32;
-        } else {
-            r.ghost_from_alpha[saved] = 0.0;
+        r.ghost_to_y[saved] = r.ghost_to_y[saved] + box.shift as f32;
+        moving: bool = box.shift != 0 || box.from_y != 0.0;
+        if (r.ghost_fade[saved] == 0 || moving) {
+            r.ghost_from_x[saved] = r.ghost_to_x[saved];
+            r.ghost_from_y[saved] = r.ghost_to_y[saved] + box.from_y;
+        }
+        if (clip.left < box.left) {
+            clip.left = box.left;
+        }
+        if (clip.right > box.right) {
+            clip.right = box.right;
+        }
+        if (clip.top < box.top) {
+            clip.top = box.top;
+        }
+        if (clip.bottom > box.bottom) {
+            clip.bottom = box.bottom;
+        }
+        r.ghost_clip[saved] = clip;
+        // A scroll reversal can bring a departing cell's destination back
+        // inside the current grid. That cell is now owned by the live plane.
+        replaced: bool = (r.ghost_fade[saved] == 0 || moving) && r.ghost_to_y[saved] >= box.top as f32 && r.ghost_to_y[saved] < box.bottom as f32;
+        if (!box.fixed && !replaced && r.ghost_from_alpha[saved] > 0.01 && terminal_ghost_visible(r,
+            saved)) {
+            terminal_ghost_copy(r, carry_start + retained, saved);
+            retained = retained + 1;
         }
         carry = carry + 1;
     }
+    carry_count = retained;
     for pos in 0..28800 {
         r.scene_used[pos] = 0;
         r.scene_match[pos] = -1;
@@ -906,14 +996,16 @@ terminal_scene_prepare(s: *Screen, r: *TerminalScene, now: int) {
                         r.scene_used[pos] = 1;
                     }
                 } else {
-                    if (box.shift != 0) {
-                        // Scrolls are rigid planes; only horizontal edits use LCS.
+                    if (box.shift != 0 || box.from_y != 0.0) {
+                        // A surviving source cell is replaced even when its text
+                        // changes. Keeping that old glyph as an opaque ghost would
+                        // stack it underneath the new one on every key repeat.
                         for x in box.left..box.right {
                             pos: int = y * 240 + x;
                             old_pos: int = old_y * 240 + x;
+                            r.scene_used[old_pos] = 1;
                             if (terminal_scene_equal(s, r, pos, old_pos)) {
                                 r.scene_match[pos] = old_pos;
-                                r.scene_used[old_pos] = 1;
                             }
                         }
                     } else {
@@ -1024,7 +1116,7 @@ terminal_scene_prepare(s: *Screen, r: *TerminalScene, now: int) {
                 r.scene_from_y[pos] = y as f32;
                 r.scene_from_alpha[pos] = 1.0;
             } else {
-                if (box.shift != 0) {
+                if (box.shift != 0 || box.from_y != 0.0) {
                     r.scene_from_x[pos] = x as f32;
                     r.scene_from_y[pos] = y as f32 + box.from_y;
                     r.scene_from_alpha[pos] = 1.0;
@@ -1071,7 +1163,7 @@ terminal_scene_prepare(s: *Screen, r: *TerminalScene, now: int) {
         x: int = 0;
         while (x < r.scene_cols) {
             pos: int = y * 240 + x;
-            meaningful: bool = r.scene_text[pos] != 32 || r.scene_comb[pos] != 0;
+            meaningful: bool = r.scene_text[pos] > 32 || r.scene_comb[pos] != 0;
             if (meaningful && r.scene_used[pos] == 0 && r.ghost_count < carry_start) {
                 box: TerminalSceneRegion = r.scene_regions[r.scene_region[pos]];
                 g: int = r.ghost_count;
@@ -1091,14 +1183,16 @@ terminal_scene_prepare(s: *Screen, r: *TerminalScene, now: int) {
                 } else {
                     r.ghost_fade[g] = 1;
                 }
-                r.ghost_count = g + 1;
+                if (box.shift == 0 || terminal_ghost_visible(r, g)) {
+                    r.ghost_count = g + 1;
+                }
             }
             x = x + 1;
         }
         y = y + 1;
     }
     carry = 0;
-    while (carry < carry_count && r.ghost_count < 28800) {
+    while (carry < carry_count && r.ghost_count < TERMINAL_GHOST_CAPACITY) {
         saved: int = carry_start + carry;
         if (r.ghost_from_alpha[saved] > 0.01) {
             terminal_ghost_copy(r, r.ghost_count, saved);

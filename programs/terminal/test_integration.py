@@ -242,6 +242,51 @@ while not (p / 'exit').exists(): time.sleep(.02)
         (self.path / 'exit').touch()
         self.assertEqual(self.proc.wait(timeout=3), 0)
 
+    def test_repeated_scroll_keeps_text_visible(self):
+        self.launch(f'''import os, time
+from pathlib import Path
+p = Path({str(self.path)!r})
+while not (p / 'start').exists(): time.sleep(.01)
+cols, rows = os.get_terminal_size(0)
+def line(n):
+    # Repeatable but distinct rows give the matcher real scroll evidence.
+    return ''.join(chr(33 + ((n * 17 + x * 13) % 90)) for x in range(cols))
+def paint(first, count, start):
+    return ''.join(f"\\x1b[{{first + i + 1}};1H" + line(start + i) for i in range(count))
+os.write(1, ('\\x1b[?25l\\x1b[2J' + paint(0, rows, 0)).encode())
+(p / 'painted').touch()
+while not (p / 'go').exists(): time.sleep(.01)
+step = rows // 2
+serial = rows
+frame = 0
+while not (p / 'exit').exists():
+    os.write(1, (f"\\x1b[{{step}}S" + paint(rows - step, step, serial)).encode())
+    serial += step
+    frame += 1
+    if frame == 20: (p / 'scrolling').touch()
+    time.sleep(.02)
+''')
+        (self.path / 'start').touch()
+        eventually(lambda: (self.path / 'painted').exists())
+        time.sleep(.2)
+        rect = self.windows()[self.win]['rect']
+        center = (rect['x'] + rect['width'] // 4, rect['y'] + rect['height'] // 4,
+                  rect['width'] // 2, rect['height'] // 2)
+        artifact = Path('.build/terminal-scroll-wayland.png').resolve()
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        reference = self.client.screenshot(artifact, region=center)['ink_fraction']
+        self.assertGreater(reference, .05, 'initial dense text did not render')
+        (self.path / 'go').touch()
+        eventually(lambda: (self.path / 'scrolling').exists())
+        for _ in range(8):
+            sample = self.client.screenshot(artifact, region=center)
+            self.assertGreater(sample['ink_fraction'], reference * .6,
+                               'scrolling lost visible text coverage')
+            time.sleep(.04)
+        (self.path / 'exit').touch()
+        self.assertEqual(self.proc.wait(timeout=5), 0)
+        self.assertEqual(self.proc.stderr.read(), b'')
+
     def test_close_reaps_uncooperative_child(self):
         self.launch(f'''
 import os, signal, time

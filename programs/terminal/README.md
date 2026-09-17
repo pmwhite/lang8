@@ -48,15 +48,21 @@ match. Stationary neighbors and styled status lines remain fixed; status counter
 and mode labels update in place even when their text changes. Blank or
 coincidentally repeated lines inside a scrolling pane remain part of its rigid
 plane. Terminal scroll-region operations provide a fallback when too little
-text survives to infer motion.
+text survives to infer motion. Repeated line-number digits follow the surrounding
+text even when cursor-line styling or status labels differ down that column.
 
 Within non-scrolling regions, a longest-common-subsequence match makes surviving
 text slide apart or together around insertions and deletions. New cells and
 non-scroll deletions fade at the inferred edit location. Scrolling cells remain
 opaque, and both incoming and departing glyphs are clipped to their own pane's
 rectangle. Interrupted animations continue from their currently displayed
-positions and retain their clipping boundaries through unrelated repaints.
-Resizing resets animation geometry to the new grid.
+positions and retain their clipping boundaries through unrelated repaints. During
+held scrolling, accumulated motion is bounded to the pane height; the whole plane
+catches up together, and visible departing text is retained until it leaves the
+clip. This prevents animation backlog from emptying the viewport during key
+repeat. Repaints replace glyphs within the moving plane, and inferred edge changes
+retain the previous pane's displacement, keeping old and new rows aligned without
+stacking duplicate characters. Resizing resets animation geometry to the new grid.
 
 PTY output waits for a 4 ms quiet interval before presentation, with a 16 ms cap
 for continuously arriving output. This joins redraws split across writes, such
@@ -126,7 +132,10 @@ scrolling, nested and borderless layouts, independent directions, stationary
 chrome, protocol hints, interrupted motion, wide/combining cells, ordinary edits,
 and resizing, including sixteen panes at the maximum grid size. Regression cases
 also cover repeated prefixes, coincidentally identical incoming code lines, and
-changing status counters.
+changing status counters. Held-scroll tests check that each cell is covered exactly
+once throughout repeated half-page and full-page animations, in both directions
+and in split panes, including concurrent edits, changing pane edges, reversals,
+and line-number gutters above fixed status rows.
 `test_presentation.l8` checks split insert-mode redraws, hidden and incomplete
 cursor updates, smooth final movement, and the bounded output settling delay.
 `test_pty.l8` builds as a static executable and checks PTY setup, environment
@@ -136,7 +145,9 @@ closed standard streams, without a display or shared libraries.
 disabled and `DISPLAY` empty. It tests a real PTY, virtual-keyboard input,
 Compose and repeat, status replies, SIGWINCH, child exit, and window close. A
 Wayland screencopy verifies rendered pixels and saves `.build/terminal-wayland.png`
-(or `TERMINAL_SCREENSHOT`). These graphical tests require `sway`, `swaymsg`,
+(or `TERMINAL_SCREENSHOT`). Continuous-scroll screenshots also verify that the
+content stays visible during key repeat and save `.build/terminal-scroll-wayland.png`.
+These graphical tests require `sway`, `swaymsg`,
 Mesa software EGL/OpenGL, and the font; they skip if Sway is not installed.
 They do not send input to your desktop session. Startup, screen, and PTY tests
 run without a compositor.
