@@ -1,11 +1,12 @@
 # L8 HTTP/1.1
 
 An HTTP/1.1 origin-server and client library written in L8. Import `http.l8`.
-The parser, serializer, chunk decoder, conditional-request evaluator, and range
-implementation are L8 code. Only sockets, DNS, clocks, calendar conversion, and
-process management use libc. The build and test commands build a tag-aware
+The parser, serializer, chunk decoder, conditional-request evaluator, range
+implementation, socket transport, clocks, calendar conversion, and process
+management are L8 code backed by Linux system calls. HTTP binaries have no libc
+or dynamic-loader dependency. The build and test commands build a tag-aware
 stage-1 compiler using the checked-in `bootstrap`, without a C compiler or
-third-party HTTP package, on x86-64 Linux with glibc. Public declarations carry
+third-party HTTP package, on x86-64 Linux. Public declarations carry
 the `http` tag; callers activate it with `use_tag http;`. Implementation helpers
 carry only `http_internal`, which is explicitly enabled by white-box tests.
 Runnable examples live in [`../examples/http-client.l8`](../examples/http-client.l8)
@@ -202,8 +203,8 @@ seconds, and returns `HTTP_INVALID_DATE` on failure. Obsolete two-digit years
 are resolved against the full current date and time, including the second at
 the 50-year boundary and century transitions. `http_parse_date_at(text, now)`
 accepts an explicit Unix timestamp for deterministic interpretation/testing.
-`http_date_at` emits IMF-fixdate. Date parsing uses libc's initial C locale; applications that change
-LC_TIME should restore C when using these helpers.
+`http_date_at` emits IMF-fixdate. Parsing and formatting use fixed English HTTP
+date names and are independent of the process locale.
 
 ## Limits and explicit scope
 
@@ -223,8 +224,10 @@ Defaults, configurable through the `HTTP_*` globals before creating messages:
 
 Keep limits positive and within L8's 512 MiB heap; increasing a buffered-body
 limit also increases possible allocation. Network I/O uses absolute deadlines,
-partial writes, EINTR/EAGAIN handling, and MSG_NOSIGNAL. DNS resolution is
-synchronous libc `getaddrinfo` and is outside the socket deadline. Streaming
+partial writes, EINTR/EAGAIN handling, and MSG_NOSIGNAL. Socket endpoints accept
+numeric IPv4 and IPv6 addresses; `localhost` aliases `127.0.0.1`. Name resolution
+is outside the transport API: applications that need DNS should resolve a name
+through a separate resolver and connect using the selected numeric address. Streaming
 output applies the size limit per chunk; callers control total output size.
 The low-level caller also controls when to reset `reader.deadline`.
 

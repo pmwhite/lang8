@@ -28,7 +28,7 @@ pinned by `spec/SOURCES.json`. No test needs a public server.
 | 7.2–7.3 | No optional gzip/deflate/compress transfer-coding codec or new coding registration | Unsupported transfer codings produce a local 501 error; `test_transfer_encoding_rfc9112_6_1` |
 | 7.4 | Never advertise unsupported transfer codings; TE: trailers adds Connection: TE | `unit.l8` |
 | 8 | Premature EOF/error never treated as a complete length/chunk-framed message | Every truncation point in `test_every_truncation_rfc9112_8`; independent truncated responses in `test_client_independent_responses` |
-| 9.1 | TCP IPv4/IPv6/DNS, connect failure handling and deadlines | `test_ipv6`, all network tests |
+| 9.1 | TCP IPv4/IPv6, connect failure handling and deadlines | `test_ipv6`, all network tests |
 | 9.2 | Associate responses in request order, consume informational responses, one outstanding client request | `test_client_reuses_connection_in_order`, `test_client_independent_responses` |
 | 9.3 | Persistence, HTTP/1.0 opt-in, complete bodies before reuse, explicit close | `test_persistence_rfc9112_9_3`, `test_python_client_keep_alive_head_and_echo`, `test_request_limit_closes_after_final_response` |
 | 9.3.1 | No automatic retries, including unsafe methods | Client errors return to caller; retry policy intentionally absent |

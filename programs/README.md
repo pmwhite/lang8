@@ -9,13 +9,15 @@ Each directory owns one library or application. Runnable demonstrations live in
 | `x11/` | `x.l8` | `x11` | X11 types and bindings |
 | `freetype/` | `ft.l8` | `freetype` | Font loading, glyph atlases, and text vertices |
 | `http/` | `http.l8` | `http` | HTTP/1.1 client, server, and streaming APIs |
+| `websocket/` | `websocket.l8` | `websocket` | RFC 6455 client, server, and message APIs; imports HTTP |
 | `block-game/` | `block-game.l8` | — | Game, editor, level model, and assets |
 
 Import the entry point relative to your source file, then activate the public
 tag with `use_tag`. Tags do not propagate through imports: GL applications using
 X11 declarations also need `use_tag x11;`.
 
-HTTP and FreeType files carry `http_internal` and `freetype_internal`; only
+HTTP, WebSocket, and FreeType files carry `http_internal`, `websocket_internal`,
+and `freetype_internal`; only
 intentional API declarations also carry their public tag. Internal tags are for
 implementation and white-box tests, not application dependencies. The GL and X11
 libraries are raw bindings, so their foreign functions and ABI types are their
@@ -27,6 +29,11 @@ FreeType exports `Font`, `Glyph`, `FT_FIRST`, `FT_LAST`, `load_font`,
 layouts, atlas defaults, and construction helpers remain internal. See
 [`http/README.md`](http/README.md) for the HTTP API.
 
+HTTP uses direct Linux x86-64 system calls and builds as a static executable with
+no libc dependency. FreeType, X11, and OpenGL remain shared-library integrations;
+the executable does not request libc directly, though those system libraries
+normally depend on it themselves.
+
 From the repository root:
 
 ```sh
@@ -34,6 +41,8 @@ From the repository root:
 .build/block-game                         # programs/block-game/world.txt
 ./build.sh http
 ./build.sh http-test
+./build.sh websocket
+./build.sh websocket-test
 ./l8 build programs/examples/tri.l8 -o .build/tri
 ./l8 build programs/examples/balls.l8 -o .build/balls
 ./l8 build programs/examples/xwin.l8 -o .build/xwin
@@ -41,4 +50,6 @@ From the repository root:
 
 The graphical programs require an X11 display (including XWayland). The HTTP
 examples are `programs/examples/http-client.l8` and `programs/examples/http-server.l8`; build output
-remains `.build/http/client` and `.build/http/server`.
+remains `.build/http/client` and `.build/http/server`. WebSocket follows the
+same layout with `programs/examples/websocket-{client,server}.l8` and
+`.build/websocket/{client,server}`; see [`websocket/README.md`](websocket/README.md).

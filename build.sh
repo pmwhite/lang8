@@ -203,7 +203,7 @@ run_examples_selfhost() {
   example_compile_fail "$tool" fixarr0 programs/examples/fixarr0.l8 'array length must be positive'
   example_compile_fail "$tool" fixarrlen programs/examples/fixarrlen.l8 'array literal length must match'
   example "$tool" aggcopy programs/examples/aggcopy.l8 'YYYYY'
-  example "$tool" dynpid programs/examples/dynpid.l8 'Y'
+  example "$tool" dynlink programs/examples/dynlink.l8 'Y'
   example "$tool" nestsum programs/examples/nestsum.l8 '1 2 3 9 4 5 6 7'
   example "$tool" exc programs/examples/exc.l8 'Hi'
   example "$tool" immheap programs/examples/immheap.l8 'Y'
@@ -401,6 +401,28 @@ do_http_test() {
   step 'HTTP protocol, API, and TCP tests' env HTTP_BUILD="$BUILD/http" python3 -m unittest discover -s programs/http/tests -v
 }
 
+build_websocket() {
+  local tool="${L8C:-./l8c1}"
+  mkdir -p "$BUILD/websocket"
+  "$tool" build programs/examples/websocket-server.l8 -o "$BUILD/websocket/server"
+  "$tool" build programs/examples/websocket-client.l8 -o "$BUILD/websocket/client"
+  "$tool" build programs/websocket/tests/unit.l8 -o "$BUILD/websocket/unit"
+}
+
+do_websocket() {
+  ensure_build_dir
+  if [[ -z "${L8C:-}" ]]; then build_stage1; fi
+  step 'WebSocket client and server' build_websocket
+}
+
+do_websocket_test() {
+  ensure_build_dir
+  if [[ -z "${L8C:-}" ]]; then build_stage1; fi
+  step 'WebSocket client, server, and unit test' build_websocket
+  step 'WebSocket protocol, visibility, and TCP tests' env WEBSOCKET_BUILD="$BUILD/websocket" python3 -m unittest discover -s programs/websocket/tests -v
+  step 'WebSocket codec vectors' "$BUILD/websocket/unit"
+}
+
 print_compiler_phases() {
   ./l8c3 build -p src2/main.l8 -o "$BUILD/l8-profile" 2>&1
 }
@@ -505,6 +527,8 @@ Commands:
   game            Build programs/block-game/block-game.l8 → .build/block-game
   http            Build programs/http client and server → .build/http/
   http-test       Verify downloaded specifications and run the HTTP test suite
+  websocket       Build WebSocket client and server → .build/websocket/
+  websocket-test  Run WebSocket codec, API visibility, and TCP tests
   selfhost        direct src1 → l8c1; src2 → l8c2; fmt src2; src2 → l8c3/l8c4; fixpoint l8c3==l8c4; examples; browse; phases
   promote-bin1    Copy the stage-1 executable → bootstrap
   promote-bin2    Copy the stage-2 fixpoint executable → bootstrap
@@ -546,6 +570,8 @@ case "$cmd" in
   game)             do_game; print_summary ;;
   http)             do_http; print_summary ;;
   http-test)        do_http_test; print_summary ;;
+  websocket)        do_websocket; print_summary ;;
+  websocket-test)   do_websocket_test; print_summary ;;
   selfhost)         do_selfhost; print_summary ;;
   promote-bin1)     do_promote_bin1 ;;
   promote-bin2)     do_promote_bin2 ;;

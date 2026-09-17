@@ -17,6 +17,22 @@
 .globl clock_gettime
 .globl getrusage
 .globl l8_memcpy
+.globl l8_clock_gettime
+.globl l8_poll
+.globl l8_recv
+.globl l8_send
+.globl l8_getrandom
+.globl l8_shutdown
+.globl l8_socket
+.globl l8_connect
+.globl l8_bind
+.globl l8_listen
+.globl l8_accept4
+.globl l8_setsockopt
+.globl l8_getsockopt
+.globl l8_fork
+.globl l8_waitpid
+.globl l8_time
 .globl l8_try_begin
 .globl l8_try_end
 .globl l8_raise
@@ -167,7 +183,8 @@ _start:
     syscall
 
 # long syscall(long nr, long a1, long a2, long a3, long a4, long a5)
-# Sixth syscall arg is always 0. Enough for open/read/write/close/exit.
+# Sixth syscall arg is always 0. Typed adapters below cover the wider OS surface
+# used by bundled programs.
 syscall:
     mov %rdi, %rax
     mov %rsi, %rdi
@@ -176,6 +193,84 @@ syscall:
     mov %r8, %r10
     mov %r9, %r8
     mov $0, %r9
+    syscall
+    ret
+
+# Linux x86-64 system-call adapters.  Keeping these in the runtime gives L8
+# programs typed entry points without routing basic OS services through libc.
+l8_clock_gettime:
+    mov $228, %rax
+    syscall
+    ret
+l8_poll:
+    mov $7, %rax
+    syscall
+    ret
+l8_recv:
+    mov %rcx, %r10
+    xor %r8, %r8
+    xor %r9, %r9
+    mov $45, %rax          # recvfrom(fd, buf, len, flags, NULL, NULL)
+    syscall
+    ret
+l8_send:
+    mov %rcx, %r10
+    xor %r8, %r8
+    xor %r9, %r9
+    mov $44, %rax          # sendto(fd, buf, len, flags, NULL, 0)
+    syscall
+    ret
+l8_getrandom:
+    mov $318, %rax
+    syscall
+    ret
+l8_shutdown:
+    mov $48, %rax
+    syscall
+    ret
+l8_socket:
+    mov $41, %rax
+    syscall
+    ret
+l8_connect:
+    mov $42, %rax
+    syscall
+    ret
+l8_bind:
+    mov $49, %rax
+    syscall
+    ret
+l8_listen:
+    mov $50, %rax
+    syscall
+    ret
+l8_accept4:
+    mov %rcx, %r10
+    mov $288, %rax
+    syscall
+    ret
+l8_setsockopt:
+    mov %rcx, %r10
+    mov $54, %rax
+    syscall
+    ret
+l8_getsockopt:
+    mov %rcx, %r10
+    mov $55, %rax
+    syscall
+    ret
+l8_fork:
+    mov $57, %rax
+    syscall
+    ret
+l8_waitpid:
+    xor %r10, %r10         # wait4(pid, status, options, NULL)
+    mov $61, %rax
+    syscall
+    ret
+l8_time:
+    xor %rdi, %rdi
+    mov $201, %rax
     syscall
     ret
 
