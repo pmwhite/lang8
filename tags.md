@@ -133,4 +133,4 @@ tag for the tag implementation itself and `compiler_internal` for the rest of th
 tool. Stage-1 sources remain untagged because the saved bootstrap predates tags;
 its generated compiler enforces the new visibility rule. Run `./build.sh selfhost`
 to build `./l8`, verify the executable fixpoint, and run the positive, negative,
-formatting, browsing, and assembly/direct-backend tests in `examples/tags/`.
+formatting, browsing, and assembly/direct-backend tests in `programs/examples/tags/`.

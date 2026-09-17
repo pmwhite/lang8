@@ -19,8 +19,10 @@ def build():
         subprocess.run([str(ROOT / 'bootstrap'), 'build', str(ROOT / 'src1/main.l8'),
                         '-o', compiler], cwd=ROOT, check=True)
     for name in ('probe', 'unit', 'session', 'date', 'server', 'client'):
-        source = ('tests/' if name in ('probe', 'unit', 'session', 'date') else '') + name + '.l8'
-        result = subprocess.run([compiler, 'build', str(ROOT / 'programs/http' / source),
+        source = (ROOT / 'programs/http/tests' / (name + '.l8')
+                  if name in ('probe', 'unit', 'session', 'date')
+                  else ROOT / 'programs/examples' / ('http-' + name + '.l8'))
+        result = subprocess.run([compiler, 'build', str(source),
                                  '-o', str(BUILD / name)], cwd=ROOT, capture_output=True)
         if result.returncode:
             raise RuntimeError(result.stderr.decode(errors='replace'))

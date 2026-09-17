@@ -5,8 +5,11 @@ The parser, serializer, chunk decoder, conditional-request evaluator, and range
 implementation are L8 code. Only sockets, DNS, clocks, calendar conversion, and
 process management use libc. The build and test commands build a tag-aware
 stage-1 compiler using the checked-in `bootstrap`, without a C compiler or
-third-party HTTP package, on x86-64 Linux with glibc. Library declarations carry
-the `http` tag; callers activate it with `use_tag http;`.
+third-party HTTP package, on x86-64 Linux with glibc. Public declarations carry
+the `http` tag; callers activate it with `use_tag http;`. Implementation helpers
+carry only `http_internal`, which is explicitly enabled by white-box tests.
+Runnable examples live in [`../examples/http-client.l8`](../examples/http-client.l8)
+and [`../examples/http-server.l8`](../examples/http-server.l8).
 
 The selected protocol scope is **HTTP/1.1 over TCP**, with HTTP/1.0 compatibility.
 The reference set includes RFC 9110, RFC 9112, their verified-errata snapshots,
@@ -134,6 +137,7 @@ WebSocket, TLS, or the selected successor protocol.
 
 ## Server and streaming APIs
 
+- `http_close_fd(fd)` closes a raw socket descriptor, including a listener.
 - `http_listen(host, port)`, `http_accept(listener)`, `http_reader(fd, true)`
   establish a connection. `http_close(reader)` half-closes, briefly drains
   in-flight data, and closes the descriptor; call it once per reader.
