@@ -1,0 +1,679 @@
+import "transport.l8";
+
+http_version(s: str): int {
+    if (len(s) != 8 || http_sub(s, 0, 5) != "HTTP/" || s[6] != '.' || s[5] < '0' || s[5] > '9' || s[7] < '0' || s[7] > '9') {
+        return -1;
+    }
+    if (s[5] != '1') {
+        return -2;
+    }
+    s[7] as int - 48;
+}
+
+http_uri_char(c: i8): bool {
+    if (c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
+        return true;
+    }
+    for x in "-._~!$&'()*+,;=:@/?%" {
+        if (x == c) {
+            return true;
+        }
+    }
+    false;
+}
+
+http_ip_literal(ip: str): bool {
+    if (len(ip) > 3 && (ip[0] == 'v' || ip[0] == 'V')) {
+        p: int = 1;
+        while (p < len(ip) && http_hex(ip[p]) >= 0) {
+            p = p + 1;
+        }
+        if (p == 1 || p + 1 >= len(ip) || ip[p] != '.') {
+            return false;
+        }
+        p = p + 1;
+        while (p < len(ip)) {
+            c: i8 = ip[p];
+            if (!http_uri_char(c) || c == '/' || c == '?' || c == '%' || c == '@') {
+                return false;
+            }
+            p = p + 1;
+        }
+        return true;
+    }
+    storage: []i8 = new i8[16](0i8);
+    inet_pton(10i32, ip, storage) == 1i32;
+}
+
+// URI authority validation; IPv6 syntax is checked separately by inet_pton.
+extern inet_pton(family: i32, source: str, destination: []i8): i32;
+
+http_authority(s: str, require_port: bool): bool {
+    if (len(s) == 0) {
+        return !require_port;
+    }
+    p: int = 0;
+    if (s[0] == '[') {
+        p = 1;
+        while (p < len(s) && s[p] != ']') {
+            p = p + 1;
+        }
+        if (p == len(s)) {
+            return false;
+        }
+        ip: str = http_sub(s, 1, p);
+        if (!http_ip_literal(ip)) {
+            return false;
+        }
+        p = p + 1;
+    } else {
+        while (p < len(s) && s[p] != ':') {
+            c: i8 = s[p];
+            if (c == '%') {
+                if (p + 2 >= len(s) || http_hex(s[p + 1]) < 0 || http_hex(s[p + 2]) < 0) {
+                    return false;
+                }
+                p = p + 3;
+            } else {
+                if (!(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.' || c == '_' || c == '~' || c == '!' || c == '$' || c == '&' || c == '\'' || c == '(' || c == ')' || c == '*' || c == '+' || c == ';' || c == '=')) {
+                    return false;
+                }
+                p = p + 1;
+            }
+        }
+        if (p == 0) {
+            return false;
+        }
+    }
+    if (p == len(s)) {
+        return !require_port;
+    }
+    if (s[p] != ':') {
+        return false;
+    }
+    p = p + 1;
+    if (p == len(s)) {
+        return !require_port;
+    }
+    port: int = http_decimal(http_sub(s, p, len(s)));
+    port >= 0 && port <= 65535;
+}
+
+http_target(m: *HttpMessage@new): bool {
+    s: str = m.target;
+    if (len(s) == 0) {
+        return false;
+    }
+    for i in 0..len(s) {
+        c: i8 = s[i];
+        if (!http_uri_char(c) && c != '[' && c != ']') {
+            return false;
+        }
+        if (c == '%' && (i + 2 >= len(s) || http_hex(s[i + 1]) < 0 || http_hex(s[i + 2]) < 0)) {
+            return false;
+        }
+    }
+    if (m.method == "CONNECT") {
+        if (!http_authority(s, true)) {
+            return false;
+        }
+        m.authority = s;
+        return true;
+    }
+    if (s == "*") {
+        return m.method == "OPTIONS";
+    }
+    if (s[0] == '/') {
+        for c in s {
+            if (!http_uri_char(c)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    start: int = 0;
+    if (http_prefix(s, "http://")) {
+        start = 7;
+    }
+    if (http_prefix(s, "https://")) {
+        start = 8;
+    }
+    if (start == 0) {
+        return false;
+    }
+    end: int = start;
+    while (end < len(s) && s[end] != '/' && s[end] != '?') {
+        end = end + 1;
+    }
+    authority: str = http_sub(s, start, end);
+    if (len(authority) == 0 || !http_authority(authority, false)) {
+        return false;
+    }
+    m.authority = authority;
+    for i in end..len(s) {
+        if (!http_uri_char(s[i])) {
+            return false;
+        }
+    }
+    if (end == len(s)) {
+        m.target = "/";
+    } else {
+        if (s[end] == '?') {
+            b: *HttpBuffer = http_buffer();
+            http_text(b, "/");
+            http_text(b, http_sub(s, end, len(s)));
+            m.target = http_string(b);
+        } else {
+            m.target = http_sub(s, end, len(s));
+        }
+    }
+    true;
+}
+
+http_fields(r: *HttpReader, m: *HttpMessage@new, trailers: bool): bool {
+    total: int = 0;
+    while (true) {
+        line: str = http_line(r, 431);
+        total = total + len(line) + 2;
+        if (r.error != 0) {
+            m.error = r.error;
+            return false;
+        }
+        if (total > HTTP_MAX_HEADERS) {
+            m.error = 431;
+            return false;
+        }
+        if (len(line) == 0) {
+            return true;
+        }
+        colon: int = 0;
+        while (colon < len(line) && line[colon] != ':') {
+            colon = colon + 1;
+        }
+        if (colon == len(line)) {
+            m.error = 400;
+            return false;
+        }
+        name: str = http_sub(line, 0, colon);
+        value: str = http_trim(http_sub(line, colon + 1, len(line)));
+        if (!http_valid_token(name) || !http_value(value)) {
+            m.error = 400;
+            return false;
+        }
+        if (trailers) {
+            if (http_forbidden_trailer(name) || http_option(m, "connection", name)) {
+                m.error = 400;
+                return false;
+            }
+            if (m.trailer_count >= HTTP_MAX_FIELDS) {
+                m.error = 431;
+                return false;
+            }
+            m.trailers[m.trailer_count] = HttpField { name: http_lower(name), value: value };
+            m.trailer_count = m.trailer_count + 1;
+        } else {
+            if (!http_add(m, name, value)) {
+                m.error = 431;
+                return false;
+            }
+        }
+    }
+    false;
+}
+
+http_framing(m: *HttpMessage, response: bool, method: str) {
+    m.close = http_option(m, "connection", "close") || m.minor == 0 && !http_option(m,
+        "connection", "keep-alive");
+    // A successful CONNECT transitions immediately; RFC 9112 6.3 explicitly ignores CL/TE.
+    if (response && (method == "CONNECT" && m.status >= 200 && m.status < 300 || m.status == 101)) {
+        m.framing = 4;
+        return;
+    }
+    nobody: bool = response && (method == "HEAD" || m.status == 304 || m.status == 204 || m.status < 200);
+    if (nobody) {
+        m.framing = 0;
+        return;
+    }
+    cl: int = -1;
+    te: *HttpBuffer = http_buffer();
+    te_present: bool = false;
+    for i in 0..m.count {
+        field: HttpField = m.headers[i];
+        if (field.name == "content-length") {
+            p: int = 0;
+            more: bool = true;
+            while (more) {
+                end: int = p;
+                while (end < len(field.value) && field.value[end] != ',') {
+                    end = end + 1;
+                }
+                n: int = http_decimal(http_trim(http_sub(field.value, p, end)));
+                if (n < 0 || cl >= 0 && n != cl) {
+                    m.error = 400;
+                    return;
+                }
+                cl = n;
+                if (end == len(field.value)) {
+                    more = false;
+                }
+                p = end + 1;
+            }
+        }
+        if (field.name == "transfer-encoding") {
+            // Preserve empty occurrences when combining field lines; their total is bounded below.
+            if (te_present) {
+                http_text(te, ",");
+            }
+            te_present = true;
+            http_text(te, field.value);
+        }
+    }
+    if (te_present) {
+        if (cl >= 0 || m.minor == 0) {
+            m.error = 400;
+            return;
+        }
+        codings: str = http_string(te);
+        p: int = 0;
+        chunks: int = 0;
+        unsupported: bool = false;
+        last_chunk: bool = false;
+        empty_elements: int = 0;
+        more: bool = true;
+        while (more) {
+            end: int = p;
+            quoted: bool = false;
+            escaped: bool = false;
+            while (end < len(codings) && (codings[end] != ',' || quoted)) {
+                c: i8 = codings[end];
+                if (escaped) {
+                    escaped = false;
+                } else {
+                    if (c == '\\' && quoted) {
+                        escaped = true;
+                    } else {
+                        if (c == '"') {
+                            quoted = !quoted;
+                        }
+                    }
+                }
+                end = end + 1;
+            }
+            coding: str = http_trim(http_sub(codings, p, end));
+            if (len(coding) == 0) {
+                empty_elements = empty_elements + 1;
+                if (empty_elements > HTTP_MAX_EMPTY_LIST_ELEMENTS) {
+                    m.error = 400;
+                    return;
+                }
+            } else {
+                name_end: int = 0;
+                while (name_end < len(coding) && http_token(coding[name_end])) {
+                    name_end = name_end + 1;
+                }
+                name: str = http_sub(coding, 0, name_end);
+                if (quoted || !http_valid_token(name) || !http_parameters(coding,
+                    name_end, true)) {
+                    m.error = 400;
+                    return;
+                }
+                last_chunk = http_equal(name, "chunked");
+                if (last_chunk && name_end != len(coding)) {
+                    m.error = 400;
+                    return;
+                }
+                if (last_chunk) {
+                    chunks = chunks + 1;
+                } else {
+                    unsupported = true;
+                }
+            }
+            if (end == len(codings)) {
+                more = false;
+            }
+            p = end + 1;
+        }
+        if (chunks == 0 && !unsupported || chunks > 1 || chunks > 0 && !last_chunk || !response && !last_chunk) {
+            m.error = 400;
+            return;
+        }
+        if (unsupported) {
+            m.error = 501;
+            return;
+        }
+        m.framing = 2;
+        return;
+    }
+    if (cl >= 0) {
+        if (cl > HTTP_MAX_BODY) {
+            m.error = 413;
+            return;
+        }
+        m.framing = 1;
+        m.length = cl;
+        return;
+    }
+    if (response) {
+        m.framing = 3;
+        m.close = true;
+    }
+}
+
+http_read_head(r: *HttpReader, response: bool, method: str): *HttpMessage@new {
+    m: *HttpMessage = http_message();
+    start: int = r.consumed;
+    line: str = http_line(r, 414);
+    if (!response && len(line) == 0 && r.error == 0) {
+        line = http_line(r, 414);
+    }
+    if (r.error != 0) {
+        m.error = r.error;
+        // Clean EOF between messages is distinct from an incomplete message.
+        if (r.eof && r.consumed == start) {
+            m.error = -1;
+        }
+        return m;
+    }
+    if (response) {
+        if (len(line) < 13 || line[8] != ' ' || line[12] != ' ') {
+            m.error = 400;
+            return m;
+        }
+        m.minor = http_version(http_sub(line, 0, 8));
+        m.status = http_decimal(http_sub(line, 9, 12));
+        m.reason = http_sub(line, 13, len(line));
+        if (m.status < 100 || m.status > 599 || !http_value(m.reason)) {
+            m.error = 400;
+            return m;
+        }
+    } else {
+        a: int = 0;
+        while (a < len(line) && line[a] != ' ') {
+            a = a + 1;
+        }
+        b: int = a + 1;
+        while (b < len(line) && line[b] != ' ') {
+            b = b + 1;
+        }
+        if (b >= len(line)) {
+            m.error = 400;
+            return m;
+        }
+        m.method = http_sub(line, 0, a);
+        m.target = http_sub(line, a + 1, b);
+        m.minor = http_version(http_sub(line, b + 1, len(line)));
+        if (!http_valid_token(m.method) || !http_target(m)) {
+            m.error = 400;
+            return m;
+        }
+    }
+    if (m.minor < 0) {
+        m.error = 400;
+        if (m.minor == -2) {
+            m.error = 505;
+        }
+        return m;
+    }
+    if (!http_fields(r, m, false)) {
+        return m;
+    }
+    if (!response) {
+        hosts: int = 0;
+        for i in 0..m.count {
+            if (m.headers[i].name == "host") {
+                hosts = hosts + 1;
+                if (!http_authority(m.headers[i].value, false)) {
+                    m.error = 400;
+                    return m;
+                }
+            }
+        }
+        if (hosts > 1 || m.minor > 0 && hosts != 1) {
+            m.error = 400;
+            return m;
+        }
+        if (len(m.authority) == 0) {
+            m.authority = http_get(m, "host");
+        }
+        if (http_has(m, "expect") && m.minor > 0) {
+            for i in 0..m.count {
+                if (m.headers[i].name == "expect" && !http_equal(m.headers[i].value,
+                    "100-continue")) {
+                    m.error = 417;
+                    return m;
+                }
+            }
+            m.expect = true;
+        }
+    }
+    http_framing(m, response, method);
+    m;
+}
+
+http_parameters(line: str, p: int, require_value: bool): bool {
+    // chunk-ext = *( BWS ";" BWS token [ BWS "=" BWS (token / quoted-string) ] )
+    while (p < len(line)) {
+        while (p < len(line) && (line[p] == ' ' || line[p] == '\t')) {
+            p = p + 1;
+        }
+        if (p == len(line) || line[p] != ';') {
+            return false;
+        }
+        p = p + 1;
+        while (p < len(line) && (line[p] == ' ' || line[p] == '\t')) {
+            p = p + 1;
+        }
+        start: int = p;
+        while (p < len(line) && http_token(line[p])) {
+            p = p + 1;
+        }
+        if (p == start) {
+            return false;
+        }
+        space: int = p;
+        while (p < len(line) && (line[p] == ' ' || line[p] == '\t')) {
+            p = p + 1;
+        }
+        if (p < len(line) && line[p] == '=') {
+            p = p + 1;
+            while (p < len(line) && (line[p] == ' ' || line[p] == '\t')) {
+                p = p + 1;
+            }
+            if (p == len(line)) {
+                return false;
+            }
+            if (line[p] == '"') {
+                p = p + 1;
+                while (p < len(line) && line[p] != '"') {
+                    if (line[p] == '\\') {
+                        p = p + 1;
+                        if (p == len(line)) {
+                            return false;
+                        }
+                    }
+                    if (line[p] < 32i8 && line[p] != '\t' || line[p] == 127i8) {
+                        return false;
+                    }
+                    p = p + 1;
+                }
+                if (p == len(line)) {
+                    return false;
+                }
+                p = p + 1;
+            } else {
+                start = p;
+                while (p < len(line) && http_token(line[p])) {
+                    p = p + 1;
+                }
+                if (p == start) {
+                    return false;
+                }
+            }
+        } else {
+            if (require_value) {
+                return false;
+            }
+            p = space;
+        }
+    }
+    true;
+}
+
+http_chunk_size(line: str): int {
+    p: int = 0;
+    n: int = 0;
+    while (p < len(line) && http_hex(line[p]) >= 0) {
+        d: int = http_hex(line[p]);
+        if (n > (9223372036854775807 - d) / 16) {
+            return -1;
+        }
+        n = n * 16 + d;
+        p = p + 1;
+    }
+    if (p == 0) {
+        return -1;
+    }
+    if (!http_parameters(line, p, false)) {
+        return -1;
+    }
+    n;
+}
+
+// Each chunk line gets its own region so arbitrarily many tiny chunks do not retain scratch storage.
+http_next_chunk(r: *HttpReader): int {
+    result: int = -1;
+    region {
+        line: str = http_line(r, 400);
+        if (r.error == 0) {
+            result = http_chunk_size(line);
+        }
+    }
+    result;
+}
+
+type HttpBodyReader = {
+    reader: *HttpReader;
+    message: *HttpMessage;
+    remaining: int;
+    total: int;
+    overhead: int;
+    chunk_end: bool;
+    done: bool;
+};
+
+http_body_reader(r: *HttpReader@new, m: *HttpMessage@new): *HttpBodyReader@new {
+    new HttpBodyReader {
+        reader: r,
+        message: m,
+        remaining: m.length,
+        total: 0,
+        overhead: 0,
+        chunk_end: false,
+        done: m.framing == 0 || m.framing == 4
+    };
+}
+
+// Pull decoded content into caller-owned storage: positive count, 0 complete, -1 error.
+// Headers must have been accepted before calling. Trailers appear only after a complete body.
+http_body_read(state: *HttpBodyReader@new, out: []i8): int {
+    m: *HttpMessage = state.message;
+    r: *HttpReader = state.reader;
+    if (m.error != 0) {
+        return -1;
+    }
+    if (state.done) {
+        return 0;
+    }
+    if (len(out) == 0) {
+        m.error = 400;
+        return -1;
+    }
+    if (m.framing == 2 && state.remaining == 0) {
+        if (state.chunk_end) {
+            if (http_read_byte(r) != 13 || http_read_byte(r) != 10) {
+                m.error = 400;
+                return -1;
+            }
+            state.chunk_end = false;
+        }
+        before: int = r.consumed;
+        state.remaining = http_next_chunk(r);
+        if (r.error != 0) {
+            m.error = r.error;
+            return -1;
+        }
+        state.overhead = state.overhead + r.consumed - before;
+        if (state.overhead > HTTP_MAX_BODY) {
+            m.error = 413;
+            return -1;
+        }
+        if (state.remaining < 0) {
+            m.error = 400;
+            return -1;
+        }
+        if (state.remaining > HTTP_MAX_BODY - state.total) {
+            m.error = 413;
+            return -1;
+        }
+        if (state.remaining == 0) {
+            if (!http_fields(r, m, true)) {
+                return -1;
+            }
+            state.done = true;
+            return 0;
+        }
+    }
+    if (m.framing == 1 && state.remaining == 0) {
+        state.done = true;
+        return 0;
+    }
+    count: int = len(out);
+    if (m.framing != 3 && count > state.remaining) {
+        count = state.remaining;
+    }
+    n: int = 0;
+    while (n < count) {
+        c: int = http_read_byte(r);
+        if (c < 0) {
+            if (m.framing == 3 && r.error == 0) {
+                state.done = true;
+                return n;
+            }
+            m.error = 400;
+            if (r.error != 0) {
+                m.error = r.error;
+            }
+            return -1;
+        }
+        if (state.total >= HTTP_MAX_BODY) {
+            m.error = 413;
+            return -1;
+        }
+        out[n] = c trunc i8;
+        n = n + 1;
+        state.total = state.total + 1;
+    }
+    if (m.framing != 3) {
+        state.remaining = state.remaining - n;
+    }
+    if (m.framing == 2 && state.remaining == 0) {
+        state.chunk_end = true;
+    }
+    n;
+}
+
+http_read_body(r: *HttpReader@new, m: *HttpMessage@new): bool {
+    state: *HttpBodyReader = http_body_reader(r, m);
+    scratch: []i8 = new i8[8192](0i8);
+    while (true) {
+        n: int = http_body_read(state, scratch);
+        if (n < 0) {
+            return false;
+        }
+        if (n == 0) {
+            return true;
+        }
+        http_bytes(m.body, scratch, n);
+    }
+    false;
+}

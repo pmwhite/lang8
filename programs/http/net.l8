@@ -1,0 +1,162 @@
+import "transport.l8";
+
+// Linux x86-64 libc ABI; the compiler emits the dynamic ELF/PLT directly.
+type HttpAddress = {
+    storage: [128]i8;
+};
+
+type HttpAddrInfo = {
+    flags: i32;
+    family: i32;
+    socktype: i32;
+    protocol: i32;
+    addrlen: u32;
+    addr: ?*HttpAddress;
+    canonname: ?*i8;
+    next: ?*HttpAddrInfo;
+};
+
+extern getaddrinfo(
+    host: str,
+    service: str,
+    hints: *HttpAddrInfo,
+    result: *?*HttpAddrInfo
+): i32;
+
+extern freeaddrinfo(info: *HttpAddrInfo): int;
+
+extern socket(family: i32, kind: i32, protocol: i32): i32;
+
+extern connect(fd: i32, address: *HttpAddress, size: u32): i32;
+
+extern bind(fd: i32, address: *HttpAddress, size: u32): i32;
+
+extern listen(fd: i32, backlog: i32): i32;
+
+extern accept4(
+    fd: i32,
+    addr: ?*HttpAddress,
+    size: ?*u32,
+    flags: i32
+): i32;
+
+extern setsockopt(
+    fd: i32,
+    level: i32,
+    name: i32,
+    value: *i32,
+    size: u32
+): i32;
+
+extern getsockopt(
+    fd: i32,
+    level: i32,
+    name: i32,
+    value: *i32,
+    size: *u32
+): i32;
+
+extern fork(): i32;
+
+extern waitpid(pid: i32, status: *i32, options: i32): i32;
+
+extern l8_exit(code: int): noreturn;
+
+// DNS itself is synchronous. Connection establishment has one overall deadline.
+http_socket(host: str, service: str, server: bool): int {
+    hints: HttpAddrInfo = HttpAddrInfo {
+        flags: 0i32,
+        family: 0i32,
+        socktype: 1i32,
+        protocol: 6i32,
+        addrlen: 0u32,
+        addr: null,
+        canonname: null,
+        next: null
+    };
+    result: ?*HttpAddrInfo = null;
+    if (getaddrinfo(host, service, &hints, &result) != 0i32) {
+        return -1;
+    }
+    if (result == null) {
+        return -1;
+    }
+    first: *HttpAddrInfo = result or &hints;
+    item: ?*HttpAddrInfo = first;
+    chosen: int = -1;
+    deadline: int = http_now() + HTTP_TIMEOUT_MS;
+    while (item != null && chosen < 0) {
+        ai: *HttpAddrInfo = item;
+        address: ?*HttpAddress = ai.addr;
+        if (address != null) {
+            kind: i32 = 524289i32; // SOCK_STREAM | SOCK_CLOEXEC
+            if (!server) {
+                kind = kind | 2048i32;
+            }
+            fd: i32 = socket(ai.family, kind, ai.protocol);
+            if (fd >= 0i32) {
+                ok: bool = false;
+                if (server) {
+                    yes: i32 = 1i32;
+                    setsockopt(fd, 1i32, 2i32, &yes, 4u32);
+                    ok = bind(fd, address, ai.addrlen) == 0i32 && listen(fd, 128i32) == 0i32;
+                } else {
+                    rc: i32 = connect(fd, address, ai.addrlen);
+                    ok = rc == 0i32;
+                    if (!ok && __errno_location().* == 115i32 && http_wait(fd as int,
+                        4, deadline)) {
+                        err: i32 = -1i32;
+                        size: u32 = 4u32;
+                        ok = getsockopt(fd, 1i32, 4i32, &err, &size) == 0i32 && err == 0i32;
+                    }
+                }
+                if (ok) {
+                    chosen = fd as int;
+                } else {
+                    close(fd as int);
+                }
+            }
+        }
+        item = ai.next;
+    }
+    freeaddrinfo(first);
+    chosen;
+}
+
+http_connect(host: str, service: str): int {
+    http_socket(host, service, false);
+}
+
+http_listen(host: str, service: str): int {
+    http_socket(host, service, true);
+}
+
+http_accept(listener: int): int {
+    while (true) {
+        fd: i32 = accept4(listener trunc i32, null, null, 526336i32);
+        if (fd >= 0i32) {
+            return fd as int;
+        }
+        if (__errno_location().* != 4i32) {
+            return -1;
+        }
+    }
+    -1;
+}
+
+// Half-close and briefly drain in-flight input to avoid discarding the response with a TCP RST.
+http_close(r: *HttpReader) {
+    shutdown(r.fd trunc i32, 1i32);
+    deadline: int = http_now() + 100;
+    draining: bool = true;
+    remaining: int = 65536;
+    while (draining && remaining > 0 && http_wait(r.fd, 1, deadline)) {
+        n: int = recv(r.fd trunc i32, r.data, len(r.data), 64i32);
+        if (n <= 0) {
+            draining = false;
+        } else {
+            remaining = remaining - n;
+        }
+    }
+    close(r.fd);
+}

@@ -1,0 +1,265 @@
+// Public entry point. Import this file; server.l8 and client.l8 are runnable examples.
+import "net.l8";
+
+import "semantics.l8";
+
+type HttpClient = {
+    reader: *HttpReader;
+    reusable: bool;
+};
+
+http_client(host: str, port: str): ?*HttpClient@new {
+    fd: int = http_connect(host, port);
+    if (fd < 0) {
+        return null;
+    }
+    new HttpClient { reader: http_reader(fd, true), reusable: true };
+}
+
+http_client_close(c: *HttpClient) {
+    if (c.reader.fd >= 0) {
+        http_close(c.reader);
+        c.reader.fd = -1;
+    }
+    c.reusable = false;
+}
+
+// A buffered request body represented as three wire segments, without copying its content.
+// Advance only after bytes are accepted by send; informational responses never reset offsets.
+type HttpUpload = {
+    prefix: *HttpBuffer;
+    suffix: *HttpBuffer;
+    part: int;
+    offset: int;
+};
+
+http_upload_advance(u: *HttpUpload, request: *HttpMessage) {
+    advancing: bool = true;
+    while (advancing && u.part < 3) {
+        size: int = u.prefix.size;
+        if (u.part == 1) {
+            size = request.body.size;
+        }
+        if (u.part == 2) {
+            size = u.suffix.size;
+        }
+        if (u.offset == size) {
+            u.part = u.part + 1;
+            u.offset = 0;
+        } else {
+            advancing = false;
+        }
+    }
+}
+
+http_upload(request: *HttpMessage): *HttpUpload@new {
+    u: *HttpUpload = new HttpUpload {
+        prefix: http_buffer(),
+        suffix: http_buffer(),
+        part: 0,
+        offset: 0
+    };
+    if (request.framing == 2) {
+        if (request.body.size > 0) {
+            http_hex_number(u.prefix, request.body.size);
+            http_text(u.prefix, "\r\n");
+            http_text(u.suffix, "\r\n");
+        }
+        tail: *HttpBuffer = http_chunk_tail(request);
+        http_bytes(u.suffix, tail.data, tail.size);
+    }
+    http_upload_advance(u, request);
+    u;
+}
+
+// One nonblocking, bounded write per poll cycle so readable responses take priority.
+http_upload_write(
+    r: *HttpReader,
+    u: *HttpUpload,
+    data: []i8,
+    size: int
+): bool {
+    if (u.offset < 0 || u.offset >= size || size > len(data)) {
+        r.error = 400;
+        return false;
+    }
+    n: int = size - u.offset;
+    if (n > 16384) {
+        n = 16384;
+    }
+    sent: int = send(r.fd trunc i32, &data[u.offset], n, 16448i32);
+    if (sent < 0 && (__errno_location().* == 4i32 || __errno_location().* == 11i32)) {
+        return true;
+    }
+    if (sent <= 0) {
+        r.error = 400;
+        return false;
+    }
+    u.offset = u.offset + sent;
+    true;
+}
+
+http_upload_step(r: *HttpReader, u: *HttpUpload, request: *HttpMessage): bool {
+    if (u.part == 3) {
+        return true;
+    }
+    ok: bool = false;
+    if (u.part == 0) {
+        ok = http_upload_write(r, u, u.prefix.data, u.prefix.size);
+    }
+    if (u.part == 1) {
+        ok = http_upload_write(r, u, request.body.data, request.body.size);
+    }
+    if (u.part == 2) {
+        ok = http_upload_write(r, u, u.suffix.data, u.suffix.size);
+    }
+    if (!ok) {
+        return false;
+    }
+    http_upload_advance(u, request);
+    true;
+}
+
+// One outstanding request per client. No implicit retries, redirects, or caching.
+http_exchange(c: *HttpClient@new, request: *HttpMessage): *HttpMessage@new {
+    r: *HttpReader = c.reader;
+    failure: *HttpMessage = http_response(0);
+    if (!c.reusable || r.fd < 0) {
+        failure.error = 400;
+        return failure;
+    }
+    // Bytes left after a previous final response must not become a response to this request.
+    if (r.pos != r.size) {
+        failure.error = 400;
+        http_client_close(c);
+        return failure;
+    }
+    r.deadline = http_now() + HTTP_TIMEOUT_MS;
+    head: *HttpBuffer = http_write_head(request, false, request.method, request.minor);
+    if (request.error != 0) {
+        failure.error = request.error;
+        return failure;
+    }
+    u: *HttpUpload = http_upload(request);
+    if (request.error != 0) {
+        failure.error = request.error;
+        return failure;
+    }
+    if (!http_send(r, head.data, head.size)) {
+        failure.error = r.error;
+        http_client_close(c);
+        return failure;
+    }
+    awaiting_continue: bool = http_option(request, "expect", "100-continue") && request.body.size > 0;
+    continue_deadline: int = http_now() + 1000;
+    infos: int = 0;
+    while (true) {
+        ready: int = 1;
+        if (r.pos == r.size) {
+            events: int = 1;
+            if (!awaiting_continue && u.part < 3) {
+                events = 5;
+            }
+            deadline: int = r.deadline;
+            if (awaiting_continue && continue_deadline < deadline) {
+                deadline = continue_deadline;
+            }
+            ready = http_poll(r.fd, events, deadline);
+        }
+        if (ready < 0) {
+            failure.error = 400;
+            http_client_close(c);
+            return failure;
+        }
+        if (ready == 0) {
+            if (awaiting_continue && http_now() >= continue_deadline && http_now() < r.deadline) {
+                awaiting_continue = false;
+            } else {
+                failure.error = 408;
+                http_client_close(c);
+                return failure;
+            }
+        } else {
+            // Read before writing when both directions are ready, including peer closure/errors.
+            if ((ready & 57) != 0) {
+                response: *HttpMessage = http_read_head(r, true, request.method);
+                if (response.error != 0) {
+                    http_client_close(c);
+                    return response;
+                }
+                if (response.status == 101 && (u.part != 3 || !http_has(request, "upgrade") || !http_has(response,
+                    "upgrade") || !http_option(response, "connection", "upgrade"))) {
+                    response.error = 400;
+                    http_client_close(c);
+                    return response;
+                }
+                if (response.status == 101) {
+                    for i in 0..response.count {
+                        if (response.headers[i].name == "upgrade" && !http_option(request,
+                            "upgrade", response.headers[i].value)) {
+                            response.error = 400;
+                            http_client_close(c);
+                            return response;
+                        }
+                    }
+                }
+                if (response.status >= 200 || response.status == 101) {
+                    incomplete: bool = u.part != 3;
+                    // No more request bytes after a final response. Signal EOF before reading
+                    // the response body: a rejecting peer may wait for it before closing.
+                    if (incomplete) {
+                        c.reusable = false;
+                        shutdown(r.fd trunc i32, 1i32);
+                    }
+                    http_read_body(r, response);
+                    if (response.framing == 4) {
+                        c.reusable = false;
+                    } else {
+                        if (response.error != 0 || response.close || request.close || incomplete || request.method == "CONNECT" && response.status >= 300) {
+                            http_client_close(c);
+                        }
+                    }
+                    return response;
+                }
+                infos = infos + 1;
+                if (infos > 32) {
+                    failure.error = 400;
+                    http_client_close(c);
+                    return failure;
+                }
+                if (response.status == 100) {
+                    awaiting_continue = false;
+                }
+            } else {
+                if ((ready & 4) != 0 && !awaiting_continue && u.part < 3) {
+                    if (!http_upload_step(r, u, request)) {
+                        failure.error = r.error;
+                        http_client_close(c);
+                        return failure;
+                    }
+                }
+            }
+        }
+    }
+    failure;
+}
+
+// Read head separately when an application needs authorization before accepting content.
+http_receive_request(r: *HttpReader@new): *HttpMessage@new {
+    r.deadline = http_now() + HTTP_TIMEOUT_MS;
+    m: *HttpMessage = http_read_head(r, false, "");
+    if (m.error != 0) {
+        return m;
+    }
+    if (m.expect && (m.framing == 2 || m.length > 0)) {
+        interim: *HttpBuffer = http_buffer();
+        http_text(interim, "HTTP/1.1 100 Continue\r\n");
+        http_text(interim, "\r\n");
+        if (!http_send(r, interim.data, interim.size)) {
+            m.error = r.error;
+            return m;
+        }
+    }
+    http_read_body(r, m);
+    m;
+}

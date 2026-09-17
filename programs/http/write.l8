@@ -1,0 +1,413 @@
+import "parse.l8";
+
+type HttpTm = {
+    sec: i32;
+    min: i32;
+    hour: i32;
+    mday: i32;
+    mon: i32;
+    year: i32;
+    wday: i32;
+    yday: i32;
+    isdst: i32;
+    gmtoff: int;
+    zone: ?*i8;
+};
+
+extern time(out: ?*int): int;
+
+extern gmtime_r(timep: *int, out: *HttpTm): ?*HttpTm;
+
+extern strftime(
+    out: []i8,
+    size: int,
+    format: str,
+    tm: *HttpTm
+): int;
+
+http_date(): str@new {
+    now: int = time(null);
+    tm: HttpTm = HttpTm {
+        sec: 0i32,
+        min: 0i32,
+        hour: 0i32,
+        mday: 0i32,
+        mon: 0i32,
+        year: 0i32,
+        wday: 0i32,
+        yday: 0i32,
+        isdst: 0i32,
+        gmtoff: 0,
+        zone: null
+    };
+    if (gmtime_r(&now, &tm) == null) {
+        return "";
+    }
+    out: []i8 = new i8[64](0i8);
+    n: int = strftime(out, len(out), "%a, %d %b %Y %H:%M:%S GMT", &tm);
+    b: *HttpBuffer = http_buffer();
+    http_bytes(b, out, n);
+    http_string(b);
+}
+
+http_reason(status: int): str {
+    if (status == 100) {
+        return "Continue";
+    }
+    if (status == 101) {
+        return "Switching Protocols";
+    }
+    if (status == 200) {
+        return "OK";
+    }
+    if (status == 201) {
+        return "Created";
+    }
+    if (status == 204) {
+        return "No Content";
+    }
+    if (status == 206) {
+        return "Partial Content";
+    }
+    if (status == 304) {
+        return "Not Modified";
+    }
+    if (status == 400) {
+        return "Bad Request";
+    }
+    if (status == 404) {
+        return "Not Found";
+    }
+    if (status == 405) {
+        return "Method Not Allowed";
+    }
+    if (status == 408) {
+        return "Request Timeout";
+    }
+    if (status == 412) {
+        return "Precondition Failed";
+    }
+    if (status == 413) {
+        return "Content Too Large";
+    }
+    if (status == 414) {
+        return "URI Too Long";
+    }
+    if (status == 416) {
+        return "Range Not Satisfiable";
+    }
+    if (status == 417) {
+        return "Expectation Failed";
+    }
+    if (status == 431) {
+        return "Request Header Fields Too Large";
+    }
+    if (status == 500) {
+        return "Internal Server Error";
+    }
+    if (status == 501) {
+        return "Not Implemented";
+    }
+    if (status == 505) {
+        return "HTTP Version Not Supported";
+    }
+    "";
+}
+
+http_request(method: str, target: str, authority: str): *HttpMessage@new {
+    m: *HttpMessage = http_message();
+    m.method = http_sub(method, 0, len(method));
+    m.target = http_sub(target, 0, len(target));
+    m.authority = http_sub(authority, 0, len(authority));
+    m;
+}
+
+http_response(status: int): *HttpMessage@new {
+    m: *HttpMessage = http_message();
+    m.status = status;
+    m.reason = http_reason(status);
+    m;
+}
+
+http_trailer(m: *HttpMessage@new, name: str, value: str): bool {
+    if (m.trailer_count >= HTTP_MAX_FIELDS || !http_valid_token(name) || !http_value(value) || http_forbidden_trailer(name)) {
+        return false;
+    }
+    m.trailers[m.trailer_count] = HttpField { name: http_lower(name), value: http_trim(value) };
+    m.trailer_count = m.trailer_count + 1;
+    true;
+}
+
+http_no_body(status: int, method: str): bool {
+    method == "HEAD" || status < 200 || status == 204 || status == 205 || status == 304 || method == "CONNECT" && status >= 200 && status < 300;
+}
+
+// Serializer owns Host, framing, and Connection. User CL/TE are rejected, never trusted.
+// HEAD/304 derive their representation length from body.size, without transmitting body.
+http_write_head(
+    m: *HttpMessage,
+    response: bool,
+    method: str,
+    minor: int
+): *HttpBuffer@new {
+    b: *HttpBuffer = http_buffer();
+    if (m.error != 0) {
+        return b;
+    }
+    if (m.body.size < 0 || m.body.size > len(m.body.data) || m.body.size > HTTP_MAX_BODY || m.count < 0 || m.count > len(m.headers) || m.trailer_count < 0 || m.trailer_count > len(m.trailers)) {
+        m.error = 400;
+        return b;
+    }
+    if (response && m.status == 205 && (m.body.size != 0 || m.framing == 2)) {
+        m.error = 400;
+        return b;
+    }
+    if (response && minor == 0 && m.status < 200) {
+        m.error = 400;
+        return b;
+    }
+    if (!response && m.method == "CONNECT" && (m.body.size != 0 || m.framing == 2)) {
+        m.error = 400;
+        return b;
+    }
+    chunked: bool = m.framing == 2;
+    if (http_has(m, "upgrade") && minor == 0) {
+        m.error = 400;
+        return b;
+    }
+    if (chunked && minor == 0) {
+        m.error = 400;
+        return b;
+    }
+    if (m.trailer_count > 0 && !chunked) {
+        m.error = 400;
+        return b;
+    }
+    if (response) {
+        if (m.status < 100 || m.status > 599 || !http_value(m.reason)) {
+            m.error = 400;
+            return b;
+        }
+        if (minor == 0) {
+            http_text(b, "HTTP/1.0 ");
+        } else {
+            http_text(b, "HTTP/1.1 ");
+        }
+        http_number(b, m.status);
+        http_text(b, " ");
+        http_text(b, m.reason);
+        http_text(b, "\r\n");
+    } else {
+        if (!http_valid_token(m.method) || len(m.target) == 0 || len(m.authority) == 0 || !http_authority(m.authority,
+            false)) {
+            m.error = 400;
+            return b;
+        }
+        check: *HttpMessage = http_request(m.method, m.target, m.authority);
+        if (!http_target(check)) {
+            m.error = 400;
+            return b;
+        }
+        http_text(b, m.method);
+        http_text(b, " ");
+        http_text(b, m.target);
+        if (minor == 0) {
+            http_text(b, " HTTP/1.0\r\n");
+        } else {
+            http_text(b, " HTTP/1.1\r\n");
+        }
+        http_text(b, "Host: ");
+        http_text(b, m.authority);
+        http_text(b, "\r\n");
+    }
+    for i in 0..m.count {
+        field: HttpField = m.headers[i];
+        if (!http_valid_token(field.name) || !http_value(field.value) || len(field.name) + len(field.value) + 2 > HTTP_MAX_LINE) {
+            m.error = 400;
+            return b;
+        }
+        if (http_equal(field.name, "content-length") || http_equal(field.name, "transfer-encoding") || http_equal(field.name,
+            "connection") || http_equal(field.name, "trailer") || !response && http_equal(field.name,
+            "host")) {
+            m.error = 400;
+            return b;
+        }
+        if (http_equal(field.name, "te") && (!http_equal(field.value, "trailers") || response)) {
+            m.error = 400;
+            return b;
+        }
+        http_text(b, field.name);
+        http_text(b, ": ");
+        http_text(b, field.value);
+        http_text(b, "\r\n");
+    }
+    if (response && !http_has(m, "date")) {
+        http_text(b, "Date: ");
+        http_text(b, http_date());
+        http_text(b, "\r\n");
+    }
+    framed: bool = !response || !(m.status < 200 || m.status == 204 || method == "CONNECT" && m.status >= 200 && m.status < 300);
+    if (response && m.status == 304 && m.length == -1) {
+        framed = false;
+    }
+    if (!response && m.body.size == 0 && m.framing == 0 && m.method != "POST" && m.method != "PUT" && m.method != "PATCH") {
+        framed = false;
+    }
+    if (framed) {
+        if (chunked) {
+            http_text(b, "Transfer-Encoding: chunked\r\n");
+        } else {
+            http_text(b, "Content-Length: ");
+            http_number(b, m.body.size);
+            http_text(b, "\r\n");
+        }
+    }
+    if (m.trailer_count > 0) {
+        http_text(b, "Trailer: ");
+        for i in 0..m.trailer_count {
+            field: HttpField = m.trailers[i];
+            if (!http_valid_token(field.name) || !http_value(field.value) || http_forbidden_trailer(field.name)) {
+                m.error = 400;
+                return b;
+            }
+            if (i > 0) {
+                http_text(b, ", ");
+            }
+            http_text(b, field.name);
+        }
+        http_text(b, "\r\n");
+    }
+    if (m.status >= 200 || !response) {
+        if (m.close) {
+            http_text(b, "Connection: close");
+        } else {
+            http_text(b, "Connection: keep-alive");
+        }
+        if (http_has(m, "te")) {
+            http_text(b, ", TE");
+        }
+        if (!response && http_has(m, "upgrade")) {
+            http_text(b, ", Upgrade");
+        }
+        http_text(b, "\r\n");
+    }
+    if (response && m.status == 101) {
+        http_text(b, "Connection: Upgrade\r\n");
+    }
+    http_text(b, "\r\n");
+    if (b.size > HTTP_MAX_HEADERS) {
+        m.error = 431;
+    }
+    line_size: int = 0;
+    lines: int = 0;
+    for i in 0..b.size {
+        if (b.data[i] == '\n') {
+            if (line_size - 1 > HTTP_MAX_LINE) {
+                m.error = 431;
+                if (lines == 0) {
+                    m.error = 414;
+                }
+            }
+            line_size = 0;
+            lines = lines + 1;
+        } else {
+            line_size = line_size + 1;
+        }
+    }
+    if (lines - 2 > HTTP_MAX_FIELDS) {
+        m.error = 431;
+    }
+    trailer_size: int = 2;
+    for i in 0..m.trailer_count {
+        field: HttpField = m.trailers[i];
+        n: int = len(field.name) + len(field.value) + 2;
+        if (n > HTTP_MAX_LINE) {
+            m.error = 431;
+        }
+        trailer_size = trailer_size + n + 2;
+    }
+    if (trailer_size > HTTP_MAX_HEADERS) {
+        m.error = 431;
+    }
+    if (response && m.status == 101 && !http_has(m, "upgrade")) {
+        m.error = 400;
+    }
+    b;
+}
+
+// Chunked streaming output: send a validated chunked head, zero or more chunks, then end_chunks.
+http_send_chunk(r: *HttpReader, data: []i8, n: int): bool {
+    if (n < 0 || n > len(data) || n > HTTP_MAX_BODY) {
+        r.error = 413;
+        return false;
+    }
+    if (n == 0) {
+        return true;
+    }
+    line: *HttpBuffer = http_buffer();
+    http_hex_number(line, n);
+    http_text(line, "\r\n");
+    http_send(r, line.data, line.size) && http_send(r, data, n) && http_send_text(r,
+        "\r\n");
+}
+
+http_chunk_tail(m: *HttpMessage): *HttpBuffer@new {
+    // Validate all trailers before emitting the terminating chunk.
+    final: *HttpBuffer = http_buffer();
+    http_text(final, "0\r\n");
+    if (m.trailer_count < 0 || m.trailer_count > HTTP_MAX_FIELDS || m.trailer_count > len(m.trailers)) {
+        m.error = 431;
+        return final;
+    }
+    for i in 0..m.trailer_count {
+        field: HttpField = m.trailers[i];
+        if (!http_valid_token(field.name) || !http_value(field.value) || http_forbidden_trailer(field.name)) {
+            m.error = 400;
+            return final;
+        }
+        if (len(field.name) + len(field.value) + 2 > HTTP_MAX_LINE) {
+            m.error = 431;
+            return final;
+        }
+        http_text(final, field.name);
+        http_text(final, ": ");
+        http_text(final, field.value);
+        http_text(final, "\r\n");
+    }
+    http_text(final, "\r\n");
+    if (final.size > HTTP_MAX_HEADERS) {
+        m.error = 431;
+        return final;
+    }
+    final;
+}
+
+http_end_chunks(r: *HttpReader, m: *HttpMessage): bool {
+    final: *HttpBuffer = http_chunk_tail(m);
+    if (m.error != 0) {
+        r.error = m.error;
+        return false;
+    }
+    http_send(r, final.data, final.size);
+}
+
+http_write_body(r: *HttpReader, m: *HttpMessage): bool {
+    if (m.framing != 2) {
+        return http_send(r, m.body.data, m.body.size);
+    }
+    http_send_chunk(r, m.body.data, m.body.size) && http_end_chunks(r, m);
+}
+
+http_send_response(r: *HttpReader, request: *HttpMessage, response: *HttpMessage): bool {
+    if (request.close || request.method == "CONNECT" && response.status >= 300) {
+        response.close = true;
+    }
+    head: *HttpBuffer = http_write_head(response, true, request.method, request.minor);
+    if (response.error != 0 || !http_send(r, head.data, head.size)) {
+        return false;
+    }
+    if (http_no_body(response.status, request.method)) {
+        return true;
+    }
+    http_write_body(r, response);
+}

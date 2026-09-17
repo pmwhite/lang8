@@ -1,0 +1,191 @@
+import "core.l8";
+
+need "libc.so.6";
+
+type HttpTimespec = {
+    sec: int;
+    nsec: int;
+};
+
+type HttpPoll = {
+    fd: i32;
+    events: i32; // two shorts in events; revents occupies high 16 bits
+};
+
+extern clock_gettime(clock: int, ts: *HttpTimespec): int;
+
+extern poll(fds: *HttpPoll, n: int, timeout: i32): i32;
+
+extern recv(
+    fd: i32,
+    buf: []i8,
+    n: int,
+    flags: i32
+): int;
+
+extern send(
+    fd: i32,
+    buf: *i8,
+    n: int,
+    flags: i32
+): int;
+
+extern close(fd: int): int;
+
+extern shutdown(fd: i32, how: i32): i32;
+
+extern __errno_location(): *i32;
+
+type HttpReader = {
+    fd: int;
+    network: bool;
+    data: []i8;
+    pos: int;
+    size: int;
+    consumed: int;
+    error: int;
+    eof: bool;
+    deadline: int;
+};
+
+http_now(): int {
+    ts: HttpTimespec = HttpTimespec { sec: 0, nsec: 0 };
+    clock_gettime(1, &ts);
+    ts.sec * 1000 + ts.nsec / 1000000;
+}
+
+http_reader(fd: int, network: bool): *HttpReader@new {
+    new HttpReader {
+        fd: fd,
+        network: network,
+        data: new i8[8192](0i8),
+        pos: 0,
+        size: 0,
+        consumed: 0,
+        error: 0,
+        eof: false,
+        deadline: http_now() + HTTP_TIMEOUT_MS
+    };
+}
+
+// Returns revents, 0 on deadline, or -1 on poll failure. HUP/ERR are kept for readers.
+http_poll(fd: int, events: int, deadline: int): int {
+    while (true) {
+        left: int = deadline - http_now();
+        if (left <= 0) {
+            return 0;
+        }
+        p: HttpPoll = HttpPoll { fd: fd trunc i32, events: events trunc i32 };
+        rc: i32 = poll(&p, 1, left trunc i32);
+        if (rc > 0i32) {
+            return p.events as int >> 16 & 65535;
+        }
+        if (rc == 0i32) {
+            return 0;
+        }
+        if (__errno_location().* != 4i32) {
+            return -1;
+        }
+    }
+    -1;
+}
+
+http_wait(fd: int, events: int, deadline: int): bool {
+    http_poll(fd, events, deadline) > 0;
+}
+
+http_read_byte(r: *HttpReader): int {
+    if (r.error != 0 || r.eof) {
+        return -1;
+    }
+    if (r.pos == r.size) {
+        n: int = -1;
+        while (n < 0) {
+            if (r.network) {
+                if (!http_wait(r.fd, 1, r.deadline)) {
+                    r.error = 408;
+                    return -1;
+                }
+                n = recv(r.fd trunc i32, r.data, len(r.data), 64i32);
+                if (n < 0 && __errno_location().* != 4i32 && __errno_location().* != 11i32) {
+                    r.error = 400;
+                    return -1;
+                }
+            } else {
+                n = read(r.fd, r.data, len(r.data));
+                if (n < 0) {
+                    r.error = 400;
+                    return -1;
+                }
+            }
+        }
+        if (n == 0) {
+            r.eof = true;
+            return -1;
+        }
+        r.size = n;
+        r.pos = 0;
+    }
+    c: int = r.data[r.pos] as int;
+    r.pos = r.pos + 1;
+    r.consumed = r.consumed + 1;
+    c;
+}
+
+http_line(r: *HttpReader, limit_error: int): str@new {
+    b: *HttpBuffer = http_buffer();
+    while (true) {
+        c: int = http_read_byte(r);
+        if (c < 0) {
+            if (r.error == 0) {
+                r.error = 400;
+            }
+            return "";
+        }
+        if (c == 13) {
+            if (http_read_byte(r) != 10) {
+                r.error = 400;
+                return "";
+            }
+            return http_string(b);
+        }
+        if (c == 10 || c == 0) {
+            r.error = 400;
+            return "";
+        }
+        if (b.size >= HTTP_MAX_LINE) {
+            r.error = limit_error;
+            return "";
+        }
+        http_byte(b, c trunc i8);
+    }
+    "";
+}
+
+http_send(r: *HttpReader, data: []i8, n: int): bool {
+    if (n < 0 || n > len(data)) {
+        r.error = 400;
+        return false;
+    }
+    off: int = 0;
+    while (off < n) {
+        if (!http_wait(r.fd, 4, r.deadline)) {
+            r.error = 408;
+            return false;
+        }
+        sent: int = send(r.fd trunc i32, &data[off], n - off, 16448i32); // DONTWAIT | NOSIGNAL
+        if (sent <= 0) {
+            if (!(sent < 0 && (__errno_location().* == 4i32 || __errno_location().* == 11i32))) {
+                r.error = 400;
+                return false;
+            }
+            sent = 0;
+        }
+        off = off + sent;
+    }
+    true;
+}
+
+http_send_text(r: *HttpReader, s: str): bool {
+    http_send(r, bytes(s), len(s));
+}

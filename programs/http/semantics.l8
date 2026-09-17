@@ -1,0 +1,502 @@
+// Optional origin-resource semantics: validators, preconditions, and byte ranges.
+import "write.l8";
+
+extern strptime(source: str, format: str, tm: *HttpTm): ?*i8;
+
+extern timegm(tm: *HttpTm): int;
+
+HTTP_INVALID_DATE: int = -9223372036854775807;
+
+http_empty_tm(): HttpTm {
+    HttpTm {
+        sec: 0i32,
+        min: 0i32,
+        hour: 0i32,
+        mday: 0i32,
+        mon: 0i32,
+        year: 0i32,
+        wday: 0i32,
+        yday: 0i32,
+        isdst: 0i32,
+        gmtoff: 0,
+        zone: null
+    };
+}
+
+http_date_at(timestamp: int): str@new {
+    tm: HttpTm = http_empty_tm();
+    if (gmtime_r(&timestamp, &tm) == null) {
+        return "";
+    }
+    out: []i8 = new i8[64](0i8);
+    n: int = strftime(out, len(out), "%a, %d %b %Y %H:%M:%S GMT", &tm);
+    b: *HttpBuffer = http_buffer();
+    http_bytes(b, out, n);
+    http_string(b);
+}
+
+// Compare calendar components before timegm normalizes the selected date.
+http_calendar_after(a: *HttpTm, b: *HttpTm): bool {
+    left: []i32 = [a.year, a.mon, a.mday, a.hour, a.min, a.sec];
+    right: []i32 = [b.year, b.mon, b.mday, b.hour, b.min, b.sec];
+    for i in 0..6 {
+        if (left[i] != right[i]) {
+            return left[i] > right[i];
+        }
+    }
+    false;
+}
+
+// Explicit clock for deterministic obsolete-date interpretation and tests.
+http_parse_date_at(s: str, now: int): int {
+    // RFC 9110 5.6.7: accept all three historical HTTP-date forms; emit IMF-fixdate.
+    tm: HttpTm = http_empty_tm();
+    end: ?*i8 = strptime(s, "%a, %d %b %Y %H:%M:%S GMT", &tm);
+    if (end == null || end.* != 0i8) {
+        tm = http_empty_tm();
+        end = strptime(s, "%A, %d-%b-%y %H:%M:%S GMT", &tm);
+        if (end == null || end.* != 0i8) {
+            tm = http_empty_tm();
+            end = strptime(s, "%a %b %e %H:%M:%S %Y", &tm);
+            if (end == null || end.* != 0i8) {
+                return HTTP_INVALID_DATE;
+            }
+        } else {
+            current: HttpTm = http_empty_tm();
+            if (gmtime_r(&now, &current) == null) {
+                return HTTP_INVALID_DATE;
+            }
+            year: int = (current.year as int + 1900) / 100 * 100 + (tm.year as int + 1900) % 100;
+            // Start at this year's or the next occurrence of the two-digit year,
+            // then choose the most recent occurrence at/before the full 50-year cutoff.
+            if (year < current.year as int + 1900) {
+                year = year + 100;
+            }
+            tm.year = (year - 1900) trunc i32;
+            current.year = current.year + 50i32;
+            if (http_calendar_after(&tm, &current)) {
+                tm.year = tm.year - 100i32;
+            }
+        }
+    }
+    if (tm.sec > 60i32 || tm.year < -1899i32) {
+        return HTTP_INVALID_DATE;
+    }
+    leap: bool = tm.sec == 60i32;
+    if (leap) {
+        tm.sec = 59i32;
+    }
+    day: i32 = tm.mday;
+    mon: i32 = tm.mon;
+    year: i32 = tm.year;
+    result: int = timegm(&tm);
+    if (tm.mday != day || tm.mon != mon || tm.year != year) {
+        return HTTP_INVALID_DATE;
+    }
+    if (leap) {
+        result = result + 1;
+    }
+    result;
+}
+
+http_parse_date(s: str): int {
+    http_parse_date_at(s, time(null));
+}
+
+http_etag_valid(tag: str): bool {
+    start: int = 0;
+    if (len(tag) >= 2 && tag[0] == 'W' && tag[1] == '/') {
+        start = 2;
+    }
+    if (len(tag) < start + 2 || tag[start] != '"' || tag[len(tag) - 1] != '"') {
+        return false;
+    }
+    for i in start + 1..len(tag) - 1 {
+        c: i8 = tag[i];
+        if (c == '"' || c < 33i8 || c == 127i8) {
+            return false;
+        }
+    }
+    true;
+}
+
+http_etag_equal(a: str, b: str, weak: bool): bool {
+    if (!http_etag_valid(a) || !http_etag_valid(b)) {
+        return false;
+    }
+    aw: bool = a[0] == 'W';
+    bw: bool = b[0] == 'W';
+    if (!weak && (aw || bw)) {
+        return false;
+    }
+    aa: int = 0;
+    bb: int = 0;
+    if (aw) {
+        aa = 2;
+    }
+    if (bw) {
+        bb = 2;
+    }
+    http_sub(a, aa, len(a)) == http_sub(b, bb, len(b));
+}
+
+http_etag_list(
+    s: str,
+    current: str,
+    exists: bool,
+    weak: bool
+): bool {
+    if (http_trim(s) == "*") {
+        return exists;
+    }
+    p: int = 0;
+    matched: bool = false;
+    while (p < len(s)) {
+        while (p < len(s) && (s[p] == ' ' || s[p] == '\t' || s[p] == ',')) {
+            p = p + 1;
+        }
+        if (p < len(s)) {
+            start: int = p;
+            if (p + 1 < len(s) && s[p] == 'W' && s[p + 1] == '/') {
+                p = p + 2;
+            }
+            if (p >= len(s) || s[p] != '"') {
+                return false;
+            }
+            p = p + 1;
+            while (p < len(s) && s[p] != '"') {
+                p = p + 1;
+            }
+            if (p == len(s)) {
+                return false;
+            }
+            p = p + 1;
+            tag: str = http_sub(s, start, p);
+            if (!http_etag_valid(tag)) {
+                return false;
+            }
+            if (exists && http_etag_equal(tag, current, weak)) {
+                matched = true;
+            }
+            while (p < len(s) && (s[p] == ' ' || s[p] == '\t')) {
+                p = p + 1;
+            }
+            if (p < len(s) && s[p] != ',') {
+                return false;
+            }
+        }
+    }
+    matched;
+}
+
+http_validator_matches(
+    m: *HttpMessage,
+    name: str,
+    tag: str,
+    exists: bool,
+    weak: bool
+): bool {
+    for i in 0..m.count {
+        if (m.headers[i].name == name && http_etag_list(m.headers[i].value, tag, exists,
+            weak)) {
+            return true;
+        }
+    }
+    false;
+}
+
+// 0 = proceed, 304 = not modified, 412 = failed precondition. Evaluate before Range.
+http_preconditions(
+    m: *HttpMessage,
+    tag: str,
+    modified: int,
+    exists: bool
+): int {
+    if (http_has(m, "if-match")) {
+        if (!http_validator_matches(m, "if-match", tag, exists, false)) {
+            return 412;
+        }
+    } else {
+        if (http_has(m, "if-unmodified-since") && exists && modified >= 0) {
+            date: int = http_parse_date(http_get(m, "if-unmodified-since"));
+            if (date != HTTP_INVALID_DATE && modified > date) {
+                return 412;
+            }
+        }
+    }
+    if (http_has(m, "if-none-match")) {
+        if (http_validator_matches(m, "if-none-match", tag, exists, true)) {
+            if (m.method == "GET" || m.method == "HEAD") {
+                return 304;
+            }
+            return 412;
+        }
+    } else {
+        if ((m.method == "GET" || m.method == "HEAD") && exists && modified >= 0 && http_has(m,
+            "if-modified-since")) {
+            date: int = http_parse_date(http_get(m, "if-modified-since"));
+            if (date != HTTP_INVALID_DATE && modified <= date) {
+                return 304;
+            }
+        }
+    }
+    0;
+}
+
+http_if_range(m: *HttpMessage, tag: str, modified: int): bool {
+    if (!http_has(m, "if-range")) {
+        return true;
+    }
+    value: str = http_get(m, "if-range");
+    if (http_etag_valid(value)) {
+        return http_etag_equal(value, tag, false);
+    }
+    date: int = http_parse_date(value);
+    date != HTTP_INVALID_DATE && modified >= 0 && date == modified;
+}
+
+type HttpRange = {
+    first: int;
+    last: int;
+};
+
+type HttpRanges = {
+    status: int;
+    count: int;
+    items: []HttpRange;
+};
+
+http_range_number(s: str): int {
+    if (len(s) == 0) {
+        return -1;
+    }
+    n: int = 0;
+    for c in s {
+        if (c < '0' || c > '9') {
+            return -1;
+        }
+        d: int = c as int - 48;
+        if (n <= (9223372036854775807 - d) / 10) {
+            n = n * 10 + d;
+        } else {
+            n = 9223372036854775807;
+        }
+    }
+    n;
+}
+
+http_ranges(value: str, size: int): *HttpRanges@new {
+    r: *HttpRanges = new HttpRanges { status: 0, count: 0, items: new HttpRange[16](HttpRange { first: 0, last: 0 }) };
+    // Invalid/unknown/too many ranges are ignored; a valid wholly unsatisfiable set yields 416.
+    if (!http_prefix(value, "bytes=") || size < 0) {
+        return r;
+    }
+    p: int = 6;
+    seen: int = 0;
+    while (p < len(value)) {
+        end: int = p;
+        while (end < len(value) && value[end] != ',') {
+            end = end + 1;
+        }
+        part: str = http_trim(http_sub(value, p, end));
+        dash: int = 0;
+        while (dash < len(part) && part[dash] != '-') {
+            dash = dash + 1;
+        }
+        if (dash == len(part) || len(part) == 1) {
+            return r;
+        }
+        first: int = 0;
+        last: int = size - 1;
+        if (dash == 0) {
+            suffix: int = http_range_number(http_sub(part, 1, len(part)));
+            if (suffix < 0) {
+                return r;
+            }
+            first = size - suffix;
+            if (first < 0) {
+                first = 0;
+            }
+        } else {
+            first = http_range_number(http_sub(part, 0, dash));
+            if (first < 0) {
+                return r;
+            }
+            if (dash + 1 < len(part)) {
+                last = http_range_number(http_sub(part, dash + 1, len(part)));
+                if (last < first) {
+                    return r;
+                }
+                if (last >= size) {
+                    last = size - 1;
+                }
+            }
+        }
+        seen = seen + 1;
+        if (seen > 16) {
+            return r;
+        }
+        if (first <= last && first < size) {
+            r.items[r.count] = HttpRange { first: first, last: last };
+            r.count = r.count + 1;
+        }
+        p = end + 1;
+        if (end + 1 == len(value)) {
+            return r;
+        }
+    }
+    if (seen == 0) {
+        return r;
+    }
+    r.status = 416;
+    if (r.count > 0) {
+        r.status = 206;
+    }
+    r;
+}
+
+http_content_range(first: int, last: int, size: int): str@new {
+    b: *HttpBuffer = http_buffer();
+    http_text(b, "bytes ");
+    if (first < 0) {
+        http_text(b, "*");
+    } else {
+        http_number(b, first);
+        http_text(b, "-");
+        http_number(b, last);
+    }
+    http_text(b, "/");
+    http_number(b, size);
+    http_string(b);
+}
+
+http_copy_range(
+    out: *HttpBuffer@new,
+    data: []i8,
+    first: int,
+    last: int
+) {
+    http_reserve(out, out.size + last - first + 1);
+    for i in first..last + 1 {
+        out.data[out.size] = data[i];
+        out.size = out.size + 1;
+    }
+}
+
+http_boundary(data: []i8, size: int): str@new {
+    nonce: int = http_now();
+    while (true) {
+        b: *HttpBuffer = http_buffer();
+        http_text(b, "l8-http-");
+        http_number(b, nonce);
+        boundary: str = http_string(b);
+        found: bool = false;
+        for i in 0..size - len(boundary) + 1 {
+            same: bool = true;
+            for j in 0..len(boundary) {
+                if (data[i + j] != boundary[j]) {
+                    same = false;
+                }
+            }
+            if (same) {
+                found = true;
+            }
+        }
+        if (!found) {
+            return boundary;
+        }
+        nonce = nonce + 1;
+    }
+    "";
+}
+
+// Pure representation helper: no filesystem access or implicit resource mutation.
+http_representation(
+    request: *HttpMessage,
+    data: []i8,
+    size: int,
+    content_type: str,
+    tag: str,
+    modified: int
+): *HttpMessage@new {
+    response: *HttpMessage = http_response(200);
+    if (size < 0 || size > len(data) || size > HTTP_MAX_BODY || !http_value(content_type) || !http_etag_valid(tag)) {
+        response.error = 400;
+        return response;
+    }
+    http_add(response, "ETag", tag);
+    if (modified >= 0) {
+        http_add(response, "Last-Modified", http_date_at(modified));
+    }
+    http_add(response, "Accept-Ranges", "bytes");
+    status: int = http_preconditions(request, tag, modified, true);
+    if (status != 0) {
+        response.status = status;
+        response.reason = http_reason(status);
+        // 304 may omit Content-Length; suppress its automatic generation via length=-1.
+        if (status == 304) {
+            response.length = -1;
+        }
+        return response;
+    }
+    ranges: *HttpRanges = http_ranges("", size);
+    if (request.method == "GET" && http_if_range(request, tag, modified)) {
+        ranges = http_ranges(http_get(request, "range"), size);
+    }
+    if (ranges.status == 416) {
+        response.status = 416;
+        response.reason = http_reason(416);
+        http_add(response, "Content-Range", http_content_range(-1, 0, size));
+        return response;
+    }
+    if (ranges.status == 206) {
+        total: int = 0;
+        for i in 0..ranges.count {
+            total = total + ranges.items[i].last - ranges.items[i].first + 1 + 512;
+        }
+        if (total <= HTTP_MAX_BODY) {
+            response.status = 206;
+            response.reason = http_reason(206);
+            if (ranges.count == 1) {
+                item: HttpRange = ranges.items[0];
+                http_add(response, "Content-Type", content_type);
+                http_add(response, "Content-Range", http_content_range(item.first,
+                    item.last, size));
+                http_copy_range(response.body, data, item.first, item.last);
+            } else {
+                boundary: str = http_boundary(data, size);
+                kind: *HttpBuffer = http_buffer();
+                http_text(kind, "multipart/byteranges; boundary=");
+                http_text(kind, boundary);
+                http_add(response, "Content-Type", http_string(kind));
+                for i in 0..ranges.count {
+                    item: HttpRange = ranges.items[i];
+                    http_text(response.body, "--");
+                    http_text(response.body, boundary);
+                    http_text(response.body, """
+
+Content-Type: """);
+                    http_text(response.body, content_type);
+                    http_text(response.body, """
+
+Content-Range: """);
+                    http_text(response.body, http_content_range(item.first, item.last,
+                        size));
+                    http_text(response.body, """
+
+
+""");
+                    http_copy_range(response.body, data, item.first, item.last);
+                    http_text(response.body, "\r\n");
+                }
+                http_text(response.body, "--");
+                http_text(response.body, boundary);
+                http_text(response.body, "--\r\n");
+            }
+            return response;
+        }
+    }
+    http_add(response, "Content-Type", content_type);
+    http_bytes(response.body, data, size);
+    response;
+}

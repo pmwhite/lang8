@@ -1,0 +1,132 @@
+import "../http.l8";
+
+main(argc: int, argv: []str): int {
+    if (argc < 3) {
+        return 2;
+    }
+    optional: ?*HttpClient = http_client("127.0.0.1", argv[1]);
+    if (optional == null) {
+        return 1;
+    }
+    c: *HttpClient = optional;
+    if (http_prefix(argv[2], "upload")) {
+        // A small send buffer makes backpressure deterministic without timing sleeps.
+        size: i32 = 4096i32;
+        if (setsockopt(c.reader.fd trunc i32, 1i32, 7i32, &size, 4u32) != 0i32) {
+            return 12;
+        }
+        HTTP_TIMEOUT_MS = 2000;
+        count: int = 8388608;
+        if (argc > 3) {
+            count = http_decimal(argv[3]);
+        }
+        request: *HttpMessage = http_request("POST", "/", "test");
+        request.body.data = new i8[count]('x');
+        request.body.size = count;
+        for i in 0..count {
+            request.body.data[i] = (i % 251) trunc i8;
+        }
+        if (argv[2] == "upload-chunked" || argv[2] == "upload-expect-chunked") {
+            request.framing = 2;
+            if (!http_trailer(request, "X-End", "done")) {
+                return 13;
+            }
+        }
+        if (argv[2] == "upload-expect-fixed" || argv[2] == "upload-expect-chunked") {
+            if (!http_add(request, "Expect", "100-continue")) {
+                return 14;
+            }
+        }
+        response: *HttpMessage = http_exchange(c, request);
+        out: *HttpBuffer = http_buffer();
+        http_text(out, "status=");
+        http_number(out, response.status);
+        http_text(out, """
+
+error=""");
+        if (response.error < 0) {
+            http_text(out, "-");
+            http_number(out, 0 - response.error);
+        } else {
+            http_number(out, response.error);
+        }
+        http_text(out, """
+
+reusable=""");
+        http_number(out, if (c.reusable) {
+            1;
+        } else {
+            0;
+        });
+        http_text(out, """
+
+body=""");
+        http_bytes(out, response.body.data, response.body.size);
+        http_text(out, "\n");
+        write(1, out.data, out.size);
+        http_client_close(c);
+        return 0;
+    }
+    if (argv[2] == "stream") {
+        request: *HttpMessage = http_request("POST", "/", "test");
+        request.framing = 2;
+        if (!http_trailer(request, "X-End", "done")) {
+            return 7;
+        }
+        head: *HttpBuffer = http_write_head(request, false, "POST", 1);
+        if (request.error != 0 || !http_send(c.reader, head.data, head.size)) {
+            return 8;
+        }
+        for text in ["first", "", "second", "third"] {
+            region {
+                if (!http_send_chunk(c.reader, bytes(text), len(text))) {
+                    l8_exit(9);
+                }
+            }
+        }
+        if (!http_end_chunks(c.reader, request)) {
+            return 10;
+        }
+        response: *HttpMessage = http_read_head(c.reader, true, "POST");
+        if (!http_read_body(c.reader, response)) {
+            return 11;
+        }
+        write(1, response.body.data, response.body.size);
+    } else {
+        if (argv[2] == "reuse") {
+            for _i in 0..3 {
+                region {
+                    request: *HttpMessage = http_request("GET", "/", "test");
+                    response: *HttpMessage = http_exchange(c, request);
+                    if (response.error != 0 || response.status != 200) {
+                        l8_exit(3);
+                    }
+                    write(1, response.body.data, response.body.size);
+                }
+            }
+        } else {
+            request: *HttpMessage = http_request("CONNECT", "example.test:443", "example.test:443");
+            if (argv[2] == "upgrade") {
+                request.method = "GET";
+                request.target = "/";
+                if (!http_add(request, "Upgrade", "test")) {
+                    return 4;
+                }
+            }
+            response: *HttpMessage = http_exchange(c, request);
+            if (response.error != 0 || response.framing != 4 || c.reusable) {
+                return 5;
+            }
+            for _i in 0..6 {
+                ch: int = http_read_byte(c.reader);
+                if (ch < 0) {
+                    return 6;
+                }
+                b: i8 = ch trunc i8;
+                write(1, &b, 1);
+            }
+        }
+    }
+    http_client_close(c);
+    0;
+}
