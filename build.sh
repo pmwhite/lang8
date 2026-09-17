@@ -139,6 +139,9 @@ example_exit() {
 run_examples_selfhost() {
   local tool="$1"
   run_examples "$tool"
+  example "$tool" callback-basic programs/callbacks/basic.l8 'callbacks OK'
+  example "$tool" callback-native programs/callbacks/native.l8 'native fn OK'
+  example "$tool" callback-effects programs/callbacks/effects.l8 'fn effects OK'
   example "$tool" or programs/examples/or.l8 'YYYY'
   example "$tool" noreturn programs/examples/noreturn.l8 'Hi'
   example "$tool" global programs/examples/global.l8 'YYYYYY'
@@ -413,6 +416,12 @@ do_terminal_test() {
   step 'terminal X11/PTY tests' python3 programs/terminal/test_integration.py "$BUILD/terminal"
 }
 
+do_callback_test() {
+  ensure_build_dir
+  build_stage1
+  step 'Function values and C callbacks [l8c1]' python3 programs/callbacks/test_callbacks.py ./l8c1 "$BUILD/callbacks"
+}
+
 build_http() {
   local tool="${L8C:-./l8c1}"
   mkdir -p "$BUILD/http"
@@ -558,6 +567,7 @@ Commands:
   game            Build programs/block-game/block-game.l8 → .build/block-game
   terminal        Build programs/terminal/terminal.l8 → .build/terminal
   terminal-test   Run terminal screen tests and X11/PTY tests (when DISPLAY is set)
+  callback-test   Test function values, lifetimes, and the C ABI (requires cc/as)
   http            Build programs/http client and server → .build/http/
   http-test       Verify downloaded specifications and run the HTTP test suite
   websocket       Build WebSocket client and server → .build/websocket/
@@ -603,6 +613,7 @@ case "$cmd" in
   game)             do_game; print_summary ;;
   terminal)         do_terminal; print_summary ;;
   terminal-test)    do_terminal_test; print_summary ;;
+  callback-test)    do_callback_test; print_summary ;;
   http)             do_http; print_summary ;;
   http-test)        do_http_test; print_summary ;;
   websocket)        do_websocket; print_summary ;;

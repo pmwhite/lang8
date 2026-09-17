@@ -38,6 +38,14 @@ Typical evolution for a breaking language change:
 
 ## Unified command line
 
+Function values, indirect calls, and C callbacks are supported by both source
+stages. See
+[`programs/callbacks/README.md`](programs/callbacks/README.md) for `fn` syntax,
+ABI restrictions, and lifetime contracts. `./build.sh callback-test` builds the
+stage-1 compiler and runs language, rejection, and C interoperability tests;
+the test fixture needs a host C compiler and GNU assembler. Building L8 programs
+with callbacks does not require a host compiler or adapter library.
+
 ```
 l8 compile [--profile|-p] file.l8 > file.s
 l8 as [-p|--profile] -o file.o file.s runtime.s

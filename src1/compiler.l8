@@ -58,6 +58,7 @@
 // Fmt prints the same tree with one canonical layout.
 // This compiler reports failures via `exception Error` (caught in main).
 type Type =
+    | FnPtr { fn: *Function, optional: int }
     | Int
     | I8
     | I32
@@ -386,6 +387,7 @@ type ExprKind =
     | Var { var: ?*Obj, name: []i8, member: ?*Member }
     | Binary { op: BinOp, lhs: *Expr, rhs: *Expr }
     | Assign { lhs: *Expr, rhs: *Expr }
+    | FuncAddr { name: []i8, fn: ?*Function }
     | Addr { lhs: *Expr }
     | Deref { lhs: *Expr }
     | Index { lhs: *Expr, idx: *Expr }
@@ -395,7 +397,12 @@ type ExprKind =
     | LogAnd { lhs: *Expr, rhs: *Expr }
     | LogOr { lhs: *Expr, rhs: *Expr }
     | OrElse { lhs: *Expr, rhs: *Expr }
-    | Funcall { funcname: []i8, args: ?*Expr, fn: ?*Function }
+    | Funcall {
+        funcname: []i8,
+        args: ?*Expr,
+        fn: ?*Function,
+        target: ?*Expr
+    }
     | MemberAccess { lhs: *Expr, name: []i8, member: ?*Member }
     | As { lhs: *Expr }
     | Trunc { lhs: *Expr }
@@ -521,6 +528,7 @@ type Function = {
     raises_list: ?*ExnList;
     used: int;
     is_extern: int;
+    address_taken: int;
     next: ?*Function;
     hash_next: ?*Function;
     ret_bound: []i8;
@@ -1305,6 +1313,10 @@ append_type(sb: *StrBuf@immortal, t: ?*Type) raises Error {
         return;
     }
     match t.* {
+        FnPtr k -> {
+            append_fnptr_type(sb, k.fn, k.optional);
+            return;
+        }
         Int -> {
             sb_puts(sb, "int");
             return;
@@ -1742,6 +1754,9 @@ type_align(t: *Type): int {
 
 type_size(t: *Type): int {
     match t.* {
+        FnPtr _ -> {
+            8;
+        }
         Int -> {
             8;
         }
@@ -2218,7 +2233,7 @@ syntax_fields_after_brace(inner: *Token): bool {
         return false;
     }
     v: *Token = inner.next.next;
-    if (v.kind == TokKind.Int || v.kind == TokKind.I8 || v.kind == TokKind.I32 || v.kind == TokKind.U32 || v.kind == TokKind.F32 || v.kind == TokKind.F64 || v.kind == TokKind.Bool || v.kind == TokKind.Noreturn) {
+    if (v.kind == TokKind.Ident && name_eq_span("fn", source, v.pos, v.len) && v.next.kind == TokKind.LParen || v.kind == TokKind.Int || v.kind == TokKind.I8 || v.kind == TokKind.I32 || v.kind == TokKind.U32 || v.kind == TokKind.F32 || v.kind == TokKind.F64 || v.kind == TokKind.Bool || v.kind == TokKind.Noreturn) {
         return false;
     }
     if (v.kind == TokKind.Star || v.kind == TokKind.Question || v.kind == TokKind.LBrack) {
@@ -2255,7 +2270,7 @@ starts_type(): bool {
     if (tok.kind == TokKind.LBrack) {
         return true;
     }
-    if (tok.kind == TokKind.StrTy || tok.kind == TokKind.Int || tok.kind == TokKind.I8 || tok.kind == TokKind.I32 || tok.kind == TokKind.U32 || tok.kind == TokKind.F32 || tok.kind == TokKind.F64 || tok.kind == TokKind.Bool || is_type_name()) {
+    if (at_function_type() || tok.kind == TokKind.StrTy || tok.kind == TokKind.Int || tok.kind == TokKind.I8 || tok.kind == TokKind.I32 || tok.kind == TokKind.U32 || tok.kind == TokKind.F32 || tok.kind == TokKind.F64 || tok.kind == TokKind.Bool || is_type_name()) {
         return true;
     }
     t: ?*Token = tok;
@@ -2440,10 +2455,16 @@ is_opt_slice(t: *Type): bool {
 }
 
 is_optional(t: *Type): bool {
-    is_opt_pointer(t) || is_opt_slice(t) || is_opt_str(t);
+    is_opt_pointer(t) || is_opt_slice(t) || is_opt_str(t) || is_opt_fnptr(t);
 }
 
 unwrap_optional(t: *Type) noregion raises Error: *Type@new {
+    match t.* {
+        FnPtr k -> {
+            return new Type.FnPtr { fn: k.fn, optional: 0 };
+        }
+        _ -> { }
+    }
     if (is_opt_str(t)) {
         return ty_str;
     }
@@ -2654,6 +2675,9 @@ assignable(to: ?*Type@from_n, from_n: ?*Expr) raises Error: bool {
                     return true;
                 }
                 return false;
+            }
+            if (is_fnptr(to2) && is_fnptr(from2) && is_opt_fnptr(to2) && !is_opt_fnptr(from2)) {
+                return fnptr_signatures_equal(fnptr_function(to2), fnptr_function(from2));
             }
             if (is_opt_str(to2) && is_str(from2)) {
                 return true;
@@ -2898,6 +2922,9 @@ type_has_pointers(t: ?*Type): bool {
 types_equal(a: *Type, b: *Type) raises Error: bool {
     if (a == b) {
         true;
+    } else if (is_fnptr(a) && is_fnptr(b)) {
+        is_opt_fnptr(a) == is_opt_fnptr(b) && fnptr_signatures_equal(fnptr_function(a),
+            fnptr_function(b));
     } else if (is_int_ty(a) && is_int_ty(b)) {
         true;
     } else if (is_i8_ty(a) && is_i8_ty(b)) {
@@ -3336,5 +3363,7 @@ import "tags.l8";
 import "parse.l8";
 
 import "check.l8";
+
+import "callbacks.l8";
 
 import "codegen.l8";

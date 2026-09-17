@@ -12,6 +12,7 @@ Each directory owns one library or application. Runnable demonstrations live in
 | `websocket/` | `websocket.l8` | `websocket` | RFC 6455 client, server, and message APIs; imports HTTP |
 | `block-game/` | `block-game.l8` | — | Game, editor, level model, and assets |
 | `terminal/` | `terminal.l8` | — | OpenGL/FreeType terminal with a syscall-backed PTY shell |
+| `callbacks/` | `basic.l8` | — | Function value examples, language tests, and C ABI fixtures |
 
 Import the entry point relative to your source file, then activate the public
 tag with `use_tag`. Tags do not propagate through imports: GL applications using

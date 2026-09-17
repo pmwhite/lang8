@@ -1213,7 +1213,12 @@ new_member_access(lhs: *Expr@new, name: []i8@new, m: ?*Member@new): *Expr@new {
 }
 
 new_funcall(name: []i8@new, args: ?*Expr@new): *Expr@new {
-    mk_expr(ExprKind.Funcall { funcname: name, args: args, fn: null });
+    mk_expr(ExprKind.Funcall {
+        funcname: name,
+        args: args,
+        fn: null,
+        target: null
+    });
 }
 
 new_return(lhs: ?*Expr@new): *Stmt@new {
@@ -1601,6 +1606,9 @@ decl_spec() noregion raises Error: *Type@new {
 }
 
 parse_type() noregion raises Error: *Type@new {
+    if (at_function_type()) {
+        return parse_fnptr_type(0);
+    }
     if (tok.kind == TokKind.LBrack) {
         tok = tok.next;
         if (tok.kind == TokKind.RBrack) {
@@ -1628,6 +1636,9 @@ parse_type() noregion raises Error: *Type@new {
     }
     if (tok.kind == TokKind.Question) {
         tok = tok.next;
+        if (at_function_type()) {
+            return parse_fnptr_type(1);
+        }
         if (tok.kind == TokKind.StrTy) {
             tok = tok.next;
             return ty_opt_str;
@@ -2045,11 +2056,11 @@ parse_primary() noregion raises Error: *Expr@new {
         nlen: int = browse_tok_len;
         nfile: int = browse_tok_file;
         qualified: bool = len(tok.qualifier) != 0;
-        if (qualified || nk == TokKind.LParen || find_local(name) == null) {
+        if (qualified || find_local(name) == null) {
             note_tag_reference();
         }
         tok = tok.next;
-        if (tok.kind == TokKind.LParen) {
+        if (tok.kind == TokKind.LParen && (qualified || find_var(name) == null || find_function(name) != null && !local_name)) {
             tok = tok.next;
             head: ?*Expr = null;
             cur: ?*Expr = null;
@@ -2319,7 +2330,30 @@ parse_match_arms(mcond: *Expr@new) noregion raises Error: ?*MatchArm@new {
 parse_postfix() noregion raises Error: *Expr@new {
     n: *Expr = parse_primary();
     while (true) {
-        if (tok.kind == TokKind.LBrack) {
+        if (tok.kind == TokKind.LParen) {
+            tok = tok.next;
+            head: ?*Expr = null;
+            tail: ?*Expr = null;
+            while (tok.kind != TokKind.RParen) {
+                if (tail != null) {
+                    skip(TokKind.Comma);
+                }
+                arg: *Expr = parse_expr();
+                if (tail != null) {
+                    tail.next = arg;
+                } else {
+                    head = arg;
+                }
+                tail = arg;
+            }
+            skip(TokKind.RParen);
+            n = mk_expr(ExprKind.Funcall {
+                funcname: "",
+                args: head,
+                fn: null,
+                target: n
+            });
+        } else if (tok.kind == TokKind.LBrack) {
             tok = tok.next;
             idx: *Expr = parse_expr();
             skip(TokKind.RBrack);
@@ -2411,6 +2445,25 @@ parse_unary() noregion raises Error: *Expr@new {
     }
     if (tok.kind == TokKind.Amp) {
         tok = tok.next;
+        if (tok.kind == TokKind.Ident) {
+            name: []i8 = reference_name();
+            v: ?*Obj = find_var(name);
+            function_name: bool = v == null;
+            if (v != null) {
+                function_name = v.is_func != 0;
+            }
+            if (len(tok.qualifier) != 0 && find_function(name) != null) {
+                function_name = true;
+            }
+            if (function_name && tok.next.kind != TokKind.LBrack && tok.next.kind != TokKind.Dot && tok.next.kind != TokKind.LParen) {
+                e: *Expr = mk_expr(ExprKind.FuncAddr { name: reference_tokstr(), fn: null });
+                e.pos = tok.pos;
+                e.file = current_file_id;
+                e.toklen = tok.len;
+                tok = tok.next;
+                return e;
+            }
+        }
         return new_addr(parse_unary());
     }
     if (tok.kind == TokKind.Not) {
@@ -2534,19 +2587,27 @@ type_or_else(p: *Expr@new, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error
     lt: ?*Type = decay(lhs.ty);
     rt: ?*Type = decay(rhs.ty);
     if (lt == null) {
-        error_ty("or requires a pointer or slice on the left", lt);
+        error_ty("or requires a pointer, slice, or function on the left", lt);
     }
     unwrapped: *Type = lt;
     if (is_optional(lt)) {
         unwrapped = unwrap_optional(lt);
     } else {
-        if (!is_pointer(lt) && !is_slice(lt)) {
-            error_ty("or requires a pointer or slice on the left", lt);
+        if (!is_pointer(lt) && !is_slice(lt) && !is_fnptr(lt)) {
+            error_ty("or requires a pointer, slice, or function on the left", lt);
         }
     }
     if (rt != null && is_noreturn_ty(rt)) {
         p.ty = unwrapped;
         return;
+    }
+    if (is_fnptr(lt)) {
+        if (rt != null && types_equal(unwrapped, rt)) {
+            p.ty = unwrapped;
+            return;
+        }
+        error_have_want("or right-hand side must be a matching non-null function or noreturn",
+            rt, unwrapped);
     }
     if (is_opt_pointer(lt) || is_pointer(lt)) {
         if (rt != null && is_pointer(rt) && types_equal(type_base(rt), type_base(lt))) {
@@ -2655,6 +2716,11 @@ type_eq_cmp(p: *Expr, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error {
     rt: ?*Type = decay(rhs.ty);
     if (lt != null && rt != null) {
         if (types_equal(lt, rt)) {
+            p.ty = ty_bool;
+            return;
+        }
+        if (is_fnptr(lt) && is_fnptr(rt) && fnptr_signatures_equal(fnptr_function(lt),
+            fnptr_function(rt))) {
             p.ty = ty_bool;
             return;
         }
@@ -2820,6 +2886,16 @@ unify_value_ty(a: ?*Type, b: ?*Type) noregion raises Error: ?*Type@b {
     if (da != null && db != null && types_equal(da, db)) {
         return da;
     }
+    if (da != null && db != null && is_fnptr(da) && is_fnptr(db)) {
+        if (fnptr_signatures_equal(fnptr_function(da), fnptr_function(db))) {
+            if (is_opt_fnptr(da)) {
+                return da;
+            }
+            if (is_opt_fnptr(db)) {
+                return db;
+            }
+        }
+    }
     if (da != null && db != null && is_opt_pointer(da) && is_pointer(db) && types_equal(type_base(da),
         type_base(db))) {
         return da;
@@ -2856,6 +2932,12 @@ opt_ptr_of(t: ?*Type) noregion raises Error: *Type@new {
     }
     if (is_optional(d)) {
         return d;
+    }
+    match d.* {
+        FnPtr k -> {
+            return new Type.FnPtr { fn: k.fn, optional: 1 };
+        }
+        _ -> { }
     }
     if (is_pointer(d)) {
         return opt_ptr_to(type_base(d));
@@ -3244,6 +3326,10 @@ type_block_expr(p: *Expr@new, body: ?*Stmt) noregion raises Error {
 
 add_type_expr(p: *Expr@new) noregion raises Error {
     match p.kind {
+        FuncAddr q -> {
+            type_function_address(p, q.name);
+            return;
+        }
         Var q -> {
             if (count_var_use != 0) {
                 mark_var_use(q.var);
@@ -3571,6 +3657,10 @@ add_type_expr(p: *Expr@new) noregion raises Error {
             return;
         }
         Funcall q -> {
+            if (q.target != null) {
+                type_indirect_call(p);
+                return;
+            }
             a: ?*Expr = q.args;
             while (a != null) {
                 add_type(a);
@@ -3594,7 +3684,12 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                         at);
                 }
                 if (at != null && (is_slice(at) || is_str(at))) {
-                    p.kind = ExprKind.Funcall { funcname: q.funcname, args: q.args, fn: null };
+                    p.kind = ExprKind.Funcall {
+                        funcname: q.funcname,
+                        args: q.args,
+                        fn: null,
+                        target: null
+                    };
                     p.ty = ty_int;
                     return;
                 }
@@ -3621,7 +3716,12 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                 if (ct == null || !is_slice(ct) || !is_i8_ty(type_base(ct))) {
                     error_ty("cstr requires []i8", ct);
                 }
-                p.kind = ExprKind.Funcall { funcname: "l8_cstr", args: q.args, fn: null };
+                p.kind = ExprKind.Funcall {
+                    funcname: "l8_cstr",
+                    args: q.args,
+                    fn: null,
+                    target: null
+                };
                 p.ty = ty_str;
                 return;
             }
@@ -3636,19 +3736,34 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                 if (bt == null || !is_str(bt)) {
                     error_ty("bytes requires str", bt);
                 }
-                p.kind = ExprKind.Funcall { funcname: "l8_bytes", args: q.args, fn: null };
+                p.kind = ExprKind.Funcall {
+                    funcname: "l8_bytes",
+                    args: q.args,
+                    fn: null,
+                    target: null
+                };
                 p.ty = slice_of(ty_i8);
                 return;
             }
             if (streq(q.funcname, "memcpy")) {
                 check_memcpy_args(q.args);
-                p.kind = ExprKind.Funcall { funcname: q.funcname, args: q.args, fn: null };
+                p.kind = ExprKind.Funcall {
+                    funcname: q.funcname,
+                    args: q.args,
+                    fn: null,
+                    target: null
+                };
                 p.ty = ty_int;
                 return;
             }
             if (streq(q.funcname, "write") || streq(q.funcname, "read")) {
                 check_io_args(q.funcname, q.args);
-                p.kind = ExprKind.Funcall { funcname: q.funcname, args: q.args, fn: null };
+                p.kind = ExprKind.Funcall {
+                    funcname: q.funcname,
+                    args: q.args,
+                    fn: null,
+                    target: null
+                };
                 p.ty = ty_int;
                 return;
             }
@@ -3661,7 +3776,12 @@ add_type_expr(p: *Expr@new) noregion raises Error {
             }
             fnu: *Function = fno;
             check_call_lifetimes(fnu, q.args);
-            p.kind = ExprKind.Funcall { funcname: q.funcname, args: q.args, fn: fnu };
+            p.kind = ExprKind.Funcall {
+                funcname: q.funcname,
+                args: q.args,
+                fn: fnu,
+                target: null
+            };
             add_callee(fnu);
             if (fnu.return_ty != null) {
                 p.ty = fnu.return_ty;
@@ -4419,6 +4539,7 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error: *Function@
         raises_list: null,
         used: 0,
         is_extern: 0,
+        address_taken: 0,
         next: null,
         hash_next: null,
         ret_bound: "",
@@ -4463,7 +4584,7 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error: *Function@
         error("function mark is noregion");
     }
     if (tok.kind == TokKind.Raises) {
-        if (is_extern != 0) {
+        if (is_extern == 1) {
             error("extern function cannot raise");
         }
         tok = tok.next;
@@ -4497,7 +4618,11 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error: *Function@
                 rtail = el;
             }
             tok = tok.next;
-            if (tok.kind == TokKind.Comma) {
+            if (is_extern == 2 && tok.kind == TokKind.Comma && tok.next.kind == TokKind.Ident && tok.next.next.kind == TokKind.Colon) {
+                // A void function type's raises list ends before the next
+                // parameter of the containing signature.
+                rdone = 1;
+            } else if (tok.kind == TokKind.Comma) {
                 tok = tok.next;
             } else {
                 rdone = 1;
@@ -4512,6 +4637,12 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error: *Function@
         }
     }
     rt: ?*Type = fn.return_ty;
+    if (is_extern == 2) {
+        fn.need_imm_heap = fn.decl_imm_heap;
+        fn.locals = locals;
+        check_function_signature(fn);
+        return fn;
+    }
     if (is_extern != 0) {
         fn.is_extern = 1;
         if (fn.return_ty == null) {
