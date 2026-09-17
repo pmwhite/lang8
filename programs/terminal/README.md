@@ -49,7 +49,9 @@ emoji double-width ranges, CR/LF, backspace, tabs, deferred wrapping, cursor
 movement and save/restore, erase operations, insert/delete characters and lines,
 scrolling regions, reverse index, ANSI, 256, and true colors, bold/bright and
 reverse video, alternate screen buffers, cursor visibility, application cursor
-keys, and status/cursor-position replies. Malformed UTF-8 displays U+FFFD and
+keys, DECSCUSR blinking/steady block, underline, and bar cursors, smooth cursor
+movement, a steady-block default, and status/cursor-position replies. Malformed
+UTF-8 displays U+FFFD and
 resynchronizes at the next byte. Escape sequences can span reads. OSC and DCS
 strings are consumed without displaying their contents. Oversized CSI sequences
 are discarded, and numeric parameters and grid dimensions are bounded.

@@ -22,6 +22,19 @@ extern XGetGeometry(
     depth: *i32
 ): int;
 
+extern clock_gettime(clk: int, ts: *TerminalTimespec): int;
+
+type TerminalTimespec = {
+    sec: int;
+    nsec: int;
+};
+
+terminal_mono_ms(): int {
+    ts: TerminalTimespec = TerminalTimespec { sec: 0, nsec: 0 };
+    clock_gettime(1, &ts);
+    ts.sec * 1000 + ts.nsec / 1000000;
+}
+
 // A bounded queue preserves partial writes and keeps X11 responsive under PTY backpressure.
 type TerminalInput = {
     data: []i8;
@@ -271,7 +284,7 @@ main(argc: int, argv: []str@new): int {
     XMapRaised(dpy, win);
     XFlush(dpy);
     q: *TerminalInput = new TerminalInput { data: new i8[65536](0i8), size: 0 };
-    buf: []i8 = new i8[8192](0i8);
+    buf: []i8 = new i8[32768](0i8);
     keys: []i8 = new i8[64](0i8);
     polls: []TerminalPoll = new TerminalPoll[2](TerminalPoll { fd: 0i32, events: 0i32 });
     ev: XEvent = XEvent.Other;
@@ -331,6 +344,10 @@ main(argc: int, argv: []str@new): int {
             timeout: i32 = 50i32;
             if (dirty) {
                 timeout = 0i32;
+            } else {
+                if (renderer.cursor_active) {
+                    timeout = 16i32;
+                }
             }
             l8_poll(&polls[0], 2, timeout);
             // Reads and writes are nonblocking, so races with readiness are harmless.
@@ -349,41 +366,58 @@ main(argc: int, argv: []str@new): int {
                     }
                 }
             }
-            n: int = read(master, buf, len(buf));
-            if (n > 0) {
-                dirty = true;
-                i: int = 0;
-                while (i < n) {
-                    action: int = terminal_byte(s, buf[i]);
-                    if (action == 1 && s == main_screen) {
-                        terminal_clear(alt_screen, 0, 28800);
-                        alt_screen.x = 0;
-                        alt_screen.y = 0;
-                        alt_screen.wrap = false;
-                        s = alt_screen;
+            // Coalesce a bounded batch before drawing. Full-screen applications
+            // often split one visual update across several PTY reads; exposing a
+            // cursor position from the middle of that update bends its animation.
+            reads: int = 0;
+            draining: bool = true;
+            while (running && draining && reads < 8) {
+                n: int = read(master, buf, len(buf));
+                if (n > 0) {
+                    dirty = true;
+                    reads = reads + 1;
+                    i: int = 0;
+                    while (i < n) {
+                        action: int = terminal_byte(s, buf[i]);
+                        cursor_style: int = s.cursor_style;
+                        if (action == 1 && s == main_screen) {
+                            terminal_clear(alt_screen, 0, 28800);
+                            alt_screen.x = 0;
+                            alt_screen.y = 0;
+                            alt_screen.wrap = false;
+                            s = alt_screen;
+                        }
+                        if (action == 2) {
+                            s = main_screen;
+                        }
+                        if (action == 3 && q.size <= len(q.data) - 16) {
+                            terminal_escape(q, "[");
+                            terminal_number(q, s.y + 1);
+                            terminal_send(q, ";");
+                            terminal_number(q, s.x + 1);
+                            terminal_send(q, "R");
+                        }
+                        if (action == 4) {
+                            terminal_escape(q, "[0n");
+                        }
+                        // Cursor style is terminal-wide rather than screen-buffer state.
+                        main_screen.cursor_style = cursor_style;
+                        alt_screen.cursor_style = cursor_style;
+                        i = i + 1;
                     }
-                    if (action == 2) {
-                        s = main_screen;
+                } else {
+                    draining = false;
+                    if (n == 0 || n < 0 && n != -4 && n != -11) {
+                        running = false;
                     }
-                    if (action == 3 && q.size <= len(q.data) - 16) {
-                        terminal_escape(q, "[");
-                        terminal_number(q, s.y + 1);
-                        terminal_send(q, ";");
-                        terminal_number(q, s.x + 1);
-                        terminal_send(q, "R");
-                    }
-                    if (action == 4) {
-                        terminal_escape(q, "[0n");
-                    }
-                    i = i + 1;
-                }
-            } else {
-                if (n == 0 || n < 0 && n != -4 && n != -11) {
-                    running = false;
                 }
             }
+            now: int = terminal_mono_ms();
+            if (terminal_cursor_frame(s, renderer, now)) {
+                dirty = true;
+            }
             if (dirty) {
-                terminal_draw(s, renderer);
+                terminal_draw(s, renderer, now);
                 dirty = false;
             }
             if (!reaped) {

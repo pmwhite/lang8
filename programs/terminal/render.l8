@@ -37,6 +37,15 @@ type TerminalRenderer = {
     texture: u32;
     vertices: []f32;
     palette: []int;
+    cursor_x: f32;
+    cursor_y: f32;
+    cursor_from_x: f32;
+    cursor_from_y: f32;
+    cursor_to_x: int;
+    cursor_to_y: int;
+    cursor_started: int;
+    cursor_active: bool;
+    cursor_on: bool;
 };
 
 terminal_shader(kind: int, text: []i8): int {
@@ -142,7 +151,8 @@ terminal_renderer(dpy: *i8@new, path: str, px: int): ?*TerminalRenderer@new {
         close_cached_font(font);
         return null;
     }
-    // Capacity for one background, base glyph, and combining-mark quad per cell.
+    // Capacity for one background, base glyph, and combining-mark quad per cell,
+    // plus the independently drawn cursor.
     r: *TerminalRenderer = new TerminalRenderer {
         dpy: dpy,
         win: win,
@@ -158,8 +168,17 @@ terminal_renderer(dpy: *i8@new, path: str, px: int): ?*TerminalRenderer@new {
         viewport: -1,
         buffer: 0u32,
         texture: 0u32,
-        vertices: new f32[3628800](0.0),
-        palette: new int[256](0)
+        vertices: new f32[3628842](0.0),
+        palette: new int[256](0),
+        cursor_x: 0.0,
+        cursor_y: 0.0,
+        cursor_from_x: 0.0,
+        cursor_from_y: 0.0,
+        cursor_to_x: 0,
+        cursor_to_y: 0,
+        cursor_started: 0,
+        cursor_active: false,
+        cursor_on: true
     };
     base: []int = [1579032, 13391189, 5614165, 13412949, 5601228, 11163050, 5614250,
         13421772, 7829367, 16742263, 7855479, 16768375, 7838207, 14514141, 7855581,
@@ -307,7 +326,46 @@ terminal_quad(
     i;
 }
 
-terminal_draw(s: *Screen, r: *TerminalRenderer) {
+terminal_cursor_update(s: *Screen, r: *TerminalRenderer, now: int) {
+    if (r.cursor_active) {
+        elapsed: int = now - r.cursor_started;
+        if (elapsed >= 75) {
+            r.cursor_x = r.cursor_to_x as f32;
+            r.cursor_y = r.cursor_to_y as f32;
+            r.cursor_active = false;
+        } else {
+            t: f32 = elapsed as f32 / 75.0;
+            remaining: f32 = 1.0 - t;
+            eased: f32 = 1.0 - remaining * remaining * remaining;
+            r.cursor_x = r.cursor_from_x + (r.cursor_to_x as f32 - r.cursor_from_x) * eased;
+            r.cursor_y = r.cursor_from_y + (r.cursor_to_y as f32 - r.cursor_from_y) * eased;
+        }
+    }
+    if (s.x != r.cursor_to_x || s.y != r.cursor_to_y) {
+        r.cursor_to_x = s.x;
+        r.cursor_to_y = s.y;
+        // Retarget from the position that was actually being rendered. This keeps
+        // large editor jumps continuous instead of teleporting near the destination.
+        r.cursor_from_x = r.cursor_x;
+        r.cursor_from_y = r.cursor_y;
+        r.cursor_started = now;
+        r.cursor_active = true;
+    }
+}
+
+terminal_cursor_frame(s: *Screen, r: *TerminalRenderer, now: int): bool {
+    if (r.cursor_active) {
+        return true;
+    }
+    blinking: bool = s.cursor_style % 2 == 1;
+    on: bool = s.visible && (!blinking || now % 1000 < 500);
+    on != r.cursor_on;
+}
+
+terminal_draw(s: *Screen, r: *TerminalRenderer, now: int) {
+    terminal_cursor_update(s, r, now);
+    blinking: bool = s.cursor_style % 2 == 1;
+    r.cursor_on = s.visible && (!blinking || now % 1000 < 500);
     glViewport(0, 0, r.width, r.height);
     glUniform2f(r.viewport, r.width as f32, r.height as f32);
     glClear(16384);
@@ -322,11 +380,6 @@ terminal_draw(s: *Screen, r: *TerminalRenderer) {
                 pos: int = y * 240 + x;
                 fg: int = s.fg[pos];
                 bg: int = s.bg[pos];
-                if (s.visible && x == s.x && y == s.y) {
-                    tmp: int = fg;
-                    fg = bg;
-                    bg = tmp;
-                }
                 px: f32 = (8 + x * r.cw) as f32;
                 py: f32 = (8 + y * r.ch) as f32;
                 if (pass == 0 && bg != 0) {
@@ -360,6 +413,29 @@ terminal_draw(s: *Screen, r: *TerminalRenderer) {
         }
         pass = pass + 1;
     }
+    content: int = n;
+    if (r.cursor_on) {
+        cursor_x: f32 = 8.0 + r.cursor_x * r.cw as f32;
+        cursor_y: f32 = 8.0 + r.cursor_y * r.ch as f32;
+        cursor_w: int = r.cw;
+        cursor_h: int = r.ch;
+        shape: int = (s.cursor_style - 1) / 2;
+        if (shape == 1) {
+            cursor_h = r.ch / 8;
+            if (cursor_h < 2) {
+                cursor_h = 2;
+            }
+            cursor_y = cursor_y + (r.ch - cursor_h) as f32;
+        }
+        if (shape == 2) {
+            cursor_w = r.cw / 5;
+            if (cursor_w < 2) {
+                cursor_w = 2;
+            }
+        }
+        n = terminal_quad(r, n, cursor_x, cursor_y, cursor_w as f32, cursor_h as f32,
+            -1.0, -1.0, -1.0, -1.0, 7);
+    }
     if (r.font.dirty) {
         glBindTexture(3553, r.texture);
         glTexSubImage2D(3553, 0, 0, 0, r.font.width, r.font.height, 6406, 5121, r.font.atlas);
@@ -367,7 +443,18 @@ terminal_draw(s: *Screen, r: *TerminalRenderer) {
     }
     if (n > 0) {
         glBufferData(34962, n * 4, r.vertices, 35040);
-        glDrawArrays(4, 0, n / 7);
+        if (content > 0) {
+            glDrawArrays(4, 0, content / 7);
+        }
+        if (n > content) {
+            // XOR keeps text legible under every cursor shape, including while moving.
+            glDisable(3042);
+            glEnable(3058);
+            glLogicOp(5386);
+            glDrawArrays(4, content / 7, 6);
+            glDisable(3058);
+            glEnable(3042);
+        }
     }
     glXSwapBuffers(r.dpy, r.win);
 }
