@@ -79,5 +79,18 @@ invoke them while an L8 region is active. Parameters/results using `@new` are al
 unsupported at this boundary. Taking the address of an `extern` function is not
 yet supported; an L8 wrapper with a compatible signature can call it instead.
 
+Typed aliases let a C entry point have multiple L8 declarations with concrete
+pointer types. The right-hand name is a linker symbol, not an L8 reference:
+
+```l8
+extern compare_strings(a: str, b: str): i32 = strcmp;
+extern compare_bytes(a: *i8, b: *i8): i32 = strcmp;
+```
+
+The normal argument, lifetime, and foreign callback checks apply to each alias.
+`aliases.l8` tests both direct binaries and textual assembly. The Wayland binding
+uses this for the different listener tables and argument layouts accepted by
+`wl_proxy_add_listener` and `wl_proxy_marshal_array_flags`.
+
 ABI references: [x86-64 System V psABI](https://gitlab.com/x86-psABIs/x86-64-ABI)
 and [glibc comparison callbacks](https://sourceware.org/glibc/manual/latest/html_node/Comparison-Functions.html).

@@ -39,7 +39,8 @@ class Callbacks(unittest.TestCase):
 
     def test_library_and_language(self):
         for name, expected in [('basic', b'callbacks OK\n'), ('abi', b'C ABI OK\n'),
-                               ('native', b'native fn OK\n'), ('effects', b'fn effects OK\n')]:
+                               ('native', b'native fn OK\n'), ('effects', b'fn effects OK\n'),
+                               ('aliases', b'extern aliases OK\n')]:
             with self.subTest(name=name):
                 source = (FIXTURES / (name + '.l8')).read_text()
                 path, binary, result = self.compile(name, source)
@@ -143,6 +144,7 @@ increment(value: int): int { value + 1; }
             'nonfunction': ('main(): int { x: int = 1; x(); }', 'requires a fn'),
             'uncaught_indirect': ('exception E; f() raises E { raise E; } main(): int { cb: fn() raises E = &f; cb(); 0; }', 'exception not in raises'),
             'indirect_region': ('g: ?*int = null; f() noregion { g = new int[1](1); } main(): int { cb: fn() noregion = &f; region { cb(); } 0; }', 'cannot call from a region'),
+            'foreign_alias': ('extern reg(cb: fn(s: str)): int = other; main(): int { 0; }', 'foreign callbacks require'),
             'foreign_raises': ('exception E; extern register(cb: fn() raises E): int; main(): int { 0; }', 'cannot raise'),
             'foreign_noregion': ('extern register(cb: fn() noregion): int; main(): int { 0; }', 'cannot require noregion'),
             'foreign_nested_field': ('type L = { cb: fn(s: []i8); next: ?*L; }; type Outer = { l: *L; }; extern register(p: *Outer): int; main(): int { 0; }', 'foreign callbacks require'),

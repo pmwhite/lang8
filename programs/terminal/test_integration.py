@@ -1,30 +1,18 @@
-"""PTY/X11 integration tests; uses only Python's standard library and libX11."""
-import ctypes as C
+"""PTY/native Wayland tests, with an isolated headless Sway compositor."""
 import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
 
+from wayland_test_client import Client
+
 BINARY = str(Path(sys.argv.pop(1) if len(sys.argv) > 1 else '.build/terminal').resolve())
-
-
-class Key(C.Structure):
-    _fields_ = [('type', C.c_int), ('serial', C.c_ulong), ('send_event', C.c_int),
-                ('display', C.c_void_p), ('window', C.c_ulong), ('root', C.c_ulong),
-                ('subwindow', C.c_ulong), ('time', C.c_ulong), ('x', C.c_int),
-                ('y', C.c_int), ('x_root', C.c_int), ('y_root', C.c_int),
-                ('state', C.c_uint), ('keycode', C.c_uint), ('same_screen', C.c_int)]
-
-
-class Message(C.Structure):
-    _fields_ = [('type', C.c_int), ('serial', C.c_ulong), ('send_event', C.c_int),
-                ('display', C.c_void_p), ('window', C.c_ulong), ('message_type', C.c_ulong),
-                ('format', C.c_int), ('data', C.c_long * 5)]
 
 
 def eventually(fn, timeout=5):
@@ -45,121 +33,123 @@ class StartupTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2, size)
 
     def test_help_without_display(self):
-        result = subprocess.run([BINARY, '--help'], env={**os.environ, 'DISPLAY': ''},
+        result = subprocess.run([BINARY, '--help'], env={**os.environ, 'DISPLAY': '', 'WAYLAND_DISPLAY': '/nonexistent/l8-wayland-test', 'WAYLAND_SOCKET': ''},
                                 capture_output=True, timeout=3)
         self.assertEqual(result.returncode, 0)
         self.assertIn(b'Usage: terminal', result.stdout)
 
     def test_missing_display(self):
-        result = subprocess.run([BINARY], env={**os.environ, 'DISPLAY': ''},
+        result = subprocess.run([BINARY], env={**os.environ, 'DISPLAY': '', 'WAYLAND_DISPLAY': '/nonexistent/l8-wayland-test', 'WAYLAND_SOCKET': ''},
                                 capture_output=True, timeout=3)
         self.assertEqual(result.returncode, 1)
-        self.assertIn(b'cannot open X11 display', result.stderr)
+        self.assertIn(b'Wayland/EGL/font setup failed', result.stderr)
 
 
-@unittest.skipUnless(os.environ.get('DISPLAY'), 'requires an X11 display (or xvfb-run)')
+@unittest.skipUnless(shutil.which('sway') and shutil.which('swaymsg'), 'requires sway/swaymsg for headless Wayland tests')
 class TerminalTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.runtime = tempfile.TemporaryDirectory(prefix='l8-wayland-')
+        cls.addClassCleanup(cls.runtime.cleanup)
+        runtime = Path(cls.runtime.name)
+        runtime.chmod(0o700)
+        config = runtime / 'sway.conf'
+        config.write_text('xwayland disable\noutput * resolution 1280x800\nseat seat0 fallback true\nfocus_follows_mouse no\ninput * repeat_delay 200\ninput * repeat_rate 25\n')
+        cls.env = {**os.environ, 'XDG_RUNTIME_DIR': str(runtime), 'WLR_BACKENDS': 'headless',
+                   'WLR_LIBINPUT_NO_DEVICES': '1', 'WLR_RENDERER': 'pixman', 'DISPLAY': '',
+                   'LIBGL_ALWAYS_SOFTWARE': '1', 'LANG': 'C.UTF-8'}
+        cls.env.pop('WAYLAND_SOCKET', None)
+        cls.env.pop('SWAYSOCK', None)
+        cls.log = (runtime / 'sway.log').open('w+')
+        cls.addClassCleanup(cls.log.close)
+        cls.compositor = subprocess.Popen(['sway', '-c', str(config)], env=cls.env,
+                                          stdout=cls.log, stderr=cls.log)
+        def stop():
+            cls.compositor.terminate()
+            try: cls.compositor.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                cls.compositor.kill()
+                cls.compositor.wait()
+        cls.addClassCleanup(stop)
+        def ready():
+            if cls.compositor.poll() is not None:
+                cls.log.seek(0)
+                raise RuntimeError('headless Sway failed: ' + cls.log.read())
+            sockets = list(runtime.glob('sway-ipc.*.sock'))
+            displays = [p for p in runtime.glob('wayland-*') if p.suffix != '.lock']
+            return (sockets[0], displays[0]) if sockets and displays else None
+        ipc, socket = eventually(ready)
+        cls.env['SWAYSOCK'] = str(ipc)
+        cls.env['WAYLAND_DISPLAY'] = socket.name
+        cls.socket = str(socket)
+
     def setUp(self):
-        self.x = C.CDLL('libX11.so.6')
-        declarations = {
-            'XOpenDisplay': ([C.c_char_p], C.c_void_p),
-            'XDefaultRootWindow': ([C.c_void_p], C.c_ulong),
-            'XQueryTree': ([C.c_void_p, C.c_ulong, C.POINTER(C.c_ulong), C.POINTER(C.c_ulong),
-                            C.POINTER(C.POINTER(C.c_ulong)), C.POINTER(C.c_uint)], C.c_int),
-            'XFetchName': ([C.c_void_p, C.c_ulong, C.POINTER(C.c_char_p)], C.c_int),
-            'XFree': ([C.c_void_p], C.c_int),
-            'XFlush': ([C.c_void_p], C.c_int),
-            'XCloseDisplay': ([C.c_void_p], C.c_int),
-            'XResizeWindow': ([C.c_void_p, C.c_ulong, C.c_uint, C.c_uint], C.c_int),
-            'XGetGeometry': ([C.c_void_p, C.c_ulong, C.POINTER(C.c_ulong),
-                              C.POINTER(C.c_int), C.POINTER(C.c_int),
-                              C.POINTER(C.c_uint), C.POINTER(C.c_uint),
-                              C.POINTER(C.c_uint), C.POINTER(C.c_uint)], C.c_int),
-            'XKeysymToKeycode': ([C.c_void_p, C.c_ulong], C.c_uint),
-            'XSendEvent': ([C.c_void_p, C.c_ulong, C.c_int, C.c_long, C.c_void_p], C.c_int),
-            'XInternAtom': ([C.c_void_p, C.c_char_p, C.c_int], C.c_ulong),
-        }
-        for name, (args, result) in declarations.items():
-            fn = getattr(self.x, name)
-            fn.argtypes, fn.restype = args, result
-        self.d = self.x.XOpenDisplay(None)
-        if not self.d:
-            self.skipTest('cannot connect to X11 display')
-        self.addCleanup(self.x.XCloseDisplay, self.d)
-        self.root = self.x.XDefaultRootWindow(self.d)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name)
+        self.client = Client(self.socket)
+        self.addCleanup(self.client.close)
 
-    def windows(self, parent=None):
-        parent = self.root if parent is None else parent
-        root, above, count = C.c_ulong(), C.c_ulong(), C.c_uint()
-        children = C.POINTER(C.c_ulong)()
-        self.x.XQueryTree(self.d, parent, C.byref(root), C.byref(above), C.byref(children), C.byref(count))
-        ids = list(children[:count.value])
-        if children:
-            self.x.XFree(children)
-        found = set()
-        for win in ids:
-            name = C.c_char_p()
-            if self.x.XFetchName(self.d, win, C.byref(name)) and name:
-                if name.value == b'L8 Terminal':
-                    found.add(win)
-                self.x.XFree(name)
-            found.update(self.windows(win))
+    def ipc(self, *args):
+        result = subprocess.run(['swaymsg', '-r', *args], env=self.env, capture_output=True,
+                                timeout=3, check=True)
+        return json.loads(result.stdout)
+
+    def windows(self):
+        found = {}
+        def visit(node):
+            if node.get('app_id') == 'org.lang8.Terminal':
+                found[node['id']] = node
+            for child in node.get('nodes', []) + node.get('floating_nodes', []):
+                visit(child)
+        visit(self.ipc('-t', 'get_tree'))
         return found
 
     def launch(self, script):
         source = self.path / 'child.py'
         source.write_text(script)
         before = self.windows()
-        self.proc = subprocess.Popen([BINARY, 'exec python3 ' + shlex.quote(str(source))],
+        self.proc = subprocess.Popen([BINARY, 'exec python3 ' + shlex.quote(str(source))], env=self.env,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.addCleanup(self.stop)
-        self.win = eventually(lambda: next(iter(self.windows() - before), None))
+        def mapped():
+            if self.proc.poll() is not None:
+                raise AssertionError('terminal exited during startup: ' + self.proc.stderr.read().decode())
+            return next(iter(self.windows().keys() - before.keys()), None)
+        self.win = eventually(mapped)
+        self.command('focus')
+        self.client.roundtrip()
 
     def stop(self):
         if self.proc.poll() is None:
             self.close_window()
-            try:
-                self.proc.wait(timeout=3)
+            try: self.proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait()
         self.proc.stdout.close()
         self.proc.stderr.close()
 
+    def command(self, command):
+        response = self.ipc(f'[con_id={self.win}] {command}')
+        self.assertTrue(all(r.get('success') for r in response), response)
+
     def close_window(self):
-        msg = Message(type=33, display=self.d, window=self.win, format=32)
-        msg.message_type = self.x.XInternAtom(self.d, b'WM_PROTOCOLS', 0)
-        msg.data[0] = self.x.XInternAtom(self.d, b'WM_DELETE_WINDOW', 0)
-        event = C.create_string_buffer(192)
-        C.memmove(event, C.byref(msg), C.sizeof(msg))
-        self.x.XSendEvent(self.d, self.win, 0, 0, event)
-        self.x.XFlush(self.d)
+        self.command('kill')
 
     def key(self, sym, state=0):
-        key = Key(type=2, display=self.d, window=self.win, root=self.root,
-                  state=state, same_screen=1, keycode=self.x.XKeysymToKeycode(self.d, sym))
-        event = C.create_string_buffer(192)
-        C.memmove(event, C.byref(key), C.sizeof(key))
-        self.x.XSendEvent(self.d, self.win, 0, 1, event)
-        self.x.XFlush(self.d)
+        code = {ord('a'): 30, ord('c'): 46, 0xff52: 103, 0xff54: 108, 0xff08: 14}[sym]
+        self.client.key(code, state)
 
     def geometry(self):
-        root = C.c_ulong()
-        x, y = C.c_int(), C.c_int()
-        width, height, border, depth = C.c_uint(), C.c_uint(), C.c_uint(), C.c_uint()
-        if not self.x.XGetGeometry(self.d, self.win, C.byref(root), C.byref(x), C.byref(y),
-                                   C.byref(width), C.byref(height), C.byref(border), C.byref(depth)):
-            return None
-        return width.value, height.value
+        r = self.windows()[self.win]['rect']
+        return r['width'], r['height']
 
     def test_missing_font(self):
         result = subprocess.run([BINARY, '--font', str(self.path / 'missing.ttf')],
-                                capture_output=True, timeout=3)
+                                capture_output=True, timeout=3, env=self.env)
         self.assertEqual(result.returncode, 1)
-        self.assertIn(b'OpenGL/font setup failed', result.stderr)
+        self.assertIn(b'Wayland/EGL/font setup failed', result.stderr)
 
     def test_shell_io_resize_and_queries(self):
         self.launch(f'''
@@ -209,25 +199,48 @@ while not (p / 'exit').exists():
         self.assertEqual((self.path / 'reply').read_bytes(), b'\x1b[3;4R')
         original_geometry = self.geometry()
         requested = (360, 160) if original_geometry != (360, 160) else (480, 240)
-        self.x.XResizeWindow(self.d, self.win, *requested)
-        self.x.XFlush(self.d)
+        self.command(f'floating enable, resize set {requested[0]} {requested[1]}')
         def resized():
             try:
                 return json.loads((self.path / 'size').read_text()) != original
             except json.JSONDecodeError:
                 return False
-        # Tiling window managers may reject client resize requests. Require the
-        # PTY update only when X11 reports that the window geometry changed.
-        deadline = time.monotonic() + 1
-        while time.monotonic() < deadline and self.geometry() == original_geometry:
-            time.sleep(.02)
-        if self.geometry() != original_geometry:
-            eventually(resized)
-        if os.environ.get('TERMINAL_SCREENSHOT'):
-            subprocess.run(['import', '-window', str(self.win), os.environ['TERMINAL_SCREENSHOT']], check=True)
+        eventually(resized)
+        artifact = Path(os.environ.get('TERMINAL_SCREENSHOT', '.build/terminal-wayland.png')).resolve()
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        time.sleep(.25)
+        self.assertGreater(self.client.screenshot(artifact), 30, 'window has no rendered text')
         (self.path / 'exit').touch()
         self.assertEqual(self.proc.wait(timeout=5), 0)
         self.assertEqual(self.proc.stderr.read(), b'')
+
+    def test_compose_and_repeat(self):
+        self.launch(f'''import os, tty, time, select
+from pathlib import Path
+p = Path({str(self.path)!r})
+tty.setraw(0)
+(p / 'ready').touch()
+data = b''
+end = time.monotonic() + 1.2
+while time.monotonic() < end:
+    if select.select([0], [], [], .05)[0]: data += os.read(0, 256)
+(p / 'keys').write_bytes(data)
+while not (p / 'exit').exists(): time.sleep(.02)
+''')
+        eventually(lambda: (self.path / 'ready').exists())
+        self.client.key(40)  # dead acute on the test's US intl layout
+        self.client.key(18)  # e
+        self.client.key(30, release=False)
+        time.sleep(.45)
+        self.client.release(30)
+        eventually(lambda: (self.path / 'keys').exists())
+        data = (self.path / 'keys').read_bytes()
+        self.assertTrue(data.startswith('é'.encode()), data)
+        self.assertGreaterEqual(len(data[2:]), 3, data)
+        self.assertLess(len(data[2:]), 16, 'repeat continued after release')
+        self.assertEqual(set(data[2:]), {ord('a')})
+        (self.path / 'exit').touch()
+        self.assertEqual(self.proc.wait(timeout=3), 0)
 
     def test_close_reaps_uncooperative_child(self):
         self.launch(f'''

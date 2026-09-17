@@ -2,12 +2,15 @@
 
 A small terminal emulator written in L8, using OpenGL for rendering, FreeType
 for antialiased monospace glyphs, and Linux system calls for the pseudoterminal.
-Requires Linux x86-64 (4.13+), libX11, libGL, libfreetype, and an X11 display with
-GLX (XWayland works). The default font is DejaVu Sans Mono at 18 pixels.
+Runs directly on Wayland using xdg-shell and EGL, with no X11 or XWayland
+connection. Requires Linux x86-64 (4.13+), libwayland-client, libwayland-egl,
+libwayland-cursor, libEGL, libOpenGL, libxkbcommon, libc, and libfreetype.
+The default font is DejaVu Sans Mono at 18 pixels.
 
 From the repository root:
 
 ```sh
+./build.sh selfhost                   # rebuild the compiler after pulling
 ./build.sh terminal
 .build/terminal                       # interactive shell from $SHELL
 .build/terminal 'exec bash --norc'     # choose another shell
@@ -46,13 +49,22 @@ deletions fade at the inferred edit location. Rows entering or leaving a scroll
 region remain opaque and are clipped at its edge. Interrupted animations continue
 from their currently displayed positions.
 
-The terminal has **no direct libc or libutil dependency**. `pty.l8` opens
+PTY handling remains independent of libc and libutil. `pty.l8` opens
 `/dev/ptmx`, unlocks and opens its slave with ioctls, forks, creates the child's
 session/controlling terminal, duplicates the slave onto standard streams, and
 calls `execve`. Typed syscall adapters and a counted copy of the initial process
-environment live in `runtime.s`. This replaces `forkpty`, `execl`, `setenv`, and
-the libc syscall wrappers. The installed X11/OpenGL/FreeType libraries still
-depend on libc indirectly; the graphical executable is not fully libc-free.
+environment live in `runtime.s`. The Wayland library uses libc for keymap mapping,
+locale lookup, and error reporting; the graphical executable is dynamically linked.
+
+[`../wayland/`](../wayland/README.md) owns the Wayland connection, typed L8
+listeners, xdg-shell lifecycle, EGL context, and xkbcommon input. Configure events
+are acknowledged before attaching buffers. Frame callbacks pace drawing, and the
+Wayland socket is polled alongside the PTY with paired prepare/read/cancel calls.
+Closing the compositor connection also closes the PTY and reaps the child.
+Server-side decorations are requested when xdg-decoration is available; otherwise
+window management uses the compositor's shortcuts. Buffers currently use scale 1
+(the compositor scales them on HiDPI outputs); fractional-scale rendering and
+client-side decorations are not implemented.
 
 Supported output includes streaming UTF-8, combining marks, common East Asian and
 emoji double-width ranges, CR/LF, backspace, tabs, deferred wrapping, cursor
@@ -66,8 +78,9 @@ resynchronizes at the next byte. Escape sequences can span reads. OSC and DCS
 strings are consumed without displaying their contents. Oversized CSI sequences
 are discarded, and numeric parameters and grid dimensions are bounded.
 
-Typing supports ASCII, Latin-1 and X11 Unicode keysyms from the current keyboard
-layout, encoded as UTF-8, plus control characters, arrows,
+Typing uses the compositor-provided xkbcommon keymap and modifiers, with UTF-8,
+dead-key/Compose sequences, compositor-configured key repeat, control characters,
+and arrows,
 Home/End, Insert/Delete, Page Up/Down, Backspace, and F1–F4. Window resizing updates
 both screen buffers and the PTY dimensions, which sends SIGWINCH to the foreground
 process group. The grid ranges from 2×2 to 240×120 cells; resizing preserves the
@@ -79,7 +92,7 @@ Scene matching is a visual heuristic because terminal protocols provide updated
 cells rather than edit intent; complex simultaneous rewrites may therefore fade
 instead of finding the motion a program intended. Color changes are immediate.
 There is no complex-script shaping, bidirectional layout, multi-mark grapheme
-storage, emoji ZWJ clustering, input-method composition, scrollback,
+storage, emoji ZWJ clustering, text-input/IME protocols, scrollback,
 selection/clipboard, mouse reporting, Alt-key encoding, custom tab stops, or DEC
 graphics character set. The width table covers common current terminal ranges
 rather than every historical Unicode width exception. Missing font glyphs use
@@ -95,7 +108,11 @@ deterministic arbitrary bytes.
 `test_pty.l8` builds as a static executable and checks PTY setup, environment
 inheritance/overrides, canonical input, dimensions, exit status, and startup with
 closed standard streams, without a display or shared libraries.
-`test_integration.py` uses Python's standard library and libX11 to test a real
-PTY, synthetic key events, status replies, SIGWINCH, child exit, and window close.
-It skips when no display is available. For a virtual display, use
-`xvfb-run -a ./build.sh terminal-test` if Xvfb is installed.
+`test_integration.py` starts its own headless Sway compositor with XWayland
+disabled and `DISPLAY` empty. It tests a real PTY, virtual-keyboard input,
+Compose and repeat, status replies, SIGWINCH, child exit, and window close. A
+Wayland screencopy verifies rendered pixels and saves `.build/terminal-wayland.png`
+(or `TERMINAL_SCREENSHOT`). These graphical tests require `sway`, `swaymsg`,
+Mesa software EGL/OpenGL, and the font; they skip if Sway is not installed.
+They do not send input to your desktop session. Startup, screen, and PTY tests
+run without a compositor.

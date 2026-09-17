@@ -1,16 +1,14 @@
 tag terminal;
 
-use_tag gl, x11, freetype;
+use_tag gl, wayland, freetype;
 
-import "../gl/gl.l8";
+import "../gl/core.l8";
+
+import "../wayland/wayland.l8";
 
 import "../freetype/ft.l8";
 
 import "screen.l8";
-
-extern XFree(data: *XVisualInfo): int;
-
-extern XFreeColormap(dpy: *i8, cmap: int): int;
 
 extern glDeleteShader(shader: int): int;
 
@@ -21,10 +19,7 @@ extern glDeleteBuffers(n: int, buffers: *u32): int;
 extern glDeleteTextures(n: int, textures: *u32): int;
 
 type TerminalRenderer = {
-    dpy: *i8;
-    win: int;
-    cmap: int;
-    ctx: *i8;
+    window: *WLWindow;
     font: *CachedFont;
     cw: int;
     ch: int;
@@ -99,20 +94,15 @@ terminal_shader(kind: int, text: []i8): int {
     shader;
 }
 
-terminal_renderer_close(r: *TerminalRenderer, destroyed: bool) {
+terminal_renderer_close(r: *TerminalRenderer) {
     glDeleteBuffers(1, &r.buffer);
     glDeleteTextures(1, &r.texture);
     glDeleteProgram(r.program);
-    glXMakeCurrent(r.dpy, 0, null);
-    glXDestroyContext(r.dpy, r.ctx);
-    if (!destroyed) {
-        XDestroyWindow(r.dpy, r.win);
-    }
-    XFreeColormap(r.dpy, r.cmap);
+    wl_window_close(r.window);
     close_cached_font(r.font);
 }
 
-terminal_renderer(dpy: *i8@new, path: str, px: int): ?*TerminalRenderer@new {
+terminal_renderer(path: str, px: int) noregion: ?*TerminalRenderer@new {
     font0: ?*CachedFont = load_cached_font(path, "/usr/share/fonts/truetype/ancient-scripts/Symbola_hint.ttf",
         px, 2048, 2048, 4096);
     if (font0 == null) {
@@ -139,57 +129,17 @@ terminal_renderer(dpy: *i8@new, path: str, px: int): ?*TerminalRenderer@new {
         }
     }
     ch: int = top + bottom + 4;
-    screen: int = XDefaultScreen(dpy);
-    attr: []i32 = [4i32, 5i32, 8i32, 8i32, 9i32, 8i32, 10i32, 8i32, 0i32];
-    visual0: ?*XVisualInfo = glXChooseVisual(dpy, screen, attr);
-    if (visual0 == null) {
+    window0: ?*WLWindow = wl_window_open(80 * cw + 16, 24 * ch + 16, "L8 Terminal",
+        "org.lang8.Terminal");
+    if (window0 == null) {
         close_cached_font(font);
         return null;
     }
-    visual: *XVisualInfo = visual0;
-    cmap: int = XCreateColormap(dpy, XRootWindow(dpy, screen), visual.visual, 0);
-    wa: XSetWindowAttributes = XSetWindowAttributes {
-        background_pixmap: 0,
-        background_pixel: 0,
-        border_pixmap: 0,
-        border_pixel: 0,
-        bit_gravity: 0i32,
-        win_gravity: 0i32,
-        backing_store: 0i32,
-        backing_planes: 0,
-        backing_pixel: 0,
-        save_under: 0i32,
-        event_mask: 163841,
-        do_not_propagate_mask: 0,
-        override_redirect: 0i32,
-        colormap: cmap,
-        cursor: 0
-    };
-    win: int = XCreateWindow(dpy, XRootWindow(dpy, screen), 0, 0, 80 * cw + 16, 24 * ch + 16,
-        0, visual.depth as int, 1, visual.visual, 10248, &wa);
-    ctx0: ?*i8 = glXCreateContext(dpy, visual, null, 1);
-    XFree(visual);
-    if (ctx0 == null) {
-        XDestroyWindow(dpy, win);
-        XFreeColormap(dpy, cmap);
-        close_cached_font(font);
-        return null;
-    }
-    ctx: *i8 = ctx0;
-    if (glXMakeCurrent(dpy, win, ctx) == 0) {
-        glXDestroyContext(dpy, ctx);
-        XDestroyWindow(dpy, win);
-        XFreeColormap(dpy, cmap);
-        close_cached_font(font);
-        return null;
-    }
+    window: *WLWindow = window0;
     // Capacity for background/base/mark quads for the current and departing
     // scenes, plus the independently drawn cursor.
     r: *TerminalRenderer = new TerminalRenderer {
-        dpy: dpy,
-        win: win,
-        cmap: cmap,
-        ctx: ctx,
+        window: window,
         font: font,
         cw: cw,
         ch: ch,
@@ -304,7 +254,7 @@ void main() {
     if (vsh == 0 || fsh == 0) {
         glDeleteShader(vsh);
         glDeleteShader(fsh);
-        terminal_renderer_close(r, false);
+        terminal_renderer_close(r);
         return null;
     }
     r.program = glCreateProgram();
@@ -320,7 +270,7 @@ void main() {
     ok: i32 = 0i32;
     glGetProgramiv(r.program, 35714, &ok);
     if (ok == 0i32) {
-        terminal_renderer_close(r, false);
+        terminal_renderer_close(r);
         return null;
     }
     glUseProgram(r.program);
@@ -1195,5 +1145,7 @@ terminal_draw(s: *Screen, r: *TerminalRenderer, now: int) {
             glEnable(3042);
         }
     }
-    glXSwapBuffers(r.dpy, r.win);
+    if (!wl_window_present(r.window)) {
+        r.window.closed = true;
+    }
 }

@@ -5,13 +5,14 @@ Each directory owns one library or application. Runnable demonstrations live in
 
 | Directory | Entry point | Public tag | Purpose |
 |---|---|---|---|
-| `gl/` | `gl.l8` | `gl` | OpenGL/GLX bindings; imports X11 |
+| `gl/` | `gl.l8`, `core.l8` | `gl` | OpenGL bindings; `gl.l8` adds GLX/X11, `core.l8` is platform-independent |
 | `x11/` | `x.l8` | `x11` | X11 types and bindings |
 | `freetype/` | `ft.l8` | `freetype` | Font loading, glyph atlases, and text vertices |
 | `http/` | `http.l8` | `http` | HTTP/1.1 client, server, and streaming APIs |
 | `websocket/` | `websocket.l8` | `websocket` | RFC 6455 client, server, and message APIs; imports HTTP |
 | `block-game/` | `block-game.l8` | — | Game, editor, level model, and assets |
-| `terminal/` | `terminal.l8` | — | OpenGL/FreeType terminal with a syscall-backed PTY shell |
+| `wayland/` | `wayland.l8` | `wayland` | Native Wayland/xdg-shell windows, EGL, xkbcommon, and typed protocol bindings |
+| `terminal/` | `terminal.l8` | — | Wayland/EGL/OpenGL/FreeType terminal with a syscall-backed PTY shell |
 | `callbacks/` | `basic.l8` | — | Function value examples, language tests, and C ABI fixtures |
 
 Import the entry point relative to your source file, then activate the public

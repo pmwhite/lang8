@@ -413,7 +413,7 @@ do_terminal_test() {
   step 'terminal system-shell PTY tests' env SHELL=/bin/bash LC_ALL=C.UTF-8 L8_EXPECT_BASH=yes L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= "$BUILD/terminal-pty-test"
   step 'terminal shell-fallback PTY tests' env SHELL=/definitely/missing LC_ALL=C.UTF-8 L8_EXPECT_BASH= L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= "$BUILD/terminal-pty-test"
   step 'terminal closed-stdio PTY tests' env SHELL=/bin/sh LC_ALL=C.UTF-8 L8_EXPECT_BASH= L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= "$BUILD/terminal-pty-test" --closed-stdio
-  step 'terminal X11/PTY tests' python3 programs/terminal/test_integration.py "$BUILD/terminal"
+  step 'terminal Wayland/PTY tests' python3 programs/terminal/test_integration.py "$BUILD/terminal"
 }
 
 do_callback_test() {
@@ -566,7 +566,7 @@ Commands:
   examples        Build stage 1 and run example programs via l8c1
   game            Build programs/block-game/block-game.l8 → .build/block-game
   terminal        Build programs/terminal/terminal.l8 → .build/terminal
-  terminal-test   Run terminal screen tests and X11/PTY tests (when DISPLAY is set)
+  terminal-test   Run terminal screen, PTY, and isolated headless Wayland tests
   callback-test   Test function values, lifetimes, and the C ABI (requires cc/as)
   http            Build programs/http client and server → .build/http/
   http-test       Verify downloaded specifications and run the HTTP test suite
