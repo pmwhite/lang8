@@ -34,7 +34,17 @@ Glyphs are loaded into a 2048×2048 grayscale atlas when their Unicode codepoint
 first appear. If installed, Symbola supplies monochrome fallback glyphs for
 symbols and emoji absent from the primary font. `--font` can select a font with
 other script coverage. Cell backgrounds and glyphs are batched into one vertex
-upload and OpenGL draw per changed frame.
+upload and OpenGL draw per changed frame. The renderer retains the previous grid
+and animates changes over 120 ms. It consumes terminal scroll-region operations
+when available and otherwise detects row shifts, treating either as rigid vertical
+planes. Unchanged styled rows at the contiguous edges bound an inferred scroll
+region, keeping editor chrome such as status lines fixed without splitting the
+content plane. It uses a longest-common-subsequence match within changed rows so
+surviving text slides
+apart or together around insertions and deletions. New cells and non-scroll
+deletions fade at the inferred edit location. Rows entering or leaving a scroll
+region remain opaque and are clipped at its edge. Interrupted animations continue
+from their currently displayed positions.
 
 The terminal has **no direct libc or libutil dependency**. `pty.l8` opens
 `/dev/ptmx`, unlocks and opens its slave with ioctls, forks, creates the child's
@@ -65,6 +75,9 @@ overlapping area without reflow. Input uses a bounded 64 KiB queue and nonblocki
 partial writes, so a busy child does not block window events.
 
 This is a basic VT-style emulator, not a complete VT100/xterm implementation.
+Scene matching is a visual heuristic because terminal protocols provide updated
+cells rather than edit intent; complex simultaneous rewrites may therefore fade
+instead of finding the motion a program intended. Color changes are immediate.
 There is no complex-script shaping, bidirectional layout, multi-mark grapheme
 storage, emoji ZWJ clustering, input-method composition, scrollback,
 selection/clipboard, mouse reporting, Alt-key encoding, custom tab stops, or DEC
