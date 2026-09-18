@@ -35,6 +35,7 @@ LEVEL_MAX_GOALS: int = 64;
 LEVEL_MAX_BRICKS: int = 2048;
 
 LEVEL_MAX_GROUND: int = 8192;
+LEVEL_MAX_LAMPS: int = 256;
 
 LEVEL_MAX_PLACES: int = 64;
 
@@ -127,6 +128,12 @@ type RoomStart = {
     present: bool;
 };
 
+type Lamp = {
+    column: int;
+    row: int;
+    style: int; // 0: low lantern, 1: shaded post
+};
+
 // The backing arrays and their active lengths form one value.  Keeping them
 // together makes snapshots, loading, saving, and editor previews difficult to
 // accidentally wire up with mismatched counts.
@@ -144,6 +151,8 @@ type LevelState = {
     nground: int;
     spawn: Cell;
     room_starts: []RoomStart;
+    lamps: []Lamp;
+    nlamps: int;
 };
 
 type WorldState = {
@@ -185,7 +194,9 @@ new_level_state(): *LevelState@new {
         }),
         nground: 0,
         spawn: Cell { column: 0, row: 0 },
-        room_starts: new RoomStart[LEVEL_MAX_ROOMS](RoomStart { column: 0, row: 0, present: false })
+        room_starts: new RoomStart[LEVEL_MAX_ROOMS](RoomStart { column: 0, row: 0, present: false }),
+        lamps: new Lamp[LEVEL_MAX_LAMPS](Lamp { column: 0, row: 0, style: 0 }),
+        nlamps: 0
     };
 }
 
@@ -1589,6 +1600,9 @@ parse_level_src(
             i = i + 1;
         } else if (src[i] == '#') {
             i = skip_line(src, i);
+        } else if (word_at(src, i, "lamp")) {
+            // Loaded into LevelState separately; never puzzle geometry.
+            i = skip_line(src, i);
         } else if (word_at(src, i, "title")) {
             i = i + 5;
             file_title = take_title(src, i);
@@ -1758,7 +1772,9 @@ save_level(
     nground: int,
     pc: int,
     pr: int,
-    room_starts: []RoomStart
+    room_starts: []RoomStart,
+    lamps: []Lamp,
+    nlamps: int
 ): int {
     cap: int = 524288;
     dst: []i8 = new i8[cap](0i8);
@@ -1792,6 +1808,8 @@ save_level(
             i = put_ch(dst, i, '\n');
         }
     }
+    // Lamps use the same local origin as the rest of a standalone level.
+    i = put_lamps(dst, i, lamps, nlamps, ox, oy);
     i = put_str(dst, i, "size ");
     i = put_int(dst, i, sw);
     i = put_ch(dst, i, ' ');
@@ -1958,6 +1976,8 @@ copy_room_starts(dst: []RoomStart, src: []RoomStart) {
 }
 
 copy_level_state(dst: *LevelState, src: *LevelState@dst) {
+    for i in 0..src.nlamps { dst.lamps[i] = src.lamps[i]; }
+    dst.nlamps = src.nlamps;
     copy_blocks(dst.blocks, 0, src.blocks, 0, src.nblocks);
     copy_rooms(dst.rooms, src.rooms, src.nrooms);
     for i in 0..src.nrooms {
@@ -3690,6 +3710,8 @@ load_world(
             i = i + 1;
         } else if (src[i] == '#') {
             i = skip_line(src, i);
+        } else if (word_at(src, i, "lamp")) {
+            i = skip_line(src, i);
         } else if (word_at(src, i, "world")) {
             i = skip_line(src, i);
         } else if (word_at(src, i, "level")) {
@@ -3898,7 +3920,9 @@ save_world(
     ndone: int,
     pc: int,
     pr: int,
-    room_starts: []RoomStart
+    room_starts: []RoomStart,
+    lamps: []Lamp,
+    nlamps: int
 ): int {
     cap: int = 524288;
     dst: []i8 = new i8[cap](0i8);
@@ -3906,6 +3930,7 @@ save_world(
     i = put_str(dst, i, "# L8 canonical world\n");
     i = put_str(dst, i, "# level <name> <x0> <y0> <x1> <y1> <title>\n");
     i = put_str(dst, i, "world\n");
+    i = put_lamps(dst, i, lamps, nlamps, 0, 0);
     i = put_ch(dst, i, 'p');
     i = put_ch(dst, i, ' ');
     i = put_int(dst, i, pc);
@@ -4374,6 +4399,56 @@ load_any(
         ground, nground, start);
 }
 
+set_lamp(lamps: []Lamp, n: int, c: int, r: int, style: int, want: bool): int {
+    for i in 0..n {
+        if (lamps[i].column == c && lamps[i].row == r) {
+            if (!want) { lamps[i] = lamps[n - 1]; return n - 1; }
+            lamps[i].style = style;
+            return n;
+        }
+    }
+    if (!want || n >= len(lamps) || !in_bounds(c, r)) { return n; }
+    lamps[n] = Lamp { column: c, row: r, style: style };
+    n + 1;
+}
+
+parse_lamps(src: []i8, lamps: []Lamp): int {
+    n: int = 0;
+    i: int = 0;
+    val: []int = new int[2](0);
+    while (i < len(src)) {
+        i = skip_spaces(src, i);
+        if (word_at(src, i, "lamp")) {
+            i = parse_int(src, skip_spaces(src, i + 4), val);
+            c: int = val[0];
+            valid: int = val[1];
+            i = parse_int(src, skip_spaces(src, i), val);
+            r: int = val[0];
+            valid = valid * val[1];
+            i = parse_int(src, skip_spaces(src, i), val);
+            if (valid != 0 && val[1] != 0 && val[0] >= 0 && val[0] <= 1) {
+                n = set_lamp(lamps, n, c, r, val[0], true);
+            }
+        }
+        while (i < len(src) && src[i] != '\n') { i = i + 1; }
+        i = i + 1;
+    }
+    n;
+}
+
+put_lamps(dst: []i8, i: int, lamps: []Lamp, n: int, ox: int, oy: int): int {
+    for k in 0..n {
+        i = put_str(dst, i, "lamp ");
+        i = put_int(dst, i, lamps[k].column - ox);
+        i = put_ch(dst, i, ' ');
+        i = put_int(dst, i, lamps[k].row - oy);
+        i = put_ch(dst, i, ' ');
+        i = put_int(dst, i, lamps[k].style);
+        i = put_ch(dst, i, '\n');
+    }
+    i;
+}
+
 load_level_state(path: []i8, state: *LevelState@new): int {
     nroom: []int = new int[1](0);
     ngoal: []int = new int[1](0);
@@ -4383,6 +4458,7 @@ load_level_state(path: []i8, state: *LevelState@new): int {
     n: int = load_any(path, state.blocks, state.rooms, state.titles, nroom, state.goals,
         ngoal, state.bricks, nbrick, state.ground, nground, start);
     if (n >= 0) {
+        state.nlamps = parse_lamps(slurp_path(path), state.lamps);
         state.nblocks = n;
         state.nrooms = nroom[0];
         state.ngoals = ngoal[0];
@@ -4413,6 +4489,7 @@ load_world_state(path: []i8, world: *WorldState@new, state: *LevelState): int {
         state.nground = nground[0];
         state.spawn = Cell { column: start[0], row: start[1] };
         world.ndone = ndone[0];
+        state.nlamps = parse_lamps(slurp_path(path), state.lamps);
         prepare_room_starts(slurp_path(path), state.rooms, state.nrooms, state.bricks,
             state.nbricks, state.goals, state.ngoals, state.room_starts);
     }
@@ -4422,12 +4499,12 @@ load_world_state(path: []i8, world: *WorldState@new, state: *LevelState): int {
 save_level_state(path: []i8, state: *LevelState): int {
     save_level(path, state.blocks, state.nblocks, state.rooms, state.titles, state.nrooms,
         state.goals, state.ngoals, state.bricks, state.nbricks, state.ground, state.nground,
-        state.spawn.column, state.spawn.row, state.room_starts);
+        state.spawn.column, state.spawn.row, state.room_starts, state.lamps, state.nlamps);
 }
 
 save_world_state(path: []i8, world: *WorldState, state: *LevelState): int {
     save_world(path, world.names, state.rooms, state.titles, state.nrooms, state.blocks,
         state.nblocks, state.goals, state.ngoals, state.bricks, state.nbricks, state.ground,
         state.nground, world.dones, world.ndone, state.spawn.column, state.spawn.row,
-        state.room_starts);
+        state.room_starts, state.lamps, state.nlamps);
 }

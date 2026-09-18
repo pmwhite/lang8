@@ -235,6 +235,8 @@ draw_editor_help_panel(
         gprog, u_gscreen, u_gcolor, u_galpha, gvbo, gverts, 110.0, y, "p", "world start");
     y = draw_help_row(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex, tvbo, tverts,
         gprog, u_gscreen, u_gcolor, u_galpha, gvbo, gverts, 110.0, y, "e", "level start");
+    y = draw_help_row(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex, tvbo, tverts,
+        gprog, u_gscreen, u_gcolor, u_galpha, gvbo, gverts, 110.0, y, "l / shift+l", "lantern / lamp post");
     y = y + 12.0;
     y = draw_help_heading(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex, tvbo, tverts,
         110.0, y, "Paint");
@@ -277,6 +279,7 @@ draw_editor_help_panel(
 }
 
 brush_slot_kind(slot: int): Brush {
+    if (slot == 14 || slot == 15) { return BRUSH_LAMP; }
     if (slot == 1) {
         return BRUSH_GRASS;
     }
@@ -305,6 +308,7 @@ brush_slot_kind(slot: int): Brush {
 }
 
 brush_slot_shape(slot: int): int {
+    if (slot == 15) { return 1; }
     if (slot == 4) {
         return 3;
     }
@@ -324,6 +328,8 @@ brush_slot_shape(slot: int): int {
 }
 
 brush_slot_key(slot: int): []i8 {
+    if (slot == 14) { return "l"; }
+    if (slot == 15) { return "L"; }
     if (slot == 1) {
         return "2";
     }
@@ -367,6 +373,7 @@ brush_slot_key(slot: int): []i8 {
 }
 
 brush_slot_on(slot: int, brush: Brush, shape: int): bool {
+    if (brush == BRUSH_LAMP) { return slot >= 14 && brush_slot_shape(slot) == shape; }
     kind: Brush = brush_slot_kind(slot);
     if (brush != kind) {
         return false;
@@ -472,6 +479,9 @@ draw_brush_preview(
     cx: f32 = look[0];
     cz: f32 = look[1];
     mat_look(icon_view, cx + 1.58, 1.78, cz + 1.70, cx, 0.34, cz, 0.0, 1.0, 0.0);
+    if (brush == BRUSH_LAMP && shape == 1) {
+        mat_look(icon_view, cx + 2.6, 2.8, cz + 2.8, cx, 1.0, cz, 0.0, 1.0, 0.0);
+    }
     mat_mul(icon_vp, icon_proj, icon_view, icon_tmp);
     glUseProgram(prog);
     glEnableVertexAttribArray(0);
@@ -564,6 +574,10 @@ draw_brush_preview(
         draw_box(u_origin, u_scale, u_color, cx, 0.42, cz, 0.70, 0.84, 0.70, 0.22,
             0.66, 0.72, chamfer_n / 6);
         glUniform1f(u_cut, 0.0);
+    } else if (brush == BRUSH_LAMP) {
+        bind_mesh(cube_buf);
+        glUniform1f(u_cut, 0.0);
+        draw_lantern(u_origin, u_scale, u_color, -1, cx, cz, shape);
     }
 }
 
@@ -616,11 +630,11 @@ draw_brush_panel(
     x0: f32 = 1048.0;
     y0: f32 = 112.0;
     tw: f32 = 62.0;
-    th: f32 = 70.0;
+    th: f32 = 61.0;
     gap: f32 = 6.0;
     pad: f32 = 10.0;
     cols: int = 2;
-    rows: int = 7;
+    rows: int = 8;
     x1: f32 = x0 + pad + cols as f32 * tw + (cols - 1) as f32 * gap + pad;
     y1: f32 = y0 + pad + 18.0 + rows as f32 * th + (rows - 1) as f32 * gap + pad;
     n: int = put_quad(gverts, 0, x0, y0, x1, y1);
@@ -735,6 +749,7 @@ type FpsMeter = {
     i: int;
     n: int;
     work0: int;
+    pending_work: int;
     flo: f32;
     fhi: f32;
     mlo: f32;
@@ -774,30 +789,39 @@ fps_ring(head: int, n: int, k: int): int {
     (head + FPS_CAP - n + k) % FPS_CAP;
 }
 
-tick_fps(
-    m: *FpsMeter,
-    times: []int,
-    works: []int,
-    rates: []f32,
-    heaps: []int,
-    stall_us: int
-) {
+// Preserve the existing pre-HUD work estimate (elapsed time minus known
+// rendering stalls). It is not OS process CPU time or GPU execution time.
+tick_fps(m: *FpsMeter, stall_us: int) {
     now: int = mono_us();
+    m.pending_work = 0;
     if (m.work0 > 0) {
         work: int = now - m.work0 - stall_us;
         if (work < 0) {
             work = 0;
         }
+        m.pending_work = work;
+    }
+}
+
+// Record only completed frames, aligned at consecutive swap returns. This
+// includes input/update/rendering, the HUD, driver stalls and vsync waits.
+// It is wall time, not a GPU query or a measurement of physical scanout.
+fps_finish_at(m: *FpsMeter, times: []int, works: []int, frames: []int,
+    rates: []f32, heaps: []int, now: int, heap_bytes: int) {
+    if (m.work0 > 0 && now > m.work0) {
         slot: int = m.i;
         times[slot] = now;
-        works[slot] = work;
-        heaps[slot] = l8_heap_used();
+        works[slot] = m.pending_work;
+        frames[slot] = now - m.work0;
+        heaps[slot] = heap_bytes;
         m.i = (m.i + 1) % FPS_CAP;
         if (m.n < FPS_CAP) {
             m.n = m.n + 1;
         }
         rates[slot] = window_fps(times, m.i, m.n, m.n - 1);
     }
+    m.work0 = now;
+    m.pending_work = 0;
 }
 
 toggle_fps(m: *FpsMeter) {
@@ -805,6 +829,7 @@ toggle_fps(m: *FpsMeter) {
     m.i = 0;
     m.n = 0;
     m.work0 = 0;
+    m.pending_work = 0;
     m.flo = 0.0;
     m.fhi = 0.0;
     m.mlo = 0.0;
@@ -817,12 +842,18 @@ toggle_fps(m: *FpsMeter) {
     m.hhi = 0.0;
 }
 
-fps_after_swap(m: *FpsMeter) {
-    m.work0 = mono_us();
+fps_after_swap(m: *FpsMeter, times: []int, works: []int, frames: []int,
+    rates: []f32, heaps: []int) {
+    fps_finish_at(m, times, works, frames, rates, heaps, mono_us(), l8_heap_used());
 }
 
 ms_of_us(us: int): f32 {
     us as f32 * 0.001;
+}
+
+frame_axis_hi(current: f32, wanted: f32, ready: int): f32 {
+    if (ready != 0 && wanted < current) { return follow_hi(current, wanted, ready); }
+    wanted;
 }
 
 mb_of_bytes(n: int): f32 {
@@ -1453,6 +1484,7 @@ draw_fps(
     m: *FpsMeter,
     times: []int,
     works: []int,
+    frames: []int,
     rates: []f32,
     heaps: []int,
     lab: []i8
@@ -1476,40 +1508,47 @@ draw_fps(
     fhi: f32 = 0.0;
     have_f: int = 0;
     last_ms: f32 = ms_of_us(works[last]);
+    last_frame: f32 = ms_of_us(frames[last]);
+    peak_frame: f32 = last_frame;
     last_fps: f32 = rates[last];
     last_mb: f32 = mb_of_bytes(heaps[last]);
-    mlo: f32 = last_ms;
-    mhi: f32 = last_ms;
+    mlo: f32 = 0.0;
+    mhi: f32 = 8.333333; // 120 FPS budget remains visible
     hlo: f32 = last_mb;
     hhi: f32 = last_mb;
     k: int = 0;
     while (k < m.n) {
-        ms: f32 = ms_of_us(works[fps_ring(m.i, m.n, k)]);
-        if (ms < mlo) {
-            mlo = ms;
-        }
-        if (ms > mhi) {
-            mhi = ms;
-        }
-        hb: f32 = mb_of_bytes(heaps[fps_ring(m.i, m.n, k)]);
-        if (hb < hlo) {
-            hlo = hb;
-        }
-        if (hb > hhi) {
-            hhi = hb;
-        }
-        fpsv: f32 = rates[fps_ring(m.i, m.n, k)];
-        if (fpsv > 0.001) {
-            if (have_f == 0) {
-                flo = fpsv;
-                fhi = fpsv;
-                have_f = 1;
+        if (times[fps_ring(m.i, m.n, k)] >= t0) {
+            frame_ms: f32 = ms_of_us(frames[fps_ring(m.i, m.n, k)]);
+            if (frame_ms > mhi) { mhi = frame_ms; }
+            if (frame_ms > peak_frame) { peak_frame = frame_ms; }
+            ms: f32 = ms_of_us(works[fps_ring(m.i, m.n, k)]);
+            if (ms < mlo) {
+                mlo = ms;
             }
-            if (fpsv < flo) {
-                flo = fpsv;
+            if (ms > mhi) {
+                mhi = ms;
             }
-            if (fpsv > fhi) {
-                fhi = fpsv;
+            hb: f32 = mb_of_bytes(heaps[fps_ring(m.i, m.n, k)]);
+            if (hb < hlo) {
+                hlo = hb;
+            }
+            if (hb > hhi) {
+                hhi = hb;
+            }
+            fpsv: f32 = rates[fps_ring(m.i, m.n, k)];
+            if (fpsv > 0.001) {
+                if (have_f == 0) {
+                    flo = fpsv;
+                    fhi = fpsv;
+                    have_f = 1;
+                }
+                if (fpsv < flo) {
+                    flo = fpsv;
+                }
+                if (fpsv > fhi) {
+                    fhi = fpsv;
+                }
             }
         }
         k = k + 1;
@@ -1536,8 +1575,10 @@ draw_fps(
     }
     flo = follow_lo(m.flo, flo, ready);
     fhi = follow_hi(m.fhi, fhi, ready);
-    mlo = follow_lo(m.mlo, mlo, ready);
-    mhi = follow_hi(m.mhi, mhi, ready);
+    mlo = 0.0;
+    // Expand immediately: smoothing a new high would hide its true height.
+    // Only ease back down when the hitch has left the visible time window.
+    mhi = frame_axis_hi(m.mhi, mhi, ready);
     hlo = follow_lo(m.hlo, hlo, ready);
     hhi = follow_hi(m.hhi, hhi, ready);
     if (fhi <= flo) {
@@ -1624,6 +1665,19 @@ draw_fps(
         0.92);
     n = 0;
     k = 0;
+    while (k < m.n) {
+        ix: int = fps_ring(m.i, m.n, k);
+        if (times[ix] >= t0) {
+            x: f32 = mx0 + (times[ix] - t0) as f32 / span as f32 * (mx1 - mx0);
+            y: f32 = plot_y(ms_of_us(frames[ix]), mlo, mhi, py0, py1);
+            n = put_quad(gverts, n, x - 1.5, y - 1.5, x + 1.5, y + 1.5);
+        }
+        k = k + 1;
+    }
+    draw_solid(gprog, u_gscreen, u_gcolor, u_galpha, gvbo, gverts, n, 1.0, 0.62, 0.25,
+        0.95);
+    n = 0;
+    k = 0;
     px = 0.0;
     py = 0.0;
     have = 0;
@@ -1652,9 +1706,21 @@ draw_fps(
     draw_hud_text(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex, tvbo, tverts, 18.0,
         22.0, lab, 0.95);
     clear_label(lab);
-    i = put_str(lab, 0, "MS ");
+    i = put_str(lab, 0, "FRAME ");
+    i = put_tenths(lab, i, last_frame);
+    i = put_str(lab, i, "ms");
+    draw_title_layer(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex, tvbo, tverts, 412.0,
+        22.0, lab, 0.95, 1.0, 0.62, 0.25);
+    clear_label(lab);
+    i = put_str(lab, 0, "MAX ");
+    i = put_tenths(lab, i, peak_frame);
+    draw_title_layer(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex, tvbo, tverts, 548.0,
+        22.0, lab, 0.95, 1.0, 0.62, 0.25);
+    clear_label(lab);
+    i = put_str(lab, 0, "WORK ");
     i = put_tenths(lab, i, last_ms);
-    draw_hud_text(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex, tvbo, tverts, 412.0,
+    i = put_str(lab, i, "ms");
+    draw_hud_text(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex, tvbo, tverts, 666.0,
         22.0, lab, 0.95);
     clear_label(lab);
     i = put_str(lab, 0, "MEM ");

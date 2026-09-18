@@ -1,5 +1,6 @@
 tag block_game;
 use_tag gl, x11, freetype;
+import "block-game-lighting.l8";
 
 // Shared graphics setup, world geometry, effects, and frame rendering.
 
@@ -273,11 +274,11 @@ mat_persp(
     m[14] = 2.0 * far * near / (near - far);
 }
 
-// Fit the point light to the camera frustum clipped to the playable height
-// slab. Extremal projected coordinates occur at vertices of this polyhedron.
-// Scratch and bounds are owned by the caller: no per-frame allocations.
-fit_shadow(m: []f32, view: []f32, proj: []f32, lx: f32, ly: f32,
-    lz: f32, corners: []f32, bounds: []f32, ceiling: f32) {
+
+
+fit_moon_shadow(m: []f32, view: []f32, proj: []f32, light_view: []f32,
+    lx: f32, lz: f32, corners: []f32, bounds: []f32) {
+    ceiling: f32 = 9.5;
     for i in 0..8 {
         depth: f32 = 0.4;
         if (i >= 4) { depth = 80.0; }
@@ -322,8 +323,8 @@ fit_shadow(m: []f32, view: []f32, proj: []f32, lx: f32, ly: f32,
                         if (x > bounds[1]) { bounds[1] = x; }
                         if (z < bounds[2]) { bounds[2] = z; }
                         if (z > bounds[3]) { bounds[3] = z; }
-                        sx: f32 = (x - lx) / (ly - y);
-                        sy: f32 = (lz - z) / (ly - y);
+                        sx: f32 = light_view[0]*x + light_view[4]*y + light_view[8]*z + light_view[12];
+                        sy: f32 = light_view[1]*x + light_view[5]*y + light_view[9]*z + light_view[13];
                         if (sx < left) { left = sx; }
                         if (sx > right) { right = sx; }
                         if (sy < bottom) { bottom = sy; }
@@ -334,27 +335,22 @@ fit_shadow(m: []f32, view: []f32, proj: []f32, lx: f32, ly: f32,
             bit = bit * 2;
         }
     }
-    // Leave room for the shader's 1% border guard and filtering footprint.
-    pad_x: f32 = (right - left) * 0.025;
-    pad_y: f32 = (top - bottom) * 0.025;
-    left = left - pad_x; right = right + pad_x;
-    bottom = bottom - pad_y; top = top + pad_y;
-    // Quantize angular bounds outwards. Pure camera translation must not
-    // rescale the map because of roundoff in the world-space intersections.
-    left = floor_i(left * 16.0) as f32 / 16.0;
-    right = (floor_i(right * 16.0) + 1) as f32 / 16.0;
-    bottom = floor_i(bottom * 16.0) as f32 / 16.0;
-    top = (floor_i(top * 16.0) + 1) as f32 / 16.0;
+    // Constant direction, orthographic projection, texel-snapped in WORLD
+    // light-space. Moving the camera only changes coverage, not illumination.
+    width: f32 = (floor_i((right-left)*1.05 / 2.0) + 1) as f32 * 2.0;
+    height: f32 = (floor_i((top-bottom)*1.05 / 2.0) + 1) as f32 * 2.0;
+    tx: f32 = width / SHADOW_SIZE as f32;
+    ty: f32 = height / SHADOW_SIZE as f32;
+    cx: f32 = (left+right)*0.5 - light_view[12];
+    cy: f32 = (bottom+top)*0.5 - light_view[13];
+    cx = floor_i(cx/tx + 0.5) as f32 * tx + light_view[12];
+    cy = floor_i(cy/ty + 0.5) as f32 * ty + light_view[13];
     mat_zero(m);
-    m[0] = 2.0 / (right - left);
-    m[5] = 2.0 / (top - bottom);
-    m[8] = (right + left) / (right - left);
-    m[9] = (top + bottom) / (top - bottom);
-    m[10] = -13.5 / 12.5; // near 0.5, far 13: covers the entire height slab
-    m[11] = -1.0;
-    m[14] = -13.0 / 12.5;
+    m[0] = 2.0/width; m[5] = 2.0/height;
+    m[10] = -0.01; // light-space z -100..100, including off-screen casters
+    m[12] = -2.0*cx/width; m[13] = -2.0*cy/height;
+    m[15] = 1.0;
 }
-
 
 shadow_cell(column: int, row: int, bounds: []f32, pad: f32): bool {
     x: f32 = column as f32 + 0.5;
@@ -2519,43 +2515,6 @@ type Spark = {
     blue: f32;
 };
 
-// Do not spend most of the map on a hypothetical eight-storey ceiling over
-// empty ground. First find all possible visible stacks/casters, then fit the
-// receiver slab to their actual height. Include both animation endpoints and
-// the player above the highest stack; falling/mounted blocks fit in this pad.
-fit_scene_shadow(m: []f32, view: []f32, proj: []f32, lx: f32, ly: f32,
-    lz: f32, corners: []f32, bounds: []f32, hist: []Block, foff: int,
-    toff: int, n: int, sparks: []Spark) {
-    fit_shadow(m, view, proj, lx, ly, lz, corners, bounds, 9.5);
-    ceiling: f32 = 2.5;
-    for phase in 0..2 {
-        off: int = foff;
-        if (phase != 0) { off = toff; }
-        for i in 0..n {
-            b: Block = hist[off + i];
-            if (shadow_cell(b.column, b.row, bounds, 5.0)) {
-                h: f32 = b.layer as f32 + 2.5;
-                if (h > ceiling) { ceiling = h; }
-            }
-        }
-    }
-    for i in 0..len(sparks) {
-        p: Spark = sparks[i];
-        if (p.life > 0.0 && shadow_cell(floor_i(p.x), floor_i(p.z), bounds, 1.0)) {
-            h: f32 = p.y + 0.5;
-            if (h > ceiling) { ceiling = h; }
-        }
-    }
-    ceiling = (floor_i(ceiling * 2.0) + 1) as f32 * 0.5;
-    if (ceiling > 9.5) { ceiling = 9.5; }
-    // Preserve the conservative caster bounds, even when fitting a lower
-    // receiver slab: an off-screen elevated block can shadow visible ground.
-    x0: f32 = bounds[0]; x1: f32 = bounds[1];
-    z0: f32 = bounds[2]; z1: f32 = bounds[3];
-    fit_shadow(m, view, proj, lx, ly, lz, corners, bounds, ceiling);
-    bounds[0] = x0; bounds[1] = x1;
-    bounds[2] = z0; bounds[3] = z1;
-}
 
 spark_rand(rng: []int): f32 {
     rng[0] = rng[0] + 1;
@@ -3822,8 +3781,12 @@ draw_frame(
     grass_blade_buf: u32,
     grass_instance_buf: u32,
     grass_instances: *GrassCache,
-    grass_blade_n: int
+    grass_blade_n: int,
+    lamp_light: *LampLight,
+    lamps: []Lamp,
+    nlamps: int
 ) {
+    update_lamp_light(lamp_light, lamps, nlamps, shadow_bounds);
     pfc: int = floor_i(focus_x);
     pfr: int = floor_i(focus_z);
     reuse: int = 0;
@@ -3898,12 +3861,20 @@ draw_frame(
             lagz, want_player, d_ramp, pru_x, pru_z, 0 - 1, 0 - 1, lean_to, lean_to,
             id_to, has_lean, cell_link, nvis, block_t);
     }
+    bind_mesh(cube_buf);
+    for i in 0..nlamps {
+        p: Lamp = lamps[i];
+        if (shadow_cell(p.column, p.row, shadow_bounds, 3.0)) {
+            draw_lantern(d_origin, d_scale, d_color, -1,
+                p.column as f32 + 0.5, p.row as f32 + 0.5, p.style);
+        }
+    }
     glDisable(32823);
     glUseProgram(bdprog);
     glUniformMatrix4fv(bd_u[0], 1, 0, lcam);
     bind_mesh(bbuf);
     draw_sparks(bd_u[1], bd_u[2], bd_u[3], bd_u[4], bd_u[5], bd_u[6], sparks, focus_x,
-        focus_z, lx, ly, lz, lx, 0.0, lz, 0.0, 0.0, 0.0 - 1.0);
+        focus_z, lx, ly, lz, focus_x, 0.0, focus_z, 0.0, 0.0, -1.0);
     stall1: int = mono_us();
     glBindFramebuffer(36160, 0u32);
     glDrawBuffer(1029);
@@ -3983,6 +3954,14 @@ draw_frame(
     glUseProgram(prog);
     draw_hedges(u_origin, u_scale, u_color, u_lag, brick_buf, brick_n, u_brick);
     bind_mesh(cube_buf);
+    glUniform1f(u_cut, 0.0);
+    for i in 0..nlamps {
+        p: Lamp = lamps[i];
+        if (shadow_cell(p.column, p.row, shadow_bounds, 3.0)) {
+            draw_lantern(u_origin, u_scale, u_color, lamp_light.emission,
+                p.column as f32 + 0.5, p.row as f32 + 0.5, p.style);
+        }
+    }
     if (want_cursor != 0 && want_player != 0) {
         draw_box(u_origin, u_scale, u_color, px + 0.5, 0.04, pz + 0.5, 0.80, 0.06,
             0.80, 0.80, 0.30, 0.24, 36);
