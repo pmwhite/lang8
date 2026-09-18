@@ -26,3 +26,36 @@ rather than blowing out the scene. `block-game-lighting.l8` owns the field and
 fixtures; moon/ambient colors and lamp tint are in the fragment shaders.
 
 Regression tests: `test_lighting.l8`, `test_shadows.l8`, `test_undo_memory.l8`.
+
+## Material response and depth
+
+The main materials now combine a cool upper-hemisphere ambient fill, a dim
+earth-colored lower fill, moon diffuse light, and restrained view-dependent
+highlights. Stone has broad highlights, dry dirt stays matte, and banks next
+to visible water darken and catch more light. Four nearby lanterns/posts supply
+directional specular highlights; the cached diffuse field still includes all
+fixtures. These highlights share the diffuse lamps' lack of wall occlusion.
+
+Grass has broad patches of height and color variation, subtle blade highlights,
+and backlit translucency. The patch value is computed with the existing CPU
+instance cache and packed alongside its wind seed, so instance storage does not
+grow. A faint distance haze separates distant terrain without obscuring puzzles.
+
+A 512-square world-space contact texture shades ground and grass roots near
+blocks, the player, walls, and fixtures. Its two CPU buffers are preallocated;
+the static field is cached, and moving footprints use interpolated positions.
+Unchanged frames do not rasterize or upload it. This is an inexpensive ground
+contact approximation, not full ambient occlusion: upper stacks use a subtle
+material-base darkening rather than a geometry-aware occlusion solution.
+
+Water reflects a fixed procedural evening sky and actual blocks, walls, ramps,
+and fixtures through a shared 480×288 planar reflection. The plane matches the
+ground surface at y=-0.02. Ripples perturb reflection sampling, with stronger
+reflection at grazing angles and an artistic minimum for the elevated camera.
+The reflection omits grass, particles, ground, and editor overlays. It renders
+only when a water cell is visible and its camera, objects, or lighting changes;
+ripples continue animating over a cached reflection. No reflection image is
+allocated per frame. Reflection rendering clips geometry below the water plane.
+
+GPU/cache regression coverage: `test_materials.l8`, `test_grass.l8`. Run with
+an X11 display, after building with `./l8 build <test> -o .build/<test-name>`.

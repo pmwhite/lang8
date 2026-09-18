@@ -1,0 +1,293 @@
+tag block_game;
+use_tag gl;
+
+// A small world-space contact field, rebuilt only when visible footprints move.
+// It shades the ground and grass roots; it is not a screen-space AO pass.
+CONTACT_SIZE: int = 512;
+CONTACT_SCALE: int = 4;
+CONTACT_CELLS: int = 128;
+
+type MaterialLight = {
+    tex: u32;
+    pixels: []i8;
+    fixed: []i8;
+    stamps: []int;
+    count: int;
+    x: int;
+    z: int;
+    fixed_key: int;
+    programs: []int;
+    cameras: []int;
+    origins: []int;
+    enabled: []int;
+    lamps: []int;
+    nearest: []int;
+    reflection: u32;
+    reflection_fbo: u32;
+    reflection_vp: []f32;
+    reflection_on: int;
+    reflection_key: int;
+    reflection_ready: bool;
+};
+
+new_material_light(prog: int, grass: int): *MaterialLight@new {
+    ids: []u32 = new u32[1](0u32);
+    glGenTextures(1, ids);
+    glActiveTexture(33987);
+    glBindTexture(3553, ids[0]);
+    glTexParameteri(3553, 10241, 9729);
+    glTexParameteri(3553, 10240, 9729);
+    glTexParameteri(3553, 10242, 33071);
+    glTexParameteri(3553, 10243, 33071);
+    pixels: []i8 = new i8[CONTACT_SIZE * CONTACT_SIZE](0i8);
+    glTexImage2D(3553, 0, 6409, CONTACT_SIZE, CONTACT_SIZE, 0, 6409, 5121, pixels);
+    programs: []int = [prog, grass];
+    cameras: []int = new int[2](0);
+    origins: []int = new int[2](0);
+    enabled: []int = new int[2](0);
+    for i in 0..2 {
+        glUseProgram(programs[i]);
+        glUniform1i(glGetUniformLocation(programs[i], "contact_map"), 3);
+        cameras[i] = glGetUniformLocation(programs[i], "camera");
+        origins[i] = glGetUniformLocation(programs[i], "contact_origin");
+        enabled[i] = glGetUniformLocation(programs[i], "material_on");
+    }
+    lamps: []int = [glGetUniformLocation(prog, "spec_lamps[0]"),
+        glGetUniformLocation(prog, "spec_lamps[1]"),
+        glGetUniformLocation(prog, "spec_lamps[2]"),
+        glGetUniformLocation(prog, "spec_lamps[3]")];
+    glActiveTexture(33984);
+    reflected: []u32 = new u32[1](0u32);
+    depth: []u32 = new u32[1](0u32);
+    fbo: []u32 = new u32[1](0u32);
+    glGenTextures(1, reflected);
+    glActiveTexture(33988);
+    glBindTexture(3553, reflected[0]);
+    glTexParameteri(3553, 10241, 9729);
+    glTexParameteri(3553, 10240, 9729);
+    glTexParameteri(3553, 10242, 33071);
+    glTexParameteri(3553, 10243, 33071);
+    glTexImage2D(3553, 0, 32856, 480, 288, 0, 6408, 5121, null);
+    glGenRenderbuffers(1, depth);
+    glBindRenderbuffer(36161, depth[0]);
+    glRenderbufferStorage(36161, 33189, 480, 288);
+    glGenFramebuffers(1, fbo);
+    glBindFramebuffer(36160, fbo[0]);
+    glFramebufferTexture2D(36160, 36064, 3553, reflected[0], 0);
+    glFramebufferRenderbuffer(36160, 36096, 36161, depth[0]);
+    glDrawBuffer(36064);
+    glReadBuffer(36064);
+    if (glCheckFramebufferStatus(36160) != 36053) { die("reflection framebuffer incomplete"); }
+    glBindFramebuffer(36160, 0u32);
+    glDrawBuffer(1029);
+    glReadBuffer(1029);
+    glUseProgram(prog);
+    glUniform1i(glGetUniformLocation(prog, "reflection_map"), 4);
+    glActiveTexture(33984);
+    new MaterialLight { tex: ids[0], pixels: pixels,
+        fixed: new i8[CONTACT_SIZE * CONTACT_SIZE](0i8),
+        stamps: new int[(LEVEL_MAX_BLOCKS + 1) * 4](0), count: 0,
+        x: -999999, z: -999999, fixed_key: 0, programs: programs,
+        cameras: cameras, origins: origins, enabled: enabled, lamps: lamps,
+        nearest: new int[4](-1), reflection: reflected[0], reflection_fbo: fbo[0],
+        reflection_vp: new f32[16](0.0),
+        reflection_on: glGetUniformLocation(prog, "reflection_on"),
+        reflection_key: 0, reflection_ready: false };
+}
+
+water_in_view(ground: []GroundCell, n: int, vp: []f32): bool {
+    for i in 0..n {
+        f: GroundCell = ground[i];
+        if (f.style == GROUND_WATER && grass_cell_in_view(vp, f.column, f.row) != 0) { return true; }
+    }
+    false;
+}
+
+water_reflection_matrix(dst: []f32, vp: []f32) {
+    // Ground is y=-0.02: mirror world y to -0.04-y before projection.
+    for i in 0..16 { dst[i] = vp[i]; }
+    for row in 0..4 {
+        dst[4+row] = -vp[4+row];
+        dst[12+row] = vp[12+row] - 0.04*vp[4+row];
+    }
+}
+
+reflection_changed(cache: *MaterialLight, vp: []f32, hist: []Block,
+    foff: int, toff: int, n: int, block_t: []f32, lagx: []f32, lagz: []f32,
+    px: f32, py: f32, pz: f32, want_player: int, pru_x: f32, pru_z: f32): bool {
+    key: int = cache.fixed_key*31 + n;
+    key = key*31 + want_player;
+    key = key*31 + (px*128.0) as int;
+    key = key*31 + (py*128.0) as int;
+    key = key*31 + (pz*128.0) as int;
+    key = key*31 + (pru_x*128.0) as int;
+    key = key*31 + (pru_z*128.0) as int;
+    key = key*31 + (lagx[1023]*128.0) as int;
+    key = key*31 + (lagz[1023]*128.0) as int;
+    for i in 0..n {
+        a: Block = hist[foff+i];
+        b: Block = hist[toff+i];
+        key = key*31 + pack_pos(a.column,a.row,a.layer,a.mounted);
+        key = key*31 + pack_pos(b.column,b.row,b.layer,b.mounted);
+        key = key*31 + b.id + b.shape*13 + b.ramp*17;
+        key = key*31 + (block_t[i]*1024.0) as int;
+        if (i < len(lagx) && i < len(lagz)) {
+            key = key*31 + (lagx[i]*128.0) as int;
+            key = key*31 + (lagz[i]*128.0) as int;
+        }
+    }
+    dirty: bool = !cache.reflection_ready || cache.reflection_key != key;
+    // Compare the actual reflected projection, not camera cells or rounded bounds.
+    for row in 0..4 {
+        if (cache.reflection_vp[row] != vp[row] || cache.reflection_vp[4+row] != -vp[4+row] ||
+            cache.reflection_vp[8+row] != vp[8+row] ||
+            cache.reflection_vp[12+row] != vp[12+row]-0.04*vp[4+row]) { dirty = true; }
+    }
+    cache.reflection_key = key;
+    cache.reflection_ready = true;
+    if (dirty) { water_reflection_matrix(cache.reflection_vp,vp); }
+    dirty;
+}
+
+contact_stamp(pixels: []i8, ox: int, oz: int, cx: f32, cz: f32,
+    half: f32, strength: f32) {
+    // Rounded-square footprint, fading over 0.55 cells beyond the object.
+    radius: f32 = half + 0.55;
+    x0: int = floor_i((cx - radius - ox as f32) * CONTACT_SCALE as f32);
+    x1: int = floor_i((cx + radius - ox as f32) * CONTACT_SCALE as f32) + 1;
+    z0: int = floor_i((cz - radius - oz as f32) * CONTACT_SCALE as f32);
+    z1: int = floor_i((cz + radius - oz as f32) * CONTACT_SCALE as f32) + 1;
+    if (x0 < 0) { x0 = 0; } if (x1 > CONTACT_SIZE) { x1 = CONTACT_SIZE; }
+    if (z0 < 0) { z0 = 0; } if (z1 > CONTACT_SIZE) { z1 = CONTACT_SIZE; }
+    for z in z0..z1 {
+        for x in x0..x1 {
+            dx: f32 = ox as f32 + (x as f32 + 0.5) / CONTACT_SCALE as f32 - cx;
+            dz: f32 = oz as f32 + (z as f32 + 0.5) / CONTACT_SCALE as f32 - cz;
+            if (dx < 0.0) { dx = -dx; } if (dz < 0.0) { dz = -dz; }
+            dx = dx - half; dz = dz - half;
+            if (dx < 0.0) { dx = 0.0; } if (dz < 0.0) { dz = 0.0; }
+            edge: f32 = 1.0 - (dx*dx + dz*dz) / (0.55*0.55);
+            if (edge > 0.0) {
+                value: int = (strength * 255.0 * edge*edge) as int;
+                at: int = z * CONTACT_SIZE + x;
+                prev: int = pixels[at] as int;
+                if (prev < 0) { prev = prev + 256; }
+                // Union rather than addition: adjoining walls must not become black.
+                if (value > prev) { pixels[at] = value trunc i8; }
+            }
+        }
+    }
+}
+
+contact_pose(cache: *MaterialLight, slot: int, x: f32, z: f32, y: f32, half: f32): bool {
+    strength: f32 = 1.0 - y;
+    if (strength < 0.0) { strength = 0.0; }
+    if (strength > 1.0) { strength = 1.0; }
+    base: int = slot * 4;
+    qx: int = floor_i(x * 64.0);
+    qz: int = floor_i(z * 64.0);
+    qs: int = (strength * 255.0) as int;
+    qh: int = (half * 64.0) as int;
+    changed: bool = cache.stamps[base] != qx || cache.stamps[base+1] != qz ||
+        cache.stamps[base+2] != qs || cache.stamps[base+3] != qh;
+    cache.stamps[base] = qx; cache.stamps[base+1] = qz;
+    cache.stamps[base+2] = qs; cache.stamps[base+3] = qh;
+    changed;
+}
+
+update_material_light(cache: *MaterialLight, light: *LampLight,
+    bricks: []Brick, nbrick: int, lamps: []Lamp, nlamps: int,
+    hist: []Block, foff: int, toff: int, n: int, t: f32, block_t: []f32,
+    ids_from: []int, visible: []int, nvis: int,
+    px: f32, py: f32, pz: f32, want_player: int,
+    cx: f32, cy: f32, cz: f32, focus_x: f32, focus_z: f32) {
+    key: int = lamp_key(lamps, nlamps) * 31 + nbrick;
+    for i in 0..nbrick {
+        key = key * 31 + bricks[i].column;
+        key = key * 31 + bricks[i].row;
+    }
+    dirty: bool = cache.x != light.x || cache.z != light.z || cache.fixed_key != key;
+    if (dirty) {
+        cache.x = light.x; cache.z = light.z; cache.fixed_key = key;
+        for i in 0..len(cache.fixed) { cache.fixed[i] = 0i8; }
+        for i in 0..nbrick {
+            contact_stamp(cache.fixed, cache.x, cache.z, bricks[i].column as f32 + 0.5,
+                bricks[i].row as f32 + 0.5, 0.32, 0.85);
+        }
+        for i in 0..nlamps {
+            contact_stamp(cache.fixed, cache.x, cache.z, lamps[i].column as f32 + 0.5,
+                lamps[i].row as f32 + 0.5, 0.12, 0.65);
+        }
+    }
+    count: int = 0;
+    for k in 0..nvis {
+        bi: int = visible[k];
+        b: Block = hist[toff + bi];
+        if (parked_block(b) == 0) {
+            x: f32 = b.column as f32 + 0.5;
+            z: f32 = b.row as f32 + 0.5;
+            y: f32 = b.layer as f32;
+            fi: int = -1;
+            if (foff != toff) { fi = hist_id_at(ids_from, hist, foff, n, b.id); }
+            if (fi >= 0) {
+                a: Block = hist[foff + fi];
+                bt: f32 = block_anim_t(block_t, bi, t);
+                x = lerp(a.column as f32 + 0.5, x, bt);
+                z = lerp(a.row as f32 + 0.5, z, bt);
+                y = lerp(a.layer as f32, y, bt);
+            }
+            if (contact_pose(cache, count, x, z, y, 0.38)) { dirty = true; }
+            count = count + 1;
+        }
+    }
+    if (want_player != 0) {
+        if (contact_pose(cache, count, px + 0.5, pz + 0.5, py - 0.55, 0.35)) { dirty = true; }
+        count = count + 1;
+    }
+    if (cache.count != count) { dirty = true; cache.count = count; }
+    glActiveTexture(33987);
+    glBindTexture(3553, cache.tex);
+    if (dirty) {
+        memcpy(cache.pixels, 0, cache.fixed, 0, len(cache.pixels));
+        for i in 0..count {
+            base: int = i * 4;
+            if (cache.stamps[base+2] > 0) {
+                contact_stamp(cache.pixels, cache.x, cache.z,
+                    cache.stamps[base] as f32 / 64.0, cache.stamps[base+1] as f32 / 64.0,
+                    cache.stamps[base+3] as f32 / 64.0, cache.stamps[base+2] as f32 / 255.0);
+            }
+        }
+        glPixelStorei(3317, 1);
+        glTexSubImage2D(3553, 0, 0, 0, CONTACT_SIZE, CONTACT_SIZE, 6409, 5121, cache.pixels);
+    }
+    for i in 0..2 {
+        glUseProgram(cache.programs[i]);
+        glUniform3f(cache.cameras[i], cx, cy, cz);
+        glUniform2f(cache.origins[i], cache.x as f32, cache.z as f32);
+        glUniform1f(cache.enabled[i], 1.0);
+    }
+    // Diffuse pools still include every lamp. Only local highlights need a bound.
+    for slot in 0..4 {
+        best: int = -1;
+        distance: f32 = 225.0;
+        for i in 0..nlamps {
+            used: bool = false;
+            for j in 0..slot { if (cache.nearest[j] == i) { used = true; } }
+            dx: f32 = lamps[i].column as f32 + 0.5 - focus_x;
+            dz: f32 = lamps[i].row as f32 + 0.5 - focus_z;
+            d: f32 = dx*dx + dz*dz;
+            if (!used && d < distance) { best = i; distance = d; }
+        }
+        cache.nearest[slot] = best;
+        glUseProgram(cache.programs[0]);
+        if (best < 0) {
+            glUniform3f(cache.lamps[slot], 0.0, -100.0, 0.0);
+        } else {
+            p: Lamp = lamps[best];
+            h: f32 = 0.38;
+            if (p.style == 1) { h = 1.85; }
+            glUniform3f(cache.lamps[slot], p.column as f32 + 0.5, h, p.row as f32 + 0.5);
+        }
+    }
+    glActiveTexture(33984);
+}

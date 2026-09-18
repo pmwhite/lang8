@@ -111,7 +111,7 @@ main(argc: int, argv: []str): int {
             level.nrooms);
     }
     prepare_room_starts(slurp_path(path), level.rooms, level.nrooms, level.bricks,
-        level.nbricks, level.goals, level.ngoals, level.room_starts);
+        level.nbricks, level.ground, level.nground, level.goals, level.ngoals, level.room_starts);
     d0: ?*i8 = XOpenDisplay(null);
     if (d0 == null) {
         write(2, "XOpenDisplay failed (need DISPLAY / XWayland)\n", len("XOpenDisplay failed (need DISPLAY / XWayland)\n"));
@@ -195,6 +195,8 @@ uniform vec2 ramp_up;
 varying vec3 vworld;
 varying vec3 vnrm;
 varying vec3 vvcol;
+varying float vheight;
+varying vec4 vclip;
 void main() {
   vec3 lp = pos * scale;
   float sy = max(scale.y, 0.0001);
@@ -228,9 +230,11 @@ void main() {
   }
   vec3 w = origin + local;
   gl_Position = vp * vec4(w, 1.0);
+  vclip = gl_Position;
   vworld = w;
   vnrm = nn;
   vvcol = vcol;
+  vheight = pos.y + 0.5;
 }
 """;
     fs: []i8 = """
@@ -245,12 +249,22 @@ uniform vec2 lamp_origin;
 uniform float emission;
 uniform vec2 mask_origin;
 uniform float ground;
+uniform float water_time;
 uniform float cut;
 uniform float brick;
 uniform float fade;
+uniform vec3 camera;
+uniform vec3 spec_lamps[4];
+uniform sampler2D contact_map;
+uniform vec2 contact_origin;
+uniform float material_on;
+uniform sampler2D reflection_map;
+uniform float reflection_on;
 varying vec3 vworld;
 varying vec3 vnrm;
 varying vec3 vvcol;
+varying float vheight;
+varying vec4 vclip;
 vec2 hash2(vec2 p) {
   vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
   p3 += dot(p3, p3.yzx + 33.33);
@@ -270,13 +284,65 @@ float grass_at(vec2 cell) {
 float stone_at(vec2 cell) {
   return step(0.50, sample_ground(cell));
 }
+float water_at(vec2 cell) {
+  float r = sample_ground(cell);
+  return step(0.08, r) * (1.0 - step(0.15, r));
+}
+float broad_noise(vec2 p) {
+  vec2 c = floor(p);
+  vec2 t = fract(p);
+  t = t*t*(3.0-2.0*t);
+  return mix(mix(hash2(c).x, hash2(c+vec2(1.0,0.0)).x, t.x),
+             mix(hash2(c+vec2(0.0,1.0)).x, hash2(c+1.0).x, t.x), t.y);
+}
+vec3 evening_sky(vec3 r) {
+  // A fixed environment: cooler overhead, softer and warmer near the horizon.
+  float up = smoothstep(-0.05, 0.9, r.y);
+  vec3 sky = mix(vec3(0.48,0.43,0.36), vec3(0.16,0.28,0.46), up);
+  float clouds = broad_noise(r.xz * 3.5 / max(r.y + 0.65, 0.3));
+  sky = mix(sky, vec3(0.52,0.59,0.64), smoothstep(0.43,0.76,clouds)*0.5);
+  return sky;
+}
 void main() {
+  if (reflection_on < -0.5 && vworld.y < -0.02) discard;
   vec3 n = normalize(vnrm);
+  vec3 V = normalize(camera - vworld);
+  if (material_on < 0.5) V = normalize(vec3(1.0,2.0,2.0));
   vec3 albedo = color;
+  float specular = 0.025;
+  float gloss = 22.0;
+  float water = 0.0;
+  float cavity = 1.0;
   if (ground > 0.5) {
     vec2 p = vworld.xz;
     vec2 cell = floor(p);
     vec2 f = fract(p);
+    if (water_at(cell) > 0.5) {
+      // World-space waves join across cells and stay fixed as the camera moves.
+      float a = p.x * 3.8 + p.y * 1.4 + water_time * 0.5;
+      float b = p.x * -1.7 + p.y * 5.2 - water_time * 0.35;
+      float wave = sin(a) * 0.55 + sin(b) * 0.45;
+      float shore = 1.0;
+      if (water_at(cell + vec2(-1.0, 0.0)) < 0.5) shore = min(shore, f.x);
+      if (water_at(cell + vec2(1.0, 0.0)) < 0.5) shore = min(shore, 1.0 - f.x);
+      if (water_at(cell + vec2(0.0, -1.0)) < 0.5) shore = min(shore, f.y);
+      if (water_at(cell + vec2(0.0, 1.0)) < 0.5) shore = min(shore, 1.0 - f.y);
+      // Round the inner shoreline around diagonal land cells as well.
+      if (water_at(cell + vec2(-1.0, -1.0)) < 0.5) shore = min(shore, length(f));
+      if (water_at(cell + vec2(1.0, -1.0)) < 0.5) shore = min(shore, length(f - vec2(1.0, 0.0)));
+      if (water_at(cell + vec2(-1.0, 1.0)) < 0.5) shore = min(shore, length(f - vec2(0.0, 1.0)));
+      if (water_at(cell + vec2(1.0, 1.0)) < 0.5) shore = min(shore, length(f - vec2(1.0)));
+      float bank = 1.0 - smoothstep(0.015, 0.12, shore);
+      float shallows = 1.0 - smoothstep(0.05, 0.48, shore);
+      albedo = mix(vec3(0.035, 0.13, 0.16), vec3(0.14, 0.27, 0.24), shallows);
+      albedo *= 0.96 + 0.04 * wave;
+      albedo = mix(albedo, vec3(0.25, 0.235, 0.17), bank);
+      n = normalize(vec3(-0.10 * cos(a) + 0.038 * cos(b), 1.0,
+                         -0.037 * cos(a) - 0.115 * cos(b)));
+      water = 1.0 - bank;
+      specular = mix(0.015, 0.85, water);
+      gloss = 100.0;
+    } else {
     float ground_grass = grass_at(cell);
     float md = 8.0;
     float md2 = 8.0;
@@ -318,7 +384,23 @@ void main() {
       albedo = grass;
     }
     albedo = mix(albedo, stone * mix(0.80, 0.86, stone_m), stone_m);
+    float patch = 0.5 + 0.5*sin(p.x*0.31 + sin(p.y*0.23))*sin(p.y*0.27+0.8);
+    albedo *= mix(0.87, 1.10, patch);
+    float wet = 0.0;
+    if (reflection_on > 0.5) {
+    wet = max(max(water_at(cell+vec2(1.0,0.0))*f.x,
+                        water_at(cell+vec2(-1.0,0.0))*(1.0-f.x)),
+                    max(water_at(cell+vec2(0.0,1.0))*f.y,
+                        water_at(cell+vec2(0.0,-1.0))*(1.0-f.y)));
+    }
+    // Dark damp banks: stronger only close to the neighboring water cell.
+    wet = smoothstep(0.2,0.95,wet) * (0.5 + 0.5*patch);
+    albedo *= 1.0 - 0.20*wet;
+    specular = mix(0.008, mix(0.06,0.14,hv.y), stone_m) + 0.12*wet;
+    gloss = mix(12.0, 42.0, stone_m) + 28.0*wet;
+    cavity = mix(0.87,1.0,smoothstep(0.015,0.13,edge));
     n = normalize(mix(n, normalize(vec3(-mr.x, 0.78, -mr.y)), stone_m * 0.32));
+    }
   } else if (cut > 0.5) {
     vec3 an = abs(n);
     vec2 uv = vworld.xz;
@@ -338,6 +420,10 @@ void main() {
     float cham = 1.0 - pow(max(an.x, max(an.y, an.z)), 6.0);
     albedo = mix(albedo, albedo * vec3(0.78, 0.90, 0.64), cham * 0.28);
     n = normalize(n + vec3(hp.x - 0.5, hp.y - 0.5, layer - 0.5) * 0.035);
+    specular = 0.10;
+    gloss = 30.0;
+    // A restrained seam at the foot of each block also separates stacked pieces.
+    cavity = mix(0.82,1.0,smoothstep(0.0,0.18,vheight));
   } else if (brick > 0.5) {
     vec3 an = abs(n);
     vec3 clay = vvcol;
@@ -345,6 +431,8 @@ void main() {
     float cham = 1.0 - pow(max(an.x, max(an.y, an.z)), 6.0);
     albedo = mix(clay, clay * vec3(0.86, 0.90, 0.80), cham * 0.16);
     albedo *= 0.78;
+    specular = 0.035;
+    gloss = 14.0;
   }
   vec3 L = normalize(vec3(4.0, 11.0, 3.0));
   float ndl = max(dot(n, L), 0.0);
@@ -360,9 +448,53 @@ void main() {
   float warmth = texture2D(lamp_map, clamp(lamp_uv, 0.0, 1.0)).r;
   if (lamp_uv.x < 0.0 || lamp_uv.x > 1.0 || lamp_uv.y < 0.0 || lamp_uv.y > 1.0) warmth = 0.0;
   warmth *= 1.0 - smoothstep(2.0, 6.0, vworld.y);
-  vec3 light_color = vec3(0.76, 0.86, 1.0) * (0.24 + 0.48 * ndl * vis);
+  float contact = 0.0;
+  vec2 contact_uv = (vworld.xz - contact_origin) / 128.0;
+  if (material_on > 0.5 && vworld.y < 0.65 &&
+      contact_uv.x > 0.0 && contact_uv.x < 1.0 && contact_uv.y > 0.0 && contact_uv.y < 1.0) {
+    contact = texture2D(contact_map, contact_uv).r * (1.0-smoothstep(0.0,0.65,vworld.y));
+  }
+  vec3 ambient = mix(vec3(0.13,0.105,0.075), vec3(0.19,0.245,0.32), n.y*0.5+0.5);
+  ambient *= cavity * (1.0-0.48*contact);
+  vec3 light_color = ambient + vec3(0.76, 0.86, 1.0) * (0.48 * ndl * vis);
   light_color += vec3(1.60, 0.87, 0.36) * warmth * (0.72 + 0.28 * max(n.y, 0.0));
   vec3 lit = albedo * light_color + albedo * emission;
+  if (water > 0.0) {
+    vec3 R = reflect(-V,n);
+    float fresnel = 0.025 + 0.975*pow(1.0-max(dot(n,V),0.0),5.0);
+    vec3 reflected = evening_sky(R);
+    if (reflection_on > 0.5 && material_on > 0.5) {
+      vec2 uv = vclip.xy / vclip.w * 0.5 + 0.5;
+      uv += n.xz * vec2(0.012,0.018);
+      vec4 scene = texture2D(reflection_map,clamp(uv,0.001,0.999));
+      float edge = smoothstep(0.0,0.025,min(min(uv.x,uv.y),min(1.0-uv.x,1.0-uv.y)));
+      // Clear pixels contain the procedural sky; silhouettes are actual scene geometry.
+      reflected = mix(reflected,scene.rgb,scene.a*edge);
+    }
+    // Art-directed reflectance keeps the water readable from the elevated game camera.
+    lit = mix(lit, reflected, water*(0.16+0.84*fresnel));
+  }
+  if (specular > 0.02) {
+    vec3 H = normalize(L+V);
+    lit += vec3(0.76,0.86,1.0)*specular*pow(max(dot(n,H),0.0),gloss)*vis*ndl;
+  }
+  if (material_on > 0.5 && specular > 0.02) {
+    for (int i=0; i<4; i++) {
+      vec3 delta = spec_lamps[i] - vworld;
+      float d2 = dot(delta,delta);
+      if (spec_lamps[i].y > 0.0 && d2 < 64.0) {
+        vec3 LL = delta * inversesqrt(max(d2,0.001));
+        vec3 HH = normalize(LL+V);
+        float shine = pow(max(dot(n,HH),0.0),gloss);
+        lit += vec3(1.0,0.57,0.24)*specular*shine * max(dot(n,LL),0.0)
+               * (1.0-smoothstep(36.0,64.0,d2)) / (1.0+0.25*d2);
+      }
+    }
+  }
+  if (material_on > 0.5) {
+    float haze = smoothstep(24.0,65.0,length(camera.xz-vworld.xz))*0.13;
+    lit = mix(lit,vec3(0.095,0.13,0.17),haze);
+  }
   lit += vec3(0.006, 0.005, 0.003) * (1.0 - smoothstep(0.0, 0.06, lit));
   lit = lit / (1.0 + max(lit - 1.10, 0.0));
   gl_FragColor = vec4(lit, fade);
@@ -448,13 +580,15 @@ varying vec3 vworld;
 varying vec3 vnrm;
 varying float vroot;
 varying float vrand;
+varying float vmeadow;
 void main() {
   vec2 base = vcol.xy;
   float ca = vcol.z;
   float sa = vcol.w;
-  vec2 seed = vaux;
+  vec2 seed = vec2(fract(vaux.x),vaux.y);
   vec2 local_xz = vec2(pos.x * ca - pos.z * sa, pos.x * sa + pos.z * ca) * 1.12;
-  float height = mix(0.24, 0.37, seed.y);
+  float meadow = floor(vaux.x)/255.0*2.0-1.0;
+  float height = mix(0.24, 0.37, seed.y) * (0.92 + 0.18*meadow);
   float t = clamp(pos.y, 0.0, 1.1);
   vec2 actor_delta = base - actor;
   float actor_dist = length(actor_delta);
@@ -476,6 +610,7 @@ void main() {
   vworld = w;
   vroot = t;
   vrand = seed.y;
+  vmeadow = meadow;
   gl_Position = vp * vec4(w, 1.0);
 }
 """;
@@ -564,6 +699,10 @@ void main() {
     grass_fs: []i8 = """
 #version 120
 uniform vec3 light;
+uniform vec3 camera;
+uniform sampler2D contact_map;
+uniform vec2 contact_origin;
+uniform float material_on;
 uniform mat4 light_vp;
 uniform sampler2DShadow shadow_map;
 uniform sampler2D cover_map;
@@ -574,6 +713,7 @@ varying vec3 vworld;
 varying vec3 vnrm;
 varying float vroot;
 varying float vrand;
+varying float vmeadow;
 void main() {
   vec2 cover_uv = (vworld.xz - cover_origin) / 96.0;
   if (cover_uv.x <= 0.0 || cover_uv.x >= 1.0 || cover_uv.y <= 0.0 || cover_uv.y >= 1.0) {
@@ -588,6 +728,8 @@ void main() {
   vec3 albedo = mix(root_color, tip_color, smoothstep(0.0, 0.82, vroot));
   albedo *= 0.92 + 0.12 * vrand;
   albedo += vec3(0.018, 0.022, 0.006) * smoothstep(0.70, 1.0, vroot);
+  float meadow = vmeadow;
+  albedo *= mix(vec3(0.88,0.96,0.85),vec3(1.16,1.06,0.91),meadow*0.5+0.5);
   vec3 L = normalize(vec3(4.0, 11.0, 3.0));
   vec3 n = normalize(vnrm);
   float ndl = abs(dot(n, L));
@@ -600,12 +742,21 @@ void main() {
     vis = shadow2D(shadow_map, vec3(sc.xy, sc.z - bias)).r;
   }
   float key = ndl * vis;
-  float shade = 0.24 + 0.44 * key;
-  shade += 0.055 * back * smoothstep(0.38, 1.0, vroot);
+  vec3 V = normalize(camera-vworld);
+  float transmission = pow(max(dot(-L,V),0.0),3.0) * vis * smoothstep(0.15,0.9,vroot);
+  float shade = 0.20 + 0.44 * key;
+  shade += (0.10 * back + 0.22*transmission) * smoothstep(0.38, 1.0, vroot);
   vec2 lamp_uv = (vworld.xz - lamp_origin) / 128.0;
   float warmth = texture2D(lamp_map, clamp(lamp_uv, 0.0, 1.0)).r;
   if (lamp_uv.x < 0.0 || lamp_uv.x > 1.0 || lamp_uv.y < 0.0 || lamp_uv.y > 1.0) warmth = 0.0;
   vec3 lit = albedo * (shade * vec3(0.76, 0.86, 1.0) + warmth * vec3(1.50, 0.84, 0.34));
+  vec2 contact_uv = (vworld.xz-contact_origin)/128.0;
+  if (material_on > 0.5 && contact_uv.x>0.0 && contact_uv.x<1.0 && contact_uv.y>0.0 && contact_uv.y<1.0) {
+    lit *= 1.0-0.30*texture2D(contact_map,contact_uv).r*(1.0-smoothstep(0.0,0.8,vroot));
+  }
+  vec3 H = normalize(L+V);
+  lit += vec3(0.035,0.044,0.035)*pow(abs(dot(n,H)),24.0)*vis*smoothstep(0.25,0.9,vroot);
+  lit = mix(lit,vec3(0.095,0.13,0.17),smoothstep(24.0,65.0,length(camera.xz-vworld.xz))*0.13);
   lit += vec3(0.006, 0.005, 0.003) * (1.0 - smoothstep(0.0, 0.06, lit));
   gl_FragColor = vec4(lit, 1.0);
 }
@@ -757,6 +908,7 @@ void main() {
     u_lag: int = glGetUniformLocation(prog, "lag");
     u_ramp: int = glGetUniformLocation(prog, "ramp_up");
     u_ground: int = glGetUniformLocation(prog, "ground");
+    u_water_time: int = glGetUniformLocation(prog, "water_time");
     u_cut: int = glGetUniformLocation(prog, "cut");
     u_fade: int = glGetUniformLocation(prog, "fade");
     u_brick: int = glGetUniformLocation(prog, "brick");
@@ -953,6 +1105,7 @@ void main() {
     glClear(16640);
     glXSwapBuffers(dpy, win);
     lamp_light: *LampLight = new_lamp_light(prog, grass_prog, bprog);
+    material_light: *MaterialLight = new_material_light(prog, grass_prog);
     proj: []f32 = new f32[16](0.0);
     view: []f32 = new f32[16](0.0);
     vp: []f32 = new f32[16](0.0);
@@ -1272,6 +1425,8 @@ void main() {
                             paint_brush = BRUSH_GRASS;
                         } else if (ks == 102 || ks == 70) {
                             paint_brush = BRUSH_STONE;
+                        } else if (ks == 97 || ks == 65) {
+                            paint_brush = BRUSH_WATER;
                         } else if (ks == 98 || ks == 66) {
                             paint_brush = BRUSH_BLOCK;
                             brush_shape = 0;
@@ -1669,11 +1824,12 @@ void main() {
                     sc as f32, st_y, sr as f32, 0.0, shape_verts, lagx, lagz, 1, cc,
                     cr, focus_x + vis_lx, vis_y, focus_z + vis_lz, 1, paint_brush,
                     brush_shape, move_mode, move_sel, move_ok, paint_c, paint_r, paint_anchor,
-                    u_ramp, u_ground, u_cut, u_fade, u_brick, d_ramp, 0.0, 0.0, present_us,
+                    u_ramp, u_ground, u_water_time, u_cut, u_fade, u_brick, d_ramp, 0.0, 0.0, present_us,
                     mask_cache, lean_to, lean_from, id_to, id_from, cell_head, cell_link,
                     block_t, prep_cache, sparks, bprog, b_u, bbuf[0], bdprog, bd_u,
                     grass_prog, grass_u, grass_cover, grass_ids[0], grass_ids[1], grass_instances,
-                    grass_blade_n, lamp_light, active.lamps, active.nlamps);
+                    grass_blade_n, lamp_light, active.lamps, active.nlamps,
+                    material_light, active.bricks, active.nbricks);
                 draw_room_start_pads(u_origin, u_scale, u_color, ids[0], active.room_starts,
                     active.nrooms);
                 if (name_mode != 0) {
@@ -1959,6 +2115,7 @@ void main() {
                                     play_clock[2] = started;
                                     play_try_dir(active.blocks, active.nblocks, active.rooms,
                                         active.nrooms, active.bricks, active.nbricks,
+                                        active.ground, active.nground,
                                         hist, hpc, hpr, hph, hpm, hms, play_clock,
                                         play_pose, dc, dr, play_pend, room_ids, room_hn,
                                         rewind_snap, rewind_n, rewind_cur, room_ghosting,
@@ -2132,7 +2289,7 @@ void main() {
                     play_clock[1] = hn;
                     play_clock[2] = started;
                     play_try_dir(active.blocks, active.nblocks, active.rooms, active.nrooms,
-                        active.bricks, active.nbricks, hist, hpc, hpr, hph, hpm, hms,
+                        active.bricks, active.nbricks, active.ground, active.nground, hist, hpc, hpr, hph, hpm, hms,
                         play_clock, play_pose, chained_dir[0], chained_dir[1], play_pend,
                         room_ids, room_hn, rewind_snap, rewind_n, rewind_cur, room_ghosting,
                         active.goals, active.ngoals, world.solved, stream_until, stream_tx,
@@ -2309,12 +2466,13 @@ void main() {
                     focus_x, focus_z, focus_x, play_camera_y, focus_z + play_camera_dist,
                     u_mask_origin, vp, lcam, lvp, shadow_bounds, lx, ly, lz, hist, foff, toff, active.nblocks,
                     px, py, pz, t, shape_verts, lagx, lagz, 1, 0, 0, 0.0, 0.0, 0.0,
-                    0, BRUSH_DIRT, 0, 0, 0, 1, 0, 0, 0, u_ramp, u_ground, u_cut, u_fade,
+                    0, BRUSH_DIRT, 0, 0, 0, 1, 0, 0, 0, u_ramp, u_ground, u_water_time, u_cut, u_fade,
                     u_brick, d_ramp, pru_x, pru_z, present_us, mask_cache, lean_to,
                     lean_from, id_to, id_from, cell_head, cell_link, block_t, prep_cache,
                     sparks, bprog, b_u, bbuf[0], bdprog, bd_u, grass_prog, grass_u,
                     grass_cover, grass_ids[0], grass_ids[1], grass_instances, grass_blade_n,
-                    lamp_light, active.lamps, active.nlamps);
+                    lamp_light, active.lamps, active.nlamps,
+                    material_light, active.bricks, active.nbricks);
                 fi_t: int = room_at(active.rooms, active.nrooms, fc, fr);
                 ti_t: int = room_at(active.rooms, active.nrooms, tc2, tr2);
                 from_title: []i8 = "";

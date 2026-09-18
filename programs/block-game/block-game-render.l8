@@ -1,6 +1,7 @@
 tag block_game;
 use_tag gl, x11, freetype;
 import "block-game-lighting.l8";
+import "block-game-materials.l8";
 
 // Shared graphics setup, world geometry, effects, and frame rendering.
 
@@ -900,7 +901,16 @@ fill_grass_instance(dst: []f32, offset: int, wx: f32, wz: f32) {
     dst[offset + 1] = wz + (seed_y - 0.5) * 0.13;
     dst[offset + 2] = cos_f32(angle);
     dst[offset + 3] = sin_f32(angle);
-    dst[offset + 4] = seed_x;
+    // Pack a stable meadow tint into the integer part of the existing wind seed.
+    // This avoids three trigonometric evaluations per blade vertex and fragment,
+    // without increasing the instance buffers or changing random blade coverage.
+    tau: f32 = 6.2831853;
+    mz: f32 = sin_f32(fract_f32(wz * 0.23 / tau) * tau);
+    meadow: f32 = sin_f32(fract_f32((wx * 0.31 + mz) / tau) * tau) *
+        sin_f32(fract_f32((wz * 0.27 + 0.8) / tau) * tau);
+    tint: int = ((meadow * 0.5 + 0.5) * 255.0) as int;
+    if (tint < 0) { tint = 0; } if (tint > 255) { tint = 255; }
+    dst[offset + 4] = tint as f32 + seed_x * 0.999;
     dst[offset + 5] = seed_y;
 }
 
@@ -1996,7 +2006,10 @@ mark_ground_cell(
     u: int = column - origin_c;
     v: int = row - origin_r;
     if (u >= 0 && u < MASK_SIZE && v >= 0 && v < MASK_SIZE) {
-        if (stone != 0 && style == GROUND_GRASS) {
+        if (style == GROUND_WATER) {
+            // Below the grass threshold, distinct from dirt and both stone codes.
+            cmask[v * MASK_SIZE + u] = 32i8;
+        } else if (stone != 0 && style == GROUND_GRASS) {
             cmask[v * MASK_SIZE + u] = 0i8 - 1i8;
         } else if (stone != 0) {
             cmask[v * MASK_SIZE + u] = 0i8 - 91i8;
@@ -3753,6 +3766,7 @@ draw_frame(
     want_pend: int,
     u_ramp: int,
     u_ground: int,
+    u_water_time: int,
     u_cut: int,
     u_fade: int,
     u_brick: int,
@@ -3784,7 +3798,10 @@ draw_frame(
     grass_blade_n: int,
     lamp_light: *LampLight,
     lamps: []Lamp,
-    nlamps: int
+    nlamps: int,
+    material_light: *MaterialLight,
+    bricks: []Brick,
+    nbrick: int
 ) {
     update_lamp_light(lamp_light, lamps, nlamps, shadow_bounds);
     pfc: int = floor_i(focus_x);
@@ -3839,6 +3856,15 @@ draw_frame(
         prep_cache[7] = 1;
         for edge in 0..4 { prep_cache[8 + edge] = floor_i(shadow_bounds[edge]); }
     }
+    if (split_hist != 0) {
+        update_material_light(material_light, lamp_light, bricks, nbrick, lamps, nlamps,
+            hist, foff, toff, n, t, block_t, id_from, cell_link, nvis,
+            px, py, pz, want_player, camera_x, camera_y, camera_z, focus_x, focus_z);
+    } else {
+        update_material_light(material_light, lamp_light, bricks, nbrick, lamps, nlamps,
+            hist, toff, toff, n, t, block_t, id_to, cell_link, nvis,
+            px, py, pz, want_player, camera_x, camera_y, camera_z, focus_x, focus_z);
+    }
     stall0: int = mono_us();
     glBindFramebuffer(36160, fbo);
     glViewport(0, 0, SHADOW_SIZE, SHADOW_SIZE);
@@ -3875,6 +3901,59 @@ draw_frame(
     bind_mesh(bbuf);
     draw_sparks(bd_u[1], bd_u[2], bd_u[3], bd_u[4], bd_u[5], bd_u[6], sparks, focus_x,
         focus_z, lx, ly, lz, focus_x, 0.0, focus_z, 0.0, 0.0, -1.0);
+    reflecting: bool = water_in_view(ground_cells, nground, vp);
+    glUseProgram(prog);
+    glUniform1f(material_light.reflection_on, 0.0);
+    if (reflecting && reflection_changed(material_light, vp, hist, foff, toff, n,
+        block_t, lagx, lagz, px, py, pz, want_player, pru_x, pru_z)) {
+        // No feedback from the reflection texture while it is the render target.
+        glActiveTexture(33988);
+        glBindTexture(3553, 0u32);
+        glActiveTexture(33984);
+        glBindTexture(3553, stex);
+        glBindFramebuffer(36160, material_light.reflection_fbo);
+        glDrawBuffer(36064);
+        glReadBuffer(36064);
+        glViewport(0, 0, 480, 288);
+        glClearColor(0.0, 0.0, 0.0, 0.0);
+        glClear(16640);
+        glUniform1f(material_light.reflection_on, -1.0);
+        glUniform1f(u_ground, 0.0);
+        glUniform1f(u_cut, 0.0);
+        glUniform1f(u_fade, 1.0);
+        glUniform2f(u_ramp, 0.0, 0.0);
+        glUniformMatrix4fv(u_vp, 1, 0, material_light.reflection_vp);
+        glUniformMatrix4fv(u_light_vp, 1, 0, lvp);
+        glUniform3f(material_light.cameras[0], camera_x, -0.04-camera_y, camera_z);
+        draw_hedges(u_origin, u_scale, u_color, u_lag, brick_buf, brick_n, u_brick);
+        bind_mesh(cube_buf);
+        for i in 0..nlamps {
+            p: Lamp = lamps[i];
+            if (shadow_cell(p.column, p.row, shadow_bounds, 3.0)) {
+                draw_lantern(u_origin, u_scale, u_color, lamp_light.emission,
+                    p.column as f32+0.5, p.row as f32+0.5, p.style);
+            }
+        }
+        if (split_hist != 0) {
+            draw_casters(u_origin, u_scale, u_color, chamfer_buf, prism_buf, ramp_buf,
+                chamfer_n, hist, foff, toff, n, px, py, pz, t, shape_verts, u_lag, lagx,
+                lagz, want_player, u_ramp, pru_x, pru_z, u_cut, u_fade, lean_to, lean_from,
+                id_from, has_lean, cell_link, nvis, block_t);
+        } else {
+            draw_casters(u_origin, u_scale, u_color, chamfer_buf, prism_buf, ramp_buf,
+                chamfer_n, hist, foff, toff, n, px, py, pz, t, shape_verts, u_lag, lagx,
+                lagz, want_player, u_ramp, pru_x, pru_z, u_cut, u_fade, lean_to, lean_to,
+                id_to, has_lean, cell_link, nvis, block_t);
+        }
+        glUniform1f(u_cut, 0.0);
+        glUniform1f(material_light.reflection_on, 1.0);
+        glUniform3f(material_light.cameras[0], camera_x, camera_y, camera_z);
+        glActiveTexture(33988);
+        glBindTexture(3553, material_light.reflection);
+        glActiveTexture(33984);
+        glClearColor(0.07, 0.06, 0.055, 1.0);
+    }
+    if (reflecting) { glUniform1f(material_light.reflection_on, 1.0); }
     stall1: int = mono_us();
     glBindFramebuffer(36160, 0u32);
     glDrawBuffer(1029);
@@ -3943,6 +4022,8 @@ draw_frame(
     glActiveTexture(33984);
     glBindTexture(3553, stex);
     glUniform2f(u_mask_origin, origin_c as f32, origin_r as f32);
+    // Both wave phases wrap at whole cycles, with small f32 time values.
+    glUniform1f(u_water_time, (mono_ms() % 125664) as f32 * 0.001);
     glUniform1f(u_ground, 1.0);
     draw_box(u_origin, u_scale, u_color, focus_x, 0.0 - 0.08, focus_z, 80.0, 0.12,
         80.0, 0.22, 0.20, 0.18, 36);
@@ -3979,6 +4060,10 @@ draw_frame(
                 anchor_r = 0.58;
                 anchor_g = 0.58;
                 anchor_b = 0.55;
+            } else if (ground_brush == BRUSH_WATER) {
+                anchor_r = 0.12;
+                anchor_g = 0.40;
+                anchor_b = 0.46;
             } else if (ground_brush == BRUSH_BLOCK) {
                 anchor_r = 0.18;
                 anchor_g = 0.62;
@@ -4062,4 +4147,6 @@ draw_frame(
     glDepthMask(1);
     glDisable(3042);
     glUseProgram(prog);
+    // The HUD's material thumbnails use their own little scene, not world contacts.
+    glUniform1f(material_light.enabled[0], 0.0);
 }
