@@ -181,6 +181,8 @@ main(argc: int, argv: []str): int {
     if (glXMakeCurrent(dpy, win, ctx) == 0) {
         die("glXMakeCurrent failed");
     }
+    write(2, "Height-field water: F7 toggles simulation, F8 makes ripples\n",
+        len("Height-field water: F7 toggles simulation, F8 makes ripples\n"));
     vsync: bool = set_vsync(dpy, win, true);
     vs: []i8 = """
 #version 120
@@ -192,12 +194,19 @@ uniform vec3 origin;
 uniform vec3 scale;
 uniform vec2 lag;
 uniform vec2 ramp_up;
+uniform float water_mesh;
 varying vec3 vworld;
 varying vec3 vnrm;
 varying vec3 vvcol;
 varying float vheight;
 varying vec4 vclip;
 void main() {
+  if (water_mesh>0.5) {
+    vworld=pos; vnrm=nrm; vvcol=vec3(0.0); vheight=0.0;
+    vclip=vp*vec4(pos.x,-0.02,pos.z,1.0);
+    gl_Position=vp*vec4(pos,1.0);
+    return;
+  }
   vec3 lp = pos * scale;
   float sy = max(scale.y, 0.0001);
   float yb = lp.y + 0.5 * sy;
@@ -244,12 +253,14 @@ uniform vec3 light;
 uniform mat4 light_vp;
 uniform sampler2DShadow shadow_map;
 uniform sampler2D check_map;
+uniform sampler2D fluid_mask;
+uniform vec2 fluid_origin;
 uniform sampler2D lamp_map;
 uniform vec2 lamp_origin;
 uniform float emission;
 uniform vec2 mask_origin;
 uniform float ground;
-uniform float water_time;
+uniform float water_mesh;
 uniform float cut;
 uniform float brick;
 uniform float fade;
@@ -313,15 +324,21 @@ void main() {
   float gloss = 22.0;
   float water = 0.0;
   float cavity = 1.0;
-  if (ground > 0.5) {
+  if (water_mesh>0.5) {
+    // The volume also includes its submerged sides/bottom. Clip only material
+    // hidden inside solid land; airborne drops above the bank remain visible.
+    if (water_at(floor(vworld.xz))<0.5 && vworld.y<-0.017) discard;
+    albedo=vec3(0.055,0.17,0.19);
+    water=1.0; specular=0.85; gloss=100.0;
+  } else if (ground > 0.5) {
     vec2 p = vworld.xz;
     vec2 cell = floor(p);
     vec2 f = fract(p);
     if (water_at(cell) > 0.5) {
-      // World-space waves join across cells and stay fixed as the camera moves.
-      float a = p.x * 3.8 + p.y * 1.4 + water_time * 0.5;
-      float b = p.x * -1.7 + p.y * 5.2 - water_time * 0.35;
-      float wave = sin(a) * 0.55 + sin(b) * 0.45;
+      // Cut a hole in the flat ground so troughs remain visible below its plane.
+      vec2 fluid_uv=(cell+0.5-fluid_origin)/32.0;
+      bool simulated=material_on>0.5 && fluid_uv.x>0.0 && fluid_uv.y>0.0 &&
+          fluid_uv.x<1.0 && fluid_uv.y<1.0 && texture2D(fluid_mask,fluid_uv).r>0.1;
       float shore = 1.0;
       if (water_at(cell + vec2(-1.0, 0.0)) < 0.5) shore = min(shore, f.x);
       if (water_at(cell + vec2(1.0, 0.0)) < 0.5) shore = min(shore, 1.0 - f.x);
@@ -333,12 +350,11 @@ void main() {
       if (water_at(cell + vec2(-1.0, 1.0)) < 0.5) shore = min(shore, length(f - vec2(0.0, 1.0)));
       if (water_at(cell + vec2(1.0, 1.0)) < 0.5) shore = min(shore, length(f - vec2(1.0)));
       float bank = 1.0 - smoothstep(0.015, 0.12, shore);
+      // Retain a very narrow bank lip behind the reconstructed water silhouette.
+      if (simulated && shore>0.018) discard;
       float shallows = 1.0 - smoothstep(0.05, 0.48, shore);
       albedo = mix(vec3(0.035, 0.13, 0.16), vec3(0.14, 0.27, 0.24), shallows);
-      albedo *= 0.96 + 0.04 * wave;
       albedo = mix(albedo, vec3(0.25, 0.235, 0.17), bank);
-      n = normalize(vec3(-0.10 * cos(a) + 0.038 * cos(b), 1.0,
-                         -0.037 * cos(a) - 0.115 * cos(b)));
       water = 1.0 - bank;
       specular = mix(0.015, 0.85, water);
       gloss = 100.0;
@@ -908,7 +924,6 @@ void main() {
     u_lag: int = glGetUniformLocation(prog, "lag");
     u_ramp: int = glGetUniformLocation(prog, "ramp_up");
     u_ground: int = glGetUniformLocation(prog, "ground");
-    u_water_time: int = glGetUniformLocation(prog, "water_time");
     u_cut: int = glGetUniformLocation(prog, "cut");
     u_fade: int = glGetUniformLocation(prog, "fade");
     u_brick: int = glGetUniformLocation(prog, "brick");
@@ -1164,8 +1179,8 @@ void main() {
     id_from: []int = new int[4096](0);
     cell_head: []int = new int[4096](0);
     cell_link: []int = new int[2048](0);
-    col_body: []int = new int[8](0);
-    col_ramp: []int = new int[8](0);
+    col_body: []int = new int[9](0);
+    col_ramp: []int = new int[9](0);
     if (edit_mode != 0) {
         cc: int = 0;
         cr: int = 0;
@@ -1250,7 +1265,11 @@ void main() {
                 match ev {
                     KeyPress -> {
                         ks: int = XLookupKeysym(&ev, 0);
-                        if (ks == 47 || ks == 63) {
+                        if (ks == 65476) {
+                            toggle_height_water(material_light.water);
+                        } else if (ks == 65477) {
+                            request_height_splash(material_light.water);
+                        } else if (ks == 47 || ks == 63) {
                             help_held = 1;
                         } else if (move_mode != 0) {
                             changed: int = 0;
@@ -1824,7 +1843,7 @@ void main() {
                     sc as f32, st_y, sr as f32, 0.0, shape_verts, lagx, lagz, 1, cc,
                     cr, focus_x + vis_lx, vis_y, focus_z + vis_lz, 1, paint_brush,
                     brush_shape, move_mode, move_sel, move_ok, paint_c, paint_r, paint_anchor,
-                    u_ramp, u_ground, u_water_time, u_cut, u_fade, u_brick, d_ramp, 0.0, 0.0, present_us,
+                    u_ramp, u_ground, u_cut, u_fade, u_brick, d_ramp, 0.0, 0.0, present_us,
                     mask_cache, lean_to, lean_from, id_to, id_from, cell_head, cell_link,
                     block_t, prep_cache, sparks, bprog, b_u, bbuf[0], bdprog, bd_u,
                     grass_prog, grass_u, grass_cover, grass_ids[0], grass_ids[1], grass_instances,
@@ -1914,8 +1933,8 @@ void main() {
         hstart: int = 0;
         pc: int = active.spawn.column;
         pr: int = active.spawn.row;
-        ph: int = 0;
-        pm: int = 0;
+        ph: int = settle_terrain_layer(active.blocks,active.nblocks,active.ground,active.nground,pc,pr,0,0-1);
+        pm: int = pose_mounted(active.blocks,active.nblocks,pc,pr,ph,0-1);
         copy_blocks(hist, 0, active.blocks, 0, active.nblocks);
         hpc[0] = pc;
         hpr[0] = pr;
@@ -1987,7 +2006,11 @@ void main() {
                 match ev {
                     KeyPress -> {
                         ks: int = XLookupKeysym(&ev, 0);
-                        if (ks == 65505 || ks == 65506) {
+                        if (ks == 65476) {
+                            toggle_height_water(material_light.water);
+                        } else if (ks == 65477) {
+                            request_height_splash(material_light.water);
+                        } else if (ks == 65505 || ks == 65506) {
                             shift = 1;
                         } else if (is_fps_key(ks)) {
                             toggle_fps(&fps);
@@ -2027,6 +2050,7 @@ void main() {
                                 play_clock[2] = started;
                                 if (play_jump_to_finish(active.blocks, active.nblocks,
                                     active.rooms, active.nrooms, active.bricks, active.nbricks,
+                                    active.ground, active.nground,
                                     active.goals, active.ngoals, world.solved, play_pose,
                                     play_pend, reset_phase, reset_t0, reset_room,
                                     reset_target, travel_goal, mono_ms()) != 0) {
@@ -2237,7 +2261,7 @@ void main() {
                 play_clock[0] = hstart;
                 play_clock[1] = hn;
                 play_clock[2] = started;
-                if (tick_reset_sink(active.blocks, active.nblocks, hist, hpc, hpr,
+                if (tick_reset_sink(active.blocks, active.nblocks, active.ground, active.nground, hist, hpc, hpr,
                     hph, hpm, play_clock, play_pose, now, active.rooms, active.nrooms,
                     room_ids, room_hn, rewind_snap, rewind_n, rewind_cur, room_ghosting,
                     active.room_starts, reset_phase, reset_t0, reset_room, reset_target) != 0) {
@@ -2393,7 +2417,7 @@ void main() {
                 th: int = hph[(hstart + ti) % 8];
                 fill_stack_col(hist, foff, active.nblocks, fc, fr, col_body, col_ramp);
                 fs: int = 0;
-                if (fh >= 0 && fh < 8 && col_ramp[fh] != 0) {
+                if (fh >= 0-1 && fh < 8 && col_ramp[fh+1] != 0) {
                     fs = 1;
                 }
                 y0: f32 = fh as f32 + 0.55;
@@ -2402,17 +2426,17 @@ void main() {
                 }
                 fx0: f32 = 0.0;
                 fz0: f32 = 0.0;
-                if (fh >= 0 && fh < 8) {
-                    fx0 = ramp_face_x(col_ramp[fh]);
-                    fz0 = ramp_face_z(col_ramp[fh]);
+                if (fh >= 0-1 && fh < 8) {
+                    fx0 = ramp_face_x(col_ramp[fh+1]);
+                    fz0 = ramp_face_z(col_ramp[fh+1]);
                 }
                 pl0: int = 0;
-                if (fh >= 0 && fh < 8) {
+                if (fh >= 0-1 && fh < 8) {
                     pl0 = stack_lean_col(col_body, col_ramp, fh, fs);
                 }
                 fill_stack_col(hist, toff, active.nblocks, tc2, tr2, col_body, col_ramp);
                 ts: int = 0;
-                if (th >= 0 && th < 8 && col_ramp[th] != 0) {
+                if (th >= 0-1 && th < 8 && col_ramp[th+1] != 0) {
                     ts = 1;
                 }
                 y1: f32 = th as f32 + 0.55;
@@ -2421,12 +2445,12 @@ void main() {
                 }
                 fx1: f32 = 0.0;
                 fz1: f32 = 0.0;
-                if (th >= 0 && th < 8) {
-                    fx1 = ramp_face_x(col_ramp[th]);
-                    fz1 = ramp_face_z(col_ramp[th]);
+                if (th >= 0-1 && th < 8) {
+                    fx1 = ramp_face_x(col_ramp[th+1]);
+                    fz1 = ramp_face_z(col_ramp[th+1]);
                 }
                 pl1: int = 0;
-                if (th >= 0 && th < 8) {
+                if (th >= 0-1 && th < 8) {
                     pl1 = stack_lean_col(col_body, col_ramp, th, ts);
                 }
                 gt: f32 = fall_t(y0, y1, fs, ts, t);
@@ -2466,7 +2490,7 @@ void main() {
                     focus_x, focus_z, focus_x, play_camera_y, focus_z + play_camera_dist,
                     u_mask_origin, vp, lcam, lvp, shadow_bounds, lx, ly, lz, hist, foff, toff, active.nblocks,
                     px, py, pz, t, shape_verts, lagx, lagz, 1, 0, 0, 0.0, 0.0, 0.0,
-                    0, BRUSH_DIRT, 0, 0, 0, 1, 0, 0, 0, u_ramp, u_ground, u_water_time, u_cut, u_fade,
+                    0, BRUSH_DIRT, 0, 0, 0, 1, 0, 0, 0, u_ramp, u_ground, u_cut, u_fade,
                     u_brick, d_ramp, pru_x, pru_z, present_us, mask_cache, lean_to,
                     lean_from, id_to, id_from, cell_head, cell_link, block_t, prep_cache,
                     sparks, bprog, b_u, bbuf[0], bdprog, bd_u, grass_prog, grass_u,

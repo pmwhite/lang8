@@ -45,9 +45,11 @@ LEVEL_PACK_BIAS: int = 4096;
 
 LEVEL_PACK_SPAN: int = 8193;
 
-LEVEL_PACK_ROW: int = 16;
+// Nine layers (-1..7), each with a mounted bit. Mixed radix 18 preserves
+// the full +/-4096 world range while keeping undo poses below 31 bits.
+LEVEL_PACK_ROW: int = 18;
 
-LEVEL_PACK_COL: int = 131088;
+LEVEL_PACK_COL: int = 147474;
 
 LEVEL_DEFAULT_PATH: []i8 = "programs/block-game/world.txt";
 
@@ -327,6 +329,11 @@ is_water(ground: []GroundCell, nground: int, column: int, row: int): bool {
         }
     }
     false;
+}
+
+terrain_floor(ground: []GroundCell, nground: int, column: int, row: int): int {
+    if(is_water(ground,nground,column,row)) { return 0-1; }
+    0;
 }
 
 put_ground_cell(
@@ -725,6 +732,18 @@ settle_layer(
     layer;
 }
 
+settle_terrain_layer(blocks: []Block,n: int,ground: []GroundCell,nground: int,
+    column: int,row: int,layer: int,skip: int): int {
+    layer=settle_layer(blocks,n,column,row,layer,skip);
+    if(layer==0 && terrain_floor(ground,nground,column,row)<0 &&
+        body_at_layer(blocks,n,column,row,0-1)<0 && !sitting_at(blocks,n,column,row,0,skip)) {
+        // A ramp directly below supports another ramp just as above ground.
+        if(skip>=0 && blocks[skip].ramp!=0 && ramp_at_layer(blocks,n,column,row,0-1)>=0) { return 0; }
+        return 0-1;
+    }
+    layer;
+}
+
 pose_mounted(
     blocks: []Block,
     n: int,
@@ -765,7 +784,7 @@ pack_pos(
     layer: int,
     mounted: int
 ): int {
-    (column + LEVEL_PACK_BIAS) * LEVEL_PACK_COL + (row + LEVEL_PACK_BIAS) * LEVEL_PACK_ROW + layer * 2 + mounted;
+    (column + LEVEL_PACK_BIAS) * LEVEL_PACK_COL + (row + LEVEL_PACK_BIAS) * LEVEL_PACK_ROW + (layer+1) * 2 + mounted;
 }
 
 pos_col(p: int): int {
@@ -777,7 +796,7 @@ pos_row(p: int): int {
 }
 
 pos_layer(p: int): int {
-    p / 2 - p / LEVEL_PACK_ROW * 8;
+    p / 2 - p / LEVEL_PACK_ROW * 9 - 1;
 }
 
 pos_mounted(p: int): int {
@@ -1734,8 +1753,8 @@ parse_level_src(
                     }
                 }
                 i = skip_spaces(src, i);
-                if (i < n && src[i] >= '0' && src[i] <= '9') {
-                    i = parse_uint(src, i, val);
+                if (i < n && (src[i]=='-' || src[i] >= '0' && src[i] <= '9')) {
+                    i = parse_int(src, i, val);
                     layer = val[0];
                 }
                 mounted: int = 0;
@@ -1744,7 +1763,7 @@ parse_level_src(
                     i = parse_uint(src, i, val);
                     mounted = val[0];
                 }
-                if (!in_bounds(col, row) || layer < 0 || layer >= LEVEL_MAX_LAYER) {
+                if (!in_bounds(col, row) || layer < 0-1 || layer >= LEVEL_MAX_LAYER) {
                     return 0 - 1;
                 }
                 if (nb < len(blocks)) {
@@ -1898,7 +1917,7 @@ save_level(
             i = put_uint(dst, i, b.ramp);
             if (b.layer != 0 || b.mounted != 0) {
                 i = put_ch(dst, i, ' ');
-                i = put_uint(dst, i, b.layer);
+                i = put_int(dst, i, b.layer);
             }
             if (b.mounted != 0) {
                 i = put_ch(dst, i, ' ');
@@ -1915,7 +1934,7 @@ save_level(
             i = put_uint(dst, i, b.shape);
             if (b.layer != 0 || b.mounted != 0) {
                 i = put_ch(dst, i, ' ');
-                i = put_uint(dst, i, b.layer);
+                i = put_int(dst, i, b.layer);
             }
             if (b.mounted != 0) {
                 i = put_ch(dst, i, ' ');
@@ -1930,7 +1949,7 @@ save_level(
             i = put_int(dst, i, b.row - oy);
             if (b.layer != 0 || b.mounted != 0) {
                 i = put_ch(dst, i, ' ');
-                i = put_uint(dst, i, b.layer);
+                i = put_int(dst, i, b.layer);
             }
             if (b.mounted != 0) {
                 i = put_ch(dst, i, ' ');
@@ -3010,7 +3029,7 @@ can_move_marked(
             b: Block = blocks[i];
             tc: int = b.column + dc;
             tr: int = b.row + dr;
-            if (!in_bounds(tc, tr) || is_brick(bricks, nbrick, tc, tr) || is_water(ground, nground, tc, tr)) {
+            if (!in_bounds(tc, tr) || is_brick(bricks, nbrick, tc, tr)) {
                 return false;
             }
             lo: int = lowest_marked(blocks, n, marks, b.column, b.row);
@@ -3021,7 +3040,7 @@ can_move_marked(
                 }
             }
             tl: int = b.layer + climb;
-            if (tl < 0 || tl >= LEVEL_MAX_LAYER) {
+            if (tl < terrain_floor(ground,nground,tc,tr) || tl >= LEVEL_MAX_LAYER) {
                 return false;
             }
             occ: int = body_at_layer(blocks, n, tc, tr, tl);
@@ -3095,7 +3114,25 @@ apply_gravity(blocks: []Block, n: int) {
 }
 
 apply_level_gravity(state: *LevelState) {
-    apply_gravity(state.blocks, state.nblocks);
+    region {
+        marks: []int=new int[state.nblocks](1);
+        apply_terrain_gravity_marked(state.blocks,state.nblocks,marks,state.ground,state.nground);
+    }
+}
+
+apply_terrain_gravity_marked(blocks: []Block,n: int,marks: []int,ground: []GroundCell,nground: int) {
+    moved: bool=true;
+    while(moved) {
+        moved=false;
+        for i in 0..n { if(marks[i]!=0) {
+            b: Block=blocks[i];
+            layer: int=settle_terrain_layer(blocks,n,ground,nground,b.column,b.row,b.layer,i);
+            mounted: int=pose_mounted(blocks,n,b.column,b.row,layer,i);
+            if(layer!=b.layer || mounted!=b.mounted) {
+                b.layer=layer; b.mounted=mounted; blocks[i]=b; moved=true;
+            }
+        } }
+    }
 }
 
 apply_gravity_marked(blocks: []Block, n: int, marks: []int) {
@@ -3145,7 +3182,7 @@ try_push(
         mark_push_group(blocks, n, hit, home, marks);
         if (can_move_marked(blocks, n, bricks, nbrick, ground, nground, marks, dc, dr)) {
             slide_marked(blocks, n, marks, dc, dr);
-            apply_gravity_marked(blocks, n, marks);
+            apply_terrain_gravity_marked(blocks,n,marks,ground,nground);
             if (hit >= 0 && hit < n) {
                 ri: int = 0;
                 while (ri < nroom) {
@@ -3214,6 +3251,16 @@ finish_move(
         return 0 - 1;
     }
     pack_pos(pc, pr, ph, pose_mounted(blocks, n, pc, pr, ph, 0 - 1));
+}
+
+finish_water_move(blocks: []Block,n: int,bricks: []Brick,nbrick: int,
+    ground: []GroundCell,nground: int,pc: int,pr: int,ph: int): int {
+    ph=settle_player_layer(blocks,n,bricks,nbrick,pc,pr,ph);
+    // Above-ground support includes brick walls, unlike block-only gravity.
+    // Extend settlement below ground only after reaching ground level.
+    if(ph==0) { ph=settle_terrain_layer(blocks,n,ground,nground,pc,pr,ph,0-1); }
+    if(body_at_layer(blocks,n,pc,pr,ph)>=0) { return 0-1; }
+    pack_pos(pc,pr,ph,pose_mounted(blocks,n,pc,pr,ph,0-1));
 }
 
 closest_visited_finish(
@@ -3310,14 +3357,14 @@ enter_at(
     rewind_cur: []int,
     room_ghosting: []int
 ): int {
-    if (is_water(ground, nground, tc, tr) || ph == 0 && is_brick(bricks, nbrick, tc, tr)) {
+    if (ph < terrain_floor(ground,nground,tc,tr) || ph <= 0 && is_brick(bricks, nbrick, tc, tr)) {
         return 0 - 1;
     }
     dest_body: int = body_at_layer(blocks, n, tc, tr, ph);
     dest_ramp: int = ramp_at_layer(blocks, n, tc, tr, ph);
     if (dest_ramp >= 0 && dest_body < 0 && is_mount_face(blocks[dest_ramp].ramp, dc,
         dr)) {
-        return finish_move(blocks, n, bricks, nbrick, tc, tr, ph);
+        return finish_water_move(blocks,n,bricks,nbrick,ground,nground,tc,tr,ph);
     }
     hit: int = dest_body;
     if (hit >= 0 && dest_ramp >= 0 && !is_mount_face(blocks[dest_ramp].ramp, dc, dr)) {
@@ -3333,7 +3380,7 @@ enter_at(
             return 0 - 1;
         }
     }
-    finish_move(blocks, n, bricks, nbrick, tc, tr, ph);
+    finish_water_move(blocks,n,bricks,nbrick,ground,nground,tc,tr,ph);
 }
 
 move_player(
@@ -3364,7 +3411,8 @@ move_player(
         return stay;
     }
     dest_flat: int = flat_at_layer(blocks, n, tc, tr, ph);
-    dest_brick: bool = ph == 0 && is_brick(bricks, nbrick, tc, tr);
+    dest_brick: bool = ph == 0 && is_brick(bricks, nbrick, tc, tr) ||
+        ph == 0-1 && terrain_floor(ground,nground,tc,tr)==0;
     ramp_home: int = ramp_at_layer(blocks, n, pc, pr, ph);
     if (ramp_home >= 0 && is_mount_face(blocks[ramp_home].ramp, dc, dr) && (dest_flat >= 0 || dest_brick)) {
         if (ph + 1 < LEVEL_MAX_LAYER) {
@@ -3898,8 +3946,8 @@ load_world(
                 }
             }
             i = skip_spaces(src, i);
-            if (i < len(src) && src[i] >= '0' && src[i] <= '9') {
-                i = parse_uint(src, i, val);
+            if (i < len(src) && (src[i]=='-' || src[i] >= '0' && src[i] <= '9')) {
+                i = parse_int(src, i, val);
                 layer = val[0];
             }
             mounted: int = 0;
@@ -3908,7 +3956,7 @@ load_world(
                 i = parse_uint(src, i, val);
                 mounted = val[0];
             }
-            if (!in_bounds(bc, br) || layer < 0 || layer >= LEVEL_MAX_LAYER) {
+            if (!in_bounds(bc, br) || layer < 0-1 || layer >= LEVEL_MAX_LAYER) {
                 return 0 - 1;
             }
             if (nb < len(blocks)) {
@@ -4066,7 +4114,7 @@ save_world(
         }
         if (b.layer != 0 || b.mounted != 0) {
             i = put_ch(dst, i, ' ');
-            i = put_uint(dst, i, b.layer);
+            i = put_int(dst, i, b.layer);
         }
         if (b.mounted != 0) {
             i = put_ch(dst, i, ' ');

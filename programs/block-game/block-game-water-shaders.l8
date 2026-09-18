@@ -1,0 +1,213 @@
+tag block_game;
+
+gpu_water_splat_vs(): []i8 { """
+#version 430
+struct Particle { vec4 pos; vec4 old; vec4 vel; vec4 delta; };
+layout(std430,binding=0) readonly buffer Particles { Particle p[]; };
+layout(std430,binding=3) readonly buffer Ponds { uvec4 pond[256]; };
+layout(std430,binding=4) readonly buffer Commands { vec4 command[256]; };
+uniform mat4 vp;
+uniform float alpha;
+out vec2 uv;
+flat out vec3 center;
+flat out vec3 rightward;
+flat out vec3 upward;
+flat out vec3 toward;
+flat out float activity;
+void main() {
+  const vec2 corners[6]=vec2[6](vec2(-1,-1),vec2(1,-1),vec2(1,1),vec2(-1,-1),vec2(1,1),vec2(-1,1));
+  Particle particle=p[gl_InstanceID]; uint id=uint(particle.pos.w);
+  center=mix(particle.old.xyz,particle.pos.xyz,pond[id].x==0u ? 1.0 : alpha);
+  rightward=normalize(vec3(vp[0][0],vp[1][0],vp[2][0]));
+  upward=normalize(vec3(vp[0][1],vp[1][1],vp[2][1]));
+  toward=normalize(cross(rightward,upward));
+  // Low speeds fade smoothly into calm reconstruction; no abrupt sleep switch.
+  activity=smoothstep(0.04,0.8,length(particle.vel.xyz));
+  // Sparse spray needs its spherical silhouette, not pond-scale smoothing.
+  activity=max(activity,1.0-smoothstep(6.0,16.0,particle.delta.w));
+  uv=corners[gl_VertexID];
+  gl_Position=vp*vec4(center+(rightward*uv.x+upward*uv.y)*0.135,1.0);
+  if(command[id].x<0.5) gl_Position=vec4(2,2,2,1);
+}
+"""; }
+
+gpu_water_splat_fs(): []i8 { """
+#version 430
+in vec2 uv;
+flat in vec3 center;
+flat in vec3 rightward;
+flat in vec3 upward;
+flat in vec3 toward;
+flat in float activity;
+uniform mat4 vp;
+uniform vec3 camera;
+uniform sampler2D check_map;
+uniform vec2 mask_origin;
+layout(location=0) out float depth;
+layout(location=1) out float motion;
+void main() {
+  float d2=dot(uv,uv); if(d2>=1.0) discard;
+  vec3 world=center+(rightward*uv.x+upward*uv.y+toward*sqrt(1.0-d2))*0.135;
+  vec2 tc=(floor(world.xz)-mask_origin+0.5)/256.0;
+  float ground=texture(check_map,tc).r;
+  if(world.y<-0.017 && (ground<0.08 || ground>=0.15)) discard;
+  vec4 clip=vp*vec4(world,1.0);
+  gl_FragDepth=clip.z/clip.w*0.5+0.5;
+  depth=dot(camera-world,toward); motion=activity;
+}
+"""; }
+
+gpu_water_full_vs(): []i8 { """
+#version 430
+out vec2 uv;
+void main() {
+  vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);
+  uv=p; gl_Position=vec4(p*2.0-1.0,0.0,1.0);
+}
+"""; }
+
+gpu_water_filter_fs(): []i8 { """
+#version 430
+in vec2 uv;
+uniform sampler2D depths;
+uniform sampler2D motion_map;
+uniform vec2 direction;
+uniform vec4 ray_y; // right.y/proj.x, up.y/proj.y, forward.y, camera.y
+uniform float focal_pixels;
+uniform float filter_pass;
+layout(location=0) out float depth;
+float height_at(vec2 t,float depth) {
+  return ray_y.w+depth*(dot(t*2.0-1.0,ray_y.xy)+ray_y.z);
+}
+float allowed(vec2 t,vec2 value,float center_height) {
+  if(any(lessThan(t,vec2(0))) || any(greaterThan(t,vec2(1))) || value.x<=0.0) return 0.0;
+  float difference=abs(height_at(t,value.x)-center_height);
+  return 1.0-smoothstep(0.10,0.22,difference);
+}
+void main() {
+  // Exact center coverage, interpolated off-center taps: this keeps silhouettes
+  // dry without stair-stepping the variable-radius sampling footprint.
+  vec2 center=vec2(texelFetch(depths,ivec2(gl_FragCoord.xy),0).r,texture(motion_map,uv).r);
+  depth=center.x;
+  if(center.x<=0.0) return;
+  float height=height_at(uv,center.x);
+  float calm=1.0-center.y;
+  if(filter_pass<2.0) {
+    // A particle-sized WORLD-space footprint, not a fixed five-pixel blur.
+    float radius=clamp(focal_pixels*mix(0.12,0.42,calm)/center.x,1.0,48.0);
+    float sum=1.0/center.x,weight=1.0;
+    for(int i=1;i<=4;i++) {
+      vec2 offset=direction*(radius*float(i)/4.0);
+      vec2 a=texture(depths,uv-offset).rg,b=texture(depths,uv+offset).rg;
+      float valid=min(allowed(uv-offset,a,height),allowed(uv+offset,b,height));
+      // Check the path to each sample too: do not join across a dry gap.
+      if(texture(depths,uv-offset*0.5).r<=0.0 || texture(depths,uv+offset*0.5).r<=0.0) valid=0.0;
+      if(valid>0.0) {
+        float w=exp(-float(i*i)/8.0)*valid;
+        sum+=w*(1.0/a.x+1.0/b.x); weight+=2.0*w;
+      }
+    }
+    // Inverse depth is linear on a perspective-projected plane. Symmetric
+    // pairs preserve that plane even beside a bank instead of tilting it.
+    depth=mix(center.x,weight/sum,mix(0.35,1.0,calm));
+  } else {
+    // Small, stable mean-curvature relaxation of the inverse-depth graph.
+    // It removes residual caps after broad reconstruction, not physical waves.
+    float spacing=mix(1.0,clamp(focal_pixels*0.045/center.x,1.0,4.0),calm);
+    vec2 dx=vec2(spacing/1200.0,0),dy=vec2(0,spacing/720.0);
+    vec2 l=texture(depths,uv-dx).rg,r=texture(depths,uv+dx).rg;
+    vec2 b=texture(depths,uv-dy).rg,t=texture(depths,uv+dy).rg;
+    float valid=min(min(allowed(uv-dx,l,height),allowed(uv+dx,r,height)),
+                    min(allowed(uv-dy,b,height),allowed(uv+dy,t,height)));
+    if(valid<=0.0) return;
+    float f=1.0/center.x;
+    float scale=center.x*focal_pixels/spacing;
+    float fx=(1.0/r.x-1.0/l.x)*0.5*scale;
+    float fy=(1.0/t.x-1.0/b.x)*0.5*scale;
+    float fxx=1.0/r.x+1.0/l.x-2.0*f;
+    float fyy=1.0/t.x+1.0/b.x-2.0*f;
+    // Axis-split curvature diffusion avoids sampling across diagonal silhouettes.
+    float change=((1.0+fy*fy)*fxx+(1.0+fx*fx)*fyy)/pow(1.0+fx*fx+fy*fy,1.5);
+    depth=1.0/max(f+0.18*valid*mix(0.25,1.0,calm)*change,0.00001);
+  }
+}
+"""; }
+
+gpu_water_composite_fs(): []i8 { """
+#version 430
+in vec2 uv;
+uniform sampler2D depths;
+uniform sampler2D reflection_map;
+uniform sampler2D lamp_map;
+uniform sampler2D check_map;
+uniform sampler2DShadow shadow_map;
+uniform mat4 vp;
+uniform mat4 inverse_vp;
+uniform mat4 light_vp;
+uniform vec3 camera;
+uniform vec2 mask_origin;
+uniform vec2 lamp_origin;
+uniform vec3 spec_lamps[4];
+uniform float reflection_on;
+out vec4 result;
+vec3 forward_axis() { return -normalize(cross(vec3(vp[0][0],vp[1][0],vp[2][0]),vec3(vp[0][1],vp[1][1],vp[2][1]))); }
+vec3 position(vec2 t,float depth) {
+  vec4 far=inverse_vp*vec4(t*2.0-1.0,1.0,1.0);
+  vec3 ray=far.xyz/far.w-camera;
+  return camera+ray*(depth/dot(ray,forward_axis()));
+}
+vec3 surface(vec2 t,vec3 fallback,float reference) {
+  float d=texelFetch(depths,clamp(ivec2(t*vec2(1200,720)),ivec2(0),ivec2(1199,719)),0).r;
+  if(d<=0.0 || abs(d-reference)>0.18) return fallback;
+  return position(t,d);
+}
+void main() {
+  float depth=texelFetch(depths,ivec2(gl_FragCoord.xy),0).r; if(depth<=0.0) discard;
+  vec3 world=position(uv,depth);
+  vec2 ground_uv=(floor(world.xz)-mask_origin+0.5)/256.0;
+  float ground=texture(check_map,ground_uv).r;
+  if(world.y<-0.017 && (ground<0.08 || ground>=0.15)) discard;
+  vec2 dx=vec2(1.0/1200.0,0),dy=vec2(0,1.0/720.0);
+  vec3 rx=surface(uv+dx,world,depth)-world;
+  vec3 lx=world-surface(uv-dx,world,depth);
+  vec3 uy=surface(uv+dy,world,depth)-world;
+  vec3 ly=world-surface(uv-dy,world,depth);
+  vec3 tx=dot(rx,rx)>0.0000001 ? rx : lx;
+  vec3 ty=dot(uy,uy)>0.0000001 ? uy : ly;
+  vec3 raw=cross(tx,ty);
+  vec3 n=dot(raw,raw)>0.0000000001 ? normalize(raw) : -forward_axis();
+  vec3 V=normalize(camera-world); if(dot(n,V)<0.0) n=-n;
+  vec3 L=normalize(vec3(4,11,3)); float ndl=max(dot(n,L),0.0);
+  vec4 sh=light_vp*vec4(world,1); vec3 sc=sh.xyz/sh.w;
+  float vis=1.0;
+  if(all(greaterThan(sc,vec3(0.01))) && all(lessThan(sc,vec3(0.99))))
+    vis=texture(shadow_map,vec3(sc.xy,sc.z-0.00025));
+  vec2 lamp_uv=(world.xz-lamp_origin)/128.0;
+  float warmth=texture(lamp_map,clamp(lamp_uv,0,1)).r;
+  if(any(lessThan(lamp_uv,vec2(0))) || any(greaterThan(lamp_uv,vec2(1)))) warmth=0.0;
+  vec3 R=reflect(-V,n);
+  vec3 sky=mix(vec3(0.48,0.43,0.36),vec3(0.16,0.28,0.46),smoothstep(-0.05,0.9,R.y));
+  vec4 baseclip=vp*vec4(world.x,-0.02,world.z,1);
+  vec2 reflection_uv=baseclip.xy/baseclip.w*0.5+0.5+n.xz*vec2(0.012,0.018);
+  vec4 scene=texture(reflection_map,clamp(reflection_uv,0.001,0.999));
+  float edge=smoothstep(0,0.025,min(min(reflection_uv.x,reflection_uv.y),min(1-reflection_uv.x,1-reflection_uv.y)));
+  vec3 reflected=mix(sky,scene.rgb,scene.a*edge*reflection_on);
+  float fresnel=0.025+0.975*pow(1.0-max(dot(n,V),0.0),5.0);
+  vec3 lighting=vec3(0.19,0.245,0.32)+vec3(0.76,0.86,1.0)*(0.48*ndl*vis);
+  lighting+=vec3(1.60,0.87,0.36)*warmth*(0.72+0.28*max(n.y,0.0));
+  vec3 lit=mix(vec3(0.055,0.17,0.19)*lighting,reflected,0.16+0.84*fresnel);
+  lit+=vec3(0.76,0.86,1.0)*0.65*pow(max(dot(n,normalize(L+V)),0.0),65.0)*vis*ndl;
+  for(int i=0;i<4;i++) {
+    vec3 delta=spec_lamps[i]-world; float d2=dot(delta,delta);
+    if(spec_lamps[i].y>0 && d2<64) {
+      vec3 LL=normalize(delta); float shine=pow(max(dot(n,normalize(LL+V)),0.0),65.0);
+      lit+=vec3(1,0.57,0.24)*0.7*shine*max(dot(n,LL),0.0)*(1-smoothstep(36,64,d2))/(1+0.25*d2);
+    }
+  }
+  float haze=smoothstep(24,65,length(camera.xz-world.xz))*0.13;
+  lit=mix(lit,vec3(0.095,0.13,0.17),haze);
+  vec4 clip=vp*vec4(world,1);
+  gl_FragDepth=clip.z/clip.w*0.5+0.5;
+  result=vec4(lit/(1.0+max(lit-1.1,0.0)),1.0);
+}
+"""; }
