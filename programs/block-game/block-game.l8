@@ -238,7 +238,7 @@ void main() {
 uniform vec3 color;
 uniform vec3 light;
 uniform mat4 light_vp;
-uniform sampler2D shadow_map;
+uniform sampler2DShadow shadow_map;
 uniform sampler2D check_map;
 uniform vec2 mask_origin;
 uniform float ground;
@@ -352,14 +352,11 @@ void main() {
   vec4 sh = light_vp * vec4(vworld, 1.0);
   vec3 sc = sh.xyz / max(sh.w, 0.0001);
   if (sc.x > 0.01 && sc.x < 0.99 && sc.y > 0.01 && sc.y < 0.99 && sc.z > 0.0 && sc.z < 1.0) {
-    float bias = 0.0025 + 0.012 * (1.0 - ndl);
-    float t = 0.00048828125;
-    float s = 0.0;
-    s += step(sc.z, texture2D(shadow_map, sc.xy + vec2(-t, -t)).r + bias);
-    s += step(sc.z, texture2D(shadow_map, sc.xy + vec2(t, -t)).r + bias);
-    s += step(sc.z, texture2D(shadow_map, sc.xy + vec2(-t, t)).r + bias);
-    s += step(sc.z, texture2D(shadow_map, sc.xy + vec2(t, t)).r + bias);
-    vis = s * 0.25;
+    // Preserve the old world-space bias with near/far 0.5/13 instead of
+    // 1.5/50: (0.5*13/12.5) / (1.5*50/48.5) = 0.33626667.
+    float bias = (0.0025 + 0.012 * (1.0 - ndl)) * 0.33626667;
+    // Hardware bilinear PCF interpolates comparisons, never raw depth.
+    vis = shadow2D(shadow_map, vec3(sc.xy, sc.z - bias)).r;
   }
   float key = ndl * att * vis;
   float shade = 0.14 + 0.86 * key;
@@ -566,7 +563,7 @@ void main() {
 #version 120
 uniform vec3 light;
 uniform mat4 light_vp;
-uniform sampler2D shadow_map;
+uniform sampler2DShadow shadow_map;
 uniform sampler2D cover_map;
 uniform vec2 cover_origin;
 varying vec3 vworld;
@@ -598,7 +595,8 @@ void main() {
   vec4 sh = light_vp * vec4(vworld, 1.0);
   vec3 sc = sh.xyz / max(sh.w, 0.0001);
   if (sc.x > 0.01 && sc.x < 0.99 && sc.y > 0.01 && sc.y < 0.99 && sc.z > 0.0 && sc.z < 1.0) {
-    vis = step(sc.z, texture2D(shadow_map, sc.xy).r + 0.004);
+    float bias = 0.004 * 0.33626667;
+    vis = shadow2D(shadow_map, vec3(sc.xy, sc.z - bias)).r;
   }
   float key = ndl * att * vis;
   float shade = 0.14 + 0.74 * key;
@@ -654,7 +652,7 @@ void main() {
 uniform vec3 color;
 uniform vec3 light;
 uniform mat4 light_vp;
-uniform sampler2D shadow_map;
+uniform sampler2DShadow shadow_map;
 uniform vec3 cam_right;
 uniform vec3 cam_up;
 uniform vec3 cam_toward;
@@ -675,14 +673,8 @@ void main() {
   vec4 sh = light_vp * vec4(vworld, 1.0);
   vec3 sc = sh.xyz / max(sh.w, 0.0001);
   if (sc.x > 0.01 && sc.x < 0.99 && sc.y > 0.01 && sc.y < 0.99 && sc.z > 0.0 && sc.z < 1.0) {
-    float bias = 0.004;
-    float t = 0.00048828125;
-    float s = 0.0;
-    s += step(sc.z, texture2D(shadow_map, sc.xy + vec2(-t, -t)).r + bias);
-    s += step(sc.z, texture2D(shadow_map, sc.xy + vec2(t, -t)).r + bias);
-    s += step(sc.z, texture2D(shadow_map, sc.xy + vec2(-t, t)).r + bias);
-    s += step(sc.z, texture2D(shadow_map, sc.xy + vec2(t, t)).r + bias);
-    vis = s * 0.25;
+    float bias = 0.004 * 0.33626667;
+    vis = shadow2D(shadow_map, vec3(sc.xy, sc.z - bias)).r;
   }
   vec3 toL = light - vworld;
   float dist = length(toL);
@@ -889,8 +881,11 @@ void main() {
     stex: []u32 = new u32[1](0u32);
     glGenTextures(1, stex);
     glBindTexture(3553, stex[0]);
-    glTexParameteri(3553, 10241, 9728);
-    glTexParameteri(3553, 10240, 9728);
+    // Hardware bilinear PCF: filter depth comparisons, not depth values.
+    glTexParameteri(3553, 10241, 9729);
+    glTexParameteri(3553, 10240, 9729);
+    glTexParameteri(3553, 34892, 34894); // COMPARE_R_TO_TEXTURE
+    glTexParameteri(3553, 34893, 515); // LEQUAL
     glTexParameteri(3553, 10242, 33071);
     glTexParameteri(3553, 10243, 33071);
     glTexImage2D(3553, 0, 33190, SHADOW_SIZE, SHADOW_SIZE, 0, 6402, 5125, null);
@@ -958,12 +953,13 @@ void main() {
     vp: []f32 = new f32[16](0.0);
     mtmp: []f32 = new f32[16](0.0);
     lproj: []f32 = new f32[16](0.0);
+    shadow_corners: []f32 = new f32[24](0.0);
+    shadow_bounds: []f32 = new f32[4](0.0);
     lview: []f32 = new f32[16](0.0);
     lcam: []f32 = new f32[16](0.0);
     lvp: []f32 = new f32[16](0.0);
     lbias: []f32 = new f32[16](0.0);
     mat_persp(proj, 2.1445, win_w / win_h, 0.4, 80.0);
-    mat_persp(lproj, 0.7, 1.0, 1.5, 50.0);
     mat_bias(lbias);
     active: *LevelState = new_level_state();
     copy_level_state(active, level);
@@ -1001,7 +997,7 @@ void main() {
     mask_cache: []int = new int[5](0);
     mask_cache[0] = 0 - 999999;
     mask_cache[3] = 0 - 999999;
-    prep_cache: []int = new int[8](0);
+    prep_cache: []int = new int[12](0);
     lean_to: []int = new int[2048](0);
     lean_from: []int = new int[2048](0);
     id_to: []int = new int[4096](0);
@@ -1635,6 +1631,8 @@ void main() {
                 ly: f32 = 11.0;
                 lz: f32 = focus_z + 3.0;
                 mat_look(lview, lx, ly, lz, lx, 0.0, lz, 0.0, 0.0, 0.0 - 1.0);
+                fit_scene_shadow(lproj, view, proj, lx, ly, lz, shadow_corners,
+                    shadow_bounds, active.blocks, 0, 0, active.nblocks, sparks);
                 mat_mul(lcam, lproj, lview, mtmp);
                 mat_mul(lvp, lbias, lcam, mtmp);
                 sc: int = active.spawn.column;
@@ -1657,7 +1655,7 @@ void main() {
                     ids[1], ids[2], ids[3], chamfer_n, ids[4], brick_n, fbos[0], stex[0],
                     ctex[0], cmask, active.ground, active.nground, active.rooms, active.nrooms,
                     focus_x, focus_z, camera_x, camera_y, camera_z, u_mask_origin,
-                    vp, lcam, lvp, lx, ly, lz, active.blocks, 0, 0, active.nblocks,
+                    vp, lcam, lvp, shadow_bounds, lx, ly, lz, active.blocks, 0, 0, active.nblocks,
                     sc as f32, st_y, sr as f32, 0.0, shape_verts, lagx, lagz, 1, cc,
                     cr, focus_x + vis_lx, vis_y, focus_z + vis_lz, 1, paint_brush,
                     brush_shape, move_mode, move_sel, move_ok, paint_c, paint_r, paint_anchor,
@@ -2189,6 +2187,8 @@ void main() {
                 ly: f32 = 11.0;
                 lz: f32 = focus_z + 3.0;
                 mat_look(lview, lx, ly, lz, lx, 0.0, lz, 0.0, 0.0, 0.0 - 1.0);
+                fit_scene_shadow(lproj, view, proj, lx, ly, lz, shadow_corners,
+                    shadow_bounds, hist, foff, toff, active.nblocks, sparks);
                 mat_mul(lcam, lproj, lview, mtmp);
                 mat_mul(lvp, lbias, lcam, mtmp);
                 px: f32 = lerp(fc as f32, tc2 as f32, t);
@@ -2268,7 +2268,7 @@ void main() {
                     ids[1], ids[2], ids[3], chamfer_n, ids[4], brick_n, fbos[0], stex[0],
                     ctex[0], cmask, active.ground, active.nground, active.rooms, active.nrooms,
                     focus_x, focus_z, focus_x, play_camera_y, focus_z + play_camera_dist,
-                    u_mask_origin, vp, lcam, lvp, lx, ly, lz, hist, foff, toff, active.nblocks,
+                    u_mask_origin, vp, lcam, lvp, shadow_bounds, lx, ly, lz, hist, foff, toff, active.nblocks,
                     px, py, pz, t, shape_verts, lagx, lagz, 1, 0, 0, 0.0, 0.0, 0.0,
                     0, BRUSH_DIRT, 0, 0, 0, 1, 0, 0, 0, u_ramp, u_ground, u_cut, u_fade,
                     u_brick, d_ramp, pru_x, pru_z, present_us, mask_cache, lean_to,

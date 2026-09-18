@@ -273,6 +273,96 @@ mat_persp(
     m[14] = 2.0 * far * near / (near - far);
 }
 
+// Fit the point light to the camera frustum clipped to the playable height
+// slab. Extremal projected coordinates occur at vertices of this polyhedron.
+// Scratch and bounds are owned by the caller: no per-frame allocations.
+fit_shadow(m: []f32, view: []f32, proj: []f32, lx: f32, ly: f32,
+    lz: f32, corners: []f32, bounds: []f32, ceiling: f32) {
+    for i in 0..8 {
+        depth: f32 = 0.4;
+        if (i >= 4) { depth = 80.0; }
+        x: f32 = (2 * (i % 2) - 1) as f32 * depth / proj[0];
+        y: f32 = (2 * ((i / 2) % 2) - 1) as f32 * depth / proj[5];
+        // Invert the rigid camera view, including its translation.
+        for axis in 0..3 {
+            corners[i * 3 + axis] = view[axis * 4] * (x - view[12]) +
+                view[axis * 4 + 1] * (y - view[13]) +
+                view[axis * 4 + 2] * (0.0 - depth - view[14]);
+        }
+    }
+    bounds[0] = lx; bounds[1] = lx;
+    bounds[2] = lz; bounds[3] = lz;
+    left: f32 = 1000000.0; right: f32 = -1000000.0;
+    bottom: f32 = 1000000.0; top: f32 = -1000000.0;
+    for i in 0..8 {
+        bit: int = 1;
+        while (bit <= 4) {
+            if ((i / bit) % 2 == 0) {
+                j: int = i + bit;
+                ay: f32 = corners[i * 3 + 1];
+                dy: f32 = corners[j * 3 + 1] - ay;
+                lo: f32 = 0.0; hi: f32 = 1.0;
+                if (dy > -0.00001 && dy < 0.00001) {
+                    if (ay < -1.0 || ay > ceiling) { hi = -1.0; }
+                } else {
+                    a: f32 = (-1.0 - ay) / dy;
+                    b: f32 = (ceiling - ay) / dy;
+                    if (a > b) { swap: f32 = a; a = b; b = swap; }
+                    if (a > lo) { lo = a; }
+                    if (b < hi) { hi = b; }
+                }
+                if (lo <= hi) {
+                    for end in 0..2 {
+                        t: f32 = lo;
+                        if (end != 0) { t = hi; }
+                        x: f32 = lerp(corners[i * 3], corners[j * 3], t);
+                        y: f32 = ay + dy * t;
+                        z: f32 = lerp(corners[i * 3 + 2], corners[j * 3 + 2], t);
+                        if (x < bounds[0]) { bounds[0] = x; }
+                        if (x > bounds[1]) { bounds[1] = x; }
+                        if (z < bounds[2]) { bounds[2] = z; }
+                        if (z > bounds[3]) { bounds[3] = z; }
+                        sx: f32 = (x - lx) / (ly - y);
+                        sy: f32 = (lz - z) / (ly - y);
+                        if (sx < left) { left = sx; }
+                        if (sx > right) { right = sx; }
+                        if (sy < bottom) { bottom = sy; }
+                        if (sy > top) { top = sy; }
+                    }
+                }
+            }
+            bit = bit * 2;
+        }
+    }
+    // Leave room for the shader's 1% border guard and filtering footprint.
+    pad_x: f32 = (right - left) * 0.025;
+    pad_y: f32 = (top - bottom) * 0.025;
+    left = left - pad_x; right = right + pad_x;
+    bottom = bottom - pad_y; top = top + pad_y;
+    // Quantize angular bounds outwards. Pure camera translation must not
+    // rescale the map because of roundoff in the world-space intersections.
+    left = floor_i(left * 16.0) as f32 / 16.0;
+    right = (floor_i(right * 16.0) + 1) as f32 / 16.0;
+    bottom = floor_i(bottom * 16.0) as f32 / 16.0;
+    top = (floor_i(top * 16.0) + 1) as f32 / 16.0;
+    mat_zero(m);
+    m[0] = 2.0 / (right - left);
+    m[5] = 2.0 / (top - bottom);
+    m[8] = (right + left) / (right - left);
+    m[9] = (top + bottom) / (top - bottom);
+    m[10] = -13.5 / 12.5; // near 0.5, far 13: covers the entire height slab
+    m[11] = -1.0;
+    m[14] = -13.0 / 12.5;
+}
+
+
+shadow_cell(column: int, row: int, bounds: []f32, pad: f32): bool {
+    x: f32 = column as f32 + 0.5;
+    z: f32 = row as f32 + 0.5;
+    x >= bounds[0] - pad && x <= bounds[1] + pad &&
+        z >= bounds[2] - pad && z <= bounds[3] + pad;
+}
+
 mat_look(
     m: []f32,
     ex: f32,
@@ -2153,8 +2243,7 @@ prep_block_draw(
     ids: []int,
     head: []int,
     link: []int,
-    fx: f32,
-    fz: f32
+    bounds: []f32
 ): int {
     build_cell_index(hist, off, n, head, link);
     has_ramp: int = 0;
@@ -2164,7 +2253,7 @@ prep_block_draw(
         if (b.id >= 0 && b.id < ID_CAP) {
             ids[b.id] = i;
         }
-        if (in_view_cell(b.column, b.row, fx, fz, 5.0)) {
+        if (shadow_cell(b.column, b.row, bounds, 5.0)) {
             leans[i] = stack_lean_ix(hist, off, head, link, b.column, b.row, b.layer,
                 b.mounted);
         } else {
@@ -2204,8 +2293,7 @@ fill_from_leans(
     ids_from: []int,
     head: []int,
     link: []int,
-    fx: f32,
-    fz: f32
+    bounds: []f32
 ) {
     i: int = 0;
     while (i < n) {
@@ -2224,8 +2312,8 @@ fill_from_leans(
         if (fi >= 0) {
             fb: Block = hist[foff + fi];
             if (fb.column != tb.column || fb.row != tb.row || fb.layer != tb.layer || fb.mounted != tb.mounted) {
-                if (in_view_cell(fb.column, fb.row, fx, fz, 5.0) || in_view_cell(tb.column,
-                    tb.row, fx, fz, 5.0)) {
+                if (shadow_cell(fb.column, fb.row, bounds, 5.0) || shadow_cell(tb.column,
+                    tb.row, bounds, 5.0)) {
                     lean_from[i] = stack_lean_ix(hist, foff, head, link, fb.column,
                         fb.row, fb.layer, fb.mounted);
                 } else {
@@ -2244,10 +2332,9 @@ block_on_screen(
     toff: int,
     n: int,
     ids_from: []int,
-    fx: f32,
-    fz: f32
+    bounds: []f32
 ): bool {
-    if (in_view_cell(tb.column, tb.row, fx, fz, 3.0)) {
+    if (shadow_cell(tb.column, tb.row, bounds, 3.0)) {
         return true;
     }
     if (foff == toff) {
@@ -2258,7 +2345,7 @@ block_on_screen(
         return false;
     }
     fb: Block = hist[foff + fi];
-    in_view_cell(fb.column, fb.row, fx, fz, 3.0);
+    shadow_cell(fb.column, fb.row, bounds, 3.0);
 }
 
 fill_draw_vis(
@@ -2268,14 +2355,13 @@ fill_draw_vis(
     n: int,
     vis: []int,
     ids_from: []int,
-    fx: f32,
-    fz: f32
+    bounds: []f32
 ): int {
     nvis: int = 0;
     i: int = 0;
     while (i < n) {
         tb: Block = hist[toff + i];
-        if (block_on_screen(tb, hist, foff, toff, n, ids_from, fx, fz)) {
+        if (block_on_screen(tb, hist, foff, toff, n, ids_from, bounds)) {
             vis[nvis] = i;
             nvis = nvis + 1;
         }
@@ -2432,6 +2518,44 @@ type Spark = {
     room: int;
     blue: f32;
 };
+
+// Do not spend most of the map on a hypothetical eight-storey ceiling over
+// empty ground. First find all possible visible stacks/casters, then fit the
+// receiver slab to their actual height. Include both animation endpoints and
+// the player above the highest stack; falling/mounted blocks fit in this pad.
+fit_scene_shadow(m: []f32, view: []f32, proj: []f32, lx: f32, ly: f32,
+    lz: f32, corners: []f32, bounds: []f32, hist: []Block, foff: int,
+    toff: int, n: int, sparks: []Spark) {
+    fit_shadow(m, view, proj, lx, ly, lz, corners, bounds, 9.5);
+    ceiling: f32 = 2.5;
+    for phase in 0..2 {
+        off: int = foff;
+        if (phase != 0) { off = toff; }
+        for i in 0..n {
+            b: Block = hist[off + i];
+            if (shadow_cell(b.column, b.row, bounds, 5.0)) {
+                h: f32 = b.layer as f32 + 2.5;
+                if (h > ceiling) { ceiling = h; }
+            }
+        }
+    }
+    for i in 0..len(sparks) {
+        p: Spark = sparks[i];
+        if (p.life > 0.0 && shadow_cell(floor_i(p.x), floor_i(p.z), bounds, 1.0)) {
+            h: f32 = p.y + 0.5;
+            if (h > ceiling) { ceiling = h; }
+        }
+    }
+    ceiling = (floor_i(ceiling * 2.0) + 1) as f32 * 0.5;
+    if (ceiling > 9.5) { ceiling = 9.5; }
+    // Preserve the conservative caster bounds, even when fitting a lower
+    // receiver slab: an off-screen elevated block can shadow visible ground.
+    x0: f32 = bounds[0]; x1: f32 = bounds[1];
+    z0: f32 = bounds[2]; z1: f32 = bounds[3];
+    fit_shadow(m, view, proj, lx, ly, lz, corners, bounds, ceiling);
+    bounds[0] = x0; bounds[1] = x1;
+    bounds[2] = z0; bounds[3] = z1;
+}
 
 spark_rand(rng: []int): f32 {
     rng[0] = rng[0] + 1;
@@ -3638,6 +3762,7 @@ draw_frame(
     vp: []f32,
     lcam: []f32,
     lvp: []f32,
+    shadow_bounds: []f32,
     lx: f32,
     ly: f32,
     lz: f32,
@@ -3718,26 +3843,28 @@ draw_frame(
     has_lean: int = 0;
     split_hist: int = 0;
     nvis: int = 0;
+    // A zoom or rotation can expose new stacks without moving the focus.
+    for edge in 0..4 {
+        if (prep_cache[8 + edge] != floor_i(shadow_bounds[edge])) { reuse = 0; }
+    }
     if (reuse != 0) {
         has_lean = prep_cache[3];
         split_hist = prep_cache[4];
         if (split_hist != 0) {
-            nvis = fill_draw_vis(hist, foff, toff, n, cell_link, id_from, focus_x,
-                focus_z);
+            nvis = fill_draw_vis(hist, foff, toff, n, cell_link, id_from, shadow_bounds);
         } else {
-            nvis = fill_draw_vis(hist, foff, toff, n, cell_link, id_to, focus_x, focus_z);
+            nvis = fill_draw_vis(hist, foff, toff, n, cell_link, id_to, shadow_bounds);
         }
     } else {
         has_lean = prep_block_draw(hist, toff, n, lean_to, id_to, cell_head, cell_link,
-            focus_x, focus_z);
+            shadow_bounds);
         if (foff != toff && !same_hist_slot(hist, foff, toff, n)) {
             fill_from_leans(hist, foff, toff, n, lean_from, lean_to, id_from, cell_head,
-                cell_link, focus_x, focus_z);
+                cell_link, shadow_bounds);
             split_hist = 1;
-            nvis = fill_draw_vis(hist, foff, toff, n, cell_link, id_from, focus_x,
-                focus_z);
+            nvis = fill_draw_vis(hist, foff, toff, n, cell_link, id_from, shadow_bounds);
         } else {
-            nvis = fill_draw_vis(hist, foff, toff, n, cell_link, id_to, focus_x, focus_z);
+            nvis = fill_draw_vis(hist, foff, toff, n, cell_link, id_to, shadow_bounds);
         }
         prep_cache[0] = foff;
         prep_cache[1] = toff;
@@ -3747,6 +3874,7 @@ draw_frame(
         prep_cache[5] = pfc;
         prep_cache[6] = pfr;
         prep_cache[7] = 1;
+        for edge in 0..4 { prep_cache[8 + edge] = floor_i(shadow_bounds[edge]); }
     }
     stall0: int = mono_us();
     glBindFramebuffer(36160, fbo);
