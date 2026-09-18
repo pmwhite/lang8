@@ -163,75 +163,29 @@ hist_off(hstart: int, i: int): int {
     (hstart + i) % 8 * 1024;
 }
 
-play_undo_slot(step: int, k: int): int {
-    step * LEVEL_MAX_BLOCKS + k;
-}
-
-play_undo_room_slot(step: int, room: int): int {
-    step * LEVEL_MAX_ROOMS + room;
-}
-
-play_undo_clear(state: []int) {
-    state[0] = 0;
-    state[1] = 0;
-    state[2] = 0;
-}
-
-play_undo_capture(
-    blocks: []Block,
-    n: int,
-    pose: []int,
-    snap: []int,
-    upc: []int,
-    upr: []int,
-    uph: []int,
-    upm: []int,
-    state: []int
-): bool {
-    start: int = state[0];
-    count: int = state[1];
-    slot: int = (start + count) % PLAY_UNDO_CAP;
-    i: int = 0;
-    while (i < n) {
+// Scratch poses live only for the current attempted move.
+play_undo_capture(blocks: []Block, n: int, snap: []int) {
+    for i in 0..n {
         b: Block = blocks[i];
-        snap[play_undo_slot(slot, i)] = pack_pos(b.column, b.row, b.layer, b.mounted);
-        i = i + 1;
+        snap[i] = pack_pos(b.column, b.row, b.layer, b.mounted);
     }
-    upc[slot] = pose[0];
-    upr[slot] = pose[1];
-    uph[slot] = pose[2];
-    upm[slot] = pose[3];
-    state[0] = start;
-    state[1] = count + 1;
-    true;
 }
 
 play_undo_blocks_changed(
     blocks: []Block,
     n: int,
-    snap: []int,
-    state: []int
+    snap: []int
 ): bool {
-    if (state[1] < 1) {
-        return false;
-    }
-    slot: int = (state[0] + state[1] - 1) % PLAY_UNDO_CAP;
     i: int = 0;
     while (i < n) {
         b: Block = blocks[i];
         p: int = pack_pos(b.column, b.row, b.layer, b.mounted);
-        if (p != snap[play_undo_slot(slot, i)]) {
+        if (p != snap[i]) {
             return true;
         }
         i = i + 1;
     }
     false;
-}
-
-play_undo_discard(state: []int) {
-    if (state[1] > 0) {
-        state[1] = state[1] - 1;
-    }
 }
 
 play_undo_step(
@@ -253,12 +207,6 @@ play_undo_step(
     rewind_n: []int,
     rewind_cur: []int,
     room_ghosting: []int,
-    snap: []int,
-    upc: []int,
-    upr: []int,
-    uph: []int,
-    upm: []int,
-    state: []int,
     u: *UndoTimeline,
     crate_pose: []int,
     crate_ms: []int,
@@ -267,23 +215,16 @@ play_undo_step(
     crate_t0: []int,
     now: int
 ): int {
-    if (state[1] < 1) {
-        return 0;
-    }
-    slot: int = (state[0] + state[1] - 1) % PLAY_UNDO_CAP;
-    if (state[2] == 0) {
-        for r in 0..nroom {
-            u.selected[r] = u.deps[play_undo_room_slot(slot, r)];
-            u.syncing[r] = 0;
-        }
-        state[2] = 1;
-    }
+    if (u.count < 1) { return 0; }
+    action: int = undo_latest(u);
+    player: int = undo_read(u, action + 2);
+    if (!u.undoing) { undo_prepare_action(u, nroom, n); }
     // Independent rooms keep running during catch-up. Recheck contacts before
     // committing so a newly arrived obstacle joins the synchronization too.
-    undo_select_rooms(u, slot, blocks, n, snap, upc[slot], upr[slot], uph[slot]);
+    undo_select_rooms(u, action, blocks, n, pos_col(player), pos_row(player), pos_layer(player));
     for r in 0..nroom {
         if (u.selected[r] != 0 && u.syncing[r] == 0) {
-            undo_build_route(u, slot, r, blocks, room_ids, room_hn, rewind_snap, rewind_cur);
+            undo_build_route(u, action, r, blocks, room_ids, room_hn, rewind_snap, rewind_cur);
             room_ghosting[r] = REWIND_HOLD;
             u.syncing[r] = 1;
         }
@@ -299,29 +240,30 @@ play_undo_step(
     hpr[0] = pose[1];
     hph[0] = pose[2];
     hpm[0] = pose[3];
+    undo_set_phase(u, action, 0);
     i: int = 0;
     while (i < n) {
         owner: int = u.home[i];
-        restore: bool = owner < 0 && u.changed[play_undo_slot(slot, i)] != 0;
+        restore: bool = owner < 0 && u.changed[i] != 0;
         if (owner >= 0 && u.selected[owner] != 0) { restore = true; }
         if (restore) {
-            blocks[i] = apply_packed(blocks[i], snap[play_undo_slot(slot, i)]);
+            blocks[i] = apply_packed(blocks[i], u.image[u.block_base + i]);
         }
         i = i + 1;
     }
     room: int = 0;
     while (room < nroom) {
         if (u.selected[room] != 0) {
-            undo_restore_history(u, slot, room, room_hn, rewind_snap, rewind_n,
+            undo_restore_history(u, action, room, room_hn, rewind_snap, rewind_n,
                 rewind_cur, room_ghosting);
         }
         room = room + 1;
     }
     copy_blocks(hist, 1024, blocks, 0, n);
-    pose[0] = upc[slot];
-    pose[1] = upr[slot];
-    pose[2] = uph[slot];
-    pose[3] = upm[slot];
+    pose[0] = pos_col(player);
+    pose[1] = pos_row(player);
+    pose[2] = pos_layer(player);
+    pose[3] = pos_mounted(player);
     hpc[1] = pose[0];
     hpr[1] = pose[1];
     hph[1] = pose[2];
@@ -335,8 +277,7 @@ play_undo_step(
     clock[2] = now;
     pend[0] = 0;
     pend[1] = 0;
-    state[1] = state[1] - 1;
-    state[2] = 0;
+    undo_pop_action(u);
     PLAY_UNDO_DONE;
 }
 
@@ -510,35 +451,23 @@ play_try_dir(
     spark_rng: []int,
     spark_xy: []int,
     undo_snap: []int,
-    undo_pc: []int,
-    undo_pr: []int,
-    undo_ph: []int,
-    undo_pm: []int,
-    undo_state: []int,
-    u: *UndoTimeline@new
+    u: *UndoTimeline
 ) {
-    captured: bool = play_undo_capture(blocks, n, pose, undo_snap, undo_pc, undo_pr,
-        undo_ph, undo_pm, undo_state);
-    slot: int = (undo_state[0] + undo_state[1] - 1) % PLAY_UNDO_CAP;
-    for r in 0..nroom { u.deps[play_undo_room_slot(slot, r)] = 0; }
-    for i in 0..n { u.changed[play_undo_slot(slot, i)] = 0; }
-    undo_save_history(u, slot, 0, nroom, room_hn, rewind_snap, rewind_n, rewind_cur,
-        room_ghosting);
+    play_undo_capture(blocks, n, undo_snap);
+    player: int = pack_pos(pose[0], pose[1], pose[2], pose[3]);
+    undo_save_history(u, 0, nroom, room_hn, rewind_snap, rewind_n, rewind_cur,
+        room_ghosting, blocks, n, player);
     packed: int = move_player(blocks, n, u.home, nroom, bricks, nbrick, pose[0], pose[1],
         pose[2], dc, dr, room_ids, room_hn, rewind_snap, rewind_n, rewind_cur, room_ghosting);
     moved: bool = false;
     if (pos_col(packed) != pose[0] || pos_row(packed) != pose[1] || pos_layer(packed) != pose[2] || pos_mounted(packed) != pose[3]) {
         moved = true;
-    } else if (captured && play_undo_blocks_changed(blocks, n, undo_snap, undo_state)) {
+    } else if (play_undo_blocks_changed(blocks, n, undo_snap)) {
         moved = true;
     }
-    if (captured) {
-        if (!moved) {
-            play_undo_discard(undo_state);
-        } else {
-            undo_record_action(u, slot, blocks, n, rooms, nroom, room_hn, undo_snap,
-                pose[0], pose[1], pose[2], pos_col(packed), pos_row(packed), pos_layer(packed));
-        }
+    if (moved) {
+        undo_record_action(u, blocks, n, rooms, nroom, room_hn, undo_snap,
+            pose[0], pose[1], pose[2], pos_col(packed), pos_row(packed), pos_layer(packed));
     }
     pend[0] = 0;
     pend[1] = 0;
@@ -547,12 +476,10 @@ play_try_dir(
         room_ghosting, goals, ngoal, solved, stream_until, stream_tx, stream_tz, sparks,
         spark_rng, spark_xy);
     if (moved) {
-        undo_save_history(u, slot, 1, nroom, room_hn, rewind_snap, rewind_n, rewind_cur,
-            room_ghosting);
-        if (undo_state[1] > PLAY_UNDO_MAX) {
-            undo_state[0] = (undo_state[0] + 1) % PLAY_UNDO_CAP;
-            undo_state[1] = PLAY_UNDO_MAX;
-        }
+        undo_save_history(u, 1, nroom, room_hn, rewind_snap, rewind_n, rewind_cur,
+            room_ghosting, blocks, n, player);
+    } else {
+        undo_cancel_action(u);
     }
 }
 

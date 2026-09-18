@@ -1,24 +1,40 @@
 tag block_game;
 use_tag gl, x11, freetype;
 
-// Undo entries own copies of the live room timelines: revisiting a room may
-// overwrite its replay buffer while an older player action is still undoable.
-PLAY_UNDO_MAX: int = 128;
-
-// One spare slot stages an attempted move without evicting history on a bump.
-PLAY_UNDO_CAP: int = PLAY_UNDO_MAX + 1;
-
 PLAY_UNDO_DONE: int = 1;
-
 PLAY_UNDO_WAIT: int = 2;
-
 UNDO_ROUTE_MAX: int = REWIND_MAX * 2 + 1;
+
+// One 20 MiB circular log, with no separate action-count limit or index.
+// Record (64-bit words):
+//   total length, pre-change count, packed player pose, room dependency mask,
+//   changes from previous action to pre-move state, changes made by the move,
+//   total length again.
+// Both ends carry the length: oldest eviction and newest undo are O(1).
+// A walking action with unchanged world state occupies five words (40 bytes).
+UNDO_JOURNAL_WORDS: int = 2621440;
+UNDO_ACTION_HEADER: int = 4;
+UNDO_ACTION_OVERHEAD: int = 5;
+
+// A change packs a 19-bit image address and a nonnegative 31-bit XOR payload
+// into one word. All legal packed poses and room metadata fit in 31 bits.
+UNDO_INDEX_BITS: int = 19;
+UNDO_INDEX_MASK: int = 524287;
 
 type UndoTimeline = {
     home: []int;
-    deps: []int;
+    deps: int;
     changed: []int;
-    history: [][]int;
+    image: []int;
+    block_base: int;
+    journal: []int;
+    stage: []int;
+    stage_n: int;
+    head: int;
+    tail: int;
+    count: int;
+    phase: int;
+    undoing: bool;
     offsets: []int;
     selected: []int;
     syncing: []int;
@@ -30,12 +46,23 @@ type UndoTimeline = {
 };
 
 new_undo_timeline(home: []int@new, n: int, room_hn: []int): *UndoTimeline@new {
+    new_undo_journal(home, n, room_hn, UNDO_JOURNAL_WORDS);
+}
+
+new_undo_journal(home: []int@new, n: int, room_hn: []int, words: int): *UndoTimeline@new {
+    owned: int = room_home_base(LEVEL_MAX_ROOMS, room_hn);
+    block_base: int = LEVEL_MAX_ROOMS * 3 + owned * REWIND_MAX;
+    image_n: int = block_base + n;
+    largest: int = image_n * 2 + UNDO_ACTION_OVERHEAD;
+    if (words < largest || image_n > UNDO_INDEX_MASK + 1) {
+        die("undo journal too small");
+    }
     u: *UndoTimeline = new UndoTimeline {
-        home: home,
-        deps: new int[PLAY_UNDO_CAP * LEVEL_MAX_ROOMS](0),
-        changed: new int[PLAY_UNDO_CAP * LEVEL_MAX_BLOCKS](0),
-        history: new []int[PLAY_UNDO_CAP * 2](new int[0](0)),
-        offsets: new int[PLAY_UNDO_CAP * 2 * LEVEL_MAX_ROOMS](0),
+        home: home, deps: 0, changed: new int[n](0),
+        image: new int[image_n](0), block_base: block_base,
+        journal: new int[words](0), stage: new int[largest](0), stage_n: 0,
+        head: 0, tail: 0, count: 0, phase: 1, undoing: false,
+        offsets: new int[LEVEL_MAX_ROOMS](0),
         selected: new int[LEVEL_MAX_ROOMS](0),
         syncing: new int[LEVEL_MAX_ROOMS](0),
         route: new int[n * UNDO_ROUTE_MAX](0),
@@ -48,62 +75,170 @@ new_undo_timeline(home: []int@new, n: int, room_hn: []int): *UndoTimeline@new {
     for r in 0..LEVEL_MAX_ROOMS {
         u.route_base[r] = base;
         base = base + room_hn[r] * UNDO_ROUTE_MAX;
+        u.offsets[r] = r * 3 + room_home_base(r, room_hn) * REWIND_MAX;
     }
     u;
 }
 
+undo_read(u: *UndoTimeline, at: int): int {
+    u.journal[at % len(u.journal)];
+}
+
+undo_latest(u: *UndoTimeline): int {
+    if (u.count < 1) { die("empty undo journal"); }
+    u.head - undo_read(u, u.head - 1);
+}
+
+undo_apply_change(u: *UndoTimeline, change: int) {
+    index: int = change & UNDO_INDEX_MASK;
+    u.image[index] = u.image[index] ^ (change >> UNDO_INDEX_BITS);
+}
+
+// Only the newest action is materialized. Switching phases reverses the
+// action's post-move changes in the private image, never in live rooms.
+undo_set_phase(u: *UndoTimeline, action: int, phase: int) {
+    if (action != undo_latest(u)) { die("undo action is not the latest"); }
+    if (phase != u.phase) {
+        first: int = action + UNDO_ACTION_HEADER + undo_read(u, action + 1);
+        for p in first..u.head - 1 { undo_apply_change(u, undo_read(u, p)); }
+        u.phase = phase;
+    }
+}
+
+undo_load_history(u: *UndoTimeline, action: int, phase: int): []int@u {
+    undo_set_phase(u, action, phase);
+    u.image;
+}
+
+undo_cancel_action(u: *UndoTimeline) {
+    // Staging is separate from the ring: a bump cannot evict older actions,
+    // even when background rooms have changed a large amount since last move.
+    for i in UNDO_ACTION_HEADER..u.stage_n { undo_apply_change(u, u.stage[i]); }
+    u.stage_n = 0;
+    u.phase = 1;
+}
+
+undo_clear_journal(u: *UndoTimeline) {
+    if (u.stage_n > 0) { undo_cancel_action(u); }
+    u.head = 0;
+    u.tail = 0;
+    u.count = 0;
+    u.phase = 1;
+    u.undoing = false;
+}
+
+undo_pop_action(u: *UndoTimeline) {
+    action: int = undo_latest(u);
+    undo_set_phase(u, action, 0);
+    // Restore the previous action's image, including unrelated room changes
+    // recorded between actions. Live independent rooms are left untouched.
+    end: int = action + UNDO_ACTION_HEADER + undo_read(u, action + 1);
+    for p in action + UNDO_ACTION_HEADER..end {
+        undo_apply_change(u, undo_read(u, p));
+    }
+    u.head = action;
+    u.count = u.count - 1;
+    u.phase = 1;
+    u.undoing = false;
+    if (u.count == 0) { u.head = 0; u.tail = 0; }
+}
+
+undo_write_word(u: *UndoTimeline, index: int, value: int) {
+    delta: int = u.image[index] ^ value;
+    if (delta == 0) { return; }
+    if (delta < 0 || delta > 2147483647) { die("undo value cannot be packed"); }
+    u.stage[u.stage_n] = (delta << UNDO_INDEX_BITS) | index;
+    u.stage_n = u.stage_n + 1;
+    u.image[index] = value;
+}
+
+undo_commit_action(u: *UndoTimeline) {
+    size: int = u.stage_n + 1;
+    u.stage[0] = size;
+    u.stage[3] = u.deps;
+    u.stage[u.stage_n] = size;
+    while (u.head - u.tail + size > len(u.journal)) {
+        u.tail = u.tail + undo_read(u, u.tail);
+        u.count = u.count - 1;
+    }
+    for i in 0..size { u.journal[(u.head + i) % len(u.journal)] = u.stage[i]; }
+    u.head = u.head + size;
+    u.count = u.count + 1;
+    u.stage_n = 0;
+    u.phase = 1;
+}
+
+// A fixed-size staging area holds at most two image diffs. No allocations or
+// history eviction happen until the attempted action succeeds.
 undo_save_history(
-    u: *UndoTimeline@new,
-    slot: int,
+    u: *UndoTimeline,
     phase: int,
     nroom: int,
     room_hn: []int,
     snap: []int,
     counts: []int,
     cursors: []int,
-    ghost: []int
+    ghost: []int,
+    blocks: []Block,
+    n: int,
+    player: int
 ) {
-    entry: int = slot * 2 + phase;
-    needed: int = 0;
-    for r in 0..nroom {
-        u.offsets[entry * LEVEL_MAX_ROOMS + r] = needed;
-        needed = needed + 3 + counts[r] * room_hn[r];
+    if (phase == 0) {
+        if (u.count > 0) { undo_set_phase(u, undo_latest(u), 1); }
+        u.stage_n = UNDO_ACTION_HEADER;
+        u.stage[2] = player;
+        u.deps = 0;
     }
-    if (len(u.history[entry]) < needed) {
-        capacity: int = len(u.history[entry]);
-        if (capacity < 64) {
-            capacity = 64;
-        }
-        while (capacity < needed) {
-            capacity = capacity * 2;
-        }
-        u.history[entry] = new int[capacity](0);
-    }
-    data: []int = u.history[entry];
     for r in 0..nroom {
-        off: int = u.offsets[entry * LEVEL_MAX_ROOMS + r];
-        data[off] = counts[r];
-        data[off + 1] = cursors[r];
-        data[off + 2] = ghost[r];
+        off: int = u.offsets[r];
+        undo_write_word(u, off, counts[r]);
+        undo_write_word(u, off + 1, cursors[r]);
+        undo_write_word(u, off + 2, ghost[r]);
+        source: int = room_home_base(r, room_hn) * REWIND_MAX;
         for s in 0..counts[r] {
             for k in 0..room_hn[r] {
-                data[off + 3 + s * room_hn[r] + k] = snap[rewind_slot(r, s, k,
-                    room_hn)];
+                index: int = s * room_hn[r] + k;
+                undo_write_word(u, off + 3 + index, snap[source + index]);
             }
         }
     }
+    for i in 0..n {
+        b: Block = blocks[i];
+        undo_write_word(u, u.block_base + i, pack_pos(b.column, b.row, b.layer,
+            b.mounted));
+    }
+    if (phase == 0) { u.stage[1] = u.stage_n - UNDO_ACTION_HEADER; }
+    else { undo_commit_action(u); }
 }
 
-undo_depend(u: *UndoTimeline, slot: int, room: int) {
+undo_depend(u: *UndoTimeline, room: int) {
     if (room >= 0 && room < LEVEL_MAX_ROOMS) {
-        u.deps[play_undo_room_slot(slot, room)] = 1;
+        u.deps = u.deps | (1 << room);
     }
+}
+
+// Reconstruct changed-block flags only for the action currently being undone.
+// No per-block flag arrays are retained for older actions.
+undo_prepare_action(u: *UndoTimeline, nroom: int, n: int) {
+    action: int = undo_latest(u);
+    undo_set_phase(u, action, 1);
+    for i in 0..n { u.changed[i] = u.image[u.block_base + i]; }
+    undo_set_phase(u, action, 0);
+    for i in 0..n {
+        if (u.changed[i] != u.image[u.block_base + i]) { u.changed[i] = 1; }
+        else { u.changed[i] = 0; }
+    }
+    mask: int = undo_read(u, action + 3);
+    for r in 0..nroom {
+        u.selected[r] = (mask >> r) & 1;
+        u.syncing[r] = 0;
+    }
+    u.undoing = true;
 }
 
 // Reading a block as support, a ramp, or an obstacle also couples its clock.
 undo_read_cell(
     u: *UndoTimeline,
-    slot: int,
     blocks: []Block,
     n: int,
     c: int,
@@ -113,7 +248,7 @@ undo_read_cell(
     for i in 0..n {
         b: Block = blocks[i];
         if (b.column == c && b.row == r && b.layer >= h - 1 && b.layer <= h + 1) {
-            undo_depend(u, slot, u.home[i]);
+            undo_depend(u, u.home[i]);
         }
     }
 }
@@ -123,7 +258,6 @@ undo_read_cell(
 // change the live room history, and the obstruction may be gone by undo time.
 undo_record_rewind_release(
     u: *UndoTimeline,
-    slot: int,
     nroom: int,
     room_hn: []int,
     pc: int,
@@ -134,10 +268,9 @@ undo_record_rewind_release(
     if (pc == nc && pr == nr) {
         return;
     }
-    entry: int = slot * 2;
-    data: []int = u.history[entry];
+    data: []int = u.image;
     for r in 0..nroom {
-        off: int = u.offsets[entry * LEVEL_MAX_ROOMS + r];
+        off: int = u.offsets[r];
         cur: int = data[off + 1];
         ghost: int = data[off + 2];
         if ((ghost == REWIND_LEAVE || ghost == REWIND_RESET) && cur > 0) {
@@ -145,7 +278,7 @@ undo_record_rewind_release(
             from: int = off + 3 + cur * width;
             dest: int = off + 3 + rewind_dest_step(cur) * width;
             if (rewind_frame_legal(data, from, dest, width, pc, pr) == 0 && rewind_frame_legal(data, from, dest, width, nc, nr) != 0) {
-                undo_depend(u, slot, r);
+                undo_depend(u, r);
             }
         }
     }
@@ -153,7 +286,6 @@ undo_record_rewind_release(
 
 undo_record_action(
     u: *UndoTimeline,
-    slot: int,
     blocks: []Block,
     n: int,
     rooms: []Room,
@@ -167,19 +299,18 @@ undo_record_action(
     nr: int,
     nh: int
 ) {
-    undo_depend(u, slot, room_at(rooms, nroom, pc, pr));
-    undo_depend(u, slot, room_at(rooms, nroom, nc, nr));
-    undo_read_cell(u, slot, blocks, n, nc, nr, nh);
-    undo_record_rewind_release(u, slot, nroom, room_hn, pc, pr, nc, nr);
+    undo_depend(u, room_at(rooms, nroom, pc, pr));
+    undo_depend(u, room_at(rooms, nroom, nc, nr));
+    undo_read_cell(u, blocks, n, nc, nr, nh);
+    undo_record_rewind_release(u, nroom, room_hn, pc, pr, nc, nr);
     for i in 0..n {
-        p: int = before[play_undo_slot(slot, i)];
+        p: int = before[i];
         b: Block = blocks[i];
         if (p != pack_pos(b.column, b.row, b.layer, b.mounted)) {
-            u.changed[play_undo_slot(slot, i)] = 1;
-            undo_depend(u, slot, u.home[i]);
+            undo_depend(u, u.home[i]);
         }
         if ((pos_col(p) == pc && pos_row(p) == pr || pos_col(p) == nc && pos_row(p) == nr) && pos_layer(p) >= ph - 1 && pos_layer(p) <= ph + 1) {
-            undo_depend(u, slot, u.home[i]);
+            undo_depend(u, u.home[i]);
         }
     }
 }
@@ -215,7 +346,7 @@ undo_route_append(
 
 undo_build_route(
     u: *UndoTimeline,
-    slot: int,
+    action: int,
     room: int,
     blocks: []Block,
     room_ids: []int,
@@ -224,9 +355,8 @@ undo_build_route(
     cursors: []int
 ) {
     width: int = room_hn[room];
-    entry: int = slot * 2 + 1;
-    data: []int = u.history[entry];
-    off: int = u.offsets[entry * LEVEL_MAX_ROOMS + room];
+    data: []int = undo_load_history(u, action, 1);
+    off: int = u.offsets[room];
     target: int = data[off + 1];
     u.route_n[room] = 0;
     u.route_cur[room] = 0;
@@ -281,14 +411,14 @@ undo_build_route(
 
 undo_select_rooms(
     u: *UndoTimeline,
-    slot: int,
+    action: int,
     blocks: []Block,
     n: int,
-    snap: []int,
     pc: int,
     pr: int,
     ph: int
 ) {
+    undo_set_phase(u, action, 0);
     // New obstructions/support can appear while an unrelated clock runs.
     for i in 0..n {
         b: Block = blocks[i];
@@ -303,12 +433,12 @@ undo_select_rooms(
         grown = false;
         for i in 0..n {
             owner: int = u.home[i];
-            restore: bool = owner < 0 && u.changed[play_undo_slot(slot, i)] != 0;
+            restore: bool = owner < 0 && u.changed[i] != 0;
             if (owner >= 0 && u.selected[owner] != 0) {
                 restore = true;
             }
             if (restore) {
-                p: int = snap[play_undo_slot(slot, i)];
+                p: int = u.image[u.block_base + i];
                 for j in 0..n {
                     other: int = u.home[j];
                     b: Block = blocks[j];
@@ -370,7 +500,7 @@ undo_sync_tick(
 
 undo_restore_history(
     u: *UndoTimeline,
-    slot: int,
+    action: int,
     room: int,
     room_hn: []int,
     snap: []int,
@@ -378,9 +508,8 @@ undo_restore_history(
     cursors: []int,
     ghost: []int
 ) {
-    entry: int = slot * 2;
-    off: int = u.offsets[entry * LEVEL_MAX_ROOMS + room];
-    data: []int = u.history[entry];
+    off: int = u.offsets[room];
+    data: []int = undo_load_history(u, action, 0);
     counts[room] = data[off];
     cursors[room] = data[off + 1];
     ghost[room] = data[off + 2];

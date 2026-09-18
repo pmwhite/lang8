@@ -1,0 +1,451 @@
+tag block_game;
+use_tag gl, x11, freetype;
+
+import "../gl/gl.l8";
+import "../freetype/ft.l8";
+import "level.l8";
+import "block-game-undo.l8";
+import "block-game-play.l8";
+import "block-game-editor.l8";
+import "block-game-render.l8";
+import "block-game-ui.l8";
+
+check(ok: bool, message: []i8) {
+    if (!ok) { die(message); }
+}
+
+// Compare the compressed log with independent full snapshots. A small ring
+// forces eviction and physical wrap; pops and cancelled attempts test branches.
+test_journal() {
+    home: []int = [0, 0, 1];
+    widths: []int = new int[LEVEL_MAX_ROOMS](0);
+    widths[0] = 2; widths[1] = 1;
+    u: *UndoTimeline = new_undo_journal(home, 3, widths, 1600);
+    blocks: []Block = new Block[3](Block { id: 0, column: 0, row: 0,
+        shape: 0, layer: 0, ramp: 0, mounted: 0 });
+    live: []int = new int[3 * REWIND_MAX](0);
+    counts: []int = new int[LEVEL_MAX_ROOMS](1);
+    cursors: []int = new int[LEVEL_MAX_ROOMS](0);
+    ghost: []int = new int[LEVEL_MAX_ROOMS](0);
+    stride: int = 9 + 3 * REWIND_MAX + 3;
+    expected: []int = new int[700 * 2 * stride](0);
+    order: []int = new int[700](0);
+    restored: []int = new int[3 * REWIND_MAX](0);
+    rc: []int = new int[LEVEL_MAX_ROOMS](0);
+    rp: []int = new int[LEVEL_MAX_ROOMS](0);
+    rg: []int = new int[LEVEL_MAX_ROOMS](0);
+    end: int = 0;
+    stable: int = l8_heap_used();
+    wrapped: bool = false;
+    evicted: bool = false;
+    for action in 0..700 {
+        prior: int = u.count;
+        for phase in 0..2 {
+            counts[0] = 1 + (action * 7 + phase) % REWIND_MAX;
+            counts[1] = 1 + (action * 3 + phase) % REWIND_MAX;
+            cursors[0] = counts[0] - 1;
+            cursors[1] = action % counts[1];
+            ghost[1] = action % 3;
+            for r in 0..2 {
+                for s in 0..counts[r] {
+                    for k in 0..widths[r] {
+                        live[rewind_slot(r, s, k, widths)] = pack_pos(action + s,
+                            r + k + phase, action % 8, phase);
+                    }
+                }
+            }
+            blocks[0].column = action;
+            blocks[2].row = phase;
+            undo_save_history(u, phase, 3, widths, live, counts, cursors,
+                ghost, blocks, 3, pack_pos(action, -3, 2, 1));
+            if (phase == 0) {
+                undo_depend(u, 0);
+                undo_depend(u, 63);
+            }
+            base: int = (action * 2 + phase) * stride;
+            for r in 0..3 {
+                expected[base + r * 3] = counts[r];
+                expected[base + r * 3 + 1] = cursors[r];
+                expected[base + r * 3 + 2] = ghost[r];
+            }
+            for i in 0..len(live) { expected[base + 9 + i] = live[i]; }
+            for i in 0..3 {
+                expected[base + 9 + len(live) + i] = pack_pos(blocks[i].column,
+                    blocks[i].row, blocks[i].layer, blocks[i].mounted);
+            }
+        }
+        order[end] = action;
+        end = end + 1;
+        if (u.count < prior + 1) { evicted = true; }
+        if (u.head > len(u.journal)) { wrapped = true; }
+        check(u.count > 0, "newest action must survive byte pressure");
+        // Test reversible phase changes and room restoration for the newest
+        // action, and periodically pop several retained actions in sequence.
+        pops: int = 0;
+        if (action % 5 == 4) { pops = 2; }
+        for attempt in 0..pops + 1 {
+            if (u.count > 0) {
+                retained: int = order[end - 1];
+                record: int = undo_latest(u);
+                check(undo_read(u, record + 2) == pack_pos(retained, -3, 2, 1),
+                    "packed player pose");
+                undo_prepare_action(u, LEVEL_MAX_ROOMS, 3);
+                check(u.selected[0] == 1 && u.selected[63] == 1 && u.selected[62] == 0,
+                    "64-bit room dependency mask");
+                for phase in 0..2 {
+                    data: []int = undo_load_history(u, record, phase);
+                    base: int = (retained * 2 + phase) * stride;
+                    for r in 0..3 {
+                        off: int = u.offsets[r];
+                        check(data[off] == expected[base + r * 3], "count reconstruction");
+                        check(data[off + 1] == expected[base + r * 3 + 1], "cursor reconstruction");
+                        check(data[off + 2] == expected[base + r * 3 + 2], "ghost reconstruction");
+                        for s in 0..data[off] {
+                            for k in 0..widths[r] {
+                                check(data[off + 3 + s * widths[r] + k] ==
+                                    expected[base + 9 + rewind_slot(r, s, k, widths)],
+                                    "branch frame reconstruction");
+                            }
+                        }
+                    }
+                    for i in 0..3 {
+                        check(data[u.block_base + i] == expected[base + 9 + len(live) + i],
+                            "block pose reconstruction");
+                    }
+                }
+                undo_restore_history(u, record, 1, widths, restored, rc, rp, rg);
+                base: int = retained * 2 * stride;
+                check(rc[1] == expected[base + 3] && rp[1] == expected[base + 4] &&
+                    rg[1] == expected[base + 5], "restore metadata");
+                for s in 0..rc[1] {
+                    i: int = rewind_slot(1, s, 0, widths);
+                    check(restored[i] == expected[base + 9 + i], "restore room frames");
+                }
+                if (attempt < pops) { undo_pop_action(u); end = end - 1; }
+                else { u.undoing = false; }
+            }
+        }
+        if (action % 13 == 12) {
+            head: int = u.head;
+            tail: int = u.tail;
+            count: int = u.count;
+            counts[0] = REWIND_MAX; counts[1] = REWIND_MAX;
+            for i in 0..len(live) { live[i] = pack_pos(-1000, action, 0, 0); }
+            undo_save_history(u, 0, 3, widths, live, counts, cursors, ghost, blocks, 3, 0);
+            undo_cancel_action(u);
+            check(u.head == head && u.tail == tail && u.count == count,
+                "failed move evicted history under byte pressure");
+        }
+        check(l8_heap_used() == stable, "journal allocated after startup");
+    }
+    check(evicted && wrapped, "test did not exercise journal eviction and wrap");
+    undo_clear_journal(u);
+    check(u.head == 0 && u.tail == 0 && u.count == 0, "clear journal");
+    for action in 0..1000 {
+        undo_save_history(u, 0, 3, widths, live, counts, cursors, ghost, blocks, 3, action);
+        undo_save_history(u, 1, 3, widths, live, counts, cursors, ghost, blocks, 3, action);
+        if (action > 0) {
+            check(undo_read(u, undo_latest(u)) == UNDO_ACTION_OVERHEAD,
+                "unchanged action wrote redundant diffs");
+        }
+    }
+    check(u.count == len(u.journal) / UNDO_ACTION_OVERHEAD, "walking byte-budget capacity");
+    check(l8_heap_used() == stable, "unchanged saves allocated");
+}
+
+type UndoGame = {
+    level: *LevelState;
+    u: *UndoTimeline;
+    widths: []int;
+    ids: []int;
+    live: []int;
+    counts: []int;
+    cursors: []int;
+    ghost: []int;
+    hist: []Block;
+    hpc: []int;
+    hpr: []int;
+    hph: []int;
+    hpm: []int;
+    hms: []int;
+    clock: []int;
+    pose: []int;
+    pend: []int;
+    scratch: []int;
+    crate_pose: []int;
+    crate_ms: []int;
+    crate_hs: []int;
+    crate_hn: []int;
+    crate_t0: []int;
+    solved: []int;
+    stream_until: []int;
+    stream_tx: []f32;
+    stream_tz: []f32;
+    sparks: []Spark;
+    rng: []int;
+    xy: []int;
+};
+
+new_undo_game(): *UndoGame@new {
+    l: *LevelState = new_level_state();
+    l.nrooms = 2;
+    l.rooms[0] = Room { x0: 0, y0: 0, x1: 2, y1: 2 };
+    l.rooms[1] = Room { x0: 10, y0: 0, x1: 13, y1: 3 };
+    l.nblocks = 3;
+    l.blocks[0] = Block { id: 0, column: 1, row: 0, shape: 1, layer: 0, ramp: 0, mounted: 0 };
+    l.blocks[1] = Block { id: 1, column: 1, row: 1, shape: 1, layer: 0, ramp: 0, mounted: 0 };
+    l.blocks[2] = Block { id: 2, column: 11, row: 1, shape: 0, layer: 0, ramp: 0, mounted: 0 };
+    home: []int = new int[LEVEL_MAX_BLOCKS](0 - 1);
+    widths: []int = new int[LEVEL_MAX_ROOMS](0);
+    ids: []int = new int[LEVEL_MAX_BLOCKS](0);
+    assign_block_homes(l.blocks, l.nblocks, l.rooms, l.nrooms, home, ids, widths);
+    g: *UndoGame = new UndoGame {
+        level: l, u: new_undo_timeline(home, l.nblocks, widths), widths: widths, ids: ids,
+        live: new int[LEVEL_MAX_BLOCKS * REWIND_MAX](0),
+        counts: new int[LEVEL_MAX_ROOMS](1), cursors: new int[LEVEL_MAX_ROOMS](0),
+        ghost: new int[LEVEL_MAX_ROOMS](0),
+        hist: new Block[8192](l.blocks[0]),
+        hpc: new int[8](0), hpr: new int[8](0), hph: new int[8](0), hpm: new int[8](0),
+        hms: new int[8](200), clock: new int[3](0), pose: new int[4](0), pend: new int[2](0),
+        scratch: new int[LEVEL_MAX_BLOCKS](0),
+        crate_pose: new int[LEVEL_MAX_BLOCKS * CRATE_HIST](0),
+        crate_ms: new int[LEVEL_MAX_BLOCKS * CRATE_HIST](0),
+        crate_hs: new int[LEVEL_MAX_BLOCKS](0), crate_hn: new int[LEVEL_MAX_BLOCKS](0),
+        crate_t0: new int[LEVEL_MAX_BLOCKS](0), solved: new int[LEVEL_MAX_ROOMS](0),
+        stream_until: new int[LEVEL_MAX_ROOMS](0), stream_tx: new f32[LEVEL_MAX_ROOMS](0.0),
+        stream_tz: new f32[LEVEL_MAX_ROOMS](0.0),
+        sparks: new Spark[SPARK_N](Spark { x: 0.0, y: 0.0, z: 0.0, vx: 0.0, vy: 0.0,
+            vz: 0.0, life: 0.0, kind: 0, room: 0, blue: 0.0 }),
+        rng: new int[1](1), xy: new int[2](0)
+    };
+    for r in 0..l.nrooms { rewind_capture(l.blocks, r, ids, widths, g.live, 0); }
+    settle_test_game(g);
+    g;
+}
+
+settle_test_game(g: *UndoGame) {
+    l: *LevelState = g.level;
+    play_snap_pose(l.blocks, l.nblocks, g.hist, g.hpc, g.hpr, g.hph, g.hpm, g.clock,
+        g.pose, pack_pos(g.pose[0], g.pose[1], g.pose[2], g.pose[3]));
+    crate_boot(l.blocks, l.nblocks, g.crate_pose, g.crate_hs, g.crate_hn, g.crate_t0);
+}
+
+test_move(g: *UndoGame, dc: int, dr: int) {
+    l: *LevelState = g.level;
+    play_try_dir(l.blocks, l.nblocks, l.rooms, l.nrooms, l.bricks, l.nbricks,
+        g.hist, g.hpc, g.hpr, g.hph, g.hpm, g.hms, g.clock, g.pose, dc, dr, g.pend,
+        g.ids, g.widths, g.live, g.counts, g.cursors, g.ghost, l.goals, l.ngoals,
+        g.solved, g.stream_until, g.stream_tx, g.stream_tz, g.sparks, g.rng, g.xy,
+        g.scratch, g.u);
+    settle_test_game(g);
+}
+
+test_undo(g: *UndoGame): int {
+    l: *LevelState = g.level;
+    result: int = PLAY_UNDO_WAIT;
+    ticks: int = 0;
+    while (result == PLAY_UNDO_WAIT && ticks < UNDO_ROUTE_MAX + 4) {
+        result = play_undo_step(l.blocks, l.nblocks, l.nrooms, g.hist, g.hpc, g.hpr,
+            g.hph, g.hpm, g.hms, g.clock, g.pose, g.pend, g.ids, g.widths, g.live,
+            g.counts, g.cursors, g.ghost, g.u, g.crate_pose, g.crate_ms, g.crate_hs, g.crate_hn, g.crate_t0,
+            ticks * 1000);
+        crate_boot(l.blocks, l.nblocks, g.crate_pose, g.crate_hs, g.crate_hn, g.crate_t0);
+        ticks = ticks + 1;
+    }
+    check(result != PLAY_UNDO_WAIT, "undo catch-up failed to finish");
+    settle_test_game(g);
+    result;
+}
+
+test_gameplay() {
+    g: *UndoGame = new_undo_game();
+    stable: int = l8_heap_used();
+    // More than 128k real walking actions, then undo every one.
+    for i in 0..131074 {
+        dc: int = 0 - 1;
+        if (i % 2 == 1) { dc = 1; }
+        test_move(g, dc, 0);
+    }
+    check(g.u.count == 131074 && g.pose[0] == 0, "large walking history");
+    check(undo_read(g.u, undo_latest(g.u)) == 5, "walking record exceeds 40 bytes");
+    for i in 0..131074 {
+        check(test_undo(g) == PLAY_UNDO_DONE, "walking undo");
+    }
+    check(test_undo(g) == 0 && g.pose[0] == 0, "empty undo boundary");
+    check(l8_heap_used() == stable, "walking/undo heap growth");
+
+    // Move a linked shape out of its room, let that room rewind part way, and
+    // undo the departure. Catch-up must use the retained post-action branch.
+    test_move(g, 1, 0); test_move(g, 1, 0); test_move(g, 1, 0);
+    check(g.pose[0] == 3 && g.level.blocks[0].column == 4 &&
+        g.level.blocks[1].column == 4 && g.ghost[0] == REWIND_LEAVE, "shape departure");
+    for i in 0..2 {
+        check(rewind_try_step(g.level.blocks, 0, g.ids, g.widths, g.live, g.counts,
+            g.cursors, g.ghost, 50, 50) == 1, "background rewind step");
+    }
+    settle_test_game(g);
+    check(test_undo(g) == PLAY_UNDO_DONE, "undo room departure");
+    check(g.pose[0] == 2 && g.level.blocks[0].column == 3 &&
+        g.level.blocks[1].column == 3 && g.counts[0] == 3 && g.ghost[0] == 0,
+        "shape undo restored wrong room branch");
+    // Undo and branch repeatedly, including reuse of the same physical slot.
+    for i in 0..100 {
+        test_move(g, 1, 0);
+        check(test_undo(g) == PLAY_UNDO_DONE, "repeat push undo");
+    }
+    check(l8_heap_used() == stable, "push/rewind/undo heap growth");
+
+    // An unrelated room can finish rewinding after a player action. Undo must
+    // not roll that independent clock back to the archived global image.
+    g.level.blocks[2].column = 12;
+    rewind_capture(g.level.blocks, 1, g.ids, g.widths, g.live, 1);
+    g.counts[1] = 2; g.cursors[1] = 1; g.ghost[1] = REWIND_LEAVE;
+    test_move(g, 0, -1);
+    check(rewind_try_step(g.level.blocks, 1, g.ids, g.widths, g.live, g.counts,
+        g.cursors, g.ghost, 50, 50) == 1, "independent rewind");
+    settle_test_game(g);
+    check(test_undo(g) == PLAY_UNDO_DONE, "undo with independent clock");
+    check(g.level.blocks[2].column == 11 && g.counts[1] == 1 && g.ghost[1] == 0,
+        "undo changed independent room");
+
+    // Failed attempts must not consume history.
+    old_count: int = g.u.count;
+    oldest: int = g.u.tail;
+    latest: int = g.u.head;
+    // A zero direction is a failed action with no history effect.
+    for i in 0..100 { test_move(g, 0, 0); }
+    check(g.u.count == old_count && g.u.tail == oldest && g.u.head == latest,
+        "failed actions evicted undo");
+    check(l8_heap_used() == stable, "gameplay allocated after startup");
+}
+
+test_branch_route() {
+    g: *UndoGame = new_undo_game();
+    stable: int = l8_heap_used();
+    undo_save_history(g.u, 0, 2, g.widths, g.live, g.counts, g.cursors, g.ghost,
+        g.level.blocks, 3, 0);
+    for s in 1..3 {
+        for k in 0..2 {
+            g.live[rewind_slot(0, s, k, g.widths)] = pack_pos(s + 1, k, 0, 0);
+        }
+    }
+    g.counts[0] = 3; g.cursors[0] = 2;
+    undo_save_history(g.u, 1, 2, g.widths, g.live, g.counts, g.cursors, g.ghost,
+        g.level.blocks, 3, 0);
+    for s in 1..3 {
+        for k in 0..2 {
+            g.live[rewind_slot(0, s, k, g.widths)] = pack_pos(s + 3, k, 0, 0);
+        }
+    }
+    g.level.blocks[0].column = 5; g.level.blocks[1].column = 5;
+    undo_build_route(g.u, undo_latest(g.u), 0, g.level.blocks, g.ids, g.widths, g.live, g.cursors);
+    check(g.u.route_n[0] == 4, "branch route length");
+    // Walk the abandoned branch back to its common ancestor, then forward.
+    check(pos_col(g.u.route[0]) == 4 && pos_col(g.u.route[2]) == 1 &&
+        pos_col(g.u.route[4]) == 2 && pos_col(g.u.route[6]) == 3, "branch route poses");
+    check(l8_heap_used() == stable, "branch route allocated");
+}
+
+test_full_action_capacity() {
+    g: *UndoGame = new_undo_game();
+    capacity: int = UNDO_JOURNAL_WORDS / UNDO_ACTION_OVERHEAD;
+    stable: int = l8_heap_used();
+    // Fill the production-size ring, including eviction of its initial image
+    // diff, then undo all 524,288 retained actions across the physical seam.
+    for i in 0..capacity + 258 {
+        dc: int = -1;
+        if (i % 2 == 1) { dc = 1; }
+        test_move(g, dc, 0);
+    }
+    check(g.u.count == capacity && g.u.head > len(g.u.journal), "full walking capacity");
+    check(g.u.head - g.u.tail == capacity * 5, "walking capacity byte accounting");
+    for i in 0..capacity {
+        check(test_undo(g) == PLAY_UNDO_DONE, "full history undo");
+        check(g.pose[0] == -1 + i % 2, "full history player position");
+    }
+    check(test_undo(g) == 0, "oldest retained action boundary");
+    check(l8_heap_used() == stable, "full history allocated");
+}
+
+test_stacked_and_unowned() {
+    g: *UndoGame = new_undo_game();
+    g.level.blocks[2].column = 1;
+    g.level.blocks[2].row = 0;
+    g.level.blocks[2].layer = 1;
+    assign_block_homes(g.level.blocks, 3, g.level.rooms, 2, g.u.home, g.ids, g.widths);
+    g.u = new_undo_timeline(g.u.home, 3, g.widths);
+    for r in 0..2 { rewind_capture(g.level.blocks, r, g.ids, g.widths, g.live, 0); }
+    settle_test_game(g);
+    stable: int = l8_heap_used();
+    test_move(g, 1, 0);
+    check(g.level.blocks[0].column == 2 && g.level.blocks[1].column == 2 &&
+        g.level.blocks[2].column == 2 && g.level.blocks[2].layer == 1, "stacked shape push");
+    check(test_undo(g) == PLAY_UNDO_DONE, "stacked shape undo");
+    check(g.level.blocks[0].column == 1 && g.level.blocks[1].column == 1 &&
+        g.level.blocks[2].column == 1 && g.level.blocks[2].layer == 1, "stack restoration");
+    check(l8_heap_used() == stable, "stacked shape allocated");
+
+    // A block outside all rooms must be restored by the changed-block flags
+    // reconstructed from the action, without selecting unrelated room clocks.
+    g.level.blocks[2].column = 20; g.level.blocks[2].row = 0; g.level.blocks[2].layer = 0;
+    assign_block_homes(g.level.blocks, 3, g.level.rooms, 2, g.u.home, g.ids, g.widths);
+    g.u = new_undo_timeline(g.u.home, 3, g.widths);
+    for r in 0..2 { rewind_capture(g.level.blocks, r, g.ids, g.widths, g.live, 0); }
+    g.pose[0] = 19;
+    settle_test_game(g);
+    stable = l8_heap_used();
+    test_move(g, 1, 0);
+    check(g.u.home[2] < 0 && g.level.blocks[2].column == 21, "unowned push");
+    check(test_undo(g) == PLAY_UNDO_DONE && g.level.blocks[2].column == 20 &&
+        g.pose[0] == 19, "unowned block undo");
+    check(l8_heap_used() == stable, "unowned block allocated");
+}
+
+test_maximum_history() {
+    n: int = LEVEL_MAX_BLOCKS;
+    home: []int = new int[n](0);
+    widths: []int = new int[LEVEL_MAX_ROOMS](0);
+    widths[0] = n;
+    u: *UndoTimeline = new_undo_timeline(home, n, widths);
+    blocks: []Block = new Block[n](Block { id: 0, column: 0, row: 0,
+        shape: 0, layer: 0, ramp: 0, mounted: 0 });
+    live: []int = new int[n * REWIND_MAX](0);
+    counts: []int = new int[LEVEL_MAX_ROOMS](0);
+    cursors: []int = new int[LEVEL_MAX_ROOMS](0);
+    ghost: []int = new int[LEVEL_MAX_ROOMS](0);
+    counts[0] = REWIND_MAX;
+    cursors[0] = REWIND_MAX - 1;
+    stable: int = l8_heap_used();
+    // Every cell changes twice per action: deliberately much denser than
+    // gameplay, proving overflow preserves the newest complete before/after.
+    for action in 0..12 {
+        for phase in 0..2 {
+            value: int = pack_pos(-4096, 4096 - action, 7, 1);
+            if (phase == 1) { value = pack_pos(4096, -4096 + action, 0, 0); }
+            for i in 0..len(live) { live[i] = value; }
+            undo_save_history(u, phase, 1, widths, live, counts, cursors,
+                ghost, blocks, n, action);
+        }
+        check(u.count > 0 && u.head - u.tail <= len(u.journal), "dense journal budget");
+        for phase in 0..2 {
+            data: []int = undo_load_history(u, undo_latest(u), phase);
+            value: int = pack_pos(-4096, 4096 - action, 7, 1);
+            if (phase == 1) { value = pack_pos(4096, -4096 + action, 0, 0); }
+            for i in 0..len(live) {
+                check(data[3 + i] == value, "dense snapshot reconstruction");
+            }
+        }
+    }
+    check(l8_heap_used() == stable, "maximum histories allocated after startup");
+}
+
+main(): int {
+    test_journal();
+    test_gameplay();
+    test_full_action_capacity();
+    test_stacked_and_unowned();
+    test_branch_route();
+    test_maximum_history();
+    write(1, "undo journal tests passed\n", len("undo journal tests passed\n"));
+    0;
+}

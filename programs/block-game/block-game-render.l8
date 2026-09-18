@@ -90,6 +90,7 @@ link_program(vs: []i8, fs: []i8, a1: str): int {
     glBindAttribLocation(prog, 0, "pos");
     glBindAttribLocation(prog, 1, a1);
     glBindAttribLocation(prog, 2, "vcol");
+    glBindAttribLocation(prog, 3, "vaux");
     glLinkProgram(prog);
     lst: []i32 = new i32[1](0i32);
     glGetProgramiv(prog, 35714, lst);
@@ -121,11 +122,18 @@ CAM_BACK: f32 = 13.5;
 
 TRAVEL_CAM_BACK: f32 = 17.5;
 
-GRASS_NX: int = 512;
-
-GRASS_NZ: int = 640;
-
 GRASS_SPACING: f32 = 0.113;
+
+// The coverage texture caches the procedural grass edge and stone pattern.
+// Sixteen samples per ground cell retain the narrow stone transitions while
+// keeping regeneration cheap enough for editor updates.
+GRASS_COVER_CELLS: int = 96;
+
+GRASS_COVER_SCALE: int = 16;
+
+GRASS_COVER_SIZE: int = GRASS_COVER_CELLS * GRASS_COVER_SCALE;
+
+GRASS_COVER_PAD: int = 34;
 
 floor_i(x: f32): int {
     i: int = x as int;
@@ -743,39 +751,170 @@ first_grid_on(min_w: f32, origin: f32, sp: f32): f32 {
     w;
 }
 
-fill_visible_grass_instances(
-    dst: []f32,
-    ground: []GroundCell,
-    nground: int,
-    gx: f32,
-    gz: f32,
-    vp: []f32
-): int {
-    max_n: int = GRASS_NX * GRASS_NZ;
+// Ground cells form independently culled chunks in a persistent instance VBO.
+GRASS_CELL_CAP: int = 81;
+
+GRASS_INSTANCE_FLOATS: int = 6;
+
+type GrassCache = {
+    cells: []GroundCell;
+    counts: []int;
+    vertices: []f32;
+    visible: []int;
+    batch: []f32;
+    batch_n: int;
+    n: int;
+    ready: bool;
+};
+
+type GrassCoverage = {
+    prog: int;
+    u_mask_origin: int;
+    u_cover_origin: int;
+    buf: u32;
+    fbo: u32;
+    tex: u32;
+};
+
+new_grass_cache(): *GrassCache@new {
+    new GrassCache {
+        cells: new GroundCell[LEVEL_MAX_GROUND](GroundCell {
+            column: 0, row: 0, style: 0, stone: 0
+        }),
+        counts: new int[LEVEL_MAX_GROUND](0),
+        vertices: new f32[LEVEL_MAX_GROUND * GRASS_CELL_CAP * GRASS_INSTANCE_FLOATS](0.0),
+        visible: new int[LEVEL_MAX_GROUND](0),
+        batch: new f32[LEVEL_MAX_GROUND * GRASS_CELL_CAP * GRASS_INSTANCE_FLOATS](0.0),
+        batch_n: 0,
+        n: 0,
+        ready: false
+    };
+}
+
+fract_f32(x: f32): f32 {
+    x - floor_i(x) as f32;
+}
+
+// This is the CPU equivalent of grass_hash in the original vertex shader.
+// It runs once when a ground cell changes instead of once for every blade vertex.
+fill_grass_instance(dst: []f32, offset: int, wx: f32, wz: f32) {
+    px: f32 = wx * 4.54545 + 17.0;
+    py: f32 = wz * 4.54545 + 17.0;
+    ax: f32 = fract_f32(px * 0.1031);
+    ay: f32 = fract_f32(py * 0.1030);
+    az: f32 = fract_f32(px * 0.0973);
+    d: f32 = ax * (ay + 33.33) + ay * (az + 33.33) + az * (ax + 33.33);
+    ax = ax + d;
+    ay = ay + d;
+    az = az + d;
+    seed_x: f32 = fract_f32((ax + ay) * az);
+    seed_y: f32 = fract_f32((ax + az) * ay);
+    angle: f32 = seed_x * 6.2831853;
+    dst[offset] = wx + (seed_x - 0.5) * 0.13;
+    dst[offset + 1] = wz + (seed_y - 0.5) * 0.13;
+    dst[offset + 2] = cos_f32(angle);
+    dst[offset + 3] = sin_f32(angle);
+    dst[offset + 4] = seed_x;
+    dst[offset + 5] = seed_y;
+}
+
+fill_grass_cell(dst: []f32, offset: int, column: int, row: int): int {
     n: int = 0;
-    i: int = 0;
-    while (i < nground) {
-        f: GroundCell = ground[i];
-        if (f.style == GROUND_GRASS && grass_cell_in_view(vp, f.column, f.row) != 0) {
-            c0: f32 = f.column as f32;
-            r0: f32 = f.row as f32;
-            c1: f32 = c0 + 1.0;
-            r1: f32 = r0 + 1.0;
-            wx: f32 = first_grid_on(c0, gx, GRASS_SPACING);
-            while (wx < c1 && n < max_n) {
-                wz: f32 = first_grid_on(r0, gz, GRASS_SPACING);
-                while (wz < r1 && n < max_n) {
-                    dst[n * 2] = wx - gx;
-                    dst[n * 2 + 1] = wz - gz;
-                    n = n + 1;
-                    wz = wz + GRASS_SPACING;
-                }
-                wx = wx + GRASS_SPACING;
-            }
+    wx: f32 = first_grid_on(column as f32, 0.0, GRASS_SPACING);
+    while (wx < (column + 1) as f32) {
+        wz: f32 = first_grid_on(row as f32, 0.0, GRASS_SPACING);
+        while (wz < (row + 1) as f32) {
+            fill_grass_instance(dst, offset + n * GRASS_INSTANCE_FLOATS, wx, wz);
+            n = n + 1;
+            wz = wz + GRASS_SPACING;
         }
-        i = i + 1;
+        wx = wx + GRASS_SPACING;
     }
     n;
+}
+
+update_grass_cache(cache: *GrassCache, ground: []GroundCell, n: int) {
+    if (n != cache.n) { cache.ready = false; }
+    for i in 0..n {
+        f: GroundCell = ground[i];
+        old: GroundCell = cache.cells[i];
+        if (i >= cache.n || f.column != old.column || f.row != old.row || f.style != old.style) {
+            cache.counts[i] = 0;
+            if (f.style == GROUND_GRASS) {
+                cache.counts[i] = fill_grass_cell(cache.vertices,
+                    i * GRASS_CELL_CAP * GRASS_INSTANCE_FLOATS, f.column, f.row);
+            }
+            cache.cells[i] = f;
+            cache.ready = false;
+        }
+    }
+    cache.n = n;
+}
+
+// Keep one draw call. Repack/upload only when visible chunks or their contents
+// change; wind, player motion and camera motion within that set use uniforms.
+prepare_grass_batch(cache: *GrassCache, buf: u32, vp: []f32) {
+    dirty: bool = !cache.ready;
+    for i in 0..cache.n {
+        f: GroundCell = cache.cells[i];
+        visible: int = 0;
+        if (cache.counts[i] > 0) { visible = grass_cell_in_view(vp, f.column, f.row); }
+        if (visible != cache.visible[i]) { dirty = true; }
+        cache.visible[i] = visible;
+    }
+    if (!dirty) { return; }
+    count: int = 0;
+    for i in 0..cache.n {
+        if (cache.visible[i] != 0) {
+            src: int = i * GRASS_CELL_CAP * GRASS_INSTANCE_FLOATS;
+            for k in 0..cache.counts[i] * GRASS_INSTANCE_FLOATS {
+                cache.batch[count * GRASS_INSTANCE_FLOATS + k] = cache.vertices[src + k];
+            }
+            count = count + cache.counts[i];
+        }
+    }
+    cache.batch_n = count;
+    glBindBuffer(34962, buf);
+    if (count > 0) {
+        glBufferData(34962, count * GRASS_INSTANCE_FLOATS * 4, cache.batch, 35044);
+    }
+    cache.ready = true;
+}
+
+draw_grass_coverage(
+    cover: *GrassCoverage,
+    ctex: u32,
+    ground_buf: u32,
+    mask_c: int,
+    mask_r: int,
+    cover_c: int,
+    cover_r: int
+) {
+    glBindFramebuffer(36160, cover.fbo);
+    glDrawBuffer(36064);
+    glReadBuffer(36064);
+    glViewport(0, 0, GRASS_COVER_SIZE, GRASS_COVER_SIZE);
+    glDisable(2929);
+    glUseProgram(cover.prog);
+    glUniform2f(cover.u_mask_origin, mask_c as f32, mask_r as f32);
+    glUniform2f(cover.u_cover_origin, cover_c as f32, cover_r as f32);
+    glActiveTexture(33985);
+    glBindTexture(3553, ctex);
+    glBindBuffer(34962, cover.buf);
+    glVertexAttribPointer(0, 2, 5126, 0, 8, 0);
+    glEnableVertexAttribArray(0);
+    glDisableVertexAttribArray(1);
+    glDisableVertexAttribArray(2);
+    glDisableVertexAttribArray(3);
+    glDrawArrays(4, 0, 6);
+    glBindFramebuffer(36160, 0u32);
+    glDrawBuffer(1029);
+    glReadBuffer(1029);
+    glViewport(0, 0, 1200, 720);
+    glEnable(2929);
+    bind_mesh(ground_buf);
+    glEnableVertexAttribArray(0);
+    glEnableVertexAttribArray(1);
 }
 
 draw_instanced_grass(
@@ -783,12 +922,10 @@ draw_instanced_grass(
     u: []int,
     blade_buf: u32,
     instance_buf: u32,
-    instances: []f32,
+    instances: *GrassCache,
     blade_n: int,
     ground: []GroundCell,
     nground: int,
-    focus_x: f32,
-    focus_z: f32,
     actor_x: f32,
     actor_z: f32,
     motion_x: f32,
@@ -799,28 +936,23 @@ draw_instanced_grass(
     vp: []f32,
     light_vp: []f32,
     stex: u32,
-    ctex: u32,
-    mask_c: int,
-    mask_r: int
+    cover_tex: u32,
+    cover_c: int,
+    cover_r: int
 ) {
-    gx: f32 = floor_i(focus_x / GRASS_SPACING) as f32 * GRASS_SPACING;
-    gz: f32 = floor_i(focus_z / GRASS_SPACING) as f32 * GRASS_SPACING;
-    gn: int = fill_visible_grass_instances(instances, ground, nground, gx, gz, vp);
-    if (gn <= 0) {
-        return;
-    }
+    update_grass_cache(instances, ground, nground);
+    prepare_grass_batch(instances, instance_buf, vp);
+    if (instances.batch_n == 0) { return; }
     glUseProgram(prog);
     glUniformMatrix4fv(u[0], 1, 0, vp);
-    glUniform2f(u[1], gx, gz);
-    glUniform2f(u[2], focus_x, focus_z);
-    glUniform2f(u[3], actor_x, actor_z);
-    glUniform2f(u[4], motion_x, motion_z);
-    glUniform1f(u[5], mono_ms() as f32 * 0.001);
-    glUniform3f(u[6], lx, ly, lz);
-    glUniformMatrix4fv(u[7], 1, 0, light_vp);
-    glUniform2f(u[10], mask_c as f32, mask_r as f32);
+    glUniform2f(u[1], actor_x, actor_z);
+    glUniform2f(u[2], motion_x, motion_z);
+    glUniform1f(u[3], mono_ms() as f32 * 0.001);
+    glUniform3f(u[4], lx, ly, lz);
+    glUniformMatrix4fv(u[5], 1, 0, light_vp);
+    glUniform2f(u[8], cover_c as f32, cover_r as f32);
     glActiveTexture(33985);
-    glBindTexture(3553, ctex);
+    glBindTexture(3553, cover_tex);
     glActiveTexture(33984);
     glBindTexture(3553, stex);
     glBindBuffer(34962, blade_buf);
@@ -829,13 +961,17 @@ draw_instanced_grass(
     glEnableVertexAttribArray(0);
     glEnableVertexAttribArray(1);
     glBindBuffer(34962, instance_buf);
-    glBufferData(34962, gn * 8, instances, 35040);
-    glVertexAttribPointer(2, 2, 5126, 0, 8, 0);
+    glVertexAttribPointer(2, 4, 5126, 0, GRASS_INSTANCE_FLOATS * 4, 0);
+    glVertexAttribPointer(3, 2, 5126, 0, GRASS_INSTANCE_FLOATS * 4, 16);
     glEnableVertexAttribArray(2);
+    glEnableVertexAttribArray(3);
     glVertexAttribDivisor(2, 1);
-    glDrawArraysInstanced(4, 0, blade_n / 6, gn);
+    glVertexAttribDivisor(3, 1);
+    glDrawArraysInstanced(4, 0, blade_n / 6, instances.batch_n);
     glVertexAttribDivisor(2, 0);
+    glVertexAttribDivisor(3, 0);
     glDisableVertexAttribArray(2);
+    glDisableVertexAttribArray(3);
 }
 
 bind_brick_mesh(buf: u32) {
@@ -3557,9 +3693,10 @@ draw_frame(
     bd_u: []int,
     grass_prog: int,
     grass_u: []int,
+    grass_cover: *GrassCoverage,
     grass_blade_buf: u32,
     grass_instance_buf: u32,
-    grass_instances: []f32,
+    grass_instances: *GrassCache,
     grass_blade_n: int
 ) {
     pfc: int = floor_i(focus_x);
@@ -3675,12 +3812,35 @@ draw_frame(
         mask_cache[1] = origin_r;
         mask_cache[2] = mkey;
     }
+    cover_c: int = mask_cache[3];
+    cover_r: int = mask_cache[4];
+    need_cover: int = need_mask;
+    if (cover_c < 0 - 999998) {
+        need_cover = 1;
+    } else if (fc - GRASS_COVER_PAD < cover_c ||
+        fc + GRASS_COVER_PAD >= cover_c + GRASS_COVER_CELLS) {
+        need_cover = 1;
+    } else if (fr - GRASS_COVER_PAD < cover_r ||
+        fr + GRASS_COVER_PAD >= cover_r + GRASS_COVER_CELLS) {
+        need_cover = 1;
+    }
+    if (need_cover != 0) {
+        cover_c = fc - GRASS_COVER_CELLS / 2;
+        cover_r = fr - GRASS_COVER_CELLS / 2;
+    }
     glActiveTexture(33985);
     glBindTexture(3553, ctex);
     if (need_mask != 0) {
         glPixelStorei(3317, 1);
         glTexSubImage2D(3553, 0, 0, 0, MASK_SIZE, MASK_SIZE, 6409, 5121, cmask);
     }
+    if (need_cover != 0) {
+        draw_grass_coverage(grass_cover, ctex, cube_buf, origin_c, origin_r, cover_c,
+            cover_r);
+        mask_cache[3] = cover_c;
+        mask_cache[4] = cover_r;
+    }
+    glUseProgram(prog);
     glActiveTexture(33984);
     glBindTexture(3553, stex);
     glUniform2f(u_mask_origin, origin_c as f32, origin_r as f32);
@@ -3689,9 +3849,9 @@ draw_frame(
         80.0, 0.22, 0.20, 0.18, 36);
     glUniform1f(u_ground, 0.0);
     draw_instanced_grass(grass_prog, grass_u, grass_blade_buf, grass_instance_buf,
-        grass_instances, grass_blade_n, ground_cells, nground, focus_x, focus_z, px + 0.5,
-        pz + 0.5, lagx[1023], lagz[1023], lx, ly, lz, vp, lvp, stex, ctex, origin_c,
-        origin_r);
+        grass_instances, grass_blade_n, ground_cells, nground, px + 0.5, pz + 0.5,
+        lagx[1023], lagz[1023], lx, ly, lz, vp, lvp, stex, grass_cover.tex,
+        cover_c, cover_r);
     glUseProgram(prog);
     draw_hedges(u_origin, u_scale, u_color, u_lag, brick_buf, brick_n, u_brick);
     bind_mesh(cube_buf);
