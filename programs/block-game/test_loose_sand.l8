@@ -1,0 +1,269 @@
+tag block_game;
+
+use_tag gl, x11, freetype;
+
+import "../gl/gl.l8";
+
+import "../freetype/ft.l8";
+
+import "level.l8";
+
+import "block-game-undo.l8";
+
+import "block-game-play.l8";
+
+import "block-game-editor.l8";
+
+import "block-game-render.l8";
+
+import "block-game-ui.l8";
+
+extern glGetError(): int;
+
+extern glReadPixels(
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    format: int,
+    typ: int,
+    pixels: *i8
+): int;
+
+sand_check(ok: bool, msg: []i8) {
+    if (!ok) {
+        die(msg);
+    }
+}
+
+sand_mass(s: *LooseSand): int {
+    mass: int = 0;
+    for i in 0..s.n {
+        mass = mass + s.amount[i];
+    }
+    mass;
+}
+
+main(): int {
+    state: *LevelState = new_level_state();
+    s: *LooseSand = state.sand;
+    out: []int = new int[7](0);
+    cell: []int = new int[7](0);
+    apply_level_brush_rect(state, 0, 0, 3, 1, BRUSH_LOOSE_SAND, 0, 0, 1, out, cell);
+    sand_check(s.n > 0 && s.n < 512 && state.nground == 0, "loose brush is independent of painted terrain");
+    sand_check(brush_slot_on(24, BRUSH_LOOSE_SAND, 0), "loose sand has its own palette slot");
+    sand_check(sand_amount(s, 0, 0) < sand_amount(s, 8, 8), "deposits taper towards rounded corners");
+    sand_check(sand_amount(s, 8, 8) != sand_amount(s, 16, 8), "deposits have varied interior depth");
+    sand_check(sand_deposit_amount(1.5, 1.5, 0, 0, 2, 2) > 850, "a broad brush deposits raised mound centers");
+    sand_check(sand_deposit_amount(1.5, 1.5, 0, 0, 2, 2) > sand_deposit_amount(0.3,
+        1.5, 0, 0, 2, 2) * 2, "mounds slope down from the center to their shoulders");
+    before: int = sand_mass(s);
+    apply_level_brush_rect(state, 0, 0, 3, 1, BRUSH_LOOSE_SAND, 0, 0, 1, out, cell);
+    sand_check(sand_mass(s) == before, "repainting deposits a consistent layer rather than unlimited height");
+    motion: *SandMotion = new_sand_motion();
+    motion.n = 1;
+    motion.poses[0] = 1.5;
+    motion.poses[1] = 0.5;
+    motion.poses[2] = 0.46;
+    heap: int = l8_heap_used();
+    sand_sweep(s, motion, 0, 0.5, 0.5, 1.5, 0.5, 0.46);
+    sand_check(sand_mass(s) == before, "pushing and settling conserve sand");
+    sand_check(sand_amount(s, 9, 4) <= 12, "blocks clear a shallow trail");
+    pile: bool = false;
+    for i in 0..s.n {
+        if (s.amount[i] > 500) {
+            pile = true;
+        }
+    }
+    sand_check(pile, "displaced sand accumulates into piles");
+    version: int = s.version;
+    sand_sweep(s, motion, 0, 1.5, 0.5, 1.5, 0.5, 0.46);
+    sand_check(s.version == version, "stationary blocks preserve tracks without churning");
+    sand_check(l8_heap_used() == heap, "sand motion does not allocate");
+    motion.nground = 1;
+    motion.ground[0] = GroundCell {
+        column: 2,
+        row: 0,
+        style: GROUND_WATER,
+        stone: 0
+    };
+    sand_check(!sand_allowed(motion, 16, 1), "sand cannot be pushed into water");
+    motion.nbricks = 1;
+    motion.bricks[0] = Brick { column: 1, row: 1 };
+    sand_check(!sand_allowed(motion, 9, 9), "sand cannot be pushed into walls");
+    sand_set(s, 0 - 1, 0 - 9, 300);
+    sand_check(sand_amount(s, 0 - 1, 0 - 9) == 300 && sand_tile(0 - 1) == 0 - 1, "negative coordinates remain distinct");
+    loaded: *LevelState = new_level_state();
+    copy_level_state(loaded, state);
+    sand_check(sand_mass(loaded.sand) == sand_mass(s), "snapshots copy loose sand");
+    // Moving a room transports its subcell detail; transforms never duplicate mass.
+    edit: *LevelState = new_level_state();
+    edit.nrooms = 1;
+    edit.rooms[0] = Room {
+        x0: 0,
+        y0: 0,
+        x1: 1,
+        y1: 2
+    };
+    sand_set(edit.sand, 1, 2, 800);
+    sand_set(edit.sand, 2, 3, 0);
+    xy: []int = new int[2](0);
+    transform_level_room(edit, 0, 4, 5, 1, xy);
+    xform_local(1, 2, 16, 24, 1, xy);
+    sand_check(sand_amount(edit.sand, 32 + xy[0], 40 + xy[1]) == 800 && sand_mass(edit.sand) == 800,
+        "room rotation moves exact subcell amounts");
+    sand_edit_column(edit.sand, 0, false);
+    sand_edit_column(edit.sand, 0, true);
+    sand_check(sand_amount(edit.sand, 32 + xy[0], 40 + xy[1]) == 800, "insert and delete preserve sand coordinates");
+    sand_clear(edit.sand);
+    sand_set(edit.sand, 0, 0, 500);
+    sand_set(edit.sand, 1, 0, 300);
+    sand_set(edit.sand, 0, 0, 0);
+    sand_reindex(edit.sand);
+    sand_check(edit.sand.n == 1 && sand_amount(edit.sand, 1, 0) == 300, "empty slots are reclaimed without losing live sand");
+    apply_level_brush_rect(edit, 0, 0, 0, 0, BRUSH_WATER, 0, 0, 1, out, cell);
+    sand_check(sand_mass(edit.sand) == 0, "painting water clears loose sand on that tile");
+    // Explicit editor saves preserve authored deposits; play changes stay in memory.
+    sand_check(save_level_state(".build/loose-sand-test.txt", state) == 0, "save authored sand");
+    sand_check(load_level_state(".build/loose-sand-test.txt", loaded) >= 0, "load authored sand");
+    sand_check(sand_mass(loaded.sand) == sand_mass(s), "sand roundtrips without quantization loss");
+    sand_set(s, 40, 40, 200);
+    sand_check(load_level_state(".build/loose-sand-test.txt", loaded) >= 0 && sand_amount(loaded.sand,
+        40, 40) == 0, "reloading discards gameplay displacement");
+    // Old sidecars must no longer override the authored deposits.
+    fd: int = open_path(".build/loose-sand-test.txt.sand", LEVEL_O_WRONLY + LEVEL_O_CREAT + LEVEL_O_TRUNC,
+        LEVEL_MODE);
+    legacy: []i8 = """
+# loose-sand 1
+loose 40 40 900
+""";
+    sand_check(fd >= 0, "create legacy sidecar fixture");
+    write(fd, legacy, len(legacy));
+    close(fd);
+    load_level_state(".build/loose-sand-test.txt", loaded);
+    sand_check(sand_amount(loaded.sand, 40, 40) == 0, "legacy gameplay sidecars are ignored");
+    sand_clear(s);
+    sand_check(save_level_state(".build/loose-sand-test.txt", state) == 0, "save erased authored sand");
+    load_level_state(".build/loose-sand-test.txt", loaded);
+    sand_check(sand_mass(loaded.sand) == 0, "explicit editor erases survive reload");
+    sand_clear(edit.sand);
+    edit.rooms[0] = Room {
+        x0: -3,
+        y0: 4,
+        x1: -1,
+        y1: 7
+    };
+    sand_set(edit.sand, -23, 34, 600);
+    sand_check(save_level_state(".build/sand-local-origin.txt", edit) == 0, "save translated room");
+    load_level_state(".build/sand-local-origin.txt", loaded);
+    sand_check(sand_amount(loaded.sand, 1, 2) == 600, "standalone room saves normalize sand to the room origin");
+    world: *WorldState = new_world_state();
+    world.names[0] = "sand-test";
+    sand_check(save_world_state(".build/sand-world-test.txt", world, edit) == 0, "save world sand");
+    load_world_state(".build/sand-world-test.txt", world, loaded);
+    sand_check(sand_amount(loaded.sand, -23, 34) == 600, "world saves retain absolute sand coordinates");
+    d0: ?*i8 = XOpenDisplay(null);
+    if (d0 == null) {
+        die("sand render test needs DISPLAY");
+    }
+    d: *i8 = d0;
+    attr: []i32 = [4i32, 0i32];
+    v0: ?*XVisualInfo = glXChooseVisual(d, XDefaultScreen(d), attr);
+    if (v0 == null) {
+        return 2;
+    }
+    v: *XVisualInfo = v0;
+    win: int = XCreateSimpleWindow(d, XRootWindow(d, XDefaultScreen(d)), 0, 0, 128,
+        128, 0, 0, 0);
+    ctx0: ?*i8 = glXCreateContext(d, v, null, 1);
+    if (ctx0 == null) {
+        return 3;
+    }
+    ctx: *i8 = ctx0;
+    glXMakeCurrent(d, win, ctx);
+    main: int = link_program("""
+#version 120
+void main(){gl_Position=vec4(0);}""", """
+#version 120
+void main(){gl_FragColor=vec4(1);}""", "nrm");
+    render: *SandRender = new_sand_render();
+    light: *LampLight = new_lamp_light(main, main, main);
+    vp: []f32 = new f32[16](0.0);
+    vp[0] = 0.2;
+    vp[5] = 0.2;
+    vp[10] = 0.2;
+    vp[15] = 1.0;
+    sand_paint(state, 0, 0, 1, 1, false);
+    draw_loose_sand(s, render, main, vp, vp, light);
+    sand_check(render.count > 0 && render.count % 6 == 0, "loose sand renders a raised mesh");
+    sand_check(glGetError() == 0, "sand shaders and draw have no GL errors");
+    // Exercise actual fragment coverage on an offscreen white ground. A tiny
+    // amount must reveal that ground instead of painting a solid square.
+    target: []u32 = new u32[1](0u32);
+    fbo: []u32 = new u32[1](0u32);
+    pixels: []i8 = new i8[128 * 128 * 4](0i8);
+    glGenTextures(1, target);
+    glActiveTexture(33984);
+    glBindTexture(3553, target[0]);
+    glTexParameteri(3553, 10241, 9729);
+    glTexParameteri(3553, 10240, 9729);
+    glTexImage2D(3553, 0, 6408, 128, 128, 0, 6408, 5121, pixels);
+    glGenFramebuffers(1, fbo);
+    glBindFramebuffer(36160, fbo[0]);
+    glFramebufferTexture2D(36160, 36064, 3553, target[0], 0);
+    glDrawBuffer(36064);
+    glReadBuffer(36064);
+    sand_check(glCheckFramebufferStatus(36160) == 36053, "sand coverage framebuffer");
+    // The shadow sampler must not sample the active color attachment.
+    glBindTexture(3553, 0u32);
+    glViewport(0, 0, 128, 128);
+    glDisable(2929);
+    glDisable(2884);
+    mat_zero(vp);
+    vp[0] = 4.0;
+    vp[9] = 4.0;
+    vp[12] = 0.0 - 0.25;
+    vp[13] = 0.0 - 0.25;
+    vp[15] = 1.0;
+    lvp: []f32 = new f32[16](0.0);
+    sample: []i8 = new i8[4](0i8);
+    faint: int = 0;
+    solid: int = 0;
+    sand_clear(s);
+    for pass in 0..2 {
+        amount: int = 16;
+        if (pass == 1) {
+            amount = 400;
+        }
+        sand_set(s, 0, 0, amount);
+        version = s.version;
+        glClearColor(1.0, 1.0, 1.0, 1.0);
+        glClear(16384);
+        draw_loose_sand(s, render, main, vp, lvp, light);
+        glReadPixels(0, 0, 128, 128, 6408, 5121, pixels);
+        darkest: int = 255;
+        for pixel in 0..128 * 128 {
+            red: int = pixels[pixel * 4] as int & 255;
+            if (red < darkest) {
+                darkest = red;
+            }
+        }
+        if (pass == 0) {
+            faint = darkest;
+        } else {
+            solid = darkest;
+        }
+        sand_check(s.version == version && sand_mass(s) == amount, "rendering leaves physical sand unchanged");
+    }
+    sand_check(faint > solid + 40 && faint < 250, "thin residue blends with the ground while piles stay opaque");
+    glReadPixels(0, 0, 1, 1, 6408, 5121, sample);
+    sand_check((sample[0] as int & 255) > solid + 40, "ground outside a remnant stays exposed");
+    sand_check(glGetError() == 0, "sand coverage rendering has no GL errors");
+    glBindFramebuffer(36160, 0u32);
+    glXMakeCurrent(d, 0, null);
+    glXDestroyContext(d, ctx);
+    XDestroyWindow(d, win);
+    XCloseDisplay(d);
+    write(1, "loose sand tests passed\n", len("loose sand tests passed\n"));
+    0;
+}

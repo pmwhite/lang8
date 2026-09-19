@@ -1,0 +1,622 @@
+tag block_game;
+
+// Sparse granular height field, eight samples per ground tile.
+// Amounts are integer height units (1/4096 block), so transport is conservative.
+SAND_CAP: int = 32768;
+
+SAND_HASH: int = 65536;
+
+type LooseSand = {
+    x: []int;
+    z: []int;
+    amount: []int;
+    table: []int;
+    n: int;
+    version: int;
+};
+
+sand_floor(x: f32): int {
+    i: int = x as int;
+    if (x < i as f32) {
+        i = i - 1;
+    }
+    i;
+}
+
+sand_tile(x: int): int {
+    sand_floor(x as f32 / 8.0);
+}
+
+new_loose_sand(): *LooseSand@new {
+    new LooseSand {
+        x: new int[SAND_CAP](0),
+        z: new int[SAND_CAP](0),
+        amount: new int[SAND_CAP](0),
+        table: new int[SAND_HASH](0),
+        n: 0,
+        version: 1
+    };
+}
+
+sand_slot(
+    s: *LooseSand,
+    x: int,
+    z: int,
+    create: bool
+): int {
+    hash: int = (x * 73856093 + z * 19349663) % SAND_HASH;
+    if (hash < 0) {
+        hash = hash + SAND_HASH;
+    }
+    for probe in 0..SAND_HASH {
+        entry: int = s.table[hash];
+        if (entry == 0) {
+            if (!create || s.n >= SAND_CAP) {
+                return 0 - 1;
+            }
+            i: int = s.n;
+            s.n = s.n + 1;
+            s.x[i] = x;
+            s.z[i] = z;
+            s.amount[i] = 0;
+            s.table[hash] = i + 1;
+            return i;
+        }
+        i: int = entry - 1;
+        if (s.x[i] == x && s.z[i] == z) {
+            return i;
+        }
+        hash = (hash + 1) % SAND_HASH;
+    }
+    0 - 1;
+}
+
+sand_amount(s: *LooseSand, x: int, z: int): int {
+    i: int = sand_slot(s, x, z, false);
+    if (i < 0) {
+        return 0;
+    }
+    s.amount[i];
+}
+
+sand_set(
+    s: *LooseSand,
+    x: int,
+    z: int,
+    amount: int
+) {
+    i: int = sand_slot(s, x, z, amount > 0);
+    if (i >= 0 && s.amount[i] != amount) {
+        s.amount[i] = amount;
+        s.version = s.version + 1;
+    }
+}
+
+sand_clear(s: *LooseSand) {
+    for i in 0..SAND_HASH {
+        s.table[i] = 0;
+    }
+    s.n = 0;
+    s.version = s.version + 1;
+}
+
+sand_copy(dst: *LooseSand, src: *LooseSand) {
+    if (dst == src) {
+        return;
+    }
+    sand_clear(dst);
+    for i in 0..src.n {
+        if (src.amount[i] > 0) {
+            sand_set(dst, src.x[i], src.z[i], src.amount[i]);
+        }
+    }
+}
+
+// Rebuild after coordinate edits, merging overlaps and reclaiming empty slots.
+sand_reindex(s: *LooseSand) {
+    oldn: int = s.n;
+    for i in 0..SAND_HASH {
+        s.table[i] = 0;
+    }
+    s.n = 0;
+    for i in 0..oldn {
+        x: int = s.x[i];
+        z: int = s.z[i];
+        amount: int = s.amount[i];
+        if (amount > 0 && in_bounds(sand_tile(x), sand_tile(z))) {
+            dest: int = sand_slot(s, x, z, true);
+            if (dest >= 0) {
+                s.amount[dest] = s.amount[dest] + amount;
+            }
+        }
+    }
+    s.version = s.version + 1;
+}
+
+sand_transform(
+    s: *LooseSand,
+    room: Room,
+    dc: int,
+    dr: int,
+    rot: int,
+    xy: []int
+) {
+    dst: Room = transform_room_rect(room, dc, dr, rot);
+    for i in 0..s.n {
+        c: int = sand_tile(s.x[i]);
+        r: int = sand_tile(s.z[i]);
+        if (room_contains(room, c, r)) {
+            xform_local(s.x[i] - room.x0 * 8, s.z[i] - room.y0 * 8, room_size_w(room) * 8,
+                room_size_h(room) * 8, rot, xy);
+            s.x[i] = (room.x0 + dc) * 8 + xy[0];
+            s.z[i] = (room.y0 + dr) * 8 + xy[1];
+        } else if (room_contains(dst, c, r)) {
+            s.amount[i] = 0;
+        }
+    }
+    sand_reindex(s);
+}
+
+sand_edit_column(s: *LooseSand, col: int, remove: bool) {
+    for i in 0..s.n {
+        c: int = sand_tile(s.x[i]);
+        if (remove) {
+            if (c == col) {
+                s.amount[i] = 0;
+            } else if (c > col) {
+                s.x[i] = s.x[i] - 8;
+            }
+        } else if (c >= col) {
+            s.x[i] = s.x[i] + 8;
+        }
+    }
+    sand_reindex(s);
+}
+
+// Stable, smooth variation for authored deposits; repainting is deterministic.
+sand_deposit_hash(x: int, z: int): f32 {
+    h: int = (x * 374761393 + z * 668265263) % 65536;
+    if (h < 0) {
+        h = h + 65536;
+    }
+    h = (h * (h + 31) * 15731 + 789221) % 65536;
+    h as f32 / 65535.0;
+}
+
+sand_deposit_noise(x: f32, z: f32): f32 {
+    ix: int = sand_floor(x);
+    iz: int = sand_floor(z);
+    fx: f32 = x - ix as f32;
+    fz: f32 = z - iz as f32;
+    fx = fx * fx * (3.0 - 2.0 * fx);
+    fz = fz * fz * (3.0 - 2.0 * fz);
+    a: f32 = sand_deposit_hash(ix, iz);
+    b: f32 = sand_deposit_hash(ix + 1, iz);
+    c: f32 = sand_deposit_hash(ix, iz + 1);
+    d: f32 = sand_deposit_hash(ix + 1, iz + 1);
+    (a + (b - a) * fx) * (1.0 - fz) + (c + (d - c) * fx) * fz;
+}
+
+sand_deposit_heaps(x: f32, z: f32): f32 {
+    gx: int = sand_floor(x / 2.4);
+    gz: int = sand_floor(z / 2.4);
+    height: f32 = 0.0;
+    for j in gz - 1..gz + 2 {
+        for i in gx - 1..gx + 2 {
+            cx: f32 = (i as f32 + 0.5) * 2.4 + (sand_deposit_hash(i + 71, j) - 0.5) * 1.3;
+            cz: f32 = (j as f32 + 0.5) * 2.4 + (sand_deposit_hash(i, j - 53) - 0.5) * 1.3;
+            radius: f32 = 1.1 + 0.65 * sand_deposit_hash(i + 19, j + 29);
+            dx: f32 = (x - cx) / radius;
+            dz: f32 = (z - cz) / radius;
+            cap: f32 = 1.0 - dx * dx - dz * dz;
+            if (cap > 0.0) {
+                height = height + (800.0 + 1600.0 * sand_deposit_hash(i - 13, j + 17)) * cap * cap;
+            }
+        }
+    }
+    height;
+}
+
+sand_deposit_amount(
+    x: f32,
+    z: f32,
+    c0: int,
+    r0: int,
+    c1: int,
+    r1: int
+): int {
+    hx: f32 = (c1 - c0 + 1) as f32 * 0.5;
+    hz: f32 = (r1 - r0 + 1) as f32 * 0.5;
+    radius: f32 = 1.4;
+    if (hx < radius) {
+        radius = hx;
+    }
+    if (hz < radius) {
+        radius = hz;
+    }
+    qx: f32 = x - (c0 + c1 + 1) as f32 * 0.5;
+    if (qx < 0.0) {
+        qx = 0.0 - qx;
+    }
+    qz: f32 = z - (r0 + r1 + 1) as f32 * 0.5;
+    if (qz < 0.0) {
+        qz = 0.0 - qz;
+    }
+    qx = qx - hx + radius;
+    qz = qz - hz + radius;
+    inside: f32 = qx;
+    if (qz > inside) {
+        inside = qz;
+    }
+    if (inside > 0.0) {
+        inside = 0.0;
+    }
+    if (qx < 0.0) {
+        qx = 0.0;
+    }
+    if (qz < 0.0) {
+        qz = 0.0;
+    }
+    depth: f32 = radius - sqrt_f32(qx * qx + qz * qz) - inside;
+    erosion: f32 = radius;
+    if (erosion > 1.0) {
+        erosion = 1.0;
+    }
+    depth = depth - erosion * (0.03 + 0.40 * sand_deposit_noise(x * 1.6 + 17.0, z * 1.6 - 9.0));
+    edge: f32 = depth / 0.42;
+    if (edge < 0.0) {
+        edge = 0.0;
+    }
+    if (edge > 1.0) {
+        edge = 1.0;
+    }
+    edge = edge * edge * (3.0 - 2.0 * edge);
+    // A rounded cap gives every stroke real volume, with broader secondary
+    // humps so a large stroke becomes a group of heaps rather than a plateau.
+    nx: f32 = (x - (c0 + c1 + 1) as f32 * 0.5) / hx;
+    nz: f32 = (z - (r0 + r1 + 1) as f32 * 0.5) / hz;
+    dome: f32 = 1.0 - nx * nx - nz * nz;
+    if (dome < 0.0) {
+        dome = 0.0;
+    }
+    dome = dome * dome;
+    amount: int = ((90.0 + 760.0 * dome + sand_deposit_heaps(x, z)) * edge) as int;
+    if (amount < 4) {
+        return 0;
+    }
+    amount;
+}
+
+sand_paint(
+    state: *LevelState,
+    c0: int,
+    r0: int,
+    c1: int,
+    r1: int,
+    erase: bool
+) {
+    if (state.sand.n > SAND_CAP - 1024) {
+        sand_reindex(state.sand);
+    }
+    if (c1 < c0) {
+        t: int = c0;
+        c0 = c1;
+        c1 = t;
+    }
+    if (r1 < r0) {
+        t: int = r0;
+        r0 = r1;
+        r1 = t;
+    }
+    for r in r0..r1 + 1 {
+        for c in c0..c1 + 1 {
+            if (in_bounds(c, r) && (erase || !is_water(state.ground, state.nground,
+                c, r) && !is_brick(state.bricks, state.nbricks, c, r))) {
+                for z in 0..8 {
+                    for x in 0..8 {
+                        amount: int = sand_deposit_amount(c as f32 + (x as f32 + 0.5) / 8.0,
+                            r as f32 + (z as f32 + 0.5) / 8.0, c0, r0, c1, r1);
+                        if (erase) {
+                            amount = 0;
+                        }
+                        sand_set(state.sand, c * 8 + x, r * 8 + z, amount);
+                    }
+                }
+            }
+        }
+    }
+}
+
+sand_parse(s: *LooseSand, src: []i8) {
+    sand_clear(s);
+    val: []int = new int[2](0);
+    i: int = 0;
+    while (i < len(src)) {
+        i = skip_spaces(src, i);
+        if (word_at(src, i, "loose")) {
+            i = parse_int(src, i + 5, val);
+            x: int = val[0];
+            ok: int = val[1];
+            i = parse_int(src, i, val);
+            z: int = val[0];
+            ok = ok * val[1];
+            i = parse_int(src, i, val);
+            if (ok != 0 && val[1] != 0 && val[0] > 0 && val[0] <= 1048576 && in_bounds(sand_tile(x),
+                sand_tile(z))) {
+                sand_set(s, x, z, val[0]);
+            }
+        }
+        i = skip_line(src, i);
+    }
+}
+
+sand_load(path: []i8, s: *LooseSand) {
+    sand_parse(s, slurp_path(path));
+}
+
+sand_append(
+    path: []i8,
+    s: *LooseSand,
+    ox: int,
+    oz: int
+): int {
+    dst: []i8 = new i8[s.n * 64 + 64](0i8);
+    n: int = put_str(dst, 0, "# loose-sand 1\n");
+    for i in 0..s.n {
+        if (s.amount[i] > 0) {
+            n = put_str(dst, n, "loose ");
+            n = put_int(dst, n, s.x[i] - ox * 8);
+            n = put_ch(dst, n, ' ');
+            n = put_int(dst, n, s.z[i] - oz * 8);
+            n = put_ch(dst, n, ' ');
+            n = put_int(dst, n, s.amount[i]);
+            n = put_ch(dst, n, '\n');
+        }
+    }
+    flags: int = LEVEL_O_WRONLY + LEVEL_O_CREAT + 1024; // O_APPEND
+    fd: int = open_path(path, flags, LEVEL_MODE);
+    if (fd < 0) {
+        return 0 - 1;
+    }
+    wrote: int = write(fd, dst, n);
+    close(fd);
+    if (wrote != n) {
+        return 0 - 1;
+    }
+    0;
+}
+
+sand_save_authored(path: []i8, state: *LevelState, local: bool): int {
+    if (state.sand.n == 0) {
+        return 0;
+    }
+    ox: int = 0;
+    oz: int = 0;
+    if (local && state.nrooms > 0) {
+        ox = state.rooms[0].x0;
+        oz = state.rooms[0].y0;
+    }
+    if (sand_append(path, state.sand, ox, oz) != 0) {
+        return 0 - 1;
+    }
+    0;
+}
+
+// Motion state is separate from the session's sand amounts.
+type SandMotion = {
+    poses: []f32;
+    previous: []f32;
+    ids: []int;
+    n: int;
+    ground: []GroundCell;
+    nground: int;
+    bricks: []Brick;
+    nbricks: int;
+};
+
+new_sand_motion(): *SandMotion@new {
+    new SandMotion {
+        poses: new f32[(LEVEL_MAX_BLOCKS + 1) * 4](0.0),
+        previous: new f32[(LEVEL_MAX_BLOCKS + 1) * 4](0.0),
+        ids: new int[LEVEL_MAX_BLOCKS + 1](0 - 2),
+        n: 0,
+        ground: new GroundCell[LEVEL_MAX_GROUND](GroundCell {
+            column: 0,
+            row: 0,
+            style: 0,
+            stone: 0
+        }),
+        nground: 0,
+        bricks: new Brick[LEVEL_MAX_BRICKS](Brick { column: 0, row: 0 }),
+        nbricks: 0
+    };
+}
+
+sand_allowed(m: *SandMotion, x: int, z: int): bool {
+    c: int = sand_tile(x);
+    r: int = sand_tile(z);
+    if (!in_bounds(c, r) || is_water(m.ground, m.nground, c, r) || is_brick(m.bricks,
+        m.nbricks, c, r)) {
+        return false;
+    }
+    wx: f32 = (x as f32 + 0.5) / 8.0;
+    wz: f32 = (z as f32 + 0.5) / 8.0;
+    for i in 0..m.n {
+        at: int = i * 4;
+        radius: f32 = m.poses[at + 2];
+        if (radius > 0.0 && wx > m.poses[at] - radius && wx < m.poses[at] + radius && wz > m.poses[at + 1] - radius && wz < m.poses[at + 1] + radius) {
+            return false;
+        }
+    }
+    true;
+}
+
+sand_transfer(
+    s: *LooseSand,
+    m: *SandMotion,
+    source: int,
+    x: int,
+    z: int,
+    amount: int
+): bool {
+    if (amount <= 0 || !sand_allowed(m, x, z)) {
+        return false;
+    }
+    dest: int = sand_slot(s, x, z, true);
+    if (dest < 0 || dest == source) {
+        return false;
+    }
+    s.amount[source] = s.amount[source] - amount;
+    s.amount[dest] = s.amount[dest] + amount;
+    s.version = s.version + 1;
+    true;
+}
+
+sand_push(
+    s: *LooseSand,
+    m: *SandMotion,
+    cx: f32,
+    cz: f32,
+    radius: f32,
+    dx: f32,
+    dz: f32
+) {
+    along_x: bool = dx * dx >= dz * dz;
+    sign: f32 = 1.0;
+    if (along_x && dx < 0.0 || !along_x && dz < 0.0) {
+        sign = 0.0 - 1.0;
+    }
+    x0: int = sand_floor((cx - radius) * 8.0);
+    x1: int = sand_floor((cx + radius) * 8.0);
+    z0: int = sand_floor((cz - radius) * 8.0);
+    z1: int = sand_floor((cz + radius) * 8.0);
+    for z in z0..z1 + 1 {
+        for x in x0..x1 + 1 {
+            wx: f32 = (x as f32 + 0.5) / 8.0;
+            wz: f32 = (z as f32 + 0.5) / 8.0;
+            if (wx > cx - radius && wx < cx + radius && wz > cz - radius && wz < cz + radius) {
+                source: int = sand_slot(s, x, z, false);
+                if (source >= 0 && s.amount[source] > 0) {
+                    // Clear the footprint; distribute the displaced sand into the
+                    // lowest accessible front/side pile, conserving every unit.
+                    for deposit in 0..12 {
+                        amount: int = s.amount[source];
+                        if (amount > 0) {
+                            best: int = 0 - 1;
+                            bx: int = x;
+                            bz: int = z;
+                            low: int = 2147483647;
+                            for side in 0..3 {
+                                tx: int = x;
+                                tz: int = z;
+                                edge: f32 = radius + 0.09;
+                                if (along_x) {
+                                    if (side == 0) {
+                                        tx = sand_floor((cx + sign * edge) * 8.0);
+                                    } else if (side == 1) {
+                                        tz = sand_floor((cz - edge) * 8.0);
+                                    } else {
+                                        tz = sand_floor((cz + edge) * 8.0);
+                                    }
+                                } else {
+                                    if (side == 0) {
+                                        tz = sand_floor((cz + sign * edge) * 8.0);
+                                    } else if (side == 1) {
+                                        tx = sand_floor((cx - edge) * 8.0);
+                                    } else {
+                                        tx = sand_floor((cx + edge) * 8.0);
+                                    }
+                                }
+                                h: int = sand_amount(s, tx, tz);
+                                if (h < low && sand_allowed(m, tx, tz)) {
+                                    best = side;
+                                    bx = tx;
+                                    bz = tz;
+                                    low = h;
+                                }
+                            }
+                            if (best >= 0) {
+                                chunk: int = (amount + 3) / 4;
+                                if (deposit == 11) {
+                                    chunk = amount;
+                                }
+                                sand_transfer(s, m, source, bx, bz, chunk);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+sand_settle(
+    s: *LooseSand,
+    m: *SandMotion,
+    cx: f32,
+    cz: f32,
+    radius: f32
+) {
+    x0: int = sand_floor((cx - radius - 0.75) * 8.0);
+    x1: int = sand_floor((cx + radius + 0.75) * 8.0);
+    z0: int = sand_floor((cz - radius - 0.75) * 8.0);
+    z1: int = sand_floor((cz + radius + 0.75) * 8.0);
+    for pass in 0..3 {
+        for z in z0..z1 + 1 {
+            for x in x0..x1 + 1 {
+                source: int = sand_slot(s, x, z, false);
+                if (source >= 0 && s.amount[source] > 280 && sand_allowed(m, x, z)) {
+                    for dir in 0..4 {
+                        tx: int = x;
+                        tz: int = z;
+                        if (dir == 0) {
+                            tx = x - 1;
+                        } else if (dir == 1) {
+                            tx = x + 1;
+                        } else if (dir == 2) {
+                            tz = z - 1;
+                        } else {
+                            tz = z + 1;
+                        }
+                        // Approximately a 29-degree angle of repose at this spacing.
+                        excess: int = s.amount[source] - sand_amount(s, tx, tz) - 280;
+                        if (excess > 1) {
+                            sand_transfer(s, m, source, tx, tz, excess / 2);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+sand_sweep(
+    s: *LooseSand,
+    m: *SandMotion,
+    body: int,
+    oldx: f32,
+    oldz: f32,
+    x: f32,
+    z: f32,
+    radius: f32
+) {
+    dx: f32 = x - oldx;
+    dz: f32 = z - oldz;
+    distance: f32 = sqrt_f32(dx * dx + dz * dz);
+    if (distance < 0.0001 || distance > 2.0) {
+        return;
+    } // Teleports do not draw a trail.
+    if (s.n > SAND_CAP - 1024) {
+        sand_reindex(s);
+    }
+    steps: int = (distance * 16.0) as int + 1;
+    for step in 1..steps + 1 {
+        t: f32 = step as f32 / steps as f32;
+        cx: f32 = oldx + dx * t;
+        cz: f32 = oldz + dz * t;
+        m.poses[body * 4] = cx;
+        m.poses[body * 4 + 1] = cz;
+        sand_push(s, m, cx, cz, radius, dx, dz);
+    }
+    sand_settle(s, m, x, z, radius);
+}

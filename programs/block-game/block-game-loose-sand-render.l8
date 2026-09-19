@@ -1,0 +1,379 @@
+tag block_game;
+
+use_tag gl;
+
+type SandRender = {
+    prog: int;
+    u: []int;
+    buffer: u32;
+    vertices: []f32;
+    count: int;
+    version: int;
+    motion: *SandMotion;
+    cell: []f32;
+};
+
+new_sand_render(): *SandRender@new {
+    vs: []i8 = """
+#version 120
+attribute vec3 pos,nrm;
+attribute vec4 vcol;
+attribute float vaux;
+uniform mat4 vp;
+varying vec3 world,normal;
+varying vec4 amounts;
+varying vec2 field;
+varying float exposure;
+float hash(vec2 p){return fract(sin(dot(p,vec2(12.9898,78.233)))*43758.5453);}
+float noise(vec2 p){
+ vec2 c=floor(p),f=fract(p); f=f*f*(3.0-2.0*f);
+ return mix(mix(hash(c),hash(c+vec2(1,0)),f.x),mix(hash(c+vec2(0,1)),hash(c+1.0),f.x),f.y);
+}
+// Value and analytic gradient of the broad relief. Lighting must follow the
+// extra height too, otherwise a raised mound still looks like a flat decal.
+vec3 reliefNoise(vec2 p){
+ vec2 c=floor(p),f=fract(p),u=f*f*(3.0-2.0*f),du=6.0*f*(1.0-f);
+ float a=hash(c),b=hash(c+vec2(1,0)),d=hash(c+vec2(0,1)),e=hash(c+1.0);
+ float crossTerm=a-b-d+e;
+ return vec3(a+(b-a)*u.x+(d-a)*u.y+crossTerm*u.x*u.y,
+   (b-a+crossTerm*u.y)*du.x,(d-a+crossTerm*u.x)*du.y);
+}
+void main(){
+ field=pos.xz; exposure=vaux; amounts=vcol;
+ vec2 drift=vec2(noise(field*1.7+13.0),noise(field*1.7-29.0))-0.5;
+ world=pos; world.xz+=drift*0.19;
+ vec3 hills=reliefNoise(field*0.72+5.0);
+ float relief=0.85+1.65*hills.x*hills.x;
+ vec2 slope=3.3*hills.x*hills.yz*0.72;
+ float height=pos.y+0.019;
+ world.y=height*relief-0.019;
+ normal=vec3(nrm.x*relief-nrm.y*height*slope.x,nrm.y,
+             nrm.z*relief-nrm.y*height*slope.y);
+ gl_Position=vp*vec4(world,1);
+}
+""";
+    fs: []i8 = """
+#version 120
+varying vec3 world,normal;
+varying vec4 amounts;
+varying vec2 field;
+varying float exposure;
+uniform mat4 light_vp;
+uniform sampler2DShadow shadow_map;
+uniform sampler2D lamp_map;
+uniform vec2 lamp_origin;
+float hash(vec2 p){return fract(sin(dot(p,vec2(12.9898,78.233)))*43758.5453);}
+float noise(vec2 p){
+ vec2 c=floor(p),f=fract(p); f=f*f*(3.0-2.0*f);
+ return mix(mix(hash(c),hash(c+vec2(1,0)),f.x),mix(hash(c+vec2(0,1)),hash(c+1.0),f.x),f.y);
+}
+void main(){
+ vec3 n=normalize(normal),L=normalize(vec3(4,11,3));
+ vec4 sh=light_vp*vec4(world,1); vec3 sc=sh.xyz/sh.w;
+ float vis=1.0;
+ if(sc.x>0.01 && sc.x<0.99 && sc.y>0.01 && sc.y<0.99 && sc.z>0.01 && sc.z<0.99)
+   vis=shadow2D(shadow_map,vec3(sc.xy,sc.z-0.0003)).r;
+ vec2 uv=(world.xz-lamp_origin)/128.0;
+ float warmth=texture2D(lamp_map,clamp(uv,0.0,1.0)).r;
+ if(uv.x<0.0 || uv.y<0.0 || uv.x>1.0 || uv.y>1.0) warmth=0.0;
+ float grain=mix(noise(world.xz*17.0),0.5,smoothstep(0.35,1.25,length(fwidth(world.xz*17.0))));
+ vec3 sand=mix(vec3(0.53,0.445,0.31),vec3(0.63,0.545,0.39),noise(world.xz*1.6));
+ sand*=0.96+0.08*grain;
+ vec3 light=vec3(0.19,0.245,0.32)+vec3(0.76,0.86,1.0)*0.48*max(dot(n,L),0.0)*vis;
+ light+=vec3(1.60,0.87,0.36)*warmth;
+ // Reconstruct density continuously across sample centers. Tiny remnants
+ // feather into the underlying ground instead of filling an opaque grid cell.
+ vec2 f=fract(field*8.0-0.5);
+ float density=mix(mix(amounts.x,amounts.y,f.x),mix(amounts.z,amounts.w,f.x),f.y);
+ float edgeGrain=mix(noise(world.xz*63.0),0.5,smoothstep(0.4,1.2,length(fwidth(world.xz*63.0))));
+ float coverage=smoothstep(0.0,max(18.0,fwidth(density)),max(0.0,density-3.0-9.0*edgeGrain));
+ // A two-sample fringe breaks long straight banks into irregular deposits.
+ // Noise is anchored to the ground; edges do not crawl when the camera moves.
+ float clumps=noise(world.xz*1.3+19.0)*0.55+noise(world.xz*4.7)*0.3+noise(world.xz*11.3-7.0)*0.15;
+ float fringe=1.0-exposure*(2.1+1.5*clumps);
+ float aa=max(0.045,fwidth(fringe));
+ coverage*=smoothstep(0.02-aa,0.8+aa,fringe);
+ if(coverage<0.001) discard;
+ gl_FragColor=vec4(sand*light,coverage);
+}
+""";
+    prog: int = link_program(vs, fs, "nrm");
+    glUseProgram(prog);
+    glUniform1i(glGetUniformLocation(prog, "shadow_map"), 0);
+    glUniform1i(glGetUniformLocation(prog, "lamp_map"), 2);
+    ids: []u32 = new u32[1](0u32);
+    glGenBuffers(1, ids);
+    motion: *SandMotion = new_sand_motion();
+    new SandRender {
+        prog: prog,
+        u: [glGetUniformLocation(prog, "vp"), glGetUniformLocation(prog, "light_vp"),
+            glGetUniformLocation(prog, "lamp_origin")],
+        buffer: ids[0],
+        vertices: new f32[SAND_CAP * 264](0.0),
+        count: 0,
+        version: 0,
+        motion: motion,
+        cell: new f32[44](0.0)
+    };
+}
+
+// Dual-grid patches join sample centers, including an empty outer ring.
+// Shared vertex heights/normals keep even one-sample-wide strips continuous.
+sand_sample_vertex(
+    dst: []f32,
+    i: int,
+    s: *LooseSand,
+    x: int,
+    z: int,
+    amount: int
+) {
+    left: int = sand_amount(s, x - 1, z);
+    right: int = sand_amount(s, x + 1, z);
+    back: int = sand_amount(s, x, z - 1);
+    front: int = sand_amount(s, x, z + 1);
+    // Weighted empty neighbors provide a continuous fringe across mesh patches.
+    fringe: f32 = 0.0;
+    if (left == 0) {
+        fringe = fringe + 2.0;
+    }
+    if (right == 0) {
+        fringe = fringe + 2.0;
+    }
+    if (back == 0) {
+        fringe = fringe + 2.0;
+    }
+    if (front == 0) {
+        fringe = fringe + 2.0;
+    }
+    if (sand_amount(s, x - 1, z - 1) == 0) {
+        fringe = fringe + 1.0;
+    }
+    if (sand_amount(s, x + 1, z - 1) == 0) {
+        fringe = fringe + 1.0;
+    }
+    if (sand_amount(s, x - 1, z + 1) == 0) {
+        fringe = fringe + 1.0;
+    }
+    if (sand_amount(s, x + 1, z + 1) == 0) {
+        fringe = fringe + 1.0;
+    }
+    if (sand_amount(s, x - 2, z) == 0) {
+        fringe = fringe + 1.0;
+    }
+    if (sand_amount(s, x + 2, z) == 0) {
+        fringe = fringe + 1.0;
+    }
+    if (sand_amount(s, x, z - 2) == 0) {
+        fringe = fringe + 1.0;
+    }
+    if (sand_amount(s, x, z + 2) == 0) {
+        fringe = fringe + 1.0;
+    }
+    // Isolated remnants still need visible centers. Empty samples fade to dirt.
+    if (amount > 0 && fringe > 6.0) {
+        fringe = 6.0;
+    }
+    if (amount > 0 && (left == 0 && right == 0 || back == 0 && front == 0) && fringe > 1.5) {
+        fringe = 1.5;
+    }
+    dst[i + 10] = fringe / 16.0;
+    put_vn(dst, i, (x as f32 + 0.5) / 8.0, amount as f32 / 4096.0 - 0.019, (z as f32 + 0.5) / 8.0,
+        (left - right) as f32 / 1024.0, 1.0, (back - front) as f32 / 1024.0);
+}
+
+sand_patch(
+    r: *SandRender,
+    s: *LooseSand,
+    out: int,
+    x: int,
+    z: int,
+    a: int,
+    b: int,
+    c: int,
+    d: int
+): int {
+    sand_sample_vertex(r.cell, 0, s, x, z, a);
+    sand_sample_vertex(r.cell, 11, s, x, z + 1, c);
+    sand_sample_vertex(r.cell, 22, s, x + 1, z + 1, d);
+    sand_sample_vertex(r.cell, 33, s, x + 1, z, b);
+    for v in 0..4 {
+        r.cell[v * 11 + 6] = a as f32;
+        r.cell[v * 11 + 7] = b as f32;
+        r.cell[v * 11 + 8] = c as f32;
+        r.cell[v * 11 + 9] = d as f32;
+    }
+    for v in 0..6 {
+        source: int = v;
+        if (v == 3) {
+            source = 0;
+        } else if (v == 4) {
+            source = 2;
+        } else if (v == 5) {
+            source = 3;
+        }
+        for j in 0..11 {
+            r.vertices[out + v * 11 + j] = r.cell[source * 11 + j];
+        }
+    }
+    out + 66;
+}
+
+prepare_loose_sand(
+    s: *LooseSand,
+    r: *SandRender,
+    hist: []Block,
+    foff: int,
+    toff: int,
+    n: int,
+    ids: []int,
+    bt: []f32,
+    t: f32,
+    px: f32,
+    py: f32,
+    pz: f32,
+    playing: bool,
+    ground: []GroundCell,
+    nground: int,
+    bricks: []Brick,
+    nbricks: int
+) {
+    if (s.n == 0) {
+        for i in 0..len(r.motion.ids) {
+            r.motion.ids[i] = 0 - 2;
+        }
+        return;
+    }
+    m: *SandMotion = r.motion;
+    m.n = n + 1;
+    m.nground = nground;
+    m.nbricks = nbricks;
+    for i in 0..nground {
+        m.ground[i] = ground[i];
+    }
+    for i in 0..nbricks {
+        m.bricks[i] = bricks[i];
+    }
+    for i in 0..n {
+        b: Block = hist[toff + i];
+        x: f32 = b.column as f32 + 0.5;
+        z: f32 = b.row as f32 + 0.5;
+        y: f32 = b.layer as f32 + 0.5;
+        old: int = hist_id_at(ids, hist, foff, n, b.id);
+        if (foff != toff && old >= 0) {
+            a: Block = hist[foff + old];
+            phase: f32 = block_anim_t(bt, i, t);
+            x = lerp(a.column as f32 + 0.5, x, phase);
+            z = lerp(a.row as f32 + 0.5, z, phase);
+            y = lerp(a.layer as f32 + 0.5, y, phase);
+        }
+        m.poses[i * 4] = x;
+        m.poses[i * 4 + 1] = z;
+        radius: f32 = 0.46;
+        if (y > 0.65 || y < 0.3) {
+            radius = 0.0;
+        }
+        m.poses[i * 4 + 2] = radius;
+        m.poses[i * 4 + 3] = b.id as f32;
+    }
+    m.poses[n * 4] = px;
+    m.poses[n * 4 + 1] = pz;
+    m.poses[n * 4 + 2] = 0.22;
+    if (py > 0.7 || py < 0.3) {
+        m.poses[n * 4 + 2] = 0.0;
+    }
+    m.poses[n * 4 + 3] = 0.0 - 1.0;
+    for i in 0..n + 1 {
+        at: int = i * 4;
+        id: int = m.poses[at + 3] as int;
+        if (playing && s.n > 0 && m.ids[i] == id && m.poses[at + 2] > 0.0 && m.previous[at + 2] > 0.0) {
+            // Rooted plants obstruct piles but do not plow sand.
+            moving: bool = i == n;
+            if (i < n) {
+                moving = !plant_block(hist[toff + i]);
+            }
+            if (moving) {
+                sand_sweep(s, m, i, m.previous[at], m.previous[at + 1], m.poses[at],
+                    m.poses[at + 1], m.poses[at + 2]);
+            }
+        }
+        m.ids[i] = id;
+        for j in 0..4 {
+            m.previous[at + j] = m.poses[at + j];
+        }
+    }
+}
+
+draw_loose_sand(
+    s: *LooseSand,
+    r: *SandRender,
+    main: int,
+    vp: []f32,
+    lvp: []f32,
+    light: *LampLight
+) {
+    if (r.version != s.version) {
+        out: int = 0;
+        for i in 0..s.n {
+            if (s.amount[i] > 0) {
+                x: int = s.x[i];
+                z: int = s.z[i];
+                // Each nonempty sample touches four patches. Emit each patch
+                // only for its first nonempty corner, avoiding overlap/blend seams.
+                for dz in 0..2 {
+                    for dx in 0..2 {
+                        qx: int = x - dx;
+                        qz: int = z - dz;
+                        a: int = sand_amount(s, qx, qz);
+                        b: int = sand_amount(s, qx + 1, qz);
+                        c: int = sand_amount(s, qx, qz + 1);
+                        d: int = sand_amount(s, qx + 1, qz + 1);
+                        ownerx: int = qx;
+                        ownerz: int = qz;
+                        if (a == 0) {
+                            if (b > 0) {
+                                ownerx = qx + 1;
+                            } else if (c > 0) {
+                                ownerz = qz + 1;
+                            } else {
+                                ownerx = qx + 1;
+                                ownerz = qz + 1;
+                            }
+                        }
+                        if (ownerx == x && ownerz == z) {
+                            out = sand_patch(r, s, out, qx, qz, a, b, c, d);
+                        }
+                    }
+                }
+            }
+        }
+        glBindBuffer(34962, r.buffer);
+        glBufferData(34962, out * 4, r.vertices, 35048);
+        r.count = out / 11;
+        r.version = s.version;
+    }
+    if (r.count == 0) {
+        return;
+    }
+    glUseProgram(r.prog);
+    glUniformMatrix4fv(r.u[0], 1, 0, vp);
+    glUniformMatrix4fv(r.u[1], 1, 0, lvp);
+    glUniform2f(r.u[2], light.x as f32, light.z as f32);
+    glBindBuffer(34962, r.buffer);
+    glEnableVertexAttribArray(0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(0, 3, 5126, 0, 44, 0);
+    glVertexAttribPointer(1, 3, 5126, 0, 44, 12);
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 4, 5126, 0, 44, 24);
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 1, 5126, 0, 44, 40);
+    glEnable(3042);
+    glBlendFunc(770, 771);
+    glDepthMask(0);
+    glDrawArrays(4, 0, r.count);
+    glDepthMask(1);
+    glDisable(3042);
+    glDisableVertexAttribArray(2);
+    glDisableVertexAttribArray(3);
+    glUseProgram(main);
+}
