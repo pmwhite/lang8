@@ -8,6 +8,7 @@ type PlantRender = {
     prog: int; u: []int; mesh: u32; instances: u32;
     starts: []int; sizes: []int; counts: []int; offsets: []int;
     data: []f32; key: int; ready: bool; total: int;
+    wind_tex: u32; wind_x: f32; wind_z: f32; wind_ready: bool; wind_start_ms: int;
 };
 
 plant_vs(): []i8 { """
@@ -17,15 +18,33 @@ attribute vec4 vcol, vaux;
 uniform mat4 vp;
 uniform float time;
 uniform int pass;
+uniform sampler2D wind_map;
+uniform vec2 wind_origin;
+uniform float wind_on;
 varying vec3 world, normal, color;
 varying float material, local_y;
 void main() {
   vec3 p=pos;
   float foliage=1.0-step(0.1,abs(vcol.a-1.0));
-  float bend=foliage*sin(3.14159265*fract(pos.y))*0.023;
   float clock=pass==2 ? 0.0 : time;
-  p.x+=sin(clock*0.9+vaux.w+pos.y*1.7)*bend;
-  p.z+=cos(clock*0.7+vaux.w+pos.x)*bend;
+  vec2 flow=vec2(0.0);
+  if(pass!=3 && wind_on>0.5) {
+    vec2 wind_uv=(vaux.xz-wind_origin)/64.0;
+    flow=(texture2D(wind_map,wind_uv).rg*2.0-1.0)*2.0;
+  }
+  float height_flex=smoothstep(0.0,2.8,pos.y);
+  float wood_flex=height_flex*0.28;
+  float leaf_flex=max(height_flex,smoothstep(0.05,0.80,pos.y)*0.55);
+  float flex=mix(wood_flex,leaf_flex,foliage);
+  float flow_len=length(flow);
+  vec2 flow_dir=flow/max(flow_len,0.001);
+  vec2 visual_flow=flow*min(1.0,1.35/max(flow_len,0.001));
+  vec2 side=normalize(vec2(-flow.y,flow.x)+vec2(0.001,0.0));
+  float gust_front=sin(clock*0.85-dot(vaux.xz,flow_dir)*0.22);
+  float gust=0.15+1.85*smoothstep(-0.20,0.85,gust_front);
+  float flutter=sin(clock*2.6+vaux.w+pos.y*2.3)*0.012*min(flow_len,1.0);
+  vec2 bend=(visual_flow*(0.115*gust)+side*flutter)*flex;
+  p.xz+=bend;
   world=p+vaux.xyz; normal=nrm; color=vcol.rgb;
   material=vcol.a; local_y=pos.y;
   gl_Position=vp*vec4(world,1.0);
@@ -328,8 +347,10 @@ new_plant_render(): *PlantRender@new {
     prog: int=link_program(plant_vs(),plant_fs(),"nrm");
     u: []int=[glGetUniformLocation(prog,"vp"),glGetUniformLocation(prog,"light_vp"),
         glGetUniformLocation(prog,"time"),glGetUniformLocation(prog,"pass"),
-        glGetUniformLocation(prog,"lamp_origin"),glGetUniformLocation(prog,"camera"),glGetUniformLocation(prog,"actor")];
+        glGetUniformLocation(prog,"lamp_origin"),glGetUniformLocation(prog,"camera"),glGetUniformLocation(prog,"actor"),
+        glGetUniformLocation(prog,"wind_map"),glGetUniformLocation(prog,"wind_origin"),glGetUniformLocation(prog,"wind_on")];
     glUseProgram(prog); glUniform1i(glGetUniformLocation(prog,"shadow_map"),0); glUniform1i(glGetUniformLocation(prog,"lamp_map"),2);
+    glUniform1i(u[7],5);
     ids: []u32=new u32[2](0u32); glGenBuffers(2,ids);
     starts: []int=new int[20](0); sizes: []int=new int[20](0);
     glBindBuffer(34962,ids[0]);
@@ -347,7 +368,16 @@ new_plant_render(): *PlantRender@new {
     data: []f32=new f32[LEVEL_MAX_BLOCKS*4](0.0);
     glBindBuffer(34962,ids[1]); glBufferData(34962,LEVEL_MAX_BLOCKS*16,data,35048);
     new PlantRender {prog:prog,u:u,mesh:ids[0],instances:ids[1],starts:starts,sizes:sizes,
-        counts:new int[20](0),offsets:new int[20](0),data:data,key:0,ready:false,total:0};
+        counts:new int[20](0),offsets:new int[20](0),data:data,key:0,ready:false,total:0,
+        wind_tex:0u32,wind_x:0.0,wind_z:0.0,wind_ready:false,wind_start_ms:0};
+}
+
+set_plant_wind(p: *PlantRender,wind: *WindField) {
+    p.wind_tex=wind.tex;
+    p.wind_x=wind.origin_x as f32;
+    p.wind_z=wind.origin_z as f32;
+    p.wind_ready=wind.ready;
+    p.wind_start_ms=wind.start_ms;
 }
 
 prepare_plants(p: *PlantRender,hist: []Block,off: int,n: int,bounds: []f32) {
@@ -375,9 +405,14 @@ draw_plants(p: *PlantRender,restore: int,vp: []f32,lvp: []f32,light: *LampLight,
     cx: f32,cy: f32,cz: f32,px: f32,py: f32,pz: f32,pass: int) {
     if(p.total==0) { return; }
     glUseProgram(p.prog); glUniformMatrix4fv(p.u[0],1,0,vp); glUniformMatrix4fv(p.u[1],1,0,lvp);
-    glUniform1f(p.u[2],mono_ms() as f32*0.001); glUniform1i(p.u[3],pass);
+    clock: f32=0.0;
+    if(p.wind_start_ms!=0) { clock=(mono_ms()-p.wind_start_ms) as f32*0.001; }
+    glUniform1f(p.u[2],clock); glUniform1i(p.u[3],pass);
     glUniform2f(p.u[4],light.x as f32,light.z as f32); glUniform3f(p.u[5],cx,cy,cz);
     glUniform3f(p.u[6],px,py,pz);
+    glUniform2f(p.u[8],p.wind_x,p.wind_z);
+    if(p.wind_ready) { glUniform1f(p.u[9],1.0); } else { glUniform1f(p.u[9],0.0); }
+    glActiveTexture(33989); glBindTexture(3553,p.wind_tex); glActiveTexture(33984);
     glBindBuffer(34962,p.mesh);
     glVertexAttribPointer(0,3,5126,0,40,0); glVertexAttribPointer(1,3,5126,0,40,12);
     glVertexAttribPointer(2,4,5126,0,40,24);
@@ -400,6 +435,7 @@ draw_plant_icon(p: *PlantRender,restore: int,vp: []f32,x: f32,z: f32,style: int,
     glUseProgram(p.prog); glUniformMatrix4fv(p.u[0],1,0,vp);
     glUniform1f(p.u[2],0.0); glUniform1i(p.u[3],3);
     glUniform3f(p.u[5],cx,cy,cz);
+    glUniform1f(p.u[9],0.0);
     glBindBuffer(34962,p.mesh);
     glVertexAttribPointer(0,3,5126,0,40,0); glVertexAttribPointer(1,3,5126,0,40,12);
     glVertexAttribPointer(2,4,5126,0,40,24);

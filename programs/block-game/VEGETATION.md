@@ -18,6 +18,11 @@ Shift+Space paints a rectangle and Backspace erases. These brushes also appear
 in the expanded palette. The selected plant's name appears above the palette.
 The existing I key still inserts a column in the standalone level editor.
 
+Ground vegetation has two paintable heights. `2` selects ordinary grass and
+`g` selects tall grass. Tall grass uses the same density and coverage edges but
+grows roughly two and a half times higher and yields farther in the wind. It is
+non-blocking like ordinary grass and is stored as `tall-grass` in level files.
+
 A trunk occupies its central grid cell. Canopy cells occupy only their stated
 height, leaving space underneath the oak's outer branches. Invisible walkable
 support stays level and at exact block heights, while the visible crown is
@@ -75,6 +80,8 @@ Instanced batches reuse them, rebuilding instance data only after visible plants
 or their properties change. Plants use opaque geometry, moon shadows, warm lamp
 lighting, contact shading at their roots, and cached water reflections. Small
 foliage motion is omitted from reflection-cache invalidation.
+Grass and foliage sample the shared coarse airflow field described in
+`WIND.md`, so their movement follows the same gusts and wall deflection.
 
 Geometry storage is a fixed 11.44 MiB GPU buffer; maximum instance storage is
 32 KiB on each of the CPU and GPU. Mesh generation uses temporary startup memory.

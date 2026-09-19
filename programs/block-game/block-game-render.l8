@@ -1,6 +1,7 @@
 tag block_game;
 use_tag gl, x11, freetype;
 import "block-game-lighting.l8";
+import "block-game-wind.l8";
 import "block-game-plant-render.l8";
 import "block-game-materials.l8";
 import "block-game-fluid.l8";
@@ -892,7 +893,7 @@ fract_f32(x: f32): f32 {
 
 // This is the CPU equivalent of grass_hash in the original vertex shader.
 // It runs once when a ground cell changes instead of once for every blade vertex.
-fill_grass_instance(dst: []f32, offset: int, wx: f32, wz: f32) {
+fill_grass_instance(dst: []f32, offset: int, wx: f32, wz: f32, tall: int) {
     px: f32 = wx * 4.54545 + 17.0;
     py: f32 = wz * 4.54545 + 17.0;
     ax: f32 = fract_f32(px * 0.1031);
@@ -919,22 +920,28 @@ fill_grass_instance(dst: []f32, offset: int, wx: f32, wz: f32) {
     tint: int = ((meadow * 0.5 + 0.5) * 255.0) as int;
     if (tint < 0) { tint = 0; } if (tint > 255) { tint = 255; }
     dst[offset + 4] = tint as f32 + seed_x * 0.999;
-    dst[offset + 5] = seed_y;
+    dst[offset + 5] = seed_y + tall as f32;
 }
 
-fill_grass_cell(dst: []f32, offset: int, column: int, row: int): int {
+fill_grass_cell_style(dst: []f32, offset: int, column: int, row: int, style: int): int {
     n: int = 0;
+    tall: int = 0;
+    if (style == GROUND_TALL_GRASS) { tall = 1; }
     wx: f32 = first_grid_on(column as f32, 0.0, GRASS_SPACING);
     while (wx < (column + 1) as f32) {
         wz: f32 = first_grid_on(row as f32, 0.0, GRASS_SPACING);
         while (wz < (row + 1) as f32) {
-            fill_grass_instance(dst, offset + n * GRASS_INSTANCE_FLOATS, wx, wz);
+            fill_grass_instance(dst, offset + n * GRASS_INSTANCE_FLOATS, wx, wz, tall);
             n = n + 1;
             wz = wz + GRASS_SPACING;
         }
         wx = wx + GRASS_SPACING;
     }
     n;
+}
+
+fill_grass_cell(dst: []f32, offset: int, column: int, row: int): int {
+    fill_grass_cell_style(dst, offset, column, row, GROUND_GRASS);
 }
 
 update_grass_cache(cache: *GrassCache, ground: []GroundCell, n: int) {
@@ -944,9 +951,9 @@ update_grass_cache(cache: *GrassCache, ground: []GroundCell, n: int) {
         old: GroundCell = cache.cells[i];
         if (i >= cache.n || f.column != old.column || f.row != old.row || f.style != old.style) {
             cache.counts[i] = 0;
-            if (f.style == GROUND_GRASS) {
-                cache.counts[i] = fill_grass_cell(cache.vertices,
-                    i * GRASS_CELL_CAP * GRASS_INSTANCE_FLOATS, f.column, f.row);
+            if (f.style == GROUND_GRASS || f.style == GROUND_TALL_GRASS) {
+                cache.counts[i] = fill_grass_cell_style(cache.vertices,
+                    i * GRASS_CELL_CAP * GRASS_INSTANCE_FLOATS, f.column, f.row, f.style);
             }
             cache.cells[i] = f;
             cache.ready = false;
@@ -1042,7 +1049,8 @@ draw_instanced_grass(
     stex: u32,
     cover_tex: u32,
     cover_c: int,
-    cover_r: int
+    cover_r: int,
+    wind: *WindField
 ) {
     update_grass_cache(instances, ground, nground);
     prepare_grass_batch(instances, instance_buf, vp);
@@ -1051,10 +1059,13 @@ draw_instanced_grass(
     glUniformMatrix4fv(u[0], 1, 0, vp);
     glUniform2f(u[1], actor_x, actor_z);
     glUniform2f(u[2], motion_x, motion_z);
-    glUniform1f(u[3], mono_ms() as f32 * 0.001);
+    glUniform1f(u[3], wind_visual_time(wind, mono_ms()));
     glUniform3f(u[4], lx, ly, lz);
     glUniformMatrix4fv(u[5], 1, 0, light_vp);
     glUniform2f(u[8], cover_c as f32, cover_r as f32);
+    glUniform2f(u[10], wind.origin_x as f32, wind.origin_z as f32);
+    glActiveTexture(33989);
+    glBindTexture(3553, wind.tex);
     glActiveTexture(33985);
     glBindTexture(3553, cover_tex);
     glActiveTexture(33984);
@@ -2017,12 +2028,14 @@ mark_ground_cell(
         if (style == GROUND_WATER) {
             // Below the grass threshold, distinct from dirt and both stone codes.
             cmask[v * MASK_SIZE + u] = 32i8;
-        } else if (stone != 0 && style == GROUND_GRASS) {
+        } else if (stone != 0 && (style == GROUND_GRASS || style == GROUND_TALL_GRASS)) {
             cmask[v * MASK_SIZE + u] = 0i8 - 1i8;
         } else if (stone != 0) {
             cmask[v * MASK_SIZE + u] = 0i8 - 91i8;
         } else if (style == GROUND_GRASS) {
             cmask[v * MASK_SIZE + u] = 90i8;
+        } else if (style == GROUND_TALL_GRASS) {
+            cmask[v * MASK_SIZE + u] = 110i8;
         }
     }
 }
@@ -3708,6 +3721,37 @@ draw_hedges(
     glUniform1f(u_brick, 0.0);
 }
 
+draw_wind_debug(wind: *WindField, u_origin: int, u_scale: int, u_color: int,
+    cube_buf: u32) {
+    if (!wind.debug) { return; }
+    bind_mesh(cube_buf);
+    for z in 0..16 {
+        for x in 0..16 {
+            gx: int = x * 4 + 2;
+            gz: int = z * 4 + 2;
+            at: int = gz * WIND_SIZE + gx;
+            wx: f32 = wind.origin_x as f32 + gx as f32 + 0.5;
+            wz: f32 = wind.origin_z as f32 + gz as f32 + 0.5;
+            vx: f32 = wind.vx[at] * 0.70;
+            vz: f32 = wind.vz[at] * 0.70;
+            ax: f32 = vx;
+            az: f32 = vz;
+            if (ax < 0.0) { ax = 0.0 - ax; }
+            if (az < 0.0) { az = 0.0 - az; }
+            draw_box(u_origin, u_scale, u_color, wx, 0.17, wz, 0.07, 0.035, 0.07,
+                0.95, 0.65, 0.20, 36);
+            if (ax > 0.015) {
+                draw_box(u_origin, u_scale, u_color, wx + vx * 0.5, 0.17, wz,
+                    ax, 0.025, 0.035, 0.20, 0.90, 0.95, 36);
+            }
+            if (az > 0.015) {
+                draw_box(u_origin, u_scale, u_color, wx + vx, 0.17, wz + vz * 0.5,
+                    0.035, 0.025, az, 0.20, 0.90, 0.95, 36);
+            }
+        }
+    }
+}
+
 draw_frame(
     prog: int,
     dprog: int,
@@ -3816,6 +3860,9 @@ draw_frame(
     nbrick: int
 ) {
     update_lamp_light(lamp_light, lamps, nlamps, shadow_bounds);
+    wind_prepare(material_light.wind, focus_x, focus_z, bricks, nbrick, mono_ms());
+    upload_wind(material_light.wind);
+    set_plant_wind(material_light.plants, material_light.wind);
     pfc: int = floor_i(focus_x);
     pfr: int = floor_i(focus_z);
     reuse: int = 0;
@@ -4038,7 +4085,7 @@ draw_frame(
     glActiveTexture(33984);
     glBindTexture(3553, stex);
     glUniform2f(u_mask_origin, origin_c as f32, origin_r as f32);
-    prepare_height_water(material_light.water,prog,ground_cells,nground,fc,fr,
+    prepare_height_water(material_light.water,prog,material_light.wind,ground_cells,nground,fc,fr,
         hist,foff,toff,n,id_from,block_t,t,px+0.5,py,pz+0.5,want_player,vp);
     bind_mesh(cube_buf);
     glUniform1f(u_ground, 1.0);
@@ -4050,7 +4097,7 @@ draw_frame(
     draw_instanced_grass(grass_prog, grass_u, grass_blade_buf, grass_instance_buf,
         grass_instances, grass_blade_n, ground_cells, nground, px + 0.5, pz + 0.5,
         lagx[PLAYER_SOFT_SLOT], lagz[PLAYER_SOFT_SLOT], lx, ly, lz, vp, lvp, stex, grass_cover.tex,
-        cover_c, cover_r);
+        cover_c, cover_r, material_light.wind);
     glUseProgram(prog);
     draw_hedges(u_origin, u_scale, u_color, u_lag, brick_buf, brick_n, u_brick);
     bind_mesh(cube_buf);
@@ -4075,6 +4122,10 @@ draw_frame(
                 anchor_r = 0.34;
                 anchor_g = 0.58;
                 anchor_b = 0.22;
+            } else if (ground_brush == BRUSH_TALL_GRASS) {
+                anchor_r = 0.25;
+                anchor_g = 0.50;
+                anchor_b = 0.16;
             } else if (ground_brush == BRUSH_STONE) {
                 anchor_r = 0.58;
                 anchor_g = 0.58;
@@ -4157,6 +4208,14 @@ draw_frame(
     }
     draw_height_water(material_light.water,prog,vp,lvp,camera_x,camera_y,camera_z,
         material_light,lamp_light,lamps,0);
+    glUseProgram(prog);
+    glUniform1f(u_ground, 0.0);
+    glUniform1f(u_cut, 0.0);
+    glUniform1f(u_fade, 1.0);
+    glUniform1f(u_brick, 0.0);
+    glUniform2f(u_lag, 0.0, 0.0);
+    glUniform2f(u_ramp, 0.0, 0.0);
+    draw_wind_debug(material_light.wind, u_origin, u_scale, u_color, cube_buf);
     glUseProgram(bprog);
     glUniformMatrix4fv(b_u[0], 1, 0, vp);
     glUniform3f(b_u[6], lx, ly, lz);

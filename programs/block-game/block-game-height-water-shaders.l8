@@ -7,14 +7,30 @@ layout(std430,binding=0) readonly buffer Input { vec4 water[]; }; // elevation, 
 layout(std430,binding=1) writeonly buffer Output { vec4 result[]; };
 layout(std430,binding=2) readonly buffer Terrain { float wet[1024]; };
 uniform sampler2D solids;
+uniform sampler2D wind_map;
 uniform int stage;
 uniform vec2 origin;
 uniform vec4 impulse;
+uniform vec2 wind_origin;
+uniform float wind_time;
+uniform float wind_on;
 const float dt=1.0/120.0, dx=0.125;
 bool wet_cell(ivec2 p) {
   return all(greaterThanEqual(p,ivec2(0))) && all(lessThan(p,ivec2(256))) && wet[(p.y/8)*32+p.x/8]>0.5;
 }
 vec4 get(ivec2 p,vec4 fallback) { return wet_cell(p) ? water[p.y*256+p.x] : fallback; }
+vec2 wind_stress(vec2 world) {
+  vec2 uv=clamp((world-wind_origin)/64.0,vec2(0.001),vec2(0.999));
+  vec2 flow=(texture(wind_map,uv).rg*2.0-1.0)*2.0;
+  float speed=length(flow);
+  vec2 along=flow/max(speed,0.001);
+  float front=sin(wind_time*0.85-dot(world,along)*0.22);
+  float gust=0.15+1.85*smoothstep(-0.20,0.85,front);
+  float streak=0.78+0.22*sin(dot(world,along)*1.65-wind_time*2.8);
+  // Wind stress grows with speed squared. Adding it to horizontal flux lets
+  // the solver create surface slopes, reflections, and waves at shorelines.
+  return flow*speed*(0.075*gust*streak*wind_on);
+}
 void main() {
   int i=int(gl_GlobalInvocationID.x); ivec2 p=ivec2(i%256,i/256);
   if(!wet_cell(p)) { result[i]=vec4(0); return; }
@@ -28,6 +44,8 @@ void main() {
     vec2 world=origin+(vec2(p)+0.5)*dx;
     vec2 r=world-impulse.xy;
     a.yz+=r*impulse.z*exp(-dot(r,r)/0.20);
+    float depth=max(0.0,0.92+a.x-a.w);
+    a.yz+=wind_stress(world)*depth*dt;
   } else if(stage==1) {
     vec4 e=get(p+ivec2(1,0),a),n=get(p+ivec2(0,1),a);
     float depth=max(0.0,0.92+a.x-a.w);
@@ -46,6 +64,58 @@ void main() {
   // Bounded basin safeguard for extreme forcing/full solid occupancy. Normal
   // waves conserve sum(elevation-solid); this clamp represents unresolved spill.
   a.x=clamp(a.x,-0.92,0.75);
+  result[i]=a;
+}
+"""; }
+
+height_water_ripple_compute(): []i8 { """
+#version 430
+layout(local_size_x=128) in;
+layout(std430,binding=0) readonly buffer Input { vec4 ripple[]; };
+layout(std430,binding=1) writeonly buffer Output { vec4 result[]; };
+layout(std430,binding=2) readonly buffer Terrain { float wet[1024]; };
+uniform sampler2D wind_map;
+uniform vec2 origin, wind_origin;
+uniform float wind_time, wind_on;
+uniform int stage;
+const float dt=1.0/120.0, dx=1.0/16.0, c2=0.64;
+bool wet_cell(ivec2 p) {
+  return all(greaterThanEqual(p,ivec2(0))) && all(lessThan(p,ivec2(512))) && wet[(p.y/16)*32+p.x/16]>0.5;
+}
+float pressure(vec2 world) {
+  if(wind_on<0.5) return 0.0;
+  vec2 flow=(textureLod(wind_map,clamp((world-wind_origin)/64.0,0.001,0.999),0).rg*2.0-1.0)*2.0;
+  float speed=length(flow);
+  if(speed<0.02) return 0.0;
+  vec2 along=flow/speed, across=vec2(-along.y,along.x);
+  float gust=0.15+1.85*smoothstep(-0.20,0.85,sin(wind_time*0.85-dot(world,along)*0.22));
+  // A narrow directional spectrum of wind pressure, with wavelengths
+  // 1.2, 0.8 and 0.5 blocks. It forces momentum; it never prescribes height.
+  float a=dot(world,along), b=dot(world,across);
+  float waves=sin(a*5.24-wind_time*4.19)
+    +0.60*sin((a*0.96+b*0.28)*7.85-wind_time*6.28+1.7)
+    +0.35*sin((a*0.94-b*0.34)*12.57-wind_time*10.06+4.1);
+  return 0.0018*min(speed*speed,2.25)*gust*waves;
+}
+void main() {
+  int i=int(gl_GlobalInvocationID.x); ivec2 p=ivec2(i%512,i/512);
+  if(!wet_cell(p)) { result[i]=vec4(0); return; }
+  vec4 a=ripple[i];
+  if(stage==0) {
+    vec2 world=origin+(vec2(p)+0.5)*dx;
+    float forcing=pressure(world);
+    // Staggered face fluxes. Closed faces reflect waves and preserve volume.
+    if(wet_cell(p+ivec2(1,0)))
+      a.y=(a.y-dt/dx*(c2*(ripple[i+1].x-a.x)+pressure(world+vec2(dx,0))-forcing))*0.99005;
+    else a.y=0.0;
+    if(wet_cell(p+ivec2(0,1)))
+      a.z=(a.z-dt/dx*(c2*(ripple[i+512].x-a.x)+pressure(world+vec2(0,dx))-forcing))*0.99005;
+    else a.z=0.0;
+  } else {
+    float west=wet_cell(p-ivec2(1,0)) ? ripple[i-1].y : 0.0;
+    float south=wet_cell(p-ivec2(0,1)) ? ripple[i-512].z : 0.0;
+    a.x-=dt/dx*(a.y-west+a.z-south);
+  }
   result[i]=a;
 }
 """; }
@@ -93,6 +163,19 @@ uniform vec2 origin;
 uniform int bed;
 out vec3 world;
 out vec3 normal;
+layout(std430,binding=5) readonly buffer Ripples { vec4 ripple[]; };
+float ripple_at(ivec2 p,float fallback) {
+  if(any(lessThan(p,ivec2(0))) || any(greaterThanEqual(p,ivec2(512)))) return fallback;
+  return wet[(p.y/16)*32+p.x/16]>0.5 ? ripple[p.y*512+p.x].x : fallback;
+}
+float ripple_height(vec2 world) {
+  vec2 grid=(world-origin)*16.0-0.5;
+  ivec2 p=ivec2(floor(grid)); vec2 f=fract(grid);
+  ivec2 center=clamp(ivec2((world-origin)*16.0),ivec2(0),ivec2(511));
+  float h=ripple[center.y*512+center.x].x;
+  return mix(mix(ripple_at(p,h),ripple_at(p+ivec2(1,0),h),f.x),
+             mix(ripple_at(p+ivec2(0,1),h),ripple_at(p+ivec2(1,1),h),f.x),f.y);
+}
 bool wet_cell(ivec2 p) {
   return all(greaterThanEqual(p,ivec2(0))) && all(lessThan(p,ivec2(256))) && wet[(p.y/8)*32+p.x/8]>0.5;
 }
@@ -129,9 +212,11 @@ void main() {
   float r=wet_cell(p) ? height_at(p+ivec2(1,0)) : h;
   float b=wet_cell(p+ivec2(0,-1)) ? height_at(p+ivec2(0,-1)) : h;
   float t=wet_cell(p) ? height_at(p+ivec2(0,1)) : h;
+  if(bed<0) { h=0.0; l=0.0; r=0.0; b=0.0; t=0.0; }
   normal=normalize(vec3(-(r-l)*4.0,1.0,-(t-b)*4.0));
-  if(bed<0) { h=0.0; normal=vec3(0,1,0); }
-  world=vec3(origin.x+float(p.x)*0.125,-0.08+h,origin.y+float(p.y)*0.125);
+  vec2 surface=origin+vec2(p)*0.125;
+  if(bed==0) h+=ripple_height(surface);
+  world=vec3(surface.x,-0.08+h,surface.y);
   gl_Position=vp*vec4(world,1);
 }
 """; }
@@ -150,9 +235,29 @@ uniform sampler2D lamp_map;
 uniform vec2 lamp_origin;
 uniform float reflection_on;
 uniform vec3 spec_lamps[4];
+uniform vec2 origin;
+layout(std430,binding=2) readonly buffer Terrain { float wet[1024]; };
+layout(std430,binding=5) readonly buffer Ripples { vec4 ripple[]; };
+float ripple_at(ivec2 p,float fallback) {
+  if(any(lessThan(p,ivec2(0))) || any(greaterThanEqual(p,ivec2(512)))) return fallback;
+  return wet[(p.y/16)*32+p.x/16]>0.5 ? ripple[p.y*512+p.x].x : fallback;
+}
+float ripple_height(vec2 world) {
+  vec2 grid=(world-origin)*16.0-0.5;
+  ivec2 p=ivec2(floor(grid)); vec2 f=fract(grid);
+  ivec2 center=clamp(ivec2((world-origin)*16.0),ivec2(0),ivec2(511));
+  float h=ripple[center.y*512+center.x].x;
+  return mix(mix(ripple_at(p,h),ripple_at(p+ivec2(1,0),h),f.x),
+             mix(ripple_at(p+ivec2(0,1),h),ripple_at(p+ivec2(1,1),h),f.x),f.y);
+}
 out vec4 result;
 void main() {
   vec3 n=normalize(normal),V=normalize(camera-world),L=normalize(vec3(4,11,3));
+  if(bed==0) {
+    float dx=(ripple_height(world.xz+vec2(0.0625,0))-ripple_height(world.xz-vec2(0.0625,0)))*8.0;
+    float dz=(ripple_height(world.xz+vec2(0,0.0625))-ripple_height(world.xz-vec2(0,0.0625)))*8.0;
+    n=normalize(vec3(n.x/n.y-dx,1.0,n.z/n.y-dz));
+  }
   if(dot(n,V)<0.0) n=-n;
   vec4 sh=light_vp*vec4(world,1); vec3 sc=sh.xyz/sh.w; float vis=1.0;
   if(all(greaterThan(sc,vec3(0.01))) && all(lessThan(sc,vec3(0.99)))) vis=texture(shadow_map,vec3(sc.xy,sc.z-0.00025));
@@ -167,19 +272,20 @@ void main() {
   vec3 R=reflect(-V,n);
   vec3 sky=mix(vec3(0.48,0.43,0.36),vec3(0.16,0.28,0.46),smoothstep(-0.05,0.9,R.y));
   vec4 clip=vp*vec4(world.x,-0.02,world.z,1);
-  vec2 uv=clip.xy/clip.w*0.5+0.5+n.xz*vec2(0.012,0.018);
+  vec2 uv=clip.xy/clip.w*0.5+0.5+n.xz*vec2(0.020,0.028);
   vec4 scene=texture(reflection_map,clamp(uv,0.001,0.999));
   float edge=smoothstep(0,0.025,min(min(uv.x,uv.y),min(1-uv.x,1-uv.y)));
   vec3 reflected=mix(sky,scene.rgb,scene.a*edge*reflection_on);
-  float fresnel=0.025+0.975*pow(1-max(dot(n,V),0.0),5.0);
-  vec3 lit=mix(vec3(0.055,0.17,0.19)*light,reflected,0.16+0.84*fresnel);
+  float fresnel=0.035+0.965*pow(1-max(dot(n,V),0.0),5.0);
+  vec3 lit=mix(vec3(0.075,0.14,0.135)*light,reflected,0.34+0.66*fresnel);
   lit+=vec3(0.76,0.86,1.0)*0.65*pow(max(dot(n,normalize(L+V)),0.0),65.0)*vis;
   for(int i=0;i<4;i++) {
     vec3 delta=spec_lamps[i]-world; float d2=dot(delta,delta);
     if(spec_lamps[i].y>0 && d2<64) lit+=vec3(1,0.57,0.24)*0.7*pow(max(dot(n,normalize(normalize(delta)+V)),0.0),65.0)/(1+0.25*d2);
   }
-  // Translucency keeps wading players and submerged blocks legible. Real scene
-  // depth still occludes the surface wherever a block protrudes above it.
-  result=vec4(lit/(1.0+max(lit-1.1,0.0)),0.58+0.40*fresnel);
+  // Murky water suppresses bottom detail so ripple reflections read clearly,
+  // with some transmission left for submerged objects. Protruding blocks
+  // still occlude the surface through scene depth.
+  result=vec4(lit/(1.0+max(lit-1.1,0.0)),0.84+0.14*fresnel);
 }
 """; }

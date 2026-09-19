@@ -65,7 +65,8 @@ Each fixed 1/120-second step updates solid displacement, accelerates horizontal
 flux from surface-height differences and available depth, then updates elevation
 from flux divergence. Dry edges have no outward flux. Damping removes motion.
 The two state buffers occupy 2 MiB total; an R32F occupancy target adds 256 KiB.
-Small masks/body lists and a retained 1 MiB initialization array are also
+The fine ripple field adds two 4 MiB buffers.
+Small masks/body lists and a retained 4 MiB initialization array are also
 preallocated. There is no runtime particle storage, surface extraction, fullscreen
 reconstruction filtering, GPU readback, or per-frame application heap allocation.
 
@@ -79,9 +80,30 @@ The renderer directly draws a continuous mesh from the height grid, with average
 vertex elevations and smooth gradient normals. It draws the basin floor and
 exposed banks, then translucent water over submerged objects. Moonlight, warm
 lamp highlights, Fresnel sky reflection, and the cached scene-reflection target
-remain in use. The reflection omits grass, ground, and editor overlays, as before.
+remain in use. Water now gives that reflection more weight and stronger
+normal-based distortion, making its simulated surface shape easier to read.
+A muted green tint and 84% baseline opacity suppress bottom detail while keeping
+some visibility of submerged objects. The
+wind field applies directional surface stress to the horizontal water flux; the
+same gravity and continuity passes used for displacement then form slopes and
+waves against basin edges without creating or removing liquid. Pausing the
+solver with F7 pauses this response. The reflection omits grass, ground, and
+editor overlays, as before.
 
-OpenGL 4.3 and at least three vertex-stage storage-buffer bindings are required.
+A separate 512-square ripple field resolves sixteen cells per block at 120 Hz.
+It stores height and horizontal wave flux, with a damped wave speed of 0.8 blocks
+per second. Local wind pressure drives three directional bands with wavelengths
+of 0.5, 0.8, and 1.2 blocks. This is an approximate wave-generation model, not a
+simulation of the air/water interface or full gravity-capillary dispersion.
+Pressure gradients change flux; conservative divergence changes height. Closed
+bank faces reflect ripples, and waves continue propagating and decaying when
+wind stops. The renderer samples this persistent field for geometry and evaluates
+its slopes per fragment, so short waves remain visible in reflections.
+The ripple layer shares basin residency/reset and pause behavior with bulk water.
+It interacts with terrain banks; submerged moving objects currently displace
+only the bulk solver. There is no two-way coupling between the wave layers.
+
+OpenGL 4.3 and at least four vertex-stage storage-buffer bindings are required.
 Unsupported hardware uses the older static reflective terrain fallback. That
 fallback does not render the cut-out underwater basin.
 
@@ -97,7 +119,7 @@ fallback does not render the cut-out underwater basin.
   which can be above its initial height. Static objects present at initialization
   start with flat water, without a startup splash.
 - Body volume approximates bevels and tilted cargo. Small ripples are limited
-  by the eight-samples-per-tile grid, not individual visible particles.
+  by the sixteen-samples-per-tile ripple grid; bulk flow uses eight samples.
 - Up to 16 fixed steps run per frame. Catch-up debt is retained up to 250 ms;
   excess after a long stall is discarded and reported. Offscreen water pauses
   without catch-up bursts. There is no per-pond sleeping optimization yet.

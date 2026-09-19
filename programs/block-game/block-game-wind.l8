@@ -1,0 +1,427 @@
+tag block_game;
+
+// A camera-centered horizontal airflow field. Weather supplies the slow global
+// forcing; advection and pressure projection turn it into local flow around walls.
+WIND_SIZE: int = 64;
+
+WIND_HALF: int = 32;
+
+WIND_CELLS: int = 4096;
+
+WIND_STEP: f32 = 0.05;
+
+WIND_MAX_SPEED: f32 = 2.0;
+
+WIND_PRESSURE_STEPS: int = 14;
+
+type WeatherState = {
+    dir_x: f32;
+    dir_z: f32;
+    speed: f32;
+    gust: f32;
+    turbulence: f32;
+    target_x: f32;
+    target_z: f32;
+    target_speed: f32;
+    target_gust: f32;
+    target_turbulence: f32;
+    clock: f32;
+    until_change: int;
+    rng: int;
+};
+
+type WindField = {
+    weather: *WeatherState;
+    vx: []f32;
+    vz: []f32;
+    next_x: []f32;
+    next_z: []f32;
+    pressure: []f32;
+    next_pressure: []f32;
+    divergence: []f32;
+    solid: []int;
+    target: []f32;
+    pixels: []i8;
+    origin_x: int;
+    origin_z: int;
+    ready: bool;
+    dirty: bool;
+    debug: bool;
+    start_ms: int;
+    last_ms: int;
+    debt: f32;
+    tex: u32;
+};
+
+wind_clamp(x: f32, lo: f32, hi: f32): f32 {
+    if (x < lo) {
+        return lo;
+    }
+    if (x > hi) {
+        return hi;
+    }
+    x;
+}
+
+weather_random(w: *WeatherState): f32 {
+    n: int = (w.rng * 48271 + 17) % 2147483647;
+    if (n <= 0) {
+        n = n + 2147483646;
+    }
+    w.rng = n;
+    n as f32 / 2147483647.0;
+}
+
+weather_choose(w: *WeatherState) {
+    angle: f32 = weather_random(w) * 6.2831855;
+    w.target_x = cos_f32(angle);
+    w.target_z = sin_f32(angle);
+    w.target_speed = 0.82 + weather_random(w) * 0.58;
+    w.target_gust = 0.42 + weather_random(w) * 0.30;
+    w.target_turbulence = 0.14 + weather_random(w) * 0.24;
+    w.until_change = 600 + (weather_random(w) * 1200.0) as int;
+}
+
+new_weather(seed: int): *WeatherState@new {
+    if (seed <= 0) {
+        seed = 1;
+    }
+    w: *WeatherState = new WeatherState {
+        dir_x: 0.915,
+        dir_z: 0.403,
+        speed: 0.98,
+        gust: 0.52,
+        turbulence: 0.21,
+        target_x: 0.915,
+        target_z: 0.403,
+        target_speed: 0.98,
+        target_gust: 0.52,
+        target_turbulence: 0.21,
+        clock: 0.0,
+        until_change: 1,
+        rng: seed
+    };
+    weather_choose(w);
+    w;
+}
+
+weather_step(w: *WeatherState) {
+    w.clock = w.clock + WIND_STEP;
+    w.until_change = w.until_change - 1;
+    if (w.until_change <= 0) {
+        weather_choose(w);
+    }
+    // Roughly twenty seconds to turn into a new weather regime. Normalize the
+    // blended direction so speed does not dip during a large turn.
+    k: f32 = 0.0025;
+    w.dir_x = w.dir_x + (w.target_x - w.dir_x) * k;
+    w.dir_z = w.dir_z + (w.target_z - w.dir_z) * k;
+    length: f32 = sqrt_f32(w.dir_x * w.dir_x + w.dir_z * w.dir_z);
+    if (length > 0.0001) {
+        w.dir_x = w.dir_x / length;
+        w.dir_z = w.dir_z / length;
+    }
+    w.speed = w.speed + (w.target_speed - w.speed) * k;
+    w.gust = w.gust + (w.target_gust - w.gust) * k;
+    w.turbulence = w.turbulence + (w.target_turbulence - w.turbulence) * k;
+}
+
+new_wind_field(seed: int): *WindField@new {
+    new WindField {
+        weather: new_weather(seed),
+        vx: new f32[WIND_CELLS](0.0),
+        vz: new f32[WIND_CELLS](0.0),
+        next_x: new f32[WIND_CELLS](0.0),
+        next_z: new f32[WIND_CELLS](0.0),
+        pressure: new f32[WIND_CELLS](0.0),
+        next_pressure: new f32[WIND_CELLS](0.0),
+        divergence: new f32[WIND_CELLS](0.0),
+        solid: new int[WIND_CELLS](0),
+        target: new f32[2](0.0),
+        // Neutral RG values keep shaders still before the first field upload.
+        pixels: new i8[WIND_CELLS * 4](128i8),
+        origin_x: 0,
+        origin_z: 0,
+        ready: false,
+        dirty: true,
+        debug: false,
+        start_ms: 0,
+        last_ms: 0,
+        debt: 0.0,
+        tex: 0u32
+    };
+}
+
+wind_target(
+    w: *WindField,
+    x: f32,
+    z: f32,
+    out: []f32
+) {
+    weather: *WeatherState = w.weather;
+    along: f32 = x * weather.dir_x + z * weather.dir_z;
+    front: f32 = 0.5 + 0.5 * sin_f32(along * 0.105 - weather.clock * 0.72);
+    front2: f32 = 0.5 + 0.5 * sin_f32(along * 0.041 - weather.clock * 0.31 + 1.7);
+    strength: f32 = weather.speed * (0.58 + weather.gust * (0.72 * front + 0.48 * front2));
+    // Curl of a smooth scalar field: this adds eddies without inventing sinks.
+    ax: f32 = x * 0.083 + weather.clock * 0.11;
+    az: f32 = z * 0.097 - weather.clock * 0.085;
+    curl_x: f32 = sin_f32(ax) * cos_f32(az) * 0.097;
+    curl_z: f32 = 0.0 - cos_f32(ax) * sin_f32(az) * 0.083;
+    curl_scale: f32 = weather.turbulence * 4.2;
+    out[0] = weather.dir_x * strength + curl_x * curl_scale;
+    out[1] = weather.dir_z * strength + curl_z * curl_scale;
+}
+
+wind_grid_sample(values: []f32, gx: f32, gz: f32): f32 {
+    x0: int = floor_i(gx - 0.5);
+    z0: int = floor_i(gz - 0.5);
+    tx: f32 = gx - 0.5 - x0 as f32;
+    tz: f32 = gz - 0.5 - z0 as f32;
+    if (x0 < 0) {
+        x0 = 0;
+        tx = 0.0;
+    }
+    if (z0 < 0) {
+        z0 = 0;
+        tz = 0.0;
+    }
+    if (x0 >= WIND_SIZE - 1) {
+        x0 = WIND_SIZE - 2;
+        tx = 1.0;
+    }
+    if (z0 >= WIND_SIZE - 1) {
+        z0 = WIND_SIZE - 2;
+        tz = 1.0;
+    }
+    a: f32 = values[z0 * WIND_SIZE + x0];
+    b: f32 = values[z0 * WIND_SIZE + x0 + 1];
+    c: f32 = values[(z0 + 1) * WIND_SIZE + x0];
+    d: f32 = values[(z0 + 1) * WIND_SIZE + x0 + 1];
+    top: f32 = a + (b - a) * tx;
+    bottom: f32 = c + (d - c) * tx;
+    top + (bottom - top) * tz;
+}
+
+wind_recenter(w: *WindField, center_x: f32, center_z: f32) {
+    next_origin_x: int = floor_i(center_x) - WIND_HALF;
+    next_origin_z: int = floor_i(center_z) - WIND_HALF;
+    if (w.ready && next_origin_x == w.origin_x && next_origin_z == w.origin_z) {
+        return;
+    }
+    for z in 0..WIND_SIZE {
+        for x in 0..WIND_SIZE {
+            at: int = z * WIND_SIZE + x;
+            old_x: int = next_origin_x + x - w.origin_x;
+            old_z: int = next_origin_z + z - w.origin_z;
+            if (w.ready && old_x >= 0 && old_x < WIND_SIZE && old_z >= 0 && old_z < WIND_SIZE) {
+                old: int = old_z * WIND_SIZE + old_x;
+                w.next_x[at] = w.vx[old];
+                w.next_z[at] = w.vz[old];
+            } else {
+                wind_target(w, next_origin_x as f32 + x as f32 + 0.5, next_origin_z as f32 + z as f32 + 0.5,
+                    w.target);
+                w.next_x[at] = w.target[0];
+                w.next_z[at] = w.target[1];
+            }
+        }
+    }
+    for i in 0..WIND_CELLS {
+        w.vx[i] = w.next_x[i];
+        w.vz[i] = w.next_z[i];
+    }
+    w.origin_x = next_origin_x;
+    w.origin_z = next_origin_z;
+    w.ready = true;
+    w.dirty = true;
+}
+
+wind_obstacles(w: *WindField, bricks: []Brick, nbrick: int) {
+    for i in 0..WIND_CELLS {
+        w.solid[i] = 0;
+    }
+    for i in 0..nbrick {
+        b: Brick = bricks[i];
+        x: int = b.column - w.origin_x;
+        z: int = b.row - w.origin_z;
+        if (x >= 0 && x < WIND_SIZE && z >= 0 && z < WIND_SIZE) {
+            at: int = z * WIND_SIZE + x;
+            w.solid[at] = 1;
+            w.vx[at] = 0.0;
+            w.vz[at] = 0.0;
+        }
+    }
+}
+
+wind_pressure_neighbor(
+    w: *WindField,
+    x: int,
+    z: int,
+    center: f32
+): f32 {
+    if (x < 0 || x >= WIND_SIZE || z < 0 || z >= WIND_SIZE) {
+        return center;
+    }
+    at: int = z * WIND_SIZE + x;
+    if (w.solid[at] != 0) {
+        return center;
+    }
+    w.pressure[at];
+}
+
+wind_step(w: *WindField) {
+    weather_step(w.weather);
+    // Semi-Lagrangian transport followed by relaxation toward the weather forcing.
+    for z in 0..WIND_SIZE {
+        for x in 0..WIND_SIZE {
+            at: int = z * WIND_SIZE + x;
+            if (w.solid[at] != 0) {
+                w.next_x[at] = 0.0;
+                w.next_z[at] = 0.0;
+            } else {
+                back_x: f32 = x as f32 + 0.5 - w.vx[at] * WIND_STEP;
+                back_z: f32 = z as f32 + 0.5 - w.vz[at] * WIND_STEP;
+                adv_x: f32 = wind_grid_sample(w.vx, back_x, back_z);
+                adv_z: f32 = wind_grid_sample(w.vz, back_x, back_z);
+                wind_target(w, w.origin_x as f32 + x as f32 + 0.5, w.origin_z as f32 + z as f32 + 0.5,
+                    w.target);
+                w.next_x[at] = adv_x + (w.target[0] - adv_x) * 0.085;
+                w.next_z[at] = adv_z + (w.target[1] - adv_z) * 0.085;
+            }
+        }
+    }
+    for i in 0..WIND_CELLS {
+        w.vx[i] = w.next_x[i];
+        w.vz[i] = w.next_z[i];
+        w.pressure[i] = 0.0;
+    }
+    for z in 0..WIND_SIZE {
+        for x in 0..WIND_SIZE {
+            at: int = z * WIND_SIZE + x;
+            if (w.solid[at] == 0) {
+                left: f32 = w.vx[at];
+                right: f32 = w.vx[at];
+                down: f32 = w.vz[at];
+                up: f32 = w.vz[at];
+                if (x > 0 && w.solid[at - 1] == 0) {
+                    left = w.vx[at - 1];
+                }
+                if (x + 1 < WIND_SIZE && w.solid[at + 1] == 0) {
+                    right = w.vx[at + 1];
+                }
+                if (z > 0 && w.solid[at - WIND_SIZE] == 0) {
+                    down = w.vz[at - WIND_SIZE];
+                }
+                if (z + 1 < WIND_SIZE && w.solid[at + WIND_SIZE] == 0) {
+                    up = w.vz[at + WIND_SIZE];
+                }
+                w.divergence[at] = (right - left + up - down) * 0.5;
+            } else {
+                w.divergence[at] = 0.0;
+            }
+        }
+    }
+    for iteration in 0..WIND_PRESSURE_STEPS {
+        for z in 0..WIND_SIZE {
+            for x in 0..WIND_SIZE {
+                at: int = z * WIND_SIZE + x;
+                if (w.solid[at] != 0) {
+                    w.next_pressure[at] = 0.0;
+                } else {
+                    center: f32 = w.pressure[at];
+                    sum: f32 = wind_pressure_neighbor(w, x - 1, z, center) + wind_pressure_neighbor(w,
+                        x + 1, z, center) + wind_pressure_neighbor(w, x, z - 1, center) + wind_pressure_neighbor(w,
+                        x, z + 1, center);
+                    w.next_pressure[at] = (sum - w.divergence[at]) * 0.25;
+                }
+            }
+        }
+        for i in 0..WIND_CELLS {
+            w.pressure[i] = w.next_pressure[i];
+        }
+    }
+    for z in 0..WIND_SIZE {
+        for x in 0..WIND_SIZE {
+            at: int = z * WIND_SIZE + x;
+            if (w.solid[at] != 0) {
+                w.vx[at] = 0.0;
+                w.vz[at] = 0.0;
+            } else {
+                center: f32 = w.pressure[at];
+                left: f32 = wind_pressure_neighbor(w, x - 1, z, center);
+                right: f32 = wind_pressure_neighbor(w, x + 1, z, center);
+                down: f32 = wind_pressure_neighbor(w, x, z - 1, center);
+                up: f32 = wind_pressure_neighbor(w, x, z + 1, center);
+                vx: f32 = (w.vx[at] - (right - left) * 0.5) * 0.997;
+                vz: f32 = (w.vz[at] - (up - down) * 0.5) * 0.997;
+                speed: f32 = sqrt_f32(vx * vx + vz * vz);
+                if (speed > WIND_MAX_SPEED) {
+                    vx = vx * WIND_MAX_SPEED / speed;
+                    vz = vz * WIND_MAX_SPEED / speed;
+                }
+                w.vx[at] = vx;
+                w.vz[at] = vz;
+            }
+        }
+    }
+    w.dirty = true;
+}
+
+wind_prepare(
+    w: *WindField,
+    center_x: f32,
+    center_z: f32,
+    bricks: []Brick,
+    nbrick: int,
+    now: int
+) {
+    if (w.start_ms == 0) { w.start_ms = now; }
+    wind_recenter(w, center_x, center_z);
+    wind_obstacles(w, bricks, nbrick);
+    if (w.last_ms == 0) {
+        w.last_ms = now;
+    }
+    elapsed: f32 = (now - w.last_ms) as f32 * 0.001;
+    w.last_ms = now;
+    if (elapsed < 0.0) {
+        elapsed = 0.0;
+    }
+    if (elapsed > 0.20) {
+        elapsed = 0.20;
+    }
+    w.debt = w.debt + elapsed;
+    steps: int = 0;
+    while (w.debt >= WIND_STEP && steps < 4) {
+        wind_step(w);
+        w.debt = w.debt - WIND_STEP;
+        steps = steps + 1;
+    }
+}
+
+wind_visual_time(w: *WindField, now: int): f32 {
+    if (w.start_ms == 0) { return 0.0; }
+    (now - w.start_ms) as f32 * 0.001;
+}
+
+wind_sample(
+    w: *WindField,
+    world_x: f32,
+    world_z: f32,
+    out: []f32
+) {
+    out[0] = wind_grid_sample(w.vx, world_x - w.origin_x as f32, world_z - w.origin_z as f32);
+    out[1] = wind_grid_sample(w.vz, world_x - w.origin_x as f32, world_z - w.origin_z as f32);
+}
+
+wind_encode(w: *WindField) {
+    for i in 0..WIND_CELLS {
+        x: f32 = wind_clamp(w.vx[i] / WIND_MAX_SPEED, -1.0, 1.0);
+        z: f32 = wind_clamp(w.vz[i] / WIND_MAX_SPEED, -1.0, 1.0);
+        qx: int = ((x * 0.5 + 0.5) * 255.0 + 0.5) as int;
+        qz: int = ((z * 0.5 + 0.5) * 255.0 + 0.5) as int;
+        w.pixels[i * 4] = qx trunc i8;
+        w.pixels[i * 4 + 1] = qz trunc i8;
+        w.pixels[i * 4 + 2] = 128i8;
+        w.pixels[i * 4 + 3] = 255i8;
+    }
+}

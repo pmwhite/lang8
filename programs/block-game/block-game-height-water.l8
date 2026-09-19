@@ -10,18 +10,18 @@ type HeightWater = {
     wet: []f32; mask: []i8; tiles: []f32; bodies: []f32; zeros: []f32;
     x: int; z: int; key: int; cells: int; nbodies: int; current: int;
     visible: bool; last_us: int; debt: f32; steps: int; dropped_us: int; frame: int;
-    label: []i8;
+    label: []i8; ripple_time: f32;
 };
 
 new_height_water(main: int): *HeightWater@new {
     version: []i32=new i32[2](0i32);
     glGetIntegerv(33307,version); glGetIntegerv(33308,&version[1]);
     supported: bool=version[0]>4i32 || version[0]==4i32 && version[1]>=3i32;
-    if(supported) { glGetIntegerv(37078,version); supported=version[0]>=3i32; }
-    programs: []int=new int[3](0); u: []int=new int[16](-1);
-    buffers: []u32=new u32[5](0u32); textures: []u32=new u32[2](0u32);
+    if(supported) { glGetIntegerv(37078,version); supported=version[0]>=4i32; }
+    programs: []int=new int[4](0); u: []int=new int[24](-1);
+    buffers: []u32=new u32[7](0u32); textures: []u32=new u32[2](0u32);
     fbos: []u32=new u32[1](0u32);
-    zeros: []f32=new f32[256*256*4](0.0);
+    zeros: []f32=new f32[512*512*4](0.0);
     mask: []i8=new i8[1024](0i8);
     glGenTextures(2,textures); glActiveTexture(33989); glBindTexture(3553,textures[0]);
     glTexParameteri(3553,10241,9728); glTexParameteri(3553,10240,9728);
@@ -34,9 +34,20 @@ new_height_water(main: int): *HeightWater@new {
         if(ok[0]==0i32) { die("height water compute link failed"); }
         programs[1]=link_program(height_water_solid_vs(),height_water_solid_fs(),"nrm");
         programs[2]=link_program(height_water_vs(),height_water_fs(),"nrm");
-        glGenBuffers(5,buffers);
-        for i in 0..5 {
+        ripple_shader: int=compile_shader(37305,height_water_ripple_compute());
+        programs[3]=glCreateProgram(); glAttachShader(programs[3],ripple_shader); glLinkProgram(programs[3]);
+        glGetProgramiv(programs[3],35714,ok);
+        if(ok[0]==0i32) { die("water ripple compute link failed"); }
+        glUseProgram(programs[3]); glUniform1i(glGetUniformLocation(programs[3],"wind_map"),7);
+        u[19]=glGetUniformLocation(programs[3],"stage");
+        u[20]=glGetUniformLocation(programs[3],"origin");
+        u[21]=glGetUniformLocation(programs[3],"wind_origin");
+        u[22]=glGetUniformLocation(programs[3],"wind_time");
+        u[23]=glGetUniformLocation(programs[3],"wind_on");
+        glGenBuffers(7,buffers);
+        for i in 0..7 {
             size: int=256*256*4;
+            if(i>=5) { size=512*512*4; }
             if(i==2) { size=1024; } if(i==3) { size=4096; } if(i==4) { size=(LEVEL_MAX_BLOCKS+1)*8; }
             glBindBuffer(37074,buffers[i]); glBufferData(37074,size*4,zeros,35048);
         }
@@ -49,8 +60,12 @@ new_height_water(main: int): *HeightWater@new {
         if(glCheckFramebufferStatus(36160)!=36053) { die("height water displacement target incomplete"); }
         glBindFramebuffer(36160,0u32); glDrawBuffer(1029); glReadBuffer(1029);
         glUseProgram(programs[0]); glUniform1i(glGetUniformLocation(programs[0],"solids"),6);
+        glUniform1i(glGetUniformLocation(programs[0],"wind_map"),7);
         u[0]=glGetUniformLocation(programs[0],"stage"); u[1]=glGetUniformLocation(programs[0],"origin");
         u[2]=glGetUniformLocation(programs[0],"impulse");
+        u[16]=glGetUniformLocation(programs[0],"wind_origin");
+        u[17]=glGetUniformLocation(programs[0],"wind_time");
+        u[18]=glGetUniformLocation(programs[0],"wind_on");
         u[3]=glGetUniformLocation(programs[1],"origin");
         glUseProgram(programs[2]);
         glUniform1i(glGetUniformLocation(programs[2],"shadow_map"),0);
@@ -70,7 +85,7 @@ new_height_water(main: int): *HeightWater@new {
         report:getenv("L8_WATER_STATS")!=null,stress:getenv("L8_WATER_STRESS")!=null,initial_splash:getenv("L8_WATER_SPLASH")!=null,
         programs:programs,u:u,buffers:buffers,textures:textures,fbo:fbos[0],zeros:zeros,mask:mask,
         wet:new f32[1024](0.0),tiles:new f32[4096](0.0),bodies:new f32[(LEVEL_MAX_BLOCKS+1)*8](0.0),
-        x:0,z:0,key:0,cells:0,nbodies:0,current:0,visible:false,last_us:0,debt:0.0,steps:0,dropped_us:0,frame:0,label:new i8[160](0i8) };
+        x:0,z:0,key:0,cells:0,nbodies:0,current:0,visible:false,last_us:0,debt:0.0,steps:0,dropped_us:0,frame:0,label:new i8[160](0i8),ripple_time:0.0 };
 }
 
 toggle_height_water(w: *HeightWater) { w.disabled=!w.disabled; w.last_us=0; w.debt=0.0; }
@@ -79,6 +94,7 @@ request_height_splash(w: *HeightWater) { w.disabled=false; w.splash=true; }
 height_water_bind(w: *HeightWater) {
     glBindBufferBase(37074,0,w.buffers[w.current]); glBindBufferBase(37074,1,w.buffers[1-w.current]);
     for i in 2..5 { glBindBufferBase(37074,i,w.buffers[i]); }
+    glBindBufferBase(37074,5,w.buffers[5]);
 }
 
 height_water_terrain(w: *HeightWater,ground: []GroundCell,n: int,cx: int,cz: int,vp: []f32) {
@@ -109,7 +125,8 @@ height_water_terrain(w: *HeightWater,ground: []GroundCell,n: int,cx: int,cz: int
             w.tiles[w.cells*4]=tx as f32; w.tiles[w.cells*4+1]=tz as f32; w.cells=w.cells+1;
         }
     }
-    for i in 0..2 { glBindBuffer(37074,w.buffers[i]); glBufferSubData(37074,0,len(w.zeros)*4,w.zeros); }
+    for i in 0..2 { glBindBuffer(37074,w.buffers[i]); glBufferSubData(37074,0,256*256*16,w.zeros); }
+    for i in 5..7 { glBindBuffer(37074,w.buffers[i]); glBufferSubData(37074,0,512*512*16,w.zeros); }
     glBindBuffer(37074,w.buffers[2]); glBufferSubData(37074,0,4096,w.wet);
     glBindBuffer(37074,w.buffers[3]); glBufferSubData(37074,0,w.cells*16,w.tiles);
     glActiveTexture(33989); glBindTexture(3553,w.textures[0]); glTexSubImage2D(3553,0,0,0,32,32,6409,5121,w.mask);
@@ -146,10 +163,36 @@ height_water_step(w: *HeightWater,ix: f32,iz: f32,strength: f32) {
         height_water_bind(w); glUniform1i(w.u[0],stage); glDispatchCompute(512,1,1); glMemoryBarrier(8192);
         w.current=1-w.current;
     }
+    height_water_ripple_step(w);
     w.initialize=false; w.steps=w.steps+1;
 }
 
-prepare_height_water(w: *HeightWater,main: int,ground: []GroundCell,nground: int,cx: int,cz: int,
+height_water_ripple_step(w: *HeightWater) {
+    glUseProgram(w.programs[3]);
+    glUniform2f(w.u[20],w.x as f32,w.z as f32);
+    glUniform1f(w.u[22],w.ripple_time);
+    glBindBufferBase(37074,2,w.buffers[2]);
+    for stage in 0..2 {
+        glBindBufferBase(37074,0,w.buffers[5+stage]);
+        glBindBufferBase(37074,1,w.buffers[6-stage]);
+        glUniform1i(w.u[19],stage); glDispatchCompute(2048,1,1); glMemoryBarrier(8192);
+    }
+    w.ripple_time=w.ripple_time+0.008333334;
+}
+
+height_water_wind(w: *HeightWater,wind: *WindField,now: int) {
+    glUseProgram(w.programs[0]);
+    glUniform2f(w.u[16],wind.origin_x as f32,wind.origin_z as f32);
+    glUniform1f(w.u[17],wind_visual_time(wind,now));
+    glUniform1f(w.u[18],1.0);
+    glUseProgram(w.programs[3]);
+    glUniform2f(w.u[21],wind.origin_x as f32,wind.origin_z as f32);
+    glUniform1f(w.u[23],1.0);
+    w.ripple_time=wind_visual_time(wind,now)-w.debt;
+    glActiveTexture(33991); glBindTexture(3553,wind.tex); glActiveTexture(33984);
+}
+
+prepare_height_water(w: *HeightWater,main: int,wind: *WindField,ground: []GroundCell,nground: int,cx: int,cz: int,
     hist: []Block,foff: int,toff: int,n: int,ids: []int,bt: []f32,t: f32,
     px: f32,py: f32,pz: f32,player: int,vp: []f32) {
     if(!w.supported) { return; }
@@ -176,6 +219,7 @@ prepare_height_water(w: *HeightWater,main: int,ground: []GroundCell,nground: int
     height_water_displacement(w);
     if(elapsed<0.0) { elapsed=0.0; } w.debt=w.debt+elapsed;
     if(w.debt>0.25) { w.dropped_us=w.dropped_us+((w.debt-0.25)*1000000.0) as int; w.debt=0.25; }
+    height_water_wind(w,wind,now/1000);
     ix: f32=px; iz: f32=pz;
     if(w.splash || w.stress) {
         best: f32=10000000.0;

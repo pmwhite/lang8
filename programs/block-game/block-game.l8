@@ -183,6 +183,8 @@ main(argc: int, argv: []str): int {
     }
     write(2, "Height-field water: F7 toggles simulation, F8 makes ripples\n",
         len("Height-field water: F7 toggles simulation, F8 makes ripples\n"));
+    write(2, "Wind field: F6 toggles the flow overlay\n",
+        len("Wind field: F6 toggles the flow overlay\n"));
     vsync: bool = set_vsync(dpy, win, true);
     vs: []i8 = """
 #version 120
@@ -592,19 +594,25 @@ uniform mat4 vp;
 uniform vec2 actor;
 uniform vec2 motion;
 uniform float time;
+uniform sampler2D wind_map;
+uniform vec2 wind_origin;
 varying vec3 vworld;
 varying vec3 vnrm;
 varying float vroot;
 varying float vrand;
 varying float vmeadow;
+varying float vtall;
 void main() {
   vec2 base = vcol.xy;
   float ca = vcol.z;
   float sa = vcol.w;
-  vec2 seed = vec2(fract(vaux.x),vaux.y);
+  vec2 seed = vec2(fract(vaux.x),fract(vaux.y));
+  float tall = step(1.0,vaux.y);
   vec2 local_xz = vec2(pos.x * ca - pos.z * sa, pos.x * sa + pos.z * ca) * 1.12;
   float meadow = floor(vaux.x)/255.0*2.0-1.0;
-  float height = mix(0.24, 0.37, seed.y) * (0.92 + 0.18*meadow);
+  float short_height = mix(0.24, 0.37, seed.y);
+  float tall_height = mix(0.64, 0.88, seed.y);
+  float height = mix(short_height,tall_height,tall) * (0.92 + 0.18*meadow);
   float t = clamp(pos.y, 0.0, 1.1);
   vec2 actor_delta = base - actor;
   float actor_dist = length(actor_delta);
@@ -613,12 +621,19 @@ void main() {
   float motion_len = length(motion);
   vec2 motion_dir = motion / max(motion_len, 0.001);
   float moving = smoothstep(0.012, 0.12, motion_len);
-  vec2 wind_dir = normalize(vec2(0.82, 0.36));
-  float wind = sin(dot(base, vec2(0.43, 0.31)) + time * 0.82 + seed.x * 5.0);
-  vec2 bend = wind_dir * wind * 0.025;
+  vec2 wind_uv = (base-wind_origin)/64.0;
+  vec2 flow = (texture2D(wind_map,wind_uv).rg*2.0-1.0)*2.0;
+  float flow_len = length(flow);
+  vec2 flow_dir = flow/max(flow_len,0.001);
+  vec2 visual_flow = flow*min(1.0,1.35/max(flow_len,0.001));
+  float gust_front = sin(time*0.85-dot(base,flow_dir)*0.22);
+  float gust = 0.15+1.85*smoothstep(-0.20,0.85,gust_front);
+  vec2 side = normalize(vec2(-flow.y,flow.x)+vec2(0.001,0.0));
+  float flutter = sin(time*3.1+seed.x*6.0+dot(base,vec2(0.13,0.19)))*0.006;
+  vec2 bend = visual_flow*(0.075*gust)+side*flutter*min(flow_len,1.0);
   bend += away * touch * 0.15;
   bend += motion_dir * touch * moving * 0.075;
-  bend *= t * t;
+  bend *= mix(1.0,2.0,tall) * t * t;
   vec3 w = vec3(base.x + local_xz.x + bend.x, -0.017 + pos.y * height,
                 base.y + local_xz.y + bend.y);
   vec2 rn = vec2(nrm.x * ca - nrm.z * sa, nrm.x * sa + nrm.z * ca);
@@ -627,6 +642,7 @@ void main() {
   vroot = t;
   vrand = seed.y;
   vmeadow = meadow;
+  vtall = tall;
   gl_Position = vp * vec4(w, 1.0);
 }
 """;
@@ -730,6 +746,7 @@ varying vec3 vnrm;
 varying float vroot;
 varying float vrand;
 varying float vmeadow;
+varying float vtall;
 void main() {
   vec2 cover_uv = (vworld.xz - cover_origin) / 96.0;
   if (cover_uv.x <= 0.0 || cover_uv.x >= 1.0 || cover_uv.y <= 0.0 || cover_uv.y >= 1.0) {
@@ -739,8 +756,8 @@ void main() {
   if (vroot > grass_amount || vrand > grass_amount) {
     discard;
   }
-  vec3 root_color = vec3(0.165, 0.190, 0.100);
-  vec3 tip_color = vec3(0.285, 0.320, 0.175);
+  vec3 root_color = mix(vec3(0.165, 0.190, 0.100),vec3(0.125,0.175,0.070),vtall);
+  vec3 tip_color = mix(vec3(0.285, 0.320, 0.175),vec3(0.245,0.310,0.135),vtall);
   vec3 albedo = mix(root_color, tip_color, smoothstep(0.0, 0.82, vroot));
   albedo *= 0.92 + 0.12 * vrand;
   albedo += vec3(0.018, 0.022, 0.006) * smoothstep(0.70, 1.0, vroot);
@@ -894,7 +911,7 @@ void main() {
     bd_u[5] = glGetUniformLocation(bdprog, "cam_up");
     bd_u[6] = glGetUniformLocation(bdprog, "cam_toward");
     glUseProgram(grass_prog);
-    grass_u: []int = new int[9](0);
+    grass_u: []int = new int[11](0);
     grass_u[0] = glGetUniformLocation(grass_prog, "vp");
     grass_u[1] = glGetUniformLocation(grass_prog, "actor");
     grass_u[2] = glGetUniformLocation(grass_prog, "motion");
@@ -904,8 +921,11 @@ void main() {
     grass_u[6] = glGetUniformLocation(grass_prog, "shadow_map");
     grass_u[7] = glGetUniformLocation(grass_prog, "cover_map");
     grass_u[8] = glGetUniformLocation(grass_prog, "cover_origin");
+    grass_u[9] = glGetUniformLocation(grass_prog, "wind_map");
+    grass_u[10] = glGetUniformLocation(grass_prog, "wind_origin");
     glUniform1i(grass_u[6], 0);
     glUniform1i(grass_u[7], 1);
+    glUniform1i(grass_u[9], 5);
     glUseProgram(grass_cover_prog);
     grass_cover_u: []int = new int[2](0);
     grass_cover_u[0] = glGetUniformLocation(grass_cover_prog, "mask_origin");
@@ -1265,7 +1285,9 @@ void main() {
                 match ev {
                     KeyPress -> {
                         ks: int = XLookupKeysym(&ev, 0);
-                        if (ks == 65476) {
+                        if (ks == 65475) {
+                            material_light.wind.debug = !material_light.wind.debug;
+                        } else if (ks == 65476) {
                             toggle_height_water(material_light.water);
                         } else if (ks == 65477) {
                             request_height_splash(material_light.water);
@@ -1442,6 +1464,8 @@ void main() {
                             paint_brush = BRUSH_DIRT;
                         } else if (ks == 50) {
                             paint_brush = BRUSH_GRASS;
+                        } else if (ks == 103 || ks == 71) {
+                            paint_brush = BRUSH_TALL_GRASS;
                         } else if (ks == 102 || ks == 70) {
                             paint_brush = BRUSH_STONE;
                         } else if (ks == 97 || ks == 65) {
@@ -2011,7 +2035,9 @@ void main() {
                 match ev {
                     KeyPress -> {
                         ks: int = XLookupKeysym(&ev, 0);
-                        if (ks == 65476) {
+                        if (ks == 65475) {
+                            material_light.wind.debug = !material_light.wind.debug;
+                        } else if (ks == 65476) {
                             toggle_height_water(material_light.water);
                         } else if (ks == 65477) {
                             request_height_splash(material_light.water);
