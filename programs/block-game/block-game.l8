@@ -301,12 +301,49 @@ float water_at(vec2 cell) {
   float r = sample_ground(cell);
   return step(0.08, r) * (1.0 - step(0.15, r));
 }
+float bank_wetness(vec2 p) {
+  vec2 cell = floor(p);
+  float distance_to_water = 1.0;
+  for (int z = -1; z <= 1; z++) {
+    for (int x = -1; x <= 1; x++) {
+      vec2 neighbor = cell + vec2(float(x), float(z));
+      if (water_at(neighbor) > 0.5) {
+        vec2 delta = max(max(neighbor-p, p-(neighbor+1.0)), vec2(0.0));
+        distance_to_water = min(distance_to_water, length(delta));
+      }
+    }
+  }
+  // Fall to zero before a water tile leaves the neighborhood, so crossing
+  // a land tile boundary never introduces a seam, including near bank corners.
+  return 1.0-smoothstep(0.05, 0.80, distance_to_water);
+}
 float broad_noise(vec2 p) {
   vec2 c = floor(p);
   vec2 t = fract(p);
   t = t*t*(3.0-2.0*t);
   return mix(mix(hash2(c).x, hash2(c+vec2(1.0,0.0)).x, t.x),
              mix(hash2(c+vec2(0.0,1.0)).x, hash2(c+1.0).x, t.x), t.y);
+}
+vec3 ground_material(vec2 cell) {
+  // Decode categorical terrain before blending; interpolating mask codes
+  // would invent other terrain types between the painted materials.
+  float r = sample_ground(cell);
+  float grass = step(0.15, r)*(1.0-step(0.50, r)) + step(0.80, r);
+  float sand = step(0.04, r)*(1.0-step(0.08, r)) + step(0.72, r)*(1.0-step(0.80, r));
+  float land = 1.0-step(0.08, r)*(1.0-step(0.15, r));
+  return vec3(1.0-grass-sand, grass, sand)*land;
+}
+vec3 ground_weights(vec2 p) {
+  // A softly irregular transition, anchored to the world rather than camera.
+  vec2 offset = vec2(broad_noise(p*2.1+7.0), broad_noise(p*2.1+31.0))-0.5;
+  vec2 grid = p + offset*0.16 - 0.5;
+  vec2 cell = floor(grid);
+  vec2 t = smoothstep(vec2(0.18), vec2(0.82), fract(grid));
+  vec3 weights = mix(mix(ground_material(cell), ground_material(cell+vec2(1.0,0.0)), t.x),
+                     mix(ground_material(cell+vec2(0.0,1.0)), ground_material(cell+1.0), t.x), t.y);
+  float total = weights.x+weights.y+weights.z;
+  // Water contributes no land color; the separate shoreline owns its shape.
+  return total>0.001 ? weights/total : ground_material(floor(p));
 }
 vec3 evening_sky(vec3 r) {
   // A fixed environment: cooler overhead, softer and warmer near the horizon.
@@ -367,7 +404,7 @@ void main() {
       specular = mix(0.015, 0.85, water);
       gloss = 100.0;
     } else {
-    float ground_grass = grass_at(cell);
+    vec3 materials = ground_weights(p);
     float md = 8.0;
     float md2 = 8.0;
     vec2 mr = vec2(0.0);
@@ -405,26 +442,22 @@ void main() {
     grass *= 0.83;
     vec3 dirt = mix(vec3(0.255, 0.205, 0.145), vec3(0.305, 0.250, 0.175), gh.x);
     dirt *= 0.91 + 0.08 * gh.y;
-    albedo = dirt;
-    if (ground_grass > 0.5) {
-      albedo = grass;
-    }
+    float sand_m = materials.z;
+    vec3 sand = mix(vec3(0.53, 0.445, 0.31), vec3(0.63, 0.545, 0.39), gh.x);
+    sand *= 0.94 + 0.06 * gh.y;
+    sand *= 0.98 + 0.04 * ground_grain(p * 18.0 + 37.0);
+    albedo = dirt*materials.x + grass*materials.y + sand*materials.z;
     albedo = mix(albedo, stone * mix(0.80, 0.86, stone_m), stone_m);
     float patch = 0.5 + 0.5*sin(p.x*0.31 + sin(p.y*0.23))*sin(p.y*0.27+0.8);
     albedo *= mix(0.87, 1.10, patch);
     float wet = 0.0;
     if (reflection_on > 0.5) {
-    wet = max(max(water_at(cell+vec2(1.0,0.0))*f.x,
-                        water_at(cell+vec2(-1.0,0.0))*(1.0-f.x)),
-                    max(water_at(cell+vec2(0.0,1.0))*f.y,
-                        water_at(cell+vec2(0.0,-1.0))*(1.0-f.y)));
+      wet = bank_wetness(p) * (0.5 + 0.5*patch);
     }
-    // Dark damp banks: stronger only close to the neighboring water cell.
-    wet = smoothstep(0.2,0.95,wet) * (0.5 + 0.5*patch);
-    albedo *= 1.0 - 0.20*wet;
+    albedo *= 1.0 - mix(0.20, 0.32, sand_m)*wet;
     specular = mix(0.008, mix(0.06,0.14,hv.y), stone_m) + 0.12*wet;
     gloss = mix(12.0, 42.0, stone_m) + 28.0*wet;
-    cavity = mix(0.87,1.0,smoothstep(0.015,0.13,edge));
+    cavity = mix(mix(0.87,1.0,smoothstep(0.015,0.13,edge)), 1.0, sand_m*(1.0-stone_m));
     n = normalize(mix(n, normalize(vec3(-mr.x, 0.78, -mr.y)), stone_m * 0.32));
     }
   } else if (cut > 0.5) {
@@ -1472,6 +1505,8 @@ void main() {
                             paint_brush = BRUSH_DIRT;
                         } else if (ks == 50) {
                             paint_brush = BRUSH_GRASS;
+                        } else if (ks == 122 || ks == 90) {
+                            paint_brush = BRUSH_SAND;
                         } else if (ks == 103 || ks == 71) {
                             paint_brush = BRUSH_TALL_GRASS;
                         } else if (ks == 102 || ks == 70) {

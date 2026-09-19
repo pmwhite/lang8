@@ -41,6 +41,18 @@ and backlit translucency. The patch value is computed with the existing CPU
 instance cache and packed alongside its wind seed, so instance storage does not
 grow. A faint distance haze separates distant terrain without obscuring puzzles.
 
+Sand is a paintable base terrain (`z` in the editor). Its warm beige color uses
+soft dirt-like variation and fine grain, filtered at distance to prevent
+shimmer. Sand darkens along wet banks and supports the independent flagstone
+overlay. It stores as `f <column> <row> sand [stone]`; rectangle painting and
+erasing work like other ground brushes. Sand does not spawn grass blades.
+Dry ground materials blend over a softly irregular band at their boundaries,
+using decoded dirt/grass/sand weights. Water cells are excluded from that blend
+to keep basin geometry and shoreline color aligned; flagstones remain an
+independent overlay on the blended ground.
+Wet-bank shading uses distance to nearby water tiles, including diagonal
+corners, so dampness remains continuous between adjacent ground tiles.
+
 A 512-square world-space contact texture shades ground and grass roots near
 blocks, the player, walls, and fixtures. Its two CPU buffers are preallocated;
 the static field is cached, and moving footprints use interpolated positions.
