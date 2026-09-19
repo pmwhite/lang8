@@ -1,0 +1,89 @@
+tag block_game;
+use_tag gl,x11,freetype;
+import "../gl/gl.l8";
+import "../freetype/ft.l8";
+import "level.l8";
+import "block-game-undo.l8";
+import "block-game-play.l8";
+import "block-game-editor.l8";
+import "block-game-render.l8";
+import "block-game-ui.l8";
+extern glGetError(): int;
+check(ok: bool,msg: []i8) { if(!ok) { die(msg); } }
+main(): int {
+    d0: ?*i8=XOpenDisplay(null); if(d0==null) { die("plant render test needs DISPLAY"); }
+    d: *i8=d0; attrs: []i32=[4i32,12i32,24i32,0i32];
+    v0: ?*XVisualInfo=glXChooseVisual(d,XDefaultScreen(d),attrs); if(v0==null) { return 2; }
+    v: *XVisualInfo=v0; win: int=XCreateSimpleWindow(d,XRootWindow(d,XDefaultScreen(d)),0,0,1200,720,0,0,0);
+    ctx0: ?*i8=glXCreateContext(d,v,null,1); if(ctx0==null) { return 3; }
+    ctx: *i8=ctx0; check(glXMakeCurrent(d,win,ctx)!=0,"plant GL context");
+    p: *PlantRender=new_plant_render(); light: *LampLight=new_lamp_light(p.prog,p.prog,p.prog);
+    mesh: []f32=new f32[PLANT_MESH_FLOATS](0.0);
+    repeat_mesh: []f32=new f32[PLANT_MESH_FLOATS](0.0);
+    hist: []Block=new Block[LEVEL_MAX_BLOCKS](Block {id:0,column:0,row:0,shape:0,layer:0,ramp:0,mounted:0});
+    for style in 0..5 { for seed in 0..4 {
+        n: int=fill_plant_mesh(mesh,style,seed);
+        check(n>0 && n<=len(mesh) && n%30==0,"plant triangle bounds");
+        top: f32=0.0;
+        for vertex in 0..n/10 {
+            y: f32=mesh[vertex*10+1];
+            check(y>=0.0 && y<=plant_height(style) as f32,"plant mesh stays within its height");
+            if(y>top) { top=y; }
+            for axis in 0..10 { value: f32=mesh[vertex*10+axis]; check(value==value,"finite plant mesh"); }
+        }
+        check(top==plant_height(style) as f32,"mesh top agrees with playable surface");
+        flat_caps: int=0; leafy_triangles: int=0; branches: int=0;
+        for triangle in 0..n/30 {
+            at: int=triangle*30;
+            if(mesh[at+9]==1.0) {
+                leafy_triangles=leafy_triangles+1;
+                if(mesh[at+1]==top && mesh[at+11]==top && mesh[at+21]==top) { flat_caps=flat_caps+1; }
+            } else { branches=branches+1; }
+        }
+        check(branches>0 && leafy_triangles>400,"plants have branches and detailed foliage");
+        check(flat_caps*20<leafy_triangles,"crowns are not drawn as flat platforms");
+        if(style==4) {
+            repeated: int=fill_plant_mesh(repeat_mesh,style,seed);
+            check(repeated==n,"seeded pine geometry has a stable size");
+            for value in 0..n { check(mesh[value]==repeat_mesh[value],"pine variation is deterministic"); }
+            leaning_top: bool=false;
+            for vertex in 0..n/10 {
+                x: f32=mesh[vertex*10]; y: f32=mesh[vertex*10+1]; z: f32=mesh[vertex*10+2];
+                check(x*x<3.24 && z*z<3.24,"irregular pine stays within decorative bounds");
+                if(y==top && x*x+z*z>0.01) { leaning_top=true; }
+            }
+            check(leaning_top,"pine leader is not perfectly centered");
+        }
+        at: int=style*4+seed;
+        hist[at]=Block {id:at,column:style*4,row:seed*4,shape:plant_shape(style,seed),layer:0,ramp:0,mounted:0};
+    } }
+    bounds: []f32=[0.0,24.0,0.0,24.0];
+    projection: []f32=new f32[16](0.0); view: []f32=new f32[16](0.0); vp: []f32=new f32[16](0.0);
+    lvp: []f32=new f32[16](0.0); tmp: []f32=new f32[16](0.0);
+    mat_persp(projection,2.1445,1200.0/720.0,0.4,80.0);
+    mat_look(view,8.0,18.0,25.0,8.0,0.0,6.0,0.0,1.0,0.0); mat_mul(vp,projection,view,tmp);
+    heap: int=l8_heap_used(); prepare_plants(p,hist,0,20,bounds);
+    check(p.total==20,"all plant variants are batched");
+    for group in 0..20 { check(p.counts[group]==1,"species and seed choose correct batch"); }
+    key: int=p.key;
+    for frame in 0..12 {
+        prepare_plants(p,hist,0,20,bounds);
+        for pass in 0..3 { draw_plants(p,p.prog,vp,lvp,light,8.0,18.0,25.0,8.0,0.55,6.0,pass); }
+        for style in 0..5 { draw_plant_icon(p,p.prog,vp,8.0,6.0,style,8.0,18.0,25.0); }
+    }
+    check(p.key==key && l8_heap_used()==heap,"plant rendering reuses cached storage");
+    hist[0].shape=plant_shape(4,3); prepare_plants(p,hist,0,20,bounds);
+    check(p.counts[0]==0 && p.counts[19]==2,"species edits invalidate batch");
+    for i in 0..4 { bounds[i]=1000.0+i as f32; }
+    prepare_plants(p,hist,0,20,bounds); check(p.total==0,"offscreen plants are culled");
+    for i in 0..LEVEL_MAX_BLOCKS {
+        hist[i]=Block {id:i,column:i%64,row:i/64,shape:plant_shape(i%5,i%4),layer:0,ramp:0,mounted:0};
+    }
+    bounds[0]=0.0; bounds[1]=100.0; bounds[2]=0.0; bounds[3]=100.0;
+    prepare_plants(p,hist,0,LEVEL_MAX_BLOCKS,bounds);
+    check(p.total==LEVEL_MAX_BLOCKS,"full vegetation instance capacity");
+    check(l8_heap_used()==heap,"full vegetation capacity was allocated up front");
+    check(glGetError()==0,"plant render GL errors");
+    glXMakeCurrent(d,0,null); glXDestroyContext(d,ctx); XDestroyWindow(d,win); XCloseDisplay(d);
+    write(1,"plant rendering tests passed\n",len("plant rendering tests passed\n")); 0;
+}

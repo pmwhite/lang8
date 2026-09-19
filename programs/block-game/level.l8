@@ -11,6 +11,7 @@ tag block_game;
 //   e <column> <row>          room reset start (legacy: extra p after the first)
 //   level <name> <x0> <y0> <x1> <y1> <title>
 //   g / b / s / r / w / f         world-space contents
+//   v <column> <row> <species> <variant>  rooted, climbable vegetation
 // Legacy world:
 //   place <name> <x> <y> <rot>   composed once, then flattened on save
 // Legacy numeric: room / c-column migrate. Grid: `= Title` maps.
@@ -27,6 +28,8 @@ LEVEL_O_TRUNC: int = 512;
 LEVEL_MODE: int = 420;
 
 LEVEL_MAX_BLOCKS: int = 2048;
+// Keep player motion separate from every supported puzzle/scenery object.
+PLAYER_SOFT_SLOT: int = LEVEL_MAX_BLOCKS;
 
 LEVEL_MAX_ROOMS: int = 64;
 
@@ -165,6 +168,8 @@ type WorldState = {
     ndone: int;
     solved: []int;
 };
+
+import "block-game-plants.l8";
 
 new_level_state(): *LevelState@new {
     new LevelState {
@@ -620,7 +625,7 @@ block_at_layer(
     i: int = 0;
     while (i < n) {
         b: Block = blocks[i];
-        if (b.column == column && b.row == row && b.layer == layer) {
+        if (object_solid(b,column,row,layer)) {
             return i;
         }
         i = i + 1;
@@ -656,7 +661,7 @@ body_at_layer(
     i: int = 0;
     while (i < n) {
         b: Block = blocks[i];
-        if (b.column == column && b.row == row && b.layer == layer) {
+        if (object_solid(b,column,row,layer)) {
             if (b.ramp == 0 || b.mounted != 0) {
                 return i;
             }
@@ -676,7 +681,7 @@ flat_at_layer(
     i: int = 0;
     while (i < n) {
         b: Block = blocks[i];
-        if (b.column == column && b.row == row && b.layer == layer && b.ramp == 0) {
+        if (object_solid(b,column,row,layer) && b.ramp == 0) {
             if (ramp_at_layer(blocks, n, column, row, layer) < 0) {
                 return i;
             }
@@ -716,6 +721,7 @@ settle_layer(
     layer: int,
     skip: int
 ): int {
+    if(skip>=0 && plant_block(blocks[skip])) { return layer; }
     while (layer > 0 && !has_support(blocks, n, column, row, layer) && !sitting_at(blocks,
         n, column, row, layer, skip)) {
         stay: bool = false;
@@ -734,6 +740,7 @@ settle_layer(
 
 settle_terrain_layer(blocks: []Block,n: int,ground: []GroundCell,nground: int,
     column: int,row: int,layer: int,skip: int): int {
+    if(skip>=0 && plant_block(blocks[skip])) { return layer; }
     layer=settle_layer(blocks,n,column,row,layer,skip);
     if(layer==0 && terrain_floor(ground,nground,column,row)<0 &&
         body_at_layer(blocks,n,column,row,0-1)<0 && !sitting_at(blocks,n,column,row,0,skip)) {
@@ -1730,7 +1737,7 @@ parse_level_src(
                         nw = toggle_brick(bricks, nw, colg, rowg);
                     }
                 }
-            } else if (cmd == 'b' || cmd == 's' || cmd == 'r') {
+            } else if (cmd == 'b' || cmd == 's' || cmd == 'r' || cmd == 'v') {
                 i = parse_int(src, i, val);
                 col: int = val[0];
                 okc: int = val[1];
@@ -1742,7 +1749,13 @@ parse_level_src(
                 shape: int = 0;
                 ramp: int = 0;
                 layer: int = 0;
-                if (cmd == 's') {
+                if (cmd == 'v') {
+                    i=parse_uint(src,i,val); species: int=val[0];
+                    if(species<0 || species>=PLANT_STYLES) { return 0-1; }
+                    i=parse_uint(src,i,val);
+                    if(val[0]<0 || val[0]>=PLANT_VARIANTS) { return 0-1; }
+                    shape=plant_shape(species,val[0]);
+                } else if (cmd == 's') {
                     i = parse_uint(src, i, val);
                     shape = val[0];
                 } else if (cmd == 'r') {
@@ -1766,6 +1779,7 @@ parse_level_src(
                 if (!in_bounds(col, row) || layer < 0-1 || layer >= LEVEL_MAX_LAYER) {
                     return 0 - 1;
                 }
+                if(cmd=='v' && (layer!=0 || mounted!=0)) { return 0-1; }
                 if (nb < len(blocks)) {
                     blocks[nb] = Block {
                         id: nb,
@@ -1907,7 +1921,9 @@ save_level(
     k = 0;
     while (k < n) {
         b: Block = blocks[k];
-        if (b.ramp != 0) {
+        if (plant_block(b)) {
+            i=put_plant(dst,i,b,ox,oy); i=put_ch(dst,i,'\n');
+        } else if (b.ramp != 0) {
             i = put_ch(dst, i, 'r');
             i = put_ch(dst, i, ' ');
             i = put_int(dst, i, b.column - ox);
@@ -2069,6 +2085,7 @@ assign_block_homes(
     for i in 0..n {
         b: Block = blocks[i];
         h: int = room_at(rooms, nroom, b.column, b.row);
+        if(plant_block(b)) { h=0-1; }
         home[i] = h;
         if (h >= 0 && h < LEVEL_MAX_ROOMS) {
             room_hn[h] = room_hn[h] + 1;
@@ -2960,7 +2977,7 @@ mark_push_group(
     hb: Block = blocks[hit];
     owner: int = home[hit];
     i: int = 0;
-    if (hb.shape != 0 && owner >= 0) {
+    if (hb.shape > 0 && owner >= 0) {
         while (i < n) {
             s: Block = blocks[i];
             if (s.shape == hb.shape && home[i] == owner) {
@@ -2979,7 +2996,7 @@ mark_push_group(
             if (marks[i] != 0) {
                 b: Block = blocks[i];
                 above: int = body_at_layer(blocks, n, b.column, b.row, b.layer + 1);
-                if (above >= 0 && marks[above] == 0) {
+                if (above >= 0 && marks[above] == 0 && !plant_block(blocks[above])) {
                     marks[above] = 1;
                     grown = true;
                 }
@@ -3028,6 +3045,7 @@ can_move_marked(
         if (marks[i] != 0) {
             b: Block = blocks[i];
             tc: int = b.column + dc;
+            if(plant_block(b)) { return false; }
             tr: int = b.row + dr;
             if (!in_bounds(tc, tr) || is_brick(bricks, nbrick, tc, tr)) {
                 return false;
@@ -3918,7 +3936,7 @@ load_world(
             }
             nf = put_ground_cell(ground, nf, fc, fr, kind[0], kind[1], 1);
             i = skip_line(src, i);
-        } else if (src[i] == 'b' || src[i] == 's' || src[i] == 'r') {
+        } else if (src[i] == 'b' || src[i] == 's' || src[i] == 'r' || src[i] == 'v') {
             cmd: i8 = src[i];
             i = i + 1;
             i = parse_int(src, i, val);
@@ -3932,7 +3950,13 @@ load_world(
             shape: int = 0;
             ramp: int = 0;
             layer: int = 0;
-            if (cmd == 's') {
+            if (cmd == 'v') {
+                i=parse_uint(src,i,val); species: int=val[0];
+                if(species<0 || species>=PLANT_STYLES) { return 0-1; }
+                i=parse_uint(src,i,val);
+                if(val[0]<0 || val[0]>=PLANT_VARIANTS) { return 0-1; }
+                shape=plant_shape(species,val[0]);
+            } else if (cmd == 's') {
                 i = parse_uint(src, i, val);
                 shape = val[0];
                 if (val[1] == 0) {
@@ -3959,6 +3983,7 @@ load_world(
             if (!in_bounds(bc, br) || layer < 0-1 || layer >= LEVEL_MAX_LAYER) {
                 return 0 - 1;
             }
+            if(cmd=='v' && (layer!=0 || mounted!=0)) { return 0-1; }
             if (nb < len(blocks)) {
                 blocks[nb] = Block {
                     id: nb,
@@ -4092,7 +4117,9 @@ save_world(
     k = 0;
     while (k < nblock) {
         b: Block = blocks[k];
-        if (b.ramp != 0) {
+        if (plant_block(b)) {
+            i=put_plant(dst,i,b,0,0);
+        } else if (b.ramp != 0) {
             i = put_str(dst, i, "r ");
             i = put_int(dst, i, b.column);
             i = put_ch(dst, i, ' ');
