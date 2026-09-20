@@ -48,6 +48,7 @@ with callbacks does not require a host compiler or adapter library.
 
 ```
 l8 compile [--profile|-p] file.l8 > file.s
+l8 unused file.l8 [file.l8 ...]
 l8 as [-p|--profile] -o file.o file.s runtime.s
 l8 elfpack file.o -o file
 l8 build [--profile|-p] file.l8 -o file
@@ -57,6 +58,9 @@ l8 build [--profile|-p] file.l8 -o file
 section, symbol, relocation, and instruction encoders. It parses only the static
 `runtime.s` input, then writes ET_EXEC directly from that builder state; generated
 assembly and ET_REL are never serialized or reparsed.
+
+`unused` reports functions that are unreachable from every listed program.
+Ordinary `compile` and `build` commands do not report unused functions.
 
 ## Scripts (`./build.sh`)
 

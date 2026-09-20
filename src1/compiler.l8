@@ -53,7 +53,8 @@
 // n must fit the 512MiB heap: negative or wrapping n * size is rejected.
 // Calls follow SysV: six integer registers, eight xmm registers, then the stack. Hidden sret is the first incoming integer slot.
 // Pipeline: parse (syntax, including comments) → typecheck (fills Obj/Member/Function) →
-// unused fn/local + raises/noreturn checks → codegen.
+// reachability/unused local + raises/noreturn checks → codegen. The `unused`
+// command combines reachability across entry points before reporting unused functions.
 // Parse does not load imports or require types; a later pass follows imports for compile.
 // Fmt prints the same tree with one canonical layout.
 // This compiler reports failures via `exception Error` (caught in main).
@@ -549,6 +550,16 @@ type Function = {
     trail: ?*Com;
 };
 
+type UnusedFunction = {
+    name: []i8;
+    path: []i8;
+    src: []i8;
+    src_len: int;
+    pos: int;
+    used: int;
+    next: ?*UnusedFunction;
+};
+
 type ItemKind =
     | Import { path: []i8, tag: int }
     | Tags { names: ?*TagSet, is_use: int }
@@ -711,6 +722,12 @@ scope_depth: int = 0;
 region_depth: int = 0;
 
 functions: ?*Function = null;
+
+unused_functions: ?*UnusedFunction = null;
+
+unused_function_tail: ?*UnusedFunction = null;
+
+checking_unused_functions: int = 0;
 
 LIFE_IMM: int = 0;
 
@@ -1109,30 +1126,87 @@ print_error_at(
     write(2, "\n", len("\n"));
 }
 
-warn_unused_function(name: []i8) {
-    write(2, "warning: unused function ", len("warning: unused function "));
-    write(2, name, len(name));
+print_warning_at(
+    path: []i8,
+    src: []i8,
+    src_len: int,
+    pos: int,
+    msg: []i8
+) {
+    line: int = 1;
+    col: int = 1;
+    i: int = 0;
+    while (i < pos && i < src_len) {
+        if (src[i] == '\n') {
+            line = line + 1;
+            col = 1;
+        } else {
+            col = col + 1;
+        }
+        i = i + 1;
+    }
+    write(2, "warning: ", len("warning: "));
+    write(2, path, len(path));
+    write(2, ":", len(":"));
+    emit_num_fd(2, line);
+    write(2, ":", len(":"));
+    emit_num_fd(2, col);
+    write(2, ": ", len(": "));
+    write(2, msg, len(msg));
     write(2, "\n", len("\n"));
 }
 
-warn_unused_local(fn_name: []i8, name: []i8) {
-    write(2, "warning: unused local ", len("warning: unused local "));
-    write(2, name, len(name));
-    write(2, " in ", len(" in "));
-    write(2, fn_name, len(fn_name));
-    write(2, "\n", len("\n"));
+warning_at(file: int, pos: int, msg: []i8) {
+    f: ?*ImportedFile = imported_files;
+    while (f != null) {
+        if (f.id == file) {
+            print_warning_at(f.path, f.src, f.src_len, pos, msg);
+            return;
+        }
+        f = f.next;
+    }
+    print_warning_at(source_path, source, source_len, pos, msg);
 }
 
-warn_unnecessary_return(fn_name: []i8) {
-    write(2, "warning: unnecessary return in ", len("warning: unnecessary return in "));
-    write(2, fn_name, len(fn_name));
-    write(2, "\n", len("\n"));
+warn_unused_function(
+    path: []i8,
+    src: []i8,
+    src_len: int,
+    pos: int,
+    name: []i8
+) {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, "unused function ");
+    sb_puts(sb, name);
+    print_warning_at(path, src, src_len, pos, sb_finish(sb));
 }
 
-warn_ignored_value(fn_name: []i8) {
-    write(2, "warning: ignored return value in ", len("warning: ignored return value in "));
-    write(2, fn_name, len(fn_name));
-    write(2, "\n", len("\n"));
+warn_unused_local(
+    file: int,
+    pos: int,
+    fn_name: []i8,
+    name: []i8
+) {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, "unused local ");
+    sb_puts(sb, name);
+    sb_puts(sb, " in ");
+    sb_puts(sb, fn_name);
+    warning_at(file, pos, sb_finish(sb));
+}
+
+warn_unnecessary_return(file: int, pos: int, fn_name: []i8) {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, "unnecessary return in ");
+    sb_puts(sb, fn_name);
+    warning_at(file, pos, sb_finish(sb));
+}
+
+warn_ignored_value(file: int, pos: int, fn_name: []i8) {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, "ignored return value in ");
+    sb_puts(sb, fn_name);
+    warning_at(file, pos, sb_finish(sb));
 }
 
 ignore_unused_local_name(name: []i8): bool {
@@ -3287,11 +3361,13 @@ compiler_analyze(src_path: []i8@immortal) noregion raises Error {
     profile_mark("load_parse");
     typecheck_program();
     profile_mark("typecheck");
-    check_unused_functions();
-    profile_mark("unused_fns");
-    check_unused_locals();
-    profile_mark("unused_locals");
-    check_return_style();
+    mark_used_functions();
+    profile_mark("reachability");
+    if (checking_unused_functions == 0) {
+        check_unused_locals();
+        profile_mark("unused_locals");
+        check_return_style();
+    }
     check_raises_functions();
     check_imm_heap_functions();
     check_written_bounds();
@@ -3312,6 +3388,30 @@ compiler_build_direct(src_path: []i8@immortal) noregion: int {
         compiler_frontend(src_path);
         as_assemble_file_append("runtime.s");
         profile_mark("runtime");
+        0;
+    } with Error e -> {
+        print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);
+        1;
+    }
+}
+
+compiler_unused_main(argc: int, argv: []str) noregion: int {
+    if (argc < 2) {
+        write(2, "error: usage: l8 unused <file.l8> [file.l8 ...]\n", len("error: usage: l8 unused <file.l8> [file.l8 ...]\n"));
+        return 1;
+    }
+    try {
+        do_profile = 0;
+        checking_unused_functions = 1;
+        unused_functions = null;
+        unused_function_tail = null;
+        ai: int = 1;
+        while (ai < argc) {
+            compiler_analyze(bytes(argv[ai]));
+            collect_unused_functions();
+            ai = ai + 1;
+        }
+        warn_unused_functions();
         0;
     } with Error e -> {
         print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);

@@ -236,8 +236,8 @@ check_tags() {
   example "$tool" tags-declaration-only programs/examples/tags/declaration_only.l8 'declaration'
   example "$tool" tags-import-only programs/examples/tags/import_only.l8 'declaration'
   example "$tool" tags-late-file programs/examples/tags/late_file.l8 'late'
-  example "$tool" tags-untagged-unused programs/examples/tags/untagged_unused.l8 'unused' 2>"$BUILD/tags-unused.err"
-  grep -q 'warning: unused function unused' "$BUILD/tags-unused.err" || die 'expected unused untagged function warning'
+  example "$tool" tags-untagged-unused programs/examples/tags/untagged_unused.l8 'unused' 2>"$BUILD/tags-compile.err"
+  if grep -q 'unused function' "$BUILD/tags-compile.err"; then die 'ordinary build emitted an unused function warning'; fi
   for name in call import use global type enum extern exception recursive; do
     example_compile_fail "$tool" "tags-untagged-$name" "programs/examples/tags/untagged_$name.l8" 'declaration has no tags'
   done
@@ -255,6 +255,22 @@ check_tags() {
   example "$tool" tags-implicit programs/examples/tags/implicit.l8 'implicit'
   example "$tool" tags-global programs/examples/tags/global.l8 'global'
   example "$tool" tags-shadow programs/examples/tags/shadow.l8 'shadow'
+  # These are separate programs over one shared library, so unused-function
+  # reachability must be the union of all of their entry points.
+  local -a unused_entries=(
+    programs/examples/tags/declaration_only.l8
+    programs/examples/tags/import_only.l8
+    programs/examples/tags/late_file.l8
+    programs/examples/tags/untagged_unused.l8
+    programs/examples/tags/main.l8
+    programs/examples/tags/used.l8
+    programs/examples/tags/implicit.l8
+    programs/examples/tags/global.l8
+    programs/examples/tags/shadow.l8
+  )
+  "./$tool" unused "${unused_entries[@]}" 2>"$BUILD/tags-unused.err"
+  grep -q 'warning: programs/examples/tags/untagged_unused.l8:1:1: unused function unused' "$BUILD/tags-unused.err" || die 'expected project-wide unused function warning'
+  if grep -q 'unused function tag_' "$BUILD/tags-unused.err"; then die 'function used by another entry point was reported unused'; fi
   for name in hidden_call hidden_global hidden_type hidden_literal hidden_enum \
       hidden_new hidden_sizeof hidden_raises hidden_raise hidden_catch local_leak \
       import_leak qualified_leak forward_hidden; do
@@ -306,9 +322,9 @@ check_retwarn() {
   local err="$BUILD/retwarn.err"
   local bin="$BUILD/retwarn"
   "./$tool" build programs/examples/retwarn.l8 -o "$bin" 2>"$err" || die "retwarn compile failed"
-  grep -q 'warning: unnecessary return in id' "$err" || die "expected unnecessary return in id"
-  grep -q 'warning: ignored return value in drop' "$err" || die "expected ignored return value in drop"
-  grep -q 'warning: unnecessary return in both' "$err" || die "expected unnecessary return in both"
+  grep -q 'warning: programs/examples/retwarn.l8:9:5: unnecessary return in id' "$err" || die "expected located unnecessary return in id"
+  grep -q 'warning: programs/examples/retwarn.l8:17:5: ignored return value in drop' "$err" || die "expected located ignored return value in drop"
+  grep -q 'warning: programs/examples/retwarn.l8:42:9: unnecessary return in both' "$err" || die "expected located unnecessary return in both"
   if grep -q 'unnecessary return in early' "$err"; then die "unexpected unnecessary return in early"; fi
   if grep -q 'ignored return value in side' "$err"; then die "unexpected ignored value on assignment"; fi
   if grep -q 'ignored return value in callp' "$err"; then die "unexpected ignored value on procedure call"; fi
