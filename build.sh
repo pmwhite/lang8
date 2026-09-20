@@ -325,6 +325,13 @@ check_retwarn() {
   grep -q 'warning: programs/examples/retwarn.l8:9:5: unnecessary return in id' "$err" || die "expected located unnecessary return in id"
   grep -q 'warning: programs/examples/retwarn.l8:17:5: ignored return value in drop' "$err" || die "expected located ignored return value in drop"
   grep -q 'warning: programs/examples/retwarn.l8:42:9: unnecessary return in both' "$err" || die "expected located unnecessary return in both"
+
+  local boolint_err="$BUILD/boolint.err"
+  "./$tool" boolint programs/examples/boolint.l8 2>"$boolint_err"
+  grep -q 'int field enabled is used only as a boolean; use bool' "$boolint_err" || die 'expected bool-int field warning'
+  grep -q 'int local on is used only as a boolean; use bool' "$boolint_err" || die 'expected bool-int parameter warning'
+  grep -q 'int return value of choose is used only as a boolean; use bool' "$boolint_err" || die 'expected bool-int return warning'
+  if grep -q 'count is used only as a boolean' "$boolint_err"; then die 'numeric int reported as boolean'; fi
   if grep -q 'unnecessary return in early' "$err"; then die "unexpected unnecessary return in early"; fi
   if grep -q 'ignored return value in side' "$err"; then die "unexpected ignored value on assignment"; fi
   if grep -q 'ignored return value in callp' "$err"; then die "unexpected ignored value on procedure call"; fi

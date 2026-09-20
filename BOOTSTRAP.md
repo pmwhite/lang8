@@ -49,6 +49,7 @@ with callbacks does not require a host compiler or adapter library.
 ```
 l8 compile [--profile|-p] file.l8 > file.s
 l8 unused file.l8 [file.l8 ...]
+l8 boolint file.l8
 l8 as [-p|--profile] -o file.o file.s runtime.s
 l8 elfpack file.o -o file
 l8 build [--profile|-p] file.l8 -o file
@@ -61,6 +62,11 @@ assembly and ET_REL are never serialized or reparsed.
 
 `unused` reports functions that are unreachable from every listed program.
 Ordinary `compile` and `build` commands do not report unused functions.
+
+`boolint` analyzes the complete typed import graph rooted at `file.l8` and reports
+`int` variables, fields, parameters, and return values that are used only to carry
+Boolean values. Numeric operations, non-Boolean literals, and external interfaces
+exclude a value from the report.
 
 ## Scripts (`./build.sh`)
 
