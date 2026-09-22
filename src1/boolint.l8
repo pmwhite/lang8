@@ -1,0 +1,615 @@
+tag compiler_internal;
+
+// Whole-program lint for `int` storage that is used only as a Boolean. The
+// typed AST already contains resolved variables, fields, calls, and imports, so
+// candidates can be linked across assignments and function boundaries.
+type BoolIntCandidate = {
+    obj: ?*Obj;
+    member: ?*Member;
+    fn: ?*Function;
+    good: int;
+    evidence: int;
+    next: ?*BoolIntCandidate;
+};
+
+boolint_candidates: ?*BoolIntCandidate = null;
+
+boolint_changed: int = 0;
+
+boolint_add(obj: ?*Obj@immortal, member: ?*Member@immortal, fn: ?*Function@immortal) noregion {
+    boolint_candidates = new BoolIntCandidate {
+        obj: obj,
+        member: member,
+        fn: fn,
+        good: 1,
+        evidence: 0,
+        next: boolint_candidates
+    };
+}
+
+boolint_find_obj(obj: ?*Obj): ?*BoolIntCandidate {
+    if (obj == null) {
+        return null;
+    }
+    c: ?*BoolIntCandidate = boolint_candidates;
+    while (c != null) {
+        if (c.obj == obj) {
+            return c;
+        }
+        c = c.next;
+    }
+    null;
+}
+
+boolint_find_member(member: ?*Member): ?*BoolIntCandidate {
+    if (member == null) {
+        return null;
+    }
+    c: ?*BoolIntCandidate = boolint_candidates;
+    while (c != null) {
+        if (c.member == member) {
+            return c;
+        }
+        c = c.next;
+    }
+    null;
+}
+
+boolint_find_fn(fn: ?*Function): ?*BoolIntCandidate {
+    if (fn == null) {
+        return null;
+    }
+    c: ?*BoolIntCandidate = boolint_candidates;
+    while (c != null) {
+        if (c.fn == fn) {
+            return c;
+        }
+        c = c.next;
+    }
+    null;
+}
+
+boolint_invalidate(c: ?*BoolIntCandidate) {
+    if (c != null) {
+        if (c.good != 0) {
+            c.good = 0;
+            boolint_changed = 1;
+        }
+    }
+}
+
+boolint_evidence(c: ?*BoolIntCandidate) {
+    if (c != null) {
+        if (c.evidence == 0) {
+            c.evidence = 1;
+            boolint_changed = 1;
+        }
+    }
+}
+
+boolint_collect_members(head: ?*Member@immortal) noregion {
+    m: ?*Member = head;
+    while (m != null) {
+        if (is_int_ty(m.ty)) {
+            boolint_add(null, m, null);
+        }
+        m = m.next;
+    }
+}
+
+boolint_collect() noregion {
+    boolint_candidates = null;
+    g: ?*Obj = globals;
+    while (g != null) {
+        if (is_int_ty(g.ty)) {
+            boolint_add(g, null, null);
+        }
+        g = g.next;
+    }
+    fn: ?*Function = functions;
+    while (fn != null) {
+        if (fn.is_extern == 0) {
+            p: ?*Obj = fn.params;
+            while (p != null) {
+                if (is_int_ty(p.ty)) {
+                    boolint_add(p, null, null);
+                }
+                p = p.param_next;
+            }
+            o: ?*Obj = fn.locals;
+            while (o != null) {
+                if (is_int_ty(o.ty) && boolint_find_obj(o) == null) {
+                    boolint_add(o, null, null);
+                }
+                o = o.next;
+            }
+            if (is_int_ty(fn.return_ty)) {
+                boolint_add(null, null, fn);
+            }
+        }
+        fn = fn.next;
+    }
+    sd: ?*StructDef = struct_defs;
+    while (sd != null) {
+        boolint_collect_members(sd.members);
+        sd = sd.next;
+    }
+    ed: ?*EnumDef = enum_defs;
+    while (ed != null) {
+        v: ?*Variant = ed.variants;
+        while (v != null) {
+            boolint_collect_members(v.fields);
+            v = v.next;
+        }
+        ed = ed.next;
+    }
+    xd: ?*ExnDef = exn_defs;
+    while (xd != null) {
+        boolint_collect_members(xd.members);
+        xd = xd.next;
+    }
+}
+
+boolint_direct(e: ?*Expr): ?*BoolIntCandidate {
+    if (e == null) {
+        return null;
+    }
+    n: *Expr = e;
+    match n.kind {
+        Var k -> {
+            boolint_find_obj(k.var);
+        }
+        MemberAccess k -> {
+            boolint_find_member(k.member);
+        }
+        Funcall k -> {
+            boolint_find_fn(k.fn);
+        }
+        _ -> {
+            null;
+        }
+    }
+}
+
+boolint_is_bit(e: ?*Expr): bool {
+    if (e == null) {
+        return false;
+    }
+    n: *Expr = e;
+    match n.kind {
+        Num k -> {
+            k.form == LIT_INT && (k.val == 0 || k.val == 1);
+        }
+        _ -> {
+            false;
+        }
+    }
+}
+
+boolint_link(dest: ?*BoolIntCandidate, src: ?*BoolIntCandidate) {
+    if (dest == null || src == null) {
+        return;
+    }
+    if (dest.good == 0) {
+        boolint_invalidate(src);
+    }
+    if (src.good == 0) {
+        boolint_invalidate(dest);
+    }
+    if (dest.evidence != 0) {
+        boolint_evidence(src);
+    }
+    if (src.evidence != 0) {
+        boolint_evidence(dest);
+    }
+}
+
+boolint_scan_inits(inits: ?*FieldInit) {
+    i: ?*FieldInit = inits;
+    while (i != null) {
+        c: ?*BoolIntCandidate = boolint_find_member(i.member);
+        if (c != null) {
+            boolint_scan_expr(i.lhs, 2, c);
+        } else {
+            boolint_scan_expr(i.lhs, 1, null);
+        }
+        i = i.next;
+    }
+}
+
+boolint_scan_call(k: *Expr) {
+    match k.kind {
+        Funcall call -> {
+            boolint_scan_expr(call.target, 1, null);
+            a: ?*Expr = call.args;
+            p: ?*Obj = null;
+            fn: ?*Function = call.fn;
+            if (fn != null) {
+                if (fn.is_extern == 0) {
+                    p = fn.params;
+                }
+            }
+            while (a != null) {
+                pc: ?*BoolIntCandidate = null;
+                if (p != null) {
+                    pc = boolint_find_obj(p);
+                }
+                if (pc != null) {
+                    boolint_scan_expr(a, 2, pc);
+                } else {
+                    boolint_scan_expr(a, 1, null);
+                }
+                a = a.next;
+                if (p != null) {
+                    p = p.param_next;
+                }
+            }
+        }
+        _ -> { }
+    }
+}
+
+boolint_scan_direct(e: *Expr, mode: int, dest: ?*BoolIntCandidate): bool {
+    c: ?*BoolIntCandidate = boolint_direct(e);
+    direct: bool = false;
+    match e.kind {
+        Var _ -> {
+            direct = true;
+        }
+        MemberAccess k -> {
+            direct = true;
+            boolint_scan_expr(k.lhs, 0, null);
+        }
+        Funcall _ -> {
+            direct = true;
+            boolint_scan_call(e);
+        }
+        _ -> { }
+    }
+    if (!direct) {
+        return false;
+    }
+    if (mode == 1) {
+        boolint_invalidate(c);
+    } else if (mode == 2) {
+        if (c == null) {
+            boolint_invalidate(dest);
+        } else {
+            boolint_link(dest, c);
+        }
+    } else if (mode == 3) {
+        boolint_evidence(c);
+    }
+    true;
+}
+
+boolint_scan_expr(e: ?*Expr, mode: int, dest: ?*BoolIntCandidate) {
+    if (e == null) {
+        if (mode == 2) {
+            boolint_invalidate(dest);
+        }
+        return;
+    }
+    n: *Expr = e;
+    if (boolint_scan_direct(n, mode, dest)) {
+        return;
+    }
+    match n.kind {
+        Num _ -> {
+            if (mode == 2 && !boolint_is_bit(n)) {
+                boolint_invalidate(dest);
+            }
+            return;
+        }
+        Null -> {
+            if (mode == 2) {
+                boolint_invalidate(dest);
+            }
+            return;
+        }
+        Binary k -> {
+            if ((k.op == BinOp.Eq || k.op == BinOp.Ne) && boolint_is_bit(k.rhs) && boolint_direct(k.lhs) != null) {
+                boolint_scan_expr(k.lhs, 3, null);
+            } else if ((k.op == BinOp.Eq || k.op == BinOp.Ne) && boolint_is_bit(k.lhs) && boolint_direct(k.rhs) != null) {
+                boolint_scan_expr(k.rhs, 3, null);
+            } else {
+                boolint_scan_expr(k.lhs, 1, null);
+                boolint_scan_expr(k.rhs, 1, null);
+            }
+            if (mode == 2) {
+                boolint_invalidate(dest);
+            }
+            return;
+        }
+        Assign k -> {
+            dc: ?*BoolIntCandidate = boolint_direct(k.lhs);
+            if (dc != null) {
+                boolint_scan_expr(k.rhs, 2, dc);
+            } else {
+                boolint_scan_expr(k.lhs, 0, null);
+                boolint_scan_expr(k.rhs, 1, null);
+            }
+            if (mode == 2) {
+                boolint_invalidate(dest);
+            }
+            return;
+        }
+        FuncAddr _ -> {
+            if (mode == 2) {
+                boolint_invalidate(dest);
+            }
+            return;
+        }
+        Addr k -> {
+            boolint_scan_expr(k.lhs, 1, null);
+        }
+        Deref k -> {
+            boolint_scan_expr(k.lhs, 1, null);
+        }
+        Index k -> {
+            boolint_scan_expr(k.lhs, 1, null);
+            boolint_scan_expr(k.idx, 1, null);
+        }
+        Not k -> {
+            boolint_scan_expr(k.lhs, 0, null);
+        }
+        Neg k -> {
+            boolint_scan_expr(k.lhs, 1, null);
+        }
+        BitNot k -> {
+            boolint_scan_expr(k.lhs, 1, null);
+        }
+        LogAnd k -> {
+            boolint_scan_expr(k.lhs, 0, null);
+            boolint_scan_expr(k.rhs, 0, null);
+        }
+        LogOr k -> {
+            boolint_scan_expr(k.lhs, 0, null);
+            boolint_scan_expr(k.rhs, 0, null);
+        }
+        OrElse k -> {
+            boolint_scan_expr(k.lhs, 1, null);
+            boolint_scan_expr(k.rhs, 1, null);
+        }
+        MemberAccess _ -> { }
+        As k -> {
+            boolint_scan_expr(k.lhs, 1, null);
+        }
+        Trunc k -> {
+            boolint_scan_expr(k.lhs, 1, null);
+        }
+        New k -> {
+            boolint_scan_expr(k.lhs, 1, null);
+            boolint_scan_expr(k.fill, 1, null);
+            boolint_scan_inits(k.inits);
+        }
+        StructLit k -> {
+            boolint_scan_inits(k.inits);
+        }
+        VariantLit k -> {
+            boolint_scan_inits(k.inits);
+        }
+        If k -> {
+            boolint_scan_expr(k.cond, 0, null);
+            if (mode == 2) {
+                boolint_scan_expr(k.then, 2, dest);
+                boolint_scan_expr(k.els, 2, dest);
+                return;
+            }
+            boolint_scan_expr(k.then, mode, dest);
+            boolint_scan_expr(k.els, mode, dest);
+            return;
+        }
+        Match k -> {
+            boolint_scan_expr(k.cond, 1, null);
+            a: ?*MatchArm = k.arms;
+            while (a != null) {
+                boolint_scan_stmt(a.body, null, mode == 2, dest);
+                a = a.next;
+            }
+        }
+        Block k -> {
+            boolint_scan_stmts(k.body, null, mode == 2, dest);
+        }
+        Sizeof k -> {
+            boolint_scan_expr(k.e, 1, null);
+        }
+        ArrayLit k -> {
+            a2: ?*Expr = k.elems;
+            while (a2 != null) {
+                boolint_scan_expr(a2, 1, null);
+                a2 = a2.next;
+            }
+        }
+        Var _ -> { }
+        Funcall _ -> { }
+    }
+    if (mode == 2) {
+        boolint_invalidate(dest);
+    }
+}
+
+boolint_scan_stmt(
+    s: ?*Stmt,
+    ret: ?*BoolIntCandidate,
+    tail: bool,
+    tail_dest: ?*BoolIntCandidate
+) {
+    if (s == null) {
+        return;
+    }
+    n: *Stmt = s;
+    match n.kind {
+        Return k -> {
+            if (ret != null) {
+                boolint_scan_expr(k.lhs, 2, ret);
+            } else {
+                boolint_scan_expr(k.lhs, 1, null);
+            }
+        }
+        If k -> {
+            boolint_scan_expr(k.cond, 0, null);
+            boolint_scan_stmt(k.then, ret, tail, tail_dest);
+            boolint_scan_stmt(k.els, ret, tail, tail_dest);
+        }
+        While k -> {
+            boolint_scan_expr(k.cond, 0, null);
+            boolint_scan_stmt(k.body, ret, false, null);
+        }
+        For k -> {
+            boolint_invalidate(boolint_find_obj(k.item));
+            boolint_invalidate(boolint_find_obj(k.coll));
+            boolint_invalidate(boolint_find_obj(k.idx));
+            boolint_invalidate(boolint_find_obj(k.n));
+            boolint_scan_expr(k.iter, 1, null);
+            boolint_scan_expr(k.hi, 1, null);
+            boolint_scan_stmt(k.body, ret, false, null);
+        }
+        Block k -> {
+            boolint_scan_stmts(k.body, ret, tail, tail_dest);
+        }
+        ExprStmt k -> {
+            if (tail && tail_dest != null) {
+                boolint_scan_expr(k.lhs, 2, tail_dest);
+            } else if (tail && ret != null) {
+                boolint_scan_expr(k.lhs, 2, ret);
+            } else {
+                boolint_scan_expr(k.lhs, 0, null);
+            }
+        }
+        Decl k -> {
+            c: ?*BoolIntCandidate = boolint_find_obj(k.var);
+            if (c != null) {
+                boolint_scan_expr(k.init, 2, c);
+            } else {
+                boolint_scan_expr(k.init, 1, null);
+            }
+        }
+        Match k -> {
+            boolint_scan_expr(k.cond, 1, null);
+            a: ?*MatchArm = k.arms;
+            while (a != null) {
+                boolint_scan_stmt(a.body, ret, tail, tail_dest);
+                a = a.next;
+            }
+        }
+        Raise k -> {
+            boolint_scan_inits(k.inits);
+        }
+        Try k -> {
+            boolint_scan_stmt(k.body, ret, tail, tail_dest);
+            a2: ?*CatchArm = k.arms;
+            while (a2 != null) {
+                boolint_scan_stmt(a2.body, ret, tail, tail_dest);
+                a2 = a2.next;
+            }
+        }
+        Region k -> {
+            boolint_scan_stmt(k.body, ret, tail, tail_dest);
+        }
+        Comment _ -> { }
+    }
+}
+
+boolint_scan_stmts(
+    head: ?*Stmt,
+    ret: ?*BoolIntCandidate,
+    tail: bool,
+    tail_dest: ?*BoolIntCandidate
+) {
+    s: ?*Stmt = head;
+    while (s != null) {
+        boolint_scan_stmt(s, ret, tail && s.next == null, tail_dest);
+        s = s.next;
+    }
+}
+
+boolint_scan_program() {
+    g: ?*Obj = globals;
+    while (g != null) {
+        c: ?*BoolIntCandidate = boolint_find_obj(g);
+        if (c != null) {
+            boolint_scan_expr(g.init, 2, c);
+        } else {
+            boolint_scan_expr(g.init, 1, null);
+        }
+        g = g.next;
+    }
+    fn: ?*Function = functions;
+    while (fn != null) {
+        if (fn.is_extern == 0) {
+            boolint_scan_stmts(fn.body, boolint_find_fn(fn), true, null);
+        }
+        fn = fn.next;
+    }
+}
+
+boolint_warn(c: *BoolIntCandidate) {
+    name: []i8 = "";
+    kind: []i8 = "value ";
+    file: int = 0;
+    at: int = 0;
+    obj: ?*Obj = c.obj;
+    member: ?*Member = c.member;
+    fn: ?*Function = c.fn;
+    if (obj != null) {
+        name = obj.name;
+        file = obj.browse_file;
+        at = obj.browse_pos;
+        if (obj.is_local != 0) {
+            kind = "local ";
+        } else {
+            kind = "global ";
+        }
+    } else if (member != null) {
+        name = member.name;
+        file = member.browse_file;
+        at = member.browse_pos;
+        kind = "field ";
+    } else if (fn != null) {
+        name = fn.name;
+        file = fn.browse_file;
+        at = fn.browse_pos;
+        kind = "return value of ";
+    }
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, "int ");
+    sb_puts(sb, kind);
+    sb_puts(sb, name);
+    sb_puts(sb, " is used only as a boolean; use bool");
+    warning_at(file, at, sb_finish(sb));
+}
+
+check_bool_ints() noregion {
+    boolint_collect();
+    boolint_changed = 1;
+    while (boolint_changed != 0) {
+        boolint_changed = 0;
+        boolint_scan_program();
+    }
+    c: ?*BoolIntCandidate = boolint_candidates;
+    while (c != null) {
+        if (c.good != 0 && c.evidence != 0) {
+            boolint_warn(c);
+        }
+        c = c.next;
+    }
+}
+
+compiler_boolint_main(argc: int, argv: []str) noregion: int {
+    if (argc != 2) {
+        write(2, "error: usage: l8 boolint <file.l8>\n", len("error: usage: l8 boolint <file.l8>\n"));
+        return 1;
+    }
+    try {
+        do_profile = 0;
+        checking_unused_functions = 1;
+        compiler_analyze(bytes(argv[1]));
+        checking_unused_functions = 0;
+        check_bool_ints();
+        0;
+    } with Error e -> {
+        print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);
+        1;
+    }
+}

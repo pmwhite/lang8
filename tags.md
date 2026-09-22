@@ -127,10 +127,8 @@ without loading imported files. `browse` links qualified and unqualified uses to
 the same declaration. Access errors identify the referring file and name and list
 the declaration's available tags.
 
-The implementation is present in both compiler stages. Stage 1 uses the existing
-language so the checked-in bootstrap can build it; stage 2 uses a `compiler_tags`
+The implementation is present in both compiler stages. Both use a `compiler_tags`
 tag for the tag implementation itself and `compiler_internal` for the rest of the
-tool. Stage-1 sources remain untagged because the saved bootstrap predates tags;
-its generated compiler enforces the new visibility rule. Run `./build.sh selfhost`
+tool. The checked-in bootstrap enforces tag visibility. Run `./build.sh selfhost`
 to build `./l8`, verify the executable fixpoint, and run the positive, negative,
 formatting, browsing, and assembly/direct-backend tests in `programs/examples/tags/`.

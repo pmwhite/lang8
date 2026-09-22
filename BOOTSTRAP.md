@@ -23,8 +23,8 @@ visibility. `tag x;` tags a file's definitions and implicitly enables `use_tag x
 tagged names into scope, while `x::name` accesses a single declaration explicitly.
 Untagged declarations are valid but invisible to source references, including
 references in their own file. Tags do not change global symbol identity or
-relative import resolution. The saved bootstrap predates tags, so `src1/` stays
-untagged; tools built from it enforce tag visibility in `src2/` and programs.
+relative import resolution. Both source stages use tags, and the saved bootstrap
+enforces tag visibility when building them and programs.
 
 `runtime.s` remains source input when building programs and successor compiler
 stages, but it is already embedded in the saved bootstrap executable.

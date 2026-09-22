@@ -1,4 +1,8 @@
+tag compiler_internal;
+
 // Tokenize, attach comments, and parse a source file into the AST.
+use_tag compiler_tags;
+
 new_token(
     kind: TokKind,
     start: *i8@new,
@@ -700,7 +704,7 @@ tokenize() noregion raises Error: *Token@new {
             if (source[pos] == '\'') {
                 pos = pos + 1;
             }
-            t = new_token(TokKind.Char, &source[pos], 0, n);
+            t = new_token(TokKind.Char, &source[pos], pos - n, n);
             t.val = ch as int;
             cur.next = t;
             cur = t;
@@ -1366,6 +1370,8 @@ new_match(cond: *Expr@new, arms: ?*MatchArm@new): *Stmt@new {
 new_match_arm(
     name: []i8@new,
     variant: ?*Variant@new,
+    literal: int,
+    is_literal: bool,
     binder: ?*Obj@new,
     binder_name: []i8@new,
     paren: int,
@@ -1374,6 +1380,8 @@ new_match_arm(
     new MatchArm {
         name: name,
         variant: variant,
+        literal: literal,
+        is_literal: is_literal,
         binder: binder,
         binder_name: binder_name,
         paren: paren,
@@ -2177,31 +2185,58 @@ parse_match_expr() noregion raises Error: *Expr@new {
 parse_match_arms(mcond: *Expr@new) noregion raises Error: ?*MatchArm@new {
     add_type(mcond);
     et: ?*Type = decay(mcond.ty);
+    enum_subject: bool = false;
     if (parse_resolve != 0) {
         if (et == null) {
-            error_ty("match requires an enum value", et);
+            error_ty("match requires an enum or integer value", et);
         }
         etu0: *Type = et;
-        if (!is_enum_ty(etu0)) {
-            error_ty("match requires an enum value", et);
+        enum_subject = is_enum_ty(etu0);
+        if (!enum_subject && !is_int_width_ty(et)) {
+            error_ty("match requires an enum or integer value", et);
         }
     }
     skip(TokKind.LBrace);
     arms: ?*MatchArm = null;
     acur: ?*MatchArm = null;
     while (tok.kind != TokKind.RBrace) {
-        if (tok.kind != TokKind.Ident) {
-            error("expected variant name in match arm");
-        }
-        vname: []i8 = cur_tokstr();
+        literal: int = 0;
+        is_literal: bool = false;
+        vname: []i8 = "";
         vpos: int = tok.pos;
-        vlen: int = tok.len;
+        vlen: int = 0;
         vfile: int = current_file_id;
-        tok = tok.next;
+        if (tok.kind == TokKind.Num || tok.kind == TokKind.Char || tok.kind == TokKind.Minus) {
+            is_literal = true;
+            neg: bool = tok.kind == TokKind.Minus;
+            if (neg) {
+                tok = tok.next;
+            }
+            if (tok.kind != TokKind.Num && (tok.kind != TokKind.Char || neg)) {
+                error("expected integer or character literal in match arm");
+            }
+            literal = tok.val;
+            if (neg) {
+                literal = 0 - literal;
+            }
+            vlen = tok.pos + tok.len - vpos;
+            tok = tok.next;
+            vname = intern(source, vpos, vlen);
+        } else {
+            if (tok.kind != TokKind.Ident) {
+                error("expected variant name or integer literal in match arm");
+            }
+            vname = cur_tokstr();
+            vlen = tok.len;
+            tok = tok.next;
+        }
         is_wild: bool = streq(vname, "_");
         binder_name: []i8 = "";
         have_binder: int = 0;
         have_paren: int = 0;
+        if (is_literal && (tok.kind == TokKind.Ident || tok.kind == TokKind.LParen)) {
+            error("literal match arm cannot bind a payload");
+        }
         if (tok.kind == TokKind.LParen) {
             /* Legacy Variant(name); prefer Variant name. */
             if (is_wild) {
@@ -2217,7 +2252,7 @@ parse_match_arms(mcond: *Expr@new) noregion raises Error: ?*MatchArm@new {
             have_paren = 1;
             tok = tok.next;
             skip(TokKind.RParen);
-        } else {
+        } else if (!is_literal) {
             if (tok.kind == TokKind.Ident) {
                 if (is_wild) {
                     error("wildcard match arm cannot bind a payload");
@@ -2247,8 +2282,28 @@ parse_match_arms(mcond: *Expr@new) noregion raises Error: ?*MatchArm@new {
             if (have_binder != 0) {
                 error("wildcard match arm cannot bind a payload");
             }
+        } else if (is_literal) {
+            if (parse_resolve != 0) {
+                if (enum_subject) {
+                    error("enum match arm requires a variant");
+                }
+                lit_ty: *Type = et or error("match requires an integer value");
+                if (is_i8_ty(lit_ty) && (literal < 0 || literal > 255) || is_i32_ty(lit_ty) && (literal < -2147483648 || literal > 2147483647) || is_u32_ty(lit_ty) && (literal < 0 || literal > 4294967295)) {
+                    error("match literal out of range");
+                }
+                chk_lit: ?*MatchArm = arms;
+                while (chk_lit != null) {
+                    if (chk_lit.is_literal && chk_lit.literal == literal) {
+                        error("duplicate match arm");
+                    }
+                    chk_lit = chk_lit.next;
+                }
+            }
         } else {
             if (parse_resolve != 0) {
+                if (!enum_subject) {
+                    error("integer match arm requires a literal or `_`");
+                }
                 etu: *Type = et or error("match requires an enum value");
                 vo: ?*Variant = find_variant(type_enum_def(etu), vname);
                 if (vo == null) {
@@ -2279,8 +2334,8 @@ parse_match_arms(mcond: *Expr@new) noregion raises Error: ?*MatchArm@new {
         }
         arm_body_n: *Stmt = parse_compound();
         leave_scope();
-        arm: *MatchArm = new_match_arm(vname, arm_variant_n, arm_binder, binder_name,
-            have_paren, arm_body_n);
+        arm: *MatchArm = new_match_arm(vname, arm_variant_n, literal, is_literal,
+            arm_binder, binder_name, have_paren, arm_body_n);
         arm.pos = vpos;
         arm.file = vfile;
         arm.toklen = vlen;
@@ -2306,6 +2361,9 @@ parse_match_arms(mcond: *Expr@new) noregion raises Error: ?*MatchArm@new {
         walk = walk.next;
     }
     if (has_wild == 0 && parse_resolve != 0) {
+        if (!enum_subject) {
+            error("integer match requires a wildcard arm");
+        }
         etu2: *Type = et or error("match requires an enum value");
         vv: ?*Variant = type_enum_def(etu2).variants;
         while (vv != null) {
@@ -2510,7 +2568,8 @@ add_type_field_inits_opt(inits: ?*FieldInit@new, heap: int) noregion raises Erro
         if (a.lhs != null) {
             mem: *Member = a.member or error("internal");
             if (!assignable(decay(mem.ty), a.lhs)) {
-                error_have_expr_want("field initializer type mismatch", a.lhs, decay(mem.ty));
+                error_have_expr_want_at(a.file, a.pos, "field initializer type mismatch",
+                    a.lhs, decay(mem.ty));
             }
             if (heap == 1) {
                 check_store(a.lhs, life_heap);
@@ -2739,7 +2798,7 @@ type_eq_cmp(p: *Expr, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error {
         p.ty = ty_bool;
         return;
     }
-    error_ty_vs("comparison type mismatch", lt, rt);
+    error_ty_vs_expr(lhs, "comparison type mismatch", lt, rt);
 }
 
 type_ord_cmp(p: *Expr, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error {
@@ -2748,13 +2807,13 @@ type_ord_cmp(p: *Expr, lhs: *Expr@new, rhs: *Expr@new) noregion raises Error {
     lt: ?*Type = decay(lhs.ty);
     rt: ?*Type = decay(rhs.ty);
     if (lt == null) {
-        error_ty_vs("comparison type mismatch", lt, rt);
+        error_ty_vs_expr(lhs, "comparison type mismatch", lt, rt);
     }
     if (rt == null) {
-        error_ty_vs("comparison type mismatch", lt, rt);
+        error_ty_vs_expr(lhs, "comparison type mismatch", lt, rt);
     }
     if (!types_equal(lt, rt)) {
-        error_ty_vs("comparison type mismatch", lt, rt);
+        error_ty_vs_expr(lhs, "comparison type mismatch", lt, rt);
     }
     p.ty = ty_bool;
 }
@@ -3253,7 +3312,7 @@ type_if_expr(
     add_type(cond);
     ct: ?*Type = decay(cond.ty);
     if (ct == null || !is_bool_ty(ct)) {
-        error_ty("condition must be bool", ct);
+        error_ty_expr(cond, "condition must be bool", ct);
     }
     save: ?*NarrowFrame = narrow_top;
     narrow_push_ne_nulls(cond);
@@ -3473,10 +3532,10 @@ add_type_expr(p: *Expr@new) noregion raises Error {
             add_type(q.lhs);
             nt: ?*Type = decay(q.lhs.ty);
             if (nt == null) {
-                error_ty("! requires bool", nt);
+                error_ty_expr(q.lhs, "! requires bool", nt);
             }
             if (!is_bool_ty(nt)) {
-                error_ty("! requires bool", nt);
+                error_ty_expr(q.lhs, "! requires bool", nt);
             }
             p.ty = ty_bool;
             return;
@@ -3804,7 +3863,8 @@ add_type_expr(p: *Expr@new) noregion raises Error {
                     if (po.ty != null) {
                         pt: ?*Type = decay(po.ty);
                         if (!assignable(pt, a)) {
-                            error_have_expr_want("argument type mismatch", a, pt);
+                            error_have_expr_want_at(p.file, p.pos, "argument type mismatch",
+                                a, pt);
                         }
                     }
                     po = po.param_next;
@@ -3828,7 +3888,7 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
             add_type(k.cond);
             ct: ?*Type = decay(k.cond.ty);
             if (ct == null || !is_bool_ty(ct)) {
-                error_ty("condition must be bool", ct);
+                error_ty_expr(k.cond, "condition must be bool", ct);
             }
             save: ?*NarrowFrame = narrow_top;
             narrow_push_ne_nulls(k.cond);
@@ -3862,7 +3922,7 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
             add_type(k.cond);
             ct2: ?*Type = decay(k.cond.ty);
             if (ct2 == null || !is_bool_ty(ct2)) {
-                error_ty("condition must be bool", ct2);
+                error_ty_expr(k.cond, "condition must be bool", ct2);
             }
             save2: ?*NarrowFrame = narrow_top;
             narrow_push_ne_nulls(k.cond);
