@@ -85,6 +85,20 @@ example() {
   run_expect "$bin" "$expected"
 }
 
+declare -a EXPECT_SOURCES=()
+
+expect_source() {
+  EXPECT_SOURCES+=("$2")
+}
+
+flush_expect_sources() {
+  local tool="$1"
+  if [[ "${#EXPECT_SOURCES[@]}" -gt 0 ]]; then
+    python3 tools/expect.py "./$tool" "$BUILD/expect" "${EXPECT_SOURCES[@]}"
+    EXPECT_SOURCES=()
+  fi
+}
+
 fmt_src2() {
   local tool="$1"
   local f
@@ -102,21 +116,10 @@ check_fmt_src2() {
   done
 }
 
-# All examples as one timed step (avoids a noisy per-file timing table).
+# Bootstrap-compatible examples as one timed step.
 run_examples() {
   local tool="$1"
-  example "$tool" hello   programs/examples/hello.l8   'Hi'
-  example "$tool" fib     programs/examples/fib.l8     '55'
-  example "$tool" logic   programs/examples/logic.l8   'YYYY'
-  example "$tool" string  programs/examples/string.l8  'Hi'
-  example "$tool" i8      programs/examples/i8.l8      'Hi'
-  example "$tool" bool    programs/examples/bool.l8    'TY10'
-  example "$tool" enum    programs/examples/enum.l8    '9 10 0 3 0'
-  example "$tool" forward programs/examples/forward.l8 '7'
-  example "$tool" null    programs/examples/null.l8    'YYYY'
-  example "$tool" narrow  programs/examples/narrow.l8  'YYYY'
-  example "$tool" imports programs/examples/imports/main.l8 'Hi'
-  example "$tool" byte    programs/examples/byte.l8    'YYYYY'
+  python3 tools/expect.py "./$tool" "$BUILD/expect" --discover programs/examples --bootstrap-only
 }
 
 example_compile_fail() {
@@ -177,19 +180,14 @@ example_exit() {
   if [[ "$rc" -ne "$want" ]]; then die "$name exited $rc, expected $want"; fi
 }
 
-# Examples that need stage-2 syntax (not yet in bootstrap).
+# Full annotated suite and specialized stage-2 checks.
 run_examples_selfhost() {
   local tool="$1"
-  run_examples "$tool"
-  example "$tool" callback-basic programs/callbacks/basic.l8 'callbacks OK'
-  example "$tool" callback-native programs/callbacks/native.l8 'native fn OK'
-  example "$tool" callback-effects programs/callbacks/effects.l8 'fn effects OK'
-  example "$tool" or programs/examples/or.l8 'YYYY'
-  example_exit "$tool" intmatch programs/examples/intmatch.l8 0
+  python3 tools/expect.py "./$tool" "$BUILD/expect" --discover programs/examples --discover programs/callbacks
   "./$tool" fmt programs/examples/intmatch.l8 >"$BUILD/intmatch-formatted.l8"
   "./$tool" fmt "$BUILD/intmatch-formatted.l8" >"$BUILD/intmatch-formatted-again.l8"
   cmp -s "$BUILD/intmatch-formatted.l8" "$BUILD/intmatch-formatted-again.l8" || die 'integer match formatting is not stable'
-  example_exit "$tool" intmatch-formatted "$BUILD/intmatch-formatted.l8" 0
+  expect_source "$tool" "$BUILD/intmatch-formatted.l8"
   "./$tool" fmt programs/examples/match_format.l8 >"$BUILD/match-format.l8"
   "./$tool" fmt "$BUILD/match-format.l8" >"$BUILD/match-format-again.l8"
   cmp -s "$BUILD/match-format.l8" "$BUILD/match-format-again.l8" || die 'match arm reduction is not stable'
@@ -198,7 +196,7 @@ run_examples_selfhost() {
   grep -q 'Value v -> {' "$BUILD/match-format.l8" || die 'scoped declaration match arm lost its braces'
   grep -q '^        1 -> {$' "$BUILD/match-format.l8" || die 'commented match arm lost its braces'
   grep -q 'Keep this comment with its block' "$BUILD/match-format.l8" || die 'match arm comment was lost'
-  example_exit "$tool" match-format "$BUILD/match-format.l8" 0
+  expect_source "$tool" "$BUILD/match-format.l8"
   "./$tool" fmt programs/examples/control_format.l8 >"$BUILD/control-format.l8"
   "./$tool" fmt "$BUILD/control-format.l8" >"$BUILD/control-format-again.l8"
   cmp -s "$BUILD/control-format.l8" "$BUILD/control-format-again.l8" || die 'control body reduction is not stable'
@@ -209,120 +207,21 @@ run_examples_selfhost() {
   grep -q 'if (true) local: int = value;' "$BUILD/control-format.l8" || die 'scoped declaration kept its braces'
   grep -q '^    if (true) {$' "$BUILD/control-format.l8" || die 'commented control body lost its braces'
   grep -q 'Keep this comment with its block' "$BUILD/control-format.l8" || die 'commented control body lost its comment'
-  example_exit "$tool" control-format-source programs/examples/control_format.l8 0
-  example_exit "$tool" control-format "$BUILD/control-format.l8" 0
+  expect_source "$tool" "$BUILD/control-format.l8"
   check_optional_semis "$tool"
-  example_exit "$tool" forlint programs/examples/forlint.l8 0
   "./$tool" forlint programs/examples/forlint.l8 2>"$BUILD/forlint.err"
   grep -q 'while loop can use for i in 0..end' "$BUILD/forlint.err" || die 'missing ranged for suggestion'
   grep -q 'while loop can use for item in xs' "$BUILD/forlint.err" || die 'missing collection for suggestion'
   [[ "$(grep -c 'while loop can use' "$BUILD/forlint.err")" -eq 2 ]] || die 'unexpected for-loop suggestion'
-  example_exit "$tool" control-scope programs/examples/control_scope.l8 0
-  example_compile_fail "$tool" control-scope-if-leak programs/examples/control_scope_if_leak.l8 'undefined variable'
-  example_compile_fail "$tool" control-scope-else-leak programs/examples/control_scope_else_leak.l8 'undefined variable'
-  example_compile_fail "$tool" control-scope-while-leak programs/examples/control_scope_while_leak.l8 'undefined variable'
-  example_compile_fail "$tool" intmatch-duplicate programs/examples/intmatch_duplicate.l8 'duplicate match arm'
-  example_compile_fail "$tool" intmatch-missing-wildcard programs/examples/intmatch_missing_wildcard.l8 'integer match requires a wildcard arm'
-  example_compile_fail "$tool" intmatch-range programs/examples/intmatch_range.l8 'match literal out of range'
-  example "$tool" noreturn programs/examples/noreturn.l8 'Hi'
-  example "$tool" global programs/examples/global.l8 'YYYYYY'
-  example "$tool" bitwise programs/examples/bitwise.l8 'YYYYYYYYYYYY'
-  example "$tool" float programs/examples/float.l8 'YYYYYYYYYYYYYY'
-  example "$tool" manyf programs/examples/manyf.l8 'YYYYYYYYYYYYYYYY'
-  example "$tool" i32 programs/examples/i32.l8 'YYYYYYYYYYYYY'
-  example_compile_fail "$tool" mixfloat programs/examples/mixfloat.l8 'arithmetic type mismatch'
-  example_compile_fail "$tool" mixnum programs/examples/mixnum.l8 'arithmetic type mismatch'
-  example "$tool" expr programs/examples/expr.l8 'YYYYYYYYYYY'
-  example "$tool" mlstr programs/examples/mlstr.l8 $'A\nB\nxy'
   check_retwarn "$tool"
-  example "$tool" newarr programs/examples/newarr.l8 'Hi'
-  example "$tool" offset programs/examples/offset.l8 'YYY'
-  example "$tool" counted programs/examples/counted.l8 'YYYYYYY'
-  example "$tool" str programs/examples/str.l8 'YYYYYYYYYYYY'
-  example_compile_fail "$tool" strnul programs/examples/strnul.l8 'string literal cannot contain NUL'
-  example_exit "$tool" cstrnul programs/examples/cstrnul.l8 1
-  example_exit "$tool" strsentinel programs/examples/strsentinel.l8 1
-  example "$tool" optslice programs/examples/optslice.l8 'YYYYY'
-  example "$tool" narrowfill programs/examples/narrowfill.l8 'YYYY'
-  example_compile_fail "$tool" narrowasgn programs/examples/narrowasgn.l8 'assignment type mismatch'
-  example_compile_fail "$tool" optsliceidx programs/examples/optsliceidx.l8 'index of optional slice'
-  example_compile_fail "$tool" optslicelen programs/examples/optslicelen.l8 'len of optional slice'
-  example "$tool" for programs/examples/for.l8 'YYYYYYYY'
-  example "$tool" forrange programs/examples/forrange.l8 'YYYYYYYYY'
-  example "$tool" forz programs/examples/forz.l8 ''
-  example_compile_fail "$tool" forint programs/examples/forint.l8 'for requires str'
-  example_compile_fail "$tool" forrangebad programs/examples/forrangebad.l8 'range end must be int'
-  example_compile_fail "$tool" ptrindex programs/examples/ptrindex.l8 'pointer indexing is not allowed'
-  example_compile_fail "$tool" usebefore programs/examples/usebefore.l8 'use of uninitialized local'
-  example_compile_fail "$tool" newnofill programs/examples/newnofill.l8 'requires an initial value'
-  example_compile_fail "$tool" bareglobal programs/examples/bareglobal.l8 'global requires an initializer'
-  example_compile_fail "$tool" writeptr programs/examples/writeptr.l8 'of \*i8 is one byte'
-  example_compile_fail "$tool" readstr programs/examples/readstr.l8 'buf must be mutable'
-  example_compile_fail "$tool" strbytes programs/examples/strbytes.l8 'argument type mismatch'
-  example_compile_fail "$tool" stackaddr programs/examples/stackaddr.l8 'address of local cannot escape'
-  example_compile_fail "$tool" stash programs/examples/stash.l8 'use @immortal'
-  example_compile_fail "$tool" stalenarrow programs/examples/stalenarrow.l8 'dereferencing optional pointer'
-  example_compile_fail "$tool" nullalias programs/examples/nullalias.l8 'dereferencing optional pointer'
-  example_compile_fail "$tool" zstore programs/examples/zstore.l8 'cannot assign through str'
-  example_compile_fail "$tool" unknownfn programs/examples/unknownfn.l8 'unknown function'
-  example_compile_fail "$tool" syscall programs/examples/syscall.l8 'unknown function'
-  example_compile_fail "$tool" badopen programs/examples/badopen.l8 'argument type mismatch'
-  example "$tool" local programs/examples/local.l8 'YYYYY'
-  example "$tool" immortal programs/examples/immortal.l8 'Y'
-  example "$tool" manyargs programs/examples/manyargs.l8 'YYYY'
-  example_compile_fail "$tool" localesc programs/examples/localesc.l8 'address of local cannot escape'
-  example_compile_fail "$tool" localbox programs/examples/localbox.l8 'cannot escape'
-  example_compile_fail "$tool" atret programs/examples/atret.l8 'expected lifetime bound after @'
-  example_compile_fail "$tool" retnew programs/examples/retnew.l8 'return of new requires @new'
-  example_compile_fail "$tool" immparam programs/examples/immparam.l8 'omit bound'
-  example_compile_fail "$tool" retbound programs/examples/retbound.l8 'return bound is @new'
-  example "$tool" struct programs/examples/struct.l8 '3 12 13'
-  example "$tool" clayout programs/examples/clayout.l8 'YYYYYYYYY'
-  example "$tool" enumtag programs/examples/enumtag.l8 'YYYYYYYYYYYYY'
-  example_compile_fail "$tool" enumtagdup programs/examples/enumtagdup.l8 'duplicate variant tag'
-  example "$tool" arrlit programs/examples/arrlit.l8 'YYYYY'
-  example_compile_fail "$tool" arrlitempty programs/examples/arrlitempty.l8 'array literal cannot be empty'
-  example_compile_fail "$tool" arrlitmix programs/examples/arrlitmix.l8 'array element type mismatch'
-  example "$tool" fixarr programs/examples/fixarr.l8 'YYYYYYYYYYYYYY'
-  example_compile_fail "$tool" fixarr0 programs/examples/fixarr0.l8 'array length must be positive'
-  example_compile_fail "$tool" fixarrlen programs/examples/fixarrlen.l8 'array literal length must match'
-  example "$tool" aggcopy programs/examples/aggcopy.l8 'YYYYY'
-  example "$tool" dynlink programs/examples/dynlink.l8 'Y'
-  example "$tool" nestsum programs/examples/nestsum.l8 '1 2 3 9 4 5 6 7'
-  example "$tool" exc programs/examples/exc.l8 'Hi'
-  example "$tool" immheap programs/examples/immheap.l8 'Y'
-  example_compile_fail "$tool" immheapmiss programs/examples/immheapmiss.l8 'missing noregion'
-  example_compile_fail "$tool" immheapbad programs/examples/immheapbad.l8 'unnecessary noregion'
-  example_compile_fail "$tool" immold programs/examples/immold.l8 'function mark is noregion'
-  example "$tool" region programs/examples/region.l8 'YYYYYYY'
-  example "$tool" exc_region programs/examples/exc_region.l8 'YYY'
-  example_compile_fail "$tool" exc_regionbad programs/examples/exc_regionbad.l8 'exception payload cannot hold a region pointer'
-  example_compile_fail "$tool" region_outer programs/examples/region_outer.l8 'region pointer cannot escape'
-  example_compile_fail "$tool" region_ret programs/examples/region_ret.l8 'region pointer cannot escape'
-  example_compile_fail "$tool" region_glob programs/examples/region_glob.l8 'region pointer cannot escape'
-  example_compile_fail "$tool" region_inner programs/examples/region_inner.l8 'region pointer cannot escape'
-  example_compile_fail "$tool" region_callimm programs/examples/region_callimm.l8 'cannot call from a region'
-  example_compile_fail "$tool" region_badchild programs/examples/region_badchild.l8 'region pointer cannot escape'
-  example_compile_fail "$tool" region_wrapstack programs/examples/region_wrapstack.l8 'address of local cannot escape'
-  example_compile_fail "$tool" colonz programs/examples/colonz.l8 'expected a slice or fixed-array type'
-  example_compile_fail "$tool" uninitkw programs/examples/uninitkw.l8 'undefined variable'
-  example_exit "$tool" sliceoob programs/examples/sliceoob.l8 1
-  example_exit "$tool" writeoob programs/examples/writeoob.l8 1
-  example_exit "$tool" newwrap programs/examples/newwrap.l8 1
+  flush_expect_sources "$tool"
   check_tags "$tool"
 }
 
 check_tags() {
   local tool="$1" name f
-  example "$tool" tags-declaration-only programs/examples/tags/declaration_only.l8 'declaration'
-  example "$tool" tags-import-only programs/examples/tags/import_only.l8 'declaration'
-  example "$tool" tags-late-file programs/examples/tags/late_file.l8 'late'
-  example "$tool" tags-untagged-unused programs/examples/tags/untagged_unused.l8 'unused' 2>"$BUILD/tags-compile.err"
+  "./$tool" build programs/examples/tags/untagged_unused.l8 -o "$BUILD/tags-untagged-unused" 2>"$BUILD/tags-compile.err"
   if grep -q 'unused function' "$BUILD/tags-compile.err"; then die 'ordinary build emitted an unused function warning'; fi
-  for name in call import use global type enum extern exception recursive; do
-    example_compile_fail "$tool" "tags-untagged-$name" "programs/examples/tags/untagged_$name.l8" 'declaration has no tags'
-  done
-  example_compile_fail "$tool" tags-untagged-qualified programs/examples/tags/untagged_qualified.l8 'does not have tag app'
   if "./$tool" build programs/examples/tags/untagged_call.l8 -o "$BUILD/tags-invalid" 2>"$BUILD/tags-build.err"; then
     die 'build accepted an untagged reference'
   fi
@@ -331,11 +230,6 @@ check_tags() {
     die 'browse accepted an untagged reference'
   fi
   grep -q 'untagged_import.l8:6:5:' "$BUILD/tags-browse.err" || die 'missing referring source location'
-  example "$tool" tags-main programs/examples/tags/main.l8 'tags'
-  example "$tool" tags-used programs/examples/tags/used.l8 'used'
-  example "$tool" tags-implicit programs/examples/tags/implicit.l8 'implicit'
-  example "$tool" tags-global programs/examples/tags/global.l8 'global'
-  example "$tool" tags-shadow programs/examples/tags/shadow.l8 'shadow'
   # These are separate programs over one shared library, so unused-function
   # reachability must be the union of all of their entry points.
   local -a unused_entries=(
@@ -352,21 +246,6 @@ check_tags() {
   "./$tool" unused "${unused_entries[@]}" 2>"$BUILD/tags-unused.err"
   grep -q 'warning: programs/examples/tags/untagged_unused.l8:1:1: unused function unused' "$BUILD/tags-unused.err" || die 'expected project-wide unused function warning'
   if grep -q 'unused function tag_' "$BUILD/tags-unused.err"; then die 'function used by another entry point was reported unused'; fi
-  for name in hidden_call hidden_global hidden_type hidden_literal hidden_enum \
-      hidden_new hidden_sizeof hidden_raises hidden_raise hidden_catch local_leak \
-      import_leak qualified_leak forward_hidden; do
-    example_compile_fail "$tool" "tags-$name" "programs/examples/tags/$name.l8" 'is not in scope'
-  done
-  example_compile_fail "$tool" tags-wrong_tag programs/examples/tags/wrong_tag.l8 'does not have tag parser'
-  example_compile_fail "$tool" tags-duplicate programs/examples/tags/duplicate.l8 'duplicate declaration same_name'
-  example_compile_fail "$tool" tags-duplicate_kind programs/examples/tags/duplicate_kind.l8 'duplicate declaration SameName'
-  example_compile_fail "$tool" tags-qualified_local programs/examples/tags/qualified_local.l8 'undefined variable'
-  example_compile_fail "$tool" tags-qualified_builtin programs/examples/tags/qualified_builtin.l8 'does not have tag missing'
-  example_compile_fail "$tool" tags-nested programs/examples/tags/nested.l8 'exactly two names'
-  example_compile_fail "$tool" tags-qualified_definition programs/examples/tags/qualified_definition.l8 'expected unqualified declaration name'
-  example_compile_fail "$tool" tags-builtin_collision programs/examples/tags/builtin_collision.l8 'cannot declare a builtin'
-  example_compile_fail "$tool" tags-invalid_modifier programs/examples/tags/invalid_modifier.l8 'must precede a definition'
-  example_compile_fail "$tool" tags-dangling_modifier programs/examples/tags/dangling_modifier.l8 'must precede a definition'
 
   # Format each file without following imports, then compile the formatted graph.
   mkdir -p "$BUILD/tags-fmt"
@@ -379,14 +258,14 @@ check_tags() {
     "./$tool" fmt "$BUILD/tags-fmt/$name" >"$BUILD/tags-fmt/check"
     cmp -s "$BUILD/tags-fmt/$name" "$BUILD/tags-fmt/check" || die "tag formatting is not stable: $f"
   done
-  example "$tool" tags-fmt-declaration "$BUILD/tags-fmt/declaration_only.l8" 'declaration'
-  example "$tool" tags-fmt-late "$BUILD/tags-fmt/late_file.l8" 'late'
-  example "$tool" tags-fmt-unused "$BUILD/tags-fmt/untagged_unused.l8" 'unused'
-  example "$tool" tags-fmt-main "$BUILD/tags-fmt/main.l8" 'tags'
-  example "$tool" tags-fmt-used "$BUILD/tags-fmt/used.l8" 'used'
-  example "$tool" tags-fmt-implicit "$BUILD/tags-fmt/implicit.l8" 'implicit'
-  example "$tool" tags-fmt-global "$BUILD/tags-fmt/global.l8" 'global'
-  example "$tool" tags-fmt-shadow "$BUILD/tags-fmt/shadow.l8" 'shadow'
+  expect_source "$tool" "$BUILD/tags-fmt/declaration_only.l8"
+  expect_source "$tool" "$BUILD/tags-fmt/late_file.l8"
+  expect_source "$tool" "$BUILD/tags-fmt/untagged_unused.l8"
+  expect_source "$tool" "$BUILD/tags-fmt/main.l8"
+  expect_source "$tool" "$BUILD/tags-fmt/used.l8"
+  expect_source "$tool" "$BUILD/tags-fmt/implicit.l8"
+  expect_source "$tool" "$BUILD/tags-fmt/global.l8"
+  expect_source "$tool" "$BUILD/tags-fmt/shadow.l8"
   "./$tool" browse programs/examples/tags/main.l8 -o "$BUILD/tags-browse.html"
   grep -q 'parser::' "$BUILD/tags-browse.html" || die 'browse lost tag qualifier'
   grep -q 'data-s=' "$BUILD/tags-browse.html" || die 'tag browse missing references'
@@ -396,6 +275,7 @@ check_tags() {
   "./$tool" as -o "$BUILD/tags-main.o" "$BUILD/tags-main.s" runtime.s
   "./$tool" elfpack "$BUILD/tags-main.o" -o "$BUILD/tags-asm"
   run_expect "$BUILD/tags-asm" 'tags'
+  flush_expect_sources "$tool"
 }
 
 check_retwarn() {
@@ -443,7 +323,6 @@ check_retwarn() {
   if grep -q 'ignored return value in side' "$err"; then die "unexpected ignored value on assignment"; fi
   if grep -q 'ignored return value in callp' "$err"; then die "unexpected ignored value on procedure call"; fi
   if grep -q 'ignored return value in id2' "$err"; then die "unexpected ignored value on last statement"; fi
-  run_expect "$bin" 'YYYYYYY'
 }
 
 check_browse() {
@@ -616,6 +495,7 @@ do_selfhost() {
   step 'stage4 direct (l8c3 → src2)' ./l8c3 build src2/main.l8 -o l8c4
   step 'verify stage3 exe == stage4 exe' verify_same l8c3 l8c4
 
+  step 'expect runner' python3 -m unittest tools.test_expect
   step 'examples [l8c3]' run_examples_selfhost l8c3
   step 'browse [l8c3]' check_browse l8c3
   step 'compiler phases [l8c3]' print_compiler_phases
