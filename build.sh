@@ -148,6 +148,31 @@ run_examples_selfhost() {
   "./$tool" fmt "$BUILD/intmatch-formatted.l8" >"$BUILD/intmatch-formatted-again.l8"
   cmp -s "$BUILD/intmatch-formatted.l8" "$BUILD/intmatch-formatted-again.l8" || die 'integer match formatting is not stable'
   example_exit "$tool" intmatch-formatted "$BUILD/intmatch-formatted.l8" 0
+  "./$tool" fmt programs/examples/match_format.l8 >"$BUILD/match-format.l8"
+  "./$tool" fmt "$BUILD/match-format.l8" >"$BUILD/match-format-again.l8"
+  cmp -s "$BUILD/match-format.l8" "$BUILD/match-format-again.l8" || die 'match arm reduction is not stable'
+  grep -q 'Value v -> v.data;' "$BUILD/match-format.l8" || die 'single expression match arm kept its braces'
+  grep -q '1 -> return 9;' "$BUILD/match-format.l8" || die 'single return match arm kept its braces'
+  grep -q 'Value v -> {' "$BUILD/match-format.l8" || die 'scoped declaration match arm lost its braces'
+  grep -q '^        1 -> {$' "$BUILD/match-format.l8" || die 'commented match arm lost its braces'
+  grep -q 'Keep this comment with its block' "$BUILD/match-format.l8" || die 'match arm comment was lost'
+  example_exit "$tool" match-format "$BUILD/match-format.l8" 0
+  "./$tool" fmt programs/examples/control_format.l8 >"$BUILD/control-format.l8"
+  "./$tool" fmt "$BUILD/control-format.l8" >"$BUILD/control-format-again.l8"
+  cmp -s "$BUILD/control-format.l8" "$BUILD/control-format-again.l8" || die 'control body reduction is not stable'
+  grep -q 'if (true) value = 1; else value = 2;' "$BUILD/control-format.l8" || die 'single if body kept its braces'
+  grep -q 'while (false) value = 9;' "$BUILD/control-format.l8" || die 'single while body kept its braces'
+  grep -q 'for i in 0..1 value = value + i;' "$BUILD/control-format.l8" || die 'single for body kept its braces'
+  grep -q 'if (false) {' "$BUILD/control-format.l8" || die 'nested if lost its protective braces'
+  grep -q 'if (true) local: int = value;' "$BUILD/control-format.l8" || die 'scoped declaration kept its braces'
+  grep -q '^    if (true) {$' "$BUILD/control-format.l8" || die 'commented control body lost its braces'
+  grep -q 'Keep this comment with its block' "$BUILD/control-format.l8" || die 'commented control body lost its comment'
+  example_exit "$tool" control-format-source programs/examples/control_format.l8 0
+  example_exit "$tool" control-format "$BUILD/control-format.l8" 0
+  example_exit "$tool" control-scope programs/examples/control_scope.l8 0
+  example_compile_fail "$tool" control-scope-if-leak programs/examples/control_scope_if_leak.l8 'undefined variable'
+  example_compile_fail "$tool" control-scope-else-leak programs/examples/control_scope_else_leak.l8 'undefined variable'
+  example_compile_fail "$tool" control-scope-while-leak programs/examples/control_scope_while_leak.l8 'undefined variable'
   example_compile_fail "$tool" intmatch-duplicate programs/examples/intmatch_duplicate.l8 'duplicate match arm'
   example_compile_fail "$tool" intmatch-missing-wildcard programs/examples/intmatch_missing_wildcard.l8 'integer match requires a wildcard arm'
   example_compile_fail "$tool" intmatch-range programs/examples/intmatch_range.l8 'match literal out of range'

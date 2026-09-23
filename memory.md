@@ -8,6 +8,11 @@ allocating values to be used in the program:
    reserved at the beginning of the function, and then unreserved at the end of
    the function.
 
+   A plain block, each `if` branch, and each `while` or `for` body introduces a
+   lexical scope, even when the control-flow body has no braces. A `for` loop also
+   scopes its iteration variable. These scopes limit name visibility; only a
+   `region` block resets the dynamic heap.
+
 3. The "new" keyword allocates memory on the heap for the specified type. We
    call this a "dynamic" allocation. Each dynamic allocation extends the end heap
    by the appropriate amount of memory. Alongside the "new" keyword is the
