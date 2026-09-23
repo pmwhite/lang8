@@ -53,6 +53,7 @@ l8 boolint file.l8
 l8 forlint file.l8
 l8 unreachable file.l8
 l8 unusedfields file.l8
+l8 unusedassign file.l8
 l8 as [-p|--profile] -o file.o file.s runtime.s
 l8 elfpack file.o -o file
 l8 build [--profile|-p] file.l8 -o file
@@ -85,6 +86,14 @@ false conditions. It leaves ordinary compilation warnings unchanged.
 read in the typed import graph. Records exposed through an `extern` signature
 are omitted because external code can inspect their layout. Raw memory access and
 uses outside the import graph are not modeled, so review findings before deletion.
+
+`unusedassign` reports local initializers and assignments overwritten before a
+read in straight-line code. It stops at branches and loops and omits locals whose
+address is taken, since an alias might observe their value. It also finds
+uninitialized declarations that can move to a later first assignment, including
+simple `if` and `match` assignments on every arm. Intervening statements may do
+other work, but must not reference the local. It does not change ordinary build
+warnings.
 
 ## Scripts (`./build.sh`)
 

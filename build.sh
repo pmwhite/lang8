@@ -429,6 +429,16 @@ check_retwarn() {
   [[ "$(grep -c 'record field' "$fields_err")" -eq 3 ]] || die 'unexpected unused field warning'
   "./$tool" boolint programs/examples/unusedfields.l8 2>"$boolint_err"
   grep -q 'int field enabled is used only as a boolean; use bool' "$boolint_err" || die 'expected bool-int record field warning'
+  local assignments_err="$BUILD/unusedassign.err"
+  "./$tool" unusedassign programs/examples/unusedassign.l8 2>"$assignments_err"
+  grep -q 'value assigned to first is overwritten before being read' "$assignments_err" || die 'expected dead initializer'
+  [[ "$(grep -c 'value assigned to second is overwritten before being read' "$assignments_err")" -eq 2 ]] || die 'expected both dead writes'
+  grep -q 'value assigned to nested is overwritten before being read' "$assignments_err" || die 'expected nested dead write'
+  [[ "$(grep -c 'overwritten before being read' "$assignments_err")" -eq 4 ]] || die 'unexpected unused assignment warning'
+  grep -q 'declaration of delayed can be combined with its first assignment' "$assignments_err" || die 'expected delayed declaration suggestion'
+  grep -q 'declaration of branched can be combined with its first assignment' "$assignments_err" || die 'expected if declaration suggestion'
+  grep -q 'declaration of matched can be combined with its first assignment' "$assignments_err" || die 'expected match declaration suggestion'
+  [[ "$(grep -c 'can be combined with its first assignment' "$assignments_err")" -eq 3 ]] || die 'unexpected declaration suggestion'
   if grep -q 'unnecessary return in early' "$err"; then die "unexpected unnecessary return in early"; fi
   if grep -q 'ignored return value in side' "$err"; then die "unexpected ignored value on assignment"; fi
   if grep -q 'ignored return value in callp' "$err"; then die "unexpected ignored value on procedure call"; fi
