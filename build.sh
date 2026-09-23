@@ -212,6 +212,11 @@ run_examples_selfhost() {
   example_exit "$tool" control-format-source programs/examples/control_format.l8 0
   example_exit "$tool" control-format "$BUILD/control-format.l8" 0
   check_optional_semis "$tool"
+  example_exit "$tool" forlint programs/examples/forlint.l8 0
+  "./$tool" forlint programs/examples/forlint.l8 2>"$BUILD/forlint.err"
+  grep -q 'while loop can use for i in 0..end' "$BUILD/forlint.err" || die 'missing ranged for suggestion'
+  grep -q 'while loop can use for item in xs' "$BUILD/forlint.err" || die 'missing collection for suggestion'
+  [[ "$(grep -c 'while loop can use' "$BUILD/forlint.err")" -eq 2 ]] || die 'unexpected for-loop suggestion'
   example_exit "$tool" control-scope programs/examples/control_scope.l8 0
   example_compile_fail "$tool" control-scope-if-leak programs/examples/control_scope_if_leak.l8 'undefined variable'
   example_compile_fail "$tool" control-scope-else-leak programs/examples/control_scope_else_leak.l8 'undefined variable'

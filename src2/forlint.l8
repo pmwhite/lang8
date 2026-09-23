@@ -1,0 +1,529 @@
+tag compiler_internal;
+
+// Find simple counted while loops whose induction variable can be scoped to a for.
+forlint_watch: ?*Obj = null;
+
+forlint_uses: int = 0;
+
+forlint_writes: int = 0;
+
+forlint_addrs: int = 0;
+
+forlint_scan_inits(head: ?*FieldInit) {
+    f: ?*FieldInit = head;
+    while (f != null) {
+        forlint_scan_expr(f.lhs, 0);
+        f = f.next
+    }
+}
+
+forlint_scan_expr(e: ?*Expr, mode: int) {
+    if (e == null) return;
+    n: *Expr = e;
+    match n.kind {
+        Var k -> {
+            if (k.var == forlint_watch && k.var != null) {
+                forlint_uses = forlint_uses + 1;
+                if (mode == 1) forlint_writes = forlint_writes + 1;
+                if (mode == 2) forlint_addrs = forlint_addrs + 1
+            }
+        }
+        Binary k -> {
+            forlint_scan_expr(k.lhs, 0);
+            forlint_scan_expr(k.rhs, 0)
+        }
+        Assign k -> {
+            forlint_scan_expr(k.lhs, 1);
+            forlint_scan_expr(k.rhs, 0)
+        }
+        Addr k -> forlint_scan_expr(k.lhs, 2);
+        Deref k -> forlint_scan_expr(k.lhs, mode);
+        Index k -> {
+            forlint_scan_expr(k.lhs, mode);
+            forlint_scan_expr(k.idx, 0)
+        }
+        Not k -> forlint_scan_expr(k.lhs, 0);
+        Neg k -> forlint_scan_expr(k.lhs, 0);
+        BitNot k -> forlint_scan_expr(k.lhs, 0);
+        LogAnd k -> {
+            forlint_scan_expr(k.lhs, 0);
+            forlint_scan_expr(k.rhs, 0)
+        }
+        LogOr k -> {
+            forlint_scan_expr(k.lhs, 0);
+            forlint_scan_expr(k.rhs, 0)
+        }
+        OrElse k -> {
+            forlint_scan_expr(k.lhs, 0);
+            forlint_scan_expr(k.rhs, 0)
+        }
+        Funcall k -> {
+            forlint_scan_expr(k.target, 0);
+            a: ?*Expr = k.args;
+            while (a != null) {
+                forlint_scan_expr(a, 0);
+                a = a.next
+            }
+        }
+        MemberAccess k -> forlint_scan_expr(k.lhs, mode);
+        As k -> forlint_scan_expr(k.lhs, mode);
+        Trunc k -> forlint_scan_expr(k.lhs, mode);
+        New k -> {
+            forlint_scan_expr(k.lhs, 0);
+            forlint_scan_expr(k.fill, 0);
+            forlint_scan_inits(k.inits)
+        }
+        StructLit k -> forlint_scan_inits(k.inits);
+        VariantLit k -> forlint_scan_inits(k.inits);
+        If k -> {
+            forlint_scan_expr(k.cond, 0);
+            forlint_scan_expr(k.then, 0);
+            forlint_scan_expr(k.els, 0)
+        }
+        Match k -> {
+            forlint_scan_expr(k.cond, 0);
+            a2: ?*MatchArm = k.arms;
+            while (a2 != null) {
+                forlint_scan_stmt(a2.body);
+                a2 = a2.next
+            }
+        }
+        Block k -> forlint_scan_stmts(k.body);
+        Sizeof k -> forlint_scan_expr(k.e, 0);
+        ArrayLit k -> {
+            a3: ?*Expr = k.elems;
+            while (a3 != null) {
+                forlint_scan_expr(a3, 0);
+                a3 = a3.next
+            }
+        }
+        Num _ -> { }
+        Null -> { }
+        FuncAddr _ -> { }
+    }
+}
+
+forlint_scan_stmt(s: ?*Stmt) {
+    if (s == null) return;
+    n: *Stmt = s;
+    match n.kind {
+        Return k -> forlint_scan_expr(k.lhs, 0);
+        If k -> {
+            forlint_scan_expr(k.cond, 0);
+            forlint_scan_stmt(k.then);
+            forlint_scan_stmt(k.els)
+        }
+        While k -> {
+            forlint_scan_expr(k.cond, 0);
+            forlint_scan_stmt(k.body)
+        }
+        For k -> {
+            forlint_scan_expr(k.iter, 0);
+            forlint_scan_expr(k.hi, 0);
+            forlint_scan_stmt(k.body)
+        }
+        Block k -> forlint_scan_stmts(k.body);
+        ExprStmt k -> forlint_scan_expr(k.lhs, 0);
+        Decl k -> forlint_scan_expr(k.init, 0);
+        Match k -> {
+            forlint_scan_expr(k.cond, 0);
+            a: ?*MatchArm = k.arms;
+            while (a != null) {
+                forlint_scan_stmt(a.body);
+                a = a.next
+            }
+        }
+        Raise k -> forlint_scan_inits(k.inits);
+        Try k -> {
+            forlint_scan_stmt(k.body);
+            a2: ?*CatchArm = k.arms;
+            while (a2 != null) {
+                forlint_scan_stmt(a2.body);
+                a2 = a2.next
+            }
+        }
+        Region k -> forlint_scan_stmt(k.body);
+        Comment _ -> { }
+    }
+}
+
+forlint_scan_stmts(head: ?*Stmt) {
+    s: ?*Stmt = head;
+    while (s != null) {
+        forlint_scan_stmt(s);
+        s = s.next
+    }
+}
+
+forlint_reset(obj: *Obj@immortal) {
+    forlint_watch = obj;
+    forlint_uses = 0;
+    forlint_writes = 0;
+    forlint_addrs = 0
+}
+
+forlint_var(e: ?*Expr): ?*Obj {
+    if (e == null) return null;
+    n: *Expr = e;
+    match n.kind {
+        Var k -> k.var;
+        _ -> null
+    }
+}
+
+forlint_one(e: ?*Expr): bool {
+    if (e == null) return false;
+    n: *Expr = e;
+    match n.kind {
+        Num k -> k.form == LIT_INT && k.val == 1;
+        _ -> false
+    }
+}
+
+forlint_simple_bound(e: *Expr): ?*Obj {
+    match e.kind {
+        Num _ -> null;
+        Var k -> {
+            obj: ?*Obj = k.var;
+            if (obj == null) return null;
+            o: *Obj = obj;
+            if (o.is_local != 0) return o;
+            null
+        }
+        Funcall k -> {
+            if (!streq(k.funcname, "len")) return null;
+            args: ?*Expr = k.args;
+            if (args == null) return null;
+            arg: *Expr = args;
+            if (arg.next != null) return null;
+            obj: ?*Obj = forlint_var(arg);
+            if (obj == null) return null;
+            o: *Obj = obj;
+            if (o.is_local != 0) return o;
+            null
+        }
+        _ -> null
+    }
+}
+
+forlint_bound_ok(e: *Expr): bool {
+    match e.kind {
+        Num k -> k.form == LIT_INT;
+        _ -> forlint_simple_bound(e) != null
+    }
+}
+
+forlint_collection(e: *Expr): ?*Obj {
+    match e.kind {
+        Funcall k -> {
+            if (!streq(k.funcname, "len")) return null;
+            args: ?*Expr = k.args;
+            if (args == null) return null;
+            arg: *Expr = args;
+            if (arg.next != null) return null;
+            forlint_var(arg)
+        }
+        _ -> null
+    }
+}
+
+forlint_increment(s: *Stmt, idx: *Obj): bool {
+    match s.kind {
+        ExprStmt k -> {
+            match k.lhs.kind {
+                Assign a -> {
+                    if (forlint_var(a.lhs) != idx) return false;
+                    match a.rhs.kind {
+                        Binary b -> {
+                            if (b.op != BinOp.Add || forlint_var(b.lhs) != idx) return false;
+                            forlint_one(b.rhs)
+                        }
+                        _ -> false
+                    }
+                }
+                _ -> false
+            }
+        }
+        _ -> false
+    }
+}
+
+forlint_start_ok(e: *Expr, idx: *Obj): bool {
+    match e.kind {
+        Num k -> k.form == LIT_INT;
+        Var k -> {
+            obj: ?*Obj = k.var;
+            if (obj == null) return false;
+            o: *Obj = obj;
+            o != idx && o.is_local != 0
+        }
+        _ -> false
+    }
+}
+
+forlint_zero(e: *Expr): bool {
+    match e.kind {
+        Num k -> k.form == LIT_INT && k.val == 0;
+        _ -> false
+    }
+}
+
+forlint_item_decl(s: *Stmt, idx: *Obj, coll: *Obj): ?*Obj {
+    match s.kind {
+        Decl k -> {
+            maybe_init: ?*Expr = k.init;
+            if (maybe_init == null) return null;
+            init: *Expr = maybe_init;
+            match init.kind {
+                Index x -> {
+                    if (forlint_var(x.lhs) == coll && forlint_var(x.idx) == idx) return k.var;
+                    null
+                }
+                _ -> null
+            }
+        }
+        _ -> null
+    }
+}
+
+forlint_put_bound(sb: *StrBuf@new, e: *Expr) {
+    match e.kind {
+        Num k -> sb_uint(sb, k.val);
+        Var k -> sb_puts(sb, k.name);
+        Funcall k -> {
+            sb_puts(sb, "len(");
+            arg: ?*Expr = k.args;
+            if (arg != null) {
+                obj: ?*Obj = forlint_var(arg);
+                if (obj != null) sb_puts(sb, obj.name)
+            }
+            sb_putc(sb, ')')
+        }
+        _ -> { }
+    }
+}
+
+forlint_warn(
+    fn: *Function,
+    loop: *Stmt,
+    idx: *Obj,
+    start: *Expr,
+    hi: *Expr,
+    item: ?*Obj,
+    coll: ?*Obj
+) {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, "while loop can use ");
+    if (item != null && coll != null) {
+        sb_puts(sb, "for ");
+        sb_puts(sb, item.name);
+        sb_puts(sb, " in ");
+        sb_puts(sb, coll.name)
+    } else {
+        sb_puts(sb, "for ");
+        sb_puts(sb, idx.name);
+        sb_puts(sb, " in ");
+        forlint_put_bound(sb, start);
+        sb_puts(sb, "..");
+        forlint_put_bound(sb, hi)
+    }
+    warning_at(fn.browse_file, loop.pos, sb_finish(sb))
+}
+
+forlint_check_pair(init_stmt: *Stmt, loop: *Stmt, fn: *Function) {
+    idx: ?*Obj = null;
+    start: ?*Expr = null;
+    match init_stmt.kind {
+        Decl k -> {
+            idx = k.var;
+            start = k.init
+        }
+        _ -> return
+    }
+    if (idx == null || start == null) return;
+    iu: *Obj = idx;
+    su: *Expr = start;
+    if (!is_int_ty(iu.ty) || !forlint_start_ok(su, iu)) return;
+    if (init_stmt.next != loop) {
+        match su.kind {
+            Num _ -> { }
+            _ -> return
+        }
+        forlint_reset(iu);
+        between: ?*Stmt = init_stmt.next;
+        while (between != null && between != loop) {
+            forlint_scan_stmt(between);
+            between = between.next
+        }
+        if (forlint_uses != 0) return
+    }
+    cond: *Expr;
+    body: *Stmt;
+    match loop.kind {
+        While k -> {
+            cond = k.cond;
+            body = k.body
+        }
+        _ -> return
+    }
+    hi: *Expr;
+    match cond.kind {
+        Binary k -> {
+            if (k.op != BinOp.Lt || forlint_var(k.lhs) != iu) return;
+            hi = k.rhs
+        }
+        _ -> return
+    }
+    if (!forlint_bound_ok(hi)) return;
+    bound: ?*Obj = forlint_simple_bound(hi);
+    if (bound == iu) return;
+    head: ?*Stmt = null;
+    match body.kind {
+        Block k -> head = k.body;
+        _ -> return
+    }
+    if (head == null) return;
+    first: *Stmt = head;
+    tail: *Stmt = first;
+    while (tail.next != null) {
+        next: ?*Stmt = tail.next;
+        if (next != null) tail = next
+    }
+    if (!forlint_increment(tail, iu)) return;
+    // A for item is a fresh scoped variable; the old index must not escape.
+    forlint_reset(iu);
+    forlint_scan_stmts(loop.next);
+    if (forlint_uses != 0) return;
+    forlint_reset(iu);
+    forlint_scan_stmts(fn.body);
+    if (forlint_addrs != 0) return;
+    forlint_reset(iu);
+    p: ?*Stmt = head;
+    while (p != null && p != tail) {
+        forlint_scan_stmt(p);
+        p = p.next
+    }
+    if (forlint_writes != 0 || forlint_addrs != 0) return;
+    if (bound != null) {
+        bu: *Obj = bound;
+        forlint_reset(bu);
+        forlint_scan_stmt(body);
+        if (forlint_writes != 0 || forlint_addrs != 0) return;
+        forlint_reset(bu);
+        forlint_scan_stmts(fn.body);
+        if (forlint_addrs != 0) return
+    }
+    item: ?*Obj = null;
+    coll: ?*Obj = forlint_collection(hi);
+    if (coll != null && forlint_zero(su) && head != tail) {
+        cu: *Obj = coll;
+        item = forlint_item_decl(head, iu, cu);
+        if (item != null) {
+            forlint_reset(iu);
+            p = head.next;
+            while (p != null && p != tail) {
+                forlint_scan_stmt(p);
+                p = p.next
+            }
+            if (forlint_uses != 0) item = null
+        }
+    }
+    forlint_warn(fn, loop, iu, su, hi, item, coll)
+}
+
+forlint_find_init(head: ?*Stmt, loop: *Stmt, fn: *Function) {
+    idx: ?*Obj = null;
+    match loop.kind {
+        While k -> {
+            match k.cond.kind {
+                Binary b -> {
+                    if (b.op != BinOp.Lt) return;
+                    idx = forlint_var(b.lhs)
+                }
+                _ -> return
+            }
+        }
+        _ -> return
+    }
+    if (idx == null) return;
+    found: ?*Stmt = null;
+    s: ?*Stmt = head;
+    while (s != null && s != loop) {
+        su: *Stmt = s;
+        match su.kind {
+            Decl d -> {
+                if (d.var == idx) found = su
+            }
+            _ -> { }
+        }
+        s = su.next
+    }
+    if (found != null) forlint_check_pair(found, loop, fn)
+}
+
+forlint_walk_stmt(s: ?*Stmt, fn: *Function) {
+    if (s == null) return;
+    n: *Stmt = s;
+    match n.kind {
+        If k -> {
+            forlint_walk_stmt(k.then, fn);
+            forlint_walk_stmt(k.els, fn)
+        }
+        While k -> forlint_walk_stmt(k.body, fn);
+        For k -> forlint_walk_stmt(k.body, fn);
+        Block k -> forlint_walk_stmts(k.body, fn);
+        Match k -> {
+            a: ?*MatchArm = k.arms;
+            while (a != null) {
+                forlint_walk_stmt(a.body, fn);
+                a = a.next
+            }
+        }
+        Try k -> {
+            forlint_walk_stmt(k.body, fn);
+            a2: ?*CatchArm = k.arms;
+            while (a2 != null) {
+                forlint_walk_stmt(a2.body, fn);
+                a2 = a2.next
+            }
+        }
+        Region k -> forlint_walk_stmt(k.body, fn);
+        _ -> { }
+    }
+}
+
+forlint_walk_stmts(head: ?*Stmt, fn: *Function) {
+    s: ?*Stmt = head;
+    while (s != null) {
+        su: *Stmt = s;
+        forlint_find_init(head, su, fn);
+        forlint_walk_stmt(su, fn);
+        s = su.next
+    }
+}
+
+check_for_loops() {
+    fn: ?*Function = functions;
+    while (fn != null) {
+        if (fn.is_extern == 0) forlint_walk_stmts(fn.body, fn);
+        fn = fn.next
+    }
+}
+
+compiler_forlint_main(argc: int, argv: []str) noregion: int {
+    if (argc != 2) {
+        write(2, "error: usage: l8 forlint <file.l8>\n", len("error: usage: l8 forlint <file.l8>\n"));
+        return 1
+    }
+    try {
+        do_profile = 0;
+        checking_unused_functions = 1;
+        compiler_analyze(bytes(argv[1]));
+        checking_unused_functions = 0;
+        check_for_loops();
+        0
+    } with Error e -> {
+        print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);
+        1
+    }
+}

@@ -50,6 +50,7 @@ with callbacks does not require a host compiler or adapter library.
 l8 compile [--profile|-p] file.l8 > file.s
 l8 unused file.l8 [file.l8 ...]
 l8 boolint file.l8
+l8 forlint file.l8
 l8 as [-p|--profile] -o file.o file.s runtime.s
 l8 elfpack file.o -o file
 l8 build [--profile|-p] file.l8 -o file
@@ -67,6 +68,12 @@ Ordinary `compile` and `build` commands do not report unused functions.
 `int` variables, fields, parameters, and return values that are used only to carry
 Boolean values. Numeric operations, non-Boolean literals, and external interfaces
 exclude a value from the report.
+
+`forlint` reports conservative `while`-loop candidates for ranged or collection
+`for` loops. It recognizes an integer index advanced by one at the end of the
+body, a stable upper bound, and no later use of the index. A collection suggestion
+also requires the body's first statement to bind `xs[i]` and no other use of `i`.
+It reports locations and suggested loop headers without rewriting source.
 
 ## Scripts (`./build.sh`)
 
