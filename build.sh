@@ -247,7 +247,7 @@ run_examples_selfhost() {
   example_compile_fail "$tool" narrowasgn programs/examples/narrowasgn.l8 'assignment type mismatch'
   example_compile_fail "$tool" optsliceidx programs/examples/optsliceidx.l8 'index of optional slice'
   example_compile_fail "$tool" optslicelen programs/examples/optslicelen.l8 'len of optional slice'
-  example "$tool" for programs/examples/for.l8 'YYYYYYY'
+  example "$tool" for programs/examples/for.l8 'YYYYYYYY'
   example "$tool" forrange programs/examples/forrange.l8 'YYYYYYYYY'
   example "$tool" forz programs/examples/forz.l8 ''
   example_compile_fail "$tool" forint programs/examples/forint.l8 'for requires str'
