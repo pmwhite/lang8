@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run L8 examples with expectations stored in trailing //% comments.
+"""Run L8 compiler fixtures with expectations stored in trailing //% comments.
 
 Usage: python3 tools/expect.py COMPILER BUILD_DIR FILE [FILE ...]
        python3 tools/expect.py COMPILER BUILD_DIR --discover DIR [--discover DIR ...]
@@ -7,15 +7,16 @@ Usage: python3 tools/expect.py COMPILER BUILD_DIR FILE [FILE ...]
     //% test: run
     //% stdout: "Hi\n"
     //% stderr: ""
+    //% compiler-warnings: ["unused local value in main"]
     //% exit: 0
     //% bootstrap: true
 
     //% test: compile-fail
     //% error-contains: "assignment type mismatch"
 
-Strings use JSON escapes. A run expects empty stderr unless specified. Compiler
-diagnostics from a successful build are displayed but do not fail a run test;
-warning-specific tests remain in build.sh.
+Strings use JSON escapes. A run expects empty program stderr and no compiler
+warnings unless specified. Warning messages omit source locations so formatted
+copies can share the same expectations.
 """
 
 import difflib
@@ -23,6 +24,7 @@ import argparse
 import hashlib
 import json
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -33,7 +35,7 @@ def expectations(path: pathlib.Path) -> dict[str, object]:
         if not line.startswith("//% "):
             continue
         key, separator, raw = line[4:].partition(": ")
-        if not separator or key not in {"test", "stdout", "stderr", "exit", "error-contains", "bootstrap"}:
+        if not separator or key not in {"test", "stdout", "stderr", "exit", "error-contains", "bootstrap", "compiler-warnings"}:
             raise ValueError(f"{path}:{number}: invalid expectation")
         if key in result:
             raise ValueError(f"{path}:{number}: duplicate {key} expectation")
@@ -52,6 +54,9 @@ def expectations(path: pathlib.Path) -> dict[str, object]:
             raise ValueError(f"{path}: stdout and stderr must be strings")
         if type(result["exit"]) is not int or not 0 <= result["exit"] <= 255:
             raise ValueError(f"{path}: exit must be an integer from 0 to 255")
+        warnings = result.get("compiler-warnings", [])
+        if not isinstance(warnings, list) or not all(isinstance(message, str) and message for message in warnings):
+            raise ValueError(f"{path}: compiler-warnings must be a list of nonempty strings")
     elif mode == "compile-fail":
         if set(result) - {"test", "error-contains", "bootstrap"} or "error-contains" not in result or not isinstance(result["error-contains"], str) or not result["error-contains"]:
             raise ValueError(f"{path}: compile-fail needs one nonempty error-contains string")
@@ -96,6 +101,16 @@ def check_stream(label: str, wanted: str, actual: bytes) -> None:
         raise ValueError(f"{diff}\nexpected bytes {wanted_bytes!r}, got {actual!r}")
 
 
+def compiler_warnings(stderr: bytes) -> list[str]:
+    messages = []
+    for line in stderr.decode("utf-8", errors="replace").splitlines():
+        warning = re.fullmatch(r"warning: .+:\d+:\d+: (.+)", line)
+        if not warning:
+            raise ValueError(f"unexpected compiler stderr: {line}")
+        messages.append(warning.group(1))
+    return messages
+
+
 def run_one(compiler: pathlib.Path, build_dir: pathlib.Path, source: pathlib.Path) -> None:
     expect = expectations(source)
     if expect["test"] == "compile-fail":
@@ -113,8 +128,7 @@ def run_one(compiler: pathlib.Path, build_dir: pathlib.Path, source: pathlib.Pat
     build = subprocess.run([str(compiler), "build", str(source), "-o", str(output)], capture_output=True)
     if build.returncode:
         raise ValueError(f"build exited {build.returncode}:\n{build.stderr.decode('utf-8', errors='replace')}")
-    if build.stderr:
-        sys.stderr.buffer.write(build.stderr)
+    check_equal("compiler warnings", expect.get("compiler-warnings", []), compiler_warnings(build.stderr))
     proc = subprocess.run([str(output)], capture_output=True)
     check_equal("exit status", expect["exit"], proc.returncode)
     check_stream("stdout", expect["stdout"], proc.stdout)

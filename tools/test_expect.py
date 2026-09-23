@@ -36,6 +36,20 @@ class ExpectTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "stdout"):
                 expect.run_one(pathlib.Path("compiler"), pathlib.Path(self.temp.name), source)
 
+    def test_compiler_warnings_are_expected_without_source_locations(self) -> None:
+        source = self.fixture('//% test: run\n//% stdout: ""\n//% exit: 0\n//% compiler-warnings: ["unused local value in main"]\n')
+        build = subprocess.CompletedProcess([], 0, b"", b"warning: case.l8:4:7: unused local value in main\n")
+        run = subprocess.CompletedProcess([], 0, b"", b"")
+        with mock.patch.object(expect.subprocess, "run", side_effect=[build, run]):
+            expect.run_one(pathlib.Path("compiler"), pathlib.Path(self.temp.name), source)
+
+    def test_unexpected_compiler_warning_fails(self) -> None:
+        source = self.fixture('//% test: run\n//% stdout: ""\n//% exit: 0\n')
+        build = subprocess.CompletedProcess([], 0, b"", b"warning: case.l8:4:7: unused local value in main\n")
+        with mock.patch.object(expect.subprocess, "run", return_value=build):
+            with self.assertRaisesRegex(ValueError, "compiler warnings"):
+                expect.run_one(pathlib.Path("compiler"), pathlib.Path(self.temp.name), source)
+
     def test_compile_failure_requires_matching_error(self) -> None:
         source = self.fixture('//% test: compile-fail\n//% error-contains: "type mismatch"\n')
         result = subprocess.CompletedProcess([], 1, b"", b"error: undefined variable\n")

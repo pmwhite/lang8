@@ -14,6 +14,10 @@ comments. A successful program uses:
 be empty unless a `//% stderr: "..."` line specifies it. Strings are JSON
 strings, so use `\n`, `\t`, and `\\` for escapes. The exit status must be an
 integer from 0 through 255.
+Compiler warnings are expected to be absent unless a
+`//% compiler-warnings: ["warning message", ...]` line lists their messages in
+emission order. Source paths and locations are omitted so formatted copies of
+a fixture use the same expectations. An unexpected warning fails the test.
 Add `//% bootstrap: true` only when the fixture also works with the stage-1
 compiler. The stage-2 run includes every discovered fixture.
 

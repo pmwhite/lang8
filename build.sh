@@ -17,19 +17,37 @@ now_ms() {
   echo $(( $(date +%s%N) / 1000000 ))
 }
 
-# Record a timed step. Progress is one line; timings go to the final summary.
-# With --bench, run the command REPEAT times and record the average.
+# Keep successful output to one narrow line per step. Full output is logged.
+# With --bench, run the command REPEAT times and show the average.
 step() {
   local name="$1"
   shift
-  local start end elapsed i total=0
-  printf '→ %s\n' "$name"
+  local start end elapsed i status total=0
+  local number=$(( ${#STEP_NAMES[@]} + 1 ))
+  local log_dir="$BUILD/logs"
+  local log
+  mkdir -p "$log_dir"
+  printf -v log '%s/%02d.log' "$log_dir" "$number"
+  printf 'step: %s\ncommand:' "$name" >"$log"
+  printf ' %q' "$@" >>"$log"
+  printf '\n' >>"$log"
+  printf '%02d %-17.17s ' "$number" "$name"
   for ((i = 1; i <= REPEAT; i++)); do
+    if [[ "$REPEAT" -gt 1 ]]; then
+      printf '\nrun %d/%d\n' "$i" "$REPEAT" >>"$log"
+    fi
     start=$(now_ms)
-    if [[ "$i" -eq 1 ]]; then
-      "$@"
-    else
-      "$@" >/dev/null
+    # Run in a subshell so errexit still applies inside shell functions.
+    set +e
+    ( set -e; "$@" ) >>"$log" 2>&1
+    status=$?
+    set -e
+    if [[ "$status" -ne 0 ]]; then
+      printf 'FAIL\n' >&2
+      printf 'step %02d failed (%d)\n' "$number" "$status" >&2
+      printf 'log: %s\n' "$log" >&2
+      cat "$log" >&2
+      return "$status"
     fi
     end=$(now_ms)
     total=$((total + end - start))
@@ -37,27 +55,20 @@ step() {
   elapsed=$(( (total + REPEAT / 2) / REPEAT ))
   STEP_NAMES+=("$name")
   STEP_MS+=("$elapsed")
+  printf '%6dms\n' "$elapsed"
 }
 
 print_summary() {
-  local i width=0 name ms total=0
-  echo
-  if [[ "$REPEAT" -gt 1 ]]; then
-    echo "========== timings (avg of ${REPEAT}) =========="
-  else
-    echo '========== timings =========='
-  fi
-  for name in "${STEP_NAMES[@]}"; do
-    (( ${#name} > width )) && width=${#name}
-  done
-  for i in "${!STEP_NAMES[@]}"; do
-    name="${STEP_NAMES[$i]}"
-    ms="${STEP_MS[$i]}"
+  local ms total=0
+  for ms in "${STEP_MS[@]}"; do
     total=$((total + ms))
-    printf "  %-*s  %6d ms\n" "$width" "$name" "$ms"
   done
-  printf "  %-*s  %6d ms\n" "$width" "TOTAL" "$total"
-  echo '============================='
+  if [[ "$REPEAT" -gt 1 ]]; then
+    printf 'avg of %d: %d.%03ds\n' "$REPEAT" "$((total / 1000))" "$((total % 1000))"
+  else
+    printf 'total: %d.%03ds\n' "$((total / 1000))" "$((total % 1000))"
+  fi
+  printf 'logs: %s/logs\n' "$BUILD"
 }
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -116,7 +127,7 @@ check_fmt_src2() {
   done
 }
 
-# Bootstrap-compatible examples as one timed step.
+# Bootstrap-compatible compiler fixtures as one timed step.
 run_bootstrap_tests() {
   local tool="$1"
   python3 tools/expect.py "./$tool" "$BUILD/expect" --discover tests/compiler --bootstrap-only
@@ -153,8 +164,13 @@ main(): int {
     if (value != id()) return 1;
     0
 }
+
+//% test: run
+//% stdout: ""
+//% exit: 0
+//% compiler-warnings: ["unused local i in main", "unused local scratch in main", "unnecessary return in id"]
 EOF
-  example_exit "$tool" optional-semi "$BUILD/optional-semi.l8" 0
+  expect_source "$tool" "$BUILD/optional-semi.l8"
   "./$tool" fmt "$BUILD/optional-semi.l8" >"$BUILD/optional-semi-formatted.l8"
   grep -q '^tag example;$' "$BUILD/optional-semi-formatted.l8" || die 'file tag lost its required semicolon'
   grep -q '^    return 3$' "$BUILD/optional-semi-formatted.l8" || die 'final return kept its semicolon'
@@ -162,7 +178,7 @@ EOF
   grep -q '^        2 -> value = value + 1;$' "$BUILD/optional-semi-formatted.l8" || die 'non-final match arm lost its semicolon'
   grep -q '^        _ -> value = 9$' "$BUILD/optional-semi-formatted.l8" || die 'final match arm kept its semicolon'
   grep -q '^    0$' "$BUILD/optional-semi-formatted.l8" || die 'final expression kept its semicolon'
-  example_exit "$tool" optional-semi-formatted "$BUILD/optional-semi-formatted.l8" 0
+  expect_source "$tool" "$BUILD/optional-semi-formatted.l8"
   for declaration in 'value: int = 1' 'extern foreign(): int' 'exception Empty' 'need "libnothing.so"' 'import "unused.l8"' 'type Choice = | A | B'; do
     printf 'tag example;\nmain(): int { 0; }\n%s\n' "$declaration" >"$BUILD/optional-semi-eof.l8"
     "./$tool" fmt "$BUILD/optional-semi-eof.l8" >"$BUILD/optional-semi-eof-formatted.l8"
@@ -170,14 +186,6 @@ EOF
   done
   printf 'tag example;\nmain(): int { value: int = 1 value }\n' >"$BUILD/optional-semi-required.l8"
   example_compile_fail "$tool" optional-semi-required "$BUILD/optional-semi-required.l8" 'unexpected token'
-}
-
-example_exit() {
-  local tool="$1" name="$2" src="$3" want="$4"
-  "./$tool" build "$src" -o "$BUILD/${name}"
-  local rc=0
-  "$BUILD/${name}" || rc=$?
-  if [[ "$rc" -ne "$want" ]]; then die "$name exited $rc, expected $want"; fi
 }
 
 # Full annotated suite and specialized stage-2 checks.
@@ -358,7 +366,7 @@ do_clean() {
 do_bootstrap() {
   require_bootstrap
   ensure_build_dir
-  step 'install bootstrap (l8c0)' bootstrap_install_l8c0
+  step 'install bootstrap' bootstrap_install_l8c0
 }
 
 bootstrap_install_l8c0() {
@@ -368,13 +376,13 @@ bootstrap_install_l8c0() {
 
 build_stage1() {
   require_bootstrap
-  step 'stage1 direct (bootstrap → src1)' ./bootstrap build src1/main.l8 -o l8c1
+  step 'stage1 bootstrap' ./bootstrap build src1/main.l8 -o l8c1
 }
 
 do_bootstrap_tests() {
   ensure_build_dir
   build_stage1
-  step 'compiler tests [l8c1]' run_bootstrap_tests l8c1
+  step 'compiler tests 1' run_bootstrap_tests l8c1
 }
 
 build_game() {
@@ -389,7 +397,7 @@ do_game() {
     build_stage1
     tool="l8c1"
   fi
-  step "block game [$tool]" build_game "$tool"
+  step "block game $tool" build_game "$tool"
 }
 
 do_game_test() {
@@ -398,9 +406,9 @@ do_game_test() {
   if [[ ! -x "$expect_tool" ]]; then
     build_stage1
     expect_tool="$BUILD/game-expect-compiler"
-    step 'game expect compiler' ./l8c1 build src2/main.l8 -o "$expect_tool"
+    step 'game test tool' ./l8c1 build src2/main.l8 -o "$expect_tool"
   fi
-  step 'headless game library tests' python3 tools/lib_expect.py --discover programs/block-game --compiler "$expect_tool"
+  step 'game tests' python3 tools/lib_expect.py --discover programs/block-game --compiler "$expect_tool"
 }
 
 do_terminal() {
@@ -410,7 +418,7 @@ do_terminal() {
     build_stage1
     tool="l8c1"
   fi
-  step "terminal [$tool]" build_terminal_binary "$tool"
+  step "terminal $tool" build_terminal_binary "$tool"
 }
 
 build_terminal_binary() {
@@ -428,20 +436,20 @@ do_terminal_test() {
   local expect_tool="./$tool"
   if [[ "$tool" == l8c1 ]]; then
     expect_tool="$BUILD/terminal-expect-compiler"
-    step 'terminal expect compiler' ./l8c1 build src2/main.l8 -o "$expect_tool"
+    step 'term test tool' ./l8c1 build src2/main.l8 -o "$expect_tool"
   fi
-  step 'terminal library tests' python3 tools/lib_expect.py --discover programs/terminal --compiler "$expect_tool"
-  step 'terminal PTY build' "./$tool" build programs/terminal/test_pty.l8 -o "$BUILD/terminal-pty-test"
-  step 'terminal system-shell PTY tests' env SHELL=/bin/bash LC_ALL=C.UTF-8 L8_EXPECT_BASH=yes L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= "$BUILD/terminal-pty-test"
-  step 'terminal shell-fallback PTY tests' env SHELL=/definitely/missing LC_ALL=C.UTF-8 L8_EXPECT_BASH= L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= "$BUILD/terminal-pty-test"
-  step 'terminal closed-stdio PTY tests' env SHELL=/bin/sh LC_ALL=C.UTF-8 L8_EXPECT_BASH= L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= "$BUILD/terminal-pty-test" --closed-stdio
-  step 'terminal Wayland/PTY tests' python3 programs/terminal/test_integration.py "$BUILD/terminal"
+  step 'terminal tests' python3 tools/lib_expect.py --discover programs/terminal --compiler "$expect_tool"
+  step 'PTY test build' "./$tool" build programs/terminal/test_pty.l8 -o "$BUILD/terminal-pty-test"
+  step 'PTY system shell' env SHELL=/bin/bash LC_ALL=C.UTF-8 L8_EXPECT_BASH=yes L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= "$BUILD/terminal-pty-test"
+  step 'PTY fallback' env SHELL=/definitely/missing LC_ALL=C.UTF-8 L8_EXPECT_BASH= L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= "$BUILD/terminal-pty-test"
+  step 'PTY closed stdio' env SHELL=/bin/sh LC_ALL=C.UTF-8 L8_EXPECT_BASH= L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= "$BUILD/terminal-pty-test" --closed-stdio
+  step 'PTY Wayland' python3 programs/terminal/test_integration.py "$BUILD/terminal"
 }
 
 do_callback_test() {
   ensure_build_dir
   build_stage1
-  step 'Function values and C callbacks [l8c1]' python3 tests/callbacks/test_callbacks.py ./l8c1 "$BUILD/callbacks"
+  step 'C callbacks' python3 tests/callbacks/test_callbacks.py ./l8c1 "$BUILD/callbacks"
 }
 
 build_http() {
@@ -454,7 +462,7 @@ build_http() {
 do_http() {
   ensure_build_dir
   if [[ -z "${L8C:-}" ]]; then build_stage1; fi
-  step 'HTTP client and server' build_http
+  step 'HTTP build' build_http
 }
 
 do_http_test() {
@@ -466,10 +474,10 @@ do_http_test() {
   fi
   local expect_tool="$BUILD/http/expect-compiler"
   mkdir -p "$BUILD/http"
-  step 'HTTP expect compiler' "$http_tool" build src2/main.l8 -o "$expect_tool"
-  step 'HTTP specification integrity' python3 programs/http/spec/fetch.py --check
-  step 'HTTP library tests' python3 tools/lib_expect.py --discover programs/http/tests --compiler "$expect_tool"
-  step 'HTTP protocol, API, and TCP tests' env HTTP_BUILD="$BUILD/http" L8C="$http_tool" python3 -m unittest discover -s programs/http/tests -v
+  step 'HTTP test tool' "$http_tool" build src2/main.l8 -o "$expect_tool"
+  step 'HTTP spec check' python3 programs/http/spec/fetch.py --check
+  step 'HTTP lib tests' python3 tools/lib_expect.py --discover programs/http/tests --compiler "$expect_tool"
+  step 'HTTP protocol' env HTTP_BUILD="$BUILD/http" L8C="$http_tool" python3 -m unittest discover -s programs/http/tests -v
 }
 
 build_websocket() {
@@ -482,7 +490,7 @@ build_websocket() {
 do_websocket() {
   ensure_build_dir
   if [[ -z "${L8C:-}" ]]; then build_stage1; fi
-  step 'WebSocket client and server' build_websocket
+  step 'WebSocket build' build_websocket
 }
 
 do_websocket_test() {
@@ -494,10 +502,10 @@ do_websocket_test() {
     mkdir -p "$BUILD/websocket"
     step 'expect compiler' ./l8c1 build src2/main.l8 -o "$expect_tool"
   fi
-  step 'WebSocket client and server' build_websocket
-  step 'library expect runner' python3 -m unittest tools.test_lib_expect
-  step 'WebSocket protocol, visibility, and TCP tests' env WEBSOCKET_BUILD="$BUILD/websocket" python3 -m unittest discover -s programs/websocket/tests -v
-  step 'WebSocket codec vectors' python3 tools/lib_expect.py --discover programs/websocket/tests --compiler "$expect_tool"
+  step 'WebSocket build' build_websocket
+  step 'expect runner' python3 -m unittest tools.test_lib_expect
+  step 'WebSocket tests' env WEBSOCKET_BUILD="$BUILD/websocket" python3 -m unittest discover -s programs/websocket/tests -v
+  step 'WebSocket vectors' python3 tools/lib_expect.py --discover programs/websocket/tests --compiler "$expect_tool"
 }
 
 print_compiler_phases() {
@@ -511,18 +519,18 @@ do_selfhost() {
   [[ -f src1/main.l8 ]] || die "src1/main.l8 missing"
   [[ -f src2/main.l8 ]] || die "src2/main.l8 missing"
 
-  step 'stage1 direct (l8c0 → src1)' ./l8c0 build src1/main.l8 -o l8c1
-  step 'stage2 direct (l8c1 → src2)' ./l8c1 build src2/main.l8 -o l8c2
-  step 'fmt src2 [l8c2]' fmt_src2 l8c2
-  step 'fmt src2 stable [l8c2]' check_fmt_src2 l8c2
-  step 'stage3 direct (l8c2 → src2)' ./l8c2 build src2/main.l8 -o l8c3
-  step 'stage4 direct (l8c3 → src2)' ./l8c3 build src2/main.l8 -o l8c4
-  step 'verify stage3 exe == stage4 exe' verify_same l8c3 l8c4
+  step 'stage1 from l8c0' ./l8c0 build src1/main.l8 -o l8c1
+  step 'stage2 from l8c1' ./l8c1 build src2/main.l8 -o l8c2
+  step 'format src2' fmt_src2 l8c2
+  step 'check src2 format' check_fmt_src2 l8c2
+  step 'stage3 from l8c2' ./l8c2 build src2/main.l8 -o l8c3
+  step 'stage4 from l8c3' ./l8c3 build src2/main.l8 -o l8c4
+  step 'check fixpoint' verify_same l8c3 l8c4
 
   step 'expect runners' python3 -m unittest tools.test_expect tools.test_lib_expect
-  step 'compiler tests [l8c3]' run_compiler_tests l8c3
-  step 'browse [l8c3]' check_browse l8c3
-  step 'compiler phases [l8c3]' print_compiler_phases
+  step 'compiler tests 3' run_compiler_tests l8c3
+  step 'browse check' check_browse l8c3
+  step 'compiler phases' print_compiler_phases
   cp l8c3 l8
 }
 
@@ -531,8 +539,9 @@ confirm_promote() {
   if [[ "$FORCE" -eq 1 ]]; then
     return 0
   fi
-  echo "About to update $what in the working tree."
-  echo "Promotes are meant for an isolated commit — not every change."
+  echo 'About to update:'
+  echo "$what"
+  echo 'Promote in its own commit.'
   read -r -p "Continue? [y/N] " ans
   [[ "$ans" == "y" || "$ans" == "Y" ]] || die "aborted"
 }
@@ -549,47 +558,51 @@ need_artifact() {
 
 do_promote_bin1() {
   need_artifact "l8c1" "./build.sh selfhost"
-  confirm_promote "bootstrap executable (from stage-1 / src1)"
+  confirm_promote 'bootstrap (from stage 1)'
   cp l8c1 bootstrap
   chmod +x bootstrap
-  echo "updated bootstrap executable from l8c1"
-  echo "Next: review diff, then commit only the snapshot (see BOOTSTRAP.md)."
+  echo 'Updated bootstrap from l8c1.'
+  echo 'Review the diff, then commit'
+  echo 'only this snapshot.'
 }
 
 do_promote_bin2() {
   need_artifact "l8c3" "./build.sh selfhost"
-  confirm_promote "bootstrap executable (from stage-2 fixpoint / src2)"
+  confirm_promote 'bootstrap (from stage 2)'
   cp l8c3 bootstrap
   chmod +x bootstrap
-  echo "updated bootstrap executable from l8c3"
-  echo "Next: review diff, then commit only the snapshot (see BOOTSTRAP.md)."
+  echo 'Updated bootstrap from l8c3.'
+  echo 'Review the diff, then commit'
+  echo 'only this snapshot.'
 }
 
 do_promote_source() {
   [[ -f src2/main.l8 ]] || die "src2/main.l8 missing"
-  confirm_promote "src1/ (from src2/)"
+  confirm_promote 'src1 (from src2)'
   rm -rf src1
   cp -R src2 src1
-  echo "updated src1/ from src2/"
-  echo "Bootstrap was not changed. Use promote-bin2 or promote if the seed should move too."
+  echo 'Updated src1 from src2.'
+  echo 'Bootstrap is unchanged.'
 }
 
 do_promote() {
   need_artifact "l8c3" "./build.sh selfhost"
-  confirm_promote "src1/ and bootstrap executable (full stage-2 promote)"
+  confirm_promote 'src1 and bootstrap'
   rm -rf src1
   cp -R src2 src1
   cp l8c3 bootstrap
   chmod +x bootstrap
-  echo "updated src1/ and bootstrap executable from stage-2 fixpoint"
-  echo "Next: review diff, then commit this promote alone."
+  echo 'Updated src1 and bootstrap'
+  echo 'from the stage 2 fixpoint.'
+  echo 'Review the diff, then commit'
+  echo 'this promote alone.'
 }
 
 do_all() {
   do_bootstrap
   do_bootstrap_tests
   do_selfhost
-  step 'block game [l8]' build_game l8
+  step 'block game l8' build_game l8
   do_game_test
   print_summary
   echo 'OK'
@@ -597,35 +610,53 @@ do_all() {
 
 usage() {
   cat <<'EOF'
-Usage: ./build.sh [command] [--force] [--bench]
+Usage: ./build.sh [command]
+       [--force] [--bench]
 
 Commands:
-  all             Install bootstrap, compiler tests, self-host, and headless game tests (default)
-  bootstrap       Copy the saved bootstrap executable → l8c0
-  compiler-test   Build stage 1 and run bootstrap-compatible compiler tests
-  game            Build programs/block-game/block-game.l8 → .build/block-game
-  game-test       Run headless block-game library tests
-  terminal        Build programs/terminal/terminal.l8 → .build/terminal
-  terminal-test   Run terminal screen, PTY, and isolated headless Wayland tests
-  callback-test   Test function values, lifetimes, and the C ABI (requires cc/as)
-  http            Build programs/http client and server → .build/http/
-  http-test       Verify downloaded specifications and run the HTTP test suite
-  websocket       Build WebSocket client and server → .build/websocket/
-  websocket-test  Run WebSocket codec, API visibility, and TCP tests
-  selfhost        direct src1 → l8c1; src2 → l8c2; fmt src2; src2 → l8c3/l8c4; fixpoint l8c3==l8c4; tests; browse; phases
-  promote-bin1    Copy the stage-1 executable → bootstrap
-  promote-bin2    Copy the stage-2 fixpoint executable → bootstrap
-  promote-source  Replace src1/ with src2/ (no bootstrap change)
-  promote         promote-source + promote-bin2
-  clean           Remove build artifacts
-  help            Show this help
+  all (default)
+    Build and test everything
+  bootstrap
+    Install saved compiler
+  compiler-test
+    Test bootstrap compiler
+  game / game-test
+    Build or test block game
+  terminal / terminal-test
+    Build or test terminal
+  callback-test
+    Test function values and
+    C callbacks (needs cc/as)
+  http / http-test
+    Build or test HTTP
+  websocket / websocket-test
+    Build or test WebSocket
+  selfhost
+    Build compiler to fixpoint
+    and run compiler tests
+  promote-bin1
+    Save stage 1 as bootstrap
+  promote-bin2
+    Save stage 2 as bootstrap
+  promote-source
+    Copy src2 to src1
+  promote
+    Promote source and binary
+  clean
+    Remove build artifacts
+  help
+    Show this help
 
---force   Skip the interactive promote confirmation (still requires artifacts).
---bench   Run each timed step 10 times and report average milliseconds.
+Options:
+  --force
+    Skip promote confirmation
+  --bench
+    Run each step 10 times;
+    show average timing
 
-Compilation, assembly, ELF packing, and direct executable building are
-subcommands of every stage binary. The build script uses the direct path.
-The saved bootstrap is directly executable; cold start needs no host compiler.
+Every compiler stage supports
+direct executable building.
+Cold start needs no host cc.
 EOF
 }
 
