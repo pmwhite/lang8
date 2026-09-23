@@ -1,7 +1,7 @@
 # Function values and C callbacks
 
 Run `./build.sh callback-test` to build the compiler and run the tests. After
-`./build.sh selfhost`, `./l8 build programs/callbacks/basic.l8 -o .build/callbacks-demo`
+`./build.sh selfhost`, `./l8 build tests/callbacks/basic.l8 -o .build/callbacks-demo`
 builds a runnable example. The checked-in bootstrap is unchanged; use a compiler
 built from either source stage for this syntax. `fn` is contextual in type
 positions; existing variables named `fn` still work.

@@ -10,7 +10,7 @@ COMPILER = str(Path(sys.argv.pop(1)).resolve())
 BUILD = Path(sys.argv.pop(1)).resolve()
 BUILD.mkdir(parents=True, exist_ok=True)
 ROOT = Path(__file__).resolve().parents[2]
-FIXTURES = ROOT / 'programs/callbacks'
+FIXTURES = ROOT / 'tests/callbacks'
 ENV = {**os.environ, 'LD_LIBRARY_PATH': str(BUILD) + ':' + os.environ.get('LD_LIBRARY_PATH', '')}
 
 

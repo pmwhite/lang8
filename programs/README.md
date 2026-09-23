@@ -1,7 +1,7 @@
 # Libraries and applications
 
 Each directory owns one library or application. Runnable demonstrations live in
-[`examples/`](examples/); library tests stay beside their implementation.
+[`examples/`](examples/); compiler and callback fixtures live in [`../tests/`](../tests/).
 
 | Directory | Entry point | Public tag | Purpose |
 |---|---|---|---|
@@ -13,7 +13,6 @@ Each directory owns one library or application. Runnable demonstrations live in
 | `block-game/` | `block-game.l8` | — | Game, editor, level model, and assets |
 | `wayland/` | `wayland.l8` | `wayland` | Native Wayland/xdg-shell windows, EGL, xkbcommon, and typed protocol bindings |
 | `terminal/` | `terminal.l8` | — | Wayland/EGL/OpenGL/FreeType terminal with a syscall-backed PTY shell |
-| `callbacks/` | `basic.l8` | — | Function value examples, language tests, and C ABI fixtures |
 
 Import the entry point relative to your source file, then activate the public
 tag with `use_tag`. Tags do not propagate through imports: GL applications using

@@ -40,7 +40,7 @@ Typical evolution for a breaking language change:
 
 Function values, indirect calls, and C callbacks are supported by both source
 stages. See
-[`programs/callbacks/README.md`](programs/callbacks/README.md) for `fn` syntax,
+[`tests/callbacks/README.md`](tests/callbacks/README.md) for `fn` syntax,
 ABI restrictions, and lifetime contracts. `./build.sh callback-test` builds the
 stage-1 compiler and runs language, rejection, and C interoperability tests;
 the test fixture needs a host C compiler and GNU assembler. Building L8 programs

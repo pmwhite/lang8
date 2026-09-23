@@ -117,9 +117,9 @@ check_fmt_src2() {
 }
 
 # Bootstrap-compatible examples as one timed step.
-run_examples() {
+run_bootstrap_tests() {
   local tool="$1"
-  python3 tools/expect.py "./$tool" "$BUILD/expect" --discover programs/examples --bootstrap-only
+  python3 tools/expect.py "./$tool" "$BUILD/expect" --discover tests/compiler --bootstrap-only
 }
 
 example_compile_fail() {
@@ -181,14 +181,14 @@ example_exit() {
 }
 
 # Full annotated suite and specialized stage-2 checks.
-run_examples_selfhost() {
+run_compiler_tests() {
   local tool="$1"
-  python3 tools/expect.py "./$tool" "$BUILD/expect" --discover programs/examples --discover programs/callbacks
-  "./$tool" fmt programs/examples/intmatch.l8 >"$BUILD/intmatch-formatted.l8"
+  python3 tools/expect.py "./$tool" "$BUILD/expect" --discover tests/compiler --discover tests/callbacks
+  "./$tool" fmt tests/compiler/intmatch.l8 >"$BUILD/intmatch-formatted.l8"
   "./$tool" fmt "$BUILD/intmatch-formatted.l8" >"$BUILD/intmatch-formatted-again.l8"
   cmp -s "$BUILD/intmatch-formatted.l8" "$BUILD/intmatch-formatted-again.l8" || die 'integer match formatting is not stable'
   expect_source "$tool" "$BUILD/intmatch-formatted.l8"
-  "./$tool" fmt programs/examples/match_format.l8 >"$BUILD/match-format.l8"
+  "./$tool" fmt tests/compiler/match_format.l8 >"$BUILD/match-format.l8"
   "./$tool" fmt "$BUILD/match-format.l8" >"$BUILD/match-format-again.l8"
   cmp -s "$BUILD/match-format.l8" "$BUILD/match-format-again.l8" || die 'match arm reduction is not stable'
   grep -q 'Value v -> v.data;' "$BUILD/match-format.l8" || die 'single expression match arm kept its braces'
@@ -197,7 +197,7 @@ run_examples_selfhost() {
   grep -q '^        1 -> {$' "$BUILD/match-format.l8" || die 'commented match arm lost its braces'
   grep -q 'Keep this comment with its block' "$BUILD/match-format.l8" || die 'match arm comment was lost'
   expect_source "$tool" "$BUILD/match-format.l8"
-  "./$tool" fmt programs/examples/control_format.l8 >"$BUILD/control-format.l8"
+  "./$tool" fmt tests/compiler/control_format.l8 >"$BUILD/control-format.l8"
   "./$tool" fmt "$BUILD/control-format.l8" >"$BUILD/control-format-again.l8"
   cmp -s "$BUILD/control-format.l8" "$BUILD/control-format-again.l8" || die 'control body reduction is not stable'
   grep -q 'if (true) value = 1 else value = 2;' "$BUILD/control-format.l8" || die 'single if body kept its braces'
@@ -209,7 +209,7 @@ run_examples_selfhost() {
   grep -q 'Keep this comment with its block' "$BUILD/control-format.l8" || die 'commented control body lost its comment'
   expect_source "$tool" "$BUILD/control-format.l8"
   check_optional_semis "$tool"
-  "./$tool" forlint programs/examples/forlint.l8 2>"$BUILD/forlint.err"
+  "./$tool" forlint tests/compiler/forlint.l8 2>"$BUILD/forlint.err"
   grep -q 'while loop can use for i in 0..end' "$BUILD/forlint.err" || die 'missing ranged for suggestion'
   grep -q 'while loop can use for item in xs' "$BUILD/forlint.err" || die 'missing collection for suggestion'
   [[ "$(grep -c 'while loop can use' "$BUILD/forlint.err")" -eq 2 ]] || die 'unexpected for-loop suggestion'
@@ -220,36 +220,36 @@ run_examples_selfhost() {
 
 check_tags() {
   local tool="$1" name f
-  "./$tool" build programs/examples/tags/untagged_unused.l8 -o "$BUILD/tags-untagged-unused" 2>"$BUILD/tags-compile.err"
+  "./$tool" build tests/compiler/tags/untagged_unused.l8 -o "$BUILD/tags-untagged-unused" 2>"$BUILD/tags-compile.err"
   if grep -q 'unused function' "$BUILD/tags-compile.err"; then die 'ordinary build emitted an unused function warning'; fi
-  if "./$tool" build programs/examples/tags/untagged_call.l8 -o "$BUILD/tags-invalid" 2>"$BUILD/tags-build.err"; then
+  if "./$tool" build tests/compiler/tags/untagged_call.l8 -o "$BUILD/tags-invalid" 2>"$BUILD/tags-build.err"; then
     die 'build accepted an untagged reference'
   fi
   grep -q 'declaration has no tags' "$BUILD/tags-build.err" || die 'missing build tag diagnostic'
-  if "./$tool" browse programs/examples/tags/untagged_import.l8 -o "$BUILD/tags-invalid.html" 2>"$BUILD/tags-browse.err"; then
+  if "./$tool" browse tests/compiler/tags/untagged_import.l8 -o "$BUILD/tags-invalid.html" 2>"$BUILD/tags-browse.err"; then
     die 'browse accepted an untagged reference'
   fi
   grep -q 'untagged_import.l8:6:5:' "$BUILD/tags-browse.err" || die 'missing referring source location'
   # These are separate programs over one shared library, so unused-function
   # reachability must be the union of all of their entry points.
   local -a unused_entries=(
-    programs/examples/tags/declaration_only.l8
-    programs/examples/tags/import_only.l8
-    programs/examples/tags/late_file.l8
-    programs/examples/tags/untagged_unused.l8
-    programs/examples/tags/main.l8
-    programs/examples/tags/used.l8
-    programs/examples/tags/implicit.l8
-    programs/examples/tags/global.l8
-    programs/examples/tags/shadow.l8
+    tests/compiler/tags/declaration_only.l8
+    tests/compiler/tags/import_only.l8
+    tests/compiler/tags/late_file.l8
+    tests/compiler/tags/untagged_unused.l8
+    tests/compiler/tags/main.l8
+    tests/compiler/tags/used.l8
+    tests/compiler/tags/implicit.l8
+    tests/compiler/tags/global.l8
+    tests/compiler/tags/shadow.l8
   )
   "./$tool" unused "${unused_entries[@]}" 2>"$BUILD/tags-unused.err"
-  grep -q 'warning: programs/examples/tags/untagged_unused.l8:1:1: unused function unused' "$BUILD/tags-unused.err" || die 'expected project-wide unused function warning'
+  grep -q 'warning: tests/compiler/tags/untagged_unused.l8:1:1: unused function unused' "$BUILD/tags-unused.err" || die 'expected project-wide unused function warning'
   if grep -q 'unused function tag_' "$BUILD/tags-unused.err"; then die 'function used by another entry point was reported unused'; fi
 
   # Format each file without following imports, then compile the formatted graph.
   mkdir -p "$BUILD/tags-fmt"
-  for f in programs/examples/tags/*.l8; do
+  for f in tests/compiler/tags/*.l8; do
     name="${f##*/}"
     case "$name" in
       nested.l8|qualified_definition.l8|duplicate.l8|duplicate_kind.l8|builtin_collision.l8|invalid_modifier.l8|dangling_modifier.l8) continue ;;
@@ -266,12 +266,12 @@ check_tags() {
   expect_source "$tool" "$BUILD/tags-fmt/implicit.l8"
   expect_source "$tool" "$BUILD/tags-fmt/global.l8"
   expect_source "$tool" "$BUILD/tags-fmt/shadow.l8"
-  "./$tool" browse programs/examples/tags/main.l8 -o "$BUILD/tags-browse.html"
+  "./$tool" browse tests/compiler/tags/main.l8 -o "$BUILD/tags-browse.html"
   grep -q 'parser::' "$BUILD/tags-browse.html" || die 'browse lost tag qualifier'
   grep -q 'data-s=' "$BUILD/tags-browse.html" || die 'tag browse missing references'
 
   # Qualified calls retain the same link names in both compiler backends.
-  "./$tool" compile programs/examples/tags/main.l8 >"$BUILD/tags-main.s"
+  "./$tool" compile tests/compiler/tags/main.l8 >"$BUILD/tags-main.s"
   "./$tool" as -o "$BUILD/tags-main.o" "$BUILD/tags-main.s" runtime.s
   "./$tool" elfpack "$BUILD/tags-main.o" -o "$BUILD/tags-asm"
   run_expect "$BUILD/tags-asm" 'tags'
@@ -282,19 +282,19 @@ check_retwarn() {
   local tool="$1"
   local err="$BUILD/retwarn.err"
   local bin="$BUILD/retwarn"
-  "./$tool" build programs/examples/retwarn.l8 -o "$bin" 2>"$err" || die "retwarn compile failed"
-  grep -q 'warning: programs/examples/retwarn.l8:9:5: unnecessary return in id' "$err" || die "expected located unnecessary return in id"
-  grep -q 'warning: programs/examples/retwarn.l8:17:5: ignored return value in drop' "$err" || die "expected located ignored return value in drop"
-  grep -q 'warning: programs/examples/retwarn.l8:39:16: unnecessary return in both' "$err" || die "expected located unnecessary return in both"
+  "./$tool" build tests/compiler/retwarn.l8 -o "$bin" 2>"$err" || die "retwarn compile failed"
+  grep -q 'warning: tests/compiler/retwarn.l8:9:5: unnecessary return in id' "$err" || die "expected located unnecessary return in id"
+  grep -q 'warning: tests/compiler/retwarn.l8:17:5: ignored return value in drop' "$err" || die "expected located ignored return value in drop"
+  grep -q 'warning: tests/compiler/retwarn.l8:39:16: unnecessary return in both' "$err" || die "expected located unnecessary return in both"
 
   local boolint_err="$BUILD/boolint.err"
-  "./$tool" boolint programs/examples/boolint.l8 2>"$boolint_err"
+  "./$tool" boolint tests/compiler/boolint.l8 2>"$boolint_err"
   grep -q 'int field enabled is used only as a boolean; use bool' "$boolint_err" || die 'expected bool-int field warning'
   grep -q 'int local on is used only as a boolean; use bool' "$boolint_err" || die 'expected bool-int parameter warning'
   grep -q 'int return value of choose is used only as a boolean; use bool' "$boolint_err" || die 'expected bool-int return warning'
   if grep -q 'count is used only as a boolean' "$boolint_err"; then die 'numeric int reported as boolean'; fi
   local paths_err="$BUILD/unreachable.err"
-  "./$tool" unreachable programs/examples/unreachable.l8 2>"$paths_err"
+  "./$tool" unreachable tests/compiler/unreachable.l8 2>"$paths_err"
   grep -q 'unreachable if branch' "$paths_err" || die 'expected dead if branch'
   grep -q 'unreachable else branch' "$paths_err" || die 'expected dead else branch'
   grep -q 'unreachable while body' "$paths_err" || die 'expected dead while body'
@@ -302,15 +302,15 @@ check_retwarn() {
   grep -q 'unreachable statement' "$paths_err" || die 'expected dead statement'
   [[ "$(grep -c 'unreachable ' "$paths_err")" -eq 6 ]] || die 'unexpected unreachable warning'
   local fields_err="$BUILD/unusedfields.err"
-  "./$tool" unusedfields programs/examples/unusedfields.l8 2>"$fields_err"
+  "./$tool" unusedfields tests/compiler/unusedfields.l8 2>"$fields_err"
   grep -q 'record field Inner.spare_inner is never read' "$fields_err" || die 'expected unused nested field'
   grep -q 'record field Flags.spare is never read' "$fields_err" || die 'expected unused field'
   grep -q 'record field Flags.write_only is never read' "$fields_err" || die 'expected write-only field'
   [[ "$(grep -c 'record field' "$fields_err")" -eq 3 ]] || die 'unexpected unused field warning'
-  "./$tool" boolint programs/examples/unusedfields.l8 2>"$boolint_err"
+  "./$tool" boolint tests/compiler/unusedfields.l8 2>"$boolint_err"
   grep -q 'int field enabled is used only as a boolean; use bool' "$boolint_err" || die 'expected bool-int record field warning'
   local assignments_err="$BUILD/unusedassign.err"
-  "./$tool" unusedassign programs/examples/unusedassign.l8 2>"$assignments_err"
+  "./$tool" unusedassign tests/compiler/unusedassign.l8 2>"$assignments_err"
   grep -q 'value assigned to first is overwritten before being read' "$assignments_err" || die 'expected dead initializer'
   [[ "$(grep -c 'value assigned to second is overwritten before being read' "$assignments_err")" -eq 2 ]] || die 'expected both dead writes'
   grep -q 'value assigned to nested is overwritten before being read' "$assignments_err" || die 'expected nested dead write'
@@ -329,7 +329,7 @@ check_browse() {
   local tool="$1"
   local hello="$BUILD/browse-hello.html"
   local html="$BUILD/l8.html"
-  "./$tool" browse programs/examples/hello.l8 -o "$hello" || die "browse hello failed"
+  "./$tool" browse tests/compiler/hello.l8 -o "$hello" || die "browse hello failed"
   grep -q 'id="files"' "$hello" || die "browse html missing file list"
   grep -q 'class="file' "$hello" || die "browse html missing code view"
   grep -q 'data-s=' "$hello" || die "browse html missing symbol spans"
@@ -351,8 +351,6 @@ require_bootstrap() {
 
 do_clean() {
   rm -f l8c0 l8c1 l8c2 l8c3 l8c4 l8 l8new l8new2
-  rm -f programs/examples/hello programs/examples/fib programs/examples/logic programs/examples/struct programs/examples/string programs/examples/i8 programs/examples/bool programs/examples/enum programs/examples/forward programs/examples/null programs/examples/newarr programs/examples/narrow programs/examples/nestsum programs/examples/noreturn programs/examples/exc
-  rm -f programs/examples/*.s
   rm -rf "$BUILD"
   echo 'cleaned'
 }
@@ -373,10 +371,10 @@ build_stage1() {
   step 'stage1 direct (bootstrap → src1)' ./bootstrap build src1/main.l8 -o l8c1
 }
 
-do_examples() {
+do_bootstrap_tests() {
   ensure_build_dir
   build_stage1
-  step 'examples [l8c1]' run_examples l8c1
+  step 'compiler tests [l8c1]' run_bootstrap_tests l8c1
 }
 
 build_game() {
@@ -432,7 +430,7 @@ do_terminal_test() {
 do_callback_test() {
   ensure_build_dir
   build_stage1
-  step 'Function values and C callbacks [l8c1]' python3 programs/callbacks/test_callbacks.py ./l8c1 "$BUILD/callbacks"
+  step 'Function values and C callbacks [l8c1]' python3 tests/callbacks/test_callbacks.py ./l8c1 "$BUILD/callbacks"
 }
 
 build_http() {
@@ -459,7 +457,6 @@ build_websocket() {
   mkdir -p "$BUILD/websocket"
   "$tool" build programs/examples/websocket-server.l8 -o "$BUILD/websocket/server"
   "$tool" build programs/examples/websocket-client.l8 -o "$BUILD/websocket/client"
-  "$tool" build programs/websocket/tests/unit.l8 -o "$BUILD/websocket/unit"
 }
 
 do_websocket() {
@@ -470,10 +467,17 @@ do_websocket() {
 
 do_websocket_test() {
   ensure_build_dir
-  if [[ -z "${L8C:-}" ]]; then build_stage1; fi
-  step 'WebSocket client, server, and unit test' build_websocket
+  local expect_tool="${L8C:-}"
+  if [[ -z "$expect_tool" ]]; then
+    build_stage1
+    expect_tool="$BUILD/websocket/expect-compiler"
+    mkdir -p "$BUILD/websocket"
+    step 'expect compiler' ./l8c1 build src2/main.l8 -o "$expect_tool"
+  fi
+  step 'WebSocket client and server' build_websocket
+  step 'library expect runner' python3 -m unittest tools.test_lib_expect
   step 'WebSocket protocol, visibility, and TCP tests' env WEBSOCKET_BUILD="$BUILD/websocket" python3 -m unittest discover -s programs/websocket/tests -v
-  step 'WebSocket codec vectors' "$BUILD/websocket/unit"
+  step 'WebSocket codec vectors' python3 tools/lib_expect.py programs/websocket/tests/unit.l8 --compiler "$expect_tool"
 }
 
 print_compiler_phases() {
@@ -495,8 +499,8 @@ do_selfhost() {
   step 'stage4 direct (l8c3 → src2)' ./l8c3 build src2/main.l8 -o l8c4
   step 'verify stage3 exe == stage4 exe' verify_same l8c3 l8c4
 
-  step 'expect runner' python3 -m unittest tools.test_expect
-  step 'examples [l8c3]' run_examples_selfhost l8c3
+  step 'expect runners' python3 -m unittest tools.test_expect tools.test_lib_expect
+  step 'compiler tests [l8c3]' run_compiler_tests l8c3
   step 'browse [l8c3]' check_browse l8c3
   step 'compiler phases [l8c3]' print_compiler_phases
   cp l8c3 l8
@@ -563,7 +567,7 @@ do_promote() {
 
 do_all() {
   do_bootstrap
-  do_examples
+  do_bootstrap_tests
   do_selfhost
   step 'block game [l8]' build_game l8
   print_summary
@@ -575,9 +579,9 @@ usage() {
 Usage: ./build.sh [command] [--force] [--bench]
 
 Commands:
-  all             Install bootstrap, examples, two-stage self-host (default)
+  all             Install bootstrap, compiler tests, two-stage self-host (default)
   bootstrap       Copy the saved bootstrap executable → l8c0
-  examples        Build stage 1 and run example programs via l8c1
+  compiler-test   Build stage 1 and run bootstrap-compatible compiler tests
   game            Build programs/block-game/block-game.l8 → .build/block-game
   terminal        Build programs/terminal/terminal.l8 → .build/terminal
   terminal-test   Run terminal screen, PTY, and isolated headless Wayland tests
@@ -586,7 +590,7 @@ Commands:
   http-test       Verify downloaded specifications and run the HTTP test suite
   websocket       Build WebSocket client and server → .build/websocket/
   websocket-test  Run WebSocket codec, API visibility, and TCP tests
-  selfhost        direct src1 → l8c1; src2 → l8c2; fmt src2; src2 → l8c3/l8c4; fixpoint l8c3==l8c4; examples; browse; phases
+  selfhost        direct src1 → l8c1; src2 → l8c2; fmt src2; src2 → l8c3/l8c4; fixpoint l8c3==l8c4; tests; browse; phases
   promote-bin1    Copy the stage-1 executable → bootstrap
   promote-bin2    Copy the stage-2 fixpoint executable → bootstrap
   promote-source  Replace src1/ with src2/ (no bootstrap change)
@@ -623,7 +627,7 @@ fi
 case "$cmd" in
   all)              do_all ;;
   bootstrap)        do_bootstrap; print_summary ;;
-  examples)         do_examples; print_summary ;;
+  compiler-test|examples) do_bootstrap_tests; print_summary ;;
   game)             do_game; print_summary ;;
   terminal)         do_terminal; print_summary ;;
   terminal-test)    do_terminal_test; print_summary ;;
