@@ -49,6 +49,11 @@ class LibraryExpectTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "JSON string"):
             lib_expect.expectations(path)
 
+    def test_discovers_marked_sources_only(self) -> None:
+        first = self.source('//% expect: "x"\n')
+        (first.parent / "helper.l8").write_text('main(): int { 0 }\n')
+        self.assertEqual(lib_expect.discover([], [first.parent]), [first.resolve()])
+
     def test_accept_does_not_hide_program_failures(self) -> None:
         path = self.source('//% expect: "old"\n')
         build = subprocess.CompletedProcess([], 0, b"", b"")

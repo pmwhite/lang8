@@ -12,11 +12,6 @@ class ApiTests(unittest.TestCase):
     def setUpClass(cls):
         build()
 
-    def test_l8_unit_suite(self):
-        result = subprocess.run([str(BUILD / 'unit')], capture_output=True, timeout=5)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(b'API checks', result.stdout)
-
     def test_streaming_buffers(self):
         data = bytes(range(256)) * 3
         fixed = request(b'Host: a\r\nContent-Length: 768\r\n', data, b'POST')

@@ -96,6 +96,17 @@ def accept(lines: list[bytes], values: dict[int, str], source: pathlib.Path) -> 
     source.write_bytes(b"".join(updated))
 
 
+def discover(sources: list[pathlib.Path], directories: list[pathlib.Path]) -> list[pathlib.Path]:
+    found = {path.resolve() for path in sources}
+    for directory in directories:
+        for path in directory.rglob("*.l8"):
+            if b"//% expect:" in path.read_bytes():
+                found.add(path.resolve())
+    if not found:
+        raise ValueError("no inline expectation tests found")
+    return sorted(found)
+
+
 def run(source: pathlib.Path, compiler: pathlib.Path, update: bool) -> None:
     source = source.resolve()
     compiler = compiler.resolve()
@@ -126,12 +137,15 @@ def run(source: pathlib.Path, compiler: pathlib.Path, update: bool) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("source", type=pathlib.Path)
+    parser.add_argument("source", type=pathlib.Path, nargs="*")
+    parser.add_argument("--discover", type=pathlib.Path, action="append", default=[],
+                        help="find L8 sources with inline expectations recursively")
     parser.add_argument("--compiler", type=pathlib.Path, default=pathlib.Path("./l8c3"))
     parser.add_argument("--accept", action="store_true", help="update changed snapshots after a successful run")
     args = parser.parse_args()
     try:
-        run(args.source, args.compiler, args.accept)
+        for source in discover(args.source, args.discover):
+            run(source, args.compiler, args.accept)
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

@@ -392,6 +392,17 @@ do_game() {
   step "block game [$tool]" build_game "$tool"
 }
 
+do_game_test() {
+  ensure_build_dir
+  local expect_tool="./l8"
+  if [[ ! -x "$expect_tool" ]]; then
+    build_stage1
+    expect_tool="$BUILD/game-expect-compiler"
+    step 'game expect compiler' ./l8c1 build src2/main.l8 -o "$expect_tool"
+  fi
+  step 'headless game library tests' python3 tools/lib_expect.py --discover programs/block-game --compiler "$expect_tool"
+}
+
 do_terminal() {
   ensure_build_dir
   local tool="l8"
@@ -414,12 +425,12 @@ do_terminal_test() {
   do_terminal
   local tool="l8"
   [[ -x "./$tool" ]] || tool="l8c1"
-  step 'terminal screen build' "./$tool" build programs/terminal/test.l8 -o "$BUILD/terminal-test"
-  step 'terminal screen tests' "$BUILD/terminal-test"
-  step 'terminal scene build' "./$tool" build programs/terminal/test_scene.l8 -o "$BUILD/terminal-scene-test"
-  step 'terminal scene tests' "$BUILD/terminal-scene-test"
-  step 'terminal presentation build' "./$tool" build programs/terminal/test_presentation.l8 -o "$BUILD/terminal-presentation-test"
-  step 'terminal presentation tests' "$BUILD/terminal-presentation-test"
+  local expect_tool="./$tool"
+  if [[ "$tool" == l8c1 ]]; then
+    expect_tool="$BUILD/terminal-expect-compiler"
+    step 'terminal expect compiler' ./l8c1 build src2/main.l8 -o "$expect_tool"
+  fi
+  step 'terminal library tests' python3 tools/lib_expect.py --discover programs/terminal --compiler "$expect_tool"
   step 'terminal PTY build' "./$tool" build programs/terminal/test_pty.l8 -o "$BUILD/terminal-pty-test"
   step 'terminal system-shell PTY tests' env SHELL=/bin/bash LC_ALL=C.UTF-8 L8_EXPECT_BASH=yes L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= "$BUILD/terminal-pty-test"
   step 'terminal shell-fallback PTY tests' env SHELL=/definitely/missing LC_ALL=C.UTF-8 L8_EXPECT_BASH= L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= "$BUILD/terminal-pty-test"
@@ -448,8 +459,17 @@ do_http() {
 
 do_http_test() {
   ensure_build_dir
+  local http_tool="${L8C:-}"
+  if [[ -z "$http_tool" ]]; then
+    build_stage1
+    http_tool="$(pwd)/l8c1"
+  fi
+  local expect_tool="$BUILD/http/expect-compiler"
+  mkdir -p "$BUILD/http"
+  step 'HTTP expect compiler' "$http_tool" build src2/main.l8 -o "$expect_tool"
   step 'HTTP specification integrity' python3 programs/http/spec/fetch.py --check
-  step 'HTTP protocol, API, and TCP tests' env HTTP_BUILD="$BUILD/http" python3 -m unittest discover -s programs/http/tests -v
+  step 'HTTP library tests' python3 tools/lib_expect.py --discover programs/http/tests --compiler "$expect_tool"
+  step 'HTTP protocol, API, and TCP tests' env HTTP_BUILD="$BUILD/http" L8C="$http_tool" python3 -m unittest discover -s programs/http/tests -v
 }
 
 build_websocket() {
@@ -477,7 +497,7 @@ do_websocket_test() {
   step 'WebSocket client and server' build_websocket
   step 'library expect runner' python3 -m unittest tools.test_lib_expect
   step 'WebSocket protocol, visibility, and TCP tests' env WEBSOCKET_BUILD="$BUILD/websocket" python3 -m unittest discover -s programs/websocket/tests -v
-  step 'WebSocket codec vectors' python3 tools/lib_expect.py programs/websocket/tests/unit.l8 --compiler "$expect_tool"
+  step 'WebSocket codec vectors' python3 tools/lib_expect.py --discover programs/websocket/tests --compiler "$expect_tool"
 }
 
 print_compiler_phases() {
@@ -570,6 +590,7 @@ do_all() {
   do_bootstrap_tests
   do_selfhost
   step 'block game [l8]' build_game l8
+  do_game_test
   print_summary
   echo 'OK'
 }
@@ -579,10 +600,11 @@ usage() {
 Usage: ./build.sh [command] [--force] [--bench]
 
 Commands:
-  all             Install bootstrap, compiler tests, two-stage self-host (default)
+  all             Install bootstrap, compiler tests, self-host, and headless game tests (default)
   bootstrap       Copy the saved bootstrap executable → l8c0
   compiler-test   Build stage 1 and run bootstrap-compatible compiler tests
   game            Build programs/block-game/block-game.l8 → .build/block-game
+  game-test       Run headless block-game library tests
   terminal        Build programs/terminal/terminal.l8 → .build/terminal
   terminal-test   Run terminal screen, PTY, and isolated headless Wayland tests
   callback-test   Test function values, lifetimes, and the C ABI (requires cc/as)
@@ -629,6 +651,7 @@ case "$cmd" in
   bootstrap)        do_bootstrap; print_summary ;;
   compiler-test|examples) do_bootstrap_tests; print_summary ;;
   game)             do_game; print_summary ;;
+  game-test)        do_game_test; print_summary ;;
   terminal)         do_terminal; print_summary ;;
   terminal-test)    do_terminal_test; print_summary ;;
   callback-test)    do_callback_test; print_summary ;;

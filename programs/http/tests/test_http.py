@@ -18,9 +18,9 @@ def build():
         compiler = str(BUILD / 'l8c1')
         subprocess.run([str(ROOT / 'bootstrap'), 'build', str(ROOT / 'src1/main.l8'),
                         '-o', compiler], cwd=ROOT, check=True)
-    for name in ('probe', 'unit', 'session', 'date', 'server', 'client'):
+    for name in ('probe', 'session', 'server', 'client'):
         source = (ROOT / 'programs/http/tests' / (name + '.l8')
-                  if name in ('probe', 'unit', 'session', 'date')
+                  if name in ('probe', 'session')
                   else ROOT / 'programs/examples' / ('http-' + name + '.l8'))
         result = subprocess.run([compiler, 'build', str(source),
                                  '-o', str(BUILD / name)], cwd=ROOT, capture_output=True)

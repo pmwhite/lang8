@@ -16,6 +16,8 @@ The markers include source positions, so missing or reordered checkpoints
 fail. Existing assertions can still check properties and error paths.
 
 Run `python3 tools/lib_expect.py path/to/test.l8 --compiler ./l8c3` from the
-repository root. Add `--accept` to update changed strings after a successful
-run. Review the source diff before committing. The WebSocket codec test in
-`programs/websocket/tests/unit.l8` is the first example.
+repository root, or use `--discover path/to/tests` to run all L8 files with
+expectations under a directory. Add `--accept` to update changed strings after
+a successful run, then review the source diff. `build.sh` discovers library
+tests for HTTP, WebSocket, terminal, and the headless block game. The Python
+runner only builds, executes, and compares L8 programs; test logic stays in L8.

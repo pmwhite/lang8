@@ -43,6 +43,7 @@ From the repository root:
 
 ```sh
 ./build.sh game
+./build.sh game-test
 .build/block-game                         # programs/block-game/world.txt
 ./build.sh terminal
 .build/terminal
