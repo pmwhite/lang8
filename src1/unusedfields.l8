@@ -1,0 +1,268 @@
+tag compiler_internal;
+
+// A field initialized or assigned but never read is a removal candidate.
+type UnusedField = {
+    owner: *StructDef;
+    member: *Member;
+    read: bool;
+    external: bool;
+    next: ?*UnusedField
+}
+
+unusedfield_candidates: ?*UnusedField = null;
+
+// C can inspect every byte of a record passed through an extern signature.
+unusedfield_external_type(ty: ?*Type) {
+    if (ty == null) return;
+    t: *Type = ty;
+    match t.* {
+        Ptr k -> unusedfield_external_type(k.base);
+        OptPtr k -> unusedfield_external_type(k.base);
+        Slice k -> unusedfield_external_type(k.base);
+        OptSlice k -> unusedfield_external_type(k.base);
+        Array k -> unusedfield_external_type(k.base);
+        Record k -> {
+            seen: bool = false;
+            c: ?*UnusedField = unusedfield_candidates;
+            while (c != null) {
+                if (c.owner == k.def) {
+                    if (c.external) seen = true;
+                    c.external = true
+                }
+                c = c.next
+            }
+            if (!seen) {
+                m: ?*Member = k.def.members;
+                while (m != null) {
+                    unusedfield_external_type(m.ty);
+                    m = m.next
+                }
+            }
+        }
+        _ -> { }
+    }
+}
+
+unusedfield_mark(member: ?*Member) {
+    if (member == null) return;
+    c: ?*UnusedField = unusedfield_candidates;
+    while (c != null) {
+        if (c.member == member) {
+            c.read = true;
+            return
+        }
+        c = c.next
+    }
+}
+
+unusedfield_scan_inits(head: ?*FieldInit) {
+    i: ?*FieldInit = head;
+    while (i != null) {
+        unusedfield_scan_expr(i.lhs, false);
+        i = i.next
+    }
+}
+
+unusedfield_scan_expr(e: ?*Expr, writing: bool) {
+    if (e == null) return;
+    n: *Expr = e;
+    match n.kind {
+        Var k -> {
+            if (!writing) unusedfield_mark(k.member)
+        }
+        MemberAccess k -> {
+            if (!writing) unusedfield_mark(k.member);
+            unusedfield_scan_expr(k.lhs, false)
+        }
+        Assign k -> {
+            unusedfield_scan_expr(k.lhs, true);
+            unusedfield_scan_expr(k.rhs, false)
+        }
+        Binary k -> {
+            unusedfield_scan_expr(k.lhs, false);
+            unusedfield_scan_expr(k.rhs, false)
+        }
+        Addr k -> unusedfield_scan_expr(k.lhs, false);
+        Deref k -> unusedfield_scan_expr(k.lhs, false);
+        Index k -> {
+            unusedfield_scan_expr(k.lhs, false);
+            unusedfield_scan_expr(k.idx, false)
+        }
+        Not k -> unusedfield_scan_expr(k.lhs, false);
+        Neg k -> unusedfield_scan_expr(k.lhs, false);
+        BitNot k -> unusedfield_scan_expr(k.lhs, false);
+        LogAnd k -> {
+            unusedfield_scan_expr(k.lhs, false);
+            unusedfield_scan_expr(k.rhs, false)
+        }
+        LogOr k -> {
+            unusedfield_scan_expr(k.lhs, false);
+            unusedfield_scan_expr(k.rhs, false)
+        }
+        OrElse k -> {
+            unusedfield_scan_expr(k.lhs, false);
+            unusedfield_scan_expr(k.rhs, false)
+        }
+        Funcall k -> {
+            unusedfield_scan_expr(k.target, false);
+            a: ?*Expr = k.args;
+            while (a != null) {
+                unusedfield_scan_expr(a, false);
+                a = a.next
+            }
+        }
+        As k -> unusedfield_scan_expr(k.lhs, false);
+        Trunc k -> unusedfield_scan_expr(k.lhs, false);
+        New k -> {
+            unusedfield_scan_expr(k.lhs, false);
+            unusedfield_scan_expr(k.fill, false);
+            unusedfield_scan_inits(k.inits)
+        }
+        StructLit k -> unusedfield_scan_inits(k.inits);
+        VariantLit k -> unusedfield_scan_inits(k.inits);
+        If k -> {
+            unusedfield_scan_expr(k.cond, false);
+            unusedfield_scan_expr(k.then, false);
+            unusedfield_scan_expr(k.els, false)
+        }
+        Match k -> {
+            unusedfield_scan_expr(k.cond, false);
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                unusedfield_scan_stmt(arm.body);
+                arm = arm.next
+            }
+        }
+        Block k -> unusedfield_scan_stmts(k.body);
+        Sizeof k -> unusedfield_scan_expr(k.e, false);
+        ArrayLit k -> {
+            a2: ?*Expr = k.elems;
+            while (a2 != null) {
+                unusedfield_scan_expr(a2, false);
+                a2 = a2.next
+            }
+        }
+        Num _ -> { }
+        Null -> { }
+        FuncAddr _ -> { }
+    }
+}
+
+unusedfield_scan_stmt(s: ?*Stmt) {
+    if (s == null) return;
+    n: *Stmt = s;
+    match n.kind {
+        Return k -> unusedfield_scan_expr(k.lhs, false);
+        If k -> {
+            unusedfield_scan_expr(k.cond, false);
+            unusedfield_scan_stmt(k.then);
+            unusedfield_scan_stmt(k.els)
+        }
+        While k -> {
+            unusedfield_scan_expr(k.cond, false);
+            unusedfield_scan_stmt(k.body)
+        }
+        For k -> {
+            unusedfield_scan_expr(k.iter, false);
+            unusedfield_scan_expr(k.hi, false);
+            unusedfield_scan_stmt(k.body)
+        }
+        Block k -> unusedfield_scan_stmts(k.body);
+        ExprStmt k -> unusedfield_scan_expr(k.lhs, false);
+        Decl k -> unusedfield_scan_expr(k.init, false);
+        Match k -> {
+            unusedfield_scan_expr(k.cond, false);
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                unusedfield_scan_stmt(arm.body);
+                arm = arm.next
+            }
+        }
+        Raise k -> unusedfield_scan_inits(k.inits);
+        Try k -> {
+            unusedfield_scan_stmt(k.body);
+            arm2: ?*CatchArm = k.arms;
+            while (arm2 != null) {
+                unusedfield_scan_stmt(arm2.body);
+                arm2 = arm2.next
+            }
+        }
+        Region k -> unusedfield_scan_stmt(k.body);
+        Comment _ -> { }
+    }
+}
+
+unusedfield_scan_stmts(head: ?*Stmt) {
+    s: ?*Stmt = head;
+    while (s != null) {
+        unusedfield_scan_stmt(s);
+        s = s.next
+    }
+}
+
+check_unused_fields() noregion {
+    unusedfield_candidates = null;
+    sd: ?*StructDef = struct_defs;
+    while (sd != null) {
+        m: ?*Member = sd.members;
+        while (m != null) {
+            unusedfield_candidates = new UnusedField {
+                owner: sd,
+                member: m,
+                read: false,
+                external: false,
+                next: unusedfield_candidates
+            };
+            m = m.next
+        }
+        sd = sd.next
+    }
+    g: ?*Obj = globals;
+    while (g != null) {
+        unusedfield_scan_expr(g.init, false);
+        g = g.next
+    }
+    fn: ?*Function = functions;
+    while (fn != null) {
+        if (fn.is_extern == 0) unusedfield_scan_stmt(fn.body) else {
+            unusedfield_external_type(fn.return_ty);
+            p: ?*Obj = fn.params;
+            while (p != null) {
+                unusedfield_external_type(p.ty);
+                p = p.param_next
+            }
+        }
+        fn = fn.next
+    }
+    c: ?*UnusedField = unusedfield_candidates;
+    while (c != null) {
+        if (!c.read && !c.external) {
+            sb: *StrBuf = sb_new();
+            sb_puts(sb, "record field ");
+            sb_puts(sb, c.owner.name);
+            sb_putc(sb, '.');
+            sb_puts(sb, c.member.name);
+            sb_puts(sb, " is never read");
+            warning_at(c.member.browse_file, c.member.browse_pos, sb_finish(sb))
+        }
+        c = c.next
+    }
+}
+
+compiler_unusedfields_main(argc: int, argv: []str) noregion: int {
+    if (argc != 2) {
+        write(2, "error: usage: l8 unusedfields <file.l8>\n", len("error: usage: l8 unusedfields <file.l8>\n"));
+        return 1
+    }
+    try {
+        do_profile = 0;
+        checking_unused_functions = 1;
+        compiler_analyze(bytes(argv[1]));
+        checking_unused_functions = 0;
+        check_unused_fields();
+        0
+    } with Error e -> {
+        print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);
+        1
+    }
+}

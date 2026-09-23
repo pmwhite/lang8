@@ -51,6 +51,8 @@ l8 compile [--profile|-p] file.l8 > file.s
 l8 unused file.l8 [file.l8 ...]
 l8 boolint file.l8
 l8 forlint file.l8
+l8 unreachable file.l8
+l8 unusedfields file.l8
 l8 as [-p|--profile] -o file.o file.s runtime.s
 l8 elfpack file.o -o file
 l8 build [--profile|-p] file.l8 -o file
@@ -74,6 +76,15 @@ exclude a value from the report.
 body, a stable upper bound, and no later use of the index. A collection suggestion
 also requires the body's first statement to bind `xs[i]` and no other use of `i`.
 It reports locations and suggested loop headers without rewriting source.
+
+`unreachable` reports statements after guaranteed exits, branches guarded by
+literal Boolean conditions, and loop bodies with statically empty ranges or
+false conditions. It leaves ordinary compilation warnings unchanged.
+
+`unusedfields` reports record fields that are initialized or written but never
+read in the typed import graph. Records exposed through an `extern` signature
+are omitted because external code can inspect their layout. Raw memory access and
+uses outside the import graph are not modeled, so review findings before deletion.
 
 ## Scripts (`./build.sh`)
 

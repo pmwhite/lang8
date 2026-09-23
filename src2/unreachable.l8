@@ -1,0 +1,151 @@
+tag compiler_internal;
+
+// Report statements and literal-condition branches that cannot execute.
+unreachable_literal(e: *Expr): int {
+    match e.kind {
+        Num k -> {
+            if (k.form == LIT_TRUE) return 1;
+            if (k.form == LIT_FALSE) return 0;
+            0 - 1
+        }
+        Not k -> {
+            v: int = unreachable_literal(k.lhs);
+            if (v < 0) 0 - 1 else 1 - v
+        }
+        _ -> 0 - 1
+    }
+}
+
+unreachable_warn(fn: *Function, s: *Stmt, why: []i8) {
+    if (s.pos > 0) warning_at(fn.browse_file, s.pos, why)
+}
+
+unreachable_empty_range(lo: *Expr, hi: ?*Expr): bool {
+    if (hi == null) return false;
+    upper: *Expr = hi;
+    match lo.kind {
+        Num a -> {
+            if (a.form != LIT_INT) return false;
+            match upper.kind {
+                Num b -> b.form == LIT_INT && a.val >= b.val;
+                _ -> false
+            }
+        }
+        _ -> false
+    }
+}
+
+unreachable_diverges(s: *Stmt): bool {
+    if (stmt_always_diverges(s)) return true;
+    match s.kind {
+        While k -> unreachable_literal(k.cond) == 1;
+        If k -> {
+            literal: int = unreachable_literal(k.cond);
+            if (literal == 1) return unreachable_diverges(k.then);
+            els: ?*Stmt = k.els;
+            if (literal == 0 && els != null) return unreachable_diverges(els);
+            false
+        }
+        Block k -> {
+            p: ?*Stmt = k.body;
+            while (p != null) {
+                if (unreachable_diverges(p)) return true;
+                p = p.next
+            }
+            false
+        }
+        Region k -> unreachable_diverges(k.body);
+        _ -> false
+    }
+}
+
+unreachable_walk_stmt(s: ?*Stmt, fn: *Function) {
+    if (s == null) return;
+    n: *Stmt = s;
+    match n.kind {
+        Block k -> unreachable_walk_stmts(k.body, fn);
+        If k -> {
+            literal: int = unreachable_literal(k.cond);
+            if (literal == 0) unreachable_warn(fn, k.then, "unreachable if branch") else unreachable_walk_stmt(k.then,
+                fn);
+            els: ?*Stmt = k.els;
+            if (els != null) {
+                if (literal == 1) unreachable_warn(fn, els, "unreachable else branch") else unreachable_walk_stmt(els,
+                    fn)
+            }
+        }
+        While k -> {
+            if (unreachable_literal(k.cond) == 0) unreachable_warn(fn, k.body, "unreachable while body") else unreachable_walk_stmt(k.body,
+                fn)
+        }
+        For k -> {
+            if (unreachable_empty_range(k.iter, k.hi)) unreachable_warn(fn, k.body,
+                "unreachable for body") else unreachable_walk_stmt(k.body, fn)
+        }
+        Match k -> {
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                unreachable_walk_stmt(arm.body, fn);
+                arm = arm.next
+            }
+        }
+        Try k -> {
+            unreachable_walk_stmt(k.body, fn);
+            arm2: ?*CatchArm = k.arms;
+            while (arm2 != null) {
+                unreachable_walk_stmt(arm2.body, fn);
+                arm2 = arm2.next
+            }
+        }
+        Region k -> unreachable_walk_stmt(k.body, fn);
+        _ -> { }
+    }
+}
+
+unreachable_walk_stmts(head: ?*Stmt, fn: *Function) {
+    dead: bool = false;
+    warned: bool = false;
+    s: ?*Stmt = head;
+    while (s != null) {
+        n: *Stmt = s;
+        match n.kind {
+            Comment _ -> { }
+            _ -> {
+                if (dead) {
+                    if (!warned) unreachable_warn(fn, n, "unreachable statement");
+                    warned = true
+                } else {
+                    unreachable_walk_stmt(n, fn);
+                    if (unreachable_diverges(n)) dead = true
+                }
+            }
+        }
+        s = n.next
+    }
+}
+
+check_unreachable_paths() {
+    fn: ?*Function = functions;
+    while (fn != null) {
+        if (fn.is_extern == 0) unreachable_walk_stmt(fn.body, fn);
+        fn = fn.next
+    }
+}
+
+compiler_unreachable_main(argc: int, argv: []str) noregion: int {
+    if (argc != 2) {
+        write(2, "error: usage: l8 unreachable <file.l8>\n", len("error: usage: l8 unreachable <file.l8>\n"));
+        return 1
+    }
+    try {
+        do_profile = 0;
+        checking_unused_functions = 1;
+        compiler_analyze(bytes(argv[1]));
+        checking_unused_functions = 0;
+        check_unreachable_paths();
+        0
+    } with Error e -> {
+        print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);
+        1
+    }
+}

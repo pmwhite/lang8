@@ -413,6 +413,22 @@ check_retwarn() {
   grep -q 'int local on is used only as a boolean; use bool' "$boolint_err" || die 'expected bool-int parameter warning'
   grep -q 'int return value of choose is used only as a boolean; use bool' "$boolint_err" || die 'expected bool-int return warning'
   if grep -q 'count is used only as a boolean' "$boolint_err"; then die 'numeric int reported as boolean'; fi
+  local paths_err="$BUILD/unreachable.err"
+  "./$tool" unreachable programs/examples/unreachable.l8 2>"$paths_err"
+  grep -q 'unreachable if branch' "$paths_err" || die 'expected dead if branch'
+  grep -q 'unreachable else branch' "$paths_err" || die 'expected dead else branch'
+  grep -q 'unreachable while body' "$paths_err" || die 'expected dead while body'
+  grep -q 'unreachable for body' "$paths_err" || die 'expected empty for body'
+  grep -q 'unreachable statement' "$paths_err" || die 'expected dead statement'
+  [[ "$(grep -c 'unreachable ' "$paths_err")" -eq 6 ]] || die 'unexpected unreachable warning'
+  local fields_err="$BUILD/unusedfields.err"
+  "./$tool" unusedfields programs/examples/unusedfields.l8 2>"$fields_err"
+  grep -q 'record field Inner.spare_inner is never read' "$fields_err" || die 'expected unused nested field'
+  grep -q 'record field Flags.spare is never read' "$fields_err" || die 'expected unused field'
+  grep -q 'record field Flags.write_only is never read' "$fields_err" || die 'expected write-only field'
+  [[ "$(grep -c 'record field' "$fields_err")" -eq 3 ]] || die 'unexpected unused field warning'
+  "./$tool" boolint programs/examples/unusedfields.l8 2>"$boolint_err"
+  grep -q 'int field enabled is used only as a boolean; use bool' "$boolint_err" || die 'expected bool-int record field warning'
   if grep -q 'unnecessary return in early' "$err"; then die "unexpected unnecessary return in early"; fi
   if grep -q 'ignored return value in side' "$err"; then die "unexpected ignored value on assignment"; fi
   if grep -q 'ignored return value in callp' "$err"; then die "unexpected ignored value on procedure call"; fi
