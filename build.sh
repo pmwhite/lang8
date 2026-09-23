@@ -127,6 +127,41 @@ example_compile_fail() {
   grep -q "$needle" "$BUILD/${name}.err" || die "expected '$needle' in $name"
 }
 
+check_optional_semis() {
+  local tool="$1" declaration
+  cat >"$BUILD/optional-semi.l8" <<'EOF'
+tag example;
+
+exception Stop;
+type Choice = | A | B
+
+id(): int { return 3 }
+done() { if (true) return else return }
+stop() raises Stop { raise Stop }
+
+main(): int {
+    value: int = 0;
+    { value = value + 1 }
+    { scratch: int = 1 }
+    if (false) value = 9 else value = value + 1;
+    while (false) { value = 9 }
+    for i in 0..0 { value = 9 }
+    match value { 2 -> value = value + 1; _ -> value = 9 }
+    if (value != id()) return 1;
+    0
+}
+EOF
+  example_exit "$tool" optional-semi "$BUILD/optional-semi.l8" 0
+  "./$tool" fmt "$BUILD/optional-semi.l8" >"$BUILD/optional-semi-formatted.l8"
+  example_exit "$tool" optional-semi-formatted "$BUILD/optional-semi-formatted.l8" 0
+  for declaration in 'value: int = 1' 'extern foreign(): int' 'exception Empty' 'need "libnothing.so"' 'import "unused.l8"' 'type Choice = | A | B'; do
+    printf 'tag example;\nmain(): int { 0; }\n%s\n' "$declaration" >"$BUILD/optional-semi-eof.l8"
+    "./$tool" fmt "$BUILD/optional-semi-eof.l8" >"$BUILD/optional-semi-eof-formatted.l8"
+  done
+  printf 'tag example;\nmain(): int { value: int = 1 value }\n' >"$BUILD/optional-semi-required.l8"
+  example_compile_fail "$tool" optional-semi-required "$BUILD/optional-semi-required.l8" 'unexpected token'
+}
+
 example_exit() {
   local tool="$1" name="$2" src="$3" want="$4"
   "./$tool" build "$src" -o "$BUILD/${name}"
@@ -169,6 +204,7 @@ run_examples_selfhost() {
   grep -q 'Keep this comment with its block' "$BUILD/control-format.l8" || die 'commented control body lost its comment'
   example_exit "$tool" control-format-source programs/examples/control_format.l8 0
   example_exit "$tool" control-format "$BUILD/control-format.l8" 0
+  check_optional_semis "$tool"
   example_exit "$tool" control-scope programs/examples/control_scope.l8 0
   example_compile_fail "$tool" control-scope-if-leak programs/examples/control_scope_if_leak.l8 'undefined variable'
   example_compile_fail "$tool" control-scope-else-leak programs/examples/control_scope_else_leak.l8 'undefined variable'
