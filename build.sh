@@ -153,10 +153,17 @@ main(): int {
 EOF
   example_exit "$tool" optional-semi "$BUILD/optional-semi.l8" 0
   "./$tool" fmt "$BUILD/optional-semi.l8" >"$BUILD/optional-semi-formatted.l8"
+  grep -q '^tag example;$' "$BUILD/optional-semi-formatted.l8" || die 'file tag lost its required semicolon'
+  grep -q '^    return 3$' "$BUILD/optional-semi-formatted.l8" || die 'final return kept its semicolon'
+  grep -q '^    if (true) return else return$' "$BUILD/optional-semi-formatted.l8" || die 'return before else kept its semicolon'
+  grep -q '^        2 -> value = value + 1;$' "$BUILD/optional-semi-formatted.l8" || die 'non-final match arm lost its semicolon'
+  grep -q '^        _ -> value = 9$' "$BUILD/optional-semi-formatted.l8" || die 'final match arm kept its semicolon'
+  grep -q '^    0$' "$BUILD/optional-semi-formatted.l8" || die 'final expression kept its semicolon'
   example_exit "$tool" optional-semi-formatted "$BUILD/optional-semi-formatted.l8" 0
   for declaration in 'value: int = 1' 'extern foreign(): int' 'exception Empty' 'need "libnothing.so"' 'import "unused.l8"' 'type Choice = | A | B'; do
     printf 'tag example;\nmain(): int { 0; }\n%s\n' "$declaration" >"$BUILD/optional-semi-eof.l8"
     "./$tool" fmt "$BUILD/optional-semi-eof.l8" >"$BUILD/optional-semi-eof-formatted.l8"
+    if tail -n 1 "$BUILD/optional-semi-eof-formatted.l8" | grep -q ';$'; then die "EOF semicolon kept for $declaration"; fi
   done
   printf 'tag example;\nmain(): int { value: int = 1 value }\n' >"$BUILD/optional-semi-required.l8"
   example_compile_fail "$tool" optional-semi-required "$BUILD/optional-semi-required.l8" 'unexpected token'
@@ -195,7 +202,7 @@ run_examples_selfhost() {
   "./$tool" fmt programs/examples/control_format.l8 >"$BUILD/control-format.l8"
   "./$tool" fmt "$BUILD/control-format.l8" >"$BUILD/control-format-again.l8"
   cmp -s "$BUILD/control-format.l8" "$BUILD/control-format-again.l8" || die 'control body reduction is not stable'
-  grep -q 'if (true) value = 1; else value = 2;' "$BUILD/control-format.l8" || die 'single if body kept its braces'
+  grep -q 'if (true) value = 1 else value = 2;' "$BUILD/control-format.l8" || die 'single if body kept its braces'
   grep -q 'while (false) value = 9;' "$BUILD/control-format.l8" || die 'single while body kept its braces'
   grep -q 'for i in 0..1 value = value + i;' "$BUILD/control-format.l8" || die 'single for body kept its braces'
   grep -q 'if (false) {' "$BUILD/control-format.l8" || die 'nested if lost its protective braces'
