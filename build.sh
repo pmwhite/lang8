@@ -6,6 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 BUILD="${BUILD:-.build}"
+LOG_DIR="$BUILD/logs/$$"
 FORCE=0
 REPEAT=1
 BENCH_REPEAT=10
@@ -24,10 +25,9 @@ step() {
   shift
   local start end elapsed i status total=0
   local number=$(( ${#STEP_NAMES[@]} + 1 ))
-  local log_dir="$BUILD/logs"
   local log
-  mkdir -p "$log_dir"
-  printf -v log '%s/%02d.log' "$log_dir" "$number"
+  mkdir -p "$LOG_DIR"
+  printf -v log '%s/%02d.log' "$LOG_DIR" "$number"
   printf 'step: %s\ncommand:' "$name" >"$log"
   printf ' %q' "$@" >>"$log"
   printf '\n' >>"$log"
@@ -68,7 +68,7 @@ print_summary() {
   else
     printf 'total: %d.%03ds\n' "$((total / 1000))" "$((total % 1000))"
   fi
-  printf 'logs: %s/logs\n' "$BUILD"
+  printf 'logs: %s\n' "$LOG_DIR"
 }
 
 die() { echo "error: $*" >&2; exit 1; }
