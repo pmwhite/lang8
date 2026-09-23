@@ -411,6 +411,17 @@ do_game_test() {
   step 'game tests' python3 tools/lib_expect.py --discover programs/block-game --compiler "$expect_tool"
 }
 
+do_stdlib_test() {
+  ensure_build_dir
+  local tool="./l8"
+  if [[ ! -x "$tool" ]]; then
+    build_stage1
+    tool="$BUILD/stdlib-compiler"
+    step 'std test tool' ./l8c1 build src2/main.l8 -o "$tool"
+  fi
+  step 'stdlib tests' python3 tools/lib_expect.py --discover programs/stdlib/tests --compiler "$tool"
+}
+
 do_terminal() {
   ensure_build_dir
   local tool="l8"
@@ -602,6 +613,7 @@ do_all() {
   do_bootstrap
   do_bootstrap_tests
   do_selfhost
+  do_stdlib_test
   step 'block game l8' build_game l8
   do_game_test
   print_summary
@@ -622,6 +634,8 @@ Commands:
     Test bootstrap compiler
   game / game-test
     Build or test block game
+  stdlib-test
+    Test standard library
   terminal / terminal-test
     Build or test terminal
   callback-test
@@ -683,6 +697,7 @@ case "$cmd" in
   compiler-test|examples) do_bootstrap_tests; print_summary ;;
   game)             do_game; print_summary ;;
   game-test)        do_game_test; print_summary ;;
+  stdlib-test)      do_stdlib_test; print_summary ;;
   terminal)         do_terminal; print_summary ;;
   terminal-test)    do_terminal_test; print_summary ;;
   callback-test)    do_callback_test; print_summary ;;

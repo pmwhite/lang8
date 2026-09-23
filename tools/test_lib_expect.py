@@ -49,6 +49,20 @@ class LibraryExpectTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "JSON string"):
             lib_expect.expectations(path)
 
+    def test_stderr_expectation_and_accept(self) -> None:
+        path = self.source('//% expect: "out"\n//% stderr: "old\\n"\n')
+        order, expected, lines, _ = lib_expect.expectations(path)
+        self.assertEqual(lib_expect.stderr_expectation(lines, path), "old\n")
+        lib_expect.accept(lines, expected, path, "new\n")
+        self.assertIn('//% stderr: "new\\n"', path.read_text())
+        self.assertEqual(lib_expect.stderr_expectation(path.read_bytes().splitlines(keepends=True),
+                                                       path), "new\n")
+
+    def test_rejects_duplicate_stderr_expectations(self) -> None:
+        path = self.source('//% expect: ""\n//% stderr: "a"\n//% stderr: "b"\n')
+        with self.assertRaisesRegex(ValueError, "duplicate stderr"):
+            lib_expect.stderr_expectation(path.read_bytes().splitlines(keepends=True), path)
+
     def test_discovers_marked_sources_only(self) -> None:
         first = self.source('//% expect: "x"\n')
         (first.parent / "helper.l8").write_text('main(): int { 0 }\n')

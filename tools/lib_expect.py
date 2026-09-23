@@ -11,6 +11,7 @@ import tempfile
 
 
 DIRECTIVE = re.compile(rb'^([ \t]*//% expect: )(.*)(\r?\n?)$')
+STDERR_DIRECTIVE = re.compile(rb'^([ \t]*//% stderr: )(.*)(\r?\n?)$')
 MARKER = re.compile(rb'\x1e[\x00-\xff]{7}')
 
 
@@ -39,6 +40,24 @@ def expectations(source: pathlib.Path) -> tuple[list[int], dict[int, str], list[
     if not order:
         raise ValueError(f"{source}: no inline expectations")
     return order, values, lines, labels
+
+
+def stderr_expectation(lines: list[bytes], source: pathlib.Path) -> str | None:
+    expected = None
+    for line_number, line in enumerate(lines, 1):
+        match = STDERR_DIRECTIVE.fullmatch(line)
+        if match:
+            if expected is not None:
+                raise ValueError(f"{source}:{line_number}: duplicate stderr expectation")
+            try:
+                expected = json.loads(match.group(2).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ValueError(f"{source}:{line_number}: invalid JSON string: {error}") from error
+            if not isinstance(expected, str):
+                raise ValueError(f"{source}:{line_number}: stderr must be a JSON string")
+        elif b"//% stderr:" in line:
+            raise ValueError(f"{source}:{line_number}: malformed stderr expectation")
+    return expected
 
 
 def checkpoint_output(stdout: bytes) -> list[tuple[int, str]]:
@@ -81,7 +100,8 @@ def compare(
     return failures
 
 
-def accept(lines: list[bytes], values: dict[int, str], source: pathlib.Path) -> None:
+def accept(lines: list[bytes], values: dict[int, str], source: pathlib.Path,
+           stderr: str | None = None) -> None:
     updated = []
     offset = 0
     for line in lines:
@@ -89,6 +109,9 @@ def accept(lines: list[bytes], values: dict[int, str], source: pathlib.Path) -> 
         if match:
             position = offset + line.index(b"//% expect:")
             updated.append(match.group(1) + json.dumps(values[position], ensure_ascii=True).encode()
+                           + match.group(3))
+        elif stderr is not None and (match := STDERR_DIRECTIVE.fullmatch(line)):
+            updated.append(match.group(1) + json.dumps(stderr, ensure_ascii=True).encode()
                            + match.group(3))
         else:
             updated.append(line)
@@ -111,6 +134,7 @@ def run(source: pathlib.Path, compiler: pathlib.Path, update: bool) -> None:
     source = source.resolve()
     compiler = compiler.resolve()
     order, expected, lines, labels = expectations(source)
+    expected_stderr = stderr_expectation(lines, source)
     with tempfile.TemporaryDirectory(prefix="l8-lib-expect-") as directory:
         binary = pathlib.Path(directory) / "test"
         build = subprocess.run(
@@ -120,14 +144,24 @@ def run(source: pathlib.Path, compiler: pathlib.Path, update: bool) -> None:
         if build.returncode:
             raise ValueError(f"build failed:\n{build.stderr.decode(errors='replace')}")
         execution = subprocess.run([str(binary)], capture_output=True)
-    if execution.returncode or execution.stderr:
+    if execution.returncode:
         raise ValueError(
             f"test exited {execution.returncode}; stderr:\n{execution.stderr.decode(errors='replace')}"
         )
+    try:
+        actual_stderr = execution.stderr.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError(f"stderr is not UTF-8: {error}") from error
+    if expected_stderr is None and actual_stderr:
+        raise ValueError(f"unexpected stderr:\n{actual_stderr}")
     actual = checkpoint_output(execution.stdout)
     differences = compare(order, expected, actual, labels)
+    if expected_stderr is not None and expected_stderr != actual_stderr:
+        differences.append("stderr: expected " + json.dumps(expected_stderr)
+                           + ", got " + json.dumps(actual_stderr))
     if differences and update:
-        accept(lines, dict(actual), source)
+        accept(lines, dict(actual), source,
+               actual_stderr if expected_stderr is not None else None)
         print(f"accepted {len(differences)} changed expectation(s) in {source}")
     elif differences:
         raise ValueError("\n".join(differences) + f"\nRun with --accept to update {source}.")
