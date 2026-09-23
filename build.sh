@@ -282,7 +282,7 @@ check_tags() {
   if "./$tool" browse programs/examples/tags/untagged_import.l8 -o "$BUILD/tags-invalid.html" 2>"$BUILD/tags-browse.err"; then
     die 'browse accepted an untagged reference'
   fi
-  grep -q 'untagged_import.l8:3:' "$BUILD/tags-browse.err" || die 'missing referring source location'
+  grep -q 'untagged_import.l8:6:5:' "$BUILD/tags-browse.err" || die 'missing referring source location'
   example "$tool" tags-main programs/examples/tags/main.l8 'tags'
   example "$tool" tags-used programs/examples/tags/used.l8 'used'
   example "$tool" tags-implicit programs/examples/tags/implicit.l8 'implicit'
@@ -357,7 +357,7 @@ check_retwarn() {
   "./$tool" build programs/examples/retwarn.l8 -o "$bin" 2>"$err" || die "retwarn compile failed"
   grep -q 'warning: programs/examples/retwarn.l8:9:5: unnecessary return in id' "$err" || die "expected located unnecessary return in id"
   grep -q 'warning: programs/examples/retwarn.l8:17:5: ignored return value in drop' "$err" || die "expected located ignored return value in drop"
-  grep -q 'warning: programs/examples/retwarn.l8:42:9: unnecessary return in both' "$err" || die "expected located unnecessary return in both"
+  grep -q 'warning: programs/examples/retwarn.l8:39:16: unnecessary return in both' "$err" || die "expected located unnecessary return in both"
 
   local boolint_err="$BUILD/boolint.err"
   "./$tool" boolint programs/examples/boolint.l8 2>"$boolint_err"

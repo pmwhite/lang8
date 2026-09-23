@@ -88,3 +88,14 @@ Promotes require the corresponding self-host artifacts unless `--force` is used.
 They update only the working tree; create the commit separately.
 
 `--bench` runs each timed step ten times and reports average milliseconds.
+
+## Pre-commit checks
+
+Run `./.githooks/install.sh` once per clone to install the repository's pre-commit
+hook without replacing other local Git hooks. The hook copies the staged tree to a
+temporary directory, runs the default `./build.sh`, and requires every staged L8
+file under `src2/` and `programs/` to match `l8c3 fmt` output. `src1/` is exempt
+because it must remain compatible with the saved bootstrap. The deliberately
+malformed fixtures listed in `.githooks/format-excludes` are exempt because the
+formatter cannot parse them. Run `./l8c3 fmt -w path/to/file.l8` and stage the
+result to fix a formatting failure.
