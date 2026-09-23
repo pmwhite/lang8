@@ -144,6 +144,10 @@ run_examples_selfhost() {
   example "$tool" callback-effects programs/callbacks/effects.l8 'fn effects OK'
   example "$tool" or programs/examples/or.l8 'YYYY'
   example_exit "$tool" intmatch programs/examples/intmatch.l8 0
+  "./$tool" fmt programs/examples/intmatch.l8 >"$BUILD/intmatch-formatted.l8"
+  "./$tool" fmt "$BUILD/intmatch-formatted.l8" >"$BUILD/intmatch-formatted-again.l8"
+  cmp -s "$BUILD/intmatch-formatted.l8" "$BUILD/intmatch-formatted-again.l8" || die 'integer match formatting is not stable'
+  example_exit "$tool" intmatch-formatted "$BUILD/intmatch-formatted.l8" 0
   example_compile_fail "$tool" intmatch-duplicate programs/examples/intmatch_duplicate.l8 'duplicate match arm'
   example_compile_fail "$tool" intmatch-missing-wildcard programs/examples/intmatch_missing_wildcard.l8 'integer match requires a wildcard arm'
   example_compile_fail "$tool" intmatch-range programs/examples/intmatch_range.l8 'match literal out of range'
