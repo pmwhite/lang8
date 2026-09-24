@@ -1,5 +1,5 @@
 # L8 minimal runtime for Linux x86-64
-# Provides: _start, syscall, malloc, read, write, open, open_nul, close, exit, len
+# Provides: _start, syscall, malloc, read, l8_os_write, open, open_nul, close, exit, len
 #           l8_str_eq, l8_opt_str_eq, l8_cstr, l8_bytes
 #           clock_gettime, getrusage, rdtsc
 # Exceptions: l8_try_begin, l8_try_end, l8_raise, l8_exc_tag, l8_exc_ptr
@@ -8,7 +8,7 @@
 .globl syscall
 .globl malloc
 .globl read
-.globl write
+.globl l8_os_write
 .globl open
 .globl open_nul
 .globl close
@@ -626,7 +626,7 @@ read:
     ret
 
 # long write(long fd, void *buf, long n)
-write:
+l8_os_write:
     mov $1, %rax
     syscall
     ret

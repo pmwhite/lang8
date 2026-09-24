@@ -27,7 +27,12 @@ relative import resolution. Both source stages use tags, and the saved bootstrap
 enforces tag visibility when building them and programs.
 
 `runtime.s` remains source input when building programs and successor compiler
-stages, but it is already embedded in the saved bootstrap executable.
+stages, but it is already embedded in the saved bootstrap executable. A library
+can declare `native "relative/path.s"` to add assembly source to a direct
+`build`. Native paths resolve relative to the declaring L8 file and duplicate
+imports add each source once. An ordinary `extern` declaration can then name a
+symbol defined by that source. `compile` emits only L8-generated assembly; if
+assembling that output separately, include its native dependencies explicitly.
 
 Typical evolution for a breaking language change:
 
@@ -61,7 +66,8 @@ l8 build [--profile|-p] file.l8 -o file
 
 `build` sends typed compiler operations directly to the assembler's in-memory
 section, symbol, relocation, and instruction encoders. It parses only the static
-`runtime.s` input, then writes ET_EXEC directly from that builder state; generated
+`runtime.s` input and imported native sources, then writes ET_EXEC directly from
+that builder state; generated
 assembly and ET_REL are never serialized or reparsed.
 
 `unused` reports functions that are unreachable from every listed program.

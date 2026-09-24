@@ -62,7 +62,8 @@ class Callbacks(unittest.TestCase):
                 self.require_ok(emitted)
                 assembly.write_bytes(emitted.stdout)
                 obj = BUILD / (name + '.o')
-                self.require_ok(run('as', str(assembly), 'runtime.s', '-o', str(obj)))
+                self.require_ok(run('as', str(assembly), 'runtime.s',
+                                    'programs/stdlib/write.s', '-o', str(obj)))
                 args = ['cc', '-nostartfiles', '-no-pie', '-Wl,-e,_start', str(obj),
                         '-o', str(binary)]
                 args += ['-L' + str(BUILD), '-lcallback-test'] if name == 'abi' else ['-lc']

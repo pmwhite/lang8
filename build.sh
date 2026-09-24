@@ -252,7 +252,7 @@ check_tags() {
     tests/compiler/tags/shadow.l8
   )
   "./$tool" unused "${unused_entries[@]}" 2>"$BUILD/tags-unused.err"
-  grep -q 'warning: tests/compiler/tags/untagged_unused.l8:1:1: unused function unused' "$BUILD/tags-unused.err" || die 'expected project-wide unused function warning'
+  grep -q 'warning: tests/compiler/tags/untagged_unused.l8:3:1: unused function unused' "$BUILD/tags-unused.err" || die 'expected project-wide unused function warning'
   if grep -q 'unused function tag_' "$BUILD/tags-unused.err"; then die 'function used by another entry point was reported unused'; fi
 
   # Format each file without following imports, then compile the formatted graph.
@@ -263,6 +263,7 @@ check_tags() {
       nested.l8|qualified_definition.l8|duplicate.l8|duplicate_kind.l8|builtin_collision.l8|invalid_modifier.l8|dangling_modifier.l8) continue ;;
     esac
     "./$tool" fmt "$f" >"$BUILD/tags-fmt/$name"
+    sed -i 's|../../../programs/stdlib/write.l8|../../programs/stdlib/write.l8|' "$BUILD/tags-fmt/$name"
     "./$tool" fmt "$BUILD/tags-fmt/$name" >"$BUILD/tags-fmt/check"
     cmp -s "$BUILD/tags-fmt/$name" "$BUILD/tags-fmt/check" || die "tag formatting is not stable: $f"
   done
@@ -280,7 +281,7 @@ check_tags() {
 
   # Qualified calls retain the same link names in both compiler backends.
   "./$tool" compile tests/compiler/tags/main.l8 >"$BUILD/tags-main.s"
-  "./$tool" as -o "$BUILD/tags-main.o" "$BUILD/tags-main.s" runtime.s
+  "./$tool" as -o "$BUILD/tags-main.o" "$BUILD/tags-main.s" runtime.s programs/stdlib/write.s
   "./$tool" elfpack "$BUILD/tags-main.o" -o "$BUILD/tags-asm"
   run_expect "$BUILD/tags-asm" 'tags'
   flush_expect_sources "$tool"
@@ -291,9 +292,9 @@ check_retwarn() {
   local err="$BUILD/retwarn.err"
   local bin="$BUILD/retwarn"
   "./$tool" build tests/compiler/retwarn.l8 -o "$bin" 2>"$err" || die "retwarn compile failed"
-  grep -q 'warning: tests/compiler/retwarn.l8:9:5: unnecessary return in id' "$err" || die "expected located unnecessary return in id"
-  grep -q 'warning: tests/compiler/retwarn.l8:17:5: ignored return value in drop' "$err" || die "expected located ignored return value in drop"
-  grep -q 'warning: tests/compiler/retwarn.l8:39:16: unnecessary return in both' "$err" || die "expected located unnecessary return in both"
+  grep -q 'warning: tests/compiler/retwarn.l8:11:5: unnecessary return in id' "$err" || die "expected located unnecessary return in id"
+  grep -q 'warning: tests/compiler/retwarn.l8:19:5: ignored return value in drop' "$err" || die "expected located ignored return value in drop"
+  grep -q 'warning: tests/compiler/retwarn.l8:41:16: unnecessary return in both' "$err" || die "expected located unnecessary return in both"
 
   local boolint_err="$BUILD/boolint.err"
   "./$tool" boolint tests/compiler/boolint.l8 2>"$boolint_err"
