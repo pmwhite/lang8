@@ -20,8 +20,8 @@ class LibraryExpectTests(unittest.TestCase):
         return b"\x1e" + position.to_bytes(7, "little")
 
     def test_multiple_checkpoints_keep_newlines(self) -> None:
-        path = self.source('write(1, "a\\n", 2);\n//% expect: "a\\n"\n'
-                           'write(1, "b", 1);\n//% expect: "b"\n')
+        path = self.source('write(1, "a\\n");\n//% expect: "a\\n"\n'
+                           'write(1, "b");\n//% expect: "b"\n')
         order, expected, _, labels = lib_expect.expectations(path)
         actual = lib_expect.checkpoint_output(
             b"a\n" + self.marker(order[0]) + b"b" + self.marker(order[1])

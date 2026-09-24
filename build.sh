@@ -263,7 +263,7 @@ check_tags() {
       nested.l8|qualified_definition.l8|duplicate.l8|duplicate_kind.l8|builtin_collision.l8|invalid_modifier.l8|dangling_modifier.l8) continue ;;
     esac
     "./$tool" fmt "$f" >"$BUILD/tags-fmt/$name"
-    sed -i 's|../../../programs/stdlib/write.l8|../../programs/stdlib/write.l8|' "$BUILD/tags-fmt/$name"
+    sed -i 's|../../../stdlib/raw_write.l8|../../stdlib/raw_write.l8|' "$BUILD/tags-fmt/$name"
     "./$tool" fmt "$BUILD/tags-fmt/$name" >"$BUILD/tags-fmt/check"
     cmp -s "$BUILD/tags-fmt/$name" "$BUILD/tags-fmt/check" || die "tag formatting is not stable: $f"
   done
@@ -281,7 +281,7 @@ check_tags() {
 
   # Qualified calls retain the same link names in both compiler backends.
   "./$tool" compile tests/compiler/tags/main.l8 >"$BUILD/tags-main.s"
-  "./$tool" as -o "$BUILD/tags-main.o" "$BUILD/tags-main.s" runtime.s programs/stdlib/write.s
+  "./$tool" as -o "$BUILD/tags-main.o" "$BUILD/tags-main.s" runtime.s stdlib/write.s
   "./$tool" elfpack "$BUILD/tags-main.o" -o "$BUILD/tags-asm"
   run_expect "$BUILD/tags-asm" 'tags'
   flush_expect_sources "$tool"
@@ -420,7 +420,7 @@ do_stdlib_test() {
     tool="$BUILD/stdlib-compiler"
     step 'std test tool' ./l8c1 build src2/main.l8 -o "$tool"
   fi
-  step 'stdlib tests' python3 tools/lib_expect.py --discover programs/stdlib/tests --compiler "$tool"
+  step 'stdlib tests' python3 tools/lib_expect.py --discover stdlib/tests --compiler "$tool"
 }
 
 do_terminal() {

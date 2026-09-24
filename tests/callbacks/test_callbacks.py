@@ -63,7 +63,7 @@ class Callbacks(unittest.TestCase):
                 assembly.write_bytes(emitted.stdout)
                 obj = BUILD / (name + '.o')
                 self.require_ok(run('as', str(assembly), 'runtime.s',
-                                    'programs/stdlib/write.s', '-o', str(obj)))
+                                    'stdlib/write.s', '-o', str(obj)))
                 args = ['cc', '-nostartfiles', '-no-pie', '-Wl,-e,_start', str(obj),
                         '-o', str(binary)]
                 args += ['-L' + str(BUILD), '-lcallback-test'] if name == 'abi' else ['-lc']
@@ -143,7 +143,7 @@ increment(value: int): int { value + 1; }
             'extern_address': ('extern f(): int; main(): int { cb: fn(): int = &f; 0; }', 'extern function address'),
             'duplicate_parameter': ('main(): int { cb: ?fn(x: int, x: int) = null; 0; }', 'duplicate'),
             'nonfunction': ('main(): int { x: int = 1; x(); }', 'requires a fn'),
-            'uncaught_indirect': ('exception E; f() raises E { raise E; } main(): int { cb: fn() raises E = &f; cb(); 0; }', 'exception not in raises'),
+            'uncaught_indirect': ('exception E; f() raises E { raise E; } main(): int { cb: fn() raises E = &f; cb(); 0; }', 'is not in raises'),
             'indirect_region': ('g: ?*int = null; f() noregion { g = new int[1](1); } main(): int { cb: fn() noregion = &f; region { cb(); } 0; }', 'cannot call from a region'),
             'foreign_alias': ('extern reg(cb: fn(s: str)): int = other; main(): int { 0; }', 'foreign callbacks require'),
             'foreign_raises': ('exception E; extern register(cb: fn() raises E): int; main(): int { 0; }', 'cannot raise'),
