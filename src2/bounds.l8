@@ -764,6 +764,18 @@ bounds_term_has_member(e: *Expr, member: *Member): bool {
     }
 }
 
+bounds_term_has_any_member(e: *Expr): bool {
+    match e.kind {
+        MemberAccess _ -> true;
+        Deref k -> bounds_term_has_any_member(k.lhs);
+        Funcall k -> {
+            a: ?*Expr = k.args;
+            a != null && bounds_term_has_any_member(a)
+        }
+        _ -> false
+    }
+}
+
 bounds_simple_term_on_root(e: *Expr, root: *Obj): bool {
     match e.kind {
         Num _ -> true;
@@ -978,6 +990,81 @@ bounds_known_len(e: ?*Expr): int {
         New k -> bounds_num(k.lhs);
         _ -> -1
     }
+}
+
+bounds_record_facts(base: *Expr@new, inits: ?*FieldInit@new, f: ?*BoundsFact@new): ?*BoundsFact@f {
+    q: ?*FieldInit = inits;
+    while (q != null) {
+        member: ?*Member = q.member;
+        value: ?*Expr = q.lhs;
+        if (member != null && value != null) {
+            path: *Expr = new_member_access(base, member.name, member);
+            f = bounds_value_facts(path, value, f)
+        }
+        q = q.next
+    }
+    f
+}
+
+bounds_direct_constructor(fn: ?*Function): ?*Expr {
+    if (fn == null) return null;
+    body: ?*Stmt = fn.body;
+    if (body == null) return null;
+    match body.kind {
+        Block block -> {
+            only: ?*Stmt = block.body;
+            if (only == null) return null;
+            if (only.next != null) return null;
+            match only.kind {
+                ExprStmt item -> {
+                    match item.lhs.kind {
+                        New _ -> item.lhs;
+                        StructLit _ -> item.lhs;
+                        _ -> null
+                    }
+                }
+                Return item -> {
+                    value: ?*Expr = item.lhs;
+                    if (value == null) return null;
+                    match value.kind {
+                        New _ -> value;
+                        StructLit _ -> value;
+                        _ -> null
+                    }
+                }
+                _ -> null
+            }
+        }
+        _ -> null
+    }
+}
+
+bounds_value_facts(path: *Expr@new, value: *Expr, f: ?*BoundsFact@new): ?*BoundsFact@f {
+    n: int = bounds_num(value);
+    if (n >= 0) {
+        f = bounds_add_order(f, path, new_num(n), 10);
+        f = bounds_add_order(f, new_num(n), path, 10)
+    }
+    known: int = bounds_known_len(value);
+    if (known >= 0) f = bounds_add_order(f, new_num(known), bounds_len_term(path),
+        10);
+    match value.kind {
+        New k -> bounds_record_facts(path, k.inits, f);
+        StructLit k -> bounds_record_facts(path, k.inits, f);
+        Funcall k -> {
+            if (k.target != null) return f;
+            made: ?*Expr = bounds_direct_constructor(k.fn);
+            if (made == null) return f;
+            bounds_value_facts(path, made, f)
+        }
+        _ -> f
+    }
+}
+
+bounds_obj_expr(v: *Obj@new): *Expr@new {
+    e: *Expr = mk_expr(ExprKind.Var { var: v, name: v.name, member: null });
+    e.ty = v.ty;
+    e
 }
 
 bounds_add_value(
@@ -1222,6 +1309,38 @@ bounds_kill(f: ?*BoundsFact@new, v: *Obj): ?*BoundsFact@new {
     q: ?*BoundsFact = f;
     while (q != null) {
         if (q.index != v && q.array != v) head = bounds_copy(head, q);
+        q = q.next
+    }
+    head
+}
+
+// Without a proven separation, another path with the same member may alias.
+// Keep facts about other members, including those of the same record.
+bounds_kill_member(f: ?*BoundsFact@new, member: *Member): ?*BoundsFact@new {
+    head: ?*BoundsFact = null;
+    q: ?*BoundsFact = f;
+    while (q != null) {
+        affected: bool = q.kind == 8 && q.value == member.browse_id;
+        left: ?*Expr = q.left;
+        right: ?*Expr = q.right;
+        if (left != null && bounds_term_has_member(left, member)) affected = true;
+        if (right != null && bounds_term_has_member(right, member)) affected = true;
+        if (!affected) head = bounds_copy(head, q);
+        q = q.next
+    }
+    head
+}
+
+bounds_kill_record_fields(f: ?*BoundsFact@new): ?*BoundsFact@new {
+    head: ?*BoundsFact = null;
+    q: ?*BoundsFact = f;
+    while (q != null) {
+        affected: bool = q.kind == 8;
+        left: ?*Expr = q.left;
+        right: ?*Expr = q.right;
+        if (left != null && bounds_term_has_any_member(left)) affected = true;
+        if (right != null && bounds_term_has_any_member(right)) affected = true;
+        if (!affected) head = bounds_copy(head, q);
         q = q.next
     }
     head
@@ -1485,6 +1604,30 @@ bounds_count_fits(a: *Expr, count: *Expr, f: ?*BoundsFact): bool {
         fact_len: int = bounds_fact_value(f, av, 3);
         if (fact_len > known) known = fact_len
     }
+    q: ?*BoundsFact = f;
+    while (q != null) {
+        left: ?*Expr = q.left;
+        right: ?*Expr = q.right;
+        if ((q.kind == 9 || q.kind == 10) && left != null && right != null && bounds_num(left) >= 0 && bounds_num(left) < 536870912 && bounds_separations_available(q.separation,
+            f)) {
+            match right.kind {
+                Funcall call -> {
+                    arg: ?*Expr = call.args;
+                    if (streq(call.funcname, "len") && arg != null && bounds_same_array_expr(arg,
+                        a)) {
+                        lower: int = bounds_num(left);
+                        if (q.kind == 9) lower = lower + 1;
+                        if (lower > known) {
+                            bounds_note_separations(q.separation, f);
+                            known = lower
+                        }
+                    }
+                }
+                _ -> { }
+            }
+        }
+        q = q.next
+    }
     if (known < 0) return false;
     n: int = bounds_num(count);
     cv: ?*Obj = bounds_var(count);
@@ -1587,9 +1730,19 @@ bounds_expr(e: ?*Expr, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@new {
             v: ?*Obj = bounds_var(k.lhs);
             if (v == null) {
                 match k.lhs.kind {
-                    // Writing an element cannot change a named array's length or
-                    // a direct record field used by a bounds relationship.
-                    Index _ -> return f;
+                    MemberAccess field -> {
+                        member: ?*Member = field.member;
+                        if (member == null) return bounds_after_call(f, null, null);
+                        f = bounds_kill_member(f, member);
+                        return bounds_value_facts(k.lhs, k.rhs, f)
+                    }
+                    Index _ -> {
+                        // Replacing a record element may change fields seen
+                        // through a pointer to that element.
+                        t: ?*Type = k.lhs.ty;
+                        if (t != null && (is_struct_ty(t) || is_enum_ty(t) || is_exn_ty(t) || is_array(t))) return bounds_kill_record_fields(f);
+                        return f
+                    }
                     _ -> return bounds_after_call(f, null, null)
                 }
             }
@@ -1601,7 +1754,7 @@ bounds_expr(e: ?*Expr, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@new {
             if (bounds_num(k.rhs) >= 0) f = bounds_add_value(f, v, null, 4, bounds_num(k.rhs));
             if (bounds_known_len(k.rhs) >= 0) f = bounds_add_value(f, v, null, 3,
                 bounds_known_len(k.rhs));
-            f
+            bounds_value_facts(bounds_obj_expr(v), k.rhs, f)
         }
         LogAnd k -> {
             f = bounds_expr(k.lhs, f);
@@ -1707,7 +1860,9 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@new {
                     f = bounds_add_value(f, v, null, 4, bounds_num(k.init))
                 }
                 if (bounds_known_len(k.init) >= 0) f = bounds_add_value(f, v, null,
-                    3, bounds_known_len(k.init))
+                    3, bounds_known_len(k.init));
+                if (init != null) f = bounds_value_facts(bounds_obj_expr(v), init,
+                    f)
             }
             f
         }
