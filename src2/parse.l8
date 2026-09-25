@@ -893,10 +893,7 @@ mk_expr(k: ExprKind@new): *Expr@new {
         pos: 0,
         file: 0,
         toklen: 0,
-        bounds_proven: false,
-        bounds_check_seen: false,
-        bounds_check_all_proved: true,
-        bounds_check_warning_emitted: false
+        bounds_proven: false
     }
 }
 
@@ -948,7 +945,11 @@ new_binary(op: BinOp, lhs: *Expr@new, rhs: *Expr@new): *Expr@new {
 }
 
 new_assign(lhs: *Expr@new, rhs: *Expr@new): *Expr@new {
-    mk_expr(ExprKind.Assign { lhs: lhs, rhs: rhs })
+    n: *Expr = mk_expr(ExprKind.Assign { lhs: lhs, rhs: rhs });
+    n.pos = lhs.pos;
+    n.file = lhs.file;
+    n.toklen = lhs.toklen;
+    n
 }
 
 new_logand(lhs: *Expr@new, rhs: *Expr@new): *Expr@new {
@@ -1550,6 +1551,9 @@ parse_variant_field_inits(v: *Variant@new) noregion raises Error: ?*FieldInit@ne
 parse_primary() noregion raises Error: *Expr@new {
     n: *Expr;
     if (tok.kind == TokKind.New) {
+        new_pos: int = tok.pos;
+        new_file: int = current_file_id;
+        new_len: int = tok.len;
         tok = tok.next;
         if (tok.next.kind == TokKind.Dot && (is_type_name() || !parse_resolve)) {
             ety: *Type = syntax_as_enum(parse_type());
@@ -1598,8 +1602,12 @@ parse_primary() noregion raises Error: *Expr@new {
         if (is_pointer(base)) error("new expects a non-pointer type");
         if (tok.kind != TokKind.LBrace) error("expected {, [, or .Variant after new");
         if (is_enum_ty(base)) error("use new Enum.Variant { ... } for sum types");
-        return new_heap_node(null, 0, parse_struct_field_inits(base), null, null,
-            "", ptr_to(base))
+        hn2: *Expr = new_heap_node(null, 0, parse_struct_field_inits(base), null,
+            null, "", ptr_to(base));
+        hn2.pos = new_pos;
+        hn2.file = new_file;
+        hn2.toklen = new_len;
+        return hn2
     }
     if (tok.kind == TokKind.Sizeof) {
         tok = tok.next;
@@ -1785,9 +1793,16 @@ parse_primary() noregion raises Error: *Expr@new {
             return vl
         }
         if (!local_name && nk == TokKind.LBrace && (is_named_type(name) || syntax_struct_lit())) {
+            struct_pos: int = tok.pos;
+            struct_file: int = current_file_id;
+            struct_len: int = tok.len;
             sty: *Type = parse_type();
             if (parse_resolve && !is_struct_ty(sty)) error("struct literal requires a struct type");
-            return new_struct_lit(name, parse_struct_field_inits(sty), sty)
+            lit: *Expr = new_struct_lit(name, parse_struct_field_inits(sty), sty);
+            lit.pos = struct_pos;
+            lit.file = struct_file;
+            lit.toklen = struct_len;
+            return lit
         }
         npos: int = browse_tok_pos;
         nlen: int = browse_tok_len;
@@ -3907,6 +3922,8 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error: *Function@
         bounds_unknown_write: false,
         bounds_separations: null,
         bounds_requirements: null,
+        bounds_returns: null,
+        bounds_precondition: null,
         next: null,
         hash_next: null,
         ret_bound: "",
@@ -3982,6 +3999,19 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error: *Function@
         fn.return_ty = parse_type();
         if (tok.kind == TokKind.At) fn.ret_bound = parse_at_bound()
     }
+    if (tok.kind == TokKind.Ident && streq(cur_tokstr(), "requires")) {
+        tok = tok.next;
+        skip(TokKind.LParen);
+        condition: *Expr = parse_expr();
+        skip(TokKind.RParen);
+        if (parse_resolve) {
+            add_type(condition);
+            if (!is_bool_ty(condition.ty)) error_ty_expr(condition, "function precondition must be bool",
+                condition.ty);
+            if (!bounds_precondition_valid(condition, fn)) error("function precondition must be a conjunction of parameter comparisons")
+        }
+        fn.bounds_precondition = condition
+    }
     rt: ?*Type = fn.return_ty;
     if (is_extern == 2) {
         fn.need_imm_heap = fn.decl_imm_heap;
@@ -4051,7 +4081,8 @@ parse_field_list(base_offset: int) noregion raises Error: *Member {
             browse_id: browse_fresh(),
             browse_pos: browse_tok_pos,
             browse_file: browse_tok_file,
-            browse_len: browse_tok_len
+            browse_len: browse_tok_len,
+            invariant_var: null
         };
         offset = offset + sz;
         if (al > max_a) max_a = al;
@@ -4130,7 +4161,8 @@ parse_variant(tag: int, enum_name: []i8, tag_size: int) noregion raises Error: *
             browse_id: 0,
             browse_pos: 0,
             browse_file: 0,
-            browse_len: 0
+            browse_len: 0,
+            invariant: null
         };
         v.payload_ty = struct_type(sd)
     }
@@ -4207,6 +4239,32 @@ parse_type_def() noregion raises Error {
         tok = tok.next;
         sd.members = parse_field_list(0);
         sd.size = field_list_size;
+        if (tok.kind == TokKind.Ident && streq(cur_tokstr(), "invariant")) {
+            tok = tok.next;
+            skip(TokKind.LParen);
+            saved_locals: ?*Obj = locals;
+            enter_scope();
+            field: ?*Member = sd.members;
+            while (field != null) {
+                v: *Obj = new_obj(field.name, true);
+                v.ty = field.ty;
+                field.invariant_var = v;
+                field = field.next
+            }
+            inv: *Expr = parse_expr();
+            if (parse_resolve) {
+                add_type(inv);
+                it: ?*Type = inv.ty;
+                if (it == null || !is_bool_ty(it)) error_ty_expr(inv, "record invariant must be bool",
+                    it);
+                if (!bounds_pure_condition(inv)) error("record invariant must be free of side effects");
+                if (bounds_invariant_map(inv, sd, new_num(0)) == null) error("record invariant may refer only to its fields")
+            }
+            leave_scope();
+            locals = saved_locals;
+            skip(TokKind.RParen);
+            sd.invariant = inv
+        }
         skip_optional_semi();
         append_item(new_item(ItemKind.Struct { def: sd }, npos));
         return
