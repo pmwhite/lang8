@@ -59,6 +59,14 @@ stable. A range loop over `len(record.field)` can index that field when its body
 has no calls or writes that could change the field's length. The verifier keeps
 facts entering a range loop only while its body preserves them.
 
+The verifier also records strict and non-strict inequalities between named field
+paths and lengths. A guard such as `0 <= b.cursor && b.cursor < len(b.data)`
+proves `b.data[b.cursor]`. A guard establishing `b.used <= len(b.data)` lets a
+stable loop over `0..b.used` index `b.data`. Assignments through fields and
+calls conservatively discard these relationships. Field effects and inferred
+cross-function count/capacity requirements are still future work; callers must
+currently establish the facts within the function that uses them.
+
 `check_index(a, i)` is the explicit runtime bridge. It checks
 `0 <= i < len(a)` once and exits with status 1 on failure, as ordinary checked
 indexing does. It returns the checked index, so an access can use

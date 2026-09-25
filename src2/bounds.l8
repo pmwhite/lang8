@@ -6,6 +6,8 @@ type BoundsFact = {
     array: ?*Obj;
     kind: int;
     value: int;
+    left: ?*Expr;
+    right: ?*Expr;
     next: ?*BoundsFact
 }
 
@@ -148,6 +150,76 @@ bounds_same_array_expr(a: *Expr, b: *Expr): bool {
     }
 }
 
+// A bounds term is a variable, a chain of named fields, or the length of one.
+bounds_term(e: ?*Expr): bool {
+    if (e == null) return false;
+    n: *Expr = e;
+    match n.kind {
+        Num k -> k.form == LIT_INT;
+        Var k -> k.var != null;
+        MemberAccess k -> bounds_term(k.lhs);
+        Deref k -> bounds_term(k.lhs);
+        Funcall k -> {
+            if (!streq(k.funcname, "len") || k.target != null) return false;
+            a: ?*Expr = k.args;
+            if (a == null) return false;
+            if (a.next != null) return false;
+            bounds_term(a)
+        }
+        _ -> false
+    }
+}
+
+bounds_same_term(a: *Expr, b: *Expr): bool {
+    match a.kind {
+        Num x -> {
+            match b.kind {
+                Num y -> x.form == LIT_INT && y.form == LIT_INT && x.val == y.val;
+                _ -> false
+            }
+        }
+        Funcall x -> {
+            match b.kind {
+                Funcall y -> {
+                    if (!streq(x.funcname, "len") || !streq(y.funcname, "len")) return false;
+                    ax: ?*Expr = x.args;
+                    ay: ?*Expr = y.args;
+                    if (ax == null || ay == null) return false;
+                    bounds_same_array_expr(ax, ay)
+                }
+                _ -> false
+            }
+        }
+        _ -> bounds_same_array_expr(a, b)
+    }
+}
+
+bounds_term_root(e: *Expr): ?*Obj {
+    match e.kind {
+        Var k -> k.var;
+        MemberAccess k -> bounds_term_root(k.lhs);
+        Deref k -> bounds_term_root(k.lhs);
+        Funcall k -> {
+            a: ?*Expr = k.args;
+            if (a == null) return null;
+            bounds_term_root(a)
+        }
+        _ -> null
+    }
+}
+
+bounds_first_member(e: *Expr): ?*Member {
+    match e.kind {
+        MemberAccess k -> {
+            inner: ?*Member = bounds_first_member(k.lhs);
+            if (inner != null) return inner;
+            k.member
+        }
+        Deref k -> bounds_first_member(k.lhs);
+        _ -> null
+    }
+}
+
 bounds_field_array(a: *Expr, root: *Obj, member: *Member): bool {
     match a.kind {
         MemberAccess k -> bounds_var(k.lhs) == root && k.member == member;
@@ -175,6 +247,8 @@ bounds_field_safe_expr(e: ?*Expr, root: *Obj, member: *Member): bool {
             root, member);
         Assign k -> {
             match k.lhs.kind {
+                Var x -> x.var != null && x.var != root && bounds_field_safe_expr(k.rhs,
+                    root, member);
                 Index x -> {
                     t: ?*Type = k.lhs.ty;
                     (is_int_width_ty(t) || is_float_ty(t) || is_bool_ty(t)) && bounds_field_array(x.lhs,
@@ -332,6 +406,104 @@ bounds_add_value(
         array: array,
         kind: kind,
         value: value,
+        left: null,
+        right: null,
+        next: f
+    }
+}
+
+// Kinds 9 and 10 denote strict and non-strict inequalities respectively.
+bounds_add_order(
+    f: ?*BoundsFact@new,
+    left: *Expr@new,
+    right: *Expr@new,
+    kind: int
+): ?*BoundsFact@new {
+    if (!bounds_term(left) || !bounds_term(right)) return f;
+    root: ?*Obj = bounds_term_root(left);
+    if (root == null) root = bounds_term_root(right);
+    if (root == null) return f;
+    new BoundsFact {
+        index: root,
+        array: bounds_term_root(right),
+        kind: kind,
+        value: 0,
+        left: left,
+        right: right,
+        next: f
+    }
+}
+
+bounds_order(
+    f: ?*BoundsFact,
+    left: *Expr,
+    right: *Expr,
+    strict: bool
+): bool {
+    q: ?*BoundsFact = f;
+    while (q != null) {
+        if (q.kind == 9 || q.kind == 10) {
+            l: ?*Expr = q.left;
+            r: ?*Expr = q.right;
+            if (l != null && r != null && bounds_same_term(l, left) && bounds_same_term(r,
+                right) && (!strict || q.kind == 9)) return true
+        }
+        q = q.next
+    }
+    false
+}
+
+bounds_order_to_len(
+    f: ?*BoundsFact,
+    left: *Expr,
+    array: *Expr,
+    strict: bool
+): bool {
+    q: ?*BoundsFact = f;
+    while (q != null) {
+        if (q.kind == 9 || !strict && q.kind == 10) {
+            l: ?*Expr = q.left;
+            r: ?*Expr = q.right;
+            if (l != null && r != null && bounds_same_term(l, left)) {
+                match r.kind {
+                    Funcall call -> {
+                        a: ?*Expr = call.args;
+                        if (streq(call.funcname, "len") && a != null && bounds_same_array_expr(a,
+                            array)) return true
+                    }
+                    _ -> { }
+                }
+            }
+        }
+        q = q.next
+    }
+    false
+}
+
+bounds_nonnegative_term(f: ?*BoundsFact, term: *Expr): bool {
+    v: ?*Obj = bounds_var(term);
+    if (v != null && bounds_has(f, v, null, 1)) return true;
+    q: ?*BoundsFact = f;
+    while (q != null) {
+        left: ?*Expr = q.left;
+        right: ?*Expr = q.right;
+        if (q.kind == 10 && left != null && right != null && bounds_num(left) == 0 && bounds_same_term(right,
+            term)) return true;
+        q = q.next
+    }
+    false
+}
+
+// The range-loop variable is strictly below its stable upper-bound path.
+bounds_add_loop_order(f: ?*BoundsFact@new, index: *Obj@new, hi: *Expr@new): ?*BoundsFact@new {
+    if (!bounds_term(hi)) return f;
+    new BoundsFact {
+        index: index,
+        array: bounds_term_root(hi),
+        kind: 11,
+        value: 0,
+        left: null,
+        right: hi,
         next: f
     }
 }
@@ -383,12 +555,44 @@ bounds_has_value(
     false
 }
 
+bounds_has_fact(f: ?*BoundsFact, fact: *BoundsFact): bool {
+    if (fact.kind == 11) {
+        q: ?*BoundsFact = f;
+        while (q != null) {
+            r: ?*Expr = q.right;
+            fr: ?*Expr = fact.right;
+            if (q.kind == 11 && q.index == fact.index && r != null && fr != null && bounds_same_term(r,
+                fr)) return true;
+            q = q.next
+        }
+        return false
+    }
+    if (fact.kind == 9 || fact.kind == 10) {
+        l: ?*Expr = fact.left;
+        r: ?*Expr = fact.right;
+        if (l == null || r == null) return false;
+        return bounds_order(f, l, r, fact.kind == 9)
+    }
+    bounds_has_value(f, fact.index, fact.array, fact.kind, fact.value)
+}
+
+bounds_copy(f: ?*BoundsFact@new, q: *BoundsFact@new): *BoundsFact@new {
+    new BoundsFact {
+        index: q.index,
+        array: q.array,
+        kind: q.kind,
+        value: q.value,
+        left: q.left,
+        right: q.right,
+        next: f
+    }
+}
+
 bounds_kill(f: ?*BoundsFact@new, v: *Obj): ?*BoundsFact@new {
     head: ?*BoundsFact = null;
     q: ?*BoundsFact = f;
     while (q != null) {
-        if (q.index != v && q.array != v) head = bounds_add_value(head, q.index, q.array,
-            q.kind, q.value);
+        if (q.index != v && q.array != v) head = bounds_copy(head, q);
         q = q.next
     }
     head
@@ -403,7 +607,8 @@ bounds_after_call(f: ?*BoundsFact@new): ?*BoundsFact@new {
         if (a != null) {
             if (!a.is_local || a.bounds_addr_taken) stable = false
         }
-        if (stable) head = bounds_add_value(head, q.index, q.array, q.kind, q.value);
+        if (stable && q.kind != 9 && q.kind != 10 && q.kind != 11) head = bounds_copy(head,
+            q);
         q = q.next
     }
     head
@@ -413,8 +618,7 @@ bounds_meet(a: ?*BoundsFact@new, b: ?*BoundsFact): ?*BoundsFact@new {
     head: ?*BoundsFact = null;
     q: ?*BoundsFact = a;
     while (q != null) {
-        if (bounds_has_value(b, q.index, q.array, q.kind, q.value)) head = bounds_add_value(head,
-            q.index, q.array, q.kind, q.value);
+        if (bounds_has_fact(b, q)) head = bounds_copy(head, q);
         q = q.next
     }
     head
@@ -423,12 +627,12 @@ bounds_meet(a: ?*BoundsFact@new, b: ?*BoundsFact): ?*BoundsFact@new {
 bounds_same(a: ?*BoundsFact, b: ?*BoundsFact): bool {
     q: ?*BoundsFact = a;
     while (q != null) {
-        if (!bounds_has_value(b, q.index, q.array, q.kind, q.value)) return false;
+        if (!bounds_has_fact(b, q)) return false;
         q = q.next
     }
     q2: ?*BoundsFact = b;
     while (q2 != null) {
-        if (!bounds_has_value(a, q2.index, q2.array, q2.kind, q2.value)) return false;
+        if (!bounds_has_fact(a, q2)) return false;
         q2 = q2.next
     }
     true
@@ -455,6 +659,8 @@ bounds_pure_condition(e: *Expr): bool {
     match e.kind {
         Num _ -> true;
         Var _ -> true;
+        MemberAccess k -> bounds_pure_condition(k.lhs);
+        Deref k -> bounds_pure_condition(k.lhs);
         Index k -> bounds_pure_condition(k.lhs) && bounds_pure_condition(k.idx);
         Binary k -> bounds_pure_condition(k.lhs) && bounds_pure_condition(k.rhs);
         Not k -> bounds_pure_condition(k.lhs);
@@ -465,7 +671,7 @@ bounds_pure_condition(e: *Expr): bool {
             a: ?*Expr = k.args;
             if (a == null) return false;
             if (a.next != null) return false;
-            bounds_var(a) != null
+            bounds_term(a)
         }
         _ -> false
     }
@@ -484,6 +690,18 @@ bounds_condition(e: *Expr, yes: bool, f: ?*BoundsFact@new): ?*BoundsFact@new {
             bounds_condition(k.rhs, false, bounds_condition(k.lhs, false, f))
         }
         Binary k -> {
+            if (yes && k.op == BinOp.Lt || !yes && k.op == BinOp.Ge) f = bounds_add_order(f,
+                k.lhs, k.rhs, 9);
+            if (yes && k.op == BinOp.Le || !yes && k.op == BinOp.Gt) f = bounds_add_order(f,
+                k.lhs, k.rhs, 10);
+            if (yes && k.op == BinOp.Gt || !yes && k.op == BinOp.Le) f = bounds_add_order(f,
+                k.rhs, k.lhs, 9);
+            if (yes && k.op == BinOp.Ge || !yes && k.op == BinOp.Lt) f = bounds_add_order(f,
+                k.rhs, k.lhs, 10);
+            if (yes && k.op == BinOp.Eq || !yes && k.op == BinOp.Ne) {
+                f = bounds_add_order(f, k.lhs, k.rhs, 10);
+                f = bounds_add_order(f, k.rhs, k.lhs, 10)
+            }
             left_len: ?*Obj = bounds_len_var(k.lhs);
             right_len: ?*Obj = bounds_len_var(k.rhs);
             if (left_len != null && right_len != null) {
@@ -560,10 +778,13 @@ bounds_invariant_proved(e: *Expr, f: ?*BoundsFact) raises Error: bool {
             if (need == null) return false;
             q: ?*BoundsFact = need;
             while (q != null) {
+                left: ?*Expr = q.left;
+                right: ?*Expr = q.right;
                 if (q.kind == 3) {
                     have: int = bounds_fact_value(f, q.index, 3);
                     if (have < q.value) return false
-                } else if (!bounds_has_value(f, q.index, q.array, q.kind, q.value)) return false;
+                } else if (q.kind == 10 && left != null && right != null && bounds_num(left) == 0 && bounds_nonnegative_term(f,
+                    right)) { } else if (!bounds_has_fact(f, q)) return false;
                 q = q.next
             }
             true
@@ -594,7 +815,16 @@ bounds_proves(a: *Expr, i: *Expr, f: ?*BoundsFact) raises Error: bool {
             q = q.next
         }
     }
+    if (bounds_term(i) && bounds_nonnegative_term(f, i) && bounds_order_to_len(f,
+        i, a, true)) return true;
     if (iv != null && bounds_has(f, iv, null, 1)) {
+        qloop: ?*BoundsFact = f;
+        while (qloop != null) {
+            bound: ?*Expr = qloop.right;
+            if (qloop.kind == 11 && qloop.index == iv && bound != null && bounds_order_to_len(f,
+                bound, a, false)) return true;
+            qloop = qloop.next
+        }
         match a.kind {
             MemberAccess k -> {
                 root: ?*Obj = bounds_var(k.lhs);
@@ -832,6 +1062,20 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@new {
                     field_root = null;
                     field_member = null
                 }
+                stable_order_bound: bool = false;
+                match hi.kind {
+                    Var bound_var -> {
+                        v: ?*Obj = bound_var.var;
+                        if (v != null) stable_order_bound = v.is_local && !v.bounds_written && !v.bounds_addr_taken
+                    }
+                    MemberAccess bound_field -> {
+                        root: ?*Obj = bounds_term_root(hi);
+                        member: ?*Member = bounds_first_member(hi);
+                        if (root != null && member != null) stable_order_bound = bounds_field_safe_stmt(k.body,
+                            root, member)
+                    }
+                    _ -> { }
+                }
                 hiconst: int = bounds_num(hi);
                 invariant2: ?*BoundsFact = f;
                 changing2: bool = true;
@@ -840,6 +1084,8 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@new {
                     if (bounds_num(k.iter) >= 0) facts = bounds_add(facts, k.item,
                         null, 1);
                     if (av != null) facts = bounds_add(facts, k.item, av, 2);
+                    if (stable_order_bound) facts = bounds_add_loop_order(facts, k.item,
+                        hi);
                     if (field_root != null && field_member != null) {
                         m2: *Member = field_member;
                         facts = bounds_add_value(facts, k.item, field_root, 8, m2.browse_id)
