@@ -66,10 +66,16 @@ stable loop over `0..b.used` index `b.data`. Assignments through fields and
 calls that may change either side discard these relationships. The compiler
 infers transitive sets of fields written by each function and preserves a fact
 across a call when those writes cannot affect its field paths. Unknown writes
-discard the fact. These summaries are deliberately conservative across objects:
-a write to the same field of a different record may still discard it. Inferred
-cross-function count/capacity requirements are future work; callers must
-currently establish the facts within the function that uses them.
+discard the fact. For direct fields of a record parameter, a write to the same
+field through a different parameter can preserve the fact if those parameters
+are distinct. The compiler infers this separation requirement only when a
+later bounds proof uses the preserved fact, then propagates the requirement
+through callers. A caller can satisfy it with distinct fresh records or a
+guard such as `if (a == b) return`, and a function can instead use
+`check_index` after the call. An unproved call is rejected. Nested paths and
+unknown aliases remain conservative; inferred cross-function count/capacity
+requirements are future work, so callers must currently establish those facts
+within the function that uses them.
 
 `check_index(a, i)` is the explicit runtime bridge. It checks
 `0 <= i < len(a)` once and exits with status 1 on failure, as ordinary checked

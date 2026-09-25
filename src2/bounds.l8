@@ -8,6 +8,7 @@ type BoundsFact = {
     value: int;
     left: ?*Expr;
     right: ?*Expr;
+    separation: ?*BoundsSeparation;
     next: ?*BoundsFact
 }
 
@@ -35,6 +36,83 @@ bounds_named_param(fn: *Function, name: []i8): ?*Obj@fn {
         p = p.param_next
     }
     null
+}
+
+bounds_param_id(fn: *Function, id: int): ?*Obj@fn {
+    p: ?*Obj = fn.params;
+    while (p != null) {
+        if (p.browse_id == id) return p;
+        p = p.param_next
+    }
+    null
+}
+
+bounds_separation_contains(list: ?*BoundsSeparation, first: int, second: int): bool {
+    q: ?*BoundsSeparation = list;
+    while (q != null) {
+        if (q.first == first && q.second == second || q.first == second && q.second == first) return true;
+        q = q.next
+    }
+    false
+}
+
+bounds_separation_same(a: ?*BoundsSeparation, b: ?*BoundsSeparation): bool {
+    q: ?*BoundsSeparation = a;
+    while (q != null) {
+        if (!bounds_separation_contains(b, q.first, q.second)) return false;
+        q = q.next
+    }
+    q2: ?*BoundsSeparation = b;
+    while (q2 != null) {
+        if (!bounds_separation_contains(a, q2.first, q2.second)) return false;
+        q2 = q2.next
+    }
+    true
+}
+
+bounds_add_separation(fn: *Function@new, first: int, second: int): bool {
+    if (first == second || bounds_separation_contains(fn.bounds_separations, first,
+        second)) return false;
+    fn.bounds_separations = new BoundsSeparation { first: first, second: second, next: fn.bounds_separations };
+    bounds_infer_changed = true;
+    true
+}
+
+bounds_separation_in_facts(f: ?*BoundsFact, first: int, second: int): bool {
+    q: ?*BoundsFact = f;
+    while (q != null) {
+        other: ?*Obj = q.array;
+        if (q.kind == 12 && other != null) {
+            if (q.index.browse_id == first && other.browse_id == second || q.index.browse_id == second && other.browse_id == first) return true
+        }
+        q = q.next
+    }
+    false
+}
+
+bounds_separations_available(list: ?*BoundsSeparation, f: ?*BoundsFact): bool {
+    if (bounds_infer_mode) return true;
+    fn: ?*Function = bounds_current_fn;
+    q: ?*BoundsSeparation = list;
+    while (q != null) {
+        if (!bounds_separation_in_facts(f, q.first, q.second)) {
+            if (fn == null) return false;
+            if (!bounds_separation_contains(fn.bounds_separations, q.first, q.second)) return false
+        }
+        q = q.next
+    }
+    true
+}
+
+bounds_note_separations(list: ?*BoundsSeparation, f: ?*BoundsFact) {
+    fn: ?*Function = bounds_current_fn;
+    if (fn == null || !bounds_infer_mode) return;
+    q: ?*BoundsSeparation = list;
+    while (q != null) {
+        if (!bounds_separation_in_facts(f, q.first, q.second)) bounds_add_separation(fn,
+            q.first, q.second);
+        q = q.next
+    }
 }
 
 bounds_infer_requirement(a: *Expr, i: *Expr) {
@@ -76,6 +154,26 @@ bounds_arg_named(fn: *Function, args: ?*Expr, name: []i8): ?*Expr@args {
     null
 }
 
+bounds_separation_proved(a: *Expr, b: *Expr, f: ?*BoundsFact): bool {
+    av: ?*Obj = bounds_var(a);
+    bv: ?*Obj = bounds_var(b);
+    if (av == null || bv == null || av == bv) return false;
+    if (bounds_has(f, av, bv, 12) || bounds_has(f, bv, av, 12)) return true;
+    ai: int = bounds_fact_value(f, av, 13);
+    bi: int = bounds_fact_value(f, bv, 13);
+    ai >= 0 && bi >= 0 && ai != bi
+}
+
+bounds_infer_caller_separation(a: *Expr, b: *Expr) {
+    fn: ?*Function = bounds_current_fn;
+    if (fn == null) return;
+    av: ?*Obj = bounds_var(a);
+    bv: ?*Obj = bounds_var(b);
+    if (av == null || bv == null || av == bv) return;
+    if (bounds_param(fn, av) && bounds_param(fn, bv)) bounds_add_separation(fn, av.browse_id,
+        bv.browse_id)
+}
+
 bounds_check_call(
     fn: *Function,
     args: ?*Expr,
@@ -96,10 +194,33 @@ bounds_check_call(
         p = p.param_next;
         a = a.next
     }
+    sep: ?*BoundsSeparation = fn.bounds_separations;
+    while (sep != null) {
+        first_param: ?*Obj = bounds_param_id(fn, sep.first);
+        second_param: ?*Obj = bounds_param_id(fn, sep.second);
+        if (first_param == null || second_param == null) error_at_file(file, pos,
+            "internal: separation requirement refers to missing parameter");
+        first_arg: ?*Expr = bounds_arg_named(fn, args, first_param.name);
+        second_arg: ?*Expr = bounds_arg_named(fn, args, second_param.name);
+        if (first_arg == null || second_arg == null) error_at_file(file, pos, "internal: separation requirement refers to missing argument");
+        if (!bounds_separation_proved(first_arg, second_arg, f)) {
+            if (bounds_infer_mode) bounds_infer_caller_separation(first_arg, second_arg) else error_at_file(file,
+                pos, "call requires distinct record arguments for bounds proof")
+        }
+        sep = sep.next
+    }
 }
 
 bounds_initial(fn: *Function@new) raises Error: ?*BoundsFact@new {
     f: ?*BoundsFact = null;
+    sep: ?*BoundsSeparation = fn.bounds_separations;
+    while (sep != null) {
+        first: ?*Obj = bounds_param_id(fn, sep.first);
+        second: ?*Obj = bounds_param_id(fn, sep.second);
+        if (first == null || second == null) error("internal: separation requirement refers to missing parameter");
+        f = bounds_add(f, first, second, 12);
+        sep = sep.next
+    }
     p: ?*Obj = fn.params;
     while (p != null) {
         if (len(p.index_for_name) != 0) {
@@ -220,13 +341,13 @@ bounds_first_member(e: *Expr): ?*Member {
     }
 }
 
-bounds_effect_add(fn: *Function@new, member: *Member@new): bool {
+bounds_effect_add(fn: *Function@new, member: *Member@new, root_param: ?*Obj@new): bool {
     q: ?*BoundsWrite = fn.bounds_writes;
     while (q != null) {
-        if (q.member == member) return false;
+        if (q.member == member && q.root_param == root_param) return false;
         q = q.next
     }
-    fn.bounds_writes = new BoundsWrite { member: member, next: fn.bounds_writes };
+    fn.bounds_writes = new BoundsWrite { member: member, root_param: root_param, next: fn.bounds_writes };
     true
 }
 
@@ -273,7 +394,9 @@ bounds_effect_expr(fn: *Function@new, e: ?*Expr): bool {
                 MemberAccess field -> {
                     m: ?*Member = field.member;
                     if (m == null) return bounds_effect_unknown(fn);
-                    if (bounds_effect_add(fn, m)) changed = true
+                    root: ?*Obj = bounds_var(field.lhs);
+                    if (root != null && !bounds_param(fn, root)) root = null;
+                    if (bounds_effect_add(fn, m, root)) changed = true
                 }
                 Var v -> {
                     o: ?*Obj = v.var;
@@ -295,7 +418,14 @@ bounds_effect_expr(fn: *Function@new, e: ?*Expr): bool {
             if (callee.bounds_unknown_write && bounds_effect_unknown(fn)) changed = true;
             q: ?*BoundsWrite = callee.bounds_writes;
             while (q != null) {
-                if (bounds_effect_add(fn, q.member)) changed = true;
+                root: ?*Obj = null;
+                formal: ?*Obj = q.root_param;
+                if (formal != null) {
+                    actual: ?*Expr = bounds_arg_named(callee, k.args, formal.name);
+                    root = bounds_var(actual);
+                    if (root != null && !bounds_param(fn, root)) root = null
+                }
+                if (bounds_effect_add(fn, q.member, root)) changed = true;
                 q = q.next
             }
             changed
@@ -449,6 +579,76 @@ bounds_effect_preserves_term(fn: *Function, e: *Expr): bool {
         }
         _ -> false
     }
+}
+
+bounds_term_roots_stable(e: *Expr): bool {
+    match e.kind {
+        Num _ -> true;
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) return false;
+            v.is_local && !v.bounds_addr_taken
+        }
+        MemberAccess k -> bounds_term_roots_stable(k.lhs);
+        Deref k -> bounds_term_roots_stable(k.lhs);
+        Funcall k -> {
+            if (!streq(k.funcname, "len")) return false;
+            a: ?*Expr = k.args;
+            if (a == null) return false;
+            bounds_term_roots_stable(a)
+        }
+        _ -> false
+    }
+}
+
+bounds_term_has_member(e: *Expr, member: *Member): bool {
+    match e.kind {
+        MemberAccess k -> k.member == member || bounds_term_has_member(k.lhs, member);
+        Deref k -> bounds_term_has_member(k.lhs, member);
+        Funcall k -> {
+            a: ?*Expr = k.args;
+            if (a == null) return false;
+            bounds_term_has_member(a, member)
+        }
+        _ -> false
+    }
+}
+
+bounds_simple_term_on_root(e: *Expr, root: *Obj): bool {
+    match e.kind {
+        Num _ -> true;
+        Var _ -> true;
+        MemberAccess k -> bounds_var(k.lhs) == root && k.member != null;
+        Funcall k -> {
+            if (!streq(k.funcname, "len")) return false;
+            a: ?*Expr = k.args;
+            if (a == null) return false;
+            match a.kind {
+                MemberAccess field -> bounds_var(field.lhs) == root && field.member != null;
+                _ -> false
+            }
+        }
+        _ -> false
+    }
+}
+
+bounds_simple_relation_root(q: *BoundsFact): int {
+    if (q.kind != 9 && q.kind != 10) return -1;
+    root: ?*Obj = q.array;
+    if (root == null || q.index != root) return -1;
+    fn: ?*Function = bounds_current_fn;
+    if (fn == null || !bounds_param(fn, root)) return -1;
+    left: ?*Expr = q.left;
+    right: ?*Expr = q.right;
+    if (left == null || right == null) return -1;
+    if (!bounds_simple_term_on_root(left, root) || !bounds_simple_term_on_root(right,
+        root)) return -1;
+    root.browse_id
+}
+
+bounds_separation_extend(list: ?*BoundsSeparation@new, first: int, second: int): ?*BoundsSeparation@new {
+    if (bounds_separation_contains(list, first, second)) return list;
+    new BoundsSeparation { first: first, second: second, next: list }
 }
 
 bounds_field_array(a: *Expr, root: *Obj, member: *Member): bool {
@@ -644,6 +844,7 @@ bounds_add_value(
         value: value,
         left: null,
         right: null,
+        separation: null,
         next: f
     }
 }
@@ -666,6 +867,7 @@ bounds_add_order(
         value: 0,
         left: left,
         right: right,
+        separation: null,
         next: f
     }
 }
@@ -705,7 +907,12 @@ bounds_order_to_len(
                     Funcall call -> {
                         a: ?*Expr = call.args;
                         if (streq(call.funcname, "len") && a != null && bounds_same_array_expr(a,
-                            array)) return true
+                            array)) {
+                            if (bounds_separations_available(q.separation, f)) {
+                                bounds_note_separations(q.separation, f);
+                                return true
+                            }
+                        }
                     }
                     _ -> { }
                 }
@@ -724,7 +931,12 @@ bounds_nonnegative_term(f: ?*BoundsFact, term: *Expr): bool {
         left: ?*Expr = q.left;
         right: ?*Expr = q.right;
         if (q.kind == 10 && left != null && right != null && bounds_num(left) == 0 && bounds_same_term(right,
-            term)) return true;
+            term)) {
+            if (bounds_separations_available(q.separation, f)) {
+                bounds_note_separations(q.separation, f);
+                return true
+            }
+        }
         q = q.next
     }
     false
@@ -740,6 +952,7 @@ bounds_add_loop_order(f: ?*BoundsFact@new, index: *Obj@new, hi: *Expr@new): ?*Bo
         value: 0,
         left: null,
         right: hi,
+        separation: null,
         next: f
     }
 }
@@ -798,7 +1011,7 @@ bounds_has_fact(f: ?*BoundsFact, fact: *BoundsFact): bool {
             r: ?*Expr = q.right;
             fr: ?*Expr = fact.right;
             if (q.kind == 11 && q.index == fact.index && r != null && fr != null && bounds_same_term(r,
-                fr)) return true;
+                fr) && bounds_separation_same(q.separation, fact.separation)) return true;
             q = q.next
         }
         return false
@@ -807,7 +1020,16 @@ bounds_has_fact(f: ?*BoundsFact, fact: *BoundsFact): bool {
         l: ?*Expr = fact.left;
         r: ?*Expr = fact.right;
         if (l == null || r == null) return false;
-        return bounds_order(f, l, r, fact.kind == 9)
+        q: ?*BoundsFact = f;
+        while (q != null) {
+            left: ?*Expr = q.left;
+            right: ?*Expr = q.right;
+            if ((q.kind == 9 || fact.kind == 10 && q.kind == 10) && left != null && right != null && bounds_same_term(l,
+                left) && bounds_same_term(r, right) && bounds_separation_same(q.separation,
+                fact.separation)) return true;
+            q = q.next
+        }
+        return false
     }
     bounds_has_value(f, fact.index, fact.array, fact.kind, fact.value)
 }
@@ -820,6 +1042,20 @@ bounds_copy(f: ?*BoundsFact@new, q: *BoundsFact@new): *BoundsFact@new {
         value: q.value,
         left: q.left,
         right: q.right,
+        separation: q.separation,
+        next: f
+    }
+}
+
+bounds_copy_separation(f: ?*BoundsFact@new, q: *BoundsFact@new, sep: ?*BoundsSeparation@new): *BoundsFact@new {
+    new BoundsFact {
+        index: q.index,
+        array: q.array,
+        kind: q.kind,
+        value: q.value,
+        left: q.left,
+        right: q.right,
+        separation: sep,
         next: f
     }
 }
@@ -834,7 +1070,7 @@ bounds_kill(f: ?*BoundsFact@new, v: *Obj): ?*BoundsFact@new {
     head
 }
 
-bounds_after_call(f: ?*BoundsFact@new, callee: ?*Function): ?*BoundsFact@new {
+bounds_after_call(f: ?*BoundsFact@new, callee: ?*Function, args: ?*Expr): ?*BoundsFact@new {
     head: ?*BoundsFact = null;
     q: ?*BoundsFact = f;
     while (q != null) {
@@ -843,26 +1079,57 @@ bounds_after_call(f: ?*BoundsFact@new, callee: ?*Function): ?*BoundsFact@new {
         if (a != null) {
             if (!a.is_local || a.bounds_addr_taken) stable = false
         }
-        if (q.kind == 9 || q.kind == 10 || q.kind == 11) {
+        if (q.kind == 9 || q.kind == 10) {
             stable = false;
             if (callee != null) {
-                left: ?*Expr = q.left;
-                right: ?*Expr = q.right;
-                stable = right != null && bounds_effect_preserves_term(callee, right);
-                if (left != null && stable) stable = bounds_effect_preserves_term(callee,
-                    left)
-            }
-        }
-        if (q.kind == 8) {
-            if (callee == null) stable = false else if (callee.bounds_unknown_write) stable = false else {
-                w: ?*BoundsWrite = callee.bounds_writes;
-                while (w != null) {
-                    if (w.member.browse_id == q.value) stable = false;
-                    w = w.next
+                if (!callee.bounds_unknown_write) {
+                    left: ?*Expr = q.left;
+                    right: ?*Expr = q.right;
+                    if (left != null && right != null) {
+                        stable = bounds_term_roots_stable(left) && bounds_term_roots_stable(right);
+                        sep: ?*BoundsSeparation = q.separation;
+                        root: int = bounds_simple_relation_root(q);
+                        w: ?*BoundsWrite = callee.bounds_writes;
+                        while (w != null && stable) {
+                            if (bounds_term_has_member(left, w.member) || bounds_term_has_member(right,
+                                w.member)) {
+                                formal: ?*Obj = w.root_param;
+                                if (root < 0 || formal == null) stable = false else {
+                                    actual: ?*Expr = bounds_arg_named(callee, args,
+                                        formal.name);
+                                    other: ?*Obj = bounds_var(actual);
+                                    current: ?*Function = bounds_current_fn;
+                                    if (other == null || current == null) stable = false else if (other.browse_id == root || !bounds_param(current,
+                                        other)) stable = false else sep = bounds_separation_extend(sep,
+                                        root, other.browse_id)
+                                }
+                            }
+                            w = w.next
+                        }
+                        if (stable) head = bounds_copy_separation(head, q, sep)
+                    }
                 }
             }
+        } else {
+            if (q.kind == 11) {
+                stable = false;
+                if (callee != null) {
+                    right: ?*Expr = q.right;
+                    if (right != null) stable = bounds_effect_preserves_term(callee,
+                        right)
+                }
+            }
+            if (q.kind == 8) {
+                if (callee == null) stable = false else if (callee.bounds_unknown_write) stable = false else {
+                    w: ?*BoundsWrite = callee.bounds_writes;
+                    while (w != null) {
+                        if (w.member.browse_id == q.value) stable = false;
+                        w = w.next
+                    }
+                }
+            }
+            if (stable) head = bounds_copy(head, q)
         }
-        if (stable) head = bounds_copy(head, q);
         q = q.next
     }
     head
@@ -944,6 +1211,12 @@ bounds_condition(e: *Expr, yes: bool, f: ?*BoundsFact@new): ?*BoundsFact@new {
             bounds_condition(k.rhs, false, bounds_condition(k.lhs, false, f))
         }
         Binary k -> {
+            if (yes && k.op == BinOp.Ne || !yes && k.op == BinOp.Eq) {
+                lhs: ?*Obj = bounds_var(k.lhs);
+                rhs: ?*Obj = bounds_var(k.rhs);
+                if (lhs != null && rhs != null && lhs != rhs) f = bounds_add(f, lhs,
+                    rhs, 12)
+            }
             if (yes && k.op == BinOp.Lt || !yes && k.op == BinOp.Ge) f = bounds_add_order(f,
                 k.lhs, k.rhs, 9);
             if (yes && k.op == BinOp.Le || !yes && k.op == BinOp.Gt) f = bounds_add_order(f,
@@ -1139,7 +1412,7 @@ bounds_expr(e: ?*Expr, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@new {
             f = bounds_expr(k.rhs, f);
             f = bounds_expr(k.lhs, f);
             v: ?*Obj = bounds_var(k.lhs);
-            if (v == null) return bounds_after_call(f, null);
+            if (v == null) return bounds_after_call(f, null, null);
             v.bounds_written = true;
             keep_nonnegative: bool = bounds_inc_preserves_nonnegative(v, k.rhs, f);
             f = bounds_kill(f, v);
@@ -1194,7 +1467,7 @@ bounds_expr(e: ?*Expr, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@new {
             }
             callee: ?*Function = k.fn;
             if (callee != null) bounds_check_call(callee, k.args, f, n.file, n.pos);
-            bounds_after_call(f, callee)
+            bounds_after_call(f, callee, k.args)
         }
         If k -> {
             f = bounds_expr(k.cond, f);
@@ -1240,6 +1513,13 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@new {
             f = bounds_expr(k.init, f);
             v: ?*Obj = k.var;
             if (v != null) {
+                init: ?*Expr = k.init;
+                if (init != null) {
+                    match init.kind {
+                        New _ -> f = bounds_add_value(f, v, null, 13, v.browse_id);
+                        _ -> { }
+                    }
+                }
                 if (bounds_num(k.init) >= 0) {
                     f = bounds_add(f, v, null, 1);
                     f = bounds_add_value(f, v, null, 4, bounds_num(k.init))
@@ -1410,6 +1690,8 @@ verify_bounds_program() raises Error {
     unsupported: ?*Function = functions;
     while (unsupported != null) {
         if (unsupported.address_taken) {
+            if (unsupported.bounds_separations != null) error_at_file(unsupported.browse_file,
+                unsupported.browse_pos, "function with separation requirement cannot be called indirectly");
             p0: ?*Obj = unsupported.params;
             while (p0 != null) {
                 if (len(p0.index_for_name) != 0) error_at_file(unsupported.browse_file,
