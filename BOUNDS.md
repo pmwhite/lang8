@@ -63,8 +63,12 @@ The verifier also records strict and non-strict inequalities between named field
 paths and lengths. A guard such as `0 <= b.cursor && b.cursor < len(b.data)`
 proves `b.data[b.cursor]`. A guard establishing `b.used <= len(b.data)` lets a
 stable loop over `0..b.used` index `b.data`. Assignments through fields and
-calls conservatively discard these relationships. Field effects and inferred
-cross-function count/capacity requirements are still future work; callers must
+calls that may change either side discard these relationships. The compiler
+infers transitive sets of fields written by each function and preserves a fact
+across a call when those writes cannot affect its field paths. Unknown writes
+discard the fact. These summaries are deliberately conservative across objects:
+a write to the same field of a different record may still discard it. Inferred
+cross-function count/capacity requirements are future work; callers must
 currently establish the facts within the function that uses them.
 
 `check_index(a, i)` is the explicit runtime bridge. It checks

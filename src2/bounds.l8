@@ -220,6 +220,237 @@ bounds_first_member(e: *Expr): ?*Member {
     }
 }
 
+bounds_effect_add(fn: *Function@new, member: *Member@new): bool {
+    q: ?*BoundsWrite = fn.bounds_writes;
+    while (q != null) {
+        if (q.member == member) return false;
+        q = q.next
+    }
+    fn.bounds_writes = new BoundsWrite { member: member, next: fn.bounds_writes };
+    true
+}
+
+bounds_effect_unknown(fn: *Function): bool {
+    if (fn.bounds_unknown_write) return false;
+    fn.bounds_unknown_write = true;
+    true
+}
+
+bounds_effect_inits(fn: *Function@new, inits: ?*FieldInit): bool {
+    changed: bool = false;
+    q: ?*FieldInit = inits;
+    while (q != null) {
+        if (bounds_effect_expr(fn, q.lhs)) changed = true;
+        q = q.next
+    }
+    changed
+}
+
+bounds_effect_exprs(fn: *Function@new, exprs: ?*Expr): bool {
+    changed: bool = false;
+    q: ?*Expr = exprs;
+    while (q != null) {
+        if (bounds_effect_expr(fn, q)) changed = true;
+        q = q.next
+    }
+    changed
+}
+
+bounds_effect_two(fn: *Function@new, a: ?*Expr, b: ?*Expr): bool {
+    x: bool = bounds_effect_expr(fn, a);
+    y: bool = bounds_effect_expr(fn, b);
+    x || y
+}
+
+bounds_effect_expr(fn: *Function@new, e: ?*Expr): bool {
+    if (e == null) return false;
+    n: *Expr = e;
+    match n.kind {
+        Assign k -> {
+            changed: bool = bounds_effect_expr(fn, k.rhs);
+            if (bounds_effect_expr(fn, k.lhs)) changed = true;
+            match k.lhs.kind {
+                MemberAccess field -> {
+                    m: ?*Member = field.member;
+                    if (m == null) return bounds_effect_unknown(fn);
+                    if (bounds_effect_add(fn, m)) changed = true
+                }
+                Var v -> {
+                    o: ?*Obj = v.var;
+                    if (o == null) return bounds_effect_unknown(fn);
+                    if (!o.is_local) return bounds_effect_unknown(fn)
+                }
+                Index _ -> { }
+                _ -> return bounds_effect_unknown(fn)
+            }
+            changed
+        }
+        Funcall k -> {
+            changed: bool = bounds_effect_expr(fn, k.target);
+            if (bounds_effect_exprs(fn, k.args)) changed = true;
+            if (streq(k.funcname, "len") || streq(k.funcname, "sizeof") || streq(k.funcname,
+                "check_index")) return changed;
+            callee: ?*Function = k.fn;
+            if (callee == null) return bounds_effect_unknown(fn);
+            if (callee.bounds_unknown_write && bounds_effect_unknown(fn)) changed = true;
+            q: ?*BoundsWrite = callee.bounds_writes;
+            while (q != null) {
+                if (bounds_effect_add(fn, q.member)) changed = true;
+                q = q.next
+            }
+            changed
+        }
+        Binary k -> bounds_effect_two(fn, k.lhs, k.rhs);
+        LogAnd k -> bounds_effect_two(fn, k.lhs, k.rhs);
+        LogOr k -> bounds_effect_two(fn, k.lhs, k.rhs);
+        OrElse k -> bounds_effect_two(fn, k.lhs, k.rhs);
+        Index k -> bounds_effect_two(fn, k.lhs, k.idx);
+        Not k -> bounds_effect_expr(fn, k.lhs);
+        Neg k -> bounds_effect_expr(fn, k.lhs);
+        BitNot k -> bounds_effect_expr(fn, k.lhs);
+        Addr k -> bounds_effect_expr(fn, k.lhs);
+        Deref k -> bounds_effect_expr(fn, k.lhs);
+        MemberAccess k -> bounds_effect_expr(fn, k.lhs);
+        As k -> bounds_effect_expr(fn, k.lhs);
+        Trunc k -> bounds_effect_expr(fn, k.lhs);
+        New k -> {
+            changed: bool = bounds_effect_two(fn, k.lhs, k.fill);
+            if (bounds_effect_inits(fn, k.inits)) changed = true;
+            changed
+        }
+        StructLit k -> bounds_effect_inits(fn, k.inits);
+        VariantLit k -> bounds_effect_inits(fn, k.inits);
+        ArrayLit k -> bounds_effect_exprs(fn, k.elems);
+        If k -> {
+            changed: bool = bounds_effect_expr(fn, k.cond);
+            if (bounds_effect_two(fn, k.then, k.els)) changed = true;
+            changed
+        }
+        Block k -> bounds_effect_stmts(fn, k.body);
+        Match k -> {
+            changed: bool = bounds_effect_expr(fn, k.cond);
+            q: ?*MatchArm = k.arms;
+            while (q != null) {
+                if (bounds_effect_stmt(fn, q.body)) changed = true;
+                q = q.next
+            }
+            changed
+        }
+        Sizeof k -> bounds_effect_expr(fn, k.e);
+        _ -> false
+    }
+}
+
+bounds_effect_stmt(fn: *Function@new, s: ?*Stmt): bool {
+    if (s == null) return false;
+    n: *Stmt = s;
+    match n.kind {
+        ExprStmt k -> bounds_effect_expr(fn, k.lhs);
+        Decl k -> bounds_effect_expr(fn, k.init);
+        Return k -> bounds_effect_expr(fn, k.lhs);
+        Raise k -> bounds_effect_inits(fn, k.inits);
+        Block k -> bounds_effect_stmts(fn, k.body);
+        Region k -> bounds_effect_stmt(fn, k.body);
+        If k -> {
+            changed: bool = bounds_effect_expr(fn, k.cond);
+            if (bounds_effect_stmt(fn, k.then)) changed = true;
+            if (bounds_effect_stmt(fn, k.els)) changed = true;
+            changed
+        }
+        While k -> {
+            changed: bool = bounds_effect_expr(fn, k.cond);
+            if (bounds_effect_stmt(fn, k.body)) changed = true;
+            changed
+        }
+        For k -> {
+            changed: bool = bounds_effect_two(fn, k.iter, k.hi);
+            if (bounds_effect_stmt(fn, k.body)) changed = true;
+            changed
+        }
+        Match k -> {
+            changed: bool = bounds_effect_expr(fn, k.cond);
+            q: ?*MatchArm = k.arms;
+            while (q != null) {
+                if (bounds_effect_stmt(fn, q.body)) changed = true;
+                q = q.next
+            }
+            changed
+        }
+        Try k -> {
+            changed: bool = bounds_effect_stmt(fn, k.body);
+            q: ?*CatchArm = k.arms;
+            while (q != null) {
+                if (bounds_effect_stmt(fn, q.body)) changed = true;
+                q = q.next
+            }
+            changed
+        }
+        _ -> false
+    }
+}
+
+bounds_effect_stmts(fn: *Function@new, s: ?*Stmt): bool {
+    changed: bool = false;
+    q: ?*Stmt = s;
+    while (q != null) {
+        if (bounds_effect_stmt(fn, q)) changed = true;
+        q = q.next
+    }
+    changed
+}
+
+bounds_infer_effects() {
+    fn: ?*Function = functions;
+    while (fn != null) {
+        fn.bounds_writes = null;
+        fn.bounds_unknown_write = fn.is_extern || fn.body == null;
+        fn = fn.next
+    }
+    changed: bool = true;
+    while (changed) {
+        changed = false;
+        fn = functions;
+        while (fn != null) {
+            if (!fn.is_extern && bounds_effect_stmts(fn, fn.body)) changed = true;
+            fn = fn.next
+        }
+    }
+}
+
+bounds_effect_has(fn: *Function, member: *Member): bool {
+    q: ?*BoundsWrite = fn.bounds_writes;
+    while (q != null) {
+        if (q.member == member) return true;
+        q = q.next
+    }
+    false
+}
+
+bounds_effect_preserves_term(fn: *Function, e: *Expr): bool {
+    if (fn.bounds_unknown_write) return false;
+    match e.kind {
+        Num _ -> true;
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) return false;
+            v.is_local && !v.bounds_addr_taken
+        }
+        MemberAccess k -> {
+            m: ?*Member = k.member;
+            if (m == null || bounds_effect_has(fn, m)) return false;
+            bounds_effect_preserves_term(fn, k.lhs)
+        }
+        Deref k -> bounds_effect_preserves_term(fn, k.lhs);
+        Funcall k -> {
+            if (!streq(k.funcname, "len")) return false;
+            a: ?*Expr = k.args;
+            if (a == null) return false;
+            bounds_effect_preserves_term(fn, a)
+        }
+        _ -> false
+    }
+}
+
 bounds_field_array(a: *Expr, root: *Obj, member: *Member): bool {
     match a.kind {
         MemberAccess k -> bounds_var(k.lhs) == root && k.member == member;
@@ -269,8 +500,13 @@ bounds_field_safe_expr(e: ?*Expr, root: *Obj, member: *Member): bool {
             root, member);
         OrElse k -> bounds_field_safe_expr(k.lhs, root, member) && bounds_field_safe_expr(k.rhs,
             root, member);
-        Funcall k -> k.target == null && (streq(k.funcname, "len") || streq(k.funcname,
-            "check_index")) && bounds_field_safe_args(k.args, root, member);
+        Funcall k -> {
+            if (k.target != null || !bounds_field_safe_args(k.args, root, member)) return false;
+            if (streq(k.funcname, "len") || streq(k.funcname, "check_index")) return true;
+            fn: ?*Function = k.fn;
+            if (fn == null) return false;
+            !fn.bounds_unknown_write && !bounds_effect_has(fn, member)
+        }
         MemberAccess k -> bounds_field_safe_expr(k.lhs, root, member);
         As k -> bounds_field_safe_expr(k.lhs, root, member);
         Trunc k -> bounds_field_safe_expr(k.lhs, root, member);
@@ -598,7 +834,7 @@ bounds_kill(f: ?*BoundsFact@new, v: *Obj): ?*BoundsFact@new {
     head
 }
 
-bounds_after_call(f: ?*BoundsFact@new): ?*BoundsFact@new {
+bounds_after_call(f: ?*BoundsFact@new, callee: ?*Function): ?*BoundsFact@new {
     head: ?*BoundsFact = null;
     q: ?*BoundsFact = f;
     while (q != null) {
@@ -607,8 +843,26 @@ bounds_after_call(f: ?*BoundsFact@new): ?*BoundsFact@new {
         if (a != null) {
             if (!a.is_local || a.bounds_addr_taken) stable = false
         }
-        if (stable && q.kind != 9 && q.kind != 10 && q.kind != 11) head = bounds_copy(head,
-            q);
+        if (q.kind == 9 || q.kind == 10 || q.kind == 11) {
+            stable = false;
+            if (callee != null) {
+                left: ?*Expr = q.left;
+                right: ?*Expr = q.right;
+                stable = right != null && bounds_effect_preserves_term(callee, right);
+                if (left != null && stable) stable = bounds_effect_preserves_term(callee,
+                    left)
+            }
+        }
+        if (q.kind == 8) {
+            if (callee == null) stable = false else if (callee.bounds_unknown_write) stable = false else {
+                w: ?*BoundsWrite = callee.bounds_writes;
+                while (w != null) {
+                    if (w.member.browse_id == q.value) stable = false;
+                    w = w.next
+                }
+            }
+        }
+        if (stable) head = bounds_copy(head, q);
         q = q.next
     }
     head
@@ -885,7 +1139,7 @@ bounds_expr(e: ?*Expr, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@new {
             f = bounds_expr(k.rhs, f);
             f = bounds_expr(k.lhs, f);
             v: ?*Obj = bounds_var(k.lhs);
-            if (v == null) return bounds_after_call(f);
+            if (v == null) return bounds_after_call(f, null);
             v.bounds_written = true;
             keep_nonnegative: bool = bounds_inc_preserves_nonnegative(v, k.rhs, f);
             f = bounds_kill(f, v);
@@ -940,7 +1194,7 @@ bounds_expr(e: ?*Expr, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@new {
             }
             callee: ?*Function = k.fn;
             if (callee != null) bounds_check_call(callee, k.args, f, n.file, n.pos);
-            bounds_after_call(f)
+            bounds_after_call(f, callee)
         }
         If k -> {
             f = bounds_expr(k.cond, f);
@@ -1068,7 +1322,7 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@new {
                         v: ?*Obj = bound_var.var;
                         if (v != null) stable_order_bound = v.is_local && !v.bounds_written && !v.bounds_addr_taken
                     }
-                    MemberAccess bound_field -> {
+                    MemberAccess _ -> {
                         root: ?*Obj = bounds_term_root(hi);
                         member: ?*Member = bounds_first_member(hi);
                         if (root != null && member != null) stable_order_bound = bounds_field_safe_stmt(k.body,
@@ -1138,6 +1392,7 @@ bounds_stmt_list(s: ?*Stmt, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@f {
 }
 
 verify_bounds_program() raises Error {
+    bounds_infer_effects();
     bounds_emit_check_warnings = false;
     bounds_infer_mode = true;
     bounds_infer_changed = true;
