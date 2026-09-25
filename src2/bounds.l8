@@ -12,6 +12,17 @@ type BoundsFact = {
     next: ?*BoundsFact
 }
 
+type BoundsAffine = {
+    base: *Expr;
+    offset: int
+}
+
+type BoundsDistance = {
+    term: *Expr;
+    value: int;
+    next: ?*BoundsDistance
+}
+
 bounds_emit_check_warnings: bool = false;
 
 bounds_infer_mode: bool = false;
@@ -1067,6 +1078,61 @@ bounds_obj_expr(v: *Obj@new): *Expr@new {
     e
 }
 
+// A term plus a constant. In a guard, only normalize arithmetic that cannot
+// wrap for any machine value. A query may normalize an index provisionally:
+// proving it lies in [0, len(array)) also proves that its arithmetic did not
+// wrap, since that interval is representable by int.
+bounds_affine(e: *Expr@new, query: bool): ?*BoundsAffine@new {
+    if (bounds_term(e)) return new BoundsAffine { base: e, offset: 0 };
+    match e.kind {
+        Binary k -> {
+            c: int = bounds_num(k.rhs);
+            base: *Expr = k.lhs;
+            if (c < 0 || c >= 536870912 || !bounds_term(base)) return null;
+            if (k.op != BinOp.Add && k.op != BinOp.Sub) return null;
+            if (!query) {
+                if (k.op != BinOp.Sub) return null;
+                match base.kind {
+                    // len is nonnegative, so subtracting a small positive
+                    // constant cannot overflow a signed int.
+                    Funcall call -> {
+                        if (!streq(call.funcname, "len") || call.target != null) return null
+                    }
+                    _ -> return null
+                }
+            }
+            new BoundsAffine { base: base, offset: if (k.op == BinOp.Add) c else 0 - c }
+        }
+        _ -> null
+    }
+}
+
+// Kind 14 is a difference constraint: left - right <= value.
+bounds_add_difference(
+    f: ?*BoundsFact@new,
+    left: *Expr@new,
+    right: *Expr@new,
+    strict: bool
+): ?*BoundsFact@new {
+    l: ?*BoundsAffine = bounds_affine(left, false);
+    r: ?*BoundsAffine = bounds_affine(right, false);
+    if (l == null || r == null) return f;
+    if (l.offset == 0 && r.offset == 0) return f;
+    root: ?*Obj = bounds_term_root(l.base);
+    if (root == null) root = bounds_term_root(r.base);
+    if (root == null) return f;
+    new BoundsFact {
+        index: root,
+        array: bounds_term_root(r.base),
+        kind: 14,
+        value: r.offset - l.offset - (if (strict) 1 else 0),
+        left: l.base,
+        right: r.base,
+        separation: null,
+        next: f
+    }
+}
+
 bounds_add_value(
     f: ?*BoundsFact@new,
     index: *Obj@new,
@@ -1186,6 +1252,96 @@ bounds_nonnegative_term(f: ?*BoundsFact, term: *Expr): bool {
     false
 }
 
+bounds_distance_get(head: ?*BoundsDistance, term: *Expr): ?*BoundsDistance@head {
+    p: ?*BoundsDistance = head;
+    while (p != null) {
+        if (bounds_same_term(p.term, term)) return p;
+        p = p.next
+    }
+    null
+}
+
+// Graph edges encode x - y <= c as y -> x with weight c. A bounded
+// relaxation keeps worst-case compilation predictable; stopping early only
+// loses proofs. Paths longer than sixteen edges are deliberately ignored.
+bounds_difference_proves(
+    f: ?*BoundsFact@new,
+    left: *Expr,
+    right: *Expr@new,
+    limit: int
+): bool {
+    if (bounds_same_term(left, right)) return 0 <= limit;
+    zero: *Expr = new_num(0);
+    distances: ?*BoundsDistance = new BoundsDistance { term: right, value: 0, next: null };
+    round: int = 0;
+    while (round < 16) {
+        changed: bool = false;
+        q: ?*BoundsFact = f;
+        while (q != null) {
+            l: ?*Expr = null;
+            r: ?*Expr = null;
+            weight: int = 0;
+            if (q.kind == 9 || q.kind == 10 || q.kind == 14) {
+                l = q.left;
+                r = q.right;
+                if (q.kind == 9) weight = -1;
+                if (q.kind == 14) weight = q.value
+            } else if (q.kind == 11) {
+                l = bounds_obj_expr(q.index);
+                r = q.right;
+                weight = -1
+            } else if (q.kind == 1) {
+                l = zero;
+                r = bounds_obj_expr(q.index)
+            } else if (q.kind == 2) {
+                a: ?*Obj = q.array;
+                if (a != null) {
+                    l = bounds_obj_expr(q.index);
+                    r = bounds_len_term(bounds_obj_expr(a));
+                    weight = -1
+                }
+            } else if (q.kind == 3 && q.value >= 0 && q.value < 536870912) {
+                l = new_num(q.value);
+                r = bounds_len_term(bounds_obj_expr(q.index))
+            } else if (q.kind == 4 && q.value >= 0 && q.value < 536870912) {
+                l = bounds_obj_expr(q.index);
+                r = zero;
+                weight = q.value
+            }
+            // Propagating separation obligations through a graph path needs
+            // provenance. Leave those facts to the existing direct prover.
+            if (l != null && r != null && q.separation == null) {
+                from: ?*BoundsDistance = bounds_distance_get(distances, r);
+                if (from != null) {
+                    value: int = from.value + weight;
+                    to: ?*BoundsDistance = bounds_distance_get(distances, l);
+                    if (to == null) {
+                        distances = new BoundsDistance { term: l, value: value, next: distances };
+                        changed = true
+                    } else if (value < to.value) {
+                        to.value = value;
+                        changed = true
+                    }
+                    if (bounds_same_term(l, left) && value <= limit) return true
+                }
+            }
+            q = q.next
+        }
+        if (!changed) return false;
+        round = round + 1
+    }
+    false
+}
+
+bounds_difference_index(f: ?*BoundsFact@new, array: *Expr@new, index: *Expr@new): bool {
+    affine: ?*BoundsAffine = bounds_affine(index, true);
+    if (affine == null) return false;
+    // Both mathematical inequalities imply that the computed machine index
+    // is representable, so provisional normalization above is justified.
+    if (!bounds_difference_proves(f, affine.base, bounds_len_term(array), 0 - affine.offset - 1)) return false;
+    bounds_difference_proves(f, new_num(0), affine.base, affine.offset)
+}
+
 // The range-loop variable is strictly below its stable upper-bound path.
 bounds_add_loop_order(f: ?*BoundsFact@new, index: *Obj@new, hi: *Expr@new): ?*BoundsFact@new {
     if (!bounds_term(hi)) return f;
@@ -1249,6 +1405,21 @@ bounds_has_value(
 }
 
 bounds_has_fact(f: ?*BoundsFact, fact: *BoundsFact): bool {
+    if (fact.kind == 14) {
+        l: ?*Expr = fact.left;
+        r: ?*Expr = fact.right;
+        if (l == null || r == null) return false;
+        q: ?*BoundsFact = f;
+        while (q != null) {
+            left: ?*Expr = q.left;
+            right: ?*Expr = q.right;
+            if (q.kind == 14 && q.value <= fact.value && left != null && right != null && bounds_same_term(l,
+                left) && bounds_same_term(r, right) && bounds_separation_same(q.separation,
+                fact.separation)) return true;
+            q = q.next
+        }
+        return false
+    }
     if (fact.kind == 11) {
         q: ?*BoundsFact = f;
         while (q != null) {
@@ -1355,7 +1526,7 @@ bounds_after_call(f: ?*BoundsFact@new, callee: ?*Function, args: ?*Expr): ?*Boun
         if (a != null) {
             if (!a.is_local || a.bounds_addr_taken) stable = false
         }
-        if (q.kind == 9 || q.kind == 10) {
+        if (q.kind == 9 || q.kind == 10 || q.kind == 14) {
             stable = false;
             if (callee != null) {
                 if (!callee.bounds_unknown_write) {
@@ -1493,17 +1664,27 @@ bounds_condition(e: *Expr, yes: bool, f: ?*BoundsFact@new): ?*BoundsFact@new {
                 if (lhs != null && rhs != null && lhs != rhs) f = bounds_add(f, lhs,
                     rhs, 12)
             }
-            if (yes && k.op == BinOp.Lt || !yes && k.op == BinOp.Ge) f = bounds_add_order(f,
-                k.lhs, k.rhs, 9);
-            if (yes && k.op == BinOp.Le || !yes && k.op == BinOp.Gt) f = bounds_add_order(f,
-                k.lhs, k.rhs, 10);
-            if (yes && k.op == BinOp.Gt || !yes && k.op == BinOp.Le) f = bounds_add_order(f,
-                k.rhs, k.lhs, 9);
-            if (yes && k.op == BinOp.Ge || !yes && k.op == BinOp.Lt) f = bounds_add_order(f,
-                k.rhs, k.lhs, 10);
+            if (yes && k.op == BinOp.Lt || !yes && k.op == BinOp.Ge) {
+                f = bounds_add_order(f, k.lhs, k.rhs, 9);
+                f = bounds_add_difference(f, k.lhs, k.rhs, true)
+            }
+            if (yes && k.op == BinOp.Le || !yes && k.op == BinOp.Gt) {
+                f = bounds_add_order(f, k.lhs, k.rhs, 10);
+                f = bounds_add_difference(f, k.lhs, k.rhs, false)
+            }
+            if (yes && k.op == BinOp.Gt || !yes && k.op == BinOp.Le) {
+                f = bounds_add_order(f, k.rhs, k.lhs, 9);
+                f = bounds_add_difference(f, k.rhs, k.lhs, true)
+            }
+            if (yes && k.op == BinOp.Ge || !yes && k.op == BinOp.Lt) {
+                f = bounds_add_order(f, k.rhs, k.lhs, 10);
+                f = bounds_add_difference(f, k.rhs, k.lhs, false)
+            }
             if (yes && k.op == BinOp.Eq || !yes && k.op == BinOp.Ne) {
                 f = bounds_add_order(f, k.lhs, k.rhs, 10);
-                f = bounds_add_order(f, k.rhs, k.lhs, 10)
+                f = bounds_add_order(f, k.rhs, k.lhs, 10);
+                f = bounds_add_difference(f, k.lhs, k.rhs, false);
+                f = bounds_add_difference(f, k.rhs, k.lhs, false)
             }
             left_len: ?*Obj = bounds_len_var(k.lhs);
             right_len: ?*Obj = bounds_len_var(k.rhs);
@@ -1636,7 +1817,7 @@ bounds_count_fits(a: *Expr, count: *Expr, f: ?*BoundsFact): bool {
     bounds_order(f, count, new_num(known), false)
 }
 
-bounds_proves(a: *Expr, i: *Expr, f: ?*BoundsFact) raises Error: bool {
+bounds_proves(a: *Expr@new, i: *Expr@new, f: ?*BoundsFact@new) raises Error: bool {
     ty: *Type = a.ty or error("internal: untyped index");
     n: int = bounds_num(i);
     iv: ?*Obj = bounds_var(i);
@@ -1680,6 +1861,7 @@ bounds_proves(a: *Expr, i: *Expr, f: ?*BoundsFact) raises Error: bool {
             _ -> { }
         }
     }
+    if (bounds_difference_index(f, a, i)) return true;
     if (iv == null || av == null) return false;
     if (!bounds_has(f, iv, null, 1)) return false;
     if (bounds_has(f, iv, av, 2)) return true;
