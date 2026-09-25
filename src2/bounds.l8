@@ -1,0 +1,722 @@
+tag compiler_internal;
+
+// Facts are immutable so branches can keep their entry state.
+type BoundsFact = {
+    index: *Obj;
+    array: ?*Obj;
+    kind: int;
+    value: int;
+    next: ?*BoundsFact
+}
+
+bounds_infer_mode: bool = false;
+
+bounds_infer_changed: bool = false;
+
+bounds_current_fn: ?*Function = null;
+
+bounds_param(fn: *Function, obj: *Obj): bool {
+    p: ?*Obj = fn.params;
+    while (p != null) {
+        if (p == obj) return true;
+        p = p.param_next
+    }
+    false
+}
+
+bounds_named_param(fn: *Function, name: []i8): ?*Obj@fn {
+    p: ?*Obj = fn.params;
+    while (p != null) {
+        if (streq(p.name, name)) return p;
+        p = p.param_next
+    }
+    null
+}
+
+bounds_infer_requirement(a: *Expr, i: *Expr) {
+    fn: ?*Function = bounds_current_fn;
+    if (fn == null) return;
+    av: ?*Obj = bounds_var(a);
+    iv: ?*Obj = bounds_var(i);
+    if (av == null || iv == null) return;
+    if (!bounds_param(fn, av) || !bounds_param(fn, iv)) return;
+    if (len(iv.index_for_name) != 0) return;
+    iv.index_for_name = av.name;
+    bounds_infer_changed = true
+}
+
+bounds_require(
+    a: *Expr,
+    i: *Expr,
+    f: ?*BoundsFact,
+    file: int,
+    pos: int
+) raises Error {
+    if (bounds_proves(a, i, f)) return;
+    if (bounds_infer_mode) {
+        bounds_infer_requirement(a, i);
+        return
+    }
+    error_at_file(file, pos, "array index not proved in bounds (need 0 <= index < len(array))")
+}
+
+bounds_arg_named(fn: *Function, args: ?*Expr, name: []i8): ?*Expr@args {
+    p: ?*Obj = fn.params;
+    a: ?*Expr = args;
+    while (p != null && a != null) {
+        if (streq(p.name, name)) return a;
+        p = p.param_next;
+        a = a.next
+    }
+    null
+}
+
+bounds_call_args_pure(args: ?*Expr): bool {
+    a: ?*Expr = args;
+    while (a != null) {
+        if (!bounds_pure_condition(a)) return false;
+        a = a.next
+    }
+    true
+}
+
+bounds_check_call(
+    fn: *Function,
+    args: ?*Expr,
+    f: ?*BoundsFact,
+    file: int,
+    pos: int
+) raises Error {
+    p: ?*Obj = fn.params;
+    a: ?*Expr = args;
+    while (p != null && a != null) {
+        if (len(p.index_for_name) != 0) {
+            if (!bounds_call_args_pure(args)) error_at_file(file, pos, "index_for call arguments must be free of side effects");
+            ar: ?*Expr = bounds_arg_named(fn, args, p.index_for_name);
+            if (ar == null) error_at_file(file, pos, "index_for refers to unknown array parameter");
+            bounds_require(ar, a, f, file, pos)
+        }
+        p = p.param_next;
+        a = a.next
+    }
+}
+
+bounds_initial(fn: *Function@new) raises Error: ?*BoundsFact@new {
+    f: ?*BoundsFact = null;
+    p: ?*Obj = fn.params;
+    while (p != null) {
+        if (len(p.index_for_name) != 0) {
+            a: ?*Obj = bounds_named_param(fn, p.index_for_name);
+            if (a == null) error_at_file(p.browse_file, p.browse_pos, "index_for refers to unknown array parameter");
+            ty: ?*Type = a.ty;
+            if (ty == null) error_at_file(p.browse_file, p.browse_pos, "index_for requires an array, slice, or string parameter");
+            if (!is_indexable(ty)) error_at_file(p.browse_file, p.browse_pos, "index_for requires an array, slice, or string parameter");
+            f = bounds_add(f, p, null, 1);
+            f = bounds_add(f, p, a, 2)
+        }
+        p = p.param_next
+    }
+    f
+}
+
+bounds_var(e: ?*Expr): ?*Obj {
+    if (e == null) return null;
+    n: *Expr = e;
+    match n.kind {
+        Var k -> k.var;
+        _ -> null
+    }
+}
+
+bounds_len_var(e: ?*Expr): ?*Obj {
+    if (e == null) return null;
+    n: *Expr = e;
+    match n.kind {
+        Funcall k -> {
+            if (!streq(k.funcname, "len")) return null;
+            a: ?*Expr = k.args;
+            if (a == null) return null;
+            if (a.next != null) return null;
+            bounds_var(a)
+        }
+        _ -> null
+    }
+}
+
+bounds_num(e: ?*Expr): int {
+    if (e == null) return -999999999;
+    n: *Expr = e;
+    match n.kind {
+        Num k -> {
+            if (k.form == LIT_INT) return k.val;
+            -999999999
+        }
+        _ -> -999999999
+    }
+}
+
+bounds_offset_var(e: ?*Expr): ?*Obj {
+    if (e == null) return null;
+    n: *Expr = e;
+    match n.kind {
+        Binary k -> {
+            if (k.op != BinOp.Add) return null;
+            if (bounds_num(k.rhs) >= 0) return bounds_var(k.lhs);
+            if (bounds_num(k.lhs) >= 0) return bounds_var(k.rhs);
+            null
+        }
+        _ -> null
+    }
+}
+
+bounds_offset_amount(e: ?*Expr): int {
+    if (e == null) return -1;
+    n: *Expr = e;
+    match n.kind {
+        Binary k -> {
+            if (k.op != BinOp.Add) return -1;
+            c: int = bounds_num(k.rhs);
+            if (c < 0) c = bounds_num(k.lhs);
+            if (c >= 0 && c < 536870912) return c;
+            -1
+        }
+        _ -> -1
+    }
+}
+
+bounds_known_len(e: ?*Expr): int {
+    if (e == null) return -1;
+    n: *Expr = e;
+    t: ?*Type = n.ty;
+    if (t != null && is_array(t)) return array_len(t);
+    match n.kind {
+        ArrayLit k -> {
+            count: int = 0;
+            q: ?*Expr = k.elems;
+            while (q != null) {
+                count = count + 1;
+                q = q.next
+            }
+            count
+        }
+        New k -> bounds_num(k.lhs);
+        _ -> -1
+    }
+}
+
+bounds_add_value(
+    f: ?*BoundsFact@new,
+    index: *Obj@new,
+    array: ?*Obj@new,
+    kind: int,
+    value: int
+): *BoundsFact@new {
+    new BoundsFact {
+        index: index,
+        array: array,
+        kind: kind,
+        value: value,
+        next: f
+    }
+}
+
+bounds_add(
+    f: ?*BoundsFact@new,
+    index: *Obj@new,
+    array: ?*Obj@new,
+    kind: int
+): *BoundsFact@new {
+    bounds_add_value(f, index, array, kind, 0)
+}
+
+bounds_has(
+    f: ?*BoundsFact,
+    index: *Obj,
+    array: ?*Obj,
+    kind: int
+): bool {
+    q: ?*BoundsFact = f;
+    while (q != null) {
+        if (q.index == index && q.array == array && q.kind == kind) return true;
+        q = q.next
+    }
+    false
+}
+
+bounds_fact_value(f: ?*BoundsFact, index: *Obj, kind: int): int {
+    q: ?*BoundsFact = f;
+    while (q != null) {
+        if (q.index == index && q.kind == kind) return q.value;
+        q = q.next
+    }
+    -1
+}
+
+bounds_has_value(
+    f: ?*BoundsFact,
+    index: *Obj,
+    array: ?*Obj,
+    kind: int,
+    value: int
+): bool {
+    q: ?*BoundsFact = f;
+    while (q != null) {
+        if (q.index == index && q.array == array && q.kind == kind && q.value == value) return true;
+        q = q.next
+    }
+    false
+}
+
+bounds_kill(f: ?*BoundsFact@new, v: *Obj): ?*BoundsFact@new {
+    head: ?*BoundsFact = null;
+    q: ?*BoundsFact = f;
+    while (q != null) {
+        if (q.index != v && q.array != v) head = bounds_add_value(head, q.index, q.array,
+            q.kind, q.value);
+        q = q.next
+    }
+    head
+}
+
+bounds_after_call(f: ?*BoundsFact@new): ?*BoundsFact@new {
+    head: ?*BoundsFact = null;
+    q: ?*BoundsFact = f;
+    while (q != null) {
+        a: ?*Obj = q.array;
+        stable: bool = q.index.is_local && !q.index.bounds_addr_taken;
+        if (a != null) {
+            if (!a.is_local || a.bounds_addr_taken) stable = false
+        }
+        if (stable) head = bounds_add_value(head, q.index, q.array, q.kind, q.value);
+        q = q.next
+    }
+    head
+}
+
+bounds_meet(a: ?*BoundsFact@new, b: ?*BoundsFact): ?*BoundsFact@new {
+    head: ?*BoundsFact = null;
+    q: ?*BoundsFact = a;
+    while (q != null) {
+        if (bounds_has_value(b, q.index, q.array, q.kind, q.value)) head = bounds_add_value(head,
+            q.index, q.array, q.kind, q.value);
+        q = q.next
+    }
+    head
+}
+
+bounds_same(a: ?*BoundsFact, b: ?*BoundsFact): bool {
+    q: ?*BoundsFact = a;
+    while (q != null) {
+        if (!bounds_has_value(b, q.index, q.array, q.kind, q.value)) return false;
+        q = q.next
+    }
+    q2: ?*BoundsFact = b;
+    while (q2 != null) {
+        if (!bounds_has_value(a, q2.index, q2.array, q2.kind, q2.value)) return false;
+        q2 = q2.next
+    }
+    true
+}
+
+bounds_inc_preserves_nonnegative(v: *Obj, rhs: *Expr, f: ?*BoundsFact): bool {
+    if (!bounds_has(f, v, null, 1)) return false;
+    match rhs.kind {
+        Binary k -> {
+            if (k.op != BinOp.Add || bounds_var(k.lhs) != v || bounds_num(k.rhs) != 1) return false;
+            q: ?*BoundsFact = f;
+            while (q != null) {
+                if (q.index == v && q.kind == 2) return true;
+                if (q.index == v && q.kind == 5 && q.value < 9223372036854775807) return true;
+                q = q.next
+            }
+            false
+        }
+        _ -> false
+    }
+}
+
+bounds_pure_condition(e: *Expr): bool {
+    match e.kind {
+        Num _ -> true;
+        Var _ -> true;
+        Index k -> bounds_pure_condition(k.lhs) && bounds_pure_condition(k.idx);
+        Binary k -> bounds_pure_condition(k.lhs) && bounds_pure_condition(k.rhs);
+        Not k -> bounds_pure_condition(k.lhs);
+        LogAnd k -> bounds_pure_condition(k.lhs) && bounds_pure_condition(k.rhs);
+        LogOr k -> bounds_pure_condition(k.lhs) && bounds_pure_condition(k.rhs);
+        Funcall k -> {
+            if (!streq(k.funcname, "len")) return false;
+            a: ?*Expr = k.args;
+            if (a == null) return false;
+            if (a.next != null) return false;
+            bounds_var(a) != null
+        }
+        _ -> false
+    }
+}
+
+bounds_condition(e: *Expr, yes: bool, f: ?*BoundsFact@new): ?*BoundsFact@new {
+    if (!bounds_pure_condition(e)) return f;
+    match e.kind {
+        Not k -> bounds_condition(k.lhs, !yes, f);
+        LogAnd k -> {
+            if (!yes) return f;
+            bounds_condition(k.rhs, true, bounds_condition(k.lhs, true, f))
+        }
+        LogOr k -> {
+            if (yes) return f;
+            bounds_condition(k.rhs, false, bounds_condition(k.lhs, false, f))
+        }
+        Binary k -> {
+            offset_index: ?*Obj = bounds_offset_var(k.lhs);
+            offset_array: ?*Obj = bounds_len_var(k.rhs);
+            offset: int = bounds_offset_amount(k.lhs);
+            if (offset_index != null && offset_array != null && offset >= 0 && bounds_has(f,
+                offset_index, null, 1) && bounds_has(f, offset_index, offset_array,
+                2) && (yes && k.op == BinOp.Lt || !yes && k.op == BinOp.Ge)) return bounds_add_value(f,
+                offset_index, offset_array, 6, offset);
+            offset_index = bounds_offset_var(k.rhs);
+            offset_array = bounds_len_var(k.lhs);
+            offset = bounds_offset_amount(k.rhs);
+            if (offset_index != null && offset_array != null && offset >= 0 && bounds_has(f,
+                offset_index, null, 1) && bounds_has(f, offset_index, offset_array,
+                2) && (yes && k.op == BinOp.Gt || !yes && k.op == BinOp.Le)) return bounds_add_value(f,
+                offset_index, offset_array, 6, offset);
+            array0: ?*Obj = bounds_len_var(k.lhs);
+            constant0: int = bounds_num(k.rhs);
+            if (array0 != null && constant0 >= 0 && constant0 < 536870912) {
+                minimum: int = -1;
+                if (yes && k.op == BinOp.Ge || !yes && k.op == BinOp.Lt) minimum = constant0;
+                if (yes && k.op == BinOp.Gt || !yes && k.op == BinOp.Le) minimum = constant0 + 1;
+                if (yes && k.op == BinOp.Eq || !yes && k.op == BinOp.Ne) minimum = constant0;
+                if (constant0 == 0 && (yes && k.op == BinOp.Ne || !yes && k.op == BinOp.Eq)) minimum = 1;
+                if (minimum >= 0) return bounds_add_value(f, array0, null, 3, minimum)
+            }
+            array0 = bounds_len_var(k.rhs);
+            constant0 = bounds_num(k.lhs);
+            if (array0 != null && constant0 >= 0 && constant0 < 536870912) {
+                minimum2: int = -1;
+                if (yes && k.op == BinOp.Le || !yes && k.op == BinOp.Gt) minimum2 = constant0;
+                if (yes && k.op == BinOp.Lt || !yes && k.op == BinOp.Ge) minimum2 = constant0 + 1;
+                if (yes && k.op == BinOp.Eq || !yes && k.op == BinOp.Ne) minimum2 = constant0;
+                if (constant0 == 0 && (yes && k.op == BinOp.Ne || !yes && k.op == BinOp.Eq)) minimum2 = 1;
+                if (minimum2 >= 0) return bounds_add_value(f, array0, null, 3, minimum2)
+            }
+            i: ?*Obj = bounds_var(k.lhs);
+            a: ?*Obj = bounds_len_var(k.rhs);
+            if (i != null && a != null && (yes && k.op == BinOp.Lt || !yes && k.op == BinOp.Ge)) return bounds_add(f,
+                i, a, 2);
+            i = bounds_var(k.rhs);
+            a = bounds_len_var(k.lhs);
+            if (i != null && a != null && (yes && k.op == BinOp.Gt || !yes && k.op == BinOp.Le)) return bounds_add(f,
+                i, a, 2);
+            i = bounds_var(k.lhs);
+            if (i != null && bounds_num(k.rhs) == 0 && (yes && k.op == BinOp.Ge || !yes && k.op == BinOp.Lt)) return bounds_add(f,
+                i, null, 1);
+            i = bounds_var(k.rhs);
+            if (i != null && bounds_num(k.lhs) == 0 && (yes && k.op == BinOp.Le || !yes && k.op == BinOp.Gt)) return bounds_add(f,
+                i, null, 1);
+            f
+        }
+        _ -> f
+    }
+}
+
+bounds_invariant_proved(e: *Expr, f: ?*BoundsFact) raises Error: bool {
+    if (!bounds_pure_condition(e)) return false;
+    match e.kind {
+        LogAnd k -> bounds_invariant_proved(k.lhs, f) && bounds_invariant_proved(k.rhs,
+            f);
+        Binary _ -> {
+            need: ?*BoundsFact = bounds_condition(e, true, null);
+            if (need == null) return false;
+            q: ?*BoundsFact = need;
+            while (q != null) {
+                if (q.kind == 3) {
+                    have: int = bounds_fact_value(f, q.index, 3);
+                    if (have < q.value) return false
+                } else if (!bounds_has_value(f, q.index, q.array, q.kind, q.value)) return false;
+                q = q.next
+            }
+            true
+        }
+        _ -> false
+    }
+}
+
+bounds_proves(a: *Expr, i: *Expr, f: ?*BoundsFact) raises Error: bool {
+    ty: *Type = a.ty or error("internal: untyped index");
+    n: int = bounds_num(i);
+    iv: ?*Obj = bounds_var(i);
+    if (iv != null && n < 0) n = bounds_fact_value(f, iv, 4);
+    if (n >= 0 && is_array(ty) && n < array_len(ty)) return true;
+    if (iv != null && is_array(ty)) {
+        hi: int = bounds_fact_value(f, iv, 5);
+        if (hi >= 0 && hi <= array_len(ty) && bounds_has(f, iv, null, 1)) return true
+    }
+    av: ?*Obj = bounds_var(a);
+    if (av != null && n >= 0 && n < bounds_fact_value(f, av, 3)) return true;
+    offset_index: ?*Obj = bounds_offset_var(i);
+    offset: int = bounds_offset_amount(i);
+    if (av != null && offset_index != null && offset >= 0 && bounds_has(f, offset_index,
+        null, 1)) {
+        q: ?*BoundsFact = f;
+        while (q != null) {
+            if (q.index == offset_index && q.array == av && q.kind == 6 && q.value >= offset) return true;
+            q = q.next
+        }
+    }
+    if (iv == null || av == null) return false;
+    bounds_has(f, iv, null, 1) && bounds_has(f, iv, av, 2)
+}
+
+bounds_inits(inits: ?*FieldInit, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@f {
+    q: ?*FieldInit = inits;
+    while (q != null) {
+        f = bounds_expr(q.lhs, f);
+        q = q.next
+    }
+    f
+}
+
+bounds_expr_list(e: ?*Expr, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@f {
+    q: ?*Expr = e;
+    while (q != null) {
+        f = bounds_expr(q, f);
+        q = q.next
+    }
+    f
+}
+
+bounds_expr(e: ?*Expr, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@new {
+    if (e == null) return f;
+    n: *Expr = e;
+    match n.kind {
+        Index k -> {
+            f = bounds_expr(k.lhs, f);
+            f = bounds_expr(k.idx, f);
+            bounds_require(k.lhs, k.idx, f, n.file, n.pos);
+            if (!bounds_infer_mode) n.bounds_proven = true;
+            f
+        }
+        Binary k -> bounds_expr(k.rhs, bounds_expr(k.lhs, f));
+        Assign k -> {
+            // Ordinary assignments evaluate the RHS before the LHS address.
+            // Doing the same for aggregate literals is conservative.
+            f = bounds_expr(k.rhs, f);
+            f = bounds_expr(k.lhs, f);
+            v: ?*Obj = bounds_var(k.lhs);
+            if (v == null) return bounds_after_call(f);
+            keep_nonnegative: bool = bounds_inc_preserves_nonnegative(v, k.rhs, f);
+            f = bounds_kill(f, v);
+            if (bounds_num(k.rhs) >= 0) f = bounds_add(f, v, null, 1);
+            if (keep_nonnegative) f = bounds_add(f, v, null, 1);
+            if (bounds_num(k.rhs) >= 0) f = bounds_add_value(f, v, null, 4, bounds_num(k.rhs));
+            if (bounds_known_len(k.rhs) >= 0) f = bounds_add_value(f, v, null, 3,
+                bounds_known_len(k.rhs));
+            f
+        }
+        LogAnd k -> {
+            f = bounds_expr(k.lhs, f);
+            rhs: ?*BoundsFact = bounds_expr(k.rhs, bounds_condition(k.lhs, true, f));
+            bounds_meet(f, rhs)
+        }
+        LogOr k -> {
+            f = bounds_expr(k.lhs, f);
+            rhs: ?*BoundsFact = bounds_expr(k.rhs, bounds_condition(k.lhs, false,
+                f));
+            bounds_meet(f, rhs)
+        }
+        OrElse k -> {
+            f = bounds_expr(k.lhs, f);
+            rhs2: ?*BoundsFact = bounds_expr(k.rhs, f);
+            bounds_meet(f, rhs2)
+        }
+        Funcall k -> {
+            f = bounds_expr_list(k.args, bounds_expr(k.target, f));
+            if (streq(k.funcname, "len") || streq(k.funcname, "sizeof")) return f;
+            callee: ?*Function = k.fn;
+            if (callee != null) bounds_check_call(callee, k.args, f, n.file, n.pos);
+            bounds_after_call(f)
+        }
+        If k -> {
+            f = bounds_expr(k.cond, f);
+            yes: ?*BoundsFact = bounds_expr(k.then, bounds_condition(k.cond, true,
+                f));
+            no: ?*BoundsFact = bounds_expr(k.els, bounds_condition(k.cond, false,
+                f));
+            bounds_meet(yes, no)
+        }
+        Block k -> bounds_stmt_list(k.body, f);
+        Match k -> {
+            f = bounds_expr(k.cond, f);
+            q: ?*MatchArm = k.arms;
+            while (q != null) {
+                _arm: ?*BoundsFact = bounds_stmt(q.body, f);
+                q = q.next
+            }
+            null
+        }
+        Addr k -> bounds_expr(k.lhs, f);
+        Deref k -> bounds_expr(k.lhs, f);
+        Not k -> bounds_expr(k.lhs, f);
+        Neg k -> bounds_expr(k.lhs, f);
+        BitNot k -> bounds_expr(k.lhs, f);
+        As k -> bounds_expr(k.lhs, f);
+        Trunc k -> bounds_expr(k.lhs, f);
+        MemberAccess k -> bounds_expr(k.lhs, f);
+        New k -> bounds_inits(k.inits, bounds_expr(k.fill, bounds_expr(k.lhs, f)));
+        StructLit k -> bounds_inits(k.inits, f);
+        VariantLit k -> bounds_inits(k.inits, f);
+        ArrayLit k -> bounds_expr_list(k.elems, f);
+        Sizeof k -> bounds_expr(k.e, f);
+        _ -> f
+    }
+}
+
+bounds_stmt(s: ?*Stmt, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@new {
+    if (s == null) return f;
+    n: *Stmt = s;
+    match n.kind {
+        ExprStmt k -> bounds_expr(k.lhs, f);
+        Decl k -> {
+            f = bounds_expr(k.init, f);
+            v: ?*Obj = k.var;
+            if (v != null) {
+                if (bounds_num(k.init) >= 0) {
+                    f = bounds_add(f, v, null, 1);
+                    f = bounds_add_value(f, v, null, 4, bounds_num(k.init))
+                }
+                if (bounds_known_len(k.init) >= 0) f = bounds_add_value(f, v, null,
+                    3, bounds_known_len(k.init))
+            }
+            f
+        }
+        Return k -> bounds_expr(k.lhs, f);
+        Raise k -> bounds_inits(k.inits, f);
+        Block k -> bounds_stmt_list(k.body, f);
+        Region k -> bounds_stmt(k.body, f);
+        If k -> {
+            f = bounds_expr(k.cond, f);
+            yes: ?*BoundsFact = bounds_stmt(k.then, bounds_condition(k.cond, true,
+                f));
+            no: ?*BoundsFact = f;
+            els: ?*Stmt = k.els;
+            if (els != null) no = bounds_stmt(els, bounds_condition(k.cond, false,
+                f));
+            if (stmt_always_diverges(k.then)) return bounds_condition(k.cond, false,
+                f);
+            if (els != null && stmt_always_diverges(els)) return bounds_condition(k.cond,
+                true, f);
+            bounds_meet(yes, no)
+        }
+        While k -> {
+            inv: ?*Expr = k.invariant;
+            if (inv != null && !bounds_invariant_proved(inv, f)) error_at_file(k.cond.file,
+                k.cond.pos, "loop invariant is not proved at entry");
+            invariant: ?*BoundsFact = f;
+            changing: bool = true;
+            while (changing) {
+                tested: ?*BoundsFact = bounds_expr(k.cond, invariant);
+                at_body: ?*BoundsFact = bounds_condition(k.cond, true, tested);
+                at_end: ?*BoundsFact = bounds_stmt(k.body, at_body);
+                if (inv != null && !bounds_invariant_proved(inv, at_end)) error_at_file(k.cond.file,
+                    k.cond.pos, "loop invariant is not preserved by body");
+                next_inv: ?*BoundsFact = bounds_meet(f, bounds_meet(tested, at_end));
+                changing = !bounds_same(invariant, next_inv);
+                invariant = next_inv
+            }
+            tested2: ?*BoundsFact = bounds_expr(k.cond, invariant);
+            bounds_condition(k.cond, false, tested2)
+        }
+        For k -> {
+            f = bounds_expr(k.hi, bounds_expr(k.iter, f));
+            hi: ?*Expr = k.hi;
+            if (hi != null) {
+                facts: ?*BoundsFact = null;
+                if (bounds_num(k.iter) >= 0) facts = bounds_add(facts, k.item, null,
+                    1);
+                av: ?*Obj = bounds_len_var(hi);
+                if (av != null) facts = bounds_add(facts, k.item, av, 2);
+                hiconst: int = bounds_num(hi);
+                if (hiconst >= 0) facts = bounds_add_value(facts, k.item, null, 5,
+                    hiconst);
+                endfacts: ?*BoundsFact = bounds_stmt(k.body, facts);
+                if (av != null && !bounds_has(endfacts, k.item, av, 2)) error_at_file(hi.file,
+                    hi.pos, "array used as for-loop bound may change in loop");
+                if (hiconst >= 0 && !bounds_has_value(endfacts, k.item, null, 5, hiconst)) error_at_file(hi.file,
+                    hi.pos, "range index may change in loop")
+            } else _body2: ?*BoundsFact = bounds_stmt(k.body, null);
+            null
+        }
+        Match k -> {
+            f = bounds_expr(k.cond, f);
+            q: ?*MatchArm = k.arms;
+            while (q != null) {
+                _arm2: ?*BoundsFact = bounds_stmt(q.body, f);
+                q = q.next
+            }
+            null
+        }
+        Try k -> {
+            _trybody: ?*BoundsFact = bounds_stmt(k.body, f);
+            q: ?*CatchArm = k.arms;
+            while (q != null) {
+                _catch: ?*BoundsFact = bounds_stmt(q.body, null);
+                q = q.next
+            }
+            null
+        }
+        _ -> f
+    }
+}
+
+bounds_stmt_list(s: ?*Stmt, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@f {
+    q: ?*Stmt = s;
+    while (q != null) {
+        f = bounds_stmt(q, f);
+        q = q.next
+    }
+    f
+}
+
+verify_bounds_program() raises Error {
+    bounds_infer_mode = true;
+    bounds_infer_changed = true;
+    while (bounds_infer_changed) {
+        bounds_infer_changed = false;
+        fn: ?*Function = functions;
+        while (fn != null) {
+            bounds_current_fn = fn;
+            f: ?*BoundsFact = bounds_initial(fn);
+            if (!fn.is_extern) _out: ?*BoundsFact = bounds_stmt(fn.body, f);
+            fn = fn.next
+        }
+    }
+    bounds_infer_mode = false;
+    unsupported: ?*Function = functions;
+    while (unsupported != null) {
+        if (unsupported.address_taken) {
+            p0: ?*Obj = unsupported.params;
+            while (p0 != null) {
+                if (len(p0.index_for_name) != 0) error_at_file(unsupported.browse_file,
+                    unsupported.browse_pos, "function with index_for requirement cannot be called indirectly");
+                p0 = p0.param_next
+            }
+        }
+        unsupported = unsupported.next
+    }
+    bounds_current_fn = null;
+    g: ?*Obj = globals;
+    while (g != null) {
+        _gf: ?*BoundsFact = bounds_expr(g.init, null);
+        g = g.next
+    }
+    fn2: ?*Function = functions;
+    while (fn2 != null) {
+        bounds_current_fn = fn2;
+        f2: ?*BoundsFact = bounds_initial(fn2);
+        if (!fn2.is_extern) _out2: ?*BoundsFact = bounds_stmt(fn2.body, f2);
+        fn2 = fn2.next
+    }
+}

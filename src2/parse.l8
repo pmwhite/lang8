@@ -85,6 +85,7 @@ ident_kind(s: []i8, off: int, n: int): TokKind {
     }
     if (n == 9) {
         if (s[off] == 'e' && streq_n(s, off, "exception", 0, 9)) return TokKind.Exception;
+        if (s[off] == 'i' && streq_n(s, off, "index_for", 0, 9)) return TokKind.IndexFor;
         return TokKind.Ident
     }
     TokKind.Ident
@@ -855,7 +856,8 @@ mk_expr(k: ExprKind@new): *Expr@new {
         ty: null,
         pos: 0,
         file: 0,
-        toklen: 0
+        toklen: 0,
+        bounds_proven: false
     }
 }
 
@@ -981,8 +983,8 @@ new_if(cond: *Expr@new, then: *Stmt@new, els: ?*Stmt@new): *Stmt@new {
     mk_stmt(StmtKind.If { cond: cond, then: then, els: els })
 }
 
-new_while(cond: *Expr@new, body: *Stmt@new): *Stmt@new {
-    mk_stmt(StmtKind.While { cond: cond, body: body })
+new_while(cond: *Expr@new, invariant: ?*Expr@new, body: *Stmt@new): *Stmt@new {
+    mk_stmt(StmtKind.While { cond: cond, invariant: invariant, body: body })
 }
 
 new_for(
@@ -1252,6 +1254,8 @@ new_obj(name: []i8@new, is_local: bool) noregion: *Obj@new {
         life: 0,
         storage_life: 0,
         life_bound: "",
+        index_for_name: "",
+        bounds_addr_taken: false,
         bound_need_imm: false,
         bound_need_new: false,
         bound_named: null,
@@ -1979,10 +1983,14 @@ parse_postfix() noregion raises Error: *Expr@new {
                 target: n
             })
         } else if (tok.kind == TokKind.LBrack) {
+            base: *Expr = n;
             tok = tok.next;
             idx: *Expr = parse_expr();
             skip(TokKind.RBrack);
-            n = new_index(n, idx)
+            n = new_index(base, idx);
+            n.pos = base.pos;
+            n.file = base.file;
+            n.toklen = base.toklen
         } else {
             if (tok.kind == TokKind.Dot) {
                 if (tok.next.kind == TokKind.Star) {
@@ -3163,6 +3171,14 @@ add_type_stmt_node(p: *Stmt) noregion raises Error {
             ct2: ?*Type = decay(k.cond.ty);
             if (ct2 == null || !is_bool_ty(ct2)) error_ty_expr(k.cond, "condition must be bool",
                 ct2);
+            inv: ?*Expr = k.invariant;
+            if (inv != null) {
+                add_type(inv);
+                it: ?*Type = decay(inv.ty);
+                if (it == null || !is_bool_ty(it)) error_ty_expr(inv, "loop invariant must be bool",
+                    it);
+                if (!bounds_pure_condition(inv)) error("loop invariant must be free of side effects")
+            }
             save2: ?*NarrowFrame = narrow_top;
             narrow_push_ne_nulls(k.cond);
             add_type_stmt(k.body);
@@ -3455,7 +3471,16 @@ parse_decl(is_local: bool, allow_at: bool) noregion raises Error: *Obj@new {
     browse_note();
     tok = tok.next;
     skip(TokKind.Colon);
-    ty: *Type = parse_type();
+    index_for_name: []i8 = "";
+    ty: *Type = ty_int;
+    if (allow_at && tok.kind == TokKind.IndexFor) {
+        tok = tok.next;
+        skip(TokKind.LParen);
+        if (tok.kind != TokKind.Ident) error("index_for requires an array parameter name");
+        index_for_name = cur_tokstr();
+        tok = tok.next;
+        skip(TokKind.RParen)
+    } else ty = parse_type();
     if (is_noreturn_ty(ty)) error("noreturn is only valid as a function return type");
     bound: []i8 = "";
     if (tok.kind == TokKind.At) {
@@ -3472,6 +3497,7 @@ parse_decl(is_local: bool, allow_at: bool) noregion raises Error: *Obj@new {
     o: *Obj = new_obj(name, is_local);
     o.ty = ty;
     o.life_bound = bound;
+    o.index_for_name = index_for_name;
     o
 }
 
@@ -3658,13 +3684,20 @@ parse_stmt_body() noregion raises Error: *Stmt@new {
         skip(TokKind.LParen);
         cond2: *Expr = parse_expr();
         skip(TokKind.RParen);
+        invariant: ?*Expr = null;
+        if (tok.kind == TokKind.Ident && streq(cur_tokstr(), "invariant")) {
+            tok = tok.next;
+            skip(TokKind.LParen);
+            invariant = parse_expr();
+            skip(TokKind.RParen)
+        }
         save2: ?*NarrowFrame = narrow_top;
         narrow_push_ne_nulls(cond2);
         enter_scope();
         body: *Stmt = parse_stmt();
         leave_scope();
         narrow_reset(save2);
-        return new_while(cond2, body)
+        return new_while(cond2, invariant, body)
     }
     if (tok.kind == TokKind.For) {
         tok = tok.next;

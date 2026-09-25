@@ -64,6 +64,10 @@ l8 elfpack file.o -o file
 l8 build [--profile|-p] file.l8 -o file
 ```
 
+Stage 2 also accepts `--verify-bounds` with `compile` and `build`. This mode
+requires a compile-time proof for each array index and is described in
+[`BOUNDS.md`](BOUNDS.md).
+
 `build` sends typed compiler operations directly to the assembler's in-memory
 section, symbol, relocation, and instruction encoders. It parses only the static
 `runtime.s` input and imported native sources, then writes ET_EXEC directly from
