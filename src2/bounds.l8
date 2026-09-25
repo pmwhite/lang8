@@ -9,6 +9,8 @@ type BoundsFact = {
     next: ?*BoundsFact
 }
 
+bounds_emit_check_warnings: bool = false;
+
 bounds_infer_mode: bool = false;
 
 bounds_infer_changed: bool = false;
@@ -52,12 +54,13 @@ bounds_require(
     file: int,
     pos: int
 ) raises Error {
+    if (bounds_checked_index(a, i)) return;
     if (bounds_proves(a, i, f)) return;
     if (bounds_infer_mode) {
         bounds_infer_requirement(a, i);
         return
     }
-    error_at_file(file, pos, "array index not proved in bounds (need 0 <= index < len(array))")
+    error_at_file(file, pos, "array index not proved in bounds (guard it or check_index after binding variables)")
 }
 
 bounds_arg_named(fn: *Function, args: ?*Expr, name: []i8): ?*Expr@args {
@@ -71,15 +74,6 @@ bounds_arg_named(fn: *Function, args: ?*Expr, name: []i8): ?*Expr@args {
     null
 }
 
-bounds_call_args_pure(args: ?*Expr): bool {
-    a: ?*Expr = args;
-    while (a != null) {
-        if (!bounds_pure_condition(a)) return false;
-        a = a.next
-    }
-    true
-}
-
 bounds_check_call(
     fn: *Function,
     args: ?*Expr,
@@ -91,9 +85,10 @@ bounds_check_call(
     a: ?*Expr = args;
     while (p != null && a != null) {
         if (len(p.index_for_name) != 0) {
-            if (!bounds_call_args_pure(args)) error_at_file(file, pos, "index_for call arguments must be free of side effects");
             ar: ?*Expr = bounds_arg_named(fn, args, p.index_for_name);
             if (ar == null) error_at_file(file, pos, "index_for refers to unknown array parameter");
+            if (!bounds_pure_condition(ar) || !bounds_pure_condition(a)) error_at_file(file,
+                pos, "index_for array and index arguments must be free of side effects (bind them to variables first)");
             bounds_require(ar, a, f, file, pos)
         }
         p = p.param_next;
@@ -125,6 +120,127 @@ bounds_var(e: ?*Expr): ?*Obj {
     match n.kind {
         Var k -> k.var;
         _ -> null
+    }
+}
+
+bounds_same_array_expr(a: *Expr, b: *Expr): bool {
+    match a.kind {
+        Var x -> {
+            match b.kind {
+                Var y -> x.var != null && x.var == y.var;
+                _ -> false
+            }
+        }
+        MemberAccess x -> {
+            match b.kind {
+                MemberAccess y -> x.member != null && x.member == y.member && bounds_same_array_expr(x.lhs,
+                    y.lhs);
+                _ -> false
+            }
+        }
+        Deref x -> {
+            match b.kind {
+                Deref y -> bounds_same_array_expr(x.lhs, y.lhs);
+                _ -> false
+            }
+        }
+        _ -> false
+    }
+}
+
+bounds_field_array(a: *Expr, root: *Obj, member: *Member): bool {
+    match a.kind {
+        MemberAccess k -> bounds_var(k.lhs) == root && k.member == member;
+        _ -> false
+    }
+}
+
+bounds_field_safe_args(args: ?*Expr, root: *Obj, member: *Member): bool {
+    q: ?*Expr = args;
+    while (q != null) {
+        if (!bounds_field_safe_expr(q, root, member)) return false;
+        q = q.next
+    }
+    true
+}
+
+bounds_field_safe_expr(e: ?*Expr, root: *Obj, member: *Member): bool {
+    if (e == null) return true;
+    n: *Expr = e;
+    match n.kind {
+        Num _ -> true;
+        Null -> true;
+        Var _ -> true;
+        Binary k -> bounds_field_safe_expr(k.lhs, root, member) && bounds_field_safe_expr(k.rhs,
+            root, member);
+        Assign k -> {
+            match k.lhs.kind {
+                Index x -> {
+                    t: ?*Type = k.lhs.ty;
+                    (is_int_width_ty(t) || is_float_ty(t) || is_bool_ty(t)) && bounds_field_array(x.lhs,
+                        root, member) && bounds_field_safe_expr(x.idx, root, member) && bounds_field_safe_expr(k.rhs,
+                        root, member)
+                }
+                _ -> false
+            }
+        }
+        Index k -> bounds_field_safe_expr(k.lhs, root, member) && bounds_field_safe_expr(k.idx,
+            root, member);
+        Not k -> bounds_field_safe_expr(k.lhs, root, member);
+        Neg k -> bounds_field_safe_expr(k.lhs, root, member);
+        BitNot k -> bounds_field_safe_expr(k.lhs, root, member);
+        LogAnd k -> bounds_field_safe_expr(k.lhs, root, member) && bounds_field_safe_expr(k.rhs,
+            root, member);
+        LogOr k -> bounds_field_safe_expr(k.lhs, root, member) && bounds_field_safe_expr(k.rhs,
+            root, member);
+        OrElse k -> bounds_field_safe_expr(k.lhs, root, member) && bounds_field_safe_expr(k.rhs,
+            root, member);
+        Funcall k -> k.target == null && (streq(k.funcname, "len") || streq(k.funcname,
+            "check_index")) && bounds_field_safe_args(k.args, root, member);
+        MemberAccess k -> bounds_field_safe_expr(k.lhs, root, member);
+        As k -> bounds_field_safe_expr(k.lhs, root, member);
+        Trunc k -> bounds_field_safe_expr(k.lhs, root, member);
+        _ -> false
+    }
+}
+
+bounds_field_safe_stmt_list(s: ?*Stmt, root: *Obj, member: *Member): bool {
+    q: ?*Stmt = s;
+    while (q != null) {
+        if (!bounds_field_safe_stmt(q, root, member)) return false;
+        q = q.next
+    }
+    true
+}
+
+bounds_field_safe_stmt(s: *Stmt, root: *Obj, member: *Member): bool {
+    match s.kind {
+        ExprStmt k -> bounds_field_safe_expr(k.lhs, root, member);
+        Decl k -> bounds_field_safe_expr(k.init, root, member);
+        Return k -> bounds_field_safe_expr(k.lhs, root, member);
+        Block k -> bounds_field_safe_stmt_list(k.body, root, member);
+        Region k -> bounds_field_safe_stmt(k.body, root, member);
+        If k -> {
+            if (!bounds_field_safe_expr(k.cond, root, member) || !bounds_field_safe_stmt(k.then,
+                root, member)) return false;
+            els: ?*Stmt = k.els;
+            if (els != null && !bounds_field_safe_stmt(els, root, member)) return false;
+            true
+        }
+        Comment _ -> true;
+        _ -> false
+    }
+}
+
+bounds_checked_index(a: *Expr, i: *Expr): bool {
+    match i.kind {
+        Funcall k -> {
+            if (!streq(k.funcname, "check_index") || k.target != null) return false;
+            checked_array: ?*Expr = k.args;
+            if (checked_array == null) return false;
+            bounds_same_array_expr(a, checked_array)
+        }
+        _ -> false
     }
 }
 
@@ -368,6 +484,18 @@ bounds_condition(e: *Expr, yes: bool, f: ?*BoundsFact@new): ?*BoundsFact@new {
             bounds_condition(k.rhs, false, bounds_condition(k.lhs, false, f))
         }
         Binary k -> {
+            left_len: ?*Obj = bounds_len_var(k.lhs);
+            right_len: ?*Obj = bounds_len_var(k.rhs);
+            if (left_len != null && right_len != null) {
+                if (yes && k.op == BinOp.Eq || !yes && k.op == BinOp.Ne) {
+                    f = bounds_add(f, left_len, right_len, 7);
+                    return bounds_add(f, right_len, left_len, 7)
+                }
+                if (yes && (k.op == BinOp.Ge || k.op == BinOp.Gt) || !yes && (k.op == BinOp.Lt || k.op == BinOp.Le)) return bounds_add(f,
+                    left_len, right_len, 7);
+                if (yes && (k.op == BinOp.Le || k.op == BinOp.Lt) || !yes && (k.op == BinOp.Gt || k.op == BinOp.Ge)) return bounds_add(f,
+                    right_len, left_len, 7)
+            }
             offset_index: ?*Obj = bounds_offset_var(k.lhs);
             offset_array: ?*Obj = bounds_len_var(k.rhs);
             offset: int = bounds_offset_amount(k.lhs);
@@ -466,8 +594,29 @@ bounds_proves(a: *Expr, i: *Expr, f: ?*BoundsFact) raises Error: bool {
             q = q.next
         }
     }
+    if (iv != null && bounds_has(f, iv, null, 1)) {
+        match a.kind {
+            MemberAccess k -> {
+                root: ?*Obj = bounds_var(k.lhs);
+                member: ?*Member = k.member;
+                if (root != null && member != null) {
+                    m: *Member = member;
+                    if (bounds_has_value(f, iv, root, 8, m.browse_id)) return true
+                }
+            }
+            _ -> { }
+        }
+    }
     if (iv == null || av == null) return false;
-    bounds_has(f, iv, null, 1) && bounds_has(f, iv, av, 2)
+    if (!bounds_has(f, iv, null, 1)) return false;
+    if (bounds_has(f, iv, av, 2)) return true;
+    q: ?*BoundsFact = f;
+    while (q != null) {
+        if (q.index == iv && q.array != null && q.kind == 2 && bounds_has(f, av, q.array,
+            7)) return true;
+        q = q.next
+    }
+    false
 }
 
 bounds_inits(inits: ?*FieldInit, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@f {
@@ -507,6 +656,7 @@ bounds_expr(e: ?*Expr, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@new {
             f = bounds_expr(k.lhs, f);
             v: ?*Obj = bounds_var(k.lhs);
             if (v == null) return bounds_after_call(f);
+            v.bounds_written = true;
             keep_nonnegative: bool = bounds_inc_preserves_nonnegative(v, k.rhs, f);
             f = bounds_kill(f, v);
             if (bounds_num(k.rhs) >= 0) f = bounds_add(f, v, null, 1);
@@ -535,6 +685,29 @@ bounds_expr(e: ?*Expr, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@new {
         Funcall k -> {
             f = bounds_expr_list(k.args, bounds_expr(k.target, f));
             if (streq(k.funcname, "len") || streq(k.funcname, "sizeof")) return f;
+            if (streq(k.funcname, "check_index")) {
+                a: ?*Expr = k.args;
+                if (a == null) error("internal: check_index arguments");
+                checked_array: *Expr = a;
+                checked_index: ?*Expr = checked_array.next;
+                if (checked_index == null) error("internal: check_index arguments");
+                if (!bounds_infer_mode) {
+                    if (bounds_emit_check_warnings) {
+                        if (n.bounds_check_seen && n.bounds_check_all_proved && !n.bounds_check_warning_emitted) {
+                            warning_at(n.file, n.pos, "check_index is redundant: index already proved in bounds");
+                            n.bounds_check_warning_emitted = true
+                        }
+                    } else {
+                        n.bounds_check_seen = true;
+                        if (!bounds_proves(checked_array, checked_index, f)) n.bounds_check_all_proved = false
+                    }
+                }
+                av: ?*Obj = bounds_var(checked_array);
+                iv: ?*Obj = bounds_var(checked_index);
+                if (av == null || iv == null) return f;
+                f = bounds_add(f, iv, null, 1);
+                return bounds_add(f, iv, av, 2)
+            }
             callee: ?*Function = k.fn;
             if (callee != null) bounds_check_call(callee, k.args, f, n.file, n.pos);
             bounds_after_call(f)
@@ -633,20 +806,58 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@new {
             f = bounds_expr(k.hi, bounds_expr(k.iter, f));
             hi: ?*Expr = k.hi;
             if (hi != null) {
-                facts: ?*BoundsFact = null;
-                if (bounds_num(k.iter) >= 0) facts = bounds_add(facts, k.item, null,
-                    1);
                 av: ?*Obj = bounds_len_var(hi);
-                if (av != null) facts = bounds_add(facts, k.item, av, 2);
+                field_root: ?*Obj = null;
+                field_member: ?*Member = null;
+                match hi.kind {
+                    Funcall len_call -> {
+                        field_arg: ?*Expr = len_call.args;
+                        if (streq(len_call.funcname, "len") && len_call.target == null && field_arg != null) {
+                            field_array: *Expr = field_arg;
+                            if (field_array.next == null) {
+                                match field_array.kind {
+                                    MemberAccess field -> {
+                                        field_root = bounds_var(field.lhs);
+                                        field_member = field.member
+                                    }
+                                    _ -> { }
+                                }
+                            }
+                        }
+                    }
+                    _ -> { }
+                }
+                if (field_root != null && field_member != null && !bounds_field_safe_stmt(k.body,
+                    field_root, field_member)) {
+                    field_root = null;
+                    field_member = null
+                }
                 hiconst: int = bounds_num(hi);
-                if (hiconst >= 0) facts = bounds_add_value(facts, k.item, null, 5,
-                    hiconst);
-                endfacts: ?*BoundsFact = bounds_stmt(k.body, facts);
-                if (av != null && !bounds_has(endfacts, k.item, av, 2)) error_at_file(hi.file,
-                    hi.pos, "array used as for-loop bound may change in loop");
-                if (hiconst >= 0 && !bounds_has_value(endfacts, k.item, null, 5, hiconst)) error_at_file(hi.file,
-                    hi.pos, "range index may change in loop")
-            } else _body2: ?*BoundsFact = bounds_stmt(k.body, null);
+                invariant2: ?*BoundsFact = f;
+                changing2: bool = true;
+                while (changing2) {
+                    facts: ?*BoundsFact = invariant2;
+                    if (bounds_num(k.iter) >= 0) facts = bounds_add(facts, k.item,
+                        null, 1);
+                    if (av != null) facts = bounds_add(facts, k.item, av, 2);
+                    if (field_root != null && field_member != null) {
+                        m2: *Member = field_member;
+                        facts = bounds_add_value(facts, k.item, field_root, 8, m2.browse_id)
+                    }
+                    if (hiconst >= 0) facts = bounds_add_value(facts, k.item, null,
+                        5, hiconst);
+                    endfacts: ?*BoundsFact = bounds_stmt(k.body, facts);
+                    if (av != null && !bounds_has(endfacts, k.item, av, 2)) error_at_file(hi.file,
+                        n.pos, "array used as for-loop bound may change in loop");
+                    if (hiconst >= 0 && (k.item.bounds_written || k.item.bounds_addr_taken)) error_at_file(hi.file,
+                        n.pos, "range index may change in loop");
+                    next_inv2: ?*BoundsFact = bounds_meet(f, endfacts);
+                    changing2 = !bounds_same(invariant2, next_inv2);
+                    invariant2 = next_inv2
+                }
+                return invariant2
+            }
+            _body2: ?*BoundsFact = bounds_stmt(k.body, null);
             null
         }
         Match k -> {
@@ -681,6 +892,7 @@ bounds_stmt_list(s: ?*Stmt, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@f {
 }
 
 verify_bounds_program() raises Error {
+    bounds_emit_check_warnings = false;
     bounds_infer_mode = true;
     bounds_infer_changed = true;
     while (bounds_infer_changed) {
@@ -719,4 +931,18 @@ verify_bounds_program() raises Error {
         if (!fn2.is_extern) _out2: ?*BoundsFact = bounds_stmt(fn2.body, f2);
         fn2 = fn2.next
     }
+    bounds_emit_check_warnings = true;
+    g2: ?*Obj = globals;
+    while (g2 != null) {
+        _gf2: ?*BoundsFact = bounds_expr(g2.init, null);
+        g2 = g2.next
+    }
+    fn3: ?*Function = functions;
+    while (fn3 != null) {
+        bounds_current_fn = fn3;
+        f3: ?*BoundsFact = bounds_initial(fn3);
+        if (!fn3.is_extern) _out3: ?*BoundsFact = bounds_stmt(fn3.body, f3);
+        fn3 = fn3.next
+    }
+    bounds_emit_check_warnings = false
 }

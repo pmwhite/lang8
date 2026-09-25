@@ -35,8 +35,12 @@ range reasoning, and Wuffs' requirement for a compile-time proof of each access.
 
 Stage 2 provides `compile --verify-bounds` and `build --verify-bounds`. In this
 mode the compiler rejects unproved index expressions and omits their generated
-runtime checks. The flag allows existing code to migrate function by function
+runtime checks. The flag allows existing program targets to migrate separately
 while ordinary builds keep their current checks.
+It also warns when a `check_index` is redundant because the verifier can prove
+the index in bounds before the call. A warning is emitted only when that proof
+holds on every analyzed visit to the call site; no warning does not mean the
+runtime check is necessary.
 
 `index_for` is a reserved keyword. `i: index_for(a)` declares a function parameter
 whose value is valid for array parameter `a`. The compiler also infers this
@@ -49,8 +53,38 @@ common cursor loops provide local proofs. A `while` loop may carry
 the compiler checks it at entry and after each iteration. Invariants are pure
 compile-time conditions.
 
-The initial verifier deliberately rejects patterns it cannot express, including
-nontrivial index arithmetic and mutable record fields. It does not yet give
-`index_for` to return values or verify the spans used by bulk operations. Those
-extensions and migration of the existing programs remain necessary before
-strict verification can become the default build mode.
+Length comparisons also carry relationships between local arrays: after
+`len(a) == len(b)`, a loop over `a` can index `b` while both lengths remain
+stable. A range loop over `len(record.field)` can index that field when its body
+has no calls or writes that could change the field's length. The verifier keeps
+facts entering a range loop only while its body preserves them.
+
+`check_index(a, i)` is the explicit runtime bridge. It checks
+`0 <= i < len(a)` once and exits with status 1 on failure, as ordinary checked
+indexing does. It returns the checked index, so an access can use
+`a[check_index(a, i)]`. For variable arguments, a standalone call also establishes
+a reusable fact: strict mode accepts later `a[i]` and calls requiring
+`i: index_for(a)` until a relevant value changes. Stable field and index
+expressions are accepted inline; an expression with an arbitrary function call
+must first be bound to a variable so the value checked is the value used. A
+normal guard remains useful when the caller needs to return or raise a
+particular error.
+
+```l8
+check_index(a, i);
+use(a[i]);
+```
+
+The verifier deliberately rejects patterns it cannot express, including some
+nontrivial index arithmetic. It does not yet give `index_for` to return values
+or verify the spans used by bulk operations. The `--verify-bounds` flag remains
+opt-in while those extensions are evaluated.
+
+## Migration
+
+The standard-library tests, both compiler stages, and all shipped program and
+test roots now compile under `--verify-bounds`. `./build.sh all` checks these
+roots in strict mode and runs the normal runtime suites. Most dynamic accesses
+use an inline `check_index`; sites with a useful shared guard can call it once
+before later accesses. Strict compilation remains opt-in for now, so newly
+added roots should be included in the build's strict source list.

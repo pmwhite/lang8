@@ -130,7 +130,8 @@ def discover(sources: list[pathlib.Path], directories: list[pathlib.Path]) -> li
     return sorted(found)
 
 
-def run(source: pathlib.Path, compiler: pathlib.Path, update: bool) -> None:
+def run(source: pathlib.Path, compiler: pathlib.Path, update: bool,
+        verify_bounds: bool = False) -> None:
     source = source.resolve()
     compiler = compiler.resolve()
     order, expected, lines, labels = expectations(source)
@@ -138,7 +139,9 @@ def run(source: pathlib.Path, compiler: pathlib.Path, update: bool) -> None:
     with tempfile.TemporaryDirectory(prefix="l8-lib-expect-") as directory:
         binary = pathlib.Path(directory) / "test"
         build = subprocess.run(
-            [str(compiler), "build", "--expect", str(source), "-o", str(binary)],
+            [str(compiler), "build", "--expect"]
+            + (["--verify-bounds"] if verify_bounds else [])
+            + [str(source), "-o", str(binary)],
             capture_output=True,
         )
         if build.returncode:
@@ -175,11 +178,13 @@ def main() -> int:
     parser.add_argument("--discover", type=pathlib.Path, action="append", default=[],
                         help="find L8 sources with inline expectations recursively")
     parser.add_argument("--compiler", type=pathlib.Path, default=pathlib.Path("./l8c3"))
+    parser.add_argument("--verify-bounds", action="store_true",
+                        help="require verified indexing in the compiled sources")
     parser.add_argument("--accept", action="store_true", help="update changed snapshots after a successful run")
     args = parser.parse_args()
     try:
         for source in discover(args.source, args.discover):
-            run(source, args.compiler, args.accept)
+            run(source, args.compiler, args.accept, args.verify_bounds)
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
