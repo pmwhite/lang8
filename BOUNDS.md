@@ -53,6 +53,16 @@ common cursor loops provide local proofs. A `while` loop may carry
 the compiler checks it at entry and after each iteration. Invariants are pure
 compile-time conditions.
 
+The compiler also infers requirements for a constant access to an array
+parameter or its direct field (`out[1]` requires `len(out) >= 2`), and for a
+direct field index into a direct field array of the same parameter
+(`b.data[b.cursor]` requires `0 <= b.cursor < len(b.data)`). These requirements
+propagate through direct calls. Callers can satisfy them with known lengths or
+guards; a call that cannot prove one is rejected. Writes that may invalidate a
+required fact still discard it within the callee, so an entry requirement does
+not justify an access after such a write. Nested paths, arithmetic indices,
+and indirect calls carrying these requirements are outside this inference pass.
+
 Length comparisons also carry relationships between local arrays: after
 `len(a) == len(b)`, a loop over `a` can index `b` while both lengths remain
 stable. A range loop over `len(record.field)` can index that field when its body

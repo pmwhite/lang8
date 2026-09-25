@@ -115,6 +115,95 @@ bounds_note_separations(list: ?*BoundsSeparation, f: ?*BoundsFact) {
     }
 }
 
+// Infer only requirements rooted at a direct parameter or one of its fields.
+bounds_requirement_root(fn: *Function, a: *Expr, i: *Expr): bool {
+    root: ?*Obj = null;
+    match a.kind {
+        Var k -> root = k.var;
+        MemberAccess k -> root = bounds_var(k.lhs);
+        _ -> return false
+    }
+    if (root == null || !bounds_param(fn, root)) return false;
+    if (bounds_num(i) >= 0 && bounds_num(i) < 536870912) return true;
+    match i.kind {
+        MemberAccess k -> {
+            if (bounds_var(k.lhs) == root && k.member != null) return true;
+            false
+        }
+        _ -> false
+    }
+}
+
+bounds_add_requirement(fn: *Function@new, a: *Expr@new, i: *Expr@new): bool {
+    if (!bounds_requirement_root(fn, a, i)) return false;
+    q: ?*BoundsRequirement = fn.bounds_requirements;
+    while (q != null) {
+        if (bounds_same_array_expr(q.array, a) && bounds_same_term(q.index, i)) return false;
+        q = q.next
+    }
+    fn.bounds_requirements = new BoundsRequirement { array: a, index: i, next: fn.bounds_requirements };
+    bounds_infer_changed = true;
+    true
+}
+
+bounds_len_term(a: *Expr@new): *Expr@new {
+    mk_expr(ExprKind.Funcall {
+        funcname: "len",
+        args: a,
+        fn: null,
+        target: null
+    })
+}
+
+bounds_requirement_facts(f: ?*BoundsFact@new, r: *BoundsRequirement@new): ?*BoundsFact@new {
+    if (bounds_num(r.index) < 0) f = bounds_add_order(f, new_num(0), r.index, 10);
+    bounds_add_order(f, r.index, bounds_len_term(r.array), 9)
+}
+
+bounds_clone_path(e: *Expr@new): ?*Expr@new {
+    match e.kind {
+        Num k -> new_num(k.val);
+        Var k -> {
+            copied: *Expr = mk_expr(ExprKind.Var { var: k.var, name: k.name, member: k.member });
+            copied.ty = e.ty;
+            copied
+        }
+        MemberAccess k -> {
+            lhs: ?*Expr = bounds_clone_path(k.lhs);
+            if (lhs == null) return null;
+            copied: *Expr = mk_expr(ExprKind.MemberAccess { lhs: lhs, name: k.name, member: k.member });
+            copied.ty = e.ty;
+            copied
+        }
+        _ -> null
+    }
+}
+
+bounds_rebind_term(e: *Expr@new, callee: *Function, args: ?*Expr@new): ?*Expr@new {
+    match e.kind {
+        Num k -> new_num(k.val);
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null || !bounds_param(callee, v)) return null;
+            actual: ?*Expr = bounds_arg_named(callee, args, v.name);
+            if (actual == null || !bounds_pure_condition(actual)) return null;
+            bounds_clone_path(actual)
+        }
+        MemberAccess k -> {
+            root: ?*Obj = bounds_var(k.lhs);
+            if (root == null || !bounds_param(callee, root)) return null;
+            actual: ?*Expr = bounds_arg_named(callee, args, root.name);
+            if (actual == null || bounds_var(actual) == null) return null;
+            copied: ?*Expr = bounds_clone_path(actual);
+            if (copied == null) return null;
+            mapped: *Expr = mk_expr(ExprKind.MemberAccess { lhs: copied, name: k.name, member: k.member });
+            mapped.ty = e.ty;
+            mapped
+        }
+        _ -> null
+    }
+}
+
 bounds_infer_requirement(a: *Expr, i: *Expr) {
     fn: ?*Function = bounds_current_fn;
     if (fn == null) return;
@@ -128,8 +217,8 @@ bounds_infer_requirement(a: *Expr, i: *Expr) {
 }
 
 bounds_require(
-    a: *Expr,
-    i: *Expr,
+    a: *Expr@new,
+    i: *Expr@new,
     f: ?*BoundsFact,
     file: int,
     pos: int
@@ -138,6 +227,8 @@ bounds_require(
     if (bounds_proves(a, i, f)) return;
     if (bounds_infer_mode) {
         bounds_infer_requirement(a, i);
+        fn: ?*Function = bounds_current_fn;
+        if (fn != null) bounds_add_requirement(fn, a, i);
         return
     }
     error_at_file(file, pos, "array index not proved in bounds (guard it or check_index after binding variables)")
@@ -175,8 +266,8 @@ bounds_infer_caller_separation(a: *Expr, b: *Expr) {
 }
 
 bounds_check_call(
-    fn: *Function,
-    args: ?*Expr,
+    fn: *Function@new,
+    args: ?*Expr@new,
     f: ?*BoundsFact,
     file: int,
     pos: int
@@ -209,10 +300,29 @@ bounds_check_call(
         }
         sep = sep.next
     }
+    requirement: ?*BoundsRequirement = fn.bounds_requirements;
+    while (requirement != null) {
+        mapped_array: ?*Expr = bounds_rebind_term(requirement.array, fn, args);
+        mapped_index: ?*Expr = bounds_rebind_term(requirement.index, fn, args);
+        if (mapped_array == null || mapped_index == null) error_at_file(file, pos,
+            "bounds requirement arguments must be simple, side-effect-free paths");
+        if (!bounds_proves(mapped_array, mapped_index, f)) {
+            if (bounds_infer_mode) {
+                caller: ?*Function = bounds_current_fn;
+                if (caller != null) bounds_add_requirement(caller, mapped_array, mapped_index)
+            } else error_at_file(file, pos, "call does not prove inferred array bounds requirement")
+        }
+        requirement = requirement.next
+    }
 }
 
 bounds_initial(fn: *Function@new) raises Error: ?*BoundsFact@new {
     f: ?*BoundsFact = null;
+    requirement: ?*BoundsRequirement = fn.bounds_requirements;
+    while (requirement != null) {
+        f = bounds_requirement_facts(f, requirement);
+        requirement = requirement.next
+    }
     sep: ?*BoundsSeparation = fn.bounds_separations;
     while (sep != null) {
         first: ?*Obj = bounds_param_id(fn, sep.first);
@@ -899,10 +1009,16 @@ bounds_order_to_len(
 ): bool {
     q: ?*BoundsFact = f;
     while (q != null) {
-        if (q.kind == 9 || !strict && q.kind == 10) {
+        if (q.kind == 9 || q.kind == 10) {
             l: ?*Expr = q.left;
             r: ?*Expr = q.right;
-            if (l != null && r != null && bounds_same_term(l, left)) {
+            numeric_implies: bool = false;
+            if (l != null && bounds_num(left) >= 0 && bounds_num(l) >= 0) {
+                if (q.kind == 9 && bounds_num(l) >= bounds_num(left)) numeric_implies = true;
+                if (q.kind == 10 && bounds_num(l) > bounds_num(left)) numeric_implies = true
+            }
+            if (l != null && r != null && ((!strict || q.kind == 9) && bounds_same_term(l,
+                left) || numeric_implies)) {
                 match r.kind {
                     Funcall call -> {
                         a: ?*Expr = call.args;
@@ -924,6 +1040,7 @@ bounds_order_to_len(
 }
 
 bounds_nonnegative_term(f: ?*BoundsFact, term: *Expr): bool {
+    if (bounds_num(term) >= 0) return true;
     v: ?*Obj = bounds_var(term);
     if (v != null && bounds_has(f, v, null, 1)) return true;
     q: ?*BoundsFact = f;
@@ -1412,7 +1529,14 @@ bounds_expr(e: ?*Expr, f: ?*BoundsFact@new) raises Error: ?*BoundsFact@new {
             f = bounds_expr(k.rhs, f);
             f = bounds_expr(k.lhs, f);
             v: ?*Obj = bounds_var(k.lhs);
-            if (v == null) return bounds_after_call(f, null, null);
+            if (v == null) {
+                match k.lhs.kind {
+                    // Writing an element cannot change a named array's length or
+                    // a direct record field used by a bounds relationship.
+                    Index _ -> return f;
+                    _ -> return bounds_after_call(f, null, null)
+                }
+            }
             v.bounds_written = true;
             keep_nonnegative: bool = bounds_inc_preserves_nonnegative(v, k.rhs, f);
             f = bounds_kill(f, v);
@@ -1690,6 +1814,8 @@ verify_bounds_program() raises Error {
     unsupported: ?*Function = functions;
     while (unsupported != null) {
         if (unsupported.address_taken) {
+            if (unsupported.bounds_requirements != null) error_at_file(unsupported.browse_file,
+                unsupported.browse_pos, "function with bounds requirement cannot be called indirectly");
             if (unsupported.bounds_separations != null) error_at_file(unsupported.browse_file,
                 unsupported.browse_pos, "function with separation requirement cannot be called indirectly");
             p0: ?*Obj = unsupported.params;
