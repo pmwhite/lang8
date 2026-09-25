@@ -126,21 +126,43 @@ bounds_note_separations(list: ?*BoundsSeparation, f: ?*BoundsFact) {
     }
 }
 
-// Infer only requirements rooted at a direct parameter or one of its fields.
+// Infer requirements rooted at a parameter path. An offset index can be
+// passed to callers as two integer inequalities, provided its base is also
+// a parameter path.
 bounds_requirement_root(
     fn: *Function,
     a: *Expr,
-    i: *Expr,
+    i: *Expr@new,
     allow_end: bool
 ): bool {
     root: ?*Obj = null;
     match a.kind {
-        Var k -> root = k.var;
-        MemberAccess k -> root = bounds_var(k.lhs);
+        Var _ -> root = bounds_term_root(a);
+        MemberAccess _ -> root = bounds_term_root(a);
         _ -> return false
     }
     if (root == null || !bounds_param(fn, root)) return false;
     if (bounds_num(i) >= 0 && bounds_num(i) < 536870912) return true;
+    offset: ?*BoundsAffine = bounds_affine(i, true);
+    if (offset != null && !allow_end) {
+        match i.kind {
+            Binary _ -> {
+                base: *Expr = offset.base;
+                match base.kind {
+                    Var k -> {
+                        v: ?*Obj = k.var;
+                        return v != null && bounds_param(fn, v)
+                    }
+                    MemberAccess k -> {
+                        other: ?*Obj = bounds_term_root(base);
+                        return other == root && k.member != null
+                    }
+                    _ -> return false
+                }
+            }
+            _ -> { }
+        }
+    }
     match i.kind {
         Var k -> {
             v: ?*Obj = k.var;
@@ -148,12 +170,19 @@ bounds_requirement_root(
             allow_end && bounds_param(fn, v)
         }
         MemberAccess k -> {
-            other: ?*Obj = bounds_var(k.lhs);
+            other: ?*Obj = bounds_term_root(i);
             if (other == root && k.member != null) return true;
             false
         }
         _ -> false
     }
+}
+
+bounds_same_requirement_index(a: *Expr@new, b: *Expr@new): bool {
+    x: ?*BoundsAffine = bounds_affine(a, true);
+    y: ?*BoundsAffine = bounds_affine(b, true);
+    if (x == null || y == null) return false;
+    x.offset == y.offset && bounds_same_term(x.base, y.base)
 }
 
 bounds_add_requirement(
@@ -165,7 +194,7 @@ bounds_add_requirement(
     if (!bounds_requirement_root(fn, a, i, allow_end)) return false;
     q: ?*BoundsRequirement = fn.bounds_requirements;
     while (q != null) {
-        if (q.allow_end == allow_end && bounds_same_array_expr(q.array, a) && bounds_same_term(q.index,
+        if (q.allow_end == allow_end && bounds_same_array_expr(q.array, a) && bounds_same_requirement_index(q.index,
             i)) return false;
         q = q.next
     }
@@ -189,9 +218,41 @@ bounds_len_term(a: *Expr@new): *Expr@new {
 }
 
 bounds_requirement_facts(f: ?*BoundsFact@new, r: *BoundsRequirement@new): ?*BoundsFact@new {
-    if (!r.allow_end && bounds_num(r.index) < 0) f = bounds_add_order(f, new_num(0),
-        r.index, 10);
-    bounds_add_order(f, r.index, bounds_len_term(r.array), if (r.allow_end) 10 else 9)
+    match r.index.kind {
+        Binary _ -> {
+            index: ?*BoundsAffine = bounds_affine(r.index, true);
+            if (index == null) return f;
+            base: *Expr = index.base;
+            length: *Expr = bounds_len_term(r.array);
+            root: ?*Obj = bounds_term_root(base);
+            if (root == null) return f;
+            f = new BoundsFact {
+                index: root,
+                array: bounds_term_root(length),
+                kind: 14,
+                value: 0 - index.offset - 1,
+                left: base,
+                right: length,
+                separation: null,
+                next: f
+            };
+            new BoundsFact {
+                index: root,
+                array: root,
+                kind: 14,
+                value: index.offset,
+                left: new_num(0),
+                right: base,
+                separation: null,
+                next: f
+            }
+        }
+        _ -> {
+            if (!r.allow_end && bounds_num(r.index) < 0) f = bounds_add_order(f, new_num(0),
+                r.index, 10);
+            bounds_add_order(f, r.index, bounds_len_term(r.array), if (r.allow_end) 10 else 9)
+        }
+    }
 }
 
 bounds_clone_path(e: *Expr@new): ?*Expr@new {
@@ -216,6 +277,22 @@ bounds_clone_path(e: *Expr@new): ?*Expr@new {
 bounds_rebind_term(e: *Expr@new, callee: *Function, args: ?*Expr@new): ?*Expr@new {
     match e.kind {
         Num k -> new_num(k.val);
+        Binary k -> {
+            if (k.op != BinOp.Add && k.op != BinOp.Sub) return null;
+            c: int = bounds_num(k.rhs);
+            if (c < 0 || c >= 536870912) return null;
+            lhs: ?*Expr = bounds_rebind_term(k.lhs, callee, args);
+            if (lhs == null) return null;
+            match lhs.kind {
+                Num number -> {
+                    if (number.form == LIT_INT && number.val >= 0 && number.val < 536870912) return new_num(if (k.op == BinOp.Add) number.val + c else number.val - c)
+                }
+                _ -> { }
+            }
+            mapped: *Expr = new_binary(k.op, lhs, new_num(c));
+            mapped.ty = e.ty;
+            mapped
+        }
         Var k -> {
             v: ?*Obj = k.var;
             if (v == null || !bounds_param(callee, v)) return null;
@@ -224,11 +301,7 @@ bounds_rebind_term(e: *Expr@new, callee: *Function, args: ?*Expr@new): ?*Expr@ne
             bounds_clone_path(actual)
         }
         MemberAccess k -> {
-            root: ?*Obj = bounds_var(k.lhs);
-            if (root == null || !bounds_param(callee, root)) return null;
-            actual: ?*Expr = bounds_arg_named(callee, args, root.name);
-            if (actual == null || bounds_var(actual) == null) return null;
-            copied: ?*Expr = bounds_clone_path(actual);
+            copied: ?*Expr = bounds_rebind_term(k.lhs, callee, args);
             if (copied == null) return null;
             mapped: *Expr = mk_expr(ExprKind.MemberAccess { lhs: copied, name: k.name, member: k.member });
             mapped.ty = e.ty;
@@ -355,8 +428,15 @@ bounds_check_call(
         mapped_index: ?*Expr = bounds_rebind_term(requirement.index, fn, args);
         if (mapped_array == null || mapped_index == null) error_at_file(file, pos,
             "bounds requirement arguments must be simple, side-effect-free paths");
-        if (!(if (requirement.allow_end) bounds_count_fits(mapped_array, mapped_index,
-            f) else bounds_proves(mapped_array, mapped_index, f))) {
+        affine_call: bool = false;
+        match mapped_index.kind {
+            Binary _ -> affine_call = true;
+            _ -> { }
+        }
+        proved: bool = if (requirement.allow_end) bounds_count_fits(mapped_array,
+            mapped_index, f) else if (affine_call) bounds_difference_index(f, mapped_array,
+            mapped_index) else bounds_proves(mapped_array, mapped_index, f);
+        if (!proved) {
             if (bounds_infer_mode) {
                 caller: ?*Function = bounds_current_fn;
                 if (caller != null) bounds_add_requirement(caller, mapped_array, mapped_index,
@@ -1307,6 +1387,30 @@ bounds_difference_proves(
                 l = bounds_obj_expr(q.index);
                 r = zero;
                 weight = q.value
+            }
+            // All numeric literals share one zero node. This lets a known
+            // length of six combine with an upper bound on a cursor of zero.
+            if (l != null) {
+                match l.kind {
+                    Num number -> {
+                        if (number.form == LIT_INT && number.val >= 0 && number.val < 536870912) {
+                            weight = weight - number.val;
+                            l = zero
+                        }
+                    }
+                    _ -> { }
+                }
+            }
+            if (r != null) {
+                match r.kind {
+                    Num number -> {
+                        if (number.form == LIT_INT && number.val >= 0 && number.val < 536870912) {
+                            weight = weight + number.val;
+                            r = zero
+                        }
+                    }
+                    _ -> { }
+                }
             }
             // Propagating separation obligations through a graph path needs
             // provenance. Leave those facts to the existing direct prover.
