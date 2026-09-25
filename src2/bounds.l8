@@ -116,7 +116,12 @@ bounds_note_separations(list: ?*BoundsSeparation, f: ?*BoundsFact) {
 }
 
 // Infer only requirements rooted at a direct parameter or one of its fields.
-bounds_requirement_root(fn: *Function, a: *Expr, i: *Expr): bool {
+bounds_requirement_root(
+    fn: *Function,
+    a: *Expr,
+    i: *Expr,
+    allow_end: bool
+): bool {
     root: ?*Obj = null;
     match a.kind {
         Var k -> root = k.var;
@@ -126,22 +131,39 @@ bounds_requirement_root(fn: *Function, a: *Expr, i: *Expr): bool {
     if (root == null || !bounds_param(fn, root)) return false;
     if (bounds_num(i) >= 0 && bounds_num(i) < 536870912) return true;
     match i.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) return false;
+            allow_end && bounds_param(fn, v)
+        }
         MemberAccess k -> {
-            if (bounds_var(k.lhs) == root && k.member != null) return true;
+            other: ?*Obj = bounds_var(k.lhs);
+            if (other == root && k.member != null) return true;
             false
         }
         _ -> false
     }
 }
 
-bounds_add_requirement(fn: *Function@new, a: *Expr@new, i: *Expr@new): bool {
-    if (!bounds_requirement_root(fn, a, i)) return false;
+bounds_add_requirement(
+    fn: *Function@new,
+    a: *Expr@new,
+    i: *Expr@new,
+    allow_end: bool
+): bool {
+    if (!bounds_requirement_root(fn, a, i, allow_end)) return false;
     q: ?*BoundsRequirement = fn.bounds_requirements;
     while (q != null) {
-        if (bounds_same_array_expr(q.array, a) && bounds_same_term(q.index, i)) return false;
+        if (q.allow_end == allow_end && bounds_same_array_expr(q.array, a) && bounds_same_term(q.index,
+            i)) return false;
         q = q.next
     }
-    fn.bounds_requirements = new BoundsRequirement { array: a, index: i, next: fn.bounds_requirements };
+    fn.bounds_requirements = new BoundsRequirement {
+        array: a,
+        index: i,
+        allow_end: allow_end,
+        next: fn.bounds_requirements
+    };
     bounds_infer_changed = true;
     true
 }
@@ -156,8 +178,9 @@ bounds_len_term(a: *Expr@new): *Expr@new {
 }
 
 bounds_requirement_facts(f: ?*BoundsFact@new, r: *BoundsRequirement@new): ?*BoundsFact@new {
-    if (bounds_num(r.index) < 0) f = bounds_add_order(f, new_num(0), r.index, 10);
-    bounds_add_order(f, r.index, bounds_len_term(r.array), 9)
+    if (!r.allow_end && bounds_num(r.index) < 0) f = bounds_add_order(f, new_num(0),
+        r.index, 10);
+    bounds_add_order(f, r.index, bounds_len_term(r.array), if (r.allow_end) 10 else 9)
 }
 
 bounds_clone_path(e: *Expr@new): ?*Expr@new {
@@ -216,10 +239,24 @@ bounds_infer_requirement(a: *Expr, i: *Expr) {
     bounds_infer_changed = true
 }
 
+bounds_infer_loop_requirement(a: *Expr@new, i: *Expr, f: ?*BoundsFact@new) {
+    item: ?*Obj = bounds_var(i);
+    fn: ?*Function = bounds_current_fn;
+    if (item == null || fn == null) return;
+    q: ?*BoundsFact = f;
+    while (q != null) {
+        bound: ?*Expr = q.right;
+        if (q.kind == 11 && q.index == item && bound != null) {
+            if (bounds_add_requirement(fn, a, bound, true)) return
+        }
+        q = q.next
+    }
+}
+
 bounds_require(
     a: *Expr@new,
     i: *Expr@new,
-    f: ?*BoundsFact,
+    f: ?*BoundsFact@new,
     file: int,
     pos: int
 ) raises Error {
@@ -228,7 +265,8 @@ bounds_require(
     if (bounds_infer_mode) {
         bounds_infer_requirement(a, i);
         fn: ?*Function = bounds_current_fn;
-        if (fn != null) bounds_add_requirement(fn, a, i);
+        if (fn != null) bounds_add_requirement(fn, a, i, false);
+        bounds_infer_loop_requirement(a, i, f);
         return
     }
     error_at_file(file, pos, "array index not proved in bounds (guard it or check_index after binding variables)")
@@ -268,7 +306,7 @@ bounds_infer_caller_separation(a: *Expr, b: *Expr) {
 bounds_check_call(
     fn: *Function@new,
     args: ?*Expr@new,
-    f: ?*BoundsFact,
+    f: ?*BoundsFact@new,
     file: int,
     pos: int
 ) raises Error {
@@ -306,10 +344,12 @@ bounds_check_call(
         mapped_index: ?*Expr = bounds_rebind_term(requirement.index, fn, args);
         if (mapped_array == null || mapped_index == null) error_at_file(file, pos,
             "bounds requirement arguments must be simple, side-effect-free paths");
-        if (!bounds_proves(mapped_array, mapped_index, f)) {
+        if (!(if (requirement.allow_end) bounds_count_fits(mapped_array, mapped_index,
+            f) else bounds_proves(mapped_array, mapped_index, f))) {
             if (bounds_infer_mode) {
                 caller: ?*Function = bounds_current_fn;
-                if (caller != null) bounds_add_requirement(caller, mapped_array, mapped_index)
+                if (caller != null) bounds_add_requirement(caller, mapped_array, mapped_index,
+                    requirement.allow_end)
             } else error_at_file(file, pos, "call does not prove inferred array bounds requirement")
         }
         requirement = requirement.next
@@ -1435,6 +1475,22 @@ bounds_invariant_proved(e: *Expr, f: ?*BoundsFact) raises Error: bool {
         }
         _ -> false
     }
+}
+
+bounds_count_fits(a: *Expr, count: *Expr, f: ?*BoundsFact): bool {
+    if (bounds_order_to_len(f, count, a, false)) return true;
+    known: int = bounds_known_len(a);
+    av: ?*Obj = bounds_var(a);
+    if (av != null) {
+        fact_len: int = bounds_fact_value(f, av, 3);
+        if (fact_len > known) known = fact_len
+    }
+    if (known < 0) return false;
+    n: int = bounds_num(count);
+    cv: ?*Obj = bounds_var(count);
+    if (cv != null && n < 0) n = bounds_fact_value(f, cv, 4);
+    if (n >= 0 && n <= known) return true;
+    bounds_order(f, count, new_num(known), false)
 }
 
 bounds_proves(a: *Expr, i: *Expr, f: ?*BoundsFact) raises Error: bool {
