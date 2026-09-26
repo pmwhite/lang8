@@ -17,10 +17,41 @@ type BoundsAffine = {
     offset: int
 }
 
-type BoundsDistance = {
+type BoundsGraphNode = {
     term: *Expr;
     value: int;
-    next: ?*BoundsDistance
+    known: bool;
+    next: ?*BoundsGraphNode
+}
+
+type BoundsGraphEdge = {
+    from: *BoundsGraphNode;
+    to: *BoundsGraphNode;
+    weight: int;
+    next: ?*BoundsGraphEdge
+}
+
+type BoundsGraph = {
+    nodes: ?*BoundsGraphNode;
+    edges: ?*BoundsGraphEdge;
+    last: ?*BoundsGraphEdge
+}
+
+type BoundsBest = {
+    value: int
+}
+
+// Numeric facts have one meaning regardless of their compact storage kind.
+type BoundsInequality = {
+    left: ?*Expr;
+    right: ?*Expr;
+    bound: int;
+    separation: ?*BoundsSeparation
+}
+
+type BoundsTodo = {
+    fn: *Function;
+    next: ?*BoundsTodo
 }
 
 // A projected difference constraint at a successful function return.
@@ -1757,36 +1788,14 @@ bounds_return_shift(f: ?*BoundsFact@new, value: *Obj@new, offset: int): ?*Bounds
             if (next_offset >= 0 && next_offset < 536870912) head = bounds_add_value(head,
                 value, q.array, 15, next_offset)
         }
-        left: ?*Expr = q.left;
-        right: ?*Expr = q.right;
-        weight: int = 0;
-        if (q.kind == 9 || q.kind == 10 || q.kind == 14) {
-            if (q.kind == 9) weight = -1;
-            if (q.kind == 14) weight = q.value
-        } else if (q.kind == 1) {
-            left = new_num(0);
-            right = bounds_obj_expr(q.index)
-        } else if (q.kind == 2) {
-            array: ?*Obj = q.array;
-            if (array != null) {
-                left = bounds_obj_expr(q.index);
-                right = bounds_len_term(bounds_obj_expr(array));
-                weight = -1
-            }
-        } else if (q.kind == 4) {
-            left = bounds_obj_expr(q.index);
-            right = new_num(0);
-            weight = q.value
-        } else if (q.kind == 11) {
-            left = bounds_obj_expr(q.index);
-            right = q.right;
-            weight = -1
-        }
-        if (left != null && right != null && q.separation == null) {
+        edge: BoundsInequality = bounds_inequality(q);
+        left: ?*Expr = edge.left;
+        right: ?*Expr = edge.right;
+        if (left != null && right != null && edge.separation == null) {
             left_self: bool = bounds_var(left) == value;
             right_self: bool = bounds_var(right) == value;
             if (left_self != right_self) {
-                if (left_self) weight = weight + offset else weight = weight - offset;
+                weight: int = if (left_self) edge.bound + offset else edge.bound - offset;
                 head = new BoundsFact {
                     index: value,
                     array: bounds_term_root(right),
@@ -1964,6 +1973,54 @@ bounds_obj_expr(v: *Obj@new): *Expr@new {
     e: *Expr = mk_expr(ExprKind.Var { var: v, name: v.name, member: null });
     e.ty = v.ty;
     e
+}
+
+bounds_inequality(q: *BoundsFact@new): BoundsInequality@new {
+    left: ?*Expr = q.left;
+    right: ?*Expr = q.right;
+    bound: int = 0;
+    if (q.kind == 9) bound = -1 else if (q.kind == 14) bound = q.value else if (q.kind != 10) {
+        left = null;
+        right = null;
+        if (q.kind == 1) {
+            left = new_num(0);
+            right = bounds_obj_expr(q.index)
+        } else if (q.kind == 2) {
+            a: ?*Obj = q.array;
+            if (a != null) {
+                left = bounds_obj_expr(q.index);
+                right = bounds_len_term(bounds_obj_expr(a));
+                bound = -1
+            }
+        } else if (q.kind == 3 && q.value >= 0 && q.value < 536870912) {
+            left = new_num(q.value);
+            right = bounds_len_term(bounds_obj_expr(q.index))
+        } else if (q.kind == 4 && q.value >= 0 && q.value < 536870912) {
+            left = bounds_obj_expr(q.index);
+            right = new_num(0);
+            bound = q.value
+        } else if (q.kind == 5 && q.value > 0 && q.value < 536870912) {
+            left = bounds_obj_expr(q.index);
+            right = new_num(0);
+            bound = q.value - 1
+        } else if (q.kind == 7) {
+            a: ?*Obj = q.array;
+            if (a != null) {
+                left = bounds_len_term(bounds_obj_expr(a));
+                right = bounds_len_term(bounds_obj_expr(q.index))
+            }
+        } else if (q.kind == 11) {
+            left = bounds_obj_expr(q.index);
+            right = q.right;
+            bound = -1
+        }
+    }
+    BoundsInequality {
+        left: left,
+        right: right,
+        bound: bound,
+        separation: q.separation
+    }
 }
 
 // A term plus a constant. In a guard, only normalize arithmetic that cannot
@@ -2251,13 +2308,20 @@ bounds_small_upper(e: *Expr, f: ?*BoundsFact): int {
     }
 }
 
-bounds_distance_get(head: ?*BoundsDistance, term: *Expr): ?*BoundsDistance@head {
-    p: ?*BoundsDistance = head;
+bounds_graph_node(graph: *BoundsGraph@new, term: *Expr@new): *BoundsGraphNode@new {
+    p: ?*BoundsGraphNode = graph.nodes;
     while (p != null) {
         if (bounds_same_term(p.term, term)) return p;
         p = p.next
     }
-    null
+    node: *BoundsGraphNode = new BoundsGraphNode {
+        term: term,
+        value: 0,
+        known: false,
+        next: graph.nodes
+    };
+    graph.nodes = node;
+    node
 }
 
 // Graph edges encode x - y <= c as y -> x with weight c. A bounded
@@ -2265,113 +2329,116 @@ bounds_distance_get(head: ?*BoundsDistance, term: *Expr): ?*BoundsDistance@head 
 // loses proofs. Paths longer than sixteen edges are deliberately ignored.
 bounds_difference_proves_impl(
     f: ?*BoundsFact@new,
-    left: *Expr,
+    left: *Expr@new,
     right: *Expr@new,
-    limit: int
+    limit: int,
+    best: ?*BoundsBest
 ): bool {
-    if (bounds_same_term(left, right)) return 0 <= limit;
+    if (bounds_same_term(left, right)) {
+        if (best != null) best.value = 0;
+        return 0 <= limit
+    }
     // Every array, slice, and string length is nonnegative. Include this
     // universal edge even when no guard mentions the length on this path.
-    if (bounds_num(left) == 0 && limit >= 0) {
+    if (bounds_num(left) == 0 && (limit >= 0 || best != null)) {
         match right.kind {
             Funcall call -> {
                 a: ?*Expr = call.args;
                 if (a != null) {
-                    if (streq(call.funcname, "len") && call.target == null && a.next == null) return true
+                    if (streq(call.funcname, "len") && call.target == null && a.next == null) {
+                        if (best == null) return true;
+                        if (best.value > 0) best.value = 0
+                    }
                 }
             }
             _ -> { }
         }
     }
     zero: *Expr = new_num(0);
-    distances: ?*BoundsDistance = new BoundsDistance { term: right, value: 0, next: null };
+    graph: *BoundsGraph = new BoundsGraph { nodes: null, edges: null, last: null };
+    source: *BoundsGraphNode = bounds_graph_node(graph, right);
+    source.known = true;
+    target: *BoundsGraphNode = bounds_graph_node(graph, left);
     match right.kind {
         Funcall call -> {
             a: ?*Expr = call.args;
             if (a != null) {
                 if (a.next == null && call.target == null && streq(call.funcname,
-                    "len")) distances = new BoundsDistance { term: zero, value: 0, next: distances }
+                    "len")) {
+                    length_zero: *BoundsGraphNode = bounds_graph_node(graph, zero);
+                    length_zero.known = true
+                }
             }
         }
         _ -> { }
     }
+    q: ?*BoundsFact = f;
+    while (q != null) {
+        edge: BoundsInequality = bounds_inequality(q);
+        l: ?*Expr = edge.left;
+        r: ?*Expr = edge.right;
+        weight: int = edge.bound;
+        // All numeric literals share one zero node. This lets a known
+        // length of six combine with an upper bound on a cursor of zero.
+        if (l != null) {
+            match l.kind {
+                Num number -> {
+                    if (number.form == LIT_INT && number.val >= 0 && number.val < 536870912) {
+                        weight = weight - number.val;
+                        l = zero
+                    }
+                }
+                _ -> { }
+            }
+        }
+        if (r != null) {
+            match r.kind {
+                Num number -> {
+                    if (number.form == LIT_INT && number.val >= 0 && number.val < 536870912) {
+                        weight = weight + number.val;
+                        r = zero
+                    }
+                }
+                _ -> { }
+            }
+        }
+        // Propagating separation obligations through a graph path needs
+        // provenance. Leave those facts to the existing direct prover.
+        if (l != null && r != null && q.separation == null) {
+            from: *BoundsGraphNode = bounds_graph_node(graph, r);
+            to: *BoundsGraphNode = bounds_graph_node(graph, l);
+            edge: *BoundsGraphEdge = new BoundsGraphEdge {
+                from: from,
+                to: to,
+                weight: weight,
+                next: null
+            };
+            last: ?*BoundsGraphEdge = graph.last;
+            if (last == null) graph.edges = edge else last.next = edge;
+            graph.last = edge
+        }
+        q = q.next
+    }
     round: int = 0;
     while (round < 16) {
         changed: bool = false;
-        q: ?*BoundsFact = f;
-        while (q != null) {
-            l: ?*Expr = null;
-            r: ?*Expr = null;
-            weight: int = 0;
-            if (q.kind == 9 || q.kind == 10 || q.kind == 14) {
-                l = q.left;
-                r = q.right;
-                if (q.kind == 9) weight = -1;
-                if (q.kind == 14) weight = q.value
-            } else if (q.kind == 11) {
-                l = bounds_obj_expr(q.index);
-                r = q.right;
-                weight = -1
-            } else if (q.kind == 1) {
-                l = zero;
-                r = bounds_obj_expr(q.index)
-            } else if (q.kind == 2) {
-                a: ?*Obj = q.array;
-                if (a != null) {
-                    l = bounds_obj_expr(q.index);
-                    r = bounds_len_term(bounds_obj_expr(a));
-                    weight = -1
-                }
-            } else if (q.kind == 3 && q.value >= 0 && q.value < 536870912) {
-                l = new_num(q.value);
-                r = bounds_len_term(bounds_obj_expr(q.index))
-            } else if (q.kind == 4 && q.value >= 0 && q.value < 536870912) {
-                l = bounds_obj_expr(q.index);
-                r = zero;
-                weight = q.value
-            }
-            // All numeric literals share one zero node. This lets a known
-            // length of six combine with an upper bound on a cursor of zero.
-            if (l != null) {
-                match l.kind {
-                    Num number -> {
-                        if (number.form == LIT_INT && number.val >= 0 && number.val < 536870912) {
-                            weight = weight - number.val;
-                            l = zero
+        e: ?*BoundsGraphEdge = graph.edges;
+        while (e != null) {
+            if (e.from.known) {
+                value: int = e.from.value + e.weight;
+                if (!e.to.known || value < e.to.value) {
+                    e.to.value = value;
+                    e.to.known = true;
+                    changed = true;
+                    if (e.to == target) {
+                        if (best != null) {
+                            if (value < best.value) best.value = value
                         }
+                        if (best == null && value <= limit) return true
                     }
-                    _ -> { }
                 }
             }
-            if (r != null) {
-                match r.kind {
-                    Num number -> {
-                        if (number.form == LIT_INT && number.val >= 0 && number.val < 536870912) {
-                            weight = weight + number.val;
-                            r = zero
-                        }
-                    }
-                    _ -> { }
-                }
-            }
-            // Propagating separation obligations through a graph path needs
-            // provenance. Leave those facts to the existing direct prover.
-            if (l != null && r != null && q.separation == null) {
-                from: ?*BoundsDistance = bounds_distance_get(distances, r);
-                if (from != null) {
-                    value: int = from.value + weight;
-                    to: ?*BoundsDistance = bounds_distance_get(distances, l);
-                    if (to == null) {
-                        distances = new BoundsDistance { term: l, value: value, next: distances };
-                        changed = true
-                    } else if (value < to.value) {
-                        to.value = value;
-                        changed = true
-                    }
-                    if (bounds_same_term(l, left) && value <= limit) return true
-                }
-            }
-            q = q.next
+            e = e.next
         }
         if (!changed) return false;
         round = round + 1
@@ -2400,23 +2467,39 @@ bounds_difference_proves(
             query_right = new_num(0);
             bound = bound + right_number
         }
-        answer = bounds_difference_proves_impl(f, query_left, query_right, bound)
+        answer = bounds_difference_proves_impl(f, query_left, query_right, bound,
+            null)
     }
     answer
 }
 
-// Find a useful bound in the existing difference domain. The fixed search
-// window keeps summary construction independent of literal sizes and graph
-// complexity. A weaker bound remains sound when the true bound is smaller.
+// Read the tightest bound found by one graph search. As in ordinary queries,
+// the fixed relaxation limit may miss a proof but never invents one.
 bounds_return_bound(f: ?*BoundsFact@new, left: *Expr, right: *Expr): int {
-    if (!bounds_difference_proves(f, left, right, 64)) return 1000000000;
-    lo: int = -64;
-    hi: int = 64;
-    while (lo < hi) {
-        mid: int = lo + (hi - lo) / 2;
-        if (bounds_difference_proves(f, left, right, mid)) hi = mid else lo = mid + 1
+    answer: int = 1000000000;
+    region {
+        query_left: *Expr = left;
+        query_right: *Expr = right;
+        shift: int = 0;
+        left_number: int = bounds_num(left);
+        if (left_number > -536870912 && left_number < 536870912) {
+            query_left = new_num(0);
+            shift = shift + left_number
+        }
+        right_number: int = bounds_num(right);
+        if (right_number > -536870912 && right_number < 536870912) {
+            query_right = new_num(0);
+            shift = shift - right_number
+        }
+        best: *BoundsBest = new BoundsBest { value: 1000000000 };
+        _proved: bool = bounds_difference_proves_impl(f, query_left, query_right,
+            64, best);
+        if (best.value < 1000000000) {
+            value: int = best.value + shift;
+            if (value <= 64) answer = (if (value < -64) -64 else value)
+        }
     }
-    lo
+    answer
 }
 
 bounds_return_add_candidate(
@@ -2800,6 +2883,15 @@ bounds_copy_separation(f: ?*BoundsFact@new, q: *BoundsFact@new, sep: ?*BoundsSep
 }
 
 bounds_kill(f: ?*BoundsFact@new, v: *Obj): ?*BoundsFact@new {
+    // Assigning a value absent from the state leaves the immutable list intact.
+    // This is common for short-lived locals and avoids copying every fact.
+    scan: ?*BoundsFact = f;
+    found: bool = false;
+    while (scan != null && !found) {
+        if (scan.index == v || scan.array == v) found = true;
+        scan = scan.next
+    }
+    if (!found) return f;
     head: ?*BoundsFact = null;
     q: ?*BoundsFact = f;
     while (q != null) {
@@ -2958,6 +3050,7 @@ bounds_after_call(f: ?*BoundsFact@new, callee: ?*Function, args: ?*Expr): ?*Boun
 }
 
 bounds_meet(a: ?*BoundsFact@new, b: ?*BoundsFact): ?*BoundsFact@new {
+    if (a == b) return a;
     head: ?*BoundsFact = null;
     q: ?*BoundsFact = a;
     while (q != null) {
@@ -2994,6 +3087,7 @@ bounds_meet(a: ?*BoundsFact@new, b: ?*BoundsFact): ?*BoundsFact@new {
 }
 
 bounds_same(a: ?*BoundsFact, b: ?*BoundsFact): bool {
+    if (a == b) return true;
     q: ?*BoundsFact = a;
     while (q != null) {
         if (!bounds_has_fact(b, q)) return false;
@@ -3769,23 +3863,53 @@ bounds_finish_returns(fn: *Function, out: ?*BoundsFact@new) noregion {
     fn.bounds_returns = next
 }
 
+// Contracts and return facts are local to a function. A change can affect
+// that function's entry state and the functions that call it.
+bounds_queue_fn(queue: ?*BoundsTodo@new, fn: *Function@new): ?*BoundsTodo@new {
+    if (fn.is_extern) return queue;
+    q: ?*BoundsTodo = queue;
+    while (q != null) {
+        if (q.fn == fn) return queue;
+        q = q.next
+    }
+    new BoundsTodo { fn: fn, next: queue }
+}
+
 verify_bounds_program() noregion raises Error {
     bounds_infer_effects();
     bounds_infer_mode = true;
-    bounds_infer_changed = true;
-    while (bounds_infer_changed) {
+    queue: ?*BoundsTodo = null;
+    last: ?*BoundsTodo = null;
+    first: ?*Function = functions;
+    while (first != null) {
+        if (!first.is_extern) {
+            entry: *BoundsTodo = new BoundsTodo { fn: first, next: null };
+            if (last == null) queue = entry else last.next = entry;
+            last = entry
+        }
+        first = first.next
+    }
+    while (queue != null) {
+        fn: *Function = queue.fn;
+        queue = queue.next;
         bounds_infer_changed = false;
-        fn: ?*Function = functions;
-        while (fn != null) {
-            bounds_current_fn = fn;
-            bounds_return_accum = null;
-            bounds_return_seen = false;
-            f: ?*BoundsFact = bounds_initial(fn);
-            if (!fn.is_extern) {
-                out: ?*BoundsFact = bounds_stmt(fn.body, f);
-                bounds_finish_returns(fn, out)
+        bounds_current_fn = fn;
+        bounds_return_accum = null;
+        bounds_return_seen = false;
+        f: ?*BoundsFact = bounds_initial(fn);
+        out: ?*BoundsFact = bounds_stmt(fn.body, f);
+        bounds_finish_returns(fn, out);
+        if (bounds_infer_changed) {
+            queue = bounds_queue_fn(queue, fn);
+            caller: ?*Function = functions;
+            while (caller != null) {
+                edge: ?*CallEdge = caller.callees;
+                while (edge != null) {
+                    if (edge.callee == fn) queue = bounds_queue_fn(queue, caller);
+                    edge = edge.next
+                }
+                caller = caller.next
             }
-            fn = fn.next
         }
     }
     bounds_infer_mode = false;
