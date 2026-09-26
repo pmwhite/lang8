@@ -1,0 +1,367 @@
+tag compiler_internal;
+
+// Projection of successful exits onto caller-visible terms.
+bounds_return_map(term: *Expr@new, callee: *Function, args: ?*Expr@new): ?*Expr@new {
+    mapped: ?*Expr = bounds_rebind_term(term, callee, args);
+    if (mapped == null) return null;
+    if (!bounds_effect_preserves_term(callee, mapped)) return null;
+    mapped
+}
+
+bounds_return_self_offset(value: *Obj, call: *Expr): int {
+    match call.kind {
+        Funcall k -> {
+            callee: ?*Function = k.fn;
+            if (callee == null || k.target != null) return 1000000000;
+            upper: int = 1000000000;
+            lower: int = 1000000000;
+            q: ?*BoundsReturnFact = callee.bounds_returns;
+            while (q != null) {
+                mapped: ?*Expr = bounds_return_map(q.term, callee, k.args);
+                if (mapped != null && bounds_var(mapped) == value) {
+                    if (q.result_left) upper = q.bound else lower = q.bound
+                }
+                q = q.next
+            }
+            if (upper == 1000000000 || lower == 1000000000 || upper != 0 - lower) return 1000000000;
+            upper
+        }
+        _ -> 1000000000
+    }
+}
+
+// Rewrite difference edges when a cursor is replaced by its old value plus
+// a proven constant. This is the compact equivalent of an SSA old-value node.
+bounds_return_shift(f: ?*BoundsState@new, value: *Obj, offset: int): ?*BoundsState@new {
+    head: ?*BoundsState = bounds_kill(f, value);
+    q_position: int = bounds_count(f) - 1;
+    q: ?*BoundsRow = bounds_row(f, q_position);
+    while (q != null) {
+        if (q.kind == BoundsKind.Cursor && q.index == value) {
+            next_offset: int = q.value + offset;
+            if (next_offset >= 0 && next_offset < 536870912) head = bounds_add_value(head,
+                value, q.array, BoundsKind.Cursor, next_offset)
+        }
+        edge: BoundsNumericView = bounds_numeric_at(f, q_position);
+        if (edge.valid && edge.separation == null) {
+            left: BoundsTermRef = bounds_view_left(edge);
+            right: BoundsTermRef = bounds_view_right(edge);
+            self: BoundsTermRef = bounds_ref_obj(value, false);
+            left_self: bool = bounds_ref_same(left, self);
+            right_self: bool = bounds_ref_same(right, self);
+            if (left_self != right_self) {
+                weight: int = if (left_self) edge.bound + offset else edge.bound - offset;
+                left_ast: ?*Expr = bounds_ref_ast(left);
+                right_ast: ?*Expr = bounds_ref_ast(right);
+                if (left_ast != null && right_ast != null) head = bounds_insert(head,
+                    value, bounds_term_root(right_ast), BoundsKind.Difference, weight,
+                    left_ast, right_ast, null)
+            }
+        }
+        q_position = q_position - 1;
+        q = bounds_row(f, q_position)
+    }
+    head
+}
+
+bounds_return_apply(value: *Obj@new, call: *Expr, f: ?*BoundsState@new): ?*BoundsState@f {
+    path: *Expr = bounds_obj_expr(value);
+    match call.kind {
+        Funcall k -> {
+            callee: ?*Function = k.fn;
+            if (callee == null || k.target != null) return f;
+            q: ?*BoundsReturnFact = callee.bounds_returns;
+            while (q != null) {
+                mapped: ?*Expr = bounds_return_map(q.term, callee, k.args);
+                if (mapped != null && bounds_term(mapped) && !bounds_same_term(path,
+                    mapped)) {
+                    left: *Expr = if (q.result_left) path else mapped;
+                    right: *Expr = if (q.result_left) mapped else path;
+                    root: ?*Obj = bounds_term_root(left);
+                    if (root == null) root = bounds_term_root(right);
+                    if (root != null) f = bounds_insert(f, root, bounds_term_root(right),
+                        BoundsKind.Difference, q.bound, left, right, null)
+                }
+                q = q.next
+            }
+            f
+        }
+        _ -> f
+    }
+}
+
+bounds_return_add_candidate(
+    head: ?*BoundsReturnFact@new,
+    fn: *Function,
+    value: *BoundsAffine,
+    candidate: *Expr@new,
+    f: ?*BoundsState
+): ?*BoundsReturnFact@head {
+    root: ?*Obj = bounds_term_root(candidate);
+    if (root != null) {
+        if (!bounds_param(fn, root) || root.bounds_written) return head
+    }
+    if (root == null && bounds_num(candidate) != 0) return head;
+    if (!bounds_term(candidate)) return head;
+    match candidate.kind {
+        Num _ -> { }
+        Funcall _ -> { }
+        _ -> {
+            if (!is_int_ty(candidate.ty)) return head
+        }
+    }
+    q: ?*BoundsReturnFact = head;
+    while (q != null) {
+        if (bounds_same_term(q.term, candidate)) return head;
+        q = q.next
+    }
+    upper: int = bounds_return_bound(f, value.base, candidate);
+    lower: int = bounds_return_bound(f, candidate, value.base);
+    if (upper != 1000000000) head = new BoundsReturnFact {
+        term: candidate,
+        result_left: true,
+        bound: upper + value.offset,
+        next: head
+    };
+    if (lower != 1000000000) head = new BoundsReturnFact {
+        term: candidate,
+        result_left: false,
+        bound: lower - value.offset,
+        next: head
+    };
+    head
+}
+
+bounds_return_no_wrap(value: *BoundsAffine, f: ?*BoundsState, fn: *Function@new): bool {
+    if (value.offset == 0) return true;
+    if (value.offset < 0) return bounds_difference_proves(f, new_num(0), value.base,
+        value.offset);
+    p: ?*Obj = fn.params;
+    while (p != null) {
+        ty: ?*Type = p.ty;
+        if (ty != null && (is_array(ty) || is_slice(ty))) {
+            if (bounds_difference_proves(f, value.base, bounds_len_term(bounds_obj_expr(p)),
+                0 - value.offset)) return true
+        }
+        p = p.param_next
+    }
+    false
+}
+
+// A check_index known to be invalid always traps, so its return statement is
+// not a successful exit of the surrounding function.
+bounds_return_traps(value: ?*Expr, f: ?*BoundsState): bool {
+    if (value == null) return false;
+    match value.kind {
+        Funcall k -> {
+            if (!streq(k.funcname, "check_index") || k.target != null) return false;
+            array: ?*Expr = k.args;
+            if (array == null) return false;
+            if (!bounds_pure_condition(array)) return false;
+            index: ?*Expr = array.next;
+            if (index == null) return false;
+            affine: ?*BoundsAffine = bounds_affine(index, true);
+            if (affine == null) return false;
+            if (affine.offset == 0) return bounds_difference_proves(f, affine.base,
+                new_num(0), -1) || bounds_difference_proves(f, bounds_len_term(array),
+                affine.base, 0);
+            if (affine.offset > 0 && bounds_difference_proves(f, new_num(0), affine.base,
+                0)) return bounds_difference_proves(f, bounds_len_term(array), affine.base,
+                affine.offset);
+            false
+        }
+        _ -> false
+    }
+}
+
+bounds_return_visit(value_expr: ?*Expr@new, f: ?*BoundsState@new) noregion {
+    fn: ?*Function = bounds_current_fn;
+    if (fn == null || !bounds_infer_mode) return;
+    if (!is_int_ty(fn.return_ty)) return;
+    current: ?*BoundsReturnFact = null;
+    if (value_expr != null) {
+        value: ?*BoundsAffine = bounds_affine(value_expr, true);
+        if (value != null && bounds_return_no_wrap(value, f, fn)) {
+            current = bounds_return_add_candidate(current, fn, value, new_num(0),
+                f);
+            p: ?*Obj = fn.params;
+            while (p != null) {
+                current = bounds_return_add_candidate(current, fn, value, bounds_obj_expr(p),
+                    f);
+                ty: ?*Type = p.ty;
+                if (ty != null && is_indexable(ty)) current = bounds_return_add_candidate(current,
+                    fn, value, bounds_len_term(bounds_obj_expr(p)), f);
+                p = p.param_next
+            }
+            // Use every caller-visible path in the exit state as a candidate.
+            // Local facts may help prove a relationship, but cannot themselves
+            // appear in the summary.
+            q_position: int = bounds_count(f) - 1;
+            q: ?*BoundsRow = bounds_row(f, q_position);
+            while (q != null) {
+                left: ?*Expr = q.left;
+                right: ?*Expr = q.right;
+                if (left != null) current = bounds_return_add_candidate(current, fn,
+                    value, left, f);
+                if (right != null) current = bounds_return_add_candidate(current,
+                    fn, value, right, f);
+                q_position = q_position - 1;
+                q = bounds_row(f, q_position)
+            }
+            cursor: ?*Obj = bounds_var(value.base);
+            if (cursor != null) {
+                origin: ?*BoundsRow = bounds_cursor_origin(f, cursor);
+                if (origin != null) {
+                    source: ?*Obj = origin.array;
+                    if (source != null && bounds_param(fn, source)) {
+                        total: int = origin.value + value.offset;
+                        if (total >= 0 && total < 536870912) {
+                            entry: *Expr = bounds_obj_expr(source);
+                            current = new BoundsReturnFact {
+                                term: entry,
+                                result_left: true,
+                                bound: total,
+                                next: current
+                            };
+                            current = new BoundsReturnFact {
+                                term: entry,
+                                result_left: false,
+                                bound: 0 - total,
+                                next: current
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Forward an exact cursor result from a tail call. The callee's
+            // return fact and this function's cursor origin compose without
+            // an extra source-level assignment.
+            qtail_position: int = bounds_count(f) - 1;
+            qtail: ?*BoundsRow = bounds_row(f, qtail_position);
+            while (qtail != null) {
+                source: ?*Obj = qtail.array;
+                if (qtail.kind == BoundsKind.Cursor && source != null && bounds_param(fn,
+                    source)) {
+                    delta: int = bounds_return_self_offset(qtail.index, value_expr);
+                    total: int = qtail.value + delta;
+                    if (delta != 1000000000 && total >= 0 && total < 536870912) {
+                        entry: *Expr = bounds_obj_expr(source);
+                        current = new BoundsReturnFact {
+                            term: entry,
+                            result_left: true,
+                            bound: total,
+                            next: current
+                        };
+                        current = new BoundsReturnFact {
+                            term: entry,
+                            result_left: false,
+                            bound: 0 - total,
+                            next: current
+                        }
+                    }
+                }
+                qtail_position = qtail_position - 1;
+                qtail = bounds_row(f, qtail_position)
+            }
+        }
+    }
+    if (!bounds_return_seen) {
+        bounds_return_accum = current;
+        bounds_return_seen = true;
+        return
+    }
+    joined: ?*BoundsReturnFact = null;
+    old: ?*BoundsReturnFact = bounds_return_accum;
+    while (old != null) {
+        other: ?*BoundsReturnFact = current;
+        matched: bool = false;
+        while (other != null && !matched) {
+            if (old.result_left == other.result_left && bounds_same_term(old.term,
+                other.term)) {
+                joined = new BoundsReturnFact {
+                    term: old.term,
+                    result_left: old.result_left,
+                    bound: if (old.bound > other.bound) old.bound else other.bound,
+                    next: joined
+                };
+                matched = true
+            }
+            other = other.next
+        }
+        old = old.next
+    }
+    bounds_return_accum = joined
+}
+
+bounds_return_same(a: ?*BoundsReturnFact, b: ?*BoundsReturnFact): bool {
+    p: ?*BoundsReturnFact = a;
+    while (p != null) {
+        found: bool = false;
+        q: ?*BoundsReturnFact = b;
+        while (q != null) {
+            if (p.result_left == q.result_left && p.bound == q.bound && bounds_same_term(p.term,
+                q.term)) found = true;
+            q = q.next
+        }
+        if (!found) return false;
+        p = p.next
+    }
+    q2: ?*BoundsReturnFact = b;
+    while (q2 != null) {
+        found2: bool = false;
+        p2: ?*BoundsReturnFact = a;
+        while (p2 != null) {
+            if (q2.result_left == p2.result_left && q2.bound == p2.bound && bounds_same_term(q2.term,
+                p2.term)) found2 = true;
+            p2 = p2.next
+        }
+        if (!found2) return false;
+        q2 = q2.next
+    }
+    true
+}
+
+bounds_finish_returns(fn: *Function, out: ?*BoundsState@new) noregion {
+    body: ?*Stmt = fn.body;
+    if (body != null) {
+        match body.kind {
+            Block block -> {
+                last: ?*Stmt = bounds_last_stmt(block.body);
+                if (last != null) {
+                    match last.kind {
+                        ExprStmt item -> bounds_return_visit(item.lhs, out);
+                        _ -> { }
+                    }
+                }
+            }
+            ExprStmt item -> bounds_return_visit(item.lhs, out);
+            _ -> { }
+        }
+    }
+    // A path that falls through without a value cannot justify a summary.
+    if (body != null && !stmt_always_diverges(body)) {
+        last_value: bool = false;
+        match body.kind {
+            Block block -> {
+                last2: ?*Stmt = bounds_last_stmt(block.body);
+                if (last2 != null) {
+                    match last2.kind {
+                        ExprStmt _ -> last_value = true;
+                        _ -> { }
+                    }
+                }
+            }
+            ExprStmt _ -> last_value = true;
+            _ -> { }
+        }
+        if (!last_value) bounds_return_accum = null
+    }
+    next: ?*BoundsReturnFact = if (bounds_return_seen) bounds_return_accum else null;
+    if (!bounds_return_same(fn.bounds_returns, next)) bounds_infer_changed = true;
+    fn.bounds_returns = next
+}
+
+// Tarjan's algorithm emits each call group after its dependencies. Contract
+// inference only needs iteration inside a recursive group (or for a function
+// whose newly inferred entry facts change its own return summary).

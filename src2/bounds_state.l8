@@ -1,0 +1,277 @@
+tag compiler_internal;
+
+// A row belongs to a dense fact table, never to a linked list. Numeric rows
+// lower to left - right <= bound; other rows describe identity/provenance.
+// The AST adapter retains source paths for invalidation and diagnostics.
+bounds_count(state: ?*BoundsState): int {
+    if (state == null) 0 else state.count
+}
+
+bounds_row(state: ?*BoundsState, position: int): ?*BoundsRow@state {
+    if (state == null) return null;
+    if (position < 0 || position >= state.count) return null;
+    &state.storage.rows[check_index(state.storage.rows, position)]
+}
+
+bounds_storage(state: ?*BoundsState@new, row: BoundsRow@new): *BoundsStorage@new {
+    count: int = bounds_count(state);
+    if (state != null) {
+        old: *BoundsStorage = state.storage;
+        if (old.used == count && count < len(old.rows)) return old
+    }
+    capacity: int = 4;
+    while (capacity <= count) capacity = capacity * 2;
+    rows: []BoundsRow = new BoundsRow[capacity](row);
+    buckets: []int = new int[capacity * 2](-1);
+    links: []int = new int[capacity](-1);
+    if (state != null) {
+        source: []BoundsRow = state.storage.rows;
+        for i in 0..count {
+            rows[check_index(rows, i)] = source[check_index(source, i)];
+            item: BoundsNumericView = bounds_numeric_view(&rows[check_index(rows,
+                i)]);
+            slot: int = bounds_row_hash(&rows[check_index(rows, i)], item) & len(buckets) - 1;
+            links[check_index(links, i)] = buckets[check_index(buckets, slot)];
+            buckets[check_index(buckets, slot)] = i
+        }
+    }
+    new BoundsStorage {
+        rows: rows,
+        buckets: buckets,
+        links: links,
+        used: count
+    }
+}
+
+bounds_push(state: ?*BoundsState@new, row: BoundsRow@new): *BoundsState@new {
+    // Numeric rows are normalized on entry, including rows made by joins.
+    // After this boundary, source syntax no longer determines representation.
+    if (row.kind == BoundsKind.Difference) {
+        normal: BoundsNumericView = bounds_numeric_view(&row);
+        row.value = normal.bound;
+        if (normal.left_zero && bounds_num(row.left) != 0) row.left = new_num(0);
+        if (normal.right_zero && bounds_num(row.right) != 0) row.right = new_num(0);
+        left: ?*Expr = row.left;
+        right: ?*Expr = row.right;
+        if (left != null && right != null) {
+            root: ?*Obj = bounds_term_root(left);
+            if (root == null) root = bounds_term_root(right);
+            if (root != null) row.index = root;
+            row.array = bounds_term_root(right)
+        }
+    }
+    decoded: BoundsNumericView = bounds_numeric_view(&row);
+    hash: int = bounds_row_hash(&row, decoded);
+    if (state != null) {
+        position: int = bounds_bucket(state, hash);
+        while (position >= 0) {
+            existing: ?*BoundsRow = bounds_row(state, position);
+            if (existing != null && bounds_row_same(existing, &row)) return state;
+            position = bounds_next_row(state, position)
+        }
+    }
+    count: int = bounds_count(state);
+    storage: *BoundsStorage = bounds_storage(state, row);
+    storage.rows[check_index(storage.rows, count)] = row;
+    slot: int = hash & len(storage.buckets) - 1;
+    storage.links[check_index(storage.links, count)] = storage.buckets[check_index(storage.buckets,
+        slot)];
+    storage.buckets[check_index(storage.buckets, slot)] = count;
+    storage.used = count + 1;
+    new BoundsState { storage: storage, count: count + 1 }
+}
+
+bounds_copy(state: ?*BoundsState@new, row: *BoundsRow@new): *BoundsState@new {
+    bounds_push(state, row.*)
+}
+
+bounds_copy_separation(state: ?*BoundsState@new, row: *BoundsRow@new, separation: ?*BoundsSeparation): *BoundsState@new {
+    copy: BoundsRow = row.*;
+    copy.separation = separation;
+    bounds_push(state, copy)
+}
+
+bounds_row_same(a: *BoundsRow, b: *BoundsRow): bool {
+    if (a == b) return true;
+    if (a.kind != b.kind || a.index != b.index || a.array != b.array || a.value != b.value || !bounds_separation_same(a.separation,
+        b.separation)) return false;
+    al: ?*Expr = a.left;
+    bl: ?*Expr = b.left;
+    ar: ?*Expr = a.right;
+    br: ?*Expr = b.right;
+    if (al != null && bl != null) {
+        if (!bounds_same_term(al, bl)) return false
+    } else if (al != bl) return false;
+    if (ar != null && br != null) {
+        if (!bounds_same_term(ar, br)) return false
+    } else if (ar != br) return false;
+    true
+}
+
+bounds_has_fact(state: ?*BoundsState, row: *BoundsRow): bool {
+    numeric: BoundsNumericView = bounds_numeric_view(row);
+    if (numeric.valid) return bounds_numeric_entails(state, numeric);
+    position: int = bounds_count(state) - 1;
+    while (position >= 0) {
+        other: ?*BoundsRow = bounds_row(state, position);
+        if (other != null && bounds_row_same(other, row)) return true;
+        position = position - 1
+    }
+    false
+}
+
+// Find a bound for the same canonical pair, independent of the syntax which
+// established it. Alias assumptions may be weakened, never strengthened.
+// Pure lattice queries compare obligations. Proof queries may discharge them.
+// Both use the same indexed lookup and the same canonical endpoint equality.
+bounds_direct_bound(state: ?*BoundsState, wanted: BoundsNumericView, prove: bool): int {
+    best: int = 1000000000;
+    obligation: ?*BoundsSeparation = null;
+    left: BoundsTermRef = bounds_view_left(wanted);
+    right: BoundsTermRef = bounds_view_right(wanted);
+    position: int = bounds_bucket(state, bounds_pair_hash(wanted));
+    while (position >= 0) {
+        row: ?*BoundsRow = bounds_row(state, position);
+        if (row != null) {
+            edge: BoundsNumericView = bounds_numeric_view(row);
+            el: BoundsTermRef = bounds_view_left(edge);
+            er: BoundsTermRef = bounds_view_right(edge);
+            if (edge.valid && edge.bound < best && bounds_ref_same(left, el) && bounds_ref_same(right,
+                er)) {
+                available: bool = if (prove) bounds_separations_available(edge.separation,
+                    state) else edge.separation == null || bounds_separation_same(edge.separation,
+                    wanted.separation);
+                if (available) {
+                    best = edge.bound;
+                    obligation = edge.separation
+                }
+            }
+        }
+        position = bounds_next_row(state, position)
+    }
+    if (prove && best < 1000000000 && best <= wanted.bound) bounds_note_separations(obligation,
+        state);
+    best
+}
+
+bounds_meet(a: ?*BoundsState@new, b: ?*BoundsState): ?*BoundsState@new {
+    if (a == b) return a;
+    result: ?*BoundsState = null;
+    position: int = bounds_count(a) - 1;
+    while (position >= 0) {
+        row: ?*BoundsRow = bounds_row(a, position);
+        if (row != null) {
+            if (bounds_has_fact(b, row)) {
+                if (!bounds_has_fact(result, row)) result = bounds_copy(result, row)
+            } else {
+                edge: BoundsNumericView = bounds_numeric_at(a, position);
+                if (edge.valid) {
+                    other: int = bounds_direct_bound(b, edge, false);
+                    if (other < 1000000000) {
+                        if (other > edge.bound) edge.bound = other;
+                        left: BoundsTermRef = bounds_view_left(edge);
+                        right: BoundsTermRef = bounds_view_right(edge);
+                        joined: BoundsRow = BoundsRow {
+                            index: row.index,
+                            array: row.array,
+                            kind: BoundsKind.Difference,
+                            value: edge.bound,
+                            left: bounds_ref_ast(left),
+                            right: bounds_ref_ast(right),
+                            separation: row.separation
+                        };
+                        if (!bounds_has_fact(result, &joined)) result = bounds_push(result,
+                            joined)
+                    }
+                }
+            }
+        }
+        position = position - 1
+    }
+    result
+}
+
+bounds_same(a: ?*BoundsState, b: ?*BoundsState): bool {
+    if (a == b) return true;
+    position: int = bounds_count(a) - 1;
+    while (position >= 0) {
+        row: ?*BoundsRow = bounds_row(a, position);
+        if (row != null && !bounds_has_fact(b, row)) return false;
+        position = position - 1
+    }
+    position = bounds_count(b) - 1;
+    while (position >= 0) {
+        row: ?*BoundsRow = bounds_row(b, position);
+        if (row != null && !bounds_has_fact(a, row)) return false;
+        position = position - 1
+    }
+    true
+}
+
+bounds_insert(
+    state: ?*BoundsState@new,
+    index: *Obj,
+    array: ?*Obj,
+    kind: BoundsKind,
+    value: int,
+    left: ?*Expr,
+    right: ?*Expr,
+    separation: ?*BoundsSeparation
+): *BoundsState@new {
+    row: BoundsRow = BoundsRow {
+        index: index,
+        array: array,
+        kind: kind,
+        value: value,
+        left: left,
+        right: right,
+        separation: separation
+    };
+    bounds_push(state, row)
+}
+
+// Loop headers use widening, not the branch join. Retain only inequalities
+// whose previous bound survives the back edge. The set is finite and strictly
+// decreases, so advancing cursors cannot cause an endless sequence of maxima.
+bounds_widen(previous: ?*BoundsState@new, incoming: ?*BoundsState): ?*BoundsState@new {
+    result: ?*BoundsState = null;
+    position: int = bounds_count(previous) - 1;
+    while (position >= 0) {
+        row: ?*BoundsRow = bounds_row(previous, position);
+        if (row != null && bounds_has_fact(incoming, row)) result = bounds_copy(result,
+            row);
+        position = position - 1
+    }
+    result
+}
+
+// Decode only rows selected by the index, instead of scanning and lowering
+// the whole state for each direct query. Graph construction lowers each row
+// once into its compact integer edge columns.
+bounds_numeric_at(state: ?*BoundsState, position: int): BoundsNumericView {
+    row: ?*BoundsRow = bounds_row(state, position);
+    if (row != null) return bounds_numeric_view(row);
+    bounds_numeric_query(null, null, 0)
+}
+
+bounds_pair_hash(edge: BoundsNumericView): int {
+    left: BoundsTermRef = bounds_view_left(edge);
+    right: BoundsTermRef = bounds_view_right(edge);
+    bounds_term_hash(left) * 33 + bounds_term_hash(right) & 2147483647
+}
+
+bounds_row_hash(row: *BoundsRow, edge: BoundsNumericView): int {
+    if (edge.valid) return bounds_pair_hash(edge);
+    row.index.browse_id * 33 & 2147483647
+}
+
+bounds_bucket(state: ?*BoundsState, hash: int): int {
+    if (state == null) return -1;
+    slots: []int = state.storage.buckets;
+    slots[check_index(slots, hash & len(slots) - 1)]
+}
+
+bounds_next_row(state: ?*BoundsState, position: int): int {
+    if (state == null) return -1;
+    state.storage.links[check_index(state.storage.links, position)]
+}

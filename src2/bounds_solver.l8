@@ -1,0 +1,208 @@
+tag compiler_internal;
+
+// Query-local, structure-of-arrays difference graph. Interned term IDs index
+// contiguous tables; relaxation touches only integer IDs, weights, and labels.
+// No AST nodes or per-edge heap objects are allocated by this module.
+bounds_path_hash(path: *Expr): int {
+    match path.kind {
+        Var k -> {
+            obj: ?*Obj = k.var;
+            if (obj == null) 0 else obj.browse_id
+        }
+        MemberAccess k -> {
+            member: ?*Member = k.member;
+            member_id: int = 0;
+            if (member != null) member_id = member.browse_id;
+            bounds_path_hash(k.lhs) * 33 + member_id & 2147483647
+        }
+        Deref k -> bounds_path_hash(k.lhs) * 33 + 7 & 2147483647;
+        Num k -> k.val & 2147483647;
+        _ -> 0
+    }
+}
+
+bounds_term_hash(term: BoundsTermRef): int {
+    if (term.is_zero) return 0;
+    hash: int = 0;
+    obj: ?*Obj = term.obj;
+    path: ?*Expr = term.path;
+    if (obj != null) hash = obj.browse_id else if (path != null) hash = bounds_path_hash(path);
+    hash * 33 + (if (term.is_len) 1 else 2) & 2147483647
+}
+
+bounds_graph_new(rows: int): *BoundsGraph@new {
+    capacity: int = rows * 2 + 4;
+    buckets: int = 8;
+    while (buckets < capacity * 2) buckets = buckets * 2;
+    new BoundsGraph {
+        terms: new BoundsTermRef[capacity](bounds_ref_zero()),
+        slots: new int[buckets](-1),
+        heads: new int[capacity](-1),
+        targets: new int[rows + capacity * 3](0),
+        weights: new int[rows + capacity * 3](0),
+        links: new int[rows + capacity * 3](-1),
+        nodes: 0,
+        edges: 0
+    }
+}
+
+bounds_graph_intern(graph: *BoundsGraph, term: BoundsTermRef@graph): int {
+    slot: int = bounds_term_hash(term) & len(graph.slots) - 1;
+    id: int = graph.slots[check_index(graph.slots, slot)];
+    while (id >= 0) {
+        existing: BoundsTermRef = graph.terms[check_index(graph.terms, id)];
+        if (bounds_ref_same(existing, term)) return id;
+        slot = slot + 1 & len(graph.slots) - 1;
+        id = graph.slots[check_index(graph.slots, slot)]
+    }
+    id = graph.nodes;
+    graph.nodes = id + 1;
+    graph.terms[check_index(graph.terms, id)] = term;
+    graph.slots[check_index(graph.slots, slot)] = id;
+    id
+}
+
+bounds_graph_edge(
+    graph: *BoundsGraph,
+    from: int,
+    to: int,
+    weight: int
+) {
+    edge: int = graph.edges;
+    graph.edges = edge + 1;
+    graph.targets[check_index(graph.targets, edge)] = to;
+    graph.weights[check_index(graph.weights, edge)] = weight;
+    graph.links[check_index(graph.links, edge)] = graph.heads[check_index(graph.heads,
+        from)];
+    graph.heads[check_index(graph.heads, from)] = edge
+}
+
+bounds_graph_load(graph: *BoundsGraph, state: ?*BoundsState) {
+    // Iterate in insertion order. Edges on the same source form integer
+    // adjacency chains; there are no allocations inside this loop.
+    for position in 0..bounds_count(state) {
+        row: ?*BoundsRow = bounds_row(state, position);
+        if (row != null) {
+            edge: BoundsNumericView = bounds_numeric_at(state, position);
+            if (edge.valid && edge.separation == null) {
+                left: BoundsTermRef = bounds_view_left(edge);
+                right: BoundsTermRef = bounds_view_right(edge);
+                to: int = bounds_graph_intern(graph, left);
+                from: int = bounds_graph_intern(graph, right);
+                bounds_graph_edge(graph, from, to, edge.bound)
+            }
+        }
+    }
+    zero_term: BoundsTermRef = bounds_ref_zero();
+    zero: int = bounds_graph_intern(graph, zero_term);
+    for id in 0..graph.nodes {
+        term: BoundsTermRef = graph.terms[check_index(graph.terms, id)];
+        if (term.is_len) {
+            bounds_graph_edge(graph, id, zero, 0);
+            path: ?*Expr = term.path;
+            if (path != null) {
+                known: int = bounds_known_len(path);
+                if (known >= 0) {
+                    bounds_graph_edge(graph, id, zero, 0 - known);
+                    bounds_graph_edge(graph, zero, id, known)
+                }
+            }
+        }
+    }
+}
+
+// A bounded work queue stops with an under-approximation of known proofs.
+// Every finite distance represents a real path. Saturation is deliberately
+// avoided: dropping an out-of-range candidate cannot invent an inequality.
+bounds_graph_distance(
+    graph: *BoundsGraph,
+    source: int,
+    target: int,
+    limit: int,
+    early: bool
+): int {
+    unknown: int = 1000000000000000000;
+    distances: []int = new int[graph.nodes](unknown);
+    queued: []bool = new bool[graph.nodes](false);
+    queue: []int = new int[graph.nodes + 1](0);
+    distances[check_index(distances, source)] = 0;
+    queued[check_index(queued, source)] = true;
+    queue[0] = source;
+    read: int = 0;
+    write: int = 1;
+    budget: int = (graph.nodes + graph.edges + 1) * 64;
+    if (budget > 262144) budget = 262144;
+    if (source == target && early && limit >= 0) return 0;
+    while (read != write && budget > 0) {
+        from: int = queue[check_index(queue, read)];
+        read = read + 1;
+        if (read == len(queue)) read = 0;
+        queued[check_index(queued, from)] = false;
+        base: int = distances[check_index(distances, from)];
+        edge: int = graph.heads[check_index(graph.heads, from)];
+        while (edge >= 0 && budget > 0) {
+            budget = budget - 1;
+            to: int = graph.targets[check_index(graph.targets, edge)];
+            value: int = base + graph.weights[check_index(graph.weights, edge)];
+            if (value > 0 - unknown && value < distances[check_index(distances, to)]) {
+                distances[check_index(distances, to)] = value;
+                if (to == target && early && value <= limit) return value;
+                if (!queued[check_index(queued, to)]) {
+                    queue[check_index(queue, write)] = to;
+                    write = write + 1;
+                    if (write == len(queue)) write = 0;
+                    queued[check_index(queued, to)] = true
+                }
+            }
+            edge = graph.links[check_index(graph.links, edge)]
+        }
+    }
+    distances[check_index(distances, target)]
+}
+
+bounds_solve(state: ?*BoundsState, query: BoundsNumericView, early: bool): int {
+    if (!query.valid) return 1000000000000000000;
+    result: int = 1000000000000000000;
+    region {
+        graph: *BoundsGraph = bounds_graph_new(bounds_count(state));
+        left: BoundsTermRef = bounds_view_left(query);
+        right: BoundsTermRef = bounds_view_right(query);
+        target: int = bounds_graph_intern(graph, left);
+        source: int = bounds_graph_intern(graph, right);
+        bounds_graph_load(graph, state);
+        result = bounds_graph_distance(graph, source, target, query.bound, early)
+    }
+    result
+}
+
+bounds_difference_proves(
+    state: ?*BoundsState,
+    left: *Expr,
+    right: *Expr,
+    limit: int
+): bool {
+    query: BoundsNumericView = bounds_numeric_query(left, right, limit);
+    if (!query.valid) return false;
+    left_ref: BoundsTermRef = bounds_view_left(query);
+    right_ref: BoundsTermRef = bounds_view_right(query);
+    if (query.bound >= 0 && bounds_ref_same(left_ref, right_ref)) return true;
+    if (bounds_direct_proves(state, query)) return true;
+    bounds_solve(state, query, true) <= query.bound
+}
+
+bounds_return_bound(state: ?*BoundsState, left: *Expr, right: *Expr): int {
+    query: BoundsNumericView = bounds_numeric_query(left, right, 0);
+    if (!query.valid) return 1000000000;
+    distance: int = bounds_solve(state, query, false);
+    value: int = distance - query.bound;
+    if (value > 64) return 1000000000;
+    if (value < -64) -64 else value
+}
+
+// Proof queries may discharge alias obligations. Lattice membership used by
+// joins/widening remains pure and never strengthens a function's contract.
+bounds_direct_proves(state: ?*BoundsState, target: BoundsNumericView): bool {
+    if (!target.valid) return false;
+    bound: int = bounds_direct_bound(state, target, true);
+    bound < 1000000000 && bound <= target.bound
+}

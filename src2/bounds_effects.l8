@@ -1,0 +1,746 @@
+tag compiler_internal;
+
+// Mutation dependencies and alias obligations for fact invalidation.
+bounds_effect_add(fn: *Function@new, member: *Member@new, root_param: ?*Obj@new): bool {
+    q: ?*BoundsWrite = fn.bounds_writes;
+    while (q != null) {
+        if (q.member == member && q.root_param == root_param) return false;
+        q = q.next
+    }
+    fn.bounds_writes = new BoundsWrite { member: member, root_param: root_param, next: fn.bounds_writes };
+    true
+}
+
+bounds_effect_unknown(fn: *Function): bool {
+    if (fn.bounds_unknown_write) return false;
+    fn.bounds_unknown_write = true;
+    true
+}
+
+bounds_effect_inits(sites: *BoundsEffectSites@new, fn: *Function@new, inits: ?*FieldInit): bool {
+    changed: bool = false;
+    q: ?*FieldInit = inits;
+    while (q != null) {
+        if (bounds_effect_expr(sites, fn, q.lhs)) changed = true;
+        q = q.next
+    }
+    changed
+}
+
+bounds_effect_exprs(sites: *BoundsEffectSites@new, fn: *Function@new, exprs: ?*Expr): bool {
+    changed: bool = false;
+    q: ?*Expr = exprs;
+    while (q != null) {
+        if (bounds_effect_expr(sites, fn, q)) changed = true;
+        q = q.next
+    }
+    changed
+}
+
+bounds_effect_two(
+    sites: *BoundsEffectSites@new,
+    fn: *Function@new,
+    a: ?*Expr,
+    b: ?*Expr
+): bool {
+    x: bool = bounds_effect_expr(sites, fn, a);
+    y: bool = bounds_effect_expr(sites, fn, b);
+    x || y
+}
+
+bounds_effect_expr(sites: *BoundsEffectSites@new, fn: *Function@new, e: ?*Expr): bool {
+    if (e == null) return false;
+    n: *Expr = e;
+    match n.kind {
+        Assign k -> {
+            changed: bool = bounds_effect_expr(sites, fn, k.rhs);
+            if (bounds_effect_expr(sites, fn, k.lhs)) changed = true;
+            match k.lhs.kind {
+                MemberAccess field -> {
+                    m: ?*Member = field.member;
+                    if (m == null) return bounds_effect_unknown(fn);
+                    root: ?*Obj = bounds_var(field.lhs);
+                    if (root != null && !bounds_param(fn, root)) root = null;
+                    if (bounds_effect_add(fn, m, root)) changed = true
+                }
+                Var v -> {
+                    o: ?*Obj = v.var;
+                    if (o == null) return bounds_effect_unknown(fn);
+                    if (!o.is_local) return bounds_effect_unknown(fn)
+                }
+                Index _ -> { }
+                _ -> return bounds_effect_unknown(fn)
+            }
+            changed
+        }
+        Funcall k -> {
+            changed: bool = bounds_effect_expr(sites, fn, k.target);
+            if (bounds_effect_exprs(sites, fn, k.args)) changed = true;
+            if (streq(k.funcname, "len") || streq(k.funcname, "sizeof") || streq(k.funcname,
+                "check_index")) return changed;
+            callee: ?*Function = k.fn;
+            if (callee == null) return bounds_effect_unknown(fn);
+            bounds_effect_site(sites, fn, callee, k.args);
+            changed
+        }
+        Binary k -> bounds_effect_two(sites, fn, k.lhs, k.rhs);
+        LogAnd k -> bounds_effect_two(sites, fn, k.lhs, k.rhs);
+        LogOr k -> bounds_effect_two(sites, fn, k.lhs, k.rhs);
+        OrElse k -> bounds_effect_two(sites, fn, k.lhs, k.rhs);
+        Index k -> bounds_effect_two(sites, fn, k.lhs, k.idx);
+        Not k -> bounds_effect_expr(sites, fn, k.lhs);
+        Neg k -> bounds_effect_expr(sites, fn, k.lhs);
+        BitNot k -> bounds_effect_expr(sites, fn, k.lhs);
+        Addr k -> bounds_effect_expr(sites, fn, k.lhs);
+        Deref k -> bounds_effect_expr(sites, fn, k.lhs);
+        MemberAccess k -> bounds_effect_expr(sites, fn, k.lhs);
+        As k -> bounds_effect_expr(sites, fn, k.lhs);
+        Trunc k -> bounds_effect_expr(sites, fn, k.lhs);
+        New k -> {
+            changed: bool = bounds_effect_two(sites, fn, k.lhs, k.fill);
+            if (bounds_effect_inits(sites, fn, k.inits)) changed = true;
+            changed
+        }
+        StructLit k -> bounds_effect_inits(sites, fn, k.inits);
+        VariantLit k -> bounds_effect_inits(sites, fn, k.inits);
+        ArrayLit k -> bounds_effect_exprs(sites, fn, k.elems);
+        If k -> {
+            changed: bool = bounds_effect_expr(sites, fn, k.cond);
+            if (bounds_effect_two(sites, fn, k.then, k.els)) changed = true;
+            changed
+        }
+        Block k -> bounds_effect_stmts(sites, fn, k.body);
+        Match k -> {
+            changed: bool = bounds_effect_expr(sites, fn, k.cond);
+            q: ?*MatchArm = k.arms;
+            while (q != null) {
+                if (bounds_effect_stmt(sites, fn, q.body)) changed = true;
+                q = q.next
+            }
+            changed
+        }
+        Sizeof k -> bounds_effect_expr(sites, fn, k.e);
+        _ -> false
+    }
+}
+
+bounds_effect_stmt(sites: *BoundsEffectSites@new, fn: *Function@new, s: ?*Stmt): bool {
+    if (s == null) return false;
+    n: *Stmt = s;
+    match n.kind {
+        ExprStmt k -> bounds_effect_expr(sites, fn, k.lhs);
+        Decl k -> bounds_effect_expr(sites, fn, k.init);
+        Return k -> bounds_effect_expr(sites, fn, k.lhs);
+        Raise k -> bounds_effect_inits(sites, fn, k.inits);
+        Block k -> bounds_effect_stmts(sites, fn, k.body);
+        Region k -> bounds_effect_stmt(sites, fn, k.body);
+        If k -> {
+            changed: bool = bounds_effect_expr(sites, fn, k.cond);
+            if (bounds_effect_stmt(sites, fn, k.then)) changed = true;
+            if (bounds_effect_stmt(sites, fn, k.els)) changed = true;
+            changed
+        }
+        While k -> {
+            changed: bool = bounds_effect_expr(sites, fn, k.cond);
+            if (bounds_effect_stmt(sites, fn, k.body)) changed = true;
+            changed
+        }
+        For k -> {
+            changed: bool = bounds_effect_two(sites, fn, k.iter, k.hi);
+            if (bounds_effect_stmt(sites, fn, k.body)) changed = true;
+            changed
+        }
+        Match k -> {
+            changed: bool = bounds_effect_expr(sites, fn, k.cond);
+            q: ?*MatchArm = k.arms;
+            while (q != null) {
+                if (bounds_effect_stmt(sites, fn, q.body)) changed = true;
+                q = q.next
+            }
+            changed
+        }
+        Try k -> {
+            changed: bool = bounds_effect_stmt(sites, fn, k.body);
+            q: ?*CatchArm = k.arms;
+            while (q != null) {
+                if (bounds_effect_stmt(sites, fn, q.body)) changed = true;
+                q = q.next
+            }
+            changed
+        }
+        _ -> false
+    }
+}
+
+bounds_effect_stmts(sites: *BoundsEffectSites@new, fn: *Function@new, s: ?*Stmt): bool {
+    changed: bool = false;
+    q: ?*Stmt = s;
+    while (q != null) {
+        if (bounds_effect_stmt(sites, fn, q)) changed = true;
+        q = q.next
+    }
+    changed
+}
+
+bounds_effect_has(fn: *Function, member: *Member): bool {
+    q: ?*BoundsWrite = fn.bounds_writes;
+    while (q != null) {
+        if (q.member == member) return true;
+        q = q.next
+    }
+    false
+}
+
+bounds_effect_preserves_term(fn: *Function, e: *Expr): bool {
+    if (fn.bounds_unknown_write) return false;
+    match e.kind {
+        Num _ -> true;
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) return false;
+            v.is_local && !v.bounds_addr_taken
+        }
+        MemberAccess k -> {
+            m: ?*Member = k.member;
+            if (m == null || bounds_effect_has(fn, m)) return false;
+            bounds_effect_preserves_term(fn, k.lhs)
+        }
+        Deref k -> bounds_effect_preserves_term(fn, k.lhs);
+        Funcall k -> {
+            if (!streq(k.funcname, "len")) return false;
+            a: ?*Expr = k.args;
+            if (a == null) return false;
+            bounds_effect_preserves_term(fn, a)
+        }
+        _ -> false
+    }
+}
+
+bounds_field_safe_args(args: ?*Expr, root: *Obj, member: *Member): bool {
+    q: ?*Expr = args;
+    while (q != null) {
+        if (!bounds_field_safe_expr(q, root, member)) return false;
+        q = q.next
+    }
+    true
+}
+
+bounds_field_safe_expr(e: ?*Expr, root: *Obj, member: *Member): bool {
+    if (e == null) return true;
+    n: *Expr = e;
+    match n.kind {
+        Num _ -> true;
+        Null -> true;
+        Var _ -> true;
+        Binary k -> bounds_field_safe_expr(k.lhs, root, member) && bounds_field_safe_expr(k.rhs,
+            root, member);
+        Assign k -> {
+            match k.lhs.kind {
+                Var x -> x.var != null && x.var != root && bounds_field_safe_expr(k.rhs,
+                    root, member);
+                Index x -> {
+                    t: ?*Type = k.lhs.ty;
+                    (is_int_width_ty(t) || is_float_ty(t) || is_bool_ty(t)) && bounds_field_array(x.lhs,
+                        root, member) && bounds_field_safe_expr(x.idx, root, member) && bounds_field_safe_expr(k.rhs,
+                        root, member)
+                }
+                _ -> false
+            }
+        }
+        Index k -> bounds_field_safe_expr(k.lhs, root, member) && bounds_field_safe_expr(k.idx,
+            root, member);
+        Not k -> bounds_field_safe_expr(k.lhs, root, member);
+        Neg k -> bounds_field_safe_expr(k.lhs, root, member);
+        BitNot k -> bounds_field_safe_expr(k.lhs, root, member);
+        LogAnd k -> bounds_field_safe_expr(k.lhs, root, member) && bounds_field_safe_expr(k.rhs,
+            root, member);
+        LogOr k -> bounds_field_safe_expr(k.lhs, root, member) && bounds_field_safe_expr(k.rhs,
+            root, member);
+        OrElse k -> bounds_field_safe_expr(k.lhs, root, member) && bounds_field_safe_expr(k.rhs,
+            root, member);
+        Funcall k -> {
+            if (k.target != null || !bounds_field_safe_args(k.args, root, member)) return false;
+            if (streq(k.funcname, "len") || streq(k.funcname, "check_index")) return true;
+            fn: ?*Function = k.fn;
+            if (fn == null) return false;
+            !fn.bounds_unknown_write && !bounds_effect_has(fn, member)
+        }
+        MemberAccess k -> bounds_field_safe_expr(k.lhs, root, member);
+        As k -> bounds_field_safe_expr(k.lhs, root, member);
+        Trunc k -> bounds_field_safe_expr(k.lhs, root, member);
+        _ -> false
+    }
+}
+
+bounds_field_safe_stmt_list(s: ?*Stmt, root: *Obj, member: *Member): bool {
+    q: ?*Stmt = s;
+    while (q != null) {
+        if (!bounds_field_safe_stmt(q, root, member)) return false;
+        q = q.next
+    }
+    true
+}
+
+bounds_field_safe_stmt(s: *Stmt, root: *Obj, member: *Member): bool {
+    match s.kind {
+        ExprStmt k -> bounds_field_safe_expr(k.lhs, root, member);
+        Decl k -> bounds_field_safe_expr(k.init, root, member);
+        Return k -> bounds_field_safe_expr(k.lhs, root, member);
+        Block k -> bounds_field_safe_stmt_list(k.body, root, member);
+        Region k -> bounds_field_safe_stmt(k.body, root, member);
+        If k -> {
+            if (!bounds_field_safe_expr(k.cond, root, member) || !bounds_field_safe_stmt(k.then,
+                root, member)) return false;
+            els: ?*Stmt = k.els;
+            if (els != null && !bounds_field_safe_stmt(els, root, member)) return false;
+            true
+        }
+        Comment _ -> true;
+        _ -> false
+    }
+}
+
+// An earlier assignment to a local does not make it an unstable loop bound.
+// Only writes reachable from the loop body matter. Address-taken locals are
+// excluded by the caller, so an ordinary call cannot change this local.
+bounds_local_stable_expr(e: ?*Expr, local: *Obj): bool {
+    if (e == null) return true;
+    n: *Expr = e;
+    match n.kind {
+        Num _ -> true;
+        Null -> true;
+        Var _ -> true;
+        Binary k -> bounds_local_stable_expr(k.lhs, local) && bounds_local_stable_expr(k.rhs,
+            local);
+        Assign k -> bounds_var(k.lhs) != local && bounds_local_stable_expr(k.lhs,
+            local) && bounds_local_stable_expr(k.rhs, local);
+        Index k -> bounds_local_stable_expr(k.lhs, local) && bounds_local_stable_expr(k.idx,
+            local);
+        Funcall k -> {
+            if (!bounds_local_stable_expr(k.target, local)) return false;
+            a: ?*Expr = k.args;
+            while (a != null) {
+                if (!bounds_local_stable_expr(a, local)) return false;
+                a = a.next
+            }
+            true
+        }
+        MemberAccess k -> bounds_local_stable_expr(k.lhs, local);
+        Deref k -> bounds_local_stable_expr(k.lhs, local);
+        Not k -> bounds_local_stable_expr(k.lhs, local);
+        Neg k -> bounds_local_stable_expr(k.lhs, local);
+        BitNot k -> bounds_local_stable_expr(k.lhs, local);
+        LogAnd k -> bounds_local_stable_expr(k.lhs, local) && bounds_local_stable_expr(k.rhs,
+            local);
+        LogOr k -> bounds_local_stable_expr(k.lhs, local) && bounds_local_stable_expr(k.rhs,
+            local);
+        OrElse k -> bounds_local_stable_expr(k.lhs, local) && bounds_local_stable_expr(k.rhs,
+            local);
+        As k -> bounds_local_stable_expr(k.lhs, local);
+        Trunc k -> bounds_local_stable_expr(k.lhs, local);
+        If k -> bounds_local_stable_expr(k.cond, local) && bounds_local_stable_expr(k.then,
+            local) && bounds_local_stable_expr(k.els, local);
+        Block k -> bounds_local_stable_stmt_list(k.body, local);
+        _ -> false
+    }
+}
+
+bounds_local_stable_stmt_list(s: ?*Stmt, local: *Obj): bool {
+    q: ?*Stmt = s;
+    while (q != null) {
+        if (!bounds_local_stable_stmt(q, local)) return false;
+        q = q.next
+    }
+    true
+}
+
+bounds_local_stable_stmt(s: *Stmt, local: *Obj): bool {
+    match s.kind {
+        ExprStmt k -> bounds_local_stable_expr(k.lhs, local);
+        Decl k -> bounds_local_stable_expr(k.init, local);
+        Return k -> bounds_local_stable_expr(k.lhs, local);
+        Block k -> bounds_local_stable_stmt_list(k.body, local);
+        Region k -> bounds_local_stable_stmt(k.body, local);
+        If k -> {
+            if (!bounds_local_stable_expr(k.cond, local) || !bounds_local_stable_stmt(k.then,
+                local)) return false;
+            els: ?*Stmt = k.els;
+            if (els != null && !bounds_local_stable_stmt(els, local)) return false;
+            true
+        }
+        While k -> bounds_local_stable_expr(k.cond, local) && bounds_local_stable_stmt(k.body,
+            local);
+        For k -> k.item != local && bounds_local_stable_expr(k.iter, local) && bounds_local_stable_expr(k.hi,
+            local) && bounds_local_stable_stmt(k.body, local);
+        Comment _ -> true;
+        _ -> false
+    }
+}
+
+// Visit syntax once. Subsequent propagation processes only call sites whose
+// callee summary changed, including recursive cycles.
+bounds_infer_effects() {
+    count: int = 0;
+    fn: ?*Function = functions;
+    while (fn != null) {
+        fn.bounds_writes = null;
+        fn.bounds_unknown_write = fn.is_extern || fn.body == null;
+        // The SCC numbering is assigned later; borrow its slot for dense IDs.
+        fn.bounds_visit = count;
+        count = count + 1;
+        fn = fn.next
+    }
+    empty: BoundsEffectSite = BoundsEffectSite {
+        caller: null,
+        callee: null,
+        args: null,
+        next: -1
+    };
+    sites: *BoundsEffectSites = new BoundsEffectSites { rows: new BoundsEffectSite[64](empty), count: 0, heads: new int[count](-1) };
+    queue: []?*Function = new ?*Function[count + 1](null);
+    queued: []bool = new bool[count](true);
+    fn = functions;
+    while (fn != null) {
+        if (!fn.is_extern) _changed: bool = bounds_effect_stmts(sites, fn, fn.body);
+        queue[check_index(queue, fn.bounds_visit)] = fn;
+        fn = fn.next
+    }
+    read: int = 0;
+    write: int = count;
+    while (read != write) {
+        callee: ?*Function = queue[check_index(queue, read)];
+        read = read + 1;
+        if (read == len(queue)) read = 0;
+        if (callee != null) {
+            queued[check_index(queued, callee.bounds_visit)] = false;
+            site_id: int = sites.heads[check_index(sites.heads, callee.bounds_visit)];
+            while (site_id >= 0) {
+                site: *BoundsEffectSite = &sites.rows[check_index(sites.rows, site_id)];
+                caller: ?*Function = site.caller;
+                if (caller != null) {
+                    changed: bool = bounds_effect_transfer(caller, callee, site.args);
+                    if (changed && !queued[check_index(queued, caller.bounds_visit)]) {
+                        queue[check_index(queue, write)] = caller;
+                        write = write + 1;
+                        if (write == len(queue)) write = 0;
+                        queued[check_index(queued, caller.bounds_visit)] = true
+                    }
+                }
+                site_id = site.next
+            }
+        }
+    }
+    fn = functions;
+    while (fn != null) {
+        fn.bounds_visit = 0;
+        fn = fn.next
+    }
+}
+
+bounds_effect_site(
+    sites: *BoundsEffectSites@new,
+    caller: *Function,
+    callee: *Function,
+    args: ?*Expr
+) {
+    row: BoundsEffectSite = BoundsEffectSite {
+        caller: caller,
+        callee: callee,
+        args: args,
+        next: sites.heads[check_index(sites.heads, callee.bounds_visit)]
+    };
+    bounds_effect_append(sites, row, callee.bounds_visit)
+}
+
+bounds_effect_append(sites: *BoundsEffectSites@new, row: BoundsEffectSite@new, callee_id: int) {
+    if (sites.count == len(sites.rows)) {
+        rows: []BoundsEffectSite = new BoundsEffectSite[sites.count * 2](row);
+        for i in 0..sites.count rows[check_index(rows, i)] = sites.rows[check_index(sites.rows,
+            i)];
+        sites.rows = rows
+    }
+    sites.rows[check_index(sites.rows, sites.count)] = row;
+    sites.heads[check_index(sites.heads, callee_id)] = sites.count;
+    sites.count = sites.count + 1
+}
+
+bounds_effect_transfer(caller: *Function@new, callee: *Function@new, args: ?*Expr): bool {
+    changed: bool = false;
+    if (callee.bounds_unknown_write && bounds_effect_unknown(caller)) changed = true;
+    write: ?*BoundsWrite = callee.bounds_writes;
+    while (write != null) {
+        root: ?*Obj = null;
+        formal: ?*Obj = write.root_param;
+        if (formal != null) {
+            actual: ?*Expr = bounds_arg_named(callee, args, formal.name);
+            root = bounds_var(actual);
+            if (root != null && !bounds_param(caller, root)) root = null
+        }
+        if (bounds_effect_add(caller, write.member, root)) changed = true;
+        write = write.next
+    }
+    changed
+}
+
+bounds_term_roots_stable(e: *Expr): bool {
+    match e.kind {
+        Num _ -> true;
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) return false;
+            v.is_local && !v.bounds_addr_taken
+        }
+        MemberAccess k -> bounds_term_roots_stable(k.lhs);
+        Deref k -> bounds_term_roots_stable(k.lhs);
+        Funcall k -> {
+            if (!streq(k.funcname, "len")) return false;
+            a: ?*Expr = k.args;
+            if (a == null) return false;
+            bounds_term_roots_stable(a)
+        }
+        _ -> false
+    }
+}
+
+bounds_term_has_member(e: *Expr, member: *Member): bool {
+    match e.kind {
+        MemberAccess k -> k.member == member || bounds_term_has_member(k.lhs, member);
+        Deref k -> bounds_term_has_member(k.lhs, member);
+        Funcall k -> {
+            a: ?*Expr = k.args;
+            if (a == null) return false;
+            bounds_term_has_member(a, member)
+        }
+        _ -> false
+    }
+}
+
+bounds_term_has_any_member(e: *Expr): bool {
+    match e.kind {
+        MemberAccess _ -> true;
+        Deref k -> bounds_term_has_any_member(k.lhs);
+        Funcall k -> {
+            a: ?*Expr = k.args;
+            a != null && bounds_term_has_any_member(a)
+        }
+        _ -> false
+    }
+}
+
+bounds_simple_term_on_root(e: *Expr, root: *Obj): bool {
+    match e.kind {
+        Num _ -> true;
+        Var _ -> true;
+        MemberAccess k -> bounds_var(k.lhs) == root && k.member != null;
+        Funcall k -> {
+            if (!streq(k.funcname, "len")) return false;
+            a: ?*Expr = k.args;
+            if (a == null) return false;
+            match a.kind {
+                MemberAccess field -> bounds_var(field.lhs) == root && field.member != null;
+                _ -> false
+            }
+        }
+        _ -> false
+    }
+}
+
+bounds_simple_relation_root(q: *BoundsRow): int {
+    if (q.kind != BoundsKind.Difference) return -1;
+    root: ?*Obj = q.array;
+    if (root == null || q.index != root) return -1;
+    fn: ?*Function = bounds_current_fn;
+    if (fn == null || !bounds_param(fn, root)) return -1;
+    left: ?*Expr = q.left;
+    right: ?*Expr = q.right;
+    if (left == null || right == null) return -1;
+    if (!bounds_simple_term_on_root(left, root) || !bounds_simple_term_on_root(right,
+        root)) return -1;
+    root.browse_id
+}
+
+bounds_separation_extend(list: ?*BoundsSeparation@new, first: int, second: int): ?*BoundsSeparation@new {
+    if (bounds_separation_contains(list, first, second)) return list;
+    new BoundsSeparation { first: first, second: second, next: list }
+}
+
+bounds_field_array(a: *Expr, root: *Obj, member: *Member): bool {
+    match a.kind {
+        MemberAccess k -> bounds_var(k.lhs) == root && k.member == member;
+        _ -> false
+    }
+}
+
+bounds_kill(f: ?*BoundsState@new, v: *Obj): ?*BoundsState@new {
+    // Assigning a value absent from the state leaves the snapshot intact.
+    // This is common for short-lived locals and avoids copying every fact.
+    scan_position: int = bounds_count(f) - 1;
+    scan: ?*BoundsRow = bounds_row(f, scan_position);
+    found: bool = false;
+    while (scan != null && !found) {
+        if (scan.index == v || scan.array == v) found = true;
+        scan_position = scan_position - 1;
+        scan = bounds_row(f, scan_position)
+    }
+    if (!found) return f;
+    head: ?*BoundsState = null;
+    q_position: int = bounds_count(f) - 1;
+    q: ?*BoundsRow = bounds_row(f, q_position);
+    while (q != null) {
+        if (q.index != v && q.array != v) head = bounds_copy(head, q);
+        q_position = q_position - 1;
+        q = bounds_row(f, q_position)
+    }
+    head
+}
+
+// Without a proven separation, another path with the same member may alias.
+// Keep facts about other members, including those of the same record.
+bounds_kill_member(f: ?*BoundsState@new, member: *Member): ?*BoundsState@new {
+    head: ?*BoundsState = null;
+    q_position: int = bounds_count(f) - 1;
+    q: ?*BoundsRow = bounds_row(f, q_position);
+    while (q != null) {
+        affected: bool = false;
+        left: ?*Expr = q.left;
+        right: ?*Expr = q.right;
+        if (left != null && bounds_term_has_member(left, member)) affected = true;
+        if (right != null && bounds_term_has_member(right, member)) affected = true;
+        if (!affected) head = bounds_copy(head, q);
+        q_position = q_position - 1;
+        q = bounds_row(f, q_position)
+    }
+    head
+}
+
+bounds_kill_record_fields(f: ?*BoundsState@new): ?*BoundsState@new {
+    head: ?*BoundsState = null;
+    q_position: int = bounds_count(f) - 1;
+    q: ?*BoundsRow = bounds_row(f, q_position);
+    while (q != null) {
+        affected: bool = false;
+        left: ?*Expr = q.left;
+        right: ?*Expr = q.right;
+        if (left != null && bounds_term_has_any_member(left)) affected = true;
+        if (right != null && bounds_term_has_any_member(right)) affected = true;
+        if (!affected) head = bounds_copy(head, q);
+        q_position = q_position - 1;
+        q = bounds_row(f, q_position)
+    }
+    head
+}
+
+bounds_flat_record(sd: *StructDef): bool {
+    m: ?*Member = sd.members;
+    while (m != null) {
+        if (!is_int_width_ty(m.ty) && !is_float_ty(m.ty) && !is_bool_ty(m.ty)) return false;
+        m = m.next
+    }
+    true
+}
+
+bounds_term_has_record_member(e: *Expr, sd: *StructDef) raises Error: bool {
+    match e.kind {
+        MemberAccess k -> {
+            owner: ?*StructDef = bounds_record_def(k.lhs.ty);
+            if (owner == sd) return true;
+            bounds_term_has_record_member(k.lhs, sd)
+        }
+        Deref k -> bounds_term_has_record_member(k.lhs, sd);
+        Funcall k -> {
+            a: ?*Expr = k.args;
+            a != null && bounds_term_has_record_member(a, sd)
+        }
+        _ -> false
+    }
+}
+
+// A write to one flat record element can change fields of that record type,
+// but it cannot change the containing array's length or sibling record fields.
+bounds_kill_flat_record_fields(f: ?*BoundsState@new, sd: *StructDef) raises Error: ?*BoundsState@new {
+    head: ?*BoundsState = null;
+    q_position: int = bounds_count(f) - 1;
+    q: ?*BoundsRow = bounds_row(f, q_position);
+    while (q != null) {
+        affected: bool = false;
+        left: ?*Expr = q.left;
+        right: ?*Expr = q.right;
+        if (left != null && bounds_term_has_record_member(left, sd)) affected = true;
+        if (right != null && bounds_term_has_record_member(right, sd)) affected = true;
+        if (!affected) head = bounds_copy(head, q);
+        q_position = q_position - 1;
+        q = bounds_row(f, q_position)
+    }
+    head
+}
+
+bounds_after_call(f: ?*BoundsState@new, callee: ?*Function, args: ?*Expr): ?*BoundsState@new {
+    head: ?*BoundsState = null;
+    q_position: int = bounds_count(f) - 1;
+    q: ?*BoundsRow = bounds_row(f, q_position);
+    while (q != null) {
+        a: ?*Obj = q.array;
+        stable: bool = q.index.is_local && !q.index.bounds_addr_taken;
+        if (a != null) {
+            if (!a.is_local || a.bounds_addr_taken) stable = false
+        }
+        if (q.kind == BoundsKind.Difference) {
+            stable = false;
+            local_left: ?*Expr = q.left;
+            local_right: ?*Expr = q.right;
+            local_values: bool = local_left != null && local_right != null && bounds_term_local_value(local_left) && bounds_term_local_value(local_right);
+            if (local_values) head = bounds_copy(head, q) else if (callee != null) {
+                if (!callee.bounds_unknown_write) {
+                    left: ?*Expr = q.left;
+                    right: ?*Expr = q.right;
+                    if (left != null && right != null) {
+                        stable = bounds_term_roots_stable(left) && bounds_term_roots_stable(right);
+                        sep: ?*BoundsSeparation = q.separation;
+                        root: int = bounds_simple_relation_root(q);
+                        w: ?*BoundsWrite = callee.bounds_writes;
+                        while (w != null && stable) {
+                            if (bounds_term_has_member(left, w.member) || bounds_term_has_member(right,
+                                w.member)) {
+                                formal: ?*Obj = w.root_param;
+                                if (root < 0 || formal == null) stable = false else {
+                                    actual: ?*Expr = bounds_arg_named(callee, args,
+                                        formal.name);
+                                    other: ?*Obj = bounds_var(actual);
+                                    current: ?*Function = bounds_current_fn;
+                                    if (other == null || current == null) stable = false else if (other.browse_id == root || !bounds_param(current,
+                                        other)) stable = false else sep = bounds_separation_extend(sep,
+                                        root, other.browse_id)
+                                }
+                            }
+                            w = w.next
+                        }
+                        if (stable) head = bounds_copy_separation(head, q, sep)
+                    }
+                }
+            }
+        } else {
+            if (stable) head = bounds_copy(head, q)
+        }
+        q_position = q_position - 1;
+        q = bounds_row(f, q_position)
+    }
+    head
+}
+
+// A call cannot rebind a local scalar or slice whose address never escaped.
+// A dereference is memory even when its root happens to be a local pointer.
+bounds_term_local_value(term: *Expr): bool {
+    match term.kind {
+        Num _ -> true;
+        Var k -> {
+            obj: ?*Obj = k.var;
+            if (obj == null) return false;
+            obj.is_local && !obj.bounds_addr_taken
+        }
+        Funcall k -> {
+            arg: ?*Expr = k.args;
+            k.target == null && streq(k.funcname, "len") && arg != null && bounds_term_local_value(arg)
+        }
+        _ -> false
+    }
+}

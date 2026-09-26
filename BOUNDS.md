@@ -177,14 +177,14 @@ only their common bounds. Arithmetic return expressions are summarized only
 when the verifier proves they cannot wrap; a `check_index` proved to fail on a
 guarded path is not counted as a successful return. The projection considers
 every fact at each exit, plus parameter and array-length terms, then retains
-only bounds shared by all successful exits. Difference searches and reported
-offsets remain bounded to keep compilation predictable. It does not yet
+only bounds shared by all successful exits. Difference searches use a bounded work queue, and reported offsets remain
+bounded to keep compilation predictable. It does not yet
 express these guarantees as `index_for` return
 types or verify the spans used by bulk operations.
 
-Difference-constraint searches now run in a reclaimable `region`, so their
-temporary graph nodes and synthesized expressions are discarded after each
-proof. Each function is analyzed under its declared and inferred entry
+Difference-constraint searches run in a reclaimable `region`. Their temporary
+integer tables are discarded after each proof; searches do not construct AST
+expressions or allocate individual graph nodes and edges. Each function is analyzed under its declared and inferred entry
 requirements; the verifier no longer traverses callees separately for each
 caller context.
 
@@ -221,3 +221,104 @@ import. `--apply` removes only successful candidates,
 then runs `./build.sh all`; it restores the original files if that build fails.
 Removing a check may strengthen the function's inferred contract, even when
 all known callers already satisfy it.
+
+
+## Checker architecture
+
+The stage-2 checker is split into a language adapter and a proof engine. The old
+`src2/bounds.l8` has been replaced by these modules:
+
+| Module | Responsibility |
+| --- | --- |
+| `bounds_model.l8` | Shared schemas and named fact kinds |
+| `bounds_terms.l8` | Term identity, arithmetic safety, numeric lowering |
+| `bounds_state.l8` | Indexed fact tables, snapshots, joins, loop widening |
+| `bounds_solver.l8` | Interned terms and difference-constraint work queue |
+| `bounds_effects.l8` | Mutation dependencies, alias obligations, effect propagation |
+| `bounds_contracts.l8` | Entry requirements and caller obligations |
+| `bounds_records.l8` | Record invariant construction and update obligations |
+| `bounds_returns.l8` | Successful-exit projection and return-value application |
+| `bounds_flow.l8` | Expression and statement transfer rules |
+| `bounds_driver.l8` | Call components, inference, and final validation |
+
+Facts occupy contiguous row tables. A state is an immutable prefix of a shared
+append-only buffer. Appending at the newest prefix reuses capacity; extending
+an older branch copies its prefix. Hash buckets index canonical term pairs, so
+a direct proof or join does not scan every fact. Buckets can include newer rows
+from a sibling branch: **every reader must enforce the snapshot's row count**.
+Copied buffers rebuild their indexes from only the copied prefix. Duplicate
+rows do not extend the state.
+
+Numeric facts have one meaning: `left - right <= bound`. Small constants fold
+into the bound on insertion, and strict comparisons subtract one. Every numeric
+row has the same `Difference` kind; only separation, freshness, and cursor
+provenance use other kinds. Numeric lookup, copying, invalidation, and branch
+joins share this representation. Thus a length guard and a
+successful `check_index` can contribute the same fact at a join. Two different
+bounds for the same pair join at the weaker bound. Copying a returned or joined
+integer preserves its relations to other stable values.
+
+Loop back edges use a separate widening operation. Only previous header facts
+that remain valid survive; an increasing sequence of cursor maxima is dropped.
+Each changing iteration removes a header fact, giving finite convergence without
+an arbitrary loop-iteration cap. Guards and declared invariants can still
+establish stronger facts inside the loop body.
+
+The transitive solver interns zero, paths, and lengths into integer IDs using a
+hash table. Its adjacency, targets, weights, distances, and work queue use flat
+arrays. An edge from `right` to `left` has weight `bound`. Every length has an
+implicit edge to zero. Work is bounded by `64 * (nodes + edges + 1)`, capped at
+262,144 edge visits. Exhausting this budget loses possible proofs; every finite
+distance still represents an actual path. Out-of-range distances are discarded
+rather than saturated. Alias-dependent edges stay out of transitive searches
+until the solver can carry their proof obligations.
+
+Effect inference scans each body once, then propagates summaries through a
+reverse call-site table. Only callers of changed summaries reenter the work
+queue. Calls preserve local scalar and slice facts when the local's address has
+not escaped; dereferenced memory and record fields require effect reasoning.
+Contract inference still follows call components, including recursive groups.
+
+To extend the checker, lower a new safe arithmetic or control-flow rule into the
+numeric domain when possible. Add a separate fact kind only for information the
+difference domain cannot represent, such as freshness or cursor provenance.
+Each extension must specify mutation dependencies, branch-join behavior, and
+loop-widening behavior. A new proof must respect machine arithmetic and the
+identity of the values checked; no rule may turn `check_index` into an assumed
+contract.
+
+`tests/compiler/bounds_engine_tables.l8` compares the solver with an independent
+all-pairs reference on 40 feasible generated graphs with negative edges. It also
+checks hash collisions, shared-buffer branch isolation, weaker joins, widening,
+long chains, and bounded handling of a disconnected negative cycle. The ordinary
+bounds fixtures exercise the language adapter and include both accepting and
+rejecting counterparts. The formerly pending equivalent-numeric-join fixture is
+now in the active suite.
+
+For repeatable timing on the same source with two compiler binaries:
+
+```sh
+python3 tools/bench_bounds.py ./l8c3 --baseline /path/to/previous/compiler
+```
+
+The default workload is the unchanged `src1/main.l8`; `--root` selects other
+roots and may be repeated. The tool reports median wall time and summed bounds
+phase time, and fails if either compiler rejects a workload. A seven-run median
+comparison of the simplification against the preceding rewrite measured about
+109 ms versus 96 ms for bounds analysis (189 ms versus 176 ms wall time).
+The simpler shared proof path currently costs about 13% more analysis time on
+this workload. Timings vary with the machine and source revision.
+
+Index accesses, count obligations, guards, and invariant checks use the same
+difference queries. Machine-arithmetic range analysis remains separate: masks,
+products, and overflow checks cannot all be represented by difference edges.
+Joins and widening use pure entailment; proof queries may additionally discharge
+alias-separation obligations and record them in inferred contracts.
+
+The old positive-offset guard shortcut is intentionally removed. The shared
+arithmetic rules may infer a stronger entry contract for a guarded lookahead,
+and some accesses need an explicit `check_index` again. Two HTTP parser accesses
+now use that workaround. `tests/pending/bounds_guarded_positive_offset.l8`
+records a safe short-buffer call accepted by the preceding checker but currently
+rejected. Recover this through general range/no-wrap reasoning rather than a
+separate array-offset fact kind.

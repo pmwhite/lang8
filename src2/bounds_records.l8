@@ -1,0 +1,261 @@
+tag compiler_internal;
+
+// Record invariants are obligations at construction and every field write.
+bounds_record_facts(base: *Expr@new, inits: ?*FieldInit@new, f: ?*BoundsState@new) raises Error: ?*BoundsState@f {
+    q: ?*FieldInit = inits;
+    while (q != null) {
+        member: ?*Member = q.member;
+        value: ?*Expr = q.lhs;
+        if (member != null && value != null) {
+            path: *Expr = new_member_access(base, member.name, member);
+            f = bounds_value_facts(path, value, f)
+        }
+        q = q.next
+    }
+    f
+}
+
+bounds_record_def(t: ?*Type) raises Error: ?*StructDef {
+    if (t == null) return null;
+    ty: *Type = t;
+    if (is_pointer(ty)) ty = type_base(ty);
+    match ty.* {
+        Record k -> k.def;
+        _ -> null
+    }
+}
+
+bounds_invariant_member(sd: *StructDef, v: *Obj): ?*Member@sd {
+    m: ?*Member = sd.members;
+    while (m != null) {
+        if (m.invariant_var == v) return m;
+        m = m.next
+    }
+    null
+}
+
+// Field names in a type invariant are placeholders for paths through the
+// record being checked. Reject globals and expressions outside the small
+// difference-constraint language rather than silently dropping a promise.
+bounds_invariant_map_with(
+    e: *Expr@new,
+    sd: *StructDef@new,
+    base: *Expr@new,
+    changed: ?*Member,
+    value: ?*Expr
+): ?*Expr@new {
+    match e.kind {
+        Num k -> new_num(k.val);
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) return null;
+            m: ?*Member = bounds_invariant_member(sd, v);
+            if (m == null) return null;
+            if (m == changed && value != null) return value;
+            new_member_access(base, m.name, m)
+        }
+        MemberAccess k -> {
+            lhs: ?*Expr = bounds_invariant_map_with(k.lhs, sd, base, changed, value);
+            if (lhs == null) return null;
+            mapped: *Expr = mk_expr(ExprKind.MemberAccess { lhs: lhs, name: k.name, member: k.member });
+            mapped.ty = e.ty;
+            mapped
+        }
+        Funcall k -> {
+            if (!streq(k.funcname, "len") || k.target != null) return null;
+            a: ?*Expr = k.args;
+            if (a == null) return null;
+            if (a.next != null) return null;
+            mapped: ?*Expr = bounds_invariant_map_with(a, sd, base, changed, value);
+            if (mapped == null) return null;
+            bounds_len_term(mapped)
+        }
+        Binary k -> {
+            lhs: ?*Expr = bounds_invariant_map_with(k.lhs, sd, base, changed, value);
+            rhs: ?*Expr = bounds_invariant_map_with(k.rhs, sd, base, changed, value);
+            if (lhs == null || rhs == null) return null;
+            mapped: *Expr = new_binary(k.op, lhs, rhs);
+            mapped.ty = e.ty;
+            mapped
+        }
+        LogAnd k -> {
+            lhs: ?*Expr = bounds_invariant_map_with(k.lhs, sd, base, changed, value);
+            rhs: ?*Expr = bounds_invariant_map_with(k.rhs, sd, base, changed, value);
+            if (lhs == null || rhs == null) return null;
+            mapped: *Expr = mk_expr(ExprKind.LogAnd { lhs: lhs, rhs: rhs });
+            mapped.ty = e.ty;
+            mapped
+        }
+        _ -> null
+    }
+}
+
+bounds_invariant_map(e: *Expr@new, sd: *StructDef@new, base: *Expr@new): ?*Expr@new {
+    bounds_invariant_map_with(e, sd, base, null, null)
+}
+
+bounds_record_invariant_facts(sd: *StructDef@new, base: *Expr@new, f: ?*BoundsState@new): ?*BoundsState@new {
+    inv: ?*Expr = sd.invariant;
+    if (inv == null) return f;
+    mapped: ?*Expr = bounds_invariant_map(inv, sd, base);
+    if (mapped == null) return f;
+    bounds_condition(mapped, true, f)
+}
+
+bounds_record_upper_for_term(whole: *Expr, term: *Expr@new, f: ?*BoundsState) raises Error: bool {
+    match whole.kind {
+        LogAnd k -> bounds_record_upper_for_term(k.lhs, term, f) || bounds_record_upper_for_term(k.rhs,
+            term, f);
+        Binary k -> {
+            if (k.op != BinOp.Le) return false;
+            first: ?*BoundsAffine = bounds_affine(k.lhs, true);
+            second: ?*BoundsAffine = bounds_affine(term, true);
+            if (first == null || second == null) return false;
+            if (first.offset != second.offset || !bounds_same_term(first.base, second.base)) return false;
+            constant: int = bounds_num(k.rhs);
+            if (constant >= 0 && first.offset >= 0) {
+                upper: int = bounds_term_numeric_upper(f, first.base);
+                return upper >= 0 && upper <= constant - first.offset
+            }
+            match k.rhs.kind {
+                Funcall call -> {
+                    a: ?*Expr = call.args;
+                    if (!streq(call.funcname, "len") || a == null) return false;
+                    if (!bounds_difference_proves(f, first.base, bounds_len_term(a),
+                        0 - first.offset)) return false;
+                    bounds_difference_proves(f, new_num(0), first.base, first.offset)
+                }
+                _ -> false
+            }
+        }
+        _ -> false
+    }
+}
+
+bounds_record_invariant_proved_with(e: *Expr, whole: *Expr, f: ?*BoundsState) raises Error: bool {
+    match e.kind {
+        LogAnd k -> bounds_record_invariant_proved_with(k.lhs, whole, f) && bounds_record_invariant_proved_with(k.rhs,
+            whole, f);
+        Binary k -> {
+            if (k.op == BinOp.Le && bounds_num(k.rhs) >= 0) {
+                affine_upper: ?*BoundsAffine = bounds_affine(k.lhs, true);
+                if (affine_upper != null) {
+                    au: *BoundsAffine = affine_upper;
+                    upper: int = bounds_term_numeric_upper(f, au.base);
+                    if (au.offset >= 0 && upper >= 0 && upper <= bounds_num(k.rhs) - au.offset) return true
+                }
+            }
+            if (k.op == BinOp.Le && bounds_num(k.lhs) == 0 && (bounds_term_numeric_lower(f,
+                k.rhs) >= 0 || bounds_difference_proves(f, new_num(0), k.rhs, 0))) return true;
+            if (k.op == BinOp.Le && bounds_num(k.lhs) == 0) {
+                affine: ?*BoundsAffine = bounds_affine(k.rhs, true);
+                if (affine != null) {
+                    if (affine.offset >= 0 && bounds_term_numeric_lower(f, affine.base) >= 0 && bounds_record_upper_for_term(whole,
+                        k.rhs, f)) return true
+                }
+            }
+            if (k.op == BinOp.Le) {
+                match k.rhs.kind {
+                    Funcall call -> {
+                        a: ?*Expr = call.args;
+                        if (streq(call.funcname, "len") && a != null) {
+                            if (bounds_count_fits(a, k.lhs, f)) return true;
+                            return bounds_record_upper_for_term(whole, k.lhs, f)
+                        }
+                    }
+                    _ -> { }
+                }
+            }
+            bounds_invariant_proved(e, f)
+        }
+        _ -> false
+    }
+}
+
+bounds_record_invariant_proved(e: *Expr, f: ?*BoundsState) raises Error: bool {
+    bounds_record_invariant_proved_with(e, e, f)
+}
+
+bounds_record_write_preproved(
+    sd: *StructDef@new,
+    base: *Expr@new,
+    member: *Member,
+    value: *Expr,
+    f: ?*BoundsState@new
+) raises Error: bool {
+    if (!bounds_pure_condition(value)) return false;
+    inv: ?*Expr = sd.invariant;
+    if (inv == null) return false;
+    mapped: ?*Expr = bounds_invariant_map_with(inv, sd, base, member, value);
+    if (mapped == null) return false;
+    bounds_record_invariant_proved(mapped, bounds_record_invariant_facts(sd, base,
+        f))
+}
+
+bounds_verify_record_invariant(
+    sd: *StructDef@new,
+    base: *Expr@new,
+    f: ?*BoundsState@new,
+    file: int,
+    pos: int
+) raises Error: ?*BoundsState@new {
+    inv: ?*Expr = sd.invariant;
+    if (inv == null) return f;
+    mapped: ?*Expr = bounds_invariant_map(inv, sd, base);
+    if (mapped == null) error_at_file(file, pos, "record invariant requires stable field paths and supported comparisons");
+    if (!bounds_infer_mode && !bounds_record_invariant_proved(mapped, f)) error_at_file(file,
+        pos, "record invariant is not proved after construction or field assignment");
+    bounds_condition(mapped, true, f)
+}
+
+bounds_verify_record_constructor(e: *Expr@new, inits: ?*FieldInit@new, f: ?*BoundsState@new) noregion raises Error {
+    sd: ?*StructDef = bounds_record_def(e.ty);
+    if (sd == null) return;
+    if (sd.invariant == null) return;
+    saved_locals: ?*Obj = locals;
+    saved_scope: ?*Obj = scope_locals;
+    temp: *Obj = new_obj(".record-invariant", true);
+    temp.ty = e.ty;
+    base: *Expr = bounds_obj_expr(temp);
+    facts: ?*BoundsState = bounds_record_facts(base, inits, f);
+    _verified: ?*BoundsState = bounds_verify_record_invariant(sd, base, facts, e.file,
+        e.pos);
+    locals = saved_locals;
+    scope_locals = saved_scope
+}
+
+bounds_direct_constructor(fn: ?*Function): ?*Expr {
+    if (fn == null) return null;
+    body: ?*Stmt = fn.body;
+    if (body == null) return null;
+    match body.kind {
+        Block block -> {
+            only: ?*Stmt = block.body;
+            if (only == null) return null;
+            if (only.next != null) return null;
+            match only.kind {
+                ExprStmt item -> {
+                    match item.lhs.kind {
+                        New _ -> item.lhs;
+                        StructLit _ -> item.lhs;
+                        _ -> null
+                    }
+                }
+                Return item -> {
+                    value: ?*Expr = item.lhs;
+                    if (value == null) return null;
+                    match value.kind {
+                        New _ -> value;
+                        StructLit _ -> value;
+                        _ -> null
+                    }
+                }
+                _ -> null
+            }
+        }
+        _ -> null
+    }
+}
+
+// Return facts refer to the callee's exit state. Map parameter paths only
+// when their actual paths keep the same value through the call.

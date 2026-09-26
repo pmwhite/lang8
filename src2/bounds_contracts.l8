@@ -1,0 +1,695 @@
+tag compiler_internal;
+
+// Contract lowering and call obligations. Requirements are verified at callers.
+bounds_param(fn: *Function, obj: *Obj): bool {
+    p: ?*Obj = fn.params;
+    while (p != null) {
+        if (p == obj) return true;
+        p = p.param_next
+    }
+    false
+}
+
+bounds_named_param(fn: *Function, name: []i8): ?*Obj@fn {
+    p: ?*Obj = fn.params;
+    while (p != null) {
+        if (streq(p.name, name)) return p;
+        p = p.param_next
+    }
+    null
+}
+
+bounds_param_id(fn: *Function, id: int): ?*Obj@fn {
+    p: ?*Obj = fn.params;
+    while (p != null) {
+        if (p.browse_id == id) return p;
+        p = p.param_next
+    }
+    null
+}
+
+bounds_separation_contains(list: ?*BoundsSeparation, first: int, second: int): bool {
+    q: ?*BoundsSeparation = list;
+    while (q != null) {
+        if (q.first == first && q.second == second || q.first == second && q.second == first) return true;
+        q = q.next
+    }
+    false
+}
+
+bounds_separation_same(a: ?*BoundsSeparation, b: ?*BoundsSeparation): bool {
+    q: ?*BoundsSeparation = a;
+    while (q != null) {
+        if (!bounds_separation_contains(b, q.first, q.second)) return false;
+        q = q.next
+    }
+    q2: ?*BoundsSeparation = b;
+    while (q2 != null) {
+        if (!bounds_separation_contains(a, q2.first, q2.second)) return false;
+        q2 = q2.next
+    }
+    true
+}
+
+bounds_add_separation(fn: *Function@new, first: int, second: int): bool {
+    if (first == second || bounds_separation_contains(fn.bounds_separations, first,
+        second)) return false;
+    fn.bounds_separations = new BoundsSeparation { first: first, second: second, next: fn.bounds_separations };
+    bounds_infer_changed = true;
+    bounds_input_changed = true;
+    true
+}
+
+bounds_separation_in_facts(f: ?*BoundsState, first: int, second: int): bool {
+    q_position: int = bounds_count(f) - 1;
+    q: ?*BoundsRow = bounds_row(f, q_position);
+    while (q != null) {
+        other: ?*Obj = q.array;
+        if (q.kind == BoundsKind.Separate && other != null) {
+            if (q.index.browse_id == first && other.browse_id == second || q.index.browse_id == second && other.browse_id == first) return true
+        }
+        q_position = q_position - 1;
+        q = bounds_row(f, q_position)
+    }
+    false
+}
+
+bounds_separations_available(list: ?*BoundsSeparation, f: ?*BoundsState): bool {
+    if (bounds_infer_mode) return true;
+    fn: ?*Function = bounds_current_fn;
+    q: ?*BoundsSeparation = list;
+    while (q != null) {
+        if (!bounds_separation_in_facts(f, q.first, q.second)) {
+            if (fn == null) return false;
+            if (!bounds_separation_contains(fn.bounds_separations, q.first, q.second)) return false
+        }
+        q = q.next
+    }
+    true
+}
+
+bounds_note_separations(list: ?*BoundsSeparation, f: ?*BoundsState) {
+    fn: ?*Function = bounds_current_fn;
+    if (fn == null || !bounds_infer_mode) return;
+    q: ?*BoundsSeparation = list;
+    while (q != null) {
+        if (!bounds_separation_in_facts(f, q.first, q.second)) bounds_add_separation(fn,
+            q.first, q.second);
+        q = q.next
+    }
+}
+
+// Infer requirements rooted at a parameter path. An offset index can be
+// passed to callers as two integer inequalities, provided its base is also
+// a parameter path.
+bounds_requirement_root(
+    fn: *Function,
+    a: *Expr,
+    i: *Expr@new,
+    allow_end: bool
+): bool {
+    root: ?*Obj = null;
+    match a.kind {
+        Var _ -> root = bounds_term_root(a);
+        MemberAccess _ -> root = bounds_term_root(a);
+        _ -> return false
+    }
+    if (root == null || !bounds_param(fn, root)) return false;
+    if (bounds_num(i) >= 0 && bounds_num(i) < 536870912) return true;
+    offset: ?*BoundsAffine = bounds_affine(i, true);
+    if (offset != null && !allow_end) {
+        match i.kind {
+            Binary _ -> {
+                base: *Expr = offset.base;
+                match base.kind {
+                    Var k -> {
+                        v: ?*Obj = k.var;
+                        return v != null && bounds_param(fn, v)
+                    }
+                    MemberAccess k -> {
+                        other: ?*Obj = bounds_term_root(base);
+                        return other == root && k.member != null
+                    }
+                    _ -> return false
+                }
+            }
+            _ -> { }
+        }
+    }
+    match i.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) return false;
+            allow_end && bounds_param(fn, v)
+        }
+        MemberAccess k -> {
+            other: ?*Obj = bounds_term_root(i);
+            if (other == root && k.member != null) return true;
+            false
+        }
+        _ -> false
+    }
+}
+
+bounds_same_requirement_index(a: *Expr@new, b: *Expr@new): bool {
+    x: ?*BoundsAffine = bounds_affine(a, true);
+    y: ?*BoundsAffine = bounds_affine(b, true);
+    if (x == null || y == null) return false;
+    x.offset == y.offset && bounds_same_term(x.base, y.base)
+}
+
+bounds_add_requirement(
+    fn: *Function@new,
+    a: *Expr@new,
+    i: *Expr@new,
+    allow_end: bool
+): bool {
+    if (!bounds_requirement_root(fn, a, i, allow_end)) return false;
+    // For a fixed nonnegative index, the largest requirement subsumes the
+    // smaller ones. For a cursor offset, keep only the smallest and largest:
+    // together they establish both sides of every intermediate access.
+    if (!allow_end) {
+        number: int = bounds_num(i);
+        next_affine: ?*BoundsAffine = bounds_affine(i, true);
+        lowest: ?*BoundsRequirement = null;
+        highest: ?*BoundsRequirement = null;
+        low_offset: int = 536870912;
+        high_offset: int = -1;
+        scan: ?*BoundsRequirement = fn.bounds_requirements;
+        while (scan != null) {
+            if (!scan.allow_end && bounds_same_array_expr(scan.array, a)) {
+                old_number: int = bounds_num(scan.index);
+                if (number >= 0 && old_number >= 0) {
+                    if (old_number >= number) return false;
+                    scan.index = i;
+                    bounds_infer_changed = true;
+                    bounds_input_changed = true;
+                    return true
+                }
+                old_affine: ?*BoundsAffine = bounds_affine(scan.index, true);
+                if (number < 0 && next_affine != null && old_affine != null) {
+                    if (next_affine.offset >= 0 && old_affine.offset >= 0 && bounds_same_term(next_affine.base,
+                        old_affine.base)) {
+                        if (old_affine.offset < low_offset) {
+                            low_offset = old_affine.offset;
+                            lowest = scan
+                        }
+                        if (old_affine.offset > high_offset) {
+                            high_offset = old_affine.offset;
+                            highest = scan
+                        }
+                    }
+                }
+            }
+            scan = scan.next
+        }
+        if (lowest != null && highest != null && next_affine != null) {
+            if (next_affine.offset >= low_offset && next_affine.offset <= high_offset) return false;
+            if (lowest != highest) {
+                if (next_affine.offset < low_offset) lowest.index = i else highest.index = i;
+                bounds_infer_changed = true;
+                bounds_input_changed = true;
+                return true
+            }
+        }
+    }
+    q: ?*BoundsRequirement = fn.bounds_requirements;
+    while (q != null) {
+        if (q.allow_end == allow_end && bounds_same_array_expr(q.array, a) && bounds_same_requirement_index(q.index,
+            i)) return false;
+        q = q.next
+    }
+    fn.bounds_requirements = new BoundsRequirement {
+        array: a,
+        index: i,
+        allow_end: allow_end,
+        next: fn.bounds_requirements
+    };
+    bounds_infer_changed = true;
+    bounds_input_changed = true;
+    true
+}
+
+bounds_len_term(a: *Expr@new): *Expr@new {
+    // An actual argument may still link to the following call arguments.
+    // A synthesized len expression must own a single-argument list.
+    arg: *Expr = mk_expr(a.kind);
+    arg.ty = a.ty;
+    mk_expr(ExprKind.Funcall {
+        funcname: "len",
+        args: arg,
+        fn: null,
+        target: null
+    })
+}
+
+bounds_requirement_facts(f: ?*BoundsState@new, r: *BoundsRequirement@new): ?*BoundsState@new {
+    match r.index.kind {
+        Binary _ -> {
+            index: ?*BoundsAffine = bounds_affine(r.index, true);
+            if (index == null) return f;
+            base: *Expr = index.base;
+            length: *Expr = bounds_len_term(r.array);
+            root: ?*Obj = bounds_term_root(base);
+            if (root == null) root = bounds_term_root(length);
+            if (root == null) return f;
+            f = bounds_insert(f, root, bounds_term_root(length), BoundsKind.Difference,
+                0 - index.offset - 1, base, length, null);
+            bounds_insert(f, root, root, BoundsKind.Difference, index.offset, new_num(0),
+                base, null)
+        }
+        _ -> {
+            if (!r.allow_end && bounds_num(r.index) < 0) f = bounds_add_order(f, new_num(0),
+                r.index, false);
+            bounds_add_order(f, r.index, bounds_len_term(r.array), !r.allow_end)
+        }
+    }
+}
+
+bounds_clone_path(e: *Expr@new): ?*Expr@new {
+    match e.kind {
+        Num k -> {
+            copied: *Expr = new_num(k.val);
+            copied.kind = e.kind;
+            copied.ty = e.ty;
+            copied
+        }
+        Var k -> {
+            copied: *Expr = mk_expr(ExprKind.Var { var: k.var, name: k.name, member: k.member });
+            copied.ty = e.ty;
+            copied
+        }
+        MemberAccess k -> {
+            lhs: ?*Expr = bounds_clone_path(k.lhs);
+            if (lhs == null) return null;
+            copied: *Expr = mk_expr(ExprKind.MemberAccess { lhs: lhs, name: k.name, member: k.member });
+            copied.ty = e.ty;
+            copied
+        }
+        _ -> null
+    }
+}
+
+bounds_rebind_term(e: *Expr@new, callee: *Function, args: ?*Expr@new): ?*Expr@new {
+    match e.kind {
+        Num k -> new_num(k.val);
+        Binary k -> {
+            if (k.op != BinOp.Add && k.op != BinOp.Sub) return null;
+            c: int = bounds_num(k.rhs);
+            if (c < 0 || c >= 536870912) return null;
+            lhs: ?*Expr = bounds_rebind_term(k.lhs, callee, args);
+            if (lhs == null) return null;
+            match lhs.kind {
+                Num number -> {
+                    if (number.form == LIT_INT && number.val >= 0 && number.val < 536870912) return new_num(if (k.op == BinOp.Add) number.val + c else number.val - c)
+                }
+                _ -> { }
+            }
+            mapped: *Expr = new_binary(k.op, lhs, new_num(c));
+            mapped.ty = e.ty;
+            mapped
+        }
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null || !bounds_param(callee, v)) return null;
+            actual: ?*Expr = bounds_arg_named(callee, args, v.name);
+            if (actual == null || !bounds_pure_condition(actual)) return null;
+            bounds_clone_path(actual)
+        }
+        MemberAccess k -> {
+            copied: ?*Expr = bounds_rebind_term(k.lhs, callee, args);
+            if (copied == null) return null;
+            mapped: *Expr = mk_expr(ExprKind.MemberAccess { lhs: copied, name: k.name, member: k.member });
+            mapped.ty = e.ty;
+            mapped
+        }
+        Funcall k -> {
+            if (!streq(k.funcname, "len") || k.target != null) return null;
+            a: ?*Expr = k.args;
+            if (a == null) return null;
+            if (a.next != null) return null;
+            mapped: ?*Expr = bounds_rebind_term(a, callee, args);
+            if (mapped == null) return null;
+            bounds_len_term(mapped)
+        }
+        _ -> null
+    }
+}
+
+bounds_precondition_path(e: *Expr, fn: *Function): bool {
+    match e.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            v != null && bounds_param(fn, v)
+        }
+        MemberAccess k -> bounds_precondition_path(k.lhs, fn);
+        _ -> false
+    }
+}
+
+bounds_precondition_term(e: *Expr, fn: *Function): bool {
+    if (!is_int_ty(e.ty)) return false;
+    match e.kind {
+        Num _ -> bounds_num(e) >= 0;
+        Var _ -> bounds_precondition_path(e, fn);
+        MemberAccess _ -> bounds_precondition_path(e, fn);
+        Funcall k -> {
+            if (!streq(k.funcname, "len") || k.target != null) return false;
+            a: ?*Expr = k.args;
+            if (a == null) return false;
+            if (a.next != null) return false;
+            bounds_precondition_path(a, fn)
+        }
+        _ -> false
+    }
+}
+
+bounds_precondition_valid(e: *Expr, fn: *Function): bool {
+    match e.kind {
+        LogAnd k -> bounds_precondition_valid(k.lhs, fn) && bounds_precondition_valid(k.rhs,
+            fn);
+        Binary k -> {
+            if (k.op != BinOp.Lt && k.op != BinOp.Le && k.op != BinOp.Gt && k.op != BinOp.Ge && k.op != BinOp.Eq) return false;
+            bounds_precondition_term(k.lhs, fn) && bounds_precondition_term(k.rhs,
+                fn)
+        }
+        _ -> false
+    }
+}
+
+bounds_rebind_precondition(e: *Expr@new, fn: *Function, args: ?*Expr@new): ?*Expr@new {
+    match e.kind {
+        LogAnd k -> {
+            lhs: ?*Expr = bounds_rebind_precondition(k.lhs, fn, args);
+            rhs: ?*Expr = bounds_rebind_precondition(k.rhs, fn, args);
+            if (lhs == null || rhs == null) return null;
+            mapped: *Expr = mk_expr(ExprKind.LogAnd { lhs: lhs, rhs: rhs });
+            mapped.ty = e.ty;
+            mapped
+        }
+        Binary k -> {
+            lhs: ?*Expr = bounds_rebind_term(k.lhs, fn, args);
+            rhs: ?*Expr = bounds_rebind_term(k.rhs, fn, args);
+            if (lhs == null || rhs == null) return null;
+            mapped: *Expr = new_binary(k.op, lhs, rhs);
+            mapped.ty = e.ty;
+            mapped
+        }
+        _ -> null
+    }
+}
+
+bounds_precondition_proved(e: *Expr, f: ?*BoundsState): bool {
+    match e.kind {
+        LogAnd k -> bounds_precondition_proved(k.lhs, f) && bounds_precondition_proved(k.rhs,
+            f);
+        Binary k -> {
+            if (k.op == BinOp.Lt) return bounds_difference_proves(f, k.lhs, k.rhs,
+                -1);
+            if (k.op == BinOp.Le) return bounds_difference_proves(f, k.lhs, k.rhs,
+                0);
+            if (k.op == BinOp.Gt) return bounds_difference_proves(f, k.rhs, k.lhs,
+                -1);
+            if (k.op == BinOp.Ge) return bounds_difference_proves(f, k.rhs, k.lhs,
+                0);
+            if (k.op == BinOp.Eq) return bounds_difference_proves(f, k.lhs, k.rhs,
+                0) && bounds_difference_proves(f, k.rhs, k.lhs, 0);
+            false
+        }
+        _ -> false
+    }
+}
+
+bounds_infer_requirement(a: *Expr, i: *Expr) {
+    fn: ?*Function = bounds_current_fn;
+    if (fn == null) return;
+    av: ?*Obj = bounds_var(a);
+    iv: ?*Obj = bounds_var(i);
+    if (av == null || iv == null) return;
+    if (!bounds_param(fn, av) || !bounds_param(fn, iv)) return;
+    if (len(iv.index_for_name) != 0) return;
+    iv.index_for_name = av.name;
+    bounds_infer_changed = true;
+    bounds_input_changed = true
+}
+
+// Cursor provenance records an exact offset from the value at
+// function entry (array == the parameter), or from zero (array == null).
+bounds_cursor_origin(f: ?*BoundsState, value: *Obj): ?*BoundsRow@f {
+    q_position: int = bounds_count(f) - 1;
+    q: ?*BoundsRow = bounds_row(f, q_position);
+    while (q != null) {
+        if (q.kind == BoundsKind.Cursor && q.index == value) return q;
+        q_position = q_position - 1;
+        q = bounds_row(f, q_position)
+    }
+    null
+}
+
+// Translate a failed requirement on the current cursor back to an entry
+// requirement. The caller can then prove the entire sequence's capacity.
+bounds_infer_cursor_requirement(a: *Expr@new, i: *Expr@new, f: ?*BoundsState@new): bool {
+    fn: ?*Function = bounds_current_fn;
+    if (fn == null) return false;
+    affine: ?*BoundsAffine = bounds_affine(i, true);
+    if (affine == null) return false;
+    v: ?*Obj = bounds_var(affine.base);
+    if (v == null) return false;
+    origin: ?*BoundsRow = bounds_cursor_origin(f, v);
+    if (origin == null) return false;
+    total: int = origin.value + affine.offset;
+    if (total < 0 || total >= 536870912) return false;
+    source: ?*Obj = origin.array;
+    if (source == null) {
+        if (!bounds_requirement_root(fn, a, new_num(total), false)) return false;
+        _added: bool = bounds_add_requirement(fn, a, new_num(total), false);
+        return true
+    }
+    if (!bounds_param(fn, source)) return false;
+    if (source == v && origin.value == 0) return false;
+    entry: *Expr = new_binary(BinOp.Add, bounds_obj_expr(source), new_num(total));
+    if (!bounds_requirement_root(fn, a, entry, false)) return false;
+    _added2: bool = bounds_add_requirement(fn, a, entry, false);
+    true
+}
+
+bounds_infer_loop_requirement(a: *Expr@new, i: *Expr, f: ?*BoundsState@new) {
+    item: ?*Obj = bounds_var(i);
+    fn: ?*Function = bounds_current_fn;
+    if (item == null || fn == null) return;
+    position: int = bounds_count(f) - 1;
+    while (position >= 0) {
+        row: ?*BoundsRow = bounds_row(f, position);
+        if (row != null) {
+            left: ?*Expr = row.left;
+            right: ?*Expr = row.right;
+            if (row.kind == BoundsKind.Difference && left != null && right != null && bounds_var(left) == item && row.separation == null) {
+                if (row.value == -1 && bounds_add_requirement(fn, a, right, true)) return;
+                if (bounds_num(right) == 0 && row.value >= 0 && row.value < 536870911) {
+                    if (bounds_add_requirement(fn, a, new_num(row.value + 1), true)) return
+                }
+            }
+        }
+        position = position - 1
+    }
+}
+
+bounds_require(
+    a: *Expr@new,
+    i: *Expr@new,
+    f: ?*BoundsState@new,
+    file: int,
+    pos: int
+) raises Error {
+    if (bounds_checked_index(a, i)) return;
+    if (bounds_proves(a, i, f)) return;
+    if (bounds_infer_mode) {
+        if (bounds_infer_cursor_requirement(a, i, f)) return;
+        affine: ?*BoundsAffine = bounds_affine(i, true);
+        if (affine != null) {
+            current: ?*Obj = bounds_var(affine.base);
+            fn0: ?*Function = bounds_current_fn;
+            if (current != null && fn0 != null) {
+                origin0: ?*BoundsRow = bounds_cursor_origin(f, current);
+                entry_value: bool = false;
+                if (origin0 != null) entry_value = origin0.array == current && origin0.value == 0;
+                if (bounds_param(fn0, current) && current.bounds_written && !entry_value) return
+            }
+        }
+        bounds_infer_requirement(a, i);
+        fn: ?*Function = bounds_current_fn;
+        if (fn != null) {
+            // A bounded expression need not be expressible in a caller's
+            // contract: its largest possible value is enough instead.
+            upper: int = bounds_small_upper(i, f);
+            if (upper >= 0 && bounds_pure_condition(i) && bounds_requirement_root(fn,
+                a, new_num(upper), false)) {
+                bounds_add_requirement(fn, a, new_num(upper), false);
+                return
+            }
+            bounds_add_requirement(fn, a, i, false)
+        }
+        bounds_infer_loop_requirement(a, i, f);
+        return
+    }
+    current: ?*Function = bounds_current_fn;
+    entry: ?*Function = find_function("main");
+    if (current != null && current == entry) {
+        array_param: ?*Obj = bounds_var(a);
+        index_param: ?*Obj = bounds_var(i);
+        if (array_param != null && bounds_param(current, array_param)) {
+            if (index_param != null && bounds_param(current, index_param)) error_at_file(file,
+                pos, "main cannot require an index_for argument at entry");
+            if (bounds_num(i) >= 0) error_at_file(file, pos, "main cannot require unproved array bounds at entry")
+        }
+    }
+    error_at_file(file, pos, "array index not proved in bounds (guard it or check_index after binding variables)")
+}
+
+bounds_arg_named(fn: *Function, args: ?*Expr, name: []i8): ?*Expr@args {
+    p: ?*Obj = fn.params;
+    a: ?*Expr = args;
+    while (p != null && a != null) {
+        if (streq(p.name, name)) return a;
+        p = p.param_next;
+        a = a.next
+    }
+    null
+}
+
+bounds_separation_proved(a: *Expr, b: *Expr, f: ?*BoundsState): bool {
+    av: ?*Obj = bounds_var(a);
+    bv: ?*Obj = bounds_var(b);
+    if (av == null || bv == null || av == bv) return false;
+    if (bounds_has(f, av, bv, BoundsKind.Separate) || bounds_has(f, bv, av, BoundsKind.Separate)) return true;
+    ai: int = bounds_fact_value(f, av, BoundsKind.Fresh);
+    bi: int = bounds_fact_value(f, bv, BoundsKind.Fresh);
+    ai >= 0 && bi >= 0 && ai != bi
+}
+
+bounds_infer_caller_separation(a: *Expr, b: *Expr) {
+    fn: ?*Function = bounds_current_fn;
+    if (fn == null) return;
+    av: ?*Obj = bounds_var(a);
+    bv: ?*Obj = bounds_var(b);
+    if (av == null || bv == null || av == bv) return;
+    if (bounds_param(fn, av) && bounds_param(fn, bv)) bounds_add_separation(fn, av.browse_id,
+        bv.browse_id)
+}
+
+bounds_check_call(
+    fn: *Function@new,
+    args: ?*Expr@new,
+    f: ?*BoundsState@new,
+    file: int,
+    pos: int
+) raises Error {
+    p: ?*Obj = fn.params;
+    a: ?*Expr = args;
+    while (p != null && a != null) {
+        if (len(p.index_for_name) != 0) {
+            ar: ?*Expr = bounds_arg_named(fn, args, p.index_for_name);
+            if (ar == null) error_at_file(file, pos, "index_for refers to unknown array parameter");
+            if (!bounds_pure_condition(ar) || !bounds_pure_condition(a)) error_at_file(file,
+                pos, "index_for array and index arguments must be free of side effects (bind them to variables first)");
+            bounds_require(ar, a, f, file, pos)
+        }
+        p = p.param_next;
+        a = a.next
+    }
+    sep: ?*BoundsSeparation = fn.bounds_separations;
+    while (sep != null) {
+        first_param: ?*Obj = bounds_param_id(fn, sep.first);
+        second_param: ?*Obj = bounds_param_id(fn, sep.second);
+        if (first_param == null || second_param == null) error_at_file(file, pos,
+            "internal: separation requirement refers to missing parameter");
+        first_arg: ?*Expr = bounds_arg_named(fn, args, first_param.name);
+        second_arg: ?*Expr = bounds_arg_named(fn, args, second_param.name);
+        if (first_arg == null || second_arg == null) error_at_file(file, pos, "internal: separation requirement refers to missing argument");
+        if (!bounds_separation_proved(first_arg, second_arg, f)) {
+            if (bounds_infer_mode) bounds_infer_caller_separation(first_arg, second_arg) else error_at_file(file,
+                pos, "call requires distinct record arguments for bounds proof")
+        }
+        sep = sep.next
+    }
+    requirement: ?*BoundsRequirement = fn.bounds_requirements;
+    while (requirement != null) {
+        mapped_array: ?*Expr = bounds_rebind_term(requirement.array, fn, args);
+        mapped_index: ?*Expr = bounds_rebind_term(requirement.index, fn, args);
+        if (mapped_array == null || mapped_index == null) error_at_file(file, pos,
+            "bounds requirement arguments must be simple, side-effect-free paths");
+        affine_call: bool = false;
+        match mapped_index.kind {
+            Binary _ -> affine_call = true;
+            _ -> { }
+        }
+        proved: bool = if (requirement.allow_end) bounds_count_fits(mapped_array,
+            mapped_index, f) else if (affine_call) bounds_difference_index(f, mapped_array,
+            mapped_index) else bounds_proves(mapped_array, mapped_index, f);
+        if (!proved) {
+            if (bounds_infer_mode) {
+                caller: ?*Function = bounds_current_fn;
+                translated: bool = false;
+                if (!requirement.allow_end) translated = bounds_infer_cursor_requirement(mapped_array,
+                    mapped_index, f);
+                if (!translated && caller != null) {
+                    base: ?*BoundsAffine = bounds_affine(mapped_index, true);
+                    current: ?*Obj = null;
+                    if (base != null) current = bounds_var(base.base);
+                    skip: bool = false;
+                    if (current != null) {
+                        origin0: ?*BoundsRow = bounds_cursor_origin(f, current);
+                        entry_value: bool = false;
+                        if (origin0 != null) entry_value = origin0.array == current && origin0.value == 0;
+                        skip = bounds_param(caller, current) && current.bounds_written && !entry_value
+                    }
+                    if (!skip) bounds_add_requirement(caller, mapped_array, mapped_index,
+                        requirement.allow_end)
+                }
+            } else error_at_file(file, pos, "call does not prove inferred array bounds requirement")
+        }
+        requirement = requirement.next
+    }
+    precondition: ?*Expr = fn.bounds_precondition;
+    if (precondition != null && !bounds_infer_mode) {
+        mapped: ?*Expr = bounds_rebind_precondition(precondition, fn, args);
+        if (mapped == null) error_at_file(file, pos, "function precondition requires stable argument paths");
+        if (!bounds_precondition_proved(mapped, f)) error_at_file(file, pos, "call does not prove function precondition")
+    }
+}
+
+bounds_initial(fn: *Function@new) raises Error: ?*BoundsState@new {
+    f: ?*BoundsState = null;
+    requirement: ?*BoundsRequirement = fn.bounds_requirements;
+    while (requirement != null) {
+        f = bounds_requirement_facts(f, requirement);
+        requirement = requirement.next
+    }
+    sep: ?*BoundsSeparation = fn.bounds_separations;
+    while (sep != null) {
+        first: ?*Obj = bounds_param_id(fn, sep.first);
+        second: ?*Obj = bounds_param_id(fn, sep.second);
+        if (first == null || second == null) error("internal: separation requirement refers to missing parameter");
+        f = bounds_add(f, first, second, BoundsKind.Separate);
+        sep = sep.next
+    }
+    p: ?*Obj = fn.params;
+    while (p != null) {
+        if (bounds_infer_mode && is_int_ty(p.ty)) f = bounds_add_value(f, p, p, BoundsKind.Cursor,
+            0);
+        if (len(p.index_for_name) != 0) {
+            a: ?*Obj = bounds_named_param(fn, p.index_for_name);
+            if (a == null) error_at_file(p.browse_file, p.browse_pos, "index_for refers to unknown array parameter");
+            ty: ?*Type = a.ty;
+            if (ty == null) error_at_file(p.browse_file, p.browse_pos, "index_for requires an array, slice, or string parameter");
+            if (!is_indexable(ty)) error_at_file(p.browse_file, p.browse_pos, "index_for requires an array, slice, or string parameter");
+            f = bounds_add_order(f, new_num(0), bounds_obj_expr(p), false);
+            f = bounds_add_order(f, bounds_obj_expr(p), bounds_len_term(bounds_obj_expr(a)),
+                true)
+        }
+        p = p.param_next
+    }
+    precondition: ?*Expr = fn.bounds_precondition;
+    if (precondition != null) f = bounds_condition(precondition, true, f);
+    f
+}

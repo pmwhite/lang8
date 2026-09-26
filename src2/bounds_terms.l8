@@ -1,0 +1,592 @@
+tag compiler_internal;
+
+// AST terms and arithmetic lowering. The solver consumes allocation-free views.
+bounds_var(e: ?*Expr): ?*Obj {
+    if (e == null) return null;
+    n: *Expr = e;
+    match n.kind {
+        Var k -> k.var;
+        _ -> null
+    }
+}
+
+bounds_same_array_expr(a: *Expr, b: *Expr): bool {
+    match a.kind {
+        Var x -> {
+            match b.kind {
+                Var y -> x.var != null && x.var == y.var;
+                _ -> false
+            }
+        }
+        MemberAccess x -> {
+            match b.kind {
+                MemberAccess y -> x.member != null && x.member == y.member && bounds_same_array_expr(x.lhs,
+                    y.lhs);
+                _ -> false
+            }
+        }
+        Deref x -> {
+            match b.kind {
+                Deref y -> bounds_same_array_expr(x.lhs, y.lhs);
+                _ -> false
+            }
+        }
+        _ -> false
+    }
+}
+
+// A bounds term is a variable, a chain of named fields, or the length of one.
+bounds_term(e: ?*Expr): bool {
+    if (e == null) return false;
+    n: *Expr = e;
+    match n.kind {
+        Num k -> k.form == LIT_INT;
+        Var k -> k.var != null;
+        MemberAccess k -> bounds_term(k.lhs);
+        Deref k -> bounds_term(k.lhs);
+        Funcall k -> {
+            if (!streq(k.funcname, "len") || k.target != null) return false;
+            a: ?*Expr = k.args;
+            if (a == null) return false;
+            if (a.next != null) return false;
+            bounds_term(a)
+        }
+        _ -> false
+    }
+}
+
+bounds_same_term(a: *Expr, b: *Expr): bool {
+    match a.kind {
+        Num x -> {
+            match b.kind {
+                Num y -> x.form == LIT_INT && y.form == LIT_INT && x.val == y.val;
+                _ -> false
+            }
+        }
+        Funcall x -> {
+            match b.kind {
+                Funcall y -> {
+                    if (!streq(x.funcname, "len") || !streq(y.funcname, "len")) return false;
+                    ax: ?*Expr = x.args;
+                    ay: ?*Expr = y.args;
+                    if (ax == null || ay == null) return false;
+                    bounds_same_array_expr(ax, ay)
+                }
+                _ -> false
+            }
+        }
+        _ -> bounds_same_array_expr(a, b)
+    }
+}
+
+bounds_term_root(e: *Expr): ?*Obj {
+    match e.kind {
+        Var k -> k.var;
+        MemberAccess k -> bounds_term_root(k.lhs);
+        Deref k -> bounds_term_root(k.lhs);
+        Funcall k -> {
+            a: ?*Expr = k.args;
+            if (a == null) return null;
+            bounds_term_root(a)
+        }
+        _ -> null
+    }
+}
+
+bounds_first_member(e: *Expr): ?*Member {
+    match e.kind {
+        MemberAccess k -> {
+            inner: ?*Member = bounds_first_member(k.lhs);
+            if (inner != null) return inner;
+            k.member
+        }
+        Deref k -> bounds_first_member(k.lhs);
+        _ -> null
+    }
+}
+
+bounds_checked_index(a: *Expr, i: *Expr): bool {
+    match i.kind {
+        Funcall k -> {
+            if (!streq(k.funcname, "check_index") || k.target != null) return false;
+            checked_array: ?*Expr = k.args;
+            if (checked_array == null) return false;
+            bounds_same_array_expr(a, checked_array)
+        }
+        _ -> false
+    }
+}
+
+bounds_len_var(e: ?*Expr): ?*Obj {
+    if (e == null) return null;
+    n: *Expr = e;
+    match n.kind {
+        Funcall k -> {
+            if (!streq(k.funcname, "len")) return null;
+            a: ?*Expr = k.args;
+            if (a == null) return null;
+            if (a.next != null) return null;
+            bounds_var(a)
+        }
+        _ -> null
+    }
+}
+
+bounds_num(e: ?*Expr): int {
+    if (e == null) return -999999999;
+    n: *Expr = e;
+    match n.kind {
+        Num k -> {
+            if (k.form == LIT_INT && k.str_label == 0) return k.val;
+            -999999999
+        }
+        _ -> -999999999
+    }
+}
+
+bounds_known_len(e: ?*Expr): int {
+    if (e == null) return -1;
+    n: *Expr = e;
+    t: ?*Type = n.ty;
+    if (t != null && is_array(t)) return array_len(t);
+    match n.kind {
+        Num k -> {
+            if (k.str_label == 0) return -1;
+            lit: ?*StrLit = str_lits;
+            while (lit != null) {
+                if (lit.label == k.str_label - 1) return lit.len;
+                lit = lit.next
+            }
+            -1
+        }
+        ArrayLit k -> {
+            count: int = 0;
+            q: ?*Expr = k.elems;
+            while (q != null) {
+                count = count + 1;
+                q = q.next
+            }
+            count
+        }
+        New k -> bounds_num(k.lhs);
+        _ -> -1
+    }
+}
+
+bounds_term_numeric_lower(f: ?*BoundsState, term: *Expr): int {
+    literal: int = bounds_num(term);
+    if (literal >= 0) return literal;
+    wanted: BoundsNumericView = bounds_numeric_query(new_num(0), term, 0);
+    if (!wanted.valid) return -1;
+    bound: int = bounds_direct_bound(f, wanted, true);
+    if (bound <= 0 && bound > -536870912) return 0 - bound;
+    -1
+}
+
+bounds_term_numeric_upper(f: ?*BoundsState, term: *Expr): int {
+    literal: int = bounds_num(term);
+    if (literal >= 0) return literal;
+    wanted: BoundsNumericView = bounds_numeric_query(term, new_num(0), 536870911);
+    if (!wanted.valid) return -1;
+    bound: int = bounds_direct_bound(f, wanted, true);
+    if (bound >= 0 && bound < 536870912) return bound;
+    -1
+}
+
+bounds_obj_expr(v: *Obj@new): *Expr@new {
+    e: *Expr = mk_expr(ExprKind.Var { var: v, name: v.name, member: null });
+    e.ty = v.ty;
+    e
+}
+
+bounds_ref_zero(): BoundsTermRef {
+    BoundsTermRef {
+        path: null,
+        obj: null,
+        is_len: false,
+        is_zero: true
+    }
+}
+
+bounds_ref_obj(obj: *Obj, length: bool): BoundsTermRef {
+    BoundsTermRef {
+        path: null,
+        obj: obj,
+        is_len: length,
+        is_zero: false
+    }
+}
+
+bounds_ref_expr(e: ?*Expr): BoundsTermRef {
+    if (e != null) {
+        match e.kind {
+            Funcall call -> {
+                arg: ?*Expr = call.args;
+                if (arg != null) {
+                    if (streq(call.funcname, "len") && call.target == null && bounds_term(arg)) return BoundsTermRef {
+                        path: arg,
+                        obj: null,
+                        is_len: true,
+                        is_zero: false
+                    }
+                }
+            }
+            _ -> { }
+        }
+        if (bounds_term(e)) return BoundsTermRef {
+            path: e,
+            obj: null,
+            is_len: false,
+            is_zero: false
+        }
+    }
+    BoundsTermRef {
+        path: null,
+        obj: null,
+        is_len: false,
+        is_zero: false
+    }
+}
+
+bounds_ref_valid(t: BoundsTermRef): bool {
+    t.is_zero || t.path != null || t.obj != null
+}
+
+bounds_ref_same(a: BoundsTermRef, b: BoundsTermRef): bool {
+    if (a.is_zero || b.is_zero) return a.is_zero && b.is_zero;
+    if (a.is_len != b.is_len) return false;
+    if (a.obj != null && b.obj != null) return a.obj == b.obj;
+    ap: ?*Expr = a.path;
+    bp: ?*Expr = b.path;
+    if (ap != null && bp != null) return bounds_same_term(ap, bp);
+    if (a.obj != null && bp != null) return bounds_var(bp) == a.obj;
+    if (b.obj != null && ap != null) return bounds_var(ap) == b.obj;
+    false
+}
+
+bounds_ref_ast(t: BoundsTermRef@new): ?*Expr@new {
+    if (t.is_zero) return new_num(0);
+    path: ?*Expr = t.path;
+    if (path == null) {
+        obj: ?*Obj = t.obj;
+        if (obj == null) return null;
+        path = bounds_obj_expr(obj)
+    }
+    if (t.is_len) return bounds_len_term(path);
+    path
+}
+
+bounds_numeric_query(left_expr: ?*Expr, right_expr: ?*Expr, initial_bound: int): BoundsNumericView {
+    left: BoundsTermRef = bounds_ref_expr(left_expr);
+    right: BoundsTermRef = bounds_ref_expr(right_expr);
+    bound: int = initial_bound;
+    ln: int = bounds_num(left_expr);
+    if (ln > -536870912 && ln < 536870912) {
+        left = bounds_ref_zero();
+        bound = bound - ln
+    }
+    rn: int = bounds_num(right_expr);
+    if (rn > -536870912 && rn < 536870912) {
+        right = bounds_ref_zero();
+        bound = bound + rn
+    }
+    BoundsNumericView {
+        left_path: left.path,
+        left_obj: left.obj,
+        left_len: left.is_len,
+        left_zero: left.is_zero,
+        right_path: right.path,
+        right_obj: right.obj,
+        right_len: right.is_len,
+        right_zero: right.is_zero,
+        bound: bound,
+        separation: null,
+        valid: bounds_ref_valid(left) && bounds_ref_valid(right)
+    }
+}
+
+// Decode the one numeric row kind into the shared query representation.
+// Literal endpoints move into the difference bound without constructing AST.
+bounds_numeric_view(q: *BoundsRow): BoundsNumericView {
+    if (q.kind != BoundsKind.Difference) return bounds_numeric_query(null, null, 0);
+    view: BoundsNumericView = bounds_numeric_query(q.left, q.right, q.value);
+    view.separation = q.separation;
+    view
+}
+
+bounds_view_left(view: BoundsNumericView): BoundsTermRef {
+    BoundsTermRef {
+        path: view.left_path,
+        obj: view.left_obj,
+        is_len: view.left_len,
+        is_zero: view.left_zero
+    }
+}
+
+bounds_view_right(view: BoundsNumericView): BoundsTermRef {
+    BoundsTermRef {
+        path: view.right_path,
+        obj: view.right_obj,
+        is_len: view.right_len,
+        is_zero: view.right_zero
+    }
+}
+
+bounds_numeric_entails(f: ?*BoundsState, target: BoundsNumericView): bool {
+    if (!target.valid) return false;
+    bound: int = bounds_direct_bound(f, target, false);
+    bound < 1000000000 && bound <= target.bound
+}
+
+bounds_affine(e: *Expr@new, query: bool): ?*BoundsAffine@new {
+    if (bounds_term(e)) return new BoundsAffine { base: e, offset: 0 };
+    match e.kind {
+        Binary k -> {
+            lhs_number: int = bounds_num(k.lhs);
+            rhs_number: int = bounds_num(k.rhs);
+            if (lhs_number >= 0 && lhs_number < 536870912 && rhs_number >= 0 && rhs_number < 536870912 && (k.op == BinOp.Add || k.op == BinOp.Sub)) {
+                folded: int = if (k.op == BinOp.Add) lhs_number + rhs_number else lhs_number - rhs_number;
+                if (folded > -536870912 && folded < 536870912) return new BoundsAffine { base: new_num(folded), offset: 0 }
+            }
+            c: int = bounds_num(k.rhs);
+            base: *Expr = k.lhs;
+            if (c < 0 && k.op == BinOp.Add) {
+                c = bounds_num(k.lhs);
+                base = k.rhs
+            }
+            if (c < 0 || c >= 536870912 || !bounds_term(base)) return null;
+            if (k.op != BinOp.Add && k.op != BinOp.Sub) return null;
+            if (!query) {
+                if (k.op != BinOp.Sub) return null;
+                match base.kind {
+                    // len is nonnegative, so subtracting a small positive
+                    // constant cannot overflow a signed int.
+                    Funcall call -> {
+                        if (!streq(call.funcname, "len") || call.target != null) return null
+                    }
+                    _ -> return null
+                }
+            }
+            new BoundsAffine { base: base, offset: if (k.op == BinOp.Add) c else 0 - c }
+        }
+        _ -> null
+    }
+}
+
+// A guard may use a positive offset when a known upper bound on its base
+// proves that evaluating the machine-integer addition cannot wrap.
+bounds_guard_affine(e: *Expr@new, f: ?*BoundsState): ?*BoundsAffine@new {
+    ordinary: ?*BoundsAffine = bounds_affine(e, false);
+    if (ordinary != null) return ordinary;
+    match e.kind {
+        Binary k -> {
+            c: int = bounds_num(k.rhs);
+            if (k.op != BinOp.Add || c < 0 || c >= 536870912 || !bounds_term(k.lhs)) return null;
+            upper: int = bounds_term_numeric_upper(f, k.lhs);
+            if (upper < 0 || upper > 536870911 - c) return null;
+            new BoundsAffine { base: k.lhs, offset: c }
+        }
+        _ -> null
+    }
+}
+
+// Difference rows state left - right <= value.
+bounds_add_difference(
+    f: ?*BoundsState@new,
+    left: *Expr@new,
+    right: *Expr@new,
+    strict: bool
+): ?*BoundsState@new {
+    l: ?*BoundsAffine = bounds_guard_affine(left, f);
+    r: ?*BoundsAffine = bounds_guard_affine(right, f);
+    if (l == null || r == null) return f;
+    root: ?*Obj = bounds_term_root(l.base);
+    if (root == null) root = bounds_term_root(r.base);
+    if (root == null) return f;
+    bounds_insert(f, root, bounds_term_root(r.base), BoundsKind.Difference, r.offset - l.offset - (if (strict) 1 else 0),
+        l.base, r.base, null)
+}
+
+bounds_add_value(
+    f: ?*BoundsState@new,
+    index: *Obj,
+    array: ?*Obj,
+    kind: BoundsKind,
+    value: int
+): *BoundsState@new {
+    bounds_insert(f, index, array, kind, value, null, null, null)
+}
+
+// Source comparisons lower to strict or non-strict numeric rows.
+bounds_add_order(
+    f: ?*BoundsState@new,
+    left: *Expr,
+    right: *Expr,
+    strict: bool
+): ?*BoundsState@new {
+    if (!bounds_term(left) || !bounds_term(right)) return f;
+    root: ?*Obj = bounds_term_root(left);
+    if (root == null) root = bounds_term_root(right);
+    if (root == null) return f;
+    bounds_insert(f, root, bounds_term_root(right), BoundsKind.Difference, if (strict) -1 else 0,
+        left, right, null)
+}
+
+bounds_order(
+    f: ?*BoundsState,
+    left: *Expr,
+    right: *Expr,
+    strict: bool
+): bool {
+    bounds_difference_proves(f, left, right, if (strict) -1 else 0)
+}
+
+bounds_nonnegative_term(f: ?*BoundsState, term: *Expr): bool {
+    bounds_difference_proves(f, new_num(0), term, 0)
+}
+
+bounds_small_upper(e: *Expr, f: ?*BoundsState): int {
+    match e.kind {
+        Num k -> {
+            if (k.str_label == 0 && k.form == LIT_INT && k.val >= 0 && k.val < 536870912) return k.val;
+            -1
+        }
+        Binary k -> {
+            if (k.op == BinOp.And) {
+                left_mask: int = bounds_num(k.lhs);
+                right_mask: int = bounds_num(k.rhs);
+                if (left_mask >= 0 && left_mask < 536870912) return left_mask;
+                if (right_mask >= 0 && right_mask < 536870912) return right_mask;
+                return -1
+            }
+            if (!bounds_pure_condition(e)) return -1;
+            if (k.op == BinOp.Xor) {
+                x: int = bounds_small_upper(k.lhs, f);
+                y: int = bounds_small_upper(k.rhs, f);
+                if (x < 0 || y < 0) return -1;
+                largest: int = if (x > y) x else y;
+                bit_limit: int = 1;
+                while (bit_limit <= largest) bit_limit = bit_limit * 2;
+                return bit_limit - 1
+            }
+            if (k.op == BinOp.Sub) {
+                left_upper: int = bounds_small_upper(k.lhs, f);
+                right_upper: int = bounds_small_upper(k.rhs, f);
+                left_lower: int = bounds_term_numeric_lower(f, k.lhs);
+                right_lower: int = bounds_term_numeric_lower(f, k.rhs);
+                if (left_upper < 0 || right_upper < 0 || left_lower < right_upper || right_lower < 0) return -1;
+                return left_upper - right_lower
+            }
+            if (k.op == BinOp.Div) {
+                divisor: int = bounds_num(k.rhs);
+                numerator: int = bounds_small_upper(k.lhs, f);
+                if (divisor <= 0 || numerator < 0) return -1;
+                return numerator / divisor
+            }
+            if (k.op == BinOp.Add || k.op == BinOp.Mul) {
+                sum_left: int = bounds_small_upper(k.lhs, f);
+                sum_right: int = bounds_small_upper(k.rhs, f);
+                if (sum_left < 0 || sum_right < 0) return -1;
+                if (k.op == BinOp.Add) {
+                    if (sum_left > 536870911 - sum_right) return -1;
+                    return sum_left + sum_right
+                }
+                if (sum_right != 0 && sum_left > 536870911 / sum_right) return -1;
+                return sum_left * sum_right
+            }
+            if (k.op == BinOp.Mod) {
+                modulus: int = bounds_num(k.rhs);
+                if (modulus > 0 && modulus < 536870912 && bounds_nonnegative_term(f,
+                    k.lhs)) return modulus - 1;
+                return -1
+            }
+            if (k.op == BinOp.Shr || k.op == BinOp.Shl) {
+                shift: int = bounds_num(k.rhs);
+                if (shift < 0 || shift > 62) return -1;
+                upper: int = bounds_small_upper(k.lhs, f);
+                if (upper < 0) return -1;
+                if (k.op == BinOp.Shr) return upper >> shift;
+                if (upper > 536870911 >> shift) return -1;
+                return upper << shift
+            }
+            if (k.op == BinOp.Or) {
+                left: int = bounds_small_upper(k.lhs, f);
+                right: int = bounds_small_upper(k.rhs, f);
+                if (left < 0 || right < 0 || left > 536870911 - right) return -1;
+                return left + right
+            }
+            -1
+        }
+        _ -> {
+            if (!bounds_term(e) || !bounds_nonnegative_term(f, e)) return -1;
+            upper2: int = bounds_term_numeric_upper(f, e);
+            if (upper2 >= 0 && upper2 < 536870912) upper2 else -1
+        }
+    }
+}
+
+bounds_difference_index(f: ?*BoundsState, array: *Expr@new, index: *Expr@new): bool {
+    affine: ?*BoundsAffine = bounds_affine(index, true);
+    if (affine == null) return false;
+    // Both mathematical inequalities imply that the computed machine index
+    // is representable, so provisional normalization above is justified.
+    if (!bounds_difference_proves(f, affine.base, bounds_length(array), 0 - affine.offset - 1)) return false;
+    bounds_difference_proves(f, new_num(0), affine.base, affine.offset)
+}
+
+// The range-loop variable is strictly below its stable upper-bound path.
+bounds_add_loop_order(f: ?*BoundsState@new, index: *Obj@new, hi: *Expr): ?*BoundsState@new {
+    bounds_add_order(f, bounds_obj_expr(index), hi, true)
+}
+
+bounds_add(
+    f: ?*BoundsState@new,
+    index: *Obj,
+    array: ?*Obj,
+    kind: BoundsKind
+): *BoundsState@new {
+    bounds_add_value(f, index, array, kind, 0)
+}
+
+bounds_has(
+    f: ?*BoundsState,
+    index: *Obj,
+    array: ?*Obj,
+    kind: BoundsKind
+): bool {
+    wanted: BoundsRow = BoundsRow {
+        index: index,
+        array: array,
+        kind: kind,
+        value: 0,
+        left: null,
+        right: null,
+        separation: null
+    };
+    bounds_has_fact(f, &wanted)
+}
+
+bounds_fact_value(f: ?*BoundsState, index: *Obj, kind: BoundsKind): int {
+    q_position: int = bounds_count(f) - 1;
+    q: ?*BoundsRow = bounds_row(f, q_position);
+    while (q != null) {
+        if (q.index == index && q.kind == kind) return q.value;
+        q_position = q_position - 1;
+        q = bounds_row(f, q_position)
+    }
+    -1
+}
+
+// Known lengths are constants; dynamic lengths retain their value identity.
+bounds_length(array: *Expr@new): *Expr@new {
+    known: int = bounds_known_len(array);
+    if (known >= 0) return new_num(known);
+    bounds_len_term(array)
+}
+
+bounds_length_expr(e: *Expr): bool {
+    match e.kind {
+        Funcall k -> k.target == null && streq(k.funcname, "len");
+        _ -> false
+    }
+}
