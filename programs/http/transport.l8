@@ -45,7 +45,7 @@ type HttpReader = {
     error: int;
     eof: bool;
     deadline: int
-}
+} invariant (0 <= pos && pos <= size && size <= len(data))
 
 tag http
 http_now(): int {
@@ -90,36 +90,44 @@ http_wait(fd: int, events: int, deadline: int): bool {
 tag http
 http_read_byte(r: *HttpReader): int {
     if (r.error != 0 || r.eof) return -1;
-    if (r.pos == r.size) {
-        n: int = -1;
-        while (n < 0) {
-            if (r.network) {
-                if (!http_wait(r.fd, 1, r.deadline)) {
-                    r.error = 408;
-                    return -1
-                }
-                n = l8_recv(r.fd trunc i32, r.data, len(r.data), 64i32);
-                if (n < 0 && n != -4 && n != -11) {
-                    r.error = 400;
-                    return -1
-                }
-            } else {
-                n = read(r.fd, r.data, len(r.data));
-                if (n < 0) {
-                    r.error = 400;
-                    return -1
-                }
+    if (r.pos < r.size) {
+        c: int = r.data[r.pos] as int;
+        r.pos = r.pos + 1;
+        r.consumed = r.consumed + 1;
+        return c
+    }
+    n: int = -1;
+    while (n < 0) {
+        if (r.network) {
+            if (!http_wait(r.fd, 1, r.deadline)) {
+                r.error = 408;
+                return -1
+            }
+            n = l8_recv(r.fd trunc i32, r.data, len(r.data), 64i32);
+            if (n < 0 && n != -4 && n != -11) {
+                r.error = 400;
+                return -1
+            }
+        } else {
+            n = read(r.fd, r.data, len(r.data));
+            if (n < 0) {
+                r.error = 400;
+                return -1
             }
         }
-        if (n == 0) {
-            r.eof = true;
-            return -1
-        }
-        r.size = n;
-        r.pos = 0
     }
-    c: int = r.data[check_index(r.data, r.pos)] as int;
-    r.pos = r.pos + 1;
+    if (n <= 0) {
+        r.eof = true;
+        return -1
+    }
+    if (n > len(r.data)) {
+        r.error = 400;
+        return -1
+    }
+    r.pos = 0;
+    r.size = n;
+    c: int = r.data[0] as int;
+    r.pos = 1;
     r.consumed = r.consumed + 1;
     c
 }
@@ -163,8 +171,7 @@ http_send(r: *HttpReader, data: []i8, n: int): bool {
             r.error = 408;
             return false
         }
-        sent: int = l8_send(r.fd trunc i32, &data[check_index(data, off)], n - off,
-            16448i32); // DONTWAIT | NOSIGNAL
+        sent: int = l8_send(r.fd trunc i32, &data[off], n - off, 16448i32); // DONTWAIT | NOSIGNAL
         if (sent <= 0) {
             if (!(sent == -4 || sent == -11)) {
                 r.error = 400;
@@ -172,11 +179,17 @@ http_send(r: *HttpReader, data: []i8, n: int): bool {
             }
             sent = 0
         }
-        off = off + sent
+        next: int = off + sent;
+        if (next < 0 || next > n) {
+            r.error = 400;
+            return false
+        }
+        off = next
     }
     true
 }
 
 http_send_text(r: *HttpReader, s: str): bool {
-    http_send(r, bytes(s), len(s))
+    data: []i8 = bytes(s);
+    http_send(r, data, len(data))
 }
