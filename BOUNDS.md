@@ -308,6 +308,10 @@ Effect inference scans each body once, then propagates summaries through a
 reverse call-site table. Only callers of changed summaries reenter the work
 queue. Calls preserve local scalar and slice facts when the local's address has
 not escaped; dereferenced memory and record fields require effect reasoning.
+Read-only direct calls with side-effect-free arguments are allowed in proof
+conditions, so a conjunct such as `p < len(s)` survives a character-classifier
+call. Read-only classification requires no unknown, field, or element writes;
+element-write effects propagate through the same call-site work queue.
 Contract inference still follows call components, including recursive groups.
 
 To extend the checker, lower a new safe arithmetic or control-flow rule into the
