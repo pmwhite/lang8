@@ -28,6 +28,37 @@ bounds_param_id(fn: *Function, id: int): ?*Obj@fn {
     null
 }
 
+// A guarded access may need only the lower half of an index contract. Keep
+// that obligation separate from array requirements so callers may pass len(a).
+bounds_add_nonnegative_requirement(fn: *Function@new, term: *Expr): bool {
+    match term.kind {
+        Var _ -> { }
+        _ -> return false
+    }
+    variable: ?*Obj = bounds_var(term);
+    if (variable == null || !bounds_param(fn, variable)) return false;
+    q: ?*BoundsNonnegativeRequirement = fn.bounds_nonnegative_requirements;
+    while (q != null) {
+        if (q.param == variable) return true;
+        q = q.next
+    }
+    fn.bounds_nonnegative_requirements = new BoundsNonnegativeRequirement { param: variable, next: fn.bounds_nonnegative_requirements };
+    bounds_infer_changed = true;
+    bounds_input_changed = true;
+    true
+}
+
+bounds_infer_nonnegative_requirement(a: *Expr@new, i: *Expr, f: ?*BoundsState): bool {
+    fn: ?*Function = bounds_current_fn;
+    if (fn == null || bounds_nonnegative_term(f, i)) return false;
+    match i.kind {
+        Var _ -> { }
+        _ -> return false
+    }
+    if (!bounds_difference_proves(f, i, bounds_length(a), -1)) return false;
+    bounds_add_nonnegative_requirement(fn, i)
+}
+
 bounds_separation_contains(list: ?*BoundsSeparation, first: int, second: int): bool {
     q: ?*BoundsSeparation = list;
     while (q != null) {
@@ -504,6 +535,7 @@ bounds_require(
     if (bounds_checked_index(a, i)) return;
     if (bounds_proves(a, i, f)) return;
     if (bounds_infer_mode) {
+        if (bounds_infer_nonnegative_requirement(a, i, f)) return;
         if (bounds_infer_cursor_requirement(a, i, f)) return;
         affine: ?*BoundsAffine = bounds_affine(i, true);
         if (affine != null) {
@@ -584,6 +616,20 @@ bounds_check_call(
     file: int,
     pos: int
 ) raises Error {
+    nonnegative: ?*BoundsNonnegativeRequirement = fn.bounds_nonnegative_requirements;
+    while (nonnegative != null) {
+        mapped_term: ?*Expr = bounds_arg_named(fn, args, nonnegative.param.name);
+        if (mapped_term == null || !bounds_pure_condition(mapped_term)) error_at_file(file,
+            pos, "nonnegative requirement needs a simple, side-effect-free argument");
+        if (!bounds_nonnegative_term(f, mapped_term)) {
+            if (bounds_infer_mode) {
+                caller: ?*Function = bounds_current_fn;
+                if (caller != null) _added: bool = bounds_add_nonnegative_requirement(caller,
+                    mapped_term)
+            } else error_at_file(file, pos, "call does not prove inferred nonnegative requirement")
+        }
+        nonnegative = nonnegative.next
+    }
     p: ?*Obj = fn.params;
     a: ?*Expr = args;
     while (p != null && a != null) {
@@ -660,6 +706,11 @@ bounds_check_call(
 
 bounds_initial(fn: *Function@new) raises Error: ?*BoundsState@new {
     f: ?*BoundsState = null;
+    nonnegative: ?*BoundsNonnegativeRequirement = fn.bounds_nonnegative_requirements;
+    while (nonnegative != null) {
+        f = bounds_add_order(f, new_num(0), bounds_obj_expr(nonnegative.param), false);
+        nonnegative = nonnegative.next
+    }
     requirement: ?*BoundsRequirement = fn.bounds_requirements;
     while (requirement != null) {
         f = bounds_requirement_facts(f, requirement);
