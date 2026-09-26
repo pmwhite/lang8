@@ -106,8 +106,8 @@ unknown aliases remain conservative. Automatically inferred cross-function
 count/capacity requirements remain future work; the explicit record invariants
 below provide a durable relationship when a type declares one.
 
-Copying a stable integer field into a local also copies its proved inequalities
-to stable paths, so `first = r.count` retains `first <= len(r.items)` when later
+Copying a stable value also copies its proved inequalities and the numeric or
+length properties of its field paths, so `first = r.count` retains `first <= len(r.items)` when later
 calls change `r.count` but preserve `r.items`. Replacing an element of a flat
 record array discards facts about that element's record type while preserving
 facts about unrelated record types and the containing array's length. For
@@ -258,6 +258,37 @@ successful `check_index` can contribute the same fact at a join. Two different
 bounds for the same pair join at the weaker bound. Copying a returned or joined
 integer preserves its relations to other stable values.
 
+Assignments, guards, and scalar returns share affine normalization and the same
+no-wrap proof. A safe `j = i + c` emits the two ordinary difference edges for
+that equality; a self-update shifts existing edges instead of reinterpreting
+the right-hand side with the new value. Symbolic remainder and mask ranges also
+lower to difference edges: a nonnegative remainder is below its positive
+divisor, and masking with a nonnegative value produces a result between zero
+and that value. Inline index proofs use the same symbolic range helper.
+
+Stable copies rebase existing paths onto the destination. Freshness tokens are
+copied with pointer aliases; a write preserves another object's field facts
+only when the actual field owners are proved separate. Different parent
+objects do not imply separate children. Constructor facts retain only constants
+from initializers preceding a possible mutation, since later initializers may
+change the paths used by earlier ones.
+
+Successful-return summaries use the same candidate enumeration, difference
+queries, and call-site transfer for scalars, slice lengths, and numeric or
+length properties of returned records. A stable synthetic result path replaces
+the old direct-constructor shortcut. Result paths are limited to three member
+steps, and summary bounds retain the existing conservative 64-unit limit;
+larger constant lower bounds weaken to 64 and larger upper bounds are omitted.
+Relations such as `len(result) = n` have offset zero and do not limit the actual
+value of `n`.
+
+When a direct branch join loses facts from both predecessors, the solver also
+projects common implications onto at most eight shared terms. It builds each
+predecessor's graph once and reuses each source search for all selected targets.
+This recovers relationships reached through different intermediate variables
+without requiring an unbounded all-pairs closure. The limit affects precision,
+not validity.
+
 Loop back edges use a separate widening operation. Only previous header facts
 that remain valid survive; an increasing sequence of cursor maxima is dropped.
 Each changing iteration removes a header fact, giving finite convergence without
@@ -304,10 +335,12 @@ python3 tools/bench_bounds.py ./l8c3 --baseline /path/to/previous/compiler
 The default workload is the unchanged `src1/main.l8`; `--root` selects other
 roots and may be repeated. The tool reports median wall time and summed bounds
 phase time, and fails if either compiler rejects a workload. A seven-run median
-comparison of the simplification against the preceding rewrite measured about
-109 ms versus 96 ms for bounds analysis (189 ms versus 176 ms wall time).
-The simpler shared proof path currently costs about 13% more analysis time on
-this workload. Timings vary with the machine and source revision.
+comparison of these extensions against `b65d519` on `src1/main.l8` measured
+about 189 ms versus 109 ms for bounds analysis (268 ms versus 188 ms wall time).
+The additional proofs currently increase analysis time by about 73% on this
+workload. The multi-source no-wrap search and bounded join projection keep the
+new work finite, but this remains a performance cost to improve. Timings vary
+with the machine and source revision.
 
 Index accesses, count obligations, guards, and invariant checks use the same
 difference queries. Machine-arithmetic range analysis remains separate: masks,

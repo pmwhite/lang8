@@ -376,18 +376,9 @@ bounds_affine(e: *Expr@new, query: bool): ?*BoundsAffine@new {
 // A guard may use a positive offset when a known upper bound on its base
 // proves that evaluating the machine-integer addition cannot wrap.
 bounds_guard_affine(e: *Expr@new, f: ?*BoundsState): ?*BoundsAffine@new {
-    ordinary: ?*BoundsAffine = bounds_affine(e, false);
-    if (ordinary != null) return ordinary;
-    match e.kind {
-        Binary k -> {
-            c: int = bounds_num(k.rhs);
-            if (k.op != BinOp.Add || c < 0 || c >= 536870912 || !bounds_term(k.lhs)) return null;
-            upper: int = bounds_term_numeric_upper(f, k.lhs);
-            if (upper < 0 || upper > 536870911 - c) return null;
-            new BoundsAffine { base: k.lhs, offset: c }
-        }
-        _ -> null
-    }
+    value: ?*BoundsAffine = bounds_affine(e, true);
+    if (value != null && bounds_affine_safe(value, f)) return value;
+    null
 }
 
 // Difference rows state left - right <= value.
@@ -424,12 +415,7 @@ bounds_add_order(
     right: *Expr,
     strict: bool
 ): ?*BoundsState@new {
-    if (!bounds_term(left) || !bounds_term(right)) return f;
-    root: ?*Obj = bounds_term_root(left);
-    if (root == null) root = bounds_term_root(right);
-    if (root == null) return f;
-    bounds_insert(f, root, bounds_term_root(right), BoundsKind.Difference, if (strict) -1 else 0,
-        left, right, null)
+    bounds_add_relation(f, left, right, if (strict) -1 else 0)
 }
 
 bounds_order(
@@ -589,4 +575,158 @@ bounds_length_expr(e: *Expr): bool {
         Funcall k -> k.target == null && streq(k.funcname, "len");
         _ -> false
     }
+}
+
+// All producers enter the numeric domain through this boundary.
+bounds_add_relation(
+    f: ?*BoundsState@new,
+    left: *Expr,
+    right: *Expr,
+    bound: int
+): ?*BoundsState@new {
+    if (!bounds_term(left) || !bounds_term(right)) return f;
+    root: ?*Obj = bounds_term_root(left);
+    if (root == null) root = bounds_term_root(right);
+    if (root == null) return f;
+    bounds_insert(f, root, bounds_term_root(right), BoundsKind.Difference, bound,
+        left, right, null)
+}
+
+// Affine transfer is valid only for mathematical, non-wrapping evaluation.
+// Length-relative upper bounds avoid needing a small constant array capacity.
+bounds_affine_safe(value: *BoundsAffine, f: ?*BoundsState): bool {
+    if (value.offset == 0) return true;
+    if (value.offset < 0) return bounds_nonnegative_term(f, value.base);
+    upper: int = bounds_term_numeric_upper(f, value.base);
+    if (upper >= 0 && upper <= 536870911 - value.offset) return true;
+    wanted: BoundsTermRef = bounds_ref_expr(value.base);
+    for position in 0..bounds_count(f) {
+        row: ?*BoundsRow = bounds_row(f, position);
+        if (row != null) {
+            edge: BoundsNumericView = bounds_numeric_view(row);
+            left: BoundsTermRef = bounds_view_left(edge);
+            if (edge.valid && edge.right_len && edge.bound <= 0 - value.offset && bounds_ref_same(left,
+                wanted) && bounds_separations_available(edge.separation, f)) {
+                bounds_note_separations(edge.separation, f);
+                return true
+            }
+        }
+    }
+    bounds_below_length(f, value.base, value.offset)
+}
+
+// Symbolic ranges lower to the same edges as ordinary comparisons. A result
+// may be related to a dynamic divisor/mask without inventing a new fact kind.
+bounds_numeric_value(path: *Expr, value: *Expr@new, f: ?*BoundsState@new): ?*BoundsState@f {
+    affine: ?*BoundsAffine = bounds_affine(value, true);
+    if (affine != null) {
+        if (!bounds_same_term(path, affine.base) && bounds_affine_safe(affine, f)) {
+            f = bounds_add_relation(f, path, affine.base, affine.offset);
+            f = bounds_add_relation(f, affine.base, path, 0 - affine.offset)
+        }
+    }
+    upper: ?*BoundsAffine = bounds_symbolic_upper(value, f);
+    if (upper != null) {
+        f = bounds_add_order(f, new_num(0), path, false);
+        f = bounds_add_relation(f, path, upper.base, upper.offset)
+    }
+    f
+}
+
+bounds_expression_nonnegative(value: *Expr@new, f: ?*BoundsState): bool {
+    affine: ?*BoundsAffine = bounds_guard_affine(value, f);
+    affine != null && bounds_affine_lower(affine, f)
+}
+
+bounds_affine_lower(value: *BoundsAffine, f: ?*BoundsState): bool {
+    bounds_difference_proves(f, new_num(0), value.base, value.offset)
+}
+
+// A returned upper bound also certifies that the expression is nonnegative.
+bounds_symbolic_upper(value: *Expr, f: ?*BoundsState): ?*BoundsAffine@new {
+    if (!bounds_pure_condition(value)) return null;
+    match value.kind {
+        Binary k -> {
+            bound: ?*Expr = null;
+            strict: bool = false;
+            if (k.op == BinOp.Mod && bounds_expression_nonnegative(k.lhs, f) && bounds_difference_proves(f,
+                new_num(0), k.rhs, -1)) {
+                bound = k.rhs;
+                strict = true
+            }
+            if (k.op == BinOp.And) {
+                if (bounds_expression_nonnegative(k.rhs, f)) bound = k.rhs else if (bounds_expression_nonnegative(k.lhs,
+                    f)) bound = k.lhs
+            }
+            if (bound != null) {
+                upper: ?*BoundsAffine = bounds_guard_affine(bound, f);
+                if (upper != null) return new BoundsAffine { base: upper.base, offset: upper.offset - (if (strict) 1 else 0) }
+            }
+            null
+        }
+        _ -> null
+    }
+}
+
+// Rebase a stable path after copying a value. This is shared by scalar,
+// slice-length and record-field transfers; it never changes the source AST.
+bounds_rebase_path(term: *Expr@new, source: *Expr, destination: *Expr): *Expr@new {
+    if (bounds_same_term(term, source)) return destination;
+    match term.kind {
+        MemberAccess k -> {
+            base: *Expr = bounds_rebase_path(k.lhs, source, destination);
+            if (base == k.lhs) return term;
+            result: *Expr = mk_expr(ExprKind.MemberAccess { lhs: base, name: k.name, member: k.member });
+            result.ty = term.ty;
+            result
+        }
+        Deref k -> {
+            base: *Expr = bounds_rebase_path(k.lhs, source, destination);
+            if (base == k.lhs) return term;
+            result: *Expr = mk_expr(ExprKind.Deref { lhs: base });
+            result.ty = term.ty;
+            result
+        }
+        Funcall k -> {
+            arg: ?*Expr = k.args;
+            if (!streq(k.funcname, "len") || k.target != null || arg == null) return term;
+            base: *Expr = bounds_rebase_path(arg, source, destination);
+            if (base == arg) return term;
+            bounds_len_term(base)
+        }
+        _ -> term
+    }
+}
+
+bounds_copy_value(f: ?*BoundsState@new, source: *Expr, destination: *Expr): ?*BoundsState@f {
+    if (!bounds_term(source) || bounds_term_root(source) == null || !bounds_term(destination) || bounds_same_term(source,
+        destination)) return f;
+    root: ?*Obj = bounds_term_root(source);
+    original: ?*BoundsState = f;
+    for position in 0..bounds_count(original) {
+        row: ?*BoundsRow = bounds_row(original, position);
+        if (row != null) {
+            if (row.index == root || row.array == root) {
+                left: ?*Expr = row.left;
+                right: ?*Expr = row.right;
+                if (row.kind == BoundsKind.Difference && row.separation == null && left != null && right != null) {
+                    copied_left: *Expr = bounds_rebase_path(left, source, destination);
+                    copied_right: *Expr = bounds_rebase_path(right, source, destination);
+                    if (copied_left != left || copied_right != right) f = bounds_add_relation(f,
+                        copied_left, copied_right, row.value)
+                }
+            }
+        }
+    }
+    from: ?*Obj = bounds_var(source);
+    to: ?*Obj = bounds_var(destination);
+    if (from != null && to != null) {
+        ty: ?*Type = from.ty;
+        if (ty != null && (is_pointer(ty) || is_indexable(ty))) {
+            identity: int = bounds_fact_value(original, from, BoundsKind.Fresh);
+            if (identity >= 0) f = bounds_add_value(f, to, null, BoundsKind.Fresh,
+                identity)
+        }
+    }
+    f
 }

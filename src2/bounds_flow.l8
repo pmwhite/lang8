@@ -1,52 +1,14 @@
 tag compiler_internal;
 
 // AST transfer rules. Branches carry immutable fact-table snapshots.
-bounds_value_facts(path: *Expr@new, value: *Expr, f: ?*BoundsState@new) raises Error: ?*BoundsState@f {
+bounds_value_facts(path: *Expr@new, value: *Expr@new, f: ?*BoundsState@new) raises Error: ?*BoundsState@f {
     local: ?*Obj = bounds_var(path);
-    if (local != null) {
-        if (local.is_local && is_int_ty(local.ty) && bounds_term(value)) {
-            // Copy normalized relations, including return offsets and joined
-            // bounds. Copying a value must not depend on the fact's spelling.
-            original: ?*BoundsState = f;
-            source: BoundsTermRef = bounds_ref_expr(value);
-            position: int = bounds_count(original) - 1;
-            while (position >= 0) {
-                row: ?*BoundsRow = bounds_row(original, position);
-                if (row != null) {
-                    edge: BoundsNumericView = bounds_numeric_at(original, position);
-                    if (edge.valid && edge.separation == null) {
-                        left: BoundsTermRef = bounds_view_left(edge);
-                        right: BoundsTermRef = bounds_view_right(edge);
-                        if (bounds_ref_same(left, source)) {
-                            other: ?*Expr = bounds_ref_ast(right);
-                            if (other != null && bounds_term_root(other) != local) f = bounds_insert(f,
-                                local, bounds_term_root(other), BoundsKind.Difference,
-                                edge.bound, path, other, null)
-                        }
-                        if (bounds_ref_same(right, source)) {
-                            other: ?*Expr = bounds_ref_ast(left);
-                            if (other != null && bounds_term_root(other) != local) f = bounds_insert(f,
-                                local, bounds_term_root(other), BoundsKind.Difference,
-                                edge.bound, other, path, null)
-                        }
-                    }
-                }
-                position = position - 1
-            }
-        }
-    }
-    n: int = bounds_num(value);
+    if (bounds_pure_condition(value)) f = bounds_copy_value(f, value, path);
+    if (is_int_ty(path.ty) && bounds_pure_condition(value)) f = bounds_numeric_value(path,
+        value, f);
     if (local != null && bounds_term(value) && bounds_nonnegative_term(f, value)) f = bounds_add_order(f,
         new_num(0), bounds_obj_expr(local), false);
-    if (n >= 0) {
-        f = bounds_add_order(f, path, new_num(n), false);
-        f = bounds_add_order(f, new_num(n), path, false)
-    }
-    known: int = bounds_known_len(value);
-    if (known >= 0) {
-        f = bounds_add_order(f, new_num(known), bounds_len_term(path), false);
-        f = bounds_add_order(f, bounds_len_term(path), new_num(known), false)
-    }
+    f = bounds_constant_value(path, value, f);
     match value.kind {
         Binary k -> {
             if (k.op == BinOp.And || k.op == BinOp.Shr || k.op == BinOp.Shl || k.op == BinOp.Or || k.op == BinOp.Xor || k.op == BinOp.Mod || k.op == BinOp.Div || k.op == BinOp.Add || k.op == BinOp.Sub || k.op == BinOp.Mul) {
@@ -61,85 +23,27 @@ bounds_value_facts(path: *Expr@new, value: *Expr, f: ?*BoundsState@new) raises E
     }
     match value.kind {
         New k -> {
-            // A completed dynamic allocation has exactly the evaluated count.
-            // Only relate it to a still-stable term: the fill expression must
-            // not write it, and assigning the result must not replace it.
-            destination: ?*Obj = bounds_var(path);
             count: ?*Expr = k.lhs;
             fill: ?*Expr = k.fill;
-            if (destination != null && count != null && fill != null) {
-                stable_count: bool = bounds_term(count) && bounds_term_root(count) != destination;
-                if (!stable_count) {
-                    affine_count: ?*BoundsAffine = bounds_affine(count, true);
-                    if (affine_count != null) {
-                        ac: *BoundsAffine = affine_count;
-                        if (bounds_term(ac.base) && bounds_term_root(ac.base) != destination) {
-                            if (ac.offset < 0) stable_count = bounds_term_numeric_lower(f,
-                                ac.base) >= 0 - ac.offset;
-                            if (ac.offset > 0) stable_count = bounds_difference_proves(f,
-                                new_num(0), ac.base, 0)
-                        }
-                    }
-                }
-                if (destination.is_local && stable_count && bounds_pure_condition(fill)) {
-                    f = bounds_add_order(f, count, bounds_len_term(path), false);
-                    f = bounds_add_order(f, bounds_len_term(path), count, false);
-                    if (!bounds_term(count)) {
-                        affine2: ?*BoundsAffine = bounds_affine(count, true);
-                        if (affine2 != null) {
-                            ac2: *BoundsAffine = affine2;
-                            base_root: ?*Obj = bounds_term_root(ac2.base);
-                            if (base_root != null) {
-                                length: *Expr = bounds_len_term(path);
-                                if (ac2.offset > 0) f = bounds_add_order(f, new_num(ac2.offset),
-                                    length, false);
-                                f = bounds_insert(f, base_root, destination, BoundsKind.Difference,
-                                    0 - ac2.offset, ac2.base, length, null);
-                                f = bounds_insert(f, destination, base_root, BoundsKind.Difference,
-                                    ac2.offset, length, ac2.base, null)
-                            }
-                        }
+            if (count != null && fill != null && bounds_pure_condition(fill)) {
+                affine: ?*BoundsAffine = bounds_affine(count, true);
+                if (affine != null) {
+                    // With a nonnegative base, positive-offset wrap would
+                    // produce a negative allocation size and cannot succeed.
+                    safe: bool = affine.offset == 0 || bounds_affine_safe(affine,
+                        f) || affine.offset > 0 && bounds_nonnegative_term(f, affine.base);
+                    length: *Expr = bounds_len_term(path);
+                    if (safe && !bounds_same_term(length, affine.base)) {
+                        f = bounds_add_relation(f, length, affine.base, affine.offset);
+                        f = bounds_add_relation(f, affine.base, length, 0 - affine.offset)
                     }
                 }
             }
             bounds_record_facts(path, k.inits, f)
         }
         StructLit k -> bounds_record_facts(path, k.inits, f);
-        Funcall k -> {
-            result_var: ?*Obj = bounds_var(path);
-            if (result_var != null) f = bounds_return_apply(result_var, value, f);
-            if (k.target != null) return f;
-            made: ?*Expr = bounds_direct_constructor(k.fn);
-            if (made == null) return f;
-            bounds_value_facts(path, made, f)
-        }
+        Funcall _ -> bounds_return_apply(path, value, f);
         _ -> f
-    }
-}
-
-bounds_inc_preserves_nonnegative(v: *Obj@new, rhs: *Expr, f: ?*BoundsState): bool {
-    if (!bounds_order(f, new_num(0), bounds_obj_expr(v), false)) return false;
-    match rhs.kind {
-        Binary k -> {
-            if (k.op != BinOp.Add || bounds_var(k.lhs) != v || bounds_num(k.rhs) != 1) return false;
-            wanted: BoundsTermRef = bounds_ref_obj(v, false);
-            position: int = bounds_count(f) - 1;
-            while (position >= 0) {
-                row: ?*BoundsRow = bounds_row(f, position);
-                if (row != null) {
-                    edge: BoundsNumericView = bounds_numeric_at(f, position);
-                    left: BoundsTermRef = bounds_view_left(edge);
-                    if (edge.valid && edge.right_len && edge.bound < 0 && bounds_ref_same(left,
-                        wanted) && bounds_separations_available(edge.separation, f)) {
-                        bounds_note_separations(edge.separation, f);
-                        return true
-                    }
-                }
-                position = position - 1
-            }
-            bounds_difference_proves(f, bounds_obj_expr(v), new_num(536870911), 0)
-        }
-        _ -> false
     }
 }
 
@@ -229,6 +133,10 @@ bounds_proves(a: *Expr@new, i: *Expr@new, f: ?*BoundsState): bool {
     // The expression range domain handles masks/products; all array-relative
     // reasoning uses the same difference query as contracts and invariants.
     if (bounds_difference_index(f, a, i)) return true;
+    symbolic: ?*BoundsAffine = bounds_symbolic_upper(i, f);
+    if (symbolic != null) {
+        if (bounds_difference_proves(f, symbolic.base, bounds_length(a), 0 - symbolic.offset - 1)) return true
+    }
     upper: int = bounds_small_upper(i, f);
     upper >= 0 && bounds_difference_proves(f, new_num(upper), bounds_length(a), -1)
 }
@@ -284,7 +192,7 @@ bounds_expr(e: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error: ?*Bounds
                                     member, k.rhs, f)
                             }
                         }
-                        f = bounds_kill_member(f, member);
+                        f = bounds_kill_member(f, member, field.lhs);
                         f = bounds_value_facts(k.lhs, k.rhs, f);
                         if (sd != null) {
                             if (sd.invariant == null) return f;
@@ -315,13 +223,21 @@ bounds_expr(e: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error: ?*Bounds
             rhs_upper: int = -1;
             if (bounds_pure_condition(k.rhs)) rhs_upper = bounds_small_upper(k.rhs,
                 f);
-            keep_nonnegative: bool = rhs_upper >= 0 || bounds_inc_preserves_nonnegative(v,
-                k.rhs, f);
+            keep_nonnegative: bool = rhs_upper >= 0;
             shift: int = bounds_return_self_offset(v, k.rhs);
-            if (shift == 1000000000) f = bounds_kill(f, v) else f = bounds_return_shift(f,
+            arithmetic_shift: bool = false;
+            affine: ?*BoundsAffine = bounds_affine(k.rhs, true);
+            if (affine != null) {
+                if (bounds_var(affine.base) == v && bounds_affine_safe(affine, f)) {
+                    shift = affine.offset;
+                    arithmetic_shift = true
+                }
+            }
+            if (shift == 1000000000) f = bounds_kill(f, v) else f = bounds_shift_value(f,
                 v, shift);
             if (keep_nonnegative) f = bounds_add_order(f, new_num(0), bounds_obj_expr(v),
                 false);
+            if (arithmetic_shift) return f;
             bounds_value_facts(bounds_obj_expr(v), k.rhs, f)
         }
         LogAnd k -> {
@@ -640,4 +556,55 @@ bounds_last_stmt(first: ?*Stmt): ?*Stmt@first {
         q = q.next
     }
     last
+}
+
+// Constants survive intervening effects; state-dependent transfers do not.
+bounds_constant_value(path: *Expr@new, value: *Expr, f: ?*BoundsState@new): ?*BoundsState@f {
+    number: int = bounds_num(value);
+    if (number > -536870912 && number < 536870912) {
+        f = bounds_add_order(f, path, new_num(number), false);
+        f = bounds_add_order(f, new_num(number), path, false)
+    }
+    length: int = bounds_known_len(value);
+    if (length >= 0) {
+        f = bounds_add_order(f, bounds_len_term(path), new_num(length), false);
+        f = bounds_add_order(f, new_num(length), bounds_len_term(path), false)
+    }
+    f
+}
+
+// Allocation can trap, but an allocation with stable inputs cannot mutate
+// a previously evaluated field initializer's paths.
+bounds_value_stable(value: *Expr): bool {
+    if (bounds_pure_condition(value)) return true;
+    match value.kind {
+        New k -> {
+            count: ?*Expr = k.lhs;
+            fill: ?*Expr = k.fill;
+            if (count != null && !bounds_value_stable(count)) return false;
+            if (fill != null && !bounds_value_stable(fill)) return false;
+            bounds_inits_stable(k.inits)
+        }
+        StructLit k -> bounds_inits_stable(k.inits);
+        VariantLit k -> bounds_inits_stable(k.inits);
+        ArrayLit k -> {
+            item: ?*Expr = k.elems;
+            while (item != null) {
+                if (!bounds_value_stable(item)) return false;
+                item = item.next
+            }
+            true
+        }
+        _ -> false
+    }
+}
+
+bounds_inits_stable(inits: ?*FieldInit): bool {
+    item: ?*FieldInit = inits;
+    while (item != null) {
+        value: ?*Expr = item.lhs;
+        if (value != null && !bounds_value_stable(value)) return false;
+        item = item.next
+    }
+    true
 }

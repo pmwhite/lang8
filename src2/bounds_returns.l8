@@ -18,7 +18,7 @@ bounds_return_self_offset(value: *Obj, call: *Expr): int {
             q: ?*BoundsReturnFact = callee.bounds_returns;
             while (q != null) {
                 mapped: ?*Expr = bounds_return_map(q.term, callee, k.args);
-                if (mapped != null && bounds_var(mapped) == value) {
+                if (q.projection == null && mapped != null && bounds_var(mapped) == value) {
                     if (q.result_left) upper = q.bound else lower = q.bound
                 }
                 q = q.next
@@ -30,42 +30,7 @@ bounds_return_self_offset(value: *Obj, call: *Expr): int {
     }
 }
 
-// Rewrite difference edges when a cursor is replaced by its old value plus
-// a proven constant. This is the compact equivalent of an SSA old-value node.
-bounds_return_shift(f: ?*BoundsState@new, value: *Obj, offset: int): ?*BoundsState@new {
-    head: ?*BoundsState = bounds_kill(f, value);
-    q_position: int = bounds_count(f) - 1;
-    q: ?*BoundsRow = bounds_row(f, q_position);
-    while (q != null) {
-        if (q.kind == BoundsKind.Cursor && q.index == value) {
-            next_offset: int = q.value + offset;
-            if (next_offset >= 0 && next_offset < 536870912) head = bounds_add_value(head,
-                value, q.array, BoundsKind.Cursor, next_offset)
-        }
-        edge: BoundsNumericView = bounds_numeric_at(f, q_position);
-        if (edge.valid && edge.separation == null) {
-            left: BoundsTermRef = bounds_view_left(edge);
-            right: BoundsTermRef = bounds_view_right(edge);
-            self: BoundsTermRef = bounds_ref_obj(value, false);
-            left_self: bool = bounds_ref_same(left, self);
-            right_self: bool = bounds_ref_same(right, self);
-            if (left_self != right_self) {
-                weight: int = if (left_self) edge.bound + offset else edge.bound - offset;
-                left_ast: ?*Expr = bounds_ref_ast(left);
-                right_ast: ?*Expr = bounds_ref_ast(right);
-                if (left_ast != null && right_ast != null) head = bounds_insert(head,
-                    value, bounds_term_root(right_ast), BoundsKind.Difference, weight,
-                    left_ast, right_ast, null)
-            }
-        }
-        q_position = q_position - 1;
-        q = bounds_row(f, q_position)
-    }
-    head
-}
-
-bounds_return_apply(value: *Obj@new, call: *Expr, f: ?*BoundsState@new): ?*BoundsState@f {
-    path: *Expr = bounds_obj_expr(value);
+bounds_return_apply(destination: *Expr, call: *Expr, f: ?*BoundsState@new): ?*BoundsState@f {
     match call.kind {
         Funcall k -> {
             callee: ?*Function = k.fn;
@@ -73,14 +38,13 @@ bounds_return_apply(value: *Obj@new, call: *Expr, f: ?*BoundsState@new): ?*Bound
             q: ?*BoundsReturnFact = callee.bounds_returns;
             while (q != null) {
                 mapped: ?*Expr = bounds_return_map(q.term, callee, k.args);
+                path: *Expr = bounds_return_destination(destination, q.projection,
+                    callee.bounds_result);
                 if (mapped != null && bounds_term(mapped) && !bounds_same_term(path,
                     mapped)) {
                     left: *Expr = if (q.result_left) path else mapped;
                     right: *Expr = if (q.result_left) mapped else path;
-                    root: ?*Obj = bounds_term_root(left);
-                    if (root == null) root = bounds_term_root(right);
-                    if (root != null) f = bounds_insert(f, root, bounds_term_root(right),
-                        BoundsKind.Difference, q.bound, left, right, null)
+                    f = bounds_add_relation(f, left, right, q.bound)
                 }
                 q = q.next
             }
@@ -95,7 +59,8 @@ bounds_return_add_candidate(
     fn: *Function,
     value: *BoundsAffine,
     candidate: *Expr@new,
-    f: ?*BoundsState
+    f: ?*BoundsState,
+    projection: ?*Expr@new
 ): ?*BoundsReturnFact@head {
     root: ?*Obj = bounds_term_root(candidate);
     if (root != null) {
@@ -112,40 +77,29 @@ bounds_return_add_candidate(
     }
     q: ?*BoundsReturnFact = head;
     while (q != null) {
-        if (bounds_same_term(q.term, candidate)) return head;
+        if (bounds_same_term(q.term, candidate) && bounds_projection_same(q.projection,
+            projection)) return head;
         q = q.next
     }
     upper: int = bounds_return_bound(f, value.base, candidate);
     lower: int = bounds_return_bound(f, candidate, value.base);
     if (upper != 1000000000) head = new BoundsReturnFact {
+        projection: projection,
         term: candidate,
         result_left: true,
         bound: upper + value.offset,
         next: head
     };
-    if (lower != 1000000000) head = new BoundsReturnFact {
+    trivial_lower: bool = false;
+    if (projection != null) trivial_lower = bounds_length_expr(projection) && bounds_num(candidate) == 0 && lower == 0;
+    if (lower != 1000000000 && !trivial_lower) head = new BoundsReturnFact {
+        projection: projection,
         term: candidate,
         result_left: false,
         bound: lower - value.offset,
         next: head
     };
     head
-}
-
-bounds_return_no_wrap(value: *BoundsAffine, f: ?*BoundsState, fn: *Function@new): bool {
-    if (value.offset == 0) return true;
-    if (value.offset < 0) return bounds_difference_proves(f, new_num(0), value.base,
-        value.offset);
-    p: ?*Obj = fn.params;
-    while (p != null) {
-        ty: ?*Type = p.ty;
-        if (ty != null && (is_array(ty) || is_slice(ty))) {
-            if (bounds_difference_proves(f, value.base, bounds_len_term(bounds_obj_expr(p)),
-                0 - value.offset)) return true
-        }
-        p = p.param_next
-    }
-    false
 }
 
 // A check_index known to be invalid always traps, so its return statement is
@@ -174,40 +128,15 @@ bounds_return_traps(value: ?*Expr, f: ?*BoundsState): bool {
     }
 }
 
-bounds_return_visit(value_expr: ?*Expr@new, f: ?*BoundsState@new) noregion {
+bounds_return_visit(value_expr: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error {
     fn: ?*Function = bounds_current_fn;
     if (fn == null || !bounds_infer_mode) return;
-    if (!is_int_ty(fn.return_ty)) return;
+    scalar: bool = is_int_ty(fn.return_ty);
     current: ?*BoundsReturnFact = null;
-    if (value_expr != null) {
+    if (value_expr != null && scalar) {
         value: ?*BoundsAffine = bounds_affine(value_expr, true);
-        if (value != null && bounds_return_no_wrap(value, f, fn)) {
-            current = bounds_return_add_candidate(current, fn, value, new_num(0),
-                f);
-            p: ?*Obj = fn.params;
-            while (p != null) {
-                current = bounds_return_add_candidate(current, fn, value, bounds_obj_expr(p),
-                    f);
-                ty: ?*Type = p.ty;
-                if (ty != null && is_indexable(ty)) current = bounds_return_add_candidate(current,
-                    fn, value, bounds_len_term(bounds_obj_expr(p)), f);
-                p = p.param_next
-            }
-            // Use every caller-visible path in the exit state as a candidate.
-            // Local facts may help prove a relationship, but cannot themselves
-            // appear in the summary.
-            q_position: int = bounds_count(f) - 1;
-            q: ?*BoundsRow = bounds_row(f, q_position);
-            while (q != null) {
-                left: ?*Expr = q.left;
-                right: ?*Expr = q.right;
-                if (left != null) current = bounds_return_add_candidate(current, fn,
-                    value, left, f);
-                if (right != null) current = bounds_return_add_candidate(current,
-                    fn, value, right, f);
-                q_position = q_position - 1;
-                q = bounds_row(f, q_position)
-            }
+        if (value != null && bounds_affine_safe(value, f)) {
+            current = bounds_return_candidates(current, fn, value, null, f);
             cursor: ?*Obj = bounds_var(value.base);
             if (cursor != null) {
                 origin: ?*BoundsRow = bounds_cursor_origin(f, cursor);
@@ -218,12 +147,14 @@ bounds_return_visit(value_expr: ?*Expr@new, f: ?*BoundsState@new) noregion {
                         if (total >= 0 && total < 536870912) {
                             entry: *Expr = bounds_obj_expr(source);
                             current = new BoundsReturnFact {
+                                projection: null,
                                 term: entry,
                                 result_left: true,
                                 bound: total,
                                 next: current
                             };
                             current = new BoundsReturnFact {
+                                projection: null,
                                 term: entry,
                                 result_left: false,
                                 bound: 0 - total,
@@ -248,12 +179,14 @@ bounds_return_visit(value_expr: ?*Expr@new, f: ?*BoundsState@new) noregion {
                     if (delta != 1000000000 && total >= 0 && total < 536870912) {
                         entry: *Expr = bounds_obj_expr(source);
                         current = new BoundsReturnFact {
+                            projection: null,
                             term: entry,
                             result_left: true,
                             bound: total,
                             next: current
                         };
                         current = new BoundsReturnFact {
+                            projection: null,
                             term: entry,
                             result_left: false,
                             bound: 0 - total,
@@ -266,6 +199,8 @@ bounds_return_visit(value_expr: ?*Expr@new, f: ?*BoundsState@new) noregion {
             }
         }
     }
+    if (value_expr != null && !scalar) current = bounds_return_properties(fn, value_expr,
+        f);
     if (!bounds_return_seen) {
         bounds_return_accum = current;
         bounds_return_seen = true;
@@ -277,9 +212,10 @@ bounds_return_visit(value_expr: ?*Expr@new, f: ?*BoundsState@new) noregion {
         other: ?*BoundsReturnFact = current;
         matched: bool = false;
         while (other != null && !matched) {
-            if (old.result_left == other.result_left && bounds_same_term(old.term,
+            if (bounds_projection_same(old.projection, other.projection) && old.result_left == other.result_left && bounds_same_term(old.term,
                 other.term)) {
                 joined = new BoundsReturnFact {
+                    projection: old.projection,
                     term: old.term,
                     result_left: old.result_left,
                     bound: if (old.bound > other.bound) old.bound else other.bound,
@@ -300,7 +236,7 @@ bounds_return_same(a: ?*BoundsReturnFact, b: ?*BoundsReturnFact): bool {
         found: bool = false;
         q: ?*BoundsReturnFact = b;
         while (q != null) {
-            if (p.result_left == q.result_left && p.bound == q.bound && bounds_same_term(p.term,
+            if (bounds_projection_same(p.projection, q.projection) && p.result_left == q.result_left && p.bound == q.bound && bounds_same_term(p.term,
                 q.term)) found = true;
             q = q.next
         }
@@ -312,7 +248,7 @@ bounds_return_same(a: ?*BoundsReturnFact, b: ?*BoundsReturnFact): bool {
         found2: bool = false;
         p2: ?*BoundsReturnFact = a;
         while (p2 != null) {
-            if (q2.result_left == p2.result_left && q2.bound == p2.bound && bounds_same_term(q2.term,
+            if (bounds_projection_same(q2.projection, p2.projection) && q2.result_left == p2.result_left && q2.bound == p2.bound && bounds_same_term(q2.term,
                 p2.term)) found2 = true;
             p2 = p2.next
         }
@@ -322,7 +258,7 @@ bounds_return_same(a: ?*BoundsReturnFact, b: ?*BoundsReturnFact): bool {
     true
 }
 
-bounds_finish_returns(fn: *Function, out: ?*BoundsState@new) noregion {
+bounds_finish_returns(fn: *Function, out: ?*BoundsState@new) noregion raises Error {
     body: ?*Stmt = fn.body;
     if (body != null) {
         match body.kind {
@@ -362,6 +298,111 @@ bounds_finish_returns(fn: *Function, out: ?*BoundsState@new) noregion {
     fn.bounds_returns = next
 }
 
-// Tarjan's algorithm emits each call group after its dependencies. Contract
-// inference only needs iteration inside a recursive group (or for a function
-// whose newly inferred entry facts change its own return summary).
+// Scalar values, returned lengths and numeric fields use identical summary
+// edges. Only the result-side projection differs.
+bounds_projection_same(a: ?*Expr, b: ?*Expr): bool {
+    if (a != null && b != null) return bounds_same_term(a, b);
+    a == b
+}
+
+bounds_projection_depth(path: *Expr): int {
+    match path.kind {
+        MemberAccess k -> 1 + bounds_projection_depth(k.lhs);
+        Funcall k -> {
+            arg: ?*Expr = k.args;
+            if (arg == null) 100 else bounds_projection_depth(arg)
+        }
+        Var _ -> 0;
+        _ -> 100
+    }
+}
+
+bounds_return_project(
+    head: ?*BoundsReturnFact@new,
+    fn: *Function@new,
+    path: *Expr@new,
+    f: ?*BoundsState@new
+): ?*BoundsReturnFact@head {
+    visited: ?*BoundsReturnFact = head;
+    while (visited != null) {
+        if (bounds_projection_same(visited.projection, path)) return head;
+        visited = visited.next
+    }
+    // A finite projection vocabulary also bounds recursive summary growth.
+    if (bounds_projection_depth(path) > BOUNDS_SUMMARY_DEPTH) return head;
+    if (!bounds_length_expr(path) && !is_int_ty(path.ty)) return head;
+    value: *BoundsAffine = new BoundsAffine { base: path, offset: 0 };
+    bounds_return_candidates(head, fn, value, path, f)
+}
+
+// All result projections use the same caller-visible vocabulary and bounds.
+bounds_return_candidates(
+    head: ?*BoundsReturnFact@new,
+    fn: *Function@new,
+    value: *BoundsAffine,
+    projection: ?*Expr@new,
+    f: ?*BoundsState@new
+): ?*BoundsReturnFact@head {
+    head = bounds_return_add_candidate(head, fn, value, new_num(0), f, projection);
+    param: ?*Obj = fn.params;
+    while (param != null) {
+        head = bounds_return_add_candidate(head, fn, value, bounds_obj_expr(param),
+            f, projection);
+        ty: ?*Type = param.ty;
+        if (ty != null && is_indexable(ty)) head = bounds_return_add_candidate(head,
+            fn, value, bounds_len_term(bounds_obj_expr(param)), f, projection);
+        param = param.param_next
+    }
+    for position in 0..bounds_count(f) {
+        row: ?*BoundsRow = bounds_row(f, position);
+        if (row != null) {
+            left: ?*Expr = row.left;
+            right: ?*Expr = row.right;
+            if (left != null) head = bounds_return_add_candidate(head, fn, value,
+                left, f, projection);
+            if (right != null) head = bounds_return_add_candidate(head, fn, value,
+                right, f, projection)
+        }
+    }
+    head
+}
+
+bounds_return_properties(fn: *Function@new, expression: *Expr@new, f: ?*BoundsState@new) noregion raises Error: ?*BoundsReturnFact {
+    ty: ?*Type = fn.return_ty;
+    if (ty == null) return null;
+    if (!is_indexable(ty) && bounds_record_def(ty) == null) return null;
+    anchor: ?*Obj = fn.bounds_result;
+    if (anchor == null) {
+        saved_locals: ?*Obj = locals;
+        saved_scope: ?*Obj = scope_locals;
+        made: *Obj = new_obj("$bounds_result", true);
+        locals = saved_locals;
+        scope_locals = saved_scope;
+        made.ty = fn.return_ty;
+        fn.bounds_result = made;
+        anchor = made
+    }
+    path: *Expr = bounds_obj_expr(anchor);
+    facts: ?*BoundsState = bounds_value_facts(path, expression, f);
+    head: ?*BoundsReturnFact = null;
+    if (is_indexable(ty)) head = bounds_return_project(head, fn, bounds_len_term(path),
+        facts);
+    for position in 0..bounds_count(facts) {
+        row: ?*BoundsRow = bounds_row(facts, position);
+        if (row != null) {
+            left: ?*Expr = row.left;
+            right: ?*Expr = row.right;
+            if (left != null && bounds_term_root(left) == anchor) head = bounds_return_project(head,
+                fn, left, facts);
+            if (right != null && bounds_term_root(right) == anchor) head = bounds_return_project(head,
+                fn, right, facts)
+        }
+    }
+    head
+}
+
+bounds_return_destination(destination: *Expr, projection: ?*Expr@new, anchor: ?*Obj@new): *Expr@new {
+    if (projection != null && anchor != null) return bounds_rebase_path(projection,
+        bounds_obj_expr(anchor), destination);
+    destination
+}
