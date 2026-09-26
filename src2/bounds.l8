@@ -559,7 +559,17 @@ bounds_require(
         }
         bounds_infer_requirement(a, i);
         fn: ?*Function = bounds_current_fn;
-        if (fn != null) bounds_add_requirement(fn, a, i, false);
+        if (fn != null) {
+            // A bounded expression need not be expressible in a caller's
+            // contract: its largest possible value is enough instead.
+            upper: int = bounds_small_upper(i, f);
+            if (upper >= 0 && bounds_pure_condition(i) && bounds_requirement_root(fn,
+                a, new_num(upper), false)) {
+                bounds_add_requirement(fn, a, new_num(upper), false);
+                return
+            }
+            bounds_add_requirement(fn, a, i, false)
+        }
         bounds_infer_loop_requirement(a, i, f);
         return
     }
@@ -1560,6 +1570,11 @@ bounds_record_upper_for_term(whole: *Expr, term: *Expr@new, f: ?*BoundsFact@new)
             second: ?*BoundsAffine = bounds_affine(term, true);
             if (first == null || second == null) return false;
             if (first.offset != second.offset || !bounds_same_term(first.base, second.base)) return false;
+            constant: int = bounds_num(k.rhs);
+            if (constant >= 0 && first.offset >= 0) {
+                upper: int = bounds_term_numeric_upper(f, first.base);
+                return upper >= 0 && upper <= constant - first.offset
+            }
             match k.rhs.kind {
                 Funcall call -> {
                     a: ?*Expr = call.args;
@@ -1580,6 +1595,14 @@ bounds_record_invariant_proved_with(e: *Expr, whole: *Expr, f: ?*BoundsFact@new)
         LogAnd k -> bounds_record_invariant_proved_with(k.lhs, whole, f) && bounds_record_invariant_proved_with(k.rhs,
             whole, f);
         Binary k -> {
+            if (k.op == BinOp.Le && bounds_num(k.rhs) >= 0) {
+                affine_upper: ?*BoundsAffine = bounds_affine(k.lhs, true);
+                if (affine_upper != null) {
+                    au: *BoundsAffine = affine_upper;
+                    upper: int = bounds_term_numeric_upper(f, au.base);
+                    if (au.offset >= 0 && upper >= 0 && upper <= bounds_num(k.rhs) - au.offset) return true
+                }
+            }
             if (k.op == BinOp.Le && bounds_num(k.lhs) == 0 && (bounds_term_numeric_lower(f,
                 k.rhs) >= 0 || bounds_difference_proves(f, new_num(0), k.rhs, 0))) return true;
             if (k.op == BinOp.Le && bounds_num(k.lhs) == 0) {
@@ -1623,7 +1646,8 @@ bounds_record_write_preproved(
     if (inv == null) return false;
     mapped: ?*Expr = bounds_invariant_map_with(inv, sd, base, member, value);
     if (mapped == null) return false;
-    bounds_record_invariant_proved(mapped, f)
+    bounds_record_invariant_proved(mapped, bounds_record_invariant_facts(sd, base,
+        f))
 }
 
 bounds_verify_record_invariant(
@@ -1846,11 +1870,13 @@ bounds_value_facts(path: *Expr@new, value: *Expr, f: ?*BoundsFact@new) raises Er
         f = bounds_add_order(f, new_num(n), path, 10)
     }
     known: int = bounds_known_len(value);
-    if (known >= 0) f = bounds_add_order(f, new_num(known), bounds_len_term(path),
-        10);
+    if (known >= 0) {
+        f = bounds_add_order(f, new_num(known), bounds_len_term(path), 10);
+        f = bounds_add_order(f, bounds_len_term(path), new_num(known), 10)
+    }
     match value.kind {
         Binary k -> {
-            if (k.op == BinOp.And || k.op == BinOp.Shr || k.op == BinOp.Shl || k.op == BinOp.Or || k.op == BinOp.Mod || k.op == BinOp.Add || k.op == BinOp.Mul) {
+            if (k.op == BinOp.And || k.op == BinOp.Shr || k.op == BinOp.Shl || k.op == BinOp.Or || k.op == BinOp.Xor || k.op == BinOp.Mod || k.op == BinOp.Div || k.op == BinOp.Add || k.op == BinOp.Sub || k.op == BinOp.Mul) {
                 upper: int = bounds_small_upper(value, f);
                 if (upper >= 0) {
                     f = bounds_add_order(f, new_num(0), path, 10);
@@ -1869,9 +1895,54 @@ bounds_value_facts(path: *Expr@new, value: *Expr, f: ?*BoundsFact@new) raises Er
             count: ?*Expr = k.lhs;
             fill: ?*Expr = k.fill;
             if (destination != null && count != null && fill != null) {
-                if (destination.is_local && bounds_term(count) && bounds_term_root(count) != destination && bounds_pure_condition(fill)) {
+                stable_count: bool = bounds_term(count) && bounds_term_root(count) != destination;
+                if (!stable_count) {
+                    affine_count: ?*BoundsAffine = bounds_affine(count, true);
+                    if (affine_count != null) {
+                        ac: *BoundsAffine = affine_count;
+                        if (bounds_term(ac.base) && bounds_term_root(ac.base) != destination) {
+                            if (ac.offset < 0) stable_count = bounds_term_numeric_lower(f,
+                                ac.base) >= 0 - ac.offset;
+                            if (ac.offset > 0) stable_count = bounds_difference_proves(f,
+                                new_num(0), ac.base, 0)
+                        }
+                    }
+                }
+                if (destination.is_local && stable_count && bounds_pure_condition(fill)) {
                     f = bounds_add_order(f, count, bounds_len_term(path), 10);
-                    f = bounds_add_order(f, bounds_len_term(path), count, 10)
+                    f = bounds_add_order(f, bounds_len_term(path), count, 10);
+                    if (!bounds_term(count)) {
+                        affine2: ?*BoundsAffine = bounds_affine(count, true);
+                        if (affine2 != null) {
+                            ac2: *BoundsAffine = affine2;
+                            base_root: ?*Obj = bounds_term_root(ac2.base);
+                            if (base_root != null) {
+                                length: *Expr = bounds_len_term(path);
+                                if (ac2.offset > 0) f = bounds_add_order(f, new_num(ac2.offset),
+                                    length, 10);
+                                f = new BoundsFact {
+                                    index: base_root,
+                                    array: destination,
+                                    kind: 14,
+                                    value: 0 - ac2.offset,
+                                    left: ac2.base,
+                                    right: length,
+                                    separation: null,
+                                    next: f
+                                };
+                                f = new BoundsFact {
+                                    index: destination,
+                                    array: base_root,
+                                    kind: 14,
+                                    value: ac2.offset,
+                                    left: length,
+                                    right: ac2.base,
+                                    separation: null,
+                                    next: f
+                                }
+                            }
+                        }
+                    }
                 }
             }
             bounds_record_facts(path, k.inits, f)
@@ -1911,6 +1982,10 @@ bounds_affine(e: *Expr@new, query: bool): ?*BoundsAffine@new {
             }
             c: int = bounds_num(k.rhs);
             base: *Expr = k.lhs;
+            if (c < 0 && k.op == BinOp.Add) {
+                c = bounds_num(k.lhs);
+                base = k.rhs
+            }
             if (c < 0 || c >= 536870912 || !bounds_term(base)) return null;
             if (k.op != BinOp.Add && k.op != BinOp.Sub) return null;
             if (!query) {
@@ -2111,6 +2186,29 @@ bounds_small_upper(e: *Expr, f: ?*BoundsFact): int {
                 return -1
             }
             if (!bounds_pure_condition(e)) return -1;
+            if (k.op == BinOp.Xor) {
+                x: int = bounds_small_upper(k.lhs, f);
+                y: int = bounds_small_upper(k.rhs, f);
+                if (x < 0 || y < 0) return -1;
+                largest: int = if (x > y) x else y;
+                bit_limit: int = 1;
+                while (bit_limit <= largest) bit_limit = bit_limit * 2;
+                return bit_limit - 1
+            }
+            if (k.op == BinOp.Sub) {
+                left_upper: int = bounds_small_upper(k.lhs, f);
+                right_upper: int = bounds_small_upper(k.rhs, f);
+                left_lower: int = bounds_term_numeric_lower(f, k.lhs);
+                right_lower: int = bounds_term_numeric_lower(f, k.rhs);
+                if (left_upper < 0 || right_upper < 0 || left_lower < right_upper || right_lower < 0) return -1;
+                return left_upper - right_lower
+            }
+            if (k.op == BinOp.Div) {
+                divisor: int = bounds_num(k.rhs);
+                numerator: int = bounds_small_upper(k.lhs, f);
+                if (divisor <= 0 || numerator < 0) return -1;
+                return numerator / divisor
+            }
             if (k.op == BinOp.Add || k.op == BinOp.Mul) {
                 sum_left: int = bounds_small_upper(k.lhs, f);
                 sum_right: int = bounds_small_upper(k.rhs, f);
@@ -2909,7 +3007,7 @@ bounds_same(a: ?*BoundsFact, b: ?*BoundsFact): bool {
     true
 }
 
-bounds_inc_preserves_nonnegative(v: *Obj, rhs: *Expr, f: ?*BoundsFact): bool {
+bounds_inc_preserves_nonnegative(v: *Obj@new, rhs: *Expr, f: ?*BoundsFact@new): bool {
     if (!bounds_has(f, v, null, 1)) return false;
     match rhs.kind {
         Binary k -> {
@@ -2920,7 +3018,7 @@ bounds_inc_preserves_nonnegative(v: *Obj, rhs: *Expr, f: ?*BoundsFact): bool {
                 if (q.index == v && q.kind == 5 && q.value < 9223372036854775807) return true;
                 q = q.next
             }
-            false
+            bounds_difference_proves(f, bounds_obj_expr(v), new_num(536870911), 0)
         }
         _ -> false
     }
@@ -3152,6 +3250,10 @@ bounds_proves(a: *Expr@new, i: *Expr@new, f: ?*BoundsFact@new) raises Error: boo
         if (av != null && upper < bounds_fact_value(f, av, 3)) return true;
         if (upper < bounds_term_numeric_lower(f, bounds_len_term(a))) return true
     }
+    length_lower: int = bounds_term_numeric_lower(f, bounds_len_term(a));
+    if (length_lower > 0 && length_lower < 536870912 && bounds_difference_proves(f,
+        i, new_num(length_lower), -1) && bounds_difference_proves(f, new_num(0), i,
+        0)) return true;
     offset_index: ?*Obj = bounds_offset_var(i);
     offset: int = bounds_offset_amount(i);
     if (av != null && offset_index != null && offset >= 0 && bounds_has(f, offset_index,
@@ -3279,7 +3381,11 @@ bounds_expr(e: ?*Expr@new, f: ?*BoundsFact@new) noregion raises Error: ?*BoundsF
             match k.rhs.kind {
                 _ -> { }
             }
-            keep_nonnegative: bool = bounds_inc_preserves_nonnegative(v, k.rhs, f);
+            rhs_upper: int = -1;
+            if (bounds_pure_condition(k.rhs)) rhs_upper = bounds_small_upper(k.rhs,
+                f);
+            keep_nonnegative: bool = rhs_upper >= 0 || bounds_inc_preserves_nonnegative(v,
+                k.rhs, f);
             shift: int = bounds_return_self_offset(v, k.rhs);
             if (shift == 1000000000) f = bounds_kill(f, v) else f = bounds_return_shift(f,
                 v, shift);
@@ -3544,12 +3650,19 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsFact@new) noregion raises Error: ?*BoundsFact@
                     _ -> { }
                 }
                 hiconst: int = bounds_num(hi);
+                if (hiconst < 0 && bounds_pure_condition(hi)) hiconst = bounds_term_numeric_upper(f,
+                    hi);
+                lo_const: int = -1;
+                if (bounds_pure_condition(k.iter)) lo_const = bounds_term_numeric_lower(f,
+                    k.iter);
                 invariant2: ?*BoundsFact = f;
                 changing2: bool = true;
                 while (changing2) {
                     facts: ?*BoundsFact = invariant2;
                     if (bounds_nonnegative_term(f, k.iter) || bounds_small_upper(k.iter,
                         f) >= 0) facts = bounds_add(facts, k.item, null, 1);
+                    if (lo_const >= 0) facts = bounds_add_order(facts, new_num(lo_const),
+                        bounds_obj_expr(k.item), 10);
                     if (av != null) facts = bounds_add(facts, k.item, av, 2);
                     if (stable_order_bound) facts = bounds_add_loop_order(facts, k.item,
                         hi);
