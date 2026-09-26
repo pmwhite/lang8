@@ -19,7 +19,8 @@ import tempfile
 IMPORT = re.compile(rb'\bimport\s+"([^"\r\n]+)"')
 CHECK = re.compile(rb'\bcheck_index\s*\(')
 PATH = re.compile(rb'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*')
-INDEX = re.compile(rb'(?:[0-9]+|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)')
+INDEX_ATOM = rb'(?:[0-9]+|[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)'
+INDEX = re.compile(INDEX_ATOM + rb'(?:\s*[+*-]\s*' + INDEX_ATOM + rb')*')
 CALLER_ERRORS = (
     b"call does not prove inferred array bounds requirement",
     b"call requires distinct record arguments for bounds proof",

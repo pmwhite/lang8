@@ -25,6 +25,12 @@ class ScannerTests(unittest.TestCase):
         sites = candidates(ROOT / "sample.l8", source)
         self.assertEqual(b"a[0] + a[1]", replace_many(source, sites))
 
+    def test_arithmetic_indexes(self):
+        source = b"a[check_index(a, row * 240 + col)] + a[check_index(a, i - 1)]"
+        sites = candidates(ROOT / "sample.l8", source)
+        self.assertEqual(b"a[row * 240 + col] + a[i - 1]", replace_many(source,
+            sites))
+
 
 class TrialTests(unittest.TestCase):
     def test_classifications(self):
