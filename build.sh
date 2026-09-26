@@ -526,7 +526,7 @@ print_compiler_phases() {
 
 # Every stage builds directly with no generated .s or .o intermediates.
 strict_sources() {
-  local tool="$1" source
+  local tool="$1"
   local -a roots=(
     src1/main.l8 src2/main.l8
     programs/examples/*.l8
@@ -535,9 +535,8 @@ strict_sources() {
     programs/http/tests/*.l8 programs/websocket/tests/*.l8
     stdlib/tests/*.l8
   )
-  for source in "${roots[@]}"; do
-    "./$tool" compile --verify-bounds "$source" >/dev/null
-  done
+  printf '%s\0' "${roots[@]}" |
+    xargs -0 -n 1 -P 4 sh -c '"./$1" compile --verify-bounds "$2" >/dev/null' _ "$tool"
 }
 
 do_selfhost() {

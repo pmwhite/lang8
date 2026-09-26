@@ -54,6 +54,11 @@ type BoundsTodo = {
     next: ?*BoundsTodo
 }
 
+type BoundsComponent = {
+    members: ?*BoundsTodo;
+    next: ?*BoundsComponent
+}
+
 // A projected difference constraint at a successful function return.
 // result_left means result - term <= bound; otherwise term - result <= bound.
 type BoundsReturnFact = {
@@ -66,6 +71,16 @@ type BoundsReturnFact = {
 bounds_infer_mode: bool = false;
 
 bounds_infer_changed: bool = false;
+
+bounds_input_changed: bool = false;
+
+bounds_scc_counter: int = 0;
+
+bounds_scc_stack: ?*BoundsTodo = null;
+
+bounds_scc_first: ?*BoundsComponent = null;
+
+bounds_scc_last: ?*BoundsComponent = null;
 
 bounds_current_fn: ?*Function = null;
 
@@ -128,6 +143,7 @@ bounds_add_separation(fn: *Function@new, first: int, second: int): bool {
         second)) return false;
     fn.bounds_separations = new BoundsSeparation { first: first, second: second, next: fn.bounds_separations };
     bounds_infer_changed = true;
+    bounds_input_changed = true;
     true
 }
 
@@ -252,6 +268,7 @@ bounds_add_requirement(
                     if (old_number >= number) return false;
                     scan.index = i;
                     bounds_infer_changed = true;
+                    bounds_input_changed = true;
                     return true
                 }
                 old_affine: ?*BoundsAffine = bounds_affine(scan.index, true);
@@ -276,6 +293,7 @@ bounds_add_requirement(
             if (lowest != highest) {
                 if (next_affine.offset < low_offset) lowest.index = i else highest.index = i;
                 bounds_infer_changed = true;
+                bounds_input_changed = true;
                 return true
             }
         }
@@ -293,6 +311,7 @@ bounds_add_requirement(
         next: fn.bounds_requirements
     };
     bounds_infer_changed = true;
+    bounds_input_changed = true;
     true
 }
 
@@ -506,7 +525,8 @@ bounds_infer_requirement(a: *Expr, i: *Expr) {
     if (!bounds_param(fn, av) || !bounds_param(fn, iv)) return;
     if (len(iv.index_for_name) != 0) return;
     iv.index_for_name = av.name;
-    bounds_infer_changed = true
+    bounds_infer_changed = true;
+    bounds_input_changed = true
 }
 
 // Kind 15 records the current cursor as an exact offset from its value at
@@ -603,6 +623,17 @@ bounds_require(
         }
         bounds_infer_loop_requirement(a, i, f);
         return
+    }
+    current: ?*Function = bounds_current_fn;
+    entry: ?*Function = find_function("main");
+    if (current != null && current == entry) {
+        array_param: ?*Obj = bounds_var(a);
+        index_param: ?*Obj = bounds_var(i);
+        if (array_param != null && bounds_param(current, array_param)) {
+            if (index_param != null && bounds_param(current, index_param)) error_at_file(file,
+                pos, "main cannot require an index_for argument at entry");
+            if (bounds_num(i) >= 0) error_at_file(file, pos, "main cannot require unproved array bounds at entry")
+        }
     }
     error_at_file(file, pos, "array index not proved in bounds (guard it or check_index after binding variables)")
 }
@@ -3863,57 +3894,114 @@ bounds_finish_returns(fn: *Function, out: ?*BoundsFact@new) noregion {
     fn.bounds_returns = next
 }
 
-// Contracts and return facts are local to a function. A change can affect
-// that function's entry state and the functions that call it.
-bounds_queue_fn(queue: ?*BoundsTodo@new, fn: *Function@new): ?*BoundsTodo@new {
-    if (fn.is_extern) return queue;
-    q: ?*BoundsTodo = queue;
-    while (q != null) {
-        if (q.fn == fn) return queue;
-        q = q.next
+// Tarjan's algorithm emits each call group after its dependencies. Contract
+// inference only needs iteration inside a recursive group (or for a function
+// whose newly inferred entry facts change its own return summary).
+bounds_scc_visit(fn: *Function@immortal) noregion {
+    bounds_scc_counter = bounds_scc_counter + 1;
+    fn.bounds_visit = bounds_scc_counter;
+    fn.bounds_lowlink = bounds_scc_counter;
+    fn.bounds_on_stack = true;
+    bounds_scc_stack = new BoundsTodo { fn: fn, next: bounds_scc_stack };
+    edge: ?*CallEdge = fn.callees;
+    while (edge != null) {
+        callee: *Function = edge.callee;
+        if (!callee.is_extern) {
+            if (callee.bounds_visit == 0) {
+                bounds_scc_visit(callee);
+                if (callee.bounds_lowlink < fn.bounds_lowlink) fn.bounds_lowlink = callee.bounds_lowlink
+            } else if (callee.bounds_on_stack && callee.bounds_visit < fn.bounds_lowlink) fn.bounds_lowlink = callee.bounds_visit
+        }
+        edge = edge.next
     }
-    new BoundsTodo { fn: fn, next: queue }
+    if (fn.bounds_lowlink != fn.bounds_visit) return;
+    component: *BoundsComponent = new BoundsComponent { members: null, next: null };
+    done: bool = false;
+    while (!done) {
+        top: ?*BoundsTodo = bounds_scc_stack;
+        if (top != null) {
+            bounds_scc_stack = top.next;
+            member: *Function = top.fn;
+            member.bounds_on_stack = false;
+            done = member == fn;
+            top.next = component.members;
+            component.members = top
+        } else done = true
+    }
+    last: ?*BoundsComponent = bounds_scc_last;
+    if (last == null) bounds_scc_first = component else last.next = component;
+    bounds_scc_last = component
+}
+
+// An uncalled entry point cannot acquire an input contract, and no call site
+// can use a return summary. Its strict pass is sufficient.
+bounds_entry_needs_inference(entry: *Function): bool {
+    if (entry.address_taken) return true;
+    caller: ?*Function = functions;
+    while (caller != null) {
+        edge: ?*CallEdge = caller.callees;
+        while (edge != null) {
+            if (edge.callee == entry) return true;
+            edge = edge.next
+        }
+        caller = caller.next
+    }
+    false
 }
 
 verify_bounds_program() noregion raises Error {
     bounds_infer_effects();
+    profile_mark("bounds effects");
     bounds_infer_mode = true;
-    queue: ?*BoundsTodo = null;
-    last: ?*BoundsTodo = null;
+    entry: ?*Function = find_function("main");
+    infer_entry: bool = entry != null && bounds_entry_needs_inference(entry);
+    bounds_scc_counter = 0;
+    bounds_scc_stack = null;
+    bounds_scc_first = null;
+    bounds_scc_last = null;
     first: ?*Function = functions;
     while (first != null) {
-        if (!first.is_extern) {
-            entry: *BoundsTodo = new BoundsTodo { fn: first, next: null };
-            if (last == null) queue = entry else last.next = entry;
-            last = entry
-        }
+        if (!first.is_extern && first.bounds_visit == 0) bounds_scc_visit(first);
         first = first.next
     }
-    while (queue != null) {
-        fn: *Function = queue.fn;
-        queue = queue.next;
-        bounds_infer_changed = false;
-        bounds_current_fn = fn;
-        bounds_return_accum = null;
-        bounds_return_seen = false;
-        f: ?*BoundsFact = bounds_initial(fn);
-        out: ?*BoundsFact = bounds_stmt(fn.body, f);
-        bounds_finish_returns(fn, out);
-        if (bounds_infer_changed) {
-            queue = bounds_queue_fn(queue, fn);
-            caller: ?*Function = functions;
-            while (caller != null) {
-                edge: ?*CallEdge = caller.callees;
-                while (edge != null) {
-                    if (edge.callee == fn) queue = bounds_queue_fn(queue, caller);
-                    edge = edge.next
+    profile_mark("bounds call groups");
+    component: ?*BoundsComponent = bounds_scc_first;
+    while (component != null) {
+        recursive: bool = false;
+        first_member: ?*BoundsTodo = component.members;
+        if (first_member != null) {
+            if (first_member.next != null) recursive = true else {
+                edge2: ?*CallEdge = first_member.fn.callees;
+                while (edge2 != null) {
+                    if (edge2.callee == first_member.fn) recursive = true;
+                    edge2 = edge2.next
                 }
-                caller = caller.next
             }
         }
+        changed: bool = true;
+        while (changed) {
+            changed = false;
+            member: ?*BoundsTodo = component.members;
+            while (member != null) {
+                fn: *Function = member.fn;
+                if (fn != entry || infer_entry) {
+                    bounds_infer_changed = false;
+                    bounds_input_changed = false;
+                    bounds_current_fn = fn;
+                    bounds_return_accum = null;
+                    bounds_return_seen = false;
+                    f: ?*BoundsFact = bounds_initial(fn);
+                    out: ?*BoundsFact = bounds_stmt(fn.body, f);
+                    bounds_finish_returns(fn, out);
+                    if (bounds_input_changed || recursive && bounds_infer_changed) changed = true
+                }
+                member = member.next
+            }
+        }
+        component = component.next
     }
     bounds_infer_mode = false;
-    entry: ?*Function = find_function("main");
+    profile_mark("bounds inference");
     if (entry != null) {
         if (entry.bounds_precondition != null) error_at_file(entry.browse_file, entry.browse_pos,
             "main cannot require a precondition");
@@ -3957,4 +4045,5 @@ verify_bounds_program() noregion raises Error {
         if (!fn2.is_extern) _out2: ?*BoundsFact = bounds_stmt(fn2.body, f2);
         fn2 = fn2.next
     }
+    profile_mark("bounds validation")
 }
