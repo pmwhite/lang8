@@ -1225,6 +1225,83 @@ bounds_field_safe_stmt(s: *Stmt, root: *Obj, member: *Member): bool {
     }
 }
 
+// An earlier assignment to a local does not make it an unstable loop bound.
+// Only writes reachable from the loop body matter. Address-taken locals are
+// excluded by the caller, so an ordinary call cannot change this local.
+bounds_local_stable_expr(e: ?*Expr, local: *Obj): bool {
+    if (e == null) return true;
+    n: *Expr = e;
+    match n.kind {
+        Num _ -> true;
+        Null -> true;
+        Var _ -> true;
+        Binary k -> bounds_local_stable_expr(k.lhs, local) && bounds_local_stable_expr(k.rhs,
+            local);
+        Assign k -> bounds_var(k.lhs) != local && bounds_local_stable_expr(k.lhs,
+            local) && bounds_local_stable_expr(k.rhs, local);
+        Index k -> bounds_local_stable_expr(k.lhs, local) && bounds_local_stable_expr(k.idx,
+            local);
+        Funcall k -> {
+            if (!bounds_local_stable_expr(k.target, local)) return false;
+            a: ?*Expr = k.args;
+            while (a != null) {
+                if (!bounds_local_stable_expr(a, local)) return false;
+                a = a.next
+            }
+            true
+        }
+        MemberAccess k -> bounds_local_stable_expr(k.lhs, local);
+        Deref k -> bounds_local_stable_expr(k.lhs, local);
+        Not k -> bounds_local_stable_expr(k.lhs, local);
+        Neg k -> bounds_local_stable_expr(k.lhs, local);
+        BitNot k -> bounds_local_stable_expr(k.lhs, local);
+        LogAnd k -> bounds_local_stable_expr(k.lhs, local) && bounds_local_stable_expr(k.rhs,
+            local);
+        LogOr k -> bounds_local_stable_expr(k.lhs, local) && bounds_local_stable_expr(k.rhs,
+            local);
+        OrElse k -> bounds_local_stable_expr(k.lhs, local) && bounds_local_stable_expr(k.rhs,
+            local);
+        As k -> bounds_local_stable_expr(k.lhs, local);
+        Trunc k -> bounds_local_stable_expr(k.lhs, local);
+        If k -> bounds_local_stable_expr(k.cond, local) && bounds_local_stable_expr(k.then,
+            local) && bounds_local_stable_expr(k.els, local);
+        Block k -> bounds_local_stable_stmt_list(k.body, local);
+        _ -> false
+    }
+}
+
+bounds_local_stable_stmt_list(s: ?*Stmt, local: *Obj): bool {
+    q: ?*Stmt = s;
+    while (q != null) {
+        if (!bounds_local_stable_stmt(q, local)) return false;
+        q = q.next
+    }
+    true
+}
+
+bounds_local_stable_stmt(s: *Stmt, local: *Obj): bool {
+    match s.kind {
+        ExprStmt k -> bounds_local_stable_expr(k.lhs, local);
+        Decl k -> bounds_local_stable_expr(k.init, local);
+        Return k -> bounds_local_stable_expr(k.lhs, local);
+        Block k -> bounds_local_stable_stmt_list(k.body, local);
+        Region k -> bounds_local_stable_stmt(k.body, local);
+        If k -> {
+            if (!bounds_local_stable_expr(k.cond, local) || !bounds_local_stable_stmt(k.then,
+                local)) return false;
+            els: ?*Stmt = k.els;
+            if (els != null && !bounds_local_stable_stmt(els, local)) return false;
+            true
+        }
+        While k -> bounds_local_stable_expr(k.cond, local) && bounds_local_stable_stmt(k.body,
+            local);
+        For k -> k.item != local && bounds_local_stable_expr(k.iter, local) && bounds_local_stable_expr(k.hi,
+            local) && bounds_local_stable_stmt(k.body, local);
+        Comment _ -> true;
+        _ -> false
+    }
+}
+
 bounds_checked_index(a: *Expr, i: *Expr): bool {
     match i.kind {
         Funcall k -> {
@@ -1257,7 +1334,7 @@ bounds_num(e: ?*Expr): int {
     n: *Expr = e;
     match n.kind {
         Num k -> {
-            if (k.form == LIT_INT) return k.val;
+            if (k.form == LIT_INT && k.str_label == 0) return k.val;
             -999999999
         }
         _ -> -999999999
@@ -1299,6 +1376,15 @@ bounds_known_len(e: ?*Expr): int {
     t: ?*Type = n.ty;
     if (t != null && is_array(t)) return array_len(t);
     match n.kind {
+        Num k -> {
+            if (k.str_label == 0) return -1;
+            lit: ?*StrLit = str_lits;
+            while (lit != null) {
+                if (lit.label == k.str_label - 1) return lit.len;
+                lit = lit.next
+            }
+            -1
+        }
         ArrayLit k -> {
             count: int = 0;
             q: ?*Expr = k.elems;
@@ -1749,6 +1835,18 @@ bounds_value_facts(path: *Expr@new, value: *Expr, f: ?*BoundsFact@new) raises Er
     if (known >= 0) f = bounds_add_order(f, new_num(known), bounds_len_term(path),
         10);
     match value.kind {
+        Binary k -> {
+            if (k.op == BinOp.And || k.op == BinOp.Shr || k.op == BinOp.Shl || k.op == BinOp.Or || k.op == BinOp.Mod) {
+                upper: int = bounds_small_upper(value, f);
+                if (upper >= 0) {
+                    f = bounds_add_order(f, new_num(0), path, 10);
+                    f = bounds_add_order(f, path, new_num(upper), 10)
+                }
+            }
+        }
+        _ -> { }
+    }
+    match value.kind {
         New k -> {
             // A completed dynamic allocation has exactly the evaluated count.
             // Only relate it to a still-stable term: the fill expression must
@@ -1961,6 +2059,56 @@ bounds_nonnegative_term(f: ?*BoundsFact, term: *Expr): bool {
         q = q.next
     }
     false
+}
+
+// Return a nonnegative upper bound for a machine-integer expression. A mask
+// bounds either operand without knowing its value; nonnegative remainders are
+// below their modulus. Shifts and OR require stable operands and an upper
+// bound small enough to rule out overflow.
+bounds_small_upper(e: *Expr, f: ?*BoundsFact): int {
+    match e.kind {
+        Num k -> {
+            if (k.str_label == 0 && k.form == LIT_INT && k.val >= 0 && k.val < 536870912) return k.val;
+            -1
+        }
+        Binary k -> {
+            if (k.op == BinOp.And) {
+                left_mask: int = bounds_num(k.lhs);
+                right_mask: int = bounds_num(k.rhs);
+                if (left_mask >= 0 && left_mask < 536870912) return left_mask;
+                if (right_mask >= 0 && right_mask < 536870912) return right_mask;
+                return -1
+            }
+            if (!bounds_pure_condition(e)) return -1;
+            if (k.op == BinOp.Mod) {
+                modulus: int = bounds_num(k.rhs);
+                if (modulus > 0 && modulus < 536870912 && bounds_nonnegative_term(f,
+                    k.lhs)) return modulus - 1;
+                return -1
+            }
+            if (k.op == BinOp.Shr || k.op == BinOp.Shl) {
+                shift: int = bounds_num(k.rhs);
+                if (shift < 0 || shift > 62) return -1;
+                upper: int = bounds_small_upper(k.lhs, f);
+                if (upper < 0) return -1;
+                if (k.op == BinOp.Shr) return upper >> shift;
+                if (upper > 536870911 >> shift) return -1;
+                return upper << shift
+            }
+            if (k.op == BinOp.Or) {
+                left: int = bounds_small_upper(k.lhs, f);
+                right: int = bounds_small_upper(k.rhs, f);
+                if (left < 0 || right < 0 || left > 536870911 - right) return -1;
+                return left + right
+            }
+            -1
+        }
+        _ -> {
+            if (!bounds_term(e) || !bounds_nonnegative_term(f, e)) return -1;
+            upper2: int = bounds_term_numeric_upper(f, e);
+            if (upper2 >= 0 && upper2 < 536870912) upper2 else -1
+        }
+    }
 }
 
 bounds_distance_get(head: ?*BoundsDistance, term: *Expr): ?*BoundsDistance@head {
@@ -2676,6 +2824,31 @@ bounds_meet(a: ?*BoundsFact@new, b: ?*BoundsFact): ?*BoundsFact@new {
         if (bounds_has_fact(b, q)) head = bounds_copy(head, q);
         q = q.next
     }
+    // Distinct branch maxima still imply their larger common upper bound.
+    q = a;
+    while (q != null) {
+        if (q.kind == 9 || q.kind == 10) {
+            left: ?*Expr = q.left;
+            right: ?*Expr = q.right;
+            if (left != null && right != null && bounds_num(right) >= 0) {
+                v: ?*Obj = bounds_var(left);
+                if (v != null) {
+                    if (v.is_local && is_int_ty(v.ty) && bounds_nonnegative_term(a,
+                        left) && bounds_nonnegative_term(b, left)) {
+                        first: int = bounds_term_numeric_upper(a, left);
+                        second: int = bounds_term_numeric_upper(b, left);
+                        if (first >= 0 && second >= 0) {
+                            bound: int = if (first > second) first else second;
+                            if (bound < 536870912 && !bounds_order(head, left, new_num(bound),
+                                false)) head = bounds_add_order(head, left, new_num(bound),
+                                10)
+                        }
+                    }
+                }
+            }
+        }
+        q = q.next
+    }
     head
 }
 
@@ -2922,6 +3095,11 @@ bounds_proves(a: *Expr@new, i: *Expr@new, f: ?*BoundsFact@new) raises Error: boo
     }
     av: ?*Obj = bounds_var(a);
     if (av != null && n >= 0 && n < bounds_fact_value(f, av, 3)) return true;
+    upper: int = bounds_small_upper(i, f);
+    if (upper >= 0) {
+        if (is_array(ty) && upper < array_len(ty)) return true;
+        if (av != null && upper < bounds_fact_value(f, av, 3)) return true
+    }
     offset_index: ?*Obj = bounds_offset_var(i);
     offset: int = bounds_offset_amount(i);
     if (av != null && offset_index != null && offset >= 0 && bounds_has(f, offset_index,
@@ -3275,7 +3453,8 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsFact@new) noregion raises Error: ?*BoundsFact@
                 match hi.kind {
                     Var bound_var -> {
                         v: ?*Obj = bound_var.var;
-                        if (v != null) stable_order_bound = v.is_local && !v.bounds_written && !v.bounds_addr_taken
+                        if (v != null) stable_order_bound = v.is_local && !v.bounds_addr_taken && (!v.bounds_written || bounds_local_stable_stmt(k.body,
+                            v))
                     }
                     MemberAccess _ -> {
                         root: ?*Obj = bounds_term_root(hi);
