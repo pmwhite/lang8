@@ -33,14 +33,12 @@ range reasoning, and Wuffs' requirement for a compile-time proof of each access.
 
 ## Initial implementation
 
-Stage 2 provides `compile --verify-bounds` and `build --verify-bounds`. In this
-mode the compiler rejects unproved index expressions and omits their generated
-runtime checks. The flag allows existing program targets to migrate separately
-while ordinary builds keep their current checks.
+Stage 2 verifies bounds during every `compile` and `build`. It rejects unproved
+index expressions and omits their generated runtime checks.
 The compiler does not warn about redundant `check_index` calls. A check can
 appear provable at its call site because its own earlier execution established
-the facts needed on a later loop iteration. Use the isolated strict-compilation
-tool described below to find removable inline checks.
+the facts needed on a later loop iteration. Verify each proposed removal in
+the complete program that imports the function.
 
 `index_for` is a reserved keyword. `i: index_for(a)` declares a function parameter
 whose value is valid for array parameter `a`. The compiler also infers this
@@ -198,17 +196,14 @@ relationship. Dynamic loops still need a guard or invariant that establishes
 capacity for each iteration.
 
 The verifier deliberately rejects patterns it cannot express, including some
-nontrivial index arithmetic. The `--verify-bounds` flag remains opt-in while
-those extensions are evaluated.
+nontrivial index arithmetic.
 
 ## Migration
 
 The standard-library tests, both compiler stages, and all shipped program and
-test roots now compile under `--verify-bounds`. `./build.sh all` checks these
-roots in strict mode and runs the normal runtime suites. Most dynamic accesses
-use an inline `check_index`; sites with a useful shared guard can call it once
-before later accesses. Strict compilation remains opt-in for now, so newly
-added roots should be included in the build's strict source list.
+test roots compile with bounds verification. `./build.sh all` runs the compiler
+and runtime suites. Most dynamic accesses use an inline `check_index`; sites
+with a useful shared guard can call it once before later accesses.
 Removing a check may strengthen the function's inferred contract, even when
 all known callers already satisfy it.
 

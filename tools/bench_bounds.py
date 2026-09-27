@@ -15,7 +15,7 @@ def measure(compiler: pathlib.Path, source: pathlib.Path, runs: int) -> tuple[fl
     for _ in range(runs):
         start = time.perf_counter()
         result = subprocess.run(
-            [str(compiler.resolve()), "compile", "--verify-bounds", "-p", str(source)],
+            [str(compiler.resolve()), "compile", "-p", str(source)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,

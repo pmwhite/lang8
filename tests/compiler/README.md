@@ -21,9 +21,8 @@ a fixture use the same expectations. An unexpected warning fails the test.
 Add `//% bootstrap: true` only when the fixture also works with the stage-1
 compiler. The stage-2 run includes every discovered fixture.
 
-`//% verify-bounds: true` adds `--verify-bounds` to that fixture's compile or
-build command. These fixtures require the stage-2 compiler and are omitted from
-the bootstrap-only run.
+The stage-2 compiler verifies bounds for every fixture. Bounds-specific fixtures
+are omitted from the bootstrap-only run unless marked `//% bootstrap: true`.
 
 A program that should fail compilation uses:
 

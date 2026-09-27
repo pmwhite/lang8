@@ -35,7 +35,7 @@ def expectations(path: pathlib.Path) -> dict[str, object]:
         if not line.startswith("//% "):
             continue
         key, separator, raw = line[4:].partition(": ")
-        if not separator or key not in {"test", "stdout", "stderr", "exit", "error-contains", "bootstrap", "compiler-warnings", "verify-bounds"}:
+        if not separator or key not in {"test", "stdout", "stderr", "exit", "error-contains", "bootstrap", "compiler-warnings"}:
             raise ValueError(f"{path}:{number}: invalid expectation")
         if key in result:
             raise ValueError(f"{path}:{number}: duplicate {key} expectation")
@@ -47,8 +47,6 @@ def expectations(path: pathlib.Path) -> dict[str, object]:
     mode = result.get("test")
     if type(result.get("bootstrap", False)) is not bool:
         raise ValueError(f"{path}: bootstrap must be true or false")
-    if type(result.get("verify-bounds", False)) is not bool:
-        raise ValueError(f"{path}: verify-bounds must be true or false")
     if mode == "run":
         if "stdout" not in result or "exit" not in result or "error-contains" in result:
             raise ValueError(f"{path}: run needs stdout and exit, without error-contains")
@@ -60,7 +58,7 @@ def expectations(path: pathlib.Path) -> dict[str, object]:
         if not isinstance(warnings, list) or not all(isinstance(message, str) and message for message in warnings):
             raise ValueError(f"{path}: compiler-warnings must be a list of nonempty strings")
     elif mode == "compile-fail":
-        if set(result) - {"test", "error-contains", "bootstrap", "verify-bounds"} or "error-contains" not in result or not isinstance(result["error-contains"], str) or not result["error-contains"]:
+        if set(result) - {"test", "error-contains", "bootstrap"} or "error-contains" not in result or not isinstance(result["error-contains"], str) or not result["error-contains"]:
             raise ValueError(f"{path}: compile-fail needs one nonempty error-contains string")
     else:
         raise ValueError(f"{path}: missing or unknown test mode")
@@ -115,9 +113,8 @@ def compiler_warnings(stderr: bytes) -> list[str]:
 
 def run_one(compiler: pathlib.Path, build_dir: pathlib.Path, source: pathlib.Path) -> None:
     expect = expectations(source)
-    verify_args = ["--verify-bounds"] if expect.get("verify-bounds", False) else []
     if expect["test"] == "compile-fail":
-        proc = subprocess.run([str(compiler), "compile", *verify_args, str(source)], capture_output=True)
+        proc = subprocess.run([str(compiler), "compile", str(source)], capture_output=True)
         if proc.returncode == 0:
             raise ValueError("compilation succeeded; expected an error")
         error = proc.stderr.decode("utf-8", errors="replace")
@@ -128,7 +125,7 @@ def run_one(compiler: pathlib.Path, build_dir: pathlib.Path, source: pathlib.Pat
     source_id = hashlib.sha256(str(source).encode("utf-8")).hexdigest()[:12]
     output = build_dir / f"{source.stem}-{source_id}"
     output.parent.mkdir(parents=True, exist_ok=True)
-    build = subprocess.run([str(compiler), "build", *verify_args, str(source), "-o", str(output)], capture_output=True)
+    build = subprocess.run([str(compiler), "build", str(source), "-o", str(output)], capture_output=True)
     if build.returncode:
         raise ValueError(f"build exited {build.returncode}:\n{build.stderr.decode('utf-8', errors='replace')}")
     check_equal("compiler warnings", expect.get("compiler-warnings", []), compiler_warnings(build.stderr))

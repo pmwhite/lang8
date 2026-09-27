@@ -420,7 +420,7 @@ do_stdlib_test() {
     tool="$BUILD/stdlib-compiler"
     step 'std test tool' ./l8c1 build src2/main.l8 -o "$tool"
   fi
-  step 'stdlib tests' python3 tools/lib_expect.py --discover stdlib/tests --compiler "$tool" --verify-bounds
+  step 'stdlib tests' python3 tools/lib_expect.py --discover stdlib/tests --compiler "$tool"
 }
 
 do_terminal() {
@@ -524,21 +524,6 @@ print_compiler_phases() {
   ./l8c3 build -p src2/main.l8 -o "$BUILD/l8-profile" 2>&1
 }
 
-# Every stage builds directly with no generated .s or .o intermediates.
-strict_sources() {
-  local tool="$1"
-  local -a roots=(
-    src1/main.l8 src2/main.l8
-    programs/examples/*.l8
-    programs/block-game/block-game.l8 programs/block-game/test_*.l8
-    programs/terminal/terminal.l8 programs/terminal/test*.l8
-    programs/http/tests/*.l8 programs/websocket/tests/*.l8
-    stdlib/tests/*.l8
-  )
-  printf '%s\0' "${roots[@]}" |
-    xargs -0 -n 1 -P 4 sh -c '"./$1" compile --verify-bounds "$2" >/dev/null' _ "$tool"
-}
-
 do_selfhost() {
   ensure_build_dir
   [[ -x ./l8c0 ]] || do_bootstrap
@@ -555,7 +540,6 @@ do_selfhost() {
 
   step 'expect runners' python3 -m unittest tools.test_expect tools.test_lib_expect
   step 'compiler tests 3' run_compiler_tests l8c3
-  step 'strict sources' strict_sources l8c3
   step 'browse check' check_browse l8c3
   step 'compiler phases' print_compiler_phases
   cp l8c3 l8
