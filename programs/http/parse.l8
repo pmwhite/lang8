@@ -69,18 +69,20 @@ http_authority(s: str, require_port: bool): bool {
     p: int = 0;
     if (s[0] == '[') {
         p = 1;
-        while (p < len(s) && s[p] != ']') p = p + 1;
-        if (p == len(s)) return false;
+        while (p < len(s) && s[p] != ']') invariant (1 <= p && p <= len(s)) p = p + 1;
+        if (p >= len(s)) return false;
         ip: str = http_sub(s, 1, p);
         if (!http_ip_literal(ip)) return false;
         p = p + 1
     } else {
-        while (p < len(s) && s[check_index(s, p)] != ':') {
-            c: i8 = s[check_index(s, p)];
+        while (p < len(s) && s[p] != ':') invariant (0 <= p && p <= len(s)) {
+            c: i8 = s[p];
             if (c == '%') {
-                if (p + 2 >= len(s) || http_hex(s[check_index(s, p + 1)]) < 0 || http_hex(s[check_index(s,
-                    p + 2)]) < 0) return false;
-                p = p + 3
+                first: int = p + 1;
+                if (first < 0 || first >= len(s)) return false;
+                second: int = first + 1;
+                if (second < 0 || second >= len(s) || http_hex(s[first]) < 0 || http_hex(s[second]) < 0) return false;
+                p = second + 1
             } else {
                 if (!(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.' || c == '_' || c == '~' || c == '!' || c == '$' || c == '&' || c == '\'' || c == '(' || c == ')' || c == '*' || c == '+' || c == ';' || c == '=')) return false;
                 p = p + 1
@@ -88,11 +90,13 @@ http_authority(s: str, require_port: bool): bool {
         }
         if (p == 0) return false
     }
-    if (p == len(s)) return !require_port;
-    if (s[check_index(s, p)] != ':') return false;
+    if (p >= len(s)) return !require_port;
+    if (s[p] != ':') return false;
     p = p + 1;
-    if (p == len(s)) return !require_port;
-    port: int = http_decimal(http_sub(s, p, len(s)));
+    if (p >= len(s)) return !require_port;
+    end: int = len(s);
+    port_text: str = http_sub(s, p, end);
+    port: int = http_decimal(port_text);
     port >= 0 && port <= 65535
 }
 
@@ -102,8 +106,12 @@ http_target(m: *HttpMessage@new): bool {
     for i in 0..len(s) {
         c: i8 = s[i];
         if (!http_uri_char(c) && c != '[' && c != ']') return false;
-        if (c == '%' && (i + 2 >= len(s) || http_hex(s[check_index(s, i + 1)]) < 0 || http_hex(s[check_index(s,
-            i + 2)]) < 0)) return false
+        if (c == '%') {
+            first: int = i + 1;
+            if (first < 0 || first >= len(s)) return false;
+            second: int = first + 1;
+            if (second < 0 || second >= len(s) || http_hex(s[first]) < 0 || http_hex(s[second]) < 0) return false
+        }
     }
     if (m.method == "CONNECT") {
         if (!http_authority(s, true)) return false;
@@ -121,21 +129,24 @@ http_target(m: *HttpMessage@new): bool {
     if (http_prefix(s, "http://")) start = 7;
     if (http_prefix(s, "https://")) start = 8;
     if (start == 0) return false;
+    if (start > len(s)) return false;
     end: int = start;
-    while (end < len(s) && s[end] != '/' && s[end] != '?') end = end + 1;
+    while (end < len(s) && s[end] != '/' && s[end] != '?') invariant (start <= end && end <= len(s)) end = end + 1;
     authority: str = http_sub(s, start, end);
     if (len(authority) == 0 || !http_authority(authority, false)) return false;
     m.authority = authority;
     for i in end..len(s) {
         if (!http_uri_char(s[i])) return false
     }
-    if (end == len(s)) m.target = "/" else {
-        if (s[check_index(s, end)] == '?') {
+    if (end >= len(s)) m.target = "/" else {
+        limit: int = len(s);
+        suffix: str = http_sub(s, end, limit);
+        if (s[end] == '?') {
             b: *HttpBuffer = http_buffer();
             http_text(b, "/");
-            http_text(b, http_sub(s, end, len(s)));
+            http_text(b, suffix);
             m.target = http_string(b)
-        } else m.target = http_sub(s, end, len(s))
+        } else m.target = suffix
     }
     true
 }
@@ -155,13 +166,16 @@ http_fields(r: *HttpReader, m: *HttpMessage@new, trailers: bool): bool {
         }
         if (len(line) == 0) return true;
         colon: int = 0;
-        while (colon < len(line) && line[colon] != ':') colon = colon + 1;
-        if (colon == len(line)) {
+        while (colon < len(line) && line[colon] != ':') invariant (0 <= colon && colon <= len(line)) colon = colon + 1;
+        if (colon >= len(line)) {
             m.error = 400;
             return false
         }
         name: str = http_sub(line, 0, colon);
-        value: str = http_trim(http_sub(line, colon + 1, len(line)));
+        limit: int = len(line);
+        value_start: int = colon + 1;
+        raw_value: str = http_sub(line, value_start, limit);
+        value: str = http_trim(raw_value);
         if (!http_valid_token(name) || !http_value(value)) {
             m.error = 400;
             return false
@@ -171,12 +185,15 @@ http_fields(r: *HttpReader, m: *HttpMessage@new, trailers: bool): bool {
                 m.error = 400;
                 return false
             }
-            if (m.trailer_count >= HTTP_MAX_FIELDS) {
+            field: HttpField = HttpField { name: http_lower(name), value: value };
+            if (m.trailer_count >= HTTP_MAX_FIELDS || m.trailer_count >= len(m.trailers)) {
                 m.error = 431;
                 return false
             }
-            m.trailers[check_index(m.trailers, m.trailer_count)] = HttpField { name: http_lower(name), value: value };
-            m.trailer_count = m.trailer_count + 1
+            trailers_array: []HttpField = m.trailers;
+            slot: int = m.trailer_count;
+            m.trailer_count = m.trailer_count + 1;
+            trailers_array[slot] = field
         } else {
             if (!http_add(m, name, value)) {
                 m.error = 431;
@@ -202,23 +219,25 @@ http_framing(m: *HttpMessage, response: bool, method: str) {
     cl: int = -1;
     te: *HttpBuffer = http_buffer();
     te_present: bool = false;
-    for i in 0..m.count {
-        field: HttpField = m.headers[check_index(m.headers, i)];
+    headers: []HttpField = m.headers;
+    count: int = m.count;
+    for i in 0..count {
+        field: HttpField = headers[i];
         if (field.name == "content-length") {
+            content: str = field.value;
             p: int = 0;
             more: bool = true;
-            while (more) {
+            while (more) invariant (0 <= p && p <= len(content)) {
                 end: int = p;
-                while (end < len(field.value) && field.value[check_index(field.value,
-                    end)] != ',') end = end + 1;
-                n: int = http_decimal(http_trim(http_sub(field.value, p, end)));
+                while (end < len(content) && content[end] != ',') invariant (0 <= end && p <= end && end <= len(content)) end = end + 1;
+                raw: str = http_sub(content, p, end);
+                n: int = http_decimal(http_trim(raw));
                 if (n < 0 || cl >= 0 && n != cl) {
                     m.error = 400;
                     return
                 }
                 cl = n;
-                if (end == len(field.value)) more = false;
-                p = end + 1
+                if (end >= len(content)) more = false else p = end + 1
             }
         }
         if (field.name == "transfer-encoding") {
@@ -240,12 +259,12 @@ http_framing(m: *HttpMessage, response: bool, method: str) {
         last_chunk: bool = false;
         empty_elements: int = 0;
         more: bool = true;
-        while (more) {
+        while (more) invariant (0 <= p && p <= len(codings)) {
             end: int = p;
             quoted: bool = false;
             escaped: bool = false;
-            while (end < len(codings) && (codings[check_index(codings, end)] != ',' || quoted)) {
-                c: i8 = codings[check_index(codings, end)];
+            while (end < len(codings) && (codings[end] != ',' || quoted)) invariant (0 <= end && p <= end && end <= len(codings)) {
+                c: i8 = codings[end];
                 if (escaped) escaped = false else {
                     if (c == '\\' && quoted) escaped = true else {
                         if (c == '"') quoted = !quoted
@@ -253,7 +272,8 @@ http_framing(m: *HttpMessage, response: bool, method: str) {
                 }
                 end = end + 1
             }
-            coding: str = http_trim(http_sub(codings, p, end));
+            raw: str = http_sub(codings, p, end);
+            coding: str = http_trim(raw);
             if (len(coding) == 0) {
                 empty_elements = empty_elements + 1;
                 if (empty_elements > HTTP_MAX_EMPTY_LIST_ELEMENTS) {
@@ -262,7 +282,7 @@ http_framing(m: *HttpMessage, response: bool, method: str) {
                 }
             } else {
                 name_end: int = 0;
-                while (name_end < len(coding) && http_token(coding[name_end])) name_end = name_end + 1;
+                while (name_end < len(coding) && http_token(coding[name_end])) invariant (0 <= name_end && name_end <= len(coding)) name_end = name_end + 1;
                 name: str = http_sub(coding, 0, name_end);
                 if (quoted || !http_valid_token(name) || !http_parameters(coding,
                     name_end, true)) {
@@ -276,8 +296,7 @@ http_framing(m: *HttpMessage, response: bool, method: str) {
                 }
                 if (last_chunk) chunks = chunks + 1 else unsupported = true
             }
-            if (end == len(codings)) more = false;
-            p = end + 1
+            if (end >= len(codings)) more = false else p = end + 1
         }
         if (chunks == 0 && !unsupported || chunks > 1 || chunks > 0 && !last_chunk || !response && !last_chunk) {
             m.error = 400;
@@ -324,23 +343,32 @@ http_read_head(r: *HttpReader, response: bool, method: str): *HttpMessage@new {
         }
         m.minor = http_version(http_sub(line, 0, 8));
         m.status = http_decimal(http_sub(line, 9, 12));
-        m.reason = http_sub(line, 13, len(line));
+        limit: int = len(line);
+        m.reason = http_sub(line, 13, limit);
         if (m.status < 100 || m.status > 599 || !http_value(m.reason)) {
             m.error = 400;
             return m
         }
     } else {
         a: int = 0;
-        while (a < len(line) && line[a] != ' ') a = a + 1;
+        while (a < len(line) && line[a] != ' ') invariant (0 <= a && a <= len(line)) a = a + 1;
+        if (a >= len(line)) {
+            m.error = 400;
+            return m
+        }
         b: int = a + 1;
-        while (b < len(line) && line[check_index(line, b)] != ' ') b = b + 1;
+        while (b < len(line) && line[b] != ' ') invariant (a < b && b <= len(line)) b = b + 1;
         if (b >= len(line)) {
             m.error = 400;
             return m
         }
         m.method = http_sub(line, 0, a);
-        m.target = http_sub(line, a + 1, b);
-        m.minor = http_version(http_sub(line, b + 1, len(line)));
+        target_start: int = a + 1;
+        m.target = http_sub(line, target_start, b);
+        version_start: int = b + 1;
+        limit: int = len(line);
+        version: str = http_sub(line, version_start, limit);
+        m.minor = http_version(version);
         if (!http_valid_token(m.method) || !http_target(m)) {
             m.error = 400;
             return m
@@ -354,10 +382,12 @@ http_read_head(r: *HttpReader, response: bool, method: str): *HttpMessage@new {
     if (!http_fields(r, m, false)) return m;
     if (!response) {
         hosts: int = 0;
-        for i in 0..m.count {
-            if (m.headers[check_index(m.headers, i)].name == "host") {
+        headers: []HttpField = m.headers;
+        count: int = m.count;
+        for i in 0..count {
+            if (headers[i].name == "host") {
                 hosts = hosts + 1;
-                if (!http_authority(m.headers[i].value, false)) {
+                if (!http_authority(headers[i].value, false)) {
                     m.error = 400;
                     return m
                 }
@@ -369,9 +399,8 @@ http_read_head(r: *HttpReader, response: bool, method: str): *HttpMessage@new {
         }
         if (len(m.authority) == 0) m.authority = http_get(m, "host");
         if (http_has(m, "expect") && m.minor > 0) {
-            for i in 0..m.count {
-                if (m.headers[check_index(m.headers, i)].name == "expect" && !http_equal(m.headers[i].value,
-                    "100-continue")) {
+            for i in 0..count {
+                if (headers[i].name == "expect" && !http_equal(headers[i].value, "100-continue")) {
                     m.error = 417;
                     return m
                 }
@@ -524,7 +553,7 @@ http_body_read(state: *HttpBodyReader@new, out: []i8): int {
     count: int = len(out);
     if (m.framing != 3 && count > state.remaining) count = state.remaining;
     n: int = 0;
-    while (n < count) {
+    while (n < count && n < len(out)) invariant (0 <= n && n <= len(out)) {
         c: int = http_read_byte(r);
         if (c < 0) {
             if (m.framing == 3 && r.error == 0) {
@@ -539,7 +568,7 @@ http_body_read(state: *HttpBodyReader@new, out: []i8): int {
             m.error = 413;
             return -1
         }
-        out[check_index(out, n)] = c trunc i8;
+        out[n] = c trunc i8;
         n = n + 1;
         state.total = state.total + 1
     }
@@ -556,6 +585,10 @@ http_read_body(r: *HttpReader@new, m: *HttpMessage@new): bool {
         n: int = http_body_read(state, scratch);
         if (n < 0) return false;
         if (n == 0) return true;
+        if (n > len(scratch)) {
+            m.error = 400;
+            return false
+        }
         http_bytes(m.body, scratch, n)
     }
 }
