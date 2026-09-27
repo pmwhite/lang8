@@ -61,6 +61,7 @@ bounds_pure_condition(e: *Expr): bool {
     match e.kind {
         Num _ -> true;
         Null -> true;
+        VariantLit k -> k.variant != null && k.inits == null;
         Var _ -> true;
         MemberAccess k -> bounds_pure_condition(k.lhs);
         Deref k -> bounds_pure_condition(k.lhs);
@@ -101,29 +102,36 @@ bounds_pure_condition(e: *Expr): bool {
     }
 }
 
-bounds_stable_nonnull_condition(e: *Expr, yes: bool, f: ?*BoundsState@new): ?*BoundsState@new {
+bounds_stable_scalar_operand(e: *Expr): bool {
     match e.kind {
-        Not k -> bounds_stable_nonnull_condition(k.lhs, !yes, f);
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) return false;
+            v.is_local && !v.bounds_addr_taken && bounds_scalar_term(e)
+        }
+        _ -> bounds_scalar_constant(e) && bounds_scalar_term(e)
+    }
+}
+
+bounds_stable_scalar_condition(e: *Expr, yes: bool, f: ?*BoundsState@new): ?*BoundsState@new {
+    match e.kind {
+        Not k -> bounds_stable_scalar_condition(k.lhs, !yes, f);
         LogAnd k -> {
             if (!yes) return f;
-            bounds_stable_nonnull_condition(k.rhs, true, bounds_stable_nonnull_condition(k.lhs,
+            bounds_stable_scalar_condition(k.rhs, true, bounds_stable_scalar_condition(k.lhs,
                 true, f))
         }
         LogOr k -> {
             if (yes) return f;
-            bounds_stable_nonnull_condition(k.rhs, false, bounds_stable_nonnull_condition(k.lhs,
+            bounds_stable_scalar_condition(k.rhs, false, bounds_stable_scalar_condition(k.lhs,
                 false, f))
         }
         Binary k -> {
-            if (yes && k.op != BinOp.Ne || !yes && k.op != BinOp.Eq) return f;
-            path: ?*Expr = null;
-            if (is_null_expr(k.lhs)) path = k.rhs;
-            if (is_null_expr(k.rhs)) path = k.lhs;
-            variable: ?*Obj = bounds_var(path);
-            if (path != null && variable != null) {
-                if (variable.is_local && !variable.bounds_addr_taken) return bounds_add_nonnull(f,
-                    path)
-            }
+            if (!bounds_stable_scalar_operand(k.lhs) || !bounds_stable_scalar_operand(k.rhs)) return f;
+            if (yes && k.op == BinOp.Eq || !yes && k.op == BinOp.Ne) return bounds_add_scalar_relation(f,
+                k.lhs, k.rhs, BoundsKind.Equal);
+            if (yes && k.op == BinOp.Ne || !yes && k.op == BinOp.Eq) return bounds_add_scalar_relation(f,
+                k.lhs, k.rhs, BoundsKind.NotEqual);
             f
         }
         _ -> f
@@ -131,8 +139,7 @@ bounds_stable_nonnull_condition(e: *Expr, yes: bool, f: ?*BoundsState@new): ?*Bo
 }
 
 bounds_condition(e: *Expr, yes: bool, f: ?*BoundsState@new): ?*BoundsState@new {
-    if (!bounds_pure_condition(e)) return bounds_stable_nonnull_condition(e, yes,
-        f);
+    if (!bounds_pure_condition(e)) return bounds_stable_scalar_condition(e, yes, f);
     match e.kind {
         Not k -> bounds_condition(k.lhs, !yes, f);
         LogAnd k -> {
@@ -144,10 +151,10 @@ bounds_condition(e: *Expr, yes: bool, f: ?*BoundsState@new): ?*BoundsState@new {
             bounds_condition(k.rhs, false, bounds_condition(k.lhs, false, f))
         }
         Binary k -> {
-            if (yes && k.op == BinOp.Ne || !yes && k.op == BinOp.Eq) {
-                if (is_null_expr(k.lhs)) f = bounds_add_nonnull(f, k.rhs);
-                if (is_null_expr(k.rhs)) f = bounds_add_nonnull(f, k.lhs)
-            }
+            if (yes && k.op == BinOp.Eq || !yes && k.op == BinOp.Ne) f = bounds_add_scalar_relation(f,
+                k.lhs, k.rhs, BoundsKind.Equal);
+            if (yes && k.op == BinOp.Ne || !yes && k.op == BinOp.Eq) f = bounds_add_scalar_relation(f,
+                k.lhs, k.rhs, BoundsKind.NotEqual);
             if (yes && k.op == BinOp.Ne || !yes && k.op == BinOp.Eq) {
                 lhs: ?*Obj = bounds_var(k.lhs);
                 rhs: ?*Obj = bounds_var(k.rhs);
