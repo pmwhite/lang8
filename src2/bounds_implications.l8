@@ -1,0 +1,668 @@
+tag compiler_internal;
+
+// Implications contain ordinary verifier facts. The premise list is a
+// conjunction, and closure adds a conclusion only after proving every premise.
+bounds_implication_fact(f: ?*BoundsState, fact: *BoundsRow): bool {
+    left: ?*Expr = fact.left;
+    right: ?*Expr = fact.right;
+    if (left == null || right == null) return false;
+    if (fact.kind == BoundsKind.Difference) return bounds_difference_proves(f, left,
+        right, fact.value);
+    if (fact.kind == BoundsKind.Equal || fact.kind == BoundsKind.NotEqual) return bounds_scalar_proves(f,
+        left, right, fact.kind);
+    false
+}
+
+bounds_implication_ready(f: ?*BoundsState, rule: *BoundsImplication): bool {
+    premise: ?*BoundsPremise = rule.premises;
+    while (premise != null) {
+        if (!bounds_implication_fact(f, &premise.fact)) return false;
+        premise = premise.next
+    }
+    true
+}
+
+bounds_implication_needs_scalar(f: ?*BoundsState, value: *Expr): bool {
+    if (f == null) return false;
+    rule: ?*BoundsImplication = f.implications;
+    while (rule != null) {
+        premise: ?*BoundsPremise = rule.premises;
+        while (premise != null) {
+            left: ?*Expr = premise.fact.left;
+            right: ?*Expr = premise.fact.right;
+            if (left != null && bounds_same_scalar(left, value) || right != null && bounds_same_scalar(right,
+                value)) return true;
+            premise = premise.next
+        }
+        rule = rule.next
+    }
+    false
+}
+
+bounds_close_implications(f: ?*BoundsState@new): ?*BoundsState@f {
+    if (f == null) return f;
+    changing: bool = true;
+    while (changing) {
+        changing = false;
+        rule: ?*BoundsImplication = f.implications;
+        while (rule != null) {
+            if (bounds_implication_ready(f, rule) && !bounds_implication_fact(f, &rule.consequence)) {
+                before: int = bounds_count(f);
+                f = bounds_push(f, rule.consequence);
+                if (bounds_count(f) != before) changing = true
+            }
+            rule = rule.next
+        }
+    }
+    f
+}
+
+bounds_implication_map_term(
+    e: *Expr@new,
+    fn: *Function,
+    args: ?*Expr@new,
+    destination: *Expr
+): ?*Expr@new {
+    root: ?*Obj = bounds_term_root(e);
+    if (root != null && root == fn.bounds_result) return bounds_rebase_path(e, bounds_obj_expr(root),
+        destination);
+    match e.kind {
+        Null -> {
+            copied: *Expr = mk_expr(e.kind);
+            copied.ty = e.ty;
+            copied
+        }
+        VariantLit k -> {
+            if (k.inits != null) return null;
+            copied: *Expr = mk_expr(e.kind);
+            copied.ty = e.ty;
+            copied
+        }
+        Num _ -> bounds_clone_path(e);
+        _ -> bounds_return_map(e, fn, args)
+    }
+}
+
+bounds_implication_map_fact(
+    fact: *BoundsRow@new,
+    fn: *Function,
+    args: ?*Expr@new,
+    destination: *Expr
+): ?*BoundsRow@new {
+    left: ?*Expr = fact.left;
+    right: ?*Expr = fact.right;
+    if (left == null || right == null || fact.separation != null) return null;
+    if (fact.kind != BoundsKind.Difference && fact.kind != BoundsKind.Equal && fact.kind != BoundsKind.NotEqual) return null;
+    mapped_left: ?*Expr = bounds_implication_map_term(left, fn, args, destination);
+    mapped_right: ?*Expr = bounds_implication_map_term(right, fn, args, destination);
+    if (mapped_left == null || mapped_right == null) return null;
+    first: ?*Obj = bounds_term_root(mapped_left);
+    second: ?*Obj = bounds_term_root(mapped_right);
+    if (first == null) {
+        first = second;
+        second = null
+    } else {
+        current: *Obj = first;
+        if (second != null) {
+            if (second.browse_id < current.browse_id) {
+                first = second;
+                second = current
+            }
+        }
+    }
+    if (first == null) return null;
+    if (first == second) second = null;
+    new BoundsRow {
+        index: first,
+        array: second,
+        kind: fact.kind,
+        value: fact.value,
+        left: mapped_left,
+        right: mapped_right,
+        separation: null
+    }
+}
+
+bounds_implication_map(
+    rule: *BoundsImplication@new,
+    fn: *Function,
+    args: ?*Expr@new,
+    destination: *Expr
+): ?*BoundsImplication@new {
+    consequence: ?*BoundsRow = bounds_implication_map_fact(&rule.consequence, fn,
+        args, destination);
+    if (consequence == null) return null;
+    premises: ?*BoundsPremise = null;
+    current: ?*BoundsPremise = rule.premises;
+    while (current != null) {
+        mapped: ?*BoundsRow = bounds_implication_map_fact(&current.fact, fn, args,
+            destination);
+        if (mapped == null) return null;
+        premises = new BoundsPremise { fact: mapped.*, next: premises };
+        current = current.next
+    }
+    new BoundsImplication { premises: premises, consequence: consequence.*, next: null }
+}
+
+bounds_guard_add(fn: *Function@new, literal: *Expr) noregion {
+    if (!bounds_scalar_constant(literal) || !bounds_scalar_term(literal)) return;
+    copied: ?*Expr = null;
+    match literal.kind {
+        Num k -> {
+            n: *Expr = mk_expr(ExprKind.Num {
+                val: k.val,
+                str_label: 0,
+                form: k.form,
+                spell: ""
+            });
+            n.ty = fn.return_ty;
+            copied = n
+        }
+        Null -> copied = new_null_expr();
+        VariantLit k -> {
+            ty: ?*Type = fn.return_ty;
+            if (ty != null) {
+                match ty.* {
+                    Enum et -> {
+                        variant: ?*Variant = et.def.variants;
+                        searching: bool = true;
+                        while (variant != null && searching) {
+                            if (variant.tag == k.val) searching = false else variant = variant.next
+                        }
+                        if (variant != null) copied = new_variant_lit("", "", variant,
+                            k.val, null, ty)
+                    }
+                    _ -> { }
+                }
+            }
+        }
+        _ -> { }
+    }
+    if (copied == null) return;
+    anchor: *Obj = bounds_result_anchor(fn);
+    q: ?*BoundsGuardFacts = bounds_guards;
+    while (q != null) {
+        known: ?*Expr = q.literal;
+        if (known != null && bounds_same_scalar(known, copied)) return;
+        q = q.next
+    }
+    premise: BoundsRow = BoundsRow {
+        index: anchor,
+        array: null,
+        kind: BoundsKind.Equal,
+        value: 0,
+        left: bounds_obj_expr(anchor),
+        right: copied,
+        separation: null
+    };
+    bounds_guards = new BoundsGuardFacts {
+        premise: premise,
+        literal: copied,
+        facts: null,
+        seen: false,
+        next: bounds_guards
+    }
+}
+
+bounds_guard_param_term(fn: *Function@new, e: *Expr): ?*Expr@new {
+    match e.kind {
+        Num k -> new_num(k.val);
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) return null;
+            param: ?*Obj = fn.params;
+            while (param != null) {
+                if (param == v && !param.bounds_written && !param.bounds_addr_taken) return bounds_obj_expr(param);
+                param = param.param_next
+            }
+            null
+        }
+        Funcall k -> {
+            if (!streq(k.funcname, "len") || k.target != null) return null;
+            arg: ?*Expr = k.args;
+            if (arg == null) return null;
+            if (arg.next != null) return null;
+            mapped: ?*Expr = bounds_guard_param_term(fn, arg);
+            if (mapped == null) return null;
+            bounds_len_term(mapped)
+        }
+        _ -> null
+    }
+}
+
+bounds_guard_observed(
+    fn: *Function@new,
+    source_left: *Expr,
+    source_right: *Expr,
+    bound: int
+) noregion {
+    if (!is_int_ty(fn.return_ty)) return;
+    mapped_left: ?*Expr = bounds_guard_param_term(fn, source_left);
+    mapped_right: ?*Expr = bounds_guard_param_term(fn, source_right);
+    if (mapped_left == null || mapped_right == null) return;
+    left: *Expr = mapped_left;
+    right: *Expr = mapped_right;
+    first: ?*Obj = bounds_term_root(left);
+    second: ?*Obj = bounds_term_root(right);
+    if (first == null) {
+        first = second;
+        second = null
+    }
+    if (first == null) return;
+    if (first == second) second = null;
+    _anchor: *Obj = bounds_result_anchor(fn);
+    row: BoundsRow = BoundsRow {
+        index: first,
+        array: second,
+        kind: BoundsKind.Difference,
+        value: bound,
+        left: left,
+        right: right,
+        separation: null
+    };
+    q: ?*BoundsGuardFacts = bounds_guards;
+    input_guards: int = 0;
+    while (q != null) {
+        if (bounds_row_same(&q.premise, &row)) return;
+        if (q.literal == null) input_guards = input_guards + 1;
+        q = q.next
+    }
+    if (input_guards >= BOUNDS_SUMMARY_INPUT_GUARDS) return;
+    bounds_guards = new BoundsGuardFacts {
+        premise: row,
+        literal: null,
+        facts: null,
+        seen: false,
+        next: bounds_guards
+    }
+}
+
+bounds_guard_condition(fn: *Function@new, e: *Expr) noregion {
+    // A source comparison suggests a useful premise. Both outcomes are
+    // candidates; return analysis keeps a rule only when every compatible
+    // successful exit proves its conclusion.
+    match e.kind {
+        Not k -> bounds_guard_condition(fn, k.lhs);
+        LogAnd k -> {
+            bounds_guard_condition(fn, k.lhs);
+            bounds_guard_condition(fn, k.rhs)
+        }
+        LogOr k -> {
+            bounds_guard_condition(fn, k.lhs);
+            bounds_guard_condition(fn, k.rhs)
+        }
+        Binary k -> {
+            if (k.op == BinOp.Lt) {
+                bounds_guard_observed(fn, k.lhs, k.rhs, -1);
+                bounds_guard_observed(fn, k.rhs, k.lhs, 0)
+            } else if (k.op == BinOp.Le) {
+                bounds_guard_observed(fn, k.lhs, k.rhs, 0);
+                bounds_guard_observed(fn, k.rhs, k.lhs, -1)
+            } else if (k.op == BinOp.Gt) {
+                bounds_guard_observed(fn, k.rhs, k.lhs, -1);
+                bounds_guard_observed(fn, k.lhs, k.rhs, 0)
+            } else if (k.op == BinOp.Ge) {
+                bounds_guard_observed(fn, k.rhs, k.lhs, 0);
+                bounds_guard_observed(fn, k.lhs, k.rhs, -1)
+            }
+        }
+        _ -> { }
+    }
+}
+
+bounds_guard_scan(fn: *Function@new, s: ?*Stmt) noregion {
+    q: ?*Stmt = s;
+    while (q != null) {
+        match q.kind {
+            Return k -> {
+                value: ?*Expr = k.lhs;
+                if (value != null) bounds_guard_add(fn, value)
+            }
+            ExprStmt _ -> { }
+            Block k -> bounds_guard_scan(fn, k.body);
+            Region k -> bounds_guard_scan(fn, k.body);
+            If k -> {
+                bounds_guard_condition(fn, k.cond);
+                bounds_guard_scan(fn, k.then);
+                bounds_guard_scan(fn, k.els)
+            }
+            While k -> {
+                bounds_guard_condition(fn, k.cond);
+                bounds_guard_scan(fn, k.body)
+            }
+            For k -> bounds_guard_scan(fn, k.body);
+            Match k -> {
+                arm: ?*MatchArm = k.arms;
+                while (arm != null) {
+                    bounds_guard_scan(fn, arm.body);
+                    arm = arm.next
+                }
+            }
+            Try k -> {
+                bounds_guard_scan(fn, k.body);
+                arm: ?*CatchArm = k.arms;
+                while (arm != null) {
+                    bounds_guard_scan(fn, arm.body);
+                    arm = arm.next
+                }
+            }
+            _ -> { }
+        }
+        q = q.next
+    }
+}
+
+bounds_prepare_implications(fn: *Function@new) noregion {
+    bounds_guards = null;
+    if (fn.return_ty == null) return;
+    bounds_guard_scan(fn, fn.body);
+    body: ?*Stmt = fn.body;
+    if (body != null) {
+        match body.kind {
+            Block k -> {
+                last: ?*Stmt = bounds_last_stmt(k.body);
+                if (last != null) {
+                    match last.kind {
+                        ExprStmt item -> bounds_guard_add(fn, item.lhs);
+                        _ -> { }
+                    }
+                }
+            }
+            ExprStmt item -> bounds_guard_add(fn, item.lhs);
+            _ -> { }
+        }
+    }
+}
+
+bounds_implication_record(guard: *BoundsGuardFacts@new, row: BoundsRow@new) {
+    // Budgets affect precision only. No unproved row enters a summary.
+    q: ?*BoundsSummaryFact = guard.facts;
+    count: int = 0;
+    while (q != null) {
+        if (bounds_row_same(&q.fact, &row)) return;
+        count = count + 1;
+        q = q.next
+    }
+    if (count >= BOUNDS_SUMMARY_FACTS_PER_GUARD) return;
+    guard.facts = new BoundsSummaryFact { fact: row, next: guard.facts }
+}
+
+bounds_implication_candidate(guard: *BoundsGuardFacts@new, f: ?*BoundsState, row: BoundsRow@new) {
+    if (bounds_row_same(&guard.premise, &row)) return;
+    if (bounds_implication_fact(f, &row)) bounds_implication_record(guard, row)
+}
+
+bounds_implication_opposite(f: ?*BoundsState, row: *BoundsRow): bool {
+    left: ?*Expr = row.left;
+    right: ?*Expr = row.right;
+    if (left == null || right == null) return false;
+    if (row.kind == BoundsKind.Difference) return bounds_difference_proves(f, right,
+        left, 0 - row.value - 1);
+    if (row.kind == BoundsKind.Equal) return bounds_scalar_proves(f, left, right,
+        BoundsKind.NotEqual);
+    if (row.kind == BoundsKind.NotEqual) return bounds_scalar_proves(f, left, right,
+        BoundsKind.Equal);
+    false
+}
+
+bounds_implication_exit_fact(
+    f: ?*BoundsState,
+    value: *Expr,
+    anchor: ?*Obj,
+    row: *BoundsRow
+): bool {
+    left: ?*Expr = row.left;
+    right: ?*Expr = row.right;
+    if (left == null || right == null) return false;
+    if (row.kind == BoundsKind.Difference) {
+        if (bounds_var(left) == anchor) return bounds_return_bound(f, value, right) <= row.value;
+        if (bounds_var(right) == anchor) return bounds_return_bound(f, left, value) <= row.value
+    }
+    bounds_implication_fact(f, row)
+}
+
+bounds_implication_numeric_candidates(fn: *Function@new, guard: *BoundsGuardFacts@new,
+    f: ?*BoundsState) {
+    param: ?*Obj = fn.params;
+    while (param != null) {
+        relevant: bool = guard.literal != null || guard.premise.index == param || guard.premise.array == param;
+        if (relevant && is_int_ty(param.ty) && !param.bounds_written && !param.bounds_addr_taken) {
+            path: *Expr = bounds_obj_expr(param);
+            zero: *Expr = new_num(0);
+            lower: BoundsRow = BoundsRow {
+                index: param,
+                array: null,
+                kind: BoundsKind.Difference,
+                value: 0,
+                left: zero,
+                right: path,
+                separation: null
+            };
+            upper: BoundsRow = BoundsRow {
+                index: param,
+                array: null,
+                kind: BoundsKind.Difference,
+                value: 0,
+                left: path,
+                right: zero,
+                separation: null
+            };
+            bounds_implication_candidate(guard, f, lower);
+            bounds_implication_candidate(guard, f, upper);
+            array: ?*Obj = fn.params;
+            while (array != null) {
+                ty: ?*Type = array.ty;
+                if (ty != null && is_indexable(ty) && !array.bounds_written && !array.bounds_addr_taken) {
+                    length: *Expr = bounds_len_term(bounds_obj_expr(array));
+                    before: BoundsRow = BoundsRow {
+                        index: param,
+                        array: array,
+                        kind: BoundsKind.Difference,
+                        value: -1,
+                        left: path,
+                        right: length,
+                        separation: null
+                    };
+                    through: BoundsRow = BoundsRow {
+                        index: param,
+                        array: array,
+                        kind: BoundsKind.Difference,
+                        value: 0,
+                        left: path,
+                        right: length,
+                        separation: null
+                    };
+                    after: BoundsRow = BoundsRow {
+                        index: array,
+                        array: param,
+                        kind: BoundsKind.Difference,
+                        value: 0,
+                        left: length,
+                        right: path,
+                        separation: null
+                    };
+                    bounds_implication_candidate(guard, f, before);
+                    bounds_implication_candidate(guard, f, through);
+                    bounds_implication_candidate(guard, f, after)
+                }
+                array = array.param_next
+            }
+        }
+        param = param.param_next
+    }
+}
+
+bounds_implication_scalar_literal(
+    guard: *BoundsGuardFacts@new,
+    f: ?*BoundsState,
+    param: *Obj@new,
+    literal: *Expr
+) {
+    path: *Expr = bounds_obj_expr(param);
+    equal: BoundsRow = BoundsRow {
+        index: param,
+        array: null,
+        kind: BoundsKind.Equal,
+        value: 0,
+        left: path,
+        right: literal,
+        separation: null
+    };
+    different: BoundsRow = equal;
+    different.kind = BoundsKind.NotEqual;
+    bounds_implication_candidate(guard, f, equal);
+    bounds_implication_candidate(guard, f, different)
+}
+
+bounds_implication_scalar_candidates(fn: *Function@new, guard: *BoundsGuardFacts@new,
+    f: ?*BoundsState) {
+    param: ?*Obj = fn.params;
+    while (param != null) {
+        ty: ?*Type = param.ty;
+        if (ty != null && !param.bounds_written && !param.bounds_addr_taken && bounds_scalar_type(ty)) {
+            if (is_bool_ty(ty)) {
+                bounds_implication_scalar_literal(guard, f, param, bounds_bool_literal(true));
+                bounds_implication_scalar_literal(guard, f, param, bounds_bool_literal(false))
+            } else if (is_any_pointer(ty)) bounds_implication_scalar_literal(guard,
+                f, param, new_null_expr()) else if (is_int_width_ty(ty)) bounds_implication_scalar_literal(guard,
+                f, param, new_num(0)) else {
+                match ty.* {
+                    Enum k -> {
+                        variant: ?*Variant = k.def.variants;
+                        while (variant != null) {
+                            literal: *Expr = new_variant_lit("", "", variant, variant.tag,
+                                null, ty);
+                            bounds_implication_scalar_literal(guard, f, param, literal);
+                            variant = variant.next
+                        }
+                    }
+                    _ -> { }
+                }
+            }
+        }
+        param = param.param_next
+    }
+}
+
+bounds_implication_result_candidates(
+    fn: *Function@new,
+    guard: *BoundsGuardFacts@new,
+    value: *Expr,
+    f: ?*BoundsState
+) {
+    if (!is_int_ty(fn.return_ty)) return;
+    anchor: ?*Obj = fn.bounds_result;
+    if (anchor == null) return;
+    result: *Expr = bounds_obj_expr(anchor);
+    param: ?*Obj = fn.params;
+    while (param != null) {
+        if (is_int_ty(param.ty) && !param.bounds_written && !param.bounds_addr_taken) {
+            path: *Expr = bounds_obj_expr(param);
+            if (bounds_return_bound(f, value, path) <= 0) {
+                upper: BoundsRow = BoundsRow {
+                    index: anchor,
+                    array: param,
+                    kind: BoundsKind.Difference,
+                    value: 0,
+                    left: result,
+                    right: path,
+                    separation: null
+                };
+                bounds_implication_record(guard, upper)
+            }
+            if (bounds_return_bound(f, path, value) <= 0) {
+                lower: BoundsRow = BoundsRow {
+                    index: param,
+                    array: anchor,
+                    kind: BoundsKind.Difference,
+                    value: 0,
+                    left: path,
+                    right: result,
+                    separation: null
+                };
+                bounds_implication_record(guard, lower)
+            }
+        }
+        param = param.param_next
+    }
+}
+
+bounds_implication_visit(fn: *Function@new, value: *Expr, f: ?*BoundsState) noregion {
+    guard: ?*BoundsGuardFacts = bounds_guards;
+    while (guard != null) {
+        disjoint: bool = false;
+        literal: ?*Expr = guard.literal;
+        if (literal != null) disjoint = bounds_scalar_constants_differ(value, literal) || bounds_scalar_proves(f,
+            value, literal, BoundsKind.NotEqual) else disjoint = bounds_implication_opposite(f,
+            &guard.premise);
+        if (!disjoint) {
+            if (!guard.seen) {
+                guard.seen = true;
+                bounds_implication_result_candidates(fn, guard, value, f);
+                bounds_implication_numeric_candidates(fn, guard, f);
+                bounds_implication_scalar_candidates(fn, guard, f)
+            } else {
+                kept: ?*BoundsSummaryFact = null;
+                candidate: ?*BoundsSummaryFact = guard.facts;
+                while (candidate != null) {
+                    if (bounds_implication_exit_fact(f, value, fn.bounds_result, &candidate.fact)) kept = new BoundsSummaryFact { fact: candidate.fact, next: kept };
+                    candidate = candidate.next
+                }
+                guard.facts = kept
+            }
+        }
+        guard = guard.next
+    }
+}
+
+bounds_implication_list_has(head: ?*BoundsImplication, rule: *BoundsImplication): bool {
+    q: ?*BoundsImplication = head;
+    while (q != null) {
+        if (bounds_implication_same(q, rule)) return true;
+        q = q.next
+    }
+    false
+}
+
+bounds_implication_lists_same(a: ?*BoundsImplication, b: ?*BoundsImplication): bool {
+    q: ?*BoundsImplication = a;
+    while (q != null) {
+        if (!bounds_implication_list_has(b, q)) return false;
+        q = q.next
+    }
+    other: ?*BoundsImplication = b;
+    while (other != null) {
+        if (!bounds_implication_list_has(a, other)) return false;
+        other = other.next
+    }
+    true
+}
+
+bounds_infer_implications(fn: *Function@new) {
+    old: ?*BoundsImplication = fn.bounds_implications;
+    head: ?*BoundsImplication = null;
+    count: int = 0;
+    if (bounds_guards == null) {
+        if (old != null) bounds_infer_changed = true;
+        fn.bounds_implications = null;
+        return
+    }
+    q: ?*BoundsGuardFacts = bounds_guards;
+    while (q != null && count < BOUNDS_SUMMARY_IMPLICATIONS) {
+        if (q.seen) {
+            premise: *BoundsPremise = new BoundsPremise { fact: q.premise, next: null };
+            fact: ?*BoundsSummaryFact = q.facts;
+            while (fact != null && count < BOUNDS_SUMMARY_IMPLICATIONS) {
+                candidate: *BoundsImplication = new BoundsImplication { premises: premise, consequence: fact.fact, next: head };
+                if (!bounds_implication_list_has(head, candidate)) {
+                    head = candidate;
+                    count = count + 1
+                }
+                fact = fact.next
+            }
+        }
+        q = q.next
+    }
+    if (!bounds_implication_lists_same(old, head)) bounds_infer_changed = true;
+    fn.bounds_implications = head
+}
