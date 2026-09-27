@@ -4,6 +4,7 @@ tag compiler_internal;
 bounds_value_facts(path: *Expr@new, value: *Expr@new, f: ?*BoundsState@new) raises Error: ?*BoundsState@f {
     local: ?*Obj = bounds_var(path);
     if (bounds_pure_condition(value)) f = bounds_copy_value(f, value, path);
+    if (bounds_nonnull(f, value)) f = bounds_add_nonnull(f, path);
     if (is_int_ty(path.ty) && bounds_pure_condition(value)) f = bounds_numeric_value(path,
         value, f);
     if (local != null && bounds_expression_nonnegative(value, f)) f = bounds_add_order(f,
@@ -100,8 +101,38 @@ bounds_pure_condition(e: *Expr): bool {
     }
 }
 
+bounds_stable_nonnull_condition(e: *Expr, yes: bool, f: ?*BoundsState@new): ?*BoundsState@new {
+    match e.kind {
+        Not k -> bounds_stable_nonnull_condition(k.lhs, !yes, f);
+        LogAnd k -> {
+            if (!yes) return f;
+            bounds_stable_nonnull_condition(k.rhs, true, bounds_stable_nonnull_condition(k.lhs,
+                true, f))
+        }
+        LogOr k -> {
+            if (yes) return f;
+            bounds_stable_nonnull_condition(k.rhs, false, bounds_stable_nonnull_condition(k.lhs,
+                false, f))
+        }
+        Binary k -> {
+            if (yes && k.op != BinOp.Ne || !yes && k.op != BinOp.Eq) return f;
+            path: ?*Expr = null;
+            if (is_null_expr(k.lhs)) path = k.rhs;
+            if (is_null_expr(k.rhs)) path = k.lhs;
+            variable: ?*Obj = bounds_var(path);
+            if (path != null && variable != null) {
+                if (variable.is_local && !variable.bounds_addr_taken) return bounds_add_nonnull(f,
+                    path)
+            }
+            f
+        }
+        _ -> f
+    }
+}
+
 bounds_condition(e: *Expr, yes: bool, f: ?*BoundsState@new): ?*BoundsState@new {
-    if (!bounds_pure_condition(e)) return f;
+    if (!bounds_pure_condition(e)) return bounds_stable_nonnull_condition(e, yes,
+        f);
     match e.kind {
         Not k -> bounds_condition(k.lhs, !yes, f);
         LogAnd k -> {
@@ -113,6 +144,10 @@ bounds_condition(e: *Expr, yes: bool, f: ?*BoundsState@new): ?*BoundsState@new {
             bounds_condition(k.rhs, false, bounds_condition(k.lhs, false, f))
         }
         Binary k -> {
+            if (yes && k.op == BinOp.Ne || !yes && k.op == BinOp.Eq) {
+                if (is_null_expr(k.lhs)) f = bounds_add_nonnull(f, k.rhs);
+                if (is_null_expr(k.rhs)) f = bounds_add_nonnull(f, k.lhs)
+            }
             if (yes && k.op == BinOp.Ne || !yes && k.op == BinOp.Eq) {
                 lhs: ?*Obj = bounds_var(k.lhs);
                 rhs: ?*Obj = bounds_var(k.rhs);
@@ -200,6 +235,10 @@ bounds_inits(inits: ?*FieldInit@new, f: ?*BoundsState@new) noregion raises Error
     q: ?*FieldInit = inits;
     while (q != null) {
         f = bounds_expr(q.lhs, f);
+        value: ?*Expr = q.lhs;
+        member: ?*Member = q.member;
+        if (value != null && member != null) bounds_require_type_invariant(member.ty,
+            value, f);
         q = q.next
     }
     f
@@ -232,6 +271,9 @@ bounds_expr(e: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error: ?*Bounds
             f = bounds_expr(k.rhs, f);
             f = bounds_expr(k.lhs, f);
             v: ?*Obj = bounds_var(k.lhs);
+            expected: ?*Type = k.lhs.ty;
+            if (v != null) expected = v.ty;
+            bounds_require_type_invariant(expected, k.rhs, f);
             if (v == null) {
                 match k.lhs.kind {
                     MemberAccess field -> {
@@ -380,7 +422,11 @@ bounds_expr(e: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error: ?*Bounds
             }
             bounds_expr(k.lhs, f)
         }
-        Deref k -> bounds_expr(k.lhs, f);
+        Deref k -> {
+            f = bounds_expr(k.lhs, f);
+            bounds_require_nonnull(k.lhs, f, k.lhs.file, k.lhs.pos);
+            f
+        }
         Not k -> bounds_expr(k.lhs, f);
         Neg k -> bounds_expr(k.lhs, f);
         BitNot k -> bounds_expr(k.lhs, f);
@@ -388,6 +434,9 @@ bounds_expr(e: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error: ?*Bounds
         Trunc k -> bounds_expr(k.lhs, f);
         MemberAccess k -> {
             f = bounds_expr(k.lhs, f);
+            t: ?*Type = k.lhs.ty;
+            if (t != null && is_any_pointer(t)) bounds_require_nonnull(k.lhs, f, n.file,
+                n.pos);
             sd: ?*StructDef = bounds_record_def(k.lhs.ty);
             if (sd != null && bounds_term(k.lhs)) f = bounds_record_invariant_facts(sd,
                 k.lhs, f);
@@ -395,6 +444,10 @@ bounds_expr(e: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error: ?*Bounds
         }
         New k -> {
             f = bounds_inits(k.inits, bounds_expr(k.fill, bounds_expr(k.lhs, f)));
+            fill: ?*Expr = k.fill;
+            ty: ?*Type = n.ty;
+            if (fill != null && ty != null) bounds_require_type_invariant(type_base(ty),
+                fill, f);
             bounds_verify_record_constructor(n, k.inits, f);
             f
         }
@@ -404,7 +457,17 @@ bounds_expr(e: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error: ?*Bounds
             f
         }
         VariantLit k -> bounds_inits(k.inits, f);
-        ArrayLit k -> bounds_expr_list(k.elems, f);
+        ArrayLit k -> {
+            elem: ?*Type = n.ty;
+            if (elem != null) elem = type_base(elem);
+            item: ?*Expr = k.elems;
+            while (item != null) {
+                f = bounds_expr(item, f);
+                bounds_require_type_invariant(elem, item, f);
+                item = item.next
+            }
+            f
+        }
         Sizeof k -> bounds_expr(k.e, f);
         _ -> f
     }
@@ -429,14 +492,20 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error: ?*BoundsStat
                 }
                 if (bounds_infer_mode && bounds_num(k.init) >= 0 && is_int_ty(v.ty)) f = bounds_add_value(f,
                     v, null, BoundsKind.Cursor, bounds_num(k.init));
-                if (init != null) f = bounds_value_facts(bounds_obj_expr(v), init,
-                    f)
+                if (init != null) {
+                    bounds_require_type_invariant(v.ty, init, f);
+                    f = bounds_value_facts(bounds_obj_expr(v), init, f)
+                }
             }
             f
         }
         Return k -> {
             trapped: bool = bounds_return_traps(k.lhs, f);
             f = bounds_expr(k.lhs, f);
+            fn: ?*Function = bounds_current_fn;
+            value: ?*Expr = k.lhs;
+            if (fn != null && value != null) bounds_require_type_invariant(fn.return_ty,
+                value, f);
             if (!trapped) bounds_return_visit(k.lhs, f);
             f
         }

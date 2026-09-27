@@ -48,6 +48,106 @@ bounds_add_nonnegative_requirement(fn: *Function@new, term: *Expr): bool {
     true
 }
 
+bounds_add_nonnull_requirement(fn: *Function@new, term: *Expr): bool {
+    variable: ?*Obj = bounds_var(term);
+    if (variable == null || !bounds_param(fn, variable)) return false;
+    q: ?*BoundsNonNullRequirement = fn.bounds_nonnull_requirements;
+    while (q != null) {
+        if (q.param == variable) return true;
+        q = q.next
+    }
+    fn.bounds_nonnull_requirements = new BoundsNonNullRequirement { param: variable, next: fn.bounds_nonnull_requirements };
+    bounds_infer_changed = true;
+    bounds_input_changed = true;
+    true
+}
+
+bounds_require_nonnull(
+    path: *Expr,
+    f: ?*BoundsState,
+    file: int,
+    pos: int
+) raises Error {
+    if (bounds_nonnull(f, path)) return;
+    if (bounds_infer_mode) {
+        fn: ?*Function = bounds_current_fn;
+        if (fn != null) _added: bool = bounds_add_nonnull_requirement(fn, path);
+        return
+    }
+    error_at_file(file, pos, "pointer use is not proved non-null")
+}
+
+bounds_type_invariant_at(e: *Expr, placeholder: *Obj, value: *Expr): ?*Expr@new {
+    match e.kind {
+        Var k -> {
+            if (k.var == placeholder) value else null
+        }
+        Null -> new_null_expr();
+        Num k -> new_num(k.val);
+        Binary k -> {
+            lhs: ?*Expr = bounds_type_invariant_at(k.lhs, placeholder, value);
+            rhs: ?*Expr = bounds_type_invariant_at(k.rhs, placeholder, value);
+            if (lhs == null || rhs == null) return null;
+            new_binary(k.op, lhs, rhs)
+        }
+        LogAnd k -> {
+            lhs: ?*Expr = bounds_type_invariant_at(k.lhs, placeholder, value);
+            rhs: ?*Expr = bounds_type_invariant_at(k.rhs, placeholder, value);
+            if (lhs == null || rhs == null) return null;
+            new_logand(lhs, rhs)
+        }
+        _ -> null
+    }
+}
+
+bounds_require_type_invariant(ty: ?*Type, value: *Expr, f: ?*BoundsState) raises Error {
+    if (ty == null) return;
+    match ty.* {
+        Refined k -> {
+            bounds_require_type_invariant(k.base, value, f);
+            invariant: *TypeInvariant = k.invariant;
+            predicate: ?*Expr = bounds_type_invariant_at(invariant.predicate, invariant.value,
+                value);
+            if (predicate == null) error("internal: unsupported type invariant");
+            bounds_require_type_predicate(predicate, f, value.file, value.pos)
+        }
+        _ -> { }
+    }
+}
+
+bounds_require_type_predicate(
+    e: *Expr,
+    f: ?*BoundsState,
+    file: int,
+    pos: int
+) raises Error {
+    match e.kind {
+        LogAnd k -> {
+            bounds_require_type_predicate(k.lhs, f, file, pos);
+            bounds_require_type_predicate(k.rhs, f, file, pos)
+        }
+        Binary k -> {
+            if (k.op == BinOp.Ne) {
+                if (is_null_expr(k.rhs)) {
+                    bounds_require_nonnull(k.lhs, f, file, pos);
+                    return
+                }
+                if (is_null_expr(k.lhs)) {
+                    bounds_require_nonnull(k.rhs, f, file, pos);
+                    return
+                }
+            }
+            if (bounds_pure_condition(e) && bounds_precondition_proved(e, f)) return;
+            if (bounds_infer_mode) {
+                bounds_infer_precondition(e, f);
+                return
+            }
+            error_at_file(file, pos, "type invariant is not proved")
+        }
+        _ -> error("internal: unsupported type invariant")
+    }
+}
+
 bounds_infer_nonnegative_requirement(a: *Expr@new, i: *Expr, f: ?*BoundsState): bool {
     fn: ?*Function = bounds_current_fn;
     if (fn == null || bounds_nonnegative_term(f, i)) return false;
@@ -471,6 +571,12 @@ bounds_infer_precondition(e: *Expr, f: ?*BoundsState) {
             bounds_infer_precondition(k.rhs, f)
         }
         Binary k -> {
+            if (k.op == BinOp.Ge && bounds_num(k.rhs) == 0 && !bounds_nonnegative_term(f,
+                k.lhs)) {
+                caller0: ?*Function = bounds_current_fn;
+                if (caller0 != null) _added0: bool = bounds_add_nonnegative_requirement(caller0,
+                    k.lhs)
+            }
             if (k.op == BinOp.Le && bounds_num(k.lhs) == 0 && !bounds_nonnegative_term(f,
                 k.rhs)) {
                 caller: ?*Function = bounds_current_fn;
@@ -664,6 +770,13 @@ bounds_check_call(
     file: int,
     pos: int
 ) raises Error {
+    required_pointer: ?*BoundsNonNullRequirement = fn.bounds_nonnull_requirements;
+    while (required_pointer != null) {
+        actual: ?*Expr = bounds_arg_named(fn, args, required_pointer.param.name);
+        if (actual == null) error_at_file(file, pos, "non-null requirement refers to missing argument");
+        bounds_require_nonnull(actual, f, file, pos);
+        required_pointer = required_pointer.next
+    }
     nonnegative: ?*BoundsNonnegativeRequirement = fn.bounds_nonnegative_requirements;
     while (nonnegative != null) {
         mapped_term: ?*Expr = bounds_arg_named(fn, args, nonnegative.param.name);
@@ -682,6 +795,7 @@ bounds_check_call(
     p: ?*Obj = fn.params;
     a: ?*Expr = args;
     while (p != null && a != null) {
+        bounds_require_type_invariant(p.ty, a, f);
         if (len(p.index_for_name) != 0) {
             ar: ?*Expr = bounds_arg_named(fn, args, p.index_for_name);
             if (ar == null) error_at_file(file, pos, "index_for refers to unknown array parameter");
@@ -768,6 +882,11 @@ bounds_check_call(
 
 bounds_initial(fn: *Function@new) raises Error: ?*BoundsState@new {
     f: ?*BoundsState = null;
+    required_pointer: ?*BoundsNonNullRequirement = fn.bounds_nonnull_requirements;
+    while (required_pointer != null) {
+        f = bounds_add_nonnull(f, bounds_obj_expr(required_pointer.param));
+        required_pointer = required_pointer.next
+    }
     nonnegative: ?*BoundsNonnegativeRequirement = fn.bounds_nonnegative_requirements;
     while (nonnegative != null) {
         f = bounds_add_order(f, new_num(0), bounds_obj_expr(nonnegative.param), false);

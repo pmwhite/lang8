@@ -64,6 +64,13 @@ tag compiler_internal;
 // Parse does not load imports or require types; a later pass follows imports for compile.
 // Fmt prints the same tree with one canonical layout.
 // This compiler reports failures via `exception Error` (caught in main).
+// A refinement is an invariant over a placeholder value of its base type.
+// Array elements and record fields retain it as part of their value type.
+type TypeInvariant = {
+    value: *Obj;
+    predicate: *Expr
+}
+
 type Type =
     | FnPtr { fn: *Function, optional: bool }
     | Int
@@ -77,7 +84,7 @@ type Type =
     | Str
     | OptStr
     | Ptr { base: *Type }
-    | OptPtr { base: *Type }
+    | Refined { base: *Type, invariant: *TypeInvariant }
     | Slice { base: *Type }
     | OptSlice { base: *Type }
     | Array { base: *Type, n: int }
@@ -543,6 +550,11 @@ type BoundsNonnegativeRequirement = {
     next: ?*BoundsNonnegativeRequirement
 }
 
+type BoundsNonNullRequirement = {
+    param: *Obj;
+    next: ?*BoundsNonNullRequirement
+}
+
 type Function = {
     name: []i8;
     link_name: []i8;
@@ -563,6 +575,7 @@ type Function = {
     bounds_separations: ?*BoundsSeparation;
     bounds_requirements: ?*BoundsRequirement;
     bounds_nonnegative_requirements: ?*BoundsNonnegativeRequirement;
+    bounds_nonnull_requirements: ?*BoundsNonNullRequirement;
     bounds_returns: ?*BoundsReturnFact;
     bounds_result: ?*Obj;
     bounds_precondition: ?*Expr;
@@ -1438,14 +1451,22 @@ append_type(sb: *StrBuf@immortal, t: ?*Type) raises Error {
             return
         }
         Ptr k -> {
-            sb_putc(sb, '*');
-            append_type(sb, k.base);
-            return
-        }
-        OptPtr k -> {
             sb_puts(sb, "?*");
             append_type(sb, k.base);
             return
+        }
+        Refined k -> {
+            if (type_invariant_plain_nonnull(k.invariant)) {
+                match k.base.* {
+                    Ptr _ -> {
+                        sb_putc(sb, '*');
+                        append_type(sb, type_base(k.base));
+                        return
+                    }
+                    _ -> { }
+                }
+            }
+            error("internal: unsupported type refinement")
         }
         Slice k -> {
             sb_puts(sb, "[]");
@@ -1805,6 +1826,7 @@ members_align(m: ?*Member): int {
 
 type_align(t: *Type): int {
     match t.* {
+        Refined k -> type_align(k.base);
         I8 -> 1;
         Bool -> 1;
         I32 -> 4;
@@ -1832,7 +1854,7 @@ type_size(t: *Type): int {
         F64 -> 8;
         Bool -> 1;
         Ptr _p -> 8;
-        OptPtr _p -> 8;
+        Refined k -> type_size(k.base);
         Slice _p -> 8;
         OptSlice _p -> 8;
         Str -> 8;
@@ -1850,7 +1872,7 @@ type_size(t: *Type): int {
 type_base(t: *Type) raises Error: *Type {
     match t.* {
         Ptr k -> k.base;
-        OptPtr k -> k.base;
+        Refined k -> type_base(k.base);
         Slice k -> k.base;
         OptSlice k -> k.base;
         Str -> ty_i8;
@@ -1887,7 +1909,11 @@ ptr_to(base: *Type@immortal) noregion: *Type@new {
         if (e.base == base) return e.ty;
         e = e.next
     }
-    t: *Type = new Type.Ptr { base: base };
+    raw: *Type = opt_ptr_to(base);
+    value: *Obj = new_obj(".refinement-value", true);
+    value.ty = raw;
+    predicate: *Expr = new_binary(BinOp.Ne, new_var_node(value), new_null_expr());
+    t: *Type = new Type.Refined { base: raw, invariant: new TypeInvariant { value: value, predicate: predicate } };
     ptr_cache = new TyEnt { base: base, ty: t, next: ptr_cache };
     t
 }
@@ -1898,7 +1924,7 @@ opt_ptr_to(base: *Type@immortal) noregion: *Type@new {
         if (e.base == base) return e.ty;
         e = e.next
     }
-    t: *Type = new Type.OptPtr { base: base };
+    t: *Type = new Type.Ptr { base: base };
     opt_ptr_cache = new TyEnt { base: base, ty: t, next: opt_ptr_cache };
     t
 }
@@ -2311,18 +2337,106 @@ catch_reset(saved: ?*CatchFrame@immortal) {
     catch_top = saved
 }
 
-is_pointer(t: *Type): bool {
-    match t.* {
-        Ptr _p -> true;
+type_invariant_is_value(e: *Expr, value: *Obj): bool {
+    match e.kind {
+        Var k -> k.var == value;
         _ -> false
     }
 }
 
-is_opt_pointer(t: *Type): bool {
-    match t.* {
-        OptPtr _p -> true;
+type_invariant_nonnull_clause(e: *Expr, value: *Obj): bool {
+    match e.kind {
+        LogAnd k -> type_invariant_nonnull_clause(k.lhs, value) || type_invariant_nonnull_clause(k.rhs,
+            value);
+        Binary k -> {
+            if (k.op != BinOp.Ne) return false;
+            if (is_null_expr(k.rhs)) return type_invariant_is_value(k.lhs, value);
+            if (is_null_expr(k.lhs)) return type_invariant_is_value(k.rhs, value);
+            false
+        }
         _ -> false
     }
+}
+
+type_invariant_nonnull(invariant: *TypeInvariant): bool {
+    type_invariant_nonnull_clause(invariant.predicate, invariant.value)
+}
+
+type_invariant_plain_nonnull(invariant: *TypeInvariant): bool {
+    match invariant.predicate.kind {
+        Binary _ -> type_invariant_nonnull(invariant);
+        _ -> false
+    }
+}
+
+type_invariant_expr_same(
+    a: *Expr,
+    b: *Expr,
+    av: *Obj,
+    bv: *Obj
+): bool {
+    match a.kind {
+        Var x -> {
+            match b.kind {
+                Var y -> x.var == av && y.var == bv;
+                _ -> false
+            }
+        }
+        Null -> {
+            match b.kind {
+                Null -> true;
+                _ -> false
+            }
+        }
+        Num x -> {
+            match b.kind {
+                Num y -> x.val == y.val && x.form == y.form;
+                _ -> false
+            }
+        }
+        Binary x -> {
+            match b.kind {
+                Binary y -> x.op == y.op && type_invariant_expr_same(x.lhs, y.lhs,
+                    av, bv) && type_invariant_expr_same(x.rhs, y.rhs, av, bv);
+                _ -> false
+            }
+        }
+        LogAnd x -> {
+            match b.kind {
+                LogAnd y -> type_invariant_expr_same(x.lhs, y.lhs, av, bv) && type_invariant_expr_same(x.rhs,
+                    y.rhs, av, bv);
+                _ -> false
+            }
+        }
+        _ -> false
+    }
+}
+
+type_invariant_same(a: *TypeInvariant, b: *TypeInvariant): bool {
+    type_invariant_expr_same(a.predicate, b.predicate, a.value, b.value)
+}
+
+pointer_shape(t: *Type): bool {
+    match t.* {
+        Ptr _ -> true;
+        Refined k -> pointer_shape(k.base);
+        _ -> false
+    }
+}
+
+pointer_nonnull_invariant(t: *Type): bool {
+    match t.* {
+        Refined k -> type_invariant_nonnull(k.invariant) || pointer_nonnull_invariant(k.base);
+        _ -> false
+    }
+}
+
+is_pointer(t: *Type): bool {
+    pointer_shape(t) && pointer_nonnull_invariant(t)
+}
+
+is_opt_pointer(t: *Type): bool {
+    pointer_shape(t) && !pointer_nonnull_invariant(t)
 }
 
 is_any_pointer(t: *Type): bool {
@@ -2483,6 +2597,18 @@ assignable(to: ?*Type@from_n, from_n: ?*Expr) raises Error: bool {
         to2: ?*Type = decay(tt);
         if (from2 != null && to2 != null) {
             if (types_equal(from2, to2)) return true;
+            match to2.* {
+                Refined k -> {
+                    if (types_equal(from2, k.base)) return true
+                }
+                _ -> { }
+            }
+            match from2.* {
+                Refined k -> {
+                    if (types_equal(k.base, to2)) return true
+                }
+                _ -> { }
+            }
             if (is_slice(to2) && is_i8_ty(type_base(to2)) && is_str(from2)) {
                 if (is_string_literal_expr(from_n)) {
                     if (from_n != null) from_n.ty = to;
@@ -2629,7 +2755,7 @@ type_has_pointers(t: ?*Type): bool {
     if (t == null) return false;
     match t.* {
         Ptr _p -> true;
-        OptPtr _p -> true;
+        Refined k -> type_has_pointers(k.base);
         Slice _p -> true;
         OptSlice _p -> true;
         Str -> true;
@@ -2643,7 +2769,22 @@ type_has_pointers(t: ?*Type): bool {
 }
 
 types_equal(a: *Type, b: *Type) raises Error: bool {
-    if (a == b) true else if (is_fnptr(a) && is_fnptr(b)) is_opt_fnptr(a) == is_opt_fnptr(b) && fnptr_signatures_equal(fnptr_function(a),
+    if (a == b) return true;
+    match a.* {
+        Refined x -> {
+            match b.* {
+                Refined y -> return types_equal(x.base, y.base) && type_invariant_same(x.invariant,
+                    y.invariant);
+                _ -> return false
+            }
+        }
+        _ -> { }
+    }
+    match b.* {
+        Refined _ -> return false;
+        _ -> { }
+    }
+    if (is_fnptr(a) && is_fnptr(b)) is_opt_fnptr(a) == is_opt_fnptr(b) && fnptr_signatures_equal(fnptr_function(a),
         fnptr_function(b)) else if (is_int_ty(a) && is_int_ty(b)) true else if (is_i8_ty(a) && is_i8_ty(b)) true else if (is_i32_ty(a) && is_i32_ty(b)) true else if (is_u32_ty(a) && is_u32_ty(b)) true else if (is_f32_ty(a) && is_f32_ty(b)) true else if (is_f64_ty(a) && is_f64_ty(b)) true else if (is_bool_ty(a) && is_bool_ty(b)) true else if (is_noreturn_ty(a) && is_noreturn_ty(b)) true else if (is_pointer(a) && is_pointer(b)) types_equal(type_base(a),
         type_base(b)) else if (is_opt_pointer(a) && is_opt_pointer(b)) types_equal(type_base(a),
         type_base(b)) else if (is_slice(a) && is_slice(b)) types_equal(type_base(a),
