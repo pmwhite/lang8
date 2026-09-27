@@ -209,16 +209,6 @@ roots in strict mode and runs the normal runtime suites. Most dynamic accesses
 use an inline `check_index`; sites with a useful shared guard can call it once
 before later accesses. Strict compilation remains opt-in for now, so newly
 added roots should be included in the build's strict source list.
-
-`python3 tools/check_index_migrate.py <root.l8>` reports inline checks whose
-removal succeeds in an isolated strict compilation, those that need a caller
-change, and those the current verifier cannot remove. It examines direct array
-and field paths with a constant or named-path index. The tool copies the root's
-imports into a temporary directory and tests each candidate separately, so
-normal compilation stays fast and the report does not edit source files.
-Use `--limit N` for a quick sample or `--file path/to/import.l8` to focus on one
-import. `--apply` removes only successful candidates,
-then runs `./build.sh all`; it restores the original files if that build fails.
 Removing a check may strengthen the function's inferred contract, even when
 all known callers already satisfy it.
 

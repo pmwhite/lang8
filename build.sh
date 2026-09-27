@@ -555,7 +555,6 @@ do_selfhost() {
 
   step 'expect runners' python3 -m unittest tools.test_expect tools.test_lib_expect
   step 'compiler tests 3' run_compiler_tests l8c3
-  step 'check migration tests' python3 -m unittest tools.test_check_index_migrate
   step 'strict sources' strict_sources l8c3
   step 'browse check' check_browse l8c3
   step 'compiler phases' print_compiler_phases
