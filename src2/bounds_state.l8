@@ -94,8 +94,35 @@ bounds_push(state: ?*BoundsState@new, row: BoundsRow@new) raises IndexOutOfBound
     }
 }
 
-bounds_copy(state: ?*BoundsState@new, row: *BoundsRow@new) raises IndexOutOfBounds: *BoundsState@new {
-    bounds_push(state, row.*)
+// Existing fact rows are already normalized and unique. Filtering a state
+// can append them directly without normalizing and searching for duplicates.
+bounds_copy(state: ?*BoundsState@new, row: *BoundsRow@new, hint: int) raises IndexOutOfBounds: *BoundsState@new {
+    count: int = bounds_count(state);
+    storage: *BoundsStorage;
+    if (state == null) {
+        capacity: int = 4;
+        while (capacity <= hint && capacity < 64) capacity = capacity * 2;
+        storage = new BoundsStorage {
+            rows: new BoundsRow[capacity](row.*),
+            buckets: new int[capacity * 2](-1),
+            links: new int[capacity](-1),
+            used: 0
+        }
+    } else storage = bounds_storage(state, row.*);
+    storage.rows[count] = row.*;
+    numeric: BoundsNumericView = bounds_numeric_view(row);
+    slot: int = bounds_row_hash(row, numeric) & len(storage.buckets) - 1;
+    storage.links[count] = storage.buckets[slot];
+    storage.buckets[slot] = count;
+    storage.used = count + 1;
+    sum_count: int = if (state == null) 0 else state.sum_count;
+    if (row.kind == BoundsKind.SumUpper) sum_count = sum_count + 1;
+    new BoundsState {
+        storage: storage,
+        count: count + 1,
+        sum_count: sum_count,
+        implications: if (state == null) null else state.implications
+    }
 }
 
 bounds_copy_separation(state: ?*BoundsState@new, row: *BoundsRow@new, separation: ?*BoundsSeparation) raises IndexOutOfBounds: *BoundsState@new {
@@ -276,15 +303,73 @@ bounds_direct_bound(state: ?*BoundsState, wanted: BoundsNumericView, prove: bool
     best
 }
 
+bounds_rows_identical(a: *BoundsRow, b: *BoundsRow): bool {
+    a.kind == b.kind && a.index == b.index && a.array == b.array && a.value == b.value && a.left == b.left && a.right == b.right && a.separation == b.separation
+}
+
+// Fact tables copied at a branch retain a byte-for-byte prefix.
+bounds_common_prefix(a: ?*BoundsState, b: ?*BoundsState) raises IndexOutOfBounds: int {
+    if (a == null || b == null) return 0;
+    limit: int = if (a.count < b.count) a.count else b.count;
+    if (a.storage == b.storage) return limit;
+    position: int = 0;
+    matching: bool = true;
+    while (position < limit && matching) {
+        first: ?*BoundsRow = bounds_row(a, position);
+        second: ?*BoundsRow = bounds_row(b, position);
+        if (first == null || second == null || !bounds_rows_identical(first, second)) matching = false else position = position + 1
+    }
+    position
+}
+
+// Reuse the weaker snapshot when every one of its facts survives a join.
+bounds_subset_from(a: ?*BoundsState, b: ?*BoundsState, prefix: int) raises IndexOutOfBounds: bool {
+    if (a == null) return true;
+    if (a == b) return true;
+    if (b == null) return bounds_count(a) == 0 && a.implications == null;
+    if (bounds_count(a) > bounds_count(b)) return false;
+    for position in prefix..bounds_count(a) {
+        row: ?*BoundsRow = bounds_row(a, position);
+        if (row != null && !bounds_has_fact(b, row)) return false
+    }
+    rule: ?*BoundsImplication = a.implications;
+    while (rule != null) {
+        if (!bounds_has_implication(b, rule)) return false;
+        rule = rule.next
+    }
+    true
+}
+
+bounds_subset(a: ?*BoundsState, b: ?*BoundsState) raises IndexOutOfBounds: bool {
+    bounds_subset_from(a, b, bounds_common_prefix(a, b))
+}
+
 bounds_meet(a: ?*BoundsState@new, b: ?*BoundsState) raises IndexOutOfBounds: ?*BoundsState@new {
     if (a == b) return a;
+    prefix: int = bounds_common_prefix(a, b);
+    if (bounds_subset_from(a, b, prefix)) return a;
+    if (bounds_subset_from(b, a, prefix)) return b;
     result: ?*BoundsState = null;
+    if (a != null && prefix > 0) {
+        prefix_sums: int = 0;
+        for index in 0..prefix {
+            row0: ?*BoundsRow = bounds_row(a, index);
+            if (row0 != null && row0.kind == BoundsKind.SumUpper) prefix_sums = prefix_sums + 1
+        }
+        result = new BoundsState {
+            storage: a.storage,
+            count: prefix,
+            sum_count: prefix_sums,
+            implications: null
+        }
+    }
     position: int = bounds_count(a) - 1;
-    while (position >= 0) {
+    while (position >= prefix) {
         row: ?*BoundsRow = bounds_row(a, position);
         if (row != null) {
             if (bounds_has_fact(b, row)) {
-                if (!bounds_has_fact(result, row)) result = bounds_copy(result, row)
+                if (!bounds_has_fact(result, row)) result = bounds_copy(result, row,
+                    bounds_count(a))
             } else {
                 edge: BoundsNumericView = bounds_numeric_at(a, position);
                 if (edge.valid) {
@@ -320,6 +405,7 @@ bounds_meet(a: ?*BoundsState@new, b: ?*BoundsState) raises IndexOutOfBounds: ?*B
 bounds_same(a: ?*BoundsState, b: ?*BoundsState) raises IndexOutOfBounds: bool {
     if (a == b) return true;
     if (!bounds_implications_same(a, b)) return false;
+    if (a != null && b != null && a.storage == b.storage && a.count == b.count) return true;
     position: int = bounds_count(a) - 1;
     while (position >= 0) {
         row: ?*BoundsRow = bounds_row(a, position);
@@ -361,12 +447,13 @@ bounds_insert(
 // whose previous bound survives the back edge. The set is finite and strictly
 // decreases, so advancing cursors cannot cause an endless sequence of maxima.
 bounds_widen(previous: ?*BoundsState@new, incoming: ?*BoundsState) raises IndexOutOfBounds: ?*BoundsState@new {
+    if (bounds_subset(previous, incoming)) return previous;
     result: ?*BoundsState = null;
     position: int = bounds_count(previous) - 1;
     while (position >= 0) {
         row: ?*BoundsRow = bounds_row(previous, position);
         if (row != null && bounds_has_fact(incoming, row)) result = bounds_copy(result,
-            row);
+            row, bounds_count(previous));
         position = position - 1
     }
     bounds_meet_implications(previous, incoming, result)
