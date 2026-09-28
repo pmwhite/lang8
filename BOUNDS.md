@@ -1,16 +1,18 @@
 # Verified array indexing
 
-L8 should compile an array access only when it can prove `0 <= i < len(a)`.
-An unproved access is an error with a diagnostic identifying the missing fact.
-Ordinary control flow can establish that fact: a guard may return or raise when
-the index is invalid, and code after the guard may index the array.
+L8 omits a bounds check when it can prove `0 <= i < len(a)`. An unproved
+access performs a runtime check and raises the built-in `IndexOutOfBounds`
+exception if the index is invalid. The containing function must declare
+`raises IndexOutOfBounds`, or a matching `try`/`with` arm must catch it.
+Ordinary control flow can establish the fact: a guard may return or raise when
+the index is invalid, and code after the guard may index the array without an
+exception effect.
 
 The programmer-facing concept is `index_for(a)`: an integer valid for a particular
 array value. A function can take or return such an index. Its callers may satisfy
 the requirement through a guard, a loop, a constructively valid index, or their
-own parameter requirement. The compiler should infer function requirements from
-bodies where practical. Explicit contracts are available when inference needs
-help or an API author wants to state the requirement.
+own parameter requirement. Explicit contracts can state an entry requirement;
+an access without a proof uses the exception effect.
 
 The verifier tracks numeric ranges, comparisons with array lengths, and small
 constant offsets for lookahead. It learns from assignments, branches, short-
@@ -33,23 +35,22 @@ range reasoning, and Wuffs' requirement for a compile-time proof of each access.
 
 ## Initial implementation
 
-Stage 2 verifies bounds during every `compile` and `build`. It rejects unproved
-index expressions and omits their generated runtime checks.
-The compiler does not warn about redundant `check_index` calls. A check can
-appear provable at its call site because its own earlier execution established
-the facts needed on a later loop iteration. Verify each proposed removal in
-the complete program that imports the function.
+Stage 2 verifies bounds during every `compile` and `build`. It emits runtime
+checks for unproved direct accesses and omits them for proved accesses. An
+unproved access needs `raises IndexOutOfBounds` on its function or a matching
+`try`/`with` arm. After a successful element write to an array field of a
+record with an invariant, the verifier can use its index bounds to check a
+subsequent count update.
 
 `index_for` is a reserved keyword. `i: index_for(a)` declares a function parameter
-whose value is valid for array parameter `a`. The compiler also infers this
-requirement from direct indexing and forwards it through ordinary calls.
-For relationships that inference cannot select, a function can state an entry
-contract after its return type:
+whose value is valid for array parameter `a`. Explicit contracts and `index_for`
+parameters carry this requirement through ordinary calls.
+A function can state an entry contract after its return type:
 
 ```l8
 advance(a: []int, n: int): int requires (0 <= n && n <= len(a)) {
     if (n == len(a)) return n;
-    a[check_index(a, n)] = 1;
+    a[n] = 1;
     n + 1
 }
 ```
@@ -70,15 +71,11 @@ common cursor loops provide local proofs. A `while` loop may carry
 the compiler checks it at entry and after each iteration. Invariants are pure
 compile-time conditions.
 
-The compiler also infers requirements for a constant access to an array
-parameter or its direct field (`out[1]` requires `len(out) >= 2`), and for a
-direct field index into a direct field array of the same parameter
-(`b.data[b.cursor]` requires `0 <= b.cursor < len(b.data)`). These requirements
-propagate through direct calls. Callers can satisfy them with known lengths or
-guards; a call that cannot prove one is rejected. Writes that may invalidate a
-required fact still discard it within the callee, so an entry requirement does
-not justify an access after such a write. Nested paths, arithmetic indices,
-and indirect calls carrying these requirements are outside this inference pass.
+An unproved access to an array parameter or its direct field raises
+`IndexOutOfBounds`. An explicit `requires` clause can make the access proved,
+and direct callers must establish that clause. Writes that invalidate a
+required fact discard it within the callee, so an entry requirement does not
+justify an access after such a write.
 
 Length comparisons also carry relationships between local arrays: after
 `len(a) == len(b)`, a loop over `a` can index `b` while both lengths remain
@@ -98,8 +95,9 @@ field through a different parameter can preserve the fact if those parameters
 are distinct. The compiler infers this separation requirement only when a
 later bounds proof uses the preserved fact, then propagates the requirement
 through callers. A caller can satisfy it with distinct fresh records or a
-guard such as `if (a == b) return`, and a function can instead use
-`check_index` after the call. An unproved call is rejected. Nested paths and
+guard such as `if (a == b) return`, and a function can declare an exception
+effect for an unproved access after the call. An unproved contract call is
+rejected. Nested paths and
 unknown aliases remain conservative. Automatically inferred cross-function
 count/capacity requirements remain future work; the explicit record invariants
 below provide a durable relationship when a type declares one.
@@ -151,19 +149,13 @@ guarantee. The current verifier already tracks relations such as
 record invariant differs by requiring that relation for every value of the
 type, at construction and after each relevant write.
 
-`check_index(a, i)` is the explicit runtime bridge. It checks
-`0 <= i < len(a)` once and exits with status 1 on failure, as ordinary checked
-indexing does. It returns the checked index, so an access can use
-`a[check_index(a, i)]`. For variable arguments, a standalone call also establishes
-a reusable fact: strict mode accepts later `a[i]` and calls requiring
-`i: index_for(a)` until a relevant value changes. Stable field and index
-expressions are accepted inline; an expression with an arbitrary function call
-must first be bound to a variable so the value checked is the value used. A
-normal guard remains useful when the caller needs to return or raise a
-particular error.
+Direct indexing is the runtime bridge. If the verifier cannot prove an index,
+the generated code checks `0 <= i < len(a)` and raises `IndexOutOfBounds` on
+failure. A guard can establish a reusable fact for later accesses or satisfy
+an `index_for(a)` parameter:
 
 ```l8
-check_index(a, i);
+if (i < 0 || i >= len(a)) raise IndexOutOfBounds;
 use(a[i]);
 ```
 
@@ -172,8 +164,7 @@ the result, parameters, and stable field paths. A caller can therefore use a
 returned in-bounds index, or carry a cursor relationship through
 `i = advance(a, i)`. It combines multiple successful return paths by keeping
 only their common bounds. Arithmetic return expressions are summarized only
-when the verifier proves they cannot wrap; a `check_index` proved to fail on a
-guarded path is not counted as a successful return. The projection considers
+when the verifier proves they cannot wrap; a path that raises is not counted as a successful return. The projection considers
 every fact at each exit, plus parameter and array-length terms, then retains
 only bounds shared by all successful exits. Difference searches use a bounded work queue, and reported offsets remain
 bounded to keep compilation predictable. It does not yet
@@ -182,30 +173,19 @@ types or verify the spans used by bulk operations.
 
 Difference-constraint searches run in a reclaimable `region`. Their temporary
 integer tables are discarded after each proof; searches do not construct AST
-expressions or allocate individual graph nodes and edges. Each function is analyzed under its declared and inferred entry
-requirements; the verifier no longer traverses callees separately for each
-caller context.
+expressions or allocate individual graph nodes and edges. Each function is
+analyzed under its declared entry requirements; the verifier no longer
+traverses callees separately for each caller context.
 
-During requirement inference, a cursor assignment with an exact return offset
-keeps its relationship to the function's entry cursor or a known initial
-constant. If a later access needs `i + 5 < len(a)` after two six-element writes,
-the compiler can infer the entry requirement `i_entry + 17 < len(a)`. It keeps
-the smallest and largest offsets for each array and cursor; together they
-cover the intermediate accesses. An unrelated assignment drops the cursor
-relationship. Dynamic loops still need a guard or invariant that establishes
-capacity for each iteration.
-
-The verifier deliberately rejects patterns it cannot express, including some
-nontrivial index arithmetic.
+Unproved index arithmetic uses the exception effect. A guard or loop invariant
+can establish capacity when an effect-free access is needed.
 
 ## Migration
 
 The standard-library tests, both compiler stages, and all shipped program and
 test roots compile with bounds verification. `./build.sh all` runs the compiler
-and runtime suites. Most dynamic accesses use an inline `check_index`; sites
-with a useful shared guard can call it once before later accesses.
-Removing a check may strengthen the function's inferred contract, even when
-all known callers already satisfy it.
+and runtime suites. Dynamic accesses use direct indexing and declare the
+exception effect where the verifier cannot prove their bounds.
 
 
 ## Checker architecture
@@ -239,7 +219,7 @@ into the bound on insertion, and strict comparisons subtract one. Every numeric
 row has the same `Difference` kind; only separation, freshness, and cursor
 provenance use other kinds. Numeric lookup, copying, invalidation, and branch
 joins share this representation. Thus a length guard and a
-successful `check_index` can contribute the same fact at a join. Two different
+successful guards can contribute the same fact at a join. Two different
 bounds for the same pair join at the weaker bound. Copying a returned or joined
 integer preserves its relations to other stable values.
 
@@ -304,8 +284,7 @@ numeric domain when possible. Add a separate fact kind only for information the
 difference domain cannot represent, such as freshness or cursor provenance.
 Each extension must specify mutation dependencies, branch-join behavior, and
 loop-widening behavior. A new proof must respect machine arithmetic and the
-identity of the values checked; no rule may turn `check_index` into an assumed
-contract.
+identity of the values checked; no rule may turn a runtime check into an assumed contract.
 
 `tests/compiler/bounds_engine_tables.l8` compares the solver with an independent
 all-pairs reference on 40 feasible generated graphs with negative edges. It also
@@ -338,9 +317,6 @@ Joins and widening use pure entailment; proof queries may additionally discharge
 alias-separation obligations and record them in inferred contracts.
 
 The old positive-offset guard shortcut is intentionally removed. The shared
-arithmetic rules may infer a stronger entry contract for a guarded lookahead,
-and some accesses need an explicit `check_index` again. Two HTTP parser accesses
-now use that workaround. `tests/pending/bounds_guarded_positive_offset.l8`
-records a safe short-buffer call accepted by the preceding checker but currently
-rejected. Recover this through general range/no-wrap reasoning rather than a
-separate array-offset fact kind.
+arithmetic rules may prove guarded lookahead; other accesses use the exception
+effect. Recover missing proofs through general range/no-wrap reasoning rather
+than a separate array-offset fact kind.

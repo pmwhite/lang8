@@ -14,7 +14,8 @@ tag compiler_internal;
 // `type E: i32, 192 = ...` sets a minimum size (C union tail padding). Match still enforces the arm.
 // *T is one object: p.* only, no p[i]. []T is a thin pointer with len at -8.
 // ?*T / ?[]T are null or the non-optional form; `if (x != null)` and `x or y` unwrap.
-// String literals and argv elements are str. str indexing is bounds checked and its sentinel is hidden.
+// String literals and argv elements are str. Its sentinel is hidden. An
+// unproved index raises IndexOutOfBounds; proved indexes omit the check.
 // `as` only forgets a claim (same pointee): []T/*T → *T or ?*T.
 // A span of an existing []T is the array plus a start index.
 // Globals: `name: type = e` is required. Constants go in .data; other inits run once before main.
@@ -60,7 +61,7 @@ tag compiler_internal;
 // n must fit the 512MiB heap: negative or wrapping n * size is rejected.
 // Calls follow SysV: six integer registers, eight xmm registers, then the stack. Hidden sret is the first incoming integer slot.
 // Pipeline: parse (syntax, including comments) → typecheck (fills Obj/Member/Function) →
-// reachability/unused local + raises/noreturn checks → codegen. The `unused`
+// reachability/unused local → bounds and raises checks → codegen. The `unused`
 // command combines reachability across entry points before reporting unused functions.
 // Parse does not load imports or require types; a later pass follows imports for compile.
 // Fmt prints the same tree with one canonical layout.
@@ -881,6 +882,10 @@ array_cache: ?*ArrEnt = null;
 
 oob_lab: int = 0;
 
+index_oob_lab: int = 0;
+
+index_exn_tag: int = 0;
+
 next_exn_tag: int = 0;
 
 field_list_size: int = 0;
@@ -983,20 +988,20 @@ streq_n(
     b: []i8,
     bi: int,
     n: int
-): bool {
+) raises IndexOutOfBounds: bool {
     for i in 0..n {
-        if (a[check_index(a, ai + i)] != b[check_index(b, bi + i)]) return false
+        if (a[ai + i] != b[bi + i]) return false
     }
     true
 }
 
-streq(a: []i8, b: []i8): bool {
+streq(a: []i8, b: []i8) raises IndexOutOfBounds: bool {
     if (a == b) return true;
     if (len(a) != len(b)) return false;
     streq_n(a, 0, b, 0, len(a))
 }
 
-add_need(name: []i8@new) noregion {
+add_need(name: []i8@new) noregion raises IndexOutOfBounds {
     p: ?*NeedLib = g_need;
     while (p != null) {
         if (streq(p.name, name)) return;
@@ -1008,7 +1013,7 @@ add_need(name: []i8@new) noregion {
     g_need_tail = n
 }
 
-add_native(path: []i8@new) noregion {
+add_native(path: []i8@new) noregion raises IndexOutOfBounds {
     p: ?*NeedLib = g_native;
     while (p != null) {
         if (streq(p.name, path)) return;
@@ -1025,13 +1030,13 @@ name_eq_span(
     s: []i8,
     off: int,
     n: int
-): bool {
+) raises IndexOutOfBounds: bool {
     if (len(name) != n) false else streq_n(name, 0, s, off, n)
 }
 
-hash_n(s: []i8, off: int, n: int): int {
+hash_n(s: []i8, off: int, n: int) raises IndexOutOfBounds: int {
     h: int = 5381;
-    for i in 0..n h = (h << 5) + h + s[check_index(s, off + i)] as int;
+    for i in 0..n h = (h << 5) + h + s[off + i] as int;
     h
 }
 
@@ -1046,13 +1051,13 @@ sym_bucket(h: int): int {
     h & SYM_SIZE - 1
 }
 
-clear_sym_tables() {
+clear_sym_tables() raises IndexOutOfBounds {
     for i in 0..SYM_SIZE {
-        fn_buckets[check_index(fn_buckets, i)].head = null;
-        global_buckets[check_index(global_buckets, i)].head = null;
-        struct_buckets[check_index(struct_buckets, i)].head = null;
-        enum_buckets[check_index(enum_buckets, i)].head = null;
-        exn_buckets[check_index(exn_buckets, i)].head = null
+        fn_buckets[i].head = null;
+        global_buckets[i].head = null;
+        struct_buckets[i].head = null;
+        enum_buckets[i].head = null;
+        exn_buckets[i].head = null
     }
 }
 
@@ -1082,13 +1087,13 @@ emit(s: []i8) {
     emit_len = emit_len + n
 }
 
-emit_ch(c: i8) {
+emit_ch(c: i8) raises IndexOutOfBounds {
     if (emit_len >= emit_cap) emit_flush();
-    emit_buf[check_index(emit_buf, emit_len)] = c;
+    emit_buf[emit_len] = c;
     emit_len = emit_len + 1
 }
 
-emit_num(n: int) {
+emit_num(n: int) raises IndexOutOfBounds {
     buf: []i8 = new i8[32](0i8);
     neg: int = 0;
     if (n < 0) {
@@ -1101,19 +1106,19 @@ emit_num(n: int) {
     }
     i: int = 0;
     while (n > 0) {
-        buf[check_index(buf, i)] = '0' + (n % 10) trunc i8;
+        buf[i] = '0' + (n % 10) trunc i8;
         n = n / 10;
         i = i + 1
     }
     need: int = i + neg;
     if (emit_len + need > emit_cap) emit_flush();
     if (neg != 0) {
-        emit_buf[check_index(emit_buf, emit_len)] = '-';
+        emit_buf[emit_len] = '-';
         emit_len = emit_len + 1
     }
     while (i > 0) {
         i = i - 1;
-        emit_buf[check_index(emit_buf, emit_len)] = buf[check_index(buf, i)];
+        emit_buf[emit_len] = buf[i];
         emit_len = emit_len + 1
     }
 }
@@ -1159,12 +1164,12 @@ print_error_at(
     src_len: int,
     pos: int,
     msg: []i8
-) {
+) raises IndexOutOfBounds {
     line: int = 1;
     col: int = 1;
     i: int = 0;
     while (i < pos && i < src_len) {
-        if (src[check_index(src, i)] == '\n') {
+        if (src[i] == '\n') {
             line = line + 1;
             col = 1
         } else col = col + 1;
@@ -1187,12 +1192,12 @@ print_warning_at(
     src_len: int,
     pos: int,
     msg: []i8
-) {
+) raises IndexOutOfBounds {
     line: int = 1;
     col: int = 1;
     i: int = 0;
     while (i < pos && i < src_len) {
-        if (src[check_index(src, i)] == '\n') {
+        if (src[i] == '\n') {
             line = line + 1;
             col = 1
         } else col = col + 1;
@@ -1209,7 +1214,7 @@ print_warning_at(
     raw::raw_write(2, "\n")
 }
 
-warning_at(file: int, pos: int, msg: []i8) {
+warning_at(file: int, pos: int, msg: []i8) raises IndexOutOfBounds {
     f: ?*ImportedFile = imported_files;
     while (f != null) {
         if (f.id == file) {
@@ -1227,7 +1232,7 @@ warn_unused_function(
     src_len: int,
     pos: int,
     name: []i8
-) {
+) raises IndexOutOfBounds {
     sb: *StrBuf = sb_new();
     sb_puts(sb, "unused function ");
     sb_puts(sb, name);
@@ -1239,7 +1244,7 @@ warn_unused_local(
     pos: int,
     fn_name: []i8,
     name: []i8
-) {
+) raises IndexOutOfBounds {
     sb: *StrBuf = sb_new();
     sb_puts(sb, "unused local ");
     sb_puts(sb, name);
@@ -1248,14 +1253,14 @@ warn_unused_local(
     warning_at(file, pos, sb_finish(sb))
 }
 
-warn_unnecessary_return(file: int, pos: int, fn_name: []i8) {
+warn_unnecessary_return(file: int, pos: int, fn_name: []i8) raises IndexOutOfBounds {
     sb: *StrBuf = sb_new();
     sb_puts(sb, "unnecessary return in ");
     sb_puts(sb, fn_name);
     warning_at(file, pos, sb_finish(sb))
 }
 
-warn_ignored_value(file: int, pos: int, fn_name: []i8) {
+warn_ignored_value(file: int, pos: int, fn_name: []i8) raises IndexOutOfBounds {
     sb: *StrBuf = sb_new();
     sb_puts(sb, "ignored return value in ");
     sb_puts(sb, fn_name);
@@ -1288,9 +1293,9 @@ sb_grow(sb: *StrBuf@new, need: int) {
     sb.cap = ncap
 }
 
-sb_putc(sb: *StrBuf@new, c: i8) {
+sb_putc(sb: *StrBuf@new, c: i8) raises IndexOutOfBounds {
     sb_grow(sb, 1);
-    sb.data[check_index(sb.data, sb.len)] = c;
+    sb.data[sb.len] = c;
     sb.len = sb.len + 1
 }
 
@@ -1301,7 +1306,7 @@ sb_puts(sb: *StrBuf@new, s: []i8) {
     sb.len = sb.len + n
 }
 
-sb_uint(sb: *StrBuf@new, n: int) {
+sb_uint(sb: *StrBuf@new, n: int) raises IndexOutOfBounds {
     if (n < 0) {
         sb_putc(sb, '-');
         n = 0 - n
@@ -1333,10 +1338,10 @@ browse_hash(file: int, pos: int): int {
     h % BROWSE_BUCK
 }
 
-browse_find(file: int, pos: int): ?*BrowseOcc {
+browse_find(file: int, pos: int) raises IndexOutOfBounds: ?*BrowseOcc {
     if (len(browse_buckets) == 0) return null;
     b: int = browse_hash(file, pos);
-    o: ?*BrowseOcc = browse_buckets[check_index(browse_buckets, b)].head;
+    o: ?*BrowseOcc = browse_buckets[b].head;
     while (o != null) {
         if (o.file == file && o.pos == pos) return o;
         o = o.hash_next
@@ -1352,7 +1357,7 @@ browse_add(
     is_def: bool,
     cls: int,
     typ: []i8@new
-) noregion {
+) noregion raises IndexOutOfBounds {
     if (n <= 0) return;
     if (browse_find(file, pos) != null) return;
     if (len(browse_buckets) == 0) browse_buckets = new BrowseBucket[4096](BrowseBucket { head: null });
@@ -1364,18 +1369,18 @@ browse_add(
         is_def: is_def,
         cls: cls,
         typ: typ,
-        hash_next: browse_buckets[check_index(browse_buckets, b)].head
+        hash_next: browse_buckets[b].head
     };
     browse_buckets[b].head = o
 }
 
-browse_type_str(t: ?*Type) noregion raises Error: []i8@new {
+browse_type_str(t: ?*Type) noregion raises Error, IndexOutOfBounds: []i8@new {
     sb: *StrBuf = sb_new();
     append_type(sb, t);
     sb_finish(sb)
 }
 
-browse_fn_str(fn: *Function) noregion raises Error: []i8@new {
+browse_fn_str(fn: *Function) noregion raises Error, IndexOutOfBounds: []i8@new {
     sb: *StrBuf = sb_new();
     sb_puts(sb, "fn ");
     sb_puts(sb, fn.name);
@@ -1409,7 +1414,7 @@ browse_reset() noregion {
     browse_buckets = new BrowseBucket[4096](BrowseBucket { head: null })
 }
 
-append_type(sb: *StrBuf@immortal, t: ?*Type) raises Error {
+append_type(sb: *StrBuf@immortal, t: ?*Type) raises Error, IndexOutOfBounds {
     if (t == null) {
         sb_puts(sb, "<unknown>");
         return
@@ -1509,7 +1514,7 @@ append_type(sb: *StrBuf@immortal, t: ?*Type) raises Error {
     }
 }
 
-error_ty(msg: []i8, t: ?*Type) noregion raises Error: noreturn {
+error_ty(msg: []i8, t: ?*Type) noregion raises Error, IndexOutOfBounds: noreturn {
     sb: *StrBuf = sb_new();
     sb_puts(sb, msg);
     sb_puts(sb, ": ");
@@ -1517,7 +1522,7 @@ error_ty(msg: []i8, t: ?*Type) noregion raises Error: noreturn {
     error(sb_finish(sb))
 }
 
-error_ty_expr(e: *Expr, msg: []i8, t: ?*Type) noregion raises Error: noreturn {
+error_ty_expr(e: *Expr, msg: []i8, t: ?*Type) noregion raises Error, IndexOutOfBounds: noreturn {
     sb: *StrBuf = sb_new();
     sb_puts(sb, msg);
     sb_puts(sb, ": ");
@@ -1525,7 +1530,7 @@ error_ty_expr(e: *Expr, msg: []i8, t: ?*Type) noregion raises Error: noreturn {
     error_at_file(e.file, e.pos, sb_finish(sb))
 }
 
-error_ty_vs(msg: []i8, a: ?*Type, b: ?*Type) noregion raises Error: noreturn {
+error_ty_vs(msg: []i8, a: ?*Type, b: ?*Type) noregion raises Error, IndexOutOfBounds: noreturn {
     sb: *StrBuf = sb_new();
     sb_puts(sb, msg);
     sb_puts(sb, ": ");
@@ -1540,7 +1545,7 @@ error_ty_vs_expr(
     msg: []i8,
     a: ?*Type,
     b: ?*Type
-) noregion raises Error: noreturn {
+) noregion raises Error, IndexOutOfBounds: noreturn {
     sb: *StrBuf = sb_new();
     sb_puts(sb, msg);
     sb_puts(sb, ": ");
@@ -1550,7 +1555,7 @@ error_ty_vs_expr(
     error_at_file(e.file, e.pos, sb_finish(sb))
 }
 
-error_have_want(msg: []i8, have: ?*Type, want: ?*Type) noregion raises Error: noreturn {
+error_have_want(msg: []i8, have: ?*Type, want: ?*Type) noregion raises Error, IndexOutOfBounds: noreturn {
     sb: *StrBuf = sb_new();
     sb_puts(sb, msg);
     sb_puts(sb, ": have ");
@@ -1560,7 +1565,7 @@ error_have_want(msg: []i8, have: ?*Type, want: ?*Type) noregion raises Error: no
     error(sb_finish(sb))
 }
 
-error_have_and(msg: []i8, a: ?*Type, b: ?*Type) noregion raises Error: noreturn {
+error_have_and(msg: []i8, a: ?*Type, b: ?*Type) noregion raises Error, IndexOutOfBounds: noreturn {
     sb: *StrBuf = sb_new();
     sb_puts(sb, msg);
     sb_puts(sb, ": have ");
@@ -1570,7 +1575,7 @@ error_have_and(msg: []i8, a: ?*Type, b: ?*Type) noregion raises Error: noreturn 
     error(sb_finish(sb))
 }
 
-append_expr_ty(sb: *StrBuf@immortal, e: ?*Expr) raises Error {
+append_expr_ty(sb: *StrBuf@immortal, e: ?*Expr) raises Error, IndexOutOfBounds {
     if (e == null) {
         append_type(sb, null);
         return
@@ -1586,7 +1591,7 @@ append_expr_ty(sb: *StrBuf@immortal, e: ?*Expr) raises Error {
     append_type(sb, null)
 }
 
-error_have_expr_want(msg: []i8, have: ?*Expr, want: ?*Type) noregion raises Error: noreturn {
+error_have_expr_want(msg: []i8, have: ?*Expr, want: ?*Type) noregion raises Error, IndexOutOfBounds: noreturn {
     sb: *StrBuf = sb_new();
     sb_puts(sb, msg);
     sb_puts(sb, ": have ");
@@ -1603,7 +1608,7 @@ error_have_expr_want_at(
     msg: []i8,
     have: ?*Expr,
     want: ?*Type
-) noregion raises Error: noreturn {
+) noregion raises Error, IndexOutOfBounds: noreturn {
     sb: *StrBuf = sb_new();
     sb_puts(sb, msg);
     sb_puts(sb, ": have ");
@@ -1613,7 +1618,7 @@ error_have_expr_want_at(
     error_at_file(file, pos, sb_finish(sb))
 }
 
-emit_num_fd(fd: int, n: int) {
+emit_num_fd(fd: int, n: int) raises IndexOutOfBounds {
     buf: []i8 = new i8[32](0i8);
     neg: bool = false;
     if (n < 0) {
@@ -1627,7 +1632,7 @@ emit_num_fd(fd: int, n: int) {
     }
     i: int = 0;
     while (n > 0) {
-        buf[check_index(buf, i)] = '0' + (n % 10) trunc i8;
+        buf[i] = '0' + (n % 10) trunc i8;
         n = n / 10;
         i = i + 1
     }
@@ -1637,7 +1642,7 @@ emit_num_fd(fd: int, n: int) {
     }
     while (i > 0) {
         i = i - 1;
-        ch: i8 = buf[check_index(buf, i)];
+        ch: i8 = buf[i];
         raw::raw_write_byte(fd, ch)
     }
 }
@@ -1707,7 +1712,7 @@ init_runtime() noregion {
     str_count = 0
 }
 
-read_file(path: []i8) raises Error: []i8@new {
+read_file(path: []i8) raises Error, IndexOutOfBounds: []i8@new {
     fd: int = open_path(path, 0, 0);
     if (fd < 0) error("cannot open file");
     cap: int = 524288;
@@ -1724,7 +1729,7 @@ read_file(path: []i8) raises Error: []i8@new {
         }
         r: int = read(fd, buf, n, room - 1);
         if (r <= 0) {
-            buf[check_index(buf, n)] = 0i8;
+            buf[n] = 0i8;
             close(fd);
             source_len = n;
             return buf
@@ -1733,7 +1738,7 @@ read_file(path: []i8) raises Error: []i8@new {
     }
 }
 
-normalize_path(path: []i8): []i8@new {
+normalize_path(path: []i8) raises IndexOutOfBounds: []i8@new {
     p: []i8 = path;
     n: int = len(p);
     out: []i8 = new i8[n + 2](0i8);
@@ -1753,22 +1758,21 @@ normalize_path(path: []i8): []i8@new {
             while (i < n && p[i] != '/') i = i + 1;
             part_len: int = i - start;
             is_dot: bool = part_len == 1 && p[start] == '.';
-            is_dotdot: bool = part_len == 2 && p[start] == '.' && p[check_index(p,
-                start + 1)] == '.';
+            is_dotdot: bool = part_len == 2 && p[start] == '.' && p[start + 1] == '.';
             if (is_dot) {
                 /* nothing */
             } else if (is_dotdot && nseg > 0) {
                 nseg = nseg - 1;
-                out_len = starts[check_index(starts, nseg)]
+                out_len = starts[nseg]
             } else {
-                starts[check_index(starts, nseg)] = out_len;
+                starts[nseg] = out_len;
                 nseg = nseg + 1;
-                if (out_len > 0 && out[check_index(out, out_len - 1)] != '/') {
-                    out[check_index(out, out_len)] = '/';
+                if (out_len > 0 && out[out_len - 1] != '/') {
+                    out[out_len] = '/';
                     out_len = out_len + 1
                 }
                 for j in 0..part_len {
-                    out[check_index(out, out_len)] = p[check_index(p, start + j)];
+                    out[out_len] = p[start + j];
                     out_len = out_len + 1
                 }
             }
@@ -1783,7 +1787,7 @@ normalize_path(path: []i8): []i8@new {
     result
 }
 
-resolve_import_path(base: []i8, imported: []i8): []i8@new {
+resolve_import_path(base: []i8, imported: []i8) raises IndexOutOfBounds: []i8@new {
     if (len(imported) > 0 && imported[0] == '/') return normalize_path(imported);
     base_len: int = len(base);
     slash: int = 0 - 1;
@@ -1795,14 +1799,14 @@ resolve_import_path(base: []i8, imported: []i8): []i8@new {
     joined: []i8 = new i8[slash + 1 + ilen](0i8);
     j: int = 0;
     while (j <= slash) {
-        joined[check_index(joined, j)] = base[check_index(base, j)];
+        joined[j] = base[j];
         j = j + 1
     }
     memcpy(joined, j, imported, 0, ilen);
     normalize_path(joined)
 }
 
-mark_imported(path: []i8@immortal) noregion: bool {
+mark_imported(path: []i8@immortal) noregion raises IndexOutOfBounds: bool {
     f: ?*ImportedFile = imported_files;
     while (f != null) {
         if (streq(f.path, path)) return false;
@@ -1912,7 +1916,7 @@ type_exn_def(t: *Type) raises Error: *ExnDef {
     }
 }
 
-ptr_to(base: *Type@immortal) noregion: *Type@new {
+ptr_to(base: *Type@immortal) noregion raises IndexOutOfBounds: *Type@new {
     e: ?*TyEnt = ptr_cache;
     while (e != null) {
         if (e.base == base) return e.ty;
@@ -2003,9 +2007,9 @@ exn_type(ed: *ExnDef@new): *Type@new {
     }
 }
 
-find_struct_span(s: []i8, off: int, n: int): ?*StructDef {
+find_struct_span(s: []i8, off: int, n: int) raises IndexOutOfBounds: ?*StructDef {
     b: int = sym_bucket(hash_n(s, off, n));
-    sd: ?*StructDef = struct_buckets[check_index(struct_buckets, b)].head;
+    sd: ?*StructDef = struct_buckets[b].head;
     while (sd != null) {
         if (name_eq_span(sd.name, s, off, n)) return sd;
         sd = sd.hash_next
@@ -2013,13 +2017,13 @@ find_struct_span(s: []i8, off: int, n: int): ?*StructDef {
     null
 }
 
-find_struct(name: []i8): ?*StructDef {
+find_struct(name: []i8) raises IndexOutOfBounds: ?*StructDef {
     find_struct_span(name, 0, len(name))
 }
 
-find_enum_span(s: []i8, off: int, n: int): ?*EnumDef {
+find_enum_span(s: []i8, off: int, n: int) raises IndexOutOfBounds: ?*EnumDef {
     b: int = sym_bucket(hash_n(s, off, n));
-    e: ?*EnumDef = enum_buckets[check_index(enum_buckets, b)].head;
+    e: ?*EnumDef = enum_buckets[b].head;
     while (e != null) {
         if (name_eq_span(e.name, s, off, n)) return e;
         e = e.hash_next
@@ -2027,13 +2031,13 @@ find_enum_span(s: []i8, off: int, n: int): ?*EnumDef {
     null
 }
 
-find_enum(name: []i8): ?*EnumDef {
+find_enum(name: []i8) raises IndexOutOfBounds: ?*EnumDef {
     find_enum_span(name, 0, len(name))
 }
 
-find_exn_span(s: []i8, off: int, n: int): ?*ExnDef {
+find_exn_span(s: []i8, off: int, n: int) raises IndexOutOfBounds: ?*ExnDef {
     b: int = sym_bucket(hash_n(s, off, n));
-    e: ?*ExnDef = exn_buckets[check_index(exn_buckets, b)].head;
+    e: ?*ExnDef = exn_buckets[b].head;
     while (e != null) {
         if (name_eq_span(e.name, s, off, n)) return e;
         e = e.hash_next
@@ -2041,48 +2045,47 @@ find_exn_span(s: []i8, off: int, n: int): ?*ExnDef {
     null
 }
 
-find_exn(name: []i8): ?*ExnDef {
+find_exn(name: []i8) raises IndexOutOfBounds: ?*ExnDef {
     find_exn_span(name, 0, len(name))
 }
 
-hash_put_struct(sd: *StructDef@immortal) {
+hash_put_struct(sd: *StructDef@immortal) raises IndexOutOfBounds {
     b: int = sym_bucket(hash_str(sd.name));
-    sd.hash_next = struct_buckets[check_index(struct_buckets, b)].head;
+    sd.hash_next = struct_buckets[b].head;
     struct_buckets[b].head = sd
 }
 
-hash_put_enum(ed: *EnumDef@immortal) {
+hash_put_enum(ed: *EnumDef@immortal) raises IndexOutOfBounds {
     b: int = sym_bucket(hash_str(ed.name));
-    ed.hash_next = enum_buckets[check_index(enum_buckets, b)].head;
+    ed.hash_next = enum_buckets[b].head;
     enum_buckets[b].head = ed
 }
 
-hash_put_exn(ed: *ExnDef@immortal) {
+hash_put_exn(ed: *ExnDef@immortal) raises IndexOutOfBounds {
     b: int = sym_bucket(hash_str(ed.name));
-    ed.hash_next = exn_buckets[check_index(exn_buckets, b)].head;
+    ed.hash_next = exn_buckets[b].head;
     exn_buckets[b].head = ed
 }
 
-hash_put_fn(fn: *Function@immortal) {
+hash_put_fn(fn: *Function@immortal) raises IndexOutOfBounds {
     b: int = sym_bucket(hash_str(fn.name));
-    fn.hash_next = fn_buckets[check_index(fn_buckets, b)].head;
+    fn.hash_next = fn_buckets[b].head;
     fn_buckets[b].head = fn
 }
 
-hash_put_global(o: *Obj@immortal) {
+hash_put_global(o: *Obj@immortal) raises IndexOutOfBounds {
     b: int = sym_bucket(hash_str(o.name));
-    o.hash_next = global_buckets[check_index(global_buckets, b)].head;
+    o.hash_next = global_buckets[b].head;
     global_buckets[b].head = o
 }
 
-hash_remove_struct(name: []i8) {
+hash_remove_struct(name: []i8) raises IndexOutOfBounds {
     b: int = sym_bucket(hash_str(name));
     prev: ?*StructDef = null;
-    s: ?*StructDef = struct_buckets[check_index(struct_buckets, b)].head;
+    s: ?*StructDef = struct_buckets[b].head;
     while (s != null) {
         if (streq(s.name, name)) {
-            if (prev != null) prev.hash_next = s.hash_next else struct_buckets[check_index(struct_buckets,
-                b)].head = s.hash_next;
+            if (prev != null) prev.hash_next = s.hash_next else struct_buckets[b].head = s.hash_next;
             return
         }
         prev = s;
@@ -2090,7 +2093,7 @@ hash_remove_struct(name: []i8) {
     }
 }
 
-remove_struct(name: []i8) {
+remove_struct(name: []i8) raises IndexOutOfBounds {
     hash_remove_struct(name);
     prev: ?*StructDef = null;
     s: ?*StructDef = struct_defs;
@@ -2104,7 +2107,7 @@ remove_struct(name: []i8) {
     }
 }
 
-get_or_create_struct(name: []i8@new) noregion: *StructDef@new {
+get_or_create_struct(name: []i8@new) noregion raises IndexOutOfBounds: *StructDef@new {
     sd: ?*StructDef = find_struct(name);
     if (sd != null) return sd;
     created: *StructDef = new StructDef {
@@ -2126,7 +2129,7 @@ get_or_create_struct(name: []i8@new) noregion: *StructDef@new {
     created
 }
 
-get_or_create_enum(name: []i8@new) noregion: *EnumDef@new {
+get_or_create_enum(name: []i8@new) noregion raises IndexOutOfBounds: *EnumDef@new {
     ed: ?*EnumDef = find_enum(name);
     if (ed != null) return ed;
     created: *EnumDef = new EnumDef {
@@ -2158,7 +2161,7 @@ rebind_struct_stub_to_enum(sd: *StructDef@ed, ed: *EnumDef@sd) {
     }
 }
 
-find_variant(ed: *EnumDef, name: []i8): ?*Variant@ed {
+find_variant(ed: *EnumDef, name: []i8) raises IndexOutOfBounds: ?*Variant@ed {
     v: ?*Variant = ed.variants;
     while (v != null) {
         if (streq(v.name, name)) return v;
@@ -2167,28 +2170,28 @@ find_variant(ed: *EnumDef, name: []i8): ?*Variant@ed {
     null
 }
 
-variant_payload_name(enum_name: []i8, var_name: []i8): []i8@new {
+variant_payload_name(enum_name: []i8, var_name: []i8) raises IndexOutOfBounds: []i8@new {
     ea: int = len(enum_name);
     va: int = len(var_name);
     n: int = ea + 1 + va;
     raw: []i8 = new i8[n](0i8);
     memcpy(raw, 0, enum_name, 0, ea);
-    raw[check_index(raw, ea)] = '.';
+    raw[ea] = '.';
     memcpy(raw, ea + 1, var_name, 0, va);
     raw
 }
 
-is_type_name(): bool {
+is_type_name() raises IndexOutOfBounds: bool {
     if (tok.kind != TokKind.Ident) false else find_struct_span(source, tok.pos, tok.len) != null || find_enum_span(source,
         tok.pos, tok.len) != null || find_exn_span(source, tok.pos, tok.len) != null
 }
 
-is_named_type(name: []i8): bool {
+is_named_type(name: []i8) raises IndexOutOfBounds: bool {
     find_struct(name) != null || find_enum(name) != null || find_exn(name) != null
 }
 
 /* Ident.Ident { field: expr } even when the type is not in this file. */
-syntax_variant_fields(): bool {
+syntax_variant_fields() raises IndexOutOfBounds: bool {
     if (parse_resolve) return false;
     d: *Token = tok.next;
     if (d.kind != TokKind.Dot) return false;
@@ -2200,14 +2203,14 @@ syntax_variant_fields(): bool {
 }
 
 /* Ident { field: expr }. Not `for x in xs { y: T = e; }` or `match x {`. */
-syntax_struct_lit(): bool {
+syntax_struct_lit() raises IndexOutOfBounds: bool {
     if (parse_resolve) return false;
     b: *Token = tok.next;
     if (b.kind != TokKind.LBrace) return false;
     syntax_fields_after_brace(b.next)
 }
 
-syntax_fields_after_brace(inner: *Token): bool {
+syntax_fields_after_brace(inner: *Token) raises IndexOutOfBounds: bool {
     if (inner.kind != TokKind.Ident) return false;
     if (inner.next.kind != TokKind.Colon) return false;
     v: *Token = inner.next.next;
@@ -2236,7 +2239,7 @@ exn_stub(name: []i8@new): *ExnDef@new {
     }
 }
 
-starts_type(): bool {
+starts_type() raises IndexOutOfBounds: bool {
     if (tok.kind == TokKind.LBrack) return true;
     if (at_function_type() || tok.kind == TokKind.StrTy || tok.kind == TokKind.Int || tok.kind == TokKind.I8 || tok.kind == TokKind.I32 || tok.kind == TokKind.U32 || tok.kind == TokKind.F32 || tok.kind == TokKind.F64 || tok.kind == TokKind.Bool || is_type_name()) return true;
     t: ?*Token = tok;
@@ -2275,7 +2278,7 @@ starts_type(): bool {
     false
 }
 
-find_field(members: ?*Member, name: []i8): ?*Member@members {
+find_field(members: ?*Member, name: []i8) raises IndexOutOfBounds: ?*Member@members {
     m: ?*Member = members;
     while (m != null) {
         if (streq(m.name, name)) return m;
@@ -2284,11 +2287,11 @@ find_field(members: ?*Member, name: []i8): ?*Member@members {
     null
 }
 
-find_member(sd: *StructDef, name: []i8): ?*Member@sd {
+find_member(sd: *StructDef, name: []i8) raises IndexOutOfBounds: ?*Member@sd {
     find_field(sd.members, name)
 }
 
-find_exn_member(ed: *ExnDef, name: []i8): ?*Member@ed {
+find_exn_member(ed: *ExnDef, name: []i8) raises IndexOutOfBounds: ?*Member@ed {
     find_field(ed.members, name)
 }
 
@@ -2470,7 +2473,7 @@ is_optional(t: *Type): bool {
     is_opt_pointer(t) || is_opt_slice(t) || is_opt_str(t) || is_opt_fnptr(t)
 }
 
-unwrap_optional(t: *Type) noregion raises Error: *Type@new {
+unwrap_optional(t: *Type) noregion raises Error, IndexOutOfBounds: *Type@new {
     match t.* {
         FnPtr k -> return new Type.FnPtr { fn: k.fn, optional: false };
         _ -> { }
@@ -2533,7 +2536,7 @@ is_enum_ty(t: *Type): bool {
 }
 
 /* Syntax-only parse: a forward/imported name was a struct stub; treat as enum. */
-syntax_as_enum(t: *Type) noregion raises Error: *Type@t {
+syntax_as_enum(t: *Type) noregion raises Error, IndexOutOfBounds: *Type@t {
     if (is_enum_ty(t)) return t;
     if (!parse_resolve && is_struct_ty(t)) {
         sd: *StructDef = type_struct_def(t);
@@ -2594,7 +2597,7 @@ is_string_literal_expr(n: ?*Expr): bool {
     }
 }
 
-assignable(to: ?*Type@from_n, from_n: ?*Expr) raises Error: bool {
+assignable(to: ?*Type@from_n, from_n: ?*Expr) raises Error, IndexOutOfBounds: bool {
     ft: ?*Type = null;
     if (from_n != null) {
         fty: ?*Type = from_n.ty;
@@ -2777,7 +2780,7 @@ type_has_pointers(t: ?*Type): bool {
     }
 }
 
-types_equal(a: *Type, b: *Type) raises Error: bool {
+types_equal(a: *Type, b: *Type) raises Error, IndexOutOfBounds: bool {
     if (a == b) return true;
     match a.* {
         Refined x -> {
@@ -2806,7 +2809,7 @@ is_numeric_ty(t: *Type): bool {
     is_int_ty(t) || is_i8_ty(t) || is_i32_ty(t) || is_u32_ty(t) || is_f32_ty(t) || is_f64_ty(t) || is_bool_ty(t)
 }
 
-check_as(from: ?*Type, to: ?*Type) noregion raises Error {
+check_as(from: ?*Type, to: ?*Type) noregion raises Error, IndexOutOfBounds {
     from = decay(from);
     to = decay(to);
     if (from == null || to == null) error("invalid as conversion");
@@ -2850,7 +2853,7 @@ io_err(name: []i8, rest: []i8) noregion raises Error: noreturn {
     error(sb_finish(sb))
 }
 
-check_io_args(name: []i8, args: ?*Expr) noregion raises Error {
+check_io_args(name: []i8, args: ?*Expr) noregion raises Error, IndexOutOfBounds {
     a0: ?*Expr = args;
     if (a0 == null) io_err(name, " takes fd and a buffer");
     a0u: *Expr = a0;
@@ -2888,7 +2891,7 @@ check_io_args(name: []i8, args: ?*Expr) noregion raises Error {
     error_have_want("I/O buf must be []i8 or *i8", t1, slice_of(ty_i8))
 }
 
-check_memcpy_args(args: ?*Expr) noregion raises Error {
+check_memcpy_args(args: ?*Expr) noregion raises Error, IndexOutOfBounds {
     a0: ?*Expr = args;
     if (a0 == null) error("memcpy takes five arguments");
     a0u: *Expr = a0;
@@ -2919,7 +2922,7 @@ check_memcpy_args(args: ?*Expr) noregion raises Error {
     if (t4 == null || !is_int_ty(t4)) error_ty("memcpy n must be int", t4)
 }
 
-check_trunc(from: ?*Type, to: ?*Type) noregion raises Error {
+check_trunc(from: ?*Type, to: ?*Type) noregion raises Error, IndexOutOfBounds {
     from = decay(from);
     to = decay(to);
     if (from == null || to == null) error("invalid trunc conversion");
@@ -2949,18 +2952,16 @@ profile_flt_prev: int = 0;
 
 profile_rbuf: []i8 = "";
 
-rd_u64(b: []i8, o: int): int {
+rd_u64(b: []i8, o: int) raises IndexOutOfBounds: int {
     (b[o] as int & 255) + ((b[o + 1] as int & 255) << 8) + ((b[o + 2] as int & 255) << 16) + ((b[o + 3] as int & 255) << 24) + ((b[o + 4] as int & 255) << 32) + ((b[o + 5] as int & 255) << 40) + ((b[o + 6] as int & 255) << 48) + ((b[o + 7] as int & 255) << 56)
 }
 
-profile_faults(): int {
+profile_faults() raises IndexOutOfBounds: int {
     getrusage(profile_rbuf);
-    if (len(profile_rbuf) < 72) return check_index(profile_rbuf, 71);
     rd_u64(profile_rbuf, 64)
 }
 
-profile_rss_kb(): int {
-    if (len(profile_rbuf) < 40) return check_index(profile_rbuf, 39);
+profile_rss_kb() raises IndexOutOfBounds: int {
     rd_u64(profile_rbuf, 32)
 }
 
@@ -2969,7 +2970,7 @@ profile_print(
     dt_ns: int,
     dt_cyc: int,
     dt_flt: int
-) {
+) raises IndexOutOfBounds {
     raw::raw_write(2, "profile: ");
     raw::raw_write_bytes(2, label);
     raw::raw_write(2, " ");
@@ -2987,7 +2988,7 @@ profile_print(
     raw::raw_write(2, " flt\n")
 }
 
-profile_start() noregion {
+profile_start() noregion raises IndexOutOfBounds {
     if (!do_profile) return;
     profile_rbuf = new i8[256](0i8);
     profile_t0 = mono_ns();
@@ -2998,7 +2999,7 @@ profile_start() noregion {
     profile_flt_prev = profile_flt0
 }
 
-profile_mark(label: []i8) {
+profile_mark(label: []i8) raises IndexOutOfBounds {
     if (!do_profile) return;
     t: int = mono_ns();
     c: int = rdtsc();
@@ -3007,7 +3008,7 @@ profile_mark(label: []i8) {
     profile_cyc_prev = c
 }
 
-profile_end() {
+profile_end() raises IndexOutOfBounds {
     if (!do_profile) return;
     profile_print("TOTAL", profile_prev - profile_t0, profile_cyc_prev - profile_cyc0,
         profile_flt_prev - profile_flt0);
@@ -3020,7 +3021,7 @@ is_profile_flag(s: str): bool {
     s == "-p" || s == "--profile"
 }
 
-compiler_analyze(src_path: []i8@immortal) noregion raises Error {
+compiler_analyze(src_path: []i8@immortal) noregion raises Error, IndexOutOfBounds {
     profile_start();
     as_init();
     init_runtime();
@@ -3041,22 +3042,22 @@ compiler_analyze(src_path: []i8@immortal) noregion raises Error {
         profile_mark("unused_locals");
         check_return_style()
     }
-    check_raises_functions();
     check_imm_heap_functions();
     check_written_bounds();
     verify_bounds_program();
+    check_raises_functions();
     profile_mark("raises");
     check_noreturn_functions();
     profile_mark("noreturn")
 }
 
-compiler_frontend(src_path: []i8@immortal) noregion raises Error {
+compiler_frontend(src_path: []i8@immortal) noregion raises Error, IndexOutOfBounds {
     compiler_analyze(src_path);
     codegen();
     profile_mark("codegen")
 }
 
-compiler_build_direct(src_path: []i8@immortal) noregion: int {
+compiler_build_direct(src_path: []i8@immortal) noregion raises IndexOutOfBounds: int {
     try {
         cg_direct_mode = true;
         compiler_frontend(src_path);
@@ -3074,7 +3075,7 @@ compiler_build_direct(src_path: []i8@immortal) noregion: int {
     }
 }
 
-compiler_unused_main(argc: int, argv: []str) noregion: int {
+compiler_unused_main(argc: int, argv: []str) noregion raises IndexOutOfBounds: int {
     if (argc < 2) {
         raw::raw_write(2, "error: usage: l8 unused <file.l8> [file.l8 ...]\n");
         return 1
@@ -3085,7 +3086,7 @@ compiler_unused_main(argc: int, argv: []str) noregion: int {
         unused_functions = null;
         unused_function_tail = null;
         for ai in 1..argc {
-            compiler_analyze(bytes(argv[check_index(argv, ai)]));
+            compiler_analyze(bytes(argv[ai]));
             collect_unused_functions()
         }
         warn_unused_functions();
@@ -3096,7 +3097,7 @@ compiler_unused_main(argc: int, argv: []str) noregion: int {
     }
 }
 
-compiler_main(argc: int, argv: []str) noregion: int {
+compiler_main(argc: int, argv: []str) noregion raises IndexOutOfBounds: int {
     try {
         cg_direct_mode = false;
         do_profile = false;
@@ -3105,9 +3106,9 @@ compiler_main(argc: int, argv: []str) noregion: int {
             raw::raw_write(2, "error: usage: l8 compile [--profile|-p] <file.l8>\n");
             return 1
         }
-        path: str = argv[check_index(argv, 0)];
+        path: str = argv[0];
         for ai in 1..argc {
-            arg: str = argv[check_index(argv, ai)];
+            arg: str = argv[ai];
             if (is_profile_flag(arg)) do_profile = true else {
                 if (have) {
                     raw::raw_write(2, "error: usage: l8 compile [--profile|-p] <file.l8>\n");
