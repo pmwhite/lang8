@@ -423,72 +423,41 @@ bounds_implication_exit_fact(
 
 bounds_implication_numeric_candidates(fn: *Function@new, guard: *BoundsGuardFacts@new,
     f: ?*BoundsState) {
-    param: ?*Obj = fn.params;
-    while (param != null) {
-        relevant: bool = guard.literal != null || guard.premise.index == param || guard.premise.array == param;
-        if (relevant && is_int_ty(param.ty) && !param.bounds_written && !param.bounds_addr_taken) {
-            path: *Expr = bounds_obj_expr(param);
-            zero: *Expr = new_num(0);
-            lower: BoundsRow = BoundsRow {
-                index: param,
-                array: null,
-                kind: BoundsKind.Difference,
-                value: 0,
-                left: zero,
-                right: path,
-                separation: null
-            };
-            upper: BoundsRow = BoundsRow {
-                index: param,
-                array: null,
-                kind: BoundsKind.Difference,
-                value: 0,
-                left: path,
-                right: zero,
-                separation: null
-            };
-            bounds_implication_candidate(guard, f, lower);
-            bounds_implication_candidate(guard, f, upper);
-            array: ?*Obj = fn.params;
-            while (array != null) {
-                ty: ?*Type = array.ty;
-                if (ty != null && is_indexable(ty) && !array.bounds_written && !array.bounds_addr_taken) {
-                    length: *Expr = bounds_len_term(bounds_obj_expr(array));
-                    before: BoundsRow = BoundsRow {
-                        index: param,
-                        array: array,
-                        kind: BoundsKind.Difference,
-                        value: -1,
-                        left: path,
-                        right: length,
-                        separation: null
-                    };
-                    through: BoundsRow = BoundsRow {
-                        index: param,
-                        array: array,
-                        kind: BoundsKind.Difference,
-                        value: 0,
-                        left: path,
-                        right: length,
-                        separation: null
-                    };
-                    after: BoundsRow = BoundsRow {
-                        index: array,
-                        array: param,
-                        kind: BoundsKind.Difference,
-                        value: 0,
-                        left: length,
-                        right: path,
-                        separation: null
-                    };
-                    bounds_implication_candidate(guard, f, before);
-                    bounds_implication_candidate(guard, f, through);
-                    bounds_implication_candidate(guard, f, after)
+    // Project proved rows whose terms still denote caller-visible values.
+    // A numeric literal is treated like any other term; a difference row's
+    // bound carries its offset after normalization.
+    for position in 0..bounds_count(f) {
+        row: ?*BoundsRow = bounds_row(f, position);
+        if (row != null) {
+            if ((row.kind == BoundsKind.Difference || row.kind == BoundsKind.Equal || row.kind == BoundsKind.NotEqual) && row.separation == null) {
+                source_left: ?*Expr = row.left;
+                source_right: ?*Expr = row.right;
+                if (source_left != null && source_right != null) {
+                    left: ?*Expr = bounds_guard_param_term(fn, source_left);
+                    right: ?*Expr = bounds_guard_param_term(fn, source_right);
+                    if (left != null && right != null) {
+                        first: ?*Obj = bounds_term_root(left);
+                        second: ?*Obj = bounds_term_root(right);
+                        if (first == null) {
+                            first = second;
+                            second = null
+                        }
+                        if (first != null) {
+                            candidate: BoundsRow = BoundsRow {
+                                index: first,
+                                array: second,
+                                kind: row.kind,
+                                value: row.value,
+                                left: left,
+                                right: right,
+                                separation: null
+                            };
+                            bounds_implication_candidate(guard, f, candidate)
+                        }
+                    }
                 }
-                array = array.param_next
             }
         }
-        param = param.param_next
     }
 }
 
@@ -524,8 +493,7 @@ bounds_implication_scalar_candidates(fn: *Function@new, guard: *BoundsGuardFacts
                 bounds_implication_scalar_literal(guard, f, param, bounds_bool_literal(true));
                 bounds_implication_scalar_literal(guard, f, param, bounds_bool_literal(false))
             } else if (is_any_pointer(ty)) bounds_implication_scalar_literal(guard,
-                f, param, new_null_expr()) else if (is_int_width_ty(ty)) bounds_implication_scalar_literal(guard,
-                f, param, new_num(0)) else {
+                f, param, new_null_expr()) else {
                 match ty.* {
                     Enum k -> {
                         variant: ?*Variant = k.def.variants;
@@ -544,6 +512,47 @@ bounds_implication_scalar_candidates(fn: *Function@new, guard: *BoundsGuardFacts
     }
 }
 
+bounds_implication_result_term(
+    fn: *Function@new,
+    guard: *BoundsGuardFacts@new,
+    value: *Expr,
+    f: ?*BoundsState,
+    term: *Expr
+) {
+    anchor: ?*Obj = fn.bounds_result;
+    if (anchor == null) return;
+    path: ?*Expr = bounds_guard_param_term(fn, term);
+    if (path == null) return;
+    result: *Expr = bounds_obj_expr(anchor);
+    root: ?*Obj = bounds_term_root(path);
+    upper_bound: int = bounds_return_bound(f, value, term);
+    if (upper_bound < 1000000000) {
+        upper: BoundsRow = BoundsRow {
+            index: anchor,
+            array: root,
+            kind: BoundsKind.Difference,
+            value: upper_bound,
+            left: result,
+            right: path,
+            separation: null
+        };
+        bounds_implication_record(guard, upper)
+    }
+    lower_bound: int = bounds_return_bound(f, term, value);
+    if (lower_bound < 1000000000) {
+        lower: BoundsRow = BoundsRow {
+            index: if (root == null) anchor else root,
+            array: if (root == null) null else anchor,
+            kind: BoundsKind.Difference,
+            value: lower_bound,
+            left: path,
+            right: result,
+            separation: null
+        };
+        bounds_implication_record(guard, lower)
+    }
+}
+
 bounds_implication_result_candidates(
     fn: *Function@new,
     guard: *BoundsGuardFacts@new,
@@ -551,39 +560,26 @@ bounds_implication_result_candidates(
     f: ?*BoundsState
 ) {
     if (!is_int_ty(fn.return_ty)) return;
-    anchor: ?*Obj = fn.bounds_result;
-    if (anchor == null) return;
-    result: *Expr = bounds_obj_expr(anchor);
     param: ?*Obj = fn.params;
     while (param != null) {
-        if (is_int_ty(param.ty) && !param.bounds_written && !param.bounds_addr_taken) {
-            path: *Expr = bounds_obj_expr(param);
-            if (bounds_return_bound(f, value, path) <= 0) {
-                upper: BoundsRow = BoundsRow {
-                    index: anchor,
-                    array: param,
-                    kind: BoundsKind.Difference,
-                    value: 0,
-                    left: result,
-                    right: path,
-                    separation: null
-                };
-                bounds_implication_record(guard, upper)
-            }
-            if (bounds_return_bound(f, path, value) <= 0) {
-                lower: BoundsRow = BoundsRow {
-                    index: param,
-                    array: anchor,
-                    kind: BoundsKind.Difference,
-                    value: 0,
-                    left: path,
-                    right: result,
-                    separation: null
-                };
-                bounds_implication_record(guard, lower)
+        if (is_int_ty(param.ty) && !param.bounds_written && !param.bounds_addr_taken) bounds_implication_result_term(fn,
+            guard, value, f, bounds_obj_expr(param));
+        param = param.param_next
+    }
+    // Terms already present in the exit state include literal thresholds and
+    // lengths. Query only those terms, not a fixed list of favored constants.
+    for position in 0..bounds_count(f) {
+        row: ?*BoundsRow = bounds_row(f, position);
+        if (row != null) {
+            if (row.kind == BoundsKind.Difference && row.separation == null) {
+                left: ?*Expr = row.left;
+                right: ?*Expr = row.right;
+                if (left != null) bounds_implication_result_term(fn, guard, value,
+                    f, left);
+                if (right != null) bounds_implication_result_term(fn, guard, value,
+                    f, right)
             }
         }
-        param = param.param_next
     }
 }
 
