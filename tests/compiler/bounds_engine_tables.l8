@@ -94,6 +94,23 @@ main() noregion raises Error, IndexOutOfBounds: int {
         right: z,
         separation: null
     };
+    // Filtering a middle or trailing row must not expose it through shared
+    // hash buckets, and later appends must not mutate the original snapshot.
+    filter_source: ?*BoundsState = bounds_push(null, x_nonnegative);
+    filter_source = bounds_push(filter_source, y_nonnegative);
+    filter_source = bounds_push(filter_source, z_nonnegative);
+    filter_middle: ?*BoundsState = bounds_kill(filter_source, y_root);
+    filter_tail: ?*BoundsState = bounds_kill(filter_source, z_root);
+    if (!bounds_has_fact(filter_middle, &x_nonnegative) || !bounds_has_fact(filter_middle,
+        &z_nonnegative)) return 116;
+    if (bounds_has_fact(filter_middle, &y_nonnegative) || bounds_has_fact(filter_tail,
+        &z_nonnegative)) return 117;
+    filter_tail = bounds_add_relation(filter_tail, x, z, -1);
+    if (!bounds_has_fact(filter_source, &y_nonnegative) || !bounds_has_fact(filter_source,
+        &z_nonnegative)) return 118;
+    if (bounds_difference_entails(filter_source, x, z, -1) || bounds_difference_entails(filter_middle,
+        x, z, -1)) return 119;
+    if (!bounds_difference_entails(filter_tail, x, z, -1)) return 120;
     two_premises: *BoundsPremise = new BoundsPremise { fact: x_nonnegative, next: new BoundsPremise { fact: y_nonnegative, next: null } };
     implication: *BoundsImplication = new BoundsImplication { premises: two_premises, consequence: z_nonnegative, next: null };
     conditional: ?*BoundsState = bounds_attach_implication(null, implication);
@@ -147,6 +164,53 @@ main() noregion raises Error, IndexOutOfBounds: int {
     if (!bounds_precondition_proved(new_binary(BinOp.Ne, a_bool, no), scalar)) return 32;
     scalar = bounds_kill(scalar, bool_b);
     if (bounds_scalar_proves(scalar, a_bool, yes, BoundsKind.Equal)) return 27;
+    // Reverse insertion order requires several closure passes. A disconnected
+    // component and a later shared-storage append must not leak into a class.
+    equal_chain: ?*BoundsState = null;
+    for i in 0..10 equal_chain = bounds_add_scalar_relation(equal_chain, terms[10 - i],
+        terms[9 - i], BoundsKind.Equal);
+    equal_chain = bounds_add_scalar_relation(equal_chain, terms[2], terms[8], BoundsKind.Equal);
+    equal_chain = bounds_add_scalar_relation(equal_chain, terms[12], terms[13], BoundsKind.Equal);
+    extended_chain: ?*BoundsState = bounds_add_scalar_relation(equal_chain, terms[10],
+        terms[12], BoundsKind.Equal);
+    if (!bounds_scalar_proves(equal_chain, terms[0], terms[10], BoundsKind.Equal)) return 153;
+    if (bounds_scalar_proves(equal_chain, terms[0], terms[13], BoundsKind.Equal)) return 154;
+    if (!bounds_scalar_proves(extended_chain, terms[0], terms[13], BoundsKind.Equal)) return 155;
+    unequal_chain: ?*BoundsState = bounds_add_scalar_relation(equal_chain, terms[9],
+        terms[12], BoundsKind.NotEqual);
+    if (!bounds_scalar_proves(unequal_chain, terms[0], terms[13], BoundsKind.NotEqual)) return 156;
+    if (bounds_scalar_proves(equal_chain, terms[0], terms[13], BoundsKind.NotEqual)) return 157;
+    // Compare equality closure with independent all-pairs reachability. Numeric
+    // rows between the components are irrelevant to scalar-class membership.
+    for trial in 0..12 {
+        eq_state: ?*BoundsState = null;
+        connected: []bool = new bool[144](false);
+        for i in 0..12 connected[i * 12 + i] = true;
+        random: int = trial + 1;
+        for _edge in 0..24 {
+            random = random * 17 + 13 & 65535;
+            a: int = random % 12;
+            random = random * 29 + 7 & 65535;
+            b: int = random % 6 * 2 + a % 2;
+            eq_state = bounds_add_scalar_relation(eq_state, terms[a], terms[b], BoundsKind.Equal);
+            connected[a * 12 + b] = true;
+            connected[b * 12 + a] = true;
+            eq_state = bounds_add_relation(eq_state, terms[a], terms[(a + 1) % 12],
+                100)
+        }
+        for k in 0..12 {
+            for i in 0..12 {
+                for j in 0..12 {
+                    if (connected[i * 12 + k] && connected[k * 12 + j]) connected[i * 12 + j] = true
+                }
+            }
+        }
+        for i in 0..12 {
+            for j in 0..12 {
+                if (bounds_scalar_proves(eq_state, terms[i], terms[j], BoundsKind.Equal) != connected[i * 12 + j]) return 158
+            }
+        }
+    }
     idle: *Variant = new Variant {
         name: "Idle",
         tag: 0,
@@ -293,6 +357,8 @@ main() noregion raises Error, IndexOutOfBounds: int {
     saved_row: ?*BoundsRow = bounds_row(pooled, 0);
     if (saved_row == null) return 102;
     exported: BoundsRow = saved_row.*;
+    probe_query: BoundsNumericView = bounds_numeric_query(x, y, 2);
+    if (bounds_solve(pooled, probe_query, false) != 2) return 121;
     bounds_arena_reset(arena);
     fresh: ?*BoundsState = bounds_add_relation(bounds_arena_state(arena), y, z, 3);
     if (fresh == null || fresh.storage != old_storage) return 103;
@@ -302,10 +368,104 @@ main() noregion raises Error, IndexOutOfBounds: int {
     if (!bounds_difference_entails(restored, x, y, 2)) return 106;
     // Fork an older snapshot after its shared buffer has been extended.
     sibling: ?*BoundsState = bounds_add_relation(fresh, x, y, 4);
+    // Borrowed descriptors obey snapshot boundaries even after shared storage
+    // grows, and expose the same existing row without copying it.
+    borrowed: ?*BoundsNumericView = bounds_numeric_ref(fresh, 0);
+    if (borrowed == null || !borrowed.valid || borrowed.bound != 3) return 148;
+    if (borrowed != bounds_numeric_ref(sibling, 0)) return 149;
+    if (bounds_numeric_ref(fresh, 1) != null) return 150;
+    if (bounds_numeric_ref(fresh, -1) != null || bounds_numeric_ref(null, 0) != null) return 151;
+    appended: ?*BoundsNumericView = bounds_numeric_ref(sibling, 1);
+    if (appended == null || !appended.valid || appended.bound != 4) return 152;
     other: ?*BoundsState = bounds_add_relation(fresh, x, z, 9);
     if (bounds_difference_entails(other, x, y, 4)) return 107;
     if (!bounds_difference_entails(sibling, x, z, 7)) return 108;
     if (bounds_difference_entails(fresh, x, z, 9)) return 109;
+    // A cached graph must not pick up rows from a later prefix, another
+    // predecessor, or a recycled storage buffer.
+    cached_fresh: ?*BoundsGraphCache = bounds_cached_graph(fresh, null, true);
+    if (cached_fresh == null) return 122;
+    pinned: *BoundsGraph = cached_fresh.graph;
+    cached_sibling: ?*BoundsGraphCache = bounds_cached_graph(sibling, pinned, true);
+    if (cached_sibling == null || cached_sibling.graph == pinned) return 123;
+    x_ref: BoundsTermRef = bounds_ref_expr(x);
+    if (bounds_graph_find(pinned, x_ref) >= 0) return 124;
+    sibling_query: BoundsNumericView = bounds_numeric_query(x, z, 7);
+    if (bounds_solve(sibling, sibling_query, false) != 7) return 125;
+    fresh_query: BoundsNumericView = bounds_numeric_query(x, z, 7);
+    if (bounds_solve(fresh, fresh_query, false) < 1000000000000000000) return 126;
+    // A length absent from the cached graph still has implicit constant and
+    // nonnegative bounds. It must take the complete query-local fallback.
+    fixed: *Obj = new_obj("fixed", true);
+    fixed.ty = array_of(ty_int, 5);
+    fixed_len: *Expr = bounds_len_term(bounds_obj_expr(fixed));
+    fixed_lower_query: BoundsNumericView = bounds_numeric_query(new_num(0), fixed_len,
+        -5);
+    if (bounds_solve(fresh, fixed_lower_query, false) != -5) return 127;
+    fixed_upper_query: BoundsNumericView = bounds_numeric_query(fixed_len, new_num(0),
+        5);
+    if (bounds_solve(fresh, fixed_upper_query, false) != 5) return 128;
+    conditional_initial: ?*BoundsState = bounds_arena_state(arena);
+    conditional_pooled: ?*BoundsState = bounds_insert(conditional_initial, first,
+        null, BoundsKind.Difference, 2, x, y, separation);
+    conditional_pooled = bounds_add_relation(conditional_pooled, y, z, 3);
+    conditional_query: BoundsNumericView = bounds_numeric_query(x, z, 5);
+    if (bounds_solve(conditional_pooled, conditional_query, false) < 1000000000000000000) return 129;
+    // The cache has a fixed memory budget, not a limit on accepted proofs.
+    oversized: ?*BoundsState = bounds_arena_state(arena);
+    for i in 0..BOUNDS_GRAPH_CACHE_ROWS + 1 oversized = bounds_add_relation(oversized,
+        x, y, i);
+    oversized = bounds_add_relation(oversized, y, z, 3);
+    oversized_query: BoundsNumericView = bounds_numeric_query(x, z, 3);
+    if (bounds_solve(oversized, oversized_query, false) != 3) return 130;
+    // The first direct edge is enough for the loose proof, but a tighter or
+    // exact query must continue past that partial result to find the detour.
+    memo: ?*BoundsState = bounds_arena_state(arena);
+    memo = bounds_add_relation(memo, x, y, 4);
+    memo = bounds_add_relation(memo, y, z, 3);
+    memo = bounds_add_relation(memo, x, z, 10);
+    loose_query: BoundsNumericView = bounds_numeric_query(x, z, 10);
+    tight_query: BoundsNumericView = bounds_numeric_query(x, z, 7);
+    reverse_query: BoundsNumericView = bounds_numeric_query(z, x, 0);
+    if (bounds_solve(memo, loose_query, true) > 10) return 133;
+    if (bounds_solve(memo, tight_query, true) > 7) return 134;
+    if (bounds_solve(memo, tight_query, false) != 7) return 135;
+    if (bounds_solve(memo, reverse_query, false) < 1000000000000000000) return 136;
+    if (bounds_solve(memo, tight_query, false) != 7) return 137;
+    extended_memo: ?*BoundsState = bounds_add_relation(memo, x, z, 6);
+    if (bounds_solve(extended_memo, tight_query, false) != 6) return 138;
+    if (bounds_solve(memo, tight_query, false) != 7) return 139;
+    // Interval shortcuts must use unconditional evidence, and may not return
+    // a loose interval path as the exact graph distance.
+    intervals: ?*BoundsState = bounds_arena_state(arena);
+    zero: *Expr = new_num(0);
+    intervals = bounds_add_relation(intervals, x, zero, 8);
+    intervals = bounds_add_relation(intervals, zero, y, -3);
+    interval_query: BoundsNumericView = bounds_numeric_query(x, y, 5);
+    if (bounds_solve(intervals, interval_query, true) != 5) return 140;
+    intervals = bounds_add_relation(intervals, x, y, 2);
+    if (bounds_solve(intervals, interval_query, false) != 2) return 141;
+    alias_intervals: ?*BoundsState = bounds_arena_state(arena);
+    alias_intervals = bounds_insert(alias_intervals, first, null, BoundsKind.Difference,
+        8, x, zero, separation);
+    alias_intervals = bounds_add_relation(alias_intervals, zero, y, -3);
+    if (bounds_solve(alias_intervals, interval_query, true) < 1000000000000000000) return 142;
+    // These snapshots share exactly their first row, including branches
+    // copied from the same older buffer and a shorter parent snapshot.
+    if (bounds_common_prefix(fresh, sibling) != 1 || bounds_common_prefix(sibling,
+        other) != 1) return 143;
+    if (bounds_common_prefix(other, fresh) != 1) return 144;
+    third_branch: ?*BoundsState = bounds_add_relation(fresh, x, z, 8);
+    if (bounds_common_prefix(other, third_branch) != 1) return 145;
+    // A reachable negative cycle consumes the work budget. Its finite path
+    // bounds remain evidence, but the memo must not mark the search complete.
+    budget_cycle: ?*BoundsState = bounds_arena_state(arena);
+    budget_cycle = bounds_add_relation(budget_cycle, x, y, -1);
+    budget_cycle = bounds_add_relation(budget_cycle, y, x, 0);
+    cycle_query: BoundsNumericView = bounds_numeric_query(x, y, -1);
+    if (bounds_solve(budget_cycle, cycle_query, false) > -1) return 146;
+    cycle_cache: ?*BoundsGraphCache = bounds_cached_graph(budget_cycle, null, false);
+    if (cycle_cache == null || cycle_cache.complete) return 147;
     bounds_arena_reset(arena);
     // A chain beyond the previous relaxation-round cutoff.
     chain: ?*BoundsState = null;
@@ -320,7 +480,8 @@ main() noregion raises Error, IndexOutOfBounds: int {
     if (bounds_difference_proves(cycle, z, x, 0)) return 13;
     seed: int = 73;
     for _trial in 0..40 {
-        state: ?*BoundsState = null;
+        bounds_arena_reset(arena);
+        state: ?*BoundsState = bounds_arena_state(arena);
         reference: []int = new int[49](1000000);
         potentials: []int = new int[7](0);
         for i in 0..7 {
@@ -334,7 +495,7 @@ main() noregion raises Error, IndexOutOfBounds: int {
             seed = (seed * 251 + 17) % 65521;
             b: int = seed % 7;
             seed = (seed * 251 + 17) % 65521;
-            weight: int = potentials[a] - potentials[b] + seed % 5;
+            weight: int = potentials![a] - potentials![b] + seed % 5;
             state = bounds_insert(state, first, null, BoundsKind.Difference, weight,
                 terms[a], terms[b], null);
             if (weight < reference[a * 7 + b]) reference[a * 7 + b] = weight
@@ -347,6 +508,21 @@ main() noregion raises Error, IndexOutOfBounds: int {
                         if (path < reference[a * 7 + b]) reference[a * 7 + b] = path
                     }
                 }
+            }
+        }
+        // Eliminating one scalar preserves every relation between the other
+        // values. Compare against closure computed before forgetting it.
+        forgotten: ?*BoundsState = bounds_forget_scalar(state, first);
+        if (bounds_difference_entails(forgotten, terms[0], terms[1], 1000)) return 112;
+        for a in 1..7 {
+            for b in 1..7 {
+                best: int = reference[a * 7 + b];
+                if (best < 1000000) {
+                    if (!bounds_difference_entails(forgotten, terms[a], terms[b],
+                        best)) return 113;
+                    if (bounds_difference_entails(forgotten, terms[a], terms[b], best - 1)) return 114
+                } else if (bounds_difference_entails(forgotten, terms[a], terms[b],
+                    1000)) return 115
             }
         }
         // Reused search workspace must agree with the independent closure,
@@ -363,19 +539,24 @@ main() noregion raises Error, IndexOutOfBounds: int {
         queue: []int = new int[graph.nodes + 1](0);
         for source in 0..7 {
             for i in 0..graph.nodes {
-                distances[i] = 1000000000000000000;
+                distances![i] = 1000000000000000000;
                 queued[i] = false
             }
-            bounds_graph_search(graph, source, 0, 0, false, distances, queued, queue);
+            if (!bounds_graph_search(graph, source, 0, 0, false, distances, queued,
+                queue)) return 132;
             for target in 0..7 {
                 expected: int = reference[target * 7 + source];
                 if (expected == 1000000) expected = 1000000000000000000;
-                if (distances[target] != expected) return 110
+                if (distances![target] != expected) return 110
             }
         }
         for a in 0..7 {
             for b in 0..7 {
                 best: int = reference[a * 7 + b];
+                exact: int = if (best == 1000000) 1000000000000000000 else best;
+                exact_query: BoundsNumericView = bounds_numeric_query(terms[a], terms[b],
+                    0);
+                if (bounds_solve(state, exact_query, false) != exact) return 131;
                 if (best < 1000000) {
                     if (!bounds_difference_proves(state, terms[a], terms[b], best)) return 10;
                     if (bounds_difference_proves(state, terms[a], terms[b], best - 1)) return 11

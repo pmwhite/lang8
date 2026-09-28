@@ -216,6 +216,15 @@ run_compiler_tests() {
   grep -q '^    if (true) {$' "$BUILD/control-format.l8" || die 'commented control body lost its braces'
   grep -q 'Keep this comment with its block' "$BUILD/control-format.l8" || die 'commented control body lost its comment'
   expect_source "$tool" "$BUILD/control-format.l8"
+  "./$tool" fmt tests/compiler/checked_access_forms.l8 >"$BUILD/checked-access-formatted.l8"
+  "./$tool" fmt "$BUILD/checked-access-formatted.l8" >"$BUILD/checked-access-formatted-again.l8"
+  cmp -s "$BUILD/checked-access-formatted.l8" "$BUILD/checked-access-formatted-again.l8" || die 'checked access formatting is not stable'
+  grep -Fq '&a![i]' "$BUILD/checked-access-formatted.l8" || die 'checked address lost its marker'
+  grep -Fq 'a![i]![j]' "$BUILD/checked-access-formatted.l8" || die 'nested checked access lost its markers'
+  expect_source "$tool" "$BUILD/checked-access-formatted.l8"
+  "./$tool" compile tests/compiler/checked_access_redundant.l8 >"$BUILD/checked-access-explicit.s" 2>"$BUILD/checked-access-explicit.err"
+  grep -q '^  jae ' "$BUILD/checked-access-explicit.s" || die 'explicit checked access lost its runtime check'
+  "./$tool" compile tests/compiler/checked_access_unreachable.l8 >"$BUILD/checked-access-unreachable.s"
   check_optional_semis "$tool"
   "./$tool" forlint tests/compiler/forlint.l8 2>"$BUILD/forlint.err"
   grep -q 'while loop can use for i in 0..end' "$BUILD/forlint.err" || die 'missing ranged for suggestion'
@@ -465,7 +474,7 @@ do_callback_test() {
 }
 
 build_http() {
-  local tool="${L8C:-./l8c1}"
+  local tool="$1"
   mkdir -p "$BUILD/http"
   "$tool" build programs/examples/http-server.l8 -o "$BUILD/http/server"
   "$tool" build programs/examples/http-client.l8 -o "$BUILD/http/client"
@@ -473,8 +482,14 @@ build_http() {
 
 do_http() {
   ensure_build_dir
-  if [[ -z "${L8C:-}" ]]; then build_stage1; fi
-  step 'HTTP build' build_http
+  local tool="${L8C:-}"
+  if [[ -z "$tool" ]]; then
+    build_stage1
+    mkdir -p "$BUILD/http"
+    tool="$BUILD/http/compiler"
+    step 'HTTP compiler' ./l8c1 build src2/main.l8 -o "$tool"
+  fi
+  step 'HTTP build' build_http "$tool"
 }
 
 do_http_test() {
@@ -489,7 +504,7 @@ do_http_test() {
   step 'HTTP test tool' "$http_tool" build src2/main.l8 -o "$expect_tool"
   step 'HTTP spec check' python3 programs/http/spec/fetch.py --check
   step 'HTTP lib tests' python3 tools/lib_expect.py --discover programs/http/tests --compiler "$expect_tool"
-  step 'HTTP protocol' env HTTP_BUILD="$BUILD/http" L8C="$http_tool" python3 -m unittest discover -s programs/http/tests -v
+  step 'HTTP protocol' env HTTP_BUILD="$BUILD/http" L8C="$expect_tool" python3 -m unittest discover -s programs/http/tests -v
 }
 
 build_websocket() {

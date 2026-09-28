@@ -18,6 +18,10 @@ def build():
         compiler = str(BUILD / 'l8c1')
         subprocess.run([str(ROOT / 'bootstrap'), 'build', str(ROOT / 'src1/main.l8'),
                         '-o', compiler], cwd=ROOT, check=True)
+        stage1 = compiler
+        compiler = str(BUILD / 'l8c2')
+        subprocess.run([stage1, 'build', str(ROOT / 'src2/main.l8'),
+                        '-o', compiler], cwd=ROOT, check=True)
     for name in ('probe', 'session', 'server', 'client'):
         source = (ROOT / 'programs/http/tests' / (name + '.l8')
                   if name in ('probe', 'session')

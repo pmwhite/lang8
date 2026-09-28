@@ -5,7 +5,7 @@ The parser, serializer, chunk decoder, conditional-request evaluator, range
 implementation, socket transport, clocks, calendar conversion, and process
 management are L8 code backed by Linux system calls. HTTP binaries have no libc
 or dynamic-loader dependency. The build and test commands build a tag-aware
-stage-1 compiler using the checked-in `bootstrap`, without a C compiler or
+stage-2 compiler using the checked-in `bootstrap`, without a C compiler or
 third-party HTTP package, on x86-64 Linux. Public declarations carry
 the `http` tag; callers activate it with `use_tag http;`. Implementation helpers
 carry only `http_internal`, which is explicitly enabled by white-box tests.

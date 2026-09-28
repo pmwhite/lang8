@@ -14,7 +14,7 @@ class VisibilityTests(unittest.TestCase):
         build()
 
     def test_internal_declarations_are_not_public(self):
-        compiler = os.environ.get('L8C', str(BUILD / 'l8c1'))
+        compiler = os.environ.get('L8C', str(BUILD / 'l8c2'))
         cases = [
             ('http', 'http/http.l8', 'http_decimal', 'http_decimal("1");'),
             ('http', 'http/http.l8', 'HttpUpload', 'value: ?*HttpUpload = null;'),

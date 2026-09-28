@@ -64,8 +64,13 @@ l8 elfpack file.o -o file
 l8 build [--profile|-p] file.l8 -o file
 ```
 
-Stage 2 requires a compile-time proof for each array index during `compile` and
-`build`, as described in [`BOUNDS.md`](BOUNDS.md).
+Stage 2 requires a compile-time proof for `a[i]` during `compile` and `build`.
+Use `a![i]` for an explicit runtime check, with `raises IndexOutOfBounds` or a
+matching handler, as described in [`BOUNDS.md`](BOUNDS.md). Stage 1 accepts `![]`
+as legacy indexing so the saved bootstrap can build the new compiler; only
+stage 2 enforces the distinction. Stage 1 also preserves difference-bound
+consequences when overwriting a scalar, so it can compile the stronger proofs
+used by stage 2. No bootstrap binary promotion is needed.
 
 `build` sends typed compiler operations directly to the assembler's in-memory
 section, symbol, relocation, and instruction encoders. It parses only the static
