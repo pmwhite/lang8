@@ -1,6 +1,12 @@
 Block game compiler investigation (2026-09-28)
 
-The latest [follow-up investigation](block_game_followup_performance.md)
+The latest [endpoint investigation](block_game_endpoint_performance.md)
+measured 553 to 507 ms (another 8.3%) by embedding and borrowing numeric term
+references and caching variable identity. It trades about 10 MiB of peak RSS
+for fewer instructions and memory accesses. The report includes hardware
+counters and rejected experiments.
+
+The preceding [follow-up investigation](block_game_followup_performance.md)
 measured 603 to 548 ms (another 9.1%) by reusing fact-table work, avoiding
 unnecessary query construction, and improving generated indexing/length code.
 Its report also identifies larger opportunities that remain unmeasured.
