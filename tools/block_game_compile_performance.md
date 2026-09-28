@@ -1,6 +1,11 @@
 Block game compiler investigation (2026-09-28)
 
-The latest [hardware-guided round](block_game_hardware_performance.md) removes
+The latest [follow-up investigation](block_game_followup_performance.md)
+measured 603 to 548 ms (another 9.1%) by reusing fact-table work, avoiding
+unnecessary query construction, and improving generated indexing/length code.
+Its report also identifies larger opportunities that remain unmeasured.
+
+The preceding [hardware-guided round](block_game_hardware_performance.md) removes
 repeated scalar-equality scans and groups graph-edge fields. Seven interleaved
 builds measured 801 to 608 ms (24% faster), with about 30% fewer instructions.
 The measurements below describe earlier rounds.

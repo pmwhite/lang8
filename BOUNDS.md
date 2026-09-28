@@ -268,8 +268,10 @@ append-only buffer. Appending at the newest prefix reuses capacity; extending
 an older branch copies its prefix. Hash buckets index canonical term pairs, so
 a direct proof or join does not scan every fact. Buckets can include newer rows
 from a sibling branch: **every reader must enforce the snapshot's row count**.
-Copied buffers rebuild their indexes from only the copied prefix. Duplicate
-rows do not extend the state.
+Copies with the same bucket count preserve the prefix links and trim bucket
+heads past the snapshot count; chains always point to older rows. Copies with
+a different bucket count rebuild the index. Unchanged rows reuse their cached
+numeric descriptors. Duplicate rows do not extend the state.
 
 The driver owns a size-classed pool of fact buffers. It recycles them only after
 an entire function inference pass, strict function check, or global initializer
@@ -340,6 +342,16 @@ implicit edge to zero. Work is bounded by `64 * (nodes + edges + 1)`, capped at
 distance still represents an actual path. Out-of-range distances are discarded
 rather than saturated. Alias-dependent edges stay out of transitive searches
 until the solver can carry their proof obligations.
+
+A length absent from a cached graph has only its implicit edges through zero.
+For small edge weights and offsets, a query can use the cached distance to or
+from zero plus that offset. This retains no query-owned AST pointers in the
+cache. Large weights, large offsets, and incomplete searches that have not
+proved the query retain the query-local fallback. The weight bound ensures that
+translation cannot change which paths cross the search's distance sentinel.
+
+Join projection keeps normalized term references through its redundancy checks.
+It materializes AST expressions only when a projected relation adds a new fact.
 
 Scalar equality closure keeps a dense list of reached equality-row indices.
 Membership checks visit only those rows, and each row joins the class at most

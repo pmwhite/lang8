@@ -155,13 +155,28 @@ bounds_storage(state: ?*BoundsState@new, row: BoundsRow@new) raises IndexOutOfBo
     if (previous != null) {
         source: []BoundsRow = previous.rows;
         source_numeric: []BoundsNumericView = previous.numeric;
-        for i in 0..count {
-            rows![i] = source![i];
-            item: BoundsNumericView = source_numeric![i];
-            numeric![i] = item;
-            slot: int = bounds_row_hash(&rows[i], item) & len(buckets) - 1;
-            links![i] = buckets![slot];
-            buckets[slot] = i
+        if (len(buckets) == len(previous.buckets)) {
+            // Append-only chains point backwards. Trim only bucket heads that
+            // belong to rows after the snapshot, then copy the prefix links.
+            for i in 0..count {
+                rows![i] = source![i];
+                numeric![i] = source_numeric![i];
+                links![i] = previous.links![i]
+            }
+            for slot in 0..len(buckets) {
+                head: int = previous.buckets![slot];
+                while (head >= count) head = previous.links![head];
+                buckets[slot] = head
+            }
+        } else {
+            for i in 0..count {
+                rows![i] = source![i];
+                item: BoundsNumericView = source_numeric![i];
+                numeric![i] = item;
+                slot: int = bounds_row_hash(&rows[i], item) & len(buckets) - 1;
+                links![i] = buckets![slot];
+                buckets[slot] = i
+            }
         }
     }
     storage.prefix_source = previous;
@@ -223,8 +238,17 @@ bounds_push(state: ?*BoundsState@new, row: BoundsRow@new) raises IndexOutOfBound
 
 // Existing fact rows are already normalized and unique. Filtering a state
 // can append them directly without normalizing and searching for duplicates.
-bounds_copy(state: ?*BoundsState@new, row: *BoundsRow@new, hint: int) raises IndexOutOfBounds: *BoundsState@new {
+// row must be the unchanged row at position in source. Its normalized
+// descriptor is already cached and can be copied without inspecting the AST.
+bounds_copy_from(
+    state: ?*BoundsState@new,
+    source: ?*BoundsState,
+    row: *BoundsRow@new,
+    position: int
+) raises IndexOutOfBounds: *BoundsState@new {
     if (state != null && state.unreachable) return state;
+    hint: int = bounds_count(source);
+    numeric: BoundsNumericView = bounds_numeric_at(source, position);
     count: int = bounds_count(state);
     storage: *BoundsStorage;
     if (count == 0) {
@@ -234,7 +258,6 @@ bounds_copy(state: ?*BoundsState@new, row: *BoundsRow@new, hint: int) raises Ind
         storage = bounds_storage_new(arena, row.*, capacity)
     } else storage = bounds_storage(state, row.*);
     storage.rows![count] = row.*;
-    numeric: BoundsNumericView = bounds_numeric_view(row);
     storage.numeric![count] = numeric;
     slot: int = bounds_row_hash(row, numeric) & len(storage.buckets) - 1;
     storage.links![count] = storage.buckets![slot];
@@ -273,7 +296,7 @@ bounds_filter_copy(
             implications: null
         }
     }
-    bounds_copy(head, row, bounds_count(source))
+    bounds_copy_from(head, source, row, position)
 }
 
 bounds_copy_separation(state: ?*BoundsState@new, row: *BoundsRow@new, separation: ?*BoundsSeparation) raises IndexOutOfBounds: *BoundsState@new {
@@ -318,9 +341,8 @@ bounds_row_same(a: *BoundsRow, b: *BoundsRow) raises IndexOutOfBounds: bool {
     true
 }
 
-bounds_has_fact(state: ?*BoundsState, row: *BoundsRow) raises IndexOutOfBounds: bool {
+bounds_has_fact_numeric(state: ?*BoundsState, row: *BoundsRow, numeric: BoundsNumericView) raises IndexOutOfBounds: bool {
     if (!bounds_reachable(state)) return true;
-    numeric: BoundsNumericView = bounds_numeric_view(row);
     if (numeric.valid) return bounds_numeric_entails(state, numeric);
     if (state == null) return false;
     position: int = bounds_bucket(state, bounds_row_hash(row, numeric));
@@ -330,6 +352,22 @@ bounds_has_fact(state: ?*BoundsState, row: *BoundsRow) raises IndexOutOfBounds: 
         position = bounds_next_row(state, position)
     }
     false
+}
+
+bounds_has_fact(state: ?*BoundsState, row: *BoundsRow) raises IndexOutOfBounds: bool {
+    numeric: BoundsNumericView = bounds_numeric_view(row);
+    bounds_has_fact_numeric(state, row, numeric)
+}
+
+// row and position identify the same immutable source fact.
+bounds_has_indexed_fact(
+    state: ?*BoundsState,
+    source: ?*BoundsState,
+    row: *BoundsRow,
+    position: int
+) raises IndexOutOfBounds: bool {
+    numeric: BoundsNumericView = bounds_numeric_at(source, position);
+    bounds_has_fact_numeric(state, row, numeric)
 }
 
 bounds_premises_has(head: ?*BoundsPremise, fact: *BoundsRow) raises IndexOutOfBounds: bool {
@@ -428,8 +466,8 @@ bounds_implications_same(a: ?*BoundsState, b: ?*BoundsState) raises IndexOutOfBo
 bounds_direct_evidence(state: ?*BoundsState, wanted: BoundsNumericView, prove: bool) raises IndexOutOfBounds: BoundsEvidence {
     best: int = 1000000000;
     obligation: ?*BoundsSeparation = null;
-    left: BoundsTermRef = bounds_view_left(wanted);
-    right: BoundsTermRef = bounds_view_right(wanted);
+    left: BoundsTermRef = bounds_view_left_ref(&wanted);
+    right: BoundsTermRef = bounds_view_right_ref(&wanted);
     position: int = bounds_bucket(state, bounds_pair_hash(wanted));
     while (position >= 0) {
         if (state != null && position < state.count) {
@@ -495,7 +533,7 @@ bounds_subset_from(a: ?*BoundsState, b: ?*BoundsState, prefix: int) raises Index
     if (bounds_count(a) > bounds_count(b)) return false;
     for position in prefix..bounds_count(a) {
         row: ?*BoundsRow = bounds_row(a, position);
-        if (row != null && !bounds_has_fact(b, row)) return false
+        if (row != null && !bounds_has_indexed_fact(b, a, row, position)) return false
     }
     rule: ?*BoundsImplication = a.implications;
     while (rule != null) {
@@ -538,17 +576,17 @@ bounds_meet(a: ?*BoundsState@new, b: ?*BoundsState) raises IndexOutOfBounds: ?*B
     while (position < bounds_count(a)) {
         row: ?*BoundsRow = bounds_row(a, position);
         if (row != null) {
-            if (bounds_has_fact(b, row)) {
-                if (!bounds_has_fact(result, row)) result = bounds_copy(result, row,
-                    bounds_count(a))
+            if (bounds_has_indexed_fact(b, a, row, position)) {
+                if (!bounds_has_indexed_fact(result, a, row, position)) result = bounds_copy_from(result,
+                    a, row, position)
             } else {
                 edge: BoundsNumericView = bounds_numeric_at(a, position);
                 if (edge.valid) {
                     other: int = bounds_direct_bound(b, edge);
                     if (other < 1000000000) {
                         if (other > edge.bound) edge.bound = other;
-                        left: BoundsTermRef = bounds_view_left(edge);
-                        right: BoundsTermRef = bounds_view_right(edge);
+                        left: BoundsTermRef = bounds_view_left_ref(&edge);
+                        right: BoundsTermRef = bounds_view_right_ref(&edge);
                         joined: BoundsRow = BoundsRow {
                             index: row.index,
                             array: row.array,
@@ -581,7 +619,7 @@ bounds_same(a: ?*BoundsState, b: ?*BoundsState) raises IndexOutOfBounds: bool {
     position: int = bounds_count(a) - 1;
     while (position >= 0) {
         row: ?*BoundsRow = bounds_row(a, position);
-        if (row != null && !bounds_has_fact(b, row)) return false;
+        if (row != null && !bounds_has_indexed_fact(b, a, row, position)) return false;
         position = position - 1
     }
     position = bounds_count(b) - 1;
@@ -626,8 +664,8 @@ bounds_widen(previous: ?*BoundsState@new, incoming: ?*BoundsState) raises IndexO
     position: int = bounds_count(previous) - 1;
     while (position >= 0) {
         row: ?*BoundsRow = bounds_row(previous, position);
-        if (row != null && bounds_has_fact(incoming, row)) result = bounds_copy(result,
-            row, bounds_count(previous));
+        if (row != null && bounds_has_indexed_fact(incoming, previous, row, position)) result = bounds_copy_from(result,
+            previous, row, position);
         position = position - 1
     }
     bounds_meet_implications(previous, incoming, result)
@@ -650,8 +688,8 @@ bounds_numeric_ref(state: ?*BoundsState, position: int) raises IndexOutOfBounds:
 }
 
 bounds_pair_hash(edge: BoundsNumericView): int {
-    left: BoundsTermRef = bounds_view_left(edge);
-    right: BoundsTermRef = bounds_view_right(edge);
+    left: BoundsTermRef = bounds_view_left_ref(&edge);
+    right: BoundsTermRef = bounds_view_right_ref(&edge);
     bounds_term_hash(left) * 33 + bounds_term_hash(right) & 2147483647
 }
 
@@ -703,8 +741,8 @@ bounds_shift_value(f: ?*BoundsState@new, value: *Obj@new, offset: int) raises In
         }
         edge: BoundsNumericView = bounds_numeric_at(f, q_position);
         if (edge.valid && edge.separation == null) {
-            left: BoundsTermRef = bounds_view_left(edge);
-            right: BoundsTermRef = bounds_view_right(edge);
+            left: BoundsTermRef = bounds_view_left_ref(&edge);
+            right: BoundsTermRef = bounds_view_right_ref(&edge);
             self: BoundsTermRef = bounds_ref_obj(value, false);
             left_self: bool = bounds_ref_same(left, self);
             right_self: bool = bounds_ref_same(right, self);
@@ -732,14 +770,14 @@ bounds_forget_scalar(f: ?*BoundsState@new, value: *Obj) raises IndexOutOfBounds:
     self: BoundsTermRef = bounds_ref_obj(value, false);
     for i in 0..bounds_count(f) {
         upper: BoundsNumericView = bounds_numeric_at(f, i);
-        upper_left: BoundsTermRef = bounds_view_left(upper);
-        upper_right: BoundsTermRef = bounds_view_right(upper);
+        upper_left: BoundsTermRef = bounds_view_left_ref(&upper);
+        upper_right: BoundsTermRef = bounds_view_right_ref(&upper);
         if (upper.valid && upper.bound > -536870912 && upper.bound < 536870912 && upper.separation == null && bounds_ref_same(upper_left,
             self) && !bounds_ref_same(upper_right, self)) {
             for j in 0..bounds_count(f) {
                 lower: BoundsNumericView = bounds_numeric_at(f, j);
-                lower_left: BoundsTermRef = bounds_view_left(lower);
-                lower_right: BoundsTermRef = bounds_view_right(lower);
+                lower_left: BoundsTermRef = bounds_view_left_ref(&lower);
+                lower_right: BoundsTermRef = bounds_view_right_ref(&lower);
                 if (lower.valid && lower.bound > -536870912 && lower.bound < 536870912 && lower.separation == null && bounds_ref_same(lower_right,
                     self) && !bounds_ref_same(lower_left, self) && !bounds_ref_same(lower_left,
                     upper_right)) {
