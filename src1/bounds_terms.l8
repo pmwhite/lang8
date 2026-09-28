@@ -126,6 +126,8 @@ bounds_add_scalar_relation(
     bounds_insert(f, first, second, kind, 0, left, right, null)
 }
 
+// Only reached equality rows can contribute members to this class.
+// Keep their indices dense so membership does not rescan unrelated facts.
 bounds_scalar_class_has(
     class: *BoundsScalarClass,
     f: ?*BoundsState,
@@ -133,47 +135,45 @@ bounds_scalar_class_has(
     value: *Expr
 ) raises IndexOutOfBounds: bool {
     if (bounds_same_scalar(seed, value)) return true;
-    for position in 0..bounds_count(f) {
-        row: ?*BoundsRow = bounds_row(f, position);
+    for i in 0..class.count {
+        row: ?*BoundsRow = bounds_row(f, class.rows![i]);
         if (row != null) {
-            if (row.kind == BoundsKind.Equal) {
-                lhs: ?*Expr = row.left;
-                rhs: ?*Expr = row.right;
-                if (lhs != null && class.reachable[position * 2] && bounds_same_scalar(lhs,
-                    value)) return true;
-                if (rhs != null && class.reachable[position * 2 + 1] && bounds_same_scalar(rhs,
-                    value)) return true
-            }
+            lhs: ?*Expr = row.left;
+            rhs: ?*Expr = row.right;
+            if (lhs != null && bounds_same_scalar(lhs, value)) return true;
+            if (rhs != null && bounds_same_scalar(rhs, value)) return true
         }
     }
     false
 }
 
+bounds_scalar_class_add(class: *BoundsScalarClass@new, position: int) raises IndexOutOfBounds {
+    if (class.count == len(class.rows)) {
+        rows: []int = new int[len(class.rows) * 2](0);
+        for i in 0..class.count rows![i] = class.rows![i];
+        class.rows = rows
+    }
+    class.rows![class.count] = position;
+    class.count = class.count + 1;
+    class.reachable![position] = true
+}
+
 bounds_scalar_class(f: ?*BoundsState, value: *Expr) raises IndexOutOfBounds: *BoundsScalarClass@new {
-    capacity: int = bounds_count(f) * 2 + 1;
-    class: *BoundsScalarClass = new BoundsScalarClass { reachable: new bool[capacity](false) };
+    class: *BoundsScalarClass = new BoundsScalarClass { reachable: new bool[bounds_count(f)](false), rows: new int[4](0), count: 0 };
     changed: bool = true;
     while (changed) {
         changed = false;
         for position in 0..bounds_count(f) {
-            row: ?*BoundsRow = bounds_row(f, position);
-            if (row != null) {
-                if (row.kind == BoundsKind.Equal) {
+            if (!class.reachable![position]) {
+                row: ?*BoundsRow = bounds_row(f, position);
+                if (row != null && row.kind == BoundsKind.Equal) {
                     left: ?*Expr = row.left;
                     right: ?*Expr = row.right;
                     if (left != null && right != null) {
                         if (bounds_scalar_class_has(class, f, value, left) || bounds_scalar_class_has(class,
                             f, value, right)) {
-                            left_index: int = position * 2;
-                            right_index: int = left_index + 1;
-                            if (!class.reachable[left_index]) {
-                                class.reachable[left_index] = true;
-                                changed = true
-                            }
-                            if (!class.reachable[right_index]) {
-                                class.reachable[right_index] = true;
-                                changed = true
-                            }
+                            bounds_scalar_class_add(class, position);
+                            changed = true
                         }
                     }
                 }
@@ -189,6 +189,7 @@ bounds_scalar_proves(
     right: *Expr,
     kind: BoundsKind
 ) raises IndexOutOfBounds: bool {
+    if (!bounds_reachable(f)) return true;
     if (!bounds_scalar_term(left) || !bounds_scalar_term(right)) return false;
     if (kind == BoundsKind.Equal && bounds_same_scalar(left, right)) return true;
     if (kind == BoundsKind.NotEqual && bounds_scalar_constants_differ(left, right)) return true;
@@ -439,8 +440,12 @@ bounds_term_numeric_lower(f: ?*BoundsState, term: *Expr) raises IndexOutOfBounds
     if (literal >= 0) return literal;
     wanted: BoundsNumericView = bounds_numeric_query(new_num(0), term, 0);
     if (!wanted.valid) return -1;
-    bound: int = bounds_direct_bound(f, wanted, true);
-    if (bound <= 0 && bound > -536870912) return 0 - bound;
+    evidence: BoundsEvidence = bounds_direct_evidence(f, wanted, true);
+    bound: int = evidence.bound;
+    if (bound <= 0 && bound > -536870912) {
+        bounds_note_separations(evidence.separation, f);
+        return 0 - bound
+    }
     -1
 }
 
@@ -449,8 +454,12 @@ bounds_term_numeric_upper(f: ?*BoundsState, term: *Expr) raises IndexOutOfBounds
     if (literal >= 0) return literal;
     wanted: BoundsNumericView = bounds_numeric_query(term, new_num(0), 536870911);
     if (!wanted.valid) return -1;
-    bound: int = bounds_direct_bound(f, wanted, true);
-    if (bound >= 0 && bound < 536870912) return bound;
+    evidence: BoundsEvidence = bounds_direct_evidence(f, wanted, true);
+    bound: int = evidence.bound;
+    if (bound >= 0 && bound < 536870912) {
+        bounds_note_separations(evidence.separation, f);
+        return bound
+    }
     -1
 }
 
@@ -575,6 +584,24 @@ bounds_numeric_view(q: *BoundsRow) raises IndexOutOfBounds: BoundsNumericView {
     view
 }
 
+bounds_view_left_ref(view: *BoundsNumericView): BoundsTermRef {
+    BoundsTermRef {
+        path: view.left_path,
+        obj: view.left_obj,
+        is_len: view.left_len,
+        is_zero: view.left_zero
+    }
+}
+
+bounds_view_right_ref(view: *BoundsNumericView): BoundsTermRef {
+    BoundsTermRef {
+        path: view.right_path,
+        obj: view.right_obj,
+        is_len: view.right_len,
+        is_zero: view.right_zero
+    }
+}
+
 bounds_view_left(view: BoundsNumericView): BoundsTermRef {
     BoundsTermRef {
         path: view.left_path,
@@ -594,8 +621,9 @@ bounds_view_right(view: BoundsNumericView): BoundsTermRef {
 }
 
 bounds_numeric_entails(f: ?*BoundsState, target: BoundsNumericView) raises IndexOutOfBounds: bool {
+    if (!bounds_reachable(f)) return true;
     if (!target.valid) return false;
-    bound: int = bounds_direct_bound(f, target, false);
+    bound: int = bounds_direct_bound(f, target);
     bound < 1000000000 && bound <= target.bound
 }
 

@@ -51,7 +51,7 @@ range reasoning, and Wuffs' requirement for a compile-time proof of each access.
 
 ## Initial implementation
 
-Stage 2 verifies bounds during every `compile` and `build`. It rejects unproved
+Both compiler stages and the saved bootstrap verify bounds during every `compile` and `build`. It rejects unproved
 `[]` accesses and emits runtime checks only for `![]` accesses. A checked access
 needs `raises IndexOutOfBounds` on its function or a matching `try`/`with` arm. After a successful read or write, the verifier can use the checked index bounds
 on the normal continuation. This can justify a later contract call or count
@@ -203,9 +203,10 @@ can establish capacity when an effect-free access is needed.
 The compiler sources and active standard-library, compiler, block-game, and
 terminal fixtures use the checked/proven distinction. `./build.sh all` runs the compiler
 and runtime suites. Dynamic accesses use `![]` and declare the exception effect where the verifier
-cannot prove their bounds. Stage 1 accepts `![]` as legacy indexing to build
-stage 2; stage 2 enforces the distinction. The migration used site-specific
-warnings to mark unproved accesses before making unproved `[]` an error.
+cannot prove their bounds. The verifier has been promoted to both source stages
+and the saved bootstrap. During migration, stage 1 accepted `![]` as legacy
+indexing while stage 2 enforced the distinction. Site-specific warnings marked
+unproved accesses before unproved `[]` became an error.
 
 
 ## Checker architecture

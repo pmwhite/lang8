@@ -1,7 +1,34 @@
 tag compiler_internal;
 
+// Explicit raises select the nearest matching handler. An unknown call may
+// throw any exception; notifying outer handlers too is conservative.
+bounds_exception(exn: ?*ExnDef, f: ?*BoundsState) noregion raises IndexOutOfBounds {
+    if (!bounds_reachable(f)) return;
+    handler: ?*BoundsHandler = bounds_handlers;
+    while (handler != null) {
+        if (exn == null || handler.arm.exn == exn) {
+            handler.incoming = bounds_meet(handler.incoming, f);
+            if (exn != null) return
+        }
+        handler = handler.next
+    }
+}
+
+bounds_call_exceptions(callee: ?*Function, f: ?*BoundsState) noregion raises IndexOutOfBounds {
+    if (callee == null) {
+        bounds_exception(null, f);
+        return
+    }
+    declared: ?*ExnList = callee.raises_list;
+    while (declared != null) {
+        bounds_exception(declared.exn, f);
+        declared = declared.next
+    }
+}
+
 // AST transfer rules. Branches carry immutable fact-table snapshots.
 bounds_value_facts(path: *Expr@new, value: *Expr@new, f: ?*BoundsState@new) raises Error, IndexOutOfBounds: ?*BoundsState@f {
+    if (!bounds_reachable(f)) return f;
     local: ?*Obj = bounds_var(path);
     if (bounds_pure_condition(value)) f = bounds_copy_value(f, value, path);
     if (bounds_nonnull(f, value)) f = bounds_add_nonnull(f, path);
@@ -137,6 +164,13 @@ bounds_stable_scalar_condition(e: *Expr, yes: bool, f: ?*BoundsState@new) raises
 }
 
 bounds_condition(e: *Expr, yes: bool, f: ?*BoundsState@new) raises IndexOutOfBounds: ?*BoundsState@new {
+    if (!bounds_reachable(f)) return f;
+    match e.kind {
+        Num literal -> {
+            if (literal.form == LIT_TRUE && !yes || literal.form == LIT_FALSE && yes) return bounds_unreachable()
+        }
+        _ -> { }
+    }
     bounds_close_implications(bounds_condition_facts(e, yes, f))
 }
 
@@ -195,7 +229,8 @@ bounds_condition_facts(e: *Expr, yes: bool, f: ?*BoundsState@new) raises IndexOu
 }
 
 bounds_invariant_proved(e: *Expr, f: ?*BoundsState) raises IndexOutOfBounds: bool {
-    bounds_pure_condition(e) && bounds_precondition_proved(e, f)
+    !bounds_reachable(f) || bounds_pure_condition(e) && bounds_precondition_proved(e,
+        f)
 }
 
 bounds_infer_invariant_entry(e: *Expr, f: ?*BoundsState) raises IndexOutOfBounds {
@@ -250,6 +285,7 @@ bounds_inits(inits: ?*FieldInit@new, f: ?*BoundsState@new) noregion raises Error
     q: ?*FieldInit = inits;
     while (q != null) {
         f = bounds_expr(q.lhs, f);
+        if (!bounds_reachable(f)) return f;
         value: ?*Expr = q.lhs;
         member: ?*Member = q.member;
         if (value != null && member != null) bounds_require_type_invariant(member.ty,
@@ -263,25 +299,88 @@ bounds_expr_list(e: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error, Ind
     q: ?*Expr = e;
     while (q != null) {
         f = bounds_expr(q, f);
+        if (!bounds_reachable(f)) return f;
         q = q.next
     }
     f
 }
 
 bounds_expr(e: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBounds: ?*BoundsState@new {
-    if (e == null) return f;
+    if (e == null || !bounds_reachable(f)) return f;
+    out: ?*BoundsState = bounds_expr_transfer(e, f);
+    ty: ?*Type = e.ty;
+    if (ty != null && is_noreturn_ty(ty)) return bounds_unreachable();
+    out
+}
+
+// Boolean expressions need not retain both complementary predicate states.
+// Coarsen a live skipped edge to the entry state, avoiding full-prefix copies
+// at every &&/||. Refine it when it is the only survivor. Literal tests are
+// cheap and retain the facts of an unconditionally evaluated RHS.
+bounds_short_circuit_join(
+    condition: *Expr,
+    skip_when: bool,
+    entry: ?*BoundsState@new,
+    evaluated: ?*BoundsState
+) raises IndexOutOfBounds: ?*BoundsState@new {
+    if (!bounds_reachable(evaluated)) return bounds_condition(condition, skip_when,
+        entry);
+    match condition.kind {
+        Num _ -> bounds_meet(bounds_condition(condition, skip_when, entry), evaluated);
+        _ -> bounds_meet(entry, evaluated)
+    }
+}
+
+bounds_expr_transfer(e: *Expr@new, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBounds: ?*BoundsState@new {
     n: *Expr = e;
     match n.kind {
         Index k -> {
             f = bounds_expr(k.lhs, f);
+            if (!bounds_reachable(f)) return f;
             f = bounds_expr(k.idx, f);
+            if (!bounds_reachable(f)) return f;
+            // The array is evaluated before the index. A mutating index
+            // may replace its source path, so post-evaluation facts alone
+            // cannot justify omitting the check on the captured array.
+            proved: bool = false;
+            // [] requests a static proof, so its missing parameter facts may
+            // become caller obligations. ![] must never acquire such a contract.
+            if (bounds_infer_mode && !k.checked && bounds_value_stable(k.idx)) bounds_require(k.lhs,
+                k.idx, f, n.file, n.pos);
+            // Inference must not turn an optional runtime check into an input
+            // contract. Proven accesses are obligations of final validation.
+            if (!bounds_infer_mode) proved = bounds_value_stable(k.idx) && bounds_proves(k.lhs,
+                k.idx, f);
+            if (k.checked) bounds_exception(find_exn("IndexOutOfBounds"), f);
             if (!bounds_infer_mode) {
-                n.bounds_proven = bounds_proves(k.lhs, k.idx, f);
-                if (!n.bounds_proven) {
+                access: ?*BoundsAccess = n.bounds_access;
+                if (access == null) {
+                    access = new BoundsAccess {
+                        file: n.file,
+                        pos: n.pos,
+                        checked: k.checked,
+                        required: false,
+                        next: bounds_accesses
+                    };
+                    bounds_accesses = access;
+                    n.bounds_access = access
+                }
+                if (!proved) access.required = true;
+                if (k.checked) {
                     ed: *ExnDef = find_exn("IndexOutOfBounds") or error("missing IndexOutOfBounds exception");
                     if (!exn_is_caught(ed) && !mark_raises_seen(ed)) error_at_file(n.file,
-                        n.pos, "unproved array access requires raises IndexOutOfBounds or a matching with arm")
+                        n.pos, "checked array access requires raises IndexOutOfBounds or a matching with arm")
                 }
+            }
+            // On the normal successor the checked operands are in bounds.
+            // Reuse source paths only when evaluating the index preserves them.
+            if (!proved && bounds_term(k.lhs) && bounds_value_stable(k.idx)) {
+                zero: *Expr = new_num(0);
+                length: *Expr = bounds_length(k.lhs);
+                if (!bounds_difference_entails(f, zero, k.idx, 0)) f = bounds_add_order(f,
+                    zero, k.idx, false);
+                if (!bounds_difference_entails(f, k.idx, length, -1)) f = bounds_add_order(f,
+                    k.idx, length, true)
             }
             f
         }
@@ -291,6 +390,7 @@ bounds_expr(e: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error, IndexOut
             // Doing the same for aggregate literals is conservative.
             f = bounds_expr(k.rhs, f);
             f = bounds_expr(k.lhs, f);
+            if (!bounds_reachable(f)) return f;
             v: ?*Obj = bounds_var(k.lhs);
             expected: ?*Type = k.lhs.ty;
             if (v != null) expected = v.ty;
@@ -320,7 +420,7 @@ bounds_expr(e: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error, IndexOut
                         }
                         return f
                     }
-                    Index target -> {
+                    Index _ -> {
                         // Replacing a record element may change fields seen
                         // through a pointer to that element.
                         t: ?*Type = k.lhs.ty;
@@ -330,20 +430,6 @@ bounds_expr(e: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error, IndexOut
                                 if (bounds_flat_record(sd)) f = bounds_kill_flat_record_fields(f,
                                     sd) else f = bounds_kill_record_fields(f)
                             } else if (is_enum_ty(t) || is_exn_ty(t) || is_array(t)) f = bounds_kill_record_fields(f)
-                        }
-                        // A completed element write can justify the next
-                        // count update on a record with a length invariant.
-                        match target.lhs.kind {
-                            MemberAccess field -> {
-                                sd: ?*StructDef = bounds_record_def(field.lhs.ty);
-                                if (sd != null && sd.invariant != null) {
-                                    f = bounds_add_order(f, new_num(0), target.idx,
-                                        false);
-                                    f = bounds_add_order(f, target.idx, bounds_length(target.lhs),
-                                        true)
-                                }
-                            }
-                            _ -> { }
                         }
                         return f
                     }
@@ -374,27 +460,33 @@ bounds_expr(e: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error, IndexOut
         }
         LogAnd k -> {
             f = bounds_expr(k.lhs, f);
+            if (!bounds_reachable(f)) return f;
             rhs: ?*BoundsState = bounds_expr(k.rhs, bounds_condition(k.lhs, true,
                 f));
-            bounds_meet(f, rhs)
+            bounds_short_circuit_join(k.lhs, false, f, rhs)
         }
         LogOr k -> {
             f = bounds_expr(k.lhs, f);
+            if (!bounds_reachable(f)) return f;
             rhs: ?*BoundsState = bounds_expr(k.rhs, bounds_condition(k.lhs, false,
                 f));
-            bounds_meet(f, rhs)
+            bounds_short_circuit_join(k.lhs, true, f, rhs)
         }
         OrElse k -> {
             f = bounds_expr(k.lhs, f);
+            if (!bounds_reachable(f)) return f;
             rhs2: ?*BoundsState = bounds_expr(k.rhs, f);
             bounds_meet(f, rhs2)
         }
         Funcall k -> {
             f = bounds_expr_list(k.args, bounds_expr(k.target, f));
+            if (!bounds_reachable(f)) return f;
             if (streq(k.funcname, "len") || streq(k.funcname, "sizeof")) return f;
             callee: ?*Function = k.fn;
             if (callee != null) bounds_check_call(callee, k.args, f, n.file, n.pos);
-            bounds_after_call(f, callee, k.args)
+            f = bounds_after_call(f, callee, k.args);
+            bounds_call_exceptions(callee, f);
+            f
         }
         If k -> {
             f = bounds_expr(k.cond, f);
@@ -407,7 +499,7 @@ bounds_expr(e: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error, IndexOut
         Block k -> bounds_stmt_list(k.body, f);
         Match k -> {
             f = bounds_expr(k.cond, f);
-            surviving: ?*BoundsState = f;
+            surviving: ?*BoundsState = bounds_unreachable();
             q: ?*MatchArm = k.arms;
             while (q != null) {
                 arm: ?*BoundsState = bounds_stmt(q.body, f);
@@ -430,6 +522,7 @@ bounds_expr(e: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error, IndexOut
         }
         Deref k -> {
             f = bounds_expr(k.lhs, f);
+            if (!bounds_reachable(f)) return f;
             bounds_require_nonnull(k.lhs, f, k.lhs.file, k.lhs.pos);
             f
         }
@@ -440,6 +533,7 @@ bounds_expr(e: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error, IndexOut
         Trunc k -> bounds_expr(k.lhs, f);
         MemberAccess k -> {
             f = bounds_expr(k.lhs, f);
+            if (!bounds_reachable(f)) return f;
             t: ?*Type = k.lhs.ty;
             if (t != null && is_any_pointer(t)) bounds_require_nonnull(k.lhs, f, n.file,
                 n.pos);
@@ -450,6 +544,7 @@ bounds_expr(e: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error, IndexOut
         }
         New k -> {
             f = bounds_inits(k.inits, bounds_expr(k.fill, bounds_expr(k.lhs, f)));
+            if (!bounds_reachable(f)) return f;
             fill: ?*Expr = k.fill;
             ty: ?*Type = n.ty;
             if (fill != null && ty != null) bounds_require_type_invariant(type_base(ty),
@@ -459,6 +554,7 @@ bounds_expr(e: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error, IndexOut
         }
         StructLit k -> {
             f = bounds_inits(k.inits, f);
+            if (!bounds_reachable(f)) return f;
             bounds_verify_record_constructor(n, k.inits, f);
             f
         }
@@ -469,6 +565,7 @@ bounds_expr(e: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error, IndexOut
             item: ?*Expr = k.elems;
             while (item != null) {
                 f = bounds_expr(item, f);
+                if (!bounds_reachable(f)) return f;
                 bounds_require_type_invariant(elem, item, f);
                 item = item.next
             }
@@ -480,12 +577,13 @@ bounds_expr(e: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error, IndexOut
 }
 
 bounds_stmt(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBounds: ?*BoundsState@new {
-    if (s == null) return f;
+    if (s == null || !bounds_reachable(f)) return f;
     n: *Stmt = s;
     match n.kind {
         ExprStmt k -> bounds_expr(k.lhs, f);
         Decl k -> {
             f = bounds_expr(k.init, f);
+            if (!bounds_reachable(f)) return f;
             v: ?*Obj = k.var;
             if (v != null) {
                 init: ?*Expr = k.init;
@@ -507,28 +605,29 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBo
         }
         Return k -> {
             f = bounds_expr(k.lhs, f);
+            if (!bounds_reachable(f)) return f;
             fn: ?*Function = bounds_current_fn;
             value: ?*Expr = k.lhs;
             if (fn != null && value != null) bounds_require_type_invariant(fn.return_ty,
                 value, f);
             bounds_return_visit(k.lhs, f);
-            f
+            bounds_unreachable()
         }
-        Raise k -> bounds_inits(k.inits, f);
+        Raise k -> {
+            f = bounds_inits(k.inits, f);
+            bounds_exception(k.exn, f);
+            bounds_unreachable()
+        }
         Block k -> bounds_stmt_list(k.body, f);
         Region k -> bounds_stmt(k.body, f);
         If k -> {
             f = bounds_expr(k.cond, f);
             yes: ?*BoundsState = bounds_stmt(k.then, bounds_condition(k.cond, true,
                 f));
-            no: ?*BoundsState = f;
+            no: ?*BoundsState = bounds_condition(k.cond, false, f);
             els: ?*Stmt = k.els;
             if (els != null) no = bounds_stmt(els, bounds_condition(k.cond, false,
                 f));
-            if (stmt_always_diverges(k.then)) return bounds_condition(k.cond, false,
-                f);
-            if (els != null && stmt_always_diverges(els)) return bounds_condition(k.cond,
-                true, f);
             bounds_meet(yes, no)
         }
         While k -> {
@@ -557,6 +656,7 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBo
         }
         For k -> {
             f = bounds_expr(k.hi, bounds_expr(k.iter, f));
+            if (!bounds_reachable(f)) return f;
             hi: ?*Expr = k.hi;
             if (hi != null) {
                 av: ?*Obj = bounds_len_var(hi);
@@ -630,9 +730,9 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBo
                     if (hiconst >= 0) facts = bounds_add_order(facts, bounds_obj_expr(k.item),
                         new_num(hiconst), true);
                     endfacts: ?*BoundsState = bounds_stmt(k.body, facts);
-                    if (av != null && !bounds_order(endfacts, bounds_obj_expr(k.item),
-                        bounds_len_term(bounds_obj_expr(av)), true)) error_at_file(hi.file,
-                        n.pos, "array used as for-loop bound may change in loop");
+                    if (bounds_reachable(endfacts) && av != null && !bounds_order(endfacts,
+                        bounds_obj_expr(k.item), bounds_len_term(bounds_obj_expr(av)),
+                        true)) error_at_file(hi.file, n.pos, "array used as for-loop bound may change in loop");
                     if (hiconst >= 0 && (k.item.bounds_written || k.item.bounds_addr_taken)) error_at_file(hi.file,
                         n.pos, "range index may change in loop");
                     next_inv2: ?*BoundsState = bounds_widen(invariant2, bounds_meet(f,
@@ -647,7 +747,7 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBo
         }
         Match k -> {
             f = bounds_expr(k.cond, f);
-            surviving: ?*BoundsState = f;
+            surviving: ?*BoundsState = bounds_unreachable();
             q: ?*MatchArm = k.arms;
             while (q != null) {
                 arm: ?*BoundsState = bounds_stmt(q.body, f);
@@ -658,19 +758,23 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBo
         }
         Try k -> {
             saved_c: ?*CatchFrame = catch_top;
+            saved_handlers: ?*BoundsHandler = bounds_handlers;
             q0: ?*CatchArm = k.arms;
             while (q0 != null) {
                 catch_push(q0.exn or error("internal"));
+                bounds_handlers = new BoundsHandler { arm: q0, incoming: bounds_unreachable(), next: bounds_handlers };
                 q0 = q0.next
             }
-            _trybody: ?*BoundsState = bounds_stmt(k.body, f);
+            surviving: ?*BoundsState = bounds_stmt(k.body, f);
             catch_reset(saved_c);
-            q: ?*CatchArm = k.arms;
-            while (q != null) {
-                _catch: ?*BoundsState = bounds_stmt(q.body, null);
-                q = q.next
+            handler: ?*BoundsHandler = bounds_handlers;
+            bounds_handlers = saved_handlers;
+            while (handler != null && handler != saved_handlers) {
+                caught: ?*BoundsState = bounds_stmt(handler.arm.body, handler.incoming);
+                surviving = bounds_meet(surviving, caught);
+                handler = handler.next
             }
-            null
+            surviving
         }
         _ -> f
     }
@@ -680,6 +784,7 @@ bounds_stmt_list(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOu
     q: ?*Stmt = s;
     while (q != null) {
         f = bounds_stmt(q, f);
+        if (!bounds_reachable(f)) return f;
         q = q.next
     }
     f

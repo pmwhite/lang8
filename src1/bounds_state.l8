@@ -1,5 +1,122 @@
 tag compiler_internal;
 
+bounds_graph_cache_new(): *BoundsGraphCache@new {
+    graph: *BoundsGraph = bounds_graph_new(BOUNDS_GRAPH_CACHE_ROWS);
+    capacity: int = len(graph.terms);
+    new BoundsGraphCache {
+        graph: graph,
+        source: -2,
+        complete: false,
+        storage: null,
+        count: -1,
+        distances: new int[capacity](0),
+        queued: new bool[capacity](false),
+        queue: new int[capacity + 1](0)
+    }
+}
+
+bounds_arena_new(): *BoundsArena@new {
+    first: *BoundsGraphCache = bounds_graph_cache_new();
+    second: *BoundsGraphCache = bounds_graph_cache_new();
+    new BoundsArena {
+        first_graph: first,
+        second_graph: second,
+        free: new ?*BoundsStorage[24](null),
+        active: null
+    }
+}
+
+bounds_arena_bin(capacity: int): int {
+    bin: int = 0;
+    size: int = capacity;
+    while (size > 1) {
+        size = size / 2;
+        bin = bin + 1
+    }
+    bin
+}
+
+// End of one function/pass: there must be no remaining users of its states.
+// AST terms and exported summary rows are deliberately not reclaimed.
+bounds_arena_reset(arena: *BoundsArena) raises IndexOutOfBounds {
+    storage: ?*BoundsStorage = arena.active;
+    arena.active = null;
+    arena.first_graph.storage = null;
+    arena.first_graph.count = -1;
+    arena.second_graph.storage = null;
+    arena.second_graph.count = -1;
+    while (storage != null) {
+        next: ?*BoundsStorage = storage.pool_next;
+        bin: int = bounds_arena_bin(len(storage.rows));
+        if (bin < len(arena.free)) {
+            storage.pool_next = arena.free![bin];
+            arena.free[bin] = storage
+        }
+        storage = next
+    }
+}
+
+bounds_arena_state(arena: *BoundsArena@new): *BoundsState@new {
+    new BoundsState {
+        arena: arena,
+        unreachable: false,
+        storage: null,
+        count: 0,
+        sum_count: 0,
+        implications: null
+    }
+}
+
+bounds_empty(state: ?*BoundsState@new): ?*BoundsState@new {
+    arena: ?*BoundsArena = if (state == null) null else state.arena;
+    if (arena == null) null else bounds_arena_state(arena)
+}
+
+bounds_storage_new(arena: ?*BoundsArena@new, row: BoundsRow@new, capacity: int) raises IndexOutOfBounds: *BoundsStorage@new {
+    bin: int = bounds_arena_bin(capacity);
+    reused: ?*BoundsStorage = null;
+    if (arena != null && bin < len(arena.free)) reused = arena.free![bin];
+    if (reused != null && arena != null) {
+        arena.free![bin] = reused.pool_next;
+        reused.pool_next = arena.active;
+        arena.active = reused;
+        for i in 0..len(reused.buckets) reused.buckets[i] = -1;
+        reused.prefix_source = null;
+        reused.prefix_count = 0;
+        return reused
+    }
+    storage: *BoundsStorage = new BoundsStorage {
+        prefix_source: null,
+        prefix_count: 0,
+        pool_next: if (arena == null) null else arena.active,
+        rows: new BoundsRow[capacity](row),
+        numeric: new BoundsNumericView[capacity](bounds_numeric_query(null, null,
+            0)),
+        buckets: new int[capacity * 2](-1),
+        links: new int[capacity](-1),
+        used: 0
+    };
+    if (arena != null) arena.active = storage;
+    storage
+}
+
+bounds_reachable(state: ?*BoundsState): bool {
+    state == null || !state.unreachable
+}
+
+// Bottom has no rows and never enters the numeric solver. Keeping it explicit
+// lets every control-flow join distinguish no predecessor from no information.
+bounds_unreachable(): *BoundsState@new {
+    new BoundsState {
+        arena: null,
+        unreachable: true,
+        storage: null,
+        count: 0,
+        sum_count: 0,
+        implications: null
+    }
+}
+
 // A row belongs to a dense fact table, never to a linked list. Numeric rows
 // lower to left - right <= bound; other rows describe identity/provenance.
 // The AST adapter retains source paths for invalidation and diagnostics.
@@ -15,44 +132,46 @@ bounds_has_sum(state: ?*BoundsState): bool {
 bounds_row(state: ?*BoundsState, position: int) raises IndexOutOfBounds: ?*BoundsRow@state {
     if (state == null) return null;
     if (position < 0 || position >= state.count) return null;
-    &state.storage.rows[position]
+    storage: ?*BoundsStorage = state.storage;
+    if (storage == null) return null;
+    &storage.rows![position]
 }
 
 bounds_storage(state: ?*BoundsState@new, row: BoundsRow@new) raises IndexOutOfBounds: *BoundsStorage@new {
     count: int = bounds_count(state);
     if (state != null) {
-        old: *BoundsStorage = state.storage;
-        if (old.used == count && count < len(old.rows)) return old
+        old: ?*BoundsStorage = state.storage;
+        if (old != null && old.used == count && count < len(old.rows)) return old
     }
     capacity: int = 4;
     while (capacity <= count) capacity = capacity * 2;
-    rows: []BoundsRow = new BoundsRow[capacity](row);
-    numeric: []BoundsNumericView = new BoundsNumericView[capacity](bounds_numeric_query(null,
-        null, 0));
-    buckets: []int = new int[capacity * 2](-1);
-    links: []int = new int[capacity](-1);
-    if (state != null) {
-        source: []BoundsRow = state.storage.rows;
-        source_numeric: []BoundsNumericView = state.storage.numeric;
+    arena: ?*BoundsArena = if (state == null) null else state.arena;
+    storage: *BoundsStorage = bounds_storage_new(arena, row, capacity);
+    rows: []BoundsRow = storage.rows;
+    numeric: []BoundsNumericView = storage.numeric;
+    buckets: []int = storage.buckets;
+    links: []int = storage.links;
+    previous: ?*BoundsStorage = if (state == null) null else state.storage;
+    if (previous != null) {
+        source: []BoundsRow = previous.rows;
+        source_numeric: []BoundsNumericView = previous.numeric;
         for i in 0..count {
-            rows[i] = source[i];
-            item: BoundsNumericView = source_numeric[i];
-            numeric[i] = item;
+            rows![i] = source![i];
+            item: BoundsNumericView = source_numeric![i];
+            numeric![i] = item;
             slot: int = bounds_row_hash(&rows[i], item) & len(buckets) - 1;
-            links[i] = buckets[slot];
+            links![i] = buckets![slot];
             buckets[slot] = i
         }
     }
-    new BoundsStorage {
-        rows: rows,
-        numeric: numeric,
-        buckets: buckets,
-        links: links,
-        used: count
-    }
+    storage.prefix_source = previous;
+    storage.prefix_count = count;
+    storage.used = count;
+    storage
 }
 
 bounds_push(state: ?*BoundsState@new, row: BoundsRow@new) raises IndexOutOfBounds: *BoundsState@new {
+    if (state != null && state.unreachable) return state;
     // Numeric rows are normalized on entry, including rows made by joins.
     // After this boundary, source syntax no longer determines representation.
     if (row.kind == BoundsKind.Difference) {
@@ -81,10 +200,10 @@ bounds_push(state: ?*BoundsState@new, row: BoundsRow@new) raises IndexOutOfBound
     }
     count: int = bounds_count(state);
     storage: *BoundsStorage = bounds_storage(state, row);
-    storage.rows[count] = row;
-    storage.numeric[count] = decoded;
+    storage.rows![count] = row;
+    storage.numeric![count] = decoded;
     slot: int = hash & len(storage.buckets) - 1;
-    storage.links[count] = storage.buckets[slot];
+    storage.links![count] = storage.buckets![slot];
     storage.buckets[slot] = count;
     storage.used = count + 1;
     implications: ?*BoundsImplication = null;
@@ -93,6 +212,8 @@ bounds_push(state: ?*BoundsState@new, row: BoundsRow@new) raises IndexOutOfBound
     if (state != null) sum_count = state.sum_count;
     if (row.kind == BoundsKind.SumUpper) sum_count = sum_count + 1;
     new BoundsState {
+        arena: if (state == null) null else state.arena,
+        unreachable: false,
         storage: storage,
         count: count + 1,
         sum_count: sum_count,
@@ -103,35 +224,56 @@ bounds_push(state: ?*BoundsState@new, row: BoundsRow@new) raises IndexOutOfBound
 // Existing fact rows are already normalized and unique. Filtering a state
 // can append them directly without normalizing and searching for duplicates.
 bounds_copy(state: ?*BoundsState@new, row: *BoundsRow@new, hint: int) raises IndexOutOfBounds: *BoundsState@new {
+    if (state != null && state.unreachable) return state;
     count: int = bounds_count(state);
     storage: *BoundsStorage;
-    if (state == null) {
+    if (count == 0) {
         capacity: int = 4;
         while (capacity <= hint && capacity < 64) capacity = capacity * 2;
-        storage = new BoundsStorage {
-            rows: new BoundsRow[capacity](row.*),
-            numeric: new BoundsNumericView[capacity](bounds_numeric_query(null, null,
-                0)),
-            buckets: new int[capacity * 2](-1),
-            links: new int[capacity](-1),
-            used: 0
-        }
+        arena: ?*BoundsArena = if (state == null) null else state.arena;
+        storage = bounds_storage_new(arena, row.*, capacity)
     } else storage = bounds_storage(state, row.*);
-    storage.rows[count] = row.*;
+    storage.rows![count] = row.*;
     numeric: BoundsNumericView = bounds_numeric_view(row);
-    storage.numeric[count] = numeric;
+    storage.numeric![count] = numeric;
     slot: int = bounds_row_hash(row, numeric) & len(storage.buckets) - 1;
-    storage.links[count] = storage.buckets[slot];
+    storage.links![count] = storage.buckets![slot];
     storage.buckets[slot] = count;
     storage.used = count + 1;
     sum_count: int = if (state == null) 0 else state.sum_count;
     if (row.kind == BoundsKind.SumUpper) sum_count = sum_count + 1;
     new BoundsState {
+        arena: if (state == null) null else state.arena,
+        unreachable: false,
         storage: storage,
         count: count + 1,
         sum_count: sum_count,
         implications: if (state == null) null else state.implications
     }
+}
+
+// Filters visit source rows in order and pass the original row at position.
+// Share the surviving prefix; the first append after a gap uses the normal
+// copy-on-write path. Invalidation deliberately drops all implications.
+bounds_filter_copy(
+    head: ?*BoundsState@new,
+    source: ?*BoundsState@new,
+    row: *BoundsRow@new,
+    position: int
+) raises IndexOutOfBounds: *BoundsState@new {
+    if (source != null && (position == 0 && bounds_count(head) == 0 || head != null && head.storage == source.storage && head.count == position)) {
+        sums: int = if (head == null) 0 else head.sum_count;
+        if (row.kind == BoundsKind.SumUpper) sums = sums + 1;
+        return new BoundsState {
+            arena: source.arena,
+            unreachable: false,
+            storage: source.storage,
+            count: position + 1,
+            sum_count: sums,
+            implications: null
+        }
+    }
+    bounds_copy(head, row, bounds_count(source))
 }
 
 bounds_copy_separation(state: ?*BoundsState@new, row: *BoundsRow@new, separation: ?*BoundsSeparation) raises IndexOutOfBounds: *BoundsState@new {
@@ -177,6 +319,7 @@ bounds_row_same(a: *BoundsRow, b: *BoundsRow) raises IndexOutOfBounds: bool {
 }
 
 bounds_has_fact(state: ?*BoundsState, row: *BoundsRow) raises IndexOutOfBounds: bool {
+    if (!bounds_reachable(state)) return true;
     numeric: BoundsNumericView = bounds_numeric_view(row);
     if (numeric.valid) return bounds_numeric_entails(state, numeric);
     if (state == null) return false;
@@ -228,19 +371,19 @@ bounds_has_implication(state: ?*BoundsState, wanted: *BoundsImplication) raises 
 }
 
 bounds_attach_implication(state: ?*BoundsState@new, rule: *BoundsImplication@new) raises IndexOutOfBounds: *BoundsState@new {
+    if (state != null && state.unreachable) return state;
     if (state != null) {
         if (bounds_has_implication(state, rule)) return state
     }
-    storage: *BoundsStorage = bounds_storage(null, rule.consequence);
+    storage: ?*BoundsStorage = if (state == null) null else state.storage;
     previous: ?*BoundsImplication = null;
-    if (state != null) {
-        storage = state.storage;
-        previous = state.implications
-    }
+    if (state != null) previous = state.implications;
     linked: *BoundsImplication = new BoundsImplication { premises: rule.premises, consequence: rule.consequence, next: previous };
     sum_count: int = 0;
     if (state != null) sum_count = state.sum_count;
     new BoundsState {
+        arena: if (state == null) null else state.arena,
+        unreachable: false,
         storage: storage,
         count: bounds_count(state),
         sum_count: sum_count,
@@ -280,9 +423,9 @@ bounds_implications_same(a: ?*BoundsState, b: ?*BoundsState) raises IndexOutOfBo
 
 // Find a bound for the same canonical pair, independent of the syntax which
 // established it. Alias assumptions may be weakened, never strengthened.
-// Pure lattice queries compare obligations. Proof queries may discharge them.
-// Both use the same indexed lookup and the same canonical endpoint equality.
-bounds_direct_bound(state: ?*BoundsState, wanted: BoundsNumericView, prove: bool) raises IndexOutOfBounds: int {
+// Lattice queries compare obligations. Proof searches return any assumptions
+// with their evidence, without changing the current function's contract.
+bounds_direct_evidence(state: ?*BoundsState, wanted: BoundsNumericView, prove: bool) raises IndexOutOfBounds: BoundsEvidence {
     best: int = 1000000000;
     obligation: ?*BoundsSeparation = null;
     left: BoundsTermRef = bounds_view_left(wanted);
@@ -290,25 +433,31 @@ bounds_direct_bound(state: ?*BoundsState, wanted: BoundsNumericView, prove: bool
     position: int = bounds_bucket(state, bounds_pair_hash(wanted));
     while (position >= 0) {
         if (state != null && position < state.count) {
-            edge: BoundsNumericView = state.storage.numeric[position];
-            el: BoundsTermRef = bounds_view_left(edge);
-            er: BoundsTermRef = bounds_view_right(edge);
-            if (edge.valid && edge.bound < best && bounds_ref_same(left, el) && bounds_ref_same(right,
-                er)) {
-                available: bool = if (prove) bounds_separations_available(edge.separation,
-                    state) else edge.separation == null || bounds_separation_same(edge.separation,
-                    wanted.separation);
-                if (available) {
-                    best = edge.bound;
-                    obligation = edge.separation
+            edge: ?*BoundsNumericView = bounds_numeric_ref(state, position);
+            if (edge != null) {
+                el: BoundsTermRef = bounds_view_left_ref(edge);
+                er: BoundsTermRef = bounds_view_right_ref(edge);
+                if (edge.valid && edge.bound < best && bounds_ref_same(left, el) && bounds_ref_same(right,
+                    er)) {
+                    available: bool = if (prove) bounds_separations_available(edge.separation,
+                        state) else edge.separation == null || bounds_separation_same(edge.separation,
+                        wanted.separation);
+                    if (available) {
+                        best = edge.bound;
+                        obligation = edge.separation
+                    }
                 }
             }
         }
         position = bounds_next_row(state, position)
     }
-    if (prove && best < 1000000000 && best <= wanted.bound) bounds_note_separations(obligation,
-        state);
-    best
+    BoundsEvidence { bound: best, separation: obligation }
+}
+
+// Pure entailment for lattice operations never discharges assumptions.
+bounds_direct_bound(state: ?*BoundsState, wanted: BoundsNumericView) raises IndexOutOfBounds: int {
+    evidence: BoundsEvidence = bounds_direct_evidence(state, wanted, false);
+    evidence.bound
 }
 
 bounds_rows_identical(a: *BoundsRow, b: *BoundsRow): bool {
@@ -321,6 +470,14 @@ bounds_common_prefix(a: ?*BoundsState, b: ?*BoundsState) raises IndexOutOfBounds
     limit: int = if (a.count < b.count) a.count else b.count;
     if (a.storage == b.storage) return limit;
     position: int = 0;
+    // Copies of a parent or sibling share a known prefix. Verify only the
+    // remaining rows, and cap provenance by both snapshot lengths.
+    first_storage: ?*BoundsStorage = a.storage;
+    second_storage: ?*BoundsStorage = b.storage;
+    if (first_storage != null && second_storage != null) {
+        if (first_storage.prefix_source == second_storage) position = first_storage.prefix_count else if (second_storage.prefix_source == first_storage) position = second_storage.prefix_count else if (first_storage.prefix_source != null && first_storage.prefix_source == second_storage.prefix_source) position = (if (first_storage.prefix_count < second_storage.prefix_count) first_storage.prefix_count else second_storage.prefix_count);
+        if (position > limit) position = limit
+    }
     matching: bool = true;
     while (position < limit && matching) {
         first: ?*BoundsRow = bounds_row(a, position);
@@ -349,30 +506,36 @@ bounds_subset_from(a: ?*BoundsState, b: ?*BoundsState, prefix: int) raises Index
 }
 
 bounds_subset(a: ?*BoundsState, b: ?*BoundsState) raises IndexOutOfBounds: bool {
+    if (!bounds_reachable(b)) return true;
+    if (!bounds_reachable(a)) return false;
     bounds_subset_from(a, b, bounds_common_prefix(a, b))
 }
 
 bounds_meet(a: ?*BoundsState@new, b: ?*BoundsState) raises IndexOutOfBounds: ?*BoundsState@new {
+    if (!bounds_reachable(a)) return b;
+    if (!bounds_reachable(b)) return a;
     if (a == b) return a;
     prefix: int = bounds_common_prefix(a, b);
     if (bounds_subset_from(a, b, prefix)) return a;
     if (bounds_subset_from(b, a, prefix)) return b;
-    result: ?*BoundsState = null;
+    result: ?*BoundsState = bounds_empty(a);
     if (a != null && prefix > 0) {
         prefix_sums: int = 0;
-        for index in 0..prefix {
+        for index in 0..if (bounds_has_sum(a)) prefix else 0 {
             row0: ?*BoundsRow = bounds_row(a, index);
             if (row0 != null && row0.kind == BoundsKind.SumUpper) prefix_sums = prefix_sums + 1
         }
         result = new BoundsState {
+            arena: a.arena,
+            unreachable: false,
             storage: a.storage,
             count: prefix,
             sum_count: prefix_sums,
             implications: null
         }
     }
-    position: int = bounds_count(a) - 1;
-    while (position >= prefix) {
+    position: int = prefix;
+    while (position < bounds_count(a)) {
         row: ?*BoundsRow = bounds_row(a, position);
         if (row != null) {
             if (bounds_has_fact(b, row)) {
@@ -381,7 +544,7 @@ bounds_meet(a: ?*BoundsState@new, b: ?*BoundsState) raises IndexOutOfBounds: ?*B
             } else {
                 edge: BoundsNumericView = bounds_numeric_at(a, position);
                 if (edge.valid) {
-                    other: int = bounds_direct_bound(b, edge, false);
+                    other: int = bounds_direct_bound(b, edge);
                     if (other < 1000000000) {
                         if (other > edge.bound) edge.bound = other;
                         left: BoundsTermRef = bounds_view_left(edge);
@@ -401,7 +564,7 @@ bounds_meet(a: ?*BoundsState@new, b: ?*BoundsState) raises IndexOutOfBounds: ?*B
                 }
             }
         }
-        position = position - 1
+        position = position + 1
     }
     // If one predecessor survived intact, it already contains every fact
     // that the other can contribute at this join.
@@ -411,6 +574,7 @@ bounds_meet(a: ?*BoundsState@new, b: ?*BoundsState) raises IndexOutOfBounds: ?*B
 }
 
 bounds_same(a: ?*BoundsState, b: ?*BoundsState) raises IndexOutOfBounds: bool {
+    if (bounds_reachable(a) != bounds_reachable(b)) return false;
     if (a == b) return true;
     if (!bounds_implications_same(a, b)) return false;
     if (a != null && b != null && a.storage == b.storage && a.count == b.count) return true;
@@ -455,8 +619,10 @@ bounds_insert(
 // whose previous bound survives the back edge. The set is finite and strictly
 // decreases, so advancing cursors cannot cause an endless sequence of maxima.
 bounds_widen(previous: ?*BoundsState@new, incoming: ?*BoundsState) raises IndexOutOfBounds: ?*BoundsState@new {
+    if (!bounds_reachable(previous)) return incoming;
+    if (!bounds_reachable(incoming)) return previous;
     if (bounds_subset(previous, incoming)) return previous;
-    result: ?*BoundsState = null;
+    result: ?*BoundsState = bounds_empty(previous);
     position: int = bounds_count(previous) - 1;
     while (position >= 0) {
         row: ?*BoundsRow = bounds_row(previous, position);
@@ -470,8 +636,17 @@ bounds_widen(previous: ?*BoundsState@new, incoming: ?*BoundsState) raises IndexO
 // Numeric views are cached alongside the source rows. Branch snapshots share
 // the prefix, and appends update both arrays together.
 bounds_numeric_at(state: ?*BoundsState, position: int) raises IndexOutOfBounds: BoundsNumericView {
-    if (state != null && position >= 0 && position < state.count) return state.storage.numeric[position];
+    storage: ?*BoundsStorage = if (state == null) null else state.storage;
+    if (state != null && storage != null && position >= 0 && position < state.count) return storage.numeric![position];
     bounds_numeric_query(null, null, 0)
+}
+
+// Borrow a cached descriptor for read-only use until the arena resets. Respect
+// the snapshot count even when a sibling has appended to the same storage.
+bounds_numeric_ref(state: ?*BoundsState, position: int) raises IndexOutOfBounds: ?*BoundsNumericView@state {
+    storage: ?*BoundsStorage = if (state == null) null else state.storage;
+    if (state != null && storage != null && position >= 0 && position < state.count) return &storage.numeric![position];
+    null
 }
 
 bounds_pair_hash(edge: BoundsNumericView): int {
@@ -487,13 +662,17 @@ bounds_row_hash(row: *BoundsRow, edge: BoundsNumericView): int {
 
 bounds_bucket(state: ?*BoundsState, hash: int) raises IndexOutOfBounds: int {
     if (state == null) return -1;
-    slots: []int = state.storage.buckets;
-    slots[hash & len(slots) - 1]
+    storage: ?*BoundsStorage = state.storage;
+    if (storage == null) return -1;
+    slots: []int = storage.buckets;
+    slots![hash & len(slots) - 1]
 }
 
 bounds_next_row(state: ?*BoundsState, position: int) raises IndexOutOfBounds: int {
     if (state == null) return -1;
-    state.storage.links[position]
+    storage: ?*BoundsStorage = state.storage;
+    if (storage == null) return -1;
+    storage.links![position]
 }
 
 // Rewrite difference edges when a cursor is replaced by its old value plus
@@ -573,7 +752,7 @@ bounds_forget_scalar(f: ?*BoundsState@new, value: *Obj) raises IndexOutOfBounds:
                         if (right == null) right = new_num(0);
                         query: BoundsNumericView = bounds_numeric_query(left, right,
                             weight);
-                        if (bounds_direct_bound(result, query, false) > query.bound) result = bounds_add_relation(result,
+                        if (bounds_direct_bound(result, query) > query.bound) result = bounds_add_relation(result,
                             left, right, weight)
                     }
                 }

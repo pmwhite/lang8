@@ -10,7 +10,7 @@ bounds_effect_add(
     root_id: int = if (root_param == null) 0 else root_param.browse_id;
     hash: int = fn.browse_id * 65599 + member.browse_id * 33 + root_id;
     slot: int = hash & len(sites.write_buckets) - 1;
-    q: ?*BoundsWrite = sites.write_buckets[slot];
+    q: ?*BoundsWrite = sites.write_buckets![slot];
     while (q != null) {
         if (q.owner == fn && q.member == member && q.root_param == root_param) return false;
         q = q.hash_next
@@ -430,29 +430,29 @@ bounds_infer_effects() raises IndexOutOfBounds {
     fn = functions;
     while (fn != null) {
         if (!fn.is_extern) _changed: bool = bounds_effect_stmts(sites, fn, fn.body);
-        queue[fn.bounds_visit] = fn;
+        queue![fn.bounds_visit] = fn;
         fn = fn.next
     }
     read: int = 0;
     write: int = count;
     while (read != write) {
-        callee: ?*Function = queue[read];
+        callee: ?*Function = queue![read];
         read = read + 1;
         if (read == len(queue)) read = 0;
         if (callee != null) {
-            queued[callee.bounds_visit] = false;
+            queued![callee.bounds_visit] = false;
             site_id: int = sites.heads[callee.bounds_visit];
             while (site_id >= 0) {
-                site: *BoundsEffectSite = &sites.rows[site_id];
+                site: *BoundsEffectSite = &sites.rows![site_id];
                 caller: ?*Function = site.caller;
                 if (caller != null) {
                     changed: bool = bounds_effect_transfer(sites, caller, callee,
                         site.args);
-                    if (changed && !queued[caller.bounds_visit]) {
-                        queue[write] = caller;
+                    if (changed && !queued![caller.bounds_visit]) {
+                        queue![write] = caller;
                         write = write + 1;
                         if (write == len(queue)) write = 0;
-                        queued[caller.bounds_visit] = true
+                        queued![caller.bounds_visit] = true
                     }
                 }
                 site_id = site.next
@@ -476,7 +476,7 @@ bounds_effect_site(
         caller: caller,
         callee: callee,
         args: args,
-        next: sites.heads[callee.bounds_visit]
+        next: sites.heads![callee.bounds_visit]
     };
     bounds_effect_append(sites, row, callee.bounds_visit)
 }
@@ -484,11 +484,11 @@ bounds_effect_site(
 bounds_effect_append(sites: *BoundsEffectSites@new, row: BoundsEffectSite@new, callee_id: int) raises IndexOutOfBounds {
     if (sites.count == len(sites.rows)) {
         rows: []BoundsEffectSite = new BoundsEffectSite[sites.count * 2](row);
-        for i in 0..sites.count rows[i] = sites.rows[i];
+        for i in 0..sites.count rows![i] = sites.rows![i];
         sites.rows = rows
     }
-    sites.rows[sites.count] = row;
-    sites.heads[callee_id] = sites.count;
+    sites.rows![sites.count] = row;
+    sites.heads![callee_id] = sites.count;
     sites.count = sites.count + 1
 }
 
@@ -616,6 +616,7 @@ bounds_sum_uses(row: *BoundsRow, v: *Obj): bool {
 }
 
 bounds_kill(f: ?*BoundsState@new, v: *Obj) raises IndexOutOfBounds: ?*BoundsState@new {
+    if (!bounds_reachable(f)) return f;
     // Assigning a value absent from the state leaves the snapshot intact.
     // This is common for short-lived locals and avoids copying every fact.
     scan_position: int = bounds_count(f) - 1;
@@ -630,19 +631,21 @@ bounds_kill(f: ?*BoundsState@new, v: *Obj) raises IndexOutOfBounds: ?*BoundsStat
         if (f == null) return f;
         if (f.implications == null) return f;
         return new BoundsState {
+            arena: f.arena,
+            unreachable: false,
             storage: f.storage,
             count: f.count,
             sum_count: f.sum_count,
             implications: null
         }
     }
-    head: ?*BoundsState = null;
-    q_position: int = bounds_count(f) - 1;
+    head: ?*BoundsState = bounds_empty(f);
+    q_position: int = 0;
     q: ?*BoundsRow = bounds_row(f, q_position);
     while (q != null) {
-        if (q.index != v && q.array != v && !bounds_sum_uses(q, v)) head = bounds_copy(head,
-            q, bounds_count(f));
-        q_position = q_position - 1;
+        if (q.index != v && q.array != v && !bounds_sum_uses(q, v)) head = bounds_filter_copy(head,
+            f, q, q_position);
+        q_position = q_position + 1;
         q = bounds_row(f, q_position)
     }
     head
@@ -651,8 +654,9 @@ bounds_kill(f: ?*BoundsState@new, v: *Obj) raises IndexOutOfBounds: ?*BoundsStat
 // Without a proven separation, another path with the same member may alias.
 // Keep facts about other members, including those of the same record.
 bounds_kill_member(f: ?*BoundsState@new, member: *Member, owner: *Expr) raises IndexOutOfBounds: ?*BoundsState@new {
-    head: ?*BoundsState = null;
-    q_position: int = bounds_count(f) - 1;
+    if (!bounds_reachable(f)) return f;
+    head: ?*BoundsState = bounds_empty(f);
+    q_position: int = 0;
     q: ?*BoundsRow = bounds_row(f, q_position);
     while (q != null) {
         affected: bool = false;
@@ -661,16 +665,17 @@ bounds_kill_member(f: ?*BoundsState@new, member: *Member, owner: *Expr) raises I
         if (left != null && !bounds_member_write_preserves(left, member, owner, f)) affected = true;
         if (right != null && !bounds_member_write_preserves(right, member, owner,
             f)) affected = true;
-        if (!affected) head = bounds_copy(head, q, bounds_count(f));
-        q_position = q_position - 1;
+        if (!affected) head = bounds_filter_copy(head, f, q, q_position);
+        q_position = q_position + 1;
         q = bounds_row(f, q_position)
     }
     head
 }
 
 bounds_kill_record_fields(f: ?*BoundsState@new) raises IndexOutOfBounds: ?*BoundsState@new {
-    head: ?*BoundsState = null;
-    q_position: int = bounds_count(f) - 1;
+    if (!bounds_reachable(f)) return f;
+    head: ?*BoundsState = bounds_empty(f);
+    q_position: int = 0;
     q: ?*BoundsRow = bounds_row(f, q_position);
     while (q != null) {
         affected: bool = false;
@@ -678,8 +683,8 @@ bounds_kill_record_fields(f: ?*BoundsState@new) raises IndexOutOfBounds: ?*Bound
         right: ?*Expr = q.right;
         if (left != null && bounds_term_has_any_member(left)) affected = true;
         if (right != null && bounds_term_has_any_member(right)) affected = true;
-        if (!affected) head = bounds_copy(head, q, bounds_count(f));
-        q_position = q_position - 1;
+        if (!affected) head = bounds_filter_copy(head, f, q, q_position);
+        q_position = q_position + 1;
         q = bounds_row(f, q_position)
     }
     head
@@ -713,8 +718,9 @@ bounds_term_has_record_member(e: *Expr, sd: *StructDef) raises Error: bool {
 // A write to one flat record element can change fields of that record type,
 // but it cannot change the containing array's length or sibling record fields.
 bounds_kill_flat_record_fields(f: ?*BoundsState@new, sd: *StructDef) raises Error, IndexOutOfBounds: ?*BoundsState@new {
-    head: ?*BoundsState = null;
-    q_position: int = bounds_count(f) - 1;
+    if (!bounds_reachable(f)) return f;
+    head: ?*BoundsState = bounds_empty(f);
+    q_position: int = 0;
     q: ?*BoundsRow = bounds_row(f, q_position);
     while (q != null) {
         affected: bool = false;
@@ -722,8 +728,8 @@ bounds_kill_flat_record_fields(f: ?*BoundsState@new, sd: *StructDef) raises Erro
         right: ?*Expr = q.right;
         if (left != null && bounds_term_has_record_member(left, sd)) affected = true;
         if (right != null && bounds_term_has_record_member(right, sd)) affected = true;
-        if (!affected) head = bounds_copy(head, q, bounds_count(f));
-        q_position = q_position - 1;
+        if (!affected) head = bounds_filter_copy(head, f, q, q_position);
+        q_position = q_position + 1;
         q = bounds_row(f, q_position)
     }
     head
@@ -758,19 +764,22 @@ bounds_pure_call_keeps_all(f: ?*BoundsState, callee: *Function) raises IndexOutO
 }
 
 bounds_after_call(f: ?*BoundsState@new, callee: ?*Function, args: ?*Expr) raises IndexOutOfBounds: ?*BoundsState@new {
+    if (!bounds_reachable(f)) return f;
     if (bounds_count(f) == 0) return null;
     if (callee != null && !callee.bounds_unknown_write && callee.bounds_writes == null && !callee.bounds_element_write && bounds_pure_call_keeps_all(f,
         callee)) {
         if (f == null || f.implications == null) return f;
         return new BoundsState {
+            arena: f.arena,
+            unreachable: false,
             storage: f.storage,
             count: f.count,
             sum_count: f.sum_count,
             implications: null
         }
     }
-    head: ?*BoundsState = null;
-    q_position: int = bounds_count(f) - 1;
+    head: ?*BoundsState = bounds_empty(f);
+    q_position: int = 0;
     q: ?*BoundsRow = bounds_row(f, q_position);
     while (q != null) {
         a: ?*Obj = q.array;
@@ -784,16 +793,16 @@ bounds_after_call(f: ?*BoundsState@new, callee: ?*Function, args: ?*Expr) raises
             if (left_scalar != null && right_scalar != null) {
                 if (callee != null) {
                     if (bounds_effect_preserves_term(callee, left_scalar) && bounds_effect_preserves_term(callee,
-                        right_scalar)) head = bounds_copy(head, q, bounds_count(f))
-                } else if (bounds_term_local_value(left_scalar) && bounds_term_local_value(right_scalar)) head = bounds_copy(head,
-                    q, bounds_count(f))
+                        right_scalar)) head = bounds_filter_copy(head, f, q, q_position)
+                } else if (bounds_term_local_value(left_scalar) && bounds_term_local_value(right_scalar)) head = bounds_filter_copy(head,
+                    f, q, q_position)
             }
         } else if (q.kind == BoundsKind.Difference) {
             stable = false;
             local_left: ?*Expr = q.left;
             local_right: ?*Expr = q.right;
             local_values: bool = local_left != null && local_right != null && bounds_term_local_value(local_left) && bounds_term_local_value(local_right);
-            if (local_values) head = bounds_copy(head, q, bounds_count(f)) else if (callee != null) {
+            if (local_values) head = bounds_filter_copy(head, f, q, q_position) else if (callee != null) {
                 if (!callee.bounds_unknown_write) {
                     left: ?*Expr = q.left;
                     right: ?*Expr = q.right;
@@ -823,9 +832,9 @@ bounds_after_call(f: ?*BoundsState@new, callee: ?*Function, args: ?*Expr) raises
                 }
             }
         } else {
-            if (stable) head = bounds_copy(head, q, bounds_count(f))
+            if (stable) head = bounds_filter_copy(head, f, q, q_position)
         }
-        q_position = q_position - 1;
+        q_position = q_position + 1;
         q = bounds_row(f, q_position)
     }
     head
