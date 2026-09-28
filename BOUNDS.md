@@ -38,9 +38,10 @@ range reasoning, and Wuffs' requirement for a compile-time proof of each access.
 Stage 2 verifies bounds during every `compile` and `build`. It emits runtime
 checks for unproved direct accesses and omits them for proved accesses. An
 unproved access needs `raises IndexOutOfBounds` on its function or a matching
-`try`/`with` arm. After a successful element write to an array field of a
-record with an invariant, the verifier can use its index bounds to check a
-subsequent count update.
+`try`/`with` arm. After a successful read or write, the verifier can use the checked index bounds
+on the normal continuation. This can justify a later contract call or count
+update. These facts are attached to source paths only when evaluating the index
+cannot mutate those paths.
 
 `index_for` is a reserved keyword. `i: index_for(a)` declares a function parameter
 whose value is valid for array parameter `a`. Explicit contracts and `index_for`
@@ -205,6 +206,38 @@ The stage-2 checker is split into a language adapter and a proof engine. The old
 | `bounds_returns.l8` | Successful-exit projection and return-value application |
 | `bounds_flow.l8` | Expression and statement transfer rules |
 | `bounds_driver.l8` | Call components, inference, and final validation |
+
+Control flow has an explicit unreachable state, distinct from a reachable state
+with no known facts (`null`). Returns, raises, and expressions of type `noreturn`
+terminate the normal continuation. Branch and match joins use only reachable
+predecessors; loop preservation obligations apply only to reachable back edges.
+Successful-return projection and fallthrough guarantees use this same state
+instead of a separate syntactic divergence test. Short-circuit expressions
+conservatively merge a live skipped edge using its entry facts, avoiding copies
+of large states for both complementary predicates. A sole surviving edge is
+refined; literal tests retain facts from an unconditionally evaluated operand.
+
+Each active catch handler accumulates exceptional predecessors. An explicit
+raise sends its state to the nearest matching handler; a direct call sends its
+state after effect invalidation to handlers for its declared exceptions. Unknown
+calls conservatively notify all active handlers. An unproved index sends the
+state before its successful-check facts to the `IndexOutOfBounds` handler. Normal
+try exits and reachable handler exits then join in the usual way. During summary
+inference, index accesses are conservatively treated as potentially throwing:
+optional check elimination must not infer additional entry requirements.
+
+Pure difference entailment also avoids inserting redundant successful-check
+facts; it never uses edges requiring additional alias assumptions.
+Direct numeric lookup returns evidence (a bound and any separation assumptions)
+without modifying contracts. Numeric proof consumers explicitly commit the
+assumptions they use; lattice operations use unconditional or matching evidence
+and never commit assumptions. Higher-level proof routines still perform this
+commitment, so a Boolean proof helper is not generally a pure entailment query.
+
+The adapter still represents values using source paths. In particular, an index
+expression that may mutate the array path keeps its runtime check, since the
+array value was evaluated before the index. General immutable evaluated values
+and a unified predicate representation remain separate follow-up work.
 
 Facts occupy contiguous row tables. A state is an immutable prefix of a shared
 append-only buffer. Appending at the newest prefix reuses capacity; extending

@@ -1,5 +1,21 @@
 tag compiler_internal;
 
+bounds_reachable(state: ?*BoundsState): bool {
+    state == null || !state.unreachable
+}
+
+// Bottom has no rows and never enters the numeric solver. Keeping it explicit
+// lets every control-flow join distinguish no predecessor from no information.
+bounds_unreachable(): *BoundsState@new {
+    new BoundsState {
+        unreachable: true,
+        storage: null,
+        count: 0,
+        sum_count: 0,
+        implications: null
+    }
+}
+
 // A row belongs to a dense fact table, never to a linked list. Numeric rows
 // lower to left - right <= bound; other rows describe identity/provenance.
 // The AST adapter retains source paths for invalidation and diagnostics.
@@ -15,14 +31,16 @@ bounds_has_sum(state: ?*BoundsState): bool {
 bounds_row(state: ?*BoundsState, position: int) raises IndexOutOfBounds: ?*BoundsRow@state {
     if (state == null) return null;
     if (position < 0 || position >= state.count) return null;
-    &state.storage.rows[position]
+    storage: ?*BoundsStorage = state.storage;
+    if (storage == null) return null;
+    &storage.rows[position]
 }
 
 bounds_storage(state: ?*BoundsState@new, row: BoundsRow@new) raises IndexOutOfBounds: *BoundsStorage@new {
     count: int = bounds_count(state);
     if (state != null) {
-        old: *BoundsStorage = state.storage;
-        if (old.used == count && count < len(old.rows)) return old
+        old: ?*BoundsStorage = state.storage;
+        if (old != null && old.used == count && count < len(old.rows)) return old
     }
     capacity: int = 4;
     while (capacity <= count) capacity = capacity * 2;
@@ -31,9 +49,10 @@ bounds_storage(state: ?*BoundsState@new, row: BoundsRow@new) raises IndexOutOfBo
         null, 0));
     buckets: []int = new int[capacity * 2](-1);
     links: []int = new int[capacity](-1);
-    if (state != null) {
-        source: []BoundsRow = state.storage.rows;
-        source_numeric: []BoundsNumericView = state.storage.numeric;
+    previous: ?*BoundsStorage = if (state == null) null else state.storage;
+    if (previous != null) {
+        source: []BoundsRow = previous.rows;
+        source_numeric: []BoundsNumericView = previous.numeric;
         for i in 0..count {
             rows[i] = source[i];
             item: BoundsNumericView = source_numeric[i];
@@ -53,6 +72,7 @@ bounds_storage(state: ?*BoundsState@new, row: BoundsRow@new) raises IndexOutOfBo
 }
 
 bounds_push(state: ?*BoundsState@new, row: BoundsRow@new) raises IndexOutOfBounds: *BoundsState@new {
+    if (state != null && state.unreachable) return state;
     // Numeric rows are normalized on entry, including rows made by joins.
     // After this boundary, source syntax no longer determines representation.
     if (row.kind == BoundsKind.Difference) {
@@ -93,6 +113,7 @@ bounds_push(state: ?*BoundsState@new, row: BoundsRow@new) raises IndexOutOfBound
     if (state != null) sum_count = state.sum_count;
     if (row.kind == BoundsKind.SumUpper) sum_count = sum_count + 1;
     new BoundsState {
+        unreachable: false,
         storage: storage,
         count: count + 1,
         sum_count: sum_count,
@@ -103,6 +124,7 @@ bounds_push(state: ?*BoundsState@new, row: BoundsRow@new) raises IndexOutOfBound
 // Existing fact rows are already normalized and unique. Filtering a state
 // can append them directly without normalizing and searching for duplicates.
 bounds_copy(state: ?*BoundsState@new, row: *BoundsRow@new, hint: int) raises IndexOutOfBounds: *BoundsState@new {
+    if (state != null && state.unreachable) return state;
     count: int = bounds_count(state);
     storage: *BoundsStorage;
     if (state == null) {
@@ -127,6 +149,7 @@ bounds_copy(state: ?*BoundsState@new, row: *BoundsRow@new, hint: int) raises Ind
     sum_count: int = if (state == null) 0 else state.sum_count;
     if (row.kind == BoundsKind.SumUpper) sum_count = sum_count + 1;
     new BoundsState {
+        unreachable: false,
         storage: storage,
         count: count + 1,
         sum_count: sum_count,
@@ -177,6 +200,7 @@ bounds_row_same(a: *BoundsRow, b: *BoundsRow) raises IndexOutOfBounds: bool {
 }
 
 bounds_has_fact(state: ?*BoundsState, row: *BoundsRow) raises IndexOutOfBounds: bool {
+    if (!bounds_reachable(state)) return true;
     numeric: BoundsNumericView = bounds_numeric_view(row);
     if (numeric.valid) return bounds_numeric_entails(state, numeric);
     if (state == null) return false;
@@ -228,19 +252,22 @@ bounds_has_implication(state: ?*BoundsState, wanted: *BoundsImplication) raises 
 }
 
 bounds_attach_implication(state: ?*BoundsState@new, rule: *BoundsImplication@new) raises IndexOutOfBounds: *BoundsState@new {
+    if (state != null && state.unreachable) return state;
     if (state != null) {
         if (bounds_has_implication(state, rule)) return state
     }
     storage: *BoundsStorage = bounds_storage(null, rule.consequence);
     previous: ?*BoundsImplication = null;
     if (state != null) {
-        storage = state.storage;
+        existing: ?*BoundsStorage = state.storage;
+        if (existing != null) storage = existing;
         previous = state.implications
     }
     linked: *BoundsImplication = new BoundsImplication { premises: rule.premises, consequence: rule.consequence, next: previous };
     sum_count: int = 0;
     if (state != null) sum_count = state.sum_count;
     new BoundsState {
+        unreachable: false,
         storage: storage,
         count: bounds_count(state),
         sum_count: sum_count,
@@ -280,9 +307,9 @@ bounds_implications_same(a: ?*BoundsState, b: ?*BoundsState) raises IndexOutOfBo
 
 // Find a bound for the same canonical pair, independent of the syntax which
 // established it. Alias assumptions may be weakened, never strengthened.
-// Pure lattice queries compare obligations. Proof queries may discharge them.
-// Both use the same indexed lookup and the same canonical endpoint equality.
-bounds_direct_bound(state: ?*BoundsState, wanted: BoundsNumericView, prove: bool) raises IndexOutOfBounds: int {
+// Lattice queries compare obligations. Proof searches return any assumptions
+// with their evidence, without changing the current function's contract.
+bounds_direct_evidence(state: ?*BoundsState, wanted: BoundsNumericView, prove: bool) raises IndexOutOfBounds: BoundsEvidence {
     best: int = 1000000000;
     obligation: ?*BoundsSeparation = null;
     left: BoundsTermRef = bounds_view_left(wanted);
@@ -290,7 +317,7 @@ bounds_direct_bound(state: ?*BoundsState, wanted: BoundsNumericView, prove: bool
     position: int = bounds_bucket(state, bounds_pair_hash(wanted));
     while (position >= 0) {
         if (state != null && position < state.count) {
-            edge: BoundsNumericView = state.storage.numeric[position];
+            edge: BoundsNumericView = bounds_numeric_at(state, position);
             el: BoundsTermRef = bounds_view_left(edge);
             er: BoundsTermRef = bounds_view_right(edge);
             if (edge.valid && edge.bound < best && bounds_ref_same(left, el) && bounds_ref_same(right,
@@ -306,9 +333,13 @@ bounds_direct_bound(state: ?*BoundsState, wanted: BoundsNumericView, prove: bool
         }
         position = bounds_next_row(state, position)
     }
-    if (prove && best < 1000000000 && best <= wanted.bound) bounds_note_separations(obligation,
-        state);
-    best
+    BoundsEvidence { bound: best, separation: obligation }
+}
+
+// Pure entailment for lattice operations never discharges assumptions.
+bounds_direct_bound(state: ?*BoundsState, wanted: BoundsNumericView) raises IndexOutOfBounds: int {
+    evidence: BoundsEvidence = bounds_direct_evidence(state, wanted, false);
+    evidence.bound
 }
 
 bounds_rows_identical(a: *BoundsRow, b: *BoundsRow): bool {
@@ -349,10 +380,14 @@ bounds_subset_from(a: ?*BoundsState, b: ?*BoundsState, prefix: int) raises Index
 }
 
 bounds_subset(a: ?*BoundsState, b: ?*BoundsState) raises IndexOutOfBounds: bool {
+    if (!bounds_reachable(b)) return true;
+    if (!bounds_reachable(a)) return false;
     bounds_subset_from(a, b, bounds_common_prefix(a, b))
 }
 
 bounds_meet(a: ?*BoundsState@new, b: ?*BoundsState) raises IndexOutOfBounds: ?*BoundsState@new {
+    if (!bounds_reachable(a)) return b;
+    if (!bounds_reachable(b)) return a;
     if (a == b) return a;
     prefix: int = bounds_common_prefix(a, b);
     if (bounds_subset_from(a, b, prefix)) return a;
@@ -365,6 +400,7 @@ bounds_meet(a: ?*BoundsState@new, b: ?*BoundsState) raises IndexOutOfBounds: ?*B
             if (row0 != null && row0.kind == BoundsKind.SumUpper) prefix_sums = prefix_sums + 1
         }
         result = new BoundsState {
+            unreachable: false,
             storage: a.storage,
             count: prefix,
             sum_count: prefix_sums,
@@ -381,7 +417,7 @@ bounds_meet(a: ?*BoundsState@new, b: ?*BoundsState) raises IndexOutOfBounds: ?*B
             } else {
                 edge: BoundsNumericView = bounds_numeric_at(a, position);
                 if (edge.valid) {
-                    other: int = bounds_direct_bound(b, edge, false);
+                    other: int = bounds_direct_bound(b, edge);
                     if (other < 1000000000) {
                         if (other > edge.bound) edge.bound = other;
                         left: BoundsTermRef = bounds_view_left(edge);
@@ -411,6 +447,7 @@ bounds_meet(a: ?*BoundsState@new, b: ?*BoundsState) raises IndexOutOfBounds: ?*B
 }
 
 bounds_same(a: ?*BoundsState, b: ?*BoundsState) raises IndexOutOfBounds: bool {
+    if (bounds_reachable(a) != bounds_reachable(b)) return false;
     if (a == b) return true;
     if (!bounds_implications_same(a, b)) return false;
     if (a != null && b != null && a.storage == b.storage && a.count == b.count) return true;
@@ -455,6 +492,8 @@ bounds_insert(
 // whose previous bound survives the back edge. The set is finite and strictly
 // decreases, so advancing cursors cannot cause an endless sequence of maxima.
 bounds_widen(previous: ?*BoundsState@new, incoming: ?*BoundsState) raises IndexOutOfBounds: ?*BoundsState@new {
+    if (!bounds_reachable(previous)) return incoming;
+    if (!bounds_reachable(incoming)) return previous;
     if (bounds_subset(previous, incoming)) return previous;
     result: ?*BoundsState = null;
     position: int = bounds_count(previous) - 1;
@@ -470,7 +509,8 @@ bounds_widen(previous: ?*BoundsState@new, incoming: ?*BoundsState) raises IndexO
 // Numeric views are cached alongside the source rows. Branch snapshots share
 // the prefix, and appends update both arrays together.
 bounds_numeric_at(state: ?*BoundsState, position: int) raises IndexOutOfBounds: BoundsNumericView {
-    if (state != null && position >= 0 && position < state.count) return state.storage.numeric[position];
+    storage: ?*BoundsStorage = if (state == null) null else state.storage;
+    if (state != null && storage != null && position >= 0 && position < state.count) return storage.numeric[position];
     bounds_numeric_query(null, null, 0)
 }
 
@@ -487,13 +527,17 @@ bounds_row_hash(row: *BoundsRow, edge: BoundsNumericView): int {
 
 bounds_bucket(state: ?*BoundsState, hash: int) raises IndexOutOfBounds: int {
     if (state == null) return -1;
-    slots: []int = state.storage.buckets;
+    storage: ?*BoundsStorage = state.storage;
+    if (storage == null) return -1;
+    slots: []int = storage.buckets;
     slots[hash & len(slots) - 1]
 }
 
 bounds_next_row(state: ?*BoundsState, position: int) raises IndexOutOfBounds: int {
     if (state == null) return -1;
-    state.storage.links[position]
+    storage: ?*BoundsStorage = state.storage;
+    if (storage == null) return -1;
+    storage.links[position]
 }
 
 // Rewrite difference edges when a cursor is replaced by its old value plus
