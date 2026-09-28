@@ -667,6 +667,31 @@ bounds_add_difference(
     right: *Expr@new,
     strict: bool
 ): ?*BoundsState@new {
+    // A guarded remaining length gives a bounded sum without requiring a
+    // general linear solver: part <= limit - base implies base + part <= limit.
+    match right.kind {
+        Binary subtraction -> {
+            if (subtraction.op == BinOp.Sub && bounds_term(left) && bounds_term(subtraction.lhs) && bounds_term(subtraction.rhs) && bounds_nonnegative_term(f,
+                subtraction.rhs) && bounds_difference_proves(f, subtraction.rhs, subtraction.lhs,
+                0)) {
+                base_root: ?*Obj = bounds_term_root(subtraction.rhs);
+                part_root: ?*Obj = bounds_term_root(left);
+                if (base_root != null && part_root != null) {
+                    row: BoundsRow = BoundsRow {
+                        index: base_root,
+                        array: part_root,
+                        kind: BoundsKind.SumUpper,
+                        value: if (strict) -1 else 0,
+                        left: new_binary(BinOp.Add, subtraction.rhs, left),
+                        right: subtraction.lhs,
+                        separation: null
+                    };
+                    f = bounds_push(f, row)
+                }
+            }
+        }
+        _ -> { }
+    }
     l: ?*BoundsAffine = bounds_guard_affine(left, f);
     r: ?*BoundsAffine = bounds_guard_affine(right, f);
     if (l == null || r == null) return f;
@@ -707,7 +732,42 @@ bounds_order(
 }
 
 bounds_nonnegative_term(f: ?*BoundsState, term: *Expr): bool {
-    bounds_difference_proves(f, new_num(0), term, 0)
+    if (bounds_difference_proves(f, new_num(0), term, 0)) return true;
+    bounds_bounded_sum_safe(f, term)
+}
+
+bounds_bounded_sum_safe(f: ?*BoundsState, term: *Expr): bool {
+    if (!bounds_has_sum(f)) return false;
+    match term.kind {
+        Binary sum -> {
+            if (sum.op != BinOp.Add || !bounds_term(sum.lhs) || !bounds_term(sum.rhs)) return false;
+            if (!bounds_difference_proves(f, new_num(0), sum.lhs, 0) || !bounds_difference_proves(f,
+                new_num(0), sum.rhs, 0)) return false;
+            for position in 0..bounds_count(f) {
+                row: ?*BoundsRow = bounds_row(f, position);
+                if (row != null) {
+                    if (row.kind == BoundsKind.SumUpper) {
+                        upper_sum: ?*Expr = row.left;
+                        if (upper_sum != null) {
+                            match upper_sum.kind {
+                                Binary upper -> {
+                                    if (upper.op == BinOp.Add) {
+                                        if (bounds_same_term(sum.lhs, upper.lhs) && bounds_difference_proves(f,
+                                            sum.rhs, upper.rhs, 0)) return true;
+                                        if (bounds_same_term(sum.rhs, upper.lhs) && bounds_difference_proves(f,
+                                            sum.lhs, upper.rhs, 0)) return true
+                                    }
+                                }
+                                _ -> { }
+                            }
+                        }
+                    }
+                }
+            }
+            false
+        }
+        _ -> false
+    }
 }
 
 bounds_small_upper(e: *Expr, f: ?*BoundsState): int {
@@ -796,11 +856,62 @@ bounds_small_upper(e: *Expr, f: ?*BoundsState): int {
 
 bounds_difference_index(f: ?*BoundsState, array: *Expr@new, index: *Expr@new): bool {
     affine: ?*BoundsAffine = bounds_affine(index, true);
-    if (affine == null) return false;
+    if (affine == null) return bounds_bounded_sum_index(f, array, index, false);
     // Both mathematical inequalities imply that the computed machine index
     // is representable, so provisional normalization above is justified.
-    if (!bounds_difference_proves(f, affine.base, bounds_length(array), 0 - affine.offset - 1)) return false;
-    bounds_difference_proves(f, new_num(0), affine.base, affine.offset)
+    if (bounds_difference_proves(f, affine.base, bounds_length(array), 0 - affine.offset - 1) && bounds_difference_proves(f,
+        new_num(0), affine.base, affine.offset)) return true;
+    bounds_bounded_sum_index(f, array, index, false)
+}
+
+bounds_bounded_sum_index(
+    f: ?*BoundsState,
+    array: *Expr@new,
+    index: *Expr,
+    allow_end: bool
+): bool {
+    bounds_bounded_sum_le(f, index, bounds_length(array), allow_end)
+}
+
+bounds_bounded_sum_le(
+    f: ?*BoundsState,
+    index: *Expr,
+    bound: *Expr,
+    allow_end: bool
+): bool {
+    if (!bounds_has_sum(f)) return false;
+    match index.kind {
+        Binary sum -> {
+            if (sum.op != BinOp.Add || !bounds_term(sum.lhs) || !bounds_term(sum.rhs)) return false;
+            if (!bounds_nonnegative_term(f, sum.lhs) || !bounds_nonnegative_term(f,
+                sum.rhs)) return false;
+            for position in 0..bounds_count(f) {
+                row: ?*BoundsRow = bounds_row(f, position);
+                if (row != null) {
+                    sum_bound: ?*Expr = row.left;
+                    limit: ?*Expr = row.right;
+                    if (row.kind == BoundsKind.SumUpper && sum_bound != null) {
+                        if (limit != null && bounds_difference_proves(f, limit, bound,
+                            0)) {
+                            match sum_bound.kind {
+                                Binary upper -> {
+                                    if (upper.op == BinOp.Add) {
+                                        if (bounds_same_term(sum.lhs, upper.lhs) && bounds_difference_proves(f,
+                                            sum.rhs, upper.rhs, 0 - row.value - (if (allow_end) 0 else 1))) return true;
+                                        if (bounds_same_term(sum.rhs, upper.lhs) && bounds_difference_proves(f,
+                                            sum.lhs, upper.rhs, 0 - row.value - (if (allow_end) 0 else 1))) return true
+                                    }
+                                }
+                                _ -> { }
+                            }
+                        }
+                    }
+                }
+            }
+            false
+        }
+        _ -> false
+    }
 }
 
 bounds_affine_le_proves(f: ?*BoundsState, left: *Expr@new, right: *Expr@new): bool {
@@ -888,9 +999,11 @@ bounds_add_relation(
 
 // Affine transfer is valid only for mathematical, non-wrapping evaluation.
 // Length-relative upper bounds avoid needing a small constant array capacity.
-bounds_affine_safe(value: *BoundsAffine, f: ?*BoundsState): bool {
+bounds_affine_safe(value: *BoundsAffine@new, f: ?*BoundsState): bool {
     if (value.offset == 0) return true;
     if (value.offset < 0) return bounds_nonnegative_term(f, value.base);
+    if (bounds_has_sum(f) && bounds_bounded_sum_safe(f, new_binary(BinOp.Add, value.base,
+        new_num(value.offset)))) return true;
     upper: int = bounds_term_numeric_upper(f, value.base);
     if (upper >= 0 && upper <= 536870911 - value.offset) return true;
     wanted: BoundsTermRef = bounds_ref_expr(value.base);
@@ -943,6 +1056,7 @@ bounds_numeric_value(path: *Expr, value: *Expr@new, f: ?*BoundsState@new): ?*Bou
 }
 
 bounds_expression_nonnegative(value: *Expr@new, f: ?*BoundsState): bool {
+    if (bounds_bounded_sum_safe(f, value)) return true;
     affine: ?*BoundsAffine = bounds_guard_affine(value, f);
     affine != null && bounds_affine_lower(affine, f)
 }

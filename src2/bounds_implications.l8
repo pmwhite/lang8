@@ -8,6 +8,7 @@ bounds_implication_fact(f: ?*BoundsState, fact: *BoundsRow): bool {
     if (left == null || right == null) return false;
     if (fact.kind == BoundsKind.Difference) return bounds_difference_proves(f, left,
         right, fact.value);
+    if (fact.kind == BoundsKind.SumUpper) return bounds_has_fact(f, fact);
     if (fact.kind == BoundsKind.Equal || fact.kind == BoundsKind.NotEqual) return bounds_scalar_proves(f,
         left, right, fact.kind);
     false
@@ -57,6 +58,77 @@ bounds_close_implications(f: ?*BoundsState@new): ?*BoundsState@f {
     f
 }
 
+bounds_direct_call_ready(
+    rule: *BoundsImplication@new,
+    callee: *Function,
+    args: ?*Expr@new,
+    value: *Expr,
+    f: ?*BoundsState
+): bool {
+    premise: ?*BoundsPremise = rule.premises;
+    while (premise != null) {
+        fact: *BoundsRow = &premise.fact;
+        left: ?*Expr = fact.left;
+        right: ?*Expr = fact.right;
+        if (left == null || right == null) return false;
+        if (fact.kind == BoundsKind.Equal || fact.kind == BoundsKind.NotEqual) {
+            literal: ?*Expr = null;
+            if (bounds_var(left) == callee.bounds_result) literal = right else if (bounds_var(right) == callee.bounds_result) literal = left;
+            if (literal != null && bounds_scalar_constant(literal)) {
+                matches: bool = bounds_same_scalar(value, literal);
+                if (fact.kind == BoundsKind.Equal && !matches || fact.kind == BoundsKind.NotEqual && matches) return false
+            } else {
+                mapped_left: ?*Expr = bounds_implication_map_term(left, callee, args,
+                    value);
+                mapped_right: ?*Expr = bounds_implication_map_term(right, callee,
+                    args, value);
+                if (mapped_left == null || mapped_right == null || !bounds_scalar_proves(f,
+                    mapped_left, mapped_right, fact.kind)) return false
+            }
+        } else {
+            mapped: ?*BoundsRow = bounds_implication_map_fact(fact, callee, args,
+                value);
+            if (mapped == null || !bounds_implication_fact(f, mapped)) return false
+        }
+        premise = premise.next
+    }
+    true
+}
+
+bounds_rule_tests_result(rule: *BoundsImplication, result: ?*Obj): bool {
+    premise: ?*BoundsPremise = rule.premises;
+    while (premise != null) {
+        left: ?*Expr = premise.fact.left;
+        right: ?*Expr = premise.fact.right;
+        if (left != null && bounds_term_root(left) == result || right != null && bounds_term_root(right) == result) return true;
+        premise = premise.next
+    }
+    false
+}
+
+bounds_call_condition(call: *Expr, yes: bool, f: ?*BoundsState@new): ?*BoundsState@f {
+    match call.kind {
+        Funcall k -> {
+            callee: ?*Function = k.fn;
+            if (callee == null || k.target != null || !is_bool_ty(call.ty)) return f;
+            value: *Expr = bounds_bool_literal(yes);
+            f = bounds_apply_ensures(callee, k.args, value, f);
+            rule: ?*BoundsImplication = callee.bounds_implications;
+            while (rule != null) {
+                if (bounds_rule_tests_result(rule, callee.bounds_result) && bounds_direct_call_ready(rule,
+                    callee, k.args, value, f)) {
+                    mapped: ?*BoundsRow = bounds_implication_map_fact(&rule.consequence,
+                        callee, k.args, value);
+                    if (mapped != null) f = bounds_push(f, mapped.*)
+                }
+                rule = rule.next
+            }
+            bounds_close_implications(f)
+        }
+        _ -> f
+    }
+}
+
 bounds_implication_map_term(
     e: *Expr@new,
     fn: *Function,
@@ -83,6 +155,23 @@ bounds_implication_map_term(
     }
 }
 
+bounds_fold_length(e: *Expr@new): *Expr@new {
+    copied: *Expr = mk_expr(e.kind);
+    copied.ty = e.ty;
+    match e.kind {
+        Funcall k -> {
+            if (!streq(k.funcname, "len") || k.target != null) return copied;
+            arg: ?*Expr = k.args;
+            if (arg == null) return copied;
+            if (arg.next != null) return copied;
+            known: int = bounds_known_len(arg);
+            if (known >= 0) return new_num(known);
+            copied
+        }
+        _ -> copied
+    }
+}
+
 bounds_implication_map_fact(
     fact: *BoundsRow@new,
     fn: *Function,
@@ -92,10 +181,43 @@ bounds_implication_map_fact(
     left: ?*Expr = fact.left;
     right: ?*Expr = fact.right;
     if (left == null || right == null || fact.separation != null) return null;
-    if (fact.kind != BoundsKind.Difference && fact.kind != BoundsKind.Equal && fact.kind != BoundsKind.NotEqual) return null;
-    mapped_left: ?*Expr = bounds_implication_map_term(left, fn, args, destination);
+    if (fact.kind != BoundsKind.Difference && fact.kind != BoundsKind.SumUpper && fact.kind != BoundsKind.Equal && fact.kind != BoundsKind.NotEqual) return null;
+    mapped_left: ?*Expr = null;
+    if (fact.kind == BoundsKind.SumUpper) {
+        match left.kind {
+            Binary sum -> {
+                if (sum.op != BinOp.Add) return null;
+                base: ?*Expr = bounds_implication_map_term(sum.lhs, fn, args, destination);
+                part: ?*Expr = bounds_implication_map_term(sum.rhs, fn, args, destination);
+                if (base == null || part == null) return null;
+                mapped_left = new_binary(BinOp.Add, base, bounds_fold_length(part))
+            }
+            _ -> return null
+        }
+    } else mapped_left = bounds_implication_map_term(left, fn, args, destination);
     mapped_right: ?*Expr = bounds_implication_map_term(right, fn, args, destination);
     if (mapped_left == null || mapped_right == null) return null;
+    if (fact.kind == BoundsKind.SumUpper) mapped_right = bounds_fold_length(mapped_right);
+    if (fact.kind == BoundsKind.SumUpper) {
+        match mapped_left.kind {
+            Binary sum -> {
+                if (!bounds_term(sum.lhs) || !bounds_term(sum.rhs) && bounds_num(sum.rhs) < 0 || !bounds_term(mapped_right) && bounds_num(mapped_right) < 0) return null;
+                base: ?*Obj = bounds_term_root(sum.lhs);
+                part: ?*Obj = bounds_term_root(sum.rhs);
+                if (base == null) return null;
+                return new BoundsRow {
+                    index: base,
+                    array: part,
+                    kind: fact.kind,
+                    value: fact.value,
+                    left: mapped_left,
+                    right: mapped_right,
+                    separation: null
+                }
+            }
+            _ -> return null
+        }
+    }
     first: ?*Obj = bounds_term_root(mapped_left);
     second: ?*Obj = bounds_term_root(mapped_right);
     if (first == null) {
@@ -608,6 +730,35 @@ bounds_implication_numeric_candidates(fn: *Function@new, guard: *BoundsGuardFact
     for position in 0..bounds_count(f) {
         row: ?*BoundsRow = bounds_row(f, position);
         if (row != null) {
+            if (row.kind == BoundsKind.SumUpper) {
+                source_sum: ?*Expr = row.left;
+                source_limit: ?*Expr = row.right;
+                if (source_sum != null && source_limit != null)
+                    match source_sum.kind {
+                        Binary sum -> {
+                            base: ?*Expr = bounds_guard_param_term(fn, sum.lhs);
+                            part: ?*Expr = bounds_guard_param_term(fn, sum.rhs);
+                            limit: ?*Expr = bounds_guard_param_term(fn, source_limit);
+                            if (base != null && part != null && limit != null) {
+                                root: ?*Obj = bounds_term_root(base);
+                                other: ?*Obj = bounds_term_root(part);
+                                if (root != null && other != null) {
+                                    candidate: BoundsRow = BoundsRow {
+                                        index: root,
+                                        array: other,
+                                        kind: BoundsKind.SumUpper,
+                                        value: row.value,
+                                        left: new_binary(BinOp.Add, base, part),
+                                        right: limit,
+                                        separation: null
+                                    };
+                                    bounds_implication_candidate(guard, f, candidate)
+                                }
+                            }
+                        }
+                        _ -> { }
+                    }
+            }
             if ((row.kind == BoundsKind.Difference || row.kind == BoundsKind.Equal || row.kind == BoundsKind.NotEqual) && row.separation == null) {
                 source_left: ?*Expr = row.left;
                 source_right: ?*Expr = row.right;

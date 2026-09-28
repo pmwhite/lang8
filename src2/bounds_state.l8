@@ -7,6 +7,11 @@ bounds_count(state: ?*BoundsState): int {
     if (state == null) 0 else state.count
 }
 
+bounds_has_sum(state: ?*BoundsState): bool {
+    if (state == null) return false;
+    state.sum_count != 0
+}
+
 bounds_row(state: ?*BoundsState, position: int): ?*BoundsRow@state {
     if (state == null) return null;
     if (position < 0 || position >= state.count) return null;
@@ -79,7 +84,15 @@ bounds_push(state: ?*BoundsState@new, row: BoundsRow@new): *BoundsState@new {
     storage.used = count + 1;
     implications: ?*BoundsImplication = null;
     if (state != null) implications = state.implications;
-    new BoundsState { storage: storage, count: count + 1, implications: implications }
+    sum_count: int = 0;
+    if (state != null) sum_count = state.sum_count;
+    if (row.kind == BoundsKind.SumUpper) sum_count = sum_count + 1;
+    new BoundsState {
+        storage: storage,
+        count: count + 1,
+        sum_count: sum_count,
+        implications: implications
+    }
 }
 
 bounds_copy(state: ?*BoundsState@new, row: *BoundsRow@new): *BoundsState@new {
@@ -100,6 +113,20 @@ bounds_row_same(a: *BoundsRow, b: *BoundsRow): bool {
     bl: ?*Expr = b.left;
     ar: ?*Expr = a.right;
     br: ?*Expr = b.right;
+    if (a.kind == BoundsKind.SumUpper) {
+        if (al == null || bl == null || ar == null || br == null) return false;
+        match al.kind {
+            Binary sum_a -> {
+                match bl.kind {
+                    Binary sum_b -> return sum_a.op == BinOp.Add && sum_b.op == BinOp.Add && bounds_same_term(sum_a.lhs,
+                        sum_b.lhs) && bounds_same_term(sum_a.rhs, sum_b.rhs) && bounds_same_term(ar,
+                        br);
+                    _ -> return false
+                }
+            }
+            _ -> return false
+        }
+    }
     if (a.kind == BoundsKind.Equal || a.kind == BoundsKind.NotEqual) {
         if (al == null || bl == null || ar == null || br == null) return false;
         return bounds_same_scalar(al, bl) && bounds_same_scalar(ar, br) || bounds_same_scalar(al,
@@ -176,7 +203,14 @@ bounds_attach_implication(state: ?*BoundsState@new, rule: *BoundsImplication@new
         previous = state.implications
     }
     linked: *BoundsImplication = new BoundsImplication { premises: rule.premises, consequence: rule.consequence, next: previous };
-    new BoundsState { storage: storage, count: bounds_count(state), implications: linked }
+    sum_count: int = 0;
+    if (state != null) sum_count = state.sum_count;
+    new BoundsState {
+        storage: storage,
+        count: bounds_count(state),
+        sum_count: sum_count,
+        implications: linked
+    }
 }
 
 bounds_meet_implications(a: ?*BoundsState@new, b: ?*BoundsState, result: ?*BoundsState@new): ?*BoundsState@result {
@@ -372,11 +406,25 @@ bounds_next_row(state: ?*BoundsState, position: int): int {
 
 // Rewrite difference edges when a cursor is replaced by its old value plus
 // a proven constant. This is the compact equivalent of an SSA old-value node.
-bounds_shift_value(f: ?*BoundsState@new, value: *Obj, offset: int): ?*BoundsState@new {
+bounds_shift_value(f: ?*BoundsState@new, value: *Obj@new, offset: int): ?*BoundsState@new {
     head: ?*BoundsState = bounds_kill(f, value);
     q_position: int = bounds_count(f) - 1;
     q: ?*BoundsRow = bounds_row(f, q_position);
     while (q != null) {
+        if (offset >= 0 && q.kind == BoundsKind.SumUpper && q.index == value) {
+            sum: ?*Expr = q.left;
+            limit: ?*Expr = q.right;
+            if (sum != null && limit != null && bounds_term_root(limit) != value) {
+                match sum.kind {
+                    Binary add -> {
+                        if (add.op == BinOp.Add && bounds_var(add.lhs) == value && bounds_term_root(add.rhs) != value && bounds_difference_proves(f,
+                            new_num(offset), add.rhs, 0)) head = bounds_add_order(head,
+                            bounds_obj_expr(value), limit, false)
+                    }
+                    _ -> { }
+                }
+            }
+        }
         if (q.kind == BoundsKind.Cursor && q.index == value) {
             next_offset: int = q.value + offset;
             if (next_offset >= 0 && next_offset < 536870912) head = bounds_add_value(head,
