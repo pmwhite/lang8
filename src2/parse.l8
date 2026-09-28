@@ -21,7 +21,7 @@ new_token(
 }
 
 ident_kind(s: []i8, off: int, n: int): TokKind {
-    if (n < 2 || n == 7 || n > 9 || off < 0) return TokKind.Ident;
+    if (n < 2 || n > 9 || off < 0) return TokKind.Ident;
     if (n == 2) {
         last: i8 = s[check_index(s, off + 1)];
         if (s[off + 0] == 'i') {
@@ -84,9 +84,15 @@ ident_kind(s: []i8, off: int, n: int): TokKind {
         if (c2 == 'e' && s[off + 1] == 'x' && s[off + 2] == 't' && s[off + 3] == 'e' && s[off + 4] == 'r' && last == 'n') return TokKind.Extern;
         return TokKind.Ident
     }
+    if (n == 7) {
+        if (streq_n(s, off, "ensures", 0, 7)) return TokKind.Ensures;
+        return TokKind.Ident
+    }
     if (n == 8) {
         last: i8 = s[check_index(s, off + 7)];
         if (last == 'n' && s[off] == 'n' && streq_n(s, off, "noreturn", 0, 8)) return TokKind.Noreturn;
+        if (last == 'd' && s[off] == 'r' && streq_n(s, off, "returned", 0, 8)) return TokKind.Returned;
+        if (last == 's' && s[off] == 'r' && streq_n(s, off, "requires", 0, 8)) return TokKind.Requires;
         return TokKind.Ident
     }
     if (n == 9) {
@@ -1314,6 +1320,7 @@ new_obj(name: []i8@new, is_local: bool) noregion: *Obj@new {
         index_for_name: "",
         bounds_addr_taken: false,
         bounds_written: false,
+        bounds_entry: null,
         bound_need_imm: false,
         bound_need_new: false,
         bound_named: null,
@@ -1731,6 +1738,13 @@ parse_primary() noregion raises Error: *Expr@new {
         label: int = add_string(source, tok.pos, tok.len);
         tok = tok.next;
         return new_str_num(label + 1)
+    }
+    if (tok.kind == TokKind.Returned) {
+        if (!parsing_ensures) error("returned is only valid in ensures");
+        fn: *Function = current_fn or error("returned is only valid in ensures");
+        anchor: *Obj = bounds_result_anchor(fn);
+        tok = tok.next;
+        return bounds_obj_expr(anchor)
     }
     if (tok.kind == TokKind.Ident) {
         name: []i8 = reference_name();
@@ -3904,6 +3918,7 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error: *Function@
         bounds_implications: null,
         bounds_result: null,
         bounds_precondition: null,
+        bounds_ensures: null,
         bounds_visit: 0,
         bounds_lowlink: 0,
         bounds_on_stack: false,
@@ -3982,7 +3997,7 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error: *Function@
         fn.return_ty = parse_type();
         if (tok.kind == TokKind.At) fn.ret_bound = parse_at_bound()
     }
-    if (tok.kind == TokKind.Ident && streq(cur_tokstr(), "requires")) {
+    if (tok.kind == TokKind.Requires) {
         tok = tok.next;
         skip(TokKind.LParen);
         condition: *Expr = parse_expr();
@@ -3994,6 +4009,24 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error: *Function@
             if (!bounds_precondition_valid(condition, fn)) error("function precondition must be a conjunction of parameter comparisons")
         }
         fn.bounds_precondition = condition
+    }
+    if (tok.kind == TokKind.Ensures) {
+        if (is_extern != 0) error("extern function cannot have ensures");
+        if (fn.return_ty == null) error("ensures requires a return type");
+        tok = tok.next;
+        fn.bounds_result = bounds_result_anchor(fn);
+        skip(TokKind.LParen);
+        parsing_ensures = true;
+        guarantee: *Expr = parse_expr();
+        parsing_ensures = false;
+        skip(TokKind.RParen);
+        if (parse_resolve) {
+            add_type(guarantee);
+            if (!is_bool_ty(guarantee.ty)) error_ty_expr(guarantee, "function guarantee must be bool",
+                guarantee.ty);
+            if (!bounds_ensure_valid(guarantee, fn)) error("function guarantee must be a conjunction of comparisons of returned and parameter values")
+        }
+        fn.bounds_ensures = guarantee
     }
     rt: ?*Type = fn.return_ty;
     if (is_extern == 2) {

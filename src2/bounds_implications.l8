@@ -144,6 +144,185 @@ bounds_implication_map(
     new BoundsImplication { premises: premises, consequence: consequence.*, next: null }
 }
 
+// Guarantees use the return value and parameter values at entry. The same
+// comparison prover checks them at exits and adds them at call sites.
+bounds_ensure_source_term(e: *Expr, fn: *Function): bool {
+    match e.kind {
+        Num _ -> true;
+        Null -> true;
+        VariantLit k -> k.inits == null;
+        Var k -> {
+            v: ?*Obj = k.var;
+            v != null && (v == fn.bounds_result || bounds_param(fn, v))
+        }
+        Funcall k -> {
+            if (!streq(k.funcname, "len") || k.target != null) return false;
+            arg: ?*Expr = k.args;
+            if (arg == null) return false;
+            if (arg.next != null) return false;
+            match arg.kind {
+                Var _ -> bounds_ensure_source_term(arg, fn);
+                _ -> false
+            }
+        }
+        _ -> false
+    }
+}
+
+bounds_ensure_valid(e: *Expr, fn: *Function): bool {
+    match e.kind {
+        LogAnd k -> bounds_ensure_valid(k.lhs, fn) && bounds_ensure_valid(k.rhs, fn);
+        Binary k -> {
+            if (!bounds_ensure_source_term(k.lhs, fn) || !bounds_ensure_source_term(k.rhs,
+                fn)) return false;
+            if (k.op == BinOp.Eq || k.op == BinOp.Ne) return bounds_scalar_term(k.lhs) && bounds_scalar_term(k.rhs);
+            if (!is_int_ty(k.lhs.ty) || !is_int_ty(k.rhs.ty)) return false;
+            k.op == BinOp.Lt || k.op == BinOp.Le || k.op == BinOp.Gt || k.op == BinOp.Ge
+        }
+        _ -> false
+    }
+}
+
+bounds_ensure_mentions(e: *Expr, param: *Obj): bool {
+    match e.kind {
+        Var k -> k.var == param;
+        Funcall k -> {
+            arg: ?*Expr = k.args;
+            arg != null && bounds_ensure_mentions(arg, param)
+        }
+        Binary k -> bounds_ensure_mentions(k.lhs, param) || bounds_ensure_mentions(k.rhs,
+            param);
+        LogAnd k -> bounds_ensure_mentions(k.lhs, param) || bounds_ensure_mentions(k.rhs,
+            param);
+        _ -> false
+    }
+}
+
+bounds_ensure_map_term(
+    fn: *Function,
+    e: *Expr@new,
+    args: ?*Expr@new,
+    destination: *Expr@new,
+    at_call: bool
+): ?*Expr@new {
+    match e.kind {
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v == null) return null;
+            if (v == fn.bounds_result) return bounds_clone_path(destination);
+            if (!bounds_param(fn, v)) return null;
+            if (at_call) {
+                actual: ?*Expr = bounds_arg_named(fn, args, v.name);
+                if (actual == null || !bounds_pure_condition(actual)) return null;
+                return bounds_return_map(bounds_obj_expr(v), fn, args)
+            }
+            entry: ?*Obj = v.bounds_entry;
+            if (entry != null) return bounds_obj_expr(entry);
+            if (v.bounds_written || v.bounds_addr_taken) return null;
+            bounds_obj_expr(v)
+        }
+        Num _ -> bounds_clone_path(e);
+        Null -> new_null_expr();
+        VariantLit k -> {
+            if (k.inits != null) return null;
+            copied: *Expr = mk_expr(e.kind);
+            copied.ty = e.ty;
+            copied
+        }
+        Funcall k -> {
+            if (!streq(k.funcname, "len") || k.target != null) return null;
+            arg: ?*Expr = k.args;
+            if (arg == null) return null;
+            if (arg.next != null) return null;
+            mapped: ?*Expr = bounds_ensure_map_term(fn, arg, args, destination, at_call);
+            if (mapped == null) return null;
+            bounds_len_term(mapped)
+        }
+        _ -> null
+    }
+}
+
+bounds_ensure_map(
+    fn: *Function,
+    e: *Expr@new,
+    args: ?*Expr@new,
+    destination: *Expr@new,
+    at_call: bool
+): ?*Expr@new {
+    match e.kind {
+        LogAnd k -> {
+            left: ?*Expr = bounds_ensure_map(fn, k.lhs, args, destination, at_call);
+            right: ?*Expr = bounds_ensure_map(fn, k.rhs, args, destination, at_call);
+            if (left == null || right == null) return null;
+            mapped: *Expr = mk_expr(ExprKind.LogAnd { lhs: left, rhs: right });
+            mapped.ty = e.ty;
+            mapped
+        }
+        Binary k -> {
+            left: ?*Expr = bounds_ensure_map_term(fn, k.lhs, args, destination, at_call);
+            right: ?*Expr = bounds_ensure_map_term(fn, k.rhs, args, destination, at_call);
+            if (left == null || right == null) return null;
+            mapped: *Expr = new_binary(k.op, left, right);
+            mapped.ty = e.ty;
+            mapped
+        }
+        _ -> null
+    }
+}
+
+bounds_prepare_ensures(fn: *Function@new) noregion {
+    guarantee: ?*Expr = fn.bounds_ensures;
+    if (guarantee == null) return;
+    param: ?*Obj = fn.params;
+    while (param != null) {
+        ty: ?*Type = param.ty;
+        if (ty != null && bounds_scalar_type(ty) && param.bounds_entry == null && bounds_ensure_mentions(guarantee,
+            param)) {
+            saved_locals: ?*Obj = locals;
+            saved_scope: ?*Obj = scope_locals;
+            entry: *Obj = new_obj("$bounds_entry", true);
+            locals = saved_locals;
+            scope_locals = saved_scope;
+            entry.ty = param.ty;
+            param.bounds_entry = entry
+        }
+        param = param.param_next
+    }
+}
+
+bounds_check_ensures(fn: *Function@new, value: ?*Expr@new, f: ?*BoundsState@new) noregion raises Error {
+    guarantee: ?*Expr = fn.bounds_ensures;
+    if (guarantee == null) return;
+    destination: ?*Obj = fn.bounds_result;
+    if (destination == null && value != null) destination = bounds_result_anchor(fn);
+    if (destination == null) error_at_file(fn.browse_file, fn.browse_pos, "function guarantee needs a return value");
+    result: *Expr = bounds_obj_expr(destination);
+    if (value != null) {
+        f = bounds_value_facts(result, value, f);
+        if (bounds_scalar_constant(value)) f = bounds_add_scalar_relation(f, result,
+            value, BoundsKind.Equal)
+    }
+    mapped: ?*Expr = bounds_ensure_map(fn, guarantee, null, result, false);
+    if (mapped == null) error_at_file(guarantee.file, guarantee.pos, "function guarantee needs stable parameter values");
+    if (!bounds_precondition_proved(mapped, f)) {
+        if (value != null) error_at_file(value.file, value.pos, "function guarantee is not proved") else error_at_file(fn.browse_file,
+            fn.browse_pos, "function guarantee is not proved")
+    }
+}
+
+bounds_apply_ensures(
+    fn: *Function@new,
+    args: ?*Expr@new,
+    destination: *Expr@new,
+    f: ?*BoundsState@new
+): ?*BoundsState@new {
+    guarantee: ?*Expr = fn.bounds_ensures;
+    if (guarantee == null) return f;
+    mapped: ?*Expr = bounds_ensure_map(fn, guarantee, args, destination, true);
+    if (mapped == null) return f;
+    bounds_condition(mapped, true, f)
+}
+
 bounds_guard_add(fn: *Function@new, literal: *Expr) noregion {
     if (!bounds_scalar_constant(literal) || !bounds_scalar_term(literal)) return;
     copied: ?*Expr = null;
