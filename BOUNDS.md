@@ -247,12 +247,26 @@ from a sibling branch: **every reader must enforce the snapshot's row count**.
 Copied buffers rebuild their indexes from only the copied prefix. Duplicate
 rows do not extend the state.
 
+The driver owns a size-classed pool of fact buffers. It recycles them only after
+an entire function inference pass, strict function check, or global initializer
+check finishes. No live state may cross that boundary. Published summaries copy
+rows by value and retain AST terms allocated outside the pool; neither those
+terms nor the summaries are reclaimed. Standalone engine states can still omit
+the pool. This reduces allocation without changing snapshot or proof semantics.
+
+Numeric graph construction already uses lexical `region` blocks. Join projection
+now shares two distance arrays and a queue across its source searches within that
+region, exporting only scalar weights. Whole-function regions are not yet safe:
+summary terms escape and analysis also uses `noregion` operations. The buffer pool
+therefore recycles only the storage whose lifetime the driver can establish.
+Implication-only states also no longer allocate an unused row table.
+
 Numeric facts have one meaning: `left - right <= bound`. Small constants fold
 into the bound on insertion, and strict comparisons subtract one. Every numeric
 row has the same `Difference` kind; only separation, freshness, and cursor
 provenance use other kinds. Numeric lookup, copying, invalidation, and branch
-joins share this representation. Thus a length guard and a
-successful guards can contribute the same fact at a join. Two different
+joins share this representation. Thus length guards and
+successful checked accesses can contribute the same fact at a join. Two different
 bounds for the same pair join at the weaker bound. Copying a returned or joined
 integer preserves its relations to other stable values.
 
@@ -322,7 +336,8 @@ identity of the values checked; no rule may turn a runtime check into an assumed
 `tests/compiler/bounds_engine_tables.l8` compares the solver with an independent
 all-pairs reference on 40 feasible generated graphs with negative edges. It also
 checks hash collisions, shared-buffer branch isolation, weaker joins, widening,
-long chains, and bounded handling of a disconnected negative cycle. The ordinary
+long chains, pool reuse without stale facts, summary-row survival after reuse,
+and bounded handling of a disconnected negative cycle. The ordinary
 bounds fixtures exercise the language adapter and include both accepting and
 rejecting counterparts. The formerly pending equivalent-numeric-join fixture is
 now in the active suite.
@@ -342,6 +357,26 @@ The additional proofs currently increase analysis time by about 73% on this
 workload. The multi-source no-wrap search and bounded join projection keep the
 new work finite, but this remains a performance cost to improve. Timings vary
 with the machine and source revision.
+
+Further experiments against `28c1e8b` tried linked branch deltas, shared fact
+chunks, immutable-state graph/source caches, and deferred join projection. They
+passed the compiler fixtures but increased elapsed analysis time on the compiler
+and game workloads, so they are not retained. The linked-delta variant reduced
+game peak RSS from roughly 480 MiB to 357 MiB but increased bounds time by about
+one third. Chunk sharing reduced that slowdown, but remained slower than dense
+tables. Graph caching and deferred projection did not reverse it. These are
+workload-specific trial results, not a claim that those approaches cannot help
+with a different representation or workload.
+
+The retained buffer pool and region-local search workspace reduced game peak
+RSS from 495,656 KiB to 443,824 KiB (about 10%). An alternating-order five-run
+comparison measured 1,339 ms versus 1,337 ms for game bounds analysis, and
+1,431 ms versus 1,428 ms wall time: effectively unchanged. A seven-run compiler
+comparison measured 183 ms versus 185 ms bounds time and 293 ms versus 292 ms
+wall time. These changes are a memory improvement; they do not establish a
+speedup. Measure RSS separately with `/usr/bin/time -v ./l8c3 compile <root>`;
+use identical roots and alternate binary order when checking small timing
+changes against machine noise.
 
 Index accesses, count obligations, guards, and invariant checks use the same
 difference queries. Machine-arithmetic range analysis remains separate: masks,
