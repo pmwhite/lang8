@@ -84,6 +84,36 @@ bounds_value_facts(path: *Expr@new, value: *Expr@new, f: ?*BoundsState@new) rais
     }
 }
 
+// A local boolean initialized from a pure condition can retain facts implied
+// by either result. Mutation invalidation drops these implications alongside
+// the ordinary facts on which they depend.
+bounds_local_bool_facts(local: *Obj@new, init: *Expr, f: ?*BoundsState@new) raises IndexOutOfBounds: ?*BoundsState@f {
+    if (!is_bool_ty(local.ty) || !bounds_pure_condition(init)) return f;
+    for truth in [false, true] {
+        branch: ?*BoundsState = bounds_condition(init, truth, f);
+        if (bounds_reachable(branch)) {
+            position: int = bounds_count(f);
+            while (position < bounds_count(branch)) {
+                row: ?*BoundsRow = bounds_row(branch, position);
+                if (row != null && row.kind == BoundsKind.Difference) {
+                    premise: BoundsRow = BoundsRow {
+                        index: local,
+                        array: null,
+                        kind: BoundsKind.Equal,
+                        value: 0,
+                        left: bounds_obj_expr(local),
+                        right: bounds_bool_literal(truth),
+                        separation: null
+                    };
+                    f = bounds_attach_implication(f, new BoundsImplication { premises: new BoundsPremise { fact: premise, next: null }, consequence: row.*, next: null })
+                }
+                position = position + 1
+            }
+        }
+    }
+    f
+}
+
 bounds_pure_condition(e: *Expr) raises IndexOutOfBounds: bool {
     match e.kind {
         Num _ -> true;
@@ -382,6 +412,15 @@ bounds_expr_transfer(e: *Expr@new, f: ?*BoundsState@new) noregion raises Error, 
                 if (!bounds_difference_entails(f, k.idx, length, -1)) f = bounds_add_order(f,
                     k.idx, length, true)
             }
+            // A successful access on a nonnegative base plus a positive
+            // offset also bounds the base. Overflow would make the index
+            // negative, so it cannot occur on this normal edge.
+            if (bounds_term(k.lhs) && bounds_value_stable(k.idx)) {
+                affine: ?*BoundsAffine = bounds_affine(k.idx, true);
+                if (affine != null && affine.offset > 0 && bounds_nonnegative_term(f,
+                    affine.base)) f = bounds_add_order(f, affine.base, bounds_length(k.lhs),
+                    true)
+            }
             f
         }
         Binary k -> bounds_expr(k.rhs, bounds_expr(k.lhs, f));
@@ -598,7 +637,8 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBo
                     v, null, BoundsKind.Cursor, bounds_num(k.init));
                 if (init != null) {
                     bounds_require_type_invariant(v.ty, init, f);
-                    f = bounds_value_facts(bounds_obj_expr(v), init, f)
+                    f = bounds_value_facts(bounds_obj_expr(v), init, f);
+                    f = bounds_local_bool_facts(v, init, f)
                 }
             }
             f
@@ -666,8 +706,7 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBo
                         if (upper.offset < 0) av = bounds_len_var(upper.base)
                     }
                 }
-                field_root: ?*Obj = null;
-                field_member: ?*Member = null;
+                field_path: ?*Expr = null;
                 match hi.kind {
                     Funcall len_call -> {
                         field_arg: ?*Expr = len_call.args;
@@ -675,10 +714,7 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBo
                             field_array: *Expr = field_arg;
                             if (field_array.next == null) {
                                 match field_array.kind {
-                                    MemberAccess field -> {
-                                        field_root = bounds_var(field.lhs);
-                                        field_member = field.member
-                                    }
+                                    MemberAccess _ -> field_path = field_array;
                                     _ -> { }
                                 }
                             }
@@ -686,11 +722,7 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBo
                     }
                     _ -> { }
                 }
-                if (field_root != null && field_member != null && !bounds_field_safe_stmt(k.body,
-                    field_root, field_member)) {
-                    field_root = null;
-                    field_member = null
-                }
+                if (field_path != null && !bounds_field_path_safe_stmt(k.body, field_path)) field_path = null;
                 stable_order_bound: bool = false;
                 match hi.kind {
                     Var bound_var -> {
@@ -725,8 +757,8 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBo
                         bounds_len_term(bounds_obj_expr(av)), true);
                     if (stable_order_bound) facts = bounds_add_loop_order(facts, k.item,
                         hi);
-                    if (field_root != null && field_member != null) facts = bounds_add_order(facts,
-                        bounds_obj_expr(k.item), hi, true);
+                    if (field_path != null) facts = bounds_add_order(facts, bounds_obj_expr(k.item),
+                        hi, true);
                     if (hiconst >= 0) facts = bounds_add_order(facts, bounds_obj_expr(k.item),
                         new_num(hiconst), true);
                     endfacts: ?*BoundsState = bounds_stmt(k.body, facts);
@@ -742,8 +774,18 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBo
                 }
                 return invariant2
             }
-            _body2: ?*BoundsState = bounds_stmt(k.body, null);
-            null
+            // The collection is evaluated once. Keep facts that survive any
+            // number of iterations, including the zero-iteration path.
+            invariant3: ?*BoundsState = f;
+            changing3: bool = true;
+            while (changing3) {
+                endfacts3: ?*BoundsState = bounds_stmt(k.body, invariant3);
+                next_inv3: ?*BoundsState = bounds_widen(invariant3, bounds_meet(f,
+                    endfacts3));
+                changing3 = !bounds_same(invariant3, next_inv3);
+                invariant3 = next_inv3
+            }
+            invariant3
         }
         Match k -> {
             f = bounds_expr(k.cond, f);

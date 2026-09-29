@@ -69,6 +69,7 @@ print_summary() {
     printf 'total: %d.%03ds\n' "$((total / 1000))" "$((total % 1000))"
   fi
   printf 'logs: %s\n' "$LOG_DIR"
+  python3 tools/count_checked_accesses.py
 }
 
 die() { echo "error: $*" >&2; exit 1; }

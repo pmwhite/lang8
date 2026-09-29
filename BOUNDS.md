@@ -42,6 +42,15 @@ facts only when their verified effects permit it. Arithmetic in proofs follows
 L8's actual overflow behavior. Contracts and invariants are checked, never
 trusted assertions.
 
+Top-level scalar values can be declared with `const NAME: T = expression;`
+for `int`, `i8`, `i32`, `u32`, `bool`, `f32`, and `f64`. The initializer must be a
+compile-time expression of literals and previously declared constants; floating point
+arithmetic in a const initializer is not yet supported. Const globals have no
+writable storage: assignment and address-taking are errors. Integer const values
+can be used in array sizes, loop bounds, contracts, and record invariants, so a
+size such as `WIND_CELLS` retains its numeric meaning in a bounds proof.
+Ordinary globals remain mutable and cannot be treated as constants by the verifier.
+
 Start with array, slice, and string indexing. Apply the same mechanism to spans
 and bulk operations where it stays simple. Keep compilation fast and predictable;
 diagnostics should make a missing guard, contract, or invariant apparent.
@@ -61,6 +70,10 @@ cannot mutate those paths.
 `index_for` is a reserved keyword. `i: index_for(a)` declares a function parameter
 whose value is valid for array parameter `a`. Explicit contracts and `index_for`
 parameters carry this requirement through ordinary calls.
+For a two-argument `main(int, []str)` that is not called or address-taken by
+source code, the verifier knows the runtime supplies `argc == len(argv)`.
+Functions receiving a count and slice separately can declare a `requires`
+relationship, which ordinary callers must prove.
 A function can state an entry contract after its return type:
 
 ```l8
@@ -99,7 +112,7 @@ Length comparisons also carry relationships between local arrays: after
 `len(a) == len(b)`, a loop over `a` can index `b` while both lengths remain
 stable. A range loop over `len(record.field)` can index that field when its body
 has no calls or writes that could change the field's length. The verifier keeps
-facts entering a range loop only while its body preserves them.
+facts entering range and collection loops only while their bodies preserve them.
 
 The verifier also records strict and non-strict inequalities between named field
 paths and lengths. A guard such as `0 <= b.cursor && b.cursor < len(b.data)`
@@ -249,6 +262,17 @@ requirements. Proven accesses may infer parameter requirements that callers must
 validated as obligations after inference. When a scalar is overwritten, the verifier
 preserves consequences between surviving values by composing unconditional
 difference bounds through its old value before forgetting it.
+
+A local boolean initialized from a pure condition retains the numeric facts
+implied by either result. For example, a false `i >= len(a) || a[i] == 0`
+implies `i < len(a)` when that boolean is tested later. These conditional
+facts are discarded when a write or call could change their inputs. Range
+loops bounded by `len` of a nested field also carry that length fact when
+the loop body preserves every field in the path.
+
+After an access at `a[i + k]` succeeds, a nonnegative `i` with positive `k`
+is also in bounds. The verifier carries this fact across the normal edge of
+both checked and proved accesses, and discards it if the array changes.
 
 Pure difference entailment also avoids inserting redundant successful-check
 facts; it never uses edges requiring additional alias assumptions.

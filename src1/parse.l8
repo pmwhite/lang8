@@ -1271,6 +1271,9 @@ new_obj(name: []i8@new, is_local: bool) noregion raises IndexOutOfBounds: *Obj@n
         name: name,
         is_local: is_local,
         is_func: false,
+        is_const: false,
+        const_val: 0,
+        const_state: 0,
         offset: 0,
         scope_depth: 0,
         ty: null,
@@ -2974,6 +2977,7 @@ add_type_expr(p: *Expr@new) noregion raises Error, IndexOutOfBounds {
                 Var vp -> {
                     var: ?*Obj = vp.var;
                     if (var != null) {
+                        if (var.is_const) error("cannot assign to const global");
                         storage = var.ty;
                         lt = decay(var.ty)
                     } else lt = decay(q.lhs.ty)
@@ -3023,7 +3027,10 @@ add_type_expr(p: *Expr@new) noregion raises Error, IndexOutOfBounds {
             match q.lhs.kind {
                 Var vk -> {
                     vo: ?*Obj = vk.var;
-                    if (vo != null) mark_addr_taken(vo)
+                    if (vo != null) {
+                        if (vo.is_const) error("cannot take address of const global");
+                        mark_addr_taken(vo)
+                    }
                 }
                 Index ik -> {
                     ilt: ?*Type = ik.lhs.ty;
@@ -4430,11 +4437,13 @@ parse_program_unit() noregion raises Error, IndexOutOfBounds {
             tok.pos, tok.len) && tok.next.kind == TokKind.Str;
         is_native: bool = tok.kind == TokKind.Ident && name_eq_span("native", source,
             tok.pos, tok.len) && tok.next.kind == TokKind.Str;
+        is_const_decl: bool = tok.kind == TokKind.Ident && name_eq_span("const", source,
+            tok.pos, tok.len) && tok.next.kind == TokKind.Ident;
         if (tok.kind == TokKind.Import || is_need || is_native) {
             if (prefix) error("declaration tags must precede a definition")
         } else {
             decl: *Token = tok;
-            if (tok.kind == TokKind.TypeKw || tok.kind == TokKind.Exception || tok.kind == TokKind.Extern) decl = tok.next;
+            if (tok.kind == TokKind.TypeKw || tok.kind == TokKind.Exception || tok.kind == TokKind.Extern || is_const_decl) decl = tok.next;
             tag_register(decl)
         }
         if (tok.kind == TokKind.Import) parse_import() else if (tok.kind == TokKind.TypeKw && tok.next.kind == TokKind.Ident && (tok.next.next.kind == TokKind.Assign || tok.next.next.kind == TokKind.Colon)) parse_type_def() else {
@@ -4450,6 +4459,7 @@ parse_program_unit() noregion raises Error, IndexOutOfBounds {
                     bind_function(ename, efn);
                     append_item(new_item(ItemKind.Func { fn: efn }, efn.browse_pos))
                 } else {
+                    if (is_const_decl) tok = tok.next;
                     if (tok.kind != TokKind.Ident) error("expected identifier");
                     name: []i8 = cur_tokstr();
                     browse_note();
@@ -4458,6 +4468,7 @@ parse_program_unit() noregion raises Error, IndexOutOfBounds {
                     gfile: int = browse_tok_file;
                     tok = tok.next;
                     if (tok.kind == TokKind.LParen) {
+                        if (is_const_decl) error("const requires a global value");
                         fn: *Function = parse_function(name, 0);
                         bind_function(name, fn);
                         append_item(new_item(ItemKind.Func { fn: fn }, fn.browse_pos))
@@ -4483,9 +4494,19 @@ parse_program_unit() noregion raises Error, IndexOutOfBounds {
                         o2.browse_file = gfile;
                         o2.browse_len = glen;
                         o2.ty = ty;
+                        o2.is_const = is_const_decl;
                         if (tok.kind != TokKind.Assign) error("global requires an initializer (name: T = e)");
                         tok = tok.next;
                         o2.init = parse_expr();
+                        if (is_const_decl && parse_resolve) {
+                            if (!const_global_type(o2.ty)) error("const global must have a scalar numeric or bool type");
+                            cinit: *Expr = o2.init or error("missing const initializer");
+                            add_type(cinit);
+                            if (!assignable(o2.ty, cinit)) error_have_expr_want("const initializer type mismatch",
+                                cinit, o2.ty);
+                            if (!is_const_init(cinit)) error("const initializer must be a constant expression");
+                            _const_value: int = const_global_value(o2)
+                        }
                         skip_file_semi();
                         append_item(new_item(ItemKind.Global { var: o2 }, gpos))
                     }
