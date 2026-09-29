@@ -273,6 +273,12 @@ heads past the snapshot count; chains always point to older rows. Copies with
 a different bucket count rebuild the index. Unchanged rows reuse their cached
 numeric descriptors. Duplicate rows do not extend the state.
 
+Hot call-preservation scans borrow the row slice and snapshot count once.
+Prefix copying validates the source and destination lengths before entering
+the loop, allowing proved indexing inside it. Direct evidence borrows the
+numeric slice and hash chains once, but still filters every candidate against
+the snapshot count; newer sibling rows never become evidence.
+
 A cached numeric descriptor contains two embedded 24-byte term references, a
 bound, and a separation pointer (64 bytes total). Term validity uses existing
 padding in each reference. Both endpoints must be valid for a numeric query.

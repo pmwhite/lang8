@@ -1,6 +1,11 @@
 Block game compiler investigation (2026-09-28)
 
-The latest [negative-cycle investigation](block_game_negative_cycle_performance.md)
+The latest [fact-access investigation](block_game_fact_access_performance.md)
+measured 465 to 450 ms (another 3.2%) by hoisting table metadata and range
+checks out of hot loops. Instructions fall 2.9% and L1 loads fall 3.4%, while
+cache misses and memory stalls are essentially unchanged.
+
+The preceding [negative-cycle investigation](block_game_negative_cycle_performance.md)
 measured 518 to 472 ms (another 8.9%) by recognizing contradictory branch
 predecessors before their searches repeatedly traverse negative cycles.
 Graph-edge visits fall 45%; instructions fall 10%.
