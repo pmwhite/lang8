@@ -336,6 +336,16 @@ This recovers relationships reached through different intermediate variables
 without requiring an unbounded all-pairs closure. The limit affects precision,
 not validity.
 
+Projection searches also stop when they find a negative distance back to their
+own source: a real closed walk proving `source - source <= -1`. Because graph
+edges carry no unresolved separation assumptions, this certifies that the
+predecessor is impossible. The join retains the other predecessor's complete
+snapshot, including its implications, rather than exporting bounds that depend
+on how many times a negative cycle ran before the budget expired. Zero-weight
+cycles are not contradictions. This is opportunistic detection using the same
+selected sources, not a complete negative-cycle scan; the ordinary search
+budget and fallback remain in place when no certificate is found.
+
 Loop back edges use a separate widening operation. Only previous header facts
 that remain valid survive; an increasing sequence of cursor maxima is dropped.
 Each changing iteration removes a header fact, giving finite convergence without

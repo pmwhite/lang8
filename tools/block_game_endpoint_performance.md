@@ -1,5 +1,8 @@
 Block-game endpoint investigation (2026-09-28)
 
+The subsequent [budget-distribution investigation](bounds_search_budget_distribution.md)
+classifies the remaining expensive searches and tests a tenfold larger budget.
+
 This round reduces full game compilation from 553.2 to 507.3 ms (8.3%).
 The baseline is commit `0b04807`, saved as `.build/block-builder-baseline`.
 Both compilers build the same current source tree. Seven warm runs per

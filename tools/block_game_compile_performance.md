@@ -1,6 +1,11 @@
 Block game compiler investigation (2026-09-28)
 
-The latest [endpoint investigation](block_game_endpoint_performance.md)
+The latest [negative-cycle investigation](block_game_negative_cycle_performance.md)
+measured 518 to 472 ms (another 8.9%) by recognizing contradictory branch
+predecessors before their searches repeatedly traverse negative cycles.
+Graph-edge visits fall 45%; instructions fall 10%.
+
+The preceding [endpoint investigation](block_game_endpoint_performance.md)
 measured 553 to 507 ms (another 8.3%) by embedding and borrowing numeric term
 references and caching variable identity. It trades about 10 MiB of peak RSS
 for fewer instructions and memory accesses. The report includes hardware
