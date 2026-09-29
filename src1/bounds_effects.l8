@@ -754,26 +754,32 @@ bounds_kill_flat_record_fields(f: ?*BoundsState@new, sd: *StructDef) raises Erro
 // A read-only call keeps every fact rooted in stable local values. Check
 // without rebuilding the table, then retain its storage while dropping rules.
 bounds_pure_call_keeps_all(f: ?*BoundsState, callee: *Function) raises IndexOutOfBounds: bool {
-    for position in 0..bounds_count(f) {
-        row: ?*BoundsRow = bounds_row(f, position);
-        if (row != null) {
-            if (row.kind == BoundsKind.Equal || row.kind == BoundsKind.NotEqual) {
-                left: ?*Expr = row.left;
-                right: ?*Expr = row.right;
-                if (left == null || right == null || !bounds_effect_preserves_term(callee,
-                    left) || !bounds_effect_preserves_term(callee, right)) return false
-            } else if (row.kind == BoundsKind.Difference) {
-                left2: ?*Expr = row.left;
-                right2: ?*Expr = row.right;
-                if (left2 == null || right2 == null) return false;
-                if (!bounds_term_local_value(left2) || !bounds_term_local_value(right2)) {
-                    if (!bounds_term_roots_stable(left2) || !bounds_term_roots_stable(right2)) return false
-                }
-            } else {
-                if (!row.index.is_local || row.index.bounds_addr_taken) return false;
-                array: ?*Obj = row.array;
-                if (array != null && (!array.is_local || array.bounds_addr_taken)) return false
+    storage: ?*BoundsStorage = if (f == null) null else f.storage;
+    if (f == null || storage == null) return true;
+    rows: []BoundsRow = storage.rows;
+    numeric: []BoundsNumericView = storage.numeric;
+    count: int = f.count;
+    if (count > len(rows) || count > len(numeric)) raise IndexOutOfBounds;
+    for position in 0..count {
+        row: *BoundsRow = &rows[position];
+        if (row.kind == BoundsKind.Equal || row.kind == BoundsKind.NotEqual) {
+            left: ?*Expr = row.left;
+            right: ?*Expr = row.right;
+            if (left == null || right == null || !bounds_effect_preserves_term(callee,
+                left) || !bounds_effect_preserves_term(callee, right)) return false
+        } else if (row.kind == BoundsKind.Difference) {
+            left2: ?*Expr = row.left;
+            right2: ?*Expr = row.right;
+            if (left2 == null || right2 == null) return false;
+            edge: *BoundsNumericView = &numeric[position];
+            if (!bounds_numeric_local_value(&edge.left, left2) || !bounds_numeric_local_value(&edge.right,
+                right2)) {
+                if (!bounds_term_roots_stable(left2) || !bounds_term_roots_stable(right2)) return false
             }
+        } else {
+            if (!row.index.is_local || row.index.bounds_addr_taken) return false;
+            array: ?*Obj = row.array;
+            if (array != null && (!array.is_local || array.bounds_addr_taken)) return false
         }
     }
     true
@@ -781,10 +787,15 @@ bounds_pure_call_keeps_all(f: ?*BoundsState, callee: *Function) raises IndexOutO
 
 bounds_after_call(f: ?*BoundsState@new, callee: ?*Function, args: ?*Expr) raises IndexOutOfBounds: ?*BoundsState@new {
     if (!bounds_reachable(f)) return f;
-    if (bounds_count(f) == 0) return null;
+    storage: ?*BoundsStorage = if (f == null) null else f.storage;
+    if (f == null || storage == null || f.count == 0) return null;
+    rows: []BoundsRow = storage.rows;
+    numeric: []BoundsNumericView = storage.numeric;
+    count: int = f.count;
+    if (count > len(rows) || count > len(numeric)) raise IndexOutOfBounds;
     if (callee != null && !callee.bounds_unknown_write && callee.bounds_writes == null && !callee.bounds_element_write && bounds_pure_call_keeps_all(f,
         callee)) {
-        if (f == null || f.implications == null) return f;
+        if (f.implications == null) return f;
         return new BoundsState {
             arena: f.arena,
             unreachable: false,
@@ -795,9 +806,8 @@ bounds_after_call(f: ?*BoundsState@new, callee: ?*Function, args: ?*Expr) raises
         }
     }
     head: ?*BoundsState = bounds_empty(f);
-    q_position: int = 0;
-    q: ?*BoundsRow = bounds_row(f, q_position);
-    while (q != null) {
+    for q_position in 0..count {
+        q: *BoundsRow = &rows[q_position];
         a: ?*Obj = q.array;
         stable: bool = q.index.is_local && !q.index.bounds_addr_taken;
         if (a != null) {
@@ -817,7 +827,9 @@ bounds_after_call(f: ?*BoundsState@new, callee: ?*Function, args: ?*Expr) raises
             stable = false;
             local_left: ?*Expr = q.left;
             local_right: ?*Expr = q.right;
-            local_values: bool = local_left != null && local_right != null && bounds_term_local_value(local_left) && bounds_term_local_value(local_right);
+            edge: *BoundsNumericView = &numeric[q_position];
+            local_values: bool = local_left != null && local_right != null && bounds_numeric_local_value(&edge.left,
+                local_left) && bounds_numeric_local_value(&edge.right, local_right);
             if (local_values) head = bounds_filter_copy(head, f, q, q_position) else if (callee != null) {
                 if (!callee.bounds_unknown_write) {
                     left: ?*Expr = q.left;
@@ -850,8 +862,6 @@ bounds_after_call(f: ?*BoundsState@new, callee: ?*Function, args: ?*Expr) raises
         } else {
             if (stable) head = bounds_filter_copy(head, f, q, q_position)
         }
-        q_position = q_position + 1;
-        q = bounds_row(f, q_position)
     }
     head
 }
@@ -896,4 +906,12 @@ bounds_member_write_preserves(
         }
         _ -> true
     }
+}
+
+// Variable and len(variable) descriptors already hold the object identity.
+// Read its current escape flags; other syntax retains the AST classification.
+bounds_numeric_local_value(term: *BoundsTermRef, original: *Expr) raises IndexOutOfBounds: bool {
+    obj: ?*Obj = term.obj;
+    if (obj != null) return obj.is_local && !obj.bounds_addr_taken;
+    bounds_term_local_value(original)
 }
