@@ -22,6 +22,10 @@ bounds_path_hash(path: *Expr): int {
 }
 
 bounds_term_hash(term: BoundsTermRef): int {
+    bounds_term_hash_borrowed(&term)
+}
+
+bounds_term_hash_borrowed(term: *BoundsTermRef): int {
     if (term.is_zero) return 0;
     hash: int = 0;
     obj: ?*Obj = term.obj;
@@ -40,17 +44,18 @@ bounds_graph_new(rows: int): *BoundsGraph@new {
         occupied_slots: new int[capacity](0),
         heads: new int[capacity](-1),
         adjacency: new BoundsGraphEdge[rows + capacity * 3](BoundsGraphEdge { target: 0, weight: 0, next: -1 }),
+        small_weights: true,
         nodes: 0,
         edges: 0
     }
 }
 
 bounds_graph_intern(graph: *BoundsGraph, term: BoundsTermRef@graph) raises IndexOutOfBounds: int {
-    slot: int = bounds_term_hash(term) & len(graph.slots) - 1;
+    slot: int = bounds_term_hash_borrowed(&term) & len(graph.slots) - 1;
     id: int = graph.slots![slot];
     while (id >= 0) {
-        existing: BoundsTermRef = graph.terms![id];
-        if (bounds_ref_same(existing, term)) return id;
+        existing: *BoundsTermRef = &graph.terms![id];
+        if (bounds_ref_same_borrowed(existing, &term)) return id;
         slot = slot + 1 & len(graph.slots) - 1;
         id = graph.slots[slot]
     }
@@ -70,6 +75,7 @@ bounds_graph_edge(
 ) raises IndexOutOfBounds {
     edge: int = graph.edges;
     graph.edges = edge + 1;
+    if (weight <= -536870912 || weight >= 536870912) graph.small_weights = false;
     entry: *BoundsGraphEdge = &graph.adjacency![edge];
     entry.target = to;
     entry.weight = weight;
@@ -77,16 +83,14 @@ bounds_graph_edge(
     graph.heads[from] = edge
 }
 
-bounds_graph_load(graph: *BoundsGraph, state: ?*BoundsState) raises IndexOutOfBounds {
+bounds_graph_load(graph: *BoundsGraph, state: ?*BoundsState@graph) raises IndexOutOfBounds {
     // Iterate in insertion order. Edges on the same source form integer
     // adjacency chains; there are no allocations inside this loop.
     for position in 0..bounds_count(state) {
         edge: ?*BoundsNumericView = bounds_numeric_ref(state, position);
-        if (edge != null && edge.valid && edge.separation == null) {
-            left: BoundsTermRef = bounds_view_left_ref(edge);
-            right: BoundsTermRef = bounds_view_right_ref(edge);
-            to: int = bounds_graph_intern(graph, left);
-            from: int = bounds_graph_intern(graph, right);
+        if (edge != null && edge.left.valid && edge.right.valid && edge.separation == null) {
+            to: int = bounds_graph_intern(graph, edge.left);
+            from: int = bounds_graph_intern(graph, edge.right);
             bounds_graph_edge(graph, from, to, edge.bound)
         }
     }
@@ -141,6 +145,8 @@ bounds_graph_search(
     queued: []bool,
     queue: []int
 ) raises IndexOutOfBounds: bool {
+    adjacency: []BoundsGraphEdge = graph.adjacency;
+    heads: []int = graph.heads;
     unknown: int = 1000000000000000000;
     read: int = 0;
     write: int = 0;
@@ -171,10 +177,10 @@ bounds_graph_search(
         if (read == len(queue)) read = 0;
         queued![from] = false;
         base: int = distances![from];
-        edge: int = graph.heads![from];
+        edge: int = heads![from];
         while (edge >= 0 && budget > 0) {
             budget = budget - 1;
-            entry: *BoundsGraphEdge = &graph.adjacency![edge];
+            entry: *BoundsGraphEdge = &adjacency![edge];
             to: int = entry.target;
             value: int = base + entry.weight;
             if (value > 0 - unknown && value < distances![to]) {
@@ -222,8 +228,8 @@ bounds_source_has_edge(state: ?*BoundsState, source: BoundsTermRef) raises Index
     if (source.is_len || source.is_zero) return true;
     for position in 0..bounds_count(state) {
         edge: ?*BoundsNumericView = bounds_numeric_ref(state, position);
-        if (edge != null && edge.valid && edge.separation == null) {
-            if (bounds_ref_same(bounds_view_right_ref(edge), source)) return true
+        if (edge != null && edge.left.valid && edge.right.valid && edge.separation == null) {
+            if (bounds_ref_same_borrowed(&edge.right, &source)) return true
         }
     }
     false
@@ -234,8 +240,8 @@ bounds_target_has_edge(state: ?*BoundsState, target: BoundsTermRef) raises Index
     if (target.is_len || target.is_zero) return true;
     for position in 0..bounds_count(state) {
         edge: ?*BoundsNumericView = bounds_numeric_ref(state, position);
-        if (edge != null && edge.valid && edge.separation == null) {
-            if (bounds_ref_same(bounds_view_left_ref(edge), target)) return true
+        if (edge != null && edge.left.valid && edge.right.valid && edge.separation == null) {
+            if (bounds_ref_same_borrowed(&edge.left, &target)) return true
         }
     }
     false
@@ -289,6 +295,7 @@ bounds_cached_graph(state: ?*BoundsState, excluded: ?*BoundsGraph, load: bool) r
     }
     graph.nodes = 0;
     graph.edges = 0;
+    graph.small_weights = true;
     bounds_graph_load(graph, state);
     cache.storage = state.storage;
     cache.count = state.count;
@@ -319,31 +326,33 @@ bounds_cached_distance(
 
 // Two explicit, unconditional interval bounds can prove a difference through
 // zero without a graph search. Restrict both weights so their sum cannot wrap.
-bounds_zero_path(state: ?*BoundsState, query: BoundsNumericView) raises IndexOutOfBounds: int {
-    if (query.left_zero || query.right_zero) return 1000000000000000000;
-    upper: BoundsNumericView = query;
-    upper.right_path = null;
-    upper.right_obj = null;
-    upper.right_len = false;
-    upper.right_zero = true;
+bounds_zero_path(state: ?*BoundsState, query: *BoundsNumericView) raises IndexOutOfBounds: int {
+    if (query.left.is_zero || query.right.is_zero) return 1000000000000000000;
+    upper: BoundsNumericView = query.*;
+    upper.right.path = null;
+    upper.right.obj = null;
+    upper.right.is_len = false;
+    upper.right.is_zero = true;
+    upper.right.valid = true;
     upper.separation = null;
-    upper_bound: int = bounds_direct_bound(state, upper);
+    upper_bound: int = bounds_direct_bound(state, &upper);
     if (upper_bound <= -536870912 || upper_bound >= 536870912) return 1000000000000000000;
-    lower: BoundsNumericView = query;
-    lower.left_path = null;
-    lower.left_obj = null;
-    lower.left_len = false;
-    lower.left_zero = true;
+    lower: BoundsNumericView = query.*;
+    lower.left.path = null;
+    lower.left.obj = null;
+    lower.left.is_len = false;
+    lower.left.is_zero = true;
+    lower.left.valid = true;
     lower.separation = null;
-    lower_bound: int = bounds_direct_bound(state, lower);
+    lower_bound: int = bounds_direct_bound(state, &lower);
     if (lower_bound <= -536870912 || lower_bound >= 536870912) return 1000000000000000000;
     upper_bound + lower_bound
 }
 
-bounds_solve(state: ?*BoundsState, query: BoundsNumericView, early: bool) raises IndexOutOfBounds: int {
-    if (!query.valid) return 1000000000000000000;
-    left: BoundsTermRef = bounds_view_left(query);
-    right: BoundsTermRef = bounds_view_right(query);
+bounds_solve(state: ?*BoundsState, query: *BoundsNumericView, early: bool) raises IndexOutOfBounds: int {
+    if (!query.left.valid || !query.right.valid) return 1000000000000000000;
+    left: BoundsTermRef = query.left;
+    right: BoundsTermRef = query.right;
     if (bounds_count(state) == 0) return bounds_empty_distance(left, right);
     if (early) {
         zero_bound: int = bounds_zero_path(state, query);
@@ -358,11 +367,47 @@ bounds_solve(state: ?*BoundsState, query: BoundsNumericView, early: bool) raises
     if (cached != null) {
         cached_target: int = bounds_graph_find(cached.graph, left);
         cached_source: int = bounds_graph_find(cached.graph, right);
-        // Missing scalar endpoints cannot gain implicit edges. Missing lengths
-        // still use the local graph, which inserts their implicit bounds.
+        // Missing scalar endpoints cannot gain implicit edges. Length endpoints
+        // may connect through zero using universal implicit bounds.
         if (!bounds_ref_same(left, right) && (cached_source < 0 && !right.is_len && !right.is_zero || cached_target < 0 && !left.is_len && !left.is_zero)) return 1000000000000000000;
         if (cached_target >= 0 && cached_source >= 0) return bounds_cached_distance(cached,
-            cached_source, cached_target, query.bound, early)
+            cached_source, cached_target, query.bound, early);
+        // An absent length has only implicit edges through zero. Translate
+        // those endpoints instead of constructing another copy of the graph.
+        // Do not retain query-owned AST nodes in the state's graph cache.
+        // Small weights keep every budget-limited path far from the sentinel.
+        // Partial searches are used only when they already prove this query.
+        if (!bounds_ref_same(left, right)) {
+            zero_term: BoundsTermRef = bounds_ref_zero();
+            zero: int = bounds_graph_find(cached.graph, zero_term);
+            shift: int = 0;
+            usable: bool = zero >= 0 && cached.graph.small_weights;
+            if (cached_source < 0) {
+                if (!right.is_len) usable = false else {
+                    known: int = bounds_known_len(right.path);
+                    if (known >= 0) shift = 0 - known;
+                    cached_source = zero
+                }
+            }
+            if (cached_target < 0) {
+                if (!left.is_len) usable = false else {
+                    known: int = bounds_known_len(left.path);
+                    if (known < 0) return 1000000000000000000;
+                    if (known >= 536870912 || shift <= -536870912) usable = false else shift = shift + known;
+                    cached_target = zero
+                }
+            }
+            if (usable && shift > -536870912 && shift < 536870912 && query.bound > -1000000000000000000 && query.bound < 1000000000000000000) {
+                distance: int = bounds_cached_distance(cached, cached_source, cached_target,
+                    query.bound - shift, early);
+                if (distance >= 1000000000000000000) {
+                    if (cached.complete) return 1000000000000000000
+                } else {
+                    adjusted: int = distance + shift;
+                    if (adjusted > -1000000000000000000 && adjusted < 1000000000000000000 && (cached.complete || early && adjusted <= query.bound)) return adjusted
+                }
+            }
+        }
     }
     result: int = 1000000000000000000;
     region {
@@ -386,12 +431,12 @@ bounds_difference_entails(
 ) raises IndexOutOfBounds: bool {
     if (!bounds_reachable(state)) return true;
     query: BoundsNumericView = bounds_numeric_query(left, right, limit);
-    if (!query.valid) return false;
-    left_ref: BoundsTermRef = bounds_view_left(query);
-    right_ref: BoundsTermRef = bounds_view_right(query);
+    if (!query.left.valid || !query.right.valid) return false;
+    left_ref: BoundsTermRef = query.left;
+    right_ref: BoundsTermRef = query.right;
     if (query.bound >= 0 && bounds_ref_same(left_ref, right_ref)) return true;
-    if (bounds_numeric_entails(state, query)) return true;
-    bounds_solve(state, query, true) <= query.bound
+    if (bounds_numeric_entails(state, &query)) return true;
+    bounds_solve(state, &query, true) <= query.bound
 }
 
 bounds_difference_proves(
@@ -402,12 +447,12 @@ bounds_difference_proves(
 ) raises IndexOutOfBounds: bool {
     if (!bounds_reachable(state)) return true;
     query: BoundsNumericView = bounds_numeric_query(left, right, limit);
-    if (!query.valid) return false;
-    left_ref: BoundsTermRef = bounds_view_left(query);
-    right_ref: BoundsTermRef = bounds_view_right(query);
+    if (!query.left.valid || !query.right.valid) return false;
+    left_ref: BoundsTermRef = query.left;
+    right_ref: BoundsTermRef = query.right;
     if (query.bound >= 0 && bounds_ref_same(left_ref, right_ref)) return true;
-    if (bounds_direct_proves(state, query)) return true;
-    bounds_solve(state, query, true) <= query.bound
+    if (bounds_direct_proves(state, &query)) return true;
+    bounds_solve(state, &query, true) <= query.bound
 }
 
 bounds_return_bound(state: ?*BoundsState, left: *Expr, right: *Expr) raises IndexOutOfBounds: int {
@@ -419,21 +464,21 @@ bounds_return_bound(state: ?*BoundsState, left: *Expr, right: *Expr) raises Inde
         if (constant >= -536870911 && constant < 0) fallback = constant
     }
     query: BoundsNumericView = bounds_numeric_query(left, right, 0);
-    if (!query.valid) {
+    if (!query.left.valid || !query.right.valid) {
         if (fallback < -64) return -64;
         return fallback
     }
-    left_ref: BoundsTermRef = bounds_view_left(query);
-    right_ref: BoundsTermRef = bounds_view_right(query);
+    left_ref: BoundsTermRef = query.left;
+    right_ref: BoundsTermRef = query.right;
     distance: int = 1000000000000000000;
     if (bounds_ref_same(left_ref, right_ref)) distance = 0 else {
-        direct: int = bounds_direct_bound(state, query);
+        direct: int = bounds_direct_bound(state, &query);
         reverse: BoundsNumericView = bounds_numeric_query(right, left, 0);
-        back: int = bounds_direct_bound(state, reverse);
+        back: int = bounds_direct_bound(state, &reverse);
         // Exact stored relations need no graph search. A stronger path could
         // only contradict the assumptions, so the direct proof suffices.
         if (direct < 1000000000 && back < 1000000000 && direct + back == 0) distance = direct else distance = bounds_solve(state,
-            query, false)
+            &query, false)
     }
     value: int = distance - query.bound;
     if (fallback < value) value = fallback;
@@ -443,8 +488,8 @@ bounds_return_bound(state: ?*BoundsState, left: *Expr, right: *Expr) raises Inde
 
 // Proof queries may discharge alias obligations. Lattice membership used by
 // joins/widening remains pure and never strengthens a function's contract.
-bounds_direct_proves(state: ?*BoundsState, target: BoundsNumericView) raises IndexOutOfBounds: bool {
-    if (!target.valid) return false;
+bounds_direct_proves(state: ?*BoundsState, target: *BoundsNumericView) raises IndexOutOfBounds: bool {
+    if (!target.left.valid || !target.right.valid) return false;
     evidence: BoundsEvidence = bounds_direct_evidence(state, target, true);
     if (evidence.bound >= 1000000000 || evidence.bound > target.bound) return false;
     bounds_note_separations(evidence.separation, state);
@@ -454,7 +499,15 @@ bounds_direct_proves(state: ?*BoundsState, target: BoundsNumericView) raises Ind
 // Project onto a bounded set of terms shared by both predecessors. Keep
 // endpoint positions, not region-owned AST references, across the scratch
 // region. Eight source searches per branch suffice for all selected pairs.
-bounds_join_project(a: ?*BoundsState, b: ?*BoundsState, result: ?*BoundsState@new) raises IndexOutOfBounds: ?*BoundsState@result {
+// impossible reports a certified contradictory predecessor: 0 not found, 1 a,
+// 2 b. The caller selects its surviving snapshot, preserving all of its facts.
+bounds_join_project(
+    a: ?*BoundsState,
+    b: ?*BoundsState,
+    result: ?*BoundsState@new,
+    impossible: *int
+) raises IndexOutOfBounds: ?*BoundsState@result {
+    impossible.* = 0;
     positions: []int = new int[BOUNDS_JOIN_TERMS](-1);
     weights: []int = new int[BOUNDS_JOIN_TERMS * BOUNDS_JOIN_TERMS](1000000000000000000);
     count: int = 0;
@@ -476,9 +529,9 @@ bounds_join_project(a: ?*BoundsState, b: ?*BoundsState, result: ?*BoundsState@ne
         position: int = 0;
         while (position < bounds_count(a) && count < BOUNDS_JOIN_TERMS) {
             edge: BoundsNumericView = bounds_numeric_at(a, position);
-            if (edge.valid) {
+            if (edge.left.valid && edge.right.valid) {
                 for side in 0..2 {
-                    term: BoundsTermRef = if (side == 0) bounds_view_left(edge) else bounds_view_right(edge);
+                    term: BoundsTermRef = if (side == 0) edge.left else edge.right;
                     left_id: int = bounds_graph_find(first, term);
                     right_id: int = bounds_graph_find(second, term);
                     seen: bool = false;
@@ -507,14 +560,28 @@ bounds_join_project(a: ?*BoundsState, b: ?*BoundsState, result: ?*BoundsState@ne
                 left_distances![i] = 1000000000000000000;
                 queued![i] = false
             }
-            _first_complete: bool = bounds_graph_search(first, first_ids![source],
-                0, 0, false, left_distances, queued, queue);
+            // A negative distance back to the source is a witnessed closed
+            // walk: source - source <= -1. All loaded edges are unconditional,
+            // so this predecessor is impossible. On consistent graphs the
+            // same search still computes every distance, with the old budget.
+            first_source: int = first_ids![source];
+            _first_complete: bool = bounds_graph_search(first, first_source, first_source,
+                -1, true, left_distances, queued, queue);
+            if (left_distances![first_source] < 0) {
+                impossible.* = 1;
+                return result
+            }
             for i in 0..second.nodes {
                 right_distances![i] = 1000000000000000000;
                 queued![i] = false
             }
-            _second_complete: bool = bounds_graph_search(second, second_ids![source],
-                0, 0, false, right_distances, queued, queue);
+            second_source: int = second_ids![source];
+            _second_complete: bool = bounds_graph_search(second, second_source, second_source,
+                -1, true, right_distances, queued, queue);
+            if (right_distances![second_source] < 0) {
+                impossible.* = 2;
+                return result
+            }
             for target in 0..count {
                 left_distance: int = left_distances![first_ids![target]];
                 right_distance: int = right_distances![second_ids![target]];
@@ -523,14 +590,27 @@ bounds_join_project(a: ?*BoundsState, b: ?*BoundsState, result: ?*BoundsState@ne
         }
     }
     for source in 0..count {
-        right: *Expr = bounds_join_endpoint(a, positions![source]);
+        source_edge: BoundsNumericView = bounds_numeric_at(a, positions![source] / 2);
+        right: BoundsTermRef = if (positions[source] % 2 == 0) source_edge.left else source_edge.right;
         for target in 0..count {
             bound: int = weights![source * BOUNDS_JOIN_TERMS + target];
             if (source != target && bound > -536870912 && bound < 536870912) {
-                left: *Expr = bounds_join_endpoint(a, positions![target]);
-                // Keep the join sparse when existing paths already prove the edge.
-                if (!bounds_difference_entails(result, left, right, bound)) result = bounds_add_relation(result,
-                    left, right, bound)
+                target_edge: BoundsNumericView = bounds_numeric_at(a, positions![target] / 2);
+                left: BoundsTermRef = if (positions[target] % 2 == 0) target_edge.left else target_edge.right;
+                query: BoundsNumericView = BoundsNumericView {
+                    left: left,
+                    right: right,
+                    bound: bound,
+                    separation: null
+                };
+                // Keep normalized endpoints throughout the membership test.
+                // Materialize source syntax only for an actual new fact.
+                if (bounds_reachable(result) && !bounds_numeric_entails(result, &query) && bounds_solve(result,
+                    &query, true) > bound) {
+                    left_ast: *Expr = bounds_join_endpoint(a, positions[target]);
+                    right_ast: *Expr = bounds_join_endpoint(a, positions[source]);
+                    result = bounds_add_relation(result, left_ast, right_ast, bound)
+                }
             }
         }
     }
@@ -539,7 +619,7 @@ bounds_join_project(a: ?*BoundsState, b: ?*BoundsState, result: ?*BoundsState@ne
 
 bounds_join_endpoint(state: ?*BoundsState, position: int) raises IndexOutOfBounds: *Expr@new {
     edge: BoundsNumericView = bounds_numeric_at(state, position / 2);
-    term: BoundsTermRef = if (position % 2 == 0) bounds_view_left(edge) else bounds_view_right(edge);
+    term: BoundsTermRef = if (position % 2 == 0) edge.left else edge.right;
     path: ?*Expr = bounds_ref_ast(term);
     if (path == null) new_num(0) else path
 }

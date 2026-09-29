@@ -439,8 +439,8 @@ bounds_term_numeric_lower(f: ?*BoundsState, term: *Expr) raises IndexOutOfBounds
     literal: int = bounds_num(term);
     if (literal >= 0) return literal;
     wanted: BoundsNumericView = bounds_numeric_query(new_num(0), term, 0);
-    if (!wanted.valid) return -1;
-    evidence: BoundsEvidence = bounds_direct_evidence(f, wanted, true);
+    if (!wanted.left.valid || !wanted.right.valid) return -1;
+    evidence: BoundsEvidence = bounds_direct_evidence(f, &wanted, true);
     bound: int = evidence.bound;
     if (bound <= 0 && bound > -536870912) {
         bounds_note_separations(evidence.separation, f);
@@ -453,8 +453,8 @@ bounds_term_numeric_upper(f: ?*BoundsState, term: *Expr) raises IndexOutOfBounds
     literal: int = bounds_num(term);
     if (literal >= 0) return literal;
     wanted: BoundsNumericView = bounds_numeric_query(term, new_num(0), 536870911);
-    if (!wanted.valid) return -1;
-    evidence: BoundsEvidence = bounds_direct_evidence(f, wanted, true);
+    if (!wanted.left.valid || !wanted.right.valid) return -1;
+    evidence: BoundsEvidence = bounds_direct_evidence(f, &wanted, true);
     bound: int = evidence.bound;
     if (bound >= 0 && bound < 536870912) {
         bounds_note_separations(evidence.separation, f);
@@ -474,7 +474,8 @@ bounds_ref_zero(): BoundsTermRef {
         path: null,
         obj: null,
         is_len: false,
-        is_zero: true
+        is_zero: true,
+        valid: true
     }
 }
 
@@ -483,7 +484,8 @@ bounds_ref_obj(obj: *Obj, length: bool): BoundsTermRef {
         path: null,
         obj: obj,
         is_len: length,
-        is_zero: false
+        is_zero: false,
+        valid: true
     }
 }
 
@@ -495,9 +497,10 @@ bounds_ref_expr(e: ?*Expr) raises IndexOutOfBounds: BoundsTermRef {
                 if (arg != null) {
                     if (streq(call.funcname, "len") && call.target == null && bounds_term(arg)) return BoundsTermRef {
                         path: arg,
-                        obj: null,
+                        obj: bounds_var(arg),
                         is_len: true,
-                        is_zero: false
+                        is_zero: false,
+                        valid: true
                     }
                 }
             }
@@ -505,24 +508,30 @@ bounds_ref_expr(e: ?*Expr) raises IndexOutOfBounds: BoundsTermRef {
         }
         if (bounds_term(e)) return BoundsTermRef {
             path: e,
-            obj: null,
+            obj: bounds_var(e),
             is_len: false,
-            is_zero: false
+            is_zero: false,
+            valid: true
         }
     }
     BoundsTermRef {
         path: null,
         obj: null,
         is_len: false,
-        is_zero: false
+        is_zero: false,
+        valid: false
     }
 }
 
 bounds_ref_valid(t: BoundsTermRef): bool {
-    t.is_zero || t.path != null || t.obj != null
+    t.valid
 }
 
 bounds_ref_same(a: BoundsTermRef, b: BoundsTermRef) raises IndexOutOfBounds: bool {
+    bounds_ref_same_borrowed(&a, &b)
+}
+
+bounds_ref_same_borrowed(a: *BoundsTermRef, b: *BoundsTermRef) raises IndexOutOfBounds: bool {
     if (a.is_zero || b.is_zero) return a.is_zero && b.is_zero;
     if (a.is_len != b.is_len) return false;
     if (a.obj != null && b.obj != null) return a.obj == b.obj;
@@ -561,17 +570,10 @@ bounds_numeric_query(left_expr: ?*Expr, right_expr: ?*Expr, initial_bound: int) 
         bound = bound + rn
     }
     BoundsNumericView {
-        left_path: left.path,
-        left_obj: left.obj,
-        left_len: left.is_len,
-        left_zero: left.is_zero,
-        right_path: right.path,
-        right_obj: right.obj,
-        right_len: right.is_len,
-        right_zero: right.is_zero,
+        left: left,
+        right: right,
         bound: bound,
-        separation: null,
-        valid: bounds_ref_valid(left) && bounds_ref_valid(right)
+        separation: null
     }
 }
 
@@ -584,45 +586,9 @@ bounds_numeric_view(q: *BoundsRow) raises IndexOutOfBounds: BoundsNumericView {
     view
 }
 
-bounds_view_left_ref(view: *BoundsNumericView): BoundsTermRef {
-    BoundsTermRef {
-        path: view.left_path,
-        obj: view.left_obj,
-        is_len: view.left_len,
-        is_zero: view.left_zero
-    }
-}
-
-bounds_view_right_ref(view: *BoundsNumericView): BoundsTermRef {
-    BoundsTermRef {
-        path: view.right_path,
-        obj: view.right_obj,
-        is_len: view.right_len,
-        is_zero: view.right_zero
-    }
-}
-
-bounds_view_left(view: BoundsNumericView): BoundsTermRef {
-    BoundsTermRef {
-        path: view.left_path,
-        obj: view.left_obj,
-        is_len: view.left_len,
-        is_zero: view.left_zero
-    }
-}
-
-bounds_view_right(view: BoundsNumericView): BoundsTermRef {
-    BoundsTermRef {
-        path: view.right_path,
-        obj: view.right_obj,
-        is_len: view.right_len,
-        is_zero: view.right_zero
-    }
-}
-
-bounds_numeric_entails(f: ?*BoundsState, target: BoundsNumericView) raises IndexOutOfBounds: bool {
+bounds_numeric_entails(f: ?*BoundsState, target: *BoundsNumericView) raises IndexOutOfBounds: bool {
     if (!bounds_reachable(f)) return true;
-    if (!target.valid) return false;
+    if (!target.left.valid || !target.right.valid) return false;
     bound: int = bounds_direct_bound(f, target);
     bound < 1000000000 && bound <= target.bound
 }
@@ -1027,8 +993,8 @@ bounds_affine_safe(value: *BoundsAffine@new, f: ?*BoundsState) raises IndexOutOf
         row: ?*BoundsRow = bounds_row(f, position);
         if (row != null) {
             edge: BoundsNumericView = bounds_numeric_view(row);
-            left: BoundsTermRef = bounds_view_left(edge);
-            if (edge.valid && edge.right_len && edge.bound <= 0 - value.offset && bounds_ref_same(left,
+            left: BoundsTermRef = edge.left;
+            if (edge.left.valid && edge.right.valid && edge.right.is_len && edge.bound <= 0 - value.offset && bounds_ref_same(left,
                 wanted) && bounds_separations_available(edge.separation, f)) {
                 bounds_note_separations(edge.separation, f);
                 return true
