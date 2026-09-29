@@ -80,6 +80,11 @@ pack_DT_JMPREL: int = 23;
 
 pack_SYMENT: int = 24;
 
+type PackInput = {
+    data: []i8;
+    used: int
+} invariant (0 <= used && used <= len(data))
+
 pack_fail(pack_msg: []i8): noreturn {
     raw::raw_write(2, "elfpack: ");
     raw::raw_write_bytes(2, pack_msg);
@@ -99,9 +104,10 @@ pack_streq(pack_a: []i8, pack_b: []i8): bool {
     }
 }
 
-pack_streq_at(pack_buf: []i8, pack_off: int, pack_lit: []i8): bool {
+pack_streq_at(input: *PackInput, pack_off: int, pack_lit: []i8): bool {
     pack_n: int = len(pack_lit);
-    if (pack_off < 0 || pack_off >= len(pack_buf) || pack_n >= len(pack_buf) - pack_off) return false;
+    if (pack_off < 0 || pack_off >= input.used || pack_n >= input.used - pack_off) return false;
+    pack_buf: []i8 = input.data;
     for pack_i in 0..pack_n {
         if (pack_buf[pack_off + pack_i] != pack_lit[pack_i]) return false
     }
@@ -112,14 +118,19 @@ pack_align_up(pack_x: int, pack_a: int): int {
     (pack_x + pack_a - 1) / pack_a * pack_a
 }
 
-pack_rd_le(pack_b: []i8, pack_o: int, pack_n: int): int requires (0 <= pack_n && pack_n <= 8) {
-    if (pack_o < 0 || pack_o > len(pack_b) || pack_n > len(pack_b) - pack_o) pack_fail("truncated ELF field");
+pack_rd_le(input: *PackInput, pack_o: int, pack_n: int): int requires (0 <= pack_n && pack_n <= 8) {
+    if (pack_o < 0 || pack_o > input.used || pack_n > input.used - pack_o) pack_fail("truncated ELF field");
+    pack_b: []i8 = input.data;
     pack_v: int = 0;
     for pack_i in 0..pack_n {
         pack_c: int = pack_b[pack_o + pack_i] as int & 255;
         pack_v = pack_v + (pack_c << pack_i * 8)
     }
     pack_v
+}
+
+pack_input_span(input: *PackInput, off: int, size: int) {
+    if (off < 0 || size < 0 || off > input.used || size > input.used - off) pack_fail("truncated ELF section")
 }
 
 pack_wr_le(
@@ -135,16 +146,16 @@ pack_wr_le(
     }
 }
 
-pack_rd16(pack_b: []i8, pack_o: int): int {
-    pack_rd_le(pack_b, pack_o, 2)
+pack_rd16(input: *PackInput, pack_o: int): int {
+    pack_rd_le(input, pack_o, 2)
 }
 
-pack_rd32(pack_b: []i8, pack_o: int): int {
-    pack_rd_le(pack_b, pack_o, 4)
+pack_rd32(input: *PackInput, pack_o: int): int {
+    pack_rd_le(input, pack_o, 4)
 }
 
-pack_rd64(pack_b: []i8, pack_o: int): int {
-    pack_rd_le(pack_b, pack_o, 8)
+pack_rd64(input: *PackInput, pack_o: int): int {
+    pack_rd_le(input, pack_o, 8)
 }
 
 pack_wr16(pack_b: []i8, pack_o: int, pack_v: int) raises IndexOutOfBounds {
@@ -281,11 +292,6 @@ pack_need_hint(pack_i: int) raises IndexOutOfBounds: noreturn {
     raw::raw_write(2, "; add need \"libfoo.so\"\n");
     exit(1)
 }
-
-type PackInput = {
-    data: []i8;
-    used: int
-} invariant (0 <= used && used <= len(data))
 
 pack_has_rela_prefix(input: *PackInput, off: int): bool {
     if (off < 0 || off > input.used - 6) return false;
@@ -710,14 +716,16 @@ elfpack_main(pack_argc: int, pack_argv: []str) raises IndexOutOfBounds: int requ
     if (pack_input.used < 64) pack_fail("input too small");
     if (pack_b[0] != 127i8 || pack_b[1] != 'E' || pack_b[2] != 'L' || pack_b[3] != 'F') pack_fail("not ELF");
     if (pack_b[4] != 2i8 || pack_b[5] != 1i8) pack_fail("need ELF64 LE");
-    if (pack_rd16(pack_b, 16) != pack_ET_REL) pack_fail("need relocatable ET_REL");
-    if (pack_rd16(pack_b, 18) != pack_EM_X86_64) pack_fail("need EM_X86_64");
-    pack_e_shoff: int = pack_rd64(pack_b, 40);
-    pack_e_shentsize: int = pack_rd16(pack_b, 58);
-    pack_e_shnum: int = pack_rd16(pack_b, 60);
-    pack_e_shstrndx: int = pack_rd16(pack_b, 62);
+    if (pack_rd16(pack_input, 16) != pack_ET_REL) pack_fail("need relocatable ET_REL");
+    if (pack_rd16(pack_input, 18) != pack_EM_X86_64) pack_fail("need EM_X86_64");
+    pack_e_shoff: int = pack_rd64(pack_input, 40);
+    pack_e_shentsize: int = pack_rd16(pack_input, 58);
+    pack_e_shnum: int = pack_rd16(pack_input, 60);
+    pack_e_shstrndx: int = pack_rd16(pack_input, 62);
     if (pack_e_shentsize != 64 || pack_e_shnum == 0) pack_fail("bad section headers");
-    pack_shstr_off: int = pack_rd64(pack_b, pack_e_shoff + pack_e_shstrndx * 64 + 24);
+    if (pack_e_shstrndx >= pack_e_shnum) pack_fail("bad section name table");
+    if (pack_e_shoff < 0 || pack_e_shoff > pack_input.used || pack_e_shnum > (pack_input.used - pack_e_shoff) / 64) pack_fail("truncated section headers");
+    pack_shstr_off: int = pack_rd64(pack_input, pack_e_shoff + pack_e_shstrndx * 64 + 24);
     pack_shstr_base: int = pack_shstr_off;
     pack_text_i: int = 0 - 1;
     pack_rodata_i: int = 0 - 1;
@@ -727,57 +735,59 @@ elfpack_main(pack_argc: int, pack_argv: []str) raises IndexOutOfBounds: int requ
     pack_rela_text_i: int = 0 - 1;
     for pack_si in 0..pack_e_shnum {
         pack_sh: int = pack_e_shoff + pack_si * 64;
-        pack_name_off: int = pack_shstr_base + pack_rd32(pack_b, pack_sh + 0);
-        if (pack_streq_at(pack_b, pack_name_off, ".text")) pack_text_i = pack_si;
-        if (pack_streq_at(pack_b, pack_name_off, ".rodata")) pack_rodata_i = pack_si;
-        if (pack_streq_at(pack_b, pack_name_off, ".data")) pack_data_i = pack_si;
-        if (pack_streq_at(pack_b, pack_name_off, ".bss")) pack_bss_i = pack_si;
-        if (pack_streq_at(pack_b, pack_name_off, ".symtab")) pack_symtab_i = pack_si;
-        if (pack_streq_at(pack_b, pack_name_off, ".rela.text")) pack_rela_text_i = pack_si;
-        if (pack_has_rela_prefix(pack_input, pack_name_off) && !pack_streq_at(pack_b,
+        pack_name_off: int = pack_shstr_base + pack_rd32(pack_input, pack_sh + 0);
+        if (pack_streq_at(pack_input, pack_name_off, ".text")) pack_text_i = pack_si;
+        if (pack_streq_at(pack_input, pack_name_off, ".rodata")) pack_rodata_i = pack_si;
+        if (pack_streq_at(pack_input, pack_name_off, ".data")) pack_data_i = pack_si;
+        if (pack_streq_at(pack_input, pack_name_off, ".bss")) pack_bss_i = pack_si;
+        if (pack_streq_at(pack_input, pack_name_off, ".symtab")) pack_symtab_i = pack_si;
+        if (pack_streq_at(pack_input, pack_name_off, ".rela.text")) pack_rela_text_i = pack_si;
+        if (pack_has_rela_prefix(pack_input, pack_name_off) && !pack_streq_at(pack_input,
             pack_name_off, ".rela.text")) pack_fail("unsupported relocation section")
     }
     if (pack_text_i < 0) pack_fail("missing .text");
     if (pack_symtab_i < 0) pack_fail("missing .symtab");
     pack_text_sh: int = pack_e_shoff + pack_text_i * 64;
-    pack_text_fileoff: int = pack_rd64(pack_b, pack_text_sh + 24);
-    pack_text_sz: int = pack_rd64(pack_b, pack_text_sh + 32);
+    pack_text_fileoff: int = pack_rd64(pack_input, pack_text_sh + 24);
+    pack_text_sz: int = pack_rd64(pack_input, pack_text_sh + 32);
     pack_rodata_sz: int = 0;
     pack_rodata_fileoff: int = 0;
     if (pack_rodata_i >= 0) {
         pack_rsh: int = pack_e_shoff + pack_rodata_i * 64;
-        pack_rodata_fileoff = pack_rd64(pack_b, pack_rsh + 24);
-        pack_rodata_sz = pack_rd64(pack_b, pack_rsh + 32)
+        pack_rodata_fileoff = pack_rd64(pack_input, pack_rsh + 24);
+        pack_rodata_sz = pack_rd64(pack_input, pack_rsh + 32)
     }
     pack_data_sz: int = 0;
     pack_data_fileoff: int = 0;
     if (pack_data_i >= 0) {
         pack_dsh: int = pack_e_shoff + pack_data_i * 64;
-        pack_data_fileoff = pack_rd64(pack_b, pack_dsh + 24);
-        pack_data_sz = pack_rd64(pack_b, pack_dsh + 32)
+        pack_data_fileoff = pack_rd64(pack_input, pack_dsh + 24);
+        pack_data_sz = pack_rd64(pack_input, pack_dsh + 32)
     }
     pack_bss_sz: int = 0;
     if (pack_bss_i >= 0) {
         pack_bsh: int = pack_e_shoff + pack_bss_i * 64;
-        pack_bss_sz = pack_rd64(pack_b, pack_bsh + 32)
+        pack_bss_sz = pack_rd64(pack_input, pack_bsh + 32)
     }
     pack_sym_sh: int = pack_e_shoff + pack_symtab_i * 64;
-    pack_sym_off: int = pack_rd64(pack_b, pack_sym_sh + 24);
-    pack_sym_sz: int = pack_rd64(pack_b, pack_sym_sh + 32);
-    pack_sym_link: int = pack_rd32(pack_b, pack_sym_sh + 40);
+    pack_sym_off: int = pack_rd64(pack_input, pack_sym_sh + 24);
+    pack_sym_sz: int = pack_rd64(pack_input, pack_sym_sh + 32);
+    pack_sym_link: int = pack_rd32(pack_input, pack_sym_sh + 40);
+    if (pack_sym_link >= pack_e_shnum) pack_fail("bad symbol string table");
     pack_str_sh: int = pack_e_shoff + pack_sym_link * 64;
-    pack_str_off: int = pack_rd64(pack_b, pack_str_sh + 24);
+    pack_str_off: int = pack_rd64(pack_input, pack_str_sh + 24);
     pack_str_base: int = pack_str_off;
     pack_nsym: int = pack_sym_sz / 24;
+    pack_input_span(pack_input, pack_sym_off, pack_sym_sz);
+    if (pack_sym_sz % 24 != 0) pack_fail("bad symbol table size");
 
     /* reject undefined globals */
     pack_zi: int = 0;
     while (pack_zi < pack_nsym) {
         pack_so: int = pack_sym_off + pack_zi * 24;
-        pack_st_name: int = pack_rd32(pack_b, pack_so + 0);
-        pack_st_info: int = pack_b![pack_so + 4] as int;
-        if (pack_st_info < 0) pack_st_info = pack_st_info + 256;
-        pack_st_shndx: int = pack_rd16(pack_b, pack_so + 6);
+        pack_st_name: int = pack_rd32(pack_input, pack_so + 0);
+        pack_st_info: int = pack_rd_le(pack_input, pack_so + 4, 1);
+        pack_st_shndx: int = pack_rd16(pack_input, pack_so + 6);
         pack_bind: int = pack_st_info / 16;
         if (pack_st_shndx == pack_SHN_UNDEF && pack_bind == pack_STB_GLOBAL && pack_st_name != 0) pack_fail("undefined symbol");
         pack_zi = pack_zi + 1
@@ -798,15 +808,18 @@ elfpack_main(pack_argc: int, pack_argv: []str) raises IndexOutOfBounds: int requ
     if (pack_rodata_i >= 0) pack_sec_vma![pack_rodata_i] = pack_rodata_vma;
     if (pack_data_i >= 0) pack_sec_vma![pack_data_i] = pack_data_vma;
     if (pack_bss_i >= 0) pack_sec_vma![pack_bss_i] = pack_bss_vma;
+    pack_input_span(pack_input, pack_text_fileoff, pack_text_sz);
     pack_text: []i8 = new i8[pack_text_sz + 1](0i8);
     memcpy(pack_text, 0, pack_b, pack_text_fileoff, pack_text_sz);
     pack_rodata_ptr: []i8 = pack_text;
     if (pack_rodata_sz > 0) {
+        pack_input_span(pack_input, pack_rodata_fileoff, pack_rodata_sz);
         pack_rodata_ptr = new i8[pack_rodata_sz](0i8);
         memcpy(pack_rodata_ptr, 0, pack_b, pack_rodata_fileoff, pack_rodata_sz)
     }
     pack_data_ptr: []i8 = pack_text;
     if (pack_data_sz > 0) {
+        pack_input_span(pack_input, pack_data_fileoff, pack_data_sz);
         pack_data_ptr = new i8[pack_data_sz](0i8);
         memcpy(pack_data_ptr, 0, pack_b, pack_data_fileoff, pack_data_sz)
     }
@@ -814,8 +827,8 @@ elfpack_main(pack_argc: int, pack_argv: []str) raises IndexOutOfBounds: int requ
     pack_zi = 0;
     while (pack_zi < pack_nsym) {
         pack_sy: int = pack_sym_off + pack_zi * 24;
-        pack_st_shndx2: int = pack_rd16(pack_b, pack_sy + 6);
-        pack_st_value: int = pack_rd64(pack_b, pack_sy + 8);
+        pack_st_shndx2: int = pack_rd16(pack_input, pack_sy + 6);
+        pack_st_value: int = pack_rd64(pack_input, pack_sy + 8);
         if (pack_st_shndx2 == pack_SHN_UNDEF) pack_sym_addr[pack_zi] = 0 else {
             if (pack_st_shndx2 == pack_SHN_ABS) pack_sym_addr[pack_zi] = pack_st_value else {
                 if (pack_st_shndx2 < pack_e_shnum) pack_sym_addr[pack_zi] = pack_sec_vma![pack_st_shndx2] + pack_st_value else pack_fail("bad symbol shndx")
@@ -827,24 +840,26 @@ elfpack_main(pack_argc: int, pack_argv: []str) raises IndexOutOfBounds: int requ
     pack_zi = 0;
     while (pack_zi < pack_nsym) {
         pack_so2: int = pack_sym_off + pack_zi * 24;
-        pack_st_name2: int = pack_rd32(pack_b, pack_so2 + 0);
+        pack_st_name2: int = pack_rd32(pack_input, pack_so2 + 0);
         if (pack_st_name2 != 0) {
-            if (pack_streq_at(pack_b, pack_str_base + pack_st_name2, "_start")) pack_entry = pack_sym_addr[pack_zi]
+            if (pack_streq_at(pack_input, pack_str_base + pack_st_name2, "_start")) pack_entry = pack_sym_addr[pack_zi]
         }
         pack_zi = pack_zi + 1
     }
     if (pack_entry == 0) pack_fail("missing _start");
     if (pack_rela_text_i >= 0) {
         pack_rsh2: int = pack_e_shoff + pack_rela_text_i * 64;
-        pack_rela_off: int = pack_rd64(pack_b, pack_rsh2 + 24);
-        pack_rela_sz: int = pack_rd64(pack_b, pack_rsh2 + 32);
+        pack_rela_off: int = pack_rd64(pack_input, pack_rsh2 + 24);
+        pack_rela_sz: int = pack_rd64(pack_input, pack_rsh2 + 32);
+        pack_input_span(pack_input, pack_rela_off, pack_rela_sz);
+        if (pack_rela_sz % 24 != 0) pack_fail("bad relocation section size");
         pack_nrela: int = pack_rela_sz / 24;
         for pack_ri in 0..pack_nrela {
             pack_ro: int = pack_rela_off + pack_ri * 24;
-            pack_r_offset: int = pack_rd64(pack_b, pack_ro + 0);
-            pack_r_type: int = pack_rd32(pack_b, pack_ro + 8);
-            pack_r_sym: int = pack_rd32(pack_b, pack_ro + 12);
-            pack_r_addend: int = pack_rd64(pack_b, pack_ro + 16);
+            pack_r_offset: int = pack_rd64(pack_input, pack_ro + 0);
+            pack_r_type: int = pack_rd32(pack_input, pack_ro + 8);
+            pack_r_sym: int = pack_rd32(pack_input, pack_ro + 12);
+            pack_r_addend: int = pack_rd64(pack_input, pack_ro + 16);
             if (pack_r_type != pack_R_X86_64_PC32 && pack_r_type != pack_R_X86_64_PLT32) pack_fail("unsupported reloc type");
             if (pack_r_sym >= pack_nsym) pack_fail("bad reloc symbol");
             if (pack_r_offset + 4 > pack_text_sz) pack_fail("reloc out of range");
