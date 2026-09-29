@@ -285,7 +285,10 @@ padding in each reference. Both endpoints must be valid for a numeric query.
 Hashing, direct evidence, and solver queries borrow descriptors or endpoints
 instead of repeatedly assembling and copying them. A variable term caches its
 object identity alongside its source path; the path remains available for
-known lengths and AST export. Graph loading retains terms from the source
+known lengths and AST export. Call filtering uses that identity for variables
+and lengths of variables, reading current local/escape flags rather than
+caching their classification. Other terms retain the AST classification.
+Graph loading retains terms from the source
 state, while borrowed descriptor pointers themselves never enter a graph.
 
 The driver owns a size-classed pool of fact buffers. It recycles them only after

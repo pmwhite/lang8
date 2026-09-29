@@ -1,6 +1,11 @@
 Block game compiler investigation (2026-09-28)
 
-The latest [fact-access investigation](block_game_fact_access_performance.md)
+The latest [call-classification investigation](block_game_call_classification_performance.md)
+reuses cached object identity during call filtering. A fifteen-pair comparison
+measured 466 to 462 ms (0.9%); instructions fall 1.2% and retired loads missing
+L2 fall 9.3%. This is a smaller improvement than the preceding rounds.
+
+The preceding [fact-access investigation](block_game_fact_access_performance.md)
 measured 465 to 450 ms (another 3.2%) by hoisting table metadata and range
 checks out of hot loops. Instructions fall 2.9% and L1 loads fall 3.4%, while
 cache misses and memory stalls are essentially unchanged.
