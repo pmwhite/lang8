@@ -1,5 +1,54 @@
 tag compiler_internal;
 
+// Only print paths whose spelling can be recovered without guessing at
+// precedence or at the result of a call. Other expressions use a generic bound.
+bounds_diagnostic_path(e: *Expr): bool {
+    match e.kind {
+        Var k -> len(k.name) != 0;
+        MemberAccess k -> bounds_diagnostic_path(k.lhs);
+        Num k -> k.val >= 0;
+        _ -> false
+    }
+}
+
+bounds_write_diagnostic_path(sb: *StrBuf@new, e: *Expr) raises IndexOutOfBounds {
+    match e.kind {
+        Var k -> sb_puts(sb, k.name);
+        MemberAccess k -> {
+            bounds_write_diagnostic_path(sb, k.lhs);
+            sb_putc(sb, '.');
+            sb_puts(sb, k.name)
+        }
+        Num k -> sb_uint(sb, k.val);
+        _ -> { }
+    }
+}
+
+bounds_access_error(access: *BoundsAccess) noregion raises Error, IndexOutOfBounds: noreturn {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, "unproved array access; use ![] for a runtime check");
+    sb_puts(sb, " (cannot prove ");
+    if (bounds_diagnostic_path(access.index) && bounds_diagnostic_path(access.array)) {
+        sb_puts(sb, "0 <= ");
+        bounds_write_diagnostic_path(sb, access.index);
+        sb_puts(sb, " && ");
+        bounds_write_diagnostic_path(sb, access.index);
+        sb_puts(sb, " < len(");
+        bounds_write_diagnostic_path(sb, access.array);
+        sb_putc(sb, ')')
+    } else sb_puts(sb, "0 <= index && index < len(array)");
+    sb_putc(sb, ')');
+    error_at_file(access.file, access.pos, sb_finish(sb))
+}
+
+bounds_checked_raises_error(fn: *Function) noregion raises Error: noreturn {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, "function ");
+    sb_puts(sb, fn.name);
+    sb_puts(sb, " may raise IndexOutOfBounds; add raises IndexOutOfBounds or catch it");
+    error_at_file(fn.browse_file, fn.browse_pos, sb_finish(sb))
+}
+
 // Dependency-ordered contract inference followed by strict validation.
 bounds_scc_visit(fn: *Function@immortal) noregion {
     bounds_scc_counter = bounds_scc_counter + 1;
@@ -178,10 +227,14 @@ verify_bounds_program() noregion raises Error, IndexOutOfBounds {
     while (access != null) {
         if (access.checked && !access.required) warning_at(access.file, access.pos,
             "checked access is already proved; use [] instead of ![]");
-        if (!access.checked && access.required) error_at_file(access.file, access.pos,
-            "unproved array access; use ![] for a runtime check");
+        if (!access.checked && access.required) bounds_access_error(access);
         access = access.next
     }
     bounds_accesses = null;
+    missing: ?*Function = functions;
+    while (missing != null) {
+        if (missing.missing_checked_raises) bounds_checked_raises_error(missing);
+        missing = missing.next
+    }
     profile_mark("bounds validation")
 }

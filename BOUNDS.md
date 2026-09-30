@@ -5,7 +5,8 @@ L8 distinguishes proven and checked indexing at each access site:
 - `a[i]` requires a proof of `0 <= i < len(a)` and emits no runtime bounds check.
 - `a![i]` performs a runtime check and raises `IndexOutOfBounds` if it fails.
   The containing function must declare `raises IndexOutOfBounds`, or a matching
-  `try`/`with` arm must catch it.
+  `try`/`with` arm must catch it. The bounds pass checks reachable accesses and
+  reports an undeclared exception at the function declaration.
 
 A function-wide `raises` declaration never permits an unproved `[]` access.
 The same syntax applies to reads, writes, address-taking, fixed arrays, slices,
@@ -173,6 +174,26 @@ can justify `used = used + 1`, provided the arithmetic cannot overflow.
 The first implementation rejects taking the address of one of these fields,
 because a later write through that pointer would bypass the field-assignment
 proof. It also rejects writes through record paths the verifier cannot track.
+
+An array field can also carry a per-element clause:
+
+```l8
+const CAP: int = 8;
+type Slots = {
+    table: []int;
+    data: []int
+} invariant (len(data) == CAP, forall entry in table (0 <= entry && entry <= CAP))
+```
+
+The verifier checks each initial fill or literal element and every later indexed
+write to `table`. An indexed read supplies the element's stated range, so a
+guard for `entry > 0` permits `data[entry - 1]`. In this first pass, the clause
+may refer to its integer element and compile-time integer constants. The field
+must be initialized or replaced with a new filled array or an array literal.
+Direct indexing and `len(table)` are supported; passing the mutable array to
+another function, copying it into a slice variable, and taking an element
+address are rejected because those aliases could change elements without a
+proof. Quantified clauses do not yet relate elements to sibling fields.
 
 This extends the existing field-path facts with a persistent type-level
 guarantee. The current verifier already tracks relations such as

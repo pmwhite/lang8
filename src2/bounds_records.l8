@@ -1,5 +1,65 @@
 tag compiler_internal;
 
+// Quantified array clauses are closed over the element and constants. A
+// successful element read can instantiate one clause; a write proves it for
+// the replacement value while the other elements retain their old facts.
+bounds_array_invariant(sd: *StructDef, member: *Member): ?*ArrayInvariant@sd {
+    q: ?*ArrayInvariant = sd.array_invariants;
+    while (q != null) {
+        if (q.member == member) return q;
+        q = q.next
+    }
+    null
+}
+
+bounds_array_field(e: *Expr) raises Error: ?*ArrayInvariant {
+    match e.kind {
+        MemberAccess k -> {
+            member: ?*Member = k.member;
+            if (member == null || !member.quantified) return null;
+            sd: ?*StructDef = bounds_record_def(k.lhs.ty);
+            if (sd == null) return null;
+            bounds_array_invariant(sd, member)
+        }
+        _ -> null
+    }
+}
+
+bounds_array_predicate(q: *ArrayInvariant, value: *Expr) raises Error: *Expr@new {
+    bounds_type_invariant_at(q.predicate, q.value, value) or error("internal: invalid forall predicate")
+}
+
+bounds_require_array_element(q: *ArrayInvariant, value: *Expr, f: ?*BoundsState) raises Error, IndexOutOfBounds {
+    predicate: *Expr = bounds_array_predicate(q, value);
+    bounds_require_type_predicate(predicate, f, value.file, value.pos)
+}
+
+bounds_require_array_fill(member: *Member, value: *Expr, f: ?*BoundsState) raises Error, IndexOutOfBounds {
+    if (!member.quantified) return;
+    q: ?*ArrayInvariant = null;
+    sd: ?*StructDef = struct_defs;
+    while (sd != null && q == null) {
+        q = bounds_array_invariant(sd, member);
+        sd = sd.next
+    }
+    if (q == null) error("internal: missing forall clause");
+    match value.kind {
+        New k -> {
+            fill: ?*Expr = k.fill;
+            if (fill == null) error_at_file(value.file, value.pos, "forall array field requires a fill value");
+            bounds_require_array_element(q, fill, f)
+        }
+        ArrayLit k -> {
+            item: ?*Expr = k.elems;
+            while (item != null) {
+                bounds_require_array_element(q, item, f);
+                item = item.next
+            }
+        }
+        _ -> error_at_file(value.file, value.pos, "forall array field requires a new or literal array; mutable aliases are not supported")
+    }
+}
+
 // Record invariants are obligations at construction and every field write.
 bounds_record_facts(base: *Expr@new, inits: ?*FieldInit@new, f: ?*BoundsState@new) raises Error, IndexOutOfBounds: ?*BoundsState@f {
     last_write: ?*FieldInit = null;

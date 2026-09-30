@@ -558,7 +558,8 @@ do_selfhost() {
   step 'compiler tests 3' run_compiler_tests l8c3
   step 'browse check' check_browse l8c3
   step 'compiler phases' print_compiler_phases
-  cp l8c3 l8
+  cp l8c3 "$BUILD/l8.next"
+  mv -f "$BUILD/l8.next" l8
 }
 
 confirm_promote() {

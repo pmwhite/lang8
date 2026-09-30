@@ -1,5 +1,7 @@
 tag compiler_internal;
 
+bounds_array_field_use: int = 0;
+
 // Explicit raises select the nearest matching handler. An unknown call may
 // throw any exception; notifying outer handlers too is conservative.
 bounds_exception(exn: ?*ExnDef, f: ?*BoundsState) noregion raises IndexOutOfBounds {
@@ -309,12 +311,12 @@ bounds_condition_facts(e: *Expr, yes: bool, f: ?*BoundsState@new) raises IndexOu
                 f = bounds_add_difference(f, k.lhs, k.rhs, false);
                 return bounds_add_difference(f, k.rhs, k.lhs, false)
             }
-            // A length is nonnegative, so a nonzero length is at least one.
+            // A nonnegative integer that is not zero is at least one.
             if (yes && k.op == BinOp.Ne || !yes && k.op == BinOp.Eq) {
-                if (bounds_num(k.lhs) == 0 && bounds_length_expr(k.rhs)) return bounds_add_order(f,
-                    new_num(0), k.rhs, true);
-                if (bounds_num(k.rhs) == 0 && bounds_length_expr(k.lhs)) return bounds_add_order(f,
-                    new_num(0), k.lhs, true)
+                if (bounds_num(k.lhs) == 0 && (bounds_length_expr(k.rhs) || bounds_nonnegative_term(f,
+                    k.rhs))) return bounds_add_order(f, new_num(0), k.rhs, true);
+                if (bounds_num(k.rhs) == 0 && (bounds_length_expr(k.lhs) || bounds_nonnegative_term(f,
+                    k.lhs))) return bounds_add_order(f, new_num(0), k.lhs, true)
             }
             f
         }
@@ -385,6 +387,8 @@ bounds_inits(inits: ?*FieldInit@new, f: ?*BoundsState@new) noregion raises Error
         member: ?*Member = q.member;
         if (value != null && member != null) bounds_require_type_invariant(member.ty,
             value, f);
+        if (value != null && member != null) bounds_require_array_fill(member, value,
+            f);
         q = q.next
     }
     f
@@ -430,7 +434,10 @@ bounds_expr_transfer(e: *Expr@new, f: ?*BoundsState@new) noregion raises Error, 
     n: *Expr = e;
     match n.kind {
         Index k -> {
+            saved_use: int = bounds_array_field_use;
+            if (bounds_array_field(k.lhs) != null) bounds_array_field_use = 1;
             f = bounds_expr(k.lhs, f);
+            bounds_array_field_use = saved_use;
             if (!bounds_reachable(f)) return f;
             f = bounds_expr(k.idx, f);
             if (!bounds_reachable(f)) return f;
@@ -453,6 +460,8 @@ bounds_expr_transfer(e: *Expr@new, f: ?*BoundsState@new) noregion raises Error, 
                     access = new BoundsAccess {
                         file: n.file,
                         pos: n.pos,
+                        array: k.lhs,
+                        index: k.idx,
                         checked: k.checked,
                         required: false,
                         next: bounds_accesses
@@ -463,8 +472,11 @@ bounds_expr_transfer(e: *Expr@new, f: ?*BoundsState@new) noregion raises Error, 
                 if (!proved) access.required = true;
                 if (k.checked) {
                     ed: *ExnDef = find_exn("IndexOutOfBounds") or error("missing IndexOutOfBounds exception");
-                    if (!exn_is_caught(ed) && !mark_raises_seen(ed)) error_at_file(n.file,
-                        n.pos, "checked array access requires raises IndexOutOfBounds or a matching with arm")
+                    if (current_fn == null) error_at_file(n.file, n.pos, "checked array access cannot appear in a global initializer");
+                    if (!exn_is_caught(ed) && !mark_raises_seen(ed)) {
+                        fn: *Function = current_fn or error("missing current function");
+                        fn.missing_checked_raises = true
+                    }
                 }
             }
             // On the normal successor the checked operands are in bounds.
@@ -486,6 +498,9 @@ bounds_expr_transfer(e: *Expr@new, f: ?*BoundsState@new) noregion raises Error, 
                     affine.base)) f = bounds_add_order(f, affine.base, bounds_length(k.lhs),
                     true)
             }
+            q: ?*ArrayInvariant = bounds_array_field(k.lhs);
+            if (q != null && bounds_term(n) && bounds_value_stable(k.idx)) f = bounds_condition(bounds_array_predicate(q,
+                n), true, f);
             f
         }
         Binary k -> bounds_expr(k.rhs, bounds_expr(k.lhs, f));
@@ -493,8 +508,22 @@ bounds_expr_transfer(e: *Expr@new, f: ?*BoundsState@new) noregion raises Error, 
             // Ordinary assignments evaluate the RHS before the LHS address.
             // Doing the same for aggregate literals is conservative.
             f = bounds_expr(k.rhs, f);
+            saved_assign_use: int = bounds_array_field_use;
+            if (bounds_array_field(k.lhs) != null) bounds_array_field_use = 1;
             f = bounds_expr(k.lhs, f);
+            bounds_array_field_use = saved_assign_use;
             if (!bounds_reachable(f)) return f;
+            match k.lhs.kind {
+                MemberAccess field -> {
+                    member: ?*Member = field.member;
+                    if (member != null) bounds_require_array_fill(member, k.rhs, f)
+                }
+                Index indexed -> {
+                    q: ?*ArrayInvariant = bounds_array_field(indexed.lhs);
+                    if (q != null) bounds_require_array_element(q, k.rhs, f)
+                }
+                _ -> { }
+            }
             v: ?*Obj = bounds_var(k.lhs);
             expected: ?*Type = k.lhs.ty;
             if (v != null) expected = v.ty;
@@ -586,7 +615,10 @@ bounds_expr_transfer(e: *Expr@new, f: ?*BoundsState@new) noregion raises Error, 
             bounds_meet(f, rhs2)
         }
         Funcall k -> {
+            saved_call_use: int = bounds_array_field_use;
+            if (streq(k.funcname, "len") && k.args != null && bounds_array_field(k.args) != null) bounds_array_field_use = 1;
             f = bounds_expr_list(k.args, bounds_expr(k.target, f));
+            bounds_array_field_use = saved_call_use;
             if (!bounds_reachable(f)) return f;
             if (streq(k.funcname, "len") || streq(k.funcname, "sizeof")) return f;
             callee: ?*Function = k.fn;
@@ -617,6 +649,10 @@ bounds_expr_transfer(e: *Expr@new, f: ?*BoundsState@new) noregion raises Error, 
         }
         Addr k -> {
             match k.lhs.kind {
+                Index indexed -> {
+                    if (bounds_array_field(indexed.lhs) != null) error_at_file(n.file,
+                        n.pos, "cannot take the address of an element in a forall array field")
+                }
                 MemberAccess field -> {
                     sd: ?*StructDef = bounds_record_def(field.lhs.ty);
                     if (sd != null) {
@@ -639,6 +675,9 @@ bounds_expr_transfer(e: *Expr@new, f: ?*BoundsState@new) noregion raises Error, 
         As k -> bounds_expr(k.lhs, f);
         Trunc k -> bounds_expr(k.lhs, f);
         MemberAccess k -> {
+            member: ?*Member = k.member;
+            if (member != null && member.quantified && bounds_array_field_use == 0) error_at_file(n.file,
+                n.pos, "forall array field cannot be aliased; use direct indexing or len");
             f = bounds_expr(k.lhs, f);
             if (!bounds_reachable(f)) return f;
             t: ?*Type = k.lhs.ty;
