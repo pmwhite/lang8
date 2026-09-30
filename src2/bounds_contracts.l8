@@ -418,6 +418,14 @@ bounds_clone_path(e: *Expr@new) raises IndexOutOfBounds: ?*Expr@new {
             copied.ty = e.ty;
             copied
         }
+        Index k -> {
+            lhs: ?*Expr = bounds_clone_path(k.lhs);
+            idx: ?*Expr = bounds_clone_path(k.idx);
+            if (lhs == null || idx == null) return null;
+            copied: *Expr = mk_expr(ExprKind.Index { lhs: lhs, idx: idx, checked: k.checked });
+            copied.ty = e.ty;
+            copied
+        }
         Funcall k -> {
             if (!streq(k.funcname, "len") || k.target != null) return null;
             arg: ?*Expr = k.args;
@@ -467,7 +475,14 @@ bounds_clone_argument(e: *Expr@new) raises IndexOutOfBounds: ?*Expr@new {
 
 bounds_rebind_term(e: *Expr@new, callee: *Function, args: ?*Expr@new) raises IndexOutOfBounds: ?*Expr@new {
     match e.kind {
-        Num k -> new_num(k.val);
+        Num _ -> bounds_clone_path(e);
+        Null -> new_null_expr();
+        VariantLit k -> {
+            if (k.inits != null) return null;
+            copied: *Expr = mk_expr(e.kind);
+            copied.ty = e.ty;
+            copied
+        }
         Binary k -> {
             if (k.op != BinOp.Add && k.op != BinOp.Sub) return null;
             // Preserve the remaining-length expression recognized by the
@@ -516,6 +531,14 @@ bounds_rebind_term(e: *Expr@new, callee: *Function, args: ?*Expr@new) raises Ind
             mapped.ty = e.ty;
             mapped
         }
+        Index k -> {
+            copied: ?*Expr = bounds_rebind_term(k.lhs, callee, args);
+            position: ?*Expr = bounds_rebind_term(k.idx, callee, args);
+            if (copied == null || position == null) return null;
+            mapped: *Expr = mk_expr(ExprKind.Index { lhs: copied, idx: position, checked: k.checked });
+            mapped.ty = e.ty;
+            mapped
+        }
         Funcall k -> {
             if (!streq(k.funcname, "len") || k.target != null) return null;
             a: ?*Expr = k.args;
@@ -536,6 +559,13 @@ bounds_precondition_path(e: *Expr, fn: *Function): bool {
             v != null && bounds_param(fn, v)
         }
         MemberAccess k -> bounds_precondition_path(k.lhs, fn);
+        Index k -> {
+            match k.idx.kind {
+                Num _ -> bounds_precondition_path(k.lhs, fn);
+                _ -> bounds_precondition_path(k.lhs, fn) && bounds_precondition_path(k.idx,
+                    fn)
+            }
+        }
         _ -> false
     }
 }
@@ -562,6 +592,7 @@ bounds_precondition_term(e: *Expr, fn: *Function) raises IndexOutOfBounds: bool 
             bounds_precondition_path(e, fn)
         }
         MemberAccess _ -> bounds_precondition_path(e, fn);
+        Index _ -> bounds_precondition_path(e, fn);
         Funcall k -> {
             if (!streq(k.funcname, "len") || k.target != null) return false;
             a: ?*Expr = k.args;
@@ -573,12 +604,50 @@ bounds_precondition_term(e: *Expr, fn: *Function) raises IndexOutOfBounds: bool 
     }
 }
 
+bounds_precondition_scalar_term(e: *Expr, fn: *Function) raises IndexOutOfBounds: bool {
+    if (!bounds_scalar_term(e)) return false;
+    match e.kind {
+        Null -> true;
+        VariantLit k -> k.inits == null;
+        Num _ -> true;
+        Var k -> {
+            v: ?*Obj = k.var;
+            v != null && (bounds_param(fn, v) || v.is_const && v.const_state == 2)
+        }
+        MemberAccess _ -> bounds_precondition_path(e, fn);
+        Index _ -> bounds_precondition_path(e, fn);
+        _ -> false
+    }
+}
+
+// An indexed contract fact is meaningful only on paths where its element
+// exists. Check that obligation using the same bounds prover as ordinary code.
+bounds_contract_indices_proved(e: *Expr, f: ?*BoundsState) raises IndexOutOfBounds: bool {
+    match e.kind {
+        Index k -> bounds_contract_indices_proved(k.lhs, f) && bounds_contract_indices_proved(k.idx,
+            f) && bounds_proves(k.lhs, k.idx, f);
+        Binary k -> bounds_contract_indices_proved(k.lhs, f) && bounds_contract_indices_proved(k.rhs,
+            f);
+        LogAnd k -> bounds_contract_indices_proved(k.lhs, f) && bounds_contract_indices_proved(k.rhs,
+            f);
+        MemberAccess k -> bounds_contract_indices_proved(k.lhs, f);
+        Funcall k -> {
+            a: ?*Expr = k.args;
+            a == null || bounds_contract_indices_proved(a, f)
+        }
+        _ -> true
+    }
+}
+
 bounds_precondition_valid(e: *Expr, fn: *Function) raises IndexOutOfBounds: bool {
     match e.kind {
         LogAnd k -> bounds_precondition_valid(k.lhs, fn) && bounds_precondition_valid(k.rhs,
             fn);
         Binary k -> {
-            if (k.op != BinOp.Lt && k.op != BinOp.Le && k.op != BinOp.Gt && k.op != BinOp.Ge && k.op != BinOp.Eq) return false;
+            if (k.op == BinOp.Eq || k.op == BinOp.Ne) return bounds_precondition_scalar_term(k.lhs,
+                fn) && bounds_precondition_scalar_term(k.rhs, fn) || bounds_precondition_term(k.lhs,
+                fn) && bounds_precondition_term(k.rhs, fn);
+            if (k.op != BinOp.Lt && k.op != BinOp.Le && k.op != BinOp.Gt && k.op != BinOp.Ge) return false;
             bounds_precondition_term(k.lhs, fn) && bounds_precondition_term(k.rhs,
                 fn)
         }
@@ -969,6 +1038,8 @@ bounds_check_call(
     if (precondition != null) {
         mapped: ?*Expr = bounds_rebind_precondition(precondition, fn, args);
         if (mapped == null) error_at_file(file, pos, "function precondition requires stable argument paths");
+        if (!bounds_infer_mode && !bounds_contract_indices_proved(mapped, f)) error_at_file(file,
+            pos, "function precondition has an unproved array access");
         if (bounds_infer_mode) bounds_infer_precondition(mapped, f) else if (!bounds_precondition_proved(mapped,
             f)) error_at_file(file, pos, "call does not prove function precondition")
     }

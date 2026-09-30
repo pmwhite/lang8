@@ -226,6 +226,8 @@ bounds_effect_preserves_term(fn: *Function, e: *Expr) raises IndexOutOfBounds: b
             bounds_effect_preserves_term(fn, k.lhs)
         }
         Deref k -> !fn.bounds_unknown_write && bounds_effect_preserves_term(fn, k.lhs);
+        Index k -> !fn.bounds_unknown_write && !fn.bounds_element_write && bounds_effect_preserves_term(fn,
+            k.lhs) && bounds_effect_preserves_term(fn, k.idx);
         Funcall k -> {
             if (!streq(k.funcname, "len")) return false;
             a: ?*Expr = k.args;
@@ -543,6 +545,10 @@ bounds_term_has_member(e: *Expr, member: *Member): bool {
     match e.kind {
         MemberAccess k -> k.member == member || bounds_term_has_member(k.lhs, member);
         Deref k -> bounds_term_has_member(k.lhs, member);
+        Index k -> bounds_term_has_member(k.lhs, member) || bounds_term_has_member(k.idx,
+            member);
+        Binary k -> bounds_term_has_member(k.lhs, member) || bounds_term_has_member(k.rhs,
+            member);
         Funcall k -> {
             a: ?*Expr = k.args;
             if (a == null) return false;
@@ -550,6 +556,51 @@ bounds_term_has_member(e: *Expr, member: *Member): bool {
         }
         _ -> false
     }
+}
+
+// Any element store can alias an indexed value, even through another slice.
+// Keep length and scalar facts while discarding all element-value facts.
+bounds_term_has_index(e: *Expr): bool {
+    match e.kind {
+        Index _ -> true;
+        MemberAccess k -> bounds_term_has_index(k.lhs);
+        Deref k -> bounds_term_has_index(k.lhs);
+        Funcall k -> {
+            arg: ?*Expr = k.args;
+            arg != null && bounds_term_has_index(arg)
+        }
+        Binary k -> bounds_term_has_index(k.lhs) || bounds_term_has_index(k.rhs);
+        Neg k -> bounds_term_has_index(k.lhs);
+        _ -> false
+    }
+}
+
+bounds_kill_elements(f: ?*BoundsState@new) raises IndexOutOfBounds: ?*BoundsState@new {
+    if (!bounds_reachable(f)) return f;
+    if (f == null) return f;
+    found: bool = false;
+    scan: int = 0;
+    while (scan < bounds_count(f) && !found) {
+        row: ?*BoundsRow = bounds_row(f, scan);
+        if (row != null) {
+            left: ?*Expr = row.left;
+            right: ?*Expr = row.right;
+            if (left != null && bounds_term_has_index(left) || right != null && bounds_term_has_index(right)) found = true
+        }
+        scan = scan + 1
+    }
+    if (!found && f.implications == null) return f;
+    head: ?*BoundsState = bounds_empty(f);
+    for position in 0..bounds_count(f) {
+        row: ?*BoundsRow = bounds_row(f, position);
+        if (row != null) {
+            left: ?*Expr = row.left;
+            right: ?*Expr = row.right;
+            if ((left == null || !bounds_term_has_index(left)) && (right == null || !bounds_term_has_index(right))) head = bounds_filter_copy(head,
+                f, row, position)
+        }
+    }
+    head
 }
 
 bounds_term_has_any_member(e: *Expr): bool {
@@ -631,6 +682,30 @@ bounds_sum_uses(row: *BoundsRow, v: *Obj): bool {
     bounds_term_root(limit) == v
 }
 
+bounds_index_depends(e: *Expr, v: *Obj): bool {
+    match e.kind {
+        Index k -> bounds_term_root(k.idx) == v || bounds_index_depends(k.idx, v) || bounds_index_depends(k.lhs,
+            v);
+        MemberAccess k -> bounds_index_depends(k.lhs, v);
+        Deref k -> bounds_index_depends(k.lhs, v);
+        Funcall k -> {
+            a: ?*Expr = k.args;
+            a != null && bounds_index_depends(a, v)
+        }
+        Binary k -> bounds_index_depends(k.lhs, v) || bounds_index_depends(k.rhs,
+            v);
+        Neg k -> bounds_index_depends(k.lhs, v);
+        _ -> false
+    }
+}
+
+bounds_row_index_depends(row: *BoundsRow, v: *Obj): bool {
+    left: ?*Expr = row.left;
+    right: ?*Expr = row.right;
+    left != null && bounds_index_depends(left, v) || right != null && bounds_index_depends(right,
+        v)
+}
+
 bounds_kill(f: ?*BoundsState@new, v: *Obj) raises IndexOutOfBounds: ?*BoundsState@new {
     if (!bounds_reachable(f)) return f;
     // Assigning a value absent from the state leaves the snapshot intact.
@@ -639,7 +714,8 @@ bounds_kill(f: ?*BoundsState@new, v: *Obj) raises IndexOutOfBounds: ?*BoundsStat
     scan: ?*BoundsRow = bounds_row(f, scan_position);
     found: bool = false;
     while (scan != null && !found) {
-        if (scan.index == v || scan.array == v || bounds_sum_uses(scan, v)) found = true;
+        if (scan.index == v || scan.array == v || bounds_sum_uses(scan, v) || bounds_row_index_depends(scan,
+            v)) found = true;
         scan_position = scan_position - 1;
         scan = bounds_row(f, scan_position)
     }
@@ -659,8 +735,8 @@ bounds_kill(f: ?*BoundsState@new, v: *Obj) raises IndexOutOfBounds: ?*BoundsStat
     q_position: int = 0;
     q: ?*BoundsRow = bounds_row(f, q_position);
     while (q != null) {
-        if (q.index != v && q.array != v && !bounds_sum_uses(q, v)) head = bounds_filter_copy(head,
-            f, q, q_position);
+        if (q.index != v && q.array != v && !bounds_sum_uses(q, v) && !bounds_row_index_depends(q,
+            v)) head = bounds_filter_copy(head, f, q, q_position);
         q_position = q_position + 1;
         q = bounds_row(f, q_position)
     }
@@ -900,6 +976,10 @@ bounds_member_write_preserves(
             bounds_member_write_preserves(k.lhs, member, owner, f)
         }
         Deref k -> bounds_member_write_preserves(k.lhs, member, owner, f);
+        Index k -> bounds_member_write_preserves(k.lhs, member, owner, f) && bounds_member_write_preserves(k.idx,
+            member, owner, f);
+        Binary k -> bounds_member_write_preserves(k.lhs, member, owner, f) && bounds_member_write_preserves(k.rhs,
+            member, owner, f);
         Funcall k -> {
             arg: ?*Expr = k.args;
             arg != null && bounds_member_write_preserves(arg, member, owner, f)

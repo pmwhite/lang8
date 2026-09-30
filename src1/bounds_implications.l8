@@ -277,29 +277,29 @@ bounds_ensure_source_term(e: *Expr, fn: *Function) raises IndexOutOfBounds: bool
             v: ?*Obj = k.var;
             v != null && (v == fn.bounds_result || bounds_param(fn, v) || v.is_const && v.const_state == 2 && is_int_ty(v.ty))
         }
-        MemberAccess k -> {
-            match k.lhs.kind {
-                Var root -> root.var == fn.bounds_result;
-                _ -> false
-            }
-        }
+        MemberAccess k -> bounds_ensure_source_term(k.lhs, fn);
+        Index k -> bounds_ensure_source_term(k.lhs, fn) && bounds_ensure_source_term(k.idx,
+            fn);
         Funcall k -> {
             if (!streq(k.funcname, "len") || k.target != null) return false;
             arg: ?*Expr = k.args;
             if (arg == null) return false;
             if (arg.next != null) return false;
-            match arg.kind {
-                Var _ -> bounds_ensure_source_term(arg, fn);
-                _ -> false
-            }
+            bounds_term(arg) && bounds_ensure_source_term(arg, fn)
         }
         Binary k -> {
-            if (k.op != BinOp.Sub) return false;
-            match k.lhs.kind {
-                Funcall length_call -> streq(length_call.funcname, "len") && length_call.target == null && bounds_ensure_source_term(k.lhs,
-                    fn) && bounds_ensure_source_term(k.rhs, fn);
-                _ -> false
+            if (k.op != BinOp.Add && k.op != BinOp.Sub) return false;
+            if (k.op == BinOp.Sub) {
+                match k.lhs.kind {
+                    Funcall length_call -> {
+                        if (streq(length_call.funcname, "len") && length_call.target == null && bounds_ensure_source_term(k.lhs,
+                            fn) && bounds_ensure_source_term(k.rhs, fn)) return true
+                    }
+                    _ -> { }
+                }
             }
+            c: int = bounds_num(k.rhs);
+            c >= 0 && c < 536870912 && bounds_ensure_source_term(k.lhs, fn)
         }
         _ -> false
     }
@@ -365,6 +365,15 @@ bounds_ensure_map_term(
             member.ty = e.ty;
             member
         }
+        Index k -> {
+            base: ?*Expr = bounds_ensure_map_term(fn, k.lhs, args, destination, at_call);
+            position: ?*Expr = bounds_ensure_map_term(fn, k.idx, args, destination,
+                at_call);
+            if (base == null || position == null) return null;
+            element: *Expr = mk_expr(ExprKind.Index { lhs: base, idx: position, checked: k.checked });
+            element.ty = e.ty;
+            element
+        }
         Num _ -> bounds_clone_path(e);
         Null -> new_null_expr();
         VariantLit k -> {
@@ -383,17 +392,29 @@ bounds_ensure_map_term(
             bounds_len_term(mapped)
         }
         Binary k -> {
-            if (k.op != BinOp.Sub) return null;
-            match k.lhs.kind {
-                Funcall length_call -> {
-                    if (!streq(length_call.funcname, "len") || length_call.target != null) return null
+            if (k.op != BinOp.Add && k.op != BinOp.Sub) return null;
+            if (k.op == BinOp.Sub) {
+                match k.lhs.kind {
+                    Funcall length_call -> {
+                        if (streq(length_call.funcname, "len") && length_call.target == null) {
+                            lhs: ?*Expr = bounds_ensure_map_term(fn, k.lhs, args,
+                                destination, at_call);
+                            rhs: ?*Expr = bounds_ensure_map_term(fn, k.rhs, args,
+                                destination, at_call);
+                            if (lhs == null || rhs == null) return null;
+                            mapped_span: *Expr = new_binary(BinOp.Sub, lhs, rhs);
+                            mapped_span.ty = e.ty;
+                            return mapped_span
+                        }
+                    }
+                    _ -> { }
                 }
-                _ -> return null
             }
-            lhs: ?*Expr = bounds_ensure_map_term(fn, k.lhs, args, destination, at_call);
-            rhs: ?*Expr = bounds_ensure_map_term(fn, k.rhs, args, destination, at_call);
-            if (lhs == null || rhs == null) return null;
-            mapped: *Expr = new_binary(BinOp.Sub, lhs, rhs);
+            c: int = bounds_num(k.rhs);
+            if (c < 0 || c >= 536870912) return null;
+            lhs2: ?*Expr = bounds_ensure_map_term(fn, k.lhs, args, destination, at_call);
+            if (lhs2 == null) return null;
+            mapped: *Expr = new_binary(k.op, lhs2, new_num(c));
             mapped.ty = e.ty;
             mapped
         }
@@ -461,6 +482,8 @@ bounds_check_ensures(fn: *Function@new, value: ?*Expr@new, f: ?*BoundsState@new)
         if (bounds_scalar_constant(value)) f = bounds_add_scalar_relation(f, result,
             value, BoundsKind.Equal)
     }
+    if (!bounds_contract_indices_proved(guarantee, f)) error_at_file(guarantee.file,
+        guarantee.pos, "function guarantee has an unproved array access");
     mapped: ?*Expr = bounds_ensure_map(fn, guarantee, null, result, false);
     if (mapped == null) error_at_file(guarantee.file, guarantee.pos, "function guarantee needs stable parameter values");
     if (!bounds_precondition_proved(mapped, f)) {
