@@ -402,6 +402,13 @@ bounds_local_stable_stmt(s: *Stmt, local: *Obj): bool {
 
 // Visit syntax once. Subsequent propagation processes only call sites whose
 // callee summary changed, including recursive cycles.
+bounds_effect_enqueue(work: *BoundsEffectQueue, fn: *Function@work) {
+    fn.bounds_effect_queue_next = null;
+    tail: ?*Function = work.tail;
+    if (tail == null) work.head = fn else tail.bounds_effect_queue_next = fn;
+    work.tail = fn
+}
+
 bounds_infer_effects() raises IndexOutOfBounds {
     count: int = 0;
     fn: ?*Function = functions;
@@ -412,6 +419,7 @@ bounds_infer_effects() raises IndexOutOfBounds {
         // The SCC numbering is assigned later; borrow its slot for dense IDs.
         fn.bounds_visit = count;
         fn.bounds_effect_queued = true;
+        fn.bounds_effect_queue_next = null;
         fn.bounds_effect_head = null;
         count = count + 1;
         fn = fn.next
@@ -421,19 +429,19 @@ bounds_infer_effects() raises IndexOutOfBounds {
     while (write_capacity < count * 8) write_capacity = write_capacity * 2;
     if (write_capacity <= 0) raise IndexOutOfBounds;
     sites: *BoundsEffectSites = new BoundsEffectSites { write_buckets: new ?*BoundsWrite[write_capacity](null) };
-    queue: []?*Function = new ?*Function[count + 1](null);
+    work: *BoundsEffectQueue = new BoundsEffectQueue { head: null, tail: null };
     fn = functions;
     while (fn != null) {
         if (!fn.is_extern) _changed: bool = bounds_effect_stmts(sites, fn, fn.body);
-        queue![fn.bounds_visit] = fn;
+        bounds_effect_enqueue(work, fn);
         fn = fn.next
     }
-    work: *BoundsEffectQueue = new BoundsEffectQueue { items: queue, read: 0, write: count };
-    while (work.read != work.write) {
-        callee: ?*Function = work.items[work.read];
-        next_read: int = work.read + 1;
-        if (next_read < len(work.items)) work.read = next_read else work.read = 0;
+    while (work.head != null) {
+        callee: ?*Function = work.head;
         if (callee != null) {
+            work.head = callee.bounds_effect_queue_next;
+            if (work.head == null) work.tail = null;
+            callee.bounds_effect_queue_next = null;
             callee.bounds_effect_queued = false;
             site: ?*BoundsEffectSite = callee.bounds_effect_head;
             while (site != null) {
@@ -442,9 +450,7 @@ bounds_infer_effects() raises IndexOutOfBounds {
                     changed: bool = bounds_effect_transfer(sites, caller, callee,
                         site.args);
                     if (changed && !caller.bounds_effect_queued) {
-                        work.items[work.write] = caller;
-                        next_write: int = work.write + 1;
-                        if (next_write < len(work.items)) work.write = next_write else work.write = 0;
+                        bounds_effect_enqueue(work, caller);
                         caller.bounds_effect_queued = true
                     }
                 }
