@@ -50,6 +50,9 @@ fixed-capacity boundaries prevent real failures.
   hash slots instead of integer slot positions. The verifier checks each
   pointer when the slot is occupied; clearing it needs no index check. A loop
   invariant preserves the table lengths while both arrays are reset.
+- [x] `src2/bounds_solver.l8`, adjacency traversal: store pointers to edge
+  records in the graph heads and links. Appending an edge proves its address
+  once; searches no longer need to validate integer adjacency links.
 
 - [x] `src2/assembler.l8`, `as_wr_le`: removed its runtime guard and
   gave the generic byte writer and fixed-width wrappers span requirements.
