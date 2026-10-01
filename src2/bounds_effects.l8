@@ -6,11 +6,11 @@ bounds_effect_add(
     fn: *Function@new,
     member: *Member@new,
     root_param: ?*Obj@new
-) raises IndexOutOfBounds: bool {
+): bool {
     root_id: int = if (root_param == null) 0 else root_param.browse_id;
     hash: int = fn.browse_id * 65599 + member.browse_id * 33 + root_id;
     slot: int = hash & len(sites.write_buckets) - 1;
-    q: ?*BoundsWrite = sites.write_buckets![slot];
+    q: ?*BoundsWrite = sites.write_buckets[slot];
     while (q != null) {
         if (q.owner == fn && q.member == member && q.root_param == root_param) return false;
         q = q.hash_next
@@ -98,7 +98,7 @@ bounds_effect_expr(sites: *BoundsEffectSites@new, fn: *Function@new, e: ?*Expr) 
             if (streq(k.funcname, "len") || streq(k.funcname, "sizeof")) return changed;
             callee: ?*Function = k.fn;
             if (callee == null) return bounds_effect_unknown(fn);
-            bounds_effect_site(sites, fn, callee, k.args);
+            bounds_effect_site(fn, callee, k.args);
             changed
         }
         Binary k -> bounds_effect_two(sites, fn, k.lhs, k.rhs);
@@ -262,8 +262,9 @@ bounds_field_safe_expr(e: ?*Expr, root: *Obj, member: *Member) raises IndexOutOf
                     root, member);
                 Index x -> {
                     t: ?*Type = k.lhs.ty;
-                    (is_int_width_ty(t) || is_float_ty(t) || is_bool_ty(t)) && bounds_field_array(x.lhs,
-                        root, member) && bounds_field_safe_expr(x.idx, root, member) && bounds_field_safe_expr(k.rhs,
+                    (is_int_width_ty(t) || is_float_ty(t) || is_bool_ty(t)) && (bounds_field_array(x.lhs,
+                        root, member) || bounds_direct_value_member(root, member) && bounds_field_safe_expr(x.lhs,
+                        root, member)) && bounds_field_safe_expr(x.idx, root, member) && bounds_field_safe_expr(k.rhs,
                         root, member)
                 }
                 _ -> false
@@ -410,88 +411,63 @@ bounds_infer_effects() raises IndexOutOfBounds {
         fn.bounds_unknown_write = fn.is_extern || fn.body == null;
         // The SCC numbering is assigned later; borrow its slot for dense IDs.
         fn.bounds_visit = count;
+        fn.bounds_effect_queued = true;
+        fn.bounds_effect_head = null;
         count = count + 1;
         fn = fn.next
     }
+    if (count < 0) raise IndexOutOfBounds;
     write_capacity: int = 16;
     while (write_capacity < count * 8) write_capacity = write_capacity * 2;
-    empty: BoundsEffectSite = BoundsEffectSite {
-        caller: null,
-        callee: null,
-        args: null,
-        next: -1
-    };
-    sites: *BoundsEffectSites = new BoundsEffectSites {
-        rows: new BoundsEffectSite[64](empty),
-        count: 0,
-        heads: new int[count](-1),
-        write_buckets: new ?*BoundsWrite[write_capacity](null)
-    };
+    if (write_capacity <= 0) raise IndexOutOfBounds;
+    sites: *BoundsEffectSites = new BoundsEffectSites { write_buckets: new ?*BoundsWrite[write_capacity](null) };
     queue: []?*Function = new ?*Function[count + 1](null);
-    queued: []bool = new bool[count](true);
     fn = functions;
     while (fn != null) {
         if (!fn.is_extern) _changed: bool = bounds_effect_stmts(sites, fn, fn.body);
         queue![fn.bounds_visit] = fn;
         fn = fn.next
     }
-    read: int = 0;
-    write: int = count;
-    while (read != write) {
-        callee: ?*Function = queue![read];
-        read = read + 1;
-        if (read == len(queue)) read = 0;
+    work: *BoundsEffectQueue = new BoundsEffectQueue { items: queue, read: 0, write: count };
+    while (work.read != work.write) {
+        callee: ?*Function = work.items[work.read];
+        next_read: int = work.read + 1;
+        if (next_read < len(work.items)) work.read = next_read else work.read = 0;
         if (callee != null) {
-            queued![callee.bounds_visit] = false;
-            site_id: int = sites.heads[callee.bounds_visit];
-            while (site_id >= 0) {
-                site: *BoundsEffectSite = &sites.rows![site_id];
+            callee.bounds_effect_queued = false;
+            site: ?*BoundsEffectSite = callee.bounds_effect_head;
+            while (site != null) {
                 caller: ?*Function = site.caller;
                 if (caller != null) {
                     changed: bool = bounds_effect_transfer(sites, caller, callee,
                         site.args);
-                    if (changed && !queued![caller.bounds_visit]) {
-                        queue![write] = caller;
-                        write = write + 1;
-                        if (write == len(queue)) write = 0;
-                        queued![caller.bounds_visit] = true
+                    if (changed && !caller.bounds_effect_queued) {
+                        work.items[work.write] = caller;
+                        next_write: int = work.write + 1;
+                        if (next_write < len(work.items)) work.write = next_write else work.write = 0;
+                        caller.bounds_effect_queued = true
                     }
                 }
-                site_id = site.next
+                site = site.next
             }
         }
     }
     fn = functions;
     while (fn != null) {
         fn.bounds_visit = 0;
+        fn.bounds_effect_queued = false;
         fn = fn.next
     }
 }
 
-bounds_effect_site(
-    sites: *BoundsEffectSites@new,
-    caller: *Function,
-    callee: *Function,
-    args: ?*Expr
-) raises IndexOutOfBounds {
-    row: BoundsEffectSite = BoundsEffectSite {
+bounds_effect_site(caller: *Function@new, callee: *Function@new, args: ?*Expr@new) {
+    row: *BoundsEffectSite = new BoundsEffectSite {
         caller: caller,
         callee: callee,
         args: args,
-        next: sites.heads![callee.bounds_visit]
+        next: callee.bounds_effect_head
     };
-    bounds_effect_append(sites, row, callee.bounds_visit)
-}
-
-bounds_effect_append(sites: *BoundsEffectSites@new, row: BoundsEffectSite@new, callee_id: int) raises IndexOutOfBounds {
-    if (sites.count == len(sites.rows)) {
-        rows: []BoundsEffectSite = new BoundsEffectSite[sites.count * 2](row);
-        for i in 0..sites.count rows![i] = sites.rows![i];
-        sites.rows = rows
-    }
-    sites.rows![sites.count] = row;
-    sites.heads![callee_id] = sites.count;
-    sites.count = sites.count + 1
+    callee.bounds_effect_head = row
 }
 
 bounds_effect_transfer(
@@ -499,7 +475,7 @@ bounds_effect_transfer(
     caller: *Function@new,
     callee: *Function@new,
     args: ?*Expr
-) raises IndexOutOfBounds: bool {
+): bool {
     changed: bool = false;
     if (callee.bounds_unknown_write && bounds_effect_unknown(caller)) changed = true;
     if (callee.bounds_element_write && !caller.bounds_element_write) {
@@ -636,7 +612,7 @@ bounds_term_has_any_member(e: *Expr): bool {
     }
 }
 
-bounds_simple_term_on_root(e: *Expr, root: *Obj) raises IndexOutOfBounds: bool {
+bounds_simple_term_on_root(e: *Expr, root: *Obj): bool {
     match e.kind {
         Num _ -> true;
         Var _ -> true;
@@ -654,7 +630,7 @@ bounds_simple_term_on_root(e: *Expr, root: *Obj) raises IndexOutOfBounds: bool {
     }
 }
 
-bounds_simple_relation_root(q: *BoundsRow) raises IndexOutOfBounds: int {
+bounds_simple_relation_root(q: *BoundsRow): int {
     if (q.kind != BoundsKind.Difference) return -1;
     root: ?*Obj = q.array;
     if (root == null || q.index != root) return -1;
@@ -680,6 +656,24 @@ bounds_field_array(a: *Expr, root: *Obj, member: *Member): bool {
         Deref k -> bounds_field_array(k.lhs, root, member);
         _ -> false
     }
+}
+
+// A scalar field of an unaliased value record cannot change when a separate
+// array element is written. This also keeps loop range bounds on such fields.
+bounds_direct_value_member(root: *Obj, member: *Member): bool {
+    if (!root.is_local || root.bounds_addr_taken) return false;
+    ty: ?*Type = root.ty;
+    if (ty == null) return false;
+    field: ?*Member = null;
+    match ty.* {
+        Record k -> field = k.def.members;
+        _ -> return false
+    }
+    while (field != null) {
+        if (field == member) return true;
+        field = field.next
+    }
+    false
 }
 
 // A field path stays stable through a loop only if each member in the path
@@ -819,20 +813,43 @@ bounds_kill_record_fields(f: ?*BoundsState@new) raises IndexOutOfBounds: ?*Bound
     head
 }
 
-bounds_flat_record(sd: *StructDef): bool {
+bounds_shallow_record(sd: *StructDef) raises Error: bool {
     m: ?*Member = sd.members;
     while (m != null) {
-        if (!is_int_width_ty(m.ty) && !is_float_ty(m.ty) && !is_bool_ty(m.ty)) return false;
+        if (!is_int_width_ty(m.ty) && !is_float_ty(m.ty) && !is_bool_ty(m.ty) && !is_pointer(m.ty) && !is_opt_pointer(m.ty)) {
+            if (is_struct_ty(m.ty)) {
+                if (!bounds_shallow_record(type_struct_def(m.ty))) return false
+            } else {
+                if (!is_enum_ty(m.ty)) return false;
+                ed: *EnumDef = type_enum_def(m.ty);
+                variant: ?*Variant = ed.variants;
+                while (variant != null) {
+                    if (variant.fields != null || variant.payload_ty != null) return false;
+                    variant = variant.next
+                }
+            }
+        }
         m = m.next
     }
     true
+}
+
+bounds_shallow_record_contains(sd: *StructDef, owner: *StructDef) raises Error: bool {
+    if (sd == owner) return true;
+    m: ?*Member = sd.members;
+    while (m != null) {
+        if (is_struct_ty(m.ty) && bounds_shallow_record_contains(type_struct_def(m.ty),
+            owner)) return true;
+        m = m.next
+    }
+    false
 }
 
 bounds_term_has_record_member(e: *Expr, sd: *StructDef) raises Error: bool {
     match e.kind {
         MemberAccess k -> {
             owner: ?*StructDef = bounds_record_def(k.lhs.ty);
-            if (owner == sd) return true;
+            if (owner != null && bounds_shallow_record_contains(sd, owner)) return true;
             bounds_term_has_record_member(k.lhs, sd)
         }
         Deref k -> bounds_term_has_record_member(k.lhs, sd);
@@ -844,9 +861,10 @@ bounds_term_has_record_member(e: *Expr, sd: *StructDef) raises Error: bool {
     }
 }
 
-// A write to one flat record element can change fields of that record type,
-// but it cannot change the containing array's length or sibling record fields.
-bounds_kill_flat_record_fields(f: ?*BoundsState@new, sd: *StructDef) raises Error, IndexOutOfBounds: ?*BoundsState@new {
+// A shallow record contains no embedded aggregate whose field could be reached
+// through an alias. Replacing its element changes paths through that record
+// type, but not fields of unrelated records or containing array lengths.
+bounds_kill_shallow_record_fields(f: ?*BoundsState@new, sd: *StructDef) raises Error, IndexOutOfBounds: ?*BoundsState@new {
     if (!bounds_reachable(f)) return f;
     head: ?*BoundsState = bounds_empty(f);
     q_position: int = 0;

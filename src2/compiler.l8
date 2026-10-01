@@ -634,6 +634,8 @@ type Function = {
     bounds_precondition: ?*Expr;
     bounds_ensures: ?*Expr;
     bounds_visit: int;
+    bounds_effect_queued: bool;
+    bounds_effect_head: ?*BoundsEffectSite;
     bounds_lowlink: int;
     bounds_on_stack: bool;
     next: ?*Function;
@@ -724,6 +726,10 @@ type InternEnt = {
 type InternBucket = {
     head: ?*InternEnt
 }
+
+type InternTable = {
+    buckets: []InternBucket
+} invariant (len(buckets) == 4096)
 
 type TyEnt = {
     base: *Type;
@@ -844,7 +850,7 @@ LIFE_HEAPTOP: int = 1;
 
 LIFE_SELF: int = 2;
 
-LIFE_MAX: int = 256;
+const LIFE_MAX: int = 256;
 
 LIFE_KIND_PARAM: int = 3;
 
@@ -922,7 +928,7 @@ symbol_buckets: SymbolBuckets = SymbolBuckets {
     exceptions: new ExnBucket[1024](ExnBucket { head: null })
 };
 
-intern_buckets: []InternBucket = new InternBucket[0](InternBucket { head: null });
+intern_table: InternTable = InternTable { buckets: new InternBucket[4096](InternBucket { head: null }) };
 
 ptr_cache: ?*TyEnt = null;
 
@@ -1042,20 +1048,21 @@ streq_n(
     b: []i8,
     bi: int,
     n: int
-) raises IndexOutOfBounds: bool {
+): bool {
+    if (ai < 0 || bi < 0 || n < 0 || ai > len(a) || bi > len(b) || n > len(a) - ai || n > len(b) - bi) return false;
     for i in 0..n {
-        if (a![ai + i] != b![bi + i]) return false
+        if (a[ai + i] != b[bi + i]) return false
     }
     true
 }
 
-streq(a: []i8, b: []i8) raises IndexOutOfBounds: bool {
+streq(a: []i8, b: []i8): bool {
     if (a == b) return true;
     if (len(a) != len(b)) return false;
     streq_n(a, 0, b, 0, len(a))
 }
 
-add_need(name: []i8@new) noregion raises IndexOutOfBounds {
+add_need(name: []i8@new) noregion {
     p: ?*NeedLib = g_need;
     while (p != null) {
         if (streq(p.name, name)) return;
@@ -1067,7 +1074,7 @@ add_need(name: []i8@new) noregion raises IndexOutOfBounds {
     g_need_tail = n
 }
 
-add_native(path: []i8@new) noregion raises IndexOutOfBounds {
+add_native(path: []i8@new) noregion {
     p: ?*NeedLib = g_native;
     while (p != null) {
         if (streq(p.name, path)) return;
@@ -1084,13 +1091,14 @@ name_eq_span(
     s: []i8,
     off: int,
     n: int
-) raises IndexOutOfBounds: bool {
+): bool {
     if (len(name) != n) false else streq_n(name, 0, s, off, n)
 }
 
-hash_n(s: []i8, off: int, n: int) raises IndexOutOfBounds: int {
+hash_n(s: []i8, off: int, n: int): int {
+    if (off < 0 || n < 0 || off > len(s) || n > len(s) - off) return 0;
     h: int = 5381;
-    for i in 0..n h = (h << 5) + h + s![off + i] as int;
+    for i in 0..n h = (h << 5) + h + s[off + i] as int;
     h
 }
 
@@ -1147,34 +1155,16 @@ emit_ch(c: i8) raises IndexOutOfBounds {
     emit_len = emit_len + 1
 }
 
+emit_digits(n: int) raises IndexOutOfBounds {
+    if (n <= -10 || n >= 10) emit_digits(n / 10);
+    digit: int = n % 10;
+    if (digit < 0) digit = 0 - digit;
+    emit_ch(('0' as int + digit) trunc i8)
+}
+
 emit_num(n: int) raises IndexOutOfBounds {
-    buf: []i8 = new i8[32](0i8);
-    neg: int = 0;
-    if (n < 0) {
-        neg = 1;
-        n = 0 - n
-    }
-    if (n == 0) {
-        emit_ch('0');
-        return
-    }
-    i: int = 0;
-    while (n > 0) {
-        buf![i] = '0' + (n % 10) trunc i8;
-        n = n / 10;
-        i = i + 1
-    }
-    need: int = i + neg;
-    if (emit_len + need > emit_cap) emit_flush();
-    if (neg != 0) {
-        emit_buf![emit_len] = '-';
-        emit_len = emit_len + 1
-    }
-    while (i > 0) {
-        i = i - 1;
-        emit_buf![emit_len] = buf![i];
-        emit_len = emit_len + 1
-    }
+    if (n < 0) emit_ch('-');
+    emit_digits(n)
 }
 
 error(msg: []i8@immortal) raises Error: noreturn {
@@ -1218,12 +1208,12 @@ print_error_at(
     src_len: int,
     pos: int,
     msg: []i8
-) raises IndexOutOfBounds {
+) {
     line: int = 1;
     col: int = 1;
     i: int = 0;
-    while (i < pos && i < src_len) {
-        if (src![i] == '\n') {
+    while (i < pos && i < src_len && i < len(src)) invariant (0 <= i) {
+        if (src[i] == '\n') {
             line = line + 1;
             col = 1
         } else col = col + 1;
@@ -1246,12 +1236,12 @@ print_warning_at(
     src_len: int,
     pos: int,
     msg: []i8
-) raises IndexOutOfBounds {
+) {
     line: int = 1;
     col: int = 1;
     i: int = 0;
-    while (i < pos && i < src_len) {
-        if (src![i] == '\n') {
+    while (i < pos && i < src_len && i < len(src)) invariant (0 <= i) {
+        if (src[i] == '\n') {
             line = line + 1;
             col = 1
         } else col = col + 1;
@@ -1268,7 +1258,7 @@ print_warning_at(
     raw::raw_write(2, "\n")
 }
 
-warning_at(file: int, pos: int, msg: []i8) raises IndexOutOfBounds {
+warning_at(file: int, pos: int, msg: []i8) {
     f: ?*ImportedFile = imported_files;
     while (f != null) {
         if (f.id == file) {
@@ -1286,7 +1276,7 @@ warn_unused_function(
     src_len: int,
     pos: int,
     name: []i8
-) raises IndexOutOfBounds {
+) {
     sb: *StrBuf = sb_new();
     sb_puts(sb, "unused function ");
     sb_puts(sb, name);
@@ -1298,7 +1288,7 @@ warn_unused_local(
     pos: int,
     fn_name: []i8,
     name: []i8
-) raises IndexOutOfBounds {
+) {
     sb: *StrBuf = sb_new();
     sb_puts(sb, "unused local ");
     sb_puts(sb, name);
@@ -1307,14 +1297,14 @@ warn_unused_local(
     warning_at(file, pos, sb_finish(sb))
 }
 
-warn_unnecessary_return(file: int, pos: int, fn_name: []i8) raises IndexOutOfBounds {
+warn_unnecessary_return(file: int, pos: int, fn_name: []i8) {
     sb: *StrBuf = sb_new();
     sb_puts(sb, "unnecessary return in ");
     sb_puts(sb, fn_name);
     warning_at(file, pos, sb_finish(sb))
 }
 
-warn_ignored_value(file: int, pos: int, fn_name: []i8) raises IndexOutOfBounds {
+warn_ignored_value(file: int, pos: int, fn_name: []i8) {
     sb: *StrBuf = sb_new();
     sb_puts(sb, "ignored return value in ");
     sb_puts(sb, fn_name);
@@ -1733,7 +1723,7 @@ init_runtime() noregion {
         enums: new EnumBucket[1024](EnumBucket { head: null }),
         exceptions: new ExnBucket[1024](ExnBucket { head: null })
     };
-    intern_buckets = new InternBucket[4096](InternBucket { head: null });
+    for i in 0..len(intern_table.buckets) intern_table.buckets[i].head = null;
     life_arrays = LifeArrays {
         parent: new int[256](0 - 1),
         kind: new int[256](0),
@@ -1793,28 +1783,29 @@ normalize_path(path: []i8) raises IndexOutOfBounds: []i8@new {
         out_len = 1
     }
     i: int = 0;
-    while (i < n) {
-        while (i < n && p[i] == '/') i = i + 1;
+    while (i < n) invariant (0 <= i && i <= n && 0 <= nseg && nseg <= i) {
+        while (i < n && p[i] == '/') invariant (0 <= i && i <= n && 0 <= nseg && nseg <= i) i = i + 1;
         if (i >= n) i = n else {
             start: int = i;
-            while (i < n && p[i] != '/') i = i + 1;
+            i = i + 1;
+            while (i < n && p[i] != '/') invariant (start <= i && i <= n && 0 <= nseg && nseg <= start) i = i + 1;
             part_len: int = i - start;
             is_dot: bool = part_len == 1 && p[start] == '.';
-            is_dotdot: bool = part_len == 2 && p[start] == '.' && p![start + 1] == '.';
+            is_dotdot: bool = part_len == 2 && p[start] == '.' && p[i - 1] == '.';
             if (is_dot) {
                 /* nothing */
             } else if (is_dotdot && nseg > 0) {
                 nseg = nseg - 1;
-                out_len = starts![nseg]
+                out_len = starts[nseg]
             } else {
-                starts![nseg] = out_len;
+                starts[nseg] = out_len;
                 nseg = nseg + 1;
                 if (out_len > 0 && out![out_len - 1] != '/') {
                     out![out_len] = '/';
                     out_len = out_len + 1
                 }
                 for j in 0..part_len {
-                    out![out_len] = p![start + j];
+                    out![out_len] = p[start + j];
                     out_len = out_len + 1
                 }
             }
@@ -1852,7 +1843,7 @@ resolve_import_path(base: []i8, imported: []i8) raises IndexOutOfBounds: []i8@ne
     normalize_path(joined)
 }
 
-mark_imported(path: []i8@immortal) noregion raises IndexOutOfBounds: bool {
+mark_imported(path: []i8@immortal) noregion: bool {
     f: ?*ImportedFile = imported_files;
     while (f != null) {
         if (streq(f.path, path)) return false;
@@ -2053,7 +2044,7 @@ exn_type(ed: *ExnDef@new): *Type@new {
     }
 }
 
-find_struct_span(s: []i8, off: int, n: int) raises IndexOutOfBounds: ?*StructDef {
+find_struct_span(s: []i8, off: int, n: int): ?*StructDef {
     b: int = sym_bucket(hash_n(s, off, n));
     sd: ?*StructDef = symbol_buckets.structs[b].head;
     while (sd != null) {
@@ -2063,11 +2054,11 @@ find_struct_span(s: []i8, off: int, n: int) raises IndexOutOfBounds: ?*StructDef
     null
 }
 
-find_struct(name: []i8) raises IndexOutOfBounds: ?*StructDef {
+find_struct(name: []i8): ?*StructDef {
     find_struct_span(name, 0, len(name))
 }
 
-find_enum_span(s: []i8, off: int, n: int) raises IndexOutOfBounds: ?*EnumDef {
+find_enum_span(s: []i8, off: int, n: int): ?*EnumDef {
     b: int = sym_bucket(hash_n(s, off, n));
     e: ?*EnumDef = symbol_buckets.enums[b].head;
     while (e != null) {
@@ -2077,11 +2068,11 @@ find_enum_span(s: []i8, off: int, n: int) raises IndexOutOfBounds: ?*EnumDef {
     null
 }
 
-find_enum(name: []i8) raises IndexOutOfBounds: ?*EnumDef {
+find_enum(name: []i8): ?*EnumDef {
     find_enum_span(name, 0, len(name))
 }
 
-find_exn_span(s: []i8, off: int, n: int) raises IndexOutOfBounds: ?*ExnDef {
+find_exn_span(s: []i8, off: int, n: int): ?*ExnDef {
     b: int = sym_bucket(hash_n(s, off, n));
     e: ?*ExnDef = symbol_buckets.exceptions[b].head;
     while (e != null) {
@@ -2091,7 +2082,7 @@ find_exn_span(s: []i8, off: int, n: int) raises IndexOutOfBounds: ?*ExnDef {
     null
 }
 
-find_exn(name: []i8) raises IndexOutOfBounds: ?*ExnDef {
+find_exn(name: []i8): ?*ExnDef {
     find_exn_span(name, 0, len(name))
 }
 
@@ -2125,7 +2116,7 @@ hash_put_global(o: *Obj@immortal) {
     symbol_buckets.globals[b].head = o
 }
 
-hash_remove_struct(name: []i8) raises IndexOutOfBounds {
+hash_remove_struct(name: []i8) {
     b: int = sym_bucket(hash_str(name));
     prev: ?*StructDef = null;
     s: ?*StructDef = symbol_buckets.structs[b].head;
@@ -2139,7 +2130,7 @@ hash_remove_struct(name: []i8) raises IndexOutOfBounds {
     }
 }
 
-remove_struct(name: []i8) raises IndexOutOfBounds {
+remove_struct(name: []i8) {
     hash_remove_struct(name);
     prev: ?*StructDef = null;
     s: ?*StructDef = struct_defs;
@@ -2153,7 +2144,7 @@ remove_struct(name: []i8) raises IndexOutOfBounds {
     }
 }
 
-get_or_create_struct(name: []i8@new) noregion raises IndexOutOfBounds: *StructDef@new {
+get_or_create_struct(name: []i8@new) noregion: *StructDef@new {
     sd: ?*StructDef = find_struct(name);
     if (sd != null) return sd;
     created: *StructDef = new StructDef {
@@ -2176,7 +2167,7 @@ get_or_create_struct(name: []i8@new) noregion raises IndexOutOfBounds: *StructDe
     created
 }
 
-get_or_create_enum(name: []i8@new) noregion raises IndexOutOfBounds: *EnumDef@new {
+get_or_create_enum(name: []i8@new) noregion: *EnumDef@new {
     ed: ?*EnumDef = find_enum(name);
     if (ed != null) return ed;
     created: *EnumDef = new EnumDef {
@@ -2208,7 +2199,7 @@ rebind_struct_stub_to_enum(sd: *StructDef@ed, ed: *EnumDef@sd) {
     }
 }
 
-find_variant(ed: *EnumDef, name: []i8) raises IndexOutOfBounds: ?*Variant@ed {
+find_variant(ed: *EnumDef, name: []i8): ?*Variant@ed {
     v: ?*Variant = ed.variants;
     while (v != null) {
         if (streq(v.name, name)) return v;
@@ -2229,17 +2220,17 @@ variant_payload_name(enum_name: []i8, var_name: []i8) raises IndexOutOfBounds: [
     raw
 }
 
-is_type_name() raises IndexOutOfBounds: bool {
+is_type_name(): bool {
     if (tok.kind != TokKind.Ident) false else find_struct_span(source, tok.pos, tok.len) != null || find_enum_span(source,
         tok.pos, tok.len) != null || find_exn_span(source, tok.pos, tok.len) != null
 }
 
-is_named_type(name: []i8) raises IndexOutOfBounds: bool {
+is_named_type(name: []i8): bool {
     find_struct(name) != null || find_enum(name) != null || find_exn(name) != null
 }
 
 /* Ident.Ident { field: expr } even when the type is not in this file. */
-syntax_variant_fields() raises IndexOutOfBounds: bool {
+syntax_variant_fields(): bool {
     if (parse_resolve) return false;
     d: *Token = tok.next;
     if (d.kind != TokKind.Dot) return false;
@@ -2251,14 +2242,14 @@ syntax_variant_fields() raises IndexOutOfBounds: bool {
 }
 
 /* Ident { field: expr }. Not `for x in xs { y: T = e; }` or `match x {`. */
-syntax_struct_lit() raises IndexOutOfBounds: bool {
+syntax_struct_lit(): bool {
     if (parse_resolve) return false;
     b: *Token = tok.next;
     if (b.kind != TokKind.LBrace) return false;
     syntax_fields_after_brace(b.next)
 }
 
-syntax_fields_after_brace(inner: *Token) raises IndexOutOfBounds: bool {
+syntax_fields_after_brace(inner: *Token): bool {
     if (inner.kind != TokKind.Ident) return false;
     if (inner.next.kind != TokKind.Colon) return false;
     v: *Token = inner.next.next;
@@ -2287,7 +2278,7 @@ exn_stub(name: []i8@new): *ExnDef@new {
     }
 }
 
-starts_type() raises IndexOutOfBounds: bool {
+starts_type(): bool {
     if (tok.kind == TokKind.LBrack) return true;
     if (at_function_type() || tok.kind == TokKind.StrTy || tok.kind == TokKind.Int || tok.kind == TokKind.I8 || tok.kind == TokKind.I32 || tok.kind == TokKind.U32 || tok.kind == TokKind.F32 || tok.kind == TokKind.F64 || tok.kind == TokKind.Bool || is_type_name()) return true;
     t: ?*Token = tok;
@@ -2326,7 +2317,7 @@ starts_type() raises IndexOutOfBounds: bool {
     false
 }
 
-find_field(members: ?*Member, name: []i8) raises IndexOutOfBounds: ?*Member@members {
+find_field(members: ?*Member, name: []i8): ?*Member@members {
     m: ?*Member = members;
     while (m != null) {
         if (streq(m.name, name)) return m;
@@ -2335,11 +2326,11 @@ find_field(members: ?*Member, name: []i8) raises IndexOutOfBounds: ?*Member@memb
     null
 }
 
-find_member(sd: *StructDef, name: []i8) raises IndexOutOfBounds: ?*Member@sd {
+find_member(sd: *StructDef, name: []i8): ?*Member@sd {
     find_field(sd.members, name)
 }
 
-find_exn_member(ed: *ExnDef, name: []i8) raises IndexOutOfBounds: ?*Member@ed {
+find_exn_member(ed: *ExnDef, name: []i8): ?*Member@ed {
     find_field(ed.members, name)
 }
 
@@ -2584,7 +2575,7 @@ is_enum_ty(t: *Type): bool {
 }
 
 /* Syntax-only parse: a forward/imported name was a struct stub; treat as enum. */
-syntax_as_enum(t: *Type) noregion raises Error, IndexOutOfBounds: *Type@t {
+syntax_as_enum(t: *Type) noregion raises Error: *Type@t {
     if (is_enum_ty(t)) return t;
     if (!parse_resolve && is_struct_ty(t)) {
         sd: *StructDef = type_struct_def(t);

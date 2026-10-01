@@ -10,7 +10,7 @@ bounds_param(fn: *Function, obj: *Obj): bool {
     false
 }
 
-bounds_named_param(fn: *Function, name: []i8) raises IndexOutOfBounds: ?*Obj@fn {
+bounds_named_param(fn: *Function, name: []i8): ?*Obj@fn {
     p: ?*Obj = fn.params;
     while (p != null) {
         if (streq(p.name, name)) return p;
@@ -680,11 +680,74 @@ bounds_span_upper_proves(f: ?*BoundsState, count: *Expr, remaining: *Expr) raise
     }
 }
 
+bounds_contract_constant(e: *Expr): int {
+    match e.kind {
+        Num k -> {
+            if (k.form == LIT_INT && k.str_label == 0 && k.val > -536870912 && k.val < 536870912) return k.val;
+            -999999999
+        }
+        Var k -> {
+            v: ?*Obj = k.var;
+            if (v != null && v.is_const && v.const_state == 2 && is_int_ty(v.ty) && v.const_val > -536870912 && v.const_val < 536870912) return v.const_val;
+            -999999999
+        }
+        Neg k -> {
+            value: int = bounds_contract_constant(k.lhs);
+            if (value != -999999999) return 0 - value;
+            -999999999
+        }
+        Binary k -> {
+            left: int = bounds_contract_constant(k.lhs);
+            right: int = bounds_contract_constant(k.rhs);
+            if (left == -999999999 || right == -999999999) return -999999999;
+            result: int = -999999999;
+            if (k.op == BinOp.Add) result = left + right;
+            if (k.op == BinOp.Sub) result = left - right;
+            if (result > -536870912 && result < 536870912) return result;
+            -999999999
+        }
+        _ -> -999999999
+    }
+}
+
+// Compose nonnegative interval bounds for sums and fixed-size table strides.
+// Keep every intermediate below the solver's conservative numeric limit.
+bounds_arithmetic_upper(e: *Expr, f: ?*BoundsState) raises IndexOutOfBounds: int {
+    match e.kind {
+        Binary k -> {
+            if (k.op == BinOp.Add || k.op == BinOp.Mul) {
+                left: int = bounds_arithmetic_upper(k.lhs, f);
+                right: int = bounds_arithmetic_upper(k.rhs, f);
+                if (left < 0 || right < 0) return -1;
+                if (k.op == BinOp.Add && left <= 536870911 - right) return left + right;
+                if (k.op == BinOp.Mul && (right == 0 || left <= 536870911 / right)) return left * right
+            }
+        }
+        _ -> { }
+    }
+    bounds_term_numeric_upper(f, e)
+}
+
 bounds_precondition_proved(e: *Expr, f: ?*BoundsState) raises IndexOutOfBounds: bool {
     match e.kind {
         LogAnd k -> bounds_precondition_proved(k.lhs, f) && bounds_precondition_proved(k.rhs,
             f);
         Binary k -> {
+            left_constant: int = bounds_contract_constant(k.lhs);
+            right_constant: int = bounds_contract_constant(k.rhs);
+            if (left_constant != -999999999 && right_constant != -999999999) {
+                if (k.op == BinOp.Lt) return left_constant < right_constant;
+                if (k.op == BinOp.Le) return left_constant <= right_constant;
+                if (k.op == BinOp.Gt) return left_constant > right_constant;
+                if (k.op == BinOp.Ge) return left_constant >= right_constant;
+                if (k.op == BinOp.Eq) return left_constant == right_constant;
+                if (k.op == BinOp.Ne) return left_constant != right_constant
+            }
+            if (k.op == BinOp.Lt) {
+                upper: int = bounds_arithmetic_upper(k.lhs, f);
+                right_number: int = bounds_num(k.rhs);
+                if (upper >= 0 && right_number > upper) return true
+            }
             if (k.op == BinOp.Lt) return bounds_difference_proves(f, k.lhs, k.rhs,
                 -1) || bounds_bounded_sum_le(f, k.lhs, k.rhs, false) || bounds_remaining_span_le(f,
                 k.lhs, k.rhs, false) || bounds_precondition_upper(f, k.lhs, k.rhs,
@@ -1078,7 +1141,7 @@ bounds_require(
     error_at_file(file, pos, "array index not proved in bounds")
 }
 
-bounds_arg_named(fn: *Function, args: ?*Expr, name: []i8) raises IndexOutOfBounds: ?*Expr@args {
+bounds_arg_named(fn: *Function, args: ?*Expr, name: []i8): ?*Expr@args {
     p: ?*Obj = fn.params;
     a: ?*Expr = args;
     while (p != null && a != null) {
