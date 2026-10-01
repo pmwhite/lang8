@@ -1,5 +1,21 @@
 tag compiler_internal;
 
+bounds_empty_numeric_view(): []BoundsNumericView@new {
+    missing: BoundsTermRef = BoundsTermRef {
+        path: null,
+        obj: null,
+        is_len: false,
+        is_zero: false,
+        valid: false
+    };
+    new BoundsNumericView[0](BoundsNumericView {
+        left: missing,
+        right: missing,
+        bound: 0,
+        separation: null
+    })
+}
+
 bounds_graph_cache_new() raises IndexOutOfBounds: *BoundsGraphCache@new {
     graph: *BoundsGraph = bounds_graph_new(BOUNDS_GRAPH_CACHE_ROWS);
     capacity: int = len(graph.terms);
@@ -61,6 +77,7 @@ bounds_arena_state(arena: *BoundsArena@new): *BoundsState@new {
         arena: arena,
         unreachable: false,
         storage: null,
+        numeric_view: bounds_empty_numeric_view(),
         count: 0,
         sum_count: 0,
         implications: null
@@ -115,6 +132,7 @@ bounds_unreachable(): *BoundsState@new {
         arena: null,
         unreachable: true,
         storage: null,
+        numeric_view: bounds_empty_numeric_view(),
         count: 0,
         sum_count: 0,
         implications: null
@@ -124,8 +142,9 @@ bounds_unreachable(): *BoundsState@new {
 // A row belongs to a dense fact table, never to a linked list. Numeric rows
 // lower to left - right <= bound; other rows describe identity/provenance.
 // The AST adapter retains source paths for invalidation and diagnostics.
-bounds_count(state: ?*BoundsState): int {
-    if (state == null) 0 else state.count
+bounds_count(state: ?*BoundsState): int ensures (0 <= returned) {
+    if (state == null) return 0;
+    state.count
 }
 
 bounds_has_sum(state: ?*BoundsState): bool {
@@ -141,11 +160,11 @@ bounds_row(state: ?*BoundsState, position: int) raises IndexOutOfBounds: ?*Bound
     &storage.rows![position]
 }
 
-bounds_storage(state: ?*BoundsState@new, row: BoundsRow@new, count: int) raises IndexOutOfBounds: *BoundsStorage@new ensures (returned.used == count && 0 <= count && count < len(returned.rows)) {
+bounds_storage(state: ?*BoundsState@new, row: BoundsRow@new, count: int) raises IndexOutOfBounds: *BoundsStorage@new ensures (returned.used == count && 0 <= count && count < len(returned.numeric)) {
     if (count < 0) raise IndexOutOfBounds;
     if (state != null) {
         old: ?*BoundsStorage = state.storage;
-        if (old != null && old.used == count && count < len(old.rows)) return old
+        if (old != null && old.used == count && count < len(old.numeric)) return old
     }
     capacity: int = 4;
     while (capacity <= count) capacity = capacity * 2;
@@ -187,7 +206,7 @@ bounds_storage(state: ?*BoundsState@new, row: BoundsRow@new, count: int) raises 
             }
         }
     }
-    if (count >= len(storage.rows)) raise IndexOutOfBounds;
+    if (count >= len(storage.numeric)) raise IndexOutOfBounds;
     storage.prefix_source = previous;
     storage.prefix_count = count;
     storage.used = count;
@@ -239,6 +258,7 @@ bounds_push(state: ?*BoundsState@new, row: BoundsRow@new) raises IndexOutOfBound
         arena: if (state == null) null else state.arena,
         unreachable: false,
         storage: storage,
+        numeric_view: storage.numeric,
         count: count + 1,
         sum_count: sum_count,
         implications: implications
@@ -249,6 +269,25 @@ bounds_push(state: ?*BoundsState@new, row: BoundsRow@new) raises IndexOutOfBound
 // can append them directly without normalizing and searching for duplicates.
 // row must be the unchanged row at position in source. Its normalized
 // descriptor is already cached and can be copied without inspecting the AST.
+bounds_copy_storage(
+    state: ?*BoundsState@new,
+    row: *BoundsRow@new,
+    count: int,
+    hint: int
+) raises IndexOutOfBounds: *BoundsStorage@new ensures (0 <= count && count < len(returned.numeric)) {
+    if (count == 0) {
+        capacity: int = 4;
+        while (capacity <= hint && capacity < 64) capacity = capacity * 2;
+        arena: ?*BoundsArena = if (state == null) null else state.arena;
+        return bounds_storage_new(arena, row.*, capacity)
+    }
+    bounds_storage(state, row.*, count)
+}
+
+bounds_storage_next_count(numeric: []BoundsNumericView, count: int): int requires (0 <= count && count < len(numeric)) ensures (0 <= returned && returned <= len(numeric)) {
+    count + 1
+}
+
 bounds_copy_from(
     state: ?*BoundsState@new,
     source: ?*BoundsState,
@@ -259,13 +298,22 @@ bounds_copy_from(
     hint: int = bounds_count(source);
     numeric: BoundsNumericView = bounds_numeric_at(source, position);
     count: int = bounds_count(state);
-    storage: *BoundsStorage;
-    if (count == 0) {
-        capacity: int = 4;
-        while (capacity <= hint && capacity < 64) capacity = capacity * 2;
-        arena: ?*BoundsArena = if (state == null) null else state.arena;
-        storage = bounds_storage_new(arena, row.*, capacity)
-    } else storage = bounds_storage(state, row.*, count);
+    storage: *BoundsStorage = bounds_copy_storage(state, row, count, hint);
+    numeric_view: []BoundsNumericView = storage.numeric;
+    next_count: int = bounds_storage_next_count(numeric_view, count);
+    sum_count: int = if (state == null) 0 else state.sum_count;
+    if (row.kind == BoundsKind.SumUpper) sum_count = sum_count + 1;
+    arena: ?*BoundsArena = if (state == null) null else state.arena;
+    implications: ?*BoundsImplication = if (state == null) null else state.implications;
+    result: *BoundsState = new BoundsState {
+        arena: arena,
+        unreachable: false,
+        storage: storage,
+        numeric_view: numeric_view,
+        count: next_count,
+        sum_count: sum_count,
+        implications: implications
+    };
     storage.rows[count] = row.*;
     storage.numeric[count] = numeric;
     hash: int = bounds_row_hash(row, &numeric);
@@ -273,16 +321,7 @@ bounds_copy_from(
     storage.links[count] = storage.buckets[slot];
     storage.buckets[slot] = count;
     storage.used = count + 1;
-    sum_count: int = if (state == null) 0 else state.sum_count;
-    if (row.kind == BoundsKind.SumUpper) sum_count = sum_count + 1;
-    new BoundsState {
-        arena: if (state == null) null else state.arena,
-        unreachable: false,
-        storage: storage,
-        count: count + 1,
-        sum_count: sum_count,
-        implications: if (state == null) null else state.implications
-    }
+    result
 }
 
 // Filters visit source rows in order and pass the original row at position.
@@ -290,17 +329,18 @@ bounds_copy_from(
 // copy-on-write path. Invalidation deliberately drops all implications.
 bounds_filter_copy(
     head: ?*BoundsState@new,
-    source: ?*BoundsState@new,
+    source: *BoundsState@new,
     row: *BoundsRow@new,
     position: int
-) raises IndexOutOfBounds: *BoundsState@new {
-    if (source != null && (position == 0 && bounds_count(head) == 0 || head != null && head.storage == source.storage && head.count == position)) {
+) raises IndexOutOfBounds: *BoundsState@new requires (0 <= position && position < source.count) {
+    if (position == 0 && bounds_count(head) == 0 || head != null && head.storage == source.storage && head.count == position) {
         sums: int = if (head == null) 0 else head.sum_count;
         if (row.kind == BoundsKind.SumUpper) sums = sums + 1;
         return new BoundsState {
             arena: source.arena,
             unreachable: false,
             storage: source.storage,
+            numeric_view: source.numeric_view,
             count: position + 1,
             sum_count: sums,
             implications: null
@@ -424,18 +464,24 @@ bounds_attach_implication(state: ?*BoundsState@new, rule: *BoundsImplication@new
     if (state != null) {
         if (bounds_has_implication(state, rule)) return state
     }
-    storage: ?*BoundsStorage = if (state == null) null else state.storage;
-    previous: ?*BoundsImplication = null;
-    if (state != null) previous = state.implications;
+    previous: ?*BoundsImplication = if (state == null) null else state.implications;
     linked: *BoundsImplication = new BoundsImplication { premises: rule.premises, consequence: rule.consequence, next: previous };
-    sum_count: int = 0;
-    if (state != null) sum_count = state.sum_count;
-    new BoundsState {
-        arena: if (state == null) null else state.arena,
+    if (state == null) return new BoundsState {
+        arena: null,
         unreachable: false,
-        storage: storage,
-        count: bounds_count(state),
-        sum_count: sum_count,
+        storage: null,
+        numeric_view: bounds_empty_numeric_view(),
+        count: 0,
+        sum_count: 0,
+        implications: linked
+    };
+    new BoundsState {
+        arena: state.arena,
+        unreachable: false,
+        storage: state.storage,
+        numeric_view: state.numeric_view,
+        count: state.count,
+        sum_count: state.sum_count,
         implications: linked
     }
 }
@@ -515,9 +561,10 @@ bounds_rows_identical(a: *BoundsRow, b: *BoundsRow): bool {
 }
 
 // Fact tables copied at a branch retain a byte-for-byte prefix.
-bounds_common_prefix(a: ?*BoundsState, b: ?*BoundsState) raises IndexOutOfBounds: int {
+bounds_common_prefix(a: ?*BoundsState, b: ?*BoundsState, cap: int) raises IndexOutOfBounds: int requires (0 <= cap) ensures (returned <= cap) {
     if (a == null || b == null) return 0;
     limit: int = if (a.count < b.count) a.count else b.count;
+    if (limit > cap) limit = cap;
     if (a.storage == b.storage) return limit;
     position: int = 0;
     // Copies of a parent or sibling share a known prefix. Verify only the
@@ -525,16 +572,15 @@ bounds_common_prefix(a: ?*BoundsState, b: ?*BoundsState) raises IndexOutOfBounds
     first_storage: ?*BoundsStorage = a.storage;
     second_storage: ?*BoundsStorage = b.storage;
     if (first_storage != null && second_storage != null) {
-        if (first_storage.prefix_source == second_storage) position = first_storage.prefix_count else if (second_storage.prefix_source == first_storage) position = second_storage.prefix_count else if (first_storage.prefix_source != null && first_storage.prefix_source == second_storage.prefix_source) position = (if (first_storage.prefix_count < second_storage.prefix_count) first_storage.prefix_count else second_storage.prefix_count);
-        if (position > limit) position = limit
+        if (first_storage.prefix_source == second_storage) position = first_storage.prefix_count else if (second_storage.prefix_source == first_storage) position = second_storage.prefix_count else if (first_storage.prefix_source != null && first_storage.prefix_source == second_storage.prefix_source) position = (if (first_storage.prefix_count < second_storage.prefix_count) first_storage.prefix_count else second_storage.prefix_count)
     }
-    matching: bool = true;
-    while (position < limit && matching) {
-        first: ?*BoundsRow = bounds_row(a, position);
-        second: ?*BoundsRow = bounds_row(b, position);
-        if (first == null || second == null || !bounds_rows_identical(first, second)) matching = false else position = position + 1
+    if (position > limit) position = limit;
+    for index in position..limit {
+        first: ?*BoundsRow = bounds_row(a, index);
+        second: ?*BoundsRow = bounds_row(b, index);
+        if (first == null || second == null || !bounds_rows_identical(first, second)) return index
     }
-    position
+    limit
 }
 
 // Reuse the weaker snapshot when every one of its facts survives a join.
@@ -558,18 +604,20 @@ bounds_subset_from(a: ?*BoundsState, b: ?*BoundsState, prefix: int) raises Index
 bounds_subset(a: ?*BoundsState, b: ?*BoundsState) raises IndexOutOfBounds: bool {
     if (!bounds_reachable(b)) return true;
     if (!bounds_reachable(a)) return false;
-    bounds_subset_from(a, b, bounds_common_prefix(a, b))
+    cap: int = bounds_count(a);
+    bounds_subset_from(a, b, bounds_common_prefix(a, b, cap))
 }
 
 bounds_meet(a: ?*BoundsState@new, b: ?*BoundsState) raises IndexOutOfBounds: ?*BoundsState@new {
     if (!bounds_reachable(a)) return b;
     if (!bounds_reachable(b)) return a;
     if (a == b) return a;
-    prefix: int = bounds_common_prefix(a, b);
+    if (a == null || b == null) return null;
+    prefix: int = bounds_common_prefix(a, b, a.count);
     if (bounds_subset_from(a, b, prefix)) return a;
     if (bounds_subset_from(b, a, prefix)) return b;
     result: ?*BoundsState = bounds_empty(a);
-    if (a != null && prefix > 0) {
+    if (prefix > 0) {
         prefix_sums: int = 0;
         for index in 0..if (bounds_has_sum(a)) prefix else 0 {
             row0: ?*BoundsRow = bounds_row(a, index);
@@ -579,6 +627,7 @@ bounds_meet(a: ?*BoundsState@new, b: ?*BoundsState) raises IndexOutOfBounds: ?*B
             arena: a.arena,
             unreachable: false,
             storage: a.storage,
+            numeric_view: a.numeric_view,
             count: prefix,
             sum_count: prefix_sums,
             implications: null
@@ -693,15 +742,15 @@ bounds_widen(previous: ?*BoundsState@new, incoming: ?*BoundsState) raises IndexO
 // the prefix, and appends update both arrays together.
 bounds_numeric_at(state: ?*BoundsState, position: int) raises IndexOutOfBounds: BoundsNumericView {
     storage: ?*BoundsStorage = if (state == null) null else state.storage;
-    if (state != null && storage != null && position >= 0 && position < state.count) return storage.numeric![position];
+    if (state != null && storage != null && position >= 0 && position < state.count) return state.numeric_view[position];
     bounds_numeric_query(null, null, 0)
 }
 
 // Borrow a cached descriptor for read-only use until the arena resets. Respect
 // the snapshot count even when a sibling has appended to the same storage.
-bounds_numeric_ref(state: ?*BoundsState, position: int) raises IndexOutOfBounds: ?*BoundsNumericView@state {
+bounds_numeric_ref(state: ?*BoundsState, position: int): ?*BoundsNumericView@state {
     storage: ?*BoundsStorage = if (state == null) null else state.storage;
-    if (state != null && storage != null && position >= 0 && position < state.count) return &storage.numeric![position];
+    if (state != null && storage != null && position >= 0 && position < state.count) return &state.numeric_view[position];
     null
 }
 
