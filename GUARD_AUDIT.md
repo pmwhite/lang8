@@ -34,6 +34,11 @@ fixed-capacity boundaries prevent real failures.
   check with a proved function requirement, removed the final allocation-size
   check using `bounds_storage_new`'s return guarantee, and protected capacity
   doubling against integer overflow.
+- [x] `src2/bounds_state.l8`, copied prefix: split the null-state and
+  existing-state paths. The existing-state function requires a count within
+  `state.count` and copies from `rows_view` and `numeric_view`, whose lengths
+  the record invariant proves. The unused source-links length check is gone.
+  Both null-state paths share the original hinted initial-capacity choice.
 - [x] `programs/terminal/scene.l8`, diff counts: removed the redundant
   `old_count/new_count > 240` check. The verifier proves the upper bound
   from the region coordinates and the retained lower-bound check.
@@ -78,11 +83,6 @@ fixed-capacity boundaries prevent real failures.
 - [x] `src2/browse.l8`, `browse_tok_start`: keep `p <= len(src)` for the
   token position. A token is a linked parser object without a source-relative
   invariant; a malformed position can make `src[p - 1]` invalid.
-- [x] `src2/bounds_state.l8`, `bounds_storage` copied-prefix check: keep the
-  source/destination capacity check when copying an arena-reused fact buffer.
-  `BoundsState` guarantees its direct views, but its separately mutable
-  `storage` reference is not tied to those views by the type system. A nested
-  record invariant would be unsound without tracking writes through aliases.
 - [x] `src2/bounds_solver.l8`, remaining graph IDs and capacities: keep the
   checks on IDs read from hash slots, adjacency links, and work queues for
   now. The verifier does not yet prove that graph construction and reloads
@@ -133,9 +133,8 @@ the mirrored `src1` compiler and tests). The remaining sites have these roles:
   invalid user programs. The other compiler raises protect path and name
   lengths from integer overflow before allocation or copying.
 - `src2/bounds_state.l8` and `src2/bounds_effects.l8`: remaining raises
-  protect allocation growth and copied arena storage against overflow or
-  mismatched capacities. Function count and write-table growth are likewise
-  bounded by the signed integer range.
+  protect allocation growth against overflow. Function count and write-table
+  growth are likewise bounded by the signed integer range.
 - `src2/bounds_solver.l8`: graph capacity and IDs read from mutable slots,
   adjacency, and cached workspaces are checked before access. The IDs are
   stored as integers, so array and graph size invariants do not prove their

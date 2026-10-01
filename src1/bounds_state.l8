@@ -210,30 +210,28 @@ bounds_row(state: ?*BoundsState, position: int): ?*BoundsRow@state {
     &state.rows_view[position]
 }
 
-bounds_storage(state: ?*BoundsState@new, row: BoundsRow@new, count: int) raises IndexOutOfBounds: *BoundsStorage@new requires (0 <= count) ensures (returned.used == count && 0 <= count && count < len(returned.numeric)) {
-    if (state != null) {
-        old: ?*BoundsStorage = state.storage;
-        if (old != null && old.used == count && count < len(old.numeric)) return old
-    }
+bounds_storage(state: *BoundsState@new, row: BoundsRow@new, count: int) raises IndexOutOfBounds: *BoundsStorage@new requires (0 <= count && count <= state.count) ensures (returned.used == count && 0 <= count && count < len(returned.numeric)) {
+    old: ?*BoundsStorage = state.storage;
+    if (old != null && old.used == count && count < len(old.numeric)) return old;
     capacity: int = 4;
     while (capacity <= count) {
         // Preserve a positive capacity when doubling a large fact table.
         if (capacity > 4611686018427387903) raise IndexOutOfBounds;
         capacity = capacity * 2
     }
-    arena: ?*BoundsArena = if (state == null) null else state.arena;
+    arena: ?*BoundsArena = state.arena;
     storage: *BoundsStorage = bounds_storage_new(arena, row, capacity);
     rows: []BoundsRow = storage.rows;
     numeric: []BoundsNumericView = storage.numeric;
     buckets: []?*BoundsLinkNode = storage.buckets;
     links: []BoundsLinkNode = storage.links;
-    previous: ?*BoundsStorage = if (state == null) null else state.storage;
+    previous: ?*BoundsStorage = state.storage;
     if (previous != null) {
-        source: []BoundsRow = previous.rows;
-        source_numeric: []BoundsNumericView = previous.numeric;
-        source_links: []BoundsLinkNode = previous.links;
+        // The snapshot's views carry count bounds even when its backing
+        // storage has since been reused or extended by another branch.
+        source: []BoundsRow = state.rows_view;
+        source_numeric: []BoundsNumericView = state.numeric_view;
         source_buckets: []?*BoundsLinkNode = previous.buckets;
-        if (count > len(rows) || count > len(numeric) || count > len(links) || count > len(source) || count > len(source_numeric) || count > len(source_links)) raise IndexOutOfBounds;
         if (len(buckets) == len(source_buckets)) {
             // Append-only chains point backwards. Trim only bucket heads that
             // belong to rows after the snapshot. Older nodes can be shared.
@@ -292,8 +290,12 @@ bounds_push(state: ?*BoundsState@new, row: BoundsRow@new) raises IndexOutOfBound
             link = link.next
         }
     }
-    count: int = bounds_count(state);
-    storage: *BoundsStorage = bounds_storage(state, row, count);
+    count: int = 0;
+    storage: *BoundsStorage;
+    if (state == null) storage = bounds_storage_new(null, row, 4) else {
+        count = state.count;
+        storage = bounds_storage(state, row, count)
+    }
     storage.rows[count] = row;
     storage.numeric[count] = decoded;
     slot: int = hash & len(storage.buckets) - 1;
@@ -317,27 +319,28 @@ bounds_push(state: ?*BoundsState@new, row: BoundsRow@new) raises IndexOutOfBound
     }
 }
 
+// Reserve a small initial copy from a source of known approximate size.
+// The four sizes preserve the positive-capacity constructor requirement.
+bounds_initial_storage(arena: ?*BoundsArena@new, row: BoundsRow@new, hint: int) raises IndexOutOfBounds: *BoundsStorage@new ensures (0 < len(returned.numeric)) {
+    capacity: int = 4;
+    if (capacity <= hint) capacity = 8;
+    if (capacity <= hint) capacity = 16;
+    if (capacity <= hint) capacity = 32;
+    if (capacity <= hint) capacity = 64;
+    bounds_storage_new(arena, row, capacity)
+}
+
 // Existing fact rows are already normalized and unique. Filtering a state
 // can append them directly without normalizing and searching for duplicates.
 // row must be the unchanged row at position in source. Its normalized
 // descriptor is already cached and can be copied without inspecting the AST.
 bounds_copy_storage(
-    state: ?*BoundsState@new,
+    state: *BoundsState@new,
     row: *BoundsRow@new,
     count: int,
     hint: int
-) raises IndexOutOfBounds: *BoundsStorage@new requires (0 <= count) ensures (0 <= count && count < len(returned.numeric)) {
-    if (count == 0) {
-        capacity: int = 4;
-        // This initial copy uses at most 64 rows. Explicit sizes make the
-        // positive-capacity obligation visible at the storage constructor.
-        if (capacity <= hint) capacity = 8;
-        if (capacity <= hint) capacity = 16;
-        if (capacity <= hint) capacity = 32;
-        if (capacity <= hint) capacity = 64;
-        arena: ?*BoundsArena = if (state == null) null else state.arena;
-        return bounds_storage_new(arena, row.*, capacity)
-    }
+) raises IndexOutOfBounds: *BoundsStorage@new requires (0 <= count && count <= state.count) ensures (0 <= count && count < len(returned.numeric)) {
+    if (count == 0) return bounds_initial_storage(state.arena, row.*, hint);
     bounds_storage(state, row.*, count)
 }
 
@@ -354,8 +357,12 @@ bounds_copy_from(
     if (state != null && state.unreachable) return state;
     hint: int = bounds_count(source);
     numeric: BoundsNumericView = bounds_numeric_at(source, position);
-    count: int = bounds_count(state);
-    storage: *BoundsStorage = bounds_copy_storage(state, row, count, hint);
+    count: int = 0;
+    storage: *BoundsStorage;
+    if (state == null) storage = bounds_initial_storage(null, row.*, hint) else {
+        count = state.count;
+        storage = bounds_copy_storage(state, row, count, hint)
+    }
     numeric_view: []BoundsNumericView = storage.numeric;
     next_count: int = bounds_storage_next_count(numeric_view, count);
     sum_count: int = if (state == null) 0 else state.sum_count;
