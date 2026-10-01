@@ -52,7 +52,9 @@ bounds_graph_new(rows: int) raises IndexOutOfBounds: *BoundsGraph@new {
     }
 }
 
-bounds_graph_intern(graph: *BoundsGraph, term: BoundsTermRef@graph) raises IndexOutOfBounds: int ensures (0 <= returned && returned < graph.nodes) {
+// Interning only increases nodes. A caller may pass an existing ID as minimum
+// and retain its bound through later insertions; -1 works for an empty graph.
+bounds_graph_intern(graph: *BoundsGraph, term: BoundsTermRef@graph, minimum: int) raises IndexOutOfBounds: int requires (minimum < graph.nodes) ensures (minimum < graph.nodes && 0 <= returned && returned < graph.nodes) {
     slots: []int = graph.slots;
     hash: int = bounds_term_hash_borrowed(&term);
     slot: int = hash & len(slots) - 1;
@@ -90,19 +92,19 @@ bounds_graph_edge(
     graph.heads[from] = edge
 }
 
-bounds_graph_load(graph: *BoundsGraph, state: ?*BoundsState@graph) raises IndexOutOfBounds {
+bounds_graph_load(graph: *BoundsGraph, state: ?*BoundsState@graph, minimum: int) raises IndexOutOfBounds: int requires (minimum < graph.nodes) ensures (returned == minimum && returned < graph.nodes) {
     // Iterate in insertion order. Edges on the same source form integer
     // adjacency chains; there are no allocations inside this loop.
     for position in 0..bounds_count(state) {
         edge: ?*BoundsNumericView = bounds_numeric_ref(state, position);
         if (edge != null && edge.left.valid && edge.right.valid && edge.separation == null) {
-            to: int = bounds_graph_intern(graph, edge.left);
-            from: int = bounds_graph_intern(graph, edge.right);
+            to: int = bounds_graph_intern(graph, edge.left, minimum);
+            from: int = bounds_graph_intern(graph, edge.right, minimum);
             bounds_graph_edge(graph, from, to, edge.bound)
         }
     }
     zero_term: BoundsTermRef = bounds_ref_zero();
-    zero: int = bounds_graph_intern(graph, zero_term);
+    zero: int = bounds_graph_intern(graph, zero_term, minimum);
     for id in 0..graph.nodes {
         term: BoundsTermRef = graph.terms[id];
         if (term.is_len) {
@@ -117,6 +119,7 @@ bounds_graph_load(graph: *BoundsGraph, state: ?*BoundsState@graph) raises IndexO
             }
         }
     }
+    minimum
 }
 
 // A bounded work queue stops with an under-approximation of known proofs.
@@ -321,7 +324,7 @@ bounds_cached_graph(state: ?*BoundsState, excluded: ?*BoundsGraph, load: bool) r
     graph.nodes = 0;
     graph.edges = 0;
     graph.small_weights = true;
-    bounds_graph_load(graph, state);
+    _loaded_minimum: int = bounds_graph_load(graph, state, -1);
     cache.storage = state.storage;
     cache.count = state.count;
     cache.source = -2;
@@ -442,13 +445,11 @@ bounds_solve(state: ?*BoundsState, query: *BoundsNumericView, early: bool) raise
     result: int = 1000000000000000000;
     region {
         graph: *BoundsGraph = bounds_graph_new(bounds_count(state));
-        target: int = bounds_graph_intern(graph, left);
-        source: int = bounds_graph_intern(graph, right);
-        bounds_graph_load(graph, state);
-        // Reloads may intern more terms. Refresh the query ID after that mutation.
-        target = bounds_graph_intern(graph, left);
-        if (source == target || graph.heads[source] >= 0) result = bounds_graph_distance(graph,
-            source, target, query.bound, early)
+        target: int = bounds_graph_intern(graph, left, -1);
+        source: int = bounds_graph_intern(graph, right, target);
+        loaded_target: int = bounds_graph_load(graph, state, target);
+        if (source == loaded_target || graph.heads[source] >= 0) result = bounds_graph_distance(graph,
+            source, loaded_target, query.bound, early)
     }
     result
 }
@@ -548,13 +549,13 @@ bounds_join_project(
         first_cached: ?*BoundsGraphCache = bounds_cached_graph(a, null, true);
         if (first_cached != null) first = first_cached.graph else {
             first = bounds_graph_new(bounds_count(a));
-            bounds_graph_load(first, a)
+            bounds_graph_load(first, a, -1)
         }
         second: *BoundsGraph;
         second_cached: ?*BoundsGraphCache = bounds_cached_graph(b, first, true);
         if (second_cached != null) second = second_cached.graph else {
             second = bounds_graph_new(bounds_count(b));
-            bounds_graph_load(second, b)
+            bounds_graph_load(second, b, -1)
         }
         first_ids: []int = new int[BOUNDS_JOIN_TERMS](-1);
         second_ids: []int = new int[BOUNDS_JOIN_TERMS](-1);
@@ -667,10 +668,9 @@ bounds_below_length(state: ?*BoundsState, base: *Expr, margin: int) raises Index
         term: BoundsTermRef = bounds_ref_expr(base);
         if (bounds_ref_valid(term)) {
             graph: *BoundsGraph = bounds_graph_new(bounds_count(state));
-            target: int = bounds_graph_intern(graph, term);
-            bounds_graph_load(graph, state);
-            target = bounds_graph_intern(graph, term);
-            result = bounds_graph_distance(graph, -1, target, 0 - margin, true) <= 0 - margin
+            target: int = bounds_graph_intern(graph, term, -1);
+            loaded_target: int = bounds_graph_load(graph, state, target);
+            result = bounds_graph_distance(graph, -1, loaded_target, 0 - margin, true) <= 0 - margin
         }
     }
     result

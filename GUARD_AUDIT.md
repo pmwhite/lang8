@@ -42,8 +42,10 @@ fixed-capacity boundaries prevent real failures.
   that queue relationship, removing two redundant queue-capacity checks and
   the duplicate queued-capacity check in the cached path.
 - [x] `src2/bounds_solver.l8`, `bounds_graph_distance`: moved the target-ID
-  check into a precondition. The query paths refresh the interned target ID
-  after graph loading, so the intern contract proves the final graph bound.
+  check into a precondition. Interning and graph loading now carry a lower
+  bound on the graph's node count through their contracts. Query paths pass
+  the target ID through that chain, proving it remains valid after loading
+  without another lookup.
 
 - [x] `src2/assembler.l8`, `as_wr_le`: removed its runtime guard and
   gave the generic byte writer and fixed-width wrappers span requirements.
