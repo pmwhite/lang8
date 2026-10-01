@@ -21,6 +21,11 @@ fixed-capacity boundaries prevent real failures.
   `count > len(storage.numeric)` exception. The lookup now reads
   `state.numeric_view`, whose length is covered by the `BoundsState` record
   invariant. Hash buckets still come from storage.
+- [x] `src2/bounds_state.l8`, `bounds_storage_new`: moved the positive-capacity
+  obligation into its contract. The copied-state caller uses the four bounded
+  growth steps up to 64, which the verifier can prove preserve positivity.
+  The bucket-count overflow check remains because general fact storage can
+  request a larger capacity.
 - [x] `src2/bounds_effects.l8`, `bounds_pure_call_keeps_all` and
   `bounds_after_call`: read the state's `rows_view` and `numeric_view` rather
   than unrelated aliases through storage. Their lengths are directly covered
@@ -45,7 +50,7 @@ fixed-capacity boundaries prevent real failures.
   record before writing its fields. A local alias keeps the section output
   buffer's length stable across writer calls.
 
-## Reviewed guards retained for real failure cases
+## Reviewed guards still requiring validation or proof
 
 - [x] `src2/browse.l8`, `browse_tok_start`: keep `p <= len(src)` for the
   token position. A token is a linked parser object without a source-relative
@@ -56,10 +61,10 @@ fixed-capacity boundaries prevent real failures.
   `storage` reference is not tied to those views by the type system. A nested
   record invariant would be unsound without tracking writes through aliases.
 - [x] `src2/bounds_solver.l8`, remaining graph IDs and capacities: keep the
-  checks on IDs read from hash slots, adjacency links, and work queues. Their
-  contents can be stale across graph reloads; array-length invariants alone
-  do not establish valid element values. Term and edge capacity limits are
-  also genuine fixed-table limits.
+  checks on IDs read from hash slots, adjacency links, and work queues for
+  now. The verifier does not yet prove that graph construction and reloads
+  preserve valid element values. These internal checks mark unresolved proof
+  obligations. Term and edge capacity limits are fixed-table limits.
 - [x] `src2/assembler.l8` and `src2/elfpack.l8`, input/patch and
   section-buffer checks: keep validation for assembler text, relocation
   offsets read from patch lists, and cursor overflow. In `as_emit_b2/b3`, a
@@ -126,7 +131,9 @@ the mirrored `src1` compiler and tests). The remaining sites have these roles:
 - `programs/terminal/scene.l8` and `render.l8`: fixed region and vertex
   buffers and diff-window lengths are checked at their capacity boundaries.
 
-Some remaining checks also expose proof-language limits: graph slot values,
-saved journal words, and room list lengths do not have element-value or
-cross-object invariants. Removing those checks safely would require changing
-the representations or adding proofs that survive mutation and reuse.
+Some remaining checks expose proof-language limits: graph slot values, saved
+journal words, and room list lengths do not have element-value or cross-object
+invariants. These are internal consistency checks, not user-facing errors.
+Their `IndexOutOfBounds` raises remain proof work: removing them safely
+requires changing the representations or adding proofs that survive mutation
+and reuse.
