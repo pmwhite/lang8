@@ -46,6 +46,10 @@ fixed-capacity boundaries prevent real failures.
   bound on the graph's node count through their contracts. Query paths pass
   the target ID through that chain, proving it remains valid after loading
   without another lookup.
+- [x] `src2/bounds_solver.l8`, cache slot clearing: store pointers to occupied
+  hash slots instead of integer slot positions. The verifier checks each
+  pointer when the slot is occupied; clearing it needs no index check. A loop
+  invariant preserves the table lengths while both arrays are reset.
 
 - [x] `src2/assembler.l8`, `as_wr_le`: removed its runtime guard and
   gave the generic byte writer and fixed-width wrappers span requirements.
