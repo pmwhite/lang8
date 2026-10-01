@@ -1,67 +1,79 @@
 # Guard audit after checked indexing removal
 
-This is a working inventory of bounds-related branches introduced or exposed while
-removing `![]`. `src1` mirrors `src2`; compiler entries refer to `src2` unless
-noted. A branch belongs on this list when its main purpose appears to be
-supplying a proof for `[]` or a bulk copy. An entry is a candidate, not a claim
-that the branch is safe to delete. Check the producer, caller, and overflow
-behavior before changing it. Keep checks on input and I/O boundaries.
+This inventory covers the bounds-related branches found while removing `![]` in
+the compiler, standard library, and programs. `src1` mirrors `src2`; compiler
+entries refer to `src2`. A completed entry records either a proof that replaced
+a guard or a reason to keep the guard. It does not imply that every runtime
+bounds check in the tree should disappear: checks at input, allocation, and
+fixed-capacity boundaries prevent real failures.
 
-## Removed
+## Removed or replaced with proofs
 
-- [x] `programs/block-game/level.l8`, `load_grid_src`: removed
-  `len(bricks) < 0`, an impossible condition. It was the only use of the
-  `bricks` parameter, so the parameter and call argument went too.
-- [x] `src2/browse.l8`, `browse_tok_end`: removed three duplicate
-  `at/j < len(src)` conditions. The function now requires the
-  `src_len < len(src)` relationship already guaranteed by `ImportedFile`.
-  The token-position checks remain because they protect the actual index.
+- [x] `programs/block-game/level.l8`, `load_grid_src`: removed the impossible
+  `len(bricks) < 0` branch and its otherwise unused argument.
+- [x] `src2/browse.l8`, `browse_tok_end`: removed three repeated
+  `at/j < len(src)` checks. A function contract carries the `ImportedFile`
+  relationship `src_len < len(src)`; the token-position checks remain.
+- [x] `src2/bounds_state.l8`, `bounds_numeric_at` and `bounds_numeric_ref`:
+  removed `storage != null` from view lookups. The record's direct invariant
+  already gives `count <= len(numeric_view)`, which is the actual array read.
+- [x] `src2/bounds_effects.l8`, `bounds_pure_call_keeps_all` and
+  `bounds_after_call`: read the state's `rows_view` and `numeric_view` rather
+  than unrelated aliases through storage. Their lengths are directly covered
+  by the `BoundsState` invariant, so both runtime capacity checks went away.
+- [x] `src2/bounds_state.l8`, `bounds_storage`: replaced the negative-count
+  check with a proved function requirement, removed the final allocation-size
+  check using `bounds_storage_new`'s return guarantee, and protected capacity
+  doubling against integer overflow.
+- [x] `programs/terminal/scene.l8`, diff counts: removed the redundant
+  `old_count/new_count > 240` check. The verifier proves the upper bound
+  from the region coordinates and the retained lower-bound check.
+- [x] `src2/bounds_solver.l8`, graph search cache: strengthened the cache
+  invariant to establish a spare queue slot. A search contract now carries
+  that queue relationship, removing two redundant queue-capacity checks and
+  the duplicate queued-capacity check in the cached path.
 
-## Internal proof candidates
+## Reviewed guards retained for real failure cases
 
-- [ ] `src2/browse.l8`, `browse_tok_start`: the `p <= len(src)` check
-  accompanies a lexer token position. Investigate whether a verified token
-  invariant or tokenizer return contract can establish it. Do not drop it
-  without proving the token position.
-- [ ] `src2/bounds_state.l8`, `bounds_storage`: the negative-count,
-  copied-prefix capacity, and final capacity checks around row copying may
-  belong in a stronger `BoundsState`/`BoundsStorage` invariant and a count
-  contract. Account for integer overflow in capacity doubling.
-- [ ] `src2/bounds_state.l8`, `bounds_numeric_at` and
-  `bounds_numeric_ref`: the `storage != null` branch looks redundant with
-  `state.count <= len(state.numeric_view)`. Check whether a null storage can
-  validly have a nonempty view before simplifying.
-- [ ] `src2/bounds_effects.l8`, `bounds_pure_call_keeps_all` and
-  `bounds_after_call`: both test `f.count` against the storage row and
-  numeric capacities. A state invariant currently covers its views but does
-  not directly relate those views to `storage`.
-- [ ] `src2/bounds_solver.l8`, graph intern/search/cache functions:
-  repeated node, slot, queue, and distance capacity checks may be derivable
-  from graph and cache invariants. Verify that graph growth cannot exceed
-  the allocated term and edge tables.
-- [ ] `src2/assembler.l8` and `src2/elfpack.l8`: byte-copy and text-buffer
-  span checks use runtime `IndexOutOfBounds` branches in internal emitters.
-  Move proved cursor/capacity relationships into helper contracts where the
-  producer establishes them; retain overflow or allocation failure checks.
-- [ ] `programs/block-game/block-game-render.l8`: cell batch and vertex
-  span guards should be reviewed against allocated batch capacities and
-  producer counts. Some limit checks are real saturation behavior.
-- [ ] `programs/block-game/block-game-undo.l8`: journal and image span
-  checks mix internal proof scaffolding with validation of archived frames.
-  Separate those cases before changing any branch.
-- [ ] `programs/block-game/block-game-plant-render.l8`,
-  `prepare_plants`: mesh range checks and the `p.data` span check may be
-  expressible through validated plant shape, block count, and render-buffer
-  invariants. A negative shape alone does not establish a valid species.
-- [ ] `programs/terminal/scene.l8` and `programs/terminal/render.l8`:
-  region, palette, glyph, and vertex offset checks are candidates where
-  positions come from internal layout calculations. Keep checks for decoded
-  escape sequences or external font data.
-- [ ] `programs/freetype/ft.l8`: glyph-cache and hash-table bounds checks
-  may be replaced by cache invariants, but library results and Unicode input
-  remain validation boundaries.
+- [x] `src2/browse.l8`, `browse_tok_start`: keep `p <= len(src)` for the
+  token position. A token is a linked parser object without a source-relative
+  invariant; a malformed position can make `src[p - 1]` invalid.
+- [x] `src2/bounds_state.l8`, `bounds_storage` copied-prefix check: keep the
+  source/destination capacity check when copying an arena-reused fact buffer.
+  `BoundsState` guarantees its direct views, but its separately mutable
+  `storage` reference is not tied to those views by the type system. A nested
+  record invariant would be unsound without tracking writes through aliases.
+- [x] `src2/bounds_solver.l8`, remaining graph IDs and capacities: keep the
+  checks on IDs read from hash slots, adjacency links, and work queues. Their
+  contents can be stale across graph reloads; array-length invariants alone
+  do not establish valid element values. Term and edge capacity limits are
+  also genuine fixed-table limits.
+- [x] `src2/assembler.l8` and `src2/elfpack.l8`: keep span checks for
+  assembly input, ELF relocation offsets, and section-buffer growth. The
+  writers take arbitrary offsets or use mutable global cursors. In
+  `as_emit_b2/b3`, returning an ensured buffer from `as_ensure_cap` alone did
+  not prove the `n + 1`/`n + 2` accesses; the existing checks also protect
+  overflow and invalid cursors.
+- [x] `programs/block-game/block-game-render.l8`: keep the grass-cell cap,
+  complete-instance span, and copy-span checks. They prevent an overfull
+  fixed batch or a partial vertex write if produced counts exceed capacity.
+- [x] `programs/block-game/block-game-undo.l8`: keep ring-journal and image
+  span checks. Journal words are read back as sizes and indices; validation
+  prevents corrupt actions and archived frames from driving an invalid copy.
+- [x] `programs/block-game/block-game-plant-render.l8`, `prepare_plants`:
+  keep mesh and instance-span checks. `plant_block` means only that shape is
+  negative; it does not prove a valid species and variant. The data buffer is
+  fixed at `LEVEL_MAX_BLOCKS * 4` floats.
+- [x] `programs/terminal/scene.l8` and `programs/terminal/render.l8`:
+  keep scene-region capacity, the diff-window lower bound, full-quad span,
+  and palette fallback checks. These enforce fixed table limits or handle colors decoded
+  from terminal input.
+- [x] `programs/freetype/ft.l8`: keep the glyph-capacity and hash-size
+  checks. The glyph table fills with distinct code points and FreeType
+  supplies glyph dimensions; neither is bounded by a verifier fact about a
+  particular array index.
 
-## Boundary checks to retain unless their input contract changes
+## Other input boundaries
 
 - `programs/http`, `programs/websocket`, and `stdlib/raw_write.l8` validate
   network or syscall data, counts, and slices.
@@ -70,6 +82,5 @@ behavior before changing it. Keep checks on input and I/O boundaries.
 - `src2/compiler.l8` and `src2/parse.l8` validate user source spans and
   imported files before parsing or copying.
 
-The scan covered bounds-related guards in compiler, standard library, and
-program sources plus the commits that removed checked indexing. It groups
-repeated patterns rather than listing every individual guard.
+This is grouped by proof pattern rather than one entry per line. The review
+also checked the commits that removed checked indexing.
