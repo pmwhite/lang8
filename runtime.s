@@ -67,7 +67,7 @@ heap_ptr:  .skip 8
 heap_base: .skip 8
 heap_end:  .skip 8
 initial_envp: .skip 8
-.equ HEAP_SIZE, 512*1024*1024
+.equ HEAP_SIZE, 768*1024*1024
 
 # Current exception (set by l8_raise, read by catch codegen)
 l8_exc_tag: .skip 8
