@@ -17,6 +17,10 @@ fixed-capacity boundaries prevent real failures.
 - [x] `src2/bounds_state.l8`, `bounds_numeric_at` and `bounds_numeric_ref`:
   removed `storage != null` from view lookups. The record's direct invariant
   already gives `count <= len(numeric_view)`, which is the actual array read.
+- [x] `src2/bounds_state.l8`, `bounds_direct_evidence`: removed the
+  `count > len(storage.numeric)` exception. The lookup now reads
+  `state.numeric_view`, whose length is covered by the `BoundsState` record
+  invariant. Hash buckets still come from storage.
 - [x] `src2/bounds_effects.l8`, `bounds_pure_call_keeps_all` and
   `bounds_after_call`: read the state's `rows_view` and `numeric_view` rather
   than unrelated aliases through storage. Their lengths are directly covered
@@ -91,3 +95,38 @@ fixed-capacity boundaries prevent real failures.
 
 This is grouped by proof pattern rather than one entry per line. The review
 also checked the commits that removed checked indexing.
+
+## Explicit exception audit
+
+Reviewed every explicit `raise` in `src2`, `stdlib`, and `programs` (excluding
+the mirrored `src1` compiler and tests). The remaining sites have these roles:
+
+- `src2/compiler.l8` and `src2/tags.l8`: source errors are diagnostics for
+  invalid user programs. The other compiler raises protect path and name
+  lengths from integer overflow before allocation or copying.
+- `src2/bounds_state.l8` and `src2/bounds_effects.l8`: remaining raises
+  protect allocation growth and copied arena storage against overflow or
+  mismatched capacities. Function count and write-table growth are likewise
+  bounded by the signed integer range.
+- `src2/bounds_solver.l8`: graph capacity and IDs read from mutable slots,
+  adjacency, and cached workspaces are checked before access. The IDs are
+  stored as integers, so array and graph size invariants do not prove their
+  contents valid after graph reuse.
+- `src2/assembler.l8` and `src2/elfpack.l8`: assembler cursors, symbol links,
+  relocation offsets, string-table spans, and ELF output spans are validated
+  at their respective capacity or patch boundaries.
+- `stdlib/write.l8`: `InvalidRange` reports caller-supplied spans; `IoError`
+  reports syscall results and zero-progress writes.
+- `programs/block-game/level.l8` and `block-game-undo.l8`: room totals,
+  journal lengths, archived frame spans, and rewind metadata are checked when
+  reconstructed from mutable or saved state.
+- `programs/block-game/block-game-render.l8` and
+  `block-game-plant-render.l8`: fixed instance buffers and batch copy spans
+  are checked before a complete record is written.
+- `programs/terminal/scene.l8` and `render.l8`: fixed region and vertex
+  buffers and diff-window lengths are checked at their capacity boundaries.
+
+Some remaining checks also expose proof-language limits: graph slot values,
+saved journal words, and room list lengths do not have element-value or
+cross-object invariants. Removing those checks safely would require changing
+the representations or adding proofs that survive mutation and reuse.
