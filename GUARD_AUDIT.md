@@ -80,33 +80,38 @@ fixed-capacity boundaries prevent real failures.
 
 ## Reviewed guards still requiring validation or proof
 
+- [ ] `programs/block-game/level.l8`, `assign_block_homes`: prove that the
+  per-room counts and reconstructed home lists describe the same blocks,
+  including their total fit in `RoomBlockIds.indices`.
 - [x] `src2/browse.l8`, `browse_tok_start`: keep `p <= len(src)` for the
   token position. A token is a linked parser object without a source-relative
   invariant; a malformed position can make `src[p - 1]` invalid.
-- [x] `src2/bounds_solver.l8`, remaining graph IDs and capacities: keep the
-  checks on IDs read from hash slots, adjacency links, and work queues for
-  now. The verifier does not yet prove that graph construction and reloads
-  preserve valid element values. These internal checks mark unresolved proof
-  obligations. Term and edge capacity limits are fixed-table limits.
-- [x] `src2/assembler.l8` and `src2/elfpack.l8`, input/patch and
-  section-buffer checks: keep validation for assembler text, relocation
-  offsets read from patch lists, and cursor overflow. In `as_emit_b2/b3`, a
-  returned buffer from `as_ensure_cap` alone does not yet prove the
-  `n + 1`/`n + 2` accesses.
-- [x] `programs/block-game/block-game-render.l8`: keep the complete-instance
-  span and copy-span checks. They prevent a partial vertex write if produced
-  counts exceed capacity.
-- [x] `programs/block-game/block-game-undo.l8`: keep ring-journal and image
-  span checks. Journal words are read back as sizes and indices; validation
-  prevents corrupt actions and archived frames from driving an invalid copy.
-- [x] `programs/block-game/block-game-plant-render.l8`, `prepare_plants`:
-  keep mesh and instance-span checks. `plant_block` means only that shape is
-  negative; it does not prove a valid species and variant. The data buffer is
-  fixed at `LEVEL_MAX_BLOCKS * 4` floats.
-- [x] `programs/terminal/scene.l8` and `programs/terminal/render.l8`:
-  keep scene-region capacity, the diff-window lower bound, full-quad span,
-  and palette fallback checks. These enforce fixed table limits or handle colors decoded
-  from terminal input.
+- [ ] `src2/bounds_solver.l8`, remaining graph IDs: prove IDs read from hash
+  slots, edge targets, and work queues refer to current nodes. Pointer links
+  removed the adjacency-index case; the stored integer values still need a
+  representation or verifier proof that survives graph reloads.
+- [x] `src2/bounds_solver.l8`, graph capacity: term and edge limits are
+  fixed-table allocation boundaries.
+- [ ] `src2/assembler.l8`, internal symbol links and emission cursors: carry
+  their bounds through the symbol table and section-buffer representations.
+  In `as_emit_b2/b3`, a returned buffer from `as_ensure_cap` alone does not
+  yet prove the `n + 1`/`n + 2` accesses.
+- [x] `src2/assembler.l8` and `src2/elfpack.l8`, input/patch spans: keep
+  validation for assembler text, relocation offsets read from patch lists,
+  and final output capacity or integer overflow.
+- [ ] `programs/block-game/block-game-render.l8`: prove complete-instance and
+  batch copy spans from cache dimensions and accumulated instance counts.
+  The current checks prevent a partial vertex write if counts exceed capacity.
+- [ ] `programs/block-game/block-game-undo.l8`: model in-memory journal words
+  as valid action sizes and indices so internal reads and copies can be
+  verified. Checks on archived frame data remain input validation.
+- [ ] `programs/block-game/block-game-plant-render.l8`, `prepare_plants`:
+  prove each computed mesh instance span fits the fixed
+  `LEVEL_MAX_BLOCKS * 4` buffer. The mesh lookup still checks species and
+  variant values that may originate in level data.
+- [ ] `programs/terminal/scene.l8` and `programs/terminal/render.l8`: prove
+  region and quad counts fit their fixed buffers. The diff-window lower bound
+  and palette fallback still handle values derived from terminal input.
 - [x] `programs/freetype/ft.l8`: keep the glyph-capacity and hash-size
   checks. The glyph table fills with distinct code points and FreeType
   supplies glyph dimensions; neither is bounded by a verifier fact about a
