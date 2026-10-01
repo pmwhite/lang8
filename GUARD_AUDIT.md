@@ -33,6 +33,14 @@ fixed-capacity boundaries prevent real failures.
   that queue relationship, removing two redundant queue-capacity checks and
   the duplicate queued-capacity check in the cached path.
 
+- [x] `src2/assembler.l8`, `as_wr_le`: removed its runtime guard and
+  gave the generic byte writer and fixed-width wrappers span requirements.
+  Variable section emission now uses the existing byte-pair emitter, which
+  owns buffer growth and cursor validation. Patch offsets are validated at
+  `as_patch_i32`; ELF output checks a complete section, symbol, or relocation
+  record before writing its fields. A local alias keeps the section output
+  buffer's length stable across writer calls.
+
 ## Reviewed guards retained for real failure cases
 
 - [x] `src2/browse.l8`, `browse_tok_start`: keep `p <= len(src)` for the
@@ -71,19 +79,6 @@ fixed-capacity boundaries prevent real failures.
   checks. The glyph table fills with distinct code points and FreeType
   supplies glyph dimensions; neither is bounded by a verifier fact about a
   particular array index.
-
-## Remaining verifier work
-
-- [ ] `src2/assembler.l8`, `as_wr_le`: the generic writer's full span guard
-  is overly broad for ordinary object emission. Most callers write fixed
-  width fields into buffers sized immediately beforehand. Trial conversion
-  to `requires (0 <= off && n <= len(buf) - off)` compiled the writer and its
-  width wrappers, but failed at `as_emit_i32` even after using the buffer
-  returned by `as_ensure_cap`. The verifier does not yet transfer the proved
-  reservation `off + width <= len(buf)` into its equivalent remaining-span
-  requirement at that call. Finish this by improving that proof rule,
-  propagating writer contracts through the object-layout loops, and keeping
-  a targeted check where a patch offset is consumed from a patch list.
 
 ## Other input boundaries
 
