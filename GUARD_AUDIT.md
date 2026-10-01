@@ -57,6 +57,10 @@ fixed-capacity boundaries prevent real failures.
 - [x] `src2/assembler.l8`, `as_zcopy`: replaced its span exception with a
   precondition. Both callers already own capacity checks; the string-table
   check now runs before the copy, where it also prevents a partial write.
+- [x] `programs/block-game/block-game-render.l8`, grass cell count: visit the
+  9 by 9 grid candidates with a bounded integer loop. Its invariant proves
+  `n <= 81` without the runtime cap check. Float coordinates still advance
+  one step at a time, preserving the original rounding.
 
 ## Reviewed guards still requiring validation or proof
 
@@ -78,9 +82,9 @@ fixed-capacity boundaries prevent real failures.
   offsets read from patch lists, and cursor overflow. In `as_emit_b2/b3`, a
   returned buffer from `as_ensure_cap` alone does not yet prove the
   `n + 1`/`n + 2` accesses.
-- [x] `programs/block-game/block-game-render.l8`: keep the grass-cell cap,
-  complete-instance span, and copy-span checks. They prevent an overfull
-  fixed batch or a partial vertex write if produced counts exceed capacity.
+- [x] `programs/block-game/block-game-render.l8`: keep the complete-instance
+  span and copy-span checks. They prevent a partial vertex write if produced
+  counts exceed capacity.
 - [x] `programs/block-game/block-game-undo.l8`: keep ring-journal and image
   span checks. Journal words are read back as sizes and indices; validation
   prevents corrupt actions and archived frames from driving an invalid copy.
