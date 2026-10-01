@@ -53,6 +53,10 @@ fixed-capacity boundaries prevent real failures.
 - [x] `src2/bounds_solver.l8`, adjacency traversal: store pointers to edge
   records in the graph heads and links. Appending an edge proves its address
   once; searches no longer need to validate integer adjacency links.
+- [x] `src2/bounds_solver.l8`, graph search source: the search now requires a
+  source ID below the graph's node count. Query construction preserves the
+  larger of its source and target IDs through graph loading, so both remain
+  valid at the search call.
 
 - [x] `src2/assembler.l8`, `as_wr_le`: removed its runtime guard and
   gave the generic byte writer and fixed-width wrappers span requirements.
