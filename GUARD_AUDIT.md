@@ -41,6 +41,9 @@ fixed-capacity boundaries prevent real failures.
   invariant to establish a spare queue slot. A search contract now carries
   that queue relationship, removing two redundant queue-capacity checks and
   the duplicate queued-capacity check in the cached path.
+- [x] `src2/bounds_solver.l8`, `bounds_graph_distance`: moved the target-ID
+  check into a precondition. The query paths refresh the interned target ID
+  after graph loading, so the intern contract proves the final graph bound.
 
 - [x] `src2/assembler.l8`, `as_wr_le`: removed its runtime guard and
   gave the generic byte writer and fixed-width wrappers span requirements.
@@ -49,6 +52,9 @@ fixed-capacity boundaries prevent real failures.
   `as_patch_i32`; ELF output checks a complete section, symbol, or relocation
   record before writing its fields. A local alias keeps the section output
   buffer's length stable across writer calls.
+- [x] `src2/assembler.l8`, `as_zcopy`: replaced its span exception with a
+  precondition. Both callers already own capacity checks; the string-table
+  check now runs before the copy, where it also prevents a partial write.
 
 ## Reviewed guards still requiring validation or proof
 
