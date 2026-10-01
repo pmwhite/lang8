@@ -48,12 +48,11 @@ fixed-capacity boundaries prevent real failures.
   contents can be stale across graph reloads; array-length invariants alone
   do not establish valid element values. Term and edge capacity limits are
   also genuine fixed-table limits.
-- [x] `src2/assembler.l8` and `src2/elfpack.l8`: keep span checks for
-  assembly input, ELF relocation offsets, and section-buffer growth. The
-  writers take arbitrary offsets or use mutable global cursors. In
-  `as_emit_b2/b3`, returning an ensured buffer from `as_ensure_cap` alone did
-  not prove the `n + 1`/`n + 2` accesses; the existing checks also protect
-  overflow and invalid cursors.
+- [x] `src2/assembler.l8` and `src2/elfpack.l8`, input/patch and
+  section-buffer checks: keep validation for assembler text, relocation
+  offsets read from patch lists, and cursor overflow. In `as_emit_b2/b3`, a
+  returned buffer from `as_ensure_cap` alone does not yet prove the
+  `n + 1`/`n + 2` accesses.
 - [x] `programs/block-game/block-game-render.l8`: keep the grass-cell cap,
   complete-instance span, and copy-span checks. They prevent an overfull
   fixed batch or a partial vertex write if produced counts exceed capacity.
@@ -72,6 +71,19 @@ fixed-capacity boundaries prevent real failures.
   checks. The glyph table fills with distinct code points and FreeType
   supplies glyph dimensions; neither is bounded by a verifier fact about a
   particular array index.
+
+## Remaining verifier work
+
+- [ ] `src2/assembler.l8`, `as_wr_le`: the generic writer's full span guard
+  is overly broad for ordinary object emission. Most callers write fixed
+  width fields into buffers sized immediately beforehand. Trial conversion
+  to `requires (0 <= off && n <= len(buf) - off)` compiled the writer and its
+  width wrappers, but failed at `as_emit_i32` even after using the buffer
+  returned by `as_ensure_cap`. The verifier does not yet transfer the proved
+  reservation `off + width <= len(buf)` into its equivalent remaining-span
+  requirement at that call. Finish this by improving that proof rule,
+  propagating writer contracts through the object-layout loops, and keeping
+  a targeted check where a patch offset is consumed from a patch list.
 
 ## Other input boundaries
 
