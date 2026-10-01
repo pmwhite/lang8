@@ -65,10 +65,10 @@ l8 build [--profile|-p] file.l8 -o file
 ```
 
 Both source stages and the saved bootstrap require a compile-time proof for
-`a[i]` during `compile` and `build`. Use `a![i]` for an explicit runtime check,
-with `raises IndexOutOfBounds` or a matching handler, as described in
-[`BOUNDS.md`](BOUNDS.md). The checked-indexing verifier and its performance
-improvements have been promoted together to `src1/` and `bootstrap`.
+`a[i]` during `compile` and `build`, as described in [`BOUNDS.md`](BOUNDS.md).
+Programs that signal invalid indexes explicitly must define their own
+exception. The verifier and its performance improvements are present in
+`src1/` and `bootstrap`.
 
 `build` sends typed compiler operations directly to the assembler's in-memory
 section, symbol, relocation, and instruction encoders. It parses only the static

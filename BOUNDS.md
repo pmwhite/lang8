@@ -1,23 +1,10 @@
 # Verified array indexing
 
-L8 distinguishes proven and checked indexing at each access site:
-
-- `a[i]` requires a proof of `0 <= i < len(a)` and emits no runtime bounds check.
-- `a![i]` performs a runtime check and raises `IndexOutOfBounds` if it fails.
-  The containing function must declare `raises IndexOutOfBounds`, or a matching
-  `try`/`with` arm must catch it. The bounds pass checks reachable accesses and
-  reports an undeclared exception at the function declaration.
-
-A function-wide `raises` declaration never permits an unproved `[]` access.
-The same syntax applies to reads, writes, address-taking, fixed arrays, slices,
-and strings. Checked access has ordinary indexing precedence: `&a![i]` and
-`rows![i]![j]` are valid.
-
-A redundant `![]` produces a warning recommending `[]`; it remains valid and
-still emits its explicit runtime check. Diagnostics use final validation after
-summary inference, combine all reachable visits to a site, and ignore unreachable
-accesses. Improving a proof can therefore introduce a warning without making an
-explicitly checked program invalid.
+`a[i]` requires a proof of `0 <= i < len(a)` and emits no runtime bounds
+check. The rule applies to reads, writes, address-taking, fixed arrays, slices,
+and strings. A function-wide `raises` declaration never permits an unproved
+access. Diagnostics use final validation after summary inference, combine all
+reachable visits to a site, and ignore unreachable accesses.
 
 Ordinary control flow can establish the fact: a guard may return or raise when
 the index is invalid, and code after the guard may index the array without an
@@ -27,9 +14,8 @@ The programmer-facing concept is `index_for(a)`: an integer valid for a particul
 array value. A function can take or return such an index. Its callers may satisfy
 the requirement through a guard, a loop, a constructively valid index, or their
 own parameter requirement. Explicit contracts can state an entry requirement;
-`[]` may also infer such a requirement from parameter paths. If neither local
-facts nor a caller obligation establish the proof, the access needs `![]` and
-the exception effect.
+indexing may also infer such a requirement from parameter paths. If neither
+local facts nor a caller obligation establish the proof, compilation fails.
 
 The verifier tracks numeric ranges, comparisons with array lengths, and small
 constant offsets for lookahead. It learns from assignments, branches, short-
@@ -61,12 +47,11 @@ range reasoning, and Wuffs' requirement for a compile-time proof of each access.
 
 ## Initial implementation
 
-Both compiler stages and the saved bootstrap verify bounds during every `compile` and `build`. It rejects unproved
-`[]` accesses and emits runtime checks only for `![]` accesses. A checked access
-needs `raises IndexOutOfBounds` on its function or a matching `try`/`with` arm. After a successful read or write, the verifier can use the checked index bounds
-on the normal continuation. This can justify a later contract call or count
-update. These facts are attached to source paths only when evaluating the index
-cannot mutate those paths.
+Both compiler stages and the saved bootstrap verify bounds during every
+`compile` and `build`. They reject unproved indexing. A successful access
+contributes its established bounds to the normal continuation. These facts
+are attached to source paths only when evaluating the index cannot mutate
+those paths.
 
 `index_for` is a reserved keyword. `i: index_for(a)` declares a function parameter
 whose value is valid for array parameter `a`. Explicit contracts and `index_for`
@@ -103,7 +88,7 @@ compile-time conditions.
 
 A proof-required access to an array parameter or its direct field can infer
 an entry requirement. For example, `a[5]` requires callers to prove
-`len(a) >= 6`. Checked accesses never infer these requirements. An explicit
+`len(a) >= 6`. An explicit
 `requires` clause can also make an access proved, and direct callers must
 establish both explicit and inferred requirements. Writes that invalidate a
 required fact discard it within the callee, so an entry requirement does not
@@ -207,10 +192,9 @@ guarantee. The current verifier already tracks relations such as
 record invariant differs by requiring that relation for every value of the
 type, at construction and after each relevant write.
 
-Explicit checked indexing (`a![i]`) is the runtime bridge. If the verifier cannot prove an index,
-the generated code checks `0 <= i < len(a)` and raises `IndexOutOfBounds` on
-failure. A guard can establish a reusable fact for later accesses or satisfy
-an `index_for(a)` parameter:
+A guard can establish a reusable fact for later accesses or satisfy an
+`index_for(a)` parameter. When a function chooses to signal a bad index, it
+must declare its exception explicitly, for example `exception IndexOutOfBounds;`:
 
 ```l8
 if (i < 0 || i >= len(a)) raise IndexOutOfBounds;
@@ -235,18 +219,15 @@ expressions or allocate individual graph nodes and edges. Each function is
 analyzed under its declared entry requirements; the verifier no longer
 traverses callees separately for each caller context.
 
-Unproved index arithmetic requires `![]` and the exception effect. A guard or loop invariant
-can establish capacity when an effect-free access is needed.
+Unproved index arithmetic requires a guard, contract, or loop invariant.
 
 ## Migration
 
 The compiler sources and active standard-library, compiler, block-game, and
-terminal fixtures use the checked/proven distinction. `./build.sh all` runs the compiler
-and runtime suites. Dynamic accesses use `![]` and declare the exception effect where the verifier
-cannot prove their bounds. The verifier has been promoted to both source stages
-and the saved bootstrap. During migration, stage 1 accepted `![]` as legacy
-indexing while stage 2 enforced the distinction. Site-specific warnings marked
-unproved accesses before unproved `[]` became an error.
+terminal fixtures use proved indexing. `./build.sh all` runs the compiler and
+runtime suites. The verifier is present in both source stages and the saved
+bootstrap. `IndexOutOfBounds` is an ordinary exception name that programs
+may define for their own validation; indexing does not raise it implicitly.
 
 
 ## Checker architecture
@@ -280,12 +261,9 @@ refined; literal tests retain facts from an unconditionally evaluated operand.
 Each active catch handler accumulates exceptional predecessors. An explicit
 raise sends its state to the nearest matching handler; a direct call sends its
 state after effect invalidation to handlers for its declared exceptions. Unknown
-calls conservatively notify all active handlers. An explicit checked index sends the
-state before its successful-check facts to the `IndexOutOfBounds` handler. Normal
-try exits and reachable handler exits then join in the usual way. During summary
-inference, only explicit checked accesses contribute index-exception edges.
-Checking whether an explicit check is redundant must not infer additional entry
-requirements. Proven accesses may infer parameter requirements that callers must prove; they are
+calls conservatively notify all active handlers. Normal try exits and reachable
+handler exits then join in the usual way. Proven accesses may infer parameter
+requirements that callers must prove; they are
 validated as obligations after inference. When a scalar is overwritten, the verifier
 preserves consequences between surviving values by composing unconditional
 difference bounds through its old value before forgetting it.
@@ -299,9 +277,9 @@ the loop body preserves every field in the path.
 
 After an access at `a[i + k]` succeeds, a nonnegative `i` with positive `k`
 is also in bounds. The verifier carries this fact across the normal edge of
-both checked and proved accesses, and discards it if the array changes.
+proved accesses, and discards it if the array changes.
 
-Pure difference entailment also avoids inserting redundant successful-check
+Pure difference entailment also avoids inserting redundant successful-access
 facts; it never uses edges requiring additional alias assumptions.
 Direct numeric lookup returns evidence (a bound and any separation assumptions)
 without modifying contracts. Numeric proof consumers explicitly commit the
@@ -310,9 +288,9 @@ and never commit assumptions. Higher-level proof routines still perform this
 commitment, so a Boolean proof helper is not generally a pure entailment query.
 
 The adapter still represents values using source paths. In particular, an index
-expression that may mutate the array path keeps its runtime check, since the
-array value was evaluated before the index. General immutable evaluated values
-and a unified predicate representation remain separate follow-up work.
+expression that may mutate the array path cannot use facts about the path after
+evaluation to justify the captured array value. General immutable evaluated
+values and a unified predicate representation remain separate follow-up work.
 
 Facts occupy contiguous row tables. A state is an immutable prefix of a shared
 append-only buffer. Appending at the newest prefix reuses capacity; extending
@@ -361,7 +339,7 @@ into the bound on insertion, and strict comparisons subtract one. Every numeric
 row has the same `Difference` kind; only separation, freshness, and cursor
 provenance use other kinds. Numeric lookup, copying, invalidation, and branch
 joins share this representation. Thus length guards and
-successful checked accesses can contribute the same fact at a join. Two different
+successful proved accesses can contribute the same fact at a join. Two different
 bounds for the same pair join at the weaker bound. Copying a returned or joined
 integer preserves its relations to other stable values.
 
@@ -452,7 +430,7 @@ numeric domain when possible. Add a separate fact kind only for information the
 difference domain cannot represent, such as freshness or cursor provenance.
 Each extension must specify mutation dependencies, branch-join behavior, and
 loop-widening behavior. A new proof must respect machine arithmetic and the
-identity of the values checked; no rule may turn a runtime check into an assumed contract.
+identity of the values proved; no rule may assume an unproved bound.
 
 `tests/compiler/bounds_engine_tables.l8` compares the solver with an independent
 all-pairs reference on 40 feasible generated graphs with negative edges. It also

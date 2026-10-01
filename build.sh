@@ -69,7 +69,6 @@ print_summary() {
     printf 'total: %d.%03ds\n' "$((total / 1000))" "$((total % 1000))"
   fi
   printf 'logs: %s\n' "$LOG_DIR"
-  python3 tools/count_checked_accesses.py
 }
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -217,15 +216,12 @@ run_compiler_tests() {
   grep -q '^    if (true) {$' "$BUILD/control-format.l8" || die 'commented control body lost its braces'
   grep -q 'Keep this comment with its block' "$BUILD/control-format.l8" || die 'commented control body lost its comment'
   expect_source "$tool" "$BUILD/control-format.l8"
-  "./$tool" fmt tests/compiler/checked_access_forms.l8 >"$BUILD/checked-access-formatted.l8"
-  "./$tool" fmt "$BUILD/checked-access-formatted.l8" >"$BUILD/checked-access-formatted-again.l8"
-  cmp -s "$BUILD/checked-access-formatted.l8" "$BUILD/checked-access-formatted-again.l8" || die 'checked access formatting is not stable'
-  grep -Fq '&a![i]' "$BUILD/checked-access-formatted.l8" || die 'checked address lost its marker'
-  grep -Fq 'a![i]![j]' "$BUILD/checked-access-formatted.l8" || die 'nested checked access lost its markers'
-  expect_source "$tool" "$BUILD/checked-access-formatted.l8"
-  "./$tool" compile tests/compiler/checked_access_redundant.l8 >"$BUILD/checked-access-explicit.s" 2>"$BUILD/checked-access-explicit.err"
-  grep -q '^  jae ' "$BUILD/checked-access-explicit.s" || die 'explicit checked access lost its runtime check'
-  "./$tool" compile tests/compiler/checked_access_unreachable.l8 >"$BUILD/checked-access-unreachable.s"
+  "./$tool" fmt tests/compiler/bounds_index_forms.l8 >"$BUILD/index-forms-formatted.l8"
+  "./$tool" fmt "$BUILD/index-forms-formatted.l8" >"$BUILD/index-forms-formatted-again.l8"
+  cmp -s "$BUILD/index-forms-formatted.l8" "$BUILD/index-forms-formatted-again.l8" || die 'index formatting is not stable'
+  grep -Fq '&a[i]' "$BUILD/index-forms-formatted.l8" || die 'indexed address was not formatted'
+  grep -Fq 'row[j]' "$BUILD/index-forms-formatted.l8" || die 'nested indexing was not formatted'
+  expect_source "$tool" "$BUILD/index-forms-formatted.l8"
   check_optional_semis "$tool"
   "./$tool" forlint tests/compiler/forlint.l8 2>"$BUILD/forlint.err"
   grep -q 'while loop can use for i in 0..end' "$BUILD/forlint.err" || die 'missing ranged for suggestion'

@@ -56,9 +56,8 @@ and runs them in sorted order. Adding an annotated file needs no build-script
 entry. `build.sh` runs the stage-1 subset and the full stage-2 set. Formatting,
 warning-location, and other multi-step checks still live in the build script.
 
-The `checked_access_*` fixtures cover site-specific checked indexing (`a![i]`),
-proof-required indexing (`a[i]`), redundant-check warnings, unreachable accesses,
-and loop revisits. The full compiler test step also checks formatting of checked
-address-taking and nested accesses, and that a redundant explicit check still
-appears in generated code. Older bounds-failure fixtures deliberately retain
-unproved `[]`; declaring or catching `IndexOutOfBounds` does not authorize them.
+The bounds fixtures cover proof-required indexing, unreachable accesses,
+loop revisits, address-taking, and nested accesses. Older bounds-failure
+fixtures deliberately retain unproved `[]`; declaring or catching
+`IndexOutOfBounds` does not authorize them. A separate fixture verifies that
+the removed runtime-check syntax is rejected.
