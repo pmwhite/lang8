@@ -2091,35 +2091,51 @@ crate_idx(i: int, slot: int): int {
     i * CRATE_HIST + slot
 }
 
+type CrateCursor = {
+    starts: []int;
+    counts: []int
+} invariant (len(starts) == LEVEL_MAX_BLOCKS && len(counts) == LEVEL_MAX_BLOCKS, forall start in starts (0 <= start && start < CRATE_HIST), forall count in counts (1 <= count && count <= CRATE_HIST))
+
+new_crate_cursor(): *CrateCursor@new {
+    new CrateCursor { starts: new int[LEVEL_MAX_BLOCKS](0), counts: new int[LEVEL_MAX_BLOCKS](1) }
+}
+
 crate_idx_bounded(i: int, slot: int): int requires (0 <= i && i < 2048 && 0 <= slot && slot < 8) ensures (0 <= returned && returned < 16384) {
     i * CRATE_HIST + slot
+}
+
+crate_cursor_slot(start: int, count: int): int requires (0 <= start && start < 8 && 1 <= count && count <= 8) ensures (0 <= returned && returned < 8) {
+    sum: int = start + count + 7;
+    sum % 8
+}
+
+crate_next_slot(start: int, count: int): int requires (0 <= start && start < 8 && 1 <= count && count <= 8) ensures (0 <= returned && returned < 8) {
+    sum: int = start + count;
+    sum % 8
 }
 
 crate_boot(
     blocks: []Block,
     n: int,
     pose: []int,
-    hs: []int,
-    hn: []int,
+    cursor: *CrateCursor,
     t0: []int
-) requires (0 <= n && n <= len(blocks) && n <= len(hs) && n <= len(hn) && n <= len(t0) && n <= 2048 && len(pose) >= 16384) {
+) requires (0 <= n && n <= len(blocks) && n <= len(t0) && n <= LEVEL_MAX_BLOCKS && len(pose) >= 16384) {
     for i in 0..n {
         pi: int = crate_idx_bounded(i, 0);
         pose[pi] = pack_pos(blocks[i].column, blocks[i].row, blocks[i].layer, blocks[i].mounted);
-        hs[i] = 0;
-        hn[i] = 1;
+        cursor.starts[i] = 0;
+        cursor.counts[i] = 1;
         t0[i] = 0
     }
 }
 
-crate_tail(
-    i: int,
-    pose: []int,
-    hs: []int,
-    hn: []int
-) raises IndexOutOfBounds: int requires (0 <= i && i < len(hs) && i < len(hn)) {
-    slot: int = crate_idx(i, (hs[i] + hn[i] - 1) % CRATE_HIST);
-    pose![slot]
+crate_tail(i: int, pose: []int, cursor: *CrateCursor): int requires (0 <= i && i < LEVEL_MAX_BLOCKS && len(pose) >= 16384) {
+    start: int = cursor.starts[i];
+    count: int = cursor.counts[i];
+    tail: int = crate_cursor_slot(start, count);
+    slot: int = crate_idx_bounded(i, tail);
+    pose[slot]
 }
 
 crate_append(
@@ -2128,27 +2144,26 @@ crate_append(
     now: int,
     pose: []int,
     ms: []int,
-    hs: []int,
-    hn: []int,
+    cursor: *CrateCursor,
     t0: []int
-) raises IndexOutOfBounds requires (0 <= i && i < len(hs) && i < len(hn) && i < len(t0)) {
-    prev: int = crate_tail(i, pose, hs, hn);
+) requires (0 <= i && i < LEVEL_MAX_BLOCKS && i < len(t0) && len(pose) >= 16384 && len(ms) >= 16384) {
+    prev: int = crate_tail(i, pose, cursor);
     if (packed == prev) return;
-    hnv: int = hn[i];
-    hsv: int = hs[i];
+    hnv: int = cursor.counts[i];
+    hsv: int = cursor.starts[i];
     if (hnv == 1) t0[i] = now;
     if (hnv >= CRATE_HIST) {
         hsv = (hsv + 1) % CRATE_HIST;
         hnv = hnv - 1;
-        hs[i] = hsv
+        cursor.starts[i] = hsv
     }
-    slot: int = (hsv + hnv) % CRATE_HIST;
-    pos: int = crate_idx(i, slot);
-    pose![pos] = packed;
+    slot: int = crate_next_slot(hsv, hnv);
+    pos: int = crate_idx_bounded(i, slot);
+    pose[pos] = packed;
     d: int = pose_step_dur(prev, packed);
     if (d < 200) d = 200;
-    ms![pos] = d;
-    hn[i] = hnv + 1
+    ms[pos] = d;
+    cursor.counts[i] = hnv + 1
 }
 
 crate_commit_changed(
@@ -2157,13 +2172,12 @@ crate_commit_changed(
     now: int,
     pose: []int,
     ms: []int,
-    hs: []int,
-    hn: []int,
+    cursor: *CrateCursor,
     t0: []int
-) raises IndexOutOfBounds requires (0 <= n && n <= len(blocks) && n <= len(hs) && n <= len(hn) && n <= len(t0)) {
+) requires (0 <= n && n <= len(blocks) && n <= LEVEL_MAX_BLOCKS && n <= len(t0) && len(pose) >= 16384 && len(ms) >= 16384) {
     for i in 0..n {
         p: int = pack_pos(blocks[i].column, blocks[i].row, blocks[i].layer, blocks[i].mounted);
-        crate_append(i, p, now, pose, ms, hs, hn, t0)
+        crate_append(i, p, now, pose, ms, cursor, t0)
     }
 }
 
@@ -2171,27 +2185,27 @@ crate_drain(
     n: int,
     now: int,
     ms: []int,
-    hs: []int,
-    hn: []int,
+    cursor: *CrateCursor,
     t0: []int
-) raises IndexOutOfBounds requires (0 <= n && n <= len(hs) && n <= len(hn) && n <= len(t0)) {
+) requires (0 <= n && n <= LEVEL_MAX_BLOCKS && n <= len(t0) && len(ms) >= 16384) {
     for i in 0..n {
-        hnv: int = hn[i];
-        hsv: int = hs[i];
+        hnv: int = cursor.counts[i];
+        hsv: int = cursor.starts[i];
         started: int = t0[i];
         keep: bool = true;
         while (hnv > 1 && keep) {
-            pos: int = crate_idx(i, (hsv + 1) % CRATE_HIST);
-            dur: int = ms![pos];
+            next: int = crate_next_slot(hsv, 1);
+            pos: int = crate_idx_bounded(i, next);
+            dur: int = ms[pos];
             if (dur < 1) dur = 1;
             if (now - started < dur) keep = false else {
-                hsv = (hsv + 1) % CRATE_HIST;
+                hsv = next;
                 hnv = hnv - 1;
                 started = started + dur
             }
         }
-        hs[i] = hsv;
-        hn[i] = hnv;
+        cursor.starts[i] = hsv;
+        cursor.counts[i] = hnv;
         t0[i] = started
     }
 }
@@ -2199,21 +2213,21 @@ crate_drain(
 rewind_room_busy(
     room: int,
     room_ids: *RoomBlockIds,
-    crate_hn: []int,
+    crate_cursor: *CrateCursor,
     n: int
-): bool requires (0 <= n && n <= len(crate_hn)) {
+): bool requires (0 <= n && n <= LEVEL_MAX_BLOCKS) {
     if (room < 0 || room >= LEVEL_MAX_ROOMS) return false;
     span: RoomBlockSpan = room_ids.spans[room];
     for slot in span.start..span.end {
         i: int = room_ids.indices[slot];
-        if (i >= 0 && i < n && crate_hn[i] > 1) return true
+        if (i >= 0 && i < n && crate_cursor.counts[i] > 1) return true
     }
     false
 }
 
-any_crate_anim(crate_hn: []int, n: int): bool requires (0 <= n && n <= len(crate_hn)) {
+any_crate_anim(crate_cursor: *CrateCursor, n: int): bool requires (0 <= n && n <= LEVEL_MAX_BLOCKS) {
     for i in 0..n {
-        if (crate_hn[i] > 1) return true
+        if (crate_cursor.counts[i] > 1) return true
     }
     false
 }
@@ -2238,23 +2252,22 @@ rewind_tick(
     room_ghosting: []int,
     crate_pose: []int,
     crate_ms: []int,
-    crate_hs: []int,
-    crate_hn: []int,
+    crate_cursor: *CrateCursor,
     crate_t0: []int,
     now: int,
     pc: int,
     pr: int
 ) raises IndexOutOfBounds: bool requires (0 <= nroom && nroom <= LEVEL_MAX_ROOMS && len(rewind_n) >= LEVEL_MAX_ROOMS && len(rewind_cur) >= LEVEL_MAX_ROOMS && len(room_ghosting) >= LEVEL_MAX_ROOMS) {
-    crate_drain(n, now, crate_ms, crate_hs, crate_hn, crate_t0);
-    crate_commit_changed(blocks, n, now, crate_pose, crate_ms, crate_hs, crate_hn,
-        crate_t0);
+    crate_drain(n, now, crate_ms, crate_cursor, crate_t0);
+    crate_commit_changed(blocks, n, now, crate_pose, crate_ms, crate_cursor, crate_t0);
     dirty: bool = false;
     for r in 0..nroom {
-        if (room_ghosting[r] != 0 && !rewind_room_busy(r, room_ids, crate_hn, n)) {
+        if (room_ghosting[r] != 0 && !rewind_room_busy(r, room_ids, crate_cursor,
+            n)) {
             if (rewind_try_step(blocks, r, room_ids, room_hn, snap, rewind_n, rewind_cur,
                 room_ghosting, pc, pr)) {
-                crate_commit_changed(blocks, n, now, crate_pose, crate_ms, crate_hs,
-                    crate_hn, crate_t0);
+                crate_commit_changed(blocks, n, now, crate_pose, crate_ms, crate_cursor,
+                    crate_t0);
                 dirty = true
             }
         }
@@ -2269,24 +2282,24 @@ overlay_crate_anims(
     n: int,
     crate_pose: []int,
     crate_ms: []int,
-    crate_hs: []int,
-    crate_hn: []int,
+    crate_cursor: *CrateCursor,
     crate_t0: []int,
     block_t: []f32,
     now: int
-) raises IndexOutOfBounds requires (0 <= n && n <= len(crate_hs) && n <= len(crate_hn) && n <= len(crate_t0) && n <= len(block_t)) {
+) requires (0 <= n && n <= LEVEL_MAX_BLOCKS && n <= len(crate_t0) && n <= len(block_t) && len(crate_pose) >= 16384 && len(crate_ms) >= 16384) {
     for i in 0..n {
-        hsv: int = crate_hs[i];
-        hnv: int = crate_hn[i];
-        from_p: int = crate_tail(i, crate_pose, crate_hs, crate_hn);
+        hsv: int = crate_cursor.starts[i];
+        hnv: int = crate_cursor.counts[i];
+        from_p: int = crate_tail(i, crate_pose, crate_cursor);
         to_p: int = from_p;
         bt: f32 = 1.0;
         if (hnv > 1) {
-            from_pos: int = crate_idx(i, hsv);
-            to_pos: int = crate_idx(i, (hsv + 1) % CRATE_HIST);
-            from_p = crate_pose![from_pos];
-            to_p = crate_pose![to_pos];
-            dur: int = crate_ms![to_pos];
+            from_pos: int = crate_idx_bounded(i, hsv);
+            next: int = crate_next_slot(hsv, 1);
+            to_pos: int = crate_idx_bounded(i, next);
+            from_p = crate_pose[from_pos];
+            to_p = crate_pose[to_pos];
+            dur: int = crate_ms[to_pos];
             if (dur < 1) dur = 1;
             bt = rewind_progress(dur, dur - (now - crate_t0[i]))
         }
