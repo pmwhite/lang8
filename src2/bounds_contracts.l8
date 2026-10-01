@@ -664,6 +664,22 @@ bounds_precondition_upper(
     upper >= 0 && bounds_difference_proves(f, new_num(upper), limit, if (strict) -1 else 0)
 }
 
+// If both pieces of a span have safe numeric maxima, their sum can be
+// compared with the destination length without forming a machine sum.
+bounds_span_upper_proves(f: ?*BoundsState, count: *Expr, remaining: *Expr) raises IndexOutOfBounds: bool {
+    match remaining.kind {
+        Binary subtraction -> {
+            if (subtraction.op != BinOp.Sub) return false;
+            offset_upper: int = bounds_small_upper(subtraction.rhs, f);
+            count_upper: int = bounds_small_upper(count, f);
+            if (offset_upper < 0 || count_upper < 0 || offset_upper > 536870911 - count_upper) return false;
+            bounds_difference_proves(f, new_num(offset_upper + count_upper), subtraction.lhs,
+                0)
+        }
+        _ -> false
+    }
+}
+
 bounds_precondition_proved(e: *Expr, f: ?*BoundsState) raises IndexOutOfBounds: bool {
     match e.kind {
         LogAnd k -> bounds_precondition_proved(k.lhs, f) && bounds_precondition_proved(k.rhs,
@@ -676,7 +692,8 @@ bounds_precondition_proved(e: *Expr, f: ?*BoundsState) raises IndexOutOfBounds: 
             if (k.op == BinOp.Le) return bounds_difference_proves(f, k.lhs, k.rhs,
                 0) || bounds_num(k.lhs) == 0 && (bounds_nonnegative_term(f, k.rhs) || bounds_small_upper(k.rhs,
                 f) >= 0) || bounds_affine_le_proves(f, k.lhs, k.rhs) || bounds_bounded_sum_le(f,
-                k.lhs, k.rhs, true) || bounds_remaining_span_le(f, k.lhs, k.rhs, true);
+                k.lhs, k.rhs, true) || bounds_remaining_span_le(f, k.lhs, k.rhs, true) || bounds_span_upper_proves(f,
+                k.lhs, k.rhs) || bounds_precondition_upper(f, k.lhs, k.rhs, false);
             if (k.op == BinOp.Gt) return bounds_difference_proves(f, k.rhs, k.lhs,
                 -1) || bounds_bounded_sum_le(f, k.rhs, k.lhs, false) || bounds_precondition_upper(f,
                 k.rhs, k.lhs, true);
@@ -693,6 +710,52 @@ bounds_precondition_proved(e: *Expr, f: ?*BoundsState) raises IndexOutOfBounds: 
     }
 }
 
+bounds_projected_upper(value: *Expr@new, f: ?*BoundsState) raises IndexOutOfBounds: int {
+    direct: int = bounds_term_numeric_upper(f, value);
+    if (direct >= 0) return direct;
+    best: int = -1;
+    for position in 0..bounds_count(f) {
+        row: ?*BoundsRow = bounds_row(f, position);
+        if (row != null) {
+            left: ?*Expr = row.left;
+            right: ?*Expr = row.right;
+            candidate: int = bounds_num(left);
+            if (candidate >= 0 && candidate < 536870912 && (best < 0 || candidate < best) && bounds_precondition_proved(new_binary(BinOp.Le,
+                value, new_num(candidate)), f)) best = candidate;
+            candidate = bounds_num(right);
+            if (candidate >= 0 && candidate < 536870912 && (best < 0 || candidate < best) && bounds_precondition_proved(new_binary(BinOp.Le,
+                value, new_num(candidate)), f)) best = candidate;
+            candidate = row.value;
+            if (row.kind == BoundsKind.Difference && candidate >= 0 && candidate < 536870912 && (best < 0 || candidate < best) && bounds_precondition_proved(new_binary(BinOp.Le,
+                value, new_num(candidate)), f)) best = candidate
+        }
+    }
+    best
+}
+
+bounds_add_upper_requirement(fn: *Function@new, term: *Expr, max: int): bool {
+    param: ?*Obj = bounds_var(term);
+    if (param == null || !bounds_param(fn, param) || param.bounds_written || max < 0 || max >= 536870912) return false;
+    old: ?*BoundsUpperRequirement = fn.bounds_upper_requirements;
+    found: bool = false;
+    while (old != null && !found) {
+        if (old.param == param) {
+            if (old.max <= max) return true;
+            old.max = max;
+            found = true
+        }
+        old = old.next
+    }
+    if (!found) fn.bounds_upper_requirements = new BoundsUpperRequirement { param: param, max: max, next: fn.bounds_upper_requirements };
+    clause: *Expr = new_binary(BinOp.Le, bounds_obj_expr(param), new_num(max));
+    existing: ?*Expr = fn.bounds_precondition;
+    if (existing != null) clause = new_logand(existing, clause);
+    fn.bounds_precondition = clause;
+    bounds_infer_changed = true;
+    bounds_input_changed = true;
+    true
+}
+
 bounds_infer_precondition(e: *Expr, f: ?*BoundsState) raises IndexOutOfBounds {
     match e.kind {
         LogAnd k -> {
@@ -700,6 +763,26 @@ bounds_infer_precondition(e: *Expr, f: ?*BoundsState) raises IndexOutOfBounds {
             bounds_infer_precondition(k.rhs, f)
         }
         Binary k -> {
+            if (k.op == BinOp.Le && bounds_num(k.rhs) >= 0 && !bounds_precondition_proved(e,
+                f)) {
+                caller_upper: ?*Function = bounds_current_fn;
+                if (caller_upper != null) _added_upper: bool = bounds_add_upper_requirement(caller_upper,
+                    k.lhs, bounds_num(k.rhs))
+            }
+            if (k.op == BinOp.Ge) {
+                match k.lhs.kind {
+                    Funcall length_call -> {
+                        if (streq(length_call.funcname, "len") && length_call.target == null) {
+                            array: ?*Expr = length_call.args;
+                            caller: ?*Function = bounds_current_fn;
+                            lower: int = bounds_num(k.rhs);
+                            if (array != null && caller != null && lower >= 0 && lower < 536870912) _added_length: bool = bounds_add_requirement(caller,
+                                array, new_num(lower), true)
+                        }
+                    }
+                    _ -> { }
+                }
+            }
             if (k.op == BinOp.Ge && bounds_num(k.rhs) == 0 && !bounds_nonnegative_term(f,
                 k.lhs)) {
                 caller0: ?*Function = bounds_current_fn;
@@ -723,6 +806,33 @@ bounds_infer_precondition(e: *Expr, f: ?*BoundsState) raises IndexOutOfBounds {
                                 if (number > 0) _added2: bool = bounds_add_requirement(caller2,
                                     array, new_num(number - 1), false) else _added3: bool = bounds_add_requirement(caller2,
                                     array, k.lhs, true)
+                            }
+                        }
+                    }
+                    Binary remaining -> {
+                        if (remaining.op == BinOp.Sub) {
+                            match remaining.lhs.kind {
+                                Funcall length_call -> {
+                                    if (streq(length_call.funcname, "len") && length_call.target == null) {
+                                        array_expr: ?*Expr = length_call.args;
+                                        caller: ?*Function = bounds_current_fn;
+                                        array: ?*Obj = bounds_var(array_expr);
+                                        count: ?*Obj = bounds_var(k.lhs);
+                                        if (array != null && caller != null) {
+                                            inferred: bool = false;
+                                            if (count != null) inferred = bounds_add_span_requirement(caller,
+                                                array, remaining.rhs, count);
+                                            if (!inferred && bounds_num(remaining.rhs) == 0) {
+                                                upper: int = bounds_projected_upper(k.lhs,
+                                                    f);
+                                                if (upper >= 0) _added_upper: bool = bounds_add_requirement(caller,
+                                                    bounds_obj_expr(array), new_num(upper),
+                                                    true)
+                                            }
+                                        }
+                                    }
+                                }
+                                _ -> { }
                             }
                         }
                     }
@@ -808,6 +918,102 @@ bounds_infer_loop_requirement(a: *Expr@new, i: *Expr, f: ?*BoundsState@new) rais
     }
 }
 
+// Publish a span condition once for each stable parameter triple.
+bounds_add_span_requirement(
+    fn: *Function@new,
+    array: *Obj@new,
+    offset_expr: *Expr@new,
+    count: *Obj@new
+) raises IndexOutOfBounds: bool {
+    if (!bounds_param(fn, array) || !bounds_param(fn, count) || array.bounds_written || count.bounds_written) return false;
+    offset: ?*Obj = null;
+    number: int = -1;
+    match offset_expr.kind {
+        Var _ -> {
+            offset = bounds_var(offset_expr);
+            if (offset == null || !bounds_param(fn, offset) || offset.bounds_written) return false
+        }
+        Num _ -> {
+            number = bounds_num(offset_expr);
+            if (number < 0 || number >= 536870912) return false
+        }
+        _ -> return false
+    }
+    old: ?*BoundsSpanRequirement = fn.bounds_span_requirements;
+    while (old != null) {
+        if (old.array == array && old.offset == offset && old.offset_number == number && old.count == count) return true;
+        old = old.next
+    }
+    fn.bounds_span_requirements = new BoundsSpanRequirement {
+        array: array,
+        offset: offset,
+        offset_number: number,
+        count: count,
+        next: fn.bounds_span_requirements
+    };
+    lower_offset: *Expr = bounds_clone_path(offset_expr) or new_num(number);
+    upper_offset: *Expr = bounds_clone_path(offset_expr) or new_num(number);
+    room_offset: *Expr = bounds_clone_path(offset_expr) or new_num(number);
+    lower: *Expr = new_binary(BinOp.Le, new_num(0), lower_offset);
+    offset_end: *Expr = new_binary(BinOp.Le, upper_offset, bounds_len_term(bounds_obj_expr(array)));
+    count_lower: *Expr = new_binary(BinOp.Le, new_num(0), bounds_obj_expr(count));
+    room: *Expr = new_binary(BinOp.Sub, bounds_len_term(bounds_obj_expr(array)), room_offset);
+    count_end: *Expr = new_binary(BinOp.Le, bounds_obj_expr(count), room);
+    span: *Expr = new_logand(new_logand(lower, offset_end), new_logand(count_lower,
+        count_end));
+    existing: ?*Expr = fn.bounds_precondition;
+    if (existing != null) span = new_logand(existing, span);
+    fn.bounds_precondition = span;
+    bounds_infer_changed = true;
+    bounds_input_changed = true;
+    true
+}
+
+// For a stable range item 0 <= item < count, an access at offset + item
+// needs a caller-facing span contract rather than a contract mentioning item.
+bounds_infer_span_requirement(a: *Expr, i: *Expr, f: ?*BoundsState) raises IndexOutOfBounds: bool {
+    fn: ?*Function = bounds_current_fn;
+    if (fn == null) return false;
+    array: ?*Obj = bounds_var(a);
+    if (array == null || !bounds_param(fn, array) || array.bounds_written) return false;
+    offset: ?*Obj = null;
+    item: ?*Obj = null;
+    match i.kind {
+        Binary sum -> {
+            if (sum.op != BinOp.Add) return false;
+            first: ?*Obj = bounds_var(sum.lhs);
+            second: ?*Obj = bounds_var(sum.rhs);
+            if (first != null && second != null && bounds_param(fn, first) && !bounds_param(fn,
+                second)) {
+                offset = first;
+                item = second
+            } else if (first != null && second != null && bounds_param(fn, second) && !bounds_param(fn,
+                first)) {
+                offset = second;
+                item = first
+            }
+        }
+        _ -> return false
+    }
+    if (offset == null || item == null || offset.bounds_written || item.bounds_written || item.bounds_addr_taken) return false;
+    if (!bounds_nonnegative_term(f, bounds_obj_expr(item))) return false;
+    position: int = bounds_count(f) - 1;
+    while (position >= 0) {
+        row: ?*BoundsRow = bounds_row(f, position);
+        if (row != null && row.kind == BoundsKind.Difference && row.value == -1 && row.separation == null) {
+            left: ?*Expr = row.left;
+            right: ?*Expr = row.right;
+            if (left != null && right != null && bounds_var(left) == item) {
+                count: ?*Obj = bounds_var(right);
+                if (count != null && bounds_param(fn, count) && !count.bounds_written) return bounds_add_span_requirement(fn,
+                    array, bounds_obj_expr(offset), count)
+            }
+        }
+        position = position - 1
+    }
+    false
+}
+
 bounds_require(
     a: *Expr@new,
     i: *Expr@new,
@@ -819,6 +1025,7 @@ bounds_require(
     if (bounds_infer_mode) {
         if (bounds_infer_nonnegative_requirement(a, i, f)) return;
         if (bounds_infer_cursor_requirement(a, i, f)) return;
+        if (bounds_infer_span_requirement(a, i, f)) return;
         affine: ?*BoundsAffine = bounds_affine(i, true);
         if (affine != null) {
             current: ?*Obj = bounds_var(affine.base);
@@ -908,7 +1115,7 @@ bounds_check_call(
     f: ?*BoundsState@new,
     file: int,
     pos: int
-) raises Error, IndexOutOfBounds {
+) noregion raises Error, IndexOutOfBounds {
     required_pointer: ?*BoundsNonNullRequirement = fn.bounds_nonnull_requirements;
     while (required_pointer != null) {
         actual: ?*Expr = bounds_arg_named(fn, args, required_pointer.param.name);
@@ -966,6 +1173,14 @@ bounds_check_call(
         mapped_index: ?*Expr = bounds_rebind_term(requirement.index, fn, args);
         if (mapped_array == null || mapped_index == null) error_at_file(file, pos,
             "bounds requirement arguments must be simple, side-effect-free paths");
+        match mapped_array.kind {
+            MemberAccess field -> {
+                sd: ?*StructDef = bounds_record_def(field.lhs.ty);
+                if (sd != null && bounds_term(field.lhs) && bounds_nonnull(f, field.lhs)) f = bounds_record_invariant_facts(sd,
+                    field.lhs, f)
+            }
+            _ -> { }
+        }
         affine_call: bool = false;
         match mapped_index.kind {
             Binary _ -> affine_call = true;
@@ -984,7 +1199,9 @@ bounds_check_call(
                     mapped_index, f)
             }
             if (!proved) proved = bounds_bounded_sum_index(f, mapped_array, mapped_index,
-                true)
+                true);
+            if (!proved) proved = bounds_precondition_proved(new_binary(BinOp.Le,
+                mapped_index, bounds_len_term(mapped_array)), f)
         } else if (affine_call) proved = bounds_difference_index(f, mapped_array,
             mapped_index) else proved = bounds_proves(mapped_array, mapped_index,
             f);
@@ -1008,7 +1225,8 @@ bounds_check_call(
                     if (!skip) bounds_add_requirement(caller, mapped_array, mapped_index,
                         requirement.allow_end)
                 }
-            } else error_at_file(file, pos, "call does not prove inferred array bounds requirement")
+            } else bounds_requirement_error(fn, mapped_array, mapped_index, requirement.allow_end,
+                file, pos)
         }
         requirement = requirement.next
     }

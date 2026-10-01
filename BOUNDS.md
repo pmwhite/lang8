@@ -108,6 +108,11 @@ an entry requirement. For example, `a[5]` requires callers to prove
 establish both explicit and inferred requirements. Writes that invalidate a
 required fact discard it within the callee, so an entry requirement does not
 justify an access after such a write.
+For `for i in 0..n` with a stable array parameter and offset parameter,
+`a[offset + i]` can infer `0 <= offset <= len(a)` and
+`0 <= n <= len(a) - offset`. The inferred span condition is checked at call
+sites and can pass through a wrapper whose arguments are stable parameters or
+constant offsets.
 
 Length comparisons also carry relationships between local arrays: after
 `len(a) == len(b)`, a loop over `a` can index `b` while both lengths remain
