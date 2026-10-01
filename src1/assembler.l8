@@ -27,7 +27,7 @@ type as_LocPatch = {
 type as_LabPatch = {
     as_off: int;
     as_next_ip: int;
-    as_next: int
+    as_next: ?*as_LabPatch
 }
 
 as_O_RDONLY: int = 0;
@@ -115,6 +115,11 @@ type AsSymbols = {
     count: int
 } invariant (0 <= count && count <= len(items))
 
+type AsEnsuredSymbol = {
+    id: int;
+    symbol: *as_Sym
+}
+
 as_symbols: AsSymbols = AsSymbols { items: new as_Sym[0](as_Sym {
     as_name: "",
     as_val: 0,
@@ -187,27 +192,18 @@ as_loc_patches_cap: int = 16;
 type AsNamedLabels = {
     offsets: []int;
     defined: []int;
-    patches: []int;
+    patches: []?*as_LabPatch;
     count: int
 } invariant (0 <= count && count <= len(offsets) && len(offsets) == len(defined) && len(offsets) == len(patches))
 
 as_labels: AsNamedLabels = AsNamedLabels {
     offsets: new int[0](0),
     defined: new int[0](0),
-    patches: new int[0](0),
+    patches: new ?*as_LabPatch[0](null),
     count: 0
 };
 
 as_lab_cap: int = 8192;
-
-type AsLabPatches = {
-    items: []as_LabPatch;
-    count: int
-} invariant (0 <= count && count <= len(items))
-
-as_lpatches: AsLabPatches = AsLabPatches { items: new as_LabPatch[0](as_LabPatch { as_off: 0, as_next_ip: 0, as_next: 0 }), count: 0 };
-
-as_lpatches_cap: int = 8192;
 
 as_src: []i8 = "";
 
@@ -685,15 +681,17 @@ as_find_sym(symbols: *AsSymbols, as_name: []i8) raises IndexOutOfBounds: int ens
     as_b: int = as_sym_bucket(as_hash_str(as_name));
     as_i: int = as_bucket_tables.symbols[as_b];
     while (as_i >= 0) {
-        if (as_streq(symbols.items![as_i].as_name, as_name)) return as_i;
+        if (as_i >= symbols.count) raise IndexOutOfBounds;
+        if (as_streq(symbols.items[as_i].as_name, as_name)) return as_i;
         as_i = symbols.items[as_i].as_hash_next
     }
     0 - 1
 }
 
-as_ensure_sym(as_name: []i8) noregion raises IndexOutOfBounds: int {
-    as_i: int = as_find_sym(&as_symbols, as_name);
-    if (as_i >= 0) return as_i;
+as_ensure_sym(as_name: []i8) noregion raises IndexOutOfBounds: AsEnsuredSymbol {
+    symbols: *AsSymbols = &as_symbols;
+    as_i: int = as_find_sym(symbols, as_name);
+    if (as_i >= 0) return AsEnsuredSymbol { id: as_i, symbol: &symbols.items[as_i] };
     as_bind: int = as_STB_LOCAL;
     if (len(as_name) >= 2 && as_name[0] == '.' && as_name[1] == 'L') { } else {
         if (as_is_globl(as_name)) as_bind = as_STB_GLOBAL
@@ -725,24 +723,27 @@ as_ensure_sym(as_name: []i8) noregion raises IndexOutOfBounds: int {
         as_symbols.items = as_ns;
         as_symbols_capacity = as_ncap
     }
-    as_symbols.items[as_symbols.count].as_name = stored_name;
-    as_symbols.items[as_symbols.count].as_val = 0;
-    as_symbols.items[as_symbols.count].as_sec = as_SEC_UND;
-    as_symbols.items[as_symbols.count].as_bind = as_bind;
-    as_symbols.items[as_symbols.count].as_defined = false;
-    as_symbols.items[as_symbols.count].as_hash_next = as_bucket_tables.symbols[as_b];
-    as_bucket_tables.symbols[as_b] = as_symbols.count;
-    as_symbols.count = as_symbols.count + 1;
-    as_symbols.count - 1
+    id: int = as_symbols.count;
+    entry: *as_Sym = &as_symbols.items[id];
+    entry.as_name = stored_name;
+    entry.as_val = 0;
+    entry.as_sec = as_SEC_UND;
+    entry.as_bind = as_bind;
+    entry.as_defined = false;
+    entry.as_hash_next = as_bucket_tables.symbols[as_b];
+    as_bucket_tables.symbols[as_b] = id;
+    as_symbols.count = id + 1;
+    AsEnsuredSymbol { id: id, symbol: entry }
 }
 
 as_define_sym(as_name: []i8) noregion raises IndexOutOfBounds {
-    as_i: int = as_ensure_sym(as_name);
-    as_symbols.items![as_i].as_val = as_cur_off();
-    as_symbols.items[as_i].as_sec = as_cur_sec;
-    as_symbols.items[as_i].as_defined = true;
-    if (len(as_name) >= 2 && as_name[0] == '.' && as_name[1] == 'L') as_symbols.items[as_i].as_bind = as_STB_LOCAL else {
-        if (as_is_globl(as_name)) as_symbols.items![as_i].as_bind = as_STB_GLOBAL
+    ensured: AsEnsuredSymbol = as_ensure_sym(as_name);
+    symbol: *as_Sym = ensured.symbol;
+    symbol.as_val = as_cur_off();
+    symbol.as_sec = as_cur_sec;
+    symbol.as_defined = true;
+    if (len(as_name) >= 2 && as_name[0] == '.' && as_name[1] == 'L') symbol.as_bind = as_STB_LOCAL else {
+        if (as_is_globl(as_name)) symbol.as_bind = as_STB_GLOBAL
     }
 }
 
@@ -752,7 +753,8 @@ as_add_reloc(
     as_name: []i8,
     as_addend: int
 ) noregion raises IndexOutOfBounds {
-    as_si: int = as_ensure_sym(as_name);
+    ensured: AsEnsuredSymbol = as_ensure_sym(as_name);
+    as_si: int = ensured.id;
     while (as_relocations.count >= len(as_relocations.items)) {
         as_ncap: int = as_relocations_capacity * 2;
         if (as_ncap < 64) as_ncap = 64;
@@ -791,7 +793,7 @@ as_lab_grow() noregion {
     while (as_ncap <= as_labels.count) as_ncap = as_ncap * 2;
     as_no: []int = new int[as_ncap](0);
     as_nd: []int = new int[as_ncap](0);
-    as_np: []int = new int[as_ncap](0);
+    as_np: []?*as_LabPatch = new ?*as_LabPatch[as_ncap](null);
     as_i: int = 0;
     while (as_i < as_labels.count) invariant (0 <= as_i && as_i <= as_labels.count && as_labels.count < len(as_no) && as_labels.count < len(as_nd) && as_labels.count < len(as_np)) {
         as_no[as_i] = as_labels.offsets[as_i];
@@ -813,58 +815,39 @@ as_lab_ensure(as_id: int) noregion: AsNamedLabels ensures (0 <= as_id && as_id <
     while (as_id >= len(as_labels.defined)) as_lab_grow();
     while (as_labels.count <= as_id) {
         as_labels.defined[as_labels.count] = 0;
-        as_labels.patches[as_labels.count] = 0 - 1;
+        as_labels.patches[as_labels.count] = null;
         as_labels.count = as_labels.count + 1
     }
     as_labels
 }
 
 as_add_lab_patch(
-    patches: []int,
+    patches: []?*as_LabPatch@new,
     as_id: int,
     as_off: int,
     as_next_ip: int
-) noregion requires (0 <= as_id && as_id < len(patches)) {
-    while (as_lpatches.count >= len(as_lpatches.items)) {
-        as_ncap: int = as_lpatches_cap * 2;
-        if (as_ncap < 64) as_ncap = 64;
-        while (as_ncap <= as_lpatches.count) as_ncap = as_ncap * 2;
-        as_np: []as_LabPatch = new as_LabPatch[as_ncap](as_LabPatch { as_off: 0, as_next_ip: 0, as_next: 0 });
-        as_j: int = 0;
-        while (as_j < as_lpatches.count) invariant (0 <= as_j && as_j <= as_lpatches.count && as_lpatches.count < len(as_np)) {
-            as_np[as_j].as_off = as_lpatches.items[as_j].as_off;
-            as_np[as_j].as_next_ip = as_lpatches.items[as_j].as_next_ip;
-            as_np[as_j].as_next = as_lpatches.items[as_j].as_next;
-            as_j = as_j + 1
-        }
-        as_lpatches.items = as_np;
-        as_lpatches_cap = as_ncap
-    }
-    as_lpatches.items[as_lpatches.count].as_off = as_off;
-    as_lpatches.items[as_lpatches.count].as_next_ip = as_next_ip;
-    as_lpatches.items[as_lpatches.count].as_next = patches[as_id];
-    patches[as_id] = as_lpatches.count;
-    as_lpatches.count = as_lpatches.count + 1
+) requires (0 <= as_id && as_id < len(patches)) {
+    patches[as_id] = new as_LabPatch { as_off: as_off, as_next_ip: as_next_ip, as_next: patches[as_id] }
 }
 
 as_define_lab(as_id: int) noregion raises IndexOutOfBounds {
     labels: AsNamedLabels = as_lab_ensure(as_id);
     labels.offsets[as_id] = as_cur_off();
     labels.defined[as_id] = 1;
-    as_pi: int = labels.patches[as_id];
-    while (as_pi >= 0) {
-        as_disp: int = labels.offsets[as_id] - as_lpatches.items![as_pi].as_next_ip;
-        as_patch_i32(as_lpatches.items[as_pi].as_off, as_disp);
-        as_pi = as_lpatches.items![as_pi].as_next
+    as_patch: ?*as_LabPatch = labels.patches[as_id];
+    while (as_patch != null) {
+        as_disp: int = labels.offsets[as_id] - as_patch.as_next_ip;
+        as_patch_i32(as_patch.as_off, as_disp);
+        as_patch = as_patch.as_next
     }
-    labels.patches[as_id] = 0 - 1
+    labels.patches[as_id] = null
 }
 
 as_emit_jmp_lab(as_cc: int, as_id: int) noregion raises IndexOutOfBounds {
     labels: AsNamedLabels = as_lab_ensure(as_id);
     defined: []int = labels.defined;
     offsets: []int = labels.offsets;
-    patches: []int = labels.patches;
+    patches: []?*as_LabPatch = labels.patches;
     if (as_cc < 0) as_emit_b(233) else {
         as_emit_b(15);
         as_emit_b(128 + as_cc)
@@ -1790,10 +1773,11 @@ as_directive(as_lp: []i8@immortal, as_o: int, as_ln: int) noregion raises IndexO
         while (as_hi > as_lo && as_lp[as_hi - 1] == ' ') as_hi = as_hi - 1;
         as_nm: []i8 = as_strdup_n(as_lp, as_lo, as_hi - as_lo);
         as_val: int = as_parse_expr_at(as_lp, as_cpos + 1, as_ln);
-        as_si: int = as_ensure_sym(as_nm);
-        as_symbols.items![as_si].as_val = as_val;
-        as_symbols.items[as_si].as_sec = as_SEC_ABS;
-        as_symbols.items[as_si].as_defined = true;
+        ensured: AsEnsuredSymbol = as_ensure_sym(as_nm);
+        symbol: *as_Sym = ensured.symbol;
+        symbol.as_val = as_val;
+        symbol.as_sec = as_SEC_ABS;
+        symbol.as_defined = true;
         return
     }
     if (as_streq(as_dname, ".quad")) {
@@ -1974,10 +1958,9 @@ as_init() noregion {
     as_labels = AsNamedLabels {
         offsets: new int[as_lab_cap](0),
         defined: new int[as_lab_cap](0),
-        patches: new int[as_lab_cap](0),
+        patches: new ?*as_LabPatch[as_lab_cap](null),
         count: 0
     };
-    as_lpatches = AsLabPatches { items: new as_LabPatch[as_lpatches_cap](as_LabPatch { as_off: 0, as_next_ip: 0, as_next: 0 }), count: 0 };
     as_tokbuf = new i8[1024](0i8);
     as_op_buffers.a = new i8[512](0i8);
     as_op_buffers.b = new i8[512](0i8);
