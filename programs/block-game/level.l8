@@ -2014,7 +2014,6 @@ rewind_apply_snap(
     blocks: []Block,
     room: int,
     room_ids: *RoomBlockIds,
-    room_hn: []int,
     snap: []int,
     step: int
 ) requires (len(blocks) >= LEVEL_MAX_BLOCKS && len(snap) >= REWIND_STORAGE_WORDS) {
@@ -2027,38 +2026,50 @@ rewind_apply_snap(
     }
 }
 
+type RewindFrameView = {
+    cells: []int;
+    start: int;
+    end: int
+} invariant (0 <= start && start <= end && end <= len(cells))
+
 // Shared by live rewind and undo's check for a move releasing that rewind.
 rewind_frame_legal(
-    snap: []int,
-    from: int,
-    dest: int,
-    hn: int,
+    before: RewindFrameView,
+    after: RewindFrameView,
     pc: int,
     pr: int
-) raises IndexOutOfBounds: bool {
-    for k in 0..hn {
-        p0: int = snap![from + k];
-        p1: int = snap![dest + k];
-        if (p0 != p1 && pos_col(p1) == pc && pos_row(p1) == pr) return false
+): bool {
+    first: int = before.start;
+    second: int = after.start;
+    while (first < before.end && second < after.end) invariant (before.start <= first && first <= before.end && after.start <= second && second <= after.end) {
+        p0: int = before.cells[first];
+        p1: int = after.cells[second];
+        if (p0 != p1 && pos_col(p1) == pc && pos_row(p1) == pr) return false;
+        first = first + 1;
+        second = second + 1
     }
-    true
+    first == before.end && second == after.end
 }
 
 rewind_step_legal(
     room: int,
-    room_hn: []int,
+    room_ids: *RoomBlockIds,
     snap: []int,
     rewind_cur: []int,
     pc: int,
     pr: int
-) raises IndexOutOfBounds: bool {
+): bool requires (len(snap) >= REWIND_STORAGE_WORDS) {
     if (room < 0 || room >= LEVEL_MAX_ROOMS) return false;
     cur: int = rewind_cur[room];
-    if (cur <= 0) return false;
-    dest: int = rewind_dest_step(cur);
-    stride: int = len(snap) / REWIND_MAX;
-    rewind_frame_legal(snap, rewind_slot(room, cur, 0, room_hn, stride), rewind_slot(room,
-        dest, 0, room_hn, stride), room_hn[room], pc, pr)
+    if (cur <= 0 || cur >= REWIND_MAX) return false;
+    dest: int = cur - 1;
+    span: RoomBlockSpan = room_ids.spans[room];
+    for slot in span.start..span.end {
+        p0: int = snap[cur * LEVEL_MAX_BLOCKS + slot];
+        p1: int = snap[dest * LEVEL_MAX_BLOCKS + slot];
+        if (p0 != p1 && pos_col(p1) == pc && pos_row(p1) == pr) return false
+    }
+    true
 }
 
 rewind_try_step(
@@ -2072,7 +2083,7 @@ rewind_try_step(
     room_ghosting: []int,
     pc: int,
     pr: int
-) raises IndexOutOfBounds: bool requires (len(rewind_n) >= LEVEL_MAX_ROOMS && len(rewind_cur) >= LEVEL_MAX_ROOMS && len(room_ghosting) >= LEVEL_MAX_ROOMS) {
+): bool requires (len(rewind_n) >= LEVEL_MAX_ROOMS && len(rewind_cur) >= LEVEL_MAX_ROOMS && len(room_ghosting) >= LEVEL_MAX_ROOMS && len(snap) >= REWIND_STORAGE_WORDS) {
     if (room < 0 || room >= LEVEL_MAX_ROOMS) return false;
     if (room_ghosting[room] == 0 || room_ghosting[room] == REWIND_HOLD) return false;
     if (rewind_cur[room] <= 0) {
@@ -2080,9 +2091,9 @@ rewind_try_step(
             room_ghosting);
         return false
     }
-    if (!rewind_step_legal(room, room_hn, snap, rewind_cur, pc, pr)) return false;
+    if (!rewind_step_legal(room, room_ids, snap, rewind_cur, pc, pr)) return false;
     dest: int = rewind_dest_step(rewind_cur[room]);
-    rewind_apply_snap(blocks, room, room_ids, room_hn, snap, dest);
+    rewind_apply_snap(blocks, room, room_ids, snap, dest);
     rewind_cur[room] = dest;
     if (dest <= 0) rewind_finish(blocks, room, room_ids, room_hn, snap, rewind_n,
         rewind_cur, room_ghosting);
@@ -2259,7 +2270,7 @@ rewind_tick(
     now: int,
     pc: int,
     pr: int
-) raises IndexOutOfBounds: bool requires (0 <= nroom && nroom <= LEVEL_MAX_ROOMS && len(rewind_n) >= LEVEL_MAX_ROOMS && len(rewind_cur) >= LEVEL_MAX_ROOMS && len(room_ghosting) >= LEVEL_MAX_ROOMS) {
+): bool requires (0 <= nroom && nroom <= LEVEL_MAX_ROOMS && len(rewind_n) >= LEVEL_MAX_ROOMS && len(rewind_cur) >= LEVEL_MAX_ROOMS && len(room_ghosting) >= LEVEL_MAX_ROOMS && len(snap) >= REWIND_STORAGE_WORDS) {
     crate_drain(n, now, crate_ms, crate_cursor, crate_t0);
     crate_commit_changed(blocks, n, now, crate_pose, crate_ms, crate_cursor, crate_t0);
     dirty: bool = false;
@@ -2328,7 +2339,6 @@ rewind_changed(
     blocks: []Block,
     room: int,
     room_ids: *RoomBlockIds,
-    room_hn: []int,
     snap: []int,
     step: int
 ): bool requires (len(blocks) >= LEVEL_MAX_BLOCKS && len(snap) >= REWIND_STORAGE_WORDS) {
@@ -2358,7 +2368,7 @@ rewind_record(
     if (room_ghosting[room] != 0) return;
     if (rewind_n[room] < 1) return;
     last: int = rewind_n[room] - 1;
-    if (!rewind_changed(blocks, room, room_ids, room_hn, snap, last)) return;
+    if (!rewind_changed(blocks, room, room_ids, snap, last)) return;
     if (rewind_n[room] >= REWIND_MAX) return;
     rewind_capture(blocks, room, room_ids, room_hn, snap, rewind_n[room]);
     rewind_n[room] = rewind_n[room] + 1;
