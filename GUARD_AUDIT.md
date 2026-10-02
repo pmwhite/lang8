@@ -229,9 +229,10 @@ would leave the underlying proof obligations unresolved.
 
 | Site | Relationship to prove |
 | --- | --- |
-| `src2/assembler.l8:764` | Every generated text patch points to four emitted bytes. |
-| `programs/block-game/block-game-undo.l8:249` | Evicted action headers describe complete stored actions. |
-| `programs/block-game/block-game-undo.l8:269,361,399,401,425,428,621` | Rewind counts, frame offsets, and route layout agree across the timeline and room records. |
+| `src2/assembler.l8`, `as_patch_i32` | Every generated text patch points to four emitted bytes after buffer growth. |
+| `programs/block-game/block-game-undo.l8`, `undo_commit_action` | Evicted action headers describe complete stored actions. |
+| `programs/block-game/block-game-undo.l8`, save/release/restore | Rewind counts and archived cursors stay within 128 frames across journal replay. |
+| `programs/block-game/block-game-undo.l8`, `undo_frame_view` and `undo_route_append` | Route construction and playback use bounded frame steps and source ranges. |
 
 The ELF packer now reports an output field outside its allocated image as an
 ELF construction error at the output boundary. Relocation symbol checks also
@@ -268,9 +269,13 @@ The room list is also the index space for rewind snapshots: each room's
 The verifier now proves that two bounded sums sharing a prefix retain the
 order of their suffixes when a record is constructed. `rewind_frame_view`
 uses that rule to construct a frame from a bounded step and room span with
-no bounds branch. The remaining undo callers use separate compact room
-widths or image offsets, so they still need one common layout object that
-relates those values to the frame storage.
+no bounds branch. The undo timeline owns its rewind snapshot and validates
+the packed room layout once at creation. It then stores bounded views for
+every room and frame, both in the snapshot and in its packed image. Saving
+and restoring history read these views, so neither operation recomputes a
+frame offset from mutable room widths. The remaining direct frame guard is
+used by route construction and playback, where cursor and route-step bounds
+still need to be carried through the timeline.
 Replacing the list with independent per-room arrays would require moving
 the snapshots to per-room storage as well. Otherwise the verifier still
 needs the same prefix-sum proof at every snapshot access. The direct
