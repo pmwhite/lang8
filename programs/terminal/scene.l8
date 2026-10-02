@@ -58,6 +58,7 @@ type TerminalScene = {
     scene_regions: []TerminalSceneRegion;
     scene_previous: []TerminalSceneRegion;
     scene_region_count: int;
+    scene_exhausted: bool;
     scene_region: []int;
     zero_columns: []int;
     zero_rows: []int;
@@ -111,6 +112,7 @@ terminal_scene(): *TerminalScene@new {
         scene_regions: new TerminalSceneRegion[256](empty),
         scene_previous: new TerminalSceneRegion[256](empty),
         scene_region_count: 0,
+        scene_exhausted: false,
         scene_region: new int[28800](0),
         zero_columns: new int[241](0),
         zero_rows: new int[121](0),
@@ -348,10 +350,14 @@ terminal_scene_column_varies(
     false
 }
 
-terminal_scene_add_region(r: *TerminalScene, box: TerminalSceneRegion) raises IndexOutOfBounds {
+terminal_scene_add_region(r: *TerminalScene, box: TerminalSceneRegion) {
     if (box.left >= box.right || box.top >= box.bottom) return;
+    if (r.scene_exhausted) return;
     index: int = r.scene_region_count;
-    if (index >= len(r.scene_regions)) raise IndexOutOfBounds;
+    if (index >= len(r.scene_regions)) {
+        r.scene_exhausted = true;
+        return
+    }
     r.scene_regions[index] = box;
     r.scene_region_count = index + 1;
     y: int = box.top;
@@ -365,6 +371,13 @@ terminal_scene_add_region(r: *TerminalScene, box: TerminalSceneRegion) raises In
     }
 }
 
+terminal_scene_fallback_region(s: *Screen, r: *TerminalScene) {
+    r.scene_region_count = 0;
+    r.scene_exhausted = false;
+    viewport: TerminalSceneRegion = terminal_scene_region(0, 0, s.cols, s.rows);
+    terminal_scene_add_region(r, viewport)
+}
+
 // Score all displacements once per rectangle. Row/column prefix sums let us
 // compare every possible cut without rescanning its cells. Horizontal scores
 // exclude matches whose source would cross the proposed cut.
@@ -375,7 +388,7 @@ terminal_scene_partition(
     depth: int,
     budget: int,
     trim: bool
-) raises IndexOutOfBounds {
+) {
     box.fixed = false;
     width: int = terminal_scene_width(box);
     height: int = terminal_scene_height(box);
@@ -663,7 +676,7 @@ terminal_scene_add_bordered_region(
     r: *TerminalScene,
     box: TerminalSceneRegion,
     budget: int
-) raises IndexOutOfBounds {
+) {
     if (box.left >= box.right || box.top >= box.bottom) return;
     if (budget >= 3) {
         // Status rows need their own clip even when the neighboring text only
@@ -706,7 +719,7 @@ terminal_ghost_visible(r: *TerminalScene, g: int): bool requires (0 <= g && g < 
     clip.left < clip.right && clip.top < clip.bottom && x < clip.right as f32 && x + 2.0 > clip.left as f32 && y < clip.bottom as f32 && y + 1.0 > clip.top as f32
 }
 
-terminal_scene_prepare(s: *Screen, r: *TerminalScene, now: int) raises IndexOutOfBounds {
+terminal_scene_prepare(s: *Screen, r: *TerminalScene, now: int) {
     hinted_shift: int = s.scroll_hint_delta;
     hinted_top: int = s.scroll_hint_top;
     hinted_bottom: int = s.scroll_hint_bottom;
@@ -724,6 +737,7 @@ terminal_scene_prepare(s: *Screen, r: *TerminalScene, now: int) raises IndexOutO
     }
     if (!r.scene_ready || s.cols != r.scene_cols || s.rows != r.scene_rows) {
         r.scene_region_count = 0;
+        r.scene_exhausted = false;
         viewport: TerminalSceneRegion = terminal_scene_region(0, 0, s.cols, s.rows);
         terminal_scene_add_region(r, viewport);
         y: int = 0;
@@ -774,6 +788,7 @@ terminal_scene_prepare(s: *Screen, r: *TerminalScene, now: int) raises IndexOutO
     previous_count: int = r.scene_region_count;
     for index in 0..previous_count r.scene_previous[index] = r.scene_regions[index];
     r.scene_region_count = 0;
+    r.scene_exhausted = false;
     r.scene_has_shift = false;
     if (old_ease < 1.0 && previous_count > 1 && hinted_shift == 0) {
         // An unrelated repaint must retain the bounds of motion still on screen.
@@ -794,6 +809,7 @@ terminal_scene_prepare(s: *Screen, r: *TerminalScene, now: int) raises IndexOutO
         // their last reported margins must not cut a confidently inferred plane.
         // They remain useful when too little text survives to infer movement.
         r.scene_region_count = 0;
+        r.scene_exhausted = false;
         above: TerminalSceneRegion = terminal_scene_region(0, 0, s.cols, hinted_top);
         inside: TerminalSceneRegion = terminal_scene_region(0, hinted_top, s.cols,
             hinted_bottom + 1);
@@ -802,6 +818,11 @@ terminal_scene_prepare(s: *Screen, r: *TerminalScene, now: int) raises IndexOutO
         terminal_scene_add_region(r, above);
         terminal_scene_partition(s, r, inside, 0, 254, false);
         terminal_scene_add_region(r, below)
+    }
+    if (r.scene_exhausted) {
+        // A capacity miss only affects pane animation. Render the entire
+        // viewport as one stationary region instead of keeping partial clips.
+        terminal_scene_fallback_region(s, r)
     }
     region_count: int = r.scene_region_count;
     for index in 0..region_count {

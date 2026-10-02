@@ -119,6 +119,9 @@ fixed-capacity boundaries prevent real failures.
 
 ## Reviewed guards still requiring validation or proof
 
+- [x] `programs/terminal/scene.l8`, region capacity: an exhausted recursive
+  partition falls back to one complete viewport region. A focused test fills
+  all 256 slots and verifies the fallback resets the region map.
 - [x] `programs/block-game/block-game-undo.l8`, route frame width: build and
   consume route frames using the same room span width, removing the duplicate
   count comparison at playback.
@@ -220,7 +223,7 @@ checks that still need proofs.
 
 ## Remaining `IndexOutOfBounds` raises
 
-There are 12 explicit raises in `src2`, the block game, and the terminal.
+There are 11 explicit raises in `src2` and the block game.
 These checks protect internal relationships; changing their exception names
 would leave the underlying proof obligations unresolved.
 
@@ -230,13 +233,15 @@ would leave the underlying proof obligations unresolved.
 | `src2/elfpack.l8:142` | Every generated ELF write fits the computed output span. |
 | `programs/block-game/block-game-undo.l8:132,225` | Journal reads have nonnegative positions and evicted action headers describe complete stored actions. |
 | `programs/block-game/block-game-undo.l8:269,361,399,401,425,428,621` | Rewind counts, frame offsets, and route layout agree across the timeline and room records. |
-| `programs/terminal/scene.l8:354` | Recursive region partitioning consumes no more than its allotted region budget. |
 
-The terminal region proof needs a relation of the form
-`region_count + budget <= limit` to survive scanning loops and recursive
-budget splits. A local contract using `region_count <= limit - budget`
-does not currently carry that relation through the verifier. Fixed-rate
-render batches need a related accumulated-count proof across loops.
+The terminal pane partition still budgets recursive leaves. If a future
+partition consumes all 256 region slots, it now stops adding partial clips
+and renders the full viewport as one stationary region. This preserves the
+displayed text while giving up that frame's pane animation. The verifier
+cannot yet express `region_count + budget <= limit` through every recursive
+split, so the fallback keeps the renderer correct even if the budget logic
+changes. Fixed-rate render batches need a related accumulated-count proof
+across loops.
 The plant batch no longer needs that proof: each mesh has a fixed GPU slot,
 and its scratch-buffer count is bounded by the number of blocks processed
 in that mesh's scan.
