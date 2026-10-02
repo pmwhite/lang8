@@ -211,3 +211,6 @@ advertise `IndexOutOfBounds` along paths that only reach those limits.
 The compiler string buffer now maintains a nonnegative used length. Both
 single-byte and bulk append report source `Error` if their target length
 overflows; bulk append previously lacked that overflow check.
+The undo journal's absolute counter exhaustion now raises
+`UndoHistoryExhausted`, separate from the remaining journal consistency
+checks that still need proofs.
