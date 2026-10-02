@@ -223,14 +223,14 @@ checks that still need proofs.
 
 ## Remaining `IndexOutOfBounds` raises
 
-There are 10 explicit raises in `src2` and the block game.
+There are 9 explicit raises in `src2` and the block game.
 These checks protect internal relationships; changing their exception names
 would leave the underlying proof obligations unresolved.
 
 | Site | Relationship to prove |
 | --- | --- |
 | `src2/assembler.l8:764` | Every generated text patch points to four emitted bytes. |
-| `programs/block-game/block-game-undo.l8:132,225` | Journal reads have nonnegative positions and evicted action headers describe complete stored actions. |
+| `programs/block-game/block-game-undo.l8:258` | Evicted action headers describe complete stored actions. |
 | `programs/block-game/block-game-undo.l8:269,361,399,401,425,428,621` | Rewind counts, frame offsets, and route layout agree across the timeline and room records. |
 
 The ELF packer now reports an output field outside its allocated image as an
@@ -256,17 +256,12 @@ The terminal renderer likewise counts possible quads while retaining one
 upload and draw sequence. Its visible quad count never exceeds the slots
 visited, including the cursor slot.
 
-The undo journal needs a representation change before its read guard can
-be removed. `undo_latest` now exposes its nonnegative, bounded result to
-callers, but change ranges and evicted action sizes are reconstructed from
-plain words in the journal ring. Those words have different meanings at
-different positions, so an invariant over every journal element would be
-false. Store action header metadata in a typed structure, with its start,
-size, and phase boundary related to `tail` and `head`, then use that
-structure to drive phase changes and eviction. The verifier also needs to
-carry a bounded action position through small positive offsets; proving
-`latest + 1` currently requires an explicit numeric upper bound even when
-the action is known to end before `head`.
+The undo journal now stores each retained action's phase boundary in a compact
+`u32` index. Its bounded type proves the phase loops start at nonnegative
+positions. The journal read accepts a proven nonnegative position and a
+nonempty array; its callers carry those facts through contracts. Eviction
+still reads a raw size word and checks it against the retained journal span.
+Eliminating that guard needs action size metadata tied to `tail` and `head`.
 
 The room list is also the index space for rewind snapshots: each room's
 `RoomBlockSpan` selects both block IDs and a compact slice of every frame.

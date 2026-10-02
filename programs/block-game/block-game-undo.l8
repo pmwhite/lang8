@@ -10,7 +10,7 @@ PLAY_UNDO_WAIT: int = 2;
 
 UNDO_ROUTE_MAX: int = REWIND_MAX * 2 + 1;
 
-// One 20 MiB circular log, with no separate action-count limit or index.
+// One 20 MiB circular log plus a compact phase-boundary index.
 // Record (64-bit words):
 //   total length, pre-change count, packed player pose, room dependency mask,
 //   changes from previous action to pre-move state, changes made by the move,
@@ -50,9 +50,13 @@ type UndoTimeline = {
     journal: []int;
     stage: []int;
     stage_n: int;
+    stage_pre_n: int;
     head: int;
     tail: int;
     count: int;
+    phase_ends: []u32;
+    action_head: int;
+    action_tail: int;
     phase: int;
     undoing: bool;
     offsets: []int;
@@ -64,7 +68,7 @@ type UndoTimeline = {
     route_n: []int;
     route_cur: []int;
     route_ms: []int
-} invariant (len(home) == LEVEL_MAX_BLOCKS && len(home_view) == LEVEL_MAX_BLOCKS && len(changed) == LEVEL_MAX_BLOCKS && 0 <= block_base && block_base <= image_capacity - LEVEL_MAX_BLOCKS && block_base == UNDO_BLOCK_BASE && len(image) == image_capacity && image_capacity == UNDO_INDEX_MASK + 1 && len(offsets) == LEVEL_MAX_ROOMS && len(metas) == LEVEL_MAX_ROOMS && len(selected) == LEVEL_MAX_ROOMS && len(syncing) == LEVEL_MAX_ROOMS && len(route_base) == LEVEL_MAX_ROOMS && len(route_n) == LEVEL_MAX_ROOMS && len(route_cur) == LEVEL_MAX_ROOMS && len(route_ms) == LEVEL_MAX_ROOMS && len(stage) >= UNDO_ACTION_OVERHEAD && len(stage) <= len(journal) && len(journal) >= UNDO_ACTION_OVERHEAD && len(journal) <= UNDO_JOURNAL_WORDS && 0 <= tail && tail <= head && UNDO_ACTION_HEADER <= stage_n && stage_n < len(stage), forall owner in home (0 - 1 <= owner && owner < LEVEL_MAX_ROOMS), forall off in offsets (0 <= off && off <= UNDO_INDEX_MASK - 2))
+} invariant (len(home) == LEVEL_MAX_BLOCKS && len(home_view) == LEVEL_MAX_BLOCKS && len(changed) == LEVEL_MAX_BLOCKS && 0 <= block_base && block_base <= image_capacity - LEVEL_MAX_BLOCKS && block_base == UNDO_BLOCK_BASE && len(image) == image_capacity && image_capacity == UNDO_INDEX_MASK + 1 && len(offsets) == LEVEL_MAX_ROOMS && len(metas) == LEVEL_MAX_ROOMS && len(selected) == LEVEL_MAX_ROOMS && len(syncing) == LEVEL_MAX_ROOMS && len(route_base) == LEVEL_MAX_ROOMS && len(route_n) == LEVEL_MAX_ROOMS && len(route_cur) == LEVEL_MAX_ROOMS && len(route_ms) == LEVEL_MAX_ROOMS && len(stage) >= UNDO_ACTION_OVERHEAD && len(stage) <= len(journal) && len(journal) >= UNDO_ACTION_OVERHEAD && len(journal) <= UNDO_JOURNAL_WORDS && len(phase_ends) > 0 && 0 <= action_tail && 0 <= action_head && 0 <= tail && tail <= head && head <= 1000000000 && UNDO_ACTION_HEADER <= stage_pre_n && stage_pre_n <= stage_n && stage_n < len(stage), forall owner in home (0 - 1 <= owner && owner < LEVEL_MAX_ROOMS), forall off in offsets (0 <= off && off <= UNDO_INDEX_MASK - 2))
 
 new_undo_timeline(home: []int, n: int, room_hn: []int) raises IoError: *UndoTimeline@new requires (0 <= n && n <= len(home)) ensures (len(returned.home) >= n) {
     new_undo_journal(home, n, room_hn, UNDO_JOURNAL_WORDS)
@@ -82,6 +86,8 @@ new_undo_journal(
     image_capacity: int = UNDO_INDEX_MASK + 1;
     largest: int = image_n * 2 + UNDO_ACTION_OVERHEAD;
     if (words < largest || n > LEVEL_MAX_BLOCKS || image_capacity > UNDO_INDEX_MASK + 1 || image_capacity < LEVEL_MAX_BLOCKS || largest < UNDO_ACTION_OVERHEAD) die("undo journal too small");
+    action_capacity: int = words / UNDO_ACTION_OVERHEAD + 1;
+    if (action_capacity <= 0) die("undo journal too small");
     empty_meta: *int = &undo_empty_meta;
     metas: []UndoRoomMeta = new UndoRoomMeta[LEVEL_MAX_ROOMS](UndoRoomMeta { count: empty_meta, cursor: empty_meta, ghost: empty_meta });
     u: *UndoTimeline = new UndoTimeline {
@@ -95,9 +101,13 @@ new_undo_journal(
         journal: new int[words](0),
         stage: new int[largest](0),
         stage_n: UNDO_ACTION_HEADER,
+        stage_pre_n: UNDO_ACTION_HEADER,
         head: 0,
         tail: 0,
         count: 0,
+        phase_ends: new u32[action_capacity](0u32),
+        action_head: 0,
+        action_tail: 0,
         phase: 1,
         undoing: false,
         offsets: new int[LEVEL_MAX_ROOMS](0),
@@ -128,14 +138,20 @@ new_undo_journal(
     u
 }
 
-undo_read(u: *UndoTimeline, at: int) raises IndexOutOfBounds: int {
-    if (at < 0) raise IndexOutOfBounds;
-    u.journal[at % len(u.journal)]
+undo_read(journal: []int, at: int): int requires (0 <= at && len(journal) > 0) {
+    journal[at % len(journal)]
 }
 
-undo_latest(u: *UndoTimeline) raises IoError, IndexOutOfBounds: int ensures (0 <= returned && u.tail <= returned && returned <= u.head) {
-    if (u.count < 1) die("empty undo journal");
-    start: int = undo_read(u, u.head - 1);
+undo_latest_phase_end(u: *UndoTimeline) raises IoError: u32 ensures (u.action_head > 0) {
+    if (u.count < 1 || u.action_head < 1) die("empty undo journal");
+    slot: int = (u.action_head - 1) % len(u.phase_ends);
+    u.phase_ends[slot]
+}
+
+undo_latest(u: *UndoTimeline) raises IoError: int ensures (0 <= returned && u.tail <= returned && returned <= u.head - UNDO_ACTION_OVERHEAD && returned < 1000000000 && u.action_head > 0) {
+    if (u.count < 1 || u.action_head < 1) die("empty undo journal");
+    footer: int = (u.head - 1) trunc u32 as int;
+    start: int = undo_read(u.journal, footer);
     if (start < u.tail || start > u.head - UNDO_ACTION_OVERHEAD) die("corrupt undo journal action");
     start
 }
@@ -144,25 +160,27 @@ undo_change_index(change: int): int ensures (0 <= returned && returned <= UNDO_I
     change & UNDO_INDEX_MASK
 }
 
-undo_apply_change(u: *UndoTimeline, change: int) {
+undo_apply_change(image: []int, change: int) requires (len(image) == UNDO_INDEX_MASK + 1) {
     index: int = undo_change_index(change);
-    u.image[index] = u.image[index] ^ change >> UNDO_INDEX_BITS
+    image[index] = image[index] ^ change >> UNDO_INDEX_BITS
 }
 
 // Only the newest action is materialized. Switching phases reverses the
 // action's post-move changes in the private image, never in live rooms.
-undo_set_phase(u: *UndoTimeline, action: int, phase: int) raises IoError, IndexOutOfBounds: int ensures (u.tail <= returned && returned == action) {
+undo_set_phase(u: *UndoTimeline, action: int, phase: int) raises IoError: int ensures (u.tail <= returned && returned == action && u.action_head > 0) {
+    phase_end: u32 = undo_latest_phase_end(u);
     latest: int = undo_latest(u);
     if (action != latest) die("undo action is not the latest");
     if (phase != u.phase) {
-        first: int = action + UNDO_ACTION_HEADER + undo_read(u, action + 1);
-        for p in first..u.head - 1 undo_apply_change(u, undo_read(u, p));
+        first: int = phase_end as int;
+        for p in first..u.head - 1 undo_apply_change(u.image, undo_read(u.journal,
+            p));
         u.phase = phase
     }
     action
 }
 
-undo_load_history(u: *UndoTimeline, action: int, phase: int) raises IoError, IndexOutOfBounds: []int@u ensures (len(returned) == u.image_capacity && len(returned) == UNDO_INDEX_MASK + 1) {
+undo_load_history(u: *UndoTimeline, action: int, phase: int) raises IoError: []int@u ensures (len(returned) == u.image_capacity && len(returned) == UNDO_INDEX_MASK + 1) {
     _phase_action: int = undo_set_phase(u, action, phase);
     u.image
 }
@@ -170,7 +188,8 @@ undo_load_history(u: *UndoTimeline, action: int, phase: int) raises IoError, Ind
 undo_cancel_action(u: *UndoTimeline) {
     // Staging is separate from the ring: a bump cannot evict older actions,
     // even when background rooms have changed a large amount since last move.
-    for i in UNDO_ACTION_HEADER..u.stage_n undo_apply_change(u, u.stage[i]);
+    for i in UNDO_ACTION_HEADER..u.stage_n undo_apply_change(u.image, u.stage[i]);
+    u.stage_pre_n = UNDO_ACTION_HEADER;
     u.stage_n = UNDO_ACTION_HEADER;
     u.phase = 1
 }
@@ -179,20 +198,25 @@ undo_clear_journal(u: *UndoTimeline) {
     if (u.stage_n > 0) undo_cancel_action(u);
     u.tail = 0;
     u.count = 0;
+    u.action_tail = 0;
+    u.action_head = 0;
     u.head = 0;
     u.phase = 1;
     u.undoing = false
 }
 
-undo_pop_action(u: *UndoTimeline) raises IoError, IndexOutOfBounds {
+undo_pop_action(u: *UndoTimeline) raises IoError {
     action: int = undo_latest(u);
+    phase_end: u32 = undo_latest_phase_end(u);
     action = undo_set_phase(u, action, 0);
     // Restore the previous action's image, including unrelated room changes
     // recorded between actions. Live independent rooms are left untouched.
-    end: int = action + UNDO_ACTION_HEADER + undo_read(u, action + 1);
-    for p in action + UNDO_ACTION_HEADER..end undo_apply_change(u, undo_read(u, p));
-    u.head = action;
+    end: int = phase_end as int;
+    first: int = (action + UNDO_ACTION_HEADER) trunc u32 as int;
+    for p in first..end undo_apply_change(u.image, undo_read(u.journal, p));
     u.count = u.count - 1;
+    u.action_head = u.action_head - 1;
+    u.head = action;
     u.phase = 1;
     u.undoing = false;
     if (u.count == 0) {
@@ -216,16 +240,18 @@ undo_write_word(u: *UndoTimeline, index: int, value: int) raises IoError require
 undo_commit_action(u: *UndoTimeline) raises UndoHistoryExhausted, IndexOutOfBounds {
     size: int = u.stage_n + 1;
     next_head: int = u.head + size;
-    if (next_head < u.head) raise UndoHistoryExhausted;
+    if (next_head < u.head || next_head > 1000000000 || u.action_head >= 1000000000) raise UndoHistoryExhausted;
     u.stage[0] = size;
     u.stage[3] = u.deps;
     u.stage[u.stage_n] = u.head;
     while (u.head - u.tail + size > len(u.journal)) {
-        old_size: int = undo_read(u, u.tail);
+        old_size: int = undo_read(u.journal, u.tail);
         if (old_size < UNDO_ACTION_OVERHEAD || old_size > u.head - u.tail) raise IndexOutOfBounds;
+        if (u.action_tail >= 1000000000) raise UndoHistoryExhausted;
         next_tail: int = u.tail + old_size;
         u.tail = next_tail;
-        u.count = u.count - 1
+        u.count = u.count - 1;
+        u.action_tail = u.action_tail + 1
     }
     ring: []int = u.journal;
     head_slot: int = u.head % len(ring);
@@ -234,8 +260,13 @@ undo_commit_action(u: *UndoTimeline) raises UndoHistoryExhausted, IndexOutOfBoun
         slot: int = offset % len(ring);
         ring[slot] = u.stage[i]
     }
+    action_slot: int = u.action_head % len(u.phase_ends);
+    pre_end: u32 = (u.head + u.stage_pre_n) trunc u32;
+    u.phase_ends[action_slot] = pre_end;
+    u.action_head = u.action_head + 1;
     u.head = next_head;
     u.count = u.count + 1;
+    u.stage_pre_n = UNDO_ACTION_HEADER;
     u.stage_n = UNDO_ACTION_HEADER;
     u.phase = 1
 }
@@ -260,6 +291,7 @@ undo_save_history(
             latest: int = undo_latest(u);
             _phase_action: int = undo_set_phase(u, latest, 1)
         }
+        u.stage_pre_n = UNDO_ACTION_HEADER;
         u.stage_n = UNDO_ACTION_HEADER;
         u.stage[2] = player;
         u.deps = 0
@@ -293,7 +325,10 @@ undo_save_history(
         b: Block = blocks[i];
         undo_write_word(u, u.block_base + i, pack_pos(b.column, b.row, b.layer, b.mounted))
     }
-    if (!phase) u.stage[1] = u.stage_n - UNDO_ACTION_HEADER else undo_commit_action(u)
+    if (!phase) {
+        u.stage[1] = u.stage_n - UNDO_ACTION_HEADER;
+        u.stage_pre_n = u.stage_n
+    } else undo_commit_action(u)
 }
 
 undo_depend(u: *UndoTimeline, room: int) {
@@ -302,7 +337,7 @@ undo_depend(u: *UndoTimeline, room: int) {
 
 // Reconstruct changed-block flags only for the action currently being undone.
 // No per-block flag arrays are retained for older actions.
-undo_prepare_action(u: *UndoTimeline, nroom: int, n: int) raises IoError, IndexOutOfBounds requires (0 <= nroom && nroom <= LEVEL_MAX_ROOMS && 0 <= n && n <= LEVEL_MAX_BLOCKS) {
+undo_prepare_action(u: *UndoTimeline, nroom: int, n: int) raises IoError requires (0 <= nroom && nroom <= LEVEL_MAX_ROOMS && 0 <= n && n <= LEVEL_MAX_BLOCKS) {
     action: int = undo_latest(u);
     _before_action: int = undo_set_phase(u, action, 1);
     for i in 0..n u.changed[i] = u.image[u.block_base + i];
@@ -310,7 +345,8 @@ undo_prepare_action(u: *UndoTimeline, nroom: int, n: int) raises IoError, IndexO
     for i in 0..n {
         if (u.changed[i] != u.image[u.block_base + i]) u.changed[i] = 1 else u.changed[i] = 0
     }
-    mask: int = undo_read(u, action + 3);
+    mask_at: int = (action + 3) trunc u32 as int;
+    mask: int = undo_read(u.journal, mask_at);
     for r in 0..nroom {
         u.selected[r] = mask >> r & 1;
         u.syncing[r] = 0
@@ -518,7 +554,7 @@ undo_select_rooms(
     pc: int,
     pr: int,
     ph: int
-) raises IoError, IndexOutOfBounds requires (0 <= n && n <= LEVEL_MAX_BLOCKS) {
+) raises IoError requires (0 <= n && n <= LEVEL_MAX_BLOCKS) {
     _phase_action: int = undo_set_phase(u, action, 0);
     // New obstructions/support can appear while an unrelated clock runs.
     for i in 0..n {
