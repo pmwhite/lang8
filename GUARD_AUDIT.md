@@ -230,7 +230,7 @@ would leave the underlying proof obligations unresolved.
 | Site | Relationship to prove |
 | --- | --- |
 | `src2/assembler.l8:764` | Every generated text patch points to four emitted bytes. |
-| `programs/block-game/block-game-undo.l8:258` | Evicted action headers describe complete stored actions. |
+| `programs/block-game/block-game-undo.l8:249` | Evicted action headers describe complete stored actions. |
 | `programs/block-game/block-game-undo.l8:269,361,399,401,425,428,621` | Rewind counts, frame offsets, and route layout agree across the timeline and room records. |
 
 The ELF packer now reports an output field outside its allocated image as an
