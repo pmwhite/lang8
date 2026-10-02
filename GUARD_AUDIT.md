@@ -223,16 +223,20 @@ checks that still need proofs.
 
 ## Remaining `IndexOutOfBounds` raises
 
-There are 11 explicit raises in `src2` and the block game.
+There are 10 explicit raises in `src2` and the block game.
 These checks protect internal relationships; changing their exception names
 would leave the underlying proof obligations unresolved.
 
 | Site | Relationship to prove |
 | --- | --- |
 | `src2/assembler.l8:764` | Every generated text patch points to four emitted bytes. |
-| `src2/elfpack.l8:142` | Every generated ELF write fits the computed output span. |
 | `programs/block-game/block-game-undo.l8:132,225` | Journal reads have nonnegative positions and evicted action headers describe complete stored actions. |
 | `programs/block-game/block-game-undo.l8:269,361,399,401,425,428,621` | Rewind counts, frame offsets, and route layout agree across the timeline and room records. |
+
+The ELF packer now reports an output field outside its allocated image as an
+ELF construction error at the output boundary. Relocation symbol checks also
+cover the generated address table, and the relocation loops retain their
+array length relationships across calls through snapshots and invariants.
 
 The terminal pane partition still budgets recursive leaves. If a future
 partition consumes all 256 region slots, it now stops adding partial clips
