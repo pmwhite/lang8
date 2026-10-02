@@ -265,6 +265,12 @@ Eliminating that guard needs action size metadata tied to `tail` and `head`.
 
 The room list is also the index space for rewind snapshots: each room's
 `RoomBlockSpan` selects both block IDs and a compact slice of every frame.
+The verifier now proves that two bounded sums sharing a prefix retain the
+order of their suffixes when a record is constructed. `rewind_frame_view`
+uses that rule to construct a frame from a bounded step and room span with
+no bounds branch. The remaining undo callers use separate compact room
+widths or image offsets, so they still need one common layout object that
+relates those values to the frame storage.
 Replacing the list with independent per-room arrays would require moving
 the snapshots to per-room storage as well. Otherwise the verifier still
 needs the same prefix-sum proof at every snapshot access. The direct
