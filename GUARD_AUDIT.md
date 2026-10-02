@@ -96,6 +96,11 @@ fixed-capacity boundaries prevent real failures.
   `tail <= head` in the timeline invariant and store each action's absolute
   start in its trailer. Undo's return contract carries the tail bound to
   phase changes, and eviction no longer needs a redundant tail-range raise.
+- [x] `programs/terminal/scene.l8`, diff window: let record arrays carry
+  quantified predicates over element fields. Stored regions maintain
+  `left <= right`, and the blank-trimming, prefix, and suffix loops preserve
+  their lower bounds. The verifier now proves both diff widths nonnegative
+  without a corruption raise.
 
 - [x] `src2/assembler.l8`, `as_wr_le`: removed its runtime guard and
   gave the generic byte writer and fixed-width wrappers span requirements.
@@ -143,8 +148,8 @@ fixed-capacity boundaries prevent real failures.
   `LEVEL_MAX_BLOCKS * 4` buffer. The mesh lookup still checks species and
   variant values that may originate in level data.
 - [ ] `programs/terminal/scene.l8` and `programs/terminal/render.l8`: prove
-  region and quad counts fit their fixed buffers. The diff-window lower bound
-  and palette fallback still handle values derived from terminal input.
+  region and quad counts fit their fixed buffers. The palette fallback still
+  handles values derived from terminal input.
 - [x] `programs/freetype/ft.l8`: keep the glyph-capacity and hash-size
   checks. The glyph table fills with distinct code points and FreeType
   supplies glyph dimensions; neither is bounded by a verifier fact about a
@@ -188,7 +193,8 @@ the mirrored `src1` compiler and tests). The remaining sites have these roles:
   `block-game-plant-render.l8`: fixed instance buffers and batch copy spans
   are checked before a complete record is written.
 - `programs/terminal/scene.l8` and `render.l8`: fixed region and vertex
-  buffers and diff-window lengths are checked at their capacity boundaries.
+  buffers retain capacity checks; diff-window widths now follow from stored
+  region and loop invariants.
 
 Some remaining checks expose proof-language limits: saved journal words and
 room list lengths do not have element-value or cross-object invariants. These
