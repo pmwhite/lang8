@@ -251,3 +251,19 @@ structure to drive phase changes and eviction. The verifier also needs to
 carry a bounded action position through small positive offsets; proving
 `latest + 1` currently requires an explicit numeric upper bound even when
 the action is known to end before `head`.
+
+The room list is also the index space for rewind snapshots: each room's
+`RoomBlockSpan` selects both block IDs and a compact slice of every frame.
+Replacing the list with independent per-room arrays would require moving
+the snapshots to per-room storage as well. Otherwise the verifier still
+needs the same prefix-sum proof at every snapshot access. The direct
+`undo_frame_view` precondition probe reached this missing room-layout
+relation at its first caller.
+
+The bounds graph keeps pointers into its preallocated node and edge arrays.
+Growing those arrays would invalidate pointers. Chunked growth was also
+tested, but a cached graph may outlive the heap region in which a later
+chunk is allocated; the lifetime checker correctly rejects that store.
+The graph therefore needs a row-budget proof for its stable preallocation,
+or a larger ownership redesign that allocates stable nodes and edges in
+the graph's original lifetime.
