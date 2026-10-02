@@ -217,7 +217,7 @@ checks that still need proofs.
 
 ## Remaining `IndexOutOfBounds` raises
 
-There are 18 explicit raises in `src2`, the block game, and the terminal.
+There are 17 explicit raises in `src2`, the block game, and the terminal.
 These checks protect internal relationships; changing their exception names
 would leave the underlying proof obligations unresolved.
 
@@ -230,7 +230,6 @@ would leave the underlying proof obligations unresolved.
 | `programs/block-game/block-game-undo.l8:132,225` | Journal reads have nonnegative positions and evicted action headers describe complete stored actions. |
 | `programs/block-game/block-game-undo.l8:269,361,399,401,425,428,576,621` | Rewind counts, frame offsets, route layout, and room spans agree across the timeline and room records. |
 | `programs/terminal/scene.l8:354` | Recursive region partitioning consumes no more than its allotted region budget. |
-| `programs/terminal/render.l8:260` | Background, glyph, ghost, and cursor quads together fit the fixed vertex buffer. |
 
 The terminal region proof needs a relation of the form
 `region_count + budget <= limit` to survive scanning loops and recursive
@@ -243,6 +242,9 @@ in that mesh's scan.
 The grass batch still makes one draw call. It visits fixed cell/blade slots
 and packs active instances with `packed <= slots visited`, a loop invariant
 the verifier can preserve.
+The terminal renderer likewise counts possible quads while retaining one
+upload and draw sequence. Its visible quad count never exceeds the slots
+visited, including the cursor slot.
 
 The undo journal needs a representation change before its read guard can
 be removed. `undo_latest` now exposes its nonnegative, bounded result to
