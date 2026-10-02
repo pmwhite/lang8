@@ -223,7 +223,7 @@ checks that still need proofs.
 
 ## Remaining `IndexOutOfBounds` raises
 
-There are 4 explicit raises in `src2` and the block game.
+There are 2 explicit raises in `src2` and the block game.
 These checks protect internal relationships; changing their exception names
 would leave the underlying proof obligations unresolved.
 
@@ -231,7 +231,6 @@ would leave the underlying proof obligations unresolved.
 | --- | --- |
 | `src2/assembler.l8`, `as_patch_i32` | Every generated text patch points to four emitted bytes after buffer growth. |
 | `programs/block-game/block-game-undo.l8`, `undo_commit_action` | Evicted action headers describe complete stored actions. |
-| `programs/block-game/block-game-undo.l8`, save and route entry | Live rewind counts and cursors stay within 128 frames. |
 
 The ELF packer now reports an output field outside its allocated image as an
 ELF construction error at the output boundary. Relocation symbol checks also
@@ -274,7 +273,8 @@ every room and frame, both in the snapshot and in its packed image. Saving
 and restoring history read these views, so neither operation recomputes a
 frame offset from mutable room widths. Routes use precomputed views as well;
 the bounded cursor loops prove their append count fits the route table. The
-remaining route-entry check is for the live rewind cursor. The undo journal
+live rewind count and cursor now use bounded record elements, so save and
+route entry need no further checks. The undo journal
 stores compact, bounded before and after values alongside count and cursor
 changes. Replay writes these values in the same direction as the image XOR,
 and restore, release detection, and route construction read them through
