@@ -223,7 +223,7 @@ checks that still need proofs.
 
 ## Remaining `IndexOutOfBounds` raises
 
-There are 9 explicit raises in `src2` and the block game.
+There are 6 explicit raises in `src2` and the block game.
 These checks protect internal relationships; changing their exception names
 would leave the underlying proof obligations unresolved.
 
@@ -231,8 +231,7 @@ would leave the underlying proof obligations unresolved.
 | --- | --- |
 | `src2/assembler.l8`, `as_patch_i32` | Every generated text patch points to four emitted bytes after buffer growth. |
 | `programs/block-game/block-game-undo.l8`, `undo_commit_action` | Evicted action headers describe complete stored actions. |
-| `programs/block-game/block-game-undo.l8`, save/release/restore | Rewind counts and archived cursors stay within 128 frames across journal replay. |
-| `programs/block-game/block-game-undo.l8`, `undo_frame_view` and `undo_route_append` | Route construction and playback use bounded frame steps and source ranges. |
+| `programs/block-game/block-game-undo.l8`, save/release/restore/route entry | Rewind counts and archived cursors stay within 128 frames across journal replay. |
 
 The ELF packer now reports an output field outside its allocated image as an
 ELF construction error at the output boundary. Relocation symbol checks also
@@ -273,9 +272,10 @@ no bounds branch. The undo timeline owns its rewind snapshot and validates
 the packed room layout once at creation. It then stores bounded views for
 every room and frame, both in the snapshot and in its packed image. Saving
 and restoring history read these views, so neither operation recomputes a
-frame offset from mutable room widths. The remaining direct frame guard is
-used by route construction and playback, where cursor and route-step bounds
-still need to be carried through the timeline.
+frame offset from mutable room widths. Routes use precomputed views as well;
+the bounded cursor loops prove their append count fits the route table. The
+remaining route-entry check is for cursor values reconstructed from the
+journal or read from live rewind state.
 Replacing the list with independent per-room arrays would require moving
 the snapshots to per-room storage as well. Otherwise the verifier still
 needs the same prefix-sum proof at every snapshot access. The direct

@@ -188,6 +188,16 @@ undo_image_frame(u: *UndoTimeline, room: int, step: int): UndoImageFrame require
     u.image_frames[room * REWIND_MAX + step]
 }
 
+undo_archived_frame(
+    u: *UndoTimeline,
+    room: int,
+    step: int,
+    data: []int
+): RewindFrameView requires (0 <= room && room < LEVEL_MAX_ROOMS && 0 <= step && step < REWIND_MAX && len(data) == UNDO_INDEX_MASK + 1) {
+    frame: UndoImageFrame = undo_image_frame(u, room, step);
+    RewindFrameView { cells: data, start: frame.start, end: frame.end }
+}
+
 undo_snap_frame(u: *UndoTimeline, room: int, step: int): RewindFrameView requires (0 <= room && room < LEVEL_MAX_ROOMS && 0 <= step && step < REWIND_MAX) {
     u.snap_frames[room * REWIND_MAX + step]
 }
@@ -476,13 +486,6 @@ undo_record_action(
     }
 }
 
-undo_frame_view(data: []int, start: int, width: int) raises IndexOutOfBounds: RewindFrameView {
-    if (start < 0 || width < 0) raise IndexOutOfBounds;
-    end: int = start + width;
-    if (end < start || end > len(data)) raise IndexOutOfBounds;
-    RewindFrameView { cells: data, start: start, end: end }
-}
-
 undo_room_frame_equal(a: RewindFrameView, b: RewindFrameView): bool {
     ai: int = a.start;
     bi: int = b.start;
@@ -497,23 +500,18 @@ undo_room_frame_equal(a: RewindFrameView, b: RewindFrameView): bool {
 undo_route_append(
     u: *UndoTimeline,
     room: int,
-    data: []int,
-    off: int
-) raises IndexOutOfBounds requires (0 <= room && room < LEVEL_MAX_ROOMS) {
-    count: int = u.route_n[room];
-    if (count >= UNDO_ROUTE_MAX) raise IndexOutOfBounds;
+    count: int,
+    source: RewindFrameView
+): int requires (0 <= room && room < LEVEL_MAX_ROOMS && 0 <= count && count < UNDO_ROUTE_MAX) ensures (returned == count + 1) {
     frame: RewindFrameView = undo_route_frame(u, room, count);
-    width: int = frame.end - frame.start;
-    source_end: int = off + width;
-    if (off < 0 || source_end < off || source_end > len(data)) raise IndexOutOfBounds;
     dest_at: int = frame.start;
-    source_at: int = off;
-    while (dest_at < frame.end && source_at < source_end) invariant (frame.start <= dest_at && dest_at <= frame.end && off <= source_at && source_at <= source_end && source_end <= len(data)) {
-        frame.cells[dest_at] = data[source_at];
+    source_at: int = source.start;
+    while (dest_at < frame.end && source_at < source.end) invariant (frame.start <= dest_at && dest_at <= frame.end && source.start <= source_at && source_at <= source.end) {
+        frame.cells[dest_at] = source.cells[source_at];
         dest_at = dest_at + 1;
         source_at = source_at + 1
     }
-    u.route_n[room] = count + 1
+    count + 1
 }
 
 undo_build_route(
@@ -522,24 +520,22 @@ undo_build_route(
     room: int,
     blocks: []Block,
     room_ids: *RoomBlockIds,
-    room_hn: []int,
-    live: []int,
     cursors: []int
-) raises IoError, IndexOutOfBounds requires (0 <= room && room < LEVEL_MAX_ROOMS && room < len(room_hn) && room < len(cursors) && len(blocks) >= LEVEL_MAX_BLOCKS) {
-    room_span: RoomBlockSpan = room_ids.spans[room];
-    width: int = room_span.end - room_span.start;
+) raises IoError, IndexOutOfBounds requires (0 <= room && room < LEVEL_MAX_ROOMS && room < len(cursors) && len(blocks) >= LEVEL_MAX_BLOCKS) {
     data: []int = undo_load_history(u, action, 1);
-    off: int = u.offsets[room];
     target: int = u.metas[room].cursor.*;
+    live_cursor: int = cursors[room];
+    if (target < -1 || target >= REWIND_MAX || live_cursor < -1 || live_cursor >= REWIND_MAX) raise IndexOutOfBounds;
     u.route_n[room] = 0;
     u.route_cur[room] = 0;
+    route_count: int = 0;
     // Find the current configuration on the retained branch first.
     match_step: int = 0 - 1;
     s: int = target;
-    while (s >= 0 && match_step < 0) {
+    while (s >= 0 && match_step < 0) invariant (-1 <= s && s < REWIND_MAX && -1 <= match_step && match_step < REWIND_MAX && -1 <= target && target < REWIND_MAX && -1 <= live_cursor && live_cursor < REWIND_MAX) {
         same: bool = true;
         span: RoomBlockSpan = room_ids.spans[room];
-        frame: RewindFrameView = undo_frame_view(data, off + 3 + s * width, width);
+        frame: RewindFrameView = undo_archived_frame(u, room, s, data);
         slot: int = span.start;
         at: int = frame.start;
         while (slot < span.end && at < frame.end) invariant (span.start <= slot && slot <= span.end && frame.start <= at && at <= frame.end) {
@@ -556,15 +552,14 @@ undo_build_route(
     if (match_step < 0) {
         // A later visit can have created a different branch. Walk back to the
         // shared configuration before traversing the retained branch forward.
-        a: int = cursors[room];
+        a: int = live_cursor;
         common: int = 0 - 1;
-        while (a >= 0 && common < 0) {
+        while (a >= 0 && common < 0) invariant (-1 <= a && a < REWIND_MAX && -1 <= common && common < REWIND_MAX && -1 <= match_step && match_step < REWIND_MAX && -1 <= live_cursor && live_cursor < REWIND_MAX && -1 <= target && target < REWIND_MAX) {
             s = target;
-            while (s >= 0 && common < 0) {
-                live_frame: RewindFrameView = undo_frame_view(live, rewind_slot(room,
-                    a, 0, room_hn, len(live) / REWIND_MAX), width);
-                archived_frame: RewindFrameView = undo_frame_view(data, off + 3 + s * width,
-                    width);
+            while (s >= 0 && common < 0) invariant (-1 <= s && s < REWIND_MAX && 0 <= a && a < REWIND_MAX && -1 <= common && common < REWIND_MAX && -1 <= match_step && match_step < REWIND_MAX && -1 <= live_cursor && live_cursor < REWIND_MAX && -1 <= target && target < REWIND_MAX) {
+                live_frame: RewindFrameView = undo_snap_frame(u, room, a);
+                archived_frame: RewindFrameView = undo_archived_frame(u, room, s,
+                    data);
                 if (undo_room_frame_equal(live_frame, archived_frame)) {
                     common = a;
                     match_step = s
@@ -574,19 +569,22 @@ undo_build_route(
             a = a - 1
         }
         if (common >= 0) {
-            a = cursors[room] - 1;
-            while (a >= common) {
-                live_frame: int = rewind_slot(room, a, 0, room_hn, len(live) / REWIND_MAX);
-                undo_route_append(u, room, live, live_frame);
+            a = live_cursor;
+            if (a > 0) a = a - 1 else a = -1;
+            while (a >= common) invariant (a < REWIND_MAX) {
+                live_frame: RewindFrameView = undo_snap_frame(u, room, a);
+                route_count = undo_route_append(u, room, route_count, live_frame);
                 a = a - 1
             }
         }
     }
     s = match_step + 1;
-    while (s <= target) {
-        undo_route_append(u, room, data, off + 3 + s * width);
+    while (s <= target) invariant (0 <= s && s <= REWIND_MAX && -1 <= target && target < REWIND_MAX) {
+        archived_frame: RewindFrameView = undo_archived_frame(u, room, s, data);
+        route_count = undo_route_append(u, room, route_count, archived_frame);
         s = s + 1
     }
+    u.route_n[room] = route_count;
     u.route_ms[room] = rewind_return_step_ms(u.route_n[room])
 }
 
