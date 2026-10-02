@@ -208,3 +208,6 @@ diagnostic path. Compiler input that overflows an import path or variant name
 reports a source `Error`. Bounds-analysis function, graph, and fact-table
 allocation limits also report source `Error`. The call contracts no longer
 advertise `IndexOutOfBounds` along paths that only reach those limits.
+The compiler string buffer now maintains a nonnegative used length. Both
+single-byte and bulk append report source `Error` if their target length
+overflows; bulk append previously lacked that overflow check.
