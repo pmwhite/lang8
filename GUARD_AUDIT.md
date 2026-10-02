@@ -239,3 +239,15 @@ The terminal region proof needs a relation of the form
 budget splits. A local contract using `region_count <= limit - budget`
 does not currently carry that relation through the verifier. Fixed-rate
 render batches need a related accumulated-count proof across loops.
+
+The undo journal needs a representation change before its read guard can
+be removed. `undo_latest` now exposes its nonnegative, bounded result to
+callers, but change ranges and evicted action sizes are reconstructed from
+plain words in the journal ring. Those words have different meanings at
+different positions, so an invariant over every journal element would be
+false. Store action header metadata in a typed structure, with its start,
+size, and phase boundary related to `tail` and `head`, then use that
+structure to drive phase changes and eviction. The verifier also needs to
+carry a bounded action position through small positive offsets; proving
+`latest + 1` currently requires an explicit numeric upper bound even when
+the action is known to end before `head`.
