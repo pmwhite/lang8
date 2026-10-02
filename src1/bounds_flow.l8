@@ -4,7 +4,7 @@ bounds_array_field_use: int = 0;
 
 // Explicit raises select the nearest matching handler. An unknown call may
 // throw any exception; notifying outer handlers too is conservative.
-bounds_exception(exn: ?*ExnDef, f: ?*BoundsState) noregion raises IndexOutOfBounds {
+bounds_exception(exn: ?*ExnDef, f: ?*BoundsState) noregion raises Error, IndexOutOfBounds {
     if (!bounds_reachable(f)) return;
     handler: ?*BoundsHandler = bounds_handlers;
     while (handler != null) {
@@ -16,7 +16,7 @@ bounds_exception(exn: ?*ExnDef, f: ?*BoundsState) noregion raises IndexOutOfBoun
     }
 }
 
-bounds_call_exceptions(callee: ?*Function, f: ?*BoundsState) noregion raises IndexOutOfBounds {
+bounds_call_exceptions(callee: ?*Function, f: ?*BoundsState) noregion raises Error, IndexOutOfBounds {
     if (callee == null) {
         bounds_exception(null, f);
         return
@@ -32,10 +32,24 @@ bounds_call_exceptions(callee: ?*Function, f: ?*BoundsState) noregion raises Ind
 bounds_value_facts(path: *Expr@new, value: *Expr@new, f: ?*BoundsState@new) raises Error, IndexOutOfBounds: ?*BoundsState@f {
     if (!bounds_reachable(f)) return f;
     local: ?*Obj = bounds_var(path);
+    path_ty: ?*Type = path.ty;
+    if (local != null) path_ty = local.ty;
     if (bounds_pure_condition(value)) f = bounds_copy_value(f, value, path);
     if (bounds_nonnull(f, value)) f = bounds_add_nonnull(f, path);
-    if (is_int_ty(path.ty) && bounds_pure_condition(value)) f = bounds_numeric_value(path,
+    if (is_int_ty(path_ty) && bounds_pure_condition(value)) f = bounds_numeric_value(path,
         value, f);
+    match value.kind {
+        Trunc narrowed -> {
+            if (is_i8_ty(path.ty) && bounds_nonnegative_term(f, narrowed.lhs)) {
+                upper: int = bounds_small_upper(narrowed.lhs, f);
+                if (upper >= 0 && upper <= 255) {
+                    f = bounds_add_relation(f, path, narrowed.lhs, 0);
+                    f = bounds_add_relation(f, narrowed.lhs, path, 0)
+                }
+            }
+        }
+        _ -> { }
+    }
     if (local != null && bounds_expression_nonnegative(value, f)) f = bounds_add_order(f,
         new_num(0), bounds_obj_expr(local), false);
     f = bounds_constant_value(path, value, f);
@@ -137,7 +151,7 @@ bounds_value_facts(path: *Expr@new, value: *Expr@new, f: ?*BoundsState@new) rais
 // A local boolean initialized from a pure condition can retain facts implied
 // by either result. Mutation invalidation drops these implications alongside
 // the ordinary facts on which they depend.
-bounds_local_bool_facts(local: *Obj@new, init: *Expr, f: ?*BoundsState@new) raises IndexOutOfBounds: ?*BoundsState@f {
+bounds_local_bool_facts(local: *Obj@new, init: *Expr, f: ?*BoundsState@new) raises Error, IndexOutOfBounds: ?*BoundsState@f {
     if (!is_bool_ty(local.ty) || !bounds_pure_condition(init)) return f;
     for truth in [false, true] {
         branch: ?*BoundsState = bounds_condition(init, truth, f);
@@ -173,6 +187,8 @@ bounds_pure_condition(e: *Expr) raises IndexOutOfBounds: bool {
         MemberAccess k -> bounds_pure_condition(k.lhs);
         Deref k -> bounds_pure_condition(k.lhs);
         Index k -> bounds_pure_condition(k.lhs) && bounds_pure_condition(k.idx);
+        As k -> bounds_pure_condition(k.lhs);
+        Trunc k -> bounds_pure_condition(k.lhs);
         Binary k -> bounds_pure_condition(k.lhs) && bounds_pure_condition(k.rhs);
         Neg k -> bounds_pure_condition(k.lhs);
         Not k -> bounds_pure_condition(k.lhs);
@@ -212,7 +228,7 @@ bounds_stable_scalar_operand(e: *Expr) raises IndexOutOfBounds: bool {
     }
 }
 
-bounds_stable_scalar_condition(e: *Expr, yes: bool, f: ?*BoundsState@new) raises IndexOutOfBounds: ?*BoundsState@new {
+bounds_stable_scalar_condition(e: *Expr, yes: bool, f: ?*BoundsState@new) raises Error, IndexOutOfBounds: ?*BoundsState@new {
     match e.kind {
         Var _ -> {
             if (is_bool_ty(e.ty) && bounds_stable_scalar_operand(e) && bounds_implication_needs_scalar(f,
@@ -243,7 +259,7 @@ bounds_stable_scalar_condition(e: *Expr, yes: bool, f: ?*BoundsState@new) raises
     }
 }
 
-bounds_condition(e: *Expr, yes: bool, f: ?*BoundsState@new) raises IndexOutOfBounds: ?*BoundsState@new {
+bounds_condition(e: *Expr, yes: bool, f: ?*BoundsState@new) raises Error, IndexOutOfBounds: ?*BoundsState@new {
     if (!bounds_reachable(f)) return f;
     match e.kind {
         Num literal -> {
@@ -256,7 +272,7 @@ bounds_condition(e: *Expr, yes: bool, f: ?*BoundsState@new) raises IndexOutOfBou
 
 // In other == base + k with k > 0, base >= 0 and other >= base rule out
 // signed overflow. The equality can then contribute exact difference edges.
-bounds_positive_offset_equality(f: ?*BoundsState@new, other: *Expr, shifted: *Expr@new) raises IndexOutOfBounds: ?*BoundsState@new {
+bounds_positive_offset_equality(f: ?*BoundsState@new, other: *Expr, shifted: *Expr@new) raises Error, IndexOutOfBounds: ?*BoundsState@new {
     affine: ?*BoundsAffine = bounds_affine(shifted, true);
     if (affine == null || affine.offset <= 0 || !bounds_term(other)) return f;
     if (!bounds_affine_safe(affine, f) && (!bounds_nonnegative_term(f, affine.base) || !bounds_difference_proves(f,
@@ -265,7 +281,7 @@ bounds_positive_offset_equality(f: ?*BoundsState@new, other: *Expr, shifted: *Ex
     bounds_add_relation(f, affine.base, other, 0 - affine.offset)
 }
 
-bounds_condition_facts(e: *Expr, yes: bool, f: ?*BoundsState@new) raises IndexOutOfBounds: ?*BoundsState@new {
+bounds_condition_facts(e: *Expr, yes: bool, f: ?*BoundsState@new) raises Error, IndexOutOfBounds: ?*BoundsState@new {
     if (!bounds_pure_condition(e)) return bounds_stable_scalar_condition(e, yes, f);
     match e.kind {
         Var _ -> {
@@ -331,12 +347,12 @@ bounds_condition_facts(e: *Expr, yes: bool, f: ?*BoundsState@new) raises IndexOu
     }
 }
 
-bounds_invariant_proved(e: *Expr, f: ?*BoundsState) raises IndexOutOfBounds: bool {
+bounds_invariant_proved(e: *Expr, f: ?*BoundsState) raises Error, IndexOutOfBounds: bool {
     !bounds_reachable(f) || bounds_pure_condition(e) && bounds_precondition_proved(e,
         f)
 }
 
-bounds_infer_invariant_entry(e: *Expr, f: ?*BoundsState) raises IndexOutOfBounds {
+bounds_infer_invariant_entry(e: *Expr, f: ?*BoundsState) raises Error, IndexOutOfBounds {
     if (!bounds_infer_mode) return;
     match e.kind {
         LogAnd k -> {
@@ -368,11 +384,11 @@ bounds_infer_invariant_entry(e: *Expr, f: ?*BoundsState) raises IndexOutOfBounds
     }
 }
 
-bounds_count_fits(a: *Expr@new, count: *Expr, f: ?*BoundsState) raises IndexOutOfBounds: bool {
+bounds_count_fits(a: *Expr@new, count: *Expr, f: ?*BoundsState) raises Error, IndexOutOfBounds: bool {
     bounds_difference_proves(f, count, bounds_length(a), 0)
 }
 
-bounds_proves(a: *Expr@new, i: *Expr@new, f: ?*BoundsState) raises IndexOutOfBounds: bool {
+bounds_proves(a: *Expr@new, i: *Expr@new, f: ?*BoundsState) raises Error, IndexOutOfBounds: bool {
     // The expression range domain handles masks/products; all array-relative
     // reasoning uses the same difference query as contracts and invariants.
     if (bounds_difference_index(f, a, i)) return true;
@@ -428,7 +444,7 @@ bounds_short_circuit_join(
     skip_when: bool,
     entry: ?*BoundsState@new,
     evaluated: ?*BoundsState
-) raises IndexOutOfBounds: ?*BoundsState@new {
+) raises Error, IndexOutOfBounds: ?*BoundsState@new {
     if (!bounds_reachable(evaluated)) return bounds_condition(condition, skip_when,
         entry);
     match condition.kind {
@@ -939,7 +955,7 @@ bounds_last_stmt(first: ?*Stmt): ?*Stmt@first {
 }
 
 // Constants survive intervening effects; state-dependent transfers do not.
-bounds_constant_value(path: *Expr@new, value: *Expr, f: ?*BoundsState@new) raises IndexOutOfBounds: ?*BoundsState@f {
+bounds_constant_value(path: *Expr@new, value: *Expr, f: ?*BoundsState@new) raises Error, IndexOutOfBounds: ?*BoundsState@f {
     number: int = bounds_num(value);
     if (number > -536870912 && number < 536870912) {
         f = bounds_add_order(f, path, new_num(number), false);

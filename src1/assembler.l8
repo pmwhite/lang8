@@ -3,12 +3,13 @@ tag compiler_internal;
 // l8as: minimal x86-64 AT&T assembler → ELF64 ET_REL (elfpack-compatible).
 // Usage: l8as -o out.o a.s b.s ...
 type as_Sym = {
+    as_id: int;
     as_name: []i8;
     as_val: int;
     as_sec: int;
     as_bind: int;
     as_defined: bool;
-    as_hash_next: int;
+    as_hash_next: ?*as_Sym;
     as_object_index: *AsSymbolIndex
 }
 
@@ -25,16 +26,30 @@ type as_Rel = {
 }
 
 type as_LocPatch = {
-    as_off: int;
+    as_site: *AsPatchSite;
     as_next_ip: int;
     as_digit: int
 }
 
 type as_LabPatch = {
-    as_off: int;
+    as_site: *AsPatchSite;
     as_next_ip: int;
     as_next: ?*as_LabPatch
 }
+
+type AsPatchSite = {
+    off: int;
+    value: int
+}
+
+as_dummy_patch: AsPatchSite = AsPatchSite { off: 0, value: 0 };
+
+type AsPatchSites = {
+    items: []*AsPatchSite;
+    count: int
+} invariant (0 <= count && count <= len(items))
+
+as_patch_sites: AsPatchSites = AsPatchSites { items: new *AsPatchSite[0](&as_dummy_patch), count: 0 };
 
 as_O_RDONLY: int = 0;
 
@@ -117,7 +132,7 @@ as_cur_sec: int = 0;
 as_pass_no: int = 0;
 
 type AsSymbols = {
-    items: []as_Sym;
+    items: []*as_Sym;
     count: int
 } invariant (0 <= count && count <= len(items))
 
@@ -126,20 +141,21 @@ type AsEnsuredSymbol = {
     symbol: *as_Sym
 }
 
-as_symbols: AsSymbols = AsSymbols { items: new as_Sym[0](as_Sym {
+as_symbols: AsSymbols = AsSymbols { items: new *as_Sym[0](new as_Sym {
+    as_id: 0,
     as_name: "",
     as_val: 0,
     as_sec: 0,
     as_bind: 0,
     as_defined: false,
-    as_hash_next: 0,
+    as_hash_next: null,
     as_object_index: new AsSymbolIndex { value: 0 }
 }), count: 0 };
 
 as_symbols_capacity: int = 4096;
 
 type AsBucketTables = {
-    symbols: []int;
+    symbols: []?*as_Sym;
     globals: []?*AsGlobalLink
 } invariant (len(symbols) == 4096 && len(globals) == 4096)
 
@@ -148,7 +164,7 @@ type AsGlobalLink = {
     next: ?*AsGlobalLink
 }
 
-as_bucket_tables: AsBucketTables = AsBucketTables { symbols: new int[4096](-1), globals: new ?*AsGlobalLink[4096](null) };
+as_bucket_tables: AsBucketTables = AsBucketTables { symbols: new ?*as_Sym[4096](null), globals: new ?*AsGlobalLink[4096](null) };
 
 type AsRelocations = {
     items: []as_Rel;
@@ -193,7 +209,7 @@ type AsLocPatches = {
     count: int
 } invariant (0 <= count && count <= len(items))
 
-as_loc_patches: AsLocPatches = AsLocPatches { items: new as_LocPatch[0](as_LocPatch { as_off: 0, as_next_ip: 0, as_digit: 0 }), count: 0 };
+as_loc_patches: AsLocPatches = AsLocPatches { items: new as_LocPatch[0](as_LocPatch { as_site: &as_dummy_patch, as_next_ip: 0, as_digit: 0 }), count: 0 };
 
 as_loc_patches_cap: int = 16;
 
@@ -317,6 +333,8 @@ as_op2_fb: bool = false;
 
 as_jmp_rel_off: int = 0;
 
+as_jmp_site: *AsPatchSite = &as_dummy_patch;
+
 as_jmp_next_ip: int = 0;
 
 as_op_a: []i8 = "";
@@ -425,7 +443,7 @@ as_sym_bucket(as_h: int): int ensures (0 <= returned && returned < 4096) {
 }
 
 as_clear_sym_buckets() {
-    for as_i in 0..len(as_bucket_tables.symbols) as_bucket_tables.symbols[as_i] = 0 - 1;
+    for as_i in 0..len(as_bucket_tables.symbols) as_bucket_tables.symbols[as_i] = null;
     for as_i in 0..len(as_bucket_tables.globals) as_bucket_tables.globals[as_i] = null
 }
 
@@ -528,11 +546,11 @@ as_cur_off(): int {
     if (as_cur_sec == as_SEC_BSS) as_bss_size else if (as_cur_sec == as_SEC_RODATA) as_rodata_len else if (as_cur_sec == as_SEC_DATA) as_data_len else as_text_len
 }
 
-as_emit_b(as_v: int) noregion raises IndexOutOfBounds {
+as_emit_b(as_v: int) noregion {
     if (as_cur_sec == as_SEC_TEXT) {
         at: int = as_text_len;
         target: int = at + 1;
-        if (at < 0 || target <= at) raise IndexOutOfBounds;
+        if (at < 0 || target <= at) as_fail("section exceeds addressable size");
         buf: []i8 = as_ensure_cap(as_SEC_TEXT, target);
         buf[at] = as_v trunc i8;
         as_text_len = target;
@@ -542,7 +560,7 @@ as_emit_b(as_v: int) noregion raises IndexOutOfBounds {
     if (as_cur_sec == as_SEC_RODATA) {
         at: int = as_rodata_len;
         target: int = at + 1;
-        if (at < 0 || target <= at) raise IndexOutOfBounds;
+        if (at < 0 || target <= at) as_fail("section exceeds addressable size");
         buf: []i8 = as_ensure_cap(as_SEC_RODATA, target);
         buf[at] = as_v trunc i8;
         as_rodata_len = target;
@@ -550,43 +568,24 @@ as_emit_b(as_v: int) noregion raises IndexOutOfBounds {
     }
     at: int = as_data_len;
     target: int = at + 1;
-    if (at < 0 || target <= at) raise IndexOutOfBounds;
+    if (at < 0 || target <= at) as_fail("section exceeds addressable size");
     buf: []i8 = as_ensure_cap(as_SEC_DATA, target);
     buf[at] = as_v trunc i8;
     as_data_len = target
 }
 
-as_emit_b2(as_a: int, as_b: int) noregion raises IndexOutOfBounds {
-    if (as_cur_sec == as_SEC_TEXT) {
-        if (as_text_len + 2 > as_text_cap) as_ensure_cap(as_SEC_TEXT, as_text_len + 2);
-        n: int = as_text_len;
-        if (n < 0 || n > len(as_text_buf) - 2) raise IndexOutOfBounds;
-        as_text_buf[n] = as_a trunc i8;
-        as_text_buf[n + 1] = as_b trunc i8;
-        as_text_len = n + 2;
-        return
-    }
+as_emit_b2(as_a: int, as_b: int) noregion {
     as_emit_b(as_a);
     as_emit_b(as_b)
 }
 
-as_emit_b3(as_a: int, as_b: int, as_c: int) noregion raises IndexOutOfBounds {
-    if (as_cur_sec == as_SEC_TEXT) {
-        if (as_text_len + 3 > as_text_cap) as_ensure_cap(as_SEC_TEXT, as_text_len + 3);
-        n: int = as_text_len;
-        if (n < 0 || n > len(as_text_buf) - 3) raise IndexOutOfBounds;
-        as_text_buf[n] = as_a trunc i8;
-        as_text_buf[n + 1] = as_b trunc i8;
-        as_text_buf[n + 2] = as_c trunc i8;
-        as_text_len = n + 3;
-        return
-    }
+as_emit_b3(as_a: int, as_b: int, as_c: int) noregion {
     as_emit_b(as_a);
     as_emit_b(as_b);
     as_emit_b(as_c)
 }
 
-as_emit_i32(as_v: int) noregion raises IndexOutOfBounds {
+as_emit_i32(as_v: int) noregion {
     x: int = as_v;
     for _ in 0..2 {
         as_emit_b2(x & 255, x >> 8 & 255);
@@ -594,7 +593,27 @@ as_emit_i32(as_v: int) noregion raises IndexOutOfBounds {
     }
 }
 
-as_emit_u64(as_v: int) noregion raises IndexOutOfBounds {
+as_emit_patch_i32() noregion: *AsPatchSite@new {
+    if (as_cur_sec != as_SEC_TEXT) as_fail("text patch outside text section");
+    at: int = as_text_len;
+    as_emit_i32(0);
+    site: *AsPatchSite = new AsPatchSite { off: at, value: 0 };
+    while (as_patch_sites.count >= len(as_patch_sites.items)) {
+        old_items: []*AsPatchSite = as_patch_sites.items;
+        count: int = as_patch_sites.count;
+        capacity: int = count * 2 + 64;
+        if (capacity <= count) as_fail("too many text patches");
+        dummy: *AsPatchSite = &as_dummy_patch;
+        next: []*AsPatchSite = new *AsPatchSite[capacity](dummy);
+        for i in 0..count next[i] = old_items[i];
+        as_patch_sites = AsPatchSites { items: next, count: count }
+    }
+    as_patch_sites.items[as_patch_sites.count] = site;
+    as_patch_sites.count = as_patch_sites.count + 1;
+    site
+}
+
+as_emit_u64(as_v: int) noregion {
     x: int = as_v;
     for _ in 0..4 {
         as_emit_b2(x & 255, x >> 8 & 255);
@@ -602,7 +621,7 @@ as_emit_u64(as_v: int) noregion raises IndexOutOfBounds {
     }
 }
 
-as_skip_bytes(as_n: int) noregion raises IndexOutOfBounds {
+as_skip_bytes(as_n: int) noregion {
     if (as_cur_sec == as_SEC_BSS) {
         as_bss_size = as_bss_size + as_n;
         return
@@ -610,7 +629,7 @@ as_skip_bytes(as_n: int) noregion raises IndexOutOfBounds {
     for _as_i in 0..as_n as_emit_b(0)
 }
 
-as_do_align(as_n: int) noregion raises IndexOutOfBounds {
+as_do_align(as_n: int) noregion {
     as_off: int = as_cur_off();
     as_pad: int = (as_n - as_off % as_n) % as_n;
     as_skip_bytes(as_pad)
@@ -621,19 +640,19 @@ as_emit_rex(
     as_r: int,
     as_x: int,
     as_b: int
-) noregion raises IndexOutOfBounds {
+) noregion {
     as_emit_b(64 + as_w * 8 + as_r * 4 + as_x * 2 + as_b)
 }
 
-as_emit_push(as_r: int) noregion raises IndexOutOfBounds {
+as_emit_push(as_r: int) noregion {
     if (as_r >= 8) as_emit_b2(65, 80 + as_r % 8) else as_emit_b(80 + as_r)
 }
 
-as_emit_pop(as_r: int) noregion raises IndexOutOfBounds {
+as_emit_pop(as_r: int) noregion {
     if (as_r >= 8) as_emit_b2(65, 88 + as_r % 8) else as_emit_b(88 + as_r)
 }
 
-as_emit_mov_rr(as_src: int, as_dst: int) noregion raises IndexOutOfBounds {
+as_emit_mov_rr(as_src: int, as_dst: int) noregion {
     as_emit_b3(72 + as_src / 8 % 2 * 4 + as_dst / 8 % 2, 137, 192 + as_src % 8 * 8 + as_dst % 8)
 }
 
@@ -670,21 +689,19 @@ as_add_globl(as_name: []i8) noregion {
     as_globals.count = as_globals.count + 1
 }
 
-as_find_sym(symbols: *AsSymbols, as_name: []i8) raises IndexOutOfBounds: int ensures (returned < len(symbols.items)) {
+as_find_sym(as_name: []i8): ?*as_Sym {
     as_b: int = as_sym_bucket(as_hash_str(as_name));
-    as_i: int = as_bucket_tables.symbols[as_b];
-    while (as_i >= 0) {
-        if (as_i >= symbols.count) raise IndexOutOfBounds;
-        if (as_streq(symbols.items[as_i].as_name, as_name)) return as_i;
-        as_i = symbols.items[as_i].as_hash_next
+    entry: ?*as_Sym = as_bucket_tables.symbols[as_b];
+    while (entry != null) {
+        if (as_streq(entry.as_name, as_name)) return entry;
+        entry = entry.as_hash_next
     }
-    0 - 1
+    null
 }
 
-as_ensure_sym(as_name: []i8) noregion raises IndexOutOfBounds: AsEnsuredSymbol {
-    symbols: *AsSymbols = &as_symbols;
-    as_i: int = as_find_sym(symbols, as_name);
-    if (as_i >= 0) return AsEnsuredSymbol { id: as_i, symbol: &symbols.items[as_i] };
+as_ensure_sym(as_name: []i8) noregion: AsEnsuredSymbol@new {
+    found: ?*as_Sym = as_find_sym(as_name);
+    if (found != null) return AsEnsuredSymbol { id: found.as_id, symbol: found };
     as_bind: int = as_STB_LOCAL;
     if (len(as_name) >= 2 && as_name[0] == '.' && as_name[1] == 'L') { } else {
         if (as_is_globl(as_name)) as_bind = as_STB_GLOBAL
@@ -695,44 +712,42 @@ as_ensure_sym(as_name: []i8) noregion raises IndexOutOfBounds: AsEnsuredSymbol {
         as_ncap: int = len(as_symbols.items) * 2;
         if (as_ncap < 64) as_ncap = 64;
         while (as_ncap <= as_symbols.count) as_ncap = as_ncap * 2;
-        as_ns: []as_Sym = new as_Sym[as_ncap](as_Sym {
+        as_ns: []*as_Sym = new *as_Sym[as_ncap](new as_Sym {
+            as_id: 0,
             as_name: "",
             as_val: 0,
             as_sec: 0,
             as_bind: 0,
             as_defined: false,
-            as_hash_next: 0,
+            as_hash_next: null,
             as_object_index: new AsSymbolIndex { value: 0 }
         });
         as_j: int = 0;
         while (as_j < as_symbols.count) invariant (0 <= as_j && as_j <= as_symbols.count && as_symbols.count < len(as_ns)) {
-            as_ns[as_j].as_name = as_symbols.items[as_j].as_name;
-            as_ns[as_j].as_val = as_symbols.items[as_j].as_val;
-            as_ns[as_j].as_sec = as_symbols.items[as_j].as_sec;
-            as_ns[as_j].as_bind = as_symbols.items[as_j].as_bind;
-            as_ns[as_j].as_defined = as_symbols.items[as_j].as_defined;
-            as_ns[as_j].as_hash_next = as_symbols.items[as_j].as_hash_next;
-            as_ns[as_j].as_object_index = as_symbols.items[as_j].as_object_index;
+            as_ns[as_j] = as_symbols.items[as_j];
             as_j = as_j + 1
         }
         as_symbols.items = as_ns;
         as_symbols_capacity = as_ncap
     }
     id: int = as_symbols.count;
-    entry: *as_Sym = &as_symbols.items[id];
-    entry.as_name = stored_name;
-    entry.as_val = 0;
-    entry.as_sec = as_SEC_UND;
-    entry.as_bind = as_bind;
-    entry.as_defined = false;
-    entry.as_hash_next = as_bucket_tables.symbols[as_b];
-    entry.as_object_index = new AsSymbolIndex { value: 0 };
-    as_bucket_tables.symbols[as_b] = id;
+    entry: *as_Sym = new as_Sym {
+        as_id: id,
+        as_name: stored_name,
+        as_val: 0,
+        as_sec: as_SEC_UND,
+        as_bind: as_bind,
+        as_defined: false,
+        as_hash_next: as_bucket_tables.symbols[as_b],
+        as_object_index: new AsSymbolIndex { value: 0 }
+    };
+    as_symbols.items[id] = entry;
+    as_bucket_tables.symbols[as_b] = entry;
     as_symbols.count = id + 1;
     AsEnsuredSymbol { id: id, symbol: entry }
 }
 
-as_define_sym(as_name: []i8) noregion raises IndexOutOfBounds {
+as_define_sym(as_name: []i8) noregion {
     ensured: AsEnsuredSymbol = as_ensure_sym(as_name);
     symbol: *as_Sym = ensured.symbol;
     symbol.as_val = as_cur_off();
@@ -748,7 +763,7 @@ as_add_reloc(
     as_typ: int,
     as_name: []i8,
     as_addend: int
-) noregion raises IndexOutOfBounds {
+) noregion {
     ensured: AsEnsuredSymbol = as_ensure_sym(as_name);
     while (as_relocations.count >= len(as_relocations.items)) {
         as_ncap: int = as_relocations_capacity * 2;
@@ -781,9 +796,22 @@ as_add_reloc(
     as_relocations.count = as_relocations.count + 1
 }
 
-as_patch_i32(as_off: int, as_v: int) raises IndexOutOfBounds {
-    if (as_off < 0 || as_off > len(as_text_buf) - 4) raise IndexOutOfBounds;
-    as_wr32(as_text_buf, as_off, as_v)
+as_patch_i32(site: *AsPatchSite, as_v: int) {
+    site.value = as_v
+}
+
+as_flush_patches() {
+    patch_i: int = 0;
+    for i in 0..len(as_text_buf) {
+        if (i < as_text_len && patch_i < as_patch_sites.count) {
+            patch: *AsPatchSite = as_patch_sites.items[patch_i];
+            if (patch.off <= i && i < patch.off + 4) {
+                shift: int = (i - patch.off) * 8;
+                as_text_buf[i] = (patch.value >> shift) trunc i8
+            }
+            if (i == patch.off + 3) patch_i = patch_i + 1
+        }
+    }
 }
 
 as_lab_grow() noregion {
@@ -823,26 +851,26 @@ as_lab_ensure(as_id: int) noregion: AsNamedLabels ensures (0 <= as_id && as_id <
 as_add_lab_patch(
     patches: []?*as_LabPatch@new,
     as_id: int,
-    as_off: int,
+    site: *AsPatchSite@new,
     as_next_ip: int
 ) requires (0 <= as_id && as_id < len(patches)) {
-    patches[as_id] = new as_LabPatch { as_off: as_off, as_next_ip: as_next_ip, as_next: patches[as_id] }
+    patches[as_id] = new as_LabPatch { as_site: site, as_next_ip: as_next_ip, as_next: patches[as_id] }
 }
 
-as_define_lab(as_id: int) noregion raises IndexOutOfBounds {
+as_define_lab(as_id: int) noregion {
     labels: AsNamedLabels = as_lab_ensure(as_id);
     labels.offsets[as_id] = as_cur_off();
     labels.defined[as_id] = 1;
     as_patch: ?*as_LabPatch = labels.patches[as_id];
     while (as_patch != null) {
         as_disp: int = labels.offsets[as_id] - as_patch.as_next_ip;
-        as_patch_i32(as_patch.as_off, as_disp);
+        as_patch_i32(as_patch.as_site, as_disp);
         as_patch = as_patch.as_next
     }
     labels.patches[as_id] = null
 }
 
-as_emit_jmp_lab(as_cc: int, as_id: int) noregion raises IndexOutOfBounds {
+as_emit_jmp_lab(as_cc: int, as_id: int) noregion {
     labels: AsNamedLabels = as_lab_ensure(as_id);
     defined: []int = labels.defined;
     offsets: []int = labels.offsets;
@@ -851,11 +879,10 @@ as_emit_jmp_lab(as_cc: int, as_id: int) noregion raises IndexOutOfBounds {
         as_emit_b(15);
         as_emit_b(128 + as_cc)
     }
-    as_rel: int = as_cur_off();
-    as_emit_i32(0);
+    site: *AsPatchSite = as_emit_patch_i32();
     as_next: int = as_cur_off();
-    if (defined[as_id] != 0) as_patch_i32(as_rel, offsets[as_id] - as_next) else as_add_lab_patch(patches,
-        as_id, as_rel, as_next)
+    if (defined[as_id] != 0) as_patch_i32(site, offsets[as_id] - as_next) else as_add_lab_patch(patches,
+        as_id, site, as_next)
 }
 
 /* ---- expression parser on tokbuf-style string ---- */
@@ -1089,11 +1116,10 @@ as_parse_operand(as_s: []i8@immortal) raises IndexOutOfBounds {
             as_op_disp = as_parse_expr(as_disp_s);
             return
         }
-        symbols: *AsSymbols = &as_symbols;
-        as_si: int = as_find_sym(symbols, as_disp_s);
-        if (as_si >= 0 && symbols.items[as_si].as_defined && symbols.items[as_si].as_sec == as_SEC_ABS) {
+        found: ?*as_Sym = as_find_sym(as_disp_s);
+        if (found != null && found.as_defined && found.as_sec == as_SEC_ABS) {
             as_op_kind = as_OP_MEM;
-            as_op_disp = symbols.items[as_si].as_val;
+            as_op_disp = found.as_val;
             return
         }
         as_op_kind = as_OP_MEMABS;
@@ -1115,7 +1141,7 @@ as_emit_modrm_mem(
     as_base: int,
     as_disp: int,
     as_rip: bool
-) noregion raises IndexOutOfBounds {
+) noregion {
     if (as_rip) {
         as_emit_b(0 + as_reg % 8 * 8 + 5);
         as_emit_i32(as_disp);
@@ -1141,7 +1167,7 @@ as_emit_mov_rm(
     as_rip: bool,
     as_name: []i8,
     as_extra: int
-) noregion raises IndexOutOfBounds {
+) noregion {
     as_rb: int = 0;
     if (!as_rip) as_rb = as_base / 8 % 2;
     as_emit_b2(72 + as_src / 8 % 2 * 4 + as_rb, 137);
@@ -1159,7 +1185,7 @@ as_emit_mov_mr(
     as_rip: bool,
     as_name: []i8,
     as_extra: int
-) noregion raises IndexOutOfBounds {
+) noregion {
     as_rb: int = 0;
     if (!as_rip) as_rb = as_base / 8 % 2;
     as_emit_b2(72 + as_dst / 8 % 2 * 4 + as_rb, 139);
@@ -1170,7 +1196,7 @@ as_emit_mov_mr(
     } else as_emit_modrm_mem(as_dst, as_base, as_disp, false)
 }
 
-as_emit_mov_imm_r(as_imm: int, as_dst: int) noregion raises IndexOutOfBounds {
+as_emit_mov_imm_r(as_imm: int, as_dst: int) noregion {
     as_rh: int = as_dst / 8 % 2;
     if (as_fits_imm32(as_imm)) {
         as_emit_b3(72 + as_rh, 199, 192 + as_dst % 8);
@@ -1188,7 +1214,7 @@ as_emit_lea(
     as_rip: bool,
     as_name: []i8,
     as_extra: int
-) noregion raises IndexOutOfBounds {
+) noregion {
     as_rb: int = 0;
     if (!as_rip) as_rb = as_base / 8 % 2;
     as_emit_b2(72 + as_dst / 8 % 2 * 4 + as_rb, 141);
@@ -1204,7 +1230,7 @@ as_emit_alu_imm(
     as_imm: int,
     as_dst: int,
     as_rax_opc: int
-) noregion raises IndexOutOfBounds {
+) noregion {
     if (as_fits_imm8(as_imm)) {
         as_emit_b3(72 + as_dst / 8 % 2, 131, 192 + as_op_ext * 8 + as_dst % 8);
         as_emit_b(as_imm)
@@ -1219,21 +1245,21 @@ as_emit_alu_imm(
     }
 }
 
-as_emit_alu_rr(as_opc: int, as_src: int, as_dst: int) noregion raises IndexOutOfBounds {
+as_emit_alu_rr(as_opc: int, as_src: int, as_dst: int) noregion {
     as_emit_b3(72 + as_src / 8 % 2 * 4 + as_dst / 8 % 2, as_opc, 192 + as_src % 8 * 8 + as_dst % 8)
 }
 
-as_emit_xor_zero(as_r: int) noregion raises IndexOutOfBounds {
+as_emit_xor_zero(as_r: int) noregion {
     as_h: int = as_r / 8 % 2;
     if (as_h != 0) as_emit_b3(69, 49, 192 + as_r % 8 * 9) else as_emit_b2(49, 192 + as_r % 8 * 9)
 }
 
-as_emit_test_rr(as_r: int) noregion raises IndexOutOfBounds {
+as_emit_test_rr(as_r: int) noregion {
     as_h: int = as_r / 8 % 2;
     as_emit_b3(72 + as_h * 4 + as_h, 133, 192 + as_r % 8 * 9)
 }
 
-as_define_loc(as_digit: int) raises IndexOutOfBounds requires (0 <= as_digit && as_digit < 10) {
+as_define_loc(as_digit: int) requires (0 <= as_digit && as_digit < 10) {
     as_off: int = as_cur_off();
     as_patches: AsLocPatches = as_loc_patches;
     as_local_labels.last_sec[as_digit] = as_cur_sec;
@@ -1244,7 +1270,7 @@ as_define_loc(as_digit: int) raises IndexOutOfBounds requires (0 <= as_digit && 
         if (as_patches.items[as_i].as_digit == as_digit) {
             if (as_cur_sec != as_SEC_TEXT) as_fail("loc label not in text");
             as_disp: int = as_off - as_patches.items[as_i].as_next_ip;
-            as_patch_i32(as_patches.items[as_i].as_off, as_disp);
+            as_patch_i32(as_patches.items[as_i].as_site, as_disp);
             as_patches.items[as_i].as_digit = 0 - 1
         }
         as_i = as_i + 1
@@ -1252,23 +1278,24 @@ as_define_loc(as_digit: int) raises IndexOutOfBounds requires (0 <= as_digit && 
 }
 
 /* jump helpers use pending fields */
-as_do_jump_target() noregion raises IndexOutOfBounds {
+as_do_jump_target() noregion {
     if (as_op_kind == as_OP_LOC) {
         if (!as_op_fb) {
             if (as_local_labels.defined[as_local_labels.op_digit] == 0) as_fail("no local Nb");
             if (as_local_labels.last_sec[as_local_labels.op_digit] != as_SEC_TEXT) as_fail("loc cross-sec");
             as_disp: int = as_local_labels.last_off[as_local_labels.op_digit] - as_jmp_next_ip;
-            as_patch_i32(as_jmp_rel_off, as_disp);
+            as_patch_i32(as_jmp_site, as_disp);
             return
         }
         while (as_loc_patches.count >= len(as_loc_patches.items)) {
             as_ncap: int = as_loc_patches_cap * 2;
             if (as_ncap < 16) as_ncap = 16;
             while (as_ncap <= as_loc_patches.count) as_ncap = as_ncap * 2;
-            as_np: []as_LocPatch = new as_LocPatch[as_ncap](as_LocPatch { as_off: 0, as_next_ip: 0, as_digit: 0 });
+            dummy: *AsPatchSite = &as_dummy_patch;
+            as_np: []as_LocPatch = new as_LocPatch[as_ncap](as_LocPatch { as_site: dummy, as_next_ip: 0, as_digit: 0 });
             as_j: int = 0;
             while (as_j < as_loc_patches.count) invariant (0 <= as_j && as_j <= as_loc_patches.count && as_loc_patches.count < len(as_np)) {
-                as_np[as_j].as_off = as_loc_patches.items[as_j].as_off;
+                as_np[as_j].as_site = as_loc_patches.items[as_j].as_site;
                 as_np[as_j].as_next_ip = as_loc_patches.items[as_j].as_next_ip;
                 as_np[as_j].as_digit = as_loc_patches.items[as_j].as_digit;
                 as_j = as_j + 1
@@ -1276,7 +1303,7 @@ as_do_jump_target() noregion raises IndexOutOfBounds {
             as_loc_patches.items = as_np;
             as_loc_patches_cap = as_ncap
         }
-        as_loc_patches.items[as_loc_patches.count].as_off = as_jmp_rel_off;
+        as_loc_patches.items[as_loc_patches.count].as_site = as_jmp_site;
         as_loc_patches.items[as_loc_patches.count].as_next_ip = as_jmp_next_ip;
         as_loc_patches.items[as_loc_patches.count].as_digit = as_local_labels.op_digit;
         as_loc_patches.count = as_loc_patches.count + 1;
@@ -1287,7 +1314,7 @@ as_do_jump_target() noregion raises IndexOutOfBounds {
     as_add_reloc(as_jmp_rel_off, as_R_X86_64_PLT32, as_op_name, 0 - 4)
 }
 
-as_emit_call() noregion raises IndexOutOfBounds {
+as_emit_call() noregion {
     if (as_op_kind == as_OP_INDREG) {
         as_emit_rex(0, 0, 0, as_op_reg / 8 % 2);
         as_emit_b(255);
@@ -1296,24 +1323,24 @@ as_emit_call() noregion raises IndexOutOfBounds {
     }
     as_emit_b(232);
     as_jmp_rel_off = as_cur_off();
-    as_emit_i32(0);
+    as_jmp_site = as_emit_patch_i32();
     as_jmp_next_ip = as_cur_off();
     as_do_jump_target()
 }
 
-as_emit_jmp_sym() noregion raises IndexOutOfBounds {
+as_emit_jmp_sym() noregion {
     as_emit_b(233);
     as_jmp_rel_off = as_cur_off();
-    as_emit_i32(0);
+    as_jmp_site = as_emit_patch_i32();
     as_jmp_next_ip = as_cur_off();
     as_do_jump_target()
 }
 
-as_emit_jcc(as_cc: int) noregion raises IndexOutOfBounds {
+as_emit_jcc(as_cc: int) noregion {
     as_emit_b(15);
     as_emit_b(128 + as_cc);
     as_jmp_rel_off = as_cur_off();
-    as_emit_i32(0);
+    as_jmp_site = as_emit_patch_i32();
     as_jmp_next_ip = as_cur_off();
     as_do_jump_target()
 }
@@ -1589,11 +1616,9 @@ as_insn(as_mnem: []i8, as_args: []i8) noregion raises IndexOutOfBounds {
             return
         }
         if (as_op2_kind == as_OP_MEMABS && as_op_kind == as_OP_REG) {
-            symbols: *AsSymbols = &as_symbols;
-            as_si: int = as_find_sym(symbols, as_op2_name);
-            if (as_si < 0 || symbols.items[as_si].as_sec != as_SEC_ABS) as_fail("lea abs");
-            as_emit_lea(as_op_reg, as_op2_base, symbols.items[as_si].as_val, false,
-                "", 0);
+            found: ?*as_Sym = as_find_sym(as_op2_name);
+            if (found == null || found.as_sec != as_SEC_ABS) as_fail("lea abs");
+            as_emit_lea(as_op_reg, as_op2_base, found.as_val, false, "", 0);
             return
         }
         if (as_op2_kind == as_OP_MEMRIP && as_op_kind == as_OP_REG) {
@@ -1757,9 +1782,8 @@ as_directive(as_lp: []i8@immortal, as_o: int, as_ln: int) noregion raises IndexO
         as_copy_to_buf(as_operand_buffers.name, as_lp, as_arg0, as_j3 - as_arg0);
         as_gn: []i8 = as_operand_buffers.name;
         as_add_globl(as_gn);
-        symbols: *AsSymbols = &as_symbols;
-        as_gi: int = as_find_sym(symbols, as_gn);
-        if (as_gi >= 0) symbols.items[as_gi].as_bind = as_STB_GLOBAL;
+        found: ?*as_Sym = as_find_sym(as_gn);
+        if (found != null) found.as_bind = as_STB_GLOBAL;
         return
     }
     if (as_streq(as_dname, ".equ")) {
@@ -1864,6 +1888,7 @@ as_handle_line(as_line: []i8@immortal, as_lo: int, as_hi: int) noregion raises I
 
 as_reset_buffers() {
     as_text_len = 0;
+    as_patch_sites.count = 0;
     as_rodata_len = 0;
     as_data_len = 0;
     as_bss_size = 0;
@@ -1925,21 +1950,23 @@ as_assemble_file_append(as_path: []i8) noregion raises IndexOutOfBounds {
 as_init() noregion {
     as_text_buf = new i8[as_text_cap](0i8);
     as_text_len = 0;
+    as_patch_sites = AsPatchSites { items: new *AsPatchSite[1024](&as_dummy_patch), count: 0 };
     as_rodata_buf = new i8[as_rodata_cap](0i8);
     as_rodata_len = 0;
     as_data_buf = new i8[as_data_cap](0i8);
     as_data_len = 0;
     as_bss_size = 0;
-    as_symbols = AsSymbols { items: new as_Sym[as_symbols_capacity](as_Sym {
+    as_symbols = AsSymbols { items: new *as_Sym[as_symbols_capacity](new as_Sym {
+        as_id: 0,
         as_name: "",
         as_val: 0,
         as_sec: 0,
         as_bind: 0,
         as_defined: false,
-        as_hash_next: 0,
+        as_hash_next: null,
         as_object_index: new AsSymbolIndex { value: 0 }
     }), count: 0 };
-    as_bucket_tables = AsBucketTables { symbols: new int[4096](-1), globals: new ?*AsGlobalLink[4096](null) };
+    as_bucket_tables = AsBucketTables { symbols: new ?*as_Sym[4096](null), globals: new ?*AsGlobalLink[4096](null) };
     as_clear_sym_buckets();
     as_relocations = AsRelocations { items: new as_Rel[as_relocations_capacity](as_Rel {
         as_off: 0,
@@ -1955,7 +1982,7 @@ as_init() noregion {
         defined: new int[10](0),
         op_digit: 0
     };
-    as_loc_patches = AsLocPatches { items: new as_LocPatch[as_loc_patches_cap](as_LocPatch { as_off: 0, as_next_ip: 0, as_digit: 0 }), count: 0 };
+    as_loc_patches = AsLocPatches { items: new as_LocPatch[as_loc_patches_cap](as_LocPatch { as_site: &as_dummy_patch, as_next_ip: 0, as_digit: 0 }), count: 0 };
     as_labels = AsNamedLabels {
         offsets: new int[as_lab_cap](0),
         defined: new int[as_lab_cap](0),
@@ -2055,14 +2082,14 @@ as_write_one_sh() {
     as_wr64(out, as_sh + 56, as_sh_entsize)
 }
 
-as_write_object(as_path: str) noregion raises IndexOutOfBounds {
+as_write_object(as_path: str) noregion {
+    as_flush_patches();
     as_object_relocations: AsRelocations = as_relocations;
     as_object_globals: AsGlobals = as_globals;
     as_gi: int = 0;
     while (as_gi < as_object_globals.count) {
-        symbols: *AsSymbols = &as_symbols;
-        as_si: int = as_find_sym(symbols, as_object_globals.names[as_gi]);
-        if (as_si >= 0) symbols.items[as_si].as_bind = as_STB_GLOBAL;
+        found: ?*as_Sym = as_find_sym(as_object_globals.names[as_gi]);
+        if (found != null) found.as_bind = as_STB_GLOBAL;
         as_gi = as_gi + 1
     }
     as_strtab_cap = 8192;
@@ -2071,7 +2098,7 @@ as_write_object(as_path: str) noregion raises IndexOutOfBounds {
     as_strtab_buf[0] = 0i8;
     as_object_symbols: *AsSymbols = &as_symbols;
     as_object_count: int = as_object_symbols.count;
-    as_object_items: []as_Sym = as_object_symbols.items;
+    as_object_items: []*as_Sym = as_object_symbols.items;
     as_symtab: []i8 = new i8[(as_object_count + 1) * 24](0i8);
     as_norder: int = 0;
     as_first_global: int = 1;
@@ -2083,7 +2110,7 @@ as_write_object(as_path: str) noregion raises IndexOutOfBounds {
             if (as_phase == 1 && as_object_items[as_i].as_defined && as_object_items[as_i].as_bind == as_STB_GLOBAL) as_take = true;
             if (as_phase == 2 && !as_object_items[as_i].as_defined) as_take = true;
             if (as_take) {
-                as_entry: *as_Sym = &as_object_items[as_i];
+                as_entry: *as_Sym = as_object_items[as_i];
                 as_entry.as_object_index.value = as_norder + 1;
                 as_no: int = as_str_add(as_entry.as_name);
                 as_st_info: int = as_entry.as_bind * 16;
