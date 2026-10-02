@@ -202,12 +202,11 @@ the mirrored `src1` compiler and tests). The remaining sites have these roles:
   buffers retain capacity checks; diff-window widths now follow from stored
   region and loop invariants.
 
-Some remaining checks expose proof-language limits: saved journal words and
-room list lengths do not have element-value or cross-object invariants. These
-are internal consistency checks, not user-facing errors.
-Their `IndexOutOfBounds` raises remain proof work: removing them safely
-requires changing the representations or adding proofs that survive mutation
-and reuse.
+The active compiler and block-game sources now have no explicit
+`raise IndexOutOfBounds` guards. Rewind state uses bounded records, and journal
+eviction reads action-end metadata written at commit rather than decoding a
+raw size word. Text patches are recorded when the assembler emits their four
+placeholder bytes and applied by a sequential pass over the text buffer.
 
 The assembler now reports an addressable-section limit through its `l8as`
 diagnostic path. Compiler input that overflows an import path or variant name
@@ -218,19 +217,11 @@ The compiler string buffer now maintains a nonnegative used length. Both
 single-byte and bulk append report source `Error` if their target length
 overflows; bulk append previously lacked that overflow check.
 The undo journal's absolute counter exhaustion now raises
-`UndoHistoryExhausted`, separate from the remaining journal consistency
-checks that still need proofs.
+`UndoHistoryExhausted`.
 
 ## Remaining `IndexOutOfBounds` raises
 
-There are 2 explicit raises in `src2` and the block game.
-These checks protect internal relationships; changing their exception names
-would leave the underlying proof obligations unresolved.
-
-| Site | Relationship to prove |
-| --- | --- |
-| `src2/assembler.l8`, `as_patch_i32` | Every generated text patch points to four emitted bytes after buffer growth. |
-| `programs/block-game/block-game-undo.l8`, `undo_commit_action` | Evicted action headers describe complete stored actions. |
+There are none in `src2` or the block game.
 
 The ELF packer now reports an output field outside its allocated image as an
 ELF construction error at the output boundary. Relocation symbol checks also
@@ -255,12 +246,12 @@ The terminal renderer likewise counts possible quads while retaining one
 upload and draw sequence. Its visible quad count never exceeds the slots
 visited, including the cursor slot.
 
-The undo journal now stores each retained action's phase boundary in a compact
-`u32` index. Its bounded type proves the phase loops start at nonnegative
-positions. The journal read accepts a proven nonnegative position and a
-nonempty array; its callers carry those facts through contracts. Eviction
-still reads a raw size word and checks it against the retained journal span.
-Eliminating that guard needs action size metadata tied to `tail` and `head`.
+The undo journal stores each retained action's phase boundary and end in
+compact `u32` indices. Their bounded type proves that phase loops and eviction
+start at nonnegative positions. Eviction reads the end written at action
+commit; raw journal words no longer control the tail. The journal read accepts
+a proven nonnegative position and a nonempty array; its callers carry those
+facts through contracts.
 
 The room list is also the index space for rewind snapshots: each room's
 `RoomBlockSpan` selects both block IDs and a compact slice of every frame.

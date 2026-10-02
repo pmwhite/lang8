@@ -26,16 +26,30 @@ type as_Rel = {
 }
 
 type as_LocPatch = {
-    as_off: int;
+    as_site: *AsPatchSite;
     as_next_ip: int;
     as_digit: int
 }
 
 type as_LabPatch = {
-    as_off: int;
+    as_site: *AsPatchSite;
     as_next_ip: int;
     as_next: ?*as_LabPatch
 }
+
+type AsPatchSite = {
+    off: int;
+    value: int
+}
+
+as_dummy_patch: AsPatchSite = AsPatchSite { off: 0, value: 0 };
+
+type AsPatchSites = {
+    items: []*AsPatchSite;
+    count: int
+} invariant (0 <= count && count <= len(items))
+
+as_patch_sites: AsPatchSites = AsPatchSites { items: new *AsPatchSite[0](&as_dummy_patch), count: 0 };
 
 as_O_RDONLY: int = 0;
 
@@ -195,7 +209,7 @@ type AsLocPatches = {
     count: int
 } invariant (0 <= count && count <= len(items))
 
-as_loc_patches: AsLocPatches = AsLocPatches { items: new as_LocPatch[0](as_LocPatch { as_off: 0, as_next_ip: 0, as_digit: 0 }), count: 0 };
+as_loc_patches: AsLocPatches = AsLocPatches { items: new as_LocPatch[0](as_LocPatch { as_site: &as_dummy_patch, as_next_ip: 0, as_digit: 0 }), count: 0 };
 
 as_loc_patches_cap: int = 16;
 
@@ -318,6 +332,8 @@ as_op2_digit: int = 0;
 as_op2_fb: bool = false;
 
 as_jmp_rel_off: int = 0;
+
+as_jmp_site: *AsPatchSite = &as_dummy_patch;
 
 as_jmp_next_ip: int = 0;
 
@@ -577,6 +593,26 @@ as_emit_i32(as_v: int) noregion {
     }
 }
 
+as_emit_patch_i32() noregion: *AsPatchSite@new {
+    if (as_cur_sec != as_SEC_TEXT) as_fail("text patch outside text section");
+    at: int = as_text_len;
+    as_emit_i32(0);
+    site: *AsPatchSite = new AsPatchSite { off: at, value: 0 };
+    while (as_patch_sites.count >= len(as_patch_sites.items)) {
+        old_items: []*AsPatchSite = as_patch_sites.items;
+        count: int = as_patch_sites.count;
+        capacity: int = count * 2 + 64;
+        if (capacity <= count) as_fail("too many text patches");
+        dummy: *AsPatchSite = &as_dummy_patch;
+        next: []*AsPatchSite = new *AsPatchSite[capacity](dummy);
+        for i in 0..count next[i] = old_items[i];
+        as_patch_sites = AsPatchSites { items: next, count: count }
+    }
+    as_patch_sites.items[as_patch_sites.count] = site;
+    as_patch_sites.count = as_patch_sites.count + 1;
+    site
+}
+
 as_emit_u64(as_v: int) noregion {
     x: int = as_v;
     for _ in 0..4 {
@@ -760,9 +796,22 @@ as_add_reloc(
     as_relocations.count = as_relocations.count + 1
 }
 
-as_patch_i32(as_off: int, as_v: int) raises IndexOutOfBounds {
-    if (as_off < 0 || as_off > len(as_text_buf) - 4) raise IndexOutOfBounds;
-    as_wr32(as_text_buf, as_off, as_v)
+as_patch_i32(site: *AsPatchSite, as_v: int) {
+    site.value = as_v
+}
+
+as_flush_patches() {
+    patch_i: int = 0;
+    for i in 0..len(as_text_buf) {
+        if (i < as_text_len && patch_i < as_patch_sites.count) {
+            patch: *AsPatchSite = as_patch_sites.items[patch_i];
+            if (patch.off <= i && i < patch.off + 4) {
+                shift: int = (i - patch.off) * 8;
+                as_text_buf[i] = (patch.value >> shift) trunc i8
+            }
+            if (i == patch.off + 3) patch_i = patch_i + 1
+        }
+    }
 }
 
 as_lab_grow() noregion {
@@ -802,26 +851,26 @@ as_lab_ensure(as_id: int) noregion: AsNamedLabels ensures (0 <= as_id && as_id <
 as_add_lab_patch(
     patches: []?*as_LabPatch@new,
     as_id: int,
-    as_off: int,
+    site: *AsPatchSite@new,
     as_next_ip: int
 ) requires (0 <= as_id && as_id < len(patches)) {
-    patches[as_id] = new as_LabPatch { as_off: as_off, as_next_ip: as_next_ip, as_next: patches[as_id] }
+    patches[as_id] = new as_LabPatch { as_site: site, as_next_ip: as_next_ip, as_next: patches[as_id] }
 }
 
-as_define_lab(as_id: int) noregion raises IndexOutOfBounds {
+as_define_lab(as_id: int) noregion {
     labels: AsNamedLabels = as_lab_ensure(as_id);
     labels.offsets[as_id] = as_cur_off();
     labels.defined[as_id] = 1;
     as_patch: ?*as_LabPatch = labels.patches[as_id];
     while (as_patch != null) {
         as_disp: int = labels.offsets[as_id] - as_patch.as_next_ip;
-        as_patch_i32(as_patch.as_off, as_disp);
+        as_patch_i32(as_patch.as_site, as_disp);
         as_patch = as_patch.as_next
     }
     labels.patches[as_id] = null
 }
 
-as_emit_jmp_lab(as_cc: int, as_id: int) noregion raises IndexOutOfBounds {
+as_emit_jmp_lab(as_cc: int, as_id: int) noregion {
     labels: AsNamedLabels = as_lab_ensure(as_id);
     defined: []int = labels.defined;
     offsets: []int = labels.offsets;
@@ -830,11 +879,10 @@ as_emit_jmp_lab(as_cc: int, as_id: int) noregion raises IndexOutOfBounds {
         as_emit_b(15);
         as_emit_b(128 + as_cc)
     }
-    as_rel: int = as_cur_off();
-    as_emit_i32(0);
+    site: *AsPatchSite = as_emit_patch_i32();
     as_next: int = as_cur_off();
-    if (defined[as_id] != 0) as_patch_i32(as_rel, offsets[as_id] - as_next) else as_add_lab_patch(patches,
-        as_id, as_rel, as_next)
+    if (defined[as_id] != 0) as_patch_i32(site, offsets[as_id] - as_next) else as_add_lab_patch(patches,
+        as_id, site, as_next)
 }
 
 /* ---- expression parser on tokbuf-style string ---- */
@@ -1211,7 +1259,7 @@ as_emit_test_rr(as_r: int) noregion {
     as_emit_b3(72 + as_h * 4 + as_h, 133, 192 + as_r % 8 * 9)
 }
 
-as_define_loc(as_digit: int) raises IndexOutOfBounds requires (0 <= as_digit && as_digit < 10) {
+as_define_loc(as_digit: int) requires (0 <= as_digit && as_digit < 10) {
     as_off: int = as_cur_off();
     as_patches: AsLocPatches = as_loc_patches;
     as_local_labels.last_sec[as_digit] = as_cur_sec;
@@ -1222,7 +1270,7 @@ as_define_loc(as_digit: int) raises IndexOutOfBounds requires (0 <= as_digit && 
         if (as_patches.items[as_i].as_digit == as_digit) {
             if (as_cur_sec != as_SEC_TEXT) as_fail("loc label not in text");
             as_disp: int = as_off - as_patches.items[as_i].as_next_ip;
-            as_patch_i32(as_patches.items[as_i].as_off, as_disp);
+            as_patch_i32(as_patches.items[as_i].as_site, as_disp);
             as_patches.items[as_i].as_digit = 0 - 1
         }
         as_i = as_i + 1
@@ -1230,23 +1278,24 @@ as_define_loc(as_digit: int) raises IndexOutOfBounds requires (0 <= as_digit && 
 }
 
 /* jump helpers use pending fields */
-as_do_jump_target() noregion raises IndexOutOfBounds {
+as_do_jump_target() noregion {
     if (as_op_kind == as_OP_LOC) {
         if (!as_op_fb) {
             if (as_local_labels.defined[as_local_labels.op_digit] == 0) as_fail("no local Nb");
             if (as_local_labels.last_sec[as_local_labels.op_digit] != as_SEC_TEXT) as_fail("loc cross-sec");
             as_disp: int = as_local_labels.last_off[as_local_labels.op_digit] - as_jmp_next_ip;
-            as_patch_i32(as_jmp_rel_off, as_disp);
+            as_patch_i32(as_jmp_site, as_disp);
             return
         }
         while (as_loc_patches.count >= len(as_loc_patches.items)) {
             as_ncap: int = as_loc_patches_cap * 2;
             if (as_ncap < 16) as_ncap = 16;
             while (as_ncap <= as_loc_patches.count) as_ncap = as_ncap * 2;
-            as_np: []as_LocPatch = new as_LocPatch[as_ncap](as_LocPatch { as_off: 0, as_next_ip: 0, as_digit: 0 });
+            dummy: *AsPatchSite = &as_dummy_patch;
+            as_np: []as_LocPatch = new as_LocPatch[as_ncap](as_LocPatch { as_site: dummy, as_next_ip: 0, as_digit: 0 });
             as_j: int = 0;
             while (as_j < as_loc_patches.count) invariant (0 <= as_j && as_j <= as_loc_patches.count && as_loc_patches.count < len(as_np)) {
-                as_np[as_j].as_off = as_loc_patches.items[as_j].as_off;
+                as_np[as_j].as_site = as_loc_patches.items[as_j].as_site;
                 as_np[as_j].as_next_ip = as_loc_patches.items[as_j].as_next_ip;
                 as_np[as_j].as_digit = as_loc_patches.items[as_j].as_digit;
                 as_j = as_j + 1
@@ -1254,7 +1303,7 @@ as_do_jump_target() noregion raises IndexOutOfBounds {
             as_loc_patches.items = as_np;
             as_loc_patches_cap = as_ncap
         }
-        as_loc_patches.items[as_loc_patches.count].as_off = as_jmp_rel_off;
+        as_loc_patches.items[as_loc_patches.count].as_site = as_jmp_site;
         as_loc_patches.items[as_loc_patches.count].as_next_ip = as_jmp_next_ip;
         as_loc_patches.items[as_loc_patches.count].as_digit = as_local_labels.op_digit;
         as_loc_patches.count = as_loc_patches.count + 1;
@@ -1265,7 +1314,7 @@ as_do_jump_target() noregion raises IndexOutOfBounds {
     as_add_reloc(as_jmp_rel_off, as_R_X86_64_PLT32, as_op_name, 0 - 4)
 }
 
-as_emit_call() noregion raises IndexOutOfBounds {
+as_emit_call() noregion {
     if (as_op_kind == as_OP_INDREG) {
         as_emit_rex(0, 0, 0, as_op_reg / 8 % 2);
         as_emit_b(255);
@@ -1274,24 +1323,24 @@ as_emit_call() noregion raises IndexOutOfBounds {
     }
     as_emit_b(232);
     as_jmp_rel_off = as_cur_off();
-    as_emit_i32(0);
+    as_jmp_site = as_emit_patch_i32();
     as_jmp_next_ip = as_cur_off();
     as_do_jump_target()
 }
 
-as_emit_jmp_sym() noregion raises IndexOutOfBounds {
+as_emit_jmp_sym() noregion {
     as_emit_b(233);
     as_jmp_rel_off = as_cur_off();
-    as_emit_i32(0);
+    as_jmp_site = as_emit_patch_i32();
     as_jmp_next_ip = as_cur_off();
     as_do_jump_target()
 }
 
-as_emit_jcc(as_cc: int) noregion raises IndexOutOfBounds {
+as_emit_jcc(as_cc: int) noregion {
     as_emit_b(15);
     as_emit_b(128 + as_cc);
     as_jmp_rel_off = as_cur_off();
-    as_emit_i32(0);
+    as_jmp_site = as_emit_patch_i32();
     as_jmp_next_ip = as_cur_off();
     as_do_jump_target()
 }
@@ -1839,6 +1888,7 @@ as_handle_line(as_line: []i8@immortal, as_lo: int, as_hi: int) noregion raises I
 
 as_reset_buffers() {
     as_text_len = 0;
+    as_patch_sites.count = 0;
     as_rodata_len = 0;
     as_data_len = 0;
     as_bss_size = 0;
@@ -1900,6 +1950,7 @@ as_assemble_file_append(as_path: []i8) noregion raises IndexOutOfBounds {
 as_init() noregion {
     as_text_buf = new i8[as_text_cap](0i8);
     as_text_len = 0;
+    as_patch_sites = AsPatchSites { items: new *AsPatchSite[1024](&as_dummy_patch), count: 0 };
     as_rodata_buf = new i8[as_rodata_cap](0i8);
     as_rodata_len = 0;
     as_data_buf = new i8[as_data_cap](0i8);
@@ -1931,7 +1982,7 @@ as_init() noregion {
         defined: new int[10](0),
         op_digit: 0
     };
-    as_loc_patches = AsLocPatches { items: new as_LocPatch[as_loc_patches_cap](as_LocPatch { as_off: 0, as_next_ip: 0, as_digit: 0 }), count: 0 };
+    as_loc_patches = AsLocPatches { items: new as_LocPatch[as_loc_patches_cap](as_LocPatch { as_site: &as_dummy_patch, as_next_ip: 0, as_digit: 0 }), count: 0 };
     as_labels = AsNamedLabels {
         offsets: new int[as_lab_cap](0),
         defined: new int[as_lab_cap](0),
@@ -2032,6 +2083,7 @@ as_write_one_sh() {
 }
 
 as_write_object(as_path: str) noregion {
+    as_flush_patches();
     as_object_relocations: AsRelocations = as_relocations;
     as_object_globals: AsGlobals = as_globals;
     as_gi: int = 0;
