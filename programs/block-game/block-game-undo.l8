@@ -8,7 +8,7 @@ PLAY_UNDO_DONE: int = 1;
 
 PLAY_UNDO_WAIT: int = 2;
 
-UNDO_ROUTE_MAX: int = REWIND_MAX * 2 + 1;
+const UNDO_ROUTE_MAX: int = REWIND_MAX * 2 + 1;
 
 // One 20 MiB circular log plus a compact phase-boundary index.
 // Record (64-bit words):
@@ -68,6 +68,7 @@ type UndoTimeline = {
     offsets: []int;
     image_frames: []UndoImageFrame;
     snap_frames: []RewindFrameView;
+    route_frames: []RewindFrameView;
     metas: []UndoRoomMeta;
     selected: []int;
     syncing: []int;
@@ -76,7 +77,7 @@ type UndoTimeline = {
     route_n: []int;
     route_cur: []int;
     route_ms: []int
-} invariant (len(home) == LEVEL_MAX_BLOCKS && len(home_view) == LEVEL_MAX_BLOCKS && len(changed) == LEVEL_MAX_BLOCKS && 0 <= block_base && block_base <= image_capacity - LEVEL_MAX_BLOCKS && block_base == UNDO_BLOCK_BASE && len(image) == image_capacity && image_capacity == UNDO_INDEX_MASK + 1 && len(offsets) == LEVEL_MAX_ROOMS && len(image_frames) == LEVEL_MAX_ROOMS * REWIND_MAX && len(snap_frames) == LEVEL_MAX_ROOMS * REWIND_MAX && len(metas) == LEVEL_MAX_ROOMS && len(selected) == LEVEL_MAX_ROOMS && len(syncing) == LEVEL_MAX_ROOMS && len(route_base) == LEVEL_MAX_ROOMS && len(route_n) == LEVEL_MAX_ROOMS && len(route_cur) == LEVEL_MAX_ROOMS && len(route_ms) == LEVEL_MAX_ROOMS && len(stage) >= UNDO_ACTION_OVERHEAD && len(stage) <= len(journal) && len(journal) >= UNDO_ACTION_OVERHEAD && len(journal) <= UNDO_JOURNAL_WORDS && len(phase_ends) > 0 && 0 <= action_tail && 0 <= action_head && 0 <= tail && tail <= head && head <= 1000000000 && UNDO_ACTION_HEADER <= stage_pre_n && stage_pre_n <= stage_n && stage_n < len(stage), forall owner in home (0 - 1 <= owner && owner < LEVEL_MAX_ROOMS), forall off in offsets (0 <= off && off <= UNDO_INDEX_MASK - 2))
+} invariant (len(home) == LEVEL_MAX_BLOCKS && len(home_view) == LEVEL_MAX_BLOCKS && len(changed) == LEVEL_MAX_BLOCKS && 0 <= block_base && block_base <= image_capacity - LEVEL_MAX_BLOCKS && block_base == UNDO_BLOCK_BASE && len(image) == image_capacity && image_capacity == UNDO_INDEX_MASK + 1 && len(offsets) == LEVEL_MAX_ROOMS && len(image_frames) == LEVEL_MAX_ROOMS * REWIND_MAX && len(snap_frames) == LEVEL_MAX_ROOMS * REWIND_MAX && len(route_frames) == LEVEL_MAX_ROOMS * UNDO_ROUTE_MAX && len(metas) == LEVEL_MAX_ROOMS && len(selected) == LEVEL_MAX_ROOMS && len(syncing) == LEVEL_MAX_ROOMS && len(route_base) == LEVEL_MAX_ROOMS && len(route_n) == LEVEL_MAX_ROOMS && len(route_cur) == LEVEL_MAX_ROOMS && len(route_ms) == LEVEL_MAX_ROOMS && len(stage) >= UNDO_ACTION_OVERHEAD && len(stage) <= len(journal) && len(journal) >= UNDO_ACTION_OVERHEAD && len(journal) <= UNDO_JOURNAL_WORDS && len(phase_ends) > 0 && 0 <= action_tail && 0 <= action_head && 0 <= tail && tail <= head && head <= 1000000000 && UNDO_ACTION_HEADER <= stage_pre_n && stage_pre_n <= stage_n && stage_n < len(stage), forall owner in home (0 - 1 <= owner && owner < LEVEL_MAX_ROOMS), forall off in offsets (0 <= off && off <= UNDO_INDEX_MASK - 2), forall steps in route_n (0 <= steps && steps <= UNDO_ROUTE_MAX), forall cursor in route_cur (0 <= cursor && cursor <= UNDO_ROUTE_MAX))
 
 new_undo_timeline(
     home: []int,
@@ -106,6 +107,7 @@ new_undo_journal(
     stride: int = len(snap) / REWIND_MAX;
     empty_meta: *int = &undo_empty_meta;
     metas: []UndoRoomMeta = new UndoRoomMeta[LEVEL_MAX_ROOMS](UndoRoomMeta { count: empty_meta, cursor: empty_meta, ghost: empty_meta });
+    route_data: []int = new int[n * UNDO_ROUTE_MAX](0);
     u: *UndoTimeline = new UndoTimeline {
         home: new int[LEVEL_MAX_BLOCKS](-1),
         home_view: new int[LEVEL_MAX_BLOCKS](-1),
@@ -130,10 +132,11 @@ new_undo_journal(
         offsets: new int[LEVEL_MAX_ROOMS](0),
         image_frames: new UndoImageFrame[LEVEL_MAX_ROOMS * REWIND_MAX](UndoImageFrame { start: 0, end: 0 }),
         snap_frames: new RewindFrameView[LEVEL_MAX_ROOMS * REWIND_MAX](RewindFrameView { cells: snap, start: 0, end: 0 }),
+        route_frames: new RewindFrameView[LEVEL_MAX_ROOMS * UNDO_ROUTE_MAX](RewindFrameView { cells: route_data, start: 0, end: 0 }),
         metas: metas,
         selected: new int[LEVEL_MAX_ROOMS](0),
         syncing: new int[LEVEL_MAX_ROOMS](0),
-        route: new int[n * UNDO_ROUTE_MAX](0),
+        route: route_data,
         route_base: new int[LEVEL_MAX_ROOMS](0),
         route_n: new int[LEVEL_MAX_ROOMS](0),
         route_cur: new int[LEVEL_MAX_ROOMS](0),
@@ -155,6 +158,12 @@ new_undo_journal(
         start: int = off + 3;
         snap_start: int = room_home_base(r, room_hn);
         if (width < 0 || width > LEVEL_MAX_BLOCKS || start > UNDO_INDEX_MASK + 1 - REWIND_MAX * width) die("invalid undo room layout");
+        for route_step in 0..UNDO_ROUTE_MAX {
+            route_start: int = u.route_base[r] + route_step * width;
+            route_end: int = route_start + width;
+            if (route_start < 0 || route_end < route_start || route_end > len(route_data)) die("invalid undo route layout");
+            u.route_frames[r * UNDO_ROUTE_MAX + route_step] = RewindFrameView { cells: route_data, start: route_start, end: route_end }
+        }
         for s in 0..REWIND_MAX {
             frame_start: int = start + s * width;
             frame_end: int = frame_start + width;
@@ -181,6 +190,10 @@ undo_image_frame(u: *UndoTimeline, room: int, step: int): UndoImageFrame require
 
 undo_snap_frame(u: *UndoTimeline, room: int, step: int): RewindFrameView requires (0 <= room && room < LEVEL_MAX_ROOMS && 0 <= step && step < REWIND_MAX) {
     u.snap_frames[room * REWIND_MAX + step]
+}
+
+undo_route_frame(u: *UndoTimeline, room: int, step: int): RewindFrameView requires (0 <= room && room < LEVEL_MAX_ROOMS && 0 <= step && step < UNDO_ROUTE_MAX) {
+    u.route_frames[room * UNDO_ROUTE_MAX + step]
 }
 
 undo_latest_phase_end(u: *UndoTimeline) raises IoError: u32 ensures (u.action_head > 0) {
@@ -484,24 +497,23 @@ undo_room_frame_equal(a: RewindFrameView, b: RewindFrameView): bool {
 undo_route_append(
     u: *UndoTimeline,
     room: int,
-    width: int,
     data: []int,
     off: int
 ) raises IndexOutOfBounds requires (0 <= room && room < LEVEL_MAX_ROOMS) {
-    dest: int = u.route_base[room] + u.route_n[room] * width;
-    route: []int = u.route;
-    if (width < 0 || dest < 0 || off < 0) raise IndexOutOfBounds;
-    dest_end: int = dest + width;
+    count: int = u.route_n[room];
+    if (count >= UNDO_ROUTE_MAX) raise IndexOutOfBounds;
+    frame: RewindFrameView = undo_route_frame(u, room, count);
+    width: int = frame.end - frame.start;
     source_end: int = off + width;
-    if (dest_end < dest || source_end < off || dest_end > len(route) || source_end > len(data)) raise IndexOutOfBounds;
-    dest_at: int = dest;
+    if (off < 0 || source_end < off || source_end > len(data)) raise IndexOutOfBounds;
+    dest_at: int = frame.start;
     source_at: int = off;
-    while (dest_at < dest_end && source_at < source_end) invariant (dest <= dest_at && dest_at <= dest_end && dest_end <= len(route) && off <= source_at && source_at <= source_end && source_end <= len(data)) {
-        route[dest_at] = data[source_at];
+    while (dest_at < frame.end && source_at < source_end) invariant (frame.start <= dest_at && dest_at <= frame.end && off <= source_at && source_at <= source_end && source_end <= len(data)) {
+        frame.cells[dest_at] = data[source_at];
         dest_at = dest_at + 1;
         source_at = source_at + 1
     }
-    u.route_n[room] = u.route_n[room] + 1
+    u.route_n[room] = count + 1
 }
 
 undo_build_route(
@@ -565,14 +577,14 @@ undo_build_route(
             a = cursors[room] - 1;
             while (a >= common) {
                 live_frame: int = rewind_slot(room, a, 0, room_hn, len(live) / REWIND_MAX);
-                undo_route_append(u, room, width, live, live_frame);
+                undo_route_append(u, room, live, live_frame);
                 a = a - 1
             }
         }
     }
     s = match_step + 1;
     while (s <= target) {
-        undo_route_append(u, room, width, data, off + 3 + s * width);
+        undo_route_append(u, room, data, off + 3 + s * width);
         s = s + 1
     }
     u.route_ms[room] = rewind_return_step_ms(u.route_n[room])
@@ -633,16 +645,16 @@ undo_sync_tick(
     crate_cursor: *CrateCursor,
     crate_t0: []int,
     now: int
-) raises IndexOutOfBounds: bool requires (0 <= nroom && nroom <= LEVEL_MAX_ROOMS && nroom <= len(room_hn) && len(blocks) == LEVEL_MAX_BLOCKS && len(blocks) <= len(crate_t0) && len(crate_pose) >= 16384 && len(crate_ms) >= 16384) {
+): bool requires (0 <= nroom && nroom <= LEVEL_MAX_ROOMS && nroom <= len(room_hn) && len(blocks) == LEVEL_MAX_BLOCKS && len(blocks) <= len(crate_t0) && len(crate_pose) >= 16384 && len(crate_ms) >= 16384) {
     crate_drain(n, now, crate_ms, crate_cursor, crate_t0);
     waiting: bool = false;
     for r in 0..nroom {
         if (u.selected[r] != 0) {
-            if (rewind_room_busy(r, room_ids, crate_cursor, n)) waiting = true else if (u.route_cur[r] < u.route_n[r]) {
+            step: int = u.route_cur[r];
+            steps: int = u.route_n[r];
+            if (rewind_room_busy(r, room_ids, crate_cursor, n)) waiting = true else if (step < steps) {
                 span: RoomBlockSpan = room_ids.spans[r];
-                width: int = span.end - span.start;
-                off: int = u.route_base[r] + u.route_cur[r] * width;
-                frame: RewindFrameView = undo_frame_view(u.route, off, width);
+                frame: RewindFrameView = undo_route_frame(u, r, step);
                 slot: int = span.start;
                 at: int = frame.start;
                 frame_end: int = frame.end;
@@ -662,7 +674,7 @@ undo_sync_tick(
                     slot = slot + 1;
                     at = at + 1
                 }
-                u.route_cur[r] = u.route_cur[r] + 1;
+                u.route_cur[r] = step + 1;
                 waiting = true
             }
         }
