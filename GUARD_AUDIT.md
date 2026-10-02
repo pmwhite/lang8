@@ -214,3 +214,28 @@ overflows; bulk append previously lacked that overflow check.
 The undo journal's absolute counter exhaustion now raises
 `UndoHistoryExhausted`, separate from the remaining journal consistency
 checks that still need proofs.
+
+## Remaining `IndexOutOfBounds` raises
+
+There are 21 explicit raises in `src2`, the block game, and the terminal.
+These checks protect internal relationships; changing their exception names
+would leave the underlying proof obligations unresolved.
+
+| Site | Relationship to prove |
+| --- | --- |
+| `src2/bounds_solver.l8:86,109` | Interned nodes and stored edges fit their tables, using the row and term budgets across graph loading. |
+| `src2/assembler.l8:764` | Every generated text patch points to four emitted bytes. |
+| `src2/elfpack.l8:142` | Every generated ELF write fits the computed output span. |
+| `programs/block-game/level.l8:1932,1952,1957` | Per-room counts sum to at most the block count, and each room list contains exactly its counted blocks. |
+| `programs/block-game/block-game-undo.l8:132,225` | Journal reads have nonnegative positions and evicted action headers describe complete stored actions. |
+| `programs/block-game/block-game-undo.l8:269,361,399,401,425,428,576,621` | Rewind counts, frame offsets, route layout, and room spans agree across the timeline and room records. |
+| `programs/block-game/block-game-render.l8:950` | Packed visible grass counts stay within the fixed batch capacity. |
+| `programs/block-game/block-game-plant-render.l8:646` | Mesh prefix offsets and per-mesh counts stay within the plant instance buffer. |
+| `programs/terminal/scene.l8:354` | Recursive region partitioning consumes no more than its allotted region budget. |
+| `programs/terminal/render.l8:260` | Background, glyph, ghost, and cursor quads together fit the fixed vertex buffer. |
+
+The terminal region proof needs a relation of the form
+`region_count + budget <= limit` to survive scanning loops and recursive
+budget splits. A local contract using `region_count <= limit - budget`
+does not currently carry that relation through the verifier. Fixed-rate
+render batches need a related accumulated-count proof across loops.
