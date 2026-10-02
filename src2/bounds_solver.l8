@@ -45,7 +45,7 @@ bounds_graph_work_new(capacity: int, term: *BoundsTermRef@new): []BoundsGraphWor
     })
 }
 
-bounds_graph_new(rows: int) raises Error: *BoundsGraph@new {
+bounds_graph_new(rows: int) raises Error: *BoundsGraph@new ensures (len(returned.row_edges) == rows) {
     capacity: int = rows * 2 + 4;
     if (capacity <= 0) error("bounds graph exceeds addressable size");
     buckets: int = 8;
@@ -56,11 +56,13 @@ bounds_graph_new(rows: int) raises Error: *BoundsGraph@new {
     terms: []BoundsTermRef = new BoundsTermRef[capacity](bounds_ref_zero());
     work: []BoundsGraphWork = bounds_graph_work_new(capacity, &terms[0]);
     first_work: *BoundsGraphWork = &work[0];
+    empty_edge: BoundsGraphEdge = BoundsGraphEdge { target: first_work, weight: 0, next: null };
     graph: *BoundsGraph = new BoundsGraph {
         terms: terms,
         slots: slots,
         occupied_slots: new *?*BoundsGraphWork[len(terms)](first_slot),
-        adjacency: new BoundsGraphEdge[rows + capacity * 3](BoundsGraphEdge { target: first_work, weight: 0, next: null }),
+        row_edges: new BoundsGraphEdge[rows](empty_edge),
+        implicit_edges: new BoundsGraphImplicitEdges[capacity](BoundsGraphImplicitEdges { nonnegative: empty_edge, known_lower: empty_edge, known_upper: empty_edge }),
         work: work,
         queue: new *BoundsGraphWork[len(terms) + 1](first_work),
         small_weights: true,
@@ -99,32 +101,30 @@ bounds_graph_intern(graph: *BoundsGraph, term: BoundsTermRef@graph) raises Index
     node
 }
 
-bounds_graph_edge(
-    graph: *BoundsGraph@from,
-    from: *BoundsGraphWork@graph,
-    to: *BoundsGraphWork@graph,
-    weight: int
-) raises IndexOutOfBounds {
-    edge: int = graph.edges;
-    if (edge < 0 || edge >= len(graph.adjacency)) raise IndexOutOfBounds;
-    graph.edges = edge + 1;
+bounds_graph_link(
+    graph: *BoundsGraph,
+    from: *BoundsGraphWork@entry,
+    to: *BoundsGraphWork@entry,
+    weight: int,
+    entry: *BoundsGraphEdge@from
+) {
+    graph.edges = graph.edges + 1;
     if (weight <= -536870912 || weight >= 536870912) graph.small_weights = false;
-    entry: *BoundsGraphEdge = &graph.adjacency[edge];
     entry.target = to;
     entry.weight = weight;
     entry.next = from.head;
     from.head = entry
 }
 
-bounds_graph_load(graph: *BoundsGraph, state: ?*BoundsState@graph) raises IndexOutOfBounds {
+bounds_graph_load(graph: *BoundsGraph, state: ?*BoundsState@graph, row_count: int) raises IndexOutOfBounds requires (0 <= row_count && row_count <= len(graph.row_edges)) {
     // Iterate in insertion order. Edges on the same source form integer
     // adjacency chains; there are no allocations inside this loop.
-    for position in 0..bounds_count(state) {
+    for position in 0..row_count {
         edge: ?*BoundsNumericView = bounds_numeric_ref(state, position);
         if (edge != null && edge.left.valid && edge.right.valid && edge.separation == null) {
             to: *BoundsGraphWork = bounds_graph_intern(graph, edge.left);
             from: *BoundsGraphWork = bounds_graph_intern(graph, edge.right);
-            bounds_graph_edge(graph, from, to, edge.bound)
+            bounds_graph_link(graph, from, to, edge.bound, &graph.row_edges[position])
         }
     }
     zero_term: BoundsTermRef = bounds_ref_zero();
@@ -136,13 +136,13 @@ bounds_graph_load(graph: *BoundsGraph, state: ?*BoundsState@graph) raises IndexO
         term: BoundsTermRef = terms[id];
         if (term.is_len) {
             node: *BoundsGraphWork = &work[id];
-            bounds_graph_edge(graph, node, zero, 0);
+            bounds_graph_link(graph, node, zero, 0, &graph.implicit_edges[id].nonnegative);
             path: ?*Expr = term.path;
             if (path != null) {
                 known: int = bounds_known_len(path);
                 if (known >= 0) {
-                    bounds_graph_edge(graph, node, zero, 0 - known);
-                    bounds_graph_edge(graph, zero, node, known)
+                    bounds_graph_link(graph, node, zero, 0 - known, &graph.implicit_edges[id].known_lower);
+                    bounds_graph_link(graph, zero, node, known, &graph.implicit_edges[id].known_upper)
                 }
             }
         }
@@ -304,7 +304,7 @@ bounds_empty_distance(left: BoundsTermRef, right: BoundsTermRef) raises IndexOut
 // Larger states use the ordinary query-local path instead of growing caches.
 // A lookup-only request avoids loading graphs for quickly rejected queries.
 bounds_cached_graph(state: ?*BoundsState, excluded: ?*BoundsGraph, load: bool) raises IndexOutOfBounds: ?*BoundsGraphCache@state {
-    if (state == null || state.count > BOUNDS_GRAPH_CACHE_ROWS) return null;
+    if (state == null) return null;
     arena: ?*BoundsArena = state.arena;
     if (arena == null) return null;
     first: *BoundsGraphCache = arena.first_graph;
@@ -316,8 +316,8 @@ bounds_cached_graph(state: ?*BoundsState, excluded: ?*BoundsGraph, load: bool) r
         arena.first_graph = second;
         arena.second_graph = first
     }
-    if (cache.storage == state.storage && cache.count == state.count) return cache;
     graph: *BoundsGraph = cache.graph;
+    if (cache.storage == state.storage && cache.count == state.count) return cache;
     occupied: []*?*BoundsGraphWork = graph.occupied_slots;
     work: []BoundsGraphWork = graph.work;
     nodes: int = graph.nodes;
@@ -330,7 +330,9 @@ bounds_cached_graph(state: ?*BoundsState, excluded: ?*BoundsGraph, load: bool) r
     graph.nodes = 0;
     graph.edges = 0;
     graph.small_weights = true;
-    bounds_graph_load(graph, state);
+    if (state.count > len(graph.row_edges)) return null;
+    row_count: int = state.count;
+    bounds_graph_load(graph, state, row_count);
     cache.storage = state.storage;
     cache.count = state.count;
     cache.source = null;
@@ -442,10 +444,11 @@ bounds_solve(state: ?*BoundsState, query: *BoundsNumericView, early: bool) raise
     }
     result: int = 1000000000000000000;
     region {
-        graph: *BoundsGraph = bounds_graph_new(bounds_count(state));
+        row_count: int = bounds_count(state);
+        graph: *BoundsGraph = bounds_graph_new(row_count);
         target: *BoundsGraphWork = bounds_graph_intern(graph, left);
         source: *BoundsGraphWork = bounds_graph_intern(graph, right);
-        bounds_graph_load(graph, state);
+        bounds_graph_load(graph, state, row_count);
         if (source == target || source.head != null) result = bounds_graph_distance(graph,
             source, target, query.bound, early)
     }
@@ -546,14 +549,16 @@ bounds_join_project(
         first: *BoundsGraph;
         first_cached: ?*BoundsGraphCache = bounds_cached_graph(a, null, true);
         if (first_cached != null) first = first_cached.graph else {
-            first = bounds_graph_new(bounds_count(a));
-            bounds_graph_load(first, a)
+            first_rows: int = bounds_count(a);
+            first = bounds_graph_new(first_rows);
+            bounds_graph_load(first, a, first_rows)
         }
         second: *BoundsGraph;
         second_cached: ?*BoundsGraphCache = bounds_cached_graph(b, first, true);
         if (second_cached != null) second = second_cached.graph else {
-            second = bounds_graph_new(bounds_count(b));
-            bounds_graph_load(second, b)
+            second_rows: int = bounds_count(b);
+            second = bounds_graph_new(second_rows);
+            bounds_graph_load(second, b, second_rows)
         }
         first_ids: []*BoundsGraphWork = new *BoundsGraphWork[BOUNDS_JOIN_TERMS](&first.work[0]);
         second_ids: []*BoundsGraphWork = new *BoundsGraphWork[BOUNDS_JOIN_TERMS](&second.work[0]);
@@ -654,9 +659,10 @@ bounds_below_length(state: ?*BoundsState, base: *Expr, margin: int) raises Error
     region {
         term: BoundsTermRef = bounds_ref_expr(base);
         if (bounds_ref_valid(term)) {
-            graph: *BoundsGraph = bounds_graph_new(bounds_count(state));
+            row_count: int = bounds_count(state);
+            graph: *BoundsGraph = bounds_graph_new(row_count);
             target: *BoundsGraphWork = bounds_graph_intern(graph, term);
-            bounds_graph_load(graph, state);
+            bounds_graph_load(graph, state, row_count);
             result = bounds_graph_distance(graph, null, target, 0 - margin, true) <= 0 - margin
         }
     }

@@ -217,13 +217,13 @@ checks that still need proofs.
 
 ## Remaining `IndexOutOfBounds` raises
 
-There are 21 explicit raises in `src2`, the block game, and the terminal.
+There are 20 explicit raises in `src2`, the block game, and the terminal.
 These checks protect internal relationships; changing their exception names
 would leave the underlying proof obligations unresolved.
 
 | Site | Relationship to prove |
 | --- | --- |
-| `src2/bounds_solver.l8:86,109` | Interned nodes and stored edges fit their tables, using the row and term budgets across graph loading. |
+| `src2/bounds_solver.l8:86` | Interned nodes fit their table, using the row and term budgets across graph loading. |
 | `src2/assembler.l8:764` | Every generated text patch points to four emitted bytes. |
 | `src2/elfpack.l8:142` | Every generated ELF write fits the computed output span. |
 | `programs/block-game/level.l8:1932,1952,1957` | Per-room counts sum to at most the block count, and each room list contains exactly its counted blocks. |
@@ -261,9 +261,11 @@ needs the same prefix-sum proof at every snapshot access. The direct
 relation at its first caller.
 
 The bounds graph keeps pointers into its preallocated node and edge arrays.
-Growing those arrays would invalidate pointers. Chunked growth was also
+Its edge check is removed: one slot belongs to each fact row and three to
+each node, so every edge write uses a row or node index already in bounds.
+Growing the node array would invalidate pointers. Chunked growth was also
 tested, but a cached graph may outlive the heap region in which a later
 chunk is allocated; the lifetime checker correctly rejects that store.
-The graph therefore needs a row-budget proof for its stable preallocation,
+Node interning therefore needs a row-budget proof for its stable preallocation,
 or a larger ownership redesign that allocates stable nodes and edges in
 the graph's original lifetime.
