@@ -72,6 +72,13 @@ fixed-capacity boundaries prevent real failures.
   and edge targets point directly to nodes, whose addresses are checked at
   creation. Search resets node work state and no longer rechecks integer IDs
   on dequeue or edge traversal.
+- [x] `src2/bounds_solver.l8`, hash slots and join sources: slots now point
+  to graph nodes and are cleared through stored slot pointers on cache reuse.
+  Lookups compare the term referenced by each node. Join source tables store
+  node pointers, so searches and distance reads need no integer ID checks.
+  The node holds a pointer to the existing term array; copying the nested
+  term value into the node produced an incomplete copy with the current
+  compiler.
 - [x] `src2/assembler.l8`, two and three byte emitters: compose the existing
   single byte emitter, which grows the section and validates each cursor
   advance. This removes duplicate span checks over separately mutable
@@ -104,10 +111,10 @@ fixed-capacity boundaries prevent real failures.
 - [x] `src2/browse.l8`, `browse_tok_start`: keep `p <= len(src)` for the
   token position. A token is a linked parser object without a source-relative
   invariant; a malformed position can make `src[p - 1]` invalid.
-- [ ] `src2/bounds_solver.l8`, remaining graph IDs: prove IDs read from hash
-  slots and join source tables refer to current nodes. Adjacency, edge
-  targets, and work queues use typed pointers; hash slots and join sources
-  still store integer IDs that survive graph reloads.
+- [x] `src2/bounds_solver.l8`, remaining graph IDs: hash slots, join sources,
+  adjacency, edge targets, and work queues now use typed node or edge
+  pointers. The four remaining graph raises guard table allocation and
+  signed arithmetic capacity boundaries.
 - [x] `src2/bounds_solver.l8`, graph capacity: term and edge limits are
   fixed-table allocation boundaries.
 - [ ] `src2/assembler.l8`, single-byte emission cursors: carry their bounds
@@ -157,10 +164,9 @@ the mirrored `src1` compiler and tests). The remaining sites have these roles:
 - `src2/bounds_state.l8` and `src2/bounds_effects.l8`: remaining raises
   protect allocation growth against overflow. Function count and write-table
   growth are likewise bounded by the signed integer range.
-- `src2/bounds_solver.l8`: graph capacity and IDs read from mutable slots,
-  adjacency, and cached workspaces are checked before access. The IDs are
-  stored as integers, so array and graph size invariants do not prove their
-  contents valid after graph reuse.
+- `src2/bounds_solver.l8`: remaining raises protect graph table capacity and
+  arithmetic during allocation. Stored hash entries, adjacency, queue
+  entries, and join sources are pointers to current graph records.
 - `src2/assembler.l8` and `src2/elfpack.l8`: assembler cursors, symbol links,
   relocation offsets, string-table spans, and ELF output spans are validated
   at their respective capacity or patch boundaries.
@@ -175,9 +181,9 @@ the mirrored `src1` compiler and tests). The remaining sites have these roles:
 - `programs/terminal/scene.l8` and `render.l8`: fixed region and vertex
   buffers and diff-window lengths are checked at their capacity boundaries.
 
-Some remaining checks expose proof-language limits: graph slot values, saved
-journal words, and room list lengths do not have element-value or cross-object
-invariants. These are internal consistency checks, not user-facing errors.
+Some remaining checks expose proof-language limits: saved journal words and
+room list lengths do not have element-value or cross-object invariants. These
+are internal consistency checks, not user-facing errors.
 Their `IndexOutOfBounds` raises remain proof work: removing them safely
 requires changing the representations or adding proofs that survive mutation
 and reuse.
