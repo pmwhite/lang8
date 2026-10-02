@@ -37,29 +37,42 @@ bounds_term_hash_borrowed(term: *BoundsTermRef): int {
 
 bounds_graph_new(rows: int) raises IndexOutOfBounds: *BoundsGraph@new {
     capacity: int = rows * 2 + 4;
+    if (capacity <= 0) raise IndexOutOfBounds;
     buckets: int = 8;
     while (buckets < capacity * 2) buckets = buckets * 2;
     if (buckets <= 0) raise IndexOutOfBounds;
     slots: []int = new int[buckets](-1);
     first_slot: *int = &slots[0];
-    new BoundsGraph {
-        terms: new BoundsTermRef[capacity](bounds_ref_zero()),
+    terms: []BoundsTermRef = new BoundsTermRef[capacity](bounds_ref_zero());
+    work: []BoundsGraphWork = new BoundsGraphWork[len(terms)](BoundsGraphWork {
+        id: 0,
+        head: null,
+        distance: 0,
+        queued: false
+    });
+    first_work: *BoundsGraphWork = &work[0];
+    graph: *BoundsGraph = new BoundsGraph {
+        terms: terms,
         slots: slots,
-        occupied_slots: new *int[capacity](first_slot),
-        heads: new ?*BoundsGraphEdge[capacity](null),
-        adjacency: new BoundsGraphEdge[rows + capacity * 3](BoundsGraphEdge { target: 0, weight: 0, next: null }),
-        distances: new int[capacity](0),
-        queued: new bool[capacity](false),
-        queue: new int[capacity + 1](0),
+        occupied_slots: new *int[len(terms)](first_slot),
+        adjacency: new BoundsGraphEdge[rows + capacity * 3](BoundsGraphEdge { target: first_work, weight: 0, next: null }),
+        work: work,
+        queue: new *BoundsGraphWork[len(terms) + 1](first_work),
         small_weights: true,
         nodes: 0,
         edges: 0
-    }
+    };
+    graph
 }
 
 // Interning only increases nodes. A caller may pass an existing ID as minimum
 // and retain its bound through later insertions; -1 works for an empty graph.
-bounds_graph_intern(graph: *BoundsGraph, term: BoundsTermRef@graph, minimum: int) raises IndexOutOfBounds: int requires (minimum < graph.nodes) ensures (minimum < graph.nodes && 0 <= returned && returned < graph.nodes) {
+bounds_graph_intern(
+    graph: *BoundsGraph,
+    term: BoundsTermRef@graph,
+    minimum: int,
+    retained: int
+) raises IndexOutOfBounds: int requires (minimum < graph.nodes && retained < graph.nodes) ensures (minimum < graph.nodes && retained < graph.nodes && 0 <= returned && returned < graph.nodes) {
     slots: []int = graph.slots;
     hash: int = bounds_term_hash_borrowed(&term);
     slot: int = hash & len(slots) - 1;
@@ -72,8 +85,14 @@ bounds_graph_intern(graph: *BoundsGraph, term: BoundsTermRef@graph, minimum: int
         id = slots[slot]
     }
     id = graph.nodes;
-    if (id >= len(graph.terms)) raise IndexOutOfBounds;
+    if (id >= len(graph.terms) || id >= len(graph.work)) raise IndexOutOfBounds;
     graph.terms[id] = term;
+    graph.work[id] = BoundsGraphWork {
+        id: id,
+        head: null,
+        distance: 0,
+        queued: false
+    };
     slots[slot] = id;
     graph.occupied_slots[id] = &slots[slot];
     graph.nodes = id + 1;
@@ -84,17 +103,20 @@ bounds_graph_edge(
     graph: *BoundsGraph,
     from: int,
     to: int,
-    weight: int
-) raises IndexOutOfBounds requires (0 <= from && from < graph.nodes) {
+    weight: int,
+    minimum: int,
+    retained: int
+) raises IndexOutOfBounds: int requires (0 <= from && from < graph.nodes && 0 <= to && to < graph.nodes && minimum < graph.nodes && retained < graph.nodes) ensures (returned == minimum && minimum < graph.nodes && retained < graph.nodes) {
     edge: int = graph.edges;
     if (edge < 0 || edge >= len(graph.adjacency)) raise IndexOutOfBounds;
     graph.edges = edge + 1;
     if (weight <= -536870912 || weight >= 536870912) graph.small_weights = false;
     entry: *BoundsGraphEdge = &graph.adjacency[edge];
-    entry.target = to;
+    entry.target = &graph.work[to];
     entry.weight = weight;
-    entry.next = graph.heads[from];
-    graph.heads[from] = entry
+    entry.next = graph.work[from].head;
+    graph.work[from].head = entry;
+    minimum
 }
 
 bounds_graph_load(graph: *BoundsGraph, state: ?*BoundsState@graph, minimum: int) raises IndexOutOfBounds: int requires (minimum < graph.nodes) ensures (returned == minimum && returned < graph.nodes) {
@@ -103,23 +125,26 @@ bounds_graph_load(graph: *BoundsGraph, state: ?*BoundsState@graph, minimum: int)
     for position in 0..bounds_count(state) {
         edge: ?*BoundsNumericView = bounds_numeric_ref(state, position);
         if (edge != null && edge.left.valid && edge.right.valid && edge.separation == null) {
-            to: int = bounds_graph_intern(graph, edge.left, minimum);
-            from: int = bounds_graph_intern(graph, edge.right, minimum);
-            bounds_graph_edge(graph, from, to, edge.bound)
+            to: int = bounds_graph_intern(graph, edge.left, minimum, minimum);
+            from: int = bounds_graph_intern(graph, edge.right, minimum, to);
+            _edge_minimum: int = bounds_graph_edge(graph, from, to, edge.bound, minimum,
+                to)
         }
     }
     zero_term: BoundsTermRef = bounds_ref_zero();
-    zero: int = bounds_graph_intern(graph, zero_term, minimum);
+    zero: int = bounds_graph_intern(graph, zero_term, minimum, minimum);
     for id in 0..graph.nodes {
         term: BoundsTermRef = graph.terms[id];
         if (term.is_len) {
-            bounds_graph_edge(graph, id, zero, 0);
+            _edge_minimum: int = bounds_graph_edge(graph, id, zero, 0, id, zero);
             path: ?*Expr = term.path;
             if (path != null) {
                 known: int = bounds_known_len(path);
                 if (known >= 0) {
-                    bounds_graph_edge(graph, id, zero, 0 - known);
-                    bounds_graph_edge(graph, zero, id, known)
+                    _known_minimum: int = bounds_graph_edge(graph, id, zero, 0 - known,
+                        id, zero);
+                    _known_retained: int = bounds_graph_edge(graph, zero, id, known,
+                        id, zero)
                 }
             }
         }
@@ -136,21 +161,20 @@ bounds_graph_distances(
     target: int,
     limit: int,
     early: bool
-) raises IndexOutOfBounds: []int@new requires (source < graph.nodes) ensures (graph.nodes <= len(returned)) {
+): []int@new requires (source < graph.nodes) ensures (graph.nodes <= len(returned)) {
     unknown: int = 1000000000000000000;
-    distances: []int = new int[graph.nodes](unknown);
-    queued: []bool = new bool[graph.nodes](false);
-    queue: []int = new int[graph.nodes + 1](0);
-    _complete: bool = bounds_graph_search(graph, source, target, limit, early, distances,
-        queued, queue);
+    _complete: bool = bounds_graph_search(graph, source, target, limit, early);
+    node_count: int = graph.nodes;
+    distances: []int = new int[node_count](unknown);
+    for id in 0..node_count distances[id] = graph.work[id].distance;
     distances
 }
 
-// Callers may reuse scratch buffers after resetting distances and queued.
-// The queue contents need no reset because each search starts with an empty queue.
+// Each search resets the graph-owned distances and queued flags. The queue
+// contents need no reset because a search starts with an empty queue.
 // True means the queue drained before the budget ran out. Early exits and
 // budget exhaustion produce valid path bounds, but not a complete result.
-bounds_queue_next(queue: []int, index: int): int requires (0 <= index && index < len(queue)) ensures (0 <= returned && returned < len(queue) && returned <= index + 1) {
+bounds_queue_next(queue: []*BoundsGraphWork, index: int): int requires (0 <= index && index < len(queue)) ensures (0 <= returned && returned < len(queue) && returned <= index + 1) {
     next: int = index + 1;
     if (next < 0 || next >= len(queue)) return 0;
     next
@@ -161,32 +185,34 @@ bounds_graph_search(
     source: int,
     target: int,
     limit: int,
-    early: bool,
-    distances: []int,
-    queued: []bool,
-    queue: []int
-) raises IndexOutOfBounds: bool requires (graph.nodes <= len(distances) && graph.nodes <= len(queued) && len(queued) < len(queue) && source < graph.nodes) {
-    heads: []?*BoundsGraphEdge = graph.heads;
+    early: bool
+): bool requires (source < graph.nodes) {
     terms: []BoundsTermRef = graph.terms;
+    work: []BoundsGraphWork = graph.work;
+    queue: []*BoundsGraphWork = graph.queue;
     node_count: int = graph.nodes;
     unknown: int = 1000000000000000000;
+    for id in 0..node_count {
+        work[id].distance = unknown;
+        work[id].queued = false
+    }
     read: int = 0;
     write: int = 0;
     if (source >= 0) {
-        distances[source] = 0;
-        queued[source] = true;
-        queue[0] = source;
+        work[source].distance = 0;
+        work[source].queued = true;
+        queue[0] = &work[source];
         write = bounds_queue_next(queue, 0)
     } else {
         // A negative source projects against the common machine upper bound
         // of all lengths. Each zero-distance seed is one possible witness.
         id: int = 0;
-        while (id < node_count) invariant (0 <= id && id <= node_count && 0 <= write && write < len(queue) && node_count <= len(terms) && node_count <= len(distances) && node_count <= len(queued) && node_count < len(queue)) {
+        while (id < node_count) invariant (0 <= id && id <= node_count && 0 <= write && write < len(queue) && node_count <= len(terms) && node_count <= len(work) && node_count < len(queue)) {
             term: BoundsTermRef = terms[id];
             if (term.is_len) {
-                distances[id] = 0;
-                queued[id] = true;
-                queue[write] = id;
+                work[id].distance = 0;
+                work[id].queued = true;
+                queue[write] = &work[id];
                 write = bounds_queue_next(queue, write)
             }
             id = id + 1
@@ -195,26 +221,24 @@ bounds_graph_search(
     budget: int = (graph.nodes + graph.edges + 1) * 64;
     if (budget > 262144) budget = 262144;
     if (source == target && early && limit >= 0) return false;
-    while (read != write && budget > 0) invariant (0 <= read && read < len(queue) && 0 <= write && write < len(queue) && node_count <= len(queued) && node_count <= len(distances) && node_count <= len(heads)) {
-        from: int = queue[read];
-        if (from < 0 || from >= node_count) raise IndexOutOfBounds;
+    while (read != write && budget > 0) invariant (0 <= read && read < len(queue) && 0 <= write && write < len(queue)) {
+        from: *BoundsGraphWork = queue[read];
         read = bounds_queue_next(queue, read);
-        queued[from] = false;
-        base: int = distances[from];
-        edge: ?*BoundsGraphEdge = heads[from];
+        from.queued = false;
+        base: int = from.distance;
+        edge: ?*BoundsGraphEdge = from.head;
         while (edge != null && budget > 0) {
             budget = budget - 1;
             entry: *BoundsGraphEdge = edge;
-            to: int = entry.target;
-            if (to < 0 || to >= node_count) raise IndexOutOfBounds;
+            to: *BoundsGraphWork = entry.target;
             value: int = base + entry.weight;
-            if (value > 0 - unknown && value < distances[to]) {
-                distances[to] = value;
-                if (to == target && early && value <= limit) return false;
-                if (!queued[to]) {
+            if (value > 0 - unknown && value < to.distance) {
+                to.distance = value;
+                if (to.id == target && early && value <= limit) return false;
+                if (!to.queued) {
                     queue[write] = to;
                     write = bounds_queue_next(queue, write);
-                    queued[to] = true
+                    to.queued = true
                 }
             }
             edge = entry.next
@@ -229,7 +253,7 @@ bounds_graph_distance(
     target: int,
     limit: int,
     early: bool
-) raises IndexOutOfBounds: int requires (source < graph.nodes && 0 <= target && target < graph.nodes) {
+): int requires (source < graph.nodes && 0 <= target && target < graph.nodes) {
     distances: []int = bounds_graph_distances(graph, source, target, limit, early);
     distances[target]
 }
@@ -315,11 +339,11 @@ bounds_cached_graph(state: ?*BoundsState, excluded: ?*BoundsGraph, load: bool) r
     if (cache.storage == state.storage && cache.count == state.count) return cache;
     graph: *BoundsGraph = cache.graph;
     occupied: []*int = graph.occupied_slots;
-    heads: []?*BoundsGraphEdge = graph.heads;
+    work: []BoundsGraphWork = graph.work;
     nodes: int = graph.nodes;
     i: int = 0;
-    while (i < nodes) invariant (0 <= i && i <= nodes && nodes <= len(heads) && nodes <= len(occupied)) {
-        heads[i] = null;
+    while (i < nodes) invariant (0 <= i && i <= nodes && nodes <= len(work) && nodes <= len(occupied)) {
+        work[i].head = null;
         occupied[i].* = -1;
         i = i + 1
     }
@@ -342,20 +366,12 @@ bounds_cached_distance(
     target: int,
     limit: int,
     early: bool
-) raises IndexOutOfBounds: int requires (source < cache.graph.nodes && 0 <= target && target < cache.graph.nodes) {
-    distances: []int = cache.graph.distances;
-    queued: []bool = cache.graph.queued;
-    queue: []int = cache.graph.queue;
-    node_count: int = cache.graph.nodes;
-    if (cache.source == source && (cache.complete || early && distances[target] <= limit)) return distances[target];
-    for i in 0..node_count {
-        distances[i] = 1000000000000000000;
-        queued[i] = false
-    }
+): int requires (source < cache.graph.nodes && 0 <= target && target < cache.graph.nodes) {
+    target_work: *BoundsGraphWork = &cache.graph.work[target];
+    if (cache.source == source && (cache.complete || early && target_work.distance <= limit)) return target_work.distance;
     cache.source = source;
-    cache.complete = bounds_graph_search(cache.graph, source, target, limit, early,
-        distances, queued, queue);
-    distances[target]
+    cache.complete = bounds_graph_search(cache.graph, source, target, limit, early);
+    target_work.distance
 }
 
 // Two explicit, unconditional interval bounds can prove a difference through
@@ -448,12 +464,12 @@ bounds_solve(state: ?*BoundsState, query: *BoundsNumericView, early: bool) raise
     result: int = 1000000000000000000;
     region {
         graph: *BoundsGraph = bounds_graph_new(bounds_count(state));
-        target: int = bounds_graph_intern(graph, left, -1);
-        source: int = bounds_graph_intern(graph, right, target);
+        target: int = bounds_graph_intern(graph, left, -1, -1);
+        source: int = bounds_graph_intern(graph, right, target, -1);
         minimum: int = target;
         if (source > minimum) minimum = source;
         _loaded_minimum: int = bounds_graph_load(graph, state, minimum);
-        if (source == target || graph.heads[source] != null) result = bounds_graph_distance(graph,
+        if (source == target || graph.work[source].head != null) result = bounds_graph_distance(graph,
             source, target, query.bound, early)
     }
     result
@@ -564,8 +580,6 @@ bounds_join_project(
         }
         first_ids: []int = new int[BOUNDS_JOIN_TERMS](-1);
         second_ids: []int = new int[BOUNDS_JOIN_TERMS](-1);
-        left_distances: []int = new int[first.nodes](1000000000000000000);
-        right_distances: []int = new int[second.nodes](1000000000000000000);
         missing_distance: int = 1000000000000000000;
         left_slots: []*int = new *int[BOUNDS_JOIN_TERMS](&missing_distance);
         right_slots: []*int = new *int[BOUNDS_JOIN_TERMS](&missing_distance);
@@ -585,42 +599,34 @@ bounds_join_project(
                         positions[count] = position * 2 + side;
                         first_ids[count] = left_id;
                         second_ids[count] = right_id;
-                        left_slots[count] = &left_distances[left_id];
-                        right_slots[count] = &right_distances[right_id];
+                        left_slots[count] = &first.work[left_id].distance;
+                        right_slots[count] = &second.work[right_id].distance;
                         count = count + 1
                     }
                 }
             }
             position = position + 1
         }
-        // All searches share region-owned workspace. No search result escapes
+        // The two graphs own separate workspaces. No search result escapes
         // except scalar weights copied into the projection table.
-        left_queued: []bool = new bool[first.nodes](false);
-        left_queue: []int = new int[first.nodes + 1](0);
-        right_queued: []bool = new bool[second.nodes](false);
-        right_queue: []int = new int[second.nodes + 1](0);
         for source in 0..count {
-            for i in 0..len(left_distances) left_distances[i] = 1000000000000000000;
-            for i in 0..len(left_queued) left_queued[i] = false;
             // A negative distance back to the source is a witnessed closed
             // walk: source - source <= -1. All loaded edges are unconditional,
             // so this predecessor is impossible. On consistent graphs the
             // same search still computes every distance, with the old budget.
             first_source: int = first_ids[source];
-            if (first_source < 0 || first_source >= len(left_distances)) raise IndexOutOfBounds;
+            if (first_source < 0 || first_source >= first.nodes) raise IndexOutOfBounds;
             _first_complete: bool = bounds_graph_search(first, first_source, first_source,
-                -1, true, left_distances, left_queued, left_queue);
-            if (left_distances[first_source] < 0) {
+                -1, true);
+            if (first.work[first_source].distance < 0) {
                 impossible.* = 1;
                 return result
             }
-            for i in 0..len(right_distances) right_distances[i] = 1000000000000000000;
-            for i in 0..len(right_queued) right_queued[i] = false;
             second_source: int = second_ids[source];
-            if (second_source < 0 || second_source >= len(right_distances)) raise IndexOutOfBounds;
+            if (second_source < 0 || second_source >= second.nodes) raise IndexOutOfBounds;
             _second_complete: bool = bounds_graph_search(second, second_source, second_source,
-                -1, true, right_distances, right_queued, right_queue);
-            if (right_distances[second_source] < 0) {
+                -1, true);
+            if (second.work[second_source].distance < 0) {
                 impossible.* = 2;
                 return result
             }
@@ -674,7 +680,7 @@ bounds_below_length(state: ?*BoundsState, base: *Expr, margin: int) raises Index
         term: BoundsTermRef = bounds_ref_expr(base);
         if (bounds_ref_valid(term)) {
             graph: *BoundsGraph = bounds_graph_new(bounds_count(state));
-            target: int = bounds_graph_intern(graph, term, -1);
+            target: int = bounds_graph_intern(graph, term, -1, -1);
             loaded_target: int = bounds_graph_load(graph, state, target);
             result = bounds_graph_distance(graph, -1, loaded_target, 0 - margin, true) <= 0 - margin
         }

@@ -62,11 +62,16 @@ fixed-capacity boundaries prevent real failures.
   source ID below the graph's node count. Query construction preserves the
   larger of its source and target IDs through graph loading, so both remain
   valid at the search call.
-- [x] `src2/bounds_solver.l8`, cached search workspace: store scratch arrays
-  on the graph whose node count they cover. The graph invariant now proves
-  their lengths across cache reloads; independent join searches allocate
-  workspaces sized to each graph. Cached target IDs flow through a search
-  precondition, including the path translated through the zero node.
+- [x] `src2/bounds_solver.l8`, cached search workspace: keep search state on
+  the graph nodes whose count controls traversal. Each search resets those
+  nodes; the two graphs in a join have independent work state. Cached target
+  IDs flow through a search precondition, including the path translated
+  through the zero node.
+- [x] `src2/bounds_solver.l8`, graph search queue and edge targets: each
+  graph node owns its head, current distance, and queue flag. Queue entries
+  and edge targets point directly to nodes, whose addresses are checked at
+  creation. Search resets node work state and no longer rechecks integer IDs
+  on dequeue or edge traversal.
 - [x] `src2/assembler.l8`, two and three byte emitters: compose the existing
   single byte emitter, which grows the section and validates each cursor
   advance. This removes duplicate span checks over separately mutable
@@ -100,10 +105,9 @@ fixed-capacity boundaries prevent real failures.
   token position. A token is a linked parser object without a source-relative
   invariant; a malformed position can make `src[p - 1]` invalid.
 - [ ] `src2/bounds_solver.l8`, remaining graph IDs: prove IDs read from hash
-  slots, edge targets, and work queues refer to current nodes. Pointer links
-  removed the adjacency-index case and graph-owned workspaces prove their
-  sizes; stored integer values still need a representation or verifier proof
-  that survives graph reloads.
+  slots and join source tables refer to current nodes. Adjacency, edge
+  targets, and work queues use typed pointers; hash slots and join sources
+  still store integer IDs that survive graph reloads.
 - [x] `src2/bounds_solver.l8`, graph capacity: term and edge limits are
   fixed-table allocation boundaries.
 - [ ] `src2/assembler.l8`, single-byte emission cursors: carry their bounds
