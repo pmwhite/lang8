@@ -220,13 +220,12 @@ checks that still need proofs.
 
 ## Remaining `IndexOutOfBounds` raises
 
-There are 13 explicit raises in `src2`, the block game, and the terminal.
+There are 12 explicit raises in `src2`, the block game, and the terminal.
 These checks protect internal relationships; changing their exception names
 would leave the underlying proof obligations unresolved.
 
 | Site | Relationship to prove |
 | --- | --- |
-| `src2/bounds_solver.l8:86` | Interned nodes fit their table, using the row and term budgets across graph loading. |
 | `src2/assembler.l8:764` | Every generated text patch points to four emitted bytes. |
 | `src2/elfpack.l8:142` | Every generated ELF write fits the computed output span. |
 | `programs/block-game/block-game-undo.l8:132,225` | Journal reads have nonnegative positions and evicted action headers describe complete stored actions. |
@@ -274,6 +273,8 @@ each node, so every edge write uses a row or node index already in bounds.
 Growing the node array would invalidate pointers. Chunked growth was also
 tested, but a cached graph may outlive the heap region in which a later
 chunk is allocated; the lifetime checker correctly rejects that store.
-Node interning therefore needs a row-budget proof for its stable preallocation,
-or a larger ownership redesign that allocates stable nodes and edges in
-the graph's original lifetime.
+Node interning now treats an exhausted graph as an incomplete proof search:
+it declines to intern the term, and callers omit edges or return an unknown
+result. Finite paths still consist only of real facts. The graph table normally
+has enough slots for two endpoints per row plus query terms; the fallback
+keeps an underestimated capacity sound without an internal exception.
