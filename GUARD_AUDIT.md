@@ -119,9 +119,9 @@ fixed-capacity boundaries prevent real failures.
 
 ## Reviewed guards still requiring validation or proof
 
-- [ ] `programs/block-game/level.l8`, `assign_block_homes`: prove that the
-  per-room counts and reconstructed home lists describe the same blocks,
-  including their total fit in `RoomBlockIds.indices`.
+- [x] `programs/block-game/level.l8`, `assign_block_homes`: sort the block
+  homes, then construct indices, spans, and per-room counts from a single
+  packed cursor bounded by the number of blocks.
 - [x] `src2/browse.l8`, `browse_tok_start`: keep `p <= len(src)` for the
   token position. A token is a linked parser object without a source-relative
   invariant; a malformed position can make `src[p - 1]` invalid.
@@ -217,7 +217,7 @@ checks that still need proofs.
 
 ## Remaining `IndexOutOfBounds` raises
 
-There are 17 explicit raises in `src2`, the block game, and the terminal.
+There are 14 explicit raises in `src2`, the block game, and the terminal.
 These checks protect internal relationships; changing their exception names
 would leave the underlying proof obligations unresolved.
 
@@ -226,7 +226,6 @@ would leave the underlying proof obligations unresolved.
 | `src2/bounds_solver.l8:86` | Interned nodes fit their table, using the row and term budgets across graph loading. |
 | `src2/assembler.l8:764` | Every generated text patch points to four emitted bytes. |
 | `src2/elfpack.l8:142` | Every generated ELF write fits the computed output span. |
-| `programs/block-game/level.l8:1932,1952,1957` | Per-room counts sum to at most the block count, and each room list contains exactly its counted blocks. |
 | `programs/block-game/block-game-undo.l8:132,225` | Journal reads have nonnegative positions and evicted action headers describe complete stored actions. |
 | `programs/block-game/block-game-undo.l8:269,361,399,401,425,428,576,621` | Rewind counts, frame offsets, route layout, and room spans agree across the timeline and room records. |
 | `programs/terminal/scene.l8:354` | Recursive region partitioning consumes no more than its allotted region budget. |
