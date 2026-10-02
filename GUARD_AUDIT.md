@@ -71,6 +71,10 @@ fixed-capacity boundaries prevent real failures.
   single byte emitter, which grows the section and validates each cursor
   advance. This removes duplicate span checks over separately mutable
   section globals.
+- [x] `src2/assembler.l8`, symbol hash links: store stable heap symbols in
+  the growable symbol table and link buckets directly to those records.
+  Lookup follows typed pointers and returns the symbol itself, so a hash
+  chain never needs to revalidate an integer table index after growth.
 
 - [x] `src2/assembler.l8`, `as_wr_le`: removed its runtime guard and
   gave the generic byte writer and fixed-width wrappers span requirements.
@@ -102,10 +106,9 @@ fixed-capacity boundaries prevent real failures.
   that survives graph reloads.
 - [x] `src2/bounds_solver.l8`, graph capacity: term and edge limits are
   fixed-table allocation boundaries.
-- [ ] `src2/assembler.l8`, internal symbol links and single-byte emission
-  cursors: carry their bounds through the symbol table and section-buffer
-  representations. The multi-byte emitters now use the proved single-byte
-  path.
+- [ ] `src2/assembler.l8`, single-byte emission cursors: carry their bounds
+  through the section-buffer representation. Symbol links and multi-byte
+  emitters no longer need internal span checks.
 - [x] `src2/assembler.l8` and `src2/elfpack.l8`, input/patch spans: keep
   validation for assembler text, relocation offsets read from patch lists,
   and final output capacity or integer overflow.

@@ -3,12 +3,13 @@ tag compiler_internal;
 // l8as: minimal x86-64 AT&T assembler → ELF64 ET_REL (elfpack-compatible).
 // Usage: l8as -o out.o a.s b.s ...
 type as_Sym = {
+    as_id: int;
     as_name: []i8;
     as_val: int;
     as_sec: int;
     as_bind: int;
     as_defined: bool;
-    as_hash_next: int;
+    as_hash_next: ?*as_Sym;
     as_object_index: *AsSymbolIndex
 }
 
@@ -117,7 +118,7 @@ as_cur_sec: int = 0;
 as_pass_no: int = 0;
 
 type AsSymbols = {
-    items: []as_Sym;
+    items: []*as_Sym;
     count: int
 } invariant (0 <= count && count <= len(items))
 
@@ -126,20 +127,21 @@ type AsEnsuredSymbol = {
     symbol: *as_Sym
 }
 
-as_symbols: AsSymbols = AsSymbols { items: new as_Sym[0](as_Sym {
+as_symbols: AsSymbols = AsSymbols { items: new *as_Sym[0](new as_Sym {
+    as_id: 0,
     as_name: "",
     as_val: 0,
     as_sec: 0,
     as_bind: 0,
     as_defined: false,
-    as_hash_next: 0,
+    as_hash_next: null,
     as_object_index: new AsSymbolIndex { value: 0 }
 }), count: 0 };
 
 as_symbols_capacity: int = 4096;
 
 type AsBucketTables = {
-    symbols: []int;
+    symbols: []?*as_Sym;
     globals: []?*AsGlobalLink
 } invariant (len(symbols) == 4096 && len(globals) == 4096)
 
@@ -148,7 +150,7 @@ type AsGlobalLink = {
     next: ?*AsGlobalLink
 }
 
-as_bucket_tables: AsBucketTables = AsBucketTables { symbols: new int[4096](-1), globals: new ?*AsGlobalLink[4096](null) };
+as_bucket_tables: AsBucketTables = AsBucketTables { symbols: new ?*as_Sym[4096](null), globals: new ?*AsGlobalLink[4096](null) };
 
 type AsRelocations = {
     items: []as_Rel;
@@ -425,7 +427,7 @@ as_sym_bucket(as_h: int): int ensures (0 <= returned && returned < 4096) {
 }
 
 as_clear_sym_buckets() {
-    for as_i in 0..len(as_bucket_tables.symbols) as_bucket_tables.symbols[as_i] = 0 - 1;
+    for as_i in 0..len(as_bucket_tables.symbols) as_bucket_tables.symbols[as_i] = null;
     for as_i in 0..len(as_bucket_tables.globals) as_bucket_tables.globals[as_i] = null
 }
 
@@ -651,21 +653,19 @@ as_add_globl(as_name: []i8) noregion {
     as_globals.count = as_globals.count + 1
 }
 
-as_find_sym(symbols: *AsSymbols, as_name: []i8) raises IndexOutOfBounds: int ensures (returned < len(symbols.items)) {
+as_find_sym(as_name: []i8): ?*as_Sym {
     as_b: int = as_sym_bucket(as_hash_str(as_name));
-    as_i: int = as_bucket_tables.symbols[as_b];
-    while (as_i >= 0) {
-        if (as_i >= symbols.count) raise IndexOutOfBounds;
-        if (as_streq(symbols.items[as_i].as_name, as_name)) return as_i;
-        as_i = symbols.items[as_i].as_hash_next
+    entry: ?*as_Sym = as_bucket_tables.symbols[as_b];
+    while (entry != null) {
+        if (as_streq(entry.as_name, as_name)) return entry;
+        entry = entry.as_hash_next
     }
-    0 - 1
+    null
 }
 
-as_ensure_sym(as_name: []i8) noregion raises IndexOutOfBounds: AsEnsuredSymbol {
-    symbols: *AsSymbols = &as_symbols;
-    as_i: int = as_find_sym(symbols, as_name);
-    if (as_i >= 0) return AsEnsuredSymbol { id: as_i, symbol: &symbols.items[as_i] };
+as_ensure_sym(as_name: []i8) noregion: AsEnsuredSymbol@new {
+    found: ?*as_Sym = as_find_sym(as_name);
+    if (found != null) return AsEnsuredSymbol { id: found.as_id, symbol: found };
     as_bind: int = as_STB_LOCAL;
     if (len(as_name) >= 2 && as_name[0] == '.' && as_name[1] == 'L') { } else {
         if (as_is_globl(as_name)) as_bind = as_STB_GLOBAL
@@ -676,44 +676,42 @@ as_ensure_sym(as_name: []i8) noregion raises IndexOutOfBounds: AsEnsuredSymbol {
         as_ncap: int = len(as_symbols.items) * 2;
         if (as_ncap < 64) as_ncap = 64;
         while (as_ncap <= as_symbols.count) as_ncap = as_ncap * 2;
-        as_ns: []as_Sym = new as_Sym[as_ncap](as_Sym {
+        as_ns: []*as_Sym = new *as_Sym[as_ncap](new as_Sym {
+            as_id: 0,
             as_name: "",
             as_val: 0,
             as_sec: 0,
             as_bind: 0,
             as_defined: false,
-            as_hash_next: 0,
+            as_hash_next: null,
             as_object_index: new AsSymbolIndex { value: 0 }
         });
         as_j: int = 0;
         while (as_j < as_symbols.count) invariant (0 <= as_j && as_j <= as_symbols.count && as_symbols.count < len(as_ns)) {
-            as_ns[as_j].as_name = as_symbols.items[as_j].as_name;
-            as_ns[as_j].as_val = as_symbols.items[as_j].as_val;
-            as_ns[as_j].as_sec = as_symbols.items[as_j].as_sec;
-            as_ns[as_j].as_bind = as_symbols.items[as_j].as_bind;
-            as_ns[as_j].as_defined = as_symbols.items[as_j].as_defined;
-            as_ns[as_j].as_hash_next = as_symbols.items[as_j].as_hash_next;
-            as_ns[as_j].as_object_index = as_symbols.items[as_j].as_object_index;
+            as_ns[as_j] = as_symbols.items[as_j];
             as_j = as_j + 1
         }
         as_symbols.items = as_ns;
         as_symbols_capacity = as_ncap
     }
     id: int = as_symbols.count;
-    entry: *as_Sym = &as_symbols.items[id];
-    entry.as_name = stored_name;
-    entry.as_val = 0;
-    entry.as_sec = as_SEC_UND;
-    entry.as_bind = as_bind;
-    entry.as_defined = false;
-    entry.as_hash_next = as_bucket_tables.symbols[as_b];
-    entry.as_object_index = new AsSymbolIndex { value: 0 };
-    as_bucket_tables.symbols[as_b] = id;
+    entry: *as_Sym = new as_Sym {
+        as_id: id,
+        as_name: stored_name,
+        as_val: 0,
+        as_sec: as_SEC_UND,
+        as_bind: as_bind,
+        as_defined: false,
+        as_hash_next: as_bucket_tables.symbols[as_b],
+        as_object_index: new AsSymbolIndex { value: 0 }
+    };
+    as_symbols.items[id] = entry;
+    as_bucket_tables.symbols[as_b] = entry;
     as_symbols.count = id + 1;
     AsEnsuredSymbol { id: id, symbol: entry }
 }
 
-as_define_sym(as_name: []i8) noregion raises IndexOutOfBounds {
+as_define_sym(as_name: []i8) noregion {
     ensured: AsEnsuredSymbol = as_ensure_sym(as_name);
     symbol: *as_Sym = ensured.symbol;
     symbol.as_val = as_cur_off();
@@ -729,7 +727,7 @@ as_add_reloc(
     as_typ: int,
     as_name: []i8,
     as_addend: int
-) noregion raises IndexOutOfBounds {
+) noregion {
     ensured: AsEnsuredSymbol = as_ensure_sym(as_name);
     while (as_relocations.count >= len(as_relocations.items)) {
         as_ncap: int = as_relocations_capacity * 2;
@@ -1070,11 +1068,10 @@ as_parse_operand(as_s: []i8@immortal) raises IndexOutOfBounds {
             as_op_disp = as_parse_expr(as_disp_s);
             return
         }
-        symbols: *AsSymbols = &as_symbols;
-        as_si: int = as_find_sym(symbols, as_disp_s);
-        if (as_si >= 0 && symbols.items[as_si].as_defined && symbols.items[as_si].as_sec == as_SEC_ABS) {
+        found: ?*as_Sym = as_find_sym(as_disp_s);
+        if (found != null && found.as_defined && found.as_sec == as_SEC_ABS) {
             as_op_kind = as_OP_MEM;
-            as_op_disp = symbols.items[as_si].as_val;
+            as_op_disp = found.as_val;
             return
         }
         as_op_kind = as_OP_MEMABS;
@@ -1570,11 +1567,9 @@ as_insn(as_mnem: []i8, as_args: []i8) noregion raises IndexOutOfBounds {
             return
         }
         if (as_op2_kind == as_OP_MEMABS && as_op_kind == as_OP_REG) {
-            symbols: *AsSymbols = &as_symbols;
-            as_si: int = as_find_sym(symbols, as_op2_name);
-            if (as_si < 0 || symbols.items[as_si].as_sec != as_SEC_ABS) as_fail("lea abs");
-            as_emit_lea(as_op_reg, as_op2_base, symbols.items[as_si].as_val, false,
-                "", 0);
+            found: ?*as_Sym = as_find_sym(as_op2_name);
+            if (found == null || found.as_sec != as_SEC_ABS) as_fail("lea abs");
+            as_emit_lea(as_op_reg, as_op2_base, found.as_val, false, "", 0);
             return
         }
         if (as_op2_kind == as_OP_MEMRIP && as_op_kind == as_OP_REG) {
@@ -1738,9 +1733,8 @@ as_directive(as_lp: []i8@immortal, as_o: int, as_ln: int) noregion raises IndexO
         as_copy_to_buf(as_operand_buffers.name, as_lp, as_arg0, as_j3 - as_arg0);
         as_gn: []i8 = as_operand_buffers.name;
         as_add_globl(as_gn);
-        symbols: *AsSymbols = &as_symbols;
-        as_gi: int = as_find_sym(symbols, as_gn);
-        if (as_gi >= 0) symbols.items[as_gi].as_bind = as_STB_GLOBAL;
+        found: ?*as_Sym = as_find_sym(as_gn);
+        if (found != null) found.as_bind = as_STB_GLOBAL;
         return
     }
     if (as_streq(as_dname, ".equ")) {
@@ -1911,16 +1905,17 @@ as_init() noregion {
     as_data_buf = new i8[as_data_cap](0i8);
     as_data_len = 0;
     as_bss_size = 0;
-    as_symbols = AsSymbols { items: new as_Sym[as_symbols_capacity](as_Sym {
+    as_symbols = AsSymbols { items: new *as_Sym[as_symbols_capacity](new as_Sym {
+        as_id: 0,
         as_name: "",
         as_val: 0,
         as_sec: 0,
         as_bind: 0,
         as_defined: false,
-        as_hash_next: 0,
+        as_hash_next: null,
         as_object_index: new AsSymbolIndex { value: 0 }
     }), count: 0 };
-    as_bucket_tables = AsBucketTables { symbols: new int[4096](-1), globals: new ?*AsGlobalLink[4096](null) };
+    as_bucket_tables = AsBucketTables { symbols: new ?*as_Sym[4096](null), globals: new ?*AsGlobalLink[4096](null) };
     as_clear_sym_buckets();
     as_relocations = AsRelocations { items: new as_Rel[as_relocations_capacity](as_Rel {
         as_off: 0,
@@ -2036,14 +2031,13 @@ as_write_one_sh() {
     as_wr64(out, as_sh + 56, as_sh_entsize)
 }
 
-as_write_object(as_path: str) noregion raises IndexOutOfBounds {
+as_write_object(as_path: str) noregion {
     as_object_relocations: AsRelocations = as_relocations;
     as_object_globals: AsGlobals = as_globals;
     as_gi: int = 0;
     while (as_gi < as_object_globals.count) {
-        symbols: *AsSymbols = &as_symbols;
-        as_si: int = as_find_sym(symbols, as_object_globals.names[as_gi]);
-        if (as_si >= 0) symbols.items[as_si].as_bind = as_STB_GLOBAL;
+        found: ?*as_Sym = as_find_sym(as_object_globals.names[as_gi]);
+        if (found != null) found.as_bind = as_STB_GLOBAL;
         as_gi = as_gi + 1
     }
     as_strtab_cap = 8192;
@@ -2052,7 +2046,7 @@ as_write_object(as_path: str) noregion raises IndexOutOfBounds {
     as_strtab_buf[0] = 0i8;
     as_object_symbols: *AsSymbols = &as_symbols;
     as_object_count: int = as_object_symbols.count;
-    as_object_items: []as_Sym = as_object_symbols.items;
+    as_object_items: []*as_Sym = as_object_symbols.items;
     as_symtab: []i8 = new i8[(as_object_count + 1) * 24](0i8);
     as_norder: int = 0;
     as_first_global: int = 1;
@@ -2064,7 +2058,7 @@ as_write_object(as_path: str) noregion raises IndexOutOfBounds {
             if (as_phase == 1 && as_object_items[as_i].as_defined && as_object_items[as_i].as_bind == as_STB_GLOBAL) as_take = true;
             if (as_phase == 2 && !as_object_items[as_i].as_defined) as_take = true;
             if (as_take) {
-                as_entry: *as_Sym = &as_object_items[as_i];
+                as_entry: *as_Sym = as_object_items[as_i];
                 as_entry.as_object_index.value = as_norder + 1;
                 as_no: int = as_str_add(as_entry.as_name);
                 as_st_info: int = as_entry.as_bind * 16;
