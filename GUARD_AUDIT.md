@@ -202,3 +202,9 @@ are internal consistency checks, not user-facing errors.
 Their `IndexOutOfBounds` raises remain proof work: removing them safely
 requires changing the representations or adding proofs that survive mutation
 and reuse.
+
+The assembler now reports an addressable-section limit through its `l8as`
+diagnostic path. Compiler input that overflows an import path or variant name
+reports a source `Error`. Bounds-analysis function, graph, and fact-table
+allocation limits also report source `Error`. The call contracts no longer
+advertise `IndexOutOfBounds` along paths that only reach those limits.
