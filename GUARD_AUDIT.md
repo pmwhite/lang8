@@ -87,6 +87,15 @@ fixed-capacity boundaries prevent real failures.
   the growable symbol table and link buckets directly to those records.
   Lookup follows typed pointers and returns the symbol itself, so a hash
   chain never needs to revalidate an integer table index after growth.
+- [x] `programs/block-game/block-game-render.l8`, grass instances: make the
+  stride a constant, carry the fixed vertex and batch capacities in the cache
+  invariant, and require one complete cell of room before filling. The
+  verifier now combines a bounded nonnegative loop displacement with a
+  length-relative base bound for both the nonnegative and upper index facts.
+- [x] `programs/block-game/block-game-undo.l8`, journal head and tail: record
+  `tail <= head` in the timeline invariant and store each action's absolute
+  start in its trailer. Undo's return contract carries the tail bound to
+  phase changes, and eviction no longer needs a redundant tail-range raise.
 
 - [x] `src2/assembler.l8`, `as_wr_le`: removed its runtime guard and
   gave the generic byte writer and fixed-width wrappers span requirements.
@@ -123,9 +132,9 @@ fixed-capacity boundaries prevent real failures.
 - [x] `src2/assembler.l8` and `src2/elfpack.l8`, input/patch spans: keep
   validation for assembler text, relocation offsets read from patch lists,
   and final output capacity or integer overflow.
-- [ ] `programs/block-game/block-game-render.l8`: prove complete-instance and
-  batch copy spans from cache dimensions and accumulated instance counts.
-  The current checks prevent a partial vertex write if counts exceed capacity.
+- [ ] `programs/block-game/block-game-render.l8`: prove batch copy spans from
+  cache dimensions and accumulated instance counts. The current check prevents
+  a partial batch copy if counts exceed capacity.
 - [ ] `programs/block-game/block-game-undo.l8`: model in-memory journal words
   as valid action sizes and indices so internal reads and copies can be
   verified. Checks on archived frame data remain input validation.
