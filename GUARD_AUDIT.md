@@ -217,7 +217,7 @@ checks that still need proofs.
 
 ## Remaining `IndexOutOfBounds` raises
 
-There are 19 explicit raises in `src2`, the block game, and the terminal.
+There are 18 explicit raises in `src2`, the block game, and the terminal.
 These checks protect internal relationships; changing their exception names
 would leave the underlying proof obligations unresolved.
 
@@ -229,7 +229,6 @@ would leave the underlying proof obligations unresolved.
 | `programs/block-game/level.l8:1932,1952,1957` | Per-room counts sum to at most the block count, and each room list contains exactly its counted blocks. |
 | `programs/block-game/block-game-undo.l8:132,225` | Journal reads have nonnegative positions and evicted action headers describe complete stored actions. |
 | `programs/block-game/block-game-undo.l8:269,361,399,401,425,428,576,621` | Rewind counts, frame offsets, route layout, and room spans agree across the timeline and room records. |
-| `programs/block-game/block-game-render.l8:950` | Packed visible grass counts stay within the fixed batch capacity. |
 | `programs/terminal/scene.l8:354` | Recursive region partitioning consumes no more than its allotted region budget. |
 | `programs/terminal/render.l8:260` | Background, glyph, ghost, and cursor quads together fit the fixed vertex buffer. |
 
@@ -241,6 +240,9 @@ render batches need a related accumulated-count proof across loops.
 The plant batch no longer needs that proof: each mesh has a fixed GPU slot,
 and its scratch-buffer count is bounded by the number of blocks processed
 in that mesh's scan.
+The grass batch still makes one draw call. It visits fixed cell/blade slots
+and packs active instances with `packed <= slots visited`, a loop invariant
+the verifier can preserve.
 
 The undo journal needs a representation change before its read guard can
 be removed. `undo_latest` now exposes its nonnegative, bounded result to
