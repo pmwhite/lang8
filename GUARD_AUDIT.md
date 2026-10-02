@@ -62,6 +62,15 @@ fixed-capacity boundaries prevent real failures.
   source ID below the graph's node count. Query construction preserves the
   larger of its source and target IDs through graph loading, so both remain
   valid at the search call.
+- [x] `src2/bounds_solver.l8`, cached search workspace: store scratch arrays
+  on the graph whose node count they cover. The graph invariant now proves
+  their lengths across cache reloads; independent join searches allocate
+  workspaces sized to each graph. Cached target IDs flow through a search
+  precondition, including the path translated through the zero node.
+- [x] `src2/assembler.l8`, two and three byte emitters: compose the existing
+  single byte emitter, which grows the section and validates each cursor
+  advance. This removes duplicate span checks over separately mutable
+  section globals.
 
 - [x] `src2/assembler.l8`, `as_wr_le`: removed its runtime guard and
   gave the generic byte writer and fixed-width wrappers span requirements.
@@ -88,14 +97,15 @@ fixed-capacity boundaries prevent real failures.
   invariant; a malformed position can make `src[p - 1]` invalid.
 - [ ] `src2/bounds_solver.l8`, remaining graph IDs: prove IDs read from hash
   slots, edge targets, and work queues refer to current nodes. Pointer links
-  removed the adjacency-index case; the stored integer values still need a
-  representation or verifier proof that survives graph reloads.
+  removed the adjacency-index case and graph-owned workspaces prove their
+  sizes; stored integer values still need a representation or verifier proof
+  that survives graph reloads.
 - [x] `src2/bounds_solver.l8`, graph capacity: term and edge limits are
   fixed-table allocation boundaries.
-- [ ] `src2/assembler.l8`, internal symbol links and emission cursors: carry
-  their bounds through the symbol table and section-buffer representations.
-  In `as_emit_b2/b3`, a returned buffer from `as_ensure_cap` alone does not
-  yet prove the `n + 1`/`n + 2` accesses.
+- [ ] `src2/assembler.l8`, internal symbol links and single-byte emission
+  cursors: carry their bounds through the symbol table and section-buffer
+  representations. The multi-byte emitters now use the proved single-byte
+  path.
 - [x] `src2/assembler.l8` and `src2/elfpack.l8`, input/patch spans: keep
   validation for assembler text, relocation offsets read from patch lists,
   and final output capacity or integer overflow.

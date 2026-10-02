@@ -48,6 +48,9 @@ bounds_graph_new(rows: int) raises IndexOutOfBounds: *BoundsGraph@new {
         occupied_slots: new *int[capacity](first_slot),
         heads: new ?*BoundsGraphEdge[capacity](null),
         adjacency: new BoundsGraphEdge[rows + capacity * 3](BoundsGraphEdge { target: 0, weight: 0, next: null }),
+        distances: new int[capacity](0),
+        queued: new bool[capacity](false),
+        queue: new int[capacity + 1](0),
         small_weights: true,
         nodes: 0,
         edges: 0
@@ -162,11 +165,10 @@ bounds_graph_search(
     distances: []int,
     queued: []bool,
     queue: []int
-) raises IndexOutOfBounds: bool requires (len(queued) < len(queue) && source < graph.nodes) {
+) raises IndexOutOfBounds: bool requires (graph.nodes <= len(distances) && graph.nodes <= len(queued) && len(queued) < len(queue) && source < graph.nodes) {
     heads: []?*BoundsGraphEdge = graph.heads;
     terms: []BoundsTermRef = graph.terms;
     node_count: int = graph.nodes;
-    if (node_count > len(distances) || node_count > len(queued)) raise IndexOutOfBounds;
     unknown: int = 1000000000000000000;
     read: int = 0;
     write: int = 0;
@@ -340,12 +342,11 @@ bounds_cached_distance(
     target: int,
     limit: int,
     early: bool
-) raises IndexOutOfBounds: int requires (source < cache.graph.nodes) {
-    distances: []int = cache.distances;
-    queued: []bool = cache.queued;
-    queue: []int = cache.queue;
+) raises IndexOutOfBounds: int requires (source < cache.graph.nodes && 0 <= target && target < cache.graph.nodes) {
+    distances: []int = cache.graph.distances;
+    queued: []bool = cache.graph.queued;
+    queue: []int = cache.graph.queue;
     node_count: int = cache.graph.nodes;
-    if (target < 0 || target >= len(distances) || node_count > len(distances)) raise IndexOutOfBounds;
     if (cache.source == source && (cache.complete || early && distances[target] <= limit)) return distances[target];
     for i in 0..node_count {
         distances[i] = 1000000000000000000;
@@ -413,31 +414,33 @@ bounds_solve(state: ?*BoundsState, query: *BoundsNumericView, early: bool) raise
         if (!bounds_ref_same(left, right)) {
             zero_term: BoundsTermRef = bounds_ref_zero();
             zero: int = bounds_graph_find(cached.graph, zero_term);
-            shift: int = 0;
-            usable: bool = zero >= 0 && cached.graph.small_weights;
-            if (cached_source < 0) {
-                if (!right.is_len) usable = false else {
-                    known: int = bounds_known_len(right.path);
-                    if (known >= 0) shift = 0 - known;
+            if (zero >= 0 && cached.graph.small_weights) {
+                shift: int = 0;
+                usable: bool = true;
+                if (cached_source < 0) {
+                    if (!right.is_len) usable = false else {
+                        known: int = bounds_known_len(right.path);
+                        if (known >= 0) shift = 0 - known
+                    }
                     cached_source = zero
                 }
-            }
-            if (cached_target < 0) {
-                if (!left.is_len) usable = false else {
-                    known: int = bounds_known_len(left.path);
-                    if (known < 0) return 1000000000000000000;
-                    if (known >= 536870912 || shift <= -536870912) usable = false else shift = shift + known;
+                if (cached_target < 0) {
+                    if (!left.is_len) usable = false else {
+                        known: int = bounds_known_len(left.path);
+                        if (known < 0) return 1000000000000000000;
+                        if (known >= 536870912 || shift <= -536870912) usable = false else shift = shift + known
+                    }
                     cached_target = zero
                 }
-            }
-            if (usable && shift > -536870912 && shift < 536870912 && query.bound > -1000000000000000000 && query.bound < 1000000000000000000) {
-                distance: int = bounds_cached_distance(cached, cached_source, cached_target,
-                    query.bound - shift, early);
-                if (distance >= 1000000000000000000) {
-                    if (cached.complete) return 1000000000000000000
-                } else {
-                    adjusted: int = distance + shift;
-                    if (adjusted > -1000000000000000000 && adjusted < 1000000000000000000 && (cached.complete || early && adjusted <= query.bound)) return adjusted
+                if (usable && shift > -536870912 && shift < 536870912 && query.bound > -1000000000000000000 && query.bound < 1000000000000000000) {
+                    distance: int = bounds_cached_distance(cached, cached_source,
+                        cached_target, query.bound - shift, early);
+                    if (distance >= 1000000000000000000) {
+                        if (cached.complete) return 1000000000000000000
+                    } else {
+                        adjusted: int = distance + shift;
+                        if (adjusted > -1000000000000000000 && adjusted < 1000000000000000000 && (cached.complete || early && adjusted <= query.bound)) return adjusted
+                    }
                 }
             }
         }
@@ -592,12 +595,13 @@ bounds_join_project(
         }
         // All searches share region-owned workspace. No search result escapes
         // except scalar weights copied into the projection table.
-        nodes: int = if (first.nodes > second.nodes) first.nodes else second.nodes;
-        queued: []bool = new bool[nodes](false);
-        queue: []int = new int[nodes + 1](0);
+        left_queued: []bool = new bool[first.nodes](false);
+        left_queue: []int = new int[first.nodes + 1](0);
+        right_queued: []bool = new bool[second.nodes](false);
+        right_queue: []int = new int[second.nodes + 1](0);
         for source in 0..count {
             for i in 0..len(left_distances) left_distances[i] = 1000000000000000000;
-            for i in 0..len(queued) queued[i] = false;
+            for i in 0..len(left_queued) left_queued[i] = false;
             // A negative distance back to the source is a witnessed closed
             // walk: source - source <= -1. All loaded edges are unconditional,
             // so this predecessor is impossible. On consistent graphs the
@@ -605,17 +609,17 @@ bounds_join_project(
             first_source: int = first_ids[source];
             if (first_source < 0 || first_source >= len(left_distances)) raise IndexOutOfBounds;
             _first_complete: bool = bounds_graph_search(first, first_source, first_source,
-                -1, true, left_distances, queued, queue);
+                -1, true, left_distances, left_queued, left_queue);
             if (left_distances[first_source] < 0) {
                 impossible.* = 1;
                 return result
             }
             for i in 0..len(right_distances) right_distances[i] = 1000000000000000000;
-            for i in 0..len(queued) queued[i] = false;
+            for i in 0..len(right_queued) right_queued[i] = false;
             second_source: int = second_ids[source];
             if (second_source < 0 || second_source >= len(right_distances)) raise IndexOutOfBounds;
             _second_complete: bool = bounds_graph_search(second, second_source, second_source,
-                -1, true, right_distances, queued, queue);
+                -1, true, right_distances, right_queued, right_queue);
             if (right_distances[second_source] < 0) {
                 impossible.* = 2;
                 return result
