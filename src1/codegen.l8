@@ -411,8 +411,39 @@ gen_load(n: *Expr) noregion raises Error, IndexOutOfBounds {
     load_mem(ty)
 }
 
+/* Load a side-effect-free scalar directly into an operand register. Evaluate
+ * the left operand first: even a simple RHS local may be changed by that call. */
+gen_simple_operand(n: *Expr, reg: int) noregion raises Error, IndexOutOfBounds: bool {
+    if (imm_operand(n)) {
+        cg_mov_imm(imm_value(n), reg);
+        return true
+    }
+    match n.kind {
+        Var k -> {
+            vo: ?*Obj = k.var;
+            ty: ?*Type = n.ty;
+            if (vo == null || ty == null || passes_by_ref(ty)) return false;
+            if (vo.is_const) {
+                cg_mov_imm(vo.const_val, reg);
+                return true
+            }
+            if (!vo.is_local) return false;
+            esz: int = enum_mem_size(ty);
+            if (esz == 1 || is_byte_ty(ty)) cg_movzb_mr(5, vo.offset, reg) else {
+                if (esz == 4 || is_i32_ty(ty)) cg_movsxd_mr(5, vo.offset, reg) else {
+                    if (is_u32_ty(ty) || is_f32_ty(ty)) cg_movl_mr(5, vo.offset, reg) else cg_mov_mr(5,
+                        vo.offset, reg)
+                }
+            }
+            true
+        }
+        _ -> false
+    }
+}
+
 gen_binop_setup(lhs: *Expr, rhs: *Expr) noregion raises Error, IndexOutOfBounds {
     gen_expr(lhs);
+    if (gen_simple_operand(rhs, 7)) return;
     cg_push(0);
     gen_expr(rhs);
     cg_mov_rr(0, 7);
@@ -578,11 +609,10 @@ gen_cmp_set(setcc: []i8) noregion raises Error {
     cg_movzb_al_rax()
 }
 
-gen_cmp(lhs: *Expr, rhs: *Expr, setcc: []i8) noregion raises Error, IndexOutOfBounds {
+gen_cmp_flags(lhs: *Expr, rhs: *Expr) noregion raises Error, IndexOutOfBounds {
     if (imm_operand(rhs) && fits_imm32(imm_value(rhs))) {
         gen_expr(lhs);
         cg_alu_imm(7, imm_value(rhs), 0);
-        gen_cmp_set(setcc);
         return
     }
     if (imm_operand(lhs) && fits_imm32(imm_value(lhs))) {
@@ -590,12 +620,76 @@ gen_cmp(lhs: *Expr, rhs: *Expr, setcc: []i8) noregion raises Error, IndexOutOfBo
         cg_mov_rr(0, 7);
         cg_mov_imm(imm_value(lhs), 0);
         cg_alu_rr(57, 7, 0);
-        gen_cmp_set(setcc);
         return
     }
     gen_binop_setup(lhs, rhs);
-    cg_alu_rr(57, 7, 0);
+    cg_alu_rr(57, 7, 0)
+}
+
+gen_cmp(lhs: *Expr, rhs: *Expr, setcc: []i8) noregion raises Error, IndexOutOfBounds {
+    gen_cmp_flags(lhs, rhs);
     gen_cmp_set(setcc)
+}
+
+/* Branch-only conditions keep comparison flags live. Leave floating-point and
+ * string comparisons on their existing value path; do not change their semantics. */
+gen_cond(n: *Expr, target: int, when_true: bool) noregion raises Error, IndexOutOfBounds {
+    match n.kind {
+        Not k -> {
+            gen_cond(k.lhs, target, !when_true);
+            return
+        }
+        LogAnd k -> {
+            if (!when_true) {
+                gen_cond(k.lhs, target, false);
+                gen_cond(k.rhs, target, false)
+            } else {
+                done: int = new_label();
+                gen_cond(k.lhs, done, false);
+                gen_cond(k.rhs, target, true);
+                cg_label_id(done)
+            }
+            return
+        }
+        LogOr k -> {
+            if (when_true) {
+                gen_cond(k.lhs, target, true);
+                gen_cond(k.rhs, target, true)
+            } else {
+                done: int = new_label();
+                gen_cond(k.lhs, done, true);
+                gen_cond(k.rhs, target, false);
+                cg_label_id(done)
+            }
+            return
+        }
+        Binary k -> {
+            ty: ?*Type = decay(k.lhs.ty);
+            if (ty != null && !is_float_ty(ty) && !is_str(ty) && !is_opt_str(ty)) {
+                cc: int = -1;
+                unsigned: bool = is_u32_ty(ty);
+                match k.op {
+                    Eq -> cc = 4;
+                    Ne -> cc = 5;
+                    Lt -> cc = (if (unsigned) 2 else 12);
+                    Le -> cc = (if (unsigned) 6 else 14);
+                    Gt -> cc = (if (unsigned) 7 else 15);
+                    Ge -> cc = (if (unsigned) 3 else 13);
+                    _ -> { }
+                }
+                if (cc >= 0) {
+                    gen_cmp_flags(k.lhs, k.rhs);
+                    if (!when_true) cc = cc ^ 1;
+                    cg_jump_id(cc, target);
+                    return
+                }
+            }
+        }
+        _ -> { }
+    }
+    gen_expr(n);
+    cg_alu_imm(7, 0, 0);
+    cg_jump_id(if (when_true) 5 else 4, target)
 }
 
 gen_str_cmp(lhs: *Expr, rhs: *Expr, ne: bool) noregion raises Error, IndexOutOfBounds {
@@ -877,6 +971,41 @@ gen_fill_array(elems: ?*Expr, base: *Type) noregion raises Error, IndexOutOfBoun
     cg_mov_mr(13, 8, 13)
 }
 
+/* Fold only nontrapping integer/Boolean arithmetic. In particular, runtime
+ * shift masking differs from the global-constant evaluator, and signed division
+ * may trap. Float comparisons must not compare their integer bit patterns. */
+cg_foldable(n: *Expr): bool {
+    ty: ?*Type = n.ty;
+    if (ty == null || !is_int_width_ty(ty) && !is_bool_ty(ty)) return false;
+    match n.kind {
+        Num k -> k.str_label == 0;
+        Var k -> {
+            vo: ?*Obj = k.var;
+            vo != null && vo.is_const
+        }
+        Neg k -> cg_foldable(k.lhs);
+        BitNot k -> cg_foldable(k.lhs);
+        Not k -> cg_foldable(k.lhs);
+        Binary k -> {
+            match k.op {
+                Div -> return false;
+                Mod -> return false;
+                Shl -> return false;
+                Shr -> return false;
+                _ -> { }
+            }
+            cg_foldable(k.lhs) && cg_foldable(k.rhs)
+        }
+        _ -> false
+    }
+}
+
+cg_emit_constant(n: *Expr) noregion raises Error, IndexOutOfBounds: bool {
+    if (!cg_foldable(n)) return false;
+    cg_mov_imm(const_value(n), 0);
+    true
+}
+
 gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
     match n.kind {
         Num k -> {
@@ -947,6 +1076,12 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
                     cg_mov_rr(13, 0);
                     cg_cld();
                     cg_rep_stosb()
+                } else if (esz == 4 && !agg) {
+                    cg_mov_rr(0, 7);
+                    cg_mov_rr(12, 1);
+                    cg_mov_rr(13, 0);
+                    cg_cld();
+                    cg_rep_stosl()
                 } else {
                     if (esz == 8) {
                         cg_mov_rr(0, 7);
@@ -1126,6 +1261,7 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
             return
         }
         Not k -> {
+            if (cg_emit_constant(n)) return;
             gen_expr(k.lhs);
             cg_alu_imm(7, 0, 0);
             cg_setcc(4);
@@ -1133,6 +1269,7 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
             return
         }
         Neg k -> {
+            if (cg_emit_constant(n)) return;
             gen_expr(k.lhs);
             nty: ?*Type = n.ty;
             if (nty != null && is_f32_ty(nty)) {
@@ -1153,6 +1290,7 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
             return
         }
         BitNot k -> {
+            if (cg_emit_constant(n)) return;
             gen_expr(k.lhs);
             cg_not(0);
             wrap_after(n.ty);
@@ -1269,10 +1407,10 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
                 a = k.args;
                 while (a != null) {
                     gen_expr(a);
-                    cg_push(0);
+                    if (nregs <= 6 && a.next == null) cg_mov_rr(0, cg_arg_reg(nregs - 1)) else cg_push(0);
                     a = a.next
                 }
-                emit_place_call_regs(nregs);
+                if (nregs <= 6 && nargs > 0) emit_place_call_regs(nregs - 1) else emit_place_call_regs(nregs);
                 if (streq(k.funcname, "memcpy")) {
                     emit_memcpy_call();
                     return
@@ -1361,6 +1499,7 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
             return
         }
         Binary k -> {
+            if (cg_emit_constant(n)) return;
             gen_binary(k.op, k.lhs, k.rhs);
             bty: ?*Type = n.ty;
             wrap_after(bty);
@@ -1369,9 +1508,7 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
         If k -> {
             le: int = new_label();
             lelse: int = new_label();
-            gen_expr(k.cond);
-            cg_alu_imm(7, 0, 0);
-            cg_jump_id(4, lelse);
+            gen_cond(k.cond, lelse, false);
             gen_expr(k.then);
             cg_jump_id(0 - 1, le);
             cg_label_id(lelse);
@@ -1541,17 +1678,15 @@ gen_stmt(n: *Stmt) noregion raises Error, IndexOutOfBounds {
         }
         If k -> {
             le: int = new_label();
-            gen_expr(k.cond);
-            cg_alu_imm(7, 0, 0);
             els: ?*Stmt = k.els;
             if (els == null) {
-                cg_jump_id(4, le);
+                gen_cond(k.cond, le, false);
                 gen_stmt(k.then);
                 cg_label_id(le);
                 return
             }
             lelse: int = new_label();
-            cg_jump_id(4, lelse);
+            gen_cond(k.cond, lelse, false);
             gen_stmt(k.then);
             cg_jump_id(0 - 1, le);
             cg_label_id(lelse);
@@ -1563,9 +1698,7 @@ gen_stmt(n: *Stmt) noregion raises Error, IndexOutOfBounds {
             lb: int = new_label();
             le2: int = new_label();
             cg_label_id(lb);
-            gen_expr(k.cond);
-            cg_alu_imm(7, 0, 0);
-            cg_jump_id(4, le2);
+            gen_cond(k.cond, le2, false);
             gen_stmt(k.body);
             cg_jump_id(0 - 1, lb);
             cg_label_id(le2);
@@ -1932,6 +2065,69 @@ emit_l8_init_globals_fn() noregion raises Error, IndexOutOfBounds {
     cg_ret()
 }
 
+/* A conservative whitelist of paths that never modify rbx/r12/r13.
+ * Unknown and aggregate/index/exception construction paths keep all saves;
+ * in particular, returns inside initializers must unwind to saved registers.
+ * Calls are safe because both generated and external callees obey SysV. */
+cg_scalar_expr(n: ?*Expr): bool {
+    if (n == null) return true;
+    match n.kind {
+        Num _ -> true;
+        Null -> true;
+        Var _ -> true;
+        FuncAddr _ -> true;
+        Sizeof _ -> true;
+        Binary k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs);
+        Assign k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs);
+        Addr k -> cg_scalar_expr(k.lhs);
+        Deref k -> cg_scalar_expr(k.lhs);
+        MemberAccess k -> cg_scalar_expr(k.lhs);
+        Not k -> cg_scalar_expr(k.lhs);
+        Neg k -> cg_scalar_expr(k.lhs);
+        BitNot k -> cg_scalar_expr(k.lhs);
+        As k -> cg_scalar_expr(k.lhs);
+        Trunc k -> cg_scalar_expr(k.lhs);
+        LogAnd k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs);
+        LogOr k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs);
+        OrElse k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs);
+        If k -> cg_scalar_expr(k.cond) && cg_scalar_expr(k.then) && cg_scalar_expr(k.els);
+        Block k -> cg_scalar_stmts(k.body);
+        Funcall k -> {
+            if (k.target != null) return false;
+            a: ?*Expr = k.args;
+            while (a != null) {
+                if (!cg_scalar_expr(a)) return false;
+                a = a.next
+            }
+            true
+        }
+        _ -> false
+    }
+}
+
+cg_scalar_stmt(n: *Stmt): bool {
+    match n.kind {
+        Return k -> cg_scalar_expr(k.lhs);
+        ExprStmt k -> cg_scalar_expr(k.lhs);
+        Decl k -> cg_scalar_expr(k.init);
+        Block k -> cg_scalar_stmts(k.body);
+        If k -> cg_scalar_expr(k.cond) && cg_scalar_stmt(k.then) && cg_scalar_stmts(k.els);
+        While k -> cg_scalar_expr(k.cond) && cg_scalar_stmt(k.body);
+        For k -> cg_scalar_expr(k.iter) && cg_scalar_expr(k.hi) && cg_scalar_stmt(k.body);
+        Comment _ -> true;
+        _ -> false
+    }
+}
+
+cg_scalar_stmts(n: ?*Stmt): bool {
+    s: ?*Stmt = n;
+    while (s != null) {
+        if (!cg_scalar_stmt(s)) return false;
+        s = s.next
+    }
+    true
+}
+
 emit_text() noregion raises Error, IndexOutOfBounds {
     fn: ?*Function = functions;
     cg_section(as_SEC_TEXT);
@@ -1953,13 +2149,14 @@ emit_text() noregion raises Error, IndexOutOfBounds {
             cg_rsp_off = 0;
             cg_push(5);
             cg_mov_rr(4, 5);
-            // Generated functions use these registers while building nested
-            // values. Calls may occur inside a field initializer, so honor
-            // the platform callee-save convention even on early returns.
-            cg_alu_imm(5, fn.stack_size + 24, 4);
-            cg_mov_rm(3, 5, 0 - fn.stack_size - 8);
-            cg_mov_rm(12, 5, 0 - fn.stack_size - 16);
-            cg_mov_rm(13, 5, 0 - fn.stack_size - 24);
+            save_regs: bool = !cg_scalar_stmts(fn.body);
+            // Keep the local offsets and 16-byte call alignment in either case.
+            if (save_regs) {
+                cg_alu_imm(5, fn.stack_size + 24, 4);
+                cg_mov_rm(3, 5, 0 - fn.stack_size - 8);
+                cg_mov_rm(12, 5, 0 - fn.stack_size - 16);
+                cg_mov_rm(13, 5, 0 - fn.stack_size - 24)
+            } else cg_alu_imm(5, fn.stack_size + 8, 4);
             ri: int = 0;
             rs: int = 0;
             nst: int = 0;
@@ -2028,9 +2225,11 @@ emit_text() noregion raises Error, IndexOutOfBounds {
             }
             cg_label_id(current_return_lab);
             emit_rax_to_ret(current_return_ty);
-            cg_mov_mr(5, 0 - fn.stack_size - 8, 3);
-            cg_mov_mr(5, 0 - fn.stack_size - 16, 12);
-            cg_mov_mr(5, 0 - fn.stack_size - 24, 13);
+            if (save_regs) {
+                cg_mov_mr(5, 0 - fn.stack_size - 8, 3);
+                cg_mov_mr(5, 0 - fn.stack_size - 16, 12);
+                cg_mov_mr(5, 0 - fn.stack_size - 24, 13)
+            }
             cg_mov_rr(5, 4);
             cg_pop(5);
             cg_ret()
