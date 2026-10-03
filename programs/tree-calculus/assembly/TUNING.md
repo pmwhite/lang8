@@ -32,3 +32,21 @@ remained 8,712 bytes because of section alignment. Branch counts are unchanged.
 [Raw measurements](results/01-addressing.json). All 720 extended oracle checks
 and 18 standalone CLI/I/O checks passed. This is a specialization of the original
 algorithm, not benchmark recognition or precomputed answers.
+
+## 02: packed continuations
+
+Continuation frames now occupy one 64-bit word instead of three. Two tag bits
+encode the operation; the remaining bits contain both node IDs. The parser and
+printer share this smaller stack. Evaluation enters with an empty stack, so it
+also avoids maintaining a generic caller's stack base.
+
+Against step 01, exponentiation wall time fell 8.6% and rules fell 9.6%.
+Fibonacci and sorting were 0.9% and 0.7% slower in this run, respectively;
+there is no clear wall-time improvement on those two. Their cycle counts fell
+2.0% and 1.7%. Instructions fell 5.5–5.7% across the four substantial cases,
+with effectively unchanged branch counts. Frame storage and copying are one
+third of their former size. Code shrank from 2,576 to 2,457 bytes; the ELF
+remains 8,712 bytes.
+
+[Raw measurements](results/02-frames.json). All 720 extended oracle checks and
+18 standalone CLI/I/O checks passed.

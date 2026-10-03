@@ -1,7 +1,9 @@
 # Standalone Linux x86-64 kernel, specialized from ../reduce.s.
 # Arrays point to data, with element count at -8. IDs fit in 23 bits.
 # Machine: nodes=0, count=8, node_cache=16, memo=24, stack=32, top=40, cold=48.
-# Node=packed(u,v):8 bytes; Frame={kind,a,b}:24;
+# Node=packed(u,v):8 bytes; Frame=packed(a,b,tag):8.
+# Frame tags: bit63=memoize, bit62=compute/apply, neither=apply-to.
+# IDs fit in 23 bits, so the tags never overlap either packed ID.
 # Cache entries={packed(a,b),result}:16. The first ID occupies the low lane.
 # All IDs originate in the checked parser or immutable node constructor.
 # Slow paths call the standalone assembly capacity-management routines.
@@ -55,10 +57,10 @@ tc_intern:
 .Ltc_intern_slow:
     jmp native_intern_grow
 
-# Callee-saved state: r12=machine, r13=nodes, r14=a, r15=b,
-# rbp=frame storage, rbx=frame count. (%rsp) holds the caller's frame count.
-# Six saved registers and 24 local bytes align the stack before every call.
-# 8(%rsp) saves the cold-counter address across memo key comparisons.
+# r12=machine, r13=nodes, r14=a, r15=b, rbp=frames, rbx=frame count.
+# Internal ABI: evaluation starts with an empty continuation stack; the CLI
+# never calls this recursively. (%rsp) temporarily holds the cold-counter address.
+# Preserve the input loop's registers only at this outer entry/exit boundary.
 tc_apply:
     push %rbp
     push %rbx
@@ -66,14 +68,13 @@ tc_apply:
     push %r13
     push %r14
     push %r15
-    sub $24, %rsp
+    sub $8, %rsp
     mov %rdi, %r12
     mov %rsi, %r14
     mov %rdx, %r15
     mov 0(%r12), %r13
     mov 32(%r12), %rbp
-    mov 40(%r12), %rbx
-    mov %rbx, (%rsp)
+    xor %ebx, %ebx
 .Ltc_reduce:
     lea 2(%rbx), %rax
     mov -8(%rbp), %rdi
@@ -105,7 +106,7 @@ tc_apply:
     sub $1, %rcx
     and %rcx, %rax
     add %rax, %rdi
-    mov %rdi, 8(%rsp)
+    mov %rdi, (%rsp)
     movzbl (%rdi), %eax
     cmp $64, %rax
     jae .Ltc_cold_skip
@@ -138,12 +139,12 @@ tc_apply:
     mov (%rcx), %rdi
     cmp %rdi, %rax
     jne .Ltc_miss
-    mov 8(%rsp), %rdi
+    mov (%rsp), %rdi
     movb $0, (%rdi)
     mov 8(%rcx), %rax
     jmp .Ltc_dispatch
 .Ltc_miss:
-    mov 8(%rsp), %rdi
+    mov (%rsp), %rdi
     movzbl (%rdi), %eax
     cmp $64, %rax
     jae .Ltc_cold_reset
@@ -153,42 +154,39 @@ tc_apply:
     mov $64, %rax
 .Ltc_cold_store:
     mov %al, (%rdi)
-    # Push MEMOIZE(a,b). y=r9, u.u=r10, u.v=r11, b.u=rsi, b.v=rdx.
-    lea (%rbx,%rbx,2), %rcx
-    lea (%rbp,%rcx,8), %rcx
-    movq $2, (%rcx)
-    mov %r14, 8(%rcx)
-    mov %r15, 16(%rcx)
-    add $1, %rbx
+    # MEMOIZE(a,b): exact pair in low 56 bits, bit63 is the frame tag.
+    mov %r15, %rcx
+    shl $32, %rcx
+    or %r14, %rcx
+    bts $63, %rcx
+    mov %rcx, (%rbp,%rbx,8)
+    inc %rbx
 .Ltc_schedule:
-    test %r11, %r11
+    test %r11d, %r11d
     je .Ltc_s
-    test %rdx, %rdx
+    test %edx, %edx
     je .Ltc_triage_stem
     # fork argument: apply(apply(y, b.u), b.v)
-    movq $0, 24(%rcx)
-    mov %rdx, 32(%rcx)
-    movq $0, 40(%rcx)
-    add $1, %rbx
-    mov %r9, %r14
-    mov %rsi, %r15
+    mov %rdx, (%rbp,%rbx,8)
+    inc %rbx
+    mov %r9d, %r14d
+    mov %esi, %r15d
     jmp .Ltc_reduce
 .Ltc_triage_stem:
-    mov %r11, %r14
-    mov %rsi, %r15
+    mov %r11d, %r14d
+    mov %esi, %r15d
     jmp .Ltc_reduce
 .Ltc_s:
-    # Evaluate y b, then x b, then apply the latter to the former.
-    movq $1, 24(%rcx)
-    mov %r10, 32(%rcx)
-    mov %r15, 40(%rcx)
-    add $1, %rbx
-    mov %r9, %r14
+    # COMPUTE_AND_APPLY(x,b), tagged in bit62.
+    mov %r15, %rcx
+    shl $32, %rcx
+    or %r10, %rcx
+    bts $62, %rcx
+    mov %rcx, (%rbp,%rbx,8)
+    inc %rbx
+    mov %r9d, %r14d
     jmp .Ltc_reduce
 .Ltc_no_memo:
-    lea (%rbx,%rbx,2), %rcx
-    lea (%rbp,%rcx,8), %rcx
-    sub $24, %rcx
     jmp .Ltc_schedule
 .Ltc_stem:
     mov %r15, %rsi
@@ -208,35 +206,30 @@ tc_apply:
 .Ltc_triage_leaf:
     mov %r10, %rax
 .Ltc_dispatch:
-    mov (%rsp), %rdi
-    cmp %rdi, %rbx
+    test %rbx, %rbx
     je .Ltc_done
-    sub $1, %rbx
-    lea (%rbx,%rbx,2), %rcx
-    lea (%rbp,%rcx,8), %rcx
-    mov (%rcx), %r8
-    cmp $2, %r8
-    je .Ltc_remember
-    test %r8, %r8
-    je .Ltc_apply_to
-    # COMPUTE_AND_APPLY -> APPLY_TO(result), reusing the same frame.
-    mov 8(%rcx), %r14
-    mov 16(%rcx), %r15
-    movq $0, (%rcx)
-    mov %rax, 8(%rcx)
-    movq $0, 16(%rcx)
-    add $1, %rbx
+    dec %rbx
+    mov (%rbp,%rbx,8), %rcx
+    test %rcx, %rcx
+    js .Ltc_remember
+    bt $62, %rcx
+    jnc .Ltc_apply_to
+    # COMPUTE_AND_APPLY -> APPLY_TO(result), reusing the same word.
+    btr $62, %rcx
+    mov %ecx, %r14d
+    shr $32, %rcx
+    mov %ecx, %r15d
+    mov %rax, (%rbp,%rbx,8)
+    inc %rbx
     jmp .Ltc_reduce
 .Ltc_apply_to:
     mov %rax, %r14
-    mov 8(%rcx), %r15
+    mov %ecx, %r15d
     jmp .Ltc_reduce
 .Ltc_remember:
-    mov 8(%rcx), %rsi
-    mov 16(%rcx), %rdx
-    mov %rsi, %r8
-    shl $32, %r8
-    or %rdx, %r8
+    btr $63, %rcx
+    mov %rcx, %r8
+    rol $32, %r8
     mov $-7046029254386353131, %r9
     imul %r9, %r8
     mov %r8, %r9
@@ -244,13 +237,11 @@ tc_apply:
     xor %r9, %r8
     mov 24(%r12), %r10
     mov -8(%r10), %r9
-    sub $1, %r9
+    dec %r9
     and %r9, %r8
     shl $4, %r8
     add %r8, %r10
-    shl $32, %rdx
-    or %rsi, %rdx
-    mov %rdx, (%r10)
+    mov %rcx, (%r10)
     mov %rax, 8(%r10)
     jmp .Ltc_dispatch
 .Ltc_grow_stack:
@@ -261,7 +252,7 @@ tc_apply:
     jmp .Ltc_reduce
 .Ltc_done:
     mov %rbx, 40(%r12)
-    add $24, %rsp
+    add $8, %rsp
     pop %r15
     pop %r14
     pop %r13
@@ -279,10 +270,9 @@ tc_copy_nodes:
     xor %rax, %rax
     ret
 
-# Copy count frames, each consisting of three words.
+# Copy count packed continuation words.
 .globl tc_copy_frames
 tc_copy_frames:
-    imul $3, %rdx
     jmp tc_copy_nodes
 
 # Allocate an ordinary zeroed L8 slice on the runtime region/bump heap.
@@ -294,7 +284,6 @@ tc_nodes:
     jmp .Ltc_allocate
 tc_frames:
     mov %rdi, %rsi
-    imul $3, %rsi
 .Ltc_allocate:
     push %rbx
     push %rbp

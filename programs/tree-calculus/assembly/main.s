@@ -306,8 +306,8 @@ native_grow_caches:
     pop %r12
     ret
 
-# Reverse prefix parsing: reuse continuation-frame storage as an explicit ID
-# stack. Only the a field is live during parsing; evaluation overwrites frames.
+# Reverse prefix parsing: reuse packed continuation storage as an ID stack.
+# Parser/printer entries have no tag bits set.
 parse_tree:
     push %rbx
     push %rbp
@@ -339,14 +339,12 @@ parse_tree:
     test %r15, %r15
     je input_error
     dec %r15
-    lea (%r15,%r15,2), %rax
-    mov 8(%rbp,%rax,8), %rsi
+    mov (%rbp,%r15,8), %rsi
     xor %edx, %edx
     cmp $50, %ecx
     jne .parse_construct
     dec %r15
-    lea (%r15,%r15,2), %rax
-    mov 8(%rbp,%rax,8), %rdx
+    mov (%rbp,%r15,8), %rdx
 .parse_construct:
     mov %r12, %rdi
     call tc_intern
@@ -360,14 +358,13 @@ parse_tree:
     mov 32(%r12), %rbp
     mov %rbx, %rax
 .parse_store:
-    lea (%r15,%r15,2), %rcx
-    mov %rax, 8(%rbp,%rcx,8)
+    mov %rax, (%rbp,%r15,8)
     inc %r15
     jmp .parse_next
 .parse_done:
     cmp $1, %r15
     jne input_error
-    mov 8(%rbp), %rax
+    mov (%rbp), %rax
     movq $0, 40(%r12)
     add $8, %rsp
     pop %r15
@@ -391,7 +388,7 @@ print_tree:
     mov %rdi, %r12
     mov (%r12), %rbx
     mov 32(%r12), %rbp
-    mov %rsi, 8(%rbp)
+    mov %rsi, (%rbp)
     mov $1, %r15d
     xor %r14d, %r14d
 .print_next:
@@ -406,8 +403,7 @@ print_tree:
     mov 32(%r12), %rbp
 .print_pop:
     dec %r15
-    lea (%r15,%r15,2), %rax
-    mov 8(%rbp,%rax,8), %rax
+    mov (%rbp,%r15,8), %rax
     mov (%rbx,%rax,8), %r13
     mov $48, %r8d
     mov %r13d, %edx
@@ -419,12 +415,10 @@ print_tree:
     test %rax, %rax
     je .print_child
     mov $50, %r8d
-    lea (%r15,%r15,2), %rcx
-    mov %rax, 8(%rbp,%rcx,8)
+    mov %rax, (%rbp,%r15,8)
     inc %r15
 .print_child:
-    lea (%r15,%r15,2), %rcx
-    mov %rdx, 8(%rbp,%rcx,8)
+    mov %rdx, (%rbp,%r15,8)
     inc %r15
 .print_byte:
     lea output(%rip), %rax
