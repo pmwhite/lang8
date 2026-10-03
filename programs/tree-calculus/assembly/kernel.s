@@ -221,9 +221,22 @@ tc_apply:
     js .Ltc_remember
     bt $62, %rcx
     jnc .Ltc_apply_to
-    # COMPUTE_AND_APPLY -> APPLY_TO(result), reusing the same word.
-    btr $62, %rcx
+    # rax already contains apply(y,b); this frame holds (x,b).
+    # If x=fork(leaf,f), apply(apply(x,b),rax) is apply(f,rax).
+    # If x=stem(leaf), the same expression returns b. Both shortcuts
+    # preserve strict evaluation of apply(y,b), which has already finished.
     mov %ecx, %r14d
+    cmpl $1, (%r13,%r14,8)
+    jne .Ltc_regular_compute
+    mov 4(%r13,%r14,8), %r8d
+    test %r8d, %r8d
+    je .Ltc_saved_argument
+    mov %r8d, %r14d
+    mov %eax, %r15d
+    jmp .Ltc_reduce
+.Ltc_regular_compute:
+    # General COMPUTE_AND_APPLY -> APPLY_TO(result), reusing this word.
+    btr $62, %rcx
     shr $32, %rcx
     mov %ecx, %r15d
     mov %rax, (%rbp,%rbx,8)
@@ -246,6 +259,12 @@ tc_apply:
     add %r8, %r10
     mov %rcx, (%r10)
     mov %rax, 8(%r10)
+    jmp .Ltc_dispatch
+.Ltc_saved_argument:
+    # Extract the 23-bit saved b, discarding the COMPUTE frame tag.
+    shr $32, %rcx
+    and $0x7fffff, %ecx
+    mov %ecx, %eax
     jmp .Ltc_dispatch
 .Ltc_done:
     mov %r12, machine+8(%rip)

@@ -10,5 +10,6 @@ fi
 mkdir -p -- "$(dirname -- "$out")"
 obj=$(mktemp)
 trap 'rm -f -- "$obj"' EXIT
-as --64 -I "$here" -o "$obj" "$here/main.s"
+# Keep fused branches within decode-cache boundaries as the hot loop changes.
+as --64 -mbranches-within-32B-boundaries -I "$here" -o "$obj" "$here/main.s"
 ld -static --build-id=none -z noexecstack -s -o "$out" "$obj"

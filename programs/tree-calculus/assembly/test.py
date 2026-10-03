@@ -29,6 +29,44 @@ def main():
         assert p.returncode == 0 and p.stdout == expected and not p.stderr, p
         checked += 1
 
+    # Exercise pending applications of leaf, stem(leaf), and constants.
+    # The independent oracle checks the full expression, including the eager
+    # evaluation of y b before the continuation combines it with x b.
+    sys.path.insert(0, str(HERE.parent))
+    from test import encode, reduce_apply
+    leaf = ()
+    stem = (leaf,)
+    fork = (leaf, leaf)
+    identity = ((stem,), leaf)
+    functions = [leaf, stem, (leaf, leaf), (leaf, stem),
+                 (leaf, fork), (leaf, identity)]
+    for x in functions:
+        for y in [leaf, stem, fork, identity, (leaf, identity)]:
+            for b in [leaf, stem, fork]:
+                a = ((x,), y)
+                expected = encode(reduce_apply(a, b, [10000]))
+                check((encode(a) + '\n' + encode(b) + '\n').encode(),
+                      (expected + '\n').encode())
+
+    # D = S I I self-applies. S stem(leaf) D applied to D must still evaluate
+    # the divergent D D before it could return its saved argument.
+    duplicate = ((identity,), identity)
+    strict = ((stem,), duplicate)
+    try:
+        reduce_apply(strict, duplicate, [200])
+    except (TimeoutError, RecursionError):
+        pass
+    else:
+        raise AssertionError('strictness fixture unexpectedly terminated')
+    payload = (encode(strict) + '\n' + encode(duplicate) + '\n').encode()
+    try:
+        p = subprocess.run([binary], input=payload, capture_output=True, timeout=0.25)
+    except subprocess.TimeoutExpired as exc:
+        assert not exc.stdout, exc.stdout
+    else:
+        assert p.returncode == 1 and not p.stdout and b'exhausted' in p.stderr, p
+    checked += 1
+
     for size in [8191, 8192, 8193, 16384]:
         tree = b'1' * (size - 1) + b'0'
         check(tree + b'\n', tree + b'\n')
@@ -83,7 +121,7 @@ def main():
                        preexec_fn=limit_memory, timeout=10)
     assert p.returncode == 1 and b'allocation failed' in p.stderr, p
     checked += 1
-    print(f'PASS: {checked} standalone buffering, CLI, limit and I/O checks')
+    print(f'PASS: {checked} standalone reduction, buffering, CLI, limit and I/O checks')
 
 
 if __name__ == '__main__':

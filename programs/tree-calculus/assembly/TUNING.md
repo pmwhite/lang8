@@ -188,3 +188,36 @@ solely to removing loads.
 18 standalone CLI/I/O checks passed. Seven further workload variants (larger
 parameters and different sorting distributions) verified the selected combination
 and showed improvements over the starting binary.
+
+## 08: fuse leaf-headed continuations
+
+A COMPUTE_AND_APPLY frame holds (x,b), with apply(y,b) already evaluated to r.
+When x=fork(leaf,f), apply(apply(x,b),r) becomes apply(f,r). When x=stem(leaf),
+it returns b. The evaluator recognizes both cases before decoding the saved
+argument or pushing another continuation. It avoids redundant reduction dispatch
+and, in the second case, constructing an intermediate constant node. The strict
+evaluation of apply(y,b) is preserved. These are general calculus identities,
+not recognition of benchmark programs.
+
+GNU as now uses `-mbranches-within-32B-boundaries`. Without this branch-placement
+control, the specialized loop lost its benefit in a paired check; the padded
+version won on the four substantial cases. This build change accompanies the
+new fast paths as one optimization, rather than claiming that padding alone
+was beneficial.
+
+Against step 07, best-of-eleven wall time fell 2.9% on Fibonacci, 4.3% on
+exponentiation, 7.7% on rules and 2.6% on sorting. Median times fell 6.0%, 2.9%,
+6.9% and 5.6%, respectively. Five counter samples per variant showed 5.3–7.8%
+fewer cycles, 3.6–8.3% fewer instructions, 7.2–12.2% fewer branches and 5.3–17.8%
+fewer branch misses. The tiny size case regressed 0.102 ms in this comparison;
+it varied in both directions in screening and is startup dominated.
+
+Code grew from 1,918 to 2,045 bytes, including padding; ELF size stayed 8,712
+bytes. All 720 extended oracle checks and 109 standalone checks passed on both
+the starting and final binaries. The latter include 90 targeted continuation
+cases and a divergent-input check to catch accidentally skipping eager work.
+Seven additional workload variants also improved in median time and cycles.
+
+[Raw final comparison](results/08-continuations.json). Explicit prefetching,
+other reduction shortcuts, lookup arithmetic changes and layout variants were
+screened separately; only this combined continuation specialization was retained.

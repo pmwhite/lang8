@@ -9,7 +9,8 @@ the fastest tested upstream configurations on the four substantial workloads.
 The latest [35-variant experiment round](experiments/README.md) cuts another
 15–21% from the previously optimized version on the four substantial upstream
 workloads. The tiny size case remains startup dominated. It links no L8-generated code, L8 runtime or libc. GNU `as` and `ld` are the only
-build dependencies:
+build dependencies (the assembler must support
+`-mbranches-within-32B-boundaries`; tested with binutils 2.40):
 
 ```sh
 programs/tree-calculus/assembly/build.sh
