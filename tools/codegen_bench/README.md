@@ -38,3 +38,18 @@ instructions -15.0%, cycles -6.6%; reference tree wall time -4.7%, instructions
 -15.0%, cycles -9.9%. The scalar loop retired 13.3% fewer instructions but showed
 no wall-time improvement (+1.0%). The fill workload showed no instruction change;
 its +3.9% wall-time difference should not be interpreted as a codegen regression.
+
+## 02: simple operands and final register arguments
+
+Binary operations load literal/constant/local scalar right operands straight into
+the operand register, after evaluating the left operand. Complex expressions and
+globals retain the general path. Calls with up to six integer argument slots put
+the final argument directly into its ABI register, avoiding a push/pop pair.
+Nested calls, by-reference returns, mixed SSE arguments and stack arguments retain
+their existing ordering and alignment rules.
+
+Compared with 01: compiler wall time -3.5%, instructions -2.3%, cycles -2.7%;
+reference tree wall time -7.6%, instructions -4.5%, cycles -8.4%; scalar loop wall
+time -20.5%, instructions -10.3%, cycles -21.1%. ELF file sizes stayed unchanged;
+compiler executable-segment size increased 0.1%, while tree and loop segments
+shrank 0.6% and 0.7%. No meaningful change in fill instructions or cycles.

@@ -411,8 +411,39 @@ gen_load(n: *Expr) noregion raises Error, IndexOutOfBounds {
     load_mem(ty)
 }
 
+/* Load a side-effect-free scalar directly into an operand register. Evaluate
+ * the left operand first: even a simple RHS local may be changed by that call. */
+gen_simple_operand(n: *Expr, reg: int) noregion raises Error, IndexOutOfBounds: bool {
+    if (imm_operand(n)) {
+        cg_mov_imm(imm_value(n), reg);
+        return true
+    }
+    match n.kind {
+        Var k -> {
+            vo: ?*Obj = k.var;
+            ty: ?*Type = n.ty;
+            if (vo == null || ty == null || passes_by_ref(ty)) return false;
+            if (vo.is_const) {
+                cg_mov_imm(vo.const_val, reg);
+                return true
+            }
+            if (!vo.is_local) return false;
+            esz: int = enum_mem_size(ty);
+            if (esz == 1 || is_byte_ty(ty)) cg_movzb_mr(5, vo.offset, reg) else {
+                if (esz == 4 || is_i32_ty(ty)) cg_movsxd_mr(5, vo.offset, reg) else {
+                    if (is_u32_ty(ty) || is_f32_ty(ty)) cg_movl_mr(5, vo.offset, reg) else cg_mov_mr(5,
+                        vo.offset, reg)
+                }
+            }
+            true
+        }
+        _ -> false
+    }
+}
+
 gen_binop_setup(lhs: *Expr, rhs: *Expr) noregion raises Error, IndexOutOfBounds {
     gen_expr(lhs);
+    if (gen_simple_operand(rhs, 7)) return;
     cg_push(0);
     gen_expr(rhs);
     cg_mov_rr(0, 7);
@@ -1332,10 +1363,10 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
                 a = k.args;
                 while (a != null) {
                     gen_expr(a);
-                    cg_push(0);
+                    if (nregs <= 6 && a.next == null) cg_mov_rr(0, cg_arg_reg(nregs - 1)) else cg_push(0);
                     a = a.next
                 }
-                emit_place_call_regs(nregs);
+                if (nregs <= 6 && nargs > 0) emit_place_call_regs(nregs - 1) else emit_place_call_regs(nregs);
                 if (streq(k.funcname, "memcpy")) {
                     emit_memcpy_call();
                     return
