@@ -275,7 +275,7 @@ tc_copy_nodes:
 tc_copy_frames:
     jmp tc_copy_nodes
 
-# Allocate an ordinary zeroed L8 slice on the runtime region/bump heap.
+# Allocate a zeroed slice from fresh anonymous-mapping storage.
 # Every call comes from a checked capacity doubling, bounded at 2^24 elements.
 .globl tc_nodes
 .globl tc_frames
@@ -285,28 +285,15 @@ tc_nodes:
 tc_frames:
     mov %rdi, %rsi
 .Ltc_allocate:
-    push %rbx
-    push %rbp
-    sub $8, %rsp
-    mov %rdi, %rbx
-    mov %rsi, %rbp
-    mov %rsi, %rdi
-    shl $3, %rdi
-    add $8, %rdi
+    # Private malloc preserves rdx. Fresh bump storage is already zero from
+    # anonymous mmap and is never reused: no explicit clearing is necessary.
+    mov %rdi, %rdx
+    lea 8(,%rsi,8), %rdi
     call malloc
     test %rax, %rax
     je .Ltc_oom
-    mov %rbx, (%rax)
-    lea 8(%rax), %rdx
-    mov %rdx, %rdi
-    mov %rbp, %rcx
-    xor %rax, %rax
-    # rep stosq: zero exactly the allocated payload; header holds element count.
-    .byte 243, 72, 171
-    mov %rdx, %rax
-    add $8, %rsp
-    pop %rbp
-    pop %rbx
+    mov %rdx, (%rax)
+    add $8, %rax
     ret
 .Ltc_oom:
     call native_oom
@@ -353,7 +340,7 @@ tc_cache:
     shl $1, %rsi
     jmp .Ltc_allocate
 
-# Byte buffers use a padded payload so bulk zeroing stays within the allocation.
+# Byte buffers round their payload up to a whole word.
 .globl tc_buffer
 tc_buffer:
     lea 7(%rdi), %rsi

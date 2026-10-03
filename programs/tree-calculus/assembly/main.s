@@ -1,7 +1,7 @@
 # Standalone Linux x86-64 tree-calculus evaluator. No libc or L8 runtime.
 # The private kernel uses the same immutable node IDs, bounded caches and
 # eager reduction rules as the L8-backed executable.
-# Routines follow SysV except private process_line; _start has an aligned stack.
+# Private ABI exceptions are documented at their entry points.
 .equ HEAP_SIZE, 768*1024*1024
 .equ LINE_LIMIT, 16777216
 .equ NODE_LIMIT, 8388608
@@ -155,6 +155,8 @@ process_line:
 
 # Eight-byte-aligned bump allocation. Retain old array capacities until exit,
 # with the same heap budget as L8. Anonymous mmap supplies initially zero pages.
+
+# Private ABI: clobbers rax, rcx, rdi only; no stack-alignment requirement.
 malloc:
     mov heap_next(%rip), %rax
     add $7, %rdi

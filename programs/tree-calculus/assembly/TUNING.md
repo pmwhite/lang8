@@ -50,3 +50,20 @@ remains 8,712 bytes.
 
 [Raw measurements](results/02-frames.json). All 720 extended oracle checks and
 18 standalone CLI/I/O checks passed.
+
+## 03: let anonymous memory supply zeros
+
+The bump allocator never reuses storage, and anonymous mmap supplies zeros.
+Explicitly clearing each new array was redundant. Removing it also lets the
+allocation helper use a private register contract: malloc preserves the logical
+length in rdx, without save/restore sequences or a stack-alignment requirement.
+
+Against step 02, wall time fell 9.5% on Fibonacci, 7.0% on exponentiation,
+2.5% on rules and 4.4% on sorting. User-mode cycles fell 4.7%, 5.0%, 1.8% and
+0.6%, respectively. Retired instructions and branches barely change: repeated
+string instructions obscure the amount of memory work, and user-mode counters
+exclude page-fault handling. Code shrank from 2,457 to 2,424 bytes; ELF size is
+still 8,712 bytes.
+
+[Raw measurements](results/03-lazy-zero.json). All 720 extended oracle checks and
+18 standalone CLI/I/O checks passed.
