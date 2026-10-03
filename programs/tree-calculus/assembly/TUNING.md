@@ -13,6 +13,42 @@ earlier standalone executable to the comparison with L8/native and L8/reference.
 The baseline can be built in a separate worktree at the corresponding commit.
 The compiler and upstream source revisions are recorded in each report.
 
+## Combined result
+
+Fresh comparison of the final binary (`fe3b369`) with the original standalone
+(`6a63ddf`) and the unchanged L8/native evaluator, using the method above:
+
+| Workload | Original assembly | Optimized assembly | L8/native | Speedup vs original | Speedup vs L8/native |
+|---|---:|---:|---:|---:|---:|
+| Size | 1.544 ms | 1.827 ms | 1.381 ms | 0.85× | 0.76× |
+| Fibonacci | 23.932 ms | 17.924 ms | 25.601 ms | 1.34× | 1.43× |
+| Exponentiation | 25.647 ms | 16.507 ms | 28.663 ms | 1.55× | 1.74× |
+| Reduction rules | 44.508 ms | 27.875 ms | 49.025 ms | 1.60× | 1.76× |
+| Merge sort | 40.110 ms | 26.371 ms | 47.081 ms | 1.52× | 1.79× |
+
+These are best-of-seven process times, including startup and I/O. Median times
+are also in the report and show the same direction. Substantial workloads use
+25–37% less wall time than the original standalone and 30–44% less than L8/native.
+The tiny size case is 0.283 ms slower than the original standalone. No claim is
+made that this wins every workload or beats all third-party evaluators.
+
+| Workload | Cycles vs original | Instructions | Branches | Branch misses |
+|---|---:|---:|---:|---:|
+| Fibonacci | -33.4% | -37.3% | -12.9% | -7.4% |
+| Exponentiation | -39.8% | -37.1% | -12.8% | -27.5% |
+| Reduction rules | -41.3% | -37.3% | -12.6% | -36.8% |
+| Merge sort | -36.5% | -38.6% | -17.5% | -13.7% |
+
+Counters are medians of three separate user-mode runs. Executable code shrank
+from 2,645 to 1,951 bytes (26.2%); ELF file size remains 8,712 bytes due to section
+alignment. All five atomic implementation commits passed the repository build
+hook and the 720 oracle plus 18 standalone checks. The final binary also passed
+an explicit full-capacity arena-exhaustion check.
+
+[Combined raw measurements](results/overall.json). Per-change results below use
+separate runs; their percentages should not be multiplied to reconstruct this
+comparison. Neither the L8 compiler nor its native kernel was changed.
+
 ## 01: direct addressing and 32-bit child loads
 
 A cycles profile of a larger rules workload placed 73% in the reducer, 15% in
