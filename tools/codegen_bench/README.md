@@ -69,3 +69,18 @@ Reference tree instructions fell 1.4% and cycles 0.4%, but wall time rose 2.0%;
 this does not establish a tree-runtime improvement. Its executable segment shrank
 2.3%. Fill code and instruction counts were unchanged. All six C callback tests
 passed in addition to the self-host/fixture checks.
+
+## 04: fold nontrapping integer constants
+
+Fold literal/const integer and Boolean arithmetic, bitwise operations, unary
+operations, and comparisons using the existing width-aware constant evaluator.
+Leave division, remainder, shifts, conversions, floating-point operations and
+side-effecting expressions alone. Tests compare folded expressions with dynamic
+ones, including narrow overflow and negative floating-point comparisons, and
+ensure an unreachable division by zero still compiles without being evaluated.
+
+This is primarily a code-quality improvement: compiler executable segment -0.1%,
+instructions -0.1%, cycles +0.2%, wall +1.9%; tree segment -0.2%, instructions
+-0.2%, cycles -1.7%, wall -0.8%. Loop/fill instruction counts are effectively
+unchanged. These samples do not demonstrate a material wall-time benefit from
+constant folding on these workloads. ELF file sizes remain unchanged.
