@@ -12,6 +12,7 @@ Each directory owns one library or application. Runnable demonstrations live in
 | `websocket/` | `websocket.l8` | `websocket` | RFC 6455 client, server, and message APIs; imports HTTP |
 | `block-game/` | `block-game.l8` | — | Game, editor, level model, and assets |
 | `wayland/` | `wayland.l8` | `wayland` | Native Wayland/xdg-shell windows, EGL, xkbcommon, and typed protocol bindings |
+| `tree-calculus/` | `main.l8` | `tree_calculus` | Ternary tree-calculus interpreter, correctness tests, and upstream benchmark runner |
 | `terminal/` | `terminal.l8` | — | Wayland/EGL/OpenGL/FreeType terminal with a syscall-backed PTY shell |
 
 Import the entry point relative to your source file, then activate the public

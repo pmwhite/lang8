@@ -1,0 +1,91 @@
+tag tree_calculus;
+
+import "tree.l8";
+
+native "reduce.s";
+
+// Same immutable-node machine and eager rules as apply(). The assembly owns
+// the hot loop and bulk memory operations. Capacity policy stays in L8.
+extern native_reduce(m: *Machine@new, a: int, b: int): int = tc_apply;
+
+// Called with m.top synchronized from the native VM. Reserve two frames.
+native_stack_grow(m: *Machine@new) {
+    if (len(m.stack) >= 16777216) fail("evaluation stack exhausted");
+    old: []Frame = m.stack;
+    larger: []Frame = native_frames(len(old) * 2);
+    native_copy_frames(larger, old, len(old));
+    m.stack = larger
+}
+
+extern native_copy_nodes(dst: []Node, src: []Node, count: int): int = tc_copy_nodes;
+
+// The hot constructor enters here only at a capacity boundary. Native slice
+// allocation uses the same L8 runtime heap and layout. Bulk copying avoids
+// the evaluator's per-node helper calls.
+native_intern_grow(m: *Machine@new, u: int, v: int): int {
+    if (m.count >= len(m.nodes)) {
+        if (len(m.nodes) >= 8388608) fail("tree arena exhausted");
+        old: []Node = m.nodes;
+        larger: []Node = native_nodes(len(old) * 2);
+        native_copy_nodes(larger, old, len(old));
+        m.nodes = larger
+    }
+    native_grow_caches(m);
+    intern(m, u, v)
+}
+
+extern native_nodes(count: int): []Node@new = tc_nodes;
+
+extern native_frames(count: int): []Frame@new = tc_frames;
+
+native_oom(): noreturn {
+    fail("tree machine allocation failed")
+}
+
+extern native_cache(count: int): []Memo@new = tc_cache;
+
+extern native_recache(old: []Memo, grown: []Memo): int = tc_recache;
+
+// Start small for short jobs, then grow with allocation count up to fixed
+// memory budgets. Rehashing preserves matching entries; collision eviction is
+// always safe because cache membership does not determine node lifetime.
+native_grow_caches(m: *Machine@new) {
+    capacity: int = len(m.node_cache);
+    while (capacity < 16384 && capacity < m.count) capacity = capacity * 2;
+    if (capacity > len(m.node_cache)) {
+        grown: []Memo = native_cache(capacity);
+        native_recache(m.node_cache, grown);
+        m.node_cache = grown
+    }
+    capacity = len(m.memo);
+    while (capacity < 65536 && capacity < m.count) capacity = capacity * 2;
+    if (capacity > len(m.memo)) {
+        grown: []Memo = native_cache(capacity);
+        native_recache(m.memo, grown);
+        m.memo = grown;
+        m.cold = new i8[capacity](0i8)
+    }
+}
+
+apply_native(m: *Machine@new, a: int, b: int): int {
+    native_grow_caches(m);
+    native_reduce(m, a, b)
+}
+
+extern native_copy_frames(dst: []Frame, src: []Frame, count: int): int = tc_copy_frames;
+
+extern native_buffer(count: int): []i8@new = tc_buffer;
+
+// Initialize short-lived machines with the same bulk-zeroing path used on
+// growth. This avoids element-by-element initialization before the first term.
+native_machine(): *Machine@new {
+    new Machine {
+        nodes: native_nodes(512),
+        count: 2,
+        node_cache: native_cache(512),
+        memo: native_cache(512),
+        stack: native_frames(256),
+        top: 0,
+        cold: native_buffer(512)
+    }
+}

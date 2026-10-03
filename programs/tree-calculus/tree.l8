@@ -1,0 +1,240 @@
+tag tree_calculus;
+
+import "../../stdlib/write.l8";
+
+use_tag std;
+
+extern exit(code: int): noreturn;
+
+fail(message: str): noreturn {
+    raw::raw_write(2, message);
+    raw::raw_write(2, "\n");
+    exit(1)
+}
+
+// Zero denotes a missing child; node 1 is the unique leaf. Node.bits packs
+// u in the low 32 bits and v in the high 32. IDs are capped below 2^23, so
+// both lanes remain positive when decoded with arithmetic shifts. The bounded
+// node cache shares equal pairs while resident. Eviction may create duplicates;
+// existing IDs never change meaning, so application memoization stays sound.
+// Memo.key packs a in the low lane and b in the high lane. Keep these layouts
+// and the hash below in sync with reduce.s; test-native.l8 checks the ABI.
+type Node = {
+    bits: int
+}
+
+type Frame = {
+    kind: int;
+    a: int;
+    b: int
+}
+
+type Memo = {
+    key: int;
+    result: int
+}
+
+type Machine = {
+    nodes: []Node;
+    count: int;
+    node_cache: []Memo;
+    memo: []Memo;
+    stack: []Frame;
+    top: int;
+    cold: []i8
+}
+
+machine(): *Machine@new {
+    new Machine {
+        nodes: new Node[512](Node { bits: 0 }),
+        count: 2,
+        node_cache: new Memo[512](Memo { key: 0, result: 0 }),
+        memo: new Memo[512](Memo { key: 0, result: 0 }),
+        stack: new Frame[256](Frame { kind: 0, a: 0, b: 0 }),
+        top: 0,
+        cold: new i8[512](0i8)
+    }
+}
+
+node(m: *Machine, id: int): *Node@m {
+    if (id < 1 || id >= len(m.nodes)) fail("invalid tree index");
+    &m.nodes[id]
+}
+
+hash(a: int, b: int): int {
+    h: int = (a << 32 | b) * -7046029254386353131;
+    h ^ h >> 32
+}
+
+intern(m: *Machine@new, u: int, v: int): int {
+    if (u == 0) return 1;
+    slot: int = hash(u, v) & len(m.node_cache) - 1;
+    if (slot < 0 || slot >= len(m.node_cache)) fail("invalid node cache index");
+    key: int = u | v << 32;
+    cached: Memo = m.node_cache[slot];
+    if (cached.key == key) return cached.result;
+    if (m.count >= len(m.nodes)) {
+        if (len(m.nodes) >= 8388608) fail("tree arena exhausted");
+        larger: []Node = new Node[len(m.nodes) * 2](Node { bits: 0 });
+        old: []Node = m.nodes;
+        for i in 0..len(old) {
+            if (i >= len(larger)) fail("invalid arena capacity");
+            larger[i] = old[i]
+        }
+        m.nodes = larger
+    }
+    id: int = m.count;
+    if (id < 0 || id >= len(m.nodes)) fail("invalid arena capacity");
+    m.nodes[id] = Node { bits: u | v << 32 };
+    m.count = id + 1;
+    if (slot < 0 || slot >= len(m.node_cache)) fail("invalid hash index");
+    m.node_cache[slot] = Memo { key: key, result: id };
+    id
+}
+
+push(
+    m: *Machine@new,
+    kind: int,
+    a: int,
+    b: int
+) {
+    if (m.top >= len(m.stack)) {
+        if (len(m.stack) >= 16777216) fail("evaluation stack exhausted");
+        larger: []Frame = new Frame[len(m.stack) * 2](Frame { kind: 0, a: 0, b: 0 });
+        old: []Frame = m.stack;
+        for i in 0..len(old) {
+            if (i >= len(larger)) fail("invalid stack capacity");
+            larger[i] = old[i]
+        }
+        m.stack = larger
+    }
+    at: int = m.top;
+    if (at < 0 || at >= len(m.stack)) fail("invalid stack index");
+    m.stack[at] = Frame { kind: kind, a: a, b: b };
+    m.top = at + 1
+}
+
+// The returned slot may be overwritten by the next push; consume its fields first.
+pop(m: *Machine): *Frame@m {
+    at: int = m.top - 1;
+    if (at < 0 || at >= len(m.stack)) fail("empty evaluation stack");
+    m.top = at;
+    &m.stack[at]
+}
+
+// Eager triage-calculus reduction. Frames: 0 = apply result to a,
+// 1 = compute a b then apply that to result, 2 = cache result of a b.
+// Only reductions that recurse are memoized; constructors and projections
+// are cheaper to execute directly. Memo keys are immutable node IDs.
+apply(m: *Machine@new, a: int, b: int): int {
+    base: int = m.top;
+    result: int = 1;
+    evaluating: bool = true;
+    while (true) {
+        if (evaluating) {
+            evaluating = false;
+            an: *Node = node(m, a);
+            if ((an.bits & 4294967295) == 0) result = intern(m, b, 0) else if (an.bits >> 32 == 0) result = intern(m,
+                an.bits & 4294967295, b) else {
+                un: *Node = node(m, an.bits & 4294967295);
+                if ((un.bits & 4294967295) == 0) result = an.bits >> 32 else {
+                    bn: *Node = node(m, b);
+                    if (un.bits >> 32 != 0 && (bn.bits & 4294967295) == 0) result = un.bits & 4294967295 else {
+                        slot: int = hash(a, b) & len(m.memo) - 1;
+                        if (slot < 0 || slot >= len(m.memo)) fail("invalid memo index");
+                        cached: Memo = m.memo[slot];
+                        if (cached.key == (a | b << 32)) result = cached.result else {
+                            push(m, 2, a, b);
+                            if (un.bits >> 32 == 0) {
+                                push(m, 1, un.bits & 4294967295, b);
+                                a = an.bits >> 32
+                            } else if (bn.bits >> 32 == 0) {
+                                a = un.bits >> 32;
+                                b = bn.bits & 4294967295
+                            } else {
+                                push(m, 0, bn.bits >> 32, 0);
+                                a = an.bits >> 32;
+                                b = bn.bits & 4294967295
+                            }
+                            evaluating = true
+                        }
+                    }
+                }
+            }
+        }
+        if (!evaluating) {
+            if (m.top == base) return result;
+            f: *Frame = pop(m);
+            if (f.kind == 2) {
+                slot: int = hash(f.a, f.b) & len(m.memo) - 1;
+                if (slot < 0 || slot >= len(m.memo)) fail("invalid memo index");
+                m.memo[slot] = Memo { key: f.a | f.b << 32, result: result }
+            } else {
+                if (f.kind == 0) {
+                    a = result;
+                    b = f.a
+                } else {
+                    a = f.a;
+                    b = f.b;
+                    push(m, 0, result, 0)
+                }
+                evaluating = true
+            }
+        }
+    }
+}
+
+// Reverse prefix parsing uses the same growable stack as evaluation.
+parse(m: *Machine@new, text: []i8, size: int): int {
+    base: int = m.top;
+    at: int = size;
+    while (at > 0) {
+        at = at - 1;
+        if (at >= len(text)) fail("invalid input length");
+        c: i8 = text[at];
+        result: int = 1;
+        if (c == '1' || c == '2') {
+            if (m.top <= base) fail("incomplete ternary tree");
+            u: *Frame = pop(m);
+            v: int = 0;
+            if (c == '2') {
+                if (m.top <= base) fail("incomplete ternary tree");
+                right: *Frame = pop(m);
+                v = right.a
+            }
+            result = intern(m, u.a, v)
+        } else if (c != '0') fail("expected ternary digits 0, 1, or 2");
+        push(m, 0, result, 0)
+    }
+    if (m.top != base + 1) fail("expected exactly one tree per line");
+    parsed: *Frame = pop(m);
+    parsed.a
+}
+
+format(m: *Machine@new, tree: int, out: []i8) raises IoError {
+    used: int = 0;
+    push(m, 0, tree, 0);
+    while (m.top > 0) {
+        f: *Frame = pop(m);
+        n: *Node = node(m, f.a);
+        c: i8 = '0';
+        if ((n.bits & 4294967295) != 0) {
+            c = '1';
+            if (n.bits >> 32 != 0) {
+                c = '2';
+                push(m, 0, n.bits >> 32, 0)
+            }
+            push(m, 0, n.bits & 4294967295, 0)
+        }
+        if (used < 0 || used >= len(out)) fail("invalid output buffer");
+        out[used] = c;
+        used = used + 1;
+        if (used == len(out)) {
+            write_bytes(1, out);
+            used = 0
+        }
+    }
+    if (used < 0 || used > len(out)) fail("invalid output length");
+    write_bytes_n(1, out, used);
+    write(1, "\n")
+}
