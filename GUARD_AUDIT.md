@@ -190,7 +190,7 @@ the mirrored `src1` compiler and tests). The remaining sites have these roles:
 - `src2/assembler.l8` and `src2/elfpack.l8`: assembler cursors, symbol links,
   relocation offsets, string-table spans, and ELF output spans are validated
   at their respective capacity or patch boundaries.
-- `stdlib/write.l8`: `InvalidRange` reports caller-supplied spans; `IoError`
+- `stdlib/write.l8`: span contracts prove caller-supplied ranges; `IoError`
   reports syscall results and zero-progress writes.
 - `programs/block-game/level.l8` and `block-game-undo.l8`: room totals,
   journal lengths, archived frame spans, and rewind metadata are checked when

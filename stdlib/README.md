@@ -11,8 +11,9 @@ An error can follow a partial write; output cannot be rolled back.
 `write_bytes_n(fd, bytes, count)` writes a prefix. `write_some(fd, bytes,
 offset, count)` makes one system call and returns its byte count so a caller
 can resume after a short write. `write_some_text(fd, text)` does the same for
-text. An invalid byte range raises `InvalidRange { offset, count, length }`.
-Declare these exceptions with `raises` or catch them at the call site.
+text. Byte ranges must be proved valid at compile time: `0 <= offset`,
+`offset <= len(bytes)`, `0 <= count`, and `count <= len(bytes) - offset`.
+Declare `IoError` with `raises` or catch it at the call site.
 
 For example, from a file in `programs/examples`:
 
