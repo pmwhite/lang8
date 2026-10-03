@@ -578,11 +578,10 @@ gen_cmp_set(setcc: []i8) noregion raises Error {
     cg_movzb_al_rax()
 }
 
-gen_cmp(lhs: *Expr, rhs: *Expr, setcc: []i8) noregion raises Error, IndexOutOfBounds {
+gen_cmp_flags(lhs: *Expr, rhs: *Expr) noregion raises Error, IndexOutOfBounds {
     if (imm_operand(rhs) && fits_imm32(imm_value(rhs))) {
         gen_expr(lhs);
         cg_alu_imm(7, imm_value(rhs), 0);
-        gen_cmp_set(setcc);
         return
     }
     if (imm_operand(lhs) && fits_imm32(imm_value(lhs))) {
@@ -590,12 +589,76 @@ gen_cmp(lhs: *Expr, rhs: *Expr, setcc: []i8) noregion raises Error, IndexOutOfBo
         cg_mov_rr(0, 7);
         cg_mov_imm(imm_value(lhs), 0);
         cg_alu_rr(57, 7, 0);
-        gen_cmp_set(setcc);
         return
     }
     gen_binop_setup(lhs, rhs);
-    cg_alu_rr(57, 7, 0);
+    cg_alu_rr(57, 7, 0)
+}
+
+gen_cmp(lhs: *Expr, rhs: *Expr, setcc: []i8) noregion raises Error, IndexOutOfBounds {
+    gen_cmp_flags(lhs, rhs);
     gen_cmp_set(setcc)
+}
+
+/* Branch-only conditions keep comparison flags live. Leave floating-point and
+ * string comparisons on their existing value path; do not change their semantics. */
+gen_cond(n: *Expr, target: int, when_true: bool) noregion raises Error, IndexOutOfBounds {
+    match n.kind {
+        Not k -> {
+            gen_cond(k.lhs, target, !when_true);
+            return
+        }
+        LogAnd k -> {
+            if (!when_true) {
+                gen_cond(k.lhs, target, false);
+                gen_cond(k.rhs, target, false)
+            } else {
+                done: int = new_label();
+                gen_cond(k.lhs, done, false);
+                gen_cond(k.rhs, target, true);
+                cg_label_id(done)
+            }
+            return
+        }
+        LogOr k -> {
+            if (when_true) {
+                gen_cond(k.lhs, target, true);
+                gen_cond(k.rhs, target, true)
+            } else {
+                done: int = new_label();
+                gen_cond(k.lhs, done, true);
+                gen_cond(k.rhs, target, false);
+                cg_label_id(done)
+            }
+            return
+        }
+        Binary k -> {
+            ty: ?*Type = decay(k.lhs.ty);
+            if (ty != null && !is_float_ty(ty) && !is_str(ty) && !is_opt_str(ty)) {
+                cc: int = -1;
+                unsigned: bool = is_u32_ty(ty);
+                match k.op {
+                    Eq -> cc = 4;
+                    Ne -> cc = 5;
+                    Lt -> cc = (if (unsigned) 2 else 12);
+                    Le -> cc = (if (unsigned) 6 else 14);
+                    Gt -> cc = (if (unsigned) 7 else 15);
+                    Ge -> cc = (if (unsigned) 3 else 13);
+                    _ -> { }
+                }
+                if (cc >= 0) {
+                    gen_cmp_flags(k.lhs, k.rhs);
+                    if (!when_true) cc = cc ^ 1;
+                    cg_jump_id(cc, target);
+                    return
+                }
+            }
+        }
+        _ -> { }
+    }
+    gen_expr(n);
+    cg_alu_imm(7, 0, 0);
+    cg_jump_id(if (when_true) 5 else 4, target)
 }
 
 gen_str_cmp(lhs: *Expr, rhs: *Expr, ne: bool) noregion raises Error, IndexOutOfBounds {
@@ -1369,9 +1432,7 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
         If k -> {
             le: int = new_label();
             lelse: int = new_label();
-            gen_expr(k.cond);
-            cg_alu_imm(7, 0, 0);
-            cg_jump_id(4, lelse);
+            gen_cond(k.cond, lelse, false);
             gen_expr(k.then);
             cg_jump_id(0 - 1, le);
             cg_label_id(lelse);
@@ -1541,17 +1602,15 @@ gen_stmt(n: *Stmt) noregion raises Error, IndexOutOfBounds {
         }
         If k -> {
             le: int = new_label();
-            gen_expr(k.cond);
-            cg_alu_imm(7, 0, 0);
             els: ?*Stmt = k.els;
             if (els == null) {
-                cg_jump_id(4, le);
+                gen_cond(k.cond, le, false);
                 gen_stmt(k.then);
                 cg_label_id(le);
                 return
             }
             lelse: int = new_label();
-            cg_jump_id(4, lelse);
+            gen_cond(k.cond, lelse, false);
             gen_stmt(k.then);
             cg_jump_id(0 - 1, le);
             cg_label_id(lelse);
@@ -1563,9 +1622,7 @@ gen_stmt(n: *Stmt) noregion raises Error, IndexOutOfBounds {
             lb: int = new_label();
             le2: int = new_label();
             cg_label_id(lb);
-            gen_expr(k.cond);
-            cg_alu_imm(7, 0, 0);
-            cg_jump_id(4, le2);
+            gen_cond(k.cond, le2, false);
             gen_stmt(k.body);
             cg_jump_id(0 - 1, lb);
             cg_label_id(le2);
