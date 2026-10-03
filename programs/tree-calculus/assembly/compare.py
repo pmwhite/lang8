@@ -28,6 +28,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('upstream', type=Path)
     p.add_argument('--cpu', type=int)
+    p.add_argument('--baseline', type=Path, help='also compare a saved earlier assembly executable')
     p.add_argument('--runs', type=int, default=7)
     p.add_argument('--counter-runs', type=int, default=3)
     p.add_argument('--output', type=Path, default=HERE / 'benchmark-results.json')
@@ -46,9 +47,11 @@ def main():
     wall_report = build / 'wall.json'
     commands = {'L8': [str(native)], 'Assembly': [str(assembly)],
                 'L8 reference': [str(native), '--reference']}
+    if args.baseline:
+        commands['Assembly before'] = [str(args.baseline.resolve())]
     bench_command = [sys.executable, str(HERE.parent / 'bench.py'), str(upstream),
                      '--binary', str(native), '--runs', str(args.runs), '--json', str(wall_report)]
-    for label in ['Assembly', 'L8 reference']:
+    for label in list(commands)[1:]:
         bench_command += ['--compare', label + '=' + shlex.join(commands[label])]
     subprocess.run(bench_command, check=True, cwd=ROOT)
     report = json.loads(wall_report.read_text())
@@ -86,14 +89,17 @@ def main():
     report['method'] = 'Pinned CPU; rotating interleaved order; wall times include process startup and I/O. Best and median recorded. Separate user-mode hardware-counter runs; input supplied afresh and output verified on every invocation.'
     report['counter_runs'] = args.counter_runs
     report['binaries'] = {}
-    for label, path in [('L8', native), ('Assembly', assembly)]:
+    binaries = [('L8', native), ('Assembly', assembly)]
+    if args.baseline:
+        binaries.append(('Assembly before', args.baseline.resolve()))
+    for label, path in binaries:
         data = path.read_bytes()
         phoff = struct.unpack_from('<Q', data, 32)[0]
         entsize, count = struct.unpack_from('<HH', data, 54)
         text_size = sum(struct.unpack_from('<Q', data, phoff + i * entsize + 32)[0]
                         for i in range(count) if struct.unpack_from('<II', data, phoff + i * entsize) == (1, 5))
         report['binaries'][label] = {'file_bytes': len(data), 'executable_segment_bytes': text_size, 'sha256': sha(path)}
-    sources = [*HERE.parent.glob('*.l8'), HERE.parent / 'reduce.s', HERE / 'main.s', HERE / 'build.sh', ROOT / 'bootstrap']
+    sources = [*HERE.parent.glob('*.l8'), HERE.parent / 'reduce.s', HERE / 'main.s', HERE / 'kernel.s', HERE / 'build.sh', ROOT / 'bootstrap']
     report['source_sha256'] = {str(path.relative_to(ROOT)): sha(path) for path in sources}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2) + '\n')

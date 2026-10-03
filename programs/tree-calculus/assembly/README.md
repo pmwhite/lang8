@@ -1,7 +1,8 @@
 # Standalone assembly tree calculus
 
 A Linux x86-64 executable written entirely in assembly. It includes its own
-startup, syscall I/O, parser, printer, allocator and capacity management. It
+startup, syscall I/O, parser, printer, allocator and capacity management.
+The standalone kernel is now specialized separately; see [optimization results](TUNING.md). It
 links no L8-generated code, L8 runtime or libc. GNU `as` and `ld` are the only
 build dependencies:
 
@@ -23,13 +24,14 @@ has no `--reference` option; use the L8 executable for that backend.
 
 ## Implementation and limits
 
-`main.s` implements the standalone portions and includes the existing
-[`reduce.s`](../reduce.s) reduction kernel in the same assembly translation unit.
+`main.s` implements the standalone portions and includes [`kernel.s`](kernel.s),
+a private specialization of the original [`reduce.s`](../reduce.s) kernel.
 The entire resulting executable is assembly, but this is deliberately **not an
 independent reduction algorithm**. Both versions use immutable packed node IDs,
 bounded constructor sharing, memoized eager reduction and adaptive cache lookup.
-Reusing the kernel keeps the semantic rules consistent and avoids maintaining a
-second copy of their hot implementation.
+The original standalone version shared the kernel source. The specialized
+version keeps its semantic rules but can now change its internal representation
+and calling conventions independently. The Python oracle checks both versions.
 
 The standalone parser uses that kernel's constructor, including cache growth on
 arena growth. The L8 parser uses its L8 constructor and grows caches before
@@ -48,9 +50,10 @@ A divergent reduction has no step limit; use an external timeout when needed.
 The native code relies on internally valid node IDs and layouts. Cache eviction
 never invalidates existing nodes.
 
-## Comparison with L8
+## Initial version: comparison with L8
 
-Measured on Intel Core i5-8365U, Linux x86-64, pinned to logical CPU 2. The L8
+The following measurements describe the initial standalone version (`6a63ddf`);
+[optimization results](TUNING.md) track subsequent changes. Measured on Intel Core i5-8365U, Linux x86-64, pinned to logical CPU 2. The L8
 executable was rebuilt with promoted compiler `0cabbce`; upstream benchmark
 sources were commit `5679507e357b1107fc9b1647871bc72c38c63748`. GNU binutils 2.40
 built the standalone executable. Best of seven rotating, interleaved process

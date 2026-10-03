@@ -10,5 +10,5 @@ fi
 mkdir -p -- "$(dirname -- "$out")"
 obj=$(mktemp)
 trap 'rm -f -- "$obj"' EXIT
-as --64 -I "$here/.." -o "$obj" "$here/main.s"
+as --64 -I "$here" -o "$obj" "$here/main.s"
 ld -static --build-id=none -z noexecstack -s -o "$out" "$obj"

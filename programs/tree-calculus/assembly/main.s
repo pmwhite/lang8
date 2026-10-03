@@ -1,6 +1,6 @@
 # Standalone Linux x86-64 tree-calculus evaluator. No libc or L8 runtime.
-# The shared reduction kernel below uses the same immutable node IDs, bounded
-# caches and 24-byte continuation frames as the L8-backed executable.
+# The private kernel uses the same immutable node IDs, bounded caches and
+# eager reduction rules as the L8-backed executable.
 # Routines follow SysV except private process_line; _start has an aligned stack.
 .equ HEAP_SIZE, 768*1024*1024
 .equ LINE_LIMIT, 16777216
@@ -506,7 +506,7 @@ fatal:
     mov $60, %eax
     syscall
 
-# Single assembly translation unit: tc_intern stays private, and growth/allocation
+# Single translation unit: tc_intern stays private, and growth/allocation
 # calls resolve to the assembly routines above. No L8 objects are linked.
-.include "reduce.s"
+.include "kernel.s"
 .section .note.GNU-stack,"",@progbits
