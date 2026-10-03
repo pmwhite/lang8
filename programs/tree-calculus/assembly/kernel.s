@@ -93,6 +93,8 @@ tc_apply:
     mov 4(%r13,%r15,8), %edx
 # Per-function miss counters: after 64 misses, sample one in 16 lookups.
 # A hit resets the counter. Skipping a cache lookup only repeats reduction work.
+# Memo-table hashing uses SSE4.2 CRC32C on the ordered pair. Exact keys are
+# still checked: collisions affect sharing only. Constructor hashing is unchanged.
 .Ltc_lookup:
     mov %r14, %rax
     mov machine+48(%rip), %rdi
@@ -109,11 +111,9 @@ tc_apply:
     mov %r14, %rax
     shl $32, %rax
     or %r15, %rax
-    mov $-7046029254386353131, %rcx
-    imul %rcx, %rax
-    mov %rax, %rcx
-    sar $32, %rcx
-    xor %rcx, %rax
+    xor %ecx, %ecx
+    crc32 %rax, %rcx
+    mov %ecx, %eax
     mov machine+24(%rip), %r8
     and $65535, %eax
     shl $4, %rax
@@ -236,11 +236,9 @@ tc_apply:
     btr $63, %rcx
     mov %rcx, %r8
     rol $32, %r8
-    mov $-7046029254386353131, %r9
-    imul %r9, %r8
-    mov %r8, %r9
-    sar $32, %r9
-    xor %r9, %r8
+    xor %r9d, %r9d
+    crc32 %r8, %r9
+    mov %r9d, %r8d
     mov machine+24(%rip), %r10
     and $65535, %r8d
     shl $4, %r8

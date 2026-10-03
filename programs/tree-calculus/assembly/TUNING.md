@@ -143,3 +143,21 @@ Inlining grew code from 1,891 to 1,951 bytes; ELF file size remains 8,712 bytes.
 [Raw measurements](results/05-register-vm.json). All 720 extended oracle checks
 and 18 standalone CLI/I/O checks passed. A separate 8,388,608-deep unary input
 also confirmed that exhausting the full node arena produces the expected error.
+
+## 06: hardware CRC32C for memo hashing
+
+Use the scalar SSE4.2 CRC32 instruction to hash application-cache keys. Both
+lookup and insertion hash the same ordered pair with a zero seed; exact keys are
+still compared, so collisions only affect performance. Constructor hashing is
+unchanged: the experiment applying CRC32 there did not produce a useful gain.
+This executable now requires SSE4.2 (available on the measured i5-8365U).
+
+Against step 05, best-of-seven wall time fell 6.8% on Fibonacci, 1.7% on
+exponentiation, 3.4% on rules and 3.6% on sorting. User-mode cycles fell 11.7%,
+8.6%, 3.5% and 6.0%, respectively; instructions fell 1.4–2.7%. Branch counts
+changed from -1.3% to +0.7%, reflecting different cache residency. Sorting branch
+misses rose 4.4%; the other substantial cases improved. Code shrank from 1,951
+to 1,914 bytes; ELF size stayed 8,712 bytes.
+
+[Raw measurements](results/06-crc-memo.json). All 720 extended oracle checks and
+18 standalone CLI/I/O checks passed.

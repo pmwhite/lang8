@@ -1,6 +1,7 @@
 # Standalone assembly tree calculus
 
-A Linux x86-64 executable written entirely in assembly. It includes its own
+A Linux x86-64 executable written entirely in assembly, requiring SSE4.2
+(the scalar CRC32 instruction used for memo hashing). It includes its own
 startup, syscall I/O, parser, printer and allocator.
 The standalone kernel is specialized separately; see [optimization results](TUNING.md).
 The optimized version takes 25–37% less wall time than the original standalone
