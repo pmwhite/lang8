@@ -53,3 +53,19 @@ reference tree wall time -7.6%, instructions -4.5%, cycles -8.4%; scalar loop wa
 time -20.5%, instructions -10.3%, cycles -21.1%. ELF file sizes stayed unchanged;
 compiler executable-segment size increased 0.1%, while tree and loop segments
 shrank 0.6% and 0.7%. No meaningful change in fill instructions or cycles.
+
+## 03: omit unused callee-save slots in scalar bodies
+
+A conservative AST whitelist identifies bodies whose generated paths never
+modify rbx/r12/r13. These functions omit the six save/restore instructions and
+use a smaller, still-aligned frame. Aggregate/index construction, indirect calls,
+exception handling, match and unknown paths retain the existing saves. Native
+ABI tests check both a scalar callback and an early return inside an aggregate
+initializer, where a function-level restore remains necessary.
+
+Compared with 02: compiler wall time -1.9%, file size -2.2%, instructions -3.0%,
+cycles -1.9%; scalar loop wall time -3.3%, instructions -17.1%, cycles -4.4%.
+Reference tree instructions fell 1.4% and cycles 0.4%, but wall time rose 2.0%;
+this does not establish a tree-runtime improvement. Its executable segment shrank
+2.3%. Fill code and instruction counts were unchanged. All six C callback tests
+passed in addition to the self-host/fixture checks.

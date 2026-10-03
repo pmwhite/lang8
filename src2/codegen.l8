@@ -2020,6 +2020,69 @@ emit_l8_init_globals_fn() noregion raises Error, IndexOutOfBounds {
     cg_ret()
 }
 
+/* A conservative whitelist of paths that never modify rbx/r12/r13.
+ * Unknown and aggregate/index/exception construction paths keep all saves;
+ * in particular, returns inside initializers must unwind to saved registers.
+ * Calls are safe because both generated and external callees obey SysV. */
+cg_scalar_expr(n: ?*Expr): bool {
+    if (n == null) return true;
+    match n.kind {
+        Num _ -> true;
+        Null -> true;
+        Var _ -> true;
+        FuncAddr _ -> true;
+        Sizeof _ -> true;
+        Binary k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs);
+        Assign k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs);
+        Addr k -> cg_scalar_expr(k.lhs);
+        Deref k -> cg_scalar_expr(k.lhs);
+        MemberAccess k -> cg_scalar_expr(k.lhs);
+        Not k -> cg_scalar_expr(k.lhs);
+        Neg k -> cg_scalar_expr(k.lhs);
+        BitNot k -> cg_scalar_expr(k.lhs);
+        As k -> cg_scalar_expr(k.lhs);
+        Trunc k -> cg_scalar_expr(k.lhs);
+        LogAnd k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs);
+        LogOr k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs);
+        OrElse k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs);
+        If k -> cg_scalar_expr(k.cond) && cg_scalar_expr(k.then) && cg_scalar_expr(k.els);
+        Block k -> cg_scalar_stmts(k.body);
+        Funcall k -> {
+            if (k.target != null) return false;
+            a: ?*Expr = k.args;
+            while (a != null) {
+                if (!cg_scalar_expr(a)) return false;
+                a = a.next
+            }
+            true
+        }
+        _ -> false
+    }
+}
+
+cg_scalar_stmt(n: *Stmt): bool {
+    match n.kind {
+        Return k -> cg_scalar_expr(k.lhs);
+        ExprStmt k -> cg_scalar_expr(k.lhs);
+        Decl k -> cg_scalar_expr(k.init);
+        Block k -> cg_scalar_stmts(k.body);
+        If k -> cg_scalar_expr(k.cond) && cg_scalar_stmt(k.then) && cg_scalar_stmts(k.els);
+        While k -> cg_scalar_expr(k.cond) && cg_scalar_stmt(k.body);
+        For k -> cg_scalar_expr(k.iter) && cg_scalar_expr(k.hi) && cg_scalar_stmt(k.body);
+        Comment _ -> true;
+        _ -> false
+    }
+}
+
+cg_scalar_stmts(n: ?*Stmt): bool {
+    s: ?*Stmt = n;
+    while (s != null) {
+        if (!cg_scalar_stmt(s)) return false;
+        s = s.next
+    }
+    true
+}
+
 emit_text() noregion raises Error, IndexOutOfBounds {
     fn: ?*Function = functions;
     cg_section(as_SEC_TEXT);
@@ -2041,13 +2104,14 @@ emit_text() noregion raises Error, IndexOutOfBounds {
             cg_rsp_off = 0;
             cg_push(5);
             cg_mov_rr(4, 5);
-            // Generated functions use these registers while building nested
-            // values. Calls may occur inside a field initializer, so honor
-            // the platform callee-save convention even on early returns.
-            cg_alu_imm(5, fn.stack_size + 24, 4);
-            cg_mov_rm(3, 5, 0 - fn.stack_size - 8);
-            cg_mov_rm(12, 5, 0 - fn.stack_size - 16);
-            cg_mov_rm(13, 5, 0 - fn.stack_size - 24);
+            save_regs: bool = !cg_scalar_stmts(fn.body);
+            // Keep the local offsets and 16-byte call alignment in either case.
+            if (save_regs) {
+                cg_alu_imm(5, fn.stack_size + 24, 4);
+                cg_mov_rm(3, 5, 0 - fn.stack_size - 8);
+                cg_mov_rm(12, 5, 0 - fn.stack_size - 16);
+                cg_mov_rm(13, 5, 0 - fn.stack_size - 24)
+            } else cg_alu_imm(5, fn.stack_size + 8, 4);
             ri: int = 0;
             rs: int = 0;
             nst: int = 0;
@@ -2116,9 +2180,11 @@ emit_text() noregion raises Error, IndexOutOfBounds {
             }
             cg_label_id(current_return_lab);
             emit_rax_to_ret(current_return_ty);
-            cg_mov_mr(5, 0 - fn.stack_size - 8, 3);
-            cg_mov_mr(5, 0 - fn.stack_size - 16, 12);
-            cg_mov_mr(5, 0 - fn.stack_size - 24, 13);
+            if (save_regs) {
+                cg_mov_mr(5, 0 - fn.stack_size - 8, 3);
+                cg_mov_mr(5, 0 - fn.stack_size - 16, 12);
+                cg_mov_mr(5, 0 - fn.stack_size - 24, 13)
+            }
             cg_mov_rr(5, 4);
             cg_pop(5);
             cg_ret()
