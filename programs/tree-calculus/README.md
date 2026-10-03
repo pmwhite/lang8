@@ -26,6 +26,14 @@ checks. It shares the immutable node representation and input/output code with
 the native backend, but implements reduction independently. It is not the
 original, pre-optimization interpreter: layouts and node sharing have changed.
 
+## Standalone assembly version
+
+[`assembly/`](assembly/README.md) contains a fully standalone Linux x86-64
+executable with assembly parsing, I/O and allocation around the shared native
+reduction kernel. It needs GNU `as`/`ld` to build and no L8 compiler or runtime.
+The measured substantial workloads use 7–13% less wall time than the L8/native
+version; that directory includes tests, a comparison runner and raw results.
+
 ## Implementation
 
 `tree.l8` provides the reference reducer, parser, printer and data structures;

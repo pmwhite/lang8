@@ -37,12 +37,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binary', nargs='?', default='.build/tree-calculus')
     parser.add_argument('--upstream', type=Path, help='also check other sizes of upstream workloads')
+    parser.add_argument('--single-backend', action='store_true',
+                        help='test a standalone executable without --reference mode')
     args = parser.parse_args()
     checked = 0
 
     def check(text, expected=None):
         nonlocal checked
-        for options in ([], ['--reference']):
+        for options in ([[]] if args.single_backend else [[], ['--reference']]):
             p = subprocess.run([args.binary, *options], input=text, text=True,
                                capture_output=True, timeout=10)
             if expected is None:
