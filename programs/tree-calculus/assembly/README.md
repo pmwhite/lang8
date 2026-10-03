@@ -4,6 +4,8 @@ A Linux x86-64 executable written entirely in assembly, requiring SSE4.2
 (the scalar CRC32 instruction used for memo hashing). It includes its own
 startup, syscall I/O, parser, printer and allocator.
 The standalone kernel is specialized separately; see [optimization results](TUNING.md).
+The [current upstream comparison](UPSTREAM.md) measures a 2.55–3.67× lead over
+the fastest tested upstream configurations on the four substantial workloads.
 The latest [35-variant experiment round](experiments/README.md) cuts another
 15–21% from the previously optimized version on the four substantial upstream
 workloads. The tiny size case remains startup dominated. It links no L8-generated code, L8 runtime or libc. GNU `as` and `ld` are the only

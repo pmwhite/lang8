@@ -29,10 +29,11 @@ original, pre-optimization interpreter: layouts and node sharing have changed.
 ## Standalone assembly version
 
 [`assembly/`](assembly/README.md) contains a fully standalone Linux x86-64
-executable with assembly parsing, I/O and allocation around the shared native
-reduction kernel. It needs GNU `as`/`ld` to build and no L8 compiler or runtime.
-The measured substantial workloads use 7–13% less wall time than the L8/native
-version; that directory includes tests, a comparison runner and raw results.
+executable with assembly parsing, I/O, allocation and a separately specialized
+reduction kernel. It requires SSE4.2 and GNU `as`/`ld`, with no L8 compiler or
+runtime. A [fresh upstream comparison](assembly/UPSTREAM.md) finds it 2.55–3.67×
+faster than the fastest tested upstream configurations on the four substantial
+mini-suite workloads. That directory includes tests, runners and raw results.
 
 ## Implementation
 
