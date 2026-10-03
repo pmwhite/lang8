@@ -87,3 +87,23 @@ ELF file size remains 8,712 bytes.
 
 [Raw measurements](results/04-fixed-storage.json). All 720 extended oracle checks
 and 18 standalone CLI/I/O checks passed.
+
+## 05: register-resident reduction machine
+
+The hot loop now makes no calls and performs no process-stack spills. It keeps
+the next node ID in r12, inlines constructor sharing, and writes the cursor back
+only when evaluation returns. Stable arrays allow cache masks to become
+constants. The cold-counter pointer stays in a register across lookup, and its
+skip path branches directly to reduction scheduling. Outer registers are saved
+once to preserve the input loop's state; there is no general calling convention
+inside evaluation.
+
+Against step 04, wall time fell 5.0% on Fibonacci, 1.3% on exponentiation,
+9.8% on rules and 6.3% on sorting. Cycles fell 5.3–12.1%, instructions fell
+11.9–12.3%, and branches fell 10.8–12.3% on those cases. Rules branch misses fell
+41.2%; sorting's rose 1.6%. The tiny size case varied upward another 0.113 ms.
+Inlining grew code from 1,891 to 1,951 bytes; ELF file size remains 8,712 bytes.
+
+[Raw measurements](results/05-register-vm.json). All 720 extended oracle checks
+and 18 standalone CLI/I/O checks passed. A separate 8,388,608-deep unary input
+also confirmed that exhausting the full node arena produces the expected error.

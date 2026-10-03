@@ -53,9 +53,10 @@ tc_intern:
     mov $1, %rax
     ret
 
-# r12=machine, r13=nodes, r14=a, r15=b, rbp=frames, rbx=frame count.
+# Private VM: r12=next node ID, r13=nodes, r14=a, r15=b, rbp=frames,
+# rbx=frame count. No calls or process-stack traffic inside the reduction loop.
 # Internal ABI: evaluation starts with an empty continuation stack; the CLI
-# never calls this recursively. (%rsp) temporarily holds the cold-counter address.
+# never calls this recursively. rdi retains the cold-counter address on lookup.
 # Preserve the input loop's registers only at this outer entry/exit boundary.
 tc_apply:
     push %rbp
@@ -64,12 +65,11 @@ tc_apply:
     push %r13
     push %r14
     push %r15
-    sub $8, %rsp
-    mov %rdi, %r12
     mov %rsi, %r14
     mov %rdx, %r15
-    mov 0(%r12), %r13
-    mov 32(%r12), %rbp
+    mov machine(%rip), %r13
+    mov machine+32(%rip), %rbp
+    mov machine+8(%rip), %r12
     xor %ebx, %ebx
 .Ltc_reduce:
     cmp $STACK_LIMIT-2, %rbx
@@ -95,22 +95,16 @@ tc_apply:
 # A hit resets the counter. Skipping a cache lookup only repeats reduction work.
 .Ltc_lookup:
     mov %r14, %rax
-    mov 48(%r12), %rdi
-    mov -8(%rdi), %rcx
-    sub $1, %rcx
-    and %rcx, %rax
+    mov machine+48(%rip), %rdi
+    and $65535, %eax
     add %rax, %rdi
-    mov %rdi, (%rsp)
     movzbl (%rdi), %eax
-    cmp $64, %rax
-    jae .Ltc_cold_skip
-    jmp .Ltc_do_lookup
-.Ltc_cold_skip:
-    add $1, %rax
+    cmp $64, %eax
+    jb .Ltc_do_lookup
+    inc %eax
     mov %al, (%rdi)
-    cmp $80, %rax
-    jae .Ltc_do_lookup
-    jmp .Ltc_no_memo
+    cmp $80, %eax
+    jb .Ltc_schedule
 .Ltc_do_lookup:
     mov %r14, %rax
     shl $32, %rax
@@ -120,25 +114,20 @@ tc_apply:
     mov %rax, %rcx
     sar $32, %rcx
     xor %rcx, %rax
-    mov 24(%r12), %r8
-    mov -8(%r8), %rcx
-    sub $1, %rcx
-    and %rcx, %rax
+    mov machine+24(%rip), %r8
+    and $65535, %eax
     shl $4, %rax
     mov %r8, %rcx
     add %rax, %rcx
     mov %r15, %rax
     shl $32, %rax
     or %r14, %rax
-    mov (%rcx), %rdi
-    cmp %rdi, %rax
+    cmp (%rcx), %rax
     jne .Ltc_miss
-    mov (%rsp), %rdi
     movb $0, (%rdi)
     mov 8(%rcx), %rax
     jmp .Ltc_dispatch
 .Ltc_miss:
-    mov (%rsp), %rdi
     movzbl (%rdi), %eax
     cmp $64, %rax
     jae .Ltc_cold_reset
@@ -180,8 +169,6 @@ tc_apply:
     inc %rbx
     mov %r9d, %r14d
     jmp .Ltc_reduce
-.Ltc_no_memo:
-    jmp .Ltc_schedule
 .Ltc_stem:
     mov %r15, %rsi
     xor %rdx, %rdx
@@ -190,9 +177,34 @@ tc_apply:
     mov %r8, %rsi
     mov %r15, %rdx
 .Ltc_construct:
-    mov %r12, %rdi
-    call tc_intern
-    mov 0(%r12), %r13
+    # u=esi is nonzero on both construction paths; v=edx may be zero.
+    # Inline exact-pair sharing, with the allocation cursor kept in r12.
+    mov %rdx, %r9
+    shl $32, %r9
+    or %rsi, %r9
+    mov %r9, %rax
+    rol $32, %rax
+    mov $-7046029254386353131, %rcx
+    imul %rcx, %rax
+    mov %rax, %rcx
+    shr $32, %rcx
+    xor %rcx, %rax
+    and $16383, %eax
+    shl $4, %rax
+    mov machine+16(%rip), %r8
+    add %rax, %r8
+    cmp (%r8), %r9
+    jne .Ltc_construct_new
+    mov 8(%r8), %rax
+    jmp .Ltc_dispatch
+.Ltc_construct_new:
+    cmp $NODE_LIMIT, %r12
+    jae arena_error
+    mov %r9, (%r13,%r12,8)
+    mov %r9, (%r8)
+    mov %r12, 8(%r8)
+    mov %r12, %rax
+    inc %r12
     jmp .Ltc_dispatch
 .Ltc_constant:
     mov %r9, %rax
@@ -229,18 +241,15 @@ tc_apply:
     mov %r8, %r9
     sar $32, %r9
     xor %r9, %r8
-    mov 24(%r12), %r10
-    mov -8(%r10), %r9
-    dec %r9
-    and %r9, %r8
+    mov machine+24(%rip), %r10
+    and $65535, %r8d
     shl $4, %r8
     add %r8, %r10
     mov %rcx, (%r10)
     mov %rax, 8(%r10)
     jmp .Ltc_dispatch
 .Ltc_done:
-    mov %rbx, 40(%r12)
-    add $8, %rsp
+    mov %r12, machine+8(%rip)
     pop %r15
     pop %r14
     pop %r13
