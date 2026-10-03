@@ -74,22 +74,23 @@ tc_apply:
 .Ltc_reduce:
     cmp $STACK_LIMIT-2, %rbx
     ja stack_error
-    mov (%r13,%r14,8), %r8d
-    test %r8d, %r8d
+    # Leaf is the unique ID 1. Test the ID before following its children.
+    cmp $1, %r14d
     je .Ltc_stem
+    mov (%r13,%r14,8), %r8d
     mov 4(%r13,%r14,8), %r9d
     test %r9d, %r9d
     je .Ltc_fork
-    mov (%r13,%r8,8), %r10d
-    test %r10d, %r10d
+    cmp $1, %r8d
     je .Ltc_constant
+    mov (%r13,%r8,8), %r10d
     mov 4(%r13,%r8,8), %r11d
     # Only triage inspects b's children; S needs neither load.
     test %r11d, %r11d
     je .Ltc_lookup
-    mov (%r13,%r15,8), %esi
-    test %esi, %esi
+    cmp $1, %r15d
     je .Ltc_triage_leaf
+    mov (%r13,%r15,8), %esi
     mov 4(%r13,%r15,8), %edx
 # Per-function miss counters: after 64 misses, sample one in 16 lookups.
 # A hit resets the counter. Skipping a cache lookup only repeats reduction work.

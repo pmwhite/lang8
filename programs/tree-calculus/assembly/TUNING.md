@@ -161,3 +161,25 @@ to 1,914 bytes; ELF size stayed 8,712 bytes.
 
 [Raw measurements](results/06-crc-memo.json). All 720 extended oracle checks and
 18 standalone CLI/I/O checks passed.
+
+## 07: recognize the leaf by its ID
+
+ID 1 is the unique leaf, and no constructor creates another leaf node. Compare
+IDs directly on the leaf, constant-function and triage-leaf paths instead of
+loading a child and testing it for zero. This removes dependent memory reads
+without adding node tags or changing the representation or cache behavior.
+
+Against step 06, best-of-seven wall time fell 7.1% on Fibonacci, 14.4% on
+exponentiation, 13.9% on rules and 9.2% on sorting. User-mode cycles fell 20.9%,
+14.6%, 15.3% and 9.8%, respectively. Instructions fell only 0.6–0.7%; branch
+counts were unchanged. Branch misses rose 3.9–8.6% on the first three workloads
+and fell 2.3% on sorting. The tiny size case was 0.226 ms slower in this run.
+Code grew four bytes to 1,918; ELF file size stayed 8,712 bytes. Code layout
+also affects these gains: padding experiments with almost identical instruction
+counts showed large runtime changes, so the full speedup cannot be attributed
+solely to removing loads.
+
+[Raw measurements](results/07-leaf-id.json). All 720 extended oracle checks and
+18 standalone CLI/I/O checks passed. Seven further workload variants (larger
+parameters and different sorting distributions) verified the selected combination
+and showed improvements over the starting binary.
