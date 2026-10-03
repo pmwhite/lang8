@@ -229,6 +229,11 @@ run_compiler_tests() {
   [[ "$(grep -c 'while loop can use' "$BUILD/forlint.err")" -eq 2 ]] || die 'unexpected for-loop suggestion'
   check_retwarn "$tool"
   flush_expect_sources "$tool"
+  # Bulk stores have equivalent encodings through text and direct backends.
+  "./$tool" compile tests/compiler/codegen_bulk_assembly.l8 >"$BUILD/bulk-fill.s"
+  "./$tool" as -o "$BUILD/bulk-fill.o" "$BUILD/bulk-fill.s" runtime.s
+  "./$tool" elfpack "$BUILD/bulk-fill.o" -o "$BUILD/bulk-fill-asm"
+  run_expect "$BUILD/bulk-fill-asm" ''
   check_tags "$tool"
 }
 

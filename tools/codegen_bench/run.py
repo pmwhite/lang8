@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import shutil
 import statistics
 import struct
 import subprocess
@@ -49,11 +50,12 @@ def build(args):
                'loops': HERE / 'loops.l8', 'fills': HERE / 'fills.l8'}
     for name, source in sources.items():
         subprocess.run([str(compiler), 'build', str(source), '-o', str(out / name)], check=True, cwd=ROOT)
+    shutil.copy2(compiler, out / 'pipeline')
     manifest = {'compiler': str(compiler), 'compiler_sha256': digest(compiler),
                 'git_head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
                 'source_hashes': {str(p.relative_to(ROOT)): digest(p) for p in sorted(FIXED.rglob('*')) if p.is_file()},
                 'workload_hashes': {str(p.relative_to(ROOT)): digest(p) for p in HERE.glob('*') if p.is_file()},
-                'binaries': {name: {'bytes': (out / name).stat().st_size, 'executable_segment_bytes': executable_bytes(out / name), 'sha256': digest(out / name)} for name in sources}}
+                'binaries': {name: {'bytes': (out / name).stat().st_size, 'executable_segment_bytes': executable_bytes(out / name), 'sha256': digest(out / name)} for name in [*sources, 'pipeline']}}
     (out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
 
 
@@ -66,9 +68,9 @@ def compare(args):
         assert manifests[labels[0]]['workload_hashes'][key] == manifests[labels[1]]['workload_hashes'][key]
     os.sched_setaffinity(0, {args.cpu})
     records = []
-    for name in ['compiler', 'tree', 'loops', 'fills']:
+    for name in (['pipeline'] if args.only_pipeline else ['compiler', 'tree', 'loops', 'fills']):
         measurements = {label: {'wall_seconds': [], 'perf': []} for label in labels}
-        expected_hash = None
+        expected_hash = {}
         for mode, count in [('warmup', 1), ('wall', args.runs), ('perf', args.counter_runs)]:
             for iteration in range(count):
                 for label in labels[iteration % 2:] + labels[:iteration % 2]:
@@ -77,7 +79,7 @@ def compare(args):
                     output = BASE / 'compiled-output'
                     payload = b''
                     expected = b''
-                    if name == 'compiler':
+                    if name in ['compiler', 'pipeline']:
                         command += ['build', str(FIXED / 'src2/main.l8'), '-o', str(output)]
                     elif name == 'tree':
                         command += ['--reference']
@@ -91,11 +93,12 @@ def compare(args):
                     elapsed = time.perf_counter() - start
                     if result.returncode or result.stdout != expected:
                         raise RuntimeError((command, result.returncode, result.stdout, result.stderr))
-                    if name == 'compiler':
+                    if name in ['compiler', 'pipeline']:
                         h = digest(output)
-                        if expected_hash is None:
-                            expected_hash = h
-                        assert h == expected_hash, 'compiled output differs between runs or compilers'
+                        key = label if name == 'pipeline' else 'shared'
+                        if key not in expected_hash:
+                            expected_hash[key] = h
+                        assert h == expected_hash[key], 'compiled output differs between equivalent runs'
                     if mode == 'wall':
                         measurements[label]['wall_seconds'].append(elapsed)
                     if mode == 'perf':
@@ -137,6 +140,7 @@ def main():
     c.add_argument('--runs', type=int, default=7)
     c.add_argument('--counter-runs', type=int, default=3)
     c.add_argument('--output', type=Path, required=True)
+    c.add_argument('--only-pipeline', action='store_true', help='measure actual compiler throughput on fixed input, including compiler algorithm changes')
     args = p.parse_args()
     if args.action == 'build': build(args)
     else: compare(args)
