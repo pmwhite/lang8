@@ -6,9 +6,11 @@ startup, syscall I/O, parser, printer and allocator.
 The standalone kernel is specialized separately; see [optimization results](TUNING.md).
 The [current upstream comparison](UPSTREAM.md) measures a 2.55–3.67× lead over
 the fastest tested upstream configurations on the four substantial workloads.
-The latest [35-variant experiment round](experiments/README.md) cuts another
+The [35-variant experiment round](experiments/README.md) cut another
 15–21% from the previously optimized version on the four substantial upstream
-workloads. The tiny size case remains startup dominated. It links no L8-generated code, L8 runtime or libc. GNU `as` and `ld` are the only
+workloads. The [latest continuation optimization](experiments-continuations/README.md)
+cuts a further 3–8%; explicit prefetches did not survive testing. The tiny size
+case remains startup dominated. It links no L8-generated code, L8 runtime or libc. GNU `as` and `ld` are the only
 build dependencies (the assembler must support
 `-mbranches-within-32B-boundaries`; tested with binutils 2.40):
 

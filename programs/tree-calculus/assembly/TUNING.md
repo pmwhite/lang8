@@ -1,9 +1,11 @@
 # Standalone assembly optimization
 
-Latest: the [35-variant experiment round](experiments/README.md) retained CRC32C
-memo hashing and direct leaf-ID checks, reducing substantial-workload wall times
-another 15–21%. The combined table below records the earlier five-step round;
-steps 06 and 07 and the linked report document the current binary.
+Latest: the [prefetch and continuation experiments](experiments-continuations/README.md)
+retained a continuation shortcut with controlled branch placement, cutting another
+3–8% from substantial-workload wall times. The earlier
+[35-variant round](experiments/README.md) retained CRC32C hashing and leaf-ID checks.
+The combined table below records the initial five-step round; steps 06–08 and
+the linked reports document later binaries.
 
 Baseline is the standalone executable from commit `6a63ddf`, not the pure L8
 reference loop. Changes are measured on the same five upstream workloads, pinned
