@@ -67,3 +67,23 @@ still 8,712 bytes.
 
 [Raw measurements](results/03-lazy-zero.json). All 720 extended oracle checks and
 18 standalone CLI/I/O checks passed.
+
+## 04: stable virtual storage and full-size caches
+
+Reserve the maximum node and continuation capacities within the existing
+anonymous mapping. Pages become resident on demand; this eliminates arena and
+stack copying, retained old capacities, and address reloads after relocation.
+The constructor and memo caches start at their bounded maximum sizes, removing
+cache growth/rehashing too. This changes cache residency and node allocation
+counts, but preserves immutable IDs and the same exact-key lookup semantics.
+
+Against step 03, wall time fell 16.7% on Fibonacci, 18.5% on exponentiation,
+17.7% on rules and 21.2% on sorting. Cycles fell 14.6–22.5%; instructions fell
+4.8–9.8%. Branch misses fell on Fibonacci, exponentiation and sorting but rose
+5.2% on rules. The tiny size benchmark **regressed 22.1%**, from 1.490 to 1.820 ms:
+large caches touch more scattered pages during startup. This is a throughput
+tradeoff, not a universal improvement. Code shrank from 2,424 to 1,891 bytes;
+ELF file size remains 8,712 bytes.
+
+[Raw measurements](results/04-fixed-storage.json). All 720 extended oracle checks
+and 18 standalone CLI/I/O checks passed.

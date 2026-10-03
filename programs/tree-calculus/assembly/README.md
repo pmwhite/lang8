@@ -1,7 +1,7 @@
 # Standalone assembly tree calculus
 
 A Linux x86-64 executable written entirely in assembly. It includes its own
-startup, syscall I/O, parser, printer, allocator and capacity management.
+startup, syscall I/O, parser, printer and allocator.
 The standalone kernel is now specialized separately; see [optimization results](TUNING.md). It
 links no L8-generated code, L8 runtime or libc. GNU `as` and `ld` are the only
 build dependencies:
@@ -33,17 +33,18 @@ The original standalone version shared the kernel source. The specialized
 version keeps its semantic rules but can now change its internal representation
 and calling conventions independently. The Python oracle checks both versions.
 
-The standalone parser uses that kernel's constructor, including cache growth on
-arena growth. The L8 parser uses its L8 constructor and grows caches before
-reduction; this can change cache residency and allocation counts while preserving
-results. The standalone printer traverses nodes directly, uses an explicit
+The standalone parser uses that kernel's constructor and fixed-size caches.
+The L8 parser uses its L8 constructor and grows caches before reduction; this
+changes cache residency and allocation counts while preserving results. The standalone printer traverses nodes directly, uses an explicit
 stack, and appends its final newline to the buffered output. Reads and writes
 handle EINTR; writes handle partial progress. No parser or evaluator recursion
 uses the process stack.
 
 As in the L8 runtime, a bump allocator reserves a 768 MiB anonymous mapping and
 retains allocations until exit; there is no garbage collector. Most pages are
-not committed until touched. Old arrays remain allocated when capacities grow.
+not committed until touched. Node and continuation arrays reserve their maximum
+virtual capacities once; only the input line buffer grows by copying. Constructor
+and application caches have 16,384 and 65,536 entries, respectively.
 Limits are 8,388,608 node slots, 16,777,216 continuation frames and 16,777,216
 bytes per input line. The heap budget can be reached before an individual limit.
 A divergent reduction has no step limit; use an external timeout when needed.

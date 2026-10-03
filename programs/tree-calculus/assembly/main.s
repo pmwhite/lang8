@@ -144,8 +144,6 @@ process_line:
     call parse_tree
     mov %rax, (%rsp)
     lea machine(%rip), %rdi
-    call native_grow_caches
-    lea machine(%rip), %rdi
     mov %r15, %rsi
     mov (%rsp), %rdx
     call tc_apply
@@ -153,7 +151,7 @@ process_line:
     add $8, %rsp
     ret
 
-# Eight-byte-aligned bump allocation. Retain old array capacities until exit,
+# Eight-byte-aligned bump allocation. Retain all allocations until exit,
 # with the same heap budget as L8. Anonymous mmap supplies initially zero pages.
 
 # Private ABI: clobbers rax, rcx, rdi only; no stack-alignment requirement.
@@ -173,139 +171,25 @@ malloc:
     xor %eax, %eax
     ret
 
+# Reserve maximum virtual capacities once; physical pages arrive on demand.
+# Stable addresses eliminate arena/stack copying and cache-rehash slow paths.
 init_machine:
-    sub $8, %rsp
-    mov $512, %edi
+    mov $NODE_LIMIT, %edi
     call tc_nodes
     mov %rax, machine(%rip)
     movq $2, machine+8(%rip)
-    mov $512, %edi
+    mov $16384, %edi
     call tc_cache
     mov %rax, machine+16(%rip)
-    mov $512, %edi
+    mov $65536, %edi
     call tc_cache
     mov %rax, machine+24(%rip)
-    mov $256, %edi
+    mov $STACK_LIMIT, %edi
     call tc_frames
     mov %rax, machine+32(%rip)
-    mov $512, %edi
+    mov $65536, %edi
     call tc_buffer
     mov %rax, machine+48(%rip)
-    add $8, %rsp
-    ret
-
-# The kernel publishes its live continuation count before calling this routine.
-native_stack_grow:
-    push %r12
-    push %r13
-    push %r14
-    mov %rdi, %r12
-    mov 32(%r12), %r13
-    mov -8(%r13), %r14
-    cmp $STACK_LIMIT, %r14
-    jae stack_error
-    lea (%r14,%r14), %rdi
-    call tc_frames
-    mov %rax, 32(%r12)
-    mov %rax, %rdi
-    mov %r13, %rsi
-    mov %r14, %rdx
-    call tc_copy_frames
-    pop %r14
-    pop %r13
-    pop %r12
-    ret
-
-# Preserve the constructor arguments while relocating the arena and caches.
-native_intern_grow:
-    push %rbx
-    push %rbp
-    push %r12
-    push %r13
-    push %r14
-    push %r15
-    sub $8, %rsp
-    mov %rdi, %r12
-    mov %rsi, %r13
-    mov %rdx, %r14
-    mov (%r12), %r15
-    mov -8(%r15), %rbp
-    cmp %rbp, 8(%r12)
-    jb .arena_ready
-    cmp $NODE_LIMIT, %rbp
-    jae arena_error
-    lea (%rbp,%rbp), %rdi
-    call tc_nodes
-    mov %rax, %rbx
-    mov %rax, %rdi
-    mov %r15, %rsi
-    mov %rbp, %rdx
-    call tc_copy_nodes
-    mov %rbx, (%r12)
-.arena_ready:
-    mov %r12, %rdi
-    call native_grow_caches
-    mov %r12, %rdi
-    mov %r13, %rsi
-    mov %r14, %rdx
-    add $8, %rsp
-    pop %r15
-    pop %r14
-    pop %r13
-    pop %r12
-    pop %rbp
-    pop %rbx
-    jmp tc_intern
-
-native_grow_caches:
-    push %r12
-    push %r13
-    push %r14
-    mov %rdi, %r12
-    mov 16(%r12), %r13
-    mov -8(%r13), %r14
-.grow_nodes_cache:
-    cmp $16384, %r14
-    jae .node_cache_ready
-    cmp 8(%r12), %r14
-    jae .node_cache_ready
-    add %r14, %r14
-    jmp .grow_nodes_cache
-.node_cache_ready:
-    cmp -8(%r13), %r14
-    je .memo_cache
-    mov %r14, %rdi
-    call tc_cache
-    mov %rax, 16(%r12)
-    mov %rax, %rsi
-    mov %r13, %rdi
-    call tc_recache
-.memo_cache:
-    mov 24(%r12), %r13
-    mov -8(%r13), %r14
-.grow_memo_cache:
-    cmp $65536, %r14
-    jae .memo_cache_ready
-    cmp 8(%r12), %r14
-    jae .memo_cache_ready
-    add %r14, %r14
-    jmp .grow_memo_cache
-.memo_cache_ready:
-    cmp -8(%r13), %r14
-    je .caches_done
-    mov %r14, %rdi
-    call tc_cache
-    mov %rax, 24(%r12)
-    mov %rax, %rsi
-    mov %r13, %rdi
-    call tc_recache
-    mov %r14, %rdi
-    call tc_buffer
-    mov %rax, 48(%r12)
-.caches_done:
-    pop %r14
-    pop %r13
-    pop %r12
     ret
 
 # Reverse prefix parsing: reuse packed continuation storage as an ID stack.
@@ -351,14 +235,8 @@ parse_tree:
     mov %r12, %rdi
     call tc_intern
 .parse_push:
-    cmp -8(%rbp), %r15
-    jb .parse_store
-    mov %rax, %rbx
-    mov %r15, 40(%r12)
-    mov %r12, %rdi
-    call native_stack_grow
-    mov 32(%r12), %rbp
-    mov %rbx, %rax
+    cmp $STACK_LIMIT, %r15
+    jae stack_error
 .parse_store:
     mov %rax, (%rbp,%r15,8)
     inc %r15
@@ -396,13 +274,8 @@ print_tree:
 .print_next:
     test %r15, %r15
     je .print_done
-    lea 1(%r15), %rax
-    cmp -8(%rbp), %rax
-    jbe .print_pop
-    mov %r15, 40(%r12)
-    mov %r12, %rdi
-    call native_stack_grow
-    mov 32(%r12), %rbp
+    cmp $STACK_LIMIT-1, %r15
+    ja stack_error
 .print_pop:
     dec %r15
     mov (%rbp,%r15,8), %rax

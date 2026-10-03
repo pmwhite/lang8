@@ -6,14 +6,13 @@
 # IDs fit in 23 bits, so the tags never overlap either packed ID.
 # Cache entries={packed(a,b),result}:16. The first ID occupies the low lane.
 # All IDs originate in the checked parser or immutable node constructor.
-# Slow paths call the standalone assembly capacity-management routines.
+# Node and frame arrays have stable addresses and checked maximum capacities.
 .section .text
 .globl tc_apply
 
 # Bounded node sharing: check the whole key, allocate on a cache miss.
 # Eviction loses sharing, never invalidates an existing node or a memo result.
-# Preserve argument registers for the slow-path tail call; check arena capacity
-# before committing a new node.
+# Check arena capacity before committing a new node.
 tc_intern:
     test %rsi, %rsi
     je .Ltc_leaf
@@ -42,9 +41,8 @@ tc_intern:
 .Ltc_new_node:
     mov 8(%rdi), %rax
     mov 0(%rdi), %r9
-    mov -8(%r9), %r10
-    cmp %r10, %rax
-    jae .Ltc_intern_slow
+    cmp $NODE_LIMIT, %rax
+    jae arena_error
     mov %r11, (%r9,%rax,8)
     mov %r11, (%r8)
     mov %rax, 8(%r8)
@@ -54,8 +52,6 @@ tc_intern:
 .Ltc_leaf:
     mov $1, %rax
     ret
-.Ltc_intern_slow:
-    jmp native_intern_grow
 
 # r12=machine, r13=nodes, r14=a, r15=b, rbp=frames, rbx=frame count.
 # Internal ABI: evaluation starts with an empty continuation stack; the CLI
@@ -76,10 +72,8 @@ tc_apply:
     mov 32(%r12), %rbp
     xor %ebx, %ebx
 .Ltc_reduce:
-    lea 2(%rbx), %rax
-    mov -8(%rbp), %rdi
-    cmp %rdi, %rax
-    ja .Ltc_grow_stack
+    cmp $STACK_LIMIT-2, %rbx
+    ja stack_error
     mov (%r13,%r14,8), %r8d
     test %r8d, %r8d
     je .Ltc_stem
@@ -244,12 +238,6 @@ tc_apply:
     mov %rcx, (%r10)
     mov %rax, 8(%r10)
     jmp .Ltc_dispatch
-.Ltc_grow_stack:
-    mov %rbx, 40(%r12)
-    mov %r12, %rdi
-    call native_stack_grow
-    mov 32(%r12), %rbp
-    jmp .Ltc_reduce
 .Ltc_done:
     mov %rbx, 40(%r12)
     add $8, %rsp
@@ -261,22 +249,8 @@ tc_apply:
     pop %rbp
     ret
 
-# Copy count packed nodes. Internal caller has allocated a larger destination.
-.globl tc_copy_nodes
-tc_copy_nodes:
-    mov %rdx, %rcx
-    # rep movsq: L8's source assembler has no mnemonic for string instructions.
-    .byte 243, 72, 165
-    xor %rax, %rax
-    ret
-
-# Copy count packed continuation words.
-.globl tc_copy_frames
-tc_copy_frames:
-    jmp tc_copy_nodes
-
 # Allocate a zeroed slice from fresh anonymous-mapping storage.
-# Every call comes from a checked capacity doubling, bounded at 2^24 elements.
+# The only callers reserve fixed, bounded capacities during initialization.
 .globl tc_nodes
 .globl tc_frames
 tc_nodes:
@@ -298,42 +272,6 @@ tc_frames:
 .Ltc_oom:
     call native_oom
 
-# Grow a bounded cache, preserving useful entries; conflicts may replace entries.
-# Pairs have their first child/argument in the low lane.
-.globl tc_recache
-tc_recache:
-    mov -8(%rdi), %rcx
-    mov -8(%rsi), %r8
-    sub $1, %r8
-.Ltc_recache_loop:
-    test %rcx, %rcx
-    je .Ltc_recache_done
-    mov (%rdi), %rdx
-    test %rdx, %rdx
-    je .Ltc_recache_next
-    mov %rdx, %rax
-    shl $32, %rax
-    mov %rdx, %r9
-    sar $32, %r9
-    or %r9, %rax
-    mov $-7046029254386353131, %r9
-    imul %r9, %rax
-    mov %rax, %r9
-    sar $32, %r9
-    xor %r9, %rax
-    and %r8, %rax
-    shl $4, %rax
-    add %rsi, %rax
-    mov %rdx, (%rax)
-    mov 8(%rdi), %r9
-    mov %r9, 8(%rax)
-.Ltc_recache_next:
-    add $16, %rdi
-    sub $1, %rcx
-    jmp .Ltc_recache_loop
-.Ltc_recache_done:
-    xor %rax, %rax
-    ret
 .globl tc_cache
 tc_cache:
     mov %rdi, %rsi
