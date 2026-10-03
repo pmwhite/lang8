@@ -1,5 +1,10 @@
 # Standalone assembly optimization
 
+Latest: the [35-variant experiment round](experiments/README.md) retained CRC32C
+memo hashing and direct leaf-ID checks, reducing substantial-workload wall times
+another 15–21%. The combined table below records the earlier five-step round;
+steps 06 and 07 and the linked report document the current binary.
+
 Baseline is the standalone executable from commit `6a63ddf`, not the pure L8
 reference loop. Changes are measured on the same five upstream workloads, pinned
 to CPU 2 on Intel Core i5-8365U. Each report includes seven interleaved wall-time
