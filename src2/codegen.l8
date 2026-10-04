@@ -21,11 +21,32 @@ load_mem(ty: *Type) noregion raises Error, IndexOutOfBounds {
     }
 }
 
-store_mem(ty: *Type) noregion raises Error, IndexOutOfBounds {
+// Load a scalar using an x86 memory displacement, without materializing
+// the field address in a separate add instruction.
+load_mem_at(
+    ty: *Type,
+    base: int,
+    offset: int,
+    dst: int
+) noregion raises Error, IndexOutOfBounds {
     esz: int = enum_mem_size(ty);
-    if (esz == 1 || is_byte_ty(ty)) cg_movb_rm(0, 7, 0) else {
+    if (esz == 1 || is_byte_ty(ty)) cg_movzb_mr(base, offset, dst) else {
+        if (esz == 4 || is_i32_ty(ty)) cg_movsxd_mr(base, offset, dst) else {
+            if (is_u32_ty(ty) || is_f32_ty(ty)) cg_movl_mr(base, offset, dst) else cg_mov_mr(base,
+                offset, dst)
+        }
+    }
+}
+
+store_mem(ty: *Type) noregion raises Error, IndexOutOfBounds {
+    store_mem_at(ty, 0)
+}
+
+store_mem_at(ty: *Type, offset: int) noregion raises Error, IndexOutOfBounds {
+    esz: int = enum_mem_size(ty);
+    if (esz == 1 || is_byte_ty(ty)) cg_movb_rm(0, 7, offset) else {
         if (esz == 4 || is_i32_ty(ty) || is_u32_ty(ty) || is_f32_ty(ty)) cg_movl_rm(0,
-            7, 0) else cg_mov_rm(0, 7, 0)
+            7, offset) else cg_mov_rm(0, 7, offset)
     }
 }
 
@@ -313,6 +334,7 @@ gen_variant_inits(inits: ?*FieldInit, base_off: int) noregion raises Error, Inde
 }
 
 gen_addr(n: *Expr) noregion raises Error, IndexOutOfBounds {
+    if (gen_simple_addr(n, 0)) return;
     match n.kind {
         Var k -> {
             var: ?*Obj = k.var;
@@ -332,7 +354,7 @@ gen_addr(n: *Expr) noregion raises Error, IndexOutOfBounds {
         }
         MemberAccess k -> {
             t: ?*Type = decay(k.lhs.ty);
-            if (t != null && is_pointer(t) && (is_struct_ty(type_base(t)) || is_exn_ty(type_base(t)))) gen_expr(k.lhs) else gen_addr(k.lhs);
+            if (t != null && is_any_pointer(t) && (is_struct_ty(type_base(t)) || is_exn_ty(type_base(t)))) gen_expr(k.lhs) else gen_addr(k.lhs);
             mem: *Member = k.member or error("internal");
             if (mem.offset != 0) cg_alu_imm(0, mem.offset, 0);
             return
@@ -391,6 +413,81 @@ emit_store_imm(vo: *Obj, ty: *Type, v: int) noregion raises Error, IndexOutOfBou
     }
 }
 
+// These address paths are rooted in locals and use reg plus r10/r11.
+// In particular they preserve rax when reg is rdi, so a scalar assignment
+// can retain its evaluated RHS without a push/pop pair. A failed attempt
+// emits no calls or writes and the normal address path may safely retry.
+gen_simple_pointer(n: *Expr, reg: int) noregion raises Error, IndexOutOfBounds: bool {
+    match n.kind {
+        Var _ -> gen_simple_operand(n, reg);
+        MemberAccess _ -> gen_simple_operand(n, reg);
+        _ -> false
+    }
+}
+
+gen_simple_member_base(lhs: *Expr, reg: int) noregion raises Error, IndexOutOfBounds: bool {
+    ty: ?*Type = decay(lhs.ty);
+    if (ty != null && is_any_pointer(ty) && (is_struct_ty(type_base(ty)) || is_exn_ty(type_base(ty)))) return gen_simple_pointer(lhs,
+        reg);
+    gen_simple_addr(lhs, reg)
+}
+
+gen_simple_store(lhs: *Expr, ty: *Type) noregion raises Error, IndexOutOfBounds: bool {
+    match lhs.kind {
+        MemberAccess k -> {
+            if (!gen_simple_member_base(k.lhs, 7)) return false;
+            member: *Member = k.member or error("internal");
+            store_mem_at(ty, member.offset);
+            true
+        }
+        _ -> {
+            if (!gen_simple_addr(lhs, 7)) return false;
+            store_mem(ty);
+            true
+        }
+    }
+}
+
+gen_simple_addr(n: *Expr, reg: int) noregion raises Error, IndexOutOfBounds: bool {
+    match n.kind {
+        Var k -> {
+            vo: ?*Obj = k.var;
+            if (vo == null || !vo.is_local) return false;
+            cg_lea_mr(5, vo.offset, reg);
+            true
+        }
+        Deref k -> gen_simple_pointer(k.lhs, reg);
+        MemberAccess k -> {
+            if (!gen_simple_member_base(k.lhs, reg)) return false;
+            member: *Member = k.member or error("internal");
+            if (member.offset != 0) cg_lea_mr(reg, member.offset, reg);
+            true
+        }
+        Index k -> {
+            if (!index_simple(k.idx)) return false;
+            ty: *Type = k.lhs.ty or error("missing type");
+            if (is_array(ty)) {
+                if (!gen_simple_addr(k.lhs, reg)) return false
+            } else if (!gen_simple_pointer(k.lhs, reg)) return false;
+            match k.idx.kind {
+                Binary sum -> {
+                    if (!gen_simple_operand(sum.lhs, 10)) return false;
+                    if (!gen_simple_operand(sum.rhs, 11)) return false;
+                    cg_alu_rr(1, 11, 10)
+                }
+                _ -> {
+                    if (!gen_simple_operand(k.idx, 10)) return false
+                }
+            }
+            size: int = type_size(type_base(ty));
+            if (size != 1) cg_imul_imm(size, 10);
+            cg_alu_rr(1, 10, reg);
+            true
+        }
+        _ -> false
+    }
+}
+
 gen_load(n: *Expr) noregion raises Error, IndexOutOfBounds {
     ty: *Type = n.ty or error("missing type");
     if (passes_by_ref(ty)) {
@@ -407,7 +504,17 @@ gen_load(n: *Expr) noregion raises Error, IndexOutOfBounds {
         }
         _ -> { }
     }
-    gen_addr(n);
+    match n.kind {
+        MemberAccess k -> {
+            base_ty: ?*Type = decay(k.lhs.ty);
+            if (base_ty != null && is_any_pointer(base_ty) && (is_struct_ty(type_base(base_ty)) || is_exn_ty(type_base(base_ty)))) gen_expr(k.lhs) else gen_addr(k.lhs);
+            member: *Member = k.member or error("internal");
+            load_mem_at(ty, 0, member.offset, 0);
+            return
+        }
+        _ -> { }
+    }
+    if (!gen_simple_addr(n, 0)) gen_addr(n);
     load_mem(ty)
 }
 
@@ -435,6 +542,21 @@ gen_simple_operand(n: *Expr, reg: int) noregion raises Error, IndexOutOfBounds: 
                         vo.offset, reg)
                 }
             }
+            true
+        }
+        Index _ -> {
+            ty: ?*Type = n.ty;
+            if (ty == null || passes_by_ref(ty)) return false;
+            if (!gen_simple_addr(n, reg)) return false;
+            load_mem_at(ty, reg, 0, reg);
+            true
+        }
+        MemberAccess k -> {
+            ty: ?*Type = n.ty;
+            if (ty == null || passes_by_ref(ty)) return false;
+            if (!gen_simple_member_base(k.lhs, reg)) return false;
+            member: *Member = k.member or error("internal");
+            load_mem_at(ty, reg, member.offset, reg);
             true
         }
         _ -> false
@@ -1222,18 +1344,9 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
                 _ -> { }
             }
             lhs_ty: *Type = q.lhs.ty or error("missing lhs type");
-            if (!passes_by_ref(lhs_ty) && imm_operand(q.rhs) && fits_imm32(imm_value(q.rhs))) {
-                match q.lhs.kind {
-                    Var k -> {
-                        vo0: ?*Obj = k.var;
-                        if (vo0 != null) {
-                            emit_store_imm(vo0, lhs_ty, imm_value(q.rhs));
-                            return
-                        }
-                    }
-                    _ -> { }
-                }
-            }
+            // Assignments are expressions: leave the assigned value in rax,
+            // including when the RHS is an immediate and the value is used
+            // as a call argument or by an enclosing expression.
             gen_expr(q.rhs);
             if (!passes_by_ref(lhs_ty)) {
                 match q.lhs.kind {
@@ -1247,6 +1360,7 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
                     _ -> { }
                 }
             }
+            if (!passes_by_ref(lhs_ty) && gen_simple_store(q.lhs, lhs_ty)) return;
             cg_push(0);
             gen_addr(q.lhs);
             cg_mov_rr(0, 7);
@@ -1593,6 +1707,60 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
     }
 }
 
+gen_match_tag_compare(tag: int) noregion raises Error, IndexOutOfBounds {
+    if (fits_imm32(tag)) cg_alu_imm(7, tag, 0) else {
+        cg_mov_imm(tag, 7);
+        cg_alu_rr(57, 7, 0)
+    }
+}
+
+// Dispatch before emitting bodies, keeping the enum tag in rax. Split larger
+// matches by tag range; small leaves use direct comparisons. No jump table or
+// new assembler instruction is needed. Stop at the first wildcard arm.
+gen_enum_dispatch(
+    arms: ?*MatchArm,
+    low: int,
+    high: int,
+    fallback: int
+) noregion raises Error, IndexOutOfBounds {
+    count: int = 0;
+    first: int = high;
+    last: int = low;
+    arm: ?*MatchArm = arms;
+    while (arm != null && arm.variant != null) {
+        variant: ?*Variant = arm.variant;
+        if (variant == null) error("missing variant");
+        tag: int = variant.tag;
+        if (low <= tag && tag <= high) {
+            count = count + 1;
+            if (tag < first) first = tag;
+            if (tag > last) last = tag
+        }
+        arm = arm.next
+    }
+    if (count <= 3 || first < 0 || last > 2147483647 || first == last) {
+        arm = arms;
+        while (arm != null && arm.variant != null) {
+            variant: ?*Variant = arm.variant;
+            if (variant == null) error("missing variant");
+            if (low <= variant.tag && variant.tag <= high) {
+                gen_match_tag_compare(variant.tag);
+                cg_jump_id(4, arm.codegen_label)
+            }
+            arm = arm.next
+        }
+        cg_jump_id(-1, fallback);
+        return
+    }
+    middle: int = first + (last - first) / 2;
+    left: int = new_label();
+    cg_alu_imm(7, middle, 0);
+    cg_jump_id(14, left);
+    gen_enum_dispatch(arms, middle + 1, last, fallback);
+    cg_label_id(left);
+    gen_enum_dispatch(arms, first, middle, fallback)
+}
+
 gen_match(cond: *Expr, arms: ?*MatchArm) noregion raises Error, IndexOutOfBounds {
     lend: int = new_label();
     cty: ?*Type = cond.ty;
@@ -1607,13 +1775,31 @@ gen_match(cond: *Expr, arms: ?*MatchArm) noregion raises Error, IndexOutOfBounds
     cg_push(0);
     if (cty != null && is_enum_ty(cty)) load_mem(enum_tag_type(cty));
     cg_push(0);
+    enum_dispatch: bool = cty != null && is_enum_ty(cty);
+    missing: int = new_label();
+    if (enum_dispatch) {
+        fallback: int = missing;
+        low: int = 0;
+        high: int = 0;
+        scan: ?*MatchArm = arms;
+        while (scan != null) {
+            scan.codegen_label = new_label();
+            variant: ?*Variant = scan.variant;
+            if (variant != null) {
+                if (variant.tag > high) high = variant.tag;
+                if (variant.tag < low) low = variant.tag
+            } else if (fallback == missing) fallback = scan.codegen_label;
+            scan = scan.next
+        }
+        gen_enum_dispatch(arms, low, high, fallback)
+    }
     arm: ?*MatchArm = arms;
     while (arm != null) {
         la: int = new_label();
         av: ?*Variant = arm.variant;
-        if (av != null) {
+        if (enum_dispatch) cg_label_id(arm.codegen_label) else if (av != null) {
             cg_mov_mr(4, 0, 0);
-            cg_alu_imm(7, av.tag, 0);
+            gen_match_tag_compare(av.tag);
             cg_jump_id(5, la)
         } else if (arm.is_literal) {
             cg_mov_mr(4, 0, 0);
@@ -1622,7 +1808,8 @@ gen_match(cond: *Expr, arms: ?*MatchArm) noregion raises Error, IndexOutOfBounds
             cg_jump_id(5, la)
         }
         bv: ?*Obj = arm.binder;
-        if (bv != null) {
+        fn: ?*Function = current_fn;
+        if (bv != null && (bv.used || fn == null || !fn.used)) {
             if (av == null) error("missing variant");
             psz: int = av.payload_size;
             poff: int = av.payload_offset;
@@ -1633,9 +1820,10 @@ gen_match(cond: *Expr, arms: ?*MatchArm) noregion raises Error, IndexOutOfBounds
         }
         gen_stmt(arm.body);
         cg_jump_id(0 - 1, lend);
-        if (av != null || arm.is_literal) cg_label_id(la);
+        if (!enum_dispatch && (av != null || arm.is_literal)) cg_label_id(la);
         arm = arm.next
     }
+    cg_label_id(missing);
     cg_mov_imm(1, 7);
     cg_call("exit");
     cg_label_id(lend);
@@ -2066,9 +2254,17 @@ emit_l8_init_globals_fn() noregion raises Error, IndexOutOfBounds {
 }
 
 /* A conservative whitelist of paths that never modify rbx/r12/r13.
- * Unknown and aggregate/index/exception construction paths keep all saves;
+ * Unknown and aggregate/exception construction paths keep all saves;
  * in particular, returns inside initializers must unwind to saved registers.
  * Calls are safe because both generated and external callees obey SysV. */
+cg_local_address_base(n: *Expr): bool {
+    match n.kind {
+        Var k -> k.var != null && k.var.is_local;
+        MemberAccess k -> cg_local_address_base(k.lhs);
+        _ -> false
+    }
+}
+
 cg_scalar_expr(n: ?*Expr): bool {
     if (n == null) return true;
     match n.kind {
@@ -2077,6 +2273,7 @@ cg_scalar_expr(n: ?*Expr): bool {
         Var _ -> true;
         FuncAddr _ -> true;
         Sizeof _ -> true;
+        Index k -> index_simple(k.idx) && cg_local_address_base(k.lhs);
         Binary k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs);
         Assign k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs);
         Addr k -> cg_scalar_expr(k.lhs);
