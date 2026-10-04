@@ -114,13 +114,13 @@ skip_line_comment(data: []i8, start: int, used: int): int requires (0 <= start &
     cursor
 }
 
-skip_block_comment(data: []i8, start: int, used: int): int requires (0 <= start && start <= used && used < len(data)) ensures (returned >= start && returned <= used) {
+skip_block_comment(data: []i8, start: int, used: int) raises Error: int requires (0 <= start && start <= used && used < len(data)) ensures (returned >= start && returned <= used) {
     cursor: int = start;
     while (cursor < used) invariant (start <= cursor && cursor <= used) {
         if (cursor <= used - 2 && data[cursor] == '*' && data[cursor + 1] == '/') return cursor + 2;
         cursor = cursor + 1
     }
-    cursor
+    error_at(start - 2, "unterminated block comment")
 }
 
 nls_since(data: []i8, at: int): int requires (0 <= at && at <= len(data)) {
@@ -248,7 +248,10 @@ parse_dec_ieee(
             i = i + 1
         } else {
             if (ch >= '0' && ch <= '9') {
-                if (ndig < 18) {
+                if (sig == 0 && ch == '0') {
+                    // Leading zeros shift the decimal point without using precision.
+                    if (saw_dot) nfrac = nfrac + 1
+                } else if (ndig < 18) {
                     sig = sig * 10 + (ch - '0') as int;
                     ndig = ndig + 1;
                     if (saw_dot) nfrac = nfrac + 1
@@ -275,10 +278,13 @@ parse_dec_ieee(
                 }
             }
             ev: int = 0;
+            // The mantissa can offset at most one decimal place per input byte.
+            exponent_limit: int = end - off + 400;
             while (i < end) {
                 dch: i8 = s[i];
                 if (dch < '0' || dch > '9') i = end else {
-                    ev = ev * 10 + (dch - '0') as int;
+                    digit: int = (dch - '0') as int;
+                    if (ev > (exponent_limit - digit) / 10) ev = exponent_limit else ev = ev * 10 + digit;
                     i = i + 1
                 }
             }
@@ -286,6 +292,12 @@ parse_dec_ieee(
         }
     }
     if (sig == 0) return 0;
+    // Even an 18-digit significand cannot bring these into f64 range.
+    if (exp10 < -400) return 0;
+    if (exp10 > 400) {
+        if (wide) return 2047 << 52;
+        return 255 << 23
+    }
     maxpos: int = 1;
     for _mi in 0..62 maxpos = maxpos + maxpos;
     maxpos = maxpos - 1 + maxpos;
@@ -372,12 +384,12 @@ scan_string_end(data: []i8, start: int, used: int) raises Error: int requires (0
     while (cursor < used) invariant (start <= cursor && cursor <= used) {
         if (data[cursor] == '"') return cursor;
         if (data[cursor] == '\\') {
-            if (cursor >= used - 1) error("unterminated string");
+            if (cursor >= used - 1) error_at(start, "unterminated string");
             cursor = cursor + 1
         }
         cursor = cursor + 1
     }
-    error("unterminated string")
+    error_at(start, "unterminated string")
 }
 
 scan_ml_string_end(data: []i8, start: int, used: int) raises Error: int requires (0 <= start && start <= used && used < len(data)) ensures (returned >= start && returned <= used) {
@@ -385,12 +397,12 @@ scan_ml_string_end(data: []i8, start: int, used: int) raises Error: int requires
     while (cursor < used) invariant (start <= cursor && cursor <= used) {
         if (is_triple_quote(data, cursor, used)) return cursor;
         if (data[cursor] == '\\') {
-            if (cursor >= used - 1) error("unterminated string");
+            if (cursor >= used - 1) error_at(start, "unterminated string");
             cursor = cursor + 1
         }
         cursor = cursor + 1
     }
-    error("unterminated string")
+    error_at(start, "unterminated string")
 }
 
 // read_file leaves a zero byte at source_len; it ends the scan before capacity.
@@ -499,7 +511,8 @@ tokenize(data: []i8@new, used: int) noregion raises Error: *Token@new requires (
                 is_fl = true;
                 pos = pos + 1;
                 if (pos < used && (data[pos] == '+' || data[pos] == '-')) pos = pos + 1;
-                if (pos >= used || data[pos] < '0' || data[pos] > '9') error("expected exponent digits");
+                if (pos >= used || data[pos] < '0' || data[pos] > '9') error_at(pos,
+                    "expected exponent digits");
                 exponent_start: int = pos;
                 pos = read_number(data, exponent_start, used, number_value);
                 v = number_value[0]
@@ -518,7 +531,10 @@ tokenize(data: []i8@new, used: int) noregion raises Error: *Token@new requires (
             if (pos <= used - 3 && data[pos] == '"' && data[pos + 1] == '"' && data[pos + 2] == '"') {
                 pos = pos + 3;
                 v = 1;
-                if (pos < used && data[pos] == '\n') {
+                if (pos <= used - 2 && data[pos] == '\r' && data[pos + 1] == '\n') {
+                    pos = pos + 2;
+                    v = 2
+                } else if (pos < used && data[pos] == '\n') {
                     pos = pos + 1;
                     v = 2
                 }
@@ -544,6 +560,7 @@ tokenize(data: []i8@new, used: int) noregion raises Error: *Token@new requires (
             n = pos;
             pos = pos + 1;
             if (pos < 0 || pos >= used) error_at(n, "unterminated character literal");
+            if (data[pos] == '\'') error_at(n, "empty character literal");
             if (data[pos] == '\\') {
                 pos = pos + 1;
                 if (pos < 0 || pos >= used) error_at(n, "unterminated character literal");
@@ -913,7 +930,9 @@ mk_expr(k: ExprKind@new): *Expr@new {
         pos: 0,
         file: 0,
         toklen: 0,
-        bounds_access: null
+        bounds_access: null,
+        bounds_term_cache: 0,
+        bounds_pure_cache: 0
     }
 }
 
@@ -1194,6 +1213,7 @@ new_match_arm(
     body: *Stmt@new
 ): *MatchArm@new {
     new MatchArm {
+        codegen_label: 0,
         name: name,
         variant: variant,
         literal: literal,
@@ -1311,6 +1331,8 @@ new_obj(name: []i8@new, is_local: bool) noregion: *Obj@new {
         is_local: is_local,
         is_func: false,
         is_const: false,
+        cg_register: 0 trunc i8,
+        cg_score: 0 trunc u32,
         const_val: 0,
         const_state: 0,
         offset: 0,
@@ -3950,6 +3972,12 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error, IndexOutOf
     np: int = 0;
     while (tok.kind != TokKind.RParen) {
         if (np != 0) skip(TokKind.Comma);
+        parameter_name: []i8 = cur_tokstr();
+        previous: ?*Obj = fn.params;
+        while (previous != null) {
+            if (streq(previous.name, parameter_name)) error("duplicate parameter name");
+            previous = previous.param_next
+        }
         p: *Obj = parse_decl(true, true);
         append_fn_param(fn, p);
         np = np + 1
@@ -4076,6 +4104,7 @@ parse_field_list(base_offset: int) noregion raises Error, IndexOutOfBounds: *Mem
     while (tok.kind != TokKind.RBrace) {
         if (tok.kind != TokKind.Ident) error("expected field name");
         mname: []i8 = cur_tokstr();
+        if (find_field(head, mname) != null) error("duplicate field name");
         browse_note();
         tok = tok.next;
         skip(TokKind.Colon);

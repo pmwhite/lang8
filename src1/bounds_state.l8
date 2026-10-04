@@ -6,6 +6,8 @@ bounds_empty_row_index: *Obj = new Obj {
     is_local: true,
     is_func: false,
     is_const: false,
+    cg_register: 0 trunc i8,
+    cg_score: 0 trunc u32,
     const_val: 0,
     const_state: 0,
     offset: 0,
@@ -54,7 +56,8 @@ bounds_empty_numeric_view(): []BoundsNumericView@new {
         obj: null,
         is_len: false,
         is_zero: false,
-        valid: false
+        valid: false,
+        hash: 2u32
     };
     new BoundsNumericView[0](BoundsNumericView {
         left: missing,
@@ -262,11 +265,12 @@ bounds_push(state: ?*BoundsState@new, row: BoundsRow@new) raises Error, IndexOut
     if (state != null && state.unreachable) return state;
     // Numeric rows are normalized on entry, including rows made by joins.
     // After this boundary, source syntax no longer determines representation.
+    // Keep this canonical view: folding the syntax below does not change it.
+    decoded: BoundsNumericView = bounds_numeric_view(&row);
     if (row.kind == BoundsKind.Difference) {
-        normal: BoundsNumericView = bounds_numeric_view(&row);
-        row.value = normal.bound;
-        if (normal.left.is_zero && bounds_num(row.left) != 0) row.left = new_num(0);
-        if (normal.right.is_zero && bounds_num(row.right) != 0) row.right = new_num(0);
+        row.value = decoded.bound;
+        if (decoded.left.is_zero && bounds_num(row.left) != 0) row.left = new_num(0);
+        if (decoded.right.is_zero && bounds_num(row.right) != 0) row.right = new_num(0);
         left: ?*Expr = row.left;
         right: ?*Expr = row.right;
         if (left != null && right != null) {
@@ -276,7 +280,6 @@ bounds_push(state: ?*BoundsState@new, row: BoundsRow@new) raises Error, IndexOut
             row.array = bounds_term_root(right)
         }
     }
-    decoded: BoundsNumericView = bounds_numeric_view(&row);
     hash: int = bounds_row_hash(&row, &decoded);
     if (state != null) {
         link: ?*BoundsLinkNode = bounds_bucket(state, hash);
@@ -817,7 +820,7 @@ bounds_numeric_ref(state: ?*BoundsState, position: int): ?*BoundsNumericView@sta
 }
 
 bounds_pair_hash(edge: *BoundsNumericView): int {
-    bounds_term_hash_borrowed(&edge.left) * 33 + bounds_term_hash_borrowed(&edge.right) & 2147483647
+    edge.left.hash as int * 33 + edge.right.hash as int & 2147483647
 }
 
 bounds_row_hash(row: *BoundsRow, edge: *BoundsNumericView): int {
@@ -837,6 +840,9 @@ bounds_bucket(state: ?*BoundsState, hash: int): ?*BoundsLinkNode@state {
 // a proven constant. This is the compact equivalent of an SSA old-value node.
 bounds_shift_value(f: ?*BoundsState@new, value: *Obj@new, offset: int) raises Error, IndexOutOfBounds: ?*BoundsState@new {
     head: ?*BoundsState = bounds_kill(f, value);
+    // An unchanged snapshot has no facts about this value to rewrite.
+    if (head == f) return head;
+    self: BoundsTermRef = bounds_ref_obj(value, false);
     q_position: int = bounds_count(f) - 1;
     q: ?*BoundsRow = bounds_row(f, q_position);
     while (q != null) {
@@ -859,17 +865,14 @@ bounds_shift_value(f: ?*BoundsState@new, value: *Obj@new, offset: int) raises Er
             if (next_offset >= 0 && next_offset < 536870912) head = bounds_add_value(head,
                 value, q.array, BoundsKind.Cursor, next_offset)
         }
-        edge: BoundsNumericView = bounds_numeric_at(f, q_position);
-        if (edge.left.valid && edge.right.valid && edge.separation == null) {
-            left: BoundsTermRef = edge.left;
-            right: BoundsTermRef = edge.right;
-            self: BoundsTermRef = bounds_ref_obj(value, false);
-            left_self: bool = bounds_ref_same(left, self);
-            right_self: bool = bounds_ref_same(right, self);
+        edge: ?*BoundsNumericView = bounds_numeric_ref(f, q_position);
+        if (edge != null && edge.left.valid && edge.right.valid && edge.separation == null) {
+            left_self: bool = bounds_ref_same_borrowed(&edge.left, &self);
+            right_self: bool = bounds_ref_same_borrowed(&edge.right, &self);
             if (left_self != right_self) {
                 weight: int = if (left_self) edge.bound + offset else edge.bound - offset;
-                left_ast: ?*Expr = bounds_ref_ast(left);
-                right_ast: ?*Expr = bounds_ref_ast(right);
+                left_ast: ?*Expr = bounds_ref_ast(edge.left);
+                right_ast: ?*Expr = bounds_ref_ast(edge.right);
                 if (left_ast != null && right_ast != null) head = bounds_add_relation(head,
                     left_ast, right_ast, weight)
             }
@@ -886,26 +889,26 @@ bounds_shift_value(f: ?*BoundsState@new, value: *Obj@new, offset: int) raises Er
 // Only unconditional edges participate; no new alias obligation is inferred.
 bounds_forget_scalar(f: ?*BoundsState@new, value: *Obj) raises Error, IndexOutOfBounds: ?*BoundsState@new {
     result: ?*BoundsState = bounds_kill(f, value);
-    if (!is_int_ty(value.ty)) return result;
+    // No invalidated facts means no edges through the old value to project.
+    if (result == f) return result;
+    if (f == null || !is_int_ty(value.ty)) return result;
+    numeric: []BoundsNumericView = f.numeric_view;
+    count: int = f.count;
     self: BoundsTermRef = bounds_ref_obj(value, false);
-    for i in 0..bounds_count(f) {
-        upper: BoundsNumericView = bounds_numeric_at(f, i);
-        upper_left: BoundsTermRef = upper.left;
-        upper_right: BoundsTermRef = upper.right;
-        if (upper.left.valid && upper.right.valid && upper.bound > -536870912 && upper.bound < 536870912 && upper.separation == null && bounds_ref_same(upper_left,
-            self) && !bounds_ref_same(upper_right, self)) {
-            for j in 0..bounds_count(f) {
-                lower: BoundsNumericView = bounds_numeric_at(f, j);
-                lower_left: BoundsTermRef = lower.left;
-                lower_right: BoundsTermRef = lower.right;
-                if (lower.left.valid && lower.right.valid && lower.bound > -536870912 && lower.bound < 536870912 && lower.separation == null && bounds_ref_same(lower_right,
-                    self) && !bounds_ref_same(lower_left, self) && !bounds_ref_same(lower_left,
-                    upper_right)) {
+    for i in 0..count {
+        upper: *BoundsNumericView = &numeric[i];
+        if (upper.left.valid && upper.right.valid && upper.bound > -536870912 && upper.bound < 536870912 && upper.separation == null && bounds_ref_same_borrowed(&upper.left,
+            &self) && !bounds_ref_same_borrowed(&upper.right, &self)) {
+            for j in 0..count {
+                lower: *BoundsNumericView = &numeric[j];
+                if (lower.left.valid && lower.right.valid && lower.bound > -536870912 && lower.bound < 536870912 && lower.separation == null && bounds_ref_same_borrowed(&lower.right,
+                    &self) && !bounds_ref_same_borrowed(&lower.left, &self) && !bounds_ref_same_borrowed(&lower.left,
+                    &upper.right)) {
                     // Both operands are bounded in magnitude, so addition cannot wrap.
                     weight: int = upper.bound + lower.bound;
                     if (weight > -536870912 && weight < 536870912) {
-                        left: ?*Expr = bounds_ref_ast(lower_left);
-                        right: ?*Expr = bounds_ref_ast(upper_right);
+                        left: ?*Expr = bounds_ref_ast(lower.left);
+                        right: ?*Expr = bounds_ref_ast(upper.right);
                         if (left == null) left = new_num(0);
                         if (right == null) right = new_num(0);
                         query: BoundsNumericView = bounds_numeric_query(left, right,

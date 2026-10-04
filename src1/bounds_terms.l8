@@ -130,14 +130,18 @@ bounds_add_scalar_relation(
 // Keep their indices dense so membership does not rescan unrelated facts.
 bounds_scalar_class_has(
     class: *BoundsScalarClass,
-    f: ?*BoundsState,
+    f: *BoundsState,
     seed: *Expr,
     value: *Expr
 ) raises IndexOutOfBounds: bool {
     if (bounds_same_scalar(seed, value)) return true;
-    for i in 0..class.count {
-        row: ?*BoundsRow = bounds_row(f, class.rows[i]);
-        if (row != null) {
+    rows: []BoundsRow = f.rows_view;
+    positions: []int = class.rows;
+    count: int = class.count;
+    for i in 0..count {
+        position: int = positions[i];
+        if (0 <= position && position < f.count) {
+            row: *BoundsRow = &rows[position];
             lhs: ?*Expr = row.left;
             rhs: ?*Expr = row.right;
             if (lhs != null && bounds_same_scalar(lhs, value)) return true;
@@ -166,8 +170,9 @@ bounds_scalar_class_add(class: *BoundsScalarClass@new, position: int) requires (
     class.reachable[position] = true
 }
 
-bounds_scalar_class(f: ?*BoundsState, value: *Expr) raises IndexOutOfBounds: *BoundsScalarClass@new {
-    extent: int = bounds_count(f);
+bounds_scalar_class(f: *BoundsState, value: *Expr) raises IndexOutOfBounds: *BoundsScalarClass@new {
+    extent: int = f.count;
+    rows: []BoundsRow = f.rows_view;
     class: *BoundsScalarClass = new BoundsScalarClass { reachable: new bool[extent](false), rows: new int[4](0), count: 0 };
     reachable: []bool = class.reachable;
     changed: bool = true;
@@ -175,8 +180,8 @@ bounds_scalar_class(f: ?*BoundsState, value: *Expr) raises IndexOutOfBounds: *Bo
         changed = false;
         for position in 0..len(reachable) {
             if (!reachable[position]) {
-                row: ?*BoundsRow = bounds_row(f, position);
-                if (row != null && row.kind == BoundsKind.Equal) {
+                row: *BoundsRow = &rows[position];
+                if (row.kind == BoundsKind.Equal) {
                     left: ?*Expr = row.left;
                     right: ?*Expr = row.right;
                     if (left != null && right != null) {
@@ -193,6 +198,26 @@ bounds_scalar_class(f: ?*BoundsState, value: *Expr) raises IndexOutOfBounds: *Bo
     class
 }
 
+// Every row reached by equality closure has both endpoints in the class.
+// Compare its constants directly instead of rescanning all facts and proving
+// membership again for each endpoint.
+bounds_scalar_class_differs(class: *BoundsScalarClass, f: *BoundsState, value: *Expr): bool {
+    rows: []BoundsRow = f.rows_view;
+    positions: []int = class.rows;
+    count: int = class.count;
+    for i in 0..count {
+        position: int = positions[i];
+        if (0 <= position && position < f.count) {
+            row: *BoundsRow = &rows[position];
+            left: ?*Expr = row.left;
+            right: ?*Expr = row.right;
+            if (left != null && bounds_scalar_constants_differ(left, value)) return true;
+            if (right != null && bounds_scalar_constants_differ(right, value)) return true
+        }
+    }
+    false
+}
+
 bounds_scalar_proves(
     f: ?*BoundsState,
     left: *Expr,
@@ -203,14 +228,17 @@ bounds_scalar_proves(
     if (!bounds_scalar_term(left) || !bounds_scalar_term(right)) return false;
     if (kind == BoundsKind.Equal && bounds_same_scalar(left, right)) return true;
     if (kind == BoundsKind.NotEqual && bounds_scalar_constants_differ(left, right)) return true;
+    if (f == null || f.storage == null) return false;
+    rows: []BoundsRow = f.rows_view;
+    count: int = f.count;
     has_equal: bool = false;
-    for position in 0..bounds_count(f) {
-        row: ?*BoundsRow = bounds_row(f, position);
-        if (row != null) {
+    for position in 0..count {
+        row: *BoundsRow = &rows[position];
+        if (row.kind == BoundsKind.Equal) has_equal = true;
+        if (row.kind == kind) {
             x: ?*Expr = row.left;
             y: ?*Expr = row.right;
-            if (row.kind == BoundsKind.Equal) has_equal = true;
-            if (row.kind == kind && x != null && y != null) {
+            if (x != null && y != null) {
                 if (bounds_same_scalar(left, x) && bounds_same_scalar(right, y) || bounds_same_scalar(left,
                     y) && bounds_same_scalar(right, x)) return true
             }
@@ -219,49 +247,19 @@ bounds_scalar_proves(
     if (!has_equal) return false;
     a: *BoundsScalarClass = bounds_scalar_class(f, left);
     if (kind == BoundsKind.Equal) return bounds_scalar_class_has(a, f, left, right);
-    b: *BoundsScalarClass = bounds_scalar_class(f, right);
     if (bounds_scalar_class_has(a, f, left, right)) return false;
-    if (bounds_scalar_constant(right)) {
-        for position in 0..bounds_count(f) {
-            row: ?*BoundsRow = bounds_row(f, position);
-            if (row != null) {
-                if (row.kind == BoundsKind.Equal) {
-                    constant: ?*Expr = row.left;
-                    if (constant != null && bounds_scalar_class_has(a, f, left, constant) && bounds_scalar_constants_differ(constant,
-                        right)) return true;
-                    constant = row.right;
-                    if (constant != null && bounds_scalar_class_has(a, f, left, constant) && bounds_scalar_constants_differ(constant,
-                        right)) return true
-                }
-            }
-        }
-    }
-    if (bounds_scalar_constant(left)) {
-        for position in 0..bounds_count(f) {
-            row: ?*BoundsRow = bounds_row(f, position);
-            if (row != null) {
-                if (row.kind == BoundsKind.Equal) {
-                    constant: ?*Expr = row.left;
-                    if (constant != null && bounds_scalar_class_has(b, f, right, constant) && bounds_scalar_constants_differ(constant,
-                        left)) return true;
-                    constant = row.right;
-                    if (constant != null && bounds_scalar_class_has(b, f, right, constant) && bounds_scalar_constants_differ(constant,
-                        left)) return true
-                }
-            }
-        }
-    }
-    for position in 0..bounds_count(f) {
-        row: ?*BoundsRow = bounds_row(f, position);
-        if (row != null) {
-            if (row.kind == BoundsKind.NotEqual) {
-                x: ?*Expr = row.left;
-                y: ?*Expr = row.right;
-                if (x != null && y != null) {
-                    if (bounds_scalar_class_has(a, f, left, x) && bounds_scalar_class_has(b,
-                        f, right, y) || bounds_scalar_class_has(a, f, left, y) && bounds_scalar_class_has(b,
-                        f, right, x)) return true
-                }
+    if (bounds_scalar_constant(right) && bounds_scalar_class_differs(a, f, right)) return true;
+    b: *BoundsScalarClass = bounds_scalar_class(f, right);
+    if (bounds_scalar_constant(left) && bounds_scalar_class_differs(b, f, left)) return true;
+    for position in 0..count {
+        row: *BoundsRow = &rows[position];
+        if (row.kind == BoundsKind.NotEqual) {
+            x: ?*Expr = row.left;
+            y: ?*Expr = row.right;
+            if (x != null && y != null) {
+                if (bounds_scalar_class_has(a, f, left, x) && bounds_scalar_class_has(b,
+                    f, right, y) || bounds_scalar_class_has(a, f, left, y) && bounds_scalar_class_has(b,
+                    f, right, x)) return true
             }
         }
     }
@@ -327,7 +325,24 @@ bounds_same_array_expr(a: *Expr, b: *Expr) raises IndexOutOfBounds: bool {
 }
 
 // A bounds term is a stable path, a constant-indexed element, or a length.
+// Cache only structural classifications, after typing and effect inference.
+// New synthesized expressions start uncached; each verification has an epoch.
+bounds_classify_epoch: int = 0;
+
+bounds_classify_enabled: bool = false;
+
 bounds_term(e: ?*Expr) raises IndexOutOfBounds: bool {
+    if (e == null) return false;
+    if (!bounds_classify_enabled) return bounds_term_uncached(e);
+    cached: int = e.bounds_term_cache;
+    if (cached == bounds_classify_epoch) return false;
+    if (cached == bounds_classify_epoch + 1) return true;
+    result: bool = bounds_term_uncached(e);
+    if (result) e.bounds_term_cache = bounds_classify_epoch + 1 else e.bounds_term_cache = bounds_classify_epoch;
+    result
+}
+
+bounds_term_uncached(e: ?*Expr) raises IndexOutOfBounds: bool {
     if (e == null) return false;
     n: *Expr = e;
     match n.kind {
@@ -536,7 +551,8 @@ bounds_ref_zero(): BoundsTermRef {
         obj: null,
         is_len: false,
         is_zero: true,
-        valid: true
+        valid: true,
+        hash: 0u32
     }
 }
 
@@ -546,13 +562,25 @@ bounds_ref_obj(obj: *Obj, length: bool): BoundsTermRef {
         obj: obj,
         is_len: length,
         is_zero: false,
-        valid: true
+        valid: true,
+        hash: (obj.browse_id * 33 + (if (length) 1 else 2) & 2147483647) trunc u32
     }
 }
 
 bounds_ref_expr(e: ?*Expr) raises IndexOutOfBounds: BoundsTermRef {
     if (e != null) {
         match e.kind {
+            Var variable -> {
+                obj: ?*Obj = variable.var;
+                if (obj != null) return BoundsTermRef {
+                    path: e,
+                    obj: obj,
+                    is_len: false,
+                    is_zero: false,
+                    valid: true,
+                    hash: (obj.browse_id * 33 + 2 & 2147483647) trunc u32
+                }
+            }
             Funcall call -> {
                 arg: ?*Expr = call.args;
                 if (arg != null) {
@@ -561,7 +589,8 @@ bounds_ref_expr(e: ?*Expr) raises IndexOutOfBounds: BoundsTermRef {
                         obj: bounds_var(arg),
                         is_len: true,
                         is_zero: false,
-                        valid: true
+                        valid: true,
+                        hash: (bounds_path_hash(arg) * 33 + 1 & 2147483647) trunc u32
                     }
                 }
             }
@@ -572,7 +601,8 @@ bounds_ref_expr(e: ?*Expr) raises IndexOutOfBounds: BoundsTermRef {
             obj: bounds_var(e),
             is_len: false,
             is_zero: false,
-            valid: true
+            valid: true,
+            hash: (bounds_path_hash(e) * 33 + 2 & 2147483647) trunc u32
         }
     }
     BoundsTermRef {
@@ -580,7 +610,8 @@ bounds_ref_expr(e: ?*Expr) raises IndexOutOfBounds: BoundsTermRef {
         obj: null,
         is_len: false,
         is_zero: false,
-        valid: false
+        valid: false,
+        hash: 2u32
     }
 }
 
@@ -594,7 +625,7 @@ bounds_ref_same(a: BoundsTermRef, b: BoundsTermRef) raises IndexOutOfBounds: boo
 
 bounds_ref_same_borrowed(a: *BoundsTermRef, b: *BoundsTermRef) raises IndexOutOfBounds: bool {
     if (a.is_zero || b.is_zero) return a.is_zero && b.is_zero;
-    if (a.is_len != b.is_len) return false;
+    if (a.hash != b.hash || a.is_len != b.is_len) return false;
     if (a.obj != null && b.obj != null) return a.obj == b.obj;
     ap: ?*Expr = a.path;
     bp: ?*Expr = b.path;
@@ -617,19 +648,19 @@ bounds_ref_ast(t: BoundsTermRef@new): ?*Expr@new {
 }
 
 bounds_numeric_query(left_expr: ?*Expr, right_expr: ?*Expr, initial_bound: int) raises IndexOutOfBounds: BoundsNumericView {
-    left: BoundsTermRef = bounds_ref_expr(left_expr);
-    right: BoundsTermRef = bounds_ref_expr(right_expr);
+    left: BoundsTermRef;
+    right: BoundsTermRef;
     bound: int = initial_bound;
     ln: int = bounds_num(left_expr);
     if (ln > -536870912 && ln < 536870912) {
         left = bounds_ref_zero();
         bound = bound - ln
-    }
+    } else left = bounds_ref_expr(left_expr);
     rn: int = bounds_num(right_expr);
     if (rn > -536870912 && rn < 536870912) {
         right = bounds_ref_zero();
         bound = bound + rn
-    }
+    } else right = bounds_ref_expr(right_expr);
     BoundsNumericView {
         left: left,
         right: right,

@@ -366,6 +366,7 @@ type FieldInit = {
 }
 
 type MatchArm = {
+    codegen_label: int;
     name: []i8;
     variant: ?*Variant;
     literal: int;
@@ -470,7 +471,9 @@ type Expr = {
     pos: int;
     file: int;
     toklen: int;
-    bounds_access: ?*BoundsAccess
+    bounds_access: ?*BoundsAccess;
+    bounds_term_cache: int;
+    bounds_pure_cache: int
 }
 
 type StmtKind =
@@ -519,6 +522,10 @@ type Obj = {
     is_local: bool;
     is_func: bool;
     is_const: bool;
+    // Allocation metadata fits the padding before const_val.
+    // 0: candidate, 1: stack only, 14/15: assigned machine register.
+    cg_register: i8;
+    cg_score: u32;
     const_val: int;
     const_state: int;
     offset: int;
@@ -1050,7 +1057,12 @@ streq_n(
 streq(a: []i8, b: []i8): bool {
     if (a == b) return true;
     if (len(a) != len(b)) return false;
-    streq_n(a, 0, b, 0, len(a))
+    // Equal lengths already establish both ranges. Avoid rechecking offsets
+    // and lengths through the general substring comparison on every call.
+    for i in 0..len(a) {
+        if (a[i] != b[i]) return false
+    }
+    true
 }
 
 add_need(name: []i8@new) noregion {
@@ -1754,13 +1766,18 @@ read_file(path: []i8) raises Error: *SourceText@new {
             room = cap - n
         }
         r: int = read(fd, buf, n, room - 1);
-        if (r <= 0) {
+        if (r < 0 && r != -4) {
+            close(fd);
+            error("cannot read file")
+        }
+        if (r == 0) {
             if (n < 0 || n >= len(buf)) error("invalid source buffer length");
             buf[n] = 0i8;
             close(fd);
             return new SourceText { data: buf, used: n }
         }
-        n = n + r
+        // Retry EINTR without advancing the source buffer.
+        if (r > 0) n = n + r
     }
 }
 
@@ -1787,8 +1804,11 @@ normalize_path(path: []i8) raises Error: []i8@new {
                 nseg = nseg - 1;
                 while (out.used > 0 && out.data[out.used - 1] != '/') out.used = out.used - 1;
                 if (out.used > 0 && !(absolute && out.used == 1)) out.used = out.used - 1
+            } else if (is_dotdot && absolute) {
+                // The parent of the filesystem root is still the root.
             } else {
-                nseg = nseg + 1;
+                // Leading parents cannot cancel one another in relative paths.
+                if (!is_dotdot) nseg = nseg + 1;
                 if (out.used > 0 && out.data[out.used - 1] != '/') sb_putc(out, '/');
                 for j in 0..part_len sb_putc(out, p[start + j])
             }
@@ -3160,5 +3180,7 @@ import "parse.l8";
 import "check.l8";
 
 import "callbacks.l8";
+
+import "registers.l8";
 
 import "codegen.l8"
