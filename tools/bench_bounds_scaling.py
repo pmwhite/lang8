@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Measure verifier growth as independent sections accumulate in one function.
+"""Measure verifier growth with independent sections or nested loops.
 
 Each section has a local interval, two branches, and a result assignment.
 Locals cease to be used after their section. No functions are split and no
-proof budgets are changed. Report validation time separately from parsing and
+proof budgets are changed. The nested case measures repeated loop analysis.
+Report validation time separately from parsing and
 code generation, which have their own scaling behavior.
 """
 
@@ -26,14 +27,27 @@ def source(size: int) -> str:
     return "\n".join(lines + ["result", "}", ""])
 
 
+def nested_source(depth: int) -> str:
+    lines = ["main(): int {", "result: int = 0;"]
+    for i in range(depth):
+        lines += [f"index{i}: int = 0;", f"while (index{i} < 2) {{"]
+    lines += ["result = result + 1;"]
+    for i in reversed(range(depth)):
+        lines += [f"index{i} = index{i} + 1", "}"]
+    return "\n".join(lines + ["result", "}", ""])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("compiler", type=pathlib.Path)
     parser.add_argument("--baseline", type=pathlib.Path)
-    parser.add_argument("--sizes", type=int, nargs="+", default=[32, 64, 128, 256, 512])
+    parser.add_argument("--sizes", type=int, nargs="+", default=None)
+    parser.add_argument("--shape", choices=["independent", "nested"], default="independent")
     parser.add_argument("--runs", type=int, default=7)
     parser.add_argument("--cpu", type=int)
     args = parser.parse_args()
+    if args.sizes is None:
+        args.sizes = [2, 4, 6, 8, 10] if args.shape == "nested" else [32, 64, 128, 256, 512]
     if args.runs < 1 or any(size < 1 for size in args.sizes):
         parser.error("sizes and runs must be positive")
     compilers = {"current": args.compiler.resolve()}
@@ -44,7 +58,7 @@ def main() -> None:
         directory = pathlib.Path(temporary)
         for size in args.sizes:
             root = directory / "scaling.l8"
-            root.write_text(source(size))
+            root.write_text(nested_source(size) if args.shape == "nested" else source(size))
             samples = {name: [] for name in compilers}
             for run in range(args.runs + 1):
                 for name in list(compilers)[::1 if run % 2 == 0 else -1]:
@@ -61,7 +75,7 @@ def main() -> None:
                         samples[name].append(float(match.group(1)))
             timings = ", ".join(f"{name} {statistics.median(values):.3f} ms"
                                 for name, values in samples.items())
-            print(f"{size} sections: {timings}", flush=True)
+            print(f"{size} {args.shape}: {timings}", flush=True)
 
 
 if __name__ == "__main__":

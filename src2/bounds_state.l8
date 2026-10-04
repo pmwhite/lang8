@@ -87,7 +87,9 @@ bounds_arena_new() raises Error: *BoundsArena@new {
         first_graph: first,
         second_graph: second,
         free: new ?*BoundsStorage[24](null),
-        active: null
+        active: null,
+        loops: null,
+        loop_count: 0
     }
 }
 
@@ -104,6 +106,8 @@ bounds_arena_bin(capacity: int): int ensures (0 <= returned) {
 // End of one function/pass: there must be no remaining users of its states.
 // AST terms and exported summary rows are deliberately not reclaimed.
 bounds_arena_reset(arena: *BoundsArena) {
+    arena.loops = null;
+    arena.loop_count = 0;
     storage: ?*BoundsStorage = arena.active;
     arena.active = null;
     arena.first_graph.storage = null;
@@ -964,4 +968,75 @@ bounds_ancestor_prefix(first: *BoundsStorage, second: *BoundsStorage, limit: int
         steps = steps + 1
     }
     0
+}
+
+bounds_loop_memo(f: *BoundsState, statement: *Stmt): ?*BoundsLoopMemo@f {
+    arena: ?*BoundsArena = f.arena;
+    if (arena == null) return null;
+    memo: ?*BoundsLoopMemo = arena.loops;
+    while (memo != null) {
+        if (memo.statement == statement) return memo;
+        memo = memo.next
+    }
+    null
+}
+
+// A repeated visit to a nested loop may have a weaker entry state. Do not
+// restart with the identical candidates already rejected on its earlier visit.
+// This is only an initial guess: the ordinary body analysis and fixed point
+// still establish every surviving invariant. New candidate bounds remain.
+bounds_loop_seed(f: ?*BoundsState@new, statement: *Stmt) raises Error, IndexOutOfBounds: ?*BoundsState@new {
+    if (f == null || !bounds_reachable(f)) return f;
+    memo: ?*BoundsLoopMemo = bounds_loop_memo(f, statement);
+    if (memo == null || !bounds_subset(f, memo.entry)) return f;
+    count: int = f.count;
+    result: ?*BoundsState = bounds_empty(f);
+    for i in 0..count {
+        row: *BoundsRow = f.rows_view[i];
+        if (bounds_has_indexed_fact(memo.header, f, row, i) || !bounds_loop_had_candidate(memo.entry,
+            f, row, i)) result = bounds_filter_copy(result, f, row, i)
+    }
+    // Implications are few and may depend on candidate facts. Let normal
+    // convergence reconsider them rather than pruning their premises here.
+    bounds_meet_implications(f, f, result)
+}
+
+bounds_loop_remember(f: ?*BoundsState@new, header: ?*BoundsState@new, statement: *Stmt@new) {
+    if (f == null || !bounds_reachable(f)) return;
+    arena: ?*BoundsArena = f.arena;
+    if (arena == null) return;
+    memo: ?*BoundsLoopMemo = bounds_loop_memo(f, statement);
+    if (memo != null) {
+        memo.entry = f;
+        memo.header = header
+    } else {
+        // Bound lookup cost even in functions with many sequential loops.
+        // Missing the cache simply uses ordinary invariant discovery.
+        if (arena.loop_count >= 64) return;
+        arena.loops = new BoundsLoopMemo {
+            statement: statement,
+            entry: f,
+            header: header,
+            next: arena.loops
+        };
+        arena.loop_count = arena.loop_count + 1
+    }
+}
+
+bounds_loop_had_candidate(
+    entry: *BoundsState,
+    source: *BoundsState,
+    row: *BoundsRow,
+    position: int
+) raises IndexOutOfBounds: bool {
+    if (bounds_row(entry, position) == row) return true;
+    numeric: ?*BoundsNumericView = bounds_numeric_ref(source, position);
+    if (numeric == null) return false;
+    link: ?*BoundsLinkNode = bounds_bucket(entry, bounds_row_hash(row, numeric));
+    while (link != null) {
+        old: ?*BoundsRow = bounds_row(entry, link.position);
+        if (old != null && bounds_row_same(old, row)) return true;
+        link = link.next
+    }
+    false
 }
