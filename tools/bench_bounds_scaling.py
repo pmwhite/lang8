@@ -4,7 +4,8 @@
 Each section has a local interval, two branches, and a result assignment.
 Locals cease to be used after their section. No functions are split and no
 proof budgets are changed. The loop-locals case puts the sections inside a
-loop; the nested case measures repeated loop analysis.
+loop; the nested case measures repeated loop analysis. Fixed locals keep
+many constant-length allocations live together, then prove accesses to each.
 Report validation time separately from parsing and
 code generation, which have their own scaling behavior.
 """
@@ -25,6 +26,14 @@ def source(size: int) -> str:
             f"if (argc > {i}) v{i} = {i + 1};",
             f"if (v{i} > {i}) result = {i};",
         ]
+    return "\n".join(lines + ["result", "}", ""])
+
+
+def fixed_local_source(size: int) -> str:
+    lines = ["main(argc: int, argv: []str): int {", "result: int = 0;"]
+    lines += [f"values{i}: []int = new int[4](0);" for i in range(size)]
+    lines += ["index: int = argc & 3;"]
+    lines += [f"result = result + values{i}[index];" for i in range(size)]
     return "\n".join(lines + ["result", "}", ""])
 
 
@@ -51,7 +60,7 @@ def main() -> None:
     parser.add_argument("compiler", type=pathlib.Path)
     parser.add_argument("--baseline", type=pathlib.Path)
     parser.add_argument("--sizes", type=int, nargs="+", default=None)
-    parser.add_argument("--shape", choices=["independent", "nested", "loop-locals"], default="independent")
+    parser.add_argument("--shape", choices=["independent", "nested", "loop-locals", "fixed-locals"], default="independent")
     parser.add_argument("--runs", type=int, default=7)
     parser.add_argument("--cpu", type=int)
     args = parser.parse_args()
@@ -68,7 +77,8 @@ def main() -> None:
         for size in args.sizes:
             root = directory / "scaling.l8"
             generator = {"nested": nested_source, "independent": source,
-                         "loop-locals": loop_local_source}[args.shape]
+                         "loop-locals": loop_local_source,
+                         "fixed-locals": fixed_local_source}[args.shape]
             root.write_text(generator(size))
             samples = {name: [] for name in compilers}
             for run in range(args.runs + 1):
