@@ -32,6 +32,8 @@ bounds_term_hash_borrowed(term: *BoundsTermRef): int {
 
 bounds_graph_work_new(capacity: int, term: *BoundsTermRef@new): []BoundsGraphWork@new requires (0 < capacity) ensures (0 < len(returned)) {
     new BoundsGraphWork[capacity](BoundsGraphWork {
+        alias: null,
+        offset: 0,
         term: term,
         head: null,
         distance: 0,
@@ -82,6 +84,8 @@ bounds_graph_intern(graph: *BoundsGraph, term: BoundsTermRef@graph) raises Index
     id: int = graph.nodes;
     graph.terms[id] = term;
     graph.work[id] = BoundsGraphWork {
+        alias: null,
+        offset: 0,
         term: &graph.terms[id],
         head: null,
         distance: 0,
@@ -107,6 +111,67 @@ bounds_graph_link(
     entry.weight = weight;
     entry.next = from.head;
     from.head = entry
+}
+
+// Exact intervals identify a term with zero plus a fixed offset. Collapse
+// those nodes, preserving every remaining edge and any negative self-cycle.
+// Keep the original node/edge counts for the existing search budget.
+bounds_graph_fold_constants(graph: *BoundsGraph, zero: *BoundsGraphWork@graph) {
+    if (!graph.small_weights || graph.nodes < 8) return;
+    work: []BoundsGraphWork = graph.work;
+    count: int = graph.nodes;
+    for i in 0..count work[i].distance = 1000000000000000000;
+    upper: ?*BoundsGraphEdge = zero.head;
+    while (upper != null) {
+        if (upper.weight < upper.target.distance) upper.target.distance = upper.weight;
+        upper = upper.next
+    }
+    folded: bool = false;
+    for i in 0..count {
+        node: *BoundsGraphWork = &work[i];
+        value: int = node.distance;
+        if (node != zero && value > -536870912 && value < 536870912) {
+            lower: ?*BoundsGraphEdge = node.head;
+            while (lower != null && node.alias == null) {
+                if (lower.target == zero && lower.weight == 0 - value) {
+                    node.alias = zero;
+                    node.offset = value;
+                    folded = true
+                }
+                lower = lower.next
+            }
+        }
+    }
+    if (!folded) return;
+    zero_edges: ?*BoundsGraphEdge = zero.head;
+    zero.head = null;
+    for i in 0..count {
+        node: *BoundsGraphWork = &work[i];
+        edge: ?*BoundsGraphEdge = if (node == zero) zero_edges else node.head;
+        if (node != zero) node.head = null;
+        from: *BoundsGraphWork = node.alias or node;
+        while (edge != null) {
+            next: ?*BoundsGraphEdge = edge.next;
+            target: *BoundsGraphWork = edge.target;
+            to: *BoundsGraphWork = target.alias or target;
+            weight: int = edge.weight + node.offset - target.offset;
+            if (from != to || weight < 0) {
+                edge.target = to;
+                edge.weight = weight;
+                edge.next = from.head;
+                from.head = edge;
+                if (weight <= -536870912 || weight >= 536870912) graph.small_weights = false
+            }
+            edge = next
+        }
+    }
+}
+
+bounds_graph_value(node: *BoundsGraphWork): int {
+    alias: ?*BoundsGraphWork = node.alias;
+    if (alias == null) return node.distance;
+    if (alias.distance >= 1000000000000000000) return 1000000000000000000;
+    alias.distance + node.offset
 }
 
 bounds_graph_load(graph: *BoundsGraph, state: ?*BoundsState@graph, row_count: int) raises IndexOutOfBounds requires (0 <= row_count && row_count <= len(graph.row_edges)) {
@@ -141,6 +206,7 @@ bounds_graph_load(graph: *BoundsGraph, state: ?*BoundsState@graph, row_count: in
             }
         }
     }
+    if (zero != null) bounds_graph_fold_constants(graph, zero)
 }
 
 // A bounded work queue stops with an under-approximation of known proofs.
@@ -167,6 +233,16 @@ bounds_graph_search(
     limit: int,
     early: bool
 ): bool {
+    target_alias: ?*BoundsGraphWork = target.alias;
+    if (target_alias != null) {
+        if (limit > -1000000000000000000 && limit < 1000000000000000000) limit = limit - target.offset else early = false;
+        target = target_alias
+    }
+    source_offset: int = 0;
+    if (source != null) {
+        source_offset = source.offset;
+        source = source.alias or source
+    }
     terms: []BoundsTermRef = graph.terms;
     work: []BoundsGraphWork = graph.work;
     queue: []*BoundsGraphWork = graph.queue;
@@ -179,7 +255,7 @@ bounds_graph_search(
     read: int = 0;
     write: int = 0;
     if (source != null) {
-        source.distance = 0;
+        source.distance = 0 - source_offset;
         source.queued = true;
         queue[0] = source;
         write = bounds_queue_next(queue, 0)
@@ -190,17 +266,22 @@ bounds_graph_search(
         while (id < node_count) invariant (0 <= id && id <= node_count && 0 <= write && write < len(queue) && node_count <= len(terms) && node_count <= len(work) && node_count < len(queue)) {
             term: BoundsTermRef = terms[id];
             if (term.is_len) {
-                work[id].distance = 0;
-                work[id].queued = true;
-                queue[write] = &work[id];
-                write = bounds_queue_next(queue, write)
+                node: *BoundsGraphWork = &work[id];
+                seed: *BoundsGraphWork = node.alias or node;
+                value: int = 0 - node.offset;
+                if (value < seed.distance) seed.distance = value;
+                if (!seed.queued) {
+                    seed.queued = true;
+                    queue[write] = seed;
+                    write = bounds_queue_next(queue, write)
+                }
             }
             id = id + 1
         }
     }
     budget: int = (graph.nodes + graph.edges + 1) * 64;
     if (budget > 262144) budget = 262144;
-    if (source == target && early && limit >= 0) return false;
+    if (source == target && early && limit >= 0 - source_offset) return false;
     while (read != write && budget > 0) invariant (0 <= read && read < len(queue) && 0 <= write && write < len(queue)) {
         from: *BoundsGraphWork = queue[read];
         read = bounds_queue_next(queue, read);
@@ -234,7 +315,7 @@ bounds_graph_distance(
     early: bool
 ): int {
     _complete: bool = bounds_graph_search(graph, source, target, limit, early);
-    target.distance
+    bounds_graph_value(target)
 }
 
 bounds_graph_find(graph: *BoundsGraph, term: BoundsTermRef) raises IndexOutOfBounds: ?*BoundsGraphWork@graph {
@@ -345,10 +426,10 @@ bounds_cached_distance(
     limit: int,
     early: bool
 ): int {
-    if (cache.source == source && (cache.complete || early && target.distance <= limit)) return target.distance;
+    if (cache.source == source && (cache.complete || early && bounds_graph_value(target) <= limit)) return bounds_graph_value(target);
     cache.source = source;
     cache.complete = bounds_graph_search(cache.graph, source, target, limit, early);
-    target.distance
+    bounds_graph_value(target)
 }
 
 // Two explicit, unconditional interval bounds can prove a difference through
@@ -447,7 +528,7 @@ bounds_solve(state: ?*BoundsState, query: *BoundsNumericView, early: bool) raise
         target: ?*BoundsGraphWork = bounds_graph_intern(graph, left);
         source: ?*BoundsGraphWork = bounds_graph_intern(graph, right);
         bounds_graph_load(graph, state, row_count);
-        if (target != null && source != null && (source == target || source.head != null)) result = bounds_graph_distance(graph,
+        if (target != null && source != null && (source == target || source.head != null || source.alias != null)) result = bounds_graph_distance(graph,
             source, target, query.bound, early)
     }
     result
@@ -560,9 +641,6 @@ bounds_join_project(
         }
         first_ids: []*BoundsGraphWork = new *BoundsGraphWork[BOUNDS_JOIN_TERMS](&first.work[0]);
         second_ids: []*BoundsGraphWork = new *BoundsGraphWork[BOUNDS_JOIN_TERMS](&second.work[0]);
-        missing_distance: int = 1000000000000000000;
-        left_slots: []*int = new *int[BOUNDS_JOIN_TERMS](&missing_distance);
-        right_slots: []*int = new *int[BOUNDS_JOIN_TERMS](&missing_distance);
         position: int = 0;
         while (position < bounds_count(a) && count < BOUNDS_JOIN_TERMS) invariant (0 <= count && count <= BOUNDS_JOIN_TERMS) {
             edge: BoundsNumericView = bounds_numeric_at(a, position);
@@ -579,8 +657,6 @@ bounds_join_project(
                         positions[count] = position * 2 + side;
                         first_ids[count] = left_id;
                         second_ids[count] = right_id;
-                        left_slots[count] = &left_id.distance;
-                        right_slots[count] = &right_id.distance;
                         count = count + 1
                     }
                 }
@@ -589,28 +665,44 @@ bounds_join_project(
         }
         // The two graphs own separate workspaces. No search result escapes
         // except scalar weights copied into the projection table.
+        if (first_cached != null) {
+            first_cached.source = null;
+            first_cached.complete = false
+        }
+        if (second_cached != null) {
+            second_cached.source = null;
+            second_cached.complete = false
+        }
+        previous_first: ?*BoundsGraphWork = null;
+        previous_second: ?*BoundsGraphWork = null;
         for source in 0..count {
             // A negative distance back to the source is a witnessed closed
             // walk: source - source <= -1. All loaded edges are unconditional,
             // so this predecessor is impossible. On consistent graphs the
             // same search still computes every distance, with the old budget.
             first_source: *BoundsGraphWork = first_ids[source];
-            _first_complete: bool = bounds_graph_search(first, first_source, first_source,
-                -1, true);
-            if (first_source.distance < 0) {
+            first_root: *BoundsGraphWork = first_source.alias or first_source;
+            if (first_root != previous_first) _first_complete: bool = bounds_graph_search(first,
+                first_root, first_root, -1, true);
+            previous_first = first_root;
+            if (first_root.distance < 0) {
                 impossible.* = 1;
                 return result
             }
             second_source: *BoundsGraphWork = second_ids[source];
-            _second_complete: bool = bounds_graph_search(second, second_source, second_source,
-                -1, true);
-            if (second_source.distance < 0) {
+            second_root: *BoundsGraphWork = second_source.alias or second_source;
+            if (second_root != previous_second) _second_complete: bool = bounds_graph_search(second,
+                second_root, second_root, -1, true);
+            previous_second = second_root;
+            if (second_root.distance < 0) {
                 impossible.* = 2;
                 return result
             }
             for target in 0..count {
-                left_distance: int = left_slots[target].*;
-                right_distance: int = right_slots[target].*;
+                left_distance: int = bounds_graph_value(first_ids[target]);
+                right_distance: int = bounds_graph_value(second_ids[target]);
+                if (left_distance < bounds_graph_infinity) left_distance = left_distance - first_source.offset;
+                if (right_distance < bounds_graph_infinity) right_distance = right_distance - second_source.offset;
                 weights[source * BOUNDS_JOIN_TERMS + target] = (if (left_distance > right_distance) left_distance else right_distance)
             }
         }
