@@ -234,6 +234,14 @@ run_compiler_tests() {
   "./$tool" as -o "$BUILD/bulk-fill.o" "$BUILD/bulk-fill.s" runtime.s
   "./$tool" elfpack "$BUILD/bulk-fill.o" -o "$BUILD/bulk-fill-asm"
   run_expect "$BUILD/bulk-fill-asm" ''
+  # Vector registers and indirect-call operands must not be confused.
+  local invalid_insn
+  for invalid_insn in 'call %xmm0' 'movdqu (%rax), *%rax'; do
+    printf '%s\n' "$invalid_insn" >"$BUILD/invalid-operand.s"
+    if "./$tool" as -o "$BUILD/invalid-operand.o" "$BUILD/invalid-operand.s" >"$BUILD/invalid-operand.log" 2>&1; then
+      die "assembler accepted invalid operand: $invalid_insn"
+    fi
+  done
   check_tags "$tool"
 }
 
