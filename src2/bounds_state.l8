@@ -149,6 +149,7 @@ bounds_storage_new(arena: ?*BoundsArena@new, row: BoundsRow@new, capacity: int) 
             for i in 0..len(buckets) buckets[i] = null;
             reused.prefix_source = null;
             reused.prefix_count = 0;
+            reused.prefix_depth = 0;
             return reused
         }
     }
@@ -161,6 +162,7 @@ bounds_storage_new(arena: ?*BoundsArena@new, row: BoundsRow@new, capacity: int) 
     storage: *BoundsStorage = new BoundsStorage {
         prefix_source: null,
         prefix_count: 0,
+        prefix_depth: 0,
         pool_next: if (arena == null) null else arena.active,
         rows: new *BoundsRow[capacity](empty_row),
         numeric: new *BoundsNumericView[capacity](empty_numeric),
@@ -258,6 +260,7 @@ bounds_storage(state: *BoundsState@new, row: BoundsRow@new, count: int) raises E
             }
         }
     }
+    storage.prefix_depth = (if (previous == null) 0 else previous.prefix_depth + 1);
     storage.prefix_source = previous;
     storage.prefix_count = count;
     storage.used = count;
@@ -489,8 +492,12 @@ bounds_has_indexed_fact(
     row: *BoundsRow,
     position: int
 ) raises IndexOutOfBounds: bool {
-    numeric: BoundsNumericView = bounds_numeric_at(source, position);
-    bounds_has_fact_numeric(state, row, &numeric)
+    // Forks share immutable payloads, so identity is sufficient evidence.
+    if (bounds_row(state, position) == row) return true;
+    numeric: ?*BoundsNumericView = bounds_numeric_ref(source, position);
+    if (numeric != null) return bounds_has_fact_numeric(state, row, numeric);
+    missing: BoundsNumericView = bounds_numeric_query(null, null, 0);
+    bounds_has_fact_numeric(state, row, &missing)
 }
 
 bounds_premises_has(head: ?*BoundsPremise, fact: *BoundsRow) raises IndexOutOfBounds: bool {
@@ -630,6 +637,7 @@ bounds_direct_bound(state: ?*BoundsState, wanted: *BoundsNumericView) raises Ind
 }
 
 bounds_rows_identical(a: *BoundsRow, b: *BoundsRow): bool {
+    if (a == b) return true;
     a.kind == b.kind && a.index == b.index && a.array == b.array && a.value == b.value && a.left == b.left && a.right == b.right && a.separation == b.separation
 }
 
@@ -647,6 +655,8 @@ bounds_common_prefix(a: ?*BoundsState, b: ?*BoundsState, cap: int): int requires
     if (first_storage != null && second_storage != null) {
         if (first_storage.prefix_source == second_storage) position = first_storage.prefix_count else if (second_storage.prefix_source == first_storage) position = second_storage.prefix_count else if (first_storage.prefix_source != null && first_storage.prefix_source == second_storage.prefix_source) position = (if (first_storage.prefix_count < second_storage.prefix_count) first_storage.prefix_count else second_storage.prefix_count)
     }
+    if (position == 0 && first_storage != null && second_storage != null) position = bounds_ancestor_prefix(first_storage,
+        second_storage, limit);
     if (position > limit) position = limit;
     for index in position..limit {
         first: ?*BoundsRow = bounds_row(a, index);
@@ -757,16 +767,18 @@ bounds_same(a: ?*BoundsState, b: ?*BoundsState) raises IndexOutOfBounds: bool {
     if (a == b) return true;
     if (!bounds_implications_same(a, b)) return false;
     if (a != null && b != null && a.storage == b.storage && a.count == b.count) return true;
+    cap: int = bounds_count(a);
+    prefix: int = bounds_common_prefix(a, b, cap);
     position: int = bounds_count(a) - 1;
-    while (position >= 0) {
+    while (position >= prefix) {
         row: ?*BoundsRow = bounds_row(a, position);
         if (row != null && !bounds_has_indexed_fact(b, a, row, position)) return false;
         position = position - 1
     }
     position = bounds_count(b) - 1;
-    while (position >= 0) {
+    while (position >= prefix) {
         row: ?*BoundsRow = bounds_row(b, position);
-        if (row != null && !bounds_has_fact(a, row)) return false;
+        if (row != null && !bounds_has_indexed_fact(a, b, row, position)) return false;
         position = position - 1
     }
     true
@@ -928,4 +940,26 @@ bounds_forget_scalar(f: ?*BoundsState@new, value: *Obj) raises Error, IndexOutOf
         }
     }
     result
+}
+
+// Copy provenance can cross several nested branches. Find their common
+// ancestor and retain the smallest copied prefix on either path. The walk is
+// bounded only as an optimization: ordinary row comparison handles a miss.
+bounds_ancestor_prefix(first: *BoundsStorage, second: *BoundsStorage, limit: int): int {
+    a: ?*BoundsStorage = first;
+    b: ?*BoundsStorage = second;
+    shared: int = limit;
+    steps: int = 0;
+    while (a != null && b != null && shared > 0 && steps < 16) {
+        if (a == b) return shared;
+        if (a.prefix_depth >= b.prefix_depth) {
+            if (a.prefix_count < shared) shared = a.prefix_count;
+            a = a.prefix_source
+        } else {
+            if (b.prefix_count < shared) shared = b.prefix_count;
+            b = b.prefix_source
+        }
+        steps = steps + 1
+    }
+    0
 }
