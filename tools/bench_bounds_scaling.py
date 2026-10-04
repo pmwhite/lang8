@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Measure verifier growth with independent sections or nested loops.
+"""Measure verifier growth with independent sections and loops.
 
 Each section has a local interval, two branches, and a result assignment.
 Locals cease to be used after their section. No functions are split and no
-proof budgets are changed. The nested case measures repeated loop analysis.
+proof budgets are changed. The loop-locals case puts the sections inside a
+loop; the nested case measures repeated loop analysis.
 Report validation time separately from parsing and
 code generation, which have their own scaling behavior.
 """
@@ -27,6 +28,14 @@ def source(size: int) -> str:
     return "\n".join(lines + ["result", "}", ""])
 
 
+def loop_local_source(size: int) -> str:
+    body = source(size).splitlines()[2:-2]
+    return "\n".join([
+        "main(argc: int, argv: []str): int {", "result: int = 0;",
+        "for _iteration in 0..2 {", *body, "}", "result", "}", "",
+    ])
+
+
 def nested_source(depth: int) -> str:
     lines = ["main(): int {", "result: int = 0;"]
     for i in range(depth):
@@ -42,7 +51,7 @@ def main() -> None:
     parser.add_argument("compiler", type=pathlib.Path)
     parser.add_argument("--baseline", type=pathlib.Path)
     parser.add_argument("--sizes", type=int, nargs="+", default=None)
-    parser.add_argument("--shape", choices=["independent", "nested"], default="independent")
+    parser.add_argument("--shape", choices=["independent", "nested", "loop-locals"], default="independent")
     parser.add_argument("--runs", type=int, default=7)
     parser.add_argument("--cpu", type=int)
     args = parser.parse_args()
@@ -58,7 +67,9 @@ def main() -> None:
         directory = pathlib.Path(temporary)
         for size in args.sizes:
             root = directory / "scaling.l8"
-            root.write_text(nested_source(size) if args.shape == "nested" else source(size))
+            generator = {"nested": nested_source, "independent": source,
+                         "loop-locals": loop_local_source}[args.shape]
+            root.write_text(generator(size))
             samples = {name: [] for name in compilers}
             for run in range(args.runs + 1):
                 for name in list(compilers)[::1 if run % 2 == 0 else -1]:

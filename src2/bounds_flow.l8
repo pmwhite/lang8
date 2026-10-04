@@ -1034,12 +1034,16 @@ bounds_inits_stable(inits: ?*FieldInit) raises IndexOutOfBounds: bool {
     true
 }
 
-// Acyclic statement boundaries are conservative lifetime boundaries. Loops
-// and exception handlers keep their locals live through the whole statement.
+// Loop-local declarations are initialized afresh on each iteration. Other
+// uses in a loop must survive its backedge. Exception regions remain atomic.
 // Parameters and address-taken locals are never retired.
+bounds_live_loop_start: int = 0;
+
 bounds_live_use(obj: ?*Obj, step: int) {
     if (obj == null) return;
-    if (step < 0) obj.bounds_keep_epoch = bounds_retire_epoch else if (step > obj.bounds_live_until) obj.bounds_live_until = step
+    if (step < 0) obj.bounds_keep_epoch = bounds_retire_epoch else if (step > obj.bounds_live_until) {
+        if (bounds_live_loop_start == 0 || obj.bounds_live_decl_step as int < bounds_live_loop_start) obj.bounds_live_until = step
+    }
 }
 
 bounds_live_expr(e: ?*Expr, step: int) {
@@ -1184,24 +1188,58 @@ bounds_live_stmts(s: ?*Stmt, step: int) {
     }
 }
 
-// Number acyclic statement boundaries. A loop or exception region remains
-// one boundary, keeping all of its uses live across backedges and handlers.
+// Number statement boundaries, then extend external loop uses to its exit.
+// Locals declared inside the loop retain their actual last-use boundaries.
 // The second walk marks retirement points without changing last-use maxima.
-bounds_live_points(s: ?*Stmt, step: int, points: []bool): int {
+bounds_live_points(
+    s: ?*Stmt,
+    step: int,
+    points: []bool,
+    loop_points: []bool
+): int {
     if (s == null) return step;
     match s.kind {
         Block k -> {
             q: ?*Stmt = k.body;
             while (q != null) {
-                step = bounds_live_points(q, step, points);
+                step = bounds_live_points(q, step, points, loop_points);
                 q = q.next
             }
         }
-        Region k -> step = bounds_live_points(k.body, step, points);
+        Region k -> step = bounds_live_points(k.body, step, points, loop_points);
         If k -> {
-            step = bounds_live_points(k.then, step, points);
-            step = bounds_live_points(k.els, step, points);
+            step = bounds_live_points(k.then, step, points, loop_points);
+            step = bounds_live_points(k.els, step, points, loop_points);
             bounds_live_expr(k.cond, step)
+        }
+        Match k -> {
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                step = bounds_live_points(arm.body, step, points, loop_points);
+                arm = arm.next
+            }
+            bounds_live_expr(k.cond, step)
+        }
+        While k -> {
+            start: int = step;
+            step = bounds_live_points(k.body, step, loop_points, loop_points);
+            bounds_live_loop_start = start;
+            bounds_live_stmt(s, step);
+            bounds_live_loop_start = 0
+        }
+        For k -> {
+            start: int = step;
+            step = bounds_live_points(k.body, step, loop_points, loop_points);
+            bounds_live_loop_start = start;
+            bounds_live_stmt(s, step);
+            bounds_live_loop_start = 0
+        }
+        Decl k -> {
+            local: ?*Obj = k.var;
+            // Truncation can only make a declaration appear earlier,
+            // conservatively extending its lifetime.
+            if (local != null) local.bounds_live_decl_step = step trunc u32;
+            bounds_live_stmt(s, step)
         }
         _ -> bounds_live_stmt(s, step)
     }
@@ -1212,7 +1250,7 @@ bounds_live_points(s: ?*Stmt, step: int, points: []bool): int {
 bounds_prepare_liveness(fn: *Function) {
     body: ?*Stmt = fn.body;
     if (body == null) return;
-    step: int = bounds_live_points(body, 1, new bool[0](false));
+    step: int = bounds_live_points(body, 1, new bool[0](false), new bool[0](false));
     match body.kind {
         Block k -> {
             last: ?*Stmt = bounds_last_stmt(k.body);
@@ -1240,7 +1278,19 @@ bounds_prepare_liveness(fn: *Function) {
         if (!local.bounds_addr_taken && last > 0 && last < len(points)) points[last] = true;
         local = local.next
     }
-    _end: int = bounds_live_points(body, 1, points)
+    // Batch the new boundaries inside loops so temporary-heavy bodies do
+    // not scan the surviving state after every statement. Delayed retirement only
+    // retains additional facts; it cannot remove a live value.
+    loop_points: []bool = new bool[len(points)](false);
+    pending: int = 0;
+    for i in 0..len(points) {
+        if (points[i]) {
+            pending = pending + 1;
+            loop_points[i] = pending >= 4;
+            if (pending >= 4) pending = 0
+        }
+    }
+    _end: int = bounds_live_points(body, 1, points, loop_points)
 }
 
 bounds_stmt(s: ?*Stmt@new, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBounds: ?*BoundsState@new {
@@ -1295,7 +1345,12 @@ bounds_retire_locals(f: ?*BoundsState@new, step: int) raises Error, IndexOutOfBo
     for i in 0..count {
         row: *BoundsRow = rows[i];
         root: *Obj = row.index;
-        if (row.array != null && row.array != root || row.kind == BoundsKind.SumUpper || row.separation != null || !bounds_retire_path(row.left,
+        // Numeric endpoints already identify simple variables and lengths.
+        // Reuse them instead of walking the same source expressions again.
+        edge: *BoundsNumericView = f.numeric_view[i];
+        if (edge.left.valid && edge.right.valid) {
+            if (row.array != null && row.array != root || row.separation != null || !edge.left.is_zero && edge.left.obj != root || !edge.right.is_zero && edge.right.obj != root) bounds_retire_keep(row)
+        } else if (row.array != null && row.array != root || row.kind == BoundsKind.SumUpper || row.separation != null || !bounds_retire_path(row.left,
             root) || !bounds_retire_path(row.right, root)) bounds_retire_keep(row)
     }
     rule: ?*BoundsImplication = f.implications;
