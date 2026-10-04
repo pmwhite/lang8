@@ -612,19 +612,41 @@ gen_simple_operand(n: *Expr, reg: int) noregion raises Error, IndexOutOfBounds: 
     }
 }
 
-// These arguments read only constants or local scalar storage. Loading them
-// into ABI registers cannot change later arguments or clobber earlier ones:
+// Restrict address formation to a local or one of its fields. Neither form
+// calls code, changes memory, or uses another ABI argument register as scratch.
+cg_local_call_address(n: *Expr): bool {
+    match n.kind {
+        Var k -> k.var != null && k.var.is_local && !k.var.is_const;
+        MemberAccess k -> {
+            match k.lhs.kind {
+                Var v -> v.var != null && v.var.is_local && !v.var.is_const;
+                _ -> false
+            }
+        }
+        _ -> false
+    }
+}
+
+// These arguments read only constants, local values, or local addresses.
+// Loading ABI registers cannot change later arguments or clobber earlier ones:
 // allocated locals live in callee-saved registers, and the rest use rbp slots.
 cg_direct_call_args(args: ?*Expr): bool {
     a: ?*Expr = args;
     while (a != null) {
         ty: ?*Type = a.ty;
-        if (ty == null || passes_by_ref(ty) || is_float_ty(ty)) return false;
+        if (ty == null || is_float_ty(ty)) return false;
         if (!imm_operand(a)) {
             match a.kind {
                 Var k -> {
                     vo: ?*Obj = k.var;
-                    if (vo == null || !vo.is_local && !vo.is_const) return false
+                    if (vo == null || !vo.is_local && !vo.is_const) return false;
+                    if (passes_by_ref(ty) && (!vo.is_local || vo.is_const)) return false
+                }
+                MemberAccess _ -> {
+                    if (!cg_local_call_address(a)) return false
+                }
+                Addr k -> {
+                    if (!cg_local_call_address(k.lhs)) return false
                 }
                 _ -> return false
             }
@@ -632,6 +654,22 @@ cg_direct_call_args(args: ?*Expr): bool {
         a = a.next
     }
     true
+}
+
+cg_load_call_arg(a: *Expr, reg: int) noregion raises Error, IndexOutOfBounds {
+    ty: *Type = a.ty or error("missing call argument type");
+    if (passes_by_ref(ty)) {
+        if (!gen_simple_addr(a, reg)) error("internal: simple aggregate argument");
+        return
+    }
+    match a.kind {
+        Addr k -> {
+            if (!gen_simple_addr(k.lhs, reg)) error("internal: simple address argument");
+            return
+        }
+        _ -> { }
+    }
+    if (!gen_simple_operand(a, reg)) error("internal: simple call argument")
 }
 
 gen_binop_setup(lhs: *Expr, rhs: *Expr) noregion raises Error, IndexOutOfBounds {
@@ -1565,7 +1603,7 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
                 slot: int = 0;
                 a = k.args;
                 while (a != null) {
-                    if (!gen_simple_operand(a, cg_arg_reg(slot))) error("internal: simple call argument");
+                    cg_load_call_arg(a, cg_arg_reg(slot));
                     slot = slot + 1;
                     a = a.next
                 }
