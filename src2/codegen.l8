@@ -365,6 +365,10 @@ gen_addr(n: *Expr) noregion raises Error, IndexOutOfBounds {
 
 /* Scalar load of a variable into %rax without lea+deref. */
 emit_load_var(vo: *Obj, ty: *Type) noregion raises Error, IndexOutOfBounds {
+    if (vo.cg_register as int > 1) {
+        cg_mov_rr(vo.cg_register as int, 0);
+        return
+    }
     esz: int = enum_mem_size(ty);
     if (vo.is_local) {
         if (esz == 1 || is_byte_ty(ty)) cg_movzb_mr(5, vo.offset, 0) else {
@@ -381,6 +385,10 @@ emit_load_var(vo: *Obj, ty: *Type) noregion raises Error, IndexOutOfBounds {
 }
 
 emit_store_var(vo: *Obj, ty: *Type) noregion raises Error, IndexOutOfBounds {
+    if (vo.cg_register as int > 1) {
+        cg_mov_rr(0, vo.cg_register as int);
+        return
+    }
     esz: int = enum_mem_size(ty);
     if (vo.is_local) {
         if (esz == 1 || is_byte_ty(ty)) cg_movb_rm(0, 5, vo.offset) else {
@@ -401,6 +409,10 @@ fits_imm32(v: int): bool {
 
 /* Store an immediate into a scalar variable (no %rax round-trip). */
 emit_store_imm(vo: *Obj, ty: *Type, v: int) noregion raises Error, IndexOutOfBounds {
+    if (vo.cg_register as int > 1) {
+        cg_mov_imm(v, vo.cg_register as int);
+        return
+    }
     esz: int = enum_mem_size(ty);
     if (vo.is_local) {
         if (esz == 1 || is_byte_ty(ty)) cg_movb_imm_m(v, 5, vo.offset) else {
@@ -535,6 +547,10 @@ gen_simple_operand(n: *Expr, reg: int) noregion raises Error, IndexOutOfBounds: 
                 return true
             }
             if (!vo.is_local) return false;
+            if (vo.cg_register as int > 1) {
+                cg_mov_rr(vo.cg_register as int, reg);
+                return true
+            }
             esz: int = enum_mem_size(ty);
             if (esz == 1 || is_byte_ty(ty)) cg_movzb_mr(5, vo.offset, reg) else {
                 if (esz == 4 || is_i32_ty(ty)) cg_movsxd_mr(5, vo.offset, reg) else {
@@ -2335,6 +2351,7 @@ emit_text() noregion raises Error, IndexOutOfBounds {
             narrow_top = null;
             catch_top = null;
             assign_lvar_offsets(fn);
+            allocated: bool = cg_assign_registers(fn);
             current_fn_name = fn.name;
             current_return_ty = fn.return_ty;
             current_sret = fn.sret;
@@ -2347,13 +2364,19 @@ emit_text() noregion raises Error, IndexOutOfBounds {
             cg_push(5);
             cg_mov_rr(4, 5);
             save_regs: bool = !cg_scalar_stmts(fn.body);
+            register_space: int = if (allocated) 16 else 0;
+            register_base: int = fn.stack_size + (if (save_regs) 24 else 8);
             // Keep the local offsets and 16-byte call alignment in either case.
             if (save_regs) {
-                cg_alu_imm(5, fn.stack_size + 24, 4);
+                cg_alu_imm(5, fn.stack_size + 24 + register_space, 4);
                 cg_mov_rm(3, 5, 0 - fn.stack_size - 8);
                 cg_mov_rm(12, 5, 0 - fn.stack_size - 16);
                 cg_mov_rm(13, 5, 0 - fn.stack_size - 24)
-            } else cg_alu_imm(5, fn.stack_size + 8, 4);
+            } else cg_alu_imm(5, fn.stack_size + 8 + register_space, 4);
+            if (allocated) {
+                cg_mov_rm(14, 5, 0 - register_base - 8);
+                cg_mov_rm(15, 5, 0 - register_base - 16)
+            }
             ri: int = 0;
             rs: int = 0;
             nst: int = 0;
@@ -2409,6 +2432,11 @@ emit_text() noregion raises Error, IndexOutOfBounds {
                 }
                 i = i + 1
             }
+            param: ?*Obj = fn.params;
+            while (param != null) {
+                if (param.cg_register as int > 1) cg_mov_mr(5, param.offset, param.cg_register as int);
+                param = param.param_next
+            }
             if (streq(fn.name, "main")) cg_call("l8_init_globals");
             body: ?*Stmt = fn.body;
             if (body == null) error("missing body");
@@ -2422,6 +2450,10 @@ emit_text() noregion raises Error, IndexOutOfBounds {
             }
             cg_label_id(current_return_lab);
             emit_rax_to_ret(current_return_ty);
+            if (allocated) {
+                cg_mov_mr(5, 0 - register_base - 8, 14);
+                cg_mov_mr(5, 0 - register_base - 16, 15)
+            }
             if (save_regs) {
                 cg_mov_mr(5, 0 - fn.stack_size - 8, 3);
                 cg_mov_mr(5, 0 - fn.stack_size - 16, 12);

@@ -1,0 +1,185 @@
+tag compiler_internal;
+
+// Whole-function allocation of two otherwise unused callee-saved registers.
+// Stack slots remain available for parameters and all ineligible locals.
+// Taking any address in an expression conservatively excludes its variables.
+// A catch restores registers from try entry, so functions containing try stay
+// on the stack until allocation can account for their exceptional control flow.
+cg_register_safe: bool = true;
+
+cg_register_use(obj: ?*Obj, weight: int, address: bool) {
+    if (obj == null || !obj.is_local) return;
+    if (address) obj.cg_register = 1 trunc i8;
+    score: int = obj.cg_score as int;
+    if (score < 1000000) obj.cg_score = (score + weight) trunc u32
+}
+
+cg_register_expr(e: ?*Expr, weight: int, address: bool) {
+    if (e == null) return;
+    match e.kind {
+        Var k -> cg_register_use(k.var, weight, address);
+        Addr k -> cg_register_expr(k.lhs, weight, true);
+        Binary k -> {
+            cg_register_expr(k.lhs, weight, address);
+            cg_register_expr(k.rhs, weight, address)
+        }
+        Assign k -> {
+            cg_register_expr(k.lhs, weight, address);
+            cg_register_expr(k.rhs, weight, address)
+        }
+        Deref k -> cg_register_expr(k.lhs, weight, address);
+        Index k -> {
+            cg_register_expr(k.lhs, weight, address);
+            cg_register_expr(k.idx, weight, address)
+        }
+        Not k -> cg_register_expr(k.lhs, weight, address);
+        Neg k -> cg_register_expr(k.lhs, weight, address);
+        BitNot k -> cg_register_expr(k.lhs, weight, address);
+        LogAnd k -> {
+            cg_register_expr(k.lhs, weight, address);
+            cg_register_expr(k.rhs, weight, address)
+        }
+        LogOr k -> {
+            cg_register_expr(k.lhs, weight, address);
+            cg_register_expr(k.rhs, weight, address)
+        }
+        OrElse k -> {
+            cg_register_expr(k.lhs, weight, address);
+            cg_register_expr(k.rhs, weight, address)
+        }
+        Funcall k -> {
+            cg_register_expr(k.target, weight, address);
+            a: ?*Expr = k.args;
+            while (a != null) {
+                cg_register_expr(a, weight, address);
+                a = a.next
+            }
+        }
+        MemberAccess k -> cg_register_expr(k.lhs, weight, address);
+        As k -> cg_register_expr(k.lhs, weight, address);
+        Trunc k -> cg_register_expr(k.lhs, weight, address);
+        New k -> {
+            cg_register_expr(k.lhs, weight, address);
+            cg_register_expr(k.fill, weight, address);
+            cg_register_inits(k.inits, weight, address)
+        }
+        StructLit k -> cg_register_inits(k.inits, weight, address);
+        VariantLit k -> cg_register_inits(k.inits, weight, address);
+        If k -> {
+            cg_register_expr(k.cond, weight, address);
+            cg_register_expr(k.then, weight, address);
+            cg_register_expr(k.els, weight, address)
+        }
+        Match k -> {
+            cg_register_expr(k.cond, weight, address);
+            cg_register_arms(k.arms, weight, address)
+        }
+        Block k -> cg_register_stmts(k.body, weight, address);
+        ArrayLit k -> {
+            a: ?*Expr = k.elems;
+            while (a != null) {
+                cg_register_expr(a, weight, address);
+                a = a.next
+            }
+        }
+        Num _ -> { }
+        Null -> { }
+        FuncAddr _ -> { }
+        Sizeof _ -> { }
+    }
+}
+
+cg_register_inits(inits: ?*FieldInit, weight: int, address: bool) {
+    i: ?*FieldInit = inits;
+    while (i != null) {
+        cg_register_expr(i.lhs, weight, address);
+        i = i.next
+    }
+}
+
+cg_register_arms(arms: ?*MatchArm, weight: int, address: bool) {
+    a: ?*MatchArm = arms;
+    while (a != null) {
+        cg_register_use(a.binder, 0, true);
+        cg_register_stmts(a.body, weight, address);
+        a = a.next
+    }
+}
+
+cg_register_stmts(stmts: ?*Stmt, weight: int, address: bool) {
+    s: ?*Stmt = stmts;
+    while (s != null) {
+        match s.kind {
+            Return k -> cg_register_expr(k.lhs, weight, address);
+            ExprStmt k -> cg_register_expr(k.lhs, weight, address);
+            Decl k -> {
+                cg_register_use(k.var, weight, address);
+                cg_register_expr(k.init, weight, address)
+            }
+            Block k -> cg_register_stmts(k.body, weight, address);
+            If k -> {
+                cg_register_expr(k.cond, weight, address);
+                cg_register_stmts(k.then, weight, address);
+                cg_register_stmts(k.els, weight, address)
+            }
+            While k -> {
+                hot: int = if (weight < 256) weight * 16 else weight;
+                cg_register_expr(k.cond, hot, address);
+                cg_register_stmts(k.body, hot, address)
+            }
+            For k -> {
+                hot: int = if (weight < 256) weight * 16 else weight;
+                cg_register_expr(k.iter, weight, address);
+                cg_register_expr(k.hi, weight, address);
+                cg_register_use(k.item, hot * 3, address);
+                cg_register_use(k.n, hot, address);
+                cg_register_use(k.idx, hot * 3, address);
+                cg_register_use(k.coll, hot, address);
+                cg_register_stmts(k.body, hot, address)
+            }
+            Match k -> {
+                cg_register_expr(k.cond, weight, address);
+                cg_register_arms(k.arms, weight, address)
+            }
+            Raise k -> cg_register_inits(k.inits, weight, address);
+            Try _ -> cg_register_safe = false;
+            Region k -> cg_register_stmts(k.body, weight, address);
+            Comment _ -> { }
+        }
+        s = s.next
+    }
+}
+
+cg_assign_registers(fn: *Function): bool {
+    obj: ?*Obj = fn.locals;
+    while (obj != null) {
+        obj.cg_register = 0 trunc i8;
+        obj.cg_score = 0 trunc u32;
+        ty: ?*Type = obj.ty;
+        if (ty == null || obj.is_const) obj.cg_register = 1 trunc i8 else {
+            if (!is_int_ty(ty) && !is_any_pointer(ty) && !is_slice(ty) && !is_str(ty)) obj.cg_register = 1 trunc i8
+        }
+        obj = obj.next
+    }
+    cg_register_safe = true;
+    cg_register_stmts(fn.body, 1, false);
+    if (!cg_register_safe) return false;
+    assigned: bool = false;
+    for reg in 14..16 {
+        best: ?*Obj = null;
+        score: int = 8;
+        obj = fn.locals;
+        while (obj != null) {
+            if (obj.cg_register as int == 0 && obj.cg_score as int > score) {
+                best = obj;
+                score = obj.cg_score as int
+            }
+            obj = obj.next
+        }
+        if (best != null) {
+            best.cg_register = reg trunc i8;
+            assigned = true
+        }
+    }
+    assigned
+}
