@@ -612,6 +612,28 @@ gen_simple_operand(n: *Expr, reg: int) noregion raises Error, IndexOutOfBounds: 
     }
 }
 
+// These arguments read only constants or local scalar storage. Loading them
+// into ABI registers cannot change later arguments or clobber earlier ones:
+// allocated locals live in callee-saved registers, and the rest use rbp slots.
+cg_direct_call_args(args: ?*Expr): bool {
+    a: ?*Expr = args;
+    while (a != null) {
+        ty: ?*Type = a.ty;
+        if (ty == null || passes_by_ref(ty) || is_float_ty(ty)) return false;
+        if (!imm_operand(a)) {
+            match a.kind {
+                Var k -> {
+                    vo: ?*Obj = k.var;
+                    if (vo == null || !vo.is_local && !vo.is_const) return false
+                }
+                _ -> return false
+            }
+        }
+        a = a.next
+    }
+    true
+}
+
 gen_binop_setup(lhs: *Expr, rhs: *Expr) noregion raises Error, IndexOutOfBounds {
     gen_expr(lhs);
     if (gen_simple_operand(rhs, 7)) return;
@@ -1538,6 +1560,26 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
             while (a != null) {
                 if (is_sse_ty(a.ty)) has_float = true;
                 a = a.next
+            }
+            if (has_sret == 0 && nargs <= 6 && !has_float && cg_direct_call_args(k.args)) {
+                slot: int = 0;
+                a = k.args;
+                while (a != null) {
+                    if (!gen_simple_operand(a, cg_arg_reg(slot))) error("internal: simple call argument");
+                    slot = slot + 1;
+                    a = a.next
+                }
+                if (streq(k.funcname, "memcpy")) {
+                    emit_memcpy_call();
+                    return
+                }
+                if (streq(k.funcname, "read")) {
+                    emit_io_call(k.funcname, k.args);
+                    return
+                }
+                cg_call(call_name);
+                emit_ret_to_rax(n.ty);
+                return
             }
             fast: bool = false;
             if (has_sret == 0 && nargs <= 1 && !has_float) fast = true;
