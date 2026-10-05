@@ -1220,14 +1220,10 @@ gen_binary(op: BinOp, lhs: *Expr, rhs: *Expr) noregion raises Error, IndexOutOfB
 }
 
 /* Dest address in %rax. Fill a [N]T or heap-slot run from a list of elements. */
-gen_fill_array(elems: ?*Expr, base: *Type) noregion raises Error, IndexOutOfBounds {
+gen_fill_array(elems: ?*Expr, base: *Type, save: int) noregion raises Error, IndexOutOfBounds {
     esz: int = type_size(base);
     if (esz <= 0) esz = 8;
-    cg_alu_imm(5, 24, 4);
-    cg_mov_rm(12, 4, 0);
-    cg_mov_rm(13, 4, 8);
-    cg_mov_rm(3, 4, 16);
-    cg_mov_rr(4, 13);
+    cg_save_fill_registers(save);
     cg_mov_rr(0, 12);
     cg_mov_rr(12, 3);
     ae: ?*Expr = elems;
@@ -1410,10 +1406,8 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
         StructLit k -> {
             sz: int = type_size(n.ty or error("missing type"));
             if (sz <= 0) sz = 8;
-            asz: int = sz + 15 & 0 - 16;
-            cg_alu_imm(5, asz, 4);
             cg_push(3);
-            cg_lea_mr(4, 8, 3);
+            cg_lea_mr(5, cg_temp_offset(n), 3);
             gen_struct_inits(k.inits);
             if (sz <= 8) cg_mov_mr(3, 0, 0) else cg_mov_rr(3, 0);
             cg_pop(3);
@@ -1428,9 +1422,8 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
                     cg_mov_imm(k.val, 0);
                     return
                 }
-                cg_alu_imm(5, 16, 4);
                 cg_push(3);
-                cg_lea_mr(4, 8, 3);
+                cg_lea_mr(5, cg_temp_offset(n), 3);
                 cg_mov_rr(3, 0);
                 store_enum_tag(k.val, enum_tag_type(ety));
                 gen_variant_inits(k.inits, variant_payload_off(k.variant));
@@ -1438,10 +1431,8 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
                 cg_pop(3);
                 return
             }
-            sz = sz + 15 & 0 - 16;
-            cg_alu_imm(5, sz, 4);
             cg_push(3);
-            cg_lea_mr(4, 8, 3);
+            cg_lea_mr(5, cg_temp_offset(n), 3);
             cg_mov_rr(3, 0);
             store_enum_tag(k.val, enum_tag_type(ety));
             gen_variant_inits(k.inits, variant_payload_off(k.variant));
@@ -1488,7 +1479,7 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
                     lty3: ?*Type = q.lhs.ty;
                     if (lty3 != null && is_array(lty3)) {
                         gen_addr(q.lhs);
-                        gen_fill_array(k.elems, type_base(lty3));
+                        gen_fill_array(k.elems, type_base(lty3), cg_array_save_offset(q.rhs));
                         return
                     }
                 }
@@ -1671,14 +1662,7 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
                 emit_ret_to_rax(n.ty);
                 return
             }
-            if (has_sret != 0) {
-                if (fno == null) error("missing function");
-                sz: int = type_size(fno.return_ty or error("missing return type"));
-                if (sz <= 0) sz = 8;
-                sz = sz + 15 & 0 - 16;
-                cg_alu_imm(5, sz, 4);
-                cg_mov_rr(4, 0)
-            }
+            if (has_sret != 0) cg_lea_mr(5, cg_temp_offset(n), 0);
             if (!has_float) {
                 call_pad: int = 0;
                 if (nstack > 0) {
@@ -1849,12 +1833,8 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
         ArrayLit k -> {
             nty: *Type = n.ty or error("missing type");
             if (is_array(nty)) {
-                sz2: int = type_size(nty);
-                if (sz2 <= 0) sz2 = 8;
-                asz2: int = sz2 + 15 & 0 - 16;
-                cg_alu_imm(5, asz2, 4);
-                cg_mov_rr(4, 0);
-                gen_fill_array(k.elems, type_base(nty));
+                cg_lea_mr(5, cg_temp_offset(n), 0);
+                gen_fill_array(k.elems, type_base(nty), cg_array_save_offset(n));
                 return
             }
             base: *Type = type_base(nty);
@@ -1866,12 +1846,8 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
                 cnt = cnt + 1;
                 ce = ce.next
             }
-            /* Save rbx/r12/r13 below later struct-lit temps; r13 holds that slot. */
-            cg_alu_imm(5, 24, 4);
-            cg_mov_rm(12, 4, 0);
-            cg_mov_rm(13, 4, 8);
-            cg_mov_rm(3, 4, 16);
-            cg_mov_rr(4, 13);
+            /* Save rbx/r12/r13 in this literal's frame slot; r13 holds that slot. */
+            cg_save_fill_registers(cg_array_save_offset(n));
             cg_mov_imm(cnt, 12);
             emit_check_new_count(12, esz);
             cg_mov_rr(12, 0);
@@ -2345,6 +2321,152 @@ emit_store_incoming(slot: int, dest_off: int) noregion raises Error, IndexOutOfB
     cg_mov_rm(0, 5, dest_off)
 }
 
+// Aggregate temporaries live in fixed frame slots, one per expression, so
+// evaluating an expression never moves rsp between saved operands and a
+// loop does not grow the stack.
+cg_temp_offset(n: *Expr) raises Error: int {
+    if (n.cg_temp == 0) error_at_file(n.file, n.pos, "internal: aggregate temporary has no frame slot");
+    n.cg_temp
+}
+
+// Array literals keep a 24-byte rbx/r12/r13 save area after their data.
+cg_array_save_offset(n: *Expr) raises Error: int {
+    cg_temp_offset(n) + cg_array_data_size(n)
+}
+
+cg_array_data_size(n: *Expr): int {
+    ty: ?*Type = n.ty;
+    if (ty == null || !is_array(ty)) return 0;
+    size: int = type_size(ty);
+    if (size <= 0) size = 8;
+    (size + 7) / 8 * 8
+}
+
+cg_save_fill_registers(save: int) noregion raises Error, IndexOutOfBounds {
+    cg_mov_rm(12, 5, save);
+    cg_mov_rm(13, 5, save + 8);
+    cg_mov_rm(3, 5, save + 16);
+    cg_lea_mr(5, save, 13)
+}
+
+cg_temp_slot(n: *Expr, size: int, off: int): int {
+    total: int = off + (if (size <= 8) 8 else (size + 7) / 8 * 8);
+    n.cg_temp = 0 - total;
+    total
+}
+
+cg_temps_inits(inits: ?*FieldInit, off: int) raises Error: int {
+    o: int = off;
+    i: ?*FieldInit = inits;
+    while (i != null) {
+        o = cg_temps_expr(i.lhs, o);
+        i = i.next
+    }
+    o
+}
+
+cg_temps_list(first: ?*Expr, off: int) raises Error: int {
+    o: int = off;
+    a: ?*Expr = first;
+    while (a != null) {
+        o = cg_temps_expr(a, o);
+        a = a.next
+    }
+    o
+}
+
+cg_temps_arms(arms: ?*MatchArm, off: int) raises Error: int {
+    o: int = off;
+    a: ?*MatchArm = arms;
+    while (a != null) {
+        o = cg_temps_stmts(a.body, o);
+        a = a.next
+    }
+    o
+}
+
+cg_temps_expr(e: ?*Expr, off: int) raises Error: int {
+    if (e == null) return off;
+    n: *Expr = e;
+    match n.kind {
+        StructLit k -> cg_temp_slot(n, type_size(n.ty or error("missing type")), cg_temps_inits(k.inits,
+            off));
+        VariantLit k -> {
+            o: int = cg_temps_inits(k.inits, off);
+            size: int = type_size(n.ty or error("missing type"));
+            // A small variant without payload is an immediate tag.
+            if (k.inits == null && size <= 8) return o;
+            cg_temp_slot(n, size, o)
+        }
+        ArrayLit k -> cg_temp_slot(n, cg_array_data_size(n) + 24, cg_temps_list(k.elems,
+            off));
+        Funcall k -> {
+            o: int = cg_temps_list(k.args, cg_temps_expr(k.target, off));
+            callee: ?*Function = k.fn;
+            if (callee == null) return o;
+            if (callee.sret == null) return o;
+            cg_temp_slot(n, type_size(callee.return_ty or error("missing return type")),
+                o)
+        }
+        Binary k -> cg_temps_expr(k.rhs, cg_temps_expr(k.lhs, off));
+        Assign k -> cg_temps_expr(k.rhs, cg_temps_expr(k.lhs, off));
+        LogAnd k -> cg_temps_expr(k.rhs, cg_temps_expr(k.lhs, off));
+        LogOr k -> cg_temps_expr(k.rhs, cg_temps_expr(k.lhs, off));
+        OrElse k -> cg_temps_expr(k.rhs, cg_temps_expr(k.lhs, off));
+        Index k -> cg_temps_expr(k.idx, cg_temps_expr(k.lhs, off));
+        Addr k -> cg_temps_expr(k.lhs, off);
+        Deref k -> cg_temps_expr(k.lhs, off);
+        Not k -> cg_temps_expr(k.lhs, off);
+        Neg k -> cg_temps_expr(k.lhs, off);
+        BitNot k -> cg_temps_expr(k.lhs, off);
+        MemberAccess k -> cg_temps_expr(k.lhs, off);
+        As k -> cg_temps_expr(k.lhs, off);
+        Trunc k -> cg_temps_expr(k.lhs, off);
+        New k -> cg_temps_inits(k.inits, cg_temps_expr(k.fill, cg_temps_expr(k.lhs,
+            off)));
+        If k -> cg_temps_expr(k.els, cg_temps_expr(k.then, cg_temps_expr(k.cond, off)));
+        Match k -> cg_temps_arms(k.arms, cg_temps_expr(k.cond, off));
+        Block k -> cg_temps_stmts(k.body, off);
+        Sizeof k -> cg_temps_expr(k.e, off);
+        Num _ -> off;
+        Null -> off;
+        Var _ -> off;
+        FuncAddr _ -> off
+    }
+}
+
+cg_temps_stmts(stmts: ?*Stmt, off: int) raises Error: int {
+    o: int = off;
+    q: ?*Stmt = stmts;
+    while (q != null) {
+        match q.kind {
+            Return k -> o = cg_temps_expr(k.lhs, o);
+            If k -> o = cg_temps_stmts(k.els, cg_temps_stmts(k.then, cg_temps_expr(k.cond,
+                o)));
+            While k -> o = cg_temps_stmts(k.body, cg_temps_expr(k.cond, o));
+            For k -> o = cg_temps_stmts(k.body, cg_temps_expr(k.hi, cg_temps_expr(k.iter,
+                o)));
+            Block k -> o = cg_temps_stmts(k.body, o);
+            ExprStmt k -> o = cg_temps_expr(k.lhs, o);
+            Decl k -> o = cg_temps_expr(k.init, o);
+            Match k -> o = cg_temps_arms(k.arms, cg_temps_expr(k.cond, o));
+            Raise k -> o = cg_temps_inits(k.inits, o);
+            Try k -> {
+                o = cg_temps_stmts(k.body, o);
+                arm: ?*CatchArm = k.arms;
+                while (arm != null) {
+                    o = cg_temps_stmts(arm.body, o);
+                    arm = arm.next
+                }
+            }
+            Region k -> o = cg_temps_stmts(k.body, o);
+            Comment _ -> { }
+        }
+        q = q.next
+    }
+    o
+}
+
 assign_lvar_offsets(fn: *Function) raises Error {
     off: int = 0;
     v: ?*Obj = fn.locals;
@@ -2357,6 +2479,7 @@ assign_lvar_offsets(fn: *Function) raises Error {
         v.offset = 0 - off;
         v = v.next
     }
+    off = cg_temps_stmts(fn.body, off);
     fn.stack_size = (off + 7) / 16 * 16 + 8
 }
 
@@ -2450,11 +2573,18 @@ emit_dyn_global_init(g: *Obj) noregion raises Error, IndexOutOfBounds {
 
 emit_l8_init_globals_fn() noregion raises Error, IndexOutOfBounds {
     already: int = new_label();
+    temps: int = 0;
+    q: ?*InitGlobals = global_init_order;
+    while (q != null) {
+        temps = cg_temps_expr(q.global.init, temps);
+        q = q.next
+    }
     cg_global("l8_init_globals");
     cg_label("l8_init_globals");
     cg_rsp_off = 0;
     cg_push(5);
     cg_mov_rr(4, 5);
+    if (temps > 0) cg_alu_imm(5, (temps + 15) / 16 * 16, 4);
     cg_mov_rip_r("l8_init_done", 0, 0);
     cg_alu_imm(7, 0, 0);
     cg_jump_id(5, already);
