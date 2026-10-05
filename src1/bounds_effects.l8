@@ -82,6 +82,7 @@ bounds_effect_expr(sites: *BoundsEffectSites@new, fn: *Function@new, e: ?*Expr) 
                 Var v -> {
                     o: ?*Obj = v.var;
                     if (o == null) return bounds_effect_unknown(fn);
+                    o.bounds_may_write = true;
                     if (!o.is_local) return bounds_effect_unknown(fn)
                 }
                 Index _ -> {
@@ -147,7 +148,36 @@ bounds_effect_stmt(sites: *BoundsEffectSites@new, fn: *Function@new, s: ?*Stmt) 
     n: *Stmt = s;
     match n.kind {
         ExprStmt k -> bounds_effect_expr(sites, fn, k.lhs);
-        Decl k -> bounds_effect_expr(sites, fn, k.init);
+        Decl k -> {
+            local: ?*Obj = k.var;
+            if (local != null) {
+                local.bounds_static_fresh = false;
+                init: ?*Expr = k.init;
+                if (init != null) {
+                    match init.kind {
+                        New _ -> local.bounds_static_fresh = true;
+                        _ -> { }
+                    }
+                }
+                local.bounds_static_scalar = false;
+                local.bounds_static_length = false
+            }
+            if (local != null && !local.bounds_addr_taken) {
+                // Local constants are disabled during this syntax walk, so
+                // a later write cannot invalidate a derived initializer.
+                local_type: ?*Type = local.ty;
+                scalar: int = bounds_num(k.init);
+                length: int = bounds_known_len(k.init);
+                if (is_int_ty(local.ty) && scalar > -536870912 && scalar < 536870912) {
+                    local.bounds_static_scalar = true;
+                    local.const_val = scalar
+                } else if (length >= 0 && length < 536870912 && local_type != null && is_indexable(local_type)) {
+                    local.bounds_static_length = true;
+                    local.const_val = length
+                }
+            }
+            bounds_effect_expr(sites, fn, k.init)
+        }
         Return k -> bounds_effect_expr(sites, fn, k.lhs);
         Raise k -> bounds_effect_inits(sites, fn, k.inits);
         Block k -> bounds_effect_stmts(sites, fn, k.body);
@@ -414,6 +444,12 @@ bounds_infer_effects() raises Error, IndexOutOfBounds {
     fn: ?*Function = functions;
     while (fn != null) {
         fn.bounds_writes = null;
+        local: ?*Obj = fn.locals;
+        while (local != null) {
+            local.bounds_may_write = false;
+            if (local.is_local && !local.is_const) local.const_state = 0;
+            local = local.next
+        }
         fn.bounds_element_write = false;
         fn.bounds_unknown_write = fn.is_extern || fn.body == null;
         // The SCC numbering is assigned later; borrow its slot for dense IDs.
@@ -462,8 +498,25 @@ bounds_infer_effects() raises Error, IndexOutOfBounds {
     while (fn != null) {
         fn.bounds_visit = 0;
         fn.bounds_effect_queued = false;
+        local: ?*Obj = fn.locals;
+        while (local != null) {
+            bounds_prepare_static_local(local);
+            local = local.next
+        }
         fn = fn.next
     }
+}
+
+// Freeze eligibility after every assignment and address escape is known.
+// Numeric constants use the existing constant-value representation; codegen
+// still sees ordinary locals because is_const is unchanged.
+bounds_prepare_static_local(local: *Obj) {
+    if (!local.is_local || local.bounds_may_write || local.bounds_addr_taken) {
+        local.bounds_static_scalar = false;
+        local.bounds_static_length = false;
+        local.bounds_static_fresh = false
+    }
+    if (local.is_local && !local.is_const) local.const_state = (if (local.bounds_static_scalar) 2 else 0)
 }
 
 bounds_effect_site(caller: *Function@new, callee: *Function@new, args: ?*Expr@new) {
@@ -748,14 +801,14 @@ bounds_kill(f: ?*BoundsState@new, v: *Obj) raises Error, IndexOutOfBounds: ?*Bou
     if (f == null) return f;
     // Find the first affected row. The entire surviving prefix can share one
     // snapshot instead of allocating a new state for each unchanged row.
-    rows: []BoundsRow = f.rows_view;
+    rows: []*BoundsRow = f.rows_view;
     count: int = f.count;
     prefix: int = 0;
     sums: int = 0;
     found: bool = false;
     if (f.storage != null) {
         while (prefix < count && !found) invariant (0 <= prefix && prefix <= count && count <= len(rows)) {
-            row: *BoundsRow = &rows[prefix];
+            row: *BoundsRow = rows[prefix];
             if (row.index == v || row.array == v || bounds_sum_uses(row, v) || bounds_row_index_depends(row,
                 v)) found = true else {
                 if (row.kind == BoundsKind.SumUpper) sums = sums + 1;
@@ -788,7 +841,7 @@ bounds_kill(f: ?*BoundsState@new, v: *Obj) raises Error, IndexOutOfBounds: ?*Bou
         implications: null
     };
     for position in prefix..count {
-        q: *BoundsRow = &rows[position];
+        q: *BoundsRow = rows[position];
         if (q.index != v && q.array != v && !bounds_sum_uses(q, v) && !bounds_row_index_depends(q,
             v)) head = bounds_filter_copy(head, f, q, position)
     }
@@ -909,11 +962,11 @@ bounds_kill_shallow_record_fields(f: ?*BoundsState@new, sd: *StructDef) raises E
 bounds_pure_call_keeps_all(f: ?*BoundsState, callee: *Function) raises IndexOutOfBounds: bool {
     storage: ?*BoundsStorage = if (f == null) null else f.storage;
     if (f == null || storage == null) return true;
-    rows: []BoundsRow = f.rows_view;
-    numeric: []BoundsNumericView = f.numeric_view;
+    rows: []*BoundsRow = f.rows_view;
+    numeric: []*BoundsNumericView = f.numeric_view;
     count: int = f.count;
     for position in 0..count {
-        row: *BoundsRow = &rows[position];
+        row: *BoundsRow = rows[position];
         if (row.kind == BoundsKind.Equal || row.kind == BoundsKind.NotEqual) {
             left: ?*Expr = row.left;
             right: ?*Expr = row.right;
@@ -923,7 +976,7 @@ bounds_pure_call_keeps_all(f: ?*BoundsState, callee: *Function) raises IndexOutO
             left2: ?*Expr = row.left;
             right2: ?*Expr = row.right;
             if (left2 == null || right2 == null) return false;
-            edge: *BoundsNumericView = &numeric[position];
+            edge: *BoundsNumericView = numeric[position];
             if (!bounds_numeric_local_value(&edge.left, left2) || !bounds_numeric_local_value(&edge.right,
                 right2)) {
                 if (!bounds_term_roots_stable(left2) || !bounds_term_roots_stable(right2)) return false
@@ -941,8 +994,8 @@ bounds_after_call(f: ?*BoundsState@new, callee: ?*Function, args: ?*Expr) raises
     if (!bounds_reachable(f)) return f;
     storage: ?*BoundsStorage = if (f == null) null else f.storage;
     if (f == null || storage == null || f.count == 0) return null;
-    rows: []BoundsRow = f.rows_view;
-    numeric: []BoundsNumericView = f.numeric_view;
+    rows: []*BoundsRow = f.rows_view;
+    numeric: []*BoundsNumericView = f.numeric_view;
     count: int = f.count;
     if (callee != null && !callee.bounds_unknown_write && callee.bounds_writes == null && !callee.bounds_element_write && bounds_pure_call_keeps_all(f,
         callee)) {
@@ -960,7 +1013,7 @@ bounds_after_call(f: ?*BoundsState@new, callee: ?*Function, args: ?*Expr) raises
     }
     head: ?*BoundsState = bounds_empty(f);
     for q_position in 0..count {
-        q: *BoundsRow = &rows[q_position];
+        q: *BoundsRow = rows[q_position];
         a: ?*Obj = q.array;
         stable: bool = q.index.is_local && !q.index.bounds_addr_taken;
         if (a != null) {
@@ -980,7 +1033,7 @@ bounds_after_call(f: ?*BoundsState@new, callee: ?*Function, args: ?*Expr) raises
             stable = false;
             local_left: ?*Expr = q.left;
             local_right: ?*Expr = q.right;
-            edge: *BoundsNumericView = &numeric[q_position];
+            edge: *BoundsNumericView = numeric[q_position];
             local_values: bool = local_left != null && local_right != null && bounds_numeric_local_value(&edge.left,
                 local_left) && bounds_numeric_local_value(&edge.right, local_right);
             if (local_values) head = bounds_filter_copy(head, f, q, q_position) else if (callee != null) {

@@ -1,5 +1,7 @@
 tag compiler_internal;
 
+bounds_retire_epoch: int = 0;
+
 bounds_array_field_use: int = 0;
 
 // Explicit raises select the nearest matching handler. An unknown call may
@@ -35,7 +37,9 @@ bounds_value_facts(path: *Expr@new, value: *Expr@new, f: ?*BoundsState@new) rais
     path_ty: ?*Type = path.ty;
     if (local != null) path_ty = local.ty;
     if (bounds_pure_condition(value)) f = bounds_copy_value(f, value, path);
-    if (bounds_nonnull(f, value)) f = bounds_add_nonnull(f, path);
+    // Only an optional pointer destination can record the non-null fact.
+    if (path_ty != null && is_opt_pointer(path_ty) && bounds_nonnull(f, value)) f = bounds_add_nonnull(f,
+        path);
     if (is_int_ty(path_ty) && bounds_pure_condition(value)) f = bounds_numeric_value(path,
         value, f);
     match value.kind {
@@ -579,14 +583,20 @@ bounds_expr_transfer(e: *Expr@new, f: ?*BoundsState@new) noregion raises Error, 
                                     member, k.rhs, f)
                             }
                         }
+                        saved_pending: ?*Member = bounds_pending_member;
+                        if (!preproved) bounds_pending_member = member;
                         f = bounds_kill_member(f, member, field.lhs);
                         f = bounds_value_facts(k.lhs, k.rhs, f);
                         if (sd != null) {
-                            if (sd.invariant == null) return f;
+                            if (sd.invariant == null) {
+                                bounds_pending_member = saved_pending;
+                                return f
+                            }
                             if (preproved) f = bounds_record_invariant_facts(sd, field.lhs,
                                 f) else f = bounds_verify_record_invariant(sd, field.lhs,
                                 f, n.file, n.pos)
                         }
+                        bounds_pending_member = saved_pending;
                         return f
                     }
                     Index _ -> {
@@ -758,7 +768,7 @@ bounds_expr_transfer(e: *Expr@new, f: ?*BoundsState@new) noregion raises Error, 
     }
 }
 
-bounds_stmt(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBounds: ?*BoundsState@new {
+bounds_stmt_transfer(s: ?*Stmt@new, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBounds: ?*BoundsState@new {
     if (s == null || !bounds_reachable(f)) return f;
     n: *Stmt = s;
     match n.kind {
@@ -771,8 +781,10 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBo
                 init: ?*Expr = k.init;
                 if (init != null) {
                     match init.kind {
-                        New _ -> f = bounds_add_value(f, v, null, BoundsKind.Fresh,
-                            v.browse_id);
+                        New _ -> {
+                            if (!v.bounds_static_fresh || !bounds_classify_enabled) f = bounds_add_value(f,
+                                v, null, BoundsKind.Fresh, v.browse_id)
+                        }
                         _ -> { }
                     }
                 }
@@ -809,8 +821,7 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBo
                 f));
             no: ?*BoundsState = bounds_condition(k.cond, false, f);
             els: ?*Stmt = k.els;
-            if (els != null) no = bounds_stmt(els, bounds_condition(k.cond, false,
-                f));
+            if (els != null) no = bounds_stmt(els, no);
             bounds_meet(yes, no)
         }
         While k -> {
@@ -819,7 +830,7 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBo
             if (inv != null && !bounds_infer_mode && !bounds_invariant_proved(inv,
                 f)) error_at_file((bounds_current_fn or error("missing current function")).browse_file,
                 n.pos, "loop invariant is not proved at entry");
-            invariant: ?*BoundsState = f;
+            invariant: ?*BoundsState = bounds_loop_seed(f, n);
             changing: bool = true;
             while (changing) {
                 // The invariant holds at the loop head, before evaluating a
@@ -832,11 +843,14 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBo
                 if (inv != null && !bounds_infer_mode && !bounds_invariant_proved(inv,
                     at_end)) error_at_file((bounds_current_fn or error("missing current function")).browse_file,
                     n.pos, "loop invariant is not preserved by body");
-                next_inv: ?*BoundsState = bounds_widen(invariant, bounds_meet(f, bounds_meet(tested,
+                next_inv: ?*BoundsState = invariant;
+                if (!bounds_subset(invariant, tested) || !bounds_subset(invariant,
+                    at_end)) next_inv = bounds_widen(invariant, bounds_meet(f, bounds_meet(tested,
                     at_end)));
                 changing = !bounds_same(invariant, next_inv);
                 invariant = next_inv
             }
+            bounds_loop_remember(f, invariant, n);
             head2: ?*BoundsState = invariant;
             if (inv != null) head2 = bounds_condition(inv, true, head2);
             tested2: ?*BoundsState = bounds_expr(k.cond, head2);
@@ -879,7 +893,7 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBo
                 lo_const: int = -1;
                 if (bounds_pure_condition(k.iter)) lo_const = bounds_term_numeric_lower(f,
                     k.iter);
-                invariant2: ?*BoundsState = f;
+                invariant2: ?*BoundsState = bounds_loop_seed(f, n);
                 changing2: bool = true;
                 while (changing2) {
                     facts: ?*BoundsState = invariant2;
@@ -904,24 +918,28 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBo
                         true)) error_at_file(hi.file, n.pos, "array used as for-loop bound may change in loop");
                     if (hiconst >= 0 && (k.item.bounds_written || k.item.bounds_addr_taken)) error_at_file(hi.file,
                         n.pos, "range index may change in loop");
-                    next_inv2: ?*BoundsState = bounds_widen(invariant2, bounds_meet(f,
-                        endfacts));
+                    next_inv2: ?*BoundsState = invariant2;
+                    if (!bounds_subset(invariant2, endfacts)) next_inv2 = bounds_widen(invariant2,
+                        bounds_meet(f, endfacts));
                     changing2 = !bounds_same(invariant2, next_inv2);
                     invariant2 = next_inv2
                 }
+                bounds_loop_remember(f, invariant2, n);
                 return invariant2
             }
             // The collection is evaluated once. Keep facts that survive any
             // number of iterations, including the zero-iteration path.
-            invariant3: ?*BoundsState = f;
+            invariant3: ?*BoundsState = bounds_loop_seed(f, n);
             changing3: bool = true;
             while (changing3) {
                 endfacts3: ?*BoundsState = bounds_stmt(k.body, invariant3);
-                next_inv3: ?*BoundsState = bounds_widen(invariant3, bounds_meet(f,
-                    endfacts3));
+                next_inv3: ?*BoundsState = invariant3;
+                if (!bounds_subset(invariant3, endfacts3)) next_inv3 = bounds_widen(invariant3,
+                    bounds_meet(f, endfacts3));
                 changing3 = !bounds_same(invariant3, next_inv3);
                 invariant3 = next_inv3
             }
+            bounds_loop_remember(f, invariant3, n);
             invariant3
         }
         Match k -> {
@@ -959,7 +977,7 @@ bounds_stmt(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBo
     }
 }
 
-bounds_stmt_list(s: ?*Stmt, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBounds: ?*BoundsState@f {
+bounds_stmt_list(s: ?*Stmt@new, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBounds: ?*BoundsState@f {
     q: ?*Stmt = s;
     while (q != null) {
         f = bounds_stmt(q, f);
@@ -982,12 +1000,12 @@ bounds_last_stmt(first: ?*Stmt): ?*Stmt@first {
 // Constants survive intervening effects; state-dependent transfers do not.
 bounds_constant_value(path: *Expr@new, value: *Expr, f: ?*BoundsState@new) raises Error, IndexOutOfBounds: ?*BoundsState@f {
     number: int = bounds_num(value);
-    if (number > -536870912 && number < 536870912) {
+    if (number > -536870912 && number < 536870912 && bounds_num(path) != number) {
         f = bounds_add_order(f, path, new_num(number), false);
         f = bounds_add_order(f, new_num(number), path, false)
     }
     length: int = bounds_known_len(value);
-    if (length >= 0) {
+    if (length >= 0 && bounds_known_len(path) != length) {
         f = bounds_add_order(f, bounds_len_term(path), new_num(length), false);
         f = bounds_add_order(f, new_num(length), bounds_len_term(path), false)
     }
@@ -1028,4 +1046,377 @@ bounds_inits_stable(inits: ?*FieldInit) raises IndexOutOfBounds: bool {
         item = item.next
     }
     true
+}
+
+// Loop-local declarations are initialized afresh on each iteration. Other
+// uses in a loop must survive its backedge. Exception regions remain atomic.
+// Parameters and address-taken locals are never retired.
+bounds_live_loop_start: int = 0;
+
+bounds_live_use(obj: ?*Obj, step: int) {
+    if (obj == null) return;
+    if (step < 0) obj.bounds_keep_epoch = bounds_retire_epoch else if (step > obj.bounds_live_until) {
+        if (bounds_live_loop_start == 0 || obj.bounds_live_decl_step as int < bounds_live_loop_start) obj.bounds_live_until = step
+    }
+}
+
+bounds_live_expr(e: ?*Expr, step: int) {
+    if (e == null) return;
+    match e.kind {
+        Var k -> bounds_live_use(k.var, step);
+        Binary k -> {
+            bounds_live_expr(k.lhs, step);
+            bounds_live_expr(k.rhs, step)
+        }
+        Assign k -> {
+            bounds_live_expr(k.lhs, step);
+            bounds_live_expr(k.rhs, step)
+        }
+        LogAnd k -> {
+            bounds_live_expr(k.lhs, step);
+            bounds_live_expr(k.rhs, step)
+        }
+        LogOr k -> {
+            bounds_live_expr(k.lhs, step);
+            bounds_live_expr(k.rhs, step)
+        }
+        OrElse k -> {
+            bounds_live_expr(k.lhs, step);
+            bounds_live_expr(k.rhs, step)
+        }
+        Index k -> {
+            bounds_live_expr(k.lhs, step);
+            bounds_live_expr(k.idx, step)
+        }
+        Not k -> bounds_live_expr(k.lhs, step);
+        Neg k -> bounds_live_expr(k.lhs, step);
+        BitNot k -> bounds_live_expr(k.lhs, step);
+        Addr k -> bounds_live_expr(k.lhs, step);
+        Deref k -> bounds_live_expr(k.lhs, step);
+        MemberAccess k -> bounds_live_expr(k.lhs, step);
+        As k -> bounds_live_expr(k.lhs, step);
+        Trunc k -> bounds_live_expr(k.lhs, step);
+        Sizeof k -> bounds_live_expr(k.e, step);
+        Funcall k -> {
+            bounds_live_expr(k.target, step);
+            bounds_live_exprs(k.args, step)
+        }
+        New k -> {
+            bounds_live_expr(k.lhs, step);
+            bounds_live_expr(k.fill, step);
+            bounds_live_inits(k.inits, step)
+        }
+        StructLit k -> bounds_live_inits(k.inits, step);
+        VariantLit k -> bounds_live_inits(k.inits, step);
+        ArrayLit k -> bounds_live_exprs(k.elems, step);
+        If k -> {
+            bounds_live_expr(k.cond, step);
+            bounds_live_expr(k.then, step);
+            bounds_live_expr(k.els, step)
+        }
+        Block k -> bounds_live_stmts(k.body, step);
+        Match k -> {
+            bounds_live_expr(k.cond, step);
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                bounds_live_stmt(arm.body, step);
+                arm = arm.next
+            }
+        }
+        _ -> { }
+    }
+}
+
+bounds_live_exprs(e: ?*Expr, step: int) {
+    q: ?*Expr = e;
+    while (q != null) {
+        bounds_live_expr(q, step);
+        q = q.next
+    }
+}
+
+bounds_live_inits(inits: ?*FieldInit, step: int) {
+    q: ?*FieldInit = inits;
+    while (q != null) {
+        bounds_live_expr(q.lhs, step);
+        q = q.next
+    }
+}
+
+bounds_live_stmt(s: ?*Stmt, step: int) {
+    if (s == null) return;
+    match s.kind {
+        Return k -> bounds_live_expr(k.lhs, step);
+        ExprStmt k -> bounds_live_expr(k.lhs, step);
+        Decl k -> {
+            bounds_live_use(k.var, step);
+            bounds_live_expr(k.init, step)
+        }
+        Block k -> bounds_live_stmts(k.body, step);
+        Region k -> bounds_live_stmt(k.body, step);
+        If k -> {
+            bounds_live_expr(k.cond, step);
+            bounds_live_stmt(k.then, step);
+            bounds_live_stmt(k.els, step)
+        }
+        While k -> {
+            bounds_live_expr(k.cond, step);
+            bounds_live_expr(k.invariant, step);
+            bounds_live_stmt(k.body, step)
+        }
+        For k -> {
+            bounds_live_use(k.item, step);
+            bounds_live_use(k.coll, step);
+            bounds_live_use(k.idx, step);
+            bounds_live_use(k.n, step);
+            bounds_live_expr(k.iter, step);
+            bounds_live_expr(k.hi, step);
+            bounds_live_stmt(k.body, step)
+        }
+        Match k -> {
+            bounds_live_expr(k.cond, step);
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                bounds_live_stmt(arm.body, step);
+                arm = arm.next
+            }
+        }
+        Raise k -> bounds_live_inits(k.inits, step);
+        Try k -> {
+            bounds_live_stmt(k.body, step);
+            arm: ?*CatchArm = k.arms;
+            while (arm != null) {
+                bounds_live_stmt(arm.body, step);
+                arm = arm.next
+            }
+        }
+        Comment _ -> { }
+    }
+}
+
+bounds_live_stmts(s: ?*Stmt, step: int) {
+    q: ?*Stmt = s;
+    while (q != null) {
+        bounds_live_stmt(q, step);
+        q = q.next
+    }
+}
+
+// Number statement boundaries, then extend external loop uses to its exit.
+// Locals declared inside the loop retain their actual last-use boundaries.
+// The second walk marks retirement points without changing last-use maxima.
+bounds_live_points(
+    s: ?*Stmt,
+    step: int,
+    points: []bool,
+    loop_points: []bool
+): int {
+    if (s == null) return step;
+    match s.kind {
+        Block k -> {
+            q: ?*Stmt = k.body;
+            while (q != null) {
+                step = bounds_live_points(q, step, points, loop_points);
+                q = q.next
+            }
+        }
+        Region k -> step = bounds_live_points(k.body, step, points, loop_points);
+        If k -> {
+            step = bounds_live_points(k.then, step, points, loop_points);
+            step = bounds_live_points(k.els, step, points, loop_points);
+            bounds_live_expr(k.cond, step)
+        }
+        Match k -> {
+            arm: ?*MatchArm = k.arms;
+            while (arm != null) {
+                step = bounds_live_points(arm.body, step, points, loop_points);
+                arm = arm.next
+            }
+            bounds_live_expr(k.cond, step)
+        }
+        While k -> {
+            start: int = step;
+            step = bounds_live_points(k.body, step, loop_points, loop_points);
+            bounds_live_loop_start = start;
+            bounds_live_stmt(s, step);
+            bounds_live_loop_start = 0
+        }
+        For k -> {
+            start: int = step;
+            step = bounds_live_points(k.body, step, loop_points, loop_points);
+            bounds_live_loop_start = start;
+            bounds_live_stmt(s, step);
+            bounds_live_loop_start = 0
+        }
+        Decl k -> {
+            local: ?*Obj = k.var;
+            // Truncation can only make a declaration appear earlier,
+            // conservatively extending its lifetime.
+            if (local != null) local.bounds_live_decl_step = step trunc u32;
+            bounds_live_stmt(s, step)
+        }
+        _ -> bounds_live_stmt(s, step)
+    }
+    if (step >= 0 && step < len(points)) s.bounds_live_step = (if (points[step]) step else 0);
+    step + 1
+}
+
+bounds_prepare_liveness(fn: *Function) {
+    body: ?*Stmt = fn.body;
+    if (body == null) return;
+    step: int = bounds_live_points(body, 1, new bool[0](false), new bool[0](false));
+    match body.kind {
+        Block k -> {
+            last: ?*Stmt = bounds_last_stmt(k.body);
+            if (last != null) {
+                match last.kind {
+                    ExprStmt k -> bounds_live_expr(k.lhs, step);
+                    _ -> { }
+                }
+            }
+        }
+        ExprStmt k -> bounds_live_expr(k.lhs, step);
+        _ -> { }
+    }
+    bounds_live_expr(fn.bounds_ensures, step);
+    points: []bool = new bool[step](false);
+    // Contract uses outlive the body, including entry-value snapshots.
+    p: ?*Obj = fn.params;
+    while (p != null) {
+        p.bounds_live_until = step;
+        p = p.param_next
+    }
+    local: ?*Obj = fn.locals;
+    while (local != null) {
+        last: int = local.bounds_live_until;
+        if (!local.bounds_addr_taken && last > 0 && last < len(points)) points[last] = true;
+        local = local.next
+    }
+    // Batch the new boundaries inside loops so temporary-heavy bodies do
+    // not scan the surviving state after every statement. Delayed retirement only
+    // retains additional facts; it cannot remove a live value.
+    loop_points: []bool = new bool[len(points)](false);
+    pending: int = 0;
+    for i in 0..len(points) {
+        if (points[i]) {
+            pending = pending + 1;
+            loop_points[i] = pending >= 4;
+            if (pending >= 4) pending = 0
+        }
+    }
+    _end: int = bounds_live_points(body, 1, points, loop_points)
+}
+
+bounds_stmt(s: ?*Stmt@new, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBounds: ?*BoundsState@new {
+    result: ?*BoundsState = bounds_stmt_transfer(s, f);
+    // Small states cost less to scan than to prepare and maintain liveness.
+    // Prepare once, when any path in this function grows beyond that size.
+    if (bounds_count(result) >= 64) {
+        fn: ?*Function = bounds_current_fn;
+        if (fn != null && !fn.bounds_liveness_prepared) {
+            fn.bounds_liveness_prepared = true;
+            bounds_prepare_liveness(fn)
+        }
+    }
+    if (s != null && s.bounds_live_step > 0) result = bounds_retire_locals(result,
+        s.bounds_live_step);
+    result
+}
+
+bounds_retire_candidate(obj: *Obj, step: int): bool {
+    obj.is_local && !obj.bounds_addr_taken && obj.bounds_live_until > 0 && obj.bounds_live_until <= step && obj.bounds_keep_epoch != bounds_retire_epoch
+}
+
+// Only independent intervals can be removed. Relationships between objects,
+// compound paths, implications and contradictory intervals retain their roots.
+// This avoids discarding a dead local that is still a bridge in a live proof.
+bounds_retire_path(e: ?*Expr, root: *Obj): bool {
+    if (e == null) return true;
+    match e.kind {
+        Var k -> k.var == root;
+        Num _ -> true;
+        Null -> true;
+        Funcall k -> {
+            arg: ?*Expr = k.args;
+            k.target == null && streq(k.funcname, "len") && arg != null && arg.next == null && bounds_var(arg) == root
+        }
+        _ -> false
+    }
+}
+
+bounds_retire_keep(row: *BoundsRow) {
+    bounds_live_use(row.index, -1);
+    bounds_live_use(row.array, -1);
+    bounds_live_expr(row.left, -1);
+    bounds_live_expr(row.right, -1)
+}
+
+bounds_retire_locals(f: ?*BoundsState@new, step: int) raises Error, IndexOutOfBounds: ?*BoundsState@new {
+    if (f == null || !bounds_reachable(f)) return f;
+    bounds_retire_epoch = bounds_retire_epoch + 1;
+    count: int = f.count;
+    rows: []*BoundsRow = f.rows_view;
+    for i in 0..count {
+        row: *BoundsRow = rows[i];
+        root: *Obj = row.index;
+        // Numeric endpoints already identify simple variables and lengths.
+        // Reuse them instead of walking the same source expressions again.
+        edge: *BoundsNumericView = f.numeric_view[i];
+        if (edge.left.valid && edge.right.valid) {
+            if (row.array != null && row.array != root || row.separation != null || !edge.left.is_zero && edge.left.obj != root || !edge.right.is_zero && edge.right.obj != root) bounds_retire_keep(row)
+        } else if (row.array != null && row.array != root || row.kind == BoundsKind.SumUpper || row.separation != null || !bounds_retire_path(row.left,
+            root) || !bounds_retire_path(row.right, root)) bounds_retire_keep(row)
+    }
+    rule: ?*BoundsImplication = f.implications;
+    while (rule != null) {
+        bounds_retire_keep(&rule.consequence);
+        premise: ?*BoundsPremise = rule.premises;
+        while (premise != null) {
+            bounds_retire_keep(&premise.fact);
+            premise = premise.next
+        }
+        rule = rule.next
+    }
+    // A contradictory component can justify proofs elsewhere through zero.
+    // Keep it: no proof result or unreachable-path behavior may be weakened.
+    for i in 0..count {
+        row: *BoundsRow = rows[i];
+        if (bounds_retire_candidate(row.index, step) && row.kind == BoundsKind.Difference) {
+            edge: *BoundsNumericView = f.numeric_view[i];
+            if (edge.left.valid && edge.right.valid) {
+                reverse: BoundsNumericView = edge.*;
+                reverse.left = edge.right;
+                reverse.right = edge.left;
+                back: int = bounds_direct_bound(f, &reverse);
+                implicit: int = bounds_empty_distance(reverse.left, reverse.right);
+                if (implicit < back) back = implicit;
+                if (edge.bound <= -536870912 || edge.bound >= 536870912 || back < 1000000000 && back < 0 - edge.bound) bounds_live_use(row.index,
+                    -1)
+            } else bounds_live_use(row.index, -1)
+        }
+    }
+    prefix: int = 0;
+    sums: int = 0;
+    while (prefix < count && !bounds_retire_candidate(rows[prefix].index, step)) {
+        if (rows[prefix].kind == BoundsKind.SumUpper) sums = sums + 1;
+        prefix = prefix + 1
+    }
+    if (prefix == count) return f;
+    if (prefix < 0 || prefix > count) error("invalid live fact prefix");
+    result: ?*BoundsState = new BoundsState {
+        arena: f.arena,
+        unreachable: false,
+        storage: f.storage,
+        rows_view: f.rows_view,
+        numeric_view: f.numeric_view,
+        count: prefix,
+        sum_count: sums,
+        implications: null
+    };
+    for i in prefix..count {
+        row: *BoundsRow = rows[i];
+        if (!bounds_retire_candidate(row.index, step)) result = bounds_filter_copy(result,
+            f, row, i)
+    }
+    bounds_meet_implications(f, f, result)
 }

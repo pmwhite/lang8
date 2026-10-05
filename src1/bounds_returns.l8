@@ -1,5 +1,31 @@
 tag compiler_internal;
 
+// Attempted summary terms belong to one unchanged return state. Remember
+// failures too: another occurrence of the same term cannot prove more.
+type BoundsReturnTerm = {
+    term: *Expr;
+    next: ?*BoundsReturnTerm
+}
+
+bounds_return_terms(count: int): []?*BoundsReturnTerm@new {
+    capacity: int = 8;
+    while (capacity < count && capacity < 65536) capacity = capacity * 2;
+    new ?*BoundsReturnTerm[capacity](null)
+}
+
+bounds_return_term_seen(terms: []?*BoundsReturnTerm@new, term: *Expr@new) raises IndexOutOfBounds: bool {
+    if (len(terms) == 0) return false;
+    ref: BoundsTermRef = bounds_ref_expr(term);
+    slot: int = ref.hash as int & len(terms) - 1;
+    entry: ?*BoundsReturnTerm = terms[slot];
+    while (entry != null) {
+        if (bounds_same_term(entry.term, term)) return true;
+        entry = entry.next
+    }
+    terms[slot] = new BoundsReturnTerm { term: term, next: terms[slot] };
+    false
+}
+
 // The summary result is a symbolic object, never a parser-visible local.
 bounds_result_anchor(fn: *Function@new) noregion: *Obj@new {
     existing: ?*Obj = fn.bounds_result;
@@ -103,7 +129,8 @@ bounds_return_add_candidate(
     value: *BoundsAffine,
     candidate: *Expr@new,
     f: ?*BoundsState,
-    projection: ?*Expr@new
+    projection: ?*Expr@new,
+    attempted: []?*BoundsReturnTerm@new
 ) raises Error, IndexOutOfBounds: ?*BoundsReturnFact@head {
     root: ?*Obj = bounds_term_root(candidate);
     if (root != null) {
@@ -118,12 +145,7 @@ bounds_return_add_candidate(
             if (!is_int_ty(candidate.ty)) return head
         }
     }
-    q: ?*BoundsReturnFact = head;
-    while (q != null) {
-        if (bounds_same_term(q.term, candidate) && bounds_projection_same(q.projection,
-            projection)) return head;
-        q = q.next
-    }
+    if (bounds_return_term_seen(attempted, candidate)) return head;
     upper: int = bounds_return_bound(f, value.base, candidate);
     lower: int = bounds_return_bound(f, candidate, value.base);
     if (upper != 1000000000) head = new BoundsReturnFact {
@@ -371,13 +393,10 @@ bounds_return_project(
     head: ?*BoundsReturnFact@new,
     fn: *Function@new,
     path: *Expr@new,
-    f: ?*BoundsState@new
+    f: ?*BoundsState@new,
+    attempted: []?*BoundsReturnTerm@new
 ) raises Error, IndexOutOfBounds: ?*BoundsReturnFact@head {
-    visited: ?*BoundsReturnFact = head;
-    while (visited != null) {
-        if (bounds_projection_same(visited.projection, path)) return head;
-        visited = visited.next
-    }
+    if (bounds_return_term_seen(attempted, path)) return head;
     // A finite projection vocabulary also bounds recursive summary growth.
     if (bounds_projection_depth(path) > BOUNDS_SUMMARY_DEPTH) return head;
     if (!bounds_length_expr(path) && !is_int_ty(path.ty)) return head;
@@ -393,14 +412,16 @@ bounds_return_candidates(
     projection: ?*Expr@new,
     f: ?*BoundsState@new
 ) raises Error, IndexOutOfBounds: ?*BoundsReturnFact@head {
-    head = bounds_return_add_candidate(head, fn, value, new_num(0), f, projection);
+    attempted: []?*BoundsReturnTerm = bounds_return_terms(bounds_count(f) * 2 + 8);
+    head = bounds_return_add_candidate(head, fn, value, new_num(0), f, projection,
+        attempted);
     param: ?*Obj = fn.params;
     while (param != null) {
         head = bounds_return_add_candidate(head, fn, value, bounds_obj_expr(param),
-            f, projection);
+            f, projection, attempted);
         ty: ?*Type = param.ty;
         if (ty != null && is_indexable(ty)) head = bounds_return_add_candidate(head,
-            fn, value, bounds_len_term(bounds_obj_expr(param)), f, projection);
+            fn, value, bounds_len_term(bounds_obj_expr(param)), f, projection, attempted);
         param = param.param_next
     }
     for position in 0..bounds_count(f) {
@@ -409,9 +430,9 @@ bounds_return_candidates(
             left: ?*Expr = row.left;
             right: ?*Expr = row.right;
             if (left != null) head = bounds_return_add_candidate(head, fn, value,
-                left, f, projection);
+                left, f, projection, attempted);
             if (right != null) head = bounds_return_add_candidate(head, fn, value,
-                right, f, projection)
+                right, f, projection, attempted)
         }
     }
     head
@@ -425,17 +446,18 @@ bounds_return_properties(fn: *Function@new, expression: *Expr@new, f: ?*BoundsSt
     path: *Expr = bounds_obj_expr(anchor);
     facts: ?*BoundsState = bounds_value_facts(path, expression, f);
     head: ?*BoundsReturnFact = null;
+    attempted: []?*BoundsReturnTerm = bounds_return_terms(bounds_count(facts) * 2 + 8);
     if (is_indexable(ty)) head = bounds_return_project(head, fn, bounds_len_term(path),
-        facts);
+        facts, attempted);
     for position in 0..bounds_count(facts) {
         row: ?*BoundsRow = bounds_row(facts, position);
         if (row != null) {
             left: ?*Expr = row.left;
             right: ?*Expr = row.right;
             if (left != null && bounds_term_root(left) == anchor) head = bounds_return_project(head,
-                fn, left, facts);
+                fn, left, facts, attempted);
             if (right != null && bounds_term_root(right) == anchor) head = bounds_return_project(head,
-                fn, right, facts)
+                fn, right, facts, attempted)
         }
     }
     head

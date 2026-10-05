@@ -39,14 +39,14 @@ load_mem_at(
 }
 
 store_mem(ty: *Type) noregion raises Error, IndexOutOfBounds {
-    store_mem_at(ty, 0)
+    store_mem_at(ty, 7, 0)
 }
 
-store_mem_at(ty: *Type, offset: int) noregion raises Error, IndexOutOfBounds {
+store_mem_at(ty: *Type, base: int, offset: int) noregion raises Error, IndexOutOfBounds {
     esz: int = enum_mem_size(ty);
-    if (esz == 1 || is_byte_ty(ty)) cg_movb_rm(0, 7, offset) else {
+    if (esz == 1 || is_byte_ty(ty)) cg_movb_rm(0, base, offset) else {
         if (esz == 4 || is_i32_ty(ty) || is_u32_ty(ty) || is_f32_ty(ty)) cg_movl_rm(0,
-            7, offset) else cg_mov_rm(0, 7, offset)
+            base, offset) else cg_mov_rm(0, base, offset)
     }
 }
 
@@ -63,9 +63,15 @@ variant_payload_off(v: ?*Variant): int {
     if (v == null) 8 else v.payload_offset
 }
 
+// Aggregate copies may clobber rax and xmm0. Incoming float parameters are
+// spilled before these copies, and expression temporaries live in GPRs.
 emit_memcpy(sz: int) noregion raises Error, IndexOutOfBounds {
     if (sz <= 0) sz = 8;
     i: int = 0;
+    while (i + 16 <= sz) {
+        cg_copy16(i);
+        i = i + 16
+    }
     while (i + 8 <= sz) {
         cg_mov_mr(6, i, 0);
         cg_mov_rm(0, 7, i);
@@ -118,10 +124,11 @@ gen_field_inits(inits: ?*FieldInit, base_off: int) noregion raises Error, IndexO
             mem: *Member = init.member or error("internal");
             mty: *Type = mem.ty;
             gen_expr(lhs);
-            cg_mov_rr(3, 7);
             off: int = base_off + mem.offset;
-            if (off != 0) cg_alu_imm(0, off, 7);
-            store_value(mty)
+            if (passes_by_ref(mty)) {
+                cg_lea_mr(3, off, 7);
+                store_value(mty)
+            } else store_mem_at(mty, 3, off)
         }
         init = init.next
     }
@@ -429,6 +436,18 @@ emit_store_imm(vo: *Obj, ty: *Type, v: int) noregion raises Error, IndexOutOfBou
 // In particular they preserve rax when reg is rdi, so a scalar assignment
 // can retain its evaluated RHS without a push/pop pair. A failed attempt
 // emits no calls or writes and the normal address path may safely retry.
+// A value already resident in a register can be used without a scratch copy.
+// These locals cannot be changed through aliases (allocation excludes addresses).
+cg_value_register(n: *Expr): int {
+    match n.kind {
+        Var k -> {
+            vo: ?*Obj = k.var;
+            if (vo != null && vo.cg_register as int > 1) vo.cg_register as int else 0
+        }
+        _ -> 0
+    }
+}
+
 gen_simple_pointer(n: *Expr, reg: int) noregion raises Error, IndexOutOfBounds: bool {
     match n.kind {
         Var _ -> gen_simple_operand(n, reg);
@@ -447,9 +466,13 @@ gen_simple_member_base(lhs: *Expr, reg: int) noregion raises Error, IndexOutOfBo
 gen_simple_store(lhs: *Expr, ty: *Type) noregion raises Error, IndexOutOfBounds: bool {
     match lhs.kind {
         MemberAccess k -> {
-            if (!gen_simple_member_base(k.lhs, 7)) return false;
+            base: int = cg_value_register(k.lhs);
+            if (base == 0) {
+                if (!gen_simple_member_base(k.lhs, 7)) return false;
+                base = 7
+            }
             member: *Member = k.member or error("internal");
-            store_mem_at(ty, member.offset);
+            store_mem_at(ty, base, member.offset);
             true
         }
         _ -> {
@@ -481,6 +504,14 @@ gen_simple_addr(n: *Expr, reg: int) noregion raises Error, IndexOutOfBounds: boo
             if (is_array(ty)) {
                 if (!gen_simple_addr(k.lhs, reg)) return false
             } else if (!gen_simple_pointer(k.lhs, reg)) return false;
+            size: int = type_size(type_base(ty));
+            if (imm_operand(k.idx)) {
+                offset: int = imm_value(k.idx) * size;
+                if (fits_imm32(offset)) {
+                    if (offset != 0) cg_lea_mr(reg, offset, reg);
+                    return true
+                }
+            }
             match k.idx.kind {
                 Binary sum -> {
                     if (!gen_simple_operand(sum.lhs, 10)) return false;
@@ -491,7 +522,6 @@ gen_simple_addr(n: *Expr, reg: int) noregion raises Error, IndexOutOfBounds: boo
                     if (!gen_simple_operand(k.idx, 10)) return false
                 }
             }
-            size: int = type_size(type_base(ty));
             if (size != 1) cg_imul_imm(size, 10);
             cg_alu_rr(1, 10, reg);
             true
@@ -518,6 +548,12 @@ gen_load(n: *Expr) noregion raises Error, IndexOutOfBounds {
     }
     match n.kind {
         MemberAccess k -> {
+            base: int = cg_value_register(k.lhs);
+            if (base != 0) {
+                member: *Member = k.member or error("internal");
+                load_mem_at(ty, base, member.offset, 0);
+                return
+            }
             base_ty: ?*Type = decay(k.lhs.ty);
             if (base_ty != null && is_any_pointer(base_ty) && (is_struct_ty(type_base(base_ty)) || is_exn_ty(type_base(base_ty)))) gen_expr(k.lhs) else gen_addr(k.lhs);
             member: *Member = k.member or error("internal");
@@ -570,13 +606,77 @@ gen_simple_operand(n: *Expr, reg: int) noregion raises Error, IndexOutOfBounds: 
         MemberAccess k -> {
             ty: ?*Type = n.ty;
             if (ty == null || passes_by_ref(ty)) return false;
-            if (!gen_simple_member_base(k.lhs, reg)) return false;
+            base: int = cg_value_register(k.lhs);
+            if (base == 0) {
+                if (!gen_simple_member_base(k.lhs, reg)) return false;
+                base = reg
+            }
             member: *Member = k.member or error("internal");
-            load_mem_at(ty, reg, member.offset, reg);
+            load_mem_at(ty, base, member.offset, reg);
             true
         }
         _ -> false
     }
+}
+
+// Restrict address formation to a local or one of its fields. Neither form
+// calls code, changes memory, or uses another ABI argument register as scratch.
+cg_local_call_address(n: *Expr): bool {
+    match n.kind {
+        Var k -> k.var != null && k.var.is_local && !k.var.is_const;
+        MemberAccess k -> {
+            match k.lhs.kind {
+                Var v -> v.var != null && v.var.is_local && !v.var.is_const;
+                _ -> false
+            }
+        }
+        _ -> false
+    }
+}
+
+// These arguments read only constants, local values, or local addresses.
+// Loading ABI registers cannot change later arguments or clobber earlier ones:
+// allocated locals live in callee-saved registers, and the rest use rbp slots.
+cg_direct_call_args(args: ?*Expr): bool {
+    a: ?*Expr = args;
+    while (a != null) {
+        ty: ?*Type = a.ty;
+        if (ty == null || is_float_ty(ty)) return false;
+        if (!imm_operand(a)) {
+            match a.kind {
+                Var k -> {
+                    vo: ?*Obj = k.var;
+                    if (vo == null || !vo.is_local && !vo.is_const) return false;
+                    if (passes_by_ref(ty) && (!vo.is_local || vo.is_const)) return false
+                }
+                MemberAccess _ -> {
+                    if (!cg_local_call_address(a)) return false
+                }
+                Addr k -> {
+                    if (!cg_local_call_address(k.lhs)) return false
+                }
+                _ -> return false
+            }
+        }
+        a = a.next
+    }
+    true
+}
+
+cg_load_call_arg(a: *Expr, reg: int) noregion raises Error, IndexOutOfBounds {
+    ty: *Type = a.ty or error("missing call argument type");
+    if (passes_by_ref(ty)) {
+        if (!gen_simple_addr(a, reg)) error("internal: simple aggregate argument");
+        return
+    }
+    match a.kind {
+        Addr k -> {
+            if (!gen_simple_addr(k.lhs, reg)) error("internal: simple address argument");
+            return
+        }
+        _ -> { }
+    }
+    if (!gen_simple_operand(a, reg)) error("internal: simple call argument")
 }
 
 gen_binop_setup(lhs: *Expr, rhs: *Expr) noregion raises Error, IndexOutOfBounds {
@@ -749,8 +849,9 @@ gen_cmp_set(setcc: []i8) noregion raises Error {
 
 gen_cmp_flags(lhs: *Expr, rhs: *Expr) noregion raises Error, IndexOutOfBounds {
     if (imm_operand(rhs) && fits_imm32(imm_value(rhs))) {
-        gen_expr(lhs);
-        cg_alu_imm(7, imm_value(rhs), 0);
+        reg: int = cg_value_register(lhs);
+        if (reg == 0) gen_expr(lhs);
+        cg_alu_imm(7, imm_value(rhs), reg);
         return
     }
     if (imm_operand(lhs) && fits_imm32(imm_value(lhs))) {
@@ -758,6 +859,17 @@ gen_cmp_flags(lhs: *Expr, rhs: *Expr) noregion raises Error, IndexOutOfBounds {
         cg_mov_rr(0, 7);
         cg_mov_imm(imm_value(lhs), 0);
         cg_alu_rr(57, 7, 0);
+        return
+    }
+    left_reg: int = cg_value_register(lhs);
+    if (left_reg != 0 && gen_simple_operand(rhs, 7)) {
+        cg_alu_rr(57, 7, left_reg);
+        return
+    }
+    right_reg: int = cg_value_register(rhs);
+    if (right_reg != 0) {
+        gen_expr(lhs);
+        cg_alu_rr(57, right_reg, 0);
         return
     }
     gen_binop_setup(lhs, rhs);
@@ -1377,6 +1489,13 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
                 }
             }
             if (!passes_by_ref(lhs_ty) && gen_simple_store(q.lhs, lhs_ty)) return;
+            // Simple address formation preserves the evaluated source in rax.
+            if (passes_by_ref(lhs_ty) && gen_simple_addr(q.lhs, 7)) {
+                cg_mov_rr(0, 6);
+                emit_memcpy(type_size(lhs_ty));
+                cg_mov_rr(7, 0);
+                return
+            }
             cg_push(0);
             gen_addr(q.lhs);
             cg_mov_rr(0, 7);
@@ -1429,12 +1548,8 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
         LogAnd k -> {
             lf: int = new_label();
             le: int = new_label();
-            gen_expr(k.lhs);
-            cg_alu_imm(7, 0, 0);
-            cg_jump_id(4, lf);
-            gen_expr(k.rhs);
-            cg_alu_imm(7, 0, 0);
-            cg_jump_id(4, lf);
+            gen_cond(k.lhs, lf, false);
+            gen_cond(k.rhs, lf, false);
             cg_mov_imm(1, 0);
             cg_jump_id(0 - 1, le);
             cg_label_id(lf);
@@ -1446,12 +1561,8 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
             lt: int = new_label();
             lf2: int = new_label();
             le2: int = new_label();
-            gen_expr(k.lhs);
-            cg_alu_imm(7, 0, 0);
-            cg_jump_id(5, lt);
-            gen_expr(k.rhs);
-            cg_alu_imm(7, 0, 0);
-            cg_jump_id(4, lf2);
+            gen_cond(k.lhs, lt, true);
+            gen_cond(k.rhs, lf2, false);
             cg_label_id(lt);
             cg_mov_imm(1, 0);
             cg_jump_id(0 - 1, le2);
@@ -1501,6 +1612,26 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
             while (a != null) {
                 if (is_sse_ty(a.ty)) has_float = true;
                 a = a.next
+            }
+            if (has_sret == 0 && nargs <= 6 && !has_float && cg_direct_call_args(k.args)) {
+                slot: int = 0;
+                a = k.args;
+                while (a != null) {
+                    cg_load_call_arg(a, cg_arg_reg(slot));
+                    slot = slot + 1;
+                    a = a.next
+                }
+                if (streq(k.funcname, "memcpy")) {
+                    emit_memcpy_call();
+                    return
+                }
+                if (streq(k.funcname, "read")) {
+                    emit_io_call(k.funcname, k.args);
+                    return
+                }
+                cg_call(call_name);
+                emit_ret_to_rax(n.ty);
+                return
             }
             fast: bool = false;
             if (has_sret == 0 && nargs <= 1 && !has_float) fast = true;
@@ -1788,10 +1919,16 @@ gen_match(cond: *Expr, arms: ?*MatchArm) noregion raises Error, IndexOutOfBounds
             _ -> gen_expr(cond)
         }
     } else gen_expr(cond);
-    cg_push(0);
-    if (cty != null && is_enum_ty(cty)) load_mem(enum_tag_type(cty));
-    cg_push(0);
     enum_dispatch: bool = cty != null && is_enum_ty(cty);
+    if (cty != null && is_enum_ty(cty)) {
+        // Dispatch only compares rax; rsi keeps the payload address until the
+        // selected arm copies it. No value needs to survive the arm body.
+        cg_mov_rr(0, 6);
+        load_mem(enum_tag_type(cty))
+    } else {
+        cg_push(0);
+        cg_push(0)
+    }
     missing: int = new_label();
     if (enum_dispatch) {
         fallback: int = missing;
@@ -1829,7 +1966,7 @@ gen_match(cond: *Expr, arms: ?*MatchArm) noregion raises Error, IndexOutOfBounds
             if (av == null) error("missing variant");
             psz: int = av.payload_size;
             poff: int = av.payload_offset;
-            cg_mov_mr(4, 8, 6);
+            if (!enum_dispatch) cg_mov_mr(4, 8, 6);
             if (poff != 0) cg_alu_imm(0, poff, 6);
             cg_lea_mr(5, bv.offset, 7);
             emit_memcpy(psz)
@@ -1843,7 +1980,30 @@ gen_match(cond: *Expr, arms: ?*MatchArm) noregion raises Error, IndexOutOfBounds
     cg_mov_imm(1, 7);
     cg_call("exit");
     cg_label_id(lend);
-    cg_alu_imm(0, 16, 4)
+    if (!enum_dispatch) cg_alu_imm(0, 16, 4)
+}
+
+// For-loop bounds and counters are integer locals with no evaluation effects.
+emit_loop_compare(item: *Obj, bound: *Obj) noregion raises Error, IndexOutOfBounds {
+    left: int = item.cg_register as int;
+    if (left <= 1) {
+        left = 1;
+        cg_mov_mr(5, item.offset, left)
+    }
+    right: int = bound.cg_register as int;
+    if (right <= 1) {
+        right = 0;
+        cg_mov_mr(5, bound.offset, right)
+    }
+    cg_alu_rr(57, right, left)
+}
+
+emit_loop_increment(item: *Obj) noregion raises Error, IndexOutOfBounds {
+    if (item.cg_register as int > 1) cg_alu_imm(0, 1, item.cg_register as int) else {
+        emit_load_var(item, ty_int);
+        cg_alu_imm(0, 1, 0);
+        emit_store_var(item, ty_int)
+    }
 }
 
 gen_stmt(n: *Stmt) noregion raises Error, IndexOutOfBounds {
@@ -1918,15 +2078,10 @@ gen_stmt(n: *Stmt) noregion raises Error, IndexOutOfBounds {
                 gen_expr(hu3);
                 emit_store_var(k.n, ty_int);
                 cg_label_id(lb3);
-                emit_load_var(k.item, ty_int);
-                cg_mov_rr(0, 1);
-                emit_load_var(k.n, ty_int);
-                cg_alu_rr(57, 0, 1);
+                emit_loop_compare(k.item, k.n);
                 cg_jump_id(13, le3);
                 gen_stmt(k.body);
-                emit_load_var(k.item, ty_int);
-                cg_alu_imm(0, 1, 0);
-                emit_store_var(k.item, ty_int);
+                emit_loop_increment(k.item);
                 cg_jump_id(0 - 1, lb3);
                 cg_label_id(le3);
                 return
@@ -1947,10 +2102,7 @@ gen_stmt(n: *Stmt) noregion raises Error, IndexOutOfBounds {
                 emit_store_imm(iu2, ty_int, 0);
                 emit_store_imm(k.n, ty_int, array_len(sty));
                 cg_label_id(lb3);
-                emit_load_var(iu2, ty_int);
-                cg_mov_rr(0, 1);
-                emit_load_var(k.n, ty_int);
-                cg_alu_rr(57, 0, 1);
+                emit_loop_compare(iu2, k.n);
                 cg_jump_id(3, le3);
                 cg_lea_mr(5, cu2.offset, 6);
                 emit_load_var(iu2, ty_int);
@@ -1965,9 +2117,7 @@ gen_stmt(n: *Stmt) noregion raises Error, IndexOutOfBounds {
                     emit_store_var(k.item, ity)
                 }
                 gen_stmt(k.body);
-                emit_load_var(iu2, ty_int);
-                cg_alu_imm(0, 1, 0);
-                emit_store_var(iu2, ty_int);
+                emit_loop_increment(iu2);
                 cg_jump_id(0 - 1, lb3);
                 cg_label_id(le3);
                 return
@@ -1979,10 +2129,7 @@ gen_stmt(n: *Stmt) noregion raises Error, IndexOutOfBounds {
             cg_mov_mr(0, 0 - 8, 0);
             emit_store_var(k.n, ty_int);
             cg_label_id(lb3);
-            emit_load_var(iu2, ty_int);
-            cg_mov_rr(0, 1);
-            emit_load_var(k.n, ty_int);
-            cg_alu_rr(57, 0, 1);
+            emit_loop_compare(iu2, k.n);
             cg_jump_id(3, le3);
             emit_load_var(cu2, sty);
             cg_mov_rr(0, 6);
@@ -1998,9 +2145,7 @@ gen_stmt(n: *Stmt) noregion raises Error, IndexOutOfBounds {
                 emit_store_var(k.item, ity)
             }
             gen_stmt(k.body);
-            emit_load_var(iu2, ty_int);
-            cg_alu_imm(0, 1, 0);
-            emit_store_var(iu2, ty_int);
+            emit_loop_increment(iu2);
             cg_jump_id(0 - 1, lb3);
             cg_label_id(le3);
             return
@@ -2351,7 +2496,10 @@ emit_text() noregion raises Error, IndexOutOfBounds {
             narrow_top = null;
             catch_top = null;
             assign_lvar_offsets(fn);
-            allocated: bool = cg_assign_registers(fn);
+            save_regs: bool = !cg_scalar_stmts(fn.body);
+            // The same whitelist that permits omitting scratch-register saves
+            // also lets allocation use r12/r13 throughout the function.
+            allocated: int = cg_assign_registers(fn, if (save_regs) 2 else 4);
             current_fn_name = fn.name;
             current_return_ty = fn.return_ty;
             current_sret = fn.sret;
@@ -2363,8 +2511,7 @@ emit_text() noregion raises Error, IndexOutOfBounds {
             cg_rsp_off = 0;
             cg_push(5);
             cg_mov_rr(4, 5);
-            save_regs: bool = !cg_scalar_stmts(fn.body);
-            register_space: int = if (allocated) 16 else 0;
+            register_space: int = (allocated + 1) / 2 * 16;
             register_base: int = fn.stack_size + (if (save_regs) 24 else 8);
             // Keep the local offsets and 16-byte call alignment in either case.
             if (save_regs) {
@@ -2373,9 +2520,11 @@ emit_text() noregion raises Error, IndexOutOfBounds {
                 cg_mov_rm(12, 5, 0 - fn.stack_size - 16);
                 cg_mov_rm(13, 5, 0 - fn.stack_size - 24)
             } else cg_alu_imm(5, fn.stack_size + 8 + register_space, 4);
-            if (allocated) {
+            if (allocated > 0) {
                 cg_mov_rm(14, 5, 0 - register_base - 8);
-                cg_mov_rm(15, 5, 0 - register_base - 16)
+                cg_mov_rm(15, 5, 0 - register_base - 16);
+                if (allocated > 2) cg_mov_rm(12, 5, 0 - register_base - 24);
+                if (allocated > 3) cg_mov_rm(13, 5, 0 - register_base - 32)
             }
             ri: int = 0;
             rs: int = 0;
@@ -2385,7 +2534,8 @@ emit_text() noregion raises Error, IndexOutOfBounds {
                 emit_store_incoming(ri, sret.offset);
                 ri = ri + 1
             }
-            /* Spill incoming args first; by-ref memcpy clobbers %rsi/%rdi/%rax. */
+            /* Preserve incoming args before copying aggregates. Allocated scalars
+             * go straight to callee-saved registers; copies do not clobber them. */
             i: int = 0;
             while (i < fn.nparams) {
                 po: ?*Obj = fn_param(fn, i);
@@ -2407,12 +2557,16 @@ emit_text() noregion raises Error, IndexOutOfBounds {
                         nst = nst + 1
                     }
                 } else {
+                    preg: int = p.cg_register as int;
                     if (ri < 6) {
-                        emit_store_incoming(ri, p.offset);
+                        if (preg > 1) cg_mov_rr(cg_arg_reg(ri), preg) else emit_store_incoming(ri,
+                            p.offset);
                         ri = ri + 1
                     } else {
-                        cg_mov_mr(5, 16 + 8 * nst, 0);
-                        cg_mov_rm(0, 5, p.offset);
+                        if (preg > 1) cg_mov_mr(5, 16 + 8 * nst, preg) else {
+                            cg_mov_mr(5, 16 + 8 * nst, 0);
+                            cg_mov_rm(0, 5, p.offset)
+                        }
                         nst = nst + 1
                     }
                 }
@@ -2432,11 +2586,6 @@ emit_text() noregion raises Error, IndexOutOfBounds {
                 }
                 i = i + 1
             }
-            param: ?*Obj = fn.params;
-            while (param != null) {
-                if (param.cg_register as int > 1) cg_mov_mr(5, param.offset, param.cg_register as int);
-                param = param.param_next
-            }
             if (streq(fn.name, "main")) cg_call("l8_init_globals");
             body: ?*Stmt = fn.body;
             if (body == null) error("missing body");
@@ -2450,9 +2599,11 @@ emit_text() noregion raises Error, IndexOutOfBounds {
             }
             cg_label_id(current_return_lab);
             emit_rax_to_ret(current_return_ty);
-            if (allocated) {
+            if (allocated > 0) {
                 cg_mov_mr(5, 0 - register_base - 8, 14);
-                cg_mov_mr(5, 0 - register_base - 16, 15)
+                cg_mov_mr(5, 0 - register_base - 16, 15);
+                if (allocated > 2) cg_mov_mr(5, 0 - register_base - 24, 12);
+                if (allocated > 3) cg_mov_mr(5, 0 - register_base - 32, 13)
             }
             if (save_regs) {
                 cg_mov_mr(5, 0 - fn.stack_size - 8, 3);

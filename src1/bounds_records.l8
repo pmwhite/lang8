@@ -1,5 +1,58 @@
 tag compiler_internal;
 
+// A pending field write must prove its replacement independently of the
+// invariant being established. Constructors use an unchecked symbolic root.
+bounds_pending_member: ?*Member = null;
+
+bounds_fixed_length_clause(sd: *StructDef, length: *Expr, constant: *Expr) {
+    match length.kind {
+        Funcall call -> {
+            if (!streq(call.funcname, "len") || call.target != null) return;
+            arg: ?*Expr = call.args;
+            if (arg == null || arg.next != null) return;
+            obj: ?*Obj = bounds_var(arg);
+            if (obj == null) return;
+            member: ?*Member = bounds_invariant_member(sd, obj);
+            if (member == null) return;
+            value: int = bounds_num(constant);
+            if (value >= 0 && value < 536870912) member.bounds_fixed_length = value trunc i32
+        }
+        _ -> { }
+    }
+}
+
+bounds_prepare_fixed_lengths(sd: *StructDef, invariant: *Expr) {
+    match invariant.kind {
+        LogAnd k -> {
+            bounds_prepare_fixed_lengths(sd, k.lhs);
+            bounds_prepare_fixed_lengths(sd, k.rhs)
+        }
+        Binary k -> {
+            if (k.op == BinOp.Eq) {
+                bounds_fixed_length_clause(sd, k.lhs, k.rhs);
+                bounds_fixed_length_clause(sd, k.rhs, k.lhs)
+            }
+        }
+        _ -> { }
+    }
+}
+
+bounds_member_known_len(e: *Expr): int {
+    if (!bounds_classify_enabled) return -1;
+    match e.kind {
+        MemberAccess k -> {
+            member: ?*Member = k.member;
+            if (member == null || member == bounds_pending_member) return -1;
+            length: int = member.bounds_fixed_length as int;
+            if (length < 0) return -1;
+            root: ?*Obj = bounds_term_root(k.lhs);
+            if (root != null && root.bounds_unchecked_record) return -1;
+            length
+        }
+        _ -> -1
+    }
+}
+
 // Quantified array clauses are closed over the element and constants. A
 // successful element read can instantiate one clause; a write proves it for
 // the replacement value while the other elements retain their old facts.
@@ -247,9 +300,63 @@ bounds_invariant_map(e: *Expr@new, sd: *StructDef@new, base: *Expr@new) raises I
     bounds_invariant_map_with(e, sd, base, null, null)
 }
 
+// Field reads reassume the invariant, usually on an unchanged snapshot.
+// Reuse the previous result for the same input instead of re-deriving it.
 bounds_record_invariant_facts(sd: *StructDef@new, base: *Expr@new, f: ?*BoundsState@new) raises Error, IndexOutOfBounds: ?*BoundsState@new {
     inv: ?*Expr = sd.invariant;
     if (inv == null) return f;
+    if (f == null) return bounds_record_invariant_assume(sd, inv, base, f);
+    arena: ?*BoundsArena = f.arena;
+    if (arena == null) return bounds_record_invariant_assume(sd, inv, base, f);
+    memo: ?*BoundsInvariantMemo = arena.invariants;
+    while (memo != null) {
+        if (memo.input == f && memo.record == sd && memo.pending == bounds_pending_member && bounds_same_term(memo.base,
+            base)) return memo.output;
+        memo = memo.next
+    }
+    path: ?*BoundsInvariantPath = arena.invariant_paths;
+    while (path != null && (path.record != sd || !bounds_same_term(path.base, base))) path = path.next;
+    if (path == null) {
+        // Bound lookup cost; a miss only maps the invariant again.
+        if (arena.invariant_path_count >= 64) {
+            arena.invariant_paths = null;
+            arena.invariant_path_count = 0
+        }
+        path = new BoundsInvariantPath {
+            record: sd,
+            base: base,
+            mapped: bounds_invariant_map(inv, sd, base),
+            next: arena.invariant_paths
+        };
+        arena.invariant_paths = path;
+        arena.invariant_path_count = arena.invariant_path_count + 1
+    }
+    mapped: ?*Expr = path.mapped;
+    out: ?*BoundsState = if (mapped == null) f else bounds_condition(mapped, true,
+        f);
+    // Bound lookup cost; a miss only repeats the ordinary derivation.
+    if (arena.invariant_count >= 32) {
+        arena.invariants = null;
+        arena.invariant_count = 0
+    }
+    arena.invariants = new BoundsInvariantMemo {
+        record: sd,
+        base: base,
+        pending: bounds_pending_member,
+        input: f,
+        output: out,
+        next: arena.invariants
+    };
+    arena.invariant_count = arena.invariant_count + 1;
+    out
+}
+
+bounds_record_invariant_assume(
+    sd: *StructDef@new,
+    inv: *Expr@new,
+    base: *Expr@new,
+    f: ?*BoundsState@new
+) raises Error, IndexOutOfBounds: ?*BoundsState@new {
     mapped: ?*Expr = bounds_invariant_map(inv, sd, base);
     if (mapped == null) return f;
     bounds_condition(mapped, true, f)
@@ -370,6 +477,7 @@ bounds_verify_record_constructor(e: *Expr@new, inits: ?*FieldInit@new, f: ?*Boun
     saved_scope: ?*Obj = scope_locals;
     temp: *Obj = new_obj(".record-invariant", true);
     temp.ty = e.ty;
+    temp.bounds_unchecked_record = true;
     base: *Expr = bounds_obj_expr(temp);
     facts: ?*BoundsState = bounds_record_facts(base, inits, f);
     _verified: ?*BoundsState = bounds_verify_record_invariant(sd, base, facts, e.file,

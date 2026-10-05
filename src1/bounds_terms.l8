@@ -135,13 +135,13 @@ bounds_scalar_class_has(
     value: *Expr
 ) raises IndexOutOfBounds: bool {
     if (bounds_same_scalar(seed, value)) return true;
-    rows: []BoundsRow = f.rows_view;
+    rows: []*BoundsRow = f.rows_view;
     positions: []int = class.rows;
     count: int = class.count;
     for i in 0..count {
         position: int = positions[i];
         if (0 <= position && position < f.count) {
-            row: *BoundsRow = &rows[position];
+            row: *BoundsRow = rows[position];
             lhs: ?*Expr = row.left;
             rhs: ?*Expr = row.right;
             if (lhs != null && bounds_same_scalar(lhs, value)) return true;
@@ -172,7 +172,7 @@ bounds_scalar_class_add(class: *BoundsScalarClass@new, position: int) requires (
 
 bounds_scalar_class(f: *BoundsState, value: *Expr) raises IndexOutOfBounds: *BoundsScalarClass@new {
     extent: int = f.count;
-    rows: []BoundsRow = f.rows_view;
+    rows: []*BoundsRow = f.rows_view;
     class: *BoundsScalarClass = new BoundsScalarClass { reachable: new bool[extent](false), rows: new int[4](0), count: 0 };
     reachable: []bool = class.reachable;
     changed: bool = true;
@@ -180,7 +180,7 @@ bounds_scalar_class(f: *BoundsState, value: *Expr) raises IndexOutOfBounds: *Bou
         changed = false;
         for position in 0..len(reachable) {
             if (!reachable[position]) {
-                row: *BoundsRow = &rows[position];
+                row: *BoundsRow = rows[position];
                 if (row.kind == BoundsKind.Equal) {
                     left: ?*Expr = row.left;
                     right: ?*Expr = row.right;
@@ -202,13 +202,13 @@ bounds_scalar_class(f: *BoundsState, value: *Expr) raises IndexOutOfBounds: *Bou
 // Compare its constants directly instead of rescanning all facts and proving
 // membership again for each endpoint.
 bounds_scalar_class_differs(class: *BoundsScalarClass, f: *BoundsState, value: *Expr): bool {
-    rows: []BoundsRow = f.rows_view;
+    rows: []*BoundsRow = f.rows_view;
     positions: []int = class.rows;
     count: int = class.count;
     for i in 0..count {
         position: int = positions[i];
         if (0 <= position && position < f.count) {
-            row: *BoundsRow = &rows[position];
+            row: *BoundsRow = rows[position];
             left: ?*Expr = row.left;
             right: ?*Expr = row.right;
             if (left != null && bounds_scalar_constants_differ(left, value)) return true;
@@ -229,11 +229,11 @@ bounds_scalar_proves(
     if (kind == BoundsKind.Equal && bounds_same_scalar(left, right)) return true;
     if (kind == BoundsKind.NotEqual && bounds_scalar_constants_differ(left, right)) return true;
     if (f == null || f.storage == null) return false;
-    rows: []BoundsRow = f.rows_view;
+    rows: []*BoundsRow = f.rows_view;
     count: int = f.count;
     has_equal: bool = false;
     for position in 0..count {
-        row: *BoundsRow = &rows[position];
+        row: *BoundsRow = rows[position];
         if (row.kind == BoundsKind.Equal) has_equal = true;
         if (row.kind == kind) {
             x: ?*Expr = row.left;
@@ -252,7 +252,7 @@ bounds_scalar_proves(
     b: *BoundsScalarClass = bounds_scalar_class(f, right);
     if (bounds_scalar_constant(left) && bounds_scalar_class_differs(b, f, left)) return true;
     for position in 0..count {
-        row: *BoundsRow = &rows[position];
+        row: *BoundsRow = rows[position];
         if (row.kind == BoundsKind.NotEqual) {
             x: ?*Expr = row.left;
             y: ?*Expr = row.right;
@@ -438,7 +438,7 @@ bounds_num(e: ?*Expr): int {
         }
         Var k -> {
             v: ?*Obj = k.var;
-            if (v != null && v.is_const && v.const_state == 2 && is_int_ty(v.ty)) return v.const_val;
+            if (v != null && v.const_state == 2 && is_int_ty(v.ty)) return v.const_val;
             -999999999
         }
         Binary k -> {
@@ -464,6 +464,16 @@ bounds_num(e: ?*Expr): int {
                 _ -> { }
             }
             match source.kind {
+                MemberAccess _ -> {
+                    fixed: int = bounds_member_known_len(source);
+                    if (fixed >= 0) return fixed;
+                    return -999999999
+                }
+                Var local -> {
+                    v: ?*Obj = local.var;
+                    if (v != null && v.bounds_static_length && bounds_classify_enabled) return v.const_val;
+                    return -999999999
+                }
                 Num literal -> {
                     if (literal.str_label == 0) return -999999999
                 }
@@ -482,6 +492,12 @@ bounds_known_len(e: ?*Expr): int {
     t: ?*Type = n.ty;
     if (t != null && is_array(t)) return array_len(t);
     match n.kind {
+        MemberAccess _ -> bounds_member_known_len(n);
+        Var local -> {
+            v: ?*Obj = local.var;
+            if (v != null && v.bounds_static_length && bounds_classify_enabled) return v.const_val;
+            -1
+        }
         Num k -> {
             if (k.str_label == 0) return -1;
             lit: ?*StrLit = str_lits;
@@ -681,15 +697,32 @@ bounds_numeric_view(q: *BoundsRow) raises IndexOutOfBounds: BoundsNumericView {
 bounds_numeric_entails(f: ?*BoundsState, target: *BoundsNumericView) raises IndexOutOfBounds: bool {
     if (!bounds_reachable(f)) return true;
     if (!target.left.valid || !target.right.valid) return false;
-    bound: int = bounds_direct_bound(f, target);
-    bound < 1000000000 && bound <= target.bound
+    if (f == null) return false;
+    numeric: []*BoundsNumericView = f.numeric_view;
+    link: ?*BoundsLinkNode = bounds_bucket(f, bounds_pair_hash(target));
+    while (link != null) {
+        position: int = link.position;
+        if (position < f.count) {
+            edge: *BoundsNumericView = numeric[position];
+            if (edge.bound < 1000000000 && edge.bound <= target.bound) {
+                // Branch snapshots share immutable descriptors. The same fact
+                // carries exactly the same endpoints and alias assumptions.
+                if (edge == target) return true;
+                if (edge.left.valid && edge.right.valid && bounds_ref_same_borrowed(&target.left,
+                    &edge.left) && bounds_ref_same_borrowed(&target.right, &edge.right) && (edge.separation == null || bounds_separation_same(edge.separation,
+                    target.separation))) return true
+            }
+        }
+        link = link.next
+    }
+    false
 }
 
 bounds_affine(e: *Expr@new, query: bool) raises IndexOutOfBounds: ?*BoundsAffine@new {
     match e.kind {
         Var k -> {
             v: ?*Obj = k.var;
-            if (v != null && v.is_const && v.const_state == 2 && is_int_ty(v.ty)) return new BoundsAffine { base: new_num(v.const_val), offset: 0 }
+            if (v != null && v.const_state == 2 && is_int_ty(v.ty)) return new BoundsAffine { base: new_num(v.const_val), offset: 0 }
         }
         _ -> { }
     }
@@ -1161,6 +1194,7 @@ bounds_has(
 }
 
 bounds_fact_value(f: ?*BoundsState, index: *Obj, kind: BoundsKind): int {
+    if (kind == BoundsKind.Fresh && index.bounds_static_fresh && bounds_classify_enabled) return index.browse_id;
     q_position: int = bounds_count(f) - 1;
     q: ?*BoundsRow = bounds_row(f, q_position);
     while (q != null) {
@@ -1409,6 +1443,12 @@ bounds_copy_value(f: ?*BoundsState@new, source: *Expr, destination: *Expr) raise
     if (!bounds_term(source) || bounds_term_root(source) == null || !bounds_term(destination) || bounds_same_term(source,
         destination)) return f;
     root: ?*Obj = bounds_term_root(source);
+    // bounds_numeric_value adds an exact equality to the immutable scalar.
+    // Copying all its incident numeric edges as well would build a clique
+    // when many record fields receive the same value. Keep the existing
+    // local-copy behavior: loop widening relies on those direct bounds.
+    scalar_source: ?*Obj = bounds_var(source);
+    shared_scalar: bool = bounds_var(destination) == null && is_int_ty(destination.ty) && bounds_classify_enabled && scalar_source != null && scalar_source.is_local && is_int_ty(scalar_source.ty) && !scalar_source.bounds_may_write && !scalar_source.bounds_addr_taken;
     original: ?*BoundsState = f;
     for position in 0..bounds_count(original) {
         row: ?*BoundsRow = bounds_row(original, position);
@@ -1416,7 +1456,7 @@ bounds_copy_value(f: ?*BoundsState@new, source: *Expr, destination: *Expr) raise
             if (row.index == root || row.array == root) {
                 left: ?*Expr = row.left;
                 right: ?*Expr = row.right;
-                if (row.kind == BoundsKind.Difference && row.separation == null && left != null && right != null) {
+                if (!shared_scalar && row.kind == BoundsKind.Difference && row.separation == null && left != null && right != null) {
                     copied_left: *Expr = bounds_rebase_path(left, source, destination);
                     copied_right: *Expr = bounds_rebase_path(right, source, destination);
                     if (copied_left != left || copied_right != right) f = bounds_add_relation(f,
