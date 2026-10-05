@@ -1,0 +1,348 @@
+tag compiler_internal;
+
+// Globals may be declared in any order, but dynamic initializers still run
+// one at a time before main. Run each after every dynamically initialized
+// global it may use, directly or through the functions it may call. Indirect
+// and foreign calls may reach any function whose address was taken. A cycle
+// would observe an uninitialized value, so it is an error.
+type InitGlobals = {
+    global: *Obj;
+    next: ?*InitGlobals
+}
+
+type InitCallees = {
+    callee: *Function;
+    next: ?*InitCallees
+}
+
+type InitSummary = {
+    globals: ?*InitGlobals;
+    callees: ?*InitCallees;
+    indirect: bool;
+    epoch: int
+}
+
+init_summaries: []?*InitSummary = new ?*InitSummary[0](null);
+
+init_global_state: []i8 = new i8[0](0i8);
+
+init_global_epoch: []int = new int[0](0);
+
+init_epoch: int = 0;
+
+init_taken: ?*InitCallees = null;
+
+global_init_order: ?*InitGlobals = null;
+
+global_init_tail: ?*InitGlobals = null;
+
+init_dynamic(g: *Obj): bool {
+    !g.is_local && !g.is_func && !g.is_const && !is_const_init(g.init)
+}
+
+init_add_global(s: *InitSummary@new, g: *Obj@new) {
+    q: ?*InitGlobals = s.globals;
+    while (q != null) {
+        if (q.global == g) return;
+        q = q.next
+    }
+    s.globals = new InitGlobals { global: g, next: s.globals }
+}
+
+init_add_callee(s: *InitSummary@new, callee: *Function@new) {
+    if (callee.is_extern) {
+        s.indirect = true;
+        return
+    }
+    q: ?*InitCallees = s.callees;
+    while (q != null) {
+        if (q.callee == callee) return;
+        q = q.next
+    }
+    s.callees = new InitCallees { callee: callee, next: s.callees }
+}
+
+init_scan_inits(inits: ?*FieldInit, s: *InitSummary@new) raises Error {
+    i: ?*FieldInit = inits;
+    while (i != null) {
+        init_scan_expr(i.lhs, s);
+        i = i.next
+    }
+}
+
+init_scan_arms(arms: ?*MatchArm, s: *InitSummary@new) raises Error {
+    a: ?*MatchArm = arms;
+    while (a != null) {
+        init_scan_stmt(a.body, s);
+        a = a.next
+    }
+}
+
+init_scan_expr(e: ?*Expr, s: *InitSummary@new) raises Error {
+    if (e == null) return;
+    n: *Expr = e;
+    match n.kind {
+        Var k -> {
+            g: ?*Obj = k.var;
+            if (g != null && init_dynamic(g)) init_add_global(s, g)
+        }
+        Binary k -> {
+            init_scan_expr(k.lhs, s);
+            init_scan_expr(k.rhs, s)
+        }
+        Assign k -> {
+            init_scan_expr(k.lhs, s);
+            init_scan_expr(k.rhs, s)
+        }
+        Addr k -> init_scan_expr(k.lhs, s);
+        Deref k -> init_scan_expr(k.lhs, s);
+        Index k -> {
+            init_scan_expr(k.lhs, s);
+            init_scan_expr(k.idx, s)
+        }
+        Not k -> init_scan_expr(k.lhs, s);
+        Neg k -> init_scan_expr(k.lhs, s);
+        BitNot k -> init_scan_expr(k.lhs, s);
+        LogAnd k -> {
+            init_scan_expr(k.lhs, s);
+            init_scan_expr(k.rhs, s)
+        }
+        LogOr k -> {
+            init_scan_expr(k.lhs, s);
+            init_scan_expr(k.rhs, s)
+        }
+        OrElse k -> {
+            init_scan_expr(k.lhs, s);
+            init_scan_expr(k.rhs, s)
+        }
+        Funcall k -> {
+            target: ?*Expr = k.target;
+            if (target != null) {
+                s.indirect = true;
+                init_scan_expr(target, s)
+            } else {
+                callee: ?*Function = k.fn;
+                if (callee == null) callee = find_function(k.funcname);
+                if (callee != null) init_add_callee(s, callee)
+            }
+            a: ?*Expr = k.args;
+            while (a != null) {
+                init_scan_expr(a, s);
+                a = a.next
+            }
+        }
+        MemberAccess k -> init_scan_expr(k.lhs, s);
+        As k -> init_scan_expr(k.lhs, s);
+        Trunc k -> init_scan_expr(k.lhs, s);
+        New k -> {
+            init_scan_expr(k.lhs, s);
+            init_scan_expr(k.fill, s);
+            init_scan_inits(k.inits, s)
+        }
+        StructLit k -> init_scan_inits(k.inits, s);
+        VariantLit k -> init_scan_inits(k.inits, s);
+        If k -> {
+            init_scan_expr(k.cond, s);
+            init_scan_expr(k.then, s);
+            init_scan_expr(k.els, s)
+        }
+        Match k -> {
+            init_scan_expr(k.cond, s);
+            init_scan_arms(k.arms, s)
+        }
+        Block k -> init_scan_stmt(k.body, s);
+        Sizeof k -> init_scan_expr(k.e, s);
+        ArrayLit k -> {
+            a: ?*Expr = k.elems;
+            while (a != null) {
+                init_scan_expr(a, s);
+                a = a.next
+            }
+        }
+        Num _ -> { }
+        Null -> { }
+        FuncAddr _ -> { }
+    }
+}
+
+init_scan_stmt(stmts: ?*Stmt, s: *InitSummary@new) raises Error {
+    q: ?*Stmt = stmts;
+    while (q != null) {
+        match q.kind {
+            Return k -> init_scan_expr(k.lhs, s);
+            If k -> {
+                init_scan_expr(k.cond, s);
+                init_scan_stmt(k.then, s);
+                init_scan_stmt(k.els, s)
+            }
+            While k -> {
+                init_scan_expr(k.cond, s);
+                init_scan_stmt(k.body, s)
+            }
+            For k -> {
+                init_scan_expr(k.iter, s);
+                init_scan_expr(k.hi, s);
+                init_scan_stmt(k.body, s)
+            }
+            Block k -> init_scan_stmt(k.body, s);
+            ExprStmt k -> init_scan_expr(k.lhs, s);
+            Decl k -> init_scan_expr(k.init, s);
+            Match k -> {
+                init_scan_expr(k.cond, s);
+                init_scan_arms(k.arms, s)
+            }
+            Raise k -> init_scan_inits(k.inits, s);
+            Try k -> {
+                init_scan_stmt(k.body, s);
+                arm: ?*CatchArm = k.arms;
+                while (arm != null) {
+                    init_scan_stmt(arm.body, s);
+                    arm = arm.next
+                }
+            }
+            Region k -> init_scan_stmt(k.body, s);
+            Comment _ -> { }
+        }
+        q = q.next
+    }
+}
+
+init_new_summary(): *InitSummary@new {
+    new InitSummary {
+        globals: null,
+        callees: null,
+        indirect: false,
+        epoch: 0
+    }
+}
+
+// Scan each function body at most once.
+init_summary(fn: *Function) noregion raises Error: *InitSummary@new {
+    id: int = fn.browse_id;
+    table: []?*InitSummary = init_summaries;
+    if (id < 0 || id >= len(table)) error("internal: function id outside summary table");
+    known: ?*InitSummary = table[id];
+    if (known != null) return known;
+    s: *InitSummary = init_new_summary();
+    table[id] = s;
+    init_scan_stmt(fn.body, s);
+    s
+}
+
+// Mark every dynamic global the initializer may reach with init_epoch.
+init_reach(root: *InitSummary@new) noregion raises Error {
+    init_epoch = init_epoch + 1;
+    pending: ?*InitCallees = null;
+    taken_added: bool = false;
+    current: ?*InitSummary = root;
+    while (current != null) {
+        s: *InitSummary = current;
+        g: ?*InitGlobals = s.globals;
+        while (g != null) {
+            init_note_reached(g.global);
+            g = g.next
+        }
+        c: ?*InitCallees = s.callees;
+        while (c != null) {
+            pending = new InitCallees { callee: c.callee, next: pending };
+            c = c.next
+        }
+        if (s.indirect && !taken_added) {
+            taken_added = true;
+            t: ?*InitCallees = init_taken;
+            while (t != null) {
+                pending = new InitCallees { callee: t.callee, next: pending };
+                t = t.next
+            }
+        }
+        current = null;
+        while (current == null && pending != null) {
+            next_fn: *Function = (pending or error("internal")).callee;
+            pending = (pending or error("internal")).next;
+            summary: *InitSummary = init_summary(next_fn);
+            if (summary.epoch != init_epoch) {
+                summary.epoch = init_epoch;
+                current = summary
+            }
+        }
+    }
+}
+
+init_note_reached(g: *Obj) {
+    id: int = g.browse_id;
+    if (id >= 0 && id < len(init_global_epoch)) init_global_epoch[id] = init_epoch
+}
+
+init_reached(g: *Obj): bool {
+    id: int = g.browse_id;
+    id >= 0 && id < len(init_global_epoch) && init_global_epoch[id] == init_epoch
+}
+
+init_cycle_error(g: *Obj, other: *Obj) noregion raises Error: noreturn {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, "global initializers for ");
+    sb_puts(sb, g.name);
+    sb_puts(sb, " and ");
+    sb_puts(sb, other.name);
+    sb_puts(sb, " depend on each other");
+    error_at_file(g.browse_file, g.browse_pos, sb_finish(sb))
+}
+
+// Visit dependencies first. State 1 is in progress and 2 is ordered.
+init_visit(g: *Obj@new) noregion raises Error, IndexOutOfBounds {
+    id: int = g.browse_id;
+    if (id < 0 || id >= len(init_global_state)) error("internal: global id outside order table");
+    if (init_global_state[id] == 2i8) return;
+    init_global_state[id] = 1i8;
+    root: *InitSummary = init_new_summary();
+    init_scan_expr(g.init, root);
+    init_reach(root);
+    // Collect before recursing: nested visits reuse the epoch marks.
+    deps: ?*InitGlobals = null;
+    d: ?*Obj = globals;
+    while (d != null) {
+        if (init_dynamic(d) && init_reached(d)) deps = new InitGlobals { global: d, next: deps };
+        d = d.next
+    }
+    while (deps != null) {
+        dep: *Obj = (deps or error("internal")).global;
+        deps = (deps or error("internal")).next;
+        // A global that reads itself still observes its zero value. Sentinel
+        // tokens rely on this until the language can build cyclic values.
+        if (dep != g) {
+            dep_id: int = dep.browse_id;
+            if (dep_id < 0 || dep_id >= len(init_global_state)) error("internal: global id outside order table");
+            if (init_global_state[dep_id] == 1i8) init_cycle_error(g, dep);
+            init_visit(dep)
+        }
+    }
+    if (id >= len(init_global_state)) error("internal: global id outside order table");
+    init_global_state[id] = 2i8;
+    entry: *InitGlobals = new InitGlobals { global: g, next: null };
+    tail: ?*InitGlobals = global_init_tail;
+    if (tail == null) global_init_order = entry else tail.next = entry;
+    global_init_tail = entry
+}
+
+init_visit_declared(g: ?*Obj@immortal) noregion raises Error, IndexOutOfBounds {
+    if (g == null) return;
+    // The list is newest first; visit in declaration order.
+    init_visit_declared(g.next);
+    if (init_dynamic(g)) init_visit(g)
+}
+
+order_global_inits() noregion raises Error, IndexOutOfBounds {
+    global_init_order = null;
+    global_init_tail = null;
+    init_epoch = 0;
+    init_summaries = new ?*InitSummary[browse_next_id + 1](null);
+    init_global_state = new i8[browse_next_id + 1](0i8);
+    init_global_epoch = new int[browse_next_id + 1](0);
+    init_taken = null;
+    fn: ?*Function = functions;
+    while (fn != null) {
+        if (fn.address_taken && !fn.is_extern) init_taken = new InitCallees { callee: fn, next: init_taken };
+        fn = fn.next
+    }
+    init_visit_declared(globals)
+}
