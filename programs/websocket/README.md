@@ -25,10 +25,10 @@ HTTP transport. TLS (`wss`) is outside this library.
 From the repository root:
 
 ```sh
-./build.sh websocket
+make websocket
 .build/websocket/server 8081
 .build/websocket/client 127.0.0.1 8081 / hello
-./build.sh websocket-test
+make websocket-test
 ```
 
 Protocol reference: [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455.html).

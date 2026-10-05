@@ -9,6 +9,11 @@ import subprocess
 import sys
 import tempfile
 
+try:
+    from tools import jobs
+except ImportError:  # run as a script from tools/
+    import jobs
+
 
 DIRECTIVE = re.compile(rb'^([ \t]*//% expect: )(.*)(\r?\n?)$')
 STDERR_DIRECTIVE = re.compile(rb'^([ \t]*//% stderr: )(.*)(\r?\n?)$')
@@ -130,7 +135,7 @@ def discover(sources: list[pathlib.Path], directories: list[pathlib.Path]) -> li
     return sorted(found)
 
 
-def run(source: pathlib.Path, compiler: pathlib.Path, update: bool) -> None:
+def run(source: pathlib.Path, compiler: pathlib.Path, update: bool) -> str:
     source = source.resolve()
     compiler = compiler.resolve()
     order, expected, lines, labels = expectations(source)
@@ -162,11 +167,10 @@ def run(source: pathlib.Path, compiler: pathlib.Path, update: bool) -> None:
     if differences and update:
         accept(lines, dict(actual), source,
                actual_stderr if expected_stderr is not None else None)
-        print(f"accepted {len(differences)} changed expectation(s) in {source}")
-    elif differences:
+        return f"accepted {len(differences)} changed expectation(s) in {source}"
+    if differences:
         raise ValueError("\n".join(differences) + f"\nRun with --accept to update {source}.")
-    else:
-        print(f"ok: {source} ({len(order)} checkpoints)")
+    return f"ok: {source} ({len(order)} checkpoints)"
 
 
 def main() -> int:
@@ -176,14 +180,28 @@ def main() -> int:
                         help="find L8 sources with inline expectations recursively")
     parser.add_argument("--compiler", type=pathlib.Path, default=pathlib.Path("./l8c3"))
     parser.add_argument("--accept", action="store_true", help="update changed snapshots after a successful run")
+    parser.add_argument("--jobs", "-j", type=int, help="concurrent tests (default: make's job limit, or all CPUs)")
     args = parser.parse_args()
     try:
-        for source in discover(args.source, args.discover):
-            run(source, args.compiler, args.accept)
+        sources = discover(args.source, args.discover)
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    return 0
+
+    def attempt(source: pathlib.Path) -> tuple[str, bool]:
+        try:
+            return run(source, args.compiler, args.accept), True
+        except (OSError, ValueError) as error:
+            return f"error: {source}: {error}", False
+
+    failed = False
+    for message, passed in jobs.run_all(sources, attempt, args.jobs):
+        if passed:
+            print(message)
+        else:
+            print(message, file=sys.stderr)
+            failed = True
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # Compiler tests
 
-Each compiler fixture tested by `build.sh` keeps its expected behavior in trailing L8
+Each compiler fixture tested by `make` keeps its expected behavior in trailing L8
 comments. A successful program uses:
 
 ```l8
@@ -52,9 +52,9 @@ python3 tools/expect.py ./l8c1 .build/expect \
 ```
 
 The runner scans `.l8` files recursively, selects files with `//%` directives,
-and runs them in sorted order. Adding an annotated file needs no build-script
-entry. `build.sh` runs the stage-1 subset and the full stage-2 set. Formatting,
-warning-location, and other multi-step checks still live in the build script.
+and runs them in sorted order. Adding an annotated file needs no build
+entry. `make` runs the stage-1 subset and the full stage-2 set. Formatting,
+warning-location, and other multi-step checks live in `tools/compiler_checks.sh`.
 
 The bounds fixtures cover proof-required indexing, unreachable accesses,
 loop revisits, address-taking, and nested accesses. Older bounds-failure

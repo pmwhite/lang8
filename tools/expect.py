@@ -28,6 +28,11 @@ import re
 import subprocess
 import sys
 
+try:
+    from tools import jobs
+except ImportError:  # run as a script from tools/
+    import jobs
+
 
 def expectations(path: pathlib.Path) -> dict[str, object]:
     result: dict[str, object] = {}
@@ -143,6 +148,7 @@ def main() -> int:
     parser.add_argument("--discover", action="append", type=pathlib.Path, default=[], metavar="DIR")
     parser.add_argument("--bootstrap-only", action="store_true")
     parser.add_argument("--list", action="store_true", help="list selected tests without running them")
+    parser.add_argument("--jobs", "-j", type=int, help="concurrent tests (default: make's job limit, or all CPUs)")
     args = parser.parse_args()
     compiler = args.compiler.resolve()
     build_dir = args.build_dir
@@ -161,12 +167,17 @@ def main() -> int:
         for source in sources:
             print(source)
         return 0
-    failures = 0
-    for source in sources:
+    def attempt(source: pathlib.Path) -> str | None:
         try:
             run_one(compiler, build_dir, source)
         except (OSError, ValueError) as error:
-            print(f"FAIL {source}: {error}", file=sys.stderr)
+            return f"FAIL {source}: {error}"
+        return None
+
+    failures = 0
+    for message in jobs.run_all(sources, attempt, args.jobs):
+        if message is not None:
+            print(message, file=sys.stderr)
             failures += 1
     if failures:
         print(f"{failures} expectation(s) failed", file=sys.stderr)

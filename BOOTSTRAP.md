@@ -46,7 +46,7 @@ Typical evolution for a breaking language change:
 Function values, indirect calls, and C callbacks are supported by both source
 stages. See
 [`tests/callbacks/README.md`](tests/callbacks/README.md) for `fn` syntax,
-ABI restrictions, and lifetime contracts. `./build.sh callback-test` builds the
+ABI restrictions, and lifetime contracts. `make callback-test` builds the
 stage-1 compiler and runs language, rejection, and C interoperability tests;
 the test fixture needs a host C compiler and GNU assembler. Building L8 programs
 with callbacks does not require a host compiler or adapter library.
@@ -107,32 +107,57 @@ simple `if` and `match` assignments on every arm. Intervening statements may do
 other work, but must not reference the local. It does not change ordinary build
 warnings.
 
-## Scripts (`./build.sh`)
+## Building (`make`)
 
-| Command | What it does |
-|---------|--------------|
-| `bootstrap` | Copy the saved bootstrap executable to `l8c0` |
-| `examples` | Build stage 1, then build and run examples with `l8c1` |
-| `http` | Build the L8 HTTP/1.1 client and server in `.build/http/` (see `programs/http/README.md`) |
-| `http-test` | Verify the downloaded RFCs and run the HTTP protocol, API, and socket tests |
-| `terminal` | Build the OpenGL/FreeType terminal emulator in `.build/terminal` |
-| `terminal-test` | Run terminal parser and static PTY tests, plus graphical integration tests when a display is available |
-| `selfhost` | Directly build `l8c1` from `src1/`, build `l8c2/l8c3/l8c4` from `src2/`, require the `l8c3 == l8c4` executable fixpoint, run examples, and print compiler phase timings |
+The `Makefile` describes every build and test step with its inputs, so
+`make -jN` runs independent steps in parallel and a later run repeats only
+the steps whose inputs changed. Each step prints one line with its time; its
+full output is in `.build/logs/STEP.log`, and `make V=1` streams it instead.
+Test runners take their parallelism from make's job slots.
+
+| Target | What it does |
+|--------|--------------|
+| `all` (default) | Format `src2/` with `l8c2`, then everything in `check` |
+| `check` | Stage-1 fixtures, `selfhost`, standard-library tests, and the block game and its tests |
+| `selfhost` | Build `l8c1` from `src1/` and `l8c2/l8c3/l8c4` from `src2/`, require the `l8c3 == l8c4` fixpoint, check `src2` formatting, run the compiler fixtures and `tools/compiler_checks.sh`, then install `./l8` |
+| `fmt` | Format `src2/` with the stage-2 compiler |
+| `install-bootstrap` | Copy the saved bootstrap executable to `l8c0` |
+| `compiler-test` | Build stage 1 and run its bootstrap-compatible fixtures |
+| `stdlib-test`, `game`, `game-test` | Standard-library tests; build `.build/block-game` and run its tests |
+| `http`, `http-test` | Build the L8 HTTP/1.1 client and server in `.build/http/`; verify the downloaded RFCs and run the protocol, API, and socket tests |
+| `websocket`, `websocket-test` | Build and test the WebSocket client and server in `.build/websocket/` |
+| `terminal`, `terminal-test` | Build the OpenGL/FreeType terminal emulator in `.build/terminal`; run parser and PTY tests, plus graphical integration tests when a display is available. Terminal tests always run |
+| `callback-test` | Build stage 1 and run the C callback tests (needs `cc` and `as`) |
 | `promote-bin1` | Promote the stage-1 executable to `bootstrap` |
 | `promote-bin2` | Promote the stage-2 fixpoint executable to `bootstrap` |
 | `promote-source` | Replace `src1/` with `src2/` without changing the bootstrap |
 | `promote` | Promote both source tree and bootstrap executable |
+| `clean` | Remove compilers and `.build/` |
 
-Promotes require the corresponding self-host artifacts unless `--force` is used.
+Program and test steps use `l8c3`, so they run alongside the compiler tests;
+`./l8` is installed only after those pass. Promotes first bring their
+artifacts up to date and ask for confirmation unless `FORCE=1` is given.
 They update only the working tree; create the commit separately.
 
-`--bench` runs each timed step ten times and reports average milliseconds.
+## Profiling
+
+`tools/profile.py` times the compiler self-build, the block game build, and
+formatting `src2/`, reporting medians over alternating runs. `--baseline PATH`
+compares another compiler, `--phases` adds the compiler's per-phase timings,
+`--counters` adds `perf stat` cycles and instructions, and `--cpu N` pins the
+runs. For example:
+
+```sh
+cp l8 .build/l8-before                      # before a change
+make selfhost
+tools/profile.py --baseline .build/l8-before --counters --cpu 3
+```
 
 ## Pre-commit checks
 
 Run `./.githooks/install.sh` once per clone to install the repository's pre-commit
 hook without replacing other local Git hooks. The hook copies the staged tree to a
-temporary directory, runs the default `./build.sh`, and requires every staged L8
+temporary directory, runs the default `make -j` target, and requires every staged L8
 file under `src2/`, `stdlib/`, and `programs/` to match `l8c3 fmt` output. `src1/` is exempt
 because it must remain compatible with the saved bootstrap. The deliberately
 malformed fixtures listed in `.githooks/format-excludes` are exempt because the

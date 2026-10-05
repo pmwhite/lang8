@@ -43,16 +43,16 @@ graphics libraries and direct syscalls for PTY setup and shell execution; see it
 From the repository root:
 
 ```sh
-./build.sh game
-./build.sh game-test
+make game
+make game-test
 .build/block-game                         # programs/block-game/world.txt
-./build.sh terminal
+make terminal
 .build/terminal
-./build.sh terminal-test
-./build.sh http
-./build.sh http-test
-./build.sh websocket
-./build.sh websocket-test
+make terminal-test
+make http
+make http-test
+make websocket
+make websocket-test
 ./l8 build programs/examples/tri.l8 -o .build/tri
 ./l8 build programs/examples/balls.l8 -o .build/balls
 ./l8 build programs/examples/xwin.l8 -o .build/xwin

@@ -1,4 +1,4 @@
-"""Function value and C ABI tests. Run through ./build.sh callback-test."""
+"""Function value and C ABI tests. Run through make callback-test."""
 import os
 from pathlib import Path
 import shlex

@@ -23,7 +23,7 @@ and allocation/fill of 16 million i32 elements. The Fibonacci input comes from
 upstream tree-calculus commit `5679507e357b1107fc9b1647871bc72c38c63748`.
 
 See `run.py --help` and its module documentation for reproduction commands.
-Build each candidate with `./build.sh selfhost` before running
+Build each candidate with `make selfhost` before running
 `python3 tools/codegen_bench/run.py build LABEL --compiler ./l8`. The build checks stage-3/stage-4 fixpoint, the compiler and
 callback fixtures, formatting, and browse output. Commit hooks additionally
 build and test the staged repository, including the standard library and game.

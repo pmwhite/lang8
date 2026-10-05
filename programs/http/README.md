@@ -26,8 +26,8 @@ requirement in the entire HTTP family.
 From the repository root:
 
 ```sh
-./build.sh http
-./build.sh http-test
+make http
+make http-test
 .build/http/server 8080 127.0.0.1
 # In another terminal:
 .build/http/client 127.0.0.1 8080 /
@@ -53,8 +53,9 @@ It prints response content, exits 22 for HTTP errors, 1 for protocol/transport
 failure, and 2 for invalid invocation. BODY arguments are strings; binary bodies
 are supported by the library. It does not follow redirects automatically.
 
-`L8C=/absolute/path/to/compiler ./build.sh http-test` selects another L8 compiler.
-`BUILD=/path/to/artifacts` changes the build-script output directory. Tests
+`make http-test` uses the stage-3 compiler. To test another compiler, run
+`python3 tools/lib_expect.py --discover programs/http/tests --compiler PATH` and
+`L8C=PATH HTTP_BUILD=DIR python3 -m unittest discover -s programs/http/tests`. Tests
 require Python 3.11+ and its standard library, run exclusively against local
 loopback peers, and need no network downloads. Test helpers rebuild once per run.
 

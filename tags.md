@@ -129,6 +129,6 @@ the declaration's available tags.
 
 The implementation is present in both compiler stages. Both use a `compiler_tags`
 tag for the tag implementation itself and `compiler_internal` for the rest of the
-tool. The checked-in bootstrap enforces tag visibility. Run `./build.sh selfhost`
+tool. The checked-in bootstrap enforces tag visibility. Run `make selfhost`
 to build `./l8`, verify the executable fixpoint, and run the positive, negative,
 formatting, browsing, and assembly/direct-backend tests in `tests/compiler/tags/`.

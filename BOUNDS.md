@@ -224,7 +224,7 @@ Unproved index arithmetic requires a guard, contract, or loop invariant.
 ## Migration
 
 The compiler sources and active standard-library, compiler, block-game, and
-terminal fixtures use proved indexing. `./build.sh all` runs the compiler and
+terminal fixtures use proved indexing. `make` runs the compiler and
 runtime suites. The verifier is present in both source stages and the saved
 bootstrap. `IndexOutOfBounds` is an ordinary exception name that programs
 may define for their own validation; indexing does not raise it implicitly.

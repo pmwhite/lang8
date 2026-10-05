@@ -4,7 +4,7 @@ Import `wayland.l8` and activate `use_tag wayland;`. The library is written in L
 including all event callbacks. It connects through libwayland-client, creates an
 xdg-shell toplevel and a desktop OpenGL context through EGL, and handles keyboard
 input with xkbcommon. No C shim, C compiler, or wayland-scanner is needed to build
-applications. Rebuild the L8 compiler with `./build.sh selfhost` first.
+applications. Rebuild the L8 compiler with `make selfhost` first.
 
 `wl_window_open(width, height, title, app_id)` returns `?*WLWindow@new`. Opening a
 window requires `noregion`: libwayland retains its callback data until close.
@@ -42,7 +42,7 @@ scaling are not implemented. Surface buffers currently use scale 1.
 ```sh
 python3 programs/wayland/generate.py
 python3 programs/wayland/generate.py --check
-./build.sh terminal-test
+make terminal-test
 ```
 
 The XML retains upstream copyright/license notices. Core metadata comes from

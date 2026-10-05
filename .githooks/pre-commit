@@ -5,39 +5,49 @@ repo=$(git rev-parse --show-toplevel)
 snapshot=$(mktemp -d "${TMPDIR:-/tmp}/lang8-pre-commit.XXXXXX")
 trap 'rm -rf "$snapshot"' EXIT
 
-# Build the exact staged tree. The self-host build formats src2 in place, so
+# Build the exact staged tree. The default make target formats src2 in place, so
 # compare it with the index below before accepting the result.
 git -C "$repo" checkout-index --all --prefix="$snapshot/"
 cd "$snapshot"
 echo 'pre-commit: building staged tree'
-if ! ./build.sh; then
+if ! make -j"$(nproc)"; then
     echo 'pre-commit: staged build failed' >&2
     exit 1
 fi
 
-failed=0
 echo 'pre-commit: checking formatted L8 sources'
-while IFS= read -r -d '' path; do
+# Print a message and fail for a staged file that is not formatted. The build
+# formatted src2 in place, so compare those files with the index instead.
+check_format() {
+    local path="$1" out
     case "$path" in
         src2/*.l8|stdlib/*.l8|programs/*.l8|tests/*.l8) ;;
-        *) continue ;;
+        *) return 0 ;;
     esac
     if grep -Fxq "$path" .githooks/format-excludes; then
-        continue
+        return 0
     fi
-    if [[ "$path" == src2/* ]] && ! git -C "$repo" show ":$path" | cmp -s - "$path"; then
+    if [[ "$path" == src2/* ]]; then
+        git -C "$repo" show ":$path" | cmp -s - "$path" && return 0
         echo "unformatted staged source: $path" >&2
-        failed=1
-        continue
+        return 1
     fi
-    if ! ./l8c3 fmt "$path" > .build/pre-commit-format.l8; then
+    out=$(mktemp "$snapshot/.build/format.XXXXXX")
+    if ! ./l8c3 fmt "$path" >"$out"; then
         echo "formatter failed: $path" >&2
-        failed=1
-    elif ! cmp -s "$path" .build/pre-commit-format.l8; then
+        return 1
+    elif ! cmp -s "$path" "$out"; then
         echo "unformatted staged source: $path" >&2
-        failed=1
+        return 1
     fi
-done < <(git -C "$repo" ls-files -z -- 'src2/*.l8' 'stdlib/*.l8' 'programs/*.l8' 'tests/*.l8')
+}
+export -f check_format
+export repo snapshot
+
+failed=0
+git -C "$repo" ls-files -z -- 'src2/*.l8' 'stdlib/*.l8' 'programs/*.l8' 'tests/*.l8' |
+    xargs -0 -n 32 -P "$(nproc)" bash -c 'status=0; for path; do check_format "$path" || status=1; done; exit $status' _ ||
+    failed=1
 
 if (( failed )); then
     echo 'Format the listed files with: ./l8c3 fmt -w <file>, then stage them.' >&2

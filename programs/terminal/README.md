@@ -10,14 +10,14 @@ The default font is DejaVu Sans Mono at 18 pixels.
 From the repository root:
 
 ```sh
-./build.sh selfhost                   # rebuild the compiler after pulling
-./build.sh terminal
+make selfhost                         # rebuild the compiler after pulling
+make terminal
 .build/terminal                       # interactive shell from $SHELL
 .build/terminal 'exec bash --norc'     # choose another shell
 .build/terminal 'ls -l; sleep 5'       # run a shell command
 .build/terminal --font-size 22
 .build/terminal --font /path/to/monospace.ttf --font-size 18
-./build.sh terminal-test
+make terminal-test
 ```
 
 The terminal runs the absolute path in `$SHELL`, falling back to `/bin/sh` when

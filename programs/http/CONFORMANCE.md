@@ -3,7 +3,7 @@
 The implementation targets the HTTP/1.1 **origin endpoint and user-agent
 messaging roles**, not every optional HTTP extension or intermediary role.
 This matrix is a coverage inventory, not formal certification. All named tests
-are executable with `./build.sh http-test`; source RFCs and verified errata are
+are executable with `make http-test`; source RFCs and verified errata are
 pinned by `spec/SOURCES.json`. No test needs a public server.
 
 ## RFC 9112: HTTP/1.1
