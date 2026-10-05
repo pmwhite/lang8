@@ -6,10 +6,9 @@ cg_direct_mode: bool = false;
 
 cg_rsp_off: int = 0;
 
-// Set when an instruction names rbx/r12/r13 after a function saves them.
-// Bodies that never do so need not restore them, and direct builds erase
-// the saves. Every primitive below reports each general register operand.
-cg_callee_saved_seen: bool = false;
+// Every primitive below reports each general register operand, so
+// functions restore only rbx/r12/r13 their bodies change; direct builds
+// erase the other saves.
 
 // The most recent 64-bit register store. A load of the same address with
 // no output or label in between can reuse the stored register.
@@ -67,8 +66,126 @@ cg_output_position(): int {
     as_text_len
 }
 
+// Per-register view of rbx/r12/r13 within the current body. A local
+// push/pop pair preserves the caller's value; uses between them need no
+// function-level save unless a return leaves while it is pushed.
+cg_saved_seen: []bool = new bool[16](false);
+
+cg_saved_depth: []int = new int[16](0);
+
+// The stack since the prologue, innermost last: a pushed register, or the
+// negated size of a reserved temporary. Pops match only their own pushes.
+cg_push_regs: []int = new int[256](0);
+
+cg_push_count: int = 0;
+
+// Set when rsp changes in a way the model cannot follow.
+cg_saved_unknown: bool = false;
+
+cg_saved_reset() {
+    for r in 0..len(cg_saved_seen) cg_saved_seen[r] = false;
+    for r2 in 0..len(cg_saved_depth) cg_saved_depth[r2] = 0;
+    cg_push_count = 0;
+    cg_saved_unknown = false
+}
+
+cg_saved_register(r: int): bool {
+    r == 3 || r == 12 || r == 13
+}
+
+cg_saved_used(r: int): bool {
+    cg_saved_unknown || 0 <= r && r < len(cg_saved_seen) && cg_saved_seen[r]
+}
+
+cg_stack_push(entry: int) {
+    if (0 <= cg_push_count && cg_push_count < len(cg_push_regs)) cg_push_regs[cg_push_count] = entry else cg_saved_unknown = true;
+    cg_push_count = cg_push_count + 1
+}
+
+cg_stack_top(): int {
+    if (cg_push_count <= 0 || cg_push_count > len(cg_push_regs)) {
+        cg_saved_unknown = true;
+        return -1000000
+    }
+    cg_push_regs[cg_push_count - 1]
+}
+
+// Discard bytes from the top. A discarded register save is not restored.
+cg_stack_release(bytes: int) {
+    remaining: int = bytes;
+    while (remaining > 0 && !cg_saved_unknown) {
+        top: int = cg_stack_top();
+        if (top >= 0) {
+            cg_push_count = cg_push_count - 1;
+            remaining = remaining - 8;
+            if (cg_saved_pushed(top) > 0) {
+                cg_saved_adjust(top, -1);
+                cg_saved_mark(top)
+            }
+        } else if (top > -1000000) {
+            size: int = 0 - top;
+            if (size <= remaining) {
+                cg_push_count = cg_push_count - 1;
+                remaining = remaining - size
+            } else {
+                if (0 < cg_push_count && cg_push_count <= len(cg_push_regs)) cg_push_regs[cg_push_count - 1] = 0 - (size - remaining);
+                remaining = 0
+            }
+        }
+    }
+    if (remaining < 0) cg_saved_unknown = true
+}
+
+cg_note_rsp(op: int, imm: int) {
+    if (op == 5 && imm > 0) cg_stack_push(0 - imm) else if (op == 0 && imm > 0) cg_stack_release(imm) else cg_saved_unknown = true
+}
+
+cg_saved_mark(r: int) {
+    if (cg_saved_register(r) && 0 <= r && r < len(cg_saved_seen)) cg_saved_seen[r] = true
+}
+
+cg_saved_pushed(r: int): int {
+    if (0 <= r && r < len(cg_saved_depth)) cg_saved_depth[r] else 0
+}
+
+cg_saved_adjust(r: int, delta: int) {
+    if (cg_saved_register(r) && 0 <= r && r < len(cg_saved_depth)) cg_saved_depth[r] = cg_saved_depth[r] + delta
+}
+
 cg_note_register(r: int) {
-    if (r == 3 || r == 12 || r == 13) cg_callee_saved_seen = true
+    if (cg_saved_register(r) && cg_saved_pushed(r) == 0) cg_saved_mark(r)
+}
+
+cg_note_return() {
+    for r in 0..16 {
+        if (cg_saved_pushed(r) > 0) cg_saved_mark(r)
+    }
+}
+
+cg_note_push(r: int) {
+    cg_stack_push(r);
+    cg_saved_adjust(r, 1)
+}
+
+cg_note_pop(r: int) {
+    top: int = cg_stack_top();
+    if (top < 0) {
+        // Popping part of a temporary: the model no longer matches.
+        cg_saved_unknown = true;
+        return
+    }
+    cg_push_count = cg_push_count - 1;
+    if (top == r && cg_saved_pushed(r) > 0) {
+        cg_saved_adjust(r, -1);
+        return
+    }
+    // Popping another value writes this register.
+    cg_saved_mark(r);
+    // A saved value consumed elsewhere leaves its register changed.
+    if (cg_saved_pushed(top) > 0) {
+        cg_saved_adjust(top, -1);
+        cg_saved_mark(top)
+    }
 }
 
 // Recommended x86-64 no-ops of lengths 1 to 8, concatenated by length.
@@ -216,7 +333,7 @@ cg_bytes(p: []i8, off: int, n: int) noregion raises Error, IndexOutOfBounds requ
 }
 
 cg_push(r: int) noregion raises Error {
-    cg_note_register(r);
+    cg_note_push(r);
     cg_rsp_off = cg_rsp_off + 8;
     if (cg_direct_mode) {
         as_emit_push(r);
@@ -228,7 +345,7 @@ cg_push(r: int) noregion raises Error {
 }
 
 cg_pop(r: int) noregion raises Error {
-    cg_note_register(r);
+    cg_note_pop(r);
     cg_rsp_off = cg_rsp_off - 8;
     if (cg_direct_mode) {
         as_emit_pop(r);
@@ -250,6 +367,7 @@ cg_ret() noregion raises Error {
 cg_mov_rr(src: int, dst: int) noregion raises Error {
     cg_note_register(src);
     cg_note_register(dst);
+    if (dst == 4) cg_saved_unknown = true;
     if (src == dst) return;
     if (cg_direct_mode) {
         as_emit_mov_rr(src, dst);
@@ -509,6 +627,7 @@ cg_test(r: int) noregion raises Error {
 
 cg_alu_imm(op: int, imm: int, dst: int) noregion raises Error, IndexOutOfBounds {
     cg_note_register(dst);
+    if (dst == 4) cg_note_rsp(op, imm);
     if (imm == 0) {
         if (op == 0) return;
         if (op == 1) return;

@@ -18,7 +18,7 @@ cg_register_expr(e: ?*Expr, weight: int, address: bool) {
     if (e == null) return;
     match e.kind {
         Var k -> cg_register_use(k.var, weight, address);
-        Addr k -> cg_register_expr(k.lhs, weight, true);
+        Addr k -> cg_register_addr(k.lhs, weight);
         Binary k -> {
             cg_register_expr(k.lhs, weight, address);
             cg_register_expr(k.rhs, weight, address)
@@ -89,6 +89,28 @@ cg_register_expr(e: ?*Expr, weight: int, address: bool) {
     }
 }
 
+// Taking the address of an element or field exposes the variable only when
+// the path stays within its own storage. Pointer and slice bases are loaded
+// as values, and index expressions are ordinary reads.
+cg_register_addr(e: *Expr, weight: int) {
+    match e.kind {
+        Var k -> cg_register_use(k.var, weight, true);
+        MemberAccess k -> {
+            t: ?*Type = k.lhs.ty;
+            if (t != null && is_any_pointer(t)) cg_register_expr(k.lhs, weight, false) else cg_register_addr(k.lhs,
+                weight)
+        }
+        Index k -> {
+            cg_register_expr(k.idx, weight, false);
+            t: ?*Type = k.lhs.ty;
+            if (t != null && is_array(t)) cg_register_addr(k.lhs, weight) else cg_register_expr(k.lhs,
+                weight, false)
+        }
+        Deref k -> cg_register_expr(k.lhs, weight, false);
+        _ -> cg_register_expr(e, weight, true)
+    }
+}
+
 cg_register_inits(inits: ?*FieldInit, weight: int, address: bool) {
     i: ?*FieldInit = inits;
     while (i != null) {
@@ -150,7 +172,28 @@ cg_register_stmts(stmts: ?*Stmt, weight: int, address: bool) {
     }
 }
 
-cg_assign_registers(fn: *Function, limit: int): int {
+// Registers chosen for the current function, in candidate order.
+cg_assigned: []int = new int[8](0);
+
+cg_assigned_register(k: int): int {
+    if (k < 0 || k >= len(cg_assigned)) return 0;
+    cg_assigned[k]
+}
+
+cg_callee_saved(reg: int): bool {
+    reg == 3 || reg >= 12
+}
+
+// Allocated callee-saved registers need prologue saves.
+cg_saved_count(allocated: int): int {
+    saved: int = 0;
+    for k in 0..allocated {
+        if (cg_callee_saved(cg_assigned_register(k))) saved = saved + 1
+    }
+    saved
+}
+
+cg_assign_registers(fn: *Function, candidates: []int, count: int): int {
     obj: ?*Obj = fn.locals;
     while (obj != null) {
         obj.cg_register = 0 trunc i8;
@@ -165,22 +208,24 @@ cg_assign_registers(fn: *Function, limit: int): int {
     cg_register_stmts(fn.body, 1, false);
     if (!cg_register_safe) return 0;
     assigned: int = 0;
-    for slot in 0..limit {
-        // Prefer r14/r15; r12/r13 are available only in scalar lowering paths.
-        reg: int = if (slot < 2) 14 + slot else 10 + slot;
-        best: ?*Obj = null;
-        score: int = 8;
-        obj = fn.locals;
-        while (obj != null) {
-            if (obj.cg_register as int == 0 && obj.cg_score as int > score) {
-                best = obj;
-                score = obj.cg_score as int
+    for slot in 0..count {
+        if (slot < len(candidates) && assigned < len(cg_assigned)) {
+            reg: int = candidates[slot];
+            best: ?*Obj = null;
+            score: int = 8;
+            obj = fn.locals;
+            while (obj != null) {
+                if (obj.cg_register as int == 0 && obj.cg_score as int > score) {
+                    best = obj;
+                    score = obj.cg_score as int
+                }
+                obj = obj.next
             }
-            obj = obj.next
-        }
-        if (best != null) {
-            best.cg_register = reg trunc i8;
-            assigned = assigned + 1
+            if (best != null) {
+                best.cg_register = reg trunc i8;
+                cg_assigned[assigned] = reg;
+                assigned = assigned + 1
+            }
         }
     }
     assigned
