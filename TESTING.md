@@ -34,7 +34,8 @@ error (in the order it was written) since the previous `expect` in the same
 test. Output left over when a test finishes is also a failure. A test body is
 an ordinary function body: it can call anything its file can see and may raise
 any exception. `expect` may appear inside loops and branches, where every run
-of it must see the same output. `expect` is only valid inside a test.
+of it must see the same output. `expect` is only valid inside a test, and test
+names are unique within a program.
 
 Put each `expect` right after the step whose output it describes, so a test
 reads as a sequence of actions and their results, rather than printing

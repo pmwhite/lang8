@@ -244,11 +244,15 @@ output, so a broken edit is never recorded as the expected result:
   error: broken.l8:1:1: unknown function missing
   |} */
 
-`expect` belongs to tests:
+`expect` belongs to tests, and each test needs its own name:
 
   $ printf 'tag demo;\n\nmain(): int {\n    expect {||}\n    0\n}\n' > outside.l8
   $ l8 compile outside.l8
   error: outside.l8:4:14: expect is only allowed in a test
+  [1]
+  $ printf 'tag demo;\n\ntest "same" { }\n\ntest "same" { }\n' > twice.l8
+  $ l8 compile twice.l8
+  error: twice.l8:5:7: duplicate test name
   [1]
 
 Cram files run their commands in a scratch directory with `l8` on the path;
