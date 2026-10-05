@@ -711,17 +711,18 @@ l8_try_begin:
     syscall
 
 # void l8_try_end(void) — pop handler if still on top
+# Preserves %rax, which holds the value of a try expression's body.
 l8_try_end:
     mov l8_handler_top(%rip), %rdi
     test %rdi, %rdi
     jz 1f
-    mov 64(%rdi), %rax
-    mov %rax, l8_handler_top(%rip)
-    mov l8_try_rn(%rip), %rax
-    test %rax, %rax
+    mov 64(%rdi), %rcx
+    mov %rcx, l8_handler_top(%rip)
+    mov l8_try_rn(%rip), %rcx
+    test %rcx, %rcx
     jz 1f
-    sub $1, %rax
-    mov %rax, l8_try_rn(%rip)
+    sub $1, %rcx
+    mov %rcx, l8_try_rn(%rip)
 1:
     ret
 
