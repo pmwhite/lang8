@@ -28,6 +28,22 @@ STDLIB_TESTS := $(shell find stdlib -type f \( -name '*.l8' -o -name '*.s' \))
 TESTS := $(shell find tests -type f -not -path '*/__pycache__/*')
 # Every compiler fixture and CLI cram test; tests/pending is not run.
 COMPILER_TESTS := $(sort $(shell find tests/compiler tests/callbacks -name '*.l8') $(wildcard tests/cli/*.t))
+# Fixtures that the stage-1 compiler (built from src1) must pass before it
+# builds stage 2.
+STAGE1_TESTS := tests/compiler/bool.l8 \
+	tests/compiler/byte.l8 \
+	tests/compiler/check_index_bootstrap.l8 \
+	tests/compiler/enum.l8 \
+	tests/compiler/fib.l8 \
+	tests/compiler/forward.l8 \
+	tests/compiler/hello.l8 \
+	tests/compiler/i8.l8 \
+	tests/compiler/imports/main.l8 \
+	tests/compiler/logic.l8 \
+	tests/compiler/narrow.l8 \
+	tests/compiler/null.l8 \
+	tests/compiler/string.l8 \
+	tests/compiler/try_value_nested.l8
 
 # `build TOOL SOURCE`: build into $@ without leaving a partial file behind.
 build = ./$(1) build $(2) -o $@.tmp && mv -f $@.tmp $@
@@ -38,10 +54,10 @@ build = ./$(1) build $(2) -o $@.tmp && mv -f $@.tmp $@
 
 # Formatting rewrites src2, so finish it before anything reads the sources.
 all:
-	@$(MAKE) -s $(OK)/fmt
+	@$(MAKE) -s $(OK)/fmt $(OK)/stage1-tests
 	@$(MAKE) -s check
 
-check: l8 $(OK)/stdlib-tests $(BUILD)/block-game $(OK)/game-tests
+check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(OK)/game-tests
 
 # ---- compiler stages ----
 
@@ -94,11 +110,15 @@ $(OK)/fmt-check: l8c2 $(SRC2) tools/format_src2.sh | $(OK)
 # `l8 test` builds and runs each file's tests; see TESTING.md. Under make it
 # shares the job slots of a recipe marked with `+`.
 
-$(OK)/compiler-tests: l8c3 $(TESTS) $(STDLIB) $(RUNTIME) $(SRC2) | $(OK)
-	+@$(STEP) 'compiler tests' ./l8c3 test $(COMPILER_TESTS)
+$(OK)/stage1-tests: l8c1 $(TESTS) $(STDLIB) $(RUNTIME) | $(OK)
+	+@$(STEP) 'compiler tests 1' ./l8c1 test $(STAGE1_TESTS)
 	@touch $@
 
-compiler-test: $(OK)/compiler-tests
+$(OK)/compiler-tests: l8c3 $(TESTS) $(STDLIB) $(RUNTIME) $(SRC2) | $(OK)
+	+@$(STEP) 'compiler tests 3' ./l8c3 test $(COMPILER_TESTS)
+	@touch $@
+
+compiler-test: $(OK)/stage1-tests $(OK)/compiler-tests
 
 # ---- standard library and programs ----
 
@@ -214,7 +234,7 @@ help:
 	@echo '  check           build and test without formatting'
 	@echo '  fmt             format src2 with the stage-2 compiler'
 	@echo '  selfhost        build l8c1..l8c4, check the fixpoint, run compiler tests, install ./l8'
-	@echo '  compiler-test   compiler fixtures and CLI cram tests (tests/)'
+	@echo '  compiler-test   stage-1 fixtures, then all fixtures and CLI cram tests (tests/)'
 	@echo '  stdlib-test, game, game-test, terminal, terminal-test, callback-test'
 	@echo '  http, http-test, websocket, websocket-test'
 	@echo '  promote, promote-bin1, promote-bin2, promote-source   (FORCE=1 skips the prompt)'
