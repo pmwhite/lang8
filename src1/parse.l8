@@ -441,6 +441,15 @@ scan_ml_string_end(data: []i8, start: int, used: int) raises Error: int requires
     error_at(start, "unterminated string")
 }
 
+scan_text_end(data: []i8, start: int, used: int) raises Error: int requires (0 <= start && start <= used && used < len(data)) ensures (returned >= start && returned < used) {
+    cursor: int = start;
+    while (cursor + 1 < used) invariant (start <= cursor) {
+        if (data[cursor] == '|' && data[cursor + 1] == '}') return cursor;
+        cursor = cursor + 1
+    }
+    error_at(start, "unterminated {| text")
+}
+
 // read_file leaves a zero byte at source_len; it ends the scan before capacity.
 scan_ident_end(s: []i8, start: int): int requires (0 <= start && start < len(s)) ensures (returned >= start && returned <= len(s)) {
     cursor: int = start;
@@ -513,12 +522,7 @@ tokenize(data: []i8@new, used: int) noregion raises Error: *Token@new requires (
             after_slashes: int = current + 2;
             cnls: int = nls_since(data, cstart);
             pos = skip_line_comment(data, after_slashes, used);
-            if (compile_expect_mode && pos - cstart >= 11 && streq_n(data, cstart,
-                "//% expect:", 0, 11)) {
-                t = new_token(TokKind.Comment, &data[cstart], pos - cstart, cstart);
-                cur.next = t;
-                cur = t
-            } else append_file_com(intern(data, cstart, pos - cstart), cstart, cnls)
+            append_file_com(intern(data, cstart, pos - cstart), cstart, cnls)
         } else if (c == '/' && current <= used - 2 && data[current + 1] == '*') {
             bstart: int = current;
             after_slashes: int = current + 2;
@@ -563,6 +567,14 @@ tokenize(data: []i8@new, used: int) noregion raises Error: *Token@new requires (
             }
             cur.next = t;
             cur = t
+        } else if (c == '{' && current <= used - 2 && data[current + 1] == '|') {
+            // {|text|} holds expected test output without escapes.
+            text_start: int = current + 2;
+            pos = scan_text_end(data, text_start, used);
+            t = new_token(TokKind.Text, &data[text_start], pos - text_start, text_start);
+            cur.next = t;
+            cur = t;
+            pos = pos + 2
         } else if (c == '"') {
             if (pos <= used - 3 && data[pos] == '"' && data[pos + 1] == '"' && data[pos + 2] == '"') {
                 pos = pos + 3;
@@ -731,7 +743,7 @@ skip_optional_semi() {
 
 // A closing brace or else already marks the end of a statement body.
 skip_stmt_semi() raises Error {
-    if (tok.kind == TokKind.RBrace || tok.kind == TokKind.Else || compile_expect_mode && tok.kind == TokKind.Comment) return;
+    if (tok.kind == TokKind.RBrace || tok.kind == TokKind.Else || at_expect()) return;
     skip(TokKind.Semi)
 }
 
@@ -886,6 +898,10 @@ attach_items(head: ?*Item@immortal, end_pos: int) raises Error: ?*Item@head {
             Enum k -> attach_variants(k.def.variants, next_pos);
             Exn k -> attach_members(k.def.members, next_pos);
             Global k -> k.var.lead = lead;
+            Test k -> {
+                tb: ?*Stmt = k.case.fn.body;
+                if (tb != null) _tb: *Stmt = attach_one_stmt(tb, next_pos)
+            }
             _ -> { }
         }
         cur.trail = com_take_trail(next_pos);
@@ -2641,10 +2657,7 @@ last_stmt(head: ?*Stmt): ?*Stmt@head {
     s: ?*Stmt = head;
     last: ?*Stmt = null;
     while (s != null) {
-        match s.kind {
-            Comment _ -> { }
-            _ -> last = s
-        }
+        last = s;
         s = s.next
     }
     last
@@ -3702,10 +3715,12 @@ parse_stmt() noregion raises Error, IndexOutOfBounds: *Stmt@new {
 }
 
 parse_stmt_body() noregion raises Error, IndexOutOfBounds: *Stmt@new {
-    if (tok.kind == TokKind.Comment) {
-        comment: []i8 = cur_tokstr();
+    if (at_expect()) {
         tok = tok.next;
-        return mk_stmt(StmtKind.Comment { text: comment })
+        site: *ExpectSite = parse_expect_text();
+        tok = tok.next;
+        skip_optional_semi();
+        return mk_stmt(StmtKind.Expect { site: site })
     }
     if (tok.kind == TokKind.Return) {
         tok = tok.next;
@@ -3957,8 +3972,8 @@ append_fn_param(fn: *Function, p: *Obj@fn) {
     }
 }
 
-parse_function(name: []i8@new, is_extern: int) noregion raises Error, IndexOutOfBounds: *Function@new {
-    fn: *Function = new Function {
+new_function(name: []i8@new): *Function@new {
+    new Function {
         name: name,
         link_name: name,
         nparams: 0,
@@ -4006,8 +4021,13 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error, IndexOutOf
         browse_id: browse_fresh(),
         browse_pos: browse_tok_pos,
         browse_file: browse_tok_file,
-        browse_len: browse_tok_len
-    };
+        browse_len: browse_tok_len,
+        test_id: 0 - 1
+    }
+}
+
+parse_function(name: []i8@new, is_extern: int) noregion raises Error, IndexOutOfBounds: *Function@new {
+    fn: *Function = new_function(name);
     locals = null;
     scope_locals = null;
     scope_depth = 0;
@@ -4573,6 +4593,222 @@ parse_import() noregion raises Error, IndexOutOfBounds {
     }
 }
 
+// `expect` is contextual: it starts a statement only before a text literal.
+at_expect(): bool {
+    tok.kind == TokKind.Ident && name_eq_span("expect", source, tok.pos, tok.len) && (tok.next.kind == TokKind.Text || tok.next.kind == TokKind.Str && tok.next.val == 0)
+}
+
+// test "name" { body }. The body is an ordinary function with no parameters
+// that may raise any exception; only `l8 test` calls it.
+parse_test() noregion raises Error, IndexOutOfBounds {
+    tpos: int = tok.pos;
+    tok = tok.next;
+    if (tok.val != 0) error("test name must be a one-line string");
+    name: []i8 = intern(source, tok.pos, tok.len);
+    for i in 0..len(name) {
+        if (name[i] == '\\') error("test name cannot contain escapes")
+    }
+    browse_note();
+    tok = tok.next;
+    if (tok.kind != TokKind.LBrace) error("expected `{` after test name");
+    label: *StrBuf = sb_new();
+    sb_puts(label, "test \"");
+    sb_puts(label, name);
+    sb_putc(label, '"');
+    fn: *Function = new_function(sb_finish(label));
+    fn.test_id = test_count;
+    link: *StrBuf = sb_new();
+    sb_puts(link, "__l8_test_");
+    sb_uint(link, test_count);
+    fn.link_name = sb_finish(link);
+    case: *TestCase = new TestCase {
+        id: test_count,
+        name: name,
+        fn: fn,
+        file: current_file_id,
+        pos: tpos,
+        close_pos: 0,
+        semi_pos: 0 - 1,
+        next: null
+    };
+    test_body_end(case);
+    test_count = test_count + 1;
+    last: ?*TestCase = test_cases_tail;
+    if (last == null) test_cases = case else last.next = case;
+    test_cases_tail = case;
+    append_function(fn);
+    locals = null;
+    scope_locals = null;
+    scope_depth = 0;
+    region_depth = 0;
+    narrow_top = null;
+    catch_top = null;
+    current_fn = fn;
+    if (parse_defer_bodies) {
+        parse_defer(ParseDeferredKind.FunctionTail, fn, null, null, false, tok, null);
+        parse_skip_balanced()
+    } else parse_function_tail(fn, 0);
+    fn.locals = locals;
+    narrow_top = null;
+    catch_top = null;
+    current_fn = null;
+    append_item(new_item(ItemKind.Test { case: case }, tpos))
+}
+
+// Find the body's closing brace and whether its last statement needs a `;`
+// before another statement can follow it.
+test_body_end(case: *TestCase) raises Error {
+    t: *Token = tok;
+    prev: *Token = tok;
+    before: *Token = tok;
+    depth: int = 0;
+    started: bool = false;
+    while (t.kind != TokKind.Eof && (!started || depth > 0)) {
+        if (t.kind == TokKind.LBrace) depth = depth + 1;
+        if (t.kind == TokKind.RBrace) depth = depth - 1;
+        started = true;
+        if (depth == 0) {
+            case.close_pos = t.pos;
+            quoted_expect: bool = prev.kind == TokKind.Str && before.kind == TokKind.Ident && name_eq_span("expect",
+                source, before.pos, before.len);
+            if (prev.kind != TokKind.Semi && prev.kind != TokKind.LBrace && prev.kind != TokKind.RBrace && prev.kind != TokKind.Text && !quoted_expect) case.semi_pos = token_end(prev)
+        }
+        before = prev;
+        prev = t;
+        t = t.next
+    }
+    if (depth != 0) error("unterminated test body")
+}
+
+// String tokens span only their contents; the source holds the quotes.
+token_end(t: *Token): int {
+    if (t.kind != TokKind.Str) return t.pos + t.len;
+    if (t.val != 0) return t.pos + t.len + 3;
+    t.pos + t.len + 1
+}
+
+parse_expect_text() noregion raises Error: *ExpectSite@new {
+    fn: *Function = current_fn or error("expect is only allowed in a test");
+    if (fn.test_id < 0) error("expect is only allowed in a test");
+    start: int = tok.pos - 1;
+    end: int = tok.pos + tok.len + 1;
+    value: []i8 = "";
+    text_from: int = tok.pos;
+    text_to: int = tok.pos + tok.len;
+    if (text_from < 0 || text_to < text_from || text_to > len(source)) error("invalid text literal");
+    if (tok.kind == TokKind.Text) {
+        start = tok.pos - 2;
+        end = tok.pos + tok.len + 2;
+        value = expect_block_value(source, text_from, text_to)
+    } else value = expect_string_value(source, text_from, text_to);
+    line: int = start;
+    while (line > 0 && byte_at(source, line - 1) != '\n') line = line - 1;
+    indent: int = 0;
+    while (line + indent < start && byte_at(source, line + indent) == ' ') indent = indent + 1;
+    site: *ExpectSite = new ExpectSite {
+        id: expect_count,
+        test_id: fn.test_id,
+        file: current_file_id,
+        start: start,
+        end: end,
+        indent: indent,
+        value: value,
+        next: null
+    };
+    expect_count = expect_count + 1;
+    last: ?*ExpectSite = expect_sites_tail;
+    if (last == null) expect_sites = site else last.next = site;
+    expect_sites_tail = site;
+    site
+}
+
+// One line of {|text|} is exact. A multi-line block starts after the newline
+// that follows `{|`; each line is indented four spaces past the closing `|}`,
+// and ends with a newline.
+expect_block_value(src: []i8, from: int, to: int) raises Error: []i8@new {
+    if (from < 0 || to < from || to > len(src)) error("invalid text literal");
+    first_nl: int = from;
+    while (first_nl < to && byte_at(src, first_nl) != '\n') first_nl = first_nl + 1;
+    if (first_nl >= to) return strdup_n(src, from, to - from);
+    for i in from..first_nl {
+        if (byte_at(src, i) != ' ') error_at(i, "a multi-line {| text must start on the next line")
+    }
+    last_nl: int = to - 1;
+    while (last_nl > first_nl && byte_at(src, last_nl) != '\n') last_nl = last_nl - 1;
+    for j in last_nl + 1..to {
+        if (byte_at(src, j) != ' ') error_at(j, "`|}` must start its own line after multi-line text")
+    }
+    strip: int = to - last_nl - 1 + 4;
+    sb: *StrBuf = sb_new();
+    line: int = first_nl + 1;
+    while (line <= last_nl) {
+        line_end: int = line;
+        while (line_end < last_nl && byte_at(src, line_end) != '\n') line_end = line_end + 1;
+        blank: bool = true;
+        for k in line..line_end {
+            if (byte_at(src, k) != ' ') blank = false
+        }
+        if (!blank || line_end - line > strip) {
+            for m in line..line + strip {
+                if (m >= line_end || byte_at(src, m) != ' ') error_at(m, "text must be indented four spaces past `|}`")
+            }
+            for c in line + strip..line_end sb_putc(sb, byte_at(src, c))
+        }
+        sb_putc(sb, '\n');
+        line = line_end + 1
+    }
+    sb_finish(sb)
+}
+
+// src[i], or zero outside src.
+byte_at(src: []i8, i: int): i8 {
+    if (i < 0 || i >= len(src)) return 0i8;
+    src[i]
+}
+
+hex_digit(c: i8): int {
+    if (c >= '0' && c <= '9') return (c - '0') as int;
+    if (c >= 'a' && c <= 'f') return (c - 'a') as int + 10;
+    if (c >= 'A' && c <= 'F') return (c - 'A') as int + 10;
+    0 - 1
+}
+
+// A quoted expectation also accepts \xHH, so it can hold any output byte.
+expect_string_value(src: []i8, from: int, to: int) raises Error: []i8@new {
+    if (from < 0 || to < from || to > len(src)) error("invalid string literal");
+    sb: *StrBuf = sb_new();
+    skip_to: int = from;
+    for i in from..to {
+        if (i >= skip_to) {
+            c: i8 = src[i];
+            skip_to = i + 1;
+            if (c == '\\' && i + 1 < to) {
+                e: i8 = src[i + 1];
+                skip_to = i + 2;
+                if (e == 'x') {
+                    hi: int = 0 - 1;
+                    lo: int = 0 - 1;
+                    third: int = i + 3;
+                    if (third < to && third < len(src) && third >= 1) {
+                        high: i8 = src[third - 1];
+                        low: i8 = src[third];
+                        hi = hex_digit(high);
+                        lo = hex_digit(low)
+                    }
+                    if (hi < 0 || lo < 0) error_at(i, "\\x needs two hex digits");
+                    sb_putc(sb, (hi * 16 + lo) trunc i8);
+                    skip_to = i + 4
+                } else {
+                    if (e != 'n' && e != 't' && e != 'r' && e != '0' && e != '\\' && e != '"' && e != '\'') error_at(i,
+                        "unknown escape in expected text");
+                    sb_putc(sb, esc_char(e))
+                }
+            } else sb_putc(sb, c)
+        }
+    }
+    sb_finish(sb)
+}
+
 is_builtin_fname(name: []i8): bool {
     streq(name, "len") || streq(name, "memcpy") || streq(name, "read") || streq(name,
         "cstr") || streq(name, "bytes")
@@ -4798,14 +5034,16 @@ parse_program_unit() noregion raises Error, IndexOutOfBounds {
             tok.pos, tok.len) && tok.next.kind == TokKind.Str;
         is_const_decl: bool = tok.kind == TokKind.Ident && name_eq_span("const", source,
             tok.pos, tok.len) && tok.next.kind == TokKind.Ident;
-        if (tok.kind == TokKind.Import || is_need || is_native) {
+        is_test: bool = tok.kind == TokKind.Ident && name_eq_span("test", source,
+            tok.pos, tok.len) && tok.next.kind == TokKind.Str;
+        if (tok.kind == TokKind.Import || is_need || is_native || is_test) {
             if (prefix) error("declaration tags must precede a definition")
         } else {
             decl: *Token = tok;
             if (tok.kind == TokKind.TypeKw || tok.kind == TokKind.Exception || tok.kind == TokKind.Extern || is_const_decl) decl = tok.next;
             tag_register(decl)
         }
-        if (tok.kind == TokKind.Import) parse_import() else if (tok.kind == TokKind.TypeKw && tok.next.kind == TokKind.Ident && (tok.next.next.kind == TokKind.Assign || tok.next.next.kind == TokKind.Colon)) parse_type_def() else {
+        if (tok.kind == TokKind.Import) parse_import() else if (is_test) parse_test() else if (tok.kind == TokKind.TypeKw && tok.next.kind == TokKind.Ident && (tok.next.next.kind == TokKind.Assign || tok.next.next.kind == TokKind.Colon)) parse_type_def() else {
             if (tok.kind == TokKind.Exception) parse_exception_def() else {
                 if (tok.kind == TokKind.Extern) {
                     tok = tok.next;
@@ -4900,6 +5138,12 @@ parse_program(entry_path: []i8) noregion raises Error, IndexOutOfBounds {
     file_items_tail = null;
     parse_deferred_head = null;
     parse_deferred_tail = null;
+    test_cases = null;
+    test_cases_tail = null;
+    test_count = 0;
+    expect_sites = null;
+    expect_sites_tail = null;
+    expect_count = 0;
     parse_defer_bodies = parse_resolve;
     parse_source_file(normalize_path(entry_path), true);
     parse_run_deferred();

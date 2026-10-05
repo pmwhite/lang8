@@ -342,7 +342,7 @@ type TokKind =
     | Extern
     | Region
     | At
-    | Comment
+    | Text
 
 type Token = {
     kind: TokKind;
@@ -509,7 +509,7 @@ type StmtKind =
     }
     | Try { body: *Stmt, arms: ?*CatchArm, buf: *Obj }
     | Region { body: *Stmt, mark: *Obj }
-    | Comment { text: []i8 }
+    | Expect { site: *ExpectSite }
 
 type Stmt = {
     bounds_live_step: int;
@@ -673,7 +673,38 @@ type Function = {
     browse_id: int;
     browse_pos: int;
     browse_file: int;
-    browse_len: int
+    browse_len: int;
+    // Index in test_cases for a test body, otherwise -1.
+    test_id: int
+}
+
+// A `test "name" { ... }` declaration. Its body is an ordinary function that
+// `l8 test` calls from a generated entry point.
+type TestCase = {
+    id: int;
+    // The name as written between the quotes.
+    name: []i8;
+    fn: *Function;
+    file: int;
+    pos: int;
+    // Where trailing output becomes a new expect, and where a `;` must first
+    // end the body's last statement (or -1).
+    close_pos: int;
+    semi_pos: int;
+    next: ?*TestCase
+}
+
+// One `expect` statement. start and end delimit its text literal so the test
+// runner can replace it; indent is the leading space of its line.
+type ExpectSite = {
+    id: int;
+    test_id: int;
+    file: int;
+    start: int;
+    end: int;
+    indent: int;
+    value: []i8;
+    next: ?*ExpectSite
 }
 
 type UnusedFunction = {
@@ -696,7 +727,7 @@ type ItemKind =
     | Exn { def: *ExnDef }
     | Func { fn: *Function }
     | Global { var: *Obj }
-    | Comment { text: []i8 }
+    | Test { case: *TestCase }
 
 type NeedLib = {
     name: []i8;
@@ -774,7 +805,20 @@ pos: int = 0;
 
 source_path: []i8 = "";
 
-compile_expect_mode: bool = false;
+// `l8 test` compiles test bodies and a test entry point in place of main.
+compile_test_mode: bool = false;
+
+test_cases: ?*TestCase = null;
+
+test_cases_tail: ?*TestCase = null;
+
+test_count: int = 0;
+
+expect_sites: ?*ExpectSite = null;
+
+expect_sites_tail: ?*ExpectSite = null;
+
+expect_count: int = 0;
 
 token_eof: *Token = new Token {
     kind: TokKind.Eof,
@@ -1236,6 +1280,26 @@ error_at_file(file: int, p: int, msg: []i8@immortal) raises Error: noreturn {
     error_at(p, msg)
 }
 
+// `l8 test` reports paths relative to the tested file's directory, so
+// expectations do not depend on where the runner started.
+diag_strip: []i8 = "";
+
+// Where a diagnostic path starts once diag_strip is removed.
+diag_path_start(path: []i8): int {
+    n: int = len(diag_strip);
+    if (n == 0 || len(path) < n) return 0;
+    for i in 0..n {
+        if (path[i] != diag_strip[i]) return 0
+    }
+    n
+}
+
+print_diag_path(path: []i8) {
+    first: int = diag_path_start(path);
+    if (first < 0) first = 0;
+    for i in first..len(path) raw::raw_write_byte(2, path[i])
+}
+
 print_error_at(
     path: []i8,
     src: []i8,
@@ -1254,7 +1318,7 @@ print_error_at(
         i = i + 1
     }
     raw::raw_write(2, "error: ");
-    raw::raw_write_bytes(2, path);
+    print_diag_path(path);
     raw::raw_write(2, ":");
     emit_num_fd(2, line);
     raw::raw_write(2, ":");
@@ -1282,7 +1346,7 @@ print_warning_at(
         i = i + 1
     }
     raw::raw_write(2, "warning: ");
-    raw::raw_write_bytes(2, path);
+    print_diag_path(path);
     raw::raw_write(2, ":");
     emit_num_fd(2, line);
     raw::raw_write(2, ":");
@@ -2400,6 +2464,9 @@ mark_raises_seen(ed: *ExnDef): bool {
 
 check_exn_allowed(ed: *ExnDef, _what: []i8) noregion raises Error {
     if (exn_is_caught(ed)) return;
+    // A test may raise anything; the runner reports it as a failure.
+    tested: ?*Function = current_fn;
+    if (tested != null && tested.test_id >= 0) return;
     if (mark_raises_seen(ed)) return;
     message: *StrBuf = sb_new();
     sb_puts(message, "exception ");
@@ -3132,11 +3199,40 @@ compiler_frontend(src_path: []i8@immortal) noregion raises Error, IndexOutOfBoun
     profile_mark("codegen")
 }
 
+extern runtime_readlink(
+    nr: int,
+    path: str,
+    buffer: []i8,
+    size: int
+): int = syscall;
+
+// runtime.s from the working directory, or else from beside the compiler.
+runtime_source_path() raises Error: []i8@new {
+    fd: int = open_path("runtime.s", 0, 0);
+    if (fd >= 0) {
+        close(fd);
+        return strdup_n("runtime.s", 0, 9)
+    }
+    buffer: []i8 = new i8[4096](0i8);
+    n: int = runtime_readlink(89, "/proc/self/exe", buffer, len(buffer));
+    if (n <= 0 || n > len(buffer)) return strdup_n("runtime.s", 0, 9);
+    slash: int = 0;
+    for i in 0..n {
+        if (buffer[i] == '/') slash = i + 1
+    }
+    path: *StrBuf = sb_new();
+    for k in 0..slash {
+        if (k < len(buffer)) sb_putc(path, buffer[k])
+    }
+    sb_puts(path, "runtime.s");
+    sb_finish(path)
+}
+
 compiler_build_direct(src_path: []i8@immortal) noregion raises IndexOutOfBounds: int {
     try {
         cg_direct_mode = true;
         compiler_frontend(src_path);
-        as_assemble_file_append("runtime.s");
+        as_assemble_file_append(runtime_source_path());
         native: ?*NeedLib = g_native;
         while (native != null) {
             as_assemble_file_append(native.name);
