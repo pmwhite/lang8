@@ -22,12 +22,8 @@ import "block-game-render.l8";
 
 import "block-game-ui.l8";
 
-check(ok: bool, message: []i8) raises IoError {
-    if (!ok) die(message)
-}
-
-main() raises IoError: int {
-    m: FpsMeter = FpsMeter {
+frames_meter(): FpsMeter {
+    FpsMeter {
         on: true,
         i: 0,
         n: 0,
@@ -43,7 +39,85 @@ main() raises IoError: int {
         x_step: 0.0,
         hlo: 0.0,
         hhi: 0.0
-    };
+    }
+}
+
+frames_show(label: str, value: int) raises IoError {
+    write(1, label);
+    write(1, ": ");
+    write_int(1, value);
+    write(1, "\n")
+}
+
+frames_show_bool(label: str, value: bool) raises IoError {
+    write(1, label);
+    if (value) write(1, ": true\n") else write(1, ": false\n")
+}
+
+frames_show_fixed(label: str, value: f32) raises IoError {
+    write(1, label);
+    write(1, ": ");
+    write_fixed(1, value as f64, 3);
+    write(1, "\n")
+}
+
+test "frames are timed from swap to swap" {
+    m: FpsMeter = frames_meter();
+    times: []int = new int[FPS_CAP](0);
+    works: []int = new int[FPS_CAP](0);
+    frames: []int = new int[FPS_CAP](0);
+    rates: []f32 = new f32[FPS_CAP](0.0);
+    heaps: []int = new int[FPS_CAP](0);
+    heap: int = l8_heap_used();
+    now: int = 1000000;
+    // The first swap only sets the baseline.
+    mark: int = l8_heap_used();
+    fps_finish_at(&m, times, works, frames, rates, heaps, now, heap);
+    grown: int = l8_heap_used() - mark;
+    frames_show("frames", m.n);
+    frames_show("bytes allocated", grown);
+    expect {|
+        frames: 0
+        bytes allocated: 0
+    |}
+    // 3 ms of work, then a wait for presentation at 120 Hz.
+    mark = l8_heap_used();
+    m.pending_work = 3000;
+    now = now + 8333;
+    fps_finish_at(&m, times, works, frames, rates, heaps, now, heap);
+    grown = l8_heap_used() - mark;
+    frames_show("frames", m.n);
+    frames_show("frame 0 wall time", frames[0]);
+    frames_show("frame 0 work", works[0]);
+    frames_show("bytes allocated", grown);
+    expect {|
+        frames: 1
+        frame 0 wall time: 8333
+        frame 0 work: 3000
+        bytes allocated: 0
+    |}
+    // A 120 ms presentation hitch.
+    mark = l8_heap_used();
+    m.pending_work = 3000;
+    now = now + 120000;
+    fps_finish_at(&m, times, works, frames, rates, heaps, now, heap);
+    grown = l8_heap_used() - mark;
+    frames_show("frames", m.n);
+    frames_show("frame 1 wall time", frames[1]);
+    frames_show("frame 1 work", works[1]);
+    frames_show_bool("frame 1 stamped with its swap time", times[1] == now);
+    frames_show("bytes allocated", grown);
+    expect {|
+        frames: 2
+        frame 1 wall time: 120000
+        frame 1 work: 3000
+        frame 1 stamped with its swap time: true
+        bytes allocated: 0
+    |}
+}
+
+test "the ring keeps the latest frame after wrapping" {
+    m: FpsMeter = frames_meter();
     times: []int = new int[FPS_CAP](0);
     works: []int = new int[FPS_CAP](0);
     frames: []int = new int[FPS_CAP](0);
@@ -52,35 +126,82 @@ main() raises IoError: int {
     heap: int = l8_heap_used();
     now: int = 1000000;
     fps_finish_at(&m, times, works, frames, rates, heaps, now, heap);
-    check(m.n == 0, "first swap must only establish baseline");
-    m.pending_work = 3000;
-    now = now + 8333;
-    fps_finish_at(&m, times, works, frames, rates, heaps, now, heap);
-    check(frames[0] == 8333 && works[0] == 3000, "wall frame must include presentation wait");
-    m.pending_work = 3000;
-    now = now + 120000;
-    fps_finish_at(&m, times, works, frames, rates, heaps, now, heap);
-    check(frames[1] == 120000 && works[1] == 3000 && times[1] == now, "a presentation hitch must stay unsmoothed and aligned with work");
-    check(frame_axis_hi(10.0, 140.0, true) == 140.0, "axis must show full hitch immediately");
-    check(frame_axis_hi(140.0, 10.0, true) > 10.0, "axis should contract smoothly");
     for _i in 0..FPS_CAP + 100 {
         now = now + 8333;
         m.pending_work = 2400;
         fps_finish_at(&m, times, works, frames, rates, heaps, now, heap)
     }
+    heap_delta: int = l8_heap_used() - heap;
     last: int = fps_ring(m.i, m.n, m.n - 1);
-    check(m.n == FPS_CAP && times[last] == now && frames[last] == 8333, "ring wrap must preserve latest completed frame");
-    check(rates[last] > 119.9 && rates[last] < 120.1, "FPS derived from completed frames");
+    frames_show_bool("ring is full", m.n == FPS_CAP);
+    frames_show_bool("latest frame stamped with the last swap", times[last] == now);
+    frames_show("latest frame wall time", frames[last]);
+    frames_show_fixed("latest frames per second", rates[last]);
+    frames_show("bytes allocated while sampling", heap_delta);
+    expect {|
+        ring is full: true
+        latest frame stamped with the last swap: true
+        latest frame wall time: 8333
+        latest frames per second: 120.005
+        bytes allocated while sampling: 0
+    |}
+}
+
+test "toggling the meter discards the stale baseline" {
+    m: FpsMeter = frames_meter();
+    times: []int = new int[FPS_CAP](0);
+    works: []int = new int[FPS_CAP](0);
+    frames: []int = new int[FPS_CAP](0);
+    rates: []f32 = new f32[FPS_CAP](0.0);
+    heaps: []int = new int[FPS_CAP](0);
+    heap: int = l8_heap_used();
+    now: int = 1000000;
+    mark: int = l8_heap_used();
+    for _i in 0..4 {
+        now = now + 8333;
+        fps_finish_at(&m, times, works, frames, rates, heaps, now, heap)
+    }
+    grown: int = l8_heap_used() - mark;
+    frames_show("frames recorded by four swaps", m.n);
+    frames_show("bytes allocated", grown);
+    expect {|
+        frames recorded by four swaps: 3
+        bytes allocated: 0
+    |}
+    // Ten seconds pass while the meter is off.
+    mark = l8_heap_used();
     toggle_fps(&m);
     now = now + 10000000;
     fps_finish_at(&m, times, works, frames, rates, heaps, now, heap);
-    check(m.n == 0, "toggle must discard stale timing baseline");
+    grown = l8_heap_used() - mark;
+    frames_show("frames after toggling and swapping", m.n);
+    frames_show("bytes allocated", grown);
+    expect {|
+        frames after toggling and swapping: 0
+        bytes allocated: 0
+    |}
+    mark = l8_heap_used();
     now = now + 16667;
     m.pending_work = 2000;
     fps_finish_at(&m, times, works, frames, rates, heaps, now, heap);
-    check(m.n == 1 && frames[0] == 16667, "restart must not include toggle gap");
-    check(l8_heap_used() == heap, "frame sampling must not allocate");
-    print("frame timing tests passed");
-    0
-    //% expect: "frame timing tests passed\n"
+    grown = l8_heap_used() - mark;
+    frames_show("frames after the next swap", m.n);
+    frames_show("frame 0 wall time", frames[0]);
+    frames_show("bytes allocated", grown);
+    expect {|
+        frames after the next swap: 1
+        frame 0 wall time: 16667
+        bytes allocated: 0
+    |}
+}
+
+test "the frame axis grows at once and shrinks smoothly" {
+    frames_show_fixed("axis from 10 ms wanting 140 ms", frame_axis_hi(10.0, 140.0,
+        true));
+    frames_show_fixed("axis from 140 ms wanting 10 ms", frame_axis_hi(140.0, 10.0,
+        true));
+    expect {|
+        axis from 10 ms wanting 140 ms: 140.000
+        axis from 140 ms wanting 10 ms: 133.500
+    |}
 }

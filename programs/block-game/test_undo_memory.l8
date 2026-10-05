@@ -22,26 +22,69 @@ import "block-game-render.l8";
 
 import "block-game-ui.l8";
 
-const TEST_JOURNAL_STRIDE: int = 9 + 3 * REWIND_MAX + 3;
+const UNDOMEM_JOURNAL_STRIDE: int = 9 + 3 * REWIND_MAX + 3;
 
-type TestJournalOrder = {
+type UndomemJournalOrder = {
     action: int;
     base: int;
-    previous: ?*TestJournalOrder
+    previous: ?*UndomemJournalOrder
 } invariant (0 <= action && action < 700 && 0 <= base && base <= 553608)
 
-test_journal_count(offset: int): int requires (0 <= offset && offset < 8192) ensures (1 <= returned && returned <= REWIND_MAX) {
+undomem_journal_count(offset: int): int requires (0 <= offset && offset < 8192) ensures (1 <= returned && returned <= REWIND_MAX) {
     remainder: int = offset % REWIND_MAX;
     remainder + 1
 }
 
-check(ok: bool, message: []i8) raises IoError {
-    if (!ok) die(message)
+undomem_show_int(label: str, value: int) raises IoError {
+    write(1, label);
+    write(1, ": ");
+    print_int(value)
+}
+
+undomem_show_bool(label: str, value: bool) raises IoError {
+    write(1, label);
+    write(1, ": ");
+    print_bool(value)
+}
+
+undomem_result_name(result: int): str {
+    if (result == PLAY_UNDO_DONE) return "done";
+    if (result == PLAY_UNDO_WAIT) return "still catching up";
+    if (result == 0) return "nothing to undo";
+    "unknown"
+}
+
+undomem_show_result(label: str, result: int) raises IoError {
+    write(1, label);
+    write(1, ": ");
+    print(undomem_result_name(result))
+}
+
+undomem_show_block(label: str, b: Block) raises IoError {
+    write(1, label);
+    write(1, ": col ");
+    write_int(1, b.column);
+    write(1, " row ");
+    write_int(1, b.row);
+    write(1, " layer ");
+    write_int(1, b.layer);
+    write(1, "\n")
+}
+
+undomem_show_player(g: *UndomemGame) raises IoError {
+    write(1, "player: col ");
+    write_int(1, g.pose[0]);
+    write(1, " row ");
+    write_int(1, g.pose[1]);
+    write(1, " layer ");
+    write_int(1, g.pose[2]);
+    write(1, "\n")
 }
 
 // Compare the compressed log with independent full snapshots. A small ring
 // forces eviction and physical wrap; pops and cancelled attempts test branches.
-test_journal() raises IoError, UndoHistoryExhausted {
+// Mismatches are counted instead of printed so the loop does not allocate.
+test "journal reconstructs retained actions under byte pressure" {
     home: []int = [0, 0, 1];
     widths: []int = new int[LEVEL_MAX_ROOMS](0);
     widths[0] = 2;
@@ -60,36 +103,50 @@ test_journal() raises IoError, UndoHistoryExhausted {
     counts: []RewindCount = new RewindCount[LEVEL_MAX_ROOMS](RewindCount { value: 1 });
     cursors: []RewindCursor = new RewindCursor[LEVEL_MAX_ROOMS](RewindCursor { value: 0 });
     ghost: []int = new int[LEVEL_MAX_ROOMS](0);
-    expected: []int = new int[700 * 2 * TEST_JOURNAL_STRIDE](0);
-    order: []TestJournalOrder = new TestJournalOrder[700](TestJournalOrder { action: 0, base: 0, previous: null });
+    expected: []int = new int[700 * 2 * UNDOMEM_JOURNAL_STRIDE](0);
+    order: []UndomemJournalOrder = new UndomemJournalOrder[700](UndomemJournalOrder { action: 0, base: 0, previous: null });
     rc: []RewindCount = new RewindCount[LEVEL_MAX_ROOMS](RewindCount { value: 0 });
     rp: []RewindCursor = new RewindCursor[LEVEL_MAX_ROOMS](RewindCursor { value: 0 });
     rg: []int = new int[LEVEL_MAX_ROOMS](0);
-    latest: ?*TestJournalOrder = null;
+    latest: ?*UndomemJournalOrder = null;
     stable: int = l8_heap_used();
     wrapped: bool = false;
     evicted: bool = false;
+    layout_bad: int = 0;
+    newest_lost: int = 0;
+    loads: int = 0;
+    pose_bad: int = 0;
+    deps_bad: int = 0;
+    meta_bad: int = 0;
+    typed_bad: int = 0;
+    frames_bad: int = 0;
+    blocks_bad: int = 0;
+    restores: int = 0;
+    restore_bad: int = 0;
+    cancels: int = 0;
+    cancel_bad: int = 0;
+    heap_bad: int = 0;
     for action in 0..700 {
         prior: int = u.count;
         for phase in 0..2 {
-            steps0: int = test_journal_count(action * 7 + phase);
-            steps1: int = test_journal_count(action * 3 + phase);
+            steps0: int = undomem_journal_count(action * 7 + phase);
+            steps1: int = undomem_journal_count(action * 3 + phase);
             counts[0].value = steps0;
             counts[1].value = steps1;
             cursors[0].value = counts[0].value - 1;
             cursors[1].value = action % counts[1].value;
             ghost[1] = action % 3;
-            check(widths[0] == 2 && widths[1] == 1, "journal fixture widths");
+            if (widths[0] != 2 || widths[1] != 1) layout_bad = layout_bad + 1;
             for s in 0..steps0 {
                 for k in 0..2 {
                     slot: int = s * 3 + k;
-                    check(slot == rewind_slot(0, s, k, widths, 3), "first journal room layout");
+                    if (slot != rewind_slot(0, s, k, widths, 3)) layout_bad = layout_bad + 1;
                     live[slot] = pack_pos(action + s, k + phase, action % 8, phase)
                 }
             }
             for s in 0..steps1 {
                 slot: int = s * 3 + 2;
-                check(slot == rewind_slot(1, s, 0, widths, 3), "second journal room layout");
+                if (slot != rewind_slot(1, s, 0, widths, 3)) layout_bad = layout_bad + 1;
                 live[slot] = pack_pos(action + s, 1 + phase, action % 8, phase)
             }
             blocks[0].column = action;
@@ -100,7 +157,7 @@ test_journal() raises IoError, UndoHistoryExhausted {
                 undo_depend(u, 0);
                 undo_depend(u, 63)
             }
-            base: int = (action * 2 + phase) * TEST_JOURNAL_STRIDE;
+            base: int = (action * 2 + phase) * UNDOMEM_JOURNAL_STRIDE;
             for r in 0..3 {
                 expected[base + r * 3] = counts[r].value;
                 expected[base + r * 3 + 1] = cursors[r].value;
@@ -110,11 +167,11 @@ test_journal() raises IoError, UndoHistoryExhausted {
             for i in 0..3 expected[base + 9 + len(live) + i] = pack_pos(blocks[i].column,
                 blocks[i].row, blocks[i].layer, blocks[i].mounted)
         }
-        order[action] = TestJournalOrder { action: action, base: action * 2 * TEST_JOURNAL_STRIDE, previous: latest };
+        order[action] = UndomemJournalOrder { action: action, base: action * 2 * UNDOMEM_JOURNAL_STRIDE, previous: latest };
         latest = &order[action];
         if (u.count < prior + 1) evicted = true;
         if (u.head > len(u.journal)) wrapped = true;
-        check(u.count > 0, "newest action must survive byte pressure");
+        if (u.count <= 0) newest_lost = newest_lost + 1;
         // Test reversible phase changes and room restoration for the newest
         // action, and periodically pop several retained actions in sequence.
         pops: int = 0;
@@ -122,64 +179,62 @@ test_journal() raises IoError, UndoHistoryExhausted {
         for attempt in 0..pops + 1 {
             if (u.count > 0) {
                 if (latest == null) die("journal action has no test snapshot");
-                entry: TestJournalOrder = latest.*;
+                entry: UndomemJournalOrder = latest.*;
                 retained: int = entry.action;
                 record: int = undo_latest(u);
                 player_at: int = (record + 2) trunc u32 as int;
-                check(undo_read(u.journal, player_at) == pack_pos(retained, -3, 2,
-                    1), "packed player pose");
+                if (undo_read(u.journal, player_at) != pack_pos(retained, -3, 2, 1)) pose_bad = pose_bad + 1;
                 undo_prepare_action(u, LEVEL_MAX_ROOMS, 3);
-                check(u.selected[0] == 1 && u.selected[63] == 1 && u.selected[62] == 0,
-                    "64-bit room dependency mask");
+                if (u.selected[0] != 1 || u.selected[63] != 1 || u.selected[62] != 0) deps_bad = deps_bad + 1;
                 for phase in 0..2 {
                     data: []int = undo_load_history(u, record, phase);
-                    base: int = entry.base + phase * TEST_JOURNAL_STRIDE;
+                    loads = loads + 1;
+                    base: int = entry.base + phase * UNDOMEM_JOURNAL_STRIDE;
                     for r in 0..3 {
                         off: int = u.offsets[r];
-                        check(u.metas[r].count.* == expected[base + r * 3], "count reconstruction");
-                        check(u.metas[r].cursor.* == expected[base + r * 3 + 1], "cursor reconstruction");
-                        check(u.meta_values[r * 2] as int == expected[base + r * 3],
-                            "typed count reconstruction");
-                        check(u.meta_values[r * 2 + 1] as int == expected[base + r * 3 + 1] + 1,
-                            "typed cursor reconstruction");
-                        check(u.metas[r].ghost.* == expected[base + r * 3 + 2], "ghost reconstruction");
+                        if (u.metas[r].count.* != expected[base + r * 3] || u.metas[r].cursor.* != expected[base + r * 3 + 1] || u.metas[r].ghost.* != expected[base + r * 3 + 2]) meta_bad = meta_bad + 1;
+                        if (u.meta_values[r * 2] as int != expected[base + r * 3] || u.meta_values[r * 2 + 1] as int != expected[base + r * 3 + 1] + 1) typed_bad = typed_bad + 1;
                         steps: int = u.metas[r].count.*;
                         if (steps < 0 || steps > REWIND_MAX) die("invalid reconstructed frame count");
                         if (r == 0) {
-                            check(off == 0 && widths[r] == 2, "first journal room layout");
+                            if (off != 0 || widths[r] != 2) layout_bad = layout_bad + 1;
                             for s in 0..steps {
-                                for k in 0..2 check(data[3 + s * 2 + k] == expected[base + 9 + s * 3 + k],
-                                    "branch frame reconstruction")
+                                for k in 0..2 {
+                                    if (data[3 + s * 2 + k] != expected[base + 9 + s * 3 + k]) frames_bad = frames_bad + 1
+                                }
                             }
                         } else if (r == 1) {
-                            check(off == 3 + 2 * REWIND_MAX && widths[r] == 1, "second journal room layout");
-                            for s in 0..steps check(data[6 + 2 * REWIND_MAX + s] == expected[base + 9 + s * 3 + 2],
-                                "branch frame reconstruction")
-                        } else check(widths[r] == 0, "empty journal room layout")
+                            if (off != 3 + 2 * REWIND_MAX || widths[r] != 1) layout_bad = layout_bad + 1;
+                            for s in 0..steps {
+                                if (data[6 + 2 * REWIND_MAX + s] != expected[base + 9 + s * 3 + 2]) frames_bad = frames_bad + 1
+                            }
+                        } else if (widths[r] != 0) layout_bad = layout_bad + 1
                     }
-                    for i in 0..3 check(u.image[u.block_base + i] == expected[base + 9 + len(live) + i],
-                        "block pose reconstruction")
+                    for i in 0..3 {
+                        if (u.image[u.block_base + i] != expected[base + 9 + len(live) + i]) blocks_bad = blocks_bad + 1
+                    }
                 }
                 undo_restore_history(u, record, 1, rc, rp, rg);
+                restores = restores + 1;
                 base: int = entry.base;
-                check(rc[1].value == expected[base + 3] && rp[1].value == expected[base + 4] && rg[1] == expected[base + 5],
-                    "restore metadata");
+                if (rc[1].value != expected[base + 3] || rp[1].value != expected[base + 4] || rg[1] != expected[base + 5]) restore_bad = restore_bad + 1;
                 restored_seen: int = 0;
                 for i in 0..len(live) {
                     if (i % 3 == 2 && i / 3 < rc[1].value) {
                         s: int = i / 3;
-                        check(i == rewind_slot(1, s, 0, widths, 3), "restore fixture layout");
-                        check(live[i] == expected[base + 9 + i], "restore room frames");
+                        if (i != rewind_slot(1, s, 0, widths, 3)) layout_bad = layout_bad + 1;
+                        if (live[i] != expected[base + 9 + i]) restore_bad = restore_bad + 1;
                         restored_seen = restored_seen + 1
                     }
                 }
-                check(restored_seen == rc[1].value, "restore frame count");
+                if (restored_seen != rc[1].value) restore_bad = restore_bad + 1;
                 if (attempt < pops) {
                     undo_pop_action(u);
                     latest = entry.previous
                 } else u.undoing = false
             }
         }
+        // A cancelled move must not evict history under byte pressure.
         if (action % 13 == 12) {
             head: int = u.head;
             tail: int = u.tail;
@@ -189,26 +244,115 @@ test_journal() raises IoError, UndoHistoryExhausted {
             for i in 0..len(live) live[i] = pack_pos(-1000, action, 0, 0);
             undo_save_history(u, false, 3, counts, cursors, ghost, blocks, 3, 0);
             undo_cancel_action(u);
-            check(u.head == head && u.tail == tail && u.count == count, "failed move evicted history under byte pressure")
+            cancels = cancels + 1;
+            if (u.head != head || u.tail != tail || u.count != count) cancel_bad = cancel_bad + 1
         }
-        check(l8_heap_used() == stable, "journal allocated after startup")
+        if (l8_heap_used() != stable) heap_bad = heap_bad + 1
     }
-    check(evicted && wrapped, "test did not exercise journal eviction and wrap");
+    undomem_show_bool("evicted old actions", evicted);
+    undomem_show_bool("wrapped around the ring", wrapped);
+    undomem_show_int("actions where the newest was lost", newest_lost);
+    undomem_show_int("actions with heap growth", heap_bad);
+    expect {|
+        evicted old actions: true
+        wrapped around the ring: true
+        actions where the newest was lost: 0
+        actions with heap growth: 0
+    |}
+    undomem_show_int("phases reconstructed", loads);
+    undomem_show_int("room layout mismatches", layout_bad);
+    undomem_show_int("player pose mismatches", pose_bad);
+    undomem_show_int("room dependency mask mismatches", deps_bad);
+    undomem_show_int("count/cursor/ghost mismatches", meta_bad);
+    undomem_show_int("typed metadata mismatches", typed_bad);
+    undomem_show_int("rewind frame mismatches", frames_bad);
+    undomem_show_int("block pose mismatches", blocks_bad);
+    expect {|
+        phases reconstructed: 1902
+        room layout mismatches: 0
+        player pose mismatches: 0
+        room dependency mask mismatches: 0
+        count/cursor/ghost mismatches: 0
+        typed metadata mismatches: 0
+        rewind frame mismatches: 0
+        block pose mismatches: 0
+    |}
+    undomem_show_int("room restores", restores);
+    undomem_show_int("room restore mismatches", restore_bad);
+    expect {|
+        room restores: 951
+        room restore mismatches: 0
+    |}
+    undomem_show_int("cancelled moves", cancels);
+    undomem_show_int("cancelled moves that changed the journal", cancel_bad);
+    expect {|
+        cancelled moves: 53
+        cancelled moves that changed the journal: 0
+    |}
+}
+
+test "unchanged actions store only the action overhead" {
+    home: []int = [0, 0, 1];
+    widths: []int = new int[LEVEL_MAX_ROOMS](0);
+    widths[0] = 2;
+    widths[1] = 1;
+    live: []int = new int[384](0);
+    u: *UndoTimeline = new_undo_journal(home, 3, widths, live, 1600);
+    blocks: []Block = new Block[3](Block {
+        id: 0,
+        column: 0,
+        row: 0,
+        shape: 0,
+        layer: 0,
+        ramp: 0,
+        mounted: 0
+    });
+    counts: []RewindCount = new RewindCount[LEVEL_MAX_ROOMS](RewindCount { value: 1 });
+    cursors: []RewindCursor = new RewindCursor[LEVEL_MAX_ROOMS](RewindCursor { value: 0 });
+    ghost: []int = new int[LEVEL_MAX_ROOMS](0);
+    for action in 0..10 {
+        blocks[0].column = action;
+        live[0] = action;
+        undo_save_history(u, false, 3, counts, cursors, ghost, blocks, 3, action);
+        undo_save_history(u, true, 3, counts, cursors, ghost, blocks, 3, action)
+    }
+    undomem_show_int("actions before clearing", u.count);
     undo_clear_journal(u);
-    check(u.head == 0 && u.tail == 0 && u.count == 0, "clear journal");
+    undomem_show_int("head after clearing", u.head);
+    undomem_show_int("tail after clearing", u.tail);
+    undomem_show_int("actions after clearing", u.count);
+    expect {|
+        actions before clearing: 10
+        head after clearing: 0
+        tail after clearing: 0
+        actions after clearing: 0
+    |}
+    stable: int = l8_heap_used();
+    larger: int = 0;
     for action in 0..1000 {
         undo_save_history(u, false, 3, counts, cursors, ghost, blocks, 3, action);
         undo_save_history(u, true, 3, counts, cursors, ghost, blocks, 3, action);
         if (action > 0) {
             latest_action: int = undo_latest(u);
-            check(undo_read(u.journal, latest_action) == UNDO_ACTION_OVERHEAD, "unchanged action wrote redundant diffs")
+            if (undo_read(u.journal, latest_action) != UNDO_ACTION_OVERHEAD) larger = larger + 1
         }
     }
-    check(u.count == len(u.journal) / UNDO_ACTION_OVERHEAD, "walking byte-budget capacity");
-    check(l8_heap_used() == stable, "unchanged saves allocated")
+    grown: int = l8_heap_used() - stable;
+    undomem_show_int("later actions larger than the overhead", larger);
+    undomem_show_int("journal words", len(u.journal));
+    undomem_show_int("action overhead words", UNDO_ACTION_OVERHEAD);
+    undomem_show_int("retained actions", u.count);
+    undomem_show_int("heap growth", grown);
+    expect {|
+        later actions larger than the overhead: 0
+        journal words: 1600
+        action overhead words: 5
+        retained actions: 320
+        heap growth: 0
+    |}
 }
 
-type UndoGame = {
+type UndomemGame = {
     level: *LevelState;
     u: *UndoTimeline;
     widths: []int;
@@ -239,7 +383,7 @@ type UndoGame = {
     rng: []int
 } invariant (len(pose) == 4 && len(hpc) == 8 && len(hpr) == 8 && len(hph) == 8 && len(hpm) == 8 && len(hms) == 8 && len(clock) == 3 && len(pend) == 2 && len(counts) == LEVEL_MAX_ROOMS && len(cursors) == LEVEL_MAX_ROOMS && len(ghost) == LEVEL_MAX_ROOMS && len(live) == LEVEL_MAX_BLOCKS * REWIND_MAX && len(hist) == 8 * LEVEL_MAX_BLOCKS && len(widths) == LEVEL_MAX_ROOMS && len(scratch) == LEVEL_MAX_BLOCKS && len(crate_pose) == LEVEL_MAX_BLOCKS * CRATE_HIST && len(crate_ms) == LEVEL_MAX_BLOCKS * CRATE_HIST && len(crate_t0) == LEVEL_MAX_BLOCKS && len(rng) == 1 && len(solved) == LEVEL_MAX_ROOMS && len(stream_until) == LEVEL_MAX_ROOMS && len(stream_tx) == LEVEL_MAX_ROOMS && len(stream_tz) == LEVEL_MAX_ROOMS)
 
-new_undo_game() raises IoError: *UndoGame@new {
+new_undomem_game() raises IoError: *UndomemGame@new {
     l: *LevelState = new_level_state();
     level_set_room_count(l, 2);
     l.rooms[0] = Room {
@@ -287,7 +431,7 @@ new_undo_game() raises IoError: *UndoGame@new {
     ids: *RoomBlockIds = new_room_block_ids();
     assign_block_homes(l.blocks, l.nblocks, l.rooms, l.nrooms, home, ids, widths);
     live: []int = new int[LEVEL_MAX_BLOCKS * REWIND_MAX](0);
-    g: *UndoGame = new UndoGame {
+    g: *UndomemGame = new UndomemGame {
         level: l,
         u: new_undo_timeline(home, l.nblocks, widths, live),
         widths: widths,
@@ -329,28 +473,30 @@ new_undo_game() raises IoError: *UndoGame@new {
         rng: new int[1](1)
     };
     for r in 0..l.nrooms rewind_capture(l.blocks, r, ids, widths, g.live, 0);
-    settle_test_game(g);
+    undomem_settle(g);
     g
 }
 
-settle_test_game(g: *UndoGame) {
+undomem_settle(g: *UndomemGame) {
     l: *LevelState = g.level;
     play_snap_pose(l.blocks, l.nblocks, g.hist, g.hpc, g.hpr, g.hph, g.hpm, g.clock,
         g.pose, pack_pos(g.pose[0], g.pose[1], g.pose[2], g.pose[3]));
     crate_boot(l.blocks, l.nblocks, g.crate_pose, g.crate_cursor, g.crate_t0)
 }
 
-test_move(g: *UndoGame, dc: int, dr: int) raises UndoHistoryExhausted, IoError {
+undomem_move(g: *UndomemGame, dc: int, dr: int) raises UndoHistoryExhausted, IoError {
     l: *LevelState = g.level;
     play_try_dir(l.blocks, l.nblocks, l.rooms, l.nrooms, l.bricks, l.nbricks, l.ground,
         l.nground, g.hist, g.hpc, g.hpr, g.hph, g.hpm, g.hms, g.clock, g.pose, dc,
         dr, g.pend, g.ids, g.widths, g.live, g.counts, g.cursors, g.ghost, l.goals,
         l.ngoals, g.solved, g.stream_until, g.stream_tx, g.stream_tz, g.sparks, g.rng,
         g.scratch, g.u);
-    settle_test_game(g)
+    undomem_settle(g)
 }
 
-test_undo(g: *UndoGame) raises IoError: int {
+// Undo one action, ticking until any catch-up animation finishes. Returns
+// PLAY_UNDO_WAIT if it never finished.
+undomem_undo(g: *UndomemGame) raises IoError: int {
     l: *LevelState = g.level;
     result: int = PLAY_UNDO_WAIT;
     ticks: int = 0;
@@ -362,81 +508,243 @@ test_undo(g: *UndoGame) raises IoError: int {
         crate_boot(l.blocks, l.nblocks, g.crate_pose, g.crate_cursor, g.crate_t0);
         ticks = ticks + 1
     }
-    check(result != PLAY_UNDO_WAIT, "undo catch-up failed to finish");
-    settle_test_game(g);
+    undomem_settle(g);
     result
 }
 
-test_gameplay() raises UndoHistoryExhausted, IoError {
-    g: *UndoGame = new_undo_game();
+// Record the player pose and the first three blocks in out[at..at + 12].
+undomem_capture(g: *UndomemGame, out: []int, at: int) {
+    blocks: []Block = g.level.blocks;
+    if (len(blocks) < 3) return;
+    for i in 0..3 undomem_put(out, at + i, g.pose[i]);
+    for b in 0..3 {
+        undomem_put(out, at + 3 + b * 3, blocks[b].column);
+        undomem_put(out, at + 4 + b * 3, blocks[b].row);
+        undomem_put(out, at + 5 + b * 3, blocks[b].layer)
+    }
+}
+
+undomem_put(out: []int, i: int, value: int) {
+    if (i >= 0 && i < len(out)) out[i] = value
+}
+
+undomem_same_capture(buf: []int, a: int, b: int): bool {
+    for i in 0..12 {
+        x: int = a + i;
+        y: int = b + i;
+        if (x < 0 || y < 0 || x >= len(buf) || y >= len(buf)) return false;
+        if (buf[x] != buf[y]) return false
+    }
+    true
+}
+
+undomem_show_captured_player(buf: []int, at: int) raises IoError {
+    if (at < 0 || at + 12 > len(buf)) return;
+    write(1, "player: col ");
+    write_int(1, buf[at]);
+    write(1, " row ");
+    write_int(1, buf[at + 1]);
+    write(1, " layer ");
+    write_int(1, buf[at + 2]);
+    write(1, "\n")
+}
+
+undomem_show_captured_block(buf: []int, at: int, b: int) raises IoError {
+    write(1, "block ");
+    write_int(1, b);
+    write(1, ":");
+    for k in 0..3 {
+        if (k == 0) write(1, " col ");
+        if (k == 1) write(1, " row ");
+        if (k == 2) write(1, " layer ");
+        j: int = at + 3 + b * 3 + k;
+        if (j >= 0 && j < len(buf)) write_int(1, buf[j]) else write(1, "?")
+    }
+    write(1, "\n")
+}
+
+test "undoing more than 128k walking actions" {
+    g: *UndomemGame = new_undomem_game();
     stable: int = l8_heap_used();
-    // More than 128k real walking actions, then undo every one.
     for i in 0..131074 {
-        dc: int = 0 - 1;
+        dc: int = -1;
         if (i % 2 == 1) dc = 1;
-        test_move(g, dc, 0)
+        undomem_move(g, dc, 0)
     }
-    check(g.u.count == 131074 && g.pose[0] == 0, "large walking history");
-    latest_action: int = undo_latest(g.u);
-    check(undo_read(g.u.journal, latest_action) == 5, "walking record exceeds 40 bytes");
-    for _i in 0..131074 check(test_undo(g) == PLAY_UNDO_DONE, "walking undo");
-    check(test_undo(g) == 0 && g.pose[0] == 0, "empty undo boundary");
-    check(l8_heap_used() == stable, "walking/undo heap growth");
+    grown: int = l8_heap_used() - stable;
+    u: *UndoTimeline = g.u;
+    latest_action: int = undo_latest(u);
+    newest: int = undo_read(u.journal, latest_action);
+    undomem_show_int("retained actions", g.u.count);
+    undomem_show_player(g);
+    undomem_show_int("newest action words", newest);
+    undomem_show_int("heap growth", grown);
+    expect {|
+        retained actions: 131074
+        player: col 0 row 0 layer 0
+        newest action words: 5
+        heap growth: 0
+    |}
+    stable = l8_heap_used();
+    failures: int = 0;
+    for _i in 0..131074 {
+        if (undomem_undo(g) != PLAY_UNDO_DONE) failures = failures + 1
+    }
+    extra: int = undomem_undo(g);
+    grown = l8_heap_used() - stable;
+    undomem_show_int("undos that did not finish", failures);
+    undomem_show_result("one more undo", extra);
+    undomem_show_player(g);
+    undomem_show_int("heap growth", grown);
+    expect {|
+        undos that did not finish: 0
+        one more undo: nothing to undo
+        player: col 0 row 0 layer 0
+        heap growth: 0
+    |}
+}
 
-    // Move a linked shape out of its room, let that room rewind part way, and
-    // undo the departure. Catch-up must use the retained post-action branch.
-    test_move(g, 1, 0);
-    test_move(g, 1, 0);
-    test_move(g, 1, 0);
-    check(g.pose[0] == 3 && g.level.blocks[0].column == 4 && g.level.blocks[1].column == 4 && g.ghost[0] == REWIND_LEAVE,
-        "shape departure");
-    for _i in 0..2 check(rewind_try_step(g.level.blocks, 0, g.ids, g.widths, g.live,
-        g.counts, g.cursors, g.ghost, 50, 50), "background rewind step");
-    settle_test_game(g);
-    check(test_undo(g) == PLAY_UNDO_DONE, "undo room departure");
-    check(g.pose[0] == 2 && g.level.blocks[0].column == 3 && g.level.blocks[1].column == 3 && g.counts[0].value == 3 && g.ghost[0] == 0,
-        "shape undo restored wrong room branch");
+// Move a linked shape out of its room, let that room rewind part way, and
+// undo the departure. Catch-up must use the retained post-action branch.
+test "undoing a shape's departure restores its room's branch" {
+    g: *UndomemGame = new_undomem_game();
+    heap: int = 0;
+    mark: int = l8_heap_used();
+    undomem_move(g, 1, 0);
+    undomem_move(g, 1, 0);
+    undomem_move(g, 1, 0);
+    heap = heap + l8_heap_used() - mark;
+    undomem_show_player(g);
+    undomem_show_block("block 0", g.level.blocks[0]);
+    undomem_show_block("block 1", g.level.blocks[1]);
+    undomem_show_bool("room 0 ghost is leaving", g.ghost[0] == REWIND_LEAVE);
+    expect {|
+        player: col 3 row 0 layer 0
+        block 0: col 4 row 0 layer 0
+        block 1: col 4 row 1 layer 0
+        room 0 ghost is leaving: true
+    |}
+    mark = l8_heap_used();
+    first: bool = rewind_try_step(g.level.blocks, 0, g.ids, g.widths, g.live, g.counts,
+        g.cursors, g.ghost, 50, 50);
+    second: bool = rewind_try_step(g.level.blocks, 0, g.ids, g.widths, g.live, g.counts,
+        g.cursors, g.ghost, 50, 50);
+    undomem_settle(g);
+    heap = heap + l8_heap_used() - mark;
+    undomem_show_bool("first background rewind step", first);
+    undomem_show_bool("second background rewind step", second);
+    expect {|
+        first background rewind step: true
+        second background rewind step: true
+    |}
+    mark = l8_heap_used();
+    result: int = undomem_undo(g);
+    heap = heap + l8_heap_used() - mark;
+    undomem_show_result("undo", result);
+    undomem_show_player(g);
+    undomem_show_block("block 0", g.level.blocks[0]);
+    undomem_show_block("block 1", g.level.blocks[1]);
+    undomem_show_int("room 0 frames", g.counts[0].value);
+    undomem_show_int("room 0 ghost", g.ghost[0]);
+    expect {|
+        undo: done
+        player: col 2 row 0 layer 0
+        block 0: col 3 row 0 layer 0
+        block 1: col 3 row 1 layer 0
+        room 0 frames: 3
+        room 0 ghost: 0
+    |}
     // Undo and branch repeatedly, including reuse of the same physical slot.
+    mark = l8_heap_used();
+    failures: int = 0;
     for _i in 0..100 {
-        test_move(g, 1, 0);
-        check(test_undo(g) == PLAY_UNDO_DONE, "repeat push undo")
+        undomem_move(g, 1, 0);
+        if (undomem_undo(g) != PLAY_UNDO_DONE) failures = failures + 1
     }
-    check(l8_heap_used() == stable, "push/rewind/undo heap growth");
+    heap = heap + l8_heap_used() - mark;
+    undomem_show_int("repeated push undos that did not finish", failures);
+    undomem_show_int("heap growth", heap);
+    expect {|
+        repeated push undos that did not finish: 0
+        heap growth: 0
+    |}
+}
 
-    // An unrelated room can finish rewinding after a player action. Undo must
-    // not roll that independent clock back to the archived global image.
+// An unrelated room can finish rewinding after a player action. Undo must
+// not roll that independent clock back to the archived global image.
+test "undo leaves an independently rewinding room alone" {
+    g: *UndomemGame = new_undomem_game();
     g.level.blocks[2].column = 12;
     rewind_capture(g.level.blocks, 1, g.ids, g.widths, g.live, 1);
     g.counts[1].value = 2;
     g.cursors[1].value = 1;
     g.ghost[1] = REWIND_LEAVE;
-    test_move(g, 0, -1);
-    check(rewind_try_step(g.level.blocks, 1, g.ids, g.widths, g.live, g.counts, g.cursors,
-        g.ghost, 50, 50), "independent rewind");
-    settle_test_game(g);
-    check(test_undo(g) == PLAY_UNDO_DONE, "undo with independent clock");
-    check(g.level.blocks[2].column == 11 && g.counts[1].value == 1 && g.ghost[1] == 0,
-        "undo changed independent room");
-
-    // Failed attempts must not consume history.
-    old_count: int = g.u.count;
-    oldest: int = g.u.tail;
-    latest: int = g.u.head;
-    // A zero direction is a failed action with no history effect.
-    for _i in 0..100 test_move(g, 0, 0);
-    check(g.u.count == old_count && g.u.tail == oldest && g.u.head == latest, "failed actions evicted undo");
-    check(l8_heap_used() == stable, "gameplay allocated after startup")
+    heap: int = 0;
+    mark: int = l8_heap_used();
+    undomem_move(g, 0, -1);
+    stepped: bool = rewind_try_step(g.level.blocks, 1, g.ids, g.widths, g.live, g.counts,
+        g.cursors, g.ghost, 50, 50);
+    undomem_settle(g);
+    heap = heap + l8_heap_used() - mark;
+    undomem_show_bool("room 1 rewind step", stepped);
+    undomem_show_block("block 2", g.level.blocks[2]);
+    expect {|
+        room 1 rewind step: true
+        block 2: col 11 row 1 layer 0
+    |}
+    mark = l8_heap_used();
+    result: int = undomem_undo(g);
+    heap = heap + l8_heap_used() - mark;
+    undomem_show_result("undo", result);
+    undomem_show_block("block 2", g.level.blocks[2]);
+    undomem_show_int("room 1 frames", g.counts[1].value);
+    undomem_show_int("room 1 ghost", g.ghost[1]);
+    undomem_show_int("heap growth", heap);
+    expect {|
+        undo: done
+        block 2: col 11 row 1 layer 0
+        room 1 frames: 1
+        room 1 ghost: 0
+        heap growth: 0
+    |}
 }
 
-test_branch_route() raises UndoHistoryExhausted, IoError {
-    g: *UndoGame = new_undo_game();
+test "failed moves do not consume history" {
+    g: *UndomemGame = new_undomem_game();
+    undomem_move(g, 1, 0);
+    count: int = g.u.count;
+    oldest: int = g.u.tail;
+    latest: int = g.u.head;
+    undomem_show_int("retained actions", count);
+    expect {|
+        retained actions: 1
+    |}
+    // A zero direction is a failed action with no history effect.
     stable: int = l8_heap_used();
+    for _i in 0..100 undomem_move(g, 0, 0);
+    grown: int = l8_heap_used() - stable;
+    undomem_show_int("retained actions after 100 failed moves", g.u.count);
+    undomem_show_bool("oldest action unchanged", g.u.tail == oldest);
+    undomem_show_bool("newest action unchanged", g.u.head == latest);
+    undomem_show_int("heap growth", grown);
+    expect {|
+        retained actions after 100 failed moves: 1
+        oldest action unchanged: true
+        newest action unchanged: true
+        heap growth: 0
+    |}
+}
+
+test "undo route walks an abandoned branch back and forward" {
+    g: *UndomemGame = new_undomem_game();
+    stable: int = l8_heap_used();
+    layout_bad: int = 0;
     undo_save_history(g.u, false, 2, g.counts, g.cursors, g.ghost, g.level.blocks,
         3, 0);
     for s in 1..3 {
         for k in 0..2 {
             slot: int = s * LEVEL_MAX_BLOCKS + k;
-            check(slot == rewind_slot(0, s, k, g.widths, LEVEL_MAX_BLOCKS), "branch fixture width");
+            if (slot != rewind_slot(0, s, k, g.widths, LEVEL_MAX_BLOCKS)) layout_bad = layout_bad + 1;
             g.live[slot] = pack_pos(s + 1, k, 0, 0)
         }
     }
@@ -447,99 +755,160 @@ test_branch_route() raises UndoHistoryExhausted, IoError {
     for s in 1..3 {
         for k in 0..2 {
             slot: int = s * LEVEL_MAX_BLOCKS + k;
-            check(slot == rewind_slot(0, s, k, g.widths, LEVEL_MAX_BLOCKS), "branch fixture width");
+            if (slot != rewind_slot(0, s, k, g.widths, LEVEL_MAX_BLOCKS)) layout_bad = layout_bad + 1;
             g.live[slot] = pack_pos(s + 3, k, 0, 0)
         }
     }
     g.level.blocks[0].column = 5;
     g.level.blocks[1].column = 5;
     undo_build_route(g.u, undo_latest(g.u), 0, g.level.blocks, g.ids, g.cursors);
-    check(g.u.route_n[0] == 4, "branch route length");
-    // Walk the abandoned branch back to its common ancestor, then forward.
+    grown: int = l8_heap_used() - stable;
+    undomem_show_int("fixture layout mismatches", layout_bad);
+    undomem_show_int("route length", g.u.route_n[0]);
+    // Each route pose has two blocks; show the first block's column.
     route: []int = g.u.route;
-    seen: int = 0;
-    for slot in 0..len(route) {
-        if (slot == 0) {
-            check(pos_col(route[slot]) == 4, "first branch route pose");
-            seen = seen + 1
-        }
-        if (slot == 2) {
-            check(pos_col(route[slot]) == 1, "second branch route pose");
-            seen = seen + 1
-        }
-        if (slot == 4) {
-            check(pos_col(route[slot]) == 2, "third branch route pose");
-            seen = seen + 1
-        }
-        if (slot == 6) {
-            check(pos_col(route[slot]) == 3, "fourth branch route pose");
-            seen = seen + 1
-        }
+    write(1, "route columns:");
+    for slot in 0..4 {
+        write(1, " ");
+        i: int = slot * 2;
+        if (i < len(route)) write_int(1, pos_col(route[i])) else write(1, "missing")
     }
-    check(seen == 4, "branch route storage");
-    check(l8_heap_used() == stable, "branch route allocated")
+    write(1, "\n");
+    undomem_show_int("heap growth", grown);
+    expect {|
+        fixture layout mismatches: 0
+        route length: 4
+        route columns: 4 1 2 3
+        heap growth: 0
+    |}
 }
 
-test_full_action_capacity() raises UndoHistoryExhausted, IoError {
-    g: *UndoGame = new_undo_game();
+test "full-size journal undoes every retained action" {
+    g: *UndomemGame = new_undomem_game();
     capacity: int = UNDO_JOURNAL_WORDS / UNDO_ACTION_OVERHEAD;
     stable: int = l8_heap_used();
     // Fill the production-size ring, including eviction of its initial image
-    // diff, then undo all 524,288 retained actions across the physical seam.
+    // diff, then undo all retained actions across the physical seam.
     for i in 0..capacity + 258 {
         dc: int = -1;
         if (i % 2 == 1) dc = 1;
-        test_move(g, dc, 0)
+        undomem_move(g, dc, 0)
     }
-    check(g.u.count == capacity && g.u.head > len(g.u.journal), "full walking capacity");
-    check(g.u.head - g.u.tail == capacity * 5, "walking capacity byte accounting");
+    grown: int = l8_heap_used() - stable;
+    undomem_show_int("action capacity", capacity);
+    undomem_show_int("retained actions", g.u.count);
+    undomem_show_int("journal words in use", g.u.head - g.u.tail);
+    undomem_show_bool("head is past the physical seam", g.u.head > len(g.u.journal));
+    undomem_show_int("heap growth", grown);
+    expect {|
+        action capacity: 524288
+        retained actions: 524288
+        journal words in use: 2621440
+        head is past the physical seam: true
+        heap growth: 0
+    |}
+    stable = l8_heap_used();
+    failures: int = 0;
+    misplaced: int = 0;
     for i in 0..capacity {
-        check(test_undo(g) == PLAY_UNDO_DONE, "full history undo");
-        check(g.pose[0] == -1 + i % 2, "full history player position")
+        if (undomem_undo(g) != PLAY_UNDO_DONE) failures = failures + 1;
+        // The player alternates between columns -1 and 0.
+        if (g.pose[0] != -1 + i % 2) misplaced = misplaced + 1
     }
-    check(test_undo(g) == 0, "oldest retained action boundary");
-    check(l8_heap_used() == stable, "full history allocated")
+    extra: int = undomem_undo(g);
+    grown = l8_heap_used() - stable;
+    undomem_show_int("undos that did not finish", failures);
+    undomem_show_int("undos leaving the player misplaced", misplaced);
+    undomem_show_result("one more undo", extra);
+    undomem_show_int("heap growth", grown);
+    expect {|
+        undos that did not finish: 0
+        undos leaving the player misplaced: 0
+        one more undo: nothing to undo
+        heap growth: 0
+    |}
 }
 
-test_stacked_and_unowned() raises UndoHistoryExhausted, IoError {
-    g: *UndoGame = new_undo_game();
+test "undo restores a block stacked on a pushed shape" {
+    g: *UndomemGame = new_undomem_game();
     g.level.blocks[2].column = 1;
     g.level.blocks[2].row = 0;
     g.level.blocks[2].layer = 1;
-    home: []int = new int[LEVEL_MAX_BLOCKS](0 - 1);
+    home: []int = new int[LEVEL_MAX_BLOCKS](-1);
     assign_block_homes(g.level.blocks, 3, g.level.rooms, 2, home, g.ids, g.widths);
     g.u = new_undo_timeline(home, 3, g.widths, g.live);
     for r in 0..2 rewind_capture(g.level.blocks, r, g.ids, g.widths, g.live, 0);
-    settle_test_game(g);
-    stable: int = l8_heap_used();
-    test_move(g, 1, 0);
-    check(g.level.blocks[0].column == 2 && g.level.blocks[1].column == 2 && g.level.blocks[2].column == 2 && g.level.blocks[2].layer == 1,
-        "stacked shape push");
-    check(test_undo(g) == PLAY_UNDO_DONE, "stacked shape undo");
-    check(g.level.blocks[0].column == 1 && g.level.blocks[1].column == 1 && g.level.blocks[2].column == 1 && g.level.blocks[2].layer == 1,
-        "stack restoration");
-    check(l8_heap_used() == stable, "stacked shape allocated");
+    undomem_settle(g);
+    heap: int = 0;
+    mark: int = l8_heap_used();
+    undomem_move(g, 1, 0);
+    heap = heap + l8_heap_used() - mark;
+    undomem_show_block("block 0", g.level.blocks[0]);
+    undomem_show_block("block 1", g.level.blocks[1]);
+    undomem_show_block("stacked block", g.level.blocks[2]);
+    expect {|
+        block 0: col 2 row 0 layer 0
+        block 1: col 2 row 1 layer 0
+        stacked block: col 2 row 0 layer 1
+    |}
+    mark = l8_heap_used();
+    result: int = undomem_undo(g);
+    heap = heap + l8_heap_used() - mark;
+    undomem_show_result("undo", result);
+    undomem_show_block("block 0", g.level.blocks[0]);
+    undomem_show_block("block 1", g.level.blocks[1]);
+    undomem_show_block("stacked block", g.level.blocks[2]);
+    undomem_show_int("heap growth", heap);
+    expect {|
+        undo: done
+        block 0: col 1 row 0 layer 0
+        block 1: col 1 row 1 layer 0
+        stacked block: col 1 row 0 layer 1
+        heap growth: 0
+    |}
+}
 
-    // A block outside all rooms must be restored by the changed-block flags
-    // reconstructed from the action, without selecting unrelated room clocks.
+// A block outside all rooms must be restored by the changed-block flags
+// reconstructed from the action, without selecting unrelated room clocks.
+test "undo restores a block outside every room" {
+    g: *UndomemGame = new_undomem_game();
     g.level.blocks[2].column = 20;
     g.level.blocks[2].row = 0;
     g.level.blocks[2].layer = 0;
-    home2: []int = new int[LEVEL_MAX_BLOCKS](0 - 1);
-    assign_block_homes(g.level.blocks, 3, g.level.rooms, 2, home2, g.ids, g.widths);
-    g.u = new_undo_timeline(home2, 3, g.widths, g.live);
+    home: []int = new int[LEVEL_MAX_BLOCKS](-1);
+    assign_block_homes(g.level.blocks, 3, g.level.rooms, 2, home, g.ids, g.widths);
+    g.u = new_undo_timeline(home, 3, g.widths, g.live);
     for r in 0..2 rewind_capture(g.level.blocks, r, g.ids, g.widths, g.live, 0);
     g.pose[0] = 19;
-    settle_test_game(g);
-    stable = l8_heap_used();
-    test_move(g, 1, 0);
-    check(home2[2] < 0 && g.level.blocks[2].column == 21, "unowned push");
-    check(test_undo(g) == PLAY_UNDO_DONE && g.level.blocks[2].column == 20 && g.pose[0] == 19,
-        "unowned block undo");
-    check(l8_heap_used() == stable, "unowned block allocated")
+    undomem_settle(g);
+    heap: int = 0;
+    mark: int = l8_heap_used();
+    undomem_move(g, 1, 0);
+    heap = heap + l8_heap_used() - mark;
+    undomem_show_int("block 2 home room", home[2]);
+    undomem_show_block("pushed block 2", g.level.blocks[2]);
+    expect {|
+        block 2 home room: -1
+        pushed block 2: col 21 row 0 layer 0
+    |}
+    mark = l8_heap_used();
+    result: int = undomem_undo(g);
+    heap = heap + l8_heap_used() - mark;
+    undomem_show_result("undo", result);
+    undomem_show_block("block 2", g.level.blocks[2]);
+    undomem_show_player(g);
+    undomem_show_int("heap growth", heap);
+    expect {|
+        undo: done
+        block 2: col 20 row 0 layer 0
+        player: col 19 row 0 layer 0
+        heap growth: 0
+    |}
 }
 
-test_maximum_history() raises UndoHistoryExhausted, IoError {
+// Every cell changes twice per action: deliberately much denser than
+// gameplay, proving overflow preserves the newest complete before/after.
+test "dense actions keep the newest complete snapshot" {
     n: int = LEVEL_MAX_BLOCKS;
     home: []int = new int[n](0);
     widths: []int = new int[LEVEL_MAX_ROOMS](0);
@@ -557,16 +926,25 @@ test_maximum_history() raises UndoHistoryExhausted, IoError {
     });
     full_span: *RoomBlockSpan = new RoomBlockSpan { start: 0, end: n };
     final_frame: RewindFrameView = rewind_frame_view(live, REWIND_MAX - 1, full_span);
-    check(final_frame.start == (REWIND_MAX - 1) * n && final_frame.end == len(live),
-        "bounded final rewind frame");
+    // Frame REWIND_MAX - 1 of n blocks ends exactly at the end of storage.
+    undomem_show_int("final frame start", final_frame.start);
+    undomem_show_int("final frame end", final_frame.end);
+    undomem_show_int("rewind storage words", len(live));
+    expect {|
+        final frame start: 260096
+        final frame end: 262144
+        rewind storage words: 262144
+    |}
     counts: []RewindCount = new RewindCount[LEVEL_MAX_ROOMS](RewindCount { value: 0 });
     cursors: []RewindCursor = new RewindCursor[LEVEL_MAX_ROOMS](RewindCursor { value: 0 });
     ghost: []int = new int[LEVEL_MAX_ROOMS](0);
     counts[0].value = REWIND_MAX;
     cursors[0].value = REWIND_MAX - 1;
     stable: int = l8_heap_used();
-    // Every cell changes twice per action: deliberately much denser than
-    // gameplay, proving overflow preserves the newest complete before/after.
+    over_budget: int = 0;
+    wrong_capacity: int = 0;
+    wrong_cells: int = 0;
+    wrong_span: int = 0;
     for action in 0..12 {
         for phase in 0..2 {
             value: int = pack_pos(-4096, 4096 - action, 7, 1);
@@ -575,64 +953,159 @@ test_maximum_history() raises UndoHistoryExhausted, IoError {
             undo_save_history(u, phase != 0, 1, counts, cursors, ghost, blocks, n,
                 action)
         }
-        check(u.count > 0 && u.head - u.tail <= len(u.journal), "dense journal budget");
+        if (u.count <= 0 || u.head - u.tail > len(u.journal)) over_budget = over_budget + 1;
         for phase in 0..2 {
             data: []int = undo_load_history(u, undo_latest(u), phase);
             value: int = pack_pos(-4096, 4096 - action, 7, 1);
             if (phase == 1) value = pack_pos(4096, -4096 + action, 0, 0);
-            check(len(data) == u.image_capacity, "dense snapshot capacity");
+            if (len(data) != u.image_capacity) wrong_capacity = wrong_capacity + 1;
             seen: int = 0;
             image: []int = u.image;
             for i in 0..len(image) {
                 if (i >= 3 && i < u.block_base && i < 3 + len(live)) {
-                    check(image[i] == value, "dense snapshot reconstruction");
+                    if (image[i] != value) wrong_cells = wrong_cells + 1;
                     seen = seen + 1
                 }
             }
-            check(seen == len(live), "dense snapshot span")
+            if (seen != len(live)) wrong_span = wrong_span + 1
         }
     }
-    check(l8_heap_used() == stable, "maximum histories allocated after startup")
+    grown: int = l8_heap_used() - stable;
+    undomem_show_int("actions with nothing retained or over budget", over_budget);
+    undomem_show_int("snapshots with the wrong capacity", wrong_capacity);
+    undomem_show_int("snapshots not spanning all rewind storage", wrong_span);
+    undomem_show_int("wrong snapshot cells", wrong_cells);
+    undomem_show_int("heap growth", grown);
+    expect {|
+        actions with nothing retained or over budget: 0
+        snapshots with the wrong capacity: 0
+        snapshots not spanning all rewind storage: 0
+        wrong snapshot cells: 0
+        heap growth: 0
+    |}
 }
 
-test_water_undo() raises UndoHistoryExhausted, IoError {
-    g: *UndoGame = new_undo_game();
+test "undo of a linked piece that fell into water" {
+    g: *UndomemGame = new_undomem_game();
     l: *LevelState = g.level;
     level_set_ground_count(l, paint_ground_cell(l.ground, 0, 2, 1, GROUND_WATER, false));
     prior: int = g.u.count;
+    // Captures: the first attempt in 0 and 12, later attempts in 24 and 36.
+    buf: []int = new int[48](0);
     heap: int = l8_heap_used();
-    for _attempt in 0..20 {
-        test_move(g, 1, 0);
-        check(g.pose[0] == 1 && l.blocks[1].column == 2 && l.blocks[1].layer == 0 - 1,
-            "linked piece falls into water");
-        test_undo(g);
-        check(g.pose[0] == 0 && l.blocks[0].column == 1 && l.blocks[1].column == 1 && l.blocks[1].layer == 0,
-            "undo restores submerged linked piece to dry land")
+    differing: int = 0;
+    failures: int = 0;
+    for attempt in 0..20 {
+        at: int = 0;
+        if (attempt > 0) at = 24;
+        undomem_move(g, 1, 0);
+        undomem_capture(g, buf, at);
+        if (undomem_undo(g) != PLAY_UNDO_DONE) failures = failures + 1;
+        undomem_capture(g, buf, at + 12);
+        if (attempt > 0 && !(undomem_same_capture(buf, 0, 24) && undomem_same_capture(buf,
+            12, 36))) differing = differing + 1
     }
-    check(g.u.count == prior && l8_heap_used() == heap, "water fall/undo does not allocate");
+    grown: int = l8_heap_used() - heap;
+    // The far member of the linked shape sinks to the bottom.
+    undomem_show_captured_player(buf, 0);
+    undomem_show_captured_block(buf, 0, 0);
+    undomem_show_captured_block(buf, 0, 1);
+    expect {|
+        player: col 1 row 0 layer 0
+        block 0: col 2 row 0 layer 0
+        block 1: col 2 row 1 layer -1
+    |}
+    // Undo puts it back on dry land.
+    undomem_show_captured_player(buf, 12);
+    undomem_show_captured_block(buf, 12, 0);
+    undomem_show_captured_block(buf, 12, 1);
+    expect {|
+        player: col 0 row 0 layer 0
+        block 0: col 1 row 0 layer 0
+        block 1: col 1 row 1 layer 0
+    |}
+    undomem_show_int("attempts differing from the first", differing);
+    undomem_show_int("undos that did not finish", failures);
+    undomem_show_int("retained actions change", g.u.count - prior);
+    undomem_show_int("heap growth", grown);
+    expect {|
+        attempts differing from the first: 0
+        undos that did not finish: 0
+        retained actions change: 0
+        heap growth: 0
+    |}
+}
+
+test "undo of wading through a pond" {
+    g: *UndomemGame = new_undomem_game();
+    l: *LevelState = g.level;
+    level_set_ground_count(l, paint_ground_cell(l.ground, 0, 2, 1, GROUND_WATER, false));
     level_set_ground_count(l, paint_ground_cell(l.ground, l.nground, 0, 1, GROUND_WATER,
         false));
     level_set_ground_count(l, paint_ground_cell(l.ground, l.nground, 0, 2, GROUND_WATER,
         false));
-    for _attempt in 0..20 {
-        test_move(g, 0, 1);
-        check(g.pose[1] == 1 && g.pose[2] == 0 - 1, "player falls to bottom");
-        test_move(g, 0, 1);
-        check(g.pose[1] == 2 && g.pose[2] == 0 - 1, "player wades on bottom");
-        test_undo(g);
-        check(g.pose[1] == 1 && g.pose[2] == 0 - 1, "undo restores submerged player pose");
-        test_undo(g);
-        check(g.pose[1] == 0 && g.pose[2] == 0, "undo restores player before water entry")
+    prior: int = g.u.count;
+    // Captures: the first attempt in 0 to 47, later attempts in 48 to 95.
+    buf: []int = new int[96](0);
+    heap: int = l8_heap_used();
+    differing: int = 0;
+    failures: int = 0;
+    for attempt in 0..20 {
+        at: int = 0;
+        if (attempt > 0) at = 48;
+        undomem_move(g, 0, 1);
+        undomem_capture(g, buf, at);
+        undomem_move(g, 0, 1);
+        undomem_capture(g, buf, at + 12);
+        if (undomem_undo(g) != PLAY_UNDO_DONE) failures = failures + 1;
+        undomem_capture(g, buf, at + 24);
+        if (undomem_undo(g) != PLAY_UNDO_DONE) failures = failures + 1;
+        undomem_capture(g, buf, at + 36);
+        if (attempt > 0) {
+            same: bool = true;
+            for k in 0..4 {
+                if (!undomem_same_capture(buf, k * 12, 48 + k * 12)) same = false
+            }
+            if (!same) differing = differing + 1
+        }
     }
-    check(g.u.count == prior && l8_heap_used() == heap, "wading undo does not allocate")
+    grown: int = l8_heap_used() - heap;
+    // The player falls to the bottom, then wades along it.
+    undomem_show_captured_player(buf, 0);
+    undomem_show_captured_player(buf, 12);
+    expect {|
+        player: col 0 row 1 layer -1
+        player: col 0 row 2 layer -1
+    |}
+    // Undo returns it to the bottom, then to the bank.
+    undomem_show_captured_player(buf, 24);
+    undomem_show_captured_player(buf, 36);
+    expect {|
+        player: col 0 row 1 layer -1
+        player: col 0 row 0 layer 0
+    |}
+    undomem_show_int("attempts differing from the first", differing);
+    undomem_show_int("undos that did not finish", failures);
+    undomem_show_int("retained actions change", g.u.count - prior);
+    undomem_show_int("heap growth", grown);
+    expect {|
+        attempts differing from the first: 0
+        undos that did not finish: 0
+        retained actions change: 0
+        heap growth: 0
+    |}
 }
 
-test_plant_undo() raises UndoHistoryExhausted, IoError, IndexOutOfBounds {
-    g: *UndoGame = new_undo_game();
+test "undo of climbing across tree canopies" {
+    g: *UndomemGame = new_undomem_game();
     l: *LevelState = g.level;
-    check(load_level_state("programs/block-game/grove-demo.txt", l) >= 0, "load canopy undo fixture");
+    undomem_show_int("load grove-demo (blocks)", load_level_state("programs/block-game/grove-demo.txt",
+        l));
+    expect {|
+        load grove-demo (blocks): 17
+    |}
     apply_level_gravity(l);
-    home: []int = new int[LEVEL_MAX_BLOCKS](0 - 1);
+    home: []int = new int[LEVEL_MAX_BLOCKS](-1);
     assign_block_homes(l.blocks, l.nblocks, l.rooms, l.nrooms, home, g.ids, g.widths);
     g.u = new_undo_timeline(home, l.nblocks, g.widths, g.live);
     for room in 0..l.nrooms rewind_capture(l.blocks, room, g.ids, g.widths, g.live,
@@ -641,20 +1114,56 @@ test_plant_undo() raises UndoHistoryExhausted, IoError, IndexOutOfBounds {
     g.pose[1] = 9;
     g.pose[2] = 0;
     g.pose[3] = 0;
-    settle_test_game(g);
+    undomem_settle(g);
+    // Captures: the first attempt in 0 and 12, later attempts in 24 and 36.
+    buf: []int = new int[48](0);
     heap: int = l8_heap_used();
-    for _attempt in 0..20 {
-        for _step in 0..7 test_move(g, 1, 0);
-        check(g.pose[0] == 10 && g.pose[2] == 3, "climb across canopy tops");
-        for _step in 0..7 check(test_undo(g) == PLAY_UNDO_DONE, "undo canopy step");
-        check(g.pose[0] == 3 && g.pose[2] == 0, "undo returns player from crown to ground");
-        check(plant_at(l.blocks, l.nblocks, 9, 9) >= 0 && g.widths[0] == 3, "trees stay rooted outside room histories")
+    differing: int = 0;
+    failures: int = 0;
+    rooted: int = 0;
+    narrow: int = 0;
+    for attempt in 0..20 {
+        at: int = 0;
+        if (attempt > 0) at = 24;
+        for _step in 0..7 undomem_move(g, 1, 0);
+        undomem_capture(g, buf, at);
+        for _step in 0..7 {
+            if (undomem_undo(g) != PLAY_UNDO_DONE) failures = failures + 1
+        }
+        undomem_capture(g, buf, at + 12);
+        if (plant_at(l.blocks, l.nblocks, 9, 9) >= 0) rooted = rooted + 1;
+        if (g.widths[0] == 3) narrow = narrow + 1;
+        if (attempt > 0 && !(undomem_same_capture(buf, 0, 24) && undomem_same_capture(buf,
+            12, 36))) differing = differing + 1
     }
-    check(l8_heap_used() == heap, "canopy climb and undo do not allocate")
+    grown: int = l8_heap_used() - heap;
+    // Seven steps east climb onto the canopy tops.
+    undomem_show_captured_player(buf, 0);
+    expect {|
+        player: col 10 row 9 layer 3
+    |}
+    // Seven undos bring the player from the crown back to the ground.
+    undomem_show_captured_player(buf, 12);
+    expect {|
+        player: col 3 row 9 layer 0
+    |}
+    // Trees stay rooted and outside room histories.
+    undomem_show_int("attempts with a tree at (9,9)", rooted);
+    undomem_show_int("attempts where room 0 history holds 3 blocks", narrow);
+    undomem_show_int("attempts differing from the first", differing);
+    undomem_show_int("undos that did not finish", failures);
+    undomem_show_int("heap growth", grown);
+    expect {|
+        attempts with a tree at (9,9): 20
+        attempts where room 0 history holds 3 blocks: 20
+        attempts differing from the first: 0
+        undos that did not finish: 0
+        heap growth: 0
+    |}
 }
 
-test_plant_capacity() raises UndoHistoryExhausted, IoError {
-    g: *UndoGame = new_undo_game();
+test "undo with a level full of plants" {
+    g: *UndomemGame = new_undomem_game();
     l: *LevelState = g.level;
     level_set_block_count(l, LEVEL_MAX_BLOCKS);
     cells: []Block = l.blocks;
@@ -668,23 +1177,36 @@ test_plant_capacity() raises UndoHistoryExhausted, IoError {
         ramp: 0,
         mounted: 0
     };
-    home: []int = new int[LEVEL_MAX_BLOCKS](0 - 1);
+    home: []int = new int[LEVEL_MAX_BLOCKS](-1);
     assign_block_homes(l.blocks, l.nblocks, l.rooms, l.nrooms, home, g.ids, g.widths);
     g.u = new_undo_timeline(home, l.nblocks, g.widths, g.live);
-    g.pose[0] = 0 - 2;
+    g.pose[0] = -2;
     g.pose[1] = 0;
-    settle_test_game(g);
+    undomem_settle(g);
     heap: int = l8_heap_used();
     for step in 0..20 {
-        dc: int = 0 - 1;
+        dc: int = -1;
         if (step % 2 == 1) dc = 1;
-        test_move(g, dc, 0)
+        undomem_move(g, dc, 0)
     }
-    for _step in 0..20 check(test_undo(g) == PLAY_UNDO_DONE, "full-capacity foliage history");
-    check(g.pose[0] == 0 - 2 && l.blocks[LEVEL_MAX_BLOCKS - 1].column == 252, "full-capacity animation keeps objects separate");
-    check(g.hist[LEVEL_MAX_BLOCKS * 2 - 1].id == LEVEL_MAX_BLOCKS - 1, "animation snapshot includes final object");
-    check(l8_heap_used() == heap, "full-capacity vegetation undo does not allocate");
-    l.spawn = Cell { column: 0 - 2, row: 0 };
+    failures: int = 0;
+    for _step in 0..20 {
+        if (undomem_undo(g) != PLAY_UNDO_DONE) failures = failures + 1
+    }
+    grown: int = l8_heap_used() - heap;
+    undomem_show_int("undos that did not finish", failures);
+    undomem_show_player(g);
+    undomem_show_block("last plant", l.blocks[LEVEL_MAX_BLOCKS - 1]);
+    undomem_show_int("last animation snapshot id", g.hist[LEVEL_MAX_BLOCKS * 2 - 1].id);
+    undomem_show_int("heap growth", grown);
+    expect {|
+        undos that did not finish: 0
+        player: col -2 row 0 layer 0
+        last plant: col 252 row 124 layer 0
+        last animation snapshot id: 2047
+        heap growth: 0
+    |}
+    l.spawn = Cell { column: -2, row: 0 };
     level_set_room_count(l, 1);
     l.rooms[0] = Room {
         x0: 0,
@@ -692,20 +1214,9 @@ test_plant_capacity() raises UndoHistoryExhausted, IoError {
         x1: 259,
         y1: 131
     };
-    check(save_level_state(".build/plants-capacity-demo.txt", l) == 0, "save dense vegetation fixture")
-}
-
-main() raises UndoHistoryExhausted, IoError, IndexOutOfBounds: int {
-    test_plant_capacity();
-    test_plant_undo();
-    test_water_undo();
-    test_journal();
-    test_gameplay();
-    test_full_action_capacity();
-    test_stacked_and_unowned();
-    test_branch_route();
-    test_maximum_history();
-    print("undo journal tests passed");
-    0
-    //% expect: "undo journal tests passed\n"
+    undomem_show_int("save plants-capacity-demo", save_level_state(".build/plants-capacity-demo.txt",
+        l));
+    expect {|
+        save plants-capacity-demo: 0
+    |}
 }

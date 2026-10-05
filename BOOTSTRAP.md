@@ -62,7 +62,12 @@ l8 unusedassign file.l8
 l8 as [-p|--profile] -o file.o file.s runtime.s
 l8 elfpack file.o -o file
 l8 build [--profile|-p] file.l8 -o file
+l8 test [--accept] [-j N] file.l8|file.t ...
 ```
+
+`test` builds each file with its `test` declarations, runs them, and compares
+their output with their `expect` statements; `.t` files are cram tests of
+commands. See [`TESTING.md`](TESTING.md).
 
 Both source stages and the saved bootstrap require a compile-time proof for
 `a[i]` during `compile` and `build`, as described in [`BOUNDS.md`](BOUNDS.md).
@@ -118,11 +123,11 @@ Test runners take their parallelism from make's job slots.
 | Target | What it does |
 |--------|--------------|
 | `all` (default) | Format `src2/` with `l8c2`, then everything in `check` |
-| `check` | Stage-1 fixtures, `selfhost`, standard-library tests, and the block game and its tests |
-| `selfhost` | Build `l8c1` from `src1/` and `l8c2/l8c3/l8c4` from `src2/`, require the `l8c3 == l8c4` fixpoint, check `src2` formatting, run the compiler fixtures and `tools/compiler_checks.sh`, then install `./l8` |
+| `check` | `selfhost`, standard-library tests, and the block game and its tests |
+| `selfhost` | Build `l8c1` from `src1/` and `l8c2/l8c3/l8c4` from `src2/`, require the `l8c3 == l8c4` fixpoint, check `src2` formatting, run the compiler fixtures and CLI cram tests under `tests/`, then install `./l8` |
 | `fmt` | Format `src2/` with the stage-2 compiler |
 | `install-bootstrap` | Copy the saved bootstrap executable to `l8c0` |
-| `compiler-test` | Build stage 1 and run its bootstrap-compatible fixtures |
+| `compiler-test` | Run the compiler fixtures and CLI cram tests under `tests/` with `l8c3` |
 | `stdlib-test`, `game`, `game-test` | Standard-library tests; build `.build/block-game` and run its tests |
 | `http`, `http-test` | Build the L8 HTTP/1.1 client and server in `.build/http/`; verify the downloaded RFCs and run the protocol, API, and socket tests |
 | `websocket`, `websocket-test` | Build and test the WebSocket client and server in `.build/websocket/` |

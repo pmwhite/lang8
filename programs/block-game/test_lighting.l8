@@ -22,18 +22,41 @@ import "block-game-render.l8";
 
 import "block-game-ui.l8";
 
-check(ok: bool, message: []i8) raises IoError {
-    if (!ok) die(message)
+lighting_show_lamps(label: str, state: *LevelState) raises IoError {
+    write(1, label);
+    write(1, ":");
+    for k in 0..state.nlamps {
+        if (k < len(state.lamps)) {
+            lamp: Lamp = state.lamps[k];
+            write(1, " (");
+            write_int(1, lamp.column);
+            write(1, ", ");
+            write_int(1, lamp.row);
+            if (lamp.style == 0) write(1, ") lantern") else if (lamp.style == 1) write(1,
+                ") post") else {
+                write(1, ") style ");
+                write_int(1, lamp.style)
+            }
+        }
+    }
+    write(1, "\n")
 }
 
-main() raises IoError, IndexOutOfBounds: int {
+lighting_show(label: str, value: int) raises IoError {
+    write(1, label);
+    write(1, ": ");
+    write_int(1, value);
+    write(1, "\n")
+}
+
+lighting_show_bool(label: str, value: bool) raises IoError {
+    write(1, label);
+    if (value) write(1, ": true\n") else write(1, ": false\n")
+}
+
+// A 12x9 room named "hearth" with shaded posts at (2, 3) and (7, 6).
+lighting_level(world: *WorldState): *LevelState@new {
     state: *LevelState = new_level_state();
-    copy: *LevelState = new_level_state();
-    loaded: *LevelState = new_level_state();
-    world: *WorldState = new_world_state();
-    xy: []int = new int[2](0);
-    pixels: []i8 = new i8[512 * 512](0i8);
-    pixels2: []i8 = new i8[512 * 512](0i8);
     level_set_room_count(state, set_room_size(state.rooms, state.titles, 0, 12, 9));
     world.names[0] = "hearth";
     level_set_lamp_count(state, parse_lamps("""
@@ -43,52 +66,148 @@ lamp 2 3 1
 lamp bad
 lamp 0 0 9
 """, state.lamps));
-    check(state.nlamps == 2 && state.lamps[0].style == 1, "lamp parsing and replacement");
-    check(save_world_state(".build/lighting-roundtrip-world.txt", world, state) == 0,
-        "save world lamps");
-    check(load_world_state(".build/lighting-roundtrip-world.txt", world, loaded) >= 0,
-        "load world lamps");
-    check(loaded.nlamps == 2 && loaded.lamps[1].style == 1, "world lamps preserved");
-    check(save_level_state(".build/lighting-roundtrip-level.txt", state) == 0, "save level lamps");
-    check(load_level_state(".build/lighting-roundtrip-level.txt", loaded) >= 0, "load level lamps");
-    check(loaded.nlamps == 2 && loaded.lamps[0].column == 2, "level lamps preserved");
+    state
+}
+
+test "lamp lines parse, replacing lamps in the same cell" {
+    // Lines: lantern at (2, 3), post at (7, 6), post at (2, 3), a malformed
+    // line, and an unknown style.
+    state: *LevelState = lighting_level(new_world_state());
+    lighting_show_lamps("lamps", state);
+    expect {|
+        lamps: (2, 3) post (7, 6) post
+    |}
+}
+
+test "lamps survive saving and loading worlds and levels" {
+    world: *WorldState = new_world_state();
+    state: *LevelState = lighting_level(world);
+    loaded: *LevelState = new_level_state();
+    lighting_show("save world", save_world_state(".build/lighting-roundtrip-world.txt",
+        world, state));
+    lighting_show("load world", load_world_state(".build/lighting-roundtrip-world.txt",
+        world, loaded));
+    lighting_show_lamps("world lamps", loaded);
+    expect {|
+        save world: 0
+        load world: 0
+        world lamps: (2, 3) post (7, 6) post
+    |}
+    lighting_show("save level", save_level_state(".build/lighting-roundtrip-level.txt",
+        state));
+    lighting_show("load level", load_level_state(".build/lighting-roundtrip-level.txt",
+        loaded));
+    lighting_show_lamps("level lamps", loaded);
+    expect {|
+        save level: 0
+        load level: 0
+        level lamps: (2, 3) post (7, 6) post
+    |}
+}
+
+test "copying and transforming a room carries its lamps" {
+    state: *LevelState = lighting_level(new_world_state());
+    copy: *LevelState = new_level_state();
+    xy: []int = new int[2](0);
     copy_level_state(copy, state);
-    check(copy.nlamps == 2 && copy.lamps[0].style == 1, "copy lamps");
+    lighting_show_lamps("copied lamps", copy);
+    expect {|
+        copied lamps: (2, 3) post (7, 6) post
+    |}
+    // Rotate a quarter turn and move by (10, 20).
     preview_room_transform(state, copy, 0, 10, 20, 1, xy);
-    check(copy.lamps[0].column == 13 && copy.lamps[0].row == 29, "rotate/translate lamps");
-    check(state.lamps[0].column == 2, "preview preserves source lamps");
+    lighting_show_lamps("transformed preview", copy);
+    lighting_show_lamps("source after preview", state);
+    expect {|
+        transformed preview: (13, 29) post (16, 24) post
+        source after preview: (2, 3) post (7, 6) post
+    |}
+}
+
+test "the lamp brush paints, restyles and erases rectangles" {
+    state: *LevelState = lighting_level(new_world_state());
     state.nlamps = 0;
-    brush_result: BrushEdit = apply_level_brush_rect(state, 2, 2, 0, 0, Brush.Lamp,
-        0, false, true);
-    check(brush_result.nground == state.nground, "brush result matches terrain state");
-    check(state.nlamps == 9 && state.nblocks == 0 && state.nbricks == 0, "non-blocking rectangular lamp paint");
-    brush_result = apply_level_brush_rect(state, 2, 2, 0, 0, Brush.Lamp, 1, false,
+    // Paint lanterns over the 3x3 rectangle from (0, 0) to (2, 2).
+    result: BrushEdit = apply_level_brush_rect(state, 2, 2, 0, 0, Brush.Lamp, 0, false,
         true);
-    check(brush_result.nground == state.nground, "brush result matches terrain state");
-    check(state.nlamps == 9 && state.lamps[0].style == 1, "change lamp style without duplicates");
-    brush_result = apply_level_brush_rect(state, 2, 2, 0, 0, Brush.Lamp, 1, true,
-        true);
-    check(brush_result.nground == state.nground, "brush result matches terrain state");
-    check(brush_result.nblocks == state.nblocks, "brush result matches lighting state");
-    check(state.nlamps == 0, "erase lamp rectangle");
-    level_set_lamp_count(state, set_lamp(state.lamps, 0, 0, 0, 0, true));
-    heap: int = l8_heap_used();
-    fill_lamp_light(pixels, -64, -64, state.lamps, state.nlamps);
-    fill_lamp_light(pixels2, -63, -64, state.lamps, state.nlamps);
+    lighting_show_bool("result ground count matches", result.nground == state.nground);
+    lighting_show("lamps", state.nlamps);
+    lighting_show("blocks", state.nblocks);
+    lighting_show("bricks", state.nbricks);
+    expect {|
+        result ground count matches: true
+        lamps: 9
+        blocks: 0
+        bricks: 0
+    |}
+    // Paint the same rectangle with posts.
+    result = apply_level_brush_rect(state, 2, 2, 0, 0, Brush.Lamp, 1, false, true);
+    lighting_show_bool("result ground count matches", result.nground == state.nground);
+    lighting_show("lamps", state.nlamps);
+    lighting_show("first lamp style", state.lamps[0].style);
+    expect {|
+        result ground count matches: true
+        lamps: 9
+        first lamp style: 1
+    |}
+    // Erase the rectangle.
+    result = apply_level_brush_rect(state, 2, 2, 0, 0, Brush.Lamp, 1, true, true);
+    lighting_show_bool("result ground count matches", result.nground == state.nground);
+    lighting_show_bool("result block count matches", result.nblocks == state.nblocks);
+    lighting_show("lamps", state.nlamps);
+    expect {|
+        result ground count matches: true
+        result block count matches: true
+        lamps: 0
+    |}
+}
+
+test "lamp light is rasterized in world space without allocating" {
+    lamps: []Lamp = new Lamp[1](Lamp { column: 0, row: 0, style: 0 });
+    pixels: []i8 = new i8[512 * 512](0i8);
+    pixels2: []i8 = new i8[512 * 512](0i8);
+    // One lantern at (0, 0), drawn into caches whose origins differ by one cell
+    // (four pixels).
+    mark: int = l8_heap_used();
+    fill_lamp_light(pixels, -64, -64, lamps, 1);
+    fill_lamp_light(pixels2, -63, -64, lamps, 1);
+    grown: int = l8_heap_used() - mark;
+    shifted_mismatches: int = 0;
     for z in 0..512 {
         for x in 4..512 {
             previous_x: int = x - 4;
-            check(pixels[z * 512 + x] == pixels2[z * 512 + previous_x], "lamp pool moves with cache, not camera")
+            if (pixels[z * 512 + x] != pixels2[z * 512 + previous_x]) shifted_mismatches = shifted_mismatches + 1
         }
     }
-    check(pixels[258 * 512 + 258] != 0i8 && pixels[0] == 0i8, "warm pool and zero outside radius");
-    state.lamps[0].style = 1;
-    fill_lamp_light(pixels2, -64, -64, state.lamps, 1);
-    check(pixels2[258 * 512 + 278] != pixels[258 * 512 + 278], "post pool wider than lantern");
-    fill_lamp_light(pixels2, -64, -64, state.lamps, 0);
-    check(pixels2[258 * 512 + 258] == 0i8, "erased lamp stops lighting");
-    check(l8_heap_used() == heap, "lamp light rasterizer allocated");
-    print("lighting tests passed");
-    0
-    //% expect: "lighting tests passed\n"
+    lighting_show("pixels differing after a one-cell shift", shifted_mismatches);
+    lighting_show("lantern at its center", pixels[258 * 512 + 258] as int);
+    lighting_show("lantern at the cache corner", pixels[0] as int);
+    lighting_show("lantern 20 pixels from center", pixels[258 * 512 + 278] as int);
+    lighting_show("bytes allocated", grown);
+    expect {|
+        pixels differing after a one-cell shift: 0
+        lantern at its center: 179
+        lantern at the cache corner: 0
+        lantern 20 pixels from center: 4
+        bytes allocated: 0
+    |}
+    lamps[0].style = 1;
+    mark = l8_heap_used();
+    fill_lamp_light(pixels2, -64, -64, lamps, 1);
+    grown = l8_heap_used() - mark;
+    lighting_show("post 20 pixels from center", pixels2[258 * 512 + 278] as int);
+    lighting_show("bytes allocated", grown);
+    expect {|
+        post 20 pixels from center: 20
+        bytes allocated: 0
+    |}
+    mark = l8_heap_used();
+    fill_lamp_light(pixels2, -64, -64, lamps, 0);
+    grown = l8_heap_used() - mark;
+    lighting_show("no lamps at the center", pixels2[258 * 512 + 258] as int);
+    lighting_show("bytes allocated", grown);
+    expect {|
+        no lamps at the center: 0
+        bytes allocated: 0
+    |}
 }

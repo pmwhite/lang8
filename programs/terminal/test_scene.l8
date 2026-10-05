@@ -8,22 +8,13 @@ import "../../stdlib/print.l8";
 
 import "scene.l8";
 
-failures: int = 0;
-
-check(ok: bool, label: str) raises IoError {
-    if (!ok) {
-        failures = failures + 1;
-        eprint(label)
-    }
-}
-
-fill(s: *Screen) {
+scene_test_fill(s: *Screen) {
     for y in 0..s.rows {
         for x in 0..s.cols s.text[y * 240 + x] = 256 + y * 240 + x
     }
 }
 
-scroll(
+scene_test_scroll(
     s: *Screen,
     r: *TerminalScene,
     left: int,
@@ -49,41 +40,102 @@ scroll(
     }
 }
 
-expect_shift(
-    r: *TerminalScene,
-    left: int,
-    top: int,
-    right: int,
-    bottom: int,
-    shift: int,
-    label: str
-) raises IoError requires (0 <= left && right <= 240 && 0 <= top && bottom <= 120) {
-    good: bool = true;
-    for y in top..bottom {
-        for x in left..right {
-            pos: int = y * 240 + x;
-            box: TerminalSceneRegion = terminal_scene_region_at(r, pos);
-            good = good && box.shift == shift;
-            if (shift != 0) {
-                good = good && r.scene_from_x[pos] == x as f32 && r.scene_from_alpha[pos] == 1.0;
-                source: int = y - shift;
-                if (source >= top && source < bottom) good = good && r.scene_match[pos] == source * 240 + x
-            } else good = good && r.scene_from_y[pos] == y as f32
-        }
-    }
-    check(good, label)
-}
-
-put_row(s: *Screen, row: int, text: str) requires (0 <= row && row < 120) {
+scene_test_put_row(s: *Screen, row: int, text: str) requires (0 <= row && row < 120) {
     for x in 0..s.cols s.text[row * 240 + x] = 32;
     width: int = len(text);
     if (width > s.cols) width = s.cols;
     for x in 0..width s.text[row * 240 + x] = text[x] as int
 }
 
+scene_test_show_int(label: str, n: int) raises IoError {
+    write(1, label);
+    write(1, ": ");
+    print_int(n)
+}
+
+scene_test_show_bool(label: str, value: bool) raises IoError {
+    write(1, label);
+    write(1, ": ");
+    print_bool(value)
+}
+
+// Print "label: fixed" or "label: shift N" when every cell of the rectangle
+// moves rigidly with the shift of its first cell: a moving cell starts in its
+// own column, opaque, matched to the cell N rows away; a fixed cell starts in
+// its own row. Otherwise name the first cell that breaks the pattern.
+scene_test_show_shift(
+    r: *TerminalScene,
+    label: str,
+    left: int,
+    top: int,
+    right: int,
+    bottom: int
+) raises IoError requires (0 <= left && left < right && right <= 240 && 0 <= top && top < bottom && bottom <= 120) {
+    first: TerminalSceneRegion = terminal_scene_region_at(r, top * 240 + left);
+    shift: int = first.shift;
+    bad: int = -1;
+    for y in top..bottom {
+        for x in left..right {
+            pos: int = y * 240 + x;
+            box: TerminalSceneRegion = terminal_scene_region_at(r, pos);
+            good: bool = box.shift == shift;
+            if (shift != 0) {
+                good = good && r.scene_from_x[pos] == x as f32 && r.scene_from_alpha[pos] == 1.0;
+                source: int = y - shift;
+                if (source >= top && source < bottom) good = good && r.scene_match[pos] == source * 240 + x
+            } else good = good && r.scene_from_y[pos] == y as f32;
+            if (!good && bad < 0) bad = pos
+        }
+    }
+    write(1, label);
+    if (bad >= 0) {
+        write(1, ": breaks at column ");
+        write_int(1, bad % 240);
+        write(1, " row ");
+        print_int(bad / 240)
+    } else if (shift == 0) write(1, ": fixed\n") else {
+        write(1, ": shift ");
+        print_int(shift)
+    }
+}
+
+// Print whether every cell of a row redraws in place without animating.
+scene_test_show_pinned(
+    s: *Screen,
+    r: *TerminalScene,
+    label: str,
+    row: int
+) raises IoError requires (0 <= row && row < 120) {
+    moving: int = 0;
+    for x in 0..s.cols {
+        pos: int = row * 240 + x;
+        if (!(r.scene_from_x[pos] == x as f32 && r.scene_from_y[pos] == row as f32 && r.scene_from_alpha[pos] == 1.0)) moving = moving + 1
+    }
+    write(1, label);
+    if (moving == 0) write(1, ": pinned\n") else {
+        write(1, ": cells animating ");
+        print_int(moving)
+    }
+}
+
+scene_test_show_region(r: *TerminalScene, label: str, pos: int) raises IoError requires (0 <= pos && pos < 28800) {
+    box: TerminalSceneRegion = terminal_scene_region_at(r, pos);
+    write(1, label);
+    write(1, ": columns ");
+    write_int(1, box.left);
+    write(1, "..");
+    write_int(1, box.right);
+    write(1, " rows ");
+    write_int(1, box.top);
+    write(1, "..");
+    write_int(1, box.bottom);
+    write(1, " shift ");
+    print_int(box.shift)
+}
+
 // Dense text should cover each cell center exactly once throughout a scroll, using the
 // same interpolated positions and clipping rectangles as the renderer.
-cover(
+scene_test_cover(
     covered: []int,
     clip: TerminalSceneRegion,
     x: f32,
@@ -98,8 +150,9 @@ cover(
     }
 }
 
-scene_covered(s: *Screen, r: *TerminalScene, now: int): bool {
-    good: bool = true;
+// Count the cells not covered by exactly one opaque glyph at time now.
+scene_test_miscovered(s: *Screen, r: *TerminalScene, now: int): int {
+    bad: int = 0;
     region {
         covered: []int = new int[28800](0);
         ease: f32 = terminal_scene_ease(r, now);
@@ -109,7 +162,7 @@ scene_covered(s: *Screen, r: *TerminalScene, now: int): bool {
                 clip: TerminalSceneRegion = terminal_scene_region_at(r, pos);
                 visual_x: f32 = r.scene_from_x[pos] + (x as f32 - r.scene_from_x[pos]) * ease;
                 visual_y: f32 = r.scene_from_y[pos] + (y as f32 - r.scene_from_y[pos]) * ease;
-                if (s.text[pos] > 32 && r.scene_from_alpha[pos] >= 0.99) cover(covered,
+                if (s.text[pos] > 32 && r.scene_from_alpha[pos] >= 0.99) scene_test_cover(covered,
                     clip, visual_x, visual_y)
             }
         }
@@ -118,19 +171,33 @@ scene_covered(s: *Screen, r: *TerminalScene, now: int): bool {
             visual_y: f32 = r.ghost_from_y[g] + (r.ghost_to_y[g] - r.ghost_from_y[g]) * ease;
             if (r.ghost_text[g] > 32 && r.ghost_fade[g] == 0 && r.ghost_from_alpha[g] >= 0.99) {
                 clip: TerminalSceneRegion = r.ghost_clip[g];
-                cover(covered, clip, visual_x, visual_y)
+                scene_test_cover(covered, clip, visual_x, visual_y)
             }
         }
         for y in 0..s.rows {
-            for x in 0..s.cols good = good && covered[y * 240 + x] == 1
+            for x in 0..s.cols {
+                if (covered[y * 240 + x] != 1) bad = bad + 1
+            }
         }
     }
-    good
+    bad
 }
 
-rapid_scroll(
-    cols: int,
-    rows: int,
+scene_test_show_coverage(s: *Screen, r: *TerminalScene, now: int) raises IoError {
+    bad: int = scene_test_miscovered(s, r, now);
+    write(1, "t=");
+    write_int(1, now);
+    if (bad == 0) write(1, ": every cell covered once\n") else {
+        write(1, ": cells covered zero or several times: ");
+        print_int(bad)
+    }
+}
+
+// Hold a scroll key for 16 frames and summarize what was drawn. Returns the
+// time of the last frame.
+scene_test_hold_scroll(
+    s: *Screen,
+    r: *TerminalScene,
     left: int,
     top: int,
     right: int,
@@ -138,16 +205,12 @@ rapid_scroll(
     shift: int,
     interval: int,
     edits: bool
-) raises IoError requires (2 <= cols && cols <= 240 && 2 <= rows && rows <= 120 && 0 <= left && left <= right && right <= cols && 0 <= top && top <= bottom && bottom <= rows && left + 5 < right && top + 2 < bottom) {
-    s: *Screen = terminal_screen(cols, rows);
-    r: *TerminalScene = terminal_scene();
-    fill(s);
-    terminal_scene_prepare(s, r, 0);
-    visible: bool = true;
+) raises IoError: int requires (0 <= left && left <= right && right <= 240 && 0 <= top && top <= bottom && bottom <= 120 && left + 5 < right && top + 2 < bottom) {
+    bad_frames: int = 0;
     bounded: bool = true;
     for frame in 0..16 {
         now: int = 200 + frame * interval;
-        scroll(s, r, left, top, right, bottom, shift);
+        scene_test_scroll(s, r, left, top, right, bottom, shift);
         // Unique incoming pages avoid accidentally encoding another displacement
         // in the fixture's generated codepoints.
         for y in top..bottom {
@@ -170,429 +233,765 @@ rapid_scroll(
             span: f32 = (box.bottom - box.top) as f32;
             bounded = bounded && box.from_y <= span && box.from_y >= 0.0 - span
         }
-        visible = visible && scene_covered(s, r, now) && scene_covered(s, r, now + interval / 2) && scene_covered(s,
-            r, now + interval - 1);
+        bad: int = scene_test_miscovered(s, r, now) + scene_test_miscovered(s, r,
+            now + interval / 2) + scene_test_miscovered(s, r, now + interval - 1);
         if (edits) {
             // A second write changes text without scrolling again.
             s.text[(top + 2) * 240 + left + 5] = 90 + frame;
             terminal_scene_prepare(s, r, now + interval / 2);
-            visible = visible && scene_covered(s, r, now + interval / 2) && scene_covered(s,
+            bad = bad + scene_test_miscovered(s, r, now + interval / 2) + scene_test_miscovered(s,
                 r, now + interval - 1)
         }
+        if (bad > 0) bad_frames = bad_frames + 1
     }
-    check(bounded, "held scroll cannot accumulate more than a pane of animation lag");
-    check(visible, "held scroll keeps exactly one opaque glyph per cell throughout each frame");
-    // Once key repeat stops, the latest screen must settle normally.
+    scene_test_show_bool("lag within one pane height", bounded);
+    scene_test_show_int("frames with a gap or overlap", bad_frames);
     now: int = 200 + 15 * interval;
     if (edits) now = now + interval / 2;
-    check(scene_covered(s, r, now + 60) && scene_covered(s, r, now + 119), "release has no gap while catching up");
-    terminal_scene_prepare(s, r, now + 120);
-    check(!r.scene_active && r.ghost_count == 0 && scene_covered(s, r, now + 120),
-        "held scroll settles to current text on release")
+    now
 }
 
-main() raises IoError: int {
-    region {
-        s: *Screen = terminal_screen(2, 2);
-        r: *TerminalScene = terminal_scene();
-        one_cell: TerminalSceneRegion = terminal_scene_region(0, 0, 1, 1);
-        i: int = 0;
-        while (i < 256) {
-            terminal_scene_add_region(r, one_cell);
-            i = i + 1
+// Release a held scroll at time now: it must catch up and settle normally.
+scene_test_release_scroll(s: *Screen, r: *TerminalScene, now: int) raises IoError {
+    scene_test_show_int("gaps or overlaps while catching up", scene_test_miscovered(s,
+        r, now + 60) + scene_test_miscovered(s, r, now + 119));
+    terminal_scene_prepare(s, r, now + 120);
+    scene_test_show_bool("settled: animating", r.scene_active);
+    scene_test_show_int("settled: ghosts", r.ghost_count);
+    scene_test_show_int("settled: gaps or overlaps", scene_test_miscovered(s, r, now + 120))
+}
+
+test "the region table reports exhaustion and falls back to the whole viewport" {
+    s: *Screen = terminal_screen(2, 2);
+    r: *TerminalScene = terminal_scene();
+    one_cell: TerminalSceneRegion = terminal_scene_region(0, 0, 1, 1);
+    for _i in 0..256 terminal_scene_add_region(r, one_cell);
+    scene_test_show_int("regions", r.scene_region_count);
+    scene_test_show_bool("exhausted", r.scene_exhausted);
+    expect {|
+        regions: 256
+        exhausted: false
+    |}
+    // One more does not write past the table's capacity.
+    terminal_scene_add_region(r, one_cell);
+    scene_test_show_int("regions", r.scene_region_count);
+    scene_test_show_bool("exhausted", r.scene_exhausted);
+    expect {|
+        regions: 256
+        exhausted: true
+    |}
+    terminal_scene_fallback_region(s, r);
+    scene_test_show_int("regions", r.scene_region_count);
+    scene_test_show_bool("exhausted", r.scene_exhausted);
+    scene_test_show_int("region of cell (0,0)", r.scene_region[0]);
+    scene_test_show_region(r, "cell (0,0)", 0);
+    expect {|
+        regions: 1
+        exhausted: false
+        region of cell (0,0): 0
+        cell (0,0): columns 0..2 rows 0..2 shift 0
+    |}
+}
+
+test "an expanding pane edge keeps old and new rows aligned" {
+    // An inferred edge expands into a previously stationary column. Its
+    // corner no longer represents the displacement of the moving pane.
+    s: *Screen = terminal_screen(40, 16);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    terminal_scene_prepare(s, r, 0);
+    scene_test_scroll(s, r, 1, 0, 40, 16, -8);
+    terminal_scene_prepare(s, r, 200);
+    scene_test_scroll(s, r, 0, 0, 40, 16, -8);
+    terminal_scene_prepare(s, r, 220);
+    scene_test_show_coverage(s, r, 220);
+    scene_test_show_coverage(s, r, 230);
+    scene_test_show_coverage(s, r, 280);
+    expect {|
+        t=220: every cell covered once
+        t=230: every cell covered once
+        t=280: every cell covered once
+    |}
+}
+
+test "a scroll reversal replaces returning ghosts with the current plane" {
+    s: *Screen = terminal_screen(40, 16);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    terminal_scene_prepare(s, r, 0);
+    scene_test_scroll(s, r, 1, 0, 40, 16, -8);
+    terminal_scene_prepare(s, r, 200);
+    scene_test_scroll(s, r, 0, 0, 40, 16, -8);
+    terminal_scene_prepare(s, r, 220);
+    scene_test_scroll(s, r, 0, 0, 40, 16, 8);
+    terminal_scene_prepare(s, r, 240);
+    scene_test_show_coverage(s, r, 240);
+    scene_test_show_coverage(s, r, 250);
+    scene_test_show_coverage(s, r, 300);
+    expect {|
+        t=240: every cell covered once
+        t=250: every cell covered once
+        t=300: every cell covered once
+    |}
+}
+
+test "a gutter repaint cannot carry moving digits over the fixed status line" {
+    // A relative-number gutter stops moving independently of the code,
+    // while both still have unfinished animation above a styled status row.
+    s: *Screen = terminal_screen(40, 18);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    for x in 0..40 s.bg[16 * 240 + x] = 4;
+    terminal_scene_prepare(s, r, 0);
+    scene_test_scroll(s, r, 0, 0, 40, 16, -8);
+    s.text[16 * 240 + 20] = 88;
+    terminal_scene_prepare(s, r, 200);
+    scene_test_scroll(s, r, 4, 0, 40, 16, -8);
+    s.text[8 * 240 + 2] = 57;
+    s.text[16 * 240 + 20] = 89;
+    terminal_scene_prepare(s, r, 220);
+    scene_test_show_coverage(s, r, 220);
+    scene_test_show_coverage(s, r, 240);
+    scene_test_show_coverage(s, r, 280);
+    expect {|
+        t=220: every cell covered once
+        t=240: every cell covered once
+        t=280: every cell covered once
+    |}
+}
+
+test "a held full-screen scroll with repaints stays covered" {
+    s: *Screen = terminal_screen(80, 24);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    terminal_scene_prepare(s, r, 0);
+    released: int = scene_test_hold_scroll(s, r, 0, 0, 80, 24, -12, 16, true);
+    expect {|
+        lag within one pane height: true
+        frames with a gap or overlap: 0
+    |}
+    scene_test_release_scroll(s, r, released);
+    expect {|
+        gaps or overlaps while catching up: 0
+        settled: animating: false
+        settled: ghosts: 0
+        settled: gaps or overlaps: 0
+    |}
+}
+
+test "a held pane scroll with repaints stays covered" {
+    s: *Screen = terminal_screen(80, 40);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    terminal_scene_prepare(s, r, 0);
+    released: int = scene_test_hold_scroll(s, r, 10, 5, 40, 25, -10, 24, true);
+    expect {|
+        lag within one pane height: true
+        frames with a gap or overlap: 0
+    |}
+    scene_test_release_scroll(s, r, released);
+    expect {|
+        gaps or overlaps while catching up: 0
+        settled: animating: false
+        settled: ghosts: 0
+        settled: gaps or overlaps: 0
+    |}
+}
+
+test "a held full-screen scroll stays covered" {
+    s: *Screen = terminal_screen(80, 24);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    terminal_scene_prepare(s, r, 0);
+    released: int = scene_test_hold_scroll(s, r, 0, 0, 80, 24, -12, 16, false);
+    expect {|
+        lag within one pane height: true
+        frames with a gap or overlap: 0
+    |}
+    scene_test_release_scroll(s, r, released);
+    expect {|
+        gaps or overlaps while catching up: 0
+        settled: animating: false
+        settled: ghosts: 0
+        settled: gaps or overlaps: 0
+    |}
+}
+
+test "a held downward scroll with slow frames stays covered" {
+    s: *Screen = terminal_screen(80, 24);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    terminal_scene_prepare(s, r, 0);
+    released: int = scene_test_hold_scroll(s, r, 0, 0, 80, 24, 12, 33, false);
+    expect {|
+        lag within one pane height: true
+        frames with a gap or overlap: 0
+    |}
+    scene_test_release_scroll(s, r, released);
+    expect {|
+        gaps or overlaps while catching up: 0
+        settled: animating: false
+        settled: ghosts: 0
+        settled: gaps or overlaps: 0
+    |}
+}
+
+test "a held full-page scroll stays covered" {
+    s: *Screen = terminal_screen(80, 24);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    terminal_scene_prepare(s, r, 0);
+    released: int = scene_test_hold_scroll(s, r, 0, 0, 80, 24, -24, 20, false);
+    expect {|
+        lag within one pane height: true
+        frames with a gap or overlap: 0
+    |}
+    scene_test_release_scroll(s, r, released);
+    expect {|
+        gaps or overlaps while catching up: 0
+        settled: animating: false
+        settled: ghosts: 0
+        settled: gaps or overlaps: 0
+    |}
+}
+
+test "a held pane scroll stays covered" {
+    s: *Screen = terminal_screen(80, 40);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    terminal_scene_prepare(s, r, 0);
+    released: int = scene_test_hold_scroll(s, r, 10, 5, 40, 25, -10, 24, false);
+    expect {|
+        lag within one pane height: true
+        frames with a gap or overlap: 0
+    |}
+    scene_test_release_scroll(s, r, released);
+    expect {|
+        gaps or overlaps while catching up: 0
+        settled: animating: false
+        settled: ghosts: 0
+        settled: gaps or overlaps: 0
+    |}
+}
+
+test "a held scroll at maximum grid size stays covered" {
+    s: *Screen = terminal_screen(240, 120);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    terminal_scene_prepare(s, r, 0);
+    released: int = scene_test_hold_scroll(s, r, 0, 0, 240, 120, -60, 16, false);
+    expect {|
+        lag within one pane height: true
+        frames with a gap or overlap: 0
+    |}
+    scene_test_release_scroll(s, r, released);
+    expect {|
+        gaps or overlaps while catching up: 0
+        settled: animating: false
+        settled: ghosts: 0
+        settled: gaps or overlaps: 0
+    |}
+}
+
+test "an unchanged line-number digit scrolls despite cursor-line styling" {
+    s: *Screen = terminal_screen(40, 18);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    for y in 0..16 {
+        s.text[y * 240] = 49;
+        s.text[y * 240 + 1] = 48 + y / 10;
+        s.text[y * 240 + 2] = 48 + y % 10;
+        s.fg[y * 240] = 8
+    }
+    s.fg[7 * 240] = 3;
+    for x in 0..40 s.bg[16 * 240 + x] = 4;
+    terminal_scene_prepare(s, r, 0);
+    scene_test_scroll(s, r, 0, 0, 40, 16, -8);
+    for y in 0..16 {
+        s.text[y * 240] = 49;
+        s.text[y * 240 + 1] = 48 + (y + 8) / 10;
+        s.text[y * 240 + 2] = 48 + (y + 8) % 10;
+        s.fg[y * 240] = 8
+    }
+    s.fg[7 * 240] = 3;
+    s.text[16 * 240 + 20] = 88;
+    terminal_scene_prepare(s, r, 200);
+    scene_test_show_shift(r, "text with line numbers", 0, 0, 40, 16);
+    scene_test_show_bool("gutter shares the text region", r.scene_region[0] == r.scene_region[3]);
+    // Status and command rows do not anchor the gutter.
+    scene_test_show_shift(r, "status and command rows", 0, 16, 40, 18);
+    expect {|
+        text with line numbers: shift -8
+        gutter shares the text region: true
+        status and command rows: fixed
+    |}
+}
+
+test "a stable cursor-line highlight does not pin scrolling text" {
+    s: *Screen = terminal_screen(40, 16);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    for x in 0..40 s.bg[x] = 4;
+    terminal_scene_prepare(s, r, 0);
+    scene_test_scroll(s, r, 0, 0, 40, 16, -5);
+    for x in 0..40 s.bg[x] = 4;
+    terminal_scene_prepare(s, r, 200);
+    scene_test_show_shift(r, "screen", 0, 0, 40, 16);
+    expect {|
+        screen: shift -5
+    |}
+}
+
+test "repeated prefixes scroll as one rigid plane" {
+    s: *Screen = terminal_screen(40, 16);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    for y in 0..16 {
+        for x in 0..12 s.text[y * 240 + x] = 65 + x
+    }
+    terminal_scene_prepare(s, r, 0);
+    scene_test_scroll(s, r, 0, 0, 40, 16, -8);
+    for y in 8..16 {
+        for x in 0..12 s.text[y * 240 + x] = 65 + x
+    }
+    terminal_scene_prepare(s, r, 200);
+    // The prefixes do not shear into a stationary strip.
+    scene_test_show_shift(r, "screen", 0, 0, 40, 16);
+    scene_test_show_int("regions", r.scene_region_count);
+    expect {|
+        screen: shift -8
+        regions: 1
+    |}
+}
+
+test "a status line with changing counters updates in place under scrolling code" {
+    s: *Screen = terminal_screen(80, 24);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    scene_test_put_row(s, 21, "            if (extra > gain) {");
+    scene_test_put_row(s, 22, "file.l8                   100,1     10%");
+    for x in 0..80 {
+        s.bg[22 * 240 + x] = 7;
+        s.fg[22 * 240 + x] = 0
+    }
+    terminal_scene_prepare(s, r, 0);
+    scene_test_scroll(s, r, 0, 0, 80, 22, -11);
+    scene_test_put_row(s, 21, "            if (extra > gain) {");
+    scene_test_put_row(s, 22, "file.l8                   111,1     11%");
+    terminal_scene_prepare(s, r, 200);
+    // The repeated last code row is new incoming text, not another status bar.
+    scene_test_show_region(r, "identical incoming code row 21", 21 * 240);
+    scene_test_show_pinned(s, r, "status row 22", 22);
+    expect {|
+        identical incoming code row 21: columns 0..80 rows 0..22 shift -11
+        status row 22: pinned
+    |}
+}
+
+test "numeric status changes stay fixed without moving the content boundary" {
+    s: *Screen = terminal_screen(40, 12);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    scene_test_put_row(s, 10, "123,4  10%");
+    for x in 0..40 s.bg[10 * 240 + x] = 4;
+    terminal_scene_prepare(s, r, 0);
+    scene_test_scroll(s, r, 0, 0, 40, 10, -4);
+    // Most meaningful characters of the status change.
+    scene_test_put_row(s, 10, "987,6  89%");
+    terminal_scene_prepare(s, r, 200);
+    scene_test_show_shift(r, "content", 0, 0, 40, 10);
+    scene_test_show_shift(r, "status rows", 0, 10, 40, 12);
+    expect {|
+        content: shift -4
+        status rows: fixed
+    |}
+    // A counter-only repaint during the scroll stays pinned.
+    scene_test_put_row(s, 10, "999,9  99%");
+    terminal_scene_prepare(s, r, 220);
+    scene_test_show_pinned(s, r, "status row 10", 10);
+    expect {|
+        status row 10: pinned
+    |}
+}
+
+test "a full-screen half-page scroll is one rigid plane that retires its ghosts" {
+    s: *Screen = terminal_screen(40, 16);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    terminal_scene_prepare(s, r, 0);
+    scene_test_scroll(s, r, 0, 0, 40, 16, -8);
+    terminal_scene_prepare(s, r, 200);
+    scene_test_show_shift(r, "screen", 0, 0, 40, 16);
+    scene_test_show_int("regions", r.scene_region_count);
+    expect {|
+        screen: shift -8
+        regions: 1
+    |}
+    terminal_scene_prepare(s, r, 321);
+    scene_test_show_bool("animating", r.scene_active);
+    scene_test_show_int("ghosts", r.ghost_count);
+    expect {|
+        animating: false
+        ghosts: 0
+    |}
+}
+
+test "a left pane scrolls under a larger stationary pane" {
+    s: *Screen = terminal_screen(60, 16);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    terminal_scene_prepare(s, r, 0);
+    scene_test_scroll(s, r, 0, 0, 20, 15, -7);
+    terminal_scene_prepare(s, r, 200);
+    scene_test_show_shift(r, "left pane", 0, 0, 20, 15);
+    scene_test_show_shift(r, "right pane", 20, 0, 60, 16);
+    scene_test_show_shift(r, "left pane status", 0, 15, 20, 16);
+    inside: int = 0;
+    for g in 0..r.ghost_count {
+        clip: TerminalSceneRegion = r.ghost_clip[g];
+        if (clip.right <= 20 && clip.bottom <= 15) inside = inside + 1
+    }
+    scene_test_show_int("departing ghosts", r.ghost_count);
+    scene_test_show_int("departing ghosts clipped to the left pane", inside);
+    expect {|
+        left pane: shift -7
+        right pane: fixed
+        left pane status: fixed
+        departing ghosts: 140
+        departing ghosts clipped to the left pane: 140
+    |}
+}
+
+test "an interrupted pane scroll continues from its displayed position" {
+    s: *Screen = terminal_screen(60, 16);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    terminal_scene_prepare(s, r, 0);
+    scene_test_scroll(s, r, 0, 0, 20, 15, -7);
+    terminal_scene_prepare(s, r, 200);
+    scene_test_scroll(s, r, 0, 0, 20, 15, -7);
+    terminal_scene_prepare(s, r, 260);
+    scene_test_show_shift(r, "left pane", 0, 0, 20, 15);
+    scene_test_show_shift(r, "right pane", 20, 0, 60, 16);
+    write(1, "cell (0,0) starts from row ");
+    print_fixed(r.scene_from_y[0] as f64, 4);
+    expect {|
+        left pane: shift -7
+        right pane: fixed
+        cell (0,0) starts from row 10.5000
+    |}
+    // An unrelated edit arrives while the left pane is still moving.
+    s.text[5 * 240 + 30] = 90;
+    terminal_scene_prepare(s, r, 290);
+    scene_test_show_region(r, "cell (0,0)", 0);
+    write(1, "cell (0,0) starts from row ");
+    print_fixed(r.scene_from_y[0] as f64, 4);
+    expect {|
+        cell (0,0): columns 0..20 rows 0..15 shift 0
+        cell (0,0) starts from row 8.8594
+    |}
+    // Nor does a neighbor's scroll cancel the motion.
+    scene_test_scroll(s, r, 20, 0, 60, 16, 3);
+    terminal_scene_prepare(s, r, 320);
+    write(1, "cell (0,0) starts from row ");
+    print_fixed(r.scene_from_y[0] as f64, 4);
+    expect {|
+        cell (0,0) starts from row 7.4751
+    |}
+}
+
+test "a right pane scrolls down beside a stationary pane" {
+    s: *Screen = terminal_screen(60, 20);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    terminal_scene_prepare(s, r, 0);
+    scene_test_scroll(s, r, 40, 0, 60, 20, 6);
+    terminal_scene_prepare(s, r, 200);
+    scene_test_show_shift(r, "left pane", 0, 0, 40, 20);
+    scene_test_show_shift(r, "right pane", 40, 0, 60, 20);
+    expect {|
+        left pane: fixed
+        right pane: shift 6
+    |}
+}
+
+test "a lower stacked pane scrolls between fixed rows" {
+    s: *Screen = terminal_screen(40, 24);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    terminal_scene_prepare(s, r, 0);
+    scene_test_scroll(s, r, 0, 13, 40, 23, -4);
+    terminal_scene_prepare(s, r, 200);
+    scene_test_show_shift(r, "upper pane and separator", 0, 0, 40, 13);
+    scene_test_show_shift(r, "lower pane", 0, 13, 40, 23);
+    scene_test_show_shift(r, "bottom status", 0, 23, 40, 24);
+    expect {|
+        upper pane and separator: fixed
+        lower pane: shift -4
+        bottom status: fixed
+    |}
+}
+
+test "nested panes scroll independently" {
+    s: *Screen = terminal_screen(60, 24);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    terminal_scene_prepare(s, r, 0);
+    scene_test_scroll(s, r, 0, 0, 30, 11, -4);
+    scene_test_scroll(s, r, 0, 12, 30, 24, 5);
+    scene_test_scroll(s, r, 31, 0, 60, 24, -8);
+    terminal_scene_prepare(s, r, 200);
+    scene_test_show_shift(r, "top-left pane", 0, 0, 30, 11);
+    scene_test_show_shift(r, "bottom-left pane", 0, 12, 30, 24);
+    scene_test_show_shift(r, "full-height right pane", 31, 0, 60, 24);
+    scene_test_show_shift(r, "horizontal divider", 0, 11, 30, 12);
+    scene_test_show_shift(r, "vertical divider", 30, 0, 31, 24);
+    expect {|
+        top-left pane: shift -4
+        bottom-left pane: shift 5
+        full-height right pane: shift -8
+        horizontal divider: fixed
+        vertical divider: fixed
+    |}
+}
+
+test "blank lines stay in the rigid scroll plane" {
+    s: *Screen = terminal_screen(40, 20);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    // Same blank line before and after a two-row scroll is not pane chrome.
+    for x in 0..40 {
+        s.text[8 * 240 + x] = 32;
+        s.text[10 * 240 + x] = 32;
+        s.text[19 * 240 + x] = 32;
+        s.bg[19 * 240 + x] = 4
+    }
+    terminal_scene_prepare(s, r, 0);
+    scene_test_scroll(s, r, 0, 0, 40, 19, -2);
+    terminal_scene_prepare(s, r, 200);
+    scene_test_show_shift(r, "text with blank lines", 0, 0, 40, 19);
+    scene_test_show_shift(r, "blank styled status row", 0, 19, 40, 20);
+    expect {|
+        text with blank lines: shift -2
+        blank styled status row: fixed
+    |}
+}
+
+test "pane inference refines a full-width protocol scroll hint" {
+    s: *Screen = terminal_screen(40, 16);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    terminal_scene_prepare(s, r, 0);
+    scene_test_scroll(s, r, 0, 2, 20, 14, -5);
+    // A program can use a full-width VT scroll then repaint the other pane.
+    s.scroll_hint_top = 2;
+    s.scroll_hint_bottom = 13;
+    s.scroll_hint_delta = -5;
+    terminal_scene_prepare(s, r, 200);
+    scene_test_show_shift(r, "scrolled pane", 0, 2, 20, 14);
+    scene_test_show_shift(r, "repainted neighbor", 20, 0, 40, 16);
+    scene_test_show_int("hint delta after use", s.scroll_hint_delta);
+    expect {|
+        scrolled pane: shift -5
+        repainted neighbor: fixed
+        hint delta after use: 0
+    |}
+}
+
+test "a sparse protocol scroll still animates" {
+    s: *Screen = terminal_screen(20, 10);
+    r: *TerminalScene = terminal_scene();
+    s.text[8 * 240] = 65;
+    terminal_scene_prepare(s, r, 0);
+    terminal_scroll(s, 0, 9, false);
+    terminal_scene_prepare(s, r, 200);
+    scene_test_show_region(r, "row 7", 7 * 240);
+    expect {|
+        row 7: columns 0..20 rows 0..10 shift -1
+    |}
+}
+
+test "an ordinary insertion keeps horizontal matching" {
+    s: *Screen = terminal_screen(20, 6);
+    r: *TerminalScene = terminal_scene();
+    for x in 0..8 s.text[x] = 65 + x;
+    terminal_scene_prepare(s, r, 0);
+    for x in 3..9 s.text[x] = 64 + x;
+    s.text[2] = 90;
+    terminal_scene_prepare(s, r, 200);
+    scene_test_show_bool("vertical shift", r.scene_has_shift);
+    scene_test_show_int("cell 3 matches old cell", r.scene_match[3]);
+    scene_test_show_int("cell 8 matches old cell", r.scene_match[8]);
+    expect {|
+        vertical shift: false
+        cell 3 matches old cell: 2
+        cell 8 matches old cell: 7
+    |}
+}
+
+test "a resize resets old geometry and ghosts" {
+    s: *Screen = terminal_screen(20, 6);
+    r: *TerminalScene = terminal_scene();
+    for x in 0..8 s.text[x] = 65 + x;
+    terminal_scene_prepare(s, r, 0);
+    for x in 3..9 s.text[x] = 64 + x;
+    s.text[2] = 90;
+    terminal_scene_prepare(s, r, 200);
+    terminal_resize(s, 10, 3);
+    terminal_scene_prepare(s, r, 230);
+    scene_test_show_bool("animating", r.scene_active);
+    scene_test_show_int("ghosts", r.ghost_count);
+    scene_test_show_int("regions", r.scene_region_count);
+    expect {|
+        animating: false
+        ghosts: 0
+        regions: 1
+    |}
+}
+
+test "wide and combining glyphs scroll with their pane" {
+    s: *Screen = terminal_screen(40, 16);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    for y in 0..16 {
+        s.text[y * 240 + 18] = 30028 + y;
+        s.text[y * 240 + 19] = -1;
+        s.comb[y * 240 + 2] = 769
+    }
+    terminal_scene_prepare(s, r, 0);
+    scene_test_scroll(s, r, 0, 0, 20, 16, -5);
+    for y in 11..16 {
+        s.text[y * 240 + 18] = 30100 + y;
+        s.text[y * 240 + 19] = -1
+    }
+    terminal_scene_prepare(s, r, 200);
+    scene_test_show_shift(r, "left pane", 0, 0, 20, 16);
+    // The pane edge cannot cut a wide glyph in half.
+    scene_test_show_bool("both halves of a wide glyph share a region", r.scene_region[18] == r.scene_region[19]);
+    expect {|
+        left pane: shift -5
+        both halves of a wide glyph share a region: true
+    |}
+}
+
+test "a small pane scrolls inside a stationary majority" {
+    s: *Screen = terminal_screen(80, 24);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    terminal_scene_prepare(s, r, 0);
+    scene_test_scroll(s, r, 0, 0, 20, 10, -4);
+    terminal_scene_prepare(s, r, 200);
+    scene_test_show_shift(r, "small pane", 0, 0, 20, 10);
+    scene_test_show_shift(r, "right neighbor", 20, 0, 80, 24);
+    scene_test_show_shift(r, "lower neighbor", 0, 10, 20, 24);
+    expect {|
+        small pane: shift -4
+        right neighbor: fixed
+        lower neighbor: fixed
+    |}
+}
+
+test "distant small panes scroll in opposite directions" {
+    s: *Screen = terminal_screen(80, 40);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    terminal_scene_prepare(s, r, 0);
+    scene_test_scroll(s, r, 0, 0, 20, 10, -4);
+    scene_test_scroll(s, r, 60, 30, 80, 40, 4);
+    terminal_scene_prepare(s, r, 200);
+    scene_test_show_shift(r, "top-left pane", 0, 0, 20, 10);
+    scene_test_show_shift(r, "bottom-right pane", 60, 30, 80, 40);
+    scene_test_show_shift(r, "stationary middle", 20, 0, 60, 40);
+    expect {|
+        top-left pane: shift -4
+        bottom-right pane: shift 4
+        stationary middle: fixed
+    |}
+}
+
+test "a Neovim half-page redraw keeps entering rows in the scrolling plane" {
+    // Reduced from an actual Neovim Ctrl-D redraw: short code lines have
+    // repeated words and blank tails, and the final VT operation describes
+    // only part of the pane. Neither should truncate its entering rows.
+    lines: []str = ["tag terminal;", "", "import screen;", "", "// Every pane owns its matching and clipping rectangle.",
+        "// Neighbors must not share source cells or departing glyphs.", "type SceneRegion = {",
+        "    left: int;", "    top: int;", "    right: int;", "    bottom: int;",
+        "    shift: int;", "    from_y: f32;", "};", "", "type Scene = {"];
+    s: *Screen = terminal_screen(80, 24);
+    r: *TerminalScene = terminal_scene();
+    for y in 0..11 scene_test_put_row(s, y, lines[y]);
+    for y in 12..22 scene_test_put_row(s, y, lines[y - 12]);
+    scene_test_put_row(s, 11, "program.l8                         1,1             Top");
+    scene_test_put_row(s, 22, "program.l8                         1,1             Top");
+    terminal_scene_prepare(s, r, 0);
+    for y in 0..11 scene_test_put_row(s, y, lines[y + 5]);
+    scene_test_put_row(s, 11, "program.l8                         6,1              0%");
+    s.scroll_hint_top = 7;
+    s.scroll_hint_bottom = 10;
+    s.scroll_hint_delta = -5;
+    terminal_scene_prepare(s, r, 200);
+    scene_test_show_shift(r, "upper pane code", 0, 0, 61, 11);
+    scene_test_show_shift(r, "status and lower pane", 0, 11, 80, 24);
+    expect {|
+        upper pane code: shift -5
+        status and lower pane: fixed
+    |}
+}
+
+test "the right edge of a maximum-width grid is not a column boundary" {
+    s: *Screen = terminal_screen(240, 120);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    scene_test_show_bool("column 240 is a boundary", terminal_scene_column_boundary(s,
+        r, 240, 0, 120));
+    expect {|
+        column 240 is a boundary: false
+    |}
+}
+
+test "sixteen borderless panes scroll at maximum grid size" {
+    s: *Screen = terminal_screen(240, 120);
+    r: *TerminalScene = terminal_scene();
+    scene_test_fill(s);
+    terminal_scene_prepare(s, r, 0);
+    for row in 0..4 {
+        for col in 0..4 {
+            shift: int = row + col + 3;
+            if ((row + col) % 2 == 0) shift = 0 - shift;
+            scene_test_scroll(s, r, col * 60, row * 30, col * 60 + 60, row * 30 + 30,
+                shift)
         }
-        check(r.scene_region_count == 256 && !r.scene_exhausted, "region table accepts its full capacity");
-        terminal_scene_add_region(r, one_cell);
-        check(r.scene_region_count == 256 && r.scene_exhausted, "region table reports exhaustion without writing past its capacity");
-        terminal_scene_fallback_region(s, r);
-        check(r.scene_region_count == 1 && !r.scene_exhausted && r.scene_region[0] == 0,
-            "exhausted region table becomes one complete viewport")
     }
-    region {
-        // An inferred edge expands into a previously stationary column. Its
-        // corner no longer represents the displacement of the moving pane.
-        s: *Screen = terminal_screen(40, 16);
-        r: *TerminalScene = terminal_scene();
-        fill(s);
-        terminal_scene_prepare(s, r, 0);
-        scroll(s, r, 1, 0, 40, 16, -8);
-        terminal_scene_prepare(s, r, 200);
-        scroll(s, r, 0, 0, 40, 16, -8);
-        terminal_scene_prepare(s, r, 220);
-        check(scene_covered(s, r, 220) && scene_covered(s, r, 230) && scene_covered(s,
-            r, 280), "expanding pane edge keeps old and new rows aligned without overlap");
-        scroll(s, r, 0, 0, 40, 16, 8);
-        terminal_scene_prepare(s, r, 240);
-        check(scene_covered(s, r, 240) && scene_covered(s, r, 250) && scene_covered(s,
-            r, 300), "reversal replaces returning ghosts with the current plane")
-    }
-    region {
-        // A relative-number gutter stops moving independently of the code,
-        // while both still have unfinished animation above a styled status row.
-        s: *Screen = terminal_screen(40, 18);
-        r: *TerminalScene = terminal_scene();
-        fill(s);
-        for x in 0..40 s.bg[16 * 240 + x] = 4;
-        terminal_scene_prepare(s, r, 0);
-        scroll(s, r, 0, 0, 40, 16, -8);
-        s.text[16 * 240 + 20] = 88;
-        terminal_scene_prepare(s, r, 200);
-        scroll(s, r, 4, 0, 40, 16, -8);
-        s.text[8 * 240 + 2] = 57;
-        s.text[16 * 240 + 20] = 89;
-        terminal_scene_prepare(s, r, 220);
-        check(scene_covered(s, r, 220) && scene_covered(s, r, 240) && scene_covered(s,
-            r, 280), "gutter repaint cannot carry moving digits over the fixed status line")
-    }
-    region {
-        rapid_scroll(80, 24, 0, 0, 80, 24, -12, 16, true)
-    }
-    region {
-        rapid_scroll(80, 40, 10, 5, 40, 25, -10, 24, true)
-    }
-    region {
-        s: *Screen = terminal_screen(40, 18);
-        r: *TerminalScene = terminal_scene();
-        fill(s);
-        for y in 0..16 {
-            s.text[y * 240] = 49;
-            s.text[y * 240 + 1] = 48 + y / 10;
-            s.text[y * 240 + 2] = 48 + y % 10;
-            s.fg[y * 240] = 8
-        }
-        s.fg[7 * 240] = 3;
-        for x in 0..40 s.bg[16 * 240 + x] = 4;
-        terminal_scene_prepare(s, r, 0);
-        scroll(s, r, 0, 0, 40, 16, -8);
-        for y in 0..16 {
-            s.text[y * 240] = 49;
-            s.text[y * 240 + 1] = 48 + (y + 8) / 10;
-            s.text[y * 240 + 2] = 48 + (y + 8) % 10;
-            s.fg[y * 240] = 8
-        }
-        s.fg[7 * 240] = 3;
-        s.text[16 * 240 + 20] = 88;
-        terminal_scene_prepare(s, r, 200);
-        expect_shift(r, 0, 0, 40, 16, -8, "unchanged leading line-number digit scrolls despite cursor-line styling");
-        check(r.scene_region[0] == r.scene_region[3], "line-number gutter remains in the text plane");
-        expect_shift(r, 0, 16, 40, 18, 0, "status and command rows do not anchor the gutter")
-    }
-    region {
-        rapid_scroll(80, 24, 0, 0, 80, 24, -12, 16, false)
-    }
-    region {
-        rapid_scroll(80, 24, 0, 0, 80, 24, 12, 33, false)
-    }
-    region {
-        rapid_scroll(80, 24, 0, 0, 80, 24, -24, 20, false)
-    }
-    region {
-        rapid_scroll(80, 40, 10, 5, 40, 25, -10, 24, false)
-    }
-    region {
-        rapid_scroll(240, 120, 0, 0, 240, 120, -60, 16, false)
-    }
-    region {
-        s: *Screen = terminal_screen(40, 16);
-        r: *TerminalScene = terminal_scene();
-        fill(s);
-        for x in 0..40 s.bg[x] = 4;
-        terminal_scene_prepare(s, r, 0);
-        scroll(s, r, 0, 0, 40, 16, -5);
-        for x in 0..40 s.bg[x] = 4;
-        terminal_scene_prepare(s, r, 200);
-        expect_shift(r, 0, 0, 40, 16, -5, "stable cursor-line highlight does not pin surviving scroll text")
-    }
-    region {
-        s: *Screen = terminal_screen(40, 16);
-        r: *TerminalScene = terminal_scene();
-        fill(s);
-        for y in 0..16 {
-            for x in 0..12 s.text[y * 240 + x] = 65 + x
-        }
-        terminal_scene_prepare(s, r, 0);
-        scroll(s, r, 0, 0, 40, 16, -8);
-        for y in 8..16 {
-            for x in 0..12 s.text[y * 240 + x] = 65 + x
-        }
-        terminal_scene_prepare(s, r, 200);
-        expect_shift(r, 0, 0, 40, 16, -8, "repeated prefixes do not shear into a stationary strip");
-        check(r.scene_region_count == 1, "incoming repeated prefixes remain one rigid plane")
-    }
-    region {
-        s: *Screen = terminal_screen(80, 24);
-        r: *TerminalScene = terminal_scene();
-        fill(s);
-        put_row(s, 21, "            if (extra > gain) {");
-        put_row(s, 22, "file.l8                   100,1     10%");
-        for x in 0..80 {
-            s.bg[22 * 240 + x] = 7;
-            s.fg[22 * 240 + x] = 0
-        }
-        terminal_scene_prepare(s, r, 0);
-        scroll(s, r, 0, 0, 80, 22, -11);
-        put_row(s, 21, "            if (extra > gain) {");
-        put_row(s, 22, "file.l8                   111,1     11%");
-        terminal_scene_prepare(s, r, 200);
-        // The repeated last code row is new incoming text, not another status bar.
-        plane: TerminalSceneRegion = terminal_scene_region_at(r, 21 * 240);
-        check(plane.shift == -11, "coincidentally identical incoming code line remains in plane");
-        for x in 0..80 {
-            pos: int = 22 * 240 + x;
-            check(r.scene_from_x[pos] == x as f32 && r.scene_from_y[pos] == 22.0 && r.scene_from_alpha[pos] == 1.0,
-                "changing status counters update immediately without horizontal or vertical animation")
+    terminal_scene_prepare(s, r, 200);
+    for row in 0..4 {
+        for col in 0..4 {
+            left: int = col * 60;
+            top: int = row * 30;
+            right: int = left + 60;
+            bottom: int = top + 30;
+            write(1, "pane ");
+            write_int(1, row);
+            write(1, ",");
+            write_int(1, col);
+            scene_test_show_shift(r, "", left, top, right, bottom)
         }
     }
-    region {
-        s: *Screen = terminal_screen(40, 12);
-        r: *TerminalScene = terminal_scene();
-        fill(s);
-        put_row(s, 10, "123,4  10%");
-        for x in 0..40 s.bg[10 * 240 + x] = 4;
-        terminal_scene_prepare(s, r, 0);
-        scroll(s, r, 0, 0, 40, 10, -4);
-        put_row(s, 10, "987,6  89%");
-        terminal_scene_prepare(s, r, 200);
-        expect_shift(r, 0, 0, 40, 10, -4, "numeric status changes do not move neighboring content boundary");
-        expect_shift(r, 0, 10, 40, 12, 0, "status remains fixed when most meaningful characters change");
-        put_row(s, 10, "999,9  99%");
-        terminal_scene_prepare(s, r, 220);
-        for x in 0..40 {
-            pos: int = 10 * 240 + x;
-            check(r.scene_from_x[pos] == x as f32 && r.scene_from_y[pos] == 10.0 && r.scene_from_alpha[pos] == 1.0,
-                "counter-only repaint during scroll stays pinned")
-        }
-    }
-    region {
-        s: *Screen = terminal_screen(40, 16);
-        r: *TerminalScene = terminal_scene();
-        fill(s);
-        terminal_scene_prepare(s, r, 0);
-        scroll(s, r, 0, 0, 40, 16, -8);
-        terminal_scene_prepare(s, r, 200);
-        expect_shift(r, 0, 0, 40, 16, -8, "full-screen half-page scroll");
-        check(r.scene_region_count == 1, "full-screen remains one rigid plane");
-        terminal_scene_prepare(s, r, 321);
-        check(!r.scene_active && r.ghost_count == 0, "completed animation retires ghosts")
-    }
-    region {
-        s: *Screen = terminal_screen(60, 16);
-        r: *TerminalScene = terminal_scene();
-        fill(s);
-        terminal_scene_prepare(s, r, 0);
-        scroll(s, r, 0, 0, 20, 15, -7);
-        terminal_scene_prepare(s, r, 200);
-        expect_shift(r, 0, 0, 20, 15, -7, "left pane scrolls under larger stationary pane");
-        expect_shift(r, 20, 0, 60, 16, 0, "right pane stays fixed");
-        expect_shift(r, 0, 15, 20, 16, 0, "pane status stays fixed");
-        for g in 0..r.ghost_count {
-            clip: TerminalSceneRegion = r.ghost_clip[g];
-            check(clip.right <= 20 && clip.bottom <= 15, "departing text clips to left pane")
-        }
-        scroll(s, r, 0, 0, 20, 15, -7);
-        terminal_scene_prepare(s, r, 260);
-        expect_shift(r, 0, 0, 20, 15, -7, "interrupted left pane remains rigid");
-        expect_shift(r, 20, 0, 60, 16, 0, "interrupted scroll leaves neighbor fixed");
-        check(r.scene_from_y[0] == 10.5, "interrupted scroll starts at displayed position");
-        // An unrelated edit arrives while the left pane is still moving.
-        s.text[5 * 240 + 30] = 90;
-        terminal_scene_prepare(s, r, 290);
-        box: TerminalSceneRegion = terminal_scene_region_at(r, 0);
-        check(box.right == 20 && box.bottom == 15 && r.scene_from_y[0] > 0.0, "unrelated repaint preserves ongoing motion and clipping");
-        scroll(s, r, 20, 0, 60, 16, 3);
-        terminal_scene_prepare(s, r, 320);
-        check(r.scene_from_y[0] > 0.0, "neighbor scroll does not cancel existing pane motion")
-    }
-    region {
-        s: *Screen = terminal_screen(60, 20);
-        r: *TerminalScene = terminal_scene();
-        fill(s);
-        terminal_scene_prepare(s, r, 0);
-        scroll(s, r, 40, 0, 60, 20, 6);
-        terminal_scene_prepare(s, r, 200);
-        expect_shift(r, 0, 0, 40, 20, 0, "left stationary pane");
-        expect_shift(r, 40, 0, 60, 20, 6, "right pane downward scroll")
-    }
-    region {
-        s: *Screen = terminal_screen(40, 24);
-        r: *TerminalScene = terminal_scene();
-        fill(s);
-        terminal_scene_prepare(s, r, 0);
-        scroll(s, r, 0, 13, 40, 23, -4);
-        terminal_scene_prepare(s, r, 200);
-        expect_shift(r, 0, 0, 40, 13, 0, "upper pane and separator stay fixed");
-        expect_shift(r, 0, 13, 40, 23, -4, "lower stacked pane scrolls");
-        expect_shift(r, 0, 23, 40, 24, 0, "bottom status fixed")
-    }
-    region {
-        s: *Screen = terminal_screen(60, 24);
-        r: *TerminalScene = terminal_scene();
-        fill(s);
-        terminal_scene_prepare(s, r, 0);
-        scroll(s, r, 0, 0, 30, 11, -4);
-        scroll(s, r, 0, 12, 30, 24, 5);
-        scroll(s, r, 31, 0, 60, 24, -8);
-        terminal_scene_prepare(s, r, 200);
-        expect_shift(r, 0, 0, 30, 11, -4, "nested top-left pane");
-        expect_shift(r, 0, 12, 30, 24, 5, "nested bottom-left pane, opposite direction");
-        expect_shift(r, 31, 0, 60, 24, -8, "nested full-height right pane");
-        expect_shift(r, 0, 11, 30, 12, 0, "nested horizontal divider");
-        expect_shift(r, 30, 0, 31, 24, 0, "nested vertical divider")
-    }
-    region {
-        s: *Screen = terminal_screen(40, 20);
-        r: *TerminalScene = terminal_scene();
-        fill(s);
-        // Same blank line before and after a two-row scroll is not pane chrome.
-        for x in 0..40 {
-            s.text[8 * 240 + x] = 32;
-            s.text[10 * 240 + x] = 32;
-            s.text[19 * 240 + x] = 32;
-            s.bg[19 * 240 + x] = 4
-        }
-        terminal_scene_prepare(s, r, 0);
-        scroll(s, r, 0, 0, 40, 19, -2);
-        terminal_scene_prepare(s, r, 200);
-        expect_shift(r, 0, 0, 40, 19, -2, "blank lines remain in rigid scroll plane");
-        expect_shift(r, 0, 19, 40, 20, 0, "blank styled status row stays fixed")
-    }
-    region {
-        s: *Screen = terminal_screen(40, 16);
-        r: *TerminalScene = terminal_scene();
-        fill(s);
-        terminal_scene_prepare(s, r, 0);
-        scroll(s, r, 0, 2, 20, 14, -5);
-        // A program can use a full-width VT scroll then repaint the other pane.
-        s.scroll_hint_top = 2;
-        s.scroll_hint_bottom = 13;
-        s.scroll_hint_delta = -5;
-        terminal_scene_prepare(s, r, 200);
-        expect_shift(r, 0, 2, 20, 14, -5, "pane inference refines protocol scroll hint");
-        expect_shift(r, 20, 0, 40, 16, 0, "repainted neighbor overrides full-width hint");
-        check(s.scroll_hint_delta == 0, "hint consumed once")
-    }
-    region {
-        s: *Screen = terminal_screen(20, 10);
-        r: *TerminalScene = terminal_scene();
-        s.text[8 * 240] = 65;
-        terminal_scene_prepare(s, r, 0);
-        terminal_scroll(s, 0, 9, false);
-        terminal_scene_prepare(s, r, 200);
-        plane2: TerminalSceneRegion = terminal_scene_region_at(r, 7 * 240);
-        check(plane2.shift == -1, "sparse protocol scroll still animates")
-    }
-    region {
-        s: *Screen = terminal_screen(20, 6);
-        r: *TerminalScene = terminal_scene();
-        for x in 0..8 s.text[x] = 65 + x;
-        terminal_scene_prepare(s, r, 0);
-        for x in 3..9 s.text[x] = 64 + x;
-        s.text[2] = 90;
-        terminal_scene_prepare(s, r, 200);
-        check(!r.scene_has_shift && r.scene_match[3] == 2 && r.scene_match[8] == 7,
-            "ordinary insertion retains horizontal LCS animation");
-        terminal_resize(s, 10, 3);
-        terminal_scene_prepare(s, r, 230);
-        check(!r.scene_active && r.ghost_count == 0 && r.scene_region_count == 1,
-            "resize resets old geometry and ghosts")
-    }
-    region {
-        s: *Screen = terminal_screen(40, 16);
-        r: *TerminalScene = terminal_scene();
-        fill(s);
-        for y in 0..16 {
-            s.text[y * 240 + 18] = 30028 + y;
-            s.text[y * 240 + 19] = -1;
-            s.comb[y * 240 + 2] = 769
-        }
-        terminal_scene_prepare(s, r, 0);
-        scroll(s, r, 0, 0, 20, 16, -5);
-        for y in 11..16 {
-            s.text[y * 240 + 18] = 30100 + y;
-            s.text[y * 240 + 19] = -1
-        }
-        terminal_scene_prepare(s, r, 200);
-        expect_shift(r, 0, 0, 20, 16, -5, "wide and combining glyphs scroll with pane");
-        check(r.scene_region[18] == r.scene_region[19], "pane edge cannot cut a wide glyph in half")
-    }
-    region {
-        s: *Screen = terminal_screen(80, 24);
-        r: *TerminalScene = terminal_scene();
-        fill(s);
-        terminal_scene_prepare(s, r, 0);
-        scroll(s, r, 0, 0, 20, 10, -4);
-        terminal_scene_prepare(s, r, 200);
-        expect_shift(r, 0, 0, 20, 10, -4, "small nested pane hidden by stationary majority");
-        expect_shift(r, 20, 0, 80, 24, 0, "large neighbor of small nested pane");
-        expect_shift(r, 0, 10, 20, 24, 0, "lower neighbor of small nested pane")
-    }
-    region {
-        s: *Screen = terminal_screen(80, 40);
-        r: *TerminalScene = terminal_scene();
-        fill(s);
-        terminal_scene_prepare(s, r, 0);
-        scroll(s, r, 0, 0, 20, 10, -4);
-        scroll(s, r, 60, 30, 80, 40, 4);
-        terminal_scene_prepare(s, r, 200);
-        expect_shift(r, 0, 0, 20, 10, -4, "small top-left scroll with distant moving pane");
-        expect_shift(r, 60, 30, 80, 40, 4, "small bottom-right scroll with distant moving pane");
-        expect_shift(r, 20, 0, 60, 40, 0, "stationary majority between distant scrolling panes")
-    }
-    region {
-        // Reduced from an actual Neovim Ctrl-D redraw: short code lines have
-        // repeated words and blank tails, and the final VT operation describes
-        // only part of the pane. Neither should truncate its entering rows.
-        lines: []str = ["tag terminal;", "", "import screen;", "", "// Every pane owns its matching and clipping rectangle.",
-            "// Neighbors must not share source cells or departing glyphs.", "type SceneRegion = {",
-            "    left: int;", "    top: int;", "    right: int;", "    bottom: int;",
-            "    shift: int;", "    from_y: f32;", "};", "", "type Scene = {"];
-        s: *Screen = terminal_screen(80, 24);
-        r: *TerminalScene = terminal_scene();
-        for y in 0..11 put_row(s, y, lines[y]);
-        for y in 12..22 put_row(s, y, lines[y - 12]);
-        put_row(s, 11, "program.l8                         1,1             Top");
-        put_row(s, 22, "program.l8                         1,1             Top");
-        terminal_scene_prepare(s, r, 0);
-        for y in 0..11 put_row(s, y, lines[y + 5]);
-        put_row(s, 11, "program.l8                         6,1              0%");
-        s.scroll_hint_top = 7;
-        s.scroll_hint_bottom = 10;
-        s.scroll_hint_delta = -5;
-        terminal_scene_prepare(s, r, 200);
-        expect_shift(r, 0, 0, 61, 11, -5, "Neovim entering code rows remain in scrolling plane");
-        expect_shift(r, 0, 11, 80, 24, 0, "Neovim status and lower pane stay fixed")
-    }
-    region {
-        s: *Screen = terminal_screen(240, 120);
-        r: *TerminalScene = terminal_scene();
-        fill(s);
-        check(!terminal_scene_column_boundary(s, r, 240, 0, 120), "maximum-width right edge is outside the grid");
-        terminal_scene_prepare(s, r, 0);
-        for row in 0..4 {
-            for col in 0..4 {
-                shift: int = row + col + 3;
-                if ((row + col) % 2 == 0) shift = 0 - shift;
-                left: int = col * 60;
-                top: int = row * 30;
-                right: int = left + 60;
-                bottom: int = top + 30;
-                scroll(s, r, left, top, right, bottom, shift)
-            }
-        }
-        terminal_scene_prepare(s, r, 200);
-        for row in 0..4 {
-            for col in 0..4 {
-                shift: int = row + col + 3;
-                if ((row + col) % 2 == 0) shift = 0 - shift;
-                left: int = col * 60;
-                top: int = row * 30;
-                right: int = left + 60;
-                bottom: int = top + 30;
-                expect_shift(r, left, top, right, bottom, shift, "sixteen borderless panes at maximum grid size")
-            }
-        }
-    }
-    if (failures == 0) print("terminal scene tests passed");
-    failures
-    //% expect: "terminal scene tests passed\n"
+    expect {|
+        pane 0,0: shift -3
+        pane 0,1: shift 4
+        pane 0,2: shift -5
+        pane 0,3: shift 6
+        pane 1,0: shift 4
+        pane 1,1: shift -5
+        pane 1,2: shift 6
+        pane 1,3: shift -7
+        pane 2,0: shift -5
+        pane 2,1: shift 6
+        pane 2,2: shift -7
+        pane 2,3: shift 8
+        pane 3,0: shift 6
+        pane 3,1: shift -7
+        pane 3,2: shift 8
+        pane 3,3: shift -9
+    |}
 }

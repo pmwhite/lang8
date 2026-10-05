@@ -26,22 +26,22 @@ SRC2 := $(wildcard src2/*.l8)
 PROGRAMS := $(shell find programs stdlib -type f \( -name '*.l8' -o -name '*.s' \))
 STDLIB_TESTS := $(shell find stdlib -type f \( -name '*.l8' -o -name '*.s' \))
 TESTS := $(shell find tests -type f -not -path '*/__pycache__/*')
-EXPECT := tools/expect.py tools/jobs.py
-LIB_EXPECT := tools/lib_expect.py tools/jobs.py
+# Every compiler fixture and CLI cram test; tests/pending is not run.
+COMPILER_TESTS := $(sort $(shell find tests/compiler tests/callbacks -name '*.l8') $(wildcard tests/cli/*.t))
 
 # `build TOOL SOURCE`: build into $@ without leaving a partial file behind.
 build = ./$(1) build $(2) -o $@.tmp && mv -f $@.tmp $@
 
-.PHONY: all check fmt selfhost compiler-test examples game game-test stdlib-test \
+.PHONY: all check fmt selfhost compiler-test game game-test stdlib-test \
 	terminal terminal-test callback-test http http-test websocket websocket-test \
 	install-bootstrap promote promote-bin1 promote-bin2 promote-source clean help
 
 # Formatting rewrites src2, so finish it before anything reads the sources.
 all:
-	@$(MAKE) -s $(OK)/fmt $(OK)/bootstrap-tests
+	@$(MAKE) -s $(OK)/fmt
 	@$(MAKE) -s check
 
-check: $(OK)/bootstrap-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(OK)/game-tests
+check: l8 $(OK)/stdlib-tests $(BUILD)/block-game $(OK)/game-tests
 
 # ---- compiler stages ----
 
@@ -67,8 +67,7 @@ $(OK)/fixpoint: l8c3 l8c4 | $(OK)
 	@touch $@
 
 # Install the tested self-hosted compiler as ./l8.
-SELFHOST_CHECKS := $(OK)/fixpoint $(OK)/fmt-check $(OK)/expect-runners $(OK)/compiler-tests \
-	$(OK)/checks-format $(OK)/checks-lint $(OK)/checks-asm $(OK)/checks-tags $(OK)/checks-browse
+SELFHOST_CHECKS := $(OK)/fixpoint $(OK)/fmt-check $(OK)/compiler-tests
 
 l8: l8c3 $(SELFHOST_CHECKS)
 	@cp l8c3 $(BUILD)/l8.next && mv -f $(BUILD)/l8.next $@
@@ -92,35 +91,22 @@ $(OK)/fmt-check: l8c2 $(SRC2) tools/format_src2.sh | $(OK)
 
 # ---- compiler tests ----
 
-$(OK)/bootstrap-tests: l8c1 $(TESTS) $(STDLIB) $(RUNTIME) $(EXPECT) | $(OK)
-	+@$(STEP) 'compiler tests 1' python3 tools/expect.py ./l8c1 $(BUILD)/expect1 --discover tests/compiler --bootstrap-only
+# `l8 test` builds and runs each file's tests; see TESTING.md. Under make it
+# shares the job slots of a recipe marked with `+`.
+
+$(OK)/compiler-tests: l8c3 $(TESTS) $(STDLIB) $(RUNTIME) $(SRC2) | $(OK)
+	+@$(STEP) 'compiler tests' ./l8c3 test $(COMPILER_TESTS)
 	@touch $@
 
-$(OK)/expect-runners: $(EXPECT) $(LIB_EXPECT) tools/test_expect.py tools/test_lib_expect.py | $(OK)
-	@$(STEP) 'expect runners' python3 -m unittest tools.test_expect tools.test_lib_expect
-	@touch $@
-
-$(OK)/compiler-tests: l8c3 $(TESTS) $(STDLIB) $(RUNTIME) $(EXPECT) | $(OK)
-	+@$(STEP) 'compiler tests 3' python3 tools/expect.py ./l8c3 $(BUILD)/expect3 --discover tests/compiler --discover tests/callbacks
-	@touch $@
-
-$(OK)/checks-browse: l8c3 $(SRC2) $(TESTS) tools/compiler_checks.sh | $(OK)
-	@$(STEP) 'browse check' tools/compiler_checks.sh browse l8c3
-	@touch $@
-
-$(OK)/checks-%: l8c3 $(TESTS) $(STDLIB) $(RUNTIME) $(EXPECT) tools/compiler_checks.sh | $(OK)
-	+@$(STEP) '$* checks' tools/compiler_checks.sh $* l8c3
-	@touch $@
-
-compiler-test examples: $(OK)/bootstrap-tests
+compiler-test: $(OK)/compiler-tests
 
 # ---- standard library and programs ----
 
 # These use l8c3 so they can run alongside the compiler tests; `l8` is only
 # installed once those pass.
 
-$(OK)/stdlib-tests: l8c3 $(STDLIB_TESTS) $(RUNTIME) $(LIB_EXPECT) | $(OK)
-	+@$(STEP) 'stdlib tests' python3 tools/lib_expect.py --discover stdlib/tests --compiler ./l8c3
+$(OK)/stdlib-tests: l8c3 $(STDLIB_TESTS) $(RUNTIME) | $(OK)
+	+@$(STEP) 'stdlib tests' ./l8c3 test $(wildcard stdlib/tests/*.l8)
 	@touch $@
 
 stdlib-test: $(OK)/stdlib-tests
@@ -128,8 +114,9 @@ stdlib-test: $(OK)/stdlib-tests
 $(BUILD)/block-game: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 	@$(STEP) 'block game' sh -c '$(call build,l8c3,programs/block-game/block-game.l8)'
 
-$(OK)/game-tests: l8c3 $(PROGRAMS) $(RUNTIME) $(LIB_EXPECT) | $(OK)
-	+@$(STEP) 'game tests' python3 tools/lib_expect.py --discover programs/block-game --compiler ./l8c3
+# tests.l8 imports every game test, so the game is built once.
+$(OK)/game-tests: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+	+@$(STEP) 'game tests' ./l8c3 test programs/block-game/tests.l8
 	@touch $@
 
 game: $(BUILD)/block-game
@@ -147,7 +134,7 @@ terminal: $(BUILD)/terminal
 
 # These depend on the shell and display, so they always run.
 terminal-test: $(BUILD)/terminal $(BUILD)/terminal-pty-test
-	+@$(STEP) 'terminal tests' python3 tools/lib_expect.py --discover programs/terminal --compiler ./l8c3
+	+@$(STEP) 'terminal tests' ./l8c3 test programs/terminal/test_scene.l8 programs/terminal/test_presentation.l8
 	@$(STEP) 'PTY system shell' env SHELL=/bin/bash LC_ALL=C.UTF-8 L8_EXPECT_BASH=yes L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= $(BUILD)/terminal-pty-test
 	@$(STEP) 'PTY fallback' env SHELL=/definitely/missing LC_ALL=C.UTF-8 L8_EXPECT_BASH= L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= $(BUILD)/terminal-pty-test
 	@$(STEP) 'PTY closed stdio' env SHELL=/bin/sh LC_ALL=C.UTF-8 L8_EXPECT_BASH= L8_TERMINAL_TEST='value with spaces' L8_EMPTY_TEST= $(BUILD)/terminal-pty-test --closed-stdio
@@ -167,10 +154,10 @@ $(BUILD)/http/client: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 
 http: $(BUILD)/http/server $(BUILD)/http/client
 
-$(OK)/http-tests: l8c3 $(BUILD)/http/server $(BUILD)/http/client $(PROGRAMS) $(LIB_EXPECT) \
+$(OK)/http-tests: l8c3 $(BUILD)/http/server $(BUILD)/http/client $(PROGRAMS) \
 		$(wildcard programs/http/tests/*.py programs/http/spec/*) | $(OK)
 	@$(STEP) 'HTTP spec check' python3 programs/http/spec/fetch.py --check
-	+@$(STEP) 'HTTP lib tests' python3 tools/lib_expect.py --discover programs/http/tests --compiler ./l8c3
+	+@$(STEP) 'HTTP lib tests' ./l8c3 test programs/http/tests/unit.l8 programs/http/tests/date.l8
 	@$(STEP) 'HTTP protocol' env HTTP_BUILD=$(BUILD)/http L8C=$(CURDIR)/l8c3 python3 -m unittest discover -s programs/http/tests -v
 	@touch $@
 
@@ -186,9 +173,9 @@ $(BUILD)/websocket/client: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 
 websocket: $(BUILD)/websocket/server $(BUILD)/websocket/client
 
-$(OK)/websocket-tests: l8c3 $(BUILD)/websocket/server $(BUILD)/websocket/client $(PROGRAMS) $(LIB_EXPECT) $(wildcard programs/websocket/tests/*.py) | $(OK)
+$(OK)/websocket-tests: l8c3 $(BUILD)/websocket/server $(BUILD)/websocket/client $(PROGRAMS) $(wildcard programs/websocket/tests/*.py) | $(OK)
 	@$(STEP) 'WebSocket tests' env WEBSOCKET_BUILD=$(BUILD)/websocket python3 -m unittest discover -s programs/websocket/tests -v
-	+@$(STEP) 'WebSocket vectors' python3 tools/lib_expect.py --discover programs/websocket/tests --compiler ./l8c3
+	+@$(STEP) 'WebSocket vectors' ./l8c3 test programs/websocket/tests/unit.l8
 	@touch $@
 
 websocket-test: $(OK)/websocket-tests
@@ -227,7 +214,7 @@ help:
 	@echo '  check           build and test without formatting'
 	@echo '  fmt             format src2 with the stage-2 compiler'
 	@echo '  selfhost        build l8c1..l8c4, check the fixpoint, run compiler tests, install ./l8'
-	@echo '  compiler-test   stage-1 compiler fixtures'
+	@echo '  compiler-test   compiler fixtures and CLI cram tests (tests/)'
 	@echo '  stdlib-test, game, game-test, terminal, terminal-test, callback-test'
 	@echo '  http, http-test, websocket, websocket-test'
 	@echo '  promote, promote-bin1, promote-bin2, promote-source   (FORCE=1 skips the prompt)'

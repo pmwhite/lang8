@@ -8,192 +8,625 @@ import "../../../stdlib/print.l8";
 
 import "../http.l8";
 
-failures: int = 0;
-
-checks: int = 0;
-
-check(ok: bool, label: str) raises IoError {
-    checks = checks + 1;
-    if (!ok) {
-        failures = failures + 1;
-        eprint(label)
-    }
+unit_bool(label: str, value: bool) raises IoError {
+    write(1, label);
+    write(1, ": ");
+    print_bool(value)
 }
 
-has_text(text: str, needle: str): bool {
-    if (len(needle) == 0) return true;
+unit_int(label: str, value: int) raises IoError {
+    write(1, label);
+    write(1, ": ");
+    print_int(value)
+}
+
+// Write the low byte of value as two lowercase hex digits.
+unit_hex_byte(value: int) raises IoError {
+    digits: str = "0123456789abcdef";
+    byte: int = value & 255;
+    write_byte(1, digits[byte / 16]);
+    write_byte(1, digits[byte % 16])
+}
+
+// Write text in double quotes, escaping quotes, backslashes, LF as \n, and
+// other control bytes as \xHH.
+unit_quote(text: str) raises IoError {
+    write(1, "\"");
     for i in 0..len(text) {
-        at: int = i;
-        j: int = 0;
-        same: bool = true;
-        while (at < len(text) && j < len(needle)) invariant (0 <= at && at <= len(text) && 0 <= j && j <= len(needle)) {
-            if (text[at] != needle[j]) same = false;
-            at = at + 1;
-            j = j + 1
-        }
-        if (same && j == len(needle)) return true
+        c: i8 = text[i];
+        if (c == '\n') write(1, "\\n") else if (c == '"' || c == '\\') {
+            write(1, "\\");
+            write_byte(1, c)
+        } else if (c >= 0i8 && c < ' ' || c == 127i8) {
+            write(1, "\\x");
+            unit_hex_byte(c as int)
+        } else write_byte(1, c)
     }
-    false
+    write(1, "\"")
 }
 
-main() raises IoError: int {
-    region {
-        r: *HttpReader = http_reader(-1, true);
-        check(!http_send(r, bytes("one"), 4), "foreign send bounds");
-        check(!http_send(r, bytes("one"), -1), "foreign send negative length")
-    }
-    for status in [100, 101, 103, 200, 204, 205, 304, 404, 599] {
-        region {
-            m: *HttpMessage = http_response(status);
-            if (status == 101) check(http_add(m, "Upgrade", "test"), "upgrade header");
-            if (status != 205) http_text(m.body, "body");
-            b: *HttpBuffer = http_write_head(m, true, "GET", 1);
-            check(m.error == 0, "serialize status");
-            text: str = http_string(b);
-            check(has_text(text, "Date: "), "date generated");
-            check(has_text(text, "Content-Length: 4\r\n") == (status >= 200 && status != 204 && status != 205),
-                "response framing suppression")
+// Whether line is a Date field whose value is a canonical IMF-fixdate.
+unit_is_date_field(line: str): bool {
+    if (len(line) != 35) return false;
+    if (http_sub(line, 0, 6) != "Date: ") return false;
+    value: str = http_sub(line, 6, 35);
+    http_date_at(http_parse_date(value)) == value
+}
+
+// Print a serialized message one line per CRLF line. A Date field holding a
+// valid IMF-fixdate is shown as <IMF-fixdate>, since its value is the time now,
+// and a trailing space is shown as <SP>.
+unit_lines(text: str) raises IoError {
+    start: int = 0;
+    for i in 0..len(text) {
+        if (text[i] == '\n' && start <= i) {
+            end: int = i;
+            crlf: bool = end > start && text[end - 1] == '\r';
+            if (crlf) end = end - 1;
+            line: str = http_sub(text, start, end);
+            if (unit_is_date_field(line)) write(1, "Date: <IMF-fixdate>") else if (len(line) > 0 && line[len(line) - 1] == ' ') {
+                write(1, http_sub(line, 0, len(line) - 1));
+                write(1, "<SP>")
+            } else write(1, line);
+            if (crlf) print("") else print(" [LF without CR]");
+            start = i + 1
         }
     }
-    for method in ["HEAD", "CONNECT"] {
-        region {
-            m: *HttpMessage = http_response(200);
-            http_text(m.body, "body");
-            text: str = http_string(http_write_head(m, true, method, 1));
-            check(http_no_body(200, method), "no body methods");
-            check(has_text(text, "Content-Length:") == (method == "HEAD"), "CONNECT framing suppressed")
-        }
+    if (start < len(text)) {
+        write(1, http_sub(text, start, len(text)));
+        print(" [no line ending]")
     }
+}
+
+// Serialize the head of m and print it, or the error it was rejected with.
+unit_head(
+    m: *HttpMessage,
+    response: bool,
+    method: str,
+    minor: int
+) raises IoError {
+    text: str = http_string(http_write_head(m, response, method, minor));
+    if (m.error != 0) {
+        unit_int("error", m.error);
+        return
+    }
+    unit_lines(text)
+}
+
+// Serialize a response with status and a 4-byte body (none for 205).
+unit_status_head(status: int) raises IoError {
+    m: *HttpMessage = http_response(status);
+    if (status == 101) unit_bool("Upgrade added", http_add(m, "Upgrade", "test"));
+    if (status != 205) http_text(m.body, "body");
+    unit_head(m, true, "GET", 1)
+}
+
+unit_address(host: str, service: str) raises IoError {
+    write(1, host);
+    write(1, " -> ");
+    optional: ?*HttpAddress = http_address(host, service);
+    if (optional == null) {
+        print("not an address");
+        return
+    }
+    a: *HttpAddress = optional;
+    if (a.family == 2i32) {
+        write(1, "IPv4 ");
+        for i in 4..8 {
+            if (i > 4) write(1, ".");
+            write_int(1, a.storage[i] as int & 255)
+        }
+    } else {
+        write(1, "IPv6 ");
+        unit_ipv6_groups(a)
+    }
+    write(1, " port ");
+    print_int((a.storage[2] as int & 255) * 256 + (a.storage[3] as int & 255))
+}
+
+// Write the eight 16-bit groups of an IPv6 socket address in hex.
+unit_ipv6_groups(a: *HttpAddress) raises IoError {
+    for group in 0..8 {
+        if (group > 0) write(1, ":");
+        for k in 0..2 unit_hex_byte(a.storage[8 + group * 2 + k] as int)
+    }
+}
+
+unit_chunk(line: str) raises IoError {
+    unit_quote(line);
+    write(1, " -> ");
+    print_int(http_chunk_size(line))
+}
+
+unit_ranges(value: str, size: int) raises IoError {
+    ranges: *HttpRanges = http_ranges(value, size);
+    write(1, value);
+    write(1, " of ");
+    write_int(1, size);
+    write(1, " bytes -> status ");
+    write_int(1, ranges.status);
+    items: []HttpRange = ranges.items;
+    count: int = ranges.count;
+    for i in 0..count {
+        write(1, " ");
+        write_int(1, items[i].first);
+        write(1, "-");
+        write_int(1, items[i].last)
+    }
+    print("")
+}
+
+unit_date(text: str) raises IoError {
+    write(1, text);
+    write(1, " -> ");
+    value: int = http_parse_date(text);
+    if (value == HTTP_INVALID_DATE) print("HTTP_INVALID_DATE") else print_int(value)
+}
+
+test "sending more bytes than the buffer holds fails" {
+    r: *HttpReader = http_reader(-1, true);
+    unit_bool("send 4 of 3 bytes", http_send(r, bytes("one"), 4));
+    expect {|
+        send 4 of 3 bytes: false
+    |}
+    unit_bool("send -1 bytes", http_send(r, bytes("one"), -1));
+    expect {|
+        send -1 bytes: false
+    |}
+}
+
+test "interim responses have a Date but no framing" {
+    unit_status_head(100);
+    expect {|
+        HTTP/1.1 100 Continue
+        Date: <IMF-fixdate>
+
+    |}
+    unit_status_head(101);
+    expect {|
+        Upgrade added: true
+        HTTP/1.1 101 Switching Protocols
+        upgrade: test
+        Date: <IMF-fixdate>
+        Connection: Upgrade
+
+    |}
+    unit_status_head(103);
+    expect {|
+        HTTP/1.1 103<SP>
+        Date: <IMF-fixdate>
+
+    |}
+}
+
+test "content responses declare Content-Length" {
+    unit_status_head(200);
+    expect {|
+        HTTP/1.1 200 OK
+        Date: <IMF-fixdate>
+        Content-Length: 4
+        Connection: keep-alive
+
+    |}
+    unit_status_head(304);
+    expect {|
+        HTTP/1.1 304 Not Modified
+        Date: <IMF-fixdate>
+        Content-Length: 4
+        Connection: keep-alive
+
+    |}
+    unit_status_head(404);
+    expect {|
+        HTTP/1.1 404 Not Found
+        Date: <IMF-fixdate>
+        Content-Length: 4
+        Connection: keep-alive
+
+    |}
+    unit_status_head(599);
+    expect {|
+        HTTP/1.1 599<SP>
+        Date: <IMF-fixdate>
+        Content-Length: 4
+        Connection: keep-alive
+
+    |}
+}
+
+test "204 responses have no Content-Length and 205 responses declare none" {
+    unit_status_head(204);
+    expect {|
+        HTTP/1.1 204 No Content
+        Date: <IMF-fixdate>
+        Connection: keep-alive
+
+    |}
+    unit_status_head(205);
+    expect {|
+        HTTP/1.1 205<SP>
+        Date: <IMF-fixdate>
+        Content-Length: 0
+        Connection: keep-alive
+
+    |}
+}
+
+test "HEAD keeps Content-Length and CONNECT drops it" {
+    unit_bool("HEAD has no body", http_no_body(200, "HEAD"));
+    head: *HttpMessage = http_response(200);
+    http_text(head.body, "body");
+    unit_head(head, true, "HEAD", 1);
+    expect {|
+        HEAD has no body: true
+        HTTP/1.1 200 OK
+        Date: <IMF-fixdate>
+        Content-Length: 4
+        Connection: keep-alive
+
+    |}
+    unit_bool("CONNECT has no body", http_no_body(200, "CONNECT"));
+    connect: *HttpMessage = http_response(200);
+    http_text(connect.body, "body");
+    unit_head(connect, true, "CONNECT", 1);
+    expect {|
+        CONNECT has no body: true
+        HTTP/1.1 200 OK
+        Date: <IMF-fixdate>
+        Connection: keep-alive
+
+    |}
+}
+
+test "callers cannot set framing or routing fields" {
     for name in ["Content-Length", "Transfer-Encoding", "Connection", "Host", "Trailer"] {
-        region {
-            m: *HttpMessage = http_request("GET", "/", "example.test");
-            check(http_add(m, name, "0"), "add reserved field");
-            http_write_head(m, false, "GET", 1);
-            check(m.error == 400, "reject user-controlled framing")
-        }
-    }
-    region {
         m: *HttpMessage = http_request("GET", "/", "example.test");
-        check(!http_add(m, """
+        unit_bool("added", http_add(m, name, "0"));
+        unit_head(m, false, "GET", 1);
+        expect {|
+            added: true
+            error: 400
+        |}
+    }
+}
+
+test "header names and values cannot inject fields" {
+    m: *HttpMessage = http_request("GET", "/", "example.test");
+    unit_bool("name with LF added", http_add(m, """
 X-Name
-Evil""", "value"), "header name injection");
-        check(!http_add(m, "X-Name", """
+Evil""", "value"));
+    expect {|
+        name with LF added: false
+    |}
+    unit_bool("value with LF added", http_add(m, "X-Name", """
 ok
-Evil: yes"""), "header value injection");
-        check(!http_trailer(m, "Host", "evil"), "trailer routing forbidden");
-        check(!http_trailer(m, "Content-Length", "0"), "trailer framing forbidden");
-        check(http_trailer(m, "X-Sum", "yes"), "extension trailer");
-        http_write_head(m, false, "GET", 1);
-        check(m.error == 400, "trailers require chunked")
-    }
-    region {
-        m: *HttpMessage = http_request("POST", "/", "example.test");
-        m.framing = 2;
-        check(http_trailer(m, "X-Sum", "yes"), "chunk trailer");
-        text: str = http_string(http_write_head(m, false, "POST", 1));
-        check(m.error == 0, "chunked request head");
-        check(has_text(text, "Transfer-Encoding: chunked\r\n"), "chunked framing");
-        check(has_text(text, "Trailer: x-sum\r\n"), "trailer declaration");
-        check(!has_text(text, "Content-Length:"), "TE excludes CL");
-        http_write_head(m, false, "POST", 0);
-        check(m.error == 400, "no HTTP/1.0 chunked")
-    }
-    region {
-        m: *HttpMessage = http_request("GET", "/", "example.test");
-        check(http_add(m, "TE", "trailers"), "TE trailers");
-        text: str = http_string(http_write_head(m, false, "GET", 1));
-        check(has_text(text, "Connection: keep-alive, TE\r\n"), "TE connection option");
-        check(!has_text(text, "Content-Length:"), "GET without content omits CL")
-    }
+Evil: yes"""));
+    expect {|
+        value with LF added: false
+    |}
+    unit_head(m, false, "GET", 1);
+    expect {|
+        GET / HTTP/1.1
+        Host: example.test
+        Connection: keep-alive
+
+    |}
+}
+
+test "trailers exclude routing and framing fields and require chunked" {
+    m: *HttpMessage = http_request("GET", "/", "example.test");
+    unit_bool("Host trailer", http_trailer(m, "Host", "evil"));
+    expect {|
+        Host trailer: false
+    |}
+    unit_bool("Content-Length trailer", http_trailer(m, "Content-Length", "0"));
+    expect {|
+        Content-Length trailer: false
+    |}
+    unit_bool("X-Sum trailer", http_trailer(m, "X-Sum", "yes"));
+    expect {|
+        X-Sum trailer: true
+    |}
+    unit_head(m, false, "GET", 1);
+    expect {|
+        error: 400
+    |}
+}
+
+test "chunked requests declare their trailers and need HTTP/1.1" {
+    m: *HttpMessage = http_request("POST", "/", "example.test");
+    m.framing = 2;
+    unit_bool("X-Sum trailer", http_trailer(m, "X-Sum", "yes"));
+    expect {|
+        X-Sum trailer: true
+    |}
+    unit_head(m, false, "POST", 1);
+    expect {|
+        POST / HTTP/1.1
+        Host: example.test
+        Transfer-Encoding: chunked
+        Trailer: x-sum
+        Connection: keep-alive
+
+    |}
+    unit_head(m, false, "POST", 0);
+    expect {|
+        error: 400
+    |}
+}
+
+test "TE trailers adds a Connection option" {
+    m: *HttpMessage = http_request("GET", "/", "example.test");
+    unit_bool("TE added", http_add(m, "TE", "trailers"));
+    expect {|
+        TE added: true
+    |}
+    unit_head(m, false, "GET", 1);
+    expect {|
+        GET / HTTP/1.1
+        Host: example.test
+        te: trailers
+        Connection: keep-alive, TE
+
+    |}
+}
+
+test "invalid request targets are rejected" {
     for target in ["""
 /bad
 Injected: yes""", "/bad|path", "/bad[segment]", "/bad%xx", "http://user@host/"] {
-        region {
-            m: *HttpMessage = http_request("GET", target, "host");
-            http_write_head(m, false, "GET", 1);
-            check(m.error == 400, "target validation")
-        }
+        m: *HttpMessage = http_request("GET", target, "host");
+        unit_head(m, false, "GET", 1);
+        expect {|
+            error: 400
+        |}
     }
-    region {
-        m: *HttpMessage = http_response(200);
-        m.reason = """
+}
+
+test "reason phrases cannot inject fields" {
+    m: *HttpMessage = http_response(200);
+    m.reason = """
 OK
 Evil: yes""";
-        http_write_head(m, true, "GET", 1);
-        check(m.error == 400, "reason injection")
-    }
-    region {
-        m: *HttpMessage = http_response(205);
-        http_text(m.body, "forbidden");
-        http_write_head(m, true, "GET", 1);
-        check(m.error == 400, "205 cannot carry content")
-    }
-    region {
-        m: *HttpMessage = http_response(100);
-        http_write_head(m, true, "GET", 0);
-        check(m.error == 400, "HTTP/1.0 no informational response")
-    }
-    region {
-        m: *HttpMessage = http_request("CONNECT", "example.test:443", "example.test:443");
-        http_text(m.body, "untrusted");
-        http_write_head(m, false, "CONNECT", 1);
-        check(m.error == 400, "RFC9931 CONNECT does not send optimistic content")
-    }
-    check(http_chunk_size("A ; name = \"a\\\"b\";flag") == 10, "chunk extension BWS");
-    check(http_chunk_size("0") == 0, "zero chunk");
-    check(http_chunk_size("01") == 1, "leading zero chunk");
-    check(http_chunk_size("1 ") == -1, "trailing chunk whitespace");
-    check(http_chunk_size(cstr([49i8, 59i8, 120i8, 61i8, 34i8, 1i8, 34i8])) == -1,
-        "chunk quoted control");
-    check(http_etag_equal("W/\"abc\"", "\"abc\"", true), "weak comparison");
-    check(!http_etag_equal("W/\"abc\"", "\"abc\"", false), "strong comparison");
-    check(!http_etag_equal("\"ABC\"", "\"abc\"", true), "tag case sensitive");
-    check(http_etag_valid("\"\""), "empty opaque tag");
-    check(!http_etag_valid(""), "empty tag");
-    check(!http_etag_valid("W/"), "short weak tag");
-    check(http_etag_list("\"a,b\", \"abc\"", "\"abc\"", true, false), "quoted comma");
-    check(!http_etag_list("*", "\"abc\"", false, false), "wildcard missing resource");
-    region {
-        m: *HttpMessage = http_request("PUT", "/", "host");
-        check(http_add(m, "If-None-Match", "*"), "unsafe condition");
-        check(http_preconditions(m, "\"abc\"", 0, true) == 412, "unsafe none match 412");
-        check(http_preconditions(m, "\"abc\"", 0, false) == 0, "create absent resource")
-    }
-    check(http_ranges("bytes=0-0", 0).status == 416, "range on empty resource");
-    check(http_ranges("bytes=-999", 0).status == 416, "suffix on empty resource");
-    check(http_ranges("bytes=0-0, 2-3", 4).count == 2, "range set");
-    check(http_address("127.0.0.1", "80") != null, "numeric IPv4 address");
-    check(http_address("::1", "80") != null, "numeric IPv6 address");
-    region {
-        address: *HttpAddress = http_empty_address();
-        check(http_ipv6(address, "1::2:3:4:5:6:7"), "overlapping IPv6 compression");
-        check(address.storage[9] == 1i8 && address.storage[11] == 0i8 && address.storage[13] == 2i8 && address.storage[15] == 3i8 && address.storage[17] == 4i8 && address.storage[19] == 5i8 && address.storage[21] == 6i8 && address.storage[23] == 7i8,
-            "IPv6 tail shift");
-        check(!http_ipv6(address, "1::2::3"), "duplicate IPv6 compression")
-    }
-    check(http_address("localhost", "80") != null, "localhost alias");
-    check(http_address("example.com", "80") == null, "DNS stays outside transport");
-    check(http_parse_date("Sun, 06 Nov 1994 08:49:37 GMT") == 784111777, "IMF date");
-    check(http_parse_date("Sunday, 06-Nov-94 08:49:37 GMT") == 784111777, "RFC850 date");
-    check(http_parse_date("Sun Nov  6 08:49:37 1994") == 784111777, "asctime date");
-    check(http_parse_date("Thu, 01 Jan 1970 00:00:00 GMT") == 0, "epoch date");
-    check(http_parse_date("Wed, 31 Dec 1969 23:59:59 GMT") == -1, "pre-epoch date");
-    check(http_parse_date("Sat, 31 Dec 2016 23:59:60 GMT") == 1483228800, "leap second date");
-    check(http_parse_date("invalid") == HTTP_INVALID_DATE, "invalid date sentinel");
-    region {
-        parts: []int = new int[6](0);
-        check(http_parse_clock("12:34:56", 0, parts), "clock at exact length");
-        check(!http_parse_clock("12:34:5", 0, parts), "short clock");
-        check(!http_parse_clock("12:34:56", 0 - 1, parts), "negative clock offset");
-        check(!http_parse_clock("12:34:56", 9223372036854775807, parts), "large clock offset")
-    }
-    check(http_date_at(784111777) == "Sun, 06 Nov 1994 08:49:37 GMT", "emit IMF only");
-    check(http_date_at(-1) == "Wed, 31 Dec 1969 23:59:59 GMT", "emit pre-epoch date");
-    b: *HttpBuffer = http_buffer();
-    http_number(b, checks);
-    http_text(b, " API checks\n");
-    write_bytes_n(1, b.data, b.size);
-    if (failures > 0) return 1;
-    0
-    //% expect: "107 API checks\n"
+    unit_head(m, true, "GET", 1);
+    expect {|
+        error: 400
+    |}
 }
+
+test "205 responses cannot carry content" {
+    m: *HttpMessage = http_response(205);
+    http_text(m.body, "forbidden");
+    unit_head(m, true, "GET", 1);
+    expect {|
+        error: 400
+    |}
+}
+
+test "HTTP/1.0 has no informational responses" {
+    m: *HttpMessage = http_response(100);
+    unit_head(m, true, "GET", 0);
+    expect {|
+        error: 400
+    |}
+}
+
+test "CONNECT requests do not send optimistic content (RFC 9931)" {
+    m: *HttpMessage = http_request("CONNECT", "example.test:443", "example.test:443");
+    http_text(m.body, "untrusted");
+    unit_head(m, false, "CONNECT", 1);
+    expect {|
+        error: 400
+    |}
+}
+
+test "chunk size lines" {
+    unit_chunk("A ; name = \"a\\\"b\";flag");
+    expect {|
+        "A ; name = \"a\\\"b\";flag" -> 10
+    |}
+    unit_chunk("0");
+    expect {|
+        "0" -> 0
+    |}
+    unit_chunk("01");
+    expect {|
+        "01" -> 1
+    |}
+    unit_chunk("1 ");
+    expect {|
+        "1 " -> -1
+    |}
+    unit_chunk(cstr([49i8, 59i8, 120i8, 61i8, 34i8, 1i8, 34i8]));
+    expect {|
+        "1;x=\"\x01\"" -> -1
+    |}
+}
+
+test "entity tag comparison" {
+    unit_bool("W/\"abc\" weakly equals \"abc\"", http_etag_equal("W/\"abc\"", "\"abc\"",
+        true));
+    expect {|
+        W/"abc" weakly equals "abc": true
+    |}
+    unit_bool("W/\"abc\" strongly equals \"abc\"", http_etag_equal("W/\"abc\"", "\"abc\"",
+        false));
+    expect {|
+        W/"abc" strongly equals "abc": false
+    |}
+    unit_bool("\"ABC\" weakly equals \"abc\"", http_etag_equal("\"ABC\"", "\"abc\"",
+        true));
+    expect {|
+        "ABC" weakly equals "abc": false
+    |}
+}
+
+test "entity tag syntax" {
+    unit_bool("\"\" valid", http_etag_valid("\"\""));
+    expect {|
+        "" valid: true
+    |}
+    unit_bool("empty valid", http_etag_valid(""));
+    expect {|
+        empty valid: false
+    |}
+    unit_bool("W/ valid", http_etag_valid("W/"));
+    expect {|
+        W/ valid: false
+    |}
+}
+
+test "entity tag lists" {
+    unit_bool("\"abc\" in \"a,b\", \"abc\"", http_etag_list("\"a,b\", \"abc\"", "\"abc\"",
+        true, false));
+    expect {|
+        "abc" in "a,b", "abc": true
+    |}
+    unit_bool("* matches a missing resource", http_etag_list("*", "\"abc\"", false,
+        false));
+    expect {|
+        * matches a missing resource: false
+    |}
+}
+
+test "If-None-Match: * guards unsafe methods" {
+    m: *HttpMessage = http_request("PUT", "/", "host");
+    unit_bool("If-None-Match added", http_add(m, "If-None-Match", "*"));
+    expect {|
+        If-None-Match added: true
+    |}
+    unit_int("existing resource", http_preconditions(m, "\"abc\"", 0, true));
+    expect {|
+        existing resource: 412
+    |}
+    unit_int("absent resource", http_preconditions(m, "\"abc\"", 0, false));
+    expect {|
+        absent resource: 0
+    |}
+}
+
+test "byte ranges" {
+    unit_ranges("bytes=0-0", 0);
+    expect {|
+        bytes=0-0 of 0 bytes -> status 416
+    |}
+    unit_ranges("bytes=-999", 0);
+    expect {|
+        bytes=-999 of 0 bytes -> status 416
+    |}
+    unit_ranges("bytes=0-0, 2-3", 4);
+    expect {|
+        bytes=0-0, 2-3 of 4 bytes -> status 206 0-0 2-3
+    |}
+}
+
+test "only numeric addresses and localhost are resolved" {
+    unit_address("127.0.0.1", "80");
+    expect {|
+        127.0.0.1 -> IPv4 127.0.0.1 port 80
+    |}
+    unit_address("::1", "80");
+    expect {|
+        ::1 -> IPv6 0000:0000:0000:0000:0000:0000:0000:0001 port 80
+    |}
+    unit_address("localhost", "80");
+    expect {|
+        localhost -> IPv4 127.0.0.1 port 80
+    |}
+    unit_address("example.com", "80");
+    expect {|
+        example.com -> not an address
+    |}
+}
+
+test "IPv6 compression" {
+    address: *HttpAddress = http_empty_address();
+    unit_bool("1::2:3:4:5:6:7", http_ipv6(address, "1::2:3:4:5:6:7"));
+    expect {|
+        1::2:3:4:5:6:7: true
+    |}
+    unit_ipv6_groups(address);
+    print("");
+    expect {|
+        0001:0000:0002:0003:0004:0005:0006:0007
+    |}
+    unit_bool("1::2::3", http_ipv6(address, "1::2::3"));
+    expect {|
+        1::2::3: false
+    |}
+}
+
+test "HTTP dates" {
+    unit_date("Sun, 06 Nov 1994 08:49:37 GMT");
+    expect {|
+        Sun, 06 Nov 1994 08:49:37 GMT -> 784111777
+    |}
+    unit_date("Sunday, 06-Nov-94 08:49:37 GMT");
+    expect {|
+        Sunday, 06-Nov-94 08:49:37 GMT -> 784111777
+    |}
+    unit_date("Sun Nov  6 08:49:37 1994");
+    expect {|
+        Sun Nov  6 08:49:37 1994 -> 784111777
+    |}
+    unit_date("Thu, 01 Jan 1970 00:00:00 GMT");
+    expect {|
+        Thu, 01 Jan 1970 00:00:00 GMT -> 0
+    |}
+    unit_date("Wed, 31 Dec 1969 23:59:59 GMT");
+    expect {|
+        Wed, 31 Dec 1969 23:59:59 GMT -> -1
+    |}
+    unit_date("Sat, 31 Dec 2016 23:59:60 GMT");
+    expect {|
+        Sat, 31 Dec 2016 23:59:60 GMT -> 1483228800
+    |}
+    unit_date("invalid");
+    expect {|
+        invalid -> HTTP_INVALID_DATE
+    |}
+}
+
+test "clock parsing stays in bounds" {
+    parts: []int = new int[6](0);
+    unit_bool("12:34:56", http_parse_clock("12:34:56", 0, parts));
+    expect {|
+        12:34:56: true
+    |}
+    unit_bool("12:34:5", http_parse_clock("12:34:5", 0, parts));
+    expect {|
+        12:34:5: false
+    |}
+    unit_bool("offset -1", http_parse_clock("12:34:56", 0 - 1, parts));
+    expect {|
+        offset -1: false
+    |}
+    unit_bool("offset max", http_parse_clock("12:34:56", 9223372036854775807, parts));
+    expect {|
+        offset max: false
+    |}
+}
+
+test "dates are emitted as IMF-fixdate" {
+    print(http_date_at(784111777));
+    expect {|
+        Sun, 06 Nov 1994 08:49:37 GMT
+    |}
+    print(http_date_at(-1));
+    expect {|
+        Wed, 31 Dec 1969 23:59:59 GMT
+    |}
+}
+
+/* expect compile {|
+warning: programs/http/semantics.l8:264:5: ignored return value in http_representation
+warning: programs/http/semantics.l8:265:24: ignored return value in http_representation
+warning: programs/http/semantics.l8:266:5: ignored return value in http_representation
+warning: programs/http/semantics.l8:281:9: ignored return value in http_representation
+warning: programs/http/semantics.l8:294:17: ignored return value in http_representation
+warning: programs/http/semantics.l8:295:17: ignored return value in http_representation
+warning: programs/http/semantics.l8:306:17: ignored return value in http_representation
+warning: programs/http/semantics.l8:337:5: ignored return value in http_representation
+warning: programs/http/http.l8:194:21: ignored return value in http_exchange
+warning: programs/http/http.l8:235:5: ignored return value in http_receive_request
+|} */

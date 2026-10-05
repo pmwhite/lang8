@@ -1,0 +1,301 @@
+tag compiler_internal;
+
+// Cram tests: a `.t` file is commentary, commands indented as `  $ cmd` (with
+// `  > ` continuation lines), and each command's expected output indented by
+// two spaces, ending with `  [N]` for a nonzero exit status. The commands run
+// in order in one shell, in a scratch directory, with `l8` on PATH and
+// TESTDIR naming the directory that holds the `.t` file.
+extern cram_sys_path(nr: int, path: str, mode: int): int = syscall;
+
+extern cram_sys_paths(nr: int, from: str, to: str): int = syscall;
+
+extern cram_sys_buffer(
+    nr: int,
+    path: str,
+    buffer: []i8,
+    size: int
+): int = syscall;
+
+extern cram_sys_cwd(nr: int, buffer: []i8, size: int): int = syscall;
+
+CRAM_SYS_GETPID: int = 39;
+
+CRAM_SYS_CHDIR: int = 80;
+
+CRAM_SYS_MKDIR: int = 83;
+
+CRAM_SYS_SYMLINK: int = 88;
+
+CRAM_SYS_READLINK: int = 89;
+
+CRAM_SYS_GETCWD: int = 79;
+
+// The byte that brackets the runner's status markers in command output.
+CRAM_MARK: i8 = 30i8;
+
+type CramCommand = {
+    // The shell text, without the `  $ ` and `  > ` prefixes.
+    text: []i8;
+    // The first line of the command, for reports.
+    title: []i8;
+    // The expected output lines, including their indentation.
+    out_start: int;
+    out_end: int;
+    next: ?*CramCommand
+}
+
+cram_starts(src: []i8, at: int, prefix: str): bool {
+    for k in 0..len(prefix) {
+        if (test_byte(src, at + k) != prefix[k] as int) return false
+    }
+    true
+}
+
+cram_parse(src: []i8) noregion raises Error: ?*CramCommand@new {
+    head: ?*CramCommand = null;
+    tail: ?*CramCommand = null;
+    at: int = 0;
+    while (at < len(src)) {
+        end: int = test_line_end(src, at);
+        if (cram_starts(src, at, "  $ ")) {
+            body_end: int = end;
+            if (test_byte(src, body_end - 1) == '\n' as int) body_end = body_end - 1;
+            title: []i8 = test_slice(src, at + 4, body_end);
+            text: *StrBuf = sb_new();
+            sb_puts(text, title);
+            at = end;
+            while (at < len(src) && cram_starts(src, at, "  > ")) {
+                end = test_line_end(src, at);
+                body_end = end;
+                if (test_byte(src, body_end - 1) == '\n' as int) body_end = body_end - 1;
+                sb_putc(text, '\n');
+                sb_puts(text, test_slice(src, at + 4, body_end));
+                at = end
+            }
+            out_start: int = at;
+            while (at < len(src) && cram_starts(src, at, "  ") && !cram_starts(src,
+                at, "  $ ")) at = test_line_end(src, at);
+            command: *CramCommand = new CramCommand {
+                text: sb_finish(text),
+                title: title,
+                out_start: out_start,
+                out_end: at,
+                next: null
+            };
+            if (tail == null) head = command else tail.next = command;
+            tail = command
+        } else at = end
+    }
+    head
+}
+
+// The expected-output lines for one command's output and exit status.
+cram_render(out: []i8, status: int) raises Error, IndexOutOfBounds: []i8@new {
+    sb: *StrBuf = sb_new();
+    line: int = 0;
+    for i in 0..len(out) {
+        if (out[i] == '\n') {
+            sb_puts(sb, "  ");
+            sb_puts(sb, test_slice(out, line, i));
+            sb_putc(sb, '\n');
+            line = i + 1
+        }
+    }
+    if (line < len(out)) {
+        sb_puts(sb, "  ");
+        sb_puts(sb, test_slice(out, line, len(out)));
+        sb_puts(sb, " (no-eol)\n")
+    }
+    if (status != 0) {
+        sb_puts(sb, "  [");
+        sb_uint(sb, status);
+        sb_puts(sb, "]\n")
+    }
+    sb_finish(sb)
+}
+
+// Replace every occurrence of from in text.
+cram_replace(text: []i8, from: []i8, to: str) raises Error: []i8@new {
+    if (len(from) == 0) return test_slice(text, 0, len(text));
+    sb: *StrBuf = sb_new();
+    at: int = 0;
+    while (at < len(text)) {
+        found: int = test_find(text, at, from);
+        if (found < 0) {
+            sb_puts(sb, test_slice(text, at, len(text)));
+            at = len(text)
+        } else {
+            sb_puts(sb, test_slice(text, at, found));
+            sb_puts(sb, bytes(to));
+            at = found + len(from)
+        }
+    }
+    sb_finish(sb)
+}
+
+cram_concat(a: []i8, b: []i8) raises Error: []i8@new {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, a);
+    sb_puts(sb, b);
+    sb_finish(sb)
+}
+
+// An absolute form of a directory path.
+cram_absolute(dir: []i8) raises Error: []i8@new {
+    if (len(dir) > 0 && dir[0] == '/') return test_slice(dir, 0, len(dir));
+    buffer: []i8 = new i8[4096](0i8);
+    n: int = cram_sys_cwd(CRAM_SYS_GETCWD, buffer, len(buffer));
+    if (n <= 1) error("cannot find the working directory");
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, test_slice(buffer, 0, n - 1));
+    if (len(dir) > 0) {
+        sb_putc(sb, '/');
+        sb_puts(sb, dir)
+    }
+    sb_finish(sb)
+}
+
+cram_self() raises Error: []i8@new {
+    buffer: []i8 = new i8[4096](0i8);
+    n: int = cram_sys_buffer(CRAM_SYS_READLINK, "/proc/self/exe", buffer, len(buffer));
+    if (n <= 0) error("cannot find the compiler executable");
+    test_slice(buffer, 0, n)
+}
+
+// Run argv and wait for it, with output discarded.
+cram_run_quietly(argv: []?str) raises Error {
+    pid: int = l8_fork();
+    if (pid == 0) {
+        null_fd: int = open("/dev/null", 1, 0);
+        if (null_fd >= 0) {
+            _out: int = l8_dup2(null_fd, 1);
+            _err: int = l8_dup2(null_fd, 2)
+        }
+        path: ?str = argv[0];
+        if (path != null) _exec: int = l8_execve(path, argv, test_env);
+        exit(127)
+    }
+    if (pid < 0) error("cannot start a process");
+    status: i32 = 0i32;
+    _waited: int = l8_waitpid(pid trunc i32, &status, 0i32)
+}
+
+cram_environment(scratch: []i8, testdir: []i8) raises Error: []?str@new {
+    source: []str = l8_environment();
+    env: []?str = new ?str[len(source) + 3](null);
+    n: int = 0;
+    have_path: bool = false;
+    for value in source {
+        if (n < len(env) - 3 && !test_starts(value, 0, "MAKEFLAGS=") && !test_starts(value,
+            0, "MFLAGS=") && !test_starts(value, 0, "TESTDIR=")) {
+            if (test_starts(value, 0, "PATH=")) {
+                path: *StrBuf = sb_new();
+                sb_puts(path, "PATH=");
+                sb_puts(path, scratch);
+                sb_puts(path, "/bin:");
+                sb_puts(path, test_slice(bytes(value), 5, len(value)));
+                env[n] = cstr(sb_finish(path));
+                have_path = true
+            } else env[n] = value;
+            n = n + 1
+        }
+    }
+    if (!have_path && n < len(env)) {
+        env[n] = cstr(cram_concat(cram_concat("PATH=", scratch), "/bin:/usr/bin:/bin"));
+        n = n + 1
+    }
+    if (n < len(env)) env[n] = cstr(cram_concat("TESTDIR=", testdir));
+    env
+}
+
+// Run a cram file's commands and record corrections. Returns the number
+// of commands.
+cram_file(path: []i8) noregion raises Error, IndexOutOfBounds: int {
+    src: []i8 = test_read_path(path);
+    commands: ?*CramCommand = cram_parse(src);
+    dir: []i8 = test_strip_dir(path);
+    testdir: []i8 = cram_absolute(test_slice(dir, 0, len(dir) - 1));
+    scratch_name: *StrBuf = sb_new();
+    sb_puts(scratch_name, "/tmp/l8-cram-");
+    sb_uint(scratch_name, test_sys(CRAM_SYS_GETPID, 0, 0, 0));
+    scratch: []i8 = sb_finish(scratch_name);
+    remove: []?str = new ?str[4](null);
+    remove[0] = "/bin/rm";
+    remove[1] = "-rf";
+    remove[2] = cstr(scratch);
+    cram_run_quietly(remove);
+    bin: []i8 = cram_concat(scratch, "/bin");
+    if (cram_sys_path(CRAM_SYS_MKDIR, cstr(scratch), 448) < 0 || cram_sys_path(CRAM_SYS_MKDIR,
+        cstr(bin), 448) < 0) error("cannot create a scratch directory");
+    if (cram_sys_paths(CRAM_SYS_SYMLINK, cstr(cram_self()), cstr(cram_concat(bin,
+        "/l8"))) < 0) error("cannot link l8 into the scratch directory");
+    script: *StrBuf = sb_new();
+    sb_puts(script, "exec 2>&1\n");
+    count: int = 0;
+    c: ?*CramCommand = commands;
+    while (c != null) {
+        sb_puts(script, c.text);
+        sb_puts(script, """
+
+printf '\\036%s %s\\036' """);
+        sb_uint(script, count);
+        sb_puts(script, " \"$?\"\n");
+        count = count + 1;
+        c = c.next
+    }
+    out_fd: int = test_memfd();
+    env: []?str = cram_environment(scratch, testdir);
+    pid: int = l8_fork();
+    if (pid == 0) {
+        _out: int = l8_dup2(out_fd, 1);
+        null_fd: int = open("/dev/null", 0, 0);
+        if (null_fd >= 0) _in: int = l8_dup2(null_fd, 0);
+        _chdir: int = cram_sys_path(CRAM_SYS_CHDIR, cstr(scratch), 0);
+        _alarm: int = test_sys(TEST_SYS_ALARM, TEST_TIMEOUT_SECONDS, 0, 0);
+        argv: []?str = new ?str[4](null);
+        argv[0] = "/bin/sh";
+        argv[1] = "-c";
+        argv[2] = cstr(sb_finish(script));
+        _exec: int = l8_execve("/bin/sh", argv, env);
+        exit(127)
+    }
+    if (pid < 0) error("cannot start the shell");
+    status: i32 = 0i32;
+    _waited: int = l8_waitpid(pid trunc i32, &status, 0i32);
+    out: []i8 = cram_replace(test_read_fd(out_fd), testdir, "$TESTDIR");
+    close(out_fd);
+    cram_run_quietly(remove);
+    // Match each command with the output before its marker.
+    at: int = 0;
+    index: int = 0;
+    marker: []i8 = new i8[1](CRAM_MARK);
+    space_byte: []i8 = new i8[1](' ');
+    c = commands;
+    while (c != null) {
+        mark: int = test_find(out, at, marker);
+        cmd: *CramCommand = c;
+        if (mark < 0) {
+            test_failed = true;
+            test_unfixable = true;
+            sb_puts(test_report, "command did not finish: $ ");
+            sb_puts(test_report, cmd.title);
+            sb_puts(test_report, "\n");
+            test_quote_output(test_slice(out, at, len(out)));
+            return index
+        }
+        close_mark: int = test_find(out, mark + 1, marker);
+        if (close_mark < 0) error("malformed command status");
+        space: int = test_find(out, mark + 1, space_byte);
+        code: int = test_digits(cstr(test_slice(out, space + 1, close_mark)), 0);
+        actual: []i8 = cram_render(test_slice(out, at, mark), code);
+        if (!test_bytes_eq(actual, test_slice(src, cmd.out_start, cmd.out_end))) {
+            test_failed = true;
+            test_add_edit(0 - 1, cmd.out_start, cmd.out_end, actual, cram_concat("$ ",
+                cmd.title))
+        }
+        at = close_mark + 1;
+        index = index + 1;
+        c = cmd.next
+    }
+    index
+}

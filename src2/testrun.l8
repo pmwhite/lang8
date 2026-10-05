@@ -1,0 +1,1169 @@
+tag compiler_internal;
+
+// `l8 test`: build each file with its tests, run every test in its own
+// process, and compare the output before each `expect` with its text.
+extern l8_fork(): int;
+
+extern l8_waitpid(pid: i32, status: *i32, options: i32): int;
+
+extern l8_dup2(oldfd: int, newfd: int): int;
+
+extern l8_execve(path: str, argv: []?str, envp: []?str): int;
+
+extern l8_environment(): []str@new;
+
+type TestPoll = {
+    fd: i32;
+    // Requested events in the low half; the kernel's reply in the high half.
+    events: i32
+}
+
+extern l8_poll(fds: *TestPoll, count: int, timeout: i32): int;
+
+extern test_sys(
+    nr: int,
+    a: int,
+    b: int,
+    c: int
+): int = syscall;
+
+extern test_sys_name(nr: int, name: str, flags: int): int = syscall;
+
+extern test_sys_mask(
+    nr: int,
+    pid: int,
+    size: int,
+    mask: []i8
+): int = syscall;
+
+TEST_SYS_LSEEK: int = 8;
+
+TEST_SYS_ALARM: int = 37;
+
+TEST_SYS_FTRUNCATE: int = 77;
+
+TEST_SYS_FCNTL: int = 72;
+
+TEST_SYS_AFFINITY: int = 204;
+
+TEST_SYS_MEMFD: int = 319;
+
+// A test that runs this long is stopped and reported.
+TEST_TIMEOUT_SECONDS: int = 60;
+
+// The status a test process exits with after an uncaught exception.
+TEST_RAISED_STATUS: int = 3;
+
+test_accept: bool = false;
+
+test_env: []?str = new ?str[1](null);
+
+// ---- the generated entry point ----
+
+// main(argc, argv) runs the test whose index is argv[1]. Records of two
+// words go to fd 3: l8_test_expect writes an expectation's id and the output
+// offset so far, a test that returns writes -2, and an uncaught exception
+// writes -1 and its tag before main returns 3.
+test_assemble_entry() noregion raises Error, IndexOutOfBounds {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, """
+.section .text
+.globl main
+main:
+    push %rbp
+    mov %rsp, %rbp
+    sub $96, %rsp
+    mov %rdi, -8(%rbp)
+    mov %rsi, -16(%rbp)
+    call l8_init_globals
+    mov -8(%rbp), %rax
+    cmp $2, %rax
+    jl .Ll8_test_usage
+    mov -16(%rbp), %rsi
+    mov 8(%rsi), %rsi
+    mov $0, %rax
+.Ll8_test_digit:
+    movzb 0(%rsi), %rcx
+    cmp $0, %rcx
+    je .Ll8_test_parsed
+    sub $48, %rcx
+    cmp $9, %rcx
+    ja .Ll8_test_usage
+    imul $10, %rax
+    add %rcx, %rax
+    add $1, %rsi
+    jmp .Ll8_test_digit
+.Ll8_test_parsed:
+    mov %rax, -24(%rbp)
+    lea -96(%rbp), %rdi
+    call l8_try_begin
+    cmp $0, %rax
+    jne .Ll8_test_raised
+    mov -24(%rbp), %rax
+""");
+    c: ?*TestCase = test_cases;
+    while (c != null) {
+        sb_puts(sb, "    cmp $");
+        sb_uint(sb, c.id);
+        sb_puts(sb, """
+, %rax
+    jne .Ll8_test_skip""");
+        sb_uint(sb, c.id);
+        sb_puts(sb, """
+
+    call """);
+        sb_puts(sb, c.fn.link_name);
+        sb_puts(sb, """
+
+    jmp .Ll8_test_done
+.Ll8_test_skip""");
+        sb_uint(sb, c.id);
+        sb_puts(sb, ":\n");
+        c = c.next
+    }
+    sb_puts(sb, """
+    call l8_try_end
+    jmp .Ll8_test_usage
+.Ll8_test_done:
+    call l8_try_end
+    mov $0, %rax
+    mov %rax, -40(%rbp)
+    sub $2, %rax
+    mov %rax, -48(%rbp)
+    mov $1, %rax
+    mov $3, %rdi
+    lea -48(%rbp), %rsi
+    mov $16, %rdx
+    syscall
+    mov $0, %rax
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+.Ll8_test_raised:
+    mov l8_exc_tag(%rip), %rax
+    mov %rax, -40(%rbp)
+    mov $0, %rax
+    sub $1, %rax
+    mov %rax, -48(%rbp)
+    mov $1, %rax
+    mov $3, %rdi
+    lea -48(%rbp), %rsi
+    mov $16, %rdx
+    syscall
+    mov $3, %rax
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+.Ll8_test_usage:
+    mov $2, %rax
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+.globl l8_test_expect
+l8_test_expect:
+    push %rbp
+    mov %rsp, %rbp
+    sub $16, %rsp
+    mov %rdi, -16(%rbp)
+    mov $8, %rax
+    mov $1, %rdi
+    mov $0, %rsi
+    mov $1, %rdx
+    syscall
+    mov %rax, -8(%rbp)
+    mov $1, %rax
+    mov $3, %rdi
+    lea -16(%rbp), %rsi
+    mov $16, %rdx
+    syscall
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+""");
+    text: []i8 = sb_finish(sb);
+    as_assemble_append(text, len(text))
+}
+
+// ---- processes and files ----
+test_memfd() raises Error: int {
+    fd: int = test_sys_name(TEST_SYS_MEMFD, "l8-test", 0);
+    if (fd < 0) error("cannot create a memory file");
+    fd
+}
+
+// Everything written to fd so far, from its start.
+test_read_fd(fd: int) raises Error: []i8@new {
+    _rewind: int = test_sys(TEST_SYS_LSEEK, fd, 0, 0);
+    sb: *StrBuf = sb_new();
+    chunk: []i8 = new i8[65536](0i8);
+    while (true) {
+        n: int = read(fd, chunk, 0, len(chunk));
+        if (n <= 0) return sb_finish(sb);
+        if (n > len(chunk)) n = len(chunk);
+        for i in 0..n sb_putc(sb, chunk[i])
+    }
+    sb_finish(sb)
+}
+
+test_read_path(path: []i8) raises Error: []i8@new {
+    fd: int = open_path(path, 0, 0);
+    if (fd < 0) error("cannot open file");
+    text: []i8 = test_read_fd(fd);
+    close(fd);
+    text
+}
+
+test_write_path(path: []i8, text: []i8) raises Error {
+    fd: int = open_path(path, 577, 420);
+    if (fd < 0) error("cannot write file");
+    raw::raw_write_bytes(fd, text);
+    close(fd)
+}
+
+test_fd_path(fd: int) raises Error, IndexOutOfBounds: []i8@new {
+    sb: *StrBuf = sb_new();
+    sb_puts(sb, "/proc/self/fd/");
+    sb_uint(sb, fd);
+    sb_finish(sb)
+}
+
+test_number(n: int) raises Error, IndexOutOfBounds: []i8@new {
+    sb: *StrBuf = sb_new();
+    sb_uint(sb, n);
+    sb_finish(sb)
+}
+
+test_word(data: []i8, at: int): int {
+    v: int = 0;
+    for k in 0..8 {
+        i: int = at + 7 - k;
+        if (i >= 0 && i < len(data)) v = v << 8 | data[i] as int & 255
+    }
+    v
+}
+
+test_environment(): []?str@new {
+    source: []str = l8_environment();
+    env: []?str = new ?str[len(source) + 1](null);
+    for i in 0..len(source) {
+        if (i < len(env)) env[i] = source[i]
+    }
+    env
+}
+
+// One test process, and its output and expectation records once done.
+type TestRun = {
+    pid: int;
+    out_fd: int;
+    marks_fd: int;
+    // Whether the process holds a job slot from make's jobserver.
+    token: bool;
+    done: bool;
+    status: int;
+    out: []i8;
+    marks: []i8
+}
+
+// Jobs at once when make provides no jobserver.
+test_limit: int = 1;
+
+test_spawn_case(exe: str@new, index: int, token: bool) raises Error, IndexOutOfBounds: *TestRun@new {
+    out_fd: int = test_memfd();
+    marks_fd: int = test_memfd();
+    arg: str = cstr(test_number(index));
+    pid: int = l8_fork();
+    if (pid == 0) {
+        _out: int = l8_dup2(out_fd, 1);
+        _err: int = l8_dup2(out_fd, 2);
+        _marks: int = l8_dup2(marks_fd, 3);
+        null_fd: int = open("/dev/null", 0, 0);
+        if (null_fd >= 0) _in: int = l8_dup2(null_fd, 0);
+        _alarm: int = test_sys(TEST_SYS_ALARM, TEST_TIMEOUT_SECONDS, 0, 0);
+        argv: []?str = new ?str[3](null);
+        argv[0] = exe;
+        argv[1] = arg;
+        _exec: int = l8_execve(exe, argv, test_env);
+        exit(127)
+    }
+    if (pid < 0) error("cannot start a test process");
+    new TestRun {
+        pid: pid,
+        out_fd: out_fd,
+        marks_fd: marks_fd,
+        token: token,
+        done: false,
+        status: 0,
+        out: "",
+        marks: ""
+    }
+}
+
+// Try to take one more job slot from make's jobserver without waiting long.
+test_take_token(): bool {
+    if (test_jobserver_read < 0) return false;
+    poll: TestPoll = TestPoll { fd: test_jobserver_read trunc i32, events: 1i32 };
+    // A short wait keeps finished tests from holding their slots for long.
+    if (l8_poll(&poll, 1, 1i32) <= 0) return false;
+    token: []i8 = new i8[1](0i8);
+    read(test_jobserver_read, token, 0, 1) == 1
+}
+
+test_give_token() {
+    token: []i8 = ['+'];
+    raw::raw_write_bytes(test_jobserver_write, token)
+}
+
+// Wait for one test process and collect what it wrote.
+test_finish_case(runs: []?*TestRun, block: bool) noregion raises Error: bool {
+    status: i32 = 0i32;
+    options: i32 = 1i32;
+    if (block) options = 0i32;
+    pid: int = l8_waitpid(0i32 - 1i32, &status, options);
+    if (pid <= 0) return false;
+    for slot in runs {
+        if (slot != null && slot.pid == pid && !slot.done) {
+            slot.done = true;
+            slot.status = status as int;
+            slot.out = test_read_fd(slot.out_fd);
+            slot.marks = test_read_fd(slot.marks_fd);
+            close(slot.out_fd);
+            close(slot.marks_fd);
+            if (slot.token) test_give_token()
+        }
+    }
+    true
+}
+
+// Run every test, as many at once as the job slots allow.
+test_run_cases(exe: str@new) noregion raises Error, IndexOutOfBounds: []?*TestRun@new {
+    runs: []?*TestRun = new ?*TestRun[test_count](null);
+    next: int = 0;
+    running: int = 0;
+    finished: int = 0;
+    while (finished < len(runs)) {
+        while (test_finish_case(runs, false)) {
+            running = running - 1;
+            finished = finished + 1
+        }
+        if (next < len(runs)) {
+            token: bool = false;
+            start: bool = running == 0 || test_jobserver_read < 0 && running < test_limit;
+            if (!start && test_jobserver_read >= 0) {
+                token = test_take_token();
+                start = token
+            }
+            if (start) {
+                runs[next] = test_spawn_case(exe, next, token);
+                next = next + 1;
+                running = running + 1
+            } else if (test_jobserver_read < 0 && test_finish_case(runs, true)) {
+                running = running - 1;
+                finished = finished + 1
+            }
+        } else if (running > 0 && test_finish_case(runs, true)) {
+            running = running - 1;
+            finished = finished + 1
+        }
+    }
+    runs
+}
+
+// ---- comparing and correcting ----
+
+// A replacement of start..end in one file.
+type TestEdit = {
+    file: int;
+    start: int;
+    end: int;
+    text: []i8;
+    // Where the report describes the change.
+    note: []i8;
+    next: ?*TestEdit
+}
+
+test_edits: ?*TestEdit = null;
+
+test_report: *StrBuf = sb_new();
+
+test_failed: bool = false;
+
+test_unfixable: bool = false;
+
+test_add_edit(
+    file: int,
+    start: int,
+    end: int,
+    text: []i8@new,
+    note: []i8@new
+) noregion {
+    edit: *TestEdit = new TestEdit {
+        file: file,
+        start: start,
+        end: end,
+        text: text,
+        note: note,
+        next: null
+    };
+    // Keep edits in source order; equal positions stay in insertion order.
+    prev: ?*TestEdit = null;
+    cur: ?*TestEdit = test_edits;
+    while (cur != null && (cur.file < file || cur.file == file && cur.start <= start)) {
+        prev = cur;
+        cur = cur.next
+    }
+    edit.next = cur;
+    if (prev == null) test_edits = edit else prev.next = edit
+}
+
+test_bytes_eq(a: []i8, b: []i8): bool {
+    if (len(a) != len(b)) return false;
+    for i in 0..len(a) {
+        if (a[i] != b[i]) return false
+    }
+    true
+}
+
+test_slice(data: []i8, from: int, to: int): []i8@new {
+    lo: int = from;
+    hi: int = to;
+    if (lo < 0) lo = 0;
+    if (lo > len(data)) lo = len(data);
+    if (hi > len(data)) hi = len(data);
+    if (hi < lo) hi = lo;
+    strdup_n(data, lo, hi - lo)
+}
+
+test_line_of(src: []i8, at: int): int {
+    line: int = 1;
+    for i in 0..len(src) {
+        if (i >= at) return line;
+        if (src[i] == '\n') line = line + 1
+    }
+    line
+}
+
+test_file_info(id: int): ?*ImportedFile {
+    f: ?*ImportedFile = imported_files;
+    while (f != null) {
+        if (f.id == id) return f;
+        f = f.next
+    }
+    null
+}
+
+// Describe a failure that a correction cannot express.
+test_problem(file: int, pos: int, message: []i8) raises Error, IndexOutOfBounds {
+    test_failed = true;
+    test_unfixable = true;
+    f: ?*ImportedFile = test_file_info(file);
+    if (f != null) {
+        sb_puts(test_report, test_slice(f.path, diag_path_start(f.path), len(f.path)));
+        sb_putc(test_report, ':');
+        sb_uint(test_report, test_line_of(f.src, pos));
+        sb_puts(test_report, ": ")
+    }
+    sb_puts(test_report, message);
+    sb_putc(test_report, '\n')
+}
+
+test_quote_output(text: []i8) raises Error {
+    if (len(text) == 0) {
+        sb_puts(test_report, "  (no output)\n");
+        return
+    }
+    sb_puts(test_report, "  | ");
+    for i in 0..len(text) {
+        sb_putc(test_report, text[i]);
+        if (text[i] == '\n' && i + 1 < len(text)) sb_puts(test_report, "  | ")
+    }
+    if (text[len(text) - 1] != '\n') sb_puts(test_report, """
+
+  (no newline at end)
+""")
+}
+
+test_exn_name(tag: int): []i8 {
+    e: ?*ExnDef = exn_defs;
+    while (e != null) {
+        if (e.tag == tag) return e.name;
+        e = e.next
+    }
+    "an unknown exception"
+}
+
+test_check_case(case: *TestCase@new, run: *TestRun) noregion raises Error, IndexOutOfBounds {
+    // Each expectation's output, or null before it is reached.
+    actual: []?[]i8 = new ?[]i8[expect_count](null);
+    conflict: []bool = new bool[expect_count](false);
+    previous: int = 0;
+    raised: int = 0 - 1;
+    finished: bool = false;
+    for record in 0..len(run.marks) / 16 {
+        k: int = record * 16;
+        id: int = test_word(run.marks, k);
+        value: int = test_word(run.marks, k + 8);
+        if (id == 0 - 2) finished = true else if (id < 0) raised = value else if (id < len(actual)) {
+            chunk: []i8 = test_slice(run.out, previous, value);
+            seen: ?[]i8 = actual[id];
+            differs: bool = seen != null && !test_bytes_eq(seen or chunk, chunk);
+            if (id < len(conflict) && differs) conflict[id] = true;
+            if (seen == null) actual[id] = chunk;
+            if (value > previous) previous = value
+        }
+    }
+    trailing: []i8 = test_slice(run.out, previous, len(run.out));
+    signal: int = run.status & 127;
+    code: int = run.status >> 8 & 255;
+    // As in a cram test, an exit status or uncaught exception is part of the
+    // output, and the test's last expect records it when the end cut the
+    // test short.
+    abrupt: bool = signal == 0 && (code != 0 || !finished);
+    if (abrupt) {
+        ending: *StrBuf = sb_new();
+        sb_puts(ending, trailing);
+        if (code == TEST_RAISED_STATUS && raised >= 0) {
+            sb_puts(ending, "[raised ");
+            sb_puts(ending, test_exn_name(raised))
+        } else {
+            sb_puts(ending, "[exit ");
+            sb_uint(ending, code)
+        }
+        sb_puts(ending, "]\n");
+        trailing = sb_finish(ending);
+        last: ?*ExpectSite = null;
+        scan: ?*ExpectSite = expect_sites;
+        while (scan != null) {
+            if (scan.test_id == case.id) last = scan;
+            scan = scan.next
+        }
+        if (last != null && last.id >= 0 && last.id < len(actual) && actual[last.id] == null) {
+            actual[last.id] = trailing;
+            trailing = ""
+        }
+    }
+    site: ?*ExpectSite = expect_sites;
+    while (site != null) {
+        if (site.test_id == case.id && site.id >= 0 && site.id < len(actual) && site.id < len(conflict)) {
+            got: ?[]i8 = actual[site.id];
+            if (conflict[site.id]) test_problem(site.file, site.start, "expect saw different output on different runs") else if (got == null) {
+                if (signal == 0) test_problem(site.file, site.start, "expect was not reached")
+            } else if (!test_bytes_eq(got, site.value)) {
+                test_failed = true;
+                text: *StrBuf = sb_new();
+                expect_render(text, got, site.indent);
+                test_add_edit(site.file, site.start, site.end, sb_finish(text), case.name)
+            }
+        }
+        site = site.next
+    }
+    if (signal != 0) {
+        why: *StrBuf = sb_new();
+        sb_puts(why, "test \"");
+        sb_puts(why, case.name);
+        if (signal == 14) sb_puts(why, "\" timed out") else {
+            sb_puts(why, "\" was killed by signal ");
+            sb_uint(why, signal)
+        }
+        sb_puts(why, "; output after the last expect:");
+        test_problem(case.file, case.pos, sb_finish(why));
+        test_quote_output(trailing);
+        return
+    }
+    if (len(trailing) == 0) return;
+    // Trailing output becomes a new expect at the end of the body.
+    test_failed = true;
+    f: *ImportedFile = test_file_info(case.file) or error("missing test file");
+    line: int = case.close_pos;
+    while (line > 0 && test_byte(f.src, line - 1) == ' ' as int) line = line - 1;
+    at_line_start: bool = line == 0 || test_byte(f.src, line - 1) == '\n' as int;
+    line_start: int = test_line_start(f.src, line);
+    indent: int = 0;
+    while (line_start + indent < case.close_pos && test_byte(f.src, line_start + indent) == ' ' as int) indent = indent + 1;
+    insert: *StrBuf = sb_new();
+    if (!at_line_start) {
+        sb_putc(insert, '\n');
+        test_spaces(insert, indent)
+    }
+    test_spaces(insert, 4);
+    sb_puts(insert, "expect ");
+    expect_render(insert, trailing, indent + 4);
+    sb_putc(insert, '\n');
+    test_spaces(insert, indent);
+    if (case.semi_pos >= 0) test_add_edit(case.file, case.semi_pos, case.semi_pos,
+        ";", case.name);
+    test_add_edit(case.file, case.close_pos, case.close_pos, sb_finish(insert), case.name)
+}
+
+// ---- compile output ----
+TEST_COMPILE_OPEN: str = "/* expect compile {|\n";
+
+TEST_COMPILE_CLOSE: str = "|} */";
+
+test_find(text: []i8, from: int, needle: []i8): int {
+    n: int = len(needle);
+    start: int = from;
+    if (start < 0) start = 0;
+    for i in start..len(text) - n + 1 {
+        found: bool = true;
+        for k in 0..n {
+            j: int = i + k;
+            if (found && (j < 0 || j >= len(text) || text[j] != needle[k])) found = false
+        }
+        if (found) return i
+    }
+    0 - 1
+}
+
+// The trailing /* expect compile {| ... |} */ block holds the compiler's
+// diagnostics, with paths relative to the file's directory.
+test_check_compile(file: int, src: []i8, output: []i8) noregion raises Error, IndexOutOfBounds {
+    start: int = 0 - 1;
+    at: int = 0;
+    while (at >= 0) {
+        found: int = test_find(src, at, bytes(TEST_COMPILE_OPEN));
+        if (found >= 0 && (found == 0 || found <= len(src) && src[found - 1] == '\n')) start = found;
+        at = (if (found >= 0) found + 1 else 0 - 1)
+    }
+    expected: []i8 = "";
+    end: int = 0 - 1;
+    if (start >= 0) {
+        body: int = start + len(TEST_COMPILE_OPEN);
+        end = test_find(src, body, bytes(TEST_COMPILE_CLOSE));
+        if (end < 0) {
+            test_problem(file, start, "unterminated compile expectation");
+            return
+        }
+        expected = test_slice(src, body, end);
+        end = end + len(TEST_COMPILE_CLOSE);
+        if (end >= 0 && end < len(src) && src[end] == '\n') end = end + 1
+    }
+    if (test_bytes_eq(expected, output)) return;
+    test_failed = true;
+    // A file that should build never accepts an error; a compile error test
+    // starts from an empty block.
+    if (start < 0 && test_find(output, 0, bytes("error: ")) >= 0) {
+        test_unfixable = true;
+        sb_puts(test_report, "the file does not compile:\n");
+        test_quote_output(output);
+        return
+    }
+    text: *StrBuf = sb_new();
+    if (len(output) > 0) {
+        if (start < 0 && len(src) > 0) {
+            if (src[len(src) - 1] != '\n') sb_putc(text, '\n');
+            sb_putc(text, '\n')
+        }
+        sb_puts(text, bytes(TEST_COMPILE_OPEN));
+        sb_puts(text, output);
+        if (output[len(output) - 1] != '\n') sb_putc(text, '\n');
+        sb_puts(text, bytes(TEST_COMPILE_CLOSE));
+        sb_putc(text, '\n')
+    }
+    if (start < 0) {
+        start = len(src);
+        end = len(src)
+    } else if (len(output) == 0) {
+        // Drop the blank line that separated the removed block.
+        while (start >= 2 && test_byte(src, start - 1) == '\n' as int && test_byte(src,
+            start - 2) == '\n' as int) start = start - 1
+    }
+    test_add_edit(file, start, end, sb_finish(text), "compile output")
+}
+
+// ---- reporting corrections ----
+test_line_start(src: []i8, at: int): int {
+    i: int = at;
+    if (i > len(src)) i = len(src);
+    while (i > 0 && test_byte(src, i - 1) != '\n' as int) i = i - 1;
+    if (i < 0) 0 else i
+}
+
+test_line_end(src: []i8, at: int): int {
+    i: int = at;
+    if (i < 0) i = 0;
+    while (i < len(src) && test_byte(src, i) != '\n' as int) i = i + 1;
+    if (i < len(src)) i + 1 else i
+}
+
+// Count lines, counting a final line without a newline.
+test_count_lines(text: []i8): int {
+    n: int = 0;
+    for i in 0..len(text) {
+        if (text[i] == '\n' || i == len(text) - 1) n = n + 1
+    }
+    n
+}
+
+// The offset of line `line` (from zero) in text.
+test_nth_line(text: []i8, line: int): int {
+    seen: int = 0;
+    for i in 0..len(text) {
+        if (seen == line) return i;
+        if (text[i] == '\n') seen = seen + 1
+    }
+    len(text)
+}
+
+test_lines_eq(
+    a: []i8,
+    a_line: int,
+    b: []i8,
+    b_line: int
+): bool {
+    test_bytes_eq(test_slice(a, test_nth_line(a, a_line), test_line_end(a, test_nth_line(a,
+        a_line))), test_slice(b, test_nth_line(b, b_line), test_line_end(b, test_nth_line(b,
+        b_line))))
+}
+
+test_put_lines(
+    text: []i8,
+    first: int,
+    last: int,
+    mark: i8
+) raises Error {
+    for line in first..last {
+        at: int = test_nth_line(text, line);
+        end: int = test_line_end(text, at);
+        sb_putc(test_report, mark);
+        for i in at..end {
+            if (i >= 0 && i < len(text)) sb_putc(test_report, text[i])
+        }
+        if (end == at || end > 0 && end <= len(text) && text[end - 1] != '\n') sb_putc(test_report,
+            '\n')
+    }
+}
+
+// Show a run of edits on touching lines as the lines that changed.
+test_show_edits(
+    path: []i8,
+    src: []i8,
+    first: *TestEdit,
+    last: *TestEdit
+) raises Error, IndexOutOfBounds {
+    from: int = test_line_start(src, first.start);
+    to: int = test_line_end(src, last.end);
+    if (last.end > last.start && test_byte(src, last.end - 1) == '\n' as int) to = last.end;
+    old: []i8 = test_slice(src, from, to);
+    built: *StrBuf = sb_new();
+    done: int = from;
+    edit: ?*TestEdit = first;
+    more: bool = true;
+    while (more) {
+        e: *TestEdit = edit or error("missing edit");
+        sb_puts(built, test_slice(src, done, e.start));
+        sb_puts(built, e.text);
+        if (e.end > done) done = e.end;
+        more = e != last;
+        edit = e.next
+    }
+    sb_puts(built, test_slice(src, done, to));
+    new_text: []i8 = sb_finish(built);
+    old_n: int = test_count_lines(old);
+    new_n: int = test_count_lines(new_text);
+    head: int = 0;
+    while (head < old_n && head < new_n && test_lines_eq(old, head, new_text, head)) head = head + 1;
+    tail: int = 0;
+    while (tail < old_n - head && tail < new_n - head && test_lines_eq(old, old_n - 1 - tail,
+        new_text, new_n - 1 - tail)) tail = tail + 1;
+    sb_puts(test_report, "@@ ");
+    sb_puts(test_report, test_slice(path, diag_path_start(path), len(path)));
+    sb_putc(test_report, ':');
+    sb_uint(test_report, test_line_of(src, from) + head);
+    sb_puts(test_report, " (");
+    if (streq(first.note, "compile output") || test_byte(first.note, 0) == '$' as int) sb_puts(test_report,
+        first.note) else {
+        sb_puts(test_report, "test \"");
+        sb_puts(test_report, first.note);
+        sb_putc(test_report, '"')
+    }
+    sb_puts(test_report, ") @@\n");
+    // One line of context on each side, from the hunk or the file around it.
+    if (head > 0) test_put_lines(old, head - 1, head, ' ') else if (from > 0) test_put_lines(test_slice(src,
+        test_line_start(src, from - 1), from), 0, 1, ' ');
+    test_put_lines(old, head, old_n - tail, '-');
+    test_put_lines(new_text, head, new_n - tail, '+');
+    if (tail > 0) test_put_lines(old, old_n - tail, old_n - tail + 1, ' ') else if (to < len(src)) test_put_lines(test_slice(src,
+        to, test_line_end(src, to)), 0, 1, ' ')
+}
+
+// Report every correction, and write the corrected files when accepting.
+test_apply_edits(root_id: int, root_path: []i8, root_src: []i8) raises Error, IndexOutOfBounds {
+    edit: ?*TestEdit = test_edits;
+    while (edit != null) {
+        file: int = edit.file;
+        path: []i8 = test_slice(root_path, 0, len(root_path));
+        src: []i8 = test_slice(root_src, 0, len(root_src));
+        if (file != root_id) {
+            f: *ImportedFile = test_file_info(file) or error("missing edited file");
+            path = test_slice(f.path, 0, len(f.path));
+            src = test_slice(f.src, 0, f.src_len)
+        }
+        out: *StrBuf = sb_new();
+        done: int = 0;
+        same: bool = true;
+        while (same) {
+            first: *TestEdit = edit or error("missing edit");
+            // Extend the hunk while the next edit starts on a line this one
+            // touches or the line after it.
+            last: *TestEdit = first;
+            joined: bool = true;
+            while (joined) {
+                following: ?*TestEdit = last.next;
+                joined = following != null && following.file == file && test_line_start(src,
+                    following.start) <= test_line_end(src, last.end);
+                if (following != null && joined) last = following
+            }
+            test_show_edits(path, src, first, last);
+            e: ?*TestEdit = first;
+            more: bool = true;
+            while (more) {
+                cur: *TestEdit = e or error("missing edit");
+                sb_puts(out, test_slice(src, done, cur.start));
+                sb_puts(out, cur.text);
+                if (cur.end > done) done = cur.end;
+                more = cur != last;
+                e = cur.next
+            }
+            following2: ?*TestEdit = last.next;
+            edit = following2;
+            same = following2 != null && following2.file == file
+        }
+        sb_puts(out, test_slice(src, done, len(src)));
+        if (test_accept) test_write_path(path, sb_finish(out))
+    }
+}
+
+// ---- one file ----
+test_strip_dir(path: []i8): []i8@new {
+    slash: int = 0;
+    for i in 0..len(path) {
+        if (path[i] == '/') slash = i + 1
+    }
+    test_slice(path, 0, slash)
+}
+
+// Build and run one file's tests. Diagnostics go to fd 2; the report goes
+// to fd 1 after a first line with the number of tests that ran. Returns 0
+// when everything matched (or was accepted) and 1 otherwise.
+test_file(arg: []i8) noregion: int {
+    try {
+        root: []i8 = normalize_path(arg);
+        diag_strip = test_strip_dir(root);
+        root_src: []i8 = test_read_path(root);
+        if (len(root) > 2 && root[len(root) - 2] == '.' && root[len(root) - 1] == 't') {
+            commands: int = cram_file(root);
+            test_apply_edits(0 - 1, root, root_src);
+            raw::raw_write_bytes(1, test_number(commands));
+            raw::raw_write(1, "\n");
+            raw::raw_write_bytes(1, sb_finish(test_report));
+            return if (test_failed && (!test_accept || test_unfixable)) 1 else 0
+        }
+        compile_test_mode = true;
+        rc: int = compiler_build_direct(root);
+        if (rc == 0) test_assemble_entry();
+        compile_out: []i8 = test_read_fd(2);
+        root_id: int = 0 - 1;
+        f: ?*ImportedFile = imported_files;
+        while (f != null) {
+            if (streq(f.path, root)) root_id = f.id;
+            f = f.next
+        }
+        test_check_compile(root_id, root_src, compile_out);
+        ran: int = 0;
+        if (rc == 0) {
+            exe_fd: int = test_memfd();
+            exe_path: []i8 = test_fd_path(exe_fd);
+            pack_assembler_exec(cstr(exe_path));
+            ro: int = open_path(exe_path, 0, 0);
+            if (ro < 0) error("cannot reopen the test executable");
+            close(exe_fd);
+            exe: str = cstr(test_fd_path(ro));
+            runs: []?*TestRun = test_run_cases(exe);
+            c: ?*TestCase = test_cases;
+            while (c != null) {
+                if (c.id >= 0 && c.id < len(runs)) {
+                    run: *TestRun = runs[c.id] or error("missing test run");
+                    test_check_case(c, run);
+                    ran = ran + 1
+                }
+                c = c.next
+            }
+        }
+        test_apply_edits(root_id, root, root_src);
+        raw::raw_write_bytes(1, test_number(ran));
+        raw::raw_write(1, "\n");
+        raw::raw_write_bytes(1, sb_finish(test_report));
+        if (test_failed && (!test_accept || test_unfixable)) 1 else 0
+    } with Error e -> {
+        raw::raw_write(1, "0\n");
+        print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);
+        2
+    } with IndexOutOfBounds -> {
+        raw::raw_write(2, "error: internal index out of bounds\n");
+        2
+    }
+}
+
+// ---- the driver ----
+
+// One file's runner process.
+type TestJob = {
+    path: str;
+    pid: int;
+    report: int;
+    diag: int;
+    token: bool;
+    done: bool;
+    status: int
+}
+
+test_jobserver_read: int = 0 - 1;
+
+test_jobserver_write: int = 0 - 1;
+
+test_digits(text: str, at: int): int {
+    v: int = 0;
+    i: int = at;
+    while (i >= 0 && i < len(text) && test_byte(bytes(text), i) >= '0' as int && test_byte(bytes(text),
+        i) <= '9' as int) {
+        v = v * 10 + test_byte(bytes(text), i) - '0' as int;
+        i = i + 1
+    }
+    v
+}
+
+// The first c at or after from, or the end of text.
+test_index_of(text: str, from: int, c: i8): int {
+    start: int = from;
+    if (start < 0) start = 0;
+    for i in start..len(text) {
+        if (text[i] == c) return i
+    }
+    len(text)
+}
+
+test_starts(text: str, at: int, prefix: str): bool {
+    if (at < 0 || at > len(text) - len(prefix)) return false;
+    for k in 0..len(prefix) {
+        j: int = at + k;
+        if (j < 0 || j >= len(text) || text[j] != prefix[k]) return false
+    }
+    true
+}
+
+// Share make's job slots when started from a recipe marked with `+`; a run
+// from make without them is serial.
+test_job_limit(requested: int): int {
+    if (requested > 0) return requested;
+    in_make: bool = false;
+    for value in l8_environment() {
+        if (test_starts(value, 0, "MAKEFLAGS=")) {
+            in_make = true;
+            for i in 0..len(value) {
+                if (test_starts(value, i, "--jobserver-auth=")) {
+                    at: int = i + 17;
+                    if (test_starts(value, at, "fifo:")) {
+                        end: int = test_index_of(value, at + 5, ' ');
+                        path: []i8 = new i8[end - at - 5](0i8);
+                        for k in at + 5..end {
+                            j: int = k - at - 5;
+                            if (j >= 0 && j < len(path) && k >= 0 && k < len(value)) path[j] = value[k]
+                        }
+                        fd: int = open_path(path, 2, 0);
+                        if (fd >= 0) {
+                            test_jobserver_read = fd;
+                            test_jobserver_write = fd
+                        }
+                    } else {
+                        r: int = test_digits(value, at);
+                        comma: int = test_index_of(value, at, ',');
+                        w: int = test_digits(value, comma + 1);
+                        if (test_sys(TEST_SYS_FCNTL, r, 1, 0) >= 0 && test_sys(TEST_SYS_FCNTL,
+                            w, 1, 0) >= 0) {
+                            test_jobserver_read = r;
+                            test_jobserver_write = w
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (in_make) return 1;
+    mask: []i8 = new i8[128](0i8);
+    n: int = test_sys_mask(TEST_SYS_AFFINITY, 0, len(mask), mask);
+    cpus: int = 0;
+    for i2 in 0..n {
+        if (i2 < len(mask)) {
+            b: int = mask[i2] as int & 255;
+            while (b != 0) {
+                cpus = cpus + (b & 1);
+                b = b >> 1
+            }
+        }
+    }
+    if (cpus < 1) 1 else cpus
+}
+
+test_start(job: *TestJob, token: bool) noregion raises Error {
+    job.report = test_memfd();
+    job.diag = test_memfd();
+    job.token = token;
+    pid: int = l8_fork();
+    if (pid == 0) {
+        _out: int = l8_dup2(job.report, 1);
+        _err: int = l8_dup2(job.diag, 2);
+        exit(test_file(bytes(job.path)))
+    }
+    if (pid < 0) error("cannot start a test runner");
+    job.pid = pid
+}
+
+// Wait for one runner, blocking only when asked.
+test_reap(jobs: []*TestJob, block: bool): bool {
+    status: i32 = 0i32;
+    options: i32 = 1i32;
+    if (block) options = 0i32;
+    pid: int = l8_waitpid(0i32 - 1i32, &status, options);
+    if (pid <= 0) return false;
+    for job in jobs {
+        if (job.pid == pid && !job.done) {
+            job.done = true;
+            job.status = status as int;
+            if (job.token) {
+                token: []i8 = ['+'];
+                raw::raw_write_bytes(test_jobserver_write, token)
+            }
+        }
+    }
+    true
+}
+
+// "1 file", "2 files".
+test_count_of(sb: *StrBuf@new, n: int, noun: str) raises Error, IndexOutOfBounds {
+    sb_uint(sb, n);
+    sb_putc(sb, ' ');
+    sb_puts(sb, bytes(noun));
+    if (n != 1) sb_putc(sb, 's')
+}
+
+test_usage(): int {
+    raw::raw_write(2, "error: usage: l8 test [--accept] [-j N] <file.l8> ...\n");
+    1
+}
+
+compiler_test_main(argc: int, argv: []str@new) noregion raises IndexOutOfBounds: int requires (argc <= len(argv)) {
+    try {
+        requested: int = 0;
+        want_jobs: bool = false;
+        count: int = 0;
+        // argv[0] is the subcommand.
+        for ai in 1..argc {
+            arg: str = argv[ai];
+            if (want_jobs) {
+                requested = test_digits(arg, 0);
+                if (requested < 1) return test_usage();
+                want_jobs = false
+            } else if (arg == "--accept") test_accept = true else if (arg == "-j") want_jobs = true else if (len(arg) > 2 && arg[0] == '-' && arg[1] == 'j') requested = test_digits(arg,
+                2) else if (len(arg) > 0 && arg[0] == '-') return test_usage() else count = count + 1
+        }
+        if (count == 0 || want_jobs) return test_usage();
+        jobs: []*TestJob = new *TestJob[count](new TestJob {
+            path: "",
+            pid: 0,
+            report: 0,
+            diag: 0,
+            token: false,
+            done: false,
+            status: 0
+        });
+        n: int = 0;
+        for ai2 in 1..argc {
+            arg2: str = argv[ai2];
+            skip_value: bool = ai2 > 0 && argv[ai2 - 1] == "-j";
+            if (!skip_value && (len(arg2) == 0 || arg2[0] != '-') && n < len(jobs)) {
+                jobs[n] = new TestJob {
+                    path: arg2,
+                    pid: 0,
+                    report: 0,
+                    diag: 0,
+                    token: false,
+                    done: false,
+                    status: 0
+                };
+                n = n + 1
+            }
+        }
+        if (n != len(jobs)) return test_usage();
+        limit: int = test_job_limit(requested);
+        test_limit = limit;
+        test_env = test_environment();
+        started: int = 0;
+        shown: int = 0;
+        running: int = 0;
+        files_failed: int = 0;
+        tests_run: int = 0;
+        while (shown < len(jobs)) {
+            while (test_reap(jobs, false)) running = running - 1;
+            if (started < len(jobs)) {
+                if (running == 0 || test_jobserver_read < 0 && running < limit) {
+                    test_start(jobs[started], false);
+                    started = started + 1;
+                    running = running + 1
+                } else if (test_jobserver_read >= 0) {
+                    poll: TestPoll = TestPoll { fd: test_jobserver_read trunc i32, events: 1i32 };
+                    // Finished runners are reaped between short waits.
+                    if (l8_poll(&poll, 1, 1i32) > 0) {
+                        token: []i8 = new i8[1](0i8);
+                        if (read(test_jobserver_read, token, 0, 1) == 1) {
+                            test_start(jobs[started], true);
+                            started = started + 1;
+                            running = running + 1
+                        }
+                    }
+                } else if (test_reap(jobs, true)) running = running - 1
+            } else if (shown < started && shown < len(jobs) && !jobs[shown].done) {
+                if (test_reap(jobs, true)) running = running - 1
+            }
+            while (shown < started && shown < len(jobs) && jobs[shown].done) {
+                job: *TestJob = jobs[shown];
+                report: []i8 = test_read_fd(job.report);
+                at: int = 0;
+                while (at < len(report) && test_byte(report, at) != '\n' as int) at = at + 1;
+                tests_run = tests_run + test_digits(cstr(test_slice(report, 0, at)),
+                    0);
+                code: int = job.status >> 8 & 255;
+                if (job.status != 0) {
+                    files_failed = files_failed + 1;
+                    raw::raw_write(1, "FAIL ");
+                    raw::raw_write(1, job.path);
+                    raw::raw_write(1, "\n")
+                } else if (test_accept && at + 1 < len(report)) {
+                    raw::raw_write(1, "accepted ");
+                    raw::raw_write(1, job.path);
+                    raw::raw_write(1, "\n")
+                }
+                raw::raw_write_bytes(1, test_slice(report, at + 1, len(report)));
+                if (code != 0 && code != 1 || (job.status & 127) != 0 || job.status != 0 && at + 1 >= len(report)) raw::raw_write_bytes(1,
+                    test_read_fd(job.diag));
+                close(job.report);
+                close(job.diag);
+                shown = shown + 1
+            }
+        }
+        summary: *StrBuf = sb_new();
+        test_count_of(summary, n, "file");
+        sb_puts(summary, ", ");
+        test_count_of(summary, tests_run, "test");
+        if (files_failed > 0) {
+            sb_puts(summary, ", ");
+            sb_uint(summary, files_failed);
+            sb_puts(summary, " failed")
+        }
+        sb_putc(summary, '\n');
+        raw::raw_write_bytes(2, sb_finish(summary));
+        if (files_failed > 0) 1 else 0
+    } with Error e -> {
+        print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);
+        1
+    }
+}

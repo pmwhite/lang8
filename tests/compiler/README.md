@@ -1,60 +1,48 @@
 # Compiler tests
 
-Each compiler fixture tested by `make` keeps its expected behavior in trailing L8
-comments. A successful program uses:
+Each `.l8` file here is an `l8 test` file (see [`TESTING.md`](../../TESTING.md)).
+`make` runs every file under `tests/compiler`, `tests/callbacks`, and the cram
+tests in `tests/cli`; adding a file needs no build entry. Helper files that
+other fixtures import run too, so they must also compile cleanly.
+
+A fixture that runs code puts it in a `test` and prints what it observes.
+Many older fixtures keep a `main` that returns a status, with a test that
+calls it:
 
 ```l8
-//% test: run
-//% stdout: "Hi\n"
-//% exit: 0
-//% bootstrap: true
+test "main" {
+    status: int = main();
+    std::write(1, "main returned ");
+    std::print_int(status);
+    expect {|
+        main returned 0
+    |}
+}
 ```
 
-`stdout` is exact, including trailing newlines. Runtime `stderr` is expected to
-be empty unless a `//% stderr: "..."` line specifies it. Strings are JSON
-strings, so use `\n`, `\t`, and `\\` for escapes. The exit status must be an
-integer from 0 through 255.
-Compiler warnings are expected to be absent unless a
-`//% compiler-warnings: ["warning message", ...]` line lists their messages in
-emission order. Source paths and locations are omitted so formatted copies of
-a fixture use the same expectations. An unexpected warning fails the test.
-Add `//% bootstrap: true` only when the fixture also works with the stage-1
-compiler. The stage-2 run includes every discovered fixture.
-
-The stage-2 compiler verifies bounds for every fixture. Bounds-specific fixtures
-are omitted from the bootstrap-only run unless marked `//% bootstrap: true`.
-
-A program that should fail compilation uses:
+A fixture for a compiler diagnostic ends with the exact output it expects,
+paths relative to this directory. Warnings in a fixture that runs are recorded
+the same way:
 
 ```l8
-//% test: compile-fail
-//% error-contains: "assignment type mismatch"
+/* expect compile {|
+error: badopen.l8:8:5: argument type mismatch: have []i8, want str
+|} */
 ```
 
-The runner requires a nonzero compiler exit status and a diagnostic containing
-that literal text. Put the comments at the end so they do not shift source
-locations in diagnostic tests. The compiler ignores them; the files remain
-directly runnable and can keep relative imports.
+A few fixtures keep their expectation elsewhere because the end of the file is
+part of the test: `unterminated_comment.l8` puts it first, since the comment
+under test would swallow it. The fixtures for `main(argc, argv)` entry facts
+have no test, because a call from a test would not get the runtime's argv
+guarantees; `l8 test` still checks that they compile.
 
-Run an individual test from the repository root with:
+Run some or all of the fixtures from the repository root:
 
 ```sh
-python3 tools/expect.py ./l8c3 .build/expect tests/compiler/hello.l8
+./l8 test tests/compiler/hello.l8
+./l8 test $(find tests/compiler tests/callbacks -name '*.l8') tests/cli/*.t
+./l8 test --accept tests/compiler/hello.l8
 ```
-
-Run all annotated tests, or list what would run, with:
-
-```sh
-python3 tools/expect.py ./l8c3 .build/expect \
-  --discover tests/compiler --discover tests/callbacks
-python3 tools/expect.py ./l8c1 .build/expect \
-  --discover tests/compiler --bootstrap-only --list
-```
-
-The runner scans `.l8` files recursively, selects files with `//%` directives,
-and runs them in sorted order. Adding an annotated file needs no build
-entry. `make` runs the stage-1 subset and the full stage-2 set. Formatting,
-warning-location, and other multi-step checks live in `tools/compiler_checks.sh`.
 
 The bounds fixtures cover proof-required indexing, unreachable accesses,
 loop revisits, address-taking, and nested accesses. Older bounds-failure

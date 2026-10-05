@@ -779,7 +779,12 @@ fmt_stmt(s: *Stmt, omit_semi: bool) noregion raises Error, IndexOutOfBounds {
             fmt_puts("region");
             fmt_brace_stmt(k.body, false)
         }
-        Comment k -> fmt_puts(k.text)
+        Expect k -> {
+            fmt_puts("expect ");
+            text: *StrBuf = sb_new();
+            expect_render(text, k.site.value, fmt_indent * 4);
+            fmt_puts(sb_finish(text))
+        }
     }
     match s.kind {
         Block _ -> { }
@@ -1060,7 +1065,13 @@ fmt_item(it: *Item, at_eof: bool) noregion raises Error, IndexOutOfBounds {
             fmt_expr(init);
             if (!at_eof) fmt_putc(';')
         }
-        Comment k -> fmt_puts(k.text)
+        Test k -> {
+            fmt_puts("test \"");
+            fmt_puts(k.case.name);
+            fmt_putc('"');
+            body: *Stmt = k.case.fn.body or error("test body");
+            fmt_brace_stmt(body, false)
+        }
     }
     fmt_trail(it.trail)
 }
@@ -1141,4 +1152,125 @@ compiler_fmt_main(argc: int, argv: []str) noregion raises IndexOutOfBounds: int 
         print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);
         1
     }
+}
+
+// Expected test output, shared with `l8 test` so corrections are formatted.
+// Whether bytes from..to start a valid UTF-8 sequence, and its length.
+test_utf8_len(value: []i8, at: int): int {
+    if (at < 0 || at >= len(value)) return 0;
+    b: int = value[at] as int & 255;
+    if (b < 128) return 1;
+    n: int = 0;
+    if (b >= 194 && b <= 223) n = 2;
+    if (b >= 224 && b <= 239) n = 3;
+    if (b >= 240 && b <= 244) n = 4;
+    if (n == 0 || at > len(value) - n) return 0;
+    for k in 1..n {
+        c: int = test_byte(value, at + k);
+        if (c < 128 || c > 191) return 0
+    }
+    n
+}
+
+// Text a {| literal can hold literally: printable ASCII and UTF-8 lines with
+// no trailing spaces and no `|}`.
+test_plain(value: []i8): bool {
+    n: int = len(value);
+    skip_to: int = 0;
+    for i in 0..n {
+        if (i >= skip_to) {
+            c: i8 = value[i];
+            skip_to = i + 1;
+            if (c == '\n') {
+                if (i > 0 && value[i - 1] == ' ') return false
+            } else {
+                if (c == '|' && i + 1 < n && value[i + 1] == '}') return false;
+                u: int = c as int & 255;
+                if (u < 32 || u == 127) return false;
+                step: int = test_utf8_len(value, i);
+                if (step <= 0) return false;
+                skip_to = i + step
+            }
+        }
+    }
+    n == 0 || value[n - 1] != ' '
+}
+
+// text[i] as a byte value, or -1 outside text.
+test_byte(text: []i8, i: int): int {
+    if (i < 0 || i >= len(text)) return 0 - 1;
+    text[i] as int & 255
+}
+
+test_spaces(sb: *StrBuf@new, n: int) raises Error {
+    for _i in 0..n sb_putc(sb, ' ')
+}
+
+test_hex(sb: *StrBuf@new, b: int) raises Error {
+    digits: str = "0123456789abcdef";
+    sb_puts(sb, "\\x");
+    sb_putc(sb, digits[b >> 4 & 15]);
+    sb_putc(sb, digits[b & 15])
+}
+
+// The canonical spelling of expected text: {||} when empty, {|text|} for one
+// plain line, an indented block for plain lines that each end in a newline,
+// and otherwise a quoted string with escapes. indent is the leading space of
+// the line that holds `expect`.
+expect_render(sb: *StrBuf@new, value: []i8, indent: int) raises Error {
+    n: int = len(value);
+    plain: bool = test_plain(value);
+    newlines: int = 0;
+    for i in 0..n {
+        if (value[i] == '\n') newlines = newlines + 1
+    }
+    if (n == 0) {
+        sb_puts(sb, "{||}");
+        return
+    }
+    if (plain && newlines == 0 && value[0] != ' ') {
+        sb_puts(sb, "{|");
+        sb_puts(sb, value);
+        sb_puts(sb, "|}");
+        return
+    }
+    if (plain && value[n - 1] == '\n') {
+        sb_puts(sb, "{|\n");
+        line: int = 0;
+        for j in 0..n {
+            if (value[j] == '\n') {
+                if (j > line) {
+                    test_spaces(sb, indent + 4);
+                    for k in line..j sb_putc(sb, value[k])
+                }
+                sb_putc(sb, '\n');
+                line = j + 1
+            }
+        }
+        test_spaces(sb, indent);
+        sb_puts(sb, "|}");
+        return
+    }
+    sb_putc(sb, '"');
+    skip_to: int = 0;
+    for i2 in 0..n {
+        if (i2 >= skip_to) {
+            c: i8 = value[i2];
+            u: int = c as int & 255;
+            skip_to = i2 + 1;
+            if (c == '\n') sb_puts(sb, "\\n") else if (c == '\t') sb_puts(sb, "\\t") else if (c == '\r') sb_puts(sb,
+                "\\r") else if (c == '\\') sb_puts(sb, "\\\\") else if (c == '"') sb_puts(sb,
+                "\\\"") else if (u < 32 || u == 127) test_hex(sb, u) else if (u < 128) sb_putc(sb,
+                c) else {
+                step: int = test_utf8_len(value, i2);
+                if (step <= 0) test_hex(sb, u) else {
+                    for k2 in i2..i2 + step {
+                        if (k2 < n) sb_putc(sb, value[k2])
+                    }
+                    skip_to = i2 + step
+                }
+            }
+        }
+    }
+    sb_putc(sb, '"')
 }

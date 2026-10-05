@@ -8,36 +8,63 @@ import "../../stdlib/print.l8";
 
 import "presentation.l8";
 
-failures: int = 0;
-
-check(ok: bool, label: str) raises IoError {
-    if (!ok) {
-        failures = failures + 1;
-        eprint(label)
-    }
-}
-
 // A caret denotes ESC in these protocol fixtures.
-feed(s: *Screen, text: str) raises IndexOutOfBounds {
+presentation_test_feed(s: *Screen, text: str) raises IndexOutOfBounds {
     for c in text {
         if (c == 94i8) _escape: int = terminal_byte(s, 27i8) else _action: int = terminal_byte(s,
             c)
     }
 }
 
-present(
+// Draw a frame at now unless the output batch is still settling.
+presentation_test_present(
     s: *Screen,
     c: *TerminalCursor,
     b: *TerminalOutputBatch,
     now: int
-) {
-    if (terminal_output_delay(b, now) == 0) {
+) raises IoError {
+    delay: int = terminal_output_delay(b, now);
+    write(1, "t=");
+    write_int(1, now);
+    if (delay == 0) {
         terminal_cursor_update(s, c, now);
-        b.pending = false
+        b.pending = false;
+        write(1, ": frame drawn\n")
+    } else {
+        write(1, ": frame deferred ");
+        write_int(1, delay);
+        write(1, " ms\n")
     }
 }
 
-main() raises IoError, IndexOutOfBounds: int {
+presentation_test_show_screen(s: *Screen) raises IoError {
+    write(1, "paint cursor (");
+    write_int(1, s.x);
+    write(1, ",");
+    write_int(1, s.y);
+    if (s.visible) write(1, ") shown\n") else write(1, ") hidden\n")
+}
+
+presentation_test_show_cursor(c: *TerminalCursor) raises IoError {
+    write(1, "target (");
+    write_int(1, c.cursor_to_x);
+    write(1, ",");
+    write_int(1, c.cursor_to_y);
+    if (c.cursor_active) {
+        write(1, ") moving from (");
+        write_fixed(1, c.cursor_from_x as f64, 3);
+        write(1, ",");
+        write_fixed(1, c.cursor_from_y as f64, 3);
+        write(1, ")")
+    } else write(1, ") at rest");
+    write(1, ", drawn at (");
+    write_fixed(1, c.cursor_x as f64, 3);
+    write(1, ",");
+    write_fixed(1, c.cursor_y as f64, 3);
+    write(1, ")\n")
+}
+
+test "a redraw split across writes animates only to its final cursor" {
     s: *Screen = terminal_screen(80, 24);
     c: *TerminalCursor = terminal_cursor();
     b: *TerminalOutputBatch = terminal_output_batch();
@@ -45,46 +72,132 @@ main() raises IoError, IndexOutOfBounds: int {
     // Neovim's insert-mode redraw can briefly SHOW the cursor on the status
     // row, then return it to the buffer in a separate write a fraction later.
     terminal_output_received(b, 100);
-    feed(s, "^[?25l^[24;1H-- INSERT --^[?25h");
-    check(s.visible && s.y == 23, "fixture contains visible intermediate paint cursor");
-    present(s, c, b, 101);
-    check(c.cursor_to_y == 0 && !c.cursor_active, "intermediate write does not retarget cursor");
+    presentation_test_feed(s, "^[?25l^[24;1H-- INSERT --^[?25h");
+    presentation_test_show_screen(s);
+    expect {|
+        paint cursor (12,23) shown
+    |}
+    // The intermediate write does not retarget the cursor.
+    presentation_test_present(s, c, b, 101);
+    presentation_test_show_cursor(c);
+    expect {|
+        t=101: frame deferred 3 ms
+        target (0,0) at rest, drawn at (0.000,0.000)
+    |}
+    // The final write moves the paint cursor back; wait for quiet after it.
     terminal_output_received(b, 102);
-    feed(s, "^[?25l^[1;2H^[?25h");
-    present(s, c, b, 104);
-    check(!c.cursor_active, "wait for quiet after final write");
-    present(s, c, b, 106);
-    check(c.cursor_active && c.cursor_to_x == 1 && c.cursor_to_y == 0 && !b.pending,
-        "only final visible cursor becomes animation target");
+    presentation_test_feed(s, "^[?25l^[1;2H^[?25h");
+    presentation_test_present(s, c, b, 104);
+    presentation_test_show_cursor(c);
+    expect {|
+        t=104: frame deferred 2 ms
+        target (0,0) at rest, drawn at (0.000,0.000)
+    |}
+    // Only the final visible cursor becomes the animation target.
+    presentation_test_present(s, c, b, 106);
+    presentation_test_show_cursor(c);
+    write(1, "batch pending: ");
+    print_bool(b.pending);
+    expect {|
+        t=106: frame drawn
+        target (1,0) moving from (0.000,0.000), drawn at (0.000,0.000)
+        batch pending: false
+    |}
+    // The insert-mode cursor moves horizontally without a detour.
     terminal_cursor_update(s, c, 140);
-    check(c.cursor_y == 0.0 && c.cursor_x > 0.0 && c.cursor_x < 1.0, "insert-mode cursor moves horizontally without a detour");
+    presentation_test_show_cursor(c);
+    expect {|
+        target (1,0) moving from (0.000,0.000), drawn at (0.837,0.000)
+    |}
+}
+
+test "a hidden paint position never becomes a cursor target" {
+    s: *Screen = terminal_screen(80, 24);
+    c: *TerminalCursor = terminal_cursor();
+    presentation_test_feed(s, "^[1;2H");
+    terminal_cursor_update(s, c, 0);
     terminal_cursor_update(s, c, 200);
-    feed(s, "^[?25l^[24;40Hhidden repaint");
+    presentation_test_show_cursor(c);
+    expect {|
+        target (1,0) at rest, drawn at (1.000,0.000)
+    |}
+    presentation_test_feed(s, "^[?25l^[24;40Hhidden repaint");
     terminal_cursor_update(s, c, 300);
-    check(c.cursor_to_y == 0 && c.cursor_to_x == 1 && c.cursor_y == 0.0, "hidden paint position never becomes a cursor target");
-    feed(s, "^[1;3H^[?25h");
+    presentation_test_show_screen(s);
+    presentation_test_show_cursor(c);
+    expect {|
+        paint cursor (53,23) hidden
+        target (1,0) at rest, drawn at (1.000,0.000)
+    |}
+    // Unhiding starts at the last displayed cursor location.
+    presentation_test_feed(s, "^[1;3H^[?25h");
     terminal_cursor_update(s, c, 320);
-    check(c.cursor_from_y == 0.0 && c.cursor_to_y == 0 && c.cursor_to_x == 2, "unhiding starts at last displayed cursor location");
+    presentation_test_show_cursor(c);
+    expect {|
+        target (2,0) moving from (1.000,0.000), drawn at (1.000,0.000)
+    |}
+}
+
+test "a partial escape sequence does not commit a paint cursor" {
+    s: *Screen = terminal_screen(80, 24);
+    c: *TerminalCursor = terminal_cursor();
+    terminal_cursor_update(s, c, 0);
     // A partial escape can span a quiet period without presenting its cursor.
-    feed(s, "^[20;10H^[");
+    presentation_test_feed(s, "^[20;10H^[");
     terminal_cursor_update(s, c, 330);
-    check(c.cursor_to_y == 0, "partial escape does not commit a paint cursor");
-    feed(s, "4;5H");
+    presentation_test_show_screen(s);
+    presentation_test_show_cursor(c);
+    expect {|
+        paint cursor (9,19) shown
+        target (0,0) at rest, drawn at (0.000,0.000)
+    |}
+    // Completing it is an ordinary visible movement, which still animates.
+    presentation_test_feed(s, "4;5H");
     terminal_cursor_update(s, c, 335);
-    check(c.cursor_to_y == 3 && c.cursor_to_x == 4, "completed visible movement still animates");
-    // Continuous output is bounded, and a drawn batch starts a fresh deadline.
+    presentation_test_show_screen(s);
+    presentation_test_show_cursor(c);
+    expect {|
+        paint cursor (4,3) shown
+        target (4,3) moving from (0.000,0.000), drawn at (0.000,0.000)
+    |}
+}
+
+test "continuous output defers a frame by at most 16 ms" {
+    b: *TerminalOutputBatch = terminal_output_batch();
     terminal_output_received(b, 400);
+    write(1, "delays at 401..415:");
     for now in 401..416 {
         terminal_output_received(b, now);
-        check(terminal_output_delay(b, now) > 0, "continuous batch waits within deadline")
+        write(1, " ");
+        write_int(1, terminal_output_delay(b, now))
     }
+    write(1, "\n");
+    expect {|
+        delays at 401..415: 4 4 4 4 4 4 4 4 4 4 4 4 3 2 1
+    |}
     terminal_output_received(b, 416);
-    check(terminal_output_delay(b, 416) == 0, "continuous output cannot defer a frame past 16 ms");
+    write(1, "delay at 416: ");
+    print_int(terminal_output_delay(b, 416));
+    expect {|
+        delay at 416: 0
+    |}
+}
+
+test "a drawn batch leaves idle frames undelayed and restarts the deadline" {
+    b: *TerminalOutputBatch = terminal_output_batch();
+    for now in 400..417 terminal_output_received(b, now);
     b.pending = false;
-    check(terminal_output_delay(b, 417) == 0, "idle animation frames incur no settling delay");
+    write(1, "idle delay at 417: ");
+    print_int(terminal_output_delay(b, 417));
+    expect {|
+        idle delay at 417: 0
+    |}
     terminal_output_received(b, 500);
-    check(b.first == 500 && terminal_output_delay(b, 500) == 4, "next output batch gets a fresh deadline");
-    if (failures == 0) print("terminal presentation tests passed");
-    failures
-    //% expect: "terminal presentation tests passed\n"
+    write(1, "next batch starts at ");
+    write_int(1, b.first);
+    write(1, " with delay ");
+    print_int(terminal_output_delay(b, 500));
+    expect {|
+        next batch starts at 500 with delay 4
+    |}
 }

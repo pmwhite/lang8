@@ -1,10 +1,13 @@
 # Tests
 
-[`compiler/`](compiler/) contains self-contained language fixtures and their
-expected results. [`callbacks/`](callbacks/) contains function-value and C ABI
-fixtures. The comment-based runner discovers annotated `.l8` files under both
-directories; [`compiler/README.md`](compiler/README.md) describes the format.
+Every test here runs with `l8 test` (see [`TESTING.md`](../TESTING.md)), and
+`make` runs them all during self-hosting:
 
-`make` runs the compiler fixtures during self-hosting. Specialized format,
-browse, and analysis checks live in `tools/compiler_checks.sh`. `make callback-test`
-runs the callback integration suite.
+- [`compiler/`](compiler/) holds language and compiler fixtures; see
+  [`compiler/README.md`](compiler/README.md).
+- [`callbacks/`](callbacks/) holds function-value and C ABI fixtures. `make
+  callback-test` also builds them against a C library with a host C compiler.
+- [`cli/`](cli/) holds cram tests of the command line: the formatter, the
+  analysis commands, the assembler, tags, `browse`, and `l8 test` itself.
+- [`pending/`](pending/) holds fixtures for behavior the compiler does not
+  support yet; they are not run.

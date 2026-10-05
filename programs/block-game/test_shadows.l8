@@ -22,7 +22,26 @@ import "block-game-render.l8";
 
 import "block-game-ui.l8";
 
-main() raises IoError: int {
+shadows_show(label: str, value: int) raises IoError {
+    write(1, label);
+    write(1, ": ");
+    write_int(1, value);
+    write(1, "\n")
+}
+
+shadows_show_fixed(label: str, value: f32) raises IoError {
+    write(1, label);
+    write(1, ": ");
+    write_fixed(1, value as f64, 4);
+    write(1, "\n")
+}
+
+shadows_abs(x: f32): f32 {
+    if (x < 0.0) return 0.0 - x;
+    x
+}
+
+test "the moon shadow map covers every visible receiver and its casters" {
     view: []f32 = new f32[16](0.0);
     proj: []f32 = new f32[16](0.0);
     vp: []f32 = new f32[16](0.0);
@@ -34,6 +53,11 @@ main() raises IoError: int {
     bounds: []f32 = new f32[4](0.0);
     heap: int = l8_heap_used();
     checked: int = 0;
+    clipped: int = 0;
+    receivers_culled: int = 0;
+    casters_culled: int = 0;
+    max_xy: f32 = 0.0;
+    max_z: f32 = 0.0;
     // Normal play, travel and maximum editor zoom; rotated cameras, portrait,
     // default and wide aspect ratios; translated focus; ground and tall stacks.
     for zoom in 0..4 {
@@ -71,14 +95,17 @@ main() raises IoError: int {
                                 sx: f32 = (shadow[0] * x + shadow[4] * y + shadow[8] * z + shadow[12]) / sw;
                                 sy: f32 = (shadow[1] * x + shadow[5] * y + shadow[9] * z + shadow[13]) / sw;
                                 sz: f32 = (shadow[2] * x + shadow[6] * y + shadow[10] * z + shadow[14]) / sw;
-                                if (sx <= -0.98 || sx >= 0.98 || sy <= -0.98 || sy >= 0.98 || sz <= -1.0 || sz >= 1.0) die("visible receiver clipped by shadow map");
-                                if (!shadow_cell(floor_i(x), floor_i(z), bounds, 3.0)) die("visible stack culled");
+                                if (sx <= -0.98 || sx >= 0.98 || sy <= -0.98 || sy >= 0.98 || sz <= -1.0 || sz >= 1.0) clipped = clipped + 1;
+                                if (shadows_abs(sx) > max_xy) max_xy = shadows_abs(sx);
+                                if (shadows_abs(sy) > max_xy) max_xy = shadows_abs(sy);
+                                if (shadows_abs(sz) > max_z) max_z = shadows_abs(sz);
+                                if (!shadow_cell(floor_i(x), floor_i(z), bounds, 3.0)) receivers_culled = receivers_culled + 1;
                                 // Casters between an on-screen receiver and the
                                 // light must survive, even when off camera.
                                 for step in 0..5 {
                                     t: f32 = step as f32 * 0.2;
                                     if (!shadow_cell(floor_i(x + t * 4.0), floor_i(z + t * 3.0),
-                                        bounds, 5.0)) die("off-screen caster culled")
+                                        bounds, 5.0)) casters_culled = casters_culled + 1
                                 }
                                 checked = checked + 1
                             }
@@ -88,7 +115,35 @@ main() raises IoError: int {
             }
         }
     }
-    if (checked < 1000) die("coverage test did not sample enough receivers");
+    heap_delta: int = l8_heap_used() - heap;
+    shadows_show("visible receivers sampled", checked);
+    shadows_show("receivers outside the map's safe area", clipped);
+    shadows_show_fixed("largest |x| or |y| in the map", max_xy);
+    shadows_show_fixed("largest |depth| in the map", max_z);
+    shadows_show("receiver cells culled", receivers_culled);
+    shadows_show("caster cells toward the light culled", casters_culled);
+    shadows_show("bytes allocated", heap_delta);
+    expect {|
+        visible receivers sampled: 399344
+        receivers outside the map's safe area: 0
+        largest |x| or |y| in the map: 0.9471
+        largest |depth| in the map: 0.5437
+        receiver cells culled: 0
+        caster cells toward the light culled: 0
+        bytes allocated: 0
+    |}
+}
+
+test "the moon shadow keeps its scale and snaps to texels as the camera moves" {
+    view: []f32 = new f32[16](0.0);
+    proj: []f32 = new f32[16](0.0);
+    light: []f32 = new f32[16](0.0);
+    fit: []f32 = new f32[16](0.0);
+    shadow: []f32 = new f32[16](0.0);
+    tmp: []f32 = new f32[16](0.0);
+    corners: []f32 = new f32[24](0.0);
+    bounds: []f32 = new f32[4](0.0);
+    heap: int = l8_heap_used();
     mat_persp(proj, 2.1445, 1200.0 / 720.0, 0.4, 80.0);
     mat_look(view, 123.25, 13.2, -63.0, 123.25, 0.0, -76.5, 0.0, 1.0, 0.0);
     mat_look(light, 127.25, 11.0, -73.5, 123.25, 0.0, -76.5, 0.0, 0.0, -1.0);
@@ -97,6 +152,10 @@ main() raises IoError: int {
     sx: f32 = fit[0];
     sy: f32 = fit[5];
     u0: f32 = (shadow[0] * 123.0 + shadow[8] * -76.0 + shadow[12]) * 512.0;
+    scale_changes: int = 0;
+    not_affine: int = 0;
+    max_residual: f32 = 0.0;
+    // Slide the camera and light by up to 0.1 cells in steps of 0.001.
     for step in 0..100 {
         dx: f32 = step as f32 * 0.001;
         mat_look(view, 123.25 + dx, 13.2, -63.0, 123.25 + dx, 0.0, -76.5, 0.0, 1.0,
@@ -105,15 +164,24 @@ main() raises IoError: int {
             -1.0);
         fit_moon_shadow(fit, view, proj, light, 127.25 + dx, -73.5, corners, bounds);
         mat_mul(shadow, fit, light, tmp);
-        check: bool = fit[0] == sx && fit[5] == sy && shadow[15] == 1.0;
-        if (!check) die("moon projection changes scale on translation");
+        if (fit[0] != sx || fit[5] != sy) scale_changes = scale_changes + 1;
+        if (shadow[15] != 1.0) not_affine = not_affine + 1;
+        // How far a fixed world point moves in shadow-map texels, minus the
+        // nearest whole number of texels.
         u: f32 = (shadow[0] * 123.0 + shadow[8] * -76.0 + shadow[12]) * 512.0;
         shift: f32 = u - u0;
-        residual: f32 = shift - floor_i(shift + 0.5) as f32;
-        if (residual < -0.001 || residual > 0.001) die("moon shadow is not world-texel snapped")
+        residual: f32 = shadows_abs(shift - floor_i(shift + 0.5) as f32);
+        if (residual > max_residual) max_residual = residual
     }
-    if (l8_heap_used() != heap) die("shadow fitting allocated");
-    print("shadow coverage tests passed");
-    0
-    //% expect: "shadow coverage tests passed\n"
+    heap_delta: int = l8_heap_used() - heap;
+    shadows_show("steps where the projection scale changed", scale_changes);
+    shadows_show("steps where shadow[15] is not 1", not_affine);
+    shadows_show_fixed("largest fraction of a texel moved", max_residual);
+    shadows_show("bytes allocated", heap_delta);
+    expect {|
+        steps where the projection scale changed: 0
+        steps where shadow[15] is not 1: 0
+        largest fraction of a texel moved: 0.0001
+        bytes allocated: 0
+    |}
 }
