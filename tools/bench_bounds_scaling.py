@@ -6,6 +6,7 @@ Locals cease to be used after their section. No functions are split and no
 proof budgets are changed. The loop-locals case puts the sections inside a
 loop; the nested case measures repeated loop analysis. Fixed locals keep
 many constant-length allocations live together, then prove accesses to each.
+Fixed records retain many objects with constant-length field invariants.
 Record returns measure inference growth when many fields share one input.
 Report verifier time separately from parsing and
 code generation, which have their own scaling behavior.
@@ -35,6 +36,15 @@ def fixed_local_source(size: int) -> str:
     lines += [f"values{i}: []int = new int[4](0);" for i in range(size)]
     lines += ["index: int = argc & 3;"]
     lines += [f"result = result + values{i}[index];" for i in range(size)]
+    return "\n".join(lines + ["result", "}", ""])
+
+
+def fixed_record_source(size: int) -> str:
+    lines = ["tag scaling;", "type Buffer = { data: []int } invariant (len(data) == 4)",
+             "main(argc: int): int {", "result: int = 0;"]
+    lines += [f"value{i}: *Buffer = new Buffer {{ data: new int[4](0) }};" for i in range(size)]
+    lines += ["index: int = argc & 3;"]
+    lines += [f"result = result + value{i}.data[index];" for i in range(size)]
     return "\n".join(lines + ["result", "}", ""])
 
 
@@ -69,7 +79,7 @@ def main() -> None:
     parser.add_argument("compiler", type=pathlib.Path)
     parser.add_argument("--baseline", type=pathlib.Path)
     parser.add_argument("--sizes", type=int, nargs="+", default=None)
-    parser.add_argument("--shape", choices=["independent", "nested", "loop-locals", "fixed-locals", "record-returns"], default="independent")
+    parser.add_argument("--shape", choices=["independent", "nested", "loop-locals", "fixed-locals", "fixed-records", "record-returns"], default="independent")
     parser.add_argument("--runs", type=int, default=7)
     parser.add_argument("--cpu", type=int)
     args = parser.parse_args()
@@ -94,6 +104,7 @@ def main() -> None:
             generator = {"nested": nested_source, "independent": source,
                          "loop-locals": loop_local_source,
                          "fixed-locals": fixed_local_source,
+                         "fixed-records": fixed_record_source,
                          "record-returns": record_return_source}[args.shape]
             root.write_text(generator(size))
             samples = {name: [] for name in compilers}

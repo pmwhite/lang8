@@ -1,5 +1,58 @@
 tag compiler_internal;
 
+// A pending field write must prove its replacement independently of the
+// invariant being established. Constructors use an unchecked symbolic root.
+bounds_pending_member: ?*Member = null;
+
+bounds_fixed_length_clause(sd: *StructDef, length: *Expr, constant: *Expr) {
+    match length.kind {
+        Funcall call -> {
+            if (!streq(call.funcname, "len") || call.target != null) return;
+            arg: ?*Expr = call.args;
+            if (arg == null || arg.next != null) return;
+            obj: ?*Obj = bounds_var(arg);
+            if (obj == null) return;
+            member: ?*Member = bounds_invariant_member(sd, obj);
+            if (member == null) return;
+            value: int = bounds_num(constant);
+            if (value >= 0 && value < 536870912) member.bounds_fixed_length = value trunc i32
+        }
+        _ -> { }
+    }
+}
+
+bounds_prepare_fixed_lengths(sd: *StructDef, invariant: *Expr) {
+    match invariant.kind {
+        LogAnd k -> {
+            bounds_prepare_fixed_lengths(sd, k.lhs);
+            bounds_prepare_fixed_lengths(sd, k.rhs)
+        }
+        Binary k -> {
+            if (k.op == BinOp.Eq) {
+                bounds_fixed_length_clause(sd, k.lhs, k.rhs);
+                bounds_fixed_length_clause(sd, k.rhs, k.lhs)
+            }
+        }
+        _ -> { }
+    }
+}
+
+bounds_member_known_len(e: *Expr): int {
+    if (!bounds_classify_enabled) return -1;
+    match e.kind {
+        MemberAccess k -> {
+            member: ?*Member = k.member;
+            if (member == null || member == bounds_pending_member) return -1;
+            length: int = member.bounds_fixed_length as int;
+            if (length < 0) return -1;
+            root: ?*Obj = bounds_term_root(k.lhs);
+            if (root != null && root.bounds_unchecked_record) return -1;
+            length
+        }
+        _ -> -1
+    }
+}
+
 // Quantified array clauses are closed over the element and constants. A
 // successful element read can instantiate one clause; a write proves it for
 // the replacement value while the other elements retain their old facts.
@@ -370,6 +423,7 @@ bounds_verify_record_constructor(e: *Expr@new, inits: ?*FieldInit@new, f: ?*Boun
     saved_scope: ?*Obj = scope_locals;
     temp: *Obj = new_obj(".record-invariant", true);
     temp.ty = e.ty;
+    temp.bounds_unchecked_record = true;
     base: *Expr = bounds_obj_expr(temp);
     facts: ?*BoundsState = bounds_record_facts(base, inits, f);
     _verified: ?*BoundsState = bounds_verify_record_invariant(sd, base, facts, e.file,
