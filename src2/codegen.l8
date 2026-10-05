@@ -1437,6 +1437,13 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
                 StructLit k -> {
                     lty: ?*Type = q.lhs.ty;
                     if (lty != null && is_struct_ty(lty)) {
+                        // A local destination is built in place through rbp.
+                        slot: int = cg_local_slot(q.lhs);
+                        if (slot != 0) {
+                            gen_field_inits_at(k.inits, 5, slot);
+                            cg_lea_mr(5, slot, 0);
+                            return
+                        }
                         gen_addr(q.lhs);
                         cg_push(3);
                         cg_mov_rr(0, 3);
@@ -1449,6 +1456,14 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
                 VariantLit k -> {
                     lty2: ?*Type = q.lhs.ty;
                     if (lty2 != null && is_enum_ty(lty2)) {
+                        slot2: int = cg_local_slot(q.lhs);
+                        if (slot2 != 0) {
+                            cg_lea_mr(5, slot2, 0);
+                            store_enum_tag(k.val, enum_tag_type(lty2));
+                            gen_field_inits_at(k.inits, 5, slot2 + variant_payload_off(k.variant));
+                            cg_lea_mr(5, slot2, 0);
+                            return
+                        }
                         gen_addr(q.lhs);
                         cg_push(3);
                         cg_mov_rr(0, 3);
@@ -2606,8 +2621,10 @@ cg_scalar_expr(n: ?*Expr): bool {
         // Element addresses use rax, rcx, rsi, rdi, r10, and r11.
         Index k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.idx);
         Binary k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs);
-        // Assigning a literal builds it in place through rbx.
-        Assign k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs) && !cg_literal(k.rhs);
+        // Assigning a literal builds it in place, through rbx unless the
+        // destination is a local, which is addressed through rbp.
+        Assign k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs) && (!cg_literal(k.rhs) || cg_local_literal_target(k.lhs,
+            k.rhs));
         // Other literals are built in their rbp-addressed frame slots.
         StructLit k -> cg_scalar_inits(k.inits);
         // A single object with call-free initializers is built through r9.
@@ -2749,6 +2766,33 @@ cg_literal(n: *Expr): bool {
     }
 }
 
+// The frame offset of a local variable kept in memory, or 0.
+cg_local_slot(n: *Expr): int {
+    match n.kind {
+        Var k -> {
+            vo: ?*Obj = k.var;
+            if (vo == null || !vo.is_local || vo.cg_register as int > 1) return 0;
+            vo.offset
+        }
+        _ -> 0
+    }
+}
+
+cg_local_literal_target(lhs: *Expr, rhs: *Expr): bool {
+    match rhs.kind {
+        StructLit _ -> { }
+        VariantLit _ -> { }
+        _ -> return false
+    }
+    match lhs.kind {
+        Var k -> {
+            vo: ?*Obj = k.var;
+            vo != null && vo.is_local
+        }
+        _ -> false
+    }
+}
+
 cg_scalar_inits(inits: ?*FieldInit): bool {
     i: ?*FieldInit = inits;
     while (i != null) {
@@ -2801,7 +2845,7 @@ emit_text() noregion raises Error, IndexOutOfBounds {
             // also lets allocation use r12/r13 throughout the function. A body
             // that makes no calls can first use r8/r9, which need no saves,
             // once they no longer hold incoming arguments.
-            candidates: []int = new int[6](0);
+            candidates: []int = new int[8](0);
             ncandidates: int = 0;
             int_args: int = fn.nparams + (if (fn.sret != null) 1 else 0);
             // main calls l8_init_globals after moving its parameters.
@@ -2810,13 +2854,13 @@ emit_text() noregion raises Error, IndexOutOfBounds {
                     candidates[0] = 8;
                     ncandidates = 1
                 }
-                if (int_args < 6 && ncandidates < 6) {
+                if (int_args < 6 && ncandidates < 8) {
                     candidates[ncandidates] = 9;
                     ncandidates = ncandidates + 1
                 }
             }
             for extra in 0..if (save_regs) 2 else 4 {
-                if (ncandidates < 6) {
+                if (ncandidates < 8) {
                     candidates[ncandidates] = (if (extra < 2) 14 + extra else 10 + extra);
                     ncandidates = ncandidates + 1
                 }
@@ -2850,7 +2894,7 @@ emit_text() noregion raises Error, IndexOutOfBounds {
             slot: int = 0;
             for k in 0..allocated {
                 reg: int = cg_assigned_register(k);
-                if (reg >= 12) {
+                if (cg_callee_saved(reg)) {
                     slot = slot + 1;
                     cg_mov_rm(reg, 5, 0 - register_base - 8 * slot)
                 }
@@ -2931,7 +2975,7 @@ emit_text() noregion raises Error, IndexOutOfBounds {
             restore_slot: int = 0;
             for k2 in 0..allocated {
                 reg2: int = cg_assigned_register(k2);
-                if (reg2 >= 12) {
+                if (cg_callee_saved(reg2)) {
                     restore_slot = restore_slot + 1;
                     cg_mov_mr(5, 0 - register_base - 8 * restore_slot, reg2)
                 }
