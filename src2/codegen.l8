@@ -317,25 +317,14 @@ gen_index_addr(lhs: *Expr, idx: *Expr) noregion raises Error, IndexOutOfBounds {
         emit_scale_offset(esz);
         return
     }
-    cg_push(3);
-    if (is_array(raw)) {
-        gen_expr(lhs);
-        cg_mov_rr(0, 6);
-        cg_push(6);
-        gen_expr(idx);
-        cg_mov_rr(0, 1);
-        cg_pop(6)
-    } else {
-        if (!is_slice(raw) && !is_str(raw)) error("index requires str, []T, or [N]T");
-        gen_expr(lhs);
-        cg_mov_rr(0, 6);
-        cg_push(6);
-        gen_expr(idx);
-        cg_mov_rr(0, 1);
-        cg_pop(6)
-    }
-    emit_scale_offset(esz);
-    cg_pop(3)
+    if (!is_array(raw) && !is_slice(raw) && !is_str(raw)) error("index requires str, []T, or [N]T");
+    gen_expr(lhs);
+    cg_mov_rr(0, 6);
+    cg_push(6);
+    gen_expr(idx);
+    cg_mov_rr(0, 1);
+    cg_pop(6);
+    emit_scale_offset(esz)
 }
 
 gen_struct_inits(inits: ?*FieldInit) noregion raises Error, IndexOutOfBounds {
@@ -1390,21 +1379,23 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
             }
             cg_mov_imm(esz, 7);
             emit_malloc();
+            // Call-free initializers leave r9 alone, so it can hold the object.
+            object: int = if (cg_leaf_inits(k.inits)) 9 else 3;
             variant: ?*Variant = k.variant;
             if (variant != null) {
-                cg_push(3);
-                cg_mov_rr(0, 3);
+                if (object == 3) cg_push(3);
+                cg_mov_rr(0, object);
                 store_enum_tag(k.val, enum_tag_type(base));
-                gen_variant_inits(k.inits, variant_payload_off(variant));
-                cg_mov_rr(3, 0);
-                cg_pop(3)
+                gen_field_inits_at(k.inits, object, variant_payload_off(variant));
+                cg_mov_rr(object, 0);
+                if (object == 3) cg_pop(3)
             } else {
                 if (k.val == 0) {
-                    cg_push(3);
-                    cg_mov_rr(0, 3);
-                    gen_struct_inits(k.inits);
-                    cg_mov_rr(3, 0);
-                    cg_pop(3)
+                    if (object == 3) cg_push(3);
+                    cg_mov_rr(0, object);
+                    gen_field_inits_at(k.inits, object, 0);
+                    cg_mov_rr(object, 0);
+                    if (object == 3) cg_pop(3)
                 }
             }
             return
@@ -2612,12 +2603,15 @@ cg_scalar_expr(n: ?*Expr): bool {
         Var _ -> true;
         FuncAddr _ -> true;
         Sizeof _ -> true;
-        Index k -> index_simple(k.idx) && cg_local_address_base(k.lhs);
+        // Element addresses use rax, rcx, rsi, rdi, r10, and r11.
+        Index k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.idx);
         Binary k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs);
         // Assigning a literal builds it in place through rbx.
         Assign k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs) && !cg_literal(k.rhs);
         // Other literals are built in their rbp-addressed frame slots.
         StructLit k -> cg_scalar_inits(k.inits);
+        // A single object with call-free initializers is built through r9.
+        New k -> k.lhs == null && cg_leaf_inits(k.inits) && cg_scalar_inits(k.inits);
         VariantLit k -> cg_scalar_inits(k.inits);
         Addr k -> cg_scalar_expr(k.lhs);
         Deref k -> cg_scalar_expr(k.lhs);
