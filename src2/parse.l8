@@ -3,6 +3,42 @@ tag compiler_internal;
 // Tokenize, attach comments, and parse a source file into the AST.
 use_tag compiler_tags;
 
+// Top-level declarations may be used anywhere in a program. A resolving parse
+// first reads every type, signature, and global declaration, deferring the
+// bodies, contracts, initializers, and record invariants that may name them.
+type ParseDeferredKind =
+    | FunctionTail
+    | GlobalInit
+    | RecordInvariant
+
+type ParseDeferred = {
+    kind: ParseDeferredKind;
+    fn: ?*Function;
+    global: ?*Obj;
+    record: ?*StructDef;
+    is_const: bool;
+    start: *Token;
+    scope: ?*Obj;
+    source: []i8;
+    source_len: int;
+    path: []i8;
+    file: int;
+    tag_scope: ?*TagScope;
+    tag_local: ?*TagSet;
+    next: ?*ParseDeferred
+}
+
+parse_defer_bodies: bool = false;
+
+parse_deferred_head: ?*ParseDeferred = null;
+
+parse_deferred_tail: ?*ParseDeferred = null;
+
+// Where parse_function stopped, and its parameter scope, for the caller.
+parse_deferred_start: *Token = token_eof;
+
+parse_deferred_scope: ?*Obj = null;
+
 new_token(
     kind: TokKind,
     start: *i8@new,
@@ -4037,6 +4073,25 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error, IndexOutOf
         fn.return_ty = parse_type();
         if (tok.kind == TokKind.At) fn.ret_bound = parse_at_bound()
     }
+    if (is_extern == 0 && parse_defer_bodies) {
+        // Contracts and the body may name globals declared later. Parse
+        // them after every top-level declaration is known.
+        parse_deferred_start = tok;
+        parse_deferred_scope = scope_locals;
+        parse_skip_function_tail();
+        fn.locals = locals;
+        narrow_top = null;
+        catch_top = null;
+        current_fn = null;
+        return fn
+    }
+    parse_function_tail(fn, is_extern);
+    fn
+}
+
+// Contracts, the result slot, and the body of a function whose signature,
+// parameters, and scope are already established.
+parse_function_tail(fn: *Function@immortal, is_extern: int) noregion raises Error, IndexOutOfBounds {
     if (tok.kind == TokKind.Requires) {
         tok = tok.next;
         skip(TokKind.LParen);
@@ -4073,7 +4128,7 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error, IndexOutOf
         fn.need_imm_heap = fn.decl_imm_heap;
         fn.locals = locals;
         check_function_signature(fn);
-        return fn
+        return
     }
     if (is_extern != 0) {
         fn.is_extern = true;
@@ -4091,7 +4146,7 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error, IndexOutOf
         narrow_top = null;
         catch_top = null;
         current_fn = null;
-        return fn
+        return
     }
     if (rt != null && passes_by_ref(rt)) {
         sret: *Obj = new_obj(".sret", true);
@@ -4102,8 +4157,7 @@ parse_function(name: []i8@new, is_extern: int) noregion raises Error, IndexOutOf
     fn.locals = locals;
     narrow_top = null;
     catch_top = null;
-    current_fn = null;
-    fn
+    current_fn = null
 }
 
 parse_field_list(base_offset: int) noregion raises Error, IndexOutOfBounds: *Member {
@@ -4300,6 +4354,48 @@ parse_record_array_invariant(sd: *StructDef@new) noregion raises Error, IndexOut
     }
 }
 
+// Parses `(clauses)` after `invariant`, with the fields in scope.
+parse_record_invariant(sd: *StructDef@new) noregion raises Error, IndexOutOfBounds {
+    skip(TokKind.LParen);
+    saved_locals: ?*Obj = locals;
+    enter_scope();
+    field: ?*Member = sd.members;
+    while (field != null) {
+        v: *Obj = new_obj(field.name, true);
+        v.ty = field.ty;
+        field.invariant_var = v;
+        field = field.next
+    }
+    inv: ?*Expr = null;
+    qhead: ?*ArrayInvariant = null;
+    qtail: ?*ArrayInvariant = null;
+    done: bool = false;
+    while (!done) {
+        if (tok.kind == TokKind.Ident && streq(cur_tokstr(), "forall")) {
+            quant: *ArrayInvariant = parse_record_array_invariant(sd);
+            if (qtail != null) qtail.next = quant else qhead = quant;
+            qtail = quant
+        } else {
+            clause: *Expr = parse_expr();
+            if (parse_resolve) {
+                add_type(clause);
+                it: ?*Type = clause.ty;
+                if (it == null || !is_bool_ty(it)) error_ty_expr(clause, "record invariant must be bool",
+                    it);
+                if (!bounds_pure_condition(clause)) error("record invariant must be free of side effects");
+                if (bounds_invariant_map(clause, sd, new_num(0)) == null) error("record invariant may refer only to its fields")
+            }
+            if (inv == null) inv = clause else inv = new_logand(inv, clause)
+        }
+        if (tok.kind == TokKind.Comma) tok = tok.next else done = true
+    }
+    leave_scope();
+    locals = saved_locals;
+    skip(TokKind.RParen);
+    sd.invariant = inv;
+    sd.array_invariants = qhead
+}
+
 parse_type_def() noregion raises Error, IndexOutOfBounds {
     tok = tok.next;
     if (tok.kind != TokKind.Ident) error("expected type name");
@@ -4339,44 +4435,11 @@ parse_type_def() noregion raises Error, IndexOutOfBounds {
         sd.size = field_list_size;
         if (tok.kind == TokKind.Ident && streq(cur_tokstr(), "invariant")) {
             tok = tok.next;
-            skip(TokKind.LParen);
-            saved_locals: ?*Obj = locals;
-            enter_scope();
-            field: ?*Member = sd.members;
-            while (field != null) {
-                v: *Obj = new_obj(field.name, true);
-                v.ty = field.ty;
-                field.invariant_var = v;
-                field = field.next
-            }
-            inv: ?*Expr = null;
-            qhead: ?*ArrayInvariant = null;
-            qtail: ?*ArrayInvariant = null;
-            done: bool = false;
-            while (!done) {
-                if (tok.kind == TokKind.Ident && streq(cur_tokstr(), "forall")) {
-                    quant: *ArrayInvariant = parse_record_array_invariant(sd);
-                    if (qtail != null) qtail.next = quant else qhead = quant;
-                    qtail = quant
-                } else {
-                    clause: *Expr = parse_expr();
-                    if (parse_resolve) {
-                        add_type(clause);
-                        it: ?*Type = clause.ty;
-                        if (it == null || !is_bool_ty(it)) error_ty_expr(clause, "record invariant must be bool",
-                            it);
-                        if (!bounds_pure_condition(clause)) error("record invariant must be free of side effects");
-                        if (bounds_invariant_map(clause, sd, new_num(0)) == null) error("record invariant may refer only to its fields")
-                    }
-                    if (inv == null) inv = clause else inv = new_logand(inv, clause)
-                }
-                if (tok.kind == TokKind.Comma) tok = tok.next else done = true
-            }
-            leave_scope();
-            locals = saved_locals;
-            skip(TokKind.RParen);
-            sd.invariant = inv;
-            sd.array_invariants = qhead
+            if (parse_defer_bodies) {
+                parse_defer(ParseDeferredKind.RecordInvariant, null, null, sd, false,
+                    tok, null);
+                parse_skip_balanced()
+            } else parse_record_invariant(sd)
         }
         skip_optional_semi();
         append_item(new_item(ItemKind.Struct { def: sd }, npos));
@@ -4544,6 +4607,160 @@ append_function(fn: *Function@immortal) {
     }
 }
 
+parse_defer(
+    kind: ParseDeferredKind,
+    fn: ?*Function@new,
+    global: ?*Obj@new,
+    record: ?*StructDef@new,
+    is_const: bool,
+    start: *Token@new,
+    scope: ?*Obj@new
+) noregion {
+    item: *ParseDeferred = new ParseDeferred {
+        kind: kind,
+        fn: fn,
+        global: global,
+        record: record,
+        is_const: is_const,
+        start: start,
+        scope: scope,
+        source: source,
+        source_len: source_len,
+        path: source_path,
+        file: current_file_id,
+        tag_scope: tag_scope,
+        tag_local: tag_local,
+        next: null
+    };
+    last: ?*ParseDeferred = parse_deferred_tail;
+    if (last == null) parse_deferred_head = item else last.next = item;
+    parse_deferred_tail = item
+}
+
+parse_bracket_depth(depth: int): int {
+    if (tok.kind == TokKind.LParen || tok.kind == TokKind.LBrack || tok.kind == TokKind.LBrace) return depth + 1;
+    if (tok.kind == TokKind.RParen || tok.kind == TokKind.RBrack || tok.kind == TokKind.RBrace) return depth - 1;
+    depth
+}
+
+// Skip one bracketed group starting at its opening token.
+parse_skip_balanced() {
+    depth: int = 0;
+    started: bool = false;
+    while (tok.kind != TokKind.Eof && (!started || depth > 0)) {
+        depth = parse_bracket_depth(depth);
+        started = true;
+        tok = tok.next
+    }
+}
+
+// Skip contracts and the braced body that follow a function signature.
+// The deferred parse reports any syntax error in them.
+parse_skip_function_tail() {
+    depth: int = 0;
+    while (tok.kind != TokKind.Eof) {
+        if (depth == 0 && tok.kind == TokKind.LBrace) {
+            parse_skip_balanced();
+            return
+        }
+        depth = parse_bracket_depth(depth);
+        tok = tok.next
+    }
+}
+
+// Skip a global initializer up to the semicolon that ends its declaration.
+parse_skip_initializer() {
+    depth: int = 0;
+    while (tok.kind != TokKind.Eof && (depth > 0 || tok.kind != TokKind.Semi)) {
+        depth = parse_bracket_depth(depth);
+        tok = tok.next
+    }
+}
+
+parse_global_init(o2: *Obj@new, is_const_decl: bool) noregion raises Error, IndexOutOfBounds {
+    o2.init = parse_expr();
+    if (is_const_decl && parse_resolve) {
+        if (!const_global_type(o2.ty)) error("const global must have a scalar numeric or bool type");
+        cinit: *Expr = o2.init or error("missing const initializer");
+        add_type(cinit);
+        if (!assignable(o2.ty, cinit)) error_have_expr_want("const initializer type mismatch",
+            cinit, o2.ty);
+        if (!is_const_init(cinit)) error("const initializer must be a constant expression")
+    }
+    skip_file_semi()
+}
+
+// Parse every deferred piece in its original file and declaration scope.
+// Initializers come first so later passes can evaluate constants, which
+// record invariants and contracts may use.
+parse_run_deferred() noregion raises Error, IndexOutOfBounds {
+    parse_defer_bodies = false;
+    saved_source: []i8 = source;
+    saved_source_len: int = source_len;
+    saved_tok: *Token = tok;
+    saved_path: []i8 = source_path;
+    saved_file: int = current_file_id;
+    saved_tag_scope: ?*TagScope = tag_scope;
+    saved_tag_local: ?*TagSet = tag_local;
+    for pass in 0..3 {
+        item: ?*ParseDeferred = parse_deferred_head;
+        while (item != null) {
+            initializer: bool = false;
+            match item.kind {
+                GlobalInit -> initializer = true;
+                _ -> { }
+            }
+            if (initializer == pass < 2) {
+                parse_enter_deferred(item);
+                match item.kind {
+                    FunctionTail -> {
+                        fn: *Function = item.fn or error("internal: deferred function");
+                        locals = fn.locals;
+                        scope_locals = item.scope;
+                        current_fn = fn;
+                        parse_function_tail(fn, 0)
+                    }
+                    GlobalInit -> {
+                        global: *Obj = item.global or error("internal: deferred global");
+                        if (pass == 0) parse_global_init(global, item.is_const) else if (item.is_const && parse_resolve) _value: int = const_global_value(global)
+                    }
+                    RecordInvariant -> parse_record_invariant(item.record or error("internal: deferred invariant"))
+                }
+            }
+            item = item.next
+        }
+    }
+    parse_deferred_head = null;
+    parse_deferred_tail = null;
+    source = saved_source;
+    source_len = saved_source_len;
+    tok = saved_tok;
+    source_path = saved_path;
+    current_file_id = saved_file;
+    tag_scope = saved_tag_scope;
+    tag_local = saved_tag_local;
+    locals = null;
+    scope_locals = null;
+    current_fn = null
+}
+
+parse_enter_deferred(item: *ParseDeferred@immortal) {
+    source = item.source;
+    source_len = item.source_len;
+    source_path = item.path;
+    current_file_id = item.file;
+    tag_scope = item.tag_scope;
+    tag_local = item.tag_local;
+    tok = item.start;
+    scope_depth = 0;
+    region_depth = 0;
+    narrow_top = null;
+    catch_top = null;
+    locals = null;
+    scope_locals = null;
+    current_fn = null
+}
+
 parse_program_unit() noregion raises Error, IndexOutOfBounds {
     while (tok.kind != TokKind.Eof) {
         tag_local = null;
@@ -4612,6 +4829,8 @@ parse_program_unit() noregion raises Error, IndexOutOfBounds {
                         if (is_const_decl) error("const requires a global value");
                         fn: *Function = parse_function(name, 0);
                         bind_function(name, fn);
+                        if (parse_defer_bodies) parse_defer(ParseDeferredKind.FunctionTail,
+                            fn, null, null, false, parse_deferred_start, parse_deferred_scope);
                         append_item(new_item(ItemKind.Func { fn: fn }, fn.browse_pos))
                     } else if (streq(name, "native") && tok.kind == TokKind.Str) {
                         relative: []i8 = cur_tokstr();
@@ -4638,17 +4857,12 @@ parse_program_unit() noregion raises Error, IndexOutOfBounds {
                         o2.is_const = is_const_decl;
                         if (tok.kind != TokKind.Assign) error("global requires an initializer (name: T = e)");
                         tok = tok.next;
-                        o2.init = parse_expr();
-                        if (is_const_decl && parse_resolve) {
-                            if (!const_global_type(o2.ty)) error("const global must have a scalar numeric or bool type");
-                            cinit: *Expr = o2.init or error("missing const initializer");
-                            add_type(cinit);
-                            if (!assignable(o2.ty, cinit)) error_have_expr_want("const initializer type mismatch",
-                                cinit, o2.ty);
-                            if (!is_const_init(cinit)) error("const initializer must be a constant expression");
-                            _const_value: int = const_global_value(o2)
-                        }
-                        skip_file_semi();
+                        if (parse_defer_bodies) {
+                            parse_defer(ParseDeferredKind.GlobalInit, null, o2, null,
+                                is_const_decl, tok, null);
+                            parse_skip_initializer();
+                            skip_file_semi()
+                        } else parse_global_init(o2, is_const_decl);
                         append_item(new_item(ItemKind.Global { var: o2 }, gpos))
                     }
                 }
@@ -4683,6 +4897,10 @@ parse_program(entry_path: []i8) noregion raises Error, IndexOutOfBounds {
     tag_buckets.buckets = new TagBucket[4096](TagBucket { head: null });
     file_items = null;
     file_items_tail = null;
+    parse_deferred_head = null;
+    parse_deferred_tail = null;
+    parse_defer_bodies = parse_resolve;
     parse_source_file(normalize_path(entry_path), true);
+    parse_run_deferred();
     if (parse_resolve) tag_check_references()
 }
