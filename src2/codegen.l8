@@ -2513,6 +2513,85 @@ cg_scalar_stmt(n: *Stmt): bool {
     }
 }
 
+// Bodies whose lowering emits no returning call, so caller-saved registers
+// survive. Allocation, string comparison, exceptions, regions, and calls
+// other than len are excluded; failed bounds checks and unmatched match
+// subjects exit the process.
+cg_leaf_expr(n: ?*Expr): bool {
+    if (n == null) return true;
+    match n.kind {
+        Num _ -> true;
+        Null -> true;
+        Var _ -> true;
+        FuncAddr _ -> true;
+        Sizeof _ -> true;
+        Index k -> cg_leaf_expr(k.lhs) && cg_leaf_expr(k.idx);
+        Binary k -> {
+            ty: ?*Type = decay(k.lhs.ty);
+            if (ty != null && (is_str(ty) || is_opt_str(ty))) return false;
+            cg_leaf_expr(k.lhs) && cg_leaf_expr(k.rhs)
+        }
+        Assign k -> cg_leaf_expr(k.lhs) && cg_leaf_expr(k.rhs);
+        Addr k -> cg_leaf_expr(k.lhs);
+        Deref k -> cg_leaf_expr(k.lhs);
+        MemberAccess k -> cg_leaf_expr(k.lhs);
+        Not k -> cg_leaf_expr(k.lhs);
+        Neg k -> cg_leaf_expr(k.lhs);
+        BitNot k -> cg_leaf_expr(k.lhs);
+        As k -> cg_leaf_expr(k.lhs);
+        Trunc k -> cg_leaf_expr(k.lhs);
+        LogAnd k -> cg_leaf_expr(k.lhs) && cg_leaf_expr(k.rhs);
+        LogOr k -> cg_leaf_expr(k.lhs) && cg_leaf_expr(k.rhs);
+        OrElse k -> cg_leaf_expr(k.lhs) && cg_leaf_expr(k.rhs);
+        If k -> cg_leaf_expr(k.cond) && cg_leaf_expr(k.then) && cg_leaf_expr(k.els);
+        Block k -> cg_leaf_stmts(k.body);
+        Match k -> cg_leaf_expr(k.cond) && cg_leaf_arms(k.arms);
+        Funcall k -> {
+            if (k.target != null || k.fn != null || !streq(k.funcname, "len")) return false;
+            a: ?*Expr = k.args;
+            while (a != null) {
+                if (!cg_leaf_expr(a)) return false;
+                a = a.next
+            }
+            true
+        }
+        _ -> false
+    }
+}
+
+cg_leaf_stmt(n: *Stmt): bool {
+    match n.kind {
+        Return k -> cg_leaf_expr(k.lhs);
+        ExprStmt k -> cg_leaf_expr(k.lhs);
+        Decl k -> cg_leaf_expr(k.init);
+        Block k -> cg_leaf_stmts(k.body);
+        If k -> cg_leaf_expr(k.cond) && cg_leaf_stmt(k.then) && cg_leaf_stmts(k.els);
+        While k -> cg_leaf_expr(k.cond) && cg_leaf_stmt(k.body);
+        For k -> cg_leaf_expr(k.iter) && cg_leaf_expr(k.hi) && cg_leaf_stmt(k.body);
+        Match k -> cg_leaf_expr(k.cond) && cg_leaf_arms(k.arms);
+        Comment _ -> true;
+        _ -> false
+    }
+}
+
+cg_leaf_stmts(n: ?*Stmt): bool {
+    s: ?*Stmt = n;
+    while (s != null) {
+        if (!cg_leaf_stmt(s)) return false;
+        s = s.next
+    }
+    true
+}
+
+cg_leaf_arms(arms: ?*MatchArm): bool {
+    arm: ?*MatchArm = arms;
+    while (arm != null) {
+        if (!cg_leaf_stmts(arm.body)) return false;
+        arm = arm.next
+    }
+    true
+}
+
 cg_variant_literal(n: *Expr): bool {
     match n.kind {
         VariantLit _ -> true;
@@ -2551,8 +2630,31 @@ emit_text() noregion raises Error, IndexOutOfBounds {
             assign_lvar_offsets(fn);
             save_regs: bool = !cg_scalar_stmts(fn.body);
             // The same whitelist that permits omitting scratch-register saves
-            // also lets allocation use r12/r13 throughout the function.
-            allocated: int = cg_assign_registers(fn, if (save_regs) 2 else 4);
+            // also lets allocation use r12/r13 throughout the function. A body
+            // that makes no calls can first use r8/r9, which need no saves,
+            // once they no longer hold incoming arguments.
+            candidates: []int = new int[6](0);
+            ncandidates: int = 0;
+            int_args: int = fn.nparams + (if (fn.sret != null) 1 else 0);
+            // main calls l8_init_globals after moving its parameters.
+            if (cg_leaf_stmts(fn.body) && !streq(fn.name, "main")) {
+                if (int_args < 5) {
+                    candidates[0] = 8;
+                    ncandidates = 1
+                }
+                if (int_args < 6 && ncandidates < 6) {
+                    candidates[ncandidates] = 9;
+                    ncandidates = ncandidates + 1
+                }
+            }
+            for extra in 0..if (save_regs) 2 else 4 {
+                if (ncandidates < 6) {
+                    candidates[ncandidates] = (if (extra < 2) 14 + extra else 10 + extra);
+                    ncandidates = ncandidates + 1
+                }
+            }
+            allocated: int = cg_assign_registers(fn, candidates, ncandidates);
+            saved: int = cg_saved_count(allocated);
             current_fn_name = fn.name;
             current_return_ty = fn.return_ty;
             current_sret = fn.sret;
@@ -2564,7 +2666,7 @@ emit_text() noregion raises Error, IndexOutOfBounds {
             cg_rsp_off = 0;
             cg_push(5);
             cg_mov_rr(4, 5);
-            register_space: int = (allocated + 1) / 2 * 16;
+            register_space: int = (saved + 1) / 2 * 16;
             register_base: int = fn.stack_size + (if (save_regs) 24 else 8);
             // Keep the local offsets and 16-byte call alignment in either case.
             save_start: int = 0;
@@ -2578,11 +2680,13 @@ emit_text() noregion raises Error, IndexOutOfBounds {
                 if (cg_direct_mode) save_end = as_cur_off()
             } else cg_alu_imm(5, fn.stack_size + 8 + register_space, 4);
             cg_callee_saved_seen = false;
-            if (allocated > 0) {
-                cg_mov_rm(14, 5, 0 - register_base - 8);
-                cg_mov_rm(15, 5, 0 - register_base - 16);
-                if (allocated > 2) cg_mov_rm(12, 5, 0 - register_base - 24);
-                if (allocated > 3) cg_mov_rm(13, 5, 0 - register_base - 32)
+            slot: int = 0;
+            for k in 0..allocated {
+                reg: int = cg_assigned_register(k);
+                if (reg >= 12) {
+                    slot = slot + 1;
+                    cg_mov_rm(reg, 5, 0 - register_base - 8 * slot)
+                }
             }
             ri: int = 0;
             rs: int = 0;
@@ -2657,11 +2761,13 @@ emit_text() noregion raises Error, IndexOutOfBounds {
             }
             cg_label_id(current_return_lab);
             emit_rax_to_ret(current_return_ty);
-            if (allocated > 0) {
-                cg_mov_mr(5, 0 - register_base - 8, 14);
-                cg_mov_mr(5, 0 - register_base - 16, 15);
-                if (allocated > 2) cg_mov_mr(5, 0 - register_base - 24, 12);
-                if (allocated > 3) cg_mov_mr(5, 0 - register_base - 32, 13)
+            restore_slot: int = 0;
+            for k2 in 0..allocated {
+                reg2: int = cg_assigned_register(k2);
+                if (reg2 >= 12) {
+                    restore_slot = restore_slot + 1;
+                    cg_mov_mr(5, 0 - register_base - 8 * restore_slot, reg2)
+                }
             }
             // The whitelist is conservative; skip saves the body never needed.
             if (save_regs && cg_callee_saved_seen) {
