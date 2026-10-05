@@ -6,7 +6,8 @@ Locals cease to be used after their section. No functions are split and no
 proof budgets are changed. The loop-locals case puts the sections inside a
 loop; the nested case measures repeated loop analysis. Fixed locals keep
 many constant-length allocations live together, then prove accesses to each.
-Report validation time separately from parsing and
+Record returns measure inference growth when many fields share one input.
+Report verifier time separately from parsing and
 code generation, which have their own scaling behavior.
 """
 
@@ -37,6 +38,14 @@ def fixed_local_source(size: int) -> str:
     return "\n".join(lines + ["result", "}", ""])
 
 
+def record_return_source(size: int) -> str:
+    fields = ";\n".join(f"field{i}: int" for i in range(size))
+    values = ", ".join(f"field{i}: n" for i in range(size))
+    return (f"tag scaling;\ntype Many = {{\n{fields}\n}}\n"
+            f"make(n: int): Many {{ Many {{ {values} }} }}\n"
+            f"main(argc: int): int {{ result: Many = make(argc); result.field{size - 1} }}\n")
+
+
 def loop_local_source(size: int) -> str:
     body = source(size).splitlines()[2:-2]
     return "\n".join([
@@ -60,12 +69,18 @@ def main() -> None:
     parser.add_argument("compiler", type=pathlib.Path)
     parser.add_argument("--baseline", type=pathlib.Path)
     parser.add_argument("--sizes", type=int, nargs="+", default=None)
-    parser.add_argument("--shape", choices=["independent", "nested", "loop-locals", "fixed-locals"], default="independent")
+    parser.add_argument("--shape", choices=["independent", "nested", "loop-locals", "fixed-locals", "record-returns"], default="independent")
     parser.add_argument("--runs", type=int, default=7)
     parser.add_argument("--cpu", type=int)
     args = parser.parse_args()
     if args.sizes is None:
-        args.sizes = [2, 4, 6, 8, 10] if args.shape == "nested" else [32, 64, 128, 256, 512]
+        if args.shape == "nested":
+            args.sizes = [2, 4, 6, 8, 10]
+        elif args.shape == "record-returns":
+            args.sizes = [8, 16, 32, 64, 128]
+        else:
+            args.sizes = [32, 64, 128, 256, 512]
+    phase = "inference" if args.shape == "record-returns" else "validation"
     if args.runs < 1 or any(size < 1 for size in args.sizes):
         parser.error("sizes and runs must be positive")
     compilers = {"current": args.compiler.resolve()}
@@ -78,7 +93,8 @@ def main() -> None:
             root = directory / "scaling.l8"
             generator = {"nested": nested_source, "independent": source,
                          "loop-locals": loop_local_source,
-                         "fixed-locals": fixed_local_source}[args.shape]
+                         "fixed-locals": fixed_local_source,
+                         "record-returns": record_return_source}[args.shape]
             root.write_text(generator(size))
             samples = {name: [] for name in compilers}
             for run in range(args.runs + 1):
@@ -88,15 +104,15 @@ def main() -> None:
                                   "-o", str(directory / "program")],
                         capture_output=True, text=True, check=True,
                     )
-                    match = re.search(r"^profile: bounds validation ([\d.]+) ms",
+                    match = re.search(rf"^profile: bounds {phase} ([\d.]+) ms",
                                       result.stderr, re.MULTILINE)
                     if match is None:
-                        raise ValueError("missing bounds validation profile")
+                        raise ValueError(f"missing bounds {phase} profile")
                     if run:
                         samples[name].append(float(match.group(1)))
             timings = ", ".join(f"{name} {statistics.median(values):.3f} ms"
                                 for name, values in samples.items())
-            print(f"{size} {args.shape}: {timings}", flush=True)
+            print(f"{size} {args.shape} ({phase}): {timings}", flush=True)
 
 
 if __name__ == "__main__":
