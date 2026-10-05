@@ -117,6 +117,12 @@ store_array_fill(fill: *Expr, base: *Type) noregion raises Error, IndexOutOfBoun
  * base_off is added to each field offset (0 for structs, 8 for enum payloads).
  */
 gen_field_inits(inits: ?*FieldInit, base_off: int) noregion raises Error, IndexOutOfBounds {
+    gen_field_inits_at(inits, 3, base_off)
+}
+
+// Store each initializer at base + base_off + its field offset. The base is
+// rbx or rbp; neither is changed by evaluating an initializer.
+gen_field_inits_at(inits: ?*FieldInit, base: int, base_off: int) noregion raises Error, IndexOutOfBounds {
     init: ?*FieldInit = inits;
     while (init != null) {
         lhs: ?*Expr = init.lhs;
@@ -126,9 +132,9 @@ gen_field_inits(inits: ?*FieldInit, base_off: int) noregion raises Error, IndexO
             gen_expr(lhs);
             off: int = base_off + mem.offset;
             if (passes_by_ref(mty)) {
-                cg_lea_mr(3, off, 7);
+                cg_lea_mr(base, off, 7);
                 store_value(mty)
-            } else store_mem_at(mty, 3, off)
+            } else store_mem_at(mty, base, off)
         }
         init = init.next
     }
@@ -1404,40 +1410,27 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
             return
         }
         StructLit k -> {
+            // Build the value in its frame slot, addressed through rbp.
             sz: int = type_size(n.ty or error("missing type"));
             if (sz <= 0) sz = 8;
-            cg_push(3);
-            cg_lea_mr(5, cg_temp_offset(n), 3);
-            gen_struct_inits(k.inits);
-            if (sz <= 8) cg_mov_mr(3, 0, 0) else cg_mov_rr(3, 0);
-            cg_pop(3);
+            temp: int = cg_temp_offset(n);
+            gen_field_inits_at(k.inits, 5, temp);
+            if (sz <= 8) cg_mov_mr(5, temp, 0) else cg_lea_mr(5, temp, 0);
             return
         }
         VariantLit k -> {
             ety: *Type = n.ty or error("missing type");
             sz: int = type_size(ety);
             if (sz <= 0) sz = 8;
-            if (sz <= 8) {
-                if (k.inits == null) {
-                    cg_mov_imm(k.val, 0);
-                    return
-                }
-                cg_push(3);
-                cg_lea_mr(5, cg_temp_offset(n), 3);
-                cg_mov_rr(3, 0);
-                store_enum_tag(k.val, enum_tag_type(ety));
-                gen_variant_inits(k.inits, variant_payload_off(k.variant));
-                cg_mov_mr(3, 0, 0);
-                cg_pop(3);
+            if (sz <= 8 && k.inits == null) {
+                cg_mov_imm(k.val, 0);
                 return
             }
-            cg_push(3);
-            cg_lea_mr(5, cg_temp_offset(n), 3);
-            cg_mov_rr(3, 0);
+            temp2: int = cg_temp_offset(n);
+            cg_lea_mr(5, temp2, 0);
             store_enum_tag(k.val, enum_tag_type(ety));
-            gen_variant_inits(k.inits, variant_payload_off(k.variant));
-            cg_mov_rr(3, 0);
-            cg_pop(3);
+            gen_field_inits_at(k.inits, 5, temp2 + variant_payload_off(k.variant));
+            if (sz <= 8) cg_mov_mr(5, temp2, 0) else cg_lea_mr(5, temp2, 0);
             return
         }
         Deref _p -> {
@@ -2619,13 +2612,11 @@ cg_scalar_expr(n: ?*Expr): bool {
         Sizeof _ -> true;
         Index k -> index_simple(k.idx) && cg_local_address_base(k.lhs);
         Binary k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs);
-        // Assigning an enum literal builds it in place through rbx.
-        Assign k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs) && !cg_variant_literal(k.rhs);
-        // A small variant without payload is an immediate tag in rax.
-        VariantLit k -> {
-            t: ?*Type = n.ty;
-            k.inits == null && t != null && type_size(t) <= 8
-        }
+        // Assigning a literal builds it in place through rbx.
+        Assign k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs) && !cg_literal(k.rhs);
+        // Other literals are built in their rbp-addressed frame slots.
+        StructLit k -> cg_scalar_inits(k.inits);
+        VariantLit k -> cg_scalar_inits(k.inits);
         Addr k -> cg_scalar_expr(k.lhs);
         Deref k -> cg_scalar_expr(k.lhs);
         MemberAccess k -> cg_scalar_expr(k.lhs);
@@ -2705,6 +2696,8 @@ cg_leaf_expr(n: ?*Expr): bool {
         If k -> cg_leaf_expr(k.cond) && cg_leaf_expr(k.then) && cg_leaf_expr(k.els);
         Block k -> cg_leaf_stmts(k.body);
         Match k -> cg_leaf_expr(k.cond) && cg_leaf_arms(k.arms);
+        StructLit k -> cg_leaf_inits(k.inits);
+        VariantLit k -> cg_leaf_inits(k.inits);
         Funcall k -> {
             if (k.target != null || k.fn != null || !streq(k.funcname, "len")) return false;
             a: ?*Expr = k.args;
@@ -2751,11 +2744,31 @@ cg_leaf_arms(arms: ?*MatchArm): bool {
     true
 }
 
-cg_variant_literal(n: *Expr): bool {
+cg_literal(n: *Expr): bool {
     match n.kind {
+        StructLit _ -> true;
         VariantLit _ -> true;
+        ArrayLit _ -> true;
         _ -> false
     }
+}
+
+cg_scalar_inits(inits: ?*FieldInit): bool {
+    i: ?*FieldInit = inits;
+    while (i != null) {
+        if (!cg_scalar_expr(i.lhs)) return false;
+        i = i.next
+    }
+    true
+}
+
+cg_leaf_inits(inits: ?*FieldInit): bool {
+    i: ?*FieldInit = inits;
+    while (i != null) {
+        if (!cg_leaf_expr(i.lhs)) return false;
+        i = i.next
+    }
+    true
 }
 
 // Dispatch and payload copies use only rax, rsi, rdi and xmm0.
