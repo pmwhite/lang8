@@ -640,27 +640,26 @@ cg_local_call_address(n: *Expr): bool {
 cg_direct_call_args(args: ?*Expr): bool {
     a: ?*Expr = args;
     while (a != null) {
-        ty: ?*Type = a.ty;
-        if (ty == null || is_float_ty(ty)) return false;
-        if (!imm_operand(a)) {
-            match a.kind {
-                Var k -> {
-                    vo: ?*Obj = k.var;
-                    if (vo == null || !vo.is_local && !vo.is_const) return false;
-                    if (passes_by_ref(ty) && (!vo.is_local || vo.is_const)) return false
-                }
-                MemberAccess _ -> {
-                    if (!cg_local_call_address(a)) return false
-                }
-                Addr k -> {
-                    if (!cg_local_call_address(k.lhs)) return false
-                }
-                _ -> return false
-            }
-        }
+        if (!cg_direct_call_arg(a)) return false;
         a = a.next
     }
     true
+}
+
+cg_direct_call_arg(a: *Expr): bool {
+    ty: ?*Type = a.ty;
+    if (ty == null || is_float_ty(ty)) return false;
+    if (imm_operand(a)) return true;
+    match a.kind {
+        Var k -> {
+            vo: ?*Obj = k.var;
+            if (vo == null || !vo.is_local && !vo.is_const) return false;
+            !passes_by_ref(ty) || vo.is_local && !vo.is_const
+        }
+        MemberAccess _ -> cg_local_call_address(a);
+        Addr k -> cg_local_call_address(k.lhs);
+        _ -> false
+    }
 }
 
 cg_load_call_arg(a: *Expr, reg: int) noregion raises Error, IndexOutOfBounds {
@@ -1665,13 +1664,37 @@ gen_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
                     }
                 }
                 if (has_sret != 0) cg_push(0);
+                // Arguments after the last one needing general evaluation are
+                // direct: load them into ABI registers, in order, after the pops.
+                split: int = nargs - 1;
+                if (has_sret == 0 && nregs <= 6) {
+                    index: int = 0;
+                    a = k.args;
+                    while (a != null) {
+                        if (!cg_direct_call_arg(a)) split = index;
+                        index = index + 1;
+                        a = a.next
+                    }
+                }
+                position: int = 0;
                 a = k.args;
-                while (a != null) {
+                while (a != null && position <= split) {
                     gen_expr(a);
-                    if (nregs <= 6 && a.next == null) cg_mov_rr(0, cg_arg_reg(nregs - 1)) else cg_push(0);
+                    if (nregs <= 6 && position == split) {
+                        if (split == nargs - 1) cg_mov_rr(0, cg_arg_reg(nregs - 1))
+                    } else cg_push(0);
+                    position = position + 1;
                     a = a.next
                 }
-                if (nregs <= 6 && nargs > 0) emit_place_call_regs(nregs - 1) else emit_place_call_regs(nregs);
+                if (nregs <= 6 && split < nargs - 1) {
+                    emit_place_call_regs(split);
+                    cg_mov_rr(0, cg_arg_reg(split));
+                    while (a != null) {
+                        cg_load_call_arg(a, cg_arg_reg(position));
+                        position = position + 1;
+                        a = a.next
+                    }
+                } else if (nregs <= 6 && nargs > 0) emit_place_call_regs(nregs - 1) else emit_place_call_regs(nregs);
                 if (streq(k.funcname, "memcpy")) {
                     emit_memcpy_call();
                     return
@@ -2436,7 +2459,13 @@ cg_scalar_expr(n: ?*Expr): bool {
         Sizeof _ -> true;
         Index k -> index_simple(k.idx) && cg_local_address_base(k.lhs);
         Binary k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs);
-        Assign k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs);
+        // Assigning an enum literal builds it in place through rbx.
+        Assign k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs) && !cg_variant_literal(k.rhs);
+        // A small variant without payload is an immediate tag in rax.
+        VariantLit k -> {
+            t: ?*Type = n.ty;
+            k.inits == null && t != null && type_size(t) <= 8
+        }
         Addr k -> cg_scalar_expr(k.lhs);
         Deref k -> cg_scalar_expr(k.lhs);
         MemberAccess k -> cg_scalar_expr(k.lhs);
@@ -2450,6 +2479,7 @@ cg_scalar_expr(n: ?*Expr): bool {
         OrElse k -> cg_scalar_expr(k.lhs) && cg_scalar_expr(k.rhs);
         If k -> cg_scalar_expr(k.cond) && cg_scalar_expr(k.then) && cg_scalar_expr(k.els);
         Block k -> cg_scalar_stmts(k.body);
+        Match k -> cg_scalar_expr(k.cond) && cg_scalar_arms(k.arms);
         Funcall k -> {
             if (k.target != null) return false;
             a: ?*Expr = k.args;
@@ -2472,9 +2502,27 @@ cg_scalar_stmt(n: *Stmt): bool {
         If k -> cg_scalar_expr(k.cond) && cg_scalar_stmt(k.then) && cg_scalar_stmts(k.els);
         While k -> cg_scalar_expr(k.cond) && cg_scalar_stmt(k.body);
         For k -> cg_scalar_expr(k.iter) && cg_scalar_expr(k.hi) && cg_scalar_stmt(k.body);
+        Match k -> cg_scalar_expr(k.cond) && cg_scalar_arms(k.arms);
         Comment _ -> true;
         _ -> false
     }
+}
+
+cg_variant_literal(n: *Expr): bool {
+    match n.kind {
+        VariantLit _ -> true;
+        _ -> false
+    }
+}
+
+// Dispatch and payload copies use only rax, rsi, rdi and xmm0.
+cg_scalar_arms(arms: ?*MatchArm): bool {
+    arm: ?*MatchArm = arms;
+    while (arm != null) {
+        if (!cg_scalar_stmts(arm.body)) return false;
+        arm = arm.next
+    }
+    true
 }
 
 cg_scalar_stmts(n: ?*Stmt): bool {
@@ -2514,12 +2562,17 @@ emit_text() noregion raises Error, IndexOutOfBounds {
             register_space: int = (allocated + 1) / 2 * 16;
             register_base: int = fn.stack_size + (if (save_regs) 24 else 8);
             // Keep the local offsets and 16-byte call alignment in either case.
+            save_start: int = 0;
+            save_end: int = 0;
             if (save_regs) {
                 cg_alu_imm(5, fn.stack_size + 24 + register_space, 4);
+                if (cg_direct_mode) save_start = as_cur_off();
                 cg_mov_rm(3, 5, 0 - fn.stack_size - 8);
                 cg_mov_rm(12, 5, 0 - fn.stack_size - 16);
-                cg_mov_rm(13, 5, 0 - fn.stack_size - 24)
+                cg_mov_rm(13, 5, 0 - fn.stack_size - 24);
+                if (cg_direct_mode) save_end = as_cur_off()
             } else cg_alu_imm(5, fn.stack_size + 8 + register_space, 4);
+            cg_callee_saved_seen = false;
             if (allocated > 0) {
                 cg_mov_rm(14, 5, 0 - register_base - 8);
                 cg_mov_rm(15, 5, 0 - register_base - 16);
@@ -2605,11 +2658,12 @@ emit_text() noregion raises Error, IndexOutOfBounds {
                 if (allocated > 2) cg_mov_mr(5, 0 - register_base - 24, 12);
                 if (allocated > 3) cg_mov_mr(5, 0 - register_base - 32, 13)
             }
-            if (save_regs) {
+            // The whitelist is conservative; skip saves the body never needed.
+            if (save_regs && cg_callee_saved_seen) {
                 cg_mov_mr(5, 0 - fn.stack_size - 8, 3);
                 cg_mov_mr(5, 0 - fn.stack_size - 16, 12);
                 cg_mov_mr(5, 0 - fn.stack_size - 24, 13)
-            }
+            } else if (save_regs && cg_direct_mode) cg_erase_text(save_start, save_end);
             cg_mov_rr(5, 4);
             cg_pop(5);
             cg_ret()

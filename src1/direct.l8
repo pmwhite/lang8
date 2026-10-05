@@ -6,6 +6,94 @@ cg_direct_mode: bool = false;
 
 cg_rsp_off: int = 0;
 
+// Set when an instruction names rbx/r12/r13 after a function saves them.
+// Bodies that never do so need not restore them, and direct builds erase
+// the saves. Every primitive below reports each general register operand.
+cg_callee_saved_seen: bool = false;
+
+// The most recent 64-bit register store. A load of the same address with
+// no output or label in between can reuse the stored register.
+cg_store_end: int = -1;
+
+cg_store_src: int = 0;
+
+cg_store_base: int = 0;
+
+cg_store_disp: int = 0;
+
+// The most recent lea that only formed base + disp in a register.
+cg_lea_start: int = -1;
+
+cg_lea_end: int = -1;
+
+cg_lea_base: int = 0;
+
+cg_lea_disp: int = 0;
+
+cg_lea_dst: int = 0;
+
+// Address chosen by cg_fold_lea for the load being emitted.
+cg_fold_base: int = 0;
+
+cg_fold_disp: int = 0;
+
+// Remove output after start. Only the instruction just emitted is removed,
+// so no label, relocation, or patch site can refer to it.
+cg_retract(start: int): bool {
+    if (cg_direct_mode) {
+        if (as_cur_sec != as_SEC_TEXT || start < 0 || start > as_text_len) return false;
+        as_text_len = start;
+        return true
+    }
+    emit_retract(start)
+}
+
+// A load that overwrites the register just formed by lea can address the
+// memory directly: lea d1(b), r; mov d2(r), r becomes mov d1+d2(b), r.
+cg_fold_lea(base: int, disp: int, dst: int): bool {
+    if (cg_lea_end < 0 || cg_lea_end != cg_output_position() || base != cg_lea_dst || dst != cg_lea_dst) return false;
+    total: int = cg_lea_disp + disp;
+    if (total < -2147483648 || total > 2147483647) return false;
+    if (!cg_retract(cg_lea_start)) return false;
+    cg_lea_end = -1;
+    cg_fold_base = cg_lea_base;
+    cg_fold_disp = total;
+    true
+}
+
+cg_output_position(): int {
+    if (!cg_direct_mode) return emit_position();
+    if (as_cur_sec != as_SEC_TEXT) return -2;
+    as_text_len
+}
+
+cg_note_register(r: int) {
+    if (r == 3 || r == 12 || r == 13) cg_callee_saved_seen = true
+}
+
+// Recommended x86-64 no-ops of lengths 1 to 8, concatenated by length.
+cg_nops: []i8 = [-112i8, 102i8, -112i8, 15i8, 31i8, 0i8, 15i8, 31i8, 64i8, 0i8, 15i8,
+    31i8, 68i8, 0i8, 0i8, 102i8, 15i8, 31i8, 68i8, 0i8, 0i8, 15i8, 31i8, -128i8, 0i8,
+    0i8, 0i8, 0i8, 15i8, 31i8, -124i8, 0i8, 0i8, 0i8, 0i8, 0i8];
+
+// Replace already emitted text bytes with no-ops.
+cg_erase_text(start: int, end: int) noregion raises Error {
+    if (start < 0 || start > end || end > as_text_len) error("internal: invalid text erase range");
+    buf: []i8 = as_ensure_cap(as_SEC_TEXT, end);
+    at: int = start;
+    while (at < end) {
+        n: int = end - at;
+        if (n > 8) n = 8;
+        first: int = n * (n - 1) / 2;
+        for k in 0..n {
+            position: int = at + k;
+            entry: int = first + k;
+            if (0 <= position && position < len(buf) && 0 <= entry && entry < len(cg_nops)) buf[position] = cg_nops[entry]
+        }
+        at = at + n
+    }
+}
+
 cg_reg_name(r: int): []i8 {
     if (r == 0) "%rax" else if (r == 1) "%rcx" else if (r == 2) "%rdx" else if (r == 3) "%rbx" else if (r == 4) "%rsp" else if (r == 5) "%rbp" else if (r == 6) "%rsi" else if (r == 7) "%rdi" else if (r == 8) "%r8" else if (r == 9) "%r9" else if (r == 10) "%r10" else if (r == 11) "%r11" else if (r == 12) "%r12" else if (r == 13) "%r13" else if (r == 14) "%r14" else "%r15"
 }
@@ -49,6 +137,8 @@ cg_emit_mem(disp: int, base: int) raises Error, IndexOutOfBounds {
 }
 
 cg_section(sec: int) raises Error {
+    cg_store_end = -1;
+    cg_lea_end = -1;
     if (cg_direct_mode) {
         as_cur_sec = sec;
         return
@@ -80,6 +170,8 @@ cg_global(name: []i8) noregion raises Error {
 }
 
 cg_label(name: []i8) noregion raises Error {
+    cg_store_end = -1;
+    cg_lea_end = -1;
     if (cg_direct_mode) {
         as_define_sym(name);
         return
@@ -124,6 +216,7 @@ cg_bytes(p: []i8, off: int, n: int) noregion raises Error, IndexOutOfBounds requ
 }
 
 cg_push(r: int) noregion raises Error {
+    cg_note_register(r);
     cg_rsp_off = cg_rsp_off + 8;
     if (cg_direct_mode) {
         as_emit_push(r);
@@ -135,6 +228,7 @@ cg_push(r: int) noregion raises Error {
 }
 
 cg_pop(r: int) noregion raises Error {
+    cg_note_register(r);
     cg_rsp_off = cg_rsp_off - 8;
     if (cg_direct_mode) {
         as_emit_pop(r);
@@ -154,6 +248,8 @@ cg_ret() noregion raises Error {
 }
 
 cg_mov_rr(src: int, dst: int) noregion raises Error {
+    cg_note_register(src);
+    cg_note_register(dst);
     if (src == dst) return;
     if (cg_direct_mode) {
         as_emit_mov_rr(src, dst);
@@ -167,6 +263,7 @@ cg_mov_rr(src: int, dst: int) noregion raises Error {
 }
 
 cg_mov_imm(imm: int, dst: int) noregion raises Error, IndexOutOfBounds {
+    cg_note_register(dst);
     if (imm == 0) {
         if (cg_direct_mode) {
             as_emit_xor_zero(dst);
@@ -191,6 +288,16 @@ cg_mov_imm(imm: int, dst: int) noregion raises Error, IndexOutOfBounds {
 }
 
 cg_mov_mr(base: int, disp: int, dst: int) noregion raises Error, IndexOutOfBounds {
+    if (cg_fold_lea(base, disp, dst)) {
+        base = cg_fold_base;
+        disp = cg_fold_disp
+    }
+    if (cg_store_end >= 0 && cg_store_end == cg_output_position() && base == cg_store_base && disp == cg_store_disp) {
+        cg_mov_rr(cg_store_src, dst);
+        return
+    }
+    cg_note_register(base);
+    cg_note_register(dst);
     if (cg_direct_mode) {
         as_emit_mov_mr(dst, base, disp, false, "", 0);
         return
@@ -203,6 +310,12 @@ cg_mov_mr(base: int, disp: int, dst: int) noregion raises Error, IndexOutOfBound
 }
 
 cg_movzb_mr(base: int, disp: int, dst: int) noregion raises Error, IndexOutOfBounds {
+    if (cg_fold_lea(base, disp, dst)) {
+        base = cg_fold_base;
+        disp = cg_fold_disp
+    }
+    cg_note_register(base);
+    cg_note_register(dst);
     if (cg_direct_mode) {
         as_emit_rex(1, dst / 8 % 2, 0, base / 8 % 2);
         as_emit_b(15);
@@ -218,18 +331,24 @@ cg_movzb_mr(base: int, disp: int, dst: int) noregion raises Error, IndexOutOfBou
 }
 
 cg_mov_rm(src: int, base: int, disp: int) noregion raises Error, IndexOutOfBounds {
-    if (cg_direct_mode) {
-        as_emit_mov_rm(src, base, disp, false, "", 0);
-        return
+    cg_note_register(src);
+    cg_note_register(base);
+    if (cg_direct_mode) as_emit_mov_rm(src, base, disp, false, "", 0) else {
+        emit("  mov ");
+        emit(cg_reg_name(src));
+        emit(", ");
+        cg_emit_mem(disp, base);
+        emit("\n")
     }
-    emit("  mov ");
-    emit(cg_reg_name(src));
-    emit(", ");
-    cg_emit_mem(disp, base);
-    emit("\n")
+    cg_store_end = cg_output_position();
+    cg_store_src = src;
+    cg_store_base = base;
+    cg_store_disp = disp
 }
 
 cg_movb_rm(src: int, base: int, disp: int) noregion raises Error, IndexOutOfBounds {
+    cg_note_register(src);
+    cg_note_register(base);
     if (cg_direct_mode) {
         if (base / 8 % 2 != 0) as_emit_b(65);
         as_emit_b(136);
@@ -242,6 +361,7 @@ cg_movb_rm(src: int, base: int, disp: int) noregion raises Error, IndexOutOfBoun
 }
 
 cg_movq_imm_m(imm: int, base: int, disp: int) noregion raises Error, IndexOutOfBounds {
+    cg_note_register(base);
     if (cg_direct_mode) {
         as_emit_rex(1, 0, 0, base / 8 % 2);
         as_emit_b(199);
@@ -257,6 +377,7 @@ cg_movq_imm_m(imm: int, base: int, disp: int) noregion raises Error, IndexOutOfB
 }
 
 cg_movb_imm_m(imm: int, base: int, disp: int) noregion raises Error, IndexOutOfBounds {
+    cg_note_register(base);
     if (cg_direct_mode) {
         if (base / 8 % 2 != 0) as_emit_b(65);
         as_emit_b(198);
@@ -272,6 +393,7 @@ cg_movb_imm_m(imm: int, base: int, disp: int) noregion raises Error, IndexOutOfB
 }
 
 cg_mov_rip_r(name: []i8, extra: int, dst: int) noregion raises Error, IndexOutOfBounds {
+    cg_note_register(dst);
     if (cg_direct_mode) {
         as_emit_mov_mr(dst, 0, 0, true, name, extra);
         return
@@ -288,6 +410,7 @@ cg_mov_rip_r(name: []i8, extra: int, dst: int) noregion raises Error, IndexOutOf
 }
 
 cg_mov_r_rip(src: int, name: []i8, extra: int) noregion raises Error, IndexOutOfBounds {
+    cg_note_register(src);
     if (cg_direct_mode) {
         as_emit_mov_rm(src, 0, 0, true, name, extra);
         return
@@ -337,18 +460,25 @@ cg_movb_imm_rip(imm: int, name: []i8) noregion raises Error, IndexOutOfBounds {
 }
 
 cg_lea_mr(base: int, disp: int, dst: int) noregion raises Error, IndexOutOfBounds {
-    if (cg_direct_mode) {
-        as_emit_lea(dst, base, disp, false, "", 0);
-        return
+    cg_note_register(base);
+    cg_note_register(dst);
+    start: int = cg_output_position();
+    if (cg_direct_mode) as_emit_lea(dst, base, disp, false, "", 0) else {
+        emit("  lea ");
+        cg_emit_mem(disp, base);
+        emit(", ");
+        emit(cg_reg_name(dst));
+        emit("\n")
     }
-    emit("  lea ");
-    cg_emit_mem(disp, base);
-    emit(", ");
-    emit(cg_reg_name(dst));
-    emit("\n")
+    cg_lea_start = start;
+    cg_lea_end = cg_output_position();
+    cg_lea_base = base;
+    cg_lea_disp = disp;
+    cg_lea_dst = dst
 }
 
 cg_lea_rip(name: []i8, extra: int, dst: int) noregion raises Error, IndexOutOfBounds {
+    cg_note_register(dst);
     if (cg_direct_mode) {
         as_emit_lea(dst, 0, 0, true, name, extra);
         return
@@ -365,6 +495,7 @@ cg_lea_rip(name: []i8, extra: int, dst: int) noregion raises Error, IndexOutOfBo
 }
 
 cg_test(r: int) noregion raises Error {
+    cg_note_register(r);
     if (cg_direct_mode) {
         as_emit_test_rr(r);
         return
@@ -377,6 +508,7 @@ cg_test(r: int) noregion raises Error {
 }
 
 cg_alu_imm(op: int, imm: int, dst: int) noregion raises Error, IndexOutOfBounds {
+    cg_note_register(dst);
     if (imm == 0) {
         if (op == 0) return;
         if (op == 1) return;
@@ -419,6 +551,8 @@ cg_alu_imm(op: int, imm: int, dst: int) noregion raises Error, IndexOutOfBounds 
 }
 
 cg_alu_rr(opc: int, src: int, dst: int) noregion raises Error {
+    cg_note_register(src);
+    cg_note_register(dst);
     if (cg_direct_mode) {
         as_emit_alu_rr(opc, src, dst);
         return
@@ -436,6 +570,7 @@ cg_alu_rr(opc: int, src: int, dst: int) noregion raises Error {
 }
 
 cg_imul_imm(imm: int, dst: int) noregion raises Error, IndexOutOfBounds {
+    cg_note_register(dst);
     // Codegen consumes the product, never the multiply's overflow flags.
     if (imm > 0 && (imm & imm - 1) == 0) {
         shift: int = 0;
@@ -469,6 +604,8 @@ cg_imul_imm(imm: int, dst: int) noregion raises Error, IndexOutOfBounds {
 }
 
 cg_imul_rr(src: int, dst: int) noregion raises Error {
+    cg_note_register(src);
+    cg_note_register(dst);
     if (cg_direct_mode) {
         as_emit_rex(1, dst / 8 % 2, 0, src / 8 % 2);
         as_emit_b(15);
@@ -514,6 +651,7 @@ cg_movzb_al_rax() noregion raises Error {
 }
 
 cg_neg(r: int) noregion raises Error {
+    cg_note_register(r);
     if (cg_direct_mode) {
         as_emit_rex(1, 0, 0, r / 8 % 2);
         as_emit_b(247);
@@ -526,6 +664,7 @@ cg_neg(r: int) noregion raises Error {
 }
 
 cg_not(r: int) noregion raises Error {
+    cg_note_register(r);
     if (cg_direct_mode) {
         as_emit_rex(1, 0, 0, r / 8 % 2);
         as_emit_b(247);
@@ -538,6 +677,7 @@ cg_not(r: int) noregion raises Error {
 }
 
 cg_shift_imm(ext: int, imm: int, dst: int) noregion raises Error, IndexOutOfBounds {
+    cg_note_register(dst);
     if (imm == 0) return;
     if (imm >= 64) {
         if (ext == 4) {
@@ -562,6 +702,7 @@ cg_shift_imm(ext: int, imm: int, dst: int) noregion raises Error, IndexOutOfBoun
 }
 
 cg_shift_cl(ext: int, dst: int) noregion raises Error {
+    cg_note_register(dst);
     if (cg_direct_mode) {
         as_emit_rex(1, 0, 0, dst / 8 % 2);
         as_emit_b(211);
@@ -584,6 +725,7 @@ cg_cqo() noregion raises Error {
 }
 
 cg_idiv(r: int) noregion raises Error {
+    cg_note_register(r);
     if (cg_direct_mode) {
         as_emit_rex(1, 0, 0, r / 8 % 2);
         as_emit_b(247);
@@ -614,6 +756,8 @@ cg_call(name: []i8@immortal) noregion raises Error, IndexOutOfBounds {
 }
 
 cg_label_id(id: int) noregion raises Error, IndexOutOfBounds {
+    cg_store_end = -1;
+    cg_lea_end = -1;
     if (cg_direct_mode) {
         as_define_lab(id);
         return
@@ -693,6 +837,12 @@ cg_rex_optional(w: int, r: int, b: int) noregion {
 }
 
 cg_movl_mr(base: int, disp: int, dst: int) noregion raises Error, IndexOutOfBounds {
+    if (cg_fold_lea(base, disp, dst)) {
+        base = cg_fold_base;
+        disp = cg_fold_disp
+    }
+    cg_note_register(base);
+    cg_note_register(dst);
     if (cg_direct_mode) {
         cg_rex_optional(0, dst / 8 % 2, base / 8 % 2);
         as_emit_b(139);
@@ -707,6 +857,8 @@ cg_movl_mr(base: int, disp: int, dst: int) noregion raises Error, IndexOutOfBoun
 }
 
 cg_movl_rm(src: int, base: int, disp: int) noregion raises Error, IndexOutOfBounds {
+    cg_note_register(src);
+    cg_note_register(base);
     if (cg_direct_mode) {
         cg_rex_optional(0, src / 8 % 2, base / 8 % 2);
         as_emit_b(137);
@@ -721,6 +873,12 @@ cg_movl_rm(src: int, base: int, disp: int) noregion raises Error, IndexOutOfBoun
 }
 
 cg_movsxd_mr(base: int, disp: int, dst: int) noregion raises Error, IndexOutOfBounds {
+    if (cg_fold_lea(base, disp, dst)) {
+        base = cg_fold_base;
+        disp = cg_fold_disp
+    }
+    cg_note_register(base);
+    cg_note_register(dst);
     if (cg_direct_mode) {
         as_emit_rex(1, dst / 8 % 2, 0, base / 8 % 2);
         as_emit_b(99);
@@ -735,6 +893,7 @@ cg_movsxd_mr(base: int, disp: int, dst: int) noregion raises Error, IndexOutOfBo
 }
 
 cg_movl_imm_m(imm: int, base: int, disp: int) noregion raises Error, IndexOutOfBounds {
+    cg_note_register(base);
     if (cg_direct_mode) {
         cg_rex_optional(0, 0, base / 8 % 2);
         as_emit_b(199);
@@ -775,6 +934,7 @@ cg_sse_xmm_gpr(
     xmm: int,
     gpr: int
 ) noregion {
+    cg_note_register(gpr);
     as_emit_b(102);
     cg_rex_optional(w, xmm / 8 % 2, gpr / 8 % 2);
     as_emit_b(15);
@@ -783,6 +943,7 @@ cg_sse_xmm_gpr(
 }
 
 cg_movd_r_xmm(src: int, xmm: int) noregion raises Error {
+    cg_note_register(src);
     if (cg_direct_mode) {
         cg_sse_xmm_gpr(0, 110, xmm, src);
         return
@@ -795,6 +956,7 @@ cg_movd_r_xmm(src: int, xmm: int) noregion raises Error {
 }
 
 cg_movd_xmm_r(xmm: int, dst: int) noregion raises Error {
+    cg_note_register(dst);
     if (cg_direct_mode) {
         cg_sse_xmm_gpr(0, 126, xmm, dst);
         return
@@ -807,6 +969,7 @@ cg_movd_xmm_r(xmm: int, dst: int) noregion raises Error {
 }
 
 cg_movq_r_xmm(src: int, xmm: int) noregion raises Error {
+    cg_note_register(src);
     if (cg_direct_mode) {
         cg_sse_xmm_gpr(1, 110, xmm, src);
         return
@@ -819,6 +982,7 @@ cg_movq_r_xmm(src: int, xmm: int) noregion raises Error {
 }
 
 cg_movq_xmm_r(xmm: int, dst: int) noregion raises Error {
+    cg_note_register(dst);
     if (cg_direct_mode) {
         cg_sse_xmm_gpr(1, 126, xmm, dst);
         return
