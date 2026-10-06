@@ -57,7 +57,8 @@ export function translateShader(source, fragment) {
   return head + s;
 }
 
-export function createPlatform(canvas, { log = console.log, checkErrors = false } = {}) {
+// scale renders the window at that fraction of its size. env answers getenv.
+export function createPlatform(canvas, { log = console.log, checkErrors = false, countCalls = false, scale = 1, env = {} } = {}) {
   let mem = null;
   let instance = null;
   const gl = canvas.getContext("webgl2", { antialias: false, depth: true, stencil: false, alpha: false });
@@ -114,10 +115,40 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false 
     return 0n;
   };
   const shaders = new Map();
+  // Uniform locations get integer names. The game sets most uniforms to the
+  // value they already hold, so each location remembers its last value and
+  // only changes reach WebGL.
   const uniforms = [null];
+  const uniformProgram = [0];
+  const uniformValues = [null];
+  let currentProgram = -1;
+  const changed = (l, ...values) => {
+    if (l < 0n) return false;
+    const id = n(l);
+    const old = uniformValues[id];
+    if (old && old.length === values.length && old.every((v, i) => v === values[i])) return false;
+    uniformValues[id] = values;
+    return true;
+  };
   const programUniforms = new Map();
   let unpackAlignment = 4;
   let boundFramebuffer = null;
+  // The window renders at `scale` of its size: the game's viewport and scissor
+  // rectangles on the default framebuffer shrink with it.
+  let windowSize = [1200, 720];
+  let viewport = [0, 0, 1200, 720];
+  let scissor = [0, 0, 1200, 720];
+  const applyViewport = () => {
+    const k = boundFramebuffer ? 1 : scale;
+    const r = (box) => box.map((v) => Math.round(v * k));
+    gl.viewport(...r(viewport));
+    gl.scissor(...r(scissor));
+  };
+  const resize = () => {
+    canvas.width = Math.round(windowSize[0] * scale);
+    canvas.height = Math.round(windowSize[1] * scale);
+    applyViewport();
+  };
 
   const pixelView = (type, ptr, w, h, channels) => {
     if (ptr === 0n) return null;
@@ -176,6 +207,8 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false 
       return 0n;
     },
     glLinkProgram(p) {
+      // Linking resets the program's uniforms.
+      uniformProgram.forEach((owner, id) => owner === n(p) && (uniformValues[id] = null));
       gl.linkProgram(obj(p));
       if (!gl.getProgramParameter(obj(p), gl.LINK_STATUS)) log(`link: ${gl.getProgramInfoLog(obj(p))}`);
       return 0n;
@@ -185,20 +218,31 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false 
       view().setInt32(n(out), typeof value === "boolean" ? Number(value) : value ?? 0, true);
       return 0n;
     },
-    glUseProgram: (p) => (gl.useProgram(obj(p)), 0n),
+    glUseProgram(p) {
+      if (n(p) !== currentProgram) {
+        currentProgram = n(p);
+        gl.useProgram(obj(p));
+      }
+      return 0n;
+    },
     glGetUniformLocation(p, nameStr) {
       const key = `${n(p)}:${mem.string(nameStr)}`;
       if (!programUniforms.has(key)) {
         const loc = gl.getUniformLocation(obj(p), mem.string(nameStr));
-        programUniforms.set(key, loc ? (uniforms.push(loc), uniforms.length - 1) : -1);
+        if (loc) {
+          uniforms.push(loc);
+          uniformProgram.push(n(p));
+          uniformValues.push(null);
+        }
+        programUniforms.set(key, loc ? uniforms.length - 1 : -1);
       }
       return BigInt(programUniforms.get(key));
     },
-    glUniform1i: (l, v) => (l >= 0n && gl.uniform1i(uniforms[n(l)], i32(v)), 0n),
-    glUniform1f: (l, x) => (l >= 0n && gl.uniform1f(uniforms[n(l)], x), 0n),
-    glUniform2f: (l, x, y) => (l >= 0n && gl.uniform2f(uniforms[n(l)], x, y), 0n),
-    glUniform3f: (l, x, y, z) => (l >= 0n && gl.uniform3f(uniforms[n(l)], x, y, z), 0n),
-    glUniform4f: (l, x, y, z, w) => (l >= 0n && gl.uniform4f(uniforms[n(l)], x, y, z, w), 0n),
+    glUniform1i: (l, v) => (changed(l, i32(v)) && gl.uniform1i(uniforms[n(l)], i32(v)), 0n),
+    glUniform1f: (l, x) => (changed(l, x) && gl.uniform1f(uniforms[n(l)], x), 0n),
+    glUniform2f: (l, x, y) => (changed(l, x, y) && gl.uniform2f(uniforms[n(l)], x, y), 0n),
+    glUniform3f: (l, x, y, z) => (changed(l, x, y, z) && gl.uniform3f(uniforms[n(l)], x, y, z), 0n),
+    glUniform4f: (l, x, y, z, w) => (changed(l, x, y, z, w) && gl.uniform4f(uniforms[n(l)], x, y, z, w), 0n),
     glUniformMatrix4fv(l, count, transpose, ptr) {
       if (l < 0n) return 0n;
       const data = new Float32Array(instance.exports.memory.buffer, n(ptr), 16 * n(count));
@@ -239,8 +283,16 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false 
     glEnableVertexAttribArray: (i) => (gl.enableVertexAttribArray(n(i)), 0n),
     glDisableVertexAttribArray: (i) => (gl.disableVertexAttribArray(n(i)), 0n),
     glVertexAttribDivisor: (i, d) => (gl.vertexAttribDivisor(n(i), n(d)), 0n),
-    glViewport: (x, y, w, h) => (gl.viewport(n(x), n(y), n(w), n(h)), 0n),
-    glScissor: (x, y, w, h) => (gl.scissor(n(x), n(y), n(w), n(h)), 0n),
+    glViewport(x, y, w, h) {
+      viewport = [n(x), n(y), n(w), n(h)];
+      applyViewport();
+      return 0n;
+    },
+    glScissor(x, y, w, h) {
+      scissor = [n(x), n(y), n(w), n(h)];
+      applyViewport();
+      return 0n;
+    },
     glClearColor: (r, g, b, a) => (gl.clearColor(r, g, b, a), 0n),
     glClear: (mask) => (gl.clear(n(mask)), 0n),
     glDrawArrays: (mode, first, count) => (gl.drawArrays(n(mode), n(first), n(count)), 0n),
@@ -278,6 +330,7 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false 
     glBindFramebuffer(target, fb) {
       boundFramebuffer = obj(fb);
       gl.bindFramebuffer(n(target), boundFramebuffer);
+      applyViewport();
       return 0n;
     },
     glFramebufferTexture2D(target, attachment, textarget, tex, level) {
@@ -318,6 +371,29 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false 
     }
   }
 
+  // With countCalls, count GL calls by name, and those that repeat the
+  // previous call with the same first argument (a uniform location, a
+  // capability, or a binding target).
+  const calls = {};
+  const repeats = {};
+  const callMs = {};
+  if (countCalls) {
+    const last = new Map();
+    for (const [key, f] of Object.entries(GL)) {
+      GL[key] = (...args) => {
+        calls[key] = (calls[key] ?? 0) + 1;
+        const slot = `${key}:${args[0]}`;
+        const text = args.join(",");
+        if (last.get(slot) === text) repeats[key] = (repeats[key] ?? 0) + 1;
+        last.set(slot, text);
+        const t = performance.now();
+        const result = f(...args);
+        callMs[key] = (callMs[key] ?? 0) + performance.now() - t;
+        return result;
+      };
+    }
+  }
+
   // ---- X11 and GLX ----
 
   // Frames shown, and the milliseconds the game spent computing them.
@@ -332,13 +408,13 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false 
     XWhitePixel: () => 16777215n,
     XCreateColormap: () => 1n,
     XCreateWindow(_d, _p, _x, _y, w, h) {
-      canvas.width = n(w);
-      canvas.height = n(h);
+      windowSize = [n(w), n(h)];
+      resize();
       return 2n;
     },
     XCreateSimpleWindow(_d, _p, _x, _y, w, h) {
-      canvas.width = n(w);
-      canvas.height = n(h);
+      windowSize = [n(w), n(h)];
+      resize();
       return 2n;
     },
     XStoreName(_d, _w, title) {
@@ -388,7 +464,10 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false 
       state.value = 1n;
       return 0n;
     },
-    getenv: () => 0n,
+    getenv(name) {
+      const value = env[mem.string(name)];
+      return value === undefined ? 0n : BigInt(mem.newCounted(new TextEncoder().encode(String(value))));
+    },
   };
 
   // ---- FreeType, rasterized with a 2D canvas ----
@@ -472,6 +551,14 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false 
         })
       ),
     frames: () => frames,
+    // The fraction of the window's size the canvas renders at.
+    scale: () => scale,
+    setScale(k) {
+      if (k === scale) return;
+      scale = k;
+      resize();
+    },
+    callCounts: () => ({ calls: { ...calls }, repeats: { ...repeats }, ms: { ...callMs } }),
     workMs: () => work,
   };
 }

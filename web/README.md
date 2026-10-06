@@ -56,8 +56,22 @@ move too. They inject X11 key events, pressed and released like a keyboard's,
 so holding a direction keeps walking.
 
 The world file is kept in an in-memory file system and saved to `localStorage`
-whenever the game writes it. `?glcheck` reports failing GL calls on the
-console.
+whenever the game writes it.
+
+Frame rate: the host skips uniform updates that repeat a location's current
+value, which removes most of the game's roughly 3,500 GL calls per frame. The
+page adapts the render resolution: when frames are slow while the game's own
+work per frame leaves time to spare, the GPU is the limit, so it renders the
+window at a smaller size (down to half) and scales it up, and raises the size
+again when frames have headroom. A step down that does not speed frames up is
+undone, since a browser frame-rate cap (such as iOS Low Power Mode) is not
+helped by fewer pixels.
+
+Query parameters: `?stats` shows the frame rate, the game's CPU time per frame,
+and the render size; `?scale=0.6` fixes the render size; `?glcheck` reports
+failing GL calls and `?glstats` counts and times them (see `l8Game.callCounts()`
+on the console); and `L8_` parameters such as `?L8_WATER_STATIC` set the game's
+environment variables.
 
 ## Pausing and resuming
 

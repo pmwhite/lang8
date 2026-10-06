@@ -113,8 +113,19 @@ async function main() {
     return status;
   };
 
-  const checkErrors = new URLSearchParams(location.search).has("glcheck");
-  const platform = createPlatform(canvas, { log: (text) => console.warn(text), checkErrors });
+  // ?scale=0.5 renders at half resolution instead of adapting; ?stats shows
+  // the frame rate; ?L8_WATER_STATIC and other L8_ parameters set the game's
+  // environment variables.
+  const params = new URLSearchParams(location.search);
+  const fixedScale = params.has("scale") ? Math.min(1, Math.max(0.25, Number(params.get("scale")) || 1)) : null;
+  const env = Object.fromEntries([...params].filter(([k]) => k.startsWith("L8_")));
+  const platform = createPlatform(canvas, {
+    log: (text) => console.warn(text),
+    checkErrors: params.has("glcheck"),
+    countCalls: params.has("glstats"),
+    scale: fixedScale ?? 1,
+    env,
+  });
   window.l8Game = platform;
   const { instance, mem } = await instantiate(module, sys, platform.imports);
   platform.attach(instance, mem);
@@ -132,9 +143,66 @@ async function main() {
   });
   canvas.focus();
 
-  const status = await runResumable(instance, platform.nextFrame);
+  const status = await runResumable(instance, pacer(platform, fixedScale === null, params.has("stats")));
   canvas.blur();
   show(`The game exited${status ? ` with status ${status}` : ""}.<br><a href="">Play again</a>`);
+}
+
+// Wait for each frame, and adapt the render resolution: when frames are slow
+// although the game's own work leaves time to spare, the GPU is the limit, so
+// render fewer pixels; when there is headroom again, render more.
+function pacer(platform, adapt, stats) {
+  const STEPS = [1, 0.85, 0.72, 0.6, 0.5];
+  let step = 0;
+  let last = 0;
+  let frames = 0;
+  let elapsed = 0;
+  let work0 = platform.workMs();
+  let fast = 0;
+  // The interval before the last step down, and the lowest useful step.
+  let before = 0;
+  let floor = STEPS.length - 1;
+  const label = stats ? document.createElement("div") : null;
+  if (label) {
+    label.style.cssText = "position:fixed;top:max(6px,env(safe-area-inset-top));left:max(8px,env(safe-area-inset-left));" +
+      "font:12px ui-monospace,Menlo,monospace;color:#cfd6e4;background:rgba(0,0,0,.55);padding:2px 6px;border-radius:4px";
+    document.body.append(label);
+  }
+  return async () => {
+    await platform.nextFrame();
+    const now = performance.now();
+    if (last) {
+      elapsed += now - last;
+      frames++;
+    }
+    last = now;
+    if (frames < 30) return;
+    const interval = elapsed / frames;
+    const work = (platform.workMs() - work0) / frames;
+    if (label) label.textContent = `${(1000 / interval).toFixed(0)} fps · cpu ${work.toFixed(1)} ms · ${Math.round(platform.scale() * 100)}%`;
+    if (adapt) {
+      // A step down must speed frames up, or it only blurs the game (as when
+      // the browser caps the frame rate, like iOS in Low Power Mode).
+      if (before && interval > before * 0.97) {
+        step--;
+        floor = step;
+      }
+      before = 0;
+      const slow = interval > 22 && work < 0.6 * interval;
+      fast = interval < 18 ? fast + 1 : 0;
+      if (slow && step < floor) {
+        before = interval;
+        step++;
+      } else if (fast >= 4 && step > 0) {
+        step--;
+        fast = 0;
+      }
+      platform.setScale(STEPS[step]);
+    }
+    frames = 0;
+    elapsed = 0;
+    work0 = platform.workMs();
+  };
 }
 
 main().catch((e) => {
