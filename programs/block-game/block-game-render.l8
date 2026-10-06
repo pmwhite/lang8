@@ -904,11 +904,16 @@ type GrassCache = {
     counts: []int;
     vertices: []f32;
     visible: []int;
+    // Every cell's blades, packed in cell order and uploaded when they
+    // change: cell i's are batch_n instances from first[i].
     batch: []f32;
+    first: []int;
     batch_n: int;
+    // Blades in visible cells, from the last culling.
+    visible_n: int;
     n: int;
     ready: bool
-} invariant (0 <= n && n <= LEVEL_MAX_GROUND && len(cells) == LEVEL_MAX_GROUND && len(counts) == LEVEL_MAX_GROUND && len(visible) == LEVEL_MAX_GROUND && len(vertices) == LEVEL_MAX_GROUND * GRASS_CELL_CAP * GRASS_INSTANCE_FLOATS && len(batch) == LEVEL_MAX_GROUND * GRASS_CELL_CAP * GRASS_INSTANCE_FLOATS, forall count in counts (0 <= count && count <= GRASS_CELL_CAP))
+} invariant (0 <= n && n <= LEVEL_MAX_GROUND && len(cells) == LEVEL_MAX_GROUND && len(counts) == LEVEL_MAX_GROUND && len(visible) == LEVEL_MAX_GROUND && len(first) == LEVEL_MAX_GROUND && len(vertices) == LEVEL_MAX_GROUND * GRASS_CELL_CAP * GRASS_INSTANCE_FLOATS && len(batch) == LEVEL_MAX_GROUND * GRASS_CELL_CAP * GRASS_INSTANCE_FLOATS, forall count in counts (0 <= count && count <= GRASS_CELL_CAP))
 
 type GrassCoverage = {
     prog: int;
@@ -931,7 +936,9 @@ new_grass_cache(): *GrassCache@new {
         vertices: new f32[LEVEL_MAX_GROUND * GRASS_CELL_CAP * GRASS_INSTANCE_FLOATS](0.0),
         visible: new int[LEVEL_MAX_GROUND](0),
         batch: new f32[LEVEL_MAX_GROUND * GRASS_CELL_CAP * GRASS_INSTANCE_FLOATS](0.0),
+        first: new int[LEVEL_MAX_GROUND](0),
         batch_n: 0,
+        visible_n: 0,
         n: 0,
         ready: false
     }
@@ -1040,12 +1047,13 @@ update_grass_cache(cache: *GrassCache, ground: []GroundCell, n: int) requires (0
     cache.n = n
 }
 
-// Keep one draw call. Repack/upload only when visible chunks or their contents
-// change; wind, player motion and camera motion within that set use uniforms.
 // The view the grass batch was last culled for, and its planes.
 grass_vp: []f32 = new f32[16](0.0);
 
 grass_planes: []f32 = new f32[24](0.0);
+
+// Whether the cells' visibility is current for grass_vp and the packed blades.
+grass_culled: bool = false;
 
 // A sphere around a grass cell and its blades, with room for their lean.
 const GRASS_CELL_RADIUS: f32 = 1.3;
@@ -1086,46 +1094,54 @@ sphere_in_view(
 }
 
 prepare_grass_batch(cache: *GrassCache, buf: u32, vp: []f32) requires (len(vp) >= 16) {
+    // A camera in motion changes which cells show nearly every frame, so the
+    // blades are packed and uploaded only when they change; culling picks
+    // the cells to draw.
+    if (!cache.ready) {
+        count: int = 0;
+        slot: int = 0;
+        while (slot < LEVEL_MAX_GROUND * GRASS_CELL_CAP && slot < cache.n * GRASS_CELL_CAP) invariant (0 <= slot && slot <= LEVEL_MAX_GROUND * GRASS_CELL_CAP && 0 <= count && count <= slot) {
+            cell: int = slot / GRASS_CELL_CAP;
+            blade: int = slot % GRASS_CELL_CAP;
+            if (blade == 0) cache.first[cell] = count;
+            if (blade < cache.counts[cell]) {
+                src: int = slot * GRASS_INSTANCE_FLOATS;
+                dest: int = count * GRASS_INSTANCE_FLOATS;
+                for j in 0..GRASS_INSTANCE_FLOATS cache.batch[dest + j] = cache.vertices[src + j];
+                count = count + 1
+            }
+            slot = slot + 1
+        }
+        cache.batch_n = count;
+        glBindBuffer(34962, buf);
+        if (count > 0) glBufferData(34962, count * GRASS_INSTANCE_FLOATS * 4, cache.batch,
+            35044);
+        cache.ready = true;
+        grass_culled = false
+    }
     // Culling every cell is the costly part; a still camera needs none.
     last: []f32 = grass_vp;
     if (len(last) < 16) return;
-    same: bool = cache.ready;
+    same: bool = grass_culled;
     for e in 0..16 {
         if (last[e] != vp[e]) same = false
     }
     if (same) return;
     for e2 in 0..16 last[e2] = vp[e2];
-    dirty: bool = !cache.ready;
     planes: []f32 = grass_planes;
     if (len(planes) < 24) return;
     view_planes(vp, planes);
+    shown: int = 0;
     for i in 0..cache.n {
         f: GroundCell = cache.cells[i];
         visible: int = 0;
         if (cache.counts[i] > 0 && sphere_in_view(planes, f.column as f32 + 0.5, 0.2,
             f.row as f32 + 0.5, GRASS_CELL_RADIUS)) visible = 1;
-        if (visible != cache.visible[i]) dirty = true;
-        cache.visible[i] = visible
+        cache.visible[i] = visible;
+        if (visible != 0) shown = shown + cache.counts[i]
     }
-    if (!dirty) return;
-    count: int = 0;
-    slot: int = 0;
-    while (slot < LEVEL_MAX_GROUND * GRASS_CELL_CAP && slot < cache.n * GRASS_CELL_CAP) invariant (0 <= slot && slot <= LEVEL_MAX_GROUND * GRASS_CELL_CAP && 0 <= count && count <= slot) {
-        cell: int = slot / GRASS_CELL_CAP;
-        blade: int = slot % GRASS_CELL_CAP;
-        if (cache.visible[cell] != 0 && blade < cache.counts[cell]) {
-            src: int = slot * GRASS_INSTANCE_FLOATS;
-            dest: int = count * GRASS_INSTANCE_FLOATS;
-            for j in 0..GRASS_INSTANCE_FLOATS cache.batch[dest + j] = cache.vertices[src + j];
-            count = count + 1
-        }
-        slot = slot + 1
-    }
-    cache.batch_n = count;
-    glBindBuffer(34962, buf);
-    if (count > 0) glBufferData(34962, count * GRASS_INSTANCE_FLOATS * 4, cache.batch,
-        35044);
-    cache.ready = true
+    cache.visible_n = shown;
+    grass_culled = true
 }
 
 draw_grass_coverage(
@@ -1190,7 +1206,7 @@ draw_instanced_grass(
 ) requires (len(u) >= 11 && 0 <= nground && nground <= len(ground) && nground <= LEVEL_MAX_GROUND) {
     update_grass_cache(instances, ground, nground);
     prepare_grass_batch(instances, instance_buf, vp);
-    if (instances.batch_n == 0) return;
+    if (instances.visible_n == 0) return;
     glUseProgram(prog);
     glUniformMatrix4fv(u[0], 1, 0, vp);
     glUniform2f(u[1], actor_x, actor_z);
@@ -1218,11 +1234,33 @@ draw_instanced_grass(
     glEnableVertexAttribArray(3);
     glVertexAttribDivisor(2, 1);
     glVertexAttribDivisor(3, 1);
-    glDrawArraysInstanced(4, 0, blade_n / 6, instances.batch_n);
+    // One draw for each run of consecutive visible cells.
+    run_first: int = 0;
+    run_count: int = 0;
+    for i in 0..instances.n {
+        blades: int = instances.counts[i];
+        if (instances.visible[i] != 0 && blades > 0) {
+            if (run_count > 0 && run_first + run_count == instances.first[i]) run_count = run_count + blades else {
+                draw_grass_run(run_first, run_count, blade_n / 6);
+                run_first = instances.first[i];
+                run_count = blades
+            }
+        }
+    }
+    draw_grass_run(run_first, run_count, blade_n / 6);
     glVertexAttribDivisor(2, 0);
     glVertexAttribDivisor(3, 0);
     glDisableVertexAttribArray(2);
     glDisableVertexAttribArray(3)
+}
+
+// Draw count grass instances from instance first, with the instance buffer
+// bound.
+draw_grass_run(first: int, count: int, vertices: int) {
+    if (count <= 0) return;
+    glVertexAttribPointer(2, 4, 5126, 0, GRASS_INSTANCE_FLOATS * 4, first * GRASS_INSTANCE_FLOATS * 4);
+    glVertexAttribPointer(3, 2, 5126, 0, GRASS_INSTANCE_FLOATS * 4, first * GRASS_INSTANCE_FLOATS * 4 + 16);
+    glDrawArraysInstanced(4, 0, vertices, count)
 }
 
 brick_shape: []u32 = new u32[1](0u32);
