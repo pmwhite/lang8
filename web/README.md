@@ -12,6 +12,23 @@ node web/run.mjs .build/hello.wasm
 make wasm-test                           # every suite, and the wasm compiler fixpoint
 ```
 
+## Playground
+
+`make web` builds a static site in `.build/web`: an editor page with the
+compiler as a module (`l8.wasm`), the standard library, and the examples in
+`examples/`. A worker runs the compiler on the page's source, then runs the
+module it wrote, so a long-running program does not block the page and Stop
+can end it. Serve the directory over HTTP, since browsers load workers and
+modules only from a server:
+
+```sh
+make web
+python3 -m http.server -d .build/web 8000   # then open http://localhost:8000/
+```
+
+Programs import the standard library as `"stdlib/print.l8"`; the editor's
+file is `/main.l8` beside `/stdlib`.
+
 ## Modules
 
 The backend (`src2/wasm.l8`) lowers the same typed AST as the x86 backend

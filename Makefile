@@ -49,7 +49,7 @@ STAGE1_TESTS := tests/compiler/bool.l8 \
 build = ./$(1) build $(2) -o $@.tmp && mv -f $@.tmp $@
 
 .PHONY: all check fmt selfhost compiler-test game game-test stdlib-test \
-	terminal terminal-test callback-test http http-test websocket websocket-test wasm-test \
+	terminal terminal-test callback-test http http-test websocket websocket-test wasm-test web \
 	install-bootstrap promote promote-bin1 promote-bin2 promote-source clean help
 
 # Formatting rewrites src2, so finish it before anything reads the sources.
@@ -225,6 +225,19 @@ $(OK)/wasm-tests: l8c3 $(TESTS) $(PROGRAMS) $(WEB) | $(OK)
 
 wasm-test: $(OK)/wasm-fixpoint $(OK)/wasm-tests
 
+# The playground: a static site in .build/web with the compiler as a module.
+# Serve it with `python3 -m http.server -d .build/web`.
+WEB_SITE := $(BUILD)/web
+WEB_FILES := web/index.html $(wildcard web/*.js web/examples/*.l8)
+
+$(OK)/web: $(BUILD)/l8.wasm $(WEB_FILES) $(STDLIB) | $(OK)
+	@$(STEP) 'web site' sh -c 'rm -rf $(WEB_SITE) && mkdir -p $(WEB_SITE)/stdlib $(WEB_SITE)/examples && \
+		cp web/index.html web/*.js $(WEB_SITE)/ && cp web/examples/*.l8 $(WEB_SITE)/examples/ && \
+		cp $(STDLIB) $(WEB_SITE)/stdlib/ && cp $(BUILD)/l8.wasm $(WEB_SITE)/'
+	@touch $@
+
+web: $(OK)/web
+
 # ---- promotion (updates the working tree; commit the result alone) ----
 
 confirm = @if [ "$(FORCE)" != 1 ]; then printf 'About to update %s. Promote in its own commit. Continue? [y/N] ' '$(1)'; \
@@ -260,6 +273,7 @@ help:
 	@echo '  stdlib-test, game, game-test, terminal, terminal-test, callback-test'
 	@echo '  http, http-test, websocket, websocket-test'
 	@echo '  wasm-test       run the tests as WebAssembly under Node; check the wasm compiler fixpoint'
+	@echo '  web             build the playground site in .build/web'
 	@echo '  promote, promote-bin1, promote-bin2, promote-source   (FORCE=1 skips the prompt)'
 	@echo '  clean'
 	@echo 'tools/profile.py times the compiler self-build, game build, and formatting.'
