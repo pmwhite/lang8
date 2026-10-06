@@ -364,6 +364,14 @@ bounds_term_uncached(e: ?*Expr) raises IndexOutOfBounds: bool {
 
 bounds_same_term(a: *Expr, b: *Expr) raises IndexOutOfBounds: bool {
     match a.kind {
+        Binary x -> {
+            match b.kind {
+                Binary y -> bounds_sum_atom(a) && bounds_sum_atom(b) && (bounds_same_array_expr(x.lhs,
+                    y.lhs) && bounds_same_array_expr(x.rhs, y.rhs) || bounds_same_array_expr(x.lhs,
+                    y.rhs) && bounds_same_array_expr(x.rhs, y.lhs));
+                _ -> false
+            }
+        }
         Num x -> {
             match b.kind {
                 Num y -> x.form == LIT_INT && y.form == LIT_INT && x.val == y.val;
@@ -383,6 +391,23 @@ bounds_same_term(a: *Expr, b: *Expr) raises IndexOutOfBounds: bool {
             }
         }
         _ -> bounds_same_array_expr(a, b)
+    }
+}
+
+// The sum of two int variables is an opaque value of its own. A guard on
+// it proves an index by the same sum, since both evaluate the same machine
+// addition, until either variable changes. Nothing is inferred about its
+// operands, so the addition may wrap.
+bounds_sum_atom(e: ?*Expr): bool {
+    if (e == null) return false;
+    match e.kind {
+        Binary k -> {
+            if (k.op != BinOp.Add || !is_int_ty(e.ty)) return false;
+            left: ?*Obj = bounds_var(k.lhs);
+            right: ?*Obj = bounds_var(k.rhs);
+            left != null && right != null && is_int_ty(left.ty) && is_int_ty(right.ty)
+        }
+        _ -> false
     }
 }
 
@@ -641,7 +666,7 @@ bounds_ref_expr(e: ?*Expr) raises IndexOutOfBounds: BoundsTermRef {
             }
             _ -> { }
         }
-        if (bounds_term(e)) return BoundsTermRef {
+        if (bounds_term(e) || bounds_sum_atom(e)) return BoundsTermRef {
             path: e,
             obj: bounds_var(e),
             is_len: false,
@@ -795,10 +820,17 @@ bounds_affine(e: *Expr@new, query: bool) raises IndexOutOfBounds: ?*BoundsAffine
     }
 }
 
+// Comparisons and indexes may also use a sum atom as a whole.
+bounds_atom_affine(e: *Expr@new) raises IndexOutOfBounds: ?*BoundsAffine@new {
+    value: ?*BoundsAffine = bounds_affine(e, true);
+    if (value == null && bounds_sum_atom(e)) return new BoundsAffine { base: e, offset: 0 };
+    value
+}
+
 // A guard may use a positive offset when a known upper bound on its base
 // proves that evaluating the machine-integer addition cannot wrap.
 bounds_guard_affine(e: *Expr@new, f: ?*BoundsState) raises Error, IndexOutOfBounds: ?*BoundsAffine@new {
-    value: ?*BoundsAffine = bounds_affine(e, true);
+    value: ?*BoundsAffine = bounds_atom_affine(e);
     if (value != null && bounds_affine_safe(value, f)) return value;
     null
 }
@@ -853,9 +885,19 @@ bounds_add_difference(
     if (l == null || r == null) return f;
     root: ?*Obj = bounds_term_root(l.base);
     if (root == null) root = bounds_term_root(r.base);
+    // A fact on a sum atom is also removed when its other operand changes.
+    if (root == null) root = bounds_atom_root(l.base);
+    if (root == null) root = bounds_atom_root(r.base);
     if (root == null) return f;
     bounds_insert(f, root, bounds_term_root(r.base), BoundsKind.Difference, r.offset - l.offset - (if (strict) 1 else 0),
         l.base, r.base, null)
+}
+
+bounds_atom_root(e: *Expr): ?*Obj {
+    match e.kind {
+        Binary k -> if (bounds_sum_atom(e)) bounds_var(k.lhs) else null;
+        _ -> null
+    }
 }
 
 bounds_add_value(
@@ -1025,7 +1067,7 @@ bounds_small_upper(e: *Expr, f: ?*BoundsState) raises Error, IndexOutOfBounds: i
 }
 
 bounds_difference_index(f: ?*BoundsState, array: *Expr@new, index: *Expr@new) raises Error, IndexOutOfBounds: bool {
-    affine: ?*BoundsAffine = bounds_affine(index, true);
+    affine: ?*BoundsAffine = bounds_atom_affine(index);
     if (affine == null) return bounds_bounded_sum_index(f, array, index, false);
     // Both mathematical inequalities imply that the computed machine index
     // is representable, so provisional normalization above is justified.

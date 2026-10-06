@@ -125,6 +125,15 @@ unknown aliases remain conservative. Automatically inferred cross-function
 count/capacity requirements remain future work; the explicit record invariants
 below provide a durable relationship when a type declares one.
 
+Facts about a global variable's value or length, as in `len(buffer) >= 1`,
+survive a call that cannot assign a global. The compiler infers which
+functions may assign one, directly or through their calls. An extern call
+cannot, since C code reaches L8 globals only by calling back into L8: once a
+function that may assign a global is passed as a function value, every extern
+call may assign one too. A call through a function value may write anything,
+so it keeps only facts about locals whose address never escaped. A global
+whose address is taken loses its facts at every call.
+
 Copying a stable value also copies its proved inequalities and the numeric or
 length properties of its field paths, so `first = r.count` retains `first <= len(r.items)` when later
 calls change `r.count` but preserve `r.items`. Replacing an element of a flat
@@ -350,6 +359,13 @@ the right-hand side with the new value. Symbolic remainder and mask ranges also
 lower to difference edges: a nonnegative remainder is below its positive
 divisor, and masking with a nonnegative value produces a result between zero
 and that value. Inline index proofs use the same symbolic range helper.
+
+The sum of two integer variables, such as `to + f`, is also a term of its own
+when a guard compares it: `if (to + f >= 0 && to + f < len(dst))` proves
+`dst[to + f]` (or `dst[f + to]`). Both evaluate the same machine addition, so
+the proof holds even if the addition wraps, and the verifier infers nothing
+about either operand from it. Assigning either variable, or a call or store
+that could change one, discards the facts about the sum.
 
 Stable copies rebase existing paths onto the destination. Freshness tokens are
 copied with pointer aliases; a write preserves another object's field facts

@@ -33,6 +33,13 @@ bounds_effect_unknown(fn: *Function): bool {
     true
 }
 
+bounds_effect_global(fn: *Function): bool {
+    changed: bool = !fn.bounds_global_write;
+    fn.bounds_global_write = true;
+    if (bounds_effect_unknown(fn)) changed = true;
+    changed
+}
+
 bounds_effect_inits(sites: *BoundsEffectSites@new, fn: *Function@new, inits: ?*FieldInit) raises IndexOutOfBounds: bool {
     changed: bool = false;
     q: ?*FieldInit = inits;
@@ -83,7 +90,7 @@ bounds_effect_expr(sites: *BoundsEffectSites@new, fn: *Function@new, e: ?*Expr) 
                     o: ?*Obj = v.var;
                     if (o == null) return bounds_effect_unknown(fn);
                     o.bounds_may_write = true;
-                    if (!o.is_local) return bounds_effect_unknown(fn)
+                    if (!o.is_local) return bounds_effect_global(fn)
                 }
                 Index _ -> {
                     if (!fn.bounds_element_write) changed = true;
@@ -97,8 +104,9 @@ bounds_effect_expr(sites: *BoundsEffectSites@new, fn: *Function@new, e: ?*Expr) 
             changed: bool = bounds_effect_expr(sites, fn, k.target);
             if (bounds_effect_exprs(sites, fn, k.args)) changed = true;
             if (streq(k.funcname, "len") || streq(k.funcname, "sizeof")) return changed;
+            // A call through a function value may reach any function.
             callee: ?*Function = k.fn;
-            if (callee == null) return bounds_effect_unknown(fn);
+            if (callee == null || k.target != null) return bounds_effect_global(fn);
             bounds_effect_site(fn, callee, k.args);
             changed
         }
@@ -246,8 +254,7 @@ bounds_effect_preserves_term(fn: *Function, e: *Expr) raises IndexOutOfBounds: b
         VariantLit k -> k.variant != null && k.inits == null;
         Var k -> {
             v: ?*Obj = k.var;
-            if (v == null) return false;
-            v.is_local && !v.bounds_addr_taken
+            v != null && bounds_call_keeps_var(fn, v)
         }
         MemberAccess k -> {
             if (fn.bounds_unknown_write) return false;
@@ -452,6 +459,9 @@ bounds_infer_effects() raises Error, IndexOutOfBounds {
         }
         fn.bounds_element_write = false;
         fn.bounds_unknown_write = fn.is_extern || fn.body == null;
+        // C code cannot name L8 globals; it reaches them only by calling
+        // back into L8, which is checked once the L8 summaries are known.
+        fn.bounds_global_write = !fn.is_extern && fn.body == null;
         // The SCC numbering is assigned later; borrow its slot for dense IDs.
         fn.bounds_visit = count;
         fn.bounds_effect_queued = true;
@@ -472,6 +482,42 @@ bounds_infer_effects() raises Error, IndexOutOfBounds {
         bounds_effect_enqueue(work, fn);
         fn = fn.next
     }
+    bounds_effect_drain(sites, work);
+    // A function passed to C may be called by any extern call.
+    callback_global_write: bool = false;
+    fn = functions;
+    while (fn != null) {
+        if (fn.address_taken && fn.bounds_global_write) callback_global_write = true;
+        fn = fn.next
+    }
+    if (callback_global_write) {
+        fn = functions;
+        while (fn != null) {
+            if (fn.is_extern && !fn.bounds_global_write) {
+                fn.bounds_global_write = true;
+                if (!fn.bounds_effect_queued) {
+                    bounds_effect_enqueue(work, fn);
+                    fn.bounds_effect_queued = true
+                }
+            }
+            fn = fn.next
+        }
+        bounds_effect_drain(sites, work)
+    }
+    fn = functions;
+    while (fn != null) {
+        fn.bounds_visit = 0;
+        fn.bounds_effect_queued = false;
+        local: ?*Obj = fn.locals;
+        while (local != null) {
+            bounds_prepare_static_local(local);
+            local = local.next
+        }
+        fn = fn.next
+    }
+}
+
+bounds_effect_drain(sites: *BoundsEffectSites@new, work: *BoundsEffectQueue@new) {
     while (work.head != null) {
         callee: ?*Function = work.head;
         if (callee != null) {
@@ -493,17 +539,6 @@ bounds_infer_effects() raises Error, IndexOutOfBounds {
                 site = site.next
             }
         }
-    }
-    fn = functions;
-    while (fn != null) {
-        fn.bounds_visit = 0;
-        fn.bounds_effect_queued = false;
-        local: ?*Obj = fn.locals;
-        while (local != null) {
-            bounds_prepare_static_local(local);
-            local = local.next
-        }
-        fn = fn.next
     }
 }
 
@@ -537,6 +572,10 @@ bounds_effect_transfer(
 ): bool {
     changed: bool = false;
     if (callee.bounds_unknown_write && bounds_effect_unknown(caller)) changed = true;
+    if (callee.bounds_global_write && !caller.bounds_global_write) {
+        caller.bounds_global_write = true;
+        changed = true
+    }
     if (callee.bounds_element_write && !caller.bounds_element_write) {
         caller.bounds_element_write = true;
         changed = true
@@ -772,6 +811,13 @@ bounds_sum_uses(row: *BoundsRow, v: *Obj): bool {
     bounds_term_root(limit) == v
 }
 
+bounds_atom_uses(e: *Expr, v: *Obj): bool {
+    match e.kind {
+        Binary k -> bounds_sum_atom(e) && (bounds_var(k.lhs) == v || bounds_var(k.rhs) == v);
+        _ -> false
+    }
+}
+
 bounds_index_depends(e: *Expr, v: *Obj): bool {
     match e.kind {
         Index k -> bounds_term_root(k.idx) == v || bounds_index_depends(k.idx, v) || bounds_index_depends(k.lhs,
@@ -782,7 +828,7 @@ bounds_index_depends(e: *Expr, v: *Obj): bool {
             a: ?*Expr = k.args;
             a != null && bounds_index_depends(a, v)
         }
-        Binary k -> bounds_index_depends(k.lhs, v) || bounds_index_depends(k.rhs,
+        Binary k -> bounds_atom_uses(e, v) || bounds_index_depends(k.lhs, v) || bounds_index_depends(k.rhs,
             v);
         Neg k -> bounds_index_depends(k.lhs, v);
         _ -> false
@@ -977,8 +1023,8 @@ bounds_pure_call_keeps_all(f: ?*BoundsState, callee: *Function) raises IndexOutO
             right2: ?*Expr = row.right;
             if (left2 == null || right2 == null) return false;
             edge: *BoundsNumericView = numeric[position];
-            if (!bounds_numeric_local_value(&edge.left, left2) || !bounds_numeric_local_value(&edge.right,
-                right2)) {
+            if (!bounds_numeric_call_keeps(callee, &edge.left, left2) || !bounds_numeric_call_keeps(callee,
+                &edge.right, right2)) {
                 if (!bounds_term_roots_stable(left2) || !bounds_term_roots_stable(right2)) return false
             }
         } else {
@@ -1026,16 +1072,17 @@ bounds_after_call(f: ?*BoundsState@new, callee: ?*Function, args: ?*Expr) raises
                 if (callee != null) {
                     if (bounds_effect_preserves_term(callee, left_scalar) && bounds_effect_preserves_term(callee,
                         right_scalar)) head = bounds_filter_copy(head, f, q, q_position)
-                } else if (bounds_term_local_value(left_scalar) && bounds_term_local_value(right_scalar)) head = bounds_filter_copy(head,
-                    f, q, q_position)
+                } else if (bounds_term_call_keeps(null, left_scalar) && bounds_term_call_keeps(null,
+                    right_scalar)) head = bounds_filter_copy(head, f, q, q_position)
             }
         } else if (q.kind == BoundsKind.Difference) {
             stable = false;
             local_left: ?*Expr = q.left;
             local_right: ?*Expr = q.right;
             edge: *BoundsNumericView = numeric[q_position];
-            local_values: bool = local_left != null && local_right != null && bounds_numeric_local_value(&edge.left,
-                local_left) && bounds_numeric_local_value(&edge.right, local_right);
+            local_values: bool = local_left != null && local_right != null && bounds_numeric_call_keeps(callee,
+                &edge.left, local_left) && bounds_numeric_call_keeps(callee, &edge.right,
+                local_right);
             if (local_values) head = bounds_filter_copy(head, f, q, q_position) else if (callee != null) {
                 if (!callee.bounds_unknown_write) {
                     left: ?*Expr = q.left;
@@ -1072,22 +1119,32 @@ bounds_after_call(f: ?*BoundsState@new, callee: ?*Function, args: ?*Expr) raises
     head
 }
 
-// A call cannot rebind a local scalar or slice whose address never escaped.
-// A dereference is memory even when its root happens to be a local pointer.
-bounds_term_local_value(term: *Expr) raises IndexOutOfBounds: bool {
+// A call cannot rebind a variable whose address never escaped, unless it is
+// a global that the callee may assign. Without a callee, as for a store
+// through a pointer, only locals are known. A dereference is memory even when
+// its root happens to be a local pointer.
+bounds_call_keeps_var(callee: ?*Function, obj: *Obj): bool {
+    if (obj.bounds_addr_taken) return false;
+    if (obj.is_local) return true;
+    callee != null && !callee.bounds_global_write
+}
+
+bounds_term_call_keeps(callee: ?*Function, term: *Expr) raises IndexOutOfBounds: bool {
     match term.kind {
         Num _ -> true;
         Null -> true;
         VariantLit k -> k.variant != null && k.inits == null;
         Var k -> {
             obj: ?*Obj = k.var;
-            if (obj == null) return false;
-            obj.is_local && !obj.bounds_addr_taken
+            obj != null && bounds_call_keeps_var(callee, obj)
         }
         Funcall k -> {
             arg: ?*Expr = k.args;
-            k.target == null && streq(k.funcname, "len") && arg != null && bounds_term_local_value(arg)
+            k.target == null && streq(k.funcname, "len") && arg != null && bounds_term_call_keeps(callee,
+                arg)
         }
+        Binary k -> bounds_sum_atom(term) && bounds_term_call_keeps(callee, k.lhs) && bounds_term_call_keeps(callee,
+            k.rhs);
         _ -> false
     }
 }
@@ -1120,10 +1177,10 @@ bounds_member_write_preserves(
 
 // Variable and len(variable) descriptors already hold the object identity.
 // Read its current escape flags; other syntax retains the AST classification.
-bounds_numeric_local_value(term: *BoundsTermRef, original: *Expr) raises IndexOutOfBounds: bool {
+bounds_numeric_call_keeps(callee: ?*Function, term: *BoundsTermRef, original: *Expr) raises IndexOutOfBounds: bool {
     obj: ?*Obj = term.obj;
-    if (obj != null) return obj.is_local && !obj.bounds_addr_taken;
-    bounds_term_local_value(original)
+    if (obj != null) return bounds_call_keeps_var(callee, obj);
+    bounds_term_call_keeps(callee, original)
 }
 
 // Whether a call leaves the reads used by a scalar value unchanged. This is
