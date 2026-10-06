@@ -66,11 +66,13 @@ moves to the top left, out from under the D-pad (`L8_TITLE_TOP`).
 The world file is kept in an in-memory file system and saved to `localStorage`
 whenever the game writes it.
 
-Frame rate: the game draws its blocks with one instanced draw per pass, and
-only the chunks of its wall mesh that a pass can see, which together took it
-from about 3,500 GL calls and 1.4 million vertices per frame to about 950 calls
-and 690,000 vertices. The host also skips uniform updates that repeat a
-location's current value. What remains is mostly the per-pixel cost of the
+Frame rate: the game draws its blocks and its wall bricks as instances, one
+draw per pass for blocks and one per run of visible wall chunks for bricks.
+Bricks use a lighter bevel than blocks, and the shadow map draws both as plain
+boxes, since bevels do not show in it. Together this took the game from about
+3,500 GL calls and 1.4 million vertices per frame to about 1,350 calls and
+250,000 vertices. The host also skips uniform updates that repeat a location's
+current value. What remains is mostly the per-pixel cost of the
 ground's shading, so the page adapts the render resolution: when frames are
 slow, it renders the window at a smaller size (down to half) and scales it up,
 and raises the size again when frames have headroom. A step down that does not
