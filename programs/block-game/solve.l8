@@ -1,0 +1,348 @@
+tag block_game;
+
+use_tag std;
+
+use_tag gl, x11, freetype;
+
+// Solve one level of a world file with the game's own rules:
+//
+//     l8 build programs/block-game/solve.l8 -o solve
+//     ./solve world.txt LEVEL [MAX_STATES [all]]
+//     ./solve world.txt LEVEL play MOVES
+//
+// A breadth-first search from the level's entrance over the player's pose
+// and the poses of the level's blocks, moving with move_player, until the
+// player stands on one of the level's goals. It prints the number of states
+// explored, and the shortest solution as arrows (R L D U, in capitals where
+// they push), or that none was found. The player may not leave the level;
+// the ways out it finds are listed first, as the cell and layer the player
+// would step to.
+//
+// With "all" it explores every state it can reach, so the ways out are all
+// listed, and counts the dead states: those from which no goal can be
+// reached. "play" makes the moves and prints where the player and the
+// level's blocks end up.
+import "../../stdlib/print.l8";
+
+import "../gl/gl.l8";
+
+import "../freetype/ft.l8";
+
+import "level.l8";
+
+import "block-game-undo.l8";
+
+import "block-game-play.l8";
+
+import "block-game-editor.l8";
+
+import "block-game-render.l8";
+
+import "block-game-ui.l8";
+
+const SOLVE_DEFAULT_STATES: int = 400000;
+
+solve_parse_int(s: str, fallback: int): int {
+    b: []i8 = bytes(s);
+    if (len(b) == 0) return fallback;
+    n: int = 0;
+    for i in 0..len(b) {
+        d: int = b[i] as int - '0' as int;
+        if (d < 0 || d > 9) return fallback;
+        n = n * 10 + d
+    }
+    n
+}
+
+// A state's hash, over the player's pose and the level's block poses.
+solve_hash(states: []int, base: int, width: int): int {
+    h: int = 1469598103;
+    for k in 0..width {
+        if (base + k >= 0 && base + k < len(states)) h = (h ^ states[base + k]) * 16777619 & 1152921504606846975
+    }
+    h
+}
+
+solve_get(values: []int, i: int): int {
+    if (i < 0 || i >= len(values)) return 0;
+    values[i]
+}
+
+solve_set(values: []int, i: int, v: int) {
+    if (i >= 0 && i < len(values)) values[i] = v
+}
+
+solve_same(
+    states: []int,
+    a: int,
+    b: int,
+    width: int
+): bool {
+    for k in 0..width {
+        if (a + k < 0 || a + k >= len(states) || b + k < 0 || b + k >= len(states)) return false;
+        if (states[a + k] != states[b + k]) return false
+    }
+    true
+}
+
+main(argc: int, argv: []str) raises IoError, IndexOutOfBounds: int {
+    if (argc < 3) {
+        write(2, "usage: solve WORLD LEVEL [MAX_STATES]\n");
+        return 2
+    }
+    path: []i8 = level_path_at(argv, 1);
+    want: []i8 = bytes(argv[2]);
+    limit: int = SOLVE_DEFAULT_STATES;
+    // "play MOVES" replays moves (R L D U) instead, printing every pose.
+    replay: bool = argc >= 5 && argv[3] == "play";
+    if (argc >= 4 && !replay) limit = solve_parse_int(argv[3], SOLVE_DEFAULT_STATES);
+    // With "all", keep searching past the first solution, to find every way
+    // out of the level.
+    all: bool = argc >= 5 && argv[4] == "all";
+    world: *WorldState = new_world_state();
+    state: *LevelState = new_level_state();
+    if (load_world_state(path, world, state) < 0) {
+        write(2, "cannot load the world\n");
+        return 1
+    }
+    // As the game does, let every block settle before play.
+    apply_level_gravity(state);
+    room: int = 0 - 1;
+    for r in 0..state.nrooms {
+        if (r < len(world.names) && titles_eq(world.names[r], want)) room = r
+    }
+    if (room < 0 || room >= LEVEL_MAX_ROOMS) {
+        write(2, "no such level\n");
+        return 1
+    }
+    n: int = state.nblocks;
+    blocks: []Block = state.blocks;
+    home: []int = new int[LEVEL_MAX_BLOCKS](0 - 1);
+    room_ids: *RoomBlockIds = new_room_block_ids();
+    room_hn: []int = new int[LEVEL_MAX_ROOMS](0);
+    snap: []int = new int[LEVEL_MAX_BLOCKS * REWIND_MAX](0);
+    rewind_n: []RewindCount = new RewindCount[LEVEL_MAX_ROOMS](RewindCount { value: 0 });
+    rewind_cur: []RewindCursor = new RewindCursor[LEVEL_MAX_ROOMS](RewindCursor { value: 0 });
+    ghosting: []int = new int[LEVEL_MAX_ROOMS](0);
+    assign_block_homes(blocks, n, state.rooms, state.nrooms, home, room_ids, room_hn);
+    for r2 in 0..state.nrooms {
+        rewind_capture(blocks, r2, room_ids, room_hn, snap, 0);
+        rewind_n[r2].value = 1
+    }
+    // The blocks this level owns; the others never move here.
+    mine: []int = new int[LEVEL_MAX_BLOCKS](0);
+    k: int = 0;
+    for i in 0..n {
+        if (home[i] == room && k < len(mine)) {
+            mine[k] = i;
+            k = k + 1
+        }
+    }
+    start: RoomStart = state.room_starts[room];
+    sc: int = state.spawn.column;
+    sr: int = state.spawn.row;
+    if (start.present) {
+        sc = start.column;
+        sr = start.row
+    }
+    sh: int = plant_spawn_layer(blocks, n, state.ground, state.nground, sc, sr);
+    if (replay) {
+        moves: []i8 = if (len(argv) > 4) bytes(argv[4]) else new i8[0](0i8);
+        pc: int = sc;
+        pr: int = sr;
+        ph: int = sh;
+        for m in 0..len(moves) {
+            ch: i8 = moves[m];
+            if (ch >= 'a') ch = ch - 32i8;
+            dc0: int = if (ch == 'R') 1 else if (ch == 'L') 0 - 1 else 0;
+            dr0: int = if (ch == 'D') 1 else if (ch == 'U') 0 - 1 else 0;
+            p1: int = move_player(blocks, n, home, state.nrooms, state.bricks, state.nbricks,
+                state.ground, state.nground, pc, pr, ph, dc0, dr0, room_ids, room_hn,
+                snap, rewind_n, rewind_cur, ghosting);
+            pc = pos_col(p1);
+            pr = pos_row(p1);
+            ph = pos_layer(p1)
+        }
+        write(1, "player ");
+        write_int(1, pc);
+        write(1, " ");
+        write_int(1, pr);
+        write(1, " ");
+        print_int(ph);
+        for j0 in 0..k {
+            i0: int = solve_get(mine, j0);
+            if (i0 >= 0 && i0 < len(blocks)) {
+                b0: Block = blocks[i0];
+                write(1, if (b0.ramp != 0) "ramp " else "block ");
+                write_int(1, b0.column);
+                write(1, " ");
+                write_int(1, b0.row);
+                write(1, " layer ");
+                write_int(1, b0.layer);
+                write(1, " mounted ");
+                print_int(b0.mounted)
+            }
+        }
+        return 0
+    }
+    width: int = k + 1;
+    if (limit < 1) limit = 1;
+    states: []int = new int[limit * width](0);
+    parent: []int = new int[limit](0 - 1);
+    moved: []int = new int[limit](0);
+    table_size: int = 1;
+    while (table_size < limit * 2) table_size = table_size * 2;
+    table: []int = new int[table_size](0 - 1);
+    solve_set(states, 0, pack_pos(sc, sr, sh, pose_mounted(blocks, n, sc, sr, sh,
+        0 - 1)));
+    for j in 0..k {
+        i1: int = solve_get(mine, j);
+        if (i1 >= 0 && i1 < len(blocks)) {
+            b: Block = blocks[i1];
+            solve_set(states, 1 + j, pack_pos(b.column, b.row, b.layer, b.mounted))
+        }
+    }
+    first_slot: int = solve_hash(states, 0, width) & len(table) - 1;
+    if (first_slot >= 0 && first_slot < len(table)) table[first_slot] = 0;
+    count: int = 1;
+    head: int = 0;
+    found: int = 0 - 1;
+    // With "all", where each move from each state leads, to count the states
+    // that cannot reach a goal.
+    edges: []int = new int[if (all) limit * 4 else 0](0 - 1);
+    exits: []int = new int[64](0);
+    nexits: int = 0;
+    rooms: []Room = state.rooms;
+    level_room: Room = rooms[room];
+    while (head < count && (found < 0 || all)) {
+        base: int = head * width;
+        pose: int = solve_get(states, base);
+        at_goal: bool = is_goal(state.goals, state.ngoals, pos_col(pose), pos_row(pose));
+        if (at_goal && found < 0) found = head;
+        dir: int = 0;
+        while (dir < 4 && !at_goal) {
+            dc: int = if (dir == 0) 1 else if (dir == 1) 0 - 1 else 0;
+            dr: int = if (dir == 2) 1 else if (dir == 3) 0 - 1 else 0;
+            for j2 in 0..k {
+                i2b: int = solve_get(mine, j2);
+                if (i2b >= 0 && i2b < len(blocks)) blocks[i2b] = apply_packed(blocks[i2b],
+                    solve_get(states, base + 1 + j2))
+            }
+            next: int = move_player(blocks, n, home, state.nrooms, state.bricks, state.nbricks,
+                state.ground, state.nground, pos_col(pose), pos_row(pose), pos_layer(pose),
+                dc, dr, room_ids, room_hn, snap, rewind_n, rewind_cur, ghosting);
+            if (!room_contains(level_room, pos_col(next), pos_row(next))) {
+                // Each way out once: where the player can leave the level.
+                seen: bool = false;
+                for x in 0..nexits {
+                    if (solve_get(exits, x) == next) seen = true
+                }
+                if (!seen && nexits < len(exits)) {
+                    solve_set(exits, nexits, next);
+                    nexits = nexits + 1
+                }
+            }
+            if (room_contains(level_room, pos_col(next), pos_row(next)) && count < limit) {
+                nb: int = count * width;
+                solve_set(states, nb, next);
+                for j3 in 0..k {
+                    i3: int = solve_get(mine, j3);
+                    if (i3 >= 0 && i3 < len(blocks)) {
+                        b3: Block = blocks[i3];
+                        solve_set(states, nb + 1 + j3, pack_pos(b3.column, b3.row,
+                            b3.layer, b3.mounted))
+                    }
+                }
+                slot: int = solve_hash(states, nb, width) & len(table) - 1;
+                fresh: bool = true;
+                while (slot >= 0 && slot < len(table) && table[slot] >= 0 && fresh) {
+                    if (solve_same(states, table[slot] * width, nb, width)) fresh = false else slot = slot + 1 & len(table) - 1
+                }
+                if (!fresh && slot >= 0 && slot < len(table)) solve_set(edges, head * 4 + dir,
+                    table[slot]);
+                if (fresh && slot >= 0 && slot < len(table)) {
+                    solve_set(edges, head * 4 + dir, count);
+                    table[slot] = count;
+                    solve_set(parent, count, head);
+                    solve_set(moved, count, dir);
+                    count = count + 1
+                }
+            }
+            dir = dir + 1
+        }
+        head = head + 1
+    }
+    for x2 in 0..nexits {
+        e: int = solve_get(exits, x2);
+        write(1, "exit ");
+        write_int(1, pos_col(e));
+        write(1, " ");
+        write_int(1, pos_row(e));
+        write(1, " layer ");
+        print_int(pos_layer(e))
+    }
+    write(1, "states ");
+    print_int(count);
+    if (all && count < limit) {
+        // Mark the states that can reach a goal, sweeping until none change.
+        good: []bool = new bool[count](false);
+        for s0 in 0..count {
+            p0: int = solve_get(states, s0 * width);
+            if (s0 < len(good)) good[s0] = is_goal(state.goals, state.ngoals, pos_col(p0),
+                pos_row(p0))
+        }
+        changed: bool = true;
+        while (changed) {
+            changed = false;
+            for s1 in 0..count {
+                if (s1 < len(good) && !good[s1]) {
+                    for d1 in 0..4 {
+                        t: int = solve_get(edges, s1 * 4 + d1);
+                        if (t >= 0 && t < len(good) && good[t]) {
+                            good[s1] = true;
+                            changed = true
+                        }
+                    }
+                }
+            }
+        }
+        dead: int = 0;
+        for s2 in 0..count {
+            if (s2 < len(good) && !good[s2]) dead = dead + 1
+        }
+        write(1, "dead ");
+        print_int(dead)
+    }
+    if (found < 0) {
+        if (count >= limit) write(1, "unsolved: state limit reached\n") else write(1,
+            "unsolvable\n");
+        return 3
+    }
+    steps: int = 0;
+    at: int = found;
+    while (at > 0 && at < len(parent)) {
+        steps = steps + 1;
+        at = parent[at]
+    }
+    path_dirs: []i8 = new i8[steps](0i8);
+    at = found;
+    i2: int = steps - 1;
+    pushes: int = 0;
+    while (at > 0 && at < len(moved) && at < len(parent) && i2 >= 0 && i2 < len(path_dirs)) {
+        d: int = moved[at];
+        // Pushes in capitals, walking in small letters.
+        push: bool = !solve_same(states, at * width + 1, parent[at] * width + 1, k);
+        if (push) pushes = pushes + 1;
+        path_dirs[i2] = (if (d == 0) 'R' else if (d == 1) 'L' else if (d == 2) 'D' else 'U');
+        if (!push && i2 >= 0 && i2 < len(path_dirs)) path_dirs[i2] = path_dirs[i2] + 32i8;
+        i2 = i2 - 1;
+        at = parent[at]
+    }
+    write(1, "pushes ");
+    print_int(pushes);
+    write(1, "solved in ");
+    print_int(steps);
+    write_bytes(1, path_dirs);
+    write(1, "\n");
+    0
+}
