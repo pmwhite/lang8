@@ -58,7 +58,7 @@ export function translateShader(source, fragment) {
 }
 
 // scale renders the window at that fraction of its size. env answers getenv.
-export function createPlatform(canvas, { log = console.log, checkErrors = false, countCalls = false, skip = new Set(), scale = 1, env = {} } = {}) {
+export function createPlatform(canvas, { log = console.log, checkErrors = false, countCalls = false, skip = new Set(), scale = 1, zoom = 0.85, env = {} } = {}) {
   let mem = null;
   let instance = null;
   const gl = canvas.getContext("webgl2", { antialias: false, depth: true, stencil: false, alpha: false });
@@ -134,20 +134,46 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
   let unpackAlignment = 4;
   let boundFramebuffer = null;
   let boundFramebufferId = 0;
-  // The window renders at `scale` of its size: the game's viewport and scissor
-  // rectangles on the default framebuffer shrink with it.
+  // The game's window takes the page's shape, up to MAX_WIDE wide or MAX_TALL
+  // tall (a taller view looks past the world's edge), at a size
+  // where one of its pixels covers at least `zoom` CSS pixels. The game keeps
+  // its text and world at a fixed size in its own pixels, so a small screen
+  // sees less of the world rather than an illegibly small view of all of it.
+  // The game learns the size from ConfigureNotify events.
+  const MAX_WIDE = 2.4;
+  const MAX_TALL = 1.6;
   let windowSize = [1200, 720];
+  // Canvas pixels per window pixel at full resolution: the screen's pixels,
+  // but no more in all than a 1200 by 720 window has.
+  let density = 1;
+  const layout = () => {
+    const w = Math.min(innerWidth, innerHeight * MAX_WIDE);
+    const h = Math.min(innerHeight, innerWidth * MAX_TALL);
+    const s = Math.max(Math.min(w / 1200, h / 720), zoom);
+    const size = [Math.round(w / s), Math.round(h / s)];
+    canvas.style.width = `${Math.round(w)}px`;
+    canvas.style.height = `${Math.round(h)}px`;
+    density = Math.min((devicePixelRatio || 1) * s, Math.sqrt((1200 * 720) / (size[0] * size[1])));
+    if (size[0] !== windowSize[0] || size[1] !== windowSize[1]) {
+      windowSize = size;
+      events.push({ type: 22, keysym: 0, text: "", width: size[0], height: size[1] });
+    }
+    resize();
+  };
+  addEventListener("resize", layout);
+  // The window renders at `scale` of that resolution: the game's viewport and
+  // scissor rectangles on the default framebuffer shrink with it.
   let viewport = [0, 0, 1200, 720];
   let scissor = [0, 0, 1200, 720];
   const applyViewport = () => {
-    const k = boundFramebuffer ? 1 : scale;
+    const k = boundFramebuffer ? 1 : density * scale;
     const r = (box) => box.map((v) => Math.round(v * k));
     gl.viewport(...r(viewport));
     gl.scissor(...r(scissor));
   };
   const resize = () => {
-    canvas.width = Math.round(windowSize[0] * scale);
-    canvas.height = Math.round(windowSize[1] * scale);
+    canvas.width = Math.round(windowSize[0] * density * scale);
+    canvas.height = Math.round(windowSize[1] * density * scale);
     applyViewport();
   };
 
@@ -426,14 +452,13 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
     XBlackPixel: () => 0n,
     XWhitePixel: () => 16777215n,
     XCreateColormap: () => 1n,
-    XCreateWindow(_d, _p, _x, _y, w, h) {
-      windowSize = [n(w), n(h)];
-      resize();
+    // The window gets the page's size, whatever the game asks for.
+    XCreateWindow() {
+      layout();
       return 2n;
     },
-    XCreateSimpleWindow(_d, _p, _x, _y, w, h) {
-      windowSize = [n(w), n(h)];
-      resize();
+    XCreateSimpleWindow() {
+      layout();
       return 2n;
     },
     XStoreName(_d, _w, title) {
@@ -447,6 +472,11 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
       const v = view();
       bytes().fill(0, n(ev), n(ev) + 192);
       v.setInt32(n(ev), e.type, true);
+      // XConfigureEvent's width and height.
+      if (e.type === 22) {
+        v.setInt32(n(ev) + 56, e.width, true);
+        v.setInt32(n(ev) + 60, e.height, true);
+      }
       v.setBigInt64(n(ev) + EVENT_KEYSYM, BigInt(e.keysym), true);
       const text = new TextEncoder().encode(e.text).subarray(0, 7);
       bytes().set(text, n(ev) + EVENT_TEXT);

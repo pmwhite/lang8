@@ -16,16 +16,6 @@ const show = (html) => {
   overlay.hidden = false;
 };
 
-// ---- layout: the largest 5:3 box that fits ----
-
-function fit() {
-  const scale = Math.min(innerWidth / canvas.width, innerHeight / canvas.height);
-  canvas.style.width = `${Math.floor(canvas.width * scale)}px`;
-  canvas.style.height = `${Math.floor(canvas.height * scale)}px`;
-}
-addEventListener("resize", fit);
-fit();
-
 // ---- touch: no browser gestures, on-screen keys, and swipes ----
 
 // Safari ignores user-scalable=no, so cancel its gestures and the second of
@@ -118,8 +108,13 @@ async function main() {
   // the frame rate; ?fps opens the game's own frame-time view; ?L8_WATER_STATIC
   // and other L8_ parameters set the game's environment variables.
   const params = new URLSearchParams(location.search);
+  // ?zoom=1.2 sets the least CSS pixels per game pixel: larger shows less
+  // of the world, larger.
+  const zoom = Math.min(4, Math.max(0.25, Number(params.get("zoom")) || 0.85));
   const fixedScale = params.has("scale") ? Math.min(1, Math.max(0.25, Number(params.get("scale")) || 1)) : null;
   const env = Object.fromEntries([...params].filter(([k]) => k.startsWith("L8_")));
+  // Touch controls cover the bottom corners, so the room's name goes on top.
+  if (touch) env.L8_TITLE_TOP = "1";
   const platform = createPlatform(canvas, {
     log: (text) => console.warn(text),
     checkErrors: params.has("glcheck"),
@@ -127,6 +122,7 @@ async function main() {
     // ?skip=fb3,prog7 drops those draws, to measure what they cost.
     skip: new Set((params.get("skip") ?? "").split(",").filter(Boolean)),
     scale: fixedScale ?? 1,
+    zoom,
     env,
   });
   window.l8Game = platform;

@@ -48,12 +48,20 @@ WebGL2 canvas:
 - FreeType glyphs are rasterized with a 2D canvas into the `FT_GlyphSlot`
   fields the bindings read.
 
-The page holds only the game, scaled to the largest 5:3 box that fits the
-screen. Browser touch gestures are off, so taps do not zoom. A Home Screen
+The page holds only the game, filling the screen (up to 2.4:1 wide or 1.6:1
+tall). The game keeps its HUD and world at a fixed size in its own window
+pixels and learns the window's size from X `ConfigureNotify` events, so the
+page chooses that size: the screen's shape, at a size where a window pixel
+covers at least 0.85 CSS pixels (`?zoom=1.1` sets another minimum). A phone
+therefore shows fewer cells of the world, each larger, instead of shrinking
+the whole 1200 by 720 view until text and blocks are hard to read. The
+canvas has at most as many pixels as a 1200 by 720 window, before the
+adaptive resolution below. Browser touch gestures are off, so taps do not zoom. A Home Screen
 bookmark opens it full screen through the web app manifest. Touch devices get
 an on-screen D-pad with Undo, Restart, Travel, and OK keys, and an FPS key in
 the corner; swipes on the game move too. They inject X11 key events, pressed and released like a keyboard's,
-so holding a direction keeps walking.
+so holding a direction keeps walking. With touch controls the room's name
+moves to the top left, out from under the D-pad (`L8_TITLE_TOP`).
 
 The world file is kept in an in-memory file system and saved to `localStorage`
 whenever the game writes it.
