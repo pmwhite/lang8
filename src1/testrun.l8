@@ -56,6 +56,11 @@ TEST_RAISED_STATUS: int = 3;
 
 test_accept: bool = false;
 
+// Build modules with the wasm backend and run them under Node.
+test_wasm: bool = false;
+
+test_wasm_runner: str = "";
+
 test_env: []?str = new ?str[1](null);
 
 // ---- the generated entry point ----
@@ -279,10 +284,20 @@ test_spawn_case(exe: str@new, index: int, token: bool) raises Error, IndexOutOfB
         null_fd: int = open("/dev/null", 0, 0);
         if (null_fd >= 0) _in: int = l8_dup2(null_fd, 0);
         _alarm: int = test_sys(TEST_SYS_ALARM, TEST_TIMEOUT_SECONDS, 0, 0);
-        argv: []?str = new ?str[3](null);
-        argv[0] = exe;
-        argv[1] = arg;
-        _exec: int = l8_execve(exe, argv, test_env);
+        if (test_wasm) {
+            wasm_argv: []?str = new ?str[6](null);
+            wasm_argv[0] = "env";
+            wasm_argv[1] = "node";
+            wasm_argv[2] = test_wasm_runner;
+            wasm_argv[3] = exe;
+            wasm_argv[4] = arg;
+            _wasm_exec: int = l8_execve("/usr/bin/env", wasm_argv, test_env)
+        } else {
+            argv: []?str = new ?str[3](null);
+            argv[0] = exe;
+            argv[1] = arg;
+            _exec: int = l8_execve(exe, argv, test_env)
+        }
         exit(127)
     }
     if (pid < 0) error("cannot start a test process");
@@ -859,8 +874,8 @@ test_file(arg: []i8) noregion: int {
             return if (test_failed && (!test_accept || test_unfixable)) 1 else 0
         }
         compile_test_mode = true;
-        rc: int = compiler_build_direct(root);
-        if (rc == 0) test_assemble_entry();
+        rc: int = if (test_wasm) compiler_build_wasm(root) else compiler_build_direct(root);
+        if (rc == 0 && !test_wasm) test_assemble_entry();
         compile_out: []i8 = test_read_fd(2);
         root_id: int = 0 - 1;
         f: ?*ImportedFile = imported_files;
@@ -873,7 +888,7 @@ test_file(arg: []i8) noregion: int {
         if (rc == 0) {
             exe_fd: int = test_memfd();
             exe_path: []i8 = test_fd_path(exe_fd);
-            pack_assembler_exec(cstr(exe_path));
+            if (test_wasm) wasm_write_file(cstr(exe_path), wasm_module()) else pack_assembler_exec(cstr(exe_path));
             ro: int = open_path(exe_path, 0, 0);
             if (ro < 0) error("cannot reopen the test executable");
             close(exe_fd);
@@ -1047,11 +1062,11 @@ test_count_of(sb: *StrBuf@new, n: int, noun: str) raises Error, IndexOutOfBounds
 }
 
 test_usage(): int {
-    raw::raw_write(2, "error: usage: l8 test [--accept] [-j N] <file.l8> ...\n");
+    raw::raw_write(2, "error: usage: l8 test [--accept] [--wasm] [--unchecked-index] [-j N] <file.l8> ...\n");
     1
 }
 
-compiler_test_main(argc: int, argv: []str@new) noregion raises IndexOutOfBounds: int requires (argc <= len(argv)) {
+compiler_test_main(argc: int, argv: []str@new) noregion raises IndexOutOfBounds: int {
     try {
         requested: int = 0;
         want_jobs: bool = false;
@@ -1063,7 +1078,10 @@ compiler_test_main(argc: int, argv: []str@new) noregion raises IndexOutOfBounds:
                 requested = test_digits(arg, 0);
                 if (requested < 1) return test_usage();
                 want_jobs = false
-            } else if (arg == "--accept") test_accept = true else if (arg == "-j") want_jobs = true else if (len(arg) > 2 && arg[0] == '-' && arg[1] == 'j') requested = test_digits(arg,
+            } else if (arg == "--accept") test_accept = true else if (arg == "--wasm") {
+                test_wasm = true;
+                test_wasm_runner = cstr(wasm_runner_path())
+            } else if (is_unchecked_flag(arg)) check_index_mode = false else if (arg == "-j") want_jobs = true else if (len(arg) > 2 && arg[0] == '-' && arg[1] == 'j') requested = test_digits(arg,
                 2) else if (len(arg) > 0 && arg[0] == '-') return test_usage() else count = count + 1
         }
         if (count == 0 || want_jobs) return test_usage();
