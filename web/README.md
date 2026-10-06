@@ -71,8 +71,7 @@ whenever the game writes it.
 
 Frame rate: the game draws its blocks and its wall bricks as instances, one
 draw per pass for blocks and one per run of visible wall chunks for bricks.
-Bricks use a lighter bevel than blocks, and the shadow map draws both as plain
-boxes, since bevels do not show in it. Together this took the game from about
+Bricks use a lighter bevel than blocks. Together this took the game from about
 3,500 GL calls and 1.4 million vertices per frame to about 1,350 calls and
 250,000 vertices. The host also skips uniform updates that repeat a location's
 current value. What remains is mostly the per-pixel cost of the
