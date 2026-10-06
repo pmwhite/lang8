@@ -72,10 +72,16 @@ type HeightWater = {
     debt: f32;
     steps: int;
     dropped_us: int;
+    // How often the basin moved or its water changed, starting it flat.
+    resets: int;
+    // Scratch for height_water_place, kept to avoid allocating each frame.
+    all_box: []int;
+    near_box: []int;
+    place: []int;
     frame: int;
     label: []i8;
     ripple_time: f32
-} invariant (len(programs) == 4 && len(u) == 24 && len(buffers) == 7 && len(textures) == 2 && len(wet) == 1024 && len(mask) == 1024 && len(tiles) == 4096 && len(bodies) == HW_BODY_FLOATS && len(targets) == 7 && len(target_fbos) == 4 && 0 <= current && current <= 1 && 0 <= cells && cells <= 1024 && 0 <= nbodies && nbodies <= LEVEL_MAX_BLOCKS + 1)
+} invariant (len(programs) == 4 && len(u) == 24 && len(buffers) == 7 && len(textures) == 2 && len(wet) == 1024 && len(mask) == 1024 && len(tiles) == 4096 && len(bodies) == HW_BODY_FLOATS && len(targets) == 7 && len(target_fbos) == 4 && len(all_box) == 4 && len(near_box) == 4 && len(place) == 4 && 0 <= current && current <= 1 && 0 <= cells && cells <= 1024 && 0 <= nbodies && nbodies <= LEVEL_MAX_BLOCKS + 1)
 
 new_height_water(main: int) raises IoError: *HeightWater@new {
     version: []i32 = new i32[2](0i32);
@@ -241,6 +247,10 @@ new_height_water(main: int) raises IoError: *HeightWater@new {
         debt: 0.0,
         steps: 0,
         dropped_us: 0,
+        resets: 0,
+        all_box: new int[4](0),
+        near_box: new int[4](0),
+        place: new int[4](0),
         frame: 0,
         label: new i8[160](0i8),
         ripple_time: 0.0
@@ -351,39 +361,74 @@ height_water_bind(w: *HeightWater) {
     glBindBufferBase(37074, 5, w.buffers[5])
 }
 
-height_water_terrain(
-    w: *HeightWater,
+// Visible water this close to the focus (in cells, along either axis) must
+// lie in the basin; when it does not, the basin moves to cover the visible
+// water out to HW_COVER, which leaves a margin before it has to move again.
+const HW_KEEP: int = 10;
+
+const HW_COVER: int = 14;
+
+// Bounding boxes of cells: x0, z0, x1, z1, empty while x0 > x1.
+height_water_box_clear(box: []int) requires (len(box) == 4) {
+    box[0] = 999999;
+    box[1] = 999999;
+    box[2] = 0 - 999999;
+    box[3] = 0 - 999999
+}
+
+height_water_box_add(box: []int, x: int, z: int) requires (len(box) == 4) {
+    if (x < box[0]) box[0] = x;
+    if (z < box[1]) box[1] = z;
+    if (x > box[2]) box[2] = x;
+    if (z > box[3]) box[3] = z
+}
+
+height_water_box_fits(box: []int): bool requires (len(box) == 4) {
+    box[0] <= box[2] && box[2] - box[0] < 30 && box[3] - box[1] < 30
+}
+
+// Where the basin goes, from the ground's water and the view: place gets the
+// basin's corner (x, z), a key of the level's water cells, and 1 if any water
+// is visible, else 0. A basin at (x, z) moves, which starts its water flat,
+// only when visible water near the focus (cx, cz) falls outside it; it then
+// covers all the visible water if that fits, or else the visible water a
+// little farther from the focus, so moving about inside that margin never
+// moves it again. all_box and near_box are scratch.
+height_water_place(
     ground: []GroundCell,
     n: int,
     cx: int,
     cz: int,
-    vp: []f32
-) requires (0 <= n && n <= len(ground)) {
+    vp: []f32,
+    x: int,
+    z: int,
+    ready: bool,
+    all_box: []int,
+    near_box: []int,
+    place: []int
+) requires (0 <= n && n <= len(ground) && len(all_box) == 4 && len(near_box) == 4 && len(place) == 4) {
     key: int = 0;
-    minx: int = 999999;
-    minz: int = 999999;
-    maxx: int = 0 - 999999;
-    maxz: int = 0 - 999999;
+    height_water_box_clear(all_box);
+    height_water_box_clear(near_box);
     nearest: int = 999999;
     nx: int = cx;
     nz: int = cz;
-    outside: bool = !w.ready;
-    w.visible = false;
+    outside: bool = !ready;
+    visible: int = 0;
     for i in 0..n {
         c: GroundCell = ground[i];
         if (c.style == GROUND_WATER) {
             key = key * 31 + c.column * 719 + c.row * 131 + 1;
             if (grass_cell_in_view(vp, c.column, c.row) != 0) {
-                w.visible = true;
-                if (c.column < w.x || c.column >= w.x + 32 || c.row < w.z || c.row >= w.z + 32) outside = true;
-                if (c.column < minx) minx = c.column;
-                if (c.column > maxx) maxx = c.column;
-                if (c.row < minz) minz = c.row;
-                if (c.row > maxz) maxz = c.row;
+                visible = 1;
                 dx: int = c.column - cx;
                 dz: int = c.row - cz;
                 if (dx < 0) dx = 0 - dx;
                 if (dz < 0) dz = 0 - dz;
+                far: int = if (dx > dz) dx else dz;
+                if (far <= HW_KEEP && (c.column < x || c.column >= x + 32 || c.row < z || c.row >= z + 32)) outside = true;
+                height_water_box_add(all_box, c.column, c.row);
+                if (far <= HW_COVER) height_water_box_add(near_box, c.column, c.row);
                 if (dx + dz < nearest) {
                     nearest = dx + dz;
                     nx = c.column;
@@ -392,16 +437,37 @@ height_water_terrain(
             }
         }
     }
-    x: int = w.x;
-    z: int = w.z;
     if (outside) {
-        if (minx <= maxx && maxx - minx < 30 && maxz - minz < 30) {
-            nx = (minx + maxx + 1) / 2;
-            nz = (minz + maxz + 1) / 2
+        if (height_water_box_fits(all_box)) {
+            nx = (all_box[0] + all_box[2] + 1) / 2;
+            nz = (all_box[1] + all_box[3] + 1) / 2
+        } else if (height_water_box_fits(near_box)) {
+            nx = (near_box[0] + near_box[2] + 1) / 2;
+            nz = (near_box[1] + near_box[3] + 1) / 2
         }
         x = nx - 16;
         z = nz - 16
     }
+    place[0] = x;
+    place[1] = z;
+    place[2] = key;
+    place[3] = visible
+}
+
+height_water_terrain(
+    w: *HeightWater,
+    ground: []GroundCell,
+    n: int,
+    cx: int,
+    cz: int,
+    vp: []f32
+) requires (0 <= n && n <= len(ground)) {
+    height_water_place(ground, n, cx, cz, vp, w.x, w.z, w.ready, w.all_box, w.near_box,
+        w.place);
+    w.visible = w.place[3] != 0;
+    x: int = w.place[0];
+    z: int = w.place[1];
+    key: int = w.place[2];
     if (w.ready && key == w.key && x == w.x && z == w.z) return;
     w.x = x;
     w.z = z;
@@ -411,6 +477,7 @@ height_water_terrain(
     w.debt = 0.0;
     w.last_us = 0;
     w.steps = 0;
+    w.resets = w.resets + 1;
     w.initialize = true;
     for i in 0..1024 {
         w.wet[i] = 0.0;
@@ -691,6 +758,12 @@ prepare_height_water(
         i = put_int(w.label, i, w.steps);
         i = put_str(w.label, i, "/");
         i = put_int(w.label, i, w.dropped_us);
+        i = put_str(w.label, i, " resets=");
+        i = put_int(w.label, i, w.resets);
+        i = put_str(w.label, i, " at ");
+        i = put_int(w.label, i, w.x);
+        i = put_str(w.label, i, ",");
+        i = put_int(w.label, i, w.z);
         i = put_str(w.label, i, "\n");
         if (i < 0 || i > len(w.label)) die("height water status buffer too small");
         write_bytes_n(2, w.label, i)
