@@ -459,6 +459,10 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false 
       instance = i;
       mem = m;
     },
+    // Inject a key event, as from on-screen controls: type 2 presses, 3 releases.
+    key(type, sym, text = "") {
+      events.push({ type, keysym: sym, text });
+    },
     nextFrame: () =>
       new Promise((resolve) =>
         requestAnimationFrame(() => {

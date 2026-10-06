@@ -48,6 +48,13 @@ WebGL2 canvas:
 - FreeType glyphs are rasterized with a 2D canvas into the `FT_GlyphSlot`
   fields the bindings read.
 
+The canvas is scaled to the largest 5:3 box that fits. Full screen uses the
+Fullscreen API where there is one; otherwise (iPhone) it hides the page around
+the game, and a Home Screen bookmark opens it full screen through the web app
+manifest. Touch devices get an on-screen D-pad with Undo, Restart, Travel, and
+OK keys; swipes on the game move too. They inject X11 key events, pressed and
+released like a keyboard's, so holding a direction keeps walking.
+
 The page offers the world, a pond demo (push the block into the water, or press
 F8 for ripples), and the Canopy Walk level. Each level is kept in an in-memory
 file system and saved to `localStorage` whenever the game writes it. `?edit`

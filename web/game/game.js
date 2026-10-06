@@ -47,6 +47,99 @@ if (editing) {
   modeLink.textContent = "Play";
   document.getElementById("hint").textContent = "Editor: keys are listed on screen; q quits";
 }
+// ---- layout: the largest 5:3 box that fits, and full screen ----
+
+const stage = document.getElementById("stage");
+function fit() {
+  const box = stage.getBoundingClientRect();
+  const scale = Math.min(box.width / canvas.width, box.height / canvas.height);
+  canvas.style.width = `${Math.floor(canvas.width * scale)}px`;
+  canvas.style.height = `${Math.floor(canvas.height * scale)}px`;
+}
+new ResizeObserver(fit).observe(stage);
+
+// The Fullscreen API where there is one; otherwise (iPhone) hide the page
+// around the game. Launched from the Home Screen, the game starts immersive.
+const root = document.documentElement;
+const canFullscreen = !!(root.requestFullscreen || root.webkitRequestFullscreen) &&
+  (document.fullscreenEnabled ?? document.webkitFullscreenEnabled ?? false);
+const setImmersive = (on) => {
+  document.body.classList.toggle("immersive", on);
+  fit();
+};
+document.getElementById("fullscreen").addEventListener("click", () => {
+  if (canFullscreen) (root.requestFullscreen ?? root.webkitRequestFullscreen).call(root, { navigationUI: "hide" });
+  setImmersive(true);
+  canvas.focus();
+});
+document.getElementById("exit-immersive").addEventListener("click", () => {
+  if (document.fullscreenElement || document.webkitFullscreenElement) (document.exitFullscreen ?? document.webkitExitFullscreen).call(document);
+  setImmersive(false);
+});
+for (const name of ["fullscreenchange", "webkitfullscreenchange"]) {
+  document.addEventListener(name, () => {
+    if (!(document.fullscreenElement || document.webkitFullscreenElement)) setImmersive(false);
+  });
+}
+if (navigator.standalone || matchMedia("(display-mode: fullscreen), (display-mode: standalone)").matches) setImmersive(true);
+
+// ---- touch: on-screen keys and swipes ----
+
+const touch = matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
+const SHIFT = 65505;
+// Set once the game is running.
+let sendKey = null;
+const press = (sym, text = "") => sendKey?.(2, sym, text);
+const release = (sym) => sendKey?.(3, sym);
+
+function enableTouch() {
+  if (document.body.classList.contains("touch")) return;
+  document.body.classList.add("touch");
+  fit();
+}
+if (touch) enableTouch();
+addEventListener("touchstart", enableTouch, { once: true, passive: true });
+
+for (const key of document.querySelectorAll(".controls .key")) {
+  const sym = Number(key.dataset.key);
+  const text = key.dataset.text ?? "";
+  const shifted = key.dataset.shift === "1";
+  let held = false;
+  const up = () => {
+    if (!held) return;
+    held = false;
+    key.classList.remove("held");
+    release(sym);
+    if (shifted) release(SHIFT);
+  };
+  // Keys never take focus, so the game keeps it.
+  key.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    key.setPointerCapture(e.pointerId);
+    held = true;
+    key.classList.add("held");
+    if (shifted) press(SHIFT);
+    press(sym, text);
+  });
+  for (const name of ["pointerup", "pointercancel", "lostpointercapture"]) key.addEventListener(name, up);
+}
+
+// A swipe on the game moves one step.
+let swipe = null;
+canvas.addEventListener("pointerdown", (e) => {
+  if (e.pointerType !== "mouse") swipe = { x: e.clientX, y: e.clientY };
+});
+canvas.addEventListener("pointerup", (e) => {
+  if (!swipe) return;
+  const dx = e.clientX - swipe.x;
+  const dy = e.clientY - swipe.y;
+  swipe = null;
+  if (Math.max(Math.abs(dx), Math.abs(dy)) < 24) return;
+  const sym = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? 65361 : 65363) : (dy < 0 ? 65362 : 65364);
+  press(sym);
+  release(sym);
+});
+
 document.getElementById("reset").addEventListener("click", () => {
   if (!confirm(`Forget saved progress and edits to ${LEVELS[level].title}?`)) return;
   localStorage.removeItem(STORAGE_KEY);
@@ -75,10 +168,17 @@ async function main() {
   const { instance, mem } = await instantiate(module, sys, platform.imports);
   platform.attach(instance, mem);
 
-  show("Click the game to start");
+  sendKey = platform.key;
+  // Keyboard players see when the game loses focus; touch controls do not need it.
+  show(touch ? "Tap the game to start" : "Click the game to start");
   canvas.addEventListener("focus", () => (overlay.hidden = true));
-  canvas.addEventListener("blur", () => show("Click the game to continue"));
-  canvas.addEventListener("pointerdown", () => canvas.focus());
+  canvas.addEventListener("blur", () => {
+    if (!document.body.classList.contains("touch")) show("Click the game to continue");
+  });
+  canvas.addEventListener("pointerdown", () => {
+    canvas.focus();
+    overlay.hidden = true;
+  });
   canvas.focus();
 
   const status = await runResumable(instance, platform.nextFrame);
