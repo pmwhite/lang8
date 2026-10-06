@@ -381,6 +381,8 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
   const callMs = {};
   const drawSites = {};
   const vertexCounts = {};
+  // Bytes uploaded by each buffer function.
+  const uploads = {};
   if (countCalls) {
     const last = new Map();
     for (const [key, f] of Object.entries(GL)) {
@@ -390,6 +392,8 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
         const text = args.join(",");
         if (last.get(slot) === text) repeats[key] = (repeats[key] ?? 0) + 1;
         last.set(slot, text);
+        if (key === "glBufferData" && args[2] !== 0n) uploads[key] = (uploads[key] ?? 0) + n(args[1]);
+        if (key === "glBufferSubData") uploads[key] = (uploads[key] ?? 0) + n(args[2]);
         if (key === "glDrawArrays" || key === "glDrawArraysInstanced") {
           // Vertices drawn per framebuffer and program, and debug skips.
           const target = `fb${boundFramebufferId} prog${currentProgram}`;
@@ -573,7 +577,7 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
       scale = k;
       resize();
     },
-    callCounts: () => ({ calls: { ...calls }, repeats: { ...repeats }, ms: { ...callMs }, sites: { ...drawSites }, vertices: { ...vertexCounts } }),
+    callCounts: () => ({ calls: { ...calls }, repeats: { ...repeats }, ms: { ...callMs }, sites: { ...drawSites }, vertices: { ...vertexCounts }, uploads: { ...uploads } }),
     workMs: () => work,
   };
 }

@@ -63,20 +63,22 @@ only the chunks of its wall mesh that a pass can see, which together took it
 from about 3,500 GL calls and 1.4 million vertices per frame to about 950 calls
 and 690,000 vertices. The host also skips uniform updates that repeat a
 location's current value. What remains is mostly the per-pixel cost of the
-ground's shading, so the page adapts the render resolution: when frames are slow while the game's own
-work per frame leaves time to spare, the GPU is the limit, so it renders the
-window at a smaller size (down to half) and scales it up, and raises the size
-again when frames have headroom. A step down that does not speed frames up is
-undone, since a browser frame-rate cap (such as iOS Low Power Mode) is not
-helped by fewer pixels.
+ground's shading, so the page adapts the render resolution: when frames are
+slow, it renders the window at a smaller size (down to half) and scales it up,
+and raises the size again when frames have headroom. A step down that does not
+speed frames up is undone, since neither a busy CPU nor a browser frame-rate cap
+(such as iOS Low Power Mode) is helped by fewer pixels. The game's own work time
+cannot decide this: Safari runs WebGL in a separate GPU process, and when the
+GPU falls behind, the game's WebGL calls wait, so GPU time shows up as work.
 
 The game's own frame-time view (frame rate, frame and work times, and heap
 size) opens with F3, as in the native game, with the FPS key, or with `?fps`.
 
-Query parameters: `?stats` shows the frame rate, the game's CPU time per frame,
+Query parameters: `?stats` shows the frame rate, the game's work time per frame,
 and the render size; `?scale=0.6` fixes the render size; `?glcheck` reports
 failing GL calls and `?glstats` counts and times them, with the vertices each
-framebuffer, program, and drawing function produces (see `l8Game.callCounts()`
+framebuffer, program, and drawing function produces, and the bytes each buffer
+function uploads (see `l8Game.callCounts()`
 on the console); `?skip=fb44,prog3` drops those draws, to measure their cost;
 and `L8_` parameters such as `?L8_WATER_STATIC` set the game's
 environment variables.

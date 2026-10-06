@@ -156,9 +156,11 @@ async function main() {
   show(`The game exited${status ? ` with status ${status}` : ""}.<br><a href="">Play again</a>`);
 }
 
-// Wait for each frame, and adapt the render resolution: when frames are slow
-// although the game's own work leaves time to spare, the GPU is the limit, so
-// render fewer pixels; when there is headroom again, render more.
+// Wait for each frame, and adapt the render resolution: when frames are slow,
+// render fewer pixels, and keep doing so while that speeds them up; when there
+// is headroom again, render more. The game's own work time cannot tell whether
+// the GPU is the limit: where WebGL runs in another process, as in Safari, its
+// calls wait for a busy GPU, so that wait counts as work.
 function pacer(platform, adapt, stats) {
   const STEPS = [1, 0.85, 0.72, 0.6, 0.5];
   let step = 0;
@@ -187,7 +189,7 @@ function pacer(platform, adapt, stats) {
     if (frames < 30) return;
     const interval = elapsed / frames;
     const work = (platform.workMs() - work0) / frames;
-    if (label) label.textContent = `${(1000 / interval).toFixed(0)} fps · cpu ${work.toFixed(1)} ms · ${Math.round(platform.scale() * 100)}%`;
+    if (label) label.textContent = `${(1000 / interval).toFixed(0)} fps · work ${work.toFixed(1)} ms · ${Math.round(platform.scale() * 100)}%`;
     if (adapt) {
       // A step down must speed frames up, or it only blurs the game (as when
       // the browser caps the frame rate, like iOS in Low Power Mode).
@@ -196,7 +198,7 @@ function pacer(platform, adapt, stats) {
         floor = step;
       }
       before = 0;
-      const slow = interval > 22 && work < 0.6 * interval;
+      const slow = interval > 22;
       fast = interval < 18 ? fast + 1 : 0;
       if (slow && step < floor) {
         before = interval;
