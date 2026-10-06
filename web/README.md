@@ -36,8 +36,11 @@ implements the X11, GLX, OpenGL, and FreeType functions it imports on a
 WebGL2 canvas:
 
 - OpenGL calls map to WebGL2, with integer names for WebGL objects. Shaders
-  are translated from GLSL 1.20 to GLSL ES 3.00. The version query reports
-  3.0, so the game skips its OpenGL 4.3 compute-shader water simulation.
+  are translated from GLSL 1.20 and 3.30 to GLSL ES 3.00. The version query
+  reports 3.3, so the water solver runs as fragment passes over float textures
+  instead of compute shaders (see `programs/block-game/WATER.md`). That needs
+  `EXT_color_buffer_float`; without `EXT_float_blend`, the blended displacement
+  target uses half floats.
 - `glXSwapBuffers` suspends the module until the next animation frame using
   JavaScript Promise Integration (`WebAssembly.Suspending`), so the game's own
   blocking event loop drives the page. Browsers without JSPI get a message.
@@ -45,8 +48,10 @@ WebGL2 canvas:
 - FreeType glyphs are rasterized with a 2D canvas into the `FT_GlyphSlot`
   fields the bindings read.
 
-The world file is kept in an in-memory file system and saved to
-`localStorage` whenever the game writes it. `?edit` opens the editor.
+The page offers the world, a pond demo (push the block into the water, or press
+F8 for ripples), and the Canopy Walk level. Each level is kept in an in-memory
+file system and saved to `localStorage` whenever the game writes it. `?edit`
+opens the editor, and `?glcheck` reports failing GL calls in the log.
 
 ## Modules
 

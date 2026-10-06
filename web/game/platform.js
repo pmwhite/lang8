@@ -32,17 +32,21 @@ function keysym(e) {
   return e.key.length === 1 ? e.key.charCodeAt(0) : 0;
 }
 
-// GLSL 1.20 to GLSL ES 3.00. The game's shaders use attribute/varying,
-// texture2D, shadow2D, and gl_FragColor.
 // Words reserved in GLSL ES 3.00 that GLSL 1.20 code may use as names.
 const RESERVED = /\b(patch|sample|smooth|flat|centroid|layout|filter|input|output|common|partition|active|half|fixed|long|short|double|unsigned|superp|union|enum|class|template|this|packed|goto|inline|noinline|volatile|public|static|extern|external|interface|namespace|using|cast|sizeof|resource|coherent|restrict|readonly|writeonly|subroutine|noperspective|buffer|shared)\b/g;
 
+// GLSL to GLSL ES 3.00. Version 330 shaders (the water solver's fragment
+// passes) only need the ES header. Version 120 shaders use attribute/varying,
+// texture2D, shadow2D, and gl_FragColor, and may use ES keywords as names.
 export function translateShader(source, fragment) {
-  let s = source.replace(/^\s*#version[^\n]*\n/, "").replace(RESERVED, "$1_l8");
-  s = s.replace(/\btexture2DLod\s*\(/g, "textureLod(").replace(/\btexture2D\s*\(/g, "texture(");
-  s = s.replace(/\bshadow2D\s*\(/g, "l8_shadow2D(");
+  const version = Number((source.match(/^\s*#version\s+(\d+)/) ?? [0, 120])[1]);
+  let s = source.replace(/^\s*#version[^\n]*\n/, "");
   let head = "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n" +
     "precision highp sampler2DShadow;\n";
+  if (version >= 300) return head + s;
+  s = s.replace(RESERVED, "$1_l8");
+  s = s.replace(/\btexture2DLod\s*\(/g, "textureLod(").replace(/\btexture2D\s*\(/g, "texture(");
+  s = s.replace(/\bshadow2D\s*\(/g, "l8_shadow2D(");
   if (fragment) {
     s = s.replace(/\bvarying\b/g, "in").replace(/\bgl_FragColor\b/g, "l8_FragColor");
     head += "out vec4 l8_FragColor;\nvec4 l8_shadow2D(sampler2DShadow s, vec3 c) { return vec4(texture(s, c)); }\n";
@@ -52,11 +56,16 @@ export function translateShader(source, fragment) {
   return head + s;
 }
 
-export function createPlatform(canvas, { log = console.log } = {}) {
+export function createPlatform(canvas, { log = console.log, checkErrors = false } = {}) {
   let mem = null;
   let instance = null;
   const gl = canvas.getContext("webgl2", { antialias: false, depth: true, stencil: false, alpha: false });
   if (!gl) throw new Error("This browser does not support WebGL2.");
+  // Float render targets let the water solver run as fragment passes. Its
+  // displacement target blends; without float blending it uses half floats.
+  const floatTargets = !!gl.getExtension("EXT_color_buffer_float");
+  const floatBlend = !!gl.getExtension("EXT_float_blend");
+  if (!floatTargets) log("WebGL2 cannot render to float textures; the water stays still.");
   const view = () => new DataView(instance.exports.memory.buffer);
   const bytes = () => new Uint8Array(instance.exports.memory.buffer);
   const cstring = (ptr) => {
@@ -216,7 +225,8 @@ export function createPlatform(canvas, { log = console.log } = {}) {
     glMemoryBarrier: () => 0n,
     glLogicOp: () => 0n,
     glGetIntegerv(pname, out) {
-      const values = { 33307: 3, 33308: 0 };
+      // OpenGL 3.3: no compute shaders, but enough for fragment-pass water.
+      const values = { 33307: 3, 33308: 3 };
       view().setInt32(n(out), values[n(pname)] ?? 0, true);
       return 0n;
     },
@@ -250,6 +260,10 @@ export function createPlatform(canvas, { log = console.log } = {}) {
       return 0n;
     },
     glTexImage2D(target, level, internal, w, h, border, format, type, pixels) {
+      if (n(internal) === gl.R32F && pixels === 0n && !floatBlend) {
+        gl.texImage2D(n(target), n(level), gl.R16F, n(w), n(h), n(border), n(format), gl.HALF_FLOAT, null);
+        return 0n;
+      }
       const data = pixelView(n(type), pixels, n(w), n(h), channelsOf(n(format)));
       gl.texImage2D(n(target), n(level), n(internal), n(w), n(h), n(border), n(format), n(type), data);
       return 0n;
@@ -289,6 +303,19 @@ export function createPlatform(canvas, { log = console.log } = {}) {
     },
     glGetError: () => BigInt(gl.getError()),
   };
+
+  // With checkErrors, report the first few GL calls that fail.
+  if (checkErrors) {
+    let reported = 0;
+    for (const [key, f] of Object.entries(GL)) {
+      GL[key] = (...args) => {
+        const result = f(...args);
+        const error = gl.getError();
+        if (error && reported++ < 20) log(`GL error ${error} in ${key}(${args.join(", ")})`);
+        return result;
+      };
+    }
+  }
 
   // ---- X11 and GLX ----
 

@@ -4,14 +4,22 @@
 import { instantiate, runStartAsync, MemFS } from "../l8-runtime.js";
 import { createPlatform } from "./platform.js";
 
-const WORLD = "/programs/block-game/world.txt";
-const STORAGE_KEY = "l8-block-game-world";
+// Levels the page offers; each keeps its own saved copy.
+const LEVELS = {
+  world: { file: "world.txt", title: "World" },
+  pond: { file: "pond.txt", title: "Pond" },
+  grove: { file: "grove-demo.txt", title: "Canopy walk" },
+};
+const params = new URLSearchParams(location.search);
+const level = LEVELS[params.get("level")] ? params.get("level") : "world";
+const WORLD = `/programs/block-game/${LEVELS[level].file}`;
+const STORAGE_KEY = level === "world" ? "l8-block-game-world" : `l8-block-game-${level}`;
 
 const canvas = document.getElementById("screen");
 const overlay = document.getElementById("overlay");
 const message = document.getElementById("message");
 const logBox = document.getElementById("log");
-const editing = new URLSearchParams(location.search).has("edit");
+const editing = params.has("edit");
 
 const log = (text) => {
   logBox.textContent += text.endsWith("\n") ? text : text + "\n";
@@ -26,13 +34,21 @@ const show = (html) => {
   overlay.hidden = false;
 };
 
+const picker = document.getElementById("level");
+for (const [key, { title }] of Object.entries(LEVELS)) picker.add(new Option(title, key, false, key === level));
+picker.addEventListener("change", () => {
+  const next = new URLSearchParams({ level: picker.value });
+  if (editing) next.set("edit", "");
+  location.search = next.toString().replace(/=$/, "");
+});
+const modeLink = document.getElementById("mode");
+modeLink.href = `?level=${level}${editing ? "" : "&edit"}`;
 if (editing) {
-  document.getElementById("mode").textContent = "Play";
-  document.getElementById("mode").href = "./";
+  modeLink.textContent = "Play";
   document.getElementById("hint").textContent = "Editor: keys are listed on screen; q quits";
 }
 document.getElementById("reset").addEventListener("click", () => {
-  if (!confirm("Forget saved progress and edits to the world?")) return;
+  if (!confirm(`Forget saved progress and edits to ${LEVELS[level].title}?`)) return;
   localStorage.removeItem(STORAGE_KEY);
   location.reload();
 });
@@ -45,7 +61,7 @@ async function main() {
   }
   const [module, world] = await Promise.all([
     WebAssembly.compileStreaming(fetch("block-game.wasm")),
-    fetch("world.txt").then((r) => r.text()),
+    fetch(LEVELS[level].file).then((r) => r.text()),
   ]);
   const fs = new MemFS({ [WORLD]: localStorage.getItem(STORAGE_KEY) ?? world });
   const decoder = new TextDecoder();
@@ -59,7 +75,7 @@ async function main() {
     return status;
   };
 
-  const platform = createPlatform(canvas, { log: fail });
+  const platform = createPlatform(canvas, { log: fail, checkErrors: params.has("glcheck") });
   window.l8Game = platform;
   const { instance, mem } = await instantiate(module, sys, platform.imports);
   platform.attach(instance, mem);
