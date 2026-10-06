@@ -29,6 +29,25 @@ python3 -m http.server -d .build/web 8000   # then open http://localhost:8000/
 Programs import the standard library as `"stdlib/print.l8"`; the editor's
 file is `/main.l8` beside `/stdlib`.
 
+## Block game
+
+The site's `game/` page runs `programs/block-game` unchanged. `game/platform.js`
+implements the X11, GLX, OpenGL, and FreeType functions it imports on a
+WebGL2 canvas:
+
+- OpenGL calls map to WebGL2, with integer names for WebGL objects. Shaders
+  are translated from GLSL 1.20 to GLSL ES 3.00. The version query reports
+  3.0, so the game skips its OpenGL 4.3 compute-shader water simulation.
+- `glXSwapBuffers` suspends the module until the next animation frame using
+  JavaScript Promise Integration (`WebAssembly.Suspending`), so the game's own
+  blocking event loop drives the page. Browsers without JSPI get a message.
+- Key events become X11 `KeyPress` and `KeyRelease` events with X keysyms.
+- FreeType glyphs are rasterized with a 2D canvas into the `FT_GlyphSlot`
+  fields the bindings read.
+
+The world file is kept in an in-memory file system and saved to
+`localStorage` whenever the game writes it. `?edit` opens the editor.
+
 ## Modules
 
 The backend (`src2/wasm.l8`) lowers the same typed AST as the x86 backend
@@ -50,7 +69,8 @@ and offsets on both targets:
 - Function values are indices in the exported function table.
 
 The module exports `memory`, `table`, `_start`, `l8_malloc` (so the host can
-build values such as `argv`), and the heap pointer `l8_heap`.
+build values such as `argv`), and the heap pointer `l8_heap`. Its `name`
+section gives functions their link names in stack traces and profiles.
 
 ## Host interface
 

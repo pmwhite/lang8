@@ -228,12 +228,16 @@ wasm-test: $(OK)/wasm-fixpoint $(OK)/wasm-tests
 # The playground: a static site in .build/web with the compiler as a module.
 # Serve it with `python3 -m http.server -d .build/web`.
 WEB_SITE := $(BUILD)/web
-WEB_FILES := web/index.html $(wildcard web/*.js web/examples/*.l8)
+WEB_FILES := web/index.html $(wildcard web/*.js web/examples/*.l8 web/game/*)
 
-$(OK)/web: $(BUILD)/l8.wasm $(WEB_FILES) $(STDLIB) | $(OK)
-	@$(STEP) 'web site' sh -c 'rm -rf $(WEB_SITE) && mkdir -p $(WEB_SITE)/stdlib $(WEB_SITE)/examples && \
+$(BUILD)/block-game.wasm: l8c3 $(PROGRAMS) | $(OK)
+	@$(STEP) 'block game wasm' sh -c './l8c3 wasm programs/block-game/block-game.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+$(OK)/web: $(BUILD)/l8.wasm $(BUILD)/block-game.wasm $(WEB_FILES) $(STDLIB) | $(OK)
+	@$(STEP) 'web site' sh -c 'rm -rf $(WEB_SITE) && mkdir -p $(WEB_SITE)/stdlib $(WEB_SITE)/examples $(WEB_SITE)/game && \
 		cp web/index.html web/*.js $(WEB_SITE)/ && cp web/examples/*.l8 $(WEB_SITE)/examples/ && \
-		cp $(STDLIB) $(WEB_SITE)/stdlib/ && cp $(BUILD)/l8.wasm $(WEB_SITE)/'
+		cp $(STDLIB) $(WEB_SITE)/stdlib/ && cp $(BUILD)/l8.wasm $(WEB_SITE)/ && \
+		cp web/game/* $(BUILD)/block-game.wasm programs/block-game/world.txt $(WEB_SITE)/game/'
 	@touch $@
 
 web: $(OK)/web

@@ -193,7 +193,9 @@ export async function instantiate(module, sys, extra = {}) {
     if (imp.kind !== "function") continue;
     const own = extra[imp.name] || env[imp.name];
     imports[imp.module] ??= {};
-    imports[imp.module][imp.name] = own ? own.bind(mem) : () => BigInt(-ENOSYS);
+    // Functions see the memory helpers as `this`; WebAssembly.Suspending
+    // wrappers pass through unchanged.
+    imports[imp.module][imp.name] = typeof own === "function" ? own.bind(mem) : own ?? (() => BigInt(-ENOSYS));
   }
   instance = await WebAssembly.instantiate(module, imports);
   const heapBase = instance.exports.l8_heap.value;
@@ -204,6 +206,18 @@ export async function instantiate(module, sys, extra = {}) {
 export function runStart(instance) {
   try {
     instance.exports._start();
+    return 0;
+  } catch (e) {
+    if (e instanceof Exit) return e.status;
+    throw e;
+  }
+}
+
+// Run _start through JS Promise Integration, so suspending imports can wait
+// for the page; resolve to the exit status.
+export async function runStartAsync(instance) {
+  try {
+    await WebAssembly.promising(instance.exports._start)();
     return 0;
   } catch (e) {
     if (e instanceof Exit) return e.status;
