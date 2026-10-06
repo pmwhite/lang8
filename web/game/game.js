@@ -5,6 +5,7 @@
 import { instantiate, runResumable, MemFS } from "../l8-runtime.js";
 import { createPlatform } from "./platform.js";
 import { createTelemetry } from "./telemetry.js";
+import { startControl } from "./control.js";
 
 const WORLD = "/programs/block-game/world.txt";
 const STORAGE_KEY = "l8-block-game-world";
@@ -168,6 +169,8 @@ async function main() {
           note.hidden = !text;
         },
       });
+  // The development server can also send commands (see control.js).
+  if (telemetry) startControl(platform, telemetry);
   const status = await runResumable(instance, pacer(platform, fixedScale === null, params.has("stats"), telemetry));
   canvas.blur();
   show(`The game exited${status ? ` with status ${status}` : ""}.<br><a href="">Play again</a>`);

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Serve the web site for development, and collect the game's telemetry.
+"""Serve the web site for development, collect the game's telemetry, and
+relay commands to open game pages.
 
     python3 web/serve.py [port] [directory]
 
@@ -7,21 +8,83 @@ Serves `directory` (default .build/web) on all interfaces at `port` (default
 8765), like `python3 -m http.server`. A POST of JSON to /telemetry is
 appended, one object per line with the client's address, to telemetry.jsonl
 in the directory's parent (.build/telemetry.jsonl by default).
+
+Remote control (see web/control.py): a POST of a JSON command to /control
+queues it; game pages poll GET /control?after=ID&session=S&ua=U for newer
+commands, run them, and post their results to /telemetry. GET /clients lists
+the pages that polled recently. Anyone who can reach the server can run
+code in those pages, so serve it only on a private network.
 """
 import functools
 import http.server
 import json
 import os
 import sys
+import threading
 import time
+import urllib.parse
 
 MAX_BODY = 256 * 1024
+
+
+COMMANDS = []  # (id, command), newest last
+CLIENTS = {}  # session -> {"ua", "client", "seen", "url"}
+LOCK = threading.Lock()
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     log_path = ""
 
+    def send_json(self, value, status=200):
+        body = json.dumps(value).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        url = urllib.parse.urlsplit(self.path)
+        query = urllib.parse.parse_qs(url.query)
+        if url.path == "/control":
+            after = int(query.get("after", ["-1"])[0])
+            session = query.get("session", [""])[0]
+            with LOCK:
+                if session:
+                    CLIENTS[session] = {
+                        "ua": query.get("ua", [""])[0],
+                        "url": query.get("url", [""])[0],
+                        "client": self.client_address[0],
+                        "seen": time.time(),
+                    }
+                latest = COMMANDS[-1][0] if COMMANDS else 0
+                newer = [c for i, c in COMMANDS if i > after] if after >= 0 else []
+            self.send_json({"latest": latest, "commands": newer})
+            return
+        if url.path == "/clients":
+            now = time.time()
+            with LOCK:
+                live = {k: dict(v, age=round(now - v["seen"], 1)) for k, v in CLIENTS.items() if now - v["seen"] < 30}
+            self.send_json(live)
+            return
+        super().do_GET()
+
     def do_POST(self):
+        if self.path == "/control":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                command = json.loads(self.rfile.read(length)) if 0 < length <= MAX_BODY else None
+            except ValueError:
+                command = None
+            if not isinstance(command, dict) or "cmd" not in command:
+                self.send_error(400)
+                return
+            with LOCK:
+                command["id"] = (COMMANDS[-1][0] if COMMANDS else 0) + 1
+                COMMANDS.append((command["id"], command))
+                del COMMANDS[:-100]
+            self.send_json({"id": command["id"]})
+            return
         if self.path != "/telemetry":
             self.send_error(404)
             return

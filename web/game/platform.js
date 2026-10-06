@@ -135,6 +135,11 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
   const uniformProgram = [0];
   const uniformValues = [null];
   let currentProgram = -1;
+  // Debug-group timing: names by message address, the open groups (name,
+  // start), and total milliseconds by name.
+  const phaseNames = new Map();
+  const phaseStack = [];
+  const phaseMs = {};
   // Draws to leave out, to measure what they cost: "fb44" or "prog3" for one
   // framebuffer or program, "offscreen" for every framebuffer but the
   // window's, or "all".
@@ -342,6 +347,26 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
     },
     glClearColor: (r, g, b, a) => (gl.clearColor(r, g, b, a), 0n),
     glClear: (mask) => (gl.clear(n(mask)), 0n),
+    // The game marks parts of a frame with debug groups; with timing, their
+    // milliseconds go to the telemetry.
+    glPushDebugGroup(_source, _id, length, message) {
+      if (!timing) return 0n;
+      const key = Number(message);
+      let label = phaseNames.get(key);
+      if (label === undefined) {
+        label = decoder.decode(bytes().subarray(key, key + n(length)));
+        phaseNames.set(key, label);
+      }
+      phaseStack.push(label, performance.now());
+      return 0n;
+    },
+    glPopDebugGroup() {
+      if (!timing || phaseStack.length < 2) return 0n;
+      const t = phaseStack.pop();
+      const label = phaseStack.pop();
+      phaseMs[label] = (phaseMs[label] ?? 0) + performance.now() - t;
+      return 0n;
+    },
     glDrawArrays: (mode, first, count) => (skipped() || gl.drawArrays(n(mode), n(first), n(count)), 0n),
     glDrawArraysInstanced: (mode, first, count, k) => (skipped() || gl.drawArraysInstanced(n(mode), n(first), n(count), n(k)), 0n),
     glEnable: (cap) => (gl.enable(n(cap)), 0n),
@@ -655,7 +680,7 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
       skip = new Set(names);
     },
     // Totals since the start: GL time and calls by function (with timing).
-    glTiming: () => ({ ms: { ...glMs }, calls: { ...glCalls } }),
+    glTiming: () => ({ ms: { ...glMs }, calls: { ...glCalls }, phases: { ...phaseMs } }),
     frames: () => frames,
     // The fraction of the window's size the canvas renders at.
     scale: () => scale,

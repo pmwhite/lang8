@@ -101,7 +101,28 @@ frames with the shadow map, grass, or all drawing left out, and posts the
 results; the differences show what each part costs on the device. It starts
 from the original world and saves nothing, so the walking changes no
 progress. Reports also say whether the frame-time view was open and how many
-keys were pressed. A server without the endpoint
+keys were pressed. Reports also time each part of a frame the game marks with GL debug
+groups (`frame_phase`): wind, lighting, shadow map, reflection, water and
+sand, grass, walls, blocks, plants, HUD, the frame-time view, and the update
+before drawing.
+
+Remote control: an open game page polls the server about once a second for
+commands, runs those addressed to it, and logs the results with the
+telemetry, so a page left open on a phone can be driven from the
+development machine:
+
+```sh
+python3 web/control.py clients                       # pages polling now
+python3 web/control.py probe --target iPhone         # reload with ?probe
+python3 web/control.py reload '?scale=0.5' --target iPhone
+python3 web/control.py set '{"view": true}'          # also scale, skip
+python3 web/control.py keys '[[2, 65363, 900], [3, 65363]]'
+python3 web/control.py report                        # a frame report now
+python3 web/control.py eval 'return platform.windowSize()'
+```
+
+Anyone who can reach the server can run code in those pages, so serve it
+only on a private network. A server without the endpoints
 turns the posts off, and `?notelemetry` turns off them and the GL timing.
 
 Query parameters: `?stats` shows the frame rate, the game's work time per frame,

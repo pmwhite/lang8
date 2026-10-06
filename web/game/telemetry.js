@@ -82,6 +82,12 @@ export function createTelemetry(platform, { probe = false, show = () => {} } = {
       if (ms > 0.05) glMs[key] = +ms.toFixed(2);
     }
     const work = (platform.workMs() - w.work) / n;
+    // Milliseconds per frame in each part the game marks (code and GL).
+    const phases = {};
+    for (const key of Object.keys(gl.phases)) {
+      const ms = (gl.phases[key] - (w.gl.phases[key] ?? 0)) / n;
+      if (ms > 0.01) phases[key] = +ms.toFixed(2);
+    }
     const round = (x) => +x.toFixed(2);
     return {
       frames: n,
@@ -94,6 +100,7 @@ export function createTelemetry(platform, { probe = false, show = () => {} } = {
       code: round(work - glTotal),
       outside: round(mean - work),
       calls: Math.round(calls),
+      phases,
       topGl: Object.fromEntries(Object.entries(glMs).sort((a, b) => b[1] - a[1]).slice(0, 8)),
       scale: platform.scale(),
       canvas: platform.canvasSize(),
@@ -140,9 +147,18 @@ export function createTelemetry(platform, { probe = false, show = () => {} } = {
   };
   if (probe) configure(PROBE[0]);
 
-  // Called once per game frame.
   return {
+    session,
+    post,
     probing: () => step >= 0,
+    // Post a frame report for the frames since the last one, and return it.
+    reportNow() {
+      const s = summary(window_);
+      if (s) post("frames", s);
+      window_ = begin();
+      return s;
+    },
+    // Called once per game frame.
     frame(now) {
       if (last) window_.intervals.push(now - last);
       last = now;
