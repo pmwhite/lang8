@@ -1,7 +1,7 @@
 // Load the block game module and run it on the page's canvas. The world file
 // lives in an in-memory file system and is saved to localStorage whenever the
 // game writes it.
-import { instantiate, runStartAsync, MemFS } from "../l8-runtime.js";
+import { instantiate, runResumable, MemFS } from "../l8-runtime.js";
 import { createPlatform } from "./platform.js";
 
 // Levels the page offers; each keeps its own saved copy.
@@ -54,11 +54,6 @@ document.getElementById("reset").addEventListener("click", () => {
 });
 
 async function main() {
-  if (typeof WebAssembly.Suspending !== "function") {
-    show("This page needs WebAssembly JavaScript Promise Integration (JSPI).<br>" +
-      "Use a recent Chrome, Edge, or Firefox.");
-    return;
-  }
   const [module, world] = await Promise.all([
     WebAssembly.compileStreaming(fetch("block-game.wasm")),
     fetch(LEVELS[level].file).then((r) => r.text()),
@@ -86,7 +81,7 @@ async function main() {
   canvas.addEventListener("pointerdown", () => canvas.focus());
   canvas.focus();
 
-  const status = await runStartAsync(instance);
+  const status = await runResumable(instance, platform.nextFrame);
   canvas.blur();
   show(`The game exited${status ? ` with status ${status}` : ""}.<br><a href="">Play again</a>`);
   overlay.style.pointerEvents = "auto";

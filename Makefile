@@ -223,7 +223,14 @@ $(OK)/wasm-tests: l8c3 $(TESTS) $(PROGRAMS) $(WEB) | $(OK)
 	+@$(STEP) 'wasm tests' ./l8c3 test --wasm $(WASM_TESTS)
 	@touch $@
 
-wasm-test: $(OK)/wasm-fixpoint $(OK)/wasm-tests
+# A program that pauses and resumes everywhere it can (`l8 wasm --async`).
+$(OK)/wasm-resume: l8c3 web/tests/resume.l8 web/tests/resume.mjs $(WEB) | $(OK)
+	@$(STEP) 'wasm resume' sh -c './l8c3 wasm --async l8_pause web/tests/resume.l8 -o $(BUILD)/resume.wasm && \
+		./l8c3 wasm web/tests/resume.l8 -o $(BUILD)/resume-plain.wasm && \
+		node web/tests/resume.mjs $(BUILD)/resume.wasm $(BUILD)/resume-plain.wasm'
+	@touch $@
+
+wasm-test: $(OK)/wasm-fixpoint $(OK)/wasm-tests $(OK)/wasm-resume
 
 # The playground: a static site in .build/web with the compiler as a module.
 # Serve it with `python3 -m http.server -d .build/web`.
@@ -231,7 +238,7 @@ WEB_SITE := $(BUILD)/web
 WEB_FILES := web/index.html $(wildcard web/*.js web/examples/*.l8 web/game/*)
 
 $(BUILD)/block-game.wasm: l8c3 $(PROGRAMS) | $(OK)
-	@$(STEP) 'block game wasm' sh -c './l8c3 wasm programs/block-game/block-game.l8 -o $@.tmp && mv -f $@.tmp $@'
+	@$(STEP) 'block game wasm' sh -c './l8c3 wasm --async glXSwapBuffers programs/block-game/block-game.l8 -o $@.tmp && mv -f $@.tmp $@'
 
 $(OK)/web: $(BUILD)/l8.wasm $(BUILD)/block-game.wasm $(WEB_FILES) $(STDLIB) | $(OK)
 	@$(STEP) 'web site' sh -c 'rm -rf $(WEB_SITE) && mkdir -p $(WEB_SITE)/stdlib $(WEB_SITE)/examples $(WEB_SITE)/game && \

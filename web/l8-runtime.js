@@ -35,6 +35,7 @@ export async function instantiate(module, sys, extra = {}) {
   const view = () => new DataView(instance.exports.memory.buffer);
   const bytes = () => new Uint8Array(instance.exports.memory.buffer);
   const mem = {
+    instance: () => instance,
     view,
     bytes,
     // A counted str or []i8: data address with the length 8 bytes before it.
@@ -193,8 +194,7 @@ export async function instantiate(module, sys, extra = {}) {
     if (imp.kind !== "function") continue;
     const own = extra[imp.name] || env[imp.name];
     imports[imp.module] ??= {};
-    // Functions see the memory helpers as `this`; WebAssembly.Suspending
-    // wrappers pass through unchanged.
+    // Functions see the memory helpers as `this`.
     imports[imp.module][imp.name] = typeof own === "function" ? own.bind(mem) : own ?? (() => BigInt(-ENOSYS));
   }
   instance = await WebAssembly.instantiate(module, imports);
@@ -217,12 +217,33 @@ export function runStart(instance) {
   }
 }
 
-// Run _start through JS Promise Integration, so suspending imports can wait
-// for the page; resolve to the exit status.
-export async function runStartAsync(instance) {
+// For modules built with `l8 wasm --async NAME`: an implementation of import
+// NAME that pauses the module. The first call pauses it (the module unwinds
+// and _start returns); when runResumable calls _start again, the module
+// rewinds to the same call, which then returns value().
+export function pausing(value = () => 0n) {
+  return function () {
+    const state = this.instance().exports.l8_async_state;
+    if (state.value === 2n) {
+      state.value = 0n;
+      return value();
+    }
+    state.value = 1n;
+    return 0n;
+  };
+}
+
+// Run _start, and after each pause wait for wait() before resuming; resolve
+// to the exit status.
+export async function runResumable(instance, wait) {
+  const state = instance.exports.l8_async_state;
   try {
-    await WebAssembly.promising(instance.exports._start)();
-    return exitStatus(instance);
+    for (;;) {
+      instance.exports._start();
+      if (state.value !== 1n) return exitStatus(instance);
+      await wait();
+      state.value = 2n;
+    }
   } catch (e) {
     if (e instanceof Exit) return e.status;
     throw e;

@@ -62,7 +62,7 @@ l8 unusedassign file.l8
 l8 as [-p|--profile] -o file.o file.s runtime.s
 l8 elfpack file.o -o file
 l8 build [--profile|-p] file.l8 -o file
-l8 wasm [--profile|-p] file.l8 -o file.wasm
+l8 wasm [--profile|-p] [--async import]... file.l8 -o file.wasm
 l8 test [--accept] [--wasm] [-j N] file.l8|file.t ...
 ```
 
@@ -85,8 +85,9 @@ assembly and ET_REL are never serialized or reparsed.
 `wasm` compiles a program to a WebAssembly module instead (see
 [`web/README.md`](web/README.md)). The module keeps every type's layout and
 imports each `extern` from the host by its link name; `native` assembly is not
-included. `node web/run.mjs file.wasm args...` runs it, and `test --wasm` runs
-tests that way. `make wasm-test` runs the test suites as modules and checks
+included. `--async import` lets that import pause the module and resume it
+later, so a blocking program loop can run in a browser. `node web/run.mjs
+file.wasm args...` runs a module, and `test --wasm` runs tests that way. `make wasm-test` runs the test suites as modules and checks
 that the compiler, built as a module, rebuilds itself unchanged under Node.
 
 `unused` reports functions that are unreachable from every listed program.

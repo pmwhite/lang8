@@ -47,6 +47,19 @@ WG_INIT_DONE: int = 5;
 // The status `exit` records, which the host reads once _start returns.
 WG_EXIT_STATUS: int = 6;
 
+// `l8 wasm --async`: whether a resumable function is running (0), unwinding
+// to pause (1), or rewinding to resume (2); and the top of its frame records.
+WG_ASYNC_STATE: int = 7;
+
+WG_ASYNC_TOP: int = 8;
+
+WA_UNWINDING: int = 1;
+
+WA_REWINDING: int = 2;
+
+// Frame records: frame pointer, entry stack pointer, and call site.
+WASM_ASYNC_DEPTH: int = 256;
+
 // exit throws the module's tag with this exception tag, which no handler
 // matches, so it unwinds to _start without a JavaScript exception.
 WASM_EXIT_TAG: int = 0 - 1;
@@ -1352,6 +1365,9 @@ wg_call(
         error_at_file(n.file, n.pos, "wasm: unknown builtin function")
     }
     fn: *Function = fno or error("missing function");
+    site: bool = wl_async && fn.wasm_async;
+    if (site && !wa_site_ok) wa_misplaced(n);
+    wa_site_ok = false;
     if (fn.sret != null) wg_frame_addr(wl_rbp + cg_temp_offset(n));
     a: ?*Expr = args;
     p: ?*Obj = fn.params;
@@ -1372,6 +1388,7 @@ wg_call(
         rt: ?*Type = fn.return_ty;
         if (wasm_returns_value(rt)) wg_from_import(rt) else w_unreachable()
     }
+    if (site) wa_unwind_check()
 }
 
 wg_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
@@ -1544,13 +1561,296 @@ wasm_str(label: int) raises Error: int {
     wasm_str_addr[label]
 }
 
-// ---- statements ----
-wg_stmts(body: ?*Stmt) noregion raises Error, IndexOutOfBounds {
-    s: ?*Stmt = body;
+// ---- resumable functions (`l8 wasm --async NAME`) ----
+//
+// An --async import can pause the module. To pause, the host sets the async
+// state to unwinding and the import returns. Each resumable function on the
+// stack (one that can reach such an import) then records its frame pointer,
+// entry stack pointer, and which of its calls was pausing, and returns at
+// once. Its frame stays on the shadow stack, and it keeps every local there.
+// To resume, the host sets the state to rewinding and calls _start again.
+// Each resumable function takes its record back, skips the statements that
+// do not contain that call, takes the branch, loop body, or arm that does,
+// and makes the call again; the import sees the rewinding state, clears it,
+// and returns. A pausing call must be a whole statement, so the wasm operand
+// stack is empty across a pause.
+wasm_async_names: ?*NeedLib = null;
+
+// Generating a resumable function, outside code that skips while rewinding.
+wl_async: bool = false;
+
+wa_guarded: bool = false;
+
+// Local holding the call site being resumed; the next site's number.
+wl_rp: int = 0;
+
+wa_next_site: int = 0;
+
+// The call being generated may pause.
+wa_site_ok: bool = false;
+
+wasm_async_name(name: []i8): bool {
+    n: ?*NeedLib = wasm_async_names;
+    while (n != null) {
+        if (streq(n.name, name)) return true;
+        n = n.next
+    }
+    false
+}
+
+wa_is_site(e: *Expr): bool {
+    match e.kind {
+        Funcall k -> {
+            f: ?*Function = k.fn;
+            k.target == null && f != null && f.wasm_async
+        }
+        _ -> false
+    }
+}
+
+// Pausing calls in an expression or statements, in evaluation order.
+wa_count_expr(e: ?*Expr): int {
+    if (e == null) return 0;
+    n: *Expr = e;
+    match n.kind {
+        Binary k -> wa_count_expr(k.lhs) + wa_count_expr(k.rhs);
+        Assign k -> wa_count_expr(k.lhs) + wa_count_expr(k.rhs);
+        LogAnd k -> wa_count_expr(k.lhs) + wa_count_expr(k.rhs);
+        LogOr k -> wa_count_expr(k.lhs) + wa_count_expr(k.rhs);
+        OrElse k -> wa_count_expr(k.lhs) + wa_count_expr(k.rhs);
+        Index k -> wa_count_expr(k.lhs) + wa_count_expr(k.idx);
+        Addr k -> wa_count_expr(k.lhs);
+        Deref k -> wa_count_expr(k.lhs);
+        Not k -> wa_count_expr(k.lhs);
+        Neg k -> wa_count_expr(k.lhs);
+        BitNot k -> wa_count_expr(k.lhs);
+        MemberAccess k -> wa_count_expr(k.lhs);
+        As k -> wa_count_expr(k.lhs);
+        Trunc k -> wa_count_expr(k.lhs);
+        Funcall k -> {
+            total: int = wa_count_expr(k.target);
+            a: ?*Expr = k.args;
+            while (a != null) {
+                total = total + wa_count_expr(a);
+                a = a.next
+            }
+            if (wa_is_site(n)) total + 1 else total
+        }
+        New k -> wa_count_expr(k.lhs) + wa_count_expr(k.fill) + wa_count_inits(k.inits);
+        StructLit k -> wa_count_inits(k.inits);
+        VariantLit k -> wa_count_inits(k.inits);
+        If k -> wa_count_expr(k.cond) + wa_count_expr(k.then) + wa_count_expr(k.els);
+        Match k -> wa_count_expr(k.cond) + wa_count_arms(k.arms);
+        Block k -> wa_count_stmts(k.body);
+        ArrayLit k -> {
+            total2: int = 0;
+            el: ?*Expr = k.elems;
+            while (el != null) {
+                total2 = total2 + wa_count_expr(el);
+                el = el.next
+            }
+            total2
+        }
+        Sizeof k -> wa_count_expr(k.e);
+        _ -> 0
+    }
+}
+
+wa_count_inits(inits: ?*FieldInit): int {
+    total: int = 0;
+    i: ?*FieldInit = inits;
+    while (i != null) {
+        total = total + wa_count_expr(i.lhs);
+        i = i.next
+    }
+    total
+}
+
+wa_count_arms(arms: ?*MatchArm): int {
+    total: int = 0;
+    a: ?*MatchArm = arms;
+    while (a != null) {
+        total = total + wa_count_stmt(a.body);
+        a = a.next
+    }
+    total
+}
+
+wa_count_stmts(stmts: ?*Stmt): int {
+    total: int = 0;
+    s: ?*Stmt = stmts;
     while (s != null) {
-        wg_stmt(s);
+        total = total + wa_count_stmt(s);
         s = s.next
     }
+    total
+}
+
+wa_count_stmt(s: *Stmt): int {
+    match s.kind {
+        Return k -> wa_count_expr(k.lhs);
+        ExprStmt k -> wa_count_expr(k.lhs);
+        Decl k -> wa_count_expr(k.init);
+        Block k -> wa_count_stmts(k.body);
+        If k -> wa_count_expr(k.cond) + wa_count_stmt(k.then) + wa_count_stmts(k.els);
+        While k -> wa_count_expr(k.cond) + wa_count_stmt(k.body);
+        For k -> wa_count_expr(k.iter) + wa_count_expr(k.hi) + wa_count_stmt(k.body);
+        Match k -> wa_count_expr(k.cond) + wa_count_arms(k.arms);
+        Raise k -> wa_count_inits(k.inits);
+        Try k -> {
+            total: int = wa_count_stmt(k.body);
+            arm: ?*CatchArm = k.arms;
+            while (arm != null) {
+                total = total + wa_count_stmt(arm.body);
+                arm = arm.next
+            }
+            total
+        }
+        Region k -> wa_count_stmt(k.body);
+        Expect _ -> 0
+    }
+}
+
+// Mark the --async imports and every function that can reach one.
+wasm_mark_async() {
+    fn: ?*Function = functions;
+    while (fn != null) {
+        fn.wasm_async = fn.is_extern && wasm_async_name(fn.link_name);
+        fn = fn.next
+    }
+    changed: bool = true;
+    while (changed) {
+        changed = false;
+        f: ?*Function = functions;
+        while (f != null) {
+            if (!f.wasm_async && wasm_emits(f) && wa_count_stmts(f.body) > 0) {
+                f.wasm_async = true;
+                changed = true
+            }
+            f = f.next
+        }
+    }
+}
+
+// Code may be resumed into here: a resumable function, not skipped code.
+wa_resuming(): bool {
+    wl_async && !wa_guarded
+}
+
+// i32: the module is rewinding.
+wa_rewinding() raises Error {
+    w_gget(WG_ASYNC_STATE);
+    w_i64(WA_REWINDING);
+    w_op(81)
+}
+
+// i32: the call site being resumed is one of the n from lo.
+wa_resumes(lo: int, n: int) raises Error {
+    if (n <= 0) {
+        w_i32(0);
+        return
+    }
+    w_lget(wl_rp);
+    w_i64(lo);
+    w_op(89);
+    w_lget(wl_rp);
+    w_i64(lo + n);
+    w_op(83);
+    w_op(113)
+}
+
+// Code that runs only when not rewinding; give the result to wa_skip_end.
+wa_skip_begin() raises Error: bool {
+    saved: bool = wa_guarded;
+    wa_rewinding();
+    w_op(69);
+    w_if();
+    wa_guarded = true;
+    saved
+}
+
+wa_skip_end(saved: bool) raises Error {
+    w_end();
+    wa_guarded = saved
+}
+
+// After a call that may pause: when unwinding, record this frame and return.
+wa_unwind_check() raises Error {
+    site: int = wa_next_site;
+    wa_next_site = wa_next_site + 1;
+    w_gget(WG_ASYNC_STATE);
+    w_i64(WA_UNWINDING);
+    w_op(81);
+    w_if();
+    w_gget(WG_ASYNC_TOP);
+    w_wrap();
+    w_lget(wl_fp);
+    w_extend();
+    w_mem(55, 0);
+    w_gget(WG_ASYNC_TOP);
+    w_wrap();
+    w_lget(wl_sp0);
+    w_extend();
+    w_mem(55, 8);
+    w_gget(WG_ASYNC_TOP);
+    w_wrap();
+    w_i64(site);
+    w_mem(55, 16);
+    w_gget(WG_ASYNC_TOP);
+    w_i64(24);
+    w_op(124);
+    w_gset(WG_ASYNC_TOP);
+    w_i64(0);
+    w_op(15);
+    w_end()
+}
+
+// A statement form that may contain a pausing call: the call itself, an
+// assignment of its result, or a declaration it initializes.
+wa_site_form(e: *Expr): bool {
+    if (wa_is_site(e)) return true;
+    match e.kind {
+        Assign q -> wa_is_site(q.rhs);
+        _ -> false
+    }
+}
+
+wa_misplaced(e: ?*Expr) raises Error: noreturn {
+    if (e != null) error_at_file(e.file, e.pos, "wasm: a call that can pause the module must be a statement, an assignment, or a declaration's initializer, outside try");
+    error("wasm: a call that can pause the module must be a statement, an assignment, or a declaration's initializer, outside try")
+}
+
+// ---- statements ----
+wg_stmts(body: ?*Stmt) noregion raises Error, IndexOutOfBounds {
+    if (!wa_resuming()) {
+        s: ?*Stmt = body;
+        while (s != null) {
+            wg_stmt_code(s);
+            s = s.next
+        }
+        return
+    }
+    // Statements without a pausing call are skipped while rewinding.
+    open: bool = false;
+    saved: bool = false;
+    r: ?*Stmt = body;
+    while (r != null) {
+        if (wa_count_stmt(r) == 0) {
+            if (!open) {
+                saved = wa_skip_begin();
+                open = true
+            }
+            wg_stmt_code(r)
+        } else {
+            if (open) {
+                wa_skip_end(saved);
+                open = false
+            }
+            wg_stmt(r)
+        }
+        r = r.next
+    }
+    if (open) wa_skip_end(saved)
 }
 
 // Copy the aggregate at the address on the stack to the result slot and
@@ -1592,17 +1892,24 @@ wg_for(
     hi: ?*Expr,
     body: *Stmt
 ) noregion raises Error, IndexOutOfBounds {
+    // Rewinding enters the body without starting or testing the loop.
+    resuming: bool = wa_resuming();
+    if (resuming && wa_count_expr(iter) + wa_count_expr(hi) > 0) wa_misplaced(iter);
     if (hi != null) {
+        saved: bool = if (resuming) wa_skip_begin() else false;
         wg_expr(iter);
         wg_store_var(item, ty_int);
         wg_expr(hi);
         wg_store_var(count, ty_int);
+        if (resuming) wa_skip_end(saved);
         done: int = w_block();
         top: int = w_loop();
+        saved2: bool = if (resuming) wa_skip_begin() else false;
         wg_load_var(item, ty_int);
         wg_load_var(count, ty_int);
         w_op(89);
         w_br_if(done);
+        if (resuming) wa_skip_end(saved2);
         wg_stmt(body);
         wg_load_var(item, ty_int);
         w_i64(1);
@@ -1619,6 +1926,7 @@ wg_for(
     ity: *Type = item.ty or error("missing type");
     esz: int = type_size(ity);
     array: bool = is_array(sty);
+    saved3: bool = if (resuming) wa_skip_begin() else false;
     if (array) {
         wg_var_addr(cu);
         w_wrap();
@@ -1639,8 +1947,10 @@ wg_for(
     wg_store_var(count, ty_int);
     w_i64(0);
     wg_store_var(iu, ty_int);
+    if (resuming) wa_skip_end(saved3);
     done2: int = w_block();
     top2: int = w_loop();
+    saved4: bool = if (resuming) wa_skip_begin() else false;
     wg_load_var(iu, ty_int);
     wg_load_var(count, ty_int);
     w_op(90);
@@ -1665,6 +1975,7 @@ wg_for(
         wg_load_op(ity, 0);
         wg_store_var(item, ity)
     }
+    if (resuming) wa_skip_end(saved4);
     wg_stmt(body);
     wg_load_var(iu, ty_int);
     w_i64(1);
@@ -1697,7 +2008,11 @@ wg_match_binder(arm: *MatchArm, ta: int) raises Error {
 // Dispatch on an enum's tag with br_table when its tags are dense, else with
 // comparisons. Each arm has a block; the first wildcard is the fallback.
 wg_match_enum(cond: *Expr, cty: *Type, arms: ?*MatchArm) noregion raises Error, IndexOutOfBounds {
+    resuming: bool = wa_resuming();
+    if (resuming && wa_count_expr(cond) > 0) wa_misplaced(cond);
     ta: int = wt_get();
+    tt: int = wt_get();
+    saved: bool = if (resuming) wa_skip_begin() else false;
     if (passes_by_ref(cty)) wg_expr(cond) else {
         lvalue: bool = false;
         match cond.kind {
@@ -1716,11 +2031,11 @@ wg_match_enum(cond: *Expr, cty: *Type, arms: ?*MatchArm) noregion raises Error, 
         }
     }
     w_lset(ta);
-    tt: int = wt_get();
     w_lget(ta);
     w_wrap();
     wg_load_op(enum_tag_type(cty), 0);
     w_lset(tt);
+    if (resuming) wa_skip_end(saved);
     narms: int = 0;
     wild: int = 0 - 1;
     low: int = 0;
@@ -1744,6 +2059,24 @@ wg_match_enum(cond: *Expr, cty: *Type, arms: ?*MatchArm) noregion raises Error, 
     for _i in 0..narms _arm_block: int = w_block();
     // Arm i's block is the (narms - i)th inside missing.
     fallback: int = if (wild >= 0) missing + narms - wild else missing;
+    if (resuming) {
+        // Rewinding goes to the arm with the call being resumed.
+        first: int = wa_next_site;
+        j: int = 0;
+        rarm: ?*MatchArm = arms;
+        while (rarm != null) {
+            sites: int = wa_count_stmt(rarm.body);
+            if (sites > 0) {
+                wa_rewinding();
+                wa_resumes(first, sites);
+                w_op(113);
+                w_br_if(missing + narms - j)
+            }
+            first = first + sites;
+            j = j + 1;
+            rarm = rarm.next
+        }
+    }
     if (tagged >= 4 && low >= 0 && high - low < 4096) {
         w_lget(tt);
         if (low != 0) {
@@ -1783,7 +2116,9 @@ wg_match_enum(cond: *Expr, cty: *Type, arms: ?*MatchArm) noregion raises Error, 
     arm3: ?*MatchArm = arms;
     while (arm3 != null) {
         w_end();
+        saved2: bool = if (resuming) wa_skip_begin() else false;
         wg_match_binder(arm3, ta);
+        if (resuming) wa_skip_end(saved2);
         wg_stmt(arm3.body);
         w_br(end);
         arm3 = arm3.next
@@ -1801,25 +2136,37 @@ wg_match(cond: *Expr, arms: ?*MatchArm) noregion raises Error, IndexOutOfBounds 
         wg_match_enum(cond, cty, arms);
         return
     }
+    resuming: bool = wa_resuming();
+    if (resuming && wa_count_expr(cond) > 0) wa_misplaced(cond);
     tv: int = wt_get();
+    saved: bool = if (resuming) wa_skip_begin() else false;
     wg_expr(cond);
     w_lset(tv);
+    if (resuming) wa_skip_end(saved);
     end: int = w_block();
+    first: int = wa_next_site;
     arm: ?*MatchArm = arms;
     while (arm != null) {
         if (arm.variant != null) error_at_file(arm.file, arm.pos, "wasm: variant arm without an enum subject");
+        sites: int = wa_count_stmt(arm.body);
+        if (resuming) {
+            // Rewinding takes the arm with the call being resumed.
+            wa_rewinding();
+            w_if_i32();
+            wa_resumes(first, sites);
+            w_else()
+        }
         if (arm.is_literal) {
             w_lget(tv);
             w_i64(arm.literal);
-            w_op(81);
-            w_if();
-            wg_stmt(arm.body);
-            w_br(end);
-            w_end()
-        } else {
-            wg_stmt(arm.body);
-            w_br(end)
-        }
+            w_op(81)
+        } else w_i32(1);
+        if (resuming) w_end();
+        w_if();
+        wg_stmt(arm.body);
+        w_br(end);
+        w_end();
+        first = first + sites;
         arm = arm.next
     }
     w_call(wf_oob);
@@ -1900,6 +2247,44 @@ wg_raise(exn: ?*ExnDef, inits: ?*FieldInit) noregion raises Error, IndexOutOfBou
 }
 
 wg_stmt(n: *Stmt) noregion raises Error, IndexOutOfBounds {
+    if (!wa_resuming()) {
+        wg_stmt_code(n);
+        return
+    }
+    if (wa_count_stmt(n) == 0) {
+        saved: bool = wa_skip_begin();
+        wg_stmt_code(n);
+        wa_skip_end(saved);
+        return
+    }
+    // While rewinding, run only the statement with the call being resumed.
+    wa_rewinding();
+    w_op(69);
+    wa_resumes(wa_next_site, wa_count_stmt(n));
+    w_op(114);
+    w_if();
+    match n.kind {
+        ExprStmt k -> {
+            if (!wa_site_form(k.lhs) || wa_count_stmt(n) != 1) wa_misplaced(k.lhs);
+            wa_site_ok = true;
+            wg_stmt_code(n);
+            wa_site_ok = false
+        }
+        Decl k -> {
+            init: ?*Expr = k.init;
+            if (init == null || !wa_is_site(init) || wa_count_stmt(n) != 1) wa_misplaced(init);
+            wa_site_ok = true;
+            wg_stmt_code(n);
+            wa_site_ok = false
+        }
+        Return k -> wa_misplaced(k.lhs);
+        Try _ -> wa_misplaced(null);
+        _ -> wg_stmt_code(n)
+    }
+    w_end()
+}
+
+wg_stmt_code(n: *Stmt) noregion raises Error, IndexOutOfBounds {
     match n.kind {
         Return k -> wg_return(k.lhs);
         ExprStmt k -> {
@@ -1908,7 +2293,16 @@ wg_stmt(n: *Stmt) noregion raises Error, IndexOutOfBounds {
         }
         Block k -> wg_stmts(k.body);
         If k -> {
-            wg_cond(k.cond);
+            if (wa_resuming()) {
+                // Rewinding takes the branch with the call being resumed.
+                if (wa_count_expr(k.cond) > 0) wa_misplaced(k.cond);
+                wa_rewinding();
+                w_if_i32();
+                wa_resumes(wa_next_site, wa_count_stmt(k.then));
+                w_else();
+                wg_cond(k.cond);
+                w_end()
+            } else wg_cond(k.cond);
             w_if();
             wg_stmt(k.then);
             els: ?*Stmt = k.els;
@@ -1919,11 +2313,15 @@ wg_stmt(n: *Stmt) noregion raises Error, IndexOutOfBounds {
             w_end()
         }
         While k -> {
+            resuming: bool = wa_resuming();
+            if (resuming && wa_count_expr(k.cond) > 0) wa_misplaced(k.cond);
             done: int = w_block();
             top: int = w_loop();
+            saved: bool = if (resuming) wa_skip_begin() else false;
             wg_cond(k.cond);
             w_op(69);
             w_br_if(done);
+            if (resuming) wa_skip_end(saved);
             wg_stmt(k.body);
             w_br(top);
             w_end();
@@ -1934,10 +2332,13 @@ wg_stmt(n: *Stmt) noregion raises Error, IndexOutOfBounds {
         Raise k -> wg_raise(k.exn, k.inits);
         Try k -> wg_try(k.body, k.arms);
         Region k -> {
+            resuming: bool = wa_resuming();
+            saved: bool = if (resuming) wa_skip_begin() else false;
             w_gget(WG_HEAP);
             wg_store_var(k.mark, ty_int);
             wg_load_var(k.mark, ty_int);
             w_call(wf_region_push);
+            if (resuming) wa_skip_end(saved);
             wl_region_depth = wl_region_depth + 1;
             wg_stmt(k.body);
             wl_region_depth = wl_region_depth - 1;
@@ -2173,6 +2574,10 @@ wasm_begin(fn: ?*Function@immortal, np: int) noregion {
     wl_spill = 0;
     wl_region_depth = 0;
     wl_depth = 0;
+    wl_async = false;
+    wa_guarded = false;
+    wa_next_site = 0;
+    wa_site_ok = false;
     wc = sb_new()
 }
 
@@ -2207,6 +2612,31 @@ wasm_prologue(fn: ?*Function) noregion raises Error {
     code: *StrBuf = wc;
     wc = sb_new();
     frame: int = (wl_rbp + wl_spill + 15) / 16 * 16;
+    resumable: bool = fn != null && fn.wasm_async;
+    if (resumable) {
+        // Resuming takes back the frame this function left when it paused.
+        wa_rewinding();
+        w_if();
+        w_gget(WG_ASYNC_TOP);
+        w_i64(24);
+        w_op(125);
+        w_gset(WG_ASYNC_TOP);
+        w_gget(WG_ASYNC_TOP);
+        w_wrap();
+        w_mem(41, 0);
+        w_wrap();
+        w_lset(wl_fp);
+        w_gget(WG_ASYNC_TOP);
+        w_wrap();
+        w_mem(41, 8);
+        w_wrap();
+        w_lset(wl_sp0);
+        w_gget(WG_ASYNC_TOP);
+        w_wrap();
+        w_mem(41, 16);
+        w_lset(wl_rp);
+        w_else()
+    }
     w_gget(WG_SP);
     w_ltee(wl_sp0);
     w_i32(frame);
@@ -2256,6 +2686,7 @@ wasm_prologue(fn: ?*Function) noregion raises Error {
         }
         if (streq(fn.name, "main")) w_call(wf_init_globals)
     }
+    if (resumable) w_end();
     wb_append(wc, code)
 }
 
@@ -2271,6 +2702,25 @@ wasm_gen_function(fn: *Function@immortal) noregion raises Error, IndexOutOfBound
     wasm_begin(fn, np);
     wasm_assign_locals(fn, np);
     wl_tmp_base = np + 3 + wl_nvars;
+    if (fn.wasm_async) {
+        // A paused function returns, so its locals must live in its frame.
+        v: ?*Obj = fn.locals;
+        while (v != null) {
+            v.wasm_slot = 0;
+            v = v.next
+        }
+        p: ?*Obj = fn.params;
+        while (p != null) {
+            p.wasm_slot = 0;
+            p = p.param_next
+        }
+        sret: ?*Obj = fn.sret;
+        if (sret != null) sret.wasm_slot = 0;
+        wl_nvars = 0;
+        wl_rp = np + 3;
+        wl_tmp_base = np + 4;
+        wl_async = true
+    }
     wl_rbp = fn.stack_size;
     body: *Stmt = fn.body or error("missing body");
     wg_stmt(body);
@@ -2279,7 +2729,8 @@ wasm_gen_function(fn: *Function@immortal) noregion raises Error, IndexOutOfBound
     if (fn.sret != null) wg_copy_to_sret();
     wg_epilogue();
     wasm_prologue(fn);
-    wasm_emit_body(wasm_fn_type(fn), 2, 1 + wl_nvars + wl_tmp_max)
+    wasm_emit_body(wasm_fn_type(fn), 2, wl_tmp_base - np - 2 + wl_tmp_max);
+    wl_async = false
 }
 
 // Initialize dynamic globals once, in dependency order.
@@ -2338,13 +2789,33 @@ wasm_gen_start() noregion raises Error {
     if (compile_test_mode) wasm_gen_test_entry(done) else {
         user_main: ?*Function = find_function("main");
         if (user_main != null && !user_main.is_extern) {
+            if (user_main.wasm_async) {
+                // Resuming main needs no arguments: it takes back its frame.
+                wa_rewinding();
+                w_if_i64();
+                for _p in 0..user_main.nparams w_i64(0);
+                w_call(user_main.wasm_index);
+                w_else()
+            }
             if (user_main.nparams > 0) {
                 w_call(wf_argv);
                 w_lset(0);
                 wg_len_of(0);
                 if (user_main.nparams > 1) w_lget(0)
             }
-            w_call(user_main.wasm_index)
+            w_call(user_main.wasm_index);
+            if (user_main.wasm_async) {
+                w_end();
+                // Paused: return to the host, which resumes by calling again.
+                w_lset(0);
+                w_gget(WG_ASYNC_STATE);
+                w_i64(WA_UNWINDING);
+                w_op(81);
+                w_if();
+                w_op(15);
+                w_end();
+                w_lget(0)
+            }
         } else w_i64(0);
         w_gset(WG_EXIT_STATUS)
     }
@@ -2397,6 +2868,8 @@ wasm_gen_test_entry(done: int) raises Error {
 
 // ---- runtime functions ----
 wasm_region_marks: int = 0;
+
+wasm_async_stack: int = 0;
 
 // The address of region mark n, from the i64 n on the stack.
 wr_mark_addr() raises Error {
@@ -2792,12 +3265,15 @@ wasm_layout() noregion raises Error {
     }
     wasm_region_marks = addr;
     addr = addr + 8 * WASM_REGION_CAP;
+    wasm_async_stack = addr;
+    addr = addr + 24 * WASM_ASYNC_DEPTH;
     wasm_heap_base = (addr + 15) / 16 * 16
 }
 
 wasm_codegen() noregion raises Error, IndexOutOfBounds {
     // The test entry point stands in for main.
     wasm_plan();
+    wasm_mark_async();
     wasm_layout();
     wr_malloc();
     wr_region_push();
@@ -2885,7 +3361,7 @@ wasm_module() noregion raises Error: *StrBuf@new {
     wb_uleb(s, wasm_sig_i64(0, 0));
     wb_section(m, 13, s);
     s = sb_new();
-    wb_uleb(s, 7);
+    wb_uleb(s, 9);
     wb_global(s, WT_I32, WASM_STACK_TOP);
     wb_global(s, WT_I64, wasm_heap_base);
     wb_global(s, WT_I64, 0);
@@ -2893,15 +3369,18 @@ wasm_module() noregion raises Error: *StrBuf@new {
     wb_global(s, WT_I64, 0);
     wb_global(s, WT_I64, 0);
     wb_global(s, WT_I64, 0);
+    wb_global(s, WT_I64, 0);
+    wb_global(s, WT_I64, wasm_async_stack);
     wb_section(m, 6, s);
     s = sb_new();
-    wb_uleb(s, 6);
+    wb_uleb(s, 7);
     wb_export(s, "memory", 2, 0);
     wb_export(s, "table", 1, 0);
     wb_export(s, "_start", 0, wf_start);
     wb_export(s, "l8_malloc", 0, wf_malloc);
     wb_export(s, "l8_heap", 3, WG_HEAP);
     wb_export(s, "l8_exit_status", 3, WG_EXIT_STATUS);
+    wb_export(s, "l8_async_state", 3, WG_ASYNC_STATE);
     wb_section(m, 7, s);
     first: int = wasm_nimports + WASM_NRUNTIME;
     s = sb_new();
@@ -3008,7 +3487,7 @@ wasm_runner_path() raises Error: []i8@new {
 }
 
 wasm_usage(): int {
-    raw::raw_write(2, "error: usage: l8 wasm [--profile|-p] <source.l8> -o <module.wasm>\n");
+    raw::raw_write(2, "error: usage: l8 wasm [--profile|-p] [--async <import>]... <source.l8> -o <module.wasm>\n");
     1
 }
 
@@ -3017,6 +3496,7 @@ compiler_wasm_main(argc: int, argv: []str) noregion raises IndexOutOfBounds: int
     have_s: bool = false;
     have_o: bool = false;
     want_o: bool = false;
+    want_async: bool = false;
     if (argc < 1) return wasm_usage();
     source: str = argv[0];
     output: str = argv[0];
@@ -3027,13 +3507,16 @@ compiler_wasm_main(argc: int, argv: []str) noregion raises IndexOutOfBounds: int
             output = arg;
             have_o = true;
             want_o = false
-        } else if (is_profile_flag(arg)) do_profile = true else if (arg == "-o") want_o = true else {
+        } else if (want_async) {
+            wasm_async_names = new NeedLib { name: bytes(arg), next: wasm_async_names };
+            want_async = false
+        } else if (is_profile_flag(arg)) do_profile = true else if (arg == "-o") want_o = true else if (arg == "--async") want_async = true else {
             if (have_s) return wasm_usage();
             source = arg;
             have_s = true
         }
     }
-    if (!have_s || !have_o || want_o) return wasm_usage();
+    if (!have_s || !have_o || want_o || want_async) return wasm_usage();
     try {
         compiler_analyze(bytes(source));
         wasm_codegen();

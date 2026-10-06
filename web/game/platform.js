@@ -2,8 +2,9 @@
 // block game imports, on a WebGL2 canvas. Pointers and integers arrive as
 // BigInt; see ../l8-runtime.js for the module conventions.
 //
-// glXSwapBuffers suspends the module until the next animation frame through
-// JS Promise Integration, so the game's own event loop drives the page.
+// glXSwapBuffers pauses the module until the next animation frame (the module
+// is built with `l8 wasm --async glXSwapBuffers`), so the game's own event
+// loop drives the page.
 
 const n = (v) => Number(v);
 const i32 = (v) => Number(BigInt.asIntN(32, v));
@@ -375,17 +376,18 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false 
     glXMakeCurrent: () => 1n,
     glXDestroyContext: () => 0n,
     glXSwapIntervalEXT: () => 0n,
-    glXSwapBuffers: new WebAssembly.Suspending(() => {
-      const now = performance.now();
-      if (resumed) work += now - resumed;
-      return new Promise((resolve) =>
-        requestAnimationFrame(() => {
-          frames++;
-          resumed = performance.now();
-          resolve(0n);
-        })
-      );
-    }),
+    // The module is built with `--async glXSwapBuffers`: a swap pauses it
+    // until nextFrame resolves, then it resumes after the swap.
+    glXSwapBuffers() {
+      const state = instance.exports.l8_async_state;
+      if (state.value === 2n) {
+        state.value = 0n;
+        return 0n;
+      }
+      if (resumed) work += performance.now() - resumed;
+      state.value = 1n;
+      return 0n;
+    },
     getenv: () => 0n,
   };
 
@@ -457,6 +459,14 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false 
       instance = i;
       mem = m;
     },
+    nextFrame: () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => {
+          frames++;
+          resumed = performance.now();
+          resolve();
+        })
+      ),
     frames: () => frames,
     workMs: () => work,
   };

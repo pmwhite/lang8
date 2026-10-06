@@ -41,9 +41,9 @@ WebGL2 canvas:
   instead of compute shaders (see `programs/block-game/WATER.md`). That needs
   `EXT_color_buffer_float`; without `EXT_float_blend`, the blended displacement
   target uses half floats.
-- `glXSwapBuffers` suspends the module until the next animation frame using
-  JavaScript Promise Integration (`WebAssembly.Suspending`), so the game's own
-  blocking event loop drives the page. Browsers without JSPI get a message.
+- The game is built with `--async glXSwapBuffers` (see below), so each swap
+  pauses the module until the next animation frame and the game's own
+  blocking event loop drives the page. This needs no JSPI.
 - Key events become X11 `KeyPress` and `KeyRelease` events with X keysyms.
 - FreeType glyphs are rasterized with a 2D canvas into the `FT_GlyphSlot`
   fields the bindings read.
@@ -52,6 +52,27 @@ The page offers the world, a pond demo (push the block into the water, or press
 F8 for ripples), and the Canopy Walk level. Each level is kept in an in-memory
 file system and saved to `localStorage` whenever the game writes it. `?edit`
 opens the editor, and `?glcheck` reports failing GL calls in the log.
+
+## Pausing and resuming
+
+`l8 wasm --async NAME` lets import `NAME` pause the module, in any browser.
+Every function that can reach `NAME` becomes resumable: it keeps its locals
+in its shadow-stack frame instead of wasm locals. To pause, the import sets the
+exported `l8_async_state` to 1 and returns; each resumable function on the
+stack records its frame and the call it was in, and returns, so `_start`
+returns to the host. To resume, the host sets the state to 2 and calls
+`_start` again. Each function takes its frame back and skips forward to that
+call, without running the statements before it, entering only the branch,
+loop body, or match arm that contains it. The call is made again, and the
+import clears the state and returns. In `l8-runtime.js`, `pausing()`
+implements such an import and `runResumable(instance, wait)` runs a module,
+awaiting `wait()` at each pause.
+
+A call that can pause must be a statement of its own (`f(x)`, `y = f(x)`, or
+`y: T = f(x)`), not inside `try`, and not through a function value; the
+compiler rejects other uses. `web/tests/resume.l8` pauses in loops, branches,
+match arms, a region, and a nested function, and `make wasm-test` checks that
+it prints the same as a build without `--async`.
 
 ## Modules
 
