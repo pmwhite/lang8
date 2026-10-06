@@ -244,8 +244,7 @@ $(OK)/web: $(BUILD)/l8.wasm $(BUILD)/block-game.wasm $(WEB_FILES) $(STDLIB) | $(
 	@$(STEP) 'web site' sh -c 'rm -rf $(WEB_SITE) && mkdir -p $(WEB_SITE)/stdlib $(WEB_SITE)/examples $(WEB_SITE)/game && \
 		cp web/index.html web/*.js $(WEB_SITE)/ && cp web/examples/*.l8 $(WEB_SITE)/examples/ && \
 		cp $(STDLIB) $(WEB_SITE)/stdlib/ && cp $(BUILD)/l8.wasm $(WEB_SITE)/ && \
-		cp web/game/* $(BUILD)/block-game.wasm programs/block-game/world.txt \
-			programs/block-game/grove-demo.txt $(WEB_SITE)/game/'
+		cp web/game/* $(BUILD)/block-game.wasm programs/block-game/world.txt $(WEB_SITE)/game/'
 	@touch $@
 
 web: $(OK)/web
