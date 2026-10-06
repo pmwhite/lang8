@@ -75,11 +75,20 @@ bounds_return_apply(destination: *Expr@new, call: *Expr, f: ?*BoundsState@new) r
         Funcall k -> {
             callee: ?*Function = k.fn;
             if (callee == null || k.target != null) return f;
+            // The facts arrive after the assignment. In i = next(i), the
+            // argument i is the old value but would map to the new one, so
+            // facts about the arguments that mention i are unusable.
+            assigned: ?*Obj = bounds_term_root(destination);
+            if (assigned != null && !bounds_args_mention(k.args, assigned)) assigned = null;
             q: ?*BoundsReturnFact = callee.bounds_returns;
             while (q != null) {
                 mapped: ?*Expr = bounds_return_map(q.term, callee, k.args);
                 path: *Expr = bounds_return_destination(destination, q.projection,
                     callee.bounds_result);
+                if (mapped != null && assigned != null) {
+                    if (bounds_ensure_mentions(mapped, assigned) || bounds_index_depends(mapped,
+                        assigned)) mapped = null
+                }
                 if (mapped != null && bounds_term(mapped) && !bounds_same_term(path,
                     mapped)) {
                     left: *Expr = if (q.result_left) path else mapped;
@@ -88,6 +97,7 @@ bounds_return_apply(destination: *Expr@new, call: *Expr, f: ?*BoundsState@new) r
                 }
                 q = q.next
             }
+            if (assigned != null) return f;
             rule: ?*BoundsImplication = callee.bounds_implications;
             while (rule != null) {
                 mapped_rule: ?*BoundsImplication = bounds_implication_map(rule, callee,
@@ -102,6 +112,36 @@ bounds_return_apply(destination: *Expr@new, call: *Expr, f: ?*BoundsState@new) r
     }
 }
 
+// A local outside the function's scopes that stands for a call's result.
+bounds_result_temporary(ty: ?*Type@new) noregion: *Obj@new {
+    saved_locals: ?*Obj = locals;
+    saved_scope: ?*Obj = scope_locals;
+    temp: *Obj = new_obj("$bounds_call_result", true);
+    locals = saved_locals;
+    scope_locals = saved_scope;
+    temp.ty = ty;
+    temp
+}
+
+// Whether call is a direct call with an argument that mentions v.
+bounds_call_reads(call: *Expr, v: *Obj): bool {
+    match call.kind {
+        Funcall k -> k.target == null && k.fn != null && bounds_args_mention(k.args,
+            v);
+        _ -> false
+    }
+}
+
+// Whether any argument mentions variable v.
+bounds_args_mention(args: ?*Expr, v: *Obj): bool {
+    q: ?*Expr = args;
+    while (q != null) {
+        if (bounds_ensure_mentions(q, v) || bounds_index_depends(q, v) || bounds_term_root(q) == v) return true;
+        q = q.next
+    }
+    false
+}
+
 // Query a call's result before an assignment destroys facts about an argument.
 bounds_return_nonnegative(call: *Expr@new, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBounds: bool {
     match call.kind {
@@ -109,12 +149,7 @@ bounds_return_nonnegative(call: *Expr@new, f: ?*BoundsState@new) noregion raises
             callee: ?*Function = k.fn;
             if (callee == null || k.target != null || !is_int_ty(call.ty)) return false;
             if (callee.bounds_returns == null && callee.bounds_ensures == null) return false;
-            saved_locals: ?*Obj = locals;
-            saved_scope: ?*Obj = scope_locals;
-            temp: *Obj = new_obj("$bounds_call_result", true);
-            locals = saved_locals;
-            scope_locals = saved_scope;
-            temp.ty = call.ty;
+            temp: *Obj = bounds_result_temporary(call.ty);
             path: *Expr = bounds_obj_expr(temp);
             facts: ?*BoundsState = bounds_return_apply(path, call, f);
             bounds_nonnegative_term(facts, path)

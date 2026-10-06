@@ -360,6 +360,23 @@ lower to difference edges: a nonnegative remainder is below its positive
 divisor, and masking with a nonnegative value produces a result between zero
 and that value. Inline index proofs use the same symbolic range helper.
 
+A range loop over a few constant values (at most 16, and 64 analyzed
+iterations across nested such loops) is checked one iteration at a time, with
+its index known exactly in each, instead of through a loop invariant. A value
+changed by a fixed amount in each iteration, such as a write cursor advanced by
+calls that ensure `returned == i + 6`, keeps its exact bounds, where an
+invariant would have to forget them. Within such an iteration a branch whose
+comparison the known facts already refute, such as `if (z > 0)` when `z` is 0,
+is unreachable and not checked.
+
+An assignment such as `i = next(i)` takes facts about the call's result from
+the callee's guarantees and return facts, which are stated in terms of the
+arguments: the old `i`. They are first given to a temporary result, and `i`
+becomes equal to it once facts about the old value are projected away. (Read
+as the new `i`, `returned == i + 2` became the contradiction `i == i + 2`,
+from which any later precondition followed.) Other destinations, such as a
+field, drop the facts that mention a variable their arguments read.
+
 The sum of two integer variables, such as `to + f`, is also a term of its own
 when a guard compares it: `if (to + f >= 0 && to + f < len(dst))` proves
 `dst[to + f]` (or `dst[f + to]`). Both evaluate the same machine addition, so

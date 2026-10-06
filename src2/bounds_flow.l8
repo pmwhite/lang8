@@ -296,7 +296,41 @@ bounds_condition(e: *Expr, yes: bool, f: ?*BoundsState@new) raises Error, IndexO
         }
         _ -> { }
     }
+    if (bounds_unroll_scale > 1 && bounds_condition_refuted(e, yes, f)) return bounds_unreachable();
     bounds_close_implications(bounds_condition_facts(e, yes, f))
+}
+
+// Whether the facts already prove that comparison e is not `yes`, so its
+// branch cannot run. Only an iteration of an unrolled range checks this: its
+// index is a known constant, so a guard such as i > 0 can rule a branch out.
+bounds_condition_refuted(e: *Expr, yes: bool, f: ?*BoundsState) raises Error, IndexOutOfBounds: bool {
+    if (!bounds_pure_condition(e)) return false;
+    match e.kind {
+        Binary k -> {
+            if (!is_int_ty(k.lhs.ty) || !is_int_ty(k.rhs.ty)) return false;
+            // The condition as small < big, strictly or not.
+            small: *Expr = k.lhs;
+            big: *Expr = k.rhs;
+            strict: bool = true;
+            if (k.op == BinOp.Lt) strict = true else if (k.op == BinOp.Le) strict = false else if (k.op == BinOp.Gt) {
+                small = k.rhs;
+                big = k.lhs
+            } else if (k.op == BinOp.Ge) {
+                small = k.rhs;
+                big = k.lhs;
+                strict = false
+            } else return false;
+            if (!yes) {
+                swap: *Expr = small;
+                small = big;
+                big = swap;
+                strict = !strict
+            }
+            // Refuted when big <= small (for <) or big < small (for <=).
+            bounds_difference_proves(f, big, small, if (strict) 0 else 0 - 1)
+        }
+        _ -> false
+    }
 }
 
 // In other == base + k with k > 0, base >= 0 and other >= base rule out
@@ -625,6 +659,15 @@ bounds_expr_transfer(e: *Expr@new, f: ?*BoundsState@new) noregion raises Error, 
             keep_nonnegative: bool = rhs_upper >= 0 || bounds_return_nonnegative(k.rhs,
                 f);
             shift: int = bounds_return_self_offset(v, k.rhs);
+            // A call whose arguments read v, as in i = next(i), states its
+            // result in terms of the old v. Give those facts to a temporary
+            // first, and make v equal to it once the old value is gone.
+            result: ?*Obj = null;
+            if (is_int_ty(v.ty) && bounds_call_reads(k.rhs, v)) {
+                temp: *Obj = bounds_result_temporary(v.ty);
+                f = bounds_value_facts(bounds_obj_expr(temp), k.rhs, f);
+                result = temp
+            }
             arithmetic_shift: bool = false;
             affine: ?*BoundsAffine = bounds_affine(k.rhs, true);
             if (affine != null) {
@@ -638,6 +681,13 @@ bounds_expr_transfer(e: *Expr@new, f: ?*BoundsState@new) noregion raises Error, 
             if (keep_nonnegative) f = bounds_add_order(f, new_num(0), bounds_obj_expr(v),
                 false);
             if (arithmetic_shift) return f;
+            if (result != null) {
+                f = bounds_add_relation(f, bounds_obj_expr(v), bounds_obj_expr(result),
+                    0);
+                f = bounds_add_relation(f, bounds_obj_expr(result), bounds_obj_expr(v),
+                    0);
+                return bounds_forget_scalar(f, result)
+            }
             bounds_value_facts(bounds_obj_expr(v), k.rhs, f)
         }
         LogAnd k -> {
@@ -886,6 +936,9 @@ bounds_stmt_transfer(s: ?*Stmt@new, f: ?*BoundsState@new) noregion raises Error,
                     _ -> { }
                 }
                 if (field_path != null && !bounds_field_path_safe_stmt(k.body, field_path)) field_path = null;
+                unrolled: ?*BoundsState = bounds_unrolled_range(k.item, k.iter, hi,
+                    k.body, f);
+                if (unrolled != null) return unrolled;
                 stable_order_bound: bool = bounds_stable_bound_expr(k.body, hi);
                 stable_lower_bound: bool = bounds_stable_bound_expr(k.body, k.iter);
                 hiconst: int = bounds_num(hi);
@@ -976,6 +1029,47 @@ bounds_stmt_transfer(s: ?*Stmt@new, f: ?*BoundsState@new) noregion raises Error,
         }
         _ -> f
     }
+}
+
+// A range over a few constant values is analyzed one iteration at a time,
+// with the index known exactly in each, instead of through an invariant. A
+// value changed by a fixed amount in each iteration, such as a write cursor,
+// keeps its bounds; an invariant would have to forget them. A range has at
+// most BOUNDS_UNROLL_TRIPS values, and nested ranges share a budget of
+// analyzed iterations. Null when the range does not qualify.
+const BOUNDS_UNROLL_TRIPS: int = 16;
+
+const BOUNDS_UNROLL_BUDGET: int = 64;
+
+bounds_unroll_scale: int = 1;
+
+bounds_unrolled_range(
+    item: *Obj@new,
+    lo: *Expr,
+    hi: *Expr,
+    body: ?*Stmt@new,
+    f: ?*BoundsState@new
+) noregion raises Error, IndexOutOfBounds: ?*BoundsState@new {
+    first: int = bounds_num(lo);
+    end: int = bounds_num(hi);
+    if (first < 0 || end < first || end >= 536870912) return null;
+    trips: int = end - first;
+    if (trips > BOUNDS_UNROLL_TRIPS || trips > BOUNDS_UNROLL_BUDGET / bounds_unroll_scale || item.bounds_written || item.bounds_addr_taken) return null;
+    if (trips == 0) return f;
+    saved_scale: int = bounds_unroll_scale;
+    bounds_unroll_scale = bounds_unroll_scale * trips;
+    index: *Expr = bounds_obj_expr(item);
+    state: ?*BoundsState = f;
+    value: int = first;
+    while (value < end && bounds_reachable(state)) {
+        facts: ?*BoundsState = bounds_forget_scalar(state, item);
+        facts = bounds_add_relation(facts, index, new_num(value), 0);
+        facts = bounds_add_relation(facts, new_num(value), index, 0);
+        state = bounds_stmt(body, facts);
+        value = value + 1
+    }
+    bounds_unroll_scale = saved_scale;
+    bounds_forget_scalar(state, item)
 }
 
 bounds_stmt_list(s: ?*Stmt@new, f: ?*BoundsState@new) noregion raises Error, IndexOutOfBounds: ?*BoundsState@f {
