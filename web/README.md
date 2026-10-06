@@ -77,12 +77,14 @@ boxes, since bevels do not show in it. Together this took the game from about
 250,000 vertices. The host also skips uniform updates that repeat a location's
 current value. What remains is mostly the per-pixel cost of the
 ground's shading, so the page adapts the render resolution: when frames are
-slow, it renders the window at a smaller size (down to half) and scales it up,
-and raises the size again when frames have headroom. A step down that does not
-speed frames up is undone, since neither a busy CPU nor a browser frame-rate cap
-(such as iOS Low Power Mode) is helped by fewer pixels. The game's own work time
-cannot decide this: Safari runs WebGL in a separate GPU process, and when the
-GPU falls behind, the game's WebGL calls wait, so GPU time shows up as work.
+slow while the game's own work (its code and GL calls) leaves time to spare,
+the GPU is the limit, so it renders the window at a smaller size (down to
+half) and scales it up, and raises the size again when frames have headroom.
+Frames slow from the game's own work keep their size, since fewer pixels
+would not help; on an iPhone, telemetry shows WebGL calls take under a
+millisecond a frame, so that work is the game's code. A step down that does
+not speed frames up is undone, as is one a browser frame-rate cap (such as
+iOS Low Power Mode) defeats.
 
 The game's own frame-time view (frame rate, frame and work times, and heap
 size) opens with F3, as in the native game, with the FPS key, or with `?fps`. On a
@@ -93,10 +95,13 @@ Telemetry: every five seconds the page posts a frame report to `/telemetry`
 on its server: the frame rate and frame-time spread, and how a frame's time
 divides into GL calls, the game's own code, and time outside the game (the
 browser, and waiting on the GPU), with the costliest GL functions, the render
-size, and the GPU's name. `?probe` first spends about 40 seconds measuring
-fixed render sizes and frames with the shadow map, offscreen passes, grass,
-world pass, or all drawing left out, and posts the results; the differences
-show what each part costs on the device. A server without the endpoint
+size, and the GPU's name. `?probe` first spends about 50 seconds measuring fixed render sizes, the
+frame-time view open, the player walking (holding each arrow in turn), and
+frames with the shadow map, grass, or all drawing left out, and posts the
+results; the differences show what each part costs on the device. It starts
+from the original world and saves nothing, so the walking changes no
+progress. Reports also say whether the frame-time view was open and how many
+keys were pressed. A server without the endpoint
 turns the posts off, and `?notelemetry` turns off them and the GL timing.
 
 Query parameters: `?stats` shows the frame rate, the game's work time per frame,

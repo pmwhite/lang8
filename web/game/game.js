@@ -93,7 +93,11 @@ async function main() {
     WebAssembly.compileStreaming(fetch("block-game.wasm")),
     fetch("world.txt").then((r) => r.text()),
   ]);
-  const fs = new MemFS({ [WORLD]: localStorage.getItem(STORAGE_KEY) ?? world });
+  const params = new URLSearchParams(location.search);
+  // ?probe moves the player, so it starts from the original world and saves
+  // nothing.
+  const probe = params.has("probe");
+  const fs = new MemFS({ [WORLD]: (!probe && localStorage.getItem(STORAGE_KEY)) || world });
   const decoder = new TextDecoder();
   fs.onOutput = (_fd, data) => console.log(decoder.decode(data).trimEnd());
   const sys = fs.sys(["block-game", "play", WORLD.slice(1)]);
@@ -101,14 +105,13 @@ async function main() {
   sys.close = (fd) => {
     const file = fs.fds.get(fd);
     const status = close(fd);
-    if (file?.writable && file.path === WORLD) localStorage.setItem(STORAGE_KEY, decoder.decode(fs.readFile(WORLD)));
+    if (!probe && file?.writable && file.path === WORLD) localStorage.setItem(STORAGE_KEY, decoder.decode(fs.readFile(WORLD)));
     return status;
   };
 
   // ?scale=0.5 renders at half resolution instead of adapting; ?stats shows
   // the frame rate; ?fps opens the game's own frame-time view; ?L8_WATER_STATIC
   // and other L8_ parameters set the game's environment variables.
-  const params = new URLSearchParams(location.search);
   // ?zoom=1.2 sets the least CSS pixels per game pixel: larger shows less
   // of the world, larger.
   const zoom = Math.min(4, Math.max(0.25, Number(params.get("zoom")) || 0.85));
@@ -159,7 +162,7 @@ async function main() {
   const telemetry = params.has("notelemetry")
     ? null
     : createTelemetry(platform, {
-        probe: params.has("probe"),
+        probe,
         show: (text) => {
           note.textContent = text ?? "";
           note.hidden = !text;
@@ -170,11 +173,11 @@ async function main() {
   show(`The game exited${status ? ` with status ${status}` : ""}.<br><a href="">Play again</a>`);
 }
 
-// Wait for each frame, and adapt the render resolution: when frames are slow,
-// render fewer pixels, and keep doing so while that speeds them up; when there
-// is headroom again, render more. The game's own work time cannot tell whether
-// the GPU is the limit: where WebGL runs in another process, as in Safari, its
-// calls wait for a busy GPU, so that wait counts as work.
+// Wait for each frame, and adapt the render resolution: when frames are slow
+// although the game's own work leaves time to spare, the GPU is the limit, so
+// render fewer pixels, and keep doing so while that speeds frames up; when
+// there is headroom again, render more. Frames slow from the game's own work
+// (its code and GL calls) keep their size, since fewer pixels would not help.
 function pacer(platform, adapt, stats, telemetry) {
   const STEPS = [1, 0.85, 0.72, 0.6, 0.5];
   let step = 0;
@@ -183,6 +186,7 @@ function pacer(platform, adapt, stats, telemetry) {
   let elapsed = 0;
   let work0 = platform.workMs();
   let fast = 0;
+  let slowRun = 0;
   // The interval before the last step down, and the lowest useful step.
   let before = 0;
   let floor = STEPS.length - 1;
@@ -213,7 +217,9 @@ function pacer(platform, adapt, stats, telemetry) {
         floor = step;
       }
       before = 0;
-      const slow = interval > 22;
+      // Two slow windows in a row, so a brief burst does not blur the game.
+      slowRun = interval > 22 && work < 0.6 * interval ? slowRun + 1 : 0;
+      const slow = slowRun >= 2;
       fast = interval < 18 ? fast + 1 : 0;
       if (slow && step < floor) {
         before = interval;

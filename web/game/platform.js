@@ -85,11 +85,24 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
   // ---- keyboard ----
 
   const events = [];
+  // Key events for the game, with what the telemetry reports about them:
+  // presses (repeats included), and whether F3's frame-time view is open.
+  let presses = 0;
+  let frameView = false;
+  const pushKey = (type, sym, text) => {
+    if (type === 2) {
+      presses++;
+      if (sym === 65472) frameView = !frameView;
+    }
+    events.push({ type, keysym: sym, text });
+  };
   const keyEvent = (type) => (e) => {
     if (e.ctrlKey || e.metaKey) return;
     if (e.code !== "F5" && e.code !== "F11" && e.code !== "F12") e.preventDefault();
     const text = e.key.length === 1 ? e.key : TEXT_KEYS[e.code] ?? "";
-    events.push({ type, keysym: keysym(e), text });
+    // A held key's repeats toggle nothing in the game; skip them for F3.
+    if (e.repeat && keysym(e) === 65472) return;
+    pushKey(type, keysym(e), text);
   };
   canvas.addEventListener("keydown", keyEvent(2));
   canvas.addEventListener("keyup", keyEvent(3));
@@ -613,8 +626,10 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
     },
     // Inject a key event, as from on-screen controls: type 2 presses, 3 releases.
     key(type, sym, text = "") {
-      events.push({ type, keysym: sym, text });
+      pushKey(type, sym, text);
     },
+    keyPresses: () => presses,
+    frameView: () => frameView,
     nextFrame: () =>
       new Promise((resolve) =>
         requestAnimationFrame(() => {
