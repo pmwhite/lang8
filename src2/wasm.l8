@@ -1,0 +1,2977 @@
+tag compiler_internal;
+
+// WebAssembly backend: `l8 wasm file.l8 -o file.wasm` lowers the typed AST to
+// a Wasm 3.0 module (exception handling, bulk memory, sign extension).
+//
+// Values follow the x86 backend: every scalar is an i64 on the wasm stack
+// (floats as their bit patterns), aggregates passed by reference are
+// addresses, and every type keeps its layout. Every L8 function takes and
+// returns i64s; a hidden result pointer comes first, as in SysV.
+//
+// Linear memory holds a downward shadow stack for frames, then string
+// literals and globals, then an upward bump heap that regions rewind. Frames
+// keep the x86 slot offsets; scalar locals whose address is never taken live
+// in wasm locals instead. A raise sets the exception tag and payload and
+// throws the module's one wasm tag; a catch restores the shadow stack and the
+// region depth recorded at its try.
+//
+// Externs become imports from module "env" named by their link names. Floats
+// cross that boundary as f32/f64 and everything else as i64. The module
+// exports its memory, its function table (function values are indices),
+// `_start`, `l8_malloc` for host-built values, and the heap pointer.
+
+// ---- layout ----
+
+// The shadow stack occupies [WASM_STACK_LOW, WASM_STACK_TOP) and grows down.
+WASM_STACK_LOW: int = 65536;
+
+WASM_STACK_TOP: int = 16842752;
+
+// Nested regions, like l8_region_marks in runtime.s.
+WASM_REGION_CAP: int = 4096;
+
+// Wasm global indices.
+WG_SP: int = 0;
+
+WG_HEAP: int = 1;
+
+WG_EXC_TAG: int = 2;
+
+WG_EXC_PTR: int = 3;
+
+WG_REGION_N: int = 4;
+
+WG_INIT_DONE: int = 5;
+
+// Wasm value types and block types.
+WT_I32: int = 127;
+
+WT_I64: int = 126;
+
+WT_F32: int = 125;
+
+WT_F64: int = 124;
+
+WT_VOID: int = 64;
+
+// ---- byte encoding ----
+wb_byte(sb: *StrBuf@new, b: int) raises Error {
+    sb_putc(sb, (b & 255) trunc i8)
+}
+
+wb_uleb(sb: *StrBuf@new, n: int) raises Error {
+    if (n < 0) error("internal: negative wasm unsigned value");
+    v: int = n;
+    while (v >= 128) {
+        wb_byte(sb, v & 127 | 128);
+        v = v >> 7
+    }
+    wb_byte(sb, v)
+}
+
+wb_sleb(sb: *StrBuf@new, n: int) raises Error {
+    v: int = n;
+    done: bool = false;
+    while (!done) {
+        b: int = v & 127;
+        v = v >> 7;
+        if (v == 0 && (b & 64) == 0 || v == 0 - 1 && (b & 64) != 0) done = true else b = b | 128;
+        wb_byte(sb, b)
+    }
+}
+
+wb_le(sb: *StrBuf@new, v: int, bytes: int) raises Error {
+    for k in 0..bytes wb_byte(sb, v >> 8 * k)
+}
+
+wb_name(sb: *StrBuf@new, s: []i8) raises Error {
+    wb_uleb(sb, len(s));
+    sb_puts(sb, s)
+}
+
+// Append the bytes written to src so far.
+wb_append(out: *StrBuf@new, src: *StrBuf) raises Error {
+    data: []i8 = src.data;
+    n: int = src.used;
+    if (n < 0 || n > len(data)) error("internal: wasm buffer");
+    old: int = out.used;
+    target: int = old + n;
+    if (target < old) error("output exceeds addressable size");
+    dst: []i8 = sb_grow(out, target);
+    memcpy(dst, old, data, 0, n);
+    out.* = StrBuf { data: dst, used: target }
+}
+
+// A section: its id, its size, then its contents.
+wb_section(out: *StrBuf@new, id: int, body: *StrBuf) raises Error {
+    wb_byte(out, id);
+    wb_uleb(out, body.used);
+    wb_append(out, body)
+}
+
+// ---- module tables ----
+type WasmType = {
+    sig: []i8;
+    next: ?*WasmType
+}
+
+type WasmImport = {
+    name: []i8;
+    type_index: int;
+    next: ?*WasmImport
+}
+
+wasm_types: ?*WasmType = null;
+
+wasm_types_tail: ?*WasmType = null;
+
+wasm_ntypes: int = 0;
+
+wasm_imports: ?*WasmImport = null;
+
+wasm_imports_tail: ?*WasmImport = null;
+
+wasm_nimports: int = 0;
+
+// Function section entries and code section bodies, in function order.
+wasm_func_types: *StrBuf = sb_new();
+
+wasm_code: *StrBuf = sb_new();
+
+wasm_ndefined: int = 0;
+
+// Initialized data, starting at WASM_STACK_TOP.
+wasm_data: *StrBuf = sb_new();
+
+// Address of each string literal by label.
+wasm_str_addr: []int = new int[0](0);
+
+wasm_heap_base: int = 0;
+
+// Index of the function type with this encoding, added when new.
+wasm_type_index(sig: []i8@new) noregion: int {
+    t: ?*WasmType = wasm_types;
+    i: int = 0;
+    while (t != null) {
+        if (streq(t.sig, sig)) return i;
+        i = i + 1;
+        t = t.next
+    }
+    n: *WasmType = new WasmType { sig: sig, next: null };
+    tail: ?*WasmType = wasm_types_tail;
+    if (tail != null) tail.next = n else wasm_types = n;
+    wasm_types_tail = n;
+    wasm_ntypes = wasm_ntypes + 1;
+    i
+}
+
+// (i64 x params) -> (i64 x results)
+wasm_sig_i64(params: int, results: int) noregion raises Error: int {
+    sb: *StrBuf = sb_new();
+    wb_byte(sb, 96);
+    wb_uleb(sb, params);
+    for _i in 0..params wb_byte(sb, WT_I64);
+    wb_uleb(sb, results);
+    for _j in 0..results wb_byte(sb, WT_I64);
+    wasm_type_index(sb_finish(sb))
+}
+
+wasm_valtype(ty: ?*Type): int {
+    if (ty != null && is_f32_ty(ty)) WT_F32 else if (ty != null && is_f64_ty(ty)) WT_F64 else WT_I64
+}
+
+wasm_returns_value(ty: ?*Type): bool {
+    ty != null && !is_noreturn_ty(ty)
+}
+
+// An extern's import type: floats as f32/f64, everything else as i64.
+wasm_extern_sig(fn: *Function) noregion raises Error: int {
+    sb: *StrBuf = sb_new();
+    wb_byte(sb, 96);
+    n: int = 0;
+    p: ?*Obj = fn.params;
+    while (p != null) {
+        n = n + 1;
+        p = p.param_next
+    }
+    wb_uleb(sb, n);
+    p = fn.params;
+    while (p != null) {
+        wb_byte(sb, wasm_valtype(p.ty));
+        p = p.param_next
+    }
+    rt: ?*Type = fn.return_ty;
+    if (wasm_returns_value(rt)) {
+        wb_uleb(sb, 1);
+        wb_byte(sb, wasm_valtype(rt))
+    } else wb_uleb(sb, 0);
+    wasm_type_index(sb_finish(sb))
+}
+
+// The function index of a new import from "env".
+wasm_add_import(name: []i8@new, type_index: int) noregion: int {
+    n: *WasmImport = new WasmImport { name: name, type_index: type_index, next: null };
+    tail: ?*WasmImport = wasm_imports_tail;
+    if (tail != null) tail.next = n else wasm_imports = n;
+    wasm_imports_tail = n;
+    index: int = wasm_nimports;
+    wasm_nimports = wasm_nimports + 1;
+    index
+}
+
+// The type of an L8 function: its parameters and hidden result pointer.
+wasm_fn_type(fn: *Function) noregion raises Error: int {
+    wasm_sig_i64(fn.nparams + (if (fn.sret != null) 1 else 0), 1)
+}
+
+// The same for a function value's signature, which carries no result slot.
+wasm_fnptr_type(fn: *Function) noregion raises Error: int {
+    rt: ?*Type = fn.return_ty;
+    wasm_sig_i64(fn.nparams + (if (rt != null && passes_by_ref(rt)) 1 else 0), 1)
+}
+
+// ---- runtime and import function indices ----
+wf_exit: int = 0;
+
+wf_read: int = 0;
+
+wf_argv: int = 0;
+
+wf_test_index: int = 0;
+
+wf_test_record: int = 0;
+
+wf_test_expect: int = 0;
+
+wf_malloc: int = 0;
+
+wf_region_push: int = 0;
+
+wf_region_pop: int = 0;
+
+wf_region_unwind: int = 0;
+
+wf_str_eq: int = 0;
+
+wf_opt_str_eq: int = 0;
+
+wf_cstr: int = 0;
+
+wf_bytes: int = 0;
+
+wf_raise: int = 0;
+
+wf_oob: int = 0;
+
+wf_init_globals: int = 0;
+
+wf_start: int = 0;
+
+// Runtime functions follow the imports in this order; then L8 functions.
+WASM_NRUNTIME: int = 12;
+
+// ---- code emission ----
+
+// The code of the function being generated.
+wc: *StrBuf = sb_new();
+
+// Open blocks, loops, ifs, and try_tables. A label's id is the depth at
+// which it opened.
+wl_depth: int = 0;
+
+w_op(op: int) raises Error {
+    wb_byte(wc, op)
+}
+
+w_u(n: int) raises Error {
+    wb_uleb(wc, n)
+}
+
+w_i64(v: int) raises Error {
+    w_op(66);
+    wb_sleb(wc, v)
+}
+
+w_i32(v: int) raises Error {
+    w_op(65);
+    wb_sleb(wc, v)
+}
+
+w_lget(i: int) raises Error {
+    w_op(32);
+    w_u(i)
+}
+
+w_lset(i: int) raises Error {
+    w_op(33);
+    w_u(i)
+}
+
+w_ltee(i: int) raises Error {
+    w_op(34);
+    w_u(i)
+}
+
+w_gget(i: int) raises Error {
+    w_op(35);
+    w_u(i)
+}
+
+w_gset(i: int) raises Error {
+    w_op(36);
+    w_u(i)
+}
+
+w_call(f: int) raises Error {
+    w_op(16);
+    w_u(f)
+}
+
+// A load or store with byte alignment and a constant offset.
+w_mem(op: int, off: int) raises Error {
+    if (off < 0 || off > 4294967295) error("internal: wasm memory offset");
+    w_op(op);
+    w_u(0);
+    w_u(off)
+}
+
+// i32.wrap_i64: an i64 address becomes a memory operand.
+w_wrap() raises Error {
+    w_op(167)
+}
+
+// i64.extend_i32_u: a condition or i32 address becomes a value.
+w_extend() raises Error {
+    w_op(173)
+}
+
+w_unreachable() raises Error {
+    w_op(0)
+}
+
+w_open(op: int, bt: int) raises Error: int {
+    w_op(op);
+    w_op(bt);
+    id: int = wl_depth;
+    wl_depth = wl_depth + 1;
+    id
+}
+
+w_block() raises Error: int {
+    w_open(2, WT_VOID)
+}
+
+w_loop() raises Error: int {
+    w_open(3, WT_VOID)
+}
+
+w_if_type(bt: int) raises Error {
+    w_op(4);
+    w_op(bt);
+    wl_depth = wl_depth + 1
+}
+
+w_if() raises Error {
+    w_if_type(WT_VOID)
+}
+
+w_if_i64() raises Error {
+    w_if_type(WT_I64)
+}
+
+w_if_i32() raises Error {
+    w_if_type(WT_I32)
+}
+
+w_else() raises Error {
+    w_op(5)
+}
+
+w_end() raises Error {
+    w_op(11);
+    wl_depth = wl_depth - 1
+}
+
+w_rel(id: int) raises Error: int {
+    rel: int = wl_depth - 1 - id;
+    if (rel < 0) error("internal: wasm label");
+    rel
+}
+
+w_br(id: int) raises Error {
+    w_op(12);
+    w_u(w_rel(id))
+}
+
+w_br_if(id: int) raises Error {
+    w_op(13);
+    w_u(w_rel(id))
+}
+
+// memory.copy from [dst i32, src i32, n i32].
+w_memory_copy() raises Error {
+    w_op(252);
+    w_u(10);
+    w_op(0);
+    w_op(0)
+}
+
+// memory.fill from [dst i32, byte i32, n i32].
+w_memory_fill() raises Error {
+    w_op(252);
+    w_u(11);
+    w_op(0)
+}
+
+// Exit with status 1, as the x86 backend's out-of-bounds label does.
+w_oob_if() raises Error {
+    w_if();
+    w_call(wf_oob);
+    w_end()
+}
+
+// ---- function state ----
+wl_fn: ?*Function = null;
+
+// i32 locals: the frame base (its lowest address) and the stack pointer at
+// entry. The i64 local wl_acc holds the value of the latest expression
+// statement, which is the value of a block, match, or function body.
+wl_fp: int = 0;
+
+wl_sp0: int = 0;
+
+wl_acc: int = 0;
+
+wl_nvars: int = 0;
+
+// Scratch i64 locals, used in LIFO order.
+wl_tmp_base: int = 0;
+
+wl_tmp_top: int = 0;
+
+wl_tmp_max: int = 0;
+
+// Frame displacement of x86's rbp, the origin of slot offsets. Spill slots
+// that the x86 backend does not need sit above it.
+wl_rbp: int = 0;
+
+wl_spill: int = 0;
+
+wl_region_depth: int = 0;
+
+wt_get(): int {
+    i: int = wl_tmp_base + wl_tmp_top;
+    wl_tmp_top = wl_tmp_top + 1;
+    if (wl_tmp_top > wl_tmp_max) wl_tmp_max = wl_tmp_top;
+    i
+}
+
+wt_put(i: int) raises Error {
+    wl_tmp_top = wl_tmp_top - 1;
+    if (i != wl_tmp_base + wl_tmp_top) error("internal: wasm temporaries out of order")
+}
+
+wl_spill_slot(size: int): int {
+    off: int = wl_rbp + wl_spill;
+    n: int = (size + 7) / 8 * 8;
+    if (n < 8) n = 8;
+    wl_spill = wl_spill + n;
+    off
+}
+
+// The x86 backend copies at least 8 bytes.
+wasm_copy_size(ty: *Type): int {
+    sz: int = type_size(ty);
+    if (sz <= 0) 8 else sz
+}
+
+// Kept in a wasm local unless its address is taken.
+wasm_scalar(ty: ?*Type): bool {
+    ty != null && !passes_by_ref(ty) && !is_struct_ty(ty) && !is_enum_ty(ty) && !is_exn_ty(ty) && !is_array(ty)
+}
+
+// A record of at most 8 bytes, which is passed by value.
+wasm_small_record(ty: *Type): bool {
+    (is_struct_ty(ty) || is_exn_ty(ty)) && !passes_by_ref(ty)
+}
+
+// i64 address fp + disp.
+wg_frame_addr(disp: int) raises Error {
+    w_lget(wl_fp);
+    w_extend();
+    if (disp != 0) {
+        w_i64(disp);
+        w_op(124)
+    }
+}
+
+wg_epilogue() raises Error {
+    w_lget(wl_sp0);
+    w_gset(WG_SP)
+}
+
+// ---- loads, stores, and conversions ----
+
+// Load a scalar of type ty from i32 address + off, as the x86 backend's
+// load_mem extends it.
+wg_load_op(ty: *Type, off: int) raises Error {
+    esz: int = enum_mem_size(ty);
+    size: int = type_size(ty);
+    if (esz == 1 || size == 1) w_mem(49, off) else if (esz == 4 || is_i32_ty(ty)) w_mem(52,
+        off) else if (is_u32_ty(ty) || is_f32_ty(ty) || wasm_small_record(ty) && size == 4) w_mem(53,
+        off) else if (wasm_small_record(ty) && size == 2) w_mem(51, off) else w_mem(41,
+        off)
+}
+
+// Store the i64 on the stack to i32 address + off with the width of ty.
+wg_store_op(ty: *Type, off: int) raises Error {
+    esz: int = enum_mem_size(ty);
+    size: int = type_size(ty);
+    if (esz == 1 || size == 1) w_mem(60, off) else if (esz == 4 || is_i32_ty(ty) || is_u32_ty(ty) || is_f32_ty(ty) || wasm_small_record(ty) && size == 4) w_mem(62,
+        off) else if (wasm_small_record(ty) && size == 2) w_mem(61, off) else w_mem(55,
+        off)
+}
+
+w_mask32() raises Error {
+    w_i64(4294967295);
+    w_op(131)
+}
+
+w_mask8() raises Error {
+    w_i64(255);
+    w_op(131)
+}
+
+// What a round trip through memory does to a scalar of type ty.
+wg_normalize(ty: *Type) raises Error {
+    if (type_size(ty) == 1) w_mask8() else if (is_i32_ty(ty)) w_op(196) else if (is_u32_ty(ty) || is_f32_ty(ty)) w_mask32()
+}
+
+// The x86 backend's wrap_after for arithmetic results.
+wg_wrap(ty: ?*Type) raises Error {
+    if (ty != null) {
+        if (is_i8_ty(ty)) w_mask8();
+        if (is_i32_ty(ty)) w_op(196);
+        if (is_u32_ty(ty)) w_mask32()
+    }
+}
+
+// Float bits to a wasm float, and back.
+wg_to_f(wide: bool) raises Error {
+    if (wide) w_op(191) else {
+        w_wrap();
+        w_op(190)
+    }
+}
+
+wg_from_f(wide: bool) raises Error {
+    if (wide) w_op(189) else {
+        w_op(188);
+        w_extend()
+    }
+}
+
+// Values cross the import boundary as f32/f64 when they are floats.
+wg_to_import(ty: ?*Type) raises Error {
+    if (ty != null && is_f32_ty(ty)) wg_to_f(false);
+    if (ty != null && is_f64_ty(ty)) wg_to_f(true)
+}
+
+wg_from_import(ty: ?*Type) raises Error {
+    if (ty != null && is_f32_ty(ty)) wg_from_f(false);
+    if (ty != null && is_f64_ty(ty)) wg_from_f(true)
+}
+
+wg_convert(from: ?*Type, to: ?*Type) raises Error, IndexOutOfBounds {
+    if (from == null || to == null) return;
+    if (types_equal(from, to)) return;
+    if (is_i32_ty(from) && is_int_ty(to)) {
+        w_op(196);
+        return
+    }
+    if (is_u32_ty(from) && is_int_ty(to)) {
+        w_mask32();
+        return
+    }
+    if (is_i8_ty(from) && is_int_ty(to)) {
+        w_mask8();
+        return
+    }
+    if (is_int_width_ty(from) && (is_f32_ty(to) || is_f64_ty(to))) {
+        if (is_i32_ty(from)) w_op(196);
+        if (is_u32_ty(from)) w_mask32();
+        if (is_i8_ty(from)) w_mask8();
+        if (is_f32_ty(to)) {
+            w_op(180);
+            wg_from_f(false)
+        } else {
+            w_op(185);
+            wg_from_f(true)
+        }
+        return
+    }
+    if (is_f32_ty(from) && is_int_ty(to)) {
+        wg_to_f(false);
+        w_op(252);
+        w_u(4);
+        return
+    }
+    if (is_f64_ty(from) && is_int_ty(to)) {
+        wg_to_f(true);
+        w_op(252);
+        w_u(6);
+        return
+    }
+    if (is_f32_ty(from) && is_f64_ty(to)) {
+        wg_to_f(false);
+        w_op(187);
+        wg_from_f(true);
+        return
+    }
+    if (is_f64_ty(from) && is_f32_ty(to)) {
+        wg_to_f(true);
+        w_op(182);
+        wg_from_f(false)
+    }
+}
+
+// ---- variables ----
+wg_load_var(vo: *Obj, ty: *Type) raises Error {
+    if (vo.is_local) {
+        if (vo.wasm_slot > 0) w_lget(vo.wasm_slot - 1) else {
+            w_lget(wl_fp);
+            wg_load_op(ty, wl_rbp + vo.offset)
+        }
+        return
+    }
+    // Globals use 8-byte slots; only 32-bit values need extension.
+    w_i32(0);
+    w_mem(41, vo.wasm_slot);
+    esz: int = enum_mem_size(ty);
+    if (esz == 4 || is_i32_ty(ty)) w_op(196);
+    if (is_u32_ty(ty) || is_f32_ty(ty)) w_mask32()
+}
+
+// Store the i64 on the stack into a scalar variable.
+wg_store_var(vo: *Obj, ty: *Type) raises Error {
+    if (vo.is_local && vo.wasm_slot > 0) {
+        wg_normalize(ty);
+        w_lset(vo.wasm_slot - 1);
+        return
+    }
+    t: int = wt_get();
+    w_lset(t);
+    if (vo.is_local) {
+        w_lget(wl_fp);
+        w_lget(t);
+        wg_store_op(ty, wl_rbp + vo.offset)
+    } else {
+        w_i32(0);
+        w_lget(t);
+        w_mem(55, vo.wasm_slot)
+    }
+    wt_put(t)
+}
+
+wg_var_addr(vo: *Obj) raises Error {
+    if (vo.is_local) {
+        if (vo.wasm_slot > 0) error("internal: address of a wasm local");
+        wg_frame_addr(wl_rbp + vo.offset)
+    } else w_i64(vo.wasm_slot)
+}
+
+// ---- expressions ----
+wg_member_base(lhs: *Expr) noregion raises Error, IndexOutOfBounds {
+    t: ?*Type = lhs.ty;
+    if (t != null && is_any_pointer(t) && (is_struct_ty(type_base(t)) || is_exn_ty(type_base(t)))) wg_expr(lhs) else wg_addr(lhs)
+}
+
+wg_index_addr(lhs: *Expr, idx: *Expr) noregion raises Error, IndexOutOfBounds {
+    raw: *Type = lhs.ty or error("missing type");
+    if (!is_array(raw) && !is_slice(raw) && !is_str(raw)) error("index requires str, []T, or [N]T");
+    esz: int = type_size(type_base(raw));
+    wg_expr(lhs);
+    wg_expr(idx);
+    if (esz != 1) {
+        w_i64(esz);
+        w_op(126)
+    }
+    w_op(124)
+}
+
+// The i64 address of an lvalue.
+wg_addr(n: *Expr) noregion raises Error, IndexOutOfBounds {
+    match n.kind {
+        Var k -> {
+            vo: *Obj = k.var or error("missing var");
+            wg_var_addr(vo)
+        }
+        Deref k -> wg_expr(k.lhs);
+        Index k -> wg_index_addr(k.lhs, k.idx);
+        MemberAccess k -> {
+            wg_member_base(k.lhs);
+            mem: *Member = k.member or error("internal");
+            if (mem.offset != 0) {
+                w_i64(mem.offset);
+                w_op(124)
+            }
+        }
+        _ -> error_at_file(n.file, n.pos, "not an lvalue")
+    }
+}
+
+wg_load(n: *Expr) noregion raises Error, IndexOutOfBounds {
+    ty: *Type = n.ty or error("missing type");
+    if (passes_by_ref(ty)) {
+        wg_addr(n);
+        return
+    }
+    match n.kind {
+        Var k -> {
+            vo: ?*Obj = k.var;
+            if (vo != null) {
+                wg_load_var(vo, ty);
+                return
+            }
+        }
+        MemberAccess k -> {
+            wg_member_base(k.lhs);
+            w_wrap();
+            mem: *Member = k.member or error("internal");
+            wg_load_op(ty, mem.offset);
+            return
+        }
+        _ -> { }
+    }
+    wg_addr(n);
+    w_wrap();
+    wg_load_op(ty, 0)
+}
+
+wasm_int_cmp(op: BinOp, unsigned: bool): int {
+    match op {
+        Eq -> 81;
+        Ne -> 82;
+        Lt -> if (unsigned) 84 else 83;
+        Gt -> if (unsigned) 86 else 85;
+        Le -> if (unsigned) 88 else 87;
+        Ge -> if (unsigned) 90 else 89;
+        _ -> 0
+    }
+}
+
+// An i32 condition.
+wg_cond(n: *Expr) noregion raises Error, IndexOutOfBounds {
+    match n.kind {
+        Not k -> {
+            wg_cond(k.lhs);
+            w_op(69);
+            return
+        }
+        LogAnd k -> {
+            wg_cond(k.lhs);
+            w_if_i32();
+            wg_cond(k.rhs);
+            w_else();
+            w_i32(0);
+            w_end();
+            return
+        }
+        LogOr k -> {
+            wg_cond(k.lhs);
+            w_if_i32();
+            w_i32(1);
+            w_else();
+            wg_cond(k.rhs);
+            w_end();
+            return
+        }
+        Binary k -> {
+            ty: ?*Type = k.lhs.ty;
+            if (ty != null && !is_float_ty(ty) && !is_str(ty) && !is_opt_str(ty)) {
+                cc: int = wasm_int_cmp(k.op, is_u32_ty(ty));
+                if (cc != 0) {
+                    wg_expr(k.lhs);
+                    wg_expr(k.rhs);
+                    w_op(cc);
+                    return
+                }
+            }
+        }
+        _ -> { }
+    }
+    wg_expr(n);
+    w_i64(0);
+    w_op(82)
+}
+
+wg_binary(op: BinOp, lhs: *Expr, rhs: *Expr) noregion raises Error, IndexOutOfBounds {
+    lty: ?*Type = lhs.ty;
+    if (lty != null && is_float_ty(lty)) {
+        wide: bool = is_f64_ty(lty);
+        wg_expr(lhs);
+        wg_to_f(wide);
+        wg_expr(rhs);
+        wg_to_f(wide);
+        arith: int = 0;
+        cmp: int = 0;
+        match op {
+            Add -> arith = (if (wide) 160 else 146);
+            Sub -> arith = (if (wide) 161 else 147);
+            Mul -> arith = (if (wide) 162 else 148);
+            Div -> arith = (if (wide) 163 else 149);
+            Eq -> cmp = (if (wide) 97 else 91);
+            Ne -> cmp = (if (wide) 98 else 92);
+            Lt -> cmp = (if (wide) 99 else 93);
+            Gt -> cmp = (if (wide) 100 else 94);
+            Le -> cmp = (if (wide) 101 else 95);
+            Ge -> cmp = (if (wide) 102 else 96);
+            _ -> error("invalid float operator")
+        }
+        if (arith != 0) {
+            w_op(arith);
+            wg_from_f(wide)
+        } else {
+            w_op(cmp);
+            w_extend()
+        }
+        return
+    }
+    if ((op == BinOp.Eq || op == BinOp.Ne) && lty != null && (is_str(lty) || is_opt_str(lty))) {
+        // Like the x86 backend, evaluate the right operand first.
+        t: int = wt_get();
+        wg_expr(rhs);
+        w_lset(t);
+        wg_expr(lhs);
+        w_lget(t);
+        wt_put(t);
+        w_call(if (is_opt_str(lty)) wf_opt_str_eq else wf_str_eq);
+        if (op == BinOp.Ne) {
+            w_i64(1);
+            w_op(133)
+        }
+        return
+    }
+    unsigned: bool = lty != null && is_u32_ty(lty);
+    if ((op == BinOp.Shl || op == BinOp.Shr) && imm_operand(rhs) && imm_value(rhs) >= 64) {
+        // Like x86 shift immediates: shl clears and sar shifts by 63.
+        wg_expr(lhs);
+        if (op == BinOp.Shl) {
+            w_op(26);
+            w_i64(0)
+        } else {
+            w_i64(63);
+            w_op(if (unsigned) 136 else 135)
+        }
+        return
+    }
+    wg_expr(lhs);
+    wg_expr(rhs);
+    cc: int = wasm_int_cmp(op, unsigned);
+    if (cc != 0) {
+        w_op(cc);
+        w_extend();
+        return
+    }
+    match op {
+        Add -> w_op(124);
+        Sub -> w_op(125);
+        Mul -> w_op(126);
+        Div -> w_op(127);
+        Mod -> w_op(129);
+        Shl -> w_op(134);
+        Shr -> w_op(if (unsigned) 136 else 135);
+        And -> w_op(131);
+        Xor -> w_op(133);
+        Or -> w_op(132);
+        _ -> error("invalid operator")
+    }
+}
+
+// Store the value of e at an address: the i64 in local base, or the frame
+// when base is negative, plus off.
+wg_store_into(
+    ty: *Type,
+    base: int,
+    off: int,
+    e: *Expr
+) noregion raises Error, IndexOutOfBounds {
+    if (base < 0) w_lget(wl_fp) else {
+        w_lget(base);
+        w_wrap()
+    }
+    if (passes_by_ref(ty)) {
+        if (off != 0) {
+            w_i32(off);
+            w_op(106)
+        }
+        wg_expr(e);
+        w_wrap();
+        w_i32(wasm_copy_size(ty));
+        w_memory_copy()
+    } else {
+        wg_expr(e);
+        wg_store_op(ty, off)
+    }
+}
+
+wg_inits(inits: ?*FieldInit, base: int, off: int) noregion raises Error, IndexOutOfBounds {
+    init: ?*FieldInit = inits;
+    while (init != null) {
+        lhs: ?*Expr = init.lhs;
+        if (lhs != null) {
+            mem: *Member = init.member or error("internal");
+            wg_store_into(mem.ty, base, off + mem.offset, lhs)
+        }
+        init = init.next
+    }
+}
+
+// Write an enum tag at the same kind of address, with its tag type's width.
+wg_store_tag(
+    base: int,
+    off: int,
+    tag: int,
+    tag_ty: *Type
+) raises Error {
+    if (base < 0) w_lget(wl_fp) else {
+        w_lget(base);
+        w_wrap()
+    }
+    w_i64(tag);
+    if (is_i8_ty(tag_ty)) w_mem(60, off) else if (is_i32_ty(tag_ty) || is_u32_ty(tag_ty)) w_mem(62,
+        off) else w_mem(55, off)
+}
+
+// Elements stored one after another from base + off.
+wg_fill_list(
+    elems: ?*Expr,
+    ty: *Type,
+    base: int,
+    off: int
+) noregion raises Error, IndexOutOfBounds {
+    esz: int = type_size(ty);
+    if (esz <= 0) esz = 8;
+    o: int = off;
+    e: ?*Expr = elems;
+    while (e != null) {
+        wg_store_into(ty, base, o, e);
+        o = o + esz;
+        e = e.next
+    }
+}
+
+// A fresh allocation: size on the stack, address in local t. Exit when the
+// heap is exhausted.
+wg_malloc_into(t: int) raises Error {
+    w_call(wf_malloc);
+    w_ltee(t);
+    w_op(80);
+    w_oob_if()
+}
+
+wg_new(
+    n: *Expr,
+    lhs: ?*Expr,
+    val: int,
+    inits: ?*FieldInit,
+    variant: ?*Variant,
+    fill: ?*Expr
+) noregion raises Error, IndexOutOfBounds {
+    base: *Type = type_base(n.ty or error("missing type"));
+    esz: int = type_size(base);
+    if (esz <= 0) esz = 8;
+    if (lhs != null) {
+        fv: *Expr = fill or error("new T[n] requires an initial value (new T[n](v))");
+        tn: int = wt_get();
+        wg_expr(lhs);
+        w_lset(tn);
+        // Cap one allocation at 512MiB; n * esz + 8 must not wrap.
+        w_lget(tn);
+        w_i64(536870904 / esz);
+        w_op(86);
+        w_oob_if();
+        tf: int = wt_get();
+        wg_expr(fv);
+        w_lset(tf);
+        tp: int = wt_get();
+        w_lget(tn);
+        if (esz != 1) {
+            w_i64(esz);
+            w_op(126)
+        }
+        w_i64(8);
+        w_op(124);
+        wg_malloc_into(tp);
+        w_lget(tp);
+        w_wrap();
+        w_lget(tn);
+        w_mem(55, 0);
+        w_lget(tp);
+        w_i64(8);
+        w_op(124);
+        w_lset(tp);
+        if (esz == 1) {
+            w_lget(tp);
+            w_wrap();
+            w_lget(tf);
+            w_wrap();
+            w_lget(tn);
+            w_wrap();
+            w_memory_fill()
+        } else {
+            ti: int = wt_get();
+            w_i64(0);
+            w_lset(ti);
+            done: int = w_block();
+            top: int = w_loop();
+            w_lget(ti);
+            w_lget(tn);
+            w_op(89);
+            w_br_if(done);
+            w_lget(tp);
+            w_lget(ti);
+            w_i64(esz);
+            w_op(126);
+            w_op(124);
+            w_wrap();
+            w_lget(tf);
+            if (passes_by_ref(base)) {
+                w_wrap();
+                w_i32(esz);
+                w_memory_copy()
+            } else wg_store_op(base, 0);
+            w_lget(ti);
+            w_i64(1);
+            w_op(124);
+            w_lset(ti);
+            w_br(top);
+            w_end();
+            w_end();
+            wt_put(ti)
+        }
+        w_lget(tp);
+        wt_put(tp);
+        wt_put(tf);
+        wt_put(tn);
+        return
+    }
+    t: int = wt_get();
+    w_i64(esz);
+    wg_malloc_into(t);
+    if (variant != null) {
+        wg_store_tag(t, 0, val, enum_tag_type(base));
+        wg_inits(inits, t, variant_payload_off(variant))
+    } else if (val == 0) wg_inits(inits, t, 0);
+    w_lget(t);
+    wt_put(t)
+}
+
+// A struct or variant literal assigned to an aggregate lvalue is built in
+// place. The value is the destination's address.
+wg_assign_literal(
+    lhs: *Expr,
+    inits: ?*FieldInit,
+    variant: bool,
+    tag: int,
+    payload: int
+) noregion raises Error, IndexOutOfBounds {
+    lty: *Type = lhs.ty or error("missing lhs type");
+    slot: int = 0 - 1;
+    match lhs.kind {
+        Var k -> {
+            vo: ?*Obj = k.var;
+            if (vo != null && vo.is_local && vo.wasm_slot <= 0) slot = wl_rbp + vo.offset
+        }
+        _ -> { }
+    }
+    if (slot >= 0) {
+        if (variant) wg_store_tag(0 - 1, slot, tag, enum_tag_type(lty));
+        wg_inits(inits, 0 - 1, slot + payload);
+        wg_frame_addr(slot);
+        return
+    }
+    t: int = wt_get();
+    wg_addr(lhs);
+    w_lset(t);
+    if (variant) wg_store_tag(t, 0, tag, enum_tag_type(lty));
+    wg_inits(inits, t, payload);
+    w_lget(t);
+    wt_put(t)
+}
+
+wg_assign(lhs: *Expr, rhs: *Expr) noregion raises Error, IndexOutOfBounds {
+    lty: *Type = lhs.ty or error("missing lhs type");
+    match rhs.kind {
+        StructLit k -> {
+            if (is_struct_ty(lty)) {
+                wg_assign_literal(lhs, k.inits, false, 0, 0);
+                return
+            }
+        }
+        VariantLit k -> {
+            if (is_enum_ty(lty)) {
+                wg_assign_literal(lhs, k.inits, true, k.val, variant_payload_off(k.variant));
+                return
+            }
+        }
+        ArrayLit k -> {
+            if (is_array(lty)) {
+                t0: int = wt_get();
+                wg_addr(lhs);
+                w_lset(t0);
+                wg_fill_list(k.elems, type_base(lty), t0, 0);
+                w_lget(t0);
+                wt_put(t0);
+                return
+            }
+        }
+        _ -> { }
+    }
+    // Evaluate the right side first, as the x86 backend does.
+    t: int = wt_get();
+    wg_expr(rhs);
+    w_lset(t);
+    if (passes_by_ref(lty)) {
+        t2: int = wt_get();
+        wg_addr(lhs);
+        w_ltee(t2);
+        w_wrap();
+        w_lget(t);
+        w_wrap();
+        w_i32(wasm_copy_size(lty));
+        w_memory_copy();
+        w_lget(t2);
+        wt_put(t2);
+        wt_put(t);
+        return
+    }
+    match lhs.kind {
+        Var k -> {
+            vo: ?*Obj = k.var;
+            if (vo != null) {
+                w_lget(t);
+                wg_store_var(vo, lty);
+                w_lget(t);
+                wt_put(t);
+                return
+            }
+        }
+        _ -> { }
+    }
+    wg_addr(lhs);
+    w_wrap();
+    w_lget(t);
+    wg_store_op(lty, 0);
+    w_lget(t);
+    wt_put(t)
+}
+
+// memcpy(dst, di, src, si, n) with the x86 backend's range checks.
+wg_memcpy(args: ?*Expr) noregion raises Error, IndexOutOfBounds {
+    ts: []int = new int[5](0);
+    a: ?*Expr = args;
+    for i in 0..5 {
+        e: *Expr = a or error("memcpy takes five arguments");
+        ts[i] = wt_get();
+        wg_expr(e);
+        w_lset(ts[i]);
+        a = e.next
+    }
+    for side in 0..2 {
+        buf: int = ts[2 * side];
+        at: int = ts[2 * side + 1];
+        w_lget(at);
+        w_lget(buf);
+        w_i64(8);
+        w_op(125);
+        w_wrap();
+        w_mem(41, 0);
+        w_op(86);
+        w_oob_if();
+        w_lget(at);
+        w_lget(ts[4]);
+        w_op(124);
+        w_lget(buf);
+        w_i64(8);
+        w_op(125);
+        w_wrap();
+        w_mem(41, 0);
+        w_op(86);
+        w_oob_if()
+    }
+    w_lget(ts[0]);
+    w_lget(ts[1]);
+    w_op(124);
+    w_wrap();
+    w_lget(ts[2]);
+    w_lget(ts[3]);
+    w_op(124);
+    w_wrap();
+    w_lget(ts[4]);
+    w_wrap();
+    w_memory_copy();
+    w_i64(0);
+    for j in 0..5 wt_put(ts[4 - j])
+}
+
+// len of the slice or str in local t.
+wg_len_of(t: int) raises Error {
+    w_lget(t);
+    w_i64(8);
+    w_op(125);
+    w_wrap();
+    w_mem(41, 0)
+}
+
+// read(fd, *i8), read(fd, buf), read(fd, buf, n), or read(fd, buf, off, n).
+wg_read(args: ?*Expr) noregion raises Error, IndexOutOfBounds {
+    a0: *Expr = args or error("missing I/O args");
+    a1: *Expr = a0.next or error("missing I/O args");
+    t1: ?*Type = a1.ty;
+    a2: ?*Expr = a1.next;
+    tf: int = wt_get();
+    wg_expr(a0);
+    w_lset(tf);
+    tb: int = wt_get();
+    wg_expr(a1);
+    w_lset(tb);
+    if (t1 != null && is_pointer(t1)) {
+        w_lget(tf);
+        w_lget(tb);
+        w_i64(1)
+    } else if (a2 == null) {
+        w_lget(tf);
+        w_lget(tb);
+        wg_len_of(tb)
+    } else if (a2.next == null) {
+        tn: int = wt_get();
+        wg_expr(a2);
+        w_lset(tn);
+        w_lget(tn);
+        wg_len_of(tb);
+        w_op(86);
+        w_oob_if();
+        w_lget(tf);
+        w_lget(tb);
+        w_lget(tn);
+        wt_put(tn)
+    } else {
+        a3: *Expr = a2.next or error("missing I/O args");
+        to: int = wt_get();
+        wg_expr(a2);
+        w_lset(to);
+        tn2: int = wt_get();
+        wg_expr(a3);
+        w_lset(tn2);
+        w_lget(to);
+        wg_len_of(tb);
+        w_op(86);
+        w_oob_if();
+        w_lget(to);
+        w_lget(tn2);
+        w_op(124);
+        wg_len_of(tb);
+        w_op(86);
+        w_oob_if();
+        w_lget(tf);
+        w_lget(tb);
+        w_lget(to);
+        w_op(124);
+        w_lget(tn2);
+        wt_put(tn2);
+        wt_put(to)
+    }
+    w_call(wf_read);
+    wt_put(tb);
+    wt_put(tf)
+}
+
+wg_indirect_call(target: *Expr, fn: *Function, args: ?*Expr) noregion raises Error, IndexOutOfBounds {
+    rt: ?*Type = fn.return_ty;
+    t: int = wt_get();
+    wg_expr(target);
+    w_lset(t);
+    if (rt != null && passes_by_ref(rt)) wg_frame_addr(wl_spill_slot(type_size(rt)));
+    a: ?*Expr = args;
+    while (a != null) {
+        wg_expr(a);
+        a = a.next
+    }
+    w_lget(t);
+    w_wrap();
+    w_op(17);
+    w_u(wasm_fnptr_type(fn));
+    w_u(0);
+    wt_put(t)
+}
+
+wg_call(
+    n: *Expr,
+    funcname: []i8,
+    args: ?*Expr,
+    fno: ?*Function,
+    target: ?*Expr
+) noregion raises Error, IndexOutOfBounds {
+    if (target != null) {
+        wg_indirect_call(target, fno or error("missing function signature"), args);
+        return
+    }
+    if (fno == null) {
+        if (streq(funcname, "len")) {
+            argument: *Expr = args or error("missing len argument");
+            wg_expr(argument);
+            w_i64(8);
+            w_op(125);
+            w_wrap();
+            w_mem(41, 0);
+            return
+        }
+        if (streq(funcname, "l8_cstr") || streq(funcname, "l8_bytes")) {
+            argument2: *Expr = args or error("missing argument");
+            wg_expr(argument2);
+            w_call(if (streq(funcname, "l8_cstr")) wf_cstr else wf_bytes);
+            return
+        }
+        if (streq(funcname, "memcpy")) {
+            wg_memcpy(args);
+            return
+        }
+        if (streq(funcname, "read")) {
+            wg_read(args);
+            return
+        }
+        error_at_file(n.file, n.pos, "wasm: unknown builtin function")
+    }
+    fn: *Function = fno or error("missing function");
+    if (fn.sret != null) wg_frame_addr(wl_rbp + cg_temp_offset(n));
+    a: ?*Expr = args;
+    p: ?*Obj = fn.params;
+    while (a != null) {
+        wg_expr(a);
+        if (fn.is_extern) {
+            pty: ?*Type = null;
+            if (p != null) {
+                pty = p.ty;
+                p = p.param_next
+            }
+            wg_to_import(pty)
+        }
+        a = a.next
+    }
+    w_call(fn.wasm_index);
+    if (fn.is_extern) {
+        rt: ?*Type = fn.return_ty;
+        if (wasm_returns_value(rt)) wg_from_import(rt) else w_unreachable()
+    }
+}
+
+wg_expr(n: *Expr) noregion raises Error, IndexOutOfBounds {
+    match n.kind {
+        Num k -> {
+            if (k.str_label != 0) w_i64(wasm_str(k.str_label - 1) + 8) else w_i64(k.val)
+        }
+        Null -> w_i64(0);
+        Var p -> {
+            v: ?*Obj = p.var;
+            if (v != null && v.is_const) w_i64(v.const_val) else wg_load(n)
+        }
+        MemberAccess _ -> wg_load(n);
+        Deref _ -> wg_load(n);
+        Index _ -> wg_load(n);
+        FuncAddr k -> {
+            fa: ?*Function = k.fn;
+            if (fa == null) fa = find_function(k.name);
+            f: *Function = fa or error_at_file(n.file, n.pos, "unknown function");
+            if (f.is_extern) error_at_file(n.file, n.pos, "wasm: an extern function cannot be a value");
+            w_i64(f.wasm_index)
+        }
+        Addr k -> wg_addr(k.lhs);
+        As k -> {
+            wg_expr(k.lhs);
+            wg_convert(k.lhs.ty, n.ty)
+        }
+        Trunc k -> {
+            wg_expr(k.lhs);
+            wg_wrap(n.ty)
+        }
+        New k -> wg_new(n, k.lhs, k.val, k.inits, k.variant, k.fill);
+        StructLit k -> {
+            ty: *Type = n.ty or error("missing type");
+            disp: int = wl_rbp + cg_temp_offset(n);
+            wg_inits(k.inits, 0 - 1, disp);
+            if (type_size(ty) <= 8) {
+                w_lget(wl_fp);
+                wg_load_op(ty, disp)
+            } else wg_frame_addr(disp)
+        }
+        VariantLit k -> {
+            ety: *Type = n.ty or error("missing type");
+            sz: int = type_size(ety);
+            if (sz <= 0) sz = 8;
+            if (sz <= 8 && k.inits == null) w_i64(k.val) else {
+                disp2: int = wl_rbp + cg_temp_offset(n);
+                wg_store_tag(0 - 1, disp2, k.val, enum_tag_type(ety));
+                wg_inits(k.inits, 0 - 1, disp2 + variant_payload_off(k.variant));
+                if (sz <= 8) {
+                    w_lget(wl_fp);
+                    wg_load_op(ety, disp2)
+                } else wg_frame_addr(disp2)
+            }
+        }
+        Assign q -> wg_assign(q.lhs, q.rhs);
+        Not _ -> {
+            wg_cond(n);
+            w_extend()
+        }
+        LogAnd _ -> {
+            wg_cond(n);
+            w_extend()
+        }
+        LogOr _ -> {
+            wg_cond(n);
+            w_extend()
+        }
+        Neg k -> {
+            nty: ?*Type = n.ty;
+            if (nty != null && is_f32_ty(nty)) {
+                wg_expr(k.lhs);
+                w_i64(2147483648);
+                w_op(133)
+            } else if (nty != null && is_f64_ty(nty)) {
+                wg_expr(k.lhs);
+                w_i64(0 - 9223372036854775807 - 1);
+                w_op(133)
+            } else {
+                w_i64(0);
+                wg_expr(k.lhs);
+                w_op(125);
+                wg_wrap(nty)
+            }
+        }
+        BitNot k -> {
+            wg_expr(k.lhs);
+            w_i64(0 - 1);
+            w_op(133);
+            wg_wrap(n.ty)
+        }
+        OrElse k -> {
+            t: int = wt_get();
+            wg_expr(k.lhs);
+            w_ltee(t);
+            w_op(80);
+            w_if_i64();
+            wg_expr(k.rhs);
+            w_else();
+            w_lget(t);
+            w_end();
+            wt_put(t)
+        }
+        Funcall k -> wg_call(n, k.funcname, k.args, k.fn, k.target);
+        Binary k -> {
+            wg_binary(k.op, k.lhs, k.rhs);
+            wg_wrap(n.ty)
+        }
+        If k -> {
+            wg_cond(k.cond);
+            w_if_i64();
+            wg_expr(k.then);
+            w_else();
+            wg_expr(k.els);
+            w_end()
+        }
+        Match k -> {
+            wg_match(k.cond, k.arms);
+            w_lget(wl_acc)
+        }
+        Block k -> {
+            wg_stmts(k.body);
+            w_lget(wl_acc)
+        }
+        Sizeof k -> {
+            sty: ?*Type = k.ty;
+            if (sty == null) {
+                se: *Expr = k.e or error("sizeof");
+                sty = se.ty
+            }
+            w_i64(type_size(sty or error("sizeof")))
+        }
+        ArrayLit k -> {
+            nty2: *Type = n.ty or error("missing type");
+            base: *Type = type_base(nty2);
+            if (is_array(nty2)) {
+                disp3: int = wl_rbp + cg_temp_offset(n);
+                wg_fill_list(k.elems, base, 0 - 1, disp3);
+                wg_frame_addr(disp3);
+                return
+            }
+            esz: int = type_size(base);
+            if (esz <= 0) esz = 8;
+            cnt: int = 0;
+            ce: ?*Expr = k.elems;
+            while (ce != null) {
+                cnt = cnt + 1;
+                ce = ce.next
+            }
+            tp: int = wt_get();
+            w_i64(cnt * esz + 8);
+            wg_malloc_into(tp);
+            w_lget(tp);
+            w_wrap();
+            w_i64(cnt);
+            w_mem(55, 0);
+            w_lget(tp);
+            w_i64(8);
+            w_op(124);
+            w_lset(tp);
+            wg_fill_list(k.elems, base, tp, 0);
+            w_lget(tp);
+            wt_put(tp)
+        }
+    }
+}
+
+wasm_str(label: int) raises Error: int {
+    if (label < 0 || label >= len(wasm_str_addr)) error("internal: string literal label");
+    wasm_str_addr[label]
+}
+
+// ---- statements ----
+wg_stmts(body: ?*Stmt) noregion raises Error, IndexOutOfBounds {
+    s: ?*Stmt = body;
+    while (s != null) {
+        wg_stmt(s);
+        s = s.next
+    }
+}
+
+// Copy the aggregate at the address on the stack to the result slot and
+// leave the slot's address, as the x86 backend returns it.
+wg_copy_to_sret() raises Error {
+    fn: *Function = wl_fn or error("internal: no function");
+    sret: *Obj = fn.sret or error("internal: no result slot");
+    rt: *Type = fn.return_ty or error("missing return type");
+    sty: *Type = sret.ty or error("missing type");
+    t: int = wt_get();
+    w_lset(t);
+    wg_load_var(sret, sty);
+    w_wrap();
+    w_lget(t);
+    w_wrap();
+    w_i32(wasm_copy_size(rt));
+    w_memory_copy();
+    wg_load_var(sret, sty);
+    wt_put(t)
+}
+
+wg_return(lhs: ?*Expr) noregion raises Error, IndexOutOfBounds {
+    if (lhs != null) {
+        wg_expr(lhs);
+        fn: *Function = wl_fn or error("internal: no function");
+        if (fn.sret != null) wg_copy_to_sret()
+    } else w_i64(0);
+    for _i in 0..wl_region_depth w_call(wf_region_pop);
+    wg_epilogue();
+    w_op(15)
+}
+
+wg_for(
+    item: *Obj,
+    coll: ?*Obj,
+    idx: ?*Obj,
+    count: *Obj,
+    iter: *Expr,
+    hi: ?*Expr,
+    body: *Stmt
+) noregion raises Error, IndexOutOfBounds {
+    if (hi != null) {
+        wg_expr(iter);
+        wg_store_var(item, ty_int);
+        wg_expr(hi);
+        wg_store_var(count, ty_int);
+        done: int = w_block();
+        top: int = w_loop();
+        wg_load_var(item, ty_int);
+        wg_load_var(count, ty_int);
+        w_op(89);
+        w_br_if(done);
+        wg_stmt(body);
+        wg_load_var(item, ty_int);
+        w_i64(1);
+        w_op(124);
+        wg_store_var(item, ty_int);
+        w_br(top);
+        w_end();
+        w_end();
+        return
+    }
+    cu: *Obj = coll or error("internal: for array missing temps");
+    iu: *Obj = idx or error("internal: for array missing temps");
+    sty: *Type = cu.ty or error("missing type");
+    ity: *Type = item.ty or error("missing type");
+    esz: int = type_size(ity);
+    array: bool = is_array(sty);
+    if (array) {
+        wg_var_addr(cu);
+        w_wrap();
+        wg_expr(iter);
+        w_wrap();
+        w_i32(wasm_copy_size(sty));
+        w_memory_copy();
+        w_i64(array_len(sty))
+    } else {
+        wg_expr(iter);
+        wg_store_var(cu, sty);
+        wg_load_var(cu, sty);
+        w_i64(8);
+        w_op(125);
+        w_wrap();
+        w_mem(41, 0)
+    }
+    wg_store_var(count, ty_int);
+    w_i64(0);
+    wg_store_var(iu, ty_int);
+    done2: int = w_block();
+    top2: int = w_loop();
+    wg_load_var(iu, ty_int);
+    wg_load_var(count, ty_int);
+    w_op(90);
+    w_br_if(done2);
+    by_ref: bool = passes_by_ref(ity);
+    if (by_ref) {
+        wg_var_addr(item);
+        w_wrap()
+    }
+    if (array) wg_var_addr(cu) else wg_load_var(cu, sty);
+    wg_load_var(iu, ty_int);
+    if (esz != 1) {
+        w_i64(esz);
+        w_op(126)
+    }
+    w_op(124);
+    w_wrap();
+    if (by_ref) {
+        w_i32(if (esz <= 0) 8 else esz);
+        w_memory_copy()
+    } else {
+        wg_load_op(ity, 0);
+        wg_store_var(item, ity)
+    }
+    wg_stmt(body);
+    wg_load_var(iu, ty_int);
+    w_i64(1);
+    w_op(124);
+    wg_store_var(iu, ty_int);
+    w_br(top2);
+    w_end();
+    w_end()
+}
+
+// Copy a match arm's payload from the subject at the address in local ta.
+wg_match_binder(arm: *MatchArm, ta: int) raises Error {
+    bv: ?*Obj = arm.binder;
+    fn: ?*Function = wl_fn;
+    if (bv != null && (bv.used || fn == null || !fn.used)) {
+        av: *Variant = arm.variant or error("missing variant");
+        wg_var_addr(bv);
+        w_wrap();
+        w_lget(ta);
+        if (av.payload_offset != 0) {
+            w_i64(av.payload_offset);
+            w_op(124)
+        }
+        w_wrap();
+        w_i32(if (av.payload_size <= 0) 8 else av.payload_size);
+        w_memory_copy()
+    }
+}
+
+// Dispatch on an enum's tag with br_table when its tags are dense, else with
+// comparisons. Each arm has a block; the first wildcard is the fallback.
+wg_match_enum(cond: *Expr, cty: *Type, arms: ?*MatchArm) noregion raises Error, IndexOutOfBounds {
+    ta: int = wt_get();
+    if (passes_by_ref(cty)) wg_expr(cond) else {
+        lvalue: bool = false;
+        match cond.kind {
+            Var _ -> lvalue = true;
+            MemberAccess _ -> lvalue = true;
+            Deref _ -> lvalue = true;
+            _ -> { }
+        }
+        if (lvalue) wg_addr(cond) else {
+            // A small enum value needs an address for its payload.
+            disp: int = wl_spill_slot(8);
+            w_lget(wl_fp);
+            wg_expr(cond);
+            w_mem(55, disp);
+            wg_frame_addr(disp)
+        }
+    }
+    w_lset(ta);
+    tt: int = wt_get();
+    w_lget(ta);
+    w_wrap();
+    wg_load_op(enum_tag_type(cty), 0);
+    w_lset(tt);
+    narms: int = 0;
+    wild: int = 0 - 1;
+    low: int = 0;
+    high: int = 0;
+    tagged: int = 0;
+    scan: ?*MatchArm = arms;
+    while (scan != null) {
+        v: ?*Variant = scan.variant;
+        if (wild < 0) {
+            if (v == null) wild = narms else {
+                if (tagged == 0 || v.tag < low) low = v.tag;
+                if (tagged == 0 || v.tag > high) high = v.tag;
+                tagged = tagged + 1
+            }
+        }
+        narms = narms + 1;
+        scan = scan.next
+    }
+    end: int = w_block();
+    missing: int = w_block();
+    for _i in 0..narms _arm_block: int = w_block();
+    // Arm i's block is the (narms - i)th inside missing.
+    fallback: int = if (wild >= 0) missing + narms - wild else missing;
+    if (tagged >= 4 && low >= 0 && high - low < 4096) {
+        w_lget(tt);
+        if (low != 0) {
+            w_i64(low);
+            w_op(125)
+        }
+        w_wrap();
+        w_op(14);
+        w_u(high - low + 1);
+        for t in low..high + 1 {
+            target: int = fallback;
+            i: int = 0;
+            arm: ?*MatchArm = arms;
+            while (arm != null && (wild < 0 || i < wild)) {
+                v2: ?*Variant = arm.variant;
+                if (target == fallback && v2 != null && v2.tag == t) target = missing + narms - i;
+                i = i + 1;
+                arm = arm.next
+            }
+            w_u(w_rel(target))
+        }
+        w_u(w_rel(fallback))
+    } else {
+        i2: int = 0;
+        arm2: ?*MatchArm = arms;
+        while (arm2 != null && (wild < 0 || i2 < wild)) {
+            v3: *Variant = arm2.variant or error("missing variant");
+            w_lget(tt);
+            w_i64(v3.tag);
+            w_op(81);
+            w_br_if(missing + narms - i2);
+            i2 = i2 + 1;
+            arm2 = arm2.next
+        }
+        w_br(fallback)
+    }
+    arm3: ?*MatchArm = arms;
+    while (arm3 != null) {
+        w_end();
+        wg_match_binder(arm3, ta);
+        wg_stmt(arm3.body);
+        w_br(end);
+        arm3 = arm3.next
+    }
+    w_end();
+    w_call(wf_oob);
+    w_end();
+    wt_put(tt);
+    wt_put(ta)
+}
+
+wg_match(cond: *Expr, arms: ?*MatchArm) noregion raises Error, IndexOutOfBounds {
+    cty: ?*Type = cond.ty;
+    if (cty != null && is_enum_ty(cty)) {
+        wg_match_enum(cond, cty, arms);
+        return
+    }
+    tv: int = wt_get();
+    wg_expr(cond);
+    w_lset(tv);
+    end: int = w_block();
+    arm: ?*MatchArm = arms;
+    while (arm != null) {
+        if (arm.variant != null) error_at_file(arm.file, arm.pos, "wasm: variant arm without an enum subject");
+        if (arm.is_literal) {
+            w_lget(tv);
+            w_i64(arm.literal);
+            w_op(81);
+            w_if();
+            wg_stmt(arm.body);
+            w_br(end);
+            w_end()
+        } else {
+            wg_stmt(arm.body);
+            w_br(end)
+        }
+        arm = arm.next
+    }
+    w_call(wf_oob);
+    w_end();
+    wt_put(tv)
+}
+
+wg_try(body: *Stmt, arms: ?*CatchArm) noregion raises Error, IndexOutOfBounds {
+    rn: int = wt_get();
+    w_gget(WG_REGION_N);
+    w_lset(rn);
+    done: int = w_block();
+    caught: int = w_block();
+    // try_table with one `catch tag 0` clause, labeled from outside it.
+    w_op(31);
+    w_op(WT_VOID);
+    w_u(1);
+    w_op(0);
+    w_u(0);
+    w_u(w_rel(caught));
+    wl_depth = wl_depth + 1;
+    wg_stmt(body);
+    w_end();
+    w_br(done);
+    w_end();
+    // Frames below this one are gone; so are regions entered since the try.
+    w_lget(wl_fp);
+    w_gset(WG_SP);
+    w_lget(rn);
+    w_call(wf_region_unwind);
+    arm: ?*CatchArm = arms;
+    while (arm != null) {
+        ced: *ExnDef = arm.exn or error("internal");
+        w_gget(WG_EXC_TAG);
+        w_i64(ced.tag);
+        w_op(81);
+        w_if();
+        binder: ?*Obj = arm.binder;
+        if (binder != null && ced.size > 0) {
+            wg_var_addr(binder);
+            w_wrap();
+            w_gget(WG_EXC_PTR);
+            w_wrap();
+            w_i32(ced.size);
+            w_memory_copy()
+        }
+        wg_stmt(arm.body);
+        w_br(done);
+        w_end();
+        arm = arm.next
+    }
+    w_gget(WG_EXC_TAG);
+    w_gget(WG_EXC_PTR);
+    w_call(wf_raise);
+    w_unreachable();
+    w_end();
+    wt_put(rn)
+}
+
+wg_raise(exn: ?*ExnDef, inits: ?*FieldInit) noregion raises Error, IndexOutOfBounds {
+    ex: *ExnDef = exn or error("internal");
+    if (ex.members != null) {
+        esz: int = ex.size;
+        if (esz <= 0) esz = 8;
+        t: int = wt_get();
+        w_i64(esz);
+        wg_malloc_into(t);
+        wg_inits(inits, t, 0);
+        w_i64(ex.tag);
+        w_lget(t);
+        wt_put(t)
+    } else {
+        w_i64(ex.tag);
+        w_i64(0)
+    }
+    w_call(wf_raise);
+    w_unreachable()
+}
+
+wg_stmt(n: *Stmt) noregion raises Error, IndexOutOfBounds {
+    match n.kind {
+        Return k -> wg_return(k.lhs);
+        ExprStmt k -> {
+            wg_expr(k.lhs);
+            w_lset(wl_acc)
+        }
+        Block k -> wg_stmts(k.body);
+        If k -> {
+            wg_cond(k.cond);
+            w_if();
+            wg_stmt(k.then);
+            els: ?*Stmt = k.els;
+            if (els != null) {
+                w_else();
+                wg_stmt(els)
+            }
+            w_end()
+        }
+        While k -> {
+            done: int = w_block();
+            top: int = w_loop();
+            wg_cond(k.cond);
+            w_op(69);
+            w_br_if(done);
+            wg_stmt(k.body);
+            w_br(top);
+            w_end();
+            w_end()
+        }
+        For k -> wg_for(k.item, k.coll, k.idx, k.n, k.iter, k.hi, k.body);
+        Match k -> wg_match(k.cond, k.arms);
+        Raise k -> wg_raise(k.exn, k.inits);
+        Try k -> wg_try(k.body, k.arms);
+        Region k -> {
+            w_gget(WG_HEAP);
+            wg_store_var(k.mark, ty_int);
+            wg_load_var(k.mark, ty_int);
+            w_call(wf_region_push);
+            wl_region_depth = wl_region_depth + 1;
+            wg_stmt(k.body);
+            wl_region_depth = wl_region_depth - 1;
+            w_call(wf_region_pop)
+        }
+        Expect k -> {
+            if (!compile_test_mode) error("expect outside a test");
+            w_i64(k.site.id);
+            w_call(wf_test_expect)
+        }
+        Decl k -> {
+            vo: ?*Obj = k.var;
+            init: ?*Expr = k.init;
+            if (init != null && vo != null) {
+                wg_expr(new_assign(new_var_node(vo), init));
+                w_lset(wl_acc)
+            }
+        }
+    }
+}
+
+// ---- functions ----
+wasm_mark_obj(o: ?*Obj) {
+    if (o != null && o.is_local) o.wasm_slot = 0 - 1
+}
+
+// Locals whose storage an address can reach stay in the frame.
+wasm_mark_addr(e: *Expr) {
+    match e.kind {
+        Var k -> wasm_mark_obj(k.var);
+        MemberAccess k -> {
+            t: ?*Type = k.lhs.ty;
+            if (t != null && is_any_pointer(t)) wasm_mark_expr(k.lhs) else wasm_mark_addr(k.lhs)
+        }
+        Index k -> {
+            wasm_mark_expr(k.idx);
+            t2: ?*Type = k.lhs.ty;
+            if (t2 != null && is_array(t2)) wasm_mark_addr(k.lhs) else wasm_mark_expr(k.lhs)
+        }
+        _ -> wasm_mark_expr(e)
+    }
+}
+
+wasm_mark_inits(inits: ?*FieldInit) {
+    i: ?*FieldInit = inits;
+    while (i != null) {
+        wasm_mark_expr(i.lhs);
+        i = i.next
+    }
+}
+
+wasm_mark_list(first: ?*Expr) {
+    a: ?*Expr = first;
+    while (a != null) {
+        wasm_mark_expr(a);
+        a = a.next
+    }
+}
+
+wasm_mark_arms(arms: ?*MatchArm) {
+    a: ?*MatchArm = arms;
+    while (a != null) {
+        // Payloads are copied into binders in memory.
+        wasm_mark_obj(a.binder);
+        wasm_mark_stmts(a.body);
+        a = a.next
+    }
+}
+
+wasm_mark_expr(e: ?*Expr) {
+    if (e == null) return;
+    n: *Expr = e;
+    match n.kind {
+        Addr k -> wasm_mark_addr(k.lhs);
+        Binary k -> {
+            wasm_mark_expr(k.lhs);
+            wasm_mark_expr(k.rhs)
+        }
+        Assign k -> {
+            wasm_mark_expr(k.lhs);
+            wasm_mark_expr(k.rhs)
+        }
+        LogAnd k -> {
+            wasm_mark_expr(k.lhs);
+            wasm_mark_expr(k.rhs)
+        }
+        LogOr k -> {
+            wasm_mark_expr(k.lhs);
+            wasm_mark_expr(k.rhs)
+        }
+        OrElse k -> {
+            wasm_mark_expr(k.lhs);
+            wasm_mark_expr(k.rhs)
+        }
+        Index k -> {
+            wasm_mark_expr(k.lhs);
+            wasm_mark_expr(k.idx)
+        }
+        Deref k -> wasm_mark_expr(k.lhs);
+        Not k -> wasm_mark_expr(k.lhs);
+        Neg k -> wasm_mark_expr(k.lhs);
+        BitNot k -> wasm_mark_expr(k.lhs);
+        MemberAccess k -> wasm_mark_expr(k.lhs);
+        As k -> wasm_mark_expr(k.lhs);
+        Trunc k -> wasm_mark_expr(k.lhs);
+        Funcall k -> {
+            wasm_mark_expr(k.target);
+            wasm_mark_list(k.args)
+        }
+        New k -> {
+            wasm_mark_expr(k.lhs);
+            wasm_mark_expr(k.fill);
+            wasm_mark_inits(k.inits)
+        }
+        StructLit k -> wasm_mark_inits(k.inits);
+        VariantLit k -> wasm_mark_inits(k.inits);
+        If k -> {
+            wasm_mark_expr(k.cond);
+            wasm_mark_expr(k.then);
+            wasm_mark_expr(k.els)
+        }
+        Match k -> {
+            wasm_mark_expr(k.cond);
+            wasm_mark_arms(k.arms)
+        }
+        Block k -> wasm_mark_stmts(k.body);
+        ArrayLit k -> wasm_mark_list(k.elems);
+        Sizeof k -> wasm_mark_expr(k.e);
+        _ -> { }
+    }
+}
+
+wasm_mark_stmts(stmts: ?*Stmt) {
+    s: ?*Stmt = stmts;
+    while (s != null) {
+        match s.kind {
+            Return k -> wasm_mark_expr(k.lhs);
+            ExprStmt k -> wasm_mark_expr(k.lhs);
+            Decl k -> wasm_mark_expr(k.init);
+            Block k -> wasm_mark_stmts(k.body);
+            If k -> {
+                wasm_mark_expr(k.cond);
+                wasm_mark_stmts(k.then);
+                wasm_mark_stmts(k.els)
+            }
+            While k -> {
+                wasm_mark_expr(k.cond);
+                wasm_mark_stmts(k.body)
+            }
+            For k -> {
+                wasm_mark_expr(k.iter);
+                wasm_mark_expr(k.hi);
+                wasm_mark_stmts(k.body)
+            }
+            Match k -> {
+                wasm_mark_expr(k.cond);
+                wasm_mark_arms(k.arms)
+            }
+            Raise k -> wasm_mark_inits(k.inits);
+            Try k -> {
+                wasm_mark_stmts(k.body);
+                arm: ?*CatchArm = k.arms;
+                while (arm != null) {
+                    wasm_mark_obj(arm.binder);
+                    wasm_mark_stmts(arm.body);
+                    arm = arm.next
+                }
+            }
+            Region k -> wasm_mark_stmts(k.body);
+            Expect _ -> { }
+        }
+        s = s.next
+    }
+}
+
+// Give scalar parameters and locals whose address is never taken wasm
+// locals; np is the number of wasm parameters.
+wasm_assign_locals(fn: *Function, np: int) {
+    v: ?*Obj = fn.locals;
+    while (v != null) {
+        v.wasm_slot = 0;
+        v = v.next
+    }
+    wasm_mark_stmts(fn.body);
+    // -2 marks a parameter kept in the frame.
+    pi: int = 0;
+    sret: ?*Obj = fn.sret;
+    if (sret != null) {
+        sret.wasm_slot = (if (sret.wasm_slot == 0 && wasm_scalar(sret.ty)) 1 else 0 - 2);
+        pi = 1
+    }
+    p: ?*Obj = fn.params;
+    while (p != null) {
+        p.wasm_slot = (if (p.wasm_slot == 0 && wasm_scalar(p.ty)) pi + 1 else 0 - 2);
+        pi = pi + 1;
+        p = p.param_next
+    }
+    n: int = 0;
+    v = fn.locals;
+    while (v != null) {
+        if (v.wasm_slot == 0 && wasm_scalar(v.ty)) {
+            v.wasm_slot = np + 3 + n + 1;
+            n = n + 1
+        }
+        v = v.next
+    }
+    v = fn.locals;
+    while (v != null) {
+        if (v.wasm_slot < 0) v.wasm_slot = 0;
+        v = v.next
+    }
+    if (sret != null && sret.wasm_slot < 0) sret.wasm_slot = 0;
+    p = fn.params;
+    while (p != null) {
+        if (p.wasm_slot < 0) p.wasm_slot = 0;
+        p = p.param_next
+    }
+    wl_nvars = n
+}
+
+// Start a function body with np wasm parameters, no variables, and an empty
+// frame.
+wasm_begin(fn: ?*Function@immortal, np: int) noregion {
+    wl_fn = fn;
+    wl_fp = np;
+    wl_sp0 = np + 1;
+    wl_acc = np + 2;
+    wl_nvars = 0;
+    wl_tmp_base = np + 3;
+    wl_tmp_top = 0;
+    wl_tmp_max = 0;
+    wl_rbp = 0;
+    wl_spill = 0;
+    wl_region_depth = 0;
+    wl_depth = 0;
+    wc = sb_new()
+}
+
+// Add the function in wc. Its locals beyond the parameters are n32 i32s and
+// then n64 i64s.
+wasm_emit_body(type_index: int, n32: int, n64: int) raises Error {
+    if (wl_depth != 0 || wl_tmp_top != 0) error("internal: unbalanced wasm function");
+    wb_uleb(wasm_func_types, type_index);
+    body: *StrBuf = sb_new();
+    groups: int = 0;
+    if (n32 > 0) groups = groups + 1;
+    if (n64 > 0) groups = groups + 1;
+    wb_uleb(body, groups);
+    if (n32 > 0) {
+        wb_uleb(body, n32);
+        wb_byte(body, WT_I32)
+    }
+    if (n64 > 0) {
+        wb_uleb(body, n64);
+        wb_byte(body, WT_I64)
+    }
+    wb_append(body, wc);
+    wb_byte(body, 11);
+    wb_uleb(wasm_code, body.used);
+    wb_append(wasm_code, body);
+    wasm_ndefined = wasm_ndefined + 1
+}
+
+// Prepend the prologue to the body code generated so far, now that the frame
+// size is known.
+wasm_prologue(fn: ?*Function) noregion raises Error {
+    code: *StrBuf = wc;
+    wc = sb_new();
+    frame: int = (wl_rbp + wl_spill + 15) / 16 * 16;
+    w_gget(WG_SP);
+    w_ltee(wl_sp0);
+    w_i32(frame);
+    w_op(107);
+    w_ltee(wl_fp);
+    w_gset(WG_SP);
+    // Trap rather than overwrite the data below the shadow stack.
+    w_lget(wl_fp);
+    w_i32(WASM_STACK_LOW);
+    w_op(73);
+    w_if();
+    w_unreachable();
+    w_end();
+    if (fn != null) {
+        pi: int = 0;
+        sret: ?*Obj = fn.sret;
+        if (sret != null) {
+            if (sret.wasm_slot == 0) {
+                w_lget(wl_fp);
+                w_lget(0);
+                w_mem(55, wl_rbp + sret.offset)
+            }
+            pi = 1
+        }
+        p: ?*Obj = fn.params;
+        while (p != null) {
+            if (p.wasm_slot == 0) {
+                pty: *Type = p.ty or error("missing param type");
+                w_lget(wl_fp);
+                if (passes_by_ref(pty)) {
+                    // Copy the caller's aggregate into the frame, as on x86.
+                    if (wl_rbp + p.offset != 0) {
+                        w_i32(wl_rbp + p.offset);
+                        w_op(106)
+                    }
+                    w_lget(pi);
+                    w_wrap();
+                    w_i32(wasm_copy_size(pty));
+                    w_memory_copy()
+                } else {
+                    w_lget(pi);
+                    wg_store_op(pty, wl_rbp + p.offset)
+                }
+            }
+            pi = pi + 1;
+            p = p.param_next
+        }
+        if (streq(fn.name, "main")) w_call(wf_init_globals)
+    }
+    wb_append(wc, code)
+}
+
+wasm_gen_function(fn: *Function@immortal) noregion raises Error, IndexOutOfBounds {
+    narrow_top = null;
+    catch_top = null;
+    assign_lvar_offsets(fn);
+    current_fn_name = fn.name;
+    current_return_ty = fn.return_ty;
+    current_sret = fn.sret;
+    current_fn = fn;
+    np: int = fn.nparams + (if (fn.sret != null) 1 else 0);
+    wasm_begin(fn, np);
+    wasm_assign_locals(fn, np);
+    wl_tmp_base = np + 3 + wl_nvars;
+    wl_rbp = fn.stack_size;
+    body: *Stmt = fn.body or error("missing body");
+    wg_stmt(body);
+    // Falling off the end returns the last expression statement's value.
+    w_lget(wl_acc);
+    if (fn.sret != null) wg_copy_to_sret();
+    wg_epilogue();
+    wasm_prologue(fn);
+    wasm_emit_body(wasm_fn_type(fn), 2, 1 + wl_nvars + wl_tmp_max)
+}
+
+// Initialize dynamic globals once, in dependency order.
+wasm_gen_init_globals() noregion raises Error, IndexOutOfBounds {
+    temps: int = 0;
+    q: ?*InitGlobals = global_init_order;
+    while (q != null) {
+        temps = cg_temps_expr(q.global.init, temps);
+        q = q.next
+    }
+    current_fn = null;
+    wasm_begin(null, 0);
+    wl_rbp = (temps + 7) / 8 * 8;
+    w_gget(WG_INIT_DONE);
+    w_op(80);
+    w_if();
+    w_i64(1);
+    w_gset(WG_INIT_DONE);
+    q = global_init_order;
+    while (q != null) {
+        g: *Obj = q.global;
+        e: *Expr = g.init or error("missing global initializer");
+        ty: *Type = g.ty or error("missing global type");
+        if (passes_by_ref(ty)) {
+            w_i32(g.wasm_slot);
+            wg_expr(e);
+            w_wrap();
+            w_i32(wasm_copy_size(ty));
+            w_memory_copy()
+        } else {
+            wg_expr(e);
+            wg_store_var(g, ty)
+        }
+        q = q.next
+    }
+    w_end();
+    wg_epilogue();
+    wasm_prologue(null);
+    wasm_emit_body(wasm_sig_i64(0, 0), 2, 1 + wl_tmp_max)
+}
+
+// _start: build argv through the host, run main, and exit with its result.
+// An uncaught exception exits with status 1, like l8_raise without a handler.
+wasm_gen_start() noregion raises Error {
+    wasm_begin(null, 0);
+    done: int = w_block();
+    caught: int = w_block();
+    w_op(31);
+    w_op(WT_VOID);
+    w_u(1);
+    w_op(0);
+    w_u(0);
+    w_u(w_rel(caught));
+    wl_depth = wl_depth + 1;
+    if (compile_test_mode) wasm_gen_test_entry() else {
+        user_main: ?*Function = find_function("main");
+        if (user_main != null && !user_main.is_extern) {
+            if (user_main.nparams > 0) {
+                w_call(wf_argv);
+                w_lset(0);
+                wg_len_of(0);
+                if (user_main.nparams > 1) w_lget(0)
+            }
+            w_call(user_main.wasm_index)
+        } else w_i64(0);
+        w_call(wf_exit);
+        w_unreachable()
+    }
+    w_end();
+    w_br(done);
+    w_end();
+    if (compile_test_mode) {
+        w_i64(0 - 1);
+        w_gget(WG_EXC_TAG);
+        w_call(wf_test_record);
+        w_i64(3)
+    } else w_i64(1);
+    w_call(wf_exit);
+    w_unreachable();
+    w_end();
+    wasm_emit_body(wasm_sig_i64(0, 0), 0, 1)
+}
+
+// `l8 test`: run the test whose index the host passes. A test that returns
+// records -2; an uncaught exception records -1 and its tag (in _start).
+wasm_gen_test_entry() raises Error {
+    w_call(wf_test_index);
+    w_lset(0);
+    w_call(wf_init_globals);
+    c: ?*TestCase = test_cases;
+    while (c != null) {
+        w_lget(0);
+        w_i64(c.id);
+        w_op(81);
+        w_if();
+        w_call(c.fn.wasm_index);
+        w_op(26);
+        w_i64(0 - 2);
+        w_i64(0);
+        w_call(wf_test_record);
+        w_i64(0);
+        w_call(wf_exit);
+        w_unreachable();
+        w_end();
+        c = c.next
+    }
+    w_i64(2);
+    w_call(wf_exit);
+    w_unreachable()
+}
+
+// ---- runtime functions ----
+wasm_region_marks: int = 0;
+
+// The address of region mark n, from the i64 n on the stack.
+wr_mark_addr() raises Error {
+    w_wrap();
+    w_i32(3);
+    w_op(116);
+    w_i32(wasm_region_marks);
+    w_op(106)
+}
+
+// Bytes of linear memory, as an i64.
+wr_memory_bytes() raises Error {
+    w_op(63);
+    w_op(0);
+    w_extend();
+    w_i64(16);
+    w_op(134)
+}
+
+// malloc(size): bump allocation, 8-byte aligned, growing memory as needed.
+// Zero when memory is exhausted.
+wr_malloc() noregion raises Error {
+    wasm_begin(null, 1);
+    w_gget(WG_HEAP);
+    w_lset(1);
+    w_lget(1);
+    w_lget(0);
+    w_i64(7);
+    w_op(124);
+    w_i64(0 - 8);
+    w_op(131);
+    w_op(124);
+    w_lset(2);
+    w_lget(2);
+    wr_memory_bytes();
+    w_op(86);
+    w_if();
+    w_lget(2);
+    wr_memory_bytes();
+    w_op(125);
+    w_i64(65535);
+    w_op(124);
+    w_i64(16);
+    w_op(136);
+    w_lset(3);
+    // Grow with 16MiB to spare when possible.
+    w_lget(3);
+    w_i64(256);
+    w_op(124);
+    w_wrap();
+    w_op(64);
+    w_op(0);
+    w_i32(0 - 1);
+    w_op(70);
+    w_if();
+    w_lget(3);
+    w_wrap();
+    w_op(64);
+    w_op(0);
+    w_i32(0 - 1);
+    w_op(70);
+    w_if();
+    w_i64(0);
+    w_op(15);
+    w_end();
+    w_end();
+    w_end();
+    w_lget(2);
+    w_gset(WG_HEAP);
+    w_lget(1);
+    wasm_emit_body(wasm_sig_i64(1, 1), 0, 3)
+}
+
+wr_region_push() noregion raises Error {
+    wasm_begin(null, 1);
+    w_gget(WG_REGION_N);
+    w_i64(WASM_REGION_CAP);
+    w_op(90);
+    w_oob_if();
+    w_gget(WG_REGION_N);
+    wr_mark_addr();
+    w_lget(0);
+    w_mem(55, 0);
+    w_gget(WG_REGION_N);
+    w_i64(1);
+    w_op(124);
+    w_gset(WG_REGION_N);
+    wasm_emit_body(wasm_sig_i64(1, 0), 0, 0)
+}
+
+wr_region_pop() noregion raises Error {
+    wasm_begin(null, 0);
+    w_gget(WG_REGION_N);
+    w_op(80);
+    w_if();
+    w_op(15);
+    w_end();
+    w_gget(WG_REGION_N);
+    w_i64(1);
+    w_op(125);
+    w_gset(WG_REGION_N);
+    w_gget(WG_REGION_N);
+    wr_mark_addr();
+    w_mem(41, 0);
+    w_gset(WG_HEAP);
+    wasm_emit_body(wasm_sig_i64(0, 0), 0, 0)
+}
+
+// Leave the regions entered after depth n.
+wr_region_unwind() noregion raises Error {
+    wasm_begin(null, 1);
+    done: int = w_block();
+    top: int = w_loop();
+    w_gget(WG_REGION_N);
+    w_lget(0);
+    w_op(87);
+    w_br_if(done);
+    w_call(wf_region_pop);
+    w_br(top);
+    w_end();
+    w_end();
+    wasm_emit_body(wasm_sig_i64(1, 0), 0, 0)
+}
+
+// str_eq(a, b): equal lengths and bytes.
+wr_str_eq() noregion raises Error {
+    wasm_begin(null, 2);
+    wg_len_of(0);
+    w_ltee(2);
+    wg_len_of(1);
+    w_op(82);
+    w_if();
+    w_i64(0);
+    w_op(15);
+    w_end();
+    w_i64(0);
+    w_lset(3);
+    done: int = w_block();
+    top: int = w_loop();
+    w_lget(3);
+    w_lget(2);
+    w_op(89);
+    w_br_if(done);
+    w_lget(0);
+    w_lget(3);
+    w_op(124);
+    w_wrap();
+    w_mem(49, 0);
+    w_lget(1);
+    w_lget(3);
+    w_op(124);
+    w_wrap();
+    w_mem(49, 0);
+    w_op(82);
+    w_if();
+    w_i64(0);
+    w_op(15);
+    w_end();
+    w_lget(3);
+    w_i64(1);
+    w_op(124);
+    w_lset(3);
+    w_br(top);
+    w_end();
+    w_end();
+    w_i64(1);
+    wasm_emit_body(wasm_sig_i64(2, 1), 0, 2)
+}
+
+wr_opt_str_eq() noregion raises Error {
+    wasm_begin(null, 2);
+    w_lget(0);
+    w_op(80);
+    w_if_i64();
+    w_lget(1);
+    w_op(80);
+    w_extend();
+    w_else();
+    w_lget(1);
+    w_op(80);
+    w_if_i64();
+    w_i64(0);
+    w_else();
+    w_lget(0);
+    w_lget(1);
+    w_call(wf_str_eq);
+    w_end();
+    w_end();
+    wasm_emit_body(wasm_sig_i64(2, 1), 0, 0)
+}
+
+// A counted copy of the slice or str in local 0, with room for extra bytes
+// after it; the copy's data address is left in local 2.
+wr_copy_counted(extra: int) raises Error {
+    wg_len_of(0);
+    w_lset(1);
+    w_lget(1);
+    w_i64(8 + extra);
+    w_op(124);
+    wg_malloc_into(2);
+    w_lget(2);
+    w_wrap();
+    w_lget(1);
+    w_mem(55, 0);
+    w_lget(2);
+    w_i64(8);
+    w_op(124);
+    w_lset(2);
+    w_lget(2);
+    w_wrap();
+    w_lget(0);
+    w_wrap();
+    w_lget(1);
+    w_wrap();
+    w_memory_copy()
+}
+
+// cstr(bytes): validate that there is no NUL, then copy with a trailing NUL.
+wr_cstr() noregion raises Error {
+    wasm_begin(null, 1);
+    wg_len_of(0);
+    w_lset(1);
+    w_i64(0);
+    w_lset(3);
+    done: int = w_block();
+    top: int = w_loop();
+    w_lget(3);
+    w_lget(1);
+    w_op(89);
+    w_br_if(done);
+    w_lget(0);
+    w_lget(3);
+    w_op(124);
+    w_wrap();
+    w_mem(49, 0);
+    w_op(80);
+    w_oob_if();
+    w_lget(3);
+    w_i64(1);
+    w_op(124);
+    w_lset(3);
+    w_br(top);
+    w_end();
+    w_end();
+    wr_copy_counted(1);
+    w_lget(2);
+    w_lget(1);
+    w_op(124);
+    w_wrap();
+    w_i64(0);
+    w_mem(60, 0);
+    w_lget(2);
+    wasm_emit_body(wasm_sig_i64(1, 1), 0, 3)
+}
+
+wr_bytes() noregion raises Error {
+    wasm_begin(null, 1);
+    wr_copy_counted(0);
+    w_lget(2);
+    wasm_emit_body(wasm_sig_i64(1, 1), 0, 2)
+}
+
+// raise(tag, payload): record the exception and throw the module's tag.
+wr_raise() noregion raises Error {
+    wasm_begin(null, 2);
+    w_lget(0);
+    w_gset(WG_EXC_TAG);
+    w_lget(1);
+    w_gset(WG_EXC_PTR);
+    w_op(8);
+    w_u(0);
+    wasm_emit_body(wasm_sig_i64(2, 0), 0, 0)
+}
+
+wr_oob() noregion raises Error {
+    wasm_begin(null, 0);
+    w_i64(1);
+    w_call(wf_exit);
+    w_unreachable();
+    wasm_emit_body(wasm_sig_i64(0, 0), 0, 0)
+}
+
+// ---- the module ----
+wasm_emits(fn: *Function): bool {
+    !fn.is_extern && fn.body != null && (fn.test_id < 0 || compile_test_mode)
+}
+
+// Number imports, runtime functions, and L8 functions.
+wasm_plan() noregion raises Error {
+    wf_exit = wasm_add_import("exit", wasm_sig_i64(1, 0));
+    wf_read = wasm_add_import("read", wasm_sig_i64(3, 1));
+    wf_argv = wasm_add_import("l8_argv", wasm_sig_i64(0, 1));
+    if (compile_test_mode) {
+        wf_test_index = wasm_add_import("l8_test_index", wasm_sig_i64(0, 1));
+        wf_test_record = wasm_add_import("l8_test_record", wasm_sig_i64(2, 0));
+        wf_test_expect = wasm_add_import("l8_test_expect", wasm_sig_i64(1, 0))
+    }
+    fn: ?*Function = functions;
+    while (fn != null) {
+        if (fn.is_extern) fn.wasm_index = wasm_add_import(fn.link_name, wasm_extern_sig(fn));
+        fn = fn.next
+    }
+    base: int = wasm_nimports;
+    wf_malloc = base;
+    wf_region_push = base + 1;
+    wf_region_pop = base + 2;
+    wf_region_unwind = base + 3;
+    wf_str_eq = base + 4;
+    wf_opt_str_eq = base + 5;
+    wf_cstr = base + 6;
+    wf_bytes = base + 7;
+    wf_raise = base + 8;
+    wf_oob = base + 9;
+    wf_init_globals = base + 10;
+    wf_start = base + 11;
+    next: int = base + WASM_NRUNTIME;
+    fn = functions;
+    while (fn != null) {
+        if (wasm_emits(fn)) {
+            fn.wasm_index = next;
+            next = next + 1
+        }
+        fn = fn.next
+    }
+}
+
+wasm_pad(addr: int): int {
+    (addr + 7) / 8 * 8
+}
+
+// Place string literals and initialized globals in the data segment, then
+// the zeroed globals and region marks; the heap starts after them.
+wasm_layout() noregion raises Error {
+    wasm_str_addr = new int[str_count](0);
+    addr: int = WASM_STACK_TOP;
+    s: ?*StrLit = str_lits;
+    while (s != null) {
+        if (s.label < 0 || s.label >= len(wasm_str_addr)) error("internal: string literal label");
+        wasm_str_addr[s.label] = addr;
+        wb_le(wasm_data, s.count, 8);
+        data: []i8 = s.data;
+        for i in 0..s.count + 1 {
+            if (i < len(data)) wb_byte(wasm_data, data[i] as int)
+        }
+        end: int = wasm_pad(addr + 8 + s.count + 1);
+        for _pad in addr + 8 + s.count + 1..end wb_byte(wasm_data, 0);
+        addr = end;
+        s = s.next
+    }
+    g: ?*Obj = globals;
+    while (g != null) {
+        if (!g.is_func && !g.is_const && is_const_init(g.init)) {
+            init: *Expr = g.init or error("missing global initializer");
+            gty: *Type = g.ty or error("missing global type");
+            if (type_size(gty) > 8) error("global initializer must be a scalar constant");
+            g.wasm_slot = addr;
+            wb_le(wasm_data, const_value(init), 8);
+            addr = addr + 8
+        }
+        g = g.next
+    }
+    g = globals;
+    while (g != null) {
+        if (!g.is_func && !g.is_const && !is_const_init(g.init)) {
+            sz: int = 8;
+            gty2: ?*Type = g.ty;
+            if (gty2 != null) sz = type_size(gty2);
+            if (sz < 8) sz = 8;
+            g.wasm_slot = addr;
+            addr = wasm_pad(addr + sz)
+        }
+        g = g.next
+    }
+    wasm_region_marks = addr;
+    addr = addr + 8 * WASM_REGION_CAP;
+    wasm_heap_base = (addr + 15) / 16 * 16
+}
+
+wasm_codegen() noregion raises Error, IndexOutOfBounds {
+    // The test entry point stands in for main.
+    wasm_plan();
+    wasm_layout();
+    wr_malloc();
+    wr_region_push();
+    wr_region_pop();
+    wr_region_unwind();
+    wr_str_eq();
+    wr_opt_str_eq();
+    wr_cstr();
+    wr_bytes();
+    wr_raise();
+    wr_oob();
+    wasm_gen_init_globals();
+    wasm_gen_start();
+    fn: ?*Function = functions;
+    while (fn != null) {
+        if (wasm_emits(fn)) wasm_gen_function(fn);
+        fn = fn.next
+    }
+}
+
+wb_global(sb: *StrBuf@new, ty: int, value: int) raises Error {
+    wb_byte(sb, ty);
+    wb_byte(sb, 1);
+    wb_byte(sb, if (ty == WT_I32) 65 else 66);
+    wb_sleb(sb, value);
+    wb_byte(sb, 11)
+}
+
+wb_export(
+    sb: *StrBuf@new,
+    name: []i8,
+    kind: int,
+    index: int
+) raises Error {
+    wb_name(sb, name);
+    wb_byte(sb, kind);
+    wb_uleb(sb, index)
+}
+
+wasm_module() noregion raises Error: *StrBuf@new {
+    m: *StrBuf = sb_new();
+    wb_byte(m, 0);
+    sb_puts(m, "asm");
+    wb_le(m, 1, 4);
+    s: *StrBuf = sb_new();
+    wb_uleb(s, wasm_ntypes);
+    t: ?*WasmType = wasm_types;
+    while (t != null) {
+        sb_puts(s, t.sig);
+        t = t.next
+    }
+    wb_section(m, 1, s);
+    s = sb_new();
+    wb_uleb(s, wasm_nimports);
+    imp: ?*WasmImport = wasm_imports;
+    while (imp != null) {
+        wb_name(s, "env");
+        wb_name(s, imp.name);
+        wb_byte(s, 0);
+        wb_uleb(s, imp.type_index);
+        imp = imp.next
+    }
+    wb_section(m, 2, s);
+    s = sb_new();
+    wb_uleb(s, wasm_ndefined);
+    wb_append(s, wasm_func_types);
+    wb_section(m, 3, s);
+    total: int = wasm_nimports + wasm_ndefined;
+    s = sb_new();
+    wb_uleb(s, 1);
+    wb_byte(s, 112);
+    wb_byte(s, 0);
+    wb_uleb(s, total);
+    wb_section(m, 4, s);
+    s = sb_new();
+    wb_uleb(s, 1);
+    wb_byte(s, 1);
+    wb_uleb(s, (wasm_heap_base + 65535) / 65536 + 16);
+    wb_uleb(s, 65536);
+    wb_section(m, 5, s);
+    s = sb_new();
+    wb_uleb(s, 1);
+    wb_byte(s, 0);
+    wb_uleb(s, wasm_sig_i64(0, 0));
+    wb_section(m, 13, s);
+    s = sb_new();
+    wb_uleb(s, 6);
+    wb_global(s, WT_I32, WASM_STACK_TOP);
+    wb_global(s, WT_I64, wasm_heap_base);
+    wb_global(s, WT_I64, 0);
+    wb_global(s, WT_I64, 0);
+    wb_global(s, WT_I64, 0);
+    wb_global(s, WT_I64, 0);
+    wb_section(m, 6, s);
+    s = sb_new();
+    wb_uleb(s, 5);
+    wb_export(s, "memory", 2, 0);
+    wb_export(s, "table", 1, 0);
+    wb_export(s, "_start", 0, wf_start);
+    wb_export(s, "l8_malloc", 0, wf_malloc);
+    wb_export(s, "l8_heap", 3, WG_HEAP);
+    wb_section(m, 7, s);
+    first: int = wasm_nimports + WASM_NRUNTIME;
+    s = sb_new();
+    wb_uleb(s, 1);
+    wb_byte(s, 0);
+    wb_byte(s, 65);
+    wb_sleb(s, first);
+    wb_byte(s, 11);
+    wb_uleb(s, total - first);
+    for f in first..total wb_uleb(s, f);
+    wb_section(m, 9, s);
+    s = sb_new();
+    wb_uleb(s, wasm_ndefined);
+    wb_append(s, wasm_code);
+    wb_section(m, 10, s);
+    s = sb_new();
+    wb_uleb(s, 1);
+    wb_byte(s, 0);
+    wb_byte(s, 65);
+    wb_sleb(s, WASM_STACK_TOP);
+    wb_byte(s, 11);
+    wb_uleb(s, wasm_data.used);
+    wb_append(s, wasm_data);
+    wb_section(m, 11, s);
+    m
+}
+
+wasm_write_file(path: str, m: *StrBuf) raises Error {
+    fd: int = open(path, 577, 420);
+    if (fd < 0) error("cannot write the output file");
+    off: int = 0;
+    while (off < m.used) {
+        n: int = raw::raw_write_some(fd, m.data, off, m.used - off);
+        if (n <= 0) error("cannot write the output file");
+        off = off + n
+    }
+    close(fd)
+}
+
+// Build for `l8 test --wasm`; the caller writes the module.
+compiler_build_wasm(src_path: []i8@immortal) noregion raises IndexOutOfBounds: int {
+    try {
+        compiler_analyze(src_path);
+        wasm_codegen();
+        0
+    } with Error e -> {
+        print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);
+        1
+    }
+}
+
+// web/run.mjs beside the compiler executable.
+wasm_runner_path() raises Error: []i8@new {
+    buffer: []i8 = new i8[4096](0i8);
+    n: int = runtime_readlink(89, "/proc/self/exe", buffer, len(buffer));
+    if (n <= 0 || n > len(buffer)) error("cannot locate the compiler executable");
+    slash: int = 0;
+    for i in 0..n {
+        if (buffer[i] == '/') slash = i + 1
+    }
+    path: *StrBuf = sb_new();
+    for k in 0..slash {
+        if (k < len(buffer)) sb_putc(path, buffer[k])
+    }
+    sb_puts(path, "web/run.mjs");
+    sb_finish(path)
+}
+
+wasm_usage(): int {
+    raw::raw_write(2, "error: usage: l8 wasm [--profile|-p] <source.l8> -o <module.wasm>\n");
+    1
+}
+
+compiler_wasm_main(argc: int, argv: []str) noregion raises IndexOutOfBounds: int requires (argc <= len(argv)) {
+    do_profile = false;
+    have_s: bool = false;
+    have_o: bool = false;
+    want_o: bool = false;
+    if (argc < 1) return wasm_usage();
+    source: str = argv[0];
+    output: str = argv[0];
+    for ai in 1..argc {
+        arg: str = argv[ai];
+        if (want_o) {
+            if (have_o) return wasm_usage();
+            output = arg;
+            have_o = true;
+            want_o = false
+        } else if (is_profile_flag(arg)) do_profile = true else if (arg == "-o") want_o = true else {
+            if (have_s) return wasm_usage();
+            source = arg;
+            have_s = true
+        }
+    }
+    if (!have_s || !have_o || want_o) return wasm_usage();
+    try {
+        compiler_analyze(bytes(source));
+        wasm_codegen();
+        profile_mark("codegen");
+        wasm_write_file(output, wasm_module());
+        profile_mark("write");
+        profile_end();
+        0
+    } with Error e -> {
+        print_error_at(e.path, e.src, e.src_len, e.pos, e.msg);
+        1
+    }
+}

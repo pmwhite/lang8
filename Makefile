@@ -49,7 +49,7 @@ STAGE1_TESTS := tests/compiler/bool.l8 \
 build = ./$(1) build $(2) -o $@.tmp && mv -f $@.tmp $@
 
 .PHONY: all check fmt selfhost compiler-test game game-test stdlib-test \
-	terminal terminal-test callback-test http http-test websocket websocket-test \
+	terminal terminal-test callback-test http http-test websocket websocket-test wasm-test \
 	install-bootstrap promote promote-bin1 promote-bin2 promote-source clean help
 
 # Formatting rewrites src2, so finish it before anything reads the sources.
@@ -203,6 +203,28 @@ websocket-test: $(OK)/websocket-tests
 $(OK):
 	@mkdir -p $@
 
+# ---- WebAssembly (needs Node) ----
+
+WEB := $(wildcard web/*.js web/*.mjs)
+# tests/compiler/native calls x86 assembly, which a module cannot contain.
+WASM_TESTS := $(filter-out tests/compiler/native/%,$(sort $(shell find tests/compiler tests/callbacks -name '*.l8'))) \
+	$(wildcard stdlib/tests/*.l8) programs/block-game/tests.l8
+
+# The compiler as a module; under Node it must rebuild itself unchanged.
+$(BUILD)/l8.wasm: l8c3 $(SRC2) $(STDLIB) | $(OK)
+	@$(STEP) 'wasm compiler' sh -c './l8c3 wasm src2/main.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+$(OK)/wasm-fixpoint: $(BUILD)/l8.wasm $(WEB) | $(OK)
+	@$(STEP) 'wasm fixpoint' sh -c 'node web/run.mjs $(BUILD)/l8.wasm wasm src2/main.l8 -o $(BUILD)/l8-self.wasm && cmp $(BUILD)/l8.wasm $(BUILD)/l8-self.wasm'
+	@touch $@
+
+# Compiler, callback, standard library, and game tests built as modules.
+$(OK)/wasm-tests: l8c3 $(TESTS) $(PROGRAMS) $(WEB) | $(OK)
+	+@$(STEP) 'wasm tests' ./l8c3 test --wasm $(WASM_TESTS)
+	@touch $@
+
+wasm-test: $(OK)/wasm-fixpoint $(OK)/wasm-tests
+
 # ---- promotion (updates the working tree; commit the result alone) ----
 
 confirm = @if [ "$(FORCE)" != 1 ]; then printf 'About to update %s. Promote in its own commit. Continue? [y/N] ' '$(1)'; \
@@ -237,6 +259,7 @@ help:
 	@echo '  compiler-test   stage-1 fixtures, then all fixtures and CLI cram tests (tests/)'
 	@echo '  stdlib-test, game, game-test, terminal, terminal-test, callback-test'
 	@echo '  http, http-test, websocket, websocket-test'
+	@echo '  wasm-test       run the tests as WebAssembly under Node; check the wasm compiler fixpoint'
 	@echo '  promote, promote-bin1, promote-bin2, promote-source   (FORCE=1 skips the prompt)'
 	@echo '  clean'
 	@echo 'tools/profile.py times the compiler self-build, game build, and formatting.'
