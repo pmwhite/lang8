@@ -227,6 +227,46 @@ emit_io_call(name: []i8@immortal, args: ?*Expr) noregion raises Error, IndexOutO
     cg_call(name)
 }
 
+// Whether idx is a constant element of a fixed array of n elements.
+index_known_in(idx: *Expr, n: int): bool {
+    v: int = 0 - 1;
+    match idx.kind {
+        Num k -> {
+            if (k.str_label == 0) v = k.val
+        }
+        Var k -> {
+            vo: ?*Obj = k.var;
+            if (vo != null && vo.is_const) v = vo.const_val
+        }
+        _ -> { }
+    }
+    0 <= v && v < n
+}
+
+/* Exit through oob_lab unless 0 <= index < len. The index is in idx_reg and,
+ * for a slice or str, its data pointer is in base_reg. Clobbers r11. */
+emit_index_check(
+    raw: *Type,
+    idx: *Expr,
+    base_reg: int,
+    idx_reg: int
+) noregion raises Error, IndexOutOfBounds {
+    if (!check_index_mode) return;
+    if (is_array(raw)) {
+        n: int = array_len(raw);
+        if (index_known_in(idx, n)) return;
+        if (fits_imm32(n)) cg_alu_imm(7, n, idx_reg) else {
+            cg_mov_imm(n, 11);
+            cg_alu_rr(57, 11, idx_reg)
+        }
+    } else {
+        cg_mov_mr(base_reg, 0 - 8, 11);
+        cg_alu_rr(57, 11, idx_reg)
+    }
+    // Unsigned, so a negative index fails too.
+    cg_jump_id(3, oob_lab)
+}
+
 emit_scale_offset(esz: int) noregion raises Error, IndexOutOfBounds {
     if (esz == 1) {
         cg_alu_rr(1, 1, 6);
@@ -307,6 +347,7 @@ gen_index_addr(lhs: *Expr, idx: *Expr) noregion raises Error, IndexOutOfBounds {
         if (is_array(raw)) {
             if (lvo.is_local) cg_lea_mr(5, lvo.offset, 6) else cg_lea_rip(lvo.name,
                 0, 6);
+            emit_index_check(raw, idx, 6, 1);
             emit_scale_offset(esz);
             return
         }
@@ -314,6 +355,7 @@ gen_index_addr(lhs: *Expr, idx: *Expr) noregion raises Error, IndexOutOfBounds {
         emit_load_var(lvo, lty);
         cg_mov_rr(0, 6);
         if (!is_slice(raw) && !is_str(raw)) error("index requires str, []T, or [N]T");
+        emit_index_check(raw, idx, 6, 1);
         emit_scale_offset(esz);
         return
     }
@@ -324,6 +366,7 @@ gen_index_addr(lhs: *Expr, idx: *Expr) noregion raises Error, IndexOutOfBounds {
     gen_expr(idx);
     cg_mov_rr(0, 1);
     cg_pop(6);
+    emit_index_check(raw, idx, 6, 1);
     emit_scale_offset(esz)
 }
 
@@ -500,7 +543,8 @@ gen_simple_addr(n: *Expr, reg: int) noregion raises Error, IndexOutOfBounds: boo
                 if (!gen_simple_addr(k.lhs, reg)) return false
             } else if (!gen_simple_pointer(k.lhs, reg)) return false;
             size: int = type_size(type_base(ty));
-            if (imm_operand(k.idx)) {
+            if (imm_operand(k.idx) && (!check_index_mode || is_array(ty) && index_known_in(k.idx,
+                array_len(ty)))) {
                 offset: int = imm_value(k.idx) * size;
                 if (fits_imm32(offset)) {
                     if (offset != 0) cg_lea_mr(reg, offset, reg);
@@ -517,6 +561,7 @@ gen_simple_addr(n: *Expr, reg: int) noregion raises Error, IndexOutOfBounds: boo
                     if (!gen_simple_operand(k.idx, 10)) return false
                 }
             }
+            emit_index_check(ty, k.idx, reg, 10);
             if (size != 1) cg_imul_imm(size, 10);
             cg_alu_rr(1, 10, reg);
             true
@@ -638,14 +683,18 @@ gen_simple_operand(n: *Expr, reg: int) noregion raises Error, IndexOutOfBounds: 
     }
 }
 
+cg_local_variable(vo: ?*Obj): bool {
+    vo != null && vo.is_local && !vo.is_const
+}
+
 // Restrict address formation to a local or one of its fields. Neither form
 // calls code, changes memory, or uses another ABI argument register as scratch.
 cg_local_call_address(n: *Expr): bool {
     match n.kind {
-        Var k -> k.var != null && k.var.is_local && !k.var.is_const;
+        Var k -> cg_local_variable(k.var);
         MemberAccess k -> {
             match k.lhs.kind {
-                Var v -> v.var != null && v.var.is_local && !v.var.is_const;
+                Var v -> cg_local_variable(v.var);
                 _ -> false
             }
         }
@@ -2594,7 +2643,10 @@ emit_l8_init_globals_fn() noregion raises Error, IndexOutOfBounds {
  * Calls are safe because both generated and external callees obey SysV. */
 cg_local_address_base(n: *Expr): bool {
     match n.kind {
-        Var k -> k.var != null && k.var.is_local;
+        Var k -> {
+            vo: ?*Obj = k.var;
+            vo != null && vo.is_local
+        }
         MemberAccess k -> cg_local_address_base(k.lhs);
         _ -> false
     }

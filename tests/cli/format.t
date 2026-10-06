@@ -200,12 +200,12 @@ protect a nested if or carry a comment:
 
 Index expressions, including addresses of elements and nested indexing:
 
-  $ l8 fmt $TESTDIR/../compiler/bounds_index_forms.l8 > bounds_index_forms.l8
-  $ grep -F -e '&a[i]' -e 'row[j]' bounds_index_forms.l8
+  $ l8 fmt $TESTDIR/../compiler/index_forms.l8 > index_forms.l8
+  $ grep -F -e '&a[i]' -e 'row[j]' index_forms.l8
       row[j]
       slot: *int = &a[i];
-  $ l8 fmt bounds_index_forms.l8 | cmp - bounds_index_forms.l8
-  $ l8 test bounds_index_forms.l8
+  $ l8 fmt index_forms.l8 | cmp - index_forms.l8
+  $ l8 test index_forms.l8
   1 file, 1 test
 
 Semicolons are optional after a block, before `}` or `else`, at the end of the

@@ -32,9 +32,7 @@ error: badopen.l8:8:5: argument type mismatch: have []i8, want str
 
 A few fixtures keep their expectation elsewhere because the end of the file is
 part of the test: `unterminated_comment.l8` puts it first, since the comment
-under test would swallow it. The fixtures for `main(argc, argv)` entry facts
-have no test, because a call from a test would not get the runtime's argv
-guarantees; `l8 test` still checks that they compile.
+under test would swallow it.
 
 Run some or all of the fixtures from the repository root:
 
@@ -44,8 +42,6 @@ Run some or all of the fixtures from the repository root:
 ./l8 test --accept tests/compiler/hello.l8
 ```
 
-The bounds fixtures cover proof-required indexing, unreachable accesses,
-loop revisits, address-taking, and nested accesses. Older bounds-failure
-fixtures deliberately retain unproved `[]`; declaring or catching
-`IndexOutOfBounds` does not authorize them. A separate fixture verifies that
-the removed runtime-check syntax is rejected.
+`index_checks.l8` covers the run-time index check for each kind of array and
+access, and `tests/cli/index.t` covers `--unchecked-index`. Separate fixtures
+check that the removed `a![i]` and verifier contract syntax are rejected.

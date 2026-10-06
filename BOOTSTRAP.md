@@ -52,7 +52,7 @@ the test fixture needs a host C compiler and GNU assembler. Building L8 programs
 with callbacks does not require a host compiler or adapter library.
 
 ```
-l8 compile [--profile|-p] file.l8 > file.s
+l8 compile [--profile|-p] [--unchecked-index] file.l8 > file.s
 l8 unused file.l8 [file.l8 ...]
 l8 boolint file.l8
 l8 forlint file.l8
@@ -61,20 +61,17 @@ l8 unusedfields file.l8
 l8 unusedassign file.l8
 l8 as [-p|--profile] -o file.o file.s runtime.s
 l8 elfpack file.o -o file
-l8 build [--profile|-p] file.l8 -o file
-l8 wasm [--profile|-p] [--async import]... file.l8 -o file.wasm
-l8 test [--accept] [--wasm] [-j N] file.l8|file.t ...
+l8 build [--profile|-p] [--unchecked-index] file.l8 -o file
+l8 wasm [--profile|-p] [--unchecked-index] [--async import]... file.l8 -o file.wasm
+l8 test [--accept] [--wasm] [--unchecked-index] [-j N] file.l8|file.t ...
 ```
 
 `test` builds each file with its `test` declarations, runs them, and compares
 their output with their `expect` statements; `.t` files are cram tests of
 commands. See [`TESTING.md`](TESTING.md).
 
-Both source stages and the saved bootstrap require a compile-time proof for
-`a[i]` during `compile` and `build`, as described in [`BOUNDS.md`](BOUNDS.md).
-Programs that signal invalid indexes explicitly must define their own
-exception. The verifier and its performance improvements are present in
-`src1/` and `bootstrap`.
+`a[i]` checks its index at run time and exits with status 1 when it is out of
+range; `--unchecked-index` leaves the checks out. See [`BOUNDS.md`](BOUNDS.md).
 
 `build` sends typed compiler operations directly to the assembler's in-memory
 section, symbol, relocation, and instruction encoders. It parses only the static

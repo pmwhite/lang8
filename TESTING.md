@@ -76,7 +76,7 @@ choose between canonically:
   newline on multi-line output, control bytes). It accepts the usual string
   escapes plus `\xHH`.
 
-Tests are type-checked and verified like other code whenever their file is
+Tests are type-checked like other code whenever their file is
 compiled, but only `l8 test` compiles them into an executable. Functions used
 only by tests count as used.
 

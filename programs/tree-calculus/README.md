@@ -67,9 +67,9 @@ with bulk zeroing and copying, including the input/output buffers: avoiding
 byte-at-a-time initialization matters for short programs. There are no recursive
 evaluator calls or benchmark-specific shortcuts.
 
-The kernel is a trusted memory-access boundary: native loads are not checked by
-L8's bounds verifier. It relies on valid node IDs, nonempty power-of-two cache
-capacities and the documented record/slice layouts. L8's built-in assembler
+The kernel is a trusted memory-access boundary: L8 does not check its native
+loads. It relies on valid node IDs, nonempty power-of-two cache capacities and
+the documented record/slice layouts. L8's built-in assembler
 builds it directly; no host C compiler or external assembler is required. Bulk
 string instructions use annotated `.byte` encodings because the built-in
 assembler does not accept their mnemonics.

@@ -6,7 +6,7 @@ const EXAMPLES = [
   ["shapes", "Records, enums, and match"],
   ["exceptions", "Checked exceptions"],
   ["mandelbrot", "Mandelbrot in ASCII"],
-  ["bounds", "A bounds proof that fails"],
+  ["bounds", "An index past the end"],
 ];
 const STORAGE_KEY = "l8-playground-source";
 const MAX_OUTPUT = 1 << 20;

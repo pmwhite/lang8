@@ -14,8 +14,9 @@ tag compiler_internal;
 // `type E: i32, 192 = ...` sets a minimum size (C union tail padding). Match still enforces the arm.
 // *T is one object: p.* only, no p[i]. []T is a thin pointer with len at -8.
 // ?*T / ?[]T are null or the non-optional form; `if (x != null)` and `x or y` unwrap.
-// String literals and argv elements are str. Its sentinel is hidden. An
-// Array indexing requires a static proof of its bounds.
+// String literals and argv elements are str. Its sentinel is hidden.
+// a[i] checks 0 <= i < len(a) at run time and exits with status 1 when it
+// fails; `--unchecked-index` omits the check.
 // `as` only forgets a claim (same pointee): []T/*T → *T or ?*T.
 // A span of an existing []T is the array plus a start index.
 // Globals: `name: type = e` is mutable. `const name: T = e` is compile-time and immutable
@@ -50,8 +51,6 @@ tag compiler_internal;
 // Match arms take one statement or a braced block; single expression arms end with `;`.
 // Each if branch and each loop body has a lexical scope, even without braces.
 // Function body uses that rule when a return type is declared; last-statement and `return` share assignable.
-// `requires (condition)` states an entry obligation; `ensures (condition)`
-// states a checked fact about result and parameter values at entry.
 // `return expr` in tail position and ignored values in returning functions are warnings.
 // Semicolon after statements and non-brace decls; not after `}`.
 // noreturn return type; checked exceptions (exception/raises/raise/try/with).
@@ -113,17 +112,7 @@ type Member = {
     browse_id: int;
     browse_pos: int;
     browse_file: int;
-    browse_len: int;
-    invariant_var: ?*Obj;
-    quantified: bool;
-    bounds_fixed_length: i32
-}
-
-type ArrayInvariant = {
-    member: *Member;
-    value: *Obj;
-    predicate: *Expr;
-    next: ?*ArrayInvariant
+    browse_len: int
 }
 
 type StructDef = {
@@ -137,9 +126,7 @@ type StructDef = {
     browse_id: int;
     browse_pos: int;
     browse_file: int;
-    browse_len: int;
-    invariant: ?*Expr;
-    array_invariants: ?*ArrayInvariant
+    browse_len: int
 }
 
 type Variant = {
@@ -198,7 +185,7 @@ type ExnList = {
 type SourceText = {
     data: []i8;
     used: int
-} invariant (0 <= used && used < len(data))
+}
 
 type ImportedFile = {
     path: []i8;
@@ -206,7 +193,7 @@ type ImportedFile = {
     src_len: int;
     id: int;
     next: ?*ImportedFile
-} invariant (0 <= src_len && src_len < len(src))
+}
 
 // Tags filter access to globally unique names; they never change symbol identity.
 type TagSet = {
@@ -233,7 +220,7 @@ type TagBucket = {
 
 type TagBucketTable = {
     buckets: []TagBucket
-} invariant (len(buckets) == 4096)
+}
 
 type TagRef = {
     name: []i8;
@@ -260,7 +247,7 @@ type BrowseBucket = {
 
 type BrowseBucketTable = {
     buckets: []BrowseBucket
-} invariant (len(buckets) == 4096)
+}
 
 type TokKind =
     | Eof
@@ -281,16 +268,12 @@ type TokKind =
     | False
     | Null
     | Noreturn
-    | IndexFor
     | If
     | Else
     | While
     | For
     | In
     | Return
-    | Returned
-    | Requires
-    | Ensures
     | TypeKw
     | Sizeof
     | As
@@ -472,9 +455,6 @@ type Expr = {
     pos: int;
     file: int;
     toklen: int;
-    bounds_access: ?*BoundsAccess;
-    bounds_term_cache: int;
-    bounds_pure_cache: int;
     // Frame offset of this expression's aggregate temporary, or 0.
     cg_temp: int
 }
@@ -482,7 +462,7 @@ type Expr = {
 type StmtKind =
     | Return { lhs: ?*Expr }
     | If { cond: *Expr, then: *Stmt, els: ?*Stmt }
-    | While { cond: *Expr, invariant: ?*Expr, body: *Stmt }
+    | While { cond: *Expr, body: *Stmt }
     | For {
         item: *Obj,
         coll: ?*Obj,
@@ -512,7 +492,6 @@ type StmtKind =
     | Expect { site: *ExpectSite }
 
 type Stmt = {
-    bounds_live_step: int;
     kind: StmtKind;
     next: ?*Stmt;
     lead: ?*Com;
@@ -530,16 +509,12 @@ type Obj = {
     // 0: candidate, 1: stack only, 14/15: assigned machine register.
     cg_register: i8;
     cg_score: u32;
-    // Also holds a verifier-known local scalar or slice length.
     const_val: int;
     const_state: int;
     offset: int;
     scope_depth: int;
     ty: ?*Type;
     used: bool;
-    bounds_may_write: bool;
-    bounds_static_fresh: bool;
-    bounds_unchecked_record: bool;
     init: ?*Expr;
     next: ?*Obj;
     param_next: ?*Obj;
@@ -547,16 +522,7 @@ type Obj = {
     life: int;
     storage_life: int;
     life_bound: []i8;
-    index_for_name: []i8;
-    bounds_addr_taken: bool;
-    bounds_written: bool;
-    bounds_static_scalar: bool;
-    bounds_static_length: bool;
     // Declaration position fits the padding before the last-use boundary.
-    bounds_live_decl_step: u32;
-    bounds_live_until: int;
-    bounds_keep_epoch: int;
-    bounds_entry: ?*Obj;
     bound_need_imm: bool;
     bound_need_new: bool;
     bound_named: ?*Obj;
@@ -582,52 +548,6 @@ type CallEdge = {
     next: ?*CallEdge
 }
 
-type BoundsWrite = {
-    owner: *Function;
-    member: *Member;
-    root_param: ?*Obj;
-    next: ?*BoundsWrite;
-    hash_next: ?*BoundsWrite
-}
-
-type BoundsSeparation = {
-    first: int;
-    second: int;
-    next: ?*BoundsSeparation
-}
-
-type BoundsRequirement = {
-    array: *Expr;
-    index: *Expr;
-    // A range-loop bound may equal the array length; an index may not.
-    allow_end: bool;
-    next: ?*BoundsRequirement
-}
-
-type BoundsSpanRequirement = {
-    array: *Obj;
-    offset: ?*Obj;
-    offset_number: int;
-    count: *Obj;
-    next: ?*BoundsSpanRequirement
-}
-
-type BoundsUpperRequirement = {
-    param: *Obj;
-    max: int;
-    next: ?*BoundsUpperRequirement
-}
-
-type BoundsNonnegativeRequirement = {
-    param: *Obj;
-    next: ?*BoundsNonnegativeRequirement
-}
-
-type BoundsNonNullRequirement = {
-    param: *Obj;
-    next: ?*BoundsNonNullRequirement
-}
-
 type Function = {
     name: []i8;
     link_name: []i8;
@@ -642,29 +562,7 @@ type Function = {
     used: bool;
     is_extern: bool;
     address_taken: bool;
-    bounds_writes: ?*BoundsWrite;
-    bounds_unknown_write: bool;
-    bounds_element_write: bool;
     // May rebind a global variable, itself or through a call.
-    bounds_global_write: bool;
-    bounds_separations: ?*BoundsSeparation;
-    bounds_requirements: ?*BoundsRequirement;
-    bounds_span_requirements: ?*BoundsSpanRequirement;
-    bounds_upper_requirements: ?*BoundsUpperRequirement;
-    bounds_nonnegative_requirements: ?*BoundsNonnegativeRequirement;
-    bounds_nonnull_requirements: ?*BoundsNonNullRequirement;
-    bounds_returns: ?*BoundsReturnFact;
-    bounds_implications: ?*BoundsImplication;
-    bounds_result: ?*Obj;
-    bounds_precondition: ?*Expr;
-    bounds_ensures: ?*Expr;
-    bounds_visit: int;
-    bounds_effect_queued: bool;
-    bounds_liveness_prepared: bool;
-    bounds_effect_queue_next: ?*Function;
-    bounds_effect_head: ?*BoundsEffectSite;
-    bounds_lowlink: int;
-    bounds_on_stack: bool;
     next: ?*Function;
     hash_next: ?*Function;
     ret_bound: []i8;
@@ -778,7 +676,7 @@ type StrLit = {
     count: int;
     label: int;
     next: ?*StrLit
-} invariant (0 <= count && count < len(data))
+}
 
 type InternEnt = {
     s: []i8;
@@ -792,7 +690,7 @@ type InternBucket = {
 
 type InternTable = {
     buckets: []InternBucket
-} invariant (len(buckets) == 4096)
+}
 
 type TyEnt = {
     base: *Type;
@@ -938,7 +836,7 @@ type LifeArrays = {
     edge_short: []int;
     n: int;
     edge_n: int
-} invariant (len(parent) == 256 && len(kind) == 256 && len(depth_frames) == 256 && len(edge_long) == 256 && len(edge_short) == 256 && 0 <= n && n <= len(parent) && 0 <= edge_n && edge_n <= len(edge_long))
+}
 
 life_arrays: LifeArrays = LifeArrays {
     parent: new int[256](0 - 1),
@@ -994,7 +892,7 @@ type SymbolBuckets = {
     structs: []StructBucket;
     enums: []EnumBucket;
     exceptions: []ExnBucket
-} invariant (len(functions) == 1024 && len(globals) == 1024 && len(structs) == 1024 && len(enums) == 1024 && len(exceptions) == 1024)
+}
 
 symbol_buckets: SymbolBuckets = SymbolBuckets {
     functions: new FnBucket[1024](FnBucket { head: null }),
@@ -1057,7 +955,7 @@ cg_region_depth: int = 0;
 type StrBuf = {
     data: []i8;
     used: int
-} invariant (0 <= used && used <= len(data))
+}
 
 emit_state: StrBuf = StrBuf { data: new i8[65536](0i8), used: 0 };
 
@@ -1067,6 +965,9 @@ emit_written: int = 0;
 emit_cap: int = 65536;
 
 do_profile: bool = false;
+
+// Whether a[i] checks its index at run time (`--unchecked-index` clears it).
+check_index_mode: bool = true;
 
 mark_nerr: int = 0;
 
@@ -1079,8 +980,6 @@ current_return_ty: ?*Type = null;
 current_sret: ?*Obj = null;
 
 current_fn: ?*Function = null;
-
-parsing_ensures: bool = false;
 
 count_var_use: bool = true;
 
@@ -1183,7 +1082,7 @@ hash_str(s: []i8): int {
     h
 }
 
-sym_bucket(h: int): int ensures (0 <= returned && returned < 1024) {
+sym_bucket(h: int): int {
     if (h < 0) h = 0 - h;
     h & 1023
 }
@@ -1344,7 +1243,7 @@ print_error_at(
     line: int = 1;
     col: int = 1;
     i: int = 0;
-    while (i < pos && i < src_len && i < len(src)) invariant (0 <= i) {
+    while (i < pos && i < src_len && i < len(src)) {
         if (src[i] == '\n') {
             line = line + 1;
             col = 1
@@ -1372,7 +1271,7 @@ print_warning_at(
     line: int = 1;
     col: int = 1;
     i: int = 0;
-    while (i < pos && i < src_len && i < len(src)) invariant (0 <= i) {
+    while (i < pos && i < src_len && i < len(src)) {
         if (src[i] == '\n') {
             line = line + 1;
             col = 1
@@ -1453,7 +1352,7 @@ sb_new(): *StrBuf@new {
     new StrBuf { data: new i8[64](0i8), used: 0 }
 }
 
-sb_grow(sb: *StrBuf@new, target: int): []i8@new ensures (target <= len(returned)) {
+sb_grow(sb: *StrBuf@new, target: int): []i8@new {
     if (target <= len(sb.data)) return sb.data;
     ncap: int = len(sb.data);
     if (ncap < 1) ncap = 1;
@@ -1514,7 +1413,7 @@ browse_note() {
     browse_tok_file = current_file_id
 }
 
-browse_hash(file: int, pos: int): int ensures (0 <= returned && returned < 4096) {
+browse_hash(file: int, pos: int): int {
     h: int = file * 1000003 + pos;
     // A power-of-two mask also handles signed hash overflow.
     h & 4095
@@ -1843,9 +1742,7 @@ init_runtime() noregion {
         browse_id: 0,
         browse_pos: 0,
         browse_file: 0,
-        browse_len: 0,
-        invariant: null,
-        array_invariants: null
+        browse_len: 0
     };
     ty_jmpbuf = struct_type(jd);
     exn_defs = null;
@@ -1920,12 +1817,12 @@ normalize_path(path: []i8) raises Error: []i8@new {
     absolute: bool = n > 0 && p[0] == '/';
     if (absolute) sb_putc(out, '/');
     i: int = 0;
-    while (i < n) invariant (0 <= i && i <= n && 0 <= nseg && nseg <= i) {
-        while (i < n && p[i] == '/') invariant (0 <= i && i <= n && 0 <= nseg && nseg <= i) i = i + 1;
+    while (i < n) {
+        while (i < n && p[i] == '/') i = i + 1;
         if (i >= n) i = n else {
             start: int = i;
             i = i + 1;
-            while (i < n && p[i] != '/') invariant (start <= i && i <= n && 0 <= nseg && nseg <= start) i = i + 1;
+            while (i < n && p[i] != '/') i = i + 1;
             part_len: int = i - start;
             is_dot: bool = part_len == 1 && p[start] == '.';
             is_dotdot: bool = part_len == 2 && p[start] == '.' && p[i - 1] == '.';
@@ -1954,7 +1851,7 @@ resolve_import_path(base: []i8, imported: []i8) raises Error: []i8@new {
     base_len: int = len(base);
     slash: int = 0 - 1;
     i: int = 0;
-    while (i < base_len) invariant (0 <= i && i <= base_len && -1 <= slash && slash < i) {
+    while (i < base_len) {
         if (base[i] == '/') slash = i;
         i = i + 1
     }
@@ -1964,7 +1861,7 @@ resolve_import_path(base: []i8, imported: []i8) raises Error: []i8@new {
     if (joined_len <= slash) error("import path exceeds addressable size");
     joined: []i8 = new i8[joined_len](0i8);
     j: int = 0;
-    while (j <= slash) invariant (0 <= j && j <= slash + 1 && slash < base_len && slash < len(joined)) {
+    while (j <= slash) {
         joined[j] = base[j];
         j = j + 1
     }
@@ -2287,9 +2184,7 @@ get_or_create_struct(name: []i8@new) noregion: *StructDef@new {
         browse_id: browse_fresh(),
         browse_pos: 0,
         browse_file: 0,
-        browse_len: 0,
-        invariant: null,
-        array_invariants: null
+        browse_len: 0
     };
     struct_defs = created;
     hash_put_struct(created);
@@ -2780,12 +2675,8 @@ assignable(to: ?*Type@from_n, from_n: ?*Expr) raises Error, IndexOutOfBounds: bo
         to2: ?*Type = decay(tt);
         if (from2 != null && to2 != null) {
             if (types_equal(from2, to2)) return true;
-            match to2.* {
-                Refined k -> {
-                    if (types_equal(from2, k.base)) return true
-                }
-                _ -> { }
-            }
+            // *T is ?*T refined to be non-null, so it can widen; the
+            // reverse needs a null test that narrows the source.
             match from2.* {
                 Refined k -> {
                     if (types_equal(k.base, to2)) return true
@@ -3123,11 +3014,11 @@ profile_flt_prev: int = 0;
 
 type ProfileUsage = {
     data: []i8
-} invariant (len(data) == 256)
+}
 
 profile_usage: ProfileUsage = ProfileUsage { data: new i8[256](0i8) };
 
-rd_u64(b: []i8, o: int): int requires (0 <= o && o <= len(b) - 8) {
+rd_u64(b: []i8, o: int): int {
     (b[o] as int & 255) + ((b[o + 1] as int & 255) << 8) + ((b[o + 2] as int & 255) << 16) + ((b[o + 3] as int & 255) << 24) + ((b[o + 4] as int & 255) << 32) + ((b[o + 5] as int & 255) << 40) + ((b[o + 6] as int & 255) << 48) + ((b[o + 7] as int & 255) << 56)
 }
 
@@ -3192,6 +3083,11 @@ profile_end() {
     raw::raw_write(2, " kb\n")
 }
 
+// `--unchecked-index` omits the run-time check of each a[i].
+is_unchecked_flag(s: str): bool {
+    s == "--unchecked-index"
+}
+
 is_profile_flag(s: str): bool {
     s == "-p" || s == "--profile"
 }
@@ -3220,7 +3116,6 @@ compiler_analyze(src_path: []i8@immortal) noregion raises Error, IndexOutOfBound
     }
     check_imm_heap_functions();
     check_written_bounds();
-    verify_bounds_program();
     check_raises_functions();
     profile_mark("raises");
     check_noreturn_functions();
@@ -3280,7 +3175,7 @@ compiler_build_direct(src_path: []i8@immortal) noregion raises IndexOutOfBounds:
     }
 }
 
-compiler_unused_main(argc: int, argv: []str) noregion raises IndexOutOfBounds: int requires (argc <= len(argv)) {
+compiler_unused_main(argc: int, argv: []str) noregion raises IndexOutOfBounds: int {
     if (argc < 2) {
         raw::raw_write(2, "error: usage: l8 unused <file.l8> [file.l8 ...]\n");
         return 1
@@ -3302,21 +3197,22 @@ compiler_unused_main(argc: int, argv: []str) noregion raises IndexOutOfBounds: i
     }
 }
 
-compiler_main(argc: int, argv: []str) noregion raises IndexOutOfBounds: int requires (argc <= len(argv)) {
+compiler_main(argc: int, argv: []str) noregion raises IndexOutOfBounds: int {
     try {
         cg_direct_mode = false;
         do_profile = false;
+        check_index_mode = true;
         have: bool = false;
         if (argc < 1) {
-            raw::raw_write(2, "error: usage: l8 compile [--profile|-p] <file.l8>\n");
+            raw::raw_write(2, "error: usage: l8 compile [--profile|-p] [--unchecked-index] <file.l8>\n");
             return 1
         }
         path: str = argv[0];
         for ai in 1..argc {
             arg: str = argv[ai];
-            if (is_profile_flag(arg)) do_profile = true else {
+            if (is_profile_flag(arg)) do_profile = true else if (is_unchecked_flag(arg)) check_index_mode = false else {
                 if (have) {
-                    raw::raw_write(2, "error: usage: l8 compile [--profile|-p] <file.l8>\n");
+                    raw::raw_write(2, "error: usage: l8 compile [--profile|-p] [--unchecked-index] <file.l8>\n");
                     return 1
                 }
                 path = arg;
@@ -3324,7 +3220,7 @@ compiler_main(argc: int, argv: []str) noregion raises IndexOutOfBounds: int requ
             }
         }
         if (!have) {
-            raw::raw_write(2, "error: usage: l8 compile [--profile|-p] <file.l8>\n");
+            raw::raw_write(2, "error: usage: l8 compile [--profile|-p] [--unchecked-index] <file.l8>\n");
             return 1
         }
         compiler_frontend(bytes(path));
