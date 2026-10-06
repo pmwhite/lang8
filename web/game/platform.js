@@ -58,7 +58,7 @@ export function translateShader(source, fragment) {
 }
 
 // scale renders the window at that fraction of its size. env answers getenv.
-export function createPlatform(canvas, { log = console.log, checkErrors = false, countCalls = false, skip = new Set(), scale = 1, zoom = 0.85, env = {} } = {}) {
+export function createPlatform(canvas, { log = console.log, checkErrors = false, countCalls = false, timing = false, skip = new Set(), scale = 1, zoom = 0.85, env = {} } = {}) {
   let mem = null;
   let instance = null;
   const gl = canvas.getContext("webgl2", { antialias: false, depth: true, stencil: false, alpha: false });
@@ -122,6 +122,13 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
   const uniformProgram = [0];
   const uniformValues = [null];
   let currentProgram = -1;
+  // Draws to leave out, to measure what they cost: "fb44" or "prog3" for one
+  // framebuffer or program, "offscreen" for every framebuffer but the
+  // window's, or "all".
+  const skipped = () =>
+    skip.size > 0 &&
+    (skip.has("all") || skip.has(`fb${boundFramebufferId}`) || skip.has(`prog${currentProgram}`) ||
+      (boundFramebufferId !== 0 && skip.has("offscreen")));
   const changed = (l, ...values) => {
     if (l < 0n) return false;
     const id = n(l);
@@ -322,8 +329,8 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
     },
     glClearColor: (r, g, b, a) => (gl.clearColor(r, g, b, a), 0n),
     glClear: (mask) => (gl.clear(n(mask)), 0n),
-    glDrawArrays: (mode, first, count) => (gl.drawArrays(n(mode), n(first), n(count)), 0n),
-    glDrawArraysInstanced: (mode, first, count, k) => (gl.drawArraysInstanced(n(mode), n(first), n(count), n(k)), 0n),
+    glDrawArrays: (mode, first, count) => (skipped() || gl.drawArrays(n(mode), n(first), n(count)), 0n),
+    glDrawArraysInstanced: (mode, first, count, k) => (skipped() || gl.drawArraysInstanced(n(mode), n(first), n(count), n(k)), 0n),
     glEnable: (cap) => (gl.enable(n(cap)), 0n),
     glDisable: (cap) => (gl.disable(n(cap)), 0n),
     glBlendFunc: (s, d) => (gl.blendFunc(n(s), n(d)), 0n),
@@ -425,7 +432,6 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
           const target = `fb${boundFramebufferId} prog${currentProgram}`;
           const verts = n(args[2]) * (key === "glDrawArraysInstanced" ? n(args[3]) : 1);
           vertexCounts[target] = (vertexCounts[target] ?? 0) + verts;
-          if (skip.has(`fb${boundFramebufferId}`) || skip.has(`prog${currentProgram}`)) return 0n;
           // The L8 functions that draw, from the stack (the module names them).
           const site = new Error().stack.split("\n").filter((line) => line.includes("wasm-function")).slice(0, 2)
             .map((line) => line.replace(/^\s*at\s+/, "").replace(/\s*\(.*$/, "")).join(" < ");
@@ -434,6 +440,24 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
         const t = performance.now();
         const result = f(...args);
         callMs[key] = (callMs[key] ?? 0) + performance.now() - t;
+        return result;
+      };
+    }
+  }
+
+  // With timing, the milliseconds spent in each GL function and its calls.
+  // Safari's clock is coarse, but its error averages out over many calls.
+  const glMs = {};
+  const glCalls = {};
+  if (timing) {
+    for (const [key, f] of Object.entries(GL)) {
+      glMs[key] = 0;
+      glCalls[key] = 0;
+      GL[key] = (...args) => {
+        const t = performance.now();
+        const result = f(...args);
+        glMs[key] += performance.now() - t;
+        glCalls[key]++;
         return result;
       };
     }
@@ -599,6 +623,24 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
           resolve();
         })
       ),
+    // The GPU and the features the game depends on.
+    glInfo() {
+      const debug = gl.getExtension("WEBGL_debug_renderer_info");
+      return {
+        renderer: gl.getParameter(debug ? debug.UNMASKED_RENDERER_WEBGL : gl.RENDERER),
+        vendor: gl.getParameter(debug ? debug.UNMASKED_VENDOR_WEBGL : gl.VENDOR),
+        version: gl.getParameter(gl.VERSION),
+        floatTargets,
+        floatBlend,
+      };
+    },
+    canvasSize: () => [canvas.width, canvas.height],
+    windowSize: () => [...windowSize],
+    setSkip(names) {
+      skip = new Set(names);
+    },
+    // Totals since the start: GL time and calls by function (with timing).
+    glTiming: () => ({ ms: { ...glMs }, calls: { ...glCalls } }),
     frames: () => frames,
     // The fraction of the window's size the canvas renders at.
     scale: () => scale,

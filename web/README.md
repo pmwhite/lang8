@@ -23,8 +23,11 @@ modules only from a server:
 
 ```sh
 make web
-python3 -m http.server -d .build/web 8000   # then open http://localhost:8000/
+python3 web/serve.py 8000   # then open http://localhost:8000/
 ```
+
+`web/serve.py` serves `.build/web` like `python3 -m http.server`, and also
+collects the game's telemetry (below) in `.build/telemetry.jsonl`.
 
 Programs import the standard library as `"stdlib/print.l8"`; the editor's
 file is `/main.l8` beside `/stdlib`.
@@ -85,6 +88,16 @@ The game's own frame-time view (frame rate, frame and work times, and heap
 size) opens with F3, as in the native game, with the FPS key, or with `?fps`. On a
 short window, as on a phone, its panels are magnified up to 1.5 times and share
 the width, so their text stays legible.
+
+Telemetry: every five seconds the page posts a frame report to `/telemetry`
+on its server: the frame rate and frame-time spread, and how a frame's time
+divides into GL calls, the game's own code, and time outside the game (the
+browser, and waiting on the GPU), with the costliest GL functions, the render
+size, and the GPU's name. `?probe` first spends about 40 seconds measuring
+fixed render sizes and frames with the shadow map, offscreen passes, grass,
+world pass, or all drawing left out, and posts the results; the differences
+show what each part costs on the device. A server without the endpoint
+turns the posts off, and `?notelemetry` turns off them and the GL timing.
 
 Query parameters: `?stats` shows the frame rate, the game's work time per frame,
 and the render size; `?scale=0.6` fixes the render size; `?glcheck` reports

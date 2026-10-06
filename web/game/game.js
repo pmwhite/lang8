@@ -4,6 +4,7 @@
 // failing GL calls on the console.
 import { instantiate, runResumable, MemFS } from "../l8-runtime.js";
 import { createPlatform } from "./platform.js";
+import { createTelemetry } from "./telemetry.js";
 
 const WORLD = "/programs/block-game/world.txt";
 const STORAGE_KEY = "l8-block-game-world";
@@ -118,7 +119,9 @@ async function main() {
   const platform = createPlatform(canvas, {
     log: (text) => console.warn(text),
     checkErrors: params.has("glcheck"),
-    countCalls: params.has("glstats") || params.has("skip"),
+    countCalls: params.has("glstats"),
+    // GL call timing for the telemetry, unless ?notelemetry.
+    timing: !params.has("notelemetry"),
     // ?skip=fb3,prog7 drops those draws, to measure what they cost.
     skip: new Set((params.get("skip") ?? "").split(",").filter(Boolean)),
     scale: fixedScale ?? 1,
@@ -147,7 +150,22 @@ async function main() {
   });
   canvas.focus();
 
-  const status = await runResumable(instance, pacer(platform, fixedScale === null, params.has("stats")));
+  // Frame-time reports go to the page's server (see telemetry.js); ?probe
+  // first measures what each part of a frame costs.
+  const note = document.createElement("div");
+  note.className = "note";
+  note.hidden = true;
+  document.body.append(note);
+  const telemetry = params.has("notelemetry")
+    ? null
+    : createTelemetry(platform, {
+        probe: params.has("probe"),
+        show: (text) => {
+          note.textContent = text ?? "";
+          note.hidden = !text;
+        },
+      });
+  const status = await runResumable(instance, pacer(platform, fixedScale === null, params.has("stats"), telemetry));
   canvas.blur();
   show(`The game exited${status ? ` with status ${status}` : ""}.<br><a href="">Play again</a>`);
 }
@@ -157,7 +175,7 @@ async function main() {
 // is headroom again, render more. The game's own work time cannot tell whether
 // the GPU is the limit: where WebGL runs in another process, as in Safari, its
 // calls wait for a busy GPU, so that wait counts as work.
-function pacer(platform, adapt, stats) {
+function pacer(platform, adapt, stats, telemetry) {
   const STEPS = [1, 0.85, 0.72, 0.6, 0.5];
   let step = 0;
   let last = 0;
@@ -177,6 +195,7 @@ function pacer(platform, adapt, stats) {
   return async () => {
     await platform.nextFrame();
     const now = performance.now();
+    telemetry?.frame(now);
     if (last) {
       elapsed += now - last;
       frames++;
@@ -186,7 +205,7 @@ function pacer(platform, adapt, stats) {
     const interval = elapsed / frames;
     const work = (platform.workMs() - work0) / frames;
     if (label) label.textContent = `${(1000 / interval).toFixed(0)} fps · work ${work.toFixed(1)} ms · ${Math.round(platform.scale() * 100)}%`;
-    if (adapt) {
+    if (adapt && !telemetry?.probing()) {
       // A step down must speed frames up, or it only blurs the game (as when
       // the browser caps the frame rate, like iOS in Low Power Mode).
       if (before && interval > before * 0.97) {
