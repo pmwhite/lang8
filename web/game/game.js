@@ -9,6 +9,8 @@ import { startControl } from "./control.js";
 
 const WORLD = "/programs/block-game/world.txt";
 const STORAGE_KEY = "l8-block-game-world";
+// The game keeps the levels solved in play beside the world.
+const PROGRESS = `${WORLD}.progress`;
 
 const canvas = document.getElementById("screen");
 const overlay = document.getElementById("overlay");
@@ -103,7 +105,10 @@ async function main() {
   // nothing; so does ?fresh, for remote experiments.
   const probe = params.has("probe");
   const fresh = probe || params.has("fresh");
-  const fs = new MemFS({ [WORLD]: (!fresh && localStorage.getItem(storageKey)) || world });
+  const files = { [WORLD]: (!fresh && localStorage.getItem(storageKey)) || world };
+  const progress = !fresh && localStorage.getItem(`${storageKey}:progress`);
+  if (progress) files[PROGRESS] = progress;
+  const fs = new MemFS(files);
   const decoder = new TextDecoder();
   fs.onOutput = (_fd, data) => console.log(decoder.decode(data).trimEnd());
   const sys = fs.sys(["block-game", "play", WORLD.slice(1)]);
@@ -112,6 +117,7 @@ async function main() {
     const file = fs.fds.get(fd);
     const status = close(fd);
     if (!fresh && file?.writable && file.path === WORLD) localStorage.setItem(storageKey, decoder.decode(fs.readFile(WORLD)));
+    if (!fresh && file?.writable && file.path === PROGRESS) localStorage.setItem(`${storageKey}:progress`, decoder.decode(fs.readFile(PROGRESS)));
     return status;
   };
 
