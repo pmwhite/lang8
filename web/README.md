@@ -51,8 +51,8 @@ WebGL2 canvas:
 The page holds only the game, scaled to the largest 5:3 box that fits the
 screen. Browser touch gestures are off, so taps do not zoom. A Home Screen
 bookmark opens it full screen through the web app manifest. Touch devices get
-an on-screen D-pad with Undo, Restart, Travel, and OK keys; swipes on the game
-move too. They inject X11 key events, pressed and released like a keyboard's,
+an on-screen D-pad with Undo, Restart, Travel, and OK keys, and an FPS key in
+the corner; swipes on the game move too. They inject X11 key events, pressed and released like a keyboard's,
 so holding a direction keeps walking.
 
 The world file is kept in an in-memory file system and saved to `localStorage`
@@ -69,6 +69,9 @@ window at a smaller size (down to half) and scales it up, and raises the size
 again when frames have headroom. A step down that does not speed frames up is
 undone, since a browser frame-rate cap (such as iOS Low Power Mode) is not
 helped by fewer pixels.
+
+The game's own frame-time view (frame rate, frame and work times, and heap
+size) opens with F3, as in the native game, with the FPS key, or with `?fps`.
 
 Query parameters: `?stats` shows the frame rate, the game's CPU time per frame,
 and the render size; `?scale=0.6` fixes the render size; `?glcheck` reports

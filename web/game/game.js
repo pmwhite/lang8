@@ -46,6 +46,7 @@ document.addEventListener(
 
 const touch = matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
 const SHIFT = 65505;
+const F3 = 65472;
 // Set once the game is running.
 let sendKey = null;
 const press = (sym, text = "") => sendKey?.(2, sym, text);
@@ -114,8 +115,8 @@ async function main() {
   };
 
   // ?scale=0.5 renders at half resolution instead of adapting; ?stats shows
-  // the frame rate; ?L8_WATER_STATIC and other L8_ parameters set the game's
-  // environment variables.
+  // the frame rate; ?fps opens the game's own frame-time view; ?L8_WATER_STATIC
+  // and other L8_ parameters set the game's environment variables.
   const params = new URLSearchParams(location.search);
   const fixedScale = params.has("scale") ? Math.min(1, Math.max(0.25, Number(params.get("scale")) || 1)) : null;
   const env = Object.fromEntries([...params].filter(([k]) => k.startsWith("L8_")));
@@ -132,6 +133,11 @@ async function main() {
   const { instance, mem } = await instantiate(module, sys, platform.imports);
   platform.attach(instance, mem);
   sendKey = platform.key;
+  // ?fps opens the game's frame-time view, as F3 does.
+  if (params.has("fps")) {
+    press(F3);
+    release(F3);
+  }
 
   // Keyboard players see when the game loses focus; touch controls do not need it.
   show(touch ? "Tap to start" : "Click to start");
