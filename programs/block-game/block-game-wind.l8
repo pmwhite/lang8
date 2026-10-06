@@ -45,6 +45,11 @@ type WindField = {
     next_pressure: []f32;
     divergence: []f32;
     solid: []int;
+    // Per column and row factors of the forcing's curl term.
+    sin_x: []f32;
+    cos_x: []f32;
+    sin_z: []f32;
+    cos_z: []f32;
     pixels: []i8;
     origin_x: int;
     origin_z: int;
@@ -55,7 +60,7 @@ type WindField = {
     last_ms: int;
     debt: f32;
     tex: u32
-} invariant (len(vx) == WIND_CELLS && len(vz) == WIND_CELLS && len(next_x) == WIND_CELLS && len(next_z) == WIND_CELLS && len(pressure) == WIND_CELLS && len(next_pressure) == WIND_CELLS && len(divergence) == WIND_CELLS && len(solid) == WIND_CELLS && len(pixels) == WIND_CELLS * 4)
+} invariant (len(vx) == WIND_CELLS && len(vz) == WIND_CELLS && len(next_x) == WIND_CELLS && len(next_z) == WIND_CELLS && len(pressure) == WIND_CELLS && len(next_pressure) == WIND_CELLS && len(divergence) == WIND_CELLS && len(solid) == WIND_CELLS && len(sin_x) == WIND_SIZE && len(cos_x) == WIND_SIZE && len(sin_z) == WIND_SIZE && len(cos_z) == WIND_SIZE && len(pixels) == WIND_CELLS * 4)
 
 wind_clamp(x: f32, lo: f32, hi: f32): f32 {
     if (x < lo) return lo;
@@ -131,6 +136,10 @@ new_wind_field(seed: int): *WindField@new {
         next_pressure: new f32[WIND_CELLS](0.0),
         divergence: new f32[WIND_CELLS](0.0),
         solid: new int[WIND_CELLS](0),
+        sin_x: new f32[WIND_SIZE](0.0),
+        cos_x: new f32[WIND_SIZE](0.0),
+        sin_z: new f32[WIND_SIZE](0.0),
+        cos_z: new f32[WIND_SIZE](0.0),
         pixels: new i8[WIND_CELLS * 4](128i8),
         origin_x: 0,
         origin_z: 0,
@@ -147,15 +156,30 @@ new_wind_field(seed: int): *WindField@new {
 
 wind_target(w: *WindField, x: f32, z: f32): WindVector {
     weather: *WeatherState = w.weather;
+    ax: f32 = x * 0.083 + weather.clock * 0.11;
+    az: f32 = z * 0.097 - weather.clock * 0.085;
+    wind_target_at(w, x, z, sin_f32(ax), cos_f32(ax), sin_f32(az), cos_f32(az))
+}
+
+// The forcing at (x, z), given the sines and cosines of the curl term's
+// angles for x and z.
+wind_target_at(
+    w: *WindField,
+    x: f32,
+    z: f32,
+    sin_ax: f32,
+    cos_ax: f32,
+    sin_az: f32,
+    cos_az: f32
+): WindVector {
+    weather: *WeatherState = w.weather;
     along: f32 = x * weather.dir_x + z * weather.dir_z;
     front: f32 = 0.5 + 0.5 * sin_f32(along * 0.105 - weather.clock * 0.72);
     front2: f32 = 0.5 + 0.5 * sin_f32(along * 0.041 - weather.clock * 0.31 + 1.7);
     strength: f32 = weather.speed * (0.58 + weather.gust * (0.72 * front + 0.48 * front2));
     // Curl of a smooth scalar field: this adds eddies without inventing sinks.
-    ax: f32 = x * 0.083 + weather.clock * 0.11;
-    az: f32 = z * 0.097 - weather.clock * 0.085;
-    curl_x: f32 = sin_f32(ax) * cos_f32(az) * 0.097;
-    curl_z: f32 = 0.0 - cos_f32(ax) * sin_f32(az) * 0.083;
+    curl_x: f32 = sin_ax * cos_az * 0.097;
+    curl_z: f32 = 0.0 - cos_ax * sin_az * 0.083;
     curl_scale: f32 = weather.turbulence * 4.2;
     WindVector { x: weather.dir_x * strength + curl_x * curl_scale, z: weather.dir_z * strength + curl_z * curl_scale }
 }
@@ -236,20 +260,58 @@ wind_obstacles(w: *WindField, bricks: []Brick, nbrick: int) requires (0 <= nbric
     }
 }
 
-wind_pressure_neighbor(
-    w: *WindField,
-    x: int,
-    z: int,
-    center: f32
-): f32 {
-    if (x < 0 || x >= WIND_SIZE || z < 0 || z >= WIND_SIZE) return center;
-    at: int = z * WIND_SIZE + x;
-    if (w.solid[at] != 0) return center;
-    w.pressure[at]
+// One Jacobi relaxation of the pressure from `p` into `next`. A neighbor
+// outside the window or inside a wall takes the center's pressure, so no flow
+// crosses walls or the window's edge.
+wind_relax(
+    p: []f32,
+    next: []f32,
+    divergence: []f32,
+    solid: []int
+) requires (WIND_CELLS <= len(p) && WIND_CELLS <= len(next) && WIND_CELLS <= len(divergence) && WIND_CELLS <= len(solid)) {
+    for z in 0..WIND_SIZE {
+        for x in 0..WIND_SIZE {
+            at: int = z * WIND_SIZE + x;
+            if (solid[at] != 0) next[at] = 0.0 else {
+                center: f32 = p[at];
+                left: f32 = center;
+                right: f32 = center;
+                down: f32 = center;
+                up: f32 = center;
+                if (x > 0) {
+                    west: int = z * WIND_SIZE + (x - 1);
+                    if (solid[west] == 0) left = p[west]
+                }
+                if (x + 1 < WIND_SIZE) {
+                    east: int = z * WIND_SIZE + (x + 1);
+                    if (solid[east] == 0) right = p[east]
+                }
+                if (z > 0) {
+                    south: int = (z - 1) * WIND_SIZE + x;
+                    if (solid[south] == 0) down = p[south]
+                }
+                if (z + 1 < WIND_SIZE) {
+                    north: int = (z + 1) * WIND_SIZE + x;
+                    if (solid[north] == 0) up = p[north]
+                }
+                next[at] = (left + right + down + up - divergence[at]) * 0.25
+            }
+        }
+    }
 }
 
 wind_step(w: *WindField) {
     weather_step(w.weather);
+    weather: *WeatherState = w.weather;
+    // The curl term's x and z factors depend only on the column and the row.
+    for i in 0..WIND_SIZE {
+        ax: f32 = (w.origin_x as f32 + i as f32 + 0.5) * 0.083 + weather.clock * 0.11;
+        az: f32 = (w.origin_z as f32 + i as f32 + 0.5) * 0.097 - weather.clock * 0.085;
+        w.sin_x[i] = sin_f32(ax);
+        w.cos_x[i] = cos_f32(ax);
+        w.sin_z[i] = sin_f32(az);
+        w.cos_z[i] = cos_f32(az)
+    }
     // Semi-Lagrangian transport followed by relaxation toward the weather forcing.
     for z in 0..WIND_SIZE {
         for x in 0..WIND_SIZE {
@@ -262,8 +324,9 @@ wind_step(w: *WindField) {
                 back_z: f32 = z as f32 + 0.5 - w.vz[at] * WIND_STEP;
                 adv_x: f32 = wind_grid_sample(w.vx, back_x, back_z);
                 adv_z: f32 = wind_grid_sample(w.vz, back_x, back_z);
-                target: WindVector = wind_target(w, w.origin_x as f32 + x as f32 + 0.5,
-                    w.origin_z as f32 + z as f32 + 0.5);
+                target: WindVector = wind_target_at(w, w.origin_x as f32 + x as f32 + 0.5,
+                    w.origin_z as f32 + z as f32 + 0.5, w.sin_x[x], w.cos_x[x], w.sin_z[z],
+                    w.cos_z[z]);
                 w.next_x[at] = adv_x + (target.x - adv_x) * 0.085;
                 w.next_z[at] = adv_z + (target.z - adv_z) * 0.085
             }
@@ -302,39 +365,52 @@ wind_step(w: *WindField) {
             } else w.divergence[at] = 0.0
         }
     }
-    for _iteration in 0..WIND_PRESSURE_STEPS {
-        for z in 0..WIND_SIZE {
-            for x in 0..WIND_SIZE {
-                at: int = z * WIND_SIZE + x;
-                if (w.solid[at] != 0) w.next_pressure[at] = 0.0 else {
-                    center: f32 = w.pressure[at];
-                    sum: f32 = wind_pressure_neighbor(w, x - 1, z, center) + wind_pressure_neighbor(w,
-                        x + 1, z, center) + wind_pressure_neighbor(w, x, z - 1, center) + wind_pressure_neighbor(w,
-                        x, z + 1, center);
-                    w.next_pressure[at] = (sum - w.divergence[at]) * 0.25
-                }
-            }
-        }
-        for i in 0..WIND_CELLS w.pressure[i] = w.next_pressure[i]
+    // Relax back and forth between the two pressure buffers; the step count is
+    // even, so the result lands in `pressure`.
+    for _iteration in 0..WIND_PRESSURE_STEPS / 2 {
+        wind_relax(w.pressure, w.next_pressure, w.divergence, w.solid);
+        wind_relax(w.next_pressure, w.pressure, w.divergence, w.solid)
     }
+    p: []f32 = w.pressure;
+    solid: []int = w.solid;
     for z in 0..WIND_SIZE {
         for x in 0..WIND_SIZE {
             at: int = z * WIND_SIZE + x;
-            if (w.solid[at] != 0) {
+            if (solid[at] != 0) {
                 w.vx[at] = 0.0;
                 w.vz[at] = 0.0
             } else {
-                center: f32 = w.pressure[at];
-                left: f32 = wind_pressure_neighbor(w, x - 1, z, center);
-                right: f32 = wind_pressure_neighbor(w, x + 1, z, center);
-                down: f32 = wind_pressure_neighbor(w, x, z - 1, center);
-                up: f32 = wind_pressure_neighbor(w, x, z + 1, center);
+                center: f32 = p[at];
+                left: f32 = center;
+                right: f32 = center;
+                down: f32 = center;
+                up: f32 = center;
+                if (x > 0) {
+                    west: int = z * WIND_SIZE + (x - 1);
+                    if (solid[west] == 0) left = p[west]
+                }
+                if (x + 1 < WIND_SIZE) {
+                    east: int = z * WIND_SIZE + (x + 1);
+                    if (solid[east] == 0) right = p[east]
+                }
+                if (z > 0) {
+                    south: int = (z - 1) * WIND_SIZE + x;
+                    if (solid[south] == 0) down = p[south]
+                }
+                if (z + 1 < WIND_SIZE) {
+                    north: int = (z + 1) * WIND_SIZE + x;
+                    if (solid[north] == 0) up = p[north]
+                }
                 vx: f32 = (w.vx[at] - (right - left) * 0.5) * 0.997;
                 vz: f32 = (w.vz[at] - (up - down) * 0.5) * 0.997;
-                speed: f32 = sqrt_f32(vx * vx + vz * vz);
-                if (speed > WIND_MAX_SPEED) {
-                    vx = vx * WIND_MAX_SPEED / speed;
-                    vz = vz * WIND_MAX_SPEED / speed
+                // Only a speed over the limit needs its square root.
+                speed2: f32 = vx * vx + vz * vz;
+                if (speed2 > WIND_MAX_SPEED * WIND_MAX_SPEED) {
+                    speed: f32 = sqrt_f32(speed2);
+                    if (speed > WIND_MAX_SPEED) {
+                        vx = vx * WIND_MAX_SPEED / speed;
+                        vz = vz * WIND_MAX_SPEED / speed
+                    }
                 }
                 w.vx[at] = vx;
                 w.vz[at] = vz
