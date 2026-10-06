@@ -90,17 +90,20 @@ canvas.addEventListener("pointerup", (e) => {
 // ---- the game ----
 
 async function main() {
+  const params = new URLSearchParams(location.search);
+  // ?world=FILE plays another world file, such as garden.txt, with its own
+  // saved progress.
+  const worldFile = params.get("world") || "world.txt";
+  const storageKey = worldFile === "world.txt" ? STORAGE_KEY : `${STORAGE_KEY}:${worldFile}`;
   const [module, world] = await Promise.all([
     WebAssembly.compileStreaming(fetch("block-game.wasm")),
-    // ?fresh&world=FILE starts from another world file, for experiments.
-    fetch(new URLSearchParams(location.search).get("world") || "world.txt").then((r) => r.text()),
+    fetch(worldFile).then((r) => r.text()),
   ]);
-  const params = new URLSearchParams(location.search);
   // ?probe moves the player, so it starts from the original world and saves
   // nothing; so does ?fresh, for remote experiments.
   const probe = params.has("probe");
   const fresh = probe || params.has("fresh");
-  const fs = new MemFS({ [WORLD]: (!fresh && localStorage.getItem(STORAGE_KEY)) || world });
+  const fs = new MemFS({ [WORLD]: (!fresh && localStorage.getItem(storageKey)) || world });
   const decoder = new TextDecoder();
   fs.onOutput = (_fd, data) => console.log(decoder.decode(data).trimEnd());
   const sys = fs.sys(["block-game", "play", WORLD.slice(1)]);
@@ -108,7 +111,7 @@ async function main() {
   sys.close = (fd) => {
     const file = fs.fds.get(fd);
     const status = close(fd);
-    if (!fresh && file?.writable && file.path === WORLD) localStorage.setItem(STORAGE_KEY, decoder.decode(fs.readFile(WORLD)));
+    if (!fresh && file?.writable && file.path === WORLD) localStorage.setItem(storageKey, decoder.decode(fs.readFile(WORLD)));
     return status;
   };
 
