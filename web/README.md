@@ -80,7 +80,9 @@ cannot decide this: Safari runs WebGL in a separate GPU process, and when the
 GPU falls behind, the game's WebGL calls wait, so GPU time shows up as work.
 
 The game's own frame-time view (frame rate, frame and work times, and heap
-size) opens with F3, as in the native game, with the FPS key, or with `?fps`.
+size) opens with F3, as in the native game, with the FPS key, or with `?fps`. On a
+short window, as on a phone, its panels are magnified up to 1.5 times and share
+the width, so their text stays legible.
 
 Query parameters: `?stats` shows the frame rate, the game's work time per frame,
 and the render size; `?scale=0.6` fixes the render size; `?glcheck` reports
