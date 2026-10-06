@@ -16,9 +16,10 @@ tag compiler_internal;
 // region depth recorded at its try.
 //
 // Externs become imports from module "env" named by their link names. Floats
-// cross that boundary as f32/f64 and everything else as i64. The module
-// exports its memory, its function table (function values are indices),
-// `_start`, `l8_malloc` for host-built values, and the heap pointer.
+// cross that boundary as f32/f64 and everything else as i64; `exit` and
+// `l8_exit` are implemented in the module. The module exports its memory, its
+// function table (function values are indices), `_start`, `l8_malloc` for
+// host-built values, the heap pointer, and the exit status.
 
 // ---- layout ----
 
@@ -42,6 +43,13 @@ WG_EXC_PTR: int = 3;
 WG_REGION_N: int = 4;
 
 WG_INIT_DONE: int = 5;
+
+// The status `exit` records, which the host reads once _start returns.
+WG_EXIT_STATUS: int = 6;
+
+// exit throws the module's tag with this exception tag, which no handler
+// matches, so it unwinds to _start without a JavaScript exception.
+WASM_EXIT_TAG: int = 0 - 1;
 
 // Wasm value types and block types.
 WT_I32: int = 127;
@@ -268,7 +276,7 @@ wf_init_globals: int = 0;
 wf_start: int = 0;
 
 // Runtime functions follow the imports in this order; then L8 functions.
-WASM_NRUNTIME: int = 12;
+WASM_NRUNTIME: int = 13;
 
 // ---- code emission ----
 
@@ -1360,7 +1368,7 @@ wg_call(
         a = a.next
     }
     w_call(fn.wasm_index);
-    if (fn.is_extern) {
+    if (wasm_is_exit(fn)) w_unreachable() else if (fn.is_extern) {
         rt: ?*Type = fn.return_ty;
         if (wasm_returns_value(rt)) wg_from_import(rt) else w_unreachable()
     }
@@ -2313,8 +2321,9 @@ wasm_gen_init_globals() noregion raises Error, IndexOutOfBounds {
     wasm_emit_body(wasm_sig_i64(0, 0), 2, 1 + wl_tmp_max)
 }
 
-// _start: build argv through the host, run main, and exit with its result.
-// An uncaught exception exits with status 1, like l8_raise without a handler.
+// _start: build argv through the host, run main, and record its result as the
+// exit status. An uncaught exception records status 1, like l8_raise without
+// a handler.
 wasm_gen_start() noregion raises Error {
     wasm_begin(null, 0);
     done: int = w_block();
@@ -2326,7 +2335,7 @@ wasm_gen_start() noregion raises Error {
     w_u(0);
     w_u(w_rel(caught));
     wl_depth = wl_depth + 1;
-    if (compile_test_mode) wasm_gen_test_entry() else {
+    if (compile_test_mode) wasm_gen_test_entry(done) else {
         user_main: ?*Function = find_function("main");
         if (user_main != null && !user_main.is_extern) {
             if (user_main.nparams > 0) {
@@ -2337,27 +2346,31 @@ wasm_gen_start() noregion raises Error {
             }
             w_call(user_main.wasm_index)
         } else w_i64(0);
-        w_call(wf_exit);
-        w_unreachable()
+        w_gset(WG_EXIT_STATUS)
     }
     w_end();
     w_br(done);
     w_end();
+    // An exit has recorded its status; any other exception is uncaught.
+    w_gget(WG_EXC_TAG);
+    w_i64(WASM_EXIT_TAG);
+    w_op(82);
+    w_if();
     if (compile_test_mode) {
         w_i64(0 - 1);
         w_gget(WG_EXC_TAG);
         w_call(wf_test_record);
         w_i64(3)
     } else w_i64(1);
-    w_call(wf_exit);
-    w_unreachable();
+    w_gset(WG_EXIT_STATUS);
+    w_end();
     w_end();
     wasm_emit_body(wasm_sig_i64(0, 0), 0, 1)
 }
 
 // `l8 test`: run the test whose index the host passes. A test that returns
 // records -2; an uncaught exception records -1 and its tag (in _start).
-wasm_gen_test_entry() raises Error {
+wasm_gen_test_entry(done: int) raises Error {
     w_call(wf_test_index);
     w_lset(0);
     w_call(wf_init_globals);
@@ -2373,14 +2386,13 @@ wasm_gen_test_entry() raises Error {
         w_i64(0);
         w_call(wf_test_record);
         w_i64(0);
-        w_call(wf_exit);
-        w_unreachable();
+        w_gset(WG_EXIT_STATUS);
+        w_br(done);
         w_end();
         c = c.next
     }
     w_i64(2);
-    w_call(wf_exit);
-    w_unreachable()
+    w_gset(WG_EXIT_STATUS)
 }
 
 // ---- runtime functions ----
@@ -2659,6 +2671,20 @@ wr_raise() noregion raises Error {
     wasm_emit_body(wasm_sig_i64(2, 0), 0, 0)
 }
 
+// exit(status): record the status and unwind to _start.
+wr_exit() noregion raises Error {
+    wasm_begin(null, 1);
+    w_lget(0);
+    w_gset(WG_EXIT_STATUS);
+    w_i64(WASM_EXIT_TAG);
+    w_gset(WG_EXC_TAG);
+    w_i64(0);
+    w_gset(WG_EXC_PTR);
+    w_op(8);
+    w_u(0);
+    wasm_emit_body(wasm_sig_i64(1, 0), 0, 0)
+}
+
 wr_oob() noregion raises Error {
     wasm_begin(null, 0);
     w_i64(1);
@@ -2668,13 +2694,16 @@ wr_oob() noregion raises Error {
 }
 
 // ---- the module ----
+wasm_is_exit(fn: *Function): bool {
+    fn.is_extern && (streq(fn.link_name, "exit") || streq(fn.link_name, "l8_exit"))
+}
+
 wasm_emits(fn: *Function): bool {
     !fn.is_extern && fn.body != null && (fn.test_id < 0 || compile_test_mode)
 }
 
 // Number imports, runtime functions, and L8 functions.
 wasm_plan() noregion raises Error {
-    wf_exit = wasm_add_import("exit", wasm_sig_i64(1, 0));
     wf_read = wasm_add_import("read", wasm_sig_i64(3, 1));
     wf_argv = wasm_add_import("l8_argv", wasm_sig_i64(0, 1));
     if (compile_test_mode) {
@@ -2684,7 +2713,8 @@ wasm_plan() noregion raises Error {
     }
     fn: ?*Function = functions;
     while (fn != null) {
-        if (fn.is_extern) fn.wasm_index = wasm_add_import(fn.link_name, wasm_extern_sig(fn));
+        if (fn.is_extern && !wasm_is_exit(fn)) fn.wasm_index = wasm_add_import(fn.link_name,
+            wasm_extern_sig(fn));
         fn = fn.next
     }
     base: int = wasm_nimports;
@@ -2700,9 +2730,11 @@ wasm_plan() noregion raises Error {
     wf_oob = base + 9;
     wf_init_globals = base + 10;
     wf_start = base + 11;
+    wf_exit = base + 12;
     next: int = base + WASM_NRUNTIME;
     fn = functions;
     while (fn != null) {
+        if (wasm_is_exit(fn)) fn.wasm_index = wf_exit;
         if (wasm_emits(fn)) {
             fn.wasm_index = next;
             next = next + 1
@@ -2779,6 +2811,7 @@ wasm_codegen() noregion raises Error, IndexOutOfBounds {
     wr_oob();
     wasm_gen_init_globals();
     wasm_gen_start();
+    wr_exit();
     fn: ?*Function = functions;
     while (fn != null) {
         if (wasm_emits(fn)) wasm_gen_function(fn);
@@ -2852,21 +2885,23 @@ wasm_module() noregion raises Error: *StrBuf@new {
     wb_uleb(s, wasm_sig_i64(0, 0));
     wb_section(m, 13, s);
     s = sb_new();
-    wb_uleb(s, 6);
+    wb_uleb(s, 7);
     wb_global(s, WT_I32, WASM_STACK_TOP);
     wb_global(s, WT_I64, wasm_heap_base);
     wb_global(s, WT_I64, 0);
     wb_global(s, WT_I64, 0);
     wb_global(s, WT_I64, 0);
     wb_global(s, WT_I64, 0);
+    wb_global(s, WT_I64, 0);
     wb_section(m, 6, s);
     s = sb_new();
-    wb_uleb(s, 5);
+    wb_uleb(s, 6);
     wb_export(s, "memory", 2, 0);
     wb_export(s, "table", 1, 0);
     wb_export(s, "_start", 0, wf_start);
     wb_export(s, "l8_malloc", 0, wf_malloc);
     wb_export(s, "l8_heap", 3, WG_HEAP);
+    wb_export(s, "l8_exit_status", 3, WG_EXIT_STATUS);
     wb_section(m, 7, s);
     first: int = wasm_nimports + WASM_NRUNTIME;
     s = sb_new();
@@ -2909,7 +2944,7 @@ wasm_name_section(m: *StrBuf@new) raises Error {
     }
     runtime: []str = ["l8_malloc", "l8_region_push", "l8_region_pop", "l8_region_unwind",
         "l8_str_eq", "l8_opt_str_eq", "l8_cstr", "l8_bytes", "l8_raise", "l8_out_of_bounds",
-        "l8_init_globals", "_start"];
+        "l8_init_globals", "_start", "l8_exit"];
     for r in runtime {
         wb_uleb(names, index);
         wb_name(names, bytes(r));

@@ -202,11 +202,15 @@ export async function instantiate(module, sys, extra = {}) {
   return { instance, mem };
 }
 
-// Run _start; resolve to the exit status.
+// The status a module's exit recorded (main's result, or exit's argument).
+const exitStatus = (instance) => Number(BigInt.asIntN(32, instance.exports.l8_exit_status.value));
+
+// Run _start; return the exit status. Exits unwind inside the module, so no
+// JavaScript exception crosses wasm frames.
 export function runStart(instance) {
   try {
     instance.exports._start();
-    return 0;
+    return exitStatus(instance);
   } catch (e) {
     if (e instanceof Exit) return e.status;
     throw e;
@@ -218,7 +222,7 @@ export function runStart(instance) {
 export async function runStartAsync(instance) {
   try {
     await WebAssembly.promising(instance.exports._start)();
-    return 0;
+    return exitStatus(instance);
   } catch (e) {
     if (e instanceof Exit) return e.status;
     throw e;
