@@ -579,5 +579,7 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
     },
     callCounts: () => ({ calls: { ...calls }, repeats: { ...repeats }, ms: { ...callMs }, sites: { ...drawSites }, vertices: { ...vertexCounts }, uploads: { ...uploads } }),
     workMs: () => work,
+    // The module's heap top, to watch for growth.
+    heapBytes: () => Number(instance.exports.l8_heap.value),
   };
 }
