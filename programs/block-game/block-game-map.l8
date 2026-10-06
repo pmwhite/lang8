@@ -1,0 +1,393 @@
+tag block_game;
+
+use_tag std;
+
+use_tag gl, freetype;
+
+// An overhead map of the whole world, drawn over the game: walls, water,
+// paths, plants and the levels' floors as flat cells, with a dot at every
+// goal, green where its level is solved and red where not, and one for the
+// player. M opens and closes it.
+type WorldMap = {
+    open: bool;
+    // The cells mapped: columns x0 .. x0 + w - 1 and rows z0 .. z0 + h - 1,
+    // one kind (MAP_*) each.
+    x0: int;
+    z0: int;
+    w: int;
+    h: int;
+    kinds: []i8;
+    // The count of solved levels, as text, and scratch for drawing.
+    heading: []i8;
+    frame: []f32;
+    rgb: []f32
+} invariant (len(frame) == 3 && len(rgb) == 3)
+
+const MAP_NONE: int = 0;
+
+const MAP_GRASS: int = 1;
+
+const MAP_SAND: int = 2;
+
+const MAP_FLOOR: int = 3;
+
+const MAP_PATH: int = 4;
+
+const MAP_WATER: int = 5;
+
+const MAP_PLANT: int = 6;
+
+const MAP_WALL: int = 7;
+
+const MAP_KINDS: int = 8;
+
+// The largest map, in cells along either side.
+const MAP_MAX_SIDE: int = 512;
+
+new_world_map(): *WorldMap@new {
+    new WorldMap {
+        open: false,
+        x0: 0,
+        z0: 0,
+        w: 0,
+        h: 0,
+        kinds: new i8[0](0i8),
+        heading: new i8[0](0i8),
+        frame: new f32[3](0.0),
+        rgb: new f32[3](0.0)
+    }
+}
+
+map_is_key(ks: int): bool {
+    ks == 109 || ks == 77
+}
+
+// Mark a cell with a kind, keeping the more important of the two.
+map_mark(
+    m: *WorldMap,
+    c: int,
+    r: int,
+    kind: int
+) {
+    x: int = c - m.x0;
+    z: int = r - m.z0;
+    if (x < 0 || x >= m.w || z < 0 || z >= m.h) return;
+    at: int = z * m.w + x;
+    if (at < 0 || at >= len(m.kinds)) return;
+    if (kind > m.kinds[at] as int) m.kinds[at] = kind trunc i8
+}
+
+// Lay the world out in cells, for drawing until it changes, and count the
+// solved levels. The bounds take in every room, wall, painted cell and plant.
+map_build(m: *WorldMap@new, s: *LevelState, solved: []int) {
+    x0: int = 999999;
+    z0: int = 999999;
+    x1: int = 0 - 999999;
+    z1: int = 0 - 999999;
+    for i in 0..s.nrooms {
+        r: Room = s.rooms[i];
+        if (r.x0 < x0) x0 = r.x0;
+        if (r.y0 < z0) z0 = r.y0;
+        if (r.x1 > x1) x1 = r.x1;
+        if (r.y1 > z1) z1 = r.y1
+    }
+    for i in 0..s.nbricks {
+        b: Brick = s.bricks[i];
+        if (b.column < x0) x0 = b.column;
+        if (b.row < z0) z0 = b.row;
+        if (b.column > x1) x1 = b.column;
+        if (b.row > z1) z1 = b.row
+    }
+    for i in 0..s.nground {
+        f: GroundCell = s.ground[i];
+        if (f.column < x0) x0 = f.column;
+        if (f.row < z0) z0 = f.row;
+        if (f.column > x1) x1 = f.column;
+        if (f.row > z1) z1 = f.row
+    }
+    for i in 0..s.nblocks {
+        b: Block = s.blocks[i];
+        if (plant_block(b)) {
+            if (b.column < x0) x0 = b.column;
+            if (b.row < z0) z0 = b.row;
+            if (b.column > x1) x1 = b.column;
+            if (b.row > z1) z1 = b.row
+        }
+    }
+    if (x1 < x0 || z1 < z0) {
+        x0 = 0;
+        z0 = 0;
+        x1 = 0;
+        z1 = 0
+    }
+    if (x1 - x0 >= MAP_MAX_SIDE) x1 = x0 + MAP_MAX_SIDE - 1;
+    if (z1 - z0 >= MAP_MAX_SIDE) z1 = z0 + MAP_MAX_SIDE - 1;
+    w: int = x1 - x0 + 1;
+    h: int = z1 - z0 + 1;
+    if (w * h > len(m.kinds)) m.kinds = new i8[w * h](0i8);
+    m.x0 = x0;
+    m.z0 = z0;
+    m.w = w;
+    m.h = h;
+    for i in 0..w * h {
+        if (i < len(m.kinds)) m.kinds[i] = 0i8
+    }
+    for i in 0..s.nrooms {
+        r: Room = s.rooms[i];
+        for z in r.y0..r.y1 + 1 {
+            for x in r.x0..r.x1 + 1 map_mark(m, x, z, MAP_FLOOR)
+        }
+    }
+    for i in 0..s.nground {
+        f: GroundCell = s.ground[i];
+        kind: int = MAP_NONE;
+        if (f.style == GROUND_WATER) kind = MAP_WATER else if (f.stone != 0) kind = MAP_PATH else if (f.style == GROUND_SAND) kind = MAP_SAND else if (f.style == GROUND_GRASS || f.style == GROUND_TALL_GRASS) kind = MAP_GRASS;
+        // Paint over the floor: the floor kind ranks below paths and water
+        // but above plain ground.
+        if (kind == MAP_GRASS || kind == MAP_SAND) map_mark(m, f.column, f.row, kind) else if (kind != MAP_NONE) {
+            x: int = f.column - m.x0;
+            z: int = f.row - m.z0;
+            at: int = z * m.w + x;
+            if (x >= 0 && x < m.w && z >= 0 && z < m.h && at >= 0 && at < len(m.kinds)) m.kinds[at] = kind trunc i8
+        }
+    }
+    for i in 0..s.nblocks {
+        b: Block = s.blocks[i];
+        if (plant_block(b)) map_mark(m, b.column, b.row, MAP_PLANT)
+    }
+    for i in 0..s.nbricks map_mark(m, s.bricks[i].column, s.bricks[i].row, MAP_WALL);
+    nsolved: int = 0;
+    ngoals: int = 0;
+    for i in 0..s.ngoals {
+        g: Goal = s.goals[i];
+        room: int = room_at(s.rooms, s.nrooms, g.column, g.row);
+        ngoals = ngoals + 1;
+        if (room >= 0 && room < len(solved) && solved[room] != 0) nsolved = nsolved + 1
+    }
+    label: []i8 = new i8[64](0i8);
+    k: int = put_int(label, 0, nsolved);
+    k = put_str(label, k, " of ");
+    k = put_int(label, k, ngoals);
+    k = put_str(label, k, " solved");
+    if (k < 0 || k > len(label)) k = 0;
+    m.heading = new i8[k](0i8);
+    for j in 0..k {
+        if (j < len(m.heading)) m.heading[j] = label[j]
+    }
+}
+
+// The kind of the cell x, z from the map's corner.
+map_kind_at(m: *WorldMap, x: int, z: int): int {
+    at: int = z * m.w + x;
+    if (x < 0 || x >= m.w || at < 0 || at >= len(m.kinds)) return MAP_NONE;
+    m.kinds[at] as int
+}
+
+toggle_map(m: *WorldMap@new, s: *LevelState, solved: []int) {
+    m.open = !m.open;
+    if (m.open) map_build(m, s, solved)
+}
+
+map_color(kind: int, rgb: []f32) requires (len(rgb) == 3) {
+    r: f32 = 0.0;
+    g: f32 = 0.0;
+    b: f32 = 0.0;
+    if (kind == MAP_GRASS) {
+        r = 0.13;
+        g = 0.24;
+        b = 0.13
+    } else if (kind == MAP_SAND) {
+        r = 0.42;
+        g = 0.37;
+        b = 0.25
+    } else if (kind == MAP_FLOOR) {
+        r = 0.27;
+        g = 0.24;
+        b = 0.20
+    } else if (kind == MAP_PATH) {
+        r = 0.50;
+        g = 0.46;
+        b = 0.39
+    } else if (kind == MAP_WATER) {
+        r = 0.16;
+        g = 0.38;
+        b = 0.66
+    } else if (kind == MAP_PLANT) {
+        r = 0.10;
+        g = 0.45;
+        b = 0.16
+    } else if (kind == MAP_WALL) {
+        r = 0.72;
+        g = 0.67;
+        b = 0.58
+    }
+    rgb[0] = r;
+    rgb[1] = g;
+    rgb[2] = b
+}
+
+// A filled circle as triangles.
+put_disc(
+    dst: []f32,
+    i: int,
+    x: f32,
+    y: f32,
+    radius: f32
+): int requires (0 <= i && i <= len(dst)) ensures (0 <= returned && returned <= len(dst)) {
+    sides: int = 16;
+    for k in 0..sides {
+        a0: f32 = k as f32 * 6.2831855 / sides as f32;
+        a1: f32 = (k + 1) as f32 * 6.2831855 / sides as f32;
+        i = put_xy(dst, i, x, y);
+        i = put_xy(dst, i, x + cos_f32(a0) * radius, y + sin_f32(a0) * radius);
+        i = put_xy(dst, i, x + cos_f32(a1) * radius, y + sin_f32(a1) * radius)
+    }
+    i
+}
+
+// Where the map goes on the screen: its left and top edges and the size of a
+// cell, in HUD pixels.
+map_frame(m: *WorldMap, frame: []f32) requires (len(frame) == 3) {
+    top: f32 = 76.0;
+    side: f32 = 24.0;
+    bottom: f32 = 40.0;
+    w: f32 = if (m.w > 0) m.w as f32 else 1.0;
+    h: f32 = if (m.h > 0) m.h as f32 else 1.0;
+    cell: f32 = (hud_w - side * 2.0) / w;
+    tall: f32 = (hud_h - top - bottom) / h;
+    if (tall < cell) cell = tall;
+    frame[0] = (hud_w - w * cell) * 0.5;
+    frame[1] = top + (hud_h - top - bottom - h * cell) * 0.5;
+    frame[2] = cell
+}
+
+// Draw the open map: the world, a dot per goal, and the player at (pc, pr).
+// font draws the heading and tex is its texture; hud and htex label the
+// levels.
+draw_map(
+    m: *WorldMap,
+    s: *LevelState,
+    solved: []int,
+    pc: int,
+    pr: int,
+    now: int,
+    gprog: int,
+    u_gscreen: int,
+    u_gcolor: int,
+    u_galpha: int,
+    gbuf: u32,
+    gverts: []f32,
+    font: Font,
+    hud: Font,
+    tprog: int,
+    u_tscreen: int,
+    u_tcolor: int,
+    u_talpha: int,
+    tex: u32,
+    htex: u32,
+    tbuf: u32,
+    tverts: []f32
+) {
+    if (!m.open) return;
+    n: int = put_quad(gverts, 0, 0.0, 0.0, hud_w, hud_h);
+    draw_solid(gprog, u_gscreen, u_gcolor, u_galpha, gbuf, gverts, n, 0.02, 0.03,
+        0.05, 0.88);
+    frame: []f32 = m.frame;
+    map_frame(m, frame);
+    left: f32 = frame[0];
+    top: f32 = frame[1];
+    cell: f32 = frame[2];
+    rgb: []f32 = m.rgb;
+    // Each kind of cell in runs along its rows, in batches that fit gverts.
+    for kind in 1..MAP_KINDS {
+        map_color(kind, rgb);
+        n = 0;
+        for z in 0..m.h {
+            x: int = 0;
+            while (x < m.w) {
+                at: int = z * m.w + x;
+                if (at >= 0 && at < len(m.kinds) && m.kinds[at] as int == kind) {
+                    run: int = x;
+                    while (run + 1 < m.w && map_kind_at(m, run + 1, z) == kind) run = run + 1;
+                    if (n > len(gverts) - 12) {
+                        draw_solid(gprog, u_gscreen, u_gcolor, u_galpha, gbuf, gverts,
+                            n, rgb[0], rgb[1], rgb[2], 1.0);
+                        n = 0
+                    }
+                    if (n >= 0 && n <= len(gverts)) n = put_quad(gverts, n, left + x as f32 * cell,
+                        top + z as f32 * cell, left + (run + 1) as f32 * cell, top + (z + 1) as f32 * cell);
+                    x = run + 1
+                } else x = x + 1
+            }
+        }
+        draw_solid(gprog, u_gscreen, u_gcolor, u_galpha, gbuf, gverts, n, rgb[0],
+            rgb[1], rgb[2], 1.0)
+    }
+    // Goals: a dark ring, then green if solved and red if not.
+    radius: f32 = cell * 0.9;
+    if (radius < 5.0) radius = 5.0;
+    for pass in 0..3 {
+        n = 0;
+        for i in 0..s.ngoals {
+            g: Goal = s.goals[i];
+            room: int = room_at(s.rooms, s.nrooms, g.column, g.row);
+            done: bool = room >= 0 && room < len(solved) && solved[room] != 0;
+            if (pass == 0 || pass == 1 && done || pass == 2 && !done) {
+                gx: f32 = left + (g.column - m.x0) as f32 * cell + cell * 0.5;
+                gz: f32 = top + (g.row - m.z0) as f32 * cell + cell * 0.5;
+                if (n > len(gverts) - 96) n = len(gverts);
+                if (n >= 0 && n <= len(gverts)) n = put_disc(gverts, n, gx, gz, if (pass == 0) radius + 2.0 else radius)
+            }
+        }
+        if (pass == 0) draw_solid(gprog, u_gscreen, u_gcolor, u_galpha, gbuf, gverts,
+            n, 0.02, 0.02, 0.03, 0.9) else if (pass == 1) draw_solid(gprog, u_gscreen,
+            u_gcolor, u_galpha, gbuf, gverts, n, 0.30, 0.92, 0.42, 1.0) else draw_solid(gprog,
+            u_gscreen, u_gcolor, u_galpha, gbuf, gverts, n, 0.95, 0.30, 0.24, 1.0)
+    }
+    // The player, with a ring that pulses.
+    px: f32 = left + (pc - m.x0) as f32 * cell + cell * 0.5;
+    pz: f32 = top + (pr - m.z0) as f32 * cell + cell * 0.5;
+    pulse: f32 = 0.5 + 0.5 * sin_f32((now % 1200) as f32 * 0.0052359877);
+    n = put_disc(gverts, 0, px, pz, radius * (1.6 + 0.6 * pulse));
+    draw_solid(gprog, u_gscreen, u_gcolor, u_galpha, gbuf, gverts, n, 1.0, 1.0, 1.0,
+        0.25 * (1.0 - pulse) + 0.1);
+    n = put_disc(gverts, 0, px, pz, radius + 2.0);
+    draw_solid(gprog, u_gscreen, u_gcolor, u_galpha, gbuf, gverts, n, 0.02, 0.02,
+        0.03, 0.9);
+    n = put_disc(gverts, 0, px, pz, radius);
+    draw_solid(gprog, u_gscreen, u_gcolor, u_galpha, gbuf, gverts, n, 1.0, 0.97, 0.88,
+        1.0);
+    // Each level's name beside its goal, on a dark backdrop, and the count
+    // solved above it all.
+    n = 0;
+    for i in 0..s.ngoals {
+        g1: Goal = s.goals[i];
+        room1: int = room_at(s.rooms, s.nrooms, g1.column, g1.row);
+        if (room1 >= 0 && room1 < s.nrooms && room1 < len(s.titles)) {
+            bx: f32 = left + (g1.column - m.x0) as f32 * cell + cell * 0.5 + radius + 1.0;
+            by: f32 = top + (g1.row - m.z0) as f32 * cell + cell * 0.5;
+            if (n > len(gverts) - 12) n = len(gverts);
+            if (n >= 0 && n <= len(gverts)) n = put_quad(gverts, n, bx, by - 9.0,
+                bx + measure_text(hud, s.titles[room1]) + 6.0, by + 7.0)
+        }
+    }
+    draw_solid(gprog, u_gscreen, u_gcolor, u_galpha, gbuf, gverts, n, 0.02, 0.02,
+        0.03, 0.72);
+    for i in 0..s.ngoals {
+        g2: Goal = s.goals[i];
+        room2: int = room_at(s.rooms, s.nrooms, g2.column, g2.row);
+        if (room2 >= 0 && room2 < s.nrooms && room2 < len(s.titles)) {
+            done2: bool = room2 < len(solved) && solved[room2] != 0;
+            lx: f32 = left + (g2.column - m.x0) as f32 * cell + cell * 0.5 + radius + 4.0;
+            ly: f32 = top + (g2.row - m.z0) as f32 * cell + cell * 0.5 + 4.0;
+            draw_title_layer(hud, tprog, u_tscreen, u_tcolor, u_talpha, htex, tbuf,
+                tverts, lx + 1.0, ly + 1.0, s.titles[room2], 0.8, 0.0, 0.0, 0.0);
+            if (done2) draw_title_layer(hud, tprog, u_tscreen, u_tcolor, u_talpha,
+                htex, tbuf, tverts, lx, ly, s.titles[room2], 0.95, 0.70, 0.95, 0.74) else draw_title_layer(hud,
+                tprog, u_tscreen, u_tcolor, u_talpha, htex, tbuf, tverts, lx, ly,
+                s.titles[room2], 0.95, 1.0, 0.80, 0.74)
+        }
+    }
+    draw_title(font, tprog, u_tscreen, u_tcolor, u_talpha, tex, tbuf, tverts, 24.0,
+        48.0, m.heading, 1.0)
+}
