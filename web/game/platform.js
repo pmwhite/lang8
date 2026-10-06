@@ -681,6 +681,8 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
     },
     // Totals since the start: GL time and calls by function (with timing).
     glTiming: () => ({ ms: { ...glMs }, calls: { ...glCalls }, phases: { ...phaseMs } }),
+    // The running per-part totals themselves, for per-frame differences.
+    phaseTotals: () => phaseMs,
     frames: () => frames,
     // The fraction of the window's size the canvas renders at.
     scale: () => scale,

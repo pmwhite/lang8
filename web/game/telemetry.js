@@ -147,6 +147,34 @@ export function createTelemetry(platform, { probe = false, show = () => {} } = {
   };
   if (probe) configure(PROBE[0]);
 
+  // Frames slower than SLOW_MS, with their parts' milliseconds, sent with
+  // the next report: what an average hides.
+  const SLOW_MS = 22;
+  let slow = [];
+  let lastPhases = {};
+  let lastWork = platform.workMs();
+  let lastPresses = platform.keyPresses();
+  const frameParts = (interval) => {
+    const totals = platform.phaseTotals();
+    const work = platform.workMs();
+    if (interval > SLOW_MS && slow.length < 20) {
+      const parts = {};
+      for (const key of Object.keys(totals)) {
+        const ms = totals[key] - (lastPhases[key] ?? 0);
+        if (ms > 0.3) parts[key] = +ms.toFixed(1);
+      }
+      slow.push({ interval: +interval.toFixed(1), work: +(work - lastWork).toFixed(1), keys: platform.keyPresses() - lastPresses, parts });
+    }
+    lastPhases = { ...totals };
+    lastWork = work;
+    lastPresses = platform.keyPresses();
+  };
+  const takeSlow = () => {
+    const s = slow.sort((a, b) => b.interval - a.interval).slice(0, 10);
+    slow = [];
+    return s;
+  };
+
   return {
     session,
     post,
@@ -154,13 +182,17 @@ export function createTelemetry(platform, { probe = false, show = () => {} } = {
     // Post a frame report for the frames since the last one, and return it.
     reportNow() {
       const s = summary(window_);
+      if (s) s.slow = takeSlow();
       if (s) post("frames", s);
       window_ = begin();
       return s;
     },
     // Called once per game frame.
     frame(now) {
-      if (last) window_.intervals.push(now - last);
+      if (last) {
+        window_.intervals.push(now - last);
+        frameParts(now - last);
+      }
       last = now;
       if (step >= 0) {
         if (!stepStart) stepStart = now;
@@ -188,7 +220,10 @@ export function createTelemetry(platform, { probe = false, show = () => {} } = {
       }
       if (now - window_.start >= REPORT_MS) {
         const s = summary(window_);
-        if (s) post("frames", s);
+        if (s) {
+          s.slow = takeSlow();
+          post("frames", s);
+        }
         window_ = begin();
       }
     },
