@@ -102,7 +102,7 @@ results; the differences show what each part costs on the device. It starts
 from the original world and saves nothing, so the walking changes no
 progress. Reports also say whether the frame-time view was open and how many
 keys were pressed. Reports also time each part of a frame the game marks with GL debug
-groups (`frame_phase`): wind, lighting, shadow map, reflection, water and
+groups (`frame_phase`): wind, wind upload, block prep, lighting, shadow map, reflection, water and
 sand, grass, walls, blocks, plants, HUD, the frame-time view, and the update
 before drawing.
 
@@ -114,6 +114,7 @@ development machine:
 ```sh
 python3 web/control.py clients                       # pages polling now
 python3 web/control.py probe --target iPhone         # reload with ?probe
+python3 web/control.py reload '?fresh' --target iPhone  # original world, never saved
 python3 web/control.py reload '?scale=0.5' --target iPhone
 python3 web/control.py set '{"view": true}'          # also scale, skip
 python3 web/control.py keys '[[2, 65363, 900], [3, 65363]]'

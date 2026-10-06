@@ -96,9 +96,10 @@ async function main() {
   ]);
   const params = new URLSearchParams(location.search);
   // ?probe moves the player, so it starts from the original world and saves
-  // nothing.
+  // nothing; so does ?fresh, for remote experiments.
   const probe = params.has("probe");
-  const fs = new MemFS({ [WORLD]: (!probe && localStorage.getItem(STORAGE_KEY)) || world });
+  const fresh = probe || params.has("fresh");
+  const fs = new MemFS({ [WORLD]: (!fresh && localStorage.getItem(STORAGE_KEY)) || world });
   const decoder = new TextDecoder();
   fs.onOutput = (_fd, data) => console.log(decoder.decode(data).trimEnd());
   const sys = fs.sys(["block-game", "play", WORLD.slice(1)]);
@@ -106,7 +107,7 @@ async function main() {
   sys.close = (fd) => {
     const file = fs.fds.get(fd);
     const status = close(fd);
-    if (!probe && file?.writable && file.path === WORLD) localStorage.setItem(STORAGE_KEY, decoder.decode(fs.readFile(WORLD)));
+    if (!fresh && file?.writable && file.path === WORLD) localStorage.setItem(STORAGE_KEY, decoder.decode(fs.readFile(WORLD)));
     return status;
   };
 
