@@ -12,8 +12,9 @@ vary the speed across the world. A smooth curl term adds eddies without creating
 local sources or sinks. This produces coherent changes without a full humidity,
 temperature, cloud, or precipitation simulation.
 
-Local airflow lives on a 64-by-64 grid centered on the camera. Every 50 ms the
-solver:
+Local airflow lives on a 64-by-64 grid centered on the camera. Every 50 ms of
+game time the solver (spread over frames, and falling behind rather than
+catching up when frames are slow):
 
 1. advects the previous velocity field;
 2. relaxes it toward the current world-space weather forcing;

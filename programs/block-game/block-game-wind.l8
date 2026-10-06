@@ -12,7 +12,7 @@ const WIND_STEP: f32 = 0.05;
 
 const WIND_MAX_SPEED: f32 = 2.0;
 
-const WIND_PRESSURE_STEPS: int = 14;
+const WIND_PRESSURE_STEPS: int = 8;
 
 // A step's pieces: the advection, pairs of pressure relaxations, and the
 // projection.
@@ -56,6 +56,10 @@ type WindField = {
     cos_x: []f32;
     sin_z: []f32;
     cos_z: []f32;
+    // The weather fronts' sines and cosines by column and by row: four of
+    // each, for the two fronts (see wind_step_begin).
+    fronts_x: []f32;
+    fronts_z: []f32;
     pixels: []i8;
     origin_x: int;
     origin_z: int;
@@ -68,7 +72,7 @@ type WindField = {
     // The next piece of the step in progress; see wind_prepare.
     piece: int;
     tex: u32
-} invariant (len(vx) == WIND_CELLS && len(vz) == WIND_CELLS && len(next_x) == WIND_CELLS && len(next_z) == WIND_CELLS && len(pressure) == WIND_CELLS && len(next_pressure) == WIND_CELLS && len(divergence) == WIND_CELLS && len(solid) == WIND_CELLS && len(sin_x) == WIND_SIZE && len(cos_x) == WIND_SIZE && len(sin_z) == WIND_SIZE && len(cos_z) == WIND_SIZE && len(pixels) == WIND_CELLS * 4)
+} invariant (len(vx) == WIND_CELLS && len(vz) == WIND_CELLS && len(next_x) == WIND_CELLS && len(next_z) == WIND_CELLS && len(pressure) == WIND_CELLS && len(next_pressure) == WIND_CELLS && len(divergence) == WIND_CELLS && len(solid) == WIND_CELLS && len(sin_x) == WIND_SIZE && len(cos_x) == WIND_SIZE && len(sin_z) == WIND_SIZE && len(cos_z) == WIND_SIZE && len(fronts_x) == 4 * WIND_SIZE && len(fronts_z) == 4 * WIND_SIZE && len(pixels) == WIND_CELLS * 4)
 
 wind_clamp(x: f32, lo: f32, hi: f32): f32 {
     if (x < lo) return lo;
@@ -148,6 +152,8 @@ new_wind_field(seed: int): *WindField@new {
         cos_x: new f32[WIND_SIZE](0.0),
         sin_z: new f32[WIND_SIZE](0.0),
         cos_z: new f32[WIND_SIZE](0.0),
+        fronts_x: new f32[4 * WIND_SIZE](0.0),
+        fronts_z: new f32[4 * WIND_SIZE](0.0),
         pixels: new i8[WIND_CELLS * 4](128i8),
         origin_x: 0,
         origin_z: 0,
@@ -183,8 +189,23 @@ wind_target_at(
 ): WindVector {
     weather: *WeatherState = w.weather;
     along: f32 = x * weather.dir_x + z * weather.dir_z;
-    front: f32 = 0.5 + 0.5 * sin_f32(along * 0.105 - weather.clock * 0.72);
-    front2: f32 = 0.5 + 0.5 * sin_f32(along * 0.041 - weather.clock * 0.31 + 1.7);
+    wind_forcing(w, sin_f32(along * 0.105 - weather.clock * 0.72), sin_f32(along * 0.041 - weather.clock * 0.31 + 1.7),
+        sin_ax, cos_ax, sin_az, cos_az)
+}
+
+// The forcing given the sines of the two weather fronts' phases.
+wind_forcing(
+    w: *WindField,
+    wave: f32,
+    wave2: f32,
+    sin_ax: f32,
+    cos_ax: f32,
+    sin_az: f32,
+    cos_az: f32
+): WindVector {
+    weather: *WeatherState = w.weather;
+    front: f32 = 0.5 + 0.5 * wave;
+    front2: f32 = 0.5 + 0.5 * wave2;
     strength: f32 = weather.speed * (0.58 + weather.gust * (0.72 * front + 0.48 * front2));
     // Curl of a smooth scalar field: this adds eddies without inventing sinks.
     curl_x: f32 = sin_ax * cos_az * 0.097;
@@ -321,7 +342,20 @@ wind_step_begin(w: *WindField) {
         w.sin_x[i] = sin_f32(ax);
         w.cos_x[i] = cos_f32(ax);
         w.sin_z[i] = sin_f32(az);
-        w.cos_z[i] = cos_f32(az)
+        w.cos_z[i] = cos_f32(az);
+        // A front's phase is (x dir_x + z dir_z) k - c: a column part and a
+        // row part, so sin(a + b) = sin a cos b + cos a sin b replaces two
+        // sines a cell with four a column and four a row.
+        cx: f32 = (w.origin_x as f32 + i as f32 + 0.5) * weather.dir_x;
+        cz: f32 = (w.origin_z as f32 + i as f32 + 0.5) * weather.dir_z;
+        w.fronts_x[i * 4] = sin_f32(cx * 0.105);
+        w.fronts_x[i * 4 + 1] = cos_f32(cx * 0.105);
+        w.fronts_x[i * 4 + 2] = sin_f32(cx * 0.041);
+        w.fronts_x[i * 4 + 3] = cos_f32(cx * 0.041);
+        w.fronts_z[i * 4] = sin_f32(cz * 0.105 - weather.clock * 0.72);
+        w.fronts_z[i * 4 + 1] = cos_f32(cz * 0.105 - weather.clock * 0.72);
+        w.fronts_z[i * 4 + 2] = sin_f32(cz * 0.041 - weather.clock * 0.31 + 1.7);
+        w.fronts_z[i * 4 + 3] = cos_f32(cz * 0.041 - weather.clock * 0.31 + 1.7)
     }
     // Semi-Lagrangian transport followed by relaxation toward the weather forcing.
     for z in 0..WIND_SIZE {
@@ -335,9 +369,12 @@ wind_step_begin(w: *WindField) {
                 back_z: f32 = z as f32 + 0.5 - w.vz[at] * WIND_STEP;
                 adv_x: f32 = wind_grid_sample(w.vx, back_x, back_z);
                 adv_z: f32 = wind_grid_sample(w.vz, back_x, back_z);
-                target: WindVector = wind_target_at(w, w.origin_x as f32 + x as f32 + 0.5,
-                    w.origin_z as f32 + z as f32 + 0.5, w.sin_x[x], w.cos_x[x], w.sin_z[z],
-                    w.cos_z[z]);
+                fx: int = x * 4;
+                fz: int = z * 4;
+                wave: f32 = w.fronts_x[fx] * w.fronts_z[fz + 1] + w.fronts_x[fx + 1] * w.fronts_z[fz];
+                wave2: f32 = w.fronts_x[fx + 2] * w.fronts_z[fz + 3] + w.fronts_x[fx + 3] * w.fronts_z[fz + 2];
+                target: WindVector = wind_forcing(w, wave, wave2, w.sin_x[x], w.cos_x[x],
+                    w.sin_z[z], w.cos_z[z]);
                 w.next_x[at] = adv_x + (target.x - adv_x) * 0.085;
                 w.next_z[at] = adv_z + (target.z - adv_z) * 0.085
             }
