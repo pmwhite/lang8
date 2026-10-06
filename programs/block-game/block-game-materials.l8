@@ -20,7 +20,15 @@ type MaterialLight = {
     tex: u32;
     pixels: []i8;
     fixed: []i8;
+    // Rows of the changed rectangle, for upload.
+    scratch: []i8;
     stamps: []int;
+    // The rectangle of pixels the changed stamps covered or now cover;
+    // empty when dirty_x0 >= dirty_x1.
+    dirty_x0: int;
+    dirty_z0: int;
+    dirty_x1: int;
+    dirty_z1: int;
     count: int;
     x: int;
     z: int;
@@ -41,7 +49,7 @@ type MaterialLight = {
     water: *HeightWater;
     plants: *PlantRender;
     sand: *SandRender
-} invariant (len(reflection_vp) == 16 && len(nearest) == 4 && len(pixels) == CONTACT_CELLS && len(fixed) == CONTACT_CELLS && len(stamps) == (LEVEL_MAX_BLOCKS + 1) * 4 && len(programs) == 2 && len(cameras) == 2 && len(origins) == 2 && len(enabled) == 2 && len(lamps) == 4)
+} invariant (len(reflection_vp) == 16 && len(nearest) == 4 && len(pixels) == CONTACT_CELLS && len(fixed) == CONTACT_CELLS && len(scratch) == CONTACT_CELLS && len(stamps) == (LEVEL_MAX_BLOCKS + 1) * 4 && len(programs) == 2 && len(cameras) == 2 && len(origins) == 2 && len(enabled) == 2 && len(lamps) == 4)
 
 new_material_light(prog: int, grass: int) raises IoError: *MaterialLight@new {
     ids: []u32 = new u32[1](0u32);
@@ -116,7 +124,12 @@ new_material_light(prog: int, grass: int) raises IoError: *MaterialLight@new {
         tex: ids[0],
         pixels: pixels,
         fixed: new i8[CONTACT_SIZE * CONTACT_SIZE](0i8),
+        scratch: new i8[CONTACT_SIZE * CONTACT_SIZE](0i8),
         stamps: new int[(LEVEL_MAX_BLOCKS + 1) * 4](0),
+        dirty_x0: 0,
+        dirty_z0: 0,
+        dirty_x1: 0,
+        dirty_z1: 0,
         count: 0,
         x: -999999,
         z: -999999,
@@ -276,11 +289,74 @@ contact_pose(
     qs: int = (strength * 255.0) as int;
     qh: int = (half * 64.0) as int;
     changed: bool = cache.stamps[base] != qx || cache.stamps[base + 1] != qz || cache.stamps[base + 2] != qs || cache.stamps[base + 3] != qh;
+    if (changed) contact_mark(cache, slot);
     cache.stamps[base] = qx;
     cache.stamps[base + 1] = qz;
     cache.stamps[base + 2] = qs;
     cache.stamps[base + 3] = qh;
+    if (changed) contact_mark(cache, slot);
     changed
+}
+
+// The pixels the stamp in slot covers, as contact_stamp computes them:
+// which 0 to 3 selects x0, z0, x1, z1. Zero-strength stamps cover nothing.
+contact_extent(cache: *MaterialLight, slot: int, which: int): int requires (0 <= slot && slot <= LEVEL_MAX_BLOCKS) {
+    base: int = slot * 4;
+    if (cache.stamps[base + 2] <= 0) return 0;
+    radius: f32 = cache.stamps[base + 3] as f32 / 64.0 + 0.55;
+    centre: f32 = if (which == 0 || which == 2) cache.stamps[base] as f32 / 64.0 - cache.x as f32 else cache.stamps[base + 1] as f32 / 64.0 - cache.z as f32;
+    edge: int = if (which < 2) floor_i((centre - radius) * CONTACT_SCALE as f32) else floor_i((centre + radius) * CONTACT_SCALE as f32) + 1;
+    if (edge < 0) return 0;
+    if (edge > CONTACT_SIZE) return CONTACT_SIZE;
+    edge
+}
+
+// Add the stamp in slot to the changed rectangle.
+contact_mark(cache: *MaterialLight, slot: int) requires (0 <= slot && slot <= LEVEL_MAX_BLOCKS) {
+    x0: int = contact_extent(cache, slot, 0);
+    z0: int = contact_extent(cache, slot, 1);
+    x1: int = contact_extent(cache, slot, 2);
+    z1: int = contact_extent(cache, slot, 3);
+    if (x0 >= x1 || z0 >= z1) return;
+    if (cache.dirty_x0 >= cache.dirty_x1) {
+        cache.dirty_x0 = x0;
+        cache.dirty_z0 = z0;
+        cache.dirty_x1 = x1;
+        cache.dirty_z1 = z1;
+        return
+    }
+    if (x0 < cache.dirty_x0) cache.dirty_x0 = x0;
+    if (z0 < cache.dirty_z0) cache.dirty_z0 = z0;
+    if (x1 > cache.dirty_x1) cache.dirty_x1 = x1;
+    if (z1 > cache.dirty_z1) cache.dirty_z1 = z1
+}
+
+// Redraw and upload only the changed rectangle: restore the fixed stamps
+// there, then stamp every moving object that reaches it. Stamps combine by
+// maximum, so stamping one again where it already shows changes nothing.
+contact_redraw_dirty(cache: *MaterialLight, count: int) requires (0 <= count && count <= LEVEL_MAX_BLOCKS + 1) {
+    x0: int = cache.dirty_x0;
+    z0: int = cache.dirty_z0;
+    x1: int = cache.dirty_x1;
+    z1: int = cache.dirty_z1;
+    cache.dirty_x1 = cache.dirty_x0;
+    if (x0 < 0 || z0 < 0 || x1 > CONTACT_SIZE || z1 > CONTACT_SIZE || x0 >= x1 || z0 >= z1) return;
+    w: int = x1 - x0;
+    for z in z0..z1 _restored: int = memcpy(cache.pixels, z * CONTACT_SIZE + x0, cache.fixed,
+        z * CONTACT_SIZE + x0, w);
+    for i in 0..count {
+        if (i <= LEVEL_MAX_BLOCKS) {
+            base: int = i * 4;
+            if (contact_extent(cache, i, 0) < x1 && contact_extent(cache, i, 2) > x0 && contact_extent(cache,
+                i, 1) < z1 && contact_extent(cache, i, 3) > z0) contact_stamp(cache.pixels,
+                cache.x, cache.z, cache.stamps[base] as f32 / 64.0, cache.stamps[base + 1] as f32 / 64.0,
+                cache.stamps[base + 3] as f32 / 64.0, cache.stamps[base + 2] as f32 / 255.0)
+        }
+    }
+    for z2 in z0..z1 _copied: int = memcpy(cache.scratch, (z2 - z0) * w, cache.pixels,
+        z2 * CONTACT_SIZE + x0, w);
+    glPixelStorei(3317, 1);
+    glTexSubImage2D(3553, 0, x0, z0, w, z1 - z0, 6409, 5121, cache.scratch)
 }
 
 update_material_light(
@@ -315,6 +391,9 @@ update_material_light(
         key = key * 31 + bricks[i].row
     }
     dirty: bool = cache.x != light.x || cache.z != light.z || cache.fixed_key != key;
+    // Whether the whole map needs redrawing; moving objects alone mark the
+    // rectangle they cover (contact_pose).
+    full: bool = dirty;
     if (dirty) {
         cache.x = light.x;
         cache.z = light.z;
@@ -354,12 +433,15 @@ update_material_light(
         count = count + 1
     }
     if (cache.count != count) {
-        dirty = true;
+        full = true;
         cache.count = count
     }
     glActiveTexture(33987);
     glBindTexture(3553, cache.tex);
-    if (dirty) {
+    // A large change is cheaper redrawn whole.
+    if ((cache.dirty_x1 - cache.dirty_x0) * (cache.dirty_z1 - cache.dirty_z0) > CONTACT_CELLS / 4) full = true;
+    if (!full && dirty) contact_redraw_dirty(cache, count) else if (full) {
+        cache.dirty_x1 = cache.dirty_x0;
         memcpy(cache.pixels, 0, cache.fixed, 0, len(cache.pixels));
         for i in 0..count {
             base: int = i * 4;
