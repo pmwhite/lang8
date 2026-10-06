@@ -119,7 +119,13 @@ python3 web/control.py set '{"view": true}'          # also scale, skip
 python3 web/control.py keys '[[2, 65363, 900], [3, 65363]]'
 python3 web/control.py report                        # a frame report now
 python3 web/control.py eval 'return platform.windowSize()'
+python3 web/control.py capture '{"frames": 60, "scale": 0.5}'  # frames to .build/captures/ID/
 ```
+
+`?fresh&world=FILE` starts from another world file in the game's directory,
+such as a copy of the world that starts the player next to what to test.
+Frame capture copies each finished frame, before it is shown, into a JPEG
+and posts it to the server, so the frames show what the device drew.
 
 Anyone who can reach the server can run code in those pages, so serve it
 only on a private network. A server without the endpoints

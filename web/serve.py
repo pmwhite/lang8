@@ -12,9 +12,11 @@ in the directory's parent (.build/telemetry.jsonl by default).
 Remote control (see web/control.py): a POST of a JSON command to /control
 queues it; game pages poll GET /control?after=ID&session=S&ua=U for newer
 commands, run them, and post their results to /telemetry. GET /clients lists
-the pages that polled recently. Anyone who can reach the server can run
+the pages that polled recently. A capture command's frames arrive as POSTs
+to /capture and are saved as captures/ID/INDEX-MSms.jpg beside the log. Anyone who can reach the server can run
 code in those pages, so serve it only on a private network.
 """
+import base64
 import functools
 import http.server
 import json
@@ -25,6 +27,7 @@ import time
 import urllib.parse
 
 MAX_BODY = 256 * 1024
+MAX_CAPTURE = 4 * 1024 * 1024
 
 
 COMMANDS = []  # (id, command), newest last
@@ -84,6 +87,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 COMMANDS.append((command["id"], command))
                 del COMMANDS[:-100]
             self.send_json({"id": command["id"]})
+            return
+        if self.path == "/capture":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                frame = json.loads(self.rfile.read(length)) if 0 < length <= MAX_CAPTURE else None
+                data = frame["data"].split(",", 1)[1]
+                image = base64.b64decode(data)
+                folder = os.path.join(os.path.dirname(self.log_path), "captures", str(int(frame["id"])))
+                os.makedirs(folder, exist_ok=True)
+                name = f'{int(frame["index"]):03d}-{int(frame["ms"]):05d}ms.jpg'
+                with open(os.path.join(folder, name), "wb") as out:
+                    out.write(image)
+            except (ValueError, KeyError, TypeError, IndexError):
+                self.send_error(400)
+                return
+            self.send_response(204)
+            self.end_headers()
             return
         if self.path != "/telemetry":
             self.send_error(404)

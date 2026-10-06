@@ -49,11 +49,43 @@ export function startControl(platform, telemetry) {
         return { scale: platform.scale(), view: platform.frameView() };
       case "report":
         return telemetry.reportNow();
+      case "capture":
+        return capture(c);
       case "eval":
         return await new Function("platform", "telemetry", `return (async () => { ${c.code} })()`)(platform, telemetry);
       default:
         throw new Error(`unknown command ${c.cmd}`);
     }
+  };
+  // Post the next {frames} finished frames (every {every}th), scaled by
+  // {scale}, as JPEGs to /capture under the command's id. It returns at once,
+  // so later commands (such as keys) run while it captures.
+  const capture = (c) => {
+    const frames = c.frames ?? 30;
+    const every = c.every ?? 1;
+    const scale = c.scale ?? 0.5;
+    const source = platform.canvas;
+    const copy = document.createElement("canvas");
+    copy.width = Math.max(1, Math.round(source.width * scale));
+    copy.height = Math.max(1, Math.round(source.height * scale));
+    const g = copy.getContext("2d");
+    let seen = 0;
+    let taken = 0;
+    const t0 = performance.now();
+    platform.setOnSwap(() => {
+      if (seen++ % every !== 0) return;
+      g.drawImage(source, 0, 0, copy.width, copy.height);
+      const index = taken++;
+      const ms = Math.round(performance.now() - t0);
+      const data = copy.toDataURL("image/jpeg", c.quality ?? 0.75);
+      fetch("/capture", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: c.id, session, index, ms, data }),
+      });
+      if (taken >= frames) platform.setOnSwap(null);
+    });
+    return `capturing ${frames} frames`;
   };
   const poll = async () => {
     while (running) {

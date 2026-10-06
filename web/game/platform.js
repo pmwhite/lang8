@@ -507,6 +507,8 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
   let frames = 0;
   let work = 0;
   let resumed = 0;
+  // Called with each finished frame, before it is shown (see setOnSwap).
+  let onSwap = null;
   const X = {
     XOpenDisplay: () => BigInt(zeroed(64)),
     XDefaultScreen: () => 0n,
@@ -572,6 +574,8 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
         return 0n;
       }
       if (resumed) work += performance.now() - resumed;
+      // The frame is complete and still in the drawing buffer.
+      onSwap?.();
       state.value = 1n;
       return 0n;
     },
@@ -676,6 +680,10 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
     },
     canvasSize: () => [canvas.width, canvas.height],
     windowSize: () => [...windowSize],
+    setOnSwap(f) {
+      onSwap = f;
+    },
+    canvas,
     setSkip(names) {
       skip = new Set(names);
     },

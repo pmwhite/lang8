@@ -8,6 +8,7 @@
     python3 web/control.py keys '[[2, 65363, 900], [3, 65363]]' [--target T]
     python3 web/control.py report [--target T]
     python3 web/control.py eval 'return devicePixelRatio' [--target T]
+    python3 web/control.py capture '{"frames": 40, "every": 2, "scale": 0.4}'
 
 Each command waits up to --wait seconds (default 15) for its results in the
 telemetry log and prints them. --target picks pages whose user agent or
@@ -51,6 +52,8 @@ def main():
         command["keys"] = json.loads(a.arg)
     elif a.cmd == "eval":
         command["code"] = a.arg
+    elif a.cmd == "capture" and a.arg:
+        command.update(json.loads(a.arg))
     if a.target:
         command["target"] = a.target
     # Wait for each live page the command reaches.

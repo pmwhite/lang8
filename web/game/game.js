@@ -92,7 +92,8 @@ canvas.addEventListener("pointerup", (e) => {
 async function main() {
   const [module, world] = await Promise.all([
     WebAssembly.compileStreaming(fetch("block-game.wasm")),
-    fetch("world.txt").then((r) => r.text()),
+    // ?fresh&world=FILE starts from another world file, for experiments.
+    fetch(new URLSearchParams(location.search).get("world") || "world.txt").then((r) => r.text()),
   ]);
   const params = new URLSearchParams(location.search);
   // ?probe moves the player, so it starts from the original world and saves
