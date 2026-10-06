@@ -1,12 +1,51 @@
 tag block_game;
 
-height_water_compute(): []i8 {
+// Height-water shaders run on one of two backends. With OpenGL 4.3 the solver
+// passes are compute shaders over storage buffers. Otherwise (OpenGL 3.3 or
+// WebGL2) each pass draws one triangle over a float texture, a fragment per
+// cell. Every pass reads its neighbors and writes only its own cell, so both
+// backends share the physics below; a prelude per backend supplies the
+// storage accessors (water_at, ripple_at_texel, wet_tile_at, tile_at, body_at).
+// The shared code avoids implicit int-to-float conversions, which GLSL ES 3.00
+// does not allow.
+height_water_join(parts: [][]i8): []i8@new {
+    total: int = 0;
+    for part in parts total = total + len(part);
+    out: []i8 = new i8[total](0i8);
+    at: int = 0;
+    for piece in parts {
+        memcpy(out, at, piece, 0, len(piece));
+        at = at + len(piece)
+    }
+    out
+}
+
+height_water_version(fragment: bool): []i8 {
+    if (fragment) return "#version 330\n";
+    "#version 430\n"
+}
+
+// ---- solver: elevation, east/north flux, and submerged solid per cell ----
+height_water_sim_storage(fragment: bool): []i8 {
+    if (fragment) return """
+uniform sampler2D water_map;
+uniform sampler2D wet_map;
+out vec4 result;
+vec4 water_at(ivec2 p) { return texelFetch(water_map,p,0); }
+bool wet_tile_at(ivec2 t) { return texelFetch(wet_map,t,0).r>0.5; }
+""";
     """
-#version 430
 layout(local_size_x=128) in;
-layout(std430,binding=0) readonly buffer Input { vec4 water[]; }; // elevation, east/north flux, submerged solid
+layout(std430,binding=0) readonly buffer Input { vec4 water[]; };
 layout(std430,binding=1) writeonly buffer Output { vec4 result[]; };
 layout(std430,binding=2) readonly buffer Terrain { float wet[1024]; };
+vec4 water_at(ivec2 p) { return water[p.y*256+p.x]; }
+bool wet_tile_at(ivec2 t) { return wet[t.y*32+t.x]>0.5; }
+"""
+}
+
+height_water_sim_body(): []i8 {
+    """
 uniform sampler2D solids;
 uniform sampler2D wind_map;
 uniform int stage;
@@ -17,9 +56,9 @@ uniform float wind_time;
 uniform float wind_on;
 const float dt=1.0/120.0, dx=0.125;
 bool wet_cell(ivec2 p) {
-  return all(greaterThanEqual(p,ivec2(0))) && all(lessThan(p,ivec2(256))) && wet[(p.y/8)*32+p.x/8]>0.5;
+  return all(greaterThanEqual(p,ivec2(0))) && all(lessThan(p,ivec2(256))) && wet_tile_at(p/8);
 }
-vec4 get(ivec2 p,vec4 fallback) { return wet_cell(p) ? water[p.y*256+p.x] : fallback; }
+vec4 get(ivec2 p,vec4 fallback) { return wet_cell(p) ? water_at(p) : fallback; }
 vec2 wind_stress(vec2 world) {
   vec2 uv=clamp((world-wind_origin)/64.0,vec2(0.001),vec2(0.999));
   vec2 flow=(texture(wind_map,uv).rg*2.0-1.0)*2.0;
@@ -32,10 +71,9 @@ vec2 wind_stress(vec2 world) {
   // the solver create surface slopes, reflections, and waves at shorelines.
   return flow*speed*(0.075*gust*streak*wind_on);
 }
-void main() {
-  int i=int(gl_GlobalInvocationID.x); ivec2 p=ivec2(i%256,i/256);
-  if(!wet_cell(p)) { result[i]=vec4(0); return; }
-  vec4 a=water[i];
+vec4 step_cell(ivec2 p) {
+  if(!wet_cell(p)) return vec4(0);
+  vec4 a=water_at(p);
   if(stage==0) {
     float solid=clamp(texelFetch(solids,p,0).r,0.0,0.92);
     // Rising solid volume pushes the surface up. Removing it draws water back
@@ -58,36 +96,65 @@ void main() {
     if(!wet_cell(p+ivec2(0,1)) || dn<0.015) a.z=0.0;
     a.yz=clamp(a.yz,vec2(-2),vec2(2));
   } else {
-    float west=wet_cell(p-ivec2(1,0)) ? water[i-1].y : 0.0;
-    float south=wet_cell(p-ivec2(0,1)) ? water[i-256].z : 0.0;
+    float west=wet_cell(p-ivec2(1,0)) ? water_at(p-ivec2(1,0)).y : 0.0;
+    float south=wet_cell(p-ivec2(0,1)) ? water_at(p-ivec2(0,1)).z : 0.0;
     a.x-=dt/dx*(a.y-west+a.z-south);
   }
   // Bounded basin safeguard for extreme forcing/full solid occupancy. Normal
   // waves conserve sum(elevation-solid); this clamp represents unresolved spill.
   a.x=clamp(a.x,-0.92,0.75);
-  result[i]=a;
+  return a;
 }
 """
 }
 
-height_water_ripple_compute(): []i8 {
+height_water_sim_main(fragment: bool): []i8 {
+    if (fragment) return "void main() { result=step_cell(ivec2(gl_FragCoord.xy)); }\n";
     """
-#version 430
+void main() {
+  int i=int(gl_GlobalInvocationID.x);
+  result[i]=step_cell(ivec2(i%256,i/256));
+}
+"""
+}
+
+height_water_sim_shader(fragment: bool): []i8@new {
+    height_water_join([height_water_version(fragment), height_water_sim_storage(fragment),
+        height_water_sim_body(), height_water_sim_main(fragment)])
+}
+
+// ---- fine ripples: height and face fluxes on a 512x512 grid ----
+height_water_ripple_storage(fragment: bool): []i8 {
+    if (fragment) return """
+uniform sampler2D ripple_map;
+uniform sampler2D wet_map;
+out vec4 result;
+vec4 ripple_at_texel(ivec2 p) { return texelFetch(ripple_map,p,0); }
+bool wet_tile_at(ivec2 t) { return texelFetch(wet_map,t,0).r>0.5; }
+""";
+    """
 layout(local_size_x=128) in;
 layout(std430,binding=0) readonly buffer Input { vec4 ripple[]; };
 layout(std430,binding=1) writeonly buffer Output { vec4 result[]; };
 layout(std430,binding=2) readonly buffer Terrain { float wet[1024]; };
+vec4 ripple_at_texel(ivec2 p) { return ripple[p.y*512+p.x]; }
+bool wet_tile_at(ivec2 t) { return wet[t.y*32+t.x]>0.5; }
+"""
+}
+
+height_water_ripple_body(): []i8 {
+    """
 uniform sampler2D wind_map;
 uniform vec2 origin, wind_origin;
 uniform float wind_time, wind_on;
 uniform int stage;
 const float dt=1.0/120.0, dx=1.0/16.0, c2=0.64;
 bool wet_cell(ivec2 p) {
-  return all(greaterThanEqual(p,ivec2(0))) && all(lessThan(p,ivec2(512))) && wet[(p.y/16)*32+p.x/16]>0.5;
+  return all(greaterThanEqual(p,ivec2(0))) && all(lessThan(p,ivec2(512))) && wet_tile_at(p/16);
 }
 float pressure(vec2 world) {
   if(wind_on<0.5) return 0.0;
-  vec2 flow=(textureLod(wind_map,clamp((world-wind_origin)/64.0,0.001,0.999),0).rg*2.0-1.0)*2.0;
+  vec2 flow=(textureLod(wind_map,clamp((world-wind_origin)/64.0,0.001,0.999),0.0).rg*2.0-1.0)*2.0;
   float speed=length(flow);
   if(speed<0.02) return 0.0;
   vec2 along=flow/speed, across=vec2(-along.y,along.x);
@@ -100,41 +167,76 @@ float pressure(vec2 world) {
     +0.35*sin((a*0.94-b*0.34)*12.57-wind_time*10.06+4.1);
   return 0.0018*min(speed*speed,2.25)*gust*waves;
 }
-void main() {
-  int i=int(gl_GlobalInvocationID.x); ivec2 p=ivec2(i%512,i/512);
-  if(!wet_cell(p)) { result[i]=vec4(0); return; }
-  vec4 a=ripple[i];
+vec4 step_cell(ivec2 p) {
+  if(!wet_cell(p)) return vec4(0);
+  vec4 a=ripple_at_texel(p);
   if(stage==0) {
     vec2 world=origin+(vec2(p)+0.5)*dx;
     float forcing=pressure(world);
     // Staggered face fluxes. Closed faces reflect waves and preserve volume.
     if(wet_cell(p+ivec2(1,0)))
-      a.y=(a.y-dt/dx*(c2*(ripple[i+1].x-a.x)+pressure(world+vec2(dx,0))-forcing))*0.99005;
+      a.y=(a.y-dt/dx*(c2*(ripple_at_texel(p+ivec2(1,0)).x-a.x)+pressure(world+vec2(dx,0))-forcing))*0.99005;
     else a.y=0.0;
     if(wet_cell(p+ivec2(0,1)))
-      a.z=(a.z-dt/dx*(c2*(ripple[i+512].x-a.x)+pressure(world+vec2(0,dx))-forcing))*0.99005;
+      a.z=(a.z-dt/dx*(c2*(ripple_at_texel(p+ivec2(0,1)).x-a.x)+pressure(world+vec2(0,dx))-forcing))*0.99005;
     else a.z=0.0;
   } else {
-    float west=wet_cell(p-ivec2(1,0)) ? ripple[i-1].y : 0.0;
-    float south=wet_cell(p-ivec2(0,1)) ? ripple[i-512].z : 0.0;
+    float west=wet_cell(p-ivec2(1,0)) ? ripple_at_texel(p-ivec2(1,0)).y : 0.0;
+    float south=wet_cell(p-ivec2(0,1)) ? ripple_at_texel(p-ivec2(0,1)).z : 0.0;
     a.x-=dt/dx*(a.y-west+a.z-south);
   }
-  result[i]=a;
+  return a;
 }
 """
 }
 
-height_water_solid_vs(): []i8 {
+height_water_ripple_main(fragment: bool): []i8 {
+    if (fragment) return "void main() { result=step_cell(ivec2(gl_FragCoord.xy)); }\n";
     """
-#version 430
+void main() {
+  int i=int(gl_GlobalInvocationID.x);
+  result[i]=step_cell(ivec2(i%512,i/512));
+}
+"""
+}
+
+height_water_ripple_shader(fragment: bool): []i8@new {
+    height_water_join([height_water_version(fragment), height_water_ripple_storage(fragment),
+        height_water_ripple_body(), height_water_ripple_main(fragment)])
+}
+
+// One triangle covering a fragment pass's whole target.
+height_water_pass_vs(): []i8 {
+    """
+#version 330
+void main() {
+  vec2 corner=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));
+  gl_Position=vec4(corner*2.0-1.0,0.0,1.0);
+}
+"""
+}
+
+// ---- submerged solids, rasterized into a displacement texture ----
+height_water_solid_storage(fragment: bool): []i8 {
+    if (fragment) return """
+uniform sampler2D bodies;
+vec4 body_at(int k) { return texelFetch(bodies,ivec2(k%64,k/64),0); }
+""";
+    """
 layout(std430,binding=4) readonly buffer Bodies { vec4 body[]; };
+vec4 body_at(int k) { return body[k]; }
+"""
+}
+
+height_water_solid_body(): []i8 {
+    """
 uniform vec2 origin;
 out vec2 local;
 flat out vec4 shape;
 flat out vec4 info;
 void main() {
   const vec2 corners[6]=vec2[6](vec2(-1,-1),vec2(1,-1),vec2(1,1),vec2(-1,-1),vec2(1,1),vec2(-1,1));
-  shape=body[gl_InstanceID*2]; info=body[gl_InstanceID*2+1];
+  shape=body_at(gl_InstanceID*2); info=body_at(gl_InstanceID*2+1);
   local=corners[gl_VertexID]*(shape.w+0.125);
   vec2 world=shape.xz+local;
   gl_Position=vec4((world-origin)/16.0-1.0,0,1);
@@ -142,9 +244,13 @@ void main() {
 """
 }
 
-height_water_solid_fs(): []i8 {
+height_water_solid_vs(fragment: bool): []i8@new {
+    height_water_join([height_water_version(fragment), height_water_solid_storage(fragment),
+        height_water_solid_body()])
+}
+
+height_water_solid_fs_body(): []i8 {
     """
-#version 430
 in vec2 local;
 flat in vec4 shape;
 flat in vec4 info;
@@ -161,47 +267,88 @@ void main() {
 """
 }
 
-height_water_vs(): []i8 {
-    """
-#version 430
+height_water_solid_fs(fragment: bool): []i8@new {
+    height_water_join([height_water_version(fragment), height_water_solid_fs_body()])
+}
+
+// ---- drawing the surface and the pond bed ----
+height_water_draw_storage(fragment: bool, vertex: bool): []i8 {
+    if (fragment) return """
+uniform sampler2D water_map;
+uniform sampler2D ripple_map;
+uniform sampler2D wet_map;
+uniform sampler2D tiles;
+vec4 water_at(ivec2 p) { return texelFetch(water_map,p,0); }
+float ripple_at_texel(ivec2 p) { return texelFetch(ripple_map,p,0).x; }
+bool wet_tile_at(ivec2 t) { return texelFetch(wet_map,t,0).r>0.5; }
+vec4 tile_at(int k) { return texelFetch(tiles,ivec2(k%32,k/32),0); }
+""";
+    if (vertex) return """
 layout(std430,binding=0) readonly buffer State { vec4 water[]; };
 layout(std430,binding=2) readonly buffer Terrain { float wet[1024]; };
 layout(std430,binding=3) readonly buffer Tiles { vec4 tile[]; };
-uniform mat4 vp;
-uniform vec2 origin;
-uniform int bed;
-out vec3 world;
-out vec3 normal;
 layout(std430,binding=5) readonly buffer Ripples { vec4 ripple[]; };
+vec4 water_at(ivec2 p) { return water[p.y*256+p.x]; }
+float ripple_at_texel(ivec2 p) { return ripple[p.y*512+p.x].x; }
+bool wet_tile_at(ivec2 t) { return wet[t.y*32+t.x]>0.5; }
+vec4 tile_at(int k) { return tile[k]; }
+""";
+    """
+layout(std430,binding=2) readonly buffer Terrain { float wet[1024]; };
+layout(std430,binding=5) readonly buffer Ripples { vec4 ripple[]; };
+float ripple_at_texel(ivec2 p) { return ripple[p.y*512+p.x].x; }
+bool wet_tile_at(ivec2 t) { return wet[t.y*32+t.x]>0.5; }
+"""
+}
+
+// Bilinear fine-ripple height, which both the surface vertices and the
+// fragment normals use.
+height_water_ripple_height(): []i8 {
+    """
 float ripple_at(ivec2 p,float fallback) {
   if(any(lessThan(p,ivec2(0))) || any(greaterThanEqual(p,ivec2(512)))) return fallback;
-  return wet[(p.y/16)*32+p.x/16]>0.5 ? ripple[p.y*512+p.x].x : fallback;
+  return wet_tile_at(p/16) ? ripple_at_texel(p) : fallback;
 }
 float ripple_height(vec2 world) {
   vec2 grid=(world-origin)*16.0-0.5;
   ivec2 p=ivec2(floor(grid)); vec2 f=fract(grid);
   ivec2 center=clamp(ivec2((world-origin)*16.0),ivec2(0),ivec2(511));
-  float h=ripple[center.y*512+center.x].x;
+  float h=ripple_at_texel(center);
   return mix(mix(ripple_at(p,h),ripple_at(p+ivec2(1,0),h),f.x),
              mix(ripple_at(p+ivec2(0,1),h),ripple_at(p+ivec2(1,1),h),f.x),f.y);
 }
+"""
+}
+
+height_water_vs_uniforms(): []i8 {
+    """
+uniform mat4 vp;
+uniform vec2 origin;
+uniform int bed;
+out vec3 world;
+out vec3 normal;
+"""
+}
+
+height_water_vs_body(): []i8 {
+    """
 bool wet_cell(ivec2 p) {
-  return all(greaterThanEqual(p,ivec2(0))) && all(lessThan(p,ivec2(256))) && wet[(p.y/8)*32+p.x/8]>0.5;
+  return all(greaterThanEqual(p,ivec2(0))) && all(lessThan(p,ivec2(256))) && wet_tile_at(p/8);
 }
 float height_at(ivec2 vertex) {
   float height=0.0,count=0.0;
   for(int y=-1;y<=0;y++) for(int x=-1;x<=0;x++) {
     ivec2 p=vertex+ivec2(x,y);
-    if(wet_cell(p)) { height+=water[p.y*256+p.x].x; count+=1.0; }
+    if(wet_cell(p)) { height+=water_at(p).x; count+=1.0; }
   }
   return count>0.0 ? height/count : 0.0;
 }
 bool wet_tile(ivec2 t) {
-  return all(greaterThanEqual(t,ivec2(0))) && all(lessThan(t,ivec2(32))) && wet[t.y*32+t.x]>0.5;
+  return all(greaterThanEqual(t,ivec2(0))) && all(lessThan(t,ivec2(32))) && wet_tile_at(t);
 }
 void main() {
   const ivec2 corners[6]=ivec2[6](ivec2(0,0),ivec2(1,0),ivec2(1,1),ivec2(0,0),ivec2(1,1),ivec2(0,1));
-  ivec2 cell=ivec2(tile[gl_InstanceID].xy); ivec2 corner=corners[gl_VertexID%6];
+  ivec2 cell=ivec2(tile_at(gl_InstanceID).xy); ivec2 corner=corners[gl_VertexID%6];
   if(bed>0) {
     int face=gl_VertexID/6;
     world=vec3(origin.x+float(cell.x+corner.x),-1.02,origin.y+float(cell.y+corner.y)); normal=vec3(0,1,0);
@@ -231,9 +378,13 @@ void main() {
 """
 }
 
-height_water_fs(): []i8 {
+height_water_vs(fragment: bool): []i8@new {
+    height_water_join([height_water_version(fragment), height_water_draw_storage(fragment,
+        true), height_water_vs_uniforms(), height_water_ripple_height(), height_water_vs_body()])
+}
+
+height_water_fs_uniforms(): []i8 {
     """
-#version 430
 in vec3 world;
 in vec3 normal;
 uniform int bed;
@@ -247,21 +398,12 @@ uniform vec2 lamp_origin;
 uniform float reflection_on;
 uniform vec3 spec_lamps[4];
 uniform vec2 origin;
-layout(std430,binding=2) readonly buffer Terrain { float wet[1024]; };
-layout(std430,binding=5) readonly buffer Ripples { vec4 ripple[]; };
-float ripple_at(ivec2 p,float fallback) {
-  if(any(lessThan(p,ivec2(0))) || any(greaterThanEqual(p,ivec2(512)))) return fallback;
-  return wet[(p.y/16)*32+p.x/16]>0.5 ? ripple[p.y*512+p.x].x : fallback;
-}
-float ripple_height(vec2 world) {
-  vec2 grid=(world-origin)*16.0-0.5;
-  ivec2 p=ivec2(floor(grid)); vec2 f=fract(grid);
-  ivec2 center=clamp(ivec2((world-origin)*16.0),ivec2(0),ivec2(511));
-  float h=ripple[center.y*512+center.x].x;
-  return mix(mix(ripple_at(p,h),ripple_at(p+ivec2(1,0),h),f.x),
-             mix(ripple_at(p+ivec2(0,1),h),ripple_at(p+ivec2(1,1),h),f.x),f.y);
-}
 out vec4 result;
+"""
+}
+
+height_water_fs_body(): []i8 {
+    """
 void main() {
   vec3 n=normalize(normal),V=normalize(camera-world),L=normalize(vec3(4,11,3));
   if(bed==0) {
@@ -273,11 +415,11 @@ void main() {
   vec4 sh=light_vp*vec4(world,1); vec3 sc=sh.xyz/sh.w; float vis=1.0;
   if(all(greaterThan(sc,vec3(0.01))) && all(lessThan(sc,vec3(0.99)))) vis=texture(shadow_map,vec3(sc.xy,sc.z-0.00025));
   vec2 luv=(world.xz-lamp_origin)/128.0;
-  float warmth=texture(lamp_map,clamp(luv,0,1)).r;
+  float warmth=texture(lamp_map,clamp(luv,0.0,1.0)).r;
   if(any(lessThan(luv,vec2(0))) || any(greaterThan(luv,vec2(1)))) warmth=0.0;
   vec3 light=vec3(0.19,0.245,0.32)+vec3(0.76,0.86,1.0)*0.48*max(dot(n,L),0.0)*vis+vec3(1.60,0.87,0.36)*warmth;
   if(bed>0) {
-    float grain=fract(sin(dot(floor(world.xz*24),vec2(12.9898,78.233)))*43758.5453);
+    float grain=fract(sin(dot(floor(world.xz*24.0),vec2(12.9898,78.233)))*43758.5453);
     result=vec4(mix(vec3(0.20,0.18,0.13),vec3(0.28,0.26,0.19),grain)*light,1); return;
   }
   vec3 R=reflect(-V,n);
@@ -285,14 +427,14 @@ void main() {
   vec4 clip=vp*vec4(world.x,-0.02,world.z,1);
   vec2 uv=clip.xy/clip.w*0.5+0.5+n.xz*vec2(0.020,0.028);
   vec4 scene=texture(reflection_map,clamp(uv,0.001,0.999));
-  float edge=smoothstep(0,0.025,min(min(uv.x,uv.y),min(1-uv.x,1-uv.y)));
+  float edge=smoothstep(0.0,0.025,min(min(uv.x,uv.y),min(1.0-uv.x,1.0-uv.y)));
   vec3 reflected=mix(sky,scene.rgb,scene.a*edge*reflection_on);
-  float fresnel=0.035+0.965*pow(1-max(dot(n,V),0.0),5.0);
+  float fresnel=0.035+0.965*pow(1.0-max(dot(n,V),0.0),5.0);
   vec3 lit=mix(vec3(0.075,0.14,0.135)*light,reflected,0.34+0.66*fresnel);
   lit+=vec3(0.76,0.86,1.0)*0.65*pow(max(dot(n,normalize(L+V)),0.0),65.0)*vis;
   for(int i=0;i<4;i++) {
     vec3 delta=spec_lamps[i]-world; float d2=dot(delta,delta);
-    if(spec_lamps[i].y>0 && d2<64) lit+=vec3(1,0.57,0.24)*0.7*pow(max(dot(n,normalize(normalize(delta)+V)),0.0),65.0)/(1+0.25*d2);
+    if(spec_lamps[i].y>0.0 && d2<64.0) lit+=vec3(1,0.57,0.24)*0.7*pow(max(dot(n,normalize(normalize(delta)+V)),0.0),65.0)/(1.0+0.25*d2);
   }
   // Murky water suppresses bottom detail so ripple reflections read clearly,
   // with some transmission left for submerged objects. Protruding blocks
@@ -300,4 +442,9 @@ void main() {
   result=vec4(lit/(1.0+max(lit-1.1,0.0)),0.84+0.14*fresnel);
 }
 """
+}
+
+height_water_fs(fragment: bool): []i8@new {
+    height_water_join([height_water_version(fragment), height_water_draw_storage(fragment,
+        false), height_water_fs_uniforms(), height_water_ripple_height(), height_water_fs_body()])
 }

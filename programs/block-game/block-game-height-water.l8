@@ -8,10 +8,42 @@ use_tag gl;
 
 extern getenv(name: str): ?*i8;
 
+extern glTexSubImage2Df(
+    target: int,
+    level: int,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    format: int,
+    typ: int,
+    pixels: *f32
+): int = glTexSubImage2D;
+
+// Texture units of the fragment backend's float textures.
+HW_UNIT_WATER: int = 8;
+
+HW_UNIT_RIPPLE: int = 9;
+
+HW_UNIT_WET: int = 10;
+
+HW_UNIT_TILES: int = 11;
+
+HW_UNIT_BODIES: int = 12;
+
+// Bodies are two RGBA texels each, in rows of 64 texels.
+const HW_BODY_FLOATS: int = 64 * 65 * 4;
+
 // A 32x32-tile resident basin, sampled at eight cells per block. No particles,
 // surface extraction, fullscreen filtering or per-frame allocations.
 type HeightWater = {
     supported: bool;
+    // Without compute shaders, the solver runs as fragment passes over float
+    // textures: targets holds the water state pair, the ripple pair, and the
+    // wet, tile, and body tables; target_fbos render to the two pairs.
+    fragment: bool;
+    targets: []u32;
+    target_fbos: []u32;
     disabled: bool;
     ready: bool;
     initialize: bool;
@@ -43,21 +75,28 @@ type HeightWater = {
     frame: int;
     label: []i8;
     ripple_time: f32
-} invariant (len(programs) == 4 && len(u) == 24 && len(buffers) == 7 && len(textures) == 2 && len(wet) == 1024 && len(mask) == 1024 && len(tiles) == 4096 && len(bodies) == (LEVEL_MAX_BLOCKS + 1) * 8 && 0 <= current && current <= 1 && 0 <= cells && cells <= 1024 && 0 <= nbodies && nbodies <= LEVEL_MAX_BLOCKS + 1)
+} invariant (len(programs) == 4 && len(u) == 24 && len(buffers) == 7 && len(textures) == 2 && len(wet) == 1024 && len(mask) == 1024 && len(tiles) == 4096 && len(bodies) == HW_BODY_FLOATS && len(targets) == 7 && len(target_fbos) == 4 && 0 <= current && current <= 1 && 0 <= cells && cells <= 1024 && 0 <= nbodies && nbodies <= LEVEL_MAX_BLOCKS + 1)
 
 new_height_water(main: int) raises IoError: *HeightWater@new {
     version: []i32 = new i32[2](0i32);
     glGetIntegerv(33307, version);
     glGetIntegerv(33308, &version[1]);
-    supported: bool = version[0] > 4i32 || version[0] == 4i32 && version[1] >= 3i32;
+    // OpenGL 4.3 runs the solver in compute shaders; 3.3 (and WebGL2) in
+    // fragment passes. L8_WATER_FRAGMENT selects fragment passes anyway.
+    fragment: bool = version[0] > 3i32 || version[0] == 3i32 && version[1] >= 3i32;
+    supported: bool = getenv("L8_WATER_FRAGMENT") == null && (version[0] > 4i32 || version[0] == 4i32 && version[1] >= 3i32);
     if (supported) {
         glGetIntegerv(37078, version);
         supported = version[0] >= 4i32
     }
+    if (supported) fragment = false;
     programs: []int = new int[4](0);
     u: []int = new int[24](-1);
     buffers: []u32 = new u32[7](0u32);
     textures: []u32 = new u32[2](0u32);
+    targets: []u32 = new u32[7](0u32);
+    target_fbos: []u32 = new u32[4](0u32);
+    if (fragment) fragment = height_water_targets(targets, target_fbos);
     fbos: []u32 = new u32[1](0u32);
     zeros: []f32 = new f32[512 * 512 * 4](0.0);
     mask: []i8 = new i8[1024](0i8);
@@ -69,39 +108,51 @@ new_height_water(main: int) raises IoError: *HeightWater@new {
     glTexParameteri(3553, 10242, 33071);
     glTexParameteri(3553, 10243, 33071);
     glTexImage2D(3553, 0, 6409, 32, 32, 0, 6409, 5121, mask);
-    if (supported) {
-        shader: int = compile_shader(37305, height_water_compute());
-        programs[0] = glCreateProgram();
-        glAttachShader(programs[0], shader);
-        glLinkProgram(programs[0]);
-        ok: []i32 = new i32[1](0i32);
-        glGetProgramiv(programs[0], 35714, ok);
-        if (ok[0] == 0i32) die("height water compute link failed");
-        programs[1] = link_program(height_water_solid_vs(), height_water_solid_fs(),
+    if (supported || fragment) {
+        if (fragment) {
+            programs[0] = link_program(height_water_pass_vs(), height_water_sim_shader(true),
+                "nrm");
+            programs[3] = link_program(height_water_pass_vs(), height_water_ripple_shader(true),
+                "nrm")
+        } else {
+            shader: int = compile_shader(37305, height_water_sim_shader(false));
+            programs[0] = glCreateProgram();
+            glAttachShader(programs[0], shader);
+            glLinkProgram(programs[0]);
+            ok: []i32 = new i32[1](0i32);
+            glGetProgramiv(programs[0], 35714, ok);
+            if (ok[0] == 0i32) die("height water compute link failed");
+            ripple_shader: int = compile_shader(37305, height_water_ripple_shader(false));
+            programs[3] = glCreateProgram();
+            glAttachShader(programs[3], ripple_shader);
+            glLinkProgram(programs[3]);
+            glGetProgramiv(programs[3], 35714, ok);
+            if (ok[0] == 0i32) die("water ripple compute link failed")
+        }
+        programs[1] = link_program(height_water_solid_vs(fragment), height_water_solid_fs(fragment),
             "nrm");
-        programs[2] = link_program(height_water_vs(), height_water_fs(), "nrm");
-        ripple_shader: int = compile_shader(37305, height_water_ripple_compute());
-        programs[3] = glCreateProgram();
-        glAttachShader(programs[3], ripple_shader);
-        glLinkProgram(programs[3]);
-        glGetProgramiv(programs[3], 35714, ok);
-        if (ok[0] == 0i32) die("water ripple compute link failed");
+        programs[2] = link_program(height_water_vs(fragment), height_water_fs(fragment),
+            "nrm");
         glUseProgram(programs[3]);
+        glUniform1i(glGetUniformLocation(programs[3], "ripple_map"), HW_UNIT_RIPPLE);
+        glUniform1i(glGetUniformLocation(programs[3], "wet_map"), HW_UNIT_WET);
         glUniform1i(glGetUniformLocation(programs[3], "wind_map"), 7);
         u[19] = glGetUniformLocation(programs[3], "stage");
         u[20] = glGetUniformLocation(programs[3], "origin");
         u[21] = glGetUniformLocation(programs[3], "wind_origin");
         u[22] = glGetUniformLocation(programs[3], "wind_time");
         u[23] = glGetUniformLocation(programs[3], "wind_on");
-        glGenBuffers(7, buffers);
-        for i in 0..7 {
-            size: int = 256 * 256 * 4;
-            if (i >= 5) size = 512 * 512 * 4;
-            if (i == 2) size = 1024;
-            if (i == 3) size = 4096;
-            if (i == 4) size = (LEVEL_MAX_BLOCKS + 1) * 8;
-            glBindBuffer(37074, buffers[i]);
-            glBufferData(37074, size * 4, zeros, 35048)
+        if (!fragment) {
+            glGenBuffers(7, buffers);
+            for i in 0..7 {
+                size: int = 256 * 256 * 4;
+                if (i >= 5) size = 512 * 512 * 4;
+                if (i == 2) size = 1024;
+                if (i == 3) size = 4096;
+                if (i == 4) size = (LEVEL_MAX_BLOCKS + 1) * 8;
+                glBindBuffer(37074, buffers[i]);
+                glBufferData(37074, size * 4, zeros, 35048)
+            }
         }
         glActiveTexture(33990);
         glBindTexture(3553, textures[1]);
@@ -122,6 +173,8 @@ new_height_water(main: int) raises IoError: *HeightWater@new {
         glUseProgram(programs[0]);
         glUniform1i(glGetUniformLocation(programs[0], "solids"), 6);
         glUniform1i(glGetUniformLocation(programs[0], "wind_map"), 7);
+        glUniform1i(glGetUniformLocation(programs[0], "water_map"), HW_UNIT_WATER);
+        glUniform1i(glGetUniformLocation(programs[0], "wet_map"), HW_UNIT_WET);
         u[0] = glGetUniformLocation(programs[0], "stage");
         u[1] = glGetUniformLocation(programs[0], "origin");
         u[2] = glGetUniformLocation(programs[0], "impulse");
@@ -129,10 +182,16 @@ new_height_water(main: int) raises IoError: *HeightWater@new {
         u[17] = glGetUniformLocation(programs[0], "wind_time");
         u[18] = glGetUniformLocation(programs[0], "wind_on");
         u[3] = glGetUniformLocation(programs[1], "origin");
+        glUseProgram(programs[1]);
+        glUniform1i(glGetUniformLocation(programs[1], "bodies"), HW_UNIT_BODIES);
         glUseProgram(programs[2]);
         glUniform1i(glGetUniformLocation(programs[2], "shadow_map"), 0);
         glUniform1i(glGetUniformLocation(programs[2], "lamp_map"), 2);
         glUniform1i(glGetUniformLocation(programs[2], "reflection_map"), 4);
+        glUniform1i(glGetUniformLocation(programs[2], "water_map"), HW_UNIT_WATER);
+        glUniform1i(glGetUniformLocation(programs[2], "ripple_map"), HW_UNIT_RIPPLE);
+        glUniform1i(glGetUniformLocation(programs[2], "wet_map"), HW_UNIT_WET);
+        glUniform1i(glGetUniformLocation(programs[2], "tiles"), HW_UNIT_TILES);
         u[4] = glGetUniformLocation(programs[2], "vp");
         u[5] = glGetUniformLocation(programs[2], "origin");
         u[6] = glGetUniformLocation(programs[2], "bed");
@@ -150,7 +209,10 @@ new_height_water(main: int) raises IoError: *HeightWater@new {
     u[15] = glGetUniformLocation(main, "fluid_origin");
     glActiveTexture(33984);
     new HeightWater {
-        supported: supported,
+        supported: supported || fragment,
+        fragment: fragment,
+        targets: targets,
+        target_fbos: target_fbos,
         disabled: getenv("L8_WATER_STATIC") != null,
         ready: false,
         initialize: true,
@@ -167,7 +229,7 @@ new_height_water(main: int) raises IoError: *HeightWater@new {
         mask: mask,
         wet: new f32[1024](0.0),
         tiles: new f32[4096](0.0),
-        bodies: new f32[(LEVEL_MAX_BLOCKS + 1) * 8](0.0),
+        bodies: new f32[HW_BODY_FLOATS](0.0),
         x: 0,
         z: 0,
         key: 0,
@@ -183,6 +245,92 @@ new_height_water(main: int) raises IoError: *HeightWater@new {
         label: new i8[160](0i8),
         ripple_time: 0.0
     }
+}
+
+// A nearest-filtered float texture on a texture unit, without data.
+height_water_float_texture(
+    name: u32,
+    unit: int,
+    internal: int,
+    width: int,
+    height: int,
+    format: int
+) {
+    glActiveTexture(33984 + unit);
+    glBindTexture(3553, name);
+    glTexParameteri(3553, 10241, 9728);
+    glTexParameteri(3553, 10240, 9728);
+    glTexParameteri(3553, 10242, 33071);
+    glTexParameteri(3553, 10243, 33071);
+    glTexImage2D(3553, 0, internal, width, height, 0, format, 5126, null)
+}
+
+// Create the fragment backend's textures and framebuffers. False when float
+// textures cannot be rendered to, which leaves the water static.
+height_water_targets(targets: []u32, fbos: []u32): bool requires (len(targets) == 7 && len(fbos) == 4) {
+    glGenTextures(7, targets);
+    for i in 0..2 {
+        height_water_float_texture(targets[i], HW_UNIT_WATER, 34836, 256, 256, 6408);
+        height_water_float_texture(targets[2 + i], HW_UNIT_RIPPLE, 34836, 512, 512,
+            6408)
+    }
+    height_water_float_texture(targets[4], HW_UNIT_WET, 33326, 32, 32, 6403);
+    height_water_float_texture(targets[5], HW_UNIT_TILES, 34836, 32, 32, 6408);
+    height_water_float_texture(targets[6], HW_UNIT_BODIES, 34836, 64, 65, 6408);
+    glActiveTexture(33984);
+    glGenFramebuffers(4, fbos);
+    complete: bool = true;
+    for f in 0..4 {
+        glBindFramebuffer(36160, fbos[f]);
+        glFramebufferTexture2D(36160, 36064, 3553, targets[f], 0);
+        glDrawBuffer(36064);
+        glReadBuffer(36064);
+        if (glCheckFramebufferStatus(36160) != 36053) complete = false
+    }
+    glBindFramebuffer(36160, 0u32);
+    glDrawBuffer(1029);
+    glReadBuffer(1029);
+    complete
+}
+
+// Bind the newest water and ripple states for drawing.
+height_water_bind_targets(w: *HeightWater) {
+    glActiveTexture(33984 + HW_UNIT_WATER);
+    glBindTexture(3553, w.targets[w.current]);
+    glActiveTexture(33984 + HW_UNIT_RIPPLE);
+    glBindTexture(3553, w.targets[2]);
+    glActiveTexture(33984 + HW_UNIT_WET);
+    glBindTexture(3553, w.targets[4]);
+    glActiveTexture(33984 + HW_UNIT_TILES);
+    glBindTexture(3553, w.targets[5]);
+    glActiveTexture(33984)
+}
+
+// One solver pass: draw a triangle over the target, reading the input state
+// on a texture unit.
+height_water_pass(
+    unit: int,
+    input: u32,
+    fbo: u32,
+    size: int
+) {
+    glActiveTexture(33984 + unit);
+    glBindTexture(3553, input);
+    glBindFramebuffer(36160, fbo);
+    glViewport(0, 0, size, size);
+    glDrawArrays(4, 0, 3)
+}
+
+height_water_passes_begin() {
+    glDisable(2929);
+    glDisable(3042)
+}
+
+height_water_passes_end() {
+    glBindFramebuffer(36160, 0u32);
+    glViewport(0, 0, 1200, 720);
+    glEnable(2929);
+    glActiveTexture(33984)
 }
 
 toggle_height_water(w: *HeightWater) {
@@ -280,18 +428,32 @@ height_water_terrain(
             w.cells = w.cells + 1
         }
     }
-    for i in 0..2 {
-        glBindBuffer(37074, w.buffers[i]);
-        glBufferSubData(37074, 0, 256 * 256 * 16, w.zeros)
+    if (w.fragment) {
+        for i in 0..4 {
+            size: int = if (i < 2) 256 else 512;
+            glActiveTexture(33984 + HW_UNIT_WATER);
+            glBindTexture(3553, w.targets[i]);
+            glTexSubImage2Df(3553, 0, 0, 0, size, size, 6408, 5126, w.zeros)
+        }
+        glBindTexture(3553, w.targets[4]);
+        glTexSubImage2Df(3553, 0, 0, 0, 32, 32, 6403, 5126, w.wet);
+        glBindTexture(3553, w.targets[5]);
+        glTexSubImage2Df(3553, 0, 0, 0, 32, 32, 6408, 5126, w.tiles);
+        height_water_bind_targets(w)
+    } else {
+        for i in 0..2 {
+            glBindBuffer(37074, w.buffers[i]);
+            glBufferSubData(37074, 0, 256 * 256 * 16, w.zeros)
+        }
+        for i in 5..7 {
+            glBindBuffer(37074, w.buffers[i]);
+            glBufferSubData(37074, 0, 512 * 512 * 16, w.zeros)
+        }
+        glBindBuffer(37074, w.buffers[2]);
+        glBufferSubData(37074, 0, 4096, w.wet);
+        glBindBuffer(37074, w.buffers[3]);
+        glBufferSubData(37074, 0, w.cells * 16, w.tiles)
     }
-    for i in 5..7 {
-        glBindBuffer(37074, w.buffers[i]);
-        glBufferSubData(37074, 0, 512 * 512 * 16, w.zeros)
-    }
-    glBindBuffer(37074, w.buffers[2]);
-    glBufferSubData(37074, 0, 4096, w.wet);
-    glBindBuffer(37074, w.buffers[3]);
-    glBufferSubData(37074, 0, w.cells * 16, w.tiles);
     glActiveTexture(33989);
     glBindTexture(3553, w.textures[0]);
     glTexSubImage2D(3553, 0, 0, 0, 32, 32, 6409, 5121, w.mask);
@@ -324,9 +486,17 @@ height_water_body(
 }
 
 height_water_displacement(w: *HeightWater) {
-    glBindBuffer(37074, w.buffers[4]);
-    glBufferSubData(37074, 0, w.nbodies * 32, w.bodies);
-    height_water_bind(w);
+    if (w.fragment) {
+        rows: int = (w.nbodies * 2 + 63) / 64;
+        glActiveTexture(33984 + HW_UNIT_BODIES);
+        glBindTexture(3553, w.targets[6]);
+        if (rows > 0) glTexSubImage2Df(3553, 0, 0, 0, 64, rows, 6408, 5126, w.bodies);
+        glActiveTexture(33984)
+    } else {
+        glBindBuffer(37074, w.buffers[4]);
+        glBufferSubData(37074, 0, w.nbodies * 32, w.bodies);
+        height_water_bind(w)
+    }
     glBindFramebuffer(36160, w.fbo);
     glDrawBuffer(36064);
     glReadBuffer(36064);
@@ -364,13 +534,18 @@ height_water_step(
     initial: f32 = 0.0;
     if (w.initialize) initial = 1.0;
     glUniform4f(w.u[2], ix, iz, strength, initial);
+    if (w.fragment) height_water_passes_begin();
     for stage in 0..3 {
-        height_water_bind(w);
         glUniform1i(w.u[0], stage);
-        glDispatchCompute(512, 1, 1);
-        glMemoryBarrier(8192);
+        if (w.fragment) height_water_pass(HW_UNIT_WATER, w.targets[w.current], w.target_fbos[1 - w.current],
+            256) else {
+            height_water_bind(w);
+            glDispatchCompute(512, 1, 1);
+            glMemoryBarrier(8192)
+        }
         if (w.current == 0) w.current = 1 else w.current = 0
     }
+    if (w.fragment) height_water_passes_end();
     height_water_ripple_step(w);
     w.initialize = false;
     w.steps = w.steps + 1
@@ -380,13 +555,24 @@ height_water_ripple_step(w: *HeightWater) {
     glUseProgram(w.programs[3]);
     glUniform2f(w.u[20], w.x as f32, w.z as f32);
     glUniform1f(w.u[22], w.ripple_time);
-    glBindBufferBase(37074, 2, w.buffers[2]);
-    for stage in 0..2 {
-        glBindBufferBase(37074, 0, w.buffers[5 + stage]);
-        glBindBufferBase(37074, 1, w.buffers[6 - stage]);
-        glUniform1i(w.u[19], stage);
-        glDispatchCompute(2048, 1, 1);
-        glMemoryBarrier(8192)
+    if (w.fragment) {
+        // The newest ripples end up back in the first texture of the pair.
+        height_water_passes_begin();
+        for stage in 0..2 {
+            glUniform1i(w.u[19], stage);
+            height_water_pass(HW_UNIT_RIPPLE, w.targets[2 + stage], w.target_fbos[3 - stage],
+                512)
+        }
+        height_water_passes_end()
+    } else {
+        glBindBufferBase(37074, 2, w.buffers[2]);
+        for stage in 0..2 {
+            glBindBufferBase(37074, 0, w.buffers[5 + stage]);
+            glBindBufferBase(37074, 1, w.buffers[6 - stage]);
+            glUniform1i(w.u[19], stage);
+            glDispatchCompute(2048, 1, 1);
+            glMemoryBarrier(8192)
+        }
     }
     w.ripple_time = w.ripple_time + 0.008333334
 }
@@ -525,7 +711,7 @@ draw_height_water(
     bed: int
 ) {
     if (!w.supported || !w.visible || w.cells == 0) return;
-    height_water_bind(w);
+    if (w.fragment) height_water_bind_targets(w) else height_water_bind(w);
     glUseProgram(w.programs[2]);
     glUniformMatrix4fv(w.u[4], 1, 0, vp);
     glUniform2f(w.u[5], w.x as f32, w.z as f32);

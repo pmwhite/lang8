@@ -107,6 +107,19 @@ OpenGL 4.3 and at least four vertex-stage storage-buffer bindings are required.
 Unsupported hardware uses the older static reflective terrain fallback. That
 fallback does not render the cut-out underwater basin.
 
+## Compute and fragment backends
+
+With OpenGL 4.3 the solver passes are compute shaders over storage buffers.
+Without compute shaders (OpenGL 3.3, or WebGL2 in the browser build) the same
+passes run as fragment shaders: each pass draws one triangle over a float
+texture, so every fragment updates one cell from its neighbors in the previous
+state. The water and ripple states ping-pong between pairs of RGBA32F textures,
+and the wet-tile, tile, and body tables are small float textures read with
+`texelFetch`. Both backends compile the same physics GLSL with a different
+storage prelude (`block-game-height-water-shaders.l8`), so they compute the same
+steps. `L8_WATER_FRAGMENT=1` selects the fragment backend even when compute
+shaders are available.
+
 ## Bounds and tradeoffs
 
 - This is a height-field fluid, not volumetric particle fluid. It cannot form
@@ -151,7 +164,8 @@ L8_WATER_STATS=1 L8_WATER_STRESS=1 LD_PRELOAD="$PWD/.build/water-frame-probe.so"
 
 Run benchmarks sequentially. Use F3 for normal presented-frame durations.
 
-`test_height_water.l8` checks exact unforced flatness, all 256 resident pond tiles,
+`test_height_water.l8` (run it again with `L8_WATER_FRAGMENT=1` for the
+fragment backend) checks exact unforced flatness, all 256 resident pond tiles,
 block displacement and volume recovery, wave propagation beyond the impact,
 player and ramp submerged volumes, toggling, no application heap growth, and GL
 errors. GPU readback is test-only. `test_water.l8` covers editing, signed-layer
