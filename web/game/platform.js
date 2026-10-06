@@ -58,7 +58,7 @@ export function translateShader(source, fragment) {
 }
 
 // scale renders the window at that fraction of its size. env answers getenv.
-export function createPlatform(canvas, { log = console.log, checkErrors = false, countCalls = false, scale = 1, env = {} } = {}) {
+export function createPlatform(canvas, { log = console.log, checkErrors = false, countCalls = false, skip = new Set(), scale = 1, env = {} } = {}) {
   let mem = null;
   let instance = null;
   const gl = canvas.getContext("webgl2", { antialias: false, depth: true, stencil: false, alpha: false });
@@ -133,6 +133,7 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
   const programUniforms = new Map();
   let unpackAlignment = 4;
   let boundFramebuffer = null;
+  let boundFramebufferId = 0;
   // The window renders at `scale` of its size: the game's viewport and scissor
   // rectangles on the default framebuffer shrink with it.
   let windowSize = [1200, 720];
@@ -329,6 +330,7 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
     glGenFramebuffers: (count, ptr) => genObjects(count, ptr, () => gl.createFramebuffer()),
     glBindFramebuffer(target, fb) {
       boundFramebuffer = obj(fb);
+      boundFramebufferId = n(fb);
       gl.bindFramebuffer(n(target), boundFramebuffer);
       applyViewport();
       return 0n;
@@ -377,6 +379,8 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
   const calls = {};
   const repeats = {};
   const callMs = {};
+  const drawSites = {};
+  const vertexCounts = {};
   if (countCalls) {
     const last = new Map();
     for (const [key, f] of Object.entries(GL)) {
@@ -386,6 +390,17 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
         const text = args.join(",");
         if (last.get(slot) === text) repeats[key] = (repeats[key] ?? 0) + 1;
         last.set(slot, text);
+        if (key === "glDrawArrays" || key === "glDrawArraysInstanced") {
+          // Vertices drawn per framebuffer and program, and debug skips.
+          const target = `fb${boundFramebufferId} prog${currentProgram}`;
+          const verts = n(args[2]) * (key === "glDrawArraysInstanced" ? n(args[3]) : 1);
+          vertexCounts[target] = (vertexCounts[target] ?? 0) + verts;
+          if (skip.has(`fb${boundFramebufferId}`) || skip.has(`prog${currentProgram}`)) return 0n;
+          // The L8 functions that draw, from the stack (the module names them).
+          const site = new Error().stack.split("\n").filter((line) => line.includes("wasm-function")).slice(0, 2)
+            .map((line) => line.replace(/^\s*at\s+/, "").replace(/\s*\(.*$/, "")).join(" < ");
+          drawSites[site] = (drawSites[site] ?? 0) + n(args[2]) * (key === "glDrawArraysInstanced" ? n(args[3]) : 1);
+        }
         const t = performance.now();
         const result = f(...args);
         callMs[key] = (callMs[key] ?? 0) + performance.now() - t;
@@ -558,7 +573,7 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
       scale = k;
       resize();
     },
-    callCounts: () => ({ calls: { ...calls }, repeats: { ...repeats }, ms: { ...callMs } }),
+    callCounts: () => ({ calls: { ...calls }, repeats: { ...repeats }, ms: { ...callMs }, sites: { ...drawSites }, vertices: { ...vertexCounts } }),
     workMs: () => work,
   };
 }

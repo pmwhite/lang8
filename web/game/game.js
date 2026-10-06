@@ -122,7 +122,9 @@ async function main() {
   const platform = createPlatform(canvas, {
     log: (text) => console.warn(text),
     checkErrors: params.has("glcheck"),
-    countCalls: params.has("glstats"),
+    countCalls: params.has("glstats") || params.has("skip"),
+    // ?skip=fb3,prog7 drops those draws, to measure what they cost.
+    skip: new Set((params.get("skip") ?? "").split(",").filter(Boolean)),
     scale: fixedScale ?? 1,
     env,
   });

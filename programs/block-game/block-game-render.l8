@@ -99,6 +99,7 @@ link_program(vs: []i8, fs: []i8, a1: str) raises IoError: int {
     glBindAttribLocation(prog, 1, a1);
     glBindAttribLocation(prog, 2, "vcol");
     glBindAttribLocation(prog, 3, "vaux");
+    for a in 0..4 glBindAttribLocation(prog, CASTER_ATTRIB + a, caster_attrib_name(a));
     glLinkProgram(prog);
     lst: []i32 = new i32[1](0i32);
     glGetProgramiv(prog, 35714, lst);
@@ -2874,6 +2875,86 @@ parked_block(b: Block): bool {
     false
 }
 
+// Cubes drawn by draw_casters go into one instanced draw per pass instead of
+// a draw call (and its uniforms) each. An instance is four vec4 attributes from
+// CASTER_ATTRIB: origin, scale, color (w = 2 marks an instance for the
+// shaders), and lag and ramp tilt.
+CASTER_ATTRIB: int = 4;
+
+const CASTER_FLOATS: int = 16;
+
+const CASTER_CAPACITY: int = LEVEL_MAX_BLOCKS + 2;
+
+caster_data: []f32 = new f32[CASTER_CAPACITY * CASTER_FLOATS](0.0);
+
+caster_count: int = 0;
+
+caster_buffer: []u32 = new u32[1](0u32);
+
+caster_attrib_name(a: int): str {
+    if (a == 0) return "inst_origin";
+    if (a == 1) return "inst_scale";
+    if (a == 2) return "inst_color";
+    "inst_motion"
+}
+
+caster_add(
+    ox: f32,
+    oy: f32,
+    oz: f32,
+    sx: f32,
+    sy: f32,
+    sz: f32,
+    cr: f32,
+    cg: f32,
+    cb: f32,
+    lx: f32,
+    lz: f32,
+    rx: f32,
+    rz: f32
+) {
+    if (caster_count < 0 || caster_count >= CASTER_CAPACITY) return;
+    at: int = caster_count * CASTER_FLOATS;
+    if (at < 0 || at + CASTER_FLOATS > len(caster_data)) return;
+    caster_data[at] = ox;
+    caster_data[at + 1] = oy;
+    caster_data[at + 2] = oz;
+    caster_data[at + 3] = 1.0;
+    caster_data[at + 4] = sx;
+    caster_data[at + 5] = sy;
+    caster_data[at + 6] = sz;
+    caster_data[at + 7] = 1.0;
+    caster_data[at + 8] = cr;
+    caster_data[at + 9] = cg;
+    caster_data[at + 10] = cb;
+    caster_data[at + 11] = 2.0;
+    caster_data[at + 12] = lx;
+    caster_data[at + 13] = lz;
+    caster_data[at + 14] = rx;
+    caster_data[at + 15] = rz;
+    caster_count = caster_count + 1
+}
+
+// Draw the collected cubes with the mesh already bound, `vertices` each.
+caster_flush(vertices: int) {
+    buffer: []u32 = caster_buffer;
+    if (caster_count <= 0 || len(buffer) < 1) return;
+    if (buffer[0] == 0u32) glGenBuffers(1, buffer);
+    glBindBuffer(34962, buffer[0]);
+    glBufferData(34962, caster_count * CASTER_FLOATS * 4, caster_data, 35040);
+    for a in 0..4 {
+        glEnableVertexAttribArray(CASTER_ATTRIB + a);
+        glVertexAttribPointer(CASTER_ATTRIB + a, 4, 5126, 0, CASTER_FLOATS * 4, a * 16);
+        glVertexAttribDivisor(CASTER_ATTRIB + a, 1)
+    }
+    glDrawArraysInstanced(4, 0, vertices, caster_count);
+    for b in 0..4 {
+        glVertexAttribDivisor(CASTER_ATTRIB + b, 0);
+        glDisableVertexAttribArray(CASTER_ATTRIB + b)
+    }
+    caster_count = 0
+}
+
 draw_casters(
     u_origin: int,
     u_scale: int,
@@ -2960,23 +3041,15 @@ draw_casters(
                 rz = lerp(fz, rz, gt);
                 kt = lerp(k0, kt, gt)
             }
-            glUniform2f(u_ramp, rx, rz);
-            glUniform2f(u_lag, lagx[bi], lagz[bi]);
-            draw_box(u_origin, u_scale, u_color, bc + 0.5 + lean_along(rx, rz, kt,
-                0), by + lean_along(rx, rz, kt, 1), br + 0.5 + lean_along(rx, rz,
-                kt, 2), 0.92, 1.0, 0.92, 0.56, 0.54, 0.52, chamfer_n / 6);
-            glUniform2f(u_ramp, 0.0, 0.0)
+            caster_add(bc + 0.5 + lean_along(rx, rz, kt, 0), by + lean_along(rx, rz,
+                kt, 1), br + 0.5 + lean_along(rx, rz, kt, 2), 0.92, 1.0, 0.92, 0.56,
+                0.54, 0.52, lagx[bi], lagz[bi], rx, rz)
         }
         k = k + 1
     }
-    if (want_player != 0) {
-        glUniform1f(u_cut, 1.0);
-        glUniform2f(u_ramp, pru_x, pru_z);
-        glUniform2f(u_lag, lagx[PLAYER_SOFT_SLOT], lagz[PLAYER_SOFT_SLOT]);
-        draw_box(u_origin, u_scale, u_color, px + 0.5, py, pz + 0.5, 0.86, 1.1, 0.86,
-            0.80, 0.30, 0.24, chamfer_n / 6);
-        glUniform2f(u_ramp, 0.0, 0.0)
-    }
+    if (want_player != 0) caster_add(px + 0.5, py, pz + 0.5, 0.86, 1.1, 0.86, 0.80,
+        0.30, 0.24, lagx[PLAYER_SOFT_SLOT], lagz[PLAYER_SOFT_SLOT], pru_x, pru_z);
+    caster_flush(chamfer_n / 6);
     bind_mesh(ramp_buf);
     glUniform1f(u_cut, 1.0);
     glUniform3f(u_scale, 0.92, 1.0, 0.92);
@@ -3241,6 +3314,147 @@ fill_prism(dst: []f32, sides: int): int requires (1080 <= len(dst)) {
     i
 }
 
+// The world's wall mesh, with its triangles grouped into BRICK_CHUNK-by-
+// BRICK_CHUNK-cell chunks, so a pass draws only the chunks its view contains.
+// Each chunk is a range of vertices; chunks are in row-major order.
+const BRICK_CHUNK: int = 8;
+
+const BRICK_CHUNK_CAP: int = 4096;
+
+type BrickChunks = {
+    buf: u32;
+    n: int;
+    first: []int;
+    count: []int;
+    cx: []int;
+    cz: []int
+} invariant (len(first) == BRICK_CHUNK_CAP && len(count) == BRICK_CHUNK_CAP && len(cx) == BRICK_CHUNK_CAP && len(cz) == BRICK_CHUNK_CAP && 0 <= n && n <= BRICK_CHUNK_CAP)
+
+brick_chunks: *BrickChunks = new BrickChunks {
+    buf: 0u32,
+    n: 0,
+    first: new int[BRICK_CHUNK_CAP](0),
+    count: new int[BRICK_CHUNK_CAP](0),
+    cx: new int[BRICK_CHUNK_CAP](0),
+    cz: new int[BRICK_CHUNK_CAP](0)
+};
+
+// The chunk of a wall triangle: its centroid's, in the mesh's 9-float vertices.
+brick_tri_chunk_x(verts: []f32, at: int): int {
+    if (at < 0 || at >= len(verts) - 18) return 0;
+    floor_i((verts[at] + verts[at + 9] + verts[at + 18]) / (3.0 * BRICK_CHUNK as f32))
+}
+
+brick_tri_chunk_z(verts: []f32, at: int): int {
+    if (at < 0 || at >= len(verts) - 20) return 0;
+    floor_i((verts[at + 2] + verts[at + 11] + verts[at + 20]) / (3.0 * BRICK_CHUNK as f32))
+}
+
+// Copy the n floats of wall triangles in verts into sorted, in chunk order,
+// and record the chunks for buffer buf. False, leaving sorted unused, when
+// there is no room for every chunk: the mesh stays whole and is drawn whole.
+chunk_brick_mesh(
+    verts: []f32,
+    n: int,
+    sorted: []f32,
+    buf: u32
+): bool requires (0 <= n && n <= len(verts) && n <= len(sorted)) {
+    table: *BrickChunks = brick_chunks;
+    table.buf = buf;
+    table.n = 0;
+    tris: int = n / 27;
+    if (tris == 0) return false;
+    minx: int = brick_tri_chunk_x(verts, 0);
+    maxx: int = minx;
+    minz: int = brick_tri_chunk_z(verts, 0);
+    maxz: int = minz;
+    at: int = 0;
+    while (at + 27 <= n) {
+        x: int = brick_tri_chunk_x(verts, at);
+        z: int = brick_tri_chunk_z(verts, at);
+        if (x < minx) minx = x;
+        if (x > maxx) maxx = x;
+        if (z < minz) minz = z;
+        if (z > maxz) maxz = z;
+        at = at + 27
+    }
+    w: int = maxx - minx + 1;
+    h: int = maxz - minz + 1;
+    if (w <= 0 || h <= 0 || w > BRICK_CHUNK_CAP || h > BRICK_CHUNK_CAP / w) return false;
+    starts: []int = new int[w * h + 1](0);
+    at = 0;
+    while (at + 27 <= n) {
+        key: int = (brick_tri_chunk_z(verts, at) - minz) * w + brick_tri_chunk_x(verts,
+            at) - minx;
+        slot: int = key + 1;
+        if (slot >= 0 && slot < len(starts)) starts[slot] = starts[slot] + 1;
+        at = at + 27
+    }
+    for c in 0..w * h {
+        next: int = c + 1;
+        if (next >= 0 && next < len(starts) && c >= 0 && c < len(starts)) {
+            size: int = starts[next];
+            starts[next] = starts[c] + size;
+            if (size > 0 && table.n < BRICK_CHUNK_CAP) {
+                table.first[table.n] = starts[c] * 3;
+                table.count[table.n] = size * 3;
+                table.cx[table.n] = minx + c % w;
+                table.cz[table.n] = minz + c / w;
+                table.n = table.n + 1
+            }
+        }
+    }
+    at = 0;
+    while (at + 27 <= n) {
+        key2: int = (brick_tri_chunk_z(verts, at) - minz) * w + brick_tri_chunk_x(verts,
+            at) - minx;
+        if (key2 >= 0 && key2 < len(starts)) {
+            to: int = starts[key2] * 27;
+            for f in 0..27 {
+                d: int = to + f;
+                from: int = at + f;
+                if (d >= 0 && d < len(sorted) && from >= 0 && from < len(verts)) sorted[d] = verts[from]
+            }
+            starts[key2] = starts[key2] + 1
+        }
+        at = at + 27
+    }
+    true
+}
+
+// Whether any of the box from (x0, y0, z0) to (x1, y1, z1) can be inside the
+// view of the view-projection matrix vp.
+box_in_view(
+    vp: []f32,
+    x0: f32,
+    y0: f32,
+    z0: f32,
+    x1: f32,
+    y1: f32,
+    z1: f32
+): bool requires (len(vp) >= 16) {
+    out: []int = [0, 0, 0, 0, 0, 0];
+    for corner in 0..8 {
+        x: f32 = if ((corner & 1) != 0) x1 else x0;
+        y: f32 = if ((corner & 2) != 0) y1 else y0;
+        z: f32 = if ((corner & 4) != 0) z1 else z0;
+        cx: f32 = vp[0] * x + vp[4] * y + vp[8] * z + vp[12];
+        cy: f32 = vp[1] * x + vp[5] * y + vp[9] * z + vp[13];
+        cz: f32 = vp[2] * x + vp[6] * y + vp[10] * z + vp[14];
+        cw: f32 = vp[3] * x + vp[7] * y + vp[11] * z + vp[15];
+        if (cx < 0.0 - cw) out[0] = out[0] + 1;
+        if (cx > cw) out[1] = out[1] + 1;
+        if (cy < 0.0 - cw) out[2] = out[2] + 1;
+        if (cy > cw) out[3] = out[3] + 1;
+        if (cz < 0.0 - cw) out[4] = out[4] + 1;
+        if (cz > cw) out[5] = out[5] + 1
+    }
+    for plane in out {
+        if (plane == 8) return false
+    }
+    true
+}
+
 draw_hedges(
     u_origin: int,
     u_scale: int,
@@ -3248,15 +3462,36 @@ draw_hedges(
     u_lag: int,
     brick_buf: u32,
     brick_n: int,
-    u_brick: int
-) {
+    u_brick: int,
+    vp: []f32
+) requires (len(vp) >= 16) {
     glUniform2f(u_lag, 0.0, 0.0);
     bind_brick_mesh(brick_buf);
     glUniform1f(u_brick, 1.0);
     glUniform3f(u_origin, 0.0, 0.0, 0.0);
     glUniform3f(u_scale, 1.0, 1.0, 1.0);
     glUniform3f(u_color, 0.62, 0.32, 0.26);
-    glDrawArrays(4, 0, brick_n / 9);
+    table: *BrickChunks = brick_chunks;
+    if (table.buf != brick_buf || table.n == 0) glDrawArrays(4, 0, brick_n / 9) else {
+        // Draw the visible chunks, joining neighbors into one draw.
+        run_first: int = 0;
+        run_count: int = 0;
+        for i in 0..table.n {
+            x0: f32 = (table.cx[i] * BRICK_CHUNK - 1) as f32;
+            z0: f32 = (table.cz[i] * BRICK_CHUNK - 1) as f32;
+            visible: bool = box_in_view(vp, x0, 0.0 - 1.2, z0, x0 + (BRICK_CHUNK + 2) as f32,
+                3.0, z0 + (BRICK_CHUNK + 2) as f32);
+            if (visible && run_count > 0 && run_first + run_count == table.first[i]) run_count = run_count + table.count[i] else {
+                if (run_count > 0) glDrawArrays(4, run_first, run_count);
+                run_count = 0;
+                if (visible) {
+                    run_first = table.first[i];
+                    run_count = table.count[i]
+                }
+            }
+        }
+        if (run_count > 0) glDrawArrays(4, run_first, run_count)
+    }
     glUniform1f(u_brick, 0.0)
 }
 
@@ -3462,7 +3697,7 @@ draw_frame(
     glUseProgram(dprog);
     glUniform2f(d_ramp, 0.0, 0.0);
     glUniformMatrix4fv(d_vp, 1, 0, lcam);
-    draw_hedges(d_origin, d_scale, d_color, d_lag, brick_buf, brick_n, 0 - 1);
+    draw_hedges(d_origin, d_scale, d_color, d_lag, brick_buf, brick_n, 0 - 1, lcam);
     if (split_hist != 0) draw_casters(d_origin, d_scale, d_color, chamfer_buf, prism_buf,
         ramp_buf, chamfer_n, hist, foff, toff, n, px, py, pz, t, shape_verts, d_lag,
         lagx, lagz, want_player, d_ramp, pru_x, pru_z, 0 - 1, 0 - 1, lean_to, lean_from,
@@ -3508,7 +3743,8 @@ draw_frame(
         glUniformMatrix4fv(u_vp, 1, 0, material_light.reflection_vp);
         glUniformMatrix4fv(u_light_vp, 1, 0, lvp);
         glUniform3f(material_light.cameras[0], camera_x, -0.04 - camera_y, camera_z);
-        draw_hedges(u_origin, u_scale, u_color, u_lag, brick_buf, brick_n, u_brick);
+        draw_hedges(u_origin, u_scale, u_color, u_lag, brick_buf, brick_n, u_brick,
+            material_light.reflection_vp);
         bind_mesh(cube_buf);
         for i in 0..nlamps {
             p: Lamp = lamps[i];
@@ -3609,7 +3845,7 @@ draw_frame(
         lagx[PLAYER_SOFT_SLOT], lagz[PLAYER_SOFT_SLOT], lx, ly, lz, vp, lvp, stex,
         grass_cover.tex, cover_c, cover_r, material_light.wind);
     glUseProgram(prog);
-    draw_hedges(u_origin, u_scale, u_color, u_lag, brick_buf, brick_n, u_brick);
+    draw_hedges(u_origin, u_scale, u_color, u_lag, brick_buf, brick_n, u_brick, vp);
     bind_mesh(cube_buf);
     glUniform1f(u_cut, 0.0);
     for i in 0..nlamps {

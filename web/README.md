@@ -58,9 +58,12 @@ so holding a direction keeps walking.
 The world file is kept in an in-memory file system and saved to `localStorage`
 whenever the game writes it.
 
-Frame rate: the host skips uniform updates that repeat a location's current
-value, which removes most of the game's roughly 3,500 GL calls per frame. The
-page adapts the render resolution: when frames are slow while the game's own
+Frame rate: the game draws its blocks with one instanced draw per pass, and
+only the chunks of its wall mesh that a pass can see, which together took it
+from about 3,500 GL calls and 1.4 million vertices per frame to about 950 calls
+and 690,000 vertices. The host also skips uniform updates that repeat a
+location's current value. What remains is mostly the per-pixel cost of the
+ground's shading, so the page adapts the render resolution: when frames are slow while the game's own
 work per frame leaves time to spare, the GPU is the limit, so it renders the
 window at a smaller size (down to half) and scales it up, and raises the size
 again when frames have headroom. A step down that does not speed frames up is
@@ -69,8 +72,10 @@ helped by fewer pixels.
 
 Query parameters: `?stats` shows the frame rate, the game's CPU time per frame,
 and the render size; `?scale=0.6` fixes the render size; `?glcheck` reports
-failing GL calls and `?glstats` counts and times them (see `l8Game.callCounts()`
-on the console); and `L8_` parameters such as `?L8_WATER_STATIC` set the game's
+failing GL calls and `?glstats` counts and times them, with the vertices each
+framebuffer, program, and drawing function produces (see `l8Game.callCounts()`
+on the console); `?skip=fb44,prog3` drops those draws, to measure their cost;
+and `L8_` parameters such as `?L8_WATER_STATIC` set the game's
 environment variables.
 
 ## Pausing and resuming
