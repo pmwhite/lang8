@@ -108,9 +108,8 @@ new_undo_journal(
     image_n: int = block_base + n;
     image_capacity: int = UNDO_INDEX_MASK + 1;
     largest: int = image_n * 2 + UNDO_ACTION_OVERHEAD;
-    if (words < largest || n > LEVEL_MAX_BLOCKS || image_capacity > UNDO_INDEX_MASK + 1 || image_capacity < LEVEL_MAX_BLOCKS || largest < UNDO_ACTION_OVERHEAD) die("undo journal too small");
+    if (words < largest || n > LEVEL_MAX_BLOCKS) die("undo journal too small");
     action_capacity: int = words / UNDO_ACTION_OVERHEAD + 1;
-    if (action_capacity <= 0) die("undo journal too small");
     if (len(snap) % REWIND_MAX != 0) die("invalid rewind snapshot layout");
     stride: int = len(snap) / REWIND_MAX;
     empty_meta: *int = &undo_empty_meta;
@@ -159,36 +158,26 @@ new_undo_journal(
         route_ms: new int[LEVEL_MAX_ROOMS](0)
     };
     for i in 0..n {
-        owner: int = home[i];
-        if (owner < -1 || owner >= LEVEL_MAX_ROOMS) die("invalid block room");
-        u.home[i] = owner;
-        u.home_view[i] = owner
+        u.home[i] = home[i];
+        u.home_view[i] = home[i]
     }
     base: int = 0;
     for r in 0..LEVEL_MAX_ROOMS {
         u.route_base[r] = base;
         base = base + room_hn[r] * UNDO_ROUTE_MAX;
         off: int = r * 3 + room_home_base(r, room_hn) * REWIND_MAX;
-        if (off < 0 || off > len(u.image) - 3) die("invalid undo room layout");
         width: int = room_hn[r];
         start: int = off + 3;
         snap_start: int = room_home_base(r, room_hn);
-        if (width < 0 || width > LEVEL_MAX_BLOCKS || start > UNDO_INDEX_MASK + 1 - REWIND_MAX * width) die("invalid undo room layout");
         for route_step in 0..UNDO_ROUTE_MAX {
             route_start: int = u.route_base[r] + route_step * width;
-            route_end: int = route_start + width;
-            if (route_start < 0 || route_end < route_start || route_end > len(route_data)) die("invalid undo route layout");
-            u.route_frames[r * UNDO_ROUTE_MAX + route_step] = RewindFrameView { cells: route_data, start: route_start, end: route_end }
+            u.route_frames[r * UNDO_ROUTE_MAX + route_step] = RewindFrameView { cells: route_data, start: route_start, end: route_start + width }
         }
         for s in 0..REWIND_MAX {
             frame_start: int = start + s * width;
-            frame_end: int = frame_start + width;
-            if (frame_start < 0 || frame_end < frame_start || frame_end > UNDO_INDEX_MASK + 1) die("invalid undo room layout");
-            u.image_frames[r * REWIND_MAX + s] = UndoImageFrame { start: frame_start, end: frame_end };
+            u.image_frames[r * REWIND_MAX + s] = UndoImageFrame { start: frame_start, end: frame_start + width };
             live_start: int = s * stride + snap_start;
-            live_end: int = live_start + width;
-            if (live_start < 0 || live_end < live_start || live_end > len(snap)) die("invalid rewind snapshot layout");
-            u.snap_frames[r * REWIND_MAX + s] = RewindFrameView { cells: snap, start: live_start, end: live_end }
+            u.snap_frames[r * REWIND_MAX + s] = RewindFrameView { cells: snap, start: live_start, end: live_start + width }
         }
         u.offsets[r] = off;
         u.meta_values[r * 2 + 1] = 1i8;
@@ -228,13 +217,13 @@ undo_route_frame(u: *UndoTimeline, room: int, step: int): RewindFrameView {
 }
 
 undo_latest_phase_end(u: *UndoTimeline) raises IoError: u32 {
-    if (u.count < 1 || u.action_head < 1) die("empty undo journal");
+    if (u.count < 1) die("empty undo journal");
     slot: int = (u.action_head - 1) % len(u.phase_ends);
     u.phase_ends[slot]
 }
 
 undo_latest(u: *UndoTimeline) raises IoError: int {
-    if (u.count < 1 || u.action_head < 1) die("empty undo journal");
+    if (u.count < 1) die("empty undo journal");
     footer: int = (u.head - 1) trunc u32 as int;
     start: int = undo_read(u.journal, footer);
     if (start < u.tail || start > u.head - UNDO_ACTION_OVERHEAD) die("corrupt undo journal action");
@@ -279,7 +268,7 @@ undo_apply_journal(u: *UndoTimeline, at: int, forward: bool) {
 
 // Only the newest action is materialized. Switching phases reverses the
 // action's post-move changes in the private image, never in live rooms.
-undo_set_phase(u: *UndoTimeline, action: int, phase: int) raises IoError: int {
+undo_set_phase(u: *UndoTimeline, action: int, phase: int) raises IoError {
     phase_end: u32 = undo_latest_phase_end(u);
     latest: int = undo_latest(u);
     if (action != latest) die("undo action is not the latest");
@@ -296,11 +285,10 @@ undo_set_phase(u: *UndoTimeline, action: int, phase: int) raises IoError: int {
         }
         u.phase = phase
     }
-    action
 }
 
 undo_load_history(u: *UndoTimeline, action: int, phase: int) raises IoError: []int@u {
-    _phase_action: int = undo_set_phase(u, action, phase);
+    undo_set_phase(u, action, phase);
     u.image
 }
 
@@ -332,7 +320,7 @@ undo_clear_journal(u: *UndoTimeline) {
 undo_pop_action(u: *UndoTimeline) raises IoError {
     action: int = undo_latest(u);
     phase_end: u32 = undo_latest_phase_end(u);
-    action = undo_set_phase(u, action, 0);
+    undo_set_phase(u, action, 0);
     // Restore the previous action's image, including unrelated room changes
     // recorded between actions. Live independent rooms are left untouched.
     end: int = phase_end as int;
@@ -358,11 +346,8 @@ undo_write_word(u: *UndoTimeline, index: int, value: int) raises IoError {
     delta: int = u.image[index] ^ value;
     if (delta == 0) return;
     if (delta < 0 || delta > 2147483647) die("undo value cannot be packed");
-    stage: []int = u.stage;
-    next_stage: int = u.stage_n + 1;
-    if (next_stage >= len(u.stage)) die("undo stage is full");
-    stage[next_stage - 1] = delta << UNDO_INDEX_BITS | index;
-    u.stage_n = next_stage;
+    u.stage[u.stage_n] = delta << UNDO_INDEX_BITS | index;
+    u.stage_n = u.stage_n + 1;
     u.image[index] = value
 }
 
@@ -399,12 +384,9 @@ undo_commit_action(u: *UndoTimeline) raises UndoHistoryExhausted {
         u.count = u.count - 1;
         u.action_tail = u.action_tail + 1
     }
-    ring: []int = u.journal;
-    head_slot: int = u.head % len(ring);
     for i in 0..size {
-        offset: int = head_slot + i;
-        slot: int = offset % len(ring);
-        ring[slot] = u.stage[i];
+        slot: int = (u.head + i) % len(u.journal);
+        u.journal[slot] = u.stage[i];
         u.journal_meta_before[slot] = u.stage_meta_before[i];
         u.journal_meta_after[slot] = u.stage_meta_after[i]
     }
@@ -434,10 +416,7 @@ undo_save_history(
     player: int
 ) raises IoError, UndoHistoryExhausted {
     if (!phase) {
-        if (u.count > 0) {
-            latest: int = undo_latest(u);
-            _phase_action: int = undo_set_phase(u, latest, 1)
-        }
+        if (u.count > 0) undo_set_phase(u, undo_latest(u), 1);
         u.stage_pre_n = UNDO_ACTION_HEADER;
         u.stage_n = UNDO_ACTION_HEADER;
         u.stage[2] = player;
@@ -456,11 +435,8 @@ undo_save_history(
             image_frame: UndoImageFrame = undo_image_frame(u, r, s);
             source_at: int = frame.start;
             dest_at: int = image_frame.start;
-            source_end: int = frame.end;
-            dest_end: int = image_frame.end;
-            frame_cells: []int = frame.cells;
-            while (source_at < source_end && dest_at < dest_end) {
-                undo_write_word(u, dest_at, frame_cells[source_at]);
+            while (source_at < frame.end && dest_at < image_frame.end) {
+                undo_write_word(u, dest_at, frame.cells[source_at]);
                 source_at = source_at + 1;
                 dest_at = dest_at + 1
             }
@@ -484,9 +460,9 @@ undo_depend(u: *UndoTimeline, room: int) {
 // No per-block flag arrays are retained for older actions.
 undo_prepare_action(u: *UndoTimeline, nroom: int, n: int) raises IoError {
     action: int = undo_latest(u);
-    _before_action: int = undo_set_phase(u, action, 1);
+    undo_set_phase(u, action, 1);
     for i in 0..n u.changed[i] = u.image[u.block_base + i];
-    _after_action: int = undo_set_phase(u, action, 0);
+    undo_set_phase(u, action, 0);
     for i in 0..n {
         if (u.changed[i] != u.image[u.block_base + i]) u.changed[i] = 1 else u.changed[i] = 0
     }
@@ -657,9 +633,8 @@ undo_build_route(
         if (common >= 0) {
             a = live_cursor;
             if (a > 0) a = a - 1 else a = -1;
-            // The walks add fewer than UNDO_ROUTE_MAX frames in all; the
-            // limit in the conditions is defensive.
-            while (a >= common && route_count < UNDO_ROUTE_MAX) {
+            // The walks add fewer than UNDO_ROUTE_MAX frames in all.
+            while (a >= common) {
                 live_frame: RewindFrameView = undo_snap_frame(u, room, a);
                 route_count = undo_route_append(u, room, route_count, live_frame);
                 a = a - 1
@@ -667,7 +642,7 @@ undo_build_route(
         }
     }
     s = match_step + 1;
-    while (s <= target && route_count < UNDO_ROUTE_MAX) {
+    while (s <= target) {
         archived_frame: RewindFrameView = undo_archived_frame(u, room, s, data);
         route_count = undo_route_append(u, room, route_count, archived_frame);
         s = s + 1
@@ -685,7 +660,7 @@ undo_select_rooms(
     pr: int,
     ph: int
 ) raises IoError {
-    _phase_action: int = undo_set_phase(u, action, 0);
+    undo_set_phase(u, action, 0);
     // New obstructions/support can appear while an unrelated clock runs.
     for i in 0..n {
         b: Block = blocks[i];
@@ -742,11 +717,9 @@ undo_sync_tick(
                 frame: RewindFrameView = undo_route_frame(u, r, step);
                 slot: int = span.start;
                 at: int = frame.start;
-                frame_end: int = frame.end;
-                frame_cells: []int = frame.cells;
-                while (slot < span.end && at < frame_end) {
+                while (slot < span.end && at < frame.end) {
                     i: int = room_ids.indices[slot];
-                    p: int = frame_cells[at];
+                    p: int = frame.cells[at];
                     blocks[i] = apply_packed(blocks[i], p);
                     _appended: bool = crate_append(i, p, now, crate_pose, crate_ms,
                         crate_cursor, crate_t0);
@@ -754,7 +727,7 @@ undo_sync_tick(
                         start: int = crate_cursor.starts[i];
                         count: int = crate_cursor.counts[i];
                         tail: int = crate_cursor_slot(start, count);
-                        pos: int = crate_idx_bounded(i, tail);
+                        pos: int = crate_idx(i, tail);
                         crate_ms[pos] = u.route_ms[r]
                     }
                     slot = slot + 1;
