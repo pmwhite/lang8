@@ -13,20 +13,19 @@ local sources or sinks. This produces coherent changes without a full humidity,
 temperature, cloud, or precipitation simulation.
 
 Local airflow lives on a 64-by-64 grid centered on the camera. Every 50 ms of
-game time the solver (spread over frames, and falling behind rather than
-catching up when frames are slow):
-
-1. advects the previous velocity field;
-2. relaxes it toward the current world-space weather forcing;
-3. marks wall cells as solid;
-4. projects the field to reduce divergence and route flow around those walls;
-5. clamps extreme speeds.
+game time a step eases each cell toward the weather's forcing at its place:
+the prevailing wind, the two traveling gust fronts and the drifting eddies. Wall
+cells are still, and cells beside a wall keep about half of it, so walls
+shelter the ground behind them. It is scenery, so there is no fluid solve; an
+earlier version advected the field and projected it around walls, which cost
+three times as much a step and most of a phone's frame. A step's rows run as
+its time passes, a share each frame, and a slow frame lets the wind fall behind
+(at most two steps' rows a frame) rather than catching up.
 
 When the camera crosses a cell boundary, overlapping world cells are copied
 exactly and only the newly exposed edge is initialized. The field therefore
-stays anchored in world space instead of visibly following the camera. A frame
-hitch can run at most four catch-up steps. All solver buffers are allocated at
-startup, and updates do not allocate.
+stays anchored in world space instead of visibly following the camera. All
+buffers are allocated at startup, and updates do not allocate.
 
 The CPU field is encoded into a linearly filtered 64-by-64 RGBA texture. Grass,
 plant vertex shaders and water compute shaders sample the same texture. A broad visual gust
@@ -49,8 +48,8 @@ Press `F6` in play or edit mode to show a sparse flow overlay. Orange squares ar
 sample points; cyan component bars show the local horizontal velocity. `F7` and
 `F8` retain their water controls.
 
-`test_wind.l8` checks deterministic evolution, finite bounded velocities, wall
-blocking and deflection, camera-window preservation, normalized weather,
+`test_wind.l8` checks deterministic evolution, finite bounded velocities, walls
+stilling and sheltering the wind, camera-window preservation, normalized weather,
 long-uptime visual-clock precision, and zero heap growth during updates. Plant
 and material GPU tests compile the vertex texture path and exercise texture
 creation under an X11 OpenGL context. `test_height_water.l8` verifies that wind
