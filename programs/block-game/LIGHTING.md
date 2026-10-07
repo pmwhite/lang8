@@ -25,8 +25,6 @@ cost does not depend on the number of fixtures, and overlapping pools saturate
 rather than blowing out the scene. `block-game-lighting.l8` owns the field and
 fixtures; moon/ambient colors and lamp tint are in the fragment shaders.
 
-Regression tests: `test_lighting.l8`, `test_shadows.l8`, `test_undo_memory.l8`.
-
 ## Material response and depth
 
 The main materials now combine a cool upper-hemisphere ambient fill, a dim
@@ -69,5 +67,3 @@ only when a water cell is visible and its camera, objects, or lighting changes;
 ripples continue animating over a cached reflection. No reflection image is
 allocated per frame. Reflection rendering clips geometry below the water plane.
 
-GPU/cache regression coverage: `test_materials.l8`, `test_grass.l8`. Run with
-an X11 display, after building with `./l8 build <test> -o .build/<test-name>`.

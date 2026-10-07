@@ -44,7 +44,6 @@ From the repository root:
 
 ```sh
 make game
-make game-test
 .build/block-game                         # programs/block-game/world.txt
 make terminal
 .build/terminal

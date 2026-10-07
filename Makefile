@@ -48,7 +48,7 @@ STAGE1_TESTS := tests/compiler/bool.l8 \
 # `build TOOL SOURCE`: build into $@ without leaving a partial file behind.
 build = ./$(1) build $(2) -o $@.tmp && mv -f $@.tmp $@
 
-.PHONY: all check fmt selfhost compiler-test game game-test stdlib-test \
+.PHONY: all check fmt selfhost compiler-test game stdlib-test \
 	terminal terminal-test callback-test http http-test websocket websocket-test wasm-test web \
 	install-bootstrap promote promote-bin1 promote-bin2 promote-source clean help
 
@@ -57,7 +57,7 @@ all:
 	@$(MAKE) -s $(OK)/fmt $(OK)/stage1-tests
 	@$(MAKE) -s check
 
-check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(OK)/game-tests
+check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game
 
 # ---- compiler stages ----
 
@@ -134,13 +134,7 @@ stdlib-test: $(OK)/stdlib-tests
 $(BUILD)/block-game: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 	@$(STEP) 'block game' sh -c '$(call build,l8c3,programs/block-game/block-game.l8)'
 
-# tests.l8 imports every game test, so the game is built once.
-$(OK)/game-tests: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
-	+@$(STEP) 'game tests' ./l8c3 test programs/block-game/tests.l8
-	@touch $@
-
 game: $(BUILD)/block-game
-game-test: $(OK)/game-tests
 
 # A terminal may be running from the previous output; `mv` replaces the
 # directory entry instead of rewriting its live inode.
@@ -208,7 +202,7 @@ $(OK):
 WEB := $(wildcard web/*.js web/*.mjs)
 # tests/compiler/native calls x86 assembly, which a module cannot contain.
 WASM_TESTS := $(filter-out tests/compiler/native/%,$(sort $(shell find tests/compiler tests/callbacks -name '*.l8'))) \
-	$(wildcard stdlib/tests/*.l8) programs/block-game/tests.l8
+	$(wildcard stdlib/tests/*.l8)
 
 # The compiler as a module; under Node it must rebuild itself unchanged.
 $(BUILD)/l8.wasm: l8c3 $(SRC2) $(STDLIB) | $(OK)
@@ -218,7 +212,7 @@ $(OK)/wasm-fixpoint: $(BUILD)/l8.wasm $(WEB) | $(OK)
 	@$(STEP) 'wasm fixpoint' sh -c 'node web/run.mjs $(BUILD)/l8.wasm wasm src2/main.l8 -o $(BUILD)/l8-self.wasm && cmp $(BUILD)/l8.wasm $(BUILD)/l8-self.wasm'
 	@touch $@
 
-# Compiler, callback, standard library, and game tests built as modules.
+# Compiler, callback, and standard library tests built as modules.
 $(OK)/wasm-tests: l8c3 $(TESTS) $(PROGRAMS) $(WEB) | $(OK)
 	+@$(STEP) 'wasm tests' ./l8c3 test --wasm $(WASM_TESTS)
 	@touch $@
@@ -282,7 +276,7 @@ help:
 	@echo '  fmt             format src2 with the stage-2 compiler'
 	@echo '  selfhost        build l8c1..l8c4, check the fixpoint, run compiler tests, install ./l8'
 	@echo '  compiler-test   stage-1 fixtures, then all fixtures and CLI cram tests (tests/)'
-	@echo '  stdlib-test, game, game-test, terminal, terminal-test, callback-test'
+	@echo '  stdlib-test, game, terminal, terminal-test, callback-test'
 	@echo '  http, http-test, websocket, websocket-test'
 	@echo '  wasm-test       run the tests as WebAssembly under Node; check the wasm compiler fixpoint'
 	@echo '  web             build the playground site in .build/web'

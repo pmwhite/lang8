@@ -46,14 +46,8 @@ deposits. No `.sand` companion file is read or written (older files are ignored)
 Editor saves still preserve placed sand in the level/world itself; quitting the
 editor without S discards edits.
 
-Build and test:
+Build:
 
 ```sh
 ./l8 build programs/block-game/block-game.l8 -o .build/block-game
-./l8 build programs/block-game/test_loose_sand.l8 -o .build/test-loose-sand
-.build/test-loose-sand
 ```
-
-The test requires an X/GL display and covers brush independence, conservative
-transport, session tracks, obstructions, room/column transforms, save/load,
-empty saves, ignored legacy sidecars, and the raised mesh/shaders. It writes fixtures under `.build/`.

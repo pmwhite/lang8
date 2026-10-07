@@ -33,16 +33,8 @@ Automatic room starts avoid water. Existing worlds are not edited automatically.
 
 ```sh
 ./l8 build programs/block-game/block-game.l8 -o .build/block-game
-./l8 build programs/block-game/test_water.l8 -o .build/test-water
-.build/test-water
-.build/block-game play .build/water-interaction-demo.txt
+.build/block-game
 ```
-
-In the interaction fixture, press Right three times: push the cube into the
-pond, step onto it, then step off into the water. Down twice and Left twice
-mounts the submerged ramp and exits onto land. Backspace undoes each action.
-The test also generates small, 24-, 64-, 128-, and 256-cell pond fixtures;
-`.build/water-256-demo.txt` contains a fully simulated 16-by-16 pond.
 
 - **F7:** toggle simulation; disabled water is flat but keeps the visible basin
   and translucent surface. Resident simulation state is retained.
@@ -58,8 +50,7 @@ The test also generates small, 24-, 64-, 128-, and 256-cell pond fixtures;
 
 A persistent 32-by-32-tile window contains eight-by-eight simulation samples per
 tile: a 256-by-256 height/flux grid. All painted water in that window is simulated,
-including offscreen parts of a visible pond. There is no separate 256-tile cap;
-256 tiles is the tested large-pond fixture, not the grid's maximum capacity.
+including offscreen parts of a visible pond. There is no separate 256-tile cap.
 
 Each fixed 1/120-second step updates solid displacement, accelerates horizontal
 flux from surface-height differences and available depth, then updates elevation
@@ -142,35 +133,23 @@ shaders are available.
 - Fluid state itself is not added to undo history. Undo restores gameplay
   positions and the water reacts to the resulting animated displacement.
 
-The older CPU/GPU particle experiments and their tests remain as reference
-modules, but the main game no longer allocates or runs those simulations.
+## Performance
 
-## Performance and verification
-
-On the Intel UHD 620 / Mesa development machine, the 256-tile stress fixture
-measured **14.7 ms mean**, **16.7 ms p95**, **17.7 ms maximum** synchronized
-whole-frame work, with no dropped simulation time. The previous particle
+On the Intel UHD 620 / Mesa development machine, a fully simulated 16-by-16
+pond (256 tiles) measured **14.7 ms mean**, **16.7 ms p95**, **17.7 ms maximum**
+synchronized whole-frame work, with no dropped simulation time. The previous particle
 experiment measured roughly 22–30 ms depending on reconstruction settings.
 These are local measurements, not a frame-rate guarantee; camera coverage,
 other GPU workloads, and hardware affect results.
 
 The diagnostic helper disables vsync, finishes pending GPU work, warms up for
-80 frames, measures 240 frames, and exits its own game process:
+80 frames, measures 240 frames, and exits its own game process. Run it on a
+level with a large pond:
 
 ```sh
 cc -shared -fPIC -O2 programs/block-game/water-frame-probe.c -o .build/water-frame-probe.so -ldl
-L8_WATER_STATS=1 L8_WATER_STRESS=1 LD_PRELOAD="$PWD/.build/water-frame-probe.so" .build/block-game play .build/water-256-demo.txt
+L8_WATER_STATS=1 L8_WATER_STRESS=1 LD_PRELOAD="$PWD/.build/water-frame-probe.so" .build/block-game play LEVEL.txt
 ```
 
 Run benchmarks sequentially. Use F3 for normal presented-frame durations.
 
-`test_height_water.l8` (run it again with `L8_WATER_FRAGMENT=1` for the
-fragment backend) checks exact unforced flatness, all 256 resident pond tiles,
-block displacement and volume recovery, wave propagation beyond the impact,
-player and ramp submerged volumes, toggling, no application heap growth, and GL
-errors. GPU readback is test-only. `test_water.l8` covers editing, signed-layer
-save/load, linked/stacked sinking, stepping stones, bottom movement, blocked bank
-exits, and the complete ramp-exit sequence. `test_undo_memory.l8` checks repeated
-water-entry/undo restoration without allocation growth. Existing particle,
-material, grass, lighting, shadow, held-movement, and frame-time regressions are
-also retained.

@@ -48,11 +48,3 @@ Press `F6` in play or edit mode to show a sparse flow overlay. Orange squares ar
 sample points; cyan component bars show the local horizontal velocity. `F7` and
 `F8` retain their water controls.
 
-`test_wind.l8` checks deterministic evolution, finite bounded velocities, walls
-stilling and sheltering the wind, camera-window preservation, normalized weather,
-long-uptime visual-clock precision, and zero heap growth during updates. Plant
-and material GPU tests compile the vertex texture path and exercise texture
-creation under an X11 OpenGL context. `test_height_water.l8` verifies that wind
-creates water flux and short-wave slopes without changing liquid volume.
-It also checks calm water, free propagation near a bank, persistence after wind
-stops, damping, dry-cell isolation, and no per-frame allocation.

@@ -113,11 +113,3 @@ Move Right seven times to climb from the ground, over the shrub and young oak,
 and across the broad oak. Backspace walks the action history back. The demo also
 contains a birch grove, pines, a hedge, lanterns, and a pond. It does not change
 the main world.
-
-`test_plants.l8` covers solid volumes, headroom, immovable roots, cargo support,
-placement/erasure, starts, level/world round trips, room transforms, and the full
-climbing route. `test_plant_render.l8` checks mesh heights, finite geometry, non-platform crowns,
-batch invalidation/culling, all 2,048 instance slots, allocation stability, and
-OpenGL errors. `test_undo_memory.l8` checks canopy climbing/undo and movement at
-the full object capacity. It also generates `.build/plants-capacity-demo.txt`
-for a large-world smoke test.
