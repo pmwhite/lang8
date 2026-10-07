@@ -58,7 +58,7 @@ export function translateShader(source, fragment) {
 }
 
 // scale renders the window at that fraction of its size. env answers getenv.
-export function createPlatform(canvas, { log = console.log, checkErrors = false, countCalls = false, timing = false, skip = new Set(), scale = 1, zoom = 0.85, env = {} } = {}) {
+export function createPlatform(canvas, { log = console.log, checkErrors = false, countCalls = false, timing = false, gpuTiming = false, skip = new Set(), scale = 1, zoom = 0.85, env = {} } = {}) {
   let mem = null;
   let instance = null;
   const gl = canvas.getContext("webgl2", { antialias: false, depth: true, stencil: false, alpha: false });
@@ -140,6 +140,12 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
   const phaseNames = new Map();
   const phaseStack = [];
   const phaseMs = {};
+  // With gpuTiming, a GPU timer query brackets each part of a frame the game
+  // marks; their results arrive frames later and add up in gpuMs.
+  const gpuMs = {};
+  const gpuPending = [];
+  let gpuQuery = null;
+  const timerExt = gpuTiming ? gl.getExtension("EXT_disjoint_timer_query_webgl2") : null;
   // Draws to leave out, to measure what they cost: "fb44" or "prog3" for one
   // framebuffer or program, "offscreen" for every framebuffer but the
   // window's, or "all".
@@ -358,6 +364,10 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
         phaseNames.set(key, label);
       }
       phaseStack.push(label, performance.now());
+      if (gpuTiming && timerExt && !gpuQuery) {
+        gpuQuery = { label, query: gl.createQuery() };
+        gl.beginQuery(timerExt.TIME_ELAPSED_EXT, gpuQuery.query);
+      }
       return 0n;
     },
     glPopDebugGroup() {
@@ -365,6 +375,17 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
       const t = phaseStack.pop();
       const label = phaseStack.pop();
       phaseMs[label] = (phaseMs[label] ?? 0) + performance.now() - t;
+      if (gpuQuery && gpuQuery.label === label) {
+        gl.endQuery(timerExt.TIME_ELAPSED_EXT);
+        gpuPending.push(gpuQuery);
+        gpuQuery = null;
+      }
+      while (gpuPending.length > 0 && gl.getQueryParameter(gpuPending[0].query, gl.QUERY_RESULT_AVAILABLE)) {
+        const done = gpuPending.shift();
+        if (!gl.getParameter(timerExt.GPU_DISJOINT_EXT))
+          gpuMs[done.label] = (gpuMs[done.label] ?? 0) + gl.getQueryParameter(done.query, gl.QUERY_RESULT) / 1e6;
+        gl.deleteQuery(done.query);
+      }
       return 0n;
     },
     glDrawArrays: (mode, first, count) => (skipped() || gl.drawArrays(n(mode), n(first), n(count)), 0n),
@@ -688,7 +709,7 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
       skip = new Set(names);
     },
     // Totals since the start: GL time and calls by function (with timing).
-    glTiming: () => ({ ms: { ...glMs }, calls: { ...glCalls }, phases: { ...phaseMs } }),
+    glTiming: () => ({ ms: { ...glMs }, calls: { ...glCalls }, phases: { ...phaseMs }, gpu: { ...gpuMs } }),
     // The running per-part totals themselves, for per-frame differences.
     phaseTotals: () => phaseMs,
     frames: () => frames,

@@ -137,6 +137,8 @@ async function main() {
     countCalls: params.has("glstats"),
     // GL call timing for the telemetry, unless ?notelemetry.
     timing: !params.has("notelemetry"),
+    // ?gputime also times those parts on the GPU, where it can.
+    gpuTiming: params.has("gputime"),
     // ?skip=fb3,prog7 drops those draws, to measure what they cost.
     skip: new Set((params.get("skip") ?? "").split(",").filter(Boolean)),
     scale: fixedScale ?? 1,

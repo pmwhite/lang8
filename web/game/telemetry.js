@@ -88,6 +88,12 @@ export function createTelemetry(platform, { probe = false, show = () => {} } = {
       const ms = (gl.phases[key] - (w.gl.phases[key] ?? 0)) / n;
       if (ms > 0.01) phases[key] = +ms.toFixed(2);
     }
+    // GPU milliseconds per frame in each part, with ?gputime.
+    const gpu = {};
+    for (const key of Object.keys(gl.gpu ?? {})) {
+      const ms = (gl.gpu[key] - (w.gl.gpu?.[key] ?? 0)) / n;
+      if (ms > 0.01) gpu[key] = +ms.toFixed(2);
+    }
     const round = (x) => +x.toFixed(2);
     return {
       frames: n,
@@ -101,6 +107,7 @@ export function createTelemetry(platform, { probe = false, show = () => {} } = {
       outside: round(mean - work),
       calls: Math.round(calls),
       phases,
+      gpu,
       topGl: Object.fromEntries(Object.entries(glMs).sort((a, b) => b[1] - a[1]).slice(0, 8)),
       scale: platform.scale(),
       canvas: platform.canvasSize(),
