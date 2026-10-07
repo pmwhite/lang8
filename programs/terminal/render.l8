@@ -26,10 +26,6 @@ extern glDeleteBuffers(n: int, buffers: *u32): int;
 
 extern glDeleteTextures(n: int, textures: *u32): int;
 
-type TerminalVertices = {
-    data: []f32
-}
-
 type TerminalRenderer = {
     window: *WLWindow;
     font: *CachedFont;
@@ -42,7 +38,7 @@ type TerminalRenderer = {
     viewport: int;
     buffer: u32;
     texture: u32;
-    vertices: *TerminalVertices;
+    vertices: []f32;
     palette: []int;
     cursor: *TerminalCursor;
     scene: *TerminalScene
@@ -60,8 +56,7 @@ terminal_shader(kind: int, text: []i8) raises IoError: int {
         log: []i8 = new i8[2048](0i8);
         count: i32 = 0i32;
         glGetShaderInfoLog(shader, len(log), &count, log);
-        log_size: int = terminal_clamp_ordered(count as int, 0, len(log));
-        write_bytes_n(2, log, log_size);
+        write_bytes_n(2, log, terminal_clamp(count as int, 0, len(log)));
         glDeleteShader(shader);
         return 0
     }
@@ -117,7 +112,7 @@ terminal_renderer(path: str, px: int) noregion raises IoError: ?*TerminalRendere
         viewport: -1,
         buffer: 0u32,
         texture: 0u32,
-        vertices: new TerminalVertices { data: new f32[TERMINAL_RENDER_QUADS * 48](0.0) },
+        vertices: new f32[TERMINAL_RENDER_QUADS * 48](0.0),
         palette: new int[256](0),
         cursor: terminal_cursor(),
         scene: terminal_scene()
@@ -265,22 +260,22 @@ terminal_quad(
 ): int {
     offset: int = quads * 48;
     rgb: int = color - 256;
-    if (color >= 0 && color < len(r.palette)) rgb = r.palette[color];
+    if (color < len(r.palette)) rgb = r.palette[color];
     red: f32 = (rgb / 65536) as f32 / 255.0;
     green: f32 = (rgb / 256 % 256) as f32 / 255.0;
     blue: f32 = (rgb % 256) as f32 / 255.0;
-    terminal_quad_corner(r.vertices.data, offset, x, y, w, h, u0, v0, u1, v1, red,
-        green, blue, alpha, false, false);
-    terminal_quad_corner(r.vertices.data, offset + 8, x, y, w, h, u0, v0, u1, v1,
-        red, green, blue, alpha, true, false);
-    terminal_quad_corner(r.vertices.data, offset + 16, x, y, w, h, u0, v0, u1, v1,
-        red, green, blue, alpha, false, true);
-    terminal_quad_corner(r.vertices.data, offset + 24, x, y, w, h, u0, v0, u1, v1,
-        red, green, blue, alpha, true, true);
-    terminal_quad_corner(r.vertices.data, offset + 32, x, y, w, h, u0, v0, u1, v1,
-        red, green, blue, alpha, false, true);
-    terminal_quad_corner(r.vertices.data, offset + 40, x, y, w, h, u0, v0, u1, v1,
-        red, green, blue, alpha, true, true);
+    terminal_quad_corner(r.vertices, offset, x, y, w, h, u0, v0, u1, v1, red, green,
+        blue, alpha, false, false);
+    terminal_quad_corner(r.vertices, offset + 8, x, y, w, h, u0, v0, u1, v1, red,
+        green, blue, alpha, true, false);
+    terminal_quad_corner(r.vertices, offset + 16, x, y, w, h, u0, v0, u1, v1, red,
+        green, blue, alpha, false, true);
+    terminal_quad_corner(r.vertices, offset + 24, x, y, w, h, u0, v0, u1, v1, red,
+        green, blue, alpha, true, true);
+    terminal_quad_corner(r.vertices, offset + 32, x, y, w, h, u0, v0, u1, v1, red,
+        green, blue, alpha, false, true);
+    terminal_quad_corner(r.vertices, offset + 40, x, y, w, h, u0, v0, u1, v1, red,
+        green, blue, alpha, true, true);
     quads + 1
 }
 
@@ -293,20 +288,9 @@ terminal_cursor_frame(s: *Screen, r: *TerminalRenderer, now: int): bool {
 
 // Clip geometry and atlas coordinates together. Masking stationary rows cannot
 // clip two adjacent moving panes, especially when they scroll in opposite ways.
-type TerminalClippedQuad = {
-    visible: bool;
-    x: f32;
-    y: f32;
-    w: f32;
-    h: f32;
-    u0: f32;
-    v0: f32;
-    u1: f32;
-    v1: f32
-}
-
-terminal_clip_quad(
+terminal_clipped_quad(
     r: *TerminalRenderer,
+    quads: int,
     clip: TerminalSceneRegion,
     x: f32,
     y: f32,
@@ -315,8 +299,10 @@ terminal_clip_quad(
     u0: f32,
     v0: f32,
     u1: f32,
-    v1: f32
-): TerminalClippedQuad {
+    v1: f32,
+    color: int,
+    alpha: f32
+): int {
     left: f32 = 8.0 + clip.left as f32 * r.cw as f32;
     top: f32 = 8.0 + clip.top as f32 * r.ch as f32;
     right: f32 = 8.0 + clip.right as f32 * r.cw as f32;
@@ -329,17 +315,10 @@ terminal_clip_quad(
     if (y0 < top) y0 = top;
     if (x1 > right) x1 = right;
     if (y1 > bottom) y1 = bottom;
-    TerminalClippedQuad {
-        visible: x0 < x1 && y0 < y1,
-        x: x0,
-        y: y0,
-        w: x1 - x0,
-        h: y1 - y0,
-        u0: u0 + (u1 - u0) * (x0 - x) / w,
-        v0: v0 + (v1 - v0) * (y0 - y) / h,
-        u1: u0 + (u1 - u0) * (x1 - x) / w,
-        v1: v0 + (v1 - v0) * (y1 - y) / h
-    }
+    if (x0 < x1 && y0 < y1) return terminal_quad(r, quads, x0, y0, x1 - x0, y1 - y0,
+        u0 + (u1 - u0) * (x0 - x) / w, v0 + (v1 - v0) * (y0 - y) / h, u0 + (u1 - u0) * (x1 - x) / w,
+        v0 + (v1 - v0) * (y1 - y) / h, color, alpha);
+    quads
 }
 
 terminal_draw(s: *Screen, r: *TerminalRenderer, now: int) {
@@ -352,35 +331,23 @@ terminal_draw(s: *Screen, r: *TerminalRenderer, now: int) {
     glUniform2f(r.viewport, r.width as f32, r.height as f32);
     glClear(16384);
     n: int = 0;
-    rows: int = s.rows;
-    cols: int = s.cols;
-    cell_limit: int = 0;
-    if (rows > 0 && cols > 0) cell_limit = (rows - 1) * 240 + cols;
-    // One potential background quad per cell.
-    potential: int = 0;
-    while (potential < 28800 && potential < cell_limit) {
-        pos: int = potential;
-        y: int = pos / 240;
-        x: int = pos % 240;
-        if (y < rows && x < cols) {
-            bg: int = s.bg[pos];
+    // Backgrounds first, then glyphs; one upload and draw for the entire screen.
+    for y in 0..s.rows {
+        for x in 0..s.cols {
+            bg: int = s.bg[y * 240 + x];
             if (bg != 0) {
+                // Background colors describe the destination grid. Keeping
+                // them opaque avoids translucent sheets during rapid scrolls.
                 bg_x: f32 = 8.0 + x as f32 * r.cw as f32;
                 bg_y: f32 = 8.0 + y as f32 * r.ch as f32;
                 n = terminal_quad(r, n, bg_x, bg_y, r.cw as f32, r.ch as f32, -1.0,
                     -1.0, -1.0, -1.0, bg, 1.0)
             }
         }
-        potential = potential + 1
     }
-    // Two potential glyph quads per cell, in the same draw order as before.
-    potential = 28800;
-    while (potential < 86400 && potential < 28800 + cell_limit * 2) {
-        cell_slot: int = potential - 28800;
-        pos: int = cell_slot / 2;
-        y: int = pos / 240;
-        x: int = pos % 240;
-        if (y < rows && x < cols) {
+    for y in 0..s.rows {
+        for x in 0..s.cols {
+            pos: int = y * 240 + x;
             clip: TerminalSceneRegion = r.scene.scene_regions[r.scene.scene_region[pos]];
             fg: int = s.fg[pos];
             visual_x: f32 = r.scene.scene_from_x[pos] + (x as f32 - r.scene.scene_from_x[pos]) * scene_ease;
@@ -388,42 +355,24 @@ terminal_draw(s: *Screen, r: *TerminalRenderer, now: int) {
             alpha: f32 = r.scene.scene_from_alpha[pos] + (1.0 - r.scene.scene_from_alpha[pos]) * scene_ease;
             px: f32 = 8.0 + visual_x * r.cw as f32;
             py: f32 = 8.0 + visual_y * r.ch as f32;
-            if (cell_slot % 2 == 0) {
-                code: int = s.text[pos];
-                if (code > 32) {
-                    g: Glyph = cached_font_glyph(r.font, code);
-                    if (g.w > 0.0 && g.h > 0.0) {
-                        clipped: TerminalClippedQuad = terminal_clip_quad(r, clip,
-                            px + g.left, py + r.ascent as f32 - g.top, g.w, g.h, g.u0,
-                            g.v0, g.u1, g.v1);
-                        if (clipped.visible) n = terminal_quad(r, n, clipped.x, clipped.y,
-                            clipped.w, clipped.h, clipped.u0, clipped.v0, clipped.u1,
-                            clipped.v1, fg, alpha)
-                    }
-                }
-            } else {
-                mark: int = s.comb[pos];
-                if (mark > 0) {
-                    accent: Glyph = cached_font_glyph(r.font, mark);
-                    if (accent.w > 0.0 && accent.h > 0.0) {
-                        clipped: TerminalClippedQuad = terminal_clip_quad(r, clip,
-                            px + accent.left, py + r.ascent as f32 - accent.top, accent.w,
-                            accent.h, accent.u0, accent.v0, accent.u1, accent.v1);
-                        if (clipped.visible) n = terminal_quad(r, n, clipped.x, clipped.y,
-                            clipped.w, clipped.h, clipped.u0, clipped.v0, clipped.u1,
-                            clipped.v1, fg, alpha)
-                    }
-                }
+            code: int = s.text[pos];
+            if (code > 32) {
+                g: Glyph = cached_font_glyph(r.font, code);
+                if (g.w > 0.0 && g.h > 0.0) n = terminal_clipped_quad(r, n, clip,
+                    px + g.left, py + r.ascent as f32 - g.top, g.w, g.h, g.u0, g.v0,
+                    g.u1, g.v1, fg, alpha)
+            }
+            mark: int = s.comb[pos];
+            if (mark > 0) {
+                accent: Glyph = cached_font_glyph(r.font, mark);
+                if (accent.w > 0.0 && accent.h > 0.0) n = terminal_clipped_quad(r,
+                    n, clip, px + accent.left, py + r.ascent as f32 - accent.top,
+                    accent.w, accent.h, accent.u0, accent.v0, accent.u1, accent.v1,
+                    fg, alpha)
             }
         }
-        potential = potential + 1
     }
-    // Two potential quads per retained ghost.
-    potential = 86400;
-    ghost_count: int = r.scene.ghost_count;
-    while (potential < TERMINAL_RENDER_QUADS - 1 && potential < 86400 + ghost_count * 2) {
-        ghost_slot: int = potential - 86400;
-        g: int = ghost_slot / 2;
+    for g in 0..r.scene.ghost_count {
         clip: TerminalSceneRegion = r.scene.ghost_clip[g];
         alpha: f32 = r.scene.ghost_from_alpha[g];
         if (r.scene.ghost_fade[g] == 1) alpha = alpha * (1.0 - scene_ease);
@@ -431,34 +380,21 @@ terminal_draw(s: *Screen, r: *TerminalRenderer, now: int) {
         visual_y: f32 = r.scene.ghost_from_y[g] + (r.scene.ghost_to_y[g] - r.scene.ghost_from_y[g]) * scene_ease;
         px: f32 = 8.0 + visual_x * r.cw as f32;
         py: f32 = 8.0 + visual_y * r.ch as f32;
-        if (ghost_slot % 2 == 0) {
-            code: int = r.scene.ghost_text[g];
-            if (code > 32) {
-                glyph: Glyph = cached_font_glyph(r.font, code);
-                if (glyph.w > 0.0 && glyph.h > 0.0) {
-                    clipped: TerminalClippedQuad = terminal_clip_quad(r, clip, px + glyph.left,
-                        py + r.ascent as f32 - glyph.top, glyph.w, glyph.h, glyph.u0,
-                        glyph.v0, glyph.u1, glyph.v1);
-                    if (clipped.visible) n = terminal_quad(r, n, clipped.x, clipped.y,
-                        clipped.w, clipped.h, clipped.u0, clipped.v0, clipped.u1,
-                        clipped.v1, r.scene.ghost_fg[g], alpha)
-                }
-            }
-        } else {
-            mark: int = r.scene.ghost_comb[g];
-            if (mark > 0) {
-                accent: Glyph = cached_font_glyph(r.font, mark);
-                if (accent.w > 0.0 && accent.h > 0.0) {
-                    clipped: TerminalClippedQuad = terminal_clip_quad(r, clip, px + accent.left,
-                        py + r.ascent as f32 - accent.top, accent.w, accent.h, accent.u0,
-                        accent.v0, accent.u1, accent.v1);
-                    if (clipped.visible) n = terminal_quad(r, n, clipped.x, clipped.y,
-                        clipped.w, clipped.h, clipped.u0, clipped.v0, clipped.u1,
-                        clipped.v1, r.scene.ghost_fg[g], alpha)
-                }
-            }
+        code: int = r.scene.ghost_text[g];
+        if (code > 32) {
+            glyph: Glyph = cached_font_glyph(r.font, code);
+            if (glyph.w > 0.0 && glyph.h > 0.0) n = terminal_clipped_quad(r, n, clip,
+                px + glyph.left, py + r.ascent as f32 - glyph.top, glyph.w, glyph.h,
+                glyph.u0, glyph.v0, glyph.u1, glyph.v1, r.scene.ghost_fg[g], alpha)
         }
-        potential = potential + 1
+        mark: int = r.scene.ghost_comb[g];
+        if (mark > 0) {
+            accent: Glyph = cached_font_glyph(r.font, mark);
+            if (accent.w > 0.0 && accent.h > 0.0) n = terminal_clipped_quad(r, n,
+                clip, px + accent.left, py + r.ascent as f32 - accent.top, accent.w,
+                accent.h, accent.u0, accent.v0, accent.u1, accent.v1, r.scene.ghost_fg[g],
+                alpha)
+        }
     }
     content: int = n * 48;
     if (r.cursor.cursor_on) {
@@ -486,7 +422,7 @@ terminal_draw(s: *Screen, r: *TerminalRenderer, now: int) {
     }
     used: int = n * 48;
     if (used > 0) {
-        glBufferData(34962, used * 4, r.vertices.data, 35040);
+        glBufferData(34962, used * 4, r.vertices, 35040);
         if (content > 0) glDrawArrays(4, 0, content / 8);
         if (used > content) {
             // XOR keeps text legible under every cursor shape, including while moving.
