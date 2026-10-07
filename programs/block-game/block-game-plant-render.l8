@@ -13,6 +13,12 @@ type PlantRender = {
     u: []int;
     mesh: u32;
     instances: u32;
+    // The plants in view, for the main pass; the other passes draw all the
+    // plants near the view, which may shade or reflect into it.
+    view_instances: u32;
+    view_counts: []int;
+    view_key: int;
+    planes: []f32;
     starts: []int;
     sizes: []int;
     counts: []int;
@@ -26,7 +32,7 @@ type PlantRender = {
     wind_z: f32;
     wind_ready: bool;
     wind_start_ms: int
-} invariant (len(counts) == 20 && len(offsets) == 20 && len(data) == LEVEL_MAX_BLOCKS * 4 && len(u) == 10 && len(starts) == 20 && len(sizes) == 20)
+} invariant (len(view_counts) == 20 && len(planes) == 24 && len(counts) == 20 && len(offsets) == 20 && len(data) == LEVEL_MAX_BLOCKS * 4 && len(u) == 10 && len(starts) == 20 && len(sizes) == 20)
 
 plant_vs(): []i8 {
     """
@@ -555,8 +561,8 @@ new_plant_render() raises IoError: *PlantRender@new {
     glUniform1i(glGetUniformLocation(prog, "shadow_map"), 0);
     glUniform1i(glGetUniformLocation(prog, "lamp_map"), 2);
     glUniform1i(u[7], 5);
-    ids: []u32 = new u32[2](0u32);
-    glGenBuffers(2, ids);
+    ids: []u32 = new u32[3](0u32);
+    glGenBuffers(3, ids);
     starts: []int = new int[20](0);
     sizes: []int = new int[20](0);
     glBindBuffer(34962, ids[0]);
@@ -576,6 +582,8 @@ new_plant_render() raises IoError: *PlantRender@new {
     glBindBuffer(34962, ids[1]);
     region {
         instance_storage: []f32 = new f32[20 * LEVEL_MAX_BLOCKS * 4](0.0);
+        glBufferData(34962, 20 * LEVEL_MAX_BLOCKS * 16, instance_storage, 35048);
+        glBindBuffer(34962, ids[2]);
         glBufferData(34962, 20 * LEVEL_MAX_BLOCKS * 16, instance_storage, 35048)
     }
     new PlantRender {
@@ -583,6 +591,10 @@ new_plant_render() raises IoError: *PlantRender@new {
         u: u,
         mesh: ids[0],
         instances: ids[1],
+        view_instances: ids[2],
+        view_counts: new int[20](0),
+        view_key: 0,
+        planes: new f32[24](0.0),
         starts: starts,
         sizes: sizes,
         counts: new int[20](0),
@@ -607,13 +619,69 @@ set_plant_wind(p: *PlantRender, wind: *WindField) {
     p.wind_start_ms = wind.start_ms
 }
 
+// A sphere about a plant that holds all of it, swaying included: centered
+// above its root, wide enough for a broad oak's crown and its leaves.
+const PLANT_SPHERE_Y: f32 = 1.75;
+
+const PLANT_SPHERE_RADIUS: f32 = 3.0;
+
+// The plants whose spheres meet the view, among those near it, in
+// view_instances by mesh. Rebuilt only when that set changes.
+prepare_view_plants(
+    p: *PlantRender,
+    hist: []Block,
+    off: int,
+    n: int,
+    bounds: []f32,
+    vp: []f32
+) requires (0 <= n && n <= LEVEL_MAX_BLOCKS && len(vp) >= 16) {
+    view_planes(vp, p.planes);
+    key: int = 1;
+    for i in 0..n {
+        b: Block = hist[off + i];
+        if (plant_block(b) && shadow_cell(b.column, b.row, bounds, 5.0) && sphere_in_view(p.planes,
+            b.column as f32 + 0.5, b.layer as f32 + PLANT_SPHERE_Y, b.row as f32 + 0.5,
+            PLANT_SPHERE_RADIUS)) {
+            key = key * 31 + b.column;
+            key = key * 31 + b.row;
+            key = key * 31 + b.shape
+        }
+    }
+    if (p.ready && key == p.view_key) return;
+    p.view_key = key;
+    glBindBuffer(34962, p.view_instances);
+    for mesh in 0..20 {
+        count: int = 0;
+        i: int = 0;
+        while (i < n) invariant (0 <= count && count <= i && i <= n && n <= LEVEL_MAX_BLOCKS) {
+            b: Block = hist[off + i];
+            if (plant_block(b) && shadow_cell(b.column, b.row, bounds, 5.0) && plant_style(b) * 4 + plant_seed(b) == mesh && sphere_in_view(p.planes,
+                b.column as f32 + 0.5, b.layer as f32 + PLANT_SPHERE_Y, b.row as f32 + 0.5,
+                PLANT_SPHERE_RADIUS)) {
+                at: int = count * 4;
+                p.data[at] = b.column as f32 + 0.5;
+                p.data[at + 1] = b.layer as f32;
+                p.data[at + 2] = b.row as f32 + 0.5;
+                p.data[at + 3] = (b.column * 13 + b.row * 7) as f32;
+                count = count + 1
+            }
+            i = i + 1
+        }
+        p.view_counts[mesh] = count;
+        if (count > 0) glBufferSubData(34962, mesh * LEVEL_MAX_BLOCKS * 16, count * 16,
+            p.data)
+    }
+}
+
 prepare_plants(
     p: *PlantRender,
     hist: []Block,
     off: int,
     n: int,
-    bounds: []f32
-) requires (0 <= n && n <= LEVEL_MAX_BLOCKS) {
+    bounds: []f32,
+    vp: []f32
+) requires (0 <= n && n <= LEVEL_MAX_BLOCKS && len(vp) >= 16) {
+    prepare_view_plants(p, hist, off, n, bounds, vp);
     key: int = 1;
     for i in 0..n {
         b: Block = hist[off + i];
@@ -685,12 +753,15 @@ draw_plants(
     glVertexAttribPointer(1, 3, 5126, 0, 40, 12);
     glVertexAttribPointer(2, 4, 5126, 0, 40, 24);
     for i in 0..4 glEnableVertexAttribArray(i);
-    glBindBuffer(34962, p.instances);
+    // The main pass draws only the plants in view.
+    if (pass == 0) glBindBuffer(34962, p.view_instances) else glBindBuffer(34962,
+        p.instances);
     glVertexAttribDivisor(3, 1);
     for mesh in 0..20 {
-        if (p.counts[mesh] > 0) {
+        count: int = if (pass == 0) p.view_counts[mesh] else p.counts[mesh];
+        if (count > 0) {
             glVertexAttribPointer(3, 4, 5126, 0, 16, p.offsets[mesh] * 16);
-            glDrawArraysInstanced(4, p.starts[mesh], p.sizes[mesh], p.counts[mesh])
+            glDrawArraysInstanced(4, p.starts[mesh], p.sizes[mesh], count)
         }
     }
     glVertexAttribDivisor(3, 0);
