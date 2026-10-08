@@ -398,13 +398,41 @@ gen_addr(n: *Expr) noregion raises Error {
             return
         }
         MemberAccess k -> {
-            t: ?*Type = decay(k.lhs.ty);
-            if (t != null && is_any_pointer(t) && (is_struct_ty(type_base(t)) || is_exn_ty(type_base(t)))) gen_expr(k.lhs) else gen_addr(k.lhs);
+            gen_member_base(k.lhs);
             mem: *Member = k.member or error("internal");
             if (mem.offset != 0) cg_alu_imm(0, mem.offset, 0);
             return
         }
-        _ -> error("not an lvalue")
+        _ -> error_at_file(n.file, n.pos, "not an lvalue")
+    }
+}
+
+// The address of the record a member access reads: the pointer itself, the
+// storage the expression names, or for a record passed by reference, such
+// as one a call returns, its temporary.
+gen_member_base(lhs: *Expr) noregion raises Error {
+    if (member_through_pointer(lhs)) gen_expr(lhs) else if (is_place(lhs)) gen_addr(lhs) else {
+        ty: *Type = lhs.ty or error("missing type");
+        if (!passes_by_ref(ty)) error_at_file(lhs.file, lhs.pos, "not an lvalue");
+        gen_expr(lhs)
+    }
+}
+
+// Whether a member access on lhs goes through a pointer to a record.
+member_through_pointer(lhs: *Expr) raises Error: bool {
+    t: ?*Type = decay(lhs.ty);
+    t != null && is_any_pointer(t) && (is_struct_ty(type_base(t)) || is_exn_ty(type_base(t)))
+}
+
+// Whether n names storage: a variable, a dereference, an element, or a
+// member of one of those.
+is_place(n: *Expr) raises Error: bool {
+    match n.kind {
+        Var _ -> true;
+        Deref _ -> true;
+        Index _ -> true;
+        MemberAccess k -> member_through_pointer(k.lhs) || is_place(k.lhs);
+        _ -> false
     }
 }
 
@@ -594,9 +622,19 @@ gen_load(n: *Expr) noregion raises Error {
                 load_mem_at(ty, base, member.offset, 0);
                 return
             }
-            base_ty: ?*Type = decay(k.lhs.ty);
-            if (base_ty != null && is_any_pointer(base_ty) && (is_struct_ty(type_base(base_ty)) || is_exn_ty(type_base(base_ty)))) gen_expr(k.lhs) else gen_addr(k.lhs);
             member: *Member = k.member or error("internal");
+            lhs_ty: *Type = k.lhs.ty or error("missing type");
+            if (!member_through_pointer(k.lhs) && !is_place(k.lhs) && !passes_by_ref(lhs_ty)) {
+                // A small record value, as a call returns one: read the
+                // member from a copy on the stack.
+                gen_expr(k.lhs);
+                cg_push(0);
+                cg_mov_rr(4, 0);
+                load_mem_at(ty, 0, member.offset, 0);
+                cg_pop(1);
+                return
+            }
+            gen_member_base(k.lhs);
             load_mem_at(ty, 0, member.offset, 0);
             return
         }

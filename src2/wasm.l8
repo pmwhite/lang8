@@ -701,9 +701,28 @@ wg_var_addr(vo: *Obj) raises Error {
 }
 
 // ---- expressions ----
+// The address of the record a member access reads; see gen_member_base.
 wg_member_base(lhs: *Expr) noregion raises Error {
-    t: ?*Type = lhs.ty;
-    if (t != null && is_any_pointer(t) && (is_struct_ty(type_base(t)) || is_exn_ty(type_base(t)))) wg_expr(lhs) else wg_addr(lhs)
+    if (member_through_pointer(lhs)) wg_expr(lhs) else if (is_place(lhs)) wg_addr(lhs) else {
+        ty: *Type = lhs.ty or error("missing type");
+        if (!passes_by_ref(ty)) error_at_file(lhs.file, lhs.pos, "not an lvalue");
+        wg_expr(lhs)
+    }
+}
+
+// A member of a small record held as an i64: its bytes shifted down, then
+// what loading it from memory does (see wg_load_op).
+wg_value_member(ty: *Type, off: int) raises Error {
+    if (off != 0) {
+        w_i64(off * 8);
+        w_op(136)
+    }
+    esz: int = enum_mem_size(ty);
+    size: int = type_size(ty);
+    if (esz == 1 || size == 1) w_mask8() else if (esz == 4 || is_i32_ty(ty)) w_op(196) else if (is_u32_ty(ty) || is_f32_ty(ty) || wasm_small_record(ty) && size == 4) w_mask32() else if (wasm_small_record(ty) && size == 2) {
+        w_i64(65535);
+        w_op(131)
+    }
 }
 
 wg_index_addr(lhs: *Expr, idx: *Expr) noregion raises Error {
@@ -769,9 +788,15 @@ wg_load(n: *Expr) noregion raises Error {
             }
         }
         MemberAccess k -> {
+            mem: *Member = k.member or error("internal");
+            lhs_ty: *Type = k.lhs.ty or error("missing type");
+            if (!member_through_pointer(k.lhs) && !is_place(k.lhs) && !passes_by_ref(lhs_ty)) {
+                wg_expr(k.lhs);
+                wg_value_member(ty, mem.offset);
+                return
+            }
             wg_member_base(k.lhs);
             w_wrap();
-            mem: *Member = k.member or error("internal");
             wg_load_op(ty, mem.offset);
             return
         }
