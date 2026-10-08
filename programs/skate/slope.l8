@@ -43,11 +43,15 @@ const TOP_SPEED: f32 = 18.0;
 // Past the finish, he drags a foot to stop.
 const BRAKE: f32 = 4.0;
 
-// How far he may turn across the run, how fast the arrows (or the stick
-// pushed all the way) turn him, and how hard the banks turn him back.
+// How far he may turn across the run, how fast he turns at the most, and
+// how hard the banks turn him back.
 const CARVE_LIMIT: f32 = 1.35;
 
-const STEER_RATE: f32 = 2.6;
+const STEER_RATE: f32 = 2.2;
+
+// How far either side of straight down the hill the steering thumb at the
+// end of its track aims him.
+const AIM_MAX: f32 = 1.2;
 
 const BANK_PULL: f32 = 5.5;
 
@@ -86,12 +90,10 @@ const RAIL_MAGNET: f32 = 0.4;
 
 const BOX_MAGNET: f32 = 0.55;
 
-// Points a second for a grab, a grind, a manual.
-const GRAB_POINTS: f32 = 250.0;
+// Points a second for a grind and a manual.
+const GRIND_POINTS: f32 = 100.0;
 
-const GRIND_POINTS: f32 = 150.0;
-
-const MANUAL_POINTS: f32 = 100.0;
+const MANUAL_POINTS: f32 = 50.0;
 
 // Start (or start over) at the top of the run.
 enter_course(m: *Mover) {
@@ -113,7 +115,8 @@ enter_course(m: *Mover) {
     m.pop_pending = false;
     m.pad_grab = false;
     line.scoring = true;
-    clear_line()
+    clear_line();
+    clear_run()
 }
 
 key_axis(keys: *Keys, pos: int, neg: int): f32 {
@@ -133,8 +136,10 @@ rise_along(x: f32, z: f32, d: V3): f32 {
     (course_height(x + d.x * e, z + d.z * e) - course_height(x - d.x * e, z - d.z * e)) / (2.0 * e)
 }
 
+// What keeps his line going: flying off a kicker or rail, a grind, or a
+// manual.
 course_busy(m: *Mover): bool {
-    m.air || m.grinding || m.manual
+    m.air && m.air_feature || m.grinding || m.manual
 }
 
 step_course(m: *Mover, keys: *Keys, dt: f32) {
@@ -189,8 +194,8 @@ step_course(m: *Mover, keys: *Keys, dt: f32) {
         m.finished = true;
         m.finish_t = 0.0
     }
-    tick_line(course_busy(m), dt);
-    if (m.finished && line.n == 0) line.best_run = maxi(line.best_run, line.run_total);
+    tick_run(course_busy(m), dt);
+    if (m.finished && run.n == 0) run.best_run = maxi(run.best_run, run.total);
     keys.hop = false;
     keys.board = false;
     keys.style = false
@@ -318,6 +323,9 @@ take_off(m: *Mover) {
     m.spin = 0.0;
     m.spin_w = 0.0;
     m.spin_goal = 0.0;
+    // Off a kicker, or anything else.
+    m.air_from = kicker_at(m.prev.x, -m.prev.z);
+    m.air_feature = m.air_from >= 0;
     d: V3 = carve_dir(m.carve);
     m.vx = d.x * m.speed;
     m.vz = d.z * m.speed
@@ -336,18 +344,22 @@ step_course_ground(m: *Mover, keys: *Keys, dt: f32) {
         m.manual_t = 0.0
     } else {
         m.manual_t = m.manual_t + dt;
-        m.manual = m.manual_t < MANUAL_MAX;
+        m.manual = m.manual_t < MANUAL_MAX && run.balance > 0.0;
+        if (m.manual) run.balance = run.balance - dt;
         m.manual_dir = -signf(lean);
-        if (m.manual_t - dt < 0.25 && m.manual_t >= 0.25) {
-            if (lean < 0.0) note(T_MANUAL) else note(T_NOSE_MANUAL)
-        }
-        if (m.manual && m.manual_t > 0.25) line_add(MANUAL_POINTS * dt)
+        if (m.manual_t - dt < 0.25 && m.manual_t >= 0.25) judge_manual(lean > 0.0);
+        if (m.manual && m.manual_t > 0.25) run_add(MANUAL_POINTS * dt)
     }
-    // Turning, as fast as the arrows or stick say.
+    // Turning: the steering thumb sets the way he aims, from straight down
+    // the hill in the middle out to AIM_MAX either side, and he carves
+    // round to it; the arrows turn him while held. Either way he eases into
+    // and out of a turn, and keeps his way when let go.
     c0: f32 = m.carve;
-    turn: f32 = keys.stick_x;
-    if (arrows) turn = turn + key_axis(keys, 0, 2);
-    m.carve = m.carve + clampf(turn, -1.0, 1.0) * STEER_RATE * dt;
+    want: f32 = 0.0;
+    if (keys.stick_on) want = clampf((keys.stick_x * AIM_MAX - m.carve) * 3.5, -STEER_RATE,
+        STEER_RATE) else if (arrows) want = key_axis(keys, 0, 2) * STEER_RATE;
+    m.carve_w = lerpf(m.carve_w, want, ease(8.0, dt));
+    m.carve = m.carve + m.carve_w * dt;
     // Up a bank, heading out, he is turned back in, harder than he can
     // steer out.
     e: f32 = 0.1;
@@ -400,14 +412,7 @@ turn_toward(
 step_course_air(m: *Mover, keys: *Keys, dt: f32) {
     m.flip = turn_toward(m.flip, m.flip_goal, m.flip_w, dt);
     m.spin = turn_toward(m.spin, m.spin_goal, m.spin_w, dt);
-    if (keys.style_held || m.pad_grab && keys.pad_held) {
-        m.grab_t = m.grab_t + dt;
-        if (m.grab_t - dt < 0.25 && m.grab_t >= 0.25) {
-            note(T_GRAB);
-            m.air_tricks = m.air_tricks + 1
-        }
-        if (m.grab_t > 0.25) line_add(GRAB_POINTS * dt)
-    }
+    if (keys.style_held || m.pad_grab && keys.pad_held) m.grab_t = m.grab_t + dt;
     m.x = clampf(m.x + m.vx * dt, -COURSE_HALF - 6.0, COURSE_HALF + 6.0);
     m.z = m.z + m.vz * dt;
     m.vy = m.vy - SLOPE_G * dt;
@@ -420,34 +425,36 @@ step_course_air(m: *Mover, keys: *Keys, dt: f32) {
     if (m.y <= h) course_land(m, h)
 }
 
-// Name what he did in the air, if he came down clean; otherwise the line is
-// lost. Either way he comes out of it upright, switch after an odd number
-// of half turns.
-land_tricks(m: *Mover) {
+// How he landed off a kicker, coming down at d: in the sweet spot of its
+// landing, short of it on the table, past it on the flat, or in between.
+landing_on(f: Feature, d: f32): int {
+    u: f32 = (d - (f.d + f.a + LIP_GAP + f.b)) / f.c;
+    if (u < 0.0) return LAND_CASED;
+    if (u > 1.05) return LAND_OVERSHOT;
+    if (u > 0.1 && u < 0.8) return LAND_STOMPED;
+    LAND_CLEAN
+}
+
+// Judge what he did in the air, if he came down clean (see judge.l8);
+// otherwise the line is lost. Either way he comes out of it upright, switch
+// after an odd number of half turns. On a rail, there is no landing to
+// judge.
+land_tricks(m: *Mover, on_rail: bool) {
     flips: f32 = floorf(m.flip / TAU + 0.5);
     halves: f32 = floorf(m.spin / PI + 0.5);
     clean: bool = absf(m.flip - flips * TAU) < LAND_TOL && absf(m.spin - halves * PI) < LAND_TOL;
     if (clean) {
-        nf: int = absf(flips) as int;
-        if (nf > 0) {
-            id: int = T_FRONTFLIP;
-            if (nf == 2) id = T_DOUBLE_FRONT;
-            if (nf >= 3) id = T_TRIPLE_FRONT;
-            if (flips < 0.0) id = id + 1;
-            note(id);
-            m.air_tricks = m.air_tricks + 1
+        kind: int = HIT_FLAT;
+        landing: int = LAND_CLEAN;
+        if (m.air_from >= 0) {
+            kind = HIT_AIR;
+            if (!on_rail) landing = landing_on(features[m.air_from], -m.z)
         }
-        nh: int = absf(halves) as int;
-        if (nh > 0) {
-            id: int = T_180;
-            if (nh == 2) id = T_360;
-            if (nh > 2) id = T_540 + mini(nh - 3, 3);
-            note(id);
-            m.air_tricks = m.air_tricks + 1
-        }
-        if (m.air_tricks == 0 && m.air_time > 0.9) note(T_AIR)
+        // A spin to the right turns him clockwise, the negative way.
+        judge_air(kind, flips as int, -halves as int, m.grab_t / maxf(m.air_time,
+            0.01), m.air_time, landing)
     } else {
-        lose_line();
+        lose_run_line();
         m.sketch_t = 0.0
     }
     if (absf(halves) as int % 2 == 1) m.fakie = !m.fakie;
@@ -467,7 +474,7 @@ mini(a: int, b: int): int {
 }
 
 course_land(m: *Mover, h: f32) {
-    land_tricks(m);
+    land_tricks(m, false);
     m.air = false;
     m.y = h;
     // His speed carries on along the ground, and a landing down a slope
@@ -519,7 +526,7 @@ try_one_rail(m: *Mover, i: int) {
     // Along it, not across.
     v: V3 = v3(m.vx, 0.0, m.vz);
     if (v_len(v) < 0.5 || v_dot(v_norm(v), v_norm(v3(hx, 0.0, hz))) < 0.5) return;
-    if (m.air) land_tricks(m);
+    if (m.air) land_tricks(m, true);
     m.air = false;
     m.manual = false;
     m.grinding = true;
@@ -529,7 +536,7 @@ try_one_rail(m: *Mover, i: int) {
     m.land = maxf(-m.vy, 0.0) * 0.5;
     m.vy = 0.0;
     place_on_crail(m);
-    if (r.box) note(T_BOX) else note(T_RAIL)
+    judge_grind(r.box)
 }
 
 place_on_crail(m: *Mover) {
@@ -548,7 +555,7 @@ place_on_crail(m: *Mover) {
 
 step_course_grind(m: *Mover, dt: f32) {
     r: CRail = crails[m.crail];
-    line_add(GRIND_POINTS * dt);
+    run_add(GRIND_POINTS * dt);
     m.crail_t = m.crail_t + m.speed * dt;
     len: f32 = v_len(v_sub(r.b, r.a));
     if (m.crail_t > len) {
@@ -572,6 +579,7 @@ leave_crail(m: *Mover, vy: f32, side: f32) {
     m.grinding = false;
     m.since_grind = 0.0;
     take_off(m);
+    m.air_feature = true;
     s: V3 = v_norm(v_cross(u, v3(0.0, 1.0, 0.0)));
     m.vx = u.x * m.speed + s.x * side * 2.0;
     m.vz = u.z * m.speed + s.z * side * 2.0;
