@@ -1,0 +1,530 @@
+tag skate;
+
+// The guy's pose each frame, from the mover: his body turns toward where he
+// faces (riding, sideways on the board), squashes when he lands or bonks
+// and springs back, and its split bottom walks. Each part's matrix goes in
+// the draw list.
+type Anim = {
+    yaw: f32;
+    up: V3;
+    y: f32;
+    ride: f32;
+    air: f32;
+    squash: f32;
+    squash_v: f32;
+    board_yaw: f32;
+    board_up: V3;
+    lean: f32;
+    push: f32;
+    grind: f32;
+    climb: f32;
+    grab: f32;
+    crouch: f32;
+    time: f32
+}
+
+new_anim(yaw: f32, y: f32): *Anim@new {
+    new Anim {
+        yaw: yaw,
+        up: v3(0.0, 1.0, 0.0),
+        y: y,
+        ride: 0.0,
+        air: 0.0,
+        squash: 0.0,
+        squash_v: 0.0,
+        board_yaw: yaw,
+        board_up: v3(0.0, 1.0, 0.0),
+        lean: 0.0,
+        push: 0.0,
+        grind: 0.0,
+        climb: 0.0,
+        grab: 0.0,
+        crouch: 0.0,
+        time: 0.0
+    }
+}
+
+const MAX_DRAWS: int = 16;
+
+draw_m: []f32 = new f32[MAX_DRAWS * 16](0.0);
+
+draw_part: []int = new int[MAX_DRAWS](0);
+
+ndraw: int = 0;
+
+add_draw(part: int, m: []f32) {
+    for i in 0..16 draw_m[ndraw * 16 + i] = m[i];
+    draw_part[ndraw] = part;
+    ndraw = ndraw + 1
+}
+
+root_m: []f32 = new f32[16](0.0);
+
+body_m: []f32 = new f32[16](0.0);
+
+part_m: []f32 = new f32[16](0.0);
+
+board_m: []f32 = new f32[16](0.0);
+
+X_AXIS: V3 = V3 { x: 1.0, y: 0.0, z: 0.0 };
+
+Y_AXIS: V3 = V3 { x: 0.0, y: 1.0, z: 0.0 };
+
+Z_AXIS: V3 = V3 { x: 0.0, y: 0.0, z: 1.0 };
+
+// A frame whose y is up and z faces fwd.
+frame_m(
+    m: []f32,
+    fwd: V3,
+    up: V3,
+    origin: V3
+) {
+    u: V3 = v_norm(up);
+    f: V3 = v_norm(v_reject(fwd, u));
+    mat_frame(m, v_cross(u, f), u, f, origin)
+}
+
+// Away from the wall he rides along, or the pole he swings round; zero
+// otherwise.
+lean_out(m: *Mover): V3 {
+    if (m.wallriding) {
+        out: V3 = v_scale(dir_vec(m.wall_d), -1.0);
+        if (m.riding) return v_scale(out, 1.4);
+        return v_scale(out, 0.5)
+    }
+    if (m.swinging) return v_scale(v_norm(v3(m.x - pole_x[m.pole_i], 0.0, m.z - pole_z[m.pole_i])),
+        0.6);
+    v3(0.0, 0.0, 0.0)
+}
+
+// The ground's tilt under him: up, or across a ramp.
+ground_up(m: *Mover): V3 {
+    if (m.course) return m.ground_n;
+    i: int = cell_of(m.x);
+    j: int = cell_of(m.z);
+    if (kind_at(i, j) != CELL_RAMP) return Y_AXIS;
+    r: V3 = dir_vec(rise_at(i, j));
+    v_norm(v3(-r.x * LEVEL, 1.0, -r.z * LEVEL))
+}
+
+// The limb angles of one pose; poses blend by mixing these. Side 0 is the
+// body's -x (riding, toward the board's tail), side 1 its +x. Pitch swings
+// a limb forward; roll swings it out to its side.
+type Limbs = {
+    leg_pitch: [2]f32;
+    leg_roll: [2]f32;
+    leg_len: [2]f32;
+    arm_pitch: [2]f32;
+    arm_roll: [2]f32;
+    drop: f32
+}
+
+no_limbs(): Limbs {
+    Limbs {
+        leg_pitch: [0.0, 0.0],
+        leg_roll: [0.0, 0.0],
+        leg_len: [1.0, 1.0],
+        arm_pitch: [0.0, 0.0],
+        arm_roll: [0.0, 0.0],
+        drop: 0.0
+    }
+}
+
+mix_limbs(a: Limbs, b: Limbs, t: f32): Limbs {
+    r: Limbs = a;
+    for i in 0..2 {
+        r.leg_pitch[i] = lerpf(a.leg_pitch[i], b.leg_pitch[i], t);
+        r.leg_roll[i] = lerpf(a.leg_roll[i], b.leg_roll[i], t);
+        r.leg_len[i] = lerpf(a.leg_len[i], b.leg_len[i], t);
+        r.arm_pitch[i] = lerpf(a.arm_pitch[i], b.arm_pitch[i], t);
+        r.arm_roll[i] = lerpf(a.arm_roll[i], b.arm_roll[i], t)
+    }
+    r.drop = lerpf(a.drop, b.drop, t);
+    r
+}
+
+side_sign(i: int): f32 {
+    if (i == 0) return -1.0;
+    1.0
+}
+
+walk_limbs(m: *Mover, a: *Anim): Limbs {
+    l: Limbs = no_limbs();
+    amp: f32 = clampf(sqrtf(m.vx * m.vx + m.vz * m.vz) / WALK_SPEED, 0.0, 1.0) * (1.0 - a.air);
+    ph: f32 = m.walk_phase * TAU;
+    swing: f32 = sinf(ph) * 0.5 * amp;
+    l.leg_pitch[0] = swing;
+    l.leg_pitch[1] = -swing;
+    l.arm_pitch[0] = -swing * 1.2;
+    l.arm_pitch[1] = swing * 1.2;
+    l.arm_roll[0] = 0.08;
+    l.arm_roll[1] = 0.08;
+    l.drop = -absf(sinf(ph)) * 0.035 * amp;
+    // Hopping: halves tucked, arms up.
+    l.leg_len[0] = lerpf(1.0, 0.8, a.air);
+    l.leg_len[1] = lerpf(1.0, 0.8, a.air);
+    l.arm_roll[0] = lerpf(l.arm_roll[0], 1.1, a.air);
+    l.arm_roll[1] = lerpf(l.arm_roll[1], 1.1, a.air);
+    l
+}
+
+ride_limbs(m: *Mover, a: *Anim): Limbs {
+    l: Limbs = no_limbs();
+    // Halves apart along the board, a little crouched, arms out.
+    l.leg_roll[0] = 0.12;
+    l.leg_roll[1] = 0.12;
+    l.leg_len[0] = 0.9;
+    l.leg_len[1] = 0.9;
+    l.drop = -0.03;
+    l.arm_roll[0] = 0.75 + a.lean * 0.5;
+    l.arm_roll[1] = 0.75 - a.lean * 0.5;
+    l.arm_pitch[1] = 0.25;
+    l.leg_len[0] = lerpf(l.leg_len[0], 0.72, a.air);
+    l.leg_len[1] = lerpf(l.leg_len[1], 0.72, a.air);
+    l.arm_roll[0] = lerpf(l.arm_roll[0], 1.15, a.air);
+    l.arm_roll[1] = lerpf(l.arm_roll[1], 1.15, a.air);
+    // A push: the back half steps down beside the board and kicks.
+    if (a.push > 0.01) {
+        k: f32 = clampf(m.since_push / PUSH_PERIOD, 0.0, 1.0);
+        kick: f32 = sinf(k * PI);
+        l.leg_pitch[0] = lerpf(l.leg_pitch[0], 0.35, a.push);
+        l.leg_roll[0] = lerpf(l.leg_roll[0], 0.12 + kick * 0.5, a.push);
+        l.leg_len[0] = lerpf(l.leg_len[0], 1.25, a.push);
+        l.arm_pitch[0] = lerpf(l.arm_pitch[0], -kick * 0.5, a.push)
+    }
+    l
+}
+
+// Grinding: low, arms wide for balance.
+grind_limbs(): Limbs {
+    l: Limbs = no_limbs();
+    l.leg_roll[0] = 0.16;
+    l.leg_roll[1] = 0.16;
+    l.leg_len[0] = 0.78;
+    l.leg_len[1] = 0.78;
+    l.drop = -0.06;
+    l.arm_roll[0] = 1.45;
+    l.arm_roll[1] = 1.45;
+    l
+}
+
+// Climbing: arms reaching up over the edge, then pressing down; legs tucked.
+climb_limbs(m: *Mover): Limbs {
+    l: Limbs = no_limbs();
+    t: f32 = clampf(m.climb_t, 0.0, 1.0);
+    l.arm_roll[0] = lerpf(2.7, 0.4, t);
+    l.arm_roll[1] = lerpf(2.7, 0.4, t);
+    l.arm_pitch[0] = 0.6;
+    l.arm_pitch[1] = 0.6;
+    l.leg_pitch[0] = 0.5 * sinf(t * PI);
+    l.leg_len[0] = 0.8;
+    l.leg_len[1] = 0.8;
+    l
+}
+
+// Kicking off a wall: legs stretched out, arms flung up.
+kick_limbs(): Limbs {
+    l: Limbs = no_limbs();
+    l.leg_pitch[0] = -0.5;
+    l.leg_pitch[1] = -0.3;
+    l.leg_len[0] = 1.12;
+    l.leg_len[1] = 1.12;
+    l.arm_roll[0] = 2.2;
+    l.arm_roll[1] = 2.2;
+    l
+}
+
+update_anim(a: *Anim, m: *Mover, dt: f32) {
+    a.time = a.time + dt;
+    rt: f32 = 0.0;
+    if (m.riding) rt = 1.0;
+    a.ride = lerpf(a.ride, rt, ease(14.0, dt));
+    at: f32 = 0.0;
+    if (m.air) at = 1.0;
+    a.air = lerpf(a.air, at, ease(12.0, dt));
+    gt: f32 = 0.0;
+    if (m.grinding) gt = 1.0;
+    a.grind = lerpf(a.grind, gt, ease(16.0, dt));
+    ct: f32 = 0.0;
+    if (m.climbing) ct = 1.0;
+    a.climb = lerpf(a.climb, ct, ease(20.0, dt));
+    gt2: f32 = 0.0;
+    if (m.course && m.air && m.grab_t > 0.0) gt2 = 1.0;
+    a.grab = lerpf(a.grab, gt2, ease(18.0, dt));
+    ct2: f32 = 0.0;
+    if (m.course && m.winding) ct2 = 1.0;
+    a.crouch = lerpf(a.crouch, ct2, ease(14.0, dt));
+    a.lean = lerpf(a.lean, clampf(m.turn_rate / TURN_RATE, -1.0, 1.0) * clampf(m.speed / 4.0,
+        0.0, 1.0), ease(9.0, dt));
+    pt: f32 = 0.0;
+    if (m.riding && m.since_push < PUSH_PERIOD) pt = 1.0;
+    a.push = lerpf(a.push, pt, ease(16.0, dt));
+    // Landings and bonks squash him; the squash springs back.
+    if (m.land > 0.0) {
+        a.squash_v = a.squash_v - minf(m.land, 12.0) * 0.04;
+        m.land = 0.0
+    }
+    if (m.bonk > 0.0) {
+        a.squash_v = a.squash_v - minf(m.bonk, 6.0) * 0.12;
+        m.bonk = 0.0
+    }
+    acc: f32 = -200.0 * a.squash - 12.0 * a.squash_v;
+    a.squash_v = a.squash_v + acc * dt;
+    a.squash = clampf(a.squash + a.squash_v * dt, -0.3, 0.25);
+    // Stepping up a curb on foot eases his height up rather than popping.
+    if (m.air || m.grinding || m.climbing) a.y = m.y else a.y = lerpf(a.y, m.y, ease(22.0,
+        dt));
+    if (m.riding) a.board_yaw = approach_angle(a.board_yaw, m.heading, ease(14.0,
+        dt));
+    bu: V3 = ground_up(m);
+    if (m.air || m.grinding) bu = Y_AXIS;
+    if (m.wallriding || m.swinging) bu = v_norm(v_add(Y_AXIS, v_scale(lean_out(m),
+        0.8)));
+    a.board_up = v_norm(v_lerp(a.board_up, bu, ease(14.0, dt)));
+    ty: f32 = m.facing;
+    if (m.riding) ty = a.board_yaw - PI * 0.5;
+    a.yaw = approach_angle(a.yaw, ty, ease(18.0, dt));
+    tu: V3 = Y_AXIS;
+    if (m.wallriding || m.swinging) {
+        // Out from the wall he rides, or the pole he swings round.
+        tu = v_norm(v_add(Y_AXIS, v_scale(lean_out(m), 0.8)));
+        a.board_up = v_norm(v_lerp(a.board_up, tu, ease(14.0, dt)))
+    } else if (m.riding) {
+        // Lean into the bend.
+        tu = v_rotate(a.board_up, yaw_dir(m.heading), -a.lean * 0.3)
+    }
+    a.up = v_norm(v_lerp(a.up, tu, ease(14.0, dt)))
+}
+
+// How far through his style move he is, 0 to 1, or -1 if none is under
+// way.
+style_progress(m: *Mover): f32 {
+    d: f32 = KICKFLIP_TIME;
+    if (m.style_kind == STYLE_SPIN) d = SPIN_TIME;
+    if (m.style_kind == STYLE_FLIP) d = FLIP_TIME;
+    if (m.style_kind == STYLE_ROLL) d = ROLL_TIME;
+    if (m.style_t >= d) return -1.0;
+    m.style_t / d
+}
+
+// A whole turn, eased in and out.
+style_turn(p: f32): f32 {
+    if (p < 0.0) return 0.0;
+    TAU * smoothstepf(0.0, 1.0, p)
+}
+
+// Tucked through a kickflip, a flip, or a roll; arms out through a spin.
+style_limbs(m: *Mover, l: Limbs): Limbs {
+    p: f32 = style_progress(m);
+    if (p < 0.0) return l;
+    k: f32 = sinf(p * PI);
+    t: Limbs = l;
+    if (m.style_kind == STYLE_SPIN) {
+        t.arm_roll[0] = 1.5;
+        t.arm_roll[1] = 1.5
+    } else {
+        t.leg_len[0] = 0.62;
+        t.leg_len[1] = 0.62;
+        t.leg_pitch[0] = 0.5;
+        t.leg_pitch[1] = 0.5;
+        t.arm_roll[0] = 0.3;
+        t.arm_roll[1] = 0.3;
+        t.arm_pitch[0] = 0.9;
+        t.arm_pitch[1] = 0.9
+    }
+    mix_limbs(l, t, k)
+}
+
+// Grabbing the board: tucked up, a hand down to its edge.
+grab_limbs(): Limbs {
+    l: Limbs = no_limbs();
+    l.leg_len[0] = 0.6;
+    l.leg_len[1] = 0.6;
+    l.leg_pitch[0] = 0.3;
+    l.leg_pitch[1] = 0.3;
+    l.leg_roll[0] = 0.1;
+    l.leg_roll[1] = 0.1;
+    l.arm_roll[0] = 1.3;
+    l.arm_roll[1] = 0.15;
+    l.arm_pitch[1] = 1.05;
+    l.drop = -0.04;
+    l
+}
+
+// On the course, his flip turns him and the board head over heels about
+// his middle, across the way he flies.
+tumble_m: []f32 = new f32[16](0.0);
+
+tumble_tmp: []f32 = new f32[16](0.0);
+
+tumbling: bool = false;
+
+set_tumble(m: *Mover, a: *Anim, origin: V3) {
+    tumbling = m.course && absf(m.flip) > 0.001;
+    if (!tumbling) return;
+    travel: V3 = v3(m.vx, 0.0, m.vz);
+    if (v_len(travel) < 0.1) travel = yaw_dir(m.heading);
+    axis: V3 = v_norm(v_cross(Y_AXIS, travel));
+    pivot: V3 = v_madd(origin, a.up, 0.5);
+    mat_identity(tumble_m);
+    mat_translate(tumble_m, pivot);
+    mat_rotate(tumble_m, axis, m.flip);
+    mat_translate(tumble_m, v_scale(pivot, -1.0))
+}
+
+apply_tumble(mat: []f32) {
+    if (!tumbling) return;
+    mat_mul(tumble_tmp, tumble_m, mat);
+    mat_copy(mat, tumble_tmp)
+}
+
+// Fill the draw list for the guy at pos (x, z from it; height from the
+// animation) and his board.
+pose(a: *Anim, m: *Mover, pos: V3) {
+    ndraw = 0;
+    limbs: Limbs = mix_limbs(walk_limbs(m, a), ride_limbs(m, a), a.ride);
+    limbs = mix_limbs(limbs, grind_limbs(), a.grind);
+    limbs = mix_limbs(limbs, climb_limbs(m), a.climb);
+    if (m.since_kick < 0.35) limbs = mix_limbs(limbs, kick_limbs(), 1.0 - m.since_kick / 0.35);
+    limbs = style_limbs(m, limbs);
+    limbs = mix_limbs(limbs, grab_limbs(), a.grab);
+    // Winding up: crouched, ready to spring.
+    for i in 0..2 limbs.leg_len[i] = limbs.leg_len[i] * (1.0 - 0.22 * a.crouch);
+    limbs.drop = limbs.drop - 0.05 * a.crouch;
+    wobble: f32 = 0.0;
+    if (m.course && m.sketch_t < 0.7) {
+        k: f32 = 1.0 - m.sketch_t / 0.7;
+        wobble = sinf(m.sketch_t * 26.0) * 0.22 * k;
+        limbs.arm_roll[0] = lerpf(limbs.arm_roll[0], 2.3, k);
+        limbs.arm_roll[1] = lerpf(limbs.arm_roll[1], 2.3, k)
+    }
+    if (m.swinging) {
+        // The arm nearer the pole reaches up to it.
+        side: int = 0;
+        to_pole: V3 = v3(pole_x[m.pole_i] - m.x, 0.0, pole_z[m.pole_i] - m.z);
+        x_axis: V3 = v_cross(Y_AXIS, yaw_dir(a.yaw));
+        if (v_dot(to_pole, x_axis) > 0.0) side = 1;
+        limbs.arm_roll[side] = 2.5;
+        limbs.arm_pitch[side] = 0.0
+    }
+    if (m.wallriding && !m.riding) {
+        // Running along the wall: a quick stride.
+        stride: f32 = sinf(m.walk_phase * TAU) * 0.6;
+        limbs.leg_pitch[0] = stride;
+        limbs.leg_pitch[1] = -stride;
+        limbs.leg_len[0] = 1.0;
+        limbs.leg_len[1] = 1.0
+    }
+    p: f32 = style_progress(m);
+    feet: V3 = v3(pos.x, a.y, pos.z);
+    if (m.air || m.grinding || m.climbing) feet.y = pos.y;
+    origin: V3 = v_madd(feet, a.up, DECK_TOP * a.ride);
+    // Hopping on or off the board.
+    if (m.since_mount < 0.25) origin.y = origin.y + sinf(m.since_mount / 0.25 * PI) * 0.18;
+    spin: f32 = 0.0;
+    if (m.style_kind == STYLE_SPIN) spin = style_turn(p) * m.style_dir;
+    if (m.course) {
+        spin = m.spin;
+        if (m.fakie) spin = spin + PI
+    }
+    // Wound up, his body turns against the way he will spin; the board
+    // stays.
+    wound: f32 = 0.0;
+    if (m.course) wound = m.wind_x * 0.7;
+    frame_m(root_m, yaw_dir(a.yaw + spin + wound), a.up, origin);
+    set_tumble(m, a, origin);
+    apply_tumble(root_m);
+    // And leans against the way he will flip.
+    if (m.course && absf(m.wind_y) > 0.01) {
+        back: f32 = 0.22 * m.wind_y;
+        if (m.fakie) back = -back;
+        mat_rotate(root_m, Z_AXIS, back)
+    }
+    // A manual: he leans back toward the tail (or the nose).
+    if (m.manual) {
+        // Riding switch, the end that trails is the nose.
+        lean: f32 = 0.16 * m.manual_dir;
+        if (m.fakie) lean = -lean;
+        mat_rotate(root_m, Z_AXIS, lean)
+    }
+    if (wobble != 0.0) mat_rotate(root_m, Z_AXIS, wobble);
+    // A flip or a roll turns him head over heels about his middle, a roll
+    // low to the ground.
+    if (m.style_kind == STYLE_FLIP || m.style_kind == STYLE_ROLL) {
+        pivot: f32 = 0.5;
+        if (m.style_kind == STYLE_ROLL) pivot = 0.36;
+        mat_translate(root_m, v3(0.0, pivot, 0.0));
+        mat_rotate(root_m, X_AXIS, style_turn(p));
+        mat_translate(root_m, v3(0.0, -pivot, 0.0))
+    }
+    sy: f32 = 1.0 + a.squash;
+    if (m.air && !m.riding) sy = sy + clampf(m.vy * 0.012, -0.05, 0.07);
+    sxz: f32 = 1.0 / sqrtf(sy);
+    mat_translate(root_m, v3(0.0, limbs.drop, 0.0));
+    mat_scale(root_m, v3(sxz, sy, sxz));
+    mat_copy(body_m, root_m);
+    breath: f32 = 1.0 + 0.01 * sinf(a.time * 2.1);
+    mat_translate(body_m, v3(0.0, LEG_H, 0.0));
+    mat_scale(body_m, v3(1.0, breath, 1.0));
+    mat_translate(body_m, v3(0.0, -LEG_H, 0.0));
+    add_draw(PART_BODY, body_m);
+    lw: f32 = (GUY_W - LEG_GAP) * 0.25;
+    for i in 0..2 {
+        s: f32 = side_sign(i);
+        mat_copy(part_m, root_m);
+        mat_translate(part_m, v3(s * (lw + LEG_GAP * 0.5), LEG_H, 0.0));
+        mat_rotate(part_m, X_AXIS, -limbs.leg_pitch[i]);
+        mat_rotate(part_m, Z_AXIS, s * limbs.leg_roll[i]);
+        mat_scale(part_m, v3(1.0, limbs.leg_len[i], 1.0));
+        add_draw(PART_LEG, part_m);
+        mat_copy(part_m, body_m);
+        mat_translate(part_m, v3(s * (GUY_W * 0.5 + 0.01), 0.68, 0.0));
+        mat_rotate(part_m, Z_AXIS, s * limbs.arm_roll[i]);
+        mat_rotate(part_m, X_AXIS, -limbs.arm_pitch[i]);
+        add_draw(PART_ARM, part_m)
+    }
+    pose_board(a, m, pos, spin)
+}
+
+pose_board(
+    a: *Anim,
+    m: *Mover,
+    pos: V3,
+    spin: f32
+) {
+    // Carried on his back, slung across it, wheels out.
+    hfwd: V3 = v_norm(mat_vector(body_m, v3(0.5, 1.0, 0.0)));
+    hup: V3 = v_norm(mat_vector(body_m, v3(0.0, 0.0, 1.0)));
+    hpos: V3 = mat_point(body_m, v3(-0.03, 0.45, -GUY_D * 0.5 - DECK_TOP - 0.01));
+    rfwd: V3 = yaw_dir(a.board_yaw + spin);
+    rup: V3 = a.board_up;
+    // An ollie pops the nose.
+    if (m.riding && m.since_hop < 0.35) {
+        pop: f32 = sinf(m.since_hop / 0.35 * PI) * 0.35;
+        r: V3 = v_cross(rup, rfwd);
+        rfwd = v_rotate(rfwd, r, -pop);
+        rup = v_rotate(rup, r, -pop)
+    }
+    rup = v_rotate(rup, yaw_dir(m.heading), -a.lean * 0.15);
+    // A manual lifts the nose, the board pivoting on its tail.
+    if (m.manual) {
+        r: V3 = v_cross(rup, rfwd);
+        tilt: f32 = -0.3 * m.manual_dir;
+        if (m.fakie) tilt = -tilt;
+        rfwd = v_rotate(rfwd, r, tilt);
+        rup = v_rotate(rup, r, tilt)
+    }
+    // A kickflip turns the board over under him, about its length.
+    if (m.style_kind == STYLE_KICKFLIP) rup = v_rotate(rup, rfwd, style_turn(style_progress(m)));
+    rpos: V3 = v3(pos.x, a.y, pos.z);
+    if (m.manual) rpos.y = rpos.y + 0.08;
+    if (m.air || m.grinding) rpos.y = pos.y;
+    // Pulled up to him in a grab.
+    rpos.y = rpos.y + 0.13 * a.grab;
+    t: f32 = a.ride;
+    f: V3 = v_norm(v_lerp(hfwd, rfwd, t));
+    u: V3 = v_norm(v_lerp(hup, rup, t));
+    frame_m(board_m, f, u, v_lerp(hpos, rpos, t));
+    apply_tumble(board_m);
+    add_draw(PART_BOARD, board_m)
+}

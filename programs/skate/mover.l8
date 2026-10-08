@@ -1,0 +1,1078 @@
+tag skate;
+
+// The guy moves over the arena's blocks by a few rules that apply
+// everywhere, so that they combine:
+//
+// - He has one velocity, kept across walking, riding, and the air. E gets on
+//   or off the board at any time.
+// - Walking, he goes where the arrows point and steps up curbs. Riding, the
+//   board turns smoothly toward the arrows, and while they are held he
+//   pushes whenever he is slower than a cruise; let go and he coasts. Slopes
+//   speed him up going down and slow him going up.
+// - A jump pushes away from what he touches: off the ground, along the
+//   slope's normal; in the air beside a wall, away from the wall and up.
+//   Each jump in the air before landing is a little weaker.
+// - On the board, coming down along an edge where the ground steps down, or
+//   a pool's lip, he grinds it, keeping his speed, and flies off its end.
+//   Off the top of a ramp he flies; up a pool's wall to its lip he pops
+//   straight up and turns around. Landing on a slope turns his fall into
+//   speed down it.
+// - On foot in the air, pushing toward a wall whose top he can reach, he
+//   climbs up onto it.
+// - Brushing along a tall wall in the air, fast enough, he rides it (or on
+//   foot, runs along it) for a moment, gravity light; Space kicks off it.
+// - Space beside a lamp post, moving, grabs it, and so does passing one with
+//   Space held: he swings around it while Space is held, and lets go flying
+//   along the way he swings.
+// - X is style. On the board in the air it kickflips, or with an arrow to
+//   the side, spins a full turn that way; held on the ground, it is a
+//   manual, rolling on without drag. On foot in the air it is a flip; on the
+//   ground, a roll that bursts him forward.
+//
+// Walls only stop him, with a squish when riding. He never falls over.
+
+// Physics steps at 120 Hz.
+const STEP_DT: f32 = 0.008333334;
+
+const WALK_SPEED: f32 = 3.2;
+
+const WALK_ACCEL: f32 = 30.0;
+
+// Faster than a walk, he slows only this quickly: he runs it out.
+const RUN_OUT: f32 = 2.5;
+
+const AIR_CONTROL: f32 = 6.0;
+
+const CRUISE: f32 = 5.5;
+
+const PUSH_ACCEL: f32 = 10.0;
+
+const PUSH_PERIOD: f32 = 0.5;
+
+const TURN_RATE: f32 = 4.0;
+
+const ROLL_DRAG: f32 = 0.35;
+
+const GRASS_DRAG: f32 = 3.0;
+
+const GRIND_DRAG: f32 = 0.3;
+
+// Style: how long each move takes, and how fast a roll bursts him along.
+const STYLE_KICKFLIP: int = 0;
+
+const STYLE_SPIN: int = 1;
+
+const STYLE_FLIP: int = 2;
+
+const STYLE_ROLL: int = 3;
+
+const KICKFLIP_TIME: f32 = 0.38;
+
+const SPIN_TIME: f32 = 0.55;
+
+const FLIP_TIME: f32 = 0.5;
+
+const ROLL_TIME: f32 = 0.42;
+
+const ROLL_SPEED: f32 = 6.5;
+
+// How hard a ramp pulls the board along it, per unit of slope.
+const SLOPE_PULL: f32 = 8.0;
+
+const MAX_SPEED: f32 = 9.0;
+
+const GRAVITY: f32 = 30.0;
+
+const HOP_SPEED: f32 = 6.2;
+
+const KICK_OUT: f32 = 4.2;
+
+const KICK_UP: f32 = 6.8;
+
+// How far above his feet he can reach a wall's top to climb it.
+const REACH: f32 = 1.05;
+
+const CLIMB_TIME: f32 = 0.3;
+
+const RADIUS: f32 = 0.28;
+
+// The highest step he takes in his stride, walking and riding.
+const WALK_STEP: f32 = 0.55;
+
+const RIDE_STEP: f32 = 0.22;
+
+// Wallrides: how fast he must be going, how light gravity is on the wall,
+// and how long he can stay on it.
+const WALLRIDE_SPEED: f32 = 2.5;
+
+const WALLRIDE_GRAVITY: f32 = 9.0;
+
+const WALLRIDE_TIME: f32 = 1.4;
+
+// Swinging round a pole: how near he must be, how slow he may be, and how
+// far round he may go.
+const POLE_REACH: f32 = 1.05;
+
+const SWING_SPEED: f32 = 1.5;
+
+const SWING_MAX: f32 = 9.4;
+
+type Keys = {
+    held: [4]bool;
+    hop: bool;
+    hop_held: bool;
+    board: bool;
+    // X: pressed since the last step, and held now.
+    style: bool;
+    style_held: bool;
+    // On the course (see touch.l8): how hard the steering thumb turns him
+    // and whether one is down; whether the trick pad is held, pressed or let go since the
+    // last step; and the trick it aims at, in half turns to the right and
+    // flips forward.
+    stick_x: f32;
+    stick_on: bool;
+    pad_held: bool;
+    pad_press: bool;
+    pad_release: bool;
+    aim_x: f32;
+    aim_y: f32
+}
+
+type Mover = {
+    x: f32;
+    z: f32;
+    y: f32;
+    prev: V3;
+    vx: f32;
+    vz: f32;
+    // Which way the board points, and its speed along that way.
+    heading: f32;
+    speed: f32;
+    turn_rate: f32;
+    facing: f32;
+    riding: bool;
+    air: bool;
+    vy: f32;
+    since_push: f32;
+    pushing: bool;
+    since_hop: f32;
+    // After a pop from a pool's lip, the arrows held then do not steer him
+    // until they change.
+    lock: bool;
+    lock_dir: V3;
+    // How fast he would fly off the ground here: up a ramp, the climb.
+    kick: f32;
+    // Grinding a rail, the way along it he goes (+1 or -1), and how long a
+    // side arrow has been held.
+    grinding: bool;
+    rail: Rail;
+    grind_dir: f32;
+    slip: f32;
+    since_grind: f32;
+    // The style move under way, how long ago it began, and for a spin,
+    // which way (+1 turns toward +yaw).
+    style_kind: int;
+    style_t: f32;
+    style_dir: f32;
+    manual: bool;
+    // Jumps since he last stood on something, and when he last pushed off
+    // a wall.
+    air_jumps: int;
+    since_kick: f32;
+    // A jump pressed in the air a moment before reaching a wall still kicks.
+    jump_buffer: f32;
+    // Riding along a wall: which side it is on, and for how long.
+    wallriding: bool;
+    wall_d: int;
+    wall_t: f32;
+    since_wall: f32;
+    // Swinging round a pole: which, how far out, at what angle, how fast
+    // (radians a second, signed), and how far round so far.
+    swinging: bool;
+    pole_i: int;
+    swing_r: f32;
+    swing_a: f32;
+    swing_w: f32;
+    swing_turned: f32;
+    since_swing: f32;
+    // For naming the line: time in the air, how far he turned there, and
+    // whether he popped from a lip; how long the manual has lasted.
+    air_time: f32;
+    air_turn: f32;
+    popped: bool;
+    manual_t: f32;
+    // Climbing onto a wall's top: from where to where, and how far along.
+    climbing: bool;
+    climb_from: V3;
+    climb_to: V3;
+    climb_t: f32;
+    since_mount: f32;
+    // The latest landing's and bonk's speeds, for the squash.
+    land: f32;
+    bonk: f32;
+    walk_phase: f32;
+    spawn: V3;
+    spawn_yaw: f32;
+    // On the slope course (see slope.l8): how far across the fall line he
+    // carves; his flip and spin so far in the air, how fast they turn, and
+    // where they end up; whether he rides switch; how long he
+    // has grabbed; the rail he rides and how far along it; the ground's
+    // normal; which end a manual is on (1 the tail); since a sketchy
+    // landing; and the finish.
+    course: bool;
+    carve: f32;
+    flip: f32;
+    flip_w: f32;
+    flip_goal: f32;
+    spin: f32;
+    spin_w: f32;
+    spin_goal: f32;
+    fakie: bool;
+    grab_t: f32;
+    ollied: bool;
+    air_tricks: int;
+    crail: int;
+    crail_t: f32;
+    ground_n: V3;
+    manual_dir: f32;
+    sketch_t: f32;
+    finished: bool;
+    finish_t: f32;
+    // Crouched on the trick pad: the trick aimed at (flips forward, half
+    // turns to the right), and eased, for his wind-up; a jump waiting for
+    // the lip ahead, and its trick; and whether the pad, pressed in the
+    // air, is a grab.
+    winding: bool;
+    aim_flips: int;
+    aim_halves: int;
+    wind_x: f32;
+    wind_y: f32;
+    pop_pending: bool;
+    pend_flips: int;
+    pend_halves: int;
+    pad_grab: bool
+}
+
+new_mover(x: f32, z: f32, yaw: f32): *Mover@new {
+    m: *Mover = new Mover {
+        x: x,
+        z: z,
+        y: 0.0,
+        prev: v3(x, 0.0, z),
+        vx: 0.0,
+        vz: 0.0,
+        heading: yaw,
+        speed: 0.0,
+        turn_rate: 0.0,
+        facing: yaw,
+        riding: false,
+        air: false,
+        vy: 0.0,
+        since_push: 10.0,
+        pushing: false,
+        since_hop: 10.0,
+        lock: false,
+        lock_dir: v3(0.0, 0.0, 0.0),
+        kick: 0.0,
+        grinding: false,
+        rail: Rail { axis: 0, line: 0.0, h: 0.0 },
+        grind_dir: 1.0,
+        slip: 0.0,
+        since_grind: 10.0,
+        style_kind: 0,
+        style_t: 10.0,
+        style_dir: 1.0,
+        manual: false,
+        air_jumps: 0,
+        since_kick: 10.0,
+        jump_buffer: 0.0,
+        wallriding: false,
+        wall_d: 0,
+        wall_t: 0.0,
+        since_wall: 10.0,
+        swinging: false,
+        pole_i: 0,
+        swing_r: 1.0,
+        swing_a: 0.0,
+        swing_w: 0.0,
+        swing_turned: 0.0,
+        since_swing: 10.0,
+        air_time: 0.0,
+        air_turn: 0.0,
+        popped: false,
+        manual_t: 0.0,
+        climbing: false,
+        climb_from: v3(0.0, 0.0, 0.0),
+        climb_to: v3(0.0, 0.0, 0.0),
+        climb_t: 0.0,
+        since_mount: 10.0,
+        land: 0.0,
+        bonk: 0.0,
+        walk_phase: 0.0,
+        spawn: v3(x, 0.0, z),
+        spawn_yaw: yaw,
+        course: false,
+        carve: 0.0,
+        flip: 0.0,
+        flip_w: 0.0,
+        flip_goal: 0.0,
+        spin: 0.0,
+        spin_w: 0.0,
+        spin_goal: 0.0,
+        fakie: false,
+        grab_t: 0.0,
+        ollied: false,
+        air_tricks: 0,
+        crail: 0,
+        crail_t: 0.0,
+        ground_n: v3(0.0, 1.0, 0.0),
+        manual_dir: 1.0,
+        sketch_t: 10.0,
+        finished: false,
+        finish_t: 0.0,
+        winding: false,
+        aim_flips: 0,
+        aim_halves: 0,
+        wind_x: 0.0,
+        wind_y: 0.0,
+        pop_pending: false,
+        pend_flips: 0,
+        pend_halves: 0,
+        pad_grab: false
+    };
+    reset_mover(m);
+    m
+}
+
+reset_mover(m: *Mover) {
+    m.course = false;
+    m.flip = 0.0;
+    m.spin = 0.0;
+    m.fakie = false;
+    m.grab_t = 0.0;
+    m.manual = false;
+    m.manual_dir = 1.0;
+    m.x = m.spawn.x;
+    m.z = m.spawn.z;
+    m.y = ground_under(m.x, m.z);
+    m.prev = v3(m.x, m.y, m.z);
+    m.vx = 0.0;
+    m.vz = 0.0;
+    m.speed = 0.0;
+    m.heading = m.spawn_yaw;
+    m.facing = m.spawn_yaw;
+    m.riding = false;
+    m.air = false;
+    m.lock = false;
+    m.grinding = false;
+    m.climbing = false;
+    m.wallriding = false;
+    m.swinging = false;
+    m.air_jumps = 0;
+    m.vy = 0.0
+}
+
+// Where the arrows point, as a unit vector or zero.
+wish(keys: *Keys): V3 {
+    w: V3 = v3(0.0, 0.0, 0.0);
+    for d in 0..4 {
+        if (keys.held[d]) w = v_add(w, dir_vec(d))
+    }
+    if (v_len(w) < 0.01) return v3(0.0, 0.0, 0.0);
+    v_norm(w)
+}
+
+// The ground he stands on at (x, z): the highest under his footprint.
+ground_under(x: f32, z: f32): f32 {
+    support_height(x, z, RADIUS)
+}
+
+// Whether he can stand at (x, z) from his height now.
+fits(m: *Mover, x: f32, z: f32): bool {
+    step: f32 = WALK_STEP;
+    if (m.riding) step = RIDE_STEP;
+    // In the air he lands on what is not much above his feet.
+    if (m.air) step = 0.15;
+    ground_under(x, z) <= m.y + step
+}
+
+// His motion across the ground, riding or not.
+flat_velocity(m: *Mover): V3 {
+    v3(m.vx, 0.0, m.vz)
+}
+
+// Set his motion across the ground; riding, the board turns to follow it.
+set_flat_velocity(m: *Mover, v: V3) {
+    m.vx = v.x;
+    m.vz = v.z;
+    s: f32 = v_len(v);
+    if (m.riding) {
+        m.speed = s;
+        if (s > 0.1) m.heading = dir_yaw(v)
+    } else if (s > 0.1) m.facing = dir_yaw(v)
+}
+
+// Off the ground, a jump pushes along the ground's normal: straight up from
+// the flat, out from a slope (a little less than straight along it).
+hop(m: *Mover) {
+    n: V3 = surface_normal(m.x, m.z);
+    m.air = true;
+    m.vy = HOP_SPEED * n.y;
+    set_flat_velocity(m, v_madd(flat_velocity(m), v3(n.x, 0.0, n.z), HOP_SPEED * 0.6));
+    m.since_hop = 0.0
+}
+
+surface_normal(x: f32, z: f32): V3 {
+    e: f32 = 0.05;
+    gx: f32 = (surface_at(x + e, z) - surface_at(x - e, z)) / (2.0 * e);
+    gz: f32 = (surface_at(x, z + e) - surface_at(x, z - e)) / (2.0 * e);
+    v_norm(v3(-gx, 1.0, -gz))
+}
+
+// The ground's slope along a direction, rise over run.
+slope_along(x: f32, z: f32, d: V3): f32 {
+    e: f32 = 0.1;
+    (surface_at(x + d.x * e, z + d.z * e) - surface_at(x - d.x * e, z - d.z * e)) / (2.0 * e)
+}
+
+// ---- jumping off walls ----
+// The side (a direction) on which a wall stands right beside him, the one
+// most in the way he moves or wants to go; -1 if none.
+wall_side(m: *Mover, keys: *Keys): int {
+    best: int = -1;
+    best_score: f32 = -10.0;
+    v: V3 = v_add(v_norm(flat_velocity(m)), wish(keys));
+    for d in 0..4 {
+        dv: V3 = dir_vec(d);
+        if (!fits(m, m.x + dv.x * 0.25, m.z + dv.z * 0.25)) {
+            score: f32 = v_dot(dv, v);
+            if (score > best_score) {
+                best = d;
+                best_score = score
+            }
+        }
+    }
+    best
+}
+
+// A jump in the air beside a wall: away from it and up, keeping some of his
+// motion along it. Each air jump before landing is weaker than the last.
+wall_kick(m: *Mover, keys: *Keys): bool {
+    d: int = wall_side(m, keys);
+    if (d < 0) return false;
+    n: V3 = v_scale(dir_vec(d), -1.0);
+    v: V3 = flat_velocity(m);
+    along: V3 = v_reject(v, n);
+    tire: f32 = powf(0.78, m.air_jumps as f32);
+    set_flat_velocity(m, v_add(v_scale(n, KICK_OUT), v_scale(along, 0.8)));
+    m.vy = maxf(m.vy, 0.0) * 0.3 + KICK_UP * tire;
+    m.air_jumps = m.air_jumps + 1;
+    m.since_kick = 0.0;
+    m.lock = false;
+    if (m.wallriding) {
+        m.wallriding = false;
+        m.since_wall = 0.0
+    }
+    note(T_WALL_KICK);
+    true
+}
+
+// ---- climbing ----
+// On foot in the air, pushing toward a wall whose top he can reach: climb.
+try_climb(m: *Mover, keys: *Keys) {
+    w: V3 = wish(keys);
+    if (m.riding || !m.air || v_len(w) < 0.5) return;
+    for d in 0..4 {
+        dv: V3 = dir_vec(d);
+        if (v_dot(w, dv) > 0.6 && !m.climbing) {
+            // The wall's face: the cell edge just beyond his footprint.
+            reach_x: f32 = m.x + dv.x * (RADIUS + 0.12);
+            reach_z: f32 = m.z + dv.z * (RADIUS + 0.12);
+            top: f32 = support_height(reach_x, reach_z, 0.05);
+            if (top > m.y + 0.15 && top <= m.y + REACH) {
+                // Stand just past the face, all on top of the wall's cell.
+                wi: int = cell_of(reach_x + dv.x * 0.06);
+                wj: int = cell_of(reach_z + dv.z * 0.06);
+                tx: f32 = m.x;
+                tz: f32 = m.z;
+                if (d == 0) tx = wi as f32 + RADIUS + 0.02;
+                if (d == 2) tx = (wi + 1) as f32 - RADIUS - 0.02;
+                if (d == 1) tz = wj as f32 + RADIUS + 0.02;
+                if (d == 3) tz = (wj + 1) as f32 - RADIUS - 0.02;
+                if (ground_under(tx, tz) <= top + 0.05) {
+                    m.climbing = true;
+                    note(T_CLIMB);
+                    m.climb_from = v3(m.x, m.y, m.z);
+                    m.climb_to = v3(tx, top, tz);
+                    m.climb_t = 0.0;
+                    m.facing = dir_yaw(dv);
+                    m.vx = 0.0;
+                    m.vz = 0.0;
+                    m.vy = 0.0
+                }
+            }
+        }
+    }
+}
+
+// Up first, then over the edge.
+step_climb(m: *Mover, dt: f32) {
+    m.climb_t = m.climb_t + dt / CLIMB_TIME;
+    t: f32 = minf(m.climb_t, 1.0);
+    up: f32 = smoothstepf(0.0, 0.65, t);
+    over: f32 = smoothstepf(0.35, 1.0, t);
+    m.y = lerpf(m.climb_from.y, m.climb_to.y + 0.02, up);
+    m.x = lerpf(m.climb_from.x, m.climb_to.x, over);
+    m.z = lerpf(m.climb_from.z, m.climb_to.z, over);
+    if (t >= 1.0) {
+        m.climbing = false;
+        m.air = false;
+        m.air_jumps = 0;
+        m.y = m.climb_to.y
+    }
+}
+
+// ---- grinding ----
+rail_dir(r: Rail): V3 {
+    if (r.axis == 0) return v3(1.0, 0.0, 0.0);
+    v3(0.0, 0.0, 1.0)
+}
+
+// Coming down along a rail on the board: lock onto it.
+try_grind(m: *Mover) {
+    if (!m.riding || !m.air || m.vy > 0.5 || m.since_grind < 0.25 || m.speed < 1.0) return;
+    d: V3 = yaw_dir(m.heading);
+    r: Rail = Rail { axis: 0, line: 0.0, h: 0.0 };
+    if (!find_rail(m.x, m.z, m.y, d, &r)) return;
+    m.grinding = true;
+    m.rail = r;
+    along: f32 = v_dot(d, rail_dir(r));
+    m.grind_dir = signf(along);
+    m.speed = maxf(m.speed * absf(along), 2.0);
+    m.heading = dir_yaw(v_scale(rail_dir(r), m.grind_dir));
+    m.land = -m.vy;
+    m.y = r.h;
+    m.vy = 0.0;
+    m.air = false;
+    m.air_jumps = 0;
+    m.slip = 0.0;
+    s: f32 = m.x;
+    if (r.axis == 1) s = m.z;
+    if (pool_lip(r.axis, r.line, s) >= 0.0) note(T_COPING) else note(T_GRIND)
+}
+
+// Off the rail into the air, with some motion to one side.
+leave_rail(m: *Mover, vy: f32, side: V3) {
+    m.grinding = false;
+    m.since_grind = 0.0;
+    m.air = true;
+    m.vy = vy;
+    v: V3 = v_add(v_scale(rail_dir(m.rail), m.grind_dir * m.speed), side);
+    set_flat_velocity(m, v)
+}
+
+step_grind(m: *Mover, keys: *Keys, dt: f32) {
+    r: Rail = m.rail;
+    dir: V3 = v_scale(rail_dir(r), m.grind_dir);
+    s: f32 = m.x;
+    if (r.axis == 1) s = m.z;
+    // Down a sloping rail he speeds up, up one he slows.
+    ahead: f32 = rail_height(r.axis, r.line, s + m.grind_dir * 0.1);
+    if (ahead >= 0.0) m.speed = m.speed - (ahead - m.y) / 0.1 * SLOPE_PULL * dt;
+    m.speed = maxf(m.speed - GRIND_DRAG * dt, 1.5);
+    // A side arrow held a moment slips him off that way.
+    w: V3 = wish(keys);
+    side: V3 = v_reject(w, rail_dir(r));
+    if (v_len(side) > 0.5) m.slip = m.slip + dt else m.slip = 0.0;
+    if (m.slip > 0.15) {
+        leave_rail(m, 2.0, v_scale(side, 2.0));
+        return
+    }
+    ns: f32 = s + m.grind_dir * m.speed * dt;
+    // Something in the way along the rail stops him.
+    ax: f32 = m.x;
+    az: f32 = m.z;
+    if (r.axis == 0) ax = ns else az = ns;
+    if (ground_under(ax, az) > m.y + 0.3) {
+        m.bonk = m.speed;
+        m.speed = 0.0;
+        leave_rail(m, 1.0, v3(0.0, 0.0, 0.0));
+        return
+    }
+    h: f32 = rail_height(r.axis, r.line, ns);
+    if (h < 0.0 || absf(h - m.y) > 0.15) {
+        // Off its end.
+        leave_rail(m, 1.5, v3(0.0, 0.0, 0.0));
+        return
+    }
+    // Along the rail, and drawn quickly onto its line.
+    k: f32 = ease(30.0, dt);
+    if (r.axis == 0) {
+        m.x = ns;
+        m.z = lerpf(m.z, r.line, k)
+    } else {
+        m.z = ns;
+        m.x = lerpf(m.x, r.line, k)
+    }
+    m.y = h;
+    m.heading = dir_yaw(dir);
+    m.vx = dir.x * m.speed;
+    m.vz = dir.z * m.speed
+}
+
+// ---- riding and walking ----
+// At a pool's lip, going out: pop straight up and turn around.
+check_lip(m: *Mover, keys: *Keys) {
+    i: int = cell_of(m.x);
+    j: int = cell_of(m.z);
+    if (kind_at(i, j) != CELL_QUARTER || m.air) return;
+    p: Pool = pools[cell_pool[j * ARENA_W + i]];
+    out: V3 = v3(0.0, 0.0, 0.0);
+    u: f32 = pool_out(p, m.x, m.z, &out);
+    if (u < p.n - 0.45 || v_dot(yaw_dir(m.heading), out) < 0.3) return;
+    m.air = true;
+    m.vy = minf(3.3 + m.speed * 0.9, 8.5);
+    m.speed = 0.0;
+    m.vx = 0.0;
+    m.vz = 0.0;
+    m.heading = dir_yaw(v_scale(out, -1.0));
+    m.lock = true;
+    m.lock_dir = wish(keys);
+    m.since_hop = 0.0;
+    m.popped = true;
+    note(T_POP)
+}
+
+step_ride(m: *Mover, keys: *Keys, dt: f32) {
+    w: V3 = wish(keys);
+    m.turn_rate = 0.0;
+    m.pushing = false;
+    if (m.lock) {
+        if (v_len(w) < 0.5 || v_dot(w, m.lock_dir) < 0.9) m.lock = false else w = v3(0.0,
+            0.0, 0.0)
+    }
+    on_wall: bool = kind_at(cell_of(m.x), cell_of(m.z)) == CELL_QUARTER;
+    if (v_len(w) > 0.5) {
+        diff: f32 = wrap_angle(dir_yaw(w) - m.heading);
+        rate: f32 = clampf(diff * 8.0, -TURN_RATE, TURN_RATE);
+        if (m.air) rate = rate * 0.5;
+        m.turn_rate = rate;
+        m.heading = wrap_angle(m.heading + rate * dt);
+        if (m.air) m.air_turn = m.air_turn + absf(rate) * dt;
+        along: f32 = cosf(diff);
+        // Turning back hard sheds speed, so U-turns stay tight.
+        if (along < -0.3 && !m.air) m.speed = maxf(m.speed - 4.0 * dt, 0.0);
+        if (along > 0.3 && !m.air && !on_wall && !m.manual && m.speed < CRUISE) {
+            m.speed = minf(m.speed + PUSH_ACCEL * along * dt, CRUISE);
+            m.pushing = true
+        }
+    }
+    if (m.pushing && m.since_push > PUSH_PERIOD) m.since_push = 0.0;
+    d: V3 = yaw_dir(m.heading);
+    if (!m.air) {
+        slope: f32 = slope_along(m.x, m.z, d);
+        // The kick off a ramp's top comes from the ramp's own slope, not the
+        // drop beyond its edge; past the edge, while his footprint still
+        // rests on the ramp, he keeps it.
+        ci: int = cell_of(m.x);
+        cj: int = cell_of(m.z);
+        if (kind_at(ci, cj) == CELL_RAMP) {
+            own: f32 = (surface_in(ci, cj, m.x + d.x * 0.1, m.z + d.z * 0.1) - surface_in(ci,
+                cj, m.x - d.x * 0.1, m.z - d.z * 0.1)) / 0.2;
+            m.kick = maxf(own * m.speed * 2.4, 0.0)
+        } else if (m.y < surface_at(m.x, m.z) + 0.01) m.kick = 0.0;
+        m.speed = m.speed - slope * SLOPE_PULL * dt;
+        drag: f32 = ROLL_DRAG;
+        if (kind_at(cell_of(m.x), cell_of(m.z)) == CELL_GRASS) drag = GRASS_DRAG;
+        if (m.manual) drag = 0.0;
+        if (m.speed > 0.0) m.speed = maxf(m.speed - drag * dt, 0.0) else m.speed = minf(m.speed + drag * dt,
+            0.0)
+    }
+    // Rolling backward, he swings around to roll nose first.
+    if (m.speed < 0.0) {
+        m.heading = wrap_angle(m.heading + PI);
+        m.speed = -m.speed;
+        d = yaw_dir(m.heading)
+    }
+    m.speed = minf(m.speed, MAX_SPEED);
+    m.vx = d.x * m.speed;
+    m.vz = d.z * m.speed;
+    check_lip(m, keys)
+}
+
+step_walk(m: *Mover, keys: *Keys, dt: f32) {
+    w: V3 = wish(keys);
+    v: V3 = flat_velocity(m);
+    if (m.air) {
+        // A little steering in the air, without slowing him.
+        t: V3 = v_scale(w, maxf(WALK_SPEED, v_len(v)));
+        if (v_len(w) > 0.5) v = v_madd(v, v_sub(t, v), minf(1.0, AIR_CONTROL * dt / maxf(v_len(v_sub(t,
+            v)), 0.001)))
+    } else {
+        // He runs out speed above a walk; within it, goes where he is told.
+        t: V3 = v_scale(w, WALK_SPEED);
+        gap: V3 = v_sub(t, v);
+        rate: f32 = WALK_ACCEL;
+        if (v_len(v) > WALK_SPEED + 0.3 && v_dot(w, v_norm(v)) > 0.3) rate = RUN_OUT;
+        // Mid-roll, he goes where the roll takes him.
+        if (m.style_kind == STYLE_ROLL && m.style_t < ROLL_TIME) rate = 0.0;
+        v = v_madd(v, gap, minf(1.0, rate * dt / maxf(v_len(gap), 0.001)))
+    }
+    m.vx = v.x;
+    m.vz = v.z;
+    if (v_len(w) > 0.5) m.facing = approach_angle(m.facing, dir_yaw(w), ease(16.0,
+        dt))
+}
+
+// Move across the ground, one axis at a time so he slides along walls.
+step_move(m: *Mover, dt: f32) {
+    before: f32 = sqrtf(m.vx * m.vx + m.vz * m.vz);
+    hit: bool = false;
+    nx: f32 = m.x + m.vx * dt;
+    if (fits(m, nx, m.z)) m.x = nx else {
+        m.vx = 0.0;
+        hit = true
+    }
+    nz: f32 = m.z + m.vz * dt;
+    if (fits(m, m.x, nz)) m.z = nz else {
+        m.vz = 0.0;
+        hit = true
+    }
+    if (push_off_poles(m)) hit = true;
+    if (hit && m.riding) {
+        // The board follows what is left of its motion along the wall.
+        left: f32 = sqrtf(m.vx * m.vx + m.vz * m.vz);
+        if (left > 0.3) {
+            m.heading = dir_yaw(v3(m.vx, 0.0, m.vz));
+            m.speed = left
+        } else m.speed = 0.0;
+        if (before - left > 2.0) m.bonk = before - left
+    }
+}
+
+// Poles are thin: he is pushed out of one he runs into, losing his motion
+// into it. Whether he touched one.
+push_off_poles(m: *Mover): bool {
+    hit: bool = false;
+    r: f32 = RADIUS * 0.8 + POLE_RADIUS;
+    for k in 0..npoles {
+        dx: f32 = m.x - pole_x[k];
+        dz: f32 = m.z - pole_z[k];
+        d: f32 = sqrtf(dx * dx + dz * dz);
+        if (d < r && d > 0.0001) {
+            nx: f32 = dx / d;
+            nz: f32 = dz / d;
+            m.x = pole_x[k] + nx * r;
+            m.z = pole_z[k] + nz * r;
+            into: f32 = m.vx * nx + m.vz * nz;
+            if (into < 0.0) {
+                m.vx = m.vx - nx * into;
+                m.vz = m.vz - nz * into
+            }
+            hit = true
+        }
+    }
+    hit
+}
+
+// ---- swinging round poles ----
+// Space beside a pole, moving: grab it and swing round it at his speed.
+try_swing(m: *Mover): bool {
+    if (m.climbing || m.grinding) return false;
+    k: int = pole_near(m.x, m.z, POLE_REACH);
+    if (k < 0) return false;
+    v: V3 = flat_velocity(m);
+    s: f32 = v_len(v);
+    if (s < SWING_SPEED) return false;
+    dx: f32 = m.x - pole_x[k];
+    dz: f32 = m.z - pole_z[k];
+    a: f32 = atan2f(dz, dx);
+    // Round the way he is already going past it.
+    t: V3 = v3(-sinf(a), 0.0, cosf(a));
+    sign: f32 = 1.0;
+    if (v_dot(v, t) < 0.0) sign = -1.0;
+    m.swinging = true;
+    m.pole_i = k;
+    m.swing_r = maxf(sqrtf(dx * dx + dz * dz), 0.8);
+    m.swing_a = a;
+    m.swing_w = sign * s / m.swing_r;
+    m.swing_turned = 0.0;
+    m.vy = 0.0;
+    m.wallriding = false;
+    note(T_POLE);
+    true
+}
+
+// Round and round while Space is held; let go, and he flies off along the
+// way he swings. Something in the way lets go too.
+step_swing(m: *Mover, keys: *Keys, dt: f32) {
+    m.swing_a = m.swing_a + m.swing_w * dt;
+    m.swing_turned = m.swing_turned + absf(m.swing_w) * dt;
+    px: f32 = pole_x[m.pole_i];
+    pz: f32 = pole_z[m.pole_i];
+    nx: f32 = px + m.swing_r * cosf(m.swing_a);
+    nz: f32 = pz + m.swing_r * sinf(m.swing_a);
+    t: V3 = v_scale(v3(-sinf(m.swing_a), 0.0, cosf(m.swing_a)), signf(m.swing_w));
+    speed: f32 = absf(m.swing_w) * m.swing_r;
+    let_go: bool = !keys.hop_held && m.swing_turned > 0.6 || m.swing_turned > SWING_MAX;
+    if (!fits(m, nx, nz)) let_go = true else {
+        m.x = nx;
+        m.z = nz
+    }
+    set_flat_velocity(m, v_scale(t, speed));
+    if (let_go) {
+        // A little faster for the swing, and up.
+        set_flat_velocity(m, v_scale(t, minf(speed * 1.1, MAX_SPEED)));
+        m.swinging = false;
+        m.since_swing = 0.0;
+        m.air = true;
+        m.vy = 2.5
+    }
+}
+
+// ---- riding along walls ----
+// A wall beside him on side d, tall enough to ride: its top well above his
+// feet.
+tall_wall(m: *Mover, d: int): bool {
+    dv: V3 = dir_vec(d);
+    support_height(m.x + dv.x * (RADIUS + 0.3), m.z + dv.z * (RADIUS + 0.3), 0.05) >= m.y + 0.5
+}
+
+// Brushing along a tall wall in the air, fast enough: onto it.
+try_wallride(m: *Mover) {
+    if (!m.air || m.wallriding || m.climbing || m.grinding || m.swinging) return;
+    if (m.since_wall < 0.3 || m.since_kick < 0.25 || m.vy < -5.0) return;
+    v: V3 = flat_velocity(m);
+    s: f32 = v_len(v);
+    if (s < WALLRIDE_SPEED) return;
+    for d in 0..4 {
+        if (!m.wallriding && tall_wall(m, d)) {
+            dv: V3 = dir_vec(d);
+            into: f32 = v_dot(v, dv) / s;
+            along: V3 = v_reject(v, dv);
+            // Glancing: toward or along it, not straight at it.
+            if (into > -0.1 && into < 0.85 && v_len(along) > 1.5) {
+                set_flat_velocity(m, v_scale(v_norm(along), s));
+                // Running, he keeps low along it; riding, an ollie's lift can
+                // carry him up and over onto its top.
+                if (m.riding) m.vy = maxf(m.vy, 1.8) else m.vy = clampf(m.vy, 1.8,
+                    3.2);
+                m.wallriding = true;
+                m.wall_d = d;
+                m.wall_t = 0.0;
+                if (m.riding) note(T_WALLRIDE) else note(T_WALLRUN)
+            }
+        }
+    }
+}
+
+end_wallride(m: *Mover) {
+    m.wallriding = false;
+    m.since_wall = 0.0
+}
+
+step_wallride(m: *Mover, dt: f32) {
+    m.wall_t = m.wall_t + dt;
+    // Drawn in against the wall's face.
+    dv: V3 = dir_vec(m.wall_d);
+    if (dv.x > 0.5) m.x = lerpf(m.x, floorf(m.x + RADIUS + 0.3) - RADIUS - 0.01, ease(20.0,
+        dt));
+    if (dv.x < -0.5) m.x = lerpf(m.x, floorf(m.x - RADIUS - 0.3) + 1.0 + RADIUS + 0.01,
+        ease(20.0, dt));
+    if (dv.z > 0.5) m.z = lerpf(m.z, floorf(m.z + RADIUS + 0.3) - RADIUS - 0.01, ease(20.0,
+        dt));
+    if (dv.z < -0.5) m.z = lerpf(m.z, floorf(m.z - RADIUS - 0.3) + 1.0 + RADIUS + 0.01,
+        ease(20.0, dt));
+    m.vy = m.vy - WALLRIDE_GRAVITY * dt;
+    v: V3 = flat_velocity(m);
+    s: f32 = maxf(v_len(v) - 0.4 * dt, 0.0);
+    if (v_len(v) > 0.01) set_flat_velocity(m, v_scale(v_norm(v), s));
+    nx: f32 = m.x + m.vx * dt;
+    nz: f32 = m.z + m.vz * dt;
+    if (fits(m, nx, nz)) {
+        m.x = nx;
+        m.z = nz;
+        if (!m.riding) m.walk_phase = m.walk_phase + s * dt / 1.1
+    } else end_wallride(m);
+    m.y = m.y + m.vy * dt;
+    ground: f32 = ground_under(m.x, m.z);
+    if (m.y <= ground) {
+        m.y = ground;
+        m.land = -m.vy;
+        m.vy = 0.0;
+        m.air = false;
+        m.air_jumps = 0;
+        end_wallride(m);
+        return
+    }
+    if (!tall_wall(m, m.wall_d) || m.wall_t > WALLRIDE_TIME) end_wallride(m)
+}
+
+// Landing on a slope, the board takes the fall as speed down it.
+land_on_slope(m: *Mover, fall: f32) {
+    e: f32 = 0.05;
+    gx: f32 = (surface_at(m.x + e, m.z) - surface_at(m.x - e, m.z)) / (2.0 * e);
+    gz: f32 = (surface_at(m.x, m.z + e) - surface_at(m.x, m.z - e)) / (2.0 * e);
+    g: f32 = sqrtf(gx * gx + gz * gz);
+    if (g < 0.05) return;
+    down: V3 = v3(-gx / g, 0.0, -gz / g);
+    steep: f32 = g / sqrtf(1.0 + g * g);
+    set_flat_velocity(m, v_madd(flat_velocity(m), down, fall * steep * 0.75));
+    if (fall * steep > 2.5 && !m.popped) note(T_DROP_IN)
+}
+
+step_vertical(m: *Mover, dt: f32) {
+    ground: f32 = ground_under(m.x, m.z);
+    if (!m.air) {
+        if (m.y > ground + 0.05) {
+            // Off a ledge, or flying off the top of a ramp.
+            m.air = true;
+            m.vy = 0.0;
+            if (m.riding) m.vy = m.kick
+        } else {
+            m.y = ground;
+            return
+        }
+    }
+    m.vy = m.vy - GRAVITY * dt;
+    m.y = m.y + m.vy * dt;
+    if (m.y <= ground) {
+        if (m.vy > 0.0) m.y = ground else {
+            fall: f32 = -m.vy;
+            m.land = fall;
+            m.y = ground;
+            m.vy = 0.0;
+            m.air = false;
+            m.air_jumps = 0;
+            if (m.riding) {
+                if (m.air_time > 0.6 && !m.popped) note(T_AIR);
+                if (m.air_turn > 2.6) note(T_180);
+                land_on_slope(m, fall)
+            }
+            m.popped = false;
+            m.air_turn = 0.0
+        }
+    }
+}
+
+// X: a style move, by what he is doing.
+style(m: *Mover, keys: *Keys) {
+    if (m.climbing || m.grinding) return;
+    if (!m.air) {
+        if (m.riding) return;
+        // A roll: tucked, bursting forward the way he faces or moves.
+        d: V3 = yaw_dir(m.facing);
+        w: V3 = wish(keys);
+        if (v_len(w) > 0.5) d = w;
+        set_flat_velocity(m, v_scale(d, maxf(v_len(flat_velocity(m)), ROLL_SPEED)));
+        m.style_kind = STYLE_ROLL;
+        m.style_t = 0.0;
+        note(T_ROLL);
+        return
+    }
+    if (m.riding) {
+        // An arrow to the side spins him that way; otherwise, a kickflip.
+        w: V3 = wish(keys);
+        f: V3 = yaw_dir(m.heading);
+        if (v_len(w) > 0.5 && absf(v_dot(w, f)) < 0.6) {
+            m.style_kind = STYLE_SPIN;
+            m.style_dir = signf(f.z * w.x - f.x * w.z)
+        } else m.style_kind = STYLE_KICKFLIP
+    } else m.style_kind = STYLE_FLIP;
+    m.style_t = 0.0;
+    if (m.style_kind == STYLE_KICKFLIP) note(T_KICKFLIP);
+    if (m.style_kind == STYLE_SPIN) note(T_360);
+    if (m.style_kind == STYLE_FLIP) note(T_FLIP)
+}
+
+step_mover(m: *Mover, keys: *Keys, dt: f32) {
+    m.prev = v3(m.x, m.y, m.z);
+    m.since_push = m.since_push + dt;
+    m.since_hop = m.since_hop + dt;
+    m.since_mount = m.since_mount + dt;
+    m.since_kick = m.since_kick + dt;
+    m.since_grind = m.since_grind + dt;
+    m.since_wall = m.since_wall + dt;
+    m.since_swing = m.since_swing + dt;
+    m.style_t = m.style_t + dt;
+    if (m.air) m.air_time = m.air_time + dt else m.air_time = 0.0;
+    if (m.climbing) {
+        step_climb(m, dt);
+        finish_step(m, keys, dt);
+        return
+    }
+    if (keys.board) {
+        if (m.grinding) leave_rail(m, 1.0, v3(0.0, 0.0, 0.0));
+        m.riding = !m.riding;
+        m.since_mount = 0.0;
+        // His motion carries over: the board points the way he goes.
+        v: V3 = flat_velocity(m);
+        if (m.riding) {
+            m.speed = v_len(v);
+            if (m.speed > 0.3) m.heading = dir_yaw(v) else m.heading = m.facing
+        } else m.facing = m.heading
+    }
+    if (keys.style) style(m, keys);
+    m.manual = m.riding && !m.air && !m.grinding && keys.style_held;
+    if (m.manual) {
+        m.manual_t = m.manual_t + dt;
+        if (m.manual_t - dt < 0.25 && m.manual_t >= 0.25) note(T_MANUAL)
+    } else m.manual_t = 0.0;
+    if (keys.hop) {
+        if (m.grinding) {
+            // Pop off, a little toward a side arrow.
+            leave_rail(m, HOP_SPEED, v_scale(v_reject(wish(keys), rail_dir(m.rail)),
+                1.5));
+            m.since_hop = 0.0
+        } else if (m.swinging) { } else if (try_swing(m)) { } else if (!m.air) {
+            hop(m);
+            if (m.riding) note(T_OLLIE)
+        } else if (!wall_kick(m, keys)) m.jump_buffer = 0.2
+    } else if (keys.hop_held && !m.swinging && m.since_swing > 0.5 && try_swing(m)) { } else if (m.jump_buffer > 0.0) {
+        m.jump_buffer = m.jump_buffer - dt;
+        if (!m.air || m.grinding) m.jump_buffer = 0.0 else if (wall_kick(m, keys)) m.jump_buffer = 0.0
+    }
+    if (m.swinging) {
+        step_swing(m, keys, dt);
+        finish_step(m, keys, dt);
+        return
+    }
+    if (m.grinding) {
+        step_grind(m, keys, dt);
+        finish_step(m, keys, dt);
+        return
+    }
+    if (m.wallriding) {
+        step_wallride(m, dt);
+        finish_step(m, keys, dt);
+        return
+    }
+    if (m.riding) step_ride(m, keys, dt) else step_walk(m, keys, dt);
+    bx: f32 = m.x;
+    bz: f32 = m.z;
+    step_move(m, dt);
+    if (!m.riding && !m.air) {
+        dx: f32 = m.x - bx;
+        dz: f32 = m.z - bz;
+        m.walk_phase = m.walk_phase + sqrtf(dx * dx + dz * dz) / 1.1
+    }
+    try_climb(m, keys);
+    try_wallride(m);
+    if (!m.climbing && !m.wallriding) {
+        try_grind(m);
+        if (!m.grinding) step_vertical(m, dt)
+    }
+    finish_step(m, keys, dt)
+}
+
+// Whether he is in the middle of something that keeps a line going.
+busy(m: *Mover): bool {
+    m.air || m.grinding || m.climbing || m.swinging || m.wallriding || m.manual || m.style_t < 0.5
+}
+
+finish_step(m: *Mover, keys: *Keys, dt: f32) {
+    tick_line(busy(m), dt);
+    keys.hop = false;
+    keys.board = false;
+    keys.style = false
+}
