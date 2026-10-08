@@ -58,7 +58,7 @@ export function translateShader(source, fragment) {
 }
 
 // scale renders the window at that fraction of its size. env answers getenv.
-export function createPlatform(canvas, { log = console.log, checkErrors = false, countCalls = false, timing = false, gpuTiming = false, skip = new Set(), scale = 1, zoom = 0.85, env = {} } = {}) {
+export function createPlatform(canvas, { log = console.log, checkErrors = false, countCalls = false, timing = false, gpuTiming = false, skip = new Set(), scale = 1, zoom = 0.85, env = {}, pointers = false, maxTall = 1.6 } = {}) {
   let mem = null;
   let instance = null;
   const gl = canvas.getContext("webgl2", { antialias: false, depth: true, stencil: false, alpha: false });
@@ -110,6 +110,49 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
     // Release held keys so nothing stays pressed while the page is unfocused.
     for (const code of [65361, 65362, 65363, 65364, 65505, 65506]) events.push({ type: 3, keysym: code, text: "" });
   });
+  // ---- pointers ----
+
+  // With `pointers`, presses, drags, and releases anywhere on the page
+  // (except on elements in `.controls` or links) reach the game as X button
+  // and motion events in window pixels. Each finger is its own button (1, 2,
+  // 3, 8, 9, skipping the wheel's), and a motion's state is that button's
+  // mask, so the game can follow several fingers at once.
+  if (pointers) {
+    const BUTTONS = [1, 2, 3, 8, 9];
+    const held = new Map();
+    const at = (e) => {
+      const r = canvas.getBoundingClientRect();
+      return [((e.clientX - r.left) / r.width) * windowSize[0], ((e.clientY - r.top) / r.height) * windowSize[1]];
+    };
+    addEventListener("pointerdown", (e) => {
+      if (e.target.closest?.(".controls, a")) return;
+      const button = BUTTONS.find((b) => ![...held.values()].includes(b));
+      if (button === undefined) return;
+      held.set(e.pointerId, button);
+      const [x, y] = at(e);
+      events.push({ type: 4, keysym: 0, text: "", x, y, state: 0, button });
+    });
+    addEventListener("pointermove", (e) => {
+      const button = held.get(e.pointerId);
+      if (button === undefined) return;
+      const [x, y] = at(e);
+      const state = 1 << (7 + button);
+      // Only the latest position of a drag matters.
+      const last = events[events.length - 1];
+      if (last && last.type === 6 && last.state === state) events.pop();
+      events.push({ type: 6, keysym: 0, text: "", x, y, state });
+    });
+    const up = (e) => {
+      const button = held.get(e.pointerId);
+      if (button === undefined) return;
+      held.delete(e.pointerId);
+      const [x, y] = at(e);
+      events.push({ type: 5, keysym: 0, text: "", x, y, state: 0, button });
+    };
+    addEventListener("pointerup", up);
+    addEventListener("pointercancel", up);
+  }
+
   // The XEvent buffer is 192 bytes; its last word is free for the keysym.
   const EVENT_KEYSYM = 184;
   const EVENT_TEXT = 176;
@@ -165,14 +208,15 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
   let unpackAlignment = 4;
   let boundFramebuffer = null;
   let boundFramebufferId = 0;
-  // The game's window takes the page's shape, up to MAX_WIDE wide or MAX_TALL
-  // tall (a taller view looks past the world's edge), at a size
+  // The game's window takes the page's shape, up to MAX_WIDE wide or
+  // `maxTall` tall (for the block game, a taller view looks past the world's
+  // edge), at a size
   // where one of its pixels covers at least `zoom` CSS pixels. The game keeps
   // its text and world at a fixed size in its own pixels, so a small screen
   // sees less of the world rather than an illegibly small view of all of it.
   // The game learns the size from ConfigureNotify events.
   const MAX_WIDE = 2.4;
-  const MAX_TALL = 1.6;
+  const MAX_TALL = maxTall;
   let windowSize = [1200, 720];
   // Canvas pixels per window pixel at full resolution: the screen's pixels,
   // but no more in all than a 1200 by 720 window has.
@@ -561,6 +605,13 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
       if (e.type === 22) {
         v.setInt32(n(ev) + 56, e.width, true);
         v.setInt32(n(ev) + 60, e.height, true);
+      }
+      // XButtonEvent's and XMotionEvent's x, y, state, and button.
+      if (e.type >= 4 && e.type <= 6) {
+        v.setInt32(n(ev) + 64, Math.round(e.x), true);
+        v.setInt32(n(ev) + 68, Math.round(e.y), true);
+        v.setInt32(n(ev) + 80, e.state, true);
+        if (e.type !== 6) v.setInt32(n(ev) + 84, e.button, true);
       }
       v.setBigInt64(n(ev) + EVENT_KEYSYM, BigInt(e.keysym), true);
       const text = new TextEncoder().encode(e.text).subarray(0, 7);
