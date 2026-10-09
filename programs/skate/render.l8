@@ -72,6 +72,9 @@ type Renderer = {
     // In each lit program: the sunset's direction, the lamp map, and
     // where it lies; and the lamp maps, the park's and the course's.
     u_dusk: []int;
+    // The look's uniforms, LOOK_UNIFORMS for each of the world, grass, and
+    // sky programs.
+    u_look: []int;
     u_lamp_map: []int;
     u_lamp_rect: []int;
     u_near0: int;
@@ -80,6 +83,7 @@ type Renderer = {
     u_marks: []int;
     u_mark_n: int;
     u_mark_time: int;
+    u_run_half: int;
     park_lamps: u32;
     course_lamps: u32
 }
@@ -134,22 +138,45 @@ link_program(vs: []i8, fs: []i8) raises IoError: int {
     prog
 }
 
-// The sky's color toward d, without the clouds; fog fades to it. It is
-// dusk: a deep blue overhead, paler at the horizon, and warm low down where
-// the sun is setting.
+// The sky's color toward d, without the clouds; the distance fades to it.
+// Late afternoon: a soft blue overhead, warming to peach at the horizon,
+// most of all toward the sun (sky_sun), low behind him.
 SKY_GLSL: str = """
 uniform vec3 sky_sun;
+// The look (see Look): the sky overhead, at the horizon away from the sun
+// and toward it, and the sun's glow low down; the sun's light, and the
+// sky's from above and below; the air (how thick per meter, and at most);
+// and the grade (exposure by channel, and color after the curve).
+uniform vec3 look_zenith;
+uniform vec3 look_away;
+uniform vec3 look_toward;
+uniform vec3 look_glow;
+uniform vec3 look_sun;
+uniform vec3 look_sky_up;
+uniform vec3 look_sky_down;
+uniform vec2 look_haze;
+uniform vec4 look_grade;
 vec3 sky_base(vec3 d) {
   float up = clamp(d.y, 0.0, 1.0);
-  vec3 zenith = vec3(0.035, 0.07, 0.19);
-  vec3 horizon = vec3(0.26, 0.27, 0.4);
-  vec3 c = mix(horizon, zenith, pow(up, 0.45));
   vec2 flat_d = d.xz + vec2(0.0001, 0.0);
-  float toward = max(dot(normalize(flat_d), normalize(sky_sun.xz)), 0.0);
-  c += vec3(0.95, 0.42, 0.16) * pow(toward, 4.0) * exp(-max(d.y, 0.0) * 7.0) * 0.9;
-  // Below the horizon, the dark land.
-  c = mix(c, vec3(0.1, 0.1, 0.13), clamp(-d.y * 3.0, 0.0, 1.0));
+  float toward = dot(normalize(flat_d), normalize(sky_sun.xz)) * 0.5 + 0.5;
+  vec3 horizon = mix(look_away, look_toward, pow(toward, 2.0));
+  vec3 c = mix(horizon, look_zenith, pow(up, 0.45));
+  c += look_glow * pow(toward, 10.0) * exp(-max(d.y, 0.0) * 8.0);
+  // Below the horizon, the far land in haze.
+  c = mix(c, horizon * 0.8, clamp(-d.y * 3.0, 0.0, 1.0));
   return c;
+}
+// The light everything is lit by: the warm low sun, and the sky, blue from
+// above with a little warm light back off the ground.
+#define SUN_LIGHT look_sun
+vec3 sky_light(vec3 n) {
+  return mix(look_sky_down, look_sky_up, n.y * 0.5 + 0.5);
+}
+// Farther off, things fade into the sky's color: little near, more far.
+vec3 haze(vec3 col, vec3 V, float dist) {
+  float f = 1.0 - exp(-max(dist - 20.0, 0.0) * look_haze.x);
+  return mix(col, sky_base(-V) * 0.95, f * look_haze.y);
 }
 // Lamps: their light on the ground, every lamp's at once, from a map
 // (see lamp_map in render.l8): lamp_rect is its corner and the scale from
@@ -162,9 +189,13 @@ vec3 lamps(vec3 p, vec3 n) {
   float v = texture2D(lamp_map, uv).r;
     return vec3(1.0, 0.68, 0.38) * v * v * 5.0 * (0.4 + 0.6 * max(n.y, 0.0));
 }
+// Exposure, a gentle warm grade, and a filmic curve; then a little more
+// color than the curve leaves.
 vec3 tone(vec3 c) {
-  c *= 0.62;
+  c *= look_grade.rgb;
   c = (c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14);
+  float l = dot(c, vec3(0.3, 0.55, 0.15));
+  c = mix(vec3(l), c, look_grade.a);
   return pow(clamp(c, 0.0, 1.0), vec3(1.0 / 2.2));
 }
 // Smooth value noise with one lattice cell per unit, from a tiling texture.
@@ -236,6 +267,8 @@ uniform vec4 mark6b;
 uniform vec4 mark7a;
 uniform vec4 mark7b;
 uniform float mark_n;
+// The run's half width, for its curbs (0 in the park, which has none).
+uniform float run_half;
 uniform float mark_time;
 // How much light a mark casts at p: a soft pool over where letting go
 // lands the trick, brighter toward the lip (or, on a halfpipe's wall,
@@ -290,54 +323,51 @@ void main() {
   float mat = vcolor.a;
   vec3 albedo = pow(vcolor.rgb, vec3(2.2));
   vec3 V = normalize(cam_pos - vworld);
+  float dist = length(cam_pos - vworld);
   // A lamp's glass glows.
   if (mat > 9.5) {
-    float gd = length(cam_pos - vworld);
-    gl_FragColor = vec4(tone(mix(albedo * 5.0, sky_base(-V), (1.0 - exp(-gd * 0.0022)) * 0.6)), 1.0);
+    gl_FragColor = vec4(tone(haze(albedo * 3.0, V, dist)), 1.0);
     return;
   }
   float spec = 0.0;
   float gloss = 8.0;
-  float wrap = 0.0;
-  float soft = 0.0;
+  // Light wraps a little round everything, for a soft look.
+  float wrap = 0.25;
   float ground = 0.0;
   vec2 xz = vworld.xz;
   if (mat < 0.5) {
-    // Concrete: speckled and weathered, saw cut into slabs, a few hairline
-    // cracks and scuffs, with a little bump.
-    float big = vnoise(xz * 0.35);
-    float mid = vnoise(xz * 2.1 + 3.0);
-    float speck = vnoise(xz * 31.0 + vworld.y * 7.0);
-    float stain = smoothstep(0.5, 0.8, vnoise(xz * 0.6 + 11.0));
-    float scuff = smoothstep(0.62, 0.9, vnoise(xz * vec2(0.8, 4.0) + 23.0));
-    albedo *= (0.88 + 0.14 * big + 0.07 * mid + 0.14 * (speck - 0.5)) * (1.0 - 0.18 * stain) * (1.0 - 0.12 * scuff);
-    // Fine detail only near: farther, it would only shimmer.
-    float near = 1.0 - smoothstep(50.0, 80.0, length(cam_pos - vworld));
-    if (near > 0.0) {
-    vec2 j = abs(fract(xz / 3.0 + 0.5) - 0.5) * 3.0;
-    float joint = 1.0 - smoothstep(0.006, 0.02, min(j.x, j.y));
-    float crack = (1.0 - smoothstep(0.0, 0.005, abs(vnoise(xz * 0.9 + 40.0) - 0.5))) * smoothstep(0.7, 0.85, vnoise(xz * 0.17 + 5.0));
-    float h0 = vnoise(xz * 7.0);
-    vec2 g = vec2(vnoise(xz * 7.0 + vec2(0.06, 0.0)) - h0, vnoise(xz * 7.0 + vec2(0.0, 0.06)) - h0);
-    n = normalize(n - vec3(g.x, 0.0, g.y) * 0.9 * near * near);
-    albedo *= 1.0 - (0.5 * joint + 0.25 * crack) * near;
+    // Concrete laid in slabs: each its own shade, a little warmer or
+    // cooler; broad warm and cool patches over them; on the run, a line worn
+    // smooth and darker down its middle, and a stone curb along its edges.
+    vec2 id = floor(xz / 3.0);
+    float t1 = vnoise(id * 7.31 + 0.5);
+    float t2 = vnoise(id * 3.17 + 9.5);
+    albedo *= 0.86 + 0.24 * t1;
+    albedo *= mix(vec3(1.05, 1.0, 0.92), vec3(0.94, 0.99, 1.06), t2);
+    float broad = vnoise(xz * 0.035 + 21.0);
+    albedo *= mix(vec3(1.06, 1.0, 0.9), vec3(0.93, 0.97, 1.04), broad);
+    if (run_half > 0.0) {
+      float ax = abs(vworld.x);
+      albedo *= 1.0 - 0.08 * (1.0 - smoothstep(1.0, 3.0, ax));
+      float curb = smoothstep(run_half - 0.55, run_half - 0.45, ax);
+      albedo = mix(albedo, albedo * vec3(0.66, 0.66, 0.7), curb);
     }
-    spec = 0.06 * (1.0 - 0.5 * stain);
-    gloss = 14.0;
+    float near = 1.0 - smoothstep(40.0, 80.0, dist);
+    if (near > 0.0) {
+      vec2 j = abs(fract(xz / 3.0 + 0.5) - 0.5) * 3.0;
+      float joint = 1.0 - smoothstep(0.015, 0.04, min(j.x, j.y));
+      albedo *= 1.0 - 0.22 * joint * near;
+    }
+    spec = 0.03;
+    gloss = 10.0;
     ground = 1.0;
   } else if (mat < 1.5) {
-    // Grass: broad patches, clumps, dry spots, clover.
-    float big = vnoise(xz * 0.13);
-    float mid = vnoise(xz * 0.9 + 7.0);
-    float fine = vnoise(xz * 6.0);
-    float clump = vnoise(xz * 2.7 + 19.0);
-    albedo *= 0.72 + 0.32 * big + 0.14 * mid + 0.16 * fine;
-    albedo = mix(albedo, albedo * vec3(1.25, 1.1, 0.6), smoothstep(0.55, 0.85, mid) * 0.55);
-    albedo = mix(albedo, albedo * vec3(0.7, 0.85, 0.75), smoothstep(0.6, 0.8, clump) * 0.6);
-    float h0 = vnoise(xz * 9.0);
-    vec2 g = vec2(vnoise(xz * 9.0 + vec2(0.05, 0.0)) - h0, vnoise(xz * 9.0 + vec2(0.0, 0.05)) - h0);
-    n = normalize(n - vec3(g.x, 0.0, g.y) * 1.5);
-    wrap = 0.15;
+    // Grass: soft, in broad patches a little yellower or deeper.
+    float big = vnoise(xz * 0.07);
+    float mid = vnoise(xz * 0.4 + 7.0);
+    albedo *= 0.9 + 0.14 * big + 0.06 * mid;
+    albedo = mix(albedo, albedo * vec3(1.15, 1.08, 0.75), smoothstep(0.55, 0.8, mid) * 0.4);
+    wrap = 0.4;
     ground = 1.0;
   } else if (mat > 2.2 && mat < 2.5) {
     // A pool: painted concrete, darker toward the deep end, with a band of
@@ -368,6 +398,20 @@ void main() {
     spec = 0.04;
     gloss = 10.0;
     ground = 1.0;
+  } else if (mat < 2.5) {
+    // Pavers in staggered rows, each a slightly different shade.
+    vec2 p = xz / vec2(0.5, 0.25);
+    float row = floor(p.y);
+    p.x += 0.5 * mod(row, 2.0);
+    vec2 id = floor(p);
+    vec2 f = fract(p);
+    float tint = vnoise(id * vec2(7.31, 3.17) + 0.5);
+    vec2 edge = min(f, 1.0 - f) * vec2(0.5, 0.25);
+    float mortar = 1.0 - smoothstep(0.006, 0.02, min(edge.x, edge.y));
+    albedo *= (0.9 + 0.16 * tint) * (1.0 - 0.2 * mortar);
+    spec = 0.03;
+    gloss = 10.0;
+    ground = 1.0;
   } else if (mat < 3.5) {
     // Plywood: sheets with seams and a little grain.
     float grain = vnoise(vec2(vworld.x * 0.7 + vworld.z * 0.7, vworld.y * 9.0 + vworld.x * 4.0));
@@ -379,14 +423,14 @@ void main() {
     gloss = 18.0;
     ground = 1.0;
   } else if (mat < 4.5) {
-    spec = 0.7;
-    gloss = 60.0;
+    // Metal: rails.
+    spec = 0.35;
+    gloss = 40.0;
   } else if (mat < 5.5) {
     // The guy: soft painted block, light wrapping a little around it.
-    wrap = 0.3;
-    soft = 1.0;
-    spec = 0.22;
-    gloss = 28.0;
+    wrap = 0.35;
+    spec = 0.12;
+    gloss = 20.0;
   } else if (mat < 6.5) {
     // Sandstone slabs, staggered, with a little grain.
     vec2 p = xz / vec2(1.0, 0.5);
@@ -403,8 +447,8 @@ void main() {
     gloss = 14.0;
     ground = 1.0;
   } else if (mat < 7.5) {
-    spec = 0.1;
-    gloss = 24.0;
+    spec = 0.06;
+    gloss = 20.0;
   } else if (mat < 8.5) {
     // Terracotta tiles in pale grout.
     vec2 p = xz / 0.3333;
@@ -421,9 +465,8 @@ void main() {
   } else {
     // Leaves: lumpy color, light coming through.
     float k = vnoise(vworld.xz * 2.3 + vworld.y * 3.0);
-    albedo *= 0.75 + 0.45 * k;
-    wrap = 0.35;
-    soft = 0.5;
+    albedo *= 0.85 + 0.3 * k;
+    wrap = 0.5;
   }
   // Light where a mark is (see mark_at).
   vec2 mk = vec2(0.0);
@@ -436,47 +479,25 @@ void main() {
   float ndl = dot(n, sun_dir);
   float vis = sun_visibility(ndl);
   float diff = max((ndl + wrap) / (1.0 + wrap), 0.0);
-    // Moonlight, cool and soft.
-  vec3 sun = vec3(0.55, 0.68, 1.0) * 0.3;
-  // Dusk light from the deep blue sky above, little from the ground,
-  // darkened where the ground folds in.
-  vec3 sky = mix(vec3(0.03, 0.035, 0.05), vec3(0.06, 0.1, 0.22), n.y * 0.5 + 0.5) * ao;
+  vec3 sky = sky_light(n) * ao;
   // Contact darkening on the ground under the player.
   if (ground > 0.5) {
     float d = length(vworld.xz - blob.xz);
     float near = (1.0 - smoothstep(0.0, 0.75, d)) * (1.0 - smoothstep(0.0, 1.0, abs(vworld.y - blob.y)));
     sky *= 1.0 - 0.5 * near;
   }
-    // The lamps: from the map for the world; for him, from the two nearest,
-  // by their direction.
-  vec3 lamp_light = lamps(vworld, n) * (0.5 + 0.5 * ao);
-  if (mat > 4.5 && mat < 5.5) lamp_light = near_light(near0, vworld, n) + near_light(near1, vworld, n);
-  vec3 col = albedo * (sun * diff * vis * (0.55 + 0.45 * ao) + sky + lamp_light);
-  if (soft > 0.0) {
-    
-    float edge = 1.0 - abs(ndl);
-    col += albedo * vec3(1.0, 0.45, 0.3) * sun * 0.06 * edge * edge * soft * (0.4 + 0.6 * vis);
-        // A cool rim of sky light along his edges, so that he stands apart
-    // from what is behind him.
+  vec3 col = albedo * (SUN_LIGHT * diff * vis * (0.6 + 0.4 * ao) + sky);
+  // Along his edges, a rim: of the sun when it is behind him, and of the
+  // sky.
+  if (mat > 4.5 && mat < 5.5) {
     float rim = pow(1.0 - max(dot(n, V), 0.0), 3.0);
-    col += vec3(0.25, 0.34, 0.6) * rim * 0.45 * soft * (0.5 + 0.5 * max(n.y, 0.0));
+    col += (SUN_LIGHT * 0.5 * max(dot(-V, sun_dir), 0.0) * vis + vec3(0.35, 0.42, 0.62) * 0.3) * rim;
   }
   vec3 H = normalize(sun_dir + V);
-  col += sun * vis * spec * pow(max(dot(n, H), 0.0), gloss) * (gloss + 8.0) / 60.0 * step(0.0, ndl);
-    // A faint reflection of the sky at grazing angles, and a damp sheen of
-  // lamplight.
-  float fres = pow(1.0 - max(dot(n, V), 0.0), 5.0);
-  col += sky_base(reflect(-V, n)) * fres * (0.04 + spec) * ao;
-    col += lamps(vworld, n) * ground * spec * 1.2 * pow(1.0 - max(dot(n, V), 0.0), 3.0);
-  // The paint glows a little, so that it reads at dusk.
-  // The marks' light: a soft pool, a little whiter than the lamps', and
-  // its fine line.
+  col += SUN_LIGHT * vis * spec * pow(max(dot(n, H), 0.0), gloss) * (gloss + 8.0) / 60.0 * step(0.0, ndl);
+  // The marks' light: a soft pool, and its fine line.
   col += albedo * vec3(1.0, 0.86, 0.62) * 1.6 * mk.x + vec3(1.0, 0.9, 0.7) * 0.22 * mk.y;
-  // Haze: the dusk sky's color with distance.
-  float dist = length(cam_pos - vworld);
-  float fog = 1.0 - exp(-dist * 0.0022);
-  col = mix(col, sky_base(-V), fog * 0.85);
-  gl_FragColor = vec4(tone(col), 1.0);
+  gl_FragColor = vec4(tone(haze(col, V, dist)), 1.0);
 }
 """;
 
@@ -540,25 +561,20 @@ void main() {
   vec3 V = normalize(cam_pos - vworld);
   // Darker at the root, lighter and yellower toward the tip; dry patches
   // straw-colored.
-    vec3 albedo = mix(vec3(0.02, 0.05, 0.015), vec3(0.08, 0.17, 0.045), vh);
-  albedo = mix(albedo, albedo * vec3(1.9, 1.5, 0.75), vtint * 0.7);
-  albedo *= 0.85 + 0.3 * vnoise(vworld.xz * 1.7);
+  vec3 albedo = mix(vec3(0.04, 0.09, 0.03), vec3(0.13, 0.25, 0.07), vh);
+  albedo = mix(albedo, albedo * vec3(1.5, 1.3, 0.8), vtint * 0.5);
+  albedo *= 0.9 + 0.2 * vnoise(vworld.xz * 0.4);
   vec3 n = normalize(mix(normalize(vnrm), vec3(0.0, 1.0, 0.0), 0.45));
   if (dot(n, V) < 0.0) n = -n;
   float ndl = dot(n, sun_dir);
   float vis = sun_visibility();
   float diff = max((ndl + 0.5) / 1.5, 0.0);
   // Light through the blades from behind.
-    float through = pow(max(dot(-V, sun_dir), 0.0), 3.0) * 0.25 * vh;
-    vec3 sun = vec3(0.55, 0.68, 1.0) * 0.3;
-  vec3 sky = mix(vec3(0.03, 0.035, 0.05), vec3(0.06, 0.1, 0.22), n.y * 0.5 + 0.5) * mix(0.4, 1.0, vh);
-  vec3 col = albedo * (sun * (diff + through) * vis + sky + lamps(vworld, n) * mix(0.4, 1.0, vh));
-  vec3 H = normalize(sun_dir + V);
-  col += sun * vis * 0.04 * pow(max(dot(n, H), 0.0), 20.0) * vh;
-  float dist = length(cam_pos - vworld);
-  float fog = 1.0 - exp(-dist * 0.0022);
-  col = mix(col, sky_base(-V), fog * 0.85);
-  gl_FragColor = vec4(tone(col), 1.0);
+  // Against the sun, light comes gold through the tips.
+  float through = pow(max(dot(-V, sun_dir), 0.0), 2.0) * vh * vh;
+  vec3 sky = sky_light(n) * mix(0.5, 1.0, vh);
+  vec3 col = albedo * (SUN_LIGHT * diff * vis + sky) + vec3(0.5, 0.36, 0.12) * SUN_LIGHT * through * vis * 0.18;
+  gl_FragColor = vec4(tone(haze(col, V, length(cam_pos - vworld))), 1.0);
 }
 """;
 
@@ -623,18 +639,27 @@ void main() {
 }
 """;
 
+// Into the shadow map: everything but the open ground (concrete and grass,
+// and what is made of them: banks, kickers, a halfpipe's walls). The ground's
+// shape shows in its shading; its own shadows would only show the steps of
+// its mesh.
 SHADOW_VS: str = """
 #version 120
 attribute vec3 pos;
+attribute vec4 vcol;
 uniform mat4 mvp;
+varying float vmat;
 void main() {
+  vmat = vcol.a;
   gl_Position = mvp * vec4(pos, 1.0);
 }
 """;
 
 SHADOW_FS: str = """
 #version 120
+varying float vmat;
 void main() {
+  if (vmat < 1.5) discard;
   gl_FragColor = vec4(1.0);
 }
 """;
@@ -670,21 +695,19 @@ float clouds(vec2 p) {
 }
 void main() {
   vec3 d = normalize(cam_f + vscreen.x * tan_half.x * cam_r + (vscreen.y - shift) * tan_half.y * cam_u);
-    vec3 c = sky_base(d);
-  // The set sun's glow, low; and the moon, small and pale.
+  vec3 c = sky_base(d);
+  // The sun's glow, and the sun.
   float s = max(dot(d, sky_sun), 0.0);
-  c += vec3(1.0, 0.55, 0.25) * (pow(s, 8.0) * 0.3 + pow(s, 60.0) * 0.5);
-  float mo = max(dot(d, sun_dir), 0.0);
-  c += vec3(0.85, 0.9, 1.0) * (smoothstep(0.99975, 0.9999, mo) * 2.5 + pow(mo, 300.0) * 0.25);
+  c += vec3(1.0, 0.78, 0.55) * (pow(s, 6.0) * 0.3 + pow(s, 400.0) * 3.0);
   if (d.y > 0.0) {
-    // Clouds lit from below by the sunset on its side, dark blue away.
-    vec2 p = d.xz / (d.y + 0.08) * 1.1 + vec2(time * 0.012, time * 0.004);
-    float k = smoothstep(0.44, 0.66, clouds(p));
-        float shade = clouds(p + sky_sun.xz * 0.15);
+    // Soft clouds, lit warm on the sun's side, lilac in their shade.
+    vec2 p = d.xz / (d.y + 0.1) * 0.9 + vec2(time * 0.01, time * 0.003);
+    float k = smoothstep(0.5, 0.7, clouds(p));
+    float shade = clouds(p + sky_sun.xz * 0.12);
     float toward = pow(max(dot(normalize(d.xz + vec2(0.0001, 0.0)), normalize(sky_sun.xz)), 0.0), 2.0);
-    vec3 lit = mix(vec3(0.16, 0.15, 0.24), vec3(0.85, 0.42, 0.3), toward);
-    vec3 cloud = mix(lit, vec3(0.05, 0.06, 0.12), smoothstep(0.4, 0.68, shade));
-    c = mix(c, cloud, k * smoothstep(0.0, 0.18, d.y) * 0.85);
+    vec3 lit = mix(vec3(1.0, 0.96, 0.98), vec3(1.15, 0.94, 0.8), toward);
+    vec3 cloud = mix(lit, vec3(0.74, 0.7, 0.86), smoothstep(0.45, 0.72, shade));
+    c = mix(c, cloud, k * smoothstep(0.0, 0.2, d.y) * 0.8);
   }
   gl_FragColor = vec4(tone(c), 1.0);
 }
@@ -798,6 +821,7 @@ new_renderer(world_mesh: *Mesh, parts: *Mesh) raises IoError: *Renderer@new {
         tuft_buf: gen_buffer(),
         grass_buf: gen_buffer(),
         u_dusk: new int[3](0),
+        u_look: new int[3 * LOOK_UNIFORMS](0),
         u_lamp_map: new int[2](0),
         u_lamp_rect: new int[2](0),
         u_near0: glGetUniformLocation(world, "near0"),
@@ -805,6 +829,7 @@ new_renderer(world_mesh: *Mesh, parts: *Mesh) raises IoError: *Renderer@new {
         u_marks: new int[MAX_ZONES * 2](0),
         u_mark_n: glGetUniformLocation(world, "mark_n"),
         u_mark_time: glGetUniformLocation(world, "mark_time"),
+        u_run_half: glGetUniformLocation(world, "run_half"),
         park_lamps: 0u32,
         course_lamps: 0u32
     };
@@ -815,6 +840,8 @@ new_renderer(world_mesh: *Mesh, parts: *Mesh) raises IoError: *Renderer@new {
     progs: []int = [world, grass_prog, sky];
     for k in 0..3 {
         r.u_dusk[k] = glGetUniformLocation(progs[k], "sky_sun");
+        for u in 0..LOOK_UNIFORMS r.u_look[k * LOOK_UNIFORMS + u] = glGetUniformLocation(progs[k],
+            look_names[u]);
         if (k < 2) {
             r.u_lamp_map[k] = glGetUniformLocation(progs[k], "lamp_map");
             r.u_lamp_rect[k] = glGetUniformLocation(progs[k], "lamp_rect")
@@ -911,7 +938,7 @@ draw_grass(r: *Renderer, view: View) {
     glUseProgram(r.grass);
     glUniformMatrix4fv(r.u_grass_vp, 1, 0, vp_m);
     glUniformMatrix4fv(r.u_grass_light, 1, 0, light_vp);
-    sun: V3 = v_norm(SUN);
+    sun: V3 = v_norm(look.sun);
     glUniform3f(r.u_grass_sun, sun.x, sun.y, sun.z);
     glUniform3f(r.u_grass_cam, view.eye.x, view.eye.y, view.eye.z);
     glUniform1f(r.u_grass_texel, 1.0 / SHADOW_SIZE as f32);
@@ -1032,8 +1059,19 @@ const PARK_LAMP_POWER: f32 = 0.9;
 // The sunset's direction, and the lamp map in use, into a program's
 // uniforms (set k of the renderer's lit programs: world, grass, sky).
 set_lights(r: *Renderer, k: int) {
-    sun: V3 = v_norm(SUNSET);
+    sun: V3 = v_norm(look.sun);
     glUniform3f(r.u_dusk[k], sun.x, sun.y, sun.z);
+    u: []int = r.u_look;
+    b: int = k * LOOK_UNIFORMS;
+    set3(u[b], look.zenith);
+    set3(u[b + 1], look.away);
+    set3(u[b + 2], look.toward);
+    set3(u[b + 3], look.glow);
+    set3(u[b + 4], look.sun_light);
+    set3(u[b + 5], look.sky_up);
+    set3(u[b + 6], look.sky_down);
+    glUniform2f(u[b + 7], look.haze, look.haze_max);
+    glUniform4f(u[b + 8], look.grade.x, look.grade.y, look.grade.z, look.sat);
     if (k == 2) return;
     map: LampMap = park_map;
     if (show_course) map = course_map;
@@ -1194,12 +1232,122 @@ type View = {
     shift: f32
 }
 
-// The key light, for shading and shadows: the moon, high and ahead to the
-// right. The sun has set, ahead to the left, leaving its glow low in the
-// sky.
-SUN: V3 = V3 { x: 0.35, y: 0.8, z: -0.5 };
+// ---- looks ----
+// How the world looks: where the sun is and its light, the sky and its
+// light, the air, the grade, and the colors of things. A few to compare;
+// L8_LOOK picks one by its letter.
+type Look = {
+    sun: V3;
+    sun_light: V3;
+    sky_up: V3;
+    sky_down: V3;
+    zenith: V3;
+    away: V3;
+    toward: V3;
+    glow: V3;
+    haze: f32;
+    haze_max: f32;
+    grade: V3;
+    sat: f32;
+    run: V3;
+    kicker: V3;
+    grass: V3;
+    hill_low: V3;
+    hill_high: V3;
+    leaf: V3;
+    // Whether the banks have grass tufts.
+    tufts: bool
+}
 
-SUNSET: V3 = V3 { x: -0.8, y: 0.06, z: -0.5 };
+const LOOK_UNIFORMS: int = 9;
+
+look_names: []str = ["look_zenith", "look_away", "look_toward", "look_glow", "look_sun",
+    "look_sky_up", "look_sky_down", "look_haze", "look_grade"];
+
+// a: a clear day, crisp, the sun from the side, deep greens.
+look_clear: Look = Look {
+    sun: v3(-0.5, 0.75, 0.42),
+    sun_light: v3(2.4, 2.28, 2.06),
+    sky_up: v3(0.27, 0.37, 0.61),
+    sky_down: v3(0.29, 0.26, 0.22),
+    zenith: v3(0.14, 0.34, 0.8),
+    away: v3(0.62, 0.78, 0.95),
+    toward: v3(0.92, 0.9, 0.86),
+    glow: v3(0.2, 0.19, 0.17),
+    haze: 0.0012,
+    haze_max: 0.55,
+    grade: v3(0.62, 0.62, 0.6),
+    sat: 1.12,
+    run: v3(0.82, 0.76, 0.68),
+    kicker: v3(0.92, 0.58, 0.36),
+    grass: v3(0.26, 0.5, 0.24),
+    hill_low: v3(0.2, 0.42, 0.22),
+    hill_high: v3(0.42, 0.62, 0.3),
+    leaf: v3(0.22, 0.48, 0.2),
+    tufts: false
+};
+
+// b: late golden light, low ahead of him, its glow in the sky.
+look_golden: Look = Look {
+    sun: v3(-0.55, 0.3, -0.78),
+    sun_light: v3(2.6, 1.92, 1.2),
+    sky_up: v3(0.24, 0.32, 0.53),
+    sky_down: v3(0.27, 0.22, 0.18),
+    zenith: v3(0.16, 0.3, 0.62),
+    away: v3(0.64, 0.62, 0.8),
+    toward: v3(1.1, 0.8, 0.66),
+    glow: v3(0.5, 0.36, 0.25),
+    haze: 0.0024,
+    haze_max: 0.75,
+    grade: v3(0.66, 0.62, 0.56),
+    sat: 1.08,
+    run: v3(0.74, 0.68, 0.6),
+    kicker: v3(0.88, 0.6, 0.4),
+    grass: v3(0.3, 0.48, 0.22),
+    hill_low: v3(0.3, 0.5, 0.26),
+    hill_high: v3(0.58, 0.7, 0.38),
+    leaf: v3(0.27, 0.48, 0.17),
+    tufts: true
+};
+
+// c: soft and pastel, like a toy: a high gentle sun, a strong sky fill,
+// mint grass, coral kickers.
+look_toy: Look = Look {
+    sun: v3(-0.35, 0.85, 0.35),
+    sun_light: v3(1.5, 1.44, 1.35),
+    sky_up: v3(0.54, 0.6, 0.77),
+    sky_down: v3(0.42, 0.36, 0.35),
+    zenith: v3(0.45, 0.62, 0.9),
+    away: v3(0.85, 0.82, 0.92),
+    toward: v3(0.98, 0.88, 0.84),
+    glow: v3(0.15, 0.14, 0.13),
+    haze: 0.0018,
+    haze_max: 0.6,
+    grade: v3(0.7, 0.69, 0.68),
+    sat: 1.05,
+    run: v3(0.92, 0.84, 0.78),
+    kicker: v3(0.96, 0.62, 0.52),
+    grass: v3(0.5, 0.74, 0.48),
+    hill_low: v3(0.45, 0.66, 0.45),
+    hill_high: v3(0.68, 0.82, 0.58),
+    leaf: v3(0.4, 0.7, 0.42),
+    tufts: false
+};
+
+look: Look = look_golden;
+
+// Choose the look by its letter (or keep the first).
+pick_look(c: int) {
+    if (c == 97) look = look_clear;
+    if (c == 98) look = look_golden;
+    if (c == 99) look = look_toy;
+    grass_color = look.grass;
+    if (!look.tufts) grass_on = false
+}
+
+set3(loc: int, v: V3) {
+    glUniform3f(loc, v.x, v.y, v.z)
+}
 
 view_m: []f32 = new f32[16](0.0);
 
@@ -1222,7 +1370,7 @@ part_tmp: []f32 = new f32[16](0.0);
 // The sun's view: an orthographic box around the focus, moved in whole
 // shadow texels so shadows do not crawl as it follows.
 fit_shadow(focus: V3) {
-    sun: V3 = v_norm(SUN);
+    sun: V3 = v_norm(look.sun);
     mat_look(light_view, v_scale(sun, 200.0), v3(0.0, 0.0, 0.0), v3(0.0, 1.0, 0.0));
     c: V3 = mat_point(light_view, focus);
     texel: f32 = 2.0 * SHADOW_HALF / SHADOW_SIZE as f32;
@@ -1287,7 +1435,7 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
     proj_m[9] = -view.shift;
     mat_look(view_m, view.eye, view.at, v3(0.0, 1.0, 0.0));
     mat_mul(vp_m, proj_m, view_m);
-    sun: V3 = v_norm(SUN);
+    sun: V3 = v_norm(look.sun);
     // The lamp map, on texture unit 2.
     glActiveTexture(33986);
     if (show_course) glBindTexture(3553, r.course_lamps) else glBindTexture(3553,
@@ -1326,6 +1474,8 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
     glUniform3f(r.u_blob, view.focus.x, view.focus.y, view.focus.z);
     glUniform1f(r.u_mark_n, nzones as f32);
     glUniform1f(r.u_mark_time, view.time);
+    if (show_course) glUniform1f(r.u_run_half, COURSE_HALF) else glUniform1f(r.u_run_half,
+        0.0);
     for k in 0..MAX_ZONES * 2 glUniform4f(r.u_marks[k], zone_rect[k * 4], zone_rect[k * 4 + 1],
         zone_rect[k * 4 + 2], zone_rect[k * 4 + 3]);
     // The bowl's lip, where its tiles end.
