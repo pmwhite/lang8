@@ -57,8 +57,9 @@ export function translateShader(source, fragment) {
   return head + s;
 }
 
-// scale renders the window at that fraction of its size. env answers getenv.
-export function createPlatform(canvas, { log = console.log, checkErrors = false, countCalls = false, timing = false, gpuTiming = false, skip = new Set(), scale = 1, zoom = 0.85, env = {}, pointers = false, maxTall = 1.6 } = {}) {
+// scale renders the window at that fraction of its size, and maxPixels caps
+// how many pixels it renders in all. env answers getenv.
+export function createPlatform(canvas, { log = console.log, checkErrors = false, countCalls = false, timing = false, gpuTiming = false, skip = new Set(), scale = 1, zoom = 0.85, env = {}, pointers = false, maxTall = 1.6, maxPixels = 1200 * 720 } = {}) {
   let mem = null;
   let instance = null;
   const gl = canvas.getContext("webgl2", { antialias: false, depth: true, stencil: false, alpha: false });
@@ -219,7 +220,7 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
   const MAX_TALL = maxTall;
   let windowSize = [1200, 720];
   // Canvas pixels per window pixel at full resolution: the screen's pixels,
-  // but no more in all than a 1200 by 720 window has.
+  // but no more in all than `maxPixels` (by default, a 1200 by 720 window's).
   let density = 1;
   const layout = () => {
     const w = Math.min(innerWidth, innerHeight * MAX_WIDE);
@@ -228,7 +229,7 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
     const size = [Math.round(w / s), Math.round(h / s)];
     canvas.style.width = `${Math.round(w)}px`;
     canvas.style.height = `${Math.round(h)}px`;
-    density = Math.min((devicePixelRatio || 1) * s, Math.sqrt((1200 * 720) / (size[0] * size[1])));
+    density = Math.min((devicePixelRatio || 1) * s, Math.sqrt(maxPixels / (size[0] * size[1])));
     if (size[0] !== windowSize[0] || size[1] !== windowSize[1]) {
       windowSize = size;
       events.push({ type: 22, keysym: 0, text: "", width: size[0], height: size[1] });
