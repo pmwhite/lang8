@@ -353,24 +353,39 @@ fly_time(
 }
 
 // ---- the jumps ahead ----
-// For each jump ahead within MARK_AHEAD (a kicker's or a gap's lip, a
-// cliff's edge), how long he would fly letting go at each place on his
-// way up to it, coming in at the speed the hill would give him by then,
-// straight. A trick's worth there, and where to let go for it, read off
-// that (see put_marks, in hud.l8). Kept a few times a second.
+// For each jump (a kicker's or a gap's lip, a cliff's edge), a table, made
+// once with the course: how long he would fly letting go at each place on
+// his way up to it, coming to it at each of a few speeds, straight. Each
+// frame, for each jump ahead within MARK_AHEAD, the speed the hill would
+// give him by then, and from the table, how long he would fly letting go
+// at each place (see find_zones and put_marks, in hud.l8).
 const MARK_AHEAD: f32 = 60.0;
 
 const MARK_STEP: f32 = 0.5;
 
 const MARK_N: int = 16;
 
+// How far behind the lip the last place is.
+const MARK_LAST: f32 = 0.2;
+
+// The speeds the tables are for: MARK_V0 and on, MARK_DV apart.
+const MARK_SPEEDS: int = 8;
+
+const MARK_V0: f32 = 4.0;
+
+const MARK_DV: f32 = 2.0;
+
 // The run-up a cliff gives to let go on.
 const CLIFF_RUN_UP: f32 = 6.0;
 
+// Whether each feature is a jump, and ahead of him now.
+mark_jump: []bool = new bool[MAX_FEATURES](false);
+
 mark_on: []bool = new bool[MAX_FEATURES](false);
 
-// Where each one's lip (or edge) is along the run, and across it; where
-// its samples start, how many there are, and his speed coming to it.
+// Where each one's lip (or edge) is along the run, and across it (a
+// cliff's, where he is); where its run-up starts, and how many places on
+// it the table has.
 mark_lip: []f32 = new f32[MAX_FEATURES](0.0);
 
 mark_x: []f32 = new f32[MAX_FEATURES](0.0);
@@ -379,53 +394,41 @@ mark_from: []f32 = new f32[MAX_FEATURES](0.0);
 
 mark_count: []int = new int[MAX_FEATURES](0);
 
-mark_speed: []f32 = new f32[MAX_FEATURES](0.0);
+// The tables: air, by feature, speed, and place; and his speed at the lip,
+// by feature and speed.
+mark_table: []f32 = new f32[MAX_FEATURES * MARK_SPEEDS * MARK_N](0.0);
 
+mark_table_lip_v: []f32 = new f32[MAX_FEATURES * MARK_SPEEDS](0.0);
+
+// Now: his air letting go at each place, and his speed at the lip.
 mark_air: []f32 = new f32[MAX_FEATURES * MARK_N](0.0);
 
-// His speed at each one's lip, coming in so.
 mark_lip_speed: []f32 = new f32[MAX_FEATURES](0.0);
 
-mark_tick: int = 0;
-
-// His speed, rolling straight down the plain hill from d0 to d1, from v.
-roll_speed(v: f32, d0: f32, d1: f32): f32 {
-    w: f32 = v * v;
-    d: f32 = d0;
-    while (d < d1) {
-        g: f32 = course_grade(d);
-        a: f32 = SLOPE_G * (g / sqrtf(1.0 + g * g) - ROLL_FRICTION) - AIR_DRAG * w;
-        w = maxf(w + 2.0 * a * 0.5, PUSH_SPEED * PUSH_SPEED);
-        d = d + 0.5
-    }
-    minf(sqrtf(w), TOP_SPEED)
-}
-
-update_marks(m: *Mover) {
-    mark_tick = mark_tick - 1;
-    if (mark_tick > 0) return;
-    mark_tick = 20;
-    d: f32 = -m.z;
+// Make the tables, for the course as laid out.
+build_marks() {
     for i in 0..nfeatures {
         f: Feature = features[i];
+        mark_jump[i] = f.kind == FEATURE_KICKER || f.kind == FEATURE_GAP || f.kind == FEATURE_CLIFF;
         mark_on[i] = false;
-        lip: f32 = f.d + f.a;
-        run: f32 = f.a;
-        x: f32 = f.x;
-        if (f.kind == FEATURE_CLIFF) {
-            lip = f.d;
-            run = CLIFF_RUN_UP;
-            x = clampf(m.x, -COURSE_HALF + 1.0, COURSE_HALF - 1.0)
-        }
-        if ((f.kind == FEATURE_KICKER || f.kind == FEATURE_GAP || f.kind == FEATURE_CLIFF) && lip > d + 1.0 && lip < d + MARK_AHEAD) {
-            mark_on[i] = true;
+        pipe_on[i] = false;
+        if (f.kind == FEATURE_PIPE) build_pipe(i);
+        if (mark_jump[i]) {
+            lip: f32 = f.d + f.a;
+            run: f32 = f.a;
+            x: f32 = f.x;
+            if (f.kind == FEATURE_CLIFF) {
+                lip = f.d;
+                run = CLIFF_RUN_UP;
+                x = 0.0
+            }
+            // The places, every MARK_STEP up the run-up, the last just
+            // behind the lip, where letting go throws him most.
+            from: f32 = lip - MARK_LAST - floorf((run - MARK_LAST) / MARK_STEP) * MARK_STEP;
             mark_lip[i] = lip;
             mark_x[i] = x;
-            from: f32 = lip - run;
-            v: f32 = m.speed;
-            if (from > d) v = roll_speed(m.speed, d, from);
-            mark_speed[i] = v;
-            sample_jump(i, x, from, lip, v)
+            mark_from[i] = from;
+            for k in 0..MARK_SPEEDS sample_jump(i, k, x, from, lip - MARK_LAST, MARK_V0 + MARK_DV * k as f32)
         }
     }
 }
@@ -433,24 +436,25 @@ update_marks(m: *Mover) {
 // Ride from from on to the lip at speed v, straight, noting how long he
 // would fly letting go every MARK_STEP of the way (as release_trick would
 // send him: popping, less up a ramp, and thrown up as steeply as the
-// ground rises just behind him).
+// ground rises just behind him), into table row (i, k).
 sample_jump(
     i: int,
+    k: int,
     x: f32,
     from: f32,
     lip: f32,
     v: f32
 ) {
+    row: int = (i * MARK_SPEEDS + k) * MARK_N;
     sp: f32 = v;
     d: f32 = from;
     n: int = 0;
-    mark_from[i] = from;
     while (n < MARK_N && d <= lip + 0.01) {
         z: f32 = -d;
         y: f32 = course_height(x, z);
         slope: f32 = (y - course_height(x, z + 0.3)) / 0.3;
         vy: f32 = maxf(sp * slope, 0.0) + pop_speed(x, d);
-        mark_air[i * MARK_N + n] = fly_time(x, y, z, 0.0, vy, -sp);
+        mark_table[row + n] = fly_time(x, y, z, 0.0, vy, -sp);
         n = n + 1;
         // On to the next, slowing as he climbs.
         ny: f32 = course_height(x, z - MARK_STEP);
@@ -459,7 +463,150 @@ sample_jump(
         d = d + MARK_STEP
     }
     mark_count[i] = n;
-    mark_lip_speed[i] = sp
+    mark_table_lip_v[i * MARK_SPEEDS + k] = sp
+}
+
+// His speed, rolling straight from d0 to d1 down the plain hill, from v: on
+// a steady slope, the square of his speed closes on the hill's own speed's
+// by a steady part of the gap each meter, as its pull meets the air.
+roll_speed(v: f32, d0: f32, d1: f32): f32 {
+    g: f32 = course_grade(d0);
+    top: f32 = maxf(SLOPE_G * (g / sqrtf(1.0 + g * g) - ROLL_FRICTION) / AIR_DRAG,
+        0.0);
+    w: f32 = top + (v * v - top) * expf(-2.0 * AIR_DRAG * maxf(d1 - d0, 0.0));
+    clampf(sqrtf(maxf(w, 0.0)), PUSH_SPEED, TOP_SPEED)
+}
+
+// ---- halfpipes ----
+// For each halfpipe, a table too: how long he flies letting go at each
+// height up its walls (by how far out across the run), heading up one at
+// PIPE_CARVE, at each of a few speeds, ridden with the game's own rules by
+// a rider made for it.
+const PIPE_CARVE: f32 = 0.85;
+
+const PIPE_SPEEDS: int = 4;
+
+const PIPE_V0: f32 = 8.0;
+
+const PIPE_DV: f32 = 2.0;
+
+const PIPE_XSTEP: f32 = 0.25;
+
+const PIPE_XN: int = 17;
+
+pipe_table: []f32 = new f32[MAX_FEATURES * PIPE_SPEEDS * PIPE_XN](0.0);
+
+// Now, for a halfpipe ahead (or under him): his air letting go at each
+// height, at the speed he has (or would come to it with).
+pipe_air: []f32 = new f32[MAX_FEATURES * PIPE_XN](0.0);
+
+pipe_on: []bool = new bool[MAX_FEATURES](false);
+
+pipe_rider: *Mover = new_mover(0.0, 0.0, PI);
+
+pipe_keys: *Keys = new Keys {
+    held: [false, false, false, false],
+    hop: false,
+    hop_held: false,
+    board: false,
+    style: false,
+    style_held: false,
+    stick_x: 0.0,
+    stick_on: false,
+    pad_held: false,
+    pad_press: false,
+    pad_release: false,
+    aim_x: 0.0,
+    aim_y: 0.0
+};
+
+build_pipe(i: int) {
+    for k in 0..PIPE_SPEEDS {
+        for n in 0..PIPE_XN pipe_table[(i * PIPE_SPEEDS + k) * PIPE_XN + n] = pipe_try(i,
+            PIPE_V0 + PIPE_DV * k as f32, PIPE_FLAT + PIPE_XSTEP * n as f32)
+    }
+}
+
+// Ride into halfpipe i's right wall at speed v, letting go x out: how long
+// he flies.
+pipe_try(i: int, v: f32, x: f32): f32 {
+    f: Feature = features[i];
+    m: *Mover = pipe_rider;
+    k: *Keys = pipe_keys;
+    enter_course(m);
+    m.x = 0.0;
+    m.z = -(f.d + 12.0);
+    m.y = course_height(m.x, m.z);
+    m.prev = v3(m.x, m.y, m.z);
+    m.speed = v;
+    m.carve = PIPE_CARVE;
+    d: V3 = carve_dir(m.carve);
+    m.vx = d.x * v;
+    m.vz = d.z * v;
+    m.vy = rise_along(m.x, m.z, d) * v;
+    k.stick_on = true;
+    k.stick_x = PIPE_CARVE / AIM_MAX;
+    k.pad_press = true;
+    k.pad_held = true;
+    k.pad_release = false;
+    k.aim_x = 0.0;
+    k.aim_y = 0.0;
+    steps: int = 0;
+    let_go: bool = false;
+    while (steps < 120 * 4) {
+        if (!let_go && (m.x >= x || m.air)) {
+            k.pad_held = false;
+            k.pad_release = true;
+            let_go = true
+        }
+        step_course(m, k, STEP_DT);
+        if (let_go && m.air && m.air_time > 0.0) {
+            // Up and back down: done when he lands.
+            while (m.air && steps < 120 * 4) {
+                step_course(m, k, STEP_DT);
+                steps = steps + 1
+            }
+            return m.air_time
+        }
+        steps = steps + 1
+    }
+    0.0
+}
+
+// Each frame: for each jump ahead, his air letting go at each place on its
+// run-up, from the tables at the speed he would come to it.
+update_marks(m: *Mover) {
+    d: f32 = -m.z;
+    for i in 0..nfeatures {
+        mark_on[i] = mark_jump[i] && mark_lip[i] > d + 0.5 && mark_lip[i] < d + MARK_AHEAD;
+        if (mark_on[i]) {
+            if (features[i].kind == FEATURE_CLIFF) mark_x[i] = clampf(m.x, -COURSE_HALF + 1.0,
+                COURSE_HALF - 1.0);
+            v: f32 = m.speed;
+            if (mark_from[i] > d) v = roll_speed(m.speed, d, mark_from[i]);
+            u: f32 = clampf((v - MARK_V0) / MARK_DV, 0.0, (MARK_SPEEDS - 1) as f32 - 0.001);
+            k: int = u as int;
+            t: f32 = u - k as f32;
+            a: int = (i * MARK_SPEEDS + k) * MARK_N;
+            b: int = a + MARK_N;
+            for n in 0..mark_count[i] mark_air[i * MARK_N + n] = lerpf(mark_table[a + n],
+                mark_table[b + n], t);
+            mark_lip_speed[i] = lerpf(mark_table_lip_v[i * MARK_SPEEDS + k], mark_table_lip_v[i * MARK_SPEEDS + k + 1],
+                t)
+        }
+        f: Feature = features[i];
+        pipe_on[i] = f.kind == FEATURE_PIPE && f.d < d + MARK_AHEAD && f.d + f.a - 6.0 > d;
+        if (pipe_on[i]) {
+            v: f32 = m.speed;
+            if (f.d > d) v = roll_speed(m.speed, d, f.d);
+            u: f32 = clampf((v - PIPE_V0) / PIPE_DV, 0.0, (PIPE_SPEEDS - 1) as f32 - 0.001);
+            k: int = u as int;
+            t: f32 = u - k as f32;
+            a: int = (i * PIPE_SPEEDS + k) * PIPE_XN;
+            for n in 0..PIPE_XN pipe_air[i * PIPE_XN + n] = lerpf(pipe_table[a + n],
+                pipe_table[a + PIPE_XN + n], t)
+        }
+    }
 }
 
 // How far ahead he looks for the next jump, and how sharply the ground

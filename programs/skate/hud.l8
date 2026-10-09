@@ -455,40 +455,6 @@ project(p: V3): bool {
     true
 }
 
-// A quad on the ground: x0 to x1 across, d0 to d1 along, a little above
-// it, as a run of the given color; if all of it is in front of the camera.
-put_ground_mark(
-    x0: f32,
-    x1: f32,
-    d0: f32,
-    d1: f32,
-    r: f32,
-    g: f32,
-    b: f32,
-    a: f32
-) {
-    if (nruns >= MAX_RUNS) return;
-    lift: f32 = 0.06;
-    if (!project(v3(x0, course_height(x0, -d0) + lift, -d0))) return;
-    ax: f32 = proj_x;
-    ay: f32 = proj_y;
-    if (!project(v3(x1, course_height(x1, -d0) + lift, -d0))) return;
-    bx: f32 = proj_x;
-    by: f32 = proj_y;
-    if (!project(v3(x1, course_height(x1, -d1) + lift, -d1))) return;
-    cx: f32 = proj_x;
-    cy: f32 = proj_y;
-    if (!project(v3(x0, course_height(x0, -d1) + lift, -d1))) return;
-    first: int = hud_n / 2;
-    put_corner(ax, ay);
-    put_corner(bx, by);
-    put_corner(cx, cy);
-    put_corner(ax, ay);
-    put_corner(cx, cy);
-    put_corner(proj_x, proj_y);
-    end_run(first, r, g, b, a)
-}
-
 // What a jump favors, in a word or two.
 favors_short(item: int) {
     if (item == FEATURE_KICKER) append("FLIPS x2");
@@ -497,17 +463,156 @@ favors_short(item: int) {
     if (item == FEATURE_PIPE) append("SPINS x2")
 }
 
+// The zones painted on the jumps ahead while he aims (see the world
+// shader, in render.l8): over each one's run-up, a faint wash, gold where
+// letting go lands the trick, on past the lip for as long as a late pop
+// still counts; long for a small trick, a sliver at the lip for a big one,
+// none for one too big. Each is two rows: x0 and x1 across, the run-up's
+// start, and where the gold starts; and where it ends, the lip, and 1 for
+// a halfpipe's wall (its gold, or wash, running across the run, up it).
+const MAX_ZONES: int = 8;
+
+zone_rect: []f32 = new f32[MAX_ZONES * 8](0.0);
+
+nzones: int = 0;
+
+find_zones() {
+    nzones = 0;
+    for k in 0..MAX_ZONES * 8 zone_rect[k] = 0.0;
+    if (!hud_aiming || hud_finished) return;
+    need: f32 = trick_need(hud_aim_flips, hud_aim_halves);
+    if (need <= 0.0) return;
+    for i in 0..nfeatures {
+        if (nzones + 4 <= MAX_ZONES && pipe_on[i]) find_pipe_zones(i, need);
+        if (nzones < MAX_ZONES && mark_on[i] && mark_count[i] > 0) find_zone(i, need)
+    }
+}
+
+// On a halfpipe's walls: a wash up each, and gold over the heights where
+// letting go lands the trick (around the one that throws him most).
+find_pipe_zones(i: int, need: f32) {
+    f: Feature = features[i];
+    a: int = i * PIPE_XN;
+    top: f32 = PIPE_FLAT + PIPE_XSTEP * (PIPE_XN - 1) as f32;
+    d0: f32 = f.d + 6.0;
+    d1: f32 = f.d + f.a - 6.0;
+    peak: int = 0;
+    for n in 0..PIPE_XN {
+        if (pipe_air[a + n] > pipe_air[a + peak]) peak = n
+    }
+    fits: bool = pipe_air[a + peak] >= need;
+    lo: f32 = 0.0;
+    hi: f32 = 0.0;
+    if (fits) {
+        // Out from the peak both ways while each height lands it, and on to
+        // where the air comes to need between the last that does and the
+        // first that doesn't.
+        k0: int = peak;
+        while (k0 > 0 && pipe_air[a + k0 - 1] >= need) k0 = k0 - 1;
+        k1: int = peak;
+        while (k1 < PIPE_XN - 1 && pipe_air[a + k1 + 1] >= need) k1 = k1 + 1;
+        lo = PIPE_FLAT + k0 as f32 * PIPE_XSTEP;
+        if (k0 > 0) lo = lo - edge_part(pipe_air[a + k0 - 1], pipe_air[a + k0], need) * PIPE_XSTEP;
+        hi = PIPE_FLAT + k1 as f32 * PIPE_XSTEP;
+        if (k1 < PIPE_XN - 1) hi = hi + edge_part(pipe_air[a + k1 + 1], pipe_air[a + k1],
+            need) * PIPE_XSTEP else hi = top + 0.4
+    }
+    for side in 0..2 {
+        sg: f32 = 1.0 - 2.0 * side as f32;
+        put_zone(sg * PIPE_FLAT, sg * (top + 0.4), d0, d1, d1, d1, 1.0);
+        if (fits) put_zone(sg * lo, sg * hi, d0, d0, d1, d1, 1.0)
+    }
+}
+
+// Between a place where the air is short of need and the next, where it
+// is at least need, how much of the way from the one that lands it toward
+// the one that doesn't the air still comes to need.
+edge_part(short: f32, lands: f32, need: f32): f32 {
+    clampf((lands - need) / maxf(lands - short, 0.001), 0.0, 1.0)
+}
+
+// A zone: x from x0 to x1 (either way round), d from d0 to d1, gold from
+// gold, the lip at lip; wall, 1 on a halfpipe's wall.
+put_zone(
+    x0: f32,
+    x1: f32,
+    d0: f32,
+    gold: f32,
+    d1: f32,
+    lip: f32,
+    wall: f32
+) {
+    z: int = nzones * 8;
+    zone_rect[z] = minf(x0, x1);
+    zone_rect[z + 1] = maxf(x0, x1);
+    zone_rect[z + 2] = d0;
+    zone_rect[z + 3] = gold;
+    zone_rect[z + 4] = d1;
+    zone_rect[z + 5] = lip;
+    zone_rect[z + 6] = wall;
+    nzones = nzones + 1
+}
+
+find_zone(i: int, need: f32) {
+    f: Feature = features[i];
+    n: int = mark_count[i];
+    lip: f32 = mark_lip[i];
+    end: f32 = lip + LATE_OLLIE * mark_lip_speed[i];
+    // Where the gold starts: back from the lip while every place lands it,
+    // and between the last that does and the first that doesn't, where the
+    // air comes to what the trick needs.
+    gold: f32 = end;
+    a: int = i * MARK_N;
+    if (mark_air[a + n - 1] >= need) {
+        k: int = n - 1;
+        while (k > 0 && mark_air[a + k - 1] >= need) k = k - 1;
+        gold = mark_from[i] + k as f32 * MARK_STEP;
+        if (k > 0) {
+            lo: f32 = mark_air[a + k - 1];
+            hi: f32 = mark_air[a + k];
+            gold = gold - (1.0 - (need - lo) / maxf(hi - lo, 0.001)) * MARK_STEP
+        }
+    }
+    hw: f32 = 1.2;
+    if (f.kind != FEATURE_CLIFF) hw = f.w * 0.8;
+    put_zone(mark_x[i] - hw, mark_x[i] + hw, mark_from[i], gold, end, lip, 0.0)
+}
+
 // Over each jump ahead (see update_marks, in slope.l8), a tag: what it
 // favors; or, while he aims, what the trick would score there, letting go
-// at its lip (in gold), or that it will not fit (in red). And on its run-up,
-// while he aims, the stretch where letting go lands the trick: long for a
-// small one, a sliver at the lip for a big one, none for one too big.
+// at its lip (in gold), or that it will not fit (in red).
 put_marks(w: int, px: f32) {
     need: f32 = trick_need(hud_aim_flips, hud_aim_halves);
     for i in 0..nfeatures {
-        if (mark_on[i] && mark_count[i] > 0) put_mark(i, need, px)
+        if (mark_on[i] && mark_count[i] > 0) put_mark(i, need, px);
+        if (pipe_on[i]) put_pipe_tag(i, need, px)
     }
     hud_px = px
+}
+
+// A halfpipe's tag, over its right wall a little ahead of him.
+put_pipe_tag(i: int, need: f32, px: f32) {
+    f: Feature = features[i];
+    best: f32 = 0.0;
+    for n in 0..PIPE_XN best = maxf(best, pipe_air[i * PIPE_XN + n]);
+    d: f32 = clampf(hud_rider_d + 14.0, f.d + 6.0, f.d + f.a - 6.0);
+    x: f32 = pipe_top() - 0.5;
+    if (!project(v3(x, course_height(x, -d) + 1.6, -d))) return;
+    a: f32 = 1.0 - smoothstepf(MARK_AHEAD - 20.0, MARK_AHEAD, d - hud_rider_d);
+    hud_px = maxf(2.0, px - 1.0);
+    text_len = 0;
+    fits: bool = best >= need;
+    if (hud_aiming) {
+        if (fits) {
+            append("+");
+            append_int(aim_value(HIT_AIR, FEATURE_PIPE, hud_aim_flips, hud_aim_halves,
+                best, hud_aim_switch))
+        } else append("TOO BIG")
+    } else favors_short(FEATURE_PIPE);
+    tx: f32 = floorf(proj_x - text_width() * 0.5);
+    ty: f32 = floorf(proj_y - 7.0 * hud_px);
+    if (hud_aiming && !fits) put_text(tx, ty, 1.0, 0.45, 0.38, a) else if (hud_aiming) put_text(tx,
+        ty, 1.0, 0.84, 0.32, a) else put_text(tx, ty, 0.75, 0.9, 1.0, 0.8 * a)
 }
 
 put_mark(i: int, need: f32, px: f32) {
@@ -519,19 +624,6 @@ put_mark(i: int, need: f32, px: f32) {
     for k in 0..n best = maxf(best, mark_air[i * MARK_N + k]);
     a: f32 = 1.0 - smoothstepf(MARK_AHEAD - 20.0, MARK_AHEAD, lip - hud_rider_d);
     fits: bool = best >= need;
-    // (No zone for an ollie: any jump will do.)
-    if (hud_aiming && fits && need > 0.0) {
-        // The zone: from the first place after which every one lands it,
-        // on past the lip for as long as a late pop still counts.
-        k0: int = n;
-        while (k0 > 0 && mark_air[i * MARK_N + k0 - 1] >= need) k0 = k0 - 1;
-        d0: f32 = mark_from[i] + k0 as f32 * MARK_STEP;
-        d1: f32 = lip + LATE_OLLIE * mark_lip_speed[i];
-        hw: f32 = 1.2;
-        if (f.kind != FEATURE_CLIFF) hw = f.w * 0.8;
-        if (k0 < n) put_ground_mark(x - hw, x + hw, minf(d0, lip - 0.2), d1, 1.0,
-            0.84, 0.32, 0.35 * a)
-    }
     if (!project(v3(x, course_height(x, -lip) + 1.8, -lip))) return;
     hud_px = maxf(2.0, px - 1.0);
     text_len = 0;
