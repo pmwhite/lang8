@@ -324,7 +324,7 @@ type CRail = {
     next: int
 }
 
-const MAX_RAILS: int = 32;
+const MAX_RAILS: int = 64;
 
 crails: []CRail = new CRail[MAX_RAILS](CRail {
     a: V3 { x: 0.0, y: 0.0, z: 0.0 },
@@ -430,7 +430,9 @@ course_mat(x: f32, d: f32): f32 {
     if (k >= 0) {
         // A gap's pit is bare earth.
         if (feature_height(features[k], x, d) < -0.05) return MAT_ROCK;
-        return MAT_KICKER
+        // Its shoulders are packed concrete; only under its planks is it
+        // dark.
+        if (absf(x - features[k].x) < features[k].w) return MAT_KICKER
     }
     for i in 0..nfeatures {
         f: Feature = features[i];
@@ -454,7 +456,9 @@ const MAT_KICKER: f32 = 0.01;
 course_color(mat: f32): V3 {
     if (mat == MAT_GRASS) return grass_color;
     if (mat == MAT_WOOD) return wood_color;
-    if (mat == MAT_KICKER) return look.kicker;
+    // Under its planks, a kicker is darker: so that the gaps between them
+    // show.
+    if (mat == MAT_KICKER) return v_scale(look.kicker, 0.5);
     // (A halfpipe is the run's own concrete: a color of its own would end
     // in the steps of the mesh.)
     if (mat == MAT_PIPE) return look.run;
@@ -682,6 +686,7 @@ build_chunk(m: *Mesh) {
         d = nd
     }
     put_lip_stripes(m);
+    if (!far_lod) put_edges(m);
     put_copings(m);
     for i in 0..ncrails {
         if (in_chunk(-crails[i].a.z)) put_course_rail(m, crails[i])
@@ -750,29 +755,238 @@ put_copings(m: *Mesh) {
     }
 }
 
-// An orange line along each kicker's lip.
+// Each kicker (and gap) is decked in planks, laid across it up its ramp and
+// over its table and landing, with a steel coping along its lip, and a
+// little flag either side.
 put_lip_stripes(m: *Mesh) {
-    orange: V3 = v3(0.95, 0.5, 0.26);
     for i in 0..nfeatures {
         f: Feature = features[i];
         if ((f.kind == FEATURE_KICKER || f.kind == FEATURE_GAP) && in_chunk(f.d + f.a)) {
-            d0: f32 = f.d + f.a - 0.3;
-            d1: f32 = f.d + f.a - 0.04;
-            x: f32 = f.x - f.w;
-            while (x < f.x + f.w - 0.01) {
-                nx: f32 = minf(x + 0.5, f.x + f.w);
-                a: V3 = v_add(course_vertex(x, d0), v3(0.0, 0.012, 0.0));
-                b: V3 = v_add(course_vertex(nx, d0), v3(0.0, 0.012, 0.0));
-                c: V3 = v_add(course_vertex(nx, d1), v3(0.0, 0.012, 0.0));
-                e: V3 = v_add(course_vertex(x, d1), v3(0.0, 0.012, 0.0));
-                put_quad(m, a, b, c, e, course_normal(x, -d0), orange, MAT_PAINT);
-                x = nx
-            }
-            // Little flags either side of the lip.
-            put_flag(m, f.x - f.w - 1.9, f.d + f.a, v3(0.95, 0.3, 0.25));
-            put_flag(m, f.x + f.w + 1.9, f.d + f.a, v3(0.25, 0.5, 0.95))
+            if (!far_lod) put_deck(m, f);
+            lip: f32 = f.d + f.a;
+            y: f32 = course_height(f.x, -lip) + 0.025;
+            put_tube(m, v3(f.x - f.w, y, -lip), v3(f.x + f.w, y, -lip), 0.035, steel,
+                MAT_METAL);
+            put_flag(m, f.x - f.w - 1.9, lip, v3(0.95, 0.3, 0.25));
+            put_flag(m, f.x + f.w + 1.9, lip, v3(0.25, 0.5, 0.95))
         }
     }
+}
+
+// How far apart planks are laid, and the gap between them.
+const PLANK_STEP: f32 = 0.26;
+
+const PLANK_GAP: f32 = 0.03;
+
+// f's planks: wherever it stands up off the hill.
+put_deck(m: *Mesh, f: Feature) {
+    len: f32 = feature_len(f);
+    s: f32 = 0.0;
+    k: int = 0;
+    while (s + PLANK_STEP <= len) {
+        d0: f32 = f.d + s;
+        d1: f32 = d0 + PLANK_STEP - PLANK_GAP;
+        h0: f32 = feature_profile(f, s);
+        h1: f32 = feature_profile(f, s + PLANK_STEP - PLANK_GAP);
+        if (h0 > 0.03 && h1 > 0.03) {
+            y0: f32 = course_height(f.x, -d0);
+            y1: f32 = course_height(f.x, -d1);
+            fwd: V3 = v_norm(v3(0.0, y1 - y0, -(d1 - d0)));
+            right: V3 = v3(1.0, 0.0, 0.0);
+            up: V3 = v_cross(right, fwd);
+            c: V3 = v_madd(v3(f.x, (y0 + y1) * 0.5, -(d0 + d1) * 0.5), up, 0.006);
+            shade: f32 = 0.86 + 0.26 * cell_jitter(k, i_of(f));
+            put_block(m, c, right, up, fwd, v3(f.w * 0.98, 0.012, (d1 - d0) * 0.5),
+                0.008, v_scale(look.kicker, shade), MAT_PAINT);
+            // Under it, a dark joist across the whole step: the gaps show
+            // it, and the deck's shadow is solid.
+            put_block(m, v_madd(c, up, -0.012), right, up, fwd, v3(f.w * 0.97, 0.008,
+                PLANK_STEP * 0.5 + 0.01), 0.0, v_scale(look.kicker, 0.35), MAT_PAINT)
+        }
+        s = s + PLANK_STEP;
+        k = k + 1
+    }
+}
+
+i_of(f: Feature): int {
+    (f.d * 10.0) as int
+}
+
+// ---- edges ----
+// Stone curbs along both edges of the run, block by block, and a low
+// wooden fence up each bank.
+const CURB_LEN: f32 = 0.6;
+
+const FENCE_OUT: f32 = 3.2;
+
+const FENCE_STEP: f32 = 2.4;
+
+put_edges(m: *Mesh) {
+    for side in 0..2 {
+        sg: f32 = 1.0 - 2.0 * side as f32;
+        d: f32 = 0.0;
+        k: int = 0;
+        while (d < COURSE_END) {
+            if (in_chunk(d)) put_curb(m, sg * (COURSE_HALF + 0.08), d, k * 2 + side);
+            d = d + CURB_LEN + 0.04;
+            k = k + 1
+        }
+        d = -6.0;
+        k = 0;
+        while (d < COURSE_END) {
+            if (in_chunk(d)) put_fence(m, sg * (COURSE_HALF + FENCE_OUT), d, k * 2 + side);
+            d = d + FENCE_STEP;
+            k = k + 1
+        }
+    }
+}
+
+// A curb stone from d on, at x: if the ground there is not too steep (a
+// cliff's face) for one.
+put_curb(
+    m: *Mesh,
+    x: f32,
+    d: f32,
+    k: int
+) {
+    y0: f32 = course_height(x, -d);
+    y1: f32 = course_height(x, -(d + CURB_LEN));
+    if (absf(y1 - y0) > 0.6) return;
+    fwd: V3 = v_norm(v3(0.0, y1 - y0, -CURB_LEN));
+    right: V3 = v3(1.0, 0.0, 0.0);
+    up: V3 = v_cross(right, fwd);
+    shade: f32 = 0.82 + 0.3 * cell_jitter(k, 11);
+    c: V3 = v_madd(v3(x, (y0 + y1) * 0.5, -(d + CURB_LEN * 0.5)), up, 0.04);
+    put_block(m, c, right, up, fwd, v3(0.17, 0.08, CURB_LEN * 0.5), 0.03, v3(0.62 * shade,
+        0.58 * shade, 0.52 * shade), MAT_PAINT)
+}
+
+// A fence post at (x, d), and its two rails on to the next.
+put_fence(
+    m: *Mesh,
+    x: f32,
+    d: f32,
+    k: int
+) {
+    wood: V3 = v_scale(v3(0.56, 0.39, 0.25), 0.85 + 0.25 * cell_jitter(k, 5));
+    y: f32 = course_height(x, -d);
+    put_block(m, v3(x, y + 0.27, -d), v3(1.0, 0.0, 0.0), v3(0.0, 1.0, 0.0), v3(0.0,
+        0.0, 1.0), v3(0.055, 0.33, 0.055), 0.015, wood, MAT_PAINT);
+    ny: f32 = course_height(x, -(d + FENCE_STEP));
+    if (absf(ny - y) > 1.2) return;
+    a: V3 = v3(x, y, -d);
+    b: V3 = v3(x, ny, -(d + FENCE_STEP));
+    fwd: V3 = v_norm(v_sub(b, a));
+    right: V3 = v_norm(v_cross(fwd, v3(0.0, 1.0, 0.0)));
+    up: V3 = v_cross(right, fwd);
+    half: f32 = v_len(v_sub(b, a)) * 0.5;
+    for r in 0..2 {
+        lift: f32 = 0.24 + 0.27 * r as f32;
+        put_block(m, v_add(v_scale(v_add(a, b), 0.5), v3(0.0, lift, 0.0)), right,
+            up, fwd, v3(0.025, 0.035, half), 0.01, v_scale(wood, 0.95), MAT_PAINT)
+    }
+}
+
+// Between the curb and the fence on each side, every few metres: a bush,
+// a bench, a few stones, or a hay bale.
+put_edge_props(m: *Mesh) {
+    for side in 0..2 {
+        sg: f32 = 1.0 - 2.0 * side as f32;
+        d: f32 = COURSE_START + 4.0;
+        k: int = 0;
+        while (d < COURSE_FINISH + 40.0) {
+            meadow_rng = k * 4231 + side * 977 + 29;
+            x: f32 = sg * (COURSE_HALF + 0.9 + meadow_rand() * 0.8);
+            step: f32 = 4.0 + meadow_rand() * 5.0;
+            if (in_chunk(d) && prop_room(x, d)) {
+                pick: f32 = meadow_rand();
+                if (pick < 0.45) put_bush(m, x, d) else if (pick < 0.65) put_bench(m,
+                    x, d) else if (pick < 0.85) put_stones(m, x, d) else put_bale(m,
+                    x, d)
+            }
+            d = d + step;
+            k = k + 1
+        }
+    }
+}
+
+// Whether the bank at (x, d) is gentle enough for a prop.
+prop_room(x: f32, d: f32): bool {
+    y0: f32 = course_height(x, -(d - 0.8));
+    y1: f32 = course_height(x, -(d + 0.8));
+    yi: f32 = course_height(x - 0.6, -d);
+    yo: f32 = course_height(x + 0.6, -d);
+    absf(y1 - y0) < 0.5 && absf(yo - yi) < 1.2
+}
+
+put_bush(m: *Mesh, x: f32, d: f32) {
+    leaf: V3 = v_scale(look.leaf, 1.05 + 0.3 * meadow_rand());
+    n: int = 2 + (meadow_rand() * 2.0) as int;
+    for i in 0..n {
+        bx: f32 = x + (meadow_rand() - 0.5) * 0.9;
+        bd: f32 = d + (meadow_rand() - 0.5) * 1.2;
+        r: f32 = 0.35 + 0.25 * meadow_rand();
+        put_clump(m, v3(bx, course_height(bx, -bd) + r * 0.6, -bd), v3(r, r * 0.8,
+            r), leaf, 24)
+    }
+}
+
+// A bench facing the run: a seat and a back of planks on two stone feet.
+put_bench(m: *Mesh, x: f32, d: f32) {
+    sg: f32 = 1.0;
+    if (x < 0.0) sg = -1.0;
+    // Level with the bank at its front; its feet go down into it.
+    y: f32 = course_height(x - sg * 0.2, -d);
+    across: V3 = v3(sg, 0.0, 0.0);
+    up: V3 = v3(0.0, 1.0, 0.0);
+    along: V3 = v3(0.0, 0.0, 1.0);
+    stone: V3 = v3(0.6, 0.57, 0.52);
+    for e in 0..2 {
+        z: f32 = -d + (2.0 * e as f32 - 1.0) * 0.6;
+        put_block(m, v3(x, y + 0.06, z), across, up, along, v3(0.2, 0.35, 0.06), 0.02,
+            stone, MAT_PAINT)
+    }
+    wood: V3 = v3(0.6, 0.4, 0.25);
+    for p in 0..3 {
+        shade: f32 = 0.85 + 0.25 * meadow_rand();
+        put_block(m, v3(x + sg * (p as f32 - 1.0) * 0.13, y + 0.43, -d), across, up,
+            along, v3(0.055, 0.022, 0.8), 0.01, v_scale(wood, shade), MAT_PAINT)
+    }
+    for p in 0..2 put_block(m, v3(x + sg * 0.21, y + 0.6 + p as f32 * 0.14, -d), across,
+        up, along, v3(0.022, 0.05, 0.8), 0.01, v_scale(wood, 0.9), MAT_PAINT);
+    put_block(m, v3(x + sg * 0.21, y + 0.5, -d), across, up, along, v3(0.03, 0.12,
+        0.05), 0.01, stone, MAT_PAINT)
+}
+
+// A few rounded stones, half sunk.
+put_stones(m: *Mesh, x: f32, d: f32) {
+    n: int = 2 + (meadow_rand() * 3.0) as int;
+    for i in 0..n {
+        sx: f32 = x + (meadow_rand() - 0.5) * 1.0;
+        sd: f32 = d + (meadow_rand() - 0.5) * 1.0;
+        r: f32 = 0.12 + 0.2 * meadow_rand();
+        a: f32 = meadow_rand() * TAU;
+        right: V3 = v3(cosf(a), 0.0, sinf(a));
+        fwd: V3 = v3(-sinf(a), 0.0, cosf(a));
+        shade: f32 = 0.75 + 0.3 * meadow_rand();
+        put_block(m, v3(sx, course_height(sx, -sd) + r * 0.3, -sd), right, v3(0.0,
+            1.0, 0.0), fwd, v3(r, r * 0.65, r * 0.8), r * 0.5, v3(0.6 * shade, 0.58 * shade,
+            0.55 * shade), MAT_PAINT)
+    }
+}
+
+// A hay bale, its straw bound in two bands.
+put_bale(m: *Mesh, x: f32, d: f32) {
+    y: f32 = course_height(x, -d);
+    a: f32 = (meadow_rand() - 0.5) * 0.6;
+    right: V3 = v3(cosf(a), 0.0, sinf(a));
+    fwd: V3 = v3(-sinf(a), 0.0, cosf(a));
+    up: V3 = v3(0.0, 1.0, 0.0);
+    straw: V3 = v_scale(v3(0.86, 0.72, 0.42), 0.9 + 0.15 * meadow_rand());
+    c: V3 = v3(x, y + 0.2, -d);
+    put_block(m, c, right, up, fwd, v3(0.35, 0.25, 0.55), 0.07, straw, MAT_PAINT);
+    for b in 0..2 put_block(m, v_madd(c, fwd, (2.0 * b as f32 - 1.0) * 0.25), right,
+        up, fwd, v3(0.36, 0.26, 0.02), 0.01, v_scale(straw, 0.7), MAT_PAINT)
 }
 
 put_flag(
@@ -806,31 +1020,70 @@ box_paint: V3 = V3 { x: 0.92, y: 0.45, z: 0.36 };
 put_course_rail(m: *Mesh, r: CRail) {
     u: V3 = rail_frame(r);
     len: f32 = v_len(v_sub(r.b, r.a));
-    post: V3 = v3(0.2, 0.21, 0.22);
+    side: V3 = v_norm(v_cross(u, v3(0.0, 1.0, 0.0)));
+    up: V3 = v_cross(side, u);
     if (r.box) {
-        // A painted box, its top a steel plate.
-        side: V3 = v_norm(v_cross(u, v3(0.0, 1.0, 0.0)));
-        up: V3 = v_cross(side, u);
-        mid: V3 = v_scale(v_add(r.a, r.b), 0.5);
-        // Deep enough to reach the ground under its low end.
-        depth: f32 = 0.6;
-        mat_frame(xf, side, up, u, v_madd(mid, up, -depth * 0.5));
-        put_rounded_box(m, xf, v3(0.28, depth * 0.5, len * 0.5), 0.06, 0.0, 1, box_paint,
-            MAT_PAINT);
-        mat_frame(xf, side, up, u, v_madd(mid, up, 0.004));
-        put_rounded_box(m, xf, v3(0.27, 0.012, len * 0.5 - 0.02), 0.01, 0.0, 1, steel,
-            MAT_METAL);
+        put_box_boards(m, r, side, up, u, len);
         return
     }
     put_tube(m, r.a, r.b, 0.05, rail_paint, MAT_PAINT);
-    // Posts down to the ground, about every metre and a half.
+    // Square posts down to the ground, about every metre and a half, each
+    // bolted to a plate.
     k: int = (len / 1.5) as int + 1;
+    flat: V3 = v_norm(v3(side.z, 0.0, -side.x));
     for i in 0..k + 1 {
         p: V3 = v_lerp(r.a, r.b, (i as f32 + 0.15) / (k as f32 + 0.3));
         g: f32 = course_height(p.x, p.z);
-        put_tube(m, v3(p.x, g - 0.1, p.z), v3(p.x, p.y - 0.04, p.z), 0.035, post,
-            MAT_PAINT)
+        h: f32 = (p.y - 0.04 - g) * 0.5 + 0.05;
+        put_block(m, v3(p.x, g - 0.05 + h, p.z), side, v3(0.0, 1.0, 0.0), flat, v3(0.035,
+            h, 0.035), 0.008, v_scale(rail_paint, 0.8), MAT_PAINT);
+        put_block(m, v3(p.x, g + 0.005, p.z), side, v3(0.0, 1.0, 0.0), flat, v3(0.11,
+            0.012, 0.11), 0.006, steel, MAT_METAL)
     }
+}
+
+// A box: painted boards along its sides and across its ends, round a dark
+// core, with steel angle along its top edges and a plate between them.
+// Deep enough to reach the ground under its low end.
+const BOX_DEPTH: f32 = 0.6;
+
+const BOX_BOARD: f32 = 0.15;
+
+put_box_boards(
+    m: *Mesh,
+    r: CRail,
+    side: V3,
+    up: V3,
+    u: V3,
+    len: f32
+) {
+    mid: V3 = v_scale(v_add(r.a, r.b), 0.5);
+    put_block(m, v_madd(mid, up, -BOX_DEPTH * 0.5), side, up, u, v3(0.26, BOX_DEPTH * 0.5,
+        len * 0.5 - 0.01), 0.01, v_scale(box_paint, 0.35), MAT_PAINT);
+    nb: int = (BOX_DEPTH / BOX_BOARD) as int;
+    for b in 0..nb {
+        y: f32 = -0.035 - BOX_BOARD * (b as f32 + 0.5);
+        for sd in 0..2 {
+            sg: f32 = 2.0 * sd as f32 - 1.0;
+            shade: f32 = 0.86 + 0.22 * cell_jitter(b * 2 + sd, (len * 10.0) as int);
+            c: V3 = v_madd(v_madd(mid, up, y), side, sg * 0.27);
+            put_block(m, c, side, up, u, v3(0.018, BOX_BOARD * 0.5 - 0.008, len * 0.5),
+                0.008, v_scale(box_paint, shade), MAT_PAINT)
+        }
+        for e in 0..2 {
+            sg: f32 = 2.0 * e as f32 - 1.0;
+            c: V3 = v_madd(v_madd(mid, up, y), u, sg * (len * 0.5 + 0.005));
+            put_block(m, c, side, up, u, v3(0.29, BOX_BOARD * 0.5 - 0.008, 0.018),
+                0.008, v_scale(box_paint, 0.9), MAT_PAINT)
+        }
+    }
+    for sd in 0..2 {
+        sg: f32 = 2.0 * sd as f32 - 1.0;
+        put_block(m, v_madd(v_madd(mid, up, -0.015), side, sg * 0.275), side, up,
+            u, v3(0.03, 0.03, len * 0.5 + 0.02), 0.006, steel, MAT_METAL)
+    }
+    put_block(m, v_madd(mid, up, -0.004), side, up, u, v3(0.25, 0.012, len * 0.5),
+        0.004, v_scale(steel, 0.9), MAT_METAL)
 }
 
 // Two posts and a banner across the run.
@@ -903,6 +1156,7 @@ put_course_scenery(m: *Mesh) {
         d = d + 2.0;
         k = k + 1
     }
+    if (!far_lod) put_edge_props(m);
     // The street lamps.
     for i in 0..nlamps {
         if (in_chunk(-lamp_z[i])) put_lamp_post(m, lamp_x[i], lamp_z[i])
