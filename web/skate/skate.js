@@ -99,6 +99,9 @@ async function main() {
   const zoom = Math.min(4, Math.max(0.25, Number(params.get("zoom")) || 0.85));
   const scale = params.has("scale") ? Math.min(1, Math.max(0.25, Number(params.get("scale")) || 1)) : 1;
   const platform = createPlatform(canvas, { log: (text) => console.warn(text), checkErrors: params.has("glcheck"), scale, zoom, env, pointers: true, maxTall: 2.4,
+    // A phone's screen has far more pixels than the block game's budget,
+    // and its GPU to spare: render nearer its own resolution.
+    maxPixels: 2.2e6,
     // ?gputime times the frame's parts on the GPU (l8Game.glTiming().gpu);
     // ?skip=prog3 drops a program's draws, to measure what they cost.
     timing: params.has("gputime"), gpuTiming: params.has("gputime"),
