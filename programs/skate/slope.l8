@@ -59,6 +59,12 @@ const OLLIE_SPEED: f32 = 5.0;
 // pop adds less.
 const LIP_POP: f32 = 2.0;
 
+// In the park, the steepest he rides up (but for the bowl's walls), and
+// the steepest that throws him (a kicker's lip is about 1).
+const STEEP_FACE: f32 = 1.6;
+
+const STEEP_THROW: f32 = 1.3;
+
 const LATE_OLLIE: f32 = 0.15;
 
 // How fast he turns, radians a second: at the most, and at the least, so
@@ -101,8 +107,6 @@ const GRIND_POINTS: f32 = 150.0;
 // Start (or start over) at the top of the run.
 enter_course(m: *Mover) {
     reset_mover(m);
-    m.course = true;
-    m.riding = true;
     m.x = 0.0;
     m.z = -(COURSE_START + 7.0);
     m.y = course_height(m.x, m.z);
@@ -110,14 +114,11 @@ enter_course(m: *Mover) {
     m.carve = 0.0;
     m.speed = PUSH_SPEED;
     m.heading = PI;
-    m.facing = PI;
     m.finished = false;
     m.finish_t = 0.0;
     m.sketch_t = 10.0;
     m.crail = -1;
     m.pad_grab = false;
-    line.scoring = true;
-    clear_line();
     clear_run()
 }
 
@@ -179,14 +180,13 @@ step_course(m: *Mover, keys: *Keys, dt: f32) {
     }
     if (m.grinding) step_course_grind(m, dt) else if (m.air) step_course_air(m, keys,
         dt) else step_course_ground(m, keys, dt);
-    if (!m.finished && -m.z >= COURSE_FINISH) {
+    if (!park && !m.finished && -m.z >= COURSE_FINISH) {
         m.finished = true;
         m.finish_t = 0.0
     }
     tick_run(dt);
     if (m.finished) run.best_run = maxi(run.best_run, run.total);
     keys.hop = false;
-    keys.board = false;
     keys.style = false
 }
 
@@ -405,6 +405,9 @@ mark_air: []f32 = new f32[MAX_FEATURES * MARK_N](0.0);
 
 mark_lip_speed: []f32 = new f32[MAX_FEATURES](0.0);
 
+// How far ahead of him each one's lip is, along it.
+mark_dist: []f32 = new f32[MAX_FEATURES](0.0);
+
 // Make the tables, for the course as laid out.
 build_marks() {
     for i in 0..nfeatures {
@@ -449,15 +452,17 @@ sample_jump(
     sp: f32 = v;
     d: f32 = from;
     n: int = 0;
+    f: Feature = features[i];
+    fwd: V3 = feature_fwd(f);
     while (n < MARK_N && d <= lip + 0.01) {
-        z: f32 = -d;
-        y: f32 = course_height(x, z);
-        slope: f32 = (y - course_height(x, z + 0.3)) / 0.3;
-        vy: f32 = maxf(sp * slope, 0.0) + pop_speed(x, d);
-        mark_table[row + n] = fly_time(x, y, z, 0.0, vy, -sp);
+        p: V3 = feature_world(f, x, d);
+        y: f32 = p.y;
+        slope: f32 = (y - feature_world(f, x, d - 0.3).y) / 0.3;
+        vy: f32 = maxf(sp * slope, 0.0) + pop_speed(p.x, -p.z);
+        mark_table[row + n] = fly_time(p.x, y, p.z, fwd.x * sp, vy, fwd.z * sp);
         n = n + 1;
         // On to the next, slowing as he climbs.
-        ny: f32 = course_height(x, z - MARK_STEP);
+        ny: f32 = feature_world(f, x, d + MARK_STEP).y;
         w: f32 = sp * sp - 2.0 * (SLOPE_G * (ny - y) + (ROLL_FRICTION * SLOPE_G + AIR_DRAG * sp * sp) * MARK_STEP);
         sp = sqrtf(maxf(w, 0.25));
         d = d + MARK_STEP
@@ -502,13 +507,12 @@ pipe_air: []f32 = new f32[MAX_FEATURES * PIPE_XN](0.0);
 
 pipe_on: []bool = new bool[MAX_FEATURES](false);
 
-pipe_rider: *Mover = new_mover(0.0, 0.0, PI);
+pipe_rider: *Mover = new_mover();
 
 pipe_keys: *Keys = new Keys {
     held: [false, false, false, false],
     hop: false,
     hop_held: false,
-    board: false,
     style: false,
     style_held: false,
     stick_x: 0.0,
@@ -578,12 +582,15 @@ pipe_try(i: int, v: f32, x: f32): f32 {
 update_marks(m: *Mover) {
     d: f32 = -m.z;
     for i in 0..nfeatures {
+        mark_dist[i] = mark_lip[i] - d;
         mark_on[i] = mark_jump[i] && mark_lip[i] > d + 0.5 && mark_lip[i] < d + MARK_AHEAD;
+        if (park) mark_on[i] = mark_jump[i] && park_ahead(m, i);
         if (mark_on[i]) {
             if (features[i].kind == FEATURE_CLIFF) mark_x[i] = clampf(m.x, -COURSE_HALF + 1.0,
                 COURSE_HALF - 1.0);
             v: f32 = m.speed;
-            if (mark_from[i] > d) v = roll_speed(m.speed, d, mark_from[i]);
+            if (park) v = maxf(m.speed, PARK_CRUISE) else if (mark_from[i] > d) v = roll_speed(m.speed,
+                d, mark_from[i]);
             u: f32 = clampf((v - MARK_V0) / MARK_DV, 0.0, (MARK_SPEEDS - 1) as f32 - 0.001);
             k: int = u as int;
             t: f32 = u - k as f32;
@@ -595,6 +602,7 @@ update_marks(m: *Mover) {
                 t)
         }
         f: Feature = features[i];
+        if (f.kind == FEATURE_BOWL) update_bowl(m);
         pipe_on[i] = f.kind == FEATURE_PIPE && f.d < d + MARK_AHEAD && f.d + f.a - 6.0 > d;
         if (pipe_on[i]) {
             v: f32 = m.speed;
@@ -624,7 +632,7 @@ preview_ahead(m: *Mover) {
     m.ahead_air = 0.0;
     m.ahead_item = -1;
     // (In a halfpipe, its walls are the jumps, and the air now says it.)
-    if (m.air || m.grinding || in_pipe(-m.z)) return;
+    if (m.air || m.grinding || in_pipe(-m.z) || wall_at(m.x, m.z)) return;
     dir: V3 = carve_dir(m.carve);
     x: f32 = m.x;
     z: f32 = m.z;
@@ -637,6 +645,15 @@ preview_ahead(m: *Mover) {
         nz: f32 = z + dir.z * AHEAD_STEP;
         ny: f32 = course_height(nx, nz);
         s: f32 = (ny - y) / AHEAD_STEP;
+        // (Up to the bowl's wall, which is a jump of its own: see
+        // update_bowl.)
+        if (park && park_out(nx, nz) > 0.0) {
+            if (bowl_fits_air > 0.0) {
+                m.ahead_air = bowl_fits_air;
+                m.ahead_item = FEATURE_PIPE
+            }
+            return
+        }
         if (k > 0 && slope - s > EDGE_DROP && slope > -0.3) {
             vy: f32 = maxf(sp * slope, 0.0) + pop_speed(x, -z);
             m.ahead_air = fly_time(x, y, z, dir.x * sp, vy, dir.z * sp);
@@ -656,18 +673,34 @@ preview_ahead(m: *Mover) {
 // The kind of feature i, or -1.
 item_of(i: int): int {
     if (i < 0) return -1;
+    // The bowl's walls are a halfpipe's, for what they favor.
+    if (features[i].kind == FEATURE_BOWL) return FEATURE_PIPE;
     features[i].kind
+}
+
+// Up a wall he may fly straight up and come back down it: a halfpipe's on
+// the course, the bowl's in the park. Whether (x, z) is up one, and the
+// level way into it there.
+wall_at(x: f32, z: f32): bool {
+    if (park) return park_out(x, z) > 0.5;
+    pipe_at(x, -z) >= 0
+}
+
+wall_in(x: f32, z: f32): V3 {
+    if (park) return park_normal(x, z);
+    v3(signf(x), 0.0, 0.0)
+}
+
+// Heading c, turned back off a wall that faces in along -n.
+mirror_carve(c: f32, n: V3): f32 {
+    d: V3 = carve_dir(c);
+    r: V3 = v_madd(d, n, -2.0 * v_dot(d, n));
+    atan2f(r.x, -r.z)
 }
 
 absi(a: int): int {
     if (a < 0) return -a;
     a
-}
-
-signi(a: int): int {
-    if (a < 0) return -1;
-    if (a > 0) return 1;
-    0
 }
 
 maxi(a: int, b: int): int {
@@ -679,9 +712,6 @@ take_off(m: *Mover) {
     m.air = true;
     m.air_time = 0.0;
     m.ollied = false;
-    m.manual = false;
-    m.manual_t = 0.0;
-    m.air_tricks = 0;
     m.grab_t = 0.0;
     m.flip = 0.0;
     m.flip_w = 0.0;
@@ -700,11 +730,20 @@ take_off(m: *Mover) {
     // Up and off a halfpipe's wall he goes straight up, drifting back in a
     // little, and will come back down it the other way. (Dropping in off
     // its deck is an ordinary air.)
-    m.pipe_vert = item_of(m.air_from) == FEATURE_PIPE && m.carve * signf(m.x) > 0.1;
+    n: V3 = wall_in(m.x, m.z);
+    // (Up the bowl's walls, at any slant: else he would fly out over the
+    // lip.)
+    up: f32 = 0.1;
+    if (park) up = 0.0;
+    m.pipe_vert = item_of(m.air_from) == FEATURE_PIPE && v_dot(d, n) > up;
     if (m.pipe_vert) {
         m.pipe_carve = m.carve;
         m.pipe_speed = m.speed;
-        m.vx = -signf(m.x) * 0.5;
+        m.pipe_n = n;
+        // Along the wall as he was going, and a little back out from it.
+        v: V3 = v_madd(v_reject(v3(m.vx, 0.0, m.vz), n), n, -0.5);
+        m.vx = v.x;
+        m.vz = v.z;
         // As fast up as he was going.
         m.vy = clampf(m.vy, 0.0, m.speed * 1.1)
     } else if (item_of(m.air_from) == FEATURE_PIPE) m.air_from = -1
@@ -717,33 +756,62 @@ step_course_ground(m: *Mover, keys: *Keys, dt: f32) {
     // the hill in the middle out to AIM_MAX either side, and he carves
     // round to it; the arrows turn him while held. Either way he eases into
     // and out of a turn, and keeps his way when let go.
+    // (In the park, there is no down the hill: the thumb turns him, as the
+    // arrows do, and he may go any way.)
     c0: f32 = m.carve;
     want: f32 = 0.0;
-    if (keys.stick_on) want = clampf((keys.stick_x * AIM_MAX - m.carve) * 3.5, -STEER_RATE,
-        STEER_RATE) else if (arrows) want = key_axis(keys, 0, 2) * STEER_RATE;
+    if (keys.stick_on && park) want = keys.stick_x * STEER_RATE else if (keys.stick_on) want = clampf((keys.stick_x * AIM_MAX - m.carve) * 3.5,
+        -STEER_RATE, STEER_RATE) else if (arrows) want = key_axis(keys, 0, 2) * STEER_RATE;
     m.carve_w = lerpf(m.carve_w, want, ease(8.0, dt));
     m.carve = m.carve + m.carve_w * dt;
     // Up a bank, heading out, he is turned back in, harder than he can
     // steer out.
-    e: f32 = 0.1;
-    gx: f32 = (course_bank(m.x + e) - course_bank(m.x - e)) / (2.0 * e);
-    if (m.carve * signf(m.x) > -0.25) m.carve = m.carve - gx * BANK_PULL * dt;
-    // Slowing to a stop up a halfpipe's wall, he rolls back down it.
-    on_wall: bool = pipe_at(m.x, -m.z) >= 0;
-    if (on_wall && m.speed < 2.5 && m.carve * signf(m.x) > 0.2) m.carve = -m.carve;
-    m.carve = clampf(m.carve, -CARVE_LIMIT, CARVE_LIMIT);
+    if (!park) {
+        e: f32 = 0.1;
+        gx: f32 = (course_bank(m.x + e) - course_bank(m.x - e)) / (2.0 * e);
+        if (m.carve * signf(m.x) > -0.25) m.carve = m.carve - gx * BANK_PULL * dt
+    } else if (park_out(m.x, m.z) > bowl_top() - 0.1) {
+        // Out of the bowl, on its deck, he turns back in to drop in again.
+        n: V3 = park_normal(m.x, m.z);
+        m.carve = approach_angle(m.carve, atan2f(-n.x, n.z), ease(4.0, dt))
+    }
+    // Slowing to a stop up a wall, he rolls back down it.
+    on_wall: bool = wall_at(m.x, m.z);
+    if (on_wall && m.speed < 2.5 && v_dot(carve_dir(m.carve), wall_in(m.x, m.z)) > 0.2) m.carve = mirror_carve(m.carve,
+        wall_in(m.x, m.z));
+    // Slow along a wall of the bowl, he turns down it, as it falls away
+    // under him.
+    if (park && on_wall) {
+        n: V3 = wall_in(m.x, m.z);
+        pull: f32 = clampf(1.0 - m.speed / 6.0, 0.0, 1.0);
+        m.carve = approach_angle(m.carve, atan2f(-n.x, n.z), ease(4.0 * pull, dt))
+    }
+    if (park) m.carve = wrap_angle(m.carve) else m.carve = clampf(m.carve, -CARVE_LIMIT,
+        CARVE_LIMIT);
     // As in the park, how fast his heading turns: carving right turns it
     // the other way.
-    m.turn_rate = (c0 - m.carve) / dt;
+    m.turn_rate = wrap_angle(c0 - m.carve) / dt;
     d: V3 = carve_dir(m.carve);
     // Gravity along the ground, against rolling, the air, and turning.
     rise: f32 = rise_along(m.x, m.z, d);
     a: f32 = -SLOPE_G * rise / (1.0 + rise * rise) - ROLL_FRICTION * SLOPE_G - AIR_DRAG * m.speed * m.speed - TURN_DRAG * absf(m.turn_rate) * m.speed;
-    if (m.finished) a = a - BRAKE else if (m.speed < PUSH_SPEED && !on_wall) a = a + SLOPE_PUSH;
+    if (m.finished) a = a - BRAKE else if (park && m.speed < PARK_CRUISE && !on_wall) a = a + PARK_PUSH else if (m.speed < PUSH_SPEED && !on_wall) a = a + SLOPE_PUSH;
     // In a halfpipe he pumps, keeping up his speed.
     if (!m.finished && in_pipe(-m.z)) a = a + maxf(0.0, PIPE_PUMP - m.speed) * 1.5;
     m.speed = clampf(m.speed + a * dt, 0.0, TOP_SPEED);
-    m.x = clampf(m.x + d.x * m.speed * dt, -COURSE_HALF - 6.0, COURSE_HALF + 6.0);
+    // In the park he may ride at a face too steep to ride up (a gap's lip,
+    // from its pit): he bumps off it, turned away, and slowed.
+    if (park && !on_wall && rise_along(m.x + d.x * 0.3, m.z + d.z * 0.3, d) > STEEP_FACE) {
+        g: V3 = v3(course_height(m.x + d.x * 0.3 + 0.05, m.z + d.z * 0.3) - course_height(m.x + d.x * 0.3 - 0.05,
+            m.z + d.z * 0.3), 0.0, course_height(m.x + d.x * 0.3, m.z + d.z * 0.3 + 0.05) - course_height(m.x + d.x * 0.3,
+            m.z + d.z * 0.3 - 0.05));
+        m.carve = mirror_carve(m.carve, v_norm(g));
+        m.bonk = m.speed;
+        m.speed = m.speed * 0.5;
+        d = carve_dir(m.carve)
+    }
+    m.x = m.x + d.x * m.speed * dt;
+    if (!park) m.x = clampf(m.x, -COURSE_HALF - 6.0, COURSE_HALF + 6.0);
     m.z = m.z + d.z * m.speed * dt;
     m.vx = d.x * m.speed;
     m.vz = d.z * m.speed;
@@ -759,13 +827,23 @@ step_course_ground(m: *Mover, keys: *Keys, dt: f32) {
         m.y = fall;
         m.vy = m.vy - SLOPE_G * dt;
         // Only the rise along the run throws him up, not across it, but
-        // for up a halfpipe's wall.
+        // for up a wall. (In the park, the rise the way he heads.)
         p: V3 = m.prev;
         // (Its rise just behind him: a lip's is the ramp's, not the drop's
         // past it.)
         dh: f32 = (course_height(p.x, p.z) - course_height(p.x, p.z + 0.3)) / 0.3;
-        if (pipe_at(p.x, -p.z) < 0 && m.vy > 0.0) m.vy = minf(m.vy, maxf(dh * maxf(-m.vz,
-            0.0), 0.0));
+        ahead: f32 = maxf(-m.vz, 0.0);
+        if (park) {
+            // (In the park, the rise along whatever he rides off, the way
+            // it faces, as on the course: not across it, nor backward.)
+            f: V3 = d;
+            k: int = kicker_at(p.x, -p.z);
+            if (k >= 0) f = feature_fwd(features[k]);
+            dh = minf((course_height(p.x, p.z) - course_height(p.x - f.x * 0.3, p.z - f.z * 0.3)) / 0.3,
+                STEEP_THROW);
+            ahead = maxf(v_dot(d, f) * m.speed, 0.0)
+        }
+        if (!wall_at(p.x, p.z) && m.vy > 0.0) m.vy = minf(m.vy, maxf(dh * ahead, 0.0));
         take_off(m)
     }
     try_course_rail(m)
@@ -791,7 +869,8 @@ step_course_air(m: *Mover, keys: *Keys, dt: f32) {
     }
     m.flip = turn_toward(m.flip, m.flip_goal, m.flip_w * slow, dt);
     m.spin = turn_toward(m.spin, m.spin_goal, m.spin_w * slow, dt);
-    m.x = clampf(m.x + m.vx * dt, -COURSE_HALF - 6.0, COURSE_HALF + 6.0);
+    m.x = m.x + m.vx * dt;
+    if (!park) m.x = clampf(m.x, -COURSE_HALF - 6.0, COURSE_HALF + 6.0);
     m.z = m.z + m.vz * dt;
     m.vy = m.vy - SLOPE_G * dt;
     m.y = m.y + m.vy * dt;
@@ -806,9 +885,9 @@ step_course_air(m: *Mover, keys: *Keys, dt: f32) {
 // How he landed off a kicker, gap, or cliff, coming down at d: in the sweet
 // spot of its landing, short of it (on a table, or in a gap's pit), past
 // it on the flat, or in between. In a halfpipe, back down the wall, clean.
-landing_on(f: Feature, d: f32): int {
-    if (f.kind == FEATURE_PIPE) return LAND_CLEAN;
-    u: f32 = (d - (f.d + landing_start(f))) / f.c;
+landing_on(f: Feature, x: f32, d: f32): int {
+    if (f.kind == FEATURE_PIPE || f.kind == FEATURE_BOWL) return LAND_CLEAN;
+    u: f32 = (feature_local(f, x, d).z - (f.d + landing_start(f))) / f.c;
     if (u < 0.0) return LAND_CASED;
     if (u > 1.05) return LAND_OVERSHOT;
     if (u > 0.12 && u < 0.85) return LAND_STOMPED;
@@ -827,7 +906,8 @@ land_tricks(m: *Mover, on_rail: bool) {
     clean: bool = absf(m.flip - flips * TAU) < LAND_TOL && absf(m.spin - halves * PI) < LAND_TOL && absf(m.flip_goal - m.flip) < LAND_TOL && absf(m.spin_goal - m.spin) < LAND_TOL;
     item: int = item_of(m.air_from);
     landing: int = LAND_CLEAN;
-    if (m.air_from >= 0 && !on_rail) landing = landing_on(features[m.air_from], -m.z);
+    if (m.air_from >= 0 && !on_rail) landing = landing_on(features[m.air_from], m.x,
+        -m.z);
     // Coming up short of a gap is as bad as landing crooked.
     if (item == FEATURE_GAP && landing == LAND_CASED) clean = false;
     if (clean) {
@@ -874,10 +954,11 @@ course_land(m: *Mover, h: f32) {
     s: f32 = rise_along(m.x, m.z, d);
     if (s < 0.0) sp = sp + -m.vy * -s * 0.4;
     m.speed = clampf(sp, 0.0, TOP_SPEED);
-    m.carve = clampf(atan2f(d.x, -d.z), -CARVE_LIMIT, CARVE_LIMIT);
-    // Back down a halfpipe's wall, the way he went up it, mirrored.
+    m.carve = atan2f(d.x, -d.z);
+    if (!park) m.carve = clampf(m.carve, -CARVE_LIMIT, CARVE_LIMIT);
+    // Back down a wall, the way he went up it, mirrored.
     if (m.pipe_vert) {
-        m.carve = -m.pipe_carve;
+        m.carve = mirror_carve(m.pipe_carve, m.pipe_n);
         m.speed = m.pipe_speed * 0.96;
         d = carve_dir(m.carve);
         s = rise_along(m.x, m.z, d);
@@ -924,7 +1005,6 @@ try_one_rail(m: *Mover, i: int) {
     if (v_len(v) < 0.5 || v_dot(v_norm(v), v_norm(v3(hx, 0.0, hz))) < 0.5) return;
     if (m.air) land_tricks(m, true);
     m.air = false;
-    m.manual = false;
     m.grinding = true;
     m.crail = i;
     m.crail_t = t * v_len(v_sub(r.b, r.a));

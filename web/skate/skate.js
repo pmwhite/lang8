@@ -28,19 +28,18 @@ addEventListener("popstate", () => history.pushState({ stay: true }, "", locatio
 
 const touch = matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
 if (touch) document.body.classList.add("touch");
-// The game starts on the course, where the screen itself is the controls;
-// in the park, the arrow pad and buttons are. The mode button (Tab) goes
-// between them.
+// The mode button (Tab) goes to the park, or back to the course; the
+// screen is the controls in either.
 const modeKey = document.querySelector(".key.mode");
-const setMode = (course) => {
-  document.body.classList.toggle("course", course);
-  modeKey.textContent = course ? "Park" : "Course";
+const setMode = (park) => {
+  document.body.classList.toggle("park", park);
+  modeKey.textContent = park ? "Course" : "Park";
 };
-setMode(true);
+setMode(new URLSearchParams(location.search).has("L8_PARK"));
 let sendKey = null;
 for (const key of document.querySelectorAll(".controls .key")) {
   const sym = Number(key.dataset.key);
-  if (key === modeKey) key.addEventListener("pointerdown", () => setMode(!document.body.classList.contains("course")));
+  if (key === modeKey) key.addEventListener("pointerdown", () => setMode(!document.body.classList.contains("park")));
   let held = false;
   const up = () => {
     if (!held) return;
@@ -93,7 +92,7 @@ async function main() {
   const decoder = new TextDecoder();
   fs.onOutput = (_fd, data) => console.log(decoder.decode(data).trimEnd());
   const sys = fs.sys(["skate"]);
-  // L8_ parameters are also the game's environment (as L8_SPAWN=col,row,dir).
+  // L8_ parameters are also the game's environment (as L8_SEED=n, L8_PARK=1).
   sys.env = [...params].filter(([k]) => k.startsWith("L8_")).map(([k, v]) => `${k}=${v}`);
   const env = Object.fromEntries([...params].filter(([k]) => k.startsWith("L8_")));
   const zoom = Math.min(4, Math.max(0.25, Number(params.get("zoom")) || 0.85));
@@ -108,7 +107,7 @@ async function main() {
     skip: new Set((params.get("skip") ?? "").split(",").filter(Boolean)) });
   // Tab on a keyboard switches too.
   canvas.addEventListener("keydown", (e) => {
-    if (e.code === "Tab" && !e.repeat) setMode(!document.body.classList.contains("course"));
+    if (e.code === "Tab" && !e.repeat) setMode(!document.body.classList.contains("park"));
   });
   // The steering and trick panels, placed over the game's view where the
   // game reads them: these fractions match programs/skate/touch.l8.

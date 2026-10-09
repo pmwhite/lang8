@@ -115,38 +115,6 @@ append_int(n: int) {
     }
 }
 
-// A line as text: its moves joined by +, the last few if it is long, and
-// how many in all.
-const LINE_SHOWN: int = 6;
-
-line_text_shown(ids: []int, n: int, shown: int) {
-    text_len = 0;
-    first: int = 0;
-    if (n > shown) {
-        first = n - shown;
-        append("... + ")
-    }
-    for i in first..n {
-        if (i > first) append(" + ");
-        append(trick_names[ids[i]])
-    }
-    if (n > 2) {
-        append("  x");
-        append_int(n)
-    }
-}
-
-// As much of a line as fits in w pixels, leaving room for a few more
-// characters after it.
-line_text(ids: []int, n: int, w: f32) {
-    shown: int = LINE_SHOWN;
-    line_text_shown(ids, n, shown);
-    while (shown > 1 && (text_len + 10) as f32 * 6.0 * hud_px > w) {
-        shown = shown - 1;
-        line_text_shown(ids, n, shown)
-    }
-}
-
 // On the course: whether the run is over, and for how long; and the trick
 // he is crouched for, if he is.
 hud_finished: bool = false;
@@ -182,6 +150,10 @@ hud_rider_d: f32 = 0.0;
 hud_aim_repeat: int = 0;
 
 hud_seed: int = 0;
+
+// While building, whether it is to go to the park (1), back to the course
+// (2), or neither.
+hud_going: int = 0;
 
 // Laying out a new course: 1 while the frame saying so is drawn, then 2.
 hud_building: int = 0;
@@ -249,6 +221,11 @@ end_run(
 
 // A trick by name: its flip, its spin, and a grab, joined by sep; or
 // none if it has none of them.
+flip_names: []str = ["FRONTFLIP", "BACKFLIP", "DOUBLE FRONTFLIP", "DOUBLE BACKFLIP",
+    "TRIPLE FRONTFLIP", "TRIPLE BACKFLIP"];
+
+spin_names: []str = ["180", "360", "540", "720", "900", "1080"];
+
 trick_text(
     flips: int,
     halves: int,
@@ -258,19 +235,14 @@ trick_text(
 ) {
     nf: int = absi(flips);
     if (nf > 0) {
-        id: int = T_FRONTFLIP;
-        if (nf == 2) id = T_DOUBLE_FRONT;
-        if (nf >= 3) id = T_TRIPLE_FRONT;
+        id: int = (mini(nf, 3) - 1) * 2;
         if (flips < 0) id = id + 1;
-        append(trick_names[id])
+        append(flip_names[id])
     }
     nh: int = absi(halves);
     if (nh > 0) {
         if (nf > 0) append(sep);
-        id: int = T_180;
-        if (nh == 2) id = T_360;
-        if (nh > 2) id = mini(T_540 + nh - 3, T_1080);
-        append(trick_names[id])
+        append(spin_names[mini(nh, 6) - 1])
     }
     if (grab) {
         if (nf + nh > 0) append(sep);
@@ -351,12 +323,15 @@ put_calls(w: int, y0: f32) {
     }
 }
 
+// How long the feed shows a trick and its calls.
+const CALL_LINGER: f32 = 2.5;
+
 // The course's feed: his latest trick and what it scored (or that it was
 // sketchy), and the calls on it, fading after a moment.
 put_course_feed(w: int, y0: f32) {
-    if (run.n == 0 || run.call_t > LINE_LINGER) return;
+    if (run.n == 0 || run.call_t > CALL_LINGER) return;
     h: Hit = run.hits[run.n - 1];
-    fade: f32 = 1.0 - smoothstepf(LINE_LINGER - 0.8, LINE_LINGER, run.call_t);
+    fade: f32 = 1.0 - smoothstepf(CALL_LINGER - 0.8, CALL_LINGER, run.call_t);
     text_len = 0;
     hit_text(h);
     if (h.kind == HIT_SKETCH) {
@@ -486,41 +461,71 @@ find_zones() {
         if (nzones + 2 <= MAX_ZONES && pipe_on[i]) find_pipe_zones(i, need);
         if (nzones < MAX_ZONES && mark_on[i] && mark_count[i] > 0) find_zone(i, need)
     }
+    if (park && bowl_on && nzones < MAX_ZONES) find_bowl_zone(need)
+}
+
+// The bowl's band: as a halfpipe's, but on the wall ahead of him, by how
+// far out up it, around where he would ride up it.
+const BOWL_GLOW: f32 = 7.0;
+
+find_bowl_zone(need: f32) {
+    lo: f32 = 0.0;
+    hi: f32 = 0.0;
+    if (!air_band(bowl_air, 0, BOWL_XN, BOWL_XSTEP, need, &lo, &hi)) return;
+    z: int = nzones * 8;
+    zone_rect[z] = lo;
+    zone_rect[z + 1] = hi;
+    zone_rect[z + 2] = bowl_hit.x;
+    zone_rect[z + 3] = bowl_hit.z;
+    zone_rect[z + 4] = BOWL_GLOW;
+    zone_rect[z + 6] = 2.0;
+    nzones = nzones + 1
 }
 
 // On a halfpipe's walls: a wash up each, and gold over the heights where
 // letting go lands the trick (around the one that throws him most).
 find_pipe_zones(i: int, need: f32) {
     f: Feature = features[i];
-    a: int = i * PIPE_XN;
-    top: f32 = PIPE_FLAT + PIPE_XSTEP * (PIPE_XN - 1) as f32;
     d0: f32 = f.d + 6.0;
     d1: f32 = f.d + f.a - 6.0;
-    peak: int = 0;
-    for n in 0..PIPE_XN {
-        if (pipe_air[a + n] > pipe_air[a + peak]) peak = n
-    }
-    fits: bool = pipe_air[a + peak] >= need;
     lo: f32 = 0.0;
     hi: f32 = 0.0;
-    if (fits) {
-        // Out from the peak both ways while each height lands it, and on to
-        // where the air comes to need between the last that does and the
-        // first that doesn't.
-        k0: int = peak;
-        while (k0 > 0 && pipe_air[a + k0 - 1] >= need) k0 = k0 - 1;
-        k1: int = peak;
-        while (k1 < PIPE_XN - 1 && pipe_air[a + k1 + 1] >= need) k1 = k1 + 1;
-        lo = PIPE_FLAT + k0 as f32 * PIPE_XSTEP;
-        if (k0 > 0) lo = lo - edge_part(pipe_air[a + k0 - 1], pipe_air[a + k0], need) * PIPE_XSTEP;
-        hi = PIPE_FLAT + k1 as f32 * PIPE_XSTEP;
-        if (k1 < PIPE_XN - 1) hi = hi + edge_part(pipe_air[a + k1 + 1], pipe_air[a + k1],
-            need) * PIPE_XSTEP else hi = top + 0.4
-    }
+    if (!air_band(pipe_air, i * PIPE_XN, PIPE_XN, PIPE_XSTEP, need, &lo, &hi)) return;
     for side in 0..2 {
         sg: f32 = 1.0 - 2.0 * side as f32;
-        if (fits) put_zone(sg * lo, sg * hi, d0, d0, d1, d1, 1.0)
+        put_zone(sg * (PIPE_FLAT + lo), sg * (PIPE_FLAT + hi), d0, d0, d1, d1, 1.0)
     }
+}
+
+// Up a wall, where letting go lands a trick that needs need: from air's n
+// places from a on, step apart, the band around the one that throws him
+// most, from lo to hi out; or false, if none does.
+air_band(
+    air: []f32,
+    a: int,
+    n: int,
+    step: f32,
+    need: f32,
+    lo: *f32,
+    hi: *f32
+): bool {
+    peak: int = 0;
+    for k in 0..n {
+        if (air[a + k] > air[a + peak]) peak = k
+    }
+    if (air[a + peak] < need) return false;
+    // Out from the peak both ways while each height lands it, and on to
+    // where the air comes to need between the last that does and the first
+    // that doesn't.
+    k0: int = peak;
+    while (k0 > 0 && air[a + k0 - 1] >= need) k0 = k0 - 1;
+    k1: int = peak;
+    while (k1 < n - 1 && air[a + k1 + 1] >= need) k1 = k1 + 1;
+    lo.* = k0 as f32 * step;
+    if (k0 > 0) lo.* = lo.* - edge_part(air[a + k0 - 1], air[a + k0], need) * step;
+    hi.* = k1 as f32 * step;
+    if (k1 < n - 1) hi.* = hi.* + edge_part(air[a + k1 + 1], air[a + k1], need) * step else hi.* = (n - 1) as f32 * step + 0.4;
+    true
 }
 
 // Between a place where the air is short of need and the next, where it
@@ -579,7 +584,10 @@ find_zone(i: int, need: f32) {
         x0 = -COURSE_HALF + 0.5;
         x1 = COURSE_HALF - 0.5
     }
-    if (gold < end) put_zone(x0, x1, mark_from[i], gold, end, lip, 0.0)
+    if (gold < end) {
+        put_zone(x0, x1, mark_from[i], gold, end, lip, 0.0);
+        zone_rect[nzones * 8 - 1] = f.yaw
+    }
 }
 
 // Over each jump ahead (see update_marks, in slope.l8), a tag: what it
@@ -591,7 +599,42 @@ put_marks(w: int, px: f32) {
         if (mark_on[i] && mark_count[i] > 0) put_mark(i, need, px);
         if (pipe_on[i]) put_pipe_tag(i, need, px)
     }
+    if (park && bowl_on) put_bowl_tag(need, px);
     hud_px = px
+}
+
+// The bowl's tag, over the wall ahead of him.
+put_bowl_tag(need: f32, px: f32) {
+    best: f32 = 0.0;
+    for n in 0..BOWL_XN best = maxf(best, bowl_air[n]);
+    if (!project(v3(bowl_hit.x, bowl_hit.y + 2.6, bowl_hit.z))) return;
+    put_tag(FEATURE_PIPE, best, need, 1.0, px)
+}
+
+// A tag at the point last projected: what a jump off item favors; or,
+// while he aims, what the trick would score with best air (in gold), or
+// that it will not fit (in red). Faded to a.
+put_tag(
+    item: int,
+    best: f32,
+    need: f32,
+    a: f32,
+    px: f32
+) {
+    hud_px = maxf(2.0, px - 1.0);
+    text_len = 0;
+    fits: bool = best >= need;
+    if (hud_aiming) {
+        if (fits) {
+            append("+");
+            append_int(aim_value(HIT_AIR, item, hud_aim_flips, hud_aim_halves, best,
+                hud_aim_switch))
+        } else append("TOO BIG")
+    } else favors_short(item);
+    tx: f32 = floorf(proj_x - text_width() * 0.5);
+    ty: f32 = floorf(proj_y - 7.0 * hud_px);
+    if (hud_aiming && !fits) put_text(tx, ty, 1.0, 0.45, 0.38, a) else if (hud_aiming) put_text(tx,
+        ty, 1.0, 0.84, 0.32, a) else put_text(tx, ty, 0.75, 0.9, 1.0, 0.8 * a)
 }
 
 // A halfpipe's tag, over its right wall a little ahead of him.
@@ -603,20 +646,7 @@ put_pipe_tag(i: int, need: f32, px: f32) {
     x: f32 = pipe_top() - 0.5;
     if (!project(v3(x, course_height(x, -d) + 1.6, -d))) return;
     a: f32 = 1.0 - smoothstepf(MARK_AHEAD - 20.0, MARK_AHEAD, d - hud_rider_d);
-    hud_px = maxf(2.0, px - 1.0);
-    text_len = 0;
-    fits: bool = best >= need;
-    if (hud_aiming) {
-        if (fits) {
-            append("+");
-            append_int(aim_value(HIT_AIR, FEATURE_PIPE, hud_aim_flips, hud_aim_halves,
-                best, hud_aim_switch))
-        } else append("TOO BIG")
-    } else favors_short(FEATURE_PIPE);
-    tx: f32 = floorf(proj_x - text_width() * 0.5);
-    ty: f32 = floorf(proj_y - 7.0 * hud_px);
-    if (hud_aiming && !fits) put_text(tx, ty, 1.0, 0.45, 0.38, a) else if (hud_aiming) put_text(tx,
-        ty, 1.0, 0.84, 0.32, a) else put_text(tx, ty, 0.75, 0.9, 1.0, 0.8 * a)
+    put_tag(FEATURE_PIPE, best, need, a, px)
 }
 
 put_mark(i: int, need: f32, px: f32) {
@@ -626,22 +656,10 @@ put_mark(i: int, need: f32, px: f32) {
     n: int = mark_count[i];
     best: f32 = 0.0;
     for k in 0..n best = maxf(best, mark_air[i * MARK_N + k]);
-    a: f32 = 1.0 - smoothstepf(MARK_AHEAD - 20.0, MARK_AHEAD, lip - hud_rider_d);
-    fits: bool = best >= need;
-    if (!project(v3(x, course_height(x, -lip) + 1.8, -lip))) return;
-    hud_px = maxf(2.0, px - 1.0);
-    text_len = 0;
-    if (hud_aiming) {
-        if (fits) {
-            append("+");
-            append_int(aim_value(HIT_AIR, f.kind, hud_aim_flips, hud_aim_halves, best,
-                hud_aim_switch))
-        } else append("TOO BIG")
-    } else favors_short(f.kind);
-    tx: f32 = floorf(proj_x - text_width() * 0.5);
-    ty: f32 = floorf(proj_y - 7.0 * hud_px);
-    if (hud_aiming && !fits) put_text(tx, ty, 1.0, 0.45, 0.38, a) else if (hud_aiming) put_text(tx,
-        ty, 1.0, 0.84, 0.32, a) else put_text(tx, ty, 0.75, 0.9, 1.0, 0.8 * a)
+    a: f32 = 1.0 - smoothstepf(MARK_AHEAD - 20.0, MARK_AHEAD, mark_dist[i]);
+    p: V3 = feature_world(f, x, lip);
+    if (!project(v3(p.x, p.y + 1.8, p.z))) return;
+    put_tag(f.kind, best, need, a, px)
 }
 
 // Lay out the feed for a window w pixels wide.
@@ -654,33 +672,21 @@ build_hud(w: int) {
     if (hud_building > 0) {
         hud_px = px * 2.0;
         text_len = 0;
-        append("NEW COURSE...");
+        // (Or, going from one to the other, where to.)
+        if (hud_going == 1) append("TO THE PARK...") else if (hud_going == 2) append("TO THE COURSE...") else append("NEW COURSE...");
         put_text(floorf((w as f32 - text_width()) * 0.5), floorf(screen_h as f32 * 0.3),
             1.0, 0.98, 0.92, 1.0);
         hud_px = px
     }
-    if (line.scoring) {
-        // At the finish, the run's report, alone.
-        if (hud_finished && hud_finish_t > 1.0) {
-            put_results(w, px);
-            return
-        }
-        // On a narrow screen the score has the top to itself.
-        if (w < 760) y = 25.0 * hud_px + 14.0;
-        put_course_feed(w, y);
-        put_course_score(w, px);
+    // At the finish, the run's report, alone.
+    if (hud_finished && hud_finish_t > 1.0) {
+        put_results(w, px);
         return
     }
-    if (line.n > 0) {
-        line_text(line.ids, line.n, w as f32);
-        put_text(floorf((w as f32 - text_width()) * 0.5), y, 1.0, 0.98, 0.92, 1.0);
-        y = y + 11.0 * hud_px
-    }
-    if (line.done_n > 0 && line.done_t < LINE_LINGER) {
-        fade: f32 = 1.0 - smoothstepf(LINE_LINGER - 0.8, LINE_LINGER, line.done_t);
-        line_text(line.done_ids, line.done_n, w as f32);
-        put_text(floorf((w as f32 - text_width()) * 0.5), y, 1.0, 0.84, 0.32, fade)
-    }
+    // On a narrow screen the score has the top to itself.
+    if (w < 760) y = 25.0 * hud_px + 14.0;
+    put_course_feed(w, y);
+    put_course_score(w, px)
 }
 
 // The thumbs, the run's score in the corner, and at the end, the finish.
@@ -692,6 +698,8 @@ put_course_score(w: int, px: f32) {
     append_int(run.total);
     put_text(w as f32 - text_width() - 3.0 * px - 10.0, 3.0 * px + 14.0, 1.0, 0.98,
         0.92, 0.9);
+    // (In the park the session goes on, and has no best.)
+    if (park) return;
     text_len = 0;
     append("BEST RUN ");
     append_int(run.best_run);
