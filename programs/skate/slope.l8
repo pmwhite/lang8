@@ -10,11 +10,12 @@ tag skate;
 //   points; the banks turn him back in.
 // - The trick pad (see touch.l8) crouches him while held, aiming a trick:
 //   flips forward or back, half turns either way. Letting go jumps into
-//   it: off the ground, off a rail, or, on a kicker's ramp, at its lip,
-//   which it waits for. In the air, pressed again, it grabs.
+//   it, there and then: off the ground, off a rail, or up a kicker's ramp,
+//   best at its lip. In the air, pressed again, it grabs.
 // - The trick fits the air: he turns as fast as he must to finish it just
 //   before he lands, and if even his fastest is not enough, he doesn't
-//   finish it.
+//   finish it. So a small trick lands from a sloppy jump, and a big one
+//   only from a jump timed right.
 // - Taking off, only the slope along the run throws him up: riding off the
 //   side of a kicker does not.
 // - Coming down on a rail or box, or riding into its low end, he grinds it.
@@ -54,7 +55,8 @@ const BANK_PULL: f32 = 5.5;
 
 const OLLIE_SPEED: f32 = 5.0;
 
-// Off a kicker's lip, which throws him already, a pop adds less.
+// Up a kicker's ramp (or just off its lip), which throws him already, a
+// pop adds less.
 const LIP_POP: f32 = 2.0;
 
 const LATE_OLLIE: f32 = 0.15;
@@ -86,12 +88,6 @@ in_pipe(d: f32): bool {
 // How much slower he turns while grabbing.
 const GRAB_SLOW: f32 = 0.7;
 
-// How far before a kicker's lip letting go waits for it, and how close to
-// the lip counts as there.
-const LIP_WAIT: f32 = 10.0;
-
-const LIP_NEAR: f32 = 0.15;
-
 // How near upright (or lined up, for a spin) a landing must be, in radians.
 const LAND_TOL: f32 = 0.55;
 
@@ -119,7 +115,6 @@ enter_course(m: *Mover) {
     m.finish_t = 0.0;
     m.sketch_t = 10.0;
     m.crail = -1;
-    m.pop_pending = false;
     m.pad_grab = false;
     line.scoring = true;
     clear_line();
@@ -142,8 +137,6 @@ rise_along(x: f32, z: f32, d: V3): f32 {
     e: f32 = 0.1;
     (course_height(x + d.x * e, z + d.z * e) - course_height(x - d.x * e, z - d.z * e)) / (2.0 * e)
 }
-
-preview_tick: int = 0;
 
 step_course(m: *Mover, keys: *Keys, dt: f32) {
     m.prev = v3(m.x, m.y, m.z);
@@ -169,14 +162,8 @@ step_course(m: *Mover, keys: *Keys, dt: f32) {
         wy = clampf(m.aim_flips as f32, -1.0, 1.0)
     }
     m.wind_x = lerpf(m.wind_x, wx, ease(12.0, dt));
-    // While he aims, now and then, how big an air he would get.
-    if (m.winding) {
-        preview_tick = preview_tick - 1;
-        if (preview_tick <= 0) {
-            preview_jump(m);
-            preview_tick = 10
-        }
-    } else preview_tick = 0;
+    // While he aims, how big an air he would get letting go now.
+    if (m.winding) preview_jump(m);
     m.wind_y = lerpf(m.wind_y, wy, ease(12.0, dt));
     if (keys.pad_release) {
         keys.pad_release = false;
@@ -192,19 +179,6 @@ step_course(m: *Mover, keys: *Keys, dt: f32) {
     }
     if (m.grinding) step_course_grind(m, dt) else if (m.air) step_course_air(m, keys,
         dt) else step_course_ground(m, keys, dt);
-    // A jump waiting for the lip goes at the lip, or once he is off the
-    // kicker's ramp or in the air.
-    if (m.pop_pending && !m.grinding) {
-        if (m.air) {
-            m.pop_pending = false;
-            late_ollie(m);
-            start_trick(m, m.pend_flips, m.pend_halves)
-        } else if (!before_lip(m, LIP_NEAR)) {
-            m.pop_pending = false;
-            pop(m, LIP_POP);
-            start_trick(m, m.pend_flips, m.pend_halves)
-        }
-    }
     if (!m.finished && -m.z >= COURSE_FINISH) {
         m.finished = true;
         m.finish_t = 0.0
@@ -221,38 +195,6 @@ trunc_toward_zero(a: f32): int {
     floorf(a) as int
 }
 
-// Whether he is on, or just short of, a kicker's ramp, more than near
-// short of its lip.
-before_lip(m: *Mover, near: f32): bool {
-    d: f32 = -m.z;
-    for i in 0..nfeatures {
-        f: Feature = features[i];
-        if (lip_ahead(f, m.x, d, near)) return true
-    }
-    false
-}
-
-// Whether (x, d) is on, or just short of, f's way up to its lip (or a
-// cliff's edge), more than near short of it.
-lip_ahead(
-    f: Feature,
-    x: f32,
-    d: f32,
-    near: f32
-): bool {
-    if ((f.kind == FEATURE_KICKER || f.kind == FEATURE_GAP) && absf(x - f.x) < f.w + 0.5) return d > f.d - LIP_WAIT && d < f.d + f.a - near;
-    if (f.kind == FEATURE_CLIFF) return d > f.d - LIP_WAIT && d < f.d - near;
-    false
-}
-
-before_lip_at(x: f32, d: f32, near: f32): int {
-    for i in 0..nfeatures {
-        f: Feature = features[i];
-        if (lip_ahead(f, x, d, near)) return i
-    }
-    -1
-}
-
 // Letting go of the pad: a jump into the trick aimed at.
 release_trick(m: *Mover) {
     nf: int = m.aim_flips;
@@ -263,15 +205,18 @@ release_trick(m: *Mover) {
     } else if (m.air) {
         late_ollie(m);
         start_trick(m, nf, nh)
-    } else if (before_lip(m, LIP_NEAR)) {
-        // On the way up a kicker: the jump waits for its lip.
-        m.pop_pending = true;
-        m.pend_flips = nf;
-        m.pend_halves = nh
     } else {
-        pop(m, OLLIE_SPEED);
+        pop(m, pop_speed(m.x, -m.z));
         start_trick(m, nf, nh)
     }
+}
+
+// How hard he pops at (x, d): up a kicker's ramp, which throws him
+// already, less. (So the time to go is at its lip: earlier, the ramp is
+// lower and less steep, and later, he has left it without a pop.)
+pop_speed(x: f32, d: f32): f32 {
+    if (kicker_at(x, d) >= 0) return LIP_POP;
+    OLLIE_SPEED
 }
 
 pop(m: *Mover, speed: f32) {
@@ -340,57 +285,225 @@ trick_fit(nf: int, nh: int, t: f32): f32 {
     (absi(nf) as f32 * TAU / FLIP_MAX + absi(nh) as f32 * PI / SPIN_MAX) / tt
 }
 
+// How long an air a trick needs, at the least.
+trick_need(nf: int, nh: int): f32 {
+    if (nf == 0 && nh == 0) return 0.0;
+    absi(nf) as f32 * TAU / FLIP_MAX + absi(nh) as f32 * PI / SPIN_MAX + FIT_MARGIN
+}
+
 // While he aims, how long he would fly if he let go now, and off what (a
-// feature kind, or -1 for the plain hill): rolling on to the lip first if
-// he is on a kicker's way up.
+// feature kind, or -1 for the plain hill), sent off as release_trick would
+// send him.
 preview_jump(m: *Mover) {
-    if (m.air) {
-        m.aim_air = predict_air(m);
-        m.aim_item = item_of(m.air_from);
-        return
-    }
     h: f32 = 1.0 / 40.0;
     x: f32 = m.x;
     z: f32 = m.z;
     y: f32 = m.y;
-    vy: f32 = m.vy;
     dir: V3 = carve_dir(m.carve);
     vx: f32 = dir.x * m.speed;
     vz: f32 = dir.z * m.speed;
-    pop: f32 = OLLIE_SPEED;
+    vy: f32 = maxf(m.vy, 0.0) + pop_speed(x, -z);
     item: int = item_of(takeoff_feature(x, -z));
-    if (!m.grinding && before_lip(m, LIP_NEAR)) {
-        // Roll up the ramp to the lip.
-        k: int = 0;
-        while (k < 80 && before_lip_at(x, -z, LIP_NEAR) >= 0) {
-            x = x + vx * h;
-            z = z + vz * h;
-            ny: f32 = course_height(x, z);
-            vy = (ny - y) / h;
-            y = ny;
-            k = k + 1
-        }
-        pop = LIP_POP;
-        item = item_of(takeoff_feature(x, -z))
-    }
-    vy = maxf(vy, 0.0) + pop;
-    if (pipe_at(x, -z) >= 0 && m.carve * signf(x) > 0.1) {
+    if (m.air) {
+        vx = m.vx;
+        vz = m.vz;
+        vy = m.vy;
+        if (m.air_time < LATE_OLLIE && !m.ollied) vy = vy + LIP_POP;
+        item = item_of(m.air_from)
+    } else if (m.grinding) {
+        u: V3 = crail_dir(crails[m.crail]);
+        vx = u.x * m.speed;
+        vz = u.z * m.speed;
+        vy = u.y * m.speed + OLLIE_SPEED
+    } else if (pipe_at(x, -z) >= 0 && m.carve * signf(x) > 0.1) {
         vx = -signf(x) * 0.5;
         vy = minf(vy, m.speed * 1.1);
         item = FEATURE_PIPE
     }
+    m.aim_air = fly_time(x, y, z, vx, vy, vz);
+    m.aim_item = item;
+    preview_ahead(m)
+}
+
+// How long he flies from (x, y, z) at (vx, vy, vz) before he is down.
+fly_time(
+    x0: f32,
+    y0: f32,
+    z0: f32,
+    vx: f32,
+    vy0: f32,
+    vz: f32
+): f32 {
+    h: f32 = 1.0 / 40.0;
+    x: f32 = x0;
+    y: f32 = y0;
+    z: f32 = z0;
+    vy: f32 = vy0;
     t: f32 = 0.0;
-    k2: int = 0;
-    while (k2 < 160) {
+    k: int = 0;
+    while (k < 160) {
         vy = vy - SLOPE_G * h;
         x = x + vx * h;
         z = z + vz * h;
         y = y + vy * h;
         t = t + h;
-        if (y <= course_height(x, z)) k2 = 160 else k2 = k2 + 1
+        if (y <= course_height(x, z)) k = 160 else k = k + 1
     }
-    m.aim_air = t;
-    m.aim_item = item
+    t
+}
+
+// ---- the jumps ahead ----
+// For each jump ahead within MARK_AHEAD (a kicker's or a gap's lip, a
+// cliff's edge), how long he would fly letting go at each place on his
+// way up to it, coming in at the speed the hill would give him by then,
+// straight. A trick's worth there, and where to let go for it, read off
+// that (see put_marks, in hud.l8). Kept a few times a second.
+const MARK_AHEAD: f32 = 60.0;
+
+const MARK_STEP: f32 = 0.5;
+
+const MARK_N: int = 16;
+
+// The run-up a cliff gives to let go on.
+const CLIFF_RUN_UP: f32 = 6.0;
+
+mark_on: []bool = new bool[MAX_FEATURES](false);
+
+// Where each one's lip (or edge) is along the run, and across it; where
+// its samples start, how many there are, and his speed coming to it.
+mark_lip: []f32 = new f32[MAX_FEATURES](0.0);
+
+mark_x: []f32 = new f32[MAX_FEATURES](0.0);
+
+mark_from: []f32 = new f32[MAX_FEATURES](0.0);
+
+mark_count: []int = new int[MAX_FEATURES](0);
+
+mark_speed: []f32 = new f32[MAX_FEATURES](0.0);
+
+mark_air: []f32 = new f32[MAX_FEATURES * MARK_N](0.0);
+
+// His speed at each one's lip, coming in so.
+mark_lip_speed: []f32 = new f32[MAX_FEATURES](0.0);
+
+mark_tick: int = 0;
+
+// His speed, rolling straight down the plain hill from d0 to d1, from v.
+roll_speed(v: f32, d0: f32, d1: f32): f32 {
+    w: f32 = v * v;
+    d: f32 = d0;
+    while (d < d1) {
+        g: f32 = course_grade(d);
+        a: f32 = SLOPE_G * (g / sqrtf(1.0 + g * g) - ROLL_FRICTION) - AIR_DRAG * w;
+        w = maxf(w + 2.0 * a * 0.5, PUSH_SPEED * PUSH_SPEED);
+        d = d + 0.5
+    }
+    minf(sqrtf(w), TOP_SPEED)
+}
+
+update_marks(m: *Mover) {
+    mark_tick = mark_tick - 1;
+    if (mark_tick > 0) return;
+    mark_tick = 20;
+    d: f32 = -m.z;
+    for i in 0..nfeatures {
+        f: Feature = features[i];
+        mark_on[i] = false;
+        lip: f32 = f.d + f.a;
+        run: f32 = f.a;
+        x: f32 = f.x;
+        if (f.kind == FEATURE_CLIFF) {
+            lip = f.d;
+            run = CLIFF_RUN_UP;
+            x = clampf(m.x, -COURSE_HALF + 1.0, COURSE_HALF - 1.0)
+        }
+        if ((f.kind == FEATURE_KICKER || f.kind == FEATURE_GAP || f.kind == FEATURE_CLIFF) && lip > d + 1.0 && lip < d + MARK_AHEAD) {
+            mark_on[i] = true;
+            mark_lip[i] = lip;
+            mark_x[i] = x;
+            from: f32 = lip - run;
+            v: f32 = m.speed;
+            if (from > d) v = roll_speed(m.speed, d, from);
+            mark_speed[i] = v;
+            sample_jump(i, x, from, lip, v)
+        }
+    }
+}
+
+// Ride from from on to the lip at speed v, straight, noting how long he
+// would fly letting go every MARK_STEP of the way (as release_trick would
+// send him: popping, less up a ramp, and thrown up as steeply as the
+// ground rises just behind him).
+sample_jump(
+    i: int,
+    x: f32,
+    from: f32,
+    lip: f32,
+    v: f32
+) {
+    sp: f32 = v;
+    d: f32 = from;
+    n: int = 0;
+    mark_from[i] = from;
+    while (n < MARK_N && d <= lip + 0.01) {
+        z: f32 = -d;
+        y: f32 = course_height(x, z);
+        slope: f32 = (y - course_height(x, z + 0.3)) / 0.3;
+        vy: f32 = maxf(sp * slope, 0.0) + pop_speed(x, d);
+        mark_air[i * MARK_N + n] = fly_time(x, y, z, 0.0, vy, -sp);
+        n = n + 1;
+        // On to the next, slowing as he climbs.
+        ny: f32 = course_height(x, z - MARK_STEP);
+        w: f32 = sp * sp - 2.0 * (SLOPE_G * (ny - y) + (ROLL_FRICTION * SLOPE_G + AIR_DRAG * sp * sp) * MARK_STEP);
+        sp = sqrtf(maxf(w, 0.25));
+        d = d + MARK_STEP
+    }
+    mark_count[i] = n;
+    mark_lip_speed[i] = sp
+}
+
+// How far ahead he looks for the next jump, and how sharply the ground
+// must fall away from under him (its slope's drop over one step) to make
+// one: a kicker's lip, a gap's, a cliff's edge.
+const AHEAD: f32 = 15.0;
+
+const AHEAD_STEP: f32 = 0.25;
+
+const EDGE_DROP: f32 = 0.35;
+
+// The next jump on his way, rolling on to it as he heads (slowing as he
+// climbs, rolls, and meets the air), and letting go at its lip.
+preview_ahead(m: *Mover) {
+    m.ahead_air = 0.0;
+    m.ahead_item = -1;
+    // (In a halfpipe, its walls are the jumps, and the air now says it.)
+    if (m.air || m.grinding || in_pipe(-m.z)) return;
+    dir: V3 = carve_dir(m.carve);
+    x: f32 = m.x;
+    z: f32 = m.z;
+    y: f32 = course_height(x, z);
+    sp: f32 = m.speed;
+    slope: f32 = 0.0;
+    k: int = 0;
+    while (k < (AHEAD / AHEAD_STEP) as int) {
+        nx: f32 = x + dir.x * AHEAD_STEP;
+        nz: f32 = z + dir.z * AHEAD_STEP;
+        ny: f32 = course_height(nx, nz);
+        s: f32 = (ny - y) / AHEAD_STEP;
+        if (k > 0 && slope - s > EDGE_DROP && slope > -0.3) {
+            vy: f32 = maxf(sp * slope, 0.0) + pop_speed(x, -z);
+            m.ahead_air = fly_time(x, y, z, dir.x * sp, vy, dir.z * sp);
+            m.ahead_item = item_of(takeoff_feature(x, -z));
+            return
+        }
+        w: f32 = sp * sp - 2.0 * (SLOPE_G * (ny - y) + (ROLL_FRICTION * SLOPE_G + AIR_DRAG * sp * sp) * AHEAD_STEP);
+        sp = sqrtf(maxf(w, 0.25));
+        x = nx;
+        z = nz;
+        y = ny;
+        slope = s;
+        k = k + 1
+    }
 }
 
 // The kind of feature i, or -1.
@@ -501,7 +614,9 @@ step_course_ground(m: *Mover, keys: *Keys, dt: f32) {
         // Only the rise along the run throws him up, not across it, but
         // for up a halfpipe's wall.
         p: V3 = m.prev;
-        dh: f32 = (course_height(p.x, p.z - 0.15) - course_height(p.x, p.z + 0.15)) / 0.3;
+        // (Its rise just behind him: a lip's is the ramp's, not the drop's
+        // past it.)
+        dh: f32 = (course_height(p.x, p.z) - course_height(p.x, p.z + 0.3)) / 0.3;
         if (pipe_at(p.x, -p.z) < 0 && m.vy > 0.0) m.vy = minf(m.vy, maxf(dh * maxf(-m.vz,
             0.0), 0.0));
         take_off(m)
