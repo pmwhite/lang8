@@ -20,7 +20,7 @@ for (const name of ["gesturestart", "gesturechange", "dblclick"]) {
 // it lands on this same page, which steps forward again.
 for (const name of ["touchstart", "touchmove"]) {
   document.addEventListener(name, (e) => {
-    if (!e.target.closest?.("a")) e.preventDefault();
+    if (!e.target.closest?.("a, #guide")) e.preventDefault();
   }, { passive: false });
 }
 history.pushState({ stay: true }, "", location.href);
@@ -58,6 +58,34 @@ for (const key of document.querySelectorAll(".controls .key")) {
   for (const name of ["pointerup", "pointercancel", "lostpointercapture"]) key.addEventListener(name, up);
 }
 
+// The guide to the course: the How button opens it, and the game pauses
+// (holding Pause) until it closes, with its button, a tap outside it, or
+// Escape.
+const guide = document.getElementById("guide");
+const openGuide = () => {
+  guide.hidden = false;
+  canvas.blur();
+  sendKey?.(2, 65299, "");
+};
+const closeGuide = () => {
+  guide.hidden = true;
+  sendKey?.(3, 65299);
+  canvas.focus();
+};
+document.querySelector(".how").addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  openGuide();
+});
+guide.addEventListener("pointerdown", (e) => {
+  if (e.target === guide || e.target.closest(".close")) {
+    e.preventDefault();
+    closeGuide();
+  }
+});
+addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !guide.hidden) closeGuide();
+});
+
 async function main() {
   const params = new URLSearchParams(location.search);
   const module = await WebAssembly.compileStreaming(fetch("skate.wasm"));
@@ -70,7 +98,11 @@ async function main() {
   const env = Object.fromEntries([...params].filter(([k]) => k.startsWith("L8_")));
   const zoom = Math.min(4, Math.max(0.25, Number(params.get("zoom")) || 0.85));
   const scale = params.has("scale") ? Math.min(1, Math.max(0.25, Number(params.get("scale")) || 1)) : 1;
-  const platform = createPlatform(canvas, { log: (text) => console.warn(text), checkErrors: params.has("glcheck"), scale, zoom, env, pointers: true, maxTall: 2.4 });
+  const platform = createPlatform(canvas, { log: (text) => console.warn(text), checkErrors: params.has("glcheck"), scale, zoom, env, pointers: true, maxTall: 2.4,
+    // ?gputime times the frame's parts on the GPU (l8Game.glTiming().gpu);
+    // ?skip=prog3 drops a program's draws, to measure what they cost.
+    timing: params.has("gputime"), gpuTiming: params.has("gputime"),
+    skip: new Set((params.get("skip") ?? "").split(",").filter(Boolean)) });
   // Tab on a keyboard switches too.
   canvas.addEventListener("keydown", (e) => {
     if (e.code === "Tab" && !e.repeat) setMode(!document.body.classList.contains("course"));
@@ -101,9 +133,10 @@ async function main() {
   show(touch ? "Tap to start" : "Click to start");
   canvas.addEventListener("focus", () => (overlay.hidden = true));
   canvas.addEventListener("blur", () => {
-    if (!touch) show("Click to continue");
+    if (!touch && guide.hidden) show("Click to continue");
   });
-  addEventListener("pointerdown", () => {
+  addEventListener("pointerdown", (e) => {
+    if (e.target.closest?.(".ui")) return;
     canvas.focus();
     overlay.hidden = true;
   });

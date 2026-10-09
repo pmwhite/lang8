@@ -1,21 +1,20 @@
 tag skate;
 
-// Judging on the course: taste over mashing. A line is a run of hits: an
-// air off a kicker, a rail or a box, a trick off anything else, a manual.
+// Judging on the course: taste over mashing. Each trick he lands clean
+// scores on its own, and the run scores what they add up to.
 //
 // - An air is worth what he did (flips, spins, a grab, more for a flip and
 //   a spin together), times how long he was up, times how he landed:
 //   stomped in the landing's sweet spot, cased short of it, or overshot.
+// - What he flew off favors some tricks: a kicker flips, a halfpipe's wall
+//   spins, a cliff grabs (and spins), a gap a bit of everything.
+// - Anything done riding switch is worth half again, and is a trick of its
+//   own.
 // - A trick he has already done this run is worth half as much, then a
 //   quarter, and so on.
-// - Off flat ground or a roller, a trick is worth a quarter, and a manual
-//   only keeps the line going.
-// - A line scores its points times how many different things he hit in
-//   it: a kicker or rail with a trick he had not done yet in the line.
-// - A line goes on through airs off kickers and rails, grinds, and
-//   manuals, but not through hops off flat ground; and manuals only have
-//   so much balance in them, refilled by each new hit.
-// - Landing crooked loses the line.
+// - Off flat ground or a roller, a trick is worth a quarter.
+// - A trick he doesn't finish, or a gap he comes up short of, is sketchy,
+//   and worth nothing.
 const HIT_AIR: int = 0;
 
 const HIT_FLAT: int = 1;
@@ -24,7 +23,8 @@ const HIT_RAIL: int = 2;
 
 const HIT_BOX: int = 3;
 
-const HIT_MANUAL: int = 4;
+// A trick landed sketchy: what he went for, for the report.
+const HIT_SKETCH: int = 4;
 
 const LAND_CLEAN: int = 0;
 
@@ -34,106 +34,95 @@ const LAND_CASED: int = 2;
 
 const LAND_OVERSHOT: int = 3;
 
-// flips and halves are signed: forward, and to the right; a manual's flips
-// is 1 for a nose manual.
+// flips and halves are signed: forward, and to the right.
 type Hit = {
     kind: int;
+    // The kind of feature an air was off (or -1), and whether he was
+    // riding switch.
+    item: int;
+    sw: bool;
     flips: int;
     halves: int;
     grab: bool;
     landing: int;
     repeat: int;
-    // Whether it added to the line's multiplier.
-    fresh: bool;
-    points: f32
+    points: f32;
+    // For the run's report: an air's points before its time up, landing,
+    // switch, flat ground, and repeat counted; its time-up factor; and
+    // what a grind added over its time.
+    base: f32;
+    amp: f32;
+    extra: f32;
+    // The base points, by part: flips, spins, a grab.
+    base_flip: f32;
+    base_spin: f32;
+    base_grab: f32
 }
 
-const MAX_HITS: int = 64;
+const MAX_HITS: int = 256;
 
 const MAX_KEYS: int = 128;
 
 no_hit(): Hit {
     Hit {
         kind: 0,
+        item: -1,
+        sw: false,
         flips: 0,
         halves: 0,
         grab: false,
         landing: 0,
         repeat: 0,
-        fresh: false,
-        points: 0.0
+        points: 0.0,
+        base: 0.0,
+        amp: 1.0,
+        extra: 0.0,
+        base_flip: 0.0,
+        base_spin: 0.0,
+        base_grab: 0.0
     }
 }
 
 type Run = {
+    // Every hit this run, in order.
     hits: []Hit;
     n: int;
     points: f32;
-    mult: int;
-    idle: f32;
-    // The last line to end: its hits, score, multiplier, whether it was
-    // lost, and how long ago.
-    done_hits: []Hit;
-    done_n: int;
-    done_points: int;
-    done_mult: int;
-    done_lost: bool;
-    done_t: f32;
     // Each kind of trick done this run, and how many times.
     keys: []int;
     key_count: []int;
     nkeys: int;
     total: int;
-    best_line: int;
     best_run: int;
-    // Since the latest hit, for its call.
-    call_t: f32;
-    // Seconds of manual left in the line.
-    balance: f32
+    // Since the latest hit (or a grind's latest points), for its call.
+    call_t: f32
 }
 
 run: *Run = new Run {
     hits: new Hit[MAX_HITS](no_hit()),
     n: 0,
     points: 0.0,
-    mult: 0,
-    idle: 0.0,
-    done_hits: new Hit[MAX_HITS](no_hit()),
-    done_n: 0,
-    done_points: 0,
-    done_mult: 0,
-    done_lost: false,
-    done_t: 100.0,
     keys: new int[MAX_KEYS](0),
     key_count: new int[MAX_KEYS](0),
     nkeys: 0,
     total: 0,
-    best_line: 0,
     best_run: 0,
-    call_t: 100.0,
-    balance: BALANCE
+    call_t: 100.0
 };
-
-const BALANCE: f32 = 3.0;
 
 clear_run() {
     run.n = 0;
     run.points = 0.0;
-    run.mult = 0;
-    run.idle = 0.0;
-    run.done_n = 0;
-    run.done_t = 100.0;
     run.nkeys = 0;
     run.total = 0;
-    run.best_line = 0;
-    run.call_t = 100.0;
-    run.balance = BALANCE
+    run.call_t = 100.0
 }
 
 // What makes a trick the same trick.
 hit_key(h: Hit): int {
     g: int = 0;
     if (h.grab) g = 1;
+    if (h.sw) g = g + 2;
     h.kind * 100000 + (h.flips + 4) * 1000 + (h.halves + 8) * 10 + g
 }
 
@@ -159,11 +148,12 @@ count_key(key: int) {
     }
 }
 
-in_line(key: int): bool {
-    for i in 0..run.n {
-        if (hit_key(run.hits[i]) == key) return true
+push_hit(h: Hit) {
+    if (run.n < MAX_HITS) {
+        run.hits[run.n] = h;
+        run.n = run.n + 1
     }
-    false
+    run.call_t = 0.0
 }
 
 add_hit(h: Hit) {
@@ -171,43 +161,69 @@ add_hit(h: Hit) {
     key: int = hit_key(h);
     r.repeat = times_done(key);
     r.points = h.points * powf(0.5, r.repeat as f32);
-    counts: bool = h.kind == HIT_AIR || h.kind == HIT_RAIL || h.kind == HIT_BOX;
-    r.fresh = counts && !in_line(key);
-    if (r.fresh || run.n == 0) run.balance = BALANCE;
-    if (run.n < MAX_HITS) {
-        run.hits[run.n] = r;
-        run.n = run.n + 1
-    }
     count_key(key);
-    run.points = run.points + r.points;
-    if (r.fresh) run.mult = run.mult + 1;
-    run.idle = 0.0;
+    push_hit(r);
+    add_points(r.points)
+}
+
+add_points(p: f32) {
+    run.points = run.points + p;
+    run.total = (run.points + 0.5) as int
+}
+
+// Points for keeping a grind up, at its repeat rate.
+run_add(points: f32) {
+    if (run.n == 0) return;
+    i: int = run.n - 1;
+    k: f32 = powf(0.5, run.hits[i].repeat as f32);
+    run.hits[i].points = run.hits[i].points + points * k;
+    run.hits[i].extra = run.hits[i].extra + points * k;
+    add_points(points * k);
     run.call_t = 0.0
 }
 
-// Points for keeping something up (a grind, a manual), at the latest
-// hit's repeat rate.
-run_add(points: f32) {
-    if (run.n == 0) return;
-    k: f32 = powf(0.5, run.hits[run.n - 1].repeat as f32);
-    run.points = run.points + points * k;
-    run.hits[run.n - 1].points = run.hits[run.n - 1].points + points * k
-}
+// Bigger is worth more, but less and less so: one trick done well where it
+// suits beats a bigger one anywhere.
+flip_points: []f32 = [0.0, 600.0, 900.0, 1100.0];
 
-flip_points: []f32 = [0.0, 400.0, 1000.0, 1800.0];
-
-spin_points: []f32 = [0.0, 100.0, 250.0, 450.0, 700.0, 1000.0, 1400.0];
+spin_points: []f32 = [0.0, 200.0, 350.0, 480.0, 580.0, 660.0, 720.0];
 
 // An air, judged as he lands: kind HIT_AIR off a kicker, else HIT_FLAT;
 // what he did, how much of the air he held a grab, how long he was up, and
 // how he landed.
+// What each kind of feature makes of flips, spins, and grabs.
+item_flips(item: int): f32 {
+    if (item == FEATURE_KICKER) return 2.0;
+    if (item == FEATURE_GAP) return 1.25;
+    if (item == FEATURE_PIPE) return 0.5;
+    if (item == FEATURE_CLIFF) return 0.75;
+    1.0
+}
+
+item_spins(item: int): f32 {
+    if (item == FEATURE_PIPE) return 2.0;
+    if (item == FEATURE_GAP || item == FEATURE_CLIFF) return 1.25;
+    if (item == FEATURE_KICKER) return 0.75;
+    1.0
+}
+
+item_grabs(item: int): f32 {
+    if (item == FEATURE_CLIFF) return 2.5;
+    if (item == FEATURE_GAP || item == FEATURE_PIPE) return 1.25;
+    1.0
+}
+
+const SWITCH_BONUS: f32 = 1.5;
+
 judge_air(
     kind: int,
+    item: int,
     flips: int,
     halves: int,
     grab: f32,
     air: f32,
-    landing: int
+    landing: int,
+    sw: bool
 ) {
     nf: int = mini(absi(flips), 3);
     nh: int = mini(absi(halves), 6);
@@ -217,66 +233,65 @@ judge_air(
         // nothing.
         if (kind != HIT_AIR || air < 0.6) return
     }
-    p: f32 = flip_points[nf] + spin_points[nh];
-    if (grabbed) p = p + 150.0 + 200.0 * grab;
+    gp: f32 = 0.0;
+    if (grabbed) gp = 300.0 + 200.0 * grab;
+    p: f32 = flip_points[nf] * item_flips(item) + spin_points[nh] * item_spins(item) + gp * item_grabs(item);
     if (p == 0.0) p = 100.0;
-    if (nf > 0 && nh > 0) p = p * 1.3;
-    if (grabbed && nf + nh > 0) p = p * 1.15;
-    p = p * clampf(air / 1.2, 0.5, 1.6);
+    if (nf > 0 && nh > 0) p = p * 1.2;
+    base: f32 = p;
+    amp: f32 = clampf(air / 1.2, 0.5, 1.6);
+    p = p * amp;
+    if (sw) p = p * SWITCH_BONUS;
     if (landing == LAND_STOMPED) p = p * 1.25;
     if (landing == LAND_CASED) p = p * 0.6;
     if (landing == LAND_OVERSHOT) p = p * 0.75;
     if (kind == HIT_FLAT) p = p * 0.25;
     h: Hit = no_hit();
     h.kind = kind;
+    h.item = item;
+    h.sw = sw;
     h.flips = flips;
     h.halves = halves;
     h.grab = grabbed;
     h.landing = landing;
     h.points = p;
+    h.base = base;
+    h.amp = amp;
+    h.base_flip = flip_points[nf];
+    h.base_spin = spin_points[nh];
+    h.base_grab = gp;
     add_hit(h)
 }
 
-judge_grind(box: bool) {
+judge_grind(box: bool, sw: bool) {
     h: Hit = no_hit();
     h.kind = HIT_RAIL;
     if (box) h.kind = HIT_BOX;
-    h.points = 150.0;
+    h.sw = sw;
+    h.points = 300.0;
+    if (sw) h.points = h.points * SWITCH_BONUS;
     add_hit(h)
 }
 
-judge_manual(nose: bool) {
+// A trick landed sketchy: what he went for, off what, and whether he came
+// up short of a gap (cased); worth nothing.
+judge_sketch(
+    item: int,
+    flips: int,
+    halves: int,
+    cased: bool,
+    sw: bool
+) {
     h: Hit = no_hit();
-    h.kind = HIT_MANUAL;
-    if (nose) h.flips = 1;
-    h.points = 25.0;
-    add_hit(h)
+    h.kind = HIT_SKETCH;
+    h.item = item;
+    h.sw = sw;
+    h.flips = flips;
+    h.halves = halves;
+    if (cased) h.landing = LAND_CASED;
+    push_hit(h)
 }
 
-end_run_line(lost: bool) {
-    for i in 0..run.n run.done_hits[i] = run.hits[i];
-    run.done_n = run.n;
-    run.done_t = 0.0;
-    run.done_lost = lost;
-    run.done_mult = maxi(run.mult, 1);
-    run.done_points = (run.points * run.done_mult as f32) as int;
-    if (!lost) {
-        run.total = run.total + run.done_points;
-        if (run.done_points > run.best_line) run.best_line = run.done_points
-    }
-    run.n = 0;
-    run.points = 0.0;
-    run.mult = 0
-}
-
-lose_run_line() {
-    if (run.n > 0) end_run_line(true)
-}
-
-// busy: he is in the air, on a rail, or in a manual.
-tick_run(busy: bool, dt: f32) {
-    run.done_t = run.done_t + dt;
-    run.call_t = run.call_t + dt;
-    if (busy) run.idle = 0.0 else run.idle = run.idle + dt;
-    if (run.n > 0 && run.idle > COURSE_SETTLE) end_run_line(false)
+tick_run(dt: f32) {
+    run.call_t = run.call_t + dt
 }
