@@ -113,10 +113,10 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
   // ---- pointers ----
 
   // With `pointers`, presses, drags, and releases anywhere on the page
-  // (except on elements in `.controls` or links) reach the game as X button
-  // and motion events in window pixels. Each finger is its own button (1, 2,
-  // 3, 8, 9, skipping the wheel's), and a motion's state is that button's
-  // mask, so the game can follow several fingers at once.
+  // (except on elements in `.controls` or `.ui`, or links) reach the game
+  // as X button and motion events in window pixels. Each finger is its own
+  // button (1, 2, 3, 8, 9, skipping the wheel's), and a motion's state is
+  // that button's mask, so the game can follow several fingers at once.
   if (pointers) {
     const BUTTONS = [1, 2, 3, 8, 9];
     const held = new Map();
@@ -125,7 +125,7 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
       return [((e.clientX - r.left) / r.width) * windowSize[0], ((e.clientY - r.top) / r.height) * windowSize[1]];
     };
     addEventListener("pointerdown", (e) => {
-      if (e.target.closest?.(".controls, a")) return;
+      if (e.target.closest?.(".controls, .ui, a")) return;
       const button = BUTTONS.find((b) => ![...held.values()].includes(b));
       if (button === undefined) return;
       held.set(e.pointerId, button);
