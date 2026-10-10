@@ -39,32 +39,63 @@ const setNight = (night) => {
 };
 setNight(startNight);
 let sendKey = null;
-for (const key of document.querySelectorAll(".controls .key")) {
-  const sym = Number(key.dataset.key);
-  if (!sym) continue;
-  if (key === lookKey) key.addEventListener("pointerdown", () => setNight(!document.body.classList.contains("night")));
-  let held = false;
-  const up = () => {
-    if (!held) return;
-    held = false;
-    key.classList.remove("held");
-    sendKey?.(3, sym);
-  };
-  key.addEventListener("pointerdown", (e) => {
-    e.preventDefault();
-    key.setPointerCapture(e.pointerId);
-    held = true;
-    key.classList.add("held");
-    sendKey?.(2, sym, "");
-  });
-  for (const name of ["pointerup", "pointercancel", "lostpointercapture"]) key.addEventListener(name, up);
-}
 const typeKeys = (syms) => {
   for (const sym of syms) {
     sendKey?.(2, sym, "");
     sendKey?.(3, sym);
   }
 };
+
+// A button is tapped, not just touched: pressed, and let go still on it,
+// without having moved far (a finger that moves is scrolling, or has
+// thought better of it). While it is pressed it shows it, the color
+// easing in (see .pressed, in index.html), so that the start of a drag,
+// which begins as a press does, shows hardly at all. `accepts` says
+// whether a press is the button's (as for a sheet's backdrop, which is
+// only where nothing else is).
+const TAP_SLOP = 10;
+const onTap = (el, act, accepts = () => true) => {
+  let press = null;
+  const end = () => {
+    press = null;
+    el.classList.remove("pressed");
+  };
+  el.addEventListener("pointerdown", (e) => {
+    if (e.button > 0 || !accepts(e)) return;
+    // (A button inside another, as a run to watch on a course's card: the
+    // press is the inner one's alone.)
+    e.stopPropagation();
+    press = { id: e.pointerId, x: e.clientX, y: e.clientY };
+    el.classList.add("pressed");
+    // A mouse held down is followed off the button and back (a finger
+    // already is).
+    if (e.pointerType === "mouse") el.setPointerCapture(e.pointerId);
+  });
+  el.addEventListener("pointermove", (e) => {
+    if (press && e.pointerId === press.id && Math.hypot(e.clientX - press.x, e.clientY - press.y) > TAP_SLOP) end();
+  });
+  el.addEventListener("pointerup", (e) => {
+    if (!press || e.pointerId !== press.id) return;
+    const r = el.getBoundingClientRect();
+    const inside = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+    end();
+    if (!inside) return;
+    e.preventDefault();
+    act(e);
+  });
+  // (The browser takes the touch for a scroll.)
+  el.addEventListener("pointercancel", end);
+};
+
+// The keys over the game: each presses its key of the game's.
+for (const key of document.querySelectorAll(".controls .key")) {
+  const sym = Number(key.dataset.key);
+  if (!sym) continue;
+  onTap(key, () => {
+    if (key === lookKey) setNight(!document.body.classList.contains("night"));
+    typeKeys([sym]);
+  });
+}
 
 // Sheets over the game: the menu, the guide, the places to pick from, and
 // the groups. The game pauses (Pause, held) while any is open, and one
@@ -94,22 +125,15 @@ const closeSheet = (id) => {
   else openMenu();
 };
 for (const [id, el] of Object.entries(sheets)) {
-  el.addEventListener("pointerdown", (e) => {
-    if (e.target === el || e.target.closest(".close")) {
-      e.preventDefault();
-      closeSheet(id);
-    }
-  });
+  onTap(el, () => closeSheet(id), (e) => e.target === el);
+  onTap(el.querySelector(".close"), () => closeSheet(id));
 }
 addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   const open = Object.entries(sheets).find(([, el]) => !el.hidden);
   if (open) closeSheet(open[0]);
 });
-document.querySelector(".how").addEventListener("pointerdown", (e) => {
-  e.preventDefault();
-  openSheet("guide");
-});
+onTap(document.querySelector(".how"), () => openSheet("guide"));
 
 // Places: a downhill course is a number; a park is one too, kept negative
 // (as the game says them: see run_id in programs/skate/park.l8). Each
@@ -337,11 +361,7 @@ const scoreList = (id, most) => {
       watch.className = "watch";
       watch.textContent = "▶";
       watch.title = "Watch this run";
-      watch.addEventListener("pointerdown", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        watchRun(id, run.name);
-      });
+      onTap(watch, () => watchRun(id, run.name));
       li.append(watch);
     }
     list.append(li);
@@ -386,22 +406,19 @@ const openMenu = () => {
     if (!sheets.menu.hidden) showMenu();
   });
 };
-sheets.menu.querySelector(".items").addEventListener("pointerdown", (e) => {
-  const go = e.target.closest(".item")?.dataset.go;
-  if (!go) return;
-  e.preventDefault();
-  if (go === "resume") closeSheets();
-  if (go === "tutorial") goTo(TUTORIAL);
-  if (go === "daily") goTo(today());
-  if (go === "dailypark") goTo(-today());
-  if (go === "courses") openPlaces(false);
-  if (go === "parks") openPlaces(true);
-  if (go === "groups") openGroups();
-});
-document.querySelector(".pick").addEventListener("pointerdown", (e) => {
-  e.preventDefault();
-  openMenu();
-});
+for (const el of sheets.menu.querySelectorAll(".item")) {
+  onTap(el, () => {
+    const go = el.dataset.go;
+    if (go === "resume") closeSheets();
+    if (go === "tutorial") goTo(TUTORIAL);
+    if (go === "daily") goTo(today());
+    if (go === "dailypark") goTo(-today());
+    if (go === "courses") openPlaces(false);
+    if (go === "parks") openPlaces(true);
+    if (go === "groups") openGroups();
+  });
+}
+onTap(document.querySelector(".pick"), () => openMenu());
 
 // The places to pick from: the courses, or the parks.
 let pickingParks = false;
@@ -427,10 +444,7 @@ const showPlaces = () => {
     if (bests[id]) div.querySelector("i").textContent = `Best ${bests[id]}`;
     const list = id !== 0 && scoreList(id, 5);
     if (list) div.append(list);
-    div.addEventListener("pointerdown", (e) => {
-      e.preventDefault();
-      goTo(id === 0 ? randomPlace(park) : id);
-    });
+    onTap(div, () => goTo(id === 0 ? randomPlace(park) : id));
     grid.append(div);
   };
   const sign = park ? -1 : 1;
@@ -471,14 +485,12 @@ const showGroups = () => {
     const show = div.querySelector(".show");
     show.textContent = group.code === shownCode ? "Showing its scores" : "Show its scores";
     show.hidden = groups.length < 2;
-    show.addEventListener("pointerdown", (e) => {
-      e.preventDefault();
+    onTap(show, () => {
       shownCode = group.code;
       saveGroups();
       showGroups();
     });
-    div.querySelector(".copy").addEventListener("pointerdown", async (e) => {
-      e.preventDefault();
+    onTap(div.querySelector(".copy"), async () => {
       const link = `${location.origin}${location.pathname}?group=${group.code}`;
       try {
         await navigator.clipboard.writeText(link);
@@ -487,8 +499,7 @@ const showGroups = () => {
         prompt("Copy this link to invite someone:", link);
       }
     });
-    div.querySelector(".leave").addEventListener("pointerdown", (e) => {
-      e.preventDefault();
+    onTap(div.querySelector(".leave"), () => {
       if (!confirm(`Leave ${group.title || "this group"}? Your runs stay on its board.`)) return;
       groups = groups.filter((g) => g !== group);
       saveGroups();
@@ -520,10 +531,7 @@ const join = async () => {
   if (ok) joinBox.value = "";
   showGroups();
 };
-sheets.groups.querySelector(".join .btn").addEventListener("pointerdown", (e) => {
-  e.preventDefault();
-  join();
-});
+onTap(sheets.groups.querySelector(".join .btn"), join);
 for (const box of [nameBox, joinBox]) {
   box.addEventListener("pointerdown", (e) => e.stopPropagation());
   box.addEventListener("keydown", (e) => {
