@@ -119,9 +119,94 @@ const store = (key, value) => {
   } catch {}
 };
 const bests = stored("skate.best", {});
+
+// The leaderboard (see ../skate-board/worker.js): the page opened with a board's
+// link (?board=<code>) is on that board from then on. A run that beats his
+// best there is posted, under his name (his on that board once posted: a
+// token kept here says it is this device). Anyone's run can be watched: the
+// game is handed it as a file, and V.
+const api = location.hostname.endsWith("trailingwhite.space") ? "/skate/api" : "https://trailingwhite.space/skate/api";
+const boardParam = new URLSearchParams(location.search).get("board");
+if (boardParam && /^[a-z0-9]{8,24}$/.test(boardParam)) store("skate.board", boardParam);
+const boardCode = stored("skate.board", null);
+let playerName = stored("skate.name", "");
+let playerToken = stored("skate.token", null);
+if (!playerToken) {
+  playerToken = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  store("skate.token", playerToken);
+}
+let board = null;
+let gameVersion = 0;
+let gameFs = null;
+const toast = (text) => {
+  const el = document.getElementById("toast");
+  el.textContent = text;
+  el.classList.add("on");
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => el.classList.remove("on"), 3500);
+};
+const cleanName = (text) => text.toUpperCase().replace(/[^A-Z0-9 ]/g, "").replace(/ +/g, " ").trim().slice(0, 12).trim();
+const loadBoard = async () => {
+  if (!boardCode) return;
+  try {
+    const r = await fetch(`${api}/board/${boardCode}`);
+    if (r.ok) board = await r.json();
+  } catch {}
+};
+// The day's course: its number is the date (as 20261010), in one time zone
+// for everyone, so that it is the same course for all of them, and changes
+// for all at once.
+const DAILY_ZONE = "America/New_York";
+const dailyCourse = (at = Date.now()) => Number(new Intl.DateTimeFormat("en-CA", { timeZone: DAILY_ZONE }).format(new Date(at)).replace(/-/g, ""));
+const isDaily = (n) => n >= 20000101 && n <= 29991231;
+const dayName = (n) =>
+  new Date(Date.UTC(Math.floor(n / 10000), (Math.floor(n / 100) % 100) - 1, n % 100)).toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short", day: "numeric", month: "short" });
+const myBest = (course) => board?.courses?.[course]?.find((e) => e.name === playerName)?.score ?? 0;
+// A run just finished, as the game wrote it: post it, if it is his best
+// there.
+const postRun = async (version, course, score, replay) => {
+  if (!boardCode || score <= 0 || !((course >= 1 && course <= COURSES) || course === dailyCourse())) return;
+  if (!playerName) {
+    toast("Set your name under Courses to post scores");
+    return;
+  }
+  if (score <= myBest(course)) return;
+  try {
+    const r = await fetch(`${api}/board/${boardCode}/score`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: playerName, token: playerToken, course, score, version, replay }),
+    });
+    const body = await r.json();
+    if (!r.ok) {
+      toast(`Not posted: ${body.error}`);
+      return;
+    }
+    await loadBoard();
+    const place = (board?.courses?.[course] ?? []).findIndex((e) => e.name === playerName) + 1;
+    if (body.posted) toast(place > 0 ? `Posted: #${place} on ${isDaily(course) ? "today's course" : `course ${course}`}` : "Posted");
+  } catch {
+    toast("Not posted: no connection");
+  }
+};
+const watchRun = async (course, name) => {
+  try {
+    const r = await fetch(`${api}/board/${boardCode}/replay?course=${course}&name=${encodeURIComponent(name)}`);
+    const run = await r.json();
+    if (!r.ok) throw new Error(run.error);
+    gameFs.writeFile("watch.txt", `${run.version} ${run.course} ${run.score} ${run.name.replace(/ /g, "_")} ${run.replay}`);
+    closeCourses();
+    setMode(false);
+    typeKeys([118]);
+  } catch {
+    toast("Could not load that run");
+  }
+};
 const gameSays = (line) => {
   const words = line.trim().split(/\s+/);
   if (words[0] === "L8LIST") courseList.set(Number(words[1]), words.slice(2));
+  else if (words[0] === "L8VERSION") gameVersion = Number(words[1]);
+  else if (words[0] === "L8REPLAY") postRun(Number(words[1]), Number(words[2]), Number(words[3]), words.slice(4).join(" "));
   else if (words[0] === "L8COURSE") {
     courseNow = Number(words[1]);
     store("skate.course", courseNow);
@@ -153,9 +238,16 @@ const pickCourse = (n) => {
   if (n > 0) typeKeys([...String(n)].map((c) => 48 + Number(c)).concat(65293));
   else typeKeys([110]);
 };
-const openCourses = () => {
+const showCourses = () => {
   const grid = courses.querySelector(".grid");
   grid.textContent = "";
+  const bar = courses.querySelector(".boardbar");
+  bar.hidden = !boardCode;
+  if (boardCode) {
+    bar.querySelector(".title").textContent = board?.title ?? "...";
+    const taken = board && playerName && Object.values(board.courses).some((list) => list.some((e) => e.name === playerName));
+    bar.querySelector("small").textContent = playerName ? (taken ? "Your runs post as this name." : "Your best runs will post as this name.") : "Type a name to post your scores.";
+  }
   const card = (n, title, text) => {
     const el = document.createElement("div");
     el.className = "course" + (n === courseNow ? " now" : "");
@@ -163,19 +255,73 @@ const openCourses = () => {
     el.querySelector("b").textContent = title;
     el.querySelector("span").textContent = text;
     if (n > 0 && bests[n]) el.querySelector("i").textContent = `Best ${bests[n]}`;
+    // The board's runs on it: the top few, each to watch (if this game can
+    // still play it).
+    const runs = (n > 0 && board?.courses?.[n]) || [];
+    if (runs.length > 0) {
+      const list = document.createElement("ol");
+      runs.slice(0, 5).forEach((run, i) => {
+        const li = document.createElement("li");
+        if (run.name === playerName) li.className = "me";
+        li.innerHTML = `<span></span><span class="who"></span><span></span>`;
+        const [place, who, score] = li.children;
+        place.textContent = `${i + 1}.`;
+        who.textContent = run.name;
+        score.textContent = String(run.score);
+        if (run.version === gameVersion) {
+          const watch = document.createElement("span");
+          watch.className = "watch";
+          watch.textContent = "\u25b6";
+          watch.title = "Watch this run";
+          watch.addEventListener("pointerdown", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            watchRun(n, run.name);
+          });
+          li.append(watch);
+        }
+        list.append(li);
+      });
+      el.append(list);
+    }
     el.addEventListener("pointerdown", (e) => {
       e.preventDefault();
       pickCourse(n);
     });
     grid.append(el);
   };
-  for (const [n, kinds] of courseList) card(n, `Course ${n}`, kinds.map((k) => SECTION_NAMES[k] ?? k).join(" \u203a "));
-  if (courseNow > COURSES) card(courseNow, `Course ${courseNow}`, "The one you are on");
+  // The day's course first; and who won yesterday's.
+  const today = dailyCourse();
+  const kindsOf = (n) => (courseList.get(n) ?? []).map((k) => SECTION_NAMES[k] ?? k).join(" \u203a ");
+  const yesterday = board?.courses?.[dailyCourse(Date.now() - 24 * 60 * 60 * 1000)]?.[0];
+  card(today, `Daily \u00b7 ${dayName(today)}`, (kindsOf(today) || "Today's course, the same for everyone") + (yesterday ? ` \u00b7 Yesterday: ${yesterday.name} ${yesterday.score}` : ""));
+  for (const [n] of courseList) if (!isDaily(n)) card(n, `Course ${n}`, kindsOf(n));
+  if (courseNow > COURSES && courseNow !== today) card(courseNow, isDaily(courseNow) ? `Daily \u00b7 ${dayName(courseNow)}` : `Course ${courseNow}`, "The one you are on");
   card(0, "Random", "A new course, laid out afresh");
+};
+const openCourses = () => {
+  showCourses();
   courses.hidden = false;
   canvas.blur();
   sendKey?.(2, 65299, "");
+  // (The board as it is now, when it comes.)
+  loadBoard().then(() => {
+    if (!courses.hidden) showCourses();
+  });
 };
+const nameBox = courses.querySelector(".boardbar input");
+nameBox.value = playerName;
+nameBox.addEventListener("pointerdown", (e) => e.stopPropagation());
+nameBox.addEventListener("keydown", (e) => {
+  e.stopPropagation();
+  if (e.key === "Enter") nameBox.blur();
+});
+nameBox.addEventListener("change", () => {
+  playerName = cleanName(nameBox.value);
+  nameBox.value = playerName;
+  store("skate.name", playerName);
+  showCourses();
+});
 document.querySelector(".pick").addEventListener("pointerdown", (e) => {
   e.preventDefault();
   openCourses();
@@ -191,6 +337,8 @@ async function main() {
   const params = new URLSearchParams(location.search);
   const module = await WebAssembly.compileStreaming(fetch("skate.wasm"));
   const fs = new MemFS({});
+  gameFs = fs;
+  loadBoard();
   const decoder = new TextDecoder();
   // (What it writes comes in pieces: a line at a time from here.)
   let written = "";
@@ -207,8 +355,11 @@ async function main() {
   if (startNight && !params.has("L8_LOOK")) params.set("L8_LOOK", "n");
   // He starts on the course he was last on (or the first), and the game
   // says what is on the first few.
-  if (!params.has("L8_SEED")) params.set("L8_SEED", String(stored("skate.course", 1) || 1));
+  // (An earlier day's course becomes today's.)
+  const last = stored("skate.course", 1) || 1;
+  if (!params.has("L8_SEED")) params.set("L8_SEED", String(isDaily(last) ? dailyCourse() : last));
   params.set("L8_COURSES", String(COURSES));
+  params.set("L8_DAILY", String(dailyCourse()));
   sys.env = [...params].filter(([k]) => k.startsWith("L8_")).map(([k, v]) => `${k}=${v}`);
   const env = Object.fromEntries([...params].filter(([k]) => k.startsWith("L8_")));
   const zoom = Math.min(4, Math.max(0.25, Number(params.get("zoom")) || 0.85));

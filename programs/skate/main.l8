@@ -110,19 +110,54 @@ say_course() raises IoError {
     print("")
 }
 
-say_finish() raises IoError {
+// (And the run itself, for the page to pass on: see replay.l8.) A run is
+// told of once its score is final: FINISH_TAIL past the line, or when he
+// starts over before that.
+say_run(which: int) raises IoError {
     write(1, "L8FINISH ");
-    write_int(1, course_seed);
+    write_int(1, rec_seed[which]);
     write(1, " ");
-    write_int(1, run.total);
+    write_int(1, rec_score[which]);
+    print("");
+    write(1, "L8REPLAY ");
+    write_int(1, REPLAY_VERSION);
+    write(1, " ");
+    write_int(1, rec_seed[which]);
+    write(1, " ");
+    write_int(1, rec_score[which]);
+    write(1, " ");
+    rec_write(which);
     print("")
 }
 
+// Tell the page of the run under way, if it has finished and has not been
+// told (before it is thrown away).
+say_now() raises IoError {
+    if (rec_done && !rec_said && rec_n[REC_NOW] > 0 && play_which < 0) {
+        say_run(REC_NOW);
+        rec_said = true
+    }
+}
+
 // L8_COURSES=n says what is on each of courses 1 to n, for the page's list
-// of them: a line each, its sections in order.
-say_courses() raises IoError {
-    prefix: str = "L8_COURSES=";
+// of them: a line each, its sections in order. L8_DAILY=n says what is on
+// course n too: the day's course, whose number is its date (see
+// daily_course, in hud.l8).
+say_list(seed: int) raises IoError {
     names: []str = ["KICKERS", "RAILS", "PIPE", "CLIFF", "GAP", "ROLLERS"];
+    course_seed = seed;
+    lay_sections();
+    write(1, "L8LIST ");
+    write_int(1, seed);
+    for k in 0..nsects {
+        write(1, " ");
+        write(1, names[sect_kind[k]])
+    }
+    print("")
+}
+
+// The number after prefix in the environment, or 0.
+env_number(prefix: str): int {
     for e in l8_environment() {
         if (len(e) > len(prefix) && starts_with(e, prefix)) {
             n: int = 0;
@@ -130,19 +165,16 @@ say_courses() raises IoError {
                 c: int = e[i] as int;
                 if (c >= 48 && c <= 57) n = n * 10 + c - 48
             }
-            for s in 1..mini(n, 60) + 1 {
-                course_seed = s;
-                lay_sections();
-                write(1, "L8LIST ");
-                write_int(1, s);
-                for k in 0..nsects {
-                    write(1, " ");
-                    write(1, names[sect_kind[k]])
-                }
-                print("")
-            }
+            return n
         }
     }
+    0
+}
+
+say_courses() raises IoError {
+    for s in 1..mini(env_number("L8_COURSES="), 60) + 1 say_list(s);
+    daily: int = env_number("L8_DAILY=");
+    if (daily > 0) say_list(daily)
 }
 
 const CAM_FOLLOW: f32 = 0.6;
@@ -267,7 +299,7 @@ new_course(
     set_course_glows(r);
     set_grass(r);
     enter_course(m);
-    rec_begin(m)
+    rec_begin()
 }
 
 // The park: its ground, its grass, and him at the near end.
@@ -413,7 +445,10 @@ main() raises IoError: int {
     set_grass(r);
     m: *Mover = new_mover();
     enter_course(m);
-    rec_begin(m);
+    rec_begin();
+    write(1, "L8VERSION ");
+    write_int(1, REPLAY_VERSION);
+    print("");
     say_course();
     // L8_PARK starts in the park.
     if (getenv("L8_PARK") != null) go_to_park(m, r, world);
@@ -428,6 +463,8 @@ main() raises IoError: int {
     // A replay is watched from beside the run, or (C) from behind him as
     // he rode it. A course's number typed (then Enter), and how long ago.
     tv: bool = true;
+    // A friend's run to watch, once its course is built.
+    watch_pending: bool = false;
     typed: int = -1;
     typed_t: f32 = 0.0;
     pick_seed: int = 0;
@@ -460,7 +497,7 @@ main() raises IoError: int {
                     if (play_which >= 0 && (ks == 32 || ks == 112 || ks == 98 || ks == 114)) {
                         play_which = -1;
                         enter_course(m);
-                        rec_begin(m);
+                        rec_begin();
                         pointers_clear(&keys);
                         a.y = m.y;
                         cam.target = v3(m.x, m.y, m.z);
@@ -478,11 +515,24 @@ main() raises IoError: int {
                         }
                     }
                     if (ks == 99) tv = !tv;
+                    // V: watch the friend's run the page has handed over, on
+                    // its course (going there first, if he is elsewhere).
+                    if (ks == 118 && hud_building == 0 && read_watch()) {
+                        if (park || rec_seed[REC_FRIEND] != course_seed) {
+                            pick_seed = rec_seed[REC_FRIEND];
+                            watch_pending = true
+                        } else if (start_replay(m, REC_FRIEND)) {
+                            pointers_clear(&keys);
+                            a.y = m.y;
+                            cam.target = v3(m.x, m.y, m.z);
+                            update_course_camera(cam, cam.target, m.carve, 10.0)
+                        }
+                    }
                     // A course's number, typed, and Enter: that course. [ and
                     // ]: the one before, and the next.
                     if (ks >= 48 && ks <= 57) {
                         if (typed < 0) typed = 0;
-                        typed = mini(typed * 10 + ks - 48, 99999);
+                        typed = mini(typed * 10 + ks - 48, 99999999);
                         typed_t = 0.0
                     }
                     if (hud_building == 0) {
@@ -496,13 +546,14 @@ main() raises IoError: int {
                         }
                     }
                     if (ks == 114 && !stopped) {
+                        say_now();
                         if (park) {
                             enter_park(m);
                             cam.target = v3(m.x, m.y, m.z);
                             update_course_camera(cam, cam.target, m.carve, 10.0)
                         } else {
                             enter_course(m);
-                            rec_begin(m);
+                            rec_begin();
                             cam.target = v3(m.x, m.y, m.z);
                             update_course_camera(cam, cam.target, m.carve, 10.0)
                         }
@@ -550,7 +601,7 @@ main() raises IoError: int {
                     if (play_which >= 0) {
                         play_which = -1;
                         enter_course(m);
-                        rec_begin(m);
+                        rec_begin();
                         pointers_clear(&keys);
                         a.y = m.y;
                         cam.target = v3(m.x, m.y, m.z);
@@ -576,6 +627,7 @@ main() raises IoError: int {
             }
         }
         if (running && hud_building == 2) {
+            say_now();
             if (hud_going == 5) {
                 new_course(m, r, world, pick_seed);
                 pick_seed = 0
@@ -586,6 +638,10 @@ main() raises IoError: int {
                 r, world, course_seed) else new_course(m, r, world, (course_seed * 48271 + mono_ns() / 1000) % 100000);
             hud_going = 0;
             if (!park) say_course();
+            if (watch_pending) {
+                watch_pending = false;
+                if (start_replay(m, REC_FRIEND)) pointers_clear(&keys)
+            }
             pointers_clear(&keys);
             a.y = m.y;
             cam.target = v3(m.x, m.y, m.z);
@@ -610,22 +666,34 @@ main() raises IoError: int {
                 // told is recorded.
                 if (play_which >= 0) {
                     if (!play_step(&keys)) {
+                        // (The run it was is over: it scores no more.)
+                        run.closed = true;
                         play_which = -1;
                         pointers_clear(&keys);
                         for d in 0..4 keys.held[d] = false;
                         keys.hop_held = false;
                         keys.style_held = false
                     }
-                } else if (!park) rec_step(m, &keys);
+                } else if (!park) rec_step(&keys);
                 starts: int = course_starts;
+                best: int = run.best_run;
                 step_course(m, &keys, STEP_DT);
+                // (A friend's run is not his best.)
+                if (play_which == REC_FRIEND) run.best_run = best;
                 if (play_which < 0 && !park) {
-                    if (course_starts != starts) rec_begin(m) else rec_note(m)
+                    if (course_starts != starts) {
+                        rec_drop();
+                        rec_begin()
+                    } else rec_note(m)
                 }
                 acc = acc - STEP_DT;
                 steps = steps + 1
             }
-            if (m.finished && !was_finished && !park && play_which < 0) say_finish();
+            if (!park && play_which < 0 && m.finished && m.finish_t > FINISH_TAIL) say_now();
+            if (rec_tell >= 0) {
+                say_run(rec_tell);
+                rec_tell = -1
+            }
             was_finished = m.finished;
             typed_t = typed_t + dt;
             if (typed_t > 4.0) typed = -1;
