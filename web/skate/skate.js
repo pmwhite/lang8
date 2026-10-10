@@ -17,6 +17,18 @@ const stopped = (html) => {
   show(html);
 };
 
+// A person's link is this page with their secret after the # (see the
+// leaderboards, below): it is kept, and taken out of the address before
+// anything else sees it there.
+const linked = location.hash.match(/^#me=([a-z0-9]{24})$/)?.[1] ?? null;
+if (linked) {
+  try {
+    localStorage.setItem("skate.me", JSON.stringify(linked));
+    localStorage.removeItem("skate.account");
+  } catch {}
+  history.replaceState(null, "", location.pathname + location.search);
+}
+
 for (const name of ["gesturestart", "gesturechange", "dblclick"]) {
   document.addEventListener(name, (e) => e.preventDefault(), { passive: false });
 }
@@ -103,9 +115,9 @@ onTap(document.querySelector(".replay"), () => {
 });
 
 // Sheets over the game: the menu, the guide, the places to pick from, and
-// the groups. The game pauses (Pause, held) while any is open, and one
+// a place. The game pauses (Pause, held) while any is open, and one
 // closes with its button, a tap outside it, or Escape.
-const sheets = Object.fromEntries(["menu", "guide", "places", "groups"].map((id) => [id, document.getElementById(id)]));
+const sheets = Object.fromEntries(["menu", "guide", "places", "place"].map((id) => [id, document.getElementById(id)]));
 const sheetOpen = () => Object.values(sheets).some((el) => !el.hidden);
 // Whether he has started riding: until then the menu cannot be closed
 // without choosing.
@@ -116,6 +128,16 @@ const sheetsChanged = () => {
   const open = Object.keys(sheets).find((id) => !sheets[id].hidden);
   document.body.classList.toggle("sheet", !!open);
   document.body.classList.toggle("canback", !!open && (open !== "menu" || started));
+  syncPreview();
+};
+// While a place's sheet is up the game shows the place off: a key held
+// tells it so (see fly_over, in programs/skate/main.l8).
+let previewing = false;
+const syncPreview = () => {
+  const want = !sheets.place.hidden;
+  if (!sendKey || want === previewing) return;
+  previewing = want;
+  sendKey(want ? 2 : 3, 65300, "");
 };
 const openSheet = (id) => {
   for (const [name, el] of Object.entries(sheets)) el.hidden = name !== id;
@@ -131,11 +153,13 @@ const closeSheets = () => {
   sendKey?.(3, 65299);
   canvas.focus();
 };
-// (Closing any sheet but the menu goes back to the menu it came from.)
+// (Closing any sheet but the menu goes back to the one it came from: the
+// menu, or for a place the list of places.)
 const closeSheet = (id) => {
   if (id === "menu") {
     if (started) closeSheets();
   } else if (id === "guide" && started) closeSheets();
+  else if (id === "place" && placeFrom === "places") openPlaces(pickingParks);
   else openMenu();
 };
 // A sheet closes with a tap outside it, the button in the corner that goes
@@ -155,10 +179,10 @@ onTap(document.querySelector(".how"), () => openSheet("guide"));
 // (as the game says them: see run_id in programs/skate/park.l8). Each
 // number is always the same place, and each day has a course and a park of
 // its own, numbered by its date (as 20261010). The game says which he is
-// on (L8COURSE), and each run's score as it ends (L8FINISH); the best on
-// each is kept here, on the device. Going to one types its number to the game, and Enter (a course)
-// or Tab (a park).
-const PLACES = 24;
+// on (L8COURSE), and each run's score as it ends (L8FINISH); his runs on
+// each are kept here, on the device. Going to one types its number to the
+// game, and Enter (a course) or Tab (a park).
+const PLACES = 5;
 // The tutorial's course (see programs/skate/tutorial.l8): where a new
 // player starts, until he has left it for another.
 const TUTORIAL = 100000000;
@@ -175,7 +199,31 @@ const store = (key, value) => {
     localStorage.setItem(key, JSON.stringify(value));
   } catch {}
 };
-const bests = stored("skate.best", {});
+// His own runs on each place, kept on the device: the latest few and the
+// best few, each a score and when.
+const KEEP_RECENT = 20;
+const KEEP_BEST = 10;
+const KEEP_PLACES = 60;
+const myRuns = stored("skate.runs", {});
+const noteRun = (id, score) => {
+  const mine = (myRuns[id] ??= { recent: [], best: [] });
+  const run = [score, Date.now()];
+  mine.recent = [run, ...mine.recent].slice(0, KEEP_RECENT);
+  mine.best = [...mine.best, run].sort((a, b) => b[0] - a[0] || a[1] - b[1]).slice(0, KEEP_BEST);
+  // (Only so many places' worth: those longest unridden go.)
+  const ids = Object.keys(myRuns).sort((a, b) => myRuns[b].recent[0][1] - myRuns[a].recent[0][1]);
+  for (const old of ids.slice(KEEP_PLACES)) delete myRuns[old];
+  store("skate.runs", myRuns);
+};
+// How long ago, in a word or two.
+const ago = (at) => {
+  const s = Math.max(0, (Date.now() - at) / 1000);
+  if (s < 90) return "just now";
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  if (s < 7 * 86400) return `${Math.round(s / 86400)} d ago`;
+  return new Date(at).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+};
 // The day's places: the date in one time zone for everyone, so that they
 // are the same for all of them, and change for all at once.
 const DAILY_ZONE = "America/New_York";
@@ -187,58 +235,49 @@ const dayName = (id) => {
 };
 const placeName = (id) => {
   if (id === TUTORIAL) return "Tutorial";
-  if (isDaily(id)) return `${id < 0 ? "Daily park" : "Daily downhill"}${Math.abs(id) === today() ? "" : `, ${dayName(id)}`}`;
+  if (isDaily(id)) return `${id < 0 ? "Daily park" : "Daily course"}${Math.abs(id) === today() ? "" : `, ${dayName(id)}`}`;
   return `${id < 0 ? "Park" : "Course"} ${Math.abs(id)}`;
 };
 // (Picked before the game is up: it starts there instead. See main.)
 let wanted = null;
-const goTo = (id) => {
-  closeSheets();
-  if (!sendKey) {
-    wanted = id;
-    return;
-  }
-  if (id === placeNow) {
-    // (There already: from its start.)
-    typeKeys([114]);
-    return;
-  }
+// Where the game has been asked to go, until it says it is there.
+let headed = null;
+const typePlace = (id) => {
+  headed = id;
   if (id === TUTORIAL) typeKeys([116]);
   else typeKeys([...String(Math.abs(id))].map((c) => 48 + Number(c)).concat(id < 0 ? 65289 : 65293));
 };
+// Have the game go there, the page's sheets left as they are (see
+// openPlace).
+const visit = (id) => {
+  if (!sendKey) wanted = id;
+  else if (id !== (headed ?? placeNow)) typePlace(id);
+};
+// Ride there: from its start, if the game is there already.
+const goTo = (id) => {
+  closeSheets();
+  if (!sendKey) wanted = id;
+  else if (id === (headed ?? placeNow)) typeKeys([114]);
+  else typePlace(id);
+};
 const randomPlace = (park) => (park ? -1 : 1) * (PLACES + 1 + Math.floor(Math.random() * 99000));
 
-// Groups (see ../skate-board/worker.js): a group shares a leaderboard, and
-// whoever opens its link (?group=<code>) is in it from then on. His best
-// runs are posted to every group he is in, under his name (his in a group
-// once posted there: a token kept here says it is this device). One group's
-// scores are the ones shown. Anyone's run can be watched: the game is
-// handed it as a file, and V.
-const api = location.hostname.endsWith("trailingwhite.space") ? "/skate/api" : "https://trailingwhite.space/skate/api";
-const validCode = (code) => typeof code === "string" && /^[a-z0-9]{8,24}$/.test(code);
-let groups = stored("skate.groups", []).filter((g) => validCode(g?.code));
-// (The one board of before there were groups.)
-const oldBoard = stored("skate.board", null);
-if (validCode(oldBoard) && !groups.some((g) => g.code === oldBoard)) groups.push({ code: oldBoard, title: "" });
-let shownCode = stored("skate.group", null);
-const saveGroups = () => {
-  if (!groups.some((g) => g.code === shownCode)) shownCode = groups[0]?.code ?? null;
-  store("skate.groups", groups);
-  store("skate.group", shownCode);
-};
-let playerName = stored("skate.name", "");
-let playerToken = stored("skate.token", null);
-if (!playerToken) {
-  playerToken = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
-  store("skate.token", playerToken);
-}
-// Each group's scores, as last fetched, by its code: kept on the device
+// The leaderboards (see ../skate-board/worker.js). There is nothing here to
+// join or sign up to: whoever looks after them makes each person a link
+// (this page, with their secret after its #: see `linked`, above) and puts
+// people in groups. Whoever opens a link plays as that person from then
+// on, on that device. A group keeps each member's best on a place, and
+// their latest runs there; a best run can be watched by anyone its rider
+// shares a group with: the game is handed it as a file, and V.
+// (?api= points a page on localhost at a worker run there, to try one.)
+const localApi = location.hostname === "localhost" && new URLSearchParams(location.search).get("api");
+const api = localApi || (location.hostname.endsWith("trailingwhite.space") ? "/skate/api" : "https://trailingwhite.space/skate/api");
+let mySecret = stored("skate.me", null);
+// Who he is, and his groups' scores, as last fetched: kept on the device
 // too, so that they show at once the next time, before they are fetched
 // again (which nothing waits for).
-const boards = new Map(Object.entries(stored("skate.boards", {})).filter(([code]) => groups.some((g) => g.code === code)));
-const saveBoards = () => store("skate.boards", Object.fromEntries(boards));
-const shown = () => boards.get(shownCode) ?? null;
-const shownTitle = () => groups.find((g) => g.code === shownCode)?.title || "your group";
+let account = mySecret ? stored("skate.account", null) : null;
+const groups = () => account?.groups ?? [];
 let gameVersion = 0;
 let gameFs = null;
 const toast = (text) => {
@@ -248,99 +287,77 @@ const toast = (text) => {
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => el.classList.remove("on"), 3500);
 };
-const cleanName = (text) => text.toUpperCase().replace(/[^A-Z0-9 ]/g, "").replace(/ +/g, " ").trim().slice(0, 12).trim();
-// Fetch a group's scores: one fetch at a time for each, and (unless
-// `fresh` asks for them as they are now) none if they were fetched in the
-// last while. True if it is there, false if there is no such group, null
-// if it could not be reached.
-const BOARD_FRESH = 20000;
-const boardLoads = new Map();
-const boardLoaded = new Map();
-const loadBoard = (code, fresh = true) => {
-  if (!fresh && Date.now() - (boardLoaded.get(code) ?? 0) < BOARD_FRESH) return Promise.resolve(true);
-  const going = boardLoads.get(code);
+// Fetch them: one fetch at a time, and (unless `fresh` asks for them as
+// they are now) none if they were fetched in the last while. True if they
+// came, false if he is nobody (no link, or one that works no longer), null
+// if the leaderboards could not be reached.
+const ACCOUNT_FRESH = 20000;
+let accountLoad = null;
+let accountLoaded = 0;
+const loadMe = (fresh = true) => {
+  if (!mySecret) return Promise.resolve(false);
+  if (!fresh && Date.now() - accountLoaded < ACCOUNT_FRESH) return Promise.resolve(true);
   // (One already on its way may be from before what he wants to see.)
-  if (going) return fresh ? going.then(() => loadBoard(code)) : going;
-  const load = (async () => {
+  if (accountLoad) return fresh ? accountLoad.then(() => loadMe()) : accountLoad;
+  accountLoad = (async () => {
     try {
-      const r = await fetch(`${api}/board/${code}`);
-      if (r.status === 404) return false;
-      if (!r.ok) return null;
-      const data = await r.json();
-      boards.set(code, data);
-      boardLoaded.set(code, Date.now());
-      saveBoards();
-      const group = groups.find((g) => g.code === code);
-      if (group && group.title !== data.title) {
-        group.title = data.title;
-        saveGroups();
+      const r = await fetch(`${api}/me`, { headers: { authorization: `Bearer ${mySecret}` } });
+      if (r.status === 401) {
+        // (His link has been replaced by another: here he is nobody again.)
+        mySecret = null;
+        account = null;
+        localStorage.removeItem("skate.me");
+        localStorage.removeItem("skate.account");
+        toast("Your link no longer works");
+        return false;
       }
+      if (!r.ok) return null;
+      account = await r.json();
+      accountLoaded = Date.now();
+      store("skate.account", account);
       return true;
     } catch {
       return null;
     }
-  })().finally(() => boardLoads.delete(code));
-  boardLoads.set(code, load);
-  return load;
+  })().finally(() => (accountLoad = null));
+  return accountLoad;
 };
-const loadBoards = () => Promise.all(groups.map((g) => loadBoard(g.code, false)));
-// Join the group with this code (or in this link): true if there is one.
-const joinGroup = async (text) => {
-  const code = (text.match(/[?&](?:group|board)=([a-z0-9]+)/)?.[1] ?? text).trim();
-  if (!validCode(code)) return false;
-  if (!groups.some((g) => g.code === code)) {
-    const found = await loadBoard(code);
-    if (found === false) return false;
-    groups.push({ code, title: boards.get(code)?.title ?? "" });
-  }
-  shownCode = code;
-  saveGroups();
-  return true;
-};
-const scoresOn = (id) => shown()?.courses?.[id] ?? [];
-const myBest = (id) => scoresOn(id).find((e) => e.name === playerName)?.score ?? 0;
+const loadScores = () => loadMe(false);
+// A group's bests on a place (one for each member, best first), and their
+// latest runs there (newest first). (Runs under older rules than this
+// game's are left out: they are not ones to beat.)
+const current = (run) => gameVersion === 0 || run.version >= gameVersion;
+const runsOn = (gid, which, id) => (groups().find((g) => g.id === gid)?.[which]?.[id] ?? []).filter(current);
+const bestsOn = (gid, id) => runsOn(gid, "courses", id);
+const recentOn = (gid, id) => runsOn(gid, "recent", id);
 const postable = (id) => (Math.abs(id) >= 1 && Math.abs(id) <= PLACES) || Math.abs(id) === today();
-// A run just finished, as the game wrote it: post it to his groups, if it
-// is his best there (on this device, or by what the group shown has).
-let newBest = false;
+// A run just finished, as the game wrote it: posted, to be logged, and
+// kept if it is his best there.
 const postRun = async (version, id, score, replay) => {
-  const post = newBest || score > myBest(id);
-  newBest = false;
-  if (groups.length === 0 || score <= 0 || !postable(id) || !post) return;
-  if (!playerName) {
-    toast("Add your name in Groups to post scores");
-    return;
-  }
-  let said = false;
-  for (const group of groups) {
-    try {
-      const r = await fetch(`${api}/board/${group.code}/score`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: playerName, token: playerToken, course: id, score, version, replay }),
-      });
-      const body = await r.json();
-      if (!r.ok) {
-        if (!said) toast(`Score not posted: ${String(body.error).replace("board", "group")}`);
-        said = true;
-        continue;
-      }
-      await loadBoard(group.code);
-      if (body.posted && group.code === shownCode) {
-        const place = scoresOn(id).findIndex((e) => e.name === playerName) + 1;
-        toast(place > 0 ? `#${place} in ${shownTitle()}` : "Score posted");
-        said = true;
-      }
-    } catch {
-      if (!said) toast("Couldn't post score");
-      said = true;
+  if (!mySecret || score <= 0 || !postable(id)) return;
+  try {
+    const r = await fetch(`${api}/score`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${mySecret}` },
+      body: JSON.stringify({ course: id, score, version, replay }),
+    });
+    const body = await r.json();
+    await loadMe();
+    // (Where a new best puts him, in the first of his groups.)
+    const group = groups()[0];
+    if (r.ok && body.best && group) {
+      const place = bestsOn(group.id, id).findIndex((e) => e.id === account.id) + 1;
+      if (place > 0) toast(`#${place} in ${group.title}`);
     }
+  } catch {
+    toast("Couldn't post score");
   }
+  showOpen();
 };
-const watchRun = async (id, name) => {
+const watchRun = async (person, id) => {
   if (!sendKey) return;
   try {
-    const r = await fetch(`${api}/board/${shownCode}/replay?course=${id}&name=${encodeURIComponent(name)}`);
+    const r = await fetch(`${api}/replay?person=${person}&course=${id}`, { headers: { authorization: `Bearer ${mySecret}` } });
     const run = await r.json();
     if (!r.ok) throw new Error(run.error);
     gameFs.writeFile("watch.txt", `${run.version} ${run.course} ${run.score} ${run.name.replace(/ /g, "_")} ${run.replay}`);
@@ -352,13 +369,22 @@ const watchRun = async (id, name) => {
 };
 const gameSays = (line) => {
   const words = line.trim().split(/\s+/);
-  if (words[0] === "L8VERSION") gameVersion = Number(words[1]);
+  if (words[0] === "L8VERSION") {
+    gameVersion = Number(words[1]);
+    // (His runs under other rules are not ones to beat under these.)
+    if (stored("skate.rules", 1) !== gameVersion) {
+      for (const id of Object.keys(myRuns)) delete myRuns[id];
+      store("skate.runs", myRuns);
+      store("skate.rules", gameVersion);
+      showOpen();
+    }
+  }
   else if (words[0] === "L8LOAD") document.body.classList.toggle("loading", words[1] === "1");
   else if (words[0] === "L8OVER") document.body.classList.toggle("over", words[1] === "1");
   else if (words[0] === "L8REPLAY") postRun(Number(words[1]), Number(words[2]), Number(words[3]), words.slice(4).join(" "));
   else if (words[0] === "L8COURSE") {
     placeNow = Number(words[1]);
-    if (!sheets.menu.hidden) showMenu();
+    if (placeNow === headed) headed = null;
     document.body.classList.toggle("park", placeNow < 0);
     if (placeNow !== TUTORIAL) {
       store("skate.course", placeNow);
@@ -366,208 +392,152 @@ const gameSays = (line) => {
     }
   } else if (words[0] === "L8FINISH") {
     const [id, score] = [Number(words[1]), Number(words[2])];
-    newBest = score > (bests[id] ?? 0);
-    if (newBest) {
-      bests[id] = score;
-      store("skate.best", bests);
-    }
+    if (score > 0) noteRun(id, score);
   } else return false;
   return true;
 };
 
-// A list of the top few runs on a place in the group shown, each to watch
-// (if this game can still play it); or null if there are none.
-const scoreList = (id, most) => {
-  const runs = scoresOn(id);
-  if (runs.length === 0) return null;
-  const list = document.createElement("ol");
-  runs.slice(0, most).forEach((run, i) => {
-    const li = document.createElement("li");
-    if (run.name === playerName) li.className = "me";
-    li.innerHTML = `<span></span><span class="who"></span><span></span>`;
-    const [place, who, score] = li.children;
-    place.textContent = `${i + 1}.`;
-    who.textContent = run.name;
-    score.textContent = String(run.score);
-    if (run.version === gameVersion) {
-      const watch = document.createElement("span");
-      watch.className = "watch";
-      watch.textContent = "▶";
-      watch.title = "Watch this run";
-      onTap(watch, () => watchRun(id, run.name));
-      li.append(watch);
-    }
-    list.append(li);
-  });
-  return list;
-};
-
-// The menu: what to play. Each day's places say what is in them, his best
-// there, and who leads his group.
+// The menu: what to play.
 const showMenu = () => {
   const el = sheets.menu;
   const item = (go) => el.querySelector(`.item[data-go="${go}"]`);
   const fresh = !stored("skate.tutorial", false) && !stored("skate.course", 0);
-  const note = (go, text) => (item(go).querySelector("i").textContent = text);
   item("tutorial").classList.toggle("first", fresh);
-  note("tutorial", fresh ? "Start here" : "");
-  item("resume").hidden = fresh || placeNow === 0;
-  note("resume", placeName(placeNow));
-  // The day's course and park: his best, and who leads the group.
-  const day = today();
-  for (const [go, id] of [["daily", day], ["dailypark", -day]]) {
-    const lines = [];
-    if (bests[id]) lines.push(`Best ${bests[id]}`);
-    const lead = scoresOn(id)[0];
-    if (lead) lines.push(`${lead.name} ${lead.score}`);
-    note(go, lines.join("\n"));
-  }
-  const played = (park) => Object.keys(bests).filter((k) => Number(k) !== 0 && Number(k) < 0 === park && Math.abs(Number(k)) <= PLACES).length;
-  note("courses", played(false) ? `${played(false)} of ${PLACES}` : "");
-  note("parks", played(true) ? `${played(true)} of ${PLACES}` : "");
-  note("groups", groups.map((g) => g.title || "Group").join(", "));
+  item("tutorial").querySelector("i").textContent = fresh ? "Start here" : "";
+  // (Who he plays as, if someone, and in which groups.)
+  el.querySelector(".me").textContent = account ? [account.name, ...groups().map((g) => g.title)].join(" · ") : "";
 };
 const openMenu = () => {
   showMenu();
   openSheet("menu");
-  // (The groups' scores as they are now, when they come.)
-  loadBoards().then(() => {
+  // (His groups as they are now, when they come.)
+  loadScores().then(() => {
     if (!sheets.menu.hidden) showMenu();
   });
 };
 for (const el of sheets.menu.querySelectorAll(".item")) {
   onTap(el, () => {
     const go = el.dataset.go;
-    if (go === "resume") closeSheets();
     if (go === "tutorial") goTo(TUTORIAL);
-    if (go === "daily") goTo(today());
-    if (go === "dailypark") goTo(-today());
+    if (go === "daily") openPlace(today(), "menu");
+    if (go === "dailypark") openPlace(-today(), "menu");
     if (go === "courses") openPlaces(false);
     if (go === "parks") openPlaces(true);
-    if (go === "groups") openGroups();
   });
 }
 onTap(document.querySelector(".pick"), () => openMenu());
 
-// The places to pick from: the courses, or the parks.
+// The places to pick from: the courses, or the parks, and one at random.
 let pickingParks = false;
 const showPlaces = () => {
   const el = sheets.places;
   const park = pickingParks;
-  el.querySelector("h2").textContent = park ? "Parks" : "Downhill courses";
-  const bar = el.querySelector(".boardbar");
-  bar.hidden = groups.length === 0;
-  bar.querySelector(".title").textContent = shownTitle();
-  bar.querySelector("small").textContent = playerName ? "" : "Add your name in Groups to post scores.";
+  el.querySelector("h2").textContent = park ? "Parks" : "Courses";
   const grid = el.querySelector(".grid");
   grid.textContent = "";
-  const card = (id, title) => {
+  const card = (title, id) => {
     const div = document.createElement("div");
-    div.className = "course" + (id !== 0 && id === placeNow ? " now" : "");
-    div.innerHTML = `<b></b>${bests[id] ? "<i></i>" : ""}`;
-    div.querySelector("b").textContent = title;
-    if (bests[id]) div.querySelector("i").textContent = `Best ${bests[id]}`;
-    const list = id !== 0 && scoreList(id, 5);
-    if (list) div.append(list);
-    onTap(div, () => goTo(id === 0 ? randomPlace(park) : id));
+    div.className = "course";
+    div.textContent = title;
+    onTap(div, () => openPlace(id || randomPlace(park), "places"));
     grid.append(div);
   };
-  const sign = park ? -1 : 1;
-  for (let n = 1; n <= PLACES; n++) card(sign * n, `${park ? "Park" : "Course"} ${n}`);
-  if (placeNow !== TUTORIAL && placeNow < 0 === park && Math.abs(placeNow) > PLACES && !isDaily(placeNow)) card(placeNow, `${park ? "Park" : "Course"} ${Math.abs(placeNow)}`);
-  card(0, "Random");
+  for (let n = 1; n <= PLACES; n++) card(`${park ? "Park" : "Course"} ${n}`, park ? -n : n);
+  card("Random", 0);
 };
 const openPlaces = (park) => {
   pickingParks = park;
   showPlaces();
   openSheet("places");
-  loadBoards().then(() => {
-    if (!sheets.places.hidden) showPlaces();
-  });
 };
 
-// The groups: his name; each group, with its link to pass on; and joining
-// another.
-const showGroups = () => {
-  const el = sheets.groups;
-  el.querySelector(".name small").textContent = playerName ? "" : "Needed to post scores";
+// A place, before he rides it. The game goes there and shows it off behind
+// the sheet (see fly_over, in programs/skate/main.l8); the sheet has a
+// button to ride it, and its scores: his own, kept on this device, and
+// each of his groups' (for a place groups keep scores of), either the best
+// (in a group, one for each member, with the run to watch) or the latest.
+// (Back goes to where it was opened from: the menu, or the places.)
+let placeOf = 0;
+let placeFrom = "menu";
+let tabWho = stored("skate.who", null);
+let tabWhat = "best";
+const showPlace = () => {
+  const el = sheets.place;
+  const id = placeOf;
+  el.querySelector("h2").textContent = placeName(id);
+  // Whose: his own, or a group's (the first, until he picks).
+  const theirs = postable(id) ? groups() : [];
+  const who = tabWho !== "me" && theirs.length ? (theirs.find((g) => g.id === tabWho) ?? theirs[0]).id : "me";
+  const tab = (row, label, on, pick) => {
+    const t = document.createElement("span");
+    t.className = "tab" + (on ? " on" : "");
+    t.textContent = label;
+    onTap(t, () => {
+      pick();
+      showPlace();
+    });
+    row.append(t);
+  };
+  const whos = el.querySelector(".tabs.who");
+  whos.textContent = "";
+  whos.hidden = theirs.length === 0;
+  const pickWho = (code) => () => store("skate.who", (tabWho = code));
+  for (const g of theirs) tab(whos, g.title, who === g.id, pickWho(g.id));
+  tab(whos, "You", who === "me", pickWho("me"));
+  const whats = el.querySelector(".tabs.what");
+  whats.textContent = "";
+  tab(whats, "Best", tabWhat === "best", () => (tabWhat = "best"));
+  tab(whats, "Recent", tabWhat === "recent", () => (tabWhat = "recent"));
+  // The runs: a score each, and whose or when.
+  const best = tabWhat === "best";
+  const runs = who === "me" ? (myRuns[id]?.[tabWhat] ?? []).map(([score, at]) => ({ score, at })) : best ? bestsOn(who, id) : recentOn(who, id);
   const list = el.querySelector(".list");
   list.textContent = "";
-  if (groups.length === 0) {
+  if (runs.length === 0) {
     const p = document.createElement("p");
-    p.textContent = "You're not in a group yet.";
+    p.textContent = "No runs yet";
     list.append(p);
+    return;
   }
-  for (const group of groups) {
-    const div = document.createElement("div");
-    div.className = "group" + (group.code === shownCode ? " shown" : "");
-    div.innerHTML = `<b></b><span class="btn show"></span><span class="btn copy">Copy invite</span><span class="btn leave">Leave</span><small></small>`;
-    div.querySelector("b").textContent = group.title || "Group";
-    const board = boards.get(group.code);
-    const names = new Set(Object.values(board?.courses ?? {}).flat().map((e) => e.name));
-    div.querySelector("small").textContent = board ? (names.size ? [...names].slice(0, 10).join(", ") : "No scores yet") : "";
-    const show = div.querySelector(".show");
-    show.textContent = group.code === shownCode ? "Viewing" : "View";
-    show.hidden = groups.length < 2;
-    onTap(show, () => {
-      shownCode = group.code;
-      saveGroups();
-      showGroups();
-    });
-    onTap(div.querySelector(".copy"), async () => {
-      const link = `${location.origin}${location.pathname}?group=${group.code}`;
-      try {
-        await navigator.clipboard.writeText(link);
-        toast("Invite link copied");
-      } catch {
-        prompt("Invite link:", link);
-      }
-    });
-    onTap(div.querySelector(".leave"), () => {
-      if (!confirm(`Leave ${group.title || "this group"}? Your scores stay on its leaderboard.`)) return;
-      groups = groups.filter((g) => g !== group);
-      boards.delete(group.code);
-      saveGroups();
-      saveBoards();
-      showGroups();
-    });
-    list.append(div);
-  }
-};
-const openGroups = () => {
-  showGroups();
-  openSheet("groups");
-  loadBoards().then(() => {
-    if (!sheets.groups.hidden) showGroups();
-  });
-};
-const nameBox = sheets.groups.querySelector(".name input");
-nameBox.value = playerName;
-nameBox.addEventListener("change", () => {
-  playerName = cleanName(nameBox.value);
-  nameBox.value = playerName;
-  store("skate.name", playerName);
-  showGroups();
-});
-const joinBox = sheets.groups.querySelector(".join input");
-const join = async () => {
-  if (!joinBox.value.trim()) return;
-  const ok = await joinGroup(joinBox.value);
-  toast(ok ? `Joined ${shownTitle()}` : "No group found");
-  if (ok) joinBox.value = "";
-  showGroups();
-};
-onTap(sheets.groups.querySelector(".join .btn"), join);
-for (const box of [nameBox, joinBox]) {
-  box.addEventListener("pointerdown", (e) => e.stopPropagation());
-  box.addEventListener("keydown", (e) => {
-    e.stopPropagation();
-    if (e.key === "Enter") {
-      box.blur();
-      if (box === joinBox) join();
+  const ol = document.createElement("ol");
+  runs.forEach((run, i) => {
+    const li = document.createElement("li");
+    if (who !== "me" && run.name === account?.name) li.className = "me";
+    const cell = (cls, text) => {
+      const span = document.createElement("span");
+      span.className = cls;
+      span.textContent = text;
+      li.append(span);
+      return span;
+    };
+    if (best) cell("n", `${i + 1}.`);
+    if (who === "me") cell("who", ago(run.at));
+    else {
+      cell("who", run.name);
+      if (!best) cell("when", ago(run.at));
     }
+    cell("score", String(run.score));
+    // (A group's best can be watched, if this game can still play it.)
+    if (who !== "me" && best && run.version === gameVersion) {
+      const watch = cell("watch", "▶");
+      watch.title = "Watch this run";
+      onTap(watch, () => watchRun(run.id, id));
+    }
+    ol.append(li);
   });
-}
+  list.append(ol);
+};
+const openPlace = (id, from) => {
+  placeOf = id;
+  placeFrom = from;
+  visit(id);
+  showPlace();
+  openSheet("place");
+  loadScores().then(() => {
+    if (!sheets.place.hidden) showPlace();
+  });
+};
+onTap(sheets.place.querySelector(".play"), () => goTo(placeOf));
 
 // Where the game starts: the place he was last at (an earlier day's
 // becoming today's; and for someone new, the tutorial).
@@ -580,7 +550,7 @@ const startPlace = () => {
 const showOpen = () => {
   if (!sheets.menu.hidden) showMenu();
   if (!sheets.places.hidden) showPlaces();
-  if (!sheets.groups.hidden) showGroups();
+  if (!sheets.place.hidden) showPlace();
 };
 
 async function main() {
@@ -589,19 +559,16 @@ async function main() {
   // is up at once (?play goes straight in), with the scores as they were
   // last time, and what he picks from it before the game has loaded is
   // where the game starts.
-  saveGroups();
   if (!params.has("L8_SEED")) placeNow = startPlace();
   if (params.has("play")) {
     sheets.menu.hidden = true;
     sheetsChanged();
   } else openMenu();
-  // The page opened with a group's link: in it, once it is found.
-  const link = params.get("group") ?? params.get("board");
-  if (link) {
-    const had = groups.length;
-    joinGroup(link).then((ok) => {
-      if (ok && groups.length > had) toast(`Joined ${shownTitle()}`);
-      if (ok) showOpen();
+  // (Opened by his link: who he is, once the leaderboards say.)
+  if (linked) {
+    loadMe().then((ok) => {
+      if (ok) toast(`Playing as ${account.name}`);
+      showOpen();
     });
   }
   const module = await WebAssembly.compileStreaming(fetch("skate.wasm"));
@@ -679,8 +646,9 @@ async function main() {
   overlay.hidden = true;
   if (sheetOpen()) sendKey(2, 65299, "");
   else closeSheets();
+  syncPreview();
   // (Picked while the game was starting somewhere else.)
-  if (wanted !== null && wanted !== placeNow) goTo(wanted);
+  if (wanted !== null && wanted !== placeNow) visit(wanted);
   wanted = null;
   canvas.addEventListener("focus", () => (overlay.hidden = true));
   canvas.addEventListener("blur", () => {

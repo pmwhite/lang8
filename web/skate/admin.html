@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta name="referrer" content="no-referrer">
+<title>Skate admin</title>
+<style>
+  body { margin: 0; background: #0e1118; color: #d7dbe3; font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 620px; margin: 0 auto; padding: 18px 14px 60px; }
+  h1 { margin: 0 0 4px; font-size: 22px; color: #fff; }
+  h2 { margin: 26px 0 8px; font-size: 16px; color: #ffd36b; }
+  p { margin: 6px 0; color: #9aa3b5; }
+  input { padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(255, 248, 236, 0.4); background: rgba(0, 0, 0, 0.35); color: #fff; font: inherit; min-width: 0; }
+  button { padding: 7px 12px; border-radius: 8px; border: 1px solid rgba(255, 248, 236, 0.4); background: rgba(74, 52, 34, 0.5); color: #fff; font: inherit; cursor: pointer; }
+  button:active { background: rgba(240, 150, 80, 0.55); }
+  button.main { border-color: #ffd36b; background: rgba(224, 138, 60, 0.85); font-weight: 700; }
+  button.quiet { border-color: rgba(255, 248, 236, 0.2); background: none; color: #c9cfdb; }
+  .add { display: flex; gap: 8px; }
+  .add input { flex: 1; }
+  .card { margin: 8px 0; padding: 11px 12px; border-radius: 10px; background: rgba(255, 248, 236, 0.07); border: 1px solid rgba(255, 248, 236, 0.2); }
+  .card .top { display: flex; align-items: baseline; gap: 10px; }
+  .card b { flex: 1; font-size: 17px; color: #fff; }
+  .card small { color: #9aa3b5; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+  /* A group a person is in (or is not): a tap puts them in, or takes them
+     out. */
+  .chip { padding: 5px 11px; border-radius: 999px; border: 1px solid rgba(255, 248, 236, 0.3); background: none; color: #9aa3b5; }
+  .chip.on { border-color: #ffd36b; background: rgba(255, 211, 107, 0.18); color: #fff; }
+  #toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); padding: 8px 14px; border-radius: 10px; background: rgba(20, 22, 26, 0.95); border: 1px solid #323846; color: #fff; opacity: 0; transition: opacity 0.3s; pointer-events: none; white-space: nowrap; }
+  #toast.on { opacity: 1; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Skate admin</h1>
+  <div id="locked" hidden>
+    <p>Open this page with your admin link, or paste the admin secret.</p>
+    <form class="add" id="unlock"><input type="password" autocomplete="off" placeholder="Admin secret"><button class="main">Open</button></form>
+  </div>
+  <div id="open" hidden>
+    <p>Each person has their own link. Whoever opens it plays as them, so send it to them alone.</p>
+    <h2>Groups</h2>
+    <div id="groups"></div>
+    <form class="add" id="newgroup"><input type="text" maxlength="30" autocomplete="off" placeholder="New group"><button>Add</button></form>
+    <h2>People</h2>
+    <div id="people"></div>
+    <form class="add" id="newperson"><input type="text" maxlength="12" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="New person's name"><button>Add</button></form>
+  </div>
+</main>
+<div id="toast"></div>
+<script type="module">
+// The skate leaderboards' admin page (see ../skate-board/worker.js): the
+// people, each with a link of their own to send them, and the groups they
+// are in. It is opened by its own link, this page with the admin secret
+// after the #, which is kept on the device and taken out of the address.
+const PUBLIC = "https://trailingwhite.space/skate/";
+const onPublic = location.hostname.endsWith("trailingwhite.space");
+// (?api= points a page on localhost at a worker run there, to try one.)
+const localApi = location.hostname === "localhost" && new URLSearchParams(location.search).get("api");
+const api = localApi || (onPublic ? "/skate/api" : "https://trailingwhite.space/skate/api");
+
+if (location.hash.length > 1) {
+  localStorage.setItem("skate.admin", location.hash.slice(1));
+  history.replaceState(null, "", location.pathname + location.search);
+}
+let secret = localStorage.getItem("skate.admin");
+
+const $ = (id) => document.getElementById(id);
+const toast = (text) => {
+  $("toast").textContent = text;
+  $("toast").classList.add("on");
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => $("toast").classList.remove("on"), 3000);
+};
+const call = async (path, body) => {
+  const r = await fetch(`${api}/admin/${path}`, {
+    method: body ? "POST" : "GET",
+    headers: { authorization: `Bearer ${secret}`, ...(body ? { "content-type": "application/json" } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await r.json();
+  if (r.status === 401) throw new Error("locked");
+  if (!r.ok) throw new Error(data.error ?? "failed");
+  return data;
+};
+// Do something, then show everything as it now is.
+const act = async (path, body, done) => {
+  try {
+    const data = await call(path, body);
+    if (done) toast(typeof done === "function" ? done(data) : done);
+    await show();
+    return data;
+  } catch (e) {
+    if (e.message === "locked") return lock();
+    toast(`Not done: ${e.message}`);
+    return null;
+  }
+};
+const lock = () => {
+  localStorage.removeItem("skate.admin");
+  secret = null;
+  $("open").hidden = true;
+  $("locked").hidden = false;
+};
+
+const ago = (at) => {
+  if (!at) return "never played";
+  const s = Math.max(0, (Date.now() - at) / 1000);
+  if (s < 3600) return "played just now";
+  if (s < 86400) return `played ${Math.round(s / 3600)} h ago`;
+  return `played ${Math.round(s / 86400)} d ago`;
+};
+const button = (label, cls, tap) => {
+  const b = document.createElement("button");
+  b.textContent = label;
+  b.className = cls;
+  b.addEventListener("click", tap);
+  return b;
+};
+// A person's link: the game's page with their secret after the #. The one
+// to send is the public page's; a copy of this site elsewhere (one being
+// tried out) has its own too.
+const linkOf = (person, here) => `${here ? new URL("./", location.href).href : PUBLIC}#me=${person.secret}`;
+const share = async (person) => {
+  const url = linkOf(person, false);
+  if (navigator.share) {
+    try {
+      await navigator.share({ text: `${person.name}, this is your Skate link. It is yours alone: please don't pass it on.`, url });
+    } catch {}
+    return;
+  }
+  copy(person);
+};
+const copy = async (person) => {
+  const url = linkOf(person, false);
+  try {
+    await navigator.clipboard.writeText(url);
+    toast("Link copied");
+  } catch {
+    prompt(`${person.name}'s link:`, url);
+  }
+};
+
+const show = async () => {
+  let all;
+  try {
+    all = await call("all");
+  } catch (e) {
+    if (e.message === "locked") return lock();
+    toast("Couldn't reach the leaderboards");
+    return;
+  }
+  $("locked").hidden = true;
+  $("open").hidden = false;
+  const card = (title, note) => {
+    const div = document.createElement("div");
+    div.className = "card";
+    div.innerHTML = `<div class="top"><b></b><small></small></div>`;
+    div.querySelector("b").textContent = title;
+    div.querySelector("small").textContent = note;
+    return div;
+  };
+  const row = (div, ...things) => {
+    const r = document.createElement("div");
+    r.className = "row";
+    r.append(...things.filter(Boolean));
+    div.append(r);
+  };
+  $("groups").textContent = "";
+  for (const g of all.groups) {
+    const n = all.people.filter((p) => p.groups.includes(g.id)).length;
+    const div = card(g.title, n === 1 ? "1 person" : `${n} people`);
+    row(
+      div,
+      button("Rename", "quiet", () => {
+        const title = prompt("Group's name:", g.title);
+        if (title && title.trim() !== g.title) act("retitle", { id: g.id, title: title.trim() });
+      }),
+      button("Delete", "quiet", () => {
+        if (confirm(`Delete ${g.title}? Nobody's scores are lost: only the group.`)) act("ungroup", { id: g.id }, "Group deleted");
+      })
+    );
+    $("groups").append(div);
+  }
+  if (all.groups.length === 0) $("groups").innerHTML = "<p>No groups yet.</p>";
+  $("people").textContent = "";
+  for (const person of all.people) {
+    const div = card(person.name, ago(person.last));
+    // The groups they are in: a tap changes it.
+    row(
+      div,
+      ...all.groups.map((g) => {
+        const on = person.groups.includes(g.id);
+        return button(g.title, on ? "chip on" : "chip", () => act("member", { group: g.id, person: person.id, on: !on }));
+      })
+    );
+    const open = document.createElement("a");
+    open.href = linkOf(person, true);
+    open.target = "_blank";
+    open.rel = "noreferrer";
+    open.append(button("Open here", "quiet", () => {}));
+    row(
+      div,
+      button("Share link", "main", () => share(person)),
+      button("Copy", "", () => copy(person)),
+      // (Where this is not the public site: play as them on this one.)
+      onPublic ? null : open
+    );
+    row(
+      div,
+      button("Rename", "quiet", () => {
+        const name = (prompt("Their name (capitals and digits, 12 at most):", person.name) ?? "").toUpperCase().trim();
+        if (name && name !== person.name) act("rename", { id: person.id, name });
+      }),
+      button("New link", "quiet", () => {
+        if (confirm(`Give ${person.name} a new link? The old one stops working on every device, and you will need to send them the new one.`)) act("relink", { id: person.id }, "New link made: share it");
+      }),
+      button("Clear scores", "quiet", () => {
+        if (confirm(`Delete all of ${person.name}'s scores?`)) act("unscore", { person: person.id }, "Scores cleared");
+      }),
+      button("Delete", "quiet", () => {
+        if (confirm(`Delete ${person.name}, their link, and their scores?`)) act("unperson", { id: person.id }, "Person deleted");
+      })
+    );
+    $("people").append(div);
+  }
+  if (all.people.length === 0) $("people").innerHTML = "<p>Nobody yet.</p>";
+};
+
+$("unlock").addEventListener("submit", (e) => {
+  e.preventDefault();
+  secret = e.target.querySelector("input").value.trim();
+  localStorage.setItem("skate.admin", secret);
+  show();
+});
+$("newgroup").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const box = e.target.querySelector("input");
+  if (box.value.trim() && (await act("group", { title: box.value.trim() }))) box.value = "";
+});
+$("newperson").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const box = e.target.querySelector("input");
+  const name = box.value.toUpperCase().replace(/[^A-Z0-9 ]/g, "").replace(/ +/g, " ").trim();
+  if (name && (await act("person", { name }, (p) => `${p.name} added: share their link`))) box.value = "";
+});
+
+if (secret) show();
+else lock();
+</script>
+</body>
+</html>
