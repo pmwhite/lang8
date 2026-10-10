@@ -36,10 +36,21 @@ const setMode = (park) => {
   modeKey.textContent = park ? "Course" : "Park";
 };
 setMode(new URLSearchParams(location.search).has("L8_PARK"));
+// Night or day (L): night to begin with where the device is in dark mode,
+// unless ?L8_LOOK= says which.
+const lookKey = document.querySelector(".key.look");
+const lookParam = new URLSearchParams(location.search).get("L8_LOOK");
+const startNight = lookParam ? lookParam === "n" : matchMedia("(prefers-color-scheme: dark)").matches;
+const setNight = (night) => {
+  document.body.classList.toggle("night", night);
+  lookKey.textContent = night ? "Day" : "Night";
+};
+setNight(startNight);
 let sendKey = null;
 for (const key of document.querySelectorAll(".controls .key")) {
   const sym = Number(key.dataset.key);
   if (key === modeKey) key.addEventListener("pointerdown", () => setMode(!document.body.classList.contains("park")));
+  if (key === lookKey) key.addEventListener("pointerdown", () => setNight(!document.body.classList.contains("night")));
   let held = false;
   const up = () => {
     if (!held) return;
@@ -93,6 +104,7 @@ async function main() {
   fs.onOutput = (_fd, data) => console.log(decoder.decode(data).trimEnd());
   const sys = fs.sys(["skate"]);
   // L8_ parameters are also the game's environment (as L8_SEED=n, L8_PARK=1).
+  if (startNight && !params.has("L8_LOOK")) params.set("L8_LOOK", "n");
   sys.env = [...params].filter(([k]) => k.startsWith("L8_")).map(([k, v]) => `${k}=${v}`);
   const env = Object.fromEntries([...params].filter(([k]) => k.startsWith("L8_")));
   const zoom = Math.min(4, Math.max(0.25, Number(params.get("zoom")) || 0.85));
@@ -108,6 +120,7 @@ async function main() {
   // Tab on a keyboard switches too.
   canvas.addEventListener("keydown", (e) => {
     if (e.code === "Tab" && !e.repeat) setMode(!document.body.classList.contains("park"));
+    if (e.code === "KeyL" && !e.repeat) setNight(!document.body.classList.contains("night"));
   });
   // The steering and trick panels, placed over the game's view where the
   // game reads them: these fractions match programs/skate/touch.l8.

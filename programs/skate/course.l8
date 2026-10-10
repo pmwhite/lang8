@@ -170,7 +170,24 @@ add_feature(
         c: c,
         yaw: 0.0
     };
+    feature_from[nfeatures] = d;
+    feature_to[nfeatures] = d + feature_len(features[nfeatures]);
+    feature_straight[nfeatures] = true;
     nfeatures = nfeatures + 1
+}
+
+// Where along the run each feature begins and ends, and whether it lies
+// straight down it (not turned, as the park's are): so that the ground at
+// d need look only at the few features there.
+feature_from: []f32 = new f32[MAX_FEATURES](0.0);
+
+feature_to: []f32 = new f32[MAX_FEATURES](0.0);
+
+feature_straight: []bool = new bool[MAX_FEATURES](false);
+
+// Whether feature i could reach d.
+feature_near(i: int, d: f32): bool {
+    !feature_straight[i] || d > feature_from[i] - 0.01 && d < feature_to[i] + 0.01
 }
 
 // Where (x, d) is in f's own frame: across it in x, along it in z (its x
@@ -317,16 +334,20 @@ feature_height(f: Feature, x: f32, d: f32): f32 {
 // Everything on top of the hill and banks at (x, d).
 features_at(x: f32, d: f32): f32 {
     h: f32 = 0.0;
-    for i in 0..nfeatures h = h + feature_height(features[i], x, d);
+    for i in 0..nfeatures {
+        if (feature_near(i, d)) h = h + feature_height(features[i], x, d)
+    }
     h
 }
 
 // Which kicker (or gap) (x, d) is on, or -1.
 kicker_at(x: f32, d: f32): int {
     for i in 0..nfeatures {
-        f: Feature = features[i];
-        if (f.kind == FEATURE_KICKER || f.kind == FEATURE_GAP) {
-            if (absf(feature_height(f, x, d)) > 0.02) return i
+        if (feature_near(i, d)) {
+            f: Feature = features[i];
+            if (f.kind == FEATURE_KICKER || f.kind == FEATURE_GAP) {
+                if (absf(feature_height(f, x, d)) > 0.02) return i
+            }
         }
     }
     -1
@@ -433,11 +454,13 @@ rail_top(r: CRail): f32 {
 }
 
 // ---- lamps ----
-// Lamp posts would stand along the run's edges, lighting it in pools (see
-// lamp_map in render.l8); by day it has none.
+// Lamp posts stand along the run's edges by night, lighting it in pools
+// (see lamp_map in render.l8); by day it has none.
 const MAX_LAMPS: int = 80;
 
 const LAMP_HEIGHT: f32 = 3.0;
+
+const LAMP_SPACING: f32 = 22.0;
 
 // Where each post stands.
 lamp_x: []f32 = new f32[MAX_LAMPS](0.0);
@@ -446,8 +469,20 @@ lamp_z: []f32 = new f32[MAX_LAMPS](0.0);
 
 nlamps: int = 0;
 
+// By night, a lamp every LAMP_SPACING down the run, on one side and then
+// the other, a little up the bank: pools of light with dark between.
 place_lamps() {
-    nlamps = 0
+    nlamps = 0;
+    if (!look.night) return;
+    d: f32 = 4.0;
+    side: f32 = 1.0;
+    while (d < COURSE_FINISH + 50.0 && nlamps < MAX_LAMPS) {
+        lamp_x[nlamps] = side * (COURSE_HALF + 1.5);
+        lamp_z[nlamps] = -d;
+        nlamps = nlamps + 1;
+        side = -side;
+        d = d + LAMP_SPACING
+    }
 }
 
 // A lamp post: slender and dark, a lantern on top.
@@ -480,10 +515,12 @@ course_mat(x: f32, d: f32): f32 {
         if (absf(feature_local(features[k], x, d).x - features[k].x) < features[k].w) return MAT_KICKER
     }
     for i in 0..nfeatures {
-        f: Feature = features[i];
-        if (f.kind == FEATURE_PIPE && pipe_height(f, x, d) > 0.02) return MAT_PIPE;
-        // A cliff's edge is rock.
-        if (f.kind == FEATURE_CLIFF && d > f.d + 0.1 && d < f.d + f.a + 0.6) return MAT_ROCK
+        if (feature_near(i, d)) {
+            f: Feature = features[i];
+            if (f.kind == FEATURE_PIPE && pipe_height(f, x, d) > 0.02) return MAT_PIPE;
+            // A cliff's edge is rock.
+            if (f.kind == FEATURE_CLIFF && d > f.d + 0.1 && d < f.d + f.a + 0.6) return MAT_ROCK
+        }
     }
     if (d < 0.0) return MAT_WOOD;
     MAT_CONCRETE
@@ -511,13 +548,63 @@ course_color(mat: f32): V3 {
     look.run
 }
 
+// The ground's height on a lattice, each point worked out when first asked
+// for and kept: for the open sky, which looks at many heights round each
+// vertex, most of them shared.
+const SOFT_STEP: f32 = 0.25;
+
+const SOFT_NX: int = 256;
+
+const SOFT_NZ: int = 3400;
+
+const SOFT_EMPTY: f32 = -1000000.0;
+
+soft_h: []f32 = new f32[SOFT_NX * SOFT_NZ](-1000000.0);
+
+soft_x0: f32 = 0.0;
+
+soft_z0: f32 = 0.0;
+
+// Forget the lattice (the ground has changed), and lay it from (x0, z0).
+soft_reset(x0: f32, z0: f32) {
+    soft_x0 = x0;
+    soft_z0 = z0;
+    for k in 0..SOFT_NX * SOFT_NZ soft_h[k] = SOFT_EMPTY
+}
+
+soft_at(i: int, j: int): f32 {
+    k: int = j * SOFT_NX + i;
+    h: f32 = soft_h[k];
+    if (h <= SOFT_EMPTY) {
+        h = course_height(soft_x0 + i as f32 * SOFT_STEP, soft_z0 + j as f32 * SOFT_STEP);
+        soft_h[k] = h
+    }
+    h
+}
+
+// The ground's height at (x, z), between the lattice's points (or, off the
+// lattice, itself).
+soft_height(x: f32, z: f32): f32 {
+    u: f32 = (x - soft_x0) / SOFT_STEP;
+    v: f32 = (z - soft_z0) / SOFT_STEP;
+    if (u < 0.0 || v < 0.0 || u >= (SOFT_NX - 1) as f32 || v >= (SOFT_NZ - 1) as f32) return course_height(x,
+        z);
+    i: int = u as int;
+    j: int = v as int;
+    fu: f32 = u - i as f32;
+    fv: f32 = v - j as f32;
+    lerpf(lerpf(soft_at(i, j), soft_at(i + 1, j), fu), lerpf(soft_at(i, j + 1), soft_at(i + 1,
+        j + 1), fu), fv)
+}
+
 // How open the sky is over the ground at (x, z): less at the foot of a
 // bank or a kicker, where higher ground nearby hides some of it. Far out on
 // the hills, it is all open.
 course_ao(x: f32, z: f32): f32 {
     if (!park && absf(x) > COURSE_HALF + 9.0) return 1.0;
     if (park && park_out(x, z) > bowl_top() + PARK_DECK + 4.0) return 1.0;
-    h: f32 = course_height(x, z);
+    // (Heights from the lattice: it looks at two dozen for each vertex.)
+    h: f32 = soft_height(x, z);
     hidden: f32 = 0.0;
     for k in 0..8 {
         a: f32 = TAU * k as f32 / 8.0;
@@ -526,7 +613,7 @@ course_ao(x: f32, z: f32): f32 {
         rise: f32 = 0.0;
         r: f32 = 0.6;
         while (r < 4.0) {
-            rise = maxf(rise, (course_height(x + dx * r, z + dz * r) - h) / r);
+            rise = maxf(rise, (soft_height(x + dx * r, z + dz * r) - h) / r);
             r = r * 2.2
         }
         hidden = hidden + rise / sqrtf(1.0 + rise * rise)
@@ -560,6 +647,66 @@ put_ground_quad(
     f: V3 = course_vertex(x0, d1);
     put_quad_n(m, a, b, e, f, course_normal_ao(a.x, a.z), course_normal_ao(b.x, b.z),
         course_normal_ao(e.x, e.z), course_normal_ao(f.x, f.z), c, mat)
+}
+
+// A row of ground quads from d to nd. Each vertex is worked out once: a
+// row's far edge is kept, for the next row's near one (when it has the
+// same columns).
+const MAX_COLS: int = 800;
+
+row_x: []f32 = new f32[MAX_COLS](0.0);
+
+row_near: []V3 = new V3[MAX_COLS](V3 { x: 0.0, y: 0.0, z: 0.0 });
+
+row_near_n: []V3 = new V3[MAX_COLS](V3 { x: 0.0, y: 0.0, z: 0.0 });
+
+row_far: []V3 = new V3[MAX_COLS](V3 { x: 0.0, y: 0.0, z: 0.0 });
+
+row_far_n: []V3 = new V3[MAX_COLS](V3 { x: 0.0, y: 0.0, z: 0.0 });
+
+// The far edge kept: where it is, and which columns it has.
+row_kept_d: f32 = -1000000.0;
+
+row_kept_fine: bool = false;
+
+row_kept_lod: bool = false;
+
+put_ground_row(
+    m: *Mesh,
+    d: f32,
+    nd: f32,
+    fine: bool
+) {
+    n: int = 0;
+    x: f32 = -COURSE_SIDE;
+    while (x < COURSE_SIDE && n < MAX_COLS - 1) {
+        row_x[n] = x;
+        n = n + 1;
+        x = x + col_step(x + 0.01, fine)
+    }
+    row_x[n] = x;
+    n = n + 1;
+    kept: bool = row_kept_d == d && row_kept_fine == fine && row_kept_lod == far_lod;
+    for i in 0..n {
+        if (kept) {
+            row_near[i] = row_far[i];
+            row_near_n[i] = row_far_n[i]
+        } else {
+            row_near[i] = course_vertex(row_x[i], d);
+            row_near_n[i] = course_normal_ao(row_x[i], -d)
+        }
+        row_far[i] = course_vertex(row_x[i], nd);
+        row_far_n[i] = course_normal_ao(row_x[i], -nd)
+    }
+    row_kept_d = nd;
+    row_kept_fine = fine;
+    row_kept_lod = far_lod;
+    for i in 0..n - 1 {
+        mat: f32 = course_mat((row_x[i] + row_x[i + 1]) * 0.5, (d + nd) * 0.5);
+        put_quad_n(m, row_near[i], row_near[i + 1], row_far[i + 1], row_far[i], row_near_n[i],
+            row_near_n[i + 1], row_far_n[i + 1], row_far_n[i], course_color(mat),
+            mat)
+    }
 }
 
 // Rows of the ground mesh: finer over features, coarse where the hill is
@@ -646,6 +793,8 @@ far_count: []int = new int[MAX_CHUNKS](0);
 
 build_course(m: *Mesh) {
     m.n = 0;
+    soft_reset(-32.0, -780.0);
+    row_kept_d = -1000000.0;
     for pass in 0..2 {
         far_lod = pass == 1;
         nchunks = 0;
@@ -725,12 +874,7 @@ build_chunk(m: *Mesh) {
     while (d < chunk_hi) {
         nd: f32 = minf(next_row(d), chunk_hi);
         fine: bool = fine_row(d) || fine_row(nd);
-        x: f32 = -COURSE_SIDE;
-        while (x < COURSE_SIDE) {
-            nx: f32 = x + col_step(x + 0.01, fine);
-            put_ground_quad(m, x, nx, d, nd);
-            x = nx
-        }
+        put_ground_row(m, d, nd, fine);
         d = nd
     }
     put_lip_stripes(m);
@@ -847,7 +991,7 @@ put_deck(m: *Mesh, f: Feature) {
             c: V3 = v_madd(v_scale(v_add(p0, p1), 0.5), up, 0.006);
             shade: f32 = 0.86 + 0.26 * cell_jitter(k, i_of(f));
             put_block(m, c, right, up, fwd, v3(f.w * 0.98, 0.012, (d1 - d0) * 0.5),
-                0.008, v_scale(look.kicker, shade), MAT_PAINT);
+                0.008, v_scale(look.kicker, shade), MAT_DECK);
             // Under it, a dark joist across the whole step: the gaps show
             // it, and the deck's shadow is solid.
             put_block(m, v_madd(c, up, -0.012), right, up, fwd, v3(f.w * 0.97, 0.008,

@@ -138,6 +138,12 @@ hud_aim_air: f32 = 0.0;
 
 hud_aim_plan: f32 = 0.0;
 
+// Whether he is on something worth flying off now, and whether a jump is
+// near ahead.
+hud_aim_on: bool = false;
+
+hud_aim_ahead: bool = false;
+
 hud_aim_need: f32 = 0.0;
 
 hud_aim_value: int = 0;
@@ -152,7 +158,7 @@ hud_aim_repeat: int = 0;
 hud_seed: int = 0;
 
 // While building, whether it is to go to the park (1), back to the course
-// (2), or neither.
+// (2), into the night (3) or the day (4), or none of them.
 hud_going: int = 0;
 
 // Laying out a new course: 1 while the frame saying so is drawn, then 2.
@@ -170,8 +176,8 @@ item_name(item: int): str {
 // What an item favors, as text.
 item_favors(item: int) {
     append(item_name(item));
-    if (item == FEATURE_KICKER) append(": FLIPS x2 SPINS x0.75");
-    if (item == FEATURE_PIPE) append(": SPINS x2 FLIPS x0.5");
+    if (item == FEATURE_KICKER) append(": FLIPS x2");
+    if (item == FEATURE_PIPE) append(": SPINS x2 GRABS x1.25");
     if (item == FEATURE_CLIFF) append(": GRABS x2.5 SPINS x1.25");
     if (item == FEATURE_GAP) append(": ALL x1.25");
     if (item < 0 || item == FEATURE_ROLLERS) append(": x0.25")
@@ -404,12 +410,20 @@ put_thumbs(w: int) {
     }
     if (hud_aim_repeat == 1) append("  REPEAT x0.5");
     if (hud_aim_repeat > 1) append("  REPEAT");
-    // It stays put above him while the thumb drags.
+    // It stays put above him while the thumb drags: green and bigger when
+    // letting go now lands it, gold while a jump ahead will, red when
+    // nothing will.
+    // (It grows and turns green as the ring round him comes up.)
+    g: f32 = ready_fade;
+    px0: f32 = hud_px;
+    hud_px = floorf(hud_px * (1.0 + 0.5 * g) + 0.5);
     cx: f32 = w as f32 * 0.5;
     y: f32 = screen_h as f32 * 0.4;
     x: f32 = clampf(cx - text_width() * 0.5, 8.0, w as f32 - text_width() - 8.0);
-    if (fits || hud_aim_plan > 0.0) put_text(floorf(x), floorf(y), 1.0, 0.84, 0.32,
-        1.0) else put_text(floorf(x), floorf(y), 1.0, 0.45, 0.38, 1.0)
+    if (fits || hud_aim_plan > 0.0) put_text(floorf(x), floorf(y), lerpf(1.0, 0.4,
+        g), lerpf(0.84, 1.0, g), lerpf(0.32, 0.55, g), 1.0) else put_text(floorf(x),
+        floorf(y), 1.0, 0.45, 0.38, 1.0);
+    hud_px = px0
 }
 
 // ---- marks on the jumps ahead ----
@@ -452,16 +466,67 @@ zone_rect: []f32 = new f32[MAX_ZONES * 8](0.0);
 nzones: int = 0;
 
 find_zones() {
-    nzones = 0;
-    for k in 0..MAX_ZONES * 8 zone_rect[k] = 0.0;
-    if (!hud_aiming || hud_finished) return;
     need: f32 = trick_need(hud_aim_flips, hud_aim_halves);
-    if (need <= 0.0) return;
-    for i in 0..nfeatures {
-        if (nzones + 2 <= MAX_ZONES && pipe_on[i]) find_pipe_zones(i, need);
-        if (nzones < MAX_ZONES && mark_on[i] && mark_count[i] > 0) find_zone(i, need)
+    aiming: bool = hud_aiming && !hud_finished;
+    // The marks come up as he starts to aim, and die away after he lets go
+    // (where they were): nothing appears or goes at once.
+    tag_fade = fade_toward(tag_fade, aiming, 0.15, 0.3);
+    ready_fade = fade_toward(ready_fade, aim_ready(), 0.12, 0.25);
+    // Each zone, by what it is on: one still wanted eases to where it now
+    // belongs (as when he adds a turn, and it shrinks toward the lip) and
+    // comes up; one no longer wanted dies away where it was.
+    for k in 0..nzones zone_live[k] = false;
+    if (aiming && need > 0.0) {
+        for i in 0..nfeatures {
+            if (pipe_on[i]) find_pipe_zones(i, need);
+            if (mark_on[i] && mark_count[i] > 0) find_zone(i, need)
+        }
+        if (park && bowl_on) find_bowl_zone(need)
     }
-    if (park && bowl_on && nzones < MAX_ZONES) find_bowl_zone(need)
+    n: int = 0;
+    for k in 0..nzones {
+        zone_alpha[k] = fade_toward(zone_alpha[k], zone_live[k], 0.15, 0.4);
+        if (zone_live[k] || zone_alpha[k] > 0.0) {
+            for j in 0..8 zone_rect[n * 8 + j] = zone_rect[k * 8 + j];
+            zone_id[n] = zone_id[k];
+            zone_kind[n] = zone_kind[k];
+            zone_alpha[n] = zone_alpha[k];
+            // (For the shader: its kind, and how far it has come up.)
+            zone_rect[n * 8 + 6] = zone_kind[n] + 0.4 * zone_alpha[n];
+            n = n + 1
+        }
+    }
+    for k in n * 8..nzones * 8 zone_rect[k] = 0.0;
+    nzones = n
+}
+
+// Each zone's id (what it is on), its kind (0 a ramp, 1 a halfpipe's wall,
+// 2 the bowl's), how far it has come up, and whether it is wanted now.
+zone_id: []int = new int[MAX_ZONES](0);
+
+zone_kind: []f32 = new f32[MAX_ZONES](0.0);
+
+zone_alpha: []f32 = new f32[MAX_ZONES](0.0);
+
+zone_live: []bool = new bool[MAX_ZONES](false);
+
+// How far in the tags' bold look and the ring round him have faded (0 to
+// 1); and the frame's length, for fading by.
+tag_fade: f32 = 0.0;
+
+ready_fade: f32 = 0.0;
+
+hud_dt: f32 = 0.016;
+
+// f, moved toward 1 (on) or 0 over rise or fall seconds.
+fade_toward(
+    f: f32,
+    on: bool,
+    rise: f32,
+    fall: f32
+): f32 {
+    if (on) return minf(f + hud_dt / rise, 1.0);
+    maxf(f - hud_dt / fall, 0.0)
 }
 
 // The bowl's band: as a halfpipe's, but on the wall ahead of him, by how
@@ -472,14 +537,11 @@ find_bowl_zone(need: f32) {
     lo: f32 = 0.0;
     hi: f32 = 0.0;
     if (!air_band(bowl_air, 0, BOWL_XN, BOWL_XSTEP, need, &lo, &hi)) return;
-    z: int = nzones * 8;
-    zone_rect[z] = lo;
-    zone_rect[z + 1] = hi;
+    z: int = put_zone(100000, lo, hi, 2.0);
+    if (z < 0) return;
     zone_rect[z + 2] = bowl_hit.x;
     zone_rect[z + 3] = bowl_hit.z;
-    zone_rect[z + 4] = BOWL_GLOW;
-    zone_rect[z + 6] = 2.0;
-    nzones = nzones + 1
+    zone_rect[z + 4] = BOWL_GLOW
 }
 
 // On a halfpipe's walls: a wash up each, and gold over the heights where
@@ -493,7 +555,14 @@ find_pipe_zones(i: int, need: f32) {
     if (!air_band(pipe_air, i * PIPE_XN, PIPE_XN, PIPE_XSTEP, need, &lo, &hi)) return;
     for side in 0..2 {
         sg: f32 = 1.0 - 2.0 * side as f32;
-        put_zone(sg * (PIPE_FLAT + lo), sg * (PIPE_FLAT + hi), d0, d0, d1, d1, 1.0)
+        z: int = put_zone(i * 4 + 1 + side, sg * (PIPE_FLAT + lo), sg * (PIPE_FLAT + hi),
+            1.0);
+        if (z >= 0) {
+            zone_rect[z + 2] = d0;
+            zone_rect[z + 3] = d0;
+            zone_rect[z + 4] = d1;
+            zone_rect[z + 5] = d1
+        }
     }
 }
 
@@ -535,26 +604,43 @@ edge_part(short: f32, lands: f32, need: f32): f32 {
     clampf((lands - need) / maxf(lands - short, 0.001), 0.0, 1.0)
 }
 
-// A zone: x from x0 to x1 (either way round), d from d0 to d1, gold from
-// gold, the lip at lip; wall, 1 on a halfpipe's wall.
+// The zone with this id, wanted this frame, across from x0 to x1 (either
+// way round): the one already showing, its span eased toward that; or a
+// new one. Where its eight numbers start in zone_rect, or -1 if there is no
+// room.
 put_zone(
+    id: int,
     x0: f32,
     x1: f32,
-    d0: f32,
-    gold: f32,
-    d1: f32,
-    lip: f32,
-    wall: f32
-) {
-    z: int = nzones * 8;
-    zone_rect[z] = minf(x0, x1);
-    zone_rect[z + 1] = maxf(x0, x1);
-    zone_rect[z + 2] = d0;
-    zone_rect[z + 3] = gold;
-    zone_rect[z + 4] = d1;
-    zone_rect[z + 5] = lip;
-    zone_rect[z + 6] = wall;
-    nzones = nzones + 1
+    kind: f32
+): int {
+    lo: f32 = minf(x0, x1);
+    hi: f32 = maxf(x0, x1);
+    for k in 0..nzones {
+        if (zone_id[k] == id) {
+            zone_live[k] = true;
+            e: f32 = zone_ease();
+            zone_rect[k * 8] = lerpf(zone_rect[k * 8], lo, e);
+            zone_rect[k * 8 + 1] = lerpf(zone_rect[k * 8 + 1], hi, e);
+            return k * 8
+        }
+    }
+    if (nzones >= MAX_ZONES) return -1;
+    k: int = nzones;
+    nzones = nzones + 1;
+    for j in 0..8 zone_rect[k * 8 + j] = 0.0;
+    zone_id[k] = id;
+    zone_kind[k] = kind;
+    zone_alpha[k] = 0.0;
+    zone_live[k] = true;
+    zone_rect[k * 8] = lo;
+    zone_rect[k * 8 + 1] = hi;
+    k * 8
+}
+
+// How much of the way a zone moves to where it belongs, this frame.
+zone_ease(): f32 {
+    ease(10.0, hud_dt)
 }
 
 find_zone(i: int, need: f32) {
@@ -585,8 +671,15 @@ find_zone(i: int, need: f32) {
         x1 = COURSE_HALF - 0.5
     }
     if (gold < end) {
-        put_zone(x0, x1, mark_from[i], gold, end, lip, 0.0);
-        zone_rect[nzones * 8 - 1] = f.yaw
+        z: int = put_zone(i * 4, x0, x1, 0.0);
+        if (z < 0) return;
+        // Where it begins eases to where it now belongs.
+        if (zone_alpha[z / 8] > 0.0) zone_rect[z + 3] = lerpf(zone_rect[z + 3], gold,
+            zone_ease()) else zone_rect[z + 3] = gold;
+        zone_rect[z + 2] = mark_from[i];
+        zone_rect[z + 4] = end;
+        zone_rect[z + 5] = lip;
+        zone_rect[z + 7] = f.yaw
     }
 }
 
@@ -621,20 +714,39 @@ put_tag(
     a: f32,
     px: f32
 ) {
-    hud_px = maxf(2.0, px - 1.0);
+    // What it favors, fading out as he starts to aim.
+    f: f32 = tag_fade;
+    if (f < 1.0) {
+        hud_px = maxf(2.0, px - 1.0);
+        text_len = 0;
+        favors_short(item);
+        put_text(floorf(proj_x - text_width() * 0.5), floorf(proj_y - 7.0 * hud_px),
+            0.75, 0.9, 1.0, 0.8 * a * (1.0 - f))
+    }
+    if (f <= 0.0) return;
+    // And fading in, bold: on a dark plate, green with what the trick would
+    // score where it fits, and red where it does not.
+    hud_px = px + 1.0;
     text_len = 0;
     fits: bool = best >= need;
-    if (hud_aiming) {
-        if (fits) {
-            append("+");
-            append_int(aim_value(HIT_AIR, item, hud_aim_flips, hud_aim_halves, best,
-                hud_aim_switch))
-        } else append("TOO BIG")
-    } else favors_short(item);
+    if (fits) {
+        append("+");
+        append_int(aim_value(HIT_AIR, item, hud_aim_flips, hud_aim_halves, best, hud_aim_switch))
+    } else append("TOO BIG");
     tx: f32 = floorf(proj_x - text_width() * 0.5);
     ty: f32 = floorf(proj_y - 7.0 * hud_px);
-    if (hud_aiming && !fits) put_text(tx, ty, 1.0, 0.45, 0.38, a) else if (hud_aiming) put_text(tx,
-        ty, 1.0, 0.84, 0.32, a) else put_text(tx, ty, 0.75, 0.9, 1.0, 0.8 * a)
+    pad: f32 = 2.0 * hud_px;
+    put_rect(tx - pad, ty - pad, tx + text_width() + pad, ty + 7.0 * hud_px + pad,
+        0.04, 0.06, 0.05, 0.62 * a * f);
+    if (fits) put_text(tx, ty, 0.4, 1.0, 0.55, a * f) else put_text(tx, ty, 1.0, 0.38,
+        0.3, a * f)
+}
+
+// Whether now is the time to let go: it lands the trick he aims (one with
+// turns in it), off the jump he is on; or off the flat, with no jump near
+// ahead to save it for.
+aim_ready(): bool {
+    hud_aiming && !hud_finished && hud_aim_need > 0.0 && hud_aim_air >= hud_aim_need && (hud_aim_on || !hud_aim_ahead)
 }
 
 // A halfpipe's tag, over its right wall a little ahead of him.
@@ -673,7 +785,7 @@ build_hud(w: int) {
         hud_px = px * 2.0;
         text_len = 0;
         // (Or, going from one to the other, where to.)
-        if (hud_going == 1) append("TO THE PARK...") else if (hud_going == 2) append("TO THE COURSE...") else append("NEW COURSE...");
+        if (hud_going == 1) append("TO THE PARK...") else if (hud_going == 2) append("TO THE COURSE...") else if (hud_going == 3) append("NIGHT...") else if (hud_going == 4) append("DAY...") else append("NEW COURSE...");
         put_text(floorf((w as f32 - text_width()) * 0.5), floorf(screen_h as f32 * 0.3),
             1.0, 0.98, 0.92, 1.0);
         hud_px = px
