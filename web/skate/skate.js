@@ -20,7 +20,7 @@ for (const name of ["gesturestart", "gesturechange", "dblclick"]) {
 // it lands on this same page, which steps forward again.
 for (const name of ["touchstart", "touchmove"]) {
   document.addEventListener(name, (e) => {
-    if (!e.target.closest?.("a, #guide")) e.preventDefault();
+    if (!e.target.closest?.("a, .guide")) e.preventDefault();
   }, { passive: false });
 }
 history.pushState({ stay: true }, "", location.href);
@@ -49,6 +49,7 @@ setNight(startNight);
 let sendKey = null;
 for (const key of document.querySelectorAll(".controls .key")) {
   const sym = Number(key.dataset.key);
+  if (!sym) continue;
   if (key === modeKey) key.addEventListener("pointerdown", () => setMode(!document.body.classList.contains("park")));
   if (key === lookKey) key.addEventListener("pointerdown", () => setNight(!document.body.classList.contains("night")));
   let held = false;
@@ -94,6 +95,96 @@ guide.addEventListener("pointerdown", (e) => {
 });
 addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !guide.hidden) closeGuide();
+  if (e.key === "Escape" && !courses.hidden) closeCourses();
+});
+
+// The courses: the game says what is on each of the first few (L8LIST
+// lines), which one he is on (L8COURSE), and each run's score as it ends
+// (L8FINISH); the best on each is kept here, on the device. Picking one
+// types its number to the game, and Enter.
+const COURSES = 24;
+const SECTION_NAMES = { KICKERS: "Kickers", RAILS: "Rails", PIPE: "Halfpipe", CLIFF: "Cliff", GAP: "Gap", ROLLERS: "Rollers" };
+const courseList = new Map();
+let courseNow = 0;
+const stored = (key, fallback) => {
+  try {
+    return JSON.parse(localStorage.getItem(key)) ?? fallback;
+  } catch {
+    return fallback;
+  }
+};
+const store = (key, value) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {}
+};
+const bests = stored("skate.best", {});
+const gameSays = (line) => {
+  const words = line.trim().split(/\s+/);
+  if (words[0] === "L8LIST") courseList.set(Number(words[1]), words.slice(2));
+  else if (words[0] === "L8COURSE") {
+    courseNow = Number(words[1]);
+    store("skate.course", courseNow);
+  } else if (words[0] === "L8FINISH") {
+    const [n, score] = [Number(words[1]), Number(words[2])];
+    if (score > (bests[n] ?? 0)) {
+      bests[n] = score;
+      store("skate.best", bests);
+    }
+  } else return false;
+  return true;
+};
+const courses = document.getElementById("courses");
+const typeKeys = (syms) => {
+  for (const sym of syms) {
+    sendKey?.(2, sym, "");
+    sendKey?.(3, sym);
+  }
+};
+const closeCourses = () => {
+  courses.hidden = true;
+  sendKey?.(3, 65299);
+  canvas.focus();
+};
+const pickCourse = (n) => {
+  closeCourses();
+  setMode(false);
+  // Its digits and Enter; or N, for a new one at random.
+  if (n > 0) typeKeys([...String(n)].map((c) => 48 + Number(c)).concat(65293));
+  else typeKeys([110]);
+};
+const openCourses = () => {
+  const grid = courses.querySelector(".grid");
+  grid.textContent = "";
+  const card = (n, title, text) => {
+    const el = document.createElement("div");
+    el.className = "course" + (n === courseNow ? " now" : "");
+    el.innerHTML = `<b></b><span></span>${n > 0 && bests[n] ? "<i></i>" : ""}`;
+    el.querySelector("b").textContent = title;
+    el.querySelector("span").textContent = text;
+    if (n > 0 && bests[n]) el.querySelector("i").textContent = `Best ${bests[n]}`;
+    el.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      pickCourse(n);
+    });
+    grid.append(el);
+  };
+  for (const [n, kinds] of courseList) card(n, `Course ${n}`, kinds.map((k) => SECTION_NAMES[k] ?? k).join(" \u203a "));
+  if (courseNow > COURSES) card(courseNow, `Course ${courseNow}`, "The one you are on");
+  card(0, "Random", "A new course, laid out afresh");
+  courses.hidden = false;
+  canvas.blur();
+  sendKey?.(2, 65299, "");
+};
+document.querySelector(".pick").addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  openCourses();
+});
+courses.addEventListener("pointerdown", (e) => {
+  if (e.target === courses || e.target.closest(".close")) {
+    e.preventDefault();
+    closeCourses();
+  }
 });
 
 async function main() {
@@ -101,10 +192,23 @@ async function main() {
   const module = await WebAssembly.compileStreaming(fetch("skate.wasm"));
   const fs = new MemFS({});
   const decoder = new TextDecoder();
-  fs.onOutput = (_fd, data) => console.log(decoder.decode(data).trimEnd());
+  // (What it writes comes in pieces: a line at a time from here.)
+  let written = "";
+  fs.onOutput = (_fd, data) => {
+    written += decoder.decode(data);
+    const lines = written.split("\n");
+    written = lines.pop();
+    for (const line of lines) {
+      if (line.trim() && !gameSays(line)) console.log(line.trimEnd());
+    }
+  };
   const sys = fs.sys(["skate"]);
   // L8_ parameters are also the game's environment (as L8_SEED=n, L8_PARK=1).
   if (startNight && !params.has("L8_LOOK")) params.set("L8_LOOK", "n");
+  // He starts on the course he was last on (or the first), and the game
+  // says what is on the first few.
+  if (!params.has("L8_SEED")) params.set("L8_SEED", String(stored("skate.course", 1) || 1));
+  params.set("L8_COURSES", String(COURSES));
   sys.env = [...params].filter(([k]) => k.startsWith("L8_")).map(([k, v]) => `${k}=${v}`);
   const env = Object.fromEntries([...params].filter(([k]) => k.startsWith("L8_")));
   const zoom = Math.min(4, Math.max(0.25, Number(params.get("zoom")) || 0.85));
@@ -148,7 +252,7 @@ async function main() {
   show(touch ? "Tap to start" : "Click to start");
   canvas.addEventListener("focus", () => (overlay.hidden = true));
   canvas.addEventListener("blur", () => {
-    if (!touch && guide.hidden) show("Click to continue");
+    if (!touch && guide.hidden && courses.hidden) show("Click to continue");
   });
   addEventListener("pointerdown", (e) => {
     if (e.target.closest?.(".ui")) return;
