@@ -28,14 +28,6 @@ addEventListener("popstate", () => history.pushState({ stay: true }, "", locatio
 
 const touch = matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
 if (touch) document.body.classList.add("touch");
-// The mode button (Tab) goes to the park, or back to the course; the
-// screen is the controls in either.
-const modeKey = document.querySelector(".key.mode");
-const setMode = (park) => {
-  document.body.classList.toggle("park", park);
-  modeKey.textContent = park ? "Course" : "Park";
-};
-setMode(new URLSearchParams(location.search).has("L8_PARK"));
 // Night or day (L): night to begin with where the device is in dark mode,
 // unless ?L8_LOOK= says which.
 const lookKey = document.querySelector(".key.look");
@@ -50,7 +42,6 @@ let sendKey = null;
 for (const key of document.querySelectorAll(".controls .key")) {
   const sym = Number(key.dataset.key);
   if (!sym) continue;
-  if (key === modeKey) key.addEventListener("pointerdown", () => setMode(!document.body.classList.contains("park")));
   if (key === lookKey) key.addEventListener("pointerdown", () => setNight(!document.body.classList.contains("night")));
   let held = false;
   const up = () => {
@@ -68,47 +59,74 @@ for (const key of document.querySelectorAll(".controls .key")) {
   });
   for (const name of ["pointerup", "pointercancel", "lostpointercapture"]) key.addEventListener(name, up);
 }
+const typeKeys = (syms) => {
+  for (const sym of syms) {
+    sendKey?.(2, sym, "");
+    sendKey?.(3, sym);
+  }
+};
 
-// The guide to the course: the How button opens it, and the game pauses
-// (holding Pause) until it closes, with its button, a tap outside it, or
-// Escape.
-const guide = document.getElementById("guide");
-const openGuide = () => {
-  guide.hidden = false;
+// Sheets over the game: the menu, the guide, the places to pick from, and
+// the groups. The game pauses (Pause, held) while any is open, and one
+// closes with its button, a tap outside it, or Escape.
+const sheets = Object.fromEntries(["menu", "guide", "places", "groups"].map((id) => [id, document.getElementById(id)]));
+const sheetOpen = () => Object.values(sheets).some((el) => !el.hidden);
+// Whether he has started riding: until then the menu cannot be closed
+// without choosing.
+let started = false;
+const openSheet = (id) => {
+  for (const [name, el] of Object.entries(sheets)) el.hidden = name !== id;
   canvas.blur();
   sendKey?.(2, 65299, "");
 };
-const closeGuide = () => {
-  guide.hidden = true;
+const closeSheets = () => {
+  for (const el of Object.values(sheets)) el.hidden = true;
+  started = true;
+  overlay.hidden = true;
   sendKey?.(3, 65299);
   canvas.focus();
 };
+// (Closing any sheet but the menu goes back to the menu it came from.)
+const closeSheet = (id) => {
+  if (id === "menu") {
+    if (started) closeSheets();
+  } else if (id === "guide" && started) closeSheets();
+  else openMenu();
+};
+for (const [id, el] of Object.entries(sheets)) {
+  el.addEventListener("pointerdown", (e) => {
+    if (e.target === el || e.target.closest(".close")) {
+      e.preventDefault();
+      closeSheet(id);
+    }
+  });
+}
+addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  const open = Object.entries(sheets).find(([, el]) => !el.hidden);
+  if (open) closeSheet(open[0]);
+});
 document.querySelector(".how").addEventListener("pointerdown", (e) => {
   e.preventDefault();
-  openGuide();
-});
-guide.addEventListener("pointerdown", (e) => {
-  if (e.target === guide || e.target.closest(".close")) {
-    e.preventDefault();
-    closeGuide();
-  }
-});
-addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !guide.hidden) closeGuide();
-  if (e.key === "Escape" && !courses.hidden) closeCourses();
+  openSheet("guide");
 });
 
-// The courses: the game says what is on each of the first few (L8LIST
-// lines), which one he is on (L8COURSE), and each run's score as it ends
-// (L8FINISH); the best on each is kept here, on the device. Picking one
-// types its number to the game, and Enter.
-const COURSES = 24;
+// Places: a downhill course is a number; a park is one too, kept negative
+// (as the game says them: see run_id in programs/skate/park.l8). Each
+// number is always the same place, and each day has a course and a park of
+// its own, numbered by its date (as 20261010). The game says what is in
+// each of the first few (L8LIST lines), which he is on (L8COURSE), and each
+// run's score as it ends (L8FINISH); the best on each is kept here, on the
+// device. Going to one types its number to the game, and Enter (a course)
+// or Tab (a park).
+const PLACES = 24;
 // The tutorial's course (see programs/skate/tutorial.l8): where a new
 // player starts, until he has left it for another.
 const TUTORIAL = 100000000;
 const SECTION_NAMES = { KICKERS: "Kickers", RAILS: "Rails", PIPE: "Halfpipe", CLIFF: "Cliff", GAP: "Gap", ROLLERS: "Rollers" };
-const courseList = new Map();
-let courseNow = 0;
+const THING_NAMES = { KICKER: ["kicker", "kickers"], GAP: ["gap", "gaps"], ROLLERS: ["rollers", "rollers"], RAIL: ["rail", "rails"], BOX: ["box", "boxes"] };
+const placeList = new Map();
+let placeNow = 0;
 const stored = (key, fallback) => {
   try {
     return JSON.parse(localStorage.getItem(key)) ?? fallback;
@@ -122,23 +140,68 @@ const store = (key, value) => {
   } catch {}
 };
 const bests = stored("skate.best", {});
+// The day's places: the date in one time zone for everyone, so that they
+// are the same for all of them, and change for all at once.
+const DAILY_ZONE = "America/New_York";
+const today = (at = Date.now()) => Number(new Intl.DateTimeFormat("en-CA", { timeZone: DAILY_ZONE }).format(new Date(at)).replace(/-/g, ""));
+const isDaily = (id) => Math.abs(id) >= 20000101 && Math.abs(id) <= 29991231;
+const dayName = (id) => {
+  const n = Math.abs(id);
+  return new Date(Date.UTC(Math.floor(n / 10000), (Math.floor(n / 100) % 100) - 1, n % 100)).toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short", day: "numeric", month: "short" });
+};
+const placeName = (id) => {
+  if (id === TUTORIAL) return "the tutorial";
+  if (isDaily(id)) return `${id < 0 ? "the daily park" : "the daily downhill"}${Math.abs(id) === today() ? "" : ` of ${dayName(id)}`}`;
+  return `${id < 0 ? "park" : "course"} ${Math.abs(id)}`;
+};
+// What is there: a course's sections in order; a park's things, counted.
+const placeText = (id) => {
+  const words = placeList.get(id) ?? [];
+  if (id > 0) return words.map((k) => SECTION_NAMES[k] ?? k).join(" › ");
+  const counts = new Map();
+  for (const w of words) counts.set(w, (counts.get(w) ?? 0) + 1);
+  return [...counts].map(([w, n]) => (n > 1 ? `${n} ${THING_NAMES[w]?.[1] ?? w}` : THING_NAMES[w]?.[0] ?? w)).join(" · ");
+};
+const goTo = (id) => {
+  closeSheets();
+  if (id === placeNow) {
+    // (There already: from its start.)
+    typeKeys([114]);
+    return;
+  }
+  if (id === TUTORIAL) typeKeys([116]);
+  else typeKeys([...String(Math.abs(id))].map((c) => 48 + Number(c)).concat(id < 0 ? 65289 : 65293));
+};
+const randomPlace = (park) => (park ? -1 : 1) * (PLACES + 1 + Math.floor(Math.random() * 99000));
 
-// The leaderboard (see ../skate-board/worker.js): the page opened with a board's
-// link (?board=<code>) is on that board from then on. A run that beats his
-// best there is posted, under his name (his on that board once posted: a
-// token kept here says it is this device). Anyone's run can be watched: the
-// game is handed it as a file, and V.
+// Groups (see ../skate-board/worker.js): a group shares a leaderboard, and
+// whoever opens its link (?group=<code>) is in it from then on. His best
+// runs are posted to every group he is in, under his name (his in a group
+// once posted there: a token kept here says it is this device). One group's
+// scores are the ones shown. Anyone's run can be watched: the game is
+// handed it as a file, and V.
 const api = location.hostname.endsWith("trailingwhite.space") ? "/skate/api" : "https://trailingwhite.space/skate/api";
-const boardParam = new URLSearchParams(location.search).get("board");
-if (boardParam && /^[a-z0-9]{8,24}$/.test(boardParam)) store("skate.board", boardParam);
-const boardCode = stored("skate.board", null);
+const validCode = (code) => typeof code === "string" && /^[a-z0-9]{8,24}$/.test(code);
+let groups = stored("skate.groups", []).filter((g) => validCode(g?.code));
+// (The one board of before there were groups.)
+const oldBoard = stored("skate.board", null);
+if (validCode(oldBoard) && !groups.some((g) => g.code === oldBoard)) groups.push({ code: oldBoard, title: "" });
+let shownCode = stored("skate.group", null);
+const saveGroups = () => {
+  if (!groups.some((g) => g.code === shownCode)) shownCode = groups[0]?.code ?? null;
+  store("skate.groups", groups);
+  store("skate.group", shownCode);
+};
 let playerName = stored("skate.name", "");
 let playerToken = stored("skate.token", null);
 if (!playerToken) {
   playerToken = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
   store("skate.token", playerToken);
 }
-let board = null;
+// Each group's scores, as last fetched, by its code.
+const boards = new Map();
+const shown = () => boards.get(shownCode) ?? null;
+const shownTitle = () => groups.find((g) => g.code === shownCode)?.title || "your group";
 let gameVersion = 0;
 let gameFs = null;
 const toast = (text) => {
@@ -149,57 +212,84 @@ const toast = (text) => {
   toast.timer = setTimeout(() => el.classList.remove("on"), 3500);
 };
 const cleanName = (text) => text.toUpperCase().replace(/[^A-Z0-9 ]/g, "").replace(/ +/g, " ").trim().slice(0, 12).trim();
-const loadBoard = async () => {
-  if (!boardCode) return;
+const loadBoard = async (code) => {
   try {
-    const r = await fetch(`${api}/board/${boardCode}`);
-    if (r.ok) board = await r.json();
-  } catch {}
+    const r = await fetch(`${api}/board/${code}`);
+    if (r.status === 404) return false;
+    if (!r.ok) return null;
+    const data = await r.json();
+    boards.set(code, data);
+    const group = groups.find((g) => g.code === code);
+    if (group && group.title !== data.title) {
+      group.title = data.title;
+      saveGroups();
+    }
+    return true;
+  } catch {
+    return null;
+  }
 };
-// The day's course: its number is the date (as 20261010), in one time zone
-// for everyone, so that it is the same course for all of them, and changes
-// for all at once.
-const DAILY_ZONE = "America/New_York";
-const dailyCourse = (at = Date.now()) => Number(new Intl.DateTimeFormat("en-CA", { timeZone: DAILY_ZONE }).format(new Date(at)).replace(/-/g, ""));
-const isDaily = (n) => n >= 20000101 && n <= 29991231;
-const dayName = (n) =>
-  new Date(Date.UTC(Math.floor(n / 10000), (Math.floor(n / 100) % 100) - 1, n % 100)).toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short", day: "numeric", month: "short" });
-const myBest = (course) => board?.courses?.[course]?.find((e) => e.name === playerName)?.score ?? 0;
-// A run just finished, as the game wrote it: post it, if it is his best
-// there.
-const postRun = async (version, course, score, replay) => {
-  if (!boardCode || score <= 0 || !((course >= 1 && course <= COURSES) || course === dailyCourse())) return;
+const loadBoards = () => Promise.all(groups.map((g) => loadBoard(g.code)));
+// Join the group with this code (or in this link): true if there is one.
+const joinGroup = async (text) => {
+  const code = (text.match(/[?&](?:group|board)=([a-z0-9]+)/)?.[1] ?? text).trim();
+  if (!validCode(code)) return false;
+  if (!groups.some((g) => g.code === code)) {
+    const found = await loadBoard(code);
+    if (found === false) return false;
+    groups.push({ code, title: boards.get(code)?.title ?? "" });
+  }
+  shownCode = code;
+  saveGroups();
+  return true;
+};
+const scoresOn = (id) => shown()?.courses?.[id] ?? [];
+const myBest = (id) => scoresOn(id).find((e) => e.name === playerName)?.score ?? 0;
+const postable = (id) => (Math.abs(id) >= 1 && Math.abs(id) <= PLACES) || Math.abs(id) === today();
+// A run just finished, as the game wrote it: post it to his groups, if it
+// is his best there (on this device, or by what the group shown has).
+let newBest = false;
+const postRun = async (version, id, score, replay) => {
+  const post = newBest || score > myBest(id);
+  newBest = false;
+  if (groups.length === 0 || score <= 0 || !postable(id) || !post) return;
   if (!playerName) {
-    toast("Set your name under Courses to post scores");
+    toast("Set your name under Your groups to post scores");
     return;
   }
-  if (score <= myBest(course)) return;
-  try {
-    const r = await fetch(`${api}/board/${boardCode}/score`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: playerName, token: playerToken, course, score, version, replay }),
-    });
-    const body = await r.json();
-    if (!r.ok) {
-      toast(`Not posted: ${body.error}`);
-      return;
+  let said = false;
+  for (const group of groups) {
+    try {
+      const r = await fetch(`${api}/board/${group.code}/score`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: playerName, token: playerToken, course: id, score, version, replay }),
+      });
+      const body = await r.json();
+      if (!r.ok) {
+        if (!said) toast(`Not posted to ${group.title || "your group"}: ${body.error}`);
+        said = true;
+        continue;
+      }
+      await loadBoard(group.code);
+      if (body.posted && group.code === shownCode) {
+        const place = scoresOn(id).findIndex((e) => e.name === playerName) + 1;
+        toast(place > 0 ? `#${place} in ${shownTitle()} on ${placeName(id)}` : "Posted");
+        said = true;
+      }
+    } catch {
+      if (!said) toast("Not posted: no connection");
+      said = true;
     }
-    await loadBoard();
-    const place = (board?.courses?.[course] ?? []).findIndex((e) => e.name === playerName) + 1;
-    if (body.posted) toast(place > 0 ? `Posted: #${place} on ${isDaily(course) ? "today's course" : `course ${course}`}` : "Posted");
-  } catch {
-    toast("Not posted: no connection");
   }
 };
-const watchRun = async (course, name) => {
+const watchRun = async (id, name) => {
   try {
-    const r = await fetch(`${api}/board/${boardCode}/replay?course=${course}&name=${encodeURIComponent(name)}`);
+    const r = await fetch(`${api}/board/${shownCode}/replay?course=${id}&name=${encodeURIComponent(name)}`);
     const run = await r.json();
     if (!r.ok) throw new Error(run.error);
     gameFs.writeFile("watch.txt", `${run.version} ${run.course} ${run.score} ${run.name.replace(/ /g, "_")} ${run.replay}`);
-    closeCourses();
-    setMode(false);
+    closeSheets();
     typeKeys([118]);
   } catch {
     toast("Could not load that run");
@@ -207,147 +297,254 @@ const watchRun = async (course, name) => {
 };
 const gameSays = (line) => {
   const words = line.trim().split(/\s+/);
-  if (words[0] === "L8LIST") courseList.set(Number(words[1]), words.slice(2));
+  if (words[0] === "L8LIST") placeList.set(Number(words[1]), words.slice(2));
   else if (words[0] === "L8VERSION") gameVersion = Number(words[1]);
   else if (words[0] === "L8REPLAY") postRun(Number(words[1]), Number(words[2]), Number(words[3]), words.slice(4).join(" "));
   else if (words[0] === "L8COURSE") {
-    courseNow = Number(words[1]);
-    if (courseNow !== TUTORIAL) {
-      store("skate.course", courseNow);
+    placeNow = Number(words[1]);
+    document.body.classList.toggle("park", placeNow < 0);
+    if (placeNow !== TUTORIAL) {
+      store("skate.course", placeNow);
       store("skate.tutorial", true);
     }
   } else if (words[0] === "L8FINISH") {
-    const [n, score] = [Number(words[1]), Number(words[2])];
-    if (score > (bests[n] ?? 0)) {
-      bests[n] = score;
+    const [id, score] = [Number(words[1]), Number(words[2])];
+    newBest = score > (bests[id] ?? 0);
+    if (newBest) {
+      bests[id] = score;
       store("skate.best", bests);
     }
   } else return false;
   return true;
 };
-const courses = document.getElementById("courses");
-const typeKeys = (syms) => {
-  for (const sym of syms) {
-    sendKey?.(2, sym, "");
-    sendKey?.(3, sym);
-  }
-};
-const closeCourses = () => {
-  courses.hidden = true;
-  sendKey?.(3, 65299);
-  canvas.focus();
-};
-const pickCourse = (n) => {
-  closeCourses();
-  setMode(false);
-  // Its digits and Enter; or T, for the tutorial; or N, for a new one at
-  // random.
-  if (n === TUTORIAL) typeKeys([116]);
-  else if (n > 0) typeKeys([...String(n)].map((c) => 48 + Number(c)).concat(65293));
-  else typeKeys([110]);
-};
-const showCourses = () => {
-  const grid = courses.querySelector(".grid");
-  grid.textContent = "";
-  const bar = courses.querySelector(".boardbar");
-  bar.hidden = !boardCode;
-  if (boardCode) {
-    bar.querySelector(".title").textContent = board?.title ?? "...";
-    const taken = board && playerName && Object.values(board.courses).some((list) => list.some((e) => e.name === playerName));
-    bar.querySelector("small").textContent = playerName ? (taken ? "Your runs post as this name." : "Your best runs will post as this name.") : "Type a name to post your scores.";
-  }
-  const card = (n, title, text) => {
-    const el = document.createElement("div");
-    el.className = "course" + (n === courseNow ? " now" : "");
-    el.innerHTML = `<b></b><span></span>${n > 0 && bests[n] ? "<i></i>" : ""}`;
-    el.querySelector("b").textContent = title;
-    el.querySelector("span").textContent = text;
-    if (n > 0 && bests[n]) el.querySelector("i").textContent = `Best ${bests[n]}`;
-    // The board's runs on it: the top few, each to watch (if this game can
-    // still play it).
-    const runs = (n > 0 && board?.courses?.[n]) || [];
-    if (runs.length > 0) {
-      const list = document.createElement("ol");
-      runs.slice(0, 5).forEach((run, i) => {
-        const li = document.createElement("li");
-        if (run.name === playerName) li.className = "me";
-        li.innerHTML = `<span></span><span class="who"></span><span></span>`;
-        const [place, who, score] = li.children;
-        place.textContent = `${i + 1}.`;
-        who.textContent = run.name;
-        score.textContent = String(run.score);
-        if (run.version === gameVersion) {
-          const watch = document.createElement("span");
-          watch.className = "watch";
-          watch.textContent = "\u25b6";
-          watch.title = "Watch this run";
-          watch.addEventListener("pointerdown", (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            watchRun(n, run.name);
-          });
-          li.append(watch);
-        }
-        list.append(li);
+
+// A list of the top few runs on a place in the group shown, each to watch
+// (if this game can still play it); or null if there are none.
+const scoreList = (id, most) => {
+  const runs = scoresOn(id);
+  if (runs.length === 0) return null;
+  const list = document.createElement("ol");
+  runs.slice(0, most).forEach((run, i) => {
+    const li = document.createElement("li");
+    if (run.name === playerName) li.className = "me";
+    li.innerHTML = `<span></span><span class="who"></span><span></span>`;
+    const [place, who, score] = li.children;
+    place.textContent = `${i + 1}.`;
+    who.textContent = run.name;
+    score.textContent = String(run.score);
+    if (run.version === gameVersion) {
+      const watch = document.createElement("span");
+      watch.className = "watch";
+      watch.textContent = "▶";
+      watch.title = "Watch this run";
+      watch.addEventListener("pointerdown", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        watchRun(id, run.name);
       });
-      el.append(list);
+      li.append(watch);
     }
-    el.addEventListener("pointerdown", (e) => {
-      e.preventDefault();
-      pickCourse(n);
-    });
-    grid.append(el);
-  };
-  // The day's course first; and who won yesterday's.
-  const today = dailyCourse();
-  const kindsOf = (n) => (courseList.get(n) ?? []).map((k) => SECTION_NAMES[k] ?? k).join(" \u203a ");
-  const yesterday = board?.courses?.[dailyCourse(Date.now() - 24 * 60 * 60 * 1000)]?.[0];
-  card(today, `Daily \u00b7 ${dayName(today)}`, (kindsOf(today) || "Today's course, the same for everyone") + (yesterday ? ` \u00b7 Yesterday: ${yesterday.name} ${yesterday.score}` : ""));
-  for (const [n] of courseList) if (!isDaily(n)) card(n, `Course ${n}`, kindsOf(n));
-  if (courseNow > COURSES && courseNow !== today && courseNow !== TUTORIAL) card(courseNow, isDaily(courseNow) ? `Daily \u00b7 ${dayName(courseNow)}` : `Course ${courseNow}`, "The one you are on");
-  card(0, "Random", "A new course, laid out afresh");
-  card(TUTORIAL, "Tutorial", "How to steer, jump, trick, grab, and grind, a step at a time");
+    list.append(li);
+  });
+  return list;
 };
-const openCourses = () => {
-  showCourses();
-  courses.hidden = false;
-  canvas.blur();
-  sendKey?.(2, 65299, "");
-  // (The board as it is now, when it comes.)
-  loadBoard().then(() => {
-    if (!courses.hidden) showCourses();
+
+// The menu: what to play. Each day's places say what is in them, his best
+// there, and who leads his group.
+const showMenu = () => {
+  const el = sheets.menu;
+  el.querySelector(".close").hidden = !started;
+  const item = (go) => el.querySelector(`.item[data-go="${go}"]`);
+  const fresh = !stored("skate.tutorial", false) && !stored("skate.course", 0);
+  item("tutorial").classList.toggle("first", fresh);
+  item("tutorial").querySelector("i").textContent = fresh ? "Start here" : "";
+  const resume = item("resume");
+  resume.hidden = fresh || placeNow === 0;
+  resume.querySelector("span").textContent = `On ${placeName(placeNow)}`;
+  const day = today();
+  for (const [go, id] of [["daily", day], ["dailypark", -day]]) {
+    const text = placeText(id);
+    item(go).querySelector("span").textContent = `${dayName(id)} · ${id < 0 ? "60 seconds · " : ""}${text || "the same for everyone"}`;
+    const lines = [];
+    if (bests[id]) lines.push(`Your best ${bests[id]}`);
+    const lead = scoresOn(id)[0];
+    if (lead) lines.push(`${lead.name} ${lead.score}`);
+    item(go).querySelector("i").textContent = lines.join("\n");
+  }
+  const count = (park) => Object.keys(bests).filter((k) => Number(k) !== 0 && Number(k) < 0 === park && Math.abs(Number(k)) <= PLACES).length;
+  item("courses").querySelector("i").textContent = count(false) ? `${count(false)} of ${PLACES} ridden` : "";
+  item("parks").querySelector("i").textContent = count(true) ? `${count(true)} of ${PLACES} ridden` : "";
+  item("groups").querySelector("span").textContent = groups.length
+    ? `${groups.map((g) => g.title || "a group").join(", ")}${playerName ? ` · playing as ${playerName}` : " · set your name to post scores"}`
+    : "Share a leaderboard with friends, and watch each other's runs";
+};
+const openMenu = () => {
+  showMenu();
+  openSheet("menu");
+  // (The groups' scores as they are now, when they come.)
+  loadBoards().then(() => {
+    if (!sheets.menu.hidden) showMenu();
   });
 };
-const nameBox = courses.querySelector(".boardbar input");
-nameBox.value = playerName;
-nameBox.addEventListener("pointerdown", (e) => e.stopPropagation());
-nameBox.addEventListener("keydown", (e) => {
-  e.stopPropagation();
-  if (e.key === "Enter") nameBox.blur();
+sheets.menu.querySelector(".items").addEventListener("pointerdown", (e) => {
+  const go = e.target.closest(".item")?.dataset.go;
+  if (!go) return;
+  e.preventDefault();
+  if (go === "resume") closeSheets();
+  if (go === "tutorial") goTo(TUTORIAL);
+  if (go === "daily") goTo(today());
+  if (go === "dailypark") goTo(-today());
+  if (go === "courses") openPlaces(false);
+  if (go === "parks") openPlaces(true);
+  if (go === "groups") openGroups();
 });
+document.querySelector(".pick").addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  openMenu();
+});
+
+// The places to pick from: the courses, or the parks.
+let pickingParks = false;
+const showPlaces = () => {
+  const el = sheets.places;
+  const park = pickingParks;
+  el.querySelector("h2").textContent = park ? "Parks" : "Downhill courses";
+  el.querySelector(".about").textContent = park
+    ? "Each number is always the same park. A run is sixty seconds: score what you can. Your best in each is kept on this device."
+    : "Each number is always the same course. Ride from the top to the finish, scoring on the way. Your best on each is kept on this device.";
+  const bar = el.querySelector(".boardbar");
+  bar.hidden = groups.length === 0;
+  bar.querySelector(".title").textContent = shownTitle();
+  bar.querySelector("small").textContent = playerName ? "" : "Set your name under Your groups to post yours.";
+  const grid = el.querySelector(".grid");
+  grid.textContent = "";
+  const card = (id, title, text) => {
+    const div = document.createElement("div");
+    div.className = "course" + (id !== 0 && id === placeNow ? " now" : "");
+    div.innerHTML = `<b></b><span></span>${bests[id] ? "<i></i>" : ""}`;
+    div.querySelector("b").textContent = title;
+    div.querySelector("span").textContent = text;
+    if (bests[id]) div.querySelector("i").textContent = `Best ${bests[id]}`;
+    const list = id !== 0 && scoreList(id, 5);
+    if (list) div.append(list);
+    div.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      goTo(id === 0 ? randomPlace(park) : id);
+    });
+    grid.append(div);
+  };
+  const sign = park ? -1 : 1;
+  for (let n = 1; n <= PLACES; n++) card(sign * n, `${park ? "Park" : "Course"} ${n}`, placeText(sign * n));
+  if (placeNow !== TUTORIAL && placeNow < 0 === park && Math.abs(placeNow) > PLACES && !isDaily(placeNow)) card(placeNow, `${park ? "Park" : "Course"} ${Math.abs(placeNow)}`, "The one you are on");
+  card(0, "Random", park ? "Another park, laid out afresh" : "Another course, laid out afresh");
+};
+const openPlaces = (park) => {
+  pickingParks = park;
+  showPlaces();
+  openSheet("places");
+  loadBoards().then(() => {
+    if (!sheets.places.hidden) showPlaces();
+  });
+};
+
+// The groups: his name; each group, with its link to pass on; and joining
+// another.
+const showGroups = () => {
+  const el = sheets.groups;
+  const taken = playerName && [...boards.values()].some((b) => Object.values(b.courses).some((list) => list.some((e) => e.name === playerName)));
+  el.querySelector(".name small").textContent = playerName ? (taken ? "Your runs post as this name." : "Your best runs will post as this name.") : "Type a name to post your scores.";
+  const list = el.querySelector(".list");
+  list.textContent = "";
+  if (groups.length === 0) {
+    const p = document.createElement("p");
+    p.textContent = "You are not in a group yet. Ask a friend for their group's link, and open it or paste it below.";
+    list.append(p);
+  }
+  for (const group of groups) {
+    const div = document.createElement("div");
+    div.className = "group" + (group.code === shownCode ? " shown" : "");
+    div.innerHTML = `<b></b><span class="btn show"></span><span class="btn copy">Copy invite link</span><span class="btn leave">Leave</span><small></small>`;
+    div.querySelector("b").textContent = group.title || "A group";
+    const board = boards.get(group.code);
+    const names = new Set(Object.values(board?.courses ?? {}).flat().map((e) => e.name));
+    div.querySelector("small").textContent = board ? (names.size ? `${names.size} riding: ${[...names].slice(0, 8).join(", ")}` : "No runs posted yet") : "";
+    const show = div.querySelector(".show");
+    show.textContent = group.code === shownCode ? "Showing its scores" : "Show its scores";
+    show.hidden = groups.length < 2;
+    show.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      shownCode = group.code;
+      saveGroups();
+      showGroups();
+    });
+    div.querySelector(".copy").addEventListener("pointerdown", async (e) => {
+      e.preventDefault();
+      const link = `${location.origin}${location.pathname}?group=${group.code}`;
+      try {
+        await navigator.clipboard.writeText(link);
+        toast("Invite link copied");
+      } catch {
+        prompt("Copy this link to invite someone:", link);
+      }
+    });
+    div.querySelector(".leave").addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      if (!confirm(`Leave ${group.title || "this group"}? Your runs stay on its board.`)) return;
+      groups = groups.filter((g) => g !== group);
+      saveGroups();
+      showGroups();
+    });
+    list.append(div);
+  }
+};
+const openGroups = () => {
+  showGroups();
+  openSheet("groups");
+  loadBoards().then(() => {
+    if (!sheets.groups.hidden) showGroups();
+  });
+};
+const nameBox = sheets.groups.querySelector(".name input");
+nameBox.value = playerName;
 nameBox.addEventListener("change", () => {
   playerName = cleanName(nameBox.value);
   nameBox.value = playerName;
   store("skate.name", playerName);
-  showCourses();
+  showGroups();
 });
-document.querySelector(".pick").addEventListener("pointerdown", (e) => {
+const joinBox = sheets.groups.querySelector(".join input");
+const join = async () => {
+  if (!joinBox.value.trim()) return;
+  const ok = await joinGroup(joinBox.value);
+  toast(ok ? `Joined ${shownTitle()}` : "No group with that link or code");
+  if (ok) joinBox.value = "";
+  showGroups();
+};
+sheets.groups.querySelector(".join .btn").addEventListener("pointerdown", (e) => {
   e.preventDefault();
-  openCourses();
+  join();
 });
-courses.addEventListener("pointerdown", (e) => {
-  if (e.target === courses || e.target.closest(".close")) {
-    e.preventDefault();
-    closeCourses();
-  }
-});
+for (const box of [nameBox, joinBox]) {
+  box.addEventListener("pointerdown", (e) => e.stopPropagation());
+  box.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") {
+      box.blur();
+      if (box === joinBox) join();
+    }
+  });
+}
 
 async function main() {
   const params = new URLSearchParams(location.search);
   const module = await WebAssembly.compileStreaming(fetch("skate.wasm"));
   const fs = new MemFS({});
   gameFs = fs;
-  loadBoard();
+  // The page opened with a group's link: in it.
+  const link = params.get("group") ?? params.get("board");
+  if (link && (await joinGroup(link))) toast(`Joined ${shownTitle()}`);
+  saveGroups();
+  loadBoards();
   const decoder = new TextDecoder();
   // (What it writes comes in pieces: a line at a time from here.)
   let written = "";
@@ -362,16 +559,20 @@ async function main() {
   const sys = fs.sys(["skate"]);
   // L8_ parameters are also the game's environment (as L8_SEED=n, L8_PARK=1).
   if (startNight && !params.has("L8_LOOK")) params.set("L8_LOOK", "n");
-  // He starts on the course he was last on (or the first), and the game
-  // says what is on the first few.
-  // (An earlier day's course becomes today's; and someone new starts with
-  // the tutorial.)
+  // The game loads the place he was last at (an earlier day's becoming
+  // today's; and for someone new, the tutorial), and says what is in the
+  // first few courses and parks, and the day's.
   const last = stored("skate.course", 0) || 0;
-  const start = last === 0 && !stored("skate.tutorial", false) ? TUTORIAL : last || 1;
-  if (!params.has("L8_SEED")) params.set("L8_SEED", String(isDaily(start) ? dailyCourse() : start));
+  let start = last === 0 && !stored("skate.tutorial", false) ? TUTORIAL : last || 1;
+  if (isDaily(start)) start = Math.sign(start) * today();
+  if (!params.has("L8_SEED")) {
+    params.set("L8_SEED", String(Math.abs(start)));
+    if (start < 0) params.set("L8_PARK", "1");
+  }
   if (touch) params.set("L8_TOUCH", "1");
-  params.set("L8_COURSES", String(COURSES));
-  params.set("L8_DAILY", String(dailyCourse()));
+  params.set("L8_COURSES", String(PLACES));
+  params.set("L8_PARKS", String(PLACES));
+  params.set("L8_DAILY", String(today()));
   sys.env = [...params].filter(([k]) => k.startsWith("L8_")).map(([k, v]) => `${k}=${v}`);
   const env = Object.fromEntries([...params].filter(([k]) => k.startsWith("L8_")));
   const zoom = Math.min(4, Math.max(0.25, Number(params.get("zoom")) || 0.85));
@@ -384,10 +585,9 @@ async function main() {
     // ?skip=prog3 drops a program's draws, to measure what they cost.
     timing: params.has("gputime"), gpuTiming: params.has("gputime"),
     skip: new Set((params.get("skip") ?? "").split(",").filter(Boolean)) });
-  // Tab on a keyboard switches too.
   canvas.addEventListener("keydown", (e) => {
-    if (e.code === "Tab" && !e.repeat) setMode(!document.body.classList.contains("park"));
     if (e.code === "KeyL" && !e.repeat) setNight(!document.body.classList.contains("night"));
+    if (e.code === "KeyM" && !e.repeat) openMenu();
   });
   // The steering and trick panels, placed over the game's view where the
   // game reads them: these fractions match programs/skate/touch.l8.
@@ -412,17 +612,20 @@ async function main() {
   const { instance, mem } = await instantiate(module, sys, platform.imports);
   platform.attach(instance, mem);
   sendKey = platform.key;
-  show(touch ? "Tap to start" : "Click to start");
+  // The menu to begin with (the game held behind it); ?play goes straight
+  // in.
+  overlay.hidden = true;
+  if (params.has("play")) closeSheets();
+  else openMenu();
   canvas.addEventListener("focus", () => (overlay.hidden = true));
   canvas.addEventListener("blur", () => {
-    if (!touch && guide.hidden && courses.hidden) show("Click to continue");
+    if (!touch && !sheetOpen()) show("Click to continue");
   });
   addEventListener("pointerdown", (e) => {
     if (e.target.closest?.(".ui")) return;
     canvas.focus();
     overlay.hidden = true;
   });
-  canvas.focus();
   // ?control lets web/control.py drive the page (see ../game/control.js).
   if (params.has("control")) {
     const session = Math.random().toString(36).slice(2, 10);

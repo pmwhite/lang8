@@ -16,8 +16,9 @@
 //
 // Scores are taken as sent: nothing here rides the replay to check it.
 
-// The courses a board covers (and each day's: see dayOf), how many players
-// it holds, and how long a replay may be.
+// The courses a board covers, and as many parks (and each day's course and
+// park: see dayOf), how many players it holds, and how long a replay may
+// be.
 const COURSES = 24;
 const MAX_PLAYERS = 60;
 const MAX_REPLAY = 150000;
@@ -54,8 +55,12 @@ const dayOf = (course) => {
 const DAY = 24 * 60 * 60 * 1000;
 // A course a board covers: one of the first few, or a day's. To post to a
 // day's it must be that day somewhere in the world.
-const validCourse = (course) => whole(course, 1, COURSES) || dayOf(course) !== null;
-const openCourse = (course) => whole(course, 1, COURSES) || (dayOf(course) !== null && Math.abs(Date.now() - dayOf(course) - DAY / 2) < DAY / 2 + 14 * 60 * 60 * 1000);
+// (A park's number is its course's, negative: park 3 is -3, and a day's park
+// its date, negative.)
+const validPlace = (n) => whole(n, 1, COURSES) || dayOf(n) !== null;
+const openPlace = (n) => whole(n, 1, COURSES) || (dayOf(n) !== null && Math.abs(Date.now() - dayOf(n) - DAY / 2) < DAY / 2 + 14 * 60 * 60 * 1000);
+const validCourse = (course) => Number.isInteger(course) && validPlace(Math.abs(course));
+const openCourse = (course) => Number.isInteger(course) && openPlace(Math.abs(course));
 // Days' courses are kept this long.
 const KEEP_DAYS = 30;
 const dayNumber = (at) => {
@@ -108,8 +113,8 @@ async function post(env, code, body) {
   await env.DB.prepare("INSERT OR REPLACE INTO scores (board, course, name, score, version, replay, at) VALUES (?, ?, ?, ?, ?, ?, ?)")
     .bind(code, course, name, score, version, replay, Date.now()).run();
   // (Old days' runs go as new ones come.)
-  if (dayOf(course) !== null) {
-    await env.DB.prepare("DELETE FROM scores WHERE board = ? AND course > ? AND course < ?").bind(code, 20000000, dayNumber(Date.now() - KEEP_DAYS * DAY)).run();
+  if (dayOf(Math.abs(course)) !== null) {
+    await env.DB.prepare("DELETE FROM scores WHERE board = ? AND ABS(course) > ? AND ABS(course) < ?").bind(code, 20000000, dayNumber(Date.now() - KEEP_DAYS * DAY)).run();
   }
   return reply(200, { posted: true, best: score });
 }

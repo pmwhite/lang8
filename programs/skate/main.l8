@@ -83,6 +83,10 @@ type Camera = {
 const TV_GAP: f32 = 46.0;
 
 update_tv_camera(c: *Camera, pos: V3) {
+    if (park) {
+        update_park_camera(c, pos);
+        return
+    }
     d: f32 = -pos.z;
     k: f32 = floorf((d + 14.0) / TV_GAP);
     cd: f32 = k * TV_GAP + 22.0;
@@ -94,9 +98,33 @@ update_tv_camera(c: *Camera, pos: V3) {
     c.fov = clampf(2.0 * atan2f(4.5, v_len(v_sub(c.eye, c.target))), 0.28, 1.0)
 }
 
-// Watch recording which (see replay.l8), if there is one of this course.
+// In a park, four cameras stand up beyond its deck, at the middle of each
+// side; the nearest watches him, and gives him up to another only when
+// that one is a good deal nearer.
+tv_park: int = 0;
+
+park_camera_at(k: int): V3 {
+    reach: f32 = bowl_top() + PARK_DECK + 3.0;
+    if (k == 0) return v3(0.0, 7.0, PARK_HZ + reach);
+    if (k == 1) return v3(PARK_HX + reach, 7.0, 0.0);
+    if (k == 2) return v3(0.0, 7.0, -(PARK_HZ + reach));
+    v3(-(PARK_HX + reach), 7.0, 0.0)
+}
+
+update_park_camera(c: *Camera, pos: V3) {
+    best: int = tv_park;
+    for k in 0..4 {
+        if (v_len(v_sub(park_camera_at(k), pos)) < v_len(v_sub(park_camera_at(best),
+            pos)) - 8.0) best = k
+    }
+    tv_park = best;
+    c.eye = park_camera_at(best);
+    c.target = v3(pos.x, pos.y + 0.9, pos.z);
+    c.fov = clampf(2.0 * atan2f(5.5, v_len(v_sub(c.eye, c.target))), 0.28, 1.0)
+}
+
+// Watch recording which (see replay.l8), if there is one of this place.
 start_replay(m: *Mover, which: int): bool {
-    if (park) return false;
     // (The run just finished is the last one.)
     rec_keep();
     if (!can_play(which)) return false;
@@ -108,7 +136,7 @@ start_replay(m: *Mover, which: int): bool {
 // and each run's score as he finishes it.
 say_course() raises IoError {
     write(1, "L8COURSE ");
-    write_int(1, course_seed);
+    write_int(1, run_id());
     print("")
 }
 
@@ -158,6 +186,24 @@ say_list(seed: int) raises IoError {
     print("")
 }
 
+// And what is in park seed (its number said negative, as a park's is).
+say_park(seed: int) raises IoError {
+    park_seed = seed;
+    lay_park();
+    write(1, "L8LIST ");
+    write_int(1, -seed);
+    for i in 0..nfeatures {
+        k: int = features[i].kind;
+        if (k == FEATURE_KICKER) write(1, " KICKER");
+        if (k == FEATURE_GAP) write(1, " GAP");
+        if (k == FEATURE_ROLLERS) write(1, " ROLLERS")
+    }
+    for i in 0..ncrails {
+        if (crails[i].box) write(1, " BOX") else write(1, " RAIL")
+    }
+    print("")
+}
+
 // The number after prefix in the environment, or 0.
 env_number(prefix: str): int {
     for e in l8_environment() {
@@ -175,8 +221,12 @@ env_number(prefix: str): int {
 
 say_courses() raises IoError {
     for s in 1..mini(env_number("L8_COURSES="), 60) + 1 say_list(s);
+    for s in 1..mini(env_number("L8_PARKS="), 60) + 1 say_park(s);
     daily: int = env_number("L8_DAILY=");
-    if (daily > 0) say_list(daily)
+    if (daily > 0) {
+        say_list(daily);
+        say_park(daily)
+    }
 }
 
 const CAM_FOLLOW: f32 = 0.6;
@@ -278,44 +328,62 @@ look_from_env(): int {
     0
 }
 
-// A course laid out from seed: the ground, its grass, and him at the top.
-new_course(
+// Go to place id (a course's number, or a park's, negative: see run_id):
+// its ground and its grass built, and him at its start.
+go_to(
     m: *Mover,
     r: *Renderer,
     world: *Mesh,
-    seed: int
+    id: int
 ) {
-    park = false;
-    // (Another course's replays and best are no use on this one.)
-    if (seed != course_seed) {
+    // (Another place's replays and best are no use here.)
+    if (id != run_id() || !world_built) {
         rec_forget();
         run.best_run = 0
     }
+    world_built = true;
     play_which = -1;
-    course_seed = seed;
-    load_course();
-    build_grass();
-    build_course(world);
+    park = id < 0;
+    if (park) {
+        park_seed = -id;
+        load_park();
+        build_park_grass();
+        build_park(world)
+    } else {
+        course_seed = id;
+        load_course();
+        build_grass();
+        build_course(world)
+    }
     set_course_mesh(r, world);
     set_course_lamps(r);
     set_course_glows(r);
     set_grass(r);
-    enter_course(m);
+    start_over(m);
     rec_begin()
 }
 
-// The park: its ground, its grass, and him at the near end.
-go_to_park(m: *Mover, r: *Renderer, world: *Mesh) {
-    park = true;
-    play_which = -1;
-    load_park();
-    build_park_grass();
-    build_park(world);
-    set_course_mesh(r, world);
-    set_course_lamps(r);
-    set_course_glows(r);
-    set_grass(r);
-    enter_park(m)
+world_built: bool = false;
+
+// Where to go next (see go_to), or 0; and the look to change to first, or
+// 0. It is built after a frame that says so: it takes a moment.
+go_id: int = 0;
+
+go_look: int = 0;
+
+ask_go(id: int) {
+    if (hud_building != 0 || id == 0) return;
+    go_id = id;
+    hud_going = 5;
+    if (id < 0) hud_going = 1;
+    hud_building = 1
+}
+
+// A place of the same kind as this one, picked at random.
+random_place(): int {
+    n: int = (absi(run_id()) % 100000 * 48271 + mono_ns() / 1000) % 100000 + 1;
+    if (park) return -n;
+    n
 }
 
 starts_with(s: str, prefix: str): bool {
@@ -383,9 +451,6 @@ main() raises IoError: int {
     grass_on = getenv("L8_NO_GRASS") == null;
     pick_look(look_from_env());
     say_courses();
-    course_seed = seed_from_env();
-    load_course();
-    build_grass();
     world: *Mesh = new_mesh(1600000);
     parts: *Mesh = new_mesh(60000);
     build_parts(parts);
@@ -433,27 +498,22 @@ main() raises IoError: int {
     XMapRaised(dpy, win);
     XkbSetDetectableAutoRepeat(dpy, 1, null);
     XFlush(dpy);
-    eprint("L8 skate: left/right steer; hold Space and tap arrows to aim a trick, let go to jump; X grabs; Tab for the park or back; R restarts, N a new course, L night or day, Escape quits");
+    eprint("L8 skate: left/right steer; hold Space and tap arrows to aim a trick, let go to jump; X grabs; Tab for the park or back; R restarts, N a new one, L night or day, Escape quits");
     ctx0: ?*i8 = glXCreateContext(dpy, vis, null, 1);
     if (ctx0 == null) die("glXCreateContext failed");
     ctx: *i8 = ctx0;
     if (glXMakeCurrent(dpy, win, ctx) == 0) die("glXMakeCurrent failed");
     glXSwapIntervalEXT(dpy, win, 1);
     r: *Renderer = new_renderer(parts);
-    build_course(world);
-    set_course_mesh(r, world);
-    set_course_lamps(r);
-    set_course_glows(r);
-    set_grass(r);
     m: *Mover = new_mover();
-    enter_course(m);
-    rec_begin();
+    // L8_SEED is the course to start on; with L8_PARK, the park.
+    first: int = seed_from_env();
+    if (getenv("L8_PARK") != null) first = -first;
+    go_to(m, r, world, first);
     write(1, "L8VERSION ");
     write_int(1, REPLAY_VERSION);
     print("");
     say_course();
-    // L8_PARK starts in the park.
-    if (getenv("L8_PARK") != null) go_to_park(m, r, world);
     a: *Anim = new_anim(m.heading, m.y);
     start: V3 = v3(m.x, m.y, m.z);
     cam: *Camera = new Camera {
@@ -470,7 +530,6 @@ main() raises IoError: int {
     watch_pending: bool = false;
     typed: int = -1;
     typed_t: f32 = 0.0;
-    pick_seed: int = 0;
     was_finished: bool = false;
     update_course_camera(cam, start, m.carve, 10.0);
     keys: Keys = no_keys();
@@ -504,14 +563,10 @@ main() raises IoError: int {
                         stopped = true
                     }
                     // T: the tutorial.
-                    if (ks == 116 && hud_building == 0) {
-                        pick_seed = TUTORIAL;
-                        hud_going = 5;
-                        hud_building = 1
-                    }
+                    if (ks == 116) ask_go(TUTORIAL);
                     if (play_which >= 0 && (ks == 32 || ks == 112 || ks == 98 || ks == 114)) {
                         play_which = -1;
-                        enter_course(m);
+                        start_over(m);
                         rec_begin();
                         pointers_clear(&keys);
                         a.y = m.y;
@@ -533,9 +588,9 @@ main() raises IoError: int {
                     // V: watch the friend's run the page has handed over, on
                     // its course (going there first, if he is elsewhere).
                     if (ks == 118 && hud_building == 0 && read_watch()) {
-                        if (park || rec_seed[REC_FRIEND] != course_seed) {
-                            pick_seed = rec_seed[REC_FRIEND];
-                            watch_pending = true
+                        if (rec_seed[REC_FRIEND] != run_id()) {
+                            ask_go(rec_seed[REC_FRIEND]);
+                            watch_pending = hud_building != 0
                         } else if (start_replay(m, REC_FRIEND)) {
                             pointers_clear(&keys);
                             a.y = m.y;
@@ -543,60 +598,49 @@ main() raises IoError: int {
                             update_course_camera(cam, cam.target, m.carve, 10.0)
                         }
                     }
-                    // A course's number, typed, and Enter: that course. [ and
-                    // ]: the one before, and the next.
+                    // A number typed, and Enter: that course; and Tab: that
+                    // park. [ and ]: the one before, and the next. Tab alone:
+                    // from the course to the park, or back.
                     if (ks >= 48 && ks <= 57) {
                         if (typed < 0) typed = 0;
                         typed = mini(typed * 10 + ks - 48, 99999999);
                         typed_t = 0.0
                     }
-                    if (hud_building == 0) {
-                        if (ks == 65293 && typed > 0) pick_seed = typed;
-                        if (ks == 93 && course_seed != TUTORIAL) pick_seed = course_seed + 1;
-                        if (ks == 93 && course_seed == TUTORIAL) pick_seed = 1;
-                        if (ks == 91 && course_seed > 1 && course_seed != TUTORIAL) pick_seed = course_seed - 1;
-                        if (pick_seed > 0) {
-                            hud_going = 5;
-                            hud_building = 1;
-                            typed = -1
-                        }
+                    if (ks == 65293 && typed > 0) ask_go(typed);
+                    if (ks == 65289) {
+                        if (typed > 0) ask_go(-typed) else if (park) ask_go(course_seed) else ask_go(-park_seed)
                     }
+                    here: int = absi(run_id());
+                    if (ks == 93) {
+                        if (in_tutorial()) ask_go(1) else ask_go(signi(run_id()) * (here + 1))
+                    }
+                    if (ks == 91 && here > 1 && !in_tutorial()) ask_go(signi(run_id()) * (here - 1));
+                    if (hud_building != 0) typed = -1;
                     if (ks == 114 && !stopped) {
                         say_now();
-                        if (park) {
-                            enter_park(m);
-                            cam.target = v3(m.x, m.y, m.z);
-                            update_course_camera(cam, cam.target, m.carve, 10.0)
-                        } else {
-                            enter_course(m);
-                            rec_begin();
-                            cam.target = v3(m.x, m.y, m.z);
-                            update_course_camera(cam, cam.target, m.carve, 10.0)
-                        }
+                        start_over(m);
+                        rec_begin();
+                        cam.target = v3(m.x, m.y, m.z);
+                        update_course_camera(cam, cam.target, m.carve, 10.0);
                         a.y = m.y
                     }
-                    // N: a new course.
-                    // (It is laid out after a frame that says so: it takes a
-                    // moment.)
-                    if (ks == 110 && !park && hud_building == 0) hud_building = 1;
+                    // N: a new course (or park), at random.
+                    if (ks == 110) ask_go(random_place());
                     // At the finish, up and down scroll the report.
                     if (m.finished) {
                         if (ks == 65362 || ks == 119) hud_scroll = hud_scroll - 4.0;
                         if (ks == 65364 || ks == 115) hud_scroll = hud_scroll + 4.0
                     }
-                    // Tab: to the park, or back to the course (built after a
-                    // frame that says so, as a new course is).
-                    if (ks == 65289 && hud_building == 0) {
-                        hud_going = 1;
-                        if (park) hud_going = 2;
-                        hud_building = 1
-                    }
                     // L: night, or day again (the world is built again in its
                     // light).
                     if (ks == 108 && hud_building == 0) {
+                        ask_go(run_id());
+                        go_look = 110;
                         hud_going = 3;
-                        if (look.night) hud_going = 4;
-                        hud_building = 1
+                        if (look.night) {
+                            go_look = 98;
+                            hud_going = 4
+                        }
                     }
                     // Space is the trick pad, and arrows pressed while it is
                     // held aim the trick.
@@ -616,7 +660,7 @@ main() raises IoError: int {
                     // A tap stops a replay, and he starts over.
                     if (play_which >= 0) {
                         play_which = -1;
-                        enter_course(m);
+                        start_over(m);
                         rec_begin();
                         pointers_clear(&keys);
                         a.y = m.y;
@@ -647,16 +691,12 @@ main() raises IoError: int {
         }
         if (running && hud_building == 2) {
             say_now();
-            if (hud_going == 5) {
-                new_course(m, r, world, pick_seed);
-                pick_seed = 0
-            } else if (hud_going >= 3) {
-                if (hud_going == 3) pick_look(110) else pick_look(98);
-                if (park) go_to_park(m, r, world) else new_course(m, r, world, course_seed)
-            } else if (hud_going == 1) go_to_park(m, r, world) else if (hud_going == 2) new_course(m,
-                r, world, course_seed) else new_course(m, r, world, (course_seed * 48271 + mono_ns() / 1000) % 100000);
+            if (go_look != 0) pick_look(go_look);
+            go_look = 0;
+            go_to(m, r, world, go_id);
+            go_id = 0;
             hud_going = 0;
-            if (!park) say_course();
+            say_course();
             if (watch_pending) {
                 watch_pending = false;
                 if (start_replay(m, REC_FRIEND)) pointers_clear(&keys)
@@ -696,7 +736,7 @@ main() raises IoError: int {
                         keys.hop_held = false;
                         keys.style_held = false
                     }
-                } else if (!park && !in_tutorial()) rec_step(&keys);
+                } else if (!in_tutorial()) rec_step(&keys);
                 starts: int = course_starts;
                 best: int = run.best_run;
                 step_course(m, &keys, STEP_DT);
@@ -704,13 +744,9 @@ main() raises IoError: int {
                 if (play_which == REC_FRIEND) run.best_run = best;
                 if (in_tutorial()) {
                     // (From the tutorial's finish, on to the first course.)
-                    if (course_starts != starts && hud_building == 0) {
-                        pick_seed = 1;
-                        hud_going = 5;
-                        hud_building = 1
-                    }
+                    if (course_starts != starts) ask_go(1);
                     tut_step(m, STEP_DT)
-                } else if (play_which < 0 && !park) {
+                } else if (play_which < 0) {
                     if (course_starts != starts) {
                         rec_drop();
                         rec_begin()
@@ -728,7 +764,7 @@ main() raises IoError: int {
                 cam.target = v3(m.x, m.y, m.z);
                 update_course_camera(cam, cam.target, m.carve, 10.0)
             }
-            if (!park && play_which < 0 && m.finished && m.finish_t > FINISH_TAIL) say_now();
+            if (play_which < 0 && m.finished && m.finish_t > FINISH_TAIL) say_now();
             if (rec_tell >= 0) {
                 say_run(rec_tell);
                 rec_tell = -1
@@ -739,7 +775,7 @@ main() raises IoError: int {
             hud_typed = typed;
             hud_blink = hud_blink + dt;
             hud_replay = play_which;
-            hud_can_replay = !park && (rec_done || can_play(REC_LAST));
+            hud_can_replay = rec_done || can_play(REC_LAST);
             if (acc > STEP_DT) acc = 0.0;
             alpha: f32 = acc / STEP_DT;
             pos: V3 = v_lerp(m.prev, v3(m.x, m.y, m.z), alpha);
@@ -785,7 +821,8 @@ main() raises IoError: int {
             update_marks(m);
             hud_dt = dt;
             find_zones();
-            hud_seed = course_seed;
+            hud_seed = run_id();
+            hud_time_left = PARK_TIME - m.run_t;
             view: View = View {
                 eye: cam.eye,
                 at: cam.target,
