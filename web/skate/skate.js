@@ -103,6 +103,9 @@ addEventListener("keydown", (e) => {
 // (L8FINISH); the best on each is kept here, on the device. Picking one
 // types its number to the game, and Enter.
 const COURSES = 24;
+// The tutorial's course (see programs/skate/tutorial.l8): where a new
+// player starts, until he has left it for another.
+const TUTORIAL = 100000000;
 const SECTION_NAMES = { KICKERS: "Kickers", RAILS: "Rails", PIPE: "Halfpipe", CLIFF: "Cliff", GAP: "Gap", ROLLERS: "Rollers" };
 const courseList = new Map();
 let courseNow = 0;
@@ -209,7 +212,10 @@ const gameSays = (line) => {
   else if (words[0] === "L8REPLAY") postRun(Number(words[1]), Number(words[2]), Number(words[3]), words.slice(4).join(" "));
   else if (words[0] === "L8COURSE") {
     courseNow = Number(words[1]);
-    store("skate.course", courseNow);
+    if (courseNow !== TUTORIAL) {
+      store("skate.course", courseNow);
+      store("skate.tutorial", true);
+    }
   } else if (words[0] === "L8FINISH") {
     const [n, score] = [Number(words[1]), Number(words[2])];
     if (score > (bests[n] ?? 0)) {
@@ -234,8 +240,10 @@ const closeCourses = () => {
 const pickCourse = (n) => {
   closeCourses();
   setMode(false);
-  // Its digits and Enter; or N, for a new one at random.
-  if (n > 0) typeKeys([...String(n)].map((c) => 48 + Number(c)).concat(65293));
+  // Its digits and Enter; or T, for the tutorial; or N, for a new one at
+  // random.
+  if (n === TUTORIAL) typeKeys([116]);
+  else if (n > 0) typeKeys([...String(n)].map((c) => 48 + Number(c)).concat(65293));
   else typeKeys([110]);
 };
 const showCourses = () => {
@@ -296,8 +304,9 @@ const showCourses = () => {
   const yesterday = board?.courses?.[dailyCourse(Date.now() - 24 * 60 * 60 * 1000)]?.[0];
   card(today, `Daily \u00b7 ${dayName(today)}`, (kindsOf(today) || "Today's course, the same for everyone") + (yesterday ? ` \u00b7 Yesterday: ${yesterday.name} ${yesterday.score}` : ""));
   for (const [n] of courseList) if (!isDaily(n)) card(n, `Course ${n}`, kindsOf(n));
-  if (courseNow > COURSES && courseNow !== today) card(courseNow, isDaily(courseNow) ? `Daily \u00b7 ${dayName(courseNow)}` : `Course ${courseNow}`, "The one you are on");
+  if (courseNow > COURSES && courseNow !== today && courseNow !== TUTORIAL) card(courseNow, isDaily(courseNow) ? `Daily \u00b7 ${dayName(courseNow)}` : `Course ${courseNow}`, "The one you are on");
   card(0, "Random", "A new course, laid out afresh");
+  card(TUTORIAL, "Tutorial", "How to steer, jump, trick, grab, and grind, a step at a time");
 };
 const openCourses = () => {
   showCourses();
@@ -355,9 +364,12 @@ async function main() {
   if (startNight && !params.has("L8_LOOK")) params.set("L8_LOOK", "n");
   // He starts on the course he was last on (or the first), and the game
   // says what is on the first few.
-  // (An earlier day's course becomes today's.)
-  const last = stored("skate.course", 1) || 1;
-  if (!params.has("L8_SEED")) params.set("L8_SEED", String(isDaily(last) ? dailyCourse() : last));
+  // (An earlier day's course becomes today's; and someone new starts with
+  // the tutorial.)
+  const last = stored("skate.course", 0) || 0;
+  const start = last === 0 && !stored("skate.tutorial", false) ? TUTORIAL : last || 1;
+  if (!params.has("L8_SEED")) params.set("L8_SEED", String(isDaily(start) ? dailyCourse() : start));
+  if (touch) params.set("L8_TOUCH", "1");
   params.set("L8_COURSES", String(COURSES));
   params.set("L8_DAILY", String(dailyCourse()));
   sys.env = [...params].filter(([k]) => k.startsWith("L8_")).map(([k, v]) => `${k}=${v}`);
