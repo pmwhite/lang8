@@ -8,7 +8,7 @@ set -eu
 site=https://trailingwhite.space/skate
 secret=$(cat "$HOME/.config/skate-board/admin-secret")
 case "${1:-}" in
-  link) echo "$site/admin.html#$secret" ;;
+  link) echo "$site/admin#$secret" ;;
   all) curl -sS "$site/api/admin/all" -H "authorization: Bearer $secret"; echo ;;
   *) sed -n '2,6p' "$0" ;;
 esac

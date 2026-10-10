@@ -114,20 +114,24 @@ onTap(document.querySelector(".replay"), () => {
   typeKeys([112]);
 });
 
-// Sheets over the game: the menu, the guide, the places to pick from, and
-// a place. The game pauses (Pause, held) while any is open, and one
-// closes with its button, a tap outside it, or Escape.
-const sheets = Object.fromEntries(["menu", "guide", "places", "place"].map((id) => [id, document.getElementById(id)]));
+// Sheets over the game: home, the guide, the places to pick from, a place,
+// and a person. The game pauses (Pause, held) while any is open.
+const sheets = Object.fromEntries(["menu", "guide", "places", "place", "person"].map((id) => [id, document.getElementById(id)]));
 const sheetOpen = () => Object.values(sheets).some((el) => !el.hidden);
-// Whether he has started riding: until then the menu cannot be closed
-// without choosing.
+// Whether he has started riding: until then home cannot be left without
+// choosing.
 let started = false;
+// The sheets he has come through, the one showing last: each a sheet's
+// name and what it is of (a place's number, a person's name, whether the
+// places are parks). Going on to another adds one; going back takes one
+// off, down to the game.
+const trail = [];
 // (The page's buttons know of it: with a sheet open, the one that goes back
-// from it takes the menu's place, unless there is nowhere to go back to.)
+// from it takes home's place, unless there is nowhere to go back to.)
 const sheetsChanged = () => {
   const open = Object.keys(sheets).find((id) => !sheets[id].hidden);
   document.body.classList.toggle("sheet", !!open);
-  document.body.classList.toggle("canback", !!open && (open !== "menu" || started));
+  document.body.classList.toggle("canback", !!open && (trail.length > 1 || started));
   syncPreview();
 };
 // While a place's sheet is up the game shows the place off: a key held
@@ -147,33 +151,49 @@ const openSheet = (id) => {
 };
 const closeSheets = () => {
   for (const el of Object.values(sheets)) el.hidden = true;
+  trail.length = 0;
   started = true;
   sheetsChanged();
   overlay.hidden = true;
   sendKey?.(3, 65299);
   canvas.focus();
 };
-// (Closing any sheet but the menu goes back to the one it came from: the
-// menu, or for a place the list of places.)
-const closeSheet = (id) => {
-  if (id === "menu") {
-    if (started) closeSheets();
-  } else if (id === "guide" && started) closeSheets();
-  else if (id === "place" && placeFrom === "places") openPlaces(pickingParks);
-  else openMenu();
+// Show the sheet he has come to (or the game, if there is none), with its
+// scores as they are now when they come.
+const present = () => {
+  const view = trail.at(-1);
+  if (!view) return closeSheets();
+  const [id, of] = view;
+  if (id === "places") pickingParks = of;
+  if (id === "place") visit((placeOf = of));
+  if (id === "person") personOf = of;
+  showOpen(id);
+  openSheet(id);
+  loadScores().then(() => {
+    if (trail.at(-1) === view) showOpen(id);
+  });
 };
-// A sheet closes with a tap outside it, the button in the corner that goes
-// back, or Escape.
+const go = (id, of) => {
+  trail.push([id, of]);
+  present();
+};
+const goHome = () => {
+  trail.length = 0;
+  go("menu");
+};
+// A sheet is left by the button in the corner that goes back, a tap
+// outside it, or Escape.
 const goBack = () => {
-  const open = Object.entries(sheets).find(([, el]) => !el.hidden);
-  if (open) closeSheet(open[0]);
+  if (trail.length === 0 || (trail.length === 1 && !started)) return;
+  trail.pop();
+  present();
 };
-for (const [id, el] of Object.entries(sheets)) onTap(el, () => closeSheet(id), (e) => e.target === el);
+for (const el of Object.values(sheets)) onTap(el, goBack, (e) => e.target === el);
 onTap(document.querySelector(".back"), goBack);
 addEventListener("keydown", (e) => {
   if (e.key === "Escape") goBack();
 });
-onTap(document.querySelector(".how"), () => openSheet("guide"));
+onTap(document.querySelector(".how"), () => go("guide"));
 
 // Places: a downhill course is a number; a park is one too, kept negative
 // (as the game says them: see run_id in programs/skate/park.l8). Each
@@ -248,7 +268,7 @@ const typePlace = (id) => {
   else typeKeys([...String(Math.abs(id))].map((c) => 48 + Number(c)).concat(id < 0 ? 65289 : 65293));
 };
 // Have the game go there, the page's sheets left as they are (see
-// openPlace).
+// showPlace).
 const visit = (id) => {
   if (!sendKey) wanted = id;
   else if (id !== (headed ?? placeNow)) typePlace(id);
@@ -397,35 +417,125 @@ const gameSays = (line) => {
   return true;
 };
 
-// The menu: what to play.
+// A row of tabs: one more, lit if it is the one picked; picking it shows
+// the sheet again.
+const addTab = (row, label, on, pick, reshow) => {
+  const t = document.createElement("span");
+  t.className = "tab" + (on ? " on" : "");
+  t.textContent = label;
+  onTap(t, () => {
+    pick();
+    reshow();
+  });
+  row.append(t);
+};
+// A list of runs, a row each: its cells in order, each [class, text, what
+// a tap on it does (if anything)]; and what a tap on the rest of the row
+// does. A row is lit if the run is his own.
+const runList = (el, runs, cells, tap) => {
+  el.textContent = "";
+  if (runs.length === 0) {
+    const p = document.createElement("p");
+    p.textContent = "No runs yet";
+    el.append(p);
+    return;
+  }
+  const ol = document.createElement("ol");
+  ol.className = "runs";
+  runs.forEach((run, i) => {
+    const li = document.createElement("li");
+    if (run.name && run.name === account?.name) li.className = "mine";
+    for (const [cls, text, act] of cells(run, i)) {
+      const span = document.createElement("span");
+      span.className = cls + (act ? " link" : "");
+      span.textContent = text;
+      if (act) onTap(span, act);
+      li.append(span);
+    }
+    if (tap) {
+      li.classList.add("link");
+      onTap(li, () => tap(run));
+    }
+    ol.append(li);
+  });
+  el.append(ol);
+};
+// (A best run can be watched, if this game can still play it.)
+const watchCell = (run, id) => (run.version === gameVersion ? [["watch", "▶", () => watchRun(run.id, id)]] : []);
+
+// What has been ridden lately in his groups, newest first: every group's
+// latest runs together (a run that is in two groups, once).
+const feed = () => {
+  const seen = new Set();
+  const runs = [];
+  for (const g of groups()) {
+    for (const [course, list] of Object.entries(g.recent ?? {})) {
+      for (const run of list) {
+        const key = `${run.name} ${course} ${run.at}`;
+        if (seen.has(key) || !current(run)) continue;
+        seen.add(key);
+        runs.push({ ...run, course: Number(course) });
+      }
+    }
+  }
+  return runs.sort((a, b) => b.at - a.at);
+};
+// Someone's best on each place they have ridden, as his groups know them:
+// the day's first, then the courses, the parks, and days gone by.
+const placeRank = (id) => {
+  const n = Math.abs(id);
+  const park = id < 0 ? 0.5 : 0;
+  if (isDaily(id)) return n === today() ? park : 1e8 - n + park;
+  return (id < 0 ? 1000 : 10) + n;
+};
+const bestsOf = (name) => {
+  const best = new Map();
+  for (const g of groups()) {
+    for (const [course, list] of Object.entries(g.courses ?? {})) {
+      for (const run of list) if (run.name === name && current(run)) best.set(Number(course), run);
+    }
+  }
+  return [...best].map(([course, run]) => ({ ...run, course })).sort((a, b) => placeRank(a.course) - placeRank(b.course));
+};
+
+// Home: what to play, who he is (if someone: see `linked`), and what his
+// groups have been riding. A run there goes to its place; its rider's
+// name, to them.
+const FEED = 30;
 const showMenu = () => {
   const el = sheets.menu;
   const item = (go) => el.querySelector(`.item[data-go="${go}"]`);
   const fresh = !stored("skate.tutorial", false) && !stored("skate.course", 0);
   item("tutorial").classList.toggle("first", fresh);
   item("tutorial").querySelector("i").textContent = fresh ? "Start here" : "";
-  // (Who he plays as, if someone, and in which groups.)
-  el.querySelector(".me").textContent = account ? [account.name, ...groups().map((g) => g.title)].join(" · ") : "";
-};
-const openMenu = () => {
-  showMenu();
-  openSheet("menu");
-  // (His groups as they are now, when they come.)
-  loadScores().then(() => {
-    if (!sheets.menu.hidden) showMenu();
-  });
+  const me = el.querySelector(".me");
+  me.hidden = !account;
+  me.querySelector("b").textContent = account?.name ?? "";
+  me.querySelector("small").textContent = groups().map((g) => g.title).join(" · ");
+  const runs = feed().slice(0, FEED);
+  el.querySelector(".feedhead").hidden = runs.length === 0;
+  const list = el.querySelector(".feed");
+  if (runs.length === 0) list.textContent = "";
+  else
+    runList(
+      list,
+      runs,
+      (run) => [["who", run.name, () => go("person", run.name)], ["what", placeName(run.course)], ["score", String(run.score)], ["when", ago(run.at)]],
+      (run) => go("place", run.course)
+    );
 };
 for (const el of sheets.menu.querySelectorAll(".item")) {
   onTap(el, () => {
-    const go = el.dataset.go;
-    if (go === "tutorial") goTo(TUTORIAL);
-    if (go === "daily") openPlace(today(), "menu");
-    if (go === "dailypark") openPlace(-today(), "menu");
-    if (go === "courses") openPlaces(false);
-    if (go === "parks") openPlaces(true);
+    const to = el.dataset.go;
+    if (to === "tutorial") goTo(TUTORIAL);
+    if (to === "daily") go("place", today());
+    if (to === "dailypark") go("place", -today());
+    if (to === "courses") go("places", false);
+    if (to === "parks") go("places", true);
   });
 }
-onTap(document.querySelector(".pick"), () => openMenu());
+onTap(sheets.menu.querySelector(".me"), () => go("person", account.name));
+onTap(document.querySelector(".pick"), goHome);
 
 // The places to pick from: the courses, or the parks, and one at random.
 let pickingParks = false;
@@ -439,16 +549,11 @@ const showPlaces = () => {
     const div = document.createElement("div");
     div.className = "course";
     div.textContent = title;
-    onTap(div, () => openPlace(id || randomPlace(park), "places"));
+    onTap(div, () => go("place", id || randomPlace(park)));
     grid.append(div);
   };
   for (let n = 1; n <= PLACES; n++) card(`${park ? "Park" : "Course"} ${n}`, park ? -n : n);
   card("Random", 0);
-};
-const openPlaces = (park) => {
-  pickingParks = park;
-  showPlaces();
-  openSheet("places");
 };
 
 // A place, before he rides it. The game goes there and shows it off behind
@@ -456,9 +561,8 @@ const openPlaces = (park) => {
 // button to ride it, and its scores: his own, kept on this device, and
 // each of his groups' (for a place groups keep scores of), either the best
 // (in a group, one for each member, with the run to watch) or the latest.
-// (Back goes to where it was opened from: the menu, or the places.)
+// A rider's name there goes to them.
 let placeOf = 0;
-let placeFrom = "menu";
 let tabWho = stored("skate.who", null);
 let tabWhat = "best";
 const showPlace = () => {
@@ -468,76 +572,51 @@ const showPlace = () => {
   // Whose: his own, or a group's (the first, until he picks).
   const theirs = postable(id) ? groups() : [];
   const who = tabWho !== "me" && theirs.length ? (theirs.find((g) => g.id === tabWho) ?? theirs[0]).id : "me";
-  const tab = (row, label, on, pick) => {
-    const t = document.createElement("span");
-    t.className = "tab" + (on ? " on" : "");
-    t.textContent = label;
-    onTap(t, () => {
-      pick();
-      showPlace();
-    });
-    row.append(t);
-  };
   const whos = el.querySelector(".tabs.who");
   whos.textContent = "";
   whos.hidden = theirs.length === 0;
   const pickWho = (code) => () => store("skate.who", (tabWho = code));
-  for (const g of theirs) tab(whos, g.title, who === g.id, pickWho(g.id));
-  tab(whos, "You", who === "me", pickWho("me"));
+  for (const g of theirs) addTab(whos, g.title, who === g.id, pickWho(g.id), showPlace);
+  addTab(whos, "You", who === "me", pickWho("me"), showPlace);
   const whats = el.querySelector(".tabs.what");
   whats.textContent = "";
-  tab(whats, "Best", tabWhat === "best", () => (tabWhat = "best"));
-  tab(whats, "Recent", tabWhat === "recent", () => (tabWhat = "recent"));
+  addTab(whats, "Best", tabWhat === "best", () => (tabWhat = "best"), showPlace);
+  addTab(whats, "Recent", tabWhat === "recent", () => (tabWhat = "recent"), showPlace);
   // The runs: a score each, and whose or when.
   const best = tabWhat === "best";
-  const runs = who === "me" ? (myRuns[id]?.[tabWhat] ?? []).map(([score, at]) => ({ score, at })) : best ? bestsOn(who, id) : recentOn(who, id);
   const list = el.querySelector(".list");
-  list.textContent = "";
-  if (runs.length === 0) {
-    const p = document.createElement("p");
-    p.textContent = "No runs yet";
-    list.append(p);
+  if (who === "me") {
+    const runs = (myRuns[id]?.[tabWhat] ?? []).map(([score, at]) => ({ score, at }));
+    runList(list, runs, (run, i) => [...(best ? [["n", `${i + 1}.`]] : []), ["who", ago(run.at)], ["score", String(run.score)]]);
     return;
   }
-  const ol = document.createElement("ol");
-  runs.forEach((run, i) => {
-    const li = document.createElement("li");
-    if (who !== "me" && run.name === account?.name) li.className = "me";
-    const cell = (cls, text) => {
-      const span = document.createElement("span");
-      span.className = cls;
-      span.textContent = text;
-      li.append(span);
-      return span;
-    };
-    if (best) cell("n", `${i + 1}.`);
-    if (who === "me") cell("who", ago(run.at));
-    else {
-      cell("who", run.name);
-      if (!best) cell("when", ago(run.at));
-    }
-    cell("score", String(run.score));
-    // (A group's best can be watched, if this game can still play it.)
-    if (who !== "me" && best && run.version === gameVersion) {
-      const watch = cell("watch", "▶");
-      watch.title = "Watch this run";
-      onTap(watch, () => watchRun(run.id, id));
-    }
-    ol.append(li);
-  });
-  list.append(ol);
-};
-const openPlace = (id, from) => {
-  placeOf = id;
-  placeFrom = from;
-  visit(id);
-  showPlace();
-  openSheet("place");
-  loadScores().then(() => {
-    if (!sheets.place.hidden) showPlace();
-  });
+  const name = (run) => ["who", run.name, () => go("person", run.name)];
+  if (best) runList(list, bestsOn(who, id), (run, i) => [["n", `${i + 1}.`], name(run), ["score", String(run.score)], ...watchCell(run, id)]);
+  else runList(list, recentOn(who, id), (run) => [name(run), ["when", ago(run.at)], ["score", String(run.score)]]);
 };
 onTap(sheets.place.querySelector(".play"), () => goTo(placeOf));
+
+// A person (himself, from home; or anyone in a group of his, by their
+// name on a run): their best on each place they have ridden, each to watch,
+// or their latest runs. A run goes to its place.
+let personOf = "";
+let personWhat = "best";
+const showPerson = () => {
+  const el = sheets.person;
+  const name = personOf;
+  el.querySelector("h2").textContent = name;
+  // (The groups of his they are in: those that have a run of theirs.)
+  const inGroup = (g) => name === account?.name || [g.courses, g.recent].some((by) => Object.values(by ?? {}).some((list) => list.some((run) => run.name === name)));
+  el.querySelector("p").textContent = groups().filter(inGroup).map((g) => g.title).join(" · ");
+  const whats = el.querySelector(".tabs.what");
+  whats.textContent = "";
+  addTab(whats, "Best", personWhat === "best", () => (personWhat = "best"), showPerson);
+  addTab(whats, "Recent", personWhat === "recent", () => (personWhat = "recent"), showPerson);
+  const list = el.querySelector(".list");
+  const place = (run) => go("place", run.course);
+  if (personWhat === "best") runList(list, bestsOf(name), (run) => [["who", placeName(run.course)], ["score", String(run.score)], ...watchCell(run, run.course)], place);
+  else runList(list, feed().filter((run) => run.name === name), (run) => [["who", placeName(run.course)], ["when", ago(run.at)], ["score", String(run.score)]], place);
+};
 
 // Where the game starts: the place he was last at (an earlier day's
 // becoming today's; and for someone new, the tutorial).
@@ -546,11 +625,13 @@ const startPlace = () => {
   const start = last === 0 && !stored("skate.tutorial", false) ? TUTORIAL : last || 1;
   return isDaily(start) ? Math.sign(start) * today() : start;
 };
-// The sheet that is open, shown again (its scores have come).
-const showOpen = () => {
-  if (!sheets.menu.hidden) showMenu();
-  if (!sheets.places.hidden) showPlaces();
-  if (!sheets.place.hidden) showPlace();
+// A sheet's contents, as they now are: the one named, or else whichever is
+// open (its scores have come).
+const showOpen = (id = Object.keys(sheets).find((name) => !sheets[name].hidden)) => {
+  if (id === "menu") showMenu();
+  if (id === "places") showPlaces();
+  if (id === "place") showPlace();
+  if (id === "person") showPerson();
 };
 
 async function main() {
@@ -563,7 +644,7 @@ async function main() {
   if (params.has("play")) {
     sheets.menu.hidden = true;
     sheetsChanged();
-  } else openMenu();
+  } else goHome();
   // (Opened by his link: who he is, once the leaderboards say.)
   if (linked) {
     loadMe().then((ok) => {
@@ -617,7 +698,7 @@ async function main() {
     skip: new Set((params.get("skip") ?? "").split(",").filter(Boolean)) });
   canvas.addEventListener("keydown", (e) => {
     if (e.code === "KeyL" && !e.repeat) setNight(!document.body.classList.contains("night"));
-    if (e.code === "KeyM" && !e.repeat) openMenu();
+    if ((e.code === "KeyH" || e.code === "KeyM") && !e.repeat) goHome();
   });
   // The steering and trick panels, placed over the game's view where the
   // game reads them: these fractions match programs/skate/touch.l8.
