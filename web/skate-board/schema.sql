@@ -40,5 +40,20 @@ CREATE TABLE IF NOT EXISTS log (
   at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS log_latest ON log (person, course, at);
+-- What a device has to say of how the game went on it: an error, or how
+-- fast its frames came (data, as JSON: see report, in ../skate/skate.js).
+-- With it, when; which visit to the page it is of; what the browser calls
+-- itself; and whose link the device has, if any. Not its address. The old
+-- ones are dropped (see KEEP_REPORTS in worker.js).
+CREATE TABLE IF NOT EXISTS reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  person TEXT,
+  session TEXT NOT NULL,
+  agent TEXT NOT NULL,
+  data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS reports_session ON reports (session);
 -- (The tables of before there were people, when a board was shared by its
 -- code, are no longer read or written: boards, players, scores, runs.)

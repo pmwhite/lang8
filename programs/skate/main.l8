@@ -121,16 +121,22 @@ fly_eye: V3 = V3 { x: 0.0, y: 0.0, z: 0.0 };
 
 fly_at: V3 = V3 { x: 0.0, y: 0.0, z: 0.0 };
 
+// (How many seconds until it is back at the top of a course, to go down it
+// again: the picture goes dark as it comes to that.)
+fly_left: f32 = 1000.0;
+
 fly_over(t: f32): V3 {
     if (park) {
         a: f32 = t * 0.2;
         fly_eye = v3(sinf(a) * (PARK_HX + 17.0), 14.0, cosf(a) * (PARK_HZ + 13.0));
         fly_at = v3(0.0, 0.0, 0.0);
+        fly_left = 1000.0;
         return fly_at
     }
     span: f32 = COURSE_FINISH + 40.0 - COURSE_START;
     along: f32 = t * 14.0;
     d: f32 = COURSE_START + along - floorf(along / span) * span;
+    fly_left = (COURSE_START + span - d) / 14.0;
     fly_eye = v3(sinf(t * 0.3) * 6.0, course_base(d - 18.0) + 11.0, -(d - 18.0));
     fly_at = v3(0.0, course_base(d + 10.0) + 1.0, -(d + 10.0));
     fly_at
@@ -333,6 +339,8 @@ go_to(
     set_grass(r);
     start_over(m);
     rec_begin();
+    // (The tutorial starts with the game riding it: see tutorial.l8.)
+    if (in_tutorial()) demo_begin() else demo_on = false;
     if (getenv("L8_TRACE") != null) {
         write(2, "longest without a frame, ms: ");
         write_int(2, breathe_longest / 1000000);
@@ -519,6 +527,8 @@ main() raises IoError: int {
     was_finished: bool = false;
     said_over: bool = false;
     said_ride: int = -1;
+    said_tut: int = -1;
+    said_hands: int = 0;
     friend_over: bool = false;
     update_course_camera(cam, start, m.carve, 10.0);
     keys: Keys = no_keys();
@@ -543,6 +553,24 @@ main() raises IoError: int {
     // the first few times, and when something has changed it), to spare
     // the device. How many frames it has been so.
     still: int = 0;
+    // Nothing in the picture changes all at once. The camera goes over to
+    // showing a place off, and comes back to him, by degrees (how far over
+    // it is: he waits for it, to ride); and where there must be a cut (he
+    // is put somewhere else, or a new place is up), the picture comes up
+    // out of the dark after it (see hud_dip). Where
+    // he was, and where the camera showing a place off looked, a frame
+    // ago, to tell a cut by.
+    fly: f32 = 0.0;
+    was_at: V3 = v3(0.0, 0.0, 0.0);
+    fly_was: V3 = v3(0.0, 0.0, 0.0);
+    // A key that cuts to somewhere else (R, from the top; P and B, to a run
+    // to watch; Backspace, back from one) is done a moment after it is
+    // pressed, the picture going dark meanwhile: which key, and when.
+    cut_key: int = 0;
+    cut_ns: int = 0;
+    // How fast time is going, from 0 (held) to 1.
+    flow: f32 = 0.0;
+    hud_dip = 1.0;
     while (running) {
         while (XPending(dpy) != 0) {
             XNextEvent(dpy, &ev);
@@ -561,43 +589,36 @@ main() raises IoError: int {
                     // friend's to the top, ready to ride. R starts over from
                     // either; C changes its camera.
                     stopped: bool = false;
-                    // Reading a lesson of the tutorial, Space (or Enter) goes
-                    // on with it, and nothing else does anything.
-                    if (in_tutorial() && tut_state == TUT_READ && (ks == 32 || ks == 65293 || key_dir(ks) >= 0)) {
-                        if (tut_waiting() && key_dir(ks) < 0) tut_go();
-                        stopped = true
+                    // The tutorial's run that the game rides takes no
+                    // notice of his keys. R leaves it, to ride it himself
+                    // (as Space does, once it is over); T starts it over.
+                    if (demo_on) {
+                        stopped = ks != 114;
+                        if (demo_over(m) && (ks == 32 || ks == 65293)) {
+                            ks = 114;
+                            stopped = false
+                        }
                     }
                     // T: the tutorial.
-                    if (ks == 116) ask_go(TUTORIAL);
+                    if (ks == 116) {
+                        if (!in_tutorial()) ask_go(TUTORIAL) else if (cut_key == 0 && hud_building == 0) {
+                            cut_key = ks;
+                            cut_ns = mono_ns()
+                        }
+                    }
+                    // (Each of these cuts to somewhere else: it is done a
+                    // moment on, once the picture has gone dark. See
+                    // cut_key.)
                     if (play_which >= 0 && (ks == 65288 || ks == 114)) {
-                        if (ks == 65288 && play_which != REC_FRIEND) {
-                            // (The rest of it, all at once.)
-                            while (play_step(&keys)) step_course(m, &keys, STEP_DT);
-                            run.closed = true;
-                            play_which = -1
-                        } else {
-                            play_which = -1;
-                            start_over(m);
-                            rec_begin()
+                        if (cut_key == 0) {
+                            cut_key = ks;
+                            cut_ns = mono_ns()
                         }
-                        pointers_clear(&keys);
-                        for d in 0..4 keys.held[d] = false;
-                        keys.hop_held = false;
-                        keys.style_held = false;
-                        a.y = m.y;
-                        cam.target = v3(m.x, m.y, m.z);
-                        update_course_camera(cam, cam.target, m.carve, 10.0);
                         stopped = true
-                    } else if (play_which < 0 && (ks == 112 || ks == 98)) {
+                    } else if (play_which < 0 && (ks == 112 || ks == 98) && cut_key == 0) {
                         // P: watch the last run again; B: the best.
-                        which: int = REC_LAST;
-                        if (ks == 98) which = REC_BEST;
-                        if (start_replay(m, which)) {
-                            pointers_clear(&keys);
-                            a.y = m.y;
-                            cam.target = v3(m.x, m.y, m.z);
-                            update_course_camera(cam, cam.target, m.carve, 10.0)
-                        }
+                        cut_key = ks;
+                        cut_ns = mono_ns()
                     }
                     if (ks == 99) tv = !tv;
                     // V: watch the friend's run the page has handed over, on
@@ -631,13 +652,18 @@ main() raises IoError: int {
                     }
                     if (ks == 91 && here > 1 && !in_tutorial()) ask_go(signi(run_id()) * (here - 1));
                     if (hud_building != 0) typed = -1;
-                    if (ks == 114 && !stopped) {
-                        say_now();
-                        start_over(m);
-                        rec_begin();
-                        cam.target = v3(m.x, m.y, m.z);
-                        update_course_camera(cam, cam.target, m.carve, 10.0);
-                        a.y = m.y
+                    if (ks == 114 && !stopped && cut_key == 0) {
+                        // (At the top already, there is nowhere to cut to.)
+                        if (m.run_t < 0.05 && !m.finished) {
+                            say_now();
+                            start_over(m);
+                            rec_begin();
+                            if (demo_on) pointers_clear(&keys);
+                            demo_on = false
+                        } else {
+                            cut_key = ks;
+                            cut_ns = mono_ns()
+                        }
                     }
                     // N: a new course (or park), at random.
                     if (ks == 110) ask_go(random_place());
@@ -648,14 +674,15 @@ main() raises IoError: int {
                     }
                     // L: night, or day again. Only the light changes (the
                     // lamps stand by day too, unlit: see place_lamps), so
-                    // he rides on through it.
+                    // he rides on through it, as it falls or lifts over a
+                    // moment (see turn_look).
                     if (ks == 108) {
-                        if (look.night) pick_look(day_look) else pick_look(110)
+                        if (look.night) turn_look(day_look) else turn_look(110)
                     }
                     // Space is the trick pad, and arrows pressed while it is
                     // held aim the trick.
                     if (keys.hop_held && key_dir(ks) >= 0) aim_key(&keys, key_dir(ks));
-                    if (!stopped) {
+                    if (!stopped && !demo_on) {
                         key_down(&keys, ks);
                         if (ks == 32) pad_press(&keys)
                     }
@@ -666,14 +693,13 @@ main() raises IoError: int {
                     if (ks == 65299) paused = false;
                     if (ks == 65300) preview = false;
                     still = 0;
-                    if (ks == 32) pad_release(&keys)
+                    if (ks == 32 && !demo_on) pad_release(&keys)
                 }
                 ButtonPress b -> {
-                    // (A replay takes no notice of a tap.)
-                    if (play_which >= 0) { } else if (in_tutorial() && tut_state == TUT_READ) {
-                        // (Reading a lesson: a tap goes on with it.)
-                        if (tut_waiting()) tut_go()
-                    } else pointer_down(&keys, b.button as int, b.x as f32, b.y as f32)
+                    // (A replay takes no notice of a tap; nor does the run
+                    // the game rides in the tutorial.)
+                    if (play_which < 0 && !demo_on) pointer_down(&keys, b.button as int,
+                        b.x as f32, b.y as f32)
                 }
                 ButtonRelease b -> pointer_up(&keys, b.button as int);
                 MotionNotify mo -> pointer_move(mo.state as int, mo.x as f32, mo.y as f32);
@@ -709,6 +735,10 @@ main() raises IoError: int {
             update_course_camera(cam, cam.target, m.carve, 10.0);
             hud_building = 0;
             still = 0;
+            // (A new place: up out of the dark, and if it is being shown
+            // off, at once from above.)
+            hud_dip = 1.0;
+            if (preview) fly = 1.0;
             prev_ns = mono_ns()
         }
         if (hud_building == 1) hud_building = 2;
@@ -718,16 +748,69 @@ main() raises IoError: int {
             prev_ns = now;
             if (dns < 0) dns = 0;
             if (dns > 100000000) dns = 100000000;
-            if (preview) preview_t = preview_t + dns as f32 / 1000000000.0;
-            if (paused || preview) dns = 0;
+            real_dt: f32 = dns as f32 / 1000000000.0;
+            if (preview || fly > 0.0) preview_t = preview_t + real_dt;
+            if (preview) fly = minf(fly + real_dt / 0.6, 1.0) else fly = maxf(fly - real_dt / 0.6,
+                0.0);
+            hud_dip = maxf(hud_dip - real_dt / 0.4, 0.0);
+            turn_looks(real_dt);
+            if (cut_key != 0) {
+                // The picture goes dark, and then the key is done: as far
+                // as it still holds (a run being watched may have ended).
+                gone: f32 = (now - cut_ns) as f32 / 120000000.0;
+                hud_dip = maxf(hud_dip, minf(gone, 1.0));
+                if (gone >= 1.0) {
+                    if (play_which >= 0) {
+                        if (cut_key == 65288 && play_which != REC_FRIEND) {
+                            // (The rest of it, all at once.)
+                            while (play_step(&keys)) step_course(m, &keys, STEP_DT);
+                            run.closed = true;
+                            play_which = -1
+                        } else if (cut_key == 65288 || cut_key == 114) {
+                            play_which = -1;
+                            start_over(m);
+                            rec_begin()
+                        }
+                        for d in 0..4 keys.held[d] = false;
+                        keys.hop_held = false;
+                        keys.style_held = false
+                    } else if (cut_key == 114) {
+                        say_now();
+                        start_over(m);
+                        rec_begin();
+                        demo_on = false
+                    } else if (cut_key == 116) {
+                        start_over(m);
+                        if (in_tutorial()) demo_begin()
+                    } else if (cut_key == 112 || cut_key == 98) {
+                        which: int = REC_LAST;
+                        if (cut_key == 98) which = REC_BEST;
+                        start_replay(m, which)
+                    }
+                    pointers_clear(&keys);
+                    a.y = m.y;
+                    cam.target = v3(m.x, m.y, m.z);
+                    update_course_camera(cam, cam.target, m.carve, 10.0);
+                    cut_key = 0;
+                    hud_dip = 1.0
+                }
+            }
+            // Held (behind a sheet, or while a place is shown off), time
+            // does not stop dead: it slows to a stop over a moment, and
+            // picks up again as gently. (The steps themselves are as long
+            // as ever: there are only fewer of them.)
+            if (paused || preview || fly > 0.0) flow = maxf(flow - real_dt / 0.3,
+                0.0) else flow = minf(flow + real_dt / 0.3, 1.0);
+            dns = (dns as f32 * flow * flow) as int;
+            // The run the game rides in the tutorial tells its own time:
+            // slowly, wherever there is something to take in.
+            demo_frame(real_dt * flow);
+            if (demo_on) dns = (dns as f32 * demo_pace) as int;
             dt: f32 = dns as f32 / 1000000000.0;
             acc = acc + dt;
             steps: int = 0;
-            read_pads(&keys);
-            // The tutorial holds the game while he reads.
-            tut_frame(m, dt);
-            if (tut_holding()) acc = 0.0;
-            while (acc >= STEP_DT && steps < 12 && !tut_holding()) {
+            if (!demo_on) read_pads(&keys);
+            while (acc >= STEP_DT && steps < 12) {
                 // A replay tells him what he was told; otherwise what he is
                 // told is recorded.
                 if (play_which >= 0) {
@@ -741,16 +824,17 @@ main() raises IoError: int {
                         keys.hop_held = false;
                         keys.style_held = false
                     }
-                } else if (!in_tutorial()) rec_step(&keys);
+                } else if (demo_on) demo_step(m, &keys, STEP_DT) else if (!in_tutorial()) rec_step(&keys);
                 starts: int = course_starts;
                 best: int = run.best_run;
                 step_course(m, &keys, STEP_DT);
                 // (A friend's run is not his best.)
                 if (play_which == REC_FRIEND) run.best_run = best;
                 if (in_tutorial()) {
-                    // (From the tutorial's finish, on to the first course.)
-                    if (course_starts != starts) ask_go(1);
-                    tut_step(m, STEP_DT)
+                    // (From the tutorial's finish, on to the first course;
+                    // but on a page, which has a button to go on from it,
+                    // only round again.)
+                    if (course_starts != starts && !demo_on && !hud_page) ask_go(1)
                 } else if (play_which < 0) {
                     if (course_starts != starts) {
                         rec_drop();
@@ -771,15 +855,6 @@ main() raises IoError: int {
                 cam.target = v3(m.x, m.y, m.z);
                 update_course_camera(cam, cam.target, m.carve, 10.0)
             }
-            // He has been put somewhere by the tutorial: nothing held carries
-            // over, and the camera cuts to him.
-            if (tut_cut) {
-                tut_cut = false;
-                pointers_clear(&keys);
-                a.y = m.y;
-                cam.target = v3(m.x, m.y, m.z);
-                update_course_camera(cam, cam.target, m.carve, 10.0)
-            }
             if (play_which < 0 && m.finished && m.finish_t > FINISH_TAIL) say_now();
             if (rec_tell >= 0) {
                 say_run(rec_tell);
@@ -794,11 +869,33 @@ main() raises IoError: int {
             hud_can_replay = rec_done || can_play(REC_LAST);
             // The page offers the run again once it is over (and not while
             // it is being watched).
-            over: bool = m.finished && m.finish_t > 1.5 && play_which < 0 && hud_can_replay;
+            // (The tutorial's run is not kept; but from its end the page
+            // goes on to a course.)
+            over: bool = m.finished && m.finish_t > 1.5 && play_which < 0 && (hud_can_replay || in_tutorial() && !demo_on);
             // And what he is doing, for its buttons: riding (0), at the end
             // of a run (1), or watching one, his own (2) or a friend's (3).
+            // And of the tutorial: what it has to say now, and of what kind
+            // (L8SAY: see tut_say); and what the thumbs of the run the game
+            // rides are doing (L8HANDS: see demo_keys; and 32 while the left
+            // one is down).
+            tut_say(m);
+            if (tut_say_id != said_tut) {
+                said_tut = tut_say_id;
+                write(1, "L8SAY ");
+                write_int(1, tut_say_kind);
+                write(1, " ");
+                print(tut_say_text)
+            }
+            hands: int = demo_keys();
+            if (demo_on && demo_steering) hands = hands | 32;
+            if (hands != said_hands) {
+                said_hands = hands;
+                write(1, "L8HANDS ");
+                write_int(1, hands);
+                print("")
+            }
             ride: int = 0;
-            if (play_which == REC_FRIEND) ride = 3 else if (play_which >= 0) ride = 2 else if (m.finished) ride = 1;
+            if (play_which == REC_FRIEND) ride = 3 else if (play_which >= 0) ride = 2 else if (m.finished && !demo_on) ride = 1;
             if (ride != said_ride) {
                 said_ride = ride;
                 write(1, "L8RIDE ");
@@ -811,6 +908,7 @@ main() raises IoError: int {
             }
             if (acc > STEP_DT) acc = 0.0;
             alpha: f32 = acc / STEP_DT;
+            if (demo_on) demo_show(alpha);
             pos: V3 = v_lerp(m.prev, v3(m.x, m.y, m.z), alpha);
             update_anim(a, m, dt);
             pose(a, m, pos);
@@ -822,7 +920,7 @@ main() raises IoError: int {
             update_course_camera(cam, pos, cam_yaw, dt);
             cam.fov = 0.0;
             if (play_which >= 0 && tv) update_tv_camera(cam, pos);
-            hud_finished = m.finished;
+            hud_finished = m.finished && !demo_on;
             // At the finish, a finger dragged up or down scrolls the report.
             drag_report();
             if (!hud_finished) hud_scroll = 0.0;
@@ -871,17 +969,30 @@ main() raises IoError: int {
                     1.0), 1.0), 1.3);
                 view.shift = 0.0
             }
-            if (preview) {
-                view.focus = fly_over(preview_t);
-                view.eye = fly_eye;
-                view.at = fly_at;
+            // A cut: he is far from where he was a frame ago (back at the
+            // top, say, or put where a run being watched starts).
+            if (v_len(v_sub(pos, was_at)) > 6.0) hud_dip = 1.0;
+            was_at = pos;
+            if (fly > 0.0) {
+                focus: V3 = fly_over(preview_t);
+                // (Round again, from the end of the run to its top: dark as
+                // it comes to the end, and up out of the dark from the top.)
+                if (fly >= 1.0) hud_dip = maxf(hud_dip, 1.0 - fly_left / 0.3);
+                if (v_len(v_sub(focus, fly_was)) > 20.0 && fly >= 1.0) hud_dip = 1.0;
+                fly_was = focus;
+                k: f32 = fly * fly * (3.0 - 2.0 * fly);
+                view.focus = v_lerp(view.focus, focus, k);
+                view.eye = v_lerp(view.eye, fly_eye, k);
+                view.at = v_lerp(view.at, fly_at, k);
                 view.fovy = view_fovy();
                 view.shift = view_shift()
             }
-            if (paused && !preview && hud_page && hud_building == 0) still = still + 1 else still = 0;
+            moving: bool = preview || fly > 0.0 || hud_dip > 0.0 || look_turn < 1.0 || flow > 0.0;
+            if (paused && !moving && hud_page && hud_building == 0) still = still + 1 else still = 0;
             if (still < 4 || still % 30 == 0) {
+                hud_bare = fly > 0.0;
                 draw_scene(r, view, shadows);
-                if (!preview) draw_hud(r)
+                draw_hud(r)
             }
             if (tracing && now - trace_ns > 250000000) {
                 trace_ns = now;

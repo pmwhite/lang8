@@ -24,8 +24,17 @@
 //   POST /admin/ungroup  {id}
 //   POST /admin/member   {group, person, on}  put a person in a group, or take them out
 //   POST /admin/unscore  {person, course?}    delete a person's runs (on one course, or all)
+//   POST /report {kind, session, data}        how the game went on a device          (anyone)
+//   GET  /admin/reports?kind=&person=&session=&limit=   the latest of those, newest first
+//   POST /admin/unreport {before?}            delete them (those before a time, or all)
 //
 // Scores are taken as sent: nothing here rides the replay to check it.
+//
+// A report is what a device has to say of how the game went on it: an
+// error, or how fast its frames came (see report, in web/skate/skate.js).
+// It is kept with the time, the browser's name for itself, and whose link
+// the device has, if any; not its address. They are for finding out what
+// went wrong for someone, and are dropped after a while.
 
 // The courses scores are kept for, and as many parks (and each day's course
 // and park: see dayOf); how many people and groups there may be; how long a
@@ -37,6 +46,13 @@ const MAX_GROUPS = 40;
 const MAX_REPLAY = 150000;
 const KEEP_RUNS = 10;
 const RECENT = 20;
+// Reports: the kinds there are, how long one may be, how many one visit to
+// the page may send, and how many are kept, for how many days.
+const REPORT_KINDS = ["error", "perf"];
+const MAX_REPORT = 6000;
+const SESSION_REPORTS = 40;
+const KEEP_REPORTS = 5000;
+const KEEP_REPORT_DAYS = 30;
 
 const headers = {
   "content-type": "application/json",
@@ -161,6 +177,46 @@ async function replay(env, who, url) {
 // Everything, for the admin's page: each person (with their secret, to
 // share their link again; the groups they are in; and when they last rode),
 // and each group.
+// A device's report, kept (see the top of this file).
+async function report(env, request, body) {
+  const { kind, session, data } = body ?? {};
+  if (!REPORT_KINDS.includes(kind) || typeof session !== "string" || !/^[a-z0-9]{6,12}$/.test(session)) return fail(400, "bad report");
+  if (data === null || typeof data !== "object" || Array.isArray(data)) return fail(400, "bad report");
+  const text = JSON.stringify(data);
+  if (text.length > MAX_REPORT) return fail(413, "too big");
+  const sent = await env.DB.prepare("SELECT COUNT(*) AS n FROM reports WHERE session = ?").bind(session).first();
+  if (sent.n >= SESSION_REPORTS) return fail(429, "enough");
+  const who = bearer(request) ? await personOf(env, request) : null;
+  const now = Date.now();
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO reports (at, kind, person, session, agent, data) VALUES (?, ?, ?, ?, ?, ?)").bind(
+      now,
+      kind,
+      who?.id ?? null,
+      session,
+      (request.headers.get("user-agent") ?? "").slice(0, 300),
+      text
+    ),
+    env.DB.prepare("DELETE FROM reports WHERE at < ? OR id <= (SELECT MAX(id) FROM reports) - ?").bind(now - KEEP_REPORT_DAYS * DAY, KEEP_REPORTS),
+  ]);
+  return reply(200, { ok: true });
+}
+
+// The latest reports, newest first: of one kind, person (by id or name), or
+// visit, if asked.
+async function reports(env, url) {
+  const q = url.searchParams;
+  const limit = Math.min(Math.max(Number(q.get("limit")) || 50, 1), 500);
+  const rows = await env.DB.prepare(
+    `SELECT r.id, r.at, r.kind, r.person, p.name, r.session, r.agent, r.data FROM reports r LEFT JOIN people p ON p.id = r.person
+     WHERE (?1 IS NULL OR r.kind = ?1) AND (?2 IS NULL OR r.person = ?2 OR p.name = ?2) AND (?3 IS NULL OR r.session = ?3)
+     ORDER BY r.id DESC LIMIT ?4`
+  )
+    .bind(q.get("kind"), q.get("person"), q.get("session"), limit)
+    .all();
+  return reply(200, { reports: rows.results.map((r) => ({ ...r, data: JSON.parse(r.data) })) });
+}
+
 async function all(env) {
   const people = await env.DB.prepare("SELECT id, name, secret, created FROM people ORDER BY created").all();
   const groups = await env.DB.prepare("SELECT id, title FROM grps ORDER BY created").all();
@@ -208,6 +264,12 @@ async function admin(env, action, body) {
       )
     );
     return reply(200, { deleted: done.reduce((n, r) => n + r.meta.changes, 0) });
+  }
+  if (action === "unreport") {
+    const before = body?.before === undefined ? Date.now() + DAY : body.before;
+    if (!Number.isFinite(before)) return fail(400, "bad request");
+    const done = await db.prepare("DELETE FROM reports WHERE at < ?").bind(before).run();
+    return reply(200, { deleted: done.meta.changes });
   }
   // The rest are of one person, or one group.
   if (!validId(body?.id)) return fail(400, "bad request");
@@ -261,9 +323,13 @@ export default {
       if (parts[0] === "admin") {
         if (!env.ADMIN_SECRET || (await sha256(bearer(request))) !== (await sha256(env.ADMIN_SECRET))) return fail(401, "not allowed");
         if (request.method === "GET" && parts[1] === "all") return await all(env);
+        if (request.method === "GET" && parts[1] === "reports") return await reports(env, url);
         if (request.method === "POST") return await admin(env, parts[1], body);
         return fail(404, "not found");
       }
+      // (A report is taken from anyone: something may go wrong for someone
+      // with no link.)
+      if (request.method === "POST" && parts[0] === "report") return await report(env, request, body);
       const who = await personOf(env, request);
       if (!who) return fail(401, "no such link");
       if (request.method === "GET" && parts[0] === "me") return await me(env, who);

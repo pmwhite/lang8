@@ -152,6 +152,8 @@ const syncPreview = () => {
 const openSheet = (id) => {
   for (const [name, el] of Object.entries(sheets)) el.hidden = name !== id;
   sheetsChanged();
+  // (Nothing to click to go on with, under a sheet.)
+  overlay.hidden = true;
   canvas.blur();
   sendKey?.(2, 65299, "");
 };
@@ -284,7 +286,9 @@ const visit = (id) => {
 const goTo = (id) => {
   closeSheets();
   if (!sendKey) wanted = id;
-  else if (id === (headed ?? placeNow)) typeKeys([114]);
+  // (Already there: from the top; and in the tutorial, which starts with
+  // the game riding it, that again.)
+  else if (id === (headed ?? placeNow)) typeKeys([id === TUTORIAL ? 116 : 114]);
   else typePlace(id);
 };
 const randomPlace = (park) => (park ? -1 : 1) * (PLACES + 1 + Math.floor(Math.random() * 99000));
@@ -308,6 +312,120 @@ let account = mySecret ? stored("skate.account", null) : null;
 // last ran here, until it says.
 let gameVersion = stored("skate.rules", 0) || 0;
 let gameFs = null;
+
+// What goes wrong on a device, and how fast its frames come, told to the
+// leaderboards' worker (POST /report: see ../skate-board/worker.js), so
+// that when the game misbehaves for someone there is something to go on. A
+// report says what happened and what the device is (its browser, screen,
+// and graphics chip); the worker notes whose link the device has, if it
+// has one, and keeps it for a while. A copy of the page on this machine,
+// being tried out, reports only to a worker run here too (?api=).
+const session = Math.random().toString(36).slice(2, 10).padEnd(8, "0");
+const reporting = location.hostname !== "localhost" || !!localApi;
+let reportsLeft = 30;
+// (Its graphics chip can be asked of the game's own context, once it has one.)
+let gameDrawn = false;
+let chip = null;
+const device = () => {
+  if (gameDrawn && chip === null) {
+    try {
+      const gl = canvas.getContext("webgl2");
+      const named = gl.getExtension("WEBGL_debug_renderer_info");
+      chip = String(gl.getParameter(named ? named.UNMASKED_RENDERER_WEBGL : gl.RENDERER)).slice(0, 120);
+    } catch {
+      chip = "?";
+    }
+  }
+  return {
+    host: location.host + location.pathname,
+    built: document.lastModified,
+    view: [innerWidth, innerHeight, devicePixelRatio],
+    canvas: [canvas.width, canvas.height],
+    touch,
+    cores: navigator.hardwareConcurrency,
+    memory: navigator.deviceMemory,
+    gpu: chip ?? undefined,
+    place: placeNow,
+    rules: gameVersion,
+    night: document.body.classList.contains("night"),
+    up: Math.round(performance.now() / 1000),
+  };
+};
+const report = (kind, data) => {
+  if (!reporting || reportsLeft <= 0) return;
+  reportsLeft--;
+  try {
+    fetch(`${api}/report`, {
+      method: "POST",
+      keepalive: true,
+      headers: { "content-type": "application/json", ...(mySecret ? { authorization: `Bearer ${mySecret}` } : {}) },
+      body: JSON.stringify({ kind, session, data: { ...device(), ...data } }),
+    }).catch(() => {});
+  } catch {}
+};
+// Something has gone wrong: told once, however often it happens, and only
+// the first few different things.
+const faults = new Set();
+const stackOf = (e) => (typeof e?.stack === "string" ? e.stack.slice(0, 1500) : undefined);
+const fault = (what, message, more = {}) => {
+  const said = `${what}: ${message}`.slice(0, 300);
+  if (faults.has(said) || faults.size >= 8) return;
+  faults.add(said);
+  report("error", { what, message: String(message).slice(0, 300), ...more });
+};
+addEventListener("error", (e) => fault("error", e.message, { where: `${e.filename}:${e.lineno}:${e.colno}`, stack: stackOf(e.error) }));
+addEventListener("unhandledrejection", (e) => fault("rejection", e.reason?.message ?? String(e.reason), { stack: stackOf(e.reason) }));
+canvas.addEventListener("webglcontextlost", () => fault("context", "graphics context lost"));
+// How the frames have come while he rides (not behind a sheet, or while a
+// place is built): how many, over how long; how many were late (half as
+// long again as the screen's own beat, or more) and how many a hitch (a
+// tenth of a second, or more), and the worst; how many came at each of a
+// few rates (under 15 a second, 25, 35, 50, 70, and over); how long each
+// place took to build; and how long the page took to its first frame. Told
+// early in a visit, every so often after, and when the page is put away.
+const FRAME_RATES = [15, 25, 35, 50, 70];
+const frames = { n: 0, ms: 0, slow: 0, hitches: 0, worst: 0, by: [0, 0, 0, 0, 0, 0], loads: [], boot: 0, skip: true, told: 0 };
+// (What the frames are paced by, and at what resolution: see main.)
+let frameState = () => ({});
+const reportFrames = (why) => {
+  // (Too little to go on is not worth telling.)
+  if (frames.ms < 5000) return;
+  report("perf", {
+    why,
+    secs: Math.round(frames.ms / 1000),
+    frames: frames.n,
+    fps: Math.round((frames.n * 10000) / frames.ms) / 10,
+    slow: frames.slow,
+    hitches: frames.hitches,
+    worst: Math.round(frames.worst),
+    by: frames.by,
+    loads: frames.loads,
+    boot: frames.boot,
+    ...frameState(),
+  });
+  Object.assign(frames, { n: 0, ms: 0, slow: 0, hitches: 0, worst: 0, by: [0, 0, 0, 0, 0, 0], loads: [], told: frames.told + 1 });
+};
+const frameCame = (gap, refresh) => {
+  // (Not the first after a pause: it is as long as the pause was.)
+  if (frames.skip || gap > 2000) {
+    frames.skip = false;
+    return;
+  }
+  frames.n++;
+  frames.ms += gap;
+  if (gap > 1.5 * refresh) frames.slow++;
+  if (gap > 100) frames.hitches++;
+  frames.worst = Math.max(frames.worst, gap);
+  const rate = 1000 / gap;
+  let i = 0;
+  while (i < FRAME_RATES.length && rate >= FRAME_RATES[i]) i++;
+  frames.by[i]++;
+  if (frames.ms >= (frames.told === 0 ? 20000 : 120000)) reportFrames("riding");
+};
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) reportFrames("hidden");
+});
+addEventListener("pagehide", () => reportFrames("leaving"));
 const toast = (text) => {
   const el = document.getElementById("toast");
   el.textContent = text;
@@ -339,7 +457,10 @@ const loadMe = (fresh = true) => {
         toast("Your link no longer works");
         return false;
       }
-      if (!r.ok) return null;
+      if (!r.ok) {
+        fault("api", `me: ${r.status}`);
+        return null;
+      }
       account = await r.json();
       accountLoaded = Date.now();
       store("skate.account", account);
@@ -371,6 +492,7 @@ const postRun = async (version, id, score, replay) => {
       body: JSON.stringify({ course: id, score, version, replay }),
     });
     const body = await r.json();
+    if (!r.ok) fault("api", `score: ${r.status} ${body.error ?? ""}`, { course: id, score, long: replay.length });
     await loadMe();
     // (Where a new best puts him, among those he sees.)
     const place = r.ok && body.best && account ? bestsOn(id).findIndex((e) => e.id === account.id) + 1 : 0;
@@ -397,6 +519,68 @@ const watchRun = async (person, id) => {
     toast("Couldn't load that run");
   }
 };
+// The tutorial (see programs/skate/tutorial.l8). The game rides a run of
+// it itself, with thumbs of its own on the controls, and says what it is
+// doing (L8SAY, with what kind of thing it is: a line of that run, 1; its
+// last, the run being over, 2; a word to him as he rides the course
+// himself, 3; or nothing, 0). The line is shown over the scene, with a way
+// to leave off watching and, at the end, to try it or watch it again.
+const teachEl = document.getElementById("teach");
+const teachLine = teachEl.querySelector(".line");
+let saying = "";
+const say = (kind, text) => {
+  document.body.classList.toggle("watching", kind === 1 || kind === 2);
+  const shown = !teachEl.hidden;
+  teachEl.hidden = kind === 0;
+  if (kind === 0) return;
+  teachEl.className = ["", "demo", "end", "cue"][kind];
+  if (text === saying) return;
+  // (One line gives way to the next: out, and the new one in. The first
+  // comes in with the card.)
+  const first = !shown || teachLine.textContent === "";
+  saying = text;
+  clearTimeout(say.timer);
+  if (first) {
+    teachLine.textContent = text;
+    teachLine.classList.remove("out");
+    return;
+  }
+  teachLine.classList.add("out");
+  say.timer = setTimeout(() => {
+    teachLine.textContent = saying;
+    teachLine.classList.remove("out");
+  }, 140);
+};
+// (R: he rides it himself. T: the game rides it again, from the top.)
+onTap(teachEl.querySelector(".skip"), () => typeKeys([114]));
+onTap(teachEl.querySelector(".try"), () => typeKeys([114]));
+onTap(teachEl.querySelector(".rewatch"), () => typeKeys([116]));
+// (From the end of his own ride of it, on to today's course.)
+onTap(document.querySelector(".onward"), () => goTo(today()));
+// What thumbs are doing: his own (as the game has it, left of the middle
+// steers, right of it is the trick), or those of the run the game rides
+// (L8HANDS: see demo_keys, in tutorial.l8). The right-hand control says
+// what it does while it is held; and a keyboard's keys light up for the
+// game's thumbs.
+const thumbs = new Map();
+let hands = 0;
+const thumbsChanged = () => {
+  const sides = [...thumbs.values()];
+  document.body.classList.toggle("steering", sides.includes("steer") || (hands & 32) !== 0);
+  document.body.classList.toggle("holding", sides.includes("trick") || (hands & 4) !== 0);
+  for (const [cap, bit] of [["l", 1], ["r", 2], ["sp", 4], ["u", 8], ["d", 16]]) teachEl.querySelector(`.cap.${cap}`).classList.toggle("on", (hands & bit) !== 0);
+};
+canvas.addEventListener("pointerdown", (e) => {
+  const r = canvas.getBoundingClientRect();
+  thumbs.set(e.pointerId, e.clientX - r.left > r.width / 2 ? "trick" : "steer");
+  thumbsChanged();
+});
+for (const name of ["pointerup", "pointercancel"]) {
+  addEventListener(name, (e) => {
+    if (thumbs.delete(e.pointerId)) thumbsChanged();
+  });
+}
+
 const gameSays = (line) => {
   const words = line.trim().split(/\s+/);
   if (words[0] === "L8VERSION") {
@@ -409,8 +593,18 @@ const gameSays = (line) => {
     }
     showOpen();
   }
-  else if (words[0] === "L8LOAD") document.body.classList.toggle("loading", words[1] === "1");
+  else if (words[0] === "L8LOAD") {
+    // (How long the place took to build is one of the things reported.)
+    if (words[1] === "1") gameSays.loading = performance.now();
+    else if (gameSays.loading && frames.loads.length < 8) frames.loads.push(Math.round(performance.now() - gameSays.loading));
+    document.body.classList.toggle("loading", words[1] === "1");
+  }
   else if (words[0] === "L8OVER") document.body.classList.toggle("over", words[1] === "1");
+  else if (words[0] === "L8SAY") say(Number(words[1]), words.slice(2).join(" "));
+  else if (words[0] === "L8HANDS") {
+    hands = Number(words[1]);
+    thumbsChanged();
+  }
   else if (words[0] === "L8RIDE") {
     // What he is doing: riding (0), at the end of a run (1), or watching
     // one, his own (2) or someone's (3). The thumb panels show only while
@@ -837,9 +1031,14 @@ async function main() {
     showScale();
   });
 
+  frameState = () => ({ refresh: Math.round(1000 / pace.refresh), scale: Math.round(platform.scale() * 100) / 100, own, low: lowPower(), pacing: pace.on });
   const paced = async () => {
     await platform.nextFrame();
     const now = performance.now();
+    if (!gameDrawn) {
+      gameDrawn = true;
+      frames.boot = Math.round(now);
+    }
     rate.frames++;
     if (now - rate.since >= 500) {
       rate.text.textContent = `${Math.round((rate.frames * 1000) / (now - rate.since))} fps${lowPower() ? " · low power" : ""}`;
@@ -852,6 +1051,8 @@ async function main() {
     // (Held behind a sheet, with no place shown off, the game draws
     // nothing: the frames come as fast as the browser gives them.)
     const body = document.body.classList;
+    if (body.contains("sheet") || document.hidden) frames.skip = true;
+    else frameCame(gap, pace.refresh);
     if (body.contains("sheet") && !body.contains("showing")) {
       if (gap < 100) pace.refresh += (gap - pace.refresh) * 0.05;
       pace.quiet = now + 1500;
@@ -888,12 +1089,15 @@ async function main() {
   const status = await runResumable(instance, () => {
     if (!document.body.classList.contains("loading")) return paced();
     pace.quiet = performance.now() + 1500;
+    frames.skip = true;
     return breathed();
   });
+  fault("exited", `status ${status}`);
   stopped(`The game exited${status ? ` with status ${status}` : ""}.<br><a href="">Play again</a>`);
 }
 
 main().catch((e) => {
   console.error(e);
+  fault("stopped", e?.message ?? String(e), { stack: stackOf(e) });
   stopped(`The game stopped: ${e.message}`);
 });
