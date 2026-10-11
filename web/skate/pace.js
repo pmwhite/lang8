@@ -8,13 +8,12 @@
 // often (its beat, found from the frames that come while nothing is
 // drawn); a frame that misses a beat is not shown until the next, so what
 // can be had is a frame every beat, every second one, every third: a count
-// of beats to a frame, which is what this aims at (`beats`). A frame is
-// late that takes a beat more than that. But no more than sixty frames a
-// second are asked for: on a screen that beats faster, a frame that takes
-// up to a sixtieth of a second is in time, and the room that leaves goes
-// to the picture (so on a screen of ninety a second, a frame that needs
-// more than one beat is shown every second one, forty-five a second, at
-// whatever size that allows).
+// of beats to a frame, which is what this aims at (`beats`), and the
+// caller holds the game to (waiting out the beats between, so that the
+// frames come evenly: see skate.js). A frame is late that takes a beat
+// more than that. On a screen that beats faster than seventy a second,
+// every second beat is the most that is aimed at: every beat would be
+// more frames than are worth their pixels, or their battery.
 //
 //   Down, fast. A few frames late running (three; more on a device that
 //   is often late anyway), and it is a rung down at once, two if they are
@@ -36,12 +35,15 @@
 //   at the one above it. A rung that does hold halves the wait, so that
 //   after a hard spell it is soon back up.
 //
-//   Fewer frames, when it must. At the foot of the ladder and still late,
-//   the device cannot draw a frame every beat whatever is asked of it: it
-//   aims at one every second beat instead (or third), and climbs the
-//   ladder again under that easier aim. Should frames then start coming
-//   sooner than aimed at, the aim tightens again; and every few minutes it
-//   tries for it from the foot, coming back to where it was if that fails.
+//   Fewer frames, before the picture gets poor. The ladder has a floor
+//   (`floor`, a rung the caller still calls a good picture): there and
+//   still late, the device cannot draw a frame every beat at a picture
+//   worth having, so it aims at one every second beat instead (or third,
+//   at the most), and climbs the ladder again under that easier aim. Only
+//   at the most beats does the ladder go on below the floor. Should
+//   frames then start coming sooner than aimed at, the aim tightens again;
+//   and every few minutes it tries for it from the floor, coming back to
+//   where it was if that fails.
 //
 // Times are in milliseconds.
 const HOLD = 2500;
@@ -52,17 +54,21 @@ const SECOND = 60;
 const LONG = 90;
 const RETRY = 180000;
 const RETRY_MOST = 1200000;
-// The fewest milliseconds a frame is asked to come within: sixty a second.
-const AIM_LEAST = 1000 / 60;
+const BEATS_MOST = 3;
+// A screen that beats faster than this many a second is not aimed at
+// every beat.
+const FAST = 70;
 
 // `work` is how much each rung asks of the device, of what the best asks
 // (its share of the pixels, say): a device far behind is taken down as
-// many rungs at once as that says it needs.
-export function createPacer({ work, rung = 0, beats = 1, beat = 1000 / 60 }) {
+// many rungs at once as that says it needs. `floor` is the last rung
+// tried before fewer frames are (the last of all, if not given).
+export function createPacer({ work, rung = 0, beats = 1, beat = 1000 / 60, floor = work.length - 1 }) {
   const rungs = work.length;
+  floor = Math.min(Math.max(floor, 0), rungs - 1);
   const s = {
     rung: Math.min(Math.max(rung, 0), rungs - 1),
-    beats: Math.max(1, beats),
+    beats: Math.min(Math.max(1, beats), BEATS_MOST),
     beat,
     // Late or not (and early or not, and how long they took), the last
     // frames since anything changed; how many to pass over, a change
@@ -107,6 +113,10 @@ export function createPacer({ work, rung = 0, beats = 1, beat = 1000 / 60 }) {
     for (let i = from; i < flags.length; i++) k += flags[i];
     return flags.length > from ? k / (flags.length - from) : 0;
   };
+  // The fewest beats to a frame worth aiming at on this screen.
+  const least = () => (s.beat < 1000 / FAST ? 2 : 1);
+  // The last rung of the ladder under this aim.
+  const foot = () => (s.beats < BEATS_MOST ? floor : rungs - 1);
   const fresh = (t) => {
     s.late.length = 0;
     s.early.length = 0;
@@ -119,7 +129,8 @@ export function createPacer({ work, rung = 0, beats = 1, beat = 1000 / 60 }) {
   };
   return {
     state: s,
-    // A frame came with nothing drawn: the screen's own beat.
+    // A frame came with nothing drawn, or a beat was waited out between
+    // two frames: the screen's own beat.
     idle(gap) {
       if (gap > 3 && gap < 60) s.beat += (gap - s.beat) * 0.1;
     },
@@ -134,13 +145,20 @@ export function createPacer({ work, rung = 0, beats = 1, beat = 1000 / 60 }) {
         s.beat = s.quickMean;
         s.quick = 0;
       }
+      // (A screen too fast to be worth every beat.)
+      if (s.beats < least()) {
+        s.beats = least();
+        s.from = -1;
+        fresh(t);
+        return s.rung;
+      }
       if (s.skip > 0) {
         s.skip--;
         return s.rung;
       }
       // (Late by half a beat; and by a little more, the more beats it
       // aims at, long frames being less even.)
-      const aim = Math.max(s.beats * s.beat, AIM_LEAST);
+      const aim = s.beats * s.beat;
       const slack = 0.5 * s.beat + 0.1 * (aim - s.beat);
       const late = gap > aim + slack;
       s.late.push(late ? 1 : 0);
@@ -184,7 +202,8 @@ export function createPacer({ work, rung = 0, beats = 1, beat = 1000 / 60 }) {
       // Down.
       const often = !s.trial && s.n >= 2 * SECOND && s.rate >= Math.max(0.1, s.base + 0.07);
       if (s.run >= running || often) {
-        if (s.rung < rungs - 1) {
+        const last = foot();
+        if (s.rung < last) {
           if (s.from < 0) s.from = s.rung;
           s.trial = { before: Math.max(s.rate, share(s.late, SECOND)), frames: 0 };
           // (Two, if it is a beat later still; and if it is taking
@@ -193,20 +212,20 @@ export function createPacer({ work, rung = 0, beats = 1, beat = 1000 / 60 }) {
           let to = s.rung + (gap > aim + 1.5 * s.beat && s.run >= running ? 2 : 1);
           if (s.run >= running && gap > 2.5 * aim) {
             const want = (work[s.rung] * aim) / (gap - s.beat);
-            while (to < rungs - 1 && work[to] > want) to++;
+            while (to < last && work[to] > want) to++;
           }
-          s.rung = Math.min(rungs - 1, to);
+          s.rung = Math.min(last, to);
           const rate = s.rate;
           fresh(t);
           s.rate = rate;
-        } else if ((s.late.length >= LONG / 2 || (s.late.length >= 8 && t - s.changed > 1500)) && share(s.late, LONG) >= 0.3) {
-          // (Not even at the foot: fewer frames, as many as it is making
+        } else if (s.beats < BEATS_MOST && (s.late.length >= LONG / 2 || (s.late.length >= 8 && t - s.changed > 1500)) && share(s.late, LONG) >= 0.3) {
+          // (Not even at the floor: fewer frames, as many as it is making
           // there, and back to the rung it came down from, to do what it
-          // can under that. If the foot was nowhere near in time, it is
+          // can under that. If the floor was nowhere near in time, it is
           // long before it tries for this again.)
           const middle = [...s.gaps].sort((a, b) => a - b)[s.gaps.length >> 1];
           if (middle > aim + 0.9 * s.beat) s.retry = RETRY_MOST;
-          s.beats = Math.max(s.beats + 1, Math.round(middle / s.beat));
+          s.beats = Math.min(BEATS_MOST, Math.max(s.beats + 1, Math.round(middle / s.beat)));
           s.eased = t;
           s.trial = null;
           if (s.from >= 0) s.rung = s.from;
@@ -216,8 +235,9 @@ export function createPacer({ work, rung = 0, beats = 1, beat = 1000 / 60 }) {
         }
         return s.rung;
       }
-      // Sooner than aimed at, most of them: aim at that.
-      if (s.beats > 1 && s.early.length >= LONG / 2 && share(s.early, LONG) >= 0.6) {
+      // Sooner than aimed at, most of them (the beat having slowed, say):
+      // aim at that.
+      if (s.beats > least() && s.early.length >= LONG / 2 && share(s.early, LONG) >= 0.6) {
         s.beats--;
         s.from = -1;
         fresh(t);
@@ -242,8 +262,8 @@ export function createPacer({ work, rung = 0, beats = 1, beat = 1000 / 60 }) {
         fresh(t);
         return s.rung;
       }
-      // And for more frames again, from the foot, now and then.
-      if (s.beats > 1 && quiet && t - s.eased >= s.retry && t - s.changed >= HOLD) {
+      // And for more frames again, from the floor, now and then.
+      if (s.beats > least() && quiet && t - s.eased >= s.retry && t - s.changed >= HOLD) {
         s.from = s.rung;
         s.beats--;
         s.eased = t;

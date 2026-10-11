@@ -1000,13 +1000,15 @@ async function main() {
       breath.port2.postMessage(0);
     });
   // The picture is kept to what the device can draw in time (see pace.js):
-  // as many frames as its screen shows, up to sixty a second, first; and
-  // then as fine a picture as that leaves room for. Its rungs, from the best: the picture's size,
-  // each a little smaller than the last, down to half; then at half with
-  // its surfaces colored plainly too (see shade_plain, in the game's
-  // render.l8); and so, smaller still by larger steps, down to a tenth.
-  // Where it got to (and the frames it found it could aim at) is where
-  // the next time starts. ?scale= fixes the size instead.
+  // a frame every beat of its screen (every second one, on a screen too
+  // fast for that to be worth it), at as fine a picture as that leaves
+  // room for, down to a quarter of the size; below that, fewer frames
+  // first. Its rungs, from the best: the picture's size, each a little
+  // smaller than the last, down to half; then at half with its surfaces
+  // colored plainly too (see shade_plain, in the game's render.l8); and
+  // so, smaller still by larger steps, down to a tenth. Where it got to
+  // (and the frames it found it could aim at) is where the next time
+  // starts. ?scale= fixes the size instead.
   const RUNGS = [
     ...[1, 0.92, 0.85, 0.78, 0.72, 0.66, 0.61, 0.56, 0.5].map((size) => ({ size, plain: false })),
     ...[0.5, 0.42, 0.36, 0.31, 0.26, 0.22, 0.19, 0.16, 0.14, 0.12, 0.1].map((size) => ({ size, plain: true })),
@@ -1016,6 +1018,9 @@ async function main() {
   // stays at half, and the game draws its scene smaller within it (see
   // render_scale, in render.l8), so that its words can still be read.
   const SIZE_LEAST = 0.1, WHOLE_LEAST = 0.5;
+  // The smallest picture tried before fewer frames are: the last rung of
+  // a quarter of the size or more.
+  const FLOOR = RUNGS.map((r) => r.size >= 0.25).lastIndexOf(true);
   let size = 1;
   const setSize = (k) => {
     size = Math.min(1, Math.max(SIZE_LEAST, k));
@@ -1035,7 +1040,7 @@ async function main() {
   const pace = { on: !params.has("scale") && !own, last: 0, quiet: 0 };
   // (What each asks of the device: its pixels, and plainly a little less.)
   const WORK = RUNGS.map((r) => r.size * r.size * (r.plain ? 0.85 : 1));
-  let pacer = createPacer({ work: WORK, rung: stored("skate.rung", 0) || 0, beats: stored("skate.beats", 1) || 1 });
+  let pacer = createPacer({ work: WORK, floor: FLOOR, rung: stored("skate.rung", 0) || 0, beats: stored("skate.beats", 1) || 1 });
   // The picture as a rung has it.
   const toRung = (r) => {
     setSize(RUNGS[r].size);
@@ -1051,8 +1056,27 @@ async function main() {
   const perf = document.querySelector(".perf");
   const panel = document.getElementById("perf");
   const slider = panel.querySelector("input");
-  const rate = { frames: 0, since: performance.now(), text: perf.querySelector(".rate b") };
+  const rate = { frames: 0, late: 0, since: performance.now(), text: perf.querySelector(".rate b") };
+  const sizeText = () => `${Math.round(size * 100)}%${plain ? " plain" : ""}`;
+  // The button: which beats of the screen the game aims at (or its beat,
+  // when he has set the size himself), the picture's size, and the frames
+  // late over the last half second, if any.
+  const rateText = () => {
+    const s = pacer.state;
+    const hz = Math.round(1000 / s.beat);
+    let text = pace.on ? `${["every", "every 2nd", "every 3rd"][s.beats - 1]} beat of ${hz} · ${sizeText()}` : `${hz} Hz · ${sizeText()}`;
+    if (rate.late > 0) text += ` · ${rate.late} late`;
+    if (lowPower()) text += " · low power";
+    return text;
+  };
   const showScale = () => {
+    const s = pacer.state;
+    const hz = Math.round(1000 / s.beat);
+    const n = s.late.length;
+    const late = s.late.reduce((a, b) => a + b, 0);
+    const draws = pace.on ? `one every ${["", "second ", "third "][s.beats - 1]}beat of it, <b>${Math.round(hz / s.beats)}</b> a second,` : "one on whichever beat it is ready for,";
+    const lately = pace.on && n >= 10 ? ` <b>${late}</b> of the last ${n} frames came late.` : "";
+    panel.querySelector(".state").innerHTML = `Your screen shows <b>${hz}</b> frames a second. The game draws ${draws} at <b>${sizeText()}</b> of the screen's size.${lately}`;
     slider.value = String(Math.round(size * 20) * 5);
     panel.querySelector("output").textContent = `${Math.round(size * 100)}%`;
     panel.querySelector(".auto").classList.toggle("on", !own);
@@ -1083,7 +1107,7 @@ async function main() {
   onTap(panel.querySelector(".auto"), () => {
     // (Back to full, and down again from there if it must.)
     pace.on = !params.has("scale");
-    pacer = createPacer({ work: WORK, beat: pacer.state.beat });
+    pacer = createPacer({ work: WORK, floor: FLOOR, beat: pacer.state.beat });
     toRung(0);
     store("skate.rung", 0);
     store("skate.beats", 1);
@@ -1169,23 +1193,38 @@ async function main() {
   };
   const paced = async () => {
     await platform.nextFrame();
-    const now = performance.now();
+    let now = performance.now();
+    // Aiming at a frame every second beat (or third), the beats between
+    // are waited out, so that the frames come evenly rather than on
+    // whichever beat each happens to make: each such wait is a beat of
+    // the screen, exactly.
+    const body = document.body.classList;
+    if (pace.on && !body.contains("sheet") && !document.hidden) {
+      for (let k = 1; k < pacer.state.beats; k++) {
+        const was = now;
+        await platform.nextFrame();
+        now = performance.now();
+        pacer.idle(now - was);
+      }
+    }
     if (!gameDrawn) {
       gameDrawn = true;
       frames.boot = Math.round(now);
     }
+    const gap = now - pace.last;
+    pace.last = now;
     rate.frames++;
+    // (Late as the pacing counts it: by half a beat past what it aims at.)
+    if (rate.frames > 1 && gap > (pacer.state.beats + 0.5) * pacer.state.beat && gap < 2000) rate.late++;
     if (now - rate.since >= 500) {
-      rate.text.textContent = `${Math.round((rate.frames * 1000) / (now - rate.since))} fps${lowPower() ? " · low power" : ""}`;
+      rate.text.textContent = rateText();
       rate.frames = 0;
+      rate.late = 0;
       rate.since = now;
       if (!panel.hidden) showScale();
     }
-    const gap = now - pace.last;
-    pace.last = now;
-    const body = document.body.classList;
     if (body.contains("sheet") || document.hidden) frames.skip = true;
-    else frameCame(gap, pacer.state.beat);
+    else frameCame(gap, pacer.state.beats * pacer.state.beat);
     if (probe) probed(gap, now);
     // (Held behind a sheet, with no place shown off, the game draws
     // nothing: the frames come at the screen's own beat.)
