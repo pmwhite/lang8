@@ -35,6 +35,7 @@ type Renderer = {
     u_sky_noise: int;
     noise_tex: u32;
     course_buf: u32;
+    course_idx: u32;
     course_n: int;
     part_buf: u32;
     sky_buf: u32;
@@ -67,6 +68,7 @@ type Renderer = {
     // In each lit program: the sunset's direction, the lamp map, and
     // where it lies; and the lamp maps, the park's and the course's.
     u_dusk: []int;
+    u_dusk_flat: []int;
     // The look's uniforms, LOOK_UNIFORMS for each of the world, grass, and
     // sky programs.
     u_look: []int;
@@ -76,6 +78,7 @@ type Renderer = {
     u_near1: int;
     // The marks painted on the jumps ahead (see find_zones, in hud.l8).
     u_marks: []int;
+    u_mark_c: []int;
     u_mark_n: int;
     u_mark_time: int;
     u_ready: int;
@@ -139,6 +142,8 @@ link_program(vs: []i8, fs: []i8) raises IoError: int {
 // most of all toward the sun (sky_sun), low behind him.
 SKY_GLSL: str = """
 uniform vec3 sky_sun;
+// (The way to it across the ground, of length one.)
+uniform vec2 sky_sun_flat;
 // The look (see Look): the sky overhead, at the horizon away from the sun
 // and toward it, and the sun's glow low down; the sun's light, and the
 // sky's from above and below; the air (how thick per meter, and at most);
@@ -158,7 +163,7 @@ uniform vec4 look_disc;
 vec3 sky_base(vec3 d) {
   float up = clamp(d.y, 0.0, 1.0);
   vec2 flat_d = d.xz + vec2(0.0001, 0.0);
-  float toward = dot(normalize(flat_d), normalize(sky_sun.xz)) * 0.5 + 0.5;
+  float toward = dot(normalize(flat_d), sky_sun_flat) * 0.5 + 0.5;
   vec3 horizon = mix(look_away, look_toward, pow(toward, 2.0));
   vec3 c = mix(horizon, look_zenith, pow(up, 0.45));
   c += look_glow * pow(toward, 10.0) * exp(-max(d.y, 0.0) * 8.0);
@@ -175,6 +180,8 @@ vec3 sky_light(vec3 n) {
 // Farther off, things fade into the sky's color: little near, more far.
 vec3 haze(vec3 col, vec3 V, float dist) {
   float f = 1.0 - exp(-max(dist - 20.0, 0.0) * look_haze.x);
+  // (Near enough, there is none: the sky's color need not be found.)
+  if (f <= 0.0) return col;
   return mix(col, sky_base(-V) * 0.95, f * look_haze.y);
 }
 // Lamps: their light on the ground, every lamp's at once, from a map
@@ -264,6 +271,17 @@ uniform vec4 mark6a;
 uniform vec4 mark6b;
 uniform vec4 mark7a;
 uniform vec4 mark7b;
+// A circle round each on the ground (its middle, and its radius squared):
+// only inside it is the mark worked out at all, which is most of what a
+// mark costs, there being far more ground outside them than in.
+uniform vec3 mark0c;
+uniform vec3 mark1c;
+uniform vec3 mark2c;
+uniform vec3 mark3c;
+uniform vec3 mark4c;
+uniform vec3 mark5c;
+uniform vec3 mark6c;
+uniform vec3 mark7c;
 uniform float mark_n;
 // The park's floor (half its width and length, and its corners' radius),
 // for the band up its bowl's walls.
@@ -328,6 +346,12 @@ vec3 mark_at(vec4 a, vec4 b, vec3 p) {
 vec3 brighter(vec3 a, vec3 b) {
   return vec3(a.x > b.x ? a.xz : b.xz, max(a.y, b.y)).xzy;
 }
+// The brighter of k and the mark (a, b) at p, if p is inside its circle c.
+vec3 with_mark(vec3 k, vec4 a, vec4 b, vec3 c, vec3 p) {
+  vec2 q = p.xz - c.xy;
+  if (dot(q, q) > c.z) return k;
+  return brighter(k, mark_at(a, b, p));
+}
 
 float sun_visibility(float ndl) {
   vec3 sc = vlight.xyz / vlight.w * 0.5 + 0.5;
@@ -350,8 +374,9 @@ void main() {
   float ao = clamp(length(vnrm), 0.0, 1.0);
   float mat = vcolor.a;
   vec3 albedo = pow(vcolor.rgb, vec3(2.2));
-  vec3 V = normalize(cam_pos - vworld);
-  float dist = length(cam_pos - vworld);
+  vec3 to_cam = cam_pos - vworld;
+  float dist = length(to_cam);
+  vec3 V = to_cam / dist;
   // A lamp's glass glows, by night.
   if (mat > 9.5 && look_disc.a > 0.0) {
     gl_FragColor = vec4(tone(haze(albedo * 3.0, V, dist)), 1.0);
@@ -427,11 +452,16 @@ void main() {
   }
   // Light where a mark is (see mark_at).
   vec3 mk = vec3(0.0);
+  // (Only as many as there are, and each only inside its circle.)
   if (mark_n > 0.5 && ground > 0.5) {
-    vec3 k = brighter(brighter(mark_at(mark0a, mark0b, vworld), mark_at(mark1a, mark1b, vworld)), brighter(mark_at(mark2a, mark2b, vworld), mark_at(mark3a, mark3b, vworld)));
-    k = brighter(k, brighter(mark_at(mark4a, mark4b, vworld), mark_at(mark5a, mark5b, vworld)));
-    k = brighter(k, brighter(mark_at(mark6a, mark6b, vworld), mark_at(mark7a, mark7b, vworld)));
-    mk = k;
+    mk = with_mark(mk, mark0a, mark0b, mark0c, vworld);
+    if (mark_n > 1.5) mk = with_mark(mk, mark1a, mark1b, mark1c, vworld);
+    if (mark_n > 2.5) mk = with_mark(mk, mark2a, mark2b, mark2c, vworld);
+    if (mark_n > 3.5) mk = with_mark(mk, mark3a, mark3b, mark3c, vworld);
+    if (mark_n > 4.5) mk = with_mark(mk, mark4a, mark4b, mark4c, vworld);
+    if (mark_n > 5.5) mk = with_mark(mk, mark5a, mark5b, mark5c, vworld);
+    if (mark_n > 6.5) mk = with_mark(mk, mark6a, mark6b, mark6c, vworld);
+    if (mark_n > 7.5) mk = with_mark(mk, mark7a, mark7b, mark7c, vworld);
   }
   float ndl = dot(n, sun_dir);
   float vis = sun_visibility(ndl);
@@ -455,8 +485,12 @@ void main() {
     float rim = pow(1.0 - max(dot(n, V), 0.0), 3.0);
     col += (SUN_LIGHT * 0.5 * max(dot(-V, sun_dir), 0.0) * vis + vec3(0.35, 0.42, 0.62) * 0.3) * rim;
   }
-  vec3 H = normalize(sun_dir + V);
-  col += SUN_LIGHT * vis * spec * pow(max(dot(n, H), 0.0), gloss) * (gloss + 8.0) / 60.0 * step(0.0, ndl);
+  // (What has no shine, as grass and leaves have none, has no highlight to
+  // work out.)
+  if (spec > 0.0) {
+    vec3 H = normalize(sun_dir + V);
+    col += SUN_LIGHT * vis * spec * pow(max(dot(n, H), 0.0), gloss) * (gloss + 8.0) / 60.0 * step(0.0, ndl);
+  }
   // The marks' light: a soft pool, and its fine line.
   // The marks: a green glow over where letting go lands the trick, pulses
   // running through it toward the lip, and a bright line where it begins.
@@ -468,8 +502,9 @@ void main() {
     col = mix(col, vec3(0.8, 1.6, 1.0) * mix(1.0, 0.5, look_disc.a), mk.y * 0.9);
   }
   // Round him on the ground, when letting go now lands it: a ring.
-  if (ready > 0.0 && ground > 0.5) {
-    float rd = length(vworld.xz - blob.xz);
+  vec2 rq = vworld.xz - blob.xz;
+  if (ready > 0.0 && ground > 0.5 && dot(rq, rq) < 1.6) {
+    float rd = length(rq);
     float ring = (1.0 - smoothstep(0.05, 0.11, abs(rd - 0.85 - 0.06 * sin(mark_time * 9.0)))) * (1.0 - smoothstep(0.0, 1.2, abs(vworld.y - blob.y)));
     col = mix(col, vec3(0.6, 1.7, 0.9) * mix(1.0, 0.5, look_disc.a), ring * 0.9 * ready);
   }
@@ -647,7 +682,9 @@ attribute vec3 pos;
 varying vec2 vscreen;
 void main() {
   vscreen = pos.xy;
-  gl_Position = vec4(pos.xy, 0.9999, 1.0);
+  // (As far off as anything can be: it is drawn last, where nothing else
+  // has been.)
+  gl_Position = vec4(pos.xy, 1.0, 1.0);
 }
 """;
 
@@ -693,7 +730,7 @@ void main() {
     vec2 p = d.xz / (d.y + 0.1) * 0.9 + vec2(time * 0.01, time * 0.003);
     float k = smoothstep(0.5, 0.7, clouds(p));
     float shade = clouds(p + sky_sun.xz * 0.12);
-    float toward = pow(max(dot(normalize(d.xz + vec2(0.0001, 0.0)), normalize(sky_sun.xz)), 0.0), 2.0);
+    float toward = pow(max(dot(normalize(d.xz + vec2(0.0001, 0.0)), sky_sun_flat), 0.0), 2.0);
     vec3 lit = mix(vec3(1.0, 0.96, 0.98), vec3(1.15, 0.94, 0.8), toward);
     vec3 cloud = mix(lit, vec3(0.74, 0.7, 0.86), smoothstep(0.45, 0.72, shade));
     // (By night, dark shapes against the stars, their edges moonlit.)
@@ -777,6 +814,7 @@ new_renderer(parts: *Mesh) raises IoError: *Renderer@new {
         u_sky_noise: glGetUniformLocation(sky, "noise_map"),
         noise_tex: make_noise_texture(),
         course_buf: gen_buffer(),
+        course_idx: gen_buffer(),
         course_n: 0,
         part_buf: gen_buffer(),
         sky_buf: gen_buffer(),
@@ -807,12 +845,14 @@ new_renderer(parts: *Mesh) raises IoError: *Renderer@new {
         tuft_buf: gen_buffer(),
         grass_buf: gen_buffer(),
         u_dusk: new int[3](0),
+        u_dusk_flat: new int[3](0),
         u_look: new int[3 * LOOK_UNIFORMS](0),
         u_lamp_map: new int[2](0),
         u_lamp_rect: new int[2](0),
         u_near0: glGetUniformLocation(world, "near0"),
         u_near1: glGetUniformLocation(world, "near1"),
         u_marks: new int[MAX_ZONES * 2](0),
+        u_mark_c: new int[MAX_ZONES](0),
         u_mark_n: glGetUniformLocation(world, "mark_n"),
         u_mark_time: glGetUniformLocation(world, "mark_time"),
         u_ready: glGetUniformLocation(world, "ready"),
@@ -824,9 +864,13 @@ new_renderer(parts: *Mesh) raises IoError: *Renderer@new {
         "mark3a", "mark3b", "mark4a", "mark4b", "mark5a", "mark5b", "mark6a", "mark6b",
         "mark7a", "mark7b"];
     for k in 0..MAX_ZONES * 2 r.u_marks[k] = glGetUniformLocation(world, mark_names[k]);
+    circle_names: []str = ["mark0c", "mark1c", "mark2c", "mark3c", "mark4c", "mark5c",
+        "mark6c", "mark7c"];
+    for k in 0..MAX_ZONES r.u_mark_c[k] = glGetUniformLocation(world, circle_names[k]);
     progs: []int = [world, grass_prog, sky];
     for k in 0..3 {
         r.u_dusk[k] = glGetUniformLocation(progs[k], "sky_sun");
+        r.u_dusk_flat[k] = glGetUniformLocation(progs[k], "sky_sun_flat");
         for u in 0..LOOK_UNIFORMS r.u_look[k * LOOK_UNIFORMS + u] = glGetUniformLocation(progs[k],
             look_names[u]);
         if (k < 2) {
@@ -871,7 +915,12 @@ new_renderer(parts: *Mesh) raises IoError: *Renderer@new {
 }
 
 set_course_mesh(r: *Renderer, m: *Mesh) {
-    upload(r.course_buf, m);
+    // (Its corners by number: see index_mesh.)
+    index_mesh(m);
+    glBindBuffer(34962, r.course_buf);
+    glBufferData(34962, mesh_distinct * VERTEX_FLOATS * 4, m.data, 35044);
+    glBindBuffer(34963, r.course_idx);
+    glNamedBufferData(r.course_idx, m.n * 4, mesh_index, 35044);
     r.course_n = m.n
 }
 
@@ -879,20 +928,58 @@ set_course_mesh(r: *Renderer, m: *Mesh) {
 // d_far, coarsely beyond.
 draw_world(
     r: *Renderer,
+    seen: []f32,
     d0: f32,
     d_far: f32,
     d1: f32
 ) {
-    first: int = 0;
-    count: int = 0;
-    course_span(d0, d_far, &first, &count);
     bind_vertices(r.course_buf);
-    glDrawArrays(4, first, count);
-    if (d1 > d_far) {
-        far_span(d_far + CHUNK_LEN, d1, &first, &count);
-        glDrawArrays(4, first, count);
-        glDrawArrays(4, backdrop_first, backdrop_count)
+    // (By their corners' numbers, four bytes each: see index_mesh.)
+    glBindBuffer(34963, r.course_idx);
+    if (park) {
+        // The park's chunks are squares of it (see sort_park): those in
+        // the picture `seen` makes, each run of them that lie together
+        // drawn as one.
+        k: int = 0;
+        while (k < nchunks) {
+            if (chunk_in_view(seen, chunk_box, k)) {
+                first: int = chunk_first[k];
+                count: int = 0;
+                while (k < nchunks && chunk_first[k] == first + count && chunk_in_view(seen,
+                    chunk_box, k)) {
+                    count = count + chunk_count[k];
+                    k = k + 1
+                }
+                glDrawElements(4, count, 5125, first * 4)
+            } else k = k + 1
+        }
+        if (d1 > d_far) glDrawElements(4, backdrop_count, 5125, backdrop_first * 4);
+        return
     }
+    // The chunks from d0 to d_far: but not those at either end that are
+    // out of the picture `seen` makes (behind the camera, say).
+    a: int = chunk_index(d0);
+    b: int = chunk_index(d_far);
+    while (a <= b && !chunk_in_view(seen, chunk_box, a)) a = a + 1;
+    while (b >= a && !chunk_in_view(seen, chunk_box, b)) b = b - 1;
+    if (a <= b) glDrawElements(4, chunk_first[b] + chunk_count[b] - chunk_first[a],
+        5125, chunk_first[a] * 4);
+    if (d1 > d_far) {
+        a = chunk_index(d_far + CHUNK_LEN);
+        b = chunk_index(d1);
+        while (a <= b && !chunk_in_view(seen, far_box, a)) a = a + 1;
+        while (b >= a && !chunk_in_view(seen, far_box, b)) b = b - 1;
+        if (a <= b) glDrawElements(4, far_first[b] + far_count[b] - far_first[a],
+            5125, far_first[a] * 4);
+        glDrawElements(4, backdrop_count, 5125, backdrop_first * 4)
+    }
+}
+
+chunk_in_view(seen: []f32, boxes: []f32, k: int): bool {
+    b: int = k * 6;
+    // (A chunk with nothing in it has nothing to show.)
+    boxes[b] <= boxes[b + 1] && box_in_view(seen, boxes[b], boxes[b + 1], boxes[b + 2],
+        boxes[b + 3], boxes[b + 4], boxes[b + 5])
 }
 
 // Whether to draw the grass (L8_NO_GRASS turns it off, to compare).
@@ -907,11 +994,13 @@ set_grass(r: *Renderer) {
 }
 
 // The tufts near him, with the world's shadows.
+grass_shows(k: int, eye: V3): bool {
+    b: int = k * 6;
+    grass_near(k, eye) && box_in_view(vp_m, grass_box[b], grass_box[b + 1], grass_box[b + 4],
+        grass_box[b + 5], grass_box[b + 2], grass_box[b + 3])
+}
+
 draw_grass(r: *Renderer, view: View) {
-    first: int = 0;
-    count: int = 0;
-    grass_span(-view.focus.z - 12.0, -view.focus.z + 44.0, &first, &count);
-    if (count <= 0) return;
     glUseProgram(r.grass);
     glUniformMatrix4fv(r.u_grass_vp, 1, 0, vp_m);
     glUniformMatrix4fv(r.u_grass_light, 1, 0, light_vp);
@@ -932,9 +1021,24 @@ draw_grass(r: *Renderer, view: View) {
     glEnableVertexAttribArray(4);
     glVertexAttribDivisor(3, 1);
     glVertexAttribDivisor(4, 1);
-    glVertexAttribPointer(3, 4, 5126, 0, GRASS_FLOATS * 4, first * GRASS_FLOATS * 4);
-    glVertexAttribPointer(4, 2, 5126, 0, GRASS_FLOATS * 4, first * GRASS_FLOATS * 4 + 16);
-    glDrawArraysInstanced(4, 0, tuft_n, count);
+    // The chunks that could show (near enough, and in the picture), each
+    // run of them that lie together drawn as one.
+    k: int = 0;
+    while (k < grass_chunks) {
+        if (grass_shows(k, view.eye)) {
+            first: int = grass_first[k];
+            count: int = 0;
+            while (k < grass_chunks && grass_first[k] == first + count && grass_shows(k,
+                view.eye)) {
+                count = count + grass_count[k];
+                k = k + 1
+            }
+            glVertexAttribPointer(3, 4, 5126, 0, GRASS_FLOATS * 4, first * GRASS_FLOATS * 4);
+            glVertexAttribPointer(4, 2, 5126, 0, GRASS_FLOATS * 4, first * GRASS_FLOATS * 4 + 16);
+            // (A tuft is one strip of triangles.)
+            glDrawArraysInstanced(5, 0, tuft_n, count)
+        } else k = k + 1
+    }
     glDisableVertexAttribArray(3);
     glDisableVertexAttribArray(4);
     glEnableVertexAttribArray(2)
@@ -1041,6 +1145,8 @@ const COURSE_LAMP_POWER: f32 = 3.2;
 set_lights(r: *Renderer, k: int) {
     sun: V3 = v_norm(look.sun);
     glUniform3f(r.u_dusk[k], sun.x, sun.y, sun.z);
+    flat: f32 = sqrtf(sun.x * sun.x + sun.z * sun.z);
+    glUniform2f(r.u_dusk_flat[k], sun.x / flat, sun.z / flat);
     u: []int = r.u_look;
     b: int = k * LOOK_UNIFORMS;
     set3(u[b], look.zenith);
@@ -1350,6 +1456,72 @@ pick_look(c: int) {
     if (!look.tufts) grass_on = false
 }
 
+// The circle on the ground that zone k lies inside (see mark_at, in the
+// world's shader, for what its numbers are): its middle, and its radius
+// squared, into a uniform.
+set_zone_circle(loc: int, k: int) {
+    z: int = k * 8;
+    kind: f32 = floorf(zone_rect[z + 6] + 0.001);
+    if (kind > 1.5) {
+        // The bowl: within reach of where he would ride up it.
+        glUniform3f(loc, zone_rect[z + 2], zone_rect[z + 3], zone_rect[z + 4] * zone_rect[z + 4]);
+        return
+    }
+    // In its own frame (turned by its yaw): a wall's bands either side of
+    // the middle, from where it starts down the run to where it ends; or a
+    // ramp's, across it, from where it lands the trick to its end.
+    x: f32 = 0.0;
+    half_x: f32 = maxf(absf(zone_rect[z]), absf(zone_rect[z + 1]));
+    d0: f32 = zone_rect[z + 2];
+    if (kind < 0.5) {
+        x = (zone_rect[z] + zone_rect[z + 1]) * 0.5;
+        half_x = absf(zone_rect[z + 1] - zone_rect[z]) * 0.5;
+        d0 = zone_rect[z + 3]
+    }
+    d1: f32 = zone_rect[z + 4];
+    half_d: f32 = absf(d1 - d0) * 0.5;
+    r: f32 = sqrtf(half_x * half_x + half_d * half_d) + 0.6;
+    // Back into the world's frame.
+    c: f32 = cosf(zone_rect[z + 7]);
+    sn: f32 = sinf(zone_rect[z + 7]);
+    lz: f32 = -(d0 + d1) * 0.5;
+    glUniform3f(loc, x * c - lz * sn, x * sn + lz * c, r * r)
+}
+
+// Whether any of a box (x0..x1, y0..y1, z0..z1) could be in the picture
+// that the matrix m makes (the camera's, vp_m, once the frame's camera is
+// set; or the sun's, light_vp, of what casts the shadows): by its sides
+// and its near end. For each, the box's corner furthest in is tried: if
+// that is out, all of it is.
+box_in_view(
+    m: []f32,
+    x0: f32,
+    x1: f32,
+    y0: f32,
+    y1: f32,
+    z0: f32,
+    z1: f32
+): bool {
+    for side in 0..5 {
+        // w + x, w - x, w + y, w - y, w + z: rows of the matrix.
+        row: int = side / 2;
+        sign: f32 = 1.0;
+        if (side % 2 == 1) sign = -1.0;
+        a: f32 = m[3] + sign * m[row];
+        b: f32 = m[7] + sign * m[4 + row];
+        c: f32 = m[11] + sign * m[8 + row];
+        d: f32 = m[15] + sign * m[12 + row];
+        x: f32 = x0;
+        if (a > 0.0) x = x1;
+        y: f32 = y0;
+        if (b > 0.0) y = y1;
+        z: f32 = z0;
+        if (c > 0.0) z = z1;
+        if (a * x + b * y + c * z + d < 0.0) return false
+    }
+    true
+}
+
 set3(loc: int, v: V3) {
     glUniform3f(loc, v.x, v.y, v.z)
 }
@@ -1421,7 +1593,7 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
         glPolygonOffset(1.5, 2.0);
         draw_shadow_mesh(r, ident_m);
         // Only what is near enough to cast a shadow he could see.
-        draw_world(r, -view.focus.z - 40.0, -view.focus.z + 40.0, -view.focus.z + 40.0);
+        draw_world(r, light_vp, -view.focus.z - 40.0, -view.focus.z + 40.0, -view.focus.z + 40.0);
         bind_vertices(r.part_buf);
         for i in 0..ndraw {
             for k in 0..16 part_tmp[k] = draw_m[i * 16 + k];
@@ -1444,29 +1616,9 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
     // The lamp map, on texture unit 2.
     glActiveTexture(33986);
     glBindTexture(3553, r.course_lamps);
-    frame_phase("sky");
-    glDepthMask(0);
-    glDisable(2929);
-    glUseProgram(r.sky);
-    f: V3 = v_norm(v_sub(view.at, view.eye));
-    rt: V3 = v_norm(v_cross(f, v3(0.0, 1.0, 0.0)));
-    up: V3 = v_cross(rt, f);
-    glUniform3f(r.u_cam_f, f.x, f.y, f.z);
-    glUniform3f(r.u_cam_r, rt.x, rt.y, rt.z);
-    glUniform3f(r.u_cam_u, up.x, up.y, up.z);
-    th: f32 = sinf(view.fovy * 0.5) / cosf(view.fovy * 0.5);
-    glUniform2f(r.u_tan, th * aspect, th);
-    glUniform1f(r.u_shift, view.shift);
-    glUniform3f(r.u_sky_sun, sun.x, sun.y, sun.z);
-    glUniform1f(r.u_time, view.time);
-    set_lights(r, 2);
+    // (The noise, on texture unit 1, for the world and the sky.)
     glActiveTexture(33985);
     glBindTexture(3553, r.noise_tex);
-    glUniform1i(r.u_sky_noise, 1);
-    bind_vertices(r.sky_buf);
-    glDrawArrays(4, 0, 3);
-    glDepthMask(1);
-    glEnable(2929);
     frame_phase("world");
     glUseProgram(r.world);
     set_lights(r, 0);
@@ -1483,19 +1635,16 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
     glUniform4f(r.u_park_floor, PARK_HX, PARK_HZ, PARK_CORNER, 0.0);
     for k in 0..MAX_ZONES * 2 glUniform4f(r.u_marks[k], zone_rect[k * 4], zone_rect[k * 4 + 1],
         zone_rect[k * 4 + 2], zone_rect[k * 4 + 3]);
+    for k in 0..nzones set_zone_circle(r.u_mark_c[k], k);
     glActiveTexture(33984);
     glBindTexture(3553, r.shadow_tex);
     glUniform1i(r.u_shadow_map, 0);
     glUniform1i(r.u_world_noise, 1);
     glUniformMatrix4fv(r.u_model, 1, 0, ident_m);
-    draw_world(r, -view.focus.z - 40.0, -view.focus.z + 110.0, -view.focus.z + 600.0);
+    draw_world(r, vp_m, -view.focus.z - 40.0, -view.focus.z + 110.0, -view.focus.z + 600.0);
     if (grass_on) {
         frame_phase("grass");
         draw_grass(r, view)
-    }
-    if (glows_on) {
-        frame_phase("glow");
-        draw_glows(r, view)
     }
     frame_phase("guy");
     glUseProgram(r.world);
@@ -1504,6 +1653,33 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
     for i in 0..ndraw {
         glUniformMatrix4fv(r.u_model, 1, 0, &draw_m[i * 16]);
         glDrawArrays(4, part_first[draw_part[i]], part_count[draw_part[i]])
+    }
+    // The sky last of what is solid, and only where nothing else is: at
+    // the far end of the depth, which it passes by being no further.
+    frame_phase("sky");
+    glDepthMask(0);
+    glDepthFunc(515);
+    glUseProgram(r.sky);
+    f: V3 = v_norm(v_sub(view.at, view.eye));
+    rt: V3 = v_norm(v_cross(f, v3(0.0, 1.0, 0.0)));
+    up: V3 = v_cross(rt, f);
+    glUniform3f(r.u_cam_f, f.x, f.y, f.z);
+    glUniform3f(r.u_cam_r, rt.x, rt.y, rt.z);
+    glUniform3f(r.u_cam_u, up.x, up.y, up.z);
+    th: f32 = sinf(view.fovy * 0.5) / cosf(view.fovy * 0.5);
+    glUniform2f(r.u_tan, th * aspect, th);
+    glUniform1f(r.u_shift, view.shift);
+    glUniform3f(r.u_sky_sun, sun.x, sun.y, sun.z);
+    glUniform1f(r.u_time, view.time);
+    set_lights(r, 2);
+    glUniform1i(r.u_sky_noise, 1);
+    bind_vertices(r.sky_buf);
+    glDrawArrays(4, 0, 3);
+    glDepthFunc(513);
+    glDepthMask(1);
+    if (glows_on) {
+        frame_phase("glow");
+        draw_glows(r, view)
     }
     frame_phase_end()
 }

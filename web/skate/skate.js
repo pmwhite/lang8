@@ -37,7 +37,7 @@ for (const name of ["gesturestart", "gesturechange", "dblclick"]) {
 // it lands on this same page, which steps forward again.
 for (const name of ["touchstart", "touchmove"]) {
   document.addEventListener(name, (e) => {
-    if (!e.target.closest?.("a, .guide")) e.preventDefault();
+    if (!e.target.closest?.("a, .guide, #perf")) e.preventDefault();
   }, { passive: false });
 }
 history.pushState({ stay: true }, "", location.href);
@@ -104,7 +104,7 @@ const onTap = (el, act, accepts = () => true) => {
 // run just finished again (its P), which the game says when to offer
 // (L8OVER).
 // (A mouse pressed on one does not take the keyboard from the game.)
-for (const el of document.querySelectorAll(".look, .replay, .again, .back")) el.addEventListener("mousedown", (e) => e.preventDefault());
+for (const el of document.querySelectorAll(".look, .replay, .again, .back, .perf .key, #perf .auto")) el.addEventListener("mousedown", (e) => e.preventDefault());
 onTap(document.querySelector(".look"), () => {
   setNight(!document.body.classList.contains("night"));
   typeKeys([108]);
@@ -519,13 +519,15 @@ const showMenu = () => {
   const fresh = !stored("skate.tutorial", false) && !stored("skate.course", 0);
   item("tutorial").classList.toggle("first", fresh);
   item("tutorial").querySelector("i").textContent = fresh ? "Start here" : "";
-  const me = el.querySelector(".me");
-  me.hidden = !account;
-  me.querySelector("b").textContent = account?.name ?? "";
+  // (Laid out for someone from the first, before who he is has come: see
+  // the script after the menu, in index.html.)
+  el.classList.toggle("someone", !!mySecret);
+  if (account) el.querySelector(".me b").textContent = account.name;
+  // (For someone, even with nothing ridden yet, its space is kept; and
+  // until what has been ridden has come, it is left empty.)
   const runs = feed().slice(0, FEED);
-  el.querySelector(".feedhead").hidden = runs.length === 0;
   const list = el.querySelector(".feed");
-  if (runs.length === 0) list.textContent = "";
+  if (!account) list.textContent = "";
   else
     runList(
       list,
@@ -544,7 +546,9 @@ for (const el of sheets.menu.querySelectorAll(".item")) {
     if (to === "parks") go("places", true);
   });
 }
-onTap(sheets.menu.querySelector(".me"), () => go("person", account.name));
+onTap(sheets.menu.querySelector(".me"), () => {
+  if (account) go("person", account.name);
+});
 onTap(document.querySelector(".pick"), goHome);
 
 // The places to pick from: the courses, or the parks, and one at random.
@@ -701,7 +705,7 @@ async function main() {
     maxPixels: 2.2e6,
     // ?gputime times the frame's parts on the GPU (l8Game.glTiming().gpu);
     // ?skip=prog3 drops a program's draws, to measure what they cost.
-    timing: params.has("gputime"), gpuTiming: params.has("gputime"),
+    timing: params.has("gputime"), gpuTiming: params.has("gputime"), countCalls: params.has("glstats"),
     skip: new Set((params.get("skip") ?? "").split(",").filter(Boolean)) });
   canvas.addEventListener("keydown", (e) => {
     if (e.code === "KeyL" && !e.repeat) setNight(!document.body.classList.contains("night"));
@@ -739,8 +743,10 @@ async function main() {
   if (wanted !== null && wanted !== placeNow) visit(wanted);
   wanted = null;
   canvas.addEventListener("focus", () => (overlay.hidden = true));
-  canvas.addEventListener("blur", () => {
-    if (!touch && !sheetOpen()) show("Click to continue");
+  canvas.addEventListener("blur", (e) => {
+    // (Not for the panel of the frames' rate: its slider takes the keyboard
+    // for a moment, and gives it back.)
+    if (!touch && !sheetOpen() && !document.getElementById("perf").contains(e.relatedTarget)) show("Click to continue");
   });
   addEventListener("pointerdown", (e) => {
     if (e.target.closest?.(".ui")) return;
@@ -764,7 +770,126 @@ async function main() {
       breath.port1.onmessage = resolve;
       breath.port2.postMessage(0);
     });
-  const status = await runResumable(instance, () => (document.body.classList.contains("loading") ? breathed() : platform.nextFrame()));
+  // On a device that cannot keep up, the picture is drawn smaller, and
+  // stretched to the screen: frames that come slowly for a few seconds
+  // take it down a step, to half its size at the least. Slowly is by the
+  // rate the browser gives frames at all, found while the game is held
+  // behind a sheet and draws nothing: a phone saving its battery gives
+  // half as many, and no size of picture brings more. A step that does not
+  // bring the frames faster is followed by another (they come only at
+  // whole divisions of that rate, so one step may not show); if none down
+  // to the least does, the size is put back and no more are tried: it is
+  // not the picture's size that holds the device up. Where it got to is
+  // kept for the next time, which starts a step above it, so that one bad
+  // spell does not last for good. ?scale= fixes it instead.
+  const PACE_SLOW = 1.45, PACE_FOR = 3000, PACE_STEP = 0.85, PACE_LEAST = 0.5, PACE_TRIAL = 4000, PACE_GAIN = 0.92;
+  // (Or he sets it himself, with the slider under the frames' rate: then
+  // it is left where he put it, until he hands it back.)
+  const kept = Math.min(1, Math.max(PACE_LEAST, stored("skate.scale", 1) || 1));
+  let own = stored("skate.scale.own", false);
+  const pace = { on: !params.has("scale") && !own, slow: 0, last: 0, quiet: 0, mean: 16, trial: null, refresh: 1000 / 60 };
+  if (pace.on) platform.setScale(Math.min(1, kept / PACE_STEP));
+  else if (!params.has("scale")) platform.setScale(kept);
+
+  // How fast the frames come, top right, if he asks to see it: counted
+  // over each half second. Beside it, a button for a panel that says what
+  // it is, with the picture's resolution to trade for speed.
+  const perf = document.querySelector(".perf");
+  const panel = document.getElementById("perf");
+  const slider = panel.querySelector("input");
+  const rate = { frames: 0, since: performance.now(), text: perf.querySelector(".rate b") };
+  const showScale = () => {
+    slider.value = String(Math.round(platform.scale() * 20) * 5);
+    panel.querySelector("output").textContent = `${Math.round(platform.scale() * 100)}%`;
+    panel.querySelector(".auto").classList.toggle("on", !own);
+    panel.querySelector(".cap").textContent = lowPower() ? `This device looks to be in Low Power Mode, which holds the game to about ${Math.round(1000 / pace.refresh)} frames a second whatever the resolution.` : "";
+  };
+  // Whether the device is saving its battery, as far as can be told: the
+  // browser gives far fewer frames than sixty a second even to a game that
+  // draws nothing (a phone in Low Power Mode gives thirty).
+  const lowPower = () => 1000 / pace.refresh < 50;
+  perf.classList.toggle("on", stored("skate.fps", false));
+  onTap(perf.querySelector(".rate"), () => {
+    store("skate.fps", perf.classList.toggle("on"));
+    panel.hidden = true;
+  });
+  onTap(perf.querySelector(".what"), () => {
+    showScale();
+    panel.hidden = !panel.hidden;
+  });
+  slider.addEventListener("input", () => {
+    pace.on = false;
+    pace.trial = null;
+    platform.setScale(Number(slider.value) / 100);
+    store("skate.scale", platform.scale());
+    store("skate.scale.own", (own = true));
+    showScale();
+  });
+  slider.addEventListener("change", () => canvas.focus());
+  onTap(panel.querySelector(".auto"), () => {
+    // (Back to full, and down again from there if it must.)
+    pace.on = !params.has("scale");
+    pace.slow = 0;
+    pace.trial = null;
+    platform.setScale(1);
+    store("skate.scale", 1);
+    store("skate.scale.own", (own = false));
+    showScale();
+  });
+
+  const paced = async () => {
+    await platform.nextFrame();
+    const now = performance.now();
+    rate.frames++;
+    if (now - rate.since >= 500) {
+      rate.text.textContent = `${Math.round((rate.frames * 1000) / (now - rate.since))} fps${lowPower() ? " · low power" : ""}`;
+      rate.frames = 0;
+      rate.since = now;
+      if (!panel.hidden) showScale();
+    }
+    const gap = now - pace.last;
+    pace.last = now;
+    // (Held behind a sheet, with no place shown off, the game draws
+    // nothing: the frames come as fast as the browser gives them.)
+    const body = document.body.classList;
+    if (body.contains("sheet") && !body.contains("showing")) {
+      if (gap < 100) pace.refresh += (gap - pace.refresh) * 0.05;
+      pace.quiet = now + 1500;
+      return;
+    }
+    if (!pace.on) return;
+    // (Not the frames after a pause, or the first few after a place is
+    // built: those are slow whatever the device.)
+    if (gap > 250 || document.hidden) pace.quiet = now + 1500;
+    if (now < pace.quiet) return;
+    pace.mean += (gap - pace.mean) * 0.05;
+    if (pace.trial) {
+      // Steps down are on trial: kept if the frames now come faster; else
+      // another is tried, down to the least, and then all are taken back.
+      if (now < pace.trial.until) return;
+      if (pace.mean <= pace.trial.mean * PACE_GAIN) store("skate.scale", platform.scale());
+      else if (platform.scale() > PACE_LEAST) {
+        platform.setScale(Math.max(PACE_LEAST, platform.scale() * PACE_STEP));
+        pace.trial.until = now + PACE_TRIAL;
+        return;
+      } else {
+        platform.setScale(pace.trial.scale);
+        pace.on = false;
+      }
+      pace.trial = null;
+      pace.slow = 0;
+      return;
+    }
+    pace.slow = gap > PACE_SLOW * pace.refresh ? pace.slow + gap : Math.max(0, pace.slow - 2 * gap);
+    if (pace.slow < PACE_FOR || platform.scale() <= PACE_LEAST) return;
+    pace.trial = { scale: platform.scale(), mean: pace.mean, until: now + PACE_TRIAL };
+    platform.setScale(Math.max(PACE_LEAST, platform.scale() * PACE_STEP));
+  };
+  const status = await runResumable(instance, () => {
+    if (!document.body.classList.contains("loading")) return paced();
+    pace.quiet = performance.now() + 1500;
+    return breathed();
+  });
   stopped(`The game exited${status ? ` with status ${status}` : ""}.<br><a href="">Play again</a>`);
 }
 

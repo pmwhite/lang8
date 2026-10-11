@@ -9,24 +9,30 @@ use_tag gl;
 //
 // A tuft is three blades, each a quad and a tip; its vertices hold a
 // position in the tuft (y from 0 at the root to 1 at the tip) and a normal.
+// They are one strip of triangles: five vertices to a blade, and two more
+// between one blade and the next, joining them with triangles of no size.
 // An instance is six floats: where the tuft stands, how it is turned, how
 // tall it is, and a tint (0 lush to 1 dry).
 const TUFT_BLADES: int = 3;
 
-const TUFT_VERTS: int = 27;
+const TUFT_VERTS: int = 19;
 
 const GRASS_FLOATS: int = 6;
 
 // Spacing of tufts, how far up the banks they reach, and the length of a
-// chunk of them along the run (they are drawn a stretch of chunks at a
-// time).
+// chunk of them along the run. Only the chunks that could show are drawn
+// (see draw_grass, in render.l8): each has the box that its tufts stand
+// in. No tuft shows further than GRASS_FAR from the camera
+// (the grass's shader shrinks them to nothing by then).
 const GRASS_SPACING: f32 = 0.28;
 
 const GRASS_REACH: f32 = 12.5;
 
-const GRASS_CHUNK: f32 = 10.0;
+const GRASS_CHUNK: f32 = 5.0;
 
-const MAX_GRASS_CHUNKS: int = 48;
+const GRASS_FAR: f32 = 42.0;
+
+const MAX_GRASS_CHUNKS: int = 200;
 
 const MAX_GRASS: int = 140000;
 
@@ -37,6 +43,10 @@ grass_n: int = 0;
 grass_first: []int = new int[MAX_GRASS_CHUNKS](0);
 
 grass_count: []int = new int[MAX_GRASS_CHUNKS](0);
+
+// (x from, x to, z from, z to, for each; and y, which close_grass_box finds
+// from its tufts.)
+grass_box: []f32 = new f32[MAX_GRASS_CHUNKS * 6](0.0);
 
 grass_chunks: int = 0;
 
@@ -81,15 +91,15 @@ build_tuft() {
         z1: f32 = dz * (o + lean * 0.4);
         x2: f32 = dx * (o + lean);
         z2: f32 = dz * (o + lean);
+        // (The first of a blade twice, after the last of the one before
+        // twice: see TUFT_VERTS.)
+        if (b > 0) put_tuft_vertex(x0 - sx * w, 0.0, z0 - sz * w, n);
         put_tuft_vertex(x0 - sx * w, 0.0, z0 - sz * w, n);
         put_tuft_vertex(x0 + sx * w, 0.0, z0 + sz * w, n);
-        put_tuft_vertex(x1 + sx * w * 0.75, 0.55, z1 + sz * w * 0.75, n);
-        put_tuft_vertex(x0 - sx * w, 0.0, z0 - sz * w, n);
-        put_tuft_vertex(x1 + sx * w * 0.75, 0.55, z1 + sz * w * 0.75, n);
-        put_tuft_vertex(x1 - sx * w * 0.75, 0.55, z1 - sz * w * 0.75, n);
         put_tuft_vertex(x1 - sx * w * 0.75, 0.55, z1 - sz * w * 0.75, n);
         put_tuft_vertex(x1 + sx * w * 0.75, 0.55, z1 + sz * w * 0.75, n);
-        put_tuft_vertex(x2, 1.0, z2, n)
+        put_tuft_vertex(x2, 1.0, z2, n);
+        if (b < TUFT_BLADES - 1) put_tuft_vertex(x2, 1.0, z2, n)
     }
 }
 
@@ -147,21 +157,41 @@ build_grass() {
             d = d + GRASS_SPACING
         }
         grass_count[grass_chunks] = grass_n - grass_first[grass_chunks];
+        reach: f32 = COURSE_HALF + GRASS_REACH + GRASS_SPACING;
+        set_grass_box(grass_chunks, -reach, reach, -(d0 + GRASS_CHUNK) - GRASS_SPACING,
+            -d0 + GRASS_SPACING);
         grass_chunks = grass_chunks + 1;
         d0 = d0 + GRASS_CHUNK;
         breathe()
     }
 }
 
-// The tufts from d0 to d1 down the run: the first and how many.
-grass_span(
-    d0: f32,
-    d1: f32,
-    first: *int,
-    count: *int
+set_grass_box(
+    k: int,
+    x0: f32,
+    x1: f32,
+    z0: f32,
+    z1: f32
 ) {
-    a: int = clampi(((d0 - COURSE_START + 10.0) / GRASS_CHUNK) as int, 0, grass_chunks - 1);
-    b: int = clampi(((d1 - COURSE_START + 10.0) / GRASS_CHUNK) as int, 0, grass_chunks - 1);
-    first.* = grass_first[a];
-    count.* = grass_first[b] + grass_count[b] - grass_first[a]
+    grass_box[k * 6] = x0;
+    grass_box[k * 6 + 1] = x1;
+    grass_box[k * 6 + 2] = z0;
+    grass_box[k * 6 + 3] = z1;
+    // How low its tufts' roots, and how high their tips.
+    lo: f32 = 1000000.0;
+    hi: f32 = -1000000.0;
+    for i in grass_first[k]..grass_first[k] + grass_count[k] {
+        y: f32 = grass_inst[i * GRASS_FLOATS + 1];
+        lo = minf(lo, y);
+        hi = maxf(hi, y + grass_inst[i * GRASS_FLOATS + 4])
+    }
+    grass_box[k * 6 + 4] = lo;
+    grass_box[k * 6 + 5] = hi + 0.3
+}
+
+// Whether any of chunk k's tufts are near enough the eye to show at all.
+grass_near(k: int, eye: V3): bool {
+    dx: f32 = eye.x - clampf(eye.x, grass_box[k * 6], grass_box[k * 6 + 1]);
+    dz: f32 = eye.z - clampf(eye.z, grass_box[k * 6 + 2], grass_box[k * 6 + 3]);
+    dx * dx + dz * dz < GRASS_FAR * GRASS_FAR
 }

@@ -434,11 +434,19 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
       return 0n;
     },
     glDrawArrays: (mode, first, count) => (skipped() || gl.drawArrays(n(mode), n(first), n(count)), 0n),
+    glDrawElements: (mode, count, type, offset) => (skipped() || gl.drawElements(n(mode), n(count), n(type), n(offset)), 0n),
+    // (WebGL has no buffers by name: this one is of triangles' corners.)
+    glNamedBufferData(buffer, size, data, usage) {
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, obj(buffer));
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, bytes().subarray(n(data), n(data) + n(size)), n(usage));
+      return 0n;
+    },
     glDrawArraysInstanced: (mode, first, count, k) => (skipped() || gl.drawArraysInstanced(n(mode), n(first), n(count), n(k)), 0n),
     glEnable: (cap) => (gl.enable(n(cap)), 0n),
     glDisable: (cap) => (gl.disable(n(cap)), 0n),
     glBlendFunc: (s, d) => (gl.blendFunc(n(s), n(d)), 0n),
     glDepthMask: (flag) => (gl.depthMask(flag !== 0n), 0n),
+    glDepthFunc: (func) => (gl.depthFunc(n(func)), 0n),
     glCullFace: (mode) => (gl.cullFace(n(mode)), 0n),
     glPolygonOffset: (factor, units) => (gl.polygonOffset(factor, units), 0n),
     glGenTextures: (count, ptr) => genObjects(count, ptr, () => gl.createTexture()),
@@ -531,6 +539,11 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
         last.set(slot, text);
         if (key === "glBufferData" && args[2] !== 0n) uploads[key] = (uploads[key] ?? 0) + n(args[1]);
         if (key === "glBufferSubData") uploads[key] = (uploads[key] ?? 0) + n(args[2]);
+        if (key === "glDrawElements") {
+          // (Corners drawn: the vertices worked out are fewer, being shared.)
+          const target = `fb${boundFramebufferId} prog${currentProgram} corners`;
+          vertexCounts[target] = (vertexCounts[target] ?? 0) + n(args[1]);
+        }
         if (key === "glDrawArrays" || key === "glDrawArraysInstanced") {
           // Vertices drawn per framebuffer and program, and debug skips.
           const target = `fb${boundFramebufferId} prog${currentProgram}`;

@@ -395,8 +395,69 @@ park_step(v: f32, half: f32): f32 {
     8.0
 }
 
-// The park, all in one near chunk (see build_course): the ground and all
-// that stands on it, and the hills far off.
+// The park's triangles are gathered into squares of the ground, each a
+// chunk with its box, so that only the squares in the picture (or that cast
+// a shadow into it) are drawn: see draw_world, in render.l8. So many
+// squares across and along, about the middle, the outermost taking all
+// that lies beyond them.
+const PARK_CELL: f32 = 16.0;
+
+const PARK_CELLS: int = 6;
+
+cell_count: []int = new int[PARK_CELLS * PARK_CELLS](0);
+
+cell_at: []int = new int[PARK_CELLS * PARK_CELLS](0);
+
+// The square the triangle whose numbers start at a lies in, by its middle.
+park_cell(d: []f32, a: int): int {
+    x: f32 = (d[a] + d[a + VERTEX_FLOATS] + d[a + 2 * VERTEX_FLOATS]) / 3.0;
+    z: f32 = (d[a + 2] + d[a + VERTEX_FLOATS + 2] + d[a + 2 * VERTEX_FLOATS + 2]) / 3.0;
+    half: f32 = PARK_CELL * PARK_CELLS as f32 * 0.5;
+    ix: int = clampi(floorf((x + half) / PARK_CELL) as int, 0, PARK_CELLS - 1);
+    iz: int = clampi(floorf((z + half) / PARK_CELL) as int, 0, PARK_CELLS - 1);
+    iz * PARK_CELLS + ix
+}
+
+// Sort the mesh's triangles by their squares (those of a square staying in
+// the order they were), through the room past the mesh's end; if there is
+// not room, it stays one chunk.
+sort_park(m: *Mesh) {
+    d: []f32 = m.data;
+    tri: int = 3 * VERTEX_FLOATS;
+    tris: int = m.n / 3;
+    up: int = m.n * VERTEX_FLOATS;
+    cells: int = PARK_CELLS * PARK_CELLS;
+    if (up * 2 > len(d) || cells > MAX_CHUNKS) return;
+    for c in 0..cells cell_count[c] = 0;
+    for t in 0..tris {
+        c: int = park_cell(d, t * tri);
+        cell_count[c] = cell_count[c] + 1
+    }
+    at: int = 0;
+    for c in 0..cells {
+        cell_at[c] = at;
+        chunk_first[c] = at * 3;
+        chunk_count[c] = cell_count[c] * 3;
+        far_first[c] = m.n;
+        far_count[c] = 0;
+        at = at + cell_count[c]
+    }
+    for t in 0..tris {
+        c: int = park_cell(d, t * tri);
+        to: int = up + cell_at[c] * tri;
+        for k in 0..tri d[to + k] = d[t * tri + k];
+        cell_at[c] = cell_at[c] + 1;
+        if (t % 4096 == 0) breathe()
+    }
+    for i in 0..up d[i] = d[up + i];
+    nchunks = cells;
+    for c in 0..cells {
+        mesh_box(m, chunk_first[c], chunk_count[c], chunk_box, c);
+        mesh_box(m, m.n, 0, far_box, c)
+    }
+}
+
+// The park: the ground and all that stands on it, and the hills far off.
 build_park(m: *Mesh) {
     m.n = 0;
     soft_reset(-32.0, -425.0);
@@ -425,8 +486,12 @@ build_park(m: *Mesh) {
     put_park_scenery(m);
     breathe();
     chunk_count[0] = m.n;
+    mesh_box(m, 0, m.n, chunk_box, 0);
     far_first[0] = m.n;
     far_count[0] = 0;
+    mesh_box(m, m.n, 0, far_box, 0);
+    sort_park(m);
+    breathe();
     backdrop_first = m.n;
     put_hills(m, 0.0, 0.0, -12.0);
     backdrop_count = m.n - backdrop_first
@@ -546,26 +611,46 @@ put_park_scenery(m: *Mesh) {
     }
 }
 
-// The grass, out from the deck, all in one chunk.
+// The grass, out from the deck.
 build_park_grass() {
     build_tuft();
     grass_n = 0;
-    grass_chunks = 1;
+    grass_chunks = 0;
     grass_rng = 4711;
-    grass_first[0] = 0;
     out: f32 = bowl_top() + PARK_DECK + 0.3;
-    z: f32 = -(PARK_HZ + out + GRASS_REACH);
-    while (z < PARK_HZ + out + GRASS_REACH) {
-        x: f32 = -(PARK_HX + out + GRASS_REACH);
-        while (x < PARK_HX + out + GRASS_REACH) {
-            gx: f32 = x + (grass_rand() - 0.5) * GRASS_SPACING;
-            gz: f32 = z + (grass_rand() - 0.5) * GRASS_SPACING;
-            e: f32 = park_out(gx, gz) - out;
-            if (e > 0.0 && e < GRASS_REACH) add_tuft(gx, gz, e);
-            x = x + GRASS_SPACING
+    hx: f32 = PARK_HX + out + GRASS_REACH;
+    hz: f32 = PARK_HZ + out + GRASS_REACH;
+    // In squares, so many rows of tufts a side: each a chunk, of which only
+    // those that could show are drawn (see draw_grass, in render.l8).
+    rows: int = 28;
+    side: f32 = rows as f32 * GRASS_SPACING;
+    z0: f32 = -hz;
+    while (z0 < hz) {
+        x0: f32 = -hx;
+        while (x0 < hx) {
+            first: int = grass_n;
+            for j in 0..rows {
+                for i in 0..rows {
+                    x: f32 = x0 + i as f32 * GRASS_SPACING;
+                    z: f32 = z0 + j as f32 * GRASS_SPACING;
+                    if (x < hx && z < hz) {
+                        gx: f32 = x + (grass_rand() - 0.5) * GRASS_SPACING;
+                        gz: f32 = z + (grass_rand() - 0.5) * GRASS_SPACING;
+                        e: f32 = park_out(gx, gz) - out;
+                        if (e > 0.0 && e < GRASS_REACH) add_tuft(gx, gz, e)
+                    }
+                }
+            }
+            if (grass_n > first && grass_chunks < MAX_GRASS_CHUNKS) {
+                grass_first[grass_chunks] = first;
+                grass_count[grass_chunks] = grass_n - first;
+                set_grass_box(grass_chunks, x0 - GRASS_SPACING, x0 + side + GRASS_SPACING,
+                    z0 - GRASS_SPACING, z0 + side + GRASS_SPACING);
+                grass_chunks = grass_chunks + 1
+            }
+            x0 = x0 + side
         }
-        z = z + GRASS_SPACING;
+        z0 = z0 + side;
         breathe()
     }
-    grass_count[0] = grass_n
 }
