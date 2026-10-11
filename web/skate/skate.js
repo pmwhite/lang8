@@ -931,7 +931,11 @@ async function main() {
     // where the picture has been made small; ?aa=0 leaves that out.
     antialias: params.get("aa") !== "0",
     timing: params.has("gputime") || params.has("probe"), gpuTiming: params.has("gputime") || params.has("probe"), countCalls: params.has("glstats"),
-    skip: new Set((params.get("skip") ?? "").split(",").filter(Boolean)) });
+    skip: new Set((params.get("skip") ?? "").split(",").filter(Boolean)),
+    // Fragments are shaded at medium precision, which a phone's GPU does
+    // far faster (the shaders keep full precision where it shows: see HP
+    // in programs/skate/render.l8); ?precision=highp to compare.
+    fragmentPrecision: params.get("precision") === "highp" ? "highp" : "mediump" });
   canvas.addEventListener("keydown", (e) => {
     if (e.code === "KeyL" && !e.repeat) setNight(!document.body.classList.contains("night"));
     if ((e.code === "KeyH" || e.code === "KeyM") && !e.repeat) goHome();

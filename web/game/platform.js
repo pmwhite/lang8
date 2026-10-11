@@ -39,10 +39,13 @@ const RESERVED = /\b(patch|sample|smooth|flat|centroid|layout|filter|input|outpu
 // GLSL to GLSL ES 3.00. Version 330 shaders (the water solver's fragment
 // passes) only need the ES header. Version 120 shaders use attribute/varying,
 // texture2D, shadow2D, and gl_FragColor, and may use ES keywords as names.
-export function translateShader(source, fragment) {
+// A fragment shader's floats are of `precision` unless it says otherwise:
+// "mediump" is about twice as fast on a phone's GPU, for shaders written to
+// mark what needs more (see HP in programs/skate/render.l8).
+export function translateShader(source, fragment, precision = "highp") {
   const version = Number((source.match(/^\s*#version\s+(\d+)/) ?? [0, 120])[1]);
   let s = source.replace(/^\s*#version[^\n]*\n/, "");
-  let head = "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n" +
+  let head = `#version 300 es\nprecision ${fragment ? precision : "highp"} float;\nprecision highp int;\nprecision highp sampler2D;\n` +
     "precision highp sampler2DShadow;\n";
   if (version >= 300) return head + s;
   s = s.replace(RESERVED, "$1_l8");
@@ -58,8 +61,9 @@ export function translateShader(source, fragment) {
 }
 
 // scale renders the window at that fraction of its size, and maxPixels caps
-// how many pixels it renders in all. env answers getenv.
-export function createPlatform(canvas, { log = console.log, checkErrors = false, countCalls = false, timing = false, gpuTiming = false, antialias = false, skip = new Set(), scale = 1, zoom = 0.85, env = {}, pointers = false, maxTall = 1.6, maxPixels = 1200 * 720 } = {}) {
+// how many pixels it renders in all. env answers getenv. fragmentPrecision
+// is the fragment shaders' default float precision (see translateShader).
+export function createPlatform(canvas, { log = console.log, checkErrors = false, countCalls = false, timing = false, gpuTiming = false, antialias = false, skip = new Set(), scale = 1, zoom = 0.85, env = {}, pointers = false, maxTall = 1.6, maxPixels = 1200 * 720, fragmentPrecision = "highp" } = {}) {
   let mem = null;
   let instance = null;
   // (antialias: edges smoothed, each pixel made of several samples.)
@@ -282,7 +286,7 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
         source += len < 0 ? cstring(BigInt(p)) : decoder.decode(bytes().subarray(p, p + len));
       }
       const info = shaders.get(n(sh));
-      gl.shaderSource(obj(sh), translateShader(source, info.fragment));
+      gl.shaderSource(obj(sh), translateShader(source, info.fragment, fragmentPrecision));
       return 0n;
     },
     glCompileShader(sh) {
