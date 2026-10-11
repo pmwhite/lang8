@@ -9,7 +9,12 @@
 // drawn); a frame that misses a beat is not shown until the next, so what
 // can be had is a frame every beat, every second one, every third: a count
 // of beats to a frame, which is what this aims at (`beats`). A frame is
-// late that takes a beat more than that.
+// late that takes a beat more than that. But no more than sixty frames a
+// second are asked for: on a screen that beats faster, a frame that takes
+// up to a sixtieth of a second is in time, and the room that leaves goes
+// to the picture (so on a screen of ninety a second, a frame that needs
+// more than one beat is shown every second one, forty-five a second, at
+// whatever size that allows).
 //
 //   Down, fast. A few frames late running (three; more on a device that
 //   is often late anyway), and it is a rung down at once, two if they are
@@ -47,6 +52,8 @@ const SECOND = 60;
 const LONG = 90;
 const RETRY = 180000;
 const RETRY_MOST = 1200000;
+// The fewest milliseconds a frame is asked to come within: sixty a second.
+const AIM_LEAST = 1000 / 60;
 
 // `work` is how much each rung asks of the device, of what the best asks
 // (its share of the pixels, say): a device far behind is taken down as
@@ -133,7 +140,7 @@ export function createPacer({ work, rung = 0, beats = 1, beat = 1000 / 60 }) {
       }
       // (Late by half a beat; and by a little more, the more beats it
       // aims at, long frames being less even.)
-      const aim = s.beats * s.beat;
+      const aim = Math.max(s.beats * s.beat, AIM_LEAST);
       const slack = 0.5 * s.beat + 0.1 * (aim - s.beat);
       const late = gap > aim + slack;
       s.late.push(late ? 1 : 0);

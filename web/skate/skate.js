@@ -1000,8 +1000,8 @@ async function main() {
       breath.port2.postMessage(0);
     });
   // The picture is kept to what the device can draw in time (see pace.js):
-  // as many frames as its screen shows, first; and then as fine a picture
-  // as that leaves room for. Its rungs, from the best: the picture's size,
+  // as many frames as its screen shows, up to sixty a second, first; and
+  // then as fine a picture as that leaves room for. Its rungs, from the best: the picture's size,
   // each a little smaller than the last, down to half; then at half with
   // its surfaces colored plainly too (see shade_plain, in the game's
   // render.l8); and so, smaller still by larger steps, down to a tenth.
