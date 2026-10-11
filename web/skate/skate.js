@@ -291,20 +291,19 @@ const randomPlace = (park) => (park ? -1 : 1) * (PLACES + 1 + Math.floor(Math.ra
 
 // The leaderboards (see ../skate-board/worker.js). There is nothing here to
 // join or sign up to: whoever looks after them makes each person a link
-// (this page, with their secret after its #: see `linked`, above) and puts
-// people in groups. Whoever opens a link plays as that person from then
-// on, on that device. A group keeps each member's best on a place, and
-// their latest runs there; a best run can be watched by anyone its rider
-// shares a group with: the game is handed it as a file, and V.
+// (this page, with their secret after its #: see `linked`, above), and
+// decides who sees whom. Whoever opens a link plays as that person from
+// then on, on that device, and sees the scores of those they may: each
+// one's best on a place, and their latest runs there. A best run can be
+// watched: the game is handed it as a file, and V.
 // (?api= points a page on localhost at a worker run there, to try one.)
 const localApi = location.hostname === "localhost" && new URLSearchParams(location.search).get("api");
 const api = localApi || (location.hostname.endsWith("trailingwhite.space") ? "/skate/api" : "https://trailingwhite.space/skate/api");
 let mySecret = stored("skate.me", null);
-// Who he is, and his groups' scores, as last fetched: kept on the device
-// too, so that they show at once the next time, before they are fetched
-// again (which nothing waits for).
+// Who he is, and the scores of those he sees, as last fetched: kept on the
+// device too, so that they show at once the next time, before they are
+// fetched again (which nothing waits for).
 let account = mySecret ? stored("skate.account", null) : null;
-const groups = () => account?.groups ?? [];
 let gameVersion = 0;
 let gameFs = null;
 const toast = (text) => {
@@ -350,13 +349,12 @@ const loadMe = (fresh = true) => {
   return accountLoad;
 };
 const loadScores = () => loadMe(false);
-// A group's bests on a place (one for each member, best first), and their
-// latest runs there (newest first). (Runs under older rules than this
-// game's are left out: they are not ones to beat.)
+// Their bests on a place (one each, best first), and their latest runs
+// there (newest first). (Runs under older rules than this game's are left
+// out: they are not ones to beat.)
 const current = (run) => gameVersion === 0 || run.version >= gameVersion;
-const runsOn = (gid, which, id) => (groups().find((g) => g.id === gid)?.[which]?.[id] ?? []).filter(current);
-const bestsOn = (gid, id) => runsOn(gid, "courses", id);
-const recentOn = (gid, id) => runsOn(gid, "recent", id);
+const bestsOn = (id) => (account?.courses?.[id] ?? []).filter(current);
+const recentOn = (id) => (account?.recent?.[id] ?? []).filter(current);
 const postable = (id) => (Math.abs(id) >= 1 && Math.abs(id) <= PLACES) || Math.abs(id) === today();
 // A run just finished, as the game wrote it: posted, to be logged, and
 // kept if it is his best there.
@@ -370,12 +368,9 @@ const postRun = async (version, id, score, replay) => {
     });
     const body = await r.json();
     await loadMe();
-    // (Where a new best puts him, in the first of his groups.)
-    const group = groups()[0];
-    if (r.ok && body.best && group) {
-      const place = bestsOn(group.id, id).findIndex((e) => e.id === account.id) + 1;
-      if (place > 0) toast(`#${place} in ${group.title}`);
-    }
+    // (Where a new best puts him, among those he sees.)
+    const place = r.ok && body.best && account ? bestsOn(id).findIndex((e) => e.id === account.id) + 1 : 0;
+    if (place > 0 && bestsOn(id).length > 1) toast(`You're #${place} on ${placeName(id)}`);
   } catch {
     toast("Couldn't post score");
   }
@@ -492,43 +487,26 @@ const runList = (el, runs, cells, tap) => {
 // (A best run can be watched, if this game can still play it.)
 const watchCell = (run, id) => (run.version === gameVersion ? [["watch", "▶", () => watchRun(run.id, id)]] : []);
 
-// What has been ridden lately in his groups, newest first: every group's
-// latest runs together (a run that is in two groups, once).
-const feed = () => {
-  const seen = new Set();
-  const runs = [];
-  for (const g of groups()) {
-    for (const [course, list] of Object.entries(g.recent ?? {})) {
-      for (const run of list) {
-        const key = `${run.name} ${course} ${run.at}`;
-        if (seen.has(key) || !current(run)) continue;
-        seen.add(key);
-        runs.push({ ...run, course: Number(course) });
-      }
-    }
-  }
-  return runs.sort((a, b) => b.at - a.at);
-};
-// Someone's best on each place they have ridden, as his groups know them:
-// the day's first, then the courses, the parks, and days gone by.
+// What those he sees have been riding, newest first.
+const feed = () =>
+  Object.entries(account?.recent ?? {})
+    .flatMap(([course, list]) => list.filter(current).map((run) => ({ ...run, course: Number(course) })))
+    .sort((a, b) => b.at - a.at);
+// Someone's best on each place they have ridden: the day's first, then the
+// courses, the parks, and days gone by.
 const placeRank = (id) => {
   const n = Math.abs(id);
   const park = id < 0 ? 0.5 : 0;
   if (isDaily(id)) return n === today() ? park : 1e8 - n + park;
   return (id < 0 ? 1000 : 10) + n;
 };
-const bestsOf = (name) => {
-  const best = new Map();
-  for (const g of groups()) {
-    for (const [course, list] of Object.entries(g.courses ?? {})) {
-      for (const run of list) if (run.name === name && current(run)) best.set(Number(course), run);
-    }
-  }
-  return [...best].map(([course, run]) => ({ ...run, course })).sort((a, b) => placeRank(a.course) - placeRank(b.course));
-};
+const bestsOf = (name) =>
+  Object.entries(account?.courses ?? {})
+    .flatMap(([course, list]) => list.filter((run) => run.name === name && current(run)).map((run) => ({ ...run, course: Number(course) })))
+    .sort((a, b) => placeRank(a.course) - placeRank(b.course));
 
-// Home: what to play, who he is (if someone: see `linked`), and what his
-// groups have been riding. A run there goes to its place; its rider's
+// Home: what to play, who he is (if someone: see `linked`), and what those
+// he sees have been riding. A run there goes to its place; its rider's
 // name, to them.
 const FEED = 30;
 const showMenu = () => {
@@ -540,7 +518,6 @@ const showMenu = () => {
   const me = el.querySelector(".me");
   me.hidden = !account;
   me.querySelector("b").textContent = account?.name ?? "";
-  me.querySelector("small").textContent = groups().map((g) => g.title).join(" · ");
   const runs = feed().slice(0, FEED);
   el.querySelector(".feedhead").hidden = runs.length === 0;
   const list = el.querySelector(".feed");
@@ -587,10 +564,10 @@ const showPlaces = () => {
 
 // A place, before he rides it. The game goes there and shows it off behind
 // the sheet (see fly_over, in programs/skate/main.l8); the sheet has a
-// button to ride it, and its scores: his own, kept on this device, and
-// each of his groups' (for a place groups keep scores of), either the best
-// (in a group, one for each member, with the run to watch) or the latest.
-// A rider's name there goes to them.
+// button to ride it, and its scores: everyone's he sees (if he is someone,
+// and it is a place scores are kept of), or his own, kept on this device;
+// either the best (of everyone's, one each, with the run to watch) or the
+// latest. A rider's name there goes to them.
 let placeOf = 0;
 let tabWho = stored("skate.who", null);
 let tabWhat = "best";
@@ -598,14 +575,14 @@ const showPlace = () => {
   const el = sheets.place;
   const id = placeOf;
   el.querySelector("h2").textContent = placeName(id);
-  // Whose: his own, or a group's (the first, until he picks).
-  const theirs = postable(id) ? groups() : [];
-  const who = tabWho !== "me" && theirs.length ? (theirs.find((g) => g.id === tabWho) ?? theirs[0]).id : "me";
+  // Whose: everyone's (until he picks), or his own.
+  const shared = !!account && postable(id);
+  const who = shared && tabWho !== "me" ? "all" : "me";
   const whos = el.querySelector(".tabs.who");
   whos.textContent = "";
-  whos.hidden = theirs.length === 0;
-  const pickWho = (code) => () => store("skate.who", (tabWho = code));
-  for (const g of theirs) addTab(whos, g.title, who === g.id, pickWho(g.id), showPlace);
+  whos.hidden = !shared;
+  const pickWho = (which) => () => store("skate.who", (tabWho = which));
+  addTab(whos, "Everyone", who === "all", pickWho("all"), showPlace);
   addTab(whos, "You", who === "me", pickWho("me"), showPlace);
   const whats = el.querySelector(".tabs.what");
   whats.textContent = "";
@@ -620,23 +597,20 @@ const showPlace = () => {
     return;
   }
   const name = (run) => ["who", run.name, () => go("person", run.name)];
-  if (best) runList(list, bestsOn(who, id), (run, i) => [["n", `${i + 1}.`], name(run), ["score", String(run.score)], ...watchCell(run, id)]);
-  else runList(list, recentOn(who, id), (run) => [name(run), ["when", ago(run.at)], ["score", String(run.score)]]);
+  if (best) runList(list, bestsOn(id), (run, i) => [["n", `${i + 1}.`], name(run), ["score", String(run.score)], ...watchCell(run, id)]);
+  else runList(list, recentOn(id), (run) => [name(run), ["when", ago(run.at)], ["score", String(run.score)]]);
 };
 onTap(sheets.place.querySelector(".play"), () => goTo(placeOf));
 
-// A person (himself, from home; or anyone in a group of his, by their
-// name on a run): their best on each place they have ridden, each to watch,
-// or their latest runs. A run goes to its place.
+// A person (himself, from home; or anyone he sees, by their name on a
+// run): their best on each place they have ridden, each to watch, or their
+// latest runs. A run goes to its place.
 let personOf = "";
 let personWhat = "best";
 const showPerson = () => {
   const el = sheets.person;
   const name = personOf;
   el.querySelector("h2").textContent = name;
-  // (The groups of his they are in: those that have a run of theirs.)
-  const inGroup = (g) => name === account?.name || [g.courses, g.recent].some((by) => Object.values(by ?? {}).some((list) => list.some((run) => run.name === name)));
-  el.querySelector("p").textContent = groups().filter(inGroup).map((g) => g.title).join(" · ");
   const whats = el.querySelector(".tabs.what");
   whats.textContent = "";
   addTab(whats, "Best", personWhat === "best", () => (personWhat = "best"), showPerson);
@@ -665,7 +639,7 @@ const showOpen = (id = Object.keys(sheets).find((name) => !sheets[name].hidden))
 
 async function main() {
   const params = new URLSearchParams(location.search);
-  // Nothing here waits for the groups' scores, or for the game: the menu
+  // Nothing here waits for anyone's scores, or for the game: the menu
   // is up at once (?play goes straight in), with the scores as they were
   // last time, and what he picks from it before the game has loaded is
   // where the game starts.

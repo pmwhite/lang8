@@ -5,14 +5,15 @@
 // web/skate/admin.html). A person has a link: the game's page with their
 // secret after the #. Whoever opens it plays as them, on any device, so it
 // is theirs alone to keep; the admin can give them a new one, and the old
-// one stops working. A group is a list of people. Its leaderboard is its
-// members' best run on each course, one each, with the run itself as a
-// replay to watch; its log, their latest runs there. Nobody joins
-// anything: a person sees the groups the admin has put them in.
+// one stops working. A group is a list of people, and only the admin knows
+// of it: all it does is decide who sees whom. A person sees themselves and
+// everyone they share a group with, and nobody else: those people's best
+// run on each course, one each, with the run itself as a replay to watch,
+// and their latest runs there. Nobody joins anything.
 //
-//   GET  /me                                  who I am, and my groups' scores   (a person)
+//   GET  /me                                  who I am, and the scores of those I see  (a person)
 //   POST /score  {course, score, version, replay}   a run of mine              (a person)
-//   GET  /replay?person=&course=              a best run, of someone in a group of mine
+//   GET  /replay?person=&course=              a best run, of someone I see
 //   GET  /admin/all                           every person and group            (the admin)
 //   POST /admin/person   {name}               make a person: {id, name, secret}
 //   POST /admin/relink   {id}                 a new secret for them
@@ -29,7 +30,7 @@
 // The courses scores are kept for, and as many parks (and each day's course
 // and park: see dayOf); how many people and groups there may be; how long a
 // replay may be; and how many of a person's latest runs on a course are
-// kept, and of a group's shown.
+// kept, and of everyone's shown.
 const COURSES = 5;
 const MAX_PEOPLE = 200;
 const MAX_GROUPS = 40;
@@ -97,28 +98,25 @@ const personOf = async (env, request) => {
   return await env.DB.prepare("SELECT id, name FROM people WHERE secret = ?").bind(secret).first();
 };
 
-// Who he is, and each of his groups: its members' bests on each course
-// (best first), and their latest runs there (newest first).
+// Who he is, and the scores of those he sees (himself, and everyone he
+// shares a group with): their bests on each course (best first), and their
+// latest runs there (newest first). Nothing of the groups themselves.
+const seen = (person) => `(${person} = ?1 OR ${person} IN (SELECT m2.person FROM members m1 JOIN members m2 ON m1.grp = m2.grp WHERE m1.person = ?1))`;
 async function me(env, who) {
-  const mine = await env.DB.prepare("SELECT g.id, g.title FROM grps g JOIN members m ON m.grp = g.id WHERE m.person = ? ORDER BY g.created").bind(who.id).all();
-  const groups = [];
-  for (const g of mine.results) {
-    const bests = await env.DB.prepare(
-      "SELECT b.course, p.id, p.name, b.score, b.version, b.at FROM bests b JOIN members m ON m.person = b.person JOIN people p ON p.id = b.person WHERE m.grp = ? ORDER BY b.course, b.score DESC, b.at"
-    ).bind(g.id).all();
-    const courses = {};
-    for (const s of bests.results) (courses[s.course] ??= []).push({ id: s.id, name: s.name, score: s.score, version: s.version, at: s.at });
-    const runs = await env.DB.prepare(
-      "SELECT l.course, p.name, l.score, l.version, l.at FROM log l JOIN members m ON m.person = l.person JOIN people p ON p.id = l.person WHERE m.grp = ? ORDER BY l.course, l.at DESC"
-    ).bind(g.id).all();
-    const recent = {};
-    for (const s of runs.results) {
-      const list = (recent[s.course] ??= []);
-      if (list.length < RECENT) list.push({ name: s.name, score: s.score, version: s.version, at: s.at });
-    }
-    groups.push({ id: g.id, title: g.title, courses, recent });
+  const bests = await env.DB.prepare(
+    `SELECT b.course, p.id, p.name, b.score, b.version, b.at FROM bests b JOIN people p ON p.id = b.person WHERE ${seen("b.person")} ORDER BY b.course, b.score DESC, b.at`
+  ).bind(who.id).all();
+  const courses = {};
+  for (const s of bests.results) (courses[s.course] ??= []).push({ id: s.id, name: s.name, score: s.score, version: s.version, at: s.at });
+  const runs = await env.DB.prepare(
+    `SELECT l.course, p.name, l.score, l.version, l.at FROM log l JOIN people p ON p.id = l.person WHERE ${seen("l.person")} ORDER BY l.course, l.at DESC`
+  ).bind(who.id).all();
+  const recent = {};
+  for (const s of runs.results) {
+    const list = (recent[s.course] ??= []);
+    if (list.length < RECENT) list.push({ name: s.name, score: s.score, version: s.version, at: s.at });
   }
-  return reply(200, { id: who.id, name: who.name, groups });
+  return reply(200, { id: who.id, name: who.name, courses, recent });
 }
 
 // A run of his: logged, and kept as his best on the course if it is (or if
