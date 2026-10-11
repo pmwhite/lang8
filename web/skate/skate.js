@@ -104,7 +104,7 @@ const onTap = (el, act, accepts = () => true) => {
 // run just finished again (its P), which the game says when to offer
 // (L8OVER).
 // (A mouse pressed on one does not take the keyboard from the game.)
-for (const el of document.querySelectorAll(".look, .replay")) el.addEventListener("mousedown", (e) => e.preventDefault());
+for (const el of document.querySelectorAll(".look, .replay, .again, .back")) el.addEventListener("mousedown", (e) => e.preventDefault());
 onTap(document.querySelector(".look"), () => {
   setNight(!document.body.classList.contains("night"));
   typeKeys([108]);
@@ -112,6 +112,11 @@ onTap(document.querySelector(".look"), () => {
 onTap(document.querySelector(".replay"), () => {
   document.body.classList.remove("over");
   typeKeys([112]);
+});
+// (And riding it again, from the top: the game's R.)
+onTap(document.querySelector(".again"), () => {
+  document.body.classList.remove("over");
+  typeKeys([114]);
 });
 
 // Sheets over the game: home, the guide, the places to pick from, a place,
@@ -184,6 +189,8 @@ const goHome = () => {
 // A sheet is left by the button in the corner that goes back, a tap
 // outside it, or Escape.
 const goBack = () => {
+  // (From a replay: the game leaves it. See L8RIDE.)
+  if (trail.length === 0 && document.body.classList.contains("replaying")) typeKeys([65288]);
   if (trail.length === 0 || (trail.length === 1 && !started)) return;
   trail.pop();
   present();
@@ -374,6 +381,8 @@ const postRun = async (version, id, score, replay) => {
   }
   showOpen();
 };
+// The sheets a run being watched was reached through, to go back to after.
+let watchedFrom = null;
 const watchRun = async (person, id) => {
   if (!sendKey) return;
   try {
@@ -381,6 +390,8 @@ const watchRun = async (person, id) => {
     const run = await r.json();
     if (!r.ok) throw new Error(run.error);
     gameFs.writeFile("watch.txt", `${run.version} ${run.course} ${run.score} ${run.name.replace(/ /g, "_")} ${run.replay}`);
+    // (Going back from the run comes back to this sheet: see L8RIDE.)
+    watchedFrom = trail.slice();
     closeSheets();
     typeKeys([118]);
   } catch {
@@ -401,11 +412,29 @@ const gameSays = (line) => {
   }
   else if (words[0] === "L8LOAD") document.body.classList.toggle("loading", words[1] === "1");
   else if (words[0] === "L8OVER") document.body.classList.toggle("over", words[1] === "1");
+  else if (words[0] === "L8RIDE") {
+    // What he is doing: riding (0), at the end of a run (1), or watching
+    // one, his own (2) or someone's (3). The thumb panels show only while
+    // he rides; a run being watched has a button to go back from it, and
+    // one of someone's ends back on the sheet it was picked from.
+    const ride = Number(words[1]);
+    document.body.classList.toggle("done", ride === 1);
+    document.body.classList.toggle("replaying", ride >= 2);
+    if (ride < 2 && watchedFrom) {
+      const back = watchedFrom;
+      watchedFrom = null;
+      if (trail.length === 0 && back.length > 0) {
+        trail.push(...back);
+        present();
+      }
+    }
+  }
   else if (words[0] === "L8REPLAY") postRun(Number(words[1]), Number(words[2]), Number(words[3]), words.slice(4).join(" "));
   else if (words[0] === "L8COURSE") {
     placeNow = Number(words[1]);
     if (placeNow === headed) headed = null;
     document.body.classList.toggle("park", placeNow < 0);
+    document.body.classList.toggle("tutorial", placeNow === TUTORIAL);
     if (placeNow !== TUTORIAL) {
       store("skate.course", placeNow);
       store("skate.tutorial", true);
