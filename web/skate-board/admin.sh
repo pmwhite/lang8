@@ -18,7 +18,8 @@ case "${1:-}" in
   reports)
     get "reports?$(echo "${2:-}" | tr ' ' '&')" | jq -r '.reports[] | [
       (.id | tostring), (.at / 1000 | strflocaltime("%m-%d %H:%M")), .session, (.name // "-"), .kind,
-      (if .kind == "perf" then "\(.data.fps) fps of \(.data.refresh), \(.data.slow)/\(.data.frames) slow, \(.data.hitches) hitches, worst \(.data.worst) ms, scale \(.data.scale), \(.data.gpu // "?")"
+      (if .data.why == "probe" then "probe (ms a frame, of which the game itself): \(.data.probe | tojson), scale \(.data.scale), \(.data.gpu // "?")"
+       elif .kind == "perf" then "\(.data.fps) fps of \(.data.refresh), cpu \(.data.cpu // "?") ms, \(.data.slow)/\(.data.frames) slow, \(.data.hitches) hitches, worst \(.data.worst) ms, scale \(.data.scale)\(if .data.plain then " plain" else "" end), \(.data.gpu // "?")"
        else "\(.data.what): \(.data.message)" end),
       (.data.host // "")
     ] | join("  ")' ;;

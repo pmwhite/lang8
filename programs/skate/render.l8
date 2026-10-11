@@ -13,6 +13,9 @@ const SHADOW_HALF: f32 = 26.0;
 
 type Renderer = {
     world: int;
+    // (See shade_less, and shade_plain.)
+    u_less: int;
+    u_plain: int;
     shadow: int;
     sky: int;
     u_vp: int;
@@ -41,6 +44,20 @@ type Renderer = {
     sky_buf: u32;
     shadow_tex: u32;
     shadow_fbo: u32;
+    // The scene drawn small, to be stretched over the window (see
+    // render_scale): where it is drawn, its picture and depths, how big
+    // they are now, and the program that stretches it.
+    // (It is drawn with its edges smoothed, several samples to a pixel, in
+    // one place, and made a picture of in the other.)
+    scene_fbo: u32;
+    scene_tex: u32;
+    scene_many: u32;
+    scene_color: u32;
+    scene_depth: u32;
+    scene_w: int;
+    scene_h: int;
+    stretch: int;
+    u_stretch_scene: int;
     hud: int;
     u_hud_screen: int;
     u_hud_offset: int;
@@ -164,9 +181,18 @@ vec3 sky_base(vec3 d) {
   float up = clamp(d.y, 0.0, 1.0);
   vec2 flat_d = d.xz + vec2(0.0001, 0.0);
   float toward = dot(normalize(flat_d), sky_sun_flat) * 0.5 + 0.5;
-  vec3 horizon = mix(look_away, look_toward, pow(toward, 2.0));
-  vec3 c = mix(horizon, look_zenith, pow(up, 0.45));
-  c += look_glow * pow(toward, 10.0) * exp(-max(d.y, 0.0) * 8.0);
+  float t2 = toward * toward;
+  float t4 = t2 * t2;
+  vec3 horizon = mix(look_away, look_toward, t2);
+  // (Below the horizon, as most of what haze is asked of is, there is no
+  // way up the sky to work out.)
+  vec3 c = horizon;
+  float glow = t4 * t4 * t2;
+  if (up > 0.0) {
+    c = mix(horizon, look_zenith, pow(up, 0.45));
+    glow *= exp(-up * 8.0);
+  }
+  c += look_glow * glow;
   // Below the horizon, the far land in haze.
   c = mix(c, horizon * 0.8, clamp(-d.y * 3.0, 0.0, 1.0));
   return c;
@@ -179,9 +205,9 @@ vec3 sky_light(vec3 n) {
 }
 // Farther off, things fade into the sky's color: little near, more far.
 vec3 haze(vec3 col, vec3 V, float dist) {
-  float f = 1.0 - exp(-max(dist - 20.0, 0.0) * look_haze.x);
   // (Near enough, there is none: the sky's color need not be found.)
-  if (f <= 0.0) return col;
+  if (dist <= 20.0) return col;
+  float f = 1.0 - exp(-(dist - 20.0) * look_haze.x);
   return mix(col, sky_base(-V) * 0.95, f * look_haze.y);
 }
 // Lamps: their light on the ground, every lamp's at once, from a map
@@ -225,7 +251,8 @@ void main() {
   vec4 w = model * vec4(pos, 1.0);
   vworld = w.xyz;
   vnrm = mat3(model[0].xyz, model[1].xyz, model[2].xyz) * nrm;
-  vcolor = vcol;
+  // (Its color as light, worked out here once a corner, not once a pixel.)
+  vcolor = vec4(pow(vcol.rgb, vec3(2.2)), vcol.a);
   vlight = light_vp * w;
   gl_Position = vp * w;
 }
@@ -237,6 +264,10 @@ uniform vec3 sun_dir;
 uniform vec3 cam_pos;
 uniform float shadow_texel;
 uniform vec3 blob;
+// (A part of the work left out, to find what it costs: see shade_less.)
+uniform float less;
+// How plainly surfaces are colored, from 0 to 1: see shade_plain.
+uniform float plain;
 // The two lamps nearest him (xyz, how bright), to light him by: he is
 // warm on the side toward them and cool away.
 uniform vec4 near0;
@@ -373,7 +404,7 @@ void main() {
   // Ambient occlusion rides in the normal's length (see mesh.l8).
   float ao = clamp(length(vnrm), 0.0, 1.0);
   float mat = vcolor.a;
-  vec3 albedo = pow(vcolor.rgb, vec3(2.2));
+  vec3 albedo = vcolor.rgb;
   vec3 to_cam = cam_pos - vworld;
   float dist = length(to_cam);
   vec3 V = to_cam / dist;
@@ -383,47 +414,66 @@ void main() {
     gl_FragColor = vec4(tone(haze(albedo * 3.0, V, dist)), 1.0);
     return;
   }
+  if (less > 5.5) {
+    gl_FragColor = vec4(albedo, 1.0);
+    return;
+  }
   float spec = 0.0;
   float gloss = 8.0;
   // Light wraps a little round everything, for a soft look.
   float wrap = 0.25;
   float ground = 0.0;
   vec2 xz = vworld.xz;
-  if (mat < 0.5) {
+  if (less == 3.0) {
+    ground = 1.0;
+  } else if (mat < 0.5) {
     // Concrete laid in slabs: each its own shade, a little warmer or
     // cooler; broad warm and cool patches over them; and on the run, a line
     // worn smooth and darker down its middle.
     vec2 id = floor(xz / 3.0);
     float t1 = vnoise(id * 7.31 + 0.5);
-    float t2 = vnoise(id * 3.17 + 9.5);
     albedo *= 0.86 + 0.24 * t1;
-    albedo *= mix(vec3(1.05, 1.0, 0.92), vec3(0.94, 0.99, 1.06), t2);
-    float broad = vnoise(xz * 0.035 + 21.0);
-    albedo *= mix(vec3(1.06, 1.0, 0.9), vec3(0.93, 0.97, 1.04), broad);
     if (run_half > 0.0) {
       float ax = abs(vworld.x);
       albedo *= 1.0 - 0.08 * (1.0 - smoothstep(1.0, 3.0, ax));
     }
-    float near = 1.0 - smoothstep(40.0, 80.0, dist);
-    if (near > 0.0) {
-      vec2 j = abs(fract(xz / 3.0 + 0.5) - 0.5) * 3.0;
-      float joint = 1.0 - smoothstep(0.015, 0.04, min(j.x, j.y));
-      albedo *= 1.0 - 0.22 * joint * near;
+    // (Plainly, only that; and the rest's color on the whole. See
+    // shade_plain.)
+    vec3 fine = vec3(0.99, 0.98, 0.96);
+    if (plain < 1.0) {
+      float t2 = vnoise(id * 3.17 + 9.5);
+      vec3 full = mix(vec3(1.05, 1.0, 0.92), vec3(0.94, 0.99, 1.06), t2);
+      float broad = vnoise(xz * 0.035 + 21.0);
+      full *= mix(vec3(1.06, 1.0, 0.9), vec3(0.93, 0.97, 1.04), broad);
+      float near = 1.0 - smoothstep(40.0, 80.0, dist);
+      if (near > 0.0) {
+        vec2 j = abs(fract(xz / 3.0 + 0.5) - 0.5) * 3.0;
+        float joint = 1.0 - smoothstep(0.015, 0.04, min(j.x, j.y));
+        full *= 1.0 - 0.22 * joint * near;
+      }
+      fine = mix(full, fine, plain);
     }
+    albedo *= fine;
     spec = 0.03;
     gloss = 10.0;
     ground = 1.0;
   } else if (mat < 1.5) {
     // Grass: soft, in broad patches a little yellower or deeper.
-    float big = vnoise(xz * 0.07);
-    float mid = vnoise(xz * 0.4 + 7.0);
-    albedo *= 0.9 + 0.14 * big + 0.06 * mid;
-    albedo = mix(albedo, albedo * vec3(1.15, 1.08, 0.75), smoothstep(0.55, 0.8, mid) * 0.4);
+    // (Plainly, all of one green.)
+    if (plain < 1.0) {
+      float big = vnoise(xz * 0.07);
+      float mid = vnoise(xz * 0.4 + 7.0);
+      vec3 full = albedo * (0.9 + 0.14 * big + 0.06 * mid);
+      full = mix(full, full * vec3(1.15, 1.08, 0.75), smoothstep(0.55, 0.8, mid) * 0.4);
+      albedo = mix(full, albedo, plain);
+    }
     wrap = 0.4;
     ground = 1.0;
   } else if (mat < 3.5) {
     // Plywood: sheets with seams and a little grain.
-    float grain = vnoise(vec2(vworld.x * 0.7 + vworld.z * 0.7, vworld.y * 9.0 + vworld.x * 4.0));
+    // (Plainly, with no grain: only the seams.)
+    float grain = 0.5;
+    if (plain < 1.0) grain = mix(vnoise(vec2(vworld.x * 0.7 + vworld.z * 0.7, vworld.y * 9.0 + vworld.x * 4.0)), 0.5, plain);
     float sz = abs(fract(vworld.z / 1.22) - 0.5) * 1.22;
     float sy = abs(fract((vworld.y + vworld.x * 0.2) / 0.81) - 0.5) * 0.81;
     float line = 1.0 - smoothstep(0.0, 0.012, min(0.61 - sz, 0.405 - sy));
@@ -447,10 +497,13 @@ void main() {
     if (mat > 7.15) ground = 1.0;
   } else {
     // Leaves: lumpy color, light coming through.
-    float k = vnoise(vworld.xz * 2.3 + vworld.y * 3.0);
+    float k = 0.5;
+    if (plain < 1.0) k = mix(vnoise(vworld.xz * 2.3 + vworld.y * 3.0), 0.5, plain);
     albedo *= 0.85 + 0.3 * k;
     wrap = 0.5;
   }
+  // (Plainly, nothing shines but him and the rails.)
+  if (mat < 3.5 || mat > 5.5) spec *= 1.0 - plain;
   // Light where a mark is (see mark_at).
   vec3 mk = vec3(0.0);
   // (Only as many as there are, and each only inside its circle.)
@@ -465,12 +518,17 @@ void main() {
     if (mark_n > 7.5) mk = with_mark(mk, mark7a, mark7b, mark7c, vworld);
   }
   float ndl = dot(n, sun_dir);
-  float vis = sun_visibility(ndl);
   float diff = max((ndl + wrap) / (1.0 + wrap), 0.0);
+  // (What faces away from the sun gets none of its light, in shadow or
+  // out: but for him, whose rim the sun lights from behind.)
+  float vis = 0.0;
+  if (less == 1.0) vis = 1.0; else if (diff > 0.0 || (mat > 4.5 && mat < 5.5)) vis = sun_visibility(ndl);
   vec3 sky = sky_light(n) * ao;
   // Contact darkening on the ground under the player.
-  if (ground > 0.5) {
-    float d = length(vworld.xz - blob.xz);
+  // (Only near him is there any to work out.)
+  vec2 bq = vworld.xz - blob.xz;
+  if (ground > 0.5 && dot(bq, bq) < 0.5625 && less != 5.0) {
+    float d = length(bq);
     float near = (1.0 - smoothstep(0.0, 0.75, d)) * (1.0 - smoothstep(0.0, 1.0, abs(vworld.y - blob.y)));
     sky *= 1.0 - 0.5 * near;
   }
@@ -489,7 +547,8 @@ void main() {
   }
   // (What has no shine, as grass and leaves have none, has no highlight to
   // work out.)
-  if (spec > 0.0) {
+  // (Nor has what the sun does not reach.)
+  if (spec > 0.0 && vis > 0.0 && ndl >= 0.0 && less != 5.0) {
     vec3 H = normalize(sun_dir + V);
     col += SUN_LIGHT * vis * spec * pow(max(dot(n, H), 0.0), gloss) * (gloss + 8.0) / 60.0 * step(0.0, ndl);
   }
@@ -510,7 +569,9 @@ void main() {
     float ring = (1.0 - smoothstep(0.05, 0.11, abs(rd - 0.85 - 0.06 * sin(mark_time * 9.0)))) * (1.0 - smoothstep(0.0, 1.2, abs(vworld.y - blob.y)));
     col = mix(col, vec3(0.6, 1.7, 0.9) * mix(1.0, 0.5, look_disc.a), ring * 0.9 * ready);
   }
-  gl_FragColor = vec4(tone(haze(col, V, dist)), 1.0);
+  if (less != 4.0) col = haze(col, V, dist);
+  if (less != 2.0) col = tone(col);
+  gl_FragColor = vec4(col, 1.0);
 }
 """;
 
@@ -584,7 +645,8 @@ void main() {
   float diff = max((ndl + 0.5) / 1.5, 0.0);
   // Light through the blades from behind.
   // Against the sun, light comes gold through the tips.
-  float through = pow(max(dot(-V, sun_dir), 0.0), 2.0) * vh * vh;
+  float back = max(dot(-V, sun_dir), 0.0);
+  float through = back * back * vh * vh;
   vec3 sky = sky_light(n) * mix(0.5, 1.0, vh);
   vec3 col = albedo * (SUN_LIGHT * diff * vis + sky) + vec3(0.5, 0.36, 0.12) * SUN_LIGHT * through * vis * 0.18;
   if (look_disc.a > 0.0) col += albedo * lamps(vworld, n) * mix(0.5, 1.0, vh) * look_disc.a;
@@ -690,6 +752,16 @@ void main() {
 }
 """;
 
+// The scene, drawn small, over the whole window.
+STRETCH_FS: str = """
+#version 120
+uniform sampler2D scene;
+varying vec2 vscreen;
+void main() {
+  gl_FragColor = vec4(texture2D(scene, vscreen * 0.5 + 0.5).rgb, 1.0);
+}
+""";
+
 SKY_FS: str = """
 uniform vec3 cam_f;
 uniform vec3 cam_r;
@@ -715,7 +787,8 @@ void main() {
   // The sun's glow, and the sun.
   float s = max(dot(d, sky_sun), 0.0);
   float night = look_disc.a;
-  c += look_disc.rgb * (pow(s, 6.0) * 0.3 + pow(s, mix(400.0, 2500.0, night)) * mix(3.0, 9.0, night));
+  float s2 = s * s;
+  c += look_disc.rgb * (s2 * s2 * s2 * 0.3 + pow(s, mix(400.0, 2500.0, night)) * mix(3.0, 9.0, night));
   if (night > 0.0 && d.y > 0.0) {
     // Stars: one in a few of the sky's cells, small, some brighter, each
     // twinkling a little.
@@ -732,7 +805,8 @@ void main() {
     vec2 p = d.xz / (d.y + 0.1) * 0.9 + vec2(time * 0.01, time * 0.003);
     float k = smoothstep(0.5, 0.7, clouds(p));
     float shade = clouds(p + sky_sun.xz * 0.12);
-    float toward = pow(max(dot(normalize(d.xz + vec2(0.0001, 0.0)), sky_sun_flat), 0.0), 2.0);
+    float toward = max(dot(normalize(d.xz + vec2(0.0001, 0.0)), sky_sun_flat), 0.0);
+    toward *= toward;
     vec3 lit = mix(vec3(1.0, 0.96, 0.98), vec3(1.15, 0.94, 0.8), toward);
     vec3 cloud = mix(lit, vec3(0.74, 0.7, 0.86), smoothstep(0.45, 0.72, shade));
     // (By night, dark shapes against the stars, their edges moonlit.)
@@ -786,6 +860,7 @@ new_renderer(parts: *Mesh) raises IoError: *Renderer@new {
     shadow: int = link_program(bytes(SHADOW_VS), bytes(SHADOW_FS));
     sky: int = link_program(bytes(SKY_VS), with_prelude(SKY_FS));
     hud: int = link_program(bytes(HUD_VS), bytes(HUD_FS));
+    stretch: int = link_program(bytes(SKY_VS), bytes(STRETCH_FS));
     glow_prog: int = link_program(bytes(GLOW_VS), bytes(GLOW_FS));
     grass_prog: int = link_program(bytes(GRASS_VS), with_prelude(GRASS_FS));
     va: []u32 = new u32[1](0u32);
@@ -794,6 +869,8 @@ new_renderer(parts: *Mesh) raises IoError: *Renderer@new {
     for i in 0..3 glEnableVertexAttribArray(i);
     r: *Renderer = new Renderer {
         world: world,
+        u_less: glGetUniformLocation(world, "less"),
+        u_plain: glGetUniformLocation(world, "plain"),
         shadow: shadow,
         sky: sky,
         u_vp: glGetUniformLocation(world, "vp"),
@@ -822,6 +899,15 @@ new_renderer(parts: *Mesh) raises IoError: *Renderer@new {
         sky_buf: gen_buffer(),
         shadow_tex: 0u32,
         shadow_fbo: 0u32,
+        scene_fbo: 0u32,
+        scene_tex: 0u32,
+        scene_many: 0u32,
+        scene_color: 0u32,
+        scene_depth: 0u32,
+        scene_w: 0,
+        scene_h: 0,
+        stretch: stretch,
+        u_stretch_scene: glGetUniformLocation(stretch, "scene"),
         hud: hud,
         u_hud_screen: glGetUniformLocation(hud, "screen"),
         u_hud_offset: glGetUniformLocation(hud, "offset"),
@@ -1637,6 +1723,83 @@ frame_phase_end() {
     frame_phase_open = false
 }
 
+// How big the scene is drawn, of the window's size each way: at less than
+// 1, it is drawn small and stretched over the window, with the words and
+// marks over it then drawn at the window's own size, as sharp as ever. (The
+// page makes its whole picture smaller first, down to half: see setScale,
+// in its skate.js. This is for smaller still.)
+render_scale: f32 = 1.0;
+
+// How many samples each of its pixels is made of, drawn small, so that
+// its edges are smooth (the fewer the pixels, the more it shows where they
+// are not).
+const SCENE_SAMPLES: int = 4;
+
+// Somewhere to draw the scene at render_scale, if that is small: whether
+// it is.
+fit_scene(r: *Renderer): bool {
+    if (render_scale > 0.995) return false;
+    w: int = maxi((screen_w as f32 * render_scale + 0.5) as int, 1);
+    h: int = maxi((screen_h as f32 * render_scale + 0.5) as int, 1);
+    if (r.scene_fbo == 0u32) {
+        one: []u32 = new u32[1](0u32);
+        glGenTextures(1, one);
+        r.scene_tex = one[0];
+        glBindTexture(3553, r.scene_tex);
+        glTexParameteri(3553, 10241, 9729);
+        glTexParameteri(3553, 10240, 9729);
+        glTexParameteri(3553, 10242, 33071);
+        glTexParameteri(3553, 10243, 33071);
+        glGenRenderbuffers(1, one);
+        r.scene_depth = one[0];
+        glGenRenderbuffers(1, one);
+        r.scene_color = one[0];
+        glGenFramebuffers(1, one);
+        r.scene_fbo = one[0];
+        glGenFramebuffers(1, one);
+        r.scene_many = one[0];
+        r.scene_w = 0
+    }
+    if (w != r.scene_w || h != r.scene_h) {
+        r.scene_w = w;
+        r.scene_h = h;
+        glBindTexture(3553, r.scene_tex);
+        glTexImage2D(3553, 0, 32856, w, h, 0, 6408, 5121, null);
+        glBindFramebuffer(36160, r.scene_fbo);
+        glFramebufferTexture2D(36160, 36064, 3553, r.scene_tex, 0);
+        glBindRenderbuffer(36161, r.scene_color);
+        glRenderbufferStorageMultisample(36161, SCENE_SAMPLES, 32856, w, h);
+        glBindRenderbuffer(36161, r.scene_depth);
+        glRenderbufferStorageMultisample(36161, SCENE_SAMPLES, 33190, w, h);
+        glBindFramebuffer(36160, r.scene_many);
+        glFramebufferRenderbuffer(36160, 36064, 36161, r.scene_color);
+        glFramebufferRenderbuffer(36160, 36096, 36161, r.scene_depth)
+    }
+    true
+}
+
+// A part of the work of coloring the world's pixels left out, to find what
+// each costs on a device (the page's ?probe steps through them with F9):
+// 0 none, 1 the sun's shadows, 2 the grade and curve at the end, 3 what
+// each stuff is given (its slabs, grain, patches), 4 the haze, 5 the
+// highlights and what is under him, 6 all of it but the stuff's plain
+// color.
+shade_less: int = 0;
+
+const SHADE_LESS: int = 7;
+
+// How plainly surfaces are colored, from 0 (in full) to 1: without the
+// warm and cool of the concrete's slabs, their joints, and its broad
+// patches; the grass's patches; the wood's grain and the leaves' lumps;
+// and with no shine on any of them. Each has its color on the whole, and
+// the slabs their shades, so the ground still moves under him. It is for a
+// device that cannot keep up even with the picture at its smallest (the
+// page asks for it then: see pace, in its skate.js), and comes and goes
+// over a moment: where it is, and where it is going.
+shade_plain: f32 = 0.0;
+
+shade_plain_to: f32 = 0.0;
+
 draw_scene(r: *Renderer, view: View, shadows: bool) {
     mat_identity(ident_m);
     fit_shadow(view.focus);
@@ -1660,8 +1823,14 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
         }
         glDisable(32823)
     }
-    glBindFramebuffer(36160, 0u32);
-    glViewport(0, 0, screen_w, screen_h);
+    small: bool = fit_scene(r);
+    if (small) {
+        glBindFramebuffer(36160, r.scene_many);
+        glViewport(0, 0, r.scene_w, r.scene_h)
+    } else {
+        glBindFramebuffer(36160, 0u32);
+        glViewport(0, 0, screen_w, screen_h)
+    }
     glClear(16640);
     // Camera.
     aspect: f32 = screen_w as f32 / screen_h as f32;
@@ -1679,6 +1848,8 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
     frame_phase("world");
     glUseProgram(r.world);
     set_lights(r, 0);
+    glUniform1f(r.u_less, shade_less as f32);
+    glUniform1f(r.u_plain, shade_plain);
     glUniformMatrix4fv(r.u_vp, 1, 0, vp_m);
     glUniformMatrix4fv(r.u_light, 1, 0, light_vp);
     glUniform3f(r.u_sun, sun.x, sun.y, sun.z);
@@ -1738,6 +1909,25 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
         frame_phase("glow");
         draw_glows(r, view)
     }
+    if (small) {
+        // The scene, stretched over the window.
+        frame_phase("stretch");
+        // (Its samples made into pixels, first.)
+        glBindFramebuffer(36008, r.scene_many);
+        glBindFramebuffer(36009, r.scene_fbo);
+        glBlitFramebuffer(0, 0, r.scene_w, r.scene_h, 0, 0, r.scene_w, r.scene_h,
+            16384, 9728);
+        glBindFramebuffer(36160, 0u32);
+        glViewport(0, 0, screen_w, screen_h);
+        glDisable(2929);
+        glUseProgram(r.stretch);
+        glActiveTexture(33984);
+        glBindTexture(3553, r.scene_tex);
+        glUniform1i(r.u_stretch_scene, 0);
+        bind_vertices(r.sky_buf);
+        glDrawArrays(4, 0, 3);
+        glEnable(2929)
+    }
     frame_phase_end()
 }
 
@@ -1745,6 +1935,7 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
 draw_hud(r: *Renderer) {
     build_hud(screen_w);
     if (hud_n == 0) return;
+    frame_phase("hud");
     glDisable(2929);
     glEnable(3042);
     glBlendFunc(770, 771);
@@ -1779,5 +1970,6 @@ draw_hud(r: *Renderer) {
     glEnableVertexAttribArray(1);
     glEnableVertexAttribArray(2);
     glDisable(3042);
-    glEnable(2929)
+    glEnable(2929);
+    frame_phase_end()
 }

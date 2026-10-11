@@ -3,6 +3,7 @@
 import { instantiate, runResumable, MemFS } from "../l8-runtime.js";
 import { createPlatform } from "../game/platform.js";
 import { startControl } from "../game/control.js";
+import { createPacer } from "./pace.js";
 
 const canvas = document.getElementById("screen");
 const overlay = document.getElementById("overlay");
@@ -326,12 +327,15 @@ let reportsLeft = 30;
 // (Its graphics chip can be asked of the game's own context, once it has one.)
 let gameDrawn = false;
 let chip = null;
+// (And how many samples its pixels are made of: see antialias, in main.)
+let samples = undefined;
 const device = () => {
   if (gameDrawn && chip === null) {
     try {
       const gl = canvas.getContext("webgl2");
       const named = gl.getExtension("WEBGL_debug_renderer_info");
       chip = String(gl.getParameter(named ? named.UNMASKED_RENDERER_WEBGL : gl.RENDERER)).slice(0, 120);
+      samples = gl.getParameter(gl.SAMPLES);
     } catch {
       chip = "?";
     }
@@ -345,6 +349,7 @@ const device = () => {
     cores: navigator.hardwareConcurrency,
     memory: navigator.deviceMemory,
     gpu: chip ?? undefined,
+    samples,
     place: placeNow,
     rules: gameVersion,
     night: document.body.classList.contains("night"),
@@ -384,13 +389,20 @@ canvas.addEventListener("webglcontextlost", () => fault("context", "graphics con
 // place took to build; and how long the page took to its first frame. Told
 // early in a visit, every so often after, and when the page is put away.
 const FRAME_RATES = [15, 25, 35, 50, 70];
-const frames = { n: 0, ms: 0, slow: 0, hitches: 0, worst: 0, by: [0, 0, 0, 0, 0, 0], loads: [], boot: 0, skip: true, told: 0 };
-// (What the frames are paced by, and at what resolution: see main.)
+const frames = { n: 0, ms: 0, slow: 0, hitches: 0, worst: 0, by: [0, 0, 0, 0, 0, 0], loads: [], boot: 0, skip: true, told: 0, drawn: 0, work: 0 };
+// (What the frames are paced by, and at what resolution: see main. And how
+// many the game has drawn, and how long it has spent working them out, for
+// the milliseconds of its own work that a frame takes: cpu.)
 let frameState = () => ({});
+let frameWork = () => [0, 0];
 const reportFrames = (why) => {
   // (Too little to go on is not worth telling.)
   if (frames.ms < 5000) return;
+  const [drawn, work] = frameWork();
+  const cpu = drawn > frames.drawn ? Math.round(((work - frames.work) / (drawn - frames.drawn)) * 10) / 10 : undefined;
+  Object.assign(frames, { drawn, work });
   report("perf", {
+    cpu,
     why,
     secs: Math.round(frames.ms / 1000),
     frames: frames.n,
@@ -767,9 +779,10 @@ const showPlaces = () => {
 // A place, before he rides it. The game goes there and shows it off behind
 // the sheet (see fly_over, in programs/skate/main.l8); the sheet has a
 // button to ride it, and its scores: everyone's he sees (if he is someone,
-// and it is a place scores are kept of), or his own, kept on this device;
-// either the best (of everyone's, one each, with the run to watch) or the
-// latest. A rider's name there goes to them.
+// and it is a place scores are kept of), or his own (as the leaderboards
+// have them, there; else as kept on this device); either the best (of
+// everyone's, one each, with the run to watch) or the latest. A rider's
+// name there goes to them.
 let placeOf = 0;
 let tabWho = stored("skate.who", null);
 let tabWhat = "best";
@@ -794,8 +807,23 @@ const showPlace = () => {
   const best = tabWhat === "best";
   const list = el.querySelector(".list");
   if (who === "me") {
-    const runs = (myRuns[id]?.[tabWhat] ?? []).map(([score, at]) => ({ score, at }));
-    runList(list, runs, (run, i) => [...(best ? [["n", `${i + 1}.`]] : []), ["who", ago(run.at)], ["score", String(run.score)]]);
+    // His own. Where the leaderboards keep this place's, as they have
+    // them: what he sees of himself is then what others see of him, on
+    // whichever device he rides, and nothing ridden before the device had
+    // his link is among them. (His best there can be watched; the rest of
+    // the best are of his latest.) Otherwise, as this device has them.
+    let runs = (myRuns[id]?.[tabWhat] ?? []).map(([score, at]) => ({ score, at }));
+    if (shared) {
+      runs = recentOn(id).filter((run) => run.name === account.name);
+      if (best) {
+        const top = bestsOn(id).find((run) => run.id === account.id);
+        const rest = runs.filter((run) => current(run) && !(top && run.at === top.at && run.score === top.score));
+        runs = [...(top ? [{ ...top, top: true }] : []), ...rest].sort((a, b) => b.score - a.score || a.at - b.at);
+      }
+      // (All his: none to pick out as his.)
+      runs = runs.map(({ name, ...run }) => run);
+    }
+    runList(list, runs, (run, i) => [...(best ? [["n", `${i + 1}.`]] : []), ["who", ago(run.at)], ["score", String(run.score)], ...(run.top ? watchCell(run, id) : [])]);
     return;
   }
   const name = (run) => ["who", run.name, () => go("person", run.name)];
@@ -899,7 +927,10 @@ async function main() {
     maxPixels: 2.2e6,
     // ?gputime times the frame's parts on the GPU (l8Game.glTiming().gpu);
     // ?skip=prog3 drops a program's draws, to measure what they cost.
-    timing: params.has("gputime"), gpuTiming: params.has("gputime"), countCalls: params.has("glstats"),
+    // Edges are smoothed (several samples to a pixel), which shows most
+    // where the picture has been made small; ?aa=0 leaves that out.
+    antialias: params.get("aa") !== "0",
+    timing: params.has("gputime") || params.has("probe"), gpuTiming: params.has("gputime") || params.has("probe"), countCalls: params.has("glstats"),
     skip: new Set((params.get("skip") ?? "").split(",").filter(Boolean)) });
   canvas.addEventListener("keydown", (e) => {
     if (e.code === "KeyL" && !e.repeat) setNight(!document.body.classList.contains("night"));
@@ -964,26 +995,51 @@ async function main() {
       breath.port1.onmessage = resolve;
       breath.port2.postMessage(0);
     });
-  // On a device that cannot keep up, the picture is drawn smaller, and
-  // stretched to the screen: frames that come slowly for a few seconds
-  // take it down a step, to half its size at the least. Slowly is by the
-  // rate the browser gives frames at all, found while the game is held
-  // behind a sheet and draws nothing: a phone saving its battery gives
-  // half as many, and no size of picture brings more. A step that does not
-  // bring the frames faster is followed by another (they come only at
-  // whole divisions of that rate, so one step may not show); if none down
-  // to the least does, the size is put back and no more are tried: it is
-  // not the picture's size that holds the device up. Where it got to is
-  // kept for the next time, which starts a step above it, so that one bad
-  // spell does not last for good. ?scale= fixes it instead.
-  const PACE_SLOW = 1.45, PACE_FOR = 3000, PACE_STEP = 0.85, PACE_LEAST = 0.5, PACE_TRIAL = 4000, PACE_GAIN = 0.92;
-  // (Or he sets it himself, with the slider under the frames' rate: then
-  // it is left where he put it, until he hands it back.)
-  const kept = Math.min(1, Math.max(PACE_LEAST, stored("skate.scale", 1) || 1));
+  // The picture is kept to what the device can draw in time (see pace.js):
+  // as many frames as its screen shows, first; and then as fine a picture
+  // as that leaves room for. Its rungs, from the best: the picture's size,
+  // each a little smaller than the last, down to half; then at half with
+  // its surfaces colored plainly too (see shade_plain, in the game's
+  // render.l8); and so, smaller still by larger steps, down to a tenth.
+  // Where it got to (and the frames it found it could aim at) is where
+  // the next time starts. ?scale= fixes the size instead.
+  const RUNGS = [
+    ...[1, 0.92, 0.85, 0.78, 0.72, 0.66, 0.61, 0.56, 0.5].map((size) => ({ size, plain: false })),
+    ...[0.5, 0.42, 0.36, 0.31, 0.26, 0.22, 0.19, 0.16, 0.14, 0.12, 0.1].map((size) => ({ size, plain: true })),
+  ];
+  // The picture's size, of the screen's each way. Down to half, the whole
+  // of it is made smaller, and the browser stretches it; below that it
+  // stays at half, and the game draws its scene smaller within it (see
+  // render_scale, in render.l8), so that its words can still be read.
+  const SIZE_LEAST = 0.1, WHOLE_LEAST = 0.5;
+  let size = 1;
+  const setSize = (k) => {
+    size = Math.min(1, Math.max(SIZE_LEAST, k));
+    const whole = Math.max(size, WHOLE_LEAST);
+    platform.setScale(whole);
+    typeKeys([70000 + Math.max(1, Math.round((size / whole) * 100))]);
+  };
+  let plain = false;
+  const setPlain = (on) => {
+    plain = on;
+    typeKeys([on ? 65479 : 65480]);
+  };
+  // (Or he sets it himself, with the slider under the frames' rate, as
+  // small as he likes: then it is left where he put it, until he hands it
+  // back.)
   let own = stored("skate.scale.own", false);
-  const pace = { on: !params.has("scale") && !own, slow: 0, last: 0, quiet: 0, mean: 16, trial: null, refresh: 1000 / 60 };
-  if (pace.on) platform.setScale(Math.min(1, kept / PACE_STEP));
-  else if (!params.has("scale")) platform.setScale(kept);
+  const pace = { on: !params.has("scale") && !own, last: 0, quiet: 0 };
+  // (What each asks of the device: its pixels, and plainly a little less.)
+  const WORK = RUNGS.map((r) => r.size * r.size * (r.plain ? 0.85 : 1));
+  let pacer = createPacer({ work: WORK, rung: stored("skate.rung", 0) || 0, beats: stored("skate.beats", 1) || 1 });
+  // The picture as a rung has it.
+  const toRung = (r) => {
+    setSize(RUNGS[r].size);
+    if (RUNGS[r].plain !== plain) setPlain(RUNGS[r].plain);
+  };
+  if (params.has("scale")) setSize(scale);
+  else if (pace.on) toRung(pacer.state.rung);
+  else setSize(Math.min(1, Math.max(SIZE_LEAST, stored("skate.scale", 1) || 1)));
 
   // How fast the frames come, top right, if he asks to see it: counted
   // over each half second. Beside it, a button for a panel that says what
@@ -993,15 +1049,15 @@ async function main() {
   const slider = panel.querySelector("input");
   const rate = { frames: 0, since: performance.now(), text: perf.querySelector(".rate b") };
   const showScale = () => {
-    slider.value = String(Math.round(platform.scale() * 20) * 5);
-    panel.querySelector("output").textContent = `${Math.round(platform.scale() * 100)}%`;
+    slider.value = String(Math.round(size * 20) * 5);
+    panel.querySelector("output").textContent = `${Math.round(size * 100)}%`;
     panel.querySelector(".auto").classList.toggle("on", !own);
-    panel.querySelector(".cap").textContent = lowPower() ? `This device looks to be in Low Power Mode, which holds the game to about ${Math.round(1000 / pace.refresh)} frames a second whatever the resolution.` : "";
+    panel.querySelector(".cap").textContent = lowPower() ? `This device looks to be in Low Power Mode, which holds the game to about ${Math.round(1000 / pacer.state.beat)} frames a second whatever the resolution.` : "";
   };
   // Whether the device is saving its battery, as far as can be told: the
   // browser gives far fewer frames than sixty a second even to a game that
   // draws nothing (a phone in Low Power Mode gives thirty).
-  const lowPower = () => 1000 / pace.refresh < 50;
+  const lowPower = () => 1000 / pacer.state.beat < 50;
   perf.classList.toggle("on", stored("skate.fps", false));
   onTap(perf.querySelector(".rate"), () => {
     store("skate.fps", perf.classList.toggle("on"));
@@ -1013,9 +1069,9 @@ async function main() {
   });
   slider.addEventListener("input", () => {
     pace.on = false;
-    pace.trial = null;
-    platform.setScale(Number(slider.value) / 100);
-    store("skate.scale", platform.scale());
+    if (plain) setPlain(false);
+    setSize(Number(slider.value) / 100);
+    store("skate.scale", size);
     store("skate.scale.own", (own = true));
     showScale();
   });
@@ -1023,15 +1079,90 @@ async function main() {
   onTap(panel.querySelector(".auto"), () => {
     // (Back to full, and down again from there if it must.)
     pace.on = !params.has("scale");
-    pace.slow = 0;
-    pace.trial = null;
-    platform.setScale(1);
-    store("skate.scale", 1);
+    pacer = createPacer({ work: WORK, beat: pacer.state.beat });
+    toRung(0);
+    store("skate.rung", 0);
+    store("skate.beats", 1);
     store("skate.scale.own", (own = false));
     showScale();
   });
 
-  frameState = () => ({ refresh: Math.round(1000 / pace.refresh), scale: Math.round(platform.scale() * 100) / 100, own, low: lowPower(), pacing: pace.on });
+  frameState = () => ({
+    refresh: Math.round(1000 / pacer.state.beat),
+    scale: Math.round(size * 100) / 100,
+    plain,
+    own,
+    low: lowPower(),
+    pacing: pace.on,
+    // (What the pacing is at: its rung, the beats to a frame it aims at,
+    // the share of frames late whatever is drawn, and how long it waits to
+    // try a rung up.)
+    rung: pacer.state.rung,
+    beats: pacer.state.beats,
+    base: Math.round(pacer.state.base * 1000) / 1000,
+    hold: Math.round(pacer.state.hold / 1000),
+  });
+  frameWork = () => [platform.frames(), platform.workMs()];
+  // ?probe: a test of what a frame's time goes on, on this device. Once he
+  // has ridden a few seconds, parts of the work are left out, each for a
+  // moment, and the picture drawn smaller for one, the frames timed through
+  // each; and the leaderboards' worker is told what each came to (see
+  // report): the milliseconds a frame took, and of them the game's own
+  // work. The picture flickers while it runs: it is for finding out why
+  // the game is slow somewhere, and is asked for by its link.
+  // Each: its name, the draws left out (see setSkip), the part of coloring
+  // the world's pixels left out (see shade_less, in render.l8: F9 goes on
+  // to the next, and round), and whether surfaces are colored plainly.
+  const PROBES = [["base", [], 0], ["noShadows", [], 1], ["noTone", [], 2], ["noStuff", [], 3], ["noHaze", [], 4], ["noShine", [], 5], ["plain", [], 6], ["again", [], 0],
+    ["shadow", ["part:shadow"], 0], ["world", ["part:world", "part:sky"], 0], ["grass", ["part:grass"], 0], ["nothing", ["all"], 0], ["small", [], 0], ["plainer", [], 0, true], ["last", [], 0]];
+  const SHADES = 7;
+  const probe = params.has("probe") ? { at: -1, since: 0, n: 0, ms: 0, drawn: 0, work: 0, wait: 8000, scale: 1, shade: 0, got: {}, gpu0: null } : null;
+  const probed = (gap, now) => {
+    if (document.body.classList.contains("sheet") || document.hidden || gap > 500) return;
+    if (probe.at < 0) {
+      // (Not until he has been riding a while, at whatever size it settled on.)
+      if ((probe.wait -= gap) > 0) return;
+      pace.on = false;
+      if (plain) setPlain(false);
+      probe.scale = size;
+      probe.at = 0;
+      probe.since = now;
+      probe.gpu0 = JSON.stringify(platform.glTiming().gpu);
+      toast("Testing: the picture will flicker");
+      return;
+    }
+    if (probe.at >= PROBES.length) return;
+    // Each for two and a half seconds, the first second not counted.
+    const into = now - probe.since;
+    if (into > 1000) {
+      if (probe.n === 0) [probe.drawn, probe.work] = frameWork();
+      probe.n++;
+      probe.ms += gap;
+    }
+    if (into < 2500) return;
+    const [drawn, work] = frameWork();
+    probe.got[PROBES[probe.at][0]] = [Math.round((probe.ms / Math.max(probe.n, 1)) * 10) / 10, Math.round(((work - probe.work) / Math.max(drawn - probe.drawn, 1)) * 10) / 10];
+    // (What the graphics chip's own clock says of each part, where the
+    // browser lets it be asked: milliseconds a frame, with nothing left out.)
+    if (probe.at === 0) {
+      const gpu0 = JSON.parse(probe.gpu0);
+      probe.got.gpu = Object.fromEntries(Object.entries(platform.glTiming().gpu).map(([k, v]) => [k, Math.round(((v - (gpu0[k] ?? 0)) / Math.max(probe.n, 1)) * 10) / 10]));
+    }
+    probe.at++;
+    Object.assign(probe, { since: now, n: 0, ms: 0 });
+    const next = PROBES[probe.at] ?? ["", [], 0];
+    platform.setSkip(next[1]);
+    setSize(next[0] === "small" ? probe.scale * 0.7 : probe.scale);
+    if (!!next[3] !== plain) setPlain(!!next[3]);
+    while (probe.shade !== next[2]) {
+      typeKeys([65478]);
+      probe.shade = (probe.shade + 1) % SHADES;
+    }
+    if (probe.at < PROBES.length) return;
+    reportsLeft = Math.max(reportsLeft, 1);
+    report("perf", { why: "probe", probe: probe.got, ...frameState(), scale: probe.scale });
+    toast("Test done, thanks");
+  };
   const paced = async () => {
     await platform.nextFrame();
     const now = performance.now();
@@ -1048,13 +1179,14 @@ async function main() {
     }
     const gap = now - pace.last;
     pace.last = now;
-    // (Held behind a sheet, with no place shown off, the game draws
-    // nothing: the frames come as fast as the browser gives them.)
     const body = document.body.classList;
     if (body.contains("sheet") || document.hidden) frames.skip = true;
-    else frameCame(gap, pace.refresh);
+    else frameCame(gap, pacer.state.beat);
+    if (probe) probed(gap, now);
+    // (Held behind a sheet, with no place shown off, the game draws
+    // nothing: the frames come at the screen's own beat.)
     if (body.contains("sheet") && !body.contains("showing")) {
-      if (gap < 100) pace.refresh += (gap - pace.refresh) * 0.05;
+      if (!body.contains("loading")) pacer.idle(gap);
       pace.quiet = now + 1500;
       return;
     }
@@ -1063,28 +1195,13 @@ async function main() {
     // built: those are slow whatever the device.)
     if (gap > 250 || document.hidden) pace.quiet = now + 1500;
     if (now < pace.quiet) return;
-    pace.mean += (gap - pace.mean) * 0.05;
-    if (pace.trial) {
-      // Steps down are on trial: kept if the frames now come faster; else
-      // another is tried, down to the least, and then all are taken back.
-      if (now < pace.trial.until) return;
-      if (pace.mean <= pace.trial.mean * PACE_GAIN) store("skate.scale", platform.scale());
-      else if (platform.scale() > PACE_LEAST) {
-        platform.setScale(Math.max(PACE_LEAST, platform.scale() * PACE_STEP));
-        pace.trial.until = now + PACE_TRIAL;
-        return;
-      } else {
-        platform.setScale(pace.trial.scale);
-        pace.on = false;
-      }
-      pace.trial = null;
-      pace.slow = 0;
-      return;
+    const [was, aimed] = [pacer.state.rung, pacer.state.beats];
+    const rung = pacer.frame(gap, now);
+    if (rung !== was) {
+      toRung(rung);
+      store("skate.rung", rung);
     }
-    pace.slow = gap > PACE_SLOW * pace.refresh ? pace.slow + gap : Math.max(0, pace.slow - 2 * gap);
-    if (pace.slow < PACE_FOR || platform.scale() <= PACE_LEAST) return;
-    pace.trial = { scale: platform.scale(), mean: pace.mean, until: now + PACE_TRIAL };
-    platform.setScale(Math.max(PACE_LEAST, platform.scale() * PACE_STEP));
+    if (pacer.state.beats !== aimed) store("skate.beats", pacer.state.beats);
   };
   const status = await runResumable(instance, () => {
     if (!document.body.classList.contains("loading")) return paced();

@@ -1,0 +1,426 @@
+tag malton;
+
+use_tag std;
+
+use_tag gl, x11;
+
+use_tag skate;
+
+import "../../stdlib/print.l8";
+
+// Norton & Malton Skatepark (see site.l8), to skate the way a real
+// skateboard rides (see ride.l8).
+//
+//   .build/malton
+//
+// Left and right lean him into a carve (or, slow, pivot him). He pushes
+// himself along; up pushes harder. Down crouches: crouch going into a
+// transition and stand up through it to pump. Space is the trick pad, as
+// in the skate game: held, he crouches, and each arrow pressed adds a turn
+// that way; let go, he ollies into the trick. Space again in the air
+// grabs. On a phone the screen's left half steers and its right half is
+// the pad (see touch.l8). R starts over where he last stood; C changes the
+// camera (to the photographs' views, to compare); Escape quits.
+import "../gl/gl.l8";
+
+import "../skate/math.l8";
+
+import "mesh.l8";
+
+import "surf.l8";
+
+import "site.l8";
+
+import "judge.l8";
+
+import "ride.l8";
+
+import "pose.l8";
+
+import "touch.l8";
+
+import "hud.l8";
+
+import "render.l8";
+
+extern getenv(name: str): ?*i8;
+
+extern clock_gettime(clk: int, ts: *Timespec): int;
+
+type Timespec = {
+    sec: int;
+    nsec: int
+}
+
+mono_ns(): int {
+    ts: Timespec = Timespec { sec: 0, nsec: 0 };
+    clock_gettime(1, &ts);
+    ts.sec * 1000000000 + ts.nsec
+}
+
+// ---- the camera ----
+// It looks down on him from high behind, turning after the way he goes a
+// little late; or it stands where a photograph was taken.
+const CAM_PITCH: f32 = 0.95;
+
+const CAM_DIST: f32 = 14.0;
+
+type Camera = {
+    eye: V3;
+    at: V3;
+    up: V3;
+    fovy: f32;
+    // The way it looks across the ground, eased after his.
+    way: V3
+}
+
+update_chase(
+    c: *Camera,
+    m: *Mover,
+    pos: V3,
+    dt: f32
+) {
+    // His way across the ground, while he rolls along it, slowly: so that
+    // back and forth in a halfpipe it hardly turns.
+    w: V3 = v3(m.v.x, 0.0, m.v.z);
+    if (m.mode == RIDE && v_len(w) > 2.0 && m.n.y > 0.9) c.way = yaw_dir(approach_angle(dir_yaw(c.way),
+        dir_yaw(w), ease(0.45, dt)));
+    want_at: V3 = v_madd(v_add(pos, v3(0.0, 0.6, 0.0)), c.way, 2.0);
+    // Up a wall or in the air, it rises only partway with him.
+    want_at.y = 0.6 + pos.y * 0.6;
+    c.at = v_lerp(c.at, want_at, ease(5.0, dt));
+    c.eye = v_add(v_madd(c.at, c.way, -cosf(CAM_PITCH) * CAM_DIST), v3(0.0, sinf(CAM_PITCH) * CAM_DIST,
+        0.0));
+    c.up = v3(0.0, 1.0, 0.0);
+    c.fovy = 0.9
+}
+
+// The photographs' views: where each was taken from (in the park's
+// metres), where it looks, and its lens. 0 follows him.
+const VIEWS: int = 3;
+
+set_view(c: *Camera, k: int) {
+    if (k == 1) {
+        // The aerial photograph: 43.5 m straight up over its middle.
+        mid: V3 = px(2372.0, 1790.0);
+        c.eye = v3(mid.x, 43.5, mid.z);
+        c.at = mid;
+        c.up = v3(0.0, 0.0, -1.0);
+        c.fovy = 1.19
+    }
+    if (k == 2) {
+        // "New halfpipe and vert wall 2": in front of the vert wall, at eye
+        // height.
+        c.eye = v3(-13.8, 1.6, -7.4);
+        c.at = v3(-15.3, 1.5, 0.7);
+        c.up = v3(0.0, 1.0, 0.0);
+        c.fovy = 0.785
+    }
+}
+
+// ---- keys ----
+// The keys held, and while Space is, the trick its arrows have aimed.
+type Keys = {
+    left: bool;
+    right: bool;
+    up: bool;
+    down: bool;
+    space: bool;
+    aim_x: int;
+    aim_y: int
+}
+
+key_dir(ks: int): int {
+    if (ks == 65363 || ks == 100) return 0;
+    if (ks == 65364 || ks == 115) return 1;
+    if (ks == 65361 || ks == 97) return 2;
+    if (ks == 65362 || ks == 119) return 3;
+    -1
+}
+
+key_set(k: *Keys, ks: int, on: bool) {
+    d: int = key_dir(ks);
+    // With Space held, each arrow pressed adds a turn its way.
+    if (on && k.space && d >= 0) {
+        if (d == 0) k.aim_x = k.aim_x + 1;
+        if (d == 2) k.aim_x = k.aim_x - 1;
+        if (d == 3) k.aim_y = k.aim_y + 1;
+        if (d == 1) k.aim_y = k.aim_y - 1
+    }
+    if (d == 2) k.left = on;
+    if (d == 0) k.right = on;
+    if (d == 3) k.up = on;
+    if (d == 1) k.down = on;
+    if (ks == 32) {
+        if (on && !k.space) {
+            k.aim_x = 0;
+            k.aim_y = 0
+        }
+        k.space = on
+    }
+}
+
+read_input(k: *Keys): Input {
+    inp: Input = no_input();
+    // (Space held, the arrows aim instead.)
+    if (!k.space) {
+        if (k.left) inp.steer = inp.steer - 1.0;
+        if (k.right) inp.steer = inp.steer + 1.0;
+        inp.push = k.up;
+        inp.crouch = k.down
+    }
+    inp.pad = k.space;
+    inp.aim_flips = k.aim_y;
+    inp.aim_halves = k.aim_x;
+    read_thumbs(&inp);
+    inp
+}
+
+// In a tall window, as on a phone held upright, the picture moves up, so
+// that he rides above the touch panels.
+view_shift(): f32 {
+    aspect: f32 = screen_w as f32 / maxf(screen_h as f32, 1.0);
+    clampf((1.0 - aspect) * 0.8, 0.0, 0.45)
+}
+
+// The camera's vertical field of view: wide enough across that a tall
+// window, as on a phone held upright, still sees to the sides.
+view_fovy(base: f32): f32 {
+    aspect: f32 = screen_w as f32 / maxf(screen_h as f32, 1.0);
+    across: f32 = sinf(base * 0.5) / cosf(base * 0.5) * 1.6;
+    maxf(base, 2.0 * atan2f(across, aspect))
+}
+
+// L8_CAM=ex,ey,ez,ax,ay,az,fovy (degrees): a camera to stand at, for
+// matching a photograph.
+cam_env: []f32 = new f32[8](0.0);
+
+cam_from_env(): bool {
+    prefix: str = "L8_CAM=";
+    for e in l8_environment() {
+        if (len(e) > len(prefix) && starts_with(e, prefix)) {
+            k: int = 0;
+            num: f32 = 0.0;
+            sign: f32 = 1.0;
+            frac: f32 = 0.0;
+            for i in len(prefix)..len(e) + 1 {
+                c: int = 44;
+                if (i < len(e)) c = e[i] as int;
+                if (c == 45) sign = -1.0 else if (c == 46) frac = 0.1 else if (c >= 48 && c <= 57) {
+                    if (frac > 0.0) {
+                        num = num + (c - 48) as f32 * frac;
+                        frac = frac * 0.1
+                    } else num = num * 10.0 + (c - 48) as f32
+                } else if (k < 8) {
+                    cam_env[k] = sign * num;
+                    k = k + 1;
+                    num = 0.0;
+                    sign = 1.0;
+                    frac = 0.0
+                }
+            }
+            return true
+        }
+    }
+    false
+}
+
+starts_with(s: str, prefix: str): bool {
+    for i in 0..len(prefix) {
+        if (s[i] != prefix[i]) return false
+    }
+    true
+}
+
+extern l8_environment(): []str@new;
+
+view_from_env(): int {
+    v: ?*i8 = getenv("L8_VIEW");
+    if (v == null) return 0;
+    p: *i8 = v;
+    (p.* as int - 48) % VIEWS
+}
+
+main() raises IoError: int {
+    world: *Mesh = new_mesh(900000);
+    build_site(world);
+    parts: *Mesh = new_mesh(60000);
+    build_parts(parts);
+    d0: ?*i8 = XOpenDisplay(null);
+    if (d0 == null) {
+        eprint("XOpenDisplay failed (need DISPLAY / XWayland)");
+        return 1
+    }
+    dpy: *i8 = d0;
+    screen: int = XDefaultScreen(dpy);
+    attr: []i32 = [4i32, 5i32, 8i32, 8i32, 9i32, 8i32, 10i32, 8i32, 12i32, 24i32,
+        0i32];
+    vis0: ?*XVisualInfo = glXChooseVisual(dpy, screen, attr);
+    if (vis0 == null) die("glXChooseVisual failed");
+    vis: *XVisualInfo = vis0;
+    root: int = XRootWindow(dpy, screen);
+    cmap: int = XCreateColormap(dpy, root, vis.visual, 0);
+    wa: XSetWindowAttributes = XSetWindowAttributes {
+        background_pixmap: 0,
+        background_pixel: 0,
+        border_pixmap: 0,
+        border_pixel: 0,
+        bit_gravity: 0i32,
+        win_gravity: 0i32,
+        backing_store: 0i32,
+        backing_planes: 0,
+        backing_pixel: 0,
+        save_under: 0i32,
+        event_mask: 163919,
+        do_not_propagate_mask: 0,
+        override_redirect: 0i32,
+        colormap: cmap,
+        cursor: 0
+    };
+    screen_w = 1280;
+    screen_h = 720;
+    win: int = XCreateWindow(dpy, root, 0, 0, screen_w, screen_h, 0, vis.depth as int,
+        1, vis.visual, 10248, &wa);
+    if (win == 0) die("XCreateWindow failed");
+    XStoreName(dpy, win, "L8 Malton");
+    proto: []int = new int[1](0);
+    proto[0] = XInternAtom(dpy, "WM_DELETE_WINDOW", 0);
+    XSetWMProtocols(dpy, win, &proto[0], 1);
+    XMapRaised(dpy, win);
+    XkbSetDetectableAutoRepeat(dpy, 1, null);
+    XFlush(dpy);
+    eprint("L8 Malton: left/right lean, up pushes, down crouches (pump), Space ollies, X grabs; R starts over, C changes the camera, Escape quits");
+    ctx0: ?*i8 = glXCreateContext(dpy, vis, null, 1);
+    if (ctx0 == null) die("glXCreateContext failed");
+    ctx: *i8 = ctx0;
+    if (glXMakeCurrent(dpy, win, ctx) == 0) die("glXMakeCurrent failed");
+    glXSwapIntervalEXT(dpy, win, 1);
+    r: *Renderer = new_renderer(world, parts);
+    // He starts on the halfpipe's deck by the warehouse, ready to drop in.
+    hb: V3 = px(1903.0, 2780.0);
+    hax: V3 = v_norm(v_sub(hb, px(1558.0, 2233.0)));
+    start: V3 = v_madd(v_madd(hb, hax, 1.4), UP, HP_H);
+    m: *Mover = new_mover(start, v_scale(hax, -1.0));
+    sync_pose(m);
+    a: *Anim = new_anim(m.fwd, m.y);
+    cam: *Camera = new Camera {
+        eye: v_add(v_madd(start, hax, 5.0), v3(0.0, 2.6, 0.0)),
+        at: start,
+        up: v3(0.0, 1.0, 0.0),
+        fovy: 1.05,
+        way: m.board
+    };
+    view: int = view_from_env();
+    fixed: bool = cam_from_env();
+    keys: Keys = Keys {
+        left: false,
+        right: false,
+        up: false,
+        down: false,
+        space: false,
+        aim_x: 0,
+        aim_y: 0
+    };
+    shadows: bool = getenv("L8_NO_SHADOWS") == null;
+    ev: XEvent = XEvent.Other;
+    running: bool = true;
+    alive: bool = true;
+    prev_ns: int = mono_ns();
+    start_ns: int = prev_ns;
+    acc: f32 = 0.0;
+    paused: bool = false;
+    while (running) {
+        while (XPending(dpy) != 0) {
+            XNextEvent(dpy, &ev);
+            match ev {
+                KeyPress -> {
+                    ks: int = XLookupKeysym(&ev, 0);
+                    if (ks == 65307) running = false;
+                    if (ks == 65299) paused = true;
+                    if (ks == 114) respawn(m);
+                    if (ks == 99) view = (view + 1) % VIEWS;
+                    key_set(&keys, ks, true)
+                }
+                KeyRelease -> {
+                    ks: int = XLookupKeysym(&ev, 0);
+                    if (ks == 65299) paused = false;
+                    key_set(&keys, ks, false)
+                }
+                ButtonPress b -> pointer_down(b.button as int, b.x as f32, b.y as f32);
+                ButtonRelease b -> pointer_up(b.button as int);
+                MotionNotify mo -> pointer_move(mo.state as int, mo.x as f32, mo.y as f32);
+                ConfigureNotify c -> {
+                    if (c.width > 0i32 && c.height > 0i32) {
+                        screen_w = c.width as int;
+                        screen_h = c.height as int
+                    }
+                }
+                DestroyNotify -> {
+                    running = false;
+                    alive = false
+                }
+                ClientMessage c -> {
+                    if (c.l0 == proto[0]) running = false
+                }
+                _ -> { }
+            }
+        }
+        if (running) {
+            now: int = mono_ns();
+            dns: int = now - prev_ns;
+            prev_ns = now;
+            if (dns < 0) dns = 0;
+            if (dns > 100000000) dns = 100000000;
+            if (paused) dns = 0;
+            dt: f32 = dns as f32 / 1000000000.0;
+            acc = acc + dt;
+            steps: int = 0;
+            inp: Input = read_input(&keys);
+            while (acc >= STEP_DT && steps < 12) {
+                step_rider(m, inp, STEP_DT);
+                acc = acc - STEP_DT;
+                steps = steps + 1
+            }
+            if (acc > STEP_DT) acc = 0.0;
+            alpha: f32 = acc / STEP_DT;
+            pos: V3 = v_lerp(m.prev, m.p, alpha);
+            update_anim(a, m, dt);
+            pose(a, m, pos);
+            if (fixed) {
+                cam.eye = v3(cam_env[0], cam_env[1], cam_env[2]);
+                cam.at = v3(cam_env[3], cam_env[4], cam_env[5]);
+                cam.up = v3(0.0, 1.0, 0.0);
+                cam.fovy = cam_env[6] * PI / 180.0
+            } else if (view == 0) update_chase(cam, m, pos, dt) else set_view(cam,
+                view);
+            tick_feed(dt);
+            hud_speed = m.speed;
+            hud_aiming = m.loading;
+            if (m.loading) {
+                hud_aim_flips = m.aim_flips;
+                hud_aim_halves = m.aim_halves;
+                hud_aim_air = preview_air(m);
+                hud_aim_item = preview_item(m);
+                hud_aim_switch = m.fakie
+            }
+            v: View = View {
+                eye: cam.eye,
+                at: cam.at,
+                up: cam.up,
+                fovy: view_fovy(cam.fovy),
+                shift: 0.0,
+                focus: pos,
+                time: (now - start_ns) as f32 / 1000000000.0
+            };
+            if (view == 1 || fixed) v.fovy = cam.fovy else if (view == 0) v.shift = view_shift();
+            draw_scene(r, v, shadows);
+            if (getenv("L8_NO_HUD") == null) draw_hud(r);
+            glXSwapBuffers(dpy, win)
+        }
+    }
+    glXMakeCurrent(dpy, 0, null);
+    glXDestroyContext(dpy, ctx);
+    if (alive) XDestroyWindow(dpy, win);
+    XCloseDisplay(dpy);
+    0
+}

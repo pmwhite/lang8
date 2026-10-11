@@ -48,7 +48,7 @@ STAGE1_TESTS := tests/compiler/bool.l8 \
 # `build TOOL SOURCE`: build into $@ without leaving a partial file behind.
 build = ./$(1) build $(2) -o $@.tmp && mv -f $@.tmp $@
 
-.PHONY: all check fmt selfhost compiler-test game skate stdlib-test \
+.PHONY: all check fmt selfhost compiler-test game skate malton stdlib-test \
 	terminal terminal-test callback-test http http-test websocket websocket-test wasm-test web \
 	install-bootstrap promote promote-bin1 promote-bin2 promote-source clean help
 
@@ -57,7 +57,7 @@ all:
 	@$(MAKE) -s $(OK)/fmt $(OK)/stage1-tests
 	@$(MAKE) -s check
 
-check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(BUILD)/skate
+check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(BUILD)/skate $(BUILD)/malton
 
 # ---- compiler stages ----
 
@@ -140,6 +140,11 @@ $(BUILD)/skate: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 	@$(STEP) 'skate' sh -c '$(call build,l8c3,programs/skate/main.l8)'
 
 skate: $(BUILD)/skate
+
+$(BUILD)/malton: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+	@$(STEP) 'malton' sh -c '$(call build,l8c3,programs/malton/main.l8)'
+
+malton: $(BUILD)/malton
 
 # A terminal may be running from the previous output; `mv` replaces the
 # directory entry instead of rewriting its live inode.
@@ -234,7 +239,7 @@ wasm-test: $(OK)/wasm-fixpoint $(OK)/wasm-tests $(OK)/wasm-resume
 # The playground: a static site in .build/web with the compiler as a module.
 # Serve it with `python3 -m http.server -d .build/web`.
 WEB_SITE := $(BUILD)/web
-WEB_FILES := web/index.html $(wildcard web/*.js web/examples/*.l8 web/game/* web/skate/*) programs/block-game/world.txt \
+WEB_FILES := web/index.html $(wildcard web/*.js web/examples/*.l8 web/game/* web/skate/* web/malton/*) programs/block-game/world.txt \
 	programs/block-game/garden.txt
 
 $(BUILD)/block-game.wasm: l8c3 $(PROGRAMS) | $(OK)
@@ -243,12 +248,16 @@ $(BUILD)/block-game.wasm: l8c3 $(PROGRAMS) | $(OK)
 $(BUILD)/skate.wasm: l8c3 $(PROGRAMS) | $(OK)
 	@$(STEP) 'skate wasm' sh -c './l8c3 wasm --async glXSwapBuffers programs/skate/main.l8 -o $@.tmp && mv -f $@.tmp $@'
 
-$(OK)/web: $(BUILD)/l8.wasm $(BUILD)/block-game.wasm $(BUILD)/skate.wasm $(WEB_FILES) $(STDLIB) | $(OK)
-	@$(STEP) 'web site' sh -c 'rm -rf $(WEB_SITE) && mkdir -p $(WEB_SITE)/stdlib $(WEB_SITE)/examples $(WEB_SITE)/game $(WEB_SITE)/skate && \
+$(BUILD)/malton.wasm: l8c3 $(PROGRAMS) | $(OK)
+	@$(STEP) 'malton wasm' sh -c './l8c3 wasm --async glXSwapBuffers programs/malton/main.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+$(OK)/web: $(BUILD)/l8.wasm $(BUILD)/block-game.wasm $(BUILD)/skate.wasm $(BUILD)/malton.wasm $(WEB_FILES) $(STDLIB) | $(OK)
+	@$(STEP) 'web site' sh -c 'rm -rf $(WEB_SITE) && mkdir -p $(WEB_SITE)/stdlib $(WEB_SITE)/examples $(WEB_SITE)/game $(WEB_SITE)/skate $(WEB_SITE)/malton && \
 		cp web/index.html web/*.js $(WEB_SITE)/ && cp web/examples/*.l8 $(WEB_SITE)/examples/ && \
 		cp $(STDLIB) $(WEB_SITE)/stdlib/ && cp $(BUILD)/l8.wasm $(WEB_SITE)/ && \
 		cp web/game/* $(BUILD)/block-game.wasm programs/block-game/world.txt programs/block-game/garden.txt $(WEB_SITE)/game/ && \
-		cp web/skate/* $(BUILD)/skate.wasm $(WEB_SITE)/skate/'
+		cp web/skate/* $(BUILD)/skate.wasm $(WEB_SITE)/skate/ && \
+		cp web/malton/* $(BUILD)/malton.wasm $(WEB_SITE)/malton/'
 	@touch $@
 
 web: $(OK)/web

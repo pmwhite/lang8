@@ -1,0 +1,841 @@
+tag malton;
+
+use_tag std;
+
+use_tag gl;
+
+use_tag skate;
+
+// Drawing: the sky, the park lit by the sun with a shadow map that follows
+// the rider, and the guy. Lighting is done in linear color, tone mapped and
+// gamma corrected at the end.
+//
+// The light is the photographs' (Pjsimages, 26 September 2022, 10:22 BST):
+// a bright morning under a blue sky with fair-weather clouds, the sun low
+// in the south-east. At Malton (54.13 N, 0.79 W) then, it stood 26 degrees
+// up at an azimuth of 136 degrees.
+const SHADOW_SIZE: int = 2048;
+
+const SHADOW_HALF: f32 = 30.0;
+
+type Renderer = {
+    world: int;
+    shadow: int;
+    sky: int;
+    u_vp: int;
+    u_model: int;
+    u_light: int;
+    u_sun: int;
+    u_cam: int;
+    u_texel: int;
+    u_blob: int;
+    u_shadow_map: int;
+    u_smvp: int;
+    u_cam_f: int;
+    u_cam_r: int;
+    u_cam_u: int;
+    u_tan: int;
+    u_sky_sun: int;
+    u_world_sky_sun: int;
+    u_time: int;
+    u_world_noise: int;
+    u_sky_noise: int;
+    noise_tex: u32;
+    world_buf: u32;
+    world_n: int;
+    part_buf: u32;
+    sky_buf: u32;
+    shadow_tex: u32;
+    shadow_fbo: u32;
+    hud: int;
+    u_hud_screen: int;
+    u_hud_offset: int;
+    u_hud_color: int;
+    hud_buf: u32;
+    // The look's uniforms, LOOK_UNIFORMS for each of the world and sky
+    // programs.
+    u_look: []int
+}
+
+screen_w: int = 1200;
+
+screen_h: int = 720;
+
+die(msg: str) raises IoError: noreturn {
+    eprint(msg);
+    exit(1)
+}
+
+extern exit(code: int): noreturn;
+
+compile_shader(kind: int, src: []i8) raises IoError: int {
+    sh: int = glCreateShader(kind);
+    sp: *i8 = src;
+    ln: []i32 = new i32[1](len(src) trunc i32);
+    glShaderSource(sh, 1, &sp, ln);
+    glCompileShader(sh);
+    st: []i32 = new i32[1](0i32);
+    glGetShaderiv(sh, 35713, st);
+    if (st[0] == 0i32) {
+        logn: []i32 = new i32[1](0i32);
+        glGetShaderiv(sh, 35716, logn);
+        n: int = logn[0] as int;
+        if (n < 1) n = 1;
+        if (n > 4096) n = 4096;
+        buf: []i8 = new i8[n](0i8);
+        glGetShaderInfoLog(sh, n, null, buf);
+        write_bytes_n(2, buf, n);
+        write(2, "\n");
+        die("shader compile failed")
+    }
+    sh
+}
+
+link_program(vs: []i8, fs: []i8) raises IoError: int {
+    prog: int = glCreateProgram();
+    glAttachShader(prog, compile_shader(35633, vs));
+    glAttachShader(prog, compile_shader(35632, fs));
+    glBindAttribLocation(prog, 0, "pos");
+    glBindAttribLocation(prog, 1, "nrm");
+    glBindAttribLocation(prog, 2, "vcol");
+    glBindAttribLocation(prog, 3, "vuv");
+    glLinkProgram(prog);
+    st: []i32 = new i32[1](0i32);
+    glGetProgramiv(prog, 35714, st);
+    if (st[0] == 0i32) die("program link failed");
+    prog
+}
+
+// The sky's color toward d, without the clouds; the distance fades to it.
+SKY_GLSL: str = """
+uniform vec3 sky_sun;
+// The look (see Look): the sky overhead, at the horizon away from the sun
+// and toward it, and the sun's glow low down; the sun's light, and the
+// sky's from above and below; the air (how thick per meter, and at most);
+// and the grade (exposure by channel, and color after the curve).
+uniform vec3 look_zenith;
+uniform vec3 look_away;
+uniform vec3 look_toward;
+uniform vec3 look_glow;
+uniform vec3 look_sun;
+uniform vec3 look_sky_up;
+uniform vec3 look_sky_down;
+uniform vec2 look_haze;
+uniform vec4 look_grade;
+vec3 sky_base(vec3 d) {
+  float up = clamp(d.y, 0.0, 1.0);
+  vec2 flat_d = d.xz + vec2(0.0001, 0.0);
+  float toward = dot(normalize(flat_d), normalize(sky_sun.xz)) * 0.5 + 0.5;
+  vec3 horizon = mix(look_away, look_toward, pow(toward, 2.0));
+  vec3 c = mix(horizon, look_zenith, pow(up, 0.5));
+  c += look_glow * pow(max(dot(d, sky_sun), 0.0), 8.0);
+  c = mix(c, horizon * 0.85, clamp(-d.y * 3.0, 0.0, 1.0));
+  return c;
+}
+#define SUN_LIGHT look_sun
+vec3 sky_light(vec3 n) {
+  return mix(look_sky_down, look_sky_up, n.y * 0.5 + 0.5);
+}
+vec3 haze(vec3 col, vec3 V, float dist) {
+  float f = 1.0 - exp(-max(dist - 30.0, 0.0) * look_haze.x);
+  return mix(col, sky_base(-V) * 0.95, f * look_haze.y);
+}
+vec3 tone(vec3 c) {
+  c *= look_grade.rgb;
+  c = (c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14);
+  float l = dot(c, vec3(0.3, 0.55, 0.15));
+  c = mix(vec3(l), c, look_grade.a);
+  return pow(clamp(c, 0.0, 1.0), vec3(1.0 / 2.2));
+}
+// Smooth value noise with one lattice cell per unit, from a tiling texture.
+uniform sampler2D noise_map;
+float vnoise(vec2 p) { return texture2D(noise_map, p * 0.015625).r; }
+""";
+
+WORLD_VS: str = """
+#version 120
+attribute vec3 pos;
+attribute vec3 nrm;
+attribute vec4 vcol;
+attribute vec2 vuv;
+uniform mat4 vp;
+uniform mat4 model;
+uniform mat4 light_vp;
+varying vec3 vworld;
+varying vec3 vnrm;
+varying vec4 vcolor;
+varying vec4 vlight;
+varying vec2 vst;
+void main() {
+  vec4 w = model * vec4(pos, 1.0);
+  vworld = w.xyz;
+  vnrm = mat3(model[0].xyz, model[1].xyz, model[2].xyz) * nrm;
+  vcolor = vcol;
+  vst = vuv;
+  vlight = light_vp * w;
+  gl_Position = vp * w;
+}
+""";
+
+WORLD_FS: str = """
+uniform sampler2DShadow shadow_map;
+uniform vec3 sun_dir;
+uniform vec3 cam_pos;
+uniform float shadow_texel;
+uniform vec3 blob;
+varying vec3 vworld;
+varying vec3 vnrm;
+varying vec4 vcolor;
+varying vec4 vlight;
+varying vec2 vst;
+
+float sun_visibility(float ndl) {
+  vec3 sc = vlight.xyz / vlight.w * 0.5 + 0.5;
+  if (sc.x < 0.002 || sc.x > 0.998 || sc.y < 0.002 || sc.y > 0.998 || sc.z > 1.0) return 1.0;
+  float bias = 0.0004 + 0.0012 * (1.0 - clamp(ndl, 0.0, 1.0));
+  float t = shadow_texel;
+  float v = shadow2D(shadow_map, vec3(sc.xy, sc.z - bias)).r * 0.36;
+  v += shadow2D(shadow_map, vec3(sc.xy + vec2(t, 0.0), sc.z - bias)).r * 0.16;
+  v += shadow2D(shadow_map, vec3(sc.xy - vec2(t, 0.0), sc.z - bias)).r * 0.16;
+  v += shadow2D(shadow_map, vec3(sc.xy + vec2(0.0, t), sc.z - bias)).r * 0.16;
+  v += shadow2D(shadow_map, vec3(sc.xy - vec2(0.0, t), sc.z - bias)).r * 0.16;
+  vec2 e = abs(sc.xy - 0.5) * 2.0;
+  return mix(v, 1.0, smoothstep(0.7, 0.95, max(e.x, e.y)));
+}
+
+// A line of width w (metres) every period along x, faded out where it
+// would be finer than a pixel.
+float seams(float x, float period, float w, float dist) {
+  float d = abs(fract(x / period + 0.5) - 0.5) * period;
+  float fade = 1.0 - smoothstep(20.0, 45.0, dist);
+  return (1.0 - smoothstep(w * 0.5, w * 0.5 + 0.004, d)) * fade;
+}
+
+void main() {
+  vec3 n = normalize(vnrm);
+  float ao = clamp(length(vnrm), 0.0, 1.0);
+  float mat = vcolor.a;
+  vec3 albedo = pow(vcolor.rgb, vec3(2.2));
+  vec3 V = normalize(cam_pos - vworld);
+  float dist = length(cam_pos - vworld);
+  if (mat > 9.5 && mat < 10.5) {
+    gl_FragColor = vec4(tone(haze(albedo * 3.0, V, dist)), 1.0);
+    return;
+  }
+  float spec = 0.0;
+  float gloss = 8.0;
+  float wrap = 0.2;
+  float ground = 0.0;
+  vec2 xz = vworld.xz;
+  float near = 1.0 - smoothstep(25.0, 60.0, dist);
+  if (mat < 0.5) {
+    // Asphalt, weathered pale: broad lighter and darker patches, dark
+    // stains where water lies, and the grit of its stones.
+    float broad = vnoise(xz * 0.21);
+    float stain = smoothstep(0.7, 0.85, vnoise(xz * 0.45 + 17.0));
+    albedo *= 0.93 + 0.12 * broad;
+    albedo *= 1.0 - 0.18 * stain;
+    float grit = vnoise(xz * 41.0) * 0.6 + vnoise(xz * 97.0 + 3.0) * 0.4;
+    albedo *= mix(1.0, 0.82 + 0.36 * grit, near);
+    spec = 0.02;
+    ground = 1.0;
+  } else if (mat < 1.5) {
+    // Grass: soft, in broad patches a little yellower or deeper.
+    float big = vnoise(xz * 0.09);
+    float mid = vnoise(xz * 0.5 + 7.0);
+    albedo *= 0.85 + 0.2 * big + 0.1 * mid;
+    albedo = mix(albedo, albedo * vec3(1.18, 1.1, 0.7), smoothstep(0.55, 0.8, mid) * 0.35);
+    wrap = 0.4;
+    ground = 1.0;
+  } else if (mat < 2.5) {
+    // Skatelite: sheets five feet across and ten along, screwed down in
+    // rows; a sheen, and the scuffs and stains of use.
+    float joint = max(seams(vst.x, 1.524, 0.008, dist), seams(vst.y, 3.048, 0.008, dist));
+    vec2 sp = vec2(vst.x / 0.254, vst.y / 0.305);
+    vec2 f = abs(fract(sp) - 0.5);
+    float screw = (1.0 - smoothstep(0.05, 0.11, length(f * vec2(0.254, 0.305)) / 0.03)) * near;
+    float scuff = vnoise(vst * vec2(3.0, 9.0)) * 0.5 + vnoise(vst * 0.7) * 0.5;
+    albedo *= 0.94 + 0.12 * scuff;
+    // Each sheet its own shade.
+    albedo *= 0.93 + 0.12 * vnoise(floor(vec2(vst.x / 1.524, vst.y / 3.048)) * vec2(7.1, 3.3) + 0.5);
+    albedo *= 1.0 - 0.45 * joint - 0.5 * screw;
+    float rust = smoothstep(0.7, 0.85, vnoise(vst * 1.3 + 41.0));
+    albedo = mix(albedo, albedo * vec3(0.8, 0.55, 0.42), rust * 0.3);
+    spec = 0.1;
+    gloss = 24.0;
+    ground = 1.0;
+  } else if (mat < 3.5) {
+    // Timber: grain along it.
+    float grain = vnoise(vec2(vst.x * 2.0, vst.y * 40.0));
+    albedo *= 0.85 + 0.25 * grain;
+    spec = 0.03;
+  } else if (mat < 4.5) {
+    // Galvanized steel: a dull silver, its spangle.
+    float spangle = vnoise(vworld.xz * 30.0 + vworld.y * 20.0);
+    albedo *= 0.85 + 0.25 * spangle;
+    spec = 0.4;
+    gloss = 30.0;
+  } else if (mat < 5.5) {
+    // The guy: soft painted block.
+    wrap = 0.35;
+    spec = 0.12;
+    gloss = 20.0;
+  } else if (mat < 6.5) {
+    // Brick, in stretcher bond: each brick its shade, mortar between.
+    float row = floor(vst.y / 0.075);
+    float x = vst.x / 0.225 + 0.5 * mod(row, 2.0);
+    vec2 id = vec2(floor(x), row);
+    float tint = vnoise(id * vec2(7.31, 3.17) + 0.5);
+    float mortar = max(seams(vst.y, 0.075, 0.01, dist), seams(x * 0.225, 0.225, 0.01, dist));
+    albedo *= 0.75 + 0.45 * tint;
+    albedo = mix(albedo, vec3(0.55, 0.52, 0.47), mortar * 0.85);
+    wrap = 0.25;
+  } else if (mat < 7.5) {
+    // Painted board, and black plastic sheet: a little sheen.
+    spec = 0.08;
+    gloss = 16.0;
+  } else if (mat < 8.5) {
+    // Corrugated steel: its ridges catch the light.
+    float r = sin(vst.x / 0.076 * 3.14159);
+    albedo *= 0.88 + 0.12 * r;
+    spec = 0.15;
+    gloss = 12.0;
+  } else if (mat < 9.5) {
+    // Leaves: lumpy color, light coming through.
+    float k = vnoise(vworld.xz * 2.3 + vworld.y * 3.0);
+    albedo *= 0.8 + 0.4 * k;
+    wrap = 0.5;
+  } else if (mat < 11.5) {
+    // The road: dark, fine-grained.
+    float grit = vnoise(xz * 50.0);
+    albedo *= mix(1.0, 0.85 + 0.3 * grit, near);
+    spec = 0.03;
+    ground = 1.0;
+  } else {
+    // Stone and concrete: blocks, weathered.
+    float joint = seams(vst.x, 0.9, 0.01, dist);
+    albedo *= (0.85 + 0.25 * vnoise(vworld.xz * 3.0 + vworld.y * 5.0)) * (1.0 - 0.3 * joint);
+    ground = 1.0;
+  }
+  float ndl = dot(n, sun_dir);
+  float vis = sun_visibility(ndl);
+  float diff = max((ndl + wrap) / (1.0 + wrap), 0.0);
+  vec3 sky = sky_light(n) * ao;
+  // Contact darkening under the rider.
+  if (ground > 0.5) {
+    float d = length(vworld.xz - blob.xz);
+    float c = (1.0 - smoothstep(0.0, 0.6, d)) * (1.0 - smoothstep(0.0, 0.8, abs(vworld.y - blob.y)));
+    sky *= 1.0 - 0.45 * c;
+  }
+  vec3 col = albedo * (SUN_LIGHT * diff * vis * (0.6 + 0.4 * ao) + sky);
+  if (mat > 4.5 && mat < 5.5) {
+    float rim = pow(1.0 - max(dot(n, V), 0.0), 3.0);
+    col += (SUN_LIGHT * 0.4 * max(dot(-V, sun_dir), 0.0) * vis + vec3(0.35, 0.42, 0.62) * 0.3) * rim;
+  }
+  vec3 H = normalize(sun_dir + V);
+  col += SUN_LIGHT * vis * spec * pow(max(dot(n, H), 0.0), gloss) * (gloss + 8.0) / 60.0 * step(0.0, ndl);
+  gl_FragColor = vec4(tone(haze(col, V, dist)), 1.0);
+}
+""";
+
+HUD_VS: str = """
+#version 120
+attribute vec2 pos;
+uniform vec2 screen;
+uniform vec2 offset;
+void main() {
+  vec2 p = pos + offset;
+  gl_Position = vec4(p.x / screen.x * 2.0 - 1.0, 1.0 - p.y / screen.y * 2.0, 0.0, 1.0);
+}
+""";
+
+HUD_FS: str = """
+#version 120
+uniform vec4 color;
+void main() {
+  gl_FragColor = color;
+}
+""";
+
+// Into the shadow map: everything but the open ground (asphalt and grass,
+// whose shapes show in their shading).
+SHADOW_VS: str = """
+#version 120
+attribute vec3 pos;
+attribute vec4 vcol;
+uniform mat4 mvp;
+varying float vmat;
+void main() {
+  vmat = vcol.a;
+  gl_Position = mvp * vec4(pos, 1.0);
+}
+""";
+
+SHADOW_FS: str = """
+#version 120
+varying float vmat;
+void main() {
+  if (vmat < 1.5 || (vmat > 10.5 && vmat < 11.5)) discard;
+  gl_FragColor = vec4(1.0);
+}
+""";
+
+SKY_VS: str = """
+#version 120
+attribute vec3 pos;
+varying vec2 vscreen;
+void main() {
+  vscreen = pos.xy;
+  gl_Position = vec4(pos.xy, 0.9999, 1.0);
+}
+""";
+
+// The sky: blue, paler down to the horizon, and the morning's fair-weather
+// clouds: white heaps, their bases a soft grey.
+SKY_FS: str = """
+uniform vec3 cam_f;
+uniform vec3 cam_r;
+uniform vec3 cam_u;
+uniform vec2 tan_half;
+uniform float time;
+varying vec2 vscreen;
+float clouds(vec2 p) {
+  float v = 0.0;
+  float a = 0.5;
+  for (int i = 0; i < 5; i++) {
+    v += a * vnoise(p);
+    p = p * 2.07 + vec2(1.7, 9.2);
+    a *= 0.5;
+  }
+  return v;
+}
+void main() {
+  vec3 d = normalize(cam_f + vscreen.x * tan_half.x * cam_r + vscreen.y * tan_half.y * cam_u);
+  vec3 c = sky_base(d);
+  float s = max(dot(d, sky_sun), 0.0);
+  c += vec3(1.0, 0.95, 0.85) * (pow(s, 30.0) * 0.25 + pow(s, 900.0) * 6.0);
+  if (d.y > 0.0) {
+    vec2 p = d.xz / (d.y + 0.08) * 0.55 + vec2(time * 0.004, time * 0.001);
+    float k = smoothstep(0.52, 0.68, clouds(p));
+    float shade = clouds(p + sky_sun.xz * 0.06 + vec2(0.0, 0.03));
+    vec3 lit = vec3(1.25, 1.24, 1.2);
+    vec3 cloud = mix(lit, vec3(0.62, 0.66, 0.74), smoothstep(0.5, 0.75, shade));
+    cloud += vec3(0.3) * pow(s, 6.0);
+    c = mix(c, cloud, k * smoothstep(0.0, 0.15, d.y) * 0.95);
+  }
+  gl_FragColor = vec4(tone(c), 1.0);
+}
+""";
+
+// GLSL source with a shared prelude after its version line.
+with_prelude(src: str): []i8@new {
+    head: str = "#version 120\n";
+    out: []i8 = new i8[len(head) + len(SKY_GLSL) + len(src)](0i8);
+    n: int = 0;
+    for c in head {
+        out[n] = c;
+        n = n + 1
+    }
+    for c in SKY_GLSL {
+        out[n] = c;
+        n = n + 1
+    }
+    for c in src {
+        out[n] = c;
+        n = n + 1
+    }
+    out
+}
+
+gen_buffer(): u32 {
+    ids: []u32 = new u32[1](0u32);
+    glGenBuffers(1, ids);
+    ids[0]
+}
+
+upload(buf: u32, m: *Mesh) {
+    glBindBuffer(34962, buf);
+    glBufferData(34962, m.n * VERTEX_FLOATS * 4, m.data, 35044)
+}
+
+bind_vertices(buf: u32) {
+    glBindBuffer(34962, buf);
+    glVertexAttribPointer(0, 3, 5126, 0, VERTEX_FLOATS * 4, 0);
+    glVertexAttribPointer(1, 3, 5126, 0, VERTEX_FLOATS * 4, 12);
+    glVertexAttribPointer(2, 4, 5126, 0, VERTEX_FLOATS * 4, 24);
+    glVertexAttribPointer(3, 2, 5126, 0, VERTEX_FLOATS * 4, 40)
+}
+
+new_renderer(world_mesh: *Mesh, parts: *Mesh) raises IoError: *Renderer@new {
+    world: int = link_program(bytes(WORLD_VS), with_prelude(WORLD_FS));
+    shadow: int = link_program(bytes(SHADOW_VS), bytes(SHADOW_FS));
+    sky: int = link_program(bytes(SKY_VS), with_prelude(SKY_FS));
+    hud: int = link_program(bytes(HUD_VS), bytes(HUD_FS));
+    va: []u32 = new u32[1](0u32);
+    glGenVertexArrays(1, va);
+    glBindVertexArray(va[0]);
+    for i in 0..4 glEnableVertexAttribArray(i);
+    r: *Renderer = new Renderer {
+        world: world,
+        shadow: shadow,
+        sky: sky,
+        u_vp: glGetUniformLocation(world, "vp"),
+        u_model: glGetUniformLocation(world, "model"),
+        u_light: glGetUniformLocation(world, "light_vp"),
+        u_sun: glGetUniformLocation(world, "sun_dir"),
+        u_cam: glGetUniformLocation(world, "cam_pos"),
+        u_texel: glGetUniformLocation(world, "shadow_texel"),
+        u_blob: glGetUniformLocation(world, "blob"),
+        u_shadow_map: glGetUniformLocation(world, "shadow_map"),
+        u_smvp: glGetUniformLocation(shadow, "mvp"),
+        u_cam_f: glGetUniformLocation(sky, "cam_f"),
+        u_cam_r: glGetUniformLocation(sky, "cam_r"),
+        u_cam_u: glGetUniformLocation(sky, "cam_u"),
+        u_tan: glGetUniformLocation(sky, "tan_half"),
+        u_sky_sun: glGetUniformLocation(sky, "sky_sun"),
+        u_world_sky_sun: glGetUniformLocation(world, "sky_sun"),
+        u_time: glGetUniformLocation(sky, "time"),
+        u_world_noise: glGetUniformLocation(world, "noise_map"),
+        u_sky_noise: glGetUniformLocation(sky, "noise_map"),
+        noise_tex: make_noise_texture(),
+        world_buf: gen_buffer(),
+        world_n: world_mesh.n,
+        part_buf: gen_buffer(),
+        sky_buf: gen_buffer(),
+        shadow_tex: 0u32,
+        shadow_fbo: 0u32,
+        hud: hud,
+        u_hud_screen: glGetUniformLocation(hud, "screen"),
+        u_hud_offset: glGetUniformLocation(hud, "offset"),
+        u_hud_color: glGetUniformLocation(hud, "color"),
+        hud_buf: gen_buffer(),
+        u_look: new int[2 * LOOK_UNIFORMS](0)
+    };
+    progs: []int = [world, sky];
+    for k in 0..2 {
+        for u in 0..LOOK_UNIFORMS r.u_look[k * LOOK_UNIFORMS + u] = glGetUniformLocation(progs[k],
+            look_names[u])
+    }
+    upload(r.world_buf, world_mesh);
+    upload(r.part_buf, parts);
+    tri: []f32 = new f32[3 * VERTEX_FLOATS](0.0);
+    tri[0] = -1.0;
+    tri[1] = -1.0;
+    tri[VERTEX_FLOATS] = 3.0;
+    tri[VERTEX_FLOATS + 1] = -1.0;
+    tri[2 * VERTEX_FLOATS] = -1.0;
+    tri[2 * VERTEX_FLOATS + 1] = 3.0;
+    glBindBuffer(34962, r.sky_buf);
+    glBufferData(34962, 3 * VERTEX_FLOATS * 4, tri, 35044);
+    stex: []u32 = new u32[1](0u32);
+    glGenTextures(1, stex);
+    glBindTexture(3553, stex[0]);
+    glTexParameteri(3553, 10241, 9729);
+    glTexParameteri(3553, 10240, 9729);
+    glTexParameteri(3553, 34892, 34894);
+    glTexParameteri(3553, 34893, 515);
+    glTexParameteri(3553, 10242, 33071);
+    glTexParameteri(3553, 10243, 33071);
+    glTexImage2D(3553, 0, 33190, SHADOW_SIZE, SHADOW_SIZE, 0, 6402, 5125, null);
+    fbo: []u32 = new u32[1](0u32);
+    glGenFramebuffers(1, fbo);
+    glBindFramebuffer(36160, fbo[0]);
+    glFramebufferTexture2D(36160, 36096, 3553, stex[0], 0);
+    glDrawBuffer(0);
+    glReadBuffer(0);
+    if (glCheckFramebufferStatus(36160) != 36053) die("shadow framebuffer incomplete");
+    glBindFramebuffer(36160, 0u32);
+    r.shadow_tex = stex[0];
+    r.shadow_fbo = fbo[0];
+    glEnable(2929);
+    r
+}
+
+// Value noise for the shaders: a 64-cell lattice of random values over 256
+// texels, smoothly interpolated, wrapping, with its mipmaps so distant
+// detail does not shimmer.
+const NOISE_SIZE: int = 256;
+
+const NOISE_CELLS: int = 64;
+
+make_noise_texture(): u32 {
+    lattice: []f32 = new f32[NOISE_CELLS * NOISE_CELLS](0.0);
+    rng: int = 99991;
+    for i in 0..NOISE_CELLS * NOISE_CELLS {
+        rng = (rng * 1103515245 + 12345) % 2147483648;
+        if (rng < 0) rng = -rng;
+        lattice[i] = (rng / 65536 % 32768) as f32 / 32767.0
+    }
+    level: []i8 = new i8[NOISE_SIZE * NOISE_SIZE](0i8);
+    k: int = NOISE_SIZE / NOISE_CELLS;
+    for y in 0..NOISE_SIZE {
+        for x in 0..NOISE_SIZE {
+            cx: int = x / k;
+            cy: int = y / k;
+            fx: f32 = (x % k) as f32 / k as f32;
+            fy: f32 = (y % k) as f32 / k as f32;
+            fx = fx * fx * (3.0 - 2.0 * fx);
+            fy = fy * fy * (3.0 - 2.0 * fy);
+            x1: int = (cx + 1) % NOISE_CELLS;
+            y1: int = (cy + 1) % NOISE_CELLS;
+            a: f32 = lerpf(lattice[cy * NOISE_CELLS + cx], lattice[cy * NOISE_CELLS + x1],
+                fx);
+            b: f32 = lerpf(lattice[y1 * NOISE_CELLS + cx], lattice[y1 * NOISE_CELLS + x1],
+                fx);
+            level[y * NOISE_SIZE + x] = (lerpf(a, b, fy) * 255.0) as int trunc i8
+        }
+    }
+    tex: []u32 = new u32[1](0u32);
+    glGenTextures(1, tex);
+    glBindTexture(3553, tex[0]);
+    glPixelStorei(3317, 1);
+    glTexParameteri(3553, 10241, 9987);
+    glTexParameteri(3553, 10240, 9729);
+    glTexParameteri(3553, 10242, 10497);
+    glTexParameteri(3553, 10243, 10497);
+    size: int = NOISE_SIZE;
+    lod: int = 0;
+    next: []i8 = new i8[NOISE_SIZE * NOISE_SIZE / 4](0i8);
+    while (size >= 1) {
+        glTexImage2D(3553, lod, 6409, size, size, 0, 6409, 5121, level);
+        if (size > 1) {
+            half: int = size / 2;
+            for y in 0..half {
+                for x in 0..half {
+                    sum: int = byte_value(level[2 * y * size + 2 * x]) + byte_value(level[2 * y * size + 2 * x + 1]) + byte_value(level[(2 * y + 1) * size + 2 * x]) + byte_value(level[(2 * y + 1) * size + 2 * x + 1]);
+                    next[y * half + x] = (sum / 4) trunc i8
+                }
+            }
+            for i in 0..half * half level[i] = next[i]
+        }
+        size = size / 2;
+        lod = lod + 1
+    }
+    tex[0]
+}
+
+byte_value(b: i8): int {
+    v: int = b as int;
+    if (v < 0) v = v + 256;
+    v
+}
+
+// What a frame needs from the game.
+type View = {
+    eye: V3;
+    at: V3;
+    up: V3;
+    fovy: f32;
+    // How far up the picture moves, in screen heights times two (so that
+    // what the camera looks at sits above the middle).
+    shift: f32;
+    focus: V3;
+    time: f32
+}
+
+// ---- the light ----
+type Look = {
+    sun: V3;
+    sun_light: V3;
+    sky_up: V3;
+    sky_down: V3;
+    zenith: V3;
+    away: V3;
+    toward: V3;
+    glow: V3;
+    haze: f32;
+    haze_max: f32;
+    grade: V3;
+    sat: f32
+}
+
+const LOOK_UNIFORMS: int = 9;
+
+look_names: []str = ["look_zenith", "look_away", "look_toward", "look_glow", "look_sun",
+    "look_sky_up", "look_sky_down", "look_haze", "look_grade"];
+
+// The morning of the photographs: the sun (see site.l8 for which way is
+// north) 26 degrees up in the south-east, near white; a clear blue sky,
+// paler to the horizon; the light off the grey asphalt a little warm.
+look: Look = Look {
+    sun: v3(-0.284, 0.445, -0.849),
+    sun_light: v3(2.75, 2.62, 2.38),
+    sky_up: v3(0.36, 0.46, 0.68),
+    sky_down: v3(0.27, 0.26, 0.24),
+    zenith: v3(0.18, 0.38, 0.86),
+    away: v3(0.62, 0.76, 0.95),
+    toward: v3(0.86, 0.9, 0.95),
+    glow: v3(0.35, 0.33, 0.28),
+    haze: 0.0016,
+    haze_max: 0.5,
+    grade: v3(0.62, 0.62, 0.62),
+    sat: 1.04
+};
+
+set3(loc: int, v: V3) {
+    glUniform3f(loc, v.x, v.y, v.z)
+}
+
+// The look into program k's uniforms (k: 0 the world, 1 the sky).
+set_look(r: *Renderer, k: int) {
+    u: []int = r.u_look;
+    b: int = k * LOOK_UNIFORMS;
+    set3(u[b], look.zenith);
+    set3(u[b + 1], look.away);
+    set3(u[b + 2], look.toward);
+    set3(u[b + 3], look.glow);
+    set3(u[b + 4], look.sun_light);
+    set3(u[b + 5], look.sky_up);
+    set3(u[b + 6], look.sky_down);
+    glUniform2f(u[b + 7], look.haze, look.haze_max);
+    glUniform4f(u[b + 8], look.grade.x, look.grade.y, look.grade.z, look.sat)
+}
+
+view_m: []f32 = new f32[16](0.0);
+
+proj_m: []f32 = new f32[16](0.0);
+
+vp_m: []f32 = new f32[16](0.0);
+
+light_view: []f32 = new f32[16](0.0);
+
+light_proj: []f32 = new f32[16](0.0);
+
+light_vp: []f32 = new f32[16](0.0);
+
+mvp_m: []f32 = new f32[16](0.0);
+
+ident_m: []f32 = new f32[16](0.0);
+
+part_tmp: []f32 = new f32[16](0.0);
+
+// The sun's view: an orthographic box around the focus, moved in whole
+// shadow texels so shadows do not crawl as it follows.
+fit_shadow(focus: V3) {
+    sun: V3 = v_norm(look.sun);
+    mat_look(light_view, v_scale(sun, 200.0), v3(0.0, 0.0, 0.0), v3(0.0, 1.0, 0.0));
+    c: V3 = mat_point(light_view, focus);
+    texel: f32 = 2.0 * SHADOW_HALF / SHADOW_SIZE as f32;
+    cx: f32 = floorf(c.x / texel) * texel;
+    cy: f32 = floorf(c.y / texel) * texel;
+    mat_ortho(light_proj, cx - SHADOW_HALF, cx + SHADOW_HALF, cy - SHADOW_HALF, cy + SHADOW_HALF,
+        -c.z - 120.0, -c.z + 120.0);
+    mat_mul(light_vp, light_proj, light_view)
+}
+
+draw_scene(r: *Renderer, view: View, shadows: bool) {
+    mat_identity(ident_m);
+    fit_shadow(view.focus);
+    glBindFramebuffer(36160, r.shadow_fbo);
+    glViewport(0, 0, SHADOW_SIZE, SHADOW_SIZE);
+    glClear(256);
+    if (shadows) {
+        glUseProgram(r.shadow);
+        glEnable(32823);
+        glPolygonOffset(1.5, 2.0);
+        mat_mul(mvp_m, light_vp, ident_m);
+        glUniformMatrix4fv(r.u_smvp, 1, 0, mvp_m);
+        bind_vertices(r.world_buf);
+        glDrawArrays(4, 0, r.world_n);
+        bind_vertices(r.part_buf);
+        for i in 0..ndraw {
+            for k in 0..16 part_tmp[k] = draw_m[i * 16 + k];
+            mat_mul(mvp_m, light_vp, part_tmp);
+            glUniformMatrix4fv(r.u_smvp, 1, 0, mvp_m);
+            glDrawArrays(4, part_first[draw_part[i]], part_count[draw_part[i]])
+        }
+        glDisable(32823)
+    }
+    glBindFramebuffer(36160, 0u32);
+    glViewport(0, 0, screen_w, screen_h);
+    glClear(16640);
+    aspect: f32 = screen_w as f32 / screen_h as f32;
+    mat_persp(proj_m, view.fovy, aspect, 0.1, 2500.0);
+    proj_m[9] = -view.shift;
+    mat_look(view_m, view.eye, view.at, view.up);
+    mat_mul(vp_m, proj_m, view_m);
+    sun: V3 = v_norm(look.sun);
+    glDepthMask(0);
+    glDisable(2929);
+    glUseProgram(r.sky);
+    f: V3 = v_norm(v_sub(view.at, view.eye));
+    rt: V3 = v_norm(v_cross(f, view.up));
+    up: V3 = v_cross(rt, f);
+    glUniform3f(r.u_cam_f, f.x, f.y, f.z);
+    glUniform3f(r.u_cam_r, rt.x, rt.y, rt.z);
+    glUniform3f(r.u_cam_u, up.x, up.y, up.z);
+    th: f32 = sinf(view.fovy * 0.5) / cosf(view.fovy * 0.5);
+    glUniform2f(r.u_tan, th * aspect, th);
+    glUniform3f(r.u_sky_sun, sun.x, sun.y, sun.z);
+    glUniform1f(r.u_time, view.time);
+    set_look(r, 1);
+    glActiveTexture(33985);
+    glBindTexture(3553, r.noise_tex);
+    glUniform1i(r.u_sky_noise, 1);
+    bind_vertices(r.sky_buf);
+    glDrawArrays(4, 0, 3);
+    glDepthMask(1);
+    glEnable(2929);
+    glUseProgram(r.world);
+    set_look(r, 0);
+    glUniformMatrix4fv(r.u_vp, 1, 0, vp_m);
+    glUniformMatrix4fv(r.u_light, 1, 0, light_vp);
+    glUniform3f(r.u_sun, sun.x, sun.y, sun.z);
+    glUniform3f(r.u_world_sky_sun, sun.x, sun.y, sun.z);
+    glUniform3f(r.u_cam, view.eye.x, view.eye.y, view.eye.z);
+    glUniform1f(r.u_texel, 1.0 / SHADOW_SIZE as f32);
+    glUniform3f(r.u_blob, view.focus.x, view.focus.y, view.focus.z);
+    glActiveTexture(33984);
+    glBindTexture(3553, r.shadow_tex);
+    glUniform1i(r.u_shadow_map, 0);
+    glUniform1i(r.u_world_noise, 1);
+    glUniformMatrix4fv(r.u_model, 1, 0, ident_m);
+    bind_vertices(r.world_buf);
+    glDrawArrays(4, 0, r.world_n);
+    bind_vertices(r.part_buf);
+    for i in 0..ndraw {
+        glUniformMatrix4fv(r.u_model, 1, 0, &draw_m[i * 16]);
+        glDrawArrays(4, part_first[draw_part[i]], part_count[draw_part[i]])
+    }
+}
+
+// The trick feed over the scene: each run of text with a soft shadow.
+draw_hud(r: *Renderer) {
+    build_hud(screen_w);
+    if (hud_n == 0) return;
+    glDisable(2929);
+    glEnable(3042);
+    glBlendFunc(770, 771);
+    glUseProgram(r.hud);
+    glUniform2f(r.u_hud_screen, screen_w as f32, screen_h as f32);
+    glBindBuffer(34962, r.hud_buf);
+    glBufferData(34962, hud_n * 4, hud_verts, 35048);
+    glDisableVertexAttribArray(1);
+    glDisableVertexAttribArray(2);
+    glDisableVertexAttribArray(3);
+    glVertexAttribPointer(0, 2, 5126, 0, 8, 0);
+    for i in 0..nruns {
+        a: f32 = run_rgba[i * 4 + 3];
+        // A soft shadow below, and a fine dark edge to keep its pixels
+        // crisp.
+        glUniform2f(r.u_hud_offset, hud_px * 0.8, hud_px * 0.8);
+        glUniform4f(r.u_hud_color, 0.0, 0.0, 0.02, 0.4 * a);
+        glDrawArrays(4, run_first[i], run_count[i]);
+        o: f32 = maxf(1.0, hud_px * 0.4);
+        glUniform4f(r.u_hud_color, 0.03, 0.03, 0.05, 0.6 * a);
+        for k in 0..4 {
+            t: f32 = TAU * k as f32 / 4.0;
+            glUniform2f(r.u_hud_offset, cosf(t) * o, sinf(t) * o);
+            glDrawArrays(4, run_first[i], run_count[i])
+        }
+        glUniform2f(r.u_hud_offset, 0.0, 0.0);
+        glUniform4f(r.u_hud_color, run_rgba[i * 4], run_rgba[i * 4 + 1], run_rgba[i * 4 + 2],
+            a);
+        glDrawArrays(4, run_first[i], run_count[i])
+    }
+    glEnableVertexAttribArray(1);
+    glEnableVertexAttribArray(2);
+    glEnableVertexAttribArray(3);
+    glDisable(3042);
+    glEnable(2929)
+}

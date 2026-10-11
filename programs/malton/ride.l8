@@ -1,0 +1,876 @@
+tag malton;
+
+use_tag skate;
+
+// Riding: the board as a point on the park's surfaces, by the physics of
+// a real one.
+//
+// - On a surface he rolls as a ball would on it, with nothing pushing him
+//   across his way: gravity along the surface speeds or slows him, and
+//   turns him downhill when he rides across a slope (his balance does it,
+//   leaning the trucks). Rolling resistance (more on rough asphalt than on
+//   Skatelite) and the air hold him back.
+// - He leans to carve: tighter when slow, never more than his grip holds.
+//   Nearly stopped, he pivots on his back wheels (a kickturn).
+// - On the flat he pushes, a kick at a time; on a transition he pumps:
+//   crouched going in, standing tall through it, and the work his legs do
+//   against its bend speeds him up.
+// - He goes where the surface goes until it bends away from him faster
+//   than he can follow (a lip, a coping): then he flies, and lands where
+//   he comes down, keeping what of his speed lies along the surface there.
+//   Straight up a vert wall, he flies straight up and comes back down it.
+// - The trick pad, as in the skate game: held, he crouches, and the trick
+//   is aimed (flips forward or back, half turns either way); let go, he
+//   ollies into it. He turns as fast as he must to finish it just before
+//   he lands, but no faster than he can: too big for the air, he lands it
+//   sketchy, and it scores nothing (see judge.l8). Pressed in the air, the
+//   pad grabs. Off a lip or a coping a moment late, it still pops.
+// - An ollie: crouched, then popped up off the surface; the longer the
+//   crouch (to a point), the higher. Filmed (Wikimedia Commons, "Ollie
+//   1.ogv", CC BY-SA 3.0), a quick ollie on the flat leaves the ground at
+//   frame 31 and lands at frame 41 of 24 a second: 0.44 s in the air, a
+//   pop of 2.15 m/s; a big one, half again.
+// - Coming down on a rail, a coping, or a box's edge, along it, he grinds.
+const G: f32 = 9.81;
+
+// Physics steps at 120 Hz.
+const STEP_DT: f32 = 0.008333334;
+
+// Rolling resistance on asphalt and on Skatelite, as a fraction of his
+// weight; the air's drag, per speed squared (a crouched rider, 70 kg).
+const CRR_ASPHALT: f32 = 0.022;
+
+const CRR_RAMP: f32 = 0.009;
+
+const CRR_GRASS: f32 = 0.3;
+
+const AIR_K: f32 = 0.004;
+
+// The tightest he carves (1 / radius), and the most sideways pull his
+// wheels hold, as a fraction of g.
+const CARVE_MAX: f32 = 0.9;
+
+const GRIP: f32 = 0.6;
+
+// Slower than this, he kickturns rather than carves; how fast.
+const KICK_SPEED: f32 = 1.2;
+
+const KICK_RATE: f32 = 4.5;
+
+// A push: how much it adds, how often, and up to what speed.
+const PUSH_DV: f32 = 0.9;
+
+const PUSH_EVERY: f32 = 0.55;
+
+const PUSH_MAX: f32 = 5.0;
+
+// Pumping: how far his middle rises standing up from a crouch.
+const PUMP_H: f32 = 0.3;
+
+// An ollie's pop, quick and fully loaded.
+const POP_MIN: f32 = 2.15;
+
+const POP_MAX: f32 = 3.0;
+
+const LOAD_TIME: f32 = 0.3;
+
+// The most he turns in the air, flipping and spinning (radians a second),
+// and the least; how much of the air is left after a trick; how far off a
+// whole turn still lands; a grab slowing him; and how late off a lip the
+// pad still pops.
+const FLIP_MAX: f32 = 13.0;
+
+const SPIN_MAX: f32 = 16.0;
+
+const FLIP_MIN: f32 = 6.0;
+
+const SPIN_MIN: f32 = 8.0;
+
+const FIT_MARGIN: f32 = 0.15;
+
+const LAND_TOL: f32 = 0.55;
+
+const GRAB_SLOW: f32 = 0.7;
+
+const LATE_OLLIE: f32 = 0.15;
+
+// Grinding scores this much a second.
+const GRIND_POINTS: f32 = 150.0;
+
+// He pushes himself up to this on the flat.
+const CRUISE: f32 = 4.0;
+
+// Grinding: friction along the edge, as a fraction of his weight.
+const GRIND_MU: f32 = 0.18;
+
+// For the guy's pose (see pose.l8).
+const TURN_RATE: f32 = 4.0;
+
+const RIDE: int = 0;
+
+const AIR: int = 1;
+
+const GRIND: int = 2;
+
+const BAIL: int = 3;
+
+type Mover = {
+    mode: int;
+    p: V3;
+    v: V3;
+    // The surface's normal under him (in the air, which way his board's
+    // up), and the way its nose points.
+    n: V3;
+    board: V3;
+    // As the guy's pose reads them.
+    x: f32;
+    y: f32;
+    z: f32;
+    prev: V3;
+    vx: f32;
+    vz: f32;
+    heading: f32;
+    speed: f32;
+    turn_rate: f32;
+    air: bool;
+    grinding: bool;
+    since_hop: f32;
+    grab_t: f32;
+    land: f32;
+    bonk: f32;
+    spin: f32;
+    flip: f32;
+    fakie: bool;
+    ground_n: V3;
+    fwd: V3;
+    sketch_t: f32;
+    winding: bool;
+    wind_x: f32;
+    wind_y: f32;
+    // Crouched for an ollie, and for how long; how crouched (0 to 1), for
+    // pumping; since the last push.
+    loading: bool;
+    load_t: f32;
+    crouch: f32;
+    push_t: f32;
+    // How the surface under him bends, along his way (1 / radius; more
+    // than 0 where it bends up toward him).
+    bend: f32;
+    // In the air: how long, how high above where he left, the board's way
+    // when he left, his spin so far and how fast it turns.
+    air_t: f32;
+    air_y0: f32;
+    air_top: f32;
+    air_board: V3;
+    spin_w: f32;
+    ollied: bool;
+    // Grinding: which edge, how far along it, and how fast (signed).
+    grind: int;
+    grind_s: f32;
+    grind_v: f32;
+    grind_t: f32;
+    // Fallen: since when; and where he last stood still, to start over.
+    bail_t: f32;
+    safe_p: V3;
+    safe_board: V3;
+    safe_t: f32;
+    // Rolling resistance where he is.
+    crr: f32;
+    // The trick pad: held last step; pressed in the air (a grab); the trick
+    // aimed and the one under way (goals and rates); what he flew off (its
+    // kind, or -1) and whether he was riding switch; the triangle he rides.
+    pad_was: bool;
+    pad_grab: bool;
+    aim_flips: int;
+    aim_halves: int;
+    flip_goal: f32;
+    flip_w: f32;
+    spin_goal: f32;
+    air_item: int;
+    air_switch: bool;
+    tri: int;
+    // Let go of the pad up a steep wall: the trick waits for the lip.
+    pending: bool
+}
+
+new_mover(p: V3, board: V3): *Mover@new {
+    m: *Mover = new Mover {
+        mode: RIDE,
+        p: p,
+        v: v3(0.0, 0.0, 0.0),
+        n: v3(0.0, 1.0, 0.0),
+        board: board,
+        x: p.x,
+        y: p.y,
+        z: p.z,
+        prev: p,
+        vx: 0.0,
+        vz: 0.0,
+        heading: dir_yaw(board),
+        speed: 0.0,
+        turn_rate: 0.0,
+        air: false,
+        grinding: false,
+        since_hop: 10.0,
+        grab_t: 0.0,
+        land: 0.0,
+        bonk: 0.0,
+        spin: 0.0,
+        flip: 0.0,
+        fakie: false,
+        ground_n: v3(0.0, 1.0, 0.0),
+        fwd: board,
+        sketch_t: 10.0,
+        winding: false,
+        wind_x: 0.0,
+        wind_y: 0.0,
+        loading: false,
+        load_t: 0.0,
+        crouch: 0.0,
+        push_t: 10.0,
+        bend: 0.0,
+        air_t: 0.0,
+        air_y0: 0.0,
+        air_top: 0.0,
+        air_board: board,
+        spin_w: 0.0,
+        ollied: false,
+        grind: -1,
+        grind_s: 0.0,
+        grind_v: 0.0,
+        grind_t: 0.0,
+        bail_t: 0.0,
+        safe_p: p,
+        safe_board: board,
+        safe_t: 0.0,
+        crr: CRR_ASPHALT,
+        pad_was: false,
+        pad_grab: false,
+        aim_flips: 0,
+        aim_halves: 0,
+        flip_goal: 0.0,
+        flip_w: 0.0,
+        spin_goal: 0.0,
+        air_item: -1,
+        air_switch: false,
+        tri: -1,
+        pending: false
+    };
+    m
+}
+
+// What he is told, each step: how far he leans (-1 left to 1 right),
+// whether he pushes or crouches (to pump), whether the trick pad is held,
+// and the trick it aims at.
+type Input = {
+    steer: f32;
+    push: bool;
+    crouch: bool;
+    pad: bool;
+    aim_flips: int;
+    aim_halves: int
+}
+
+no_input(): Input {
+    Input {
+        steer: 0.0,
+        push: false,
+        crouch: false,
+        pad: false,
+        aim_flips: 0,
+        aim_halves: 0
+    }
+}
+
+// Start over where he last stood, still.
+respawn(m: *Mover) {
+    m.mode = RIDE;
+    m.p = m.safe_p;
+    m.prev = m.p;
+    m.v = v3(0.0, 0.0, 0.0);
+    m.n = v3(0.0, 1.0, 0.0);
+    m.board = m.safe_board;
+    m.fakie = false;
+    m.spin = 0.0;
+    m.spin_w = 0.0;
+    m.loading = false;
+    m.crouch = 0.0;
+    m.grind = -1;
+    sync_pose(m)
+}
+
+step_rider(m: *Mover, inp: Input, dt: f32) {
+    m.prev = m.p;
+    m.since_hop = m.since_hop + dt;
+    m.sketch_t = m.sketch_t + dt;
+    m.push_t = m.push_t + dt;
+    if (m.mode == BAIL) {
+        step_bail(m, dt);
+        sync_pose(m);
+        return
+    }
+    // The pad: pressed on a surface, he crouches, aiming; in the air, he
+    // grabs. Let go of the crouch, he goes.
+    pressed: bool = inp.pad && !m.pad_was;
+    released: bool = !inp.pad && m.pad_was;
+    m.pad_was = inp.pad;
+    if (pressed) {
+        m.pad_grab = m.mode == AIR;
+        if (!m.pad_grab) {
+            m.loading = true;
+            m.load_t = 0.0
+        }
+    }
+    if (m.loading) {
+        m.load_t = m.load_t + dt;
+        m.aim_flips = clampi(inp.aim_flips, -3, 3);
+        m.aim_halves = clampi(inp.aim_halves, -6, 6)
+    }
+    if (released) {
+        if (m.pad_grab) m.pad_grab = false else if (m.loading) {
+            m.loading = false;
+            release_trick(m)
+        }
+    }
+    if (m.mode == RIDE) step_ground(m, inp, dt) else if (m.mode == AIR) step_air(m,
+        inp, dt) else if (m.mode == GRIND) step_grind(m, dt);
+    sync_pose(m)
+}
+
+// ---- on a surface ----
+step_ground(m: *Mover, inp: Input, dt: f32) {
+    n: V3 = m.n;
+    v: V3 = m.v;
+    speed: f32 = v_len(v);
+    way: V3 = m.board;
+    if (m.fakie) way = v_scale(way, -1.0);
+    if (speed > 0.05) way = v_scale(v, 1.0 / speed);
+    right: V3 = v_norm(v_cross(way, n));
+    gv: V3 = v3(0.0, -G, 0.0);
+    // Gravity along the surface; rolling and the air against him.
+    a: V3 = v_reject(gv, n);
+    weight: f32 = maxf(G * n.y + speed * speed * maxf(m.bend, 0.0), 0.0);
+    if (speed > 0.02) a = v_madd(a, way, -(m.crr * weight + AIR_K * speed * speed));
+    // Carving: a lean to a side, as tight as his grip and the trucks allow.
+    m.turn_rate = 0.0;
+    if (speed > KICK_SPEED) {
+        k: f32 = inp.steer * minf(CARVE_MAX, GRIP * G / (speed * speed));
+        a = v_madd(a, right, k * speed * speed);
+        m.turn_rate = -k * speed
+    } else if (inp.steer != 0.0) {
+        // A kickturn: he pivots, the board and his way with it.
+        ang: f32 = -inp.steer * KICK_RATE * dt;
+        v = v_rotate(v, n, ang);
+        m.board = v_rotate(m.board, n, ang);
+        m.turn_rate = ang / dt
+    }
+    // Pushing, on the flat: to a cruise, or harder while told.
+    top: f32 = CRUISE;
+    if (inp.push) top = PUSH_MAX;
+    if (n.y > 0.94 && m.push_t > PUSH_EVERY && speed < top && !m.loading && !inp.crouch && m.crr < CRR_GRASS) {
+        dir: V3 = m.board;
+        if (m.fakie) dir = v_scale(dir, -1.0);
+        v = v_madd(v, dir, PUSH_DV);
+        m.push_t = 0.0
+    }
+    // Pumping: standing up through a bend that rises toward him.
+    want: f32 = 0.0;
+    if (inp.crouch || m.loading) want = 1.0;
+    c0: f32 = m.crouch;
+    m.crouch = approachf(m.crouch, want, 5.0 * dt);
+    rise: f32 = c0 - m.crouch;
+    if (rise > 0.0 && m.bend > 0.0) v = v_scale(v, 1.0 + m.bend * PUMP_H * rise);
+    v = v_madd(v, a, dt);
+    v = v_reject(v, n);
+    p: V3 = v_madd(m.p, v, dt);
+    // Into something solid: a wall, a box's side.
+    // (Only one he came through this step, from in front of it.)
+    if (surf_inside(p, 0.25) >= 0 && v_dot(hit_n, n) < 0.6 && v_dot(v_sub(m.p, hit_p),
+        hit_n) > -0.002) {
+        wn: V3 = hit_n;
+        into: f32 = v_dot(v, wn);
+        if (into < 0.0) {
+            v = v_madd(v, wn, -into * 1.3);
+            m.bonk = -into
+        }
+        p = v_madd(hit_p, wn, 0.003)
+    }
+    // Still on a surface? The nearest he can ride, facing near his
+    // surface's way.
+    t: int = surf_nearest(p, 0.45, n, 0.6);
+    if (t >= 0) m.tri = t;
+    if (t < 0) {
+        m.p = p;
+        m.v = v;
+        take_off(m);
+        return
+    }
+    above: f32 = v_dot(v_sub(p, hit_p), hit_n);
+    allow: f32 = 0.5 * maxf(G * hit_n.y, 0.0) * dt * dt + 0.008;
+    // Off the surface: out from it, or past its edge (as up past a vert
+    // wall's top).
+    if (above > allow || above > -0.005 && !hit_inside) {
+        // Slow over an edge the surface falls away from (a coping, into a
+        // ramp), his wheels roll him over it, nose down: dropping in.
+        if (speed < 3.0 && roll_over(m, p, v)) return;
+        m.p = p;
+        m.v = v;
+        take_off(m);
+        return
+    }
+    sp: f32 = v_len(v);
+    nn: V3 = hit_n;
+    // How the surface bent from the last step to this.
+    if (sp > 0.2) {
+        dn: V3 = v_sub(nn, n);
+        b: f32 = v_len(dn) / (sp * dt);
+        if (v_dot(dn, v) > 0.0) b = -b;
+        m.bend = lerpf(m.bend, b, 0.5)
+    } else m.bend = 0.0;
+    m.crr = CRR_RAMP;
+    if (nn.y > 0.995 && hit_p.y < 0.01) m.crr = CRR_ASPHALT;
+    if (nn.y > 0.995 && hit_p.y < -0.01) m.crr = CRR_GRASS;
+    vt: V3 = v_reject(v, nn);
+    if (v_len(vt) > 0.0001) v = v_scale(vt, sp / v_len(vt));
+    m.p = hit_p;
+    m.v = v;
+    m.n = nn;
+    // Back down off the wall without reaching its lip, the trick is off.
+    if (m.pending && (nn.y > 0.8 || v.y < 0.0)) m.pending = false;
+    // The board along his way, nose or tail first.
+    m.board = v_norm(v_reject(m.board, nn));
+    if (sp > 0.1) {
+        if (v_dot(v, m.board) >= 0.0) {
+            m.board = v_scale(v, 1.0 / sp);
+            m.fakie = false
+        } else {
+            m.board = v_scale(v, -1.0 / sp);
+            m.fakie = true
+        }
+    }
+    // Where to start over: still, on the flat.
+    if (nn.y > 0.99 && sp < 6.0) {
+        m.safe_t = m.safe_t + dt;
+        if (m.safe_t > 0.5) {
+            m.safe_p = m.p;
+            m.safe_board = v_norm(v3(m.board.x, 0.0, m.board.z))
+        }
+    } else m.safe_t = 0.0
+}
+
+// Over the edge onto the surface below and beyond it, if there is one
+// close, falling away along his way: on it, his speed turned down it.
+roll_over(m: *Mover, p: V3, v: V3): bool {
+    if (surf_nearest(p, 0.3, m.n, -0.2) < 0 || !hit_inside) return false;
+    vt: V3 = v_reject(v, hit_n);
+    // Off the top of a vert wall, square to it: straight down it.
+    if (v_len(vt) < 0.05) vt = v_reject(v3(0.0, -1.0, 0.0), hit_n);
+    if (v_len(vt) < 0.05) return false;
+    t: V3 = v_norm(vt);
+    if (t.y > -0.05) return false;
+    m.p = hit_p;
+    m.v = v_scale(t, v_len(v));
+    m.n = hit_n;
+    true
+}
+
+approachf(a: f32, b: f32, step: f32): f32 {
+    if (a < b) return minf(a + step, b);
+    maxf(a - step, b)
+}
+
+// Off the surface, as he was going; up off a vert wall, a little back in.
+take_off(m: *Mover) {
+    if (m.n.y < 0.3) m.v = v_madd(m.v, m.n, 0.2);
+    from_grind: bool = m.mode == GRIND;
+    m.mode = AIR;
+    m.air_t = 0.0;
+    m.air_y0 = m.p.y;
+    m.air_top = m.p.y;
+    m.air_board = m.board;
+    m.spin = 0.0;
+    m.spin_w = 0.0;
+    m.flip = 0.0;
+    m.flip_w = 0.0;
+    m.flip_goal = 0.0;
+    m.spin_goal = 0.0;
+    m.grab_t = 0.0;
+    m.pad_grab = false;
+    m.ollied = false;
+    m.air_switch = m.fakie;
+    m.air_item = -1;
+    if (!from_grind && m.tri >= 0) m.air_item = tri_item[m.tri];
+    if (m.pending) {
+        m.pending = false;
+        m.ollied = true;
+        m.since_hop = 0.0;
+        start_trick(m, m.aim_flips, m.aim_halves)
+    }
+}
+
+// An ollie (or off a grind): up off the surface, harder for a longer
+// crouch.
+pop(m: *Mover) {
+    k: f32 = clampf((m.load_t - 0.06) / LOAD_TIME, 0.0, 1.0);
+    speed: f32 = POP_MIN + (POP_MAX - POP_MIN) * k;
+    up: V3 = m.n;
+    if (m.mode == GRIND) {
+        up = v3(0.0, 1.0, 0.0);
+        m.grind = -1
+    }
+    m.v = v_madd(m.v, up, speed);
+    m.p = v_madd(m.p, m.n, 0.01);
+    m.mode = AIR;
+    take_off(m);
+    m.ollied = true;
+    m.since_hop = 0.0;
+    m.crouch = 0.0
+}
+
+// ---- in the air ----
+step_air(m: *Mover, inp: Input, dt: f32) {
+    m.air_t = m.air_t + dt;
+    v: V3 = m.v;
+    sp: f32 = v_len(v);
+    v = v_add(v, v3(0.0, -G * dt, 0.0));
+    v = v_madd(v, v, -AIR_K * sp * dt);
+    // The trick, turning toward its whole turns; slower grabbing.
+    slow: f32 = 1.0;
+    if (m.pad_grab && inp.pad) {
+        m.grab_t = m.grab_t + dt;
+        slow = GRAB_SLOW
+    }
+    m.flip = turn_toward(m.flip, m.flip_goal, m.flip_w * slow, dt);
+    m.spin = turn_toward(m.spin, m.spin_goal, m.spin_w * slow, dt);
+    // His board comes level as he flies.
+    m.n = v_norm(v_lerp(m.n, v3(0.0, 1.0, 0.0), ease(3.0, dt)));
+    p1: V3 = v_madd(m.p, v, dt);
+    m.air_top = maxf(m.air_top, p1.y);
+    if (v.y < 0.0 && try_grind(m, p1, v)) return;
+    t: int = surf_cross(m.p, p1);
+    // Just behind a surface he can ride (come through it between steps):
+    // on it.
+    if (t < 0 && surf_nearest(p1, 0.12, v3(0.0, 1.0, 0.0), -1.0) >= 0 && hit_inside && v_dot(v_sub(p1,
+        hit_p), hit_n) < -0.002 && v_dot(v, hit_n) < 0.0) t = ntris + 1;
+    if (t > ntris) {
+        m.p = hit_p;
+        m.v = v;
+        land(m, 0);
+        return
+    }
+    if (t >= 0) {
+        if (tri_ride[t]) {
+            m.v = v;
+            land(m, t);
+            return
+        }
+        // Into a wall: off it.
+        wn: V3 = hit_n;
+        into: f32 = v_dot(v, wn);
+        if (into < 0.0) v = v_madd(v, wn, -into * 1.4);
+        m.bonk = -into;
+        p1 = v_madd(hit_p, wn, 0.01)
+    }
+    m.p = p1;
+    m.v = v
+}
+
+// Down on a surface at hit_p: riding on. If he finished the trick he
+// went for, it scores (see judge.l8): stomped into a transition or down a
+// bank, clean on the flat. If not, it was sketchy: he rides away, but it
+// scores nothing.
+land(m: *Mover, t: int) {
+    n: V3 = hit_n;
+    vn: f32 = v_dot(m.v, n);
+    vt: V3 = v_reject(m.v, n);
+    sp: f32 = v_len(vt);
+    clean: bool = absf(m.flip_goal - m.flip) < LAND_TOL && absf(m.spin_goal - m.spin) < LAND_TOL;
+    // The board's way now: as it left, turned by his spin (whole half turns,
+    // if clean).
+    turned: f32 = m.spin;
+    if (clean) turned = m.spin_goal;
+    b: V3 = v_rotate(m.air_board, v3(0.0, 1.0, 0.0), turned);
+    b = v_reject(b, n);
+    if (v_len(b) < 0.1) b = v_reject(m.n, n);
+    b = v_norm(b);
+    // Sketchy, his wheels swing the board round to his way.
+    if (!clean && sp > 0.5) {
+        w: V3 = v_scale(vt, 1.0 / sp);
+        if (v_dot(w, b) >= 0.0) b = w else b = v_scale(w, -1.0)
+    }
+    m.p = hit_p;
+    m.n = n;
+    judge_landing(m, clean, n);
+    m.v = v_scale(vt, 1.0 - 0.08 * minf(1.0, -vn / 6.0));
+    m.board = b;
+    m.fakie = v_dot(m.v, b) < 0.0;
+    m.land = -vn;
+    m.mode = RIDE;
+    m.spin = 0.0;
+    m.spin_w = 0.0;
+    m.flip = 0.0;
+    m.flip_w = 0.0;
+    m.flip_goal = 0.0;
+    m.spin_goal = 0.0;
+    m.grab_t = 0.0;
+    m.pad_grab = false;
+    m.bend = 0.0
+}
+
+// What he did in the air, judged as he comes down (onto a surface, or a
+// rail).
+judge_landing(m: *Mover, clean: bool, n: V3) {
+    flips: int = floorf(m.flip_goal / TAU + 0.5) as int;
+    halves: int = floorf(m.spin_goal / PI + 0.5) as int;
+    kind: int = HIT_FLAT;
+    if (m.air_item >= 0) kind = HIT_AIR;
+    if (clean) {
+        landing: int = LAND_CLEAN;
+        if (n.y < 0.97) landing = LAND_STOMPED;
+        before: int = run.n;
+        // A spin to the right turns him clockwise, the negative way.
+        judge_air(kind, m.air_item, flips, -halves, m.grab_t / maxf(m.air_t, 0.01),
+            m.air_t, landing, m.air_switch);
+        if (run.n > before) call_hit(m)
+    } else {
+        judge_sketch(m.air_item, flips, -halves, false, m.air_switch);
+        m.sketch_t = 0.0;
+        feed_say("SKETCHY", 1.0, 0.45, 0.38)
+    }
+}
+
+turn_toward(
+    a: f32,
+    goal: f32,
+    w: f32,
+    dt: f32
+): f32 {
+    a + clampf(goal - a, -w * dt, w * dt)
+}
+
+// ---- tricks ----
+// Letting go of the pad: an ollie into the trick aimed at; off a rail, a
+// pop off it; just off a lip, a late pop; later in the air, the trick
+// alone, in what air is left.
+release_trick(m: *Mover) {
+    // Up a steep wall he does not ollie off it: he drives up it, and goes
+    // into the trick as he leaves its lip.
+    if (m.mode == RIDE && m.n.y < 0.7) {
+        along: V3 = v_reject(v3(0.0, 1.0, 0.0), m.n);
+        if (v_len(along) > 0.01 && v_dot(m.v, along) > 0.0) {
+            m.v = v_madd(m.v, v_norm(along), POP_MIN * 0.5);
+            m.pending = true;
+            return
+        }
+    }
+    if (m.mode == RIDE || m.mode == GRIND) pop(m) else if (m.mode == AIR && m.air_t < LATE_OLLIE && !m.ollied) {
+        m.v = v_add(m.v, v3(0.0, POP_MIN * 0.8, 0.0));
+        m.ollied = true;
+        m.since_hop = 0.0
+    }
+    if (m.mode == AIR) start_trick(m, m.aim_flips, m.aim_halves)
+}
+
+// Into the air with nf flips (forward) and nh half turns (to the right),
+// as fast as he must to finish them just before he lands, but no faster
+// than he can.
+start_trick(m: *Mover, nf: int, nh: int) {
+    air: f32 = fly_time(m.p, m.v);
+    t: f32 = maxf(air - FIT_MARGIN, 0.05);
+    fit: f32 = maxf(trick_fit(nf, nh, air), 1.0);
+    m.flip_goal = m.flip + nf as f32 * TAU;
+    m.flip_w = maxf(absi(nf) as f32 * TAU / t / fit, FLIP_MIN);
+    m.spin_goal = m.spin - nh as f32 * PI;
+    m.spin_w = maxf(absi(nh) as f32 * PI / t / fit, SPIN_MIN)
+}
+
+// How much of an air t long a trick needs, as a fraction of what he can
+// turn in it: over 1, it is too big.
+trick_fit(nf: int, nh: int, t: f32): f32 {
+    tt: f32 = t - FIT_MARGIN;
+    if (nf == 0 && nh == 0) return 0.0;
+    if (tt <= 0.05) return 9.99;
+    (absi(nf) as f32 * TAU / FLIP_MAX + absi(nh) as f32 * PI / SPIN_MAX) / tt
+}
+
+// How long an air a trick needs, at the least.
+trick_need(nf: int, nh: int): f32 {
+    if (nf == 0 && nh == 0) return 0.0;
+    absi(nf) as f32 * TAU / FLIP_MAX + absi(nh) as f32 * PI / SPIN_MAX + FIT_MARGIN
+}
+
+// How long he flies from p at v before he comes down on something he can
+// ride (or 3 s).
+fly_time(p0: V3, v0: V3): f32 {
+    h: f32 = 1.0 / 60.0;
+    p: V3 = p0;
+    v: V3 = v0;
+    t: f32 = 0.0;
+    k: int = 0;
+    while (k < 180) {
+        v.y = v.y - G * h;
+        p1: V3 = v_madd(p, v, h);
+        hit: int = surf_cross(p, p1);
+        t = t + h;
+        if (hit >= 0 && tri_ride[hit]) return t;
+        p = p1;
+        k = k + 1
+    }
+    t
+}
+
+// While he aims: how long he would fly letting go now, and off what.
+preview_air(m: *Mover): f32 {
+    if (m.mode == AIR) {
+        v: V3 = m.v;
+        if (m.air_t < LATE_OLLIE && !m.ollied) v = v_add(v, v3(0.0, POP_MIN * 0.8,
+            0.0));
+        return fly_time(m.p, v)
+    }
+    k: f32 = clampf((m.load_t - 0.06) / LOAD_TIME, 0.0, 1.0);
+    speed: f32 = POP_MIN + (POP_MAX - POP_MIN) * k;
+    up: V3 = m.n;
+    if (m.mode == GRIND) up = v3(0.0, 1.0, 0.0) else if (up.y < 0.7) {
+        // Up a wall: straight up off its lip, at what speed he will have
+        // there, and back down to it.
+        top: f32 = wall_top_left(m);
+        vy: f32 = sqrtf(maxf(m.v.y * m.v.y + POP_MIN * POP_MIN * 0.25 - 2.0 * G * top,
+            0.0));
+        return 2.0 * vy / G + 0.1
+    }
+    fly_time(v_madd(m.p, m.n, 0.01), v_madd(m.v, up, speed))
+}
+
+// How far up the wall he is on he has still to go to its lip: up past
+// him, the first point the surface ends.
+wall_top_left(m: *Mover): f32 {
+    p: V3 = m.p;
+    k: int = 0;
+    while (k < 40) {
+        q: V3 = v_add(p, v3(0.0, 0.1, 0.0));
+        if (surf_nearest(q, 0.3, m.n, 0.0) < 0 || !hit_inside) return q.y - m.p.y;
+        p = hit_p;
+        k = k + 1
+    }
+    4.0
+}
+
+// What he would fly off now: its kind, or -1.
+preview_item(m: *Mover): int {
+    if (m.mode == RIDE && m.tri >= 0) return tri_item[m.tri];
+    if (m.mode == AIR) return m.air_item;
+    -1
+}
+
+// ---- grinding ----
+// Coming down onto an edge, along it: on it.
+try_grind(m: *Mover, p1: V3, v: V3): bool {
+    vh: V3 = v3(v.x, 0.0, v.z);
+    vhl: f32 = v_len(vh);
+    if (vhl < 1.0) return false;
+    for i in 0..ngrinds {
+        a: V3 = v_madd(grind_a[i], v3(0.0, 1.0, 0.0), grind_lift[i]);
+        b: V3 = v_madd(grind_b[i], v3(0.0, 1.0, 0.0), grind_lift[i]);
+        d: V3 = v_sub(b, a);
+        len: f32 = v_len(d);
+        d = v_scale(d, 1.0 / len);
+        s: f32 = clampf(v_dot(v_sub(p1, a), d), 0.0, len);
+        c: V3 = v_madd(a, d, s);
+        off: V3 = v_sub(p1, c);
+        dh: V3 = v_norm(v3(d.x, 0.0, d.z));
+        along: f32 = v_dot(vh, dh) / vhl;
+        if (s > 0.05 && s < len - 0.05 && v_len(off) < 0.14 && m.p.y > c.y - 0.03 && absf(along) > 0.8) {
+            m.mode = GRIND;
+            m.grind = i;
+            m.grind_s = s;
+            m.grind_v = v_dot(v, d);
+            m.grind_t = 0.0;
+            m.p = c;
+            m.n = v3(0.0, 1.0, 0.0);
+            m.board = v_scale(d, signf(m.grind_v));
+            m.fakie = false;
+            // Whatever he did on the way down: done before he got on, or
+            // sketchy.
+            if (absf(m.flip_goal) > 0.1 || absf(m.spin_goal) > 0.1) judge_landing(m,
+                absf(m.flip_goal - m.flip) < LAND_TOL && absf(m.spin_goal - m.spin) < LAND_TOL,
+                v3(0.0, 1.0, 0.0));
+            m.flip = 0.0;
+            m.spin = 0.0;
+            m.flip_goal = 0.0;
+            m.spin_goal = 0.0;
+            m.land = maxf(-v.y, 0.0) * 0.5;
+            judge_grind(grind_lift[i] < 0.01, m.air_switch);
+            return true
+        }
+    }
+    false
+}
+
+step_grind(m: *Mover, dt: f32) {
+    i: int = m.grind;
+    a: V3 = v_madd(grind_a[i], v3(0.0, 1.0, 0.0), grind_lift[i]);
+    b: V3 = v_madd(grind_b[i], v3(0.0, 1.0, 0.0), grind_lift[i]);
+    d: V3 = v_sub(b, a);
+    len: f32 = v_len(d);
+    d = v_scale(d, 1.0 / len);
+    acc: f32 = -G * d.y - GRIND_MU * G * signf(m.grind_v);
+    v0: f32 = m.grind_v;
+    m.grind_v = m.grind_v + acc * dt;
+    // Friction stops him; it does not turn him round.
+    if (v0 * m.grind_v < 0.0 && absf(d.y) < 0.2) m.grind_v = 0.0;
+    m.grind_s = m.grind_s + m.grind_v * dt;
+    m.grind_t = m.grind_t + dt;
+    run_add(GRIND_POINTS * dt);
+    m.v = v_scale(d, m.grind_v);
+    m.p = v_madd(a, d, m.grind_s);
+    if (m.grind_s < 0.0 || m.grind_s > len || absf(m.grind_v) < 0.2) {
+        note_grind(m);
+        m.grind = -1;
+        // Off its end, or off its side to fall.
+        if (absf(m.grind_v) < 0.2) m.v = v_add(m.v, v3(0.0, 0.0, 0.0));
+        take_off(m)
+    }
+}
+
+// ---- falling ----
+fall(m: *Mover) {
+    m.mode = BAIL;
+    m.bail_t = 0.0;
+    m.sketch_t = 0.0;
+    m.loading = false;
+    m.grind = -1;
+    feed_say("BAIL", 1.0, 0.45, 0.38)
+}
+
+step_bail(m: *Mover, dt: f32) {
+    m.bail_t = m.bail_t + dt;
+    m.sketch_t = 0.0;
+    // He slides to a stop where he fell.
+    sp: f32 = v_len(m.v);
+    if (sp > 0.0) m.v = v_scale(m.v, maxf(sp - 7.0 * dt, 0.0) / sp);
+    p1: V3 = v_madd(m.p, v3(m.v.x, 0.0, m.v.z), dt);
+    if (surf_nearest(p1, 0.6, v3(0.0, 1.0, 0.0), 0.5) >= 0) m.p = hit_p else m.p = p1;
+    if (m.bail_t > 1.6) respawn(m)
+}
+
+// ---- for the pose ----
+sync_pose(m: *Mover) {
+    m.x = m.p.x;
+    m.y = m.p.y;
+    m.z = m.p.z;
+    m.vx = m.v.x;
+    m.vz = m.v.z;
+    m.speed = v_len(m.v);
+    m.air = m.mode == AIR;
+    m.grinding = m.mode == GRIND;
+    m.ground_n = m.n;
+    m.winding = m.loading || m.crouch > 0.5;
+    m.wind_x = 0.0;
+    m.wind_y = 0.0;
+    if (m.loading) {
+        m.wind_x = clampf(m.aim_halves as f32 * 0.5, -1.0, 1.0);
+        m.wind_y = clampf(m.aim_flips as f32, -1.0, 1.0)
+    }
+    if (m.mode == AIR) m.fwd = m.air_board else m.fwd = m.board;
+    m.heading = dir_yaw(m.fwd)
+}

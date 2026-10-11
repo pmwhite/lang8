@@ -59,10 +59,11 @@ export function translateShader(source, fragment) {
 
 // scale renders the window at that fraction of its size, and maxPixels caps
 // how many pixels it renders in all. env answers getenv.
-export function createPlatform(canvas, { log = console.log, checkErrors = false, countCalls = false, timing = false, gpuTiming = false, skip = new Set(), scale = 1, zoom = 0.85, env = {}, pointers = false, maxTall = 1.6, maxPixels = 1200 * 720 } = {}) {
+export function createPlatform(canvas, { log = console.log, checkErrors = false, countCalls = false, timing = false, gpuTiming = false, antialias = false, skip = new Set(), scale = 1, zoom = 0.85, env = {}, pointers = false, maxTall = 1.6, maxPixels = 1200 * 720 } = {}) {
   let mem = null;
   let instance = null;
-  const gl = canvas.getContext("webgl2", { antialias: false, depth: true, stencil: false, alpha: false });
+  // (antialias: edges smoothed, each pixel made of several samples.)
+  const gl = canvas.getContext("webgl2", { antialias, depth: true, stencil: false, alpha: false });
   if (!gl) throw new Error("This browser does not support WebGL2.");
   // Float render targets let the water solver run as fragment passes. Its
   // displacement target blends; without float blending it uses half floats.
@@ -192,10 +193,12 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
   const timerExt = gpuTiming ? gl.getExtension("EXT_disjoint_timer_query_webgl2") : null;
   // Draws to leave out, to measure what they cost: "fb44" or "prog3" for one
   // framebuffer or program, "offscreen" for every framebuffer but the
-  // window's, or "all".
+  // window's, "part:world" for a part of the frame that the game marks by
+  // that name ("part:" alone for what is in none), or "all".
+  let part = "";
   const skipped = () =>
     skip.size > 0 &&
-    (skip.has("all") || skip.has(`fb${boundFramebufferId}`) || skip.has(`prog${currentProgram}`) ||
+    (skip.has("all") || skip.has(`fb${boundFramebufferId}`) || skip.has(`prog${currentProgram}`) || skip.has(`part:${part}`) ||
       (boundFramebufferId !== 0 && skip.has("offscreen")));
   const changed = (l, ...values) => {
     if (l < 0n) return false;
@@ -401,13 +404,14 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
     // The game marks parts of a frame with debug groups; with timing, their
     // milliseconds go to the telemetry.
     glPushDebugGroup(_source, _id, length, message) {
-      if (!timing) return 0n;
       const key = Number(message);
       let label = phaseNames.get(key);
       if (label === undefined) {
         label = decoder.decode(bytes().subarray(key, key + n(length)));
         phaseNames.set(key, label);
       }
+      part = label;
+      if (!timing) return 0n;
       phaseStack.push(label, performance.now());
       if (gpuTiming && timerExt && !gpuQuery) {
         gpuQuery = { label, query: gl.createQuery() };
@@ -416,6 +420,7 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
       return 0n;
     },
     glPopDebugGroup() {
+      part = "";
       if (!timing || phaseStack.length < 2) return 0n;
       const t = phaseStack.pop();
       const label = phaseStack.pop();
@@ -487,6 +492,10 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
     glGenRenderbuffers: (count, ptr) => genObjects(count, ptr, () => gl.createRenderbuffer()),
     glBindRenderbuffer: (target, rb) => (gl.bindRenderbuffer(n(target), obj(rb)), 0n),
     glRenderbufferStorage: (target, internal, w, h) => (gl.renderbufferStorage(n(target), n(internal), n(w), n(h)), 0n),
+    // (As many samples as asked for, or as the device has.)
+    glRenderbufferStorageMultisample: (target, samples, internal, w, h) =>
+      (gl.renderbufferStorageMultisample(n(target), Math.min(n(samples), gl.getParameter(gl.MAX_SAMPLES)), n(internal), n(w), n(h)), 0n),
+    glBlitFramebuffer: (...args) => (gl.blitFramebuffer(...args.map(n)), 0n),
     glFramebufferRenderbuffer(target, attachment, rbtarget, rb) {
       gl.framebufferRenderbuffer(n(target), n(attachment), n(rbtarget), obj(rb));
       return 0n;
