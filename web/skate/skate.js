@@ -136,6 +136,7 @@ const trail = [];
 const sheetsChanged = () => {
   const open = Object.keys(sheets).find((id) => !sheets[id].hidden);
   document.body.classList.toggle("sheet", !!open);
+  document.body.classList.toggle("showing", open === "place");
   document.body.classList.toggle("canback", !!open && (trail.length > 1 || started));
   syncPreview();
 };
@@ -186,8 +187,8 @@ const goHome = () => {
   trail.length = 0;
   go("menu");
 };
-// A sheet is left by the button in the corner that goes back, a tap
-// outside it, or Escape.
+// A sheet is left by the button in the corner that goes back, or Escape
+// (not by a tap outside it, which is too easily made by mistake).
 const goBack = () => {
   // (From a replay: the game leaves it. See L8RIDE.)
   if (trail.length === 0 && document.body.classList.contains("replaying")) typeKeys([65288]);
@@ -195,7 +196,6 @@ const goBack = () => {
   trail.pop();
   present();
 };
-for (const el of Object.values(sheets)) onTap(el, goBack, (e) => e.target === el);
 onTap(document.querySelector(".back"), goBack);
 addEventListener("keydown", (e) => {
   if (e.key === "Escape") goBack();
@@ -304,7 +304,9 @@ let mySecret = stored("skate.me", null);
 // device too, so that they show at once the next time, before they are
 // fetched again (which nothing waits for).
 let account = mySecret ? stored("skate.account", null) : null;
-let gameVersion = 0;
+// The game's rules, by their number (see L8VERSION): as they were when it
+// last ran here, until it says.
+let gameVersion = stored("skate.rules", 0) || 0;
 let gameFs = null;
 const toast = (text) => {
   const el = document.getElementById("toast");
@@ -350,11 +352,13 @@ const loadMe = (fresh = true) => {
 };
 const loadScores = () => loadMe(false);
 // Their bests on a place (one each, best first), and their latest runs
-// there (newest first). (Runs under older rules than this game's are left
-// out: they are not ones to beat.)
+// there (newest first). A best under older rules than this game's is left
+// out, as it is not one to beat (the next run its rider posts takes its
+// place); the latest runs are a record of what was ridden, whatever the
+// rules were.
 const current = (run) => gameVersion === 0 || run.version >= gameVersion;
 const bestsOn = (id) => (account?.courses?.[id] ?? []).filter(current);
-const recentOn = (id) => (account?.recent?.[id] ?? []).filter(current);
+const recentOn = (id) => account?.recent?.[id] ?? [];
 const postable = (id) => (Math.abs(id) >= 1 && Math.abs(id) <= PLACES) || Math.abs(id) === today();
 // A run just finished, as the game wrote it: posted, to be logged, and
 // kept if it is his best there.
@@ -402,8 +406,8 @@ const gameSays = (line) => {
       for (const id of Object.keys(myRuns)) delete myRuns[id];
       store("skate.runs", myRuns);
       store("skate.rules", gameVersion);
-      showOpen();
     }
+    showOpen();
   }
   else if (words[0] === "L8LOAD") document.body.classList.toggle("loading", words[1] === "1");
   else if (words[0] === "L8OVER") document.body.classList.toggle("over", words[1] === "1");
@@ -490,7 +494,7 @@ const watchCell = (run, id) => (run.version === gameVersion ? [["watch", "▶", 
 // What those he sees have been riding, newest first.
 const feed = () =>
   Object.entries(account?.recent ?? {})
-    .flatMap(([course, list]) => list.filter(current).map((run) => ({ ...run, course: Number(course) })))
+    .flatMap(([course, list]) => list.map((run) => ({ ...run, course: Number(course) })))
     .sort((a, b) => b.at - a.at);
 // Someone's best on each place they have ridden: the day's first, then the
 // courses, the parks, and days gone by.
