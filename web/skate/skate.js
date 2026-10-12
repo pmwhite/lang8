@@ -955,6 +955,8 @@ async function main() {
     };
     place(steerPanel, STEER_LEFT, STEER_RIGHT);
     place(trickPanel, 1 - STEER_RIGHT, 1 - STEER_LEFT);
+    // (The tutorial's words sit just above the pads: see #teach .card.)
+    document.documentElement.style.setProperty("--pads-top", `${r.top + r.height * PANEL_TOP}px`);
   };
   new ResizeObserver(placePads).observe(canvas);
   addEventListener("resize", placePads);
