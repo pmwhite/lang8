@@ -263,6 +263,21 @@ const ago = (at) => {
 const DAILY_ZONE = "America/New_York";
 const today = (at = Date.now()) => Number(new Intl.DateTimeFormat("en-CA", { timeZone: DAILY_ZONE }).format(new Date(at)).replace(/-/g, ""));
 const isDaily = (id) => Math.abs(id) >= 20000101 && Math.abs(id) <= 29991231;
+// How long the day's places are open for: until midnight where the day is
+// kept (see DAILY_ZONE); and that, in words.
+const dayLeft = (at = Date.now()) => {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", { timeZone: DAILY_ZONE, hour: "numeric", minute: "numeric", second: "numeric", hourCycle: "h23" }).formatToParts(new Date(at)).map((p) => [p.type, p.value]));
+  return 86400000 - ((Number(parts.hour) * 60 + Number(parts.minute)) * 60 + Number(parts.second)) * 1000;
+};
+const leftText = (ms) => {
+  const m = Math.max(1, Math.ceil(ms / 60000));
+  return m >= 120 ? `${Math.floor(m / 60)} h ${m % 60} min` : m >= 60 ? `1 h ${m % 60} min` : `${m} min`;
+};
+// A day's place, as a number, some days ago.
+const dayAgo = (days) => today(Date.now() - days * 86400000);
+// The days gone by whose places may still be ridden and looked at (the
+// leaderboards keep a month of them).
+const PAST_DAYS = 7;
 const dayName = (id) => {
   const n = Math.abs(id);
   return new Date(Date.UTC(Math.floor(n / 10000), (Math.floor(n / 100) % 100) - 1, n % 100)).toLocaleDateString("en-GB", { timeZone: "UTC", day: "numeric", month: "short" });
@@ -502,7 +517,11 @@ const loadScores = () => loadMe(false);
 const current = (run) => gameVersion === 0 || run.version >= gameVersion;
 const bestsOn = (id) => (account?.courses?.[id] ?? []).filter(current);
 const recentOn = (id) => account?.recent?.[id] ?? [];
-const postable = (id) => (Math.abs(id) >= 1 && Math.abs(id) <= PLACES) || Math.abs(id) === today() || (isBigAir(id) && id - BIG_AIR <= PLACES);
+// A place the leaderboards keep scores of (so there is a board to see);
+// and one a run may be posted to now: a day's place only on its day, as
+// everyone has the same day to ride it in.
+const boarded = (id) => (Math.abs(id) >= 1 && Math.abs(id) <= PLACES) || (isDaily(id) && Math.abs(id) <= today() && Math.abs(id) >= dayAgo(30)) || (isBigAir(id) && id - BIG_AIR <= PLACES);
+const postable = (id) => boarded(id) && (!isDaily(id) || Math.abs(id) === today());
 // A run just finished, as the game wrote it: posted, to be logged, and
 // kept if it is his best there.
 const postRun = async (version, id, score, replay) => {
@@ -784,9 +803,33 @@ const showPlaces = () => {
     onTap(div, () => go("place", id || randomPlace(kind)));
     grid.append(div);
   };
-  card(`Daily ${kind === "parks" ? "park" : "slopestyle"}`, kind === "parks" ? -today() : today(), true);
-  for (let n = 1; n <= PLACES; n++) card(placeName(kind === "parks" ? -n : n), kind === "parks" ? -n : n);
+  const sign = kind === "parks" ? -1 : 1;
+  card(`Daily ${kind === "parks" ? "park" : "slopestyle"}`, sign * today(), true);
+  const daily = grid.lastChild;
+  const left = document.createElement("i");
+  daily.append(left);
+  // (And the days gone by: their boards stand, but a run on them is not
+  // posted, the day being over.)
+  const days = document.createElement("div");
+  days.className = "days";
+  const label = document.createElement("span");
+  label.textContent = "Past days";
+  days.append(label);
+  for (let k = 1; k <= PAST_DAYS; k++) {
+    const id = sign * dayAgo(k);
+    const chip = document.createElement("span");
+    chip.className = "day";
+    chip.textContent = dayName(id);
+    onTap(chip, () => go("place", id));
+    days.append(chip);
+  }
+  grid.append(days);
+  for (let n = 1; n <= PLACES; n++) card(placeName(sign * n), sign * n);
   card("Random", 0);
+  const tick = () => (left.textContent = `${leftText(dayLeft())} left`);
+  tick();
+  clearInterval(showPlaces.timer);
+  showPlaces.timer = setInterval(() => (el.hidden ? clearInterval(showPlaces.timer) : tick()), 15000);
 };
 
 // A place, before he rides it. The game goes there and shows it off behind
@@ -803,8 +846,18 @@ const showPlace = () => {
   const el = sheets.place;
   const id = placeOf;
   el.querySelector("h2").textContent = placeName(id);
+  // A day's place: how long it is open for, or that it is over.
+  const note = el.querySelector(".note");
+  const tick = () => {
+    if (!isDaily(id)) note.textContent = "";
+    else if (Math.abs(id) === today()) note.textContent = `Open for ${leftText(dayLeft())} more`;
+    else note.textContent = "This day is over: runs here are not posted";
+  };
+  tick();
+  clearInterval(showPlace.timer);
+  if (isDaily(id)) showPlace.timer = setInterval(() => (el.hidden ? clearInterval(showPlace.timer) : tick()), 15000);
   // Whose: everyone's (until he picks), or his own.
-  const shared = !!account && postable(id);
+  const shared = !!account && boarded(id);
   const who = shared && tabWho !== "me" ? "all" : "me";
   const whos = el.querySelector(".tabs.who");
   whos.textContent = "";

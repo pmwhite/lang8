@@ -93,7 +93,13 @@ const DAY = 24 * 60 * 60 * 1000;
 // (And big air's: numbered from BIG_AIR, as the page has them.)
 const BIG_AIR = 200000000;
 const validPlace = (n) => whole(n, 1, COURSES) || whole(n, BIG_AIR + 1, BIG_AIR + COURSES) || dayOf(n) !== null;
-const openPlace = (n) => whole(n, 1, COURSES) || whole(n, BIG_AIR + 1, BIG_AIR + COURSES) || (dayOf(n) !== null && Math.abs(Date.now() - dayOf(n) - DAY / 2) < DAY / 2 + 14 * 60 * 60 * 1000);
+// (A day's place takes runs on its day alone, the day being everyone's
+// one day, where the page keeps it: see DAILY_ZONE there; with a few
+// minutes' grace for a run begun before midnight.)
+const DAILY_ZONE = "America/New_York";
+const dayNow = (at) => Number(new Intl.DateTimeFormat("en-CA", { timeZone: DAILY_ZONE }).format(new Date(at)).replace(/-/g, ""));
+const GRACE = 5 * 60 * 1000;
+const openPlace = (n) => whole(n, 1, COURSES) || whole(n, BIG_AIR + 1, BIG_AIR + COURSES) || (dayOf(n) !== null && (dayNow(Date.now()) === n || dayNow(Date.now() - GRACE) === n));
 const validCourse = (course) => Number.isInteger(course) && validPlace(Math.abs(course));
 const openCourse = (course) => Number.isInteger(course) && openPlace(Math.abs(course));
 // Days' runs are kept this long.
