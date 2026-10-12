@@ -323,6 +323,18 @@ const goTo = (id) => {
 };
 const randomPlace = (kind) => (kind === "parks" ? -1 : 1) * (PLACES + 1 + Math.floor(Math.random() * 99000));
 
+// His best run on the place he is at, for the game's corner (which knows
+// only this visit's): as the leaderboards have it, if he is someone, or
+// else as this device does. Told as a key, 300000000 and the score, when
+// he arrives, and again when the leaderboards come.
+const tellBest = () => {
+  if (!sendKey || !placeNow || placeNow === TUTORIAL) return;
+  const local = myRuns[placeNow]?.best?.[0]?.[0] ?? 0;
+  const posted = account ? (bestsOn(placeNow).find((run) => run.id === account.id)?.score ?? 0) : 0;
+  const best = Math.max(local, posted);
+  if (best > 0) typeKeys([300000000 + best]);
+};
+
 // The leaderboards (see ../skate-board/worker.js). There is nothing here to
 // join or sign up to: whoever looks after them makes each person a link
 // (this page, with their secret after its #: see `linked`, above), and
@@ -505,6 +517,7 @@ const loadMe = (fresh = true) => {
       account = await r.json();
       accountLoaded = Date.now();
       store("skate.account", account);
+      tellBest();
       return true;
     } catch {
       return null;
@@ -671,6 +684,7 @@ const gameSays = (line) => {
   else if (words[0] === "L8COURSE") {
     placeNow = Number(words[1]);
     if (placeNow === headed) headed = null;
+    tellBest();
     document.body.classList.toggle("park", placeNow < 0);
     document.body.classList.toggle("tutorial", placeNow === TUTORIAL);
     if (placeNow !== TUTORIAL) {
