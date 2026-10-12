@@ -567,8 +567,6 @@ const say = (kind, text) => {
 onTap(teachEl.querySelector(".skip"), () => typeKeys([114]));
 onTap(teachEl.querySelector(".try"), () => typeKeys([114]));
 onTap(teachEl.querySelector(".rewatch"), () => typeKeys([116]));
-// (And at its end, the guide, which says the rest.)
-onTap(teachEl.querySelector(".guide-of"), () => go("guide"));
 // (From the end of his own ride of it, on to today's course.)
 onTap(document.querySelector(".onward"), () => goTo(today()));
 // What thumbs are doing: his own (as the game has it, left of the middle
