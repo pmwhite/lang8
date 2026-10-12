@@ -122,7 +122,7 @@ onTap(document.querySelector(".again"), () => {
 
 // Sheets over the game: home, the guide, the places to pick from, a place,
 // and a person. The game pauses (Pause, held) while any is open.
-const sheets = Object.fromEntries(["menu", "guide", "places", "place", "person"].map((id) => [id, document.getElementById(id)]));
+const sheets = Object.fromEntries(["menu", "guide", "places", "days", "place", "person"].map((id) => [id, document.getElementById(id)]));
 const sheetOpen = () => Object.values(sheets).some((el) => !el.hidden);
 // Whether he has started riding: until then home cannot be left without
 // choosing.
@@ -173,7 +173,7 @@ const present = () => {
   const view = trail.at(-1);
   if (!view) return closeSheets();
   const [id, of] = view;
-  if (id === "places") picking = of;
+  if (id === "places" || id === "days") picking = of;
   if (id === "place") visit((placeOf = of));
   if (id === "person") personOf = of;
   showOpen(id);
@@ -277,10 +277,12 @@ const leftText = (ms) => {
 const dayAgo = (days) => today(Date.now() - days * 86400000);
 // The days gone by whose places may still be ridden and looked at (the
 // leaderboards keep a month of them).
-const PAST_DAYS = 7;
+const PAST_DAYS = 14;
+// (A day's name is its month and day, as 10/9: the year is this one, or
+// near enough, days being kept a month.)
 const dayName = (id) => {
   const n = Math.abs(id);
-  return new Date(Date.UTC(Math.floor(n / 10000), (Math.floor(n / 100) % 100) - 1, n % 100)).toLocaleDateString("en-GB", { timeZone: "UTC", day: "numeric", month: "short" });
+  return `${Math.floor(n / 100) % 100}/${n % 100}`;
 };
 // The first few slopestyles and parks have names; the rest, numbers.
 const SLOPE_NAMES = ["Haystack", "Pinewood", "Lantern", "Clover", "Fox Run"];
@@ -290,8 +292,9 @@ const placeName = (id) => {
   if (id >= 1 && id <= SLOPE_NAMES.length) return SLOPE_NAMES[id - 1];
   if (id <= -1 && id >= -PARK_NAMES.length) return PARK_NAMES[-id - 1];
   if (isBigAir(id)) return id === BIG_AIR + 1 ? "Big air" : `Big air ${id - BIG_AIR}`;
-  // (A day gone by is named by its day alone: "Park, 9 Oct".)
-  if (isDaily(id)) return Math.abs(id) === today() ? (id < 0 ? "Daily park" : "Daily slopestyle") : `${id < 0 ? "Park" : "Slopestyle"} ${dayName(id)}`;
+  // (A day gone by is named by its day: "Daily 10/9" is that day's
+  // slopestyle, "Park 10/9" its park.)
+  if (isDaily(id)) return Math.abs(id) === today() ? (id < 0 ? "Daily park" : "Daily slopestyle") : `${id < 0 ? "Park" : "Daily"} ${dayName(id)}`;
   return `${id < 0 ? "Park" : "Slopestyle"} ${Math.abs(id)}`;
 };
 // (Picked before the game is up: it starts there instead. See main.)
@@ -809,28 +812,43 @@ const showPlaces = () => {
   const daily = grid.lastChild;
   const left = document.createElement("i");
   daily.append(left);
-  // (And the days gone by: their boards stand, but a run on them is not
-  // posted, the day being over.)
-  const days = document.createElement("div");
-  days.className = "days";
-  const label = document.createElement("span");
-  label.textContent = "Past days";
-  days.append(label);
-  for (let k = 1; k <= PAST_DAYS; k++) {
-    const id = sign * dayAgo(k);
-    const chip = document.createElement("span");
-    chip.className = "day";
-    chip.textContent = dayName(id);
-    onTap(chip, () => go("place", id));
-    days.append(chip);
-  }
-  grid.append(days);
+  // (And the days gone by, on a sheet of their own.)
+  const past = document.createElement("div");
+  past.className = "course past";
+  past.textContent = "Past days";
+  onTap(past, () => go("days", kind));
+  grid.append(past);
   for (let n = 1; n <= PLACES; n++) card(placeName(sign * n), sign * n);
   card("Random", 0);
   const tick = () => (left.textContent = `${leftText(dayLeft())} left`);
   tick();
   clearInterval(showPlaces.timer);
   showPlaces.timer = setInterval(() => (el.hidden ? clearInterval(showPlaces.timer) : tick()), 15000);
+};
+
+// The days gone by, of slopestyles or of parks: any day of the last month
+// by its date, and the last couple of weeks as rows. Their boards stand,
+// but a run on them is not posted, the day being over (see postable).
+const showDays = () => {
+  const el = sheets.days;
+  const sign = picking === "parks" ? -1 : 1;
+  el.querySelector("h2").textContent = `Past ${picking === "parks" ? "parks" : "slopestyles"}`;
+  const input = el.querySelector("input");
+  const iso = (n) => `${Math.floor(n / 10000)}-${String(Math.floor(n / 100) % 100).padStart(2, "0")}-${String(n % 100).padStart(2, "0")}`;
+  input.min = iso(dayAgo(30));
+  input.max = iso(dayAgo(1));
+  input.value = "";
+  input.onchange = () => {
+    const n = Number(input.value.replace(/-/g, ""));
+    if (n >= dayAgo(30) && n <= dayAgo(1)) go("place", sign * n);
+  };
+  const days = [];
+  for (let k = 1; k <= PAST_DAYS; k++) days.push(sign * dayAgo(k));
+  const weekday = (id) => {
+    const n = Math.abs(id);
+    return new Date(Date.UTC(Math.floor(n / 10000), (Math.floor(n / 100) % 100) - 1, n % 100)).toLocaleDateString("en-US", { timeZone: "UTC", weekday: "long" });
+  };
+  runList(el.querySelector(".list"), days.map((id) => ({ id })), (day, i) => [["who", i === 0 ? "Yesterday" : weekday(day.id)], ["when", dayName(day.id)]], (day) => go("place", day.id));
 };
 
 // A place, before he rides it. The game goes there and shows it off behind
@@ -930,6 +948,7 @@ const startPlace = () => {
 const showOpen = (id = Object.keys(sheets).find((name) => !sheets[name].hidden)) => {
   if (id === "menu") showMenu();
   if (id === "places") showPlaces();
+  if (id === "days") showDays();
   if (id === "place") showPlace();
   if (id === "person") showPerson();
 };
