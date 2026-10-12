@@ -278,11 +278,11 @@ const dayAgo = (days) => today(Date.now() - days * 86400000);
 // The days gone by whose places may still be ridden and looked at (the
 // leaderboards keep a month of them).
 const PAST_DAYS = 14;
-// (A day's name is its month and day, as 10/9: the year is this one, or
-// near enough, days being kept a month.)
+// (A day's name is its day and month, as "9 Oct": the year is this one,
+// or near enough, days being kept a month.)
 const dayName = (id) => {
   const n = Math.abs(id);
-  return `${Math.floor(n / 100) % 100}/${n % 100}`;
+  return new Date(Date.UTC(Math.floor(n / 10000), (Math.floor(n / 100) % 100) - 1, n % 100)).toLocaleDateString("en-GB", { timeZone: "UTC", day: "numeric", month: "short" });
 };
 // The first few slopestyles and parks have names; the rest, numbers.
 const SLOPE_NAMES = ["Haystack", "Pinewood", "Lantern", "Clover", "Fox Run"];
@@ -292,8 +292,8 @@ const placeName = (id) => {
   if (id >= 1 && id <= SLOPE_NAMES.length) return SLOPE_NAMES[id - 1];
   if (id <= -1 && id >= -PARK_NAMES.length) return PARK_NAMES[-id - 1];
   if (isBigAir(id)) return id === BIG_AIR + 1 ? "Big air" : `Big air ${id - BIG_AIR}`;
-  // (A day gone by is named by its day: "Daily 10/9" is that day's
-  // slopestyle, "Park 10/9" its park.)
+  // (A day gone by is named by its day: "Daily 9 Oct" is that day's
+  // slopestyle, "Park 9 Oct" its park.)
   if (isDaily(id)) return Math.abs(id) === today() ? (id < 0 ? "Daily park" : "Daily slopestyle") : `${id < 0 ? "Park" : "Daily"} ${dayName(id)}`;
   return `${id < 0 ? "Park" : "Slopestyle"} ${Math.abs(id)}`;
 };
