@@ -102,12 +102,6 @@ const GRACE = 5 * 60 * 1000;
 const openPlace = (n) => whole(n, 1, COURSES) || whole(n, BIG_AIR + 1, BIG_AIR + COURSES) || (dayOf(n) !== null && (dayNow(Date.now()) === n || dayNow(Date.now() - GRACE) === n));
 const validCourse = (course) => Number.isInteger(course) && validPlace(Math.abs(course));
 const openCourse = (course) => Number.isInteger(course) && openPlace(Math.abs(course));
-// Days' runs are kept this long.
-const KEEP_DAYS = 30;
-const dayNumber = (at) => {
-  const d = new Date(at);
-  return d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate();
-};
 const validId = (id) => typeof id === "string" && /^[a-z0-9]{8}$/.test(id);
 // A name: capitals, digits, and single spaces between them (all the game's
 // letters), twelve at most.
@@ -150,14 +144,12 @@ async function post(env, who, body) {
   if (!openCourse(course) || !whole(score, 1, 10000000) || !whole(version, 1, 100000)) return fail(400, "bad score");
   if (typeof replay !== "string" || replay.length === 0 || replay.length > MAX_REPLAY || !/^[0-9a-z. ]+$/.test(replay)) return fail(400, "bad replay");
   const now = Date.now();
-  const old = dayNumber(now - KEEP_DAYS * DAY);
   await env.DB.batch([
     env.DB.prepare("INSERT INTO log (person, course, score, version, at) VALUES (?, ?, ?, ?, ?)").bind(who.id, course, score, version, now),
-    // (Only his latest few on the course are kept, and no days long past.)
+    // (Only his latest few on the course are kept. Days gone by are kept
+    // for good: their boards stand.)
     env.DB.prepare("DELETE FROM log WHERE person = ? AND course = ? AND at < (SELECT at FROM log WHERE person = ? AND course = ? ORDER BY at DESC LIMIT 1 OFFSET ?)")
       .bind(who.id, course, who.id, course, KEEP_RUNS - 1),
-    env.DB.prepare("DELETE FROM log WHERE person = ? AND ABS(course) > 20000000 AND ABS(course) < ?").bind(who.id, old),
-    env.DB.prepare("DELETE FROM bests WHERE person = ? AND ABS(course) > 20000000 AND ABS(course) < ?").bind(who.id, old),
   ]);
   const best = await env.DB.prepare("SELECT score, version FROM bests WHERE person = ? AND course = ?").bind(who.id, course).first();
   if (best && best.version >= version && best.score >= score) return reply(200, { best: false, score: best.score });

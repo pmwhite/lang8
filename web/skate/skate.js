@@ -276,12 +276,15 @@ const leftText = (ms) => {
 // A day's place, as a number, some days ago.
 const dayAgo = (days) => today(Date.now() - days * 86400000);
 
-// (A day's name is its month and day, as "Oct 9": the year is this one,
-// or near enough, days being kept a month.)
+// (A day's name is its month and day, as "Oct 9", with the year when it
+// is not this one.)
 const dayName = (id) => {
   const n = Math.abs(id);
-  return new Date(Date.UTC(Math.floor(n / 10000), (Math.floor(n / 100) % 100) - 1, n % 100)).toLocaleDateString("en-US", { timeZone: "UTC", day: "numeric", month: "short" });
+  const year = Math.floor(n / 10000);
+  return new Date(Date.UTC(year, (Math.floor(n / 100) % 100) - 1, n % 100)).toLocaleDateString("en-US", { timeZone: "UTC", day: "numeric", month: "short", ...(year === Math.floor(today() / 10000) ? {} : { year: "numeric" }) });
 };
+// The first day there were daily places.
+const FIRST_DAY = 20261010;
 // The first few slopestyles and parks have names; the rest, numbers.
 const SLOPE_NAMES = ["Haystack", "Pinewood", "Lantern", "Clover", "Fox Run"];
 const PARK_NAMES = ["Pebble", "Sundial", "Mossy", "Birdbath", "Thistle"];
@@ -521,7 +524,7 @@ const recentOn = (id) => account?.recent?.[id] ?? [];
 // A place the leaderboards keep scores of (so there is a board to see);
 // and one a run may be posted to now: a day's place only on its day, as
 // everyone has the same day to ride it in.
-const boarded = (id) => (Math.abs(id) >= 1 && Math.abs(id) <= PLACES) || (isDaily(id) && Math.abs(id) <= today() && Math.abs(id) >= dayAgo(30)) || (isBigAir(id) && id - BIG_AIR <= PLACES);
+const boarded = (id) => (Math.abs(id) >= 1 && Math.abs(id) <= PLACES) || (isDaily(id) && Math.abs(id) <= today() && Math.abs(id) >= FIRST_DAY) || (isBigAir(id) && id - BIG_AIR <= PLACES);
 const postable = (id) => boarded(id) && (!isDaily(id) || Math.abs(id) === today());
 // A run just finished, as the game wrote it: posted, to be logged, and
 // kept if it is his best there.
@@ -824,15 +827,15 @@ const showPlaces = () => {
 };
 
 // The days gone by, of slopestyles or of parks: a calendar, a month at a
-// time, with the days of the last month (up to yesterday) to pick from.
-// Their boards stand, but a run on them is not posted, the day being over
-// (see postable).
+// time, with every day since the first (up to yesterday) to pick from.
+// Their boards stand for good, but a run on them is not posted, the day
+// being over (see postable).
 let calendarMonth = null;
 const showDays = () => {
   const el = sheets.days;
   const sign = picking === "parks" ? -1 : 1;
   el.querySelector("h2").textContent = `Past ${picking === "parks" ? "parks" : "slopestyles"}`;
-  const first = dayAgo(30);
+  const first = FIRST_DAY;
   const last = dayAgo(1);
   const now = today();
   const monthOf = (n) => Math.floor(n / 100);
