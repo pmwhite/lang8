@@ -537,15 +537,6 @@ const watchRun = async (person, id) => {
 // last, the run being over, 2; a word to him as he rides the course
 // himself, 3; or nothing, 0). The line is shown over the scene, with a way
 // to leave off watching and, at the end, to try it or watch it again.
-// Where his feet are on the screen, as the game says (L8AT): the
-// tutorial's words sit just below them, the one place near him that
-// never covers what he is coming to.
-let riderFrac = 0.6;
-const riderAt = (frac) => {
-  riderFrac = frac;
-  const r = canvas.getBoundingClientRect();
-  document.documentElement.style.setProperty("--rider-y", `${Math.round(r.top + r.height * frac)}px`);
-};
 const teachEl = document.getElementById("teach");
 const teachLine = teachEl.querySelector(".line");
 let saying = "";
@@ -622,7 +613,6 @@ const gameSays = (line) => {
   }
   else if (words[0] === "L8OVER") document.body.classList.toggle("over", words[1] === "1");
   else if (words[0] === "L8SAY") say(Number(words[1]), words.slice(2).join(" "));
-  else if (words[0] === "L8AT") riderAt(Number(words[1]) / 1000);
   else if (words[0] === "L8HANDS") {
     hands = Number(words[1]);
     thumbsChanged();
@@ -965,7 +955,13 @@ async function main() {
     };
     place(steerPanel, STEER_LEFT, STEER_RIGHT);
     place(trickPanel, 1 - STEER_RIGHT, 1 - STEER_LEFT);
-    riderAt(riderFrac);
+    // The tutorial's words: a fixed place near him, off the pads and
+    // their tags, and off what he is coming to. On a tall screen he rides
+    // above the pads' band, so they go just above it; on a wide one he
+    // rides within it, so they go just below.
+    const tall = r.height > r.width;
+    const y = tall ? r.top + r.height * PANEL_TOP - 38 - 46 : r.top + r.height * PANEL_BOTTOM + 10;
+    document.documentElement.style.setProperty("--words-y", `${Math.round(y)}px`);
   };
   new ResizeObserver(placePads).observe(canvas);
   addEventListener("resize", placePads);
