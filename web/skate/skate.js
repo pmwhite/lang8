@@ -173,7 +173,7 @@ const present = () => {
   const view = trail.at(-1);
   if (!view) return closeSheets();
   const [id, of] = view;
-  if (id === "places") pickingParks = of;
+  if (id === "places") picking = of;
   if (id === "place") visit((placeOf = of));
   if (id === "person") personOf = of;
   showOpen(id);
@@ -216,6 +216,10 @@ const PLACES = 5;
 // The tutorial's course (see programs/skate/tutorial.l8): where a new
 // player starts, until he has left it for another.
 const TUTORIAL = 100000000;
+// Big air's places are numbered from here (big air 3 is BIG_AIR + 3): see
+// lay_big_air, in programs/skate/layout.l8.
+const BIG_AIR = 200000000;
+const isBigAir = (id) => id > BIG_AIR && id < BIG_AIR + 100000000;
 let placeNow = 0;
 const stored = (key, fallback) => {
   try {
@@ -265,6 +269,7 @@ const dayName = (id) => {
 };
 const placeName = (id) => {
   if (id === TUTORIAL) return "Tutorial";
+  if (isBigAir(id)) return `Big air ${id - BIG_AIR}`;
   if (isDaily(id)) return `${id < 0 ? "Daily park" : "Daily course"}${Math.abs(id) === today() ? "" : `, ${dayName(id)}`}`;
   return `${id < 0 ? "Park" : "Course"} ${Math.abs(id)}`;
 };
@@ -292,7 +297,7 @@ const goTo = (id) => {
   else if (id === (headed ?? placeNow)) typeKeys([id === TUTORIAL ? 116 : 114]);
   else typePlace(id);
 };
-const randomPlace = (park) => (park ? -1 : 1) * (PLACES + 1 + Math.floor(Math.random() * 99000));
+const randomPlace = (kind) => (kind === "parks" ? -1 : 1) * ((kind === "bigair" ? BIG_AIR : 0) + PLACES + 1 + Math.floor(Math.random() * 99000));
 
 // The leaderboards (see ../skate-board/worker.js). There is nothing here to
 // join or sign up to: whoever looks after them makes each person a link
@@ -492,7 +497,7 @@ const loadScores = () => loadMe(false);
 const current = (run) => gameVersion === 0 || run.version >= gameVersion;
 const bestsOn = (id) => (account?.courses?.[id] ?? []).filter(current);
 const recentOn = (id) => account?.recent?.[id] ?? [];
-const postable = (id) => (Math.abs(id) >= 1 && Math.abs(id) <= PLACES) || Math.abs(id) === today();
+const postable = (id) => (Math.abs(id) >= 1 && Math.abs(id) <= PLACES) || Math.abs(id) === today() || (isBigAir(id) && id - BIG_AIR <= PLACES);
 // A run just finished, as the game wrote it: posted, to be logged, and
 // kept if it is his best there.
 const postRun = async (version, id, score, replay) => {
@@ -708,6 +713,7 @@ const placeRank = (id) => {
   const n = Math.abs(id);
   const park = id < 0 ? 0.5 : 0;
   if (isDaily(id)) return n === today() ? park : 1e8 - n + park;
+  if (isBigAir(id)) return 2000 + id - BIG_AIR;
   return (id < 0 ? 1000 : 10) + n;
 };
 const bestsOf = (name) =>
@@ -748,8 +754,9 @@ for (const el of sheets.menu.querySelectorAll(".item")) {
     if (to === "tutorial") goTo(TUTORIAL);
     if (to === "daily") go("place", today());
     if (to === "dailypark") go("place", -today());
-    if (to === "courses") go("places", false);
-    if (to === "parks") go("places", true);
+    if (to === "courses") go("places", "courses");
+    if (to === "parks") go("places", "parks");
+    if (to === "bigair") go("places", "bigair");
   });
 }
 onTap(sheets.menu.querySelector(".me"), () => {
@@ -757,22 +764,24 @@ onTap(sheets.menu.querySelector(".me"), () => {
 });
 onTap(document.querySelector(".pick"), goHome);
 
-// The places to pick from: the courses, or the parks, and one at random.
-let pickingParks = false;
+// The places to pick from: the courses, the parks, or the big airs, and
+// one at random.
+let picking = "courses";
 const showPlaces = () => {
   const el = sheets.places;
-  const park = pickingParks;
-  el.querySelector("h2").textContent = park ? "Parks" : "Courses";
+  const kind = picking;
+  const names = { courses: "Course", parks: "Park", bigair: "Big air" };
+  el.querySelector("h2").textContent = { courses: "Courses", parks: "Parks", bigair: "Big air" }[kind];
   const grid = el.querySelector(".grid");
   grid.textContent = "";
   const card = (title, id) => {
     const div = document.createElement("div");
     div.className = "course";
     div.textContent = title;
-    onTap(div, () => go("place", id || randomPlace(park)));
+    onTap(div, () => go("place", id || randomPlace(kind)));
     grid.append(div);
   };
-  for (let n = 1; n <= PLACES; n++) card(`${park ? "Park" : "Course"} ${n}`, park ? -n : n);
+  for (let n = 1; n <= PLACES; n++) card(`${names[kind]} ${n}`, kind === "parks" ? -n : kind === "bigair" ? BIG_AIR + n : n);
   card("Random", 0);
 };
 

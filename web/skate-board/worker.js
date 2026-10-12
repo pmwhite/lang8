@@ -90,8 +90,10 @@ const DAY = 24 * 60 * 60 * 1000;
 // to a day's it must be that day somewhere in the world.
 // (A park's number is its course's, negative: park 3 is -3, and a day's park
 // its date, negative.)
-const validPlace = (n) => whole(n, 1, COURSES) || dayOf(n) !== null;
-const openPlace = (n) => whole(n, 1, COURSES) || (dayOf(n) !== null && Math.abs(Date.now() - dayOf(n) - DAY / 2) < DAY / 2 + 14 * 60 * 60 * 1000);
+// (And big air's: numbered from BIG_AIR, as the page has them.)
+const BIG_AIR = 200000000;
+const validPlace = (n) => whole(n, 1, COURSES) || whole(n, BIG_AIR + 1, BIG_AIR + COURSES) || dayOf(n) !== null;
+const openPlace = (n) => whole(n, 1, COURSES) || whole(n, BIG_AIR + 1, BIG_AIR + COURSES) || (dayOf(n) !== null && Math.abs(Date.now() - dayOf(n) - DAY / 2) < DAY / 2 + 14 * 60 * 60 * 1000);
 const validCourse = (course) => Number.isInteger(course) && validPlace(Math.abs(course));
 const openCourse = (course) => Number.isInteger(course) && openPlace(Math.abs(course));
 // Days' runs are kept this long.
