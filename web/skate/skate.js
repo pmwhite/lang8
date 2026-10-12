@@ -265,7 +265,7 @@ const today = (at = Date.now()) => Number(new Intl.DateTimeFormat("en-CA", { tim
 const isDaily = (id) => Math.abs(id) >= 20000101 && Math.abs(id) <= 29991231;
 const dayName = (id) => {
   const n = Math.abs(id);
-  return new Date(Date.UTC(Math.floor(n / 10000), (Math.floor(n / 100) % 100) - 1, n % 100)).toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short", day: "numeric", month: "short" });
+  return new Date(Date.UTC(Math.floor(n / 10000), (Math.floor(n / 100) % 100) - 1, n % 100)).toLocaleDateString("en-GB", { timeZone: "UTC", day: "numeric", month: "short" });
 };
 // The first few slopestyles and parks have names; the rest, numbers.
 const SLOPE_NAMES = ["Haystack", "Pinewood", "Lantern", "Clover", "Fox Run"];
