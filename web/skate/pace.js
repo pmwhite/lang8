@@ -15,25 +15,27 @@
 // every second beat is the most that is aimed at: every beat would be
 // more frames than are worth their pixels, or their battery.
 //
-//   Down, fast. A few frames late running (three; more on a device that
-//   is often late anyway), and it is a rung down at once, two if they are
-//   later still, and as many as it takes if it is far behind: a device
-//   that falls behind has fewer pixels to draw within a few frames. So is
-//   one frame in ten late over a couple of seconds. A late frame on its
-//   own, as any device has now and then for reasons of its own, changes
-//   nothing.
+//   Down, fast. Two frames late running (more on a device that is often
+//   late anyway), and it is a rung down at once, two if they are later
+//   still, and as many as it takes if it is far behind: a device that
+//   falls behind has fewer pixels to draw within a few frames. So is one
+//   frame in twenty-five late over a couple of seconds. A late frame on
+//   its own, as any device has now and then for reasons of its own,
+//   changes nothing.
 //
 //   But only if it helps. A second and a half after a rung down, if as
 //   many frames are late as before it, it was not the picture that made
 //   them so: the rung is given back, and that many late frames are taken
 //   for how this device is.
 //
-//   Up, with care. After a quiet while it tries a rung up. If that rung
-//   does not hold (it is back down within half a minute, and that plainly
-//   helped), it waits twice as long before it tries again, up to some
-//   minutes: so it finds the best rung that holds, and soon stops knocking
-//   at the one above it. A rung that does hold halves the wait, so that
-//   after a hard spell it is soon back up.
+//   Up, with care. After a quiet while (eight seconds with hardly a late
+//   frame) it tries a rung up. If that rung does not hold (it is back
+//   down within a minute and a half, and that plainly helped), it waits
+//   twice as long before it tries again, up to five minutes: so it finds
+//   the best rung that holds, and soon stops knocking at the one above
+//   it. A rung that does hold halves the wait, so that after a hard spell
+//   it is soon back up. (Late frames are the thing to be rid of: a rung
+//   of picture is given up readily for them, and taken back slowly.)
 //
 //   Fewer frames, before the picture gets poor. The ladder has a floor
 //   (`floor`, a rung the caller still calls a good picture): there and
@@ -46,9 +48,9 @@
 //   where it was if that fails.
 //
 // Times are in milliseconds.
-const HOLD = 2500;
-const HOLD_MOST = 120000;
-const PROBE = 30000;
+const HOLD = 8000;
+const HOLD_MOST = 300000;
+const PROBE = 90000;
 const SETTLED = 2000;
 const SECOND = 60;
 const LONG = 90;
@@ -180,7 +182,7 @@ export function createPacer({ work, rung = 0, beats = 1, beat = 1000 / 60, floor
       // while: which creeps up, in case that was long ago.)
       if (++s.seen > 10 * SECOND) s.least = Math.min(s.slow, s.least + Math.max(0, s.slow - s.least) * 0.00005);
       if (s.least < s.base || s.least === Infinity) { } else s.base = s.least;
-      const running = s.base < 0.02 ? 3 : s.base < 0.05 ? 4 : 5;
+      const running = s.base < 0.02 ? 2 : s.base < 0.05 ? 3 : 4;
       // A rung down on trial has had its time: given back if it did not
       // help; and if it did, the rung above it did not hold.
       if (s.trial && ++s.trial.frames >= LONG) {
@@ -200,7 +202,7 @@ export function createPacer({ work, rung = 0, beats = 1, beat = 1000 / 60, floor
         }
       }
       // Down.
-      const often = !s.trial && s.n >= 2 * SECOND && s.rate >= Math.max(0.1, s.base + 0.07);
+      const often = !s.trial && s.n >= 2 * SECOND && s.rate >= Math.max(0.04, s.base + 0.03);
       if (s.run >= running || often) {
         const last = foot();
         if (s.rung < last) {
@@ -250,7 +252,7 @@ export function createPacer({ work, rung = 0, beats = 1, beat = 1000 / 60, floor
         s.eager = true;
       }
       if (t - s.up >= PROBE) s.up = -Infinity;
-      const quiet = !s.trial && s.rate <= Math.max(0.04, s.base + 0.03);
+      const quiet = !s.trial && s.rate <= Math.max(0.01, s.base + 0.01);
       // (Settled where it is: there is nowhere it came down from.)
       if (quiet && t - s.changed > SETTLED) s.from = -1;
       // Up.
