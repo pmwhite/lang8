@@ -1047,8 +1047,8 @@ async function main() {
   // widens into the stats, counted over each half second.
   const perf = document.querySelector(".rate");
   const rate = { frames: 0, late: 0, since: performance.now(), text: perf.querySelector("b"), wide: 0 };
-  // The stats: which beats of the screen the game aims at (or its beat,
-  // when ?scale= has fixed the size), the picture's size, the frames late
+  // The stats: the frames a second the game aims at (the screen's, or
+  // every second or third of them), the picture's size, the frames late
   // over the last half second, and that the device is saving its battery
   // (if it is). Each number has a cell of its own, as wide as its most
   // digits (measured by an unseen copy, and never narrowed), so that one
@@ -1057,7 +1057,7 @@ async function main() {
   measure.className = "measure";
   perf.querySelector(".stats").appendChild(measure);
   // (The cells, each with the most it could hold where that is a number.)
-  const cells = ["", "00", " · ", "000", "%", "", " · ", "00", " late", ""].map((widest) => {
+  const cells = ["000", " fps · ", "000", "%", "", " · ", "00", " late", ""].map((widest) => {
     const el = document.createElement("span");
     // (A number keeps to its cell's right, so the gap for a digit it has
     // not got comes after the words before it.)
@@ -1069,9 +1069,8 @@ async function main() {
     const s = pacer.state;
     const hz = Math.round(1000 / s.beat);
     const words = [
-      pace.on ? `${["every", "every 2nd", "every 3rd"][s.beats - 1]} beat of ` : "",
-      String(hz),
-      pace.on ? " · " : " Hz · ",
+      String(Math.round(hz / (pace.on ? s.beats : 1))),
+      " fps · ",
       String(Math.round(size * 100)),
       "%",
       plain ? " plain" : "",
