@@ -275,14 +275,12 @@ const leftText = (ms) => {
 };
 // A day's place, as a number, some days ago.
 const dayAgo = (days) => today(Date.now() - days * 86400000);
-// The days gone by whose places may still be ridden and looked at (the
-// leaderboards keep a month of them).
-const PAST_DAYS = 14;
-// (A day's name is its day and month, as "9 Oct": the year is this one,
+
+// (A day's name is its month and day, as "Oct 9": the year is this one,
 // or near enough, days being kept a month.)
 const dayName = (id) => {
   const n = Math.abs(id);
-  return new Date(Date.UTC(Math.floor(n / 10000), (Math.floor(n / 100) % 100) - 1, n % 100)).toLocaleDateString("en-GB", { timeZone: "UTC", day: "numeric", month: "short" });
+  return new Date(Date.UTC(Math.floor(n / 10000), (Math.floor(n / 100) % 100) - 1, n % 100)).toLocaleDateString("en-US", { timeZone: "UTC", day: "numeric", month: "short" });
 };
 // The first few slopestyles and parks have names; the rest, numbers.
 const SLOPE_NAMES = ["Haystack", "Pinewood", "Lantern", "Clover", "Fox Run"];
@@ -292,9 +290,8 @@ const placeName = (id) => {
   if (id >= 1 && id <= SLOPE_NAMES.length) return SLOPE_NAMES[id - 1];
   if (id <= -1 && id >= -PARK_NAMES.length) return PARK_NAMES[-id - 1];
   if (isBigAir(id)) return id === BIG_AIR + 1 ? "Big air" : `Big air ${id - BIG_AIR}`;
-  // (A day gone by is named by its day: "Daily 9 Oct" is that day's
-  // slopestyle, "Park 9 Oct" its park.)
-  if (isDaily(id)) return Math.abs(id) === today() ? (id < 0 ? "Daily park" : "Daily slopestyle") : `${id < 0 ? "Park" : "Daily"} ${dayName(id)}`;
+  // (A day gone by is named by its day: "Slopestyle Oct 9", "Park Oct 9".)
+  if (isDaily(id)) return Math.abs(id) === today() ? (id < 0 ? "Daily park" : "Daily slopestyle") : `${id < 0 ? "Park" : "Slopestyle"} ${dayName(id)}`;
   return `${id < 0 ? "Park" : "Slopestyle"} ${Math.abs(id)}`;
 };
 // (Picked before the game is up: it starts there instead. See main.)
@@ -826,29 +823,52 @@ const showPlaces = () => {
   showPlaces.timer = setInterval(() => (el.hidden ? clearInterval(showPlaces.timer) : tick()), 15000);
 };
 
-// The days gone by, of slopestyles or of parks: any day of the last month
-// by its date, and the last couple of weeks as rows. Their boards stand,
-// but a run on them is not posted, the day being over (see postable).
+// The days gone by, of slopestyles or of parks: a calendar, a month at a
+// time, with the days of the last month (up to yesterday) to pick from.
+// Their boards stand, but a run on them is not posted, the day being over
+// (see postable).
+let calendarMonth = null;
 const showDays = () => {
   const el = sheets.days;
   const sign = picking === "parks" ? -1 : 1;
   el.querySelector("h2").textContent = `Past ${picking === "parks" ? "parks" : "slopestyles"}`;
-  const input = el.querySelector("input");
-  const iso = (n) => `${Math.floor(n / 10000)}-${String(Math.floor(n / 100) % 100).padStart(2, "0")}-${String(n % 100).padStart(2, "0")}`;
-  input.min = iso(dayAgo(30));
-  input.max = iso(dayAgo(1));
-  input.value = "";
-  input.onchange = () => {
-    const n = Number(input.value.replace(/-/g, ""));
-    if (n >= dayAgo(30) && n <= dayAgo(1)) go("place", sign * n);
+  const first = dayAgo(30);
+  const last = dayAgo(1);
+  const now = today();
+  const monthOf = (n) => Math.floor(n / 100);
+  if (calendarMonth === null || calendarMonth > monthOf(now) || calendarMonth < monthOf(first)) calendarMonth = monthOf(last);
+  const [y, m] = [Math.floor(calendarMonth / 100), calendarMonth % 100];
+  el.querySelector(".month b").textContent = new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-US", { timeZone: "UTC", month: "long", year: "numeric" });
+  const prev = el.querySelector(".prev");
+  const next = el.querySelector(".next");
+  prev.classList.toggle("off", calendarMonth <= monthOf(first));
+  next.classList.toggle("off", calendarMonth >= monthOf(now));
+  const step = (by) => {
+    calendarMonth = m + by < 1 ? (y - 1) * 100 + 12 : m + by > 12 ? (y + 1) * 100 + 1 : y * 100 + m + by;
+    showDays();
   };
-  const days = [];
-  for (let k = 1; k <= PAST_DAYS; k++) days.push(sign * dayAgo(k));
-  const weekday = (id) => {
-    const n = Math.abs(id);
-    return new Date(Date.UTC(Math.floor(n / 10000), (Math.floor(n / 100) % 100) - 1, n % 100)).toLocaleDateString("en-US", { timeZone: "UTC", weekday: "long" });
-  };
-  runList(el.querySelector(".list"), days.map((id) => ({ id })), (day, i) => [["who", i === 0 ? "Yesterday" : weekday(day.id)], ["when", dayName(day.id)]], (day) => go("place", day.id));
+  prev.onclick = () => step(-1);
+  next.onclick = () => step(1);
+  const grid = el.querySelector(".calendar");
+  grid.textContent = "";
+  for (const wd of ["S", "M", "T", "W", "T", "F", "S"]) {
+    const h = document.createElement("span");
+    h.className = "wd";
+    h.textContent = wd;
+    grid.append(h);
+  }
+  const start = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
+  const days = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  for (let i = 0; i < start; i++) grid.append(document.createElement("span"));
+  for (let d = 1; d <= days; d++) {
+    const n = calendarMonth * 100 + d;
+    const cell = document.createElement("span");
+    const on = n >= first && n <= last;
+    cell.className = `d ${n === now ? "today" : on ? "on" : "off"}`;
+    cell.textContent = String(d);
+    if (on) onTap(cell, () => go("place", sign * n));
+    grid.append(cell);
+  }
 };
 
 // A place, before he rides it. The game goes there and shows it off behind
