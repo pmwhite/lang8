@@ -1,0 +1,409 @@
+tag race;
+
+use_tag skate;
+
+// The track: a road that loops along the floor of a canyon.
+//
+// The road's middle line is a smooth closed curve through a few points, kept
+// as samples a metre apart. A place on the canyon's floor is known by how
+// far along that line it is (s, from the start line, in metres) and how far
+// out from it (d, more than 0 to the right of the way round). The road is
+// the strip within ROAD_HALF of the line; beyond it lies open ground, fast
+// to slow: grass, and at the outside of the bends, sand.
+//
+// Either side, some way out, stands the canyon's wall, and the walls are
+// what a lap is: they have no top, and nothing gets past them, so the floor
+// between them is a ring, and the only way to come over the start line
+// again is all the way round. Nothing else is checked. The walls stand well
+// back from the road (MARGIN or so), so that running wide costs only the
+// slower ground; they come nearer only where they must: inside a tight
+// bend, and where two stretches of the track pass near each other, with a
+// fin of rock left between them.
+const ROAD_HALF: f32 = 5.0;
+
+// How far past the road's edge a wall stands, where nothing brings it
+// nearer; the least it ever is; and half the thickness of the rock left
+// between two stretches.
+const MARGIN: f32 = 20.0;
+
+const MIN_MARGIN: f32 = 2.5;
+
+const ROCK_HALF: f32 = 3.0;
+
+// The road's middle line passes through these (x, z), in order, and round
+// again; it starts along the long straight.
+track_pts: []f32 = [-50.0, 0.0, 60.0, 0.0, 160.0, 6.0, 228.0, 40.0, 258.0, 105.0,
+    262.0, 170.0, 240.0, 215.0, 200.0, 225.0, 172.0, 195.0, 160.0, 150.0, 125.0, 105.0,
+    70.0, 95.0, 30.0, 130.0, 0.0, 185.0, -50.0, 225.0, -120.0, 232.0, -180.0, 205.0,
+    -214.0, 150.0, -196.0, 105.0, -212.0, 62.0, -208.0, 25.0, -185.0, 4.0, -150.0,
+    0.0];
+
+const MAX_TRACK: int = 4096;
+
+// How many samples there are, the lap's length, and how far apart they are
+// (a metre, near enough).
+track_n: int = 0;
+
+track_len: f32 = 0.0;
+
+track_ds: f32 = 1.0;
+
+// At each sample: where the line is, the way it goes (of length one), how
+// sharply it bends (1 / radius, more than 0 bending left), the road's
+// height, and how far out the walls stand to the left and to the right.
+track_p: []V3 = new V3[MAX_TRACK](V3 { x: 0.0, y: 0.0, z: 0.0 });
+
+track_t: []V3 = new V3[MAX_TRACK](V3 { x: 0.0, y: 0.0, z: 0.0 });
+
+track_k: []f32 = new f32[MAX_TRACK](0.0);
+
+track_h: []f32 = new f32[MAX_TRACK](0.0);
+
+wall_l: []f32 = new f32[MAX_TRACK](0.0);
+
+wall_r: []f32 = new f32[MAX_TRACK](0.0);
+
+// Sample i, counted round the loop.
+wrap_i(i: int): int {
+    n: int = track_n;
+    (i % n + n) % n
+}
+
+// A distance along the lap as the short way round from 0: within half a
+// lap either way.
+wrap_s(s: f32): f32 {
+    while (s > track_len * 0.5) s = s - track_len;
+    while (s <= -track_len * 0.5) s = s + track_len;
+    s
+}
+
+// To the right of the way f, across the ground.
+right_of(f: V3): V3 {
+    v3(-f.z, 0.0, f.x)
+}
+
+ctrl(k: int): V3 {
+    n: int = len(track_pts) / 2;
+    i: int = (k % n + n) % n;
+    v3(track_pts[i * 2], 0.0, track_pts[i * 2 + 1])
+}
+
+// The curve from p1 to p2, t of the way, that passes smoothly on from p0
+// and toward p3 (Catmull and Rom's).
+catmull(
+    p0: V3,
+    p1: V3,
+    p2: V3,
+    p3: V3,
+    t: f32
+): V3 {
+    a: V3 = v_scale(p1, 2.0);
+    b: V3 = v_sub(p2, p0);
+    c: V3 = v_add(v_sub(v_scale(p0, 2.0), v_scale(p1, 5.0)), v_sub(v_scale(p2, 4.0),
+        p3));
+    d: V3 = v_add(v_sub(v_scale(p1, 3.0), p0), v_sub(p3, v_scale(p2, 3.0)));
+    v_scale(v_add(v_add(a, v_scale(b, t)), v_add(v_scale(c, t * t), v_scale(d, t * t * t))),
+        0.5)
+}
+
+const DENSE_PER: int = 40;
+
+build_track() {
+    npts: int = len(track_pts) / 2;
+    nd: int = npts * DENSE_PER;
+    // The curve, finely; and how far along it each of its points is.
+    dense: []V3 = new V3[nd + 1](V3 { x: 0.0, y: 0.0, z: 0.0 });
+    cum: []f32 = new f32[nd + 1](0.0);
+    for i in 0..npts {
+        for k in 0..DENSE_PER dense[i * DENSE_PER + k] = catmull(ctrl(i - 1), ctrl(i),
+            ctrl(i + 1), ctrl(i + 2), k as f32 / DENSE_PER as f32)
+    }
+    dense[nd] = dense[0];
+    for i in 0..nd cum[i + 1] = cum[i] + v_len(v_sub(dense[i + 1], dense[i]));
+    track_len = cum[nd];
+    n: int = (track_len + 0.5) as int;
+    if (n > MAX_TRACK) n = MAX_TRACK;
+    track_n = n;
+    track_ds = track_len / n as f32;
+    // Samples evenly along it.
+    j: int = 0;
+    for i in 0..n {
+        s: f32 = i as f32 * track_ds;
+        while (j < nd - 1 && cum[j + 1] < s) j = j + 1;
+        f: f32 = (s - cum[j]) / maxf(cum[j + 1] - cum[j], 0.000001);
+        track_p[i] = v_lerp(dense[j], dense[j + 1], f)
+    }
+    for i in 0..n track_t[i] = v_norm(v_sub(track_p[wrap_i(i + 1)], track_p[wrap_i(i - 1)]));
+    // How sharply it bends: how fast its way turns, smoothed a little.
+    for i in 0..n {
+        a: f32 = dir_yaw(track_t[wrap_i(i - 1)]);
+        b: f32 = dir_yaw(track_t[wrap_i(i + 1)]);
+        track_k[i] = wrap_angle(b - a) / (2.0 * track_ds)
+    }
+    for _pass in 0..3 {
+        first: f32 = track_k[0];
+        before: f32 = track_k[n - 1];
+        for i in 0..n {
+            next: f32 = first;
+            if (i < n - 1) next = track_k[i + 1];
+            here: f32 = track_k[i];
+            track_k[i] = (before + here + next) / 3.0;
+            before = here
+        }
+    }
+    // The road rises and falls gently round the lap.
+    for i in 0..n {
+        u: f32 = TAU * i as f32 / n as f32;
+        track_h[i] = 3.2 * sinf(u * 2.0 + 0.6) + 1.4 * sinf(u * 5.0 + 2.1)
+    }
+    build_walls(wall_r, 1.0);
+    build_walls(wall_l, -1.0);
+    build_sand()
+}
+
+// How far out the wall stands on one side (1 the right, -1 the left), at
+// each sample.
+build_walls(w: []f32, side: f32) {
+    n: int = track_n;
+    for i in 0..n {
+        // As far as it likes, wandering in and out along the way.
+        u: f32 = TAU * i as f32 / n as f32;
+        lim: f32 = ROAD_HALF + MARGIN * (1.0 + 0.2 * sinf(u * 3.0 + 1.3 + side) + 0.12 * sinf(u * 7.0 + 4.0 * side));
+        // Inside a bend, no farther than most of the way to the bend's
+        // middle, where the wall would fold over itself.
+        inside: f32 = -track_k[i] * side;
+        if (inside > 0.0001) lim = minf(lim, 0.7 / inside);
+        // Where another stretch of the track lies to this side, no farther
+        // than short of half way to it: the rock between is the wall of
+        // both.
+        p: V3 = track_p[i];
+        out: V3 = v_scale(right_of(track_t[i]), side);
+        for j in 0..n {
+            arc: int = j - i;
+            if (arc < 0) arc = -arc;
+            if (arc > n - arc) arc = n - arc;
+            if (arc > 30) {
+                to: V3 = v_sub(track_p[j], p);
+                if (v_dot(to, out) > 0.0) {
+                    dist: f32 = v_len(to);
+                    if (dist < 0.6 * arc as f32 * track_ds) lim = minf(lim, dist * 0.5 - ROCK_HALF)
+                }
+            }
+        }
+        w[i] = maxf(lim, ROAD_HALF + MIN_MARGIN)
+    }
+    // It comes in and goes out no faster than this along the way.
+    slope: f32 = 0.4 * track_ds;
+    for _pass in 0..2 {
+        for i in 0..n w[i] = minf(w[i], w[wrap_i(i - 1)] + slope);
+        i: int = n - 1;
+        while (i >= 0) {
+            w[i] = minf(w[i], w[wrap_i(i + 1)] + slope);
+            i = i - 1
+        }
+    }
+}
+
+// ---- sand ----
+// A sand trap lies along the outside of each bend, from its middle to a
+// way past its end, where a car going too fast runs wide. Each is a
+// rounded patch in s and d: its middle, its half sizes, and its corners'
+// radius.
+const MAX_SAND: int = 32;
+
+sand_s: []f32 = new f32[MAX_SAND](0.0);
+
+sand_d: []f32 = new f32[MAX_SAND](0.0);
+
+sand_hs: []f32 = new f32[MAX_SAND](0.0);
+
+sand_hd: []f32 = new f32[MAX_SAND](0.0);
+
+nsand: int = 0;
+
+const SAND_CORNER: f32 = 3.0;
+
+// A bend is where the line turns tighter than this (1 / radius).
+const BEND_K: f32 = 0.0185;
+
+build_sand() {
+    n: int = track_n;
+    nsand = 0;
+    // From somewhere straight, round the lap: each run of samples that
+    // bend one way.
+    from: int = 0;
+    while (from < n && absf(track_k[from]) > BEND_K) from = from + 1;
+    i: int = 0;
+    while (i < n) {
+        a: int = from + i;
+        if (absf(track_k[wrap_i(a)]) > BEND_K) {
+            way: f32 = signf(track_k[wrap_i(a)]);
+            b: int = a;
+            while (b - from < n && track_k[wrap_i(b)] * way > BEND_K) b = b + 1;
+            put_sand(a, b, way);
+            i = b - from
+        } else i = i + 1
+    }
+}
+
+// The trap for the bend from sample a to sample b, bending left (way 1)
+// or right (-1): on the other side.
+put_sand(a: int, b: int, way: f32) {
+    if (nsand >= MAX_SAND || (b - a) as f32 * track_ds < 14.0) return;
+    s0: f32 = (a as f32 + 0.3 * (b - a) as f32) * track_ds;
+    s1: f32 = b as f32 * track_ds + 24.0;
+    // Out as far as the wall leaves room, all along it.
+    room: f32 = 1000.0;
+    i0: int = (s0 / track_ds) as int;
+    i1: int = (s1 / track_ds) as int + 1;
+    for i in i0..i1 {
+        if (way > 0.0) room = minf(room, wall_r[wrap_i(i)]) else room = minf(room,
+            wall_l[wrap_i(i)])
+    }
+    d0: f32 = ROAD_HALF + 1.4;
+    d1: f32 = minf(room - 3.0, d0 + 13.0);
+    if (d1 - d0 < 2.0 * SAND_CORNER) return;
+    sand_s[nsand] = wrap_s((s0 + s1) * 0.5);
+    sand_hs[nsand] = (s1 - s0) * 0.5;
+    sand_d[nsand] = way * (d0 + d1) * 0.5;
+    sand_hd[nsand] = (d1 - d0) * 0.5;
+    nsand = nsand + 1
+}
+
+// How deep into sand the place (s, d) is, in metres from the sand's edge:
+// more than 0 in it, less outside.
+sand_depth(s: f32, d: f32): f32 {
+    best: f32 = -100.0;
+    for k in 0..nsand {
+        qx: f32 = absf(wrap_s(s - sand_s[k])) - (sand_hs[k] - SAND_CORNER);
+        qy: f32 = absf(d - sand_d[k]) - (sand_hd[k] - SAND_CORNER);
+        ox: f32 = maxf(qx, 0.0);
+        oy: f32 = maxf(qy, 0.0);
+        out: f32 = sqrtf(ox * ox + oy * oy) + minf(maxf(qx, qy), 0.0) - SAND_CORNER;
+        best = maxf(best, -out)
+    }
+    best
+}
+
+// ---- places ----
+// A place on the canyon's floor: the stretch of the line it is beside (from
+// sample i, f of the way to the next), how far along the lap that is, and
+// how far out from the line.
+type Spot = {
+    i: int;
+    f: f32;
+    s: f32;
+    d: f32
+}
+
+// Where p is, looking along the line within `reach` samples of sample
+// `hint`. (Something that moves is found from where it was: so it is on
+// the stretch it came along, though another pass near.)
+locate(p: V3, hint: int, reach: int): Spot {
+    best: f32 = 1000000000.0;
+    bi: int = wrap_i(hint);
+    bf: f32 = 0.0;
+    for k in 0..2 * reach + 1 {
+        i: int = wrap_i(hint - reach + k);
+        a: V3 = track_p[i];
+        ab: V3 = v_sub(track_p[wrap_i(i + 1)], a);
+        apx: f32 = p.x - a.x;
+        apz: f32 = p.z - a.z;
+        f: f32 = clampf((apx * ab.x + apz * ab.z) / maxf(ab.x * ab.x + ab.z * ab.z,
+            0.000001), 0.0, 1.0);
+        dx: f32 = apx - ab.x * f;
+        dz: f32 = apz - ab.z * f;
+        d2: f32 = dx * dx + dz * dz;
+        if (d2 < best) {
+            best = d2;
+            bi = i;
+            bf = f
+        }
+    }
+    c: V3 = line_at(bi, bf);
+    r: V3 = right_of(way_at(bi, bf));
+    Spot {
+        i: bi,
+        f: bf,
+        s: (bi as f32 + bf) * track_ds,
+        d: (p.x - c.x) * r.x + (p.z - c.z) * r.z
+    }
+}
+
+// Where p is, looking all round the lap.
+locate_anywhere(p: V3): Spot {
+    locate(p, 0, track_n / 2)
+}
+
+// The place s along the lap and d out.
+spot_at(s: f32, d: f32): Spot {
+    u: f32 = s / track_ds;
+    i: int = floorf(u) as int;
+    w: int = wrap_i(i);
+    f: f32 = u - i as f32;
+    Spot {
+        i: w,
+        f: f,
+        s: (w as f32 + f) * track_ds,
+        d: d
+    }
+}
+
+// The line's place and its way, f of the way from sample i to the next.
+line_at(i: int, f: f32): V3 {
+    v_lerp(track_p[i], track_p[wrap_i(i + 1)], f)
+}
+
+way_at(i: int, f: f32): V3 {
+    v_norm(v_lerp(track_t[i], track_t[wrap_i(i + 1)], f))
+}
+
+// Where a spot is in the world (on the ground: see spot_y for its height).
+spot_point(sp: Spot): V3 {
+    v_madd(line_at(sp.i, sp.f), right_of(way_at(sp.i, sp.f)), sp.d)
+}
+
+// How far out the wall stands on the spot's side of the line.
+spot_wall(sp: Spot): f32 {
+    j: int = wrap_i(sp.i + 1);
+    if (sp.d < 0.0) return lerpf(wall_l[sp.i], wall_l[j], sp.f);
+    lerpf(wall_r[sp.i], wall_r[j], sp.f)
+}
+
+// ---- the ground ----
+// What the ground is made of.
+const ROAD: int = 0;
+
+const GRASS: int = 1;
+
+const SAND: int = 2;
+
+spot_ground(sp: Spot): int {
+    if (absf(sp.d) < ROAD_HALF) return ROAD;
+    if (sand_depth(sp.s, sp.d) > 0.0) return SAND;
+    GRASS
+}
+
+// How much the ground rises toward a wall, for each metre the wall stands
+// from the road; and how far past the road's edge it starts to.
+const FLANK_RISE: f32 = 0.085;
+
+const FLANK_FROM: f32 = 1.5;
+
+// The ground's height at a spot, which is at (x, z): the road's own, flat
+// across; beyond the road the ground rises toward the wall's foot, and off
+// the road it is a little bumpy.
+spot_y(sp: Spot, x: f32, z: f32): f32 {
+    j: int = wrap_i(sp.i + 1);
+    y: f32 = lerpf(track_h[sp.i], track_h[j], sp.f);
+    ad: f32 = absf(sp.d);
+    from: f32 = ROAD_HALF + FLANK_FROM;
+    if (ad <= ROAD_HALF) return y;
+    wall: f32 = spot_wall(sp);
+    if (ad > from) {
+        m: f32 = minf((ad - from) / maxf(wall - from, 1.0), 1.5);
+        y = y + FLANK_RISE * (wall - ROAD_HALF) * m * m
+    }
+    rough: f32 = smoothstepf(ROAD_HALF, ROAD_HALF + 3.0, ad);
+    y + rough * 0.07 * (sinf(x * 0.83 + 1.7 * sinf(z * 0.29)) * sinf(z * 0.71 + 1.3 * sinf(x * 0.37)) + 1.0)
+}

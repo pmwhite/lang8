@@ -1,0 +1,212 @@
+tag race_tests;
+
+use_tag std;
+
+use_tag skate, race;
+
+import "../../stdlib/print.l8";
+
+import "../skate/math.l8";
+
+import "mesh.l8";
+
+import "track.l8";
+
+import "world.l8";
+
+import "car.l8";
+
+// The canyon as the game builds it.
+test_build() {
+    build_track();
+    build_world(new_mesh(520000))
+}
+
+test_say(label: str, yes: bool) raises IoError {
+    write(1, label);
+    if (yes) write(1, ": yes\n") else write(1, ": no\n")
+}
+
+// Drive for `time` seconds with the wheel and pedals held as given.
+test_hold(c: *Car, inp: Input, time: f32) {
+    t: f32 = 0.0;
+    while (t < time) {
+        step_car(c, inp, STEP_DT);
+        tick_laps(c, STEP_DT);
+        t = t + STEP_DT
+    }
+}
+
+// Drive flat out for `time` seconds along the line d out from the road's
+// middle; the speed it ends at.
+test_along(
+    c: *Car,
+    s: f32,
+    d: f32,
+    time: f32
+): f32 {
+    place_car(c, s);
+    c.p = spot_point(spot_at(s, d));
+    t: f32 = 0.0;
+    while (t < time) {
+        way: V3 = way_at(c.spot.i, c.spot.f);
+        steer: f32 = (d - c.spot.d) * 0.2 + wrap_angle(c.yaw - dir_yaw(way)) * 2.0;
+        step_car(c, Input { steer: steer, gas: 1.0, brake: 0.0 }, STEP_DT);
+        t = t + STEP_DT
+    }
+    v_len(c.v)
+}
+
+test "the walls stand back from the road, and no two stretches share ground" {
+    test_build();
+    least: f32 = 1000.0;
+    shared: int = 0;
+    for i in 0..track_n {
+        least = minf(least, minf(wall_l[i], wall_r[i]));
+        // The foot of each wall here lies on no other stretch's floor.
+        for e in 0..2 {
+            wall: f32 = wall_r[i];
+            if (e == 0) wall = -wall_l[i];
+            sp: Spot = locate_anywhere(v_madd(track_p[i], right_of(track_t[i]), wall));
+            arc: int = sp.i - i;
+            if (arc < 0) arc = -arc;
+            if (arc > track_n - arc) arc = track_n - arc;
+            if (arc > 40 && absf(sp.d) < spot_wall(sp)) shared = shared + 1
+        }
+    }
+    test_say("every wall is past the road's edge", least >= ROAD_HALF + MIN_MARGIN - 0.001);
+    write(1, "wall feet on another stretch's floor: ");
+    write_int(1, shared);
+    write(1, "\n");
+    expect {|
+        every wall is past the road's edge: yes
+        wall feet on another stretch's floor: 0
+    |}
+}
+
+test "the walls keep the car in" {
+    test_build();
+    c: *Car = new_car(0.0);
+    past: int = 0;
+    // Flat out at a wall, from all round the lap, left and right by turns.
+    for k in 0..40 {
+        place_car(c, track_len * k as f32 / 40.0);
+        if (k % 2 == 0) c.yaw = c.yaw - 1.2 else c.yaw = c.yaw + 1.2;
+        t: f32 = 0.0;
+        while (t < 8.0) {
+            step_car(c, Input { steer: 0.0, gas: 1.0, brake: 0.0 }, STEP_DT);
+            if (absf(c.spot.d) > spot_wall(c.spot)) past = past + 1;
+            t = t + STEP_DT
+        }
+    }
+    write(1, "steps spent past a wall: ");
+    write_int(1, past);
+    write(1, "\n");
+    expect {|
+        steps spent past a wall: 0
+    |}
+}
+
+test "a lap is all the way round" {
+    test_build();
+    c: *Car = new_car(-12.0);
+    reset_laps();
+    gas: Input = Input { steer: 0.0, gas: 1.0, brake: 0.0 };
+    back: Input = Input { steer: 0.0, gas: 0.0, brake: 1.0 };
+    write(1, "before the line: ");
+    write_int(1, laps.crossed);
+    test_hold(c, gas, 2.5);
+    write(1, """
+
+over it: """);
+    write_int(1, laps.crossed);
+    write(1, "\n");
+    expect {|
+        before the line: 0
+        over it: 1
+    |}
+    // Back over the line, and forward over it again: nothing.
+    test_hold(c, back, 9.0);
+    test_say("backed over the line", c.progress < 0.0);
+    test_hold(c, gas, 5.0);
+    test_say("over it again", c.progress > 0.0);
+    write(1, "crossed: ");
+    write_int(1, laps.crossed);
+    write(1, "\n");
+    expect {|
+        backed over the line: yes
+        over it again: yes
+        crossed: 1
+    |}
+    // Backward all the way round, and over the line from behind: nothing.
+    place_car(c, 5.0);
+    c.yaw = wrap_angle(c.yaw + PI);
+    t: f32 = 0.0;
+    while (t < 200.0 && c.progress > 20.0 - track_len) {
+        inp: Input = auto_backward(c);
+        step_car(c, inp, STEP_DT);
+        tick_laps(c, STEP_DT);
+        t = t + STEP_DT
+    }
+    test_say("went round backward", c.progress <= 20.0 - track_len);
+    write(1, "crossed: ");
+    write_int(1, laps.crossed);
+    write(1, "\n");
+    expect {|
+        went round backward: yes
+        crossed: 1
+    |}
+    // The driver, round the right way: a lap each time round.
+    place_car(c, -12.0);
+    reset_laps();
+    t = 0.0;
+    while (t < 300.0 && laps.crossed < 3) {
+        step_car(c, auto_input(c), STEP_DT);
+        tick_laps(c, STEP_DT);
+        t = t + STEP_DT
+    }
+    write(1, "crossed: ");
+    write_int(1, laps.crossed);
+    write(1, "\n");
+    test_say("the last lap took between half a minute and a minute and a half", laps.last > 30.0 && laps.last < 90.0);
+    test_say("the best is the quicker of the two", laps.best <= laps.last && laps.best > 30.0);
+    expect {|
+        crossed: 3
+        the last lap took between half a minute and a minute and a half: yes
+        the best is the quicker of the two: yes
+    |}
+}
+
+// The driver's steering, turned round: for a car that faces the wrong way.
+auto_backward(c: *Car): Input {
+    behind: Spot = spot_at(c.spot.s - 12.0, 0.0);
+    off: f32 = wrap_angle(dir_yaw(v_sub(spot_point(behind), c.p)) - c.yaw);
+    gas: f32 = 0.0;
+    if (v_len(c.v) < 14.0) gas = 1.0;
+    Input { steer: clampf(-off * 3.0, -1.0, 1.0), gas: gas, brake: 0.0 }
+}
+
+test "the road is fast, the grass slower, the sand slowest" {
+    test_build();
+    c: *Car = new_car(0.0);
+    road: f32 = test_along(c, 20.0, 0.0, 9.0);
+    // Two wheels over the road's edge, and all four.
+    half: f32 = test_along(c, 20.0, ROAD_HALF, 9.0);
+    grass: f32 = test_along(c, 20.0, ROAD_HALF + 5.0, 9.0);
+    test_say("on the grass by the straight", spot_ground(c.spot) == GRASS);
+    // Along the first sand trap, down its middle.
+    sand: f32 = test_along(c, sand_s[0] - sand_hs[0] + 4.0, sand_d[0], 1.5);
+    test_say("in the sand", spot_ground(c.spot) == SAND);
+    test_say("road faster than two wheels on the grass", road > half + 2.0);
+    test_say("two wheels on the grass faster than four", half > grass + 2.0);
+    test_say("grass faster than sand", grass > sand + 2.0);
+    test_say("sand still moves", sand > 5.0);
+    expect {|
+        on the grass by the straight: yes
+        in the sand: yes
+        road faster than two wheels on the grass: yes
+        two wheels on the grass faster than four: yes
+        grass faster than sand: yes
+        sand still moves: yes
+    |}
+}

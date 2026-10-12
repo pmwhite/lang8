@@ -1,0 +1,475 @@
+tag race;
+
+use_tag skate;
+
+// The canyon, built round the track (see track.l8) into one mesh: its
+// floor, its walls, and what stands on the floor.
+UP: V3 = V3 { x: 0.0, y: 1.0, z: 0.0 };
+
+world_rng: int = 20261012;
+
+world_rand(): f32 {
+    world_rng = (world_rng * 1103515245 + 12345) % 2147483648;
+    (world_rng / 4096 % 100000) as f32 / 100000.0
+}
+
+// The mesh is built a stretch of the track at a time, so that only the
+// stretches near the car need be drawn (see draw_scene, in render.l8): each
+// is CHUNK samples of the track, with all that stands along them. Of each:
+// where its corners start in the mesh, how many of them are the floor's
+// (they come first, and cast no shadow), how many there are in all, and
+// the box they lie in (x, y, z: the least, then the most).
+const CHUNK: int = 32;
+
+const MAX_CHUNKS: int = 160;
+
+chunk_first: []int = new int[MAX_CHUNKS](0);
+
+chunk_floor: []int = new int[MAX_CHUNKS](0);
+
+chunk_count: []int = new int[MAX_CHUNKS](0);
+
+chunk_box: []f32 = new f32[MAX_CHUNKS * 6](0.0);
+
+nchunks: int = 0;
+
+build_world(m: *Mesh) {
+    m.n = 0;
+    plan_cliffs(0);
+    plan_cliffs(1);
+    plan_trees();
+    nchunks = (track_n + CHUNK - 1) / CHUNK;
+    if (nchunks > MAX_CHUNKS) nchunks = MAX_CHUNKS;
+    for k in 0..nchunks {
+        i0: int = k * CHUNK;
+        i1: int = i0 + CHUNK;
+        if (k == nchunks - 1) i1 = track_n;
+        s0: f32 = i0 as f32 * track_ds;
+        s1: f32 = i1 as f32 * track_ds;
+        chunk_first[k] = m.n;
+        build_floor(m, i0, i1);
+        chunk_floor[k] = m.n - chunk_first[k];
+        build_cliffs(m, 0, s0, s1);
+        build_cliffs(m, 1, s0, s1);
+        build_kerbs(m, s0, s1);
+        build_trees(m, s0, s1);
+        if (k == 0) build_gantry(m);
+        chunk_count[k] = m.n - chunk_first[k];
+        fit_chunk(m, k)
+    }
+    set_extra(0.0, 0.0)
+}
+
+// The box chunk k's corners lie in.
+fit_chunk(m: *Mesh, k: int) {
+    b: int = k * 6;
+    for a in 0..3 {
+        chunk_box[b + a] = 1000000.0;
+        chunk_box[b + 3 + a] = -1000000.0
+    }
+    for i in chunk_first[k]..chunk_first[k] + chunk_count[k] {
+        for a in 0..3 {
+            v: f32 = m.data[i * VERTEX_FLOATS + a];
+            chunk_box[b + a] = minf(chunk_box[b + a], v);
+            chunk_box[b + 3 + a] = maxf(chunk_box[b + 3 + a], v)
+        }
+    }
+}
+
+// ---- the floor ----
+// A sheet of quads in rows across the track: every FLOOR_STEP samples, from
+// one wall's foot to the other's (and a little under the walls). A row has
+// a corner on the line, FLOOR_NEAR more out to the road's edge and just
+// past it, and FLOOR_FAR more evenly on to the wall and one past it: more
+// than 0 to the right.
+const FLOOR_STEP: int = 2;
+
+const FLOOR_NEAR: int = 3;
+
+const FLOOR_FAR: int = 9;
+
+// How far under the wall the floor goes on.
+const FLOOR_UNDER: f32 = 3.5;
+
+// How far out corner c of a row is, where the wall stands `wall` out on
+// its side: c from -(FLOOR_NEAR + FLOOR_FAR) to FLOOR_NEAR + FLOOR_FAR.
+floor_d(c: int, wall: f32): f32 {
+    side: f32 = 1.0;
+    k: int = c;
+    if (c < 0) {
+        side = -1.0;
+        k = -c
+    }
+    if (k == 0) return 0.0;
+    if (k == 1) return side * 2.6;
+    if (k == 2) return side * (ROAD_HALF - 0.6);
+    from: f32 = ROAD_HALF + FLANK_FROM;
+    if (k == 3) return side * from;
+    if (k == FLOOR_NEAR + FLOOR_FAR) return side * (wall + FLOOR_UNDER);
+    side * lerpf(from, wall, (k - FLOOR_NEAR) as f32 / (FLOOR_FAR - 1) as f32)
+}
+
+// The ground at sample i (which may be the lap's last, track_n, back at
+// the start), d out: its height, and which way it faces.
+floor_y(i: int, d: f32): f32 {
+    w: int = wrap_i(i);
+    p: V3 = v_madd(track_p[w], right_of(track_t[w]), d);
+    spot_y(Spot {
+        i: w,
+        f: 0.0,
+        s: w as f32 * track_ds,
+        d: d
+    }, p.x, p.z)
+}
+
+floor_normal(i: int, d: f32): V3 {
+    w: int = wrap_i(i);
+    along: f32 = (floor_y(i + 1, d) - floor_y(i - 1, d)) / (2.0 * track_ds);
+    across: f32 = (floor_y(i, d + 0.4) - floor_y(i, d - 0.4)) / 0.8;
+    v_norm(v_sub(v_sub(UP, v_scale(track_t[w], along)), v_scale(right_of(track_t[w]),
+        across)))
+}
+
+// The floor's corner at sample i, corner c of its row.
+put_floor(m: *Mesh, i: int, c: int) {
+    w: int = wrap_i(i);
+    wall: f32 = wall_r[w];
+    if (c < 0) wall = wall_l[w];
+    d: f32 = floor_d(c, wall);
+    p: V3 = v_madd(track_p[w], right_of(track_t[w]), d);
+    p.y = floor_y(i, d);
+    s: f32 = i as f32 * track_ds;
+    set_extra(d, s);
+    put(m, p, floor_normal(i, d), v3(sand_depth(s, d), wall - absf(d), 0.0), MAT_GROUND)
+}
+
+// The floor from sample i0 to sample i1.
+build_floor(m: *Mesh, i0: int, i1: int) {
+    cols: int = FLOOR_NEAR + FLOOR_FAR;
+    first: int = -cols;
+    i: int = i0;
+    while (i < i1) {
+        j: int = i + FLOOR_STEP;
+        if (j > i1) j = i1;
+        for c in first..cols {
+            put_floor(m, i, c);
+            put_floor(m, i, c + 1);
+            put_floor(m, j, c + 1);
+            put_floor(m, i, c);
+            put_floor(m, j, c + 1);
+            put_floor(m, j, c)
+        }
+        i = j
+    }
+}
+
+// ---- the walls ----
+// A wall is a row of great columns of rock, shoulder to shoulder, each set
+// back a little more or less than the next; their front corners are
+// rounded. They rise out of sight (see MAT_ROCK). Boulders lie at the feet
+// of some.
+//
+// How wide a column is, about; how far back its front stands from where
+// the wall stops a car, at most; how deep it is; its corners' radius; and
+// how far up it goes.
+const COLUMN_WIDE: f32 = 7.0;
+
+const COLUMN_BACK: f32 = 1.5;
+
+const COLUMN_DEEP: f32 = 3.6;
+
+const COLUMN_CORNER: f32 = 0.9;
+
+const COLUMN_TOP: f32 = 160.0;
+
+// How high up a wall casts a shadow from: the rest of it, the light passes
+// (or the canyon's floor would never see the sun).
+const WALL_CAST: f32 = 11.0;
+
+// The wall's foot on one side (1 the right, -1 the left), s along the lap,
+// `back` behind where the wall stops a car.
+wall_point(s: f32, side: f32, back: f32): V3 {
+    sp: Spot = spot_at(s, side);
+    sp.d = side * (spot_wall(sp) + back);
+    p: V3 = spot_point(sp);
+    p.y = spot_y(sp, p.x, p.z);
+    p
+}
+
+// The columns of each wall (0 the left, 1 the right), planned before any
+// is built: where each ends along the lap (it starts where the one before
+// ends), and how far back it stands.
+const MAX_COLUMNS: int = 512;
+
+column_end: []f32 = new f32[2 * MAX_COLUMNS](0.0);
+
+column_back: []f32 = new f32[2 * MAX_COLUMNS](0.0);
+
+ncolumns: int = 0;
+
+plan_cliffs(wall: int) {
+    count: int = (track_len / COLUMN_WIDE) as int;
+    if (count > MAX_COLUMNS) count = MAX_COLUMNS;
+    ncolumns = count;
+    back0: f32 = COLUMN_BACK * world_rand();
+    for k in 0..count {
+        // Evenly, but each a little to one side.
+        s1: f32 = track_len * (k + 1) as f32 / count as f32;
+        if (k < count - 1) s1 = s1 + (world_rand() - 0.5) * COLUMN_WIDE * 0.5;
+        back: f32 = COLUMN_BACK * world_rand();
+        // (Not level with the one before: a step shows where one ends.)
+        if (absf(back - back0) < 0.4) back = back0 + 0.5;
+        if (back > COLUMN_BACK) back = back0 - 0.5;
+        column_end[wall * MAX_COLUMNS + k] = s1;
+        column_back[wall * MAX_COLUMNS + k] = back;
+        back0 = back
+    }
+}
+
+// The columns of a wall whose middles are between s0 and s1 along the lap.
+build_cliffs(
+    m: *Mesh,
+    wall: int,
+    s0: f32,
+    s1: f32
+) {
+    side: f32 = -1.0;
+    if (wall == 1) side = 1.0;
+    for k in 0..ncolumns {
+        from: f32 = 0.0;
+        if (k > 0) from = column_end[wall * MAX_COLUMNS + k - 1];
+        to: f32 = column_end[wall * MAX_COLUMNS + k];
+        mid: f32 = (from + to) * 0.5;
+        if (mid >= s0 && mid < s1) {
+            back: f32 = column_back[wall * MAX_COLUMNS + k];
+            // (Each its own shade, the same however the lap is cut up.)
+            world_rng = 7919 * (k + 1) + 104729 * wall;
+            tint: f32 = 0.86 + 0.28 * world_rand();
+            put_column(m, wall_point(from, side, back), wall_point(to, side, back),
+                side, v3(tint, tint * (0.96 + 0.08 * world_rand()), tint * (0.92 + 0.12 * world_rand())));
+            if (world_rand() < 0.3) put_boulder(m, mid, side, back)
+        }
+    }
+}
+
+// A column whose front runs from a to b along the wall, the canyon to its
+// `side` reversed (it faces the track).
+put_column(
+    m: *Mesh,
+    a: V3,
+    b: V3,
+    side: f32,
+    tint: V3
+) {
+    foot: f32 = minf(a.y, b.y);
+    u: V3 = v_sub(b, a);
+    u.y = 0.0;
+    wide: f32 = v_len(u);
+    u = v_norm(u);
+    // Away from the track.
+    v: V3 = v_scale(right_of(u), side);
+    c: f32 = minf(COLUMN_CORNER, wide * 0.4);
+    // Its outline, seen from above: back along one side, round the corner,
+    // across the front, round the other, and back. (Across, and back from
+    // the front; and the way each point faces, the same.)
+    n: int = 0;
+    column_u[0] = 0.0;
+    column_v[0] = COLUMN_DEEP;
+    column_nu[0] = -1.0;
+    column_nv[0] = 0.0;
+    n = 1;
+    arc: int = 4;
+    for e in 0..2 {
+        for k in 0..arc + 1 {
+            t: f32 = PI * 0.5 * k as f32 / arc as f32;
+            if (e == 0) {
+                column_u[n] = c - c * cosf(t);
+                column_v[n] = c - c * sinf(t);
+                column_nu[n] = -cosf(t);
+                column_nv[n] = -sinf(t)
+            } else {
+                column_u[n] = wide - c + c * sinf(t);
+                column_v[n] = c - c * cosf(t);
+                column_nu[n] = sinf(t);
+                column_nv[n] = -cosf(t)
+            }
+            n = n + 1
+        }
+    }
+    column_u[n] = wide;
+    column_v[n] = COLUMN_DEEP;
+    column_nu[n] = 1.0;
+    column_nv[n] = 0.0;
+    n = n + 1;
+    set_extra(foot, foot + WALL_CAST);
+    y0: f32 = foot - 3.0;
+    y1: f32 = foot + COLUMN_TOP;
+    for k in 0..n - 1 {
+        p0: V3 = v_madd(v_madd(a, u, column_u[k]), v, column_v[k]);
+        p1: V3 = v_madd(v_madd(a, u, column_u[k + 1]), v, column_v[k + 1]);
+        n0: V3 = v_add(v_scale(u, column_nu[k]), v_scale(v, column_nv[k]));
+        n1: V3 = v_add(v_scale(u, column_nu[k + 1]), v_scale(v, column_nv[k + 1]));
+        put_quad_n(m, v3(p0.x, y0, p0.z), v3(p1.x, y0, p1.z), v3(p1.x, y1, p1.z),
+            v3(p0.x, y1, p0.z), n0, n1, n1, n0, tint, MAT_ROCK)
+    }
+}
+
+column_u: []f32 = new f32[16](0.0);
+
+column_v: []f32 = new f32[16](0.0);
+
+column_nu: []f32 = new f32[16](0.0);
+
+column_nv: []f32 = new f32[16](0.0);
+
+// A boulder at a column's foot, in the space the column leaves by standing
+// back: a rounded block, half sunk, a little askew.
+put_boulder(
+    m: *Mesh,
+    s: f32,
+    side: f32,
+    back: f32
+) {
+    size: f32 = 0.7 + 0.9 * world_rand();
+    p: V3 = wall_point(s + (world_rand() - 0.5) * 3.0, side, maxf(back - size * 0.5,
+        size * 0.9));
+    mat_identity(xf);
+    xf[12] = p.x;
+    xf[13] = p.y + size * 0.25;
+    xf[14] = p.z;
+    mat_rotate(xf, UP, world_rand() * TAU);
+    mat_rotate(xf, v3(1.0, 0.0, 0.0), (world_rand() - 0.5) * 0.5);
+    tint: f32 = 0.8 + 0.3 * world_rand();
+    set_extra(p.y, p.y + WALL_CAST);
+    put_rounded_box(m, xf, v3(size * (0.8 + 0.5 * world_rand()), size * 0.75, size * (0.7 + 0.4 * world_rand())),
+        size * 0.3, 0.0, 1, v3(tint, tint * 0.97, tint * 0.94), MAT_ROCK)
+}
+
+// ---- kerbs ----
+// Along the inside of each bend, the road's edge is a row of low blocks,
+// red and white by turns.
+const KERB_K: f32 = 0.021;
+
+const KERB_LONG: f32 = 1.5;
+
+build_kerbs(m: *Mesh, s0: f32, s1: f32) {
+    count: int = (track_len / KERB_LONG) as int;
+    long: f32 = track_len / count as f32;
+    set_extra(0.0, 0.0);
+    for k in 0..count {
+        s: f32 = (k as f32 + 0.5) * long;
+        sp: Spot = spot_at(s, 0.0);
+        bend: f32 = lerpf(track_k[sp.i], track_k[wrap_i(sp.i + 1)], sp.f);
+        if (s >= s0 && s < s1 && absf(bend) > KERB_K) {
+            // (Bending left, its inside is to the left.)
+            sp.d = -signf(bend) * (ROAD_HALF + 0.42);
+            p: V3 = spot_point(sp);
+            p.y = spot_y(sp, p.x, p.z) + 0.02;
+            t: V3 = way_at(sp.i, sp.f);
+            col: V3 = v3(0.86, 0.2, 0.17);
+            if (k % 2 == 0) col = v3(0.95, 0.94, 0.9);
+            put_block(m, p, right_of(t), UP, t, v3(0.42, 0.07, long * 0.5 - 0.02),
+                0.05, col, MAT_PAINT)
+        }
+    }
+}
+
+// ---- the start ----
+// Over the start line, a gantry: two posts and a beam, with a chequered
+// board along it.
+build_gantry(m: *Mesh) {
+    set_extra(0.0, 0.0);
+    sp: Spot = spot_at(0.0, 0.0);
+    c: V3 = spot_point(sp);
+    c.y = track_h[0];
+    t: V3 = track_t[0];
+    r: V3 = right_of(t);
+    half: f32 = ROAD_HALF + 1.6;
+    mat_frame(xf, v_scale(r, -1.0), UP, t, c);
+    frame: []f32 = new f32[16](0.0);
+    for e in 0..2 {
+        side: f32 = 1.0;
+        if (e == 0) side = -1.0;
+        mat_copy(frame, xf);
+        mat_translate(frame, v3(side * half, 2.9, 0.0));
+        put_rounded_box(m, frame, v3(0.3, 3.0, 0.3), 0.12, 0.004, 2, cream, MAT_PAINT)
+    }
+    mat_copy(frame, xf);
+    mat_translate(frame, v3(0.0, 5.6, 0.0));
+    put_rounded_box(m, frame, v3(half + 0.5, 0.5, 0.36), 0.16, 0.004, 2, body_color,
+        MAT_SOFT);
+    // The board: squares, dark and light by turns, on both its faces.
+    sq: f32 = 0.4;
+    across: int = (half * 2.0 / sq) as int - 1;
+    for face in 0..2 {
+        z: f32 = 0.37;
+        if (face == 0) z = -0.37;
+        for row in 0..2 {
+            for k in 0..across {
+                col: V3 = cream;
+                if ((row + k) % 2 == 0) col = dark;
+                x0: f32 = (k as f32 - across as f32 * 0.5) * sq;
+                y0: f32 = 5.2 + row as f32 * sq;
+                put_quad(m, mat_point(xf, v3(x0, y0, z)), mat_point(xf, v3(x0 + sq,
+                    y0, z)), mat_point(xf, v3(x0 + sq, y0 + sq, z)), mat_point(xf,
+                    v3(x0, y0 + sq, z)), v_scale(t, signf(z)), col, MAT_PAINT)
+            }
+        }
+    }
+}
+
+// ---- trees ----
+// Trees stand here and there along the walls' feet. Each is something to
+// run into (see car.l8): where its trunk is, and how thick; and, to build
+// it, how far along the lap it is, the ground's height there, and its
+// size.
+const MAX_OBSTACLES: int = 256;
+
+obs_x: []f32 = new f32[MAX_OBSTACLES](0.0);
+
+obs_z: []f32 = new f32[MAX_OBSTACLES](0.0);
+
+obs_r: []f32 = new f32[MAX_OBSTACLES](0.0);
+
+obs_s: []f32 = new f32[MAX_OBSTACLES](0.0);
+
+obs_y: []f32 = new f32[MAX_OBSTACLES](0.0);
+
+obs_size: []f32 = new f32[MAX_OBSTACLES](0.0);
+
+nobs: int = 0;
+
+plan_trees() {
+    nobs = 0;
+    s: f32 = 20.0;
+    while (s < track_len - 20.0) {
+        side: f32 = 1.0;
+        if (world_rand() < 0.5) side = -1.0;
+        sp: Spot = spot_at(s, side);
+        wall: f32 = spot_wall(sp);
+        // Only where the wall stands well back, and not in the sand.
+        d: f32 = wall - 2.2 - 3.5 * world_rand();
+        sp.d = side * d;
+        size: f32 = 1.5 + 0.9 * world_rand();
+        if (d > ROAD_HALF + 7.0 && sand_depth(sp.s, sp.d) < -1.5 && nobs < MAX_OBSTACLES) {
+            p: V3 = spot_point(sp);
+            obs_x[nobs] = p.x;
+            obs_z[nobs] = p.z;
+            obs_r[nobs] = 0.22 * size;
+            obs_s[nobs] = sp.s;
+            obs_y[nobs] = spot_y(sp, p.x, p.z);
+            obs_size[nobs] = size;
+            nobs = nobs + 1
+        }
+        s = s + 9.0 + 16.0 * world_rand()
+    }
+}
+
+// The trees between s0 and s1 along the lap.
+build_trees(m: *Mesh, s0: f32, s1: f32) {
+    set_extra(0.0, 0.0);
+    for k in 0..nobs {
+        if (obs_s[k] >= s0 && obs_s[k] < s1) put_tree(m, obs_x[k], obs_z[k], obs_y[k],
+            obs_size[k])
+    }
+}

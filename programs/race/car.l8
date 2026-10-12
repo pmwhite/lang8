@@ -1,0 +1,399 @@
+tag race;
+
+use_tag skate;
+
+// The car: how it drives, and the lap it is on.
+//
+// It is a toy's driving, not a real car's, worked out flat on the ground:
+// - It has a speed along its own way and a speed sideways. Its tyres pull
+//   the sideways speed toward none, as hard as the ground under them
+//   grips: turn faster than that, and it slides wide.
+// - The front wheels turn it, by how fast it rolls. The faster it goes the
+//   less they turn, so that on the road, hard over, it only just slides.
+// - Each kind of ground has a top speed, a grip, and a hold: faster than
+//   the ground's top speed, the ground slows the car toward it. The road
+//   is fast and grips; grass is slower and slippery; sand is slow. Each
+//   wheel is on its own ground, and the car has the mean of the four: two
+//   wheels on the grass cost half what four do.
+// - The canyon's walls (see track.l8) and the trees stop it.
+const G: f32 = 9.81;
+
+// Physics steps at 120 Hz.
+const STEP_DT: f32 = 0.008333334;
+
+// The engine's pull from rest (it fades toward the top speed), the
+// brakes', and going backward: the pull and the most speed.
+const ENGINE: f32 = 11.0;
+
+const BRAKES: f32 = 22.0;
+
+const REVERSE: f32 = 6.0;
+
+const REVERSE_TOP: f32 = 8.0;
+
+// What slows it rolling free: a little always, and more by its speed.
+const ROLL: f32 = 0.6;
+
+const ROLL_BY_SPEED: f32 = 0.035;
+
+// The most the front wheels turn; how fast the steering wheel goes over
+// (all the way, from straight, in 1 / STEER_RATE seconds) and comes back;
+// and the pull sideways that the wheel hard over asks of the tyres, at
+// speed: a little more than the road grips, and on slippery ground no more
+// than STEER_OVER times what that grips, so that the car slides there but
+// does not spin.
+const STEER_MAX: f32 = 0.5;
+
+const STEER_RATE: f32 = 5.0;
+
+const STEER_BACK: f32 = 8.0;
+
+const STEER_PULL: f32 = 18.5;
+
+const STEER_OVER: f32 = 1.7;
+
+// Sliding, the car comes round to face the way it is going: how fast.
+const STRAIGHTEN: f32 = 1.6;
+
+// Between its axles.
+const WHEELBASE: f32 = 1.84;
+
+// How near its middle comes to a wall.
+const CAR_HALF: f32 = 1.05;
+
+// By the ground (ROAD, GRASS, SAND): the top speed on it, its grip, and
+// how fast it slows a car that is going faster than its top speed (per
+// second, of the speed over).
+ground_top: []f32 = [40.0, 23.0, 12.0];
+
+ground_grip: []f32 = [17.0, 9.0, 8.0];
+
+ground_hold: []f32 = [0.5, 0.9, 1.8];
+
+// What the driver asks: the wheel from -1 (left) to 1 (right), and the
+// pedals from 0 to 1.
+type Input = {
+    steer: f32;
+    gas: f32;
+    brake: f32
+}
+
+type Car = {
+    // Where it is on the ground (the middle of it), which way it points,
+    // and how it moves; and the same a step ago, to draw it between steps.
+    p: V3;
+    yaw: f32;
+    v: V3;
+    prev: V3;
+    prev_yaw: f32;
+    // How far over the steering wheel is, from -1 (left) to 1; how far that
+    // turns the front wheels (to the right more than 0); and how far the
+    // wheels have rolled.
+    steer: f32;
+    turned: f32;
+    rolled: f32;
+    // Where it is on the track; and how far it has come from the start
+    // line in all, going the way round (less going back).
+    spot: Spot;
+    progress: f32;
+    // The ground's height under each wheel (front left, front right, back
+    // left, back right), and what the ground is, as the mean of the four:
+    // its top speed, grip, and hold.
+    wheel_y: [4]f32;
+    top: f32;
+    grip: f32;
+    hold: f32;
+    // How many wheels are off the road.
+    off: int;
+    // How hard it is pulled sideways and along, for its lean; and how hard
+    // it last hit something, fading.
+    pull_side: f32;
+    pull_along: f32;
+    hit: f32
+}
+
+// A car at rest s along the lap, on the line.
+new_car(s: f32): *Car@new {
+    c: *Car = new Car {
+        p: v3(0.0, 0.0, 0.0),
+        yaw: 0.0,
+        v: v3(0.0, 0.0, 0.0),
+        prev: v3(0.0, 0.0, 0.0),
+        prev_yaw: 0.0,
+        steer: 0.0,
+        turned: 0.0,
+        rolled: 0.0,
+        spot: spot_at(0.0, 0.0),
+        progress: 0.0,
+        wheel_y: [0.0, 0.0, 0.0, 0.0],
+        top: 40.0,
+        grip: 17.0,
+        hold: 0.5,
+        off: 0,
+        pull_side: 0.0,
+        pull_along: 0.0,
+        hit: 0.0
+    };
+    place_car(c, s);
+    c
+}
+
+// Put it at rest s along the lap from the start line (less than 0: before
+// it), on the line, pointing the way round.
+place_car(c: *Car, s: f32) {
+    sp: Spot = spot_at(s, 0.0);
+    c.p = spot_point(sp);
+    c.yaw = dir_yaw(way_at(sp.i, sp.f));
+    c.v = v3(0.0, 0.0, 0.0);
+    c.prev = c.p;
+    c.prev_yaw = c.yaw;
+    c.steer = 0.0;
+    c.turned = 0.0;
+    c.spot = sp;
+    c.progress = s;
+    c.pull_side = 0.0;
+    c.pull_along = 0.0;
+    c.hit = 0.0;
+    feel_ground(c)
+}
+
+// Where wheel k is: the car's middle, and out to it.
+wheel_at(c: *Car, k: int): V3 {
+    f: V3 = yaw_dir(c.yaw);
+    r: V3 = right_of(f);
+    along: f32 = AXLE_Z;
+    if (k >= 2) along = -AXLE_Z;
+    across: f32 = -WHEEL_X;
+    if (k % 2 == 1) across = WHEEL_X;
+    v_madd(v_madd(c.p, f, along), r, across)
+}
+
+// What is under the wheels.
+feel_ground(c: *Car) {
+    top: f32 = 0.0;
+    grip: f32 = 0.0;
+    hold: f32 = 0.0;
+    c.off = 0;
+    for k in 0..4 {
+        w: V3 = wheel_at(c, k);
+        sp: Spot = locate(w, c.spot.i, 6);
+        c.wheel_y[k] = spot_y(sp, w.x, w.z);
+        g: int = spot_ground(sp);
+        if (g != ROAD) c.off = c.off + 1;
+        top = top + ground_top[g] * 0.25;
+        grip = grip + ground_grip[g] * 0.25;
+        hold = hold + ground_hold[g] * 0.25
+    }
+    c.top = top;
+    c.grip = grip;
+    c.hold = hold
+}
+
+// The ground's height under the car's middle, and how it slopes: up toward
+// the nose, and up toward the right.
+car_y(c: *Car): f32 {
+    (c.wheel_y[0] + c.wheel_y[1] + c.wheel_y[2] + c.wheel_y[3]) * 0.25
+}
+
+car_rise(c: *Car): f32 {
+    (c.wheel_y[0] + c.wheel_y[1] - c.wheel_y[2] - c.wheel_y[3]) / (4.0 * AXLE_Z)
+}
+
+car_tilt(c: *Car): f32 {
+    (c.wheel_y[1] + c.wheel_y[3] - c.wheel_y[0] - c.wheel_y[2]) / (4.0 * WHEEL_X)
+}
+
+// x moved toward `to` by at most `by`.
+toward(x: f32, to: f32, by: f32): f32 {
+    if (x < to) return minf(x + by, to);
+    maxf(x - by, to)
+}
+
+step_car(c: *Car, inp: Input, dt: f32) {
+    c.prev = c.p;
+    c.prev_yaw = c.yaw;
+    feel_ground(c);
+    f: V3 = yaw_dir(c.yaw);
+    along: f32 = v_dot(c.v, f);
+    // The steering wheel goes over, and comes back; it turns the front
+    // wheels less the faster the car goes.
+    want: f32 = clampf(inp.steer, -1.0, 1.0);
+    rate: f32 = STEER_RATE;
+    if (absf(want) < absf(c.steer) || want * c.steer < 0.0) rate = STEER_BACK;
+    c.steer = toward(c.steer, want, rate * dt);
+    ask: f32 = minf(STEER_PULL, c.grip * STEER_OVER);
+    c.turned = c.steer * minf(STEER_MAX, atan2f(WHEELBASE * ask, along * along));
+    // (A turn to the right is a yaw the other way: see math.l8.)
+    turn: f32 = -along * sinf(c.turned) / cosf(c.turned) / WHEELBASE;
+    c.yaw = wrap_angle(c.yaw + turn * dt);
+    // Sliding forward, it comes round to face the way it goes.
+    if (along > 3.0) c.yaw = approach_angle(c.yaw, dir_yaw(c.v), ease(STRAIGHTEN,
+        dt));
+    f = yaw_dir(c.yaw);
+    r: V3 = right_of(f);
+    along = v_dot(c.v, f);
+    side: f32 = v_dot(c.v, r);
+    // The pedals.
+    pull: f32 = 0.0;
+    gas: f32 = clampf(inp.gas, 0.0, 1.0);
+    brake: f32 = clampf(inp.brake, 0.0, 1.0);
+    if (gas > 0.0 && along > -0.5) {
+        u: f32 = along / c.top;
+        pull = pull + ENGINE * gas * clampf(1.0 - u * u, 0.0, 1.0)
+    } else if (gas > 0.0) pull = pull + BRAKES * gas;
+    if (brake > 0.0) {
+        if (along > 0.5) pull = pull - BRAKES * brake else {
+            u: f32 = along / REVERSE_TOP;
+            pull = pull - REVERSE * brake * clampf(1.0 - u * u, 0.0, 1.0)
+        }
+    }
+    // Downhill it rolls faster, uphill slower.
+    pull = pull - G * car_rise(c);
+    // What holds it back: rolling, and the ground, if it is going faster
+    // than the ground lets it.
+    speed: f32 = absf(along);
+    drag: f32 = ROLL + ROLL_BY_SPEED * speed + c.hold * maxf(speed - c.top, 0.0);
+    before: f32 = along;
+    along = along + pull * dt;
+    along = toward(along, 0.0, drag * dt);
+    // (Nothing but the pedals takes it through a stop.)
+    if (gas == 0.0 && brake == 0.0 && before * along < 0.0) along = 0.0;
+    // The tyres.
+    cut: f32 = c.grip * dt;
+    held: f32 = clampf(side, -cut, cut);
+    side = side - held;
+    c.pull_side = lerpf(c.pull_side, -held / dt, ease(10.0, dt));
+    c.pull_along = lerpf(c.pull_along, (along - before) / dt, ease(10.0, dt));
+    c.v = v_add(v_scale(f, along), v_scale(r, side));
+    c.p = v_madd(c.p, c.v, dt);
+    // (How far the wheels have rolled, kept within one turn of them.)
+    c.rolled = c.rolled + along * dt;
+    if (c.rolled > TAU * WHEEL_R) c.rolled = c.rolled - TAU * WHEEL_R;
+    if (c.rolled < 0.0) c.rolled = c.rolled + TAU * WHEEL_R;
+    c.hit = c.hit * (1.0 - ease(6.0, dt));
+    hit_trees(c, dt);
+    // Where it has come to; and no farther out than the wall.
+    sp: Spot = locate(c.p, c.spot.i, 12);
+    room: f32 = spot_wall(sp) - CAR_HALF;
+    if (absf(sp.d) > room) {
+        way: V3 = way_at(sp.i, sp.f);
+        out: V3 = v_scale(right_of(way), signf(sp.d));
+        c.p = v_madd(c.p, out, room - absf(sp.d));
+        bounce(c, out);
+        // Scraping along it, the car comes round to the wall's way.
+        if (v_dot(f, way) < 0.0) way = v_scale(way, -1.0);
+        c.yaw = approach_angle(c.yaw, dir_yaw(way), ease(3.0, dt));
+        sp = locate(c.p, sp.i, 12)
+    }
+    c.progress = c.progress + wrap_s(sp.s - c.spot.s);
+    c.spot = sp
+}
+
+// It has run into something that faces `out` from the car: what of its
+// speed went into the thing comes back a little, and the rest is rubbed
+// down.
+bounce(c: *Car, out: V3) {
+    into: f32 = v_dot(c.v, out);
+    if (into <= 0.0) return;
+    c.v = v_madd(c.v, out, -1.25 * into);
+    c.v = v_scale(c.v, 1.0 - minf(into * 0.03, 0.5));
+    c.hit = maxf(c.hit, into)
+}
+
+// A trunk in the way pushes the car back out, and turns it aside, so that
+// with the gas held it slips round the tree.
+hit_trees(c: *Car, dt: f32) {
+    for k in 0..nobs {
+        dx: f32 = c.p.x - obs_x[k];
+        dz: f32 = c.p.z - obs_z[k];
+        reach: f32 = obs_r[k] + CAR_HALF;
+        d2: f32 = dx * dx + dz * dz;
+        if (d2 < reach * reach && d2 > 0.0001) {
+            d: f32 = sqrtf(d2);
+            away: V3 = v3(dx / d, 0.0, dz / d);
+            c.p = v_madd(c.p, away, reach - d);
+            bounce(c, v_scale(away, -1.0));
+            past: V3 = right_of(away);
+            if (v_dot(past, yaw_dir(c.yaw)) < 0.0) past = v_scale(past, -1.0);
+            c.yaw = approach_angle(c.yaw, dir_yaw(past), ease(4.0, dt))
+        }
+    }
+}
+
+// ---- the lap ----
+// A lap is counted when the car, having come all the way round, crosses
+// the start line: when it has come a lap's length farther from the line
+// than ever before. (Backing over the line and coming over it again is no
+// lap; nor is there any other way round: see track.l8.) The clock starts
+// the first time it crosses.
+type Laps = {
+    // How many times it has crossed the line, counting each only once (0
+    // before the start); the lap's time so far; and the last lap's and the
+    // best's (0 if there is none yet).
+    crossed: int;
+    time: f32;
+    last: f32;
+    best: f32;
+    // Since a lap was last finished, and whether that one was the best
+    // yet: to say so for a moment.
+    since: f32;
+    was_best: bool;
+    // How long it has been going the wrong way round.
+    wrong: f32
+}
+
+laps: Laps = Laps {
+    crossed: 0,
+    time: 0.0,
+    last: 0.0,
+    best: 0.0,
+    since: 100.0,
+    was_best: false,
+    wrong: 0.0
+};
+
+reset_laps() {
+    laps.crossed = 0;
+    laps.time = 0.0;
+    laps.last = 0.0;
+    laps.since = 100.0;
+    laps.was_best = false;
+    laps.wrong = 0.0
+}
+
+tick_laps(c: *Car, dt: f32) {
+    laps.since = laps.since + dt;
+    if (laps.crossed > 0) laps.time = laps.time + dt;
+    if (c.progress >= laps.crossed as f32 * track_len) {
+        if (laps.crossed > 0) {
+            laps.last = laps.time;
+            laps.was_best = laps.best == 0.0 || laps.time < laps.best;
+            if (laps.was_best) laps.best = laps.time;
+            laps.since = 0.0
+        }
+        laps.crossed = laps.crossed + 1;
+        laps.time = 0.0
+    }
+    // The wrong way: moving against the way round for a while.
+    against: f32 = -v_dot(c.v, way_at(c.spot.i, c.spot.f));
+    if (against > 3.0) laps.wrong = laps.wrong + dt else laps.wrong = 0.0
+}
+
+// ---- a driver ----
+// Something to drive it round by itself (L8_AUTO): it steers for a point
+// on the line some way ahead, and slows for the bends it can see coming.
+auto_input(c: *Car): Input {
+    f: V3 = yaw_dir(c.yaw);
+    speed: f32 = v_dot(c.v, f);
+    ahead: Spot = spot_at(c.spot.s + 7.0 + 0.5 * maxf(speed, 0.0), 0.0);
+    to: V3 = v_sub(spot_point(ahead), c.p);
+    off: f32 = wrap_angle(dir_yaw(to) - c.yaw);
+    // The tightest bend within reach of its brakes.
+    tight: f32 = 0.0001;
+    reach: int = (12.0 + speed * speed / (2.0 * BRAKES * 0.6)) as int;
+    for k in 0..reach tight = maxf(tight, absf(track_k[wrap_i(c.spot.i + k)]));
+    safe: f32 = sqrtf(ground_grip[ROAD] * 0.8 / tight);
+    inp: Input = Input { steer: clampf(-off * 3.0, -1.0, 1.0), gas: 0.0, brake: 0.0 };
+    if (speed < safe) inp.gas = 1.0 else if (speed > safe + 1.5) inp.brake = 1.0;
+    inp
+}
