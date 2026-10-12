@@ -1047,24 +1047,50 @@ async function main() {
   // widens into the stats, counted over each half second.
   const perf = document.querySelector(".rate");
   const rate = { frames: 0, late: 0, since: performance.now(), text: perf.querySelector("b"), wide: 0 };
-  // (An unseen copy of the words at their longest, to hold the pill's
-  // width to it: a number changing does not move the pill.)
+  // The stats: which beats of the screen the game aims at (or its beat,
+  // when ?scale= has fixed the size), the picture's size, the frames late
+  // over the last half second, and that the device is saving its battery
+  // (if it is). Each number has a cell of its own, as wide as its most
+  // digits (measured by an unseen copy, and never narrowed), so that one
+  // changing moves nothing else, nor the pill.
   const measure = document.createElement("b");
   measure.className = "measure";
   perf.querySelector(".stats").appendChild(measure);
-  const sizeText = () => `${Math.round(size * 100)}%${plain ? " plain" : ""}`;
-  // The stats: which beats of the screen the game aims at (or its beat,
-  // when ?scale= has fixed the size), the picture's size, and the frames
-  // late over the last half second, if any.
+  // (The cells, each with the most it could hold where that is a number.)
+  const cells = ["", "00", " · ", "000", "%", "", " · ", "00", " late", ""].map((widest) => {
+    const el = document.createElement("span");
+    // (A number keeps to its cell's right, so the gap for a digit it has
+    // not got comes after the words before it.)
+    if (/^0+$/.test(widest)) el.className = "num";
+    rate.text.appendChild(el);
+    return { el, widest, wide: 0 };
+  });
   const showStats = () => {
     const s = pacer.state;
     const hz = Math.round(1000 / s.beat);
-    const main = pace.on ? `${["every", "every 2nd", "every 3rd"][s.beats - 1]} beat of ${hz} · ${sizeText()}` : `${hz} Hz · ${sizeText()}`;
-    const low = lowPower() ? " · low power" : "";
-    measure.textContent = `${main} · 99 late${low}`;
-    rate.wide = Math.max(rate.wide, measure.getBoundingClientRect().width);
-    perf.style.setProperty("--stats", `${Math.ceil(rate.wide) + 13}px`);
-    rate.text.textContent = `${main}${rate.late > 0 ? ` · ${rate.late} late` : ""}${low}`;
+    const words = [
+      pace.on ? `${["every", "every 2nd", "every 3rd"][s.beats - 1]} beat of ` : "",
+      String(hz),
+      pace.on ? " · " : " Hz · ",
+      String(Math.round(size * 100)),
+      "%",
+      plain ? " plain" : "",
+      " · ",
+      String(rate.late),
+      " late",
+      lowPower() ? " · low power" : "",
+    ];
+    let wide = 0;
+    cells.forEach((cell, i) => {
+      for (const text of [words[i], cell.widest]) {
+        measure.textContent = text;
+        cell.wide = Math.max(cell.wide, measure.getBoundingClientRect().width);
+      }
+      cell.el.style.minWidth = `${Math.ceil(cell.wide)}px`;
+      cell.el.textContent = words[i];
+      wide += Math.ceil(cell.wide);
+    });
+    perf.style.setProperty("--stats", `${wide + 13}px`);
   };
   // Whether the device is saving its battery, as far as can be told: the
   // browser gives far fewer frames than sixty a second even to a game that
