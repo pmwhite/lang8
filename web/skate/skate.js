@@ -269,9 +269,9 @@ const dayName = (id) => {
 };
 const placeName = (id) => {
   if (id === TUTORIAL) return "Tutorial";
-  if (isBigAir(id)) return `Big air ${id - BIG_AIR}`;
-  if (isDaily(id)) return `${id < 0 ? "Daily park" : "Daily course"}${Math.abs(id) === today() ? "" : `, ${dayName(id)}`}`;
-  return `${id < 0 ? "Park" : "Course"} ${Math.abs(id)}`;
+  if (isBigAir(id)) return id === BIG_AIR + 1 ? "Big air" : `Big air ${id - BIG_AIR}`;
+  if (isDaily(id)) return `${id < 0 ? "Daily park" : "Daily slopestyle"}${Math.abs(id) === today() ? "" : `, ${dayName(id)}`}`;
+  return `${id < 0 ? "Park" : "Slopestyle"} ${Math.abs(id)}`;
 };
 // (Picked before the game is up: it starts there instead. See main.)
 let wanted = null;
@@ -297,7 +297,7 @@ const goTo = (id) => {
   else if (id === (headed ?? placeNow)) typeKeys([id === TUTORIAL ? 116 : 114]);
   else typePlace(id);
 };
-const randomPlace = (kind) => (kind === "parks" ? -1 : 1) * ((kind === "bigair" ? BIG_AIR : 0) + PLACES + 1 + Math.floor(Math.random() * 99000));
+const randomPlace = (kind) => (kind === "parks" ? -1 : 1) * (PLACES + 1 + Math.floor(Math.random() * 99000));
 
 // The leaderboards (see ../skate-board/worker.js). There is nothing here to
 // join or sign up to: whoever looks after them makes each person a link
@@ -752,11 +752,10 @@ for (const el of sheets.menu.querySelectorAll(".item")) {
   onTap(el, () => {
     const to = el.dataset.go;
     if (to === "tutorial") goTo(TUTORIAL);
-    if (to === "daily") go("place", today());
-    if (to === "dailypark") go("place", -today());
     if (to === "courses") go("places", "courses");
     if (to === "parks") go("places", "parks");
-    if (to === "bigair") go("places", "bigair");
+    // (One big air is enough.)
+    if (to === "bigair") go("place", BIG_AIR + 1);
   });
 }
 onTap(sheets.menu.querySelector(".me"), () => {
@@ -764,14 +763,14 @@ onTap(sheets.menu.querySelector(".me"), () => {
 });
 onTap(document.querySelector(".pick"), goHome);
 
-// The places to pick from: the courses, the parks, or the big airs, and
-// one at random.
+// The places to pick from: the slopestyles or the parks, the day's first,
+// and one at random.
 let picking = "courses";
 const showPlaces = () => {
   const el = sheets.places;
   const kind = picking;
-  const names = { courses: "Course", parks: "Park", bigair: "Big air" };
-  el.querySelector("h2").textContent = { courses: "Courses", parks: "Parks", bigair: "Big air" }[kind];
+  const names = { courses: "Slopestyle", parks: "Park" };
+  el.querySelector("h2").textContent = { courses: "Slopestyle", parks: "Parks" }[kind];
   const grid = el.querySelector(".grid");
   grid.textContent = "";
   const card = (title, id) => {
@@ -781,7 +780,8 @@ const showPlaces = () => {
     onTap(div, () => go("place", id || randomPlace(kind)));
     grid.append(div);
   };
-  for (let n = 1; n <= PLACES; n++) card(`${names[kind]} ${n}`, kind === "parks" ? -n : kind === "bigair" ? BIG_AIR + n : n);
+  card(`Daily ${kind === "parks" ? "park" : "slopestyle"}`, kind === "parks" ? -today() : today());
+  for (let n = 1; n <= PLACES; n++) card(`${names[kind]} ${n}`, kind === "parks" ? -n : n);
   card("Random", 0);
 };
 
