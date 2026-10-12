@@ -1046,18 +1046,25 @@ async function main() {
   // How the frames come, top right, if he asks to see it: the button
   // widens into the stats, counted over each half second.
   const perf = document.querySelector(".rate");
-  const rate = { frames: 0, late: 0, since: performance.now(), text: perf.querySelector("b") };
+  const rate = { frames: 0, late: 0, since: performance.now(), text: perf.querySelector("b"), wide: 0 };
+  // (An unseen copy of the words at their longest, to hold the pill's
+  // width to it: a number changing does not move the pill.)
+  const measure = document.createElement("b");
+  measure.className = "measure";
+  perf.querySelector(".stats").appendChild(measure);
   const sizeText = () => `${Math.round(size * 100)}%${plain ? " plain" : ""}`;
   // The stats: which beats of the screen the game aims at (or its beat,
   // when ?scale= has fixed the size), the picture's size, and the frames
   // late over the last half second, if any.
-  const rateText = () => {
+  const showStats = () => {
     const s = pacer.state;
     const hz = Math.round(1000 / s.beat);
-    let text = pace.on ? `${["every", "every 2nd", "every 3rd"][s.beats - 1]} beat of ${hz} · ${sizeText()}` : `${hz} Hz · ${sizeText()}`;
-    if (rate.late > 0) text += ` · ${rate.late} late`;
-    if (lowPower()) text += " · low power";
-    return text;
+    const main = pace.on ? `${["every", "every 2nd", "every 3rd"][s.beats - 1]} beat of ${hz} · ${sizeText()}` : `${hz} Hz · ${sizeText()}`;
+    const low = lowPower() ? " · low power" : "";
+    measure.textContent = `${main} · 99 late${low}`;
+    rate.wide = Math.max(rate.wide, measure.getBoundingClientRect().width);
+    perf.style.setProperty("--stats", `${Math.ceil(rate.wide) + 13}px`);
+    rate.text.textContent = `${main}${rate.late > 0 ? ` · ${rate.late} late` : ""}${low}`;
   };
   // Whether the device is saving its battery, as far as can be told: the
   // browser gives far fewer frames than sixty a second even to a game that
@@ -1065,11 +1072,11 @@ async function main() {
   const lowPower = () => 1000 / pacer.state.beat < 50;
   // (Shown, or not, as it was last time.)
   if (stored("skate.fps", false)) {
-    rate.text.textContent = rateText();
+    showStats();
     perf.classList.add("on");
   }
   onTap(perf, () => {
-    rate.text.textContent = rateText();
+    showStats();
     store("skate.fps", perf.classList.toggle("on"));
   });
 
@@ -1174,7 +1181,7 @@ async function main() {
     // (Late as the pacing counts it: by half a beat past what it aims at.)
     if (rate.frames > 1 && gap > (pacer.state.beats + 0.5) * pacer.state.beat && gap < 2000) rate.late++;
     if (now - rate.since >= 500) {
-      rate.text.textContent = rateText();
+      showStats();
       rate.frames = 0;
       rate.late = 0;
       rate.since = now;
