@@ -252,10 +252,10 @@ const noteRun = (id, score) => {
 // How long ago, in a word or two.
 const ago = (at) => {
   const s = Math.max(0, (Date.now() - at) / 1000);
-  if (s < 90) return "just now";
-  if (s < 3600) return `${Math.round(s / 60)} min ago`;
-  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
-  if (s < 7 * 86400) return `${Math.round(s / 86400)} d ago`;
+  if (s < 90) return "now";
+  if (s < 3600) return `${Math.round(s / 60)} min`;
+  if (s < 86400) return `${Math.round(s / 3600)} h`;
+  if (s < 7 * 86400) return `${Math.round(s / 86400)} d`;
   return new Date(at).toLocaleDateString(undefined, { day: "numeric", month: "short" });
 };
 // The day's places: the date in one time zone for everyone, so that they
@@ -290,7 +290,8 @@ const placeName = (id) => {
   if (id >= 1 && id <= SLOPE_NAMES.length) return SLOPE_NAMES[id - 1];
   if (id <= -1 && id >= -PARK_NAMES.length) return PARK_NAMES[-id - 1];
   if (isBigAir(id)) return id === BIG_AIR + 1 ? "Big air" : `Big air ${id - BIG_AIR}`;
-  if (isDaily(id)) return `${id < 0 ? "Daily park" : "Daily slopestyle"}${Math.abs(id) === today() ? "" : `, ${dayName(id)}`}`;
+  // (A day gone by is named by its day alone: "Park, 9 Oct".)
+  if (isDaily(id)) return Math.abs(id) === today() ? (id < 0 ? "Daily park" : "Daily slopestyle") : `${id < 0 ? "Park" : "Slopestyle"} ${dayName(id)}`;
   return `${id < 0 ? "Park" : "Slopestyle"} ${Math.abs(id)}`;
 };
 // (Picked before the game is up: it starts there instead. See main.)
