@@ -38,7 +38,7 @@ for (const name of ["gesturestart", "gesturechange", "dblclick"]) {
 // it lands on this same page, which steps forward again.
 for (const name of ["touchstart", "touchmove"]) {
   document.addEventListener(name, (e) => {
-    if (!e.target.closest?.("a, .guide, #perf")) e.preventDefault();
+    if (!e.target.closest?.("a, .guide")) e.preventDefault();
   }, { passive: false });
 }
 history.pushState({ stay: true }, "", location.href);
@@ -105,7 +105,7 @@ const onTap = (el, act, accepts = () => true) => {
 // run just finished again (its P), which the game says when to offer
 // (L8OVER).
 // (A mouse pressed on one does not take the keyboard from the game.)
-for (const el of document.querySelectorAll(".look, .replay, .again, .back, .perf .key, #perf .auto")) el.addEventListener("mousedown", (e) => e.preventDefault());
+for (const el of document.querySelectorAll(".look, .replay, .again, .back, .rate")) el.addEventListener("mousedown", (e) => e.preventDefault());
 onTap(document.querySelector(".look"), () => {
   setNight(!document.body.classList.contains("night"));
   typeKeys([108]);
@@ -972,10 +972,8 @@ async function main() {
   if (wanted !== null && wanted !== placeNow) visit(wanted);
   wanted = null;
   canvas.addEventListener("focus", () => (overlay.hidden = true));
-  canvas.addEventListener("blur", (e) => {
-    // (Not for the panel of the frames' rate: its slider takes the keyboard
-    // for a moment, and gives it back.)
-    if (!touch && !sheetOpen() && !document.getElementById("perf").contains(e.relatedTarget)) show("Click to continue");
+  canvas.addEventListener("blur", () => {
+    if (!touch && !sheetOpen()) show("Click to continue");
   });
   addEventListener("pointerdown", (e) => {
     if (e.target.closest?.(".ui")) return;
@@ -1033,33 +1031,25 @@ async function main() {
     plain = on;
     typeKeys([on ? 65479 : 65480]);
   };
-  // (Or he sets it himself, with the slider under the frames' rate, as
-  // small as he likes: then it is left where he put it, until he hands it
-  // back.)
-  let own = stored("skate.scale.own", false);
-  const pace = { on: !params.has("scale") && !own, last: 0, quiet: 0 };
+  const pace = { on: !params.has("scale"), last: 0, quiet: 0 };
   // (What each asks of the device: its pixels, and plainly a little less.)
   const WORK = RUNGS.map((r) => r.size * r.size * (r.plain ? 0.85 : 1));
-  let pacer = createPacer({ work: WORK, floor: FLOOR, rung: stored("skate.rung", 0) || 0, beats: stored("skate.beats", 1) || 1 });
+  const pacer = createPacer({ work: WORK, floor: FLOOR, rung: stored("skate.rung", 0) || 0, beats: stored("skate.beats", 1) || 1 });
   // The picture as a rung has it.
   const toRung = (r) => {
     setSize(RUNGS[r].size);
     if (RUNGS[r].plain !== plain) setPlain(RUNGS[r].plain);
   };
   if (params.has("scale")) setSize(scale);
-  else if (pace.on) toRung(pacer.state.rung);
-  else setSize(Math.min(1, Math.max(SIZE_LEAST, stored("skate.scale", 1) || 1)));
+  else toRung(pacer.state.rung);
 
-  // How fast the frames come, top right, if he asks to see it: counted
-  // over each half second. Beside it, a button for a panel that says what
-  // it is, with the picture's resolution to trade for speed.
-  const perf = document.querySelector(".perf");
-  const panel = document.getElementById("perf");
-  const slider = panel.querySelector("input");
-  const rate = { frames: 0, late: 0, since: performance.now(), text: perf.querySelector(".rate b") };
+  // How the frames come, top right, if he asks to see it: the button
+  // widens into the stats, counted over each half second.
+  const perf = document.querySelector(".rate");
+  const rate = { frames: 0, late: 0, since: performance.now(), text: perf.querySelector("b") };
   const sizeText = () => `${Math.round(size * 100)}%${plain ? " plain" : ""}`;
-  // The button: which beats of the screen the game aims at (or its beat,
-  // when he has set the size himself), the picture's size, and the frames
+  // The stats: which beats of the screen the game aims at (or its beat,
+  // when ?scale= has fixed the size), the picture's size, and the frames
   // late over the last half second, if any.
   const rateText = () => {
     const s = pacer.state;
@@ -1069,57 +1059,24 @@ async function main() {
     if (lowPower()) text += " · low power";
     return text;
   };
-  const showScale = () => {
-    const s = pacer.state;
-    const hz = Math.round(1000 / s.beat);
-    const n = s.late.length;
-    const late = s.late.reduce((a, b) => a + b, 0);
-    const draws = pace.on ? `one every ${["", "second ", "third "][s.beats - 1]}beat of it, <b>${Math.round(hz / s.beats)}</b> a second,` : "one on whichever beat it is ready for,";
-    const lately = pace.on && n >= 10 ? ` <b>${late}</b> of the last ${n} frames came late.` : "";
-    panel.querySelector(".state").innerHTML = `Your screen shows <b>${hz}</b> frames a second. The game draws ${draws} at <b>${sizeText()}</b> of the screen's size.${lately}`;
-    slider.value = String(Math.round(size * 20) * 5);
-    panel.querySelector("output").textContent = `${Math.round(size * 100)}%`;
-    panel.querySelector(".auto").classList.toggle("on", !own);
-    panel.querySelector(".cap").textContent = lowPower() ? `This device looks to be in Low Power Mode, which holds the game to about ${Math.round(1000 / pacer.state.beat)} frames a second whatever the resolution.` : "";
-  };
   // Whether the device is saving its battery, as far as can be told: the
   // browser gives far fewer frames than sixty a second even to a game that
   // draws nothing (a phone in Low Power Mode gives thirty).
   const lowPower = () => 1000 / pacer.state.beat < 50;
-  perf.classList.toggle("on", stored("skate.fps", false));
-  onTap(perf.querySelector(".rate"), () => {
+  // (Shown, or not, as it was last time.)
+  if (stored("skate.fps", false)) {
+    rate.text.textContent = rateText();
+    perf.classList.add("on");
+  }
+  onTap(perf, () => {
+    rate.text.textContent = rateText();
     store("skate.fps", perf.classList.toggle("on"));
-    panel.hidden = true;
-  });
-  onTap(perf.querySelector(".what"), () => {
-    showScale();
-    panel.hidden = !panel.hidden;
-  });
-  slider.addEventListener("input", () => {
-    pace.on = false;
-    if (plain) setPlain(false);
-    setSize(Number(slider.value) / 100);
-    store("skate.scale", size);
-    store("skate.scale.own", (own = true));
-    showScale();
-  });
-  slider.addEventListener("change", () => canvas.focus());
-  onTap(panel.querySelector(".auto"), () => {
-    // (Back to full, and down again from there if it must.)
-    pace.on = !params.has("scale");
-    pacer = createPacer({ work: WORK, floor: FLOOR, beat: pacer.state.beat });
-    toRung(0);
-    store("skate.rung", 0);
-    store("skate.beats", 1);
-    store("skate.scale.own", (own = false));
-    showScale();
   });
 
   frameState = () => ({
     refresh: Math.round(1000 / pacer.state.beat),
     scale: Math.round(size * 100) / 100,
     plain,
-    own,
     low: lowPower(),
     pacing: pace.on,
     // (What the pacing is at: its rung, the beats to a frame it aims at,
@@ -1221,7 +1178,6 @@ async function main() {
       rate.frames = 0;
       rate.late = 0;
       rate.since = now;
-      if (!panel.hidden) showScale();
     }
     if (body.contains("sheet") || document.hidden) frames.skip = true;
     else frameCame(gap, pacer.state.beats * pacer.state.beat);
