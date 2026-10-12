@@ -267,8 +267,13 @@ const dayName = (id) => {
   const n = Math.abs(id);
   return new Date(Date.UTC(Math.floor(n / 10000), (Math.floor(n / 100) % 100) - 1, n % 100)).toLocaleDateString("en-GB", { timeZone: "UTC", weekday: "short", day: "numeric", month: "short" });
 };
+// The first few slopestyles and parks have names; the rest, numbers.
+const SLOPE_NAMES = ["Haystack", "Pinewood", "Lantern", "Clover", "Fox Run"];
+const PARK_NAMES = ["Pebble", "Sundial", "Mossy", "Birdbath", "Thistle"];
 const placeName = (id) => {
   if (id === TUTORIAL) return "Tutorial";
+  if (id >= 1 && id <= SLOPE_NAMES.length) return SLOPE_NAMES[id - 1];
+  if (id <= -1 && id >= -PARK_NAMES.length) return PARK_NAMES[-id - 1];
   if (isBigAir(id)) return id === BIG_AIR + 1 ? "Big air" : `Big air ${id - BIG_AIR}`;
   if (isDaily(id)) return `${id < 0 ? "Daily park" : "Daily slopestyle"}${Math.abs(id) === today() ? "" : `, ${dayName(id)}`}`;
   return `${id < 0 ? "Park" : "Slopestyle"} ${Math.abs(id)}`;
@@ -769,19 +774,18 @@ let picking = "courses";
 const showPlaces = () => {
   const el = sheets.places;
   const kind = picking;
-  const names = { courses: "Slopestyle", parks: "Park" };
-  el.querySelector("h2").textContent = { courses: "Slopestyle", parks: "Parks" }[kind];
+  el.querySelector("h2").textContent = { courses: "Slopestyle", parks: "Park" }[kind];
   const grid = el.querySelector(".grid");
   grid.textContent = "";
-  const card = (title, id) => {
+  const card = (title, id, daily = false) => {
     const div = document.createElement("div");
-    div.className = "course";
+    div.className = daily ? "course daily" : "course";
     div.textContent = title;
     onTap(div, () => go("place", id || randomPlace(kind)));
     grid.append(div);
   };
-  card(`Daily ${kind === "parks" ? "park" : "slopestyle"}`, kind === "parks" ? -today() : today());
-  for (let n = 1; n <= PLACES; n++) card(`${names[kind]} ${n}`, kind === "parks" ? -n : n);
+  card(`Daily ${kind === "parks" ? "park" : "slopestyle"}`, kind === "parks" ? -today() : today(), true);
+  for (let n = 1; n <= PLACES; n++) card(placeName(kind === "parks" ? -n : n), kind === "parks" ? -n : n);
   card("Random", 0);
 };
 
