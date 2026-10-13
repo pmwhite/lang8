@@ -13,7 +13,8 @@ import "../../stdlib/print.l8";
 //   .build/race
 //
 // Left and right steer; up is the gas; down is the brake, and from a stop
-// goes backward. On a phone the screen's left half steers and its right
+// goes backward. Braked into a turn, at speed, the car drifts, until the
+// wheel is let go (Space is a hand brake, to start one with). On a phone the screen's left half steers and its right
 // half is the pedals (see touch.l8). The road is fast; the grass beside it
 // is slower, and the sand slower still. A lap is timed from the start line
 // round to it again. There are four cars (see cars.l8): 1 to 4 choose one,
@@ -33,6 +34,8 @@ import "world.l8";
 import "car.l8";
 
 import "pose.l8";
+
+import "marks.l8";
 
 import "touch.l8";
 
@@ -75,6 +78,8 @@ type Camera = {
     fovy: f32;
     // The way it looks across the ground, eased after the car's.
     way: V3;
+    // How much a push has it dropped back and seeing wider, from 0 to 1.
+    kick: f32;
     // Where the picture is taken from, and of: the same, but while it
     // flies.
     seen_eye: V3;
@@ -160,12 +165,18 @@ update_chase(
 ) {
     f: V3 = yaw_dir(yaw);
     speed: f32 = v_len(c.v);
-    // Mostly the way the car points; sliding, a little the way it goes.
+    // The way the car points; sliding, more the way it goes (so that a
+    // drifting car is seen askew).
     want: V3 = f;
     if (speed > 4.0 && v_dot(c.v, f) > 0.0) want = v_norm(v_lerp(f, v_scale(c.v, 1.0 / speed),
-        0.4));
+        0.7));
     cam.way = yaw_dir(approach_angle(dir_yaw(cam.way), dir_yaw(want), ease(5.5, dt)));
     k: f32 = clampf(speed / 40.0, 0.0, 1.0);
+    // (A push throws it back a little, and it sees wider.)
+    pushed: f32 = 0.0;
+    if (c.push > 0.0) pushed = 1.0;
+    cam.kick = lerpf(cam.kick, pushed, ease(5.0, dt));
+    k = k + 0.6 * cam.kick;
     cam.at = v_madd(v_add(p, v3(0.0, 1.0, 0.0)), cam.way, 3.5 + 2.5 * k);
     // (Nearer a short car, farther from a long one.)
     size: f32 = 0.5 + 0.5 * car_axle[c.kind] / car_axle[BUGGY];
@@ -207,26 +218,46 @@ set_map_view(cam: *Camera) {
 }
 
 // ---- keys ----
+const HAND_BRAKE: f32 = 0.3;
+
+const KEYS_IDLE: f32 = 0.12;
+
 type Keys = {
     left: bool;
     right: bool;
     up: bool;
-    down: bool
+    down: bool;
+    space: bool;
+    // How long neither steering key has been down.
+    idle: f32
 }
 
 key_set(k: *Keys, ks: int, on: bool) {
     if (ks == 65361 || ks == 97) k.left = on;
     if (ks == 65363 || ks == 100) k.right = on;
     if (ks == 65362 || ks == 119) k.up = on;
-    if (ks == 65364 || ks == 115) k.down = on
+    if (ks == 65364 || ks == 115) k.down = on;
+    if (ks == 32) k.space = on
 }
 
-read_input(k: *Keys): Input {
-    inp: Input = Input { steer: 0.0, gas: 0.0, brake: 0.0 };
+// What the driver asks now, dt on from the last time. (The wheel counts as
+// held for a moment after the steering keys are up, so that going from
+// one key to the other is not letting go of it.)
+read_input(k: *Keys, dt: f32): Input {
+    if (k.left || k.right) k.idle = 0.0 else k.idle = k.idle + dt;
+    inp: Input = Input {
+        steer: 0.0,
+        gas: 0.0,
+        brake: 0.0,
+        tidy: false,
+        hold: k.idle < KEYS_IDLE
+    };
     if (k.left) inp.steer = inp.steer - 1.0;
     if (k.right) inp.steer = inp.steer + 1.0;
     if (k.up) inp.gas = 1.0;
     if (k.down) inp.brake = 1.0;
+    // (The hand brake: a touch of the brakes, enough to start a drift.)
+    if (k.space) inp.brake = maxf(inp.brake, HAND_BRAKE);
     read_thumbs(&inp);
     inp
 }
@@ -344,7 +375,7 @@ main() raises IoError: int {
     XMapRaised(dpy, win);
     XkbSetDetectableAutoRepeat(dpy, 1, null);
     XFlush(dpy);
-    eprint("L8 Race: left/right steer, up is the gas, down the brake (and backward); 1-4 or Tab choose a car, R starts over, C changes the camera, Escape quits");
+    eprint("L8 Race: left/right steer, up is the gas, down the brake (and backward; braked into a turn, it drifts); 1-4 or Tab choose a car, R starts over, C changes the camera, Escape quits");
     ctx0: ?*i8 = glXCreateContext(dpy, vis, null, 1);
     if (ctx0 == null) die("glXCreateContext failed");
     ctx: *i8 = ctx0;
@@ -363,6 +394,7 @@ main() raises IoError: int {
         up: v3(0.0, 1.0, 0.0),
         fovy: 0.92,
         way: yaw_dir(c.yaw),
+        kick: 0.0,
         seen_eye: c.p,
         seen_at: c.p,
         from_eye: c.p,
@@ -390,7 +422,9 @@ main() raises IoError: int {
         left: false,
         right: false,
         up: false,
-        down: false
+        down: false,
+        space: false,
+        idle: 1.0
     };
     shadows: bool = getenv("L8_NO_SHADOWS") == null;
     ev: XEvent = XEvent.Other;
@@ -469,14 +503,21 @@ main() raises IoError: int {
                 change.to = -1;
                 place_car(c, START_S);
                 reset_laps();
+                break_marks();
                 start_flight(cam, c, high)
             }
             hurry: f32 = 1.0;
             if (change.to >= 0) hurry = 3.0;
             change.turn = minf(change.turn + hurry * dt / MORPH_TIME, 1.0);
-            inp: Input = read_input(&keys);
+            inp: Input = read_input(&keys, dt);
             if (auto) inp = auto_input(c);
-            if (!change_done(change, cam)) inp = Input { steer: 0.0, gas: 0.0, brake: 0.0 };
+            if (!change_done(change, cam)) inp = Input {
+                steer: 0.0,
+                gas: 0.0,
+                brake: 0.0,
+                tidy: true,
+                hold: true
+            };
             while (acc >= STEP_DT && steps < 12) {
                 step_car(c, inp, STEP_DT);
                 tick_laps(c, STEP_DT);
@@ -484,6 +525,7 @@ main() raises IoError: int {
                 steps = steps + 1
             }
             if (acc > STEP_DT) acc = 0.0;
+            tick_marks(c);
             alpha: f32 = acc / STEP_DT;
             pos: V3 = car_point(c, alpha);
             yaw: f32 = car_yaw(c, alpha);

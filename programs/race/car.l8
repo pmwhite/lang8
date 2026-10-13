@@ -15,6 +15,19 @@ use_tag skate;
 //   is fast and grips; grass is slower and slippery; sand is slow. Each
 //   wheel is on its own ground, and the car has the mean of the four: two
 //   wheels on the grass cost half what four do.
+// - Braked into a turn, at speed, its back steps out, and it drifts: it
+//   points farther round the bend than it goes, and slides, round to the
+//   side the wheel was over. A drift is held, as the wheel is: while it
+//   is, the car keeps drifting that way round, and the wheel only sets
+//   how tightly: hard over into the bend, tighter than grip would turn
+//   it; hard over the other way, wide, but still round the bend, and
+//   still askew. The only way out is to let go of the wheel: then the
+//   tyres catch, the car goes off the way it points, and the drift is
+//   over. So a drift aims the car, and letting go sends it there.
+// - A drift held for a while, and ended by letting go, gives
+//   the car a push: more pull than its engine has, for a moment, the more
+//   the longer the drift was held. (One ended by a knock, or by slowing to
+//   a crawl, gives none.)
 // - The canyon's walls (see track.l8) and the trees stop it.
 // - There are several cars (see cars.l8), each with its own engine,
 //   brakes, top speeds, and grips.
@@ -50,12 +63,62 @@ const STEER_OVER: f32 = 1.7;
 // Sliding, the car comes round to face the way it is going: how fast.
 const STRAIGHTEN: f32 = 1.6;
 
+// Drifting. It starts with the brake on, the steering wheel at least this
+// far over, at this speed or more; and ends below a lower speed, or, the
+// wheel let go, when the car has come this near straight.
+const DRIFT_WHEEL: f32 = 0.35;
+
+const DRIFT_SPEED: f32 = 11.0;
+
+const DRIFT_END: f32 = 6.0;
+
+const DRIFT_STRAIGHT: f32 = 0.08;
+
+// Drifting, the wheel turns the way the car goes with between DRIFT_WIDE
+// (hard over away from the bend) and DRIFT_BITE (hard over into it) times
+// what the ground grips; the car is between DRIFT_LEAST and DRIFT_ANGLE
+// askew, the same, and swings to that this fast; and sliding slows it by
+// this share of its grip, when it is square across the way it goes.
+const DRIFT_WIDE: f32 = 0.3;
+
+const DRIFT_BITE: f32 = 1.15;
+
+const DRIFT_LEAST: f32 = 0.3;
+
+const DRIFT_ANGLE: f32 = 0.55;
+
+const DRIFT_SWING: f32 = 6.0;
+
+// The wheel let go, the tyres catch, and the way the car goes comes round
+// to where it points: this fast.
+const DRIFT_CATCH: f32 = 7.0;
+
+const DRIFT_SCRUB: f32 = 0.15;
+
+// The push after a drift. Held this long, it earns the least push, and held PUSH_FULL, the
+// most. The push is PUSH_PULL more pull, for this long at the least, and
+// this long at the most.
+const PUSH_LEAST: f32 = 0.5;
+
+const PUSH_FULL: f32 = 1.5;
+
+const PUSH_PULL: f32 = 10.0;
+
+const PUSH_SHORT: f32 = 0.35;
+
+const PUSH_LONG: f32 = 0.8;
+
 // What the driver asks: the wheel from -1 (left) to 1 (right), and the
 // pedals from 0 to 1.
 type Input = {
     steer: f32;
     gas: f32;
-    brake: f32
+    brake: f32;
+    // A tidy driver: one who never lets the back step out.
+    tidy: bool;
+    // Whether the wheel is held at all (a thumb on it, or a key down): a
+    // drift lasts until it is let go.
+    hold: bool
 }
 
 type Car = {
@@ -85,8 +148,26 @@ type Car = {
     top: f32;
     grip: f32;
     hold: f32;
-    // How many wheels are off the road.
+    // How many wheels are off the road, and whether each is on it.
     off: int;
+    on_road: [4]bool;
+    // Whether it is drifting, to which side (1 round to the right, -1 to
+    // the left), and how far askew the drift has it; how far askew it is
+    // at all (the angle from where it points to where it goes, more than 0
+    // going to the right of where it points); and how fast it slides
+    // sideways.
+    drift: bool;
+    drift_side: f32;
+    askew: f32;
+    // Whether the wheel has been let go, and the tyres are catching.
+    caught: bool;
+    slip: f32;
+    skid: f32;
+    // How long the drift has been held, toward a push; and the push: how
+    // long is left of it, and how long it was in all.
+    held: f32;
+    push: f32;
+    push_all: f32;
     // How hard it is pulled sideways and along, for its lean; and how hard
     // it last hit something, fading.
     pull_side: f32;
@@ -113,6 +194,16 @@ new_car(kind: int, s: f32): *Car@new {
         grip: 17.0,
         hold: 0.5,
         off: 0,
+        on_road: [true, true, true, true],
+        drift: false,
+        drift_side: 1.0,
+        askew: 0.0,
+        caught: false,
+        slip: 0.0,
+        skid: 0.0,
+        held: 0.0,
+        push: 0.0,
+        push_all: 1.0,
         pull_side: 0.0,
         pull_along: 0.0,
         hit: 0.0
@@ -132,6 +223,11 @@ place_car(c: *Car, s: f32) {
     c.prev_yaw = c.yaw;
     c.steer = 0.0;
     c.turned = 0.0;
+    c.drift = false;
+    c.slip = 0.0;
+    c.skid = 0.0;
+    c.held = 0.0;
+    c.push = 0.0;
     c.spot = sp;
     c.progress = s;
     c.pull_side = 0.0;
@@ -162,6 +258,7 @@ feel_ground(c: *Car) {
         sp: Spot = locate(w, c.spot.i, 6);
         c.wheel_y[k] = spot_y(sp, w.x, w.z);
         g: int = spot_ground(sp);
+        c.on_road[k] = g == ROAD;
         if (g != ROAD) c.off = c.off + 1;
         top = top + car_top[c.kind * 3 + g] * 0.25;
         grip = grip + car_grip[c.kind * 3 + g] * 0.25;
@@ -192,18 +289,51 @@ toward(x: f32, to: f32, by: f32): f32 {
     maxf(x - by, to)
 }
 
-step_car(c: *Car, inp: Input, dt: f32) {
-    c.prev = c.p;
-    c.prev_yaw = c.yaw;
-    feel_ground(c);
+// The pedals, the hills, and what holds the car back, for dt: its speed
+// along its way, from what it was.
+roll_on(
+    c: *Car,
+    along: f32,
+    gas: f32,
+    brake: f32,
+    dt: f32
+): f32 {
+    pull: f32 = 0.0;
+    if (gas > 0.0 && along > -0.5) {
+        u: f32 = along / c.top;
+        pull = pull + car_engine[c.kind] * gas * clampf(1.0 - u * u, 0.0, 1.0)
+    } else if (gas > 0.0) pull = pull + car_brakes[c.kind] * gas;
+    if (brake > 0.0) {
+        if (along > 0.5) pull = pull - car_brakes[c.kind] * brake else {
+            u: f32 = along / REVERSE_TOP;
+            pull = pull - REVERSE * brake * clampf(1.0 - u * u, 0.0, 1.0)
+        }
+    }
+    // A push, after a drift.
+    if (c.push > 0.0) pull = pull + PUSH_PULL;
+    // Downhill it rolls faster, uphill slower.
+    pull = pull - G * car_rise(c);
+    // What holds it back: rolling, and the ground, if it is going faster
+    // than the ground lets it.
+    speed: f32 = absf(along);
+    drag: f32 = ROLL + ROLL_BY_SPEED * speed + c.hold * maxf(speed - c.top, 0.0);
+    on: f32 = toward(along + pull * dt, 0.0, drag * dt);
+    // (Nothing but the pedals takes it through a stop.)
+    if (gas == 0.0 && brake == 0.0 && along * on < 0.0) on = 0.0;
+    on
+}
+
+// A step of a car that grips: the front wheels turn it, and its tyres pull
+// its sideways speed toward none. Its speed along its own way, after.
+grip_on(
+    c: *Car,
+    gas: f32,
+    brake: f32,
+    dt: f32
+): f32 {
     f: V3 = yaw_dir(c.yaw);
     along: f32 = v_dot(c.v, f);
-    // The steering wheel goes over, and comes back; it turns the front
-    // wheels less the faster the car goes.
-    want: f32 = clampf(inp.steer, -1.0, 1.0);
-    rate: f32 = car_steer_rate[c.kind];
-    if (absf(want) < absf(c.steer) || want * c.steer < 0.0) rate = STEER_BACK;
-    c.steer = toward(c.steer, want, rate * dt);
+    // The wheel turns the front wheels less the faster the car goes.
     base: f32 = 2.0 * car_axle[c.kind];
     ask: f32 = minf(car_grip[c.kind * 3 + ROAD] * STEER_EDGE, c.grip * STEER_OVER);
     c.turned = c.steer * minf(STEER_MAX, atan2f(base * ask, along * along));
@@ -217,38 +347,101 @@ step_car(c: *Car, inp: Input, dt: f32) {
     r: V3 = right_of(f);
     along = v_dot(c.v, f);
     side: f32 = v_dot(c.v, r);
-    // The pedals.
-    pull: f32 = 0.0;
-    gas: f32 = clampf(inp.gas, 0.0, 1.0);
-    brake: f32 = clampf(inp.brake, 0.0, 1.0);
-    if (gas > 0.0 && along > -0.5) {
-        u: f32 = along / c.top;
-        pull = pull + car_engine[c.kind] * gas * clampf(1.0 - u * u, 0.0, 1.0)
-    } else if (gas > 0.0) pull = pull + car_brakes[c.kind] * gas;
-    if (brake > 0.0) {
-        if (along > 0.5) pull = pull - car_brakes[c.kind] * brake else {
-            u: f32 = along / REVERSE_TOP;
-            pull = pull - REVERSE * brake * clampf(1.0 - u * u, 0.0, 1.0)
-        }
-    }
-    // Downhill it rolls faster, uphill slower.
-    pull = pull - G * car_rise(c);
-    // What holds it back: rolling, and the ground, if it is going faster
-    // than the ground lets it.
-    speed: f32 = absf(along);
-    drag: f32 = ROLL + ROLL_BY_SPEED * speed + c.hold * maxf(speed - c.top, 0.0);
     before: f32 = along;
-    along = along + pull * dt;
-    along = toward(along, 0.0, drag * dt);
-    // (Nothing but the pedals takes it through a stop.)
-    if (gas == 0.0 && brake == 0.0 && before * along < 0.0) along = 0.0;
+    along = roll_on(c, along, gas, brake, dt);
     // The tyres.
+    c.slip = atan2f(side, maxf(along, 0.01));
+    c.skid = side;
     cut: f32 = c.grip * dt;
     held: f32 = clampf(side, -cut, cut);
     side = side - held;
     c.pull_side = lerpf(c.pull_side, -held / dt, ease(10.0, dt));
     c.pull_along = lerpf(c.pull_along, (along - before) / dt, ease(10.0, dt));
     c.v = v_add(v_scale(f, along), v_scale(r, side));
+    along
+}
+
+// A step of a car that drifts. Its speed along its own way, after.
+drift_on(
+    c: *Car,
+    gas: f32,
+    brake: f32,
+    hold: bool,
+    dt: f32
+): f32 {
+    fast: f32 = v_len(c.v);
+    way: f32 = dir_yaw(c.v);
+    pull: f32 = 0.0;
+    if (!hold) c.caught = true;
+    if (c.caught) {
+        // The wheel let go, the tyres catch: the car keeps pointing where
+        // it points, and the way it goes comes round to that.
+        less: f32 = c.askew * ease(DRIFT_CATCH, dt);
+        c.askew = c.askew - less;
+        way = wrap_angle(way - c.drift_side * less);
+        pull = less / dt * fast
+    } else {
+        // How far the wheel is over, from hard away from the bend (0) to
+        // hard into it (1): it turns the way the car goes as hard as
+        // that says, and the car is as far askew.
+        share: f32 = (clampf(c.steer * c.drift_side, -1.0, 1.0) + 1.0) * 0.5;
+        pull = c.grip * lerpf(DRIFT_WIDE, DRIFT_BITE, share);
+        way = wrap_angle(way - c.drift_side * pull / maxf(fast, 1.0) * dt);
+        c.askew = lerpf(c.askew, lerpf(DRIFT_LEAST, DRIFT_ANGLE, share), ease(DRIFT_SWING,
+            dt));
+        // It counts toward a push.
+        c.held = minf(c.held + dt, PUSH_FULL)
+    }
+    // (Its front wheels point the way it goes.)
+    c.yaw = wrap_angle(way - c.drift_side * c.askew);
+    c.turned = -c.drift_side * c.askew * 1.2;
+    // The pedals work along the way it goes; and sliding slows it a
+    // little.
+    before: f32 = fast;
+    fast = roll_on(c, fast, gas, brake, dt);
+    fast = maxf(fast - DRIFT_SCRUB * c.grip * sinf(c.askew) * dt, 0.0);
+    c.v = v_scale(yaw_dir(way), fast);
+    c.slip = -c.drift_side * c.askew;
+    c.skid = fast * sinf(c.slip);
+    c.pull_side = lerpf(c.pull_side, c.drift_side * pull, ease(10.0, dt));
+    c.pull_along = lerpf(c.pull_along, (fast - before) / dt, ease(10.0, dt));
+    // It is over when it is slow; or when, the wheel let go, the car has
+    // come straight: and then, held long enough, it has its push.
+    if (fast < DRIFT_END) c.drift = false else if (c.caught && c.askew < DRIFT_STRAIGHT) {
+        c.drift = false;
+        if (c.held >= PUSH_LEAST) {
+            c.push_all = lerpf(PUSH_SHORT, PUSH_LONG, (c.held - PUSH_LEAST) / (PUSH_FULL - PUSH_LEAST));
+            c.push = c.push_all
+        }
+    }
+    fast * cosf(c.askew)
+}
+
+step_car(c: *Car, inp: Input, dt: f32) {
+    c.prev = c.p;
+    c.prev_yaw = c.yaw;
+    feel_ground(c);
+    // The steering wheel goes over, and comes back.
+    want: f32 = clampf(inp.steer, -1.0, 1.0);
+    rate: f32 = car_steer_rate[c.kind];
+    if (absf(want) < absf(c.steer) || want * c.steer < 0.0) rate = STEER_BACK;
+    c.steer = toward(c.steer, want, rate * dt);
+    gas: f32 = clampf(inp.gas, 0.0, 1.0);
+    brake: f32 = clampf(inp.brake, 0.0, 1.0);
+    // Braked into a turn, at speed, the back steps out: it drifts, round
+    // to the side the wheel is over.
+    if (!c.drift && !inp.tidy && inp.hold && brake > 0.0 && absf(c.steer) > DRIFT_WHEEL && v_dot(c.v,
+        yaw_dir(c.yaw)) > DRIFT_SPEED) {
+        c.drift = true;
+        c.drift_side = signf(c.steer);
+        c.askew = 0.0;
+        c.caught = false;
+        c.held = 0.0
+    }
+    c.push = maxf(c.push - dt, 0.0);
+    along: f32 = 0.0;
+    if (c.drift) along = drift_on(c, gas, brake, inp.hold, dt) else along = grip_on(c,
+        gas, brake, dt);
     c.p = v_madd(c.p, c.v, dt);
     // (How far the wheels have rolled, kept within one turn of them.)
     c.rolled = c.rolled + along * dt;
@@ -266,7 +459,7 @@ step_car(c: *Car, inp: Input, dt: f32) {
         c.p = v_madd(c.p, out, room - absf(sp.d));
         bounce(c, out);
         // Scraping along it, the car comes round to the wall's way.
-        if (v_dot(f, way) < 0.0) way = v_scale(way, -1.0);
+        if (v_dot(yaw_dir(c.yaw), way) < 0.0) way = v_scale(way, -1.0);
         c.yaw = approach_angle(c.yaw, dir_yaw(way), ease(3.0, dt));
         sp = locate(c.p, sp.i, 12)
     }
@@ -282,7 +475,9 @@ bounce(c: *Car, out: V3) {
     if (into <= 0.0) return;
     c.v = v_madd(c.v, out, -1.25 * into);
     c.v = v_scale(c.v, 1.0 - minf(into * 0.03, 0.5));
-    c.hit = maxf(c.hit, into)
+    c.hit = maxf(c.hit, into);
+    // (A hard knock ends a drift.)
+    if (into > 4.0) c.drift = false
 }
 
 // A trunk in the way pushes the car back out, and turns it aside, so that
@@ -377,7 +572,13 @@ auto_input(c: *Car): Input {
     reach: int = (12.0 + speed * speed / (2.0 * car_brakes[c.kind] * 0.6)) as int;
     for k in 0..reach tight = maxf(tight, absf(track_k[wrap_i(c.spot.i + k)]));
     safe: f32 = sqrtf(car_grip[c.kind * 3 + ROAD] * 0.8 / tight);
-    inp: Input = Input { steer: clampf(-off * 3.0, -1.0, 1.0), gas: 0.0, brake: 0.0 };
+    inp: Input = Input {
+        steer: clampf(-off * 3.0, -1.0, 1.0),
+        gas: 0.0,
+        brake: 0.0,
+        tidy: true,
+        hold: true
+    };
     if (speed < safe) inp.gas = 1.0 else if (speed > safe + 1.5) inp.brake = 1.0;
     inp
 }
