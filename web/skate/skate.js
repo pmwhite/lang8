@@ -133,7 +133,10 @@ const lessonNow = () => {
 };
 let pendingStep = "";
 const syncSteps = () => {
-  document.body.classList.toggle("lesson", lessonNow() !== 0);
+  // (Not under another sheet, as home's or the guide's: there he is
+  // somewhere else, whatever the game is at behind it.)
+  const elsewhere = Object.entries(sheets).some(([name, el]) => name !== "lesson" && !el.hidden);
+  document.body.classList.toggle("lesson", lessonNow() !== 0 && !elsewhere);
   const at = !sheets.lesson.hidden ? "read" : document.body.classList.contains("watching") ? "watch" : "try";
   for (const tab of stepsEl.querySelectorAll(".tab")) tab.classList.toggle("on", tab.dataset.step === at);
 };
@@ -305,20 +308,20 @@ const TUTORIAL = 100000000;
 const LESSONS = [
   {
     title: "Steering",
-    thumbs: "Your left thumb steers. Slide it toward the side you want to go; lift it, and he keeps his heading. Ride the run to the finish.",
-    keys: "The Left and Right arrows steer. Let go, and he keeps his heading. Ride the run to the finish.",
+    thumbs: "Your left thumb steers. Slide it toward the side you want to go: the further from the middle, the more he heads across the hill. Lift it, and he keeps his heading. Ride the run to the finish.",
+    keys: "The Left and Right arrows steer: hold one, and he turns further across the hill. Let go, and he keeps his heading. Ride the run to the finish.",
     scoring: "A run's score is the sum of its tricks. Steering scores nothing, but it gets you to the jumps, and onto the line for them.",
   },
   {
     title: "The ramp",
-    thumbs: "Put your right thumb down early, and he crouches. Slide it up to set a frontflip. Let go where the ramp glows green: the later, the more air.",
-    keys: "Hold Space early, and he crouches. Tap Up to set a frontflip. Let go where the ramp glows green: the later, the more air.",
-    scoring: "A flip is 600; two are 900, three 1100. A kicker pays flips double. Land it clean, or it is sketchy and scores nothing.",
+    thumbs: "Put your right thumb down early, and he crouches. Slide it up to set a frontflip: the further you slide, the more flips. Let go, and he jumps. A bigger trick needs longer in the air to finish, and the later you let go, the more air you get. The ramp glows green where letting go lands the trick you've set clean: the bigger the trick, the less green there is.",
+    keys: "Hold Space early, and he crouches. Tap Up to set a frontflip: each tap adds a flip. Let go, and he jumps. A bigger trick needs longer in the air to finish, and the later you let go, the more air you get. The ramp glows green where letting go lands the trick you've set clean: the bigger the trick, the less green there is.",
+    scoring: "A flip is 600; two are 900, three 1100. A kicker pays flips double. A trick that hasn't finished when he lands is sketchy, and scores nothing.",
   },
   {
     title: "Backflip and grab",
-    thumbs: "The same trick twice scores half, so set another: slide down for a backflip. In the air, thumb down again to grab the board; let go before you land.",
-    keys: "The same trick twice scores half, so set another: tap Down for a backflip. In the air, hold Space again to grab the board; let go before you land.",
+    thumbs: "The same trick twice scores half, so set another: slide down for a backflip. In the air, thumb down again to grab the board. Holding the grab slows his flip, so let go of it in time for the flip to finish before he lands.",
+    keys: "The same trick twice scores half, so set another: tap Down for a backflip. In the air, hold Space again to grab the board. Holding the grab slows his flip, so let go of it in time for the flip to finish before he lands.",
     scoring: "A repeat scores half, then a quarter. A grab adds 300 to 500, more the longer you hold it.",
   },
   {
@@ -329,14 +332,14 @@ const LESSONS = [
   },
   {
     title: "The halfpipe",
-    thumbs: "Steer up a wall and he rides it. Slide sideways to set a spin, and let go on the green near the top. Then the other wall.",
-    keys: "Steer up a wall and he rides it. Hold Space and tap Left or Right to set a spin, and let go on the green near the top. Then the other wall.",
+    thumbs: "Steer up a wall and he rides it. Slide sideways to set a spin: further for a bigger one, a half turn at a time. Let go on the green near the top, where there's air enough for it. Then the other wall.",
+    keys: "Steer up a wall and he rides it. Hold Space and tap Left or Right to set a spin: each tap adds a half turn. Let go on the green near the top, where there's air enough for it. Then the other wall.",
     scoring: "A 180 is 200, a 360 is 350, a 540 is 480, a 720 is 580. A halfpipe pays spins double. Landing switch, facing backward, scores half again.",
   },
   {
     title: "The gap",
-    thumbs: "A big jump has room for more. Slide up and across for a flip and a spin at once, and clear the gap: landing short scores nothing.",
-    keys: "A big jump has room for more. Hold Space, tap Up and Right for a flip and a spin at once, and clear the gap: landing short scores nothing.",
+    thumbs: "A big jump has room for more. Slide up and across for a flip and a spin at once. Together they need more air than either alone, so let go right at the lip, and clear the gap: landing short scores nothing.",
+    keys: "A big jump has room for more. Hold Space, tap Up and Right for a flip and a spin at once. Together they need more air than either alone, so let go right at the lip, and clear the gap: landing short scores nothing.",
     scoring: "A gap pays a flip with a spin half again. Each kind of jump favors one kind of trick, so mix them up: set the trick early, and let go late.",
   },
 ];
@@ -431,12 +434,14 @@ const placeName = (id) => {
 let wanted = null;
 // Where the game has been asked to go, until it says it is there.
 let headed = null;
+// (Asked for outright, as one key the game knows a page by: 2000000000 and
+// the place's number. Typed as a number and Enter, as on a keyboard, it
+// could be lost: Enter means other things to the game at times.)
 const typePlace = (id) => {
   headed = id;
   pendingStep = "";
   syncSteps();
-  if (id === TUTORIAL) typeKeys([116]);
-  else typeKeys([...String(Math.abs(id))].map((c) => 48 + Number(c)).concat(id < 0 ? 65289 : 65293));
+  typeKeys([2000000000 + id]);
 };
 // Have the game go there, the page's sheets left as they are (see
 // showPlace).
