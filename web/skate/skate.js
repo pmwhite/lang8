@@ -223,36 +223,43 @@ const PLACES = 5;
 const TUTORIAL = 100000000;
 // The tutorial's lessons, TUTORIAL + 1 on: each a stretch of its course
 // with one thing on it (see programs/skate/tutorial.l8), with a word
-// before it, and of the scoring it bears on.
+// before it (of thumbs, on a phone; of keys, otherwise), and of the
+// scoring it bears on.
 const LESSONS = [
   {
     title: "Steering",
-    intro: "Your left thumb steers (or the arrow keys). Slide it toward the side you want to go; lift it, and he keeps his heading. Ride the run to the finish.",
+    thumbs: "Your left thumb steers. Slide it toward the side you want to go; lift it, and he keeps his heading. Ride the run to the finish.",
+    keys: "The Left and Right arrows steer. Let go, and he keeps his heading. Ride the run to the finish.",
     scoring: "A run's score is the sum of its tricks. Steering scores nothing, but it gets you to the jumps, and onto the line for them.",
   },
   {
     title: "The ramp",
-    intro: "Put your right thumb down early (or hold Space), and he crouches. Slide it up (or tap Up) to set a frontflip. Let go where the ramp glows green: the later, the more air.",
+    thumbs: "Put your right thumb down early, and he crouches. Slide it up to set a frontflip. Let go where the ramp glows green: the later, the more air.",
+    keys: "Hold Space early, and he crouches. Tap Up to set a frontflip. Let go where the ramp glows green: the later, the more air.",
     scoring: "A flip is 600; two are 900, three 1100. A kicker pays flips double. Land it clean, or it is sketchy and scores nothing.",
   },
   {
     title: "Backflip and grab",
-    intro: "The same trick twice scores half, so set another: slide down (or tap Down) for a backflip. In the air, thumb down again (or Space) to grab the board; let go before you land.",
+    thumbs: "The same trick twice scores half, so set another: slide down for a backflip. In the air, thumb down again to grab the board; let go before you land.",
+    keys: "The same trick twice scores half, so set another: tap Down for a backflip. In the air, hold Space again to grab the board; let go before you land.",
     scoring: "A repeat scores half, then a quarter. A grab adds 300 to 500, more the longer you hold it.",
   },
   {
     title: "The box",
-    intro: "Line up early with a box or a rail and ride straight onto it to grind. Keep the steering gentle to stay on, and ride off its end.",
+    thumbs: "Line up early with a box or a rail and ride straight onto it to grind. Keep the steering gentle to stay on, and ride off its end.",
+    keys: "Line up early with a box or a rail and ride straight onto it to grind. Keep the steering gentle to stay on, and ride off its end.",
     scoring: "A grind is 300, plus 150 for each second on it.",
   },
   {
     title: "The halfpipe",
-    intro: "Steer up a wall and he rides it. Slide sideways (or tap Left or Right) to set a spin, and let go on the green near the top. Then the other wall.",
+    thumbs: "Steer up a wall and he rides it. Slide sideways to set a spin, and let go on the green near the top. Then the other wall.",
+    keys: "Steer up a wall and he rides it. Hold Space and tap Left or Right to set a spin, and let go on the green near the top. Then the other wall.",
     scoring: "A 180 is 200, a 360 is 350, a 540 is 480, a 720 is 580. A halfpipe pays spins double. Landing switch, facing backward, scores half again.",
   },
   {
     title: "The gap",
-    intro: "A big jump has room for more. Slide up and across (or tap Up and Right) for a flip and a spin at once, and clear the gap: landing short scores nothing.",
+    thumbs: "A big jump has room for more. Slide up and across for a flip and a spin at once, and clear the gap: landing short scores nothing.",
+    keys: "A big jump has room for more. Hold Space, tap Up and Right for a flip and a spin at once, and clear the gap: landing short scores nothing.",
     scoring: "A gap pays a flip with a spin half again. Each kind of jump favors one kind of trick, so mix them up: set the trick early, and let go late.",
   },
 ];
@@ -869,13 +876,16 @@ onTap(document.querySelector(".pick"), goHome);
 const showLessons = () => {
   const el = sheets.lessons.querySelector(".items");
   el.textContent = "";
+  // (The first not yet done is the one to take next: marked so.)
+  const next = LESSONS.findIndex((_, i) => !lessonsDone[i + 1]) + 1;
   LESSONS.forEach((lesson, i) => {
     const div = document.createElement("div");
-    div.className = "item";
+    const done = !!lessonsDone[i + 1];
+    div.className = `item${done ? " done" : ""}${i + 1 === next ? " first" : ""}`;
     const b = document.createElement("b");
     b.textContent = `${i + 1}. ${lesson.title}`;
     const mark = document.createElement("i");
-    mark.textContent = lessonsDone[i + 1] ? "\u2713" : "";
+    mark.textContent = done ? "\u2713" : i + 1 === next ? "Next" : "";
     div.append(b, mark);
     onTap(div, () => go("lesson", i + 1));
     el.append(div);
@@ -886,7 +896,7 @@ const showLesson = () => {
   const el = sheets.lesson;
   const lesson = LESSONS[lessonOf - 1];
   el.querySelector("h2").textContent = `${lessonOf}. ${lesson.title}`;
-  el.querySelector(".intro").textContent = lesson.intro;
+  el.querySelector(".intro").textContent = touch ? lesson.thumbs : lesson.keys;
   el.querySelector(".scoring p").textContent = lesson.scoring;
 };
 // Watch: the game rides the lesson (from its start again, if it is there
