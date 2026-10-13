@@ -33,7 +33,7 @@ const NET_A = 2 ** 50, NET_B = 2 ** 51, NET_RACE = 2 ** 52;
 // What the page tells the game with plain key syms (see PAGE_MENU, in
 // programs/race/main.l8): that the menu is up, that the car is to be
 // driven alone, and its place in a race.
-const PAGE_MENU = 90000, PAGE_ALONE = 90001, PAGE_PLACE = 90100;
+const PAGE_MENU = 90000, PAGE_ALONE = 90001, PAGE_PLACE = 90100, PAGE_COURSE = 90010;
 // The computer drivers' names, by their places on the grid (see
 // programs/race/bots.l8).
 const BOT_NAMES = ["Vera", "Otto", "Mab", "Finn", "Ines", "Tobe", "Zuri"];
@@ -72,17 +72,23 @@ const clock = (ms) => {
 const TRACK = "3";
 const GHOST_KEY = 2n ** 60n;
 const ghosts = {
+  // (Each course has its own: under this name, for a kind of car.)
+  name(course, kind) {
+    return course === 0 ? `race.ghost.${TRACK}.${kind}` : `race.ghost.${TRACK}.c${course}s.${kind}`;
+  },
   wrote(line) {
     if (!line.startsWith("L8GHOST ")) return false;
     const kind = Number(line.slice(8).split(" ", 1)[0]);
-    if (kind >= 0 && kind < 4) store(`race.ghost.${TRACK}.${kind}`, line.slice(8));
+    if (kind >= 0 && kind < 4) store(this.name(flow.course, kind), line.slice(8));
     return true;
   },
-  give(platform) {
+  // The ghosts kept of a course, to the game (which has that course
+  // built, and no ghosts).
+  give(platform, course) {
     const within = (v, lo, hi) => BigInt(Math.min(Math.max(Math.round(v), lo), hi));
     const turn = 2 * Math.PI * 1000;
     for (let kind = 0; kind < 4; kind++) {
-      const words = (stored(`race.ghost.${TRACK}.${kind}`) ?? "").split(" ").map(Number);
+      const words = (stored(this.name(course, kind)) ?? "").split(" ").map(Number);
       const [k, ms, n] = words;
       if (k !== kind || !(n > 1) || words.length !== 3 + n * 4 || !words.every(Number.isFinite)) continue;
       const of = GHOST_KEY + (BigInt(kind) << 57n);
@@ -124,6 +130,54 @@ const link = {
   },
 };
 
+// ---- the courses ----
+// The game says what courses there are as it starts, a line each (see
+// say_course, in programs/race/main.l8): which, how long its lap is and
+// how far it climbs, in metres, what its road is, and its middle line as
+// points; then its name. Each is a card in the menu, in a row, to choose it by: its shape
+// and its name; and under the row, those two numbers of the one chosen. (COURSES: how many there are, as
+// programs/race/track.l8 has it.)
+const COURSES = 3;
+const courses = {
+  all: [],
+  wrote(line) {
+    if (!line.startsWith("L8COURSE ")) return false;
+    const words = line.slice(9).trim().split(" ");
+    const [k, length, climb, road, n] = words.slice(0, 5).map(Number);
+    const points = [];
+    for (let i = 0; i < n; i++) points.push([Number(words[5 + i * 2]), Number(words[6 + i * 2])]);
+    this.all[k] = { name: words.slice(5 + n * 2).join(" "), length, climb, road, points };
+    this.draw();
+    return true;
+  },
+  draw() {
+    const cards = document.getElementById("cards");
+    cards.textContent = "";
+    this.all.forEach((course, k) => {
+      const card = document.createElement("button");
+      card.className = k === flow.course ? "card chosen" : "card";
+      // (Its shape, fitted into the picture.)
+      const xs = course.points.map((p) => p[0]), zs = course.points.map((p) => p[1]);
+      const x0 = Math.min(...xs), z0 = Math.min(...zs);
+      const by = Math.min(104 / Math.max(Math.max(...xs) - x0, 1), 54 / Math.max(Math.max(...zs) - z0, 1));
+      const ox = (120 - (Math.max(...xs) - x0) * by) / 2, oz = (70 - (Math.max(...zs) - z0) * by) / 2;
+      const at = course.points.map(([x, z]) => `${(ox + (x - x0) * by).toFixed(1)},${(oz + (z - z0) * by).toFixed(1)}`);
+      card.innerHTML = `<svg viewBox="0 0 120 70" aria-hidden="true"><polygon points="${at.join(" ")}" fill="none" stroke="rgba(20,12,6,0.55)" stroke-width="6" stroke-linejoin="round"/>`
+        + `<polygon points="${at.join(" ")}" fill="none" stroke="#fff8ec" stroke-width="3" stroke-linejoin="round"/><circle cx="${at[0].split(",")[0]}" cy="${at[0].split(",")[1]}" r="3.4" fill="#ffd866" stroke="rgba(20,12,6,0.7)"/></svg>`;
+      const name = document.createElement("span");
+      name.textContent = course.name;
+      card.append(name);
+      card.setAttribute("aria-pressed", String(k === flow.course));
+      card.addEventListener("click", () => flow.pick(k));
+      cards.append(card);
+    });
+    const chosen = this.all[flow.course];
+    // (What its road is, by the game's number for the ground.)
+    const roads = { 0: "tarmac", 3: "snow", 5: "dirt and mud" };
+    document.getElementById("course-facts").textContent = chosen ? `${roads[chosen.road] ?? "road"}  ·  ${(chosen.length / 1000).toFixed(1)} km  ·  ${chosen.climb} m of climb` : "";
+  },
+};
+
 const room = {
   socket: null,
   platform: null,
@@ -138,19 +192,38 @@ const room = {
   // Whether a race has been called (it is, until the next, or the menu).
   racing: false,
   list: document.getElementById("order"),
-  join(platform, params) {
+  // The room: the one the address names (?room=), or everyone's; and
+  // each course has a room of its own, so that those in a room are all on
+  // one course.
+  base: "track",
+  course: 0,
+  live: null,
+  hurry: false,
+  join(platform, params, course) {
     this.platform = platform;
-    this.url = `${link.at}/room/${(params.get("room") ?? "track").toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 24) || "track"}?key=${link.key}`;
+    this.base = (params.get("room") ?? "track").toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 20) || "track";
+    this.course = course;
     setInterval(() => this.show(), 300);
     this.open();
+  },
+  // To another course's room: this one is left (see the socket's onclose),
+  // and that one joined at once.
+  move(course) {
+    if (course === this.course) return;
+    this.course = course;
+    if (this.live) {
+      this.hurry = true;
+      this.live.close();
+    }
   },
   open() {
     let socket;
     try {
-      socket = new WebSocket(this.url);
+      socket = new WebSocket(`${link.at}/room/${this.base}${this.course > 0 ? `-${this.course}` : ""}?key=${link.key}`);
     } catch {
       return;
     }
+    this.live = socket;
     socket.onopen = () => {
       this.socket = socket;
       this.send(`name ${this.me.name}`);
@@ -161,9 +234,11 @@ const room = {
     // again in a while.)
     socket.onclose = () => {
       if (this.socket === socket) this.socket = null;
+      if (this.live === socket) this.live = null;
       for (const seat of [...this.others.keys()]) this.gone(seat);
       this.show();
-      setTimeout(() => this.open(), 4000);
+      setTimeout(() => this.open(), this.hurry ? 0 : 4000);
+      this.hurry = false;
     };
     socket.onerror = () => socket.close();
   },
@@ -340,19 +415,39 @@ const flow = {
   // How many computer drivers the race on now has (none: it is against
   // the others here).
   bots: 0,
-  // What the player chose, for a race against computer drivers: how many,
-  // and how good (see SKILLS). They are remembered.
+  // What the player chose: the course; how many laps a race is; and for a
+  // race against computer drivers, how many of them, and how good (see
+  // SKILLS). They are remembered.
+  course: 0,
+  laps: 3,
   drivers: 5,
   skill: 3,
-  choose(drivers, skill) {
+  choose(laps, drivers, skill) {
+    this.laps = Math.min(Math.max(Math.round(laps) || 3, 1), 9);
     this.drivers = Math.min(Math.max(Math.round(drivers) || 1, 1), BOT_NAMES.length);
     this.skill = ((Math.round(skill) || 0) + SKILLS.length) % SKILLS.length;
+    store("race.laps", String(this.laps));
     store("race.drivers", String(this.drivers));
     store("race.skill", String(this.skill));
+    el("laps").textContent = String(this.laps);
     el("drivers").textContent = String(this.drivers);
     el("skill").textContent = SKILLS[this.skill];
+    el("laps-fewer").disabled = this.laps <= 1;
+    el("laps-more").disabled = this.laps >= 9;
     el("fewer").disabled = this.drivers <= 1;
     el("more").disabled = this.drivers >= BOT_NAMES.length;
+  },
+  // A course is chosen (see courses): the game builds it, its room is
+  // joined, and its ghosts given.
+  pick(course) {
+    canvas.focus();
+    if (course === this.course || this.scene !== "menu") return;
+    this.course = course;
+    store("race.course", String(course));
+    this.platform.key(2, PAGE_COURSE + course);
+    room.move(course);
+    ghosts.give(this.platform, course);
+    courses.draw();
   },
   set(scene) {
     this.scene = scene;
@@ -380,8 +475,8 @@ const flow = {
   // Race: against the others, if anyone else is here (the room tells
   // everyone, me too: see heard); or else against computer drivers.
   call() {
-    if (room.socket && room.others.size > 0) room.send("race");
-    else this.race(5000, 3, this.drivers, this.skill);
+    if (room.socket && room.others.size > 0) room.send(`race ${this.laps}`);
+    else this.race(5000, this.laps, this.drivers, this.skill);
   },
   race(wait, laps, bots, skill = this.skill) {
     this.bots = bots;
@@ -408,7 +503,7 @@ const flow = {
     el("came").textContent = room.me.done === null ? "" : `${place}${ends[place % 10 < 4 && (place % 100 < 11 || place % 100 > 13) ? place % 10 : 0]} of ${all.length}  ·  ${clock(room.me.done)}`;
     el("name").textContent = room.me.name;
     const others = room.socket ? room.others.size : 0;
-    el("options").hidden = others > 0;
+    el("options").classList.toggle("others", others > 0);
     el("here").textContent = others === 0 ? "Nobody else is here: a race is against computer drivers." : `${others === 1 ? "1 other is" : `${others} others are`} here: a race is against ${others === 1 ? "them" : "them all"}.`;
   },
   // The pause sheet. Alone, the game stands still under it: as if its
@@ -455,7 +550,7 @@ async function main() {
     const lines = written.split("\n");
     written = lines.pop();
     for (const line of lines) {
-      if (!room.wrote(line) && !ghosts.wrote(line) && line.trim()) console.log(line.trimEnd());
+      if (!room.wrote(line) && !ghosts.wrote(line) && !courses.wrote(line) && line.trim()) console.log(line.trimEnd());
     }
   };
   const sys = fs.sys(["race"]);
@@ -465,6 +560,9 @@ async function main() {
   let car = Number(params.get("L8_CAR") ?? stored("race.car") ?? 0);
   if (!(car >= 0 && car < CARS)) car = 0;
   params.set("L8_CAR", String(car));
+  // (And the course last driven.)
+  flow.course = Math.min(Math.max(Math.round(Number(params.get("L8_COURSE") ?? stored("race.course") ?? 0)) || 0, 0), COURSES - 1);
+  params.set("L8_COURSE", String(flow.course));
   // (There is a room to tell where the car is; and the menu is up.)
   params.set("L8_NET", "1");
   params.set("L8_MENU", "1");
@@ -496,8 +594,8 @@ async function main() {
   placePads();
   window.l8Game = platform;
   window.l8Race = { flow, room };
-  room.join(platform, params);
-  ghosts.give(platform);
+  room.join(platform, params, flow.course);
+  ghosts.give(platform, flow.course);
   const { instance, mem } = await instantiate(module, sys, platform.imports);
   platform.attach(instance, mem);
   // The menus (see flow). The car is chosen with the arrows either side
@@ -520,11 +618,13 @@ async function main() {
   const on = (id, what) => el(id).addEventListener("click", what);
   on("prev", () => pick(-1));
   on("next", () => pick(1));
-  flow.choose(Number(stored("race.drivers") ?? 5), Number(stored("race.skill") ?? 3));
-  on("fewer", () => flow.choose(flow.drivers - 1, flow.skill));
-  on("more", () => flow.choose(flow.drivers + 1, flow.skill));
-  on("easier", () => flow.choose(flow.drivers, flow.skill - 1));
-  on("harder", () => flow.choose(flow.drivers, flow.skill + 1));
+  flow.choose(Number(stored("race.laps") ?? 3), Number(stored("race.drivers") ?? 5), Number(stored("race.skill") ?? 3));
+  on("laps-fewer", () => flow.choose(flow.laps - 1, flow.drivers, flow.skill));
+  on("laps-more", () => flow.choose(flow.laps + 1, flow.drivers, flow.skill));
+  on("fewer", () => flow.choose(flow.laps, flow.drivers - 1, flow.skill));
+  on("more", () => flow.choose(flow.laps, flow.drivers + 1, flow.skill));
+  on("easier", () => flow.choose(flow.laps, flow.drivers, flow.skill - 1));
+  on("harder", () => flow.choose(flow.laps, flow.drivers, flow.skill + 1));
   on("go-race", () => flow.call());
   on("go-trial", () => flow.trial());
   on("name", () => room.rename());

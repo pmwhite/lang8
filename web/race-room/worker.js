@@ -27,7 +27,7 @@
 //   to the others:        "SEAT X Z YAW AT SLIP SPEED KIND FAR WHEN"
 //   from a device:        "name NAME"           what its driver is called
 //   to the others:        "SEAT name NAME"      (and to a device as it joins, of those there)
-//   from a device:        "race"                call a race
+//   from a device:        "race LAPS"           call a race (of so many laps; or "race": of three)
 //   to everyone:          "race MS LAPS"        one starts in MS thousandths of a second
 //   from a device:        "done MS"             it has finished the race, in MS
 //   to the others:        "SEAT done MS"
@@ -43,6 +43,8 @@ const SEATS = 16;
 const PLACE = /^-?\d{1,7}( -?\d{1,7}){7,8}$/;
 const NAME = /^name ([^\s\p{C}][^\p{C}]{0,11})$/u;
 const DONE = /^done (\d{1,8})$/;
+// (A race called: of so many laps, if it says.)
+const RACE = /^race(?: ([1-9]))?$/;
 
 // A race: how long from its being called to its start, how many laps, and
 // how long before another can be called.
@@ -90,13 +92,14 @@ export class Room extends DurableObject {
       return this.tell(`${who.seat} name ${name[1].trim()}`, ws);
     }
     if (DONE.test(message)) return this.tell(`${who.seat} ${message}`, ws);
-    if (message === "race") {
+    const race = message.match(RACE);
+    if (race) {
       // (One at a time: a second call just after the first is the same
       // race.)
       const now = Date.now();
       if (now - (this.raced ?? 0) < RACE_APART) return;
       this.raced = now;
-      this.tell(`race ${RACE_WAIT} ${RACE_LAPS}`);
+      this.tell(`race ${RACE_WAIT} ${race[1] ?? RACE_LAPS}`);
     }
   }
 

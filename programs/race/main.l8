@@ -26,8 +26,8 @@ import "../../stdlib/print.l8";
 // against computer drivers (see bots.l8). It tells the game what was
 // chosen with key events whose key syms are far past any key's (see
 // PAGE_MENU). In a window of its own, 1 to 4 choose a car and Tab the next,
-// Enter starts a race against computer drivers, R starts over, C changes
-// the camera, and Escape quits.
+// N the next course, Enter starts a race against computer drivers, R
+// starts over, C changes the camera, and Escape quits.
 import "../gl/gl.l8";
 
 import "../skate/math.l8";
@@ -84,6 +84,9 @@ const PAGE_MENU: int = 90000;
 const PAGE_ALONE: int = 90001;
 
 const PAGE_PLACE: int = 90100;
+
+// (And which course: PAGE_COURSE and the course's number.)
+const PAGE_COURSE: int = 90010;
 
 // Where the car starts: a little before the start line.
 const START_S: f32 = -12.0;
@@ -227,6 +230,20 @@ update_chase(
     cam.fovy = 0.92 + 0.2 * k
 }
 
+// ---- another course ----
+// Choosing another course does not swap one world for another at a blink:
+// the canyon turns into the other where it stands, about the car, which
+// is at the same start in both: its road bends to the new line, its hills
+// rise and sink, its walls and its trees move, its ground changes color
+// (see keep_world, in world.l8). The camera goes on as it was. How long
+// the turning takes.
+const TURN_TIME: f32 = 1.0;
+
+// How long, of each picture's time, the new world may be built for, while
+// it is being (see build_more, in world.l8): in thousand-millionths of a
+// second. (All at once would stop the picture for a while.)
+const BUILD_FOR: int = 5000000;
+
 // The views: from behind the car; from higher and farther behind it; and
 // (L8_VIEW=2) down on the whole track, over the walls.
 const VIEW_CHASE: int = 0;
@@ -354,7 +371,52 @@ view_from_env(): int {
     (p.* as int - 48) % 3
 }
 
+// A line for the page, of the course that is built, for the page to show
+// among the courses to choose from: which it is, how long its lap, how far
+// the lap climbs in all, what its road is (see road_kind, in track.l8),
+// and its middle line as so many points (x and z, in metres), a dozen
+// metres apart; then its name.
+say_course() raises IoError {
+    climb: f32 = 0.0;
+    for i in 0..track_n climb = climb + maxf(track_h[wrap_i(i + 1)] - track_h[i],
+        0.0);
+    step: int = 12;
+    write(1, "L8COURSE ");
+    write_int(1, course);
+    write(1, " ");
+    write_int(1, (track_len + 0.5) as int);
+    write(1, " ");
+    write_int(1, (climb + 0.5) as int);
+    write(1, " ");
+    write_int(1, road_kind());
+    write(1, " ");
+    write_int(1, (track_n + step - 1) / step);
+    i: int = 0;
+    while (i < track_n) {
+        write(1, " ");
+        write_int(1, floorf(track_p[i].x + 0.5) as int);
+        write(1, " ");
+        write_int(1, floorf(track_p[i].z + 0.5) as int);
+        i = i + step
+    }
+    write(1, " ");
+    write(1, course_names[course]);
+    write(1, "\n")
+}
+
 main() raises IoError: int {
+    // The course: the first, or the one L8_COURSE says. (On a page, the
+    // page is told of them all first.)
+    courses: []f32 = new f32[1](0.0);
+    if (env_numbers("L8_COURSE=", courses) == 0) courses[0] = 0.0;
+    if (getenv("L8_NET") != null) {
+        for k in 0..COURSES {
+            set_course(k);
+            build_track();
+            say_course()
+        }
+    }
+    set_course(courses[0] as int);
     build_track();
     world: *Mesh = new_mesh(520000);
     build_world(world);
@@ -460,23 +522,41 @@ main() raises IoError: int {
     // see hud_list.)
     list_said: f32 = -1.0;
     // In a window of its own, a race is against so many computer drivers,
-    // so good (see bots.l8); L8_RACE=n,skill says otherwise, and starts
-    // one at once.
+    // so good (see bots.l8), of so many laps; L8_RACE=n,skill,laps says
+    // otherwise, and starts one at once.
     own_bots: int = 5;
     own_skill: int = SKILL_ADAPTIVE;
+    own_laps: int = 3;
     if (getenv("L8_RACE") != null) {
         said: int = env_numbers("L8_RACE=", env);
         if (said > 0) own_bots = clampf(env[0], 1.0, MAX_BOTS as f32) as int;
         if (said > 1) own_skill = env[1] as int;
+        if (said > 2) own_laps = clampf(env[2], 1.0, 15.0) as int;
         net_race = true;
         net_race_wait = 4.0;
-        net_race_laps = 3;
+        net_race_laps = own_laps;
         net_race_bots = own_bots;
         net_race_skill = own_skill;
         net_race_place = own_bots
     }
     menu_eye: V3 = c.p;
     menu_at: V3 = c.p;
+    // The course asked for, if it is not the one built (or -1).
+    course_to: int = -1;
+    // A course turning into another: how long it has been at it (less
+    // than 0: none is), and the course it was.
+    turn: f32 = -1.0;
+    turn_from: int = 0;
+    // (And how the building of the new world stands: 0, there is none; 1,
+    // what is round the start is being built, and the old world still
+    // shows; 2, the rest is.)
+    making: int = 0;
+    // How far round the car the menu's camera has gone.
+    round: f32 = 0.5;
+    // (And where the car was shown, and the way it pointed, in that one:
+    // its place before the line is not quite the same in the other.)
+    turn_p: V3 = c.p;
+    turn_yaw: f32 = c.yaw;
     ghosts: []*Car = new_ghosts();
     keys: Keys = Keys {
         left: false,
@@ -516,6 +596,11 @@ main() raises IoError: int {
                         change.at_s = START_S;
                         change.at_d = 0.0
                     }
+                    // (Another course: the ghosts are of this one, and go
+                    // at once. On a page, the other's come next.)
+                    if (ks >= PAGE_COURSE && ks < PAGE_COURSE + COURSES) course_to = ks - PAGE_COURSE;
+                    if (ks == 110 && !online && !(race.on && !race.done)) course_to = (course + 1) % COURSES;
+                    if (course_to >= 0) forget_ghosts();
                     if (ks >= PAGE_PLACE && ks < PAGE_PLACE + 1024) {
                         hud_place = (ks - PAGE_PLACE) / 32;
                         hud_of = (ks - PAGE_PLACE) % 32
@@ -526,7 +611,7 @@ main() raises IoError: int {
                     if (ks == 65293 && !online) {
                         net_race = true;
                         net_race_wait = 5.0;
-                        net_race_laps = 3;
+                        net_race_laps = own_laps;
                         net_race_bots = own_bots;
                         net_race_skill = own_skill;
                         net_race_place = own_bots
@@ -597,9 +682,59 @@ main() raises IoError: int {
             acc = acc + dt;
             steps: int = 0;
             high: bool = view == VIEW_HIGH;
-            // A race is called: the car goes to its place on the grid, and
-            // the computer drivers, if any are in it, to theirs.
-            if (net_race) {
+            // Another course is asked for: it is built in this one's
+            // place (this one being kept, to turn into it), and the car
+            // is at its start, which is where this one's is, with no race
+            // on, and no marks on its road.
+            if (turn >= 0.0) {
+                turn = turn + dt;
+                if (turn >= TURN_TIME) turn = -1.0
+            }
+            if (turn < 0.0 && making == 0) {
+                if (course_to >= 0 && course_to != course) {
+                    turn_from = course;
+                    turn_p = shown;
+                    turn_yaw = shown_yaw;
+                    keep_world(c.spot.i);
+                    set_course(course_to);
+                    build_track();
+                    begin_world(world);
+                    making = 1;
+                    race.on = false;
+                    nbots = 0;
+                    clear_marks();
+                    place_car_at(c, START_S, 0.0);
+                    reset_laps();
+                    going = false;
+                    change.to = -1;
+                    change.turn = 1.0;
+                    // (Out on the road, the camera is behind the car at
+                    // once; with the menu up, it goes on round it.)
+                    if (!menu) {
+                        cam.way = yaw_dir(c.yaw);
+                        update_chase(cam, c, car_point(c, 1.0), c.yaw, high, 0.0);
+                        cam.fly = 1.0
+                    }
+                }
+                course_to = -1
+            }
+            // The new world is built a little in each picture's time: first
+            // what is round the start, and when that is done, the old
+            // world begins to turn into it; then the rest.
+            if (making > 0) {
+                began: int = mono_ns();
+                more: bool = true;
+                while (more && mono_ns() - began < BUILD_FOR && !(making == 1 && world_built >= world_first)) more = build_more(world);
+                if (making == 1 && world_built >= world_first) {
+                    upload_world(r, world);
+                    making = 2;
+                    turn = 0.0
+                } else if (making == 2 && world_built >= nchunks) {
+                    upload_more(r, world);
+                    making = 0
+                }
+            }
+            if (net_race && turn < 0.0 && making == 0) {
                 net_race = false;
                 menu = false;
                 call_race(net_race_wait, net_race_laps);
@@ -697,21 +832,40 @@ main() raises IoError: int {
             if (fixed || view == VIEW_MAP) cam.fly = 1.0;
             fly_camera(cam, dt);
             melt: f32 = flight_melt(cam);
+            // A course turning into another: how far it has (and, till the
+            // new one's first chunks are built, not at all); and where the
+            // car stands meanwhile: with the ground, from where it stood
+            // to where it stands.
+            turning: f32 = -1.0;
+            if (making == 1) {
+                turning = 0.0;
+                set_theme_between(turn_from, turn_from, 0.0)
+            } else if (turn >= 0.0) {
+                turning = smoothstepf(0.0, 1.0, turn / TURN_TIME);
+                set_theme_between(turn_from, course, turning)
+            } else set_theme_between(course, course, 0.0);
+            stand: V3 = pos;
+            stand_yaw: f32 = yaw;
+            if (turning >= 0.0 && menu) {
+                stand = v_lerp(turn_p, pos, turning);
+                stand_yaw = turn_yaw + wrap_angle(yaw - turn_yaw) * turning
+            }
             // With the menu up, once it has come to the car, it goes
             // slowly round it.
+            round = round + 0.25 * dt;
             if (menu && cam.fly >= 1.0 && !fixed && view != VIEW_MAP) {
-                round: f32 = (now - start_ns) as f32 / 1000000000.0 * 0.25 + 0.5;
                 reach: f32 = 3.4 + 2.0 * car_axle[c.kind];
-                menu_eye = v_lerp(menu_eye, v_add(pos, v3(sinf(round) * reach, 1.7,
-                    cosf(round) * reach)), ease(3.0, dt));
-                menu_at = v_lerp(menu_at, v_add(pos, v3(0.0, 0.6, 0.0)), ease(3.0,
-                    dt));
+                near: f32 = ease(3.0, dt);
+                menu_eye = v_lerp(menu_eye, v_add(stand, v3(sinf(round) * reach, 1.7,
+                    cosf(round) * reach)), near);
+                menu_at = v_lerp(menu_at, v_add(stand, v3(0.0, 0.6, 0.0)), near);
                 cam.seen_eye = menu_eye;
                 cam.seen_at = menu_at
             } else {
                 menu_eye = cam.seen_eye;
                 menu_at = cam.seen_at
             }
+            near: int = c.spot.i;
             // The car goes with the camera: from where it was taken up to
             // where it is, not quite as high (the camera looks down on it),
             // and level while it is off the ground.
@@ -725,6 +879,9 @@ main() raises IoError: int {
                 shown_yaw = change.from_yaw + wrap_angle(yaw - change.from_yaw) * k;
                 held = smoothstepf(0.0, 0.15, cam.fly) * (1.0 - smoothstepf(0.8, 1.0,
                     cam.fly))
+            } else {
+                shown = stand;
+                shown_yaw = stand_yaw
             }
             pose_none();
             pose_eye = cam.seen_eye;
@@ -782,7 +939,9 @@ main() raises IoError: int {
                 time: (now - start_ns) as f32 / 1000000000.0,
                 fade_from: lerpf(16.0, 1.0, melt),
                 fade_to: lerpf(85.0, 5.0, melt),
-                near: c.spot.i
+                near: near,
+                turning: turning,
+                was: making == 1
             };
             // (The car's way is made longer for a small car: the dark under
             // it is as small as the car is. And over the walls, all of the

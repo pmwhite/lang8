@@ -33,31 +33,258 @@ chunk_box: []f32 = new f32[MAX_CHUNKS * 6](0.0);
 
 nchunks: int = 0;
 
-build_world(m: *Mesh) {
+// ---- themes ----
+// What each course is made of, to look at (see course_grounds, in track.l8,
+// for what it is to drive on): THEME_COLORS colors, and four numbers. The
+// colors: its open ground, its patches, the scree at the walls' feet, the
+// road's shoulder, the road; its rock, in three layers; and what its
+// leaves are tinted. The numbers: how much paint the road has, how much
+// the open ground is mown in bands and mottled, how wet its patches are,
+// and one to spare.
+//
+// - CANYON RUN: grass, sand, a tarred road, red rock;
+// - SWITCHBACK: snow, deeper drifts of it, a road of snow packed hard,
+//   grey rock, and pines;
+// - ROLLER: dry scrub, mud, a dirt road, yellow rock.
+const THEME_COLORS: int = 9;
+
+const THEME_FLOATS: int = 31;
+
+themes: []f32 = [0.078, 0.175, 0.042, 0.7, 0.5, 0.21, 0.28, 0.155, 0.085, 0.2, 0.155,
+    0.09, 0.082, 0.082, 0.092, 0.47, 0.2, 0.09, 0.72, 0.42, 0.2, 0.3, 0.1, 0.055,
+    1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.5, 0.54, 0.6, 0.66, 0.72, 0.82, 0.3, 0.31,
+    0.35, 0.36, 0.4, 0.47, 0.2, 0.24, 0.32, 0.27, 0.28, 0.32, 0.5, 0.52, 0.57, 0.15,
+    0.16, 0.19, 0.72, 0.95, 0.95, 0.25, 0.0, 0.0, 0.0, 0.2, 0.19, 0.065, 0.075, 0.048,
+    0.026, 0.3, 0.2, 0.11, 0.25, 0.17, 0.09, 0.3, 0.2, 0.105, 0.5, 0.36, 0.16, 0.74,
+    0.6, 0.32, 0.32, 0.2, 0.09, 1.15, 1.0, 0.65, 0.0, 0.35, 1.0, 0.0];
+
+// The theme the picture is drawn with: a course's, or between two.
+theme_now: []f32 = new f32[THEME_FLOATS](0.0);
+
+// The theme k of the way from course a's to course b's.
+set_theme_between(a: int, b: int, k: f32) {
+    for i in 0..THEME_FLOATS theme_now[i] = lerpf(themes[a * THEME_FLOATS + i], themes[b * THEME_FLOATS + i],
+        k)
+}
+
+// ---- a course turning into another ----
+// When another course is chosen, this one turns into it where it stands:
+// its road bends to the other's line, its hills rise and sink, its walls
+// and trees move to where the other's are (see draw_scene, in render.l8,
+// which draws each corner of the old world part way to the same corner of
+// the new). For that, every course is built as the same corners in the
+// same order, as far as can be: all that is built is laid out from the
+// start line, forward and backward, in pieces of a fixed size; so that
+// what is so far past the line in one course is the same piece of rock,
+// or the same tree, as what is so far past it in another. (The courses
+// are of different lengths: the odd piece that makes up the difference is
+// far round the lap, where nobody at the start sees it.)
+//
+// A lap in pieces `wide` long: how many go forward from the line, how many
+// back from it, and whether there is an odd one between.
+grid_fwd(wide: f32): int {
+    (0.6 * track_len / wide) as int
+}
+
+grid_back(wide: f32): int {
+    ((track_len - grid_fwd(wide) as f32 * wide) / wide) as int
+}
+
+grid_odd(wide: f32): bool {
+    track_len - (grid_fwd(wide) + grid_back(wide)) as f32 * wide > 0.02 * wide
+}
+
+grid_count(wide: f32): int {
+    n: int = grid_fwd(wide) + grid_back(wide);
+    if (grid_odd(wide)) n = n + 1;
+    n
+}
+
+// Piece j, in order round the lap: where it starts and ends; and which it
+// is, the same in every course: 0, 1, 2 and so on forward from the line,
+// -1, -2 and so on back from it (and the odd one: GRID_ODD).
+const GRID_ODD: int = 100000;
+
+grid_id(wide: f32, j: int): int {
+    if (j < grid_fwd(wide)) return j;
+    back: int = grid_count(wide) - j;
+    if (back <= grid_back(wide)) return -back;
+    GRID_ODD
+}
+
+grid_from(wide: f32, j: int): f32 {
+    id: int = grid_id(wide, j);
+    if (id == GRID_ODD) return grid_fwd(wide) as f32 * wide;
+    if (id >= 0) return id as f32 * wide;
+    track_len + id as f32 * wide
+}
+
+grid_to(wide: f32, j: int): f32 {
+    id: int = grid_id(wide, j);
+    if (id == GRID_ODD) return track_len - grid_back(wide) as f32 * wide;
+    if (id >= 0) return (id + 1) as f32 * wide;
+    track_len + (id + 1) as f32 * wide
+}
+
+// The chunks are such pieces too (of whole samples): so many forward of
+// the line, so many back from it; and of each, the samples it runs from
+// and to, and how many of its corners are ones every course has (the rest,
+// its kerbs, come last).
+chunks_fwd: int = 0;
+
+chunks_back: int = 0;
+
+chunk_from: []int = new int[MAX_CHUNKS](0);
+
+chunk_to: []int = new int[MAX_CHUNKS](0);
+
+chunk_same: []int = new int[MAX_CHUNKS](0);
+
+// The chunk sample i is in.
+chunk_of(i: int): int {
+    w: int = wrap_i(i);
+    if (w < chunks_fwd * CHUNK) return w / CHUNK;
+    if (w >= track_n - chunks_back * CHUNK) return nchunks - 1 - (track_n - 1 - w) / CHUNK;
+    chunks_fwd
+}
+
+// The world as it was before the one that is built now: its chunks (see
+// keep_world), for the old one to be turned into the new.
+old_first: []int = new int[MAX_CHUNKS](0);
+
+old_floor: []int = new int[MAX_CHUNKS](0);
+
+old_same: []int = new int[MAX_CHUNKS](0);
+
+old_count: []int = new int[MAX_CHUNKS](0);
+
+old_box: []f32 = new f32[MAX_CHUNKS * 6](0.0);
+
+old_chunks: int = 0;
+
+old_fwd: int = 0;
+
+old_back: int = 0;
+
+// (And the chunk the car was in, to draw the old world by till the new
+// one's first chunks are built.)
+old_near: int = 0;
+
+// Another world is about to be built in this one's place: this one's
+// chunks are kept. (`near`: the sample of the track the car is at.)
+keep_world(near: int) {
+    old_near = chunk_of(near);
+    old_chunks = nchunks;
+    old_fwd = chunks_fwd;
+    old_back = chunks_back;
+    for k in 0..nchunks {
+        old_first[k] = chunk_first[k];
+        old_floor[k] = chunk_floor[k];
+        old_same[k] = chunk_same[k];
+        old_count[k] = chunk_count[k];
+        for a in 0..6 old_box[k * 6 + a] = chunk_box[k * 6 + a]
+    }
+}
+
+// The chunk of the old world that chunk k of this one was: the one as far
+// from the start line, the same way; or -1, if there was none, or it was
+// not the same corners.
+old_chunk(k: int): int {
+    was: int = -1;
+    if (k < chunks_fwd) {
+        if (k < old_fwd) was = k
+    } else if (k >= nchunks - chunks_back) {
+        if (nchunks - k <= old_back) was = old_chunks - (nchunks - k)
+    }
+    if (was >= 0 && (old_same[was] != chunk_same[k] || old_floor[was] != chunk_floor[k])) return -1;
+    was
+}
+
+// How far the picture reaches along the track from the car, ahead and
+// behind, in chunks. (No farther than the canyon runs straight: its walls
+// hide the rest.)
+const CHUNKS_AHEAD: int = 15;
+
+const CHUNKS_BEHIND: int = 4;
+
+// The world is built a chunk at a time, those round the start line first
+// (they are what is seen from it: see chunk_near, in render.l8), so that
+// it need not all be built before the first of it is shown: the order
+// they are built in, how many are built, and how many are the ones round
+// the start.
+world_order: []int = new int[MAX_CHUNKS](0);
+
+world_built: int = 0;
+
+world_first: int = 0;
+
+// Begin building the course's world into m: none of it is built yet.
+begin_world(m: *Mesh) {
     m.n = 0;
-    plan_cliffs(0);
-    plan_cliffs(1);
-    plan_trees();
-    nchunks = (track_n + CHUNK - 1) / CHUNK;
-    if (nchunks > MAX_CHUNKS) nchunks = MAX_CHUNKS;
+    chunks_fwd = track_n * 6 / 10 / CHUNK;
+    chunks_back = (track_n - chunks_fwd * CHUNK) / CHUNK;
+    nchunks = chunks_fwd + chunks_back;
+    odd: int = track_n - nchunks * CHUNK;
+    if (odd > 0) nchunks = nchunks + 1;
     for k in 0..nchunks {
         i0: int = k * CHUNK;
         i1: int = i0 + CHUNK;
-        if (k == nchunks - 1) i1 = track_n;
-        s0: f32 = i0 as f32 * track_ds;
-        s1: f32 = i1 as f32 * track_ds;
-        chunk_first[k] = m.n;
-        build_floor(m, i0, i1);
-        chunk_floor[k] = m.n - chunk_first[k];
-        build_cliffs(m, 0, s0, s1);
-        build_cliffs(m, 1, s0, s1);
-        build_kerbs(m, s0, s1);
-        build_trees(m, s0, s1);
-        if (k == 0) build_gantry(m);
-        chunk_count[k] = m.n - chunk_first[k];
-        fit_chunk(m, k)
+        if (k >= chunks_fwd) {
+            i1 = track_n - (nchunks - 1 - k) * CHUNK;
+            i0 = i1 - CHUNK;
+            if (k == chunks_fwd && odd > 0) i0 = chunks_fwd * CHUNK
+        }
+        chunk_from[k] = i0;
+        chunk_to[k] = i1;
+        chunk_first[k] = 0;
+        chunk_floor[k] = 0;
+        chunk_same[k] = 0;
+        chunk_count[k] = 0;
+        for a in 0..6 chunk_box[k * 6 + a] = 0.0
     }
-    set_extra(0.0, 0.0)
+    // The order: the chunk before the line, those ahead of it, those
+    // behind it; then the rest.
+    n: int = 0;
+    for pass in 0..2 {
+        for k in 0..nchunks {
+            ahead: int = ((k - (nchunks - 1)) % nchunks + nchunks) % nchunks;
+            near: bool = ahead <= CHUNKS_AHEAD || ahead >= nchunks - CHUNKS_BEHIND;
+            if (near == (pass == 0)) {
+                world_order[n] = k;
+                n = n + 1
+            }
+        }
+        if (pass == 0) world_first = n
+    }
+    world_built = 0
+}
+
+// Build the next chunk of it. Whether there was one to build.
+build_more(m: *Mesh): bool {
+    if (world_built >= nchunks) return false;
+    k: int = world_order[world_built];
+    world_built = world_built + 1;
+    s0: f32 = chunk_from[k] as f32 * track_ds;
+    s1: f32 = chunk_to[k] as f32 * track_ds;
+    chunk_first[k] = m.n;
+    build_floor(m, chunk_from[k], chunk_to[k], k >= nchunks - chunks_back);
+    chunk_floor[k] = m.n - chunk_first[k];
+    build_cliffs(m, 0, s0, s1);
+    build_cliffs(m, 1, s0, s1);
+    build_trees(m, s0, s1);
+    if (k == 0) build_gantry(m);
+    chunk_same[k] = m.n - chunk_first[k];
+    if (road_kind() != DIRT) build_kerbs(m, s0, s1);
+    chunk_count[k] = m.n - chunk_first[k];
+    fit_chunk(m, k);
+    set_extra(0.0, 0.0);
+    true
+}
+
+// All of it, at once.
+build_world(m: *Mesh) {
+    begin_world(m);
+    while (build_more(m)) { }
 }
 
 // The box chunk k's corners lie in.
@@ -131,7 +358,17 @@ floor_normal(i: int, d: f32): V3 {
 }
 
 // The floor's corner at sample i, corner c of its row.
-put_floor(m: *Mesh, i: int, c: int) {
+// (What is painted on the road goes by how far along the lap a corner is
+// from the start line, the short way: forward of the line, or, less than
+// 0, back from it, as `back` says. So the paint is where it was however
+// long the lap, when one course turns into another, and the line itself
+// stays put.)
+put_floor(
+    m: *Mesh,
+    i: int,
+    c: int,
+    back: bool
+) {
     w: int = wrap_i(i);
     wall: f32 = wall_r[w];
     if (c < 0) wall = wall_l[w];
@@ -139,26 +376,63 @@ put_floor(m: *Mesh, i: int, c: int) {
     p: V3 = v_madd(track_p[w], right_of(track_t[w]), d);
     p.y = floor_y(i, d);
     s: f32 = i as f32 * track_ds;
-    set_extra(d, s);
+    from_line: f32 = s;
+    if (back) from_line = s - track_len;
+    set_extra(d, from_line);
     put(m, p, floor_normal(i, d), v3(sand_depth(s, d), wall - absf(d), 0.0), MAT_GROUND)
 }
 
 // The floor from sample i0 to sample i1.
-build_floor(m: *Mesh, i0: int, i1: int) {
+// (Each corner of a row is worked out once, and used by the quads either
+// side of it: a row at a time, and the row before it.)
+const FLOOR_ACROSS: int = 2 * (FLOOR_NEAR + FLOOR_FAR) + 1;
+
+floor_row_a: []f32 = new f32[FLOOR_ACROSS * VERTEX_FLOATS](0.0);
+
+floor_row_b: []f32 = new f32[FLOOR_ACROSS * VERTEX_FLOATS](0.0);
+
+// The floor's row at sample i, into a row's own small mesh.
+fill_row(row: *Mesh, i: int, back: bool) {
     cols: int = FLOOR_NEAR + FLOOR_FAR;
-    first: int = -cols;
+    row.n = 0;
+    for c in -cols..cols + 1 put_floor(row, i, c, back)
+}
+
+// Corner c of a row, to the mesh.
+put_from_row(m: *Mesh, row: *Mesh, c: int) {
+    to: int = m.n * VERTEX_FLOATS;
+    if (to + VERTEX_FLOATS > len(m.data)) return;
+    from: int = (c + FLOOR_NEAR + FLOOR_FAR) * VERTEX_FLOATS;
+    for f in 0..VERTEX_FLOATS m.data[to + f] = row.data[from + f];
+    m.n = m.n + 1
+}
+
+build_floor(
+    m: *Mesh,
+    i0: int,
+    i1: int,
+    back: bool
+) {
+    cols: int = FLOOR_NEAR + FLOOR_FAR;
+    here: *Mesh = new Mesh { data: floor_row_a, n: 0 };
+    next: *Mesh = new Mesh { data: floor_row_b, n: 0 };
+    fill_row(here, i0, back);
     i: int = i0;
     while (i < i1) {
         j: int = i + FLOOR_STEP;
         if (j > i1) j = i1;
-        for c in first..cols {
-            put_floor(m, i, c);
-            put_floor(m, i, c + 1);
-            put_floor(m, j, c + 1);
-            put_floor(m, i, c);
-            put_floor(m, j, c + 1);
-            put_floor(m, j, c)
+        fill_row(next, j, back);
+        for c in -cols..cols {
+            put_from_row(m, here, c);
+            put_from_row(m, here, c + 1);
+            put_from_row(m, next, c + 1);
+            put_from_row(m, here, c);
+            put_from_row(m, next, c + 1);
+            put_from_row(m, next, c)
         }
+        was: *Mesh = here;
+        here = next;
+        next = was;
         i = j
     }
 }
@@ -196,37 +470,28 @@ wall_point(s: f32, side: f32, back: f32): V3 {
     p
 }
 
-// The columns of each wall (0 the left, 1 the right), planned before any
-// is built: where each ends along the lap (it starts where the one before
-// ends), and how far back it stands.
-const MAX_COLUMNS: int = 512;
-
-column_end: []f32 = new f32[2 * MAX_COLUMNS](0.0);
-
-column_back: []f32 = new f32[2 * MAX_COLUMNS](0.0);
-
-ncolumns: int = 0;
-
-plan_cliffs(wall: int) {
-    count: int = (track_len / COLUMN_WIDE) as int;
-    if (count > MAX_COLUMNS) count = MAX_COLUMNS;
-    ncolumns = count;
-    back0: f32 = COLUMN_BACK * world_rand();
-    for k in 0..count {
-        // Evenly, but each a little to one side.
-        s1: f32 = track_len * (k + 1) as f32 / count as f32;
-        if (k < count - 1) s1 = s1 + (world_rand() - 0.5) * COLUMN_WIDE * 0.5;
-        back: f32 = COLUMN_BACK * world_rand();
-        // (Not level with the one before: a step shows where one ends.)
-        if (absf(back - back0) < 0.4) back = back0 + 0.5;
-        if (back > COLUMN_BACK) back = back0 - 0.5;
-        column_end[wall * MAX_COLUMNS + k] = s1;
-        column_back[wall * MAX_COLUMNS + k] = back;
-        back0 = back
-    }
+// The columns of each wall (0 the left, 1 the right) are pieces of the lap
+// (see grid_from), each ending a little to one side of where its piece
+// does, and standing back by its own amount: forward of where the wall
+// stops a car, or back from it, by turns, so that a step shows where one
+// column ends. Both go by which piece it is, not by the course.
+column_seed(id: int, wall: int) {
+    world_rng = 7919 * (id + 3000) + 104729 * wall + 1
 }
 
-// The columns of a wall whose middles are between s0 and s1 along the lap.
+// Where column j of a wall ends.
+column_end(j: int, wall: int): f32 {
+    to: f32 = grid_to(COLUMN_WIDE, j);
+    count: int = grid_count(COLUMN_WIDE);
+    id: int = grid_id(COLUMN_WIDE, j);
+    // (Not at the start line, nor beside the odd piece.)
+    if (j == count - 1 || id == GRID_ODD || grid_id(COLUMN_WIDE, j + 1) == GRID_ODD) return to;
+    column_seed(id, wall);
+    to + (world_rand() - 0.5) * COLUMN_WIDE * 0.5
+}
+
+// The columns of a wall whose pieces' middles are between s0 and s1 along
+// the lap.
 build_cliffs(
     m: *Mesh,
     wall: int,
@@ -235,20 +500,35 @@ build_cliffs(
 ) {
     side: f32 = -1.0;
     if (wall == 1) side = 1.0;
-    for k in 0..ncolumns {
-        from: f32 = 0.0;
-        if (k > 0) from = column_end[wall * MAX_COLUMNS + k - 1];
-        to: f32 = column_end[wall * MAX_COLUMNS + k];
-        mid: f32 = (from + to) * 0.5;
+    for j in 0..grid_count(COLUMN_WIDE) {
+        mid: f32 = (grid_from(COLUMN_WIDE, j) + grid_to(COLUMN_WIDE, j)) * 0.5;
         if (mid >= s0 && mid < s1) {
-            back: f32 = column_back[wall * MAX_COLUMNS + k];
-            // (Each its own shade, the same however the lap is cut up.)
-            world_rng = 7919 * (k + 1) + 104729 * wall;
+            id: int = grid_id(COLUMN_WIDE, j);
+            from: f32 = 0.0;
+            if (j > 0) from = column_end(j - 1, wall);
+            to: f32 = column_end(j, wall);
+            // (Each its own shade, and the same in every course.)
+            column_seed(id, wall);
+            _edge: f32 = world_rand();
+            back: f32 = COLUMN_BACK * 0.4 * world_rand();
+            if ((id % 2 + 2) % 2 == 1) back = COLUMN_BACK - back;
             tint: f32 = 0.86 + 0.28 * world_rand();
             put_column(m, wall_point(from, side, back), wall_point(to, side, back),
                 side, v3(tint, tint * (0.96 + 0.08 * world_rand()), tint * (0.92 + 0.12 * world_rand())));
+            // (A boulder at every third or so: at the same ones in every
+            // course.)
             if (world_rand() < 0.3) put_boulder(m, mid, side, back)
         }
+    }
+}
+
+// The corners from `from` on are all put at one place under p: what they
+// make is not seen.
+sink(m: *Mesh, from: int, p: V3) {
+    for i in from..m.n {
+        m.data[i * VERTEX_FLOATS] = p.x;
+        m.data[i * VERTEX_FLOATS + 1] = p.y - 1.0;
+        m.data[i * VERTEX_FLOATS + 2] = p.z
     }
 }
 
@@ -439,37 +719,94 @@ obs_size: []f32 = new f32[MAX_OBSTACLES](0.0);
 
 nobs: int = 0;
 
+// A tree may stand in each piece of the lap TREE_APART long (see
+// grid_from). The pieces are for oaks and for pines by turns; which side
+// of the road, how far from the wall, and how big go by which piece it is,
+// the same in every course. Whether a tree stands there at all goes by the
+// course: only where the wall stands well back, and not in a patch, or at
+// the start; and only so many of the oaks' places, and of the pines', as
+// the course has (see tree_oaks: snow has no oaks). Of each piece: where
+// its tree is, or would be, how big, and whether it is there.
+const TREE_APART: f32 = 14.0;
+
+const MAX_TREES: int = 256;
+
+tree_p: []V3 = new V3[MAX_TREES](V3 { x: 0.0, y: 0.0, z: 0.0 });
+
+tree_size: []f32 = new f32[MAX_TREES](0.0);
+
+tree_there: []bool = new bool[MAX_TREES](false);
+
+// How many of the oaks' places have an oak, on the course that is built
+// (see tree_pines, in mesh.l8, for the pines').
+tree_oaks: f32 = 1.0;
+
+// Whether piece `id` is a pine's.
+pine_piece(id: int): bool {
+    (id % 2 + 2) % 2 == 1
+}
+
 plan_trees() {
+    tree_oaks = 1.0;
+    tree_pines = 0.55;
+    if (road_kind() == PACK) {
+        tree_oaks = 0.0;
+        tree_pines = 1.0
+    }
+    if (road_kind() == DIRT) tree_pines = 0.1;
     nobs = 0;
-    s: f32 = 20.0;
-    while (s < track_len - 20.0) {
+    count: int = grid_count(TREE_APART);
+    if (count > MAX_TREES) count = MAX_TREES;
+    for j in 0..count {
+        id: int = grid_id(TREE_APART, j);
+        world_rng = 15485863 + 6151 * (id + 3000);
+        mid: f32 = (grid_from(TREE_APART, j) + grid_to(TREE_APART, j)) * 0.5;
+        s: f32 = mid + (world_rand() - 0.5) * 9.0;
         side: f32 = 1.0;
         if (world_rand() < 0.5) side = -1.0;
-        sp: Spot = spot_at(s, side);
-        wall: f32 = spot_wall(sp);
-        // Only where the wall stands well back, and not in the sand.
-        d: f32 = wall - 2.2 - 3.5 * world_rand();
-        sp.d = side * d;
+        back: f32 = 2.2 + 3.5 * world_rand();
         size: f32 = 1.5 + 0.9 * world_rand();
-        if (d > ROAD_HALF + 7.0 && sand_depth(sp.s, sp.d) < -1.5 && nobs < MAX_OBSTACLES) {
-            p: V3 = spot_point(sp);
+        share: f32 = tree_oaks;
+        if (pine_piece(id)) share = tree_pines;
+        sp: Spot = spot_at(s, side);
+        d: f32 = spot_wall(sp) - back;
+        there: bool = d > ROAD_HALF + 7.0 && id != GRID_ODD && mid > 20.0 && mid < track_len - 20.0 && world_rand() < share;
+        sp.d = side * maxf(d, ROAD_HALF + 3.0);
+        if (sand_depth(sp.s, sp.d) >= -1.5) there = false;
+        p: V3 = spot_point(sp);
+        p.y = spot_y(sp, p.x, p.z);
+        tree_p[j] = p;
+        tree_size[j] = size;
+        tree_there[j] = there;
+        if (there && nobs < MAX_OBSTACLES) {
             obs_x[nobs] = p.x;
             obs_z[nobs] = p.z;
             obs_r[nobs] = 0.22 * size;
             obs_s[nobs] = sp.s;
-            obs_y[nobs] = spot_y(sp, p.x, p.z);
+            obs_y[nobs] = p.y;
             obs_size[nobs] = size;
             nobs = nobs + 1
         }
-        s = s + 9.0 + 16.0 * world_rand()
     }
 }
 
-// The trees between s0 and s1 along the lap.
+// The trees of the pieces whose middles are between s0 and s1 along the
+// lap. (Every piece has its tree built, always the same one: where none
+// stands, sunk out of sight.)
 build_trees(m: *Mesh, s0: f32, s1: f32) {
     set_extra(0.0, 0.0);
-    for k in 0..nobs {
-        if (obs_s[k] >= s0 && obs_s[k] < s1) put_tree(m, obs_x[k], obs_z[k], obs_y[k],
-            obs_size[k])
+    count: int = grid_count(TREE_APART);
+    if (count > MAX_TREES) count = MAX_TREES;
+    for j in 0..count {
+        mid: f32 = (grid_from(TREE_APART, j) + grid_to(TREE_APART, j)) * 0.5;
+        if (mid >= s0 && mid < s1) {
+            id: int = grid_id(TREE_APART, j);
+            p: V3 = tree_p[j];
+            from: int = m.n;
+            meadow_rng = (id + 3000) * 977 + 7;
+            if (pine_piece(id)) put_pine(m, p.x, p.z, p.y - 0.05, tree_size[j] * 1.1) else put_oak(m,
+                p.x, p.z, p.y - 0.05, tree_size[j]);
+            if (!tree_there[j]) sink(m, from, p)
+        }
     }
 }
