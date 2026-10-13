@@ -12,13 +12,15 @@ import "../../stdlib/print.l8";
 //
 //   .build/race
 //
-// Left and right steer; up is the gas; down is the brake, and from a stop
-// goes backward. Braked into a turn, at speed, the car drifts, until the
-// wheel is let go (Space is a hand brake, to start one with). On a phone the screen's left half steers and its right
-// half is the pedals (see touch.l8). The road is fast; the grass beside it
-// is slower, and the sand slower still. A lap is timed from the start line
-// round to it again. There are four cars (see cars.l8): 1 to 4 choose one,
-// and Tab the next. R starts over; C changes the camera; Escape quits.
+// Left and right steer, and the car goes by itself (once it has been
+// touched); down is the brake, and from a stop goes backward. Space is the
+// veer button: held, at speed, with the wheel over, the car drifts, until
+// it is let go. On a phone the screen's left half steers and its right half
+// is the veer button, with the brake small under it (see touch.l8). The
+// road is fast; the grass beside it is slower, and the sand slower still.
+// A lap is timed from the start line round to it again. There are four cars
+// (see cars.l8): 1 to 4 choose one, and Tab the next. R starts over; C
+// changes the camera; Escape quits.
 import "../gl/gl.l8";
 
 import "../skate/math.l8";
@@ -36,6 +38,10 @@ import "car.l8";
 import "pose.l8";
 
 import "marks.l8";
+
+import "net.l8";
+
+import "ghost.l8";
 
 import "touch.l8";
 
@@ -147,7 +153,12 @@ type Change = {
     from: int;
     turn: f32;
     from_p: V3;
-    from_yaw: f32
+    from_yaw: f32;
+    // Where the car is to be put: how far along the lap from the start
+    // line, and how far out from the road's middle. (Before the line: or,
+    // for a race, on the grid.)
+    at_s: f32;
+    at_d: f32
 }
 
 // Whether the car can be driven.
@@ -171,7 +182,7 @@ update_chase(
     if (speed > 4.0 && v_dot(c.v, f) > 0.0) want = v_norm(v_lerp(f, v_scale(c.v, 1.0 / speed),
         0.7));
     cam.way = yaw_dir(approach_angle(dir_yaw(cam.way), dir_yaw(want), ease(5.5, dt)));
-    k: f32 = clampf(speed / 40.0, 0.0, 1.0);
+    k: f32 = clampf(speed / 30.0, 0.0, 1.0);
     // (A push throws it back a little, and it sees wider.)
     pushed: f32 = 0.0;
     if (c.push > 0.0) pushed = 1.0;
@@ -218,18 +229,12 @@ set_map_view(cam: *Camera) {
 }
 
 // ---- keys ----
-const HAND_BRAKE: f32 = 0.3;
-
-const KEYS_IDLE: f32 = 0.12;
-
 type Keys = {
     left: bool;
     right: bool;
     up: bool;
     down: bool;
-    space: bool;
-    // How long neither steering key has been down.
-    idle: f32
+    space: bool
 }
 
 key_set(k: *Keys, ks: int, on: bool) {
@@ -240,26 +245,28 @@ key_set(k: *Keys, ks: int, on: bool) {
     if (ks == 32) k.space = on
 }
 
-// What the driver asks now, dt on from the last time. (The wheel counts as
-// held for a moment after the steering keys are up, so that going from
-// one key to the other is not letting go of it.)
-read_input(k: *Keys, dt: f32): Input {
-    if (k.left || k.right) k.idle = 0.0 else k.idle = k.idle + dt;
+// What the driver asks now. There is no gas to hold: once the driver has
+// touched anything (`going`), the car goes by itself, but while the brake
+// is on.
+read_input(k: *Keys, going: bool): Input {
     inp: Input = Input {
         steer: 0.0,
         gas: 0.0,
         brake: 0.0,
         tidy: false,
-        hold: k.idle < KEYS_IDLE
+        veer: k.space
     };
     if (k.left) inp.steer = inp.steer - 1.0;
     if (k.right) inp.steer = inp.steer + 1.0;
-    if (k.up) inp.gas = 1.0;
     if (k.down) inp.brake = 1.0;
-    // (The hand brake: a touch of the brakes, enough to start a drift.)
-    if (k.space) inp.brake = maxf(inp.brake, HAND_BRAKE);
     read_thumbs(&inp);
+    if (going && inp.brake == 0.0) inp.gas = 1.0;
     inp
+}
+
+// Whether a key is one the car is driven by.
+driving_key(ks: int): bool {
+    ks == 32 || ks >= 65361 && ks <= 65364 || ks == 97 || ks == 100 || ks == 115 || ks == 119
 }
 
 // In a tall window, as on a phone held upright, the picture moves up, so
@@ -375,7 +382,7 @@ main() raises IoError: int {
     XMapRaised(dpy, win);
     XkbSetDetectableAutoRepeat(dpy, 1, null);
     XFlush(dpy);
-    eprint("L8 Race: left/right steer, up is the gas, down the brake (and backward; braked into a turn, it drifts); 1-4 or Tab choose a car, R starts over, C changes the camera, Escape quits");
+    eprint("L8 Race: left/right steer, and it goes by itself; down is the brake (and backward); hold Space to veer into a drift; 1-4 or Tab choose a car, R starts over, C changes the camera, Escape quits");
     ctx0: ?*i8 = glXCreateContext(dpy, vis, null, 1);
     if (ctx0 == null) die("glXCreateContext failed");
     ctx: *i8 = ctx0;
@@ -408,7 +415,9 @@ main() raises IoError: int {
         from: kind,
         turn: 1.0,
         from_p: c.p,
-        from_yaw: c.yaw
+        from_yaw: c.yaw,
+        at_s: START_S,
+        at_d: 0.0
     };
     // Where the car is shown, and the way it points: where it is, but
     // while it is carried.
@@ -418,13 +427,16 @@ main() raises IoError: int {
     fixed: bool = env_numbers("L8_CAM=", env) >= 7;
     // (L8_AUTO: it drives itself round, to watch. See auto_input.)
     auto: bool = getenv("L8_AUTO") != null;
+    // (L8_NET: there is a page to tell where the car is, for the others.)
+    online: bool = getenv("L8_NET") != null;
+    others: []*Other = new_others();
+    ghosts: []*Car = new_ghosts();
     keys: Keys = Keys {
         left: false,
         right: false,
         up: false,
         down: false,
-        space: false,
-        idle: 1.0
+        space: false
     };
     shadows: bool = getenv("L8_NO_SHADOWS") == null;
     ev: XEvent = XEvent.Other;
@@ -435,12 +447,17 @@ main() raises IoError: int {
     acc: f32 = 0.0;
     paused: bool = false;
     tab: bool = false;
+    // Whether the driver has touched anything since the car was put where
+    // it is: it waits there till then, and then it goes (see read_input).
+    going: bool = false;
     while (running) {
         while (XPending(dpy) != 0) {
             XNextEvent(dpy, &ev);
             match ev {
                 KeyPress -> {
                     ks: int = XLookupKeysym(&ev, 0);
+                    // (Word of another car, from the page: no key.)
+                    if (ghost_key(ks) || net_key(others, ks)) ks = 0;
                     if (ks == 65307) running = false;
                     if (ks == 65299) paused = true;
                     // (1 to 4 choose a car, Tab the next one: it starts
@@ -452,8 +469,13 @@ main() raises IoError: int {
                     // (Held, Tab is the next car once, not over and over.)
                     if (ks == 65289 && !tab) pick = (now_kind + 1) % CARS;
                     if (ks == 65289) tab = true;
-                    if (ks == 114 || pick != now_kind) change.to = pick;
+                    if (ks == 114 || pick != now_kind) {
+                        change.to = pick;
+                        change.at_s = START_S;
+                        change.at_d = 0.0
+                    }
                     if (ks == 99) view = (view + 1) % 2;
+                    if (driving_key(ks)) going = true;
                     key_set(&keys, ks, true)
                 }
                 KeyRelease -> {
@@ -462,7 +484,10 @@ main() raises IoError: int {
                     if (ks == 65289) tab = false;
                     key_set(&keys, ks, false)
                 }
-                ButtonPress b -> pointer_down(b.button as int, b.x as f32, b.y as f32);
+                ButtonPress b -> {
+                    going = true;
+                    pointer_down(b.button as int, b.x as f32, b.y as f32)
+                }
                 ButtonRelease b -> pointer_up(b.button as int);
                 MotionNotify mo -> pointer_move(mo.state as int, mo.x as f32, mo.y as f32);
                 ConfigureNotify c -> {
@@ -492,6 +517,14 @@ main() raises IoError: int {
             acc = acc + dt;
             steps: int = 0;
             high: bool = view == VIEW_HIGH;
+            // A race is called: the car goes to its place on the grid.
+            if (net_race) {
+                net_race = false;
+                call_race(net_race_wait, net_race_laps);
+                change.to = c.kind;
+                change.at_s = grid_s(net_race_place);
+                change.at_d = grid_d(net_race_place)
+            }
             if (change.to >= 0 && change.turn >= 1.0) {
                 // It is taken up from where it is shown; and it is at the
                 // start, the car asked for.
@@ -501,26 +534,40 @@ main() raises IoError: int {
                 change.from_yaw = shown_yaw;
                 c.kind = change.to;
                 change.to = -1;
-                place_car(c, START_S);
+                place_car_at(c, change.at_s, change.at_d);
                 reset_laps();
                 break_marks();
+                drop_lap();
+                going = false;
                 start_flight(cam, c, high)
             }
             hurry: f32 = 1.0;
             if (change.to >= 0) hurry = 3.0;
             change.turn = minf(change.turn + hurry * dt / MORPH_TIME, 1.0);
-            inp: Input = read_input(&keys, dt);
+            // (After the count, a race is under way, touched or not.)
+            if (race.on && !race_waits() && !race.done) going = true;
+            inp: Input = read_input(&keys, going);
             if (auto) inp = auto_input(c);
-            if (!change_done(change, cam)) inp = Input {
+            // (It cannot be driven while it is changing, or waiting on the
+            // grid.)
+            if (!change_done(change, cam) || race_waits()) inp = Input {
                 steer: 0.0,
                 gas: 0.0,
                 brake: 0.0,
                 tidy: true,
-                hold: true
+                veer: false
             };
             while (acc >= STEP_DT && steps < 12) {
                 step_car(c, inp, STEP_DT);
+                // (While it is carried to the start, it runs into nobody.)
+                if (change_done(change, cam)) hit_others(others, c);
+                crossed: int = laps.crossed;
                 tick_laps(c, STEP_DT);
+                // (The lap is kept as it is driven, for a ghost: see
+                // ghost.l8.)
+                if (laps.crossed != crossed) keep_lap(c, crossed > 0 && laps.was_best);
+                keep_step(c);
+                tick_race(c, STEP_DT);
                 acc = acc - STEP_DT;
                 steps = steps + 1
             }
@@ -554,14 +601,22 @@ main() raises IoError: int {
                 held = smoothstepf(0.0, 0.15, cam.fly) * (1.0 - smoothstepf(0.8, 1.0,
                     cam.fly))
             }
-            pose_from = change.from;
-            pose_to = c.kind;
-            pose_morph = smoothstepf(0.0, 1.0, change.turn);
-            if (change.turn >= 1.0) {
-                pose_from = c.kind;
-                pose_morph = 0.0
-            }
+            pose_none();
+            pose_kind(change.from, c.kind, smoothstepf(0.0, 1.0, change.turn));
+            if (change.turn >= 1.0) pose_kind(c.kind, c.kind, 0.0);
             pose_car(c, shown, shown_yaw, held);
+            blob_size: f32 = 0.55 + 0.45 * pose_shape(car_axle) / car_axle[BUGGY];
+            // The others on the track; and word of where this car is, for
+            // them.
+            tick_others(others, dt);
+            pose_others(others, shown);
+            tick_ghosts(ghosts, laps.time + acc, dt);
+            pose_ghosts(ghosts);
+            if (online) {
+                say_place(c, (now - start_ns) as f32 / 1000000000.0, dt);
+                say_finish();
+                say_ghost()
+            }
             hud_speed = v_len(c.v);
             hud_kind = c.kind;
             hud_card = cam.fly >= 1.0 || cam.lift == 0.0;
@@ -574,7 +629,7 @@ main() raises IoError: int {
                 shift: 0.0,
                 focus: v_madd(pos, cam.way, 26.0),
                 car: shown,
-                car_way: v_scale(yaw_dir(shown_yaw), 1.0 / (0.55 + 0.45 * pose_shape(car_axle) / car_axle[BUGGY])),
+                car_way: v_scale(yaw_dir(shown_yaw), 1.0 / blob_size),
                 time: (now - start_ns) as f32 / 1000000000.0,
                 fade_from: lerpf(16.0, 1.0, melt),
                 fade_to: lerpf(85.0, 5.0, melt),

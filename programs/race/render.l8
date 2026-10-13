@@ -27,7 +27,9 @@ type Renderer = {
     u_blob: int;
     u_blob_way: int;
     u_lap: int;
+    u_road: int;
     u_fade: int;
+    u_ghost: int;
     u_shadow_map: int;
     u_smvp: int;
     u_morph: int;
@@ -254,6 +256,8 @@ uniform vec2 blob_way;
 uniform float lap_len;
 // How high the walls start to fade into the sky, and are gone.
 uniform vec2 rock_fade;
+// How much of a ghost shows (see ghost.l8): 0, for all that is no ghost.
+uniform float ghost;
 varying vec3 vworld;
 varying vec3 vnrm;
 varying vec4 vcolor;
@@ -282,7 +286,9 @@ float line(float x, float w, float px) {
   return (1.0 - smoothstep(w - px, w + px, abs(x))) * min(1.0, 1.4 * w / px);
 }
 
-const float ROAD_HALF = 5.0;
+// Half the road's width (ROAD_HALF, in track.l8).
+uniform float road_half;
+#define ROAD_HALF road_half
 
 void main() {
   vec3 n = normalize(vnrm);
@@ -445,6 +451,14 @@ void main() {
   }
   col = haze(col, V, dist);
   if (fade > 0.0) col = mix(col, sky_full(-V), fade);
+  // A ghost is pale and cool, and seen through, least at its edges.
+  if (ghost > 0.0) {
+    float l = dot(col, vec3(0.3, 0.55, 0.15));
+    col = mix(vec3(l) * vec3(0.85, 0.97, 1.15) + 0.12, col, 0.35);
+    float edge = pow(1.0 - max(dot(n, V), 0.0), 2.0);
+    gl_FragColor = vec4(tone(col), ghost * (0.6 + 0.4 * edge));
+    return;
+  }
   gl_FragColor = vec4(tone(col), 1.0);
 }
 """;
@@ -603,7 +617,9 @@ new_renderer(world_mesh: *Mesh, parts: *Mesh) raises IoError: *Renderer@new {
         u_blob: glGetUniformLocation(world, "blob"),
         u_blob_way: glGetUniformLocation(world, "blob_way"),
         u_lap: glGetUniformLocation(world, "lap_len"),
+        u_road: glGetUniformLocation(world, "road_half"),
         u_fade: glGetUniformLocation(world, "rock_fade"),
+        u_ghost: glGetUniformLocation(world, "ghost"),
         u_shadow_map: glGetUniformLocation(world, "shadow_map"),
         u_smvp: glGetUniformLocation(shadow, "mvp"),
         u_morph: glGetUniformLocation(world, "morph"),
@@ -890,22 +906,23 @@ draw_marks(r: *Renderer, view: View) {
     glDisable(3042)
 }
 
-// The car's parts are about to be drawn, part way from one kind of car to
-// another (see pose.l8): each corner is given twice.
-bind_parts(u_morph: int) {
-    for i in 4..7 glEnableVertexAttribArray(i);
-    glUniform1f(u_morph, pose_morph)
+// The cars' parts are about to be drawn (see pose.l8): each corner is given
+// twice, as it is in the kind of car it was and in the kind it is to be.
+bind_parts() {
+    for i in 4..7 glEnableVertexAttribArray(i)
 }
 
 unbind_parts() {
     for i in 4..7 glDisableVertexAttribArray(i)
 }
 
-// Draw a part (the body, or a wheel) of the car that was, each corner with
-// the same corner of that part of the car to be.
-draw_part_between(r: *Renderer, part: int) {
-    a: int = part_first[pose_from * CAR_PARTS + part] * VERTEX_FLOATS * 4;
-    b: int = part_first[pose_to * CAR_PARTS + part] * VERTEX_FLOATS * 4;
+// Draw posed part i: of the car that was, each corner with the same corner
+// of that part of the car to be, as far between as u_morph is told.
+draw_part_between(r: *Renderer, i: int, u_morph: int) {
+    part: int = draw_part[i];
+    a: int = part_first[draw_from[i] * CAR_PARTS + part] * VERTEX_FLOATS * 4;
+    b: int = part_first[draw_to[i] * CAR_PARTS + part] * VERTEX_FLOATS * 4;
+    glUniform1f(u_morph, draw_morph[i]);
     glBindBuffer(34962, r.part_buf);
     glVertexAttribPointer(0, 3, 5126, 0, VERTEX_FLOATS * 4, a);
     glVertexAttribPointer(1, 3, 5126, 0, VERTEX_FLOATS * 4, a + 12);
@@ -914,7 +931,7 @@ draw_part_between(r: *Renderer, part: int) {
     glVertexAttribPointer(4, 3, 5126, 0, VERTEX_FLOATS * 4, b);
     glVertexAttribPointer(5, 3, 5126, 0, VERTEX_FLOATS * 4, b + 12);
     glVertexAttribPointer(6, 4, 5126, 0, VERTEX_FLOATS * 4, b + 24);
-    glDrawArrays(4, 0, part_count[pose_from * CAR_PARTS + part])
+    glDrawArrays(4, 0, part_count[draw_from[i] * CAR_PARTS + part])
 }
 
 // How far the picture reaches along the track from the car, ahead and
@@ -977,12 +994,12 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
             if (chunk_near(k, view) && chunk_in_view(light_vp, k)) glDrawArrays(4,
                 chunk_first[k] + chunk_floor[k], chunk_count[k] - chunk_floor[k])
         }
-        bind_parts(r.u_smorph);
+        bind_parts();
         for i in 0..ndraw {
             for k in 0..16 part_tmp[k] = draw_m[i * 16 + k];
             mat_mul(mvp_m, light_vp, part_tmp);
             glUniformMatrix4fv(r.u_smvp, 1, 0, mvp_m);
-            draw_part_between(r, draw_part[i])
+            if (!draw_ghost[i]) draw_part_between(r, i, r.u_smorph)
         }
         unbind_parts();
         glDisable(32823)
@@ -1009,6 +1026,7 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
     glUniform3f(r.u_blob, view.car.x, view.car.y, view.car.z);
     glUniform2f(r.u_blob_way, view.car_way.x, view.car_way.z);
     glUniform1f(r.u_lap, track_len);
+    glUniform1f(r.u_road, ROAD_HALF);
     glUniform2f(r.u_fade, view.fade_from, view.fade_to);
     glUniform1f(r.u_world_time, view.time);
     glActiveTexture(33984);
@@ -1017,6 +1035,7 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
     glUniform1i(r.u_world_noise, 1);
     glUniformMatrix4fv(r.u_model, 1, 0, ident_m);
     glUniform1f(r.u_morph, 0.0);
+    glUniform1f(r.u_ghost, 0.0);
     bind_vertices(r.world_buf);
     for k in 0..nchunks {
         if (chunk_near(k, view) && chunk_in_view(vp_m, k)) glDrawArrays(4, chunk_first[k],
@@ -1024,10 +1043,12 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
     }
     draw_marks(r, view);
     glUseProgram(r.world);
-    bind_parts(r.u_morph);
+    bind_parts();
     for i in 0..ndraw {
-        glUniformMatrix4fv(r.u_model, 1, 0, &draw_m[i * 16]);
-        draw_part_between(r, draw_part[i])
+        if (!draw_ghost[i]) {
+            glUniformMatrix4fv(r.u_model, 1, 0, &draw_m[i * 16]);
+            draw_part_between(r, i, r.u_morph)
+        }
     }
     unbind_parts();
     glUniform1f(r.u_morph, 0.0);
@@ -1052,7 +1073,43 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
     bind_vertices(r.sky_buf);
     glDrawArrays(4, 0, 3);
     glDepthFunc(513);
-    glDepthMask(1)
+    glDepthMask(1);
+    draw_ghosts(r)
+}
+
+// The ghosts' parts (see ghost.l8), over everything else, seen through.
+// They are drawn twice: first only to find what of each is nearest (its
+// color is left as it was), and then, where it is, its color over what was
+// there: so that a ghost's far side does not show through its near side.
+const GHOST_SHOWS: f32 = 0.55;
+
+draw_ghosts(r: *Renderer) {
+    any: bool = false;
+    for i in 0..ndraw {
+        if (draw_ghost[i]) any = true
+    }
+    if (!any) return;
+    glUseProgram(r.world);
+    glUniform1f(r.u_ghost, GHOST_SHOWS);
+    bind_parts();
+    glEnable(3042);
+    for pass in 0..2 {
+        if (pass == 0) glBlendFunc(0, 1) else {
+            glBlendFunc(770, 771);
+            glDepthFunc(515)
+        }
+        for i in 0..ndraw {
+            if (draw_ghost[i]) {
+                glUniformMatrix4fv(r.u_model, 1, 0, &draw_m[i * 16]);
+                draw_part_between(r, i, r.u_morph)
+            }
+        }
+    }
+    glDepthFunc(513);
+    glDisable(3042);
+    unbind_parts();
+    glUniform1f(r.u_morph, 0.0);
+    glUniform1f(r.u_ghost, 0.0)
 }
 
 // The words over the scene: each run of text with a soft shadow (but for

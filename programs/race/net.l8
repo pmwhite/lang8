@@ -1,0 +1,388 @@
+tag race;
+
+use_tag std;
+
+use_tag skate;
+
+import "../../stdlib/print.l8";
+
+// The others: people driving the same track at the same time, each on a
+// device of their own. Every device works out its own car, says where it
+// is several times a second, and is told where the others' are, to draw
+// them, and to run into: each device knocks its own car off the others as
+// it sees them (see hit_others), and so, between them, two cars that meet
+// are both knocked.
+//
+// On a page, the page does the talking (see web/race/race.js, and the room
+// it talks to, web/race-room/worker.js). The game tells the page where its
+// car is by writing a line; and the page tells the game about another car
+// with two key events whose key syms are far past any key's, numbers
+// packed into them (see net_key).
+const MAX_OTHERS: int = 16;
+
+// How often the game says where its car is.
+const SAY_EVERY: f32 = 0.05;
+
+// An other is forgotten when nothing has been heard of it for this long.
+const OTHER_QUIET: f32 = 4.0;
+
+// What is heard of a car comes a little unevenly, and a moment late. So a
+// car is not shown where it was last heard to be, but a little behind
+// that: where it was SHOW_BEHIND ago by its own device's clock, between
+// the two places it was heard to be either side of then. That is smooth,
+// however unevenly the word came. The last HEARD places are kept for it.
+const HEARD: int = 8;
+
+const SHOW_BEHIND: f32 = 0.12;
+
+type Other = {
+    // Whether there is one in this seat.
+    here: bool;
+    // A car to stand for it (it is posed as the player's own is).
+    car: *Car;
+    // What was heard of it, the last HEARD times: when (by its own
+    // device's clock, in seconds, counted on from the first), where it
+    // was, how it was moving, the way it pointed, and how far askew it
+    // was. How many are kept, which is the newest, the newest's stamp
+    // (see net_key), and the track sample it was by.
+    time: [8]f32;
+    px: [8]f32;
+    pz: [8]f32;
+    vx: [8]f32;
+    vz: [8]f32;
+    yaw: [8]f32;
+    slip: [8]f32;
+    kept: int;
+    newest: int;
+    stamp: int;
+    at: int;
+    // How long since anything was heard of it; the time (on its clock) it
+    // is shown at; and whether it has been shown yet.
+    quiet: f32;
+    play: f32;
+    seen: bool
+}
+
+// A seat with nobody in it.
+new_other(): *Other@new {
+    new Other {
+        here: false,
+        car: new_car(BUGGY, 0.0),
+        time: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        px: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        pz: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        vx: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        vz: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        yaw: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        slip: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        kept: 0,
+        newest: 0,
+        stamp: 0,
+        at: 0,
+        quiet: 0.0,
+        play: 0.0,
+        seen: false
+    }
+}
+
+// The seats, all empty.
+new_others(): []*Other@new {
+    others: []*Other = new *Other[MAX_OTHERS](new_other());
+    for k in 1..MAX_OTHERS others[k] = new_other();
+    others
+}
+
+// The key syms that are word of another car start here: the first of the
+// two, and the second.
+const NET_A: int = 1125899906842624;
+
+const NET_B: int = 2251799813685248;
+
+// (And past those, word that a race is called.)
+const NET_RACE: int = 4503599627370496;
+
+const NET_END: int = 9007199254740992;
+
+// A race called, until the game has taken it up: whether one was, how long
+// till it starts, how many laps, and this car's place on the grid.
+net_race: bool = false;
+
+net_race_wait: f32 = 0.0;
+
+net_race_laps: int = 3;
+
+net_race_place: int = 0;
+
+// What the first of the two said: whose it was, the car's kind, and where
+// it was.
+net_seat: int = -1;
+
+net_kind: int = 0;
+
+net_x: f32 = 0.0;
+
+net_z: f32 = 0.0;
+
+net_stamp: int = 0;
+
+// A key sym, if it is word of another car: whether it was. The first of a
+// pair says whose car, its kind, where it is (x and z, in centimetres,
+// from 0 at -1310.72 m), and when that was (its device's clock, in
+// hundredths of a second, as far as 256 of them count); the second says the way it points (4096 to a
+// turn), the track sample it is by, how far askew it is (hundredths of a
+// radian, from 0 at -0.64), its speed (quarters of a metre a second), and
+// in its last bit, that it has gone.
+net_key(others: []*Other, ks: int): bool {
+    if (ks < NET_A || ks >= NET_END) return false;
+    // A race: tenths of a second till it starts, its laps, and the place
+    // on the grid.
+    if (ks >= NET_RACE) {
+        w: int = ks - NET_RACE;
+        net_race = true;
+        net_race_wait = (w / 256 % 256) as f32 * 0.1;
+        net_race_laps = w / 16 % 16;
+        net_race_place = w % 16;
+        return true
+    }
+    if (ks < NET_B) {
+        w: int = ks - NET_A;
+        net_z = (w % 262144 - 131072) as f32 * 0.01;
+        net_x = (w / 262144 % 262144 - 131072) as f32 * 0.01;
+        net_kind = w / 68719476736 % 4;
+        net_seat = w / 274877906944 % 16;
+        net_stamp = w / 4398046511104 % 256;
+        return true
+    }
+    w: int = ks - NET_B;
+    seat: int = w / 1099511627776 % 16;
+    if (seat != net_seat && w % 2 == 0) return true;
+    o: *Other = others[seat];
+    if (w % 2 == 1) {
+        o.here = false;
+        return true
+    }
+    // When this was, on from the one before: by how far its stamp has
+    // come round. (After a silence, it is the first again.)
+    when: f32 = 0.0;
+    if (!o.here || o.quiet > 1.5) {
+        o.kept = 0;
+        o.seen = false
+    } else {
+        step: int = ((net_stamp - o.stamp) % 256 + 256) % 256;
+        if (step == 0) step = 1;
+        when = o.time[o.newest] + step as f32 * 0.01
+    }
+    i: int = (o.newest + 1) % HEARD;
+    yaw: f32 = wrap_angle((w / 268435456 % 4096) as f32 * TAU / 4096.0);
+    slip: f32 = (w / 512 % 128 - 64) as f32 * 0.01;
+    // (It goes to the right of where it points by how far askew it is.)
+    v: V3 = v_scale(yaw_dir(yaw - slip), (w / 2 % 256) as f32 * 0.25);
+    o.time[i] = when;
+    o.px[i] = net_x;
+    o.pz[i] = net_z;
+    o.vx[i] = v.x;
+    o.vz[i] = v.z;
+    o.yaw[i] = yaw;
+    o.slip[i] = slip;
+    o.newest = i;
+    if (o.kept < HEARD) o.kept = o.kept + 1;
+    o.stamp = net_stamp;
+    o.at = wrap_i(w / 65536 % 4096);
+    o.quiet = 0.0;
+    o.here = true;
+    o.car.kind = net_kind % CARS;
+    net_seat = -1;
+    true
+}
+
+// Carry the others on by dt: each is shown where it was a little while
+// ago by its own clock (see SHOW_BEHIND), on the curve through the two
+// places it was heard to be either side of then, going as it was going at
+// each; or, with nothing heard that late, a little on from the last.
+tick_others(others: []*Other, dt: f32) {
+    for k in 0..MAX_OTHERS {
+        o: *Other = others[k];
+        if (o.here) {
+            o.quiet = o.quiet + dt;
+            if (o.quiet > OTHER_QUIET) o.here = false
+        }
+        if (o.here && o.kept > 0) {
+            // The time to show it at: behind what its clock must say now
+            // (the newest heard, and how long ago that came), and kept to
+            // that gently, so that word come early or late does not jolt
+            // it.
+            want: f32 = o.time[o.newest] + o.quiet - SHOW_BEHIND;
+            if (!o.seen || absf(want - o.play) > 0.4) o.play = want;
+            o.play = o.play + dt + (want - o.play - dt) * minf(2.0 * dt, 1.0);
+            o.seen = true;
+            // The two heard either side of then: b the first at or after
+            // it, going back from the newest, and a the one before.
+            b: int = o.newest;
+            a: int = o.newest;
+            found: bool = false;
+            for back in 1..o.kept {
+                j: int = (o.newest - back + HEARD) % HEARD;
+                if (!found && o.time[b] > o.play) {
+                    a = j;
+                    if (o.time[j] > o.play) b = j else found = true
+                }
+            }
+            c: *Car = o.car;
+            if (o.play >= o.time[o.newest] || a == b) {
+                // Nothing that late (or only the one): on from the last
+                // a little way, or where the one was.
+                on: f32 = clampf(o.play - o.time[b], 0.0, 0.25);
+                c.p = v3(o.px[b] + o.vx[b] * on, 0.0, o.pz[b] + o.vz[b] * on);
+                c.v = v3(o.vx[b], 0.0, o.vz[b]);
+                c.yaw = o.yaw[b];
+                c.slip = o.slip[b]
+            } else {
+                h: f32 = maxf(o.time[b] - o.time[a], 0.001);
+                u: f32 = clampf((o.play - o.time[a]) / h, 0.0, 1.0);
+                // (Hermite's curve: through both places, at both speeds.)
+                fa: f32 = 2.0 * u * u * u - 3.0 * u * u + 1.0;
+                ga: f32 = (u * u * u - 2.0 * u * u + u) * h;
+                fb: f32 = 3.0 * u * u - 2.0 * u * u * u;
+                gb: f32 = (u * u * u - u * u) * h;
+                c.p = v3(fa * o.px[a] + ga * o.vx[a] + fb * o.px[b] + gb * o.vx[b],
+                    0.0, fa * o.pz[a] + ga * o.vz[a] + fb * o.pz[b] + gb * o.vz[b]);
+                c.v = v3(lerpf(o.vx[a], o.vx[b], u), 0.0, lerpf(o.vz[a], o.vz[b],
+                    u));
+                c.yaw = approach_angle(o.yaw[a], o.yaw[b], u);
+                c.slip = lerpf(o.slip[a], o.slip[b], u)
+            }
+            c.prev = c.p;
+            c.prev_yaw = c.yaw;
+            c.spot = locate(c.p, o.at, 30);
+            feel_ground(c);
+            // Its wheels roll, and its front wheels point the way it goes.
+            c.rolled = c.rolled + v_dot(c.v, yaw_dir(c.yaw)) * dt;
+            round: f32 = TAU * car_wheel_r[c.kind];
+            if (c.rolled > round) c.rolled = c.rolled - round;
+            if (c.rolled < 0.0) c.rolled = c.rolled + round;
+            c.turned = c.slip * 1.2
+        }
+    }
+}
+
+// ---- running into them ----
+// A car is as two discs, one over each axle, a little wider than the car:
+// how far apart they are, of the way between its axles; and how much wider
+// than its wheels. And how much of the speed two cars meet with comes back
+// as they part.
+const DISCS_APART: f32 = 0.8;
+
+const DISC_WIDER: f32 = 0.12;
+
+const CARS_BOUNCE: f32 = 0.35;
+
+// The middle of a car's front disc (1) or back disc (-1).
+disc_at(c: *Car, end: f32): V3 {
+    v_madd(c.p, yaw_dir(c.yaw), end * car_axle[c.kind] * DISCS_APART)
+}
+
+disc_radius(c: *Car): f32 {
+    car_wheel_x[c.kind] + DISC_WIDER
+}
+
+// The car, where it has run into another: it is moved back out of it, and
+// knocked. Each device does this for its own car alone, against the
+// others as it sees them; the other car's device does the same for its
+// own. So this car takes only its share of the parting and of the knock,
+// by the weights of the two: a Truck shoves a Mini a long way, and is
+// hardly shoved itself. (What each device sees of the other is a moment
+// old, so the two do not always agree on how hard they met.)
+hit_others(others: []*Other, c: *Car) {
+    for k in 0..MAX_OTHERS {
+        o: *Other = others[k];
+        reach: f32 = car_axle[c.kind] + car_axle[o.car.kind] + 2.5;
+        if (o.here && o.seen && v_len(v_sub(o.car.p, c.p)) < reach) {
+            // The two discs, one of each car, that are deepest into each
+            // other.
+            deep: f32 = 0.0;
+            out: V3 = v3(0.0, 0.0, 0.0);
+            touch: f32 = disc_radius(c) + disc_radius(o.car);
+            for e in 0..4 {
+                mine: f32 = 1.0;
+                if (e % 2 == 1) mine = -1.0;
+                its: f32 = 1.0;
+                if (e / 2 == 1) its = -1.0;
+                apart: V3 = v_sub(disc_at(c, mine), disc_at(o.car, its));
+                apart.y = 0.0;
+                d: f32 = v_len(apart);
+                if (touch - d > deep && d > 0.001) {
+                    deep = touch - d;
+                    out = v_scale(apart, 1.0 / d)
+                }
+            }
+            if (deep > 0.0) {
+                share: f32 = car_weight[o.car.kind] / (car_weight[c.kind] + car_weight[o.car.kind]);
+                c.p = v_madd(c.p, out, deep * share);
+                // (Knocked only if they are closing: not again while they
+                // part.)
+                closing: f32 = -v_dot(v_sub(c.v, o.car.v), out);
+                if (closing > 0.0) {
+                    c.v = v_madd(c.v, out, closing * (1.0 + CARS_BOUNCE) * share);
+                    c.hit = maxf(c.hit, closing);
+                    if (closing > 4.0) c.drift = false
+                }
+            }
+        }
+    }
+}
+
+// The others, posed with the cars already posed: those within sight of
+// the place p.
+pose_others(others: []*Other, p: V3) {
+    for k in 0..MAX_OTHERS {
+        o: *Other = others[k];
+        if (o.here && o.seen && v_len(v_sub(o.car.p, p)) < 320.0) {
+            c: *Car = o.car;
+            pose_kind(c.kind, c.kind, 0.0);
+            at: V3 = c.p;
+            at.y = car_y(c);
+            pose_car(c, at, c.yaw, 0.0)
+        }
+    }
+}
+
+// Say where the car is, every so often: a line for the page, in whole
+// numbers (centimetres, thousandths of a radian, the track sample,
+// centimetres a second, its kind, how far it has come from the start
+// line, in metres, and when this is: `time` in hundredths of a second, as
+// far as 256 of them count). And, once, that it has finished a race, and in how
+// many thousandths of a second.
+say_wait: f32 = 0.0;
+
+say_place(c: *Car, time: f32, dt: f32) raises IoError {
+    say_wait = say_wait - dt;
+    if (say_wait > 0.0) return;
+    say_wait = SAY_EVERY;
+    write(1, "L8AT ");
+    write_int(1, (c.p.x * 100.0) as int);
+    write(1, " ");
+    write_int(1, (c.p.z * 100.0) as int);
+    write(1, " ");
+    write_int(1, (c.yaw * 1000.0) as int);
+    write(1, " ");
+    write_int(1, c.spot.i);
+    write(1, " ");
+    write_int(1, (c.slip * 1000.0) as int);
+    write(1, " ");
+    write_int(1, (v_len(c.v) * 100.0) as int);
+    write(1, " ");
+    write_int(1, c.kind);
+    write(1, " ");
+    write_int(1, floorf(c.progress) as int);
+    write(1, " ");
+    write_int(1, (time * 100.0) as int % 256);
+    write(1, "\n")
+}
+
+say_finish() raises IoError {
+    if (!race.done || race.told) return;
+    race.told = true;
+    write(1, "L8DONE ");
+    write_int(1, (race.done_time * 1000.0) as int);
+    write(1, "\n")
+}
