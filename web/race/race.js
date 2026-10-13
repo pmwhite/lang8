@@ -30,6 +30,16 @@ if (touch) document.body.classList.add("touch");
 // programs/race/net.l8, for how). The page keeps the list of who is here,
 // and in a race, of who is ahead.
 const NET_A = 2 ** 50, NET_B = 2 ** 51, NET_RACE = 2 ** 52;
+// What the page tells the game with plain key syms (see PAGE_MENU, in
+// programs/race/main.l8): that the menu is up, that the car is to be
+// driven alone, and its place in a race.
+const PAGE_MENU = 90000, PAGE_ALONE = 90001, PAGE_PLACE = 90100;
+// The computer drivers' names, by their places on the grid (see
+// programs/race/bots.l8).
+const BOT_NAMES = ["Vera", "Otto", "Mab", "Finn", "Ines", "Tobe", "Zuri"];
+// How good they can be asked to be, by the game's numbers for it (the last:
+// as good as the player makes them).
+const SKILLS = ["EASY", "MEDIUM", "HARD", "ADAPTIVE"];
 const CAR_COLORS = ["#e6382e", "#2b6edb", "#fab847", "#54c2a8"];
 const stored = (key) => {
   try {
@@ -59,7 +69,7 @@ const clock = (ms) => {
 // are of the track as it is: TRACK is changed when the track is, and the
 // old ones are left behind. (As it is when the cars are made slower, or
 // faster: a ghost of a lap that cannot be driven now is no use.)
-const TRACK = "2";
+const TRACK = "3";
 const GHOST_KEY = 2n ** 60n;
 const ghosts = {
   wrote(line) {
@@ -122,23 +132,15 @@ const room = {
   // race, if it has finished.
   me: { seat: -1, name: tidyName(stored("race.name")) || `Driver ${10 + Math.floor(Math.random() * 90)}`, kind: 0, far: 0, done: null },
   others: new Map(),
-  // Whether a race has been called (it is, until the next).
+  // The computer drivers in the race, if any (the game says where they
+  // are: see wrote).
+  bots: [],
+  // Whether a race has been called (it is, until the next, or the menu).
   racing: false,
   list: document.getElementById("order"),
-  call: document.getElementById("race"),
   join(platform, params) {
     this.platform = platform;
     this.url = `${link.at}/room/${(params.get("room") ?? "track").toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 24) || "track"}?key=${link.key}`;
-    this.call.addEventListener("click", () => this.ask());
-    // (A tap on the list: another name.)
-    this.list.addEventListener("click", () => {
-      const name = tidyName(prompt("Your name on the list", this.me.name));
-      if (!name) return;
-      this.me.name = name;
-      store("race.name", name);
-      this.send(`name ${name}`);
-      this.show();
-    });
     setInterval(() => this.show(), 300);
     this.open();
   },
@@ -168,10 +170,29 @@ const room = {
   send(text) {
     if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(text);
   },
-  // Call a race, for everyone here.
-  ask() {
-    this.send("race");
-    canvas.focus();
+  // Another name for me.
+  rename() {
+    const name = tidyName(prompt("Your name", this.me.name));
+    if (!name) return;
+    this.me.name = name;
+    store("race.name", name);
+    this.send(`name ${name}`);
+    this.show();
+  },
+  // A race is on: of so many laps, to start in `wait` thousandths of a
+  // second, with so many computer drivers. The game is told, with the
+  // car's place on the grid: behind the computer drivers; or, among
+  // others, in the order of their seats.
+  race(wait, laps, bots, skill = 1) {
+    const seats = [this.me.seat, ...this.others.keys()].sort((a, b) => a - b);
+    const place = bots > 0 ? bots : Math.max(seats.indexOf(this.me.seat), 0);
+    const tenths = Math.min(Math.max(Math.round(wait / 100), 0), 255);
+    this.platform.key(2, NET_RACE + skill * 1048576 + bots * 65536 + tenths * 256 + Math.min(Math.max(laps | 0, 1), 15) * 16 + place);
+    this.racing = true;
+    this.bots = Array.from({ length: bots }, (_, k) => ({ seat: 100 + k, name: BOT_NAMES[k] ?? `Driver ${k + 1}`, kind: 0, far: -100 - k, done: null }));
+    for (const who of [this.me, ...this.others.values()]) who.done = null;
+    if (bots > 0) this.me.far = -1000;
+    this.show();
   },
   // What the game wrote: where its car is, or that it has finished.
   wrote(line) {
@@ -179,7 +200,8 @@ const room = {
       const place = line.slice(5);
       const words = place.split(" ");
       this.me.kind = Number(words[6]);
-      this.me.far = Number(words[7]);
+      // (Against computer drivers, how far it has come is said with theirs.)
+      if (!(this.racing && this.bots.length)) this.me.far = Number(words[7]);
       this.send(place);
       return true;
     }
@@ -187,6 +209,26 @@ const room = {
       this.me.done = Number(line.slice(7));
       this.send(`done ${this.me.done}`);
       this.show();
+      flow.finished();
+      return true;
+    }
+    // (Where the computer drivers are: how many; and of each, its kind of
+    // car, how far it has come, and its time if it has finished, or -1.)
+    // (Where the list may start, down the window: under the game's map,
+    // which is in the same corner. See hud_list, in programs/race/hud.l8.)
+    if (line.startsWith("L8LIST ")) {
+      this.list.style.top = `${Number(line.slice(7)) / 10}%`;
+      return true;
+    }
+    if (line.startsWith("L8BOTS ")) {
+      const words = line.slice(7).split(" ").map(Number);
+      if (this.racing && this.bots.length) this.me.far = words[1];
+      this.bots.forEach((bot, k) => {
+        if (k >= words[0]) return;
+        bot.kind = words[2 + k * 3];
+        bot.far = words[3 + k * 3];
+        bot.done = words[4 + k * 3] >= 0 ? words[4 + k * 3] : null;
+      });
       return true;
     }
     return false;
@@ -207,15 +249,8 @@ const room = {
       return;
     }
     if (words[0] === "race") {
-      // A race: everyone to the grid, in the order of their seats.
-      const seats = [this.me.seat, ...this.others.keys()].sort((a, b) => a - b);
-      const place = Math.max(seats.indexOf(this.me.seat), 0);
-      const wait = Math.min(Math.max(Math.round(Number(words[1]) / 100), 0), 255);
-      const laps = Math.min(Math.max(Number(words[2]) | 0, 1), 15);
-      this.platform.key(2, NET_RACE + wait * 256 + laps * 16 + place);
-      this.racing = true;
-      for (const who of [this.me, ...this.others.values()]) who.done = null;
-      this.show();
+      // A race, called by someone here: everyone is in it.
+      flow.race(Number(words[1]), Number(words[2]), 0);
       return;
     }
     const seat = Number(words[0]);
@@ -245,35 +280,156 @@ const room = {
     who.kind = clamp(kind, 0, 3);
     who.far = far;
   },
-  // The list: who is here; and in a race, in order: those who have
-  // finished, by their times, then the rest, by how far they have come.
-  show() {
-    const online = this.socket !== null;
-    this.call.hidden = !online;
-    const all = online ? [this.me, ...this.others.values()] : [];
+  // Everyone in the order they are in: in a race, those who have
+  // finished, by their times, then the rest, by how far they have come;
+  // out of one, by their seats.
+  order() {
+    const all = [this.me, ...(this.socket ? this.others.values() : []), ...(this.racing ? this.bots : [])];
     if (this.racing) {
       all.sort((a, b) => (a.done !== null && b.done !== null ? a.done - b.done : a.done !== null ? -1 : b.done !== null ? 1 : b.far - a.far));
     } else all.sort((a, b) => a.seat - b.seat);
-    // (Alone, and not racing, there is nothing to list.)
-    const rows = all.length > 1 || this.racing ? all : [];
-    while (this.list.children.length > rows.length) this.list.lastChild.remove();
-    while (this.list.children.length < rows.length) {
+    return all;
+  },
+  // A list of them, into a list on the page.
+  fill(list, rows) {
+    while (list.children.length > rows.length) list.lastChild.remove();
+    while (list.children.length < rows.length) {
       const row = document.createElement("li");
       for (const part of ["place", "dot", "name", "time"]) {
         const span = document.createElement("span");
         span.className = part;
         row.append(span);
       }
-      this.list.append(row);
+      list.append(row);
     }
     rows.forEach((who, k) => {
-      const row = this.list.children[k];
+      const row = list.children[k];
       row.className = who === this.me ? "me" : "";
       row.children[0].textContent = this.racing ? String(k + 1) : "";
       row.children[1].style.background = CAR_COLORS[who.kind] ?? CAR_COLORS[0];
       row.children[2].textContent = who.name;
       row.children[3].textContent = this.racing && who.done !== null ? clock(who.done) : "";
     });
+  },
+  // The lists as they are now: at the side, who is here, and in a race,
+  // who is ahead (alone and not racing, nobody); and the same wherever
+  // else the page shows it (see flow). In a race the game is told the
+  // car's place, for it to show.
+  show() {
+    const all = this.order();
+    this.fill(this.list, all.length > 1 || this.racing ? all : []);
+    for (const list of document.querySelectorAll(".order.copy")) this.fill(list, all);
+    if (this.racing && this.platform) this.platform.key(2, PAGE_PLACE + (all.indexOf(this.me) + 1) * 32 + Math.min(all.length, 31));
+    flow.shown(all);
+  },
+};
+
+
+// ---- the menus ----
+// What the page is showing: the menu (the car waits at the start, to be
+// chosen), driving alone against the clock ("trial"), or a race. The game
+// is told as each begins (see PAGE_MENU, in programs/race/main.l8).
+const el = (id) => document.getElementById(id);
+const flow = {
+  scene: "menu",
+  platform: null,
+  // Whether the pause sheet is up, and whether the game stands still under
+  // it (it does, with nobody else to wait for).
+  paused: false,
+  held: false,
+  // How many computer drivers the race on now has (none: it is against
+  // the others here).
+  bots: 0,
+  // What the player chose, for a race against computer drivers: how many,
+  // and how good (see SKILLS). They are remembered.
+  drivers: 5,
+  skill: 3,
+  choose(drivers, skill) {
+    this.drivers = Math.min(Math.max(Math.round(drivers) || 1, 1), BOT_NAMES.length);
+    this.skill = ((Math.round(skill) || 0) + SKILLS.length) % SKILLS.length;
+    store("race.drivers", String(this.drivers));
+    store("race.skill", String(this.skill));
+    el("drivers").textContent = String(this.drivers);
+    el("skill").textContent = SKILLS[this.skill];
+    el("fewer").disabled = this.drivers <= 1;
+    el("more").disabled = this.drivers >= BOT_NAMES.length;
+  },
+  set(scene) {
+    this.scene = scene;
+    document.body.dataset.scene = scene;
+    this.results(false);
+    this.resume();
+    canvas.focus();
+  },
+  // The menu: no race, the car at the start.
+  menu() {
+    room.racing = false;
+    room.bots = [];
+    this.platform.key(2, PAGE_MENU);
+    this.set("menu");
+    room.show();
+  },
+  // Driving alone.
+  trial() {
+    room.racing = false;
+    room.bots = [];
+    this.platform.key(2, PAGE_ALONE);
+    this.set("trial");
+    room.show();
+  },
+  // Race: against the others, if anyone else is here (the room tells
+  // everyone, me too: see heard); or else against computer drivers.
+  call() {
+    if (room.socket && room.others.size > 0) room.send("race");
+    else this.race(5000, 3, this.drivers, this.skill);
+  },
+  race(wait, laps, bots, skill = this.skill) {
+    this.bots = bots;
+    this.set("race");
+    room.race(wait, laps, bots, skill);
+  },
+  // The race is run: in a moment, how it came out.
+  finished() {
+    if (this.scene !== "race") return;
+    setTimeout(() => {
+      if (this.scene === "race" && room.me.done !== null) this.results(true);
+    }, 1400);
+  },
+  // (With the results up, the list at the side is not: they are the same.)
+  results(up) {
+    el("results").hidden = !up;
+    document.body.classList.toggle("done", up);
+  },
+  // (What the lists say, each time they change: the place and time at the
+  // head of the results, and who is here, in the menu.)
+  shown(all) {
+    const place = all.indexOf(room.me) + 1;
+    const ends = ["th", "st", "nd", "rd"];
+    el("came").textContent = room.me.done === null ? "" : `${place}${ends[place % 10 < 4 && (place % 100 < 11 || place % 100 > 13) ? place % 10 : 0]} of ${all.length}  ·  ${clock(room.me.done)}`;
+    el("name").textContent = room.me.name;
+    const others = room.socket ? room.others.size : 0;
+    el("options").hidden = others > 0;
+    el("here").textContent = others === 0 ? "Nobody else is here: a race is against computer drivers." : `${others === 1 ? "1 other is" : `${others} others are`} here: a race is against ${others === 1 ? "them" : "them all"}.`;
+  },
+  // The pause sheet. Alone, the game stands still under it: as if its
+  // Pause key were held.
+  pause() {
+    if (this.scene === "menu" || this.paused) return;
+    this.paused = true;
+    this.held = !(this.scene === "race" && this.bots === 0);
+    if (this.held) this.platform.key(2, 65299);
+    el("pause").hidden = false;
+  },
+  resume() {
+    if (!this.paused) return;
+    this.paused = false;
+    if (this.held) this.platform.key(3, 65299);
+    el("pause").hidden = true;
+    canvas.focus();
+  },
+  again() {
+    if (this.scene === "race") this.call();
+    else this.trial();
   },
 };
 
@@ -309,8 +465,9 @@ async function main() {
   let car = Number(params.get("L8_CAR") ?? stored("race.car") ?? 0);
   if (!(car >= 0 && car < CARS)) car = 0;
   params.set("L8_CAR", String(car));
-  // (There is a room to tell where the car is.)
+  // (There is a room to tell where the car is; and the menu is up.)
   params.set("L8_NET", "1");
+  params.set("L8_MENU", "1");
   sys.env = [...params].filter(([k]) => k.startsWith("L8_")).map(([k, v]) => `${k}=${v}`);
   const env = Object.fromEntries([...params].filter(([k]) => k.startsWith("L8_")));
   const platform = createPlatform(canvas, { log: (text) => console.warn(text), checkErrors: params.has("glcheck"), scale: 1, zoom: 0.85, env, pointers: true, maxTall: 2.4, maxPixels: 2.2e6 });
@@ -338,42 +495,63 @@ async function main() {
   addEventListener("resize", placePads);
   placePads();
   window.l8Game = platform;
+  window.l8Race = { flow, room };
   room.join(platform, params);
   ghosts.give(platform);
   const { instance, mem } = await instantiate(module, sys, platform.imports);
   platform.attach(instance, mem);
-  // Start over: the game's R key. The next car: its keys 1 to 4. (The
-  // keyboard's own 1 to 4 and Tab are remembered the same way.)
+  // The menus (see flow). The car is chosen with the arrows either side
+  // of it (or the keyboard's 1 to 4 and Tab), which are the game's own
+  // keys for it; and the choice is remembered.
+  flow.platform = platform;
   const press = (sym) => {
     platform.key(2, sym);
     platform.key(3, sym);
     canvas.focus();
   };
   const choose = (k) => {
-    car = k;
+    car = ((k % CARS) + CARS) % CARS;
     store("race.car", String(car));
   };
-  document.getElementById("again").addEventListener("click", () => press(114));
-  document.getElementById("car").addEventListener("click", () => {
-    choose((car + 1) % CARS);
+  const pick = (by) => {
+    choose(car + by);
     press(49 + car);
-  });
+  };
+  const on = (id, what) => el(id).addEventListener("click", what);
+  on("prev", () => pick(-1));
+  on("next", () => pick(1));
+  flow.choose(Number(stored("race.drivers") ?? 5), Number(stored("race.skill") ?? 3));
+  on("fewer", () => flow.choose(flow.drivers - 1, flow.skill));
+  on("more", () => flow.choose(flow.drivers + 1, flow.skill));
+  on("easier", () => flow.choose(flow.drivers, flow.skill - 1));
+  on("harder", () => flow.choose(flow.drivers, flow.skill + 1));
+  on("go-race", () => flow.call());
+  on("go-trial", () => flow.trial());
+  on("name", () => room.rename());
+  on("menu", () => flow.pause());
+  on("resume", () => flow.resume());
+  on("restart", () => flow.again());
+  on("quit", () => flow.menu());
+  on("again", () => flow.again());
+  on("leave", () => flow.menu());
   canvas.addEventListener("keydown", (e) => {
     if (e.ctrlKey || e.metaKey || e.repeat) return;
-    // (Enter calls a race.)
-    if (e.key === "Enter") room.ask();
-    if (e.key >= "1" && e.key <= String(CARS)) choose(Number(e.key) - 1);
-    if (e.key === "Tab") choose((car + 1) % CARS);
+    if (flow.scene === "menu") {
+      if (e.key === "Enter") flow.call();
+      if (e.key >= "1" && e.key <= String(CARS)) choose(Number(e.key) - 1);
+      if (e.key === "Tab") choose(car + 1);
+      if (e.key === "ArrowLeft") pick(-1);
+      if (e.key === "ArrowRight") pick(1);
+    } else if (e.key === "Escape") {
+      if (flow.paused) flow.resume();
+      else flow.pause();
+    }
   });
-  show(touch ? "Tap to start" : "Click to start");
-  canvas.addEventListener("focus", () => (overlay.hidden = true));
-  canvas.addEventListener("blur", () => {
-    if (!touch) show("Click to continue");
-  });
+  document.body.dataset.scene = "menu";
+  room.show();
+  overlay.hidden = true;
   addEventListener("pointerdown", (e) => {
-    if (e.target.closest?.("a")) return;
-    canvas.focus();
-    overlay.hidden = true;
+    if (!e.target.closest?.("a, button")) canvas.focus();
   });
   canvas.focus();
   const status = await runResumable(instance, () => platform.nextFrame());

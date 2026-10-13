@@ -1,0 +1,342 @@
+tag race;
+
+use_tag std;
+
+use_tag skate;
+
+import "../../stdlib/print.l8";
+
+// Computer drivers: cars to race when nobody else is on the track. Each is
+// a car like the player's, driven by the same rules: it can do just what a
+// car of its kind can, no more. Its driver keeps to a line of its own along
+// the road, slows for the bends it can see coming, and pulls out to pass
+// what is in its way. They never drift.
+const MAX_BOTS: int = 7;
+
+// How good a driver is, is a number from 0 to 1, and all of it is in the
+// driving. With more skill it takes a bend faster (at 1, as fast as the
+// tyres hold), brakes later for it, and keeps to the inside of it; and with
+// little, it does not go flat out even down a straight.
+//
+// How good they are in a race is as the player chose: one of three that
+// stay as they are; or as good as the player makes them, so that nobody is
+// left far behind, the player or they: each drives the better the farther
+// behind the player it is, and the worse the farther ahead; and all of
+// them together come, in time, to drive as well as the player does. (As
+// well as they can, that is: a player who is better than their best leaves
+// them.)
+const SKILL_EASY: int = 0;
+
+const SKILL_MEDIUM: int = 1;
+
+const SKILL_HARD: int = 2;
+
+const SKILL_ADAPTIVE: int = 3;
+
+bot_skill: int = SKILL_MEDIUM;
+
+// The skill of the three that stay as they are.
+skill_level: []f32 = [0.3, 0.6, 0.9];
+
+// What skill is: how fast a driver dares take a bend (1: as fast as the
+// road's grip holds, on the road's middle), from the least skill to the
+// most; how much of its brakes it counts on, when it looks for the bends
+// it must slow for; how far in from the road's middle it keeps in a bend,
+// at the most; and how much of its car's top speed it lets itself go down
+// a straight, at the least (from DRIVE_FLAT of skill up, all of it).
+drive_nerve_least: f32 = 0.45;
+
+drive_nerve_most: f32 = 1.5;
+
+drive_brakes_least: f32 = 0.5;
+
+drive_brakes_most: f32 = 0.75;
+
+drive_inside: f32 = 5.5;
+
+drive_eases: f32 = 0.72;
+
+const DRIVE_FLAT: f32 = 0.5;
+
+// As good as the player makes them: how far behind the player a driver
+// drives its best (and ahead, its worst), and how much skill that is; and
+// all of them together: their skill (it is kept from one race to the
+// next), and how fast it comes to what the player's driving asks, a
+// second, were they all as far behind as ADAPT_FAR.
+const ADAPT_FAR: f32 = 60.0;
+
+const ADAPT_BY: f32 = 0.6;
+
+adapt_all: f32 = 0.6;
+
+const ADAPT_LEARN: f32 = 0.01;
+
+type Bot = {
+    car: *Car;
+    // How good it is: now; and more or less than the others, always.
+    skill: f32;
+    own: f32;
+    // The line it keeps: how far out from the road's middle, now, and
+    // where it means to be on a straight.
+    lane: f32;
+    home: f32;
+    // Whether it has finished the race, and in what time.
+    done: bool;
+    done_time: f32
+}
+
+// How many are racing.
+nbots: int = 0;
+
+// By the grid's places from the front: the kind of car in each, and how
+// much better its driver is than the others (or worse).
+bot_kinds: []int = [DART, MINI, BUGGY, TRUCK, MINI, BUGGY, DART];
+
+bot_own: []f32 = [0.1, 0.07, 0.03, 0.0, -0.03, -0.07, -0.1];
+
+new_bot(): *Bot@new {
+    new Bot {
+        car: new_car(BUGGY, 0.0),
+        skill: 0.5,
+        own: 0.0,
+        lane: 0.0,
+        home: 0.0,
+        done: false,
+        done_time: 0.0
+    }
+}
+
+new_bots(): []*Bot@new {
+    bots: []*Bot = new *Bot[MAX_BOTS](new_bot());
+    for k in 1..MAX_BOTS bots[k] = new_bot();
+    bots
+}
+
+// Put n of them on the grid's first n places, for a race; so good.
+start_bots(bots: []*Bot, n: int, skill: int) {
+    nbots = n;
+    if (nbots > MAX_BOTS) nbots = MAX_BOTS;
+    bot_skill = skill;
+    if (skill < SKILL_EASY || skill > SKILL_ADAPTIVE) bot_skill = SKILL_MEDIUM;
+    for k in 0..nbots {
+        b: *Bot = bots[k];
+        b.car.kind = bot_kinds[k];
+        place_car_at(b.car, grid_s(k), grid_d(k));
+        b.own = bot_own[k];
+        level: f32 = adapt_all;
+        if (bot_skill != SKILL_ADAPTIVE) level = skill_level[bot_skill];
+        b.skill = clampf(level + b.own, 0.0, 1.0);
+        b.home = grid_d(k) * 0.7;
+        b.lane = grid_d(k);
+        b.done = false;
+        b.done_time = 0.0
+    }
+}
+
+// What a driver so good asks of its car, to keep it `lane` out from the
+// road's middle: it steers for a point on its line some way ahead, and
+// goes as fast as it dares into the tightest bend within reach of its
+// brakes.
+drive(c: *Car, lane: f32, skill: f32): Input {
+    speed: f32 = v_dot(c.v, yaw_dir(c.yaw));
+    ahead: Spot = spot_at(c.spot.s + 7.0 + 0.5 * maxf(speed, 0.0), lane);
+    off: f32 = wrap_angle(dir_yaw(v_sub(spot_point(ahead), c.p)) - c.yaw);
+    tight: f32 = 0.0001;
+    brakes: f32 = car_brakes[c.kind] * lerpf(drive_brakes_least, drive_brakes_most,
+        skill);
+    reach: int = (12.0 + speed * speed / (2.0 * brakes)) as int;
+    for i in 0..reach tight = maxf(tight, absf(track_k[wrap_i(c.spot.i + i)]));
+    nerve: f32 = lerpf(drive_nerve_least, drive_nerve_most, skill);
+    safe: f32 = sqrtf(car_grip[c.kind * 3 + ROAD] * nerve / tight);
+    // (With little skill, it does not go flat out anywhere.)
+    safe = minf(safe, car_top[c.kind * 3 + ROAD] * lerpf(drive_eases, 1.02, clampf(skill / DRIVE_FLAT,
+        0.0, 1.0)));
+    inp: Input = Input {
+        steer: clampf(-off * 3.0, -1.0, 1.0),
+        gas: 0.0,
+        brake: 0.0,
+        tidy: true,
+        veer: false
+    };
+    if (speed < safe) inp.gas = 1.0 else if (speed > safe + 1.5) inp.brake = 1.0;
+    inp
+}
+
+// How much the road turns, a little way ahead of a car going so fast: from
+// -1 (hard to the left) to 1.
+bend_ahead(c: *Car, speed: f32): f32 {
+    here: V3 = way_at(c.spot.i, c.spot.f);
+    there: V3 = track_t[wrap_i(c.spot.i + 14 + (0.9 * maxf(speed, 0.0)) as int)];
+    clampf(v_dot(right_of(here), there) * 2.2, -1.0, 1.0)
+}
+
+// How far ahead a driver looks for a car in its way, and how near to its
+// own line that car must be; and how far to one side it pulls out.
+const BOT_SEES: f32 = 16.0;
+
+const BOT_CLEAR: f32 = 2.6;
+
+const BOT_PASS: f32 = 3.4;
+
+// Whether the car o is in the way of the driver's car: just ahead of it,
+// near its line, and no faster.
+in_the_way(c: *Car, o: *Car): bool {
+    ahead: f32 = o.progress - c.progress;
+    ahead > 1.0 && ahead < BOT_SEES && absf(o.spot.d - c.spot.d) < BOT_CLEAR && v_len(o.v) < v_len(c.v) + 2.0
+}
+
+// What driver k asks of its car.
+bot_input(bots: []*Bot, k: int, player: *Car): Input {
+    b: *Bot = bots[k];
+    c: *Car = b.car;
+    speed: f32 = v_dot(c.v, yaw_dir(c.yaw));
+    // Its line: its own, and in a bend, the nearer the inside the better
+    // it is; or, with a car in its way, out to one side of that car (the
+    // side with more road).
+    bend: f32 = bend_ahead(c, speed) * b.skill;
+    want: f32 = lerpf(b.home, signf(bend) * drive_inside, absf(bend));
+    block: f32 = 100.0;
+    if (in_the_way(c, player)) block = player.spot.d;
+    for j in 0..nbots {
+        if (j != k && in_the_way(c, bots[j].car)) block = bots[j].car.spot.d
+    }
+    if (block < 50.0) {
+        if (block > 0.0) want = block - BOT_PASS else want = block + BOT_PASS
+    }
+    want = clampf(want, -(ROAD_HALF - 1.4), ROAD_HALF - 1.4);
+    b.lane = toward(b.lane, want, 4.0 * STEP_DT);
+    drive(c, b.lane, b.skill)
+}
+
+// A step of all their driving; and of their meeting one another, and the
+// player's car (which is knocked by them too, if it may be: not while it
+// is carried to the start).
+step_bots(
+    bots: []*Bot,
+    player: *Car,
+    solid: bool,
+    dt: f32
+) {
+    // As good as the player makes them: while the race is on, and the
+    // player in it, all of them together come toward the player's speed
+    // (by how far behind it they are, one with another).
+    adapting: bool = bot_skill == SKILL_ADAPTIVE && race.on && !race.done && !race_waits();
+    if (adapting) {
+        behind: f32 = 0.0;
+        for k in 0..nbots behind = behind + clampf((player.progress - bots[k].car.progress) / ADAPT_FAR,
+            -1.0, 1.0) / nbots as f32;
+        adapt_all = clampf(adapt_all + ADAPT_LEARN * behind * dt, 0.0, 1.0)
+    }
+    for k in 0..nbots {
+        b: *Bot = bots[k];
+        // (And each comes to drive as well as it must where it is, not at
+        // once. Its race run, it takes its ease.)
+        if (adapting && !b.done) {
+            g: f32 = clampf((player.progress - b.car.progress) / ADAPT_FAR, -1.0,
+                1.0);
+            b.skill = lerpf(b.skill, clampf(adapt_all + b.own + ADAPT_BY * g, 0.0,
+                1.0), ease(1.5, dt))
+        }
+        if (b.done) b.skill = 0.0;
+        inp: Input = Input {
+            steer: 0.0,
+            gas: 0.0,
+            brake: 0.0,
+            tidy: true,
+            veer: false
+        };
+        if (!race_waits()) inp = bot_input(bots, k, player);
+        step_car(b.car, inp, dt);
+        if (!b.done && race.on && b.car.progress >= race.laps as f32 * track_len) {
+            b.done = true;
+            b.done_time = race.time
+        }
+    }
+    for k in 0..nbots {
+        for j in 0..nbots {
+            if (j != k) hit_car(bots[k].car, bots[j].car)
+        }
+        if (solid) {
+            hit_car(bots[k].car, player);
+            hit_car(player, bots[k].car)
+        }
+    }
+}
+
+// How much each drafts: the player's car any of them (the most it could:
+// see feel_draft for what is done with it), and each of them the player's
+// and one another.
+draft_bots(bots: []*Bot, player: *Car, dt: f32): f32 {
+    most: f32 = 0.0;
+    for k in 0..nbots {
+        c: *Car = bots[k].car;
+        most = maxf(most, draft_behind(player, c));
+        its: f32 = draft_behind(c, player);
+        for j in 0..nbots {
+            if (j != k) its = maxf(its, draft_behind(c, bots[j].car))
+        }
+        feel_draft(c, its, dt)
+    }
+    most
+}
+
+// The player's place in the race among them: 1, if it is ahead of them
+// all. (One that has finished is ahead of one that has not; and of two
+// that have, the one with the better time.)
+place_among(bots: []*Bot, player: *Car): int {
+    place: int = 1;
+    for k in 0..nbots {
+        b: *Bot = bots[k];
+        if (race.done) {
+            if (b.done && b.done_time < race.done_time) place = place + 1
+        } else if (b.done || b.car.progress > player.progress) place = place + 1
+    }
+    place
+}
+
+// They are posed with the cars already posed.
+pose_bots(bots: []*Bot) {
+    for k in 0..nbots {
+        c: *Car = bots[k].car;
+        pose_kind(c.kind, c.kind, 0.0);
+        at: V3 = c.p;
+        at.y = car_y(c);
+        pose_ghost = pose_near(at);
+        pose_car(c, at, c.yaw, 0.0)
+    }
+    pose_ghost = false
+}
+
+// And they are on the map (see hud.l8).
+map_bots(bots: []*Bot) {
+    for k in 0..nbots map_put(bots[k].car.p, bots[k].car.kind, DOT_OTHER)
+}
+
+// On a page, the page keeps the list of who is ahead (see
+// web/race/race.js): so every so often the game writes a line of where
+// they are: how many; how far the player's car has come from the start
+// line, in metres (at the same moment as theirs: else two cars that are
+// level are listed now one first, now the other); and of each, its kind of
+// car, how far it has come, and its time in the race, in thousandths of a
+// second, if it has finished (or -1).
+bots_wait: f32 = 0.0;
+
+say_bots(bots: []*Bot, player: *Car, dt: f32) raises IoError {
+    bots_wait = bots_wait - dt;
+    if (bots_wait > 0.0) return;
+    bots_wait = 0.1;
+    write(1, "L8BOTS ");
+    write_int(1, nbots);
+    write(1, " ");
+    write_int(1, floorf(player.progress) as int);
+    for k in 0..nbots {
+        b: *Bot = bots[k];
+        write(1, " ");
+        write_int(1, b.car.kind);
+        write(1, " ");
+        write_int(1, floorf(b.car.progress) as int);
+        write(1, " ");
+        if (b.done) write_int(1, (b.done_time * 1000.0) as int) else write(1, "-1")
+    }
+    write(1, "\n")
+}

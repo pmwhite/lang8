@@ -9,9 +9,9 @@ import "../../stdlib/print.l8";
 // The others: people driving the same track at the same time, each on a
 // device of their own. Every device works out its own car, says where it
 // is several times a second, and is told where the others' are, to draw
-// them, and to run into: each device knocks its own car off the others as
-// it sees them (see hit_others), and so, between them, two cars that meet
-// are both knocked.
+// them, to run into, and to draft: each device knocks its own car off the
+// others as it sees them (see hit_others), and so, between them, two cars
+// that meet are both knocked.
 //
 // On a page, the page does the talking (see web/race/race.js, and the room
 // it talks to, web/race-room/worker.js). The game tells the page where its
@@ -113,6 +113,11 @@ net_race_laps: int = 3;
 
 net_race_place: int = 0;
 
+// (And how many computer drivers are in it, and how good: see bots.l8.)
+net_race_bots: int = 0;
+
+net_race_skill: int = 1;
+
 // What the first of the two said: whose it was, the car's kind, and where
 // it was.
 net_seat: int = -1;
@@ -134,14 +139,16 @@ net_stamp: int = 0;
 // in its last bit, that it has gone.
 net_key(others: []*Other, ks: int): bool {
     if (ks < NET_A || ks >= NET_END) return false;
-    // A race: tenths of a second till it starts, its laps, and the place
-    // on the grid.
+    // A race: how many computer drivers, tenths of a second till it
+    // starts, its laps, and the place on the grid.
     if (ks >= NET_RACE) {
         w: int = ks - NET_RACE;
         net_race = true;
         net_race_wait = (w / 256 % 256) as f32 * 0.1;
         net_race_laps = w / 16 % 16;
         net_race_place = w % 16;
+        net_race_bots = w / 65536 % 16;
+        net_race_skill = w / 1048576 % 16;
         return true
     }
     if (ks < NET_B) {
@@ -266,67 +273,36 @@ tick_others(others: []*Other, dt: f32) {
 }
 
 // ---- running into them ----
-// A car is as two discs, one over each axle, a little wider than the car:
-// how far apart they are, of the way between its axles; and how much wider
-// than its wheels. And how much of the speed two cars meet with comes back
-// as they part.
-const DISCS_APART: f32 = 0.8;
-
-const DISC_WIDER: f32 = 0.12;
-
-const CARS_BOUNCE: f32 = 0.35;
-
-// The middle of a car's front disc (1) or back disc (-1).
-disc_at(c: *Car, end: f32): V3 {
-    v_madd(c.p, yaw_dir(c.yaw), end * car_axle[c.kind] * DISCS_APART)
-}
-
-disc_radius(c: *Car): f32 {
-    car_wheel_x[c.kind] + DISC_WIDER
-}
-
-// The car, where it has run into another: it is moved back out of it, and
-// knocked. Each device does this for its own car alone, against the
-// others as it sees them; the other car's device does the same for its
-// own. So this car takes only its share of the parting and of the knock,
-// by the weights of the two: a Truck shoves a Mini a long way, and is
-// hardly shoved itself. (What each device sees of the other is a moment
-// old, so the two do not always agree on how hard they met.)
+// The car, where it has run into any of the others: see hit_car. Each
+// device does this for its own car alone, against the others as it sees
+// them; the other car's device does the same for its own. (What each
+// device sees of the other is a moment old, so the two do not always agree
+// on how hard they met.)
 hit_others(others: []*Other, c: *Car) {
     for k in 0..MAX_OTHERS {
         o: *Other = others[k];
-        reach: f32 = car_axle[c.kind] + car_axle[o.car.kind] + 2.5;
-        if (o.here && o.seen && v_len(v_sub(o.car.p, c.p)) < reach) {
-            // The two discs, one of each car, that are deepest into each
-            // other.
-            deep: f32 = 0.0;
-            out: V3 = v3(0.0, 0.0, 0.0);
-            touch: f32 = disc_radius(c) + disc_radius(o.car);
-            for e in 0..4 {
-                mine: f32 = 1.0;
-                if (e % 2 == 1) mine = -1.0;
-                its: f32 = 1.0;
-                if (e / 2 == 1) its = -1.0;
-                apart: V3 = v_sub(disc_at(c, mine), disc_at(o.car, its));
-                apart.y = 0.0;
-                d: f32 = v_len(apart);
-                if (touch - d > deep && d > 0.001) {
-                    deep = touch - d;
-                    out = v_scale(apart, 1.0 / d)
-                }
-            }
-            if (deep > 0.0) {
-                share: f32 = car_weight[o.car.kind] / (car_weight[c.kind] + car_weight[o.car.kind]);
-                c.p = v_madd(c.p, out, deep * share);
-                // (Knocked only if they are closing: not again while they
-                // part.)
-                closing: f32 = -v_dot(v_sub(c.v, o.car.v), out);
-                if (closing > 0.0) {
-                    c.v = v_madd(c.v, out, closing * (1.0 + CARS_BOUNCE) * share);
-                    c.hit = maxf(c.hit, closing);
-                    if (closing > 4.0) c.drift = false
-                }
-            }
+        if (o.here && o.seen) hit_car(c, o.car)
+    }
+}
+
+// How much the car drafts the others: the most it drafts any of them.
+draft_others(others: []*Other, c: *Car): f32 {
+    most: f32 = 0.0;
+    for k in 0..MAX_OTHERS {
+        o: *Other = others[k];
+        if (o.here && o.seen) most = maxf(most, draft_behind(c, o.car))
+    }
+    most
+}
+
+// What shows in the air about the wheels of those near the place p (see
+// fx.l8).
+fx_others(others: []*Other, p: V3, dt: f32) {
+    for k in 0..MAX_OTHERS {
+        o: *Other = others[k];
+        if (o.here && o.seen && v_len(v_sub(o.car.p, p)) < 80.0) {
+            o.car.skid = v_len(o.car.v) * sinf(o.car.slip);
+            fx_wheels(o.car, dt)
         }
     }
 }
@@ -341,8 +317,18 @@ pose_others(others: []*Other, p: V3) {
             pose_kind(c.kind, c.kind, 0.0);
             at: V3 = c.p;
             at.y = car_y(c);
+            pose_ghost = pose_near(at);
             pose_car(c, at, c.yaw, 0.0)
         }
+    }
+    pose_ghost = false
+}
+
+// And all of them are on the map (see hud.l8), however far off.
+map_others(others: []*Other) {
+    for k in 0..MAX_OTHERS {
+        o: *Other = others[k];
+        if (o.here && o.seen) map_put(o.car.p, o.car.kind, DOT_OTHER)
     }
 }
 
