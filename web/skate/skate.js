@@ -112,6 +112,7 @@ onTap(document.querySelector(".look"), () => {
 });
 onTap(document.querySelector(".replay"), () => {
   document.body.classList.remove("over");
+  go("watch");
   typeKeys([112]);
 });
 // (And riding it again, from the top: the game's R.)
@@ -127,23 +128,17 @@ onTap(document.querySelector(".again"), () => {
 // Reading never waits. Watching or trying asked for before the game is
 // there and done building is kept, and done the moment it is.
 const stepsEl = document.querySelector(".steps");
-const lessonNow = () => {
-  const id = headed ?? placeNow;
-  return isLesson(id) ? id : 0;
-};
+const lessonNow = () => (pageNow() === "lesson" ? TUTORIAL + trail.at(-1)[1] : 0);
 let pendingStep = "";
 const syncSteps = () => {
   document.body.classList.toggle("lesson", lessonNow() !== 0);
-  // (Under another sheet, as home's or the guide's, they stay where they
-  // are, but beneath it: dimmed with the rest, and out of reach.)
-  document.body.classList.toggle("covered", Object.entries(sheets).some(([name, el]) => name !== "lesson" && !el.hidden));
   // The one he is at: reading; or what he has asked for and waits on; or
   // else what the game is doing.
-  const at = !sheets.lesson.hidden ? "read" : pendingStep || (document.body.classList.contains("watching") ? "watch" : "try");
+  const at = reading ? "read" : pendingStep || (document.body.classList.contains("watching") ? "watch" : "try");
   for (const tab of stepsEl.querySelectorAll(".tab")) tab.classList.toggle("on", tab.dataset.step === at);
 };
 // The game is at a lesson, built and ready to be told what to do.
-const lessonReady = () => headed === null && isLesson(placeNow) && !document.body.classList.contains("loading");
+const lessonReady = () => headed === null && placeNow === lessonNow() && !document.body.classList.contains("loading");
 const doStep = (step) => {
   document.body.classList.remove("over");
   // (As it will be, the moment the game takes the key: see L8RIDE.)
@@ -156,10 +151,12 @@ for (const tab of stepsEl.querySelectorAll(".tab")) {
     const id = lessonNow();
     if (!id) return;
     const step = tab.dataset.step;
-    if (step === "read") return go("lesson", id - TUTORIAL);
-    pendingStep = lessonReady() ? "" : step;
-    closeSheets();
-    if (!pendingStep) doStep(step);
+    // (The lesson's one page, whichever step of it shows: none of them
+    // is a page further on.)
+    reading = step === "read";
+    pendingStep = reading || lessonReady() ? "" : step;
+    present();
+    if (!reading && !pendingStep) doStep(step);
   });
 }
 // (Once the game is there and built: see L8COURSE and L8LOAD.)
@@ -175,10 +172,10 @@ const stepWhenReady = () => {
 // (From a lesson's end, the next lesson, or the list of them.)
 const onwardEl = document.querySelector(".onward");
 onTap(onwardEl, () => {
-  if (!isLesson(placeNow)) return goTo(today());
+  if (!isLesson(placeNow)) return goTo(today(), true);
   const n = placeNow - TUTORIAL;
-  if (n < LESSONS.length) go("lesson", n + 1);
-  else go("lessons");
+  if (n < LESSONS.length) goInstead("lesson", n + 1);
+  else goBack();
 });
 // What thumbs are doing: his own (as the game has it, left of the middle
 // steers, right of it is the trick), or those of the run the game rides
@@ -204,25 +201,29 @@ for (const name of ["pointerup", "pointercancel"]) {
   });
 }
 
-// Sheets over the game: home, the guide, the places to pick from, a place,
-// and a person. The game pauses (Pause, held) while any is open.
+// Pages. Home is the root: it is where the page opens, there is nothing to
+// go back to from it, and nothing closes it but going on to something. The
+// rest are a history back to it (`trail`, home first, the page showing
+// last): each a kind and what it is of. Most are sheets over the game,
+// which is held (Pause, held) while one is up: the lessons, a lesson read,
+// the places to pick from, the days gone by, a place, a person. Three have
+// no sheet, the game itself showing: a place ridden ("ride"), a run
+// watched ("watch"), and a lesson watched or tried (the lesson's own page,
+// when it is not being read: see `reading`).
+//
+// Two buttons, on every page but home: back, a page; and home.
 const sheets = Object.fromEntries(["menu", "lessons", "lesson", "places", "days", "place", "person"].map((id) => [id, document.getElementById(id)]));
 const sheetOpen = () => Object.values(sheets).some((el) => !el.hidden);
-// Whether he has started riding: until then home cannot be left without
-// choosing.
-let started = false;
-// The sheets he has come through, the one showing last: each a sheet's
-// name and what it is of (a place's number, a person's name, whether the
-// places are parks). Going on to another adds one; going back takes one
-// off, down to the game.
-const trail = [];
-// (The page's buttons know of it: with a sheet open, the one that goes back
-// from it takes home's place, unless there is nowhere to go back to.)
+const trail = [["menu"]];
+const pageNow = () => trail.at(-1)[0];
+// (A lesson's page is its sheet only while its word is being read.)
+let reading = true;
 const sheetsChanged = () => {
   const open = Object.keys(sheets).find((id) => !sheets[id].hidden);
   document.body.classList.toggle("sheet", !!open);
+  document.body.classList.toggle("home", open === "menu");
   document.body.classList.toggle("showing", open === "place");
-  document.body.classList.toggle("canback", !!open && (trail.length > 1 || started));
+  document.body.classList.toggle("canback", trail.length > 1);
   syncPreview();
   syncSteps();
 };
@@ -235,65 +236,69 @@ const syncPreview = () => {
   previewing = want;
   sendKey(want ? 2 : 3, 65300, "");
 };
-const openSheet = (id) => {
+// The sheet named is up, and the game held; or none is, and the game goes.
+const showSheet = (id) => {
   for (const [name, el] of Object.entries(sheets)) el.hidden = name !== id;
   sheetsChanged();
   // (Nothing to click to go on with, under a sheet.)
   overlay.hidden = true;
-  canvas.blur();
-  sendKey?.(2, 65299, "");
+  if (id) {
+    canvas.blur();
+    sendKey?.(2, 65299, "");
+  } else {
+    sendKey?.(3, 65299);
+    canvas.focus();
+  }
 };
-const closeSheets = () => {
-  for (const el of Object.values(sheets)) el.hidden = true;
-  trail.length = 0;
-  started = true;
-  sheetsChanged();
-  overlay.hidden = true;
-  sendKey?.(3, 65299);
-  canvas.focus();
-};
-// Show the sheet he has come to (or the game, if there is none), with its
-// scores as they are now when they come.
+// Show the page he has come to, with its scores as they are now when they
+// come.
 const present = () => {
   const view = trail.at(-1);
-  if (!view) return closeSheets();
   const [id, of] = view;
   if (id === "places" || id === "days") picking = of;
-  // (A lesson: the game goes to it behind its sheet, and holds.)
+  // (A lesson: the game goes to it, behind its sheet if that is up.)
   if (id === "lesson") {
     lessonOf = of;
     visit(TUTORIAL + of);
   }
   if (id === "place") visit((placeOf = of));
   if (id === "person") personOf = of;
-  showOpen(id);
-  openSheet(id);
-  loadScores().then(() => {
-    if (trail.at(-1) === view) showOpen(id);
-  });
+  const sheet = id in sheets && (id !== "lesson" || reading) ? id : null;
+  if (sheet) showOpen(sheet);
+  showSheet(sheet);
+  if (sheet)
+    loadScores().then(() => {
+      if (trail.at(-1) === view) showOpen(sheet);
+    });
 };
 const go = (id, of) => {
+  if (id === "lesson") {
+    reading = true;
+    pendingStep = "";
+  }
   trail.push([id, of]);
   present();
 };
-const goHome = () => {
-  trail.length = 0;
-  go("menu");
+// (In place of the page showing: on from one lesson to the next, or one
+// ride to another, back from either being to where they were come to
+// from.)
+const goInstead = (id, of) => {
+  if (trail.length > 1) trail.pop();
+  go(id, of);
 };
-// A sheet is left by the button in the corner that goes back, or Escape
-// (not by a tap outside it, which is too easily made by mistake).
+const goHome = () => {
+  // (A run being watched is left.)
+  if (pageNow() === "watch") typeKeys([65288]);
+  trail.length = 1;
+  present();
+};
+// Back a page, by the button in the corner or Escape (not by a tap outside
+// a sheet, which is too easily made by mistake). From home there is
+// nowhere back to.
 const goBack = () => {
-  // (From a replay: the game leaves it. See L8RIDE.)
-  if (trail.length === 0 && document.body.classList.contains("replaying")) typeKeys([65288]);
-  // (From a lesson, at any of its steps: to the lessons, and from them
-  // home.)
-  if (lessonNow() && (trail.length === 0 || trail.at(-1)[0] === "lesson")) {
-    trail.length = 0;
-    trail.push(["menu"], ["lessons"]);
-    return present();
-  }
-  if (trail.length === 0 || (trail.length === 1 && !started)) return;
-  trail.pop();
+  if (trail.length <= 1) return;
+  // (From a run being watched: the game leaves it. See L8RIDE.)
+  if (trail.pop()[0] === "watch") typeKeys([65288]);
   present();
 };
 onTap(document.querySelector(".back"), goBack);
@@ -460,9 +465,11 @@ const visit = (id) => {
   if (!sendKey) wanted = id;
   else if (id !== (headed ?? placeNow)) typePlace(id);
 };
-// Ride there: from its start, if the game is there already.
-const goTo = (id) => {
-  closeSheets();
+// Ride there: from its start, if the game is there already. (A page of its
+// own; or, `instead`, in place of the ride he is on.)
+const goTo = (id, instead = false) => {
+  if (instead && pageNow() === "ride") goInstead("ride", id);
+  else go("ride", id);
   if (!sendKey) wanted = id;
   // (Already there: from the top; and in the tutorial, which starts with
   // the game riding it, that again.)
@@ -708,8 +715,6 @@ const postRun = async (version, id, score, replay) => {
   }
   showOpen();
 };
-// The sheets a run being watched was reached through, to go back to after.
-let watchedFrom = null;
 const watchRun = async (person, id) => {
   if (!sendKey) return;
   try {
@@ -717,9 +722,9 @@ const watchRun = async (person, id) => {
     const run = await r.json();
     if (!r.ok) throw new Error(run.error);
     gameFs.writeFile("watch.txt", `${run.version} ${run.course} ${run.score} ${run.name.replace(/ /g, "_")} ${run.replay}`);
-    // (Going back from the run comes back to this sheet: see L8RIDE.)
-    watchedFrom = trail.slice();
-    closeSheets();
+    // (Going back from the run, or its end, comes back to this sheet:
+    // see L8RIDE.)
+    go("watch");
     typeKeys([118]);
   } catch {
     toast("Couldn't load that run");
@@ -833,14 +838,17 @@ const gameSays = (line) => {
     if (ride === 1 && isLesson(placeNow) && !document.body.classList.contains("watching")) sayVerdict();
     if (ride !== 1) verdict = "";
     if (ride === 1) onwardEl.textContent = isLesson(placeNow) ? (placeNow - TUTORIAL < LESSONS.length ? "Next lesson" : "All lessons") : "Daily slopestyle";
-    document.body.classList.toggle("replaying", ride === 2 || ride === 3);
-    if (ride < 2 && watchedFrom) {
-      const back = watchedFrom;
-      watchedFrom = null;
-      if (trail.length === 0 && back.length > 0) {
-        trail.push(...back);
-        present();
-      }
+    const replaying = ride === 2 || ride === 3;
+    document.body.classList.toggle("replaying", replaying);
+    // A run being watched is a page: come to by the game's own key, it
+    // is noted; and over, it is left, for the page before it.
+    if (replaying && pageNow() !== "watch" && !sheetOpen()) {
+      trail.push(["watch"]);
+      sheetsChanged();
+    }
+    if (!replaying && pageNow() === "watch") {
+      trail.pop();
+      present();
     }
   }
   else if (words[0] === "L8REPLAY") postRun(Number(words[1]), Number(words[2]), Number(words[3]), words.slice(4).join(" "));
@@ -1192,10 +1200,9 @@ async function main() {
   // last time, and what he picks from it before the game has loaded is
   // where the game starts.
   if (!params.has("L8_SEED")) placeNow = startPlace();
-  if (params.has("play")) {
-    sheets.menu.hidden = true;
-    sheetsChanged();
-  } else goHome();
+  // (Home; or with ?play, riding where he last was.)
+  if (params.has("play")) trail.push(["ride", placeNow]);
+  present();
   // (Opened by his link: who he is, once the leaderboards say.)
   if (linked) {
     loadMe().then((ok) => {
@@ -1288,11 +1295,8 @@ async function main() {
   const { instance, mem } = await instantiate(module, sys, platform.imports);
   platform.attach(instance, mem);
   sendKey = platform.key;
-  // The game is held behind a sheet that is open (see openSheet).
-  overlay.hidden = true;
-  if (sheetOpen()) sendKey(2, 65299, "");
-  else closeSheets();
-  syncPreview();
+  // (The game is held behind a sheet that is up: see showSheet.)
+  present();
   // (Picked while the game was starting somewhere else.)
   if (wanted !== null && wanted !== placeNow) visit(wanted);
   wanted = null;
