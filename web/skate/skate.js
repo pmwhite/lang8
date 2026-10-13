@@ -122,7 +122,7 @@ onTap(document.querySelector(".again"), () => {
 
 // Sheets over the game: home, the guide, the places to pick from, a place,
 // and a person. The game pauses (Pause, held) while any is open.
-const sheets = Object.fromEntries(["menu", "guide", "places", "days", "place", "person"].map((id) => [id, document.getElementById(id)]));
+const sheets = Object.fromEntries(["menu", "guide", "lessons", "lesson", "places", "days", "place", "person"].map((id) => [id, document.getElementById(id)]));
 const sheetOpen = () => Object.values(sheets).some((el) => !el.hidden);
 // Whether he has started riding: until then home cannot be left without
 // choosing.
@@ -174,6 +174,11 @@ const present = () => {
   if (!view) return closeSheets();
   const [id, of] = view;
   if (id === "places" || id === "days") picking = of;
+  // (A lesson: the game goes to it behind its sheet, and holds.)
+  if (id === "lesson") {
+    lessonOf = of;
+    visit(TUTORIAL + of);
+  }
   if (id === "place") visit((placeOf = of));
   if (id === "person") personOf = of;
   showOpen(id);
@@ -216,6 +221,44 @@ const PLACES = 5;
 // The tutorial's course (see programs/skate/tutorial.l8): where a new
 // player starts, until he has left it for another.
 const TUTORIAL = 100000000;
+// The tutorial's lessons, TUTORIAL + 1 on: each a stretch of its course
+// with one thing on it (see programs/skate/tutorial.l8), with a word
+// before it, and of the scoring it bears on.
+const LESSONS = [
+  {
+    title: "Steering",
+    intro: "Your left thumb steers (or the arrow keys). Slide it toward the side you want to go; lift it, and he keeps his heading. Ride the run to the finish.",
+    scoring: "A run's score is the sum of its tricks. Steering scores nothing, but it gets you to the jumps, and onto the line for them.",
+  },
+  {
+    title: "The ramp",
+    intro: "Put your right thumb down early (or hold Space), and he crouches. Slide it up (or tap Up) to set a frontflip. Let go where the ramp glows green: the later, the more air.",
+    scoring: "A flip is 600; two are 900, three 1100. A kicker pays flips double. Land it clean, or it is sketchy and scores nothing.",
+  },
+  {
+    title: "Backflip and grab",
+    intro: "The same trick twice scores half, so set another: slide down (or tap Down) for a backflip. In the air, thumb down again (or Space) to grab the board; let go before you land.",
+    scoring: "A repeat scores half, then a quarter. A grab adds 300 to 500, more the longer you hold it.",
+  },
+  {
+    title: "The box",
+    intro: "Line up early with a box or a rail and ride straight onto it to grind. Keep the steering gentle to stay on, and ride off its end.",
+    scoring: "A grind is 300, plus 150 for each second on it.",
+  },
+  {
+    title: "The halfpipe",
+    intro: "Steer up a wall and he rides it. Slide sideways (or tap Left or Right) to set a spin, and let go on the green near the top. Then the other wall.",
+    scoring: "A 180 is 200, a 360 is 350, a 540 is 480, a 720 is 580. A halfpipe pays spins double. Landing switch, facing backward, scores half again.",
+  },
+  {
+    title: "The gap",
+    intro: "A big jump has room for more. Slide up and across (or tap Up and Right) for a flip and a spin at once, and clear the gap: landing short scores nothing.",
+    scoring: "A gap pays a flip with a spin half again. Each kind of jump favors one kind of trick, so mix them up: set the trick early, and let go late.",
+  },
+];
+const isLesson = (id) => id > TUTORIAL && id <= TUTORIAL + LESSONS.length;
+const inTutorial = (id) => id === TUTORIAL || isLesson(id);
+
 // Big air's places are numbered from here (big air 3 is BIG_AIR + 3): see
 // lay_big_air, in programs/skate/layout.l8.
 const BIG_AIR = 200000000;
@@ -239,6 +282,8 @@ const KEEP_RECENT = 20;
 const KEEP_BEST = 10;
 const KEEP_PLACES = 60;
 const myRuns = stored("skate.runs", {});
+// The tutorial's lessons he has finished (riding them himself to the end).
+const lessonsDone = stored("skate.lessons", {});
 const noteRun = (id, score) => {
   const mine = (myRuns[id] ??= { recent: [], best: [] });
   const run = [score, Date.now()];
@@ -290,6 +335,7 @@ const SLOPE_NAMES = ["Haystack", "Pinewood", "Lantern", "Clover", "Fox Run"];
 const PARK_NAMES = ["Pebble", "Sundial", "Mossy", "Birdbath", "Thistle"];
 const placeName = (id) => {
   if (id === TUTORIAL) return "Tutorial";
+  if (isLesson(id)) return `Lesson ${id - TUTORIAL}: ${LESSONS[id - TUTORIAL - 1].title}`;
   if (id >= 1 && id <= SLOPE_NAMES.length) return SLOPE_NAMES[id - 1];
   if (id <= -1 && id >= -PARK_NAMES.length) return PARK_NAMES[-id - 1];
   if (isBigAir(id)) return id === BIG_AIR + 1 ? "Big air" : `Big air ${id - BIG_AIR}`;
@@ -328,7 +374,7 @@ const randomPlace = (kind) => (kind === "parks" ? -1 : 1) * (PLACES + 1 + Math.f
 // else as this device does. Told as a key, 300000000 and the score, when
 // he arrives, and again when the leaderboards come.
 const tellBest = () => {
-  if (!sendKey || !placeNow || placeNow === TUTORIAL) return;
+  if (!sendKey || !placeNow || inTutorial(placeNow)) return;
   const local = myRuns[placeNow]?.best?.[0]?.[0] ?? 0;
   const posted = account ? (bestsOn(placeNow).find((run) => run.id === account.id)?.score ?? 0) : 0;
   const best = Math.max(local, posted);
@@ -614,7 +660,14 @@ onTap(teachEl.querySelector(".skip"), () => typeKeys([114]));
 onTap(teachEl.querySelector(".try"), () => typeKeys([114]));
 onTap(teachEl.querySelector(".rewatch"), () => typeKeys([116]));
 // (From the end of his own ride of it, on to today's course.)
-onTap(document.querySelector(".onward"), () => goTo(today()));
+// (From a lesson's end, the next lesson, or the list of them.)
+const onwardEl = document.querySelector(".onward");
+onTap(onwardEl, () => {
+  if (!isLesson(placeNow)) return goTo(today());
+  const n = placeNow - TUTORIAL;
+  if (n < LESSONS.length) go("lesson", n + 1);
+  else go("lessons");
+});
 // What thumbs are doing: his own (as the game has it, left of the middle
 // steers, right of it is the trick), or those of the run the game rides
 // (L8HANDS: see demo_keys, in tutorial.l8). The right-hand control says
@@ -670,6 +723,12 @@ const gameSays = (line) => {
     // one of someone's ends back on the sheet it was picked from.
     const ride = Number(words[1]);
     document.body.classList.toggle("done", ride === 1);
+    // (A lesson ridden to its end is done.)
+    if (ride === 1 && isLesson(placeNow) && !lessonsDone[placeNow - TUTORIAL]) {
+      lessonsDone[placeNow - TUTORIAL] = true;
+      store("skate.lessons", lessonsDone);
+    }
+    if (ride === 1) onwardEl.textContent = isLesson(placeNow) ? (placeNow - TUTORIAL < LESSONS.length ? "Next lesson" : "All lessons") : "Daily slopestyle";
     document.body.classList.toggle("replaying", ride >= 2);
     if (ride < 2 && watchedFrom) {
       const back = watchedFrom;
@@ -686,8 +745,8 @@ const gameSays = (line) => {
     if (placeNow === headed) headed = null;
     tellBest();
     document.body.classList.toggle("park", placeNow < 0);
-    document.body.classList.toggle("tutorial", placeNow === TUTORIAL);
-    if (placeNow !== TUTORIAL) {
+    document.body.classList.toggle("tutorial", inTutorial(placeNow));
+    if (!inTutorial(placeNow)) {
       store("skate.course", placeNow);
       store("skate.tutorial", true);
     }
@@ -793,7 +852,7 @@ const showMenu = () => {
 for (const el of sheets.menu.querySelectorAll(".item")) {
   onTap(el, () => {
     const to = el.dataset.go;
-    if (to === "tutorial") goTo(TUTORIAL);
+    if (to === "tutorial") go("lessons");
     if (to === "courses") go("places", "courses");
     if (to === "parks") go("places", "parks");
     // (One big air is enough.)
@@ -804,6 +863,40 @@ onTap(sheets.menu.querySelector(".me"), () => {
   if (account) go("person", account.name);
 });
 onTap(document.querySelector(".pick"), goHome);
+
+// The tutorial's lessons, each to its word before it is watched (or to be
+// taken up again, done or not).
+const showLessons = () => {
+  const el = sheets.lessons.querySelector(".items");
+  el.textContent = "";
+  LESSONS.forEach((lesson, i) => {
+    const div = document.createElement("div");
+    div.className = "item";
+    const b = document.createElement("b");
+    b.textContent = `${i + 1}. ${lesson.title}`;
+    const mark = document.createElement("i");
+    mark.textContent = lessonsDone[i + 1] ? "\u2713" : "";
+    div.append(b, mark);
+    onTap(div, () => go("lesson", i + 1));
+    el.append(div);
+  });
+};
+let lessonOf = 1;
+const showLesson = () => {
+  const el = sheets.lesson;
+  const lesson = LESSONS[lessonOf - 1];
+  el.querySelector("h2").textContent = `${lessonOf}. ${lesson.title}`;
+  el.querySelector(".intro").textContent = lesson.intro;
+  el.querySelector(".scoring p").textContent = lesson.scoring;
+};
+// Watch: the game rides the lesson (from its start again, if it is there
+// already), and then it is his turn.
+onTap(sheets.lesson.querySelector(".play"), () => {
+  const id = TUTORIAL + lessonOf;
+  closeSheets();
+  if (id === (headed ?? placeNow)) typeKeys([116]);
+  else typePlace(id);
+});
 
 // The places to pick from: the slopestyles or the parks, the day's first,
 // and one at random.
@@ -977,7 +1070,7 @@ const showPerson = () => {
 // becoming today's; and for someone new, the tutorial).
 const startPlace = () => {
   const last = stored("skate.course", 0) || 0;
-  const start = last === 0 && !stored("skate.tutorial", false) ? TUTORIAL : last || 1;
+  const start = last === 0 && !stored("skate.tutorial", false) ? TUTORIAL + 1 : last || 1;
   return isDaily(start) ? Math.sign(start) * today() : start;
 };
 // A sheet's contents, as they now are: the one named, or else whichever is
@@ -985,6 +1078,8 @@ const startPlace = () => {
 const showOpen = (id = Object.keys(sheets).find((name) => !sheets[name].hidden)) => {
   if (id === "menu") showMenu();
   if (id === "places") showPlaces();
+  if (id === "lessons") showLessons();
+  if (id === "lesson") showLesson();
   if (id === "days") showDays();
   if (id === "place") showPlace();
   if (id === "person") showPerson();
