@@ -647,10 +647,18 @@ canvas.addEventListener("webglcontextlost", () => fault("context", "graphics con
 // place took to build; and how long the page took to its first frame. Told
 // early in a visit, every so often after, and when the page is put away.
 const FRAME_RATES = [15, 25, 35, 50, 70];
-const frames = { n: 0, ms: 0, slow: 0, hitches: 0, worst: 0, by: [0, 0, 0, 0, 0, 0], loads: [], boot: 0, skip: true, told: 0, drawn: 0, work: 0 };
+const frames = { n: 0, ms: 0, slow: 0, hitches: 0, worst: 0, by: [0, 0, 0, 0, 0, 0], loads: [], how: [], boot: 0, skip: true, told: 0, drawn: 0, work: 0 };
 // (What the frames are paced by, and at what resolution: see main. And how
 // many the game has drawn, and how long it has spent working them out, for
 // the milliseconds of its own work that a frame takes: cpu.)
+// How the time a place takes to build goes: the game works for a few
+// milliseconds, then stops to let the page breathe (see main's end, and
+// programs/skate/breathe.l8), over and over. So of each build: how long the
+// game was working, how long the page took over its breaths, and how many
+// there were; and the game's own word on each stage, where it gives it
+// (L8_TRACE). A device slow to build is slow in one of these, and which
+// says why.
+const building = { work: 0, wait: 0, breaths: 0, since: 0, stages: [], done: null };
 let frameState = () => ({});
 let frameWork = () => [0, 0];
 const reportFrames = (why) => {
@@ -670,10 +678,11 @@ const reportFrames = (why) => {
     worst: Math.round(frames.worst),
     by: frames.by,
     loads: frames.loads,
+    how: frames.how,
     boot: frames.boot,
     ...frameState(),
   });
-  Object.assign(frames, { n: 0, ms: 0, slow: 0, hitches: 0, worst: 0, by: [0, 0, 0, 0, 0, 0], loads: [], told: frames.told + 1 });
+  Object.assign(frames, { n: 0, ms: 0, slow: 0, hitches: 0, worst: 0, by: [0, 0, 0, 0, 0, 0], loads: [], how: [], told: frames.told + 1 });
 };
 const frameCame = (gap, refresh) => {
   // (Not the first after a pause: it is as long as the pause was.)
@@ -876,9 +885,21 @@ const gameSays = (line) => {
     showOpen();
   }
   else if (words[0] === "L8LOAD") {
-    // (How long the place took to build is one of the things reported.)
-    if (words[1] === "1") gameSays.loading = performance.now();
-    else if (gameSays.loading && frames.loads.length < 8) frames.loads.push(Math.round(performance.now() - gameSays.loading));
+    // (How long the place took to build is one of the things reported;
+    // and how that time went: see building.)
+    const now = performance.now();
+    if (words[1] === "1") {
+      gameSays.loading = now;
+      Object.assign(building, { work: 0, wait: 0, breaths: 0, since: now, stages: [] });
+    } else if (gameSays.loading) {
+      building.work += now - building.since;
+      const how = [Math.round(now - gameSays.loading), Math.round(building.work), Math.round(building.wait), building.breaths];
+      if (frames.loads.length < 8) {
+        frames.loads.push(how[0]);
+        frames.how.push(how.slice(1));
+      }
+      building.done?.({ ms: how[0], work: how[1], wait: how[2], breaths: how[3], stages: building.stages });
+    }
     document.body.classList.toggle("loading", words[1] === "1");
     stepWhenReady();
   }
@@ -1258,6 +1279,82 @@ const showOpen = (id = Object.keys(sheets).find((name) => !sheets[name].hidden))
   if (id === "person") showPerson();
 };
 
+// ?diag: find out why places build slowly on this device, and say so, on
+// the page and to the leaderboards' reports. It times a small loop of
+// arithmetic in WebAssembly, cold and again (which shows whether the
+// browser is compiling WebAssembly at all, or only interpreting it: some
+// thirty times slower); then has the game build three places, and says of
+// each how long the game worked, how long its breaths took, and what the
+// game says of each stage.
+const loopModule = () => {
+  // (func (param n i32) (result f64): a = a * 1.0000001 + i, n times.)
+  const k = [...new Uint8Array(new Float64Array([1.0000001]).buffer)];
+  const body = [2, 1, 0x7f, 1, 0x7c, 0x02, 0x40, 0x03, 0x40, 0x20, 1, 0x20, 0, 0x4f, 0x0d, 1, 0x20, 2, 0x44, ...k, 0xa2, 0x20, 1, 0xb8, 0xa0, 0x21, 2, 0x20, 1, 0x41, 1, 0x6a, 0x21, 1, 0x0c, 0, 0x0b, 0x0b, 0x20, 2, 0x0b];
+  return new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, 1, 6, 1, 0x60, 1, 0x7f, 1, 0x7c, 3, 2, 1, 0, 7, 7, 1, 3, 0x72, 0x75, 0x6e, 0, 0, 10, body.length + 2, 1, body.length, ...body]);
+};
+const diagnose = async (platform) => {
+  const out = document.createElement("pre");
+  out.style.cssText = "position:fixed;left:8px;right:8px;top:60px;z-index:9;margin:0;padding:10px;border-radius:10px;background:rgba(8,10,16,0.92);color:#fff8ec;font:12px/1.45 ui-monospace,monospace;white-space:pre-wrap;pointer-events:none";
+  document.body.append(out);
+  const found = { why: "diag", agent: navigator.userAgent.slice(0, 160), secure: isSecureContext, at: location.origin };
+  const say = (line) => (out.textContent += `${line}\n`);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  say("diagnosing: leave this open for half a minute");
+  say(`${location.origin} (${isSecureContext ? "a secure context" : "NOT a secure context"})`);
+  try {
+    // The loop, in one long call (as a build is: long loops in few
+    // calls), four times; then in many short calls.
+    const t0 = performance.now();
+    const { instance } = await WebAssembly.instantiate(loopModule());
+    const run = instance.exports.run;
+    found.compile = Math.round(performance.now() - t0);
+    found.long = [];
+    for (let i = 0; i < 4; i++) {
+      const t = performance.now();
+      run(20000000);
+      found.long.push(Math.round(performance.now() - t));
+      await sleep(30);
+    }
+    const t = performance.now();
+    for (let i = 0; i < 20000; i++) run(1000);
+    found.short = Math.round(performance.now() - t);
+    say(`loop of 20M, one call, four times: ${found.long.join(", ")} ms`);
+    say(`the same work in 20000 calls: ${found.short} ms`);
+    say(found.long[3] > 400 ? "=> WebAssembly is NOT being compiled here (interpreted)" : "=> WebAssembly is compiled here");
+  } catch (e) {
+    found.loopError = String(e).slice(0, 120);
+    say(`loop failed: ${found.loopError}`);
+  }
+  // The game's own builds: the first (as the page came up), and three more.
+  const built = () => new Promise((resolve) => (building.done = resolve));
+  const ready = async () => {
+    while (!gameDrawn || document.body.classList.contains("loading")) await sleep(100);
+  };
+  await ready();
+  found.boot = frames.boot;
+  found.builds = [];
+  for (const id of [4, 5, 4]) {
+    await sleep(600);
+    const done = built();
+    typePlace(id);
+    const b = await done;
+    await ready();
+    found.builds.push([b.ms, b.work, b.wait, b.breaths, b.stages.join("; ")]);
+    say(`place ${id}: ${b.ms} ms = game ${b.work} + breaths ${b.wait} (${b.breaths})`);
+    if (b.stages.length) say(`  ${b.stages.join(", ")}`);
+  }
+  building.done = null;
+  const slow = found.builds.at(-1);
+  if (slow) say(slow[1] > 4 * slow[2] ? "=> the time is the game's own work" : slow[2] > 4 * slow[1] ? "=> the time is in the breaths between" : "=> the time is in both");
+  // (And an ordinary frame's work, over a couple of seconds of them.)
+  const [w0, f0] = [platform.workMs(), platform.frames()];
+  await sleep(2000);
+  found.frame = Math.round(((platform.workMs() - w0) / Math.max(1, platform.frames() - f0)) * 100) / 100;
+  say(`the game's work in a frame: ${found.frame} ms`);
+  report("perf", found);
+  say("sent. thanks!");
+};
+
 async function main() {
   const params = new URLSearchParams(location.search);
   // Nothing here waits for anyone's scores, or for the game: the menu
@@ -1286,7 +1383,11 @@ async function main() {
     const lines = written.split("\n");
     written = lines.pop();
     for (const line of lines) {
-      if (line.trim() && !gameSays(line)) console.log(line.trimEnd());
+      if (!line.trim() || gameSays(line)) continue;
+      // (The game's word on a stage of a build: "stage mesh ms: 260".)
+      const stage = line.match(/^stage (.+) ms: (\d+)/);
+      if (stage) building.stages.push(`${stage[1]} ${stage[2]}`);
+      console.log(line.trimEnd());
     }
   };
   const sys = fs.sys(["skate"]);
@@ -1307,6 +1408,8 @@ async function main() {
   // (On a page: the game stops for frames while it builds a place, and
   // leaves it to the page to show that it is loading. See L8LOAD.)
   params.set("L8_PAGE", "1");
+  // (?diag has the game say how long each stage of a build takes.)
+  if (params.has("diag")) params.set("L8_TRACE", "1");
   sys.env = [...params].filter(([k]) => k.startsWith("L8_")).map(([k, v]) => `${k}=${v}`);
   const env = Object.fromEntries([...params].filter(([k]) => k.startsWith("L8_")));
   const zoom = Math.min(4, Math.max(0.25, Number(params.get("zoom")) || 0.85));
@@ -1635,11 +1738,18 @@ async function main() {
     }
     if (pacer.state.beats !== aimed) store("skate.beats", pacer.state.beats);
   };
-  const status = await runResumable(instance, () => {
+  if (params.has("diag")) diagnose(platform);
+  const status = await runResumable(instance, async () => {
     if (!document.body.classList.contains("loading")) return paced();
     pace.quiet = performance.now() + 1500;
     frames.skip = true;
-    return breathed();
+    // (Of a build: the game's work up to this breath, and the breath.)
+    const paused = performance.now();
+    building.work += paused - building.since;
+    building.breaths++;
+    await breathed();
+    building.since = performance.now();
+    building.wait += building.since - paused;
   });
   fault("exited", `status ${status}`);
   stopped(`The game exited${status ? ` with status ${status}` : ""}.<br><a href="">Play again</a>`);
