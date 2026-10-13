@@ -134,11 +134,11 @@ const syncSteps = () => {
   const lesson = lessonNow() !== 0;
   document.body.classList.toggle("lesson", lesson);
   document.body.classList.toggle("reading", lesson && reading);
-  // A plain ground (see body::before) under a page whose place the game
-  // is not yet at, or has not yet built: so that the place is first seen
-  // whole, and comes up from the ground rather than in pieces.
-  const built = gameDrawn && headed === null && !document.body.classList.contains("loading");
-  document.body.classList.toggle("veiled", lesson ? !lessonReady() : pageNow() in sheets && !built);
+  // A plain ground (see body::before) under a page until the game has
+  // drawn anything at all: so that the first place comes up from the
+  // ground, whole. (After that, one place fades into the next: see
+  // keepPicture.)
+  document.body.classList.toggle("veiled", !gameDrawn && (lesson || pageNow() in sheets));
   // The one he is at: reading; or what he has asked for and waits on; or
   // else what the game is doing.
   const at = reading ? "read" : pendingStep || (document.body.classList.contains("watching") ? "watch" : "try");
@@ -475,9 +475,52 @@ let headed = null;
 const typePlace = (id) => {
   headed = id;
   pendingStep = "";
+  keepPicture();
   syncSteps();
   typeKeys([2000000000 + id]);
 };
+// The picture as it is, kept over the game while another place is built
+// (which takes a moment, and shows nothing meanwhile), and faded away once
+// that place has been drawn: one fades into the next, with no gap between.
+// It is copied from the next frame the game draws, as it is drawn (a
+// picture already shown cannot be read back).
+const snap = document.getElementById("snap");
+let snapAt = 0;
+let snapFrames = 0;
+const keepPicture = () => {
+  // (Not while a place is being built: no frame is drawn then, and the
+  // picture from before it is kept already.)
+  if (!gameDrawn || !keepFrame || snap.classList.contains("on") || document.body.classList.contains("loading")) return;
+  keepFrame(async () => {
+    // (As a bitmap handed straight to the other canvas, which stays on
+    // the GPU: drawn into a 2D canvas, the copy came back through memory
+    // and held a frame up for a fifth of a second.)
+    const r = canvas.getBoundingClientRect();
+    let bitmap;
+    try {
+      bitmap = await createImageBitmap(canvas);
+    } catch {
+      return;
+    }
+    snap.width = bitmap.width;
+    snap.height = bitmap.height;
+    Object.assign(snap.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+    snap.getContext("bitmaprenderer").transferFromImageBitmap(bitmap);
+    snap.classList.add("on");
+    snapAt = performance.now();
+    snapFrames = 0;
+  });
+};
+// (Each frame: once the place headed for is built and has been drawn a
+// couple of times, or if it never comes, the kept picture goes.)
+const dropPicture = () => {
+  if (!snap.classList.contains("on")) return;
+  const there = headed === null && !document.body.classList.contains("loading");
+  if (there) snapFrames++;
+  if (snapFrames >= 3 || performance.now() - snapAt > 12000) snap.classList.remove("on");
+};
+// (The next frame the game draws, handed over as it is drawn: see main.)
+let keepFrame = null;
 // Have the game go there, the page's sheets left as they are (see
 // showPlace).
 const visit = (id) => {
@@ -1314,6 +1357,11 @@ async function main() {
   addEventListener("resize", placePads);
   placePads();
   window.l8Game = platform;
+  keepFrame = (take) =>
+    platform.setOnSwap(() => {
+      platform.setOnSwap(null);
+      take();
+    });
   const { instance, mem } = await instantiate(module, sys, platform.imports);
   platform.attach(instance, mem);
   sendKey = platform.key;
@@ -1547,6 +1595,7 @@ async function main() {
         pacer.idle(now - was);
       }
     }
+    dropPicture();
     if (!gameDrawn) {
       gameDrawn = true;
       syncSteps();
