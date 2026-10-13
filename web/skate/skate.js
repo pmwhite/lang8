@@ -1301,6 +1301,19 @@ const diagnose = async (platform) => {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   say("diagnosing: leave this open for half a minute");
   say(`${location.origin} (${isSecureContext ? "a secure context" : "NOT a secure context"})`);
+  // (What might tell one kind of tab from another: whether this browser
+  // has been here before, as its storage says, and how much it may keep,
+  // which a private tab is given far less of.)
+  try {
+    found.visits = Number(localStorage.getItem("skate.diag") || 0) + 1;
+    localStorage.setItem("skate.diag", String(found.visits));
+    found.keys = localStorage.length;
+    found.quota = Math.round(((await navigator.storage?.estimate?.())?.quota ?? 0) / 1e6);
+    say(`visit ${found.visits} of this probe here; ${found.keys} things kept; may keep ${found.quota} MB`);
+  } catch (e) {
+    found.storage = String(e).slice(0, 80);
+    say(`storage: ${found.storage}`);
+  }
   try {
     // The loop, in one long call (as a build is: long loops in few
     // calls), four times; then in many short calls.
