@@ -131,12 +131,29 @@ const stepsEl = document.querySelector(".steps");
 const lessonNow = () => (pageNow() === "lesson" ? TUTORIAL + trail.at(-1)[1] : 0);
 let pendingStep = "";
 const syncSteps = () => {
-  document.body.classList.toggle("lesson", lessonNow() !== 0);
+  const lesson = lessonNow() !== 0;
+  document.body.classList.toggle("lesson", lesson);
+  document.body.classList.toggle("reading", lesson && reading);
+  // A plain ground (see body::before) under a page whose place the game
+  // is not yet at, or has not yet built: so that the place is first seen
+  // whole, and comes up from the ground rather than in pieces.
+  const built = gameDrawn && headed === null && !document.body.classList.contains("loading");
+  document.body.classList.toggle("veiled", lesson ? !lessonReady() : pageNow() in sheets && !built);
   // The one he is at: reading; or what he has asked for and waits on; or
   // else what the game is doing.
   const at = reading ? "read" : pendingStep || (document.body.classList.contains("watching") ? "watch" : "try");
-  for (const tab of stepsEl.querySelectorAll(".tab")) tab.classList.toggle("on", tab.dataset.step === at);
+  let on = null;
+  for (const tab of stepsEl.querySelectorAll(".tab")) {
+    tab.classList.toggle("on", tab.dataset.step === at);
+    if (tab.dataset.step === at) on = tab;
+  }
+  // (The thumb slides to it.)
+  const thumb = stepsEl.querySelector(".thumb");
+  thumb.style.left = `${on.offsetLeft}px`;
+  thumb.style.width = `${on.offsetWidth}px`;
 };
+addEventListener("resize", () => syncSteps());
+document.fonts?.ready.then(() => syncSteps());
 // The game is at a lesson, built and ready to be told what to do.
 const lessonReady = () => headed === null && placeNow === lessonNow() && !document.body.classList.contains("loading");
 const doStep = (step) => {
@@ -227,11 +244,13 @@ const sheetsChanged = () => {
   syncPreview();
   syncSteps();
 };
-// While a place's sheet is up the game shows the place off: a key held
-// tells it so (see fly_over, in programs/skate/main.l8).
+// Behind a sheet the game flies over the place it is at, as a drone
+// would, so that no page is a bare one: a key held tells it so (see
+// fly_over, in programs/skate/main.l8). But behind a lesson's word, which
+// has the lesson's own stretch behind it, as he will ride it.
 let previewing = false;
 const syncPreview = () => {
-  const want = !sheets.place.hidden;
+  const want = sheetOpen() && sheets.lesson.hidden;
   if (!sendKey || want === previewing) return;
   previewing = want;
   sendKey(want ? 2 : 3, 65300, "");
@@ -773,7 +792,9 @@ const teachEl = document.getElementById("teach");
 const teachLine = teachEl.querySelector(".line");
 let saying = "";
 const say = (kind, text) => {
-  // (That the game rides is told apart: see L8RIDE.)
+  // (That the game rides is told apart: see L8RIDE. Its ride over, the
+  // next step asks to be taken.)
+  document.body.classList.toggle("nudge", kind === 2);
   const shown = !teachEl.hidden;
   // (The word on how a lesson went stays up while nothing else is said.)
   if (kind === 0 && verdict) return;
@@ -1001,7 +1022,8 @@ let lessonOf = 1;
 const showLesson = () => {
   const el = sheets.lesson;
   const lesson = LESSONS[lessonOf - 1];
-  el.querySelector("h2").textContent = `${lessonOf}. ${lesson.title}`;
+  el.querySelector(".eyebrow").textContent = `Lesson ${lessonOf} of ${LESSONS.length}`;
+  el.querySelector("h2").textContent = lesson.title;
   el.querySelector(".intro").textContent = touch ? lesson.thumbs : lesson.keys;
   el.querySelector(".scoring p").textContent = lesson.scoring;
 };
@@ -1527,6 +1549,7 @@ async function main() {
     }
     if (!gameDrawn) {
       gameDrawn = true;
+      syncSteps();
       frames.boot = Math.round(now);
     }
     const gap = now - pace.last;
