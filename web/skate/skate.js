@@ -773,8 +773,7 @@ const teachEl = document.getElementById("teach");
 const teachLine = teachEl.querySelector(".line");
 let saying = "";
 const say = (kind, text) => {
-  document.body.classList.toggle("watching", kind === 1 || kind === 2);
-  syncSteps();
+  // (That the game rides is told apart: see L8RIDE.)
   const shown = !teachEl.hidden;
   // (The word on how a lesson went stays up while nothing else is said.)
   if (kind === 0 && verdict) {
@@ -836,6 +835,8 @@ const gameSays = (line) => {
     // one of someone's ends back on the sheet it was picked from.
     const ride = Number(words[1]);
     document.body.classList.toggle("done", ride === 1);
+    document.body.classList.toggle("watching", ride === 4);
+    syncSteps();
     // (A lesson ridden to its end: a word on how it went.)
     if (ride === 1 && isLesson(placeNow) && !document.body.classList.contains("watching")) sayVerdict();
     if (ride !== 1) verdict = "";
@@ -845,7 +846,7 @@ const gameSays = (line) => {
       store("skate.lessons", lessonsDone);
     }
     if (ride === 1) onwardEl.textContent = isLesson(placeNow) ? (placeNow - TUTORIAL < LESSONS.length ? "Next lesson" : "All lessons") : "Daily slopestyle";
-    document.body.classList.toggle("replaying", ride >= 2);
+    document.body.classList.toggle("replaying", ride === 2 || ride === 3);
     if (ride < 2 && watchedFrom) {
       const back = watchedFrom;
       watchedFrom = null;
