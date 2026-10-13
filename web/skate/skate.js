@@ -729,53 +729,32 @@ const watchRun = async (person, id) => {
 // main.l8), and the word on how it went, judged by the lesson.
 let lessonHits = [];
 let verdict = "";
-const HIT_AIR = 0, HIT_RAIL = 2, HIT_BOX = 3, HIT_SKETCH = 4;
-const FEATURE_KICKER = 0, FEATURE_PIPE = 2, FEATURE_GAP = 4;
+const HIT_AIR = 0, HIT_RAIL = 2, HIT_BOX = 3;
+const FEATURE_PIPE = 2;
+// Whether he did the lesson's thing, and that said plainly.
 const judgeLesson = (n, hits) => {
-  const airs = hits.filter((h) => h.kind === HIT_AIR || h.kind === HIT_SKETCH);
-  const clean = airs.filter((h) => h.kind === HIT_AIR);
-  const sketchy = airs.filter((h) => h.kind === HIT_SKETCH);
-  // (Of thumbs on a phone; of keys otherwise.)
-  const t = touch;
-  if (n === 1) return "You made it to the finish. Steer onto the line early for what's coming: he turns gently.";
-  if (n === 2) {
-    if (clean.some((h) => h.flips !== 0)) return "Landed. That's the whole trick: set it early, let go on the green.";
-    if (sketchy.some((h) => h.flips !== 0 && h.short)) return "He flipped, but came down short. Let go later, nearer the lip, for more air.";
-    if (sketchy.some((h) => h.flips !== 0)) return "He flipped, but didn't finish it before landing. Let go later, on the green near the lip, where there's air enough.";
-    return t ? "You went off the ramp without a flip. Thumb down before the ramp, slide it up to set the flip, and let go on the green." : "You went off the ramp without a flip. Hold Space before the ramp, tap Up to set the flip, and let go on the green.";
-  }
-  if (n === 3) {
-    if (clean.some((h) => h.flips !== 0 && h.grab)) return "A flip and a grab, landed clean. The longer the grab, the more it's worth.";
-    if (clean.some((h) => h.flips !== 0)) return t ? "Landed, but no grab. In the air, thumb down again, and let go before he lands." : "Landed, but no grab. In the air, hold Space again, and let go before he lands.";
-    if (sketchy.some((h) => h.grab)) return "You grabbed, but the flip didn't finish. Let go of the grab sooner, or let go of the ramp later for more air.";
-    if (sketchy.length) return "He didn't land it. Let go later, on the green near the lip, so there's air for the flip.";
-    return t ? "No trick off the ramp. Thumb down before it, slide down for the backflip, let go on the green, then thumb down again in the air." : "No trick off the ramp. Hold Space before it, tap Down for the backflip, let go on the green, then hold Space again in the air.";
-  }
-  if (n === 4) {
-    if (hits.some((h) => h.kind === HIT_RAIL || h.kind === HIT_BOX)) return "You grinded it. The longer you stay on, the more it's worth: ride it to the end.";
-    return "You missed the box. Line up with it early, straight on, and ride onto its end. Steer gently while you're on it.";
-  }
-  if (n === 5) {
-    const walls = airs.filter((h) => h.item === FEATURE_PIPE);
-    if (walls.some((h) => h.kind === HIT_AIR && h.halves !== 0)) return "A spin off the wall, landed. The halfpipe pays spins double: try a bigger one next time.";
-    if (walls.some((h) => h.kind === HIT_SKETCH)) return "He flew off the wall, but the spin didn't finish. Let go nearer the top, where it's green, or set a smaller spin.";
-    if (walls.length) return t ? "You rode the wall, but with no spin set. Slide sideways while your thumb is down, then let go near the top." : "You rode the wall, but with no spin set. Hold Space and tap Left or Right, then let go near the top.";
-    return "You didn't get up a wall. Steer hard toward one, and keep steering: he rides up it, and flies off the top.";
-  }
-  if (n === 6) {
-    if (clean.some((h) => h.flips !== 0 && h.halves !== 0)) return "A flip with a spin, over the gap. That's everything: now mix them up on the courses.";
-    if (sketchy.some((h) => h.short)) return "He landed short, in the gap. Let go later, right at the lip, for the air to clear it.";
-    if (clean.some((h) => h.flips !== 0 || h.halves !== 0)) return t ? "Cleared it, with half the trick. Slide up and across, both, for the flip and the spin at once." : "Cleared it, with half the trick. Tap Up and Right, both, for the flip and the spin at once.";
-    if (sketchy.length) return "He didn't land it. A flip with a spin needs the whole jump: let go at the lip.";
-    return t ? "You cleared the gap, but with no trick. Thumb down early, slide up and across, and let go at the lip." : "You cleared the gap, but with no trick. Hold Space early, tap Up and Right, and let go at the lip.";
-  }
-  return "";
+  const clean = hits.filter((h) => h.kind === HIT_AIR);
+  const tell = (ok, yes, no) => ({ ok, text: ok ? yes : no });
+  if (n === 1) return tell(true, "You reached the finish.", "");
+  if (n === 2) return tell(clean.some((h) => h.flips !== 0), "You landed the flip.", "No flip landed.");
+  if (n === 3) return tell(clean.some((h) => h.flips !== 0 && h.grab), "You landed a flip with a grab.", "No flip with a grab landed.");
+  if (n === 4) return tell(hits.some((h) => h.kind === HIT_RAIL || h.kind === HIT_BOX), "You grinded the box.", "You missed the box.");
+  if (n === 5) return tell(clean.some((h) => h.item === FEATURE_PIPE && h.halves !== 0), "You landed a spin off the wall.", "No spin landed off the wall.");
+  if (n === 6) return tell(clean.some((h) => h.flips !== 0 && h.halves !== 0), "You landed a flip with a spin.", "No flip with a spin landed.");
+  return tell(false, "", "");
 };
 const sayVerdict = () => {
-  verdict = judgeLesson(placeNow - TUTORIAL, lessonHits);
+  const n = placeNow - TUTORIAL;
+  const { ok, text } = judgeLesson(n, lessonHits);
+  verdict = text;
+  // (A lesson is done once he has done its thing.)
+  if (ok && !lessonsDone[n]) {
+    lessonsDone[n] = true;
+    store("skate.lessons", lessonsDone);
+  }
   if (!verdict) return;
   teachEl.hidden = false;
-  teachEl.className = "result";
+  teachEl.className = ok ? "result ok" : "result";
   teachLine.textContent = verdict;
   teachLine.classList.remove("out");
 };
@@ -786,10 +765,7 @@ const say = (kind, text) => {
   // (That the game rides is told apart: see L8RIDE.)
   const shown = !teachEl.hidden;
   // (The word on how a lesson went stays up while nothing else is said.)
-  if (kind === 0 && verdict) {
-    sayVerdict();
-    return;
-  }
+  if (kind === 0 && verdict) return;
   teachEl.hidden = kind === 0;
   if (kind === 0) return;
   verdict = "";
@@ -850,11 +826,6 @@ const gameSays = (line) => {
     // (A lesson ridden to its end: a word on how it went.)
     if (ride === 1 && isLesson(placeNow) && !document.body.classList.contains("watching")) sayVerdict();
     if (ride !== 1) verdict = "";
-    // (A lesson ridden to its end is done.)
-    if (ride === 1 && isLesson(placeNow) && !lessonsDone[placeNow - TUTORIAL]) {
-      lessonsDone[placeNow - TUTORIAL] = true;
-      store("skate.lessons", lessonsDone);
-    }
     if (ride === 1) onwardEl.textContent = isLesson(placeNow) ? (placeNow - TUTORIAL < LESSONS.length ? "Next lesson" : "All lessons") : "Daily slopestyle";
     document.body.classList.toggle("replaying", ride === 2 || ride === 3);
     if (ride < 2 && watchedFrom) {
