@@ -206,7 +206,7 @@ for (const name of ["pointerup", "pointercancel"]) {
 
 // Sheets over the game: home, the guide, the places to pick from, a place,
 // and a person. The game pauses (Pause, held) while any is open.
-const sheets = Object.fromEntries(["menu", "guide", "lessons", "lesson", "places", "days", "place", "person"].map((id) => [id, document.getElementById(id)]));
+const sheets = Object.fromEntries(["menu", "lessons", "lesson", "places", "days", "place", "person"].map((id) => [id, document.getElementById(id)]));
 const sheetOpen = () => Object.values(sheets).some((el) => !el.hidden);
 // Whether he has started riding: until then home cannot be left without
 // choosing.
@@ -285,6 +285,13 @@ const goHome = () => {
 const goBack = () => {
   // (From a replay: the game leaves it. See L8RIDE.)
   if (trail.length === 0 && document.body.classList.contains("replaying")) typeKeys([65288]);
+  // (From a lesson, at any of its steps: to the lessons, and from them
+  // home.)
+  if (lessonNow() && (trail.length === 0 || trail.at(-1)[0] === "lesson")) {
+    trail.length = 0;
+    trail.push(["menu"], ["lessons"]);
+    return present();
+  }
   if (trail.length === 0 || (trail.length === 1 && !started)) return;
   trail.pop();
   present();
@@ -293,7 +300,6 @@ onTap(document.querySelector(".back"), goBack);
 addEventListener("keydown", (e) => {
   if (e.key === "Escape") goBack();
 });
-onTap(document.querySelector(".how"), () => go("guide"));
 
 // Places: a downhill course is a number; a park is one too, kept negative
 // (as the game says them: see run_id in programs/skate/park.l8). Each
