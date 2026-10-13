@@ -16,10 +16,13 @@ import "../../stdlib/print.l8";
 // goes backward. On a phone the screen's left half steers and its right
 // half is the pedals (see touch.l8). The road is fast; the grass beside it
 // is slower, and the sand slower still. A lap is timed from the start line
-// round to it again. R starts over; C changes the camera; Escape quits.
+// round to it again. There are four cars (see cars.l8): 1 to 4 choose one,
+// and Tab the next. R starts over; C changes the camera; Escape quits.
 import "../gl/gl.l8";
 
 import "../skate/math.l8";
+
+import "cars.l8";
 
 import "mesh.l8";
 
@@ -59,13 +62,92 @@ const START_S: f32 = -12.0;
 // It follows behind and above the car, looking past it down the road, and
 // turns after the car a little late; it stays inside the canyon's walls.
 // Faster, it drops back and sees wider.
+//
+// When the car is put somewhere else (back at the start: see Change), the
+// camera does not jump there: it flies, from where it was to where it
+// follows from now. If that is far, it goes up and over, and the canyon's
+// walls melt out of its way while it does.
 type Camera = {
+    // Where it follows the car from, and what it looks at.
     eye: V3;
     at: V3;
     up: V3;
     fovy: f32;
     // The way it looks across the ground, eased after the car's.
-    way: V3
+    way: V3;
+    // Where the picture is taken from, and of: the same, but while it
+    // flies.
+    seen_eye: V3;
+    seen_at: V3;
+    // A flight: where it began, how much of it is done (1: all, or there
+    // is none), how long it takes, and how high it goes on the way (0: not
+    // far enough to leave the canyon).
+    from_eye: V3;
+    from_at: V3;
+    fly: f32;
+    fly_time: f32;
+    lift: f32
+}
+
+// The car has been put somewhere else: fly to behind it there.
+start_flight(cam: *Camera, c: *Car, high: bool) {
+    cam.from_eye = cam.seen_eye;
+    cam.from_at = cam.seen_at;
+    cam.way = yaw_dir(c.yaw);
+    update_chase(cam, c, car_point(c, 1.0), c.yaw, high, 0.0);
+    far: f32 = v_len(v_sub(cam.eye, cam.from_eye));
+    cam.fly = 0.0;
+    cam.fly_time = clampf(0.4 + far / 260.0, 0.4, 1.6);
+    cam.lift = 0.0;
+    if (far > 30.0) cam.lift = minf(far * 0.3, 70.0)
+}
+
+// Carry a flight on by dt, and work out where the picture is taken from.
+fly_camera(cam: *Camera, dt: f32) {
+    cam.seen_eye = cam.eye;
+    cam.seen_at = cam.at;
+    if (cam.fly >= 1.0) return;
+    cam.fly = minf(cam.fly + dt / cam.fly_time, 1.0);
+    k: f32 = smoothstepf(0.0, 1.0, cam.fly);
+    cam.seen_eye = v_lerp(cam.from_eye, cam.eye, k);
+    cam.seen_eye.y = cam.seen_eye.y + cam.lift * sinf(PI * cam.fly);
+    cam.seen_at = v_lerp(cam.from_at, cam.at, k)
+}
+
+// How much the walls have melted out of a flight's way, from 0 to 1.
+flight_melt(cam: *Camera): f32 {
+    if (cam.fly >= 1.0 || cam.lift == 0.0) return 0.0;
+    clampf(sinf(PI * cam.fly) * 4.0, 0.0, 1.0)
+}
+
+// ---- changing cars, and starting over ----
+// Neither is sudden. The car turns into the car asked for: its wheels grow
+// or shrink, its body changes its shape, its colors turn, until it is the
+// other (see pose.l8). As it does, it is carried from where it was to the
+// start: lifted, if that is far, up over the canyon's walls with the
+// camera, and set down. It cannot be driven till it is down, and nearly
+// the car it is to be.
+const MORPH_TIME: f32 = 0.45;
+
+// How high the car is carried, of how high the camera flies.
+const CARRY_LIFT: f32 = 0.72;
+
+type Change = {
+    // The car asked for, or -1 if none is. (Asked for while the car is
+    // still turning into another, it waits, and the turning hurries.)
+    to: int;
+    // The car it was; how far it has turned into the car it is, from 0 to
+    // 1 (1: it is done, or there is none); and where it was shown, and
+    // the way it pointed, when it was taken up.
+    from: int;
+    turn: f32;
+    from_p: V3;
+    from_yaw: f32
+}
+
+// Whether the car can be driven.
+change_done(g: *Change, cam: *Camera): bool {
+    g.turn > 0.6 && cam.fly > 0.8
 }
 
 update_chase(
@@ -85,7 +167,9 @@ update_chase(
     cam.way = yaw_dir(approach_angle(dir_yaw(cam.way), dir_yaw(want), ease(5.5, dt)));
     k: f32 = clampf(speed / 40.0, 0.0, 1.0);
     cam.at = v_madd(v_add(p, v3(0.0, 1.0, 0.0)), cam.way, 3.5 + 2.5 * k);
-    eye: V3 = v_madd(v_add(p, v3(0.0, 2.9 + 0.3 * k, 0.0)), cam.way, -(6.4 + 1.8 * k));
+    // (Nearer a short car, farther from a long one.)
+    size: f32 = 0.5 + 0.5 * car_axle[c.kind] / car_axle[BUGGY];
+    eye: V3 = v_madd(v_add(p, v3(0.0, (2.9 + 0.3 * k) * size, 0.0)), cam.way, -(6.4 + 1.8 * k) * size);
     if (high) eye = v_madd(v_add(p, v3(0.0, 9.0, 0.0)), cam.way, -(13.0 + 2.0 * k));
     // Inside the walls, and above the ground.
     sp: Spot = locate(eye, c.spot.i, 30);
@@ -165,7 +249,7 @@ view_fovy(base: f32): f32 {
 // The numbers after `prefix` in the environment, parted by commas, into
 // out: how many there were. (L8_CAM=ex,ey,ez,ax,ay,az,fovy, in degrees,
 // is a camera to stand at; L8_START=s starts the car s metres round the
-// lap.)
+// lap; L8_CAR=k starts in car k.)
 env_numbers(prefix: str, out: []f32): int {
     for e in l8_environment() {
         if (len(e) > len(prefix) && starts_with(e, prefix)) {
@@ -215,7 +299,7 @@ main() raises IoError: int {
     build_track();
     world: *Mesh = new_mesh(520000);
     build_world(world);
-    parts: *Mesh = new_mesh(60000);
+    parts: *Mesh = new_mesh(120000);
     build_parts(parts);
     d0: ?*i8 = XOpenDisplay(null);
     if (d0 == null) {
@@ -260,7 +344,7 @@ main() raises IoError: int {
     XMapRaised(dpy, win);
     XkbSetDetectableAutoRepeat(dpy, 1, null);
     XFlush(dpy);
-    eprint("L8 Race: left/right steer, up is the gas, down the brake (and backward); R starts over, C changes the camera, Escape quits");
+    eprint("L8 Race: left/right steer, up is the gas, down the brake (and backward); 1-4 or Tab choose a car, R starts over, C changes the camera, Escape quits");
     ctx0: ?*i8 = glXCreateContext(dpy, vis, null, 1);
     if (ctx0 == null) die("glXCreateContext failed");
     ctx: *i8 = ctx0;
@@ -268,16 +352,36 @@ main() raises IoError: int {
     glXSwapIntervalEXT(dpy, win, 1);
     r: *Renderer = new_renderer(world, parts);
     env: []f32 = new f32[8](0.0);
+    kind: int = BUGGY;
+    if (env_numbers("L8_CAR=", env) > 0) kind = (env[0] as int % CARS + CARS) % CARS;
     start: f32 = START_S;
     if (env_numbers("L8_START=", env) > 0) start = env[0];
-    c: *Car = new_car(start);
+    c: *Car = new_car(kind, start);
     cam: *Camera = new Camera {
         eye: c.p,
         at: c.p,
         up: v3(0.0, 1.0, 0.0),
         fovy: 0.92,
-        way: yaw_dir(c.yaw)
+        way: yaw_dir(c.yaw),
+        seen_eye: c.p,
+        seen_at: c.p,
+        from_eye: c.p,
+        from_at: c.p,
+        fly: 1.0,
+        fly_time: 1.0,
+        lift: 0.0
     };
+    change: *Change = new Change {
+        to: -1,
+        from: kind,
+        turn: 1.0,
+        from_p: c.p,
+        from_yaw: c.yaw
+    };
+    // Where the car is shown, and the way it points: where it is, but
+    // while it is carried.
+    shown: V3 = c.p;
+    shown_yaw: f32 = c.yaw;
     view: int = view_from_env();
     fixed: bool = env_numbers("L8_CAM=", env) >= 7;
     // (L8_AUTO: it drives itself round, to watch. See auto_input.)
@@ -296,6 +400,7 @@ main() raises IoError: int {
     start_ns: int = prev_ns;
     acc: f32 = 0.0;
     paused: bool = false;
+    tab: bool = false;
     while (running) {
         while (XPending(dpy) != 0) {
             XNextEvent(dpy, &ev);
@@ -304,16 +409,23 @@ main() raises IoError: int {
                     ks: int = XLookupKeysym(&ev, 0);
                     if (ks == 65307) running = false;
                     if (ks == 65299) paused = true;
-                    if (ks == 114) {
-                        place_car(c, START_S);
-                        reset_laps()
-                    }
+                    // (1 to 4 choose a car, Tab the next one: it starts
+                    // over.)
+                    now_kind: int = c.kind;
+                    if (change.to >= 0) now_kind = change.to;
+                    pick: int = now_kind;
+                    if (ks >= 49 && ks < 49 + CARS) pick = ks - 49;
+                    // (Held, Tab is the next car once, not over and over.)
+                    if (ks == 65289 && !tab) pick = (now_kind + 1) % CARS;
+                    if (ks == 65289) tab = true;
+                    if (ks == 114 || pick != now_kind) change.to = pick;
                     if (ks == 99) view = (view + 1) % 2;
                     key_set(&keys, ks, true)
                 }
                 KeyRelease -> {
                     ks: int = XLookupKeysym(&ev, 0);
                     if (ks == 65299) paused = false;
+                    if (ks == 65289) tab = false;
                     key_set(&keys, ks, false)
                 }
                 ButtonPress b -> pointer_down(b.button as int, b.x as f32, b.y as f32);
@@ -345,8 +457,26 @@ main() raises IoError: int {
             dt: f32 = dns as f32 / 1000000000.0;
             acc = acc + dt;
             steps: int = 0;
+            high: bool = view == VIEW_HIGH;
+            if (change.to >= 0 && change.turn >= 1.0) {
+                // It is taken up from where it is shown; and it is at the
+                // start, the car asked for.
+                change.from = c.kind;
+                change.turn = 0.0;
+                change.from_p = shown;
+                change.from_yaw = shown_yaw;
+                c.kind = change.to;
+                change.to = -1;
+                place_car(c, START_S);
+                reset_laps();
+                start_flight(cam, c, high)
+            }
+            hurry: f32 = 1.0;
+            if (change.to >= 0) hurry = 3.0;
+            change.turn = minf(change.turn + hurry * dt / MORPH_TIME, 1.0);
             inp: Input = read_input(&keys);
             if (auto) inp = auto_input(c);
+            if (!change_done(change, cam)) inp = Input { steer: 0.0, gas: 0.0, brake: 0.0 };
             while (acc >= STEP_DT && steps < 12) {
                 step_car(c, inp, STEP_DT);
                 tick_laps(c, STEP_DT);
@@ -355,7 +485,6 @@ main() raises IoError: int {
             }
             if (acc > STEP_DT) acc = 0.0;
             alpha: f32 = acc / STEP_DT;
-            pose_car(c, alpha);
             pos: V3 = car_point(c, alpha);
             yaw: f32 = car_yaw(c, alpha);
             if (fixed) {
@@ -364,22 +493,58 @@ main() raises IoError: int {
                 cam.up = v3(0.0, 1.0, 0.0);
                 cam.fovy = env[6] * PI / 180.0
             } else if (view == VIEW_MAP) set_map_view(cam) else update_chase(cam,
-                c, pos, yaw, view == VIEW_HIGH, dt);
+                c, pos, yaw, high, dt);
+            // (A flight is only from behind a car to behind a car.)
+            if (fixed || view == VIEW_MAP) cam.fly = 1.0;
+            fly_camera(cam, dt);
+            melt: f32 = flight_melt(cam);
+            // The car goes with the camera: from where it was taken up to
+            // where it is, not quite as high (the camera looks down on it),
+            // and level while it is off the ground.
+            shown = pos;
+            shown_yaw = yaw;
+            held: f32 = 0.0;
+            if (cam.fly < 1.0) {
+                k: f32 = smoothstepf(0.0, 1.0, cam.fly);
+                shown = v_lerp(change.from_p, pos, k);
+                shown.y = shown.y + CARRY_LIFT * cam.lift * sinf(PI * cam.fly);
+                shown_yaw = change.from_yaw + wrap_angle(yaw - change.from_yaw) * k;
+                held = smoothstepf(0.0, 0.15, cam.fly) * (1.0 - smoothstepf(0.8, 1.0,
+                    cam.fly))
+            }
+            pose_from = change.from;
+            pose_to = c.kind;
+            pose_morph = smoothstepf(0.0, 1.0, change.turn);
+            if (change.turn >= 1.0) {
+                pose_from = c.kind;
+                pose_morph = 0.0
+            }
+            pose_car(c, shown, shown_yaw, held);
             hud_speed = v_len(c.v);
+            hud_kind = c.kind;
+            hud_card = cam.fly >= 1.0 || cam.lift == 0.0;
+            tick_card(dt);
             v: View = View {
-                eye: cam.eye,
-                at: cam.at,
+                eye: cam.seen_eye,
+                at: cam.seen_at,
                 up: cam.up,
                 fovy: view_fovy(cam.fovy),
                 shift: 0.0,
                 focus: v_madd(pos, cam.way, 26.0),
-                car: pos,
-                car_way: yaw_dir(yaw),
+                car: shown,
+                car_way: v_scale(yaw_dir(shown_yaw), 1.0 / (0.55 + 0.45 * pose_shape(car_axle) / car_axle[BUGGY])),
                 time: (now - start_ns) as f32 / 1000000000.0,
-                fade_from: 16.0,
-                fade_to: 85.0,
+                fade_from: lerpf(16.0, 1.0, melt),
+                fade_to: lerpf(85.0, 5.0, melt),
                 near: c.spot.i
             };
+            // (The car's way is made longer for a small car: the dark under
+            // it is as small as the car is. And over the walls, all of the
+            // track may show, and what is looked at is not near the car.)
+            if (cam.fly < 1.0 && cam.lift > 0.0) {
+                v.near = -1;
+                v.focus = cam.seen_at
+            }
             if (fixed) {
                 v.fovy = cam.fovy;
                 v.near = -1

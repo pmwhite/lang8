@@ -30,6 +30,8 @@ type Renderer = {
     u_fade: int;
     u_shadow_map: int;
     u_smvp: int;
+    u_morph: int;
+    u_smorph: int;
     u_cam_f: int;
     u_cam_r: int;
     u_cam_u: int;
@@ -100,6 +102,9 @@ link_program(vs: []i8, fs: []i8) raises IoError: int {
     glBindAttribLocation(prog, 1, "nrm");
     glBindAttribLocation(prog, 2, "vcol");
     glBindAttribLocation(prog, 3, "vuv");
+    glBindAttribLocation(prog, 4, "pos2");
+    glBindAttribLocation(prog, 5, "nrm2");
+    glBindAttribLocation(prog, 6, "vcol2");
     glLinkProgram(prog);
     st: []i32 = new i32[1](0i32);
     glGetProgramiv(prog, 35714, st);
@@ -191,25 +196,39 @@ vec3 tone(vec3 c) {
 }
 """;
 
+// (A car changing from one kind to another has each corner twice: as it is
+// in the one, and (pos2, nrm2, vcol2) as it is in the other, and is drawn
+// `morph` of the way between. Nothing else has the second: its morph is 0.)
 WORLD_VS: str = """
 #version 120
 attribute vec3 pos;
 attribute vec3 nrm;
 attribute vec4 vcol;
 attribute vec2 vuv;
+attribute vec3 pos2;
+attribute vec3 nrm2;
+attribute vec4 vcol2;
 uniform mat4 vp;
 uniform mat4 model;
 uniform mat4 light_vp;
+uniform float morph;
 varying vec3 vworld;
 varying vec3 vnrm;
 varying vec4 vcolor;
 varying vec4 vlight;
 varying vec2 vst;
 void main() {
-  vec4 w = model * vec4(pos, 1.0);
-  vworld = w.xyz;
-  vnrm = mat3(model[0].xyz, model[1].xyz, model[2].xyz) * nrm;
+  vec3 p = pos;
+  vec3 n = nrm;
   vcolor = vcol;
+  if (morph > 0.0) {
+    p = mix(pos, pos2, morph);
+    n = mix(nrm, nrm2, morph);
+    vcolor.rgb = mix(vcol.rgb, vcol2.rgb, morph);
+  }
+  vec4 w = model * vec4(p, 1.0);
+  vworld = w.xyz;
+  vnrm = mat3(model[0].xyz, model[1].xyz, model[2].xyz) * n;
   vst = vuv;
   // (Looked up in the shadow map from a little off the surface, so that
   // the surface does not shadow itself.)
@@ -343,8 +362,9 @@ void main() {
     float h = vworld.y - vst.x;
     fade = smoothstep(rock_fade.x, rock_fade.y, h);
     if (fade > 0.995) {
-      // (Looked down on over the walls, what is behind them shows.)
-      if (rock_fade.y < 10.0) discard;
+      // (Looked down on over the walls, or flown over while they melt,
+      // what is behind them shows.)
+      if (rock_fade.y < 80.0) discard;
       gl_FragColor = vec4(tone(sky_full(-V)), 1.0);
       return;
     }
@@ -451,9 +471,12 @@ SHADOW_VS: str = """
 attribute vec3 pos;
 attribute vec4 vcol;
 attribute vec2 vuv;
+attribute vec3 pos2;
 uniform mat4 mvp;
+uniform float morph;
 void main() {
   vec3 p = pos;
+  if (morph > 0.0) p = mix(pos, pos2, morph);
   if (vcol.a > 1.5 && vcol.a < 2.5) p.y = min(p.y, vuv.y);
   gl_Position = mvp * vec4(p, 1.0);
 }
@@ -555,6 +578,8 @@ new_renderer(world_mesh: *Mesh, parts: *Mesh) raises IoError: *Renderer@new {
         u_fade: glGetUniformLocation(world, "rock_fade"),
         u_shadow_map: glGetUniformLocation(world, "shadow_map"),
         u_smvp: glGetUniformLocation(shadow, "mvp"),
+        u_morph: glGetUniformLocation(world, "morph"),
+        u_smorph: glGetUniformLocation(shadow, "morph"),
         u_cam_f: glGetUniformLocation(sky, "cam_f"),
         u_cam_r: glGetUniformLocation(sky, "cam_r"),
         u_cam_u: glGetUniformLocation(sky, "cam_u"),
@@ -805,6 +830,33 @@ fit_shadow(focus: V3) {
     mat_mul(light_vp, light_proj, light_view)
 }
 
+// The car's parts are about to be drawn, part way from one kind of car to
+// another (see pose.l8): each corner is given twice.
+bind_parts(u_morph: int) {
+    for i in 4..7 glEnableVertexAttribArray(i);
+    glUniform1f(u_morph, pose_morph)
+}
+
+unbind_parts() {
+    for i in 4..7 glDisableVertexAttribArray(i)
+}
+
+// Draw a part (the body, or a wheel) of the car that was, each corner with
+// the same corner of that part of the car to be.
+draw_part_between(r: *Renderer, part: int) {
+    a: int = part_first[pose_from * CAR_PARTS + part] * VERTEX_FLOATS * 4;
+    b: int = part_first[pose_to * CAR_PARTS + part] * VERTEX_FLOATS * 4;
+    glBindBuffer(34962, r.part_buf);
+    glVertexAttribPointer(0, 3, 5126, 0, VERTEX_FLOATS * 4, a);
+    glVertexAttribPointer(1, 3, 5126, 0, VERTEX_FLOATS * 4, a + 12);
+    glVertexAttribPointer(2, 4, 5126, 0, VERTEX_FLOATS * 4, a + 24);
+    glVertexAttribPointer(3, 2, 5126, 0, VERTEX_FLOATS * 4, a + 40);
+    glVertexAttribPointer(4, 3, 5126, 0, VERTEX_FLOATS * 4, b);
+    glVertexAttribPointer(5, 3, 5126, 0, VERTEX_FLOATS * 4, b + 12);
+    glVertexAttribPointer(6, 4, 5126, 0, VERTEX_FLOATS * 4, b + 24);
+    glDrawArrays(4, 0, part_count[pose_from * CAR_PARTS + part])
+}
+
 // How far the picture reaches along the track from the car, ahead and
 // behind, in chunks. (No farther than the canyon runs straight: its walls
 // hide the rest.)
@@ -857,6 +909,7 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
         glPolygonOffset(1.5, 2.0);
         mat_mul(mvp_m, light_vp, ident_m);
         glUniformMatrix4fv(r.u_smvp, 1, 0, mvp_m);
+        glUniform1f(r.u_smorph, 0.0);
         // (Of the world, what is near enough to cast a shadow that shows;
         // and none of its floor.)
         bind_vertices(r.world_buf);
@@ -864,13 +917,14 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
             if (chunk_near(k, view) && chunk_in_view(light_vp, k)) glDrawArrays(4,
                 chunk_first[k] + chunk_floor[k], chunk_count[k] - chunk_floor[k])
         }
-        bind_vertices(r.part_buf);
+        bind_parts(r.u_smorph);
         for i in 0..ndraw {
             for k in 0..16 part_tmp[k] = draw_m[i * 16 + k];
             mat_mul(mvp_m, light_vp, part_tmp);
             glUniformMatrix4fv(r.u_smvp, 1, 0, mvp_m);
-            glDrawArrays(4, part_first[draw_part[i]], part_count[draw_part[i]])
+            draw_part_between(r, draw_part[i])
         }
+        unbind_parts();
         glDisable(32823)
     }
     glBindFramebuffer(36160, 0u32);
@@ -902,16 +956,19 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
     glUniform1i(r.u_shadow_map, 0);
     glUniform1i(r.u_world_noise, 1);
     glUniformMatrix4fv(r.u_model, 1, 0, ident_m);
+    glUniform1f(r.u_morph, 0.0);
     bind_vertices(r.world_buf);
     for k in 0..nchunks {
         if (chunk_near(k, view) && chunk_in_view(vp_m, k)) glDrawArrays(4, chunk_first[k],
             chunk_count[k])
     }
-    bind_vertices(r.part_buf);
+    bind_parts(r.u_morph);
     for i in 0..ndraw {
         glUniformMatrix4fv(r.u_model, 1, 0, &draw_m[i * 16]);
-        glDrawArrays(4, part_first[draw_part[i]], part_count[draw_part[i]])
+        draw_part_between(r, draw_part[i])
     }
+    unbind_parts();
+    glUniform1f(r.u_morph, 0.0);
     // The sky last, and only where nothing else is: at the far end of the
     // depth, which it passes by being no further.
     glDepthMask(0);

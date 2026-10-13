@@ -29,6 +29,19 @@ async function main() {
   const decoder = new TextDecoder();
   fs.onOutput = (_fd, data) => console.log(decoder.decode(data).trimEnd());
   const sys = fs.sys(["race"]);
+  // The car last driven here is the one to start in (the game's L8_CAR),
+  // unless the address says which.
+  const CARS = 4;
+  const stored = (key) => {
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  };
+  let car = Number(params.get("L8_CAR") ?? stored("race.car") ?? 0);
+  if (!(car >= 0 && car < CARS)) car = 0;
+  params.set("L8_CAR", String(car));
   sys.env = [...params].filter(([k]) => k.startsWith("L8_")).map(([k, v]) => `${k}=${v}`);
   const env = Object.fromEntries([...params].filter(([k]) => k.startsWith("L8_")));
   const platform = createPlatform(canvas, { log: (text) => console.warn(text), checkErrors: params.has("glcheck"), scale: 1, zoom: 0.85, env, pointers: true, maxTall: 2.4, maxPixels: 2.2e6 });
@@ -56,11 +69,28 @@ async function main() {
   window.l8Game = platform;
   const { instance, mem } = await instantiate(module, sys, platform.imports);
   platform.attach(instance, mem);
-  // Start over: the game's R key.
-  document.getElementById("again").addEventListener("click", () => {
-    platform.key(2, 114);
-    platform.key(3, 114);
+  // Start over: the game's R key. The next car: its keys 1 to 4. (The
+  // keyboard's own 1 to 4 and Tab are remembered the same way.)
+  const press = (sym) => {
+    platform.key(2, sym);
+    platform.key(3, sym);
     canvas.focus();
+  };
+  const choose = (k) => {
+    car = k;
+    try {
+      localStorage.setItem("race.car", String(car));
+    } catch {}
+  };
+  document.getElementById("again").addEventListener("click", () => press(114));
+  document.getElementById("car").addEventListener("click", () => {
+    choose((car + 1) % CARS);
+    press(49 + car);
+  });
+  canvas.addEventListener("keydown", (e) => {
+    if (e.ctrlKey || e.metaKey || e.repeat) return;
+    if (e.key >= "1" && e.key <= String(CARS)) choose(Number(e.key) - 1);
+    if (e.key === "Tab") choose((car + 1) % CARS);
   });
   show(touch ? "Tap to start" : "Click to start");
   canvas.addEventListener("focus", () => (overlay.hidden = true));
