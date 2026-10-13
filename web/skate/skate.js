@@ -133,18 +133,23 @@ const lessonNow = () => {
 };
 let pendingStep = "";
 const syncSteps = () => {
-  // (Not under another sheet, as home's or the guide's: there he is
-  // somewhere else, whatever the game is at behind it.)
-  const elsewhere = Object.entries(sheets).some(([name, el]) => name !== "lesson" && !el.hidden);
-  document.body.classList.toggle("lesson", lessonNow() !== 0 && !elsewhere);
-  const at = !sheets.lesson.hidden ? "read" : document.body.classList.contains("watching") ? "watch" : "try";
+  document.body.classList.toggle("lesson", lessonNow() !== 0);
+  // (Under another sheet, as home's or the guide's, they stay where they
+  // are, but beneath it: dimmed with the rest, and out of reach.)
+  document.body.classList.toggle("covered", Object.entries(sheets).some(([name, el]) => name !== "lesson" && !el.hidden));
+  // The one he is at: reading; or what he has asked for and waits on; or
+  // else what the game is doing.
+  const at = !sheets.lesson.hidden ? "read" : pendingStep || (document.body.classList.contains("watching") ? "watch" : "try");
   for (const tab of stepsEl.querySelectorAll(".tab")) tab.classList.toggle("on", tab.dataset.step === at);
 };
 // The game is at a lesson, built and ready to be told what to do.
 const lessonReady = () => headed === null && isLesson(placeNow) && !document.body.classList.contains("loading");
 const doStep = (step) => {
   document.body.classList.remove("over");
+  // (As it will be, the moment the game takes the key: see L8RIDE.)
+  document.body.classList.toggle("watching", step === "watch");
   typeKeys([step === "watch" ? 116 : 114]);
+  syncSteps();
 };
 for (const tab of stepsEl.querySelectorAll(".tab")) {
   onTap(tab, () => {
@@ -152,9 +157,9 @@ for (const tab of stepsEl.querySelectorAll(".tab")) {
     if (!id) return;
     const step = tab.dataset.step;
     if (step === "read") return go("lesson", id - TUTORIAL);
+    pendingStep = lessonReady() ? "" : step;
     closeSheets();
-    if (lessonReady()) doStep(step);
-    else pendingStep = step;
+    if (!pendingStep) doStep(step);
   });
 }
 // (Once the game is there and built: see L8COURSE and L8LOAD.)
