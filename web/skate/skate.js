@@ -124,15 +124,24 @@ onTap(document.querySelector(".again"), () => {
 // game ride it (its T), or try it (its R); any, in any order. The one he
 // is at is lit.
 const stepsEl = document.querySelector(".steps");
+// (Watch or Try it asked for before the lesson has loaded: done when it has.
+// Watching needs nothing, as a lesson starts with the game riding it.)
+let pendingStep = "";
 const syncSteps = () => {
   const at = !sheets.lesson.hidden ? "read" : document.body.classList.contains("watching") ? "watch" : "try";
   for (const tab of stepsEl.querySelectorAll(".tab")) tab.classList.toggle("on", tab.dataset.step === at);
 };
 for (const tab of stepsEl.querySelectorAll(".tab")) {
   onTap(tab, () => {
-    if (!isLesson(placeNow)) return;
     const step = tab.dataset.step;
-    if (step === "read") return go("lesson", placeNow - TUTORIAL);
+    const id = isLesson(headed) ? headed : placeNow;
+    if (!isLesson(id)) return;
+    if (step === "read") return go("lesson", id - TUTORIAL);
+    if (id !== placeNow || document.body.classList.contains("loading")) {
+      pendingStep = step;
+      closeSheets();
+      return;
+    }
     closeSheets();
     document.body.classList.remove("over");
     typeKeys([step === "watch" ? 116 : 114]);
@@ -226,9 +235,11 @@ const present = () => {
   if (!view) return closeSheets();
   const [id, of] = view;
   if (id === "places" || id === "days") picking = of;
-  // (A lesson: the game goes to it behind its sheet, and holds.)
+  // (A lesson: the game goes to it behind its sheet, and holds. Its
+  // steps are up from here, while it loads: see .steps.)
   if (id === "lesson") {
     lessonOf = of;
+    document.body.classList.add("lesson");
     visit(TUTORIAL + of);
   }
   if (id === "place") visit((placeOf = of));
@@ -834,6 +845,14 @@ const gameSays = (line) => {
     tellBest();
     document.body.classList.toggle("park", placeNow < 0);
     document.body.classList.toggle("tutorial", inTutorial(placeNow));
+    document.body.classList.toggle("lesson", isLesson(placeNow));
+    // (A step asked for while the lesson was loading.)
+    if (isLesson(placeNow) && pendingStep) {
+      const step = pendingStep;
+      pendingStep = "";
+      closeSheets();
+      if (step === "try") typeKeys([114]);
+    }
     if (!inTutorial(placeNow)) {
       store("skate.course", placeNow);
       store("skate.tutorial", true);
