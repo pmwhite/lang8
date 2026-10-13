@@ -120,6 +120,57 @@ onTap(document.querySelector(".again"), () => {
   typeKeys([114]);
 });
 
+// A lesson's steps (see .steps): read its word (its sheet), watch the
+// game ride it (its T), or try it (its R); any, in any order. The one he
+// is at is lit.
+const stepsEl = document.querySelector(".steps");
+const syncSteps = () => {
+  const at = !sheets.lesson.hidden ? "read" : document.body.classList.contains("watching") ? "watch" : "try";
+  for (const tab of stepsEl.querySelectorAll(".tab")) tab.classList.toggle("on", tab.dataset.step === at);
+};
+for (const tab of stepsEl.querySelectorAll(".tab")) {
+  onTap(tab, () => {
+    if (!isLesson(placeNow)) return;
+    const step = tab.dataset.step;
+    if (step === "read") return go("lesson", placeNow - TUTORIAL);
+    closeSheets();
+    document.body.classList.remove("over");
+    typeKeys([step === "watch" ? 116 : 114]);
+  });
+}
+// (From the end of his own ride of it, on to today's course.)
+// (From a lesson's end, the next lesson, or the list of them.)
+const onwardEl = document.querySelector(".onward");
+onTap(onwardEl, () => {
+  if (!isLesson(placeNow)) return goTo(today());
+  const n = placeNow - TUTORIAL;
+  if (n < LESSONS.length) go("lesson", n + 1);
+  else go("lessons");
+});
+// What thumbs are doing: his own (as the game has it, left of the middle
+// steers, right of it is the trick), or those of the run the game rides
+// (L8HANDS: see demo_keys, in tutorial.l8). The right-hand control says
+// what it does while it is held; and a keyboard's keys light up for the
+// game's thumbs.
+const thumbs = new Map();
+let hands = 0;
+const thumbsChanged = () => {
+  const sides = [...thumbs.values()];
+  document.body.classList.toggle("steering", sides.includes("steer") || (hands & 32) !== 0);
+  document.body.classList.toggle("holding", sides.includes("trick") || (hands & 4) !== 0);
+  for (const [cap, bit] of [["l", 1], ["r", 2], ["sp", 4], ["u", 8], ["d", 16]]) teachEl.querySelector(`.cap.${cap}`).classList.toggle("on", (hands & bit) !== 0);
+};
+canvas.addEventListener("pointerdown", (e) => {
+  const r = canvas.getBoundingClientRect();
+  thumbs.set(e.pointerId, e.clientX - r.left > r.width / 2 ? "trick" : "steer");
+  thumbsChanged();
+});
+for (const name of ["pointerup", "pointercancel"]) {
+  addEventListener(name, (e) => {
+    if (thumbs.delete(e.pointerId)) thumbsChanged();
+  });
+}
+
 // Sheets over the game: home, the guide, the places to pick from, a place,
 // and a person. The game pauses (Pause, held) while any is open.
 const sheets = Object.fromEntries(["menu", "guide", "lessons", "lesson", "places", "days", "place", "person"].map((id) => [id, document.getElementById(id)]));
@@ -140,6 +191,7 @@ const sheetsChanged = () => {
   document.body.classList.toggle("showing", open === "place");
   document.body.classList.toggle("canback", !!open && (trail.length > 1 || started));
   syncPreview();
+  syncSteps();
 };
 // While a place's sheet is up the game shows the place off: a key held
 // tells it so (see fly_over, in programs/skate/main.l8).
@@ -636,14 +688,75 @@ const watchRun = async (person, id) => {
 // last, the run being over, 2; a word to him as he rides the course
 // himself, 3; or nothing, 0). The line is shown over the scene, with a way
 // to leave off watching and, at the end, to try it or watch it again.
+// What he did on a lesson, as the game tells it at the end (L8HITS: see
+// main.l8), and the word on how it went, judged by the lesson.
+let lessonHits = [];
+let verdict = "";
+const HIT_AIR = 0, HIT_RAIL = 2, HIT_BOX = 3, HIT_SKETCH = 4;
+const FEATURE_KICKER = 0, FEATURE_PIPE = 2, FEATURE_GAP = 4;
+const judgeLesson = (n, hits) => {
+  const airs = hits.filter((h) => h.kind === HIT_AIR || h.kind === HIT_SKETCH);
+  const clean = airs.filter((h) => h.kind === HIT_AIR);
+  const sketchy = airs.filter((h) => h.kind === HIT_SKETCH);
+  // (Of thumbs on a phone; of keys otherwise.)
+  const t = touch;
+  if (n === 1) return "You made it to the finish. Steer onto the line early for what's coming: he turns gently.";
+  if (n === 2) {
+    if (clean.some((h) => h.flips !== 0)) return "Landed. That's the whole trick: set it early, let go on the green.";
+    if (sketchy.some((h) => h.flips !== 0 && h.short)) return "He flipped, but came down short. Let go later, nearer the lip, for more air.";
+    if (sketchy.some((h) => h.flips !== 0)) return "He flipped, but didn't finish it before landing. Let go later, on the green near the lip, where there's air enough.";
+    return t ? "You went off the ramp without a flip. Thumb down before the ramp, slide it up to set the flip, and let go on the green." : "You went off the ramp without a flip. Hold Space before the ramp, tap Up to set the flip, and let go on the green.";
+  }
+  if (n === 3) {
+    if (clean.some((h) => h.flips !== 0 && h.grab)) return "A flip and a grab, landed clean. The longer the grab, the more it's worth.";
+    if (clean.some((h) => h.flips !== 0)) return t ? "Landed, but no grab. In the air, thumb down again, and let go before he lands." : "Landed, but no grab. In the air, hold Space again, and let go before he lands.";
+    if (sketchy.some((h) => h.grab)) return "You grabbed, but the flip didn't finish. Let go of the grab sooner, or let go of the ramp later for more air.";
+    if (sketchy.length) return "He didn't land it. Let go later, on the green near the lip, so there's air for the flip.";
+    return t ? "No trick off the ramp. Thumb down before it, slide down for the backflip, let go on the green, then thumb down again in the air." : "No trick off the ramp. Hold Space before it, tap Down for the backflip, let go on the green, then hold Space again in the air.";
+  }
+  if (n === 4) {
+    if (hits.some((h) => h.kind === HIT_RAIL || h.kind === HIT_BOX)) return "You grinded it. The longer you stay on, the more it's worth: ride it to the end.";
+    return "You missed the box. Line up with it early, straight on, and ride onto its end. Steer gently while you're on it.";
+  }
+  if (n === 5) {
+    const walls = airs.filter((h) => h.item === FEATURE_PIPE);
+    if (walls.some((h) => h.kind === HIT_AIR && h.halves !== 0)) return "A spin off the wall, landed. The halfpipe pays spins double: try a bigger one next time.";
+    if (walls.some((h) => h.kind === HIT_SKETCH)) return "He flew off the wall, but the spin didn't finish. Let go nearer the top, where it's green, or set a smaller spin.";
+    if (walls.length) return t ? "You rode the wall, but with no spin set. Slide sideways while your thumb is down, then let go near the top." : "You rode the wall, but with no spin set. Hold Space and tap Left or Right, then let go near the top.";
+    return "You didn't get up a wall. Steer hard toward one, and keep steering: he rides up it, and flies off the top.";
+  }
+  if (n === 6) {
+    if (clean.some((h) => h.flips !== 0 && h.halves !== 0)) return "A flip with a spin, over the gap. That's everything: now mix them up on the courses.";
+    if (sketchy.some((h) => h.short)) return "He landed short, in the gap. Let go later, right at the lip, for the air to clear it.";
+    if (clean.some((h) => h.flips !== 0 || h.halves !== 0)) return t ? "Cleared it, with half the trick. Slide up and across, both, for the flip and the spin at once." : "Cleared it, with half the trick. Tap Up and Right, both, for the flip and the spin at once.";
+    if (sketchy.length) return "He didn't land it. A flip with a spin needs the whole jump: let go at the lip.";
+    return t ? "You cleared the gap, but with no trick. Thumb down early, slide up and across, and let go at the lip." : "You cleared the gap, but with no trick. Hold Space early, tap Up and Right, and let go at the lip.";
+  }
+  return "";
+};
+const sayVerdict = () => {
+  verdict = judgeLesson(placeNow - TUTORIAL, lessonHits);
+  if (!verdict) return;
+  teachEl.hidden = false;
+  teachEl.className = "result";
+  teachLine.textContent = verdict;
+  teachLine.classList.remove("out");
+};
 const teachEl = document.getElementById("teach");
 const teachLine = teachEl.querySelector(".line");
 let saying = "";
 const say = (kind, text) => {
   document.body.classList.toggle("watching", kind === 1 || kind === 2);
+  syncSteps();
   const shown = !teachEl.hidden;
+  // (The word on how a lesson went stays up while nothing else is said.)
+  if (kind === 0 && verdict) {
+    sayVerdict();
+    return;
+  }
   teachEl.hidden = kind === 0;
   if (kind === 0) return;
+  verdict = "";
   teachEl.className = ["", "demo", "end", "cue"][kind];
   if (text === saying) return;
   // (One line gives way to the next: out, and the new one in. The first
@@ -662,42 +775,6 @@ const say = (kind, text) => {
     teachLine.classList.remove("out");
   }, 140);
 };
-// (R: he rides it himself. T: the game rides it again, from the top.)
-onTap(teachEl.querySelector(".skip"), () => typeKeys([114]));
-onTap(teachEl.querySelector(".try"), () => typeKeys([114]));
-onTap(teachEl.querySelector(".rewatch"), () => typeKeys([116]));
-// (From the end of his own ride of it, on to today's course.)
-// (From a lesson's end, the next lesson, or the list of them.)
-const onwardEl = document.querySelector(".onward");
-onTap(onwardEl, () => {
-  if (!isLesson(placeNow)) return goTo(today());
-  const n = placeNow - TUTORIAL;
-  if (n < LESSONS.length) go("lesson", n + 1);
-  else go("lessons");
-});
-// What thumbs are doing: his own (as the game has it, left of the middle
-// steers, right of it is the trick), or those of the run the game rides
-// (L8HANDS: see demo_keys, in tutorial.l8). The right-hand control says
-// what it does while it is held; and a keyboard's keys light up for the
-// game's thumbs.
-const thumbs = new Map();
-let hands = 0;
-const thumbsChanged = () => {
-  const sides = [...thumbs.values()];
-  document.body.classList.toggle("steering", sides.includes("steer") || (hands & 32) !== 0);
-  document.body.classList.toggle("holding", sides.includes("trick") || (hands & 4) !== 0);
-  for (const [cap, bit] of [["l", 1], ["r", 2], ["sp", 4], ["u", 8], ["d", 16]]) teachEl.querySelector(`.cap.${cap}`).classList.toggle("on", (hands & bit) !== 0);
-};
-canvas.addEventListener("pointerdown", (e) => {
-  const r = canvas.getBoundingClientRect();
-  thumbs.set(e.pointerId, e.clientX - r.left > r.width / 2 ? "trick" : "steer");
-  thumbsChanged();
-});
-for (const name of ["pointerup", "pointercancel"]) {
-  addEventListener(name, (e) => {
-    if (thumbs.delete(e.pointerId)) thumbsChanged();
-  });
-}
 
 const gameSays = (line) => {
   const words = line.trim().split(/\s+/);
@@ -719,6 +796,7 @@ const gameSays = (line) => {
   }
   else if (words[0] === "L8OVER") document.body.classList.toggle("over", words[1] === "1");
   else if (words[0] === "L8SAY") say(Number(words[1]), words.slice(2).join(" "));
+  else if (words[0] === "L8HITS") lessonHits = words.slice(1).map((w) => w.split(":").map(Number)).map(([kind, item, flips, halves, grab, short]) => ({ kind, item, flips, halves, grab: !!grab, short: !!short }));
   else if (words[0] === "L8HANDS") {
     hands = Number(words[1]);
     thumbsChanged();
@@ -730,6 +808,9 @@ const gameSays = (line) => {
     // one of someone's ends back on the sheet it was picked from.
     const ride = Number(words[1]);
     document.body.classList.toggle("done", ride === 1);
+    // (A lesson ridden to its end: a word on how it went.)
+    if (ride === 1 && isLesson(placeNow) && !document.body.classList.contains("watching")) sayVerdict();
+    if (ride !== 1) verdict = "";
     // (A lesson ridden to its end is done.)
     if (ride === 1 && isLesson(placeNow) && !lessonsDone[placeNow - TUTORIAL]) {
       lessonsDone[placeNow - TUTORIAL] = true;
@@ -899,14 +980,6 @@ const showLesson = () => {
   el.querySelector(".intro").textContent = touch ? lesson.thumbs : lesson.keys;
   el.querySelector(".scoring p").textContent = lesson.scoring;
 };
-// Watch: the game rides the lesson (from its start again, if it is there
-// already), and then it is his turn.
-onTap(sheets.lesson.querySelector(".play"), () => {
-  const id = TUTORIAL + lessonOf;
-  closeSheets();
-  if (id === (headed ?? placeNow)) typeKeys([116]);
-  else typePlace(id);
-});
 
 // The places to pick from: the slopestyles or the parks, the day's first,
 // and one at random.
