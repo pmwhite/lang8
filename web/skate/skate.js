@@ -818,7 +818,8 @@ const onTap = (name) => {
     setNight(!document.body.classList.contains("night"));
     typeKeys([108]);
   } else if (what === "stats") toggleStats?.();
-  else if (what === "read" || what === "watch" || what === "try") takeStep(what);
+  // (A lesson's steps; a run to watch is "watch" and whose.)
+  else if ((what === "read" || what === "watch" || what === "try") && rest.length === 0) takeStep(what);
   else if (what === "replay") {
     document.body.classList.remove("over");
     go("watch");
