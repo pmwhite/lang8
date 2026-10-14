@@ -1004,6 +1004,8 @@ const showPlace = () => {
   const who = shared && tabWho !== "me" ? "all" : "me";
   if (shared) blocks.push(["tabs", who === "all" ? 0 : 1, "who:all", "Everyone", "who:me", "You"]);
   blocks.push(["tabs", tabWhat === "best" ? 0 : 1, "what:best", "Best", "what:recent", "Recent"]);
+  // (The runs scroll under the rest, which stays put.)
+  blocks.push(["scroll"]);
   // The runs: a score each, and whose or when.
   const best = tabWhat === "best";
   let rows = [];
@@ -1036,7 +1038,7 @@ let personOf = "";
 let personWhat = "best";
 const showPerson = () => {
   const name = personOf;
-  const blocks = [["title", "", name], ["tabs", personWhat === "best" ? 0 : 1, "pwhat:best", "Best", "pwhat:recent", "Recent"], ["gap", 4]];
+  const blocks = [["title", "", name], ["tabs", personWhat === "best" ? 0 : 1, "pwhat:best", "Best", "pwhat:recent", "Recent"], ["scroll"], ["gap", 4]];
   const runs = personWhat === "best" ? bestsOf(name) : feed().filter((run) => run.name === name);
   const rows = runs.map((run) => row(`go:place:${run.course}`, false, ["what", "", placeName(run.course)], ...(personWhat === "best" ? [["score", "", run.score], ...watchCell(run, run.course)] : [["when", "", ago(run.at)], ["score", "", run.score]])));
   blocks.push(...(rows.length ? rows : [["empty", "No runs yet"]]), listRoom(rows));
