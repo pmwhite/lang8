@@ -20,14 +20,15 @@ import "../../stdlib/print.l8";
 // touch.l8). The road is fast; the grass beside it is slower, and the sand
 // slower still. A lap is timed from the start line round to it again.
 //
-// On a page, the page has the menus (see web/race/race.js): which car, and
+// The game has its own menus (see ui.l8): which car, which course, and
 // whether to drive alone against the clock and one's own ghosts, or to
 // race: against whoever else is on the track, or, with nobody else there,
-// against computer drivers (see bots.l8). It tells the game what was
-// chosen with key events whose key syms are far past any key's (see
-// PAGE_MENU). In a window of its own, 1 to 4 choose a car and Tab the next,
-// N the next course, Enter starts a race against computer drivers, R
-// starts over, C changes the camera, and Escape quits.
+// against computer drivers (see bots.l8). A page it is on (see
+// web/race/race.js) carries word to and from the others, and keeps what
+// is to be kept. With the menu up, the arrows (or W, A, S, D) go about it
+// and Enter is RACE; 1 to 4 choose a car, and Tab the next. Driving,
+// Escape is the pause, R starts over (not in a race), and C changes the
+// camera.
 import "../gl/gl.l8";
 
 import "../skate/math.l8";
@@ -46,6 +47,8 @@ import "pose.l8";
 
 import "marks.l8";
 
+import "racers.l8";
+
 import "net.l8";
 
 import "bots.l8";
@@ -56,7 +59,11 @@ import "ghost.l8";
 
 import "touch.l8";
 
+import "font.l8";
+
 import "hud.l8";
+
+import "ui.l8";
 
 import "render.l8";
 
@@ -74,19 +81,6 @@ mono_ns(): int {
     clock_gettime(1, &ts);
     ts.sec * 1000000000 + ts.nsec
 }
-
-// What the page says, as key syms: that the menu is up (the car waits at
-// the start, to be looked at and chosen), that it is down and the car is to
-// be driven alone, and (from PAGE_PLACE on) the car's place in a race, as
-// 32 times the place, plus how many are racing.
-const PAGE_MENU: int = 90000;
-
-const PAGE_ALONE: int = 90001;
-
-const PAGE_PLACE: int = 90100;
-
-// (And which course: PAGE_COURSE and the course's number.)
-const PAGE_COURSE: int = 90010;
 
 // Where the car starts: a little before the start line.
 const START_S: f32 = -12.0;
@@ -371,51 +365,16 @@ view_from_env(): int {
     (p.* as int - 48) % 3
 }
 
-// A line for the page, of the course that is built, for the page to show
-// among the courses to choose from: which it is, how long its lap, how far
-// the lap climbs in all, what its road is (see road_kind, in track.l8),
-// and its middle line as so many points (x and z, in metres), a dozen
-// metres apart; then its name.
-say_course() raises IoError {
-    climb: f32 = 0.0;
-    for i in 0..track_n climb = climb + maxf(track_h[wrap_i(i + 1)] - track_h[i],
-        0.0);
-    step: int = 12;
-    write(1, "L8COURSE ");
-    write_int(1, course);
-    write(1, " ");
-    write_int(1, (track_len + 0.5) as int);
-    write(1, " ");
-    write_int(1, (climb + 0.5) as int);
-    write(1, " ");
-    write_int(1, road_kind());
-    write(1, " ");
-    write_int(1, (track_n + step - 1) / step);
-    i: int = 0;
-    while (i < track_n) {
-        write(1, " ");
-        write_int(1, floorf(track_p[i].x + 0.5) as int);
-        write(1, " ");
-        write_int(1, floorf(track_p[i].z + 0.5) as int);
-        i = i + step
-    }
-    write(1, " ");
-    write(1, course_names[course]);
-    write(1, "\n")
-}
-
 main() raises IoError: int {
-    // The course: the first, or the one L8_COURSE says. (On a page, the
-    // page is told of them all first.)
+    // The course: the first, or the one L8_COURSE says. (Every course's
+    // track is built first: the menu shows the shape of each.)
     courses: []f32 = new f32[1](0.0);
     if (env_numbers("L8_COURSE=", courses) == 0) courses[0] = 0.0;
-    if (getenv("L8_NET") != null) {
-        for k in 0..COURSES {
-            set_course(k);
-            build_track();
-            say_course()
-        }
+    for k in 0..COURSES {
+        set_course(k);
+        build_track()
     }
+    init_names();
     set_course(courses[0] as int);
     build_track();
     world: *Mesh = new_mesh(640000);
@@ -465,7 +424,7 @@ main() raises IoError: int {
     XMapRaised(dpy, win);
     XkbSetDetectableAutoRepeat(dpy, 1, null);
     XFlush(dpy);
-    eprint("L8 Race: left/right steer, and it goes by itself; down is the brake (and backward); hold Space to veer into a drift; 1-4 or Tab choose a car, R starts over, C changes the camera, Escape quits");
+    eprint("L8 Race: in the menu, the arrows go about it and Enter races; driving, left/right steer, and it goes by itself; down is the brake (and backward); hold Space to veer into a drift; Escape is the pause, C changes the camera");
     ctx0: ?*i8 = glXCreateContext(dpy, vis, null, 1);
     if (ctx0 == null) die("glXCreateContext failed");
     ctx: *i8 = ctx0;
@@ -514,31 +473,38 @@ main() raises IoError: int {
     online: bool = getenv("L8_NET") != null;
     others: []*Other = new_others();
     bots: []*Bot = new_bots();
-    // Whether the menu is up (on a page, it is at first): the car waits at
-    // the start, and the camera goes slowly round it. And where the
-    // camera is while it does.
-    menu: bool = getenv("L8_MENU") != null;
-    // (How far down the page's list may start, as the page was last told:
-    // see hud_list.)
-    list_said: f32 = -1.0;
-    // In a window of its own, a race is against so many computer drivers,
-    // so good (see bots.l8), of so many laps; L8_RACE=n,skill,laps says
-    // otherwise, and starts one at once.
-    own_bots: int = 5;
-    own_skill: int = SKILL_ADAPTIVE;
-    own_laps: int = 3;
+    // Whether the menu is up (it is at first, but when the car is put
+    // somewhere to be looked at, or drives itself): the car waits at the
+    // start, and the camera goes slowly round it. And where the camera is
+    // while it does.
+    menu: bool = getenv("L8_MENU") != null || !(auto || fixed || getenv("L8_START") != null || getenv("L8_VIEW") != null || getenv("L8_RACE") != null);
+    ui_online = online;
+    ui_touch = getenv("L8_TOUCH") != null;
+    // What a race is to be (see racers.l8): L8_SET=laps,drivers,skill, as
+    // a page kept it; L8_RACE=drivers,skill,laps says too, and starts one
+    // against computer drivers at once.
+    said: int = env_numbers("L8_SET=", env);
+    if (said > 0) set_laps = clampf(env[0], 1.0, 9.0) as int;
+    if (said > 1) set_drivers = clampf(env[1], 1.0, MAX_BOTS as f32) as int;
+    if (said > 2) set_skill = clampf(env[2], 0.0, 3.0) as int;
     if (getenv("L8_RACE") != null) {
-        said: int = env_numbers("L8_RACE=", env);
-        if (said > 0) own_bots = clampf(env[0], 1.0, MAX_BOTS as f32) as int;
-        if (said > 1) own_skill = env[1] as int;
-        if (said > 2) own_laps = clampf(env[2], 1.0, 15.0) as int;
+        said = env_numbers("L8_RACE=", env);
+        if (said > 0) set_drivers = clampf(env[0], 1.0, MAX_BOTS as f32) as int;
+        if (said > 1) set_skill = clampf(env[1], 0.0, 3.0) as int;
+        if (said > 2) set_laps = clampf(env[2], 1.0, 9.0) as int;
         net_race = true;
         net_race_wait = 4.0;
-        net_race_laps = own_laps;
-        net_race_bots = own_bots;
-        net_race_skill = own_skill;
-        net_race_place = own_bots
+        net_race_laps = set_laps;
+        net_race_bots = set_drivers;
+        net_race_skill = set_skill;
+        net_race_place = set_drivers
     }
+    // (What a page has been told to keep: the car, the course, and those.)
+    kept_car: int = kind;
+    kept_course: int = course;
+    kept_laps: int = set_laps;
+    kept_drivers: int = set_drivers;
+    kept_skill: int = set_skill;
     menu_eye: V3 = c.p;
     menu_at: V3 = c.p;
     // The course asked for, if it is not the one built (or -1).
@@ -584,52 +550,24 @@ main() raises IoError: int {
                 KeyPress -> {
                     ks: int = XLookupKeysym(&ev, 0);
                     // (Word of another car, from the page: no key.)
-                    if (ghost_key(ks) || net_key(others, ks)) ks = 0;
-                    // What the page says (see PAGE_MENU). With the menu
-                    // up, or to drive alone, no race is on, and the car
-                    // goes to the start.
-                    if (ks == PAGE_MENU || ks == PAGE_ALONE) {
-                        menu = ks == PAGE_MENU;
-                        race.on = false;
-                        nbots = 0;
-                        change.to = c.kind;
-                        change.at_s = START_S;
-                        change.at_d = 0.0
-                    }
-                    // (Another course: the ghosts are of this one, and go
-                    // at once. On a page, the other's come next.)
-                    if (ks >= PAGE_COURSE && ks < PAGE_COURSE + COURSES) course_to = ks - PAGE_COURSE;
-                    if (ks == 110 && !online && !(race.on && !race.done)) course_to = (course + 1) % COURSES;
-                    if (course_to >= 0) forget_ghosts();
-                    if (ks >= PAGE_PLACE && ks < PAGE_PLACE + 1024) {
-                        hud_place = (ks - PAGE_PLACE) / 32;
-                        hud_of = (ks - PAGE_PLACE) % 32
-                    }
-                    // (In a window of its own: Escape quits, and Enter
-                    // starts a race against computer drivers.)
-                    if (ks == 65307 && !online) running = false;
-                    if (ks == 65293 && !online) {
-                        net_race = true;
-                        net_race_wait = 5.0;
-                        net_race_laps = own_laps;
-                        net_race_bots = own_bots;
-                        net_race_skill = own_skill;
-                        net_race_place = own_bots
-                    }
-                    if (ks == 65299) paused = true;
-                    // 1 to 4 choose a car, Tab the next one: on a page, only
-                    // with the menu up. R starts over: not in a race.
+                    if (ui_page_key(ks) || ghost_key(ks) || net_key(others, ks)) ks = 0;
+                    // (The menus' keys are nothing else's. In a window of
+                    // its own, Escape from the menu ends the game.)
+                    if (ks != 0 && ui_key(ks)) ks = 0;
+                    if (ks == 65307 && !online && menu) running = false;
+                    // 1 to 4 choose a car, Tab the next one: with the menu
+                    // up. R starts over: not in a race.
                     now_kind: int = c.kind;
                     if (change.to >= 0) now_kind = change.to;
                     pick: int = now_kind;
-                    if (menu || !online) {
+                    if (menu) {
                         if (ks >= 49 && ks < 49 + CARS) pick = ks - 49;
                         // (Held, Tab is the next car once, not over and
                         // over.)
                         if (ks == 65289 && !tab) pick = (now_kind + 1) % CARS
                     }
                     if (ks == 65289) tab = true;
-                    again: bool = ks == 114 && !menu && !(race.on && !race.done);
+                    again: bool = ks == 114 && !menu && !ui_paused && !(race.on && !race.done);
                     if (again || pick != now_kind) {
                         if (again) {
                             race.on = false;
@@ -645,16 +583,24 @@ main() raises IoError: int {
                 }
                 KeyRelease -> {
                     ks: int = XLookupKeysym(&ev, 0);
-                    if (ks == 65299) paused = false;
                     if (ks == 65289) tab = false;
                     key_set(&keys, ks, false)
                 }
+                // (A press on the menus is theirs; any other is the
+                // driving's.)
                 ButtonPress b -> {
-                    going = true;
-                    pointer_down(b.button as int, b.x as f32, b.y as f32)
+                    if (!ui_press(b.button as int, b.x as f32, b.y as f32)) {
+                        going = true;
+                        pointer_down(b.button as int, b.x as f32, b.y as f32)
+                    }
                 }
-                ButtonRelease b -> pointer_up(b.button as int);
-                MotionNotify mo -> pointer_move(mo.state as int, mo.x as f32, mo.y as f32);
+                ButtonRelease b -> {
+                    if (!ui_release(b.button as int, b.x as f32, b.y as f32)) pointer_up(b.button as int)
+                }
+                MotionNotify mo -> {
+                    ui_motion(mo.state as int, mo.x as f32, mo.y as f32);
+                    pointer_move(mo.state as int, mo.x as f32, mo.y as f32)
+                }
                 ConfigureNotify c -> {
                     if (c.width > 0i32 && c.height > 0i32) {
                         screen_w = c.width as int;
@@ -677,6 +623,64 @@ main() raises IoError: int {
             prev_ns = now;
             if (dns < 0) dns = 0;
             if (dns > 100000000) dns = 100000000;
+            // What the menus ask (see ui.l8).
+            act: int = ui_act;
+            ui_act = ACT_NONE;
+            if (act == ACT_CAR && menu) {
+                was_kind: int = c.kind;
+                if (change.to >= 0) was_kind = change.to;
+                change.to = ((was_kind + ui_arg) % CARS + CARS) % CARS;
+                change.at_s = START_S;
+                change.at_d = 0.0
+            }
+            // (Another course: the ghosts are of this one, and go at once.
+            // A page gives the other's next, and joins its room.)
+            if (act == ACT_COURSE && menu && ui_arg != course) {
+                course_to = ui_arg;
+                forget_ghosts();
+                if (online) {
+                    write(1, "L8ROOM ");
+                    write_int(1, ui_arg);
+                    write(1, "\n")
+                }
+            }
+            // To the menu, or to drive alone (or to start that over): no
+            // race is on, and the car goes to the start.
+            if (act == ACT_MENU || act == ACT_TRIAL || act == ACT_AGAIN && !race.on) {
+                if (act != ACT_AGAIN) menu = act == ACT_MENU;
+                ui_paused = false;
+                race.on = false;
+                nbots = 0;
+                change.to = c.kind;
+                change.at_s = START_S;
+                change.at_d = 0.0
+            }
+            // A race: with others here, it is asked of them all (the page
+            // asks the room, which calls it: see net_key); with nobody,
+            // it is against computer drivers, here and now.
+            if (act == ACT_RACE || act == ACT_AGAIN && race.on) {
+                ui_paused = false;
+                if (online && others_here(others) > 0) {
+                    write(1, "L8RACE ");
+                    write_int(1, set_laps);
+                    write(1, "\n")
+                } else {
+                    net_race = true;
+                    net_race_wait = 5.0;
+                    net_race_laps = set_laps;
+                    net_race_bots = set_drivers;
+                    net_race_skill = set_skill;
+                    net_race_place = set_drivers
+                }
+            }
+            if (act == ACT_PAUSE && !menu) ui_paused = true;
+            if (act == ACT_RESUME) ui_paused = false;
+            if (act == ACT_NAME && online) write(1, "L8NAME\n");
+            // (The menus go on while the game stands still under the
+            // pause: which it does, but in a race with others, who do
+            // not wait.)
+            ui_dt: f32 = dns as f32 / 1000000000.0;
+            paused = ui_paused && !(race.on && others_here(others) > 0);
             if (paused) dns = 0;
             dt: f32 = dns as f32 / 1000000000.0;
             acc = acc + dt;
@@ -737,6 +741,8 @@ main() raises IoError: int {
             if (net_race && turn < 0.0 && making == 0) {
                 net_race = false;
                 menu = false;
+                ui_paused = false;
+                others_begin();
                 call_race(net_race_wait, net_race_laps);
                 start_bots(bots, net_race_bots, net_race_skill);
                 change.to = c.kind;
@@ -897,29 +903,59 @@ main() raises IoError: int {
             pose_bots(bots);
             tick_ghosts(ghosts, laps.time + acc, dt);
             pose_ghosts(ghosts);
-            // (Its place in a race against computer drivers is known here;
-            // in one against others, the page says: see PAGE_PLACE.)
-            if (nbots > 0) {
-                hud_place = place_among(bots, c);
-                hud_of = nbots + 1
-            }
+            // Who is racing, and in what order (see racers.l8): the
+            // player, the others, and the computer drivers.
+            racers_none();
+            racer_put(NAME_ME, c.kind, c.progress, race.done, race.done_time);
+            race_others(others);
+            race_bots(bots);
+            hud_place = racers_sort(race.on);
+            hud_of = nracers;
             // And all of them on the map, with the car itself.
             map_none();
             map_ghosts(ghosts);
             map_others(others);
             map_bots(bots);
             map_put(shown, c.kind, DOT_ME);
-            hud_menu = menu;
-            hud_page = online;
+            hud_menu = menu && show_menu > 0.5;
+            ui_menu = menu;
+            ui_others = others_here(others);
+            tick_ui(ui_dt);
             if (online) {
-                if (nbots > 0) say_bots(bots, c, dt);
                 say_place(c, (now - start_ns) as f32 / 1000000000.0, dt);
                 say_finish();
                 say_ghost();
-                if (absf(hud_list - list_said) > 0.002) {
-                    list_said = hud_list;
-                    write(1, "L8LIST ");
-                    write_int(1, (hud_list * 1000.0) as int);
+                // (And what is to be kept, when it is another.)
+                now_car: int = c.kind;
+                if (change.to >= 0) now_car = change.to;
+                if (now_car != kept_car) {
+                    kept_car = now_car;
+                    write(1, "L8SAVE car ");
+                    write_int(1, kept_car);
+                    write(1, "\n")
+                }
+                if (course != kept_course) {
+                    kept_course = course;
+                    write(1, "L8SAVE course ");
+                    write_int(1, kept_course);
+                    write(1, "\n")
+                }
+                if (set_laps != kept_laps) {
+                    kept_laps = set_laps;
+                    write(1, "L8SAVE laps ");
+                    write_int(1, kept_laps);
+                    write(1, "\n")
+                }
+                if (set_drivers != kept_drivers) {
+                    kept_drivers = set_drivers;
+                    write(1, "L8SAVE drivers ");
+                    write_int(1, kept_drivers);
+                    write(1, "\n")
+                }
+                if (set_skill != kept_skill) {
+                    kept_skill = set_skill;
+                    write(1, "L8SAVE skill ");
+                    write_int(1, kept_skill);
                     write(1, "\n")
                 }
             }
@@ -962,7 +998,8 @@ main() raises IoError: int {
             } else v.shift = view_shift();
             // (With the menu up, the car is shown above the middle, clear
             // of the menu's buttons.)
-            if (menu && !fixed && view != VIEW_MAP) v.shift = maxf(v.shift, 0.3);
+            if (!fixed && view != VIEW_MAP) v.shift = lerpf(v.shift, menu_shift(),
+                smoothstepf(0.0, 1.0, show_menu));
             draw_scene(r, v, shadows);
             if (getenv("L8_NO_HUD") == null) draw_hud(r);
             glXSwapBuffers(dpy, win)

@@ -62,6 +62,16 @@ type Renderer = {
     u_hud_offset: int;
     u_hud_color: int;
     hud_buf: u32;
+    // The writing's program, what it is told (the window's size, a color,
+    // the font's picture, and how far off the shadow is in it), its
+    // corners, and the font's picture.
+    text: int;
+    u_text_screen: int;
+    u_text_color: int;
+    u_text_font: int;
+    u_text_shadow: int;
+    text_buf: u32;
+    font_tex: u32;
     // What shows in the air (see fx.l8).
     fx: int;
     u_fx_vp: int;
@@ -516,6 +526,39 @@ void main() {
 }
 """;
 
+// The writing over the scene (see font.l8, and put_text in hud.l8): each
+// corner is where it is in the window, and where in the font's picture.
+// The picture says how far inside a character's edge each point is: the
+// character is its color from the edge in, with a dark line round it and a
+// soft shadow below, to be read over anything.
+TEXT_VS: str = """
+#version 120
+attribute vec4 pos;
+uniform vec2 screen;
+varying vec2 vuv;
+void main() {
+  vuv = pos.zw;
+  gl_Position = vec4(pos.x / screen.x * 2.0 - 1.0, 1.0 - pos.y / screen.y * 2.0, 0.0, 1.0);
+}
+""";
+
+TEXT_FS: str = """
+#version 120
+uniform sampler2D font;
+uniform vec4 color;
+uniform vec2 shadow;
+varying vec2 vuv;
+void main() {
+  float d = texture2D(font, vuv).r;
+  float w = clamp(fwidth(d) * 0.75, 0.004, 0.2);
+  float fill = smoothstep(0.5 - w, 0.5 + w, d);
+  float edge = smoothstep(0.34 - w, 0.34 + w, d);
+  float under = smoothstep(0.2, 0.55, texture2D(font, vuv - shadow).r);
+  float alpha = max(fill, max(edge * 0.7, under * 0.4));
+  gl_FragColor = vec4(mix(vec3(0.03, 0.03, 0.05), color.rgb, fill), alpha * color.a);
+}
+""";
+
 // What shows in the air (see fx.l8): smoke, soft and round; a streak of
 // air, fine, and fading toward its ends; and flame, bright at its middle.
 FX_VS: str = """
@@ -714,6 +757,7 @@ new_renderer(world_mesh: *Mesh, parts: *Mesh) raises IoError: *Renderer@new {
     shadow: int = link_program(bytes(SHADOW_VS), bytes(SHADOW_FS));
     sky: int = link_program(bytes(SKY_VS), with_prelude(SKY_FS));
     hud: int = link_program(bytes(HUD_VS), bytes(HUD_FS));
+    text: int = link_program(bytes(TEXT_VS), bytes(TEXT_FS));
     mark: int = link_program(bytes(MARK_VS), bytes(MARK_FS));
     fx: int = link_program(bytes(FX_VS), bytes(FX_FS));
     va: []u32 = new u32[1](0u32);
@@ -765,6 +809,13 @@ new_renderer(world_mesh: *Mesh, parts: *Mesh) raises IoError: *Renderer@new {
         u_hud_offset: glGetUniformLocation(hud, "offset"),
         u_hud_color: glGetUniformLocation(hud, "color"),
         hud_buf: gen_buffer(),
+        text: text,
+        u_text_screen: glGetUniformLocation(text, "screen"),
+        u_text_color: glGetUniformLocation(text, "color"),
+        u_text_font: glGetUniformLocation(text, "font"),
+        u_text_shadow: glGetUniformLocation(text, "shadow"),
+        text_buf: gen_buffer(),
+        font_tex: make_font_texture(),
         fx: fx,
         u_fx_vp: glGetUniformLocation(fx, "vp"),
         fx_buf: gen_buffer(),
@@ -822,6 +873,27 @@ new_renderer(world_mesh: *Mesh, parts: *Mesh) raises IoError: *Renderer@new {
 const NOISE_SIZE: int = 256;
 
 const NOISE_CELLS: int = 64;
+
+// The font's picture (see font.l8), as a texture: each point how far
+// inside a character's edge it is, from 0 to 252.
+make_font_texture(): u32 {
+    bits: []i8 = new i8[FONT_W * FONT_H](0i8);
+    level: []int = new int[128](0);
+    for k in 0..len(FONT_LEVELS) level[FONT_LEVELS[k] as int] = k;
+    for y in 0..FONT_H {
+        for x in 0..FONT_W bits[y * FONT_W + x] = (level[font_rows[y][x] as int] * 4) trunc i8
+    }
+    tex: []u32 = new u32[1](0u32);
+    glGenTextures(1, tex);
+    glBindTexture(3553, tex[0]);
+    glPixelStorei(3317, 1);
+    glTexParameteri(3553, 10241, 9729);
+    glTexParameteri(3553, 10240, 9729);
+    glTexParameteri(3553, 10242, 33071);
+    glTexParameteri(3553, 10243, 33071);
+    glTexImage2D(3553, 0, 6409, FONT_W, FONT_H, 0, 6409, 5121, bits);
+    tex[0]
+}
 
 make_noise_texture(): u32 {
     lattice: []f32 = new f32[NOISE_CELLS * NOISE_CELLS](0.0);
@@ -1367,38 +1439,66 @@ draw_ghosts(r: *Renderer) {
 // a plain shape: see run_plain).
 draw_hud(r: *Renderer) {
     build_hud(screen_w);
-    if (hud_n == 0) return;
+    if (nruns == 0) return;
     glDisable(2929);
     glEnable(3042);
     glBlendFunc(770, 771);
-    glUseProgram(r.hud);
-    glUniform2f(r.u_hud_screen, screen_w as f32, screen_h as f32);
-    glBindBuffer(34962, r.hud_buf);
-    glBufferData(34962, hud_n * 4, hud_verts, 35048);
     glDisableVertexAttribArray(1);
     glDisableVertexAttribArray(2);
     glDisableVertexAttribArray(3);
-    glVertexAttribPointer(0, 2, 5126, 0, 8, 0);
+    glBindBuffer(34962, r.hud_buf);
+    glBufferData(34962, hud_n * 4, hud_verts, 35048);
+    glBindBuffer(34962, r.text_buf);
+    glBufferData(34962, text_n * 4, text_verts, 35048);
+    glActiveTexture(33984);
+    glBindTexture(3553, r.font_tex);
+    glUseProgram(r.text);
+    glUniform2f(r.u_text_screen, screen_w as f32, screen_h as f32);
+    glUniform1i(r.u_text_font, 0);
+    glUniform2f(r.u_text_shadow, 0.9 / FONT_W as f32, 1.5 / FONT_H as f32);
+    glUseProgram(r.hud);
+    glUniform2f(r.u_hud_screen, screen_w as f32, screen_h as f32);
+    // The runs in order, each as what it is: writing, or shapes. (-1:
+    // neither is set up to be drawn yet.)
+    mode: int = -1;
     for i in 0..nruns {
         a: f32 = run_rgba[i * 4 + 3];
-        // A soft shadow below, and a fine dark edge to keep its pixels
-        // crisp.
-        if (!run_plain[i]) {
-            glUniform2f(r.u_hud_offset, hud_px * 0.8, hud_px * 0.8);
-            glUniform4f(r.u_hud_color, 0.0, 0.0, 0.02, 0.4 * a);
-            glDrawArrays(4, run_first[i], run_count[i]);
-            o: f32 = maxf(1.0, hud_px * 0.4);
-            glUniform4f(r.u_hud_color, 0.03, 0.03, 0.05, 0.6 * a);
-            for k in 0..4 {
-                t: f32 = TAU * k as f32 / 4.0;
-                glUniform2f(r.u_hud_offset, cosf(t) * o, sinf(t) * o);
-                glDrawArrays(4, run_first[i], run_count[i])
+        if (run_text[i]) {
+            if (mode != 1) {
+                mode = 1;
+                glUseProgram(r.text);
+                glBindBuffer(34962, r.text_buf);
+                glVertexAttribPointer(0, 4, 5126, 0, 16, 0)
             }
+            glUniform4f(r.u_text_color, run_rgba[i * 4], run_rgba[i * 4 + 1], run_rgba[i * 4 + 2],
+                a);
+            glDrawArrays(4, run_first[i], run_count[i])
+        } else {
+            if (mode != 0) {
+                mode = 0;
+                glUseProgram(r.hud);
+                glBindBuffer(34962, r.hud_buf);
+                glVertexAttribPointer(0, 2, 5126, 0, 8, 0)
+            }
+            // A soft shadow below, and a fine dark edge, for a shape that
+            // is to stand out (see run_plain).
+            if (!run_plain[i]) {
+                glUniform2f(r.u_hud_offset, hud_px * 0.8, hud_px * 0.8);
+                glUniform4f(r.u_hud_color, 0.0, 0.0, 0.02, 0.4 * a);
+                glDrawArrays(4, run_first[i], run_count[i]);
+                o: f32 = maxf(1.0, hud_px * 0.4);
+                glUniform4f(r.u_hud_color, 0.03, 0.03, 0.05, 0.6 * a);
+                for k in 0..4 {
+                    t: f32 = TAU * k as f32 / 4.0;
+                    glUniform2f(r.u_hud_offset, cosf(t) * o, sinf(t) * o);
+                    glDrawArrays(4, run_first[i], run_count[i])
+                }
+            }
+            glUniform2f(r.u_hud_offset, 0.0, 0.0);
+            glUniform4f(r.u_hud_color, run_rgba[i * 4], run_rgba[i * 4 + 1], run_rgba[i * 4 + 2],
+                a);
+            glDrawArrays(4, run_first[i], run_count[i])
         }
-        glUniform2f(r.u_hud_offset, 0.0, 0.0);
-        glUniform4f(r.u_hud_color, run_rgba[i * 4], run_rgba[i * 4 + 1], run_rgba[i * 4 + 2],
-            a);
-        glDrawArrays(4, run_first[i], run_count[i])
     }
     glEnableVertexAttribArray(1);
     glEnableVertexAttribArray(2);
