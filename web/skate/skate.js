@@ -174,8 +174,11 @@ const syncPreview = () => {
   sendKey(want ? 2 : 3, 65300, "");
 };
 // The game is held while a sheet is up, and goes when none is.
+// (How big the scene is drawn: see setSize, in main.)
+let sayScale = () => {};
 const holdGame = () => {
   const open = sheetOpen();
+  sayScale();
   document.body.classList.toggle("sheet", open);
   document.body.classList.toggle("showing", sheetNow() === "place");
   syncPreview();
@@ -919,7 +922,7 @@ const showLessons = () => {
   const blocks = [["title", "", "Tutorial"], ["para", "Six short lessons. Each shows you a run, then it's your turn. Take them in order, or pick one.", "dim"], ["gap", 4]];
   LESSONS.forEach((lesson, i) => {
     const done = !!lessonsDone[i + 1];
-    blocks.push(["item", `go:lesson:${i + 1}`, `${i + 1}. ${lesson.title}`, done ? "✓" : i + 1 === next ? "Next" : "", done ? "done" : i + 1 === next ? "first" : "plain"]);
+    blocks.push(["item", `go:lesson:${i + 1}`, `${i + 1}. ${lesson.title}`, done ? "" : i + 1 === next ? "Next" : "", done ? "done" : i + 1 === next ? "first" : "plain"]);
   });
   return { wide: 440, blocks };
 };
@@ -1081,7 +1084,8 @@ const syncChrome = () => {
   // shows the place off: there, out of the way at the bottom.)
   chrome("load", sheet ? (sheetNow() === "place" ? 2 : 0) : 1);
   chrome("overlay", overlayWord);
-  chrome("help", !touch && !sheet && !lesson, HELP);
+  // (The keys' help, where there is room for it along the top.)
+  chrome("help", !touch && !sheet && !lesson && innerWidth >= 760, HELP);
 };
 
 // Where the game starts: the place he was last at (an earlier day's
@@ -1350,9 +1354,19 @@ async function main() {
   // a quarter of the size or more.
   const FLOOR = RUNGS.map((r) => r.size >= 0.25).lastIndexOf(true);
   let size = 1;
+  // (Behind a sheet, the place is a backdrop, drawn a little smaller: what
+  // shows of it through the sheet is blurred anyway.)
+  const SHEET_SIZE = 0.8;
+  let sizeSaid = 0;
   const setSize = (k) => {
     size = Math.min(1, Math.max(SIZE_LEAST, k));
-    typeKeys([70000 + Math.max(1, Math.round(size * 100))]);
+    sayScale();
+  };
+  sayScale = () => {
+    const want = Math.max(1, Math.round((sheetOpen() ? Math.min(size, SHEET_SIZE) : size) * 100));
+    if (want === sizeSaid) return;
+    sizeSaid = want;
+    typeKeys([70000 + want]);
   };
   let plain = false;
   const setPlain = (on) => {
@@ -1489,7 +1503,6 @@ async function main() {
     }
     if (!gameDrawn) {
       gameDrawn = true;
-      document.body.classList.remove("booting");
       frames.boot = Math.round(now);
     }
     // (What is over the game, as it is now; and all that is to be told to
@@ -1532,6 +1545,9 @@ async function main() {
   };
   if (params.has("diag")) diagnose(platform);
   const status = await runResumable(instance, async () => {
+    // (The game has drawn: the page's plain ground lifts. While its first
+    // place is built, it draws what is over it already: see breath_draw.)
+    document.body.classList.remove("booting");
     if (!document.body.classList.contains("loading")) return paced();
     pace.quiet = performance.now() + 1500;
     frames.skip = true;
