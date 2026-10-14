@@ -871,6 +871,10 @@ const row = (tap, mine, ...cells) => ["row", tap, mine ? 1 : 0, ...cells.flat()]
 const watchCell = (run, id) => (run.version === gameVersion ? [["watch", `watch:${run.id}:${id}`, ""]] : []);
 const nameCell = (run) => ["who", `go:person:${run.name}`, run.name];
 const BELOW = touch ? 66 : 58;
+// A list of runs has room for a few, however few it has, so that the sheet
+// keeps its shape (and its tabs their place) from one list to the next.
+const LIST_ROWS = 4;
+const listRoom = (rows) => ["gap", Math.max(0, LIST_ROWS - Math.max(rows.length, 0.6)) * (touch ? 46 : 42)];
 
 // What those he sees have been riding, newest first.
 const feed = () =>
@@ -1021,7 +1025,7 @@ const showPlace = () => {
     rows = runs.map((run, i) => row("", false, ...(best ? [["n", "", `${i + 1}.`]] : []), ["what", "", ago(run.at)], ["score", "", run.score], ...(run.top ? watchCell(run, id) : [])));
   } else if (best) rows = bestsOn(id).map((run, i) => row("", run.name === account?.name, ["n", "", `${i + 1}.`], nameCell(run), ["score", "", run.score], ...watchCell(run, id)));
   else rows = recentOn(id).map((run) => row("", run.name === account?.name, nameCell(run), ["when", "", ago(run.at)], ["score", "", run.score]));
-  blocks.push(["gap", 4], ...(rows.length ? rows : [["empty", "No runs yet"]]));
+  blocks.push(["gap", 4], ...(rows.length ? rows : [["empty", "No runs yet"]]), listRoom(rows));
   return { place: "dock", wide: 440, blocks };
 };
 
@@ -1035,7 +1039,7 @@ const showPerson = () => {
   const blocks = [["title", "", name], ["tabs", personWhat === "best" ? 0 : 1, "pwhat:best", "Best", "pwhat:recent", "Recent"], ["gap", 4]];
   const runs = personWhat === "best" ? bestsOf(name) : feed().filter((run) => run.name === name);
   const rows = runs.map((run) => row(`go:place:${run.course}`, false, ["what", "", placeName(run.course)], ...(personWhat === "best" ? [["score", "", run.score], ...watchCell(run, run.course)] : [["when", "", ago(run.at)], ["score", "", run.score]])));
-  blocks.push(...(rows.length ? rows : [["empty", "No runs yet"]]));
+  blocks.push(...(rows.length ? rows : [["empty", "No runs yet"]]), listRoom(rows));
   return { wide: 440, blocks };
 };
 
