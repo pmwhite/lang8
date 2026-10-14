@@ -25,6 +25,7 @@ EM = 40          # the size the characters are kept at, in pixels to the em
 FINE = 8         # how many times finer they are drawn, to measure from
 SPREAD = 6       # how far from an edge the distance is kept, in pixels
 WIDE = 1024      # the picture's width
+KERN_LEAST = 1.0 # a pair kerned by less than this (pixels at EM) is left as it is
 # The characters: the printable ASCII ones, and a few more that are written
 # (each after the ASCII ones, in this order).
 EXTRAS = [0xB7, 0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2026, 0xD7, 0x2022, 0xB0]
@@ -122,7 +123,7 @@ def main():
             glyphs.append({"name": name, "adv": adv, "crop": coarse, "ox": ox, "oy": oy})
         kerns = pair_kerning(tt, scale)
         index = {cmap[c]: i for i, c in enumerate(CODES)}
-        kern = sorted((index[a], index[b], v) for (a, b), v in kerns.items() if a in index and b in index)
+        kern = sorted((index[a], index[b], v) for (a, b), v in kerns.items() if a in index and b in index and abs(v) >= KERN_LEAST)
         os2 = tt["OS/2"]
         faces.append({"glyphs": glyphs, "kern": kern, "ascent": tt["hhea"].ascent * scale, "descent": -tt["hhea"].descent * scale,
                       "cap": os2.sCapHeight * scale, "x": os2.sxHeight * scale,

@@ -1063,6 +1063,7 @@ setInterval(() => {
 // told each frame, but only what has changed.
 let overlayWord = "";
 let statsWords = "";
+let statsRoom = "";
 let statsOn = false;
 const HELP = "Arrows steer · hold Space, tap arrows, let go to jump · Space in the air grabs · R restart · H home";
 const syncChrome = () => {
@@ -1074,7 +1075,7 @@ const syncChrome = () => {
   chrome("back", trail.length > 1);
   chrome("look", true);
   chrome("night", body.contains("night"));
-  chrome("stats", true, statsOn, statsWords);
+  chrome("stats", true, statsOn, statsWords, statsRoom);
   chrome("steps", lesson, ["read", "watch", "try"].indexOf(stepAt()), body.contains("nudge"));
   chrome("ends", body.contains("over") && !sheet && !replaying, !tutorial, !tutorial, tutorial ? onwardWord : "", lesson);
   chrome("teach", sheet ? 0 : teach.kind, teach.text, teach.ok);
@@ -1345,28 +1346,37 @@ async function main() {
     ...[1, 0.92, 0.85, 0.78, 0.72, 0.66, 0.61, 0.56, 0.5].map((size) => ({ size, plain: false })),
     ...[0.5, 0.42, 0.36, 0.31, 0.26, 0.22, 0.19, 0.16, 0.14, 0.12, 0.1].map((size) => ({ size, plain: true })),
   ];
-  // The picture's size, of the screen's each way: the game draws its scene
-  // that much smaller (see render_scale, in render.l8), and stretches it
-  // over the window. What it draws over the scene (its words, its sheets)
-  // is drawn at the window's own size, always sharp.
-  const SIZE_LEAST = 0.1;
+  // The picture's size, of the screen's each way. Riding, down to half the
+  // whole of it is made smaller, and the browser stretches it; below that
+  // it stays at half, and the game draws its scene smaller within it (see
+  // render_scale, in render.l8), so that its words can still be read. With
+  // a sheet up, the whole stays at its full size, the sheet as sharp as it
+  // can be, and the place behind it, a backdrop that shows through the
+  // sheet blurred, is drawn a little smaller (and no larger than riding
+  // has it).
+  const SIZE_LEAST = 0.1, WHOLE_LEAST = 0.5, SHEET_SIZE = 0.8;
   // The smallest picture tried before fewer frames are: the last rung of
   // a quarter of the size or more.
   const FLOOR = RUNGS.map((r) => r.size >= 0.25).lastIndexOf(true);
   let size = 1;
-  // (Behind a sheet, the place is a backdrop, drawn a little smaller: what
-  // shows of it through the sheet is blurred anyway.)
-  const SHEET_SIZE = 0.8;
-  let sizeSaid = 0;
+  let scaleSaid = 0;
   const setSize = (k) => {
     size = Math.min(1, Math.max(SIZE_LEAST, k));
     sayScale();
   };
   sayScale = () => {
-    const want = Math.max(1, Math.round((sheetOpen() ? Math.min(size, SHEET_SIZE) : size) * 100));
-    if (want === sizeSaid) return;
-    sizeSaid = want;
-    typeKeys([70000 + want]);
+    const sheet = sheetOpen();
+    const whole = sheet ? 1 : Math.max(size, WHOLE_LEAST);
+    const scene = Math.max(1, Math.round((sheet ? Math.min(size, SHEET_SIZE) : size / whole) * 100));
+    if (whole !== platform.scale()) {
+      platform.setScale(whole);
+      // (The game draws its scene by the canvas's pixels: see sendView.)
+      sendView();
+    }
+    if (scene !== scaleSaid) {
+      scaleSaid = scene;
+      typeKeys([70000 + scene]);
+    }
   };
   let plain = false;
   const setPlain = (on) => {
@@ -1396,6 +1406,9 @@ async function main() {
     const s = pacer.state;
     const hz = Math.round(1000 / s.beat);
     statsWords = `${Math.round(hz / (pace.on ? s.beats : 1))} fps · ${Math.round(size * 100)}%${plain ? " plain" : ""} · ${rate.late} late${lowPower() ? " · low power" : ""}`;
+    // (And the same with each number as wide as it can be, which the pill is
+    // as wide as: a number changing moves nothing.)
+    statsRoom = `000 fps · 000%${plain ? " plain" : ""} · 00 late${lowPower() ? " · low power" : ""}`;
   };
   // Whether the device is saving its battery, as far as can be told: the
   // browser gives far fewer frames than sixty a second even to a game that
