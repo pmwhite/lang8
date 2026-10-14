@@ -46,7 +46,8 @@ for (const name of ["touchstart", "touchmove"]) {
 history.pushState({ stay: true }, "", location.href);
 addEventListener("popstate", () => history.pushState({ stay: true }, "", location.href));
 
-const touch = matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
+// (?touch has a desktop browser be one, to try the game as a phone has it.)
+const touch = matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0 || new URLSearchParams(location.search).has("touch");
 if (touch) document.body.classList.add("touch");
 // Night or day (L): night to begin with where the device is in dark mode,
 // unless ?L8_LOOK= says which.
@@ -1281,7 +1282,7 @@ async function main() {
     const r = canvas.getBoundingClientRect();
     const s = getComputedStyle(safe);
     const inset = (side, from) => Math.max(0, (parseFloat(s[`padding${side}`]) || 0) - from);
-    uiSay("view", r.width, r.height, canvas.width, canvas.height, inset("Top", r.top), inset("Right", innerWidth - r.right), inset("Bottom", innerHeight - r.bottom), inset("Left", r.left), touch);
+    uiSay("view", r.width, r.height, canvas.width, canvas.height, inset("Top", r.top), inset("Right", innerWidth - r.right), inset("Bottom", innerHeight - r.bottom), inset("Left", r.left), touch, ...platform.windowSize());
   };
   platform.layout();
   sendView();
@@ -1295,7 +1296,7 @@ async function main() {
   const { instance, mem } = await instantiate(module, sys, platform.imports);
   platform.attach(instance, mem);
   sendKey = platform.key;
-  // (The game is held behind a sheet that is up: see showSheet.)
+  // (The game is held behind a sheet that is up: see holdGame.)
   present();
   // (Picked while the game was starting somewhere else.)
   if (wanted !== null && wanted !== placeNow) visit(wanted);

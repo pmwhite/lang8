@@ -60,11 +60,6 @@ type Renderer = {
     scene_h: int;
     stretch: int;
     u_stretch_scene: int;
-    hud: int;
-    u_hud_screen: int;
-    u_hud_offset: int;
-    u_hud_color: int;
-    hud_buf: u32;
     // Painting over the scene (see paint.l8): its program, what it is told
     // (the window's size, the clip, how far the clip's ends fade, and its
     // three pictures: the font's, the scene blurred, and the place before),
@@ -743,25 +738,6 @@ void main() {
 }
 """;
 
-HUD_VS: str = """
-#version 120
-attribute vec2 pos;
-uniform vec2 screen;
-uniform vec2 offset;
-void main() {
-  vec2 p = pos + offset;
-  gl_Position = vec4(p.x / screen.x * 2.0 - 1.0, 1.0 - p.y / screen.y * 2.0, 0.0, 1.0);
-}
-""";
-
-HUD_FS: str = """
-#version 120
-uniform vec4 color;
-void main() {
-  gl_FragColor = color;
-}
-""";
-
 // Painting over the scene (see paint.l8): each quad's shape worked out
 // for each of its pixels. A box (or its outline), a line, a triangle, and
 // an arc are each a distance from the shape's edge, in window pixels, and
@@ -1079,7 +1055,6 @@ new_renderer(parts: *Mesh) raises IoError: *Renderer@new {
     world: int = link_program(bytes(WORLD_VS), with_prelude(WORLD_FS));
     shadow: int = link_program(bytes(SHADOW_VS), bytes(SHADOW_FS));
     sky: int = link_program(bytes(SKY_VS), with_prelude(SKY_FS));
-    hud: int = link_program(bytes(HUD_VS), bytes(HUD_FS));
     stretch: int = link_program(bytes(SKY_VS), bytes(STRETCH_FS));
     paint: int = link_program(bytes(PAINT_VS), bytes(PAINT_FS));
     shrink: int = link_program(bytes(SKY_VS), bytes(SHRINK_FS));
@@ -1132,11 +1107,6 @@ new_renderer(parts: *Mesh) raises IoError: *Renderer@new {
         scene_h: 0,
         stretch: stretch,
         u_stretch_scene: glGetUniformLocation(stretch, "scene"),
-        hud: hud,
-        u_hud_screen: glGetUniformLocation(hud, "screen"),
-        u_hud_offset: glGetUniformLocation(hud, "offset"),
-        u_hud_color: glGetUniformLocation(hud, "color"),
-        hud_buf: gen_buffer(),
         paint: paint,
         u_paint_screen: glGetUniformLocation(paint, "screen"),
         u_paint_clip: glGetUniformLocation(paint, "clip"),
@@ -1761,6 +1731,30 @@ make_frost(r: *Renderer) {
     glViewport(0, 0, screen_w, screen_h)
 }
 
+// The scene as drawn this frame (see fit_scene), copied to be kept: the
+// picture of the place he is leaving, shown while the next is built, and
+// faded from once it is (see kept_show).
+keep_picture(r: *Renderer) {
+    if (r.scene_fbo == 0u32) return;
+    w: int = r.scene_w;
+    h: int = r.scene_h;
+    if (r.kept_tex == 0u32 || w != r.kept_w || h != r.kept_h) {
+        tex: []u32 = new u32[1](r.kept_tex);
+        fbo: []u32 = new u32[1](r.kept_fbo);
+        make_target(tex, fbo, 0, w, h);
+        r.kept_tex = tex[0];
+        r.kept_fbo = fbo[0];
+        r.kept_w = w;
+        r.kept_h = h
+    }
+    glBindFramebuffer(36008, r.scene_fbo);
+    glBindFramebuffer(36009, r.kept_fbo);
+    glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, 16384, 9729);
+    glBindFramebuffer(36160, 0u32);
+    glViewport(0, 0, screen_w, screen_h);
+    kept_ok = true
+}
+
 // What has been painted this frame (see paint.l8), over the scene.
 draw_paint(r: *Renderer) {
     if (paint_n == 0) return;
@@ -2227,6 +2221,25 @@ render_scale: f32 = 1.0;
 // however big.
 frost_wanted: bool = false;
 
+// Whether the scene is to be kept this frame (see keep_picture): drawn
+// somewhere it can be copied from.
+keep_scene: bool = false;
+
+// Whether the scene blurred can be had for frosted glass this frame: it was
+// drawn somewhere it can be blurred from (or, while a place is built, the
+// picture of the last is kept). Without it, glass is painted solid.
+frost_live: bool = false;
+
+// The renderer, for drawing while a place is built (see breath_draw, in
+// ui.l8).
+the_renderer: ?*Renderer = null;
+
+// The picture of the place before is kept (see keep_picture), and how much
+// it shows over the next (1 while that is built, then fading).
+kept_ok: bool = false;
+
+kept_show: f32 = 0.0;
+
 // How many of the canvas's pixels there are to a window pixel, each way
 // (on a page, which says: see ui.l8). render_scale is of those.
 canvas_k: f32 = 1.0;
@@ -2239,7 +2252,7 @@ const SCENE_SAMPLES: int = 4;
 // Somewhere to draw the scene at render_scale, if that is small: whether
 // it is.
 fit_scene(r: *Renderer): bool {
-    if (render_scale > 0.995 && !frost_wanted) return false;
+    if (render_scale > 0.995 && !frost_wanted && !keep_scene) return false;
     w: int = maxi((screen_w as f32 * canvas_k * render_scale + 0.5) as int, 1);
     h: int = maxi((screen_h as f32 * canvas_k * render_scale + 0.5) as int, 1);
     if (r.scene_fbo == 0u32) {
@@ -2325,6 +2338,7 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
         glDisable(32823)
     }
     small: bool = fit_scene(r);
+    frost_live = small;
     if (small) {
         glBindFramebuffer(36160, r.scene_many);
         glViewport(0, 0, r.scene_w, r.scene_h)
@@ -2429,48 +2443,5 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
         glDrawArrays(4, 0, 3);
         glEnable(2929)
     }
-    frame_phase_end()
-}
-
-// The trick feed over the scene: each run of text with a soft shadow.
-draw_hud(r: *Renderer) {
-    build_hud(screen_w);
-    if (hud_n == 0) return;
-    frame_phase("hud");
-    glDisable(2929);
-    glEnable(3042);
-    glBlendFunc(770, 771);
-    glUseProgram(r.hud);
-    glUniform2f(r.u_hud_screen, screen_w as f32, screen_h as f32);
-    glBindBuffer(34962, r.hud_buf);
-    glBufferData(34962, hud_n * 4, hud_verts, 35048);
-    glDisableVertexAttribArray(1);
-    glDisableVertexAttribArray(2);
-    glVertexAttribPointer(0, 2, 5126, 0, 8, 0);
-    for i in 0..nruns {
-        a: f32 = run_rgba[i * 4 + 3];
-        // A soft shadow below, and a fine dark edge to keep its pixels
-        // crisp (but for a plain shape: see run_plain).
-        if (!run_plain[i]) {
-            glUniform2f(r.u_hud_offset, hud_px * 0.8, hud_px * 0.8);
-            glUniform4f(r.u_hud_color, 0.0, 0.0, 0.02, 0.4 * a);
-            glDrawArrays(4, run_first[i], run_count[i]);
-            o: f32 = maxf(1.0, hud_px * 0.4);
-            glUniform4f(r.u_hud_color, 0.03, 0.03, 0.05, 0.6 * a);
-            for k in 0..4 {
-                t: f32 = TAU * k as f32 / 4.0;
-                glUniform2f(r.u_hud_offset, cosf(t) * o, sinf(t) * o);
-                glDrawArrays(4, run_first[i], run_count[i])
-            }
-        }
-        glUniform2f(r.u_hud_offset, 0.0, 0.0);
-        glUniform4f(r.u_hud_color, run_rgba[i * 4], run_rgba[i * 4 + 1], run_rgba[i * 4 + 2],
-            a);
-        glDrawArrays(4, run_first[i], run_count[i])
-    }
-    glEnableVertexAttribArray(1);
-    glEnableVertexAttribArray(2);
-    glDisable(3042);
-    glEnable(2929);
     frame_phase_end()
 }
