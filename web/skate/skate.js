@@ -1085,7 +1085,9 @@ const syncChrome = () => {
   chrome("stats", true, statsOn, statsWords, statsRoom);
   chrome("steps", lesson, ["read", "watch", "try"].indexOf(stepAt()), body.contains("nudge"));
   chrome("ends", body.contains("over") && !sheet && !replaying, !tutorial, !tutorial, tutorial ? onwardWord : "", lesson);
-  chrome("teach", sheet ? 0 : teach.kind, teach.text, teach.ok);
+  // (Of the tutorial's words, only how a lesson went: nothing is said over
+  // the course as he rides it himself.)
+  chrome("teach", sheet || teach.kind !== 4 ? 0 : 4, teach.text, teach.ok);
   chrome("caps", !touch && !sheet && teach.kind === 1, hands);
   chrome("pads", touch && !sheet && !replaying && !body.contains("done"), body.contains("watching"));
   // (Under a sheet, that a place is loading matters only where the sheet
