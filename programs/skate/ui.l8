@@ -1,0 +1,968 @@
+tag skate;
+
+use_tag std;
+
+// The menus and everything else over the game that is not the game itself
+// (see ui_page.l8, and ui_chrome.l8), drawn by the game in its own writing
+// (see paint.l8), and worked by a finger, a mouse, or the keys.
+//
+// On a page (web/skate/skate.js) the page decides what there is to show:
+// it knows the leaderboards, what is kept on the device, and the day. It
+// writes what to show to the file ui.txt and presses a key (UI_KEY): a
+// line for each thing, its parts parted by tabs. The game lays it out,
+// draws it, moves it, and tells the page what was pressed (a line, L8TAP
+// and the thing's name). So the page says what a sheet has on it, and the
+// game makes it a sheet: how it looks, how it comes and goes, how it
+// scrolls, how a press shows.
+//
+// What the page writes:
+//   view   (its size in CSS pixels, the canvas's in its own, the edges a
+//          phone keeps for itself, whether it is a touch screen)
+//   page   (a sheet: its name, how it comes (push, pop, swap), where it
+//          goes (center, dock, or none for no sheet), how wide it may be;
+//          then its blocks, a line each (see ui_page.l8), and end)
+//   chrome (one of the things over the game: see ui_chrome.l8)
+const UI_KEY: int = 65301;
+
+// ---- the window, as the page has it ----
+// Window pixels to a CSS pixel; the edges a phone keeps for itself, in
+// window pixels; and whether there is a page at all (the window of its own
+// has none of this).
+ui_k: f32 = 1.0;
+
+safe_t: f32 = 0.0;
+
+safe_r: f32 = 0.0;
+
+safe_b: f32 = 0.0;
+
+safe_l: f32 = 0.0;
+
+ui_on: bool = false;
+
+// (As the page says them, in CSS pixels: the page's width, the canvas's
+// width in its own pixels, and the edges. Made window pixels each frame, as
+// the window may not yet be the size it will be when they are said.)
+view_css_w: f32 = 0.0;
+
+view_canvas_w: f32 = 0.0;
+
+view_safe: []f32 = new f32[4](0.0);
+
+// Window pixels from the page's view, for this frame.
+take_view() {
+    if (view_css_w <= 0.0) return;
+    ui_k = screen_w as f32 / view_css_w;
+    canvas_k = maxf(view_canvas_w, 1.0) / maxf(screen_w as f32, 1.0);
+    safe_t = view_safe[0] * ui_k;
+    safe_r = view_safe[1] * ui_k;
+    safe_b = view_safe[2] * ui_k;
+    safe_l = view_safe[3] * ui_k
+}
+
+// Time, for what moves, and the frame's length.
+ui_time: f32 = 0.0;
+
+ui_dt: f32 = 0.016;
+
+// f moved toward to by a share of the way that is the same each second,
+// whatever the frame's length (quick, at rate 20; slow, at 6).
+ease_to(f: f32, to: f32, rate: f32): f32 {
+    f + (to - f) * (1.0 - expf(-rate * ui_dt))
+}
+
+// f moved toward to by at most step.
+step_to(f: f32, to: f32, step: f32): f32 {
+    if (f < to) return minf(f + step, to);
+    maxf(f - step, to)
+}
+
+// Smooth, from 0 to 1: slow at both ends; and quick to start, slow to end.
+smooth(t: f32): f32 {
+    u: f32 = clampf(t, 0.0, 1.0);
+    u * u * (3.0 - 2.0 * u)
+}
+
+ease_out(t: f32): f32 {
+    u: f32 = 1.0 - clampf(t, 0.0, 1.0);
+    1.0 - u * u * u
+}
+
+// ---- the colors ----
+// The writing's cream; a quieter grey, and a quieter one still; the gold
+// of what is chosen or new; the orange of the button that goes on; and the
+// dark of a sheet, and of a button over the game.
+const INK_R: f32 = 1.0;
+
+const INK_G: f32 = 0.973;
+
+const INK_B: f32 = 0.925;
+
+const GOLD_R: f32 = 1.0;
+
+const GOLD_G: f32 = 0.827;
+
+const GOLD_B: f32 = 0.42;
+
+const GO_R: f32 = 0.878;
+
+const GO_G: f32 = 0.541;
+
+const GO_B: f32 = 0.235;
+
+// ---- what the page says, kept as it said it ----
+// Text, for each of the two sheets (the one up, and the one going or
+// coming: see `cur`), and the parts of each line, as where they are in it.
+const SLOT_TEXT: int = 32768;
+
+const SLOT_FIELDS: int = 4096;
+
+const SLOT_BLOCKS: int = 400;
+
+ui_pool: []i8 = new i8[SLOT_TEXT * 2](0i8);
+
+pool_n: []int = new int[2](0);
+
+fld_from: []int = new int[SLOT_FIELDS * 2](0);
+
+fld_to: []int = new int[SLOT_FIELDS * 2](0);
+
+fld_n: []int = new int[2](0);
+
+// Each block: what kind it is, its first part, and how many.
+blk_kind: []int = new int[SLOT_BLOCKS * 2](0);
+
+blk_f: []int = new int[SLOT_BLOCKS * 2](0);
+
+blk_nf: []int = new int[SLOT_BLOCKS * 2](0);
+
+// Where each block was laid out: from the top of the sheet's content, and
+// how tall.
+blk_y: []f32 = new f32[SLOT_BLOCKS * 2](0.0);
+
+blk_h: []f32 = new f32[SLOT_BLOCKS * 2](0.0);
+
+// (Across, for what is laid out in a grid: cards, and days.)
+blk_x: []f32 = new f32[SLOT_BLOCKS * 2](0.0);
+
+blk_w: []f32 = new f32[SLOT_BLOCKS * 2](0.0);
+
+// Whether a block is in the feed (see ui_page.l8), which scrolls on its own.
+blk_feed: []bool = new bool[SLOT_BLOCKS * 2](false);
+
+nblk: []int = new int[2](0);
+
+// Each sheet: its name (a part), where it goes (PLACE_), how wide it may
+// be (CSS pixels), and whether it is one at all.
+const PLACE_NONE: int = 0;
+
+const PLACE_CENTER: int = 1;
+
+const PLACE_DOCK: int = 2;
+
+page_key: []int = new int[2](-1);
+
+page_place: []int = new int[2](0);
+
+page_wide: []f32 = new f32[2](440.0);
+
+// (And how much room it leaves below it, CSS pixels: for the buttons in
+// the corner, or a lesson's steps.)
+page_room: []f32 = new f32[2](58.0);
+
+// How far it is scrolled, how fast it is going, and where it is headed
+// (the wheel's: see wheel_to); how tall its content is, and how much of it
+// shows. And the same of the part that scrolls on its own within it (the
+// feed, on home: see ui_page.l8), if it has one.
+scroll: []f32 = new f32[2](0.0);
+
+scroll_v: []f32 = new f32[2](0.0);
+
+wheel_to: []f32 = new f32[2](0.0);
+
+wheeling: []bool = new bool[2](false);
+
+content_h: []f32 = new f32[2](0.0);
+
+view_h: []f32 = new f32[2](0.0);
+
+feed_scroll: []f32 = new f32[2](0.0);
+
+feed_v: []f32 = new f32[2](0.0);
+
+feed_to: []f32 = new f32[2](0.0);
+
+feed_wheeling: []bool = new bool[2](false);
+
+feed_content: []f32 = new f32[2](0.0);
+
+feed_view: []f32 = new f32[2](0.0);
+
+// Where the feed is on the window, as last drawn (to scroll by a finger or
+// the wheel over it).
+feed_box: []f32 = new f32[8](0.0);
+
+// The sheet up (0 or 1), and the one going, as the new one comes: which,
+// how far it has gone (0 to 1), and which way (1 on, to a page further in;
+// -1 back; 0 in place of it).
+cur: int = 0;
+
+was: int = -1;
+
+trans_t: f32 = 1.0;
+
+trans_dir: int = 0;
+
+// The sheet as drawn: where, how big, and how much of it shows (its
+// corners move to where the sheet up is, smoothly).
+pan_x: f32 = 0.0;
+
+pan_y: f32 = 0.0;
+
+pan_w: f32 = 0.0;
+
+pan_h: f32 = 0.0;
+
+pan_a: f32 = 0.0;
+
+// (Where it was last put without moving: a sheet that comes from nothing
+// starts where it will be.)
+pan_fresh: bool = true;
+
+// ---- reading what the page says ----
+inbox: []i8 = new i8[131072](0i8);
+
+// A part of the line being read, by where it is in the inbox.
+line_from: []int = new int[64](0);
+
+line_to: []int = new int[64](0);
+
+line_n: int = 0;
+
+// Whether the part k of the line is the word w.
+part_is(k: int, w: str): bool {
+    if (k >= line_n) return false;
+    n: int = line_to[k] - line_from[k];
+    if (n != len(w)) return false;
+    for i in 0..n {
+        if (inbox[line_from[k] + i] != w[i]) return false
+    }
+    true
+}
+
+// A part of the line as a whole number (or 0).
+part_int(k: int): int {
+    if (k >= line_n) return 0;
+    v: int = 0;
+    sign: int = 1;
+    for i in line_from[k]..line_to[k] {
+        c: int = inbox[i] as int;
+        if (c == 45) sign = -1;
+        if (c >= 48 && c <= 57) v = v * 10 + c - 48
+    }
+    sign * v
+}
+
+// (Or with a point in it.)
+part_f32(k: int): f32 {
+    if (k >= line_n) return 0.0;
+    v: f32 = 0.0;
+    sign: f32 = 1.0;
+    scale: f32 = 0.0;
+    for i in line_from[k]..line_to[k] {
+        c: int = inbox[i] as int;
+        if (c == 45) sign = -1.0;
+        if (c == 46) scale = 1.0;
+        if (c >= 48 && c <= 57) {
+            v = v * 10.0 + (c - 48) as f32;
+            if (scale > 0.0) scale = scale * 10.0
+        }
+    }
+    if (scale > 0.0) v = v / scale;
+    sign * v
+}
+
+// The sheet being read into, if one is (-1 if not).
+reading: int = -1;
+
+// A part of the line, kept in a sheet's text: the part's index there.
+keep_part(s: int, k: int): int {
+    f: int = fld_n[s];
+    if (f >= SLOT_FIELDS) return SLOT_FIELDS * s;
+    base: int = SLOT_TEXT * s;
+    n: int = line_to[k] - line_from[k];
+    if (k >= line_n) n = 0;
+    if (pool_n[s] + n > SLOT_TEXT) n = 0;
+    at: int = base + pool_n[s];
+    for i in 0..n ui_pool[at + i] = inbox[line_from[k] + i];
+    fld_from[SLOT_FIELDS * s + f] = at;
+    fld_to[SLOT_FIELDS * s + f] = at + n;
+    pool_n[s] = pool_n[s] + n;
+    fld_n[s] = f + 1;
+    SLOT_FIELDS * s + f
+}
+
+// The page has written: read it all, a line at a time.
+ui_read() {
+    fd: int = open("ui.txt", 0, 0);
+    if (fd < 0) return;
+    n: int = 0;
+    more: bool = true;
+    while (more && n < len(inbox)) {
+        r: int = read(fd, inbox, n, len(inbox) - n);
+        if (r <= 0) more = false else n = n + r
+    }
+    close(fd);
+    ui_on = true;
+    i: int = 0;
+    while (i < n) {
+        e: int = i;
+        while (e < n && inbox[e] != 10i8) e = e + 1;
+        // (Its parts, at the tabs.)
+        line_n = 0;
+        a: int = i;
+        for j in i..e + 1 {
+            if (j == e || inbox[j] == 9i8) {
+                if (line_n < 64) {
+                    line_from[line_n] = a;
+                    line_to[line_n] = j;
+                    line_n = line_n + 1
+                }
+                a = j + 1
+            }
+        }
+        if (e > i) ui_line();
+        i = e + 1
+    }
+}
+
+ui_line() {
+    if (part_is(0, "view")) {
+        view_css_w = maxf(part_f32(1), 1.0);
+        view_canvas_w = part_f32(3);
+        for k in 0..4 view_safe[k] = part_f32(5 + k);
+        hud_touch = part_int(9) == 1;
+        take_view();
+        return
+    }
+    if (part_is(0, "chrome")) {
+        chrome_line();
+        return
+    }
+    if (part_is(0, "page")) {
+        s: int = 1 - cur;
+        reading = s;
+        pool_n[s] = 0;
+        fld_n[s] = 0;
+        nblk[s] = 0;
+        page_key[s] = keep_part(s, 1);
+        page_place[s] = PLACE_CENTER;
+        if (part_is(3, "none")) page_place[s] = PLACE_NONE;
+        if (part_is(3, "dock")) page_place[s] = PLACE_DOCK;
+        page_wide[s] = maxf(part_f32(4), 200.0);
+        page_room[s] = part_f32(5);
+        // (How it is to come: kept till its end.)
+        page_motion = 0;
+        if (part_is(2, "push")) page_motion = 1;
+        if (part_is(2, "pop")) page_motion = -1;
+        return
+    }
+    if (part_is(0, "end")) {
+        if (reading >= 0) page_done(reading);
+        reading = -1;
+        return
+    }
+    // A block of the sheet being read.
+    if (reading < 0) return;
+    s: int = reading;
+    b: int = nblk[s];
+    if (b >= SLOT_BLOCKS) return;
+    kind: int = block_kind();
+    if (kind < 0) return;
+    i: int = SLOT_BLOCKS * s + b;
+    blk_kind[i] = kind;
+    blk_f[i] = fld_n[s];
+    blk_nf[i] = line_n - 1;
+    for k in 1..line_n keep_part(s, k);
+    nblk[s] = b + 1
+}
+
+page_motion: int = 0;
+
+// Whether two sheets' names are the same.
+same_key(a: int, b: int): bool {
+    if (a < 0 || b < 0) return false;
+    n: int = fld_to[a] - fld_from[a];
+    if (n != fld_to[b] - fld_from[b]) return false;
+    for i in 0..n {
+        if (ui_pool[fld_from[a] + i] != ui_pool[fld_from[b] + i]) return false
+    }
+    true
+}
+
+// A sheet has been read into s: it is the one up now. The same sheet as
+// was up (its scores come, or a minute has passed) takes its place as it
+// is, scrolled as it was; another comes in, the one before going.
+page_done(s: int) {
+    o: int = cur;
+    if (same_key(page_key[s], page_key[o])) {
+        scroll[s] = scroll[o];
+        scroll_v[s] = scroll_v[o];
+        wheel_to[s] = wheel_to[o];
+        wheeling[s] = wheeling[o];
+        feed_scroll[s] = feed_scroll[o];
+        feed_v[s] = feed_v[o];
+        feed_to[s] = feed_to[o];
+        feed_wheeling[s] = feed_wheeling[o];
+        tabs_carry(o, s);
+        cur = s;
+        // (If the one before it was still going, it goes on going.)
+        if (was == s) was = -1;
+        return
+    }
+    scroll[s] = 0.0;
+    scroll_v[s] = 0.0;
+    wheel_to[s] = 0.0;
+    wheeling[s] = false;
+    feed_scroll[s] = 0.0;
+    feed_v[s] = 0.0;
+    feed_to[s] = 0.0;
+    feed_wheeling[s] = false;
+    tabs_fresh(s);
+    was = o;
+    cur = s;
+    trans_t = 0.0;
+    trans_dir = page_motion;
+    // (A sheet from none, or to none: it comes up, or goes, as a whole.)
+    if (page_place[o] == PLACE_NONE || page_place[s] == PLACE_NONE) trans_dir = 0;
+    if (page_place[o] == PLACE_NONE) pan_fresh = true;
+    focus = -1;
+    end_press()
+}
+
+// A part of a block: the index of its k-th, or -1 if it has none.
+part_of(b: int, k: int): int {
+    if (k >= blk_nf[b]) return -1;
+    blk_f[b] + k
+}
+
+// Whether a block's part k is the word w.
+block_is(b: int, k: int, w: str): bool {
+    f: int = part_of(b, k);
+    if (f < 0) return false;
+    n: int = fld_to[f] - fld_from[f];
+    if (n != len(w)) return false;
+    for i in 0..n {
+        if (ui_pool[fld_from[f] + i] != w[i]) return false
+    }
+    true
+}
+
+block_int(b: int, k: int): int {
+    f: int = part_of(b, k);
+    if (f < 0) return 0;
+    v: int = 0;
+    sign: int = 1;
+    for i in fld_from[f]..fld_to[f] {
+        c: int = ui_pool[i] as int;
+        if (c == 45) sign = -1;
+        if (c >= 48 && c <= 57) v = v * 10 + c - 48
+    }
+    sign * v
+}
+
+// Whether a part has anything in it.
+block_has(b: int, k: int): bool {
+    f: int = part_of(b, k);
+    f >= 0 && fld_to[f] > fld_from[f]
+}
+
+// ---- saying what was pressed ----
+// The page is told of a thing pressed by its name: a part of a block, or
+// one of the things over the game by a name of its own.
+tell_part(f: int) raises IoError {
+    if (f < 0) return;
+    n: int = mini(fld_to[f] - fld_from[f], len(scratch));
+    if (n == 0) return;
+    for i in 0..n scratch[i] = ui_pool[fld_from[f] + i];
+    write(1, "L8TAP ");
+    write_bytes_n(1, scratch, n);
+    write(1, "\n")
+}
+
+tell_name(name: str) raises IoError {
+    write(1, "L8TAP ");
+    write(1, name);
+    write(1, "\n")
+}
+
+// ---- what can be pressed ----
+// Each frame, as it is drawn, each thing that can be pressed is noted:
+// where it is (a little way out from what is drawn of it, on a touch
+// screen), what it is (the part naming it, or a name of the things over
+// the game: see CHROME_), which sheet it is on, and an identity, to show
+// it pressed by from one frame to the next.
+const UI_HITS: int = 256;
+
+hit_box: []f32 = new f32[UI_HITS * 4](0.0);
+
+hit_part: []int = new int[UI_HITS](-1);
+
+hit_chrome: []int = new int[UI_HITS](0);
+
+hit_id: []int = new int[UI_HITS](0);
+
+// (Whether it is on the sheet, to be reached by the keys.)
+hit_sheet: []bool = new bool[UI_HITS](false);
+
+nhits: int = 0;
+
+// The things noted as the frame before was drawn: pressing is by those.
+seen_box: []f32 = new f32[UI_HITS * 4](0.0);
+
+seen_part: []int = new int[UI_HITS](-1);
+
+seen_chrome: []int = new int[UI_HITS](0);
+
+seen_id: []int = new int[UI_HITS](0);
+
+seen_sheet: []bool = new bool[UI_HITS](false);
+
+nseen: int = 0;
+
+// Where the sheet was, as the frame before was drawn (a press anywhere on
+// it is the sheet's, and while one is up, every press is the menus').
+seen_pan: []f32 = new f32[4](0.0);
+
+seen_modal: bool = false;
+
+note_hit(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    part: int,
+    chrome: int,
+    id: int,
+    sheet: bool
+) {
+    if (nhits >= UI_HITS) return;
+    // (Only what is inside the clip can be pressed.)
+    if (x1 < clip_x0 || x0 > clip_x1 || y1 < clip_y0 || y0 > clip_y1) return;
+    slop: f32 = 0.0;
+    if (hud_touch) slop = 4.0 * ui_k;
+    hit_box[nhits * 4] = maxf(x0 - slop, clip_x0);
+    hit_box[nhits * 4 + 1] = maxf(y0 - slop, clip_y0);
+    hit_box[nhits * 4 + 2] = minf(x1 + slop, clip_x1);
+    hit_box[nhits * 4 + 3] = minf(y1 + slop, clip_y1);
+    hit_part[nhits] = part;
+    hit_chrome[nhits] = chrome;
+    hit_id[nhits] = id;
+    hit_sheet[nhits] = sheet;
+    nhits = nhits + 1
+}
+
+// The frame is drawn: what was noted is what can be pressed now.
+keep_hits() {
+    for k in 0..nhits * 4 seen_box[k] = hit_box[k];
+    for k in 0..nhits {
+        seen_part[k] = hit_part[k];
+        seen_chrome[k] = hit_chrome[k];
+        seen_id[k] = hit_id[k];
+        seen_sheet[k] = hit_sheet[k]
+    }
+    nseen = nhits;
+    nhits = 0
+}
+
+// The thing at (x, y), as it was last drawn, or -1. (The last noted is
+// the one on top.)
+hit_at(x: f32, y: f32): int {
+    k: int = nseen - 1;
+    while (k >= 0) {
+        if (x >= seen_box[k * 4] && x < seen_box[k * 4 + 2] && y >= seen_box[k * 4 + 1] && y < seen_box[k * 4 + 3]) return k;
+        k = k - 1
+    }
+    -1
+}
+
+// ---- pressing ----
+// A finger (or the mouse's button) down on the menus: which button it is
+// (see touch.l8), where it went down and where it is, how fast it moves
+// up and down; the thing it is on (an identity, -1 for none), and how much
+// that shows it is pressed (0 to 1); and whether it is dragging a sheet
+// (or the feed) to scroll it, and which.
+press_b: int = -1;
+
+press_x0: f32 = 0.0;
+
+press_y0: f32 = 0.0;
+
+press_x: f32 = 0.0;
+
+press_y: f32 = 0.0;
+
+press_vy: f32 = 0.0;
+
+press_hit: int = -1;
+
+press_id: int = -1;
+
+press_amt: f32 = 0.0;
+
+// (The one let go of, still showing it was pressed, as that fades.)
+let_id: int = -1;
+
+let_amt: f32 = 0.0;
+
+dragging: int = 0;
+
+drag_from: f32 = 0.0;
+
+// The mouse, pointing (no button down): where, and the thing it is over
+// (an identity), and how much that shows it.
+point_x: f32 = -10000.0;
+
+point_y: f32 = -10000.0;
+
+hover_id: int = -1;
+
+hover_amt: f32 = 0.0;
+
+// The thing the keys are on (an index among those on the sheet: see
+// hit_sheet), or -1; and whether it is to be shown (only once the keys
+// are used).
+focus: int = -1;
+
+focus_shown: bool = false;
+
+// A finger that moves this far (CSS pixels) is not pressing, but dragging.
+const TAP_SLOP: f32 = 10.0;
+
+end_press() {
+    if (press_id >= 0) {
+        let_id = press_id;
+        let_amt = press_amt
+    }
+    press_b = -1;
+    press_hit = -1;
+    press_id = -1;
+    press_amt = 0.0;
+    dragging = 0
+}
+
+// Whether (x, y) is on the sheet up, as last drawn.
+on_sheet(x: f32, y: f32): bool {
+    seen_pan[2] > seen_pan[0] && x >= seen_pan[0] && x < seen_pan[2] && y >= seen_pan[1] && y < seen_pan[3]
+}
+
+on_feed(x: f32, y: f32): bool {
+    s: int = cur;
+    feed_box[s * 4 + 2] > feed_box[s * 4] && x >= feed_box[s * 4] && x < feed_box[s * 4 + 2] && y >= feed_box[s * 4 + 1] && y < feed_box[s * 4 + 3]
+}
+
+// A button went down at (x, y): whether it is the menus' (not the
+// game's, to steer by or jump).
+ui_press(b: int, x: f32, y: f32): bool {
+    if (!ui_on) return false;
+    // The wheel: a sheet scrolls by it (the page puts how far in the
+    // event's state: see ui_wheel).
+    if (b == 4 || b == 5) return true;
+    if (!pointer_button(b) || press_b >= 0) return false;
+    k: int = hit_at(x, y);
+    if (k < 0 && !seen_modal && !on_sheet(x, y)) return false;
+    press_b = b;
+    press_x0 = x;
+    press_y0 = y;
+    press_x = x;
+    press_y = y;
+    press_vy = 0.0;
+    press_hit = k;
+    press_id = -1;
+    if (k >= 0) press_id = seen_id[k];
+    press_amt = 0.0;
+    dragging = 0;
+    point_x = -10000.0;
+    focus_shown = false;
+    true
+}
+
+// The wheel turned at (x, y), by so many CSS pixels (more than 0, down).
+ui_wheel(x: f32, y: f32, by: f32) {
+    s: int = cur;
+    if (on_feed(x, y)) {
+        if (!feed_wheeling[s]) feed_to[s] = feed_scroll[s];
+        feed_wheeling[s] = true;
+        feed_v[s] = 0.0;
+        feed_to[s] = clampf(feed_to[s] + by * ui_k, 0.0, maxf(feed_content[s] - feed_view[s],
+            0.0));
+        return
+    }
+    if (!wheeling[s]) wheel_to[s] = scroll[s];
+    wheeling[s] = true;
+    scroll_v[s] = 0.0;
+    wheel_to[s] = clampf(wheel_to[s] + by * ui_k, 0.0, maxf(content_h[s] - view_h[s],
+        0.0))
+}
+
+// A button came up: whether it was the menus'. A press let go of on the
+// thing it went down on is that thing pressed.
+ui_release(b: int, x: f32, y: f32) raises IoError: bool {
+    if (b != press_b) return false;
+    press_x = x;
+    press_y = y;
+    k: int = press_hit;
+    if (dragging == 0 && k >= 0 && hit_at(x, y) == k) tap(k);
+    // (A drag let go of carries on, as fast as it was going.)
+    if (dragging == 1) scroll_v[cur] = -press_vy;
+    if (dragging == 2) feed_v[cur] = -press_vy;
+    end_press();
+    true
+}
+
+ui_motion(state: int, x: f32, y: f32) {
+    if (!ui_on) return;
+    if (press_b >= 0) {
+        if ((state >> 7 + press_b & 1) == 0) return;
+        dy: f32 = y - press_y;
+        if (ui_dt > 0.0) press_vy = lerpf(press_vy, dy / maxf(ui_dt, 0.004), 0.5);
+        press_x = x;
+        press_y = y;
+        moved: f32 = sqrtf((x - press_x0) * (x - press_x0) + (y - press_y0) * (y - press_y0));
+        if (dragging == 0 && moved > TAP_SLOP * ui_k) {
+            // No longer a press: a drag, up or down, scrolls what it is on.
+            if (press_id >= 0) {
+                let_id = press_id;
+                let_amt = press_amt
+            }
+            press_hit = -1;
+            press_id = -1;
+            dragging = 3;
+            if (absf(y - press_y0) > absf(x - press_x0)) {
+                if (on_feed(press_x0, press_y0) && feed_content[cur] > feed_view[cur]) {
+                    dragging = 2;
+                    drag_from = feed_scroll[cur] + (y - press_y0)
+                } else if (on_sheet(press_x0, press_y0)) {
+                    dragging = 1;
+                    drag_from = scroll[cur] + (y - press_y0)
+                }
+            }
+            wheeling[cur] = false;
+            feed_wheeling[cur] = false
+        }
+        return
+    }
+    // (A mouse pointing, no button down.)
+    if (state / 256 % 32 == 0) {
+        point_x = x;
+        point_y = y
+    }
+}
+
+// A thing pressed: told to the page (or, for some, done here).
+tap(k: int) raises IoError {
+    if (seen_part[k] >= 0) tell_part(seen_part[k]) else chrome_tap(seen_chrome[k])
+}
+
+// ---- the keys ----
+// While a sheet is up, the arrow keys (and Tab) go from one thing on it to
+// the next, and Enter (or Space) presses it. Whether the key was the
+// menus'.
+ui_key(ks: int) raises IoError: bool {
+    if (!ui_on || page_place[cur] == PLACE_NONE) return false;
+    n: int = 0;
+    for k in 0..nseen {
+        if (seen_sheet[k]) n = n + 1
+    }
+    if (n == 0) return false;
+    step: int = 0;
+    if (ks == 65364 || ks == 65289 || ks == 65363) step = 1;
+    if (ks == 65362 || ks == 65056 || ks == 65361) step = -1;
+    if (step != 0) {
+        if (!focus_shown || focus < 0) {
+            focus = 0;
+            if (step < 0) focus = n - 1
+        } else focus = (focus + step + n) % n;
+        focus_shown = true;
+        point_x = -10000.0;
+        reveal_focus();
+        return true
+    }
+    if ((ks == 65293 || ks == 32) && focus_shown && focus >= 0) {
+        k: int = sheet_hit(focus);
+        if (k >= 0) {
+            let_id = seen_id[k];
+            let_amt = 1.0;
+            tap(k)
+        }
+        return true
+    }
+    false
+}
+
+// The index among all those noted of the one at i among the sheet's.
+sheet_hit(i: int): int {
+    j: int = 0;
+    for k in 0..nseen {
+        if (seen_sheet[k]) {
+            if (j == i) return k;
+            j = j + 1
+        }
+    }
+    -1
+}
+
+// The thing the keys are on, scrolled into view.
+reveal_focus() {
+    k: int = sheet_hit(focus);
+    if (k < 0) return;
+    s: int = cur;
+    top: f32 = seen_pan[1] + 12.0 * ui_k;
+    bottom: f32 = seen_pan[3] - 12.0 * ui_k;
+    y0: f32 = seen_box[k * 4 + 1];
+    y1: f32 = seen_box[k * 4 + 3];
+    to: f32 = scroll[s];
+    if (y0 < top) to = to - (top - y0);
+    if (y1 > bottom) to = to + (y1 - bottom);
+    wheel_to[s] = clampf(to, 0.0, maxf(content_h[s] - view_h[s], 0.0));
+    wheeling[s] = true
+}
+
+// ---- moving ----
+// A scroll carried on by its speed, slowing; held to its ends (dragged
+// past one, it goes less far than the finger, and springs back).
+const SCROLL_SLOW: f32 = 2.6;
+
+carry_scroll(at: f32, v: f32, most: f32): f32 {
+    p: f32 = at + v * ui_dt;
+    if (p < 0.0) p = ease_to(p, 0.0, 14.0);
+    if (p > most) p = ease_to(p, most, 14.0);
+    p
+}
+
+// How far a drag past an end goes, for how far the finger went past it.
+rubber(over: f32, room: f32): f32 {
+    if (over <= 0.0) return over;
+    room * 0.55 * (1.0 - 1.0 / (over / (room * 0.55) + 1.0))
+}
+
+dragged(at: f32, most: f32, room: f32): f32 {
+    if (at < 0.0) return -rubber(-at, room);
+    if (at > most) return most + rubber(at - most, room);
+    at
+}
+
+move_scrolls() {
+    for s in 0..2 {
+        most: f32 = maxf(content_h[s] - view_h[s], 0.0);
+        fmost: f32 = maxf(feed_content[s] - feed_view[s], 0.0);
+        if (s == cur && dragging == 1) scroll[s] = dragged(drag_from - press_y, most,
+            view_h[s]) else if (wheeling[s]) {
+            scroll[s] = ease_to(scroll[s], wheel_to[s], 16.0);
+            if (absf(scroll[s] - wheel_to[s]) < 0.3) {
+                scroll[s] = wheel_to[s];
+                wheeling[s] = false
+            }
+        } else {
+            scroll[s] = carry_scroll(scroll[s], scroll_v[s], most);
+            scroll_v[s] = scroll_v[s] * expf(-SCROLL_SLOW * ui_dt);
+            if (scroll[s] < 0.0 || scroll[s] > most) scroll_v[s] = scroll_v[s] * expf(-10.0 * ui_dt);
+            if (absf(scroll_v[s]) < 2.0) scroll_v[s] = 0.0
+        }
+        if (s == cur && dragging == 2) feed_scroll[s] = dragged(drag_from - press_y,
+            fmost, feed_view[s]) else if (feed_wheeling[s]) {
+            feed_scroll[s] = ease_to(feed_scroll[s], feed_to[s], 16.0);
+            if (absf(feed_scroll[s] - feed_to[s]) < 0.3) {
+                feed_scroll[s] = feed_to[s];
+                feed_wheeling[s] = false
+            }
+        } else {
+            feed_scroll[s] = carry_scroll(feed_scroll[s], feed_v[s], fmost);
+            feed_v[s] = feed_v[s] * expf(-SCROLL_SLOW * ui_dt);
+            if (feed_scroll[s] < 0.0 || feed_scroll[s] > fmost) feed_v[s] = feed_v[s] * expf(-10.0 * ui_dt);
+            if (absf(feed_v[s]) < 2.0) feed_v[s] = 0.0
+        }
+    }
+}
+
+// How much a thing shows that it is pressed, or pointed at (0 to 1), by
+// its identity.
+pressed_by(id: int): f32 {
+    p: f32 = 0.0;
+    if (id == press_id) p = press_amt;
+    if (id == let_id) p = maxf(p, let_amt);
+    p
+}
+
+hovered_by(id: int): f32 {
+    if (id == hover_id) return hover_amt;
+    0.0
+}
+
+// Whether anything over the game is moving, so that the frames go on.
+ui_busy(): bool {
+    trans_t < 1.0 || press_b >= 0 || let_amt > 0.0 || hover_amt > 0.0 && hover_amt < 1.0 || absf(scroll_v[cur]) > 0.0 || wheeling[cur] || absf(feed_v[cur]) > 0.0 || feed_wheeling[cur] || scroll[cur] < 0.0 || scroll[cur] > maxf(content_h[cur] - view_h[cur],
+        0.0) || absf(pan_a - sheet_target_a()) > 0.002 || chrome_busy()
+}
+
+sheet_target_a(): f32 {
+    if (page_place[cur] == PLACE_NONE) return 0.0;
+    1.0
+}
+
+// ---- each frame ----
+// Time moves on: what shows it is pressed or pointed at, the sheets
+// coming and going, and the scrolls.
+ui_tick(dt: f32) {
+    take_view();
+    ui_dt = clampf(dt, 0.0, 0.1);
+    ui_time = ui_time + ui_dt;
+    // (A press shows slowly at first, so that a touch that turns out to be
+    // a drag has hardly shown by then; and goes quickly.)
+    if (press_id >= 0) press_amt = minf(press_amt + ui_dt / 0.22, 1.0);
+    let_amt = maxf(let_amt - ui_dt / 0.25, 0.0);
+    if (let_amt <= 0.0) let_id = -1;
+    // What the mouse points at.
+    k: int = -1;
+    if (point_x > -1000.0 && press_b < 0) k = hit_at(point_x, point_y);
+    id: int = -1;
+    if (k >= 0) id = seen_id[k];
+    if (id != hover_id) {
+        hover_amt = maxf(hover_amt - ui_dt / 0.15, 0.0);
+        if (hover_amt <= 0.0) hover_id = id
+    } else if (id >= 0) hover_amt = minf(hover_amt + ui_dt / 0.12, 1.0);
+    trans_t = minf(trans_t + ui_dt / 0.34, 1.0);
+    if (trans_t >= 1.0) was = -1;
+    move_scrolls();
+    chrome_tick()
+}
+
+// The pointer's look: a hand over what can be pressed (the page sets it:
+// L8CURSOR).
+cursor_said: int = 0;
+
+say_cursor() raises IoError {
+    want: int = 0;
+    if (point_x > -1000.0 && hit_at(point_x, point_y) >= 0) want = 1;
+    if (want == cursor_said) return;
+    cursor_said = want;
+    write(1, "L8CURSOR ");
+    write_int(1, want);
+    write(1, "\n")
+}
+
+// Whether a sheet is up (or going), so that the scene behind it is to be
+// blurred.
+ui_frost(): bool {
+    ui_on && (pan_a > 0.01 || page_place[cur] != PLACE_NONE)
+}
+
+// Everything over the game, painted.
+ui_paint() {
+    if (!ui_on) return;
+    paint_sheets();
+    paint_chrome();
+    // (What is on the sheet up, and where it is, to press by next frame.)
+    seen_modal = page_place[cur] != PLACE_NONE && pan_a > 0.5;
+    keep_hits()
+}

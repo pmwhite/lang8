@@ -65,6 +65,41 @@ type Renderer = {
     u_hud_offset: int;
     u_hud_color: int;
     hud_buf: u32;
+    // Painting over the scene (see paint.l8): its program, what it is told
+    // (the window's size, the clip, how far the clip's ends fade, and its
+    // three pictures: the font's, the scene blurred, and the place before),
+    // its corners and their order, and the font's picture.
+    paint: int;
+    u_paint_screen: int;
+    u_paint_clip: int;
+    u_paint_fade: int;
+    u_paint_font: int;
+    u_paint_frost: int;
+    u_paint_kept: int;
+    paint_buf: u32;
+    paint_idx: u32;
+    font_tex: u32;
+    // The scene blurred, for frosted glass (see make_frost): a quarter of
+    // the window's size each way, in two pictures that it goes back and
+    // forth between; the programs that shrink it and blur it, and what they
+    // are told.
+    frost_tex: []u32;
+    frost_fbo: []u32;
+    // The picture of the place before, kept while the next is built (see
+    // keep_picture): its texture and somewhere to copy it into, and its
+    // size.
+    kept_tex: u32;
+    kept_fbo: u32;
+    kept_w: int;
+    kept_h: int;
+    frost_w: int;
+    frost_h: int;
+    shrink: int;
+    u_shrink_scene: int;
+    u_shrink_step: int;
+    blur: int;
+    u_blur_scene: int;
+    u_blur_step: int;
     glow: int;
     u_glow_vp: int;
     u_glow_cam: int;
@@ -727,6 +762,174 @@ void main() {
 }
 """;
 
+// Painting over the scene (see paint.l8): each quad's shape worked out
+// for each of its pixels. A box (or its outline), a line, a triangle, and
+// an arc are each a distance from the shape's edge, in window pixels, and
+// so have a clean edge a pixel wide (or wider, soft); a character is the
+// font's picture of the same; frosted glass is a box showing the scene
+// blurred, tinted; and the picture of the place before is shown as it was.
+// The clip keeps it to a box, fading over the box's top and bottom.
+PAINT_VS: str = """
+#version 120
+#ifdef GL_ES
+#define HP highp
+#else
+#define HP
+#endif
+attribute vec4 pos;
+attribute vec4 nrm;
+attribute vec4 vcol;
+attribute vec4 inst;
+uniform HP vec2 screen;
+varying HP vec2 vat;
+varying HP vec2 vuv;
+varying HP vec4 vshape;
+varying HP vec2 vsoft;
+varying vec4 vcolor;
+void main() {
+  vat = pos.xy;
+  vuv = pos.zw;
+  vshape = nrm;
+  vsoft = vcol.xy;
+  vcolor = inst;
+  gl_Position = vec4(pos.x / screen.x * 2.0 - 1.0, 1.0 - pos.y / screen.y * 2.0, 0.0, 1.0);
+}
+""";
+
+PAINT_FS: str = """
+#version 120
+#ifdef GL_ES
+#define HP highp
+#else
+#define HP
+#endif
+uniform sampler2D font;
+uniform sampler2D frost;
+uniform sampler2D kept;
+uniform HP vec2 screen;
+uniform HP vec4 clip;
+uniform HP float fade;
+varying HP vec2 vat;
+varying HP vec2 vuv;
+varying HP vec4 vshape;
+varying HP vec2 vsoft;
+varying vec4 vcolor;
+HP float box(HP vec2 p, HP vec2 b, HP float r) {
+  HP vec2 q = abs(p) - b + vec2(r);
+  return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+}
+HP float segment(HP vec2 p, HP vec2 b) {
+  HP float h = clamp(dot(p, b) / max(dot(b, b), 0.0001), 0.0, 1.0);
+  return length(p - b * h);
+}
+HP float triangle(HP vec2 p, HP vec2 p0, HP vec2 p1, HP vec2 p2) {
+  HP vec2 e0 = p1 - p0;
+  HP vec2 e1 = p2 - p1;
+  HP vec2 e2 = p0 - p2;
+  HP vec2 v0 = p - p0;
+  HP vec2 v1 = p - p1;
+  HP vec2 v2 = p - p2;
+  HP vec2 q0 = v0 - e0 * clamp(dot(v0, e0) / dot(e0, e0), 0.0, 1.0);
+  HP vec2 q1 = v1 - e1 * clamp(dot(v1, e1) / dot(e1, e1), 0.0, 1.0);
+  HP vec2 q2 = v2 - e2 * clamp(dot(v2, e2) / dot(e2, e2), 0.0, 1.0);
+  HP float s = sign(e0.x * e2.y - e0.y * e2.x);
+  HP vec2 d = min(min(vec2(dot(q0, q0), s * (v0.x * e0.y - v0.y * e0.x)),
+                      vec2(dot(q1, q1), s * (v1.x * e1.y - v1.y * e1.x))),
+                      vec2(dot(q2, q2), s * (v2.x * e2.y - v2.y * e2.x)));
+  return -sqrt(d.x) * sign(d.y);
+}
+float edge(HP float d) {
+  HP float w = max(fwidth(d), 0.0001);
+  return clamp(0.5 - d / w, 0.0, 1.0);
+}
+void main() {
+  float kind = vshape.z;
+  vec3 rgb = vcolor.rgb;
+  float a = 0.0;
+  if (kind < 0.5 || (kind > 3.5 && kind < 4.5)) {
+    HP float d = box(vuv, vshape.xy, vshape.w);
+    if (kind < 0.5 && vsoft.y > 0.0) d = abs(d + vsoft.y * 0.5) - vsoft.y * 0.5;
+    if (vsoft.x > 0.0) a = 1.0 - smoothstep(-vsoft.x, vsoft.x, d);
+    else a = edge(d);
+    if (kind > 3.5) {
+      vec3 behind = texture2D(frost, vec2(vat.x / screen.x, 1.0 - vat.y / screen.y)).rgb;
+      rgb = mix(behind, vcolor.rgb, vsoft.y);
+    }
+  } else if (kind < 1.5) {
+    float d = texture2D(font, vuv).r;
+    float e = 0.5 - vsoft.y;
+    float w = max(fwidth(d) * 0.7, 0.002) + vsoft.x;
+    a = smoothstep(e - w, e + w, d);
+  } else if (kind < 2.5) {
+    a = edge(segment(vuv, vshape.xy) - vshape.w);
+  } else if (kind < 3.5) {
+    HP vec2 b = vshape.xy - vec2(vshape.w);
+    a = edge(triangle(vuv, vec2(-b.x, -b.y), vec2(b.x, 0.0), vec2(-b.x, b.y)) - vshape.w);
+  } else if (kind < 5.5) {
+    HP float ang = atan(vuv.y, vuv.x) - vshape.w;
+    ang = mod(ang, 6.2831853);
+    HP float d = abs(length(vuv) - vshape.x) - vshape.y;
+    if (ang > vsoft.x) {
+      HP vec2 p0 = vshape.x * vec2(cos(vshape.w), sin(vshape.w));
+      HP vec2 p1 = vshape.x * vec2(cos(vshape.w + vsoft.x), sin(vshape.w + vsoft.x));
+      d = min(length(vuv - p0), length(vuv - p1)) - vshape.y;
+    }
+    a = edge(d);
+  } else if (kind > 6.5) {
+    HP float d = max(length(vuv) - vshape.x, -(length(vuv - vec2(0.5, -0.42) * vshape.x) - 0.8 * vshape.x));
+    a = edge(d);
+  } else {
+    rgb = texture2D(kept, vec2(vat.x / screen.x, 1.0 - vat.y / screen.y)).rgb;
+    a = 1.0;
+  }
+  HP float cx = min(vat.x - clip.x, clip.z - vat.x);
+  HP float cy = min(vat.y - clip.y, clip.w - vat.y);
+  float c = clamp(cx + 0.5, 0.0, 1.0);
+  if (fade > 0.0) c *= clamp(cy / fade, 0.0, 1.0); else c *= clamp(cy + 0.5, 0.0, 1.0);
+  gl_FragColor = vec4(rgb, a * c * vcolor.a);
+}
+""";
+
+// Making the scene blurred, for frosted glass (see make_frost): first
+// shrunk to a quarter of the window each way, each pixel the mean of the
+// sixteen it stands for; then blurred, across and down, and again.
+SHRINK_FS: str = """
+#version 120
+#ifdef GL_ES
+#define HP highp
+#else
+#define HP
+#endif
+uniform sampler2D scene;
+uniform vec2 step;
+varying HP vec2 vscreen;
+void main() {
+  HP vec2 uv = vscreen * 0.5 + 0.5;
+  vec3 c = texture2D(scene, uv + vec2(-step.x, -step.y)).rgb + texture2D(scene, uv + vec2(step.x, -step.y)).rgb
+    + texture2D(scene, uv + vec2(-step.x, step.y)).rgb + texture2D(scene, uv + vec2(step.x, step.y)).rgb;
+  gl_FragColor = vec4(c * 0.25, 1.0);
+}
+""";
+
+BLUR_FS: str = """
+#version 120
+#ifdef GL_ES
+#define HP highp
+#else
+#define HP
+#endif
+uniform sampler2D scene;
+uniform vec2 step;
+varying HP vec2 vscreen;
+void main() {
+  HP vec2 uv = vscreen * 0.5 + 0.5;
+  vec3 c = texture2D(scene, uv).rgb * 0.2270270;
+  c += (texture2D(scene, uv + step * 1.3846154).rgb + texture2D(scene, uv - step * 1.3846154).rgb) * 0.3162162;
+  c += (texture2D(scene, uv + step * 3.2307692).rgb + texture2D(scene, uv - step * 3.2307692).rgb) * 0.0702703;
+  gl_FragColor = vec4(c, 1.0);
+}
+""";
+
 // Into the shadow map: everything but the open ground (concrete and grass,
 // and what is made of them: banks, kickers, a halfpipe's walls). The ground's
 // shape shows in its shading; its own shadows would only show the steps of
@@ -878,6 +1081,9 @@ new_renderer(parts: *Mesh) raises IoError: *Renderer@new {
     sky: int = link_program(bytes(SKY_VS), with_prelude(SKY_FS));
     hud: int = link_program(bytes(HUD_VS), bytes(HUD_FS));
     stretch: int = link_program(bytes(SKY_VS), bytes(STRETCH_FS));
+    paint: int = link_program(bytes(PAINT_VS), bytes(PAINT_FS));
+    shrink: int = link_program(bytes(SKY_VS), bytes(SHRINK_FS));
+    blur: int = link_program(bytes(SKY_VS), bytes(BLUR_FS));
     glow_prog: int = link_program(bytes(GLOW_VS), bytes(GLOW_FS));
     grass_prog: int = link_program(bytes(GRASS_VS), with_prelude(GRASS_FS));
     va: []u32 = new u32[1](0u32);
@@ -931,6 +1137,30 @@ new_renderer(parts: *Mesh) raises IoError: *Renderer@new {
         u_hud_offset: glGetUniformLocation(hud, "offset"),
         u_hud_color: glGetUniformLocation(hud, "color"),
         hud_buf: gen_buffer(),
+        paint: paint,
+        u_paint_screen: glGetUniformLocation(paint, "screen"),
+        u_paint_clip: glGetUniformLocation(paint, "clip"),
+        u_paint_fade: glGetUniformLocation(paint, "fade"),
+        u_paint_font: glGetUniformLocation(paint, "font"),
+        u_paint_frost: glGetUniformLocation(paint, "frost"),
+        u_paint_kept: glGetUniformLocation(paint, "kept"),
+        paint_buf: gen_buffer(),
+        paint_idx: make_paint_index(),
+        font_tex: make_font_texture(),
+        frost_tex: new u32[2](0u32),
+        frost_fbo: new u32[2](0u32),
+        kept_tex: 0u32,
+        kept_fbo: 0u32,
+        kept_w: 0,
+        kept_h: 0,
+        frost_w: 0,
+        frost_h: 0,
+        shrink: shrink,
+        u_shrink_scene: glGetUniformLocation(shrink, "scene"),
+        u_shrink_step: glGetUniformLocation(shrink, "step"),
+        blur: blur,
+        u_blur_scene: glGetUniformLocation(blur, "scene"),
+        u_blur_step: glGetUniformLocation(blur, "step"),
         glow: glow_prog,
         u_glow_vp: glGetUniformLocation(glow_prog, "vp"),
         u_glow_cam: glGetUniformLocation(glow_prog, "cam_pos"),
@@ -1415,6 +1645,167 @@ const NOISE_SIZE: int = 256;
 
 const NOISE_CELLS: int = 64;
 
+// The font's picture (see font.l8), as a texture: each point how far
+// inside a character's edge it is, from 0 to 252.
+make_font_texture(): u32 {
+    bits: []i8 = new i8[FONT_W * FONT_H](0i8);
+    level: []int = new int[128](0);
+    for k in 0..len(FONT_LEVELS) level[FONT_LEVELS[k] as int] = k;
+    for y in 0..FONT_H {
+        for x in 0..FONT_W bits[y * FONT_W + x] = (level[font_rows[y][x] as int] * 4) trunc i8
+    }
+    tex: []u32 = new u32[1](0u32);
+    glGenTextures(1, tex);
+    glBindTexture(3553, tex[0]);
+    glPixelStorei(3317, 1);
+    glTexParameteri(3553, 10241, 9729);
+    glTexParameteri(3553, 10240, 9729);
+    glTexParameteri(3553, 10242, 33071);
+    glTexParameteri(3553, 10243, 33071);
+    glTexImage2D(3553, 0, 6409, FONT_W, FONT_H, 0, 6409, 5121, bits);
+    glPixelStorei(3317, 4);
+    tex[0]
+}
+
+// The order the corners of each painted quad are drawn in: two triangles.
+make_paint_index(): u32 {
+    idx: []i32 = new i32[PAINT_QUADS * 6](0i32);
+    for q in 0..PAINT_QUADS {
+        c: int = q * 4;
+        idx[q * 6] = c trunc i32;
+        idx[q * 6 + 1] = (c + 1) trunc i32;
+        idx[q * 6 + 2] = (c + 2) trunc i32;
+        idx[q * 6 + 3] = c trunc i32;
+        idx[q * 6 + 4] = (c + 2) trunc i32;
+        idx[q * 6 + 5] = (c + 3) trunc i32
+    }
+    buf: u32 = gen_buffer();
+    glBindBuffer(34963, buf);
+    glNamedBufferData(buf, PAINT_QUADS * 24, idx, 35044);
+    buf
+}
+
+// A texture to draw into, w by h, smoothed when it is drawn from.
+make_target(
+    tex: []u32,
+    fbo: []u32,
+    k: int,
+    w: int,
+    h: int
+) {
+    one: []u32 = new u32[1](0u32);
+    if (tex[k] == 0u32) {
+        glGenTextures(1, one);
+        tex[k] = one[0];
+        glGenFramebuffers(1, one);
+        fbo[k] = one[0]
+    }
+    glBindTexture(3553, tex[k]);
+    glTexParameteri(3553, 10241, 9729);
+    glTexParameteri(3553, 10240, 9729);
+    glTexParameteri(3553, 10242, 33071);
+    glTexParameteri(3553, 10243, 33071);
+    glTexImage2D(3553, 0, 32856, w, h, 0, 6408, 5121, null);
+    glBindFramebuffer(36160, fbo[k]);
+    glFramebufferTexture2D(36160, 36064, 3553, tex[k], 0)
+}
+
+// One pass of the frost's: from the texture src into frost k, by the
+// program p (shrink or blur), which steps by (sx, sy) in src.
+frost_pass(
+    r: *Renderer,
+    p: int,
+    u_scene: int,
+    u_step: int,
+    src: u32,
+    k: int,
+    sx: f32,
+    sy: f32
+) {
+    glBindFramebuffer(36160, r.frost_fbo[k]);
+    glViewport(0, 0, r.frost_w, r.frost_h);
+    glUseProgram(p);
+    glActiveTexture(33984);
+    glBindTexture(3553, src);
+    glUniform1i(u_scene, 0);
+    glUniform2f(u_step, sx, sy);
+    glDrawArrays(4, 0, 3)
+}
+
+// The scene, as drawn this frame (see fit_scene), shrunk and blurred into
+// frost 0.
+make_frost(r: *Renderer) {
+    if (r.scene_fbo == 0u32) return;
+    w: int = maxi(screen_w / 4, 1);
+    h: int = maxi(screen_h / 4, 1);
+    if (w != r.frost_w || h != r.frost_h) {
+        r.frost_w = w;
+        r.frost_h = h;
+        make_target(r.frost_tex, r.frost_fbo, 0, w, h);
+        make_target(r.frost_tex, r.frost_fbo, 1, w, h)
+    }
+    glDisable(2929);
+    glDisable(3042);
+    bind_vertices(r.sky_buf);
+    // (Each of its pixels from four taps, each between four of the scene's.)
+    frost_pass(r, r.shrink, r.u_shrink_scene, r.u_shrink_step, r.scene_tex, 0, 1.0 / r.scene_w as f32,
+        1.0 / r.scene_h as f32);
+    dx: f32 = 1.0 / w as f32;
+    dy: f32 = 1.0 / h as f32;
+    frost_pass(r, r.blur, r.u_blur_scene, r.u_blur_step, r.frost_tex[0], 1, dx, 0.0);
+    frost_pass(r, r.blur, r.u_blur_scene, r.u_blur_step, r.frost_tex[1], 0, 0.0, dy);
+    frost_pass(r, r.blur, r.u_blur_scene, r.u_blur_step, r.frost_tex[0], 1, dx * 2.0,
+        0.0);
+    frost_pass(r, r.blur, r.u_blur_scene, r.u_blur_step, r.frost_tex[1], 0, 0.0, dy * 2.0);
+    glBindFramebuffer(36160, 0u32);
+    glViewport(0, 0, screen_w, screen_h)
+}
+
+// What has been painted this frame (see paint.l8), over the scene.
+draw_paint(r: *Renderer) {
+    if (paint_n == 0) return;
+    if (paint_glass) make_frost(r);
+    frame_phase("paint");
+    glDisable(2929);
+    glEnable(3042);
+    glBlendFunc(770, 771);
+    glUseProgram(r.paint);
+    glUniform2f(r.u_paint_screen, screen_w as f32, screen_h as f32);
+    glActiveTexture(33984);
+    glBindTexture(3553, r.font_tex);
+    glUniform1i(r.u_paint_font, 0);
+    glActiveTexture(33985);
+    if (r.frost_tex[0] != 0u32) glBindTexture(3553, r.frost_tex[0]) else glBindTexture(3553,
+        r.font_tex);
+    glUniform1i(r.u_paint_frost, 1);
+    glActiveTexture(33986);
+    if (r.kept_tex != 0u32) glBindTexture(3553, r.kept_tex) else glBindTexture(3553,
+        r.font_tex);
+    glUniform1i(r.u_paint_kept, 2);
+    glActiveTexture(33984);
+    glBindBuffer(34962, r.paint_buf);
+    glBufferData(34962, paint_n * 4 * PAINT_FLOATS * 4, paint_verts, 35048);
+    glEnableVertexAttribArray(3);
+    glVertexAttribDivisor(3, 0);
+    glVertexAttribPointer(0, 4, 5126, 0, PAINT_FLOATS * 4, 0);
+    glVertexAttribPointer(1, 4, 5126, 0, PAINT_FLOATS * 4, 16);
+    glVertexAttribPointer(2, 4, 5126, 0, PAINT_FLOATS * 4, 32);
+    glVertexAttribPointer(3, 4, 5126, 0, PAINT_FLOATS * 4, 48);
+    glBindBuffer(34963, r.paint_idx);
+    for b in 0..nbatches {
+        if (batch_count[b] > 0) {
+            glUniform4f(r.u_paint_clip, batch_clip[b * 5], batch_clip[b * 5 + 1],
+                batch_clip[b * 5 + 2], batch_clip[b * 5 + 3]);
+            glUniform1f(r.u_paint_fade, batch_clip[b * 5 + 4]);
+            glDrawElements(4, batch_count[b] * 6, 5125, batch_first[b] * 24)
+        }
+    }
+    glDisableVertexAttribArray(3);
+    glDisable(3042);
+    glEnable(2929);
+    frame_phase_end()
+}
+
 make_noise_texture(): u32 {
     lattice: []f32 = new f32[NOISE_CELLS * NOISE_CELLS](0.0);
     rng: int = 99991;
@@ -1831,6 +2222,15 @@ frame_phase_end() {
 // in its skate.js. This is for smaller still.)
 render_scale: f32 = 1.0;
 
+// Whether frosted glass is to be painted over the scene this frame (see
+// paint.l8): the scene is then drawn somewhere it can be blurred from,
+// however big.
+frost_wanted: bool = false;
+
+// How many of the canvas's pixels there are to a window pixel, each way
+// (on a page, which says: see ui.l8). render_scale is of those.
+canvas_k: f32 = 1.0;
+
 // How many samples each of its pixels is made of, drawn small, so that
 // its edges are smooth (the fewer the pixels, the more it shows where they
 // are not).
@@ -1839,9 +2239,9 @@ const SCENE_SAMPLES: int = 4;
 // Somewhere to draw the scene at render_scale, if that is small: whether
 // it is.
 fit_scene(r: *Renderer): bool {
-    if (render_scale > 0.995) return false;
-    w: int = maxi((screen_w as f32 * render_scale + 0.5) as int, 1);
-    h: int = maxi((screen_h as f32 * render_scale + 0.5) as int, 1);
+    if (render_scale > 0.995 && !frost_wanted) return false;
+    w: int = maxi((screen_w as f32 * canvas_k * render_scale + 0.5) as int, 1);
+    h: int = maxi((screen_h as f32 * canvas_k * render_scale + 0.5) as int, 1);
     if (r.scene_fbo == 0u32) {
         one: []u32 = new u32[1](0u32);
         glGenTextures(1, one);

@@ -63,7 +63,7 @@ export function translateShader(source, fragment, precision = "highp") {
 // scale renders the window at that fraction of its size, and maxPixels caps
 // how many pixels it renders in all. env answers getenv. fragmentPrecision
 // is the fragment shaders' default float precision (see translateShader).
-export function createPlatform(canvas, { log = console.log, checkErrors = false, countCalls = false, timing = false, gpuTiming = false, antialias = false, skip = new Set(), scale = 1, zoom = 0.85, env = {}, pointers = false, maxTall = 1.6, maxPixels = 1200 * 720, fragmentPrecision = "highp" } = {}) {
+export function createPlatform(canvas, { log = console.log, checkErrors = false, countCalls = false, timing = false, gpuTiming = false, antialias = false, skip = new Set(), scale = 1, zoom = 0.85, env = {}, pointers = false, hover = false, wheel = false, maxTall = 1.6, maxPixels = 1200 * 720, fragmentPrecision = "highp" } = {}) {
   let mem = null;
   let instance = null;
   // (antialias: edges smoothed, each pixel made of several samples.)
@@ -140,7 +140,16 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
     });
     addEventListener("pointermove", (e) => {
       const button = held.get(e.pointerId);
-      if (button === undefined) return;
+      // (With `hover`, a mouse moving with no button down is told too, as
+      // a motion with no buttons in its state: for what it points at.)
+      if (button === undefined) {
+        if (!hover || e.pointerType !== "mouse" || e.buttons !== 0) return;
+        const [x, y] = at(e);
+        const last = events[events.length - 1];
+        if (last && last.type === 6 && last.state === 0) events.pop();
+        events.push({ type: 6, keysym: 0, text: "", x, y, state: 0 });
+        return;
+      }
       const [x, y] = at(e);
       const state = 1 << (7 + button);
       // Only the latest position of a drag matters.
@@ -157,6 +166,20 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
     };
     addEventListener("pointerup", up);
     addEventListener("pointercancel", up);
+    // With `wheel`, the wheel (or a trackpad's two fingers) is X's buttons
+    // 4 (up) and 5 (down), pressed and let go, with how far it went in CSS
+    // pixels as the press's state.
+    if (wheel) {
+      addEventListener("wheel", (e) => {
+        e.preventDefault();
+        const px = e.deltaMode === 1 ? e.deltaY * 18 : e.deltaMode === 2 ? e.deltaY * innerHeight : e.deltaY;
+        if (Math.abs(px) < 0.5) return;
+        const [x, y] = at(e);
+        const button = px < 0 ? 4 : 5;
+        events.push({ type: 4, keysym: 0, text: "", x, y, state: Math.min(Math.round(Math.abs(px)), 4000), button });
+        events.push({ type: 5, keysym: 0, text: "", x, y, state: 0, button });
+      }, { passive: false });
+    }
   }
 
   // The XEvent buffer is 192 bytes; its last word is free for the keysym.
@@ -778,6 +801,8 @@ export function createPlatform(canvas, { log = console.log, checkErrors = false,
       };
     },
     canvasSize: () => [canvas.width, canvas.height],
+    // (The canvas sized to the page now, as the game's window will be.)
+    layout,
     windowSize: () => [...windowSize],
     setOnSwap(f) {
       onSwap = f;

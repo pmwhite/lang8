@@ -1,0 +1,569 @@
+tag skate;
+
+// Painting over the scene: everything the game draws flat on the window,
+// its menus and its HUD alike (see ui.l8 and hud.l8), as quads that one
+// program draws (PAINT_FS, in render.l8). Each quad is a shape worked out
+// for each of its pixels, so that it has a clean edge at any size: a box
+// with round corners (or its outline); a character of the writing (see
+// font.l8); a line with round ends; a triangle; an arc; frosted glass,
+// which shows the scene behind it blurred; or the picture of the place
+// before, kept while the next is built. Anything can be soft (a shadow
+// is a box made soft), and everything is drawn in the order painted.
+//
+// Painting is clipped to a box (see paint_clip): what is painted after it
+// is set shows only inside it, fading out over its top and bottom edges by
+// as much as asked (a list that scrolls fades out at its ends).
+const PAINT_BOX: f32 = 0.0;
+
+const PAINT_GLYPH: f32 = 1.0;
+
+const PAINT_LINE: f32 = 2.0;
+
+const PAINT_TRI: f32 = 3.0;
+
+const PAINT_GLASS: f32 = 4.0;
+
+const PAINT_ARC: f32 = 5.0;
+
+const PAINT_PICTURE: f32 = 6.0;
+
+const PAINT_CRESCENT: f32 = 7.0;
+
+// Each corner of a quad: where it is in the window, and where in its
+// shape (or, for a character, where in the font's picture); the shape's
+// half size, its kind, and its corners' radius; how soft it is, and a
+// thickness (an outline's, or 0 for a filled shape) or for a character how
+// much bolder it is drawn; and its color.
+const PAINT_FLOATS: int = 16;
+
+const PAINT_QUADS: int = 16000;
+
+paint_verts: []f32 = new f32[PAINT_QUADS * 4 * PAINT_FLOATS](0.0);
+
+paint_n: int = 0;
+
+// Runs of quads painted with one clip: the first, how many, the box, and
+// how far its top and bottom fade.
+const PAINT_BATCHES: int = 64;
+
+batch_first: []int = new int[PAINT_BATCHES](0);
+
+batch_count: []int = new int[PAINT_BATCHES](0);
+
+batch_clip: []f32 = new f32[PAINT_BATCHES * 5](0.0);
+
+nbatches: int = 0;
+
+// The clip now.
+clip_x0: f32 = -100000.0;
+
+clip_y0: f32 = -100000.0;
+
+clip_x1: f32 = 100000.0;
+
+clip_y1: f32 = 100000.0;
+
+clip_fade: f32 = 0.0;
+
+// Whether anything painted shows the scene behind it blurred, or the kept
+// picture (render.l8 makes those only when they are wanted).
+paint_glass: bool = false;
+
+paint_picture: bool = false;
+
+// How much everything painted shows, from 1: a layer fading in or out
+// paints with less.
+paint_alpha: f32 = 1.0;
+
+paint_reset() {
+    paint_n = 0;
+    nbatches = 0;
+    paint_glass = false;
+    paint_picture = false;
+    paint_alpha = 1.0;
+    paint_noclip()
+}
+
+paint_noclip() {
+    paint_clip(-100000.0, -100000.0, 100000.0, 100000.0, 0.0)
+}
+
+paint_clip(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    fade: f32
+) {
+    clip_x0 = x0;
+    clip_y0 = y0;
+    clip_x1 = x1;
+    clip_y1 = y1;
+    clip_fade = fade;
+    // (A new run from here, unless the last one has nothing in it yet.)
+    if (nbatches > 0 && batch_count[nbatches - 1] == 0) nbatches = nbatches - 1;
+    if (nbatches >= PAINT_BATCHES) return;
+    batch_first[nbatches] = paint_n;
+    batch_count[nbatches] = 0;
+    batch_clip[nbatches * 5] = x0;
+    batch_clip[nbatches * 5 + 1] = y0;
+    batch_clip[nbatches * 5 + 2] = x1;
+    batch_clip[nbatches * 5 + 3] = y1;
+    batch_clip[nbatches * 5 + 4] = fade;
+    nbatches = nbatches + 1
+}
+
+// The clip now, narrowed to a box within it.
+paint_clip_within(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    fade: f32
+) {
+    paint_clip(maxf(x0, clip_x0), maxf(y0, clip_y0), minf(x1, clip_x1), minf(y1, clip_y1),
+        fade)
+}
+
+paint_corner(
+    k: int,
+    x: f32,
+    y: f32,
+    u: f32,
+    v: f32
+) {
+    paint_verts[k] = x;
+    paint_verts[k + 1] = y;
+    paint_verts[k + 2] = u;
+    paint_verts[k + 3] = v
+}
+
+// One quad: its box in the window (x0, y0 to x1, y1), and in its shape (u0,
+// v0 to u1, v1); the rest of what each corner has (see PAINT_FLOATS).
+paint_quad(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
+    hw: f32,
+    hh: f32,
+    kind: f32,
+    radius: f32,
+    soft: f32,
+    thick: f32,
+    red: f32,
+    g: f32,
+    b: f32,
+    a: f32
+) {
+    if (paint_n >= PAINT_QUADS || nbatches == 0) return;
+    alpha: f32 = a * paint_alpha;
+    if (alpha <= 0.002) return;
+    // (Wholly outside the clip: nothing to paint.)
+    if (x1 < clip_x0 || x0 > clip_x1 || y1 < clip_y0 || y0 > clip_y1) return;
+    k: int = paint_n * 4 * PAINT_FLOATS;
+    paint_corner(k, x0, y0, u0, v0);
+    paint_corner(k + PAINT_FLOATS, x1, y0, u1, v0);
+    paint_corner(k + 2 * PAINT_FLOATS, x1, y1, u1, v1);
+    paint_corner(k + 3 * PAINT_FLOATS, x0, y1, u0, v1);
+    for c in 0..4 {
+        j: int = k + c * PAINT_FLOATS + 4;
+        paint_verts[j] = hw;
+        paint_verts[j + 1] = hh;
+        paint_verts[j + 2] = kind;
+        paint_verts[j + 3] = radius;
+        paint_verts[j + 4] = soft;
+        paint_verts[j + 5] = thick;
+        paint_verts[j + 8] = red;
+        paint_verts[j + 9] = g;
+        paint_verts[j + 10] = b;
+        paint_verts[j + 11] = alpha
+    }
+    paint_n = paint_n + 1;
+    batch_count[nbatches - 1] = batch_count[nbatches - 1] + 1
+}
+
+// A box with round corners: x, y its top left, w by h, its corners'
+// radius; soft by so many pixels (0 for a clean edge), filled or (thick
+// more than 0) an outline that thick, inside its edge.
+paint_shape(
+    kind: f32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    soft: f32,
+    thick: f32,
+    red: f32,
+    g: f32,
+    b: f32,
+    a: f32
+) {
+    if (w <= 0.0 || h <= 0.0) return;
+    // (Room round it for its soft edge, and for a pixel more.)
+    m: f32 = soft + 1.5;
+    hw: f32 = w * 0.5;
+    hh: f32 = h * 0.5;
+    paint_quad(x - m, y - m, x + w + m, y + h + m, -hw - m, -hh - m, hw + m, hh + m,
+        hw, hh, kind, minf(radius, minf(hw, hh)), soft, thick, red, g, b, a)
+}
+
+paint_box(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    red: f32,
+    g: f32,
+    b: f32,
+    a: f32
+) {
+    paint_shape(PAINT_BOX, x, y, w, h, radius, 0.0, 0.0, red, g, b, a)
+}
+
+// Its outline, thick, inside its edge.
+paint_outline(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    thick: f32,
+    red: f32,
+    g: f32,
+    b: f32,
+    a: f32
+) {
+    paint_shape(PAINT_BOX, x, y, w, h, radius, 0.0, thick, red, g, b, a)
+}
+
+// A soft shadow under a box: as big as it, moved down by drop, blurred by
+// soft.
+paint_shadow(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    drop: f32,
+    soft: f32,
+    a: f32
+) {
+    paint_shape(PAINT_BOX, x, y + drop, w, h, radius, soft, 0.0, 0.0, 0.0, 0.02, a)
+}
+
+// Frosted glass: the scene behind it, blurred, and tinted toward a color by
+// as much as a (see PAINT_FS).
+paint_frost(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    red: f32,
+    g: f32,
+    b: f32,
+    a: f32
+) {
+    paint_glass = true;
+    paint_shape(PAINT_GLASS, x, y, w, h, radius, 0.0, a, red, g, b, 1.0)
+}
+
+// A disc, at (x, y), of radius r; or (thick) a ring.
+paint_disc(
+    x: f32,
+    y: f32,
+    r: f32,
+    red: f32,
+    g: f32,
+    b: f32,
+    a: f32
+) {
+    paint_shape(PAINT_BOX, x - r, y - r, 2.0 * r, 2.0 * r, r, 0.0, 0.0, red, g, b,
+        a)
+}
+
+paint_ring(
+    x: f32,
+    y: f32,
+    r: f32,
+    thick: f32,
+    red: f32,
+    g: f32,
+    b: f32,
+    a: f32
+) {
+    paint_shape(PAINT_BOX, x - r, y - r, 2.0 * r, 2.0 * r, r, 0.0, thick, red, g,
+        b, a)
+}
+
+// A line from (x0, y0) to (x1, y1), w wide, with round ends.
+paint_line(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    w: f32,
+    red: f32,
+    g: f32,
+    b: f32,
+    a: f32
+) {
+    m: f32 = w * 0.5 + 1.5;
+    bx: f32 = minf(x0, x1) - m;
+    by: f32 = minf(y0, y1) - m;
+    ex: f32 = maxf(x0, x1) + m;
+    ey: f32 = maxf(y0, y1) + m;
+    // (Its shape: where each corner is from the line's start; and the line,
+    // from its start to its end.)
+    paint_quad(bx, by, ex, ey, bx - x0, by - y0, ex - x0, ey - y0, x1 - x0, y1 - y0,
+        PAINT_LINE, w * 0.5, 0.0, 0.0, red, g, b, a)
+}
+
+// A triangle pointing right, in the box at (x, y), w by h, its corners
+// rounded by radius.
+paint_triangle(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    red: f32,
+    g: f32,
+    b: f32,
+    a: f32
+) {
+    paint_shape(PAINT_TRI, x, y, w, h, radius, 0.0, 0.0, red, g, b, a)
+}
+
+// An arc of a ring round (x, y), of radius r and thick, from the angle
+// start (0 to the right, a quarter turn down) round by sweep, with round
+// ends.
+paint_arc(
+    x: f32,
+    y: f32,
+    r: f32,
+    thick: f32,
+    start: f32,
+    sweep: f32,
+    red: f32,
+    g: f32,
+    b: f32,
+    a: f32
+) {
+    m: f32 = r + thick + 1.5;
+    paint_quad(x - m, y - m, x + m, y + m, -m, -m, m, m, r, thick * 0.5, PAINT_ARC,
+        start, sweep, 0.0, red, g, b, a)
+}
+
+// A crescent moon at (x, y), of radius r.
+paint_crescent(
+    x: f32,
+    y: f32,
+    r: f32,
+    red: f32,
+    g: f32,
+    b: f32,
+    a: f32
+) {
+    m: f32 = r + 1.5;
+    paint_quad(x - m, y - m, x + m, y + m, -m, -m, m, m, r, r, PAINT_CRESCENT, 0.0,
+        0.0, 0.0, red, g, b, a)
+}
+
+// The picture of the place before (see render.l8), over the whole window.
+paint_kept(a: f32) {
+    paint_picture = true;
+    w: f32 = screen_w as f32;
+    h: f32 = screen_h as f32;
+    paint_quad(0.0, 0.0, w, h, 0.0, 0.0, w, h, w * 0.5, h * 0.5, PAINT_PICTURE, 0.0,
+        0.0, 0.0, 1.0, 1.0, 1.0, a)
+}
+
+// ---- writing ----
+// Text is bytes (UTF-8): from `from` up to `to` in them. Each face (0, for
+// what is read; 1, bold, to call out) is written at a size, in pixels to
+// the em, a little further apart than the font has it by `track` ems; and
+// with `even`, its figures each in the same room, so that a number changing
+// does not move what is round it.
+//
+// The character at i, as its place among the font's (see font.l8), and how
+// many bytes it takes up; or the question mark's, for one the font has
+// not.
+glyph_at: int = 0;
+
+glyph_bytes: int = 1;
+
+read_glyph(t: []i8, i: int, to: int) {
+    c: int = t[i] as int & 255;
+    glyph_bytes = 1;
+    code: int = c;
+    if (c >= 192 && i + 1 < to) {
+        c1: int = t[i + 1] as int & 63;
+        if (c < 224) {
+            code = ((c & 31) << 6) + c1;
+            glyph_bytes = 2
+        } else if (i + 2 < to) {
+            code = ((c & 15) << 12) + (c1 << 6) + (t[i + 2] as int & 63);
+            glyph_bytes = 3
+        }
+    }
+    glyph_at = 31;
+    if (code >= 32 && code < 127) {
+        glyph_at = code - FONT_FIRST;
+        return
+    }
+    for k in 0..len(font_more) {
+        if (font_more[k] == code) glyph_at = 127 - FONT_FIRST + k
+    }
+}
+
+// How much nearer two characters go than their widths say, at FONT_EM.
+kern(face: int, a: int, b: int): f32 {
+    key: int = (face * 256 + a) * 256 + b;
+    lo: int = 0;
+    hi: int = len(font_kern_pairs);
+    while (lo < hi) {
+        mid: int = (lo + hi) / 2;
+        if (font_kern_pairs[mid] < key) lo = mid + 1 else hi = mid
+    }
+    if (lo < len(font_kern_pairs) && font_kern_pairs[lo] == key) return font_kern_by[lo];
+    0.0
+}
+
+is_figure(g: int): bool {
+    g >= 48 - FONT_FIRST && g <= 57 - FONT_FIRST
+}
+
+// How far the pen goes on for a character, at FONT_EM.
+glyph_advance(face: int, g: int, even: bool): f32 {
+    if (even && is_figure(g)) return font_figure[face];
+    font_glyphs[(face * FONT_GLYPHS + g) * GLYPH_FLOATS + 6]
+}
+
+// How wide some text is written.
+text_wide(
+    face: int,
+    size: f32,
+    track: f32,
+    even: bool,
+    t: []i8,
+    from: int,
+    to: int
+): f32 {
+    w: f32 = 0.0;
+    prev: int = -1;
+    i: int = from;
+    n: int = 0;
+    while (i < to) {
+        read_glyph(t, i, to);
+        g: int = glyph_at;
+        if (prev >= 0 && !(even && is_figure(prev) && is_figure(g))) w = w + kern(face,
+            prev, g);
+        w = w + glyph_advance(face, g, even);
+        prev = g;
+        i = i + glyph_bytes;
+        n = n + 1
+    }
+    if (n > 1) w = w + track * FONT_EM * (n - 1) as f32;
+    w * size / FONT_EM
+}
+
+// (A string, by way of a buffer kept for it: see scratch.)
+scratch: []i8 = new i8[512](0i8);
+
+scratch_n: int = 0;
+
+scratch_set(t: str) {
+    scratch_n = mini(len(t), len(scratch));
+    for i in 0..scratch_n scratch[i] = t[i]
+}
+
+text_wide_str(
+    face: int,
+    size: f32,
+    track: f32,
+    t: str
+): f32 {
+    scratch_set(t);
+    text_wide(face, size, track, false, scratch, 0, scratch_n)
+}
+
+// Write it, its line's left end at x and its baseline at y; bolder by
+// weight (in the font's picture's units: 0.05 is a little), and soft by
+// soft (0 for a clean edge, more for a shadow). Where the pen ends.
+paint_text(
+    face: int,
+    size: f32,
+    track: f32,
+    even: bool,
+    x: f32,
+    y: f32,
+    t: []i8,
+    from: int,
+    to: int,
+    weight: f32,
+    soft: f32,
+    red: f32,
+    g: f32,
+    b: f32,
+    a: f32
+): f32 {
+    k: f32 = size / FONT_EM;
+    pen: f32 = x;
+    prev: int = -1;
+    i: int = from;
+    while (i < to) {
+        read_glyph(t, i, to);
+        gi: int = glyph_at;
+        if (prev >= 0) {
+            if (!(even && is_figure(prev) && is_figure(gi))) pen = pen + kern(face,
+                prev, gi) * k;
+            pen = pen + track * size
+        }
+        j: int = (face * FONT_GLYPHS + gi) * GLYPH_FLOATS;
+        gw: f32 = font_glyphs[j + 2];
+        gh: f32 = font_glyphs[j + 3];
+        adv: f32 = glyph_advance(face, gi, even) * k;
+        if (gw > 0.0) {
+            // (A figure in a wider room than its own: in the middle of it.)
+            off: f32 = 0.0;
+            if (even && is_figure(gi)) off = (adv - font_glyphs[j + 6] * k) * 0.5;
+            gx: f32 = pen + off + font_glyphs[j + 4] * k;
+            gy: f32 = y + font_glyphs[j + 5] * k;
+            u0: f32 = font_glyphs[j] / FONT_W as f32;
+            v0: f32 = font_glyphs[j + 1] / FONT_H as f32;
+            u1: f32 = (font_glyphs[j] + gw) / FONT_W as f32;
+            v1: f32 = (font_glyphs[j + 1] + gh) / FONT_H as f32;
+            paint_quad(gx, gy, gx + gw * k, gy + gh * k, u0, v0, u1, v1, 0.0, 0.0,
+                PAINT_GLYPH, 0.0, soft, weight, red, g, b, a)
+        }
+        pen = pen + adv;
+        prev = gi;
+        i = i + glyph_bytes
+    }
+    pen
+}
+
+paint_str(
+    face: int,
+    size: f32,
+    track: f32,
+    x: f32,
+    y: f32,
+    t: str,
+    red: f32,
+    g: f32,
+    b: f32,
+    a: f32
+): f32 {
+    scratch_set(t);
+    paint_text(face, size, track, false, x, y, scratch, 0, scratch_n, 0.0, 0.0, red,
+        g, b, a)
+}

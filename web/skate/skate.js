@@ -1,21 +1,23 @@
 // The skate game on a canvas that fills the screen. It shares the block
 // game's browser implementation of X11, GLX, and OpenGL (../game/platform.js).
+//
+// Everything over the game is the game's own, drawn in its own writing (see
+// programs/skate/ui.l8): its sheets, its buttons, the tutorial's words. This
+// page says what there is to show, a line at a time (see uiSay), and the
+// game says what was pressed (L8TAP). The page keeps what a page must: the
+// way from page to page, the leaderboards, what is kept on the device, the
+// day, and how fast the frames come.
 import { instantiate, runResumable, MemFS } from "../l8-runtime.js";
 import { createPlatform } from "../game/platform.js";
 import { startControl } from "../game/control.js";
 import { createPacer } from "./pace.js";
 
 const canvas = document.getElementById("screen");
-const overlay = document.getElementById("overlay");
-const message = document.getElementById("message");
-const show = (html) => {
-  message.innerHTML = html;
-  overlay.hidden = false;
-};
-// (The game has stopped: it is not loading.)
+// (The game has stopped: what is left to show is the page's.)
 const stopped = (html) => {
-  document.body.classList.remove("loading");
-  show(html);
+  document.getElementById("message").innerHTML = html;
+  document.getElementById("overlay").hidden = false;
+  document.body.classList.remove("booting");
 };
 
 // A person's link is this page with their secret after the # (see the
@@ -38,7 +40,7 @@ for (const name of ["gesturestart", "gesturechange", "dblclick"]) {
 // it lands on this same page, which steps forward again.
 for (const name of ["touchstart", "touchmove"]) {
   document.addEventListener(name, (e) => {
-    if (!e.target.closest?.("a, .guide")) e.preventDefault();
+    if (!e.target.closest?.("a")) e.preventDefault();
   }, { passive: false });
 }
 history.pushState({ stay: true }, "", location.href);
@@ -60,100 +62,47 @@ const typeKeys = (syms) => {
   }
 };
 
-// A button is tapped, not just touched: pressed, and let go still on it,
-// without having moved far (a finger that moves is scrolling, or has
-// thought better of it). While it is pressed it shows it, the color
-// easing in (see .pressed, in index.html), so that the start of a drag,
-// which begins as a press does, shows hardly at all. `accepts` says
-// whether a press is the button's (as for a sheet's backdrop, which is
-// only where nothing else is).
-const TAP_SLOP = 10;
-const onTap = (el, act, accepts = () => true) => {
-  let press = null;
-  const end = () => {
-    press = null;
-    el.classList.remove("pressed");
-  };
-  el.addEventListener("pointerdown", (e) => {
-    if (e.button > 0 || !accepts(e)) return;
-    // (A button inside another, as a run to watch on a course's card: the
-    // press is the inner one's alone.)
-    e.stopPropagation();
-    press = { id: e.pointerId, x: e.clientX, y: e.clientY };
-    el.classList.add("pressed");
-    // A mouse held down is followed off the button and back (a finger
-    // already is).
-    if (e.pointerType === "mouse") el.setPointerCapture(e.pointerId);
-  });
-  el.addEventListener("pointermove", (e) => {
-    if (press && e.pointerId === press.id && Math.hypot(e.clientX - press.x, e.clientY - press.y) > TAP_SLOP) end();
-  });
-  el.addEventListener("pointerup", (e) => {
-    if (!press || e.pointerId !== press.id) return;
-    const r = el.getBoundingClientRect();
-    const inside = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
-    end();
-    if (!inside) return;
-    e.preventDefault();
-    act(e);
-  });
-  // (The browser takes the touch for a scroll.)
-  el.addEventListener("pointercancel", end);
+// ---- telling the game what to show ----
+// Lines for the game (see programs/skate/ui.l8), each of parts parted by
+// tabs; sent all together once a frame, as the file ui.txt, and the key
+// that says it is there (UI_KEY). Not while the game builds a place, when
+// it reads nothing: they wait for it.
+const UI_KEY = 65301;
+let uiLines = [];
+const clean = (v) => String(typeof v === "boolean" ? Number(v) : v ?? "").replace(/[\t\n\r]/g, " ");
+const uiSay = (...parts) => uiLines.push(parts.map(clean).join("\t"));
+let gameFs = null;
+const flushUi = () => {
+  if (!uiLines.length || !gameFs || !sendKey) return;
+  gameFs.writeFile("ui.txt", uiLines.join("\n") + "\n");
+  uiLines = [];
+  typeKeys([UI_KEY]);
+};
+// What is over the game (see programs/skate/ui_chrome.l8), each by its name:
+// told again only when it changes.
+const chromeSaid = new Map();
+const chrome = (name, ...parts) => {
+  const line = ["chrome", name, ...parts].map(clean).join("\t");
+  if (chromeSaid.get(name) === line) return;
+  chromeSaid.set(name, line);
+  uiLines.push(line);
 };
 
-// The buttons over the game: night or day (the game's L), and watching the
-// run just finished again (its P), which the game says when to offer
-// (L8OVER).
-// (A mouse pressed on one does not take the keyboard from the game.)
-for (const el of document.querySelectorAll(".look, .replay, .again, .back, .rate")) el.addEventListener("mousedown", (e) => e.preventDefault());
-onTap(document.querySelector(".look"), () => {
-  setNight(!document.body.classList.contains("night"));
-  typeKeys([108]);
-});
-onTap(document.querySelector(".replay"), () => {
-  document.body.classList.remove("over");
-  go("watch");
-  typeKeys([112]);
-});
-// (And riding it again, from the top: the game's R.)
-onTap(document.querySelector(".again"), () => {
-  document.body.classList.remove("over");
-  typeKeys([114]);
-});
-
-// A lesson's steps (see .steps): read its word (its sheet), watch the
-// game ride it (its T), or try it (its R); any, in any order. The one he
-// is at is lit. They are up for the lesson the game is at, or is on its
-// way to (see lessonNow): from the moment it is picked, loading or not.
+// ---- the way from page to page ----
+// A lesson's steps (see the chrome's steps): read its word (its sheet),
+// watch the game ride it (its T), or try it (its R); any, in any order. The
+// one he is at is lit. They are up for the lesson the game is at, or is on
+// its way to (see lessonNow): from the moment it is picked, loading or not.
 // Reading never waits. Watching or trying asked for before the game is
 // there and done building is kept, and done the moment it is.
-const stepsEl = document.querySelector(".steps");
 const lessonNow = () => (pageNow() === "lesson" ? TUTORIAL + trail.at(-1)[1] : 0);
 let pendingStep = "";
+const stepAt = () => (reading ? "read" : pendingStep || (document.body.classList.contains("watching") ? "watch" : "try"));
 const syncSteps = () => {
   const lesson = lessonNow() !== 0;
   document.body.classList.toggle("lesson", lesson);
   document.body.classList.toggle("reading", lesson && reading);
-  // A plain ground (see body::before) under a page until the game has
-  // drawn anything at all: so that the first place comes up from the
-  // ground, whole. (After that, one place fades into the next: see
-  // keepPicture.)
-  document.body.classList.toggle("veiled", !gameDrawn && (lesson || pageNow() in sheets));
-  // The one he is at: reading; or what he has asked for and waits on; or
-  // else what the game is doing.
-  const at = reading ? "read" : pendingStep || (document.body.classList.contains("watching") ? "watch" : "try");
-  let on = null;
-  for (const tab of stepsEl.querySelectorAll(".tab")) {
-    tab.classList.toggle("on", tab.dataset.step === at);
-    if (tab.dataset.step === at) on = tab;
-  }
-  // (The thumb slides to it.)
-  const thumb = stepsEl.querySelector(".thumb");
-  thumb.style.left = `${on.offsetLeft}px`;
-  thumb.style.width = `${on.offsetWidth}px`;
 };
-addEventListener("resize", () => syncSteps());
-document.fonts?.ready.then(() => syncSteps());
 // The game is at a lesson, built and ready to be told what to do.
 const lessonReady = () => headed === null && placeNow === lessonNow() && !document.body.classList.contains("loading");
 const doStep = (step) => {
@@ -163,19 +112,15 @@ const doStep = (step) => {
   typeKeys([step === "watch" ? 116 : 114]);
   syncSteps();
 };
-for (const tab of stepsEl.querySelectorAll(".tab")) {
-  onTap(tab, () => {
-    const id = lessonNow();
-    if (!id) return;
-    const step = tab.dataset.step;
-    // (The lesson's one page, whichever step of it shows: none of them
-    // is a page further on.)
-    reading = step === "read";
-    pendingStep = reading || lessonReady() ? "" : step;
-    present();
-    if (!reading && !pendingStep) doStep(step);
-  });
-}
+const takeStep = (step) => {
+  if (!lessonNow()) return;
+  // (The lesson's one page, whichever step of it shows: none of them is a
+  // page further on.)
+  reading = step === "read";
+  pendingStep = reading || lessonReady() ? "" : step;
+  present();
+  if (!reading && !pendingStep) doStep(step);
+};
 // (Once the game is there and built: see L8COURSE and L8LOAD.)
 const stepWhenReady = () => {
   syncSteps();
@@ -185,38 +130,18 @@ const stepWhenReady = () => {
     doStep(step);
   }
 };
-// (From the end of his own ride of it, on to today's course.)
-// (From a lesson's end, the next lesson, or the list of them.)
-const onwardEl = document.querySelector(".onward");
-onTap(onwardEl, () => {
+// (From the end of his own ride of it, on to today's course; from a
+// lesson's end, the next lesson, or the list of them.)
+let onwardWord = "";
+const onward = () => {
   if (!isLesson(placeNow)) return goTo(today(), true);
   const n = placeNow - TUTORIAL;
   if (n < LESSONS.length) goInstead("lesson", n + 1);
   else goBack();
-});
-// What thumbs are doing: his own (as the game has it, left of the middle
-// steers, right of it is the trick), or those of the run the game rides
-// (L8HANDS: see demo_keys, in tutorial.l8). The right-hand control says
-// what it does while it is held; and a keyboard's keys light up for the
-// game's thumbs.
-const thumbs = new Map();
-let hands = 0;
-const thumbsChanged = () => {
-  const sides = [...thumbs.values()];
-  document.body.classList.toggle("steering", sides.includes("steer") || (hands & 32) !== 0);
-  document.body.classList.toggle("holding", sides.includes("trick") || (hands & 4) !== 0);
-  for (const [cap, bit] of [["l", 1], ["r", 2], ["sp", 4], ["u", 8], ["d", 16]]) teachEl.querySelector(`.cap.${cap}`).classList.toggle("on", (hands & bit) !== 0);
 };
-canvas.addEventListener("pointerdown", (e) => {
-  const r = canvas.getBoundingClientRect();
-  thumbs.set(e.pointerId, e.clientX - r.left > r.width / 2 ? "trick" : "steer");
-  thumbsChanged();
-});
-for (const name of ["pointerup", "pointercancel"]) {
-  addEventListener(name, (e) => {
-    if (thumbs.delete(e.pointerId)) thumbsChanged();
-  });
-}
+// What the thumbs of the run the game rides are doing (L8HANDS: see
+// demo_keys, in tutorial.l8): a keyboard's keys light up for them.
+let hands = 0;
 
 // Pages. Home is the root: it is where the page opens, there is nothing to
 // go back to from it, and nothing closes it but going on to something. The
@@ -229,48 +154,37 @@ for (const name of ["pointerup", "pointercancel"]) {
 // when it is not being read: see `reading`).
 //
 // Two buttons, on every page but home: back, a page; and home.
-const sheets = Object.fromEntries(["menu", "lessons", "lesson", "places", "days", "place", "person"].map((id) => [id, document.getElementById(id)]));
-const sheetOpen = () => Object.values(sheets).some((el) => !el.hidden);
+const SHEETS = new Set(["menu", "lessons", "lesson", "places", "days", "place", "person"]);
 const trail = [["menu"]];
 const pageNow = () => trail.at(-1)[0];
 // (A lesson's page is its sheet only while its word is being read.)
 let reading = true;
-const sheetsChanged = () => {
-  const open = Object.keys(sheets).find((id) => !sheets[id].hidden);
-  document.body.classList.toggle("sheet", !!open);
-  document.body.classList.toggle("home", open === "menu");
-  document.body.classList.toggle("showing", open === "place");
-  document.body.classList.toggle("canback", trail.length > 1);
-  syncPreview();
-  syncSteps();
-};
+const sheetNow = () => (SHEETS.has(pageNow()) && (pageNow() !== "lesson" || reading) ? pageNow() : null);
+const sheetOpen = () => sheetNow() !== null;
 // Behind a sheet the game flies over the place it is at, as a drone
 // would, so that no page is a bare one: a key held tells it so (see
 // fly_over, in programs/skate/main.l8). But behind a lesson's word, which
 // has the lesson's own stretch behind it, as he will ride it.
 let previewing = false;
 const syncPreview = () => {
-  const want = sheetOpen() && sheets.lesson.hidden;
+  const want = sheetOpen() && pageNow() !== "lesson";
   if (!sendKey || want === previewing) return;
   previewing = want;
   sendKey(want ? 2 : 3, 65300, "");
 };
-// The sheet named is up, and the game held; or none is, and the game goes.
-const showSheet = (id) => {
-  for (const [name, el] of Object.entries(sheets)) el.hidden = name !== id;
-  sheetsChanged();
-  // (Nothing to click to go on with, under a sheet.)
-  overlay.hidden = true;
-  if (id) {
-    canvas.blur();
-    sendKey?.(2, 65299, "");
-  } else {
-    sendKey?.(3, 65299);
-    canvas.focus();
-  }
+// The game is held while a sheet is up, and goes when none is.
+const holdGame = () => {
+  const open = sheetOpen();
+  document.body.classList.toggle("sheet", open);
+  document.body.classList.toggle("showing", sheetNow() === "place");
+  syncPreview();
+  syncSteps();
+  if (open) sendKey?.(2, 65299, "");
+  else sendKey?.(3, 65299);
 };
-// Show the page he has come to, with its scores as they are now when they
-// come.
+// Show the page he has come to (its sheet coming the way he went: on, or
+// back), with its scores as they are now when they come.
+let shownLength = 1;
 const present = () => {
   const view = trail.at(-1);
   const [id, of] = view;
@@ -282,12 +196,13 @@ const present = () => {
   }
   if (id === "place") visit((placeOf = of));
   if (id === "person") personOf = of;
-  const sheet = id in sheets && (id !== "lesson" || reading) ? id : null;
-  if (sheet) showOpen(sheet);
-  showSheet(sheet);
-  if (sheet)
+  const motion = trail.length > shownLength ? "push" : trail.length < shownLength ? "pop" : "swap";
+  shownLength = trail.length;
+  showPage(motion);
+  holdGame();
+  if (sheetOpen())
     loadScores().then(() => {
-      if (trail.at(-1) === view) showOpen(sheet);
+      if (trail.at(-1) === view) showPage();
     });
 };
 const go = (id, of) => {
@@ -304,6 +219,7 @@ const go = (id, of) => {
 const goInstead = (id, of) => {
   if (trail.length > 1) trail.pop();
   go(id, of);
+  // (Not a page further in: the sheet comes in place of the last.)
 };
 const goHome = () => {
   // (A run being watched is left.)
@@ -320,7 +236,6 @@ const goBack = () => {
   if (trail.pop()[0] === "watch") typeKeys([65288]);
   present();
 };
-onTap(document.querySelector(".back"), goBack);
 addEventListener("keydown", (e) => {
   if (e.key === "Escape") goBack();
 });
@@ -471,56 +386,15 @@ let wanted = null;
 let headed = null;
 // (Asked for outright, as one key the game knows a page by: 2000000000 and
 // the place's number. Typed as a number and Enter, as on a keyboard, it
-// could be lost: Enter means other things to the game at times.)
+// could be lost: Enter means other things to the game at times. The game
+// keeps the picture of the place it is leaving while it builds the next,
+// and fades from one to the other.)
 const typePlace = (id) => {
   headed = id;
   pendingStep = "";
-  keepPicture();
   syncSteps();
   typeKeys([2000000000 + id]);
 };
-// The picture as it is, kept over the game while another place is built
-// (which takes a moment, and shows nothing meanwhile), and faded away once
-// that place has been drawn: one fades into the next, with no gap between.
-// It is copied from the next frame the game draws, as it is drawn (a
-// picture already shown cannot be read back).
-const snap = document.getElementById("snap");
-let snapAt = 0;
-let snapFrames = 0;
-const keepPicture = () => {
-  // (Not while a place is being built: no frame is drawn then, and the
-  // picture from before it is kept already.)
-  if (!gameDrawn || !keepFrame || snap.classList.contains("on") || document.body.classList.contains("loading")) return;
-  keepFrame(async () => {
-    // (As a bitmap handed straight to the other canvas, which stays on
-    // the GPU: drawn into a 2D canvas, the copy came back through memory
-    // and held a frame up for a fifth of a second.)
-    const r = canvas.getBoundingClientRect();
-    let bitmap;
-    try {
-      bitmap = await createImageBitmap(canvas);
-    } catch {
-      return;
-    }
-    snap.width = bitmap.width;
-    snap.height = bitmap.height;
-    Object.assign(snap.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
-    snap.getContext("bitmaprenderer").transferFromImageBitmap(bitmap);
-    snap.classList.add("on");
-    snapAt = performance.now();
-    snapFrames = 0;
-  });
-};
-// (Each frame: once the place headed for is built and has been drawn a
-// couple of times, or if it never comes, the kept picture goes.)
-const dropPicture = () => {
-  if (!snap.classList.contains("on")) return;
-  const there = headed === null && !document.body.classList.contains("loading");
-  if (there) snapFrames++;
-  if (snapFrames >= 3 || performance.now() - snapAt > 12000) snap.classList.remove("on");
-};
-// (The next frame the game draws, handed over as it is drawn: see main.)
-let keepFrame = null;
 // Have the game go there, the page's sheets left as they are (see
 // showPlace).
 const visit = (id) => {
@@ -570,7 +444,6 @@ let account = mySecret ? stored("skate.account", null) : null;
 // The game's rules, by their number (see L8VERSION): as they were when it
 // last ran here, until it says.
 let gameVersion = stored("skate.rules", 0) || 0;
-let gameFs = null;
 
 // What goes wrong on a device, and how fast its frames come, told to the
 // leaderboards' worker (POST /report: see ../skate-board/worker.js), so
@@ -705,13 +578,8 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden) reportFrames("hidden");
 });
 addEventListener("pagehide", () => reportFrames("leaving"));
-const toast = (text) => {
-  const el = document.getElementById("toast");
-  el.textContent = text;
-  el.classList.add("on");
-  clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => el.classList.remove("on"), 3500);
-};
+// A word that comes and goes, near the top (see ui_chrome.l8).
+const toast = (text) => uiLines.push(["chrome", "toast", text].map(clean).join("\t"));
 // Fetch them: one fetch at a time, and (unless `fresh` asks for them as
 // they are now) none if they were fetched in the last while. True if they
 // came, false if he is nobody (no link, or one that works no longer), null
@@ -805,12 +673,14 @@ const watchRun = async (person, id) => {
 // it itself, with thumbs of its own on the controls, and says what it is
 // doing (L8SAY, with what kind of thing it is: a line of that run, 1; its
 // last, the run being over, 2; a word to him as he rides the course
-// himself, 3; or nothing, 0). The line is shown over the scene, with a way
-// to leave off watching and, at the end, to try it or watch it again.
+// himself, 3; or nothing, 0). Of those, the game shows his own words (3)
+// over the scene, and how a lesson went (4: see sayVerdict); the rest only
+// steer what else is shown.
 // What he did on a lesson, as the game tells it at the end (L8HITS: see
 // main.l8), and the word on how it went, judged by the lesson.
 let lessonHits = [];
 let verdict = "";
+let teach = { kind: 0, text: "", ok: false };
 const HIT_AIR = 0, HIT_RAIL = 2, HIT_BOX = 3;
 const FEATURE_PIPE = 2;
 // Whether he did the lesson's thing, and that said plainly.
@@ -834,47 +704,23 @@ const sayVerdict = () => {
     lessonsDone[n] = true;
     store("skate.lessons", lessonsDone);
   }
-  if (!verdict) return;
-  teachEl.hidden = false;
-  teachEl.className = ok ? "result ok" : "result";
-  teachLine.textContent = verdict;
-  teachLine.classList.remove("out");
+  if (verdict) teach = { kind: 4, text: verdict, ok };
 };
-const teachEl = document.getElementById("teach");
-const teachLine = teachEl.querySelector(".line");
-let saying = "";
 const say = (kind, text) => {
   // (That the game rides is told apart: see L8RIDE. Its ride over, the
   // next step asks to be taken.)
   document.body.classList.toggle("nudge", kind === 2);
-  const shown = !teachEl.hidden;
   // (The word on how a lesson went stays up while nothing else is said.)
   if (kind === 0 && verdict) return;
-  teachEl.hidden = kind === 0;
-  if (kind === 0) return;
-  verdict = "";
-  teachEl.className = ["", "demo", "end", "cue"][kind];
-  if (text === saying) return;
-  // (One line gives way to the next: out, and the new one in. The first
-  // comes in with the card.)
-  const first = !shown || teachLine.textContent === "";
-  saying = text;
-  clearTimeout(say.timer);
-  if (first) {
-    teachLine.textContent = text;
-    teachLine.classList.remove("out");
-    return;
-  }
-  teachLine.classList.add("out");
-  say.timer = setTimeout(() => {
-    teachLine.textContent = saying;
-    teachLine.classList.remove("out");
-  }, 140);
+  if (kind !== 0) verdict = "";
+  teach = { kind, text: kind === 0 ? "" : text, ok: false };
 };
 
 const gameSays = (line) => {
   const words = line.trim().split(/\s+/);
-  if (words[0] === "L8VERSION") {
+  if (words[0] === "L8TAP") onTap(line.trim().slice(6));
+  else if (words[0] === "L8CURSOR") canvas.style.cursor = words[1] === "1" ? "pointer" : "";
+  else if (words[0] === "L8VERSION") {
     gameVersion = Number(words[1]);
     // (His runs under other rules are not ones to beat under these.)
     if (stored("skate.rules", 1) !== gameVersion) {
@@ -882,7 +728,7 @@ const gameSays = (line) => {
       store("skate.runs", myRuns);
       store("skate.rules", gameVersion);
     }
-    showOpen();
+    showPage();
   }
   else if (words[0] === "L8LOAD") {
     // (How long the place took to build is one of the things reported;
@@ -906,10 +752,7 @@ const gameSays = (line) => {
   else if (words[0] === "L8OVER") document.body.classList.toggle("over", words[1] === "1");
   else if (words[0] === "L8SAY") say(Number(words[1]), words.slice(2).join(" "));
   else if (words[0] === "L8HITS") lessonHits = words.slice(1).map((w) => w.split(":").map(Number)).map(([kind, item, flips, halves, grab, short]) => ({ kind, item, flips, halves, grab: !!grab, short: !!short }));
-  else if (words[0] === "L8HANDS") {
-    hands = Number(words[1]);
-    thumbsChanged();
-  }
+  else if (words[0] === "L8HANDS") hands = Number(words[1]);
   else if (words[0] === "L8RIDE") {
     // What he is doing: riding (0), at the end of a run (1), or watching
     // one, his own (2) or someone's (3). The thumb panels show only while
@@ -921,15 +764,18 @@ const gameSays = (line) => {
     syncSteps();
     // (A lesson ridden to its end: a word on how it went.)
     if (ride === 1 && isLesson(placeNow) && !document.body.classList.contains("watching")) sayVerdict();
-    if (ride !== 1) verdict = "";
-    if (ride === 1) onwardEl.textContent = isLesson(placeNow) ? (placeNow - TUTORIAL < LESSONS.length ? "Next lesson" : "All lessons") : "Daily slopestyle";
+    if (ride !== 1) {
+      verdict = "";
+      if (teach.kind === 4) teach = { kind: 0, text: "", ok: false };
+    }
+    if (ride === 1) onwardWord = isLesson(placeNow) ? (placeNow - TUTORIAL < LESSONS.length ? "Next lesson" : "All lessons") : "Daily slopestyle";
     const replaying = ride === 2 || ride === 3;
     document.body.classList.toggle("replaying", replaying);
     // A run being watched is a page: come to by the game's own key, it
     // is noted; and over, it is left, for the page before it.
     if (replaying && pageNow() !== "watch" && !sheetOpen()) {
       trail.push(["watch"]);
-      sheetsChanged();
+      shownLength = trail.length;
     }
     if (!replaying && pageNow() === "watch") {
       trail.pop();
@@ -955,51 +801,71 @@ const gameSays = (line) => {
   return true;
 };
 
-// A row of tabs: one more, lit if it is the one picked; picking it shows
-// the sheet again.
-const addTab = (row, label, on, pick, reshow) => {
-  const t = document.createElement("span");
-  t.className = "tab" + (on ? " on" : "");
-  t.textContent = label;
-  onTap(t, () => {
-    pick();
-    reshow();
-  });
-  row.append(t);
+// ---- what is pressed ----
+// Each thing that can be pressed is named by what it does (see the sheets,
+// below): the game says the name (L8TAP), and here it is done. The things
+// over the game have names of their own (see ui_chrome.l8).
+const onTap = (name) => {
+  const [what, ...rest] = name.split(":");
+  const arg = rest.join(":");
+  if (what === "back") goBack();
+  else if (what === "home") goHome();
+  else if (what === "look") {
+    setNight(!document.body.classList.contains("night"));
+    typeKeys([108]);
+  } else if (what === "stats") toggleStats?.();
+  else if (what === "read" || what === "watch" || what === "try") takeStep(what);
+  else if (what === "replay") {
+    document.body.classList.remove("over");
+    go("watch");
+    typeKeys([112]);
+  } else if (what === "again") {
+    // (Riding it again, from the top: the game's R.)
+    document.body.classList.remove("over");
+    typeKeys([114]);
+  } else if (what === "onward") onward();
+  else if (what === "go") {
+    const [page, of] = [rest[0], rest.slice(1).join(":")];
+    if (page === "lessons") go("lessons");
+    else if (page === "places" || page === "days") go(page, of);
+    else if (page === "place") go("place", Number(of));
+    else if (page === "lesson") go("lesson", Number(of));
+    else if (page === "person") go("person", of);
+  } else if (what === "random") go("place", randomPlace(arg));
+  else if (what === "me") {
+    if (account) go("person", account.name);
+  } else if (what === "play") goTo(placeOf);
+  else if (what === "who") {
+    store("skate.who", (tabWho = arg));
+    showPage();
+  } else if (what === "what") {
+    tabWhat = arg;
+    showPage();
+  } else if (what === "pwhat") {
+    personWhat = arg;
+    showPage();
+  } else if (what === "month") {
+    const by = Number(arg);
+    const [y, m] = [Math.floor(calendarMonth / 100), calendarMonth % 100];
+    calendarMonth = m + by < 1 ? (y - 1) * 100 + 12 : m + by > 12 ? (y + 1) * 100 + 1 : y * 100 + m + by;
+    showPage();
+  } else if (what === "watch") watchRun(rest[0], Number(rest[1]));
 };
-// A list of runs, a row each: its cells in order, each [class, text, what
-// a tap on it does (if anything)]; and what a tap on the rest of the row
-// does. A row is lit if the run is his own.
-const runList = (el, runs, cells, tap) => {
-  el.textContent = "";
-  if (runs.length === 0) {
-    const p = document.createElement("p");
-    p.textContent = "No runs yet";
-    el.append(p);
-    return;
-  }
-  const ol = document.createElement("ol");
-  ol.className = "runs";
-  runs.forEach((run, i) => {
-    const li = document.createElement("li");
-    if (run.name && run.name === account?.name) li.className = "mine";
-    for (const [cls, text, act] of cells(run, i)) {
-      const span = document.createElement("span");
-      span.className = cls + (act ? " link" : "");
-      span.textContent = text;
-      if (act) onTap(span, act);
-      li.append(span);
-    }
-    if (tap) {
-      li.classList.add("link");
-      onTap(li, () => tap(run));
-    }
-    ol.append(li);
-  });
-  el.append(ol);
-};
+let toggleStats = null;
+
+// ---- the sheets ----
+// Each sheet as the game is to show it (see programs/skate/ui_page.l8):
+// where it goes (in the middle; or docked, at the bottom of a tall screen
+// and at the right of a wide one, with the game behind it), how wide it may
+// be, how much room it leaves below it, and its blocks, a line each.
+//
+// A run, as a row: what pressing it does (if anything), whether it is his,
+// and its cells, each a kind, what pressing it does, and its words.
+const row = (tap, mine, ...cells) => ["row", tap, mine ? 1 : 0, ...cells.flat()];
 // (A best run can be watched, if this game can still play it.)
-const watchCell = (run, id) => (run.version === gameVersion ? [["watch", "▶", () => watchRun(run.id, id)]] : []);
+const watchCell = (run, id) => (run.version === gameVersion ? [["watch", `watch:${run.id}:${id}`, ""]] : []);
+const nameCell = (run) => ["who", `go:person:${run.name}`, run.name];
+const BELOW = touch ? 66 : 58;
 
 // What those he sees have been riding, newest first.
 const feed = () =>
@@ -1022,109 +888,65 @@ const bestsOf = (name) =>
 
 // Home: what to play, who he is (if someone: see `linked`), and what those
 // he sees have been riding. A run there goes to its place; its rider's
-// name, to them.
+// name, to them. (For someone, even with nothing ridden yet, the feed's
+// space is kept, a few runs high, so that home keeps its shape.)
 const FEED = 30;
 const showMenu = () => {
-  const el = sheets.menu;
-  const item = (go) => el.querySelector(`.item[data-go="${go}"]`);
   const fresh = !stored("skate.tutorial", false) && !stored("skate.course", 0);
-  item("tutorial").classList.toggle("first", fresh);
-  item("tutorial").querySelector("i").textContent = fresh ? "Start here" : "";
-  // (Laid out for someone from the first, before who he is has come: see
-  // the script after the menu, in index.html.)
-  el.classList.toggle("someone", !!mySecret);
-  if (account) el.querySelector(".me b").textContent = account.name;
-  // (For someone, even with nothing ridden yet, its space is kept; and
-  // until what has been ridden has come, it is left empty.)
-  const runs = feed().slice(0, FEED);
-  const list = el.querySelector(".feed");
-  if (!account) list.textContent = "";
-  else
-    runList(
-      list,
-      runs,
-      (run) => [["who", run.name, () => go("person", run.name)], ["what", placeName(run.course)], ["score", String(run.score)], ["when", ago(run.at)]],
-      (run) => go("place", run.course)
-    );
+  const blocks = [["title", "", "Home"]];
+  if (mySecret) blocks.push(["me", "me", account?.name ?? "You"]);
+  blocks.push(["item", "go:lessons", "Tutorial", fresh ? "Start here" : "", fresh ? "first" : "plain"]);
+  blocks.push(["item", "go:places:courses", "Slopestyle", "", "plain"]);
+  blocks.push(["item", "go:places:parks", "Park", "", "plain"]);
+  // (One big air is enough.)
+  blocks.push(["item", `go:place:${BIG_AIR + 1}`, "Big air", "", "plain"]);
+  if (mySecret) {
+    blocks.push(["head", "Activity"], ["feed", 4]);
+    const runs = feed().slice(0, FEED);
+    if (account && runs.length === 0) blocks.push(["empty", "No runs yet"]);
+    for (const run of runs) blocks.push(row(`go:place:${run.course}`, run.name === account?.name, nameCell(run), ["what", "", placeName(run.course)], ["score", "", run.score], ["when", "", ago(run.at)]));
+    blocks.push(["/feed"]);
+  }
+  return { wide: 520, blocks };
 };
-for (const el of sheets.menu.querySelectorAll(".item")) {
-  onTap(el, () => {
-    const to = el.dataset.go;
-    if (to === "tutorial") go("lessons");
-    if (to === "courses") go("places", "courses");
-    if (to === "parks") go("places", "parks");
-    // (One big air is enough.)
-    if (to === "bigair") go("place", BIG_AIR + 1);
-  });
-}
-onTap(sheets.menu.querySelector(".me"), () => {
-  if (account) go("person", account.name);
-});
-onTap(document.querySelector(".pick"), goHome);
 
 // The tutorial's lessons, each to its word before it is watched (or to be
-// taken up again, done or not).
+// taken up again, done or not). The first not yet done is the one to take
+// next: marked so.
 const showLessons = () => {
-  const el = sheets.lessons.querySelector(".items");
-  el.textContent = "";
-  // (The first not yet done is the one to take next: marked so.)
   const next = LESSONS.findIndex((_, i) => !lessonsDone[i + 1]) + 1;
+  const blocks = [["title", "", "Tutorial"], ["para", "Six short lessons. Each shows you a run, then it's your turn. Take them in order, or pick one.", "dim"], ["gap", 4]];
   LESSONS.forEach((lesson, i) => {
-    const div = document.createElement("div");
     const done = !!lessonsDone[i + 1];
-    div.className = `item${done ? " done" : ""}${i + 1 === next ? " first" : ""}`;
-    const b = document.createElement("b");
-    b.textContent = `${i + 1}. ${lesson.title}`;
-    const mark = document.createElement("i");
-    mark.textContent = done ? "\u2713" : i + 1 === next ? "Next" : "";
-    div.append(b, mark);
-    onTap(div, () => go("lesson", i + 1));
-    el.append(div);
+    blocks.push(["item", `go:lesson:${i + 1}`, `${i + 1}. ${lesson.title}`, done ? "✓" : i + 1 === next ? "Next" : "", done ? "done" : i + 1 === next ? "first" : "plain"]);
   });
+  return { wide: 440, blocks };
 };
 let lessonOf = 1;
+// A lesson's word: on a sheet docked clear of its stretch of course, which
+// lies behind it as he will ride it, and above its steps.
 const showLesson = () => {
-  const el = sheets.lesson;
   const lesson = LESSONS[lessonOf - 1];
-  el.querySelector(".eyebrow").textContent = `Lesson ${lessonOf} of ${LESSONS.length}`;
-  el.querySelector("h2").textContent = lesson.title;
-  el.querySelector(".intro").textContent = touch ? lesson.thumbs : lesson.keys;
-  el.querySelector(".scoring p").textContent = lesson.scoring;
+  return {
+    place: "dock",
+    wide: 440,
+    below: touch ? 86 : 78,
+    blocks: [["title", `LESSON ${lessonOf} OF ${LESSONS.length}`, lesson.title], ["para", touch ? lesson.thumbs : lesson.keys], ["box", "SCORING", lesson.scoring]],
+  };
 };
 
-// The places to pick from: the slopestyles or the parks, the day's first,
-// and one at random.
+// The places to pick from: the slopestyles or the parks, the day's first
+// (with how long it is open for), the days gone by, and one at random.
 let picking = "courses";
 const showPlaces = () => {
-  const el = sheets.places;
   const kind = picking;
-  el.querySelector("h2").textContent = { courses: "Slopestyle", parks: "Park" }[kind];
-  const grid = el.querySelector(".grid");
-  grid.textContent = "";
-  const card = (title, id, daily = false) => {
-    const div = document.createElement("div");
-    div.className = daily ? "course daily" : "course";
-    div.textContent = title;
-    onTap(div, () => go("place", id || randomPlace(kind)));
-    grid.append(div);
-  };
   const sign = kind === "parks" ? -1 : 1;
-  card(`Daily ${kind === "parks" ? "park" : "slopestyle"}`, sign * today(), true);
-  const daily = grid.lastChild;
-  const left = document.createElement("i");
-  daily.append(left);
-  // (And the days gone by, on a sheet of their own.)
-  const past = document.createElement("div");
-  past.className = "course past";
-  past.textContent = "Past days";
-  onTap(past, () => go("days", kind));
-  grid.append(past);
-  for (let n = 1; n <= PLACES; n++) card(placeName(sign * n), sign * n);
-  card("Random", 0);
-  const tick = () => (left.textContent = `${leftText(dayLeft())} left`);
-  tick();
-  clearInterval(showPlaces.timer);
-  showPlaces.timer = setInterval(() => (el.hidden ? clearInterval(showPlaces.timer) : tick()), 15000);
+  const blocks = [["title", "", { courses: "Slopestyle", parks: "Park" }[kind]]];
+  blocks.push(["card", `go:place:${sign * today()}`, `Daily ${kind === "parks" ? "park" : "slopestyle"}`, `${leftText(dayLeft())} left`, 1, "daily"]);
+  blocks.push(["card", `go:days:${kind}`, "Past days", "", 1, "past"]);
+  for (let n = 1; n <= PLACES; n++) blocks.push(["card", `go:place:${sign * n}`, placeName(sign * n), "", 0, "plain"]);
+  blocks.push(["card", `random:${kind}`, "Random", "", 0, "plain"]);
+  return { wide: 440, blocks };
 };
 
 // The days gone by, of slopestyles or of parks: a calendar, a month at a
@@ -1133,46 +955,24 @@ const showPlaces = () => {
 // being over (see postable).
 let calendarMonth = null;
 const showDays = () => {
-  const el = sheets.days;
   const sign = picking === "parks" ? -1 : 1;
-  el.querySelector("h2").textContent = `Past ${picking === "parks" ? "parks" : "slopestyles"}`;
   const first = FIRST_DAY;
   const last = dayAgo(1);
   const now = today();
   const monthOf = (n) => Math.floor(n / 100);
   if (calendarMonth === null || calendarMonth > monthOf(now) || calendarMonth < monthOf(first)) calendarMonth = monthOf(last);
   const [y, m] = [Math.floor(calendarMonth / 100), calendarMonth % 100];
-  el.querySelector(".month b").textContent = new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-US", { timeZone: "UTC", month: "long", year: "numeric" });
-  const prev = el.querySelector(".prev");
-  const next = el.querySelector(".next");
-  prev.classList.toggle("off", calendarMonth <= monthOf(first));
-  next.classList.toggle("off", calendarMonth >= monthOf(now));
-  const step = (by) => {
-    calendarMonth = m + by < 1 ? (y - 1) * 100 + 12 : m + by > 12 ? (y + 1) * 100 + 1 : y * 100 + m + by;
-    showDays();
-  };
-  prev.onclick = () => step(-1);
-  next.onclick = () => step(1);
-  const grid = el.querySelector(".calendar");
-  grid.textContent = "";
-  for (const wd of ["S", "M", "T", "W", "T", "F", "S"]) {
-    const h = document.createElement("span");
-    h.className = "wd";
-    h.textContent = wd;
-    grid.append(h);
-  }
+  const label = new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-US", { timeZone: "UTC", month: "long", year: "numeric" });
+  const blocks = [["title", "", `Past ${picking === "parks" ? "parks" : "slopestyles"}`], ["month", calendarMonth > monthOf(first) ? "month:-1" : "", label, calendarMonth < monthOf(now) ? "month:1" : ""]];
   const start = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
   const days = new Date(Date.UTC(y, m, 0)).getUTCDate();
-  for (let i = 0; i < start; i++) grid.append(document.createElement("span"));
+  for (let i = 0; i < start; i++) blocks.push(["day", "", "", "blank"]);
   for (let d = 1; d <= days; d++) {
     const n = calendarMonth * 100 + d;
-    const cell = document.createElement("span");
     const on = n >= first && n <= last;
-    cell.className = `d ${n === now ? "today" : on ? "on" : "off"}`;
-    cell.textContent = String(d);
-    if (on) onTap(cell, () => go("place", sign * n));
-    grid.append(cell);
+    blocks.push(["day", on ? `go:place:${sign * n}` : "", d, n === now ? "today" : on ? "on" : "off"]);
   }
+  return { wide: 380, blocks };
 };
 
 // A place, before he rides it. The game goes there and shows it off behind
@@ -1186,35 +986,18 @@ let placeOf = 0;
 let tabWho = stored("skate.who", null);
 let tabWhat = "best";
 const showPlace = () => {
-  const el = sheets.place;
   const id = placeOf;
-  el.querySelector("h2").textContent = placeName(id);
+  const blocks = [["title", "", placeName(id), "play", "Play"]];
   // A day's place: how long it is open for, or that it is over.
-  const note = el.querySelector(".note");
-  const tick = () => {
-    if (!isDaily(id)) note.textContent = "";
-    else if (Math.abs(id) === today()) note.textContent = `Open for ${leftText(dayLeft())} more`;
-    else note.textContent = "This day is over: runs here are not posted";
-  };
-  tick();
-  clearInterval(showPlace.timer);
-  if (isDaily(id)) showPlace.timer = setInterval(() => (el.hidden ? clearInterval(showPlace.timer) : tick()), 15000);
+  if (isDaily(id)) blocks.push(["note", Math.abs(id) === today() ? `Open for ${leftText(dayLeft())} more` : "This day is over: runs here are not posted", "gold"]);
   // Whose: everyone's (until he picks), or his own.
   const shared = !!account && boarded(id);
   const who = shared && tabWho !== "me" ? "all" : "me";
-  const whos = el.querySelector(".tabs.who");
-  whos.textContent = "";
-  whos.hidden = !shared;
-  const pickWho = (which) => () => store("skate.who", (tabWho = which));
-  addTab(whos, "Everyone", who === "all", pickWho("all"), showPlace);
-  addTab(whos, "You", who === "me", pickWho("me"), showPlace);
-  const whats = el.querySelector(".tabs.what");
-  whats.textContent = "";
-  addTab(whats, "Best", tabWhat === "best", () => (tabWhat = "best"), showPlace);
-  addTab(whats, "Recent", tabWhat === "recent", () => (tabWhat = "recent"), showPlace);
+  if (shared) blocks.push(["tabs", who === "all" ? 0 : 1, "who:all", "Everyone", "who:me", "You"]);
+  blocks.push(["tabs", tabWhat === "best" ? 0 : 1, "what:best", "Best", "what:recent", "Recent"]);
   // The runs: a score each, and whose or when.
   const best = tabWhat === "best";
-  const list = el.querySelector(".list");
+  let rows = [];
   if (who === "me") {
     // His own. Where the leaderboards keep this place's, as they have
     // them: what he sees of himself is then what others see of him, on
@@ -1229,17 +1012,13 @@ const showPlace = () => {
         const rest = runs.filter((run) => current(run) && !(top && run.at === top.at && run.score === top.score));
         runs = [...(top ? [{ ...top, top: true }] : []), ...rest].sort((a, b) => b.score - a.score || a.at - b.at);
       }
-      // (All his: none to pick out as his.)
-      runs = runs.map(({ name, ...run }) => run);
     }
-    runList(list, runs, (run, i) => [...(best ? [["n", `${i + 1}.`]] : []), ["who", ago(run.at)], ["score", String(run.score)], ...(run.top ? watchCell(run, id) : [])]);
-    return;
-  }
-  const name = (run) => ["who", run.name, () => go("person", run.name)];
-  if (best) runList(list, bestsOn(id), (run, i) => [["n", `${i + 1}.`], name(run), ["score", String(run.score)], ...watchCell(run, id)]);
-  else runList(list, recentOn(id), (run) => [name(run), ["when", ago(run.at)], ["score", String(run.score)]]);
+    rows = runs.map((run, i) => row("", false, ...(best ? [["n", "", `${i + 1}.`]] : []), ["what", "", ago(run.at)], ["score", "", run.score], ...(run.top ? watchCell(run, id) : [])));
+  } else if (best) rows = bestsOn(id).map((run, i) => row("", run.name === account?.name, ["n", "", `${i + 1}.`], nameCell(run), ["score", "", run.score], ...watchCell(run, id)));
+  else rows = recentOn(id).map((run) => row("", run.name === account?.name, nameCell(run), ["when", "", ago(run.at)], ["score", "", run.score]));
+  blocks.push(["gap", 4], ...(rows.length ? rows : [["empty", "No runs yet"]]));
+  return { place: "dock", wide: 440, blocks };
 };
-onTap(sheets.place.querySelector(".play"), () => goTo(placeOf));
 
 // A person (himself, from home; or anyone he sees, by their name on a
 // run): their best on each place they have ridden, each to watch, or their
@@ -1247,17 +1026,61 @@ onTap(sheets.place.querySelector(".play"), () => goTo(placeOf));
 let personOf = "";
 let personWhat = "best";
 const showPerson = () => {
-  const el = sheets.person;
   const name = personOf;
-  el.querySelector("h2").textContent = name;
-  const whats = el.querySelector(".tabs.what");
-  whats.textContent = "";
-  addTab(whats, "Best", personWhat === "best", () => (personWhat = "best"), showPerson);
-  addTab(whats, "Recent", personWhat === "recent", () => (personWhat = "recent"), showPerson);
-  const list = el.querySelector(".list");
-  const place = (run) => go("place", run.course);
-  if (personWhat === "best") runList(list, bestsOf(name), (run) => [["who", placeName(run.course)], ["score", String(run.score)], ...watchCell(run, run.course)], place);
-  else runList(list, feed().filter((run) => run.name === name), (run) => [["who", placeName(run.course)], ["when", ago(run.at)], ["score", String(run.score)]], place);
+  const blocks = [["title", "", name], ["tabs", personWhat === "best" ? 0 : 1, "pwhat:best", "Best", "pwhat:recent", "Recent"], ["gap", 4]];
+  const runs = personWhat === "best" ? bestsOf(name) : feed().filter((run) => run.name === name);
+  const rows = runs.map((run) => row(`go:place:${run.course}`, false, ["what", "", placeName(run.course)], ...(personWhat === "best" ? [["score", "", run.score], ...watchCell(run, run.course)] : [["when", "", ago(run.at)], ["score", "", run.score]])));
+  blocks.push(...(rows.length ? rows : [["empty", "No runs yet"]]));
+  return { wide: 440, blocks };
+};
+
+// The sheet up (or none), told to the game: the same sheet again (its
+// scores have come, say) as it is, in place; another, coming the way he
+// went (motion).
+const SHOW = { menu: showMenu, lessons: showLessons, lesson: showLesson, places: showPlaces, days: showDays, place: showPlace, person: showPerson };
+const showPage = (motion = "swap") => {
+  const id = sheetNow();
+  if (!id) {
+    uiSay("page", "none", motion, "none", 440, BELOW);
+    uiSay("end");
+    return;
+  }
+  const sheet = SHOW[id]();
+  uiSay("page", `${id}:${trail.at(-1)[1] ?? ""}`, motion, sheet.place ?? "center", sheet.wide ?? 440, sheet.below ?? BELOW);
+  for (const block of sheet.blocks) uiSay(...block);
+  uiSay("end");
+};
+// (A day's place says how long it is open for: told again each minute.)
+setInterval(() => {
+  if (sheetNow() === "places" || (sheetNow() === "place" && isDaily(placeOf))) showPage();
+}, 15000);
+
+// What is over the game, as it is now (see programs/skate/ui_chrome.l8):
+// told each frame, but only what has changed.
+let overlayWord = "";
+let statsWords = "";
+let statsOn = false;
+const HELP = "Arrows steer · hold Space, tap arrows, let go to jump · Space in the air grabs · R restart · H home";
+const syncChrome = () => {
+  const body = document.body.classList;
+  const sheet = sheetOpen();
+  const tutorial = body.contains("tutorial");
+  const replaying = body.contains("replaying");
+  const lesson = lessonNow() !== 0;
+  chrome("back", trail.length > 1);
+  chrome("look", true);
+  chrome("night", body.contains("night"));
+  chrome("stats", true, statsOn, statsWords);
+  chrome("steps", lesson, ["read", "watch", "try"].indexOf(stepAt()), body.contains("nudge"));
+  chrome("ends", body.contains("over") && !sheet && !replaying, !tutorial, !tutorial, tutorial ? onwardWord : "", lesson);
+  chrome("teach", sheet ? 0 : teach.kind, teach.text, teach.ok);
+  chrome("caps", !touch && !sheet && teach.kind === 1, hands);
+  chrome("pads", touch && !sheet && !replaying && !body.contains("done"), body.contains("watching"));
+  // (Under a sheet, that a place is loading matters only where the sheet
+  // shows the place off: there, out of the way at the bottom.)
+  chrome("load", sheet ? (sheetNow() === "place" ? 2 : 0) : 1);
+  chrome("overlay", overlayWord);
+  chrome("help", !touch && !sheet && !lesson, HELP);
 };
 
 // Where the game starts: the place he was last at (an earlier day's
@@ -1267,18 +1090,8 @@ const startPlace = () => {
   const start = last === 0 && !stored("skate.tutorial", false) ? TUTORIAL + 1 : last || 1;
   return isDaily(start) ? Math.sign(start) * today() : start;
 };
-// A sheet's contents, as they now are: the one named, or else whichever is
-// open (its scores have come).
-const showOpen = (id = Object.keys(sheets).find((name) => !sheets[name].hidden)) => {
-  if (id === "menu") showMenu();
-  if (id === "places") showPlaces();
-  if (id === "lessons") showLessons();
-  if (id === "lesson") showLesson();
-  if (id === "days") showDays();
-  if (id === "place") showPlace();
-  if (id === "person") showPerson();
-};
-
+// A sheet's contents, as they now are (its scores have come).
+const showOpen = () => showPage();
 // ?diag: find out why places build slowly on this device, and say so, on
 // the page and to the leaderboards' reports. It times a small loop of
 // arithmetic in WebAssembly, cold and again (which shows whether the
@@ -1387,7 +1200,6 @@ async function main() {
   }
   const module = await WebAssembly.compileStreaming(fetch("skate.wasm"));
   const fs = new MemFS({});
-  gameFs = fs;
   const decoder = new TextDecoder();
   // (What it writes comes in pieces: a line at a time from here.)
   let written = "";
@@ -1427,7 +1239,7 @@ async function main() {
   const env = Object.fromEntries([...params].filter(([k]) => k.startsWith("L8_")));
   const zoom = Math.min(4, Math.max(0.25, Number(params.get("zoom")) || 0.85));
   const scale = params.has("scale") ? Math.min(1, Math.max(0.25, Number(params.get("scale")) || 1)) : 1;
-  const platform = createPlatform(canvas, { log: (text) => console.warn(text), checkErrors: params.has("glcheck"), scale, zoom, env, pointers: true, maxTall: 2.4,
+  const platform = createPlatform(canvas, { log: (text) => console.warn(text), checkErrors: params.has("glcheck"), scale: 1, zoom, env, pointers: true, hover: true, wheel: true, maxTall: 2.4,
     // A phone's screen has far more pixels than the block game's budget,
     // and its GPU to spare: render nearer its own resolution.
     maxPixels: 2.2e6,
@@ -1446,38 +1258,40 @@ async function main() {
     if (e.code === "KeyL" && !e.repeat) setNight(!document.body.classList.contains("night"));
     if ((e.code === "KeyH" || e.code === "KeyM") && !e.repeat) goHome();
   });
-  // The steering and trick panels, placed over the game's view where the
-  // game reads them: these fractions match programs/skate/touch.l8.
-  const STEER_LEFT = 0.04, STEER_RIGHT = 0.47, PANEL_TOP = 0.52, PANEL_BOTTOM = 0.8;
-  const steerPanel = document.querySelector(".panel.steer");
-  const trickPanel = document.querySelector(".panel.trick");
-  const placePads = () => {
-    const r = canvas.getBoundingClientRect();
-    const place = (el, left, right) => {
-      el.style.left = `${r.left + r.width * left}px`;
-      el.style.width = `${r.width * (right - left)}px`;
-      el.style.top = `${r.top + r.height * PANEL_TOP}px`;
-      el.style.height = `${r.height * (PANEL_BOTTOM - PANEL_TOP)}px`;
-    };
-    place(steerPanel, STEER_LEFT, STEER_RIGHT);
-    place(trickPanel, 1 - STEER_RIGHT, 1 - STEER_LEFT);
-    // The tutorial's words: a fixed place near him, off the pads and
-    // their tags, and off what he is coming to. On a tall screen he rides
-    // above the pads' band, so they go just above it; on a wide one he
-    // rides within it, so they go just below.
-    const tall = r.height > r.width;
-    const y = tall ? r.top + r.height * PANEL_TOP - 38 - 46 : r.top + r.height * PANEL_BOTTOM + 10;
-    document.documentElement.style.setProperty("--words-y", `${Math.round(y)}px`);
-  };
-  new ResizeObserver(placePads).observe(canvas);
-  addEventListener("resize", placePads);
-  placePads();
+  // While a sheet is up the game is held, and takes only the keys that work
+  // the sheet (the arrows, Tab, Enter, and Space: see ui_key, in ui.l8),
+  // and L.
+  const SHEET_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Tab", "Enter", "Space", "KeyL"]);
+  for (const name of ["keydown", "keyup"]) {
+    addEventListener(name, (e) => {
+      if (sheetOpen() && !SHEET_KEYS.has(e.code) && e.code !== "Escape" && !e.ctrlKey && !e.metaKey) {
+        e.stopPropagation();
+        if (e.code !== "F5" && e.code !== "F11" && e.code !== "F12") e.preventDefault();
+      }
+      if (sheetOpen() && e.code === "Tab") e.preventDefault();
+    }, { capture: true });
+  }
   window.l8Game = platform;
-  keepFrame = (take) =>
-    platform.setOnSwap(() => {
-      platform.setOnSwap(null);
-      take();
-    });
+  // What the game is told of the window (see ui.l8): its size in CSS pixels
+  // and the canvas's own, the edges a phone keeps for itself (as far as
+  // they fall on the canvas), and whether it is a touch screen. Told
+  // before it starts (in the file it reads first), and whenever it changes.
+  const safe = document.getElementById("safe");
+  const sendView = () => {
+    const r = canvas.getBoundingClientRect();
+    const s = getComputedStyle(safe);
+    const inset = (side, from) => Math.max(0, (parseFloat(s[`padding${side}`]) || 0) - from);
+    uiSay("view", r.width, r.height, canvas.width, canvas.height, inset("Top", r.top), inset("Right", innerWidth - r.right), inset("Bottom", innerHeight - r.bottom), inset("Left", r.left), touch);
+  };
+  platform.layout();
+  sendView();
+  new ResizeObserver(sendView).observe(canvas);
+  addEventListener("resize", sendView);
+  present();
+  syncChrome();
+  fs.writeFile("ui.txt", uiLines.join("\n") + "\n");
+  uiLines = [];
+  gameFs = fs;
   const { instance, mem } = await instantiate(module, sys, platform.imports);
   platform.attach(instance, mem);
   sendKey = platform.key;
@@ -1486,14 +1300,14 @@ async function main() {
   // (Picked while the game was starting somewhere else.)
   if (wanted !== null && wanted !== placeNow) visit(wanted);
   wanted = null;
-  canvas.addEventListener("focus", () => (overlay.hidden = true));
+  canvas.focus();
+  canvas.addEventListener("focus", () => (overlayWord = ""));
   canvas.addEventListener("blur", () => {
-    if (!touch && !sheetOpen()) show("Click to continue");
+    if (!touch && !sheetOpen()) overlayWord = "Click to continue";
   });
-  addEventListener("pointerdown", (e) => {
-    if (e.target.closest?.(".ui")) return;
+  addEventListener("pointerdown", () => {
     canvas.focus();
-    overlay.hidden = true;
+    overlayWord = "";
   });
   // ?control lets web/control.py drive the page (see ../game/control.js).
   if (params.has("control")) {
@@ -1526,20 +1340,18 @@ async function main() {
     ...[1, 0.92, 0.85, 0.78, 0.72, 0.66, 0.61, 0.56, 0.5].map((size) => ({ size, plain: false })),
     ...[0.5, 0.42, 0.36, 0.31, 0.26, 0.22, 0.19, 0.16, 0.14, 0.12, 0.1].map((size) => ({ size, plain: true })),
   ];
-  // The picture's size, of the screen's each way. Down to half, the whole
-  // of it is made smaller, and the browser stretches it; below that it
-  // stays at half, and the game draws its scene smaller within it (see
-  // render_scale, in render.l8), so that its words can still be read.
-  const SIZE_LEAST = 0.1, WHOLE_LEAST = 0.5;
+  // The picture's size, of the screen's each way: the game draws its scene
+  // that much smaller (see render_scale, in render.l8), and stretches it
+  // over the window. What it draws over the scene (its words, its sheets)
+  // is drawn at the window's own size, always sharp.
+  const SIZE_LEAST = 0.1;
   // The smallest picture tried before fewer frames are: the last rung of
   // a quarter of the size or more.
   const FLOOR = RUNGS.map((r) => r.size >= 0.25).lastIndexOf(true);
   let size = 1;
   const setSize = (k) => {
     size = Math.min(1, Math.max(SIZE_LEAST, k));
-    const whole = Math.max(size, WHOLE_LEAST);
-    platform.setScale(whole);
-    typeKeys([70000 + Math.max(1, Math.round((size / whole) * 100))]);
+    typeKeys([70000 + Math.max(1, Math.round(size * 100))]);
   };
   let plain = false;
   const setPlain = (on) => {
@@ -1559,66 +1371,29 @@ async function main() {
   else toRung(pacer.state.rung);
 
   // How the frames come, top right, if he asks to see it: the button
-  // widens into the stats, counted over each half second.
-  const perf = document.querySelector(".rate");
-  const rate = { frames: 0, late: 0, since: performance.now(), text: perf.querySelector("b"), wide: 0 };
-  // The stats: the frames a second the game aims at (the screen's, or
-  // every second or third of them), the picture's size, the frames late
+  // widens into the stats (see put_stats, in ui_chrome.l8), counted over
+  // each half second: the frames a second the game aims at (the screen's,
+  // or every second or third of them), the picture's size, the frames late
   // over the last half second, and that the device is saving its battery
-  // (if it is). Each number has a cell of its own, as wide as its most
-  // digits (measured by an unseen copy, and never narrowed), so that one
-  // changing moves nothing else, nor the pill.
-  const measure = document.createElement("b");
-  measure.className = "measure";
-  perf.querySelector(".stats").appendChild(measure);
-  // (The cells, each with the most it could hold where that is a number.)
-  const cells = ["000", " fps · ", "000", "%", "", " · ", "00", " late", ""].map((widest) => {
-    const el = document.createElement("span");
-    // (A number keeps to its cell's right, so the gap for a digit it has
-    // not got comes after the words before it.)
-    if (/^0+$/.test(widest)) el.className = "num";
-    rate.text.appendChild(el);
-    return { el, widest, wide: 0 };
-  });
+  // (if it is).
+  const rate = { frames: 0, late: 0, since: performance.now() };
   const showStats = () => {
     const s = pacer.state;
     const hz = Math.round(1000 / s.beat);
-    const words = [
-      String(Math.round(hz / (pace.on ? s.beats : 1))),
-      " fps · ",
-      String(Math.round(size * 100)),
-      "%",
-      plain ? " plain" : "",
-      " · ",
-      String(rate.late),
-      " late",
-      lowPower() ? " · low power" : "",
-    ];
-    let wide = 0;
-    cells.forEach((cell, i) => {
-      for (const text of [words[i], cell.widest]) {
-        measure.textContent = text;
-        cell.wide = Math.max(cell.wide, measure.getBoundingClientRect().width);
-      }
-      cell.el.style.minWidth = `${Math.ceil(cell.wide)}px`;
-      cell.el.textContent = words[i];
-      wide += Math.ceil(cell.wide);
-    });
-    perf.style.setProperty("--stats", `${wide + 13}px`);
+    statsWords = `${Math.round(hz / (pace.on ? s.beats : 1))} fps · ${Math.round(size * 100)}%${plain ? " plain" : ""} · ${rate.late} late${lowPower() ? " · low power" : ""}`;
   };
   // Whether the device is saving its battery, as far as can be told: the
   // browser gives far fewer frames than sixty a second even to a game that
   // draws nothing (a phone in Low Power Mode gives thirty).
   const lowPower = () => 1000 / pacer.state.beat < 50;
   // (Shown, or not, as it was last time.)
-  if (stored("skate.fps", false)) {
+  statsOn = !!stored("skate.fps", false);
+  showStats();
+  toggleStats = () => {
     showStats();
-    perf.classList.add("on");
-  }
-  onTap(perf, () => {
-    showStats();
-    store("skate.fps", perf.classList.toggle("on"));
-  });
+    statsOn = !statsOn;
+    store("skate.fps", statsOn);
+  };
 
   frameState = () => ({
     refresh: Math.round(1000 / pacer.state.beat),
@@ -1711,12 +1486,15 @@ async function main() {
         pacer.idle(now - was);
       }
     }
-    dropPicture();
     if (!gameDrawn) {
       gameDrawn = true;
-      syncSteps();
+      document.body.classList.remove("booting");
       frames.boot = Math.round(now);
     }
+    // (What is over the game, as it is now; and all that is to be told to
+    // the game, at once.)
+    syncChrome();
+    flushUi();
     const gap = now - pace.last;
     pace.last = now;
     rate.frames++;
