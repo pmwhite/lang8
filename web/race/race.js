@@ -74,7 +74,7 @@ const GHOST_KEY = 2n ** 60n;
 const ghosts = {
   // (Each course has its own: under this name, for a kind of car.)
   name(course, kind) {
-    return course === 0 ? `race.ghost.${TRACK}.${kind}` : `race.ghost.${TRACK}.c${course}s.${kind}`;
+    return course === 0 ? `race.ghost.${TRACK}.${kind}` : `race.ghost.${TRACK}.c${course}h.${kind}`;
   },
   wrote(line) {
     if (!line.startsWith("L8GHOST ")) return false;
