@@ -1,0 +1,248 @@
+tag cad;
+
+use_tag std, gl, x11, skate;
+
+// Fingers (or the mouse). Each finger is a button (the web page numbers
+// them 1, 2, 3, 8, 9; a motion's state holds the masks of the buttons that
+// moved, as X's does). What a finger does is settled when it comes down:
+// it presses a button of the editor's own; or it holds a part, or starts a
+// track, if there is one under it in the mode the editor is in; or else it
+// moves the view. A second finger makes it a pinch, which zooms and moves
+// at once. A finger that comes up without having moved is a tap (two
+// quickly in one place, a double tap).
+const FINGERS: int = 10;
+
+const ROLE_NONE: int = 0;
+
+const ROLE_UI: int = 1;
+
+const ROLE_PAN: int = 2;
+
+const ROLE_PINCH: int = 3;
+
+const ROLE_HOLD: int = 4;
+
+f_down: []bool = new bool[FINGERS](false);
+
+f_role: []int = new int[FINGERS](0);
+
+f_x0: []f32 = new f32[FINGERS](0.0);
+
+f_y0: []f32 = new f32[FINGERS](0.0);
+
+f_x: []f32 = new f32[FINGERS](0.0);
+
+f_y: []f32 = new f32[FINGERS](0.0);
+
+f_t0: []f32 = new f32[FINGERS](0.0);
+
+f_moved: []bool = new bool[FINGERS](false);
+
+// Whether the fingers are a phone's (the page says so: L8_TOUCH), which
+// cover what they touch; and whether the editor is on a page at all.
+touch_ui: bool = false;
+
+on_page: bool = false;
+
+// How far a finger may wander and still be a tap.
+slop(): f32 {
+    if (touch_ui) return 11.0;
+    4.0
+}
+
+// The pan: how far it has gone this frame, and how fast it was going (for
+// the glide when the finger lets go), in pixels a second; and when it last
+// moved.
+pan_dx: f32 = 0.0;
+
+pan_dy: f32 = 0.0;
+
+pan_vx: f32 = 0.0;
+
+pan_vy: f32 = 0.0;
+
+pan_last_t: f32 = 0.0;
+
+// The pinch: its two fingers, and the board point between them at the start.
+pinch_a: int = -1;
+
+pinch_b: int = -1;
+
+pinch_d0: f32 = 1.0;
+
+pinch_s0: f32 = 1.0;
+
+pinch_bx: f32 = 0.0;
+
+pinch_by: f32 = 0.0;
+
+// The last tap, for a double tap.
+tap_t: f32 = -10.0;
+
+tap_x: f32 = 0.0;
+
+tap_y: f32 = 0.0;
+
+fingers_down(): int {
+    n: int = 0;
+    for b in 0..FINGERS {
+        if (f_down[b]) n = n + 1
+    }
+    n
+}
+
+start_pinch(a: int, b: int) {
+    pinch_a = a;
+    pinch_b = b;
+    f_role[a] = ROLE_PINCH;
+    f_role[b] = ROLE_PINCH;
+    dx: f32 = f_x[b] - f_x[a];
+    dy: f32 = f_y[b] - f_y[a];
+    pinch_d0 = maxf(sqrtf(dx * dx + dy * dy), 10.0);
+    pinch_s0 = cam_s;
+    pinch_bx = to_bx((f_x[a] + f_x[b]) * 0.5);
+    pinch_by = to_by((f_y[a] + f_y[b]) * 0.5);
+    stop_view()
+}
+
+finger_down(b: int, x: f32, y: f32) {
+    if (b < 0 || b >= FINGERS) return;
+    f_down[b] = true;
+    f_x0[b] = x;
+    f_y0[b] = y;
+    f_x[b] = x;
+    f_y[b] = y;
+    f_t0[b] = now_t;
+    f_moved[b] = false;
+    f_role[b] = ROLE_NONE;
+    // (Off a page, the mouse's middle and right buttons move the view.)
+    if (!on_page && (b == 2 || b == 3)) {
+        f_role[b] = ROLE_PAN;
+        stop_view();
+        return
+    }
+    if (ui_press(b, x, y)) {
+        f_role[b] = ROLE_UI;
+        return
+    }
+    // A second finger on the board: a pinch, with the first, unless that
+    // one is already moving something.
+    for o in 0..FINGERS {
+        if (o != b && f_down[o] && (f_role[o] == ROLE_PAN || f_role[o] == ROLE_HOLD && !f_moved[o])) {
+            if (f_role[o] == ROLE_HOLD) hold_cancel();
+            start_pinch(o, b);
+            return
+        }
+    }
+    if (fingers_down() > 1) return;
+    stop_view();
+    pan_vx = 0.0;
+    pan_vy = 0.0;
+    if (hold_begin(x, y)) f_role[b] = ROLE_HOLD else f_role[b] = ROLE_PAN
+}
+
+finger_move(state: int, x: f32, y: f32) {
+    for b in 0..FINGERS {
+        if (f_down[b] && (state & 1 << 7 + b) != 0) {
+            dx: f32 = x - f_x[b];
+            dy: f32 = y - f_y[b];
+            f_x[b] = x;
+            f_y[b] = y;
+            if (!f_moved[b] && absf(x - f_x0[b]) + absf(y - f_y0[b]) > slop()) f_moved[b] = true;
+            role: int = f_role[b];
+            if (role == ROLE_UI) ui_drag(b, x, y);
+            if (role == ROLE_PAN && f_moved[b]) {
+                cam_x = cam_x - dx / cam_s;
+                cam_y = cam_y + dy / cam_s;
+                pan_dx = pan_dx + dx;
+                pan_dy = pan_dy + dy;
+                pan_last_t = now_t
+            }
+            if (role == ROLE_PINCH && pinch_a >= 0 && pinch_b >= 0) {
+                ax: f32 = f_x[pinch_a];
+                ay: f32 = f_y[pinch_a];
+                bx: f32 = f_x[pinch_b];
+                by: f32 = f_y[pinch_b];
+                d: f32 = maxf(sqrtf((bx - ax) * (bx - ax) + (by - ay) * (by - ay)),
+                    10.0);
+                cam_s = clampf(pinch_s0 * d / pinch_d0, min_scale(), max_scale());
+                pin_view(pinch_bx, pinch_by, (ax + bx) * 0.5, (ay + by) * 0.5)
+            }
+            if (role == ROLE_HOLD && f_moved[b]) hold_move(x, y)
+        }
+    }
+}
+
+finger_up(b: int, x: f32, y: f32) {
+    if (b < 0 || b >= FINGERS || !f_down[b]) return;
+    f_x[b] = x;
+    f_y[b] = y;
+    f_down[b] = false;
+    role: int = f_role[b];
+    f_role[b] = ROLE_NONE;
+    if (role == ROLE_UI) {
+        ui_release(b);
+        return
+    }
+    if (role == ROLE_PINCH) {
+        // The other finger of the pinch goes on moving the view, from
+        // where it is.
+        other: int = pinch_a;
+        if (other == b) other = pinch_b;
+        pinch_a = -1;
+        pinch_b = -1;
+        if (other >= 0 && f_down[other]) {
+            f_role[other] = ROLE_PAN;
+            f_moved[other] = true
+        }
+        return
+    }
+    if (role == ROLE_HOLD) {
+        if (f_moved[b]) hold_end() else {
+            hold_cancel();
+            tapped(x, y)
+        }
+        return
+    }
+    if (role == ROLE_PAN) {
+        if (!f_moved[b]) {
+            tapped(x, y);
+            return
+        }
+        // Let go while moving: the view glides on.
+        if (now_t - pan_last_t < 0.08 && pan_vx * pan_vx + pan_vy * pan_vy > 6400.0) {
+            fling_x = pan_vx;
+            fling_y = pan_vy
+        }
+    }
+}
+
+tapped(x: f32, y: f32) {
+    dx: f32 = x - tap_x;
+    dy: f32 = y - tap_y;
+    if (now_t - tap_t < 0.32 && dx * dx + dy * dy < 900.0) {
+        tap_t = -10.0;
+        double_tap(x, y);
+        return
+    }
+    tap_t = now_t;
+    tap_x = x;
+    tap_y = y;
+    tap(x, y)
+}
+
+// Once a frame: the pan's speed, from how far it went this frame.
+step_fingers(dt: f32) {
+    if (dt > 0.0) {
+        k: f32 = 0.55;
+        pan_vx = lerpf(pan_vx, pan_dx / dt, k);
+        pan_vy = lerpf(pan_vy, pan_dy / dt, k)
+    }
+    pan_dx = 0.0;
+    pan_dy = 0.0
+}
+
+// The wheel (or two fingers on a trackpad): zoom about the pointer.
+wheel(x: f32, y: f32, amount: f32) {
+    ease_zoom_at(x, y, expf(-amount * 0.0022))
+}

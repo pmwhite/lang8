@@ -204,3 +204,12 @@ Integers, pointers, and slices cross as `i64` (a JavaScript `BigInt`), and
 
 Other imports return `-ENOSYS`. `instantiate(module, sys, extra)` accepts
 extra imports, and `MemFS` is an in-memory file system for browsers.
+
+## CAD
+
+The site's `cad/` page runs `programs/cad` (see its README) on the same
+platform, with every finger passed to it as a button and the wheel as zoom.
+Everything on the page is drawn by the editor. The editor writes the board to
+`/board.pcb` after each change and the page keeps it in `localStorage`;
+`?fresh` starts from `handheld.pcb` again. The page tells the editor the
+phone's safe edges as keys (1000000000 + 1000 * what + pixels).

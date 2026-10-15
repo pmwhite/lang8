@@ -14,6 +14,7 @@ Each directory owns one library or application. Runnable demonstrations live in
 | `wayland/` | `wayland.l8` | `wayland` | Native Wayland/xdg-shell windows, EGL, xkbcommon, and typed protocol bindings |
 | `tree-calculus/` | `main.l8` | `tree_calculus` | Ternary tree-calculus interpreter, correctness tests, and upstream benchmark runner |
 | `terminal/` | `terminal.l8` | — | Wayland/EGL/OpenGL/FreeType terminal with a syscall-backed PTY shell |
+| `cad/` | `main.l8` | — | CAD tool drawn by its own renderer; first a mobile-first PCB designer, opening on the handheld's board ([README](cad/README.md)) |
 
 Import the entry point relative to your source file, then activate the public
 tag with `use_tag`. Tags do not propagate through imports: GL applications using

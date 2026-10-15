@@ -1,0 +1,255 @@
+tag cad;
+
+use_tag std, gl, x11, skate;
+
+// A CAD tool for making things, drawn the way the games here are: the
+// picture is the interface. First, a PCB designer: place parts, lay
+// copper, and see as you go what is still to connect and what breaks the
+// rules.
+//
+//   .build/cad [BOARD]        (programs/cad/handheld.pcb if none)
+//
+// See README.md for how it is used.
+import "../../stdlib/print.l8";
+
+import "../gl/gl.l8";
+
+import "../skate/math.l8";
+
+import "../skate/font.l8";
+
+import "names.l8";
+
+import "paint.l8";
+
+import "parts.l8";
+
+import "board.l8";
+
+import "check.l8";
+
+import "route.l8";
+
+import "pour.l8";
+
+import "view.l8";
+
+import "draw.l8";
+
+import "touch.l8";
+
+import "edit.l8";
+
+import "ui.l8";
+
+extern getenv(name: str): ?*i8;
+
+extern open(path: str, flags: int, mode: int): int;
+
+extern close(fd: int): int;
+
+// The board's file, read into doc.
+board_path: str = "programs/cad/handheld.pcb";
+
+read_file(path: str): bool {
+    fd: int = open(path, 0, 0);
+    if (fd < 0) return false;
+    doc_n = 0;
+    more: bool = true;
+    while (more && doc_n < len(doc)) {
+        r: int = read(fd, doc, doc_n, len(doc) - doc_n);
+        if (r <= 0) more = false else doc_n = doc_n + r
+    }
+    close(fd);
+    true
+}
+
+// The board, written back to its file (the page keeps it from there).
+save_board() raises IoError {
+    write_board();
+    fd: int = open(board_path, 577, 420);
+    if (fd < 0) return;
+    write_bytes_n(fd, doc, doc_n);
+    close(fd)
+}
+
+main(argc: int, argv: []str@immortal) raises IoError: int {
+    if (argc > 1) board_path = argv[1];
+    load_library();
+    names_lib = names_n;
+    names_lib_used = name_used;
+    if (!read_file(board_path)) {
+        eprint("cad: cannot read the board file");
+        return 1
+    }
+    read_board(doc, doc_n);
+    check_board();
+    d0: ?*i8 = XOpenDisplay(null);
+    if (d0 == null) {
+        eprint("XOpenDisplay failed (need DISPLAY / XWayland)");
+        return 1
+    }
+    dpy: *i8 = d0;
+    screen: int = XDefaultScreen(dpy);
+    attr: []i32 = [4i32, 5i32, 8i32, 8i32, 9i32, 8i32, 10i32, 8i32, 12i32, 24i32,
+        0i32];
+    vis0: ?*XVisualInfo = glXChooseVisual(dpy, screen, attr);
+    if (vis0 == null) cad_die("glXChooseVisual failed");
+    vis: *XVisualInfo = vis0;
+    root: int = XRootWindow(dpy, screen);
+    cmap: int = XCreateColormap(dpy, root, vis.visual, 0);
+    wa: XSetWindowAttributes = XSetWindowAttributes {
+        background_pixmap: 0,
+        background_pixel: 0,
+        border_pixmap: 0,
+        border_pixel: 0,
+        bit_gravity: 0i32,
+        win_gravity: 0i32,
+        backing_store: 0i32,
+        backing_planes: 0,
+        backing_pixel: 0,
+        save_under: 0i32,
+        event_mask: 163919,
+        do_not_propagate_mask: 0,
+        override_redirect: 0i32,
+        colormap: cmap,
+        cursor: 0
+    };
+    scr_w = env_int("L8_W", 1280);
+    scr_h = env_int("L8_H", 720);
+    win: int = XCreateWindow(dpy, root, 0, 0, scr_w, scr_h, 0, vis.depth as int, 1,
+        vis.visual, 10248, &wa);
+    if (win == 0) cad_die("XCreateWindow failed");
+    XStoreName(dpy, win, "CAD");
+    proto: []int = new int[1](0);
+    proto[0] = XInternAtom(dpy, "WM_DELETE_WINDOW", 0);
+    XSetWMProtocols(dpy, win, &proto[0], 1);
+    XMapRaised(dpy, win);
+    XkbSetDetectableAutoRepeat(dpy, 1, null);
+    XFlush(dpy);
+    ctx0: ?*i8 = glXCreateContext(dpy, vis, null, 1);
+    if (ctx0 == null) cad_die("glXCreateContext failed");
+    ctx: *i8 = ctx0;
+    if (glXMakeCurrent(dpy, win, ctx) == 0) cad_die("glXMakeCurrent failed");
+    glXSwapIntervalEXT(dpy, win, 1);
+    painter: *Painter = new_painter();
+    touch_ui = getenv("L8_TOUCH") != null;
+    on_page = getenv("L8_PAGE") != null;
+    start_view();
+    // (L8_X0, L8_Y0, L8_X1, L8_Y1: a box of the board, in mm, to show at
+    // first, for pictures of a part of it.)
+    if (getenv("L8_X0") != null) {
+        ease_to_box(env_int("L8_X0", 0) as f32, env_int("L8_Y0", 0) as f32, env_int("L8_X1",
+            10) as f32, env_int("L8_Y1", 10) as f32);
+        cam_x = ease_x;
+        cam_y = ease_y;
+        cam_s = ease_s;
+        ease_on = false
+    }
+    if (getenv("L8_ROUTE") != null) mode = MODE_ROUTE;
+    ev: XEvent = XEvent.Other;
+    running: bool = true;
+    alive: bool = true;
+    prev_ns: int = mono_ns();
+    start_ns: int = prev_ns;
+    // Frames drawn with nothing changing: after a few, the picture is left
+    // as it is until something does.
+    still: int = 0;
+    while (running) {
+        while (XPending(dpy) != 0) {
+            XNextEvent(dpy, &ev);
+            still = 0;
+            match ev {
+                KeyPress -> {
+                    ks: int = XLookupKeysym(&ev, 0);
+                    if (ks == 65307 && !on_page && !esc_key()) running = false else if (ks != 65307) key_press(ks)
+                }
+                ButtonPress b -> {
+                    bn: int = b.button as int;
+                    if (bn == 4 || bn == 5) {
+                        amount: f32 = maxf(b.state as f32, 40.0);
+                        if (bn == 4) wheel(b.x as f32, b.y as f32, -amount) else wheel(b.x as f32,
+                            b.y as f32, amount)
+                    } else finger_down(bn, b.x as f32, b.y as f32)
+                }
+                ButtonRelease b -> finger_up(b.button as int, b.x as f32, b.y as f32);
+                MotionNotify mo -> finger_move(mo.state as int, mo.x as f32, mo.y as f32);
+                ConfigureNotify c -> {
+                    if (c.width > 0i32 && c.height > 0i32) {
+                        was_w: int = scr_w;
+                        was_h: int = scr_h;
+                        scr_w = c.width as int;
+                        scr_h = c.height as int;
+                        if (was_w != scr_w || was_h != scr_h) window_resized(was_w,
+                            was_h)
+                    }
+                }
+                DestroyNotify -> {
+                    running = false;
+                    alive = false
+                }
+                ClientMessage c -> {
+                    if (c.l0 == proto[0]) running = false
+                }
+                _ -> { }
+            }
+        }
+        now: int = mono_ns();
+        dt: f32 = clampf((now - prev_ns) as f32 / 1000000000.0, 0.0, 0.1);
+        prev_ns = now;
+        now_t = (now - start_ns) as f32 / 1000000000.0;
+        if (step_editor(dt)) still = 0 else still = still + 1;
+        if (wants_save) {
+            wants_save = false;
+            save_board()
+        }
+        if (still < 3 || !on_page) {
+            glViewport(0, 0, scr_w, scr_h);
+            glClearColor(0.051, 0.063, 0.082, 1.0);
+            glClear(16640);
+            for l in 0..2 {
+                if (pour_net[l] >= 0 && !pour_drawn[l]) {
+                    p_pour_upload(painter, l);
+                    pour_drawn[l] = true
+                }
+            }
+            p_reset();
+            draw_board();
+            draw_editing();
+            draw_ui();
+            p_draw(painter)
+        }
+        glXSwapBuffers(dpy, win)
+    }
+    glXMakeCurrent(dpy, 0, null);
+    glXDestroyContext(dpy, ctx);
+    if (alive) XDestroyWindow(dpy, win);
+    XCloseDisplay(dpy);
+    0
+}
+
+extern l8_environment(): []str@new;
+
+// A whole number from the environment (as L8_W=390), or the fallback.
+env_int(key: str, fallback: int): int {
+    if (getenv(key) == null) return fallback;
+    for e in l8_environment() {
+        if (len(e) > len(key) + 1 && e[len(key)] == '=') {
+            same: bool = true;
+            for i in 0..len(key) {
+                if (e[i] != key[i]) same = false
+            }
+            if (same) {
+                v: int = 0;
+                neg: bool = false;
+                for i in len(key) + 1..len(e) {
+                    c: int = e[i] as int;
+                    if (c == 45) neg = true else if (c >= 48 && c <= 57) v = v * 10 + c - 48
+                }
+                if (neg) return -v;
+                return v
+            }
+        }
+    }
+    fallback
+}

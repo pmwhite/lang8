@@ -1,0 +1,742 @@
+tag cad;
+
+use_tag std, gl, x11, skate;
+
+// Checking the board, again after each change: which copper touches which
+// (pads, tracks, and vias, each layer apart, vias and through holes joining
+// them); from that, the connections each net still needs (the ratsnest:
+// the shortest lines that would join its islands of copper); and the
+// problems: copper of different nets too near (or touching: a short),
+// parts whose courtyards overlap, and copper too near the board's edge.
+//
+// Every piece of copper is an item: the pins first, then the tracks, then
+// the vias.
+const ITEMS: int = PINS + SEGS + VIAS + 4;
+
+uf_up: []int = new int[ITEMS](0);
+
+items_n: int = 0;
+
+uf_root(i: int): int {
+    r: int = i;
+    while (uf_up[r] != r) r = uf_up[r];
+    // (Everything on the way points at the root after.)
+    k: int = i;
+    while (uf_up[k] != r) {
+        next: int = uf_up[k];
+        uf_up[k] = r;
+        k = next
+    }
+    r
+}
+
+uf_join(a: int, b: int) {
+    ra: int = uf_root(a);
+    rb: int = uf_root(b);
+    if (ra != rb) uf_up[ra] = rb
+}
+
+// ---- distances ----
+// From (px, py) to the segment from a to b.
+seg_point(
+    ax: f32,
+    ay: f32,
+    bx: f32,
+    by: f32,
+    px: f32,
+    py: f32
+): f32 {
+    dx: f32 = bx - ax;
+    dy: f32 = by - ay;
+    l2: f32 = dx * dx + dy * dy;
+    t: f32 = 0.0;
+    if (l2 > 0.0) t = clampf(((px - ax) * dx + (py - ay) * dy) / l2, 0.0, 1.0);
+    ex: f32 = ax + dx * t - px;
+    ey: f32 = ay + dy * t - py;
+    sqrtf(ex * ex + ey * ey)
+}
+
+// Whether the segments a-b and c-d cross.
+cross_z(
+    ax: f32,
+    ay: f32,
+    bx: f32,
+    by: f32,
+    cx: f32,
+    cy: f32
+): f32 {
+    (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+}
+
+segs_cross(
+    ax: f32,
+    ay: f32,
+    bx: f32,
+    by: f32,
+    cx: f32,
+    cy: f32,
+    dx: f32,
+    dy: f32
+): bool {
+    d1: f32 = cross_z(ax, ay, bx, by, cx, cy);
+    d2: f32 = cross_z(ax, ay, bx, by, dx, dy);
+    d3: f32 = cross_z(cx, cy, dx, dy, ax, ay);
+    d4: f32 = cross_z(cx, cy, dx, dy, bx, by);
+    (d1 > 0.0 && d2 < 0.0 || d1 < 0.0 && d2 > 0.0) && (d3 > 0.0 && d4 < 0.0 || d3 < 0.0 && d4 > 0.0)
+}
+
+seg_seg(
+    ax: f32,
+    ay: f32,
+    bx: f32,
+    by: f32,
+    cx: f32,
+    cy: f32,
+    dx: f32,
+    dy: f32
+): f32 {
+    if (segs_cross(ax, ay, bx, by, cx, cy, dx, dy)) return 0.0;
+    minf(minf(seg_point(ax, ay, bx, by, cx, cy), seg_point(ax, ay, bx, by, dx, dy)),
+        minf(seg_point(cx, cy, dx, dy, ax, ay), seg_point(cx, cy, dx, dy, bx, by)))
+}
+
+// From (px, py) to the box about (cx, cy), hx by hy each way (0 inside).
+box_point(
+    cx: f32,
+    cy: f32,
+    hx: f32,
+    hy: f32,
+    px: f32,
+    py: f32
+): f32 {
+    dx: f32 = maxf(absf(px - cx) - hx, 0.0);
+    dy: f32 = maxf(absf(py - cy) - hy, 0.0);
+    sqrtf(dx * dx + dy * dy)
+}
+
+// From the box to the segment a-b: 0 if it goes into the box; or else the
+// nearer of its ends to the box and the box's corners to it.
+box_seg(
+    cx: f32,
+    cy: f32,
+    hx: f32,
+    hy: f32,
+    ax: f32,
+    ay: f32,
+    bx: f32,
+    by: f32
+): f32 {
+    // (Clipped to the box, Liang and Barsky's way: anything left inside?)
+    t0: f32 = 0.0;
+    t1: f32 = 1.0;
+    dx: f32 = bx - ax;
+    dy: f32 = by - ay;
+    inside: bool = true;
+    for side in 0..4 {
+        p: f32 = 0.0;
+        q: f32 = 0.0;
+        if (side == 0) {
+            p = -dx;
+            q = ax - (cx - hx)
+        } else if (side == 1) {
+            p = dx;
+            q = cx + hx - ax
+        } else if (side == 2) {
+            p = -dy;
+            q = ay - (cy - hy)
+        } else {
+            p = dy;
+            q = cy + hy - ay
+        }
+        if (p == 0.0) {
+            if (q < 0.0) inside = false
+        } else {
+            t: f32 = q / p;
+            if (p < 0.0) t0 = maxf(t0, t) else t1 = minf(t1, t)
+        }
+    }
+    if (inside && t0 <= t1) return 0.0;
+    d: f32 = minf(box_point(cx, cy, hx, hy, ax, ay), box_point(cx, cy, hx, hy, bx,
+        by));
+    d = minf(d, seg_point(ax, ay, bx, by, cx - hx, cy - hy));
+    d = minf(d, seg_point(ax, ay, bx, by, cx + hx, cy - hy));
+    d = minf(d, seg_point(ax, ay, bx, by, cx - hx, cy + hy));
+    minf(d, seg_point(ax, ay, bx, by, cx + hx, cy + hy))
+}
+
+// ---- items, as round boxes or as lines with round ends ----
+// Its layers (1 top, 2 bottom), and either a box (middle, half size,
+// corners) or a line (ends and half width); and the box round it all.
+it_layers: []int = new int[ITEMS](0);
+
+it_line: []bool = new bool[ITEMS](false);
+
+it_ax: []f32 = new f32[ITEMS](0.0);
+
+it_ay: []f32 = new f32[ITEMS](0.0);
+
+it_bx: []f32 = new f32[ITEMS](0.0);
+
+it_by: []f32 = new f32[ITEMS](0.0);
+
+it_r: []f32 = new f32[ITEMS](0.0);
+
+it_net: []int = new int[ITEMS](-1);
+
+// The route a track or via is of (see route.l8), or -1.
+it_route: []int = new int[ITEMS](-1);
+
+it_x0: []f32 = new f32[ITEMS](0.0);
+
+it_y0: []f32 = new f32[ITEMS](0.0);
+
+it_x1: []f32 = new f32[ITEMS](0.0);
+
+it_y1: []f32 = new f32[ITEMS](0.0);
+
+// A box item: its inner box (without the round corners) about (ax, ay),
+// bx by by each way, and the corners' radius r.
+set_box_item(
+    i: int,
+    x: f32,
+    y: f32,
+    hw: f32,
+    hh: f32,
+    r: f32,
+    layers: int,
+    net: int
+) {
+    it_layers[i] = layers;
+    it_line[i] = false;
+    it_ax[i] = x;
+    it_ay[i] = y;
+    it_bx[i] = maxf(hw - r, 0.0);
+    it_by[i] = maxf(hh - r, 0.0);
+    it_r[i] = r;
+    it_net[i] = net;
+    it_x0[i] = x - hw;
+    it_y0[i] = y - hh;
+    it_x1[i] = x + hw;
+    it_y1[i] = y + hh
+}
+
+set_line_item(
+    i: int,
+    ax: f32,
+    ay: f32,
+    bx: f32,
+    by: f32,
+    hw: f32,
+    layers: int,
+    net: int
+) {
+    it_layers[i] = layers;
+    it_line[i] = true;
+    it_ax[i] = ax;
+    it_ay[i] = ay;
+    it_bx[i] = bx;
+    it_by[i] = by;
+    it_r[i] = hw;
+    it_net[i] = net;
+    it_x0[i] = minf(ax, bx) - hw;
+    it_y0[i] = minf(ay, by) - hw;
+    it_x1[i] = maxf(ax, bx) + hw;
+    it_y1[i] = maxf(ay, by) + hw
+}
+
+seg_item(s: int): int {
+    pins_n + s
+}
+
+via_item(v: int): int {
+    pins_n + segs_n + v
+}
+
+load_items() {
+    for q in 0..pins_n {
+        set_box_item(q, pin_x[q], pin_y[q], pin_hw[q], pin_hh[q], pin_r[q], pin_layers[q],
+            pin_net[q]);
+        it_route[q] = -1
+    }
+    for s in 0..segs_n {
+        set_line_item(seg_item(s), sg_x0[s], sg_y0[s], sg_x1[s], sg_y1[s], sg_w[s] * 0.5,
+            1 << sg_layer[s], sg_net[s]);
+        it_route[seg_item(s)] = sg_route[s]
+    }
+    for v in 0..vias_n {
+        h: f32 = via_d[v] * 0.5;
+        set_box_item(via_item(v), via_x[v], via_y[v], h, h, h, 3, via_net[v]);
+        it_route[via_item(v)] = via_route[v]
+    }
+    items_n = pins_n + segs_n + vias_n
+}
+
+// The gap between the copper of items i and j (below 0 if they overlap).
+item_gap(i: int, j: int): f32 {
+    if (it_line[i] && it_line[j]) return seg_seg(it_ax[i], it_ay[i], it_bx[i], it_by[i],
+        it_ax[j], it_ay[j], it_bx[j], it_by[j]) - it_r[i] - it_r[j];
+    if (it_line[i]) return box_seg(it_ax[j], it_ay[j], it_bx[j], it_by[j], it_ax[i],
+        it_ay[i], it_bx[i], it_by[i]) - it_r[i] - it_r[j];
+    if (it_line[j]) return box_seg(it_ax[i], it_ay[i], it_bx[i], it_by[i], it_ax[j],
+        it_ay[j], it_bx[j], it_by[j]) - it_r[i] - it_r[j];
+    dx: f32 = maxf(absf(it_ax[i] - it_ax[j]) - it_bx[i] - it_bx[j], 0.0);
+    dy: f32 = maxf(absf(it_ay[i] - it_ay[j]) - it_by[i] - it_by[j], 0.0);
+    sqrtf(dx * dx + dy * dy) - it_r[i] - it_r[j]
+}
+
+// ---- what the check found ----
+// Problems: where, what kind, and the two things (items, or for a
+// courtyard, parts).
+const PROB_CLEAR: int = 0;
+
+const PROB_SHORT: int = 1;
+
+const PROB_COURT: int = 2;
+
+const PROB_EDGE: int = 3;
+
+// A track thinner than can be made (0.1 mm).
+const PROB_THIN: int = 4;
+
+// Copper inside a part's courtyard on its side of the board (or a via
+// through it) that is not on any of that part's nets: only a part's own
+// nets may come in, to reach its pads (see ~/src/handheld/design.md).
+const PROB_KEEPOUT: int = 5;
+
+const PROBS: int = 512;
+
+prob_n: int = 0;
+
+prob_x: []f32 = new f32[PROBS](0.0);
+
+prob_y: []f32 = new f32[PROBS](0.0);
+
+prob_kind: []int = new int[PROBS](0);
+
+prob_a: []int = new int[PROBS](0);
+
+prob_b: []int = new int[PROBS](0);
+
+// The connections still to make: from pin to pin, and its net.
+const WIRES: int = 4096;
+
+wire_n: int = 0;
+
+wire_a: []int = new int[WIRES](0);
+
+wire_b: []int = new int[WIRES](0);
+
+// Nets with two pins or more, and how many of those are whole.
+nets_wanted: int = 0;
+
+nets_done: int = 0;
+
+net_left: []int = new int[NETS](0);
+
+add_prob(
+    x: f32,
+    y: f32,
+    kind: int,
+    a: int,
+    b: int
+) {
+    if (prob_n >= PROBS) return;
+    // (One mark is enough for a place.)
+    for k in 0..prob_n {
+        if (prob_kind[k] == kind && absf(prob_x[k] - x) < 0.3 && absf(prob_y[k] - y) < 0.3) return
+    }
+    prob_x[prob_n] = x;
+    prob_y[prob_n] = y;
+    prob_kind[prob_n] = kind;
+    prob_a[prob_n] = a;
+    prob_b[prob_n] = b;
+    prob_n = prob_n + 1
+}
+
+// Where between two items to mark a problem: the middle of where their
+// boxes overlap, or of the gap between them.
+mark_between(i: int, j: int, kind: int) {
+    x: f32 = (maxf(it_x0[i], it_x0[j]) + minf(it_x1[i], it_x1[j])) * 0.5;
+    y: f32 = (maxf(it_y0[i], it_y0[j]) + minf(it_y1[i], it_y1[j])) * 0.5;
+    add_prob(x, y, kind, i, j)
+}
+
+// The pins of the part whose courtyard is being checked, and the parts'
+// courtyards on the board.
+court_x0(p: int): f32 {
+    f: int = part_fp[p];
+    k: int = part_rot[p];
+    a: f32 = turn_x(fp_cx0[f], fp_cy0[f], k);
+    b: f32 = turn_x(fp_cx1[f], fp_cy1[f], k);
+    part_x[p] + minf(a, b)
+}
+
+court_x1(p: int): f32 {
+    f: int = part_fp[p];
+    k: int = part_rot[p];
+    a: f32 = turn_x(fp_cx0[f], fp_cy0[f], k);
+    b: f32 = turn_x(fp_cx1[f], fp_cy1[f], k);
+    part_x[p] + maxf(a, b)
+}
+
+court_y0(p: int): f32 {
+    f: int = part_fp[p];
+    k: int = part_rot[p];
+    a: f32 = turn_y(fp_cx0[f], fp_cy0[f], k);
+    b: f32 = turn_y(fp_cx1[f], fp_cy1[f], k);
+    part_y[p] + minf(a, b)
+}
+
+court_y1(p: int): f32 {
+    f: int = part_fp[p];
+    k: int = part_rot[p];
+    a: f32 = turn_y(fp_cx0[f], fp_cy0[f], k);
+    b: f32 = turn_y(fp_cx1[f], fp_cy1[f], k);
+    part_y[p] + maxf(a, b)
+}
+
+// Whether the courtyards of parts p and o, whose boxes overlap, do: a
+// round one is a circle.
+courts_meet(p: int, o: int): bool {
+    rp: f32 = fp_court_r[part_fp[p]];
+    ro: f32 = fp_court_r[part_fp[o]];
+    if (rp <= 0.0 && ro <= 0.0) return true;
+    if (rp > 0.0 && ro > 0.0) {
+        dx: f32 = part_x[p] - part_x[o];
+        dy: f32 = part_y[p] - part_y[o];
+        return dx * dx + dy * dy < (rp + ro) * (rp + ro)
+    }
+    // (A circle and a box.)
+    c: int = p;
+    b: int = o;
+    r: f32 = rp;
+    if (ro > 0.0) {
+        c = o;
+        b = p;
+        r = ro
+    }
+    hx: f32 = (court_x1(b) - court_x0(b)) * 0.5;
+    hy: f32 = (court_y1(b) - court_y0(b)) * 0.5;
+    box_point((court_x0(b) + court_x1(b)) * 0.5, (court_y0(b) + court_y1(b)) * 0.5,
+        hx, hy, part_x[c], part_y[c]) < r
+}
+
+// The space between a part's pads, under its body, where nothing goes on
+// the top: between its two rows (a SOT-23, an SOIC, an 0603, a crystal),
+// or inside the ring of a QFN, whose middle pad is the one thing there
+// (solder paste on it bridges, and the mask beside it is a sliver). Copper
+// comes to a part's pads from outside it. Its middle and half size (ib_x,
+// ib_y, ib_hx, ib_hy), or false for a part with pads on one side only (a
+// connector's row) or round (a button's contacts).
+ib_x: f32 = 0.0;
+
+ib_y: f32 = 0.0;
+
+ib_hx: f32 = 0.0;
+
+ib_hy: f32 = 0.0;
+
+inner_box(p: int): bool {
+    f: int = part_fp[p];
+    if (fp_round[f]) return false;
+    first: int = part_pin0[p];
+    hx: f32 = 1000.0;
+    hy: f32 = 1000.0;
+    left: bool = false;
+    right: bool = false;
+    below: bool = false;
+    above: bool = false;
+    for q in first..first + fp_npads[f] {
+        dx: f32 = pin_x[q] - part_x[p];
+        dy: f32 = pin_y[q] - part_y[p];
+        if (pin_layers[q] != 0 && (absf(dx) > 0.01 || absf(dy) > 0.01)) {
+            if (absf(dx) >= absf(dy)) {
+                if (dx < 0.0) left = true else right = true;
+                hx = minf(hx, absf(dx) - pin_hw[q])
+            } else {
+                if (dy < 0.0) below = true else above = true;
+                hy = minf(hy, absf(dy) - pin_hh[q])
+            }
+        }
+    }
+    across: bool = left && right;
+    up: bool = below && above;
+    if (!across && !up) return false;
+    // (Along the rows, as far as the body goes.)
+    bw: f32 = fp_bw[f] * 0.5;
+    bh: f32 = fp_bh[f] * 0.5;
+    if ((part_rot[p] & 1) == 1) {
+        bw = fp_bh[f] * 0.5;
+        bh = fp_bw[f] * 0.5
+    }
+    // (A row on one side only still bounds it: the space is behind the row,
+    // under the body.)
+    if (!up && !below && !above) hy = bh else if (!up) hy = minf(hy, bh);
+    if (!across && !left && !right) hx = bw else if (!across) hx = minf(hx, bw);
+    if (hx <= 0.05 || hy <= 0.05) return false;
+    ib_x = part_x[p];
+    ib_y = part_y[p];
+    ib_hx = hx;
+    ib_hy = hy;
+    true
+}
+
+// Whether part p has a pin on net n.
+part_has_net(p: int, n: int): bool {
+    if (n < 0) return false;
+    first: int = part_pin0[p];
+    for q in first..first + fp_npads[part_fp[p]] {
+        if (pin_net[q] == n) return true
+    }
+    false
+}
+
+// Whether item i's copper comes inside part p's courtyard.
+in_court(p: int, i: int): bool {
+    rc: f32 = fp_court_r[part_fp[p]];
+    if (rc > 0.0) {
+        if (it_line[i]) return seg_point(it_ax[i], it_ay[i], it_bx[i], it_by[i], part_x[p],
+            part_y[p]) < rc + it_r[i];
+        return box_point(it_ax[i], it_ay[i], it_bx[i], it_by[i], part_x[p], part_y[p]) < rc + it_r[i]
+    }
+    cx: f32 = (court_x0(p) + court_x1(p)) * 0.5;
+    cy: f32 = (court_y0(p) + court_y1(p)) * 0.5;
+    hx: f32 = (court_x1(p) - court_x0(p)) * 0.5;
+    hy: f32 = (court_y1(p) - court_y0(p)) * 0.5;
+    if (it_line[i]) return box_seg(cx, cy, hx, hy, it_ax[i], it_ay[i], it_bx[i], it_by[i]) < it_r[i];
+    // (A box item's inner box and corners, against the courtyard's box.)
+    dx: f32 = maxf(absf(it_ax[i] - cx) - hx - it_bx[i], 0.0);
+    dy: f32 = maxf(absf(it_ay[i] - cy) - hy - it_by[i], 0.0);
+    sqrtf(dx * dx + dy * dy) < it_r[i]
+}
+
+// Which parts' courtyards overlap another's (for drawing them so).
+part_crowded: []bool = new bool[PARTS](false);
+
+check_board() {
+    load_items();
+    for i in 0..items_n uf_up[i] = i;
+    prob_n = 0;
+    // Copper against copper.
+    for i in 0..items_n {
+        for j in i + 1..items_n {
+            if ((it_layers[i] & it_layers[j]) != 0 && it_x0[j] <= it_x1[i] + rule_clear && it_x0[i] <= it_x1[j] + rule_clear && it_y0[j] <= it_y1[i] + rule_clear && it_y0[i] <= it_y1[j] + rule_clear) {
+                gap: f32 = item_gap(i, j);
+                if (gap <= 0.001) {
+                    uf_join(i, j);
+                    if (it_net[i] != it_net[j] && it_net[i] >= 0 && it_net[j] >= 0) mark_between(i,
+                        j, PROB_SHORT)
+                } else if (gap < rule_clear - 0.001 && it_net[i] != it_net[j]) {
+                    // (Pads of one part are as close as its maker made them.)
+                    same_part: bool = i < pins_n && j < pins_n && pin_part[i] == pin_part[j];
+                    if (!same_part) mark_between(i, j, PROB_CLEAR)
+                }
+            }
+        }
+    }
+    // Copper under parts it has no business with.
+    for p in 0..parts_n {
+        x0: f32 = court_x0(p);
+        x1: f32 = court_x1(p);
+        y0: f32 = court_y0(p);
+        y1: f32 = court_y1(p);
+        for i in pins_n..items_n {
+            // (Tracks on the top, where the parts are; vias go through.)
+            on_top: bool = (it_layers[i] & 1) != 0;
+            if (on_top && it_x1[i] > x0 && it_x0[i] < x1 && it_y1[i] > y0 && it_y0[i] < y1 && !part_has_net(p,
+                it_net[i]) && in_court(p, i)) add_prob(clampf((it_x0[i] + it_x1[i]) * 0.5,
+                x0, x1), clampf((it_y0[i] + it_y1[i]) * 0.5, y0, y1), PROB_KEEPOUT,
+                i, p)
+        }
+    }
+    // Nothing on the top between a part's pads but a strap into its middle
+    // pad (and that pad's own vias, its pour's).
+    for p in 0..parts_n {
+        if (inner_box(p)) {
+            for i in pins_n..items_n {
+                // (Its middle pad's own copper may come in to it: a strap
+                // from a pin of the same net, its vias.)
+                mid: int = middle_on(p, it_net[i]);
+                to_middle: bool = mid >= 0 && item_gap(i, mid) <= 0.001;
+                if (!to_middle && (it_layers[i] & 1) != 0 && !(i >= pins_n + segs_n && via_route[i - pins_n - segs_n] == VIA_POUR)) {
+                    gx: f32 = 0.0;
+                    if (it_line[i]) gx = box_seg(ib_x, ib_y, ib_hx, ib_hy, it_ax[i],
+                        it_ay[i], it_bx[i], it_by[i]) - it_r[i] else gx = box_point(ib_x,
+                        ib_y, ib_hx, ib_hy, it_ax[i], it_ay[i]) - it_r[i];
+                    if (gx < -0.001) add_prob(clampf((it_x0[i] + it_x1[i]) * 0.5,
+                        ib_x - ib_hx, ib_x + ib_hx), clampf((it_y0[i] + it_y1[i]) * 0.5,
+                        ib_y - ib_hy, ib_y + ib_hy), PROB_KEEPOUT, i, p)
+                }
+            }
+        }
+    }
+    // Tracks too thin to make.
+    for s in 0..segs_n {
+        if (sg_w[s] < 0.1) add_prob((sg_x0[s] + sg_x1[s]) * 0.5, (sg_y0[s] + sg_y1[s]) * 0.5,
+            PROB_THIN, seg_item(s), seg_item(s))
+    }
+    // Pads a part joins inside itself.
+    for q in 0..pins_n {
+        jq: int = lp_join[pin_pad[q]];
+        if (jq > 0) {
+            for o in q + 1..part_pin0[pin_part[q]] + fp_npads[part_fp[pin_part[q]]] {
+                if (lp_join[pin_pad[o]] == jq) uf_join(q, o)
+            }
+        }
+    }
+    // Copper near the board's edge.
+    hx: f32 = brd_w * 0.5 - 0.3;
+    hy: f32 = brd_h * 0.5 - 0.3;
+    for i in pins_n..items_n {
+        if (it_x0[i] < -hx || it_x1[i] > hx || it_y0[i] < -hy || it_y1[i] > hy) add_prob(clampf((it_x0[i] + it_x1[i]) * 0.5,
+            -hx, hx), clampf((it_y0[i] + it_y1[i]) * 0.5, -hy, hy), PROB_EDGE, i,
+            i)
+    }
+    // Courtyards.
+    for p in 0..parts_n part_crowded[p] = false;
+    for p in 0..parts_n {
+        for o in p + 1..parts_n {
+            x0: f32 = maxf(court_x0(p), court_x0(o));
+            x1: f32 = minf(court_x1(p), court_x1(o));
+            y0: f32 = maxf(court_y0(p), court_y0(o));
+            y1: f32 = minf(court_y1(p), court_y1(o));
+            if (x0 < x1 && y0 < y1 && courts_meet(p, o)) {
+                part_crowded[p] = true;
+                part_crowded[o] = true;
+                add_prob((x0 + x1) * 0.5, (y0 + y1) * 0.5, PROB_COURT, p, o)
+            }
+        }
+    }
+    join_pours();
+    make_ratsnest()
+}
+
+// ---- the ratsnest ----
+// For each net, Prim's way: from one island of its copper, the nearest pin
+// not yet reached, and all of that pin's island with it, until all are.
+rn_pin: []int = new int[PINS](0);
+
+rn_in: []bool = new bool[PINS](false);
+
+rn_best: []f32 = new f32[PINS](0.0);
+
+rn_from: []int = new int[PINS](0);
+
+// Pins by net: the first of each net's in rn_order, and how many.
+net_first: []int = new int[NETS](0);
+
+net_count: []int = new int[NETS](0);
+
+rn_order: []int = new int[PINS](0);
+
+rn_take(k: int, n: int) {
+    root: int = uf_root(rn_pin[k]);
+    for j in 0..n {
+        if (!rn_in[j] && uf_root(rn_pin[j]) == root) {
+            rn_in[j] = true;
+            // (Every pin not yet reached is perhaps nearer this one.)
+            for o in 0..n {
+                if (!rn_in[o]) {
+                    dx: f32 = pin_x[rn_pin[o]] - pin_x[rn_pin[j]];
+                    dy: f32 = pin_y[rn_pin[o]] - pin_y[rn_pin[j]];
+                    d: f32 = dx * dx + dy * dy;
+                    // (A pair routing found no way between is the last
+                    // choice: another way round is wanted.)
+                    if (avoided(rn_pin[o], rn_pin[j])) d = d + 1000000.0;
+                    // (Two pins of a chip on one net, not side by side, are
+                    // joined out beyond it, each to its own cap, not round
+                    // it to each other: as if three times as far.)
+                    if (pin_part[rn_pin[o]] == pin_part[rn_pin[j]] && d > 0.36 && ring_part(pin_part[rn_pin[o]])) d = d * 9.0;
+                    if (d < rn_best[o]) {
+                        rn_best[o] = d;
+                        rn_from[o] = j
+                    }
+                }
+            }
+        }
+    }
+}
+
+make_ratsnest() {
+    wire_n = 0;
+    nets_wanted = 0;
+    nets_done = 0;
+    for n in 0..nets_n net_count[n] = 0;
+    for q in 0..pins_n {
+        if (pin_net[q] >= 0) net_count[pin_net[q]] = net_count[pin_net[q]] + 1
+    }
+    at: int = 0;
+    for n in 0..nets_n {
+        net_first[n] = at;
+        at = at + net_count[n];
+        net_count[n] = 0
+    }
+    for q in 0..pins_n {
+        n: int = pin_net[q];
+        if (n >= 0) {
+            rn_order[net_first[n] + net_count[n]] = q;
+            net_count[n] = net_count[n] + 1
+        }
+    }
+    for n in 0..nets_n {
+        net_left[n] = 0;
+        k: int = net_count[n];
+        if (k >= 2) {
+            nets_wanted = nets_wanted + 1;
+            for j in 0..k {
+                rn_pin[j] = rn_order[net_first[n] + j];
+                rn_in[j] = false;
+                rn_best[j] = 1.0e30;
+                rn_from[j] = -1
+            }
+            rn_take(0, k);
+            more: bool = true;
+            while (more) {
+                best: int = -1;
+                for j in 0..k {
+                    if (!rn_in[j] && (best < 0 || rn_best[j] < rn_best[best])) best = j
+                }
+                if (best < 0) more = false else {
+                    if (wire_n < WIRES) {
+                        wire_a[wire_n] = rn_pin[rn_from[best]];
+                        wire_b[wire_n] = rn_pin[best];
+                        wire_n = wire_n + 1
+                    }
+                    net_left[n] = net_left[n] + 1;
+                    rn_take(best, k)
+                }
+            }
+            if (net_left[n] == 0) nets_done = nets_done + 1
+        }
+    }
+}
+
+// Pairs of pins Route all found no way between (see edit.l8), which the
+// ratsnest then joins some other way if it can.
+const AVOIDS: int = 256;
+
+avoid_a: []int = new int[AVOIDS](0);
+
+avoid_b: []int = new int[AVOIDS](0);
+
+avoid_n: int = 0;
+
+avoided(a: int, b: int): bool {
+    for k in 0..avoid_n {
+        if (avoid_a[k] == a && avoid_b[k] == b || avoid_a[k] == b && avoid_b[k] == a) return true
+    }
+    false
+}
+
+avoid(a: int, b: int) {
+    if (avoid_n < AVOIDS && !avoided(a, b)) {
+        avoid_a[avoid_n] = a;
+        avoid_b[avoid_n] = b;
+        avoid_n = avoid_n + 1
+    }
+}
+
+// Whether item i's copper is joined to item j's.
+joined(i: int, j: int): bool {
+    uf_root(i) == uf_root(j)
+}

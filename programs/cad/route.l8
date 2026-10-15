@@ -1,0 +1,1447 @@
+tag cad;
+
+use_tag std, gl, x11, skate;
+
+// Routes: the copper of a connection, said as what it is meant to do rather
+// than where each segment goes. A route runs from a pin to a pin of its net,
+// through any waypoints between (where a finger put them); it would rather
+// be on one layer (it takes the other where it must, by vias); and it is
+// either free or locked. Its copper is found by the router: the shortest
+// way, in straight runs and 45-degree turns, that keeps the rules' clearance
+// from every other net's copper and from the board's edge.
+//
+// The router searches a grid of cells (0.1 mm, or coarser on a big board)
+// on both layers at once, A* fashion: a step costs its length (more on the
+// layer the route would rather not use), a turn a little (a right angle
+// more than 45 degrees; sharper turns are not taken), and a via as much as
+// some length of track. It searches near the two points first, then wider.
+//
+// A route that cannot get through may push free routes aside: it searches
+// again letting itself cross their copper at a cost, takes their copper up
+// where it crosses, and they are routed again after it (and may push others
+// in turn, a few times at most). Locked routes are never moved.
+//
+// From a pin whose neighbours are too close for a track of full width to
+// pass (a QFN's), a route first leaves straight out along the pad, as wide
+// as the pad, until it is clear of the part's pads: its fan-out.
+const ROUTES: int = 1024;
+
+const RPTS: int = 32;
+
+routes_n: int = 0;
+
+ro_net: []int = new int[ROUTES](-1);
+
+ro_w: []f32 = new f32[ROUTES](0.25);
+
+ro_layer: []int = new int[ROUTES](0);
+
+ro_locked: []bool = new bool[ROUTES](false);
+
+ro_np: []int = new int[ROUTES](0);
+
+// Whether every leg found a way; and (while a part it ends on is dragged)
+// whether its copper is taken up, to be routed again.
+ro_ok: []bool = new bool[ROUTES](false);
+
+ro_stale: []bool = new bool[ROUTES](false);
+
+// A drop: a route from a pin of a poured net to the nearest place a via
+// can take it down into the pour (its second point is where that via is).
+ro_drop: []bool = new bool[ROUTES](false);
+
+// Its points: a pin (or -1), or else where the waypoint is and the layer
+// it must be on there (-1: either). Leg k goes from point k to k + 1.
+rp_pin: []int = new int[ROUTES * RPTS](-1);
+
+rp_x: []f32 = new f32[ROUTES * RPTS](0.0);
+
+rp_y: []f32 = new f32[ROUTES * RPTS](0.0);
+
+rp_layer: []int = new int[ROUTES * RPTS](-1);
+
+rl_ok: []bool = new bool[ROUTES * RPTS](false);
+
+// Where point k of route r is.
+point_x(r: int, k: int): f32 {
+    q: int = rp_pin[r * RPTS + k];
+    if (q >= 0) return pin_x[q];
+    rp_x[r * RPTS + k]
+}
+
+point_y(r: int, k: int): f32 {
+    q: int = rp_pin[r * RPTS + k];
+    if (q >= 0) return pin_y[q];
+    rp_y[r * RPTS + k]
+}
+
+// A new route from pin a to pin b, on net's preferred layer. Its number,
+// or -1.
+new_route(
+    net: int,
+    a: int,
+    b: int,
+    layer: int
+): int {
+    if (routes_n >= ROUTES) return -1;
+    r: int = routes_n;
+    routes_n = routes_n + 1;
+    ro_net[r] = net;
+    ro_w[r] = net_track_width(net);
+    ro_layer[r] = layer;
+    ro_locked[r] = false;
+    ro_ok[r] = false;
+    ro_stale[r] = false;
+    ro_drop[r] = false;
+    ro_np[r] = 2;
+    rp_pin[r * RPTS] = a;
+    rp_pin[r * RPTS + 1] = b;
+    rp_layer[r * RPTS] = -1;
+    rp_layer[r * RPTS + 1] = -1;
+    r
+}
+
+// A waypoint into route r as its point k (before what was k).
+insert_point(
+    r: int,
+    k: int,
+    x: f32,
+    y: f32
+): bool {
+    if (ro_np[r] >= RPTS || k < 1 || k > ro_np[r] - 1) return false;
+    base: int = r * RPTS;
+    i: int = ro_np[r];
+    while (i > k) {
+        rp_pin[base + i] = rp_pin[base + i - 1];
+        rp_x[base + i] = rp_x[base + i - 1];
+        rp_y[base + i] = rp_y[base + i - 1];
+        rp_layer[base + i] = rp_layer[base + i - 1];
+        i = i - 1
+    }
+    rp_pin[base + k] = -1;
+    rp_x[base + k] = x;
+    rp_y[base + k] = y;
+    rp_layer[base + k] = -1;
+    ro_np[r] = ro_np[r] + 1;
+    true
+}
+
+remove_point(r: int, k: int) {
+    if (k < 1 || k >= ro_np[r] - 1) return;
+    base: int = r * RPTS;
+    for i in k..ro_np[r] - 1 {
+        rp_pin[base + i] = rp_pin[base + i + 1];
+        rp_x[base + i] = rp_x[base + i + 1];
+        rp_y[base + i] = rp_y[base + i + 1];
+        rp_layer[base + i] = rp_layer[base + i + 1]
+    }
+    ro_np[r] = ro_np[r] - 1
+}
+
+// Route r's copper taken up.
+clear_route_copper(r: int) {
+    s: int = segs_n - 1;
+    while (s >= 0) {
+        if (sg_route[s] == r) remove_seg(s);
+        s = s - 1
+    }
+    v: int = vias_n - 1;
+    while (v >= 0) {
+        if (via_route[v] == r) remove_via(v);
+        v = v - 1
+    }
+    for k in 0..ro_np[r] rl_ok[r * RPTS + k] = false;
+    ro_ok[r] = false
+}
+
+// Route r gone: the last route takes its number.
+delete_route(r: int) {
+    clear_route_copper(r);
+    last: int = routes_n - 1;
+    if (r != last) {
+        ro_net[r] = ro_net[last];
+        ro_w[r] = ro_w[last];
+        ro_layer[r] = ro_layer[last];
+        ro_locked[r] = ro_locked[last];
+        ro_np[r] = ro_np[last];
+        ro_ok[r] = ro_ok[last];
+        ro_stale[r] = ro_stale[last];
+        ro_drop[r] = ro_drop[last];
+        for k in 0..RPTS {
+            rp_pin[r * RPTS + k] = rp_pin[last * RPTS + k];
+            rp_x[r * RPTS + k] = rp_x[last * RPTS + k];
+            rp_y[r * RPTS + k] = rp_y[last * RPTS + k];
+            rp_layer[r * RPTS + k] = rp_layer[last * RPTS + k];
+            rl_ok[r * RPTS + k] = rl_ok[last * RPTS + k]
+        }
+        for s in 0..segs_n {
+            if (sg_route[s] == last) sg_route[s] = r
+        }
+        for v in 0..vias_n {
+            if (via_route[v] == last) via_route[v] = r
+        }
+    }
+    routes_n = last
+}
+
+// Pins first up to first + count are going (their part is): routes to them
+// go too, and the pins after move down.
+routes_drop_pins(first: int, count: int) {
+    r: int = routes_n - 1;
+    while (r >= 0) {
+        gone: bool = false;
+        for k in 0..ro_np[r] {
+            q: int = rp_pin[r * RPTS + k];
+            if (q >= first && q < first + count) gone = true
+        }
+        if (gone) delete_route(r) else {
+            for k in 0..ro_np[r] {
+                q: int = rp_pin[r * RPTS + k];
+                if (q >= first + count) rp_pin[r * RPTS + k] = q - count
+            }
+        }
+        r = r - 1
+    }
+}
+
+// Whether route r ends on a pin of part p.
+route_on_part(r: int, p: int): bool {
+    for k in 0..ro_np[r] {
+        q: int = rp_pin[r * RPTS + k];
+        if (q >= 0 && pin_part[q] == p) return true
+    }
+    false
+}
+
+// After a board is read: which legs have copper.
+after_read() {
+    grid_setup();
+    for r in 0..routes_n {
+        for k in 0..ro_np[r] rl_ok[r * RPTS + k] = false;
+        ro_stale[r] = false
+    }
+    for s in 0..segs_n {
+        r: int = sg_route[s];
+        if (r >= 0 && r < routes_n && sg_leg[s] >= 0 && sg_leg[s] < RPTS) rl_ok[r * RPTS + sg_leg[s]] = true
+    }
+    for v in 0..vias_n {
+        if (via_route[v] >= routes_n) via_route[v] = -1
+    }
+    for r in 0..routes_n {
+        ok: bool = true;
+        for k in 0..ro_np[r] - 1 {
+            if (!rl_ok[r * RPTS + k]) ok = false
+        }
+        ro_ok[r] = ok
+    }
+    make_pours()
+}
+
+// ---- reading and writing ----
+// `route NET WIDTH top|bottom free|locked POINT...`: a point is a pin
+// (REF.PAD), or a waypoint `X Y`, with `t` or `b` after it if it must be on
+// the top or the bottom.
+read_route(t: []i8): bool {
+    if (routes_n >= ROUTES) return false;
+    r: int = routes_n;
+    net: int = word_net(t, 1);
+    ro_net[r] = net;
+    ro_w[r] = word_num(t, 2);
+    ro_layer[r] = TOP;
+    if (word_is(t, 3, "bottom")) ro_layer[r] = BOTTOM;
+    ro_locked[r] = word_is(t, 4, "locked");
+    ro_drop[r] = word_is(t, 5, "drop");
+    ro_np[r] = 0;
+    w: int = 5;
+    if (ro_drop[r]) w = 6;
+    base: int = r * RPTS;
+    while (w < words_n) {
+        c: int = t[word_from[w]] as int;
+        k: int = ro_np[r];
+        letter: bool = c >= 65 && c <= 90 || c >= 97 && c <= 122;
+        if (word_is(t, w, "t") || word_is(t, w, "b")) {
+            if (k > 0) {
+                if (word_is(t, w, "t")) rp_layer[base + k - 1] = TOP else rp_layer[base + k - 1] = BOTTOM
+            }
+            w = w + 1
+        } else if (k >= RPTS) return false else if (letter) {
+            q: int = find_pin(t, word_from[w], word_to[w]);
+            if (q < 0) return false;
+            rp_pin[base + k] = q;
+            rp_layer[base + k] = -1;
+            ro_np[r] = k + 1;
+            w = w + 1
+        } else {
+            rp_pin[base + k] = -1;
+            rp_x[base + k] = word_num(t, w);
+            rp_y[base + k] = word_num(t, w + 1);
+            rp_layer[base + k] = -1;
+            ro_np[r] = k + 1;
+            w = w + 2
+        }
+    }
+    if (ro_np[r] < 2) return false;
+    routes_n = r + 1;
+    true
+}
+
+write_routes() {
+    for r in 0..routes_n {
+        line_add("route ");
+        doc_net(ro_net[r]);
+        line_add(" ");
+        line_num(ro_w[r], 3);
+        if (ro_layer[r] == TOP) line_add(" top") else line_add(" bottom");
+        if (ro_locked[r]) line_add(" locked") else line_add(" free");
+        if (ro_drop[r]) line_add(" drop");
+        base: int = r * RPTS;
+        for k in 0..ro_np[r] {
+            line_add(" ");
+            q: int = rp_pin[base + k];
+            if (q >= 0) {
+                line_name(part_ref[pin_part[q]]);
+                line_add(".");
+                line_name(lp_name[pin_pad[q]])
+            } else {
+                line_num(rp_x[base + k], 3);
+                line_add(" ");
+                line_num(rp_y[base + k], 3);
+                if (rp_layer[base + k] == TOP) line_add(" t");
+                if (rp_layer[base + k] == BOTTOM) line_add(" b")
+            }
+        }
+        doc_line()
+    }
+}
+
+// ---- the grid ----
+const GRID_CELLS: int = 1048576;
+
+gr_g: f32 = 0.1;
+
+gr_nx: int = 1;
+
+gr_ny: int = 1;
+
+gr_x0: f32 = 0.0;
+
+gr_y0: f32 = 0.0;
+
+grid_setup() {
+    g: f32 = 0.1;
+    while ((brd_w / g + 1.0) * (brd_h / g + 1.0) > GRID_CELLS as f32) g = g * 1.25;
+    gr_g = g;
+    gr_nx = (brd_w / g) as int + 1;
+    gr_ny = (brd_h / g) as int + 1;
+    gr_x0 = -gr_nx as f32 * g * 0.5;
+    gr_y0 = -gr_ny as f32 * g * 0.5
+}
+
+cell_cx(i: int): f32 {
+    gr_x0 + (i as f32 + 0.5) * gr_g
+}
+
+cell_cy(j: int): f32 {
+    gr_y0 + (j as f32 + 0.5) * gr_g
+}
+
+cell_i(x: f32): int {
+    clampi(floorf((x - gr_x0) / gr_g) as int, 0, gr_nx - 1)
+}
+
+cell_j(y: f32): int {
+    clampi(floorf((y - gr_y0) / gr_g) as int, 0, gr_ny - 1)
+}
+
+clampi(v: int, lo: int, hi: int): int {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    v
+}
+
+// What is in each cell, for the route being searched: per layer (cell * 2
+// + layer), free (0), taken (1), or taken by a free route that may be
+// pushed aside (2, and which); and whether a via may go there, the same way.
+gr_blk: []i8 = new i8[GRID_CELLS * 2](0i8);
+
+gr_own: []i32 = new i32[GRID_CELLS * 2](0i32);
+
+// (A second free route in the same cell: both are taken up to go through.
+// A third makes it as good as taken.)
+gr_own2: []i32 = new i32[GRID_CELLS * 2](0i32);
+
+gr_via: []i8 = new i8[GRID_CELLS](0i8);
+
+gr_vown: []i32 = new i32[GRID_CELLS](0i32);
+
+// The window searched, in cells.
+wx0: int = 0;
+
+wy0: int = 0;
+
+wx1: int = 0;
+
+wy1: int = 0;
+
+set_window(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32
+) {
+    wx0 = cell_i(x0);
+    wy0 = cell_j(y0);
+    wx1 = cell_i(x1);
+    wy1 = cell_j(y1)
+}
+
+// How far item i's copper is from (x, y) (below 0 inside it).
+item_point_dist(i: int, x: f32, y: f32): f32 {
+    if (it_line[i]) return seg_point(it_ax[i], it_ay[i], it_bx[i], it_by[i], x, y) - it_r[i];
+    box_point(it_ax[i], it_ay[i], it_bx[i], it_by[i], x, y) - it_r[i]
+}
+
+// The route being found (for what it may push aside: see rip_ok).
+searching: int = -1;
+
+// What the window holds for a track of net, w wide.
+raster(net: int, w: f32) {
+    infl: f32 = rule_clear + w * 0.5 + 0.04;
+    vinfl: f32 = rule_clear + rule_via * 0.5 + 0.04;
+    ex: f32 = brd_w * 0.5 - 0.3 - w * 0.5;
+    ey: f32 = brd_h * 0.5 - 0.3 - w * 0.5;
+    vx: f32 = brd_w * 0.5 - 0.3 - rule_via * 0.5;
+    vy: f32 = brd_h * 0.5 - 0.3 - rule_via * 0.5;
+    for j in wy0..wy1 + 1 {
+        cy: f32 = cell_cy(j);
+        for i in wx0..wx1 + 1 {
+            c: int = j * gr_nx + i;
+            cx: f32 = cell_cx(i);
+            b: i8 = 0i8;
+            if (absf(cx) > ex || absf(cy) > ey) b = 1i8;
+            gr_blk[c * 2] = b;
+            gr_blk[c * 2 + 1] = b;
+            gr_own[c * 2] = -1i32;
+            gr_own[c * 2 + 1] = -1i32;
+            gr_own2[c * 2] = -1i32;
+            gr_own2[c * 2 + 1] = -1i32;
+            gr_via[c] = 0i8;
+            gr_vown[c] = -1i32;
+            if (absf(cx) > vx || absf(cy) > vy) gr_via[c] = 1i8
+        }
+    }
+    // (The parts that are not on this net keep the top under them, and
+    // vias, clear: only a part's own nets go in to its pads.)
+    for p in 0..parts_n {
+        if (!part_has_net(p, net)) block_court(p, w * 0.5 + 0.02, rule_via * 0.5 + 0.02) else if (inner_box(p)) block_box(ib_x,
+            ib_y, ib_hx + w * 0.5 + 0.02, ib_hy + w * 0.5 + 0.02, rule_via * 0.5 + 0.02)
+    }
+    // (Each crowded pin's way out, its fan-out, is kept for its own net:
+    // see needs_fanout.)
+    for q in 0..pins_n {
+        // (A pin on no net has nothing to leave by: its way out is free.)
+        if (pin_net[q] >= 0 && pin_net[q] != net && pin_layers[q] != 0 && needs_fanout(q,
+            net_track_width(pin_net[q]))) {
+            // (And on past its end, so a track of another net does not run
+            // across in front of it: each line out of a row goes straight
+            // out a while before any turns across the others.)
+            dx: f32 = esc_x - pin_x[q];
+            dy: f32 = esc_y - pin_y[q];
+            l: f32 = maxf(sqrtf(dx * dx + dy * dy), 0.001);
+            // (Only a chip's ring of lines going off: a connector's, or a
+            // poured net's drop, go no farther than the end.)
+            past: f32 = rule_clear + net_track_width(pin_net[q]) * 0.5;
+            if (ring_part(pin_part[q]) && pour_net[BOTTOM] != pin_net[q] && pour_net[TOP] != pin_net[q]) past = past + FAN_PAST;
+            // (Fan-outs sit exactly on a part's pitch, not between grid
+            // points: a hair of margin, not the grid's.)
+            block_line(pin_x[q], pin_y[q], esc_x + dx / l * past, esc_y + dy / l * past,
+                esc_w * 0.5 + rule_clear + w * 0.5 + 0.01, esc_w * 0.5 + rule_clear + rule_via * 0.5 + 0.01,
+                pin_layers[q])
+        }
+    }
+    wxa: f32 = cell_cx(wx0) - gr_g;
+    wxb: f32 = cell_cx(wx1) + gr_g;
+    wya: f32 = cell_cy(wy0) - gr_g;
+    wyb: f32 = cell_cy(wy1) + gr_g;
+    for it in 0..items_n {
+        layers: int = it_layers[it];
+        // (A bare hole keeps copper off both layers.)
+        if (layers == 0) layers = 3;
+        same: bool = net >= 0 && it_net[it] == net;
+        if (!same && it_x1[it] + vinfl >= wxa && it_x0[it] - vinfl <= wxb && it_y1[it] + vinfl >= wya && it_y0[it] - vinfl <= wyb) {
+            owner: int = -1;
+            if (it >= pins_n && it_route[it] >= 0 && rip_ok(it_route[it])) owner = it_route[it];
+            reach: f32 = maxf(infl, vinfl);
+            i0: int = maxi(cell_i(it_x0[it] - reach), wx0);
+            i1: int = mini(cell_i(it_x1[it] + reach), wx1);
+            j0: int = maxi(cell_j(it_y0[it] - reach), wy0);
+            j1: int = mini(cell_j(it_y1[it] + reach), wy1);
+            for j in j0..j1 + 1 {
+                cy: f32 = cell_cy(j);
+                for i in i0..i1 + 1 {
+                    d: f32 = item_point_dist(it, cell_cx(i), cy);
+                    c: int = j * gr_nx + i;
+                    if (d < infl) {
+                        for l in 0..2 {
+                            if ((layers & 1 << l) != 0) {
+                                k: int = c * 2 + l;
+                                if (owner < 0) gr_blk[k] = 1i8 else if (gr_blk[k] == 0i8) {
+                                    gr_blk[k] = 2i8;
+                                    gr_own[k] = owner trunc i32
+                                } else if (gr_blk[k] == 2i8 && gr_own[k] as int != owner) {
+                                    if (gr_own2[k] < 0i32 || gr_own2[k] as int == owner) gr_own2[k] = owner trunc i32 else gr_blk[k] = 1i8
+                                }
+                            }
+                        }
+                    }
+                    if (d < vinfl) {
+                        if (owner < 0 || gr_via[c] == 2i8 && gr_vown[c] as int != owner) gr_via[c] = 1i8 else if (gr_via[c] != 1i8) {
+                            gr_via[c] = 2i8;
+                            gr_vown[c] = owner trunc i32
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The cells within reach of the line from a to b taken, on layers; and
+// within vreach, kept from vias.
+block_line(
+    ax: f32,
+    ay: f32,
+    bx: f32,
+    by: f32,
+    reach: f32,
+    vreach: f32,
+    layers: int
+) {
+    far: f32 = maxf(reach, vreach);
+    i0: int = maxi(cell_i(minf(ax, bx) - far), wx0);
+    i1: int = mini(cell_i(maxf(ax, bx) + far), wx1);
+    j0: int = maxi(cell_j(minf(ay, by) - far), wy0);
+    j1: int = mini(cell_j(maxf(ay, by) + far), wy1);
+    for j in j0..j1 + 1 {
+        cy: f32 = cell_cy(j);
+        for i in i0..i1 + 1 {
+            d: f32 = seg_point(ax, ay, bx, by, cell_cx(i), cy);
+            c: int = j * gr_nx + i;
+            if (d < reach) {
+                for l in 0..2 {
+                    if ((layers & 1 << l) != 0) gr_blk[c * 2 + l] = 1i8
+                }
+            }
+            if (d < vreach) gr_via[c] = 1i8
+        }
+    }
+}
+
+// A box (middle, half size) taken on the top, and kept from vias grown by
+// vreach more: a QFN's ring, for its own nets too (see inner_box).
+block_box(
+    cx: f32,
+    cy: f32,
+    hx: f32,
+    hy: f32,
+    vreach: f32
+) {
+    i0: int = maxi(cell_i(cx - hx - vreach), wx0);
+    i1: int = mini(cell_i(cx + hx + vreach), wx1);
+    j0: int = maxi(cell_j(cy - hy - vreach), wy0);
+    j1: int = mini(cell_j(cy + hy + vreach), wy1);
+    if (i0 > i1 || j0 > j1) return;
+    for j in j0..j1 + 1 {
+        y: f32 = cell_cy(j);
+        for i in i0..i1 + 1 {
+            x: f32 = cell_cx(i);
+            c: int = j * gr_nx + i;
+            if (absf(x - cx) < hx && absf(y - cy) < hy) gr_blk[c * 2] = 1i8;
+            if (absf(x - cx) < hx + vreach && absf(y - cy) < hy + vreach) gr_via[c] = 1i8
+        }
+    }
+}
+
+// Part p's courtyard taken on the top, grown by reach; and kept from vias,
+// grown by vreach.
+block_court(p: int, reach: f32, vreach: f32) {
+    rc: f32 = fp_court_r[part_fp[p]];
+    far: f32 = maxf(reach, vreach);
+    i0: int = maxi(cell_i(court_x0(p) - far), wx0);
+    i1: int = mini(cell_i(court_x1(p) + far), wx1);
+    j0: int = maxi(cell_j(court_y0(p) - far), wy0);
+    j1: int = mini(cell_j(court_y1(p) + far), wy1);
+    if (i0 > i1 || j0 > j1) return;
+    cx: f32 = (court_x0(p) + court_x1(p)) * 0.5;
+    cy: f32 = (court_y0(p) + court_y1(p)) * 0.5;
+    hx: f32 = (court_x1(p) - court_x0(p)) * 0.5;
+    hy: f32 = (court_y1(p) - court_y0(p)) * 0.5;
+    for j in j0..j1 + 1 {
+        y: f32 = cell_cy(j);
+        for i in i0..i1 + 1 {
+            x: f32 = cell_cx(i);
+            d: f32 = 0.0;
+            if (rc > 0.0) d = sqrtf((x - part_x[p]) * (x - part_x[p]) + (y - part_y[p]) * (y - part_y[p])) - rc else d = box_point(cx,
+                cy, hx, hy, x, y);
+            c: int = j * gr_nx + i;
+            if (d < reach) gr_blk[c * 2] = 1i8;
+            if (d < vreach) gr_via[c] = 1i8
+        }
+    }
+}
+
+// ---- the search ----
+const STATES: int = GRID_CELLS * 2;
+
+const HEAP: int = 3000000;
+
+st_g: []f32 = new f32[STATES](0.0);
+
+st_par: []i32 = new i32[STATES](0i32);
+
+st_seen: []i32 = new i32[STATES](0i32);
+
+st_dir: []i8 = new i8[STATES](0i8);
+
+search_id: int = 0;
+
+hp_key: []f32 = new f32[HEAP](0.0);
+
+hp_val: []i32 = new i32[HEAP](0i32);
+
+hp_n: int = 0;
+
+hp_push(key: f32, v: int) {
+    if (hp_n >= HEAP) return;
+    i: int = hp_n;
+    hp_n = hp_n + 1;
+    while (i > 0) {
+        p: int = (i - 1) / 2;
+        if (hp_key[p] <= key) {
+            hp_key[i] = key;
+            hp_val[i] = v trunc i32;
+            return
+        }
+        hp_key[i] = hp_key[p];
+        hp_val[i] = hp_val[p];
+        i = p
+    }
+    hp_key[0] = key;
+    hp_val[0] = v trunc i32
+}
+
+// The least, taken off (its key in hp_top).
+hp_top: f32 = 0.0;
+
+hp_pop(): int {
+    v: int = hp_val[0] as int;
+    hp_top = hp_key[0];
+    hp_n = hp_n - 1;
+    if (hp_n == 0) return v;
+    key: f32 = hp_key[hp_n];
+    val: i32 = hp_val[hp_n];
+    i: int = 0;
+    while (true) {
+        a: int = 2 * i + 1;
+        if (a >= hp_n) {
+            hp_key[i] = key;
+            hp_val[i] = val;
+            return v
+        }
+        if (a + 1 < hp_n && hp_key[a + 1] < hp_key[a]) a = a + 1;
+        if (hp_key[a] >= key) {
+            hp_key[i] = key;
+            hp_val[i] = val;
+            return v
+        }
+        hp_key[i] = hp_key[a];
+        hp_val[i] = hp_val[a];
+        i = a
+    }
+    v
+}
+
+// The eight ways, counterclockwise from east.
+DIR_I: []int = [1, 1, 0, -1, -1, -1, 0, 1];
+
+DIR_J: []int = [0, 1, 1, 1, 0, -1, -1, -1];
+
+// What a turn costs (in mm of track), and a via, and crossing a free route
+// (per cell; only when pushing aside), and the other layer (as much more a
+// millimetre of it costs).
+const TURN_45: f32 = 0.12;
+
+const TURN_90: f32 = 0.5;
+
+const VIA_COST: f32 = 2.0;
+
+const SOFT_COST: f32 = 1.2;
+
+const OTHER_LAYER: f32 = 0.8;
+
+// How much the search leans toward the goal: over 1, it looks at far fewer
+// cells, for a way a little longer than the shortest at worst.
+const HEUR_WEIGHT: f32 = 1.3;
+
+// (How much later a diagonal would rather come, per millimetre it is from
+// the goal; see search.)
+const JOG_LATE: f32 = 0.01;
+
+// The most cells one search looks at before it gives up (so that a way
+// that is not there costs a bounded time, on a phone too).
+const SEARCH_LIMIT: int = 150000;
+
+const SEARCH_LIMIT_WIDE: int = 300000;
+
+// The limit for the search being made: the wide one for the widest tries.
+search_limit: int = SEARCH_LIMIT;
+
+// The goal: its cell, and the layers it may be reached on.
+goal_i: int = 0;
+
+goal_j: int = 0;
+
+goal_mask: int = 3;
+
+goal_state: int = -1;
+
+// Whether the search's start, and its goal, are the middle of a pad of the
+// route's own (and so free whatever is near).
+free_start: bool = false;
+
+free_goal: bool = false;
+
+// Whether the search is for a drop: any place a via can go down into the
+// pour on the bottom.
+goal_drop: bool = false;
+
+heur(c: int): f32 {
+    if (goal_drop) return 0.0;
+    di: int = absi(c % gr_nx - goal_i);
+    dj: int = absi(c / gr_nx - goal_j);
+    lo: int = mini(di, dj);
+    hi: int = maxi(di, dj);
+    ((hi - lo) as f32 + 1.4142 * lo as f32) * gr_g
+}
+
+absi(v: int): int {
+    if (v < 0) return -v;
+    v
+}
+
+relax(
+    s: int,
+    cost: f32,
+    from: int,
+    d: int
+) {
+    if (st_seen[s] as int == search_id && st_g[s] <= cost + 0.00001) return;
+    st_seen[s] = search_id trunc i32;
+    st_g[s] = cost;
+    st_par[s] = from trunc i32;
+    st_dir[s] = d trunc i8;
+    hp_push(cost + HEUR_WEIGHT * heur(s / 2), s)
+}
+
+// Search from (sx, sy) on the layers smask to (tx, ty) on tmask, for a
+// route preferring layer pref; through free routes' copper too if push.
+search(
+    sx: f32,
+    sy: f32,
+    smask: int,
+    tx: f32,
+    ty: f32,
+    tmask: int,
+    pref: int,
+    push: bool
+): bool {
+    search_id = search_id + 1;
+    hp_n = 0;
+    goal_i = cell_i(tx);
+    goal_j = cell_j(ty);
+    goal_mask = tmask;
+    goal_state = -1;
+    si: int = cell_i(sx);
+    sj: int = cell_j(sy);
+    // (An end in the middle of its own pad is never in the way, though a
+    // neighbouring pad's clearance may reach it: it is where it must go.)
+    for l in 0..2 {
+        sc: int = (sj * gr_nx + si) * 2 + l;
+        tc: int = (goal_j * gr_nx + goal_i) * 2 + l;
+        if (free_start && (smask & 1 << l) != 0) gr_blk[sc] = 0i8;
+        if (free_goal && (tmask & 1 << l) != 0) gr_blk[tc] = 0i8
+    }
+    for l in 0..2 {
+        sb: int = gr_blk[(sj * gr_nx + si) * 2 + l] as int;
+        if ((smask & 1 << l) != 0 && (sb == 0 || sb == 2 && push)) relax((sj * gr_nx + si) * 2 + l,
+            0.0, -1, 8)
+    }
+    pops: int = 0;
+    while (hp_n > 0 && pops < search_limit) {
+        pops = pops + 1;
+        s: int = hp_pop();
+        c: int = s / 2;
+        l: int = s % 2;
+        // (A stale entry: this state has since been reached for less.)
+        if (hp_top <= st_g[s] + HEUR_WEIGHT * heur(c) + 0.0001) {
+            i: int = c % gr_nx;
+            j: int = c / gr_nx;
+            if (!goal_drop && i == goal_i && j == goal_j && (goal_mask & 1 << l) != 0 || goal_drop && gr_via[c] == 0i8 && pm[c * 2 + 1] == 1i8) {
+                goal_state = s;
+                return true
+            }
+            g: f32 = st_g[s];
+            pd: int = st_dir[s] as int;
+            factor: f32 = 1.0;
+            if (l != pref) factor = 1.0 + OTHER_LAYER;
+            for d in 0..8 {
+                turn: f32 = 0.0;
+                ok: bool = true;
+                if (pd < 8) {
+                    diff: int = absi(pd - d);
+                    if (diff > 4) diff = 8 - diff;
+                    if (diff == 1) turn = TURN_45;
+                    if (diff == 2) turn = TURN_90;
+                    if (diff > 2) ok = false
+                }
+                ni: int = i + DIR_I[d];
+                nj: int = j + DIR_J[d];
+                if (ok && ni >= wx0 && ni <= wx1 && nj >= wy0 && nj <= wy1) {
+                    ns: int = (nj * gr_nx + ni) * 2 + l;
+                    b: int = gr_blk[ns] as int;
+                    if (b == 0 || b == 2 && push) {
+                        step: f32 = gr_g;
+                        // (A diagonal costs a hair more the farther it is
+                        // from the goal: a bus's tracks jog late, near the
+                        // end they go to, each just short of where the one
+                        // before jogged, like stairs.)
+                        if ((d & 1) == 1) step = gr_g * 1.4142 + gr_g * JOG_LATE * heur(ns / 2);
+                        cost: f32 = g + step * factor + turn;
+                        if (b == 2) cost = cost + SOFT_COST;
+                        relax(ns, cost, s, d)
+                    }
+                }
+            }
+            // A via, to the other layer.
+            vb: int = gr_via[c] as int;
+            other: int = s ^ 1;
+            ob: int = gr_blk[other] as int;
+            if ((vb == 0 || vb == 2 && push) && (ob == 0 || ob == 2 && push)) {
+                cost2: f32 = g + VIA_COST;
+                if (vb == 2 || ob == 2) cost2 = cost2 + SOFT_COST;
+                relax(other, cost2, s, 8)
+            }
+        }
+    }
+    false
+}
+
+// ---- pushing aside ----
+// Within one routing (see route_assisted): the route it began with, and how
+// often each route has been taken up, and those taken up and waiting.
+rip_origin: int = -1;
+
+rip_count: []int = new int[ROUTES](0);
+
+rip_queue: []int = new int[ROUTES * 4](0);
+
+rip_n: int = 0;
+
+// Whether route o may be pushed aside now.
+rip_ok(o: int): bool {
+    o >= 0 && o < routes_n && !ro_locked[o] && o != searching && o != rip_origin && rip_count[o] < 2 && (searching < 0 || route_class(o) >= route_class(searching))
+}
+
+// How much a route matters when space is short: signals (0) before power
+// (1, wide, and able to go round) before a poured net (2, which mostly
+// drops into its pour). A route pushes aside only routes of its own class
+// or after.
+route_class(r: int): int {
+    n: int = ro_net[r];
+    if (ro_drop[r] || n >= 0 && (pour_net[TOP] == n || pour_net[BOTTOM] == n)) return 2;
+    if (n >= 0 && net_track_width(n) > rule_track + 0.001) return 1;
+    0
+}
+
+rip(o: int) {
+    clear_route_copper(o);
+    rip_count[o] = rip_count[o] + 1;
+    if (rip_n < len(rip_queue)) {
+        rip_queue[rip_n] = o;
+        rip_n = rip_n + 1
+    }
+}
+
+// ---- laying what was found ----
+// The path's states, from its start.
+const PATH: int = 400000;
+
+path_s: []i32 = new i32[PATH](0i32);
+
+path_n: int = 0;
+
+take_path() {
+    path_n = 0;
+    s: int = goal_state;
+    while (s >= 0 && path_n < PATH) {
+        path_s[path_n] = s trunc i32;
+        path_n = path_n + 1;
+        s = st_par[s] as int
+    }
+    // (It was read from the goal back: turned round.)
+    for k in 0..path_n / 2 {
+        t: i32 = path_s[k];
+        path_s[k] = path_s[path_n - 1 - k];
+        path_s[path_n - 1 - k] = t
+    }
+}
+
+// The free routes the path goes through: taken up.
+rip_along_path() {
+    for k in 0..path_n {
+        s: int = path_s[k] as int;
+        if (gr_blk[s] == 2i8) {
+            o: int = gr_own[s] as int;
+            if (rip_ok(o)) rip(o);
+            o4: int = gr_own2[s] as int;
+            if (o4 >= 0 && rip_ok(o4)) rip(o4)
+        }
+        if (k > 0 && path_s[k - 1] as int == (s ^ 1)) {
+            c: int = s / 2;
+            if (gr_via[c] == 2i8) {
+                o2: int = gr_vown[c] as int;
+                if (rip_ok(o2)) rip(o2)
+            }
+            if (gr_blk[s ^ 1] == 2i8) {
+                o3: int = gr_own[s ^ 1] as int;
+                if (rip_ok(o3)) rip(o3);
+                o5: int = gr_own2[s ^ 1] as int;
+                if (o5 >= 0 && rip_ok(o5)) rip(o5)
+            }
+        }
+    }
+}
+
+lay(
+    r: int,
+    leg: int,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    w: f32,
+    layer: int
+) {
+    if (absf(x1 - x0) + absf(y1 - y0) < 0.0001) return;
+    s: int = add_seg(x0, y0, x1, y1, w, layer, ro_net[r]);
+    if (s >= 0) {
+        sg_route[s] = r;
+        sg_leg[s] = leg
+    }
+}
+
+lay_via(r: int, x: f32, y: f32) {
+    v: int = add_via(x, y, ro_net[r]);
+    if (v >= 0) via_route[v] = r
+}
+
+// The width the route is laid at (its own, or necked down).
+lay_width: f32 = 0.25;
+
+// The path as copper for leg `leg` of route r: from (ax, ay) through the
+// cells to (bx, by), one segment for each straight run, a via where it
+// changes layer.
+lay_path(
+    r: int,
+    leg: int,
+    ax: f32,
+    ay: f32,
+    bx: f32,
+    by: f32
+) {
+    w: f32 = lay_width;
+    // (The run so far: from where, on which layer, which way.)
+    px: f32 = ax;
+    py: f32 = ay;
+    s0: int = path_s[0] as int;
+    l: int = s0 % 2;
+    run_di: int = 0;
+    run_dj: int = 0;
+    run_set: bool = false;
+    prev_x: f32 = ax;
+    prev_y: f32 = ay;
+    for k in 1..path_n + 1 {
+        x: f32 = bx;
+        y: f32 = by;
+        nl: int = l;
+        if (k < path_n) {
+            s: int = path_s[k] as int;
+            c: int = s / 2;
+            x = cell_cx(c % gr_nx);
+            y = cell_cy(c / gr_nx);
+            nl = s % 2
+        }
+        if (nl != l) {
+            lay(r, leg, px, py, prev_x, prev_y, w, l);
+            lay_via(r, prev_x, prev_y);
+            px = prev_x;
+            py = prev_y;
+            l = nl;
+            run_set = false
+        } else {
+            di: int = sgn(x - prev_x);
+            dj: int = sgn(y - prev_y);
+            if (di != 0 || dj != 0) {
+                if (run_set && (di != run_di || dj != run_dj)) {
+                    lay(r, leg, px, py, prev_x, prev_y, w, l);
+                    px = prev_x;
+                    py = prev_y
+                }
+                run_di = di;
+                run_dj = dj;
+                run_set = true
+            }
+            prev_x = x;
+            prev_y = y
+        }
+    }
+    lay(r, leg, px, py, prev_x, prev_y, w, l)
+}
+
+sgn(v: f32): int {
+    if (v > 0.02) return 1;
+    if (v < -0.02) return -1;
+    0
+}
+
+// ---- fan-out ----
+// How far past its fan-out a crowded pin's way out is kept for it.
+const FAN_PAST: f32 = 0.4;
+
+// Whether a route w wide leaving pin q must first fan out; if so where it
+// is clear (esc_x, esc_y) and how wide it goes until there.
+esc_x: f32 = 0.0;
+
+esc_y: f32 = 0.0;
+
+esc_w: f32 = 0.0;
+
+// Whether a fan-out goes the other way, into the part (when the way out is
+// taken: a connector's pin can often go in under its body).
+fan_flip: bool = false;
+
+// How far apart the pin and its nearest crowding neighbour are.
+fan_pitch: f32 = 1000.0;
+
+// The widest track that can leave a fanned-out pin past its neighbours'
+// fan-outs (stubs as wide as their pads), and run beside theirs, as a
+// person necks tracks down at a fine-pitch part: 0.2 mm at 0.4 mm pitch.
+neck_width(q: int, w: f32): f32 {
+    if (!needs_fanout(q, w)) return w;
+    // (Side by side at the part's pitch, with room for the router's grid:
+    // the pitch less the clearance and a little.)
+    // (Never thinner than a fabricator can make, 0.1 mm.)
+    maxf(minf(minf(w, 2.0 * (fan_pitch - rule_clear) - esc_w - 0.06), fan_pitch - rule_clear - 0.05),
+        0.1)
+}
+
+needs_fanout(q: int, w: f32): bool {
+    p: int = pin_part[q];
+    f: int = part_fp[p];
+    crowded: bool = false;
+    first: int = part_pin0[p];
+    fan_pitch = 1000.0;
+    for o in first..first + fp_npads[f] {
+        // (A pad in the very same place is the same copper, not a
+        // neighbour: a USB-C socket's A4 and B9.)
+        same_place: bool = absf(pin_x[o] - pin_x[q]) + absf(pin_y[o] - pin_y[q]) < 0.01;
+        if (o != q && pin_layers[o] != 0 && !same_place) {
+            dx: f32 = maxf(absf(pin_x[o] - pin_x[q]) - pin_hw[o] - pin_hw[q], 0.0);
+            dy: f32 = maxf(absf(pin_y[o] - pin_y[q]) - pin_hh[o] - pin_hh[q], 0.0);
+            if (sqrtf(dx * dx + dy * dy) < w + 2.0 * rule_clear) {
+                crowded = true;
+                cx: f32 = pin_x[o] - pin_x[q];
+                cy: f32 = pin_y[o] - pin_y[q];
+                fan_pitch = minf(fan_pitch, sqrtf(cx * cx + cy * cy))
+            }
+        }
+    }
+    if (!crowded) return false;
+    // Out along the pad's long side, away from the part's middle, past
+    // the farthest of its pads that way.
+    along_x: bool = pin_hw[q] > pin_hh[q];
+    side: f32 = 0.0;
+    if (along_x) side = signf(pin_x[q] - part_x[p]) else side = signf(pin_y[q] - part_y[p]);
+    if (absf(side) < 0.5) return false;
+    far: f32 = -1000000.0;
+    if (fan_flip) {
+        // (The other way, into the part: just past its own pad's end.)
+        side = -side;
+        if (along_x) far = side * pin_x[q] + pin_hw[q] else far = side * pin_y[q] + pin_hh[q]
+    } else {
+        for o in first..first + fp_npads[f] {
+            if (pin_layers[o] != 0) {
+                if (along_x) far = maxf(far, side * pin_x[o] + pin_hw[o]) else far = maxf(far,
+                    side * pin_y[o] + pin_hh[o])
+            }
+        }
+    }
+    reach: f32 = far + rule_clear + w * 0.5 + 0.05;
+    if (along_x) {
+        esc_x = side * reach;
+        esc_y = pin_y[q]
+    } else {
+        esc_x = pin_x[q];
+        esc_y = side * reach
+    }
+    esc_w = minf(w, 2.0 * minf(pin_hw[q], pin_hh[q]));
+    true
+}
+
+// (A leg already made, by a strap.)
+continue_leg: bool = false;
+
+// A strap from pin a's pad to pin b's, of the same part, as wide as the
+// narrower pad allows (and the route), laid if it keeps clear of all else.
+strap(
+    r: int,
+    a: int,
+    b: int,
+    w: f32
+): bool {
+    if (pin_part[a] != pin_part[b] || (pin_layers[a] & pin_layers[b] & 1) == 0) return false;
+    sw: f32 = minf(w, 2.0 * minf(minf(pin_hw[a], pin_hh[a]), minf(pin_hw[b], pin_hh[b])));
+    // (Not across a QFN's ring: a corner's two pads would cut through it.)
+    // (Into the part's own middle pad is the one way in: a ground pin
+    // strapped to the exposed pad it is joined to anyway.)
+    into_middle: bool = is_middle(a) || is_middle(b);
+    if (!into_middle && inner_box(pin_part[a]) && box_seg(ib_x, ib_y, ib_hx, ib_hy,
+        pin_x[a], pin_y[a], pin_x[b], pin_y[b]) < sw * 0.5 + 0.001) return false;
+    // (Into a middle pad: straight in from the pin to the pad's nearest
+    // edge, not across to its middle, past the neighbours.)
+    ax: f32 = pin_x[a];
+    ay: f32 = pin_y[a];
+    bx: f32 = pin_x[b];
+    by: f32 = pin_y[b];
+    if (is_middle(b)) {
+        bx = clampf(ax, pin_x[b] - pin_hw[b] + sw, pin_x[b] + pin_hw[b] - sw);
+        by = clampf(ay, pin_y[b] - pin_hh[b] + sw, pin_y[b] + pin_hh[b] - sw)
+    } else if (is_middle(a)) {
+        ax = clampf(bx, pin_x[a] - pin_hw[a] + sw, pin_x[a] + pin_hw[a] - sw);
+        ay = clampf(by, pin_y[a] - pin_hh[a] + sw, pin_y[a] + pin_hh[a] - sw)
+    }
+    t: int = ITEMS - 1;
+    set_line_item(t, ax, ay, bx, by, sw * 0.5, 1, ro_net[r]);
+    for i in 0..items_n {
+        if (i != a && i != b && (it_layers[i] & 1) != 0 && (it_net[i] != ro_net[r] || ro_net[r] < 0) && it_x0[i] <= it_x1[t] + rule_clear && it_x0[t] <= it_x1[i] + rule_clear && it_y0[i] <= it_y1[t] + rule_clear && it_y0[t] <= it_y1[i] + rule_clear) {
+            if (item_gap(i, t) < rule_clear + 0.005) return false
+        }
+    }
+    lay(r, 0, ax, ay, bx, by, sw, TOP);
+    true
+}
+
+// Whether pin q is its part's middle pad (a QFN's exposed pad).
+is_middle(q: int): bool {
+    p: int = pin_part[q];
+    absf(pin_x[q] - part_x[p]) < 0.01 && absf(pin_y[q] - part_y[p]) < 0.01 && fp_npads[part_fp[p]] > 8
+}
+
+// Part p's middle pad, if it is on net n; or -1.
+middle_on(p: int, n: int): int {
+    first: int = part_pin0[p];
+    for q in first..first + fp_npads[part_fp[p]] {
+        if (is_middle(q) && pin_net[q] == n) return q
+    }
+    -1
+}
+
+// ---- routing a route ----
+// The searches a leg tries, in turn: how far round its ends each looks, and
+// whether it may push free routes aside.
+TRY_MARGIN: []f32 = [2.5, 8.0, 8.0, 20.0, 20.0];
+
+TRY_PUSH: []bool = [false, false, true, false, true];
+
+// Route r's copper found again from its points, leg by leg. With push, a
+// leg with no way may take free routes up (see rip). Whether every leg got
+// through.
+route_route(r: int, push: bool): bool {
+    clear_route_copper(r);
+    ro_stale[r] = false;
+    searching = r;
+    width: f32 = ro_w[r];
+    base: int = r * RPTS;
+    np: int = ro_np[r];
+    // (Narrower, if it must be, to leave a fine-pitch part.)
+    for k in 0..np {
+        if (rp_pin[base + k] >= 0) width = minf(width, neck_width(rp_pin[base + k],
+            ro_w[r]))
+    }
+    all: bool = true;
+    // The layers the next leg may start on.
+    from_mask: int = 3;
+    for k in 0..np - 1 {
+        load_items();
+        a: int = base + k;
+        b: int = base + k + 1;
+        ax: f32 = point_x(r, k);
+        ay: f32 = point_y(r, k);
+        bx: f32 = point_x(r, k + 1);
+        by: f32 = point_y(r, k + 1);
+        amask: int = from_mask;
+        bmask: int = 3;
+        a_fan: bool = false;
+        b_fan: bool = false;
+        afx: f32 = 0.0;
+        afy: f32 = 0.0;
+        afw: f32 = 0.0;
+        free_start = false;
+        free_goal = false;
+        if (rp_pin[a] >= 0) {
+            q: int = rp_pin[a];
+            free_start = true;
+            amask = pin_layers[q];
+            if (amask == 0) amask = 3;
+            if (needs_fanout(q, width)) {
+                free_start = false;
+                a_fan = true;
+                afx = esc_x;
+                afy = esc_y;
+                afw = esc_w;
+                ax = esc_x;
+                ay = esc_y
+            }
+        } else if (rp_layer[a] >= 0) amask = 1 << rp_layer[a];
+        bfx: f32 = 0.0;
+        bfy: f32 = 0.0;
+        bfw: f32 = 0.0;
+        if (rp_pin[b] >= 0) {
+            q2: int = rp_pin[b];
+            free_goal = true;
+            bmask = pin_layers[q2];
+            if (bmask == 0) bmask = 3;
+            if (needs_fanout(q2, width)) {
+                free_goal = false;
+                b_fan = true;
+                bfx = esc_x;
+                bfy = esc_y;
+                bfw = esc_w;
+                bx = esc_x;
+                by = esc_y
+            }
+        } else if (rp_layer[b] >= 0) bmask = 1 << rp_layer[b];
+        // A drop: from the pin to the nearest place a via can go down into
+        // the pour, looked for near it.
+        if (ro_drop[r]) {
+            goal_drop = true;
+            set_window(ax - 4.0, ay - 4.0, ax + 4.0, ay + 4.0);
+            raster(ro_net[r], width);
+            got: bool = search(ax, ay, amask, ax, ay, 3, TOP, false);
+            if (!got && a_fan) {
+                fan_flip = true;
+                if (needs_fanout(rp_pin[a], width)) {
+                    afx = esc_x;
+                    afy = esc_y;
+                    ax = esc_x;
+                    ay = esc_y;
+                    set_window(ax - 4.0, ay - 4.0, ax + 4.0, ay + 4.0);
+                    raster(ro_net[r], width);
+                    got = search(ax, ay, amask, ax, ay, 3, TOP, false)
+                }
+                fan_flip = false
+            }
+            goal_drop = false;
+            if (got) {
+                take_path();
+                gs: int = path_s[path_n - 1] as int;
+                vx: f32 = cell_cx(gs / 2 % gr_nx);
+                vy: f32 = cell_cy(gs / 2 / gr_nx);
+                rp_x[b] = vx;
+                rp_y[b] = vy;
+                lay_width = width;
+                l0d: int = path_s[0] as int % 2;
+                if (a_fan) lay(r, k, point_x(r, k), point_y(r, k), afx, afy, afw,
+                    l0d);
+                lay_path(r, k, ax, ay, vx, vy);
+                lay_via(r, vx, vy);
+                rl_ok[a] = true
+            } else {
+                rl_ok[a] = false;
+                all = false
+            }
+            continue_leg = true
+        }
+        // Two pins of one part, side by side: a strap straight between
+        // their pads, if nothing is in the way.
+        if (np == 2 && rp_pin[a] >= 0 && rp_pin[b] >= 0 && strap(r, rp_pin[a], rp_pin[b],
+            width)) {
+            rl_ok[a] = true;
+            continue_leg = true
+        }
+        // Near the two ends first, then wider; pushing free routes aside
+        // only when the near ways are all taken, and never searching the
+        // whole of a big board (a search with no way through looks at
+        // every cell it may).
+        found: bool = false;
+        tries: int = 0;
+        if (continue_leg) tries = 5;
+        while (!found && tries < 5) {
+            margin: f32 = TRY_MARGIN[tries];
+            pushing: bool = TRY_PUSH[tries];
+            if (!pushing || push) {
+                search_limit = SEARCH_LIMIT;
+                if (tries >= 3) search_limit = SEARCH_LIMIT_WIDE;
+                set_window(minf(ax, bx) - margin, minf(ay, by) - margin, maxf(ax,
+                    bx) + margin, maxf(ay, by) + margin);
+                raster(ro_net[r], width);
+                found = search(ax, ay, amask, bx, by, bmask, ro_layer[r], pushing);
+                if (found) {
+                    take_path();
+                    if (pushing) rip_along_path()
+                }
+            }
+            tries = tries + 1
+        }
+        search_limit = SEARCH_LIMIT;
+        // Still no way, from a pin that fans out: the other way, into the
+        // part.
+        if (!continue_leg && !found && (a_fan || b_fan)) {
+            fan_flip = true;
+            if (a_fan && needs_fanout(rp_pin[a], width)) {
+                afx = esc_x;
+                afy = esc_y;
+                ax = esc_x;
+                ay = esc_y
+            }
+            if (b_fan && needs_fanout(rp_pin[b], width)) {
+                bfx = esc_x;
+                bfy = esc_y;
+                bx = esc_x;
+                by = esc_y
+            }
+            fan_flip = false;
+            set_window(minf(ax, bx) - 8.0, minf(ay, by) - 8.0, maxf(ax, bx) + 8.0,
+                maxf(ay, by) + 8.0);
+            raster(ro_net[r], width);
+            found = search(ax, ay, amask, bx, by, bmask, ro_layer[r], false);
+            if (found) take_path()
+        }
+        if (continue_leg) continue_leg = false else if (found) {
+            lay_width = width;
+            l0: int = path_s[0] as int % 2;
+            l1: int = path_s[path_n - 1] as int % 2;
+            if (a_fan) lay(r, k, point_x(r, k), point_y(r, k), afx, afy, afw, l0);
+            lay_path(r, k, ax, ay, bx, by);
+            if (b_fan) lay(r, k, bfx, bfy, point_x(r, k + 1), point_y(r, k + 1), bfw,
+                l1);
+            rl_ok[a] = true;
+            from_mask = 1 << l1
+        } else {
+            rl_ok[a] = false;
+            all = false;
+            from_mask = 3
+        }
+    }
+    searching = -1;
+    ro_ok[r] = all;
+    all
+}
+
+// Route r, pushing free routes aside if it must, and those routed again
+// after it (pushing others, a little). Whether r got through; how many
+// routes were left with no way (fails).
+fails: int = 0;
+
+route_assisted(r: int): bool {
+    rip_origin = r;
+    for o in 0..routes_n rip_count[o] = 0;
+    rip_n = 0;
+    ok: bool = route_route(r, true);
+    budget: int = 10;
+    rerouted: int = 0;
+    head: int = 0;
+    while (head < rip_n && budget > 0) {
+        o: int = rip_queue[head];
+        head = head + 1;
+        if (route_route(o, true)) rerouted = rerouted + 1;
+        budget = budget - 1
+    }
+    // (What was pushed aside and found no way again.)
+    fails = rip_n - rerouted;
+    rip_origin = -1;
+    ok
+}
+
+// A connection from pin a to pin b routed: a new route, on the preferred
+// layer. The route, or -1 (if it could not be made).
+connect_pins(a: int, b: int, layer: int): int {
+    n: int = pin_net[a];
+    if (n < 0) n = pin_net[b];
+    // (A net poured on the bottom: the pin not yet on the pour drops to it.
+    // Both on it, the pour is in pieces: they are joined as any two pins.)
+    if (n >= 0 && pour_net[BOTTOM] == n && !(pin_on_pour(a) && pin_on_pour(b))) {
+        q: int = a;
+        if (pin_on_pour(a)) q = b;
+        // (A pin of a QFN whose exposed pad is on its net: strapped into it.)
+        mid: int = middle_on(pin_part[q], n);
+        if (mid >= 0 && mid != q) {
+            rs: int = new_route(n, q, mid, layer);
+            if (rs >= 0) {
+                if (route_route(rs, false)) return rs;
+                delete_route(rs)
+            }
+        }
+        r0: int = new_route(n, q, q, layer);
+        if (r0 < 0) return -1;
+        ro_drop[r0] = true;
+        rp_pin[r0 * RPTS + 1] = -1;
+        rp_x[r0 * RPTS + 1] = pin_x[q];
+        rp_y[r0 * RPTS + 1] = pin_y[q];
+        // (A drop only wants a via somewhere near: it never pushes a
+        // route aside for one.)
+        if (route_route(r0, false)) return r0;
+        // (No room for a via near it: then to the copper of the net the
+        // ratsnest pointed at, as any connection.)
+        ro_drop[r0] = false;
+        rp_pin[r0 * RPTS + 1] = a + b - q;
+        if (route_assisted(r0)) return r0;
+        return r0
+    }
+    // (From the part with more pins: its crowded side fans out straight,
+    // and the jogging is done at the other end.)
+    from: int = a;
+    to: int = b;
+    if (fp_npads[part_fp[pin_part[b]]] > fp_npads[part_fp[pin_part[a]]]) {
+        from = b;
+        to = a
+    }
+    r: int = new_route(n, from, to, layer);
+    if (r < 0) return -1;
+    if (route_assisted(r)) return r;
+    r
+}
+
+// Whether pin q's copper is joined to a piece of the bottom pour (as the
+// last check found).
+pin_on_pour(q: int): bool {
+    for k in 1..pieces_n[BOTTOM] + 1 {
+        it: int = piece_item[POUR_PIECES + k];
+        if (it >= 0 && joined(it, q)) return true
+    }
+    false
+}
+
+// ---- time ----
+extern clock_gettime(clk: int, ts: *Timespec): int;
+
+type Timespec = {
+    sec: int;
+    nsec: int
+}
+
+mono_ns(): int {
+    ts: Timespec = Timespec { sec: 0, nsec: 0 };
+    clock_gettime(1, &ts);
+    ts.sec * 1000000000 + ts.nsec
+}

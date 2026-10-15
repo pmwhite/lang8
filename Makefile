@@ -48,7 +48,7 @@ STAGE1_TESTS := tests/compiler/bool.l8 \
 # `build TOOL SOURCE`: build into $@ without leaving a partial file behind.
 build = ./$(1) build $(2) -o $@.tmp && mv -f $@.tmp $@
 
-.PHONY: all check fmt selfhost compiler-test game skate malton race race-test stdlib-test \
+.PHONY: all check fmt selfhost compiler-test game skate malton race race-test cad cad-test stdlib-test \
 	terminal terminal-test callback-test http http-test websocket websocket-test wasm-test web \
 	install-bootstrap promote promote-bin1 promote-bin2 promote-source clean help
 
@@ -57,7 +57,7 @@ all:
 	@$(MAKE) -s $(OK)/fmt $(OK)/stage1-tests
 	@$(MAKE) -s check
 
-check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(BUILD)/skate $(BUILD)/malton $(BUILD)/race $(OK)/race-tests
+check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(BUILD)/skate $(BUILD)/malton $(BUILD)/race $(OK)/race-tests $(BUILD)/cad $(OK)/cad-tests
 
 # ---- compiler stages ----
 
@@ -145,6 +145,17 @@ $(BUILD)/malton: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 	@$(STEP) 'malton' sh -c '$(call build,l8c3,programs/malton/main.l8)'
 
 malton: $(BUILD)/malton
+
+$(BUILD)/cad: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+	@$(STEP) 'cad' sh -c '$(call build,l8c3,programs/cad/main.l8)'
+
+cad: $(BUILD)/cad
+
+$(OK)/cad-tests: l8c3 $(PROGRAMS) $(RUNTIME) programs/cad/handheld.pcb programs/cad/handheld-sketch.pcb | $(OK)
+	+@$(STEP) 'cad tests' ./l8c3 test programs/cad/test_board.l8
+	@touch $@
+
+cad-test: $(OK)/cad-tests
 
 $(BUILD)/race: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 	@$(STEP) 'race' sh -c '$(call build,l8c3,programs/race/main.l8)'
@@ -250,7 +261,7 @@ wasm-test: $(OK)/wasm-fixpoint $(OK)/wasm-tests $(OK)/wasm-resume
 # The playground: a static site in .build/web with the compiler as a module.
 # Serve it with `python3 -m http.server -d .build/web`.
 WEB_SITE := $(BUILD)/web
-WEB_FILES := web/index.html $(wildcard web/*.js web/examples/*.l8 web/game/* web/skate/* web/malton/* web/race/*) programs/block-game/world.txt \
+WEB_FILES := web/index.html $(wildcard web/*.js web/examples/*.l8 web/game/* web/skate/* web/malton/* web/race/* web/cad/*) programs/cad/handheld.pcb programs/cad/handheld-sketch.pcb programs/block-game/world.txt \
 	programs/block-game/garden.txt
 
 $(BUILD)/block-game.wasm: l8c3 $(PROGRAMS) | $(OK)
@@ -262,17 +273,21 @@ $(BUILD)/skate.wasm: l8c3 $(PROGRAMS) | $(OK)
 $(BUILD)/malton.wasm: l8c3 $(PROGRAMS) | $(OK)
 	@$(STEP) 'malton wasm' sh -c './l8c3 wasm --async glXSwapBuffers programs/malton/main.l8 -o $@.tmp && mv -f $@.tmp $@'
 
+$(BUILD)/cad.wasm: l8c3 $(PROGRAMS) | $(OK)
+	@$(STEP) 'cad wasm' sh -c './l8c3 wasm --async glXSwapBuffers programs/cad/main.l8 -o $@.tmp && mv -f $@.tmp $@'
+
 $(BUILD)/race.wasm: l8c3 $(PROGRAMS) | $(OK)
 	@$(STEP) 'race wasm' sh -c './l8c3 wasm --async glXSwapBuffers programs/race/main.l8 -o $@.tmp && mv -f $@.tmp $@'
 
-$(OK)/web: $(BUILD)/l8.wasm $(BUILD)/block-game.wasm $(BUILD)/skate.wasm $(BUILD)/malton.wasm $(BUILD)/race.wasm $(WEB_FILES) $(STDLIB) | $(OK)
-	@$(STEP) 'web site' sh -c 'rm -rf $(WEB_SITE) && mkdir -p $(WEB_SITE)/stdlib $(WEB_SITE)/examples $(WEB_SITE)/game $(WEB_SITE)/skate $(WEB_SITE)/malton $(WEB_SITE)/race && \
+$(OK)/web: $(BUILD)/l8.wasm $(BUILD)/block-game.wasm $(BUILD)/skate.wasm $(BUILD)/malton.wasm $(BUILD)/race.wasm $(BUILD)/cad.wasm $(WEB_FILES) $(STDLIB) | $(OK)
+	@$(STEP) 'web site' sh -c 'rm -rf $(WEB_SITE) && mkdir -p $(WEB_SITE)/stdlib $(WEB_SITE)/examples $(WEB_SITE)/game $(WEB_SITE)/skate $(WEB_SITE)/malton $(WEB_SITE)/race $(WEB_SITE)/cad && \
 		cp web/index.html web/*.js $(WEB_SITE)/ && cp web/examples/*.l8 $(WEB_SITE)/examples/ && \
 		cp $(STDLIB) $(WEB_SITE)/stdlib/ && cp $(BUILD)/l8.wasm $(WEB_SITE)/ && \
 		cp web/game/* $(BUILD)/block-game.wasm programs/block-game/world.txt programs/block-game/garden.txt $(WEB_SITE)/game/ && \
 		cp web/skate/* $(BUILD)/skate.wasm $(WEB_SITE)/skate/ && \
 		cp web/malton/* $(BUILD)/malton.wasm $(WEB_SITE)/malton/ && \
-		cp web/race/* $(BUILD)/race.wasm $(WEB_SITE)/race/'
+		cp web/race/* $(BUILD)/race.wasm $(WEB_SITE)/race/ && \
+		cp web/cad/* $(BUILD)/cad.wasm programs/cad/handheld.pcb programs/cad/handheld-sketch.pcb $(WEB_SITE)/cad/'
 	@touch $@
 
 web: $(OK)/web
@@ -309,7 +324,7 @@ help:
 	@echo '  fmt             format src2 with the stage-2 compiler'
 	@echo '  selfhost        build l8c1..l8c4, check the fixpoint, run compiler tests, install ./l8'
 	@echo '  compiler-test   stage-1 fixtures, then all fixtures and CLI cram tests (tests/)'
-	@echo '  stdlib-test, game, skate, race, race-test, terminal, terminal-test, callback-test'
+	@echo '  stdlib-test, game, skate, race, race-test, cad, cad-test, terminal, terminal-test, callback-test'
 	@echo '  http, http-test, websocket, websocket-test'
 	@echo '  wasm-test       run the tests as WebAssembly under Node; check the wasm compiler fixpoint'
 	@echo '  web             build the playground site in .build/web'

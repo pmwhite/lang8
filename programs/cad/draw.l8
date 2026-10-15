@@ -1,0 +1,384 @@
+tag cad;
+
+use_tag std, gl, x11, skate;
+
+// Drawing the board: the solder mask with its grid, the bottom copper under
+// the top, pads, holes, the silkscreen (outlines and names), the ratsnest
+// still to route, and the problems the check found. What is shown follows
+// the zoom: the names of parts come in once there is room to read them, and
+// then the names of pins in their pads. With a net picked out, everything
+// else steps back.
+const C_BACK: int = 856085; // #0d1015
+
+const C_MASK: int = 1194543; // #123a2f
+
+const C_EDGE: int = 4164207; // #3f8a6f
+
+const C_TOP: int = 14853696; // #e2a640
+
+const C_BOTTOM: int = 4165600; // #3f8fe0
+
+const C_PAD: int = 15778650; // #f0c35a
+
+const C_HOLE: int = 724498; // #0b0e12
+
+const C_SILK: int = 15331058; // #e9eef2
+
+const C_WIRE: int = 14674160; // #dfe8f0
+
+const C_PICK: int = 6082559; // #5ccfff
+
+const C_BAD: int = 16731998; // #ff4f5e
+
+const C_WARN: int = 16755243; // #ffaa2b
+
+const C_GOOD: int = 5235610; // #4fe39a
+
+// The layer tracks are being laid on, and what is picked out: a net, a
+// part, a track (or -1 for none). How much each shows (they fade in and
+// out).
+layer_on: int = 0;
+
+hl_net: int = -1;
+
+hl_show: f32 = 0.0;
+
+hl_was: int = -1;
+
+sel_part: int = -1;
+
+sel_seg: int = -1;
+
+sel_via: int = -1;
+
+sel_pin: int = -1;
+
+// The time, for what pulses.
+now_t: f32 = 0.0;
+
+// A color halfway (by t) to another.
+mix_rgb(a: int, b: int, t: f32): int {
+    ra: f32 = (a >> 16 & 255) as f32;
+    ga: f32 = (a >> 8 & 255) as f32;
+    ba: f32 = (a & 255) as f32;
+    rb: f32 = (b >> 16 & 255) as f32;
+    gb: f32 = (b >> 8 & 255) as f32;
+    bb: f32 = (b & 255) as f32;
+    r: int = (ra + (rb - ra) * t + 0.5) as int;
+    g: int = (ga + (gb - ga) * t + 0.5) as int;
+    bl: int = (ba + (bb - ba) * t + 0.5) as int;
+    (r << 16) + (g << 8) + bl
+}
+
+// How much something of net n shows, with a net picked out.
+net_dim(n: int): f32 {
+    if (hl_was < 0 || n == hl_was) return 1.0;
+    1.0 - 0.72 * hl_show
+}
+
+// A layer's copper color: the one being worked on bright, the other
+// sunk toward the mask.
+layer_rgb(layer: int): int {
+    c: int = C_TOP;
+    if (layer == BOTTOM) c = C_BOTTOM;
+    if (layer != layer_on) c = mix_rgb(c, C_MASK, 0.55);
+    c
+}
+
+draw_seg(s: int, rgb: int, a: f32) {
+    p_line(to_sx(sg_x0[s]), to_sy(sg_y0[s]), to_sx(sg_x1[s]), to_sy(sg_y1[s]), maxf(sg_w[s] * cam_s,
+        1.0), rgb, a)
+}
+
+draw_layer_tracks(layer: int) {
+    rgb: int = layer_rgb(layer);
+    for s in 0..segs_n {
+        if (sg_layer[s] == layer) draw_seg(s, rgb, net_dim(sg_net[s]))
+    }
+}
+
+// Pin q's copper (in the color given), and its hole.
+draw_pin(q: int, rgb: int, a: f32) {
+    if (pin_layers[q] == 0) return;
+    x: f32 = to_sx(pin_x[q]);
+    y: f32 = to_sy(pin_y[q]);
+    hw: f32 = maxf(pin_hw[q] * cam_s, 0.6);
+    hh: f32 = maxf(pin_hh[q] * cam_s, 0.6);
+    p_box_at(x, y, hw, hh, pin_r[q] * cam_s, rgb, a)
+}
+
+draw_hole_at(
+    x: f32,
+    y: f32,
+    sw: f32,
+    sh: f32
+) {
+    hw: f32 = maxf(sw * 0.5 * cam_s, 0.5);
+    hh: f32 = maxf(sh * 0.5 * cam_s, 0.5);
+    p_box_at(x, y, hw, hh, minf(hw, hh), C_HOLE, 1.0)
+}
+
+draw_board() {
+    s: f32 = cam_s;
+    // The board, and its edge.
+    x0: f32 = to_sx(-brd_w * 0.5);
+    x1: f32 = to_sx(brd_w * 0.5);
+    y0: f32 = to_sy(brd_h * 0.5);
+    y1: f32 = to_sy(-brd_h * 0.5);
+    p_shadow(x0, y0, x1 - x0, y1 - y0, brd_r * s, 6.0, 18.0, 0.5);
+    p_board(x0, y0, x1, y1, -brd_w * 0.5, -brd_h * 0.5, brd_w * 0.5, brd_h * 0.5,
+        brd_r, grid_step(), C_MASK, 1.0);
+    p_outline(x0, y0, x1 - x0, y1 - y0, brd_r * s, 1.5, C_EDGE, 0.9);
+    // The layer not being worked on goes first, under the other.
+    other: int = 1 - layer_on;
+    draw_pour(other);
+    draw_layer_tracks(other);
+    draw_pour(layer_on);
+    draw_layer_tracks(layer_on);
+    draw_silk(true);
+    // Pads (all on the top, or through the board).
+    for q in 0..pins_n {
+        rgb: int = C_PAD;
+        if (layer_on == BOTTOM && pin_layers[q] == 1) rgb = mix_rgb(C_PAD, C_MASK,
+            0.55);
+        draw_pin(q, rgb, net_dim(pin_net[q]))
+    }
+    for v in 0..vias_n {
+        x: f32 = to_sx(via_x[v]);
+        y: f32 = to_sy(via_y[v]);
+        p_disc(x, y, maxf(via_d[v] * 0.5 * s, 1.0), C_PAD, net_dim(via_net[v]));
+        draw_hole_at(x, y, via_drill[v], via_drill[v])
+    }
+    for q in 0..pins_n {
+        if (pin_drill[q] > 0.0) draw_hole_at(to_sx(pin_x[q]), to_sy(pin_y[q]), pin_slot_w[q],
+            pin_slot_h[q])
+    }
+    draw_silk(false);
+    draw_pin_names();
+    draw_ratsnest();
+    draw_problems()
+}
+
+// The silkscreen: each part's body outline, a dot by its first pin, and
+// its name.
+draw_silk(outlines: bool) {
+    s: f32 = cam_s;
+    for p in 0..parts_n {
+        f: int = part_fp[p];
+        k: int = part_rot[p];
+        x: f32 = to_sx(part_x[p]);
+        y: f32 = to_sy(part_y[p]);
+        bw: f32 = fp_bw[f];
+        bh: f32 = fp_bh[f];
+        if ((k & 1) == 1) {
+            bw = fp_bh[f];
+            bh = fp_bw[f]
+        }
+        thick: f32 = clampf(0.15 * s, 1.0, 2.5);
+        a: f32 = 0.75;
+        if (hl_was >= 0) a = a * (1.0 - 0.6 * hl_show);
+        if (outlines && bw > 0.0 && bh > 0.0) {
+            if (fp_round[f]) p_ring(x, y, bw * 0.5 * s, thick, C_SILK, a) else p_outline(x - bw * 0.5 * s,
+                y - bh * 0.5 * s, bw * s, bh * s, 0.2 * s, thick, C_SILK, a);
+            // (Pin 1: a dot just outside the body, by its pad.)
+            q: int = part_pin0[p];
+            px: f32 = to_sx(pin_x[q]);
+            py: f32 = to_sy(pin_y[q]);
+            if (fp_npads[f] > 2 && !fp_round[f]) {
+                dx: f32 = px - x;
+                dy: f32 = py - y;
+                cx: f32 = clampf(dx, -bw * 0.5 * s, bw * 0.5 * s);
+                cy: f32 = clampf(dy, -bh * 0.5 * s, bh * 0.5 * s);
+                p_disc(x + cx * 0.82, y + cy * 0.82, maxf(0.25 * s, 1.5), C_SILK,
+                    a)
+            }
+        }
+        // Its name: as big as its body allows, once that can be read.
+        room: f32 = maxf(minf(bw, bh), 1.0) * s;
+        size: f32 = minf(room * 0.42, 26.0);
+        if (!outlines && size >= 7.0) {
+            fade: f32 = clampf((size - 7.0) / 4.0, 0.0, 1.0);
+            line_clear();
+            line_name(part_ref[p]);
+            w: f32 = p_text_w(1, size, line, 0, line_n);
+            // (Too long for its body: smaller.)
+            if (w > room * 0.9 && w > 0.0) {
+                size = size * room * 0.9 / w;
+                w = room * 0.9
+            }
+            if (size >= 6.0) {
+                ta: f32 = fade * 0.92;
+                if (hl_was >= 0) ta = ta * (1.0 - 0.6 * hl_show);
+                ty: f32 = y + size * 0.35;
+                // (Under the pads' names, once those show: above the middle.)
+                if (part_value[p] >= 0 && size >= 12.0) ty = y - size * 0.05;
+                // A pad in the middle with its name showing: the part's name
+                // goes above its body, and its value below.
+                outside: bool = middle_named(p);
+                if (outside) {
+                    size = minf(size, 16.0);
+                    line_clear();
+                    line_name(part_ref[p]);
+                    w = p_text_w(1, size, line, 0, line_n);
+                    ty = y - bh * 0.5 * s - 6.0
+                }
+                p_text(1, size, x - w * 0.5, ty, line, 0, line_n, 0.0, C_SILK, ta);
+                if (part_value[p] >= 0 && size >= 12.0) {
+                    line_clear();
+                    line_name(part_value[p]);
+                    vs: f32 = size * 0.55;
+                    vy: f32 = ty + vs * 1.25;
+                    if (outside) {
+                        vs = size * 0.75;
+                        vy = y + bh * 0.5 * s + vs * 1.2
+                    }
+                    vw: f32 = p_text_w(0, vs, line, 0, line_n);
+                    if (vw < room * 0.95 || outside) p_text(0, vs, x - vw * 0.5, vy,
+                        line, 0, line_n, 0.0, C_SILK, ta * 0.7)
+                }
+            }
+        }
+    }
+}
+
+// Whether part p has a pad over its middle whose name shows (see
+// draw_pin_names).
+middle_named(p: int): bool {
+    f: int = part_fp[p];
+    for i in 0..fp_npads[f] {
+        q: int = part_pin0[p] + i;
+        if (absf(pin_x[q] - part_x[p]) < pin_hw[q] && absf(pin_y[q] - part_y[p]) < pin_hh[q] && pin_name_size(q) >= 6.0) return true
+    }
+    false
+}
+
+// How big pin q's name is written in its pad (below 6, it is not).
+pin_name_size(q: int): f32 {
+    pw: f32 = pin_hw[q] * 2.0 * cam_s;
+    ph: f32 = pin_hh[q] * 2.0 * cam_s;
+    size: f32 = minf(ph * 0.52, 15.0);
+    if (size < 6.5 || pw < 10.0) return 0.0;
+    line_clear();
+    line_name(lp_name[pin_pad[q]]);
+    w: f32 = p_text_w(0, size, line, 0, line_n);
+    if (w > pw * 0.86) size = size * pw * 0.86 / w;
+    size
+}
+
+// Pins' names, in their pads, once they fit; and with a net picked out,
+// its name on its pins.
+draw_pin_names() {
+    s: f32 = cam_s;
+    for q in 0..pins_n {
+        if (pin_layers[q] != 0) {
+            pw: f32 = pin_hw[q] * 2.0 * s;
+            ph: f32 = pin_hh[q] * 2.0 * s;
+            size: f32 = minf(ph * 0.52, 15.0);
+            if (size >= 6.5 && pw >= 10.0) {
+                line_clear();
+                line_name(lp_name[pin_pad[q]]);
+                w: f32 = p_text_w(0, size, line, 0, line_n);
+                if (w > pw * 0.86) {
+                    size = size * pw * 0.86 / w;
+                    w = pw * 0.86
+                }
+                if (size >= 6.0) {
+                    a: f32 = clampf((size - 6.0) / 3.0, 0.0, 1.0) * net_dim(pin_net[q]);
+                    p_text(0, size, to_sx(pin_x[q]) - w * 0.5, to_sy(pin_y[q]) + size * 0.36,
+                        line, 0, line_n, 0.0, 2759941, a * 0.9)
+                }
+            }
+        }
+    }
+}
+
+// The ratsnest: a thin line for each connection still to make.
+draw_ratsnest() {
+    for w in 0..wire_n {
+        a: int = wire_a[w];
+        b: int = wire_b[w];
+        n: int = pin_net[a];
+        alpha: f32 = 0.5;
+        lit: bool = hl_was >= 0 && n == hl_was;
+        // (A picked part's own connections are lit too.)
+        if (sel_part >= 0 && (pin_part[a] == sel_part || pin_part[b] == sel_part)) {
+            lit = true;
+            alpha = 0.0
+        }
+        width: f32 = 1.2;
+        rgb: int = C_WIRE;
+        if (lit && alpha == 0.0) {
+            alpha = 0.95;
+            width = 2.0;
+            rgb = C_PICK
+        } else if (lit) {
+            alpha = 0.5 + 0.45 * hl_show;
+            width = 1.2 + 0.8 * hl_show;
+            rgb = mix_rgb(C_WIRE, C_PICK, hl_show)
+        } else if (hl_was >= 0) alpha = 0.5 - 0.35 * hl_show else if (sel_part >= 0) alpha = 0.3;
+        p_line(to_sx(pin_x[a]), to_sy(pin_y[a]), to_sx(pin_x[b]), to_sy(pin_y[b]),
+            width, rgb, alpha)
+    }
+}
+
+// The problems: a pulsing ring at each, red for copper, amber for
+// courtyards; and the parts that are too close outlined.
+draw_problems() {
+    pulse: f32 = 0.5 + 0.5 * sinf(now_t * 5.0);
+    for p in 0..parts_n {
+        if (part_crowded[p]) draw_court(p, 0.0, 1.2, 0.0, C_WARN, 0.55)
+    }
+    for k in 0..prob_n {
+        rgb: int = C_BAD;
+        if (prob_kind[k] == PROB_COURT) rgb = C_WARN;
+        x: f32 = to_sx(prob_x[k]);
+        y: f32 = to_sy(prob_y[k]);
+        r: f32 = 7.0 + 3.0 * pulse;
+        p_glow(x, y, r + 4.0, 6.0, rgb, 0.25);
+        p_ring(x, y, r, 2.0, rgb, 0.9);
+        p_disc(x, y, 2.0, rgb, 0.9)
+    }
+}
+
+// Part p's courtyard, grown by so many pixels: its outline thick, or soft
+// (a glow).
+draw_court(
+    p: int,
+    grow: f32,
+    thick: f32,
+    soft: f32,
+    rgb: int,
+    a: f32
+) {
+    r: f32 = fp_court_r[part_fp[p]];
+    if (r > 0.0) {
+        rr: f32 = r * cam_s + grow;
+        x: f32 = to_sx(part_x[p]);
+        y: f32 = to_sy(part_y[p]);
+        p_shape(x - rr, y - rr, 2.0 * rr, 2.0 * rr, rr, soft, thick, rgb, a);
+        return
+    }
+    x0: f32 = to_sx(court_x0(p)) - grow;
+    x1: f32 = to_sx(court_x1(p)) + grow;
+    y0: f32 = to_sy(court_y1(p)) - grow;
+    y1: f32 = to_sy(court_y0(p)) + grow;
+    p_shape(x0, y0, x1 - x0, y1 - y0, 3.0 + grow * 0.5, soft, thick, rgb, a)
+}
+
+// Layer l's pour, if it has one: the layer's color, sunk a little toward
+// the mask, under its tracks.
+draw_pour(l: int) {
+    n: int = pour_net[l];
+    if (n < 0) return;
+    x0: f32 = to_sx(gr_x0);
+    x1: f32 = to_sx(gr_x0 + gr_nx as f32 * gr_g);
+    y0: f32 = to_sy(gr_y0 + gr_ny as f32 * gr_g);
+    y1: f32 = to_sy(gr_y0);
+    rgb: int = mix_rgb(layer_rgb(l), C_MASK, 0.3);
+    // (See-through, so the board shows under it: more on the layer not
+    // being worked on.)
+    k: f32 = 0.6;
+    if (l != layer_on) k = 0.42;
+    p_quad(x0, y0, x1, y1, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, P_POUR, 0.0, 0.0, 0.0, l as f32,
+        0.0, rgb, k * net_dim(n))
+}
