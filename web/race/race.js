@@ -63,7 +63,7 @@ const GHOST_KEY = 2n ** 60n;
 const ghosts = {
   // (Each course has its own: under this name, for a kind of car.)
   name(course, kind) {
-    return course === 0 ? `race.ghost.${TRACK}.${kind}` : `race.ghost.${TRACK}.c${course}h.${kind}`;
+    return course === 0 ? `race.ghost.${TRACK}.${kind}` : `race.ghost.${TRACK}.c${course}t.${kind}`;
   },
   wrote(line) {
     if (!line.startsWith("L8GHOST ")) return false;
@@ -317,7 +317,7 @@ async function main() {
     return n >= 0 && n <= most ? n : usual;
   };
   if (!params.has("L8_CAR")) params.set("L8_CAR", String(kept("car", 3, 0)));
-  if (!params.has("L8_COURSE")) params.set("L8_COURSE", String(kept("course", 2, 0)));
+  if (!params.has("L8_COURSE")) params.set("L8_COURSE", String(kept("course", 3, 0)));
   if (!params.has("L8_SET")) params.set("L8_SET", `${kept("laps", 9, 3)},${kept("drivers", 7, 5)},${kept("skill", 3, 3)}`);
   const course = Number(params.get("L8_COURSE")) || 0;
   // (There is a room to tell where the car is; the menu is up; and
