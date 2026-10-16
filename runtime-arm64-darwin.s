@@ -70,6 +70,7 @@
     .globl _l8rt_argc
     .globl _l8rt_argv
     .globl _l8_msg_hfa
+    .globl _l8_run_loop_common_modes
     .globl _l8_msg_hfa_super
 
     .section __DATA,__data
@@ -690,6 +691,14 @@ _l8_msg_hfa_super:
     stp d0, d1, [x16]
     stp d2, d3, [x16, #16]
     ldp x29, x30, [sp], #32
+    ret
+
+// NSRunLoopCommonModes, the object (the run loop knows the common modes by
+// that object, not by its text).
+_l8_run_loop_common_modes:
+    adrp x0, _NSRunLoopCommonModes@GOTPAGE
+    ldr x0, [x0, _NSRunLoopCommonModes@GOTPAGEOFF]
+    ldr x0, [x0]
     ret
 
 // The C library's math functions that L8 programs declare come from
