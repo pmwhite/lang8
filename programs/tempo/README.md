@@ -72,7 +72,12 @@ wrapper). Its view is an OpenGL ES layer that takes touches and, for the
 name field, the keyboard; CoreLocation watches where the phone is while
 Tempo wants it, with the screen locked too, and passes each fix on only as
 a step from the one before, as the page does. The log is kept in the app's
-Documents. (Saving it with a personal link is not built there yet.)
+Documents, and with a personal link once the app has been opened with it:
+`tempo://link#me=SECRET` (the page's link with `tempo://link` in place of
+its address, opened in Safari on the phone). The app then keeps it with
+the worker itself (`sync.l8`, as `tempo.js` does on the page): the
+worker's log when it starts or is looked at again, and its own changes
+sent a second after each save.
 
 ```sh
 ./l8c3 arm64 --target ios programs/tempo/ios.l8 -o tempo-ios.s
