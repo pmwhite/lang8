@@ -14,6 +14,10 @@ use_tag std, gl, x11, skate;
 // be taken up. Route all does every connection, shortest first, a few each
 // frame; and a stroke drawn from one part to another (the guide) routes the
 // connections between them side by side along it.
+// Whether the editor only shows the designs (it does: they are made by
+// their generators, and changed there).
+const VIEW_ONLY: bool = true;
+
 const MODE_ARRANGE: int = 0;
 
 const MODE_ROUTE: int = 1;
@@ -132,13 +136,58 @@ forget_picks() {
     sel_route = -1;
     sel_point = -1;
     hl_net = -1;
+    sel_hole = -1;
     pt_drag = false;
     drag_part = -1
 }
 
+// The hole of a case's layer picked (a shape), or -1.
+sel_hole: int = -1;
+
 pick_part(p: int) {
     forget_picks();
-    sel_part = p
+    sel_part = p;
+    // (Its nets lit, the rest dimmed: see net_dim.)
+    for q in part_pin0[p]..part_pin0[p] + fp_npads[part_fp[p]] {
+        if (pin_net[q] >= 0 && hl_net < 0) hl_net = pin_net[q]
+    }
+    // (Not left under the card it brings up, nor the title.)
+    if (!view3d) keep_in_view((court_x0(p) + court_x1(p)) * 0.5, court_y0(p), court_y1(p))
+}
+
+// Glide the view up or down, if need be, just far enough that the board's
+// box from y0 to y1, at x, is clear of the title and the card. (On a wide,
+// short window the top's middle, between the title and the pills, is
+// free: the fit may have put the board up in it.)
+keep_in_view(x: f32, y0: f32, y1: f32) {
+    layout_ui();
+    sx: f32 = to_sx(x);
+    top: f32 = to_sy(y1);
+    bottom: f32 = to_sy(y0);
+    lo: f32 = view_top + 24.0;
+    if (tl_py < safe_top + 30.0 && sx > 12.0 + safe_left + tl_w + 8.0 && sx < minf(tl_px,
+        tl_mx) - 8.0) lo = safe_top + 24.0;
+    hi: f32 = scr_h as f32 - view_bottom - 24.0;
+    d: f32 = 0.0;
+    if (bottom > hi) d = bottom - hi;
+    if (top - d < lo) d = top - lo;
+    if (d == 0.0 || lo >= hi) return;
+    view_fitted = false;
+    ease_s = cam_s;
+    ease_x = cam_x;
+    ease_y = cam_y - d / cam_s;
+    ease_anchored = false;
+    ease_on = true;
+    fling_x = 0.0;
+    fling_y = 0.0
+}
+
+// Whether part p has a pin on net n.
+part_on_net(p: int, n: int): bool {
+    for q in part_pin0[p]..part_pin0[p] + fp_npads[part_fp[p]] {
+        if (pin_net[q] == n) return true
+    }
+    false
 }
 
 // ---- finding what is where (in board millimetres) ----
@@ -474,6 +523,12 @@ start_route_all() {
     }
     avoid_n = 0;
     check_board();
+    // (Locked routes with no copper yet, as a board's generator gives them
+    // (a supply's trunk, a sense line to its resistor's pads): laid first,
+    // before anything is in their way.)
+    for k in 0..routes_n {
+        if (!ro_ok[k] && ro_locked[k]) route_assisted(k)
+    }
     if (poured_first) toast_str("Ground poured on both sides first");
     // (The board as it is, to start again from: see end_job.)
     write_board();
@@ -1092,6 +1147,13 @@ job_wires: int = 0;
 // How many found no way in the pass before.
 job_failed: int = 0;
 
+// How many passes after the first Route all may make, and whether it then
+// tries each that found no way again, its corner done again (see repair):
+// all of it, but for a test that wants a bounded time.
+job_passes_most: int = 4;
+
+job_repairs: bool = true;
+
 finish_job() {
     job_on = false;
     failed_pairs: int = 0;
@@ -1107,7 +1169,7 @@ finish_job() {
     // most.
     // (Only while each pass leaves fewer that find no way: one that gets
     // nowhere is the last, its failures kept, in red.)
-    if (job_pass < 4 && (failed_pairs == 0 || job_pass == 0 || failed_pairs < job_failed)) {
+    if (job_pass < job_passes_most && (failed_pairs == 0 || job_pass == 0 || failed_pairs < job_failed)) {
         job_failed = failed_pairs;
         r2: int = routes_n - 1;
         while (r2 >= 0) {
@@ -1131,7 +1193,7 @@ finish_job() {
     // more than minutes of trying.)
     rep_at = 0;
     rep_tries = 0;
-    if (failed_pairs > 6) {
+    if (failed_pairs > 6 || !job_repairs) {
         end_job();
         return
     }
@@ -1555,8 +1617,11 @@ oc_add(x: f32, y: f32) {
 
 // ---- fingers on the board (see touch.l8) ----
 // A finger down on the board: whether it holds something (a part to move,
-// a waypoint to pull, a guide to draw).
+// a waypoint to pull, a guide to draw). The editor is a viewer now (the
+// designs are made by their generators, tools/*.py): nothing is held, and
+// a finger on the board moves the view.
 hold_begin(x: f32, y: f32): bool {
+    if (VIEW_ONLY) return false;
     bx: f32 = to_bx(x);
     by: f32 = to_by(y);
     tol: f32 = px_mm(12.0);
@@ -1734,8 +1799,20 @@ tap(x: f32, y: f32) {
     by: f32 = to_by(y);
     tol: f32 = px_mm(10.0);
     if (touch_ui) tol = px_mm(16.0);
+    // (A case's layer: the hole tapped, its smallest (the most particular:
+    // a light's hole in the board's pocket), said on the card.)
     if (mode == MODE_CASE) {
         forget_picks();
+        if (in_3d() || !cs_on || cs_view < 0 || cs_view >= layers_n) return;
+        f: int = pc_first[cs_view];
+        best_a: f32 = 1000000.0;
+        for k in f + 1..f + pc_n[cs_view] {
+            ar: f32 = sh_hw[k] * sh_hh[k];
+            if (!sh_engrave[k] && in_shape(k, bx, by) && ar < best_a) {
+                best_a = ar;
+                sel_hole = k
+            }
+        }
         return
     }
     // Arranging, a tap picks out a part (its own connections lit).
@@ -1747,7 +1824,8 @@ tap(x: f32, y: f32) {
         return
     }
     if (job_on || guide_on) return;
-    k: int = handle_at(x, y);
+    k: int = -1;
+    if (!VIEW_ONLY) k = handle_at(x, y);
     if (k >= 0) {
         sel_point = k;
         return
@@ -1767,7 +1845,7 @@ tap(x: f32, y: f32) {
         return
     }
     w: int = wire_at(x, y);
-    if (w >= 0) {
+    if (w >= 0 && !VIEW_ONLY) {
         route_wire(w);
         return
     }
@@ -1797,9 +1875,12 @@ tap(x: f32, y: f32) {
 
 double_tap(x: f32, y: f32) {
     // (In 3D: apart, or together again.)
+    // (Putting it together, step by step: nothing pulled apart.)
     if (in_3d()) {
-        exploded = !exploded;
-        explode_fit = true;
+        if (!sp_on) {
+            exploded = !exploded;
+            explode_fit = true
+        }
         return
     }
     ease_zoom_at(x, y, 2.2)
@@ -2036,23 +2117,26 @@ set_mode(m: int) {
     drag_part = -1;
     guide_on = false;
     forget_picks();
-    if (m == MODE_ROUTE) toast_str("Route: tap a line to route it, or drag it to steer");
-    if (m == MODE_ARRANGE) toast_str("Place: drag parts to move them");
-    if (m == MODE_CASE || view_fitted) fit_board();
-    if (m == MODE_CASE) {
-        if (cs_on) toast_str("Case: step through its layers; drag the screen or battery") else toast_str("No case yet: make one from the board")
-    }
+    // (Copper and Case have a card that says what they are; Parts has
+    // none.)
+    if (m == MODE_ARRANGE) toast_str("Parts: tap one to see what it is");
+    // (The parts are on the top: looking at them, the top side in front;
+    // only the copper has a way to turn it over.)
+    if (m != MODE_ROUTE) layer_on = TOP;
+    steps_end();
+    if (m == MODE_CASE || view_fitted) fit_board()
 }
 
 // The layer new routes would rather be on (the picked route's, if one is
 // picked: see flip_route).
 switch_layer() {
-    if (sel_route >= 0) {
+    if (sel_route >= 0 && !VIEW_ONLY) {
         flip_route();
         return
     }
+    if (mode != MODE_ROUTE) return;
     layer_on = 1 - layer_on;
-    if (layer_on == TOP) toast_str("New routes on the top") else toast_str("New routes on the bottom")
+    if (layer_on == TOP) toast_str("The top side in front") else toast_str("The bottom side in front")
 }
 
 toggle_guide() {
@@ -2068,6 +2152,7 @@ prob_next: int = 0;
 show_problem() {
     if (prob_n == 0) {
         fit_board();
+        if (cs_on) toast_str("Checked: clearances, edges, drill spacing, keepouts, and the case's wood: all clear") else toast_str("Checked: clearances, edges, drill spacing and keepouts: all clear");
         return
     }
     k: int = prob_next % prob_n;
@@ -2076,6 +2161,13 @@ show_problem() {
     view_fitted = false;
     ease_to_box(prob_x[k] - r, prob_y[k] - r, prob_x[k] + r, prob_y[k] + r);
     line_clear();
+    prob_words(k);
+    if (prob_kind[k] == PROB_WALL && mode == MODE_CASE) case_step(prob_a[k] - cs_view);
+    toast_line()
+}
+
+// What problem k is, in a few words, into line.
+prob_words(k: int) {
     kind: int = prob_kind[k];
     if (kind == PROB_COURT) {
         line_name(part_ref[prob_a[k]]);
@@ -2085,9 +2177,8 @@ show_problem() {
     } else if (kind == PROB_WALL) {
         line_add("Wood too thin between cuts in the ");
         line_add(pc_name[prob_a[k]]);
-        line_add(" layer");
-        if (mode == MODE_CASE) case_step(prob_a[k] - cs_view)
-    } else if (kind == PROB_EDGE) line_add("Copper too near the edge") else if (kind == PROB_THIN) line_add("Track too thin to make") else if (kind == PROB_KEEPOUT) {
+        line_add(" layer")
+    } else if (kind == PROB_EDGE) line_add("Copper too near the edge") else if (kind == PROB_THIN) line_add("Track too thin to make") else if (kind == PROB_HOLES) line_add("Holes too near each other to drill") else if (kind == PROB_KEEPOUT) {
         item_words(prob_a[k]);
         line_add(" runs under ");
         line_name(part_ref[prob_b[k]])
@@ -2097,7 +2188,6 @@ show_problem() {
         line_add(" and ");
         item_words(prob_b[k])
     }
-    toast_line()
 }
 
 // What an item is, in a few words.
@@ -2113,32 +2203,33 @@ item_words(i: int) {
 
 // ---- keys ----
 key_press(ks: int) {
+    // (Putting it together: the arrows, or space, step through it; s
+    // starts it, in 3D.)
+    if (in_3d() && sp_on) {
+        if (ks == 65363 || ks == 32) steps_next();
+        if (ks == 65361) steps_back()
+    } else if (in_3d() && ks == 115) {
+        steps_begin();
+        v3_fit()
+    }
     if (ks == 49) set_mode(MODE_ARRANGE);
     if (ks == 50) set_mode(MODE_ROUTE);
     if (ks == 51) set_mode(MODE_CASE);
     if (ks == 109) order_pending = B_MAKE;
     if (ks == 116 && mode == MODE_CASE) {
         view3d = !view3d;
+        if (!view3d) steps_end();
         v3_fit()
     }
-    if (ks == 101 && mode == MODE_CASE) {
+    if (ks == 101 && mode == MODE_CASE && !sp_on) {
         exploded = !exploded;
         explode_fit = true
     }
     if (ks == 91) case_step(-1);
     if (ks == 93) case_step(1);
-    if (ks == 114 || ks == 82) rotate_part();
-    if (ks == 65535 || ks == 65288) delete_picked();
-    if (ks == 122) undo();
-    if (ks == 121 || ks == 90) redo();
     if (ks == 102) fit_board();
     if (ks == 118 || ks == 108) switch_layer();
-    if (ks == 107) lock_route();
-    if (ks == 103) toggle_guide();
-    if (ks == 119) start_route_all();
-    if (ks == 99) toggle_clear_menu();
     if (ks == 112) show_problem();
-    if (ks == 97) sheet_toggle();
     if (ks == 61 || ks == 43) ease_zoom_at(scr_w as f32 * 0.5, scr_h as f32 * 0.5,
         1.5);
     if (ks == 45) ease_zoom_at(scr_w as f32 * 0.5, scr_h as f32 * 0.5, 1.0 / 1.5);
@@ -2146,33 +2237,43 @@ key_press(ks: int) {
     if (ks >= 1000000000) page_says((ks - 1000000000) / 1000, (ks - 1000000000) % 1000)
 }
 
-// Escape: whether it meant something here (rather than quitting).
-esc_key(): bool {
+// Escape: shuts what is open, the topmost first; else lets go of what is
+// picked.
+esc_key() {
     if (order_open) {
         order_open = false;
-        return true
-    }
-    if (clear_menu) {
-        clear_menu = false;
-        return true
+        return
     }
     if (sheet_open) {
         sheet_close();
-        return true
+        return
+    }
+    if (design_menu) {
+        design_menu = false;
+        return
+    }
+    // (Out of the set, to the dock; out of 3D, to the layers.)
+    if (stage_on) {
+        design_pending = design_on;
+        return
+    }
+    if (sp_on) {
+        steps_end();
+        return
+    }
+    if (view3d) {
+        view3d = false;
+        return
     }
     if (job_on) {
         stop_job();
-        return true
+        return
     }
     if (guide_on) {
         guide_on = false;
-        return true
+        return
     }
-    if (sel_part >= 0 || sel_pin >= 0 || sel_seg >= 0 || sel_via >= 0 || sel_route >= 0 || hl_net >= 0) {
-        forget_picks();
-        return true
-    }
-    false
+    forget_picks()
 }
 
 // The page's measures: the phone's own edges, in window pixels.
@@ -2207,7 +2308,9 @@ window_resized(was_w: int, was_h: int) {
         1.0));
     cam_s = clampf(cam_s * maxf(k, 0.5), min_scale(), max_scale());
     layout_ui();
-    if (view_fitted) start_view()
+    if (view_fitted) start_view();
+    // (In 3D: from far enough to see it all again, in the new shape.)
+    if (in_3d()) v3_fit()
 }
 
 // A frame: whether anything moves.
@@ -2353,6 +2456,12 @@ draw_picked_route(r: int) {
         if (via_route[k] == r) p_ring(to_sx(via_x[k]), to_sy(via_y[k]), via_d[k] * 0.5 * s + 4.0,
             2.0, C_PICK, 0.8)
     }
+    // Its ends.
+    for k in 0..ro_np[r] {
+        if (k == 0 || k == ro_np[r] - 1) p_ring(to_sx(point_x(r, k)), to_sy(point_y(r,
+            k)), 7.0, 2.0, C_PICK, 0.9)
+    }
+    if (VIEW_ONLY) return;
     // On each leg's longest run, a mark where a waypoint can be pulled out.
     for leg in 0..ro_np[r] - 1 {
         best: int = -1;
@@ -2414,6 +2523,7 @@ make_case_here() {
 case_step(d: int) {
     if (!cs_on || layers_n == 0) return;
     cs_view = clampi(cs_view + d, 0, layers_n - 1);
+    sel_hole = -1;
     cm_drawn = false
 }
 
@@ -2429,7 +2539,7 @@ case_dy: f32 = 0.0;
 case_hold(bx: f32, by: f32): bool {
     // (A dock has no screen or battery to move.)
     if (!cs_on || dock_on) return false;
-    if (cs_view >= L_SHELF && absf(bx - cs_screen_x) < SCREEN_W * 0.5 && absf(by - cs_screen_y) < SCREEN_H * 0.5) {
+    if (cs_view >= L_SCREEN && absf(bx - cs_screen_x) < SCREEN_W * 0.5 && absf(by - cs_screen_y) < SCREEN_H * 0.5) {
         case_drag = 1;
         case_dx = cs_screen_x - bx;
         case_dy = cs_screen_y - by

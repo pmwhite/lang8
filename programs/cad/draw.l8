@@ -73,6 +73,7 @@ mix_rgb(a: int, b: int, t: f32): int {
 // How much something of net n shows, with a net picked out.
 net_dim(n: int): f32 {
     if (hl_was < 0 || n == hl_was) return 1.0;
+    if (sel_part >= 0 && n >= 0 && part_on_net(sel_part, n)) return 1.0;
     1.0 - 0.72 * hl_show
 }
 
@@ -90,10 +91,23 @@ draw_seg(s: int, rgb: int, a: f32) {
         1.0), rgb, a)
 }
 
+// How much of net n's copper shows: looking at the parts, it is faint,
+// but a picked part's own nets (not ground, poured everywhere: lit, it
+// would light the whole board).
+copper_dim(n: int): f32 {
+    a: f32 = net_dim(n);
+    if (mode == MODE_ARRANGE && (sel_part < 0 || !part_on_net(sel_part, n) || net_poured(n))) a = a * 0.35;
+    a
+}
+
+net_poured(n: int): bool {
+    n >= 0 && (pour_net[0] == n || pour_net[1] == n)
+}
+
 draw_layer_tracks(layer: int) {
     rgb: int = layer_rgb(layer);
     for s in 0..segs_n {
-        if (sg_layer[s] == layer) draw_seg(s, rgb, net_dim(sg_net[s]))
+        if (sg_layer[s] == layer) draw_seg(s, rgb, copper_dim(sg_net[s]))
     }
 }
 
@@ -194,7 +208,7 @@ draw_board() {
     for v in 0..vias_n {
         x: f32 = to_sx(via_x[v]);
         y: f32 = to_sy(via_y[v]);
-        p_disc(x, y, maxf(via_d[v] * 0.5 * s, 1.0), C_PAD, net_dim(via_net[v]));
+        p_disc(x, y, maxf(via_d[v] * 0.5 * s, 1.0), C_PAD, copper_dim(via_net[v]));
         draw_hole_at(x, y, via_drill[v], via_drill[v])
     }
     for q in 0..pins_n {
@@ -244,7 +258,8 @@ draw_silk(outlines: bool) {
         // Its name: as big as its body allows, once that can be read.
         room: f32 = maxf(minf(bw, bh), 1.0) * s;
         size: f32 = minf(room * 0.42, 26.0);
-        if (!outlines && size >= 7.0) {
+        // (Not a hole's, in the Case mode: it is under the wood.)
+        if (!outlines && size >= 7.0 && !(mode == MODE_CASE && in_board(part_fp[p]))) {
             fade: f32 = clampf((size - 7.0) / 4.0, 0.0, 1.0);
             line_clear();
             line_name(part_ref[p]);
@@ -260,16 +275,22 @@ draw_silk(outlines: bool) {
                 ty: f32 = y + size * 0.35;
                 // (Under the pads' names, once those show: above the middle.)
                 if (part_value[p] >= 0 && size >= 12.0) ty = y - size * 0.05;
-                // A pad in the middle with its name showing: the part's name
-                // goes above its body, and its value below.
-                outside: bool = middle_named(p);
+                // A pad under the name with its own name showing (a middle
+                // pad, or one off the middle, as the module's ground): the
+                // part's name goes above its body, and its value below.
+                outside: bool = label_on_pad(p, w * 0.5 / s, size * 1.4 / s);
+                // (The pads' test uses line: its name again.)
+                // (Outside on the side away from the board's middle: a part
+                // low on the board, its name under it, its value over.)
+                below: bool = outside && part_y[p] < 0.0;
                 if (outside) {
                     size = minf(size, 16.0);
-                    line_clear();
-                    line_name(part_ref[p]);
-                    w = p_text_w(1, size, line, 0, line_n);
-                    ty = y - bh * 0.5 * s - 6.0
+                    ty = y - bh * 0.5 * s - 6.0;
+                    if (below) ty = y + bh * 0.5 * s + size + 2.0
                 }
+                line_clear();
+                line_name(part_ref[p]);
+                w = p_text_w(1, size, line, 0, line_n);
                 p_text(1, size, x - w * 0.5, ty, line, 0, line_n, 0.0, C_SILK, ta);
                 if (part_value[p] >= 0 && size >= 12.0) {
                     line_clear();
@@ -278,24 +299,29 @@ draw_silk(outlines: bool) {
                     vy: f32 = ty + vs * 1.25;
                     if (outside) {
                         vs = size * 0.75;
-                        vy = y + bh * 0.5 * s + vs * 1.2
+                        vy = y + bh * 0.5 * s + vs * 1.2;
+                        if (below) vy = y - bh * 0.5 * s - 4.0
                     }
                     vw: f32 = p_text_w(0, vs, line, 0, line_n);
-                    if (vw < room * 0.95 || outside) p_text(0, vs, x - vw * 0.5, vy,
-                        line, 0, line_n, 0.0, C_SILK, ta * 0.7)
+                    // (Inside, not over a pad whose name shows.)
+                    clear: bool = outside || !label_on_pad(p, vw * 0.5 / s, vs * 0.8 / s);
+                    line_clear();
+                    line_name(part_value[p]);
+                    if (clear && (vw < room * 0.95 || outside)) p_text(0, vs, x - vw * 0.5,
+                        vy, line, 0, line_n, 0.0, C_SILK, ta * 0.7)
                 }
             }
         }
     }
 }
 
-// Whether part p has a pad over its middle whose name shows (see
-// draw_pin_names).
-middle_named(p: int): bool {
+// Whether part p has a pad whose name shows (see draw_pin_names) under
+// its name, hw by hh mm about its middle.
+label_on_pad(p: int, hw: f32, hh: f32): bool {
     f: int = part_fp[p];
     for i in 0..fp_npads[f] {
         q: int = part_pin0[p] + i;
-        if (absf(pin_x[q] - part_x[p]) < pin_hw[q] && absf(pin_y[q] - part_y[p]) < pin_hh[q] && pin_name_size(q) >= 6.0) return true
+        if (absf(pin_x[q] - part_x[p]) < pin_hw[q] + hw && absf(pin_y[q] - part_y[p]) < pin_hh[q] + hh && pin_name_size(q) >= 6.0) return true
     }
     false
 }
@@ -428,5 +454,5 @@ draw_pour(l: int) {
     k: f32 = 0.6;
     if (l != layer_on) k = 0.42;
     p_quad(x0, y0, x1, y1, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, P_POUR, 0.0, 0.0, 0.0, l as f32,
-        0.0, rgb, k * net_dim(n))
+        0.0, rgb, k * copper_dim(n))
 }

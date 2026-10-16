@@ -483,9 +483,42 @@ raster(net: int, w: f32) {
             j1: int = mini(cell_j(it_y1[it] + reach), wy1);
             for j in j0..j1 + 1 {
                 cy: f32 = cell_cy(j);
-                for i in i0..i1 + 1 {
-                    d: f32 = item_point_dist(it, cell_cx(i), cy);
+                // (A track: in each row, only the cells near where it
+                // crosses the row, not all its box's, which for a long
+                // diagonal is mostly far from it.)
+                ri0: int = i0;
+                ri1: int = i1;
+                if (it_line[it]) {
+                    rr: f32 = reach + it_r[it] + gr_g;
+                    ax: f32 = it_ax[it];
+                    ay: f32 = it_ay[it];
+                    bx: f32 = it_bx[it];
+                    by: f32 = it_by[it];
+                    t0: f32 = 0.0;
+                    t1: f32 = 1.0;
+                    if (absf(by - ay) > 0.0001) {
+                        ta: f32 = (cy - rr - ay) / (by - ay);
+                        tb: f32 = (cy + rr - ay) / (by - ay);
+                        t0 = maxf(minf(ta, tb), 0.0);
+                        t1 = minf(maxf(ta, tb), 1.0)
+                    }
+                    if (t0 > t1) {
+                        ri0 = 1;
+                        ri1 = 0
+                    } else {
+                        xa: f32 = ax + (bx - ax) * t0;
+                        xb: f32 = ax + (bx - ax) * t1;
+                        ri0 = maxi(i0, cell_i(minf(xa, xb) - rr));
+                        ri1 = mini(i1, cell_i(maxf(xa, xb) + rr))
+                    }
+                }
+                for i in ri0..ri1 + 1 {
                     c: int = j * gr_nx + i;
+                    // (A cell already shut to all, both sides and vias,
+                    // stays so: no need to measure.)
+                    shut: bool = gr_blk[c * 2] == 1i8 && gr_blk[c * 2 + 1] == 1i8 && gr_via[c] == 1i8;
+                    d: f32 = 1000.0;
+                    if (!shut) d = item_point_dist(it, cell_cx(i), cy);
                     if (d < infl) {
                         for l in 0..2 {
                             if ((layers & 1 << l) != 0) {
@@ -505,6 +538,22 @@ raster(net: int, w: f32) {
                             gr_vown[c] = owner trunc i32
                         }
                     }
+                }
+            }
+        }
+    }
+    // (No new via's hole nearer another's, of any net, than the board
+    // house can drill: 0.25 mm of board between them.)
+    hreach: f32 = rule_drill + 0.25 + 0.03;
+    for v in 0..vias_n {
+        if (via_x[v] + hreach >= wxa && via_x[v] - hreach <= wxb && via_y[v] + hreach >= wya && via_y[v] - hreach <= wyb) {
+            for j in maxi(cell_j(via_y[v] - hreach), wy0)..mini(cell_j(via_y[v] + hreach),
+                wy1) + 1 {
+                for i in maxi(cell_i(via_x[v] - hreach), wx0)..mini(cell_i(via_x[v] + hreach),
+                    wx1) + 1 {
+                    dx: f32 = cell_cx(i) - via_x[v];
+                    dy: f32 = cell_cy(j) - via_y[v];
+                    if (dx * dx + dy * dy < hreach * hreach) gr_via[j * gr_nx + i] = 1i8
                 }
             }
         }
@@ -1065,6 +1114,10 @@ fan_flip: bool = false;
 // How far apart the pin and its nearest crowding neighbour are.
 fan_pitch: f32 = 1000.0;
 
+// How much farther out a fan-out goes before its route starts: more for a
+// wide one, clear of the grid's margin round the neighbours' pads.
+fan_extra: f32 = 0.0;
+
 // The widest track that can leave a fanned-out pin past its neighbours'
 // fan-outs (stubs as wide as their pads), and run beside theirs, as a
 // person necks tracks down at a fine-pitch part: 0.2 mm at 0.4 mm pitch.
@@ -1123,7 +1176,7 @@ needs_fanout(q: int, w: f32): bool {
             }
         }
     }
-    reach: f32 = far + rule_clear + w * 0.5 + 0.05;
+    reach: f32 = far + rule_clear + w * 0.5 + 0.05 + fan_extra;
     if (along_x) {
         esc_x = side * reach;
         esc_y = pin_y[q]
@@ -1181,7 +1234,7 @@ strap(
 // Whether pin q is its part's middle pad (a QFN's exposed pad).
 is_middle(q: int): bool {
     p: int = pin_part[q];
-    absf(pin_x[q] - part_x[p]) < 0.01 && absf(pin_y[q] - part_y[p]) < 0.01 && fp_npads[part_fp[p]] > 8
+    absf(pin_x[q] - part_x[p]) < 0.01 && absf(pin_y[q] - part_y[p]) < 0.01 && fp_npads[part_fp[p]] > 4
 }
 
 // Part p's middle pad, if it is on net n; or -1.
@@ -1204,17 +1257,30 @@ TRY_PUSH: []bool = [false, false, true, false, true];
 // leg with no way may take free routes up (see rip). Whether every leg got
 // through.
 route_route(r: int, push: bool): bool {
+    // (A wide route, a supply's, from a fine-pitch part: at its whole width
+    // past its fan-out's stub, if it can be; else necked down all the way.)
+    base: int = r * RPTS;
+    necked: f32 = ro_w[r];
+    for k in 0..ro_np[r] {
+        if (rp_pin[base + k] >= 0) necked = minf(necked, neck_width(rp_pin[base + k],
+            ro_w[r]))
+    }
+    if (ro_w[r] >= 0.6 && necked < ro_w[r]) {
+        fan_extra = ro_w[r] + 0.2;
+        ok: bool = route_route_w(r, push, ro_w[r]);
+        fan_extra = 0.0;
+        if (ok) return true
+    }
+    route_route_w(r, push, necked)
+}
+
+route_route_w(r: int, push: bool, w: f32): bool {
     clear_route_copper(r);
     ro_stale[r] = false;
     searching = r;
-    width: f32 = ro_w[r];
+    width: f32 = w;
     base: int = r * RPTS;
     np: int = ro_np[r];
-    // (Narrower, if it must be, to leave a fine-pitch part.)
-    for k in 0..np {
-        if (rp_pin[base + k] >= 0) width = minf(width, neck_width(rp_pin[base + k],
-            ro_w[r]))
-    }
     all: bool = true;
     // The layers the next leg may start on.
     from_mask: int = 3;

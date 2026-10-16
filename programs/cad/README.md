@@ -1,85 +1,73 @@
 # CAD
 
-A tool for designing things to make, drawn the way the games here are: the
-picture is the interface (no HTML or CSS on its page). It designs the
-whole of a small electronic thing, mobile first: its board (a PCB
-designer, with the computer doing the routing), the case it goes into
-(a stack of laser-cut plywood layers, and the bolts that hold them), and
-what to send to whom so that it all arrives (**Make it**). Its parts
-library starts with the parts of the handheld game controller
-(`~/src/handheld`), and the board it opens with is the handheld's.
+The designs of a small electronic thing, and a viewer for them drawn the
+way the games here are: the picture is the interface (no HTML or CSS on
+its page), mobile first. A design is the whole of the thing: its board
+(placed and routed, the computer doing the routing), the case it goes
+into (a stack of laser-cut plywood layers, and the bolts that hold them),
+and what to send to whom so that it all arrives (**Make it**). There are
+two: the handheld game console (`~/src/handheld`) and the dock that holds
+and charges four of them.
+
+The designs are made by their generators, `tools/handheld.py` and
+`tools/dock.py` (where every part goes, and every net), and routed by
+`tools/finish.l8`: `make cad-boards` runs them and writes the board files
+kept here, which are the whole design. To change a design, change its
+generator. The editor shows them, for looking over and reviewing; it does
+not change them.
 
 ```sh
 make cad && .build/cad [BOARD...]    # the handheld and its dock if none
+make cad-boards                      # the designs, from their generators
 make cad-test                        # programs/cad/test_board.l8
 make web                             # the page is .build/web/cad/
 ```
 
-The editor has its designs open together (the boards given, or the
+The viewer has its designs open together (the boards given, or the
 handheld and its dock): a tap on the title opens their menu, and there
 too *The set*, the dock in 3D with four handhelds lying in it, its lid on
-or slid off: the product as it is to be seen. Each design is written back
-to its file as it is left. The page keeps each in `localStorage`, with
-the version of the file it began from: when the site has a newer one,
-that is what opens.
+or lifted off: the product as it is to be seen.
 
 ## Using it
 
-There are three modes, along the bottom: **Place**, **Route** and **Case**.
-In any,
-a finger on empty board moves the view (let go mid-swipe and it glides), two
-fingers pinch to zoom, and a double tap zooms in. The mouse wheel zooms;
-off a page, the middle or right button drags the view.
+There are three ways of looking, along the bottom: **Parts**, **Copper**
+and **Case**. In any, a finger on the board moves the view (let go
+mid-swipe and it glides), two fingers pinch to zoom, and a double tap
+zooms in. The mouse wheel zooms; off a page, the middle or right button
+drags the view.
 
-- **Place**: drag a part to move it (it snaps to the grid shown, which
-  follows the zoom). A tap picks a part; its card can rotate or delete it,
-  and its connections are lit.
-- **Route**: routing is said, not drawn. The computer finds the copper
-  (`route.l8`); you give it intent, and help where it is stuck.
-  - Tap a line of the ratsnest: that connection is routed, the shortest
-    clean way in straight runs and 45-degree turns, changing layer by vias
-    where it must.
-  - Drag a ratsnest line, or a picked route's copper, to pull out a
-    waypoint; the route goes through it, found again as you move it. Tap a
-    waypoint to pick it (Take out removes it).
-  - A picked route can go to the other layer, be **locked** (routing will go
-    round it and never move it), or be taken up.
-  - **Route all** routes every connection, a few each frame (pouring a net
-    called GND on the bottom first, if nothing is poured yet).
-    Free routes may be pushed aside (taken up and routed again) to let a
-    later one through; locked ones never are. What finds no way is left as
-    a red dashed line to steer by hand.
-  - **Guide**: draw a stroke from one part to another, and the connections
-    between them are routed side by side along it, in lanes.
-  - **Clear** starts over, as far as you choose: the free routes, all
-    routes (locked ones too), or all copper (routes, hand-laid tracks and
-    vias, and pours: a bare board with its parts where they are). Each
-    shows how much it would take up; undo brings it back.
-  - Tap a pad to light its net; its card routes the whole net, or **pours**
-    it on the bottom (a copper fill with a via in each of its top pads).
+- **Parts**: a tap picks a part: its card says what it is, its package,
+  and what it is bought as (the manufacturer's part and LCSC's number, or
+  that it is not put on by the board house), and its connections are lit.
+- **Copper**: the routed copper of both sides. A tap on a track, a via or
+  a pin lights its net and says what it is (a track's width and layer, a
+  route's length and vias, a net's pins). The layer button puts the other
+  side on top.
 - **Case**: the case, a layer at a time, over the board (Up and Down step
-  through them; the holes show the board through them). Drag the screen
-  (in the layers it lies in) or the battery to move it; the layers follow.
-  A board with no case has a button to make one. **3D** shows the whole
-  thing (the layers, the buttons' discs, the board and its parts, the
-  screen, the battery, the bolts): drag to turn it, pinch or wheel to come
-  closer; **Explode** (or a double tap) pulls it all apart, everything in
-  a place of its own in the order it goes together (the nuts, the back,
-  the battery's layers and the battery, the board's layer, the board, its
-  domes, each layer above with its discs, and over it all the bolts); **Flat**
-  goes back to the layers.
-- **Make it** (top right, bright once nothing is left to do): who makes
-  or sells each part of the thing, what to send them, and a way to their
-  page. See *Making it*, below.
-- The layer button switches between top and bottom copper; undo and redo
-  keep 200 steps; the corners button fits the board; **+** opens the parts.
-- Top right: the problems the check finds. A tap goes to each in turn.
+  through them; the holes show the board through them). **3D** shows the
+  whole thing (the layers, the buttons' discs, the board and its parts,
+  the screen, the battery, the bolts): drag to turn it, pinch or wheel to
+  come closer; **Explode** (or a double tap) pulls it all apart, everything
+  in a place of its own in the order it goes together; **Steps** puts it
+  together step by step, as *Putting it together* says (below), each
+  step's pieces coming down into place in turn, turned face down for the
+  steps done face down (Next and Back, or the arrow keys); **Flat** goes
+  back to the layers. It is lit as a room is, to read its depth: a lamp
+  above it casting shadows on it and on the floor under it, a softer
+  light from the other side and from above; the ply's faces pale birch
+  with a grain, its laser-cut edges charred brown with the sheets' seams
+  in them, the engravings burnt in, the metal and the screen's glass
+  reflecting the room.
+- **Make it** (top right): who makes or sells each part of the thing,
+  what to send them, and a way to their page. See *Making it*, below.
+- The corners button fits the board. Top right: the problems the check
+  finds (none, as kept); a tap goes to each in turn.
 
-Keys: `1`, `2` and `3` the modes, `[` and `]` the case's layers, `t` 3D,
-`e` explode, `m` Make it, `r` rotate, Delete delete, `z` undo, `y` redo,
-`f` fit, `v` the layer (of the picked route, or for new ones), `k` lock,
-`w` route all, `g` guide, `c` clear, `p` next problem, `a` the parts, `+`/`-` zoom,
-Escape to let go of what is picked (or stop Route all).
+Keys: `1`, `2` and `3` the ways of looking, `[` and `]` the case's
+layers, `t` 3D, `e` explode, `s` the steps (in 3D; the arrows or space
+go through them), `m` Make it, `f` fit, `v` the layer on top, `p` next
+problem, `+`/`-` zoom; Escape shuts what is open (or lets go of what is
+picked), `q` quits.
 
 ## The router
 
@@ -97,8 +85,10 @@ Things a person would do, it does:
 - **Fan-out**: from a pad whose neighbours are too close for a track to pass
   (a QFN's), the route first goes straight out along the pad, as wide as
   the pad, until it is clear of the part's pads. Each such pin's way out is
-  kept for its own net. A wide (power) track is necked down to what the
-  pitch allows.
+  kept for its own net. A wide (power) track goes out as a stub as wide as
+  its pad, a track's width farther than a thin one would, and on at its
+  full width from there; only if it cannot is it necked down all the way
+  to what the pitch allows.
 - **Straps**: two pins of one part on the same net are joined straight
   across, pad to pad, when nothing is between.
 - **Pushing aside**: when the near ways are taken, it searches again
@@ -110,6 +100,11 @@ Things a person would do, it does:
 
 Route all also routes in the order a person would:
 
+- **The generator's own routes** first: a design's generator may give
+  routes that matter more than the rest, locked, with no copper yet (a
+  supply's trunk, wide and straight from its source to its load; a sense
+  line from a shunt's own pad, carrying no current), and they are laid
+  before anything is in their way.
 - **Buses** first: three or more signals between the same two parts are
   routed together in lanes, along a guide of its own from the middle of
   one end's pins to the other's. Those that meet the far part on its far
@@ -144,7 +139,7 @@ unrouted; one try a frame.
 
 ## The check
 
-After every change (and while a part is dragged) the board is checked
+When a board is read the board is checked
 (`check.l8`): which copper touches which, each layer apart, through holes and
 vias joining them; then for each net the connections still to make (Prim's
 tree between its islands of copper: the thin lines); and the problems:
@@ -165,41 +160,29 @@ into the ground pad). Pads a part joins inside itself, or that are joined
 beyond the board (the display's ground pins, one ground on its flex), need
 no copper between them. The title shows how many nets are joined.
 
-On the handheld's board it finds one problem: the one track `design.ml`
-routes, from the battery connector to the PTC, runs through J2's ground pad.
 Pours join what they touch of their net.
 
 ## The handheld
 
-`handheld.pcb` is the handheld (`~/src/handheld`) laid out again so that it
-routes, from `tools/handheld.py` (change that, not the board file). The
-board files kept are the whole design, routed: `make cad-boards` runs each
-generator (`tools/handheld.py`, `tools/dock.py`), which places the parts
-and lists the nets, then `tools/finish.l8`, which presses Route all on it
-as the editor would (pouring ground first) and writes it with its copper,
-failing if anything is left to connect or any rule is broken. The routing
-comes out the same every time; the tests check that each board as kept is
-whole and clean, and that it routes whole and clean again from bare.
-`tests/sketch.pcb` is the first sketch, as `design.ml` placed it, kept only
-as a hard board for the router's tests. It follows `design.md`: the display at the top, a D-pad on the left, A and B on
-the right thumb's arc, Back and Home in the bottom corners, USB-C on the
-bottom edge, the power switch on the top edge. (So eight buttons, as the
-spec says; `design.ml` had added X and Y.)
+`handheld.pcb` is the handheld (`~/src/handheld`), from
+`tools/handheld.py`. The board files kept are the whole design, routed:
+`make cad-boards` runs each generator (`tools/handheld.py`,
+`tools/dock.py`), which places the parts, lists the nets and gives the
+routes that must be laid first, then `tools/finish.l8`, which presses
+Route all on it (laying those, and pouring ground, first) and writes it
+with its copper, failing if anything is left to connect or any rule is
+broken. The routing comes out the same every time; the tests check that
+each board as kept is whole and clean, and that it routes whole and
+clean again from the generator's placing. `tests/sketch.pcb` is the first
+sketch, as `design.ml` placed it, kept only as a hard board for the
+router's tests.
 
-What was hard about the sketch is the RP2040's pinout against where its
-partners were: QSPI on the edge away from the flash, USB on the edge away
-from the connector, the LCD's GPIOs at the chip's far corner and in the
-reverse of the connector's order, half the buttons on the side away from
-them, the crystal on the wrong side, and decoupling caps far from their
-pins. Its USB-C connector also faced into the board, its contacts squeezed
-against the edge. Every connection fought for the narrow ring round a
-0.4 mm-pitch chip.
-
-The new layout is as small as its screen and buttons allow: 77 x 86 mm.
-A 2.8 inch screen (Newhaven NHD-2.8-240320AF-CSXP-F, 240 x 320, its flex
-leaving its right end) lies on its side across the top half; the buttons
-are below it. The bolts go through the board's corners, so the case's rim
-is thin all round.
+The board is 79 x 86 mm and 1.2 mm thick, as small as its screen and
+buttons allow (the thickness sets the buttons' room: see below). A 2.8
+inch screen (Newhaven NHD-2.8-240320AF-CSXP-F, 240 x 320, its flex
+leaving its right end and folding back under it to its connector) lies
+on its side across the top half; the buttons are below it. The bolts go
+through the board's corners, so the case's rim is thin all round.
 
 - The computer is an ESP32-S3 module (ESP32-S3-WROOM-1-N16R8: Wi-Fi,
   Bluetooth LE, its own USB, 16 MB of flash and 8 MB of PSRAM inside), so
@@ -208,11 +191,13 @@ is thin all round.
   is the software's to do, the board needs nothing more. It lies on its
   side at the left edge, its antenna's end at the board's edge, out past
   the screen's side; nothing may be under the antenna (its footprint's
-  keepout: no tracks, vias or pour on either side). The screen is set
-  1.85 mm right of the middle, as far as the case allows, so its metal is
-  2.6 mm from the antenna; the battery, under the board, is 2 mm from it.
-  Espressif ask for 15 mm from metal: in a handheld this size it cannot
-  have that, so its range will be shorter than a dev board's.
+  keepout: no tracks, vias or pour on either side). The screen is set so
+  its picture is in the middle of the case, across, so its metal is
+  1.65 mm from the antenna; the battery, under the board, is 2 mm from
+  it. Espressif ask for 15 mm from metal: in a handheld this
+  size it cannot have that, so its range will be shorter than a dev
+  board's. A 3.3 V trunk, 0.5 mm wide, goes straight from the regulator
+  to the module (its Wi-Fi draws 0.5 A in bursts), laid first.
 - Its right end faces the screen's connector, level with it. The screen
   (an ST7789VI inside) is on its 8-bit parallel interface (8080 style:
   IM0 high, IM1 and IM2 low), which the ESP32-S3's LCD peripheral drives
@@ -224,129 +209,331 @@ is thin all round.
   are strapping pins: the screen's inputs leave them be at reset, and
   IO45's pulldown holds the screen in reset until the program starts.)
   Its tearing signal goes to IO38, to draw between refreshes; its unused
-  serial input, read strobe and DB0-DB7 are tied high. IO39 sets the
-  backlight (below).
-- Its bottom row faces the D-pad and Back (IO4-7, IO15) and Home, B and
-  A (IO16-18). IO2 reads the battery's voltage, halved (1M each, so
-  little goes back into the module when it is off).
+  serial input, read strobe and DB0-DB7 are tied high. Its flex, folded
+  back under it, brings its contact 1 to the low end of the connector,
+  which is pin 1's (the connector takes contacts on either face).
+- Its bottom row faces the arrows and Back (IO4-7, IO15), Home, B and A
+  (IO16-18) and power (IO8). IO2 reads the battery's voltage, halved (1M
+  each, so little goes back into the module when it is off: the pin
+  leaks 50 nA at most, 25 mV).
+- The buttons are tactile switches (XKB's TS-1187A, 5.1 mm square, 160
+  gf, 1.7 mm tall: -B-C-B), put on by the board house. Power is one of them: a small flush button at the
+  right end of the bottom row (Back, Home, power), a ring engraved round
+  it. There is no power switch: "off" is the module's deep sleep (the
+  program's to do: held, the button puts it to sleep; pressed, it wakes
+  it, IO8 being one it can wake on, its pull-up kept in sleep). Asleep it
+  draws about 0.1 mA: the regulator (25 uA), the charger's own leak from
+  the battery (30 uA), the dividers (8 uA), the module (10 to 30) and the
+  screen told to sleep (the program's to do; its datasheet gives no
+  figure: tens of uA, to be measured) - over a year on the battery. To keep it for longer, unplug the battery
+  (which takes the case apart: the battery is under the board). The
+  program should put it to sleep, too, below about 3.55 V: Wi-Fi's bursts
+  through the fuse and the charger pull the 3.3 V down near the module's
+  brown-out below that.
 - There is no USB socket: programs come over the air and charging is
   wireless. For the first program, or to recover from a bad one, there
   are eight test points, plated holes in two rows of four at the lower
-  right: 5V (the charger's input), GND, D+, D- (USB, IO20 and IO19); EN,
+  right: 5V (into the charger), GND, D+, D- (USB, IO20 and IO19); EN,
   BOOT (IO0: low at reset to load by the serial port), TX, RX. A window
   through the case's back and battery layers reaches them, for a jig of
   pogo pins with the case shut (a sticker over it).
-- The backlight's four LEDs (160 mA together at 3.1 V) run from the
-  system supply through a current sink: an LMV321 op-amp holds a
-  logic-level MOSFET (AO3400A) at 157 mA through a 1 ohm sense resistor,
-  however the supply goes (5 V on a charger, 3.4 to 4.2 V on the
-  battery). IO39 high sets it, through a divider (3.3 V to 0.157 V); PWM
-  on it dims it; with the 3.3 V off the gate is pulled down.
-- Power is at the top right: the side switch on the top edge (C&K
-  PCM12SMTR), the 3.3 V regulator, the charger with its input and battery
-  each bypassed (10 uF, as its datasheet asks), its fuse (1.1 A hold:
-  Wi-Fi's bursts and the backlight), the battery's socket, and a slot
-  (5.5 x 7.5 mm) through the board over the battery for its wire and
-  the plug on its end. The switch only turns the regulator on or off
-  (its EN to the system supply, or to ground), so it carries no current
-  to speak of. (Things the first sketch had wrong, which would have kept
-  it from working: its regulator's footprint had EN and NC the other way
-  round; the charger's THERM and PROG3 floated, where its datasheet wants
-  10k for no thermistor and a resistor to end charging (100k, 10 mA);
-  and its SOT-23s', the regulator's and the charger's footprints were
-  KiCad's, y down, in this tool's y up: mirrored, so each part's pins
-  landed on the wrong pads (the battery onto ground). Each is now turned
-  over (`fp_flip_y` in `parts.l8`).)
+- The backlight's four LEDs (160 mA most, together, at 3.1 V) run from
+  the system supply through a current sink: an LMV321 op-amp holds a
+  logic-level MOSFET (AO3400A) at 99 mA (Newhaven's pin table says 100
+  mA, its electrical table 160 most: the lower, for the LEDs' life, and
+  bright enough indoors) through a 1 ohm (1%) sense
+  resistor, however the supply goes (5 V on a charger, the battery's 3.4
+  to 4.2 V; below about 3.6 V it dims a little, the LEDs wanting up to
+  3.4 V). IO39 high sets it, through a divider (3.3 V to 0.099 V); PWM on
+  it dims it. The op-amp is powered from IO1 (one that holds in deep
+  sleep): with it low the op-amp draws nothing and the gate is pulled
+  down, so the LEDs are truly off (an op-amp left on would hold them at
+  its offset, a few mA's glow). Its feedback comes back through 1k with
+  4.7 nF from the op-amp's output, so the loop is steady with the
+  MOSFET's gate on it; the MOSFET's drain has a wide track to shed its
+  heat (0.17 W on a charger).
+- Power is at the top right: the 3.3 V regulator (always on; TI's
+  TLV75533 in WSON-6, its middle pad soldered to ground: on a charger it
+  drops 1.7 V, a few hundred mW with Wi-Fi busy, and that package sheds
+  it at 100 C/W where a SOT-23-5 would at 230), the charger
+  (MCP73871) with its input and battery each bypassed (10 uF, as its
+  datasheet asks; nine vias in its exposed pad take its heat, up to 0.9 W
+  charging, to the ground pour on the back), its fuse (1.1 A hold: Wi-Fi's
+  bursts and the backlight; the charger senses the battery through it, so
+  its 0.1 V at full current ends the constant current a little early,
+  and the taper finishes the charge at 4.2 V all the same), and left of
+  the charger, beside its battery pins, the
+  battery's socket (JST PH, side entry, surface mount, 4.6 mm tall,
+  under the screen,
+  its plug going in from over the hole its wire comes up through, a
+  5.5 x 7.5 mm slot in the board over the battery). The charger's THERM
+  has a 10k thermistor over the battery, on the board's top, away from
+  the backlight's MOSFET: it stops charging outside about 3 to 44 C (a
+  warm dock, the sun); PROG3's 100k ends the charge at 10 mA; its safety
+  timer is off (TE high): played on a pad for hours, the handheld would
+  use most of the 500 mA, and the timer would end the charge unfinished.
+  Its VPCC holds its input at 4.55 V at least (270k and 100k): if the
+  receiver sags under the load, the charge current falls back, rather
+  than the charger stopping and starting.
 - Charging: from a Qi pad (or the dock), through a wireless receiver
   (Adafruit 1901, 5 V at 500 mA) lying against the back under the
-  buttons, its two wires soldered up into pads in the board, and a
-  Schottky diode (so the jig's 5 V does not feed back into it).
-- Charge lights, between the D-pad and A and B, through five holes in
+  buttons, its two wires soldered up into pads in the board, straight to
+  the charger through a P-channel MOSFET used as a diode that drops next
+  to nothing (the charger wants 4.35 V at least to start; a Schottky's
+  0.45 V would leave it short). The jig's 5 V comes in through a Schottky
+  diode, and turns the MOSFET off, so it does not feed back into the
+  receiver (10 nF on the jig's pin keeps a spark off the MOSFET's gate).
+  The Schottky drops 0.45 to 0.6 V: on the jig the charger's input sits
+  near its 4.55 V floor, so it charges slowly there; loading programs is
+  not affected.
+- Charge lights, between the arrows and A and B, through five holes in
   the front: four for the battery's level and one for full. They need no
   program, and light only on a charger: run from the charger's input, a
-  quad comparator (LM339) weighs the battery, halved by its own divider,
-  against four steps of a 2.5 V reference (LM4040): 3.6, 3.75, 3.9 and
-  4.05 V, as the battery reads while charging. Full is the charger's own
-  STAT2. Engraved under them: a bar under each of the four, longer step
-  by step, and a ring round full.
+  quad comparator (LM339) weighs the battery, halved by its own divider
+  (330k each, 6 uA: the four inputs' bias moves it 4 mV as they usually
+  are, 41 at the worst), against four
+  steps of a 2.5 V reference (LM4040): 3.6, 3.75, 3.9 and 4.05 V, as the
+  battery reads while charging. Full is the charger's own STAT2 (which
+  also goes low when it stops for heat or cold: too warm on the dock,
+  "full" lights though it is not charging; the program can tell, from
+  the battery's voltage).
+  Engraved over them: a bar over each of the four, taller step by step,
+  and a ring round full. Each light shines up a tube of its own through
+  the wood (no light reaches its neighbours'), 1.6 mm across and 11 mm
+  from the light to the face: seen only nearly head on, as it is. Its top
+  6.4 mm (the front and the screen's layer) filled with clear UV resin,
+  flush with the front, it carries the light up to the face, which
+  glows.
 
-Route all (which pours ground on both sides first) joins all 61 of
-its nets with no rule broken, in a few seconds; the sketch gets 30
-of 40.
+Route all (which lays the generator's routes, and pours ground on both
+sides, first) joins all 65 of its nets with no rule broken, in a few
+seconds; the sketch gets 30 of 40.
 
-Its case (`case 3.2 2.5 4.6 11 0.5 17 90`, `qi 0 -22`) is 82 x 90.5 mm and
-25.6 mm thick: eight layers of 3.2 mm birch ply and forty discs, held by
-four M2.5 x 20 bolts through the board's corners; the battery is
-Adafruit's 1200 mAh one (34 x 62 x 5 mm), on its side under the top half,
-and the wireless receiver beside it under the bottom half. The side
-switch's knob is 0.3 mm inside the case's outline, in a slot of the rim
-2.5 mm wider than the switch each side, for a fingertip.
+Its case (`case 3.2 2.5 2.75 11 0.5 17 90 5`, `qi 0 -22`) is 84 x 93.5
+mm and 22.4 mm thick: seven layers of 3.2 mm birch ply and 33 discs. Its
+rim is 2.5 mm, but 5 along the bottom, under the row of small buttons,
+so they are not crowded against the edge. Four steel M2.5 x 12 bolts go
+up through the board's corners from the back, their heads sunk through
+it and the first battery layer, into nuts glued (epoxy) in hexes in the
+screen's layer, under the front, bearing on the spacer: the bolts clamp
+the battery layers, the board's layer and the spacer, and the front's
+block is held by the nuts glued in it. Nothing of them shows on the
+front, which is wood, the window and the buttons. (From the heads' seat
+to the nuts' top is 11.6 mm, to the front 12.8: a 12 mm bolt goes all
+through its nut, and its tip stops 0.8 short of the front. Stack the
+second battery layer, the board's layer, the spacer and the screen's
+layer dry and measure them: under 12.6 mm, put a thin washer, DIN 433
+M2.5, 5 mm across and 0.5 thick (it fits the head's 5.6 mm hole), under
+each head. Under 3.15 mm a sheet, the 2 mm posts on the board stand
+proud of the gap over it: a seam shows in the side; 1.8 mm posts would
+close it.) The battery is Adafruit's
+1200 mAh one (34 x 62 x 5 mm), on its side under the top half, its lead
+to the right (a bay in its pocket at that end takes the lead's bend and
+its slack; the wire lies back over the battery to the slot in the
+board), and the wireless receiver beside it under the bottom half. Foam
+squares (1.6 mm, sticky both sides) hold the receiver still in its
+pocket, and one layer of them on the battery (beside its wire, not on
+it), squeezed to 1.4, holds the battery and presses the board up
+against its posts.
 
-Its buttons: the D-pad is one cross (its arms 20 mm across, 7 wide) over
-its four domes, rocking on a stem in its middle; A and B have 8 mm caps
-standing 3.2 mm out of the front; Home and Back, low either side of the
-middle and 13 mm from B, have caps flush with the front, so a thumb
-passing over them does not press them. Each cap rests on its dome
-(pressed, it goes straight into it); held upside down a button can rise
-1.3 mm before its flange meets the front, as the layers are all 3.2 mm
-(a dot of felt on its stem's foot quiets it). The window onto the screen
-is a millimetre wider than its picture each side, filled with 3 mm clear
-acrylic, cut as its own piece and glued in flush. The back is laid face
-down, so what is engraved on it is outside: a ring where the wireless
-receiver's coil is, to set it on a charging pad (and the cut file has the
-back mirrored, so that turned over it fits). Its edges are square as cut:
-sanding them round is worth doing.
+Its buttons: the four arrows are buttons of their own, in a cross, each
+7.5 mm from its middle, with round caps about 6.8 mm across standing 3.2
+mm out of the front (not one rocking cross: in plywood, its play and the
+pivot it rocks on are hard to make true, and it could catch or press two
+at once; four stacks press as surely as A and B). A and B have caps as
+wide as there is room (about 7.6 mm), standing out as far, their middle as
+far right of the case's middle as the arrows' is left; Back,
+Home and power, in a row along the bottom, have small caps (5 mm) flush
+with the front, so a thumb passing over them does not press them, nor
+takes them for the face buttons; engraved by them, a bar for Back, a dot
+for Home, a ring for power, and a small triangle past each arrow,
+pointing its way (four round caps alone read as more face buttons). Each button's stems rest on its switch.
+With the board 1.2 mm thick the gap from it to the spacer is 2 mm, and
+the switches 1.7: each button's flange has 0.3 mm of room under the
+front, more than the switch's travel (0.25), little to rattle.
+Posts at the board's corners, 2 mm (4 x 4 mm inductors), bear on the
+spacer, and the foam on the battery presses the board up against them:
+it cannot rattle. Each disc has a 2.2 mm hole in its middle (but a cap's
+top disc, which shows: a flush button's one cap disc too): round
+toothpicks (2 mm) through a button's discs line them up as they are
+glued, cut off flush after. The caps have 0.2 mm round them in the
+front.
+
+The window onto the screen is a sheet of 3 mm clear acrylic in a hole its
+size in the front, the picture and 1 mm round it: inside the glass's
+edge (Newhaven's drawing leaves 1.5 mm of glass outside the picture), so
+what shows is an even black border, and the wood's margin, even all
+round, hides the glass's edges, the backlight's frame and the room for
+the flex; the screen is set so that its picture is in the middle of the
+case, across. The screen lies in its own layer under the front, on four
+pads of the foam squares (1.6 mm) on the spacer under its corners (the
+wood there: its middle is over holes), squeezed to 0.8, which press its
+glass up against the front's wood round the window, the acrylic in it
+flush with the face: a press cannot push it in, and there is no gap to
+rattle in. Glue
+the acrylic in with clear epoxy or a UV acrylic adhesive (superglue
+would frost its edges). The screen comes out only with the case
+unbolted. The back is laid face down, so what is engraved on it is outside: a
+ring where the wireless receiver's coil is, to set it on a charging pad
+(and the cut file has the back mirrored, so that turned over it fits).
+Its edges are square as cut: sanding them round is worth doing.
+
+Putting it together (beside what the cart brings: wood glue, 5-minute
+epoxy, clear UV resin and a UV torch, round toothpicks 2 mm across,
+clear packing tape, a little wax; and, if the ply is thin, four DIN 433
+M2.5 washers). The viewer's **Steps** (in 3D) shows each step:
+
+1. The back block: the wireless receiver in the first battery layer's
+   pocket, its coil down against where the back goes, foam over it, its
+   wires up through the second's channel; then glue (wood glue) the
+   first battery layer on the back (engraving out) and the second on it,
+   lined up by their edges and the bolts' holes (bolts through them
+   while it sets), sanded flush.
+2. The front block: glue the front on the screen's layer the same way.
+   Set the acrylic in the window from behind, its back at least 0.1 mm
+   inside the front's back face, so the screen's glass bears on wood, not
+   on it: if the acrylic is thicker than the ply, let it stand proud of
+   the face by the difference (never sand it: that frosts it over the
+   picture). Glue it from behind (clear epoxy). Seal the five light
+   tubes' walls with a thin coat of the resin, cured; then clear packing
+   tape over the front's face, burnished down, turn it over, and fill the
+   tubes from behind with UV resin, a toothpick to work out the bubbles,
+   in two pours, each cured. Peel the tape: the resin is flush with the
+   face.
+3. The nuts: epoxy each into its hex in the screen's layer, flush with
+   the layer's back face (the spacer's side), not against the front: lay
+   on them, waxed, the spacer and the board's layer, then the back
+   block, and run the four bolts in as at the end (11.6 mm from head to
+   nut, the tip short of the front), drawing each nut flush; leave it
+   while it sets (no epoxy on that face, nor in the thread); then out.
+4. The buttons: each one's discs glued on toothpicks through their holes,
+   the toothpicks cut flush when set (a flush button's at its flange: its
+   cap goes on in step 6); the standing caps' top
+   edges broken with fine sandpaper, kinder to a thumb.
+5. The board, face up: solder the receiver's two wires (the back block
+   lying beside it) up into its pads. Their slack lies, when it is
+   closed, in a bay in the second battery layer over the receiver.
+6. Face down, on a folded towel (the caps stand out of the front): the
+   front block; the buttons into their holes (a flush button's cap first,
+   dropped into its hole, waxed so it does not glue itself to the front,
+   then its flange and stem glued on it from behind); the screen into its layer,
+   face down on the window; four foam pads on the screen's back corners;
+   the spacer, then the board's layer, over it all.
+7. The screen's flex into its connector. Then thread the battery's plug
+   up through the slot into its socket (the battery plugged in last,
+   after the flex), and turn the board over onto them, like a page, into
+   its layer.
+8. The battery on the board's back, its lead to the right, its wire in
+   the bay at that end and back over it; one layer of foam on it, beside
+   the wire; the receiver's wires' slack into their bay. The back block
+   lowered over it all, bolts held through it as guides; the four bolts
+   in: snug, not tight (the clamp is wood on wood, and the posts are
+   under it).
 
 ## The dock
 
 `dock.pcb` (from `tools/dock.py`) is a box that holds four handhelds lying
 flat, two by two, under a lid, and charges them without wires. It is the
 second design open (the title's menu); its board file's `dock` line, instead of
-`case`, makes its box (`dock.l8`), 243 x 210 x 51 mm of 3.2 mm birch ply,
-from the bottom:
+`case`, makes its box (`dock.l8`), 251 x 223.5 x 38.4 mm of 3.2 mm birch ply
+(lid on, on its feet 48 mm), from the bottom:
 
-- a base, held on by six M2.5 x 6 bolts (their heads under it, between
-  four wooden feet; their nuts in hexes in the first cavity), so it comes
-  off to reach the electronics; slots in it under each transmitter let
-  air in from under the box (its program should also watch the
-  ESP32-S3's own temperature, and the current, and stop a transmitter
-  that draws what no handheld would: a coin on its pocket's floor);
-- holes for two 3 mm dowels through the glued layers, at opposite ends
-  of the side rims, to line them up as they are glued;
+- a base, held on by six steel M2.5 x 12 bolts (their heads under it,
+  between four wooden feet), through the first cavity into nuts in hexes
+  in the second, so they clamp it to the body; it comes off, the dock's
+  board bolted to it (three M2.5 x 8), to reach the electronics. A slot
+  in it past each transmitter's board's outer end lets air in from under
+  the box;
+- holes for two 3 mm dowels through the glued layers, in the side rims
+  toward the front, to line them up as they are glued; left standing
+  3 mm out of the top, into the lid's frame, they line the lid up too;
 - two cavities, for the dock's board, the four Qi transmitters (Adafruit
   2162: 5 V in, 5 W at most, each its board and a 53 mm coil) and the
   transmitters' wires' ways; the coils stand on the first cavity, up
   through the second and the floor, 2.4 mm under the pockets' floor and
-  about 6 mm from the handhelds' receivers (Adafruit give 2 to 8 mm);
-- the floor, then ten walls round four pockets, each a handheld's case and
-  0.75 mm each side, its coil under the handheld's receiver (they go in
-  buttons to the front); the lowest three walls have the dividers, the
-  rest go only round the outside, and each pocket has a finger's notch
-  at its outer end, 20 mm across and 5 deep, to lift the handheld out
-  (a loop of ribbon glued to the pocket's floor, its end up at the
-  notch, lifts it more easily still). On each pocket's floor, at the
-  end the handheld's screen goes, the screen's outline is engraved: the
-  way round it charges, its receiver over the coil. The walls stand a
-  layer higher than a handheld with its caps out as far as they go, so
-  the lid slides over them, and the top one has a notch in the middle of
-  the front, under the lid's front, for a finger to slide it out;
+  about 6 mm from the handhelds' receivers (Adafruit give 2 to 8 mm). In
+  the second, each coil's pocket is joined to its transmitter's: the way
+  for its leads, and for the air, which goes on up round the coil (the
+  floor's hole is 2.5 mm wider each side) into the pocket. Foam squares
+  hold the coils and boards still;
+- the floor, then eight walls round four pockets, each a handheld's case
+  and 0.75 mm each side, its coil under the handheld's receiver (they go
+  in buttons to the front); the lowest three walls have the dividers, the
+  rest go only round the outside, and each pocket has a finger's notch at
+  its outer end, 22 mm across and 10 mm deep (the front and back rims
+  are 14 and 13.5 mm deep for them), and 6 mm on into the floor, under
+  the handheld's end: a fingertip goes under it to lift it out.
+  On each pocket's floor, at the end the handheld's screen goes, the
+  screen's outline is engraved: the way round it charges, its receiver
+  over the coil. A grille in the lid's top, over the back pockets'
+  finger notches (the lid's frame open there too), lets
+  out the air the transmitters warm; dust falls into the notches, not on
+  the screens. With a handheld lying over its coil the air's way
+  is narrow, so the program reads the thermistor on its board and turns
+  the transmitters down to keep the box under about 40 C (the handhelds'
+  own stop at 44); and the current, and stops a transmitter that draws
+  what no handheld would: a coin on its pocket's floor. (The dock's own
+  3.3 V, 0.1 to 0.2 A, is drawn before the shunt: the program allows for
+  it against what the charger offers.);
 - right of the pockets, past a wall all the way up, the stowage: 48 mm
-  across, the pockets' length and depth (28.8 mm under the lid), for the
-  charger and its cable: Qualtek's QFWC-18-12-USCR (in the cart: 18 W
-  USB-C, 5 V at 3 A among its voltages, its 1.2 m cable attached, a
-  folding US plug), lying down, its cable coiled beside it. (Any USB-C
-  charger that gives 5 V at 3 A will do, if it is under 28 mm one way.);
-- the lid: it slides in a channel from the front, under a lip over its
-  sides and back, so it cannot lift off, nor fall out tipped up; it is
-  0.75 mm narrower than its channel each side (it may want its faces
-  sanded where the ply runs thick: the channel is a layer of the same
-  ply). A strip glued on its front fills the lip's front, which is
-  12 mm deep. The catch is a wooden tab on a bolt through that strip and
-  the lid (its nut glued in a hex in the lid, its head on the tab, tight
-  enough to hold where it is turned): turned to the right, its arm
-  reaches 3.5 mm into a notch in the lip's right side, which holds it
-  with 2 mm and more of wood in front of it, and the lid cannot slide;
-  turned back, over the lid, it slides out.
+  across, the pockets' length, 28.8 mm deep under the lid, for the charger
+  and its cable: Qualtek's QFWC-18-12-USCR (in the cart: 18 W USB-C, 5 V
+  at 3 A among its voltages, its 1.2 m cable attached, a folding US
+  plug), lying down, its cable coiled beside it. In the lowest two walls
+  the stowage is wood but for a pocket the charger's shape (3 mm bigger:
+  its size is from the maker's listing, to be measured on a real one
+  before cutting, and where its cable leaves it), against the outer wall, a round well 42 mm across that the
+  cable's coil sits in, and a channel for the cable between them, so
+  neither slides about; a finger's notch in the outer wall beside the
+  charger lifts it out. (Any USB-C charger that gives 5 V at 3 A will
+  do, if it is under 28 mm one way and fits the pocket.);
+- the lid: it lifts off. A frame (the walls' outline and holes) with a
+  top glued on it, 6.4 mm in all, a grille of four slots in the top over
+  each back pocket's finger notch, and a third over the stowage's back
+  end; four disc magnets (10 x 2 mm,
+  magnetized through) in the top wall's front and back rims, and four
+  over them in the frame, hidden by the top, hold it down. Each sits at
+  the bottom of its hole (on the wall under it, or against the lid's
+  top), 1.2 mm in from the faces that meet, so the pairs are 2.4 mm
+  apart: a firm hold, not a grip, and the same from one to the next. It
+  comes off by the notch under its front edge, in the middle, over the
+  lights and between the front pockets, through the top wall and the
+  lid's frame: 6.4 mm, a fingertip. Dry-fit a lid's magnets before gluing
+  them: if a fingertip at the notch tips the dock before the lid lets go,
+  leave a thin shim under the box's four to widen the gap.
+
+The pockets' corners are round as the handhelds' are (7.25 mm, their
+6.5 and the gap round them).
+
+Putting it together (beside the cart: wood glue, 5-minute epoxy, two
+3 mm wooden dowels cut to 41 mm, a little wax). The viewer's **Steps**
+shows each step:
+
+1. The body: the floor and the walls glued up in order, the two dowels
+   through their holes to line them up (left standing 3 mm out of the
+   top wall, for the lid, and about 9 mm below the floor, where the
+   cavities and the base go on them: glue it up on its side, or on a
+   scrap with holes for them), sanded flush round the outside. The
+   base's and Cavity 1's holes for them are loose: they come off.
+2. The box's four magnets into the top wall's holes, epoxied on their
+   floors, all the same way up. The lid's top glued on its frame. Mark
+   each lid magnet's down face by setting it on its partner; then, the
+   lid upside down and away from the box, epoxy each into its hole
+   against the top (not set on its partner, whose pull would drag it out
+   of its hole while the epoxy is soft).
+3. The cavities, the body upside down on its lid (whose frame takes the
+   dowels): glue Cavity 2 under the floor;
+   epoxy the base bolts' nuts into its hexes, flush with its underside,
+   the waxed base laid on them as a jig and its bolts run in while it
+   sets.
+4. The base: the coils and the transmitters' boards into their pockets
+   from below, on foam squares (a coil and its board go in together, the
+   leads between them); Cavity 1 laid on them, not glued (the base's
+   bolts clamp it, and it comes off to reach the coils); the dock's
+   board bolted to the base (three M2.5 x 8), the transmitters' wires
+   soldered to its pads with the base lying beside the body; the base
+   turned onto it like a page, its six bolts in, and the feet glued
+   under it.
 
 Its board is a strip the dock's length, down its middle under the
 dividers, where neither the transmitters nor their coils are. At its back
@@ -355,18 +542,30 @@ beside it the ESP32-S3, its antenna at the board's end, out through the
 back. It takes 5 V from USB-C, reads what the charger offers from the CC
 lines (the voltage on its 5.1k pulldowns: 0.5, 1.5 or 3 A) and what is
 drawn through a 10 milliohm shunt (an INA180 amplifies it 50 times for an
-ADC pin: 0.5 V an amp), and switches each transmitter with a P-channel
-MOSFET. A transmitter draws a little over an amp at its 5 W, so a 3 A
-charger runs two or three at once: the program keeps as many on as the
-power allows and the others take turns. At the board's front, five
-lights show through slots in the dock's front face (each on a tongue of
-the board): each pocket's, left to right as they lie, and power in the
-middle, the program's to say what it knows (charging, waiting its turn,
-full). It can hear the handhelds over ESP-NOW; its own USB loads its
-program. Each transmitter's two wires are soldered into pads at the
-board's side level with it, a channel straight across (at their other
-end, to its USB-A port's 5 V and ground, which are its input's too).
-Route all joins its 35 nets with no rule broken.
+ADC pin, through 1k: 0.5 V an amp), and switches each transmitter with a
+P-channel MOSFET, its gate pulled down through 10k with 100 nF to its
+source, so it turns on over about a millisecond: the transmitter's input
+does not draw a step from the charger. Its 3.3 V regulator is the
+handheld's (TLV75533, WSON-6), for the same heat. The supply's trunk is laid first, 1.2 mm wide (3 A at
+a 20 C rise; each transmitter's own feed 0.8), from
+both of USB-C's VBUS pads to the shunt and from the shunt to each switch,
+so the current goes nowhere else; the amplifier reads the shunt at its
+own pads, by lines that carry nothing (and is bypassed at its supply). A
+transmitter is rated to draw up to 2 A; charging a handheld's receiver,
+at its 2.5 W, nearer 0.8 A: the program measures, keeps as many on as
+the charger allows (two or three on a 3 A one), and the others take
+turns. A thermistor in the board's middle, powered from a pin while it is
+read, tells it how warm the box is. At the board's front, five
+side-looking lights (330 ohms, 4 mA each) shine out through their own
+slots in the dock's front face: each pocket's, left to right as they
+lie, and power in the middle, the program's to say what it knows
+(charging, waiting its turn, full). It can hear the handhelds over
+ESP-NOW; its own USB loads its program. Each transmitter's two wires are
+soldered into pads at the board's side level with it, a channel straight
+across (at their other end, to its USB-A port's 5 V and ground, which are
+its input's too). The lights, left to right on the front face: the
+front-left pocket's, the back-left's, power, the back-right's, the
+front-right's. Route all joins its 38 nets with no rule broken.
 
 The program for the dock, and the handhelds', is not written yet: this is
 the hardware.
@@ -374,43 +573,53 @@ the hardware.
 ## The case
 
 `case.l8` works the case out from the board and a few numbers (the board
-file's `case` line), again after every change: a stack of plywood layers
-the board's outline and a rim bigger, held by bolts through all of them
-(M2.5, through the board's mounting holes if it has them, else through the
-rim; each head sunk in the front, each nut in a hex in the first battery
-layer). The back and the front are glued on, as the bolts' ends are inside
-them: the rest comes apart. From the back: the back; two layers with a
+file's `case` line): a stack of plywood layers the board's outline and a
+rim bigger, held by bolts through them (M2.5, through the board's
+mounting holes if it has them, else through the rim; each head sunk in
+the back (through it and the first battery layer), each nut in a hex in
+the screen's layer, under the front, bearing on the spacer: none in
+the front). The front is glued to the layer under it,
+and the back and the first battery layer to the second: undo the bolts
+and the rest comes apart. From the back: the back; two layers with a
 pocket for the battery (and a way for its wire to the board: through a
 hole in the board if it has one, else a channel to its edge; and room
 under the board for the pins of through-hole parts), and in the first a
 pocket for a wireless charging receiver, if there is one (the board
 file's `qi` line), its coil against the back, with a way for its wires
-up to their pads; the board's own layer; a spacer, open over the board's
-parts; a shelf the screen rests on; the
-screen's layer; the front, with the window onto the screen. A part that
-stands taller than a layer gets a hole in the layers it reaches into.
-A part reached through the case's side (a USB socket, a side switch)
-sits flush with the outside: the board reaches out under it in a tongue
+up to their pads; the board's own layer; a spacer over the board, holes
+in it where a part stands taller than the 2 mm under it, for the
+buttons' stems and the lights, for the screen's flex from its fold to
+its connector, and for the battery's plug, the screen resting on it;
+the screen's layer; the front, with the window onto the screen. A part
+that stands taller than a layer gets a hole in the layers it reaches
+into.
+A part reached through the case's side (a USB socket, a side switch, a
+dock's light) sits flush with the outside: the board reaches out under it in a tongue
 across the rim (thin there, 2 mm), and the wood is notched round the
 tongue and the part, in each layer the part stands up into. (The layers
 are 3.2 mm and the board sits halfway up one, so a USB socket, 3.3 mm
 tall, leaves a 1.5 mm slot over it.) An LED's light comes up through a
 small hole in every layer over it. The tongues are part of the board's
-outline everywhere: its drawing, the edge check, the Gerber outline. Each button is a stack of discs over its dome
-(a stem, a flange that stops it under the front, a cap that stands out of
-it), as wide as its neighbours leave room for: the D-pad's as small as a
-cap may be, the rest all one size.
+outline everywhere: its drawing, the edge check, the Gerber outline. Each
+button is a stack of discs on its switch (a stem, 6 mm, a flange that
+stops it under the front, a cap that stands out of it), as wide as its
+neighbours leave room for, one size within each kind (the arrows; the
+face buttons), the flush ones smaller. (Four arrows with a post in their
+middle on the board make one cross that rocks on it, a D-pad, instead.)
 
 The check also finds wood too thin to hold together (under 1.5 mm between
-holes, or a hole and the edge), and says which layer.
+holes, or a hole and the edge), and says which layer; and a hole that
+cuts through the edge where it is not meant to (only a tongue's notch, a
+slot out to the side, is).
 
 The cut file is an SVG of every piece, as Ponoko asks for it:
 millimetres, cuts in blue hairlines, made bigger or smaller by half the
 laser's kerf (0.2 mm), engravings in red (not grown), and a few
-engraved dots on each layer saying its place in the stack. The pieces go
-in rows on sheets of Ponoko's biggest size (790 x 384 mm), each material
-on its own: the handheld's plywood fits one and its acrylic window another,
-the dock's take six. More than one sheet, and the cut file is a zip of a
+engraved dots on each layer saying its place in the stack (on its bottom
+rim's top face, which the next layer covers; none on the front). The
+pieces go in rows on sheets of Ponoko's biggest size (790 x 384 mm), each
+material on its own: the handheld's plywood fits one and its acrylic
+window another, the dock's take five. More than one sheet, and the cut file is a zip of a
 file a sheet, each named for its material (`-ply-1.svg`,
 `-acrylic-1.svg`). A piece laid face down (the handheld's back, engraved
 outside) is drawn mirrored.
@@ -423,11 +632,13 @@ The *Make it* panel lists who makes or sells each part of the thing:
 | --- | --- | --- |
 | The board, made and its parts put on | JLCPCB | `fab.l8`'s zip: Gerbers (top and bottom copper, mask, paste, silkscreen, outline), plated and unplated drill files, the parts list (`Comment, Designator, Footprint, LCSC Part #`) and their places (`Designator, Mid X, Mid Y, Layer, Rotation`) |
 | The case, laser cut | Ponoko | the cut file |
-| Screen, bolts, nuts, battery, domes, wireless receiver (the dock: transmitters, charger, bolts, nuts) | DigiKey | a cart filled by its FastAdd link (`order.l8`) |
+| Screen, steel bolts and nuts, battery, foam squares (the dock: transmitters, charger, bolts, nuts, the lid's magnets, foam squares) | DigiKey | a cart filled by its FastAdd link (`order.l8`) |
+| The handheld's wireless receiver (Adafruit 1901: DigiKey does not carry it) | Adafruit | its page |
 
 Each part on the board has a manufacturer's and an LCSC part number
 (`sourcing.l8`, found in JLCPCB's parts library and in stock on
-2026-10-15). None of these lets a program pay, so the panel goes as far
+2026-10-15 and 16). Each DigiKey number was checked on DigiKey's own page,
+in stock, on 2026-10-16. None of these lets a program pay, so the panel goes as far
 as there is to go: each button opens the site with what to send or buy,
 and paying is yours.
 
@@ -438,11 +649,21 @@ the buttons write `fab.zip` and `case.svg` beside where the editor was
 started, and print the sites' addresses.
 
 Still to check by hand before ordering: the parts' turns in JLCPCB's
-placement preview (`SRC_ROT` is all 0 until each is checked), the
-screen's visual area against a real module, and the DigiKey numbers made
-by pattern (the 20 mm bolts, the screen, the wireless receiver) in the
-cart. The PCM12 switch's body depth is from its land pattern, not
-measured.
+placement preview (`SRC_ROT` is all 0 until each is checked, the WSON-6 regulators among
+them; the dock's
+side-looking lights' cathodes are on the right, lens down, from Lite-On's
+tape drawing), the screen's visual area against a real module, and the
+battery plug's polarity against Adafruit's (its + to pin 1). Vias in
+pads (the stitching in ground pads, the grid under the charger) are
+open: if solder wicking under the charger is a worry, ask JLCPCB for
+filled and capped vias. The dock's CC lines go straight to the module's
+ADC pins, beside their 5.1k pulldowns (no room for series resistors by
+the socket): the USB-C socket's contacts are recessed in the dock's
+back. The
+handheld's board is 1.2 mm thick (its `thickness` line): choose that in
+JLCPCB's order form, where 1.6 is the default; at 1.6 the buttons have
+no room to travel. The MCP73871
+charger is thin at JLC (about 76).
 
 ## The board file
 
@@ -452,12 +673,13 @@ One thing to a line, in millimetres, y up, the board's middle at 0, 0.
 ```
 board W H CORNER NAME...
 rules CLEARANCE TRACK VIA_DIAMETER VIA_DRILL
-case PLY RIM SCREEN_X SCREEN_Y BATTERY_X BATTERY_Y [90]    the case: plywood thickness (as measured), rim width, where the screen's and battery's middles are (90: the battery on its side)
+thickness T                                  the board's thickness, if not 1.6
+case PLY RIM SCREEN_X SCREEN_Y BATTERY_X BATTERY_Y [90 [BOTTOM]]    the case: plywood thickness (as measured), rim width, where the screen's and battery's middles are (90: the battery on its side; BOTTOM: a wider rim along the bottom)
 qi X Y                                       a wireless charging receiver against the case's back, its middle there
 dock PLY SLOT_W SLOT_H SLOT_T QI_DY BX BY    instead of case: a dock for four of a thing SLOT_W x SLOT_H x SLOT_T (its receiver QI_DY up from its middle), this board's middle at BX, BY in it
 part REF FOOTPRINT X Y ROTATION [VALUE]      rotation in degrees, a multiple of 90
 net NAME WIDTH REF.PAD REF.PAD ...           width 0: the rules' track width
-route NET WIDTH top|bottom free|locked POINT...
+route NET WIDTH top|bottom free|locked POINT...   a generator's, locked and with no copper, is laid first
 pour NET top|bottom
 track NET top|bottom WIDTH X0 Y0 X1 Y1 [ROUTE LEG]   NET is - for none
 via NET X Y DIAMETER DRILL [ROUTE]
@@ -469,14 +691,13 @@ as tracks and vias tagged with the route's number (and the leg, between
 which two points), so a board reads back exactly as it was; a pour's vias
 are made again with it.
 
-Footprints (`parts.l8`): `rp2040`, `w25q16`, `mcp73871`, `sot23-5`, `sot23-6`,
-`sot23`, `xtal3225`, `r0603`, `c0603`, `ptc1206`, `usb4105`, `fpc14`,
-`ss12d00`, `jst-ph2`, `dome6`, `tp1`, `r0805`, `c0805`, `led0603`. The
-handheld's are transcribed from its OCaml footprint modules (same pad
-centers and shapes).
-
-The same text is the editor's undo history: each change keeps the board's
-text from before it.
+Footprints (`parts.l8`): `rp2040`, `w25q16`, `mcp73871`, `sot23-5`,
+`sot23-5i`, `sot23-5o`, `sot23-6`, `sot23`, `sot23r`, `xtal3225`, `r0603`,
+`c0603`, `r1206`, `ptc1206`, `usb4105`, `fpc14`, `fpc40`, `mh25`,
+`wirehole`, `ss12d00`, `pcm12`, `esp32s3`, `sod123`, `pads2`, `jst-ph2`,
+`jst-ph2s`, `tact5`, `post3015`, `ledside`, `dome6`, `tp1`, `tph`,
+`r0805`, `c0805`, `soic14`, `led0603`. Each is from its datasheet's land
+pattern, or KiCad's (turned over to y up: `fp_flip_y`).
 
 ## How it is built
 
@@ -485,12 +706,16 @@ boxes, round-ended lines, arcs, the board with its grid, and Rubik from
 `../skate/font.l8`), so edges are clean at every zoom. `draw.l8` draws the
 board with level of detail: part names once readable, then pin names in
 their pads. `view.l8` is the camera, `touch.l8` turns fingers into taps,
-drags and pinches, `edit.l8` is the modes, router, and undo, and `ui.l8` the
-title, toolbar, card, toasts and parts drawer; `route.l8` the router and
+drags and pinches, `edit.l8` is the ways of looking and Route all (the
+editing it once did is shut off: `VIEW_ONLY`), and `ui.l8` the title,
+toolbar, card and toasts; `route.l8` the router and
 routes, `pour.l8` the pours (a mask on the router's grid, drawn as a
 texture). `case.l8` is the case (its layers, drawn as a texture too, and
-its cut file), `view3d.l8` the 3D view (each layer of wood drawn as
-slices of its mask, so its holes go through it), `fab.l8` the files for
+its cut file), `view3d.l8` the 3D view (each layer of wood drawn as its
+two faces, cut by its mask, and walls along every edge of its outline and
+holes where wood meets air; lit by one shader, with a shadow map from the
+lamp; built again only when something in it moves), `steps.l8` the steps
+of putting it together, `fab.l8` the files for
 the board house, `sourcing.l8` the
 parts' numbers, and `order.l8` the *Make it* panel. With nothing moving
 the page stops redrawing.
@@ -498,8 +723,6 @@ the page stops redrawing.
 ## Not built yet
 
 Ordering through an API (none of the makers lets a program pay); text
-on the silkscreen; a 3D view of the case; a schematic or netlist editor (nets come
-from the file); thermal reliefs on pours; length matching or differential
-pairs (USB); telling you why a connection has no way (which pins of a bus
-cross); swapping pins (an RP2040's GPIOs) to uncross a bus; parts on the
-bottom side; board outline editing; the enclosure.
+on the silkscreen; a schematic (nets come from the generators); thermal
+reliefs on pours; length matching or differential pairs (USB); parts on
+the bottom side; the programs, for the handheld and the dock.
