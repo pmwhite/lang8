@@ -151,7 +151,7 @@ $(BUILD)/cad: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 
 cad: $(BUILD)/cad
 
-$(OK)/cad-tests: l8c3 $(PROGRAMS) $(RUNTIME) programs/cad/handheld.pcb programs/cad/handheld-sketch.pcb | $(OK)
+$(OK)/cad-tests: l8c3 $(PROGRAMS) $(RUNTIME) programs/cad/handheld.pcb programs/cad/tests/sketch.pcb programs/cad/dock.pcb | $(OK)
 	+@$(STEP) 'cad tests' ./l8c3 test programs/cad/test_board.l8
 	@touch $@
 
@@ -261,7 +261,7 @@ wasm-test: $(OK)/wasm-fixpoint $(OK)/wasm-tests $(OK)/wasm-resume
 # The playground: a static site in .build/web with the compiler as a module.
 # Serve it with `python3 -m http.server -d .build/web`.
 WEB_SITE := $(BUILD)/web
-WEB_FILES := web/index.html $(wildcard web/*.js web/examples/*.l8 web/game/* web/skate/* web/malton/* web/race/* web/cad/*) programs/cad/handheld.pcb programs/cad/handheld-sketch.pcb programs/block-game/world.txt \
+WEB_FILES := web/index.html $(wildcard web/*.js web/examples/*.l8 web/game/* web/skate/* web/malton/* web/race/* web/cad/*) programs/cad/handheld.pcb programs/cad/dock.pcb programs/block-game/world.txt \
 	programs/block-game/garden.txt
 
 $(BUILD)/block-game.wasm: l8c3 $(PROGRAMS) | $(OK)
@@ -287,7 +287,7 @@ $(OK)/web: $(BUILD)/l8.wasm $(BUILD)/block-game.wasm $(BUILD)/skate.wasm $(BUILD
 		cp web/skate/* $(BUILD)/skate.wasm $(WEB_SITE)/skate/ && \
 		cp web/malton/* $(BUILD)/malton.wasm $(WEB_SITE)/malton/ && \
 		cp web/race/* $(BUILD)/race.wasm $(WEB_SITE)/race/ && \
-		cp web/cad/* $(BUILD)/cad.wasm programs/cad/handheld.pcb programs/cad/handheld-sketch.pcb $(WEB_SITE)/cad/'
+		cp web/cad/* $(BUILD)/cad.wasm programs/cad/handheld.pcb programs/cad/dock.pcb $(WEB_SITE)/cad/'
 	@touch $@
 
 web: $(OK)/web

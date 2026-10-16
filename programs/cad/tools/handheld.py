@@ -1,155 +1,239 @@
 # Writes programs/cad/handheld.pcb: the handheld (~/src/handheld) laid out
-# for routing. Placement and pin assignment follow the RP2040's pinout;
-# see "The handheld" in programs/cad/README.md.
+# for routing, as small as its screen and buttons allow. Placement and pin
+# assignment follow the RP2040's pinout; see "The handheld" in
+# programs/cad/README.md.
 #
 #   python3 programs/cad/tools/handheld.py programs/cad/handheld.pcb
+#
+# The board is 77 x 86 mm, its middle at 0, 0. A 2.8 inch screen lies on
+# its side across the top (over the RP2040 and most of the rest), the
+# buttons below it, the power and USB between them; the case's bolts go
+# through the board's corners, so its rim is thin all round.
+import os
+# (Overrides, for trying layouts: HH_MX=-3.5 and the like in the
+# environment.)
+def knob(name, default): return float(os.environ.get("HH_" + name, default))
+
+
+TPX = knob("TPX", 0)
 P = []   # (ref, fp, x, y, rot, value)
 def part(ref, fp, x, y, rot=0, value=""): P.append((ref, fp, x, y, rot, value))
 
-# The MCU, turned half round so that each side faces what it joins: its
-# USB and QSPI edge down (USB straight down the middle to the connector,
-# the flash below and to the right), GPIO17-29 up and to the left (the
-# display, then the D-pad), GPIO0-11 right (A, B, Home), and XIN/XOUT,
-# SWD and RUN along the top.
-MX, MY = 0.0, 20.0
-part("U1", "rp2040", MX, MY, 180, "RP2040")
-# The display's connector above and to the left: SPI0 leaves the chip's
-# left side and top-left corner in the connector's own order (RESET 21,
-# RS 20, MOSI 19, SCK 18, CS 17).
-JX, JY = -4.5, 38.0
-part("J3", "fpc14", JX, JY, 0, "ER-TFT020-3")
-part("C15", "c0603", JX + 7.5, JY - 1.0, 90, "100n")      # display supply
-# Backlight: switch and resistor to the left of the connector, under its
-# LED pins.
-part("Q1", "sot23", JX - 6.0, JY - 4.6, 0, "2N7002")
-part("R2", "r0603", JX - 1.75, JY - 5.6, 90, "10R")       # LED+ to 3V3
-part("R3", "r0603", JX - 9.0, JY - 4.6, 90, "100k")       # gate pulldown
-# The flash below and to the right, its near row facing the right half of
-# the QSPI pins in their order (SD2, SD1, SS straight down to IO2, DO, CS);
-# the left half (SD3, SCLK, SD0) goes down its left side and round under it
-# to the far row, in order too: no line crosses another.
-part("U2", "w25q16", MX + 5.4, MY - 13.5, 270, "W25Q16")
-part("C9", "c0603", MX + 9.0, MY - 16.4, 90, "100n")       # by VCC, bottom right
-part("C13", "c0603", MX + 10.5, MY - 16.4, 90, "10u")
-part("TP5", "tp1", MX + 9.2, MY - 9.4, 0, "BOOT")         # QSPI_SS, past CS
-# USB series resistors, side by side by the ESD part (at full speed a line
-# this long is electrically short), D- on the left as the pair comes down.
-part("R7", "r0603", -1.0, -45.0, 270, "27R")                # D-
-part("R8", "r0603", 1.0, -45.0, 270, "27R")                 # D+
-# The crystal to the right of XIN/XOUT, half turned so that XIN (along the
-# top edge, past the unused GPIO12-15) comes to XTAL1 from below and XOUT
-# (up, and over) to XTAL2 from the left; its load caps by them.
-part("Y1", "xtal3225", MX + 6.8, MY + 6.0, 180, "12MHz")
-part("C1", "c0603", MX + 10.6, MY + 5.15, 0, "12p")         # XIN
-part("C2", "c0603", MX + 2.6, MY + 5.5, 0, "12p")          # XOUT, under its line
-# Above them, the caps of the top edge's power pins (IOVDD22, DVDD23), and
-# above those the SWD and RUN test pads: the lines leave the top edge up and
-# turn right, the rightmost first, so each comes to the nearer one.
-part("C5", "c0603", MX + 2.6, MY + 8.4, 0, "100n")       # IOVDD22
-part("C18", "c0603", MX + 2.6, MY + 9.9, 0, "100n")      # DVDD23
-part("TP3", "tp1", MX + 1.0, MY + 12.0, 0, "SWCLK")
-part("TP2", "tp1", MX + 3.0, MY + 12.6, 0, "SWDIO")
-part("TP1", "tp1", MX + 5.0, MY + 13.2, 0, "RUN")
-part("TP4", "tp1", MX + 7.0, MY + 13.8, 0, "GND")
-part("R1", "r0603", MX + 5.0, MY + 15.6, 90, "1k")
-# The rest of the decoupling, each by its own pins, in the gaps between
-# groups of lines.
-part("C4", "c0603", MX - 7.4, MY - 6.8, 90, "100n")      # IOVDD33 (left; by a via, GPIO22 below it being free)
-part("C7", "c0603", MX + 6.4, MY + 1.0, 0, "100n")       # IOVDD10 (right)
-part("C6", "c0603", MX + 6.4, MY - 3.6, 0, "100n")       # IOVDD1 (right, low)
-part("C8", "c0603", MX - 0.1, MY - 8.2, 270, "100n")     # USB_VDD, IOVDD49 (below, between the USB pair and the flash lines)
-part("C16", "c0603", MX - 2.9, MY - 6.8, 270, "1u")      # VREG_VOUT, straight below it
-part("C12", "c0603", MX - 4.4, MY - 6.8, 270, "10u")     # VREG_VIN, ADC_AVDD (their lines pass left of C16)
-part("C3", "c0603", MX - 5.9, MY - 6.8, 270, "100n")     # IOVDD42 (below left)
-# Power: the switch on the top edge, the LDO under it, top-left.
-part("SW1", "ss12d00", -22.0, 61.0, 0, "SS-12D00")
-part("U4", "sot23-5", -18.0, 48.0, 0, "AP2112K-3.3")
-part("C11", "c0603", -14.5, 48.0, 90, "1u")              # LDO out
-part("C17", "c0603", -21.5, 48.0, 90, "1u")              # LDO in
-# Charging and USB, along the bottom.
-part("J1", "usb4105", 0.0, -60.4, 180, "USB4105")
-part("U6", "sot23-6", 0.0, -50.5, 90, "USBLC6-2SC6")
-part("R4", "r0603", 5.0, -54.0, 90, "5.1k")
-part("R5", "r0603", -5.0, -54.0, 90, "5.1k")
-part("U3", "mcp73871", -12.0, -48.0, 0, "MCP73871")
-part("R6", "r0603", -7.0, -44.5, 0, "2k")
-part("C10", "c0603", -16.5, -52.5, 0, "100n")            # VSYS
-part("C14", "c0603", -16.5, -55.0, 0, "10u")             # VSYS bulk
-part("F1", "ptc1206", -20.0, -44.0, 0, "500mA")
-part("J2", "jst-ph2", -27.0, -44.0, 0, "JST-PH")
-# Buttons: D-pad left, A and B on the right thumb's arc, Back and Home in the
-# bottom corners.
-def dpad(dx, dy): return (-24.0 + dx * 6.0, -4.0 + dy * 6.0)
+BW, BH = 77.0, 86.0
+# The screen module's middle (its window, 2.75 mm left of that, is in the
+# board's middle across); its flex leaves its right end.
+SX, SY = 2.75, 11.0
+
+# The computer: an ESP32-S3 module (Wi-Fi, Bluetooth LE, USB of its own,
+# flash and PSRAM inside), on its side at the left edge, its antenna's end
+# at the board's edge, out past the screen's side (nothing metal over it,
+# no copper under it). Its right end faces the screen's connector, level
+# with it: the screen's eleven parallel lines go straight across from its
+# twelve pins there, in the connector's order (see the nets). Its bottom
+# row faces the D-pad (IO4-7, IO15, and Back)
+# and the USB socket (IO19, IO20, at its right end, as the module has
+# them); Home, B and A between (IO16-18). Its top row: the battery's
+# voltage (IO2, an ADC pin), the screen's tearing signal (IO38), the
+# backlight's switch (IO39) and the serial port's test pads.
+MX, MY = knob("MX", -25.75), knob("MY", 11.0)
+part("U1", "esp32s3", MX, MY, 90, "ESP32-S3")
+# Its supply's caps and its enable's RC (10k up, 1 uF down: it starts once
+# the 3.3 V is up), left of its bottom row's 3V3 and EN, under the antenna's
+# end (but not under the antenna).
+part("C2", "c0603", -34.0, -0.6, 0, "10u")
+part("C3", "c0603", -34.0, -2.1, 0, "100n")
+part("R1", "r0603", -34.0, -3.6, 0, "10k")
+part("C1", "c0603", -34.0, -5.1, 0, "1u")
+part("TP1", "tp1", -36.0, -7.5, 0, "EN")
+part("TP5", "tp1", -12.0, 22.5, 0, "BOOT")     # IO0: low at reset to load by its serial port
+part("TP2", "tp1", -26.5, 23.0, 0, "TX")
+part("TP3", "tp1", -24.0, 23.0, 0, "RX")
+part("TP4", "tp1", -21.5, 23.0, 0, "GND")
+
+# The screen's connector, where the end of its flex comes once folded back
+# under the module (about 28 mm in from the module's right end), its pins
+# facing the ESP32-S3, contact 1 at the bottom: its busy end (reset, the
+# interface straps, the backlight) at the top. Its unused read and data
+# pins are tied high, as its driver allows: one block of 3.3 V.
+JX, JY = knob("JX", 13.0), SY
+part("J3", "fpc40", JX, JY, 90, "NHD-2.8")
+# Backlight: its four LEDs from the switched battery supply, their cathodes
+# together (side by side on the connector) through one resistor (6.8 ohm:
+# at most 160 mA, a full battery's 4.2 V less the LEDs' 3.1 V; a 1206, for
+# the sixth of a watt), switched by Q1 (PWM from IO39); above the
+# connector's LED pins, the anode's line going on up past them to the
+# switch.
+QX, QY = knob("QX", -5.5), knob("QY", 0.0)
+part("R2", "r1206", JX + QX, JY + 15.5 + QY, 270, "6.8R")
+part("Q1", "sot23", JX + QX, JY + 20.0 + QY, 270, "2N7002")
+part("R3", "r0603", JX + QX - 2.5, JY + 23.0 + QY, 90, "100k")      # gate pulldown
+# Power, all at the top right: the switch on the top edge, the LDO beside
+# it; the charger, its fuse and the battery's socket under them, right of
+# the backlight's anode line (up from the screen's connector to the
+# switched supply); the battery's wire up through the board over the
+# battery. Only VBUS comes far, from the USB socket.
+part("SW1", "pcm12", 23.5, 42.85, 0, "PCM12")  # its tabs 0.3 mm in from the board's tongue's end, its knob out past the case
+part("U4", "sot23-5", 14.0, 39.0, 0, "AP2112K-3.3")
+part("C17", "c0603", 17.5, 39.0, 90, "1u")               # LDO in
+part("C11", "c0603", 10.5, 39.0, 90, "1u")               # LDO out
+part("U3", "mcp73871", 28.0, 31.0, 0, "MCP73871")
+part("R6", "r0603", 23.0, 34.0, 90, "2k")
+# (Its THERM and PROG3 must not float: 10k for "no thermistor", as its
+# datasheet asks, and 100k to end charging at 10 mA.)
+part("R24", "r0603", knob("R24X", 25.8), knob("R24Y", 35.8), 0, "10k")
+part("R25", "r0603", knob("R25X", 32.0), knob("R25Y", 34.5), 0, "100k")
+part("C10", "c0603", 23.0, 30.5, 90, "100n")             # VSYS
+part("C14", "c0603", 21.5, 30.5, 90, "10u")              # VSYS bulk
+part("F1", "ptc1206", 33.5, 25.5, 90, "500mA")
+part("J2", "jst-ph2", 35.5, 30.0, 90, "JST-PH")
+part("WH1", "wirehole", 28.5, 25.0, 0, "")                # the battery's wire up
+# No USB socket: programs come over the air, and charging is wireless. For
+# the first program, or to recover from a bad one, USB (and 5 V for the
+# charger) is on test pads, for a clip-on jig with the case open.
+part("TP6", "tp1", -16.5, -2.5, 0, "D+")      # IO20
+part("TP7", "tp1", -14.0, -2.5, 0, "D-")      # IO19
+part("TP8", "tp1", -11.5, -2.5, 0, "5V")      # the charger's input
+# The wireless charging receiver's two wires, up through the board from
+# where it lies against the back (the `qi` line below), and a Schottky
+# diode, so that a jig's 5 V does not feed back into it.
+part("J4", "pads2", -5.27, -10.0, 0, "QI")   # soldered from below: the wires come straight up into it
+part("D2", "sod123", 2.0, -10.0, 0, "B5819W")
+# The battery's voltage, halved for an ADC pin, by the charger.
+part("R9", "r0603", 31.0, 21.0, 90, "100k")
+part("R10", "r0603", 29.5, 21.0, 90, "100k")
+part("C4", "c0603", 28.0, 21.0, 90, "100n")
+# The charge lights, between the D-pad and A and B, up through holes in
+# the front: four for the battery's level and one for full. They need no
+# program: run from the charger's input, they light only on a charger.
+# A quad comparator weighs the battery (halved, by its own divider: the
+# ADC's would be pulled down by the ESP32-S3 when it is off) against four
+# steps of a 2.5 V reference (3.6, 3.75, 3.9 and 4.05 V, as the battery
+# reads while charging); each lights its LED as the battery passes it.
+# Full is the charger's own STAT2.
+LX = [-7.0, -3.5, 0.0, 3.5, 7.0]
+for i, x in enumerate(LX):
+    part(f"D{3 + i}", "led0603", x, -31.0, 0, "green")
+    part(f"R{11 + i}", "r0603", x, -28.6, 90, "1k")
+part("U7", "soic14", 0.0, -21.5, 180, "LM339")   # its outputs down to the lights, its inputs up to the steps
+part("C5", "c0603", 4.8, -20.2, 90, "100n")
+part("U8", "sot23r", 8.0, -16.0, 0, "LM4040-2.5")
+part("R16", "r0603", 8.0, -12.8, 0, "10k")         # the reference's bias, from the charger's input
+part("R17", "r0603", 7.5, -20.0, 90, "20k")        # 2.5 V down to the steps
+part("R18", "r0603", 9.0, -20.0, 90, "3k")
+part("R19", "r0603", 10.5, -20.0, 90, "3k")
+part("R20", "r0603", 12.0, -20.0, 90, "3k")
+part("R21", "r0603", 13.5, -20.0, 90, "75k")
+part("R22", "r0603", 32.5, 21.0, 90, "100k")       # the battery, halved, for the lights
+part("R23", "r0603", 34.0, 21.0, 90, "100k")
+# The case's bolts, through the board's corners.
+for i, (x, y) in enumerate([(-35.0, 39.5), (35.0, 39.5), (-35.0, -39.5), (35.0, -39.5)]):
+    part(f"H{i + 1}", "mh25", x, y, 0, "")
+# Buttons: the D-pad and A, B under the screen's ends, Back and Home low
+# between them, either side of the USB socket.
+def dpad(dx, dy): return (-24.0 + dx * 7.0, -27.5 + dy * 7.0)
 for ref, name, (dx, dy) in [("SW2", "UP", (0, 1)), ("SW3", "DOWN", (0, -1)),
                             ("SW4", "LEFT", (-1, 0)), ("SW5", "RIGHT", (1, 0))]:
     x, y = dpad(dx, dy); part(ref, "dome6", x, y, 0, name)
-part("SW6", "dome6", 27.0, -1.0, 0, "A")
-part("SW7", "dome6", 19.0, -7.0, 0, "B")
-part("SW8", "dome6", -24.0, -30.0, 0, "BACK")
-part("SW9", "dome6", 24.0, -30.0, 0, "HOME")
+part("SW6", "dome6", 28.0, -24.0, 0, "A")
+part("SW7", "dome6", 17.0, -31.0, 0, "B")
+part("SW8", "dome6", -9.5, -37.0, 0, "BACK")
+part("SW9", "dome6", 9.5, -37.0, 0, "HOME")
 
 N = []
 def net(name, w, *pins): N.append((name, w, list(pins)))
-net("QSPI_SS", 0, "U1.QSPI_SS", "U2.CS", "TP5.1")
-net("QSPI_SCLK", 0, "U1.QSPI_SCLK", "U2.CLK")
-net("QSPI_SD0", 0, "U1.QSPI_SD0", "U2.DI")
-net("QSPI_SD1", 0, "U1.QSPI_SD1", "U2.DO")
-net("QSPI_SD2", 0, "U1.QSPI_SD2", "U2.IO2")
-net("QSPI_SD3", 0, "U1.QSPI_SD3", "U2.IO3")
-net("XIN", 0, "U1.XIN", "Y1.XTAL1", "C1.1")
-net("XOUT", 0, "U1.XOUT", "Y1.XTAL2", "C2.1")
-net("SWCLK", 0, "U1.SWCLK", "TP3.1")
-net("SWDIO", 0, "U1.SWD", "TP2.1")
-net("RUN", 0, "U1.RUN", "R1.2", "TP1.1")
-net("LCD_SCK", 0, "U1.GPIO18", "J3.SCK")
-net("LCD_SDA", 0, "U1.GPIO19", "J3.SDA")
-net("LCD_RS", 0, "U1.GPIO20", "J3.RS")
-net("LCD_RESET", 0, "U1.GPIO21", "J3.RESET")
-net("LCD_CS", 0, "U1.GPIO17", "J3.CS")
-net("BL_GATE", 0, "U1.GPIO23", "Q1.G", "R3.1")
-net("BL_A", 0, "J3.LED+", "R2.2")
-net("BL_K", 0, "J3.LED-", "Q1.D")
-net("USB_DP", 0, "R8.1", "U1.USB_DP")
-net("USB_DM", 0, "R7.1", "U1.USB_DM")
-net("USB_DP_C", 0, "J1.A6", "J1.B6", "U6.IO1", "U6.IO1'", "R8.2")
-net("USB_DM_C", 0, "J1.A7", "J1.B7", "U6.IO2", "U6.IO2'", "R7.2")
-net("CC1", 0, "J1.CC1", "R4.2")
-net("CC2", 0, "J1.CC2", "R5.2")
+net("EN", 0, "U1.EN", "R1.2", "C1.1", "TP1.1")
+net("BOOT", 0, "U1.IO0", "TP5.1")
+net("TXD0", 0, "U1.TXD0", "TP2.1")
+net("RXD0", 0, "U1.RXD0", "TP3.1")
+# (The screen on its 8-bit parallel interface, 8080 style, which the
+# ESP32-S3's LCD peripheral drives by DMA: about twice the frames a second
+# of its SPI. Straight across from the module's end, in the connector's
+# order: chip select, data/command, write, then its DB8-DB15, then reset.
+# Three of these are the module's strapping pins (IO3, IO46, IO45): the
+# screen's inputs leave them be at reset, and reset held low by IO45's
+# pulldown until the program starts is as wanted.)
+LCD = [("LCD_CS", 3, "CSX"), ("LCD_DC", 46, "DCX"), ("LCD_WR", 9, "WRX")] + [
+    (f"LCD_D{i}", g, f"DB{8 + i}") for i, g in enumerate([10, 11, 12, 13, 14, 21, 47, 48])] + [
+    ("LCD_RESET", 45, "RES")]
+for name, g, pin in LCD:
+    net(name, 0, f"U1.IO{g}", f"J3.{pin}")
+# (Its tearing signal, to draw between its refreshes; the backlight's
+# switch: from the module's top row.)
+net("LCD_TE", 0, "U1.IO38", "J3.TE")
+net("BL_GATE", 0, "U1.IO39", "Q1.G", "R3.1")
+net("BAT_SENSE", 0, "U1.IO2", "R9.2", "R10.1", "C4.1")
+net("BL_K", 0.3, "J3.LEDK1", "J3.LEDK2", "J3.LEDK3", "J3.LEDK4", "R2.2")
+net("BL_SW", 0.3, "Q1.D", "R2.1")
+net("USB_DP", 0, "U1.IO20", "TP6.1")
+net("USB_DM", 0, "U1.IO19", "TP7.1")
 net("VBAT", 0.4, "J2.VBAT", "F1.1")
-net("VBAT_F", 0.4, "F1.2", "U3.VBAT14", "U3.VBAT15", "U3.VBAT_SENSE")
-net("VBUS", 0.4, "J1.A4", "J1.A9", "J1.B4", "J1.B9", "U6.VBUS", "U3.IN18", "U3.IN19", "U3.VPCC", "U3.CE", "U3.PROG2")
+net("VBAT_F", 0.4, "F1.2", "U3.VBAT14", "U3.VBAT15", "U3.VBAT_SENSE", "R9.1", "R22.1")
+net("VQI", 0.4, "J4.V", "D2.A")
+# (The charger's input: the receiver's, or a jig's 5 V; and what lights
+# the charge lights.)
+net("CHG_IN", 0.4, "D2.K", "TP8.1", "U3.IN18", "U3.IN19", "U3.VPCC", "U3.CE", "U3.PROG2",
+    "U7.VCC", "C5.1", "R16.1", *[f"R{11 + i}.1" for i in range(5)])
+net("VREF", 0, "R16.2", "U8.K", "R17.1")
+# (The comparators in the order their outputs meet the lights, left to
+# right: 4, 3, 2, 1; so the steps go to them that way round.)
+net("T4", 0, "R17.2", "R18.1", "U7.IN1+")
+net("T3", 0, "R18.2", "R19.1", "U7.IN2+")
+net("T2", 0, "R19.2", "R20.1", "U7.IN3+")
+net("T1", 0, "R20.2", "R21.1", "U7.IN4+")
+net("BAT_LVL", 0, "R22.2", "R23.1", "U7.IN1-", "U7.IN2-", "U7.IN3-", "U7.IN4-")
+for i in range(5):
+    net(f"LED{i + 1}", 0, f"R{11 + i}.2", f"D{3 + i}.A")
+net("LVL1", 0, "D3.K", "U7.OUT4")
+net("LVL2", 0, "D4.K", "U7.OUT3")
+net("LVL3", 0, "D5.K", "U7.OUT2")
+net("LVL4", 0, "D6.K", "U7.OUT1")
+net("FULL", 0, "D7.K", "U3.STAT2")
 net("VSYS", 0.4, "U3.OUT1", "U3.OUT20", "SW1.COM", "C14.1", "C10.1")
-net("VSW", 0.4, "SW1.1", "U4.VIN", "U4.EN", "C17.1")
-net("DVDD", 0.3, "U1.VREG_VOUT", "U1.DVDD23", "U1.DVDD50", "C16.1", "C18.1")
+# (The switched battery supply: the LDO's input, and the backlight's anode,
+# straight up from the screen's connector to it.)
+net("VSW", 0.4, "SW1.1", "U4.VIN", "U4.EN", "C17.1", "J3.LEDA")
 net("PROG1", 0, "U3.PROG1", "R6.1")
-net("3V3", 0.4, "U4.VOUT", "C11.1", "U1.IOVDD1", "U1.IOVDD10", "U1.IOVDD22", "U1.IOVDD33",
-    "U1.IOVDD42", "U1.IOVDD49", "U1.USB_VDD", "U1.ADC_AVDD", "U1.VREG_VIN", "U2.VCC",
-    "J3.VDD", "J3.IOVDD", "R1.1", "R2.1", "C3.1", "C4.1", "C5.1", "C6.1", "C7.1", "C8.1",
-    "C9.1", "C12.1", "C13.1", "C15.1")
-gnd = ["U1.GND", "U1.TESTEN", "U2.GND", "Y1.GND2", "Y1.GND4", "C1.2", "C2.2", "TP4.1",
-       "J3.GND2", "J3.GND5", "J3.GND13", "J3.MP1", "J3.MP2", "Q1.S", "R3.2",
-       "J1.A1", "J1.A12", "J1.B1", "J1.B12", "J1.SH1", "J1.SH2", "J1.SH3", "J1.SH4",
-       "U6.GND", "R4.1", "R5.1", "U3.VSS10", "U3.VSS11", "U3.EP", "U3.SEL", "U3.TE",
-       "R6.2", "U4.GND", "J2.GND"]
-gnd += [f"C{i}.2" for i in (3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18)]
+net("THERM", 0, "U3.THERM", "R24.1")
+net("PROG3", 0, "U3.PROG3", "R25.1")
+net("3V3", 0.4, "U4.VOUT", "C11.1", "U1.3V3", "C2.1", "C3.1", "R1.1",
+    "J3.VDD", "J3.VDDI", "J3.RDX", "J3.SDA", "J3.IM0", *[f"J3.DB{i}" for i in range(8)])
+gnd = ["U1.GND1", "U1.GND40", "U1.GND41", "C1.2", "C2.2", "C3.2", "C4.2", "R10.2", "TP4.1",
+       "J3.GND1", "J3.IM1", "J3.IM2", "J3.MP1", "J3.MP2", "Q1.S", "R3.2",
+       "U7.GND", "U8.A", "R24.2", "R25.2", "R21.2", "R23.2", "C5.2", "U3.VSS10", "U3.VSS11", "U3.EP", "U3.SEL", "U3.TE",
+       "R6.2", "U4.GND", "J2.GND", "J4.GND"]
+# (The screen's second ground pin, 39, is joined to its first on its flex:
+# the board leaves it be, and its backlight's anode beside it has the way
+# out.)
+gnd += [f"C{i}.2" for i in (10, 11, 14, 17)]
 for i in range(2, 10):
     gnd += [f"SW{i}.{p}" for p in ("GN", "GE", "GS", "GW")]
 net("GND", 0.4, *gnd)
-for name, g, sw in [("LEFT", 24, "SW4"), ("UP", 25, "SW2"), ("DOWN", 26, "SW3"),
-                    ("BACK", 27, "SW8"), ("RIGHT", 28, "SW5"),
-                    ("HOME", 0, "SW9"), ("B", 1, "SW7"), ("A", 2, "SW6")]:
-    net(f"BTN_{name}", 0, f"U1.GPIO{g}", f"{sw}.SIG")
+# (The buttons' lines leave the bottom row in the order they fan out:
+# the D-pad's and Back's left of Home's, B's and A's.)
+LEFT_SIDE = [["LEFT", "UP", "DOWN", "RIGHT", "BACK"], ["UP", "LEFT", "DOWN", "RIGHT", "BACK"],
+             ["LEFT", "DOWN", "UP", "RIGHT", "BACK"]][int(knob("GP", 0))]
+RIGHT_SIDE = [["HOME", "B", "A"], ["A", "B", "HOME"], ["B", "HOME", "A"]][int(knob("GR", 0))]
+SW_OF = {"UP": "SW2", "DOWN": "SW3", "LEFT": "SW4", "RIGHT": "SW5", "BACK": "SW8",
+         "HOME": "SW9", "B": "SW7", "A": "SW6"}
+for name, g in list(zip(LEFT_SIDE, [4, 5, 6, 7, 15])) + list(zip(RIGHT_SIDE, [16, 17, 18])):
+    net(f"BTN_{name}", 0, f"U1.IO{g}", f"{SW_OF[name]}.SIG")
 
 def mm(v):
     s = f"{v:.3f}".rstrip("0").rstrip(".")
     return "0" if s in ("-0", "") else s
 out = ["# The handheld game controller (~/src/handheld), laid out again for",
-       "# routing: the RP2040 turned so its pins face what they join, GPIOs",
-       "# chosen in the order of what they reach (see programs/cad/README.md).",
-       "# The first sketch, from design.ml, is handheld-sketch.pcb. Written by",
-       "# tools/handheld.py: change that, not this.",
-       "board 72 128 4 Handheld",
-       "rules 0.15 0.25 0.6 0.3"]
+       "# routing, as small as its screen and buttons allow (see",
+       "# programs/cad/README.md). Written by tools/handheld.py: change that,",
+       "# not this.",
+       f"board {mm(BW)} {mm(BH)} 4 Handheld",
+       "rules 0.15 0.25 0.6 0.3",
+       # The case: 3.2 mm birch ply, a 2.5 mm rim (its bolts go through the
+       # board), the screen's middle, the battery on its side under the top
+       # half of the board.
+       f"case 3.2 2.5 {mm(SX)} {mm(SY)} 0.5 17 90",
+       # The wireless charging receiver, against the back under the
+       # buttons, clear of the battery.
+       "qi 0 -22"]
 for ref, fp, x, y, rot, val in P:
     out.append(f"part {ref} {fp} {mm(x)} {mm(y)} {rot} {val}".rstrip())
 for name, w, pins in N:

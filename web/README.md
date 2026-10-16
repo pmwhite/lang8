@@ -209,7 +209,17 @@ extra imports, and `MemFS` is an in-memory file system for browsers.
 
 The site's `cad/` page runs `programs/cad` (see its README) on the same
 platform, with every finger passed to it as a button and the wheel as zoom.
-Everything on the page is drawn by the editor. The editor writes the board to
-`/board.pcb` after each change and the page keeps it in `localStorage`;
-`?fresh` starts from `handheld.pcb` again. The page tells the editor the
-phone's safe edges as keys (1000000000 + 1000 * what + pixels).
+Everything on the page is drawn by the editor. It has both designs open,
+`/handheld.pcb` and `/dock.pcb`, and goes between them (and the set, the
+dock with its handhelds in it) from its title's menu; it writes each back
+after each change, and the page keeps it in `localStorage` with the version
+of the file it began from, so a newer file on the site replaces old edits by
+itself. The page tells the editor the
+phone's safe edges as keys (1000000000 + 1000 * what + pixels). A tap that
+opens another site or saves a file has to be the page's own, so the editor
+says where its buttons for those are (`CADLINKS n`, then `n` lines of
+`CADLINK ID x0 y0 x1 y1 open URL` or `... save PATH NAME`, in its
+pixels), and the page lays unseen links over them; a file is read from the
+editor's memory when its link is tapped, and the editor is told which was
+tapped (key 6, the ID), to say what it did.
+

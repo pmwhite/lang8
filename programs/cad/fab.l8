@@ -1,0 +1,681 @@
+tag cad;
+
+use_tag std, gl, x11, skate;
+
+// What a board house needs to make the board and put its parts on, from
+// the board as it is: Gerber files (RS-274X) of each layer, Excellon drill
+// files, and the lists for assembly (the parts, with LCSC numbers, and
+// where each sits), all put into one zip (stored, not squeezed), named as
+// JLCPCB and most others expect (Protel's endings).
+//
+//   NAME.GTL  NAME.GBL   copper, top and bottom (pads, tracks, vias, pours)
+//   NAME.GTS  NAME.GBS   solder mask: where it is opened (pads)
+//   NAME.GTP             paste, top: the pads parts are soldered to
+//   NAME.GTO             silkscreen, top: the parts' outlines
+//   NAME.GKO             the board's outline
+//   NAME-PTH.DRL         plated holes (vias, through-hole pins, slots)
+//   NAME-NPTH.DRL        holes with no copper (a socket's pegs)
+//   NAME-BOM.csv         the parts: Comment, Designator, Footprint, LCSC
+//   NAME-CPL.csv         where: Designator, Mid X, Mid Y, Layer, Rotation
+//
+// The board's middle is 0, 0 in all of them; y up; millimetres.
+
+// ---- the file being written ----
+fo: []i8 = new i8[4194304](0i8);
+
+fo_n: int = 0;
+
+fo_line() {
+    line_byte(10);
+    if (fo_n + line_n <= len(fo)) {
+        for i in 0..line_n fo[fo_n + i] = line[i];
+        fo_n = fo_n + line_n
+    }
+    line_clear()
+}
+
+fo_put(t: str) {
+    line_add(t);
+    fo_line()
+}
+
+// A Gerber coordinate: millimetres in millionths (the format 4.6).
+line_g(v: f32) {
+    line_int(roundf32(v * 1000000.0))
+}
+
+roundf32(v: f32): int {
+    if (v < 0.0) return -(-v + 0.5) as int;
+    (v + 0.5) as int
+}
+
+g_xy(x: f32, y: f32, d: str) {
+    line_add("X");
+    line_g(x);
+    line_add("Y");
+    line_g(y);
+    line_add(d);
+    fo_line()
+}
+
+g_begin(what: str) {
+    fo_n = 0;
+    line_clear();
+    line_add("G04 ");
+    line_add(what);
+    line_add(", from the lang8 CAD tool*");
+    fo_line();
+    fo_put("%FSLAX46Y46*%");
+    fo_put("%MOMM*%");
+    fo_put("%LPD*%")
+}
+
+// Apertures: a circle of each width used, numbered from 10.
+const APERTURES: int = 64;
+
+ap_d: []f32 = new f32[APERTURES](0.0);
+
+ap_n: int = 0;
+
+aperture(d: f32): int {
+    for k in 0..ap_n {
+        if (absf(ap_d[k] - d) < 0.0005) return k + 10
+    }
+    if (ap_n >= APERTURES) return 10;
+    ap_d[ap_n] = d;
+    ap_n = ap_n + 1;
+    line_add("%ADD");
+    line_int(ap_n + 9);
+    line_add("C,");
+    line_num(d, 4);
+    line_add("*%");
+    fo_line();
+    ap_n + 9
+}
+
+use_aperture(d: f32) {
+    // (Its number first: a new one is defined on a line of its own.)
+    a: int = aperture(d);
+    line_add("D");
+    line_int(a);
+    line_add("*");
+    fo_line()
+}
+
+// A box with round corners as a filled region (its corners in four steps
+// each), grown by g.
+g_round_box(
+    x: f32,
+    y: f32,
+    hw0: f32,
+    hh0: f32,
+    r0: f32,
+    g: f32
+) {
+    hw: f32 = hw0 + g;
+    hh: f32 = hh0 + g;
+    r: f32 = clampf(r0 + g, 0.0, minf(hw, hh));
+    fo_put("G36*");
+    first: bool = true;
+    for c in 0..4 {
+        // (Corners anticlockwise from the top right.)
+        sx: f32 = 1.0;
+        sy: f32 = 1.0;
+        if (c == 1 || c == 2) sx = -1.0;
+        if (c >= 2) sy = -1.0;
+        cx: f32 = x + sx * (hw - r);
+        cy: f32 = y + sy * (hh - r);
+        a0: f32 = c as f32 * 1.5707963;
+        for k in 0..5 {
+            a: f32 = a0 + k as f32 * 0.39269908;
+            px: f32 = cx + r * cosf(a);
+            py: f32 = cy + r * sinf(a);
+            if (first) {
+                g_xy(px, py, "D02*");
+                first = false
+            } else g_xy(px, py, "D01*")
+        }
+    }
+    g_xy(x + hw, y + hh - r, "D01*");
+    fo_put("G37*")
+}
+
+// Pin q's pad, grown by g (the mask's opening is a little bigger).
+g_pad(q: int, g: f32) {
+    g_round_box(pin_x[q], pin_y[q], pin_hw[q], pin_hh[q], pin_r[q], g)
+}
+
+g_end() {
+    fo_put("M02*")
+}
+
+// Copper of layer l: pads on it, its tracks, the vias, its pour.
+g_copper(l: int) {
+    if (l == TOP) g_begin("Copper, top") else g_begin("Copper, bottom");
+    ap_n = 0;
+    // (The pour first: what is laid after it is drawn over it.)
+    if (pour_net[l] >= 0) {
+        for j in 0..gr_ny {
+            i: int = 0;
+            while (i < gr_nx) {
+                if (pm[(j * gr_nx + i) * 2 + l] == 1i8) {
+                    e: int = i;
+                    while (e + 1 < gr_nx && pm[(j * gr_nx + e + 1) * 2 + l] == 1i8) e = e + 1;
+                    x0: f32 = gr_x0 + i as f32 * gr_g;
+                    x1: f32 = gr_x0 + (e + 1) as f32 * gr_g;
+                    y0: f32 = gr_y0 + j as f32 * gr_g;
+                    fo_put("G36*");
+                    g_xy(x0, y0, "D02*");
+                    g_xy(x1, y0, "D01*");
+                    g_xy(x1, y0 + gr_g, "D01*");
+                    g_xy(x0, y0 + gr_g, "D01*");
+                    g_xy(x0, y0, "D01*");
+                    fo_put("G37*");
+                    i = e + 1
+                } else i = i + 1
+            }
+        }
+    }
+    for q in 0..pins_n {
+        if ((pin_layers[q] & 1 << l) != 0) g_pad(q, 0.0)
+    }
+    for s in 0..segs_n {
+        if (sg_layer[s] == l) {
+            use_aperture(sg_w[s]);
+            g_xy(sg_x0[s], sg_y0[s], "D02*");
+            g_xy(sg_x1[s], sg_y1[s], "D01*")
+        }
+    }
+    for v in 0..vias_n {
+        use_aperture(via_d[v]);
+        g_xy(via_x[v], via_y[v], "D03*")
+    }
+    g_end()
+}
+
+// The solder mask's openings on layer l: each pad on it, 0.05 mm bigger.
+// (Vias are left covered: tented.)
+g_mask(l: int) {
+    if (l == TOP) g_begin("Solder mask, top") else g_begin("Solder mask, bottom");
+    ap_n = 0;
+    for q in 0..pins_n {
+        if ((pin_layers[q] & 1 << l) != 0) g_pad(q, 0.05)
+    }
+    g_end()
+}
+
+// Paste: the top's surface-mount pads (not through-hole ones).
+g_paste() {
+    g_begin("Paste, top");
+    ap_n = 0;
+    for q in 0..pins_n {
+        if (pin_layers[q] == 1) g_pad(q, 0.0)
+    }
+    g_end()
+}
+
+// The silkscreen: each part's body outline (the board house clips it off
+// the pads).
+g_silk() {
+    g_begin("Silkscreen, top");
+    ap_n = 0;
+    use_aperture(0.15);
+    for p in 0..parts_n {
+        f: int = part_fp[p];
+        hw: f32 = fp_bw[f] * 0.5;
+        hh: f32 = fp_bh[f] * 0.5;
+        if ((part_rot[p] & 1) == 1) {
+            hw = fp_bh[f] * 0.5;
+            hh = fp_bw[f] * 0.5
+        }
+        if (hw > 0.0 && hh > 0.0 && !fp_round[f]) {
+            x: f32 = part_x[p];
+            y: f32 = part_y[p];
+            g_xy(x - hw, y - hh, "D02*");
+            g_xy(x + hw, y - hh, "D01*");
+            g_xy(x + hw, y + hh, "D01*");
+            g_xy(x - hw, y + hh, "D01*");
+            g_xy(x - hw, y - hh, "D01*")
+        }
+    }
+    g_end()
+}
+
+// The board's outline: a box with round corners, as a line, out round
+// its tongues on the way (see case.l8).
+g_outline() {
+    g_begin("Board outline");
+    ap_n = 0;
+    use_aperture(0.1);
+    find_tongues();
+    hw: f32 = brd_w * 0.5;
+    hh: f32 = brd_h * 0.5;
+    r: f32 = minf(brd_r, minf(hw, hh));
+    first: bool = true;
+    for c in 0..4 {
+        sx: f32 = 1.0;
+        sy: f32 = 1.0;
+        if (c == 1 || c == 2) sx = -1.0;
+        if (c >= 2) sy = -1.0;
+        cx: f32 = sx * (hw - r);
+        cy: f32 = sy * (hh - r);
+        a0: f32 = c as f32 * 1.5707963;
+        for k in 0..9 {
+            a: f32 = a0 + k as f32 * 0.19634954;
+            if (first) {
+                g_xy(cx + r * cosf(a), cy + r * sinf(a), "D02*");
+                first = false
+            } else g_xy(cx + r * cosf(a), cy + r * sinf(a), "D01*")
+        }
+        // (The edge after this corner: the top, the left, the bottom, the
+        // right, going round counterclockwise.)
+        g_tongues(c + 1 & 3)
+    }
+    g_xy(hw, hh - r, "D01*");
+    g_end()
+}
+
+// Edge e's tongues, in the order the outline meets them going round
+// counterclockwise (along the top and the left, from the high end).
+g_tongues(e: int) {
+    hw: f32 = brd_w * 0.5;
+    hh: f32 = brd_h * 0.5;
+    down: bool = e == 1 || e == 2;
+    last: f32 = -1000.0;
+    if (down) last = 1000.0;
+    for _n in 0..tg_n {
+        // (The next along: the nearest beyond the last.)
+        k: int = -1;
+        for j in 0..tg_n {
+            if (tg_e[j] == e) {
+                beyond: bool = tg_a0[j] > last;
+                if (down) beyond = tg_a1[j] < last;
+                if (beyond && (k < 0 || !down && tg_a0[j] < tg_a0[k] || down && tg_a1[j] > tg_a1[k])) k = j
+            }
+        }
+        if (k >= 0) {
+            a: f32 = tg_a0[k];
+            b: f32 = tg_a1[k];
+            if (down) {
+                a = tg_a1[k];
+                b = tg_a0[k];
+                last = tg_a0[k]
+            } else last = tg_a1[k];
+            d: f32 = tg_d[k];
+            if (e == 1) {
+                g_xy(a, hh, "D01*");
+                g_xy(a, hh + d, "D01*");
+                g_xy(b, hh + d, "D01*");
+                g_xy(b, hh, "D01*")
+            }
+            if (e == 3) {
+                g_xy(a, -hh, "D01*");
+                g_xy(a, -hh - d, "D01*");
+                g_xy(b, -hh - d, "D01*");
+                g_xy(b, -hh, "D01*")
+            }
+            if (e == 2) {
+                g_xy(-hw, a, "D01*");
+                g_xy(-hw - d, a, "D01*");
+                g_xy(-hw - d, b, "D01*");
+                g_xy(-hw, b, "D01*")
+            }
+            if (e == 0) {
+                g_xy(hw, a, "D01*");
+                g_xy(hw + d, a, "D01*");
+                g_xy(hw + d, b, "D01*");
+                g_xy(hw, b, "D01*")
+            }
+        }
+    }
+}
+
+// ---- drill files ----
+// The holes, plated or not: each size a tool, round holes drilled and
+// long ones routed as slots (G85).
+const TOOLS: int = 32;
+
+tool_d: []f32 = new f32[TOOLS](0.0);
+
+tools_n: int = 0;
+
+hole_tool(d: f32): int {
+    for k in 0..tools_n {
+        if (absf(tool_d[k] - d) < 0.0005) return k
+    }
+    if (tools_n >= TOOLS) return 0;
+    tool_d[tools_n] = d;
+    tools_n = tools_n + 1;
+    tools_n - 1
+}
+
+// Whether pin q's hole is plated: one with copper round it.
+pin_plated(q: int): bool {
+    pin_layers[q] != 0
+}
+
+// Millimetres with always three decimals (a number with no point in it
+// would be read as a count of the format's smallest steps).
+line_mm3(v: f32) {
+    m: int = roundf32(v * 1000.0);
+    if (m < 0) {
+        line_byte(45);
+        m = -m
+    }
+    line_int(m / 1000);
+    line_byte(46);
+    f: int = m % 1000;
+    line_byte(48 + f / 100);
+    line_byte(48 + f / 10 % 10);
+    line_byte(48 + f % 10)
+}
+
+write_drill(plated: bool) {
+    fo_n = 0;
+    line_clear();
+    tools_n = 0;
+    // (The tools first, from the holes there are.)
+    for v in 0..vias_n {
+        if (plated) _t: int = hole_tool(via_drill[v])
+    }
+    for q in 0..pins_n {
+        if (pin_drill[q] > 0.0 && pin_plated(q) == plated) _u: int = hole_tool(minf(pin_slot_w[q],
+            pin_slot_h[q]))
+    }
+    fo_put("M48");
+    if (plated) fo_put("; plated holes") else fo_put("; holes with no copper");
+    fo_put("METRIC,TZ");
+    for k in 0..tools_n {
+        line_add("T");
+        line_int(k + 1);
+        line_add("C");
+        line_mm3(tool_d[k]);
+        fo_line()
+    }
+    fo_put("%");
+    fo_put("G90");
+    fo_put("G05");
+    for k in 0..tools_n {
+        line_add("T");
+        line_int(k + 1);
+        fo_line();
+        if (plated) {
+            for v in 0..vias_n {
+                if (absf(via_drill[v] - tool_d[k]) < 0.0005) drill_at(via_x[v], via_y[v])
+            }
+        }
+        for q in 0..pins_n {
+            if (pin_drill[q] > 0.0 && pin_plated(q) == plated) {
+                d: f32 = minf(pin_slot_w[q], pin_slot_h[q]);
+                if (absf(d - tool_d[k]) < 0.0005) {
+                    // (A slot: from one end of it to the other.)
+                    l: f32 = (maxf(pin_slot_w[q], pin_slot_h[q]) - d) * 0.5;
+                    if (l < 0.001) drill_at(pin_x[q], pin_y[q]) else if (pin_slot_w[q] > pin_slot_h[q]) slot_at(pin_x[q] - l,
+                        pin_y[q], pin_x[q] + l, pin_y[q]) else slot_at(pin_x[q], pin_y[q] - l,
+                        pin_x[q], pin_y[q] + l)
+                }
+            }
+        }
+    }
+    fo_put("M30")
+}
+
+drill_at(x: f32, y: f32) {
+    line_add("X");
+    line_mm3(x);
+    line_add("Y");
+    line_mm3(y);
+    fo_line()
+}
+
+slot_at(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32
+) {
+    line_add("X");
+    line_mm3(x0);
+    line_add("Y");
+    line_mm3(y0);
+    line_add("G85X");
+    line_mm3(x1);
+    line_add("Y");
+    line_mm3(y1);
+    fo_line()
+}
+
+// ---- the parts' lists, for assembly ----
+// The BOM: one line for each kind of part (its parts' designators
+// together, in quotes); the CPL: one line for each part. Only parts with
+// an LCSC number are put on by the board house (see sourcing.l8): the
+// buttons' domes and the test pads are not parts to place.
+write_bom() {
+    fo_n = 0;
+    line_clear();
+    fo_put("Comment,Designator,Footprint,LCSC Part #");
+    for p in 0..parts_n {
+        s: int = source_of(p);
+        // (Only at the first part of its kind.)
+        first: bool = s >= 0;
+        for o in 0..p {
+            if (source_of(o) == s) first = false
+        }
+        if (first) {
+            line_add(SRC_MPN[s]);
+            line_add(",\"");
+            any: bool = false;
+            for o in p..parts_n {
+                if (source_of(o) == s) {
+                    if (any) line_add(",");
+                    line_name(part_ref[o]);
+                    any = true
+                }
+            }
+            line_add("\",");
+            line_name(fp_key[part_fp[p]]);
+            line_add(",");
+            line_add(SRC_LCSC[s]);
+            fo_line()
+        }
+    }
+}
+
+write_cpl() {
+    fo_n = 0;
+    line_clear();
+    fo_put("Designator,Mid X,Mid Y,Layer,Rotation");
+    for p in 0..parts_n {
+        s: int = source_of(p);
+        if (s >= 0) {
+            // (Its middle: the middle of its pads.)
+            x0: f32 = 1000.0;
+            y0: f32 = 1000.0;
+            x1: f32 = -1000.0;
+            y1: f32 = -1000.0;
+            first: int = part_pin0[p];
+            for q in first..first + fp_npads[part_fp[p]] {
+                x0 = minf(x0, pin_x[q]);
+                x1 = maxf(x1, pin_x[q]);
+                y0 = minf(y0, pin_y[q]);
+                y1 = maxf(y1, pin_y[q])
+            }
+            line_name(part_ref[p]);
+            line_add(",");
+            line_mm3((x0 + x1) * 0.5);
+            line_add("mm,");
+            line_mm3((y0 + y1) * 0.5);
+            line_add("mm,Top,");
+            line_int((part_rot[p] * 90 + SRC_ROT[s]) % 360);
+            fo_line()
+        }
+    }
+}
+
+// ---- the zip ----
+// Files stored as they are, each with its CRC-32, then the directory.
+zip: []i8 = new i8[16777216](0i8);
+
+zip_n: int = 0;
+
+const ZIP_FILES: int = 32;
+
+zf_at: []int = new int[ZIP_FILES](0);
+
+zf_crc: []int = new int[ZIP_FILES](0);
+
+zf_size: []int = new int[ZIP_FILES](0);
+
+zf_name: []i8 = new i8[ZIP_FILES * 64](0i8);
+
+zf_name_n: []int = new int[ZIP_FILES](0);
+
+zip_files: int = 0;
+
+crc_table: []int = new int[256](0);
+
+crc_ready: bool = false;
+
+crc32(b: []i8, n: int): int {
+    if (!crc_ready) {
+        for i in 0..256 {
+            c: int = i;
+            for _k in 0..8 {
+                if ((c & 1) != 0) c = 3988292384 ^ c >> 1 else c = c >> 1
+            }
+            crc_table[i] = c
+        }
+        crc_ready = true
+    }
+    c: int = 4294967295;
+    for i in 0..n c = crc_table[(c ^ b[i] as int & 255) & 255] ^ c >> 8;
+    c ^ 4294967295
+}
+
+zip_byte(v: int) {
+    if (zip_n < len(zip)) {
+        zip[zip_n] = (v & 255) trunc i8;
+        zip_n = zip_n + 1
+    }
+}
+
+zip_u16(v: int) {
+    zip_byte(v);
+    zip_byte(v >> 8)
+}
+
+zip_u32(v: int) {
+    zip_u16(v & 65535);
+    zip_u16(v >> 16 & 65535)
+}
+
+zip_begin() {
+    zip_n = 0;
+    zip_files = 0
+}
+
+// The file just written (fo), into the zip as NAME + ending.
+zip_add(ending: str) {
+    if (zip_files >= ZIP_FILES) return;
+    k: int = zip_files;
+    zip_files = zip_files + 1;
+    // Its name: the board's, then the ending.
+    line_clear();
+    fab_name();
+    line_add(ending);
+    n: int = mini(line_n, 63);
+    for i in 0..n zf_name[k * 64 + i] = line[i];
+    zf_name_n[k] = n;
+    line_clear();
+    zf_at[k] = zip_n;
+    zf_crc[k] = crc32(fo, fo_n);
+    zf_size[k] = fo_n;
+    zip_u32(67324752);
+    zip_u16(10);
+    zip_u16(0);
+    zip_u16(0);
+    zip_u16(0);
+    zip_u16(33);
+    zip_u32(zf_crc[k]);
+    zip_u32(fo_n);
+    zip_u32(fo_n);
+    zip_u16(n);
+    zip_u16(0);
+    for i in 0..n zip_byte(zf_name[k * 64 + i] as int);
+    for i in 0..fo_n zip_byte(fo[i] as int)
+}
+
+zip_end() {
+    dir: int = zip_n;
+    for k in 0..zip_files {
+        zip_u32(33639248);
+        zip_u16(20);
+        zip_u16(10);
+        zip_u16(0);
+        zip_u16(0);
+        zip_u16(0);
+        zip_u16(33);
+        zip_u32(zf_crc[k]);
+        zip_u32(zf_size[k]);
+        zip_u32(zf_size[k]);
+        zip_u16(zf_name_n[k]);
+        zip_u16(0);
+        zip_u16(0);
+        zip_u16(0);
+        zip_u16(0);
+        zip_u32(0);
+        zip_u32(zf_at[k]);
+        for i in 0..zf_name_n[k] zip_byte(zf_name[k * 64 + i] as int)
+    }
+    size: int = zip_n - dir;
+    zip_u32(101010256);
+    zip_u16(0);
+    zip_u16(0);
+    zip_u16(zip_files);
+    zip_u16(zip_files);
+    zip_u32(size);
+    zip_u32(dir);
+    zip_u16(0)
+}
+
+// The board's name for files: its name, letters and digits only.
+fab_name() {
+    s: int = name_start[brd_name];
+    any: bool = false;
+    for i in 0..name_len[brd_name] {
+        c: int = name_bytes[s + i] as int;
+        if (c >= 48 && c <= 57 || c >= 65 && c <= 90 || c >= 97 && c <= 122) {
+            line_byte(c);
+            any = true
+        } else if (any) line_byte(45)
+    }
+    if (!any) line_add("board")
+}
+
+// Everything for the board house, into zip.
+write_fab() {
+    zip_begin();
+    g_copper(TOP);
+    zip_add(".GTL");
+    g_copper(BOTTOM);
+    zip_add(".GBL");
+    g_mask(TOP);
+    zip_add(".GTS");
+    g_mask(BOTTOM);
+    zip_add(".GBS");
+    g_paste();
+    zip_add(".GTP");
+    g_silk();
+    zip_add(".GTO");
+    g_outline();
+    zip_add(".GKO");
+    write_drill(true);
+    zip_add("-PTH.DRL");
+    write_drill(false);
+    zip_add("-NPTH.DRL");
+    write_bom();
+    zip_add("-BOM.csv");
+    write_cpl();
+    zip_add("-CPL.csv");
+    zip_end()
+}

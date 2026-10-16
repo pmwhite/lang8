@@ -1,0 +1,758 @@
+tag cad;
+
+use_tag std, gl, x11, skate;
+
+// The whole thing in 3D: the case's plywood layers, the buttons' discs,
+// the board with its parts, the screen, the battery and the bolts, turned
+// about with a finger; and pulled apart, each layer from the next, with
+// what lies in it (the exploded view), to see how it goes together.
+//
+// Each layer of wood (and each height of discs) is drawn from a mask of
+// it, as the Case mode's layer is (see case.l8): as a stack of thin
+// slices, each the mask's shape, so its holes go through it and their
+// walls show; the top slice lit, those under it darker, as a wall in shade.
+// The rest are boxes. Heights are as in case.l8: millimetres up from the
+// board's top face.
+view3d: bool = false;
+
+// The camera: turned about the middle of the stack (yaw round the up axis,
+// pitch above level), from dist away.
+v3_yaw: f32 = 0.35;
+
+v3_pitch: f32 = 0.95;
+
+v3_dist: f32 = 260.0;
+
+// How far apart (0 together, 1 apart), and where it is going.
+explode_t: f32 = 0.0;
+
+exploded: bool = false;
+
+// Whether the camera follows the explosion to keep it all in view (until
+// a finger zooms).
+explode_fit: bool = false;
+
+// The gap the explosion opens between one layer and the next.
+const EXPLODE_GAP: f32 = 14.0;
+
+// ---- levels: the layers, and each height of discs ----
+const LEVELS: int = 32;
+
+lv_z: []f32 = new f32[LEVELS](0.0);
+
+lv_layer: []int = new int[LEVELS](-1);
+
+lv_n: int = 0;
+
+// Whether the levels' masks are out of date (the case changed).
+v3_dirty: bool = true;
+
+find_levels() {
+    lv_n = 0;
+    for l in 0..mini(layers_n, LEVELS - 1) {
+        lv_z[lv_n] = pc_z[l];
+        lv_layer[lv_n] = l;
+        lv_n = lv_n + 1
+    }
+    for p in layers_n..pieces_count {
+        known: bool = false;
+        for k in 0..lv_n {
+            if (lv_layer[k] < 0 && absf(lv_z[k] - pc_z[p]) < 0.01) known = true
+        }
+        if (!known && lv_n < LEVELS - 1) {
+            lv_z[lv_n] = pc_z[p];
+            lv_layer[lv_n] = -1;
+            lv_n = lv_n + 1
+        }
+    }
+}
+
+// Pulled apart, everything has a place of its own, in the order it goes
+// together (each a gap above the one before): the back; the first
+// battery layer, the nuts in it; the second, then the battery; the board's layer, then the board
+// with its parts, then the domes on it; each layer above, with the discs
+// at its height after it (the screen after the shelf's); and over it all
+// the bolts, to go down through it.
+lv_slot: []int = new int[LEVELS](0);
+
+slot_battery: int = 0;
+
+slot_pcb: int = 0;
+
+slot_domes: int = 0;
+
+slot_screen: int = 0;
+
+slot_bolts: int = 0;
+
+slot_nuts: int = 0;
+
+find_slots() {
+    s: int = 0;
+    for k in 0..lv_n lv_slot[k] = 0;
+    for l in 0..layers_n {
+        for k in 0..lv_n {
+            if (lv_layer[k] == l) {
+                lv_slot[k] = s;
+                s = s + 1
+            }
+        }
+        for k in 0..lv_n {
+            if (lv_layer[k] < 0 && absf(lv_z[k] - pc_z[l]) < 0.01) {
+                lv_slot[k] = s;
+                s = s + 1
+            }
+        }
+        // (A dock: on its base, its board and the transmitters' boards;
+        // the nuts in the first cavity; the coils in the second; on the
+        // floor, the handhelds. The same slots, other things.)
+        if (dock_on) {
+            if (l == D_BASE) {
+                slot_pcb = s;
+                slot_battery = s;
+                s = s + 1
+            }
+            if (l == D_CAV1) {
+                slot_nuts = s;
+                s = s + 1
+            }
+            if (l == D_CAV2) {
+                slot_screen = s;
+                s = s + 1
+            }
+            if (l == D_FLOOR) {
+                slot_domes = s;
+                s = s + 1
+            }
+        } else {
+            if (l == L_BATT1) {
+                slot_nuts = s;
+                s = s + 1
+            }
+            if (l == L_BATT2) {
+                slot_battery = s;
+                s = s + 1
+            }
+            if (l == L_BOARD) {
+                slot_pcb = s;
+                slot_domes = s + 1;
+                s = s + 2
+            }
+            if (l == L_SHELF) {
+                slot_screen = s;
+                s = s + 1
+            }
+        }
+    }
+    // (Discs above the top layer: the caps' upper halves.)
+    for k in 0..lv_n {
+        if (lv_layer[k] < 0 && lv_z[k] >= pc_z[layers_n - 1] + cs_ply - 0.01) {
+            lv_slot[k] = s;
+            s = s + 1
+        }
+    }
+    slot_bolts = s
+}
+
+// How far a thing in slot s is lifted, as far apart as it is.
+lift(s: int): f32 {
+    explode_t * EXPLODE_GAP * s as f32
+}
+
+// The bolts' feet: together, a bolt's length under the front's back face
+// (its head sunk in the front); apart, a gap above the top of everything.
+bolt_foot(): f32 {
+    together: f32 = layer_z(L_FRONT) - bolt_length();
+    apart: f32 = layer_z(L_FRONT) + 2.0 * cs_ply + EXPLODE_GAP * (slot_bolts - 1) as f32 + EXPLODE_GAP;
+    together + explode_t * (apart - together)
+}
+
+// ---- the masks ----
+const V3_G: f32 = 0.25;
+
+v3_nx: int = 1;
+
+v3_ny: int = 1;
+
+v3_x0: f32 = 0.0;
+
+v3_y0: f32 = 0.0;
+
+v3_x1: f32 = 0.0;
+
+v3_y1: f32 = 0.0;
+
+v3_mask: []i8 = new i8[524288](0i8);
+
+// Level k's mask into v3_mask.
+level_mask(k: int) {
+    w: f32 = case_w() + 1.0;
+    h: f32 = case_h() + 1.0;
+    v3_nx = (w / V3_G) as int + 1;
+    v3_ny = (h / V3_G) as int + 1;
+    while (v3_nx * v3_ny > len(v3_mask)) {
+        v3_nx = v3_nx * 3 / 4;
+        v3_ny = v3_ny * 3 / 4
+    }
+    gx: f32 = w / v3_nx as f32;
+    gy: f32 = h / v3_ny as f32;
+    v3_bounds();
+    for c in 0..v3_nx * v3_ny v3_mask[c] = 0i8;
+    l: int = lv_layer[k];
+    if (l >= 0) {
+        // (A layer: its outline, less its holes.)
+        f: int = pc_first[l];
+        mask_shape(f, 0.0, 0.0, -1i8, gx, gy);
+        for s in f + 1..f + pc_n[l] mask_shape(s, 0.0, 0.0, 0i8, gx, gy)
+    } else {
+        // (Discs: each where it sits.)
+        for p in layers_n..pieces_count {
+            if (absf(pc_z[p] - lv_z[k]) < 0.01) mask_shape(pc_first[p], pc_x[p], pc_y[p],
+                -1i8, gx, gy)
+        }
+    }
+}
+
+// Shape s, moved by (dx, dy), set to v in the mask over its own box.
+mask_shape(
+    s: int,
+    dx: f32,
+    dy: f32,
+    v: i8,
+    gx: f32,
+    gy: f32
+) {
+    cx: f32 = sh_x[s] + dx;
+    cy: f32 = sh_y[s] + dy;
+    i0: int = clampi(((cx - sh_hw[s] - v3_x0) / gx) as int - 1, 0, v3_nx - 1);
+    i1: int = clampi(((cx + sh_hw[s] - v3_x0) / gx) as int + 1, 0, v3_nx - 1);
+    j0: int = clampi(((cy - sh_hh[s] - v3_y0) / gy) as int - 1, 0, v3_ny - 1);
+    j1: int = clampi(((cy + sh_hh[s] - v3_y0) / gy) as int + 1, 0, v3_ny - 1);
+    for j in j0..j1 + 1 {
+        y: f32 = v3_y0 + (j as f32 + 0.5) * gy - dy;
+        for i in i0..i1 + 1 {
+            if (in_shape(s, v3_x0 + (i as f32 + 0.5) * gx - dx, y)) v3_mask[j * v3_nx + i] = v
+        }
+    }
+}
+
+// The masks' box: the case's, and half a millimetre.
+v3_bounds() {
+    v3_x0 = case_x0() - 0.5;
+    v3_y0 = case_y0() - 0.5;
+    v3_x1 = case_x1() + 0.5;
+    v3_y1 = case_y1() + 0.5
+}
+
+// ---- drawing ----
+V3_VS: str = """
+#version 120
+#ifdef GL_ES
+#define HP highp
+#else
+#define HP
+#endif
+attribute vec4 pos;
+attribute vec4 nrm;
+attribute vec4 vcol;
+attribute vec4 inst;
+uniform HP mat4 vp;
+varying HP vec2 vuv;
+varying vec3 vn;
+varying vec3 vc;
+void main() {
+  vuv = vcol.xy;
+  vn = nrm.xyz;
+  vc = inst.rgb;
+  gl_Position = vp * vec4(pos.xyz, 1.0);
+}
+""";
+
+V3_FS: str = """
+#version 120
+#ifdef GL_ES
+#define HP highp
+#else
+#define HP
+#endif
+uniform sampler2D mask;
+uniform float masked;
+varying HP vec2 vuv;
+varying vec3 vn;
+varying vec3 vc;
+void main() {
+  if (masked > 0.5 && texture2D(mask, vuv).r < 0.5) discard;
+  vec3 l = normalize(vec3(0.35, -0.55, 0.76));
+  float k = 0.42 + 0.58 * max(dot(normalize(vn), l), 0.0);
+  gl_FragColor = vec4(vc * k, 1.0);
+}
+""";
+
+// The program, its uniforms, its buffer and the levels' textures, made
+// the first time they are wanted.
+v3_ready: bool = false;
+
+v3_prog: int = 0;
+
+v3_u_vp: int = 0;
+
+v3_u_mask: int = 0;
+
+v3_u_masked: int = 0;
+
+v3_buf: []u32 = new u32[1](0u32);
+
+v3_tex: []u32 = new u32[LEVELS](0u32);
+
+v3_init() raises IoError {
+    if (v3_ready) return;
+    v3_ready = true;
+    v3_prog = p_link(bytes(V3_VS), bytes(V3_FS));
+    v3_u_vp = glGetUniformLocation(v3_prog, "vp");
+    v3_u_mask = glGetUniformLocation(v3_prog, "mask");
+    v3_u_masked = glGetUniformLocation(v3_prog, "masked");
+    glGenBuffers(1, v3_buf);
+    glGenTextures(LEVELS, v3_tex);
+    for k in 0..LEVELS {
+        glBindTexture(3553, v3_tex[k]);
+        glTexParameteri(3553, 10241, 9729);
+        glTexParameteri(3553, 10240, 9729);
+        glTexParameteri(3553, 10242, 33071);
+        glTexParameteri(3553, 10243, 33071)
+    }
+}
+
+// The vertices of what is drawn at once: x y z, normal, u v, colour (11
+// floats each).
+const V3_FLOATS: int = 11;
+
+v3_v: []f32 = new f32[V3_FLOATS * 60000](0.0);
+
+v3_n: int = 0;
+
+vert(
+    x: f32,
+    y: f32,
+    z: f32,
+    nx: f32,
+    ny: f32,
+    nz: f32,
+    u: f32,
+    v: f32,
+    rgb: int
+) {
+    if (v3_n >= 60000) return;
+    b: int = v3_n * V3_FLOATS;
+    v3_v[b] = x;
+    v3_v[b + 1] = y;
+    v3_v[b + 2] = z;
+    v3_v[b + 3] = nx;
+    v3_v[b + 4] = ny;
+    v3_v[b + 5] = nz;
+    v3_v[b + 6] = u;
+    v3_v[b + 7] = v;
+    v3_v[b + 8] = (rgb >> 16 & 255) as f32 / 255.0;
+    v3_v[b + 9] = (rgb >> 8 & 255) as f32 / 255.0;
+    v3_v[b + 10] = (rgb & 255) as f32 / 255.0;
+    v3_n = v3_n + 1
+}
+
+// A flat quad level at z, over the whole case, its texture across it
+// (moved v3_dy along: a dock's lid, slid off).
+v3_dy: f32 = 0.0;
+
+v3_dx: f32 = 0.0;
+
+level_quad(z: f32, nz: f32, rgb: int) {
+    quad_at(v3_x0 + v3_dx, v3_y0 + v3_dy, v3_x1 + v3_dx, v3_y1 + v3_dy, z, nz, rgb)
+}
+
+// The same over any box.
+quad_at(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    z: f32,
+    nz: f32,
+    rgb: int
+) {
+    vert(x0, y0, z, 0.0, 0.0, nz, 0.0, 0.0, rgb);
+    vert(x1, y0, z, 0.0, 0.0, nz, 1.0, 0.0, rgb);
+    vert(x1, y1, z, 0.0, 0.0, nz, 1.0, 1.0, rgb);
+    vert(x0, y0, z, 0.0, 0.0, nz, 0.0, 0.0, rgb);
+    vert(x1, y1, z, 0.0, 0.0, nz, 1.0, 1.0, rgb);
+    vert(x0, y1, z, 0.0, 0.0, nz, 0.0, 1.0, rgb)
+}
+
+// A box from (x0, y0, z0) to (x1, y1, z1), lit on each face.
+box3(
+    x0: f32,
+    y0: f32,
+    z0: f32,
+    x1: f32,
+    y1: f32,
+    z1: f32,
+    rgb: int
+) {
+    face(x0, y0, z1, x1, y0, z1, x1, y1, z1, x0, y1, z1, 0.0, 0.0, 1.0, rgb);
+    face(x0, y1, z0, x1, y1, z0, x1, y0, z0, x0, y0, z0, 0.0, 0.0, -1.0, rgb);
+    face(x0, y0, z0, x1, y0, z0, x1, y0, z1, x0, y0, z1, 0.0, -1.0, 0.0, rgb);
+    face(x1, y1, z0, x0, y1, z0, x0, y1, z1, x1, y1, z1, 0.0, 1.0, 0.0, rgb);
+    face(x0, y1, z0, x0, y0, z0, x0, y0, z1, x0, y1, z1, -1.0, 0.0, 0.0, rgb);
+    face(x1, y0, z0, x1, y1, z0, x1, y1, z1, x1, y0, z1, 1.0, 0.0, 0.0, rgb)
+}
+
+face(
+    ax: f32,
+    ay: f32,
+    az: f32,
+    bx: f32,
+    by: f32,
+    bz: f32,
+    cx: f32,
+    cy: f32,
+    cz: f32,
+    dx: f32,
+    dy: f32,
+    dz: f32,
+    nx: f32,
+    ny: f32,
+    nz: f32,
+    rgb: int
+) {
+    vert(ax, ay, az, nx, ny, nz, 0.0, 0.0, rgb);
+    vert(bx, by, bz, nx, ny, nz, 0.0, 0.0, rgb);
+    vert(cx, cy, cz, nx, ny, nz, 0.0, 0.0, rgb);
+    vert(ax, ay, az, nx, ny, nz, 0.0, 0.0, rgb);
+    vert(cx, cy, cz, nx, ny, nz, 0.0, 0.0, rgb);
+    vert(dx, dy, dz, nx, ny, nz, 0.0, 0.0, rgb)
+}
+
+// A round post (a bolt, a dome) as an eight-sided prism.
+post(
+    x: f32,
+    y: f32,
+    r: f32,
+    z0: f32,
+    z1: f32,
+    rgb: int
+) {
+    for k in 0..8 {
+        a0: f32 = k as f32 * 0.78539816;
+        a1: f32 = a0 + 0.78539816;
+        am: f32 = a0 + 0.39269908;
+        x0: f32 = x + r * cosf(a0);
+        y0: f32 = y + r * sinf(a0);
+        x1: f32 = x + r * cosf(a1);
+        y1: f32 = y + r * sinf(a1);
+        face(x0, y0, z0, x1, y1, z0, x1, y1, z1, x0, y0, z1, cosf(am), sinf(am), 0.0,
+            rgb);
+        vert(x, y, z1, 0.0, 0.0, 1.0, 0.0, 0.0, rgb);
+        vert(x0, y0, z1, 0.0, 0.0, 1.0, 0.0, 0.0, rgb);
+        vert(x1, y1, z1, 0.0, 0.0, 1.0, 0.0, 0.0, rgb)
+    }
+}
+
+v3_flush(masked: bool, tex: int) {
+    if (v3_n == 0) return;
+    glBindBuffer(34962, v3_buf[0]);
+    glBufferData(34962, v3_n * V3_FLOATS * 4, v3_v, 35048);
+    s: int = V3_FLOATS * 4;
+    glVertexAttribPointer(0, 3, 5126, 0, s, 0);
+    glVertexAttribPointer(1, 3, 5126, 0, s, 12);
+    glVertexAttribPointer(2, 2, 5126, 0, s, 24);
+    glVertexAttribPointer(3, 3, 5126, 0, s, 32);
+    if (masked) {
+        glActiveTexture(33984);
+        glBindTexture(3553, v3_tex[tex]);
+        glUniform1i(v3_u_mask, 0);
+        glUniform1f(v3_u_masked, 1.0)
+    } else glUniform1f(v3_u_masked, 0.0);
+    glDrawArrays(4, 0, v3_n);
+    v3_n = 0
+}
+
+const C_BOARD3: int = 1989178;
+
+const C_CHIP3: int = 2502443;
+
+const C_CAP3: int = 11564912;
+
+const C_RES3: int = 1973790;
+
+const C_METAL3: int = 12174028;
+
+const C_COIL3: int = 12087091; // #b86f33
+
+const C_WALL3: int = 11110234;
+
+v3_vp: []f32 = new f32[16](0.0);
+
+v3_proj: []f32 = new f32[16](0.0);
+
+v3_view_m: []f32 = new f32[16](0.0);
+
+draw_3d() raises IoError {
+    if (!cs_on) return;
+    v3_init();
+    if (v3_dirty) {
+        find_levels();
+        for k in 0..lv_n {
+            level_mask(k);
+            glBindTexture(3553, v3_tex[k]);
+            glPixelStorei(3317, 1);
+            glTexImage2D(3553, 0, 6409, v3_nx, v3_ny, 0, 6409, 5121, v3_mask);
+            glPixelStorei(3317, 4)
+        }
+        find_slots();
+        v3_dirty = false
+    }
+    // The camera, about the stack's middle (as far apart as it is).
+    z0: f32 = stack_z0();
+    top: f32 = stack_z0() + stack_t() + lift(slot_bolts);
+    if (!dock_on) top = maxf(layer_z(L_FRONT) + 2.0 * cs_ply, bolt_foot() + bolt_length() + 1.5);
+    mid: V3 = v3((case_x0() + case_x1()) * 0.5 + stage_lid_dx() * 0.5, (case_y0() + case_y1()) * 0.5 + stage_lid_dy() * 0.5,
+        (z0 + top) * 0.5);
+    eye: V3 = v_add(mid, v3(v3_dist * cosf(v3_pitch) * sinf(v3_yaw), -v3_dist * cosf(v3_pitch) * cosf(v3_yaw),
+        v3_dist * sinf(v3_pitch)));
+    mat_look(v3_view_m, eye, mid, v3(0.0, 0.0, 1.0));
+    mat_persp(v3_proj, 0.6, scr_w as f32 / maxf(scr_h as f32, 1.0), v3_dist * 0.05,
+        v3_dist * 6.0);
+    mat_mul(v3_vp, v3_proj, v3_view_m);
+    glEnable(2929);
+    glDepthFunc(515);
+    glDepthMask(1);
+    glDisable(3042);
+    glUseProgram(v3_prog);
+    glUniformMatrix4fv(v3_u_vp, 1, 0, v3_vp);
+    // The wood, a level at a time: slices up through each.
+    v3_bounds();
+    slices: int = 16;
+    for k in 0..lv_n {
+        zb: f32 = lv_z[k] + lift(lv_slot[k]);
+        // (A dock's lid, its front and its catch: slid off, on the set.)
+        v3_dx = 0.0;
+        v3_dy = 0.0;
+        if (dock_on && lv_layer[k] < 0 && lv_z[k] >= layer_z(dk_channel()) - 0.01) {
+            v3_dx = stage_lid_dx();
+            v3_dy = stage_lid_dy();
+            zb = zb + stage_lid_dz()
+        }
+        // (A layer's outer edge as a wall: seen side on, slices would show
+        // the gaps between them.)
+        if (lv_layer[k] >= 0) outline_wall(pc_first[lv_layer[k]], zb, zb + cs_ply);
+        base: int = C_WOOD;
+        if (lv_layer[k] < 0) base = C_WOOD_LIGHT;
+        for i in 0..slices + 1 {
+            z: f32 = zb + cs_ply * i as f32 / slices as f32;
+            rgb: int = C_WALL3;
+            if (i == slices) rgb = base;
+            if (i == 0) level_quad(z, -1.0, base) else level_quad(z, 1.0, rgb)
+        }
+        v3_flush(true, k)
+    }
+    v3_dx = 0.0;
+    v3_dy = 0.0;
+    v3_flush(false, 0);
+    // (The handheld's front, as taken for the set, in the last texture.)
+    if (stage_on && st_ok && !st_uploaded) {
+        glBindTexture(3553, v3_tex[LEVELS - 1]);
+        glPixelStorei(3317, 1);
+        glTexImage2D(3553, 0, 6409, st_nx, st_ny, 0, 6409, 5121, st_mask);
+        glPixelStorei(3317, 4);
+        st_uploaded = true
+    }
+    // The board, with what is on it (its domes in a place of their own).
+    bz: f32 = lift(slot_pcb);
+    dz: f32 = lift(slot_domes);
+    box3(-brd_w * 0.5, -brd_h * 0.5, -PCB_T + bz, brd_w * 0.5, brd_h * 0.5, bz, C_BOARD3);
+    find_tongues();
+    for k in 0..tg_n {
+        tongue_box(k, 0.0);
+        box3(tg_box_x0, tg_box_y0, -PCB_T + bz, tg_box_x1, tg_box_y1, bz, C_BOARD3)
+    }
+    for p in 0..parts_n {
+        ht: f32 = part_height(p);
+        rgb: int = C_CHIP3;
+        f: int = part_fp[p];
+        if (fp_is(f, "c0603")) rgb = C_CAP3;
+        if (fp_is(f, "r0603")) rgb = C_RES3;
+        if (fp_is(f, "usb4105") || fp_is(f, "dome6")) rgb = C_METAL3;
+        if (fp_is(f, "tp1")) rgb = 13148480;
+        if (is_button(p)) post(part_x[p], part_y[p], 3.0, dz, dz + ht, rgb) else {
+            x0: f32 = court_x0(p) + 0.25;
+            x1: f32 = court_x1(p) - 0.25;
+            y0: f32 = court_y0(p) + 0.25;
+            y1: f32 = court_y1(p) - 0.25;
+            if (x1 > x0 && y1 > y0) box3(x0, y0, bz, x1, y1, bz + ht, rgb)
+        }
+        // (A side switch's knob, out past its body and the board's edge.)
+        if (fp_is(f, "pcm12")) {
+            ax: f32 = part_x[p] + turn_x(-0.65, 1.85, part_rot[p]);
+            ay: f32 = part_y[p] + turn_y(-0.65, 1.85, part_rot[p]);
+            bx: f32 = part_x[p] + turn_x(0.65, 3.35, part_rot[p]);
+            by: f32 = part_y[p] + turn_y(0.65, 3.35, part_rot[p]);
+            box3(minf(ax, bx), minf(ay, by), bz + 0.35, maxf(ax, bx), maxf(ay, by),
+                bz + 1.05, C_CHIP3)
+        }
+    }
+    if (dock_on) {
+        draw_dock_3d();
+        v3_flush(false, 0);
+        glDisable(2929);
+        return
+    }
+    // The battery, in its pocket; the screen, on its shelf.
+    tz: f32 = layer_z(L_BATT1);
+    tdz: f32 = lift(slot_battery);
+    box3(cs_batt_x - batt_w() * 0.5, cs_batt_y - batt_l() * 0.5, tz + tdz + 0.3, cs_batt_x + batt_w() * 0.5,
+        cs_batt_y + batt_l() * 0.5, tz + tdz + 0.3 + BATT_T, C_POUCH);
+    // The wireless receiver beside it, its coil down against the back and
+    // its chip on top.
+    if (qi_on) {
+        box3(qi_x - QI_W * 0.5, qi_y - QI_H * 0.5, tz + tdz, qi_x + QI_W * 0.5, qi_y + QI_H * 0.5,
+            tz + tdz + 0.5, C_COIL3);
+        box3(qi_x - 9.5, qi_y - 6.0, tz + tdz + 0.5, qi_x + 9.5, qi_y + 6.0, tz + tdz + QI_T,
+            C_CHIP3)
+    }
+    sz: f32 = layer_z(L_SCREEN);
+    sdz: f32 = lift(slot_screen);
+    box3(cs_screen_x - SCREEN_W * 0.5, cs_screen_y - SCREEN_H * 0.5, sz + sdz, cs_screen_x + SCREEN_W * 0.5,
+        cs_screen_y + SCREEN_H * 0.5, sz + sdz + SCREEN_T, C_GLASS);
+    box3(cs_screen_x + SCREEN_VA_DX - SCREEN_VA_W * 0.5, cs_screen_y + SCREEN_VA_DY - SCREEN_VA_H * 0.5,
+        sz + sdz + SCREEN_T, cs_screen_x + SCREEN_VA_DX + SCREEN_VA_W * 0.5, cs_screen_y + SCREEN_VA_DY + SCREEN_VA_H * 0.5,
+        sz + sdz + SCREEN_T + 0.05, C_SCREEN_ON);
+    // The bolts, their heads sunk in the front (apart, above it all), and
+    // the nuts in their pockets (apart, over the first battery layer).
+    foot: f32 = bolt_foot();
+    head: f32 = foot + bolt_length();
+    nz: f32 = layer_z(L_BATT2) - NUT_T + lift(slot_nuts);
+    for b in 0..bolts_n() {
+        x: f32 = bolt_x(b);
+        y: f32 = bolt_y(b);
+        post(x, y, 1.25, foot, head, C_METAL3);
+        post(x, y, HEAD_D * 0.5, head, head + HEAD_T, C_METAL3);
+        post(x, y, NUT_AF * 0.55, nz, nz + NUT_T, 9474192)
+    }
+    v3_flush(false, 0);
+    glDisable(2929)
+}
+
+// Whether the 3D view is what is shown.
+in_3d(): bool {
+    mode == MODE_CASE && view3d && cs_on
+}
+
+// The same about any middle, half size and corners' radius.
+round_wall(
+    cx: f32,
+    cy: f32,
+    hw: f32,
+    hh: f32,
+    r: f32,
+    z0: f32,
+    z1: f32
+) {
+    px: f32 = 0.0;
+    py: f32 = 0.0;
+    for c in 0..4 {
+        sx: f32 = 1.0;
+        sy: f32 = 1.0;
+        if (c == 1 || c == 2) sx = -1.0;
+        if (c >= 2) sy = -1.0;
+        ccx: f32 = cx + sx * (hw - r);
+        ccy: f32 = cy + sy * (hh - r);
+        for k in 0..9 {
+            a: f32 = (c as f32 + k as f32 / 8.0) * 1.5707963;
+            x: f32 = ccx + r * cosf(a);
+            y: f32 = ccy + r * sinf(a);
+            if (c > 0 || k > 0) wall(px, py, x, y, z0, z1);
+            px = x;
+            py = y
+        }
+    }
+    wall(px, py, cx + hw, cy + hh - r, z0, z1)
+}
+
+// The wall round a box with round corners (shape s), from z0 to z1.
+outline_wall(s: int, z0: f32, z1: f32) {
+    hw: f32 = sh_hw[s];
+    hh: f32 = sh_hh[s];
+    r: f32 = sh_r[s];
+    px: f32 = 0.0;
+    py: f32 = 0.0;
+    for c in 0..4 {
+        sx: f32 = 1.0;
+        sy: f32 = 1.0;
+        if (c == 1 || c == 2) sx = -1.0;
+        if (c >= 2) sy = -1.0;
+        cx: f32 = sh_x[s] + sx * (hw - r);
+        cy: f32 = sh_y[s] + sy * (hh - r);
+        for k in 0..9 {
+            a: f32 = (c as f32 + k as f32 / 8.0) * 1.5707963;
+            x: f32 = cx + r * cosf(a);
+            y: f32 = cy + r * sinf(a);
+            if (c > 0 || k > 0) wall(px, py, x, y, z0, z1);
+            px = x;
+            py = y
+        }
+    }
+    wall(px, py, sh_x[s] + hw, sh_y[s] + hh - r, z0, z1)
+}
+
+// A wall from (x0, y0) to (x1, y1), facing out (to its right).
+wall(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    z0: f32,
+    z1: f32
+) {
+    dx: f32 = x1 - x0;
+    dy: f32 = y1 - y0;
+    l: f32 = maxf(sqrtf(dx * dx + dy * dy), 0.0001);
+    face(x0, y0, z0, x1, y1, z0, x1, y1, z1, x0, y0, z1, dy / l, -dx / l, 0.0, C_WALL3)
+}
+
+// From far enough away to see all of it, as far apart as it will be.
+v3_fit() {
+    find_levels();
+    find_slots();
+    t: f32 = stack_t() + explode_t * (EXPLODE_GAP * (slot_bolts + 1) as f32 + bolt_length());
+    w: f32 = case_w() + stage_lid_dx();
+    h: f32 = case_h() - stage_lid_dy();
+    r: f32 = 0.5 * sqrtf(w * w + h * h + t * t);
+    aspect: f32 = scr_w as f32 / maxf(scr_h as f32, 1.0);
+    v3_dist = clampf(r / (0.3093 * minf(aspect, 1.0)) * 1.05, 60.0, 2000.0)
+}
+
+// ---- moving it ----
+v3_orbit(dx: f32, dy: f32) {
+    v3_yaw = v3_yaw - dx * 0.008;
+    v3_pitch = clampf(v3_pitch + dy * 0.008, -1.45, 1.45)
+}
+
+v3_zoom(k: f32) {
+    explode_fit = false;
+    v3_dist = clampf(v3_dist / k, 60.0, 2000.0)
+}
+
+// A frame's worth of pulling apart or together. Whether it moved.
+step_3d(dt: f32): bool {
+    t: f32 = 0.0;
+    if (exploded) t = 1.0;
+    if (absf(explode_t - t) < 0.001) {
+        explode_t = t;
+        return false
+    }
+    explode_t = lerpf(explode_t, t, 1.0 - expf(-dt * 5.0));
+    // (Backing away, or closer, as it comes apart or together; and lower,
+    // to see between the layers.)
+    if (explode_fit) {
+        v3_fit();
+        v3_pitch = lerpf(0.95, 0.38, explode_t)
+    }
+    true
+}

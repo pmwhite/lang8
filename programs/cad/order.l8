@@ -1,0 +1,490 @@
+tag cad;
+
+use_tag std, gl, x11, skate;
+
+// Making it: everything to send off so that the thing arrives, from the
+// design as it is. A panel lists who makes or sells each part of it, with
+// what to send them (files written from the board and the case) and a way
+// to their page with that ready: the board, made and its parts put on, at
+// JLCPCB (the Gerber, drill and assembly files: see fab.l8); the case's
+// plywood, laser cut, at Ponoko (the cut file: see case.l8); the screen,
+// bolts, nuts, battery and domes from DigiKey (a cart filled by its
+// FastAdd link);
+// Paying is left to a person, at each.
+//
+// On a page, a tap that opens another site or saves a file has to be the
+// page's own: so the panel says where its buttons are (CADLINK lines, in
+// window pixels) and the page lays links over them. Off a page, a button
+// writes its file beside the board, or says the site's address.
+extern open(path: str, flags: int, mode: int): int;
+
+extern close(fd: int): int;
+
+order_open: bool = false;
+
+// A button pressed (its file to write, its site), done once the frame is
+// drawn: see main.l8.
+order_pending: int = -1;
+
+order_t: f32 = 0.0;
+
+const B_MAKE: int = 44;
+
+const B_ORDER_CLOSE: int = 45;
+
+const B_FAB_FILES: int = 46;
+
+const B_FAB_SITE: int = 47;
+
+const B_CUT_FILE: int = 48;
+
+const B_CUT_SITE: int = 49;
+
+const B_PARTS_CART: int = 50;
+
+JLCPCB_URL: str = "https://cart.jlcpcb.com/quote";
+
+PONOKO_URL: str = "https://www.ponoko.com/laser-cutting";
+
+// The hardware, from DigiKey: what, its DigiKey part number, and how many
+// (the bolts and nuts one for each of the case's, the domes one for each
+// button).
+// (Checked against DigiKey's stock on 2026-10-15. The bolts are nylon:
+// DigiKey has few metal M2.5 so long. The domes come a hundred at the
+// least. The screen is Newhaven's, its number at DigiKey by the same
+// pattern as its others: to check in the cart. The wireless charging
+// receiver is Adafruit's 1901, its number by DigiKey's pattern for
+// Adafruit's too, to check; Adafruit sells it as well.)
+HW_WHAT: []str = ["M2.5 bolt, nylon", "M2.5 nut", "Battery, 1200 mAh", "Dome, 6 mm",
+    "Screen, 2.8 inch", "Wireless charging receiver"];
+
+HW_PN: []str = ["", "36-4707-ND", "1528-1838-ND", "4955-F06180-ND", "NHD-2.8-240320AF-CSXP-F-ND",
+    "1528-1901-ND"];
+
+// The bolts' DigiKey number, by their length: Essentra's nylon pan heads
+// (the 25 mm one checked on 2026-10-15; the others by the same pattern).
+bolt_pn(length: int) {
+    line_add("145-50M025045P");
+    if (length < 100) line_add("0");
+    if (length < 10) line_add("0");
+    line_int(length);
+    line_add("-ND")
+}
+
+// A dock's: the base's six bolts and the catch's, all 6 mm, and their
+// nuts; and the four transmitters (Adafruit 2162, its number by DigiKey's
+// pattern for Adafruit's, to check in the cart).
+// Its charger: Qualtek's QFWC-18-12-USCR (18 W, USB-C power delivery, 5 V
+// at 3 A among its voltages, its 1.2 m cable attached, a folding US plug),
+// in stock at DigiKey on 2026-10-16.
+DOCK_PN: []str = ["", "36-4707-ND", "1528-2162-ND", "Q1285-ND"];
+
+dock_qty(k: int): int {
+    if (k <= 1) return DK_BOLTS + 1;
+    if (k == 3) return 1;
+    4
+}
+
+hw_qty(k: int): int {
+    if (k <= 1) return bolts_n();
+    if (k == 2 || k == 4 || k == 5) return 1;
+    buttons: int = 0;
+    for p in 0..parts_n {
+        if (is_button(p)) buttons = buttons + 1
+    }
+    maxi(buttons, 100)
+}
+
+// The files, where they are written: on a page, in its memory, for the
+// page to save (named after the board as it does); else beside where the
+// editor was started.
+// (A cut file of more than one sheet goes as a zip of them.)
+fab_path(case_file: bool): str {
+    if (on_page) {
+        if (case_file && cut_sheets() > 1) return "/case.zip";
+        if (case_file) return "/case.svg";
+        return "/fab.zip"
+    }
+    if (case_file && cut_sheets() > 1) return "case.zip";
+    if (case_file) return "case.svg";
+    "fab.zip"
+}
+
+// The cut file's ending, after the board's name.
+cut_ending(): str {
+    if (cut_sheets() > 1) return "-case.zip";
+    "-case.svg"
+}
+
+cut_sheets(): int {
+    lay_out_sheets();
+    sheets_n
+}
+
+SHEET_FILES: []str = ["-sheet-1.svg", "-sheet-2.svg", "-sheet-3.svg", "-sheet-4.svg",
+    "-sheet-5.svg", "-sheet-6.svg", "-sheet-7.svg", "-sheet-8.svg"];
+
+// The cut file: one sheet's SVG (in svg), or a zip of them all (in zip).
+write_cut() {
+    n: int = cut_sheets();
+    if (n <= 1) {
+        write_case_svg(0);
+        return
+    }
+    zip_begin();
+    for k in 0..mini(n, len(SHEET_FILES)) {
+        write_case_svg(k);
+        fo_n = svg_n;
+        for i in 0..svg_n fo[i] = svg[i];
+        zip_add(SHEET_FILES[k])
+    }
+    zip_end()
+}
+
+write_out(case_file: bool) raises IoError {
+    if (case_file) write_cut() else write_fab();
+    fd: int = open(fab_path(case_file), 577, 420);
+    if (fd < 0) {
+        toast_str("Could not write the file");
+        return
+    }
+    if (case_file && cut_sheets() <= 1) write_bytes_n(fd, svg, svg_n) else write_bytes_n(fd,
+        zip, zip_n);
+    close(fd)
+}
+
+// The files are written when the panel opens (and again if the design
+// changed since).
+order_written: int = -1;
+
+order_toggle() raises IoError {
+    order_open = !order_open;
+    if (order_open) {
+        forget_picks();
+        // (On a page, ready to save; else only worked out, for what the
+        // panel says, until a button asks for the file.)
+        if (on_page) {
+            write_out(false);
+            write_out(true)
+        } else {
+            write_cut();
+            write_fab()
+        }
+        order_written = und_pos
+    }
+}
+
+// ---- the page's links ----
+const LINKS: int = 8;
+
+lk_id: []int = new int[LINKS](0);
+
+lk_x0: []f32 = new f32[LINKS](0.0);
+
+lk_y0: []f32 = new f32[LINKS](0.0);
+
+lk_x1: []f32 = new f32[LINKS](0.0);
+
+lk_y1: []f32 = new f32[LINKS](0.0);
+
+lk_n: int = 0;
+
+// What was last told the page, to say again only when it changes.
+told_links: int = -1;
+
+add_link(
+    id: int,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32
+) {
+    if (lk_n >= LINKS) return;
+    lk_id[lk_n] = id;
+    lk_x0[lk_n] = x0;
+    lk_y0[lk_n] = y0;
+    lk_x1[lk_n] = x1;
+    lk_y1[lk_n] = y1;
+    lk_n = lk_n + 1
+}
+
+// Where link id goes, into line: `open URL` or `save PATH NAME`.
+link_words(id: int) {
+    if (id == B_FAB_SITE) {
+        line_add("open ");
+        line_add(JLCPCB_URL)
+    }
+    if (id == B_CUT_SITE) {
+        line_add("open ");
+        line_add(PONOKO_URL)
+    }
+    if (id == B_PARTS_CART) {
+        line_add("open ");
+        cart_url()
+    }
+    if (id == B_FAB_FILES || id == B_CUT_FILE) {
+        line_add("save ");
+        line_add(fab_path(id == B_CUT_FILE));
+        line_add(" ");
+        fab_name();
+        if (id == B_CUT_FILE) line_add(cut_ending()) else line_add("-fab.zip")
+    }
+}
+
+// DigiKey's FastAdd link: a new cart with these parts in it.
+cart_url() {
+    line_add("https://www.digikey.com/classic/ordering/fastadd.aspx?newcart=true");
+    k: int = 0;
+    if (dock_on) {
+        for h in 0..len(DOCK_PN) {
+            k = k + 1;
+            line_add("&part");
+            line_int(k);
+            line_add("=");
+            if (h == 0) bolt_pn(6) else line_add(DOCK_PN[h]);
+            line_add("&qty");
+            line_int(k);
+            line_add("=");
+            line_int(dock_qty(h))
+        }
+        return
+    }
+    for h in 0..len(HW_PN) {
+        if (h == 0 || len(HW_PN[h]) > 0) {
+            k = k + 1;
+            line_add("&part");
+            line_int(k);
+            line_add("=");
+            if (h == 0) bolt_pn(bolt_length() as int) else line_add(HW_PN[h]);
+            line_add("&qty");
+            line_int(k);
+            line_add("=");
+            line_int(hw_qty(h))
+        }
+    }
+}
+
+// The page says a link was tapped (the button's id): say what it did, as
+// the button would off a page.
+link_tapped(id: int) {
+    line_clear();
+    if (id == B_FAB_FILES || id == B_CUT_FILE) {
+        line_add("Saving ");
+        fab_name();
+        if (id == B_CUT_FILE) line_add(cut_ending()) else line_add("-fab.zip")
+    } else {
+        line_add("Opening ");
+        if (id == B_FAB_SITE) line_add("JLCPCB: upload the zip, then the parts and their places");
+        if (id == B_CUT_SITE) line_add("Ponoko: upload the cut file, birch ply ");
+        if (id == B_CUT_SITE) line_num(cs_ply, 1);
+        if (id == B_CUT_SITE) line_add(" mm");
+        if (id == B_PARTS_CART) line_add("DigiKey, with the parts in a new cart")
+    }
+    toast_line()
+}
+
+// Once a frame, after drawing: the links, to the page, if they changed.
+tell_links() raises IoError {
+    if (!on_page) return;
+    sum: int = lk_n;
+    for k in 0..lk_n sum = sum * 31 + lk_id[k] + (lk_x0[k] + lk_y0[k] * 7.0 + lk_x1[k] * 13.0 + lk_y1[k] * 17.0) as int;
+    if (sum == told_links) return;
+    told_links = sum;
+    line_clear();
+    line_add("CADLINKS ");
+    line_int(lk_n);
+    write_bytes_n(1, line, line_n);
+    print("");
+    for k in 0..lk_n {
+        line_clear();
+        line_add("CADLINK ");
+        line_int(lk_id[k]);
+        line_add(" ");
+        line_int(lk_x0[k] as int);
+        line_add(" ");
+        line_int(lk_y0[k] as int);
+        line_add(" ");
+        line_int((lk_x1[k] + 0.5) as int);
+        line_add(" ");
+        line_int((lk_y1[k] + 0.5) as int);
+        line_add(" ");
+        link_words(lk_id[k]);
+        write_bytes_n(1, line, line_n);
+        print("")
+    }
+}
+
+// A button off a page: the file written beside the board, or the site's
+// address said (and printed, to be opened).
+order_act(id: int) raises IoError {
+    if (id == B_MAKE) order_toggle();
+    if (id == B_ORDER_CLOSE) order_open = false;
+    if (id == B_FAB_FILES || id == B_CUT_FILE) {
+        write_out(id == B_CUT_FILE);
+        line_clear();
+        line_add(fab_path(id == B_CUT_FILE));
+        line_add(" written");
+        toast_line()
+    }
+    if (id == B_FAB_SITE || id == B_CUT_SITE || id == B_PARTS_CART) {
+        line_clear();
+        link_words(id);
+        write_bytes_n(1, line, line_n);
+        print("");
+        toast_line()
+    }
+}
+
+// ---- the panel ----
+draw_order() {
+    if (order_t < 0.01) return;
+    a: f32 = order_t;
+    x: f32 = 10.0 + safe_left;
+    w: f32 = minf(scr_w as f32 - 20.0 - safe_left - safe_right, 560.0);
+    x = (scr_w as f32 - w) * 0.5;
+    top: f32 = safe_top + 10.0;
+    h: f32 = scr_h as f32 - safe_bottom - 10.0 - top;
+    y: f32 = top + (1.0 - order_t) * 40.0;
+    panel(x, y, w, h, 20.0, a);
+    p_str(1, 22.0, x + 18.0, y + 34.0, "Make it", C_INK, a);
+    pill_button(B_ORDER_CLOSE, x + w - 88.0, y + 12.0, 76.0, 34.0, "Done", false,
+        a);
+    // Whether the design is ready to send.
+    line_clear();
+    ok: bool = wire_n == 0 && prob_n == 0;
+    if (ok) line_add("Ready: each opens with what to send or buy. Paying is yours.") else {
+        line_add("Not ready: ");
+        if (wire_n > 0) {
+            line_int(wire_n);
+            line_add(" connections to make");
+            if (prob_n > 0) line_add(", ")
+        }
+        if (prob_n > 0) {
+            line_int(prob_n);
+            line_add(" problems")
+        }
+    }
+    rgb: int = C_MUTED;
+    if (!ok) rgb = C_BAD;
+    fit_text(0, 13.0, x + 18.0, y + 56.0, w - 36.0, rgb, a);
+    ry: f32 = y + 72.0;
+    rh: f32 = 112.0;
+    // The board.
+    line_clear();
+    parts: int = 0;
+    kinds: int = 0;
+    for p in 0..parts_n {
+        s: int = source_of(p);
+        if (s >= 0) {
+            parts = parts + 1;
+            first: bool = true;
+            for o in 0..p {
+                if (source_of(o) == s) first = false
+            }
+            if (first) kinds = kinds + 1
+        }
+    }
+    line_add("2 layers, ");
+    line_num(brd_w, 1);
+    line_add(" x ");
+    line_num(brd_h, 1);
+    line_add(" mm; ");
+    line_int(parts);
+    line_add(" parts of ");
+    line_int(kinds);
+    line_add(" kinds put on, from LCSC.");
+    order_row(x + 10.0, ry, w - 20.0, rh, "The board, made and put together", "JLCPCB",
+        B_FAB_FILES, "Files", B_FAB_SITE, "JLCPCB", a);
+    ry = ry + rh + 8.0;
+    // The case.
+    line_clear();
+    if (!cs_on) line_add("No case yet: make one in Case.") else {
+        n: int = cut_sheets();
+        line_int(layers_n);
+        line_add(" layers and ");
+        line_int(pieces_count - layers_n);
+        if (dock_on) line_add(" pieces (the lid, its catch, feet) of ") else line_add(" discs of ");
+        line_num(cs_ply, 1);
+        if (n > 1) {
+            line_add(" mm birch ply, on ");
+            line_int(n);
+            line_add(" sheets of 790 x 384 mm.")
+        } else {
+            line_add(" mm birch ply, on a sheet ");
+            line_int(sheet_w as int);
+            line_add(" x ");
+            line_int(sheet_h as int);
+            line_add(" mm.")
+        }
+    }
+    order_row(x + 10.0, ry, w - 20.0, rh, "The case, laser cut", "Ponoko", B_CUT_FILE,
+        "Cut file", B_CUT_SITE, "Ponoko", a);
+    ry = ry + rh + 8.0;
+    // The hardware.
+    line_clear();
+    if (dock_on) {
+        line_add("Four Qi transmitters (Adafruit 2162), ");
+        line_int(DK_BOLTS + 1);
+        line_add(" M2.5 x 6 bolts (nylon) and nuts, an 18 W USB-C charger (its cable attached).");
+        order_row(x + 10.0, ry, w - 20.0, rh, "Transmitters, charger, bolts", "DigiKey",
+            -1, "", B_PARTS_CART, "Cart", a)
+    } else {
+        line_add("The 2.8 inch screen (Newhaven), ");
+        line_int(bolts_n());
+        line_add(" M2.5 x ");
+        line_num(bolt_length(), 0);
+        line_add(" bolts (nylon) and nuts, a 1200 mAh battery, domes (by the hundred), a wireless charging receiver.");
+        order_row(x + 10.0, ry, w - 20.0, rh, "Screen, battery, bolts, the rest",
+            "DigiKey", -1, "", B_PARTS_CART, "Cart", a)
+    }
+}
+
+// A row: what, from whom, a line about it (in line), and its buttons (a
+// file to save, if file >= 0, and the site).
+order_row(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    what: str,
+    who: str,
+    file: int,
+    file_t: str,
+    site: int,
+    site_t: str,
+    a: f32
+) {
+    p_box(x, y, w, h, 14.0, C_PANEL_HI, 0.6 * a);
+    p_str(1, 16.0, x + 14.0, y + 26.0, what, C_INK, a);
+    p_str(0, 12.5, x + 14.0, y + 44.0, who, C_PICK, a);
+    fit_text(0, 12.5, x + 14.0, y + 62.0, w - 28.0, C_MUTED, a);
+    bh: f32 = 34.0;
+    by: f32 = y + h - bh - 10.0;
+    bx: f32 = x + w - 10.0;
+    sw: f32 = p_str_w(1, 14.0, site_t) + 40.0;
+    bx = bx - sw;
+    pill_button(site, bx, by, sw, bh, site_t, true, a);
+    if (a > 0.9) add_link(site, bx, by, bx + sw, by + bh);
+    if (file >= 0) {
+        fw: f32 = p_str_w(1, 14.0, file_t) + 40.0;
+        bx = bx - fw - 8.0;
+        pill_button(file, bx, by, fw, bh, file_t, false, a);
+        if (a > 0.9) add_link(file, bx, by, bx + fw, by + bh)
+    }
+}
+
+// What is in line, at (x, y), made smaller if wider than room.
+fit_text(
+    face: int,
+    size: f32,
+    x: f32,
+    y: f32,
+    room: f32,
+    rgb: int,
+    a: f32
+) {
+    s: f32 = size;
+    tw: f32 = p_text_w(face, s, line, 0, line_n);
+    if (tw > room) s = s * room / tw;
+    p_text(face, s, x, y, line, 0, line_n, 0.0, rgb, a)
+}

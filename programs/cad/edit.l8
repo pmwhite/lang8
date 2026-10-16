@@ -18,6 +18,8 @@ const MODE_ARRANGE: int = 0;
 
 const MODE_ROUTE: int = 1;
 
+const MODE_CASE: int = 2;
+
 mode: int = 0;
 
 // Whether the board changed and wants writing to its file, and checking.
@@ -463,21 +465,84 @@ start_route_all() {
     if (pour_net[TOP] < 0 && pour_net[BOTTOM] < 0) {
         gnd: int = find_net(bytes("GND"), 0, 3);
         if (gnd >= 0) {
+            // (And on the top, where there is room after: it joins what
+            // the bottom's tracks cut its pour into.)
+            pour_net[TOP] = gnd;
             toggle_pour(gnd, BOTTOM);
             poured_first = true
         }
     }
     avoid_n = 0;
     check_board();
-    if (poured_first) toast_str("Ground poured on the bottom first");
+    if (poured_first) toast_str("Ground poured on both sides first");
+    // (The board as it is, to start again from: see end_job.)
+    write_board();
+    rs_start_n = doc_n;
+    memcpy(rs_start, 0, doc, 0, doc_n);
+    rs_try = 0;
+    rs_best_left = 1000000;
+    hard_n = 0;
+    job_stopped = false;
+    route_begin(true)
+}
+
+// Route all's routing itself, from the board as it is.
+route_begin(say: bool) {
+    // (Before the buses: the links that must go under a part's lines, so
+    // that their vias are where they fit; see under_link.)
+    route_under_links();
     route_buses();
     check_board();
-    if (!queue_wires(true)) return;
+    if (!queue_wires(say)) return;
     forget_picks();
     job_pass = 0;
     job_wires = wire_n;
     job_on = true;
     job_ok = 0
+}
+
+// Starting again: Route all, if it ends with connections left, starts
+// again from the board as it was before it (twice at most), routing those
+// first; and in the end keeps the best of its tries. The board to start
+// from, the best so far, the tries, and the connections found hard.
+rs_start: []i8 = new i8[1048576](0i8);
+
+rs_start_n: int = 0;
+
+rs_best: []i8 = new i8[1048576](0i8);
+
+rs_best_n: int = 0;
+
+rs_best_left: int = 1000000;
+
+rs_try: int = 0;
+
+restart_tries: int = 2;
+
+const HARD: int = 64;
+
+hard_a: []int = new int[HARD](0);
+
+hard_b: []int = new int[HARD](0);
+
+hard_n: int = 0;
+
+// (Stopped by a person: no starting again.)
+job_stopped: bool = false;
+
+is_hard(a: int, b: int): bool {
+    for k in 0..hard_n {
+        if (hard_a[k] == a && hard_b[k] == b || hard_a[k] == b && hard_b[k] == a) return true
+    }
+    false
+}
+
+add_hard(a: int, b: int) {
+    if (hard_n < HARD && !is_hard(a, b)) {
+        hard_a[hard_n] = a;
+        hard_b[hard_n] = b;
+        hard_n = hard_n + 1
+    }
 }
 
 // The connections still to make, into the job, in the order a person
@@ -532,50 +597,60 @@ route_buses() {
                 my: f32 = bw_ay / all as f32;
                 for pass in 0..2 {
                     for sd in 0..4 {
-                        m: int = bus_wires(pa, pb, sd);
-                        if (m > 0) {
-                            nx: f32 = side_x(sd);
-                            ny: f32 = side_y(sd);
-                            ax: f32 = bw_ax / m as f32;
-                            ay: f32 = bw_ay / m as f32;
-                            bx: f32 = bw_bx / m as f32;
-                            by: f32 = bw_by / m as f32;
-                            facing: bool = nx * (ax - bx) + ny * (ay - by) >= 0.0;
-                            if (facing == (pass == 0)) {
-                                gd_n = 0;
-                                guide_add(ax, ay);
-                                if (!facing) {
-                                    // (Round the part: by the side these
-                                    // leave the near part on, of the bus's
-                                    // ends there, so as not to cross the
-                                    // rest; clear of it by the lanes' room.)
-                                    cx: f32 = (court_x0(pb) + court_x1(pb)) * 0.5;
-                                    cy: f32 = (court_y0(pb) + court_y1(pb)) * 0.5;
-                                    hx: f32 = (court_x1(pb) - court_x0(pb)) * 0.5;
-                                    hy: f32 = (court_y1(pb) - court_y0(pb)) * 0.5;
-                                    tx: f32 = -ny;
-                                    ty: f32 = nx;
-                                    away: f32 = tx * (ax - mx) + ty * (ay - my);
-                                    if (absf(away) < 0.05) away = tx * (ax - cx) + ty * (ay - cy);
-                                    if (away < 0.0) {
-                                        tx = -tx;
-                                        ty = -ty
+                        // (In runs of pins side by side on the far part:
+                        // a pin of another net between two of them is a
+                        // way the bus would block.)
+                        bus_runs(pa, pb, sd);
+                        for run in 0..runs_n {
+                            bus_lo = run_lo[run];
+                            bus_hi = run_hi[run];
+                            m: int = bus_wires(pa, pb, sd);
+                            if (m >= 2) {
+                                nx: f32 = side_x(sd);
+                                ny: f32 = side_y(sd);
+                                ax: f32 = bw_ax / m as f32;
+                                ay: f32 = bw_ay / m as f32;
+                                bx: f32 = bw_bx / m as f32;
+                                by: f32 = bw_by / m as f32;
+                                facing: bool = nx * (ax - bx) + ny * (ay - by) >= 0.0;
+                                if (facing == (pass == 0)) {
+                                    gd_n = 0;
+                                    guide_add(ax, ay);
+                                    if (!facing) {
+                                        // (Round the part: by the side these
+                                        // leave the near part on, of the bus's
+                                        // ends there, so as not to cross the
+                                        // rest; clear of it by the lanes' room.)
+                                        cx: f32 = (court_x0(pb) + court_x1(pb)) * 0.5;
+                                        cy: f32 = (court_y0(pb) + court_y1(pb)) * 0.5;
+                                        hx: f32 = (court_x1(pb) - court_x0(pb)) * 0.5;
+                                        hy: f32 = (court_y1(pb) - court_y0(pb)) * 0.5;
+                                        tx: f32 = -ny;
+                                        ty: f32 = nx;
+                                        away: f32 = tx * (ax - mx) + ty * (ay - my);
+                                        if (absf(away) < 0.05) away = tx * (ax - cx) + ty * (ay - cy);
+                                        if (away < 0.0) {
+                                            tx = -tx;
+                                            ty = -ty
+                                        }
+                                        mg: f32 = 0.5 + (m - 1) as f32 * 0.3;
+                                        ht: f32 = absf(tx) * hx + absf(ty) * hy + mg;
+                                        hn: f32 = absf(nx) * hx + absf(ny) * hy + mg;
+                                        guide_add(cx + tx * ht - nx * hn, cy + ty * ht - ny * hn);
+                                        guide_add(cx + tx * ht + nx * hn, cy + ty * ht + ny * hn)
                                     }
-                                    mg: f32 = 0.5 + (m - 1) as f32 * 0.3;
-                                    ht: f32 = absf(tx) * hx + absf(ty) * hy + mg;
-                                    hn: f32 = absf(nx) * hx + absf(ny) * hy + mg;
-                                    guide_add(cx + tx * ht - nx * hn, cy + ty * ht - ny * hn);
-                                    guide_add(cx + tx * ht + nx * hn, cy + ty * ht + ny * hn)
+                                    guide_add(bx, by);
+                                    bus_side = sd;
+                                    gd_auto = true;
+                                    route_bus(pa, pb, false);
+                                    gd_auto = false;
+                                    bus_side = -1;
+                                    check_board()
                                 }
-                                guide_add(bx, by);
-                                bus_side = sd;
-                                gd_auto = true;
-                                route_bus(pa, pb, false);
-                                gd_auto = false;
-                                bus_side = -1;
-                                check_board()
                             }
                         }
+                        bus_lo = -1000000.0;
+                        bus_hi = 1000000.0
                     }
                 }
             }
@@ -612,8 +687,101 @@ pin_side(q: int): int {
 }
 
 // Bus side: when not -1, the bus is only the connections that meet the
-// far part on that side of it.
+// far part on that side of it (and there, between bus_lo and bus_hi along
+// it: see bus_runs).
 bus_side: int = -1;
+
+bus_lo: f32 = -1000000.0;
+
+bus_hi: f32 = 1000000.0;
+
+// How far along side sd of its part pin q is (anticlockwise).
+side_along(q: int, sd: int): f32 {
+    -pin_x[q] * side_y(sd) + pin_y[q] * side_x(sd)
+}
+
+// The runs of the signals between parts pa and pb that meet pb on side sd:
+// those side by side there, with no pin of another net between.
+const RUNS: int = 16;
+
+run_lo: []f32 = new f32[RUNS](0.0);
+
+run_hi: []f32 = new f32[RUNS](0.0);
+
+runs_n: int = 0;
+
+run_at: []f32 = new f32[64](0.0);
+
+bus_runs(pa: int, pb: int, sd: int) {
+    runs_n = 0;
+    bus_lo = -1000000.0;
+    bus_hi = 1000000.0;
+    n: int = 0;
+    for w in 0..wire_n {
+        a: int = wire_a[w];
+        b: int = wire_b[w];
+        if (pin_part[a] == pb && pin_part[b] == pa) b = wire_a[w];
+        if (pin_part[b] == pb && bus_wire(w, pa, pb, sd) && n < len(run_at)) {
+            // (In order along the side.)
+            v: f32 = side_along(b, sd);
+            k: int = n;
+            while (k > 0 && run_at[k - 1] > v) {
+                run_at[k] = run_at[k - 1];
+                k = k - 1
+            }
+            run_at[k] = v;
+            n = n + 1
+        }
+    }
+    if (n == 0) return;
+    lo: f32 = run_at[0];
+    for i in 1..n + 1 {
+        split: bool = i == n;
+        if (!split) {
+            first: int = part_pin0[pb];
+            for q in first..first + fp_npads[part_fp[pb]] {
+                v: f32 = side_along(q, sd);
+                if (pin_net[q] >= 0 && pin_side(q) == sd && v > run_at[i - 1] + 0.01 && v < run_at[i] - 0.01 && !bus_pin(q,
+                    pa, pb, sd)) split = true
+            }
+        }
+        if (split && runs_n < RUNS) {
+            run_lo[runs_n] = lo - 0.01;
+            run_hi[runs_n] = run_at[i - 1] + 0.01;
+            runs_n = runs_n + 1;
+            if (i < n) lo = run_at[i]
+        }
+    }
+}
+
+// Whether wire w is a signal between pa and pb that meets pb on side sd.
+bus_wire(
+    w: int,
+    pa: int,
+    pb: int,
+    sd: int
+): bool {
+    a: int = wire_a[w];
+    b: int = wire_b[w];
+    if (pin_part[a] == pb && pin_part[b] == pa) {
+        a = wire_b[w];
+        b = wire_a[w]
+    }
+    pin_part[a] == pa && pin_part[b] == pb && net_track_width(pin_net[a]) <= rule_track + 0.001 && pin_side(b) == sd
+}
+
+// Whether pin q is the far end of one of those.
+bus_pin(
+    q: int,
+    pa: int,
+    pb: int,
+    sd: int
+): bool {
+    for w in 0..wire_n {
+        if ((wire_a[w] == q || wire_b[w] == q) && bus_wire(w, pa, pb, sd)) return true
+    }
+    false
+}
 
 // The signals to join between parts pa and pb (meeting pb on side sd,
 // unless -1), and the sums of their ends' places.
@@ -638,7 +806,8 @@ bus_wires(pa: int, pb: int, sd: int): int {
             a = wire_b[w];
             b = wire_a[w]
         }
-        if (pin_part[a] == pa && pin_part[b] == pb && net_track_width(pin_net[a]) <= rule_track + 0.001 && (sd < 0 || pin_side(b) == sd)) {
+        if (pin_part[a] == pa && pin_part[b] == pb && net_track_width(pin_net[a]) <= rule_track + 0.001 && (sd < 0 || pin_side(b) == sd && side_along(b,
+            sd) >= bus_lo && side_along(b, sd) <= bus_hi)) {
             n = n + 1;
             bw_ax = bw_ax + pin_x[a];
             bw_ay = bw_ay + pin_y[a];
@@ -657,15 +826,26 @@ guide_add(x: f32, y: f32) {
 
 job_key(a: int, b: int): f32 {
     n: int = pin_net[a];
+    // (Those a try before found no way for: first of all.)
+    if (is_hard(a, b)) return -300000.0 + wire_len(a, b);
     // (First, the links that must go under a part's other lines; then the
     // lines out of a many-pinned part's crowded sides: see fan_key.)
     if (under_link(a, b)) return -200000.0 + wire_len(a, b);
+    // (A connector's crowded row first of all: its pins can be left only
+    // the one way, so its lines claim the room by them before a chip's
+    // lines go round its ends.)
+    // (Unless its other end is a chip's: then the chip's side's order.)
+    if (row_pin(a, b) && !fan_pin(b, a)) return -150000.0 + fan_key(a, b);
+    if (row_pin(b, a) && !fan_pin(a, b)) return -150000.0 + fan_key(b, a);
     if (fan_pin(b, a) && !fan_pin(a, b)) return -100000.0 + fan_key(b, a);
     if (fan_pin(a, b)) return -100000.0 + fan_key(a, b);
     class: f32 = 0.0;
     // (Power that only goes a step, a chip's pin to its neighbour or its
-    // cap, has little choice of way: it goes in with the signals.)
-    if (n >= 0 && net_track_width(n) > rule_track + 0.001 && (wire_len(a, b) > 6.0 || pins_between(a,
+    // cap, has little choice of way: it goes in with the signals. A cap's
+    // step may be longer, up to a centimetre: where it fits by the chip.)
+    step: f32 = 6.0;
+    if (fp_npads[part_fp[pin_part[a]]] == 2 || fp_npads[part_fp[pin_part[b]]] == 2) step = 12.0;
+    if (n >= 0 && net_track_width(n) > rule_track + 0.001 && (wire_len(a, b) > step || pins_between(a,
         b))) class = 1.0;
     if (n >= 0 && pour_net[BOTTOM] == n) class = 2.0;
     class * 100000.0 + wire_len(a, b)
@@ -677,6 +857,15 @@ fan_pin(a: int, b: int): bool {
     p: int = pin_part[a];
     n: int = pin_net[a];
     ring_part(p) && pin_part[b] != p && n >= 0 && pour_net[BOTTOM] != n && pour_net[TOP] != n && needs_fanout(a,
+        rule_track)
+}
+
+// Whether pin a, going to pin b, is one of a connector's crowded row (a
+// part of many pins, not all round it), and b is beyond it.
+row_pin(a: int, b: int): bool {
+    p: int = pin_part[a];
+    n: int = pin_net[a];
+    fp_npads[part_fp[p]] >= 10 && !ring_part(p) && pin_part[b] != p && n >= 0 && pour_net[BOTTOM] != n && pour_net[TOP] != n && needs_fanout(a,
         rule_track)
 }
 
@@ -693,14 +882,26 @@ ring_part(p: int): bool {
     sides == 15
 }
 
-// Whether pins a and b are crowded pins of one many-pinned part, on a
+route_under_links() {
+    n: int = wire_n;
+    for w in 0..n {
+        if (w < wire_n && under_link(wire_a[w], wire_b[w])) {
+            r: int = connect_pins(wire_a[w], wire_b[w], BOTTOM);
+            if (r >= 0 && !ro_ok[r]) delete_route(r)
+        }
+    }
+    check_board()
+}
+
+// Whether pins a and b are crowded pins of one many-pinned part (a chip's,
+// or a connector's row), on a
 // net it joins outside (power: VREG_VOUT to DVDD), with others' pins
 // between them: lines that go off elsewhere between them, as a USB pair
 // does, leave them no way on the top. Such a link is made first, on the
 // bottom, its vias where they fit before anything is beside them.
 under_link(a: int, b: int): bool {
     p: int = pin_part[a];
-    pin_part[b] == p && ring_part(p) && pin_net[a] >= 0 && pour_net[BOTTOM] != pin_net[a] && needs_fanout(a,
+    pin_part[b] == p && (ring_part(p) || fp_npads[part_fp[p]] >= 10) && pin_net[a] >= 0 && pour_net[BOTTOM] != pin_net[a] && needs_fanout(a,
         rule_track) && needs_fanout(b, rule_track) && pins_between(a, b)
 }
 
@@ -862,6 +1063,11 @@ step_job(budget_ns: int) {
         if (under_link(job_a[job_at], job_b[job_at]) || job_key(job_a[job_at], job_b[job_at]) >= 100000.0 && job_key(job_a[job_at],
             job_b[job_at]) < 200000.0) layer = BOTTOM;
         r: int = connect_pins(job_a[job_at], job_b[job_at], layer);
+        // (No way, liking that layer: once more, liking the other.)
+        if (r >= 0 && !ro_ok[r] && !ro_drop[r]) {
+            delete_route(r);
+            r = connect_pins(job_a[job_at], job_b[job_at], 1 - layer)
+        }
         if (r >= 0 && ro_ok[r]) job_ok = job_ok + 1;
         job_at = job_at + 1
     }
@@ -951,6 +1157,39 @@ end_job() {
         r3 = r3 - 1
     }
     if (gone > 0) changed();
+    // Not all joined: the best so far kept, and (twice at most) again from
+    // the start, the connections left first. (If only a few are left: many,
+    // and the board wants a person's help, as for repair.)
+    check_board();
+    if (wire_n < rs_best_left) {
+        rs_best_left = wire_n;
+        write_board();
+        rs_best_n = doc_n;
+        memcpy(rs_best, 0, doc, 0, doc_n)
+    }
+    if (wire_n > 0 && wire_n <= 6 && !job_stopped && rs_try < restart_tries) {
+        for w in 0..wire_n add_hard(wire_a[w], wire_b[w]);
+        for r in 0..routes_n {
+            a4: int = rp_pin[r * RPTS];
+            b4: int = rp_pin[r * RPTS + ro_np[r] - 1];
+            if (!ro_ok[r] && a4 >= 0 && b4 >= 0) add_hard(a4, b4)
+        }
+        rs_try = rs_try + 1;
+        memcpy(doc, 0, rs_start, 0, rs_start_n);
+        doc_n = rs_start_n;
+        read_board(doc, doc_n);
+        avoid_n = 0;
+        check_board();
+        route_begin(false);
+        if (job_on) return
+    }
+    if (wire_n > rs_best_left) {
+        memcpy(doc, 0, rs_best, 0, rs_best_n);
+        doc_n = rs_best_n;
+        read_board(doc, doc_n);
+        check_board();
+        changed()
+    }
     // What is left, in the end (a route made early may have been pushed
     // aside by a later one and found no way again).
     left: int = 0;
@@ -968,6 +1207,7 @@ end_job() {
 }
 
 stop_job() {
+    job_stopped = true;
     if (rep_on) end_job() else if (job_on) {
         job_n = job_at;
         finish_job();
@@ -1059,7 +1299,8 @@ route_bus(pa: int, pb: int, by_hand: bool) {
             a = wire_b[w];
             b = wire_a[w]
         }
-        if (pin_part[a] == pa && pin_part[b] == pb && n < BUS && (bus_side < 0 || pin_side(b) == bus_side && net_track_width(pin_net[a]) <= rule_track + 0.001)) {
+        if (pin_part[a] == pa && pin_part[b] == pb && n < BUS && (bus_side < 0 || pin_side(b) == bus_side && net_track_width(pin_net[a]) <= rule_track + 0.001 && side_along(b,
+            bus_side) >= bus_lo && side_along(b, bus_side) <= bus_hi)) {
             bus_a[n] = a;
             bus_b[n] = b;
             n = n + 1
@@ -1320,6 +1561,8 @@ hold_begin(x: f32, y: f32): bool {
     by: f32 = to_by(y);
     tol: f32 = px_mm(12.0);
     if (touch_ui) tol = px_mm(18.0);
+    if (in_3d()) return false;
+    if (mode == MODE_CASE) return case_hold(bx, by);
     if (mode == MODE_ARRANGE) {
         p: int = -1;
         q: int = pin_at(bx, by, tol * 0.5);
@@ -1371,6 +1614,10 @@ hold_begin(x: f32, y: f32): bool {
 }
 
 hold_move(x: f32, y: f32) {
+    if (case_drag > 0) {
+        case_move(to_bx(x), to_by(y));
+        return
+    }
     if (drag_part >= 0) {
         p: int = drag_part;
         if (!drag_kept) {
@@ -1441,6 +1688,11 @@ hold_move(x: f32, y: f32) {
 }
 
 hold_end() {
+    if (case_drag > 0) {
+        if (case_kept) changed();
+        case_drag = 0;
+        return
+    }
     if (drag_part >= 0) {
         p: int = drag_part;
         drag_part = -1;
@@ -1470,6 +1722,7 @@ hold_end() {
 }
 
 hold_cancel() {
+    case_drag = 0;
     drag_part = -1;
     gd_drawing = false;
     pt_drag = false
@@ -1481,6 +1734,10 @@ tap(x: f32, y: f32) {
     by: f32 = to_by(y);
     tol: f32 = px_mm(10.0);
     if (touch_ui) tol = px_mm(16.0);
+    if (mode == MODE_CASE) {
+        forget_picks();
+        return
+    }
     // Arranging, a tap picks out a part (its own connections lit).
     if (mode == MODE_ARRANGE) {
         p0: int = part_at(bx, by);
@@ -1539,6 +1796,12 @@ tap(x: f32, y: f32) {
 }
 
 double_tap(x: f32, y: f32) {
+    // (In 3D: apart, or together again.)
+    if (in_3d()) {
+        exploded = !exploded;
+        explode_fit = true;
+        return
+    }
     ease_zoom_at(x, y, 2.2)
 }
 
@@ -1773,7 +2036,12 @@ set_mode(m: int) {
     drag_part = -1;
     guide_on = false;
     forget_picks();
-    if (m == MODE_ROUTE) toast_str("Route: tap a line to route it, or drag it to steer") else toast_str("Arrange: drag parts to move them")
+    if (m == MODE_ROUTE) toast_str("Route: tap a line to route it, or drag it to steer");
+    if (m == MODE_ARRANGE) toast_str("Place: drag parts to move them");
+    if (m == MODE_CASE || view_fitted) fit_board();
+    if (m == MODE_CASE) {
+        if (cs_on) toast_str("Case: step through its layers; drag the screen or battery") else toast_str("No case yet: make one from the board")
+    }
 }
 
 // The layer new routes would rather be on (the picked route's, if one is
@@ -1814,6 +2082,11 @@ show_problem() {
         line_add(" and ");
         line_name(part_ref[prob_b[k]]);
         line_add(" overlap")
+    } else if (kind == PROB_WALL) {
+        line_add("Wood too thin between cuts in the ");
+        line_add(pc_name[prob_a[k]]);
+        line_add(" layer");
+        if (mode == MODE_CASE) case_step(prob_a[k] - cs_view)
     } else if (kind == PROB_EDGE) line_add("Copper too near the edge") else if (kind == PROB_THIN) line_add("Track too thin to make") else if (kind == PROB_KEEPOUT) {
         item_words(prob_a[k]);
         line_add(" runs under ");
@@ -1842,6 +2115,18 @@ item_words(i: int) {
 key_press(ks: int) {
     if (ks == 49) set_mode(MODE_ARRANGE);
     if (ks == 50) set_mode(MODE_ROUTE);
+    if (ks == 51) set_mode(MODE_CASE);
+    if (ks == 109) order_pending = B_MAKE;
+    if (ks == 116 && mode == MODE_CASE) {
+        view3d = !view3d;
+        v3_fit()
+    }
+    if (ks == 101 && mode == MODE_CASE) {
+        exploded = !exploded;
+        explode_fit = true
+    }
+    if (ks == 91) case_step(-1);
+    if (ks == 93) case_step(1);
     if (ks == 114 || ks == 82) rotate_part();
     if (ks == 65535 || ks == 65288) delete_picked();
     if (ks == 122) undo();
@@ -1863,6 +2148,10 @@ key_press(ks: int) {
 
 // Escape: whether it meant something here (rather than quitting).
 esc_key(): bool {
+    if (order_open) {
+        order_open = false;
+        return true
+    }
     if (clear_menu) {
         clear_menu = false;
         return true
@@ -1888,6 +2177,12 @@ esc_key(): bool {
 
 // The page's measures: the phone's own edges, in window pixels.
 page_says(what: int, v: int) {
+    // (6: a link over a button of the making panel was tapped: see
+    // order.l8.)
+    if (what == 6) {
+        link_tapped(v);
+        return
+    }
     if (what == 1) safe_top = v as f32;
     if (what == 2) safe_bottom = v as f32;
     if (what == 3) safe_left = v as f32;
@@ -2093,4 +2388,73 @@ draw_picked_route(r: int) {
             if (k == sel_point) p_ring(x, y, 14.0, 2.0, C_PICK, 0.9)
         }
     }
+}
+
+// ---- the case (see case.l8) ----
+// Make a case for the board: 3.2 mm plywood, a 9 mm rim, the screen near
+// the top, the battery under the lower half.
+make_case_here() {
+    if (cs_on) return;
+    before_change();
+    cs_on = true;
+    cs_ply = 3.2;
+    cs_rim = 9.0;
+    cs_screen_x = 0.0;
+    cs_screen_y = snap(brd_h * 0.5 - SCREEN_H * 0.5 - 2.0, 0.5);
+    cs_batt_x = 0.0;
+    cs_batt_y = snap(-brd_h * 0.25, 0.5);
+    cs_view = L_FRONT;
+    changed();
+    cm_drawn = false;
+    fit_board();
+    toast_str("A case of eight layers: step through them")
+}
+
+// Show the layer d above (or below) the one shown.
+case_step(d: int) {
+    if (!cs_on || layers_n == 0) return;
+    cs_view = clampi(cs_view + d, 0, layers_n - 1);
+    cm_drawn = false
+}
+
+// Dragging the screen (1) or the battery (2), in the layers they lie in.
+case_drag: int = 0;
+
+case_kept: bool = false;
+
+case_dx: f32 = 0.0;
+
+case_dy: f32 = 0.0;
+
+case_hold(bx: f32, by: f32): bool {
+    // (A dock has no screen or battery to move.)
+    if (!cs_on || dock_on) return false;
+    if (cs_view >= L_SHELF && absf(bx - cs_screen_x) < SCREEN_W * 0.5 && absf(by - cs_screen_y) < SCREEN_H * 0.5) {
+        case_drag = 1;
+        case_dx = cs_screen_x - bx;
+        case_dy = cs_screen_y - by
+    } else if (cs_view >= L_BATT1 && cs_view <= L_BATT2 && absf(bx - cs_batt_x) < batt_w() * 0.5 && absf(by - cs_batt_y) < batt_l() * 0.5) {
+        case_drag = 2;
+        case_dx = cs_batt_x - bx;
+        case_dy = cs_batt_y - by
+    } else return false;
+    case_kept = false;
+    true
+}
+
+case_move(bx: f32, by: f32) {
+    if (!case_kept) {
+        before_change();
+        case_kept = true
+    }
+    g: f32 = grid_step();
+    if (case_drag == 1) {
+        cs_screen_x = snap(bx + case_dx, g);
+        cs_screen_y = snap(by + case_dy, g)
+    } else {
+        cs_batt_x = snap(bx + case_dx, g);
+        cs_batt_y = snap(by + case_dy, g)
+    }
+    make_case();
+    cm_drawn = false
 }

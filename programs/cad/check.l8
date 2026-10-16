@@ -303,6 +303,10 @@ const PROB_THIN: int = 4;
 // nets may come in, to reach its pads (see ~/src/handheld/design.md).
 const PROB_KEEPOUT: int = 5;
 
+// Wood of the case thinner than holds together (see case.l8): between two
+// of a layer's holes, or a hole and its edge. (prob_a is the layer.)
+const PROB_WALL: int = 6;
+
 const PROBS: int = 512;
 
 prob_n: int = 0;
@@ -363,6 +367,31 @@ mark_between(i: int, j: int, kind: int) {
 
 // The pins of the part whose courtyard is being checked, and the parts'
 // courtyards on the board.
+// Part p's keepout (see fp_kx0), on the board, into ko_*: whether it has
+// one.
+ko_x0: f32 = 0.0;
+
+ko_y0: f32 = 0.0;
+
+ko_x1: f32 = 0.0;
+
+ko_y1: f32 = 0.0;
+
+part_keepout(p: int): bool {
+    f: int = part_fp[p];
+    if (fp_kx1[f] <= fp_kx0[f]) return false;
+    k: int = part_rot[p];
+    ax: f32 = turn_x(fp_kx0[f], fp_ky0[f], k);
+    ay: f32 = turn_y(fp_kx0[f], fp_ky0[f], k);
+    bx: f32 = turn_x(fp_kx1[f], fp_ky1[f], k);
+    by: f32 = turn_y(fp_kx1[f], fp_ky1[f], k);
+    ko_x0 = part_x[p] + minf(ax, bx);
+    ko_x1 = part_x[p] + maxf(ax, bx);
+    ko_y0 = part_y[p] + minf(ay, by);
+    ko_y1 = part_y[p] + maxf(ay, by);
+    true
+}
+
 court_x0(p: int): f32 {
     f: int = part_fp[p];
     k: int = part_rot[p];
@@ -450,7 +479,11 @@ inner_box(p: int): bool {
         dx: f32 = pin_x[q] - part_x[p];
         dy: f32 = pin_y[q] - part_y[p];
         if (pin_layers[q] != 0 && (absf(dx) > 0.01 || absf(dy) > 0.01)) {
-            if (absf(dx) >= absf(dy)) {
+            // (Which side a pad is on: along its long way, if it has one,
+            // as a row's pads are; else the way it is farther out.)
+            sideways: bool = absf(dx) >= absf(dy);
+            if (absf(pin_hw[q] - pin_hh[q]) > 0.05) sideways = pin_hw[q] > pin_hh[q];
+            if (sideways) {
                 if (dx < 0.0) left = true else right = true;
                 hx = minf(hx, absf(dx) - pin_hw[q])
             } else {
@@ -549,6 +582,16 @@ check_board() {
                 i, p)
         }
     }
+    // Nothing at all, either side, in a part's keepout (an antenna's).
+    for p in 0..parts_n {
+        if (part_keepout(p)) {
+            for i in pins_n..items_n {
+                if (it_x1[i] > ko_x0 && it_x0[i] < ko_x1 && it_y1[i] > ko_y0 && it_y0[i] < ko_y1) add_prob(clampf((it_x0[i] + it_x1[i]) * 0.5,
+                    ko_x0, ko_x1), clampf((it_y0[i] + it_y1[i]) * 0.5, ko_y0, ko_y1),
+                    PROB_KEEPOUT, i, p)
+            }
+        }
+    }
     // Nothing on the top between a part's pads but a strap into its middle
     // pad (and that pad's own vias, its pour's).
     for p in 0..parts_n {
@@ -584,11 +627,12 @@ check_board() {
             }
         }
     }
-    // Copper near the board's edge.
+    // Copper near the board's edge (its tongues counted).
+    find_tongues();
     hx: f32 = brd_w * 0.5 - 0.3;
     hy: f32 = brd_h * 0.5 - 0.3;
     for i in pins_n..items_n {
-        if (it_x0[i] < -hx || it_x1[i] > hx || it_y0[i] < -hy || it_y1[i] > hy) add_prob(clampf((it_x0[i] + it_x1[i]) * 0.5,
+        if (!inside_board(it_x0[i], it_y0[i], it_x1[i], it_y1[i])) add_prob(clampf((it_x0[i] + it_x1[i]) * 0.5,
             -hx, hx), clampf((it_y0[i] + it_y1[i]) * 0.5, -hy, hy), PROB_EDGE, i,
             i)
     }
@@ -608,7 +652,9 @@ check_board() {
         }
     }
     join_pours();
-    make_ratsnest()
+    make_ratsnest();
+    make_case();
+    check_case()
 }
 
 // ---- the ratsnest ----
@@ -647,6 +693,10 @@ rn_take(k: int, n: int) {
                     // joined out beyond it, each to its own cap, not round
                     // it to each other: as if three times as far.)
                     if (pin_part[rn_pin[o]] == pin_part[rn_pin[j]] && d > 0.36 && ring_part(pin_part[rn_pin[o]])) d = d * 9.0;
+                    // (Nor is a cap joined far to a chip's pin when it can be
+                    // to another cap: the chip's pins are crowded, its caps
+                    // out in the open. As if twice as far, past 6 mm.)
+                    if (pin_part[rn_pin[o]] != pin_part[rn_pin[j]] && d > 36.0 && net_track_width(pin_net[rn_pin[o]]) > rule_track + 0.001 && (ring_part(pin_part[rn_pin[o]]) || ring_part(pin_part[rn_pin[j]]))) d = d * 4.0;
                     if (d < rn_best[o]) {
                         rn_best[o] = d;
                         rn_from[o] = j

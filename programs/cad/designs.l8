@@ -1,0 +1,320 @@
+tag cad;
+
+use_tag std, gl, x11, skate;
+
+// The designs open together: the handheld and its dock, each its own board
+// file, one in the editor at a time, the title's menu going from one to
+// the other (each written back to its file as it is left, and after each
+// change). And the set: the dock in 3D, with a handheld lying in each of
+// its pockets, as the whole thing is to be seen.
+const DESIGNS: int = 4;
+
+design_path: []str = new str[DESIGNS]("");
+
+// Each one's name (from its board line), and whether it is a dock.
+design_name: []i8 = new i8[DESIGNS * 32](0i8);
+
+design_name_n: []int = new int[DESIGNS](0);
+
+design_dock: []bool = new bool[DESIGNS](false);
+
+design_n: int = 0;
+
+design_on: int = 0;
+
+// The board's file (the one in the editor).
+board_path: str = "programs/cad/handheld.pcb";
+
+read_file(path: str): bool {
+    fd: int = open(path, 0, 0);
+    if (fd < 0) return false;
+    doc_n = 0;
+    more: bool = true;
+    while (more && doc_n < len(doc)) {
+        r: int = read(fd, doc, doc_n, len(doc) - doc_n);
+        if (r <= 0) more = false else doc_n = doc_n + r
+    }
+    close(fd);
+    true
+}
+
+// The board, written back to its file (on a page, the page keeps it from
+// there).
+save_board() raises IoError {
+    write_board();
+    fd: int = open(board_path, 577, 420);
+    if (fd < 0) return;
+    write_bytes_n(fd, doc, doc_n);
+    close(fd)
+}
+
+// A design to have open: its name and kind, read from its file now.
+add_design(path: str@immortal) {
+    if (design_n >= DESIGNS || !read_file(path)) return;
+    k: int = design_n;
+    design_n = design_n + 1;
+    design_path[k] = path;
+    design_name_n[k] = 0;
+    design_dock[k] = false;
+    i: int = 0;
+    while (i < doc_n) {
+        e: int = i;
+        while (e < doc_n && doc[e] != '\n') e = e + 1;
+        split_words(doc, i, e);
+        if (word_is(doc, 0, "dock")) design_dock[k] = true;
+        if (word_is(doc, 0, "board") && words_n >= 5) {
+            n: int = mini(word_to[words_n - 1] - word_from[4], 31);
+            for c in 0..n design_name[k * 32 + c] = doc[word_from[4] + c];
+            design_name_n[k] = n
+        }
+        i = e + 1
+    }
+}
+
+// The design open (its file read into the editor), as at the start: no
+// history, nothing picked, all of it in view.
+open_design(k: int) {
+    design_on = k;
+    board_path = design_path[k];
+    if (!read_file(board_path)) return;
+    read_board(doc, doc_n);
+    check_board();
+    und_n = 0;
+    und_pos = 0;
+    forget_picks();
+    drag_part = -1;
+    guide_on = false;
+    order_open = false;
+    v3_dirty = true;
+    cm_drawn = false;
+    pour_drawn[0] = false;
+    pour_drawn[1] = false
+}
+
+// Which design the menu asked for (or STAGE, the set), done between
+// frames (it writes files).
+const STAGE: int = 99;
+
+design_pending: int = -1;
+
+// Going to design k (or the set): the one open written back first, any
+// routing stopped.
+go_design(k: int) raises IoError {
+    if (job_on) stop_job();
+    save_board();
+    if (k == STAGE) {
+        stage_open();
+        return
+    }
+    stage_on = false;
+    if (k < 0 || k >= design_n) return;
+    open_design(k);
+    view3d = false;
+    exploded = false;
+    explode_t = 0.0;
+    if (mode == MODE_CASE && !cs_on) mode = MODE_ARRANGE;
+    fit_board()
+}
+
+// ---- the set ----
+stage_on: bool = false;
+
+// Whether the dock's lid is off (slid out to the front), and how far.
+stage_lid_off: bool = false;
+
+stage_lid_t: f32 = 0.0;
+
+// Whether there is a set to show: a dock, and a design with a case for it.
+can_stage(): bool {
+    stage_dock() >= 0 && stage_item() >= 0
+}
+
+stage_dock(): int {
+    for k in 0..design_n {
+        if (design_dock[k]) return k
+    }
+    -1
+}
+
+stage_item(): int {
+    for k in 0..design_n {
+        if (!design_dock[k]) return k
+    }
+    -1
+}
+
+// The set: the handheld opened long enough to take what it looks like (its
+// case's outline, its front with its holes, its screen and its buttons'
+// caps), then the dock, in 3D, the lid on.
+stage_open() {
+    h: int = stage_item();
+    d: int = stage_dock();
+    if (h < 0 || d < 0) return;
+    open_design(h);
+    stage_take();
+    open_design(d);
+    stage_on = true;
+    stage_lid_off = false;
+    stage_lid_t = 0.0;
+    mode = MODE_CASE;
+    view3d = true;
+    exploded = false;
+    explode_t = 0.0;
+    v3_yaw = 0.35;
+    v3_pitch = 0.75;
+    v3_fit()
+}
+
+// ---- the handheld, as taken for the set ----
+// All about its case's middle: its outline (a box with round corners), its
+// height, its front's mask (st_mask, st_nx by st_ny over st_x0 .. st_x1,
+// st_y0 .. st_y1), its screen's window, its caps and its bolts' heads.
+st_ok: bool = false;
+
+st_w: f32 = 0.0;
+
+st_h: f32 = 0.0;
+
+st_r: f32 = 0.0;
+
+st_t: f32 = 0.0;
+
+st_x0: f32 = 0.0;
+
+st_y0: f32 = 0.0;
+
+st_x1: f32 = 0.0;
+
+st_y1: f32 = 0.0;
+
+st_nx: int = 1;
+
+st_ny: int = 1;
+
+st_mask: []i8 = new i8[262144](0i8);
+
+// Whether the mask is in its texture yet.
+st_uploaded: bool = false;
+
+st_scr_x: f32 = 0.0;
+
+st_scr_y: f32 = 0.0;
+
+st_va_x: f32 = 0.0;
+
+st_va_y: f32 = 0.0;
+
+const ST_CAPS: int = 16;
+
+st_cap_x: []f32 = new f32[ST_CAPS](0.0);
+
+st_cap_y: []f32 = new f32[ST_CAPS](0.0);
+
+st_cap_r: []f32 = new f32[ST_CAPS](0.0);
+
+st_caps: int = 0;
+
+st_bolt_x: []f32 = new f32[8](0.0);
+
+st_bolt_y: []f32 = new f32[8](0.0);
+
+st_bolts: int = 0;
+
+stage_take() {
+    st_ok = false;
+    if (!cs_on || dock_on || layers_n <= L_FRONT) return;
+    cx: f32 = (case_x0() + case_x1()) * 0.5;
+    cy: f32 = (case_y0() + case_y1()) * 0.5;
+    st_w = case_w();
+    st_h = case_h();
+    st_r = case_r();
+    st_t = stack_t();
+    st_x0 = case_x0() - 0.5 - cx;
+    st_y0 = case_y0() - 0.5 - cy;
+    st_x1 = case_x1() + 0.5 - cx;
+    st_y1 = case_y1() + 0.5 - cy;
+    g: f32 = 0.25;
+    st_nx = ((st_x1 - st_x0) / g) as int + 1;
+    st_ny = ((st_y1 - st_y0) / g) as int + 1;
+    while (st_nx * st_ny > len(st_mask)) {
+        st_nx = st_nx * 3 / 4;
+        st_ny = st_ny * 3 / 4
+    }
+    gx: f32 = (st_x1 - st_x0) / st_nx as f32;
+    gy: f32 = (st_y1 - st_y0) / st_ny as f32;
+    f: int = pc_first[L_FRONT];
+    for j in 0..st_ny {
+        y: f32 = st_y0 + (j as f32 + 0.5) * gy + cy;
+        for i in 0..st_nx {
+            x: f32 = st_x0 + (i as f32 + 0.5) * gx + cx;
+            on: bool = in_shape(f, x, y);
+            if (on) {
+                for s in f + 1..f + pc_n[L_FRONT] {
+                    if (on && in_shape(s, x, y)) on = false
+                }
+            }
+            if (on) st_mask[j * st_nx + i] = -1i8 else st_mask[j * st_nx + i] = 0i8
+        }
+    }
+    st_scr_x = cs_screen_x - cx;
+    st_scr_y = cs_screen_y - cy;
+    st_va_x = cs_screen_x + SCREEN_VA_DX - cx;
+    st_va_y = cs_screen_y + SCREEN_VA_DY - cy;
+    // (The caps: the discs in the front layer.)
+    st_caps = 0;
+    for p in layers_n..pieces_count {
+        if (absf(pc_z[p] - layer_z(L_FRONT)) < 0.01 && st_caps < ST_CAPS) {
+            st_cap_x[st_caps] = pc_x[p] + sh_x[pc_first[p]] - cx;
+            st_cap_y[st_caps] = pc_y[p] + sh_y[pc_first[p]] - cy;
+            st_cap_r[st_caps] = sh_hw[pc_first[p]];
+            st_caps = st_caps + 1
+        }
+    }
+    st_bolts = mini(bolts_n(), 8);
+    for b in 0..st_bolts {
+        st_bolt_x[b] = bolt_x(b) - cx;
+        st_bolt_y[b] = bolt_y(b) - cy
+    }
+    st_uploaded = false;
+    st_ok = true
+}
+
+// A frame's worth of the lid going on or off. Whether it moved.
+step_stage(dt: f32): bool {
+    t: f32 = 0.0;
+    if (stage_lid_off) t = 1.0;
+    if (absf(stage_lid_t - t) < 0.001) {
+        stage_lid_t = t;
+        return false
+    }
+    stage_lid_t = lerpf(stage_lid_t, t, 1.0 - expf(-dt * 3.0));
+    // (Backing off to keep the lid in view, where it goes.)
+    v3_fit();
+    true
+}
+
+// Where the lid is, now: slid out to the front, then laid down on the
+// table (each half the way): in front of the box on a tall screen, beside
+// it on a wide one.
+stage_wide(): bool {
+    scr_w > scr_h
+}
+
+stage_lid_dx(): f32 {
+    if (!stage_on || !stage_wide()) return 0.0;
+    clampf(stage_lid_t * 2.0 - 1.0, 0.0, 1.0) * (dk_ow() + 15.0)
+}
+
+stage_lid_dy(): f32 {
+    if (!stage_on) return 0.0;
+    t1: f32 = clampf(stage_lid_t * 2.0, 0.0, 1.0);
+    t2: f32 = clampf(stage_lid_t * 2.0 - 1.0, 0.0, 1.0);
+    if (stage_wide()) return -(t1 - t2) * (dk_oh() + 12.0);
+    -t1 * (dk_oh() + 12.0)
+}
+
+stage_lid_dz(): f32 {
+    if (!stage_on) return 0.0;
+    t2: f32 = clampf(stage_lid_t * 2.0 - 1.0, 0.0, 1.0);
+    t2 * (layer_z(D_BASE) - cs_ply - layer_z(dk_channel()))
+}
