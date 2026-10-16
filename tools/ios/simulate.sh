@@ -37,7 +37,7 @@ shot() {
   xcrun simctl io "$dev" screenshot "$out/$1.png" >/dev/null 2>&1 && echo "shot $1"
 }
 # Its log, and its console (what it prints), from before it starts.
-xcrun simctl spawn "$dev" log stream --level debug --predicate 'process == "Tempo"' > "$out/log.txt" 2>&1 &
+xcrun simctl spawn "$dev" log stream --predicate 'process == "Tempo" AND messageType >= 16' > "$out/log.txt" 2>&1 &
 logger=$!
 SIMCTL_CHILD_L8_DEMO=1 xcrun simctl launch --console-pty "$dev" "$id" > "$out/console.txt" 2>&1 &
 console=$!
