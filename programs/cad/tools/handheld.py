@@ -149,8 +149,10 @@ for ref, name, (dx, dy) in [("SW2", "UP", (0, 1)), ("SW3", "DOWN", (0, -1)),
     x, y = dpad(dx, dy); part(ref, "dome6", x, y, 0, name)
 part("SW6", "dome6", 28.0, -24.0, 0, "A")
 part("SW7", "dome6", 17.0, -31.0, 0, "B")
-part("SW8", "dome6", -9.5, -37.0, 0, "BACK")
-part("SW9", "dome6", 9.5, -37.0, 0, "HOME")
+# (Back and Home low and either side of the middle, 13 mm from B: not hit
+# by a thumb on B or the D-pad.)
+part("SW8", "dome6", -6.0, -38.5, 0, "BACK")
+part("SW9", "dome6", 6.0, -38.5, 0, "HOME")
 
 N = []
 def net(name, w, *pins): N.append((name, w, list(pins)))

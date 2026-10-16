@@ -267,7 +267,8 @@ is thin all round.
   quad comparator (LM339) weighs the battery, halved by its own divider,
   against four steps of a 2.5 V reference (LM4040): 3.6, 3.75, 3.9 and
   4.05 V, as the battery reads while charging. Full is the charger's own
-  STAT2.
+  STAT2. Engraved under them: a bar under each of the four, longer step
+  by step, and a ring round full.
 
 Route all (which pours ground on both sides first) joins all 61 of
 its nets with no rule broken, in a few seconds; the sketch gets 30
@@ -278,7 +279,23 @@ Its case (`case 3.2 2.5 4.6 11 0.5 17 90`, `qi 0 -22`) is 82 x 90.5 mm and
 four M2.5 x 20 bolts through the board's corners; the battery is
 Adafruit's 1200 mAh one (34 x 62 x 5 mm), on its side under the top half,
 and the wireless receiver beside it under the bottom half. The side
-switch's knob is 0.3 mm inside the case's outline, in the rim's slot.
+switch's knob is 0.3 mm inside the case's outline, in a slot of the rim
+2.5 mm wider than the switch each side, for a fingertip.
+
+Its buttons: the D-pad is one cross (its arms 20 mm across, 7 wide) over
+its four domes, rocking on a stem in its middle; A and B have 8 mm caps
+standing 3.2 mm out of the front; Home and Back, low either side of the
+middle and 13 mm from B, have caps flush with the front, so a thumb
+passing over them does not press them. Each cap rests on its dome
+(pressed, it goes straight into it); held upside down a button can rise
+1.3 mm before its flange meets the front, as the layers are all 3.2 mm
+(a dot of felt on its stem's foot quiets it). The window onto the screen
+is a millimetre wider than its picture each side, filled with 3 mm clear
+acrylic, cut as its own piece and glued in flush. The back is laid face
+down, so what is engraved on it is outside: a ring where the wireless
+receiver's coil is, to set it on a charging pad (and the cut file has the
+back mirrored, so that turned over it fits). Its edges are square as cut:
+sanding them round is worth doing.
 
 ## The dock
 
@@ -290,7 +307,12 @@ from the bottom:
 
 - a base, held on by six M2.5 x 6 bolts (their heads under it, between
   four wooden feet; their nuts in hexes in the first cavity), so it comes
-  off to reach the electronics;
+  off to reach the electronics; slots in it under each transmitter let
+  air in from under the box (its program should also watch the
+  ESP32-S3's own temperature, and the current, and stop a transmitter
+  that draws what no handheld would: a coin on its pocket's floor);
+- holes for two 3 mm dowels through the glued layers, at opposite ends
+  of the side rims, to line them up as they are glued;
 - two cavities, for the dock's board, the four Qi transmitters (Adafruit
   2162: 5 V in, 5 W at most, each its board and a 53 mm coil) and the
   transmitters' wires' ways; the coils stand on the first cavity, up
@@ -302,9 +324,12 @@ from the bottom:
   rest go only round the outside, and each pocket has a finger's notch
   at its outer end, 20 mm across and 5 deep, to lift the handheld out
   (a loop of ribbon glued to the pocket's floor, its end up at the
-  notch, lifts it more easily still). The walls stand a layer higher
-  than a handheld with its caps out as far as they go, so the lid slides
-  over them;
+  notch, lifts it more easily still). On each pocket's floor, at the
+  end the handheld's screen goes, the screen's outline is engraved: the
+  way round it charges, its receiver over the coil. The walls stand a
+  layer higher than a handheld with its caps out as far as they go, so
+  the lid slides over them, and the top one has a notch in the middle of
+  the front, under the lid's front, for a finger to slide it out;
 - right of the pockets, past a wall all the way up, the stowage: 48 mm
   across, the pockets' length and depth (28.8 mm under the lid), for the
   charger and its cable: Qualtek's QFWC-18-12-USCR (in the cart: 18 W
@@ -381,10 +406,14 @@ holes, or a hole and the edge), and says which layer.
 
 The cut file is an SVG of every piece, as Ponoko asks for it:
 millimetres, cuts in blue hairlines, made bigger or smaller by half the
-laser's kerf (0.2 mm), and a few engraved dots on each layer saying its
-place in the stack. The pieces go in rows on sheets of Ponoko's biggest
-size (790 x 384 mm): the handheld's fit one, the dock's take six, and
-then the cut file is a zip of a file a sheet.
+laser's kerf (0.2 mm), engravings in red (not grown), and a few
+engraved dots on each layer saying its place in the stack. The pieces go
+in rows on sheets of Ponoko's biggest size (790 x 384 mm), each material
+on its own: the handheld's plywood fits one and its acrylic window another,
+the dock's take six. More than one sheet, and the cut file is a zip of a
+file a sheet, each named for its material (`-ply-1.svg`,
+`-acrylic-1.svg`). A piece laid face down (the handheld's back, engraved
+outside) is drawn mirrored.
 
 ## Making it
 
