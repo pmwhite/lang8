@@ -1,0 +1,600 @@
+tag tempo;
+
+use_tag std, gl, skate, ios;
+
+// Tempo as an iPhone app: the same program as main.l8's, natively, built
+// with `l8 arm64 --target ios` (see tools/ios/). UIKit runs it: an app
+// delegate makes a window whose view is an OpenGL ES layer, a display link
+// draws a frame when one is due, and the view takes touches and, for the
+// field Tempo draws, the keyboard. CoreLocation watches where the phone is
+// while Tempo wants it (recording, or ready to), on with the screen locked
+// too: each fix is passed on as main.l8's page passes them, only as how far
+// it is east and north of the one before, and how much higher; that fix is
+// the only position held, and it is dropped when the watching stops.
+//
+// The log is kept in the app's Documents, with the recording under way.
+// L8_DEMO=1 in the environment records a short run by itself, for the
+// simulator in CI (see tools/ios/simulate.sh).
+import "../../stdlib/print.l8";
+
+import "../gl/core.l8";
+
+import "../ios/objc.l8";
+
+import "../skate/math.l8";
+
+import "../skate/font.l8";
+
+import "paint.l8";
+
+import "text.l8";
+
+import "log.l8";
+
+import "record.l8";
+
+import "ui.l8";
+
+import "touch.l8";
+
+import "app.l8";
+
+import "pages.l8";
+
+import "frame.l8";
+
+extern getenv(name: str): ?*i8;
+
+extern glGetRenderbufferParameteriv(target: int, pname: int, out: *i32): int;
+
+extern time(t: int): int;
+
+extern localtime_r(t: *int, out: *Tm): int;
+
+// C's struct tm: its offset from UTC (seconds) is after nine ints.
+type Tm = {
+    sec: i32;
+    min: i32;
+    hour: i32;
+    mday: i32;
+    mon: i32;
+    year: i32;
+    wday: i32;
+    yday: i32;
+    isdst: i32;
+    pad: i32;
+    gmtoff: int;
+    zone: int
+}
+
+// ---- what UIKit made ----
+ios_app: int = 0;
+
+ios_window: int = 0;
+
+ios_view: int = 0;
+
+ios_ctx: int = 0;
+
+ios_layer: int = 0;
+
+ios_locations: int = 0;
+
+// The framebuffer and its renderbuffer (the layer's pixels), and its size.
+ios_fb: []u32 = new u32[1](0u32);
+
+ios_rb: []u32 = new u32[1](0u32);
+
+ios_w: int = 0;
+
+ios_size: []i32 = new i32[2](0i32);
+
+ios_h: int = 0;
+
+// Points to pixels.
+ios_scale: f64 = 2.0f64;
+
+ios_painter: ?*Painter = null;
+
+// Where results of four doubles come back (see msg_hfa): kept, as callbacks
+// run outside any region and what they make is never freed.
+ios_hfa: []f64 = new f64[4](0.0f64);
+
+ios_hfa2: []f64 = new f64[4](0.0f64);
+
+// The clock, for frames; frames drawn with nothing moving (after a few,
+// none are until something does); whether the keyboard is up.
+ios_start_ns: int = 0;
+
+ios_prev_ns: int = 0;
+
+ios_still: int = 0;
+
+ios_keyboard: bool = false;
+
+// The fix before (degrees, meters), and whether there is one: the one
+// position held.
+ios_have_prev: bool = false;
+
+ios_prev_lat: f64 = 0.0f64;
+
+ios_prev_lon: f64 = 0.0f64;
+
+ios_have_alt: bool = false;
+
+ios_prev_alt: f64 = 0.0f64;
+
+// Where the phone is is being watched.
+ios_watching: bool = false;
+
+// The demo (L8_DEMO): when it started, on the clock (0: no demo).
+ios_demo_t: f32 = 0.0;
+
+ios_demo_step: int = 0;
+
+// ---- the platform, for frame.l8 ----
+platform_gps(on: bool) {
+    ios_watching = on;
+    lm: int = ios_locations;
+    if (lm == 0) return;
+    if (on) {
+        msg(lm, sel("requestWhenInUseAuthorization"));
+        msg1(lm, sel("setAllowsBackgroundLocationUpdates:"), 1);
+        msg1(lm, sel("setShowsBackgroundLocationIndicator:"), 1);
+        msg(lm, sel("startUpdatingLocation"))
+    } else {
+        msg(lm, sel("stopUpdatingLocation"));
+        msg1(lm, sel("setAllowsBackgroundLocationUpdates:"), 0);
+        ios_have_prev = false;
+        ios_have_alt = false
+    }
+}
+
+platform_gps_retry() {
+    if (ios_watching) {
+        platform_gps(false);
+        platform_gps(true)
+    }
+}
+
+// The screen stays on while recording; the recording is dark, so the
+// status bar is light on it.
+platform_wake(on: bool) {
+    msg1(ios_app, sel("setIdleTimerDisabled:"), if (on) 1 else 0);
+    ios_style()
+}
+
+platform_theme(pick: int, _dark: bool) raises IoError {
+    line_clear();
+    line_int(pick);
+    ios_save_setting();
+    ios_style()
+}
+
+platform_blur() {
+    if (ios_keyboard) {
+        ios_keyboard = false;
+        msg(ios_view, sel("resignFirstResponder"))
+    }
+}
+
+// The window's light or dark (for the status bar): Tempo's.
+ios_style() {
+    dark: bool = theme_target() > 0.5 || rec_on;
+    if (ios_window != 0) msg1(ios_window, sel("setOverrideUserInterfaceStyle:"), if (dark) 2 else 1)
+}
+
+// ---- files ----
+// A file in the app's Documents, as a path.
+ios_document(name: str): str@new {
+    line_clear();
+    for c in nsstring_bytes(NSHomeDirectory()) line_byte(c as int);
+    line_add("/Documents/");
+    line_add(name);
+    cstr(text_of_line())
+}
+
+text_of_line(): []i8@new {
+    out: []i8 = new i8[line_n](0i8);
+    for i in 0..line_n out[i] = line[i];
+    out
+}
+
+settings_path: str = "";
+
+// The line, as the settings file (the theme picked).
+ios_save_setting() raises IoError {
+    lt_n = 0;
+    lt_line();
+    write_file(settings_path)
+}
+
+ios_load_settings() {
+    n: int = read_file(settings_path);
+    if (n > 0 && lg_t[0] as int >= 48 && lg_t[0] as int <= 50) theme_pick = lg_t[0] as int - 48
+}
+
+// ---- the clock ----
+// Now (from 1970) and how far ahead of UTC the phone's clock is.
+ios_set_clock() {
+    t: int = time(0);
+    tm: Tm = Tm {
+        sec: 0i32,
+        min: 0i32,
+        hour: 0i32,
+        mday: 0i32,
+        mon: 0i32,
+        year: 0i32,
+        wday: 0i32,
+        yday: 0i32,
+        isdst: 0i32,
+        pad: 0i32,
+        gmtoff: 0,
+        zone: 0
+    };
+    localtime_r(&t, &tm);
+    clock_set(clock_ns(0) / 1000000, tm.gmtoff / 60)
+}
+
+// ---- a frame ----
+// The app's state on to now, and what the platform is told, and the files.
+ios_step() raises IoError {
+    now: int = clock_ns(1);
+    dt: f32 = clampf((now - ios_prev_ns) as f32 / 1000000000.0, 0.0, 0.05);
+    ios_prev_ns = now;
+    tempo_step(dt, (now - ios_start_ns) as f32 / 1000000000.0);
+    ios_demo();
+    tempo_after()
+}
+
+// The display link's tick: a frame, drawn if one is due.
+ios_tick(_self: int, _cmd: int, _link: int): int {
+    try {
+        ios_step();
+        if (busy || g_finger >= 0) ios_still = 0;
+        // The keyboard is up while Tempo's field is written in.
+        if (field_on >= 0 && !ios_keyboard) {
+            ios_keyboard = true;
+            msg(ios_view, sel("becomeFirstResponder"))
+        }
+        if (field_on < 0 && ios_keyboard) platform_blur();
+        painter: ?*Painter = ios_painter;
+        if (ios_still < 3 && painter != null) {
+            ios_bind();
+            if (tempo_draw(painter, ios_w, ios_h)) ios_still = 0 else ios_still = ios_still + 1;
+            glBindRenderbuffer(36161, ios_rb[0]);
+            msg1(ios_ctx, sel("presentRenderbuffer:"), 36161)
+        }
+    } with IoError _e -> { }
+    0
+}
+
+ios_bind() {
+    msg1(cls("EAGLContext"), sel("setCurrentContext:"), ios_ctx);
+    glBindFramebuffer(36160, ios_fb[0])
+}
+
+// The layer's pixels, as big as the view now is.
+ios_storage() {
+    if (ios_ctx == 0) return;
+    ios_bind();
+    glBindRenderbuffer(36161, ios_rb[0]);
+    msg2(ios_ctx, sel("renderbufferStorage:fromDrawable:"), 36161, ios_layer);
+    glFramebufferRenderbuffer(36160, 36064, 36161, ios_rb[0]);
+    glGetRenderbufferParameteriv(36161, 36162, &ios_size[0]);
+    glGetRenderbufferParameteriv(36161, 36163, &ios_size[1]);
+    ios_w = ios_size[0] as int;
+    ios_h = ios_size[1] as int;
+    ios_still = 0
+}
+
+// The view's size, edges and lightness, as they now are.
+ios_measure() {
+    l8_msg_hfa(ios_hfa2, ios_view, sel("safeAreaInsets"), 0, 0, 0);
+    insets: []f64 = ios_hfa2;
+    safe_top = insets[0] as f32;
+    safe_left = insets[1] as f32;
+    safe_bottom = insets[2] as f32;
+    safe_right = insets[3] as f32;
+    p_ui = ios_scale as f32;
+    traits: int = msg(ios_view, sel("traitCollection"));
+    phone_dark = msg(traits, sel("userInterfaceStyle")) == 2;
+    ios_still = 0
+}
+
+// ---- the view ----
+// Its layer is CAEAGLLayer's (a class method).
+view_layer_class(_self: int, _cmd: int): int {
+    cls("CAEAGLLayer")
+}
+
+view_layout(_self: int, _cmd: int): int {
+    ios_storage();
+    ios_measure();
+    0
+}
+
+view_traits(_self: int, _cmd: int, _previous: int): int {
+    ios_measure();
+    0
+}
+
+// Touches: one finger is followed (see touch.l8), in points, which are
+// Tempo's pixels.
+ios_touch_at(touches: int): []f64 {
+    touch: int = msg(touches, sel("anyObject"));
+    l8_msg_hfa(ios_hfa, touch, sel("locationInView:"), ios_view, 0, 0);
+    ios_hfa
+}
+
+view_began(
+    _self: int,
+    _cmd: int,
+    touches: int,
+    _event: int
+): int {
+    p: []f64 = ios_touch_at(touches);
+    finger_down(1, p[0] as f32, p[1] as f32);
+    ios_still = 0;
+    0
+}
+
+view_moved(
+    _self: int,
+    _cmd: int,
+    touches: int,
+    _event: int
+): int {
+    p: []f64 = ios_touch_at(touches);
+    finger_move(1 << 8, p[0] as f32, p[1] as f32);
+    ios_still = 0;
+    0
+}
+
+view_ended(
+    _self: int,
+    _cmd: int,
+    touches: int,
+    _event: int
+): int {
+    p: []f64 = ios_touch_at(touches);
+    finger_up(1, p[0] as f32, p[1] as f32);
+    ios_still = 0;
+    0
+}
+
+// The keyboard (UIKeyInput): what is typed goes to Tempo as keys.
+view_yes(_self: int, _cmd: int): int {
+    1
+}
+
+view_insert(_self: int, _cmd: int, text: int): int {
+    for c in nsstring_bytes(text) {
+        k: int = c as int & 255;
+        if (k == 10) key_press(65293) else if (k >= 32 && k < 127) key_press(k)
+    }
+    ios_still = 0;
+    0
+}
+
+view_delete(_self: int, _cmd: int): int {
+    key_press(65288);
+    ios_still = 0;
+    0
+}
+
+// UITextInputTraits: words begin capitalized, no autocorrection, and the
+// return key says Done.
+view_capitalize(_self: int, _cmd: int): int {
+    1
+}
+
+view_no_correction(_self: int, _cmd: int): int {
+    1
+}
+
+view_done_key(_self: int, _cmd: int): int {
+    9
+}
+
+// ---- where the phone is ----
+// Each fix: as a step from the one before (and how much higher), then on
+// through Tempo as the page's fixes go (see app.l8's read_inbox).
+loc_update(
+    _self: int,
+    _cmd: int,
+    _manager: int,
+    locations: int
+): int {
+    n: int = msg(locations, sel("count"));
+    for i in 0..n ios_fix(msg1(locations, sel("objectAtIndex:"), i));
+    try {
+        ios_step()
+    } with IoError _e -> { }
+    0
+}
+
+ios_fix(location: int) {
+    acc: f64 = msg_f(location, sel("horizontalAccuracy"));
+    if (acc < 0.0f64) return;
+    l8_msg_hfa(ios_hfa2, location, sel("coordinate"), 0, 0, 0);
+    c: []f64 = ios_hfa2;
+    lat: f64 = c[0];
+    lon: f64 = c[1];
+    dx: f64 = 0.0f64;
+    dy: f64 = 0.0f64;
+    if (ios_have_prev) {
+        rad: f64 = 0.017453292519943295f64;
+        earth: f64 = 6371008.8f64;
+        dy = (lat - ios_prev_lat) * rad * earth;
+        dx = (lon - ios_prev_lon) * rad * earth * cos64((lat + ios_prev_lat) * 0.5f64 * rad)
+    }
+    ios_have_prev = true;
+    ios_prev_lat = lat;
+    ios_prev_lon = lon;
+    dz: f64 = 0.0f64;
+    zacc: f64 = msg_f(location, sel("verticalAccuracy"));
+    if (zacc >= 0.0f64) {
+        alt: f64 = msg_f(location, sel("altitude"));
+        if (ios_have_alt) dz = alt - ios_prev_alt;
+        ios_have_alt = true;
+        ios_prev_alt = alt
+    }
+    spd: f64 = msg_f(location, sel("speed"));
+    at: f64 = msg_f(msg(location, sel("timestamp")), sel("timeIntervalSince1970"));
+    v: f32 = -1.0;
+    if (spd >= 0.0f64) v = spd as f32;
+    za: f32 = -1.0;
+    if (zacc >= 0.0f64) za = zacc as f32;
+    fix((at * 1000.0f64) as int, dx as f32, dy as f32, acc as f32, v, dz as f32, za)
+}
+
+// cos for degrees' worth of radians, in doubles (latitudes: small arguments).
+cos64(x: f64): f64 {
+    x2: f64 = x * x;
+    1.0f64 - x2 / 2.0f64 + x2 * x2 / 24.0f64 - x2 * x2 * x2 / 720.0f64 + x2 * x2 * x2 * x2 / 40320.0f64
+}
+
+// Whether the phone lets Tempo know where it is.
+loc_authorization(_self: int, _cmd: int, manager: int): int {
+    status: int = msg(manager, sel("authorizationStatus"));
+    if (status == 1 || status == 2) gps_state = GPS_DENIED;
+    if ((status == 3 || status == 4) && ios_watching) {
+        if (gps_state == GPS_DENIED || gps_state == GPS_OFF) gps_state = GPS_LOOKING;
+        msg(manager, sel("startUpdatingLocation"))
+    }
+    ios_still = 0;
+    0
+}
+
+loc_failed(
+    _self: int,
+    _cmd: int,
+    _manager: int,
+    error: int
+): int {
+    if (msg(error, sel("code")) == 1) gps_state = GPS_DENIED;
+    ios_still = 0;
+    0
+}
+
+// ---- the app ----
+app_launched(
+    self: int,
+    _cmd: int,
+    application: int,
+    _options: int
+): int {
+    ios_app = application;
+    screen: int = msg(cls("UIScreen"), sel("mainScreen"));
+    l8_msg_hfa(ios_hfa2, screen, sel("bounds"), 0, 0, 0);
+    frame: []f64 = ios_hfa2;
+    ios_scale = msg_f(screen, sel("nativeScale"));
+    ios_window = msg_rect(msg(cls("UIWindow"), sel("alloc")), sel("initWithFrame:"),
+        frame[0], frame[1], frame[2], frame[3]);
+    controller: int = make("UIViewController");
+    ios_view = msg_rect(msg(cls("L8TempoView"), sel("alloc")), sel("initWithFrame:"),
+        frame[0], frame[1], frame[2], frame[3]);
+    msg_set_f(ios_view, sel("setContentScaleFactor:"), ios_scale);
+    msg1(ios_view, sel("setMultipleTouchEnabled:"), 0);
+    msg1(controller, sel("setView:"), ios_view);
+    msg1(ios_window, sel("setRootViewController:"), controller);
+    msg(ios_window, sel("makeKeyAndVisible"));
+    ios_layer = msg(ios_view, sel("layer"));
+    msg1(ios_layer, sel("setOpaque:"), 1);
+    // (The OpenGL ES context and the painter were made before; the layer's
+    // pixels now.)
+    ios_storage();
+    ios_measure();
+    // Where the phone is: asked for when Tempo wants it.
+    ios_locations = make("CLLocationManager");
+    msg1(ios_locations, sel("setDelegate:"), self);
+    msg_set_f(ios_locations, sel("setDesiredAccuracy:"), -1.0f64);
+    msg_set_f(ios_locations, sel("setDistanceFilter:"), -1.0f64);
+    msg1(ios_locations, sel("setActivityType:"), 3);
+    msg1(ios_locations, sel("setPausesLocationUpdatesAutomatically:"), 0);
+    if (ios_watching) platform_gps(true);
+    // A frame each time the screen is ready for one.
+    link: int = msg2(cls("CADisplayLink"), sel("displayLinkWithTarget:selector:"),
+        self, sel("tick:"));
+    msg2(link, sel("addToRunLoop:forMode:"), msg(cls("NSRunLoop"), sel("mainRunLoop")),
+        nsstring("kCFRunLoopCommonModes"));
+    ios_style();
+    1
+}
+
+// ---- the demo, for the simulator in CI ----
+// Ready a while; record a run (where the simulator's route takes it);
+// finish, and save; the activity's page.
+ios_demo() {
+    if (ios_demo_t <= 0.0) return;
+    t: f32 = now_t - ios_demo_t;
+    if (ios_demo_step == 0 && t > 6.0) {
+        ios_demo_step = 1;
+        start()
+    }
+    if (ios_demo_step == 1 && t > 90.0) {
+        ios_demo_step = 2;
+        finish()
+    }
+    if (ios_demo_step == 2 && t > 96.0) {
+        ios_demo_step = 3;
+        save()
+    }
+}
+
+// ---- classes, then UIKit ----
+main() noregion: int {
+    log_path = ios_document("tempo-log.txt");
+    live_path = ios_document("tempo-live.txt");
+    settings_path = ios_document("tempo-settings.txt");
+    on_page = false;
+    touch_ui = true;
+    ios_set_clock();
+    ios_load_settings();
+    tempo_open();
+    ios_start_ns = clock_ns(1);
+    ios_prev_ns = ios_start_ns;
+    if (getenv("L8_DEMO") != null) ios_demo_t = 0.001;
+    // OpenGL ES 3, and what Tempo paints with (made here: what a callback
+    // makes is not kept).
+    ios_ctx = msg1(msg(cls("EAGLContext"), sel("alloc")), sel("initWithAPI:"), 3);
+    msg1(cls("EAGLContext"), sel("setCurrentContext:"), ios_ctx);
+    glGenFramebuffers(1, &ios_fb[0]);
+    glGenRenderbuffers(1, &ios_rb[0]);
+    p_gles = true;
+    try {
+        ios_painter = new_painter()
+    } with IoError _e -> { }
+    // The view: an OpenGL ES layer that takes touches and the keyboard.
+    view: int = objc_allocateClassPair(cls("UIView"), "L8TempoView", 0);
+    add_method0(object_getClass(view), sel("layerClass"), &view_layer_class, "#@:");
+    add_method0(view, sel("layoutSubviews"), &view_layout, "v@:");
+    add_method1(view, sel("traitCollectionDidChange:"), &view_traits, "v@:@");
+    add_method2(view, sel("touchesBegan:withEvent:"), &view_began, "v@:@@");
+    add_method2(view, sel("touchesMoved:withEvent:"), &view_moved, "v@:@@");
+    add_method2(view, sel("touchesEnded:withEvent:"), &view_ended, "v@:@@");
+    add_method2(view, sel("touchesCancelled:withEvent:"), &view_ended, "v@:@@");
+    add_method0(view, sel("canBecomeFirstResponder"), &view_yes, "B@:");
+    add_method0(view, sel("hasText"), &view_yes, "B@:");
+    add_method1(view, sel("insertText:"), &view_insert, "v@:@");
+    add_method0(view, sel("deleteBackward"), &view_delete, "v@:");
+    add_method0(view, sel("autocapitalizationType"), &view_capitalize, "q@:");
+    add_method0(view, sel("autocorrectionType"), &view_no_correction, "q@:");
+    add_method0(view, sel("returnKeyType"), &view_done_key, "q@:");
+    class_addProtocol(view, objc_getProtocol("UIKeyInput"));
+    objc_registerClassPair(view);
+    // The app's delegate: the window, the frames, and where the phone is.
+    app: int = objc_allocateClassPair(cls("UIResponder"), "L8TempoApp", 0);
+    add_method2(app, sel("application:didFinishLaunchingWithOptions:"), &app_launched,
+        "B@:@@");
+    add_method1(app, sel("tick:"), &ios_tick, "v@:@");
+    add_method2(app, sel("locationManager:didUpdateLocations:"), &loc_update, "v@:@@");
+    add_method1(app, sel("locationManagerDidChangeAuthorization:"), &loc_authorization,
+        "v@:@");
+    add_method2(app, sel("locationManager:didFailWithError:"), &loc_failed, "v@:@@");
+    class_addProtocol(app, objc_getProtocol("UIApplicationDelegate"));
+    class_addProtocol(app, objc_getProtocol("CLLocationManagerDelegate"));
+    objc_registerClassPair(app);
+    UIApplicationMain(l8rt_argc(), l8rt_argv(), 0, nsstring("L8TempoApp"))
+}
