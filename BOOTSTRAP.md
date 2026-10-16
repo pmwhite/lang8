@@ -63,7 +63,8 @@ l8 as [-p|--profile] -o file.o file.s runtime.s
 l8 elfpack file.o -o file
 l8 build [--profile|-p] [--unchecked-index] file.l8 -o file
 l8 wasm [--profile|-p] [--unchecked-index] [--async import]... file.l8 -o file.wasm
-l8 test [--accept] [--wasm] [--unchecked-index] [-j N] file.l8|file.t ...
+l8 arm64 [--target linux|ios] [--unchecked-index] file.l8 -o file.s
+l8 test [--accept] [--wasm] [--arm64] [--unchecked-index] [-j N] file.l8|file.t ...
 ```
 
 `test` builds each file with its `test` declarations, runs them, and compares
@@ -86,6 +87,19 @@ included. `--async import` lets that import pause the module and resume it
 later, so a blocking program loop can run in a browser. `node web/run.mjs
 file.wasm args...` runs a module, and `test --wasm` runs tests that way. `make wasm-test` runs the test suites as modules and checks
 that the compiler, built as a module, rebuilds itself unchanged under Node.
+
+`arm64` compiles a program to AArch64 assembly text, with its runtime after
+it: for Linux (ELF, `runtime-arm64-linux.s`) or for iOS and its simulator
+(Mach-O, `runtime-arm64-darwin.s`, over Apple's C library). The x86-64 code
+generator drives it unchanged: `src2/arm64.l8` writes each of the primitives
+in `src2/direct.l8` as arm64, an x86 register standing for an arm64 one, and
+explains the stack and calling conventions that keep L8 and C able to call
+each other. A library's `native "NAME.s"` is `NAME.arm64-linux.s` or
+`NAME.arm64-darwin.s` there. Assemble and link the output with a toolchain
+for the target: `tools/arm64/linux.sh` uses clang and ld.lld, and runs the
+result under qemu-aarch64; `tools/ios/build.sh` uses Xcode's (see
+`programs/tempo/README.md`). `test --arm64` builds and runs tests that way,
+under qemu, so the compiler's tests check the arm64 code generator too.
 
 `unused` reports functions that are unreachable from every listed program.
 Ordinary `compile` and `build` commands do not report unused functions.
