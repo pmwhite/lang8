@@ -157,6 +157,18 @@ $(OK)/cad-tests: l8c3 $(PROGRAMS) $(RUNTIME) programs/cad/handheld.pcb programs/
 
 cad-test: $(OK)/cad-tests
 
+# The designs' board files, made again from their generators and routed
+# whole (programs/cad/tools/finish.l8): run after changing a generator.
+$(BUILD)/cad-finish: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+	@$(STEP) 'cad finish' sh -c '$(call build,l8c3,programs/cad/tools/finish.l8)'
+
+.PHONY: cad-boards
+cad-boards: $(BUILD)/cad-finish
+	python3 programs/cad/tools/handheld.py $(BUILD)/handheld-placed.pcb
+	$(BUILD)/cad-finish $(BUILD)/handheld-placed.pcb programs/cad/handheld.pcb
+	python3 programs/cad/tools/dock.py $(BUILD)/dock-placed.pcb
+	$(BUILD)/cad-finish $(BUILD)/dock-placed.pcb programs/cad/dock.pcb
+
 $(BUILD)/race: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 	@$(STEP) 'race' sh -c '$(call build,l8c3,programs/race/main.l8)'
 
@@ -328,6 +340,7 @@ help:
 	@echo '  http, http-test, websocket, websocket-test'
 	@echo '  wasm-test       run the tests as WebAssembly under Node; check the wasm compiler fixpoint'
 	@echo '  web             build the playground site in .build/web'
+	@echo '  cad-boards      make the CAD board files again from their generators, routed'
 	@echo '  promote, promote-bin1, promote-bin2, promote-source   (FORCE=1 skips the prompt)'
 	@echo '  clean'
 	@echo 'tools/profile.py times the compiler self-build, game build, and formatting.'

@@ -172,7 +172,14 @@ Pours join what they touch of their net.
 ## The handheld
 
 `handheld.pcb` is the handheld (`~/src/handheld`) laid out again so that it
-routes, from `tools/handheld.py` (change that, not the board file).
+routes, from `tools/handheld.py` (change that, not the board file). The
+board files kept are the whole design, routed: `make cad-boards` runs each
+generator (`tools/handheld.py`, `tools/dock.py`), which places the parts
+and lists the nets, then `tools/finish.l8`, which presses Route all on it
+as the editor would (pouring ground first) and writes it with its copper,
+failing if anything is left to connect or any rule is broken. The routing
+comes out the same every time; the tests check that each board as kept is
+whole and clean, and that it routes whole and clean again from bare.
 `tests/sketch.pcb` is the first sketch, as `design.ml` placed it, kept only
 as a hard board for the router's tests. It follows `design.md`: the display at the top, a D-pad on the left, A and B on
 the right thumb's arc, Back and Home in the bottom corners, USB-C on the
@@ -243,7 +250,7 @@ is thin all round.
   4.05 V, as the battery reads while charging. Full is the charger's own
   STAT2.
 
-Route all (which pours ground on both sides first) then joins all 58 of
+Route all (which pours ground on both sides first) joins all 58 of
 its nets with no rule broken, in a few seconds; the sketch gets 27
 of 40.
 

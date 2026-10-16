@@ -1,8 +1,9 @@
-# Writes programs/cad/dock.pcb: the dock that holds four handhelds lying
-# flat, under a sliding lid, and charges them without wires (see "The dock"
-# in programs/cad/README.md, and dock.l8 for its box).
+# Writes the dock as a board file, placed (tools/finish.l8 routes it into
+# programs/cad/dock.pcb; make cad-boards does both): the dock that holds
+# four handhelds lying flat, under a sliding lid, and charges them without
+# wires (see "The dock" in programs/cad/README.md, and dock.l8 for its box).
 #
-#   python3 programs/cad/tools/dock.py programs/cad/dock.pcb
+#   python3 programs/cad/tools/dock.py .build/dock-placed.pcb
 #
 # Its board is a strip, 32 x 80 mm, down the dock's middle under the
 # dividers, where neither the transmitters nor their coils are: USB-C at

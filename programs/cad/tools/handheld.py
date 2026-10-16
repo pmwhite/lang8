@@ -1,13 +1,14 @@
-# Writes programs/cad/handheld.pcb: the handheld (~/src/handheld) laid out
-# for routing, as small as its screen and buttons allow. Placement and pin
-# assignment follow the RP2040's pinout; see "The handheld" in
-# programs/cad/README.md.
+# Writes the handheld (~/src/handheld) as a board file: its parts placed,
+# as small as its screen and buttons allow, and its nets. Placement and pin
+# assignment follow the ESP32-S3 module's pins; see "The handheld" in
+# programs/cad/README.md. tools/finish.l8 routes it into
+# programs/cad/handheld.pcb, the whole design (make cad-boards does both):
 #
-#   python3 programs/cad/tools/handheld.py programs/cad/handheld.pcb
+#   python3 programs/cad/tools/handheld.py .build/handheld-placed.pcb
 #
 # The board is 77 x 86 mm, its middle at 0, 0. A 2.8 inch screen lies on
-# its side across the top (over the RP2040 and most of the rest), the
-# buttons below it, the power and USB between them; the case's bolts go
+# its side across the top (over the ESP32-S3 and most of the rest), the
+# buttons below it, the power at the top right; the case's bolts go
 # through the board's corners, so its rim is thin all round.
 import os
 # (Overrides, for trying layouts: HH_MX=-3.5 and the like in the
