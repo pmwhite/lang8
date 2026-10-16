@@ -57,7 +57,7 @@ all:
 	@$(MAKE) -s $(OK)/fmt $(OK)/stage1-tests
 	@$(MAKE) -s check
 
-check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(BUILD)/skate $(BUILD)/malton $(BUILD)/race $(OK)/race-tests $(BUILD)/tempo $(OK)/tempo-tests
+check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(BUILD)/skate $(BUILD)/malton $(BUILD)/race $(OK)/race-tests $(BUILD)/tempo $(OK)/tempo-tests $(BUILD)/tempo-ios.s $(BUILD)/ios-check.s
 
 # ---- compiler stages ----
 
@@ -167,6 +167,14 @@ $(OK)/tempo-tests: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
 	@touch $@
 
 tempo-test: $(OK)/tempo-tests
+
+# Tempo as an iPhone app, and the arm64 runtime's check, as arm64 assembly
+# for iOS (built into an app on a Mac: see programs/tempo/README.md).
+$(BUILD)/tempo-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
+	@$(STEP) 'tempo for iOS' sh -c './l8c3 arm64 --target ios programs/tempo/ios.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+$(BUILD)/ios-check.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
+	@$(STEP) 'iOS check' sh -c './l8c3 arm64 --target ios programs/ios/check.l8 -o $@.tmp && mv -f $@.tmp $@'
 
 # A terminal may be running from the previous output; `mv` replaces the
 # directory entry instead of rewriting its live inode.
