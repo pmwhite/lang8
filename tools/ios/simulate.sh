@@ -5,8 +5,8 @@
 # L8_DEMO=1 (Tempo records a run by itself: ready at first, recording from
 # 6 s, finished at 90 s, saved at 96 s; see programs/tempo/ios.l8) while the
 # simulator walks a loop, and takes screenshots along the way, then one in
-# dark mode, then opens it with a personal link the worker does not know
-# (its console says how the requests went). OUT gets the screenshots,
+# dark mode. It starts with a personal link the worker does not know (its
+# console says how the requests went). OUT gets the screenshots,
 # Tempo's output and log, its saved log file, and any crash report. CHECK,
 # if given, is programs/ios/check.l8 built for the simulator: it runs
 # first, and says what of the runtime works.
@@ -41,7 +41,7 @@ shot() {
 # Its log, and its console (what it prints), from before it starts.
 xcrun simctl spawn "$dev" log stream --predicate 'process == "Tempo" AND messageType >= 16' > "$out/log.txt" 2>&1 &
 logger=$!
-SIMCTL_CHILD_L8_DEMO=1 xcrun simctl launch --console-pty "$dev" "$id" > "$out/console.txt" 2>&1 &
+SIMCTL_CHILD_L8_DEMO=1 SIMCTL_CHILD_L8_LINK="#me=cinotalink0000000000000" xcrun simctl launch --console-pty "$dev" "$id" > "$out/console.txt" 2>&1 &
 console=$!
 sleep 4
 shot 01-ready
@@ -60,10 +60,6 @@ shot 05-saved
 xcrun simctl ui "$dev" appearance dark
 sleep 3
 shot 06-saved-dark
-# A personal link (one the worker does not know: it should say so).
-xcrun simctl openurl "$dev" "tempo://link#me=cinotalink0000000000000" || true
-sleep 6
-shot 07-linked
 xcrun simctl location "$dev" clear || true
 data=$(xcrun simctl get_app_container "$dev" "$id" data 2>/dev/null || true)
 [ -n "$data" ] && cp "$data"/Documents/* "$out"/ 2>/dev/null
