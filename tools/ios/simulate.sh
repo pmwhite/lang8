@@ -32,11 +32,13 @@ xcrun simctl boot "$dev" 2>/dev/null || true
 xcrun simctl bootstatus "$dev" -b >/dev/null
 mark booted
 xcrun simctl ui "$dev" appearance light
+# The check, alongside the rest (the simulator's first spawn is slow).
+checker=
 if [ -n "$check" ]; then
-  xcrun simctl spawn "$dev" "$check" > "$out/check.txt" 2>&1
-  echo "check exited $?" >> "$out/check.txt"
-  cat "$out/check.txt"
-  mark checked
+  ( xcrun simctl spawn "$dev" "$check" > "$out/check.txt" 2>&1
+    echo "check exited $?" >> "$out/check.txt"
+    mark checked ) &
+  checker=$!
 fi
 xcrun simctl install "$dev" "$app"
 xcrun simctl privacy "$dev" grant location "$id" || true
@@ -77,5 +79,9 @@ data=$(xcrun simctl get_app_container "$dev" "$id" data 2>/dev/null || true)
 kill "$logger" "$console" 2>/dev/null || true
 xcrun simctl spawn "$dev" launchctl list > "$out/launchctl.txt" 2>&1 || true
 find ~/Library/Logs/DiagnosticReports -newer "$app/Info.plist" -type f -exec cp {} "$out"/ \; 2>/dev/null || true
+if [ -n "$checker" ]; then
+  wait "$checker"
+  cat "$out/check.txt"
+fi
 mark done
 ls -la "$out"
