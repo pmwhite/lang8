@@ -208,7 +208,11 @@ is thin all round.
   is the software's to do, the board needs nothing more. It lies on its
   side at the left edge, its antenna's end at the board's edge, out past
   the screen's side; nothing may be under the antenna (its footprint's
-  keepout: no tracks, vias or pour on either side).
+  keepout: no tracks, vias or pour on either side). The screen is set
+  1.85 mm right of the middle, as far as the case allows, so its metal is
+  2.6 mm from the antenna; the battery, under the board, is 2 mm from it.
+  Espressif ask for 15 mm from metal: in a handheld this size it cannot
+  have that, so its range will be shorter than a dev board's.
 - Its right end faces the screen's connector, level with it. The screen
   (an ST7789VI inside) is on its 8-bit parallel interface (8080 style:
   IM0 high, IM1 and IM2 low), which the ESP32-S3's LCD peripheral drives
@@ -220,24 +224,39 @@ is thin all round.
   are strapping pins: the screen's inputs leave them be at reset, and
   IO45's pulldown holds the screen in reset until the program starts.)
   Its tearing signal goes to IO38, to draw between refreshes; its unused
-  serial input, read strobe and DB0-DB7 are tied high. The backlight's
-  switch is on IO39.
+  serial input, read strobe and DB0-DB7 are tied high. IO39 sets the
+  backlight (below).
 - Its bottom row faces the D-pad and Back (IO4-7, IO15) and Home, B and
-  A (IO16-18). IO0 (low at reset: load by the serial port), EN, TX and RX
-  have test pads. IO2 reads the battery's voltage, halved.
+  A (IO16-18). IO2 reads the battery's voltage, halved (1M each, so
+  little goes back into the module when it is off).
 - There is no USB socket: programs come over the air and charging is
-  wireless. For the first program, or to recover from a bad one, USB
-  (IO19, IO20) and 5 V for the charger are on test pads, for a clip-on
-  jig with the case open.
-- The backlight's four LEDs run from the switched battery supply through
-  one 6.8 ohm resistor (160 mA at most), switched by a transistor.
+  wireless. For the first program, or to recover from a bad one, there
+  are eight test points, plated holes in two rows of four at the lower
+  right: 5V (the charger's input), GND, D+, D- (USB, IO20 and IO19); EN,
+  BOOT (IO0: low at reset to load by the serial port), TX, RX. A window
+  through the case's back and battery layers reaches them, for a jig of
+  pogo pins with the case shut (a sticker over it).
+- The backlight's four LEDs (160 mA together at 3.1 V) run from the
+  system supply through a current sink: an LMV321 op-amp holds a
+  logic-level MOSFET (AO3400A) at 157 mA through a 1 ohm sense resistor,
+  however the supply goes (5 V on a charger, 3.4 to 4.2 V on the
+  battery). IO39 high sets it, through a divider (3.3 V to 0.157 V); PWM
+  on it dims it; with the 3.3 V off the gate is pulled down.
 - Power is at the top right: the side switch on the top edge (C&K
-  PCM12SMTR, 0.3 A), the 3.3 V regulator, the charger, its fuse, the
-  battery's socket and a hole for its wire. (Two things the first sketch
-  had wrong, which would have kept it from working: its regulator's
-  footprint had EN and NC the other way round, so EN floated; and the
-  charger's THERM and PROG3 floated, where its datasheet wants 10k for no
-  thermistor and a resistor to end charging: 100k, 10 mA.)
+  PCM12SMTR), the 3.3 V regulator, the charger with its input and battery
+  each bypassed (10 uF, as its datasheet asks), its fuse (1.1 A hold:
+  Wi-Fi's bursts and the backlight), the battery's socket, and a slot
+  (5.5 x 7.5 mm) through the board over the battery for its wire and
+  the plug on its end. The switch only turns the regulator on or off
+  (its EN to the system supply, or to ground), so it carries no current
+  to speak of. (Things the first sketch had wrong, which would have kept
+  it from working: its regulator's footprint had EN and NC the other way
+  round; the charger's THERM and PROG3 floated, where its datasheet wants
+  10k for no thermistor and a resistor to end charging (100k, 10 mA);
+  and its SOT-23s', the regulator's and the charger's footprints were
+  KiCad's, y down, in this tool's y up: mirrored, so each part's pins
+  landed on the wrong pads (the battery onto ground). Each is now turned
+  over (`fp_flip_y` in `parts.l8`).)
 - Charging: from a Qi pad (or the dock), through a wireless receiver
   (Adafruit 1901, 5 V at 500 mA) lying against the back under the
   buttons, its two wires soldered up into pads in the board, and a
@@ -250,22 +269,23 @@ is thin all round.
   4.05 V, as the battery reads while charging. Full is the charger's own
   STAT2.
 
-Route all (which pours ground on both sides first) joins all 58 of
-its nets with no rule broken, in a few seconds; the sketch gets 27
+Route all (which pours ground on both sides first) joins all 61 of
+its nets with no rule broken, in a few seconds; the sketch gets 30
 of 40.
 
-Its case (`case 3.2 2.5 2.75 11 0.5 17 90`, `qi 0 -22`) is 82 x 90.5 mm and
+Its case (`case 3.2 2.5 4.6 11 0.5 17 90`, `qi 0 -22`) is 82 x 90.5 mm and
 25.6 mm thick: eight layers of 3.2 mm birch ply and forty discs, held by
 four M2.5 x 20 bolts through the board's corners; the battery is
 Adafruit's 1200 mAh one (34 x 62 x 5 mm), on its side under the top half,
-and the wireless receiver beside it under the bottom half.
+and the wireless receiver beside it under the bottom half. The side
+switch's knob is 0.3 mm inside the case's outline, in the rim's slot.
 
 ## The dock
 
 `dock.pcb` (from `tools/dock.py`) is a box that holds four handhelds lying
 flat, two by two, under a lid, and charges them without wires. It is the
 second design open (the title's menu); its board file's `dock` line, instead of
-`case`, makes its box (`dock.l8`), 241 x 204 x 48 mm of 3.2 mm birch ply,
+`case`, makes its box (`dock.l8`), 243 x 210 x 51 mm of 3.2 mm birch ply,
 from the bottom:
 
 - a base, held on by six M2.5 x 6 bolts (their heads under it, between
@@ -276,11 +296,15 @@ from the bottom:
   transmitters' wires' ways; the coils stand on the first cavity, up
   through the second and the floor, 2.4 mm under the pockets' floor and
   about 6 mm from the handhelds' receivers (Adafruit give 2 to 8 mm);
-- the floor, then the walls round four pockets, each a handheld's case and
-  0.3 mm each side, its coil under the handheld's receiver (they go in
+- the floor, then ten walls round four pockets, each a handheld's case and
+  0.75 mm each side, its coil under the handheld's receiver (they go in
   buttons to the front); the lowest three walls have the dividers, the
-  rest go only round the outside, and each pocket has a finger's notch at
-  its outer end, to lift the handheld out;
+  rest go only round the outside, and each pocket has a finger's notch
+  at its outer end, 20 mm across and 5 deep, to lift the handheld out
+  (a loop of ribbon glued to the pocket's floor, its end up at the
+  notch, lifts it more easily still). The walls stand a layer higher
+  than a handheld with its caps out as far as they go, so the lid slides
+  over them;
 - right of the pockets, past a wall all the way up, the stowage: 48 mm
   across, the pockets' length and depth (28.8 mm under the lid), for the
   charger and its cable: Qualtek's QFWC-18-12-USCR (in the cart: 18 W
@@ -288,26 +312,36 @@ from the bottom:
   folding US plug), lying down, its cable coiled beside it. (Any USB-C
   charger that gives 5 V at 3 A will do, if it is under 28 mm one way.);
 - the lid: it slides in a channel from the front, under a lip over its
-  sides and back, so it cannot lift off, nor fall out tipped up. A strip
-  glued on its front fills the lip's front. The catch is a wooden tab on
-  a bolt through that strip and the lid (its nut in a hex in the lid, its
-  head on the tab, tight enough to hold where it is turned): turned into a
-  notch in the lip's right side, the lid cannot slide; turned back, over
-  the lid, it slides out.
+  sides and back, so it cannot lift off, nor fall out tipped up; it is
+  0.75 mm narrower than its channel each side (it may want its faces
+  sanded where the ply runs thick: the channel is a layer of the same
+  ply). A strip glued on its front fills the lip's front, which is
+  12 mm deep. The catch is a wooden tab on a bolt through that strip and
+  the lid (its nut glued in a hex in the lid, its head on the tab, tight
+  enough to hold where it is turned): turned to the right, its arm
+  reaches 3.5 mm into a notch in the lip's right side, which holds it
+  with 2 mm and more of wood in front of it, and the lid cannot slide;
+  turned back, over the lid, it slides out.
 
-Its board is a strip down the dock's middle, under the dividers, where
-neither the transmitters nor their coils are. USB-C comes in at the back,
-flush with the dock's back face on the board's tongue; the ESP32-S3 is at
-the front, its antenna at the board's edge. It takes 5 V from USB-C, reads
-what the charger offers from the CC lines (the voltage on its 5.1k
-pulldowns: 0.5, 1.5 or 3 A) and what is drawn through a 20 milliohm shunt
-(an INA180 amplifies it for an ADC pin), and switches each transmitter
-with a P-channel MOSFET: its program keeps as many on as that allows (a 3
-A charger runs all four, near enough; less, and they take turns), and can
-hear the handhelds over ESP-NOW. Its own USB loads its program. Each
-transmitter's two wires are soldered into pads on the board (at their
-other end, to its USB-A port's 5 V and ground, which are its input's too).
-Route all joins its 25 nets with no rule broken.
+Its board is a strip the dock's length, down its middle under the
+dividers, where neither the transmitters nor their coils are. At its back
+USB-C comes in, flush with the dock's back face on the board's tongue, and
+beside it the ESP32-S3, its antenna at the board's end, out through the
+back. It takes 5 V from USB-C, reads what the charger offers from the CC
+lines (the voltage on its 5.1k pulldowns: 0.5, 1.5 or 3 A) and what is
+drawn through a 10 milliohm shunt (an INA180 amplifies it 50 times for an
+ADC pin: 0.5 V an amp), and switches each transmitter with a P-channel
+MOSFET. A transmitter draws a little over an amp at its 5 W, so a 3 A
+charger runs two or three at once: the program keeps as many on as the
+power allows and the others take turns. At the board's front, five
+lights show through slots in the dock's front face (each on a tongue of
+the board): each pocket's, left to right as they lie, and power in the
+middle, the program's to say what it knows (charging, waiting its turn,
+full). It can hear the handhelds over ESP-NOW; its own USB loads its
+program. Each transmitter's two wires are soldered into pads at the
+board's side level with it, a channel straight across (at their other
+end, to its USB-A port's 5 V and ground, which are its input's too).
+Route all joins its 35 nets with no rule broken.
 
 The program for the dock, and the handhelds', is not written yet: this is
 the hardware.
