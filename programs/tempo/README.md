@@ -47,11 +47,11 @@ Three tabs along the bottom; a finger slides between them too.
   columns (a tap on one says what that week was); then the activities by
   the week, newest first, each with its distance, pace or speed, and time
   (a medal if it holds a record). The pills show one sport.
-- **You**: miles or kilometers; light or dark (Auto follows the phone's
+- **Settings**: miles or kilometers; light or dark (Auto follows the phone's
   own setting; the pick is kept on each device, and the colors ease from
   one to the other); each sport's totals (all time, and this
   year); each sport's records (the fastest stretch of each standard length
-  ever gone; a tap opens the activity); and how the log is kept.
+  ever gone; a tap opens the activity).
 
 An activity's page slides in over them (slide it back to the right, or
 the arrow): its distance, moving and elapsed time, average pace or speed,
