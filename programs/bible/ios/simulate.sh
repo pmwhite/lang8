@@ -1,5 +1,5 @@
 #!/bin/sh
-# Run Bible.app in the iOS simulator, on a Mac, and keep what it showed:
+# Run SmoothBible.app (Smooth Bible) in the iOS simulator, on a Mac, and keep what it showed:
 #   simulate.sh APP OUT
 # It boots an iPhone simulator, launches the app with L8_DEMO=1, and takes it
 # through its demo with Darwin notifications (see demo_do in
@@ -12,7 +12,7 @@
 set -u
 app=$1
 out=$2
-id=space.trailingwhite.bible
+id=space.trailingwhite.smoothbible
 mkdir -p "$out"
 dev=$(xcrun simctl list devices available -j | python3 -c '
 import json, sys
@@ -29,12 +29,12 @@ xcrun simctl install "$dev" "$app"
 shot() {
   xcrun simctl io "$dev" screenshot "$out/$1.png" >/dev/null 2>&1 && echo "shot $1"
 }
-xcrun simctl spawn "$dev" log stream --predicate 'process == "Bible" AND messageType >= 16' > "$out/log.txt" 2>&1 &
+xcrun simctl spawn "$dev" log stream --predicate 'process == "SmoothBible" AND messageType >= 16' > "$out/log.txt" 2>&1 &
 logger=$!
 SIMCTL_CHILD_L8_DEMO=1 xcrun simctl launch --console-pty "$dev" "$id" > "$out/console.txt" 2>&1 &
 console=$!
 # (Once it says it is up: the first launch may take minutes.) Each step
-# is a Darwin notification the app takes (space.trailingwhite.bible.demoN),
+# is a Darwin notification the app takes (space.trailingwhite.smoothbible.demoN),
 # its screenshot after its animations.
 for i in $(seq 1200); do
   grep -q "bible: up" "$out/console.txt" 2>/dev/null && break

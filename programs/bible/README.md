@@ -1,4 +1,4 @@
-# Bible
+# Smooth Bible
 
 The Berean Standard Bible to read on an iPhone, in UIKit's own views: an
 L8 program (`ios.l8`) compiled by `l8 arm64 --target ios`, with no Swift,
@@ -43,7 +43,7 @@ read aloud by VoiceOver as it would be in the phone's own apps.
 ```sh
 ./l8c3 arm64 --target ios programs/bible/ios.l8 -o bible-ios.s
 tools/ios/build.sh sim bible-ios.s build programs/bible/ios   # on a Mac
-programs/bible/ios/simulate.sh build/Bible.app shots
+programs/bible/ios/simulate.sh build/SmoothBible.app shots
 ```
 
 GitHub builds it on every push to the `bible` branch
@@ -51,4 +51,4 @@ GitHub builds it on every push to the `bible` branch
 the app, and macOS jobs build it for the simulator, run it there with
 `L8_DEMO=1`, taking it through the books, a psalm, a footnote and John 3
 (each step a Darwin notification, sent with `notifyutil`), and push the screenshots to the `ci-bible-shots` branch, and build
-`Bible.ipa` for an iPhone onto `ci-bible-ipa`.
+`SmoothBible.ipa` for an iPhone onto `ci-bible-ipa`.
