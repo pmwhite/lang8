@@ -14,7 +14,7 @@ set -u
 app=$1
 out=$2
 check=${3:-}
-id=space.trailingwhite.tempo
+id=space.trailingwhite.better
 mkdir -p "$out"
 dev=$(xcrun simctl list devices available -j | python3 -c '
 import json, sys
