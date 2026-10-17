@@ -34,7 +34,7 @@ SIMCTL_CHILD_L8_DEMO=1 xcrun simctl launch --console-pty "$dev" "$id" > "$out/co
 console=$!
 # (Once it says it is up: the first launch may take minutes.)
 for i in $(seq 1200); do
-  grep -q "bible: up" "$out/console.txt" 2>/dev/null && break
+  grep -q "bible: up\|Terminating app" "$out/console.txt" 2>/dev/null && break
   sleep 0.5
 done
 sleep 2
