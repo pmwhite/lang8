@@ -1,8 +1,11 @@
 // The block game, alone on the page: load the module and run it on a canvas
 // that fills the screen. The world file lives in an in-memory file system and
-// is saved to localStorage whenever the game writes it. `?glcheck` reports
-// failing GL calls on the console.
+// is saved to localStorage whenever the game writes it. So are the levels
+// solved, which are kept for whoever plays (see ../people/people.js) by
+// the people's Worker too, so that they go with them from device to
+// device. `?glcheck` reports failing GL calls on the console.
 import { instantiate, runResumable, MemFS } from "../l8-runtime.js";
+import * as people from "../people/people.js";
 import { createPlatform } from "./platform.js";
 import { createTelemetry } from "./telemetry.js";
 import { startControl } from "./control.js";
@@ -89,6 +92,36 @@ canvas.addEventListener("pointerup", (e) => {
   release(sym);
 });
 
+// ---- the levels solved, kept for whoever plays ----
+
+// The game writes them as lines, "done NAME" each, in any order: those
+// solved here and those solved elsewhere are all the lines of either.
+const union = (...texts) => [...new Set(texts.flatMap((t) => (t ?? "").split("\n")).filter((l) => l.trim()))].map((l) => `${l}\n`).join("");
+const within = (promise, ms, otherwise) => Promise.race([promise, new Promise((done) => setTimeout(() => done(otherwise), ms))]);
+
+// Where they are kept on this device, for the world (by its key), and
+// who plays (as the people's Worker has them: person, or null for nobody);
+// and as kept for them there (null where nobody plays, or it could not be
+// reached). Not waited for long: without it, what this device has.
+async function solvedFor(storageKey, slot) {
+  const own = `${storageKey}:progress`;
+  const checked = await within(people.check(), 4000, null);
+  // (Somebody, as last said, if the Worker could not say now.)
+  const person = checked !== false && people.me()?.id ? people.me() : null;
+  if (!person) return { key: own, person: null, local: localStorage.getItem(own), kept: null };
+  const key = `${own}@${person.id}`;
+  let local = localStorage.getItem(key);
+  // (What was solved on this device before anyone played on it is the
+  // first player's.)
+  const adopted = `${own}:adopted`;
+  if (local === null && !localStorage.getItem(adopted)) {
+    local = localStorage.getItem(own);
+    localStorage.setItem(adopted, person.id);
+  }
+  const saved = await within(people.loadSave("blocks", slot, person), 4000, null);
+  return { key, person, local, kept: saved ? (saved.data ?? "") : null };
+}
+
 // ---- the game ----
 
 async function main() {
@@ -97,17 +130,38 @@ async function main() {
   // saved progress.
   const worldFile = params.get("world") || "world.txt";
   const storageKey = worldFile === "world.txt" ? STORAGE_KEY : `${STORAGE_KEY}:${worldFile}`;
-  const [module, world] = await Promise.all([
-    WebAssembly.compileStreaming(fetch("block-game.wasm")),
-    fetch(worldFile).then((r) => r.text()),
-  ]);
   // ?probe moves the player, so it starts from the original world and saves
   // nothing; so does ?fresh, for remote experiments.
   const probe = params.has("probe");
   const fresh = probe || params.has("fresh");
+  const [module, world, solved] = await Promise.all([
+    WebAssembly.compileStreaming(fetch("block-game.wasm")),
+    fetch(worldFile).then((r) => r.text()),
+    fresh ? null : solvedFor(storageKey, worldFile),
+  ]);
   const files = { [WORLD]: (!fresh && localStorage.getItem(storageKey)) || world };
-  const progress = !fresh && localStorage.getItem(`${storageKey}:progress`);
-  if (progress) files[PROGRESS] = progress;
+  // The levels solved: here and, for whoever plays, elsewhere too; kept
+  // again where either lacks some.
+  let kept = solved?.kept ?? null;
+  // (Where what is kept there was not had, it is asked for first: it is
+  // never written over with less.)
+  const keepSolved = async (text) => {
+    localStorage.setItem(solved.key, text);
+    if (!solved.person) return;
+    if (kept === null) {
+      const saved = await people.loadSave("blocks", worldFile, solved.person);
+      if (!saved) return;
+      kept = union(kept, saved.data);
+    }
+    const all = union(text, kept);
+    if (all === kept) return;
+    if (await people.keepSave("blocks", worldFile, all, solved.person)) kept = all;
+  };
+  const progress = solved && union(solved.local, kept);
+  if (progress) {
+    files[PROGRESS] = progress;
+    keepSolved(progress);
+  }
   const fs = new MemFS(files);
   const decoder = new TextDecoder();
   fs.onOutput = (_fd, data) => console.log(decoder.decode(data).trimEnd());
@@ -117,7 +171,7 @@ async function main() {
     const file = fs.fds.get(fd);
     const status = close(fd);
     if (!fresh && file?.writable && file.path === WORLD) localStorage.setItem(storageKey, decoder.decode(fs.readFile(WORLD)));
-    if (!fresh && file?.writable && file.path === PROGRESS) localStorage.setItem(`${storageKey}:progress`, decoder.decode(fs.readFile(PROGRESS)));
+    if (!fresh && file?.writable && file.path === PROGRESS) keepSolved(decoder.decode(fs.readFile(PROGRESS)));
     return status;
   };
 

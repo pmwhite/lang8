@@ -1,28 +1,17 @@
 // The skate game's leaderboards: a Cloudflare Worker at /skate/api/ with a
 // D1 database behind it (schema.sql).
 //
-// People and groups are made by the admin, who holds the admin secret (see
-// web/skate/admin.html). A person has a link: the game's page with their
-// secret after the #. Whoever opens it plays as them, on any device, so it
-// is theirs alone to keep; the admin can give them a new one, and the old
-// one stops working. A group is a list of people, and only the admin knows
-// of it: all it does is decide who sees whom. A person sees themselves and
-// everyone they share a group with, and nobody else: those people's best
-// run on each course, one each, with the run itself as a replay to watch,
-// and their latest runs there. Nobody joins anything.
+// People and groups are those every game shares (see ../people-api): this
+// Worker asks their database, bound as PEOPLE, whose link a request
+// carries and whom they see. A person sees themselves and everyone they
+// share a group with, and nobody else: those people's best run on each
+// course, one each, with the run itself as a replay to watch, and their
+// latest runs there.
 //
 //   GET  /me                                  who I am, and the scores of those I see  (a person)
 //   POST /score  {course, score, version, replay}   a run of mine              (a person)
 //   GET  /replay?person=&course=              a best run, of someone I see
-//   GET  /admin/all                           every person and group            (the admin)
-//   POST /admin/person   {name}               make a person: {id, name, secret}
-//   POST /admin/relink   {id}                 a new secret for them
-//   POST /admin/rename   {id, name}
-//   POST /admin/unperson {id}                 delete a person, and their runs
-//   POST /admin/group    {title}              make a group: {id, title}
-//   POST /admin/retitle  {id, title}
-//   POST /admin/ungroup  {id}
-//   POST /admin/member   {group, person, on}  put a person in a group, or take them out
+//   GET  /admin/last                          when each person last rode: {id: at}  (the admin)
 //   POST /admin/unscore  {person, course?}    delete a person's runs (on one course, or all)
 //   POST /report {kind, session, data}        how the game went on a device          (anyone)
 //   GET  /admin/reports?kind=&person=&session=&limit=   the latest of those, newest first
@@ -36,13 +25,12 @@
 // the device has, if any; not its address. They are for finding out what
 // went wrong for someone, and are dropped after a while.
 
+import { bearer, personOf, seenBy } from "../people-api/people.js";
+
 // The courses scores are kept for, and as many parks (and each day's course
-// and park: see dayOf); how many people and groups there may be; how long a
-// replay may be; and how many of a person's latest runs on a course are
-// kept, and of everyone's shown.
+// and park: see dayOf); how long a replay may be; and how many of a
+// person's latest runs on a course are kept, and of everyone's shown.
 const COURSES = 5;
-const MAX_PEOPLE = 200;
-const MAX_GROUPS = 40;
 const MAX_REPLAY = 150000;
 const KEEP_RUNS = 10;
 const RECENT = 20;
@@ -67,12 +55,6 @@ const fail = (status, error) => reply(status, { error });
 const sha256 = async (text) => {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-};
-// Random letters and digits (none that look alike): 24 make a secret, 8 an
-// id.
-const random = (n) => {
-  const letters = "abcdefghijkmnpqrstuvwxyz23456789";
-  return [...crypto.getRandomValues(new Uint8Array(n))].map((b) => letters[b % letters.length]).join("");
 };
 const whole = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
 // A day's course has its date for its number, as 20261010 (the page reckons
@@ -103,36 +85,26 @@ const openPlace = (n) => whole(n, 1, COURSES) || whole(n, BIG_AIR + 1, BIG_AIR +
 const validCourse = (course) => Number.isInteger(course) && validPlace(Math.abs(course));
 const openCourse = (course) => Number.isInteger(course) && openPlace(Math.abs(course));
 const validId = (id) => typeof id === "string" && /^[a-z0-9]{8}$/.test(id);
-// A name: capitals, digits, and single spaces between them (all the game's
-// letters), twelve at most.
-const validName = (name) => typeof name === "string" && /^[A-Z0-9]+( [A-Z0-9]+)*$/.test(name) && name.length <= 12;
-const validTitle = (title) => typeof title === "string" && title.trim().length > 0 && title.length <= 30;
-
-const bearer = (request) => (request.headers.get("authorization") ?? "").replace(/^Bearer /, "");
-// Whose secret the request carries: {id, name}, or null.
-const personOf = async (env, request) => {
-  const secret = bearer(request);
-  if (!/^[a-z0-9]{24}$/.test(secret)) return null;
-  return await env.DB.prepare("SELECT id, name FROM people WHERE secret = ?").bind(secret).first();
-};
 
 // Who he is, and the scores of those he sees (himself, and everyone he
 // shares a group with): their bests on each course (best first), and their
 // latest runs there (newest first). Nothing of the groups themselves.
-const seen = (person) => `(${person} = ?1 OR ${person} IN (SELECT m2.person FROM members m1 JOIN members m2 ON m1.grp = m2.grp WHERE m1.person = ?1))`;
 async function me(env, who) {
+  const seen = await seenBy(env, who.id);
+  const names = Object.fromEntries(seen.map((p) => [p.id, p.name]));
+  const ids = JSON.stringify(seen.map((p) => p.id));
   const bests = await env.DB.prepare(
-    `SELECT b.course, p.id, p.name, b.score, b.version, b.at FROM bests b JOIN people p ON p.id = b.person WHERE ${seen("b.person")} ORDER BY b.course, b.score DESC, b.at`
-  ).bind(who.id).all();
+    "SELECT course, person, score, version, at FROM bests WHERE person IN (SELECT value FROM json_each(?)) ORDER BY course, score DESC, at"
+  ).bind(ids).all();
   const courses = {};
-  for (const s of bests.results) (courses[s.course] ??= []).push({ id: s.id, name: s.name, score: s.score, version: s.version, at: s.at });
+  for (const s of bests.results) (courses[s.course] ??= []).push({ id: s.person, name: names[s.person], score: s.score, version: s.version, at: s.at });
   const runs = await env.DB.prepare(
-    `SELECT l.course, p.name, l.score, l.version, l.at FROM log l JOIN people p ON p.id = l.person WHERE ${seen("l.person")} ORDER BY l.course, l.at DESC`
-  ).bind(who.id).all();
+    "SELECT course, person, score, version, at FROM log WHERE person IN (SELECT value FROM json_each(?)) ORDER BY course, at DESC"
+  ).bind(ids).all();
   const recent = {};
   for (const s of runs.results) {
     const list = (recent[s.course] ??= []);
-    if (list.length < RECENT) list.push({ name: s.name, score: s.score, version: s.version, at: s.at });
+    if (list.length < RECENT) list.push({ name: names[s.person], score: s.score, version: s.version, at: s.at });
   }
   return reply(200, { id: who.id, name: who.name, courses, recent });
 }
@@ -164,19 +136,13 @@ async function replay(env, who, url) {
   const course = Number(url.searchParams.get("course"));
   const whose = url.searchParams.get("person");
   if (!validCourse(course) || !validId(whose)) return fail(400, "bad request");
-  if (whose !== who.id) {
-    const shared = await env.DB.prepare("SELECT 1 FROM members a JOIN members b ON a.grp = b.grp WHERE a.person = ? AND b.person = ?").bind(who.id, whose).first();
-    if (!shared) return fail(404, "no such run");
-  }
-  const row = await env.DB.prepare("SELECT b.score, b.version, b.replay, p.name FROM bests b JOIN people p ON p.id = b.person WHERE b.person = ? AND b.course = ?")
-    .bind(whose, course).first();
+  const rider = (await seenBy(env, who.id)).find((p) => p.id === whose);
+  if (!rider) return fail(404, "no such run");
+  const row = await env.DB.prepare("SELECT score, version, replay FROM bests WHERE person = ? AND course = ?").bind(whose, course).first();
   if (!row) return fail(404, "no such run");
-  return reply(200, { course, name: row.name, score: row.score, version: row.version, replay: row.replay });
+  return reply(200, { course, name: rider.name, score: row.score, version: row.version, replay: row.replay });
 }
 
-// Everything, for the admin's page: each person (with their secret, to
-// share their link again; the groups they are in; and when they last rode),
-// and each group.
 // A device's report, kept (see the top of this file).
 async function report(env, request, body) {
   const { kind, session, data } = body ?? {};
@@ -207,53 +173,29 @@ async function report(env, request, body) {
 async function reports(env, url) {
   const q = url.searchParams;
   const limit = Math.min(Math.max(Number(q.get("limit")) || 50, 1), 500);
+  const people = await env.PEOPLE.prepare("SELECT id, name FROM people").all();
+  const names = Object.fromEntries(people.results.map((p) => [p.id, p.name]));
+  // (A person asked for by name is asked for by their id.)
+  const person = q.get("person");
+  const named = person && people.results.find((p) => p.name === person)?.id;
   const rows = await env.DB.prepare(
-    `SELECT r.id, r.at, r.kind, r.person, p.name, r.session, r.agent, r.data FROM reports r LEFT JOIN people p ON p.id = r.person
-     WHERE (?1 IS NULL OR r.kind = ?1) AND (?2 IS NULL OR r.person = ?2 OR p.name = ?2) AND (?3 IS NULL OR r.session = ?3)
-     ORDER BY r.id DESC LIMIT ?4`
+    `SELECT id, at, kind, person, session, agent, data FROM reports
+     WHERE (?1 IS NULL OR kind = ?1) AND (?2 IS NULL OR person = ?2) AND (?3 IS NULL OR session = ?3)
+     ORDER BY id DESC LIMIT ?4`
   )
-    .bind(q.get("kind"), q.get("person"), q.get("session"), limit)
+    .bind(q.get("kind"), named || person, q.get("session"), limit)
     .all();
-  return reply(200, { reports: rows.results.map((r) => ({ ...r, data: JSON.parse(r.data) })) });
+  return reply(200, { reports: rows.results.map((r) => ({ ...r, name: names[r.person] ?? null, data: JSON.parse(r.data) })) });
 }
 
-async function all(env) {
-  const people = await env.DB.prepare("SELECT id, name, secret, created FROM people ORDER BY created").all();
-  const groups = await env.DB.prepare("SELECT id, title FROM grps ORDER BY created").all();
-  const members = await env.DB.prepare("SELECT grp, person FROM members").all();
-  const last = await env.DB.prepare("SELECT person, MAX(at) AS at FROM log GROUP BY person").all();
-  const seen = Object.fromEntries(last.results.map((r) => [r.person, r.at]));
-  return reply(200, {
-    people: people.results.map((p) => ({ ...p, groups: members.results.filter((m) => m.person === p.id).map((m) => m.grp), last: seen[p.id] ?? null })),
-    groups: groups.results,
-  });
+// When each person last rode, for the admin's page (see ../people/admin.html).
+async function last(env) {
+  const rows = await env.DB.prepare("SELECT person, MAX(at) AS at FROM log GROUP BY person").all();
+  return reply(200, Object.fromEntries(rows.results.map((r) => [r.person, r.at])));
 }
 
 async function admin(env, action, body) {
   const db = env.DB;
-  if (action === "person") {
-    if (!validName(body?.name)) return fail(400, "bad name");
-    if (await db.prepare("SELECT 1 FROM people WHERE name = ?").bind(body.name).first()) return fail(409, "that name is taken");
-    if ((await db.prepare("SELECT COUNT(*) AS n FROM people").first()).n >= MAX_PEOPLE) return fail(403, "too many people");
-    const person = { id: random(8), name: body.name, secret: random(24) };
-    await db.prepare("INSERT INTO people (id, name, secret, created) VALUES (?, ?, ?, ?)").bind(person.id, person.name, person.secret, Date.now()).run();
-    return reply(200, person);
-  }
-  if (action === "group") {
-    if (!validTitle(body?.title)) return fail(400, "bad title");
-    if ((await db.prepare("SELECT COUNT(*) AS n FROM grps").first()).n >= MAX_GROUPS) return fail(403, "too many groups");
-    const group = { id: random(8), title: body.title.trim() };
-    await db.prepare("INSERT INTO grps (id, title, created) VALUES (?, ?, ?)").bind(group.id, group.title, Date.now()).run();
-    return reply(200, group);
-  }
-  if (action === "member") {
-    if (!validId(body?.group) || !validId(body?.person)) return fail(400, "bad request");
-    const both = await db.prepare("SELECT (SELECT 1 FROM grps WHERE id = ?) AS g, (SELECT 1 FROM people WHERE id = ?) AS p").bind(body.group, body.person).first();
-    if (!both.g || !both.p) return fail(404, "no such group or person");
-    if (body.on) await db.prepare("INSERT OR IGNORE INTO members (grp, person) VALUES (?, ?)").bind(body.group, body.person).run();
-    else await db.prepare("DELETE FROM members WHERE grp = ? AND person = ?").bind(body.group, body.person).run();
-    return reply(200, { on: !!body.on });
-  }
   if (action === "unscore") {
     if (!validId(body?.person) || (body.course !== undefined && !validCourse(body.course))) return fail(400, "bad request");
     const done = await db.batch(
@@ -270,35 +212,6 @@ async function admin(env, action, body) {
     if (!Number.isFinite(before)) return fail(400, "bad request");
     const done = await db.prepare("DELETE FROM reports WHERE at < ?").bind(before).run();
     return reply(200, { deleted: done.meta.changes });
-  }
-  // The rest are of one person, or one group.
-  if (!validId(body?.id)) return fail(400, "bad request");
-  const changed = (r) => (r.meta.changes === 0 ? fail(404, "no such one") : null);
-  if (action === "relink") {
-    const secret = random(24);
-    return changed(await db.prepare("UPDATE people SET secret = ? WHERE id = ?").bind(secret, body.id).run()) ?? reply(200, { id: body.id, secret });
-  }
-  if (action === "rename") {
-    if (!validName(body.name)) return fail(400, "bad name");
-    if (await db.prepare("SELECT 1 FROM people WHERE name = ? AND id != ?").bind(body.name, body.id).first()) return fail(409, "that name is taken");
-    return changed(await db.prepare("UPDATE people SET name = ? WHERE id = ?").bind(body.name, body.id).run()) ?? reply(200, { id: body.id, name: body.name });
-  }
-  if (action === "unperson") {
-    const done = await db.batch([
-      db.prepare("DELETE FROM people WHERE id = ?").bind(body.id),
-      db.prepare("DELETE FROM members WHERE person = ?").bind(body.id),
-      db.prepare("DELETE FROM bests WHERE person = ?").bind(body.id),
-      db.prepare("DELETE FROM log WHERE person = ?").bind(body.id),
-    ]);
-    return changed(done[0]) ?? reply(200, { deleted: true });
-  }
-  if (action === "retitle") {
-    if (!validTitle(body.title)) return fail(400, "bad title");
-    return changed(await db.prepare("UPDATE grps SET title = ? WHERE id = ?").bind(body.title.trim(), body.id).run()) ?? reply(200, { id: body.id, title: body.title.trim() });
-  }
-  if (action === "ungroup") {
-    const done = await db.batch([db.prepare("DELETE FROM grps WHERE id = ?").bind(body.id), db.prepare("DELETE FROM members WHERE grp = ?").bind(body.id)]);
-    return changed(done[0]) ?? reply(200, { deleted: true });
   }
   return fail(404, "no such action");
 }
@@ -322,7 +235,7 @@ export default {
       }
       if (parts[0] === "admin") {
         if (!env.ADMIN_SECRET || (await sha256(bearer(request))) !== (await sha256(env.ADMIN_SECRET))) return fail(401, "not allowed");
-        if (request.method === "GET" && parts[1] === "all") return await all(env);
+        if (request.method === "GET" && parts[1] === "last") return await last(env);
         if (request.method === "GET" && parts[1] === "reports") return await reports(env, url);
         if (request.method === "POST") return await admin(env, parts[1], body);
         return fail(404, "not found");

@@ -223,3 +223,19 @@ pixels), and the page lays unseen links over them; a file is read from the
 editor's memory when its link is tapped, and the editor is told which was
 tapped (key 6, the ID), to say what it did.
 
+## People
+
+The games share one set of people: the worker in `people-api/` (Cloudflare
+D1 at `trailingwhite.space/people/api`) keeps each person (a name, and the
+secret in their link, `#me=SECRET`, the same for every game), the groups
+that decide who sees whom, and saves for a game with no worker of its own.
+A game's worker binds the same database as `PEOPLE` and asks it who is who
+(`people-api/people.js`); the skate leaderboards do. In the browser,
+`people/people.js` takes a link out of the address and keeps everyone who
+has played on the device and which of them plays now, for every page on
+the site: the skate page lets another of them be picked (Players, from the
+name on its home sheet), and the block game keeps the levels solved for
+whoever plays, merged with those solved on their other devices. People and
+groups are made on `people/admin.html`, opened once with the admin secret
+after its `#` and kept on the device (`people-api/admin.sh link`).
+`?people=URL` points a page on localhost at a people worker run there.

@@ -273,7 +273,7 @@ wasm-test: $(OK)/wasm-fixpoint $(OK)/wasm-tests $(OK)/wasm-resume
 # The playground: a static site in .build/web with the compiler as a module.
 # Serve it with `python3 -m http.server -d .build/web`.
 WEB_SITE := $(BUILD)/web
-WEB_FILES := web/index.html $(wildcard web/*.js web/examples/*.l8 web/game/* web/skate/* web/malton/* web/race/* web/cad/*) programs/cad/handheld.pcb programs/cad/dock.pcb programs/block-game/world.txt \
+WEB_FILES := web/index.html $(wildcard web/*.js web/examples/*.l8 web/game/* web/skate/* web/malton/* web/race/* web/cad/* web/people/*) programs/cad/handheld.pcb programs/cad/dock.pcb programs/block-game/world.txt \
 	programs/block-game/garden.txt
 
 $(BUILD)/block-game.wasm: l8c3 $(PROGRAMS) | $(OK)
@@ -292,14 +292,15 @@ $(BUILD)/race.wasm: l8c3 $(PROGRAMS) | $(OK)
 	@$(STEP) 'race wasm' sh -c './l8c3 wasm --async glXSwapBuffers programs/race/main.l8 -o $@.tmp && mv -f $@.tmp $@'
 
 $(OK)/web: $(BUILD)/l8.wasm $(BUILD)/block-game.wasm $(BUILD)/skate.wasm $(BUILD)/malton.wasm $(BUILD)/race.wasm $(BUILD)/cad.wasm $(WEB_FILES) $(STDLIB) | $(OK)
-	@$(STEP) 'web site' sh -c 'rm -rf $(WEB_SITE) && mkdir -p $(WEB_SITE)/stdlib $(WEB_SITE)/examples $(WEB_SITE)/game $(WEB_SITE)/skate $(WEB_SITE)/malton $(WEB_SITE)/race $(WEB_SITE)/cad && \
+	@$(STEP) 'web site' sh -c 'rm -rf $(WEB_SITE) && mkdir -p $(WEB_SITE)/stdlib $(WEB_SITE)/examples $(WEB_SITE)/game $(WEB_SITE)/skate $(WEB_SITE)/malton $(WEB_SITE)/race $(WEB_SITE)/cad $(WEB_SITE)/people && \
 		cp web/index.html web/*.js $(WEB_SITE)/ && cp web/examples/*.l8 $(WEB_SITE)/examples/ && \
 		cp $(STDLIB) $(WEB_SITE)/stdlib/ && cp $(BUILD)/l8.wasm $(WEB_SITE)/ && \
 		cp web/game/* $(BUILD)/block-game.wasm programs/block-game/world.txt programs/block-game/garden.txt $(WEB_SITE)/game/ && \
 		cp web/skate/* $(BUILD)/skate.wasm $(WEB_SITE)/skate/ && \
 		cp web/malton/* $(BUILD)/malton.wasm $(WEB_SITE)/malton/ && \
 		cp web/race/* $(BUILD)/race.wasm $(WEB_SITE)/race/ && \
-		cp web/cad/* $(BUILD)/cad.wasm programs/cad/handheld.pcb programs/cad/dock.pcb $(WEB_SITE)/cad/'
+		cp web/cad/* $(BUILD)/cad.wasm programs/cad/handheld.pcb programs/cad/dock.pcb $(WEB_SITE)/cad/ && \
+		cp web/people/* $(WEB_SITE)/people/'
 	@touch $@
 
 web: $(OK)/web

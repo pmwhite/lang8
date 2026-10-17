@@ -11,6 +11,9 @@ import { instantiate, runResumable, MemFS } from "../l8-runtime.js";
 import { createPlatform } from "../game/platform.js";
 import { startControl } from "../game/control.js";
 import { createPacer } from "./pace.js";
+// (Who plays: see the leaderboards, below. A person's link is taken out of
+// the address as this comes in, before anything else sees it there.)
+import * as people from "../people/people.js";
 
 const canvas = document.getElementById("screen");
 // (The game has stopped: what is left to show is the page's.)
@@ -19,18 +22,6 @@ const stopped = (html) => {
   document.getElementById("overlay").hidden = false;
   document.body.classList.remove("booting");
 };
-
-// A person's link is this page with their secret after the # (see the
-// leaderboards, below): it is kept, and taken out of the address before
-// anything else sees it there.
-const linked = location.hash.match(/^#me=([a-z0-9]{24})$/)?.[1] ?? null;
-if (linked) {
-  try {
-    localStorage.setItem("skate.me", JSON.stringify(linked));
-    localStorage.removeItem("skate.account");
-  } catch {}
-  history.replaceState(null, "", location.pathname + location.search);
-}
 
 for (const name of ["gesturestart", "gesturechange", "dblclick"]) {
   document.addEventListener(name, (e) => e.preventDefault(), { passive: false });
@@ -155,7 +146,7 @@ let hands = 0;
 // when it is not being read: see `reading`).
 //
 // Two buttons, on every page but home: back, a page; and home.
-const SHEETS = new Set(["menu", "lessons", "lesson", "places", "days", "place", "person"]);
+const SHEETS = new Set(["menu", "lessons", "lesson", "places", "days", "place", "person", "players"]);
 const trail = [["menu"]];
 const pageNow = () => trail.at(-1)[0];
 // (A lesson's page is its sheet only while its word is being read.)
@@ -432,19 +423,23 @@ const tellBest = () => {
 
 // The leaderboards (see ../skate-board/worker.js). There is nothing here to
 // join or sign up to: whoever looks after them makes each person a link
-// (this page, with their secret after its #: see `linked`, above), and
-// decides who sees whom. Whoever opens a link plays as that person from
-// then on, on that device, and sees the scores of those they may: each
-// one's best on a place, and their latest runs there. A best run can be
-// watched: the game is handed it as a file, and V.
+// (this page, with their secret after its #: see ../people/people.js, which
+// keeps who is who for every game here), and decides who sees whom.
+// Whoever opens a link plays as that person from then on, on that device
+// (until someone else who has played there is picked: see showPlayers),
+// and sees the scores of those they may: each one's best on a place, and
+// their latest runs there. A best run can be watched: the game is handed
+// it as a file, and V.
 // (?api= points a page on localhost at a worker run there, to try one.)
 const localApi = location.hostname === "localhost" && new URLSearchParams(location.search).get("api");
 const api = localApi || (location.hostname.endsWith("trailingwhite.space") ? "/skate/api" : "https://trailingwhite.space/skate/api");
-let mySecret = stored("skate.me", null);
+let mySecret = people.me()?.secret ?? null;
 // Who he is, and the scores of those he sees, as last fetched: kept on the
 // device too, so that they show at once the next time, before they are
-// fetched again (which nothing waits for).
-let account = mySecret ? stored("skate.account", null) : null;
+// fetched again (which nothing waits for). (Kept for whoever played last:
+// not for anyone else.)
+const keptAccount = stored("skate.account", null);
+let account = mySecret && keptAccount?.id && keptAccount.id === people.me().id ? keptAccount : null;
 // The game's rules, by their number (see L8VERSION): as they were when it
 // last ran here, until it says.
 let gameVersion = stored("skate.rules", 0) || 0;
@@ -598,14 +593,18 @@ const loadMe = (fresh = true) => {
   if (accountLoad) return fresh ? accountLoad.then(() => loadMe()) : accountLoad;
   accountLoad = (async () => {
     try {
-      const r = await fetch(`${api}/me`, { headers: { authorization: `Bearer ${mySecret}` } });
+      const asked = mySecret;
+      const r = await fetch(`${api}/me`, { headers: { authorization: `Bearer ${asked}` } });
+      // (Someone else was picked to play while it came.)
+      if (asked !== mySecret) return loadMe();
       if (r.status === 401) {
-        // (His link has been replaced by another: here he is nobody again.)
-        mySecret = null;
-        account = null;
-        localStorage.removeItem("skate.me");
+        // (His link has been replaced by another: he is taken off this
+        // device. Whoever else played here last plays, if anyone.)
+        const name = people.me()?.name;
+        people.forget(asked);
         localStorage.removeItem("skate.account");
-        toast("Your link no longer works");
+        toast(name ? `${name}'s link no longer works` : "Your link no longer works");
+        playAs(people.me()?.secret ?? null, false);
         return false;
       }
       if (!r.ok) {
@@ -614,6 +613,7 @@ const loadMe = (fresh = true) => {
       }
       account = await r.json();
       accountLoaded = Date.now();
+      people.said(account.id, account.name);
       store("skate.account", account);
       tellBest();
       return true;
@@ -624,6 +624,23 @@ const loadMe = (fresh = true) => {
   return accountLoad;
 };
 const loadScores = () => loadMe(false);
+// Someone else plays (one who has played on this device before: see
+// showPlayers), or nobody: their scores as they are now, and the corner's
+// best theirs. (Said, unless something else is.)
+const playAs = (secret, tell = true) => {
+  people.use(secret);
+  mySecret = secret && people.me()?.secret === secret ? secret : null;
+  account = null;
+  accountLoaded = 0;
+  localStorage.removeItem("skate.account");
+  tellBest();
+  showPage();
+  if (!mySecret) return;
+  loadMe().then((ok) => {
+    if (ok && tell) toast(`Playing as ${account.name}`);
+    showPage();
+  });
+};
 // Their bests on a place (one each, best first), and their latest runs
 // there (newest first). A best under older rules than this game's is left
 // out, as it is not one to beat (the next run its rider posts takes its
@@ -838,7 +855,15 @@ const onTap = (name) => {
     else if (page === "person") go("person", of);
   } else if (what === "random") go("place", randomPlace(arg));
   else if (what === "me") {
-    if (account) go("person", account.name);
+    // (Where more than one has played here: who plays.)
+    if (people.everyone().length > 1) go("players");
+    else if (account) go("person", account.name);
+  } else if (what === "as") {
+    const person = playersShown[Number(arg)];
+    if (person && person.secret !== mySecret) {
+      playAs(person.secret);
+      goBack();
+    } else if (account) go("person", account.name);
   } else if (what === "play") goTo(placeOf);
   else if (what === "who") {
     store("skate.who", (tabWho = arg));
@@ -895,7 +920,7 @@ const bestsOf = (name) =>
     .flatMap(([course, list]) => list.filter((run) => run.name === name && current(run)).map((run) => ({ ...run, course: Number(course) })))
     .sort((a, b) => placeRank(a.course) - placeRank(b.course));
 
-// Home: what to play, who he is (if someone: see `linked`), and what those
+// Home: what to play, who he is (if someone: see people), and what those
 // he sees have been riding. A run there goes to its place; its rider's
 // name, to them. (For someone, even with nothing ridden yet, the feed's
 // space is kept, a few runs high, so that home keeps its shape.)
@@ -903,7 +928,7 @@ const FEED = 30;
 const showMenu = () => {
   const fresh = !stored("skate.tutorial", false) && !stored("skate.course", 0);
   const blocks = [["title", "", "Home"]];
-  if (mySecret) blocks.push(["me", "me", account?.name ?? "You"]);
+  if (mySecret) blocks.push(["me", "me", account?.name ?? people.me()?.name ?? "You"]);
   blocks.push(["item", "go:lessons", "Tutorial", fresh ? "Start here" : "", fresh ? "first" : "plain"]);
   blocks.push(["item", "go:places:courses", "Slopestyle", "", "plain"]);
   blocks.push(["item", "go:places:parks", "Park", "", "plain"]);
@@ -1045,10 +1070,25 @@ const showPerson = () => {
   return { wide: 440, blocks };
 };
 
+// Who plays: everyone who has played on this device (that is, opened their
+// link on it), he who plays now first. Another, pressed, plays from then
+// on; he himself, pressed, goes to his runs.
+let playersShown = [];
+const showPlayers = () => {
+  playersShown = people.everyone();
+  const blocks = [["title", "", "Players"], ["para", "Everyone who has played on this device. Tap someone to play as them.", "dim"], ["gap", 4]];
+  playersShown.forEach((person, i) => {
+    const playing = person.secret === mySecret;
+    const name = (playing ? account?.name : null) ?? person.name ?? "Someone";
+    blocks.push(["item", `as:${i}`, name, playing ? "Playing" : "", playing ? "first" : "plain"]);
+  });
+  return { wide: 440, blocks };
+};
+
 // The sheet up (or none), told to the game: the same sheet again (its
 // scores have come, say) as it is, in place; another, coming the way he
 // went (motion).
-const SHOW = { menu: showMenu, lessons: showLessons, lesson: showLesson, places: showPlaces, days: showDays, place: showPlace, person: showPerson };
+const SHOW = { menu: showMenu, lessons: showLessons, lesson: showLesson, places: showPlaces, days: showDays, place: showPlace, person: showPerson, players: showPlayers };
 const showPage = (motion = "swap") => {
   const id = sheetNow();
   if (!id) {
@@ -1207,7 +1247,7 @@ async function main() {
   if (params.has("play")) trail.push(["ride", placeNow]);
   present();
   // (Opened by his link: who he is, once the leaderboards say.)
-  if (linked) {
+  if (people.linked) {
     loadMe().then((ok) => {
       if (ok) toast(`Playing as ${account.name}`);
       showOpen();
