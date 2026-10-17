@@ -12,11 +12,23 @@ focus(): int {
     open_nodes[0]
 }
 
-// The candidate whose button says these words, or -1.
+// The candidate whose button says these words, or -1. (Written in
+// ASCII: ... stands for the …  of a choice still to make.)
 cand_named(words: str): int {
-    s: int = sym(words);
-    for c in 0..cd_n {
-        if (cd_label[c] == s) return c
+    line_clear();
+    i: int = 0;
+    while (i < len(words)) {
+        if (i + 2 < len(words) && words[i] == '.' && words[i + 1] == '.' && words[i + 2] == '.') {
+            line_cp(8230);
+            i = i + 3
+        } else {
+            line_byte(words[i] as int);
+            i = i + 1
+        }
+    }
+    s: int = line_sym_now();
+    for i in 0..cd_shown {
+        if (cd_label[cd_order[i]] == s) return cd_order[i]
     }
     -1
 }
@@ -138,7 +150,8 @@ print_focus() raises IoError {
     copy: []i8 = line_copy;
     for i in 0..k copy[i] = line[i];
     line_clear();
-    line_add("\�\�\� ");
+    line_cp(8866);
+    line_add(" ");
     for i in 0..k line_byte(copy[i] as int);
     line_print()
 }
@@ -148,9 +161,239 @@ line_copy: []i8 = new i8[65536](0i8);
 // The buttons for the candidates listed.
 print_cands() raises IoError {
     line_clear();
-    for c in 0..cd_n {
-        if (c > 0) line_add(" | ");
-        line_sym(cd_label[c])
+    for i in 0..cd_shown {
+        if (i > 0) line_add(" | ");
+        line_sym(cd_label[cd_order[i]])
     }
     line_print()
+}
+
+// ---- proofs written in the files ----
+// A level's proof is the moves a player would make, one to a line:
+//
+//   goal "Split"                          tap the goal, then the button
+//   goal "Choose ..." with "max(N₁, N₂)"  ... and pick the witness
+//   hyp 1 "Use with ε/2"                  tap hypothesis 1 (from 0)
+//   part "a · b" "a · c"                  tap a part of the goal (its first
+//   part "x" in 2 "…"                       place), or of hypothesis 2
+//   undo
+//
+// Why the last proof failed, and at which move (from 1).
+proof_why: str = "";
+
+proof_step: int = 0;
+
+// The text of a string token, into a str-like buffer (as words for
+// cand_named and witness_term).
+tok_text: []i8 = new i8[512](0i8);
+
+tok_text_n: int = 0;
+
+take_text() {
+    tok_text_n = 0;
+    s: int = tk_sym;
+    for i in 0..sym_len[s] {
+        if (tok_text_n < len(tok_text)) {
+            tok_text[tok_text_n] = sym_byte(s, i) trunc i8;
+            tok_text_n = tok_text_n + 1
+        }
+    }
+    lex()
+}
+
+// The candidate whose button says the text in buf (0..n), or -1.
+cand_named_bytes(buf: []i8, n: int): int {
+    // (... stands for the … of a choice still to make.)
+    line_clear();
+    i: int = 0;
+    while (i < n) {
+        if (i + 2 < n && buf[i] == '.' && buf[i + 1] == '.' && buf[i + 2] == '.') {
+            line_cp(8230);
+            i = i + 3
+        } else {
+            line_byte(buf[i] as int);
+            i = i + 1
+        }
+    }
+    s: int = line_sym_now();
+    for k in 0..cd_shown {
+        if (cd_label[cd_order[k]] == s) return cd_order[k]
+    }
+    -1
+}
+
+w1_text: []i8 = new i8[512](0i8);
+
+w2_text: []i8 = new i8[512](0i8);
+
+w1_n: int = 0;
+
+w2_n: int = 0;
+
+label_text: []i8 = new i8[512](0i8);
+
+label_n: int = 0;
+
+// A term written in buf (0..n), read in node n's names.
+witness_bytes(n: int, buf: []i8, k: int) raises KernelError: int {
+    for i in 0..k wit_text[i] = buf[i];
+    lex_save();
+    g: int = pn_goal[n];
+    mark: int = ent_n;
+    for i in 0..gl_fixn[g] {
+        x: int = goal_fix(g, i);
+        last_ent = add_ent(tm_name(x), E_FIX, tm_type(x), x)
+    }
+    read_from(wit_text, k);
+    r: int = 0;
+    try {
+        r = read_term_only()
+    } with ReadError -> {
+        r = 0
+    }
+    ent_n = mark;
+    lex_restore();
+    r
+}
+
+// Play level l's written proof from the start. Whether it proved it.
+run_proof(l: int) raises KernelError: bool {
+    level_start(l);
+    proof_step = 0;
+    proof_why = "";
+    lex_save();
+    read_range(script_bytes, lv_proof0[l], lv_proof0[l] + lv_proofn[l]);
+    ok: bool = true;
+    while (ok && tk_kind != K_EOF) {
+        proof_step = proof_step + 1;
+        ok = run_move()
+    }
+    lex_restore();
+    if (ok && !level_done()) {
+        proof_why = "the moves leave goals open";
+        return false
+    }
+    ok
+}
+
+run_move() raises KernelError: bool {
+    w: int = tk_sym;
+    lex();
+    if (w == sym("undo")) {
+        undo();
+        return true
+    }
+    n: int = focus();
+    if (n < 0) {
+        proof_why = "a move after the level is done";
+        return false
+    }
+    in_hyp: int = -1;
+    part: int = 0;
+    if (w == sym("goal")) cands_goal(n) else if (w == sym("hyp")) {
+        in_hyp = take_count();
+        if (in_hyp < 0 || in_hyp >= gl_hypn[pn_goal[n]]) {
+            proof_why = "no such hypothesis";
+            return false
+        }
+        cands_hyp(n, in_hyp)
+    } else if (w == sym("part")) {
+        if (tk_kind != K_STRING) {
+            proof_why = "part takes a term in quotes";
+            return false
+        }
+        take_text();
+        for i in 0..tok_text_n w1_text[i] = tok_text[i];
+        w1_n = tok_text_n;
+        if (tk_is("in")) {
+            lex();
+            in_hyp = take_count()
+        }
+        g: int = pn_goal[n];
+        part = witness_bytes(n, w1_text, w1_n);
+        target: int = gl_concl[g];
+        if (in_hyp >= 0) target = goal_hyp(g, in_hyp);
+        if (part == 0 || !find_path(target, part)) {
+            proof_why = "the part is not there";
+            return false
+        }
+        sub_n = fp_n;
+        for i in 0..fp_n sub_steps[i] = fp_steps[i];
+        cands_sub(n, in_hyp)
+    } else {
+        proof_why = "no such kind of move";
+        return false
+    }
+    if (tk_kind != K_STRING) {
+        proof_why = "a move needs its button's words in quotes";
+        return false
+    }
+    take_text();
+    for i in 0..tok_text_n label_text[i] = tok_text[i];
+    label_n = tok_text_n;
+    w1_n = 0;
+    w2_n = 0;
+    if (tk_is("with")) {
+        lex();
+        take_text();
+        for i in 0..tok_text_n w1_text[i] = tok_text[i];
+        w1_n = tok_text_n;
+        if (tk_kind == K_STRING) {
+            take_text();
+            for i in 0..tok_text_n w2_text[i] = tok_text[i];
+            w2_n = tok_text_n
+        }
+    }
+    c: int = cand_named_bytes(label_text, label_n);
+    if (c < 0) {
+        proof_why = "no button with those words";
+        return false
+    }
+    wn: int = 0;
+    if (cd_wn[c] > 0) {
+        wit_buf[0] = witness_bytes(n, w1_text, w1_n);
+        wn = 1
+    }
+    if (cd_wn[c] > 1) {
+        wit_buf[1] = witness_bytes(n, w2_text, w2_n);
+        wn = 2
+    }
+    for i in 0..wn {
+        if (wit_buf[i] == 0) {
+            proof_why = "a witness that cannot be read";
+            return false
+        }
+    }
+    last_move = cand_apply(n, c, wit_buf, wn);
+    auto_close();
+    true
+}
+
+take_count(): int {
+    if (tk_kind != K_NAME) return -1;
+    v: int = 0;
+    for i in 0..sym_len[tk_sym] {
+        c: int = sym_byte(tk_sym, i);
+        if (c < 48 || c > 57) return -1;
+        v = v * 10 + c - 48
+    }
+    lex();
+    v
+}
+
+// Prove each lemma the file gave with its proof (lv_given), adding it to
+// the tools. Whether all were proved; the first that was not, in proof_level.
+proof_level: int = -1;
+
+prove_given() raises KernelError: bool {
+    for l in 0..lv_n {
+        if (lv_given[l] && lv_lemma[l] < 0) {
+            if (!run_proof(l)) {
+                proof_level = l;
+                return false
+            }
+            level_solved(l)
+        }
+    }
+    true
 }

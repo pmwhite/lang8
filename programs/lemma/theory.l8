@@ -17,6 +17,8 @@ use_tag std;
 //   assume NAME "words": PROP   a rule of its rulebook (assumed, never an axiom)
 //   define NAME ARGS = TERM     a symbol the region defines
 //   level NAME "Title"          a level (see read_level)
+//   lemma NAME "words": PROP    a lemma, proved as the file is read by the
+//                               moves under it (proof:), as a level would be
 //
 // A region adds no axioms: what it fixes is free, what it assumes is a
 // hypothesis of every theorem proved in it, and a definition is a
@@ -33,6 +35,9 @@ const LM_ASSUME: int = 2;
 const LM_DEF: int = 3;
 
 const LM_LEVEL: int = 4;
+
+// A lemma a file gave with its proof (always a tool, like the rulebook).
+const LM_GIVEN: int = 5;
 
 const LEMMAS: int = 1024;
 
@@ -127,6 +132,20 @@ lv_kitn: []int = new int[LEVELS](0);
 // The lemma it proves, once solved.
 lv_lemma: []int = new int[LEVELS](-1);
 
+// A lemma given with its proof (proved as the file is read, not played).
+lv_given: []bool = new bool[LEVELS](false);
+
+// Its proof, as written: moves, in script_bytes from lv_proof0.
+lv_proof0: []int = new int[LEVELS](0);
+
+lv_proofn: []int = new int[LEVELS](0);
+
+const SCRIPT_BYTES: int = 262144;
+
+script_bytes: []i8 = new i8[SCRIPT_BYTES](0i8);
+
+script_used: int = 0;
+
 lv_n: int = 0;
 
 const POOL: int = 8192;
@@ -153,13 +172,16 @@ mark_lm: int = 0;
 
 mark_sub: int = 0;
 
+mark_script: int = 0;
+
 // Everything the logic has brought, kept; anything after it forgotten.
 mark_logic() {
     mark_ent = ent_n;
     mark_nt = nt_n;
     mark_tok = tok_n;
     mark_lm = lm_n;
-    mark_sub = sub_types_n
+    mark_sub = sub_types_n;
+    mark_script = script_used
 }
 
 reset_to_logic() {
@@ -168,6 +190,7 @@ reset_to_logic() {
     tok_n = mark_tok;
     lm_n = mark_lm;
     sub_types_n = mark_sub;
+    script_used = mark_script;
     ctx_n = 0;
     lv_n = 0;
     pool_n = 0;
@@ -290,6 +313,10 @@ statement() raises TheoryError, ReadError, KernelError {
             if (m < 0) theory_fail("hid a lemma there is not");
             lm_hidden[m] = true
         }
+    } else if (w == sym("lemma")) {
+        read_level();
+        l: int = lv_n - 1;
+        lv_given[l] = true
     } else if (w == sym("calculate")) region_calc = true else if (w == sym("picture")) region_picture = take_name() else if (w == sym("level")) read_level() else theory_fail("no such statement");
     if (!at_statement()) theory_fail("more after a statement than it takes")
 }
@@ -430,20 +457,34 @@ read_level() raises TheoryError, ReadError, KernelError {
     lv_kit0[l] = pool_n;
     lv_kitn[l] = 0;
     lv_lemma[l] = -1;
+    lv_given[l] = false;
+    lv_proof0[l] = 0;
+    lv_proofn[l] = 0;
     lv_n = lv_n + 1;
+    // (A lemma's statement follows its name: lemma NAME "words": PROP.)
+    if (tk_is(":")) {
+        lex();
+        lv_goal[l] = norm(read_statement(true))
+    }
     while (!at_statement()) {
         f: int = take_name();
         expect_tok(":");
-        if (f == sym("show")) lv_goal[l] = norm(read_statement(true)) else if (f == sym("say")) {
+        if (f == sym("show")) lv_goal[l] = norm(read_statement(true)) else if (f == sym("proof")) {
+            from: int = tk_from;
+            while (!at_statement() && !next_is_field()) lex();
+            to: int = tk_from;
+            if (script_used + to - from > SCRIPT_BYTES) theory_fail("too many proofs");
+            lv_proof0[l] = script_used;
+            for i in from..to script_bytes[script_used + i - from] = src[i];
+            lv_proofn[l] = to - from;
+            script_used = script_used + to - from
+        } else if (f == sym("say")) {
             if (tk_kind != K_STRING) theory_fail("say: takes words in quotes");
             lv_intro[l] = take_name()
         } else if (f == sym("par")) lv_par[l] = take_int() else if (f == sym("tools")) {
             lv_tool0[l] = pool_n;
-            while (!at_statement() && !next_is_field()) {
-                m: int = find_lemma(take_name());
-                if (m < 0) theory_fail("a level's tool is not a lemma");
-                pool_add(m)
-            }
+            // (By name: a tool may be a level's lemma, proved later.)
+            while (!at_statement() && !next_is_field()) pool_add(take_name());
             lv_tooln[l] = pool_n - lv_tool0[l]
         } else if (f == sym("kit")) {
             lv_kit0[l] = pool_n;
@@ -460,7 +501,7 @@ read_level() raises TheoryError, ReadError, KernelError {
 
 is_level_field(): bool {
     s: int = tk_sym;
-    s == sym("show") || s == sym("say") || s == sym("par") || s == sym("tools") || s == sym("kit")
+    s == sym("show") || s == sym("say") || s == sym("par") || s == sym("tools") || s == sym("kit") || s == sym("proof")
 }
 
 // Whether the next tokens are a level's field (a word, then a colon).
