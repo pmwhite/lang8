@@ -13,7 +13,9 @@
 # Keys and what Apple gives back are kept in ~/.config/tempo-ios (the API
 # key there as AuthKey_KEYID.p8, its ids in asc.env as KEY_ID and
 # ISSUER_ID); nothing secret is kept in the repository. sign.sh signs the
-# app with what this makes.
+# app with what this makes. It is Better's unless $APPLE_BUNDLE and
+# $APPLE_NAME say another app's (space.trailingwhite.smoothbible, "Smooth
+# Bible", for programs/bible).
 import base64
 import hashlib
 import os
@@ -28,7 +30,8 @@ import requests
 
 HOME = os.path.expanduser("~/.config/tempo-ios")
 API = "https://api.appstoreconnect.apple.com/v1"
-BUNDLE = "space.trailingwhite.better"
+BUNDLE = os.environ.get("APPLE_BUNDLE", "space.trailingwhite.better")
+NAME = os.environ.get("APPLE_NAME", "Better")
 KINDS = {
     "dev": ("DEVELOPMENT", "IOS_APP_DEVELOPMENT"),
     "store": ("DISTRIBUTION", "IOS_APP_STORE"),
@@ -78,7 +81,7 @@ def bundle_id():
     if found:
         return found[0]
     return call("POST", "/bundleIds", {"data": {"type": "bundleIds", "attributes": {
-        "identifier": BUNDLE, "name": "Better", "platform": "IOS"}}})["data"]
+        "identifier": BUNDLE, "name": NAME, "platform": "IOS"}}})["data"]
 
 
 def app_id():
