@@ -1,0 +1,591 @@
+tag bible_ios;
+
+use_tag std, ios, bible;
+
+// What the reader keeps: highlights, bookmarks, notes and the places jumped
+// from, each a file of tab-separated lines in Application
+// Support/SmoothBible (written whole after every change, by way of a
+// temporary file), and the settings, in the user's defaults.
+import "../ios/objc.l8";
+
+import "text.l8";
+
+extern time(t: int): int;
+
+extern NSSearchPathForDirectoriesInDomains(directory: int, mask: int, expand: int): int;
+
+extern memcpy_to(dst: int, src: []i8, n: int): int = memcpy;
+
+// A verse as one number: its chapter (through the Bible) and its verse.
+verse_key(c: int, v: int): int {
+    c * 1000 + v
+}
+
+key_chapter(k: int): int {
+    k / 1000
+}
+
+key_verse(k: int): int {
+    k % 1000
+}
+
+// ---- highlights: a verse each, sorted ----
+hl_n: int = 0;
+
+hl_key: []int = new int[32768](0);
+
+hl_color: []int = new int[32768](0);
+
+hl_time: []int = new int[32768](0);
+
+// ---- bookmarks ----
+bm_n: int = 0;
+
+bm_key: []int = new int[8192](0);
+
+bm_time: []int = new int[8192](0);
+
+// ---- notes: on their first verse, to their last; their text in a pool ----
+nt_n: int = 0;
+
+nt_key: []int = new int[4096](0);
+
+nt_end: []int = new int[4096](0);
+
+nt_time: []int = new int[4096](0);
+
+nt_at: []int = new int[4096](0);
+
+nt_len: []int = new int[4096](0);
+
+nt_pool: []i8 = new i8[1048576](0i8);
+
+nt_pool_n: int = 0;
+
+// ---- history: the places jumped from (chapter, verse, how far into it,
+// and whether the place was a verse), newest last ----
+hs_n: int = 0;
+
+hs_ch: []int = new int[51](0);
+
+hs_v: []int = new int[51](0);
+
+hs_frac: []int = new int[51](0);
+
+hs_exact: []bool = new bool[51](false);
+
+hs_time: []int = new int[51](0);
+
+// Where key k is (or would go) in the first n of keys, sorted.
+find_key(ks: []int, n: int, k: int): int {
+    lo: int = 0;
+    hi: int = n;
+    while (lo < hi) {
+        mid: int = (lo + hi) / 2;
+        if (ks[mid] < k) lo = mid + 1 else hi = mid
+    }
+    lo
+}
+
+// The color (0 to 4) of verse v of chapter c's highlight, or -1.
+highlight_of(c: int, v: int): int {
+    k: int = verse_key(c, v);
+    i: int = find_key(hl_key, hl_n, k);
+    if (i < hl_n && hl_key[i] == k) hl_color[i] else -1
+}
+
+set_highlight(c: int, v: int, color: int) {
+    k: int = verse_key(c, v);
+    i: int = find_key(hl_key, hl_n, k);
+    if (i < hl_n && hl_key[i] == k) {
+        if (color < 0) {
+            for j in i..hl_n - 1 {
+                hl_key[j] = hl_key[j + 1];
+                hl_color[j] = hl_color[j + 1];
+                hl_time[j] = hl_time[j + 1]
+            }
+            hl_n = hl_n - 1
+        } else {
+            hl_color[i] = color;
+            hl_time[i] = time(0)
+        }
+        return
+    }
+    if (color < 0 || hl_n >= len(hl_key)) return;
+    j: int = hl_n;
+    while (j > i) {
+        hl_key[j] = hl_key[j - 1];
+        hl_color[j] = hl_color[j - 1];
+        hl_time[j] = hl_time[j - 1];
+        j = j - 1
+    }
+    hl_key[i] = k;
+    hl_color[i] = color;
+    hl_time[i] = time(0);
+    hl_n = hl_n + 1
+}
+
+is_bookmarked(c: int, v: int): bool {
+    k: int = verse_key(c, v);
+    i: int = find_key(bm_key, bm_n, k);
+    i < bm_n && bm_key[i] == k
+}
+
+set_bookmark(c: int, v: int, on: bool) {
+    k: int = verse_key(c, v);
+    i: int = find_key(bm_key, bm_n, k);
+    here: bool = i < bm_n && bm_key[i] == k;
+    if (here && !on) {
+        for j in i..bm_n - 1 {
+            bm_key[j] = bm_key[j + 1];
+            bm_time[j] = bm_time[j + 1]
+        }
+        bm_n = bm_n - 1
+    }
+    if (!here && on && bm_n < len(bm_key)) {
+        j: int = bm_n;
+        while (j > i) {
+            bm_key[j] = bm_key[j - 1];
+            bm_time[j] = bm_time[j - 1];
+            j = j - 1
+        }
+        bm_key[i] = k;
+        bm_time[i] = time(0);
+        bm_n = bm_n + 1
+    }
+}
+
+// The note on verse v of chapter c (one that begins there), or -1.
+note_of(c: int, v: int): int {
+    k: int = verse_key(c, v);
+    i: int = find_key(nt_key, nt_n, k);
+    if (i < nt_n && nt_key[i] == k) i else -1
+}
+
+// The note on verses v to last of chapter c: its text the first n bytes of
+// b (none, if n is 0).
+set_note(
+    c: int,
+    v: int,
+    last: int,
+    b: []i8,
+    n: int
+) {
+    k: int = verse_key(c, v);
+    i: int = find_key(nt_key, nt_n, k);
+    here: bool = i < nt_n && nt_key[i] == k;
+    if (n == 0) {
+        if (here) {
+            for j in i..nt_n - 1 {
+                nt_key[j] = nt_key[j + 1];
+                nt_end[j] = nt_end[j + 1];
+                nt_time[j] = nt_time[j + 1];
+                nt_at[j] = nt_at[j + 1];
+                nt_len[j] = nt_len[j + 1]
+            }
+            nt_n = nt_n - 1
+        }
+        return
+    }
+    if (!here) {
+        if (nt_n >= len(nt_key)) return;
+        j: int = nt_n;
+        while (j > i) {
+            nt_key[j] = nt_key[j - 1];
+            nt_end[j] = nt_end[j - 1];
+            nt_time[j] = nt_time[j - 1];
+            nt_at[j] = nt_at[j - 1];
+            nt_len[j] = nt_len[j - 1];
+            j = j - 1
+        }
+        nt_n = nt_n + 1;
+        nt_key[i] = k
+    }
+    if (nt_pool_n + n > len(nt_pool)) compact_notes();
+    m: int = if (nt_pool_n + n > len(nt_pool)) len(nt_pool) - nt_pool_n else n;
+    for x in 0..m nt_pool[nt_pool_n + x] = b[x];
+    nt_at[i] = nt_pool_n;
+    nt_len[i] = m;
+    nt_pool_n = nt_pool_n + m;
+    nt_end[i] = last;
+    nt_time[i] = time(0)
+}
+
+// The notes' texts moved together (the pool's old texts let go).
+compact_buf: []i8 = new i8[1048576](0i8);
+
+compact_notes() {
+    n: int = 0;
+    for i in 0..nt_n {
+        for x in 0..nt_len[i] compact_buf[n + x] = nt_pool[nt_at[i] + x];
+        nt_at[i] = n;
+        n = n + nt_len[i]
+    }
+    for x in 0..n nt_pool[x] = compact_buf[x];
+    nt_pool_n = n
+}
+
+// A note's text as an NSString.
+note_string(i: int): int {
+    nsstring_at(bytes_address(nt_pool) + nt_at[i], nt_len[i])
+}
+
+// A place jumped from, newest last (the last 50 kept).
+push_history(
+    c: int,
+    v: int,
+    frac: int,
+    exact: bool
+) {
+    if (hs_n >= 50) {
+        for i in 0..hs_n - 1 {
+            hs_ch[i] = hs_ch[i + 1];
+            hs_v[i] = hs_v[i + 1];
+            hs_frac[i] = hs_frac[i + 1];
+            hs_exact[i] = hs_exact[i + 1];
+            hs_time[i] = hs_time[i + 1]
+        }
+        hs_n = hs_n - 1
+    }
+    hs_ch[hs_n] = c;
+    hs_v[hs_n] = v;
+    hs_frac[hs_n] = frac;
+    hs_exact[hs_n] = exact;
+    hs_time[hs_n] = time(0);
+    hs_n = hs_n + 1
+}
+
+// ---- files ----
+fbuf: []i8 = new i8[2097152](0i8);
+
+fbuf_n: int = 0;
+
+fput(k: int) {
+    if (fbuf_n < len(fbuf)) {
+        fbuf[fbuf_n] = k trunc i8;
+        fbuf_n = fbuf_n + 1
+    }
+}
+
+fput_str(s: str) {
+    for k in s fput(k as int)
+}
+
+fput_int(n: int) {
+    if (n < 0) {
+        fput(45);
+        fput_int(-n);
+        return
+    }
+    if (n >= 10) fput_int(n / 10);
+    fput(48 + n % 10)
+}
+
+// A book's code (GEN), then a tab.
+fput_book(b: int) {
+    for i in 0..3 fput(bsb[book_line[b] + 1 + i] as int);
+    fput(9)
+}
+
+fput_place(c: int, v: int) {
+    fput_book(ch_book[c]);
+    fput_int(ch_num[c]);
+    fput(9);
+    fput_int(v);
+    fput(9)
+}
+
+// The directory the files are in (made, if it was not).
+data_dir: int = 0;
+
+dir_path(): int {
+    if (data_dir != 0) return data_dir;
+    dirs: int = NSSearchPathForDirectoriesInDomains(14, 1, 1);
+    base: int = msg(dirs, sel("firstObject"));
+    if (base == 0) base = NSHomeDirectory();
+    data_dir = keep(msg1(base, sel("stringByAppendingPathComponent:"), nsstring("SmoothBible")));
+    msg4(msg(cls("NSFileManager"), sel("defaultManager")), sel("createDirectoryAtPath:withIntermediateDirectories:attributes:error:"),
+        data_dir, 1, 0, 0);
+    data_dir
+}
+
+file_path(name: str): int {
+    msg1(dir_path(), sel("stringByAppendingPathComponent:"), nsstring(name))
+}
+
+// fbuf written to the file name (whole, by way of a temporary file).
+write_file(name: str) {
+    data: int = msg2(cls("NSData"), sel("dataWithBytes:length:"), bytes_address(fbuf),
+        fbuf_n);
+    msg2(data, sel("writeToFile:atomically:"), file_path(name), 1)
+}
+
+// The file name into fbuf (empty if there is none).
+read_file(name: str) {
+    fbuf_n = 0;
+    data: int = msg1(cls("NSData"), sel("dataWithContentsOfFile:"), file_path(name));
+    if (data == 0) return;
+    n: int = msg(data, sel("length"));
+    if (n > len(fbuf)) n = len(fbuf);
+    if (n > 0) memcpy_from(fbuf, msg(data, sel("bytes")), n);
+    fbuf_n = n
+}
+
+save_highlights() {
+    fbuf_n = 0;
+    for i in 0..hl_n {
+        fput_place(key_chapter(hl_key[i]), key_verse(hl_key[i]));
+        fput_str(hl_names[hl_color[i]]);
+        fput(9);
+        fput_int(hl_time[i]);
+        fput(10)
+    }
+    write_file("highlights.tsv")
+}
+
+save_bookmarks() {
+    fbuf_n = 0;
+    for i in 0..bm_n {
+        fput_place(key_chapter(bm_key[i]), key_verse(bm_key[i]));
+        fput_int(bm_time[i]);
+        fput(10)
+    }
+    write_file("bookmarks.tsv")
+}
+
+save_notes() {
+    fbuf_n = 0;
+    for i in 0..nt_n {
+        fput_place(key_chapter(nt_key[i]), key_verse(nt_key[i]));
+        fput_int(nt_end[i]);
+        fput(9);
+        fput_int(nt_time[i]);
+        fput(9);
+        for x in 0..nt_len[i] {
+            k: int = nt_pool[nt_at[i] + x] as int;
+            if (k == 92) fput_str("\\\\") else if (k == 10) fput_str("\\n") else if (k == 9) fput_str("\\t") else fput(k)
+        }
+        fput(10)
+    }
+    write_file("notes.tsv")
+}
+
+save_history() {
+    fbuf_n = 0;
+    for i in 0..hs_n {
+        fput_place(hs_ch[i], hs_v[i]);
+        fput_int(hs_time[i]);
+        // (Beyond the four columns: how far into the verse, and whether the
+        // place was a verse.)
+        fput(9);
+        fput_int(hs_frac[i]);
+        fput(9);
+        fput_int(if (hs_exact[i]) 1 else 0);
+        fput(10)
+    }
+    write_file("history.tsv")
+}
+
+// Reading a file: its fields, a line at a time.
+fpos: int = 0;
+
+line_e: int = 0;
+
+// The next line (false at the end): fpos is its start, line_e its end.
+next_line(): bool {
+    fpos = line_e + 1;
+    if (fpos >= fbuf_n) return false;
+    line_e = fpos;
+    while (line_e < fbuf_n && fbuf[line_e] as int != 10) line_e = line_e + 1;
+    true
+}
+
+// The field after the tab from p: where it starts.
+field_after(p: int): int {
+    q: int = p;
+    while (q < line_e && fbuf[q] as int != 9) q = q + 1;
+    q + 1
+}
+
+field_int(p: int): int {
+    n: int = 0;
+    neg: bool = false;
+    q: int = p;
+    if (q < line_e && fbuf[q] as int == 45) {
+        neg = true;
+        q = q + 1
+    }
+    while (q < line_e && fbuf[q] as int >= 48 && fbuf[q] as int <= 57) {
+        n = n * 10 + fbuf[q] as int - 48;
+        q = q + 1
+    }
+    if (neg) -n else n
+}
+
+// The chapter a line's first two fields name (GEN, 1), or -1.
+field_chapter(p: int): int {
+    if (p + 3 > line_e) return -1;
+    for b in 0..books {
+        same: bool = true;
+        for i in 0..3
+            if (bsb[book_line[b] + 1 + i] != fbuf[p + i]) same = false;
+        if (same) {
+            n: int = field_int(field_after(p));
+            if (n < 1 || n > book_count[b]) return -1;
+            return book_first[b] + n - 1
+        }
+    }
+    -1
+}
+
+field_is(p: int, word: str): bool {
+    for i in 0..len(word)
+        if (p + i >= line_e || fbuf[p + i] != word[i]) return false;
+    true
+}
+
+begin_lines() {
+    fpos = 0;
+    line_e = -1
+}
+
+note_buf: []i8 = new i8[65536](0i8);
+
+load_marks() {
+    read_file("highlights.tsv");
+    begin_lines();
+    hl_n = 0;
+    while (next_line()) {
+        c: int = field_chapter(fpos);
+        f2: int = field_after(fpos);
+        f3: int = field_after(f2);
+        f4: int = field_after(f3);
+        f5: int = field_after(f4);
+        color: int = -1;
+        for i in 0..5
+            if (field_is(f4, hl_names[i])) color = i;
+        if (c >= 0 && color >= 0) {
+            set_highlight(c, field_int(f3), color);
+            hl_time[find_key(hl_key, hl_n, verse_key(c, field_int(f3)))] = field_int(f5)
+        }
+    }
+    read_file("bookmarks.tsv");
+    begin_lines();
+    bm_n = 0;
+    while (next_line()) {
+        c: int = field_chapter(fpos);
+        f3: int = field_after(field_after(fpos));
+        if (c >= 0) set_bookmark(c, field_int(f3), true)
+    }
+    read_file("notes.tsv");
+    begin_lines();
+    nt_n = 0;
+    nt_pool_n = 0;
+    while (next_line()) {
+        c: int = field_chapter(fpos);
+        f3: int = field_after(field_after(fpos));
+        f4: int = field_after(f3);
+        f5: int = field_after(f4);
+        f6: int = field_after(f5);
+        n: int = 0;
+        q: int = f6;
+        while (q < line_e && n < len(note_buf)) {
+            k: int = fbuf[q] as int;
+            if (k == 92 && q + 1 < line_e) {
+                q = q + 1;
+                m: int = fbuf[q] as int;
+                k = (if (m == 110) 10 else if (m == 116) 9 else m)
+            }
+            note_buf[n] = k trunc i8;
+            n = n + 1;
+            q = q + 1
+        }
+        if (c >= 0 && n > 0) set_note(c, field_int(f3), field_int(f4), note_buf, n)
+    }
+    read_file("history.tsv");
+    begin_lines();
+    hs_n = 0;
+    while (next_line()) {
+        c: int = field_chapter(fpos);
+        f3: int = field_after(field_after(fpos));
+        f4: int = field_after(f3);
+        f5: int = field_after(f4);
+        f6: int = field_after(f5);
+        if (c >= 0) push_history(c, field_int(f3), field_int(f5), field_int(f6) == 1)
+    }
+}
+
+// ---- the settings ----
+defaults(): int {
+    msg(cls("NSUserDefaults"), sel("standardUserDefaults"))
+}
+
+def_int(key: str): int {
+    msg1(defaults(), sel("integerForKey:"), nsstring(key))
+}
+
+set_def_int(key: str, n: int) {
+    msg2(defaults(), sel("setInteger:forKey:"), n, nsstring(key))
+}
+
+def_bool(key: str): bool {
+    (msg1(defaults(), sel("boolForKey:"), nsstring(key)) & 255) != 0
+}
+
+set_def_bool(key: str, on: bool) {
+    msg2(defaults(), sel("setBool:forKey:"), if (on) 1 else 0, nsstring(key))
+}
+
+// What the settings are until they are changed.
+def_keys: []int = new int[8](0);
+
+def_values: []int = new int[8](0);
+
+register_defaults() {
+    yes: int = msg1(cls("NSNumber"), sel("numberWithBool:"), 1);
+    two: int = msg1(cls("NSNumber"), sel("numberWithLong:"), 2);
+    one: int = msg1(cls("NSNumber"), sel("numberWithLong:"), 1);
+    def_keys[0] = nsstring("showVerseNumbers");
+    def_values[0] = yes;
+    def_keys[1] = nsstring("showHeadings");
+    def_values[1] = yes;
+    def_keys[2] = nsstring("showNotes");
+    def_values[2] = yes;
+    def_keys[3] = nsstring("sizeStep");
+    def_values[3] = two;
+    def_keys[4] = nsstring("spacing");
+    def_values[4] = one;
+    def_keys[5] = nsstring("margins");
+    def_values[5] = one;
+    msg1(defaults(), sel("registerDefaults:"), nsdictionary(def_keys, def_values,
+        6))
+}
+
+clamp(n: int, lo: int, hi: int): int {
+    if (n < lo) lo else if (n > hi) hi else n
+}
+
+load_settings() {
+    register_defaults();
+    set_theme = clamp(def_int("theme"), 0, 5);
+    set_font = clamp(def_int("font"), 0, 4);
+    set_size = clamp(def_int("sizeStep"), 0, 7);
+    set_spacing = clamp(def_int("spacing"), 0, 2);
+    set_margins = clamp(def_int("margins"), 0, 2);
+    lay_verse_numbers = def_bool("showVerseNumbers");
+    lay_headings = def_bool("showHeadings");
+    lay_notes = def_bool("showNotes");
+    lay_verse_lines = def_bool("verseLines")
+}
+
+save_settings() {
+    set_def_int("theme", set_theme);
+    set_def_int("font", set_font);
+    set_def_int("sizeStep", set_size);
+    set_def_int("spacing", set_spacing);
+    set_def_int("margins", set_margins);
+    set_def_bool("showVerseNumbers", lay_verse_numbers);
+    set_def_bool("showHeadings", lay_headings);
+    set_def_bool("showNotes", lay_notes);
+    set_def_bool("verseLines", lay_verse_lines)
+}

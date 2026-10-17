@@ -2,31 +2,42 @@ tag bible_ios;
 
 use_tag std, ios, bible;
 
-// Smooth Bible, the Bible app for an iPhone, built with `l8 arm64 --target ios` (see
-// tools/ios/build.sh and programs/bible/ios/): the Berean Standard Bible to
-// read, in UIKit's own views, so it reads, scrolls, selects and copies as
-// the phone's own apps do.
+// Smooth Bible, the Bible app for an iPhone, built with `l8 arm64 --target
+// ios` (see tools/ios/build.sh and programs/bible/ios/): the Berean Standard
+// Bible to read, in UIKit's own views, so it reads, scrolls, selects and
+// copies as the phone's own apps do.
 //
 // A navigation controller holds a table of every chapter, one after
 // another, read on by scrolling from Genesis 1 to Revelation 22. Each row is
 // a text view of one attributed string (text.l8 lays the chapter out as
-// runs; each run here is a string in its style), its text sized from the
-// phone's text size, headed by its book's name where a book begins and its
-// number. The bar's title is the chapter being read, shown once its heading
-// has scrolled up under the bar; the title, or the books button beside it,
-// opens a sheet of the books, and a book its chapters. A tap on a
-// footnote's mark shows the note; a tap elsewhere hides or shows the bars,
-// which scrolling on through the text hides too. Where the reader was is
-// kept.
+// runs; each run here is a string in its style, ios_look.l8), with the
+// reader's highlights, bookmarks and notes in it (ios_store.l8 keeps them).
+// The bar's title is the chapter being read, shown once its opener has
+// scrolled up under the bar; it opens the passage picker. The bar's other
+// buttons open search, the library and the reading settings (sheets,
+// ios_sheets.l8). A tap on a verse selects it, and a tray of what can be
+// done with the verses selected comes up (ios_select.l8); a tap elsewhere
+// hides or shows the bars, which scrolling on through the text hides too
+// and scrolling back shows. Where the reader was is kept, by its verse.
 //
 // Links (bsb://JHN/3) open a chapter. With L8_DEMO=1 in the environment,
 // Darwin notifications take it through a demo, for the simulator in CI (see
-// programs/bible/ios/simulate.sh).
+// ios_demo.l8 and programs/bible/ios/simulate.sh).
 import "../../stdlib/print.l8";
 
 import "../ios/objc.l8";
 
 import "text.l8";
+
+import "ios_look.l8";
+
+import "ios_store.l8";
+
+import "ios_select.l8";
+
+import "ios_sheets.l8";
+
+import "ios_demo.l8";
 
 extern open(path: str, flags: int, mode: int): int;
 
@@ -34,20 +45,25 @@ extern close(fd: int): int;
 
 extern getenv(name: str): ?*i8;
 
-extern msg_f_f(receiver: int, selector: int, x: f64): f64 = objc_msgSend;
-
-extern CFNotificationCenterGetDarwinNotifyCenter(): int;
-
-extern CFNotificationCenterAddObserver(
-    center: int,
-    observer: int,
-    callback: fn(center: int, observer: int, name: int, object: int, info: int): int,
-    name: int,
-    object: int,
-    behavior: int
-): int;
-
 extern msg_super0(sup: *ObjcSuper, selector: int): int = objc_msgSendSuper;
+
+extern msg_f4(
+    receiver: int,
+    selector: int,
+    t: f64,
+    a: int,
+    b: int,
+    c: int,
+    d: int
+): int = objc_msgSend;
+
+extern msg1_ff(
+    receiver: int,
+    selector: int,
+    a: int,
+    x: f64,
+    y: f64
+): int = objc_msgSend;
 
 // [super selector], from a method of cls (the class that defines it).
 super0(self: int, cls: int, selector: int) {
@@ -73,264 +89,334 @@ reader: int = 0;
 
 table: int = 0;
 
+// The chapter's name at the top: a button in a view (whose alpha fades it).
+title_view: int = 0;
+
 title_button: int = 0;
 
-// The book whose chapters the sheet of books shows.
-picker_book: int = 0;
-
-books_class: int = 0;
+// The strip of page behind the status bar.
+strip: int = 0;
 
 nav_class: int = 0;
 
+reader_class: int = 0;
+
 // The chapter being read (the one at the top), and how far down into it
-// (points); where that was when the app was last shut.
+// (points).
 cur: int = 0;
 
 cur_y: f64 = 0.0f64;
 
-restore_y: int = 0;
+// Where the reader was when the app was last shut: its chapter, verse (0
+// above the first), and how far into that (thousandths of em).
+restore_c: int = 0;
+
+restore_v: int = 0;
+
+restore_frac: int = 0;
+
+restored: bool = false;
 
 bars_hidden: bool = false;
 
-// A drag's start (where the text was), to tell which way it went.
-drag_from: f64 = 0.0f64;
+// A drag: the highest and lowest the text has been during it.
+drag_top: f64 = 0.0f64;
+
+drag_low: f64 = 0.0f64;
 
 // Results of four doubles (msg_hfa), kept: callbacks run outside any region.
 hfa: []f64 = new f64[4](0.0f64);
 
-// ---- the text's look ----
-// The phone's text size, as the body's size in points; the fonts, colors,
-// paragraph styles and attributes made from it (kept: made again when the
-// text size changes).
-em: f64 = 19.0f64;
+one: []int = new int[8](0);
 
-k_font: int = 0;
+timer_class: int = 0;
 
-k_color: int = 0;
+// The characters cp and then cp2 (if not 0) as an NSString.
+ubuf: []i8 = new i8[8](0i8);
 
-k_para: int = 0;
+ubuf_n: int = 0;
 
-k_baseline: int = 0;
-
-k_kern: int = 0;
-
-k_link: str = "L8Link";
-
-serif_desc: int = 0;
-
-ink: int = 0;
-
-faint: int = 0;
-
-accent: int = 0;
-
-paper: int = 0;
-
-fonts: []int = new int[STYLES](0);
-
-// For each style and paragraph kind (with a stanza's break or not), its
-// paragraph style and attributes.
-paras: []int = new int[STYLES * 14](0);
-
-attrs: []int = new int[STYLES * 14](0);
-
-keys: []int = new int[8](0);
-
-one_object: []int = new int[1](0);
-
-values: []int = new int[8](0);
-
-color_named(name: str, otherwise: str): int {
-    c: int = msg1(cls("UIColor"), sel("colorNamed:"), nsstring(name));
-    if (c == 0) c = msg(cls("UIColor"), sel(otherwise));
-    keep(c)
-}
-
-serif(size: f64): int {
-    msg1_f(cls("UIFont"), sel("fontWithDescriptor:size:"), serif_desc, size)
-}
-
-serif_italic(size: f64): int {
-    d: int = msg1(serif_desc, sel("fontDescriptorWithSymbolicTraits:"), 1);
-    if (d == 0) d = serif_desc;
-    msg1_f(cls("UIFont"), sel("fontWithDescriptor:size:"), d, size)
-}
-
-// The serif with its capitals as small capitals (the font's own, through
-// its feature for them: type 38, kUpperCaseType; selector 1, small caps).
-small_caps(size: f64): int {
-    keys[0] = objc_const("UIFontFeatureTypeIdentifierKey");
-    values[0] = msg1(cls("NSNumber"), sel("numberWithLong:"), 38);
-    keys[1] = objc_const("UIFontFeatureSelectorIdentifierKey");
-    values[1] = msg1(cls("NSNumber"), sel("numberWithLong:"), 1);
-    one: []int = one_object;
-    one[0] = nsdictionary(keys, values, 2);
-    keys[0] = objc_const("UIFontDescriptorFeatureSettingsAttribute");
-    values[0] = nsarray(one, 1);
-    d: int = msg1(serif_desc, sel("fontDescriptorByAddingAttributes:"), nsdictionary(keys,
-        values, 1));
-    msg1_f(cls("UIFont"), sel("fontWithDescriptor:size:"), d, size)
-}
-
-sans(size: f64, weight: f64): int {
-    msg_ff(cls("UIFont"), sel("systemFontOfSize:weight:"), size, weight)
-}
-
-release(object: int) {
-    if (object != 0) msg(object, sel("release"))
-}
-
-// The fonts and the rest, for the phone's text size now.
-make_look() {
-    if (k_font == 0) {
-        k_font = objc_const("NSFontAttributeName");
-        k_color = objc_const("NSForegroundColorAttributeName");
-        k_para = objc_const("NSParagraphStyleAttributeName");
-        k_baseline = objc_const("NSBaselineOffsetAttributeName");
-        k_kern = objc_const("NSKernAttributeName");
-        body: int = objc_const("UIFontTextStyleBody");
-        d: int = msg1(cls("UIFontDescriptor"), sel("preferredFontDescriptorWithTextStyle:"),
-            body);
-        s: int = msg1(d, sel("fontDescriptorWithDesign:"), objc_const("UIFontDescriptorSystemDesignSerif"));
-        serif_desc = keep(if (s != 0) s else d);
-        ink = color_named("Ink", "labelColor");
-        faint = color_named("Faint", "secondaryLabelColor");
-        accent = color_named("Accent", "tintColor");
-        paper = color_named("Paper", "systemBackgroundColor")
-    }
-    metrics: int = msg1(cls("UIFontMetrics"), sel("metricsForTextStyle:"), objc_const("UIFontTextStyleBody"));
-    em = msg_f_f(metrics, sel("scaledValueForValue:"), 19.0f64);
-    for i in 0..len(fonts) release(fonts[i]);
-    fonts[STYLE_BODY] = keep(serif(em));
-    fonts[STYLE_VERSE] = keep(sans(em * 0.56f64, 0.3f64));
-    fonts[STYLE_BOOK] = keep(serif(em * 1.75f64));
-    fonts[STYLE_NUMERAL] = keep(serif(em * 2.4f64));
-    fonts[STYLE_HEAD] = keep(sans(em * 0.9f64, 0.3f64));
-    fonts[STYLE_SUBHEAD] = keep(sans(em * 0.8f64, 0.3f64));
-    fonts[STYLE_REF] = keep(serif_italic(em * 0.78f64));
-    fonts[STYLE_TITLE] = keep(serif_italic(em * 0.94f64));
-    fonts[STYLE_MAJOR] = keep(sans(em * 0.66f64, 0.3f64));
-    fonts[STYLE_RANGE] = keep(serif_italic(em * 0.8f64));
-    fonts[STYLE_ACROSTIC] = keep(sans(em * 0.7f64, 0.3f64));
-    fonts[STYLE_NOTE] = keep(sans(em * 0.56f64, 0.4f64));
-    fonts[STYLE_LABEL] = keep(sans(em * 0.6f64, 0.3f64));
-    fonts[STYLE_CAPS] = keep(small_caps(em));
-    for i in 0..len(paras) {
-        release(paras[i]);
-        release(attrs[i]);
-        paras[i] = 0;
-        attrs[i] = 0
+uput(cp: int) {
+    if (cp < 128) {
+        ubuf[ubuf_n] = cp trunc i8;
+        ubuf_n = ubuf_n + 1
+    } else if (cp < 2048) {
+        ubuf[ubuf_n] = (192 + cp / 64) trunc i8;
+        ubuf[ubuf_n + 1] = (128 + cp % 64) trunc i8;
+        ubuf_n = ubuf_n + 2
+    } else {
+        ubuf[ubuf_n] = (224 + cp / 4096) trunc i8;
+        ubuf[ubuf_n + 1] = (128 + cp / 64 % 64) trunc i8;
+        ubuf[ubuf_n + 2] = (128 + cp % 64) trunc i8;
+        ubuf_n = ubuf_n + 3
     }
 }
 
-// A paragraph style: its alignment (0 left, 1 centered, 2 right), its
-// first line's indent and the rest's, and its space before and after.
-para_style(
-    align: int,
-    first: f64,
-    head: f64,
-    before: f64,
-    after: f64,
-    lines: f64
-): int {
-    p: int = msg(msg(cls("NSMutableParagraphStyle"), sel("alloc")), sel("init"));
-    msg1(p, sel("setAlignment:"), align);
-    msg_set_f(p, sel("setFirstLineHeadIndent:"), first);
-    msg_set_f(p, sel("setHeadIndent:"), head);
-    msg_set_f(p, sel("setParagraphSpacingBefore:"), before);
-    msg_set_f(p, sel("setParagraphSpacing:"), after);
-    msg_set_f(p, sel("setLineHeightMultiple:"), lines);
-    p
+ustr(cp: int, cp2: int): int {
+    ubuf_n = 0;
+    uput(cp);
+    if (cp2 != 0) uput(cp2);
+    nsstring_of(ubuf, ubuf_n)
 }
 
-// The paragraph style of a style's runs in a paragraph of kind para.
-para_for(style: int, para: int): int {
-    at: int = style * 14 + para;
-    if (paras[at] != 0) return paras[at];
-    kind: int = para % KINDS;
-    gap: f64 = if (para >= KINDS) em * 0.8f64 else 0.0f64;
-    p: int = 0;
-    if (style == STYLE_BOOK) p = para_style(1, 0.0f64, 0.0f64, em * 1.0f64, em * 1.2f64,
-        1.0f64) else if (style == STYLE_NUMERAL) p = para_style(1, 0.0f64, 0.0f64,
-        0.0f64, em * 0.5f64, 1.0f64) else if (style == STYLE_HEAD) p = para_style(0,
-        0.0f64, 0.0f64, em * 1.4f64, em * 0.3f64, 1.1f64) else if (style == STYLE_SUBHEAD) p = para_style(0,
-        0.0f64, 0.0f64, em * 1.0f64, em * 0.25f64, 1.1f64) else if (style == STYLE_REF) p = para_style(0,
-        0.0f64, 0.0f64, 0.0f64, em * 0.6f64, 1.1f64) else if (style == STYLE_TITLE) p = para_style(0,
-        0.0f64, 0.0f64, em * 0.2f64, em * 0.6f64, 1.15f64) else if (style == STYLE_MAJOR) p = para_style(1,
-        0.0f64, 0.0f64, em * 1.2f64, em * 0.1f64, 1.0f64) else if (style == STYLE_RANGE) p = para_style(1,
-        0.0f64, 0.0f64, 0.0f64, em * 0.6f64, 1.0f64) else if (style == STYLE_ACROSTIC) p = para_style(0,
-        0.0f64, 0.0f64, em * 1.2f64, em * 0.3f64, 1.0f64) else if (style == STYLE_LABEL) p = para_style(1,
-        0.0f64, 0.0f64, 0.0f64, em * 0.1f64, 1.0f64) else if (kind == PARA_Q1) p = para_style(0,
-        em * 1.0f64, em * 2.6f64, gap, 0.0f64, 1.22f64) else if (kind == PARA_Q2) p = para_style(0,
-        em * 2.0f64, em * 2.6f64, gap, 0.0f64, 1.22f64) else if (kind == PARA_L1) p = para_style(0,
-        em * 1.0f64, em * 2.0f64, gap, 0.0f64, 1.22f64) else if (kind == PARA_L2) p = para_style(0,
-        em * 2.0f64, em * 3.0f64, gap, 0.0f64, 1.22f64) else if (kind == PARA_CENTER) p = para_style(1,
-        0.0f64, 0.0f64, gap, 0.0f64, 1.22f64) else if (kind == PARA_RIGHT) p = para_style(2,
-        0.0f64, 0.0f64, gap, 0.0f64, 1.22f64) else p = para_style(0, 0.0f64, 0.0f64,
-        gap, 0.0f64, 1.22f64);
-    paras[at] = p;
-    p
+nsnumber_int(n: int): int {
+    msg1(cls("NSNumber"), sel("numberWithLong:"), n)
 }
 
-color_for(style: int): int {
-    if (style == STYLE_BODY || style == STYLE_HEAD || style == STYLE_CAPS || style == STYLE_BOOK) return ink;
-    if (style == STYLE_NUMERAL || style == STYLE_NOTE || style == STYLE_ACROSTIC) return accent;
-    faint
+// A timer that sends selector name to the app after t seconds.
+after(t: f64, name: str): int {
+    msg_f4(cls("NSTimer"), sel("scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:"),
+        t, app_obj, sel(name), 0, 0)
 }
 
-// The attributes of run r: its style's, in its paragraph, and for a
-// footnote's mark, what a tap on it opens (the note's place in the text).
-attrs_for(r: int): int {
-    style: int = run_style[r];
-    para: int = run_para[r];
-    link: bool = style == STYLE_NOTE;
-    at: int = style * 14 + para;
-    if (!link && attrs[at] != 0) return attrs[at];
+stop_timer(timer: int): int {
+    if (timer != 0) msg(timer, sel("invalidate"));
+    0
+}
+
+// ---- the chapter as an attributed string ----
+// For each byte of out (and its end), how many UTF-16 units come before it.
+u16_at: []int = new int[262145](0);
+
+// The verses of the chapter last measured (compute_ranges): their numbers,
+// and where each is in its text (UTF-16), from its number to its end, with
+// the marks put in.
+rv_c: int = -1;
+
+rv_count: int = 0;
+
+rv_num: []int = new int[200](0);
+
+rv_b: []int = new int[200](0);
+
+rv_e: []int = new int[200](0);
+
+// Whether a verse's wash goes on over the space after it (to the next).
+rv_joins: []bool = new bool[200](false);
+
+// The marks put in: where (before them), how many units, and what (0 a
+// bookmark, 1 a note), for which verse.
+ev_n: int = 0;
+
+ev_pos: []int = new int[400](0);
+
+ev_len: []int = new int[400](0);
+
+ev_kind: []int = new int[400](0);
+
+ev_verse: []int = new int[400](0);
+
+// Where each chapter's opener ends (its numeral, UTF-16), once laid out.
+opener16: []int = new int[1200](0);
+
+// Chapter c laid out (text.l8), its verses measured.
+compute_ranges(c: int) {
+    layout_chapter(c);
     n: int = 0;
-    keys[n] = k_font;
-    values[n] = fonts[style];
-    n = n + 1;
-    keys[n] = k_color;
-    values[n] = color_for(style);
-    n = n + 1;
-    keys[n] = k_para;
-    values[n] = para_for(style, para);
-    n = n + 1;
-    if (style == STYLE_VERSE || style == STYLE_NOTE) {
-        keys[n] = k_baseline;
-        values[n] = nsnumber_f(em * 0.34f64);
-        n = n + 1
+    for i in 0..out_n {
+        u16_at[i] = n;
+        k: int = out[i] as int & 255;
+        if (k < 128 || k >= 192) n = n + 1;
+        if (k >= 240) n = n + 1
     }
-    if (style == STYLE_LABEL || style == STYLE_MAJOR || style == STYLE_ACROSTIC) {
-        keys[n] = k_kern;
-        values[n] = nsnumber_f(em * 0.12f64);
-        n = n + 1
+    u16_at[out_n] = n;
+    opener16[c] = u16_at[opener_at];
+    rv_c = c;
+    rv_count = verse_count;
+    ev_n = 0;
+    for i in 0..verse_count {
+        b: int = verse_begin[i];
+        e: int = verse_end[i];
+        if (e < 0) e = (if (b >= 0) b else 0);
+        if (b < 0) b = e;
+        v: int = verse_num[i];
+        rv_num[i] = v;
+        rv_b[i] = u16_at[b];
+        rv_e[i] = u16_at[e];
+        rv_joins[i] = e < out_n && out[e] as int == 32;
+        if (is_bookmarked(c, v)) add_event(rv_b[i], 2, 0, v);
+        if (note_of(c, v) >= 0) add_event(rv_e[i], 2, 1, v)
     }
-    if (link) {
-        keys[n] = nsstring(k_link);
-        values[n] = msg1(cls("NSNumber"), sel("numberWithLong:"), run_arg[r]);
-        n = n + 1
+    // (Each verse's place, past the marks put in before it: a bookmark
+    // before its number is not in it, nor its note after its end.)
+    shift: int = 0;
+    j: int = 0;
+    for i in 0..rv_count {
+        b: int = rv_b[i];
+        while (j < ev_n && ev_pos[j] <= b) {
+            shift = shift + ev_len[j];
+            j = j + 1
+        }
+        rv_b[i] = b + shift;
+        e: int = rv_e[i];
+        while (j < ev_n && ev_pos[j] < e) {
+            shift = shift + ev_len[j];
+            j = j + 1
+        }
+        rv_e[i] = e + shift
     }
-    d: int = nsdictionary(keys, values, n);
-    if (!link) attrs[at] = keep(d);
-    d
+}
+
+add_event(
+    pos: int,
+    n: int,
+    kind: int,
+    v: int
+) {
+    if (ev_n >= len(ev_pos)) return;
+    ev_pos[ev_n] = pos;
+    ev_len[ev_n] = n;
+    ev_kind[ev_n] = kind;
+    ev_verse[ev_n] = v;
+    ev_n = ev_n + 1
+}
+
+// The verse table's row for verse v (of the chapter measured), or -1.
+rv_index(v: int): int {
+    for i in 0..rv_count
+        if (rv_num[i] == v) return i;
+    -1
+}
+
+// The verse whose text is at UTF-16 index k (of the chapter measured), or
+// -1.
+rv_at(k: int): int {
+    for i in 0..rv_count
+        if (k >= rv_b[i] && k < rv_e[i]) return i;
+    -1
+}
+
+// An attachment of a symbol's image, h points tall, its foot y above the
+// baseline.
+symbol_attachment(name: str, h: f64, y: f64): int {
+    image: int = symbol(name, h * 1.2f64, 5, c_accent);
+    att: int = msg1(cls("NSTextAttachment"), sel("textAttachmentWithImage:"), image);
+    l8_msg_hfa(hfa, image, sel("size"), 0, 0, 0);
+    w: f64 = if (hfa[1] > 0.0f64) hfa[0] * h / hfa[1] else h;
+    msg_rect(att, sel("setBounds:"), 0.0f64, y, w, h);
+    att
+}
+
+// A mark put into s at an event: an attachment with the attributes of the
+// text beside it (and a hair or thin space).
+put_event(s: int, j: int) {
+    pos: int = ev_pos[j];
+    n: int = msg(s, sel("length"));
+    at: int = if (ev_kind[j] == 1) pos - 1 else pos;
+    if (at < 0) at = 0;
+    if (at >= n) at = n - 1;
+    base: int = msg2(s, sel("attributesAtIndex:effectiveRange:"), at, 0);
+    att: int = if (ev_kind[j] == 0) symbol_attachment("bookmark.fill", em * 0.55f64,
+        em * 0.3f64) else symbol_attachment("note.text", em * 0.62f64, -em * 0.04f64);
+    d: int = msg(base, sel("mutableCopy"));
+    msg2(d, sel("setObject:forKey:"), att, k_attachment);
+    if (ev_kind[j] == 1) msg2(d, sel("setObject:forKey:"), nsnumber_int(ev_verse[j]),
+        nsstring(k_note_mark));
+    glyph: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        ustr(65532, 0), d);
+    space: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        ustr(if (ev_kind[j] == 0) 8202 else 8201, 0), base);
+    ins: int = make("NSMutableAttributedString");
+    if (ev_kind[j] == 0) {
+        msg1(ins, sel("appendAttributedString:"), glyph);
+        msg1(ins, sel("appendAttributedString:"), space)
+    } else {
+        msg1(ins, sel("appendAttributedString:"), space);
+        msg1(ins, sel("appendAttributedString:"), glyph)
+    }
+    msg2(s, sel("insertAttributedString:atIndex:"), ins, pos);
+    release(ins);
+    release(glyph);
+    release(space);
+    release(d)
+}
+
+// The verse flashed after a jump to it (its chapter, or -1).
+flash_c: int = -1;
+
+flash_v: int = 0;
+
+// The washes on chapter c's text s (the chapter measured): highlights,
+// the verses selected, and a verse flashed.
+paint_marks(s: int, c: int) {
+    n: int = msg(s, sel("length"));
+    msg3(s, sel("removeAttribute:range:"), k_background, 0, n);
+    msg3(s, sel("removeAttribute:range:"), k_underline, 0, n);
+    for i in 0..rv_count {
+        v: int = rv_num[i];
+        color: int = highlight_of(c, v);
+        b: int = rv_b[i];
+        e: int = rv_e[i];
+        if (color >= 0) {
+            // (Joined to the next verse's, if it is the same color.)
+            to: int = e;
+            if (i + 1 < rv_count && rv_joins[i] && highlight_of(c, rv_num[i + 1]) == color) to = rv_b[i + 1];
+            if (to > n) to = n;
+            if (to > b) msg4(s, sel("addAttribute:value:range:"), k_background, c_hl[color],
+                b, to - b)
+        }
+        if (c == sel_c && is_selected(v) && e > b && e <= n) {
+            msg4(s, sel("addAttribute:value:range:"), k_background, c_sel, b, e - b);
+            msg4(s, sel("addAttribute:value:range:"), k_underline, nsnumber_int(257),
+                b, e - b);
+            msg4(s, sel("addAttribute:value:range:"), k_underline_color, c_underline,
+                b, e - b)
+        }
+        if (c == flash_c && v == flash_v && e > b && e <= n) msg4(s, sel("addAttribute:value:range:"),
+            k_background, c_flash, b, e - b)
+    }
 }
 
 // Chapter c as an attributed string (autoreleased).
 chapter_text(c: int): int {
-    layout_chapter(c);
+    compute_ranges(c);
     s: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
     base: int = bytes_address(out);
     p: int = 0;
     for r in 0..runs {
         e: int = run_end[r];
-        a: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        a: int = 0;
+        if (run_style[r] == STYLE_RULE) {
+            // The divider: the hairline's attachment, then the line's end.
+            d: int = msg(attrs_for(r), sel("mutableCopy"));
+            msg2(d, sel("setObject:forKey:"), rule_attachment, k_attachment);
+            a = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+                ustr(65532, 10), d);
+            release(d)
+        } else a = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
             nsstring_at(base + p, e - p), attrs_for(r));
         msg1(s, sel("appendAttributedString:"), a);
         release(a);
         p = e
     }
+    j: int = ev_n - 1;
+    while (j >= 0) {
+        put_event(s, j);
+        j = j - 1
+    }
+    paint_marks(s, c);
     s
+}
+
+// The washes of chapter c, painted again where it is on the screen.
+repaint(c: int) {
+    tv: int = view_of(c);
+    if (tv == 0) return;
+    compute_ranges(c);
+    storage: int = msg(tv, sel("textStorage"));
+    msg(storage, sel("beginEditing"));
+    paint_marks(storage, c);
+    msg(storage, sel("endEditing"))
+}
+
+// Chapter c made again where it is on the screen (its marks changed), the
+// place kept.
+remake(c: int) {
+    tv: int = view_of(c);
+    if (tv == 0) return;
+    msg1(tv, sel("setAttributedText:"), chapter_text(c));
+    msg(table, sel("beginUpdates"));
+    msg(table, sel("endUpdates"))
 }
 
 // ---- the chapters, one after another ----
@@ -344,9 +430,13 @@ chapter_path(c: int): int {
     msg2(cls("NSIndexPath"), sel("indexPathForRow:inSection:"), c, 0)
 }
 
-// Space above a chapter, apart from the one before.
-chapter_gap(c: int): f64 {
-    if (c == 0) em * 0.6f64 else em * 2.6f64
+// The text's side margins, for the table's width now.
+side_margin(): f64 {
+    l8_msg_hfa(hfa, table, sel("bounds"), 0, 0, 0);
+    w: f64 = hfa[2];
+    m: f64 = margins[set_margins];
+    if (w - 2.0f64 * m > 600.0f64) m = (w - 600.0f64) / 2.0f64;
+    m
 }
 
 chapter_cell(t: int, path: int): int {
@@ -355,7 +445,6 @@ chapter_cell(t: int, path: int): int {
     if (cell == 0) {
         cell = msg(msg2(msg(cls("UITableViewCell"), sel("alloc")), sel("initWithStyle:reuseIdentifier:"),
             0, nsstring("chapter")), sel("autorelease"));
-        msg1(cell, sel("setBackgroundColor:"), paper);
         msg1(cell, sel("setSelectionStyle:"), 0);
         content: int = msg(cell, sel("contentView"));
         tv: int = msg_rect(msg(cls("UITextView"), sel("alloc")), sel("initWithFrame:"),
@@ -365,6 +454,7 @@ chapter_cell(t: int, path: int): int {
         msg1(tv, sel("setBackgroundColor:"), msg(cls("UIColor"), sel("clearColor")));
         msg_set_f(msg(tv, sel("textContainer")), sel("setLineFragmentPadding:"), 0.0f64);
         msg1(tv, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+        msg1(tv, sel("setDelegate:"), app_obj);
         tap: int = msg2(msg(cls("UITapGestureRecognizer"), sel("alloc")), sel("initWithTarget:action:"),
             app_obj, sel("tapped:"));
         msg1(tap, sel("setDelegate:"), app_obj);
@@ -377,9 +467,12 @@ chapter_cell(t: int, path: int): int {
         pin(tv, content, "topAnchor");
         pin(tv, content, "bottomAnchor")
     }
+    msg1(cell, sel("setBackgroundColor:"), c_bg);
     tv: int = text_of_cell(cell);
-    msg_rect(tv, sel("setTextContainerInset:"), chapter_gap(c), 26.0f64, if (c + 1 == chapters) 96.0f64 else 0.0f64,
-        26.0f64);
+    msg1(tv, sel("setTintColor:"), c_accent);
+    m: f64 = side_margin();
+    msg_rect(tv, sel("setTextContainerInset:"), if (c == 0) em * 0.8f64 else 0.0f64,
+        m, if (c + 1 == chapters) 120.0f64 else 0.0f64, m);
     msg1(tv, sel("setAttributedText:"), chapter_text(c));
     msg1(tv, sel("setTag:"), c + 1);
     cell
@@ -391,6 +484,35 @@ pin(a: int, b: int, edge: str) {
         sel("setActive:"), 1)
 }
 
+// Edge name of a, at d points past b's.
+pin_by(
+    a: int,
+    b: int,
+    edge: str,
+    d: f64
+) {
+    msg1(msg1_f(msg(a, sel(edge)), sel("constraintEqualToAnchor:constant:"), msg(b,
+        sel(edge)), d), sel("setActive:"), 1)
+}
+
+// A's edge ea at d points past b's edge eb.
+pin_to(
+    a: int,
+    ea: str,
+    b: int,
+    eb: str,
+    d: f64
+) {
+    msg1(msg1_f(msg(a, sel(ea)), sel("constraintEqualToAnchor:constant:"), msg(b,
+        sel(eb)), d), sel("setActive:"), 1)
+}
+
+// A view's width or height, fixed.
+pin_size(v: int, dim: str, d: f64) {
+    msg1(msg_set_f(msg(v, sel(dim)), sel("constraintEqualToConstant:"), d), sel("setActive:"),
+        1)
+}
+
 text_of_cell(cell: int): int {
     msg(msg(msg(cell, sel("contentView")), sel("subviews")), sel("lastObject"))
 }
@@ -399,11 +521,16 @@ chapter_of_view(v: int): int {
     msg(v, sel("tag")) - 1
 }
 
-// The text view of the chapter being read (0 if it is not on the screen).
-current_view(): int {
-    cell: int = msg1(table, sel("cellForRowAtIndexPath:"), chapter_path(cur));
+// The text view of chapter c (0 if it is not on the screen).
+view_of(c: int): int {
+    if (c < 0 || c >= chapters) return 0;
+    cell: int = msg1(table, sel("cellForRowAtIndexPath:"), chapter_path(c));
     if (cell == 0) return 0;
     text_of_cell(cell)
+}
+
+current_view(): int {
+    view_of(cur)
 }
 
 // The text's top, where it rests unscrolled (the bars above it).
@@ -412,10 +539,52 @@ top_inset(sv: int): f64 {
     hfa[0]
 }
 
+bottom_inset(sv: int): f64 {
+    l8_msg_hfa(hfa, sv, sel("adjustedContentInset"), 0, 0, 0);
+    hfa[2]
+}
+
 offset_y(sv: int): f64 {
     l8_msg_hfa(hfa, sv, sel("contentOffset"), 0, 0, 0);
     hfa[1]
 }
+
+view_height(v: int): f64 {
+    l8_msg_hfa(hfa, v, sel("bounds"), 0, 0, 0);
+    hfa[3]
+}
+
+view_width(v: int): f64 {
+    l8_msg_hfa(hfa, v, sel("bounds"), 0, 0, 0);
+    hfa[2]
+}
+
+row_y(c: int): f64 {
+    l8_msg_hfa(hfa, table, sel("rectForRowAtIndexPath:"), chapter_path(c), 0, 0);
+    hfa[1]
+}
+
+// The rect of UTF-16 units k to k + n of text view tv (in its own
+// coordinates): hfa.
+range_rect(tv: int, k: int, n: int): bool {
+    begin: int = msg(tv, sel("beginningOfDocument"));
+    a: int = msg2(tv, sel("positionFromPosition:offset:"), begin, k);
+    b: int = msg2(tv, sel("positionFromPosition:offset:"), begin, k + n);
+    if (a == 0 || b == 0) return false;
+    range: int = msg2(tv, sel("textRangeFromPosition:toPosition:"), a, b);
+    l8_msg_hfa(hfa, tv, sel("firstRectForRange:"), range, 0, 0);
+    if (hfa[3] > 0.0f64 && hfa[1] < 1.0e9f64) return true;
+    // (Not laid out yet: the layout manager's rect of its glyphs.)
+    lm: int = msg(tv, sel("layoutManager"));
+    l8_msg_hfa(hfa, lm, sel("boundingRectForGlyphRange:inTextContainer:"), k, n, msg(tv,
+        sel("textContainer")));
+    l8_msg_hfa(one_rect, tv, sel("textContainerInset"), 0, 0, 0);
+    hfa[0] = hfa[0] + one_rect[1];
+    hfa[1] = hfa[1] + one_rect[0];
+    hfa[3] > 0.0f64
+}
+
+one_rect: []f64 = new f64[4](0.0f64);
 
 // Which chapter is at the top (under the bars), and how far down into it:
 // cur and cur_y. The title follows.
@@ -433,16 +602,19 @@ find_place() {
     title_fade()
 }
 
-// The title shows the chapter once its heading (its book's name, its
-// number) has gone up under the bar: it is not shown twice.
+// The title shows the chapter only once its opener (its label, book's name
+// and number) has gone up under the bar, fading in over 1.2 em more: the
+// chapter's name is not shown twice.
 title_fade() {
-    b: int = ch_book[cur];
-    heading: f64 = chapter_gap(cur) + (if (book_count[b] > 1) em * 3.2f64 else 0.0f64) + (if (ch_num[cur] == 1) em * 3.6f64 else 0.0f64) + (if (book_is(b,
-        "PSA")) em * 0.9f64 else 0.0f64);
-    a: f64 = (cur_y - heading) / (em * 1.2f64);
-    if (a < 0.0f64) a = 0.0f64;
-    if (a > 1.0f64) a = 1.0f64;
-    msg_set_f(title_button, sel("setAlpha:"), a)
+    a: f64 = 1.0f64;
+    tv: int = current_view();
+    if (tv != 0 && range_rect(tv, opener16[cur], 1)) {
+        foot: f64 = row_y(cur) + hfa[1] + hfa[3];
+        a = (offset_y(table) + top_inset(table) - foot) / (em * 1.2f64);
+        if (a < 0.0f64) a = 0.0f64;
+        if (a > 1.0f64) a = 1.0f64
+    }
+    msg_set_f(title_view, sel("setAlpha:"), a)
 }
 
 // Chapter c, at y points down into it.
@@ -456,16 +628,114 @@ go(c: int, y: f64) {
     msg(table, sel("layoutIfNeeded"));
     msg3(table, sel("scrollToRowAtIndexPath:atScrollPosition:animated:"), path, 1,
         0);
-    if (y > 0.0f64) {
-        l8_msg_hfa(hfa, table, sel("contentSize"), 0, 0, 0);
-        most: f64 = hfa[1] - 400.0f64;
-        to: f64 = offset_y(table) + y;
-        if (to > most) to = most;
-        msg_ff1(table, sel("setContentOffset:animated:"), 0.0f64, to, 0)
+    msg(table, sel("layoutIfNeeded"));
+    if (y != 0.0f64) set_offset(offset_y(table) + y);
+    cur = -1;
+    find_place()
+}
+
+// The table scrolled to y (within its content).
+set_offset(y: f64) {
+    l8_msg_hfa(hfa, table, sel("contentSize"), 0, 0, 0);
+    most: f64 = hfa[1] + bottom_inset(table) - view_height(table);
+    to: f64 = y;
+    if (to > most) to = most;
+    if (to < -top_inset(table)) to = -top_inset(table);
+    msg_ff1(table, sel("setContentOffset:animated:"), 0.0f64, to, 0);
+    msg(table, sel("layoutIfNeeded"))
+}
+
+// Where verse v of chapter c begins, down from the table's top (or its
+// chapter's top, for verse 0).
+verse_y(c: int, v: int): f64 {
+    y: f64 = row_y(c);
+    if (v <= 0) return y;
+    tv: int = view_of(c);
+    if (tv == 0) return y;
+    compute_ranges(c);
+    i: int = rv_index(v);
+    if (i < 0) return y;
+    if (!range_rect(tv, rv_b[i], 1)) return y;
+    y + hfa[1]
+}
+
+// Chapter c at verse v (0: its top), frac thousandths of em down into it.
+go_place(c: int, v: int, frac: int) {
+    go(c, 0.0f64);
+    y: f64 = verse_y(c, v) + frac as f64 * em / 1000.0f64;
+    set_offset(y - top_inset(table));
+    // (Once more, now the rows around it are laid out.)
+    y = verse_y(c, v) + frac as f64 * em / 1000.0f64;
+    set_offset(y - top_inset(table));
+    cur = -1;
+    find_place()
+}
+
+// Chapter c at verse v, a third of the way down what can be seen.
+go_verse(c: int, v: int) {
+    go(c, 0.0f64);
+    for _i in 0..2 {
+        seen: f64 = view_height(table) - top_inset(table) - bottom_inset(table);
+        set_offset(verse_y(c, v) - top_inset(table) - seen / 3.0f64)
     }
     cur = -1;
+    find_place()
+}
+
+// The place now: the verse at the top (0 above the first), and how far
+// into it (thousandths of em): place_v and place_frac (cur is the chapter).
+place_v: int = 0;
+
+place_frac: int = 0;
+
+measure_place() {
     find_place();
-    show_bars(false);
+    place_v = 0;
+    place_frac = (cur_y * 1000.0f64 / em) as int;
+    tv: int = current_view();
+    if (tv == 0) return;
+    pos: int = msg_ff(tv, sel("closestPositionToPoint:"), side_margin() + 4.0f64,
+        cur_y + 2.0f64);
+    if (pos == 0) return;
+    k: int = msg2(tv, sel("offsetFromPosition:toPosition:"), msg(tv, sel("beginningOfDocument")),
+        pos);
+    compute_ranges(cur);
+    i: int = -1;
+    for x in 0..rv_count
+        if (rv_b[x] <= k) i = x;
+    if (i < 0) return;
+    if (!range_rect(tv, rv_b[i], 1)) return;
+    place_v = rv_num[i];
+    place_frac = ((cur_y - hfa[1]) * 1000.0f64 / em) as int
+}
+
+save_place() {
+    if (!restored) return;
+    measure_place();
+    set_def_int("chapter", cur + 1);
+    set_def_int("verse", place_v);
+    set_def_int("verseOffset", place_frac);
+    msg(defaults(), sel("synchronize"))
+}
+
+load_place() {
+    c: int = def_int("chapter") - 1;
+    if (c >= 0 && c < chapters) {
+        restore_c = c;
+        restore_v = def_int("verse");
+        restore_frac = def_int("verseOffset")
+    }
+}
+
+// The rows made again (the look changed), at the same verse.
+relayout() {
+    measure_place();
+    c: int = cur;
+    v: int = place_v;
+    f: int = place_frac;
+    msg(table, sel("reloadData"));
+    msg(table, sel("layoutIfNeeded"));
+    go_place(c, v, f);
     save_place()
 }
 
@@ -489,10 +759,17 @@ nav_status_animation(_self: int, _cmd: int): int {
     1
 }
 
-// Scrolling on through the text hides the bars; back to its top shows them.
+// Dark text on the light themes, light on the dark.
+nav_status_style(_self: int, _cmd: int): int {
+    if (is_dark()) 1 else 3
+}
+
+// Scrolling on through the text hides the bars; a deliberate drag back up
+// (more than 40 points), or the top, shows them.
 scroll_began(_self: int, _cmd: int, sv: int): int {
     if (!is_reader(sv)) return 0;
-    drag_from = offset_y(sv);
+    drag_top = offset_y(sv);
+    drag_low = drag_top;
     0
 }
 
@@ -500,8 +777,14 @@ scrolled(_self: int, _cmd: int, sv: int): int {
     if (!is_reader(sv)) return 0;
     find_place();
     y: f64 = offset_y(sv);
-    if ((msg(sv, sel("isTracking")) & 255) != 0 && y > drag_from + 30.0f64 && y > 0.0f64) show_bars(true);
+    if ((msg(sv, sel("isTracking")) & 255) != 0) {
+        if (y > drag_top) drag_top = y;
+        if (y < drag_low) drag_low = y;
+        if (y > drag_low + 30.0f64 && y > 0.0f64 && sel_n == 0) show_bars(true);
+        if (y < drag_top - 40.0f64) show_bars(false)
+    }
     if (y + top_inset(sv) < 4.0f64 && bars_hidden && (msg(sv, sel("isDragging")) & 255) != 0) show_bars(false);
+    back_scrolled(y);
     0
 }
 
@@ -520,88 +803,166 @@ scroll_dragged(
     0
 }
 
-// A tap: on a footnote's mark, the note; elsewhere, the bars shown or hidden (unless text is selected,
-// which the tap puts away).
+// ---- taps ----
+// A tap: on a footnote's mark, the note; on a note's mark, the note's
+// editor; on a verse, the verse selected (or not); elsewhere, the verses
+// selected let go, or else the bars shown or hidden.
 tapped(_self: int, _cmd: int, tap: int): int {
     tv: int = msg(tap, sel("view"));
     l8_msg_hfa(hfa, tap, sel("locationInView:"), tv, 0, 0);
     x: f64 = hfa[0];
     y: f64 = hfa[1];
-    link: int = link_at(tv, x, y);
-    if (link > 0) {
-        show_note(tv, link, x, y);
-        return 0
-    }
     range: int = msg(tv, sel("selectedTextRange"));
     if (range != 0 && (msg(range, sel("isEmpty")) & 255) == 0) return 0;
-    show_bars(!bars_hidden);
+    c: int = chapter_of_view(tv);
+    link: int = link_at(tv, x, y, k_link);
+    if (link > 0) {
+        show_footnote(tv, c, link, x, y);
+        return 0
+    }
+    mark: int = link_at(tv, x, y, k_note_mark);
+    if (mark > 0) {
+        open_note(c, mark, mark);
+        return 0
+    }
+    k: int = char_at(tv, x, y);
+    if (k >= 0) {
+        compute_ranges(c);
+        i: int = rv_at(k);
+        if (i >= 0 && near_char(tv, k, x, y, 6.0f64)) {
+            toggle_verse(c, rv_num[i]);
+            return 0
+        }
+    }
+    if (sel_n > 0) clear_selection() else show_bars(!bars_hidden);
     0
 }
 
-// What a link at (x, y) in tv opens (0 if none there).
-link_at(tv: int, x: f64, y: f64): int {
+// The UTF-16 index of the character at (x, y) in tv, or -1.
+char_at(tv: int, x: f64, y: f64): int {
     pos: int = msg_ff(tv, sel("closestPositionToPoint:"), x, y);
-    if (pos == 0) return 0;
-    i: int = msg2(tv, sel("offsetFromPosition:toPosition:"), msg(tv, sel("beginningOfDocument")),
-        pos);
+    if (pos == 0) return -1;
+    msg2(tv, sel("offsetFromPosition:toPosition:"), msg(tv, sel("beginningOfDocument")),
+        pos)
+}
+
+// What the attribute key (a link's, a note mark's) at (x, y) in tv says (0
+// if none there).
+link_at(
+    tv: int,
+    x: f64,
+    y: f64,
+    key_name: str
+): int {
+    i: int = char_at(tv, x, y);
+    if (i < 0) return 0;
     storage: int = msg(tv, sel("textStorage"));
     n: int = msg(storage, sel("length"));
-    key: int = nsstring(k_link);
-    // The character after the place, or before it (a mark is one letter).
+    key: int = nsstring(key_name);
+    // The character after the place, or before it (a mark is one).
     for k in [i, i - 1] {
         if (k >= 0 && k < n) {
             v: int = msg3(storage, sel("attribute:atIndex:effectiveRange:"), key,
                 k, 0);
-            if (v != 0 && near_char(tv, k, x, y)) return msg(v, sel("longValue"))
+            if (v != 0 && near_char(tv, k, x, y, 16.0f64)) return msg(v, sel("longValue"))
         }
     }
     0
 }
 
-// Whether (x, y) is on or near character k of tv (a finger's width).
+// Whether (x, y) is on or near character k of tv (within slack).
 near_char(
     tv: int,
     k: int,
     x: f64,
-    y: f64
+    y: f64,
+    slack: f64
 ): bool {
-    begin: int = msg(tv, sel("beginningOfDocument"));
-    a: int = msg2(tv, sel("positionFromPosition:offset:"), begin, k);
-    b: int = msg2(tv, sel("positionFromPosition:offset:"), begin, k + 1);
-    if (a == 0 || b == 0) return false;
-    range: int = msg2(tv, sel("textRangeFromPosition:toPosition:"), a, b);
-    l8_msg_hfa(hfa, tv, sel("firstRectForRange:"), range, 0, 0);
-    slack: f64 = 16.0f64;
+    if (!range_rect(tv, k, 1)) return false;
     x >= hfa[0] - slack && x <= hfa[0] + hfa[2] + slack && y >= hfa[1] - slack && y <= hfa[1] + hfa[3] + slack
 }
 
-// A footnote, in a popover pointing at its mark.
-show_note(
+// The tap is seen alongside the text view's own gestures.
+together(
+    _self: int,
+    _cmd: int,
+    _a: int,
+    _b: int
+): int {
+    1
+}
+
+// ---- footnotes ----
+// A footnote, in a popover pointing at its mark: which verse it is on, and
+// its words.
+show_footnote(
     tv: int,
+    c: int,
     at: int,
     x: f64,
     y: f64
 ) {
+    if (presented() != 0) return;
     e: int = line_end(at);
+    vc: int = make("UIViewController");
+    view: int = msg(vc, sel("view"));
+    bg: int = if (theme == 2 || theme == 4) msg(cls("UIColor"), sel("systemBackgroundColor")) else c_cell;
+    msg1(view, sel("setBackgroundColor:"), bg);
+    header: int = make("UILabel");
+    title_of(c);
+    v: int = verse_at(c, at);
+    lay_str("");
+    msg1(header, sel("setFont:"), sans(12.0f64, 0.3f64));
+    msg1(header, sel("setTextColor:"), c_faint);
+    fbuf_n = 0;
+    fput_str("Footnote \Â\· ");
+    for i in 0..out_n fput(out[i] as int);
+    if (v > 0 && book_count[ch_book[c]] > 1) {
+        fput(58);
+        fput_int(v)
+    } else if (v > 0) {
+        fput_str(" ");
+        fput_int(v)
+    }
+    msg1(header, sel("setText:"), nsstring_of(fbuf, fbuf_n));
     label: int = make("UILabel");
     msg1(label, sel("setNumberOfLines:"), 0);
-    msg1(label, sel("setFont:"), serif(em * 0.9f64));
-    msg1(label, sel("setTextColor:"), ink);
-    msg1(label, sel("setText:"), nsstring_at(bytes_address(bsb) + at + 1, e - at - 1));
-    msg_set_f(label, sel("setPreferredMaxLayoutWidth:"), 280.0f64);
+    size: f64 = em * 0.88f64;
+    if (size < 15.0f64) size = 15.0f64;
+    if (size > 22.0f64) size = 22.0f64;
+    keys[0] = k_font;
+    values[0] = body(size);
+    keys[1] = k_color;
+    values[1] = c_ink;
+    keys[2] = k_para;
+    values[2] = msg(para_style(0, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 1.25f64), sel("autorelease"));
+    a: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        nsstring_at(bytes_address(bsb) + at + 1, e - at - 1), nsdictionary(keys, values,
+        3));
+    msg1(label, sel("setAttributedText:"), a);
+    release(a);
+    msg_set_f(label, sel("setPreferredMaxLayoutWidth:"), 268.0f64);
     l8_msg_hfa(hfa, label, sel("intrinsicContentSize"), 0, 0, 0);
     w: f64 = hfa[0];
     h: f64 = hfa[1];
-    msg_rect(label, sel("setFrame:"), 18.0f64, 14.0f64, w, h);
-    vc: int = make("UIViewController");
-    msg1(msg(vc, sel("view")), sel("addSubview:"), label);
+    l8_msg_hfa(hfa, header, sel("intrinsicContentSize"), 0, 0, 0);
+    hw: f64 = hfa[0];
+    hh: f64 = hfa[1];
+    if (hw > w) w = hw;
+    if (w > 268.0f64) w = 268.0f64;
+    msg_rect(header, sel("setFrame:"), 16.0f64, 16.0f64, w, hh);
+    msg_rect(label, sel("setFrame:"), 16.0f64, 16.0f64 + hh + 6.0f64, w, h);
+    msg1(view, sel("addSubview:"), header);
+    msg1(view, sel("addSubview:"), label);
+    release(header);
     release(label);
-    msg_ff(vc, sel("setPreferredContentSize:"), w + 36.0f64, h + 28.0f64);
+    msg_ff(vc, sel("setPreferredContentSize:"), w + 32.0f64, h + hh + 38.0f64);
     msg1(vc, sel("setModalPresentationStyle:"), 7);
     pop: int = msg(vc, sel("popoverPresentationController"));
     msg1(pop, sel("setSourceView:"), tv);
     msg_rect(pop, sel("setSourceRect:"), x - 4.0f64, y - 10.0f64, 8.0f64, 20.0f64);
     msg1(pop, sel("setPermittedArrowDirections:"), 3);
+    msg1(pop, sel("setBackgroundColor:"), bg);
     msg1(pop, sel("setDelegate:"), app_obj);
     msg3(nav, sel("presentViewController:animated:completion:"), vc, 1, 0);
     release(vc)
@@ -617,26 +978,17 @@ popover_style(
     -1
 }
 
-// The tap is seen alongside the text view's own gestures.
-together(
-    _self: int,
-    _cmd: int,
-    _a: int,
-    _b: int
-): int {
-    1
-}
-
 // ---- the chapter's name, at the top ----
 title_attrs(): int {
     keys[0] = k_font;
-    values[0] = sans(17.0f64, 0.3f64);
+    values[0] = sans(17.0f64, 0.4f64);
     keys[1] = k_color;
-    values[1] = ink;
+    values[1] = c_ink;
     nsdictionary(keys, values, 2)
 }
 
 set_title() {
+    if (cur < 0) return;
     title_of(cur);
     name: int = nsstring_at(bytes_address(out), out_n);
     config: int = msg(cls("UIButtonConfiguration"), sel("plainButtonConfiguration"));
@@ -644,269 +996,109 @@ set_title() {
         name, title_attrs());
     msg1(config, sel("setAttributedTitle:"), t);
     release(t);
-    symbol: int = msg_f1(cls("UIImageSymbolConfiguration"), sel("configurationWithPointSize:weight:"),
-        11.0f64, 7);
-    image: int = msg2(cls("UIImage"), sel("systemImageNamed:withConfiguration:"),
-        nsstring("chevron.down"), symbol);
-    if (image != 0) image = msg2(image, sel("imageWithTintColor:renderingMode:"),
-        faint, 1);
-    msg1(config, sel("setImage:"), image);
+    msg1(config, sel("setImage:"), symbol("chevron.down", 10.0f64, 7, c_faint));
     msg1(config, sel("setImagePlacement:"), 8);
-    msg_set_f(config, sel("setImagePadding:"), 5.0f64);
+    msg_set_f(config, sel("setImagePadding:"), 4.0f64);
     msg1(title_button, sel("setConfiguration:"), config);
     msg1(title_button, sel("setAccessibilityLabel:"), name);
     msg1(title_button, sel("setAccessibilityHint:"), nsstring("Choose a book and chapter"));
-    msg(title_button, sel("sizeToFit"))
+    msg(title_button, sel("sizeToFit"));
+    l8_msg_hfa(hfa, title_button, sel("bounds"), 0, 0, 0);
+    msg_rect(title_view, sel("setBounds:"), 0.0f64, 0.0f64, hfa[2], hfa[3]);
+    msg_rect(title_button, sel("setFrame:"), 0.0f64, 0.0f64, hfa[2], hfa[3])
 }
 
-// ---- the books and chapters ----
-// What is shown over the chapters (the books' sheet, or a note), if any.
+// What is shown over the chapters (a sheet, or a footnote), if any.
 presented(): int {
     msg(nav, sel("presentedViewController"))
 }
 
-show_picker(_self: int, _cmd: int, _sender: int): int {
-    open_books();
+// ---- the theme, applied ----
+// The bar's look for the theme: frosted page over the text (or the
+// system's glass, where there is glass), clear at the top.
+style_bar() {
+    bar: int = msg(nav, sel("navigationBar"));
+    glass: bool = cls("UIGlassEffect") != 0;
+    standard: int = make("UINavigationBarAppearance");
+    msg(standard, sel("configureWithDefaultBackground"));
+    if (!glass) {
+        msg1(standard, sel("setBackgroundColor:"), msg_set_f(c_bg, sel("colorWithAlphaComponent:"),
+            0.8f64));
+        msg1(standard, sel("setBackgroundEffect:"), msg1(cls("UIBlurEffect"), sel("effectWithStyle:"),
+            if (is_dark()) 20 else 15));
+        msg1(standard, sel("setShadowColor:"), c_rule)
+    }
+    keys[0] = k_color;
+    values[0] = c_ink;
+    msg1(standard, sel("setTitleTextAttributes:"), nsdictionary(keys, values, 1));
+    edge: int = make("UINavigationBarAppearance");
+    msg(edge, sel("configureWithTransparentBackground"));
+    if (!glass) msg1(edge, sel("setBackgroundColor:"), c_bg);
+    msg1(edge, sel("setTitleTextAttributes:"), nsdictionary(keys, values, 1));
+    msg1(bar, sel("setStandardAppearance:"), standard);
+    msg1(bar, sel("setCompactAppearance:"), standard);
+    msg1(bar, sel("setScrollEdgeAppearance:"), edge);
+    release(standard);
+    release(edge);
+    msg1(bar, sel("setTintColor:"), c_icon)
+}
+
+// The theme (and the look made from it) applied everywhere: crossfaded,
+// when asked.
+apply_theme(fade: bool) {
+    resolve_theme();
+    make_colors();
+    make_look();
+    if (fade) {
+        t: int = make("CATransition");
+        msg1(t, sel("setType:"), objc_const("kCATransitionFade"));
+        msg_set_f(t, sel("setDuration:"), 0.25f64);
+        msg2(msg(window, sel("layer")), sel("addAnimation:forKey:"), t, 0);
+        release(t)
+    }
+    msg1(window, sel("setOverrideUserInterfaceStyle:"), if (set_theme == 0) 0 else if (is_dark()) 2 else 1);
+    msg1(window, sel("setTintColor:"), c_accent);
+    msg1(window, sel("setBackgroundColor:"), c_bg);
+    msg1(table, sel("setBackgroundColor:"), c_bg);
+    msg1(strip, sel("setBackgroundColor:"), c_bg);
+    style_bar();
+    set_title();
+    msg(nav, sel("setNeedsStatusBarAppearanceUpdate"));
+    style_tray();
+    style_back();
+    style_sheets()
+}
+
+// The phone's light or dark mode changed: Auto follows it.
+reader_traits(self: int, cmd: int, previous: int): int {
+    _r: int = super1(self, reader_class, cmd, previous);
+    if (set_theme != 0 || window == 0) return 0;
+    was: int = theme;
+    resolve_theme();
+    if (theme != was) {
+        apply_theme(false);
+        relayout()
+    }
     0
 }
 
-open_books() {
-    if (presented() != 0) return;
-    books_vc: int = msg1(msg(books_class, sel("alloc")), sel("initWithStyle:"), 2);
-    msg1(books_vc, sel("setTitle:"), nsstring("Books"));
-    list: int = msg(books_vc, sel("tableView"));
-    msg1(list, sel("setDataSource:"), app_obj);
-    msg1(list, sel("setDelegate:"), app_obj);
-    done: int = msg3(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithBarButtonSystemItem:target:action:"),
-        0, app_obj, sel("closePicker:"));
-    msg1(msg(books_vc, sel("navigationItem")), sel("setRightBarButtonItem:"), done);
-    release(done);
-    sheet_nav: int = msg1(msg(cls("UINavigationController"), sel("alloc")), sel("initWithRootViewController:"),
-        books_vc);
-    release(books_vc);
-    msg1(msg(sheet_nav, sel("navigationBar")), sel("setPrefersLargeTitles:"), 1);
-    sheet: int = msg(sheet_nav, sel("sheetPresentationController"));
-    if (sheet != 0) msg1(sheet, sel("setPrefersGrabberVisible:"), 1);
-    msg3(nav, sel("presentViewController:animated:completion:"), sheet_nav, 1, 0);
-    release(sheet_nav)
-}
-
-close_picker(_self: int, _cmd: int, _sender: int): int {
-    dismiss_picker();
+// The reader on the screen: where it was, once its rows can be laid out.
+reader_appeared(self: int, cmd: int, animated: int): int {
+    _r: int = super1(self, reader_class, cmd, animated);
+    if (!restored) {
+        restored = true;
+        go_place(restore_c, restore_v, restore_frac);
+        save_place();
+        note("bible: up");
+        if (demo_on) demo_listen();
+        if (pending_link != 0) {
+            open_link(pending_link);
+            release(pending_link);
+            pending_link = 0
+        }
+    }
+    title_fade();
     0
-}
-
-dismiss_picker() {
-    if (presented() != 0) msg2(nav, sel("dismissViewControllerAnimated:completion:"),
-        1, 0)
-}
-
-// The books' list, first laid out: at the book being read.
-books_layout(self: int, cmd: int): int {
-    super0(self, books_class, cmd);
-    list: int = msg(self, sel("tableView"));
-    if (msg(list, sel("tag")) != 0) return 0;
-    msg1(list, sel("setTag:"), 1);
-    b: int = ch_book[cur];
-    path: int = msg2(cls("NSIndexPath"), sel("indexPathForRow:inSection:"), if (b < 39) b else b - 39,
-        if (b < 39) 0 else 1);
-    msg3(list, sel("scrollToRowAtIndexPath:atScrollPosition:animated:"), path, 2,
-        0);
-    0
-}
-
-book_of(path: int): int {
-    msg(path, sel("row")) + (if (msg(path, sel("section")) == 0) 0 else 39)
-}
-
-table_sections(_self: int, _cmd: int, t: int): int {
-    if (is_reader(t)) 1 else 2
-}
-
-table_rows(
-    _self: int,
-    _cmd: int,
-    t: int,
-    section: int
-): int {
-    if (is_reader(t)) return chapters;
-    if (section == 0) 39 else books - 39
-}
-
-table_header(
-    _self: int,
-    _cmd: int,
-    t: int,
-    section: int
-): int {
-    if (is_reader(t)) return 0;
-    nsstring(if (section == 0) "Old Testament" else "New Testament")
-}
-
-number_buf: []i8 = new i8[24](0i8);
-
-// A number as an NSString.
-nsnumber_text(n: int): int {
-    m: int = n;
-    digits: int = 1;
-    while (m >= 10) {
-        m = m / 10;
-        digits = digits + 1
-    }
-    m = n;
-    for i in 0..digits {
-        number_buf[digits - 1 - i] = (48 + m % 10) trunc i8;
-        m = m / 10
-    }
-    nsstring_at(bytes_address(number_buf), digits)
-}
-
-table_cell(
-    _self: int,
-    _cmd: int,
-    t: int,
-    path: int
-): int {
-    if (is_reader(t)) return chapter_cell(t, path);
-    b: int = book_of(path);
-    cell: int = msg1(t, sel("dequeueReusableCellWithIdentifier:"), nsstring("book"));
-    if (cell == 0) cell = msg(msg2(msg(cls("UITableViewCell"), sel("alloc")), sel("initWithStyle:reuseIdentifier:"),
-        1, nsstring("book")), sel("autorelease"));
-    label: int = msg(cell, sel("textLabel"));
-    msg1(label, sel("setText:"), nsstring_at(bytes_address(bsb) + book_name_start(b),
-        book_name_end(b) - book_name_start(b)));
-    here: bool = b == ch_book[cur];
-    msg1(label, sel("setTextColor:"), if (here) accent else ink);
-    msg1(label, sel("setFont:"), sans(17.0f64, if (here) 0.3f64 else 0.0f64));
-    detail: int = msg(cell, sel("detailTextLabel"));
-    msg1(detail, sel("setText:"), nsnumber_text(book_count[b]));
-    msg1(detail, sel("setTextColor:"), faint);
-    msg1(cell, sel("setAccessoryType:"), if (book_count[b] > 1) 1 else 0);
-    cell
-}
-
-// A book picked: its chapters (or, with only one, the book itself).
-table_picked(
-    _self: int,
-    _cmd: int,
-    t: int,
-    path: int
-): int {
-    if (is_reader(t)) return 0;
-    msg2(t, sel("deselectRowAtIndexPath:animated:"), path, 1);
-    b: int = book_of(path);
-    if (book_count[b] == 1) {
-        go(book_first[b], 0.0f64);
-        dismiss_picker();
-        return 0
-    }
-    show_chapters(b);
-    0
-}
-
-show_chapters(b: int) {
-    picker_book = b;
-    l8_msg_hfa(hfa, msg(cls("UIScreen"), sel("mainScreen")), sel("bounds"), 0, 0,
-        0);
-    width: f64 = hfa[2];
-    side: f64 = ((width - 40.0f64 - 40.0f64) / 5.0f64) as int as f64;
-    layout: int = make("UICollectionViewFlowLayout");
-    msg_ff(layout, sel("setItemSize:"), side, side * 0.82f64);
-    msg_set_f(layout, sel("setMinimumInteritemSpacing:"), 9.0f64);
-    msg_set_f(layout, sel("setMinimumLineSpacing:"), 10.0f64);
-    msg_rect(layout, sel("setSectionInset:"), 12.0f64, 20.0f64, 32.0f64, 20.0f64);
-    grid: int = msg1(msg(cls("UICollectionViewController"), sel("alloc")), sel("initWithCollectionViewLayout:"),
-        layout);
-    release(layout);
-    msg1(grid, sel("setTitle:"), nsstring_at(bytes_address(bsb) + book_name_start(b),
-        book_name_end(b) - book_name_start(b)));
-    view: int = msg(grid, sel("collectionView"));
-    msg1(view, sel("setBackgroundColor:"), msg(cls("UIColor"), sel("systemGroupedBackgroundColor")));
-    msg2(view, sel("registerClass:forCellWithReuseIdentifier:"), cls("UICollectionViewCell"),
-        nsstring("chapter"));
-    msg1(view, sel("setDataSource:"), app_obj);
-    msg1(view, sel("setDelegate:"), app_obj);
-    sheet_nav: int = presented();
-    if (sheet_nav != 0) msg2(sheet_nav, sel("pushViewController:animated:"), grid,
-        1);
-    release(grid)
-}
-
-grid_items(
-    _self: int,
-    _cmd: int,
-    _view: int,
-    _section: int
-): int {
-    book_count[picker_book]
-}
-
-grid_cell(
-    _self: int,
-    _cmd: int,
-    view: int,
-    path: int
-): int {
-    cell: int = msg2(view, sel("dequeueReusableCellWithReuseIdentifier:forIndexPath:"),
-        nsstring("chapter"), path);
-    content: int = msg(cell, sel("contentView"));
-    label: int = msg1(content, sel("viewWithTag:"), 7);
-    if (label == 0) {
-        l8_msg_hfa(hfa, content, sel("bounds"), 0, 0, 0);
-        label = msg_rect(msg(cls("UILabel"), sel("alloc")), sel("initWithFrame:"),
-            hfa[0], hfa[1], hfa[2], hfa[3]);
-        msg1(label, sel("setTag:"), 7);
-        msg1(label, sel("setAutoresizingMask:"), 18);
-        msg1(label, sel("setTextAlignment:"), 1);
-        msg1(content, sel("addSubview:"), label);
-        release(label);
-        layer: int = msg(content, sel("layer"));
-        msg_set_f(layer, sel("setCornerRadius:"), 12.0f64);
-        curve: int = objc_const("kCACornerCurveContinuous");
-        if (curve != 0) msg1(layer, sel("setCornerCurve:"), curve);
-        msg1(content, sel("setClipsToBounds:"), 1)
-    }
-    n: int = msg(path, sel("item"));
-    here: bool = book_first[picker_book] + n == cur;
-    msg1(label, sel("setText:"), nsnumber_text(n + 1));
-    msg1(label, sel("setFont:"), sans(18.0f64, if (here) 0.4f64 else 0.0f64));
-    msg1(label, sel("setTextColor:"), if (here) msg(cls("UIColor"), sel("whiteColor")) else ink);
-    msg1(content, sel("setBackgroundColor:"), if (here) accent else msg(cls("UIColor"),
-        sel("secondarySystemGroupedBackgroundColor")));
-    cell
-}
-
-grid_picked(
-    _self: int,
-    _cmd: int,
-    _view: int,
-    path: int
-): int {
-    go(book_first[picker_book] + msg(path, sel("item")), 0.0f64);
-    dismiss_picker();
-    0
-}
-
-// ---- where the reader is, kept ----
-defaults(): int {
-    msg(cls("NSUserDefaults"), sel("standardUserDefaults"))
-}
-
-save_place() {
-    d: int = defaults();
-    msg2(d, sel("setInteger:forKey:"), cur + 1, nsstring("chapter"));
-    y: int = cur_y as int;
-    if (y < 0) y = 0;
-    msg2(d, sel("setInteger:forKey:"), y, nsstring("y"))
-}
-
-load_place() {
-    d: int = defaults();
-    c: int = msg1(d, sel("integerForKey:"), nsstring("chapter")) - 1;
-    if (c >= 0 && c < chapters) {
-        cur = c;
-        restore_y = msg1(d, sel("integerForKey:"), nsstring("y"))
-    }
 }
 
 app_background(_self: int, _cmd: int, _application: int): int {
@@ -914,37 +1106,53 @@ app_background(_self: int, _cmd: int, _application: int): int {
     0
 }
 
-// The phone's text size changed: the text made again, at about the same
-// place (as far down, scaled with the text).
+// The phone's text size changed: the text made again, at the same verse.
 text_size_changed(_self: int, _cmd: int, _note: int): int {
+    measure_place();
     c: int = cur;
-    y: f64 = cur_y / em;
+    v: int = place_v;
+    f: int = place_frac;
     make_look();
     msg(table, sel("reloadData"));
-    go(c, y * em);
+    msg(table, sel("layoutIfNeeded"));
+    go_place(c, v, f);
+    save_place();
     0
 }
 
-// ---- links: bsb://JHN/3, and the demo's steps ----
+// ---- links: bsb://JHN/3 ----
 // A link opens a chapter: the book's code (as the text has them: GEN, PSA,
-// JHN) and the chapter's number. With L8_DEMO=1 in the environment, the app
-// takes the demo's steps when told to (simulate.sh does, for its
-// screenshots in CI).
-demo_on: bool = false;
-
+// JHN) and the chapter's number, and perhaps a verse (bsb://JHN/3/16).
 link_buf: []i8 = new i8[512](0i8);
 
+// A link that came before the reader could go to it.
+pending_link: int = 0;
+
+open_link_text(s: str) {
+    open_link(msg1(cls("NSURL"), sel("URLWithString:"), nsstring(s)))
+}
+
 open_link(url: int) {
+    if (!restored) {
+        release(pending_link);
+        pending_link = keep(url);
+        return
+    }
     n: int = nsstring_into(msg(url, sel("absoluteString")), link_buf);
     p: int = 6;
     if (n < p || link_buf[0] as int != 98) return;
-    // (After "bsb://": a word, then a number.)
+    // (After "bsb://": a word, then a number, and perhaps another.)
     w: int = p;
     while (w < n && link_buf[w] as int != 47) w = w + 1;
     num: int = 0;
+    verse: int = 0;
+    second: bool = false;
     for i in w + 1..n {
         k: int = link_buf[i] as int;
-        if (k >= 48 && k <= 57) num = num * 10 + k - 48
+        if (k == 47) second = true;
+        if (k >= 48 && k <= 57) {
+            if (second) verse = verse * 10 + k - 48 else num = num * 10 + k - 48
+        }
     }
     if (w - p != 3) return;
     for b in 0..books {
@@ -956,39 +1164,10 @@ open_link(url: int) {
             if (bsb[q + i] as int != k) same = false
         }
         if (same) {
-            if (presented() != 0) msg2(nav, sel("dismissViewControllerAnimated:completion:"),
-                0, 0);
-            go(chapter_of(b, num), 0.0f64);
+            jump(chapter_of(b, num), verse);
             return
         }
     }
-}
-
-// The demo's steps, as the Darwin notifications NAME1 to NAME8 (sent by
-// `notifyutil -p` in the simulator: a link would ask first).
-demo_name: str = "space.trailingwhite.smoothbible.demo";
-
-demo_listen() {
-    center: int = CFNotificationCenterGetDarwinNotifyCenter();
-    n: int = len(demo_name);
-    for i in 0..n link_buf[i] = demo_name[i];
-    for step in 1..9 {
-        link_buf[n] = (48 + step) trunc i8;
-        CFNotificationCenterAddObserver(center, 0, &demo_note, nsstring_at(bytes_address(link_buf),
-            n + 1), 0, 4)
-    }
-}
-
-demo_note(
-    _center: int,
-    _observer: int,
-    name: int,
-    _object: int,
-    _info: int
-): int {
-    n: int = nsstring_into(name, link_buf);
-    if (n > 0) demo_do(link_buf[n - 1] as int - 48);
-    0
 }
 
 // Links opened while the app runs, and the one it was opened with.
@@ -1007,64 +1186,9 @@ open_links(contexts: int) {
     if (c != 0) open_link(msg(c, sel("URL")))
 }
 
-// The demo's steps: Genesis 1 (as it starts); the books; Psalms' chapters;
-// Psalm 23; a footnote; John 3; read on (the bars hide); the bars back.
-demo_do(t: int) {
-    if (t == 2) open_books();
-    if (t == 3) show_chapters(18);
-    if (t == 4) {
-        go(book_first[18] + 22, 0.0f64);
-        dismiss_picker()
-    }
-    if (t == 5) {
-        // The first footnote's mark, tapped.
-        tv: int = current_view();
-        layout_chapter(cur);
-        at: int = 0;
-        p: int = 0;
-        for r in 0..runs {
-            if (at == 0 && run_style[r] == STYLE_NOTE) at = utf16_count(0, p);
-            p = run_end[r]
-        }
-        if (tv != 0 && at > 0) {
-            begin: int = msg(tv, sel("beginningOfDocument"));
-            a: int = msg2(tv, sel("positionFromPosition:offset:"), begin, at);
-            b: int = msg2(tv, sel("positionFromPosition:offset:"), begin, at + 1);
-            l8_msg_hfa(hfa, tv, sel("firstRectForRange:"), msg2(tv, sel("textRangeFromPosition:toPosition:"),
-                a, b), 0, 0);
-            x: f64 = hfa[0] + hfa[2] * 0.5f64;
-            y: f64 = hfa[1] + hfa[3] * 0.5f64;
-            link: int = link_at(tv, x, y);
-            if (link > 0) show_note(tv, link, x, y)
-        }
-    }
-    if (t == 6) {
-        msg2(nav, sel("dismissViewControllerAnimated:completion:"), 0, 0);
-        go(book_first[42] + 2, 0.0f64)
-    }
-    if (t == 7) {
-        msg_ff1(table, sel("setContentOffset:animated:"), 0.0f64, offset_y(table) + 700.0f64,
-            1);
-        show_bars(true)
-    }
-    if (t == 8) {
-        show_bars(false);
-        save_place()
-    }
-}
-
-// How many UTF-16 units out's bytes p to e are.
-utf16_count(p: int, e: int): int {
-    n: int = 0;
-    for i in p..e {
-        k: int = out[i] as int & 255;
-        if (k < 128 || k >= 192) n = n + 1;
-        if (k >= 240) n = n + 1
-    }
-    n
-}
-
 // ---- the app ----
+demo_on: bool = false;
+
 app_launched(
     self: int,
     _cmd: int,
@@ -1072,12 +1196,22 @@ app_launched(
     _options: int
 ): int {
     app_obj = self;
-    make_look();
+    load_settings();
+    load_marks();
     load_place();
     msg4(msg(cls("NSNotificationCenter"), sel("defaultCenter")), sel("addObserver:selector:name:object:"),
         self, sel("textSizeChanged:"), objc_const("UIContentSizeCategoryDidChangeNotification"),
         0);
     1
+}
+
+// A bar button of a symbol, sending action to the app.
+bar_item(name: str, action: str, label: str): int {
+    image: int = symbol(name, 17.0f64, 4, 0);
+    item: int = msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithImage:style:target:action:"),
+        image, 0, app_obj, sel(action));
+    msg1(item, sel("setAccessibilityLabel:"), nsstring(label));
+    msg(item, sel("autorelease"))
 }
 
 // The app's one scene, connected: its window, the chapters in it.
@@ -1092,61 +1226,53 @@ scene_connected(
     self: int = app_obj;
     window = msg1(msg(cls("UIWindow"), sel("alloc")), sel("initWithWindowScene:"),
         scene);
-    msg1(window, sel("setTintColor:"), accent);
-    msg1(window, sel("setBackgroundColor:"), paper);
+    resolve_theme();
+    make_colors();
+    make_look();
     // The chapters, one after another.
-    reader = msg1(msg(cls("UITableViewController"), sel("alloc")), sel("initWithStyle:"),
-        0);
+    reader = msg1(msg(reader_class, sel("alloc")), sel("initWithStyle:"), 0);
     table = msg(reader, sel("tableView"));
     msg1(table, sel("setDataSource:"), self);
     msg1(table, sel("setDelegate:"), self);
     msg1(table, sel("setSeparatorStyle:"), 0);
     msg1(table, sel("setAllowsSelection:"), 0);
-    msg1(table, sel("setBackgroundColor:"), paper);
     msg_set_f(table, sel("setRowHeight:"), objc_const_f("UITableViewAutomaticDimension"));
     msg_set_f(table, sel("setEstimatedRowHeight:"), em * 140.0f64);
-    // The chapter's name at the top (shown once its heading is under the
-    // bar), and the books, beside it.
+    // The bar: search; the chapter's name (shown once its opener is under
+    // the bar), which opens the passage picker; the library and the reading
+    // settings.
     title_button = keep(msg1(cls("UIButton"), sel("buttonWithType:"), 1));
     msg3(title_button, sel("addTarget:action:forControlEvents:"), self, sel("showPicker:"),
         64);
+    title_view = keep(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
+        0.0f64, 0.0f64, 120.0f64, 32.0f64));
+    msg1(title_view, sel("addSubview:"), title_button);
+    msg_set_f(title_view, sel("setAlpha:"), 0.0f64);
     item: int = msg(reader, sel("navigationItem"));
-    msg1(item, sel("setTitleView:"), title_button);
-    image: int = msg1(cls("UIImage"), sel("systemImageNamed:"), nsstring("list.bullet"));
-    books_item: int = msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithImage:style:target:action:"),
-        image, 0, self, sel("showPicker:"));
-    msg1(books_item, sel("setAccessibilityLabel:"), nsstring("Books"));
-    msg1(item, sel("setRightBarButtonItem:"), books_item);
-    release(books_item);
+    msg1(item, sel("setTitleView:"), title_view);
+    msg1(item, sel("setLeftBarButtonItem:"), bar_item("magnifyingglass", "showSearch:",
+        "Search"));
+    one[0] = bar_item("textformat.size", "showSettings:", "Reading Settings");
+    one[1] = bar_item("bookmark", "showLibrary:", "Library");
+    msg1(item, sel("setRightBarButtonItems:"), nsarray(one, 2));
     nav = msg1(msg(nav_class, sel("alloc")), sel("initWithRootViewController:"), reader);
-    // The bar: clear over the text's top, frosted once the text is under it.
-    bar: int = msg(nav, sel("navigationBar"));
-    standard: int = make("UINavigationBarAppearance");
-    msg(standard, sel("configureWithDefaultBackground"));
-    edge: int = make("UINavigationBarAppearance");
-    msg(edge, sel("configureWithTransparentBackground"));
-    msg1(bar, sel("setStandardAppearance:"), standard);
-    msg1(bar, sel("setCompactAppearance:"), standard);
-    msg1(bar, sel("setScrollEdgeAppearance:"), edge);
     msg1(window, sel("setRootViewController:"), nav);
     msg(window, sel("makeKeyAndVisible"));
     msg(window, sel("layoutIfNeeded"));
-    // Paper behind the status bar (under the bar), so that text read on
+    // Page behind the status bar (under the bar), so that text read on
     // with the bars hidden does not run up under the camera.
     l8_msg_hfa(hfa, window, sel("safeAreaInsets"), 0, 0, 0);
     top: f64 = hfa[0];
     l8_msg_hfa(hfa, window, sel("bounds"), 0, 0, 0);
-    strip: int = msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
-        0.0f64, 0.0f64, hfa[2], top);
-    msg1(strip, sel("setBackgroundColor:"), paper);
+    strip = msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"), 0.0f64,
+        0.0f64, hfa[2], top);
     msg1(strip, sel("setAutoresizingMask:"), 2);
     msg1(strip, sel("setUserInteractionEnabled:"), 0);
-    msg2(msg(nav, sel("view")), sel("insertSubview:belowSubview:"), strip, bar);
-    release(strip);
-    set_title();
-    go(cur, restore_y as f64);
-    note("bible: up");
-    if (demo_on) demo_listen();
+    msg2(msg(nav, sel("view")), sel("insertSubview:belowSubview:"), strip, msg(nav,
+        sel("navigationBar")));
+    make_tray();
+    make_back();
+    apply_theme(false);
     links: int = msg(options, sel("URLContexts"));
     if (links != 0) open_links(links);
     0
@@ -1186,19 +1312,27 @@ main() noregion: int {
     add_method0(nav_class, sel("prefersStatusBarHidden"), &nav_status_hidden, "B@:");
     add_method0(nav_class, sel("childViewControllerForStatusBarHidden"), &nav_status_child,
         "@@:");
+    add_method0(nav_class, sel("childViewControllerForStatusBarStyle"), &nav_status_child,
+        "@@:");
     add_method0(nav_class, sel("preferredStatusBarUpdateAnimation"), &nav_status_animation,
         "q@:");
+    add_method0(nav_class, sel("preferredStatusBarStyle"), &nav_status_style, "q@:");
     objc_registerClassPair(nav_class);
-    // The books' list, which starts at the book being read.
-    books_class = objc_allocateClassPair(cls("UITableViewController"), "L8Books",
+    // The reader's controller: the theme follows the phone's mode; the
+    // place is found once it is on the screen; and the edit menu's commands.
+    reader_class = objc_allocateClassPair(cls("UITableViewController"), "L8Reader",
         0);
-    add_method0(books_class, sel("viewDidLayoutSubviews"), &books_layout, "v@:");
-    objc_registerClassPair(books_class);
+    add_method1(reader_class, sel("traitCollectionDidChange:"), &reader_traits, "v@:@");
+    add_method1(reader_class, sel("viewDidAppear:"), &reader_appeared, "v@:B");
+    add_commands(reader_class);
+    objc_registerClassPair(reader_class);
+    make_sheet_classes();
     // The app's delegate, and every other delegate and data source.
     app: int = objc_allocateClassPair(cls("UIResponder"), "L8BibleApp", 0);
     add_method2(app, sel("application:didFinishLaunchingWithOptions:"), &app_launched,
         "B@:@@");
     add_method1(app, sel("applicationDidEnterBackground:"), &app_background, "v@:@");
+    add_method1(app, sel("applicationWillTerminate:"), &app_background, "v@:@");
     add_method1(app, sel("scrollViewWillBeginDragging:"), &scroll_began, "v@:@");
     add_method1(app, sel("scrollViewDidScroll:"), &scrolled, "v@:@");
     add_method1(app, sel("scrollViewDidEndDecelerating:"), &scroll_ended, "v@:@");
@@ -1209,18 +1343,10 @@ main() noregion: int {
         &together, "B@:@@");
     add_method2(app, sel("adaptivePresentationStyleForPresentationController:traitCollection:"),
         &popover_style, "q@:@@");
-    add_method1(app, sel("showPicker:"), &show_picker, "v@:@");
-    add_method1(app, sel("closePicker:"), &close_picker, "v@:@");
-    add_method1(app, sel("numberOfSectionsInTableView:"), &table_sections, "q@:@");
-    add_method2(app, sel("tableView:numberOfRowsInSection:"), &table_rows, "q@:@q");
-    add_method2(app, sel("tableView:titleForHeaderInSection:"), &table_header, "@@:@q");
-    add_method2(app, sel("tableView:cellForRowAtIndexPath:"), &table_cell, "@@:@@");
-    add_method2(app, sel("tableView:didSelectRowAtIndexPath:"), &table_picked, "v@:@@");
-    add_method2(app, sel("collectionView:numberOfItemsInSection:"), &grid_items, "q@:@q");
-    add_method2(app, sel("collectionView:cellForItemAtIndexPath:"), &grid_cell, "@@:@@");
-    add_method2(app, sel("collectionView:didSelectItemAtIndexPath:"), &grid_picked,
-        "v@:@@");
     add_method1(app, sel("textSizeChanged:"), &text_size_changed, "v@:@");
+    add_select_methods(app);
+    add_commands(app);
+    add_sheet_methods(app);
     add_protocol(app, "UIApplicationDelegate");
     add_protocol(app, "UITableViewDataSource");
     add_protocol(app, "UITableViewDelegate");
@@ -1228,6 +1354,10 @@ main() noregion: int {
     add_protocol(app, "UICollectionViewDelegate");
     add_protocol(app, "UIGestureRecognizerDelegate");
     add_protocol(app, "UIPopoverPresentationControllerDelegate");
+    add_protocol(app, "UITextViewDelegate");
+    add_protocol(app, "UISearchResultsUpdating");
+    add_protocol(app, "UISearchBarDelegate");
+    add_protocol(app, "UIAdaptivePresentationControllerDelegate");
     objc_registerClassPair(app);
     // The scene's delegate (UIKit makes it, from Info.plist's manifest): its
     // window is made with the app delegate's objects.

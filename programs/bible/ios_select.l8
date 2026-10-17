@@ -1,0 +1,843 @@
+tag bible_ios;
+
+use_tag std, ios, bible;
+
+// Verses selected and what can be done with them: the tray that floats up
+// (highlight in a color, copy, share, bookmark, note), the commands added to
+// the text's own edit menu, and the toast that says a copy was made. Also
+// jumps: the place jumped from kept, the capsule that goes back to it, and
+// the verse jumped to flashed.
+import "../ios/objc.l8";
+
+import "text.l8";
+
+// ---- the selection: verses of one chapter ----
+sel_c: int = -1;
+
+sel_n: int = 0;
+
+sel_v: []int = new int[200](0);
+
+is_selected(v: int): bool {
+    for i in 0..sel_n
+        if (sel_v[i] == v) return true;
+    false
+}
+
+// Haptics: a tick for a selection, a light or medium tap, and success.
+haptic_select() {
+    g: int = make("UISelectionFeedbackGenerator");
+    msg(g, sel("selectionChanged"));
+    release(g)
+}
+
+haptic_impact(style: int) {
+    g: int = msg1(msg(cls("UIImpactFeedbackGenerator"), sel("alloc")), sel("initWithStyle:"),
+        style);
+    msg(g, sel("impactOccurred"));
+    release(g)
+}
+
+haptic_success() {
+    g: int = make("UINotificationFeedbackGenerator");
+    msg1(g, sel("notificationOccurred:"), 0);
+    release(g)
+}
+
+// Verse v of chapter c selected, or not (a verse of another chapter starts
+// the selection again).
+toggle_verse(c: int, v: int) {
+    if (c != sel_c && sel_n > 0) {
+        old: int = sel_c;
+        sel_n = 0;
+        sel_c = -1;
+        repaint(old)
+    }
+    sel_c = c;
+    at: int = -1;
+    for i in 0..sel_n
+        if (sel_v[i] == v) at = i;
+    if (at >= 0) {
+        for i in at..sel_n - 1 sel_v[i] = sel_v[i + 1];
+        sel_n = sel_n - 1
+    } else if (sel_n < len(sel_v)) {
+        i: int = sel_n;
+        while (i > 0 && sel_v[i - 1] > v) {
+            sel_v[i] = sel_v[i - 1];
+            i = i - 1
+        }
+        sel_v[i] = v;
+        sel_n = sel_n + 1
+    }
+    haptic_select();
+    repaint(c);
+    if (sel_n > 0) show_tray() else hide_tray()
+}
+
+clear_selection() {
+    if (sel_n == 0) return;
+    c: int = sel_c;
+    sel_n = 0;
+    sel_c = -1;
+    repaint(c);
+    hide_tray()
+}
+
+// ---- references and text, for the tray, copies and the library ----
+// A reference into fbuf: the chapter's name, then its verses (16‚Äì18, or 16,
+// 18), from the first n of vs.
+put_ref(c: int, vs: []int, n: int) {
+    title_of(c);
+    for i in 0..out_n fput(out[i] as int);
+    if (n == 0) return;
+    fput(if (book_count[ch_book[c]] > 1) 58 else 32);
+    i: int = 0;
+    while (i < n) {
+        j: int = i;
+        while (j + 1 < n && vs[j + 1] == vs[j] + 1) j = j + 1;
+        if (i > 0) fput_str(", ");
+        fput_int(vs[i]);
+        if (j > i) {
+            fput_str("\‚\Ä\ì");
+            fput_int(vs[j])
+        }
+        i = j + 1
+    }
+}
+
+ref_verses: []int = new int[200](0);
+
+// Verses from to last (a range) of chapter c, as a reference in fbuf.
+put_range_ref(c: int, from: int, last: int) {
+    n: int = 0;
+    v: int = from;
+    while (v <= last && n < len(ref_verses)) {
+        ref_verses[n] = v;
+        n = n + 1;
+        v = v + 1
+    }
+    put_ref(c, ref_verses, n)
+}
+
+// fbuf as an NSString.
+fstring(): int {
+    nsstring_of(fbuf, fbuf_n)
+}
+
+// The verses' words, quoted, and their reference: what a copy or a share
+// is (‚Äú‚Ä¶‚Äù John 3:16 BSB).
+put_quote(c: int, vs: []int, n: int) {
+    fput_str("\‚\Ä\ú");
+    for i in 0..n {
+        if (i > 0) fput(32);
+        if (lay_verse_lines && n > 1) {
+            fput_int(vs[i]);
+            fput(32)
+        }
+        verse_text(c, vs[i]);
+        for x in 0..vt_n fput(vt[x] as int)
+    }
+    fput_str("\‚\Ä\ù\n");
+    put_ref(c, vs, n);
+    fput_str(" BSB")
+}
+
+// ---- the tray ----
+tray: int = 0;
+
+tray_shown: bool = false;
+
+tray_label: int = 0;
+
+tray_close: int = 0;
+
+tray_swatches: []int = new int[6](0);
+
+tray_actions: []int = new int[4](0);
+
+tray_effect: int = 0;
+
+tray_timer: int = 0;
+
+action_titles: []str = ["Copy", "Share", "Bookmark", "Note"];
+
+action_symbols: []str = ["doc.on.doc", "square.and.arrow.up", "bookmark", "square.and.pencil"];
+
+stack(axis: int, spacing: f64): int {
+    s: int = make("UIStackView");
+    msg1(s, sel("setAxis:"), axis);
+    msg_set_f(s, sel("setSpacing:"), spacing);
+    msg1(s, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+    msg(s, sel("autorelease"))
+}
+
+// An action's button: its symbol over its title.
+action_config(title: str, name: str): int {
+    config: int = msg(cls("UIButtonConfiguration"), sel("plainButtonConfiguration"));
+    keys[0] = k_font;
+    values[0] = sans(11.0f64, 0.23f64);
+    keys[1] = k_color;
+    values[1] = c_ink;
+    t: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        nsstring(title), nsdictionary(keys, values, 2));
+    msg1(config, sel("setAttributedTitle:"), t);
+    release(t);
+    msg1(config, sel("setImage:"), symbol(name, 19.0f64, 4, 0));
+    msg1(config, sel("setImagePlacement:"), 2);
+    msg_set_f(config, sel("setImagePadding:"), 4.0f64);
+    msg1(config, sel("setBaseForegroundColor:"), c_ink);
+    config
+}
+
+make_tray() {
+    root: int = msg(nav, sel("view"));
+    tray = make("UIView");
+    msg1(tray, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+    layer: int = msg(tray, sel("layer"));
+    msg1(layer, sel("setShadowColor:"), msg(msg(cls("UIColor"), sel("blackColor")),
+        sel("CGColor")));
+    msg_set_f(layer, sel("setShadowOpacity:"), 0.15f64);
+    msg_set_f(layer, sel("setShadowRadius:"), 20.0f64);
+    msg_ff(layer, sel("setShadowOffset:"), 0.0f64, 6.0f64);
+    glass: int = cls("UIGlassEffect");
+    effect: int = if (glass != 0) msg(glass, sel("effect")) else msg1(cls("UIBlurEffect"),
+        sel("effectWithStyle:"), 10);
+    tray_effect = msg1(msg(cls("UIVisualEffectView"), sel("alloc")), sel("initWithEffect:"),
+        effect);
+    msg1(tray_effect, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+    el: int = msg(tray_effect, sel("layer"));
+    msg_set_f(el, sel("setCornerRadius:"), 26.0f64);
+    curve: int = objc_const("kCACornerCurveContinuous");
+    if (curve != 0) msg1(el, sel("setCornerCurve:"), curve);
+    msg1(tray_effect, sel("setClipsToBounds:"), 1);
+    msg1(tray, sel("addSubview:"), tray_effect);
+    release(tray_effect);
+    for e in ["leadingAnchor", "trailingAnchor", "topAnchor", "bottomAnchor"] pin(tray_effect,
+        tray, e);
+    content: int = msg(tray_effect, sel("contentView"));
+    column: int = stack(1, 12.0f64);
+    msg1(content, sel("addSubview:"), column);
+    pin_by(column, content, "leadingAnchor", 14.0f64);
+    pin_by(column, content, "trailingAnchor", -14.0f64);
+    pin_by(column, content, "topAnchor", 14.0f64);
+    pin_by(column, content, "bottomAnchor", -14.0f64);
+    // The reference, and the close button.
+    header: int = stack(0, 8.0f64);
+    msg1(header, sel("setAlignment:"), 3);
+    tray_label = make("UILabel");
+    msg1(tray_label, sel("setFont:"), sans(15.0f64, 0.3f64));
+    msg1(header, sel("addArrangedSubview:"), tray_label);
+    release(tray_label);
+    tray_close = msg1(cls("UIButton"), sel("buttonWithType:"), 0);
+    msg2(tray_close, sel("setImage:forState:"), symbol("xmark", 13.0f64, 6, 0), 0);
+    msg1(tray_close, sel("setBackgroundColor:"), msg(cls("UIColor"), sel("systemFillColor")));
+    msg_set_f(msg(tray_close, sel("layer")), sel("setCornerRadius:"), 14.0f64);
+    pin_size(tray_close, "widthAnchor", 28.0f64);
+    pin_size(tray_close, "heightAnchor", 28.0f64);
+    msg1(tray_close, sel("setAccessibilityLabel:"), nsstring("Close"));
+    msg3(tray_close, sel("addTarget:action:forControlEvents:"), app_obj, sel("trayClose:"),
+        64);
+    msg1(header, sel("addArrangedSubview:"), tray_close);
+    msg1(column, sel("addArrangedSubview:"), header);
+    // The colors (and, if any verse is highlighted, none).
+    colors: int = stack(0, 0.0f64);
+    msg1(colors, sel("setDistribution:"), 3);
+    msg1(colors, sel("setAlignment:"), 3);
+    for i in 0..6 {
+        b: int = msg1(cls("UIButton"), sel("buttonWithType:"), 0);
+        pin_size(b, "widthAnchor", 34.0f64);
+        pin_size(b, "heightAnchor", 34.0f64);
+        msg_set_f(msg(b, sel("layer")), sel("setCornerRadius:"), 17.0f64);
+        msg1(b, sel("setTag:"), i);
+        msg3(b, sel("addTarget:action:forControlEvents:"), app_obj, sel("traySwatch:"),
+            64);
+        if (i < 5) {
+            fbuf_n = 0;
+            fput_str("Highlight ");
+            fput_str(hl_titles[i]);
+            msg1(b, sel("setAccessibilityLabel:"), fstring())
+        } else msg1(b, sel("setAccessibilityLabel:"), nsstring("Remove Highlight"));
+        msg1(colors, sel("addArrangedSubview:"), b);
+        tray_swatches[i] = b
+    }
+    msg1(column, sel("addArrangedSubview:"), colors);
+    // Copy, share, bookmark and note.
+    actions: int = stack(0, 0.0f64);
+    msg1(actions, sel("setDistribution:"), 1);
+    for i in 0..4 {
+        b: int = msg2(cls("UIButton"), sel("buttonWithConfiguration:primaryAction:"),
+            action_config(action_titles[i], action_symbols[i]), 0);
+        msg1(b, sel("setTag:"), i);
+        msg3(b, sel("addTarget:action:forControlEvents:"), app_obj, sel("trayAction:"),
+            64);
+        msg1(actions, sel("addArrangedSubview:"), b);
+        tray_actions[i] = b
+    }
+    msg1(column, sel("addArrangedSubview:"), actions);
+    msg1(root, sel("addSubview:"), tray);
+    pin_by(tray, root, "leadingAnchor", 12.0f64);
+    pin_by(tray, root, "trailingAnchor", -12.0f64);
+    pin_to(tray, "bottomAnchor", msg(root, sel("safeAreaLayoutGuide")), "bottomAnchor",
+        -8.0f64);
+    msg1(tray, sel("setHidden:"), 1)
+}
+
+style_tray() {
+    if (tray == 0) return;
+    msg1(tray_label, sel("setTextColor:"), c_ink);
+    msg1(tray_close, sel("setTintColor:"), c_ink);
+    for i in 0..5 msg1(tray_swatches[i], sel("setBackgroundColor:"), c_swatch[i]);
+    msg2(tray_swatches[5], sel("setImage:forState:"), symbol("circle.slash", 30.0f64,
+        4, c_faint), 0);
+    if (tray_shown) update_tray()
+}
+
+// The tray's reference, checked color, and bookmark's and note's titles,
+// for the verses selected.
+update_tray() {
+    fbuf_n = 0;
+    put_ref(sel_c, sel_v, sel_n);
+    msg1(tray_label, sel("setText:"), fstring());
+    // The color all the verses share (-1 if not one), and whether any is
+    // highlighted.
+    shared: int = -2;
+    any: bool = false;
+    for i in 0..sel_n {
+        h: int = highlight_of(sel_c, sel_v[i]);
+        if (h >= 0) any = true;
+        if (shared == -2) shared = h else if (shared != h) shared = -1
+    }
+    for i in 0..5 {
+        msg2(tray_swatches[i], sel("setImage:forState:"), if (shared == i) symbol("checkmark",
+            12.0f64, 7, msg(cls("UIColor"), sel("whiteColor"))) else 0, 0);
+        msg1(tray_swatches[i], sel("setSelected:"), if (shared == i) 1 else 0)
+    }
+    msg1(tray_swatches[5], sel("setHidden:"), if (any) 0 else 1);
+    marked: bool = sel_n > 0 && is_bookmarked(sel_c, sel_v[0]);
+    msg1(tray_actions[2], sel("setConfiguration:"), action_config(if (marked) "Bookmarked" else "Bookmark",
+        if (marked) "bookmark.fill" else "bookmark"));
+    noted: bool = sel_n > 0 && note_of(sel_c, sel_v[0]) >= 0;
+    msg1(tray_actions[3], sel("setConfiguration:"), action_config(if (noted) "Edit Note" else "Note",
+        if (noted) "note.text" else "square.and.pencil"));
+    for i in [0, 1] msg1(tray_actions[i], sel("setConfiguration:"), action_config(action_titles[i],
+        action_symbols[i]))
+}
+
+reduce_motion(): bool {
+    (UIAccessibilityIsReduceMotionEnabled() & 255) != 0
+}
+
+extern UIAccessibilityIsReduceMotionEnabled(): int;
+
+// A layer's key path animated from a to b (a spring, or ease in and out
+// over t seconds).
+animate(
+    layer: int,
+    path: str,
+    a: f64,
+    b: f64,
+    spring: bool,
+    t: f64
+) {
+    anim: int = 0;
+    if (spring) {
+        anim = msg1(cls("CASpringAnimation"), sel("animationWithKeyPath:"), nsstring(path));
+        msg_set_f(anim, sel("setMass:"), 1.0f64);
+        msg_set_f(anim, sel("setStiffness:"), 300.0f64);
+        msg_set_f(anim, sel("setDamping:"), 30.0f64);
+        msg_set_f(anim, sel("setDuration:"), msg_f(anim, sel("settlingDuration")))
+    } else {
+        anim = msg1(cls("CABasicAnimation"), sel("animationWithKeyPath:"), nsstring(path));
+        msg_set_f(anim, sel("setDuration:"), t);
+        msg1(anim, sel("setTimingFunction:"), msg1(cls("CAMediaTimingFunction"), sel("functionWithName:"),
+            objc_const("kCAMediaTimingFunctionEaseInEaseOut")))
+    }
+    msg1(anim, sel("setFromValue:"), nsnumber_f(a));
+    msg1(anim, sel("setToValue:"), nsnumber_f(b));
+    msg2(layer, sel("addAnimation:forKey:"), anim, nsstring(path))
+}
+
+show_tray() {
+    update_tray();
+    hide_back();
+    if (tray_shown) return;
+    tray_shown = true;
+    tray_timer = stop_timer(tray_timer);
+    msg1(tray, sel("setHidden:"), 0);
+    root: int = msg(nav, sel("view"));
+    msg(root, sel("layoutIfNeeded"));
+    layer: int = msg(tray, sel("layer"));
+    msg_set_f(layer, sel("setOpacity:"), 1.0f64);
+    if (reduce_motion()) {
+        animate(layer, "opacity", 0.0f64, 1.0f64, false, 0.15f64);
+        return
+    }
+    h: f64 = view_height(tray);
+    animate(layer, "transform.translation.y", h + 24.0f64, 0.0f64, true, 0.0f64);
+    animate(layer, "opacity", 0.0f64, 1.0f64, false, 0.18f64)
+}
+
+hide_tray() {
+    if (!tray_shown) return;
+    tray_shown = false;
+    layer: int = msg(tray, sel("layer"));
+    msg_set_f(layer, sel("setOpacity:"), 0.0f64);
+    if (!reduce_motion()) animate(layer, "transform.translation.y", 0.0f64, view_height(tray) + 24.0f64,
+        false, 0.2f64);
+    animate(layer, "opacity", 1.0f64, 0.0f64, false, 0.2f64);
+    tray_timer = stop_timer(tray_timer);
+    tray_timer = after(0.22f64, "trayHidden:")
+}
+
+tray_hidden(_self: int, _cmd: int, _timer: int): int {
+    tray_timer = 0;
+    if (!tray_shown) msg1(tray, sel("setHidden:"), 1);
+    0
+}
+
+tray_closed(_self: int, _cmd: int, _sender: int): int {
+    clear_selection();
+    0
+}
+
+// A swatch: its color on every verse selected (or off, if they all had it).
+tray_swatch(_self: int, _cmd: int, sender: int): int {
+    i: int = msg(sender, sel("tag"));
+    color: int = if (i >= 5) -1 else i;
+    if (color >= 0) {
+        all: bool = true;
+        for x in 0..sel_n
+            if (highlight_of(sel_c, sel_v[x]) != color) all = false;
+        if (all) color = -1
+    }
+    apply_highlight(sel_c, sel_v, sel_n, color);
+    clear_selection();
+    0
+}
+
+// Color (-1: none) on the first n verses of vs in chapter c, kept.
+apply_highlight(
+    c: int,
+    vs: []int,
+    n: int,
+    color: int
+) {
+    for i in 0..n set_highlight(c, vs[i], color);
+    save_highlights();
+    if (color >= 0) {
+        msg2(defaults(), sel("setObject:forKey:"), nsstring(hl_names[color]), nsstring("lastHighlight"));
+        last_color = color
+    }
+    haptic_impact(0);
+    repaint(c)
+}
+
+last_color: int = -1;
+
+// The color the edit menu's Highlight uses: the last one used (yellow at
+// first).
+last_highlight(): int {
+    if (last_color >= 0) return last_color;
+    name: int = msg1(defaults(), sel("stringForKey:"), nsstring("lastHighlight"));
+    last_color = 0;
+    if (name != 0) {
+        for i in 0..5
+            if ((msg1(name, sel("isEqualToString:"), nsstring(hl_names[i])) & 255) != 0) last_color = i
+    }
+    last_color
+}
+
+tray_action(_self: int, _cmd: int, sender: int): int {
+    i: int = msg(sender, sel("tag"));
+    if (i == 0) copy_verses(sel_c, sel_v, sel_n) else if (i == 1) share_verses(sel_c,
+        sel_v, sel_n, sender) else if (i == 2) toggle_bookmark(sel_c, sel_v[0]) else if (i == 3) {
+        c: int = sel_c;
+        v: int = sel_v[0];
+        last: int = sel_v[sel_n - 1];
+        clear_selection();
+        open_note(c, v, last);
+        return 0
+    }
+    clear_selection();
+    0
+}
+
+copy_verses(c: int, vs: []int, n: int) {
+    if (n == 0) return;
+    fbuf_n = 0;
+    put_quote(c, vs, n);
+    msg1(msg(cls("UIPasteboard"), sel("generalPasteboard")), sel("setString:"), fstring());
+    haptic_success();
+    toast("Copied")
+}
+
+share_verses(
+    c: int,
+    vs: []int,
+    n: int,
+    from: int
+) {
+    if (n == 0) return;
+    fbuf_n = 0;
+    put_quote(c, vs, n);
+    one[0] = fstring();
+    vc: int = msg2(msg(cls("UIActivityViewController"), sel("alloc")), sel("initWithActivityItems:applicationActivities:"),
+        nsarray(one, 1), 0);
+    pop: int = msg(vc, sel("popoverPresentationController"));
+    if (pop != 0 && from != 0) msg1(pop, sel("setSourceView:"), from);
+    msg3(nav, sel("presentViewController:animated:completion:"), vc, 1, 0);
+    release(vc)
+}
+
+toggle_bookmark(c: int, v: int) {
+    on: bool = !is_bookmarked(c, v);
+    set_bookmark(c, v, on);
+    save_bookmarks();
+    if (on) haptic_impact(1);
+    remake(c)
+}
+
+// ---- the toast ----
+toast_label: int = 0;
+
+toast_timer: int = 0;
+
+toast(text: str) {
+    root: int = msg(nav, sel("view"));
+    if (toast_label == 0) {
+        toast_label = make("UILabel");
+        msg1(toast_label, sel("setTextAlignment:"), 1);
+        msg1(toast_label, sel("setFont:"), sans(14.0f64, 0.3f64));
+        msg1(toast_label, sel("setClipsToBounds:"), 1);
+        msg1(root, sel("addSubview:"), toast_label)
+    }
+    msg1(toast_label, sel("setText:"), nsstring(text));
+    msg1(toast_label, sel("setTextColor:"), c_bg);
+    msg1(toast_label, sel("setBackgroundColor:"), msg_set_f(c_ink, sel("colorWithAlphaComponent:"),
+        0.9f64));
+    l8_msg_hfa(hfa, toast_label, sel("intrinsicContentSize"), 0, 0, 0);
+    w: f64 = hfa[0] + 32.0f64;
+    h: f64 = 34.0f64;
+    l8_msg_hfa(hfa, root, sel("safeAreaInsets"), 0, 0, 0);
+    bottom: f64 = hfa[2];
+    W: f64 = view_width(root);
+    H: f64 = view_height(root);
+    msg_rect(toast_label, sel("setFrame:"), (W - w) / 2.0f64, H - bottom - 8.0f64 - 132.0f64 - 12.0f64 - h,
+        w, h);
+    msg_set_f(msg(toast_label, sel("layer")), sel("setCornerRadius:"), h / 2.0f64);
+    msg1(root, sel("bringSubviewToFront:"), toast_label);
+    layer: int = msg(toast_label, sel("layer"));
+    msg_set_f(layer, sel("setOpacity:"), 1.0f64);
+    animate(layer, "opacity", 0.0f64, 1.0f64, false, 0.2f64);
+    toast_timer = stop_timer(toast_timer);
+    toast_timer = after(1.2f64, "toastDone:")
+}
+
+toast_done(_self: int, _cmd: int, _timer: int): int {
+    toast_timer = 0;
+    layer: int = msg(toast_label, sel("layer"));
+    msg_set_f(layer, sel("setOpacity:"), 0.0f64);
+    animate(layer, "opacity", 1.0f64, 0.0f64, false, 0.2f64);
+    0
+}
+
+// ---- the edit menu: the app's commands first ----
+// The text view and range of the text selected when the menu was asked for.
+em_tv: int = 0;
+
+em_loc: int = 0;
+
+em_len: int = 0;
+
+command_titles: []str = ["Highlight", "Note", "Copy with Reference", "Share"];
+
+command_sels: []str = ["bibleHighlight:", "bibleNote:", "bibleCopyRef:", "bibleShare:"];
+
+edit_menu(
+    _self: int,
+    _cmd: int,
+    tv: int,
+    loc: int,
+    length: int,
+    suggested: int
+): int {
+    if (chapter_of_view(tv) < 0) return msg2(cls("UIMenu"), sel("menuWithTitle:children:"),
+        nsstring(""), suggested);
+    em_tv = tv;
+    em_loc = loc;
+    em_len = length;
+    for i in 0..4 one[i] = msg4(cls("UICommand"), sel("commandWithTitle:image:action:propertyList:"),
+        nsstring(command_titles[i]), 0, sel(command_sels[i]), 0);
+    children: int = msg1(nsarray(one, 4), sel("arrayByAddingObjectsFromArray:"), suggested);
+    m: int = cls("UIMenu");
+    if ((msg1(m, sel("respondsToSelector:"), sel("menuWithChildren:")) & 255) != 0) return msg1(m,
+        sel("menuWithChildren:"), children);
+    msg2(m, sel("menuWithTitle:children:"), nsstring(""), children)
+}
+
+// The verses the text selected touches: into the selection (of its
+// chapter); false if none.
+command_verses(): bool {
+    if (em_tv == 0) return false;
+    c: int = chapter_of_view(em_tv);
+    if (c < 0) return false;
+    compute_ranges(c);
+    clear_selection();
+    sel_c = c;
+    sel_n = 0;
+    for i in 0..rv_count {
+        if (rv_b[i] < em_loc + em_len && rv_e[i] > em_loc && sel_n < len(sel_v)) {
+            sel_v[sel_n] = rv_num[i];
+            sel_n = sel_n + 1
+        }
+    }
+    msg2(em_tv, sel("setSelectedRange:"), em_loc, 0);
+    msg(em_tv, sel("resignFirstResponder"));
+    sel_n > 0
+}
+
+command_highlight(_self: int, _cmd: int, _sender: int): int {
+    if (command_verses()) {
+        apply_highlight(sel_c, sel_v, sel_n, last_highlight());
+        sel_n = 0;
+        sel_c = -1
+    }
+    0
+}
+
+command_note(_self: int, _cmd: int, _sender: int): int {
+    if (command_verses()) {
+        c: int = sel_c;
+        v: int = sel_v[0];
+        last: int = sel_v[sel_n - 1];
+        sel_n = 0;
+        sel_c = -1;
+        open_note(c, v, last)
+    }
+    0
+}
+
+command_copy(_self: int, _cmd: int, _sender: int): int {
+    if (command_verses()) {
+        copy_verses(sel_c, sel_v, sel_n);
+        sel_n = 0;
+        sel_c = -1
+    }
+    0
+}
+
+command_share(_self: int, _cmd: int, _sender: int): int {
+    if (command_verses()) {
+        share_verses(sel_c, sel_v, sel_n, em_tv);
+        sel_n = 0;
+        sel_c = -1
+    }
+    0
+}
+
+add_commands(c: int) {
+    add_method1(c, sel("bibleHighlight:"), &command_highlight, "v@:@");
+    add_method1(c, sel("bibleNote:"), &command_note, "v@:@");
+    add_method1(c, sel("bibleCopyRef:"), &command_copy, "v@:@");
+    add_method1(c, sel("bibleShare:"), &command_share, "v@:@")
+}
+
+// ---- jumps, and the way back ----
+back: int = 0;
+
+back_shown: bool = false;
+
+back_timer: int = 0;
+
+// Where the reader arrived (the table's offset), and whether at a verse
+// (and which).
+arrival_y: f64 = 0.0f64;
+
+arrived_v: int = 0;
+
+make_back() {
+    back = keep(msg2(cls("UIButton"), sel("buttonWithConfiguration:primaryAction:"),
+        msg(cls("UIButtonConfiguration"), sel("filledButtonConfiguration")), 0));
+    msg3(back, sel("addTarget:action:forControlEvents:"), app_obj, sel("backTapped:"),
+        64);
+    layer: int = msg(back, sel("layer"));
+    msg1(layer, sel("setShadowColor:"), msg(msg(cls("UIColor"), sel("blackColor")),
+        sel("CGColor")));
+    msg_set_f(layer, sel("setShadowOpacity:"), 0.12f64);
+    msg_set_f(layer, sel("setShadowRadius:"), 12.0f64);
+    msg_ff(layer, sel("setShadowOffset:"), 0.0f64, 4.0f64);
+    msg1(back, sel("setHidden:"), 1);
+    msg1(msg(nav, sel("view")), sel("addSubview:"), back)
+}
+
+// The capsule's look, and its title: the place it goes back to.
+style_back() {
+    if (back == 0 || hs_n == 0) return;
+    config: int = msg(cls("UIButtonConfiguration"), sel("filledButtonConfiguration"));
+    msg1(config, sel("setBaseBackgroundColor:"), if (theme == 2) msg(cls("UIColor"),
+        sel("systemBackgroundColor")) else c_cell);
+    msg1(config, sel("setBaseForegroundColor:"), c_ink);
+    msg1(config, sel("setCornerStyle:"), 4);
+    msg_rect(config, sel("setContentInsets:"), 0.0f64, 14.0f64, 0.0f64, 14.0f64);
+    msg1(config, sel("setImage:"), symbol("chevron.left", 12.0f64, 6, 0));
+    msg_set_f(config, sel("setImagePadding:"), 6.0f64);
+    i: int = hs_n - 1;
+    fbuf_n = 0;
+    title_of(hs_ch[i]);
+    for x in 0..out_n fput(out[x] as int);
+    if (hs_exact[i] && hs_v[i] > 0) {
+        fput(if (book_count[ch_book[hs_ch[i]]] > 1) 58 else 32);
+        fput_int(hs_v[i])
+    }
+    keys[0] = k_font;
+    values[0] = sans(14.0f64, 0.3f64);
+    keys[1] = k_color;
+    values[1] = c_ink;
+    t: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        fstring(), nsdictionary(keys, values, 2));
+    msg1(config, sel("setAttributedTitle:"), t);
+    release(t);
+    msg1(back, sel("setConfiguration:"), config);
+    fput_str("");
+    msg1(back, sel("setAccessibilityLabel:"), fstring());
+    msg1(back, sel("setAccessibilityHint:"), nsstring("Go back"));
+    l8_msg_hfa(hfa, back, sel("intrinsicContentSize"), 0, 0, 0);
+    w: f64 = hfa[0];
+    root: int = msg(nav, sel("view"));
+    l8_msg_hfa(hfa, root, sel("safeAreaInsets"), 0, 0, 0);
+    bottom: f64 = hfa[2];
+    msg_rect(back, sel("setFrame:"), 16.0f64, view_height(root) - bottom - 12.0f64 - 36.0f64,
+        w, 36.0f64)
+}
+
+show_back() {
+    style_back();
+    if (tray_shown || hs_n == 0) return;
+    msg1(msg(nav, sel("view")), sel("bringSubviewToFront:"), back);
+    msg1(back, sel("setHidden:"), 0);
+    layer: int = msg(back, sel("layer"));
+    msg_set_f(layer, sel("setOpacity:"), 1.0f64);
+    animate(layer, "opacity", 0.0f64, 1.0f64, false, 0.25f64);
+    if (!reduce_motion()) animate(layer, "transform.scale", 0.92f64, 1.0f64, false,
+        0.25f64);
+    back_shown = true;
+    back_timer = stop_timer(back_timer);
+    back_timer = after(12.0f64, "backTimeout:")
+}
+
+hide_back() {
+    if (!back_shown) return;
+    back_shown = false;
+    back_timer = stop_timer(back_timer);
+    layer: int = msg(back, sel("layer"));
+    msg_set_f(layer, sel("setOpacity:"), 0.0f64);
+    animate(layer, "opacity", 1.0f64, 0.0f64, false, 0.2f64)
+}
+
+back_timeout(_self: int, _cmd: int, _timer: int): int {
+    back_timer = 0;
+    if (demo_on) return 0;
+    hide_back();
+    0
+}
+
+// The capsule goes when the reader has scrolled two screens from where
+// it arrived.
+back_scrolled(y: f64) {
+    if (!back_shown) return;
+    d: f64 = y - arrival_y;
+    if (d < 0.0f64) d = -d;
+    if (d > 2.0f64 * view_height(table)) hide_back();
+    if (d > 8.0f64) arrived_v = 0
+}
+
+// Where the reader is now, onto the history (to come back to).
+push_here() {
+    measure_place();
+    push_history(cur, if (arrived_v > 0) arrived_v else place_v, place_frac, arrived_v > 0);
+    save_history()
+}
+
+// A jump: to chapter c (at verse v, flashed, if v > 0), from a sheet, a
+// link or anywhere; the place left kept, and the capsule back to it shown.
+jump(c: int, v: int) {
+    if (c < 0 || c >= chapters) return;
+    push_here();
+    clear_selection();
+    if (presented() != 0) msg2(nav, sel("dismissViewControllerAnimated:completion:"),
+        1, 0);
+    show_bars(false);
+    arrive(c, v);
+    show_back()
+}
+
+arrive(c: int, v: int) {
+    if (v > 0) {
+        go_verse(c, v);
+        flash(c, v)
+    } else go(c, 0.0f64);
+    arrival_y = offset_y(table);
+    arrived_v = v;
+    save_place()
+}
+
+// The capsule: back to where the reader was (and this place kept, to come
+// back to in turn).
+back_tapped(_self: int, _cmd: int, _sender: int): int {
+    if (hs_n == 0) return 0;
+    i: int = hs_n - 1;
+    c: int = hs_ch[i];
+    v: int = hs_v[i];
+    f: int = hs_frac[i];
+    exact: bool = hs_exact[i];
+    hs_n = hs_n - 1;
+    push_here();
+    if (exact) arrive(c, v) else {
+        go_place(c, v, f);
+        arrival_y = offset_y(table);
+        arrived_v = 0;
+        save_place()
+    }
+    show_back();
+    0
+}
+
+// ---- the flash on a verse jumped to ----
+flash_timer: int = 0;
+
+flash(c: int, v: int) {
+    flash_c = c;
+    flash_v = v;
+    repaint(c);
+    flash_timer = stop_timer(flash_timer);
+    flash_timer = after(if (demo_on) 6.0f64 else 0.9f64, "flashDone:")
+}
+
+flash_done(_self: int, _cmd: int, _timer: int): int {
+    flash_timer = 0;
+    c: int = flash_c;
+    flash_c = -1;
+    tv: int = view_of(c);
+    if (tv != 0) {
+        t: int = make("CATransition");
+        msg1(t, sel("setType:"), objc_const("kCATransitionFade"));
+        msg_set_f(t, sel("setDuration:"), 0.4f64);
+        msg2(msg(tv, sel("layer")), sel("addAnimation:forKey:"), t, 0);
+        release(t)
+    }
+    repaint(c);
+    0
+}
+
+add_select_methods(app: int) {
+    add_method1(app, sel("trayClose:"), &tray_closed, "v@:@");
+    add_method1(app, sel("traySwatch:"), &tray_swatch, "v@:@");
+    add_method1(app, sel("trayAction:"), &tray_action, "v@:@");
+    add_method1(app, sel("trayHidden:"), &tray_hidden, "v@:@");
+    add_method1(app, sel("toastDone:"), &toast_done, "v@:@");
+    add_method1(app, sel("backTapped:"), &back_tapped, "v@:@");
+    add_method1(app, sel("backTimeout:"), &back_timeout, "v@:@");
+    add_method1(app, sel("flashDone:"), &flash_done, "v@:@");
+    add_method4(app, sel("textView:editMenuForTextInRange:suggestedActions:"), &edit_menu,
+        "@@:@{_NSRange=QQ}@")
+}
