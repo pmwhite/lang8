@@ -9,22 +9,26 @@ read aloud by VoiceOver as it would be in the phone's own apps.
 
 ## Reading
 
-- The chapter is set in the phone's serif (New York), sized from its text
-  size (Settings, Display & Brightness, Text Size), on warm paper (near black
-  in dark mode). Its book and number head it; its headings, the passages they
-  point to, psalms' titles, poetry's indents and stanzas, and lists are as
-  the BSB sets them. Verses are numbered small, in the margin's color.
-- A finger slides from one chapter to the next, or back; the next
-  chapter's name at the end goes on to it too.
-- The chapter's name at the top opens the books (the Old and New
-  Testaments, at the book being read); a book opens its chapters, as a grid.
-- A footnote's mark (a small letter) shows its note.
-- Reading on hides the bars and the status bar; a tap brings them back (or
-  hides them), as does going back to the top.
-- Where you were (the chapter, and how far down) is kept for next time,
-  and through a change of the text size.
-- A link opens a chapter: `bsb://JHN/3` (the book's three-letter code, as
-  the text has them, and the chapter).
+`DESIGN.md` is the design it follows (Round 1 is built).
+
+- Every chapter is a row of one table, read on by scrolling; a hairline
+  divides chapters, each headed by its book's name (JOHN, PSALM) and number.
+  The chapter's name shows in the bar only once its opener has gone under it.
+- Themes (Auto, Paper, White, Sepia, Night, Black), five fonts, a text size
+  on top of the phone's, line spacing, margins, and what to show (verse
+  numbers, headings, footnote marks, a verse a line): the reading settings
+  (Aa), applied live.
+- A tap on a verse selects it: a tray offers five highlight colors, Copy,
+  Share, Bookmark and Note. The text's own edit menu has Highlight, Note,
+  Copy with Reference and Share first.
+- The title opens the passage picker: a reference typed ("jn 3:16"), recent
+  places, the books, and a book's chapters. Search finds verses with every
+  word (or a quoted phrase), in a scope. The library lists highlights, notes
+  and bookmarks by book. After any jump, a capsule goes back.
+- Where you were (the chapter, verse, and how far into it) is kept through
+  size changes and relaunches. Highlights, bookmarks, notes and history are
+  files in Application Support/SmoothBible, by book, chapter and verse.
+- A link opens a chapter: `bsb://JHN/3` (or a verse, `bsb://JHN/3/16`).
 
 ## Files
 
@@ -33,7 +37,10 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   The BSB is in the public domain.
 - `text.l8` indexes it and lays a chapter out as runs of styled text;
   `test_text.l8` tests that (`make bible-test`).
-- `ios.l8` is the app: its classes, its views, and their look.
+- `ios.l8` is the app: the reader and its classes; `ios_look.l8` the themes,
+  fonts and styles; `ios_store.l8` what is kept; `ios_select.l8` selection,
+  the tray, the edit menu and jumps; `ios_sheets.l8` the sheets;
+  `ios_demo.l8` the demo CI runs.
 - `ios/` is what goes into the app besides its code: its Info.plist, icon
   (`AppIcon.svg`, drawn to `AppIcon.png` in Chromium), privacy manifest,
   named colors (`Colors/`: Paper, Ink, Faint, Accent, each light and dark),
