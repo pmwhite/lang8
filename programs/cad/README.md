@@ -229,7 +229,10 @@ through the board's corners, so the case's rim is thin all round.
   (which takes the case apart: the battery is under the board). The
   program should put it to sleep, too, below about 3.55 V: Wi-Fi's bursts
   through the fuse and the charger pull the 3.3 V down near the module's
-  brown-out below that.
+  brown-out below that. Held 7.5 s, whatever the program is doing, the
+  button restarts it: a push-button reset timer on its line (TI's
+  TPS3422, 0.25 uA, its own pull-up) pulls EN low for 0.4 s. (The
+  program should sleep on a shorter hold, a second or two.)
 - There is no USB socket: programs come over the air and charging is
   wireless. For the first program, or to recover from a bad one, there
   are eight test points, plated holes in two rows of four at the lower
@@ -343,7 +346,7 @@ pivot it rocks on are hard to make true, and it could catch or press two
 at once; four stacks press as surely as A and B). A and B have caps as
 wide as there is room (about 7.6 mm), standing out as far, their middle as
 far right of the case's middle as the arrows' is left; Back,
-Home and power, in a row along the bottom, have small caps (5 mm) flush
+Home and power, in a row along the bottom, have small caps (6 mm) flush
 with the front, so a thumb passing over them does not press them, nor
 takes them for the face buttons; engraved by them, a bar for Back, a dot
 for Home, a ring for power, and a small triangle past each arrow,
@@ -435,8 +438,8 @@ M2.5 washers). The viewer's **Steps** (in 3D) shows each step:
 `dock.pcb` (from `tools/dock.py`) is a box that holds four handhelds lying
 flat, two by two, under a lid, and charges them without wires. It is the
 second design open (the title's menu); its board file's `dock` line, instead of
-`case`, makes its box (`dock.l8`), 251 x 223.5 x 38.4 mm of 3.2 mm birch ply
-(lid on, on its feet 48 mm), from the bottom:
+`case`, makes its box (`dock.l8`), 257 x 223.5 x 41.6 mm of 3.2 mm birch ply
+(lid on, on its feet 51 mm), from the bottom:
 
 - a base, held on by six steel M2.5 x 12 bolts (their heads under it,
   between four wooden feet), through the first cavity into nuts in hexes
@@ -456,7 +459,7 @@ second design open (the title's menu); its board file's `dock` line, instead of
   for its leads, and for the air, which goes on up round the coil (the
   floor's hole is 2.5 mm wider each side) into the pocket. Foam squares
   hold the coils and boards still;
-- the floor, then eight walls round four pockets, each a handheld's case
+- the floor, then nine walls round four pockets, each a handheld's case
   and 0.75 mm each side, its coil under the handheld's receiver (they go
   in buttons to the front); the lowest three walls have the dividers, the
   rest go only round the outside, and each pocket has a finger's notch at
@@ -465,7 +468,11 @@ second design open (the title's menu); its board file's `dock` line, instead of
   the handheld's end: a fingertip goes under it to lift it out.
   On each pocket's floor, at the end the handheld's screen goes, the
   screen's outline is engraved: the way round it charges, its receiver
-  over the coil. A grille in the lid's top, over the back pockets'
+  over the coil. (Turned round, it does not charge, and shows it: its
+  own lights and its pocket's light stay dark. Nothing stops it going in
+  that way: its back's one mark that is not the same turned round, the
+  test points' window, lies over the coil's hole, where there is no
+  wood for a key.) A grille in the lid's top, over the back pockets'
   finger notches (the lid's frame open there too), lets
   out the air the transmitters warm; dust falls into the notches, not on
   the screens. With a handheld lying over its coil the air's way
@@ -475,18 +482,20 @@ second design open (the title's menu); its board file's `dock` line, instead of
   what no handheld would: a coin on its pocket's floor. (The dock's own
   3.3 V, 0.1 to 0.2 A, is drawn before the shunt: the program allows for
   it against what the charger offers.);
-- right of the pockets, past a wall all the way up, the stowage: 48 mm
-  across, the pockets' length, 28.8 mm deep under the lid, for the charger
-  and its cable: Qualtek's QFWC-18-12-USCR (in the cart: 18 W USB-C, 5 V
-  at 3 A among its voltages, its 1.2 m cable attached, a folding US
-  plug), lying down, its cable coiled beside it. In the lowest two walls
-  the stowage is wood but for a pocket the charger's shape (3 mm bigger:
-  its size is from the maker's listing, to be measured on a real one
-  before cutting, and where its cable leaves it), against the outer wall, a round well 42 mm across that the
-  cable's coil sits in, and a channel for the cable between them, so
-  neither slides about; a finger's notch in the outer wall beside the
-  charger lifts it out. (Any USB-C charger that gives 5 V at 3 A will
-  do, if it is under 28 mm one way and fits the pocket.);
+- right of the pockets, past a wall all the way up, the stowage: 54 mm
+  across, the pockets' length, 32 mm deep under the lid (the walls are
+  as many as the charger's 28 mm and 2 to spare need: nine on 3.2 mm
+  ply), for the charger and its cable: Qualtek's QFWC-18-12-USCR (in the
+  cart: 18 W USB-C, 5 V at 3 A among its voltages, a folding US plug,
+  48 x 48 x 28 mm by its datasheet; a USB-C socket, so the cart has a
+  1 m USB-C cable for it too, Adafruit's 4199), lying down, its cable
+  coiled beside it. In the lowest two walls the stowage is wood but for
+  a pocket the charger's shape (3 mm bigger), against the outer wall, a
+  round well 42 mm across that the cable's coil sits in, and a channel
+  for the cable between them, so neither slides about; a finger's notch
+  in the outer wall beside the charger lifts it out. (Any USB-C charger
+  that gives 5 V at 3 A will do, if it is under 30 mm one way and fits
+  the pocket; and any USB-C to C cable rated 3 A.);
 - the lid: it lifts off. A frame (the walls' outline and holes) with a
   top glued on it, 6.4 mm in all, a grille of four slots in the top over
   each back pocket's finger notch, and a third over the stowage's back
@@ -506,7 +515,7 @@ The pockets' corners are round as the handhelds' are (7.25 mm, their
 6.5 and the gap round them).
 
 Putting it together (beside the cart: wood glue, 5-minute epoxy, two
-3 mm wooden dowels cut to 41 mm, a little wax). The viewer's **Steps**
+3 mm wooden dowels cut to 44 mm, a little wax). The viewer's **Steps**
 shows each step:
 
 1. The body: the floor and the walls glued up in order, the two dowels
@@ -543,8 +552,9 @@ back. It takes 5 V from USB-C, reads what the charger offers from the CC
 lines (the voltage on its 5.1k pulldowns: 0.5, 1.5 or 3 A) and what is
 drawn through a 10 milliohm shunt (an INA180 amplifies it 50 times for an
 ADC pin, through 1k: 0.5 V an amp), and switches each transmitter with a
-P-channel MOSFET, its gate pulled down through 10k with 100 nF to its
-source, so it turns on over about a millisecond: the transmitter's input
+P-channel MOSFET, its gate held up by 100k and pulled down through 10k
+by an N-channel one when the module's pin is high, with 100 nF from gate
+to source, so it turns on over about a millisecond: the transmitter's input
 does not draw a step from the charger. Its 3.3 V regulator is the
 handheld's (TLV75533, WSON-6), for the same heat. The supply's trunk is laid first, 1.2 mm wide (3 A at
 a 20 C rise; each transmitter's own feed 0.8), from
@@ -632,8 +642,8 @@ The *Make it* panel lists who makes or sells each part of the thing:
 | --- | --- | --- |
 | The board, made and its parts put on | JLCPCB | `fab.l8`'s zip: Gerbers (top and bottom copper, mask, paste, silkscreen, outline), plated and unplated drill files, the parts list (`Comment, Designator, Footprint, LCSC Part #`) and their places (`Designator, Mid X, Mid Y, Layer, Rotation`) |
 | The case, laser cut | Ponoko | the cut file |
-| Screen, steel bolts and nuts, battery, foam squares (the dock: transmitters, charger, bolts, nuts, the lid's magnets, foam squares) | DigiKey | a cart filled by its FastAdd link (`order.l8`) |
-| The handheld's wireless receiver (Adafruit 1901: DigiKey does not carry it) | Adafruit | its page |
+| Screen, steel bolts and nuts, battery, foam squares (the dock: transmitters, charger and its USB-C cable, bolts, nuts, the lid's magnets, foam squares) | DigiKey | a cart filled by its FastAdd link (`order.l8`) |
+| The handheld's wireless receiver (Adafruit 1901: DigiKey does not carry it; when Adafruit is out of it, Mouser's 485-1901) | Adafruit | its page |
 
 Each part on the board has a manufacturer's and an LCSC part number
 (`sourcing.l8`, found in JLCPCB's parts library and in stock on
@@ -648,22 +658,59 @@ page's own, so the editor tells the page where those buttons are
 the buttons write `fab.zip` and `case.svg` beside where the editor was
 started, and print the sites' addresses.
 
-Still to check by hand before ordering: the parts' turns in JLCPCB's
-placement preview (`SRC_ROT` is all 0 until each is checked, the WSON-6 regulators among
-them; the dock's
-side-looking lights' cathodes are on the right, lens down, from Lite-On's
-tape drawing), the screen's visual area against a real module, and the
-battery plug's polarity against Adafruit's (its + to pin 1). Vias in
-pads (the stitching in ground pads, the grid under the charger) are
-open: if solder wicking under the charger is a worry, ask JLCPCB for
-filled and capped vias. The dock's CC lines go straight to the module's
-ADC pins, beside their 5.1k pulldowns (no room for series resistors by
-the socket): the USB-C socket's contacts are recessed in the dock's
-back. The
-handheld's board is 1.2 mm thick (its `thickness` line): choose that in
-JLCPCB's order form, where 1.6 is the default; at 1.6 the buttons have
-no room to travel. The MCP73871
-charger is thin at JLC (about 76).
+Still to check by hand before ordering (none of it a change to the
+design, unless a check fails):
+
+- The parts' turns in JLCPCB's placement preview. `SRC_ROT` is all 0
+  until each is checked: JLCPCB's library draws some parts turned from
+  the usual (often the SOIC, QFN, SON and SOT parts, and the
+  connectors). For each of these, pin 1 in the preview must sit on pin
+  1's pad (the silkscreen's dot), or its line in `SRC_ROT` set to the
+  turn that puts it there: the handheld's ESP32-S3 (U1), MCP73871 (U3,
+  QFN-20), TLV75533 (U4, WSON-6), LM339 (U7, SOIC-14), LM4040 (U8),
+  LMV321 (U9), TPS3422 (U10, USON-6), the MOSFETs (Q1, Q2), the
+  Schottky (D2), the five lights (their cathodes), the battery's
+  socket (J2) and the screen's (J3); the dock's ESP32-S3, regulator,
+  INA180, MOSFETs, USB-C socket and side-looking lights (their cathodes
+  on the right, lens down, from Lite-On's tape drawing). Resistors,
+  capacitors and the switches go either way.
+- The screen's reset. It is on IO45, which the module reads at reset to
+  choose its flash's voltage: low (its own pull-down) is the 3.3 V its
+  flash wants. Newhaven's module must not pull its RES pin up (its
+  datasheet shows none): measure a real one's RES to its VDD. If it
+  does, the handheld will not start from its flash; the fix is in the
+  module, not the board (`espefuse.py set_flash_voltage 3.3V` over the
+  test points, once, makes IO45 not matter).
+- The battery's plug's polarity against the board's (its + to pin 1):
+  Adafruit's are, others' often are not.
+- The screen's visual area against a real module.
+- The charger's size (48 x 48 x 28 mm, its datasheet's) against a real
+  one before the dock's ply is cut.
+- The handheld's board is 1.2 mm thick (its `thickness` line): choose
+  that in JLCPCB's order form, where 1.6 is the default; at 1.6 the
+  buttons have no room to travel.
+- The MCP73871 charger is thin at JLC (about 76) and the TPS3422 has
+  7,900; the receiver (Adafruit 1901) comes and goes: Mouser's 485-1901
+  is the same part.
+
+Known, and left as they are: vias in pads (the stitching in ground
+pads, the grid under the charger) are open: if solder wicking under the
+charger is a worry, ask JLCPCB for filled and capped vias. The dock's CC
+lines go straight to the module's ADC pins, beside their 5.1k pulldowns
+(no room for series resistors by the socket): the USB-C socket's
+contacts are recessed in the dock's back. A battery too flat to run the
+comparators shows no light on a charger until it has charged a little
+(a minute or two). Where the ply comes thin (under 3 mm), a thin washer
+under each bolt's head keeps it from pulling into the back.
+
+The first program goes in by the test points, with the case shut: a jig
+of eight spring pins (pogo pins, 2.54 mm apart in two rows of four,
+under the window in the back), its 5V and GND from a USB supply of 5.1
+to 5.25 V (the Schottky drops up to 0.6 V; the charger wants 4.35 V),
+its D+ and D- to a computer's USB: the ESP32-S3's own USB loads it
+(esptool resets it into its loader by USB alone, even with nothing in
+its flash). Two buttons on the jig, EN and BOOT to ground, are for a
+module that will not: BOOT held while EN is let go starts the loader.
 
 ## The board file
 

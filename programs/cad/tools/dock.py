@@ -162,7 +162,7 @@ def mm(v):
     return "0" if s in ("-0", "") else s
 out = ["# The dock for four handhelds (see programs/cad/README.md). Written by",
        "# tools/dock.py: change that, not this.",
-       f"board {mm(BW)} {mm(BH)} 2 Dock",
+       f"board {mm(BW)} {mm(BH)} 0 Dock",
        "rules 0.15 0.25 0.6 0.3",
        # Its box: 3.2 mm birch ply; the handhelds' cases, 84 x 93.5 x 22.4,
        # their receivers 20.75 mm down from their middles; the board's

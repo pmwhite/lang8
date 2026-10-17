@@ -46,6 +46,12 @@ part("C2", "c0603", -35.0, -0.6, 0, "10u")
 part("C3", "c0603", -35.0, -2.1, 0, "100n")
 part("R1", "r0603", -35.0, -3.6, 0, "10k")
 part("C1", "c0603", -35.0, -5.1, 0, "1u")
+# A way out of a hung program, whatever it does: Power held 7.5 s pulls
+# EN low for 0.4 s (a push-button reset timer, TPS3422: 0.25 uA, its own
+# pull-up on the button's line, its output open drain onto the RC above),
+# and the module starts again. Its bypass beside it.
+part("U10", "uson6", -35.0, -7.0, 0, "TPS3422")
+part("C23", "c0603", -35.0, -8.8, 0, "100n")
 # Test points, for a jig of pogo pins from under the case (through a window
 # in its back, under a sticker): to load the first program, or to recover
 # from a bad one. Away from the screen and from the battery's and the
@@ -199,7 +205,7 @@ part("SW10", "tact5h", knob("PWX", 24.0), knob("PWY", -39.5), 0, "POWER")
 
 N = []
 def net(name, w, *pins): N.append((name, w, list(pins)))
-net("EN", 0, "U1.EN", "R1.2", "C1.1", "TP1.1")
+net("EN", 0, "U1.EN", "R1.2", "C1.1", "TP1.1", "U10.RST")
 net("BOOT", 0, "U1.IO0", "TP5.1")
 net("TXD0", 0, "U1.TXD0", "TP2.1")
 net("RXD0", 0, "U1.RXD0", "TP3.1")
@@ -266,12 +272,12 @@ net("THERM", 0, "U3.THERM", "RT1.1")
 net("PROG3", 0, "U3.PROG3", "R25.1")
 net("BL_ON", 0, "U1.IO1", "U9.VCC", "C18.1")
 net("3V3", 0.4, "U4.VOUT", "C11.1", "U1.3V3", "C2.1", "C3.1", "R1.1",
-    "J3.VDD", "J3.VDDI", "J3.RDX", "J3.SDA", "J3.IM0", *[f"J3.DB{i}" for i in range(8)])
+    "U10.VCC", "C23.1", "J3.VDD", "J3.VDDI", "J3.RDX", "J3.SDA", "J3.IM0", *[f"J3.DB{i}" for i in range(8)])
 gnd = ["U1.GND1", "U1.GND40", "U1.GND41", "C1.2", "C2.2", "C3.2", "C4.2", "R10.2", "TP4.1",
        "J3.GND1", "J3.IM1", "J3.IM2", "J3.MP1", "J3.MP2", "R2.2", "U9.GND", "C18.2", "R26.2", "R27.2",
        "C19.2", "C20.2", "C22.2", "R32.2",
        "U7.GND", "U8.A", "RT1.2", "R25.2", "R21.2", "R23.2", "C5.2", "U3.VSS10", "U3.VSS11", "U3.EP", "U3.SEL", "R29.2",
-       "R6.2", "U4.GND", "U4.EP", "J2.GND", "J4.GND"]
+       "R6.2", "U4.GND", "U4.EP", "J2.GND", "J4.GND", "U10.GND", "U10.TS", "U10.TST", "C23.2"]
 # (The screen's second ground pin, 39, is joined to its first on its flex:
 # the board leaves it be, and its backlight's anode beside it has the way
 # out.)
@@ -288,7 +294,7 @@ SW_OF = {"UP": "SW2", "DOWN": "SW3", "LEFT": "SW4", "RIGHT": "SW5", "BACK": "SW8
          "HOME": "SW9", "B": "SW7", "A": "SW6"}
 for name, g in list(zip(LEFT_SIDE, [4, 5, 6, 7, 15])) + list(zip(RIGHT_SIDE, [16, 17, 18])):
     net(f"BTN_{name}", 0, f"U1.IO{g}", f"{SW_OF[name]}.SIG", f"{SW_OF[name]}.SIG2")
-net("BTN_POWER", 0, "U1.IO8", "SW10.SIG", "SW10.SIG2")
+net("BTN_POWER", 0, "U1.IO8", "SW10.SIG", "SW10.SIG2", "U10.PB1")
 
 def mm(v):
     s = f"{v:.3f}".rstrip("0").rstrip(".")
@@ -323,6 +329,11 @@ out.append("route 3V3 0.5 bottom locked U4.VOUT U1.3V3")
 # (The reference's ground to the comparator's bypass, beside it: the
 # pour under them is cut up by the lights' tracks.)
 out.append("route GND 0.25 top locked U8.A C5.2")
+# (The reset timer's TS and TST, side by side, to ground together: its
+# pads are too small for the pour to reach each.)
+out.append("route GND 0.15 top locked U10.TS U10.TST")
+# (And its GND, between two signals' pads, out to a via to the back's pour.)
+out.append("route GND 0.2 top locked drop U10.GND -36.3 -7")
 # (And the charger's TE, up from its pin to the system supply's cap over
 # it, before the rest come round the chip.)
 out.append("route VSYS 0.25 top locked U3.TE C10.1")
