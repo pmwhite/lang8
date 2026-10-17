@@ -79,6 +79,12 @@ sides drawn as squares.
   that morph), `app.l8`, `pages.l8`, `picture.l8`, `touch.l8`, `main.l8`;
   `web/lemma` runs it in a browser.
 
+A region's theorem can be exported (`export_theorem` in moves.l8): its
+rulebook discharged, its symbols quantified and its carrier types made
+any types, it is a theorem with no hypotheses at all, ready to be used of
+any structure that obeys the rulebook. The test shows (a·b)⁻¹ = b⁻¹·a⁻¹
+exported so; that is what the Foundations region will instantiate.
+
 ## Adding a region
 
 Write `regions/NAME.txt`: `region`, the types and fixed symbols with their
