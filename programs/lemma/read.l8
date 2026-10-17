@@ -84,6 +84,12 @@ ast_name(s: int) raises ReadError: int {
     ast(A_NAME, s, 0, 0, 0)
 }
 
+// A name written by notation i: it keeps the token, since another
+// notation may share it (≤ on ℝ and on ℕ) and the types choose.
+ast_note(i: int) raises ReadError: int {
+    ast(A_NAME, nt_name[i], 0, 0, nt_tok[i])
+}
+
 ast_app(f: int, x: int) raises ReadError: int {
     ast(A_APP, f, x, 0, 0)
 }
@@ -112,6 +118,7 @@ read_init() raises KernelError {
     add_token(sym("=>"));
     add_token(sym_cp(8658));
     add_token(sym("::"));
+    add_token(sym_cp(8800));
     p: int = prop_type();
     a: int = mk_tvar(sym("'a"));
     add_ent(name_pure_imp, E_CONST, mk_fun(p, mk_fun(p, p)), 0);
@@ -206,7 +213,7 @@ read_atom() raises ReadError, KernelError: int {
             t: int = read_term(0);
             if (tk_sym != nt_tok2[o]) read_fail("an open bar without its close");
             lex();
-            return ast_app(ast_name(nt_name[o]), t)
+            return ast_app(ast_note(o), t)
         }
     }
     read_fail("expected a term")
@@ -234,9 +241,8 @@ read_binder(name: int) raises ReadError, KernelError: int {
         if (r >= 0 && nt_prec[r] >= 40 && nt_prec[r] <= 60) {
             lex();
             bound_by: int = read_term(nt_prec[r] + 1);
-            if (nt_kind[r] == N_FLIP) cond = ast_app2(ast_name(nt_name[r]), bound_by,
-                ast_name(v)) else cond = ast_app2(ast_name(nt_name[r]), ast_name(v),
-                bound_by)
+            if (nt_kind[r] == N_FLIP) cond = ast_app2(ast_note(r), bound_by, ast_name(v)) else cond = ast_app2(ast_note(r),
+                ast_name(v), bound_by)
         }
     }
     body: int = 0;
@@ -270,20 +276,27 @@ read_term(min: int) raises ReadError, KernelError: int {
     if (tk_kind == K_SYM) p = note_for_tok(tk_sym, 1 << N_PREFIX);
     if (p >= 0) {
         lex();
-        left = ast_app(ast_name(nt_name[p]), read_term(nt_prec[p]))
+        left = ast_app(ast_note(p), read_term(nt_prec[p]))
     } else left = read_atom();
     more: bool = true;
     while (more) {
+        // (a ≠ b is ¬(a = b).)
+        if (tk_kind == K_SYM && tk_sym == sym_cp(8800) && min <= 50 && role_name[ROLE_NOT] != 0) {
+            lex();
+            right: int = read_term(51);
+            left = ast_app(ast_name(role_name[ROLE_NOT]), ast_app2(ast_name(role_name[ROLE_EQ]),
+                left, right))
+        }
         i: int = -1;
         if (tk_kind == K_SYM || tk_kind == K_NAME) i = note_for_tok(tk_sym, 1 << N_INFIX | 1 << N_INFIXL | 1 << N_INFIXR | 1 << N_FLIP | 1 << N_POSTFIX);
         if (i >= 0 && nt_prec[i] >= min) {
             lex();
             k: int = nt_kind[i];
-            if (k == N_POSTFIX) left = ast_app(ast_name(nt_name[i]), left) else {
+            if (k == N_POSTFIX) left = ast_app(ast_note(i), left) else {
                 next: int = nt_prec[i] + 1;
                 if (k == N_INFIXR) next = nt_prec[i];
                 right: int = read_term(next);
-                if (k == N_FLIP) left = ast_app2(ast_name(nt_name[i]), right, left) else left = ast_app2(ast_name(nt_name[i]),
+                if (k == N_FLIP) left = ast_app2(ast_note(i), right, left) else left = ast_app2(ast_note(i),
                     left, right)
             }
         } else if (min <= 1000 && starts_arg()) left = ast_app(left, read_arg()) else more = false
@@ -300,7 +313,7 @@ read_arg() raises ReadError, KernelError: int {
         if (tk_kind == K_SYM) i = note_for_tok(tk_sym, 1 << N_POSTFIX);
         if (i >= 0) {
             lex();
-            a = ast_app(ast_name(nt_name[i]), a)
+            a = ast_app(ast_note(i), a)
         } else more = false
     }
     a
@@ -419,6 +432,23 @@ infer(n: int) raises ReadError, KernelError: int {
             if (env_name[i] == s) t = env_ty[i];
             i = i - 1
         }
+        if (t == 0 && overload_cands(n) > 1) {
+            // (More than one thing it could be: the types will choose.)
+            if (ov_n >= len(ov_node)) read_fail("too many overloaded names");
+            t = fresh_meta();
+            ov_node[ov_n] = n;
+            ov_c0[ov_n] = ovc_used;
+            for j in 0..oc_n {
+                if (ovc_used < len(ovc)) {
+                    ovc[ovc_used] = oc[j];
+                    ovc_used = ovc_used + 1
+                }
+            }
+            ov_cn[ov_n] = ovc_used - ov_c0[ov_n];
+            ov_choice[ov_n] = -1;
+            ov_ty[ov_n] = t;
+            ov_n = ov_n + 1
+        }
         if (t == 0) {
             e: int = find_ent(s, 1 << E_CONST | 1 << E_FIX);
             if (e >= 0) {
@@ -475,6 +505,134 @@ infer(n: int) raises ReadError, KernelError: int {
     }
     ast_ty[n] = t;
     t
+}
+
+// ---- overloading ----
+// Names that could be more than one thing: the node, its candidates
+// (entities, in ovc from ov_c0), the one chosen, and the type it has.
+ov_node: []int = new int[256](0);
+
+ov_c0: []int = new int[256](0);
+
+ov_cn: []int = new int[256](0);
+
+ov_choice: []int = new int[256](-1);
+
+ov_ty: []int = new int[256](0);
+
+ov_n: int = 0;
+
+ovc: []int = new int[2048](0);
+
+ovc_used: int = 0;
+
+// The candidates for name node n (into oc): every notation with its token
+// (if it was written by one), or every fixed symbol or constant of its name.
+oc: []int = new int[64](0);
+
+oc_n: int = 0;
+
+overload_cands(n: int): int {
+    oc_n = 0;
+    tok: int = ast_d[n];
+    if (tok != 0) {
+        for i in 0..nt_n {
+            if (nt_tok[i] == tok) oc_add(find_ent(nt_name[i], 1 << E_CONST | 1 << E_FIX))
+        }
+    } else {
+        s: int = ast_a[n];
+        for e in 0..ent_n {
+            if (ent_name[e] == s && (ent_kind[e] == E_CONST || ent_kind[e] == E_FIX)) oc_add(e)
+        }
+    }
+    oc_n
+}
+
+oc_add(e: int) {
+    if (e < 0) return;
+    for i in 0..oc_n {
+        if (oc[i] == e) return
+    }
+    if (oc_n < len(oc)) {
+        oc[oc_n] = e;
+        oc_n = oc_n + 1
+    }
+}
+
+// Whether two types could be made the same (unknowns fit anything).
+could_unify(a0: int, b0: int): bool {
+    a: int = walk_ty(a0);
+    b: int = walk_ty(b0);
+    if (a == b || is_meta[a] || is_meta[b]) return true;
+    if (ty_kind(a) == TY_VAR || ty_kind(b) == TY_VAR) return true;
+    if (ty_kind(a) == TY_FUN && ty_kind(b) == TY_FUN) return could_unify(ty_dom(a),
+        ty_dom(b)) && could_unify(ty_cod(a), ty_cod(b));
+    false
+}
+
+// The type an entity has at one use (a constant's afresh).
+ent_use_type(e: int) raises KernelError: int {
+    if (ent_kind[e] == E_CONST) {
+        sch_n = 0;
+        return fresh_scheme(ent_ty[e])
+    }
+    ent_ty[e]
+}
+
+// Choose each overloaded name: one that fits its type, if only one does,
+// which may fix other types and so choose more; then, of those still
+// open, the last declared, and so on until all are chosen.
+resolve_overloads() raises ReadError, KernelError {
+    left: int = ov_n;
+    while (left > 0) {
+        progress: bool = true;
+        while (progress) {
+            progress = false;
+            for i in 0..ov_n {
+                if (ov_choice[i] < 0) {
+                    fits: int = 0;
+                    pick: int = -1;
+                    for j in 0..ov_cn[i] {
+                        e: int = ovc[ov_c0[i] + j];
+                        if (could_unify(ov_ty[i], ent_ty[e])) {
+                            fits = fits + 1;
+                            pick = e
+                        }
+                    }
+                    if (fits == 0) read_fail("no meaning of this name fits here");
+                    if (fits == 1) {
+                        ov_choice[i] = pick;
+                        unify(ov_ty[i], ent_use_type(pick));
+                        progress = true;
+                        left = left - 1
+                    }
+                }
+            }
+        }
+        // (Still open: the last declared that fits.)
+        done: bool = false;
+        for i in 0..ov_n {
+            if (!done && ov_choice[i] < 0) {
+                pick: int = -1;
+                for j in 0..ov_cn[i] {
+                    e: int = ovc[ov_c0[i] + j];
+                    if (could_unify(ov_ty[i], ent_ty[e]) && e > pick) pick = e
+                }
+                ov_choice[i] = pick;
+                unify(ov_ty[i], ent_use_type(pick));
+                left = left - 1;
+                done = true
+            }
+        }
+    }
+}
+
+// The entity chosen for node n, if it was overloaded, or -1.
+ov_chosen(n: int): int {
+    for i in 0..ov_n {
+        if (ov_node[i] == n) return ov_choice[i]
+    }
+    -1
 }
 
 // Where a proposition goes: a bool is fine there too (it is wrapped).
@@ -534,9 +692,10 @@ build(n: int) raises ReadError, KernelError: int {
             i = i - 1
         }
         if (r == 0) {
-            e: int = find_ent(s, 1 << E_CONST | 1 << E_FIX);
+            e: int = ov_chosen(n);
+            if (e < 0) e = find_ent(s, 1 << E_CONST | 1 << E_FIX);
             if (e >= 0) {
-                if (ent_kind[e] == E_CONST) r = mk_const(s, zonk(ast_ty[n])) else r = ent_term[e]
+                if (ent_kind[e] == E_CONST) r = mk_const(ent_name[e], zonk(ast_ty[n])) else r = ent_term[e]
             }
         }
         if (r == 0) {
@@ -583,13 +742,24 @@ finish_term(n: int, schematic: bool, prop: bool) raises ReadError, KernelError: 
     own_schematic = schematic;
     mark_props(n);
     if (prop) ast_prop[n] = true;
+    ov_n = 0;
+    ovc_used = 0;
     t: int = infer(n);
+    if (want_type != 0) {
+        unify(t, want_type);
+        want_type = 0
+    }
+    resolve_overloads();
     if (prop) t = bool_or_prop(t);
     env_n = 0;
     r: int = build(n);
     if (prop) r = wrap_true(r);
     r
 }
+
+// The type the next term read must have (0: any).
+tag lemma
+want_type: int = 0;
 
 // A term (not a statement): of whatever type.
 tag lemma
