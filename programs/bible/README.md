@@ -21,7 +21,10 @@ read aloud by VoiceOver as it would be in the phone's own apps.
 - A footnote's mark (a small letter) shows its note.
 - Reading on hides the bars and the status bar; a tap brings them back (or
   hides them), as does going back to the top.
-- Where you were (the chapter, and how far down) is kept for next time.
+- Where you were (the chapter, and how far down) is kept for next time,
+  and through a change of the text size.
+- A link opens a chapter: `bsb://JHN/3` (the book's three-letter code, as
+  the text has them, and the chapter).
 
 ## Files
 
@@ -46,6 +49,6 @@ programs/bible/ios/simulate.sh build/Bible.app shots
 GitHub builds it on every push to the `bible` branch
 (`.github/workflows/bible.yml`): a Linux job tests the layout and compiles
 the app, and macOS jobs build it for the simulator, run it there with
-`L8_DEMO=1` (it goes through the books, a psalm, a footnote and John 3 by
-itself) and push the screenshots to the `ci-bible-shots` branch, and build
+`L8_DEMO=1`, taking it through the books, a psalm, a footnote and John 3
+(each step a Darwin notification, sent with `notifyutil`), and push the screenshots to the `ci-bible-shots` branch, and build
 `Bible.ipa` for an iPhone onto `ci-bible-ipa`.

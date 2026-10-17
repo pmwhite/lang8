@@ -34,8 +34,8 @@ logger=$!
 SIMCTL_CHILD_L8_DEMO=1 xcrun simctl launch --console-pty "$dev" "$id" > "$out/console.txt" 2>&1 &
 console=$!
 # (Once it says it is up: the first launch may take minutes.) Each step
-# is a link the app takes (bsb://demo/N), its screenshot after its
-# animations.
+# is a Darwin notification the app takes (space.trailingwhite.bible.demoN),
+# its screenshot after its animations.
 for i in $(seq 1200); do
   grep -q "bible: up" "$out/console.txt" 2>/dev/null && break
   sleep 0.5
