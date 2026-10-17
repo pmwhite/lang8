@@ -345,3 +345,30 @@ help:
 	@echo '  promote, promote-bin1, promote-bin2, promote-source   (FORCE=1 skips the prompt)'
 	@echo '  clean'
 	@echo 'tools/profile.py times the compiler self-build, game build, and formatting.'
+
+# ---- Lemma, the proof game (programs/lemma) ----
+.PHONY: lemma lemma-test lemma-web
+
+check: $(BUILD)/lemma $(OK)/lemma-tests
+
+LEMMA_FILES := programs/lemma/hol.txt $(wildcard programs/lemma/regions/*.txt)
+
+$(BUILD)/lemma: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+	@$(STEP) 'lemma' sh -c '$(call build,l8c3,programs/lemma/main.l8)'
+
+lemma: $(BUILD)/lemma
+
+$(OK)/lemma-tests: l8c3 $(PROGRAMS) $(RUNTIME) $(LEMMA_FILES) | $(OK)
+	+@$(STEP) 'lemma tests' ./l8c3 test programs/lemma/test_kernel.l8 programs/lemma/test_theory.l8 programs/lemma/test_play.l8 programs/lemma/test_regions.l8
+	@touch $@
+
+lemma-test: $(OK)/lemma-tests
+
+# The page, put into the site `make web` makes (.build/web/lemma).
+$(BUILD)/lemma.wasm: l8c3 $(PROGRAMS) | $(OK)
+	@$(STEP) 'lemma wasm' sh -c './l8c3 wasm --async glXSwapBuffers programs/lemma/main.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+lemma-web: $(BUILD)/lemma.wasm $(wildcard web/lemma/*) $(LEMMA_FILES)
+	@mkdir -p $(WEB_SITE)/lemma/regions
+	@cp web/lemma/* $(BUILD)/lemma.wasm programs/lemma/hol.txt $(WEB_SITE)/lemma/
+	@cp programs/lemma/regions/*.txt $(WEB_SITE)/lemma/regions/
