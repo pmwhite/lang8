@@ -26,6 +26,19 @@ xcrun --sdk "$sdk" clang -target "$target" -isysroot "$sysroot" "$out/tempo.o" -
   -framework UIKit -framework Foundation -framework CoreLocation -framework QuartzCore \
   -framework OpenGLES -lobjc -Wl,-dead_strip
 sed "s/PLATFORM/$platform/" "$here/Info.plist" > "$app/Info.plist"
+# The icon (AppIcon.png, drawn from AppIcon.svg), compiled into the app and
+# named in its Info.plist.
+icons="$out/Assets.xcassets/AppIcon.appiconset"
+mkdir -p "$icons"
+cp "$here/AppIcon.png" "$icons/icon.png"
+cat > "$icons/Contents.json" <<'JSON'
+{"images": [{"filename": "icon.png", "idiom": "universal", "platform": "ios", "size": "1024x1024"}],
+ "info": {"author": "xcode", "version": 1}}
+JSON
+xcrun actool --compile "$app" --platform "$sdk" --minimum-deployment-target 16.0 \
+  --target-device iphone --app-icon AppIcon --output-partial-info-plist "$out/icon.plist" \
+  "$out/Assets.xcassets" >/dev/null
+/usr/libexec/PlistBuddy -c "Merge $out/icon.plist" "$app/Info.plist"
 plutil -lint "$app/Info.plist"
 printf 'APPL????' > "$app/PkgInfo"
 if [ "$kind" = device ] && [ -n "${IOS_PROFILE:-}" ]; then
