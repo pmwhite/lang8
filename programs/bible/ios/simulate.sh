@@ -38,7 +38,9 @@ console=$!
 # to Documents/demo.txt), and its animations have finished.
 data=$(xcrun simctl get_app_container "$dev" "$id" data)
 step() {
-  for i in $(seq 80); do
+  tries=80
+  [ "$1" = 1 ] && tries=2400   # (the first launch may take minutes)
+  for i in $(seq $tries); do
     [ "$(cat "$data/Documents/demo.txt" 2>/dev/null)" = "$1" ] && break
     sleep 0.25
   done
