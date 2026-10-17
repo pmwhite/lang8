@@ -91,12 +91,10 @@ builds the app, runs it in the simulator with `L8_DEMO=1` (it records a run
 by itself while the simulator walks a loop), and keeps the screenshots, the
 logs and the app (`Tempo-simulator.zip`, which runs in any iOS simulator,
 or online at appetize.io) as the run's artifacts and on the `ci-shots`
-branch. It builds `Tempo.ipa` for an iPhone too, which is not signed for
-one: a sideloader signs it with an Apple ID (a free one keeps it on the
-phone seven days) and installs it over USB, from Linux too (Sideloader,
-with usbmuxd). On the phone, Developer Mode (Settings, Privacy &
-Security) must be on, and the Apple ID's apps trusted (Settings, General,
-VPN & Device Management).
+branch. It builds `Tempo.ipa` for an iPhone too, as **Better** (Better Late Than
+Never on the App Store), which `tools/ios/sign.sh` signs on Linux, for a
+phone plugged in or for TestFlight, and `tools/ios/apple.py` sends to App
+Store Connect through its API (the keys in `~/.config/tempo-ios`).
 
 ## Keeping it
 
