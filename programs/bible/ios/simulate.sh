@@ -2,7 +2,7 @@
 # Run Bible.app in the iOS simulator, on a Mac, and keep what it showed:
 #   simulate.sh APP OUT
 # It boots an iPhone simulator, launches the app with L8_DEMO=1, and takes it
-# through its demo with links (bsb://demo/N; see demo_do in
+# through its demo with Darwin notifications (see demo_do in
 # programs/bible/ios.l8): Genesis 1 at first, the books, Psalms' chapters,
 # Psalm 23, a footnote, John 3, read on (the bars hidden), the bars back. It
 # takes a screenshot after each, then one in dark mode and one with a larger
@@ -42,7 +42,7 @@ for i in $(seq 1200); do
 done
 sleep 2
 step() {
-  [ "$1" = 1 ] || xcrun simctl openurl "$dev" "bsb://demo/$1"
+  [ "$1" = 1 ] || xcrun simctl spawn "$dev" notifyutil -p "$id.demo$1"
   sleep 2
   shot "$2"
 }
@@ -71,7 +71,7 @@ for i in $(seq 240); do
   sleep 0.5
 done
 sleep 2; shot 11-opened-again
-# A link to a chapter.
+# A link to a chapter (the simulator asks first: the shot shows that).
 xcrun simctl openurl "$dev" "bsb://rom/8"
 sleep 2; shot 12-link-romans-8
 kill "$logger" "$console" 2>/dev/null || true
