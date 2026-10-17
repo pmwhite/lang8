@@ -1,0 +1,481 @@
+tag lemma;
+
+use_tag std;
+
+// Theory files: the logic (hol.txt) and each subject's region. A file is
+// statements, each starting at the beginning of a line (lines after it
+// that are indented go on with it):
+//
+//   type NAME                   a type
+//   typevar NAME                a type a region fixes (its carrier: any set)
+//   const NAME : TYPE           a constant of the logic
+//   notation KIND ...           how something is written (see read_notation)
+//   role ROLE NAME              which constant plays which part in the logic
+//   axiom NAME: PROP            an axiom of the logic
+//   region NAME "Title"         a region (a subject) starts
+//   fix NAME : TYPE             a symbol the region fixes
+//   assume NAME "words": PROP   a rule of its rulebook (assumed, never an axiom)
+//   define NAME ARGS = TERM     a symbol the region defines
+//   level NAME "Title"          a level (see read_level)
+//
+// A region adds no axioms: what it fixes is free, what it assumes is a
+// hypothesis of every theorem proved in it, and a definition is a
+// hypothesis NAME ≡ TERM. So each region stands on its own, and anything
+// proved in it holds for whatever satisfies its rulebook.
+tag lemma
+exception TheoryError;
+
+// ---- named theorems (the tools) ----
+const LM_AXIOM: int = 1;
+
+const LM_ASSUME: int = 2;
+
+const LM_DEF: int = 3;
+
+const LM_LEVEL: int = 4;
+
+const LEMMAS: int = 1024;
+
+lm_name: []int = new int[LEMMAS](0);
+
+lm_kind: []int = new int[LEMMAS](0);
+
+// The theorem, in the form a move uses it: its variables schematic.
+lm_thm: []int = new int[LEMMAS](0);
+
+// What it is called on screen ("associativity"), or 0 for its name.
+lm_words: []int = new int[LEMMAS](0);
+
+// The level that proves it, or -1.
+lm_level: []int = new int[LEMMAS](-1);
+
+// Whether it is used only inside other moves, never offered itself.
+lm_hidden: []bool = new bool[LEMMAS](false);
+
+lm_n: int = 0;
+
+add_lemma(
+    name: int,
+    kind: int,
+    th: int,
+    words: int
+): int {
+    if (lm_n >= LEMMAS) return -1;
+    lm_name[lm_n] = name;
+    lm_kind[lm_n] = kind;
+    lm_thm[lm_n] = th;
+    lm_words[lm_n] = words;
+    lm_level[lm_n] = -1;
+    lm_hidden[lm_n] = false;
+    lm_n = lm_n + 1;
+    lm_n - 1
+}
+
+find_lemma(name: int): int {
+    i: int = lm_n - 1;
+    while (i >= 0) {
+        if (lm_name[i] == name) return i;
+        i = i - 1
+    }
+    -1
+}
+
+// ---- the region's context ----
+// Its hypotheses (rulebook and definitions), as propositions.
+const CTX: int = 256;
+
+ctx_hyp: []int = new int[CTX](0);
+
+ctx_n: int = 0;
+
+// Its name and title.
+region_name: int = 0;
+
+region_title: int = 0;
+
+// Whether Calculate may be used in the region.
+region_calc: bool = false;
+
+// What the region's pictures are (a name the screen knows, or 0).
+region_picture: int = 0;
+
+// ---- levels ----
+const LEVELS: int = 128;
+
+lv_name: []int = new int[LEVELS](0);
+
+lv_title: []int = new int[LEVELS](0);
+
+// What it asks to show (its own variables schematic, as a rule).
+lv_goal: []int = new int[LEVELS](0);
+
+// Words said before it is played.
+lv_intro: []int = new int[LEVELS](0);
+
+lv_par: []int = new int[LEVELS](0);
+
+// Its tools (lemma numbers, from lv_tool0, lv_tooln of them).
+lv_tool0: []int = new int[LEVELS](0);
+
+lv_tooln: []int = new int[LEVELS](0);
+
+// Its kit: terms the player can build witnesses from (from lv_kit0).
+lv_kit0: []int = new int[LEVELS](0);
+
+lv_kitn: []int = new int[LEVELS](0);
+
+// The lemma it proves, once solved.
+lv_lemma: []int = new int[LEVELS](-1);
+
+lv_n: int = 0;
+
+const POOL: int = 8192;
+
+pool: []int = new int[POOL](0);
+
+pool_n: int = 0;
+
+pool_add(v: int) {
+    if (pool_n < POOL) {
+        pool[pool_n] = v;
+        pool_n = pool_n + 1
+    }
+}
+
+// ---- marks: what the logic is, so a region can be put away ----
+mark_ent: int = 0;
+
+mark_nt: int = 0;
+
+mark_tok: int = 0;
+
+mark_lm: int = 0;
+
+mark_sub: int = 0;
+
+// Everything the logic has brought, kept; anything after it forgotten.
+mark_logic() {
+    mark_ent = ent_n;
+    mark_nt = nt_n;
+    mark_tok = tok_n;
+    mark_lm = lm_n;
+    mark_sub = sub_types_n
+}
+
+reset_to_logic() {
+    ent_n = mark_ent;
+    nt_n = mark_nt;
+    tok_n = mark_tok;
+    lm_n = mark_lm;
+    sub_types_n = mark_sub;
+    ctx_n = 0;
+    lv_n = 0;
+    pool_n = 0;
+    region_name = 0;
+    region_title = 0;
+    region_calc = false;
+    region_picture = 0
+}
+
+// ---- reading statements ----
+theory_why: str = "";
+
+theory_line: int = 0;
+
+theory_fail(why: str@immortal) raises TheoryError: noreturn {
+    theory_why = why;
+    theory_line = tk_line;
+    raise TheoryError
+}
+
+// A name: a word, any token, or text in quotes.
+take_name(): int {
+    s: int = tk_sym;
+    lex();
+    s
+}
+
+expect_tok(t: str) raises TheoryError {
+    if (!tk_is(t)) theory_fail("a statement is missing a part");
+    lex()
+}
+
+take_int() raises TheoryError: int {
+    if (tk_kind != K_NAME) theory_fail("expected a number");
+    v: int = 0;
+    for i in 0..sym_len[tk_sym] {
+        c: int = sym_byte(tk_sym, i);
+        if (c < 48 || c > 57) theory_fail("expected a number");
+        v = v * 10 + c - 48
+    }
+    lex();
+    v
+}
+
+// Whether the token starts a new statement (it begins a line).
+at_statement(): bool {
+    tk_kind == K_EOF || tk_bol
+}
+
+// A whole file of statements.
+load_theory(t: []i8@immortal, n: int) raises TheoryError {
+    try {
+        read_init()
+    } with KernelError -> {
+        theory_fail("the kernel would not start")
+    }
+    read_from(t, n);
+    while (tk_kind != K_EOF) {
+        try {
+            statement()
+        } with ReadError -> {
+            theory_why = read_why;
+            theory_line = read_line;
+            raise TheoryError
+        } with KernelError -> {
+            theory_why = kernel_why;
+            theory_line = tk_line;
+            raise TheoryError
+        }
+    }
+}
+
+statement() raises TheoryError, ReadError, KernelError {
+    if (tk_kind != K_NAME) theory_fail("a statement must start with a word");
+    w: int = tk_sym;
+    lex();
+    if (w == sym("type")) {
+        s: int = take_name();
+        t: int = mk_tcon(s);
+        add_ent(s, E_TYPE, t, 0);
+        if (s == sym("bool")) bool_t = t
+    } else if (w == sym("typevar")) {
+        s: int = take_name();
+        add_ent(s, E_TFREE, mk_tfree(s), 0)
+    } else if (w == sym("const")) {
+        s: int = take_name();
+        expect_tok(":");
+        add_ent(s, E_CONST, read_type(), 0)
+    } else if (w == sym("fix")) {
+        s: int = take_name();
+        expect_tok(":");
+        ty: int = read_type();
+        add_ent(s, E_FIX, ty, mk_free(s, ty))
+    } else if (w == sym("notation")) read_notation() else if (w == sym("role")) {
+        r: int = take_name();
+        s: int = take_name();
+        for i in 0..ROLES {
+            if (sym(role_names[i]) == r) role_name[i] = s
+        }
+    } else if (w == sym("axiom")) {
+        s: int = take_name();
+        words: int = 0;
+        if (tk_kind == K_STRING) words = take_name();
+        expect_tok(":");
+        p: int = read_statement(true);
+        add_lemma(s, LM_AXIOM, add_axiom(s, p), words)
+    } else if (w == sym("assume")) {
+        s: int = take_name();
+        words: int = 0;
+        if (tk_kind == K_STRING) words = take_name();
+        expect_tok(":");
+        p: int = read_statement(true);
+        add_lemma(s, LM_ASSUME, assume_rule(p), words)
+    } else if (w == sym("define")) read_define() else if (w == sym("region")) {
+        region_name = take_name();
+        if (tk_kind == K_STRING) region_title = take_name()
+    } else if (w == sym("hide")) {
+        while (!at_statement()) {
+            m: int = find_lemma(take_name());
+            if (m < 0) theory_fail("hid a lemma there is not");
+            lm_hidden[m] = true
+        }
+    } else if (w == sym("calculate")) region_calc = true else if (w == sym("picture")) region_picture = take_name() else if (w == sym("level")) read_level() else theory_fail("no such statement");
+    if (!at_statement()) theory_fail("more after a statement than it takes")
+}
+
+//   notation infixl 65 "+" plus     (also infixr, infix, flip, prefix, postfix)
+//   notation binder "∀" All
+//   notation outfix "|" "|" abs
+//   notation hidden Trueprop
+//   notation subscript nat => R     (terms of this type are shown as aₙ)
+read_notation() raises TheoryError, ReadError, KernelError {
+    k: int = take_name();
+    kind: int = 0;
+    if (k == sym("infixl")) kind = N_INFIXL else if (k == sym("infixr")) kind = N_INFIXR else if (k == sym("infix")) kind = N_INFIX else if (k == sym("flip")) kind = N_FLIP else if (k == sym("prefix")) kind = N_PREFIX else if (k == sym("postfix")) kind = N_POSTFIX else if (k == sym("binder")) kind = N_BINDER else if (k == sym("outfix")) kind = N_OUTFIX else if (k == sym("hidden")) kind = N_HIDDEN else if (k == sym("subscript")) {
+        add_sub_type(read_type());
+        return
+    } else theory_fail("no such kind of notation");
+    prec: int = 0;
+    if (kind <= N_POSTFIX || kind == N_FLIP) prec = take_int();
+    tok: int = 0;
+    tok2: int = 0;
+    if (kind != N_HIDDEN) {
+        if (tk_kind != K_STRING) theory_fail("a notation's token goes in quotes");
+        tok = take_name()
+    }
+    if (kind == N_OUTFIX) {
+        if (tk_kind != K_STRING) theory_fail("a notation's token goes in quotes");
+        tok2 = take_name()
+    }
+    add_notation(kind, prec, tok, tok2, take_name())
+}
+
+// A rulebook rule: assumed, with its own variables quantified (⋀) in the
+// hypothesis, then taken off again as schematic variables for use.
+assume_rule(p: int) raises KernelError: int {
+    // (Its schematic variables, in the order first met.)
+    vars_n = 0;
+    collect_vars(p);
+    q: int = p;
+    i: int = vars_n - 1;
+    while (i >= 0) {
+        q = mk_all(mk_abs(vars[i], q));
+        i = i - 1
+    }
+    if (ctx_n < CTX) {
+        ctx_hyp[ctx_n] = norm(q);
+        ctx_n = ctx_n + 1
+    }
+    th: int = assume(q);
+    for j in 0..vars_n th = forall_elim(vars[j], th);
+    th
+}
+
+vars: []int = new int[64](0);
+
+vars_n: int = 0;
+
+collect_vars(t: int) {
+    k: int = tm_kind(t);
+    if (k == TM_VAR) {
+        for i in 0..vars_n {
+            if (vars[i] == t) return
+        }
+        if (vars_n < len(vars)) {
+            vars[vars_n] = t;
+            vars_n = vars_n + 1
+        }
+    } else if (k == TM_APP) {
+        collect_vars(tm_fun(t));
+        collect_vars(tm_arg(t))
+    } else if (k == TM_ABS) collect_vars(tm_body(t))
+}
+
+//   define NAME x y "words" = TERM
+// fixes NAME and assumes NAME ≡ λx y. TERM; the tool is NAME ?x ?y ≡ TERM.
+read_define() raises TheoryError, ReadError, KernelError {
+    s: int = take_name();
+    args: []int = def_args;
+    n: int = 0;
+    while (tk_kind == K_NAME && n < len(args)) {
+        args[n] = take_name();
+        n = n + 1
+    }
+    words: int = 0;
+    if (tk_kind == K_STRING) words = take_name();
+    expect_tok("=");
+    ast_n = 1;
+    own_n = 0;
+    env_n = 0;
+    body: int = read_term(0);
+    lam: int = body;
+    i: int = n - 1;
+    while (i >= 0) {
+        lam = ast(A_BIND, name_lambda, args[i], 0, lam);
+        i = i - 1
+    }
+    rhs: int = finish_term(lam, true, false);
+    if (own_n > 0) theory_fail("a definition uses a name it does not have");
+    c: int = mk_free(s, tm_type(rhs));
+    add_ent(s, E_FIX, tm_type(rhs), c);
+    eq: int = mk_eq(c, rhs);
+    if (ctx_n < CTX) {
+        ctx_hyp[ctx_n] = norm(eq);
+        ctx_n = ctx_n + 1
+    }
+    th: int = assume(eq);
+    // (Applied to schematic variables: NAME ?x ?y ≡ TERM[?x, ?y].)
+    rest: int = tm_type(rhs);
+    for j in 0..n {
+        v: int = mk_var(args[j], ty_dom(rest));
+        th = combination(th, reflexive(v));
+        rest = ty_cod(rest)
+    }
+    line_clear();
+    line_sym(s);
+    line_add("_def");
+    add_lemma(line_sym_now(), LM_DEF, th, words)
+}
+
+def_args: []int = new int[16](0);
+
+//   level NAME "Title"
+//     say: "words before it"
+//     show: PROP
+//     tools: NAME NAME ...
+//     kit: TERM, TERM
+//     par: N
+read_level() raises TheoryError, ReadError, KernelError {
+    if (lv_n >= LEVELS) theory_fail("too many levels");
+    l: int = lv_n;
+    lv_name[l] = take_name();
+    lv_title[l] = 0;
+    if (tk_kind == K_STRING) lv_title[l] = take_name();
+    lv_goal[l] = 0;
+    lv_intro[l] = 0;
+    lv_par[l] = 0;
+    lv_tool0[l] = pool_n;
+    lv_tooln[l] = 0;
+    lv_kit0[l] = pool_n;
+    lv_kitn[l] = 0;
+    lv_lemma[l] = -1;
+    lv_n = lv_n + 1;
+    while (!at_statement()) {
+        f: int = take_name();
+        expect_tok(":");
+        if (f == sym("show")) lv_goal[l] = norm(read_statement(true)) else if (f == sym("say")) {
+            if (tk_kind != K_STRING) theory_fail("say: takes words in quotes");
+            lv_intro[l] = take_name()
+        } else if (f == sym("par")) lv_par[l] = take_int() else if (f == sym("tools")) {
+            lv_tool0[l] = pool_n;
+            while (!at_statement() && !next_is_field()) {
+                m: int = find_lemma(take_name());
+                if (m < 0) theory_fail("a level's tool is not a lemma");
+                pool_add(m)
+            }
+            lv_tooln[l] = pool_n - lv_tool0[l]
+        } else if (f == sym("kit")) {
+            lv_kit0[l] = pool_n;
+            more: bool = true;
+            while (more) {
+                pool_add(read_kit_term());
+                if (tk_is(",")) lex() else more = false
+            }
+            lv_kitn[l] = pool_n - lv_kit0[l]
+        } else theory_fail("no such part of a level")
+    }
+    if (lv_goal[l] == 0) theory_fail("a level must say what it shows")
+}
+
+is_level_field(): bool {
+    s: int = tk_sym;
+    s == sym("show") || s == sym("say") || s == sym("par") || s == sym("tools") || s == sym("kit")
+}
+
+// Whether the next tokens are a level's field (a word, then a colon).
+next_is_field(): bool {
+    if (tk_kind != K_NAME || !is_level_field()) return false;
+    at: int = src_at;
+    while (at < src_n && src[at] as int == 32) at = at + 1;
+    at < src_n && src[at] as int == 58
+}
+
+// A kit term: written with schematic variables for its holes (max ?a ?b).
+read_kit_term() raises ReadError, KernelError: int {
+    ast_n = 1;
+    own_n = 0;
+    env_n = 0;
+    n: int = read_term(0);
+    finish_term(n, true, false)
+}

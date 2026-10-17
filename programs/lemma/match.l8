@@ -1,0 +1,194 @@
+tag lemma;
+
+use_tag std;
+
+// Matching a rule's pattern (with schematic variables ?x and type
+// variables) against a term: which term each variable stands for, so the
+// rule says exactly that term. Terms are kept in normal form, so this is
+// matching of trees, with bound variables walked in step.
+const MATCH_VARS: int = 64;
+
+// Each variable bound so far, and what to.
+mt_var: []int = new int[MATCH_VARS](0);
+
+mt_val: []int = new int[MATCH_VARS](0);
+
+mt_n: int = 0;
+
+// Each type variable bound so far, and what to.
+mt_tvar: []int = new int[MATCH_VARS](0);
+
+mt_tval: []int = new int[MATCH_VARS](0);
+
+mt_tn: int = 0;
+
+match_clear() {
+    mt_n = 0;
+    mt_tn = 0
+}
+
+// What variable v is bound to, or 0.
+match_val(v: int): int {
+    for i in 0..mt_n {
+        if (mt_var[i] == v) return mt_val[i]
+    }
+    0
+}
+
+match_bind(v: int, t: int): bool {
+    old: int = match_val(v);
+    if (old != 0) return old == t;
+    if (mt_n >= MATCH_VARS) return false;
+    mt_var[mt_n] = v;
+    mt_val[mt_n] = t;
+    mt_n = mt_n + 1;
+    true
+}
+
+match_type(p: int, o: int): bool {
+    if (p == o) return true;
+    k: int = ty_kind(p);
+    if (k == TY_VAR) {
+        for i in 0..mt_tn {
+            if (mt_tvar[i] == p) return mt_tval[i] == o
+        }
+        if (mt_tn >= MATCH_VARS) return false;
+        mt_tvar[mt_tn] = p;
+        mt_tval[mt_tn] = o;
+        mt_tn = mt_tn + 1;
+        return true
+    }
+    if (k == TY_FUN && ty_kind(o) == TY_FUN) return match_type(ty_dom(p), ty_dom(o)) && match_type(ty_cod(p),
+        ty_cod(o));
+    false
+}
+
+// Whether pattern p matches term o, binding more variables. On false,
+// bindings made on the way are left: clear or restore them (match_save).
+match_term(p: int, o: int): bool {
+    if (p == o) return true;
+    k: int = tm_kind(p);
+    if (k == TM_VAR) {
+        if (!tm_closed(o)) return false;
+        if (!match_type(tm_type(p), tm_type(o))) return false;
+        return match_bind(p, o)
+    }
+    ok: int = tm_kind(o);
+    if (k != ok) return false;
+    if (k == TM_CONST) return tm_name(p) == tm_name(o) && match_type(tm_type(p), tm_type(o));
+    if (k == TM_APP) return match_term(tm_fun(p), tm_fun(o)) && match_term(tm_arg(p),
+        tm_arg(o));
+    if (k == TM_ABS) return match_type(tm_abs_type(p), tm_abs_type(o)) && match_term(tm_body(p),
+        tm_body(o));
+    if (k == TM_BOUND) return tm_bound_index(p) == tm_bound_index(o) && match_type(tm_type(p),
+        tm_type(o));
+    false
+}
+
+match_saved_n: int = 0;
+
+match_saved_tn: int = 0;
+
+match_save() {
+    match_saved_n = mt_n;
+    match_saved_tn = mt_tn
+}
+
+match_restore() {
+    mt_n = match_saved_n;
+    mt_tn = match_saved_tn
+}
+
+// ---- a rule instantiated by the bindings ----
+inst_vars: []int = new int[MATCH_VARS](0);
+
+inst_vals: []int = new int[MATCH_VARS](0);
+
+inst_tvars: []int = new int[MATCH_VARS](0);
+
+inst_tvals: []int = new int[MATCH_VARS](0);
+
+// Theorem th with the bound type variables, then variables, put in.
+// A variable's number changes with its type, so it is found again by name.
+match_instantiate(th: int) raises KernelError: int {
+    r: int = th;
+    if (mt_tn > 0) {
+        for i in 0..mt_tn {
+            inst_tvars[i] = mt_tvar[i];
+            inst_tvals[i] = mt_tval[i]
+        }
+        ty_inst_set(inst_tvars, inst_tvals, mt_tn);
+        r = instantiate_types(r)
+    }
+    if (mt_n == 0) return r;
+    for i in 0..mt_n {
+        v: int = mt_var[i];
+        inst_vars[i] = mk_var(tm_name(v), match_ty_subst(tm_type(v)));
+        inst_vals[i] = mt_val[i]
+    }
+    instantiate(r, inst_vars, inst_vals, mt_n)
+}
+
+// A term with the bound type variables and variables put in.
+match_subst(t: int) raises KernelError: int {
+    r: int = t;
+    if (mt_tn > 0) {
+        for i in 0..mt_tn {
+            inst_tvars[i] = mt_tvar[i];
+            inst_tvals[i] = mt_tval[i]
+        }
+        ty_inst_set(inst_tvars, inst_tvals, mt_tn);
+        r = subst_tvars(r)
+    }
+    if (mt_n == 0) return r;
+    for i in 0..mt_n {
+        v: int = mt_var[i];
+        inst_vars[i] = mk_var(tm_name(v), match_ty_subst(tm_type(v)));
+        inst_vals[i] = mt_val[i]
+    }
+    subst_vars(r, inst_vars, inst_vals, mt_n)
+}
+
+match_ty_subst(t: int) raises KernelError: int {
+    k: int = ty_kind(t);
+    if (k == TY_VAR) {
+        for i in 0..mt_tn {
+            if (mt_tvar[i] == t) return mt_tval[i]
+        }
+        return t
+    }
+    if (k == TY_FUN) return mk_fun(match_ty_subst(ty_dom(t)), match_ty_subst(ty_cod(t)));
+    t
+}
+
+// ---- schematic variables of a term ----
+// Those in t not bound yet, in the order first met, into free_vars.
+free_vars: []int = new int[MATCH_VARS](0);
+
+free_vars_n: int = 0;
+
+unbound_vars(t: int) {
+    k: int = tm_kind(t);
+    if (k == TM_VAR) {
+        if (match_val(t) != 0) return;
+        for i in 0..free_vars_n {
+            if (free_vars[i] == t) return
+        }
+        if (free_vars_n < MATCH_VARS) {
+            free_vars[free_vars_n] = t;
+            free_vars_n = free_vars_n + 1
+        }
+    } else if (k == TM_APP) {
+        unbound_vars(tm_fun(t));
+        unbound_vars(tm_arg(t))
+    } else if (k == TM_ABS) unbound_vars(tm_body(t))
+}
+
+// Whether t has schematic variables.
+has_vars(t: int): bool {
+    k: int = tm_kind(t);
+    if (k == TM_VAR) return true;
+    if (k == TM_APP) return has_vars(tm_fun(t)) || has_vars(tm_arg(t));
+    if (k == TM_ABS) return has_vars(tm_body(t));
+    false
+}

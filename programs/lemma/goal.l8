@@ -1,0 +1,754 @@
+tag lemma;
+
+use_tag std;
+
+// Goals and the proof being built.
+//
+// A goal is what is left to show: some fixed names (x, ε, N₁), some
+// hypotheses, and a conclusion. As a proposition it is ⋀x̄. H̄ ⟹ C.
+//
+// A proof is a tree of nodes, each with its goal. Making a move at a node
+// gives it children (the goals the move leaves) and a step theorem: the
+// node's goal, from its children's goals as hypotheses. The kernel checks
+// the step as the move is made. When every child is proved, the children's
+// theorems discharge those hypotheses, and the node is proved; when the
+// root is, the level is.
+//
+// Every move is one of a few kinds: a rule applied backwards (its
+// conclusion is the goal, its premises the new goals), a rule applied
+// forwards (from a hypothesis, a new hypothesis), a rewrite (a part of the
+// goal or of a hypothesis replaced by something equal), Calculate (the
+// arithmetic oracle), or a hypothesis that is the goal.
+const GOALS: int = 65536;
+
+gl_fix0: []int = new int[GOALS](0);
+
+gl_fixn: []int = new int[GOALS](0);
+
+gl_hyp0: []int = new int[GOALS](0);
+
+gl_hypn: []int = new int[GOALS](0);
+
+gl_concl: []int = new int[GOALS](0);
+
+gl_prop: []int = new int[GOALS](0);
+
+gl_n: int = 1;
+
+const GPOOL: int = 1048576;
+
+gpool: []int = new int[GPOOL](0);
+
+gpool_n: int = 0;
+
+gpool_add(v: int) {
+    if (gpool_n < GPOOL) {
+        gpool[gpool_n] = v;
+        gpool_n = gpool_n + 1
+    }
+}
+
+goal_fix(g: int, i: int): int {
+    gpool[gl_fix0[g] + i]
+}
+
+goal_hyp(g: int, i: int): int {
+    gpool[gl_hyp0[g] + i]
+}
+
+goal_has_hyp(g: int, h: int): bool {
+    for i in 0..gl_hypn[g] {
+        if (goal_hyp(g, i) == h) return true
+    }
+    false
+}
+
+// A goal from the lists being gathered (nf fixes, nh hypotheses).
+nf: []int = new int[256](0);
+
+nf_n: int = 0;
+
+nh: []int = new int[1024](0);
+
+nh_n: int = 0;
+
+make_goal(concl: int) raises KernelError: int {
+    if (gl_n >= GOALS) kernel_fail("too many goals");
+    g: int = gl_n;
+    gl_fix0[g] = gpool_n;
+    for i in 0..nf_n gpool_add(nf[i]);
+    gl_fixn[g] = nf_n;
+    gl_hyp0[g] = gpool_n;
+    for i in 0..nh_n gpool_add(nh[i]);
+    gl_hypn[g] = nh_n;
+    gl_concl[g] = norm(concl);
+    gl_prop[g] = 0;
+    gl_n = g + 1;
+    g
+}
+
+// Start the lists from goal g's.
+lists_from(g: int) {
+    nf_n = 0;
+    for i in 0..gl_fixn[g] {
+        nf[nf_n] = goal_fix(g, i);
+        nf_n = nf_n + 1
+    }
+    nh_n = 0;
+    for i in 0..gl_hypn[g] {
+        nh[nh_n] = goal_hyp(g, i);
+        nh_n = nh_n + 1
+    }
+}
+
+add_fix(x: int) {
+    if (nf_n < len(nf)) {
+        nf[nf_n] = x;
+        nf_n = nf_n + 1
+    }
+}
+
+add_hyp(h: int) {
+    for i in 0..nh_n {
+        if (nh[i] == h) return
+    }
+    if (nh_n < len(nh)) {
+        nh[nh_n] = h;
+        nh_n = nh_n + 1
+    }
+}
+
+// ⋀x̄. H̄ ⟹ C
+goal_prop(g: int) raises KernelError: int {
+    if (gl_prop[g] != 0) return gl_prop[g];
+    q: int = gl_concl[g];
+    i: int = gl_hypn[g] - 1;
+    while (i >= 0) {
+        q = mk_imp(goal_hyp(g, i), q);
+        i = i - 1
+    }
+    j: int = gl_fixn[g] - 1;
+    while (j >= 0) {
+        q = mk_all(mk_abs(goal_fix(g, j), q));
+        j = j - 1
+    }
+    q = norm(q);
+    gl_prop[g] = q;
+    q
+}
+
+// ---- names for new fixed things ----
+// Whether a name is used in goal g (a fixed name, or a free name in it),
+// or by the region.
+name_used_in_goal(s: int, g: int): bool {
+    for i in 0..gl_fixn[g] {
+        if (tm_name(goal_fix(g, i)) == s) return true
+    }
+    for i in 0..gl_hypn[g] {
+        if (name_in(s, goal_hyp(g, i))) return true
+    }
+    if (name_in(s, gl_concl[g])) return true;
+    for i in 0..nf_n {
+        if (tm_name(nf[i]) == s) return true
+    }
+    find_ent(s, 1 << E_FIX | 1 << E_CONST) >= 0
+}
+
+// A name like base for something new in goal g: base itself if free, or
+// with a subscript (N₁, N₂).
+fresh_name(base0: int, g: int): int {
+    base: int = base0;
+    if (base == 0 || sym_byte(base, 0) == 1) base = sym("x");
+    if (!name_used_in_goal(base, g)) return base;
+    for k in 1..30 {
+        line_clear();
+        line_sym(base);
+        if (k >= 10) line_cp(8320 + k / 10);
+        line_cp(8320 + k % 10);
+        s: int = line_sym_now();
+        if (!name_used_in_goal(s, g)) return s
+    }
+    base
+}
+
+// ---- the proof tree ----
+const NODES: int = 65536;
+
+pn_goal: []int = new int[NODES](0);
+
+pn_parent: []int = new int[NODES](-1);
+
+// The move made here (a number in the moves made), or -1 if open.
+pn_move: []int = new int[NODES](-1);
+
+pn_kid0: []int = new int[NODES](0);
+
+pn_kidn: []int = new int[NODES](0);
+
+pn_step: []int = new int[NODES](0);
+
+// The node's goal proved, once it is (0 till then).
+pn_thm: []int = new int[NODES](0);
+
+pn_n: int = 0;
+
+const KPOOL: int = 262144;
+
+kpool: []int = new int[KPOOL](0);
+
+kpool_n: int = 0;
+
+new_node(g: int, parent: int) raises KernelError: int {
+    if (pn_n >= NODES) kernel_fail("too many proof nodes");
+    n: int = pn_n;
+    pn_goal[n] = g;
+    pn_parent[n] = parent;
+    pn_move[n] = -1;
+    pn_kid0[n] = 0;
+    pn_kidn[n] = 0;
+    pn_step[n] = 0;
+    pn_thm[n] = 0;
+    pn_n = n + 1;
+    n
+}
+
+node_kid(n: int, i: int): int {
+    kpool[pn_kid0[n] + i]
+}
+
+// ---- moves made ----
+const MV_RULE: int = 1;
+
+const MV_FWD: int = 2;
+
+const MV_REWRITE: int = 3;
+
+const MV_CALC: int = 4;
+
+const MV_HYP: int = 5;
+
+const MOVES: int = 65536;
+
+// Each move made: its kind; the lemma it used (or -1); the hypothesis it
+// used (or -1); which way a rewrite went; and its witnesses (from mv_w0 in
+// gpool, mv_wn of them). And for the English: what it made (a new name,
+// the new hypothesis or the rewritten term).
+mv_kind: []int = new int[MOVES](0);
+
+mv_lemma: []int = new int[MOVES](-1);
+
+mv_hyp: []int = new int[MOVES](-1);
+
+mv_dir: []int = new int[MOVES](0);
+
+mv_w0: []int = new int[MOVES](0);
+
+mv_wn: []int = new int[MOVES](0);
+
+mv_node: []int = new int[MOVES](0);
+
+// Whether the game made the move itself (closing a goal that is a
+// hypothesis, or arithmetic), not the player.
+mv_auto: []bool = new bool[MOVES](false);
+
+mv_n: int = 0;
+
+// ---- making a step ----
+// The children of the move being made: goals, and for each, what it opens
+// in order (a fixed name, or a hypothesis), so its theorem can be turned
+// back into the premise it proves.
+const OPS: int = 4096;
+
+op_is_fix: []bool = new bool[OPS](false);
+
+op_term: []int = new int[OPS](0);
+
+op_n: int = 0;
+
+kid_goal: []int = new int[64](0);
+
+kid_op0: []int = new int[64](0);
+
+kid_opn: []int = new int[64](0);
+
+// How many of the kid's hypotheses come from its parent (or are derived
+// there), so are eliminated rather than kept.
+kid_known: []int = new int[64](0);
+
+kid_n: int = 0;
+
+// Facts derived in the parent for a kid (forwards, or a rewritten
+// hypothesis): their propositions and theorems.
+dv_prop: []int = new int[16](0);
+
+dv_thm: []int = new int[16](0);
+
+dv_n: int = 0;
+
+// Names given to new fixed things in this move (in the order opened).
+new_names: []int = new int[16](0);
+
+new_names_n: int = 0;
+
+// The theorem for a hypothesis the parent has (assumed) or derived.
+known_thm(h: int) raises KernelError: int {
+    for i in 0..dv_n {
+        if (dv_prop[i] == h) return dv_thm[i]
+    }
+    assume(h)
+}
+
+// A kid for premise p of goal g: its fixed names and hypotheses opened off
+// p (⋀ and ⟹), the rest its conclusion. The parent's hypotheses come first.
+// hint, if not 0, names the first new fixed thing.
+open_kid(g: int, p0: int, hint: int) raises KernelError: int {
+    lists_from(g);
+    for i in 0..dv_n add_hyp(dv_prop[i]);
+    known: int = nh_n;
+    op0: int = op_n;
+    p: int = p0;
+    more: bool = true;
+    first: bool = true;
+    while (more) {
+        if (is_all(p)) {
+            f: int = tm_arg(p);
+            base: int = sym("x");
+            if (tm_kind(f) == TM_ABS) base = tm_abs_hint(f);
+            if (first && hint != 0) base = hint;
+            first = false;
+            x: int = mk_free(fresh_name(base, g), ty_dom(tm_type(f)));
+            add_fix(x);
+            if (new_names_n < len(new_names)) {
+                new_names[new_names_n] = tm_name(x);
+                new_names_n = new_names_n + 1
+            }
+            if (op_n < OPS) {
+                op_is_fix[op_n] = true;
+                op_term[op_n] = x;
+                op_n = op_n + 1
+            }
+            if (tm_kind(f) == TM_ABS) p = open_abs(f, x) else p = norm(mk_app(f, x))
+        } else if (is_imp(p)) {
+            a: int = lhs_of(p);
+            add_hyp(a);
+            if (op_n < OPS) {
+                op_is_fix[op_n] = false;
+                op_term[op_n] = a;
+                op_n = op_n + 1
+            }
+            p = rhs_of(p)
+        } else more = false
+    }
+    k: int = kid_n;
+    if (k >= len(kid_goal)) kernel_fail("too many new goals");
+    kid_goal[k] = make_goal(p);
+    kid_op0[k] = op0;
+    kid_opn[k] = op_n - op0;
+    kid_known[k] = known;
+    kid_n = k + 1;
+    k
+}
+
+// The premise kid k proves, from its goal assumed: ⊢ p (with the kid's goal
+// and the parent's hypotheses as hypotheses).
+kid_derive(k: int) raises KernelError: int {
+    c: int = kid_goal[k];
+    t: int = assume(goal_prop(c));
+    for i in 0..gl_fixn[c] t = forall_elim(goal_fix(c, i), t);
+    for i in 0..kid_known[k] t = implies_elim(t, known_thm(goal_hyp(c, i)));
+    // (Now ⊢ Ā ⟹ B: the kid's own hypotheses taken in, then put back
+    // with its fixed names in the order they were opened.)
+    for i in kid_known[k]..gl_hypn[c] t = implies_elim(t, assume(goal_hyp(c, i)));
+    j: int = kid_opn[k] - 1;
+    while (j >= 0) {
+        o: int = kid_op0[k] + j;
+        if (op_is_fix[o]) t = forall_intro(op_term[o], t) else t = implies_intro(op_term[o],
+            t);
+        j = j - 1
+    }
+    t
+}
+
+// From ⊢ C (with goal g's hypotheses assumed) to ⊢ goal g.
+close_step(g: int, th0: int) raises KernelError: int {
+    th: int = th0;
+    i: int = gl_hypn[g] - 1;
+    while (i >= 0) {
+        th = implies_intro(goal_hyp(g, i), th);
+        i = i - 1
+    }
+    j: int = gl_fixn[g] - 1;
+    while (j >= 0) {
+        th = forall_intro(goal_fix(g, j), th);
+        j = j - 1
+    }
+    if (thm_prop(th) != goal_prop(g)) kernel_fail("a step did not prove its goal");
+    th
+}
+
+// What the last call whose answer was not needed gave (kept, unused).
+last_concl: int = 0;
+
+last_term: int = 0;
+
+last_move: int = 0;
+
+// Strip a rule's premises: into prem (prem_n of them); its conclusion.
+prem: []int = new int[32](0);
+
+prem_n: int = 0;
+
+strip_rule(p0: int): int {
+    prem_n = 0;
+    p: int = p0;
+    while (is_imp(p) && prem_n < len(prem)) {
+        prem[prem_n] = lhs_of(p);
+        prem_n = prem_n + 1;
+        p = rhs_of(p)
+    }
+    p
+}
+
+// A premise closed without a new goal: a hypothesis the goal has (or one
+// derived), or True.
+closes_at_once(g: int, p: int): bool {
+    if (goal_has_hyp(g, p)) return true;
+    for i in 0..dv_n {
+        if (dv_prop[i] == p) return true
+    }
+    false
+}
+
+// Make the kids for each premise of rule r (instantiated) that is not
+// closed at once; then ⊢ conclusion, with the kids' goals and goal g's
+// hypotheses as hypotheses.
+rule_through(g: int, r: int, hint: int) raises KernelError: int {
+    q: int = strip_rule(thm_prop(r));
+    n: int = prem_n;
+    ps: []int = rule_prems;
+    for i in 0..n ps[i] = prem[i];
+    // (Kids made first, as rule_prems is reused by nothing in between.)
+    kid_at: []int = rule_kid;
+    for i in 0..n {
+        if (closes_at_once(g, ps[i])) kid_at[i] = -1 else {
+            h: int = 0;
+            if (i == n - 1 || prem_has_all(ps[i])) h = hint;
+            kid_at[i] = open_kid(g, ps[i], h)
+        }
+    }
+    th: int = r;
+    for i in 0..n {
+        if (kid_at[i] < 0) th = implies_elim(th, known_thm(ps[i])) else th = implies_elim(th,
+            kid_derive(kid_at[i]))
+    }
+    if (thm_prop(th) != q) kernel_fail("a rule did not give its conclusion");
+    th
+}
+
+prem_has_all(p: int): bool {
+    is_all(p)
+}
+
+rule_prems: []int = new int[32](0);
+
+rule_kid: []int = new int[32](0);
+
+// ---- moves ----
+// Start a move at node n: nothing made yet.
+move_begin() {
+    kid_n = 0;
+    op_n = 0;
+    dv_n = 0;
+    new_names_n = 0
+}
+
+// Finish a move at node n with its step theorem: the kids become nodes.
+move_end(
+    n: int,
+    kind: int,
+    lemma: int,
+    hyp: int,
+    step: int
+) raises KernelError: int {
+    if (mv_n >= MOVES) kernel_fail("too many moves");
+    m: int = mv_n;
+    mv_kind[m] = kind;
+    mv_lemma[m] = lemma;
+    mv_hyp[m] = hyp;
+    mv_dir[m] = 0;
+    mv_node[m] = n;
+    mv_auto[m] = false;
+    mv_w0[m] = gpool_n;
+    mv_wn[m] = 0;
+    mv_n = m + 1;
+    pn_move[n] = m;
+    pn_step[n] = step;
+    pn_kid0[n] = kpool_n;
+    pn_kidn[n] = kid_n;
+    for i in 0..kid_n {
+        if (kpool_n < KPOOL) {
+            kpool[kpool_n] = new_node(kid_goal[i], n);
+            kpool_n = kpool_n + 1
+        }
+    }
+    try_close(n);
+    m
+}
+
+// A rule (lemma l, instantiated by the matcher's bindings) applied
+// backwards at node n: its conclusion must be the goal.
+apply_back(
+    n: int,
+    l: int,
+    hyp: int,
+    hint: int
+) raises KernelError: int {
+    g: int = pn_goal[n];
+    r: int = match_instantiate(lm_thm[l]);
+    if (has_vars(thm_prop(r))) kernel_fail("a rule was applied with a variable not chosen");
+    q: int = strip_rule(thm_prop(r));
+    if (q != gl_concl[g]) kernel_fail("the rule's conclusion is not the goal");
+    move_begin();
+    th: int = rule_through(g, r, hint);
+    m: int = move_end(n, MV_RULE, l, hyp, close_step(g, th));
+    m
+}
+
+// A rule applied forwards at node n: its conclusion becomes a hypothesis
+// of the one goal left (with its other premises as goals before it).
+apply_fwd(
+    n: int,
+    l: int,
+    hyp: int,
+    hint: int
+) raises KernelError: int {
+    g: int = pn_goal[n];
+    r: int = match_instantiate(lm_thm[l]);
+    if (has_vars(thm_prop(r))) kernel_fail("a rule was applied with a variable not chosen");
+    move_begin();
+    fact: int = rule_through(g, r, hint);
+    dv_prop[0] = thm_prop(fact);
+    dv_thm[0] = fact;
+    dv_n = 1;
+    k: int = open_kid(g, gl_concl[g], 0);
+    th: int = kid_derive(k);
+    m: int = move_end(n, MV_FWD, l, hyp, close_step(g, th));
+    m
+}
+
+// The goal closed by one of its hypotheses.
+apply_hyp(n: int) raises KernelError: int {
+    g: int = pn_goal[n];
+    if (!goal_has_hyp(g, gl_concl[g])) kernel_fail("no hypothesis is the goal");
+    move_begin();
+    m: int = move_end(n, MV_HYP, -1, -1, close_step(g, assume(gl_concl[g])));
+    mv_auto[m] = true;
+    m
+}
+
+// The goal closed by Calculate: hyps (the goal's and the region's) ⊢ C.
+apply_calc(n: int) raises KernelError: int {
+    g: int = pn_goal[n];
+    move_begin();
+    k: int = 0;
+    for i in 0..gl_hypn[g] {
+        calc_hyps[k] = goal_hyp(g, i);
+        k = k + 1
+    }
+    for i in 0..ctx_n {
+        calc_hyps[k] = ctx_hyp[i];
+        k = k + 1
+    }
+    th: int = oracle(gl_concl[g], calc_hyps, k);
+    m: int = move_end(n, MV_CALC, -1, -1, close_step(g, th));
+    m
+}
+
+calc_hyps: []int = new int[1024](0);
+
+// ---- rewriting ----
+// A path into a term: its steps (P_FUN, P_ARG, P_BODY) from the top.
+rw_steps: []int = new int[256](0);
+
+rw_n: int = 0;
+
+// Free names standing for the bound variables met on the path.
+rw_z: []int = new int[256](0);
+
+// The subterm at the path, with the bound variables on the way made free.
+rw_sub(t: int, g: int) raises KernelError: int {
+    s: int = t;
+    for i in 0..rw_n {
+        st: int = rw_steps[i];
+        if (st == P_FUN) {
+            if (tm_kind(s) != TM_APP) kernel_fail("a path that does not fit");
+            s = tm_fun(s)
+        } else if (st == P_ARG) {
+            if (tm_kind(s) != TM_APP) kernel_fail("a path that does not fit");
+            s = tm_arg(s)
+        } else {
+            if (tm_kind(s) != TM_ABS) kernel_fail("a path that does not fit");
+            z: int = mk_free(fresh_name(tm_abs_hint(s), g), tm_abs_type(s));
+            rw_z[i] = z;
+            s = open_abs(s, z)
+        }
+    }
+    s
+}
+
+// ⊢ t ≡ t' for eq: ⊢ s ≡ s', s at the path (from step i) in t.
+rw_cong(t: int, i: int, eq: int) raises KernelError: int {
+    if (i == rw_n) {
+        if (lhs_of(thm_prop(eq)) != t) kernel_fail("a rewrite's term is not there");
+        return eq
+    }
+    st: int = rw_steps[i];
+    if (st == P_FUN) return combination(rw_cong(tm_fun(t), i + 1, eq), reflexive(tm_arg(t)));
+    if (st == P_ARG) return combination(reflexive(tm_fun(t)), rw_cong(tm_arg(t), i + 1,
+        eq));
+    z: int = rw_z[i];
+    abstraction(z, rw_cong(open_abs(t, z), i + 1, eq))
+}
+
+// Whether the path goes under a binder.
+rw_under_binder(): bool {
+    for i in 0..rw_n {
+        if (rw_steps[i] == P_BODY) return true
+    }
+    false
+}
+
+// The equation a rewrite uses, instantiated by the matcher's bindings,
+// turned the right way: ⊢ s ≡ s' (meta). From lemma l, or hypothesis h
+// (an equation of the goal) if l < 0. Its premises become goals.
+rw_equation(
+    g: int,
+    l: int,
+    h: int,
+    back: bool
+) raises KernelError: int {
+    e: int = 0;
+    if (l >= 0) {
+        r: int = match_instantiate(lm_thm[l]);
+        if (has_vars(thm_prop(r))) kernel_fail("a rewrite with a variable not chosen");
+        e = rule_through(g, r, 0)
+    } else e = assume(h);
+    p: int = thm_prop(e);
+    if (!is_eq(p)) {
+        // (An equation of the logic, a = b: made one of Pure's.)
+        ax: int = lm_thm[find_lemma(sym("eq_reflection"))];
+        last_concl = strip_rule(thm_prop(ax));
+        match_clear();
+        if (prem_n != 1 || !match_term(prem[0], p)) kernel_fail("not an equation");
+        e = implies_elim(match_instantiate(ax), e);
+        if (!is_eq(thm_prop(e))) kernel_fail("not an equation")
+    }
+    if (back) e = symmetric(e);
+    e
+}
+
+// Rewrite at the path (rw_steps) in the conclusion (hyp < 0) or in
+// hypothesis hyp of node n's goal, by lemma l or (l < 0) by hypothesis eqh.
+apply_rewrite(
+    n: int,
+    l: int,
+    eqh: int,
+    back: bool,
+    hyp: int
+) raises KernelError: int {
+    g: int = pn_goal[n];
+    move_begin();
+    target: int = gl_concl[g];
+    if (hyp >= 0) target = goal_hyp(g, hyp);
+    last_term = rw_sub(target, g);
+    eq: int = rw_equation(g, l, eqh, back);
+    cong: int = rw_cong(target, 0, eq);
+    th: int = 0;
+    if (hyp < 0) {
+        k: int = open_kid(g, rhs_of(thm_prop(cong)), 0);
+        th = equal_elim(symmetric(cong), kid_derive(k))
+    } else {
+        // (The hypothesis replaced by the rewritten one.)
+        newh: int = equal_elim(cong, assume(target));
+        dv_prop[0] = thm_prop(newh);
+        dv_thm[0] = newh;
+        dv_n = 1;
+        k: int = open_kid_without(g, target);
+        th = kid_derive(k)
+    }
+    m: int = move_end(n, MV_REWRITE, l, hyp, close_step(g, th));
+    if (back) mv_dir[m] = 1;
+    m
+}
+
+// A kid with the same conclusion, hypothesis `drop` left out (the derived
+// facts in its place).
+open_kid_without(g: int, drop: int) raises KernelError: int {
+    lists_from(g);
+    nh_n = 0;
+    for i in 0..gl_hypn[g] {
+        h: int = goal_hyp(g, i);
+        if (h == drop) {
+            for j in 0..dv_n add_hyp(dv_prop[j])
+        } else add_hyp(h)
+    }
+    k: int = kid_n;
+    kid_goal[k] = make_goal(gl_concl[g]);
+    kid_op0[k] = op_n;
+    kid_opn[k] = 0;
+    kid_known[k] = nh_n;
+    kid_n = k + 1;
+    k
+}
+
+// ---- closing ----
+// Node n proved, if its move's kids all are; then its parent, and so on.
+try_close(n0: int) raises KernelError {
+    n: int = n0;
+    while (n >= 0) {
+        if (pn_move[n] < 0 || pn_thm[n] != 0) return;
+        for i in 0..pn_kidn[n] {
+            if (pn_thm[node_kid(n, i)] == 0) return
+        }
+        th: int = pn_step[n];
+        for i in 0..pn_kidn[n] {
+            k: int = node_kid(n, i);
+            p: int = goal_prop(pn_goal[k]);
+            th = implies_elim(implies_intro(p, th), pn_thm[k])
+        }
+        if (thm_prop(th) != goal_prop(pn_goal[n])) kernel_fail("a node's proof is not of its goal");
+        pn_thm[n] = th;
+        n = pn_parent[n]
+    }
+}
+
+// ---- undo ----
+// Node n open again: its move and everything under it forgotten (the
+// nodes stay, unreached), and the nodes above it no longer proved.
+reopen(n: int) {
+    pn_move[n] = -1;
+    pn_kidn[n] = 0;
+    pn_step[n] = 0;
+    p: int = n;
+    while (p >= 0) {
+        pn_thm[p] = 0;
+        p = pn_parent[p]
+    }
+}
+
+// The open goals under node n, in order (into open_nodes).
+open_nodes: []int = new int[1024](0);
+
+open_n: int = 0;
+
+collect_open(n: int) {
+    if (pn_thm[n] != 0) return;
+    if (pn_move[n] < 0) {
+        if (open_n < len(open_nodes)) {
+            open_nodes[open_n] = n;
+            open_n = open_n + 1
+        }
+        return
+    }
+    for i in 0..pn_kidn[n] collect_open(node_kid(n, i))
+}

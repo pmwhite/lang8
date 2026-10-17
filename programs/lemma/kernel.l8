@@ -1,0 +1,1010 @@
+tag lemma_kernel;
+
+use_tag std, lemma;
+
+// The kernel: the only code that can make a theorem. Everything else (the
+// logic's rules, the subjects' rulebooks, the moves a player makes, the
+// arithmetic) asks it for theorems through the rules below, so a mistake
+// anywhere else can offer a bad move but can never prove a false thing.
+//
+// The logic here is Pure, Isabelle's meta-logic: simply typed λ-terms
+// with three connectives of their own, for all (⋀), implies (⟹) and equals
+// (≡), at the type prop. An object logic (classical higher-order logic,
+// declared in hol.txt) is constants and axioms written in it.
+//
+// Types and terms are hash-consed: each is made once and known by its
+// number, so two are the same exactly when their numbers are. Bound
+// variables are de Bruijn indices, so terms that differ only in the names
+// of their bound variables are the same term. Every theorem's proposition
+// is kept in β-normal, η-short form, so terms equal up to α, β and η are
+// one number too, and the rules compare numbers.
+//
+// The tables are internal to this file (tag lemma_kernel): other files
+// read terms through the functions tagged lemma, and only the rules here
+// write a theorem.
+tag lemma
+exception KernelError;
+
+// Why the last rule failed, for a test or a bug report.
+tag lemma
+kernel_why: str = "";
+
+tag lemma
+kernel_fail(why: str@immortal) raises KernelError: noreturn {
+    kernel_why = why;
+    raise KernelError
+}
+
+// ---- types ----
+tag lemma
+const TY_CON: int = 0;
+
+// A type variable fixed in a context ('a).
+tag lemma
+const TY_FREE: int = 1;
+
+// A type variable a rule may be instantiated at (?'a).
+tag lemma
+const TY_VAR: int = 2;
+
+tag lemma
+const TY_FUN: int = 3;
+
+const TYS: int = 65536;
+
+const TY_SLOTS: int = 131072;
+
+ty_k: []int = new int[TYS](0);
+
+ty_a: []int = new int[TYS](0);
+
+ty_b: []int = new int[TYS](0);
+
+ty_slot: []int = new int[TY_SLOTS](0);
+
+// Type 0 is no type.
+ty_n: int = 1;
+
+mix3(a: int, b: int, c: int): int {
+    h: int = a * -7046029254386353131 + b;
+    h = (h ^ h >> 31) * -4658895280553007687 + c;
+    h = (h ^ h >> 29) * -7723592293110705685;
+    h ^ h >> 32
+}
+
+ty_make(k: int, a: int, b: int) raises KernelError: int {
+    at: int = mix3(k, a, b) & TY_SLOTS - 1;
+    while (ty_slot[at] != 0) {
+        t: int = ty_slot[at];
+        if (ty_k[t] == k && ty_a[t] == a && ty_b[t] == b) return t;
+        at = at + 1 & TY_SLOTS - 1
+    }
+    if (ty_n >= TYS) kernel_fail("too many types");
+    t: int = ty_n;
+    ty_k[t] = k;
+    ty_a[t] = a;
+    ty_b[t] = b;
+    ty_n = ty_n + 1;
+    ty_slot[at] = t;
+    t
+}
+
+tag lemma
+mk_tcon(name: int) raises KernelError: int {
+    ty_make(TY_CON, name, 0)
+}
+
+tag lemma
+mk_tfree(name: int) raises KernelError: int {
+    ty_make(TY_FREE, name, 0)
+}
+
+tag lemma
+mk_tvar(name: int) raises KernelError: int {
+    ty_make(TY_VAR, name, 0)
+}
+
+tag lemma
+mk_fun(a: int, b: int) raises KernelError: int {
+    if (a <= 0 || b <= 0) kernel_fail("a function type needs two types");
+    ty_make(TY_FUN, a, b)
+}
+
+tag lemma
+ty_kind(t: int): int {
+    ty_k[t]
+}
+
+// A named type's name, or a function type's argument type.
+tag lemma
+ty_name(t: int): int {
+    ty_a[t]
+}
+
+tag lemma
+ty_dom(t: int): int {
+    ty_a[t]
+}
+
+tag lemma
+ty_cod(t: int): int {
+    ty_b[t]
+}
+
+// ---- terms ----
+tag lemma
+const TM_CONST: int = 0;
+
+tag lemma
+const TM_FREE: int = 1;
+
+tag lemma
+const TM_VAR: int = 2;
+
+tag lemma
+const TM_BOUND: int = 3;
+
+tag lemma
+const TM_APP: int = 4;
+
+tag lemma
+const TM_ABS: int = 5;
+
+const TMS: int = 1048576;
+
+const TM_SLOTS: int = 2097152;
+
+// What kind each term is, and its parts: a constant's, free or schematic
+// variable's name; a bound variable's index; an application's function and
+// argument; an abstraction's bound type and body. Then its type, the name an
+// abstraction's variable was written with (not part of what it is), and one
+// more than the largest index of a bound variable loose in it.
+tm_k: []int = new int[TMS](0);
+
+tm_a: []int = new int[TMS](0);
+
+tm_b: []int = new int[TMS](0);
+
+tm_ty: []int = new int[TMS](0);
+
+tm_hint: []int = new int[TMS](0);
+
+tm_loose: []int = new int[TMS](0);
+
+tm_slot: []int = new int[TM_SLOTS](0);
+
+// Term 0 is no term.
+tm_n: int = 1;
+
+tm_make(
+    k: int,
+    a: int,
+    b: int,
+    ty: int,
+    hint: int,
+    loose: int
+) raises KernelError: int {
+    at: int = mix3(k * 1000003 + ty, a, b) & TM_SLOTS - 1;
+    while (tm_slot[at] != 0) {
+        t: int = tm_slot[at];
+        if (tm_k[t] == k && tm_a[t] == a && tm_b[t] == b && tm_ty[t] == ty) return t;
+        at = at + 1 & TM_SLOTS - 1
+    }
+    if (tm_n >= TMS) kernel_fail("too many terms");
+    t: int = tm_n;
+    tm_k[t] = k;
+    tm_a[t] = a;
+    tm_b[t] = b;
+    tm_ty[t] = ty;
+    tm_hint[t] = hint;
+    tm_loose[t] = loose;
+    tm_n = tm_n + 1;
+    tm_slot[at] = t;
+    t
+}
+
+tag lemma
+mk_const(name: int, ty: int) raises KernelError: int {
+    tm_make(TM_CONST, name, 0, ty, 0, 0)
+}
+
+tag lemma
+mk_free(name: int, ty: int) raises KernelError: int {
+    tm_make(TM_FREE, name, 0, ty, 0, 0)
+}
+
+tag lemma
+mk_var(name: int, ty: int) raises KernelError: int {
+    tm_make(TM_VAR, name, 0, ty, 0, 0)
+}
+
+bound(i: int, ty: int) raises KernelError: int {
+    tm_make(TM_BOUND, i, 0, ty, 0, i + 1)
+}
+
+app_raw(f: int, x: int) raises KernelError: int {
+    tm_make(TM_APP, f, x, ty_b[tm_ty[f]], 0, maxk(tm_loose[f], tm_loose[x]))
+}
+
+abs_raw(bty: int, body: int, hint: int) raises KernelError: int {
+    tm_make(TM_ABS, bty, body, mk_fun(bty, tm_ty[body]), hint, maxk(tm_loose[body] - 1,
+        0))
+}
+
+maxk(a: int, b: int): int {
+    if (a > b) return a;
+    b
+}
+
+tag lemma
+mk_app(f: int, x: int) raises KernelError: int {
+    ft: int = tm_ty[f];
+    if (ty_k[ft] != TY_FUN) kernel_fail("applied a term that is not a function");
+    if (ty_a[ft] != tm_ty[x]) kernel_fail("an argument of the wrong type");
+    app_raw(f, x)
+}
+
+// λv. body, where v is a free or schematic variable.
+tag lemma
+mk_abs(v: int, body: int) raises KernelError: int {
+    if (tm_k[v] != TM_FREE && tm_k[v] != TM_VAR) kernel_fail("abstracted over a non-variable");
+    abs_raw(tm_ty[v], abstract_at(body, v, 0), tm_a[v])
+}
+
+// λx. body, abstracting each occurrence of the closed term s (a variable,
+// usually, or any subterm).
+tag lemma
+mk_abs_over(s: int, hint: int, body: int) raises KernelError: int {
+    if (tm_loose[s] != 0) kernel_fail("abstracted over a term with loose bound variables");
+    abs_raw(tm_ty[s], abstract_at(body, s, 0), hint)
+}
+
+tag lemma
+tm_kind(t: int): int {
+    tm_k[t]
+}
+
+tag lemma
+tm_type(t: int): int {
+    tm_ty[t]
+}
+
+// A constant's or variable's name.
+tag lemma
+tm_name(t: int): int {
+    tm_a[t]
+}
+
+tag lemma
+tm_bound_index(t: int): int {
+    tm_a[t]
+}
+
+tag lemma
+tm_fun(t: int): int {
+    tm_a[t]
+}
+
+tag lemma
+tm_arg(t: int): int {
+    tm_b[t]
+}
+
+tag lemma
+tm_abs_type(t: int): int {
+    tm_a[t]
+}
+
+// An abstraction's body, its bound variable loose as index 0.
+tag lemma
+tm_body(t: int): int {
+    tm_b[t]
+}
+
+tag lemma
+tm_abs_hint(t: int): int {
+    tm_hint[t]
+}
+
+tag lemma
+tm_closed(t: int): bool {
+    tm_loose[t] == 0
+}
+
+tag lemma
+tm_count(): int {
+    tm_n
+}
+
+// An abstraction's body with v (of its bound type) for its variable.
+tag lemma
+open_abs(t: int, v: int) raises KernelError: int {
+    if (tm_k[t] != TM_ABS) kernel_fail("opened a term that is not an abstraction");
+    if (tm_ty[v] != tm_a[t]) kernel_fail("opened with the wrong type");
+    if (tm_loose[v] != 0) kernel_fail("opened with a term that has loose bound variables");
+    subst_b(tm_b[t], 0, v)
+}
+
+// t with the closed term s replaced by bound variable `depth`.
+abstract_at(t: int, s: int, depth: int) raises KernelError: int {
+    if (t == s) return bound(depth, tm_ty[s]);
+    k: int = tm_k[t];
+    if (k == TM_APP) {
+        f: int = abstract_at(tm_a[t], s, depth);
+        x: int = abstract_at(tm_b[t], s, depth);
+        if (f == tm_a[t] && x == tm_b[t]) return t;
+        return app_raw(f, x)
+    }
+    if (k == TM_ABS) {
+        b: int = abstract_at(tm_b[t], s, depth + 1);
+        if (b == tm_b[t]) return t;
+        return abs_raw(tm_a[t], b, tm_hint[t])
+    }
+    t
+}
+
+// Bound variables at or past `cut` moved out by `by`.
+lift(t: int, by: int, cut: int) raises KernelError: int {
+    if (by == 0 || tm_loose[t] <= cut) return t;
+    k: int = tm_k[t];
+    if (k == TM_BOUND) return bound(tm_a[t] + by, tm_ty[t]);
+    if (k == TM_APP) return app_raw(lift(tm_a[t], by, cut), lift(tm_b[t], by, cut));
+    if (k == TM_ABS) return abs_raw(tm_a[t], lift(tm_b[t], by, cut + 1), tm_hint[t]);
+    t
+}
+
+// t with bound variable `lvl` replaced by arg (which is from outside lvl
+// binders), and those past it moved in by one.
+subst_b(t: int, lvl: int, arg: int) raises KernelError: int {
+    if (tm_loose[t] <= lvl) return t;
+    k: int = tm_k[t];
+    if (k == TM_BOUND) {
+        i: int = tm_a[t];
+        if (i == lvl) return lift(arg, lvl, 0);
+        if (i > lvl) return bound(i - 1, tm_ty[t]);
+        return t
+    }
+    if (k == TM_APP) return app_raw(subst_b(tm_a[t], lvl, arg), subst_b(tm_b[t], lvl,
+        arg));
+    if (k == TM_ABS) return abs_raw(tm_a[t], subst_b(tm_b[t], lvl + 1, arg), tm_hint[t]);
+    t
+}
+
+// Whether bound variable i is loose in t.
+has_bound(t: int, i: int): bool {
+    if (tm_loose[t] <= i) return false;
+    k: int = tm_k[t];
+    if (k == TM_BOUND) return tm_a[t] == i;
+    if (k == TM_APP) return has_bound(tm_a[t], i) || has_bound(tm_b[t], i);
+    if (k == TM_ABS) return has_bound(tm_b[t], i + 1);
+    false
+}
+
+// Whether s occurs in t.
+tag lemma
+occurs(s: int, t: int): bool {
+    if (s == t) return true;
+    k: int = tm_k[t];
+    if (k == TM_APP) return occurs(s, tm_a[t]) || occurs(s, tm_b[t]);
+    if (k == TM_ABS) return occurs(s, tm_b[t]);
+    false
+}
+
+// Each term's β-normal, η-short form, once worked out (0 not yet).
+norm_of: []int = new int[TMS](0);
+
+tag lemma
+norm(t: int) raises KernelError: int {
+    if (norm_of[t] != 0) return norm_of[t];
+    k: int = tm_k[t];
+    r: int = t;
+    if (k == TM_APP) {
+        f: int = norm(tm_a[t]);
+        x: int = norm(tm_b[t]);
+        if (tm_k[f] == TM_ABS) r = norm(subst_b(tm_b[f], 0, x)) else r = app_raw(f,
+            x)
+    } else if (k == TM_ABS) {
+        b: int = norm(tm_b[t]);
+        if (tm_k[b] == TM_APP && tm_k[tm_b[b]] == TM_BOUND && tm_a[tm_b[b]] == 0 && !has_bound(tm_a[b],
+            0)) r = subst_b(tm_a[b], 0, tm_a[b]) else r = abs_raw(tm_a[t], b, tm_hint[t])
+    }
+    norm_of[t] = r;
+    norm_of[r] = r;
+    r
+}
+
+// ---- instantiating schematic variables ----
+inst_stamp: []int = new int[TMS](0);
+
+inst_res: []int = new int[TMS](0);
+
+inst_gen: int = 0;
+
+inst_from: []int = new int[256](0);
+
+inst_to: []int = new int[256](0);
+
+inst_n: int = 0;
+
+inst_walk(t: int) raises KernelError: int {
+    if (inst_stamp[t] == inst_gen) return inst_res[t];
+    k: int = tm_k[t];
+    r: int = t;
+    if (k == TM_VAR) {
+        for i in 0..inst_n {
+            if (inst_from[i] == t) r = inst_to[i]
+        }
+    } else if (k == TM_APP) {
+        f: int = inst_walk(tm_a[t]);
+        x: int = inst_walk(tm_b[t]);
+        if (f != tm_a[t] || x != tm_b[t]) r = app_raw(f, x)
+    } else if (k == TM_ABS) {
+        b: int = inst_walk(tm_b[t]);
+        if (b != tm_b[t]) r = abs_raw(tm_a[t], b, tm_hint[t])
+    }
+    inst_stamp[t] = inst_gen;
+    inst_res[t] = r;
+    r
+}
+
+// t with each schematic variable vars[i] replaced by terms[i] (closed, of
+// its type), normalized.
+tag lemma
+subst_vars(
+    t: int,
+    vars: []int,
+    terms: []int,
+    n: int
+) raises KernelError: int {
+    if (n > len(inst_from)) kernel_fail("too many variables at once");
+    for i in 0..n {
+        v: int = vars[i];
+        if (tm_k[v] != TM_VAR) kernel_fail("instantiated a term that is not a schematic variable");
+        if (tm_ty[terms[i]] != tm_ty[v]) kernel_fail("instantiated a variable at the wrong type");
+        if (tm_loose[terms[i]] != 0) kernel_fail("instantiated with loose bound variables");
+        inst_from[i] = v;
+        inst_to[i] = terms[i]
+    }
+    inst_n = n;
+    inst_gen = inst_gen + 1;
+    norm(inst_walk(t))
+}
+
+// t with free variable v replaced by s (closed, of its type), normalized.
+tag lemma
+subst_free(t: int, v: int, s: int) raises KernelError: int {
+    if (tm_k[v] != TM_FREE && tm_k[v] != TM_VAR) kernel_fail("replaced a non-variable");
+    if (tm_ty[s] != tm_ty[v]) kernel_fail("replaced a variable at the wrong type");
+    if (tm_loose[s] != 0) kernel_fail("replaced with loose bound variables");
+    inst_from[0] = v;
+    inst_to[0] = s;
+    inst_n = 1;
+    inst_gen = inst_gen + 1;
+    norm(walk_any(t))
+}
+
+walk_any(t: int) raises KernelError: int {
+    if (inst_stamp[t] == inst_gen) return inst_res[t];
+    k: int = tm_k[t];
+    r: int = t;
+    if (k == TM_FREE || k == TM_VAR) {
+        for i in 0..inst_n {
+            if (inst_from[i] == t) r = inst_to[i]
+        }
+    } else if (k == TM_APP) {
+        f: int = walk_any(tm_a[t]);
+        x: int = walk_any(tm_b[t]);
+        if (f != tm_a[t] || x != tm_b[t]) r = app_raw(f, x)
+    } else if (k == TM_ABS) {
+        b: int = walk_any(tm_b[t]);
+        if (b != tm_b[t]) r = abs_raw(tm_a[t], b, tm_hint[t])
+    }
+    inst_stamp[t] = inst_gen;
+    inst_res[t] = r;
+    r
+}
+
+// ---- instantiating type variables ----
+tyi_from: []int = new int[64](0);
+
+tyi_to: []int = new int[64](0);
+
+tyi_n: int = 0;
+
+tag lemma
+ty_subst(t: int) raises KernelError: int {
+    k: int = ty_k[t];
+    if (k == TY_VAR) {
+        for i in 0..tyi_n {
+            if (tyi_from[i] == t) return tyi_to[i]
+        }
+        return t
+    }
+    if (k == TY_FUN) {
+        a: int = ty_subst(ty_a[t]);
+        b: int = ty_subst(ty_b[t]);
+        if (a == ty_a[t] && b == ty_b[t]) return t;
+        return mk_fun(a, b)
+    }
+    t
+}
+
+tyi_walk(t: int) raises KernelError: int {
+    if (inst_stamp[t] == inst_gen) return inst_res[t];
+    k: int = tm_k[t];
+    r: int = t;
+    if (k == TM_APP) r = app_raw(tyi_walk(tm_a[t]), tyi_walk(tm_b[t])) else if (k == TM_ABS) r = abs_raw(ty_subst(tm_a[t]),
+        tyi_walk(tm_b[t]), tm_hint[t]) else r = tm_make(k, tm_a[t], 0, ty_subst(tm_ty[t]),
+        0, tm_loose[t]);
+    inst_stamp[t] = inst_gen;
+    inst_res[t] = r;
+    r
+}
+
+// Set the type variables to instantiate (tvars are TY_VAR types).
+tag lemma
+ty_inst_set(tvars: []int, types: []int, n: int) raises KernelError {
+    if (n > len(tyi_from)) kernel_fail("too many type variables at once");
+    for i in 0..n {
+        if (ty_k[tvars[i]] != TY_VAR) kernel_fail("instantiated a type that is not a type variable");
+        tyi_from[i] = tvars[i];
+        tyi_to[i] = types[i]
+    }
+    tyi_n = n
+}
+
+// t at the types set by ty_inst_set.
+tag lemma
+subst_tvars(t: int) raises KernelError: int {
+    if (tyi_n == 0) return t;
+    inst_gen = inst_gen + 1;
+    norm(tyi_walk(t))
+}
+
+// ---- Pure's connectives ----
+prop_t: int = 0;
+
+imp_c: int = 0;
+
+name_all: int = 0;
+
+name_eq: int = 0;
+
+name_imp: int = 0;
+
+tag lemma
+kernel_init() raises KernelError {
+    if (prop_t != 0) return;
+    prop_t = mk_tcon(sym("prop"));
+    name_imp = sym("==>");
+    name_all = sym("!!");
+    name_eq = sym("==");
+    imp_c = mk_const(name_imp, mk_fun(prop_t, mk_fun(prop_t, prop_t)))
+}
+
+tag lemma
+prop_type(): int {
+    prop_t
+}
+
+tag lemma
+mk_imp(a: int, b: int) raises KernelError: int {
+    if (tm_ty[a] != prop_t || tm_ty[b] != prop_t) kernel_fail("implication between non-propositions");
+    app_raw(app_raw(imp_c, a), b)
+}
+
+// ⋀ applied to a predicate (usually an abstraction).
+tag lemma
+mk_all(p: int) raises KernelError: int {
+    pt: int = tm_ty[p];
+    if (ty_k[pt] != TY_FUN || ty_b[pt] != prop_t) kernel_fail("for all over a non-predicate");
+    norm(app_raw(mk_const(name_all, mk_fun(pt, prop_t)), p))
+}
+
+tag lemma
+mk_eq(a: int, b: int) raises KernelError: int {
+    t: int = tm_ty[a];
+    if (tm_ty[b] != t) kernel_fail("equation between terms of different types");
+    app_raw(app_raw(mk_const(name_eq, mk_fun(t, mk_fun(t, prop_t))), a), b)
+}
+
+// Whether t is c applied to two arguments.
+binary_of(t: int, name: int): bool {
+    tm_k[t] == TM_APP && tm_k[tm_a[t]] == TM_APP && tm_k[tm_a[tm_a[t]]] == TM_CONST && tm_a[tm_a[tm_a[t]]] == name
+}
+
+tag lemma
+is_imp(t: int): bool {
+    binary_of(t, name_imp)
+}
+
+tag lemma
+is_eq(t: int): bool {
+    binary_of(t, name_eq)
+}
+
+tag lemma
+is_all(t: int): bool {
+    tm_k[t] == TM_APP && tm_k[tm_a[t]] == TM_CONST && tm_a[tm_a[t]] == name_all
+}
+
+// The two sides of a binary connective (A ⟹ B, a ≡ b).
+tag lemma
+lhs_of(t: int): int {
+    tm_b[tm_a[t]]
+}
+
+tag lemma
+rhs_of(t: int): int {
+    tm_b[t]
+}
+
+// ---- theorems ----
+const THMS: int = 524288;
+
+const HYPS: int = 4194304;
+
+// Each theorem's proposition; its hypotheses (sorted term numbers in
+// hyp_pool from thm_h0, thm_hn of them); and whether an oracle (an
+// unchecked procedure) was trusted on the way.
+thm_concl: []int = new int[THMS](0);
+
+thm_h0: []int = new int[THMS](0);
+
+thm_hn: []int = new int[THMS](0);
+
+thm_oracle: []bool = new bool[THMS](false);
+
+hyp_pool: []int = new int[HYPS](0);
+
+hyp_used: int = 0;
+
+// Theorem 0 is no theorem.
+thm_n: int = 1;
+
+// Hypotheses being gathered for the next theorem.
+hs: []int = new int[4096](0);
+
+hs_n: int = 0;
+
+thm_make(concl: int, oracle: bool) raises KernelError: int {
+    if (thm_n >= THMS || hyp_used + hs_n > HYPS) kernel_fail("too many theorems");
+    th: int = thm_n;
+    thm_concl[th] = concl;
+    thm_h0[th] = hyp_used;
+    thm_hn[th] = hs_n;
+    for i in 0..hs_n hyp_pool[hyp_used + i] = hs[i];
+    hyp_used = hyp_used + hs_n;
+    thm_oracle[th] = oracle;
+    thm_n = th + 1;
+    th
+}
+
+// The hypotheses of a then b, merged (both are sorted), into hs.
+hs_union(a: int, b: int) {
+    hs_n = 0;
+    i: int = 0;
+    j: int = 0;
+    an: int = thm_hn[a];
+    bn: int = thm_hn[b];
+    while (i < an || j < bn) {
+        x: int = 0;
+        if (j >= bn) {
+            x = hyp_pool[thm_h0[a] + i];
+            i = i + 1
+        } else if (i >= an) {
+            x = hyp_pool[thm_h0[b] + j];
+            j = j + 1
+        } else {
+            p: int = hyp_pool[thm_h0[a] + i];
+            q: int = hyp_pool[thm_h0[b] + j];
+            if (p <= q) {
+                x = p;
+                i = i + 1;
+                if (p == q) j = j + 1
+            } else {
+                x = q;
+                j = j + 1
+            }
+        }
+        if (hs_n < len(hs)) {
+            hs[hs_n] = x;
+            hs_n = hs_n + 1
+        }
+    }
+}
+
+hs_of(a: int) {
+    hs_n = 0;
+    for i in 0..thm_hn[a] {
+        if (hs_n < len(hs)) {
+            hs[hs_n] = hyp_pool[thm_h0[a] + i];
+            hs_n = hs_n + 1
+        }
+    }
+}
+
+tag lemma
+thm_prop(th: int): int {
+    thm_concl[th]
+}
+
+tag lemma
+thm_hyp_count(th: int): int {
+    thm_hn[th]
+}
+
+tag lemma
+thm_hyp(th: int, i: int): int {
+    hyp_pool[thm_h0[th] + i]
+}
+
+tag lemma
+thm_trusts_oracle(th: int): bool {
+    thm_oracle[th]
+}
+
+tag lemma
+thm_count(): int {
+    thm_n
+}
+
+// Whether free variable x occurs in any hypothesis of th.
+free_in_hyps(x: int, th: int): bool {
+    for i in 0..thm_hn[th] {
+        if (occurs(x, hyp_pool[thm_h0[th] + i])) return true
+    }
+    false
+}
+
+need_prop(a: int) raises KernelError {
+    if (tm_ty[a] != prop_t) kernel_fail("not a proposition");
+    if (tm_loose[a] != 0) kernel_fail("a proposition with loose bound variables")
+}
+
+// A ⊢ A
+tag lemma
+assume(a0: int) raises KernelError: int {
+    need_prop(a0);
+    a: int = norm(a0);
+    hs_n = 1;
+    hs[0] = a;
+    thm_make(a, false)
+}
+
+// Γ ⊢ B gives Γ − {A} ⊢ A ⟹ B
+tag lemma
+implies_intro(a0: int, th: int) raises KernelError: int {
+    need_prop(a0);
+    a: int = norm(a0);
+    hs_n = 0;
+    for i in 0..thm_hn[th] {
+        h: int = hyp_pool[thm_h0[th] + i];
+        if (h != a) {
+            hs[hs_n] = h;
+            hs_n = hs_n + 1
+        }
+    }
+    thm_make(mk_imp(a, thm_concl[th]), thm_oracle[th])
+}
+
+// Γ ⊢ A ⟹ B and Δ ⊢ A give Γ ∪ Δ ⊢ B
+tag lemma
+implies_elim(ab: int, a: int) raises KernelError: int {
+    c: int = thm_concl[ab];
+    if (!is_imp(c)) kernel_fail("implies_elim: not an implication");
+    if (lhs_of(c) != thm_concl[a]) kernel_fail("implies_elim: the premise does not match");
+    hs_union(ab, a);
+    thm_make(rhs_of(c), thm_oracle[ab] || thm_oracle[a])
+}
+
+// Γ ⊢ B, x not free in Γ, gives Γ ⊢ ⋀x. B
+tag lemma
+forall_intro(x: int, th: int) raises KernelError: int {
+    if (tm_k[x] != TM_FREE) kernel_fail("forall_intro: not a free variable");
+    if (free_in_hyps(x, th)) kernel_fail("forall_intro: the variable is in a hypothesis");
+    p: int = mk_all(mk_abs(x, thm_concl[th]));
+    hs_of(th);
+    thm_make(p, thm_oracle[th])
+}
+
+// Γ ⊢ ⋀x. B gives Γ ⊢ B[t/x]
+tag lemma
+forall_elim(t: int, th: int) raises KernelError: int {
+    c: int = thm_concl[th];
+    if (!is_all(c)) kernel_fail("forall_elim: not a for all");
+    f: int = tm_b[c];
+    if (ty_a[tm_ty[f]] != tm_ty[t]) kernel_fail("forall_elim: the term has the wrong type");
+    if (tm_loose[t] != 0) kernel_fail("forall_elim: loose bound variables");
+    p: int = norm(app_raw(f, t));
+    hs_of(th);
+    thm_make(p, thm_oracle[th])
+}
+
+// ⊢ t ≡ t
+tag lemma
+reflexive(t0: int) raises KernelError: int {
+    if (tm_loose[t0] != 0) kernel_fail("reflexive: loose bound variables");
+    t: int = norm(t0);
+    hs_n = 0;
+    thm_make(mk_eq(t, t), false)
+}
+
+// Γ ⊢ a ≡ b gives Γ ⊢ b ≡ a
+tag lemma
+symmetric(th: int) raises KernelError: int {
+    c: int = thm_concl[th];
+    if (!is_eq(c)) kernel_fail("symmetric: not an equation");
+    hs_of(th);
+    thm_make(mk_eq(rhs_of(c), lhs_of(c)), thm_oracle[th])
+}
+
+// Γ ⊢ a ≡ b and Δ ⊢ b ≡ c give Γ ∪ Δ ⊢ a ≡ c
+tag lemma
+transitive(ab: int, bc: int) raises KernelError: int {
+    p: int = thm_concl[ab];
+    q: int = thm_concl[bc];
+    if (!is_eq(p) || !is_eq(q)) kernel_fail("transitive: not equations");
+    if (rhs_of(p) != lhs_of(q)) kernel_fail("transitive: the middles differ");
+    hs_union(ab, bc);
+    thm_make(mk_eq(lhs_of(p), rhs_of(q)), thm_oracle[ab] || thm_oracle[bc])
+}
+
+// Γ ⊢ f ≡ g and Δ ⊢ x ≡ y give Γ ∪ Δ ⊢ f x ≡ g y
+tag lemma
+combination(fg: int, xy: int) raises KernelError: int {
+    p: int = thm_concl[fg];
+    q: int = thm_concl[xy];
+    if (!is_eq(p) || !is_eq(q)) kernel_fail("combination: not equations");
+    l: int = mk_app(lhs_of(p), lhs_of(q));
+    r: int = mk_app(rhs_of(p), rhs_of(q));
+    hs_union(fg, xy);
+    thm_make(mk_eq(norm(l), norm(r)), thm_oracle[fg] || thm_oracle[xy])
+}
+
+// Γ ⊢ t ≡ u, x not free in Γ, gives Γ ⊢ (λx. t) ≡ (λx. u)
+tag lemma
+abstraction(x: int, th: int) raises KernelError: int {
+    if (tm_k[x] != TM_FREE) kernel_fail("abstraction: not a free variable");
+    if (free_in_hyps(x, th)) kernel_fail("abstraction: the variable is in a hypothesis");
+    c: int = thm_concl[th];
+    if (!is_eq(c)) kernel_fail("abstraction: not an equation");
+    l: int = norm(mk_abs(x, lhs_of(c)));
+    r: int = norm(mk_abs(x, rhs_of(c)));
+    hs_of(th);
+    thm_make(mk_eq(l, r), thm_oracle[th])
+}
+
+// Γ ⊢ A ≡ B and Δ ⊢ A give Γ ∪ Δ ⊢ B
+tag lemma
+equal_elim(ab: int, a: int) raises KernelError: int {
+    c: int = thm_concl[ab];
+    if (!is_eq(c)) kernel_fail("equal_elim: not an equation");
+    if (lhs_of(c) != thm_concl[a]) kernel_fail("equal_elim: the sides do not match");
+    if (tm_ty[lhs_of(c)] != prop_t) kernel_fail("equal_elim: not propositions");
+    hs_union(ab, a);
+    thm_make(rhs_of(c), thm_oracle[ab] || thm_oracle[a])
+}
+
+// A theorem with its schematic variables vars[i] replaced by terms[i],
+// hypotheses too. (Schematic variables stand for anything.)
+tag lemma
+instantiate(
+    th: int,
+    vars: []int,
+    terms: []int,
+    n: int
+) raises KernelError: int {
+    if (n == 0) return th;
+    hn: int = thm_hn[th];
+    if (hn > len(hs)) kernel_fail("too many hypotheses");
+    c: int = subst_vars(thm_concl[th], vars, terms, n);
+    // (Each hypothesis instantiated, then the set sorted again.)
+    tmp: []int = inst_hyps;
+    for i in 0..hn tmp[i] = subst_vars(hyp_pool[thm_h0[th] + i], vars, terms, n);
+    sort_unique(tmp, hn);
+    thm_make(c, thm_oracle[th])
+}
+
+inst_hyps: []int = new int[4096](0);
+
+// tmp[0..n) sorted, without repeats, into hs.
+sort_unique(tmp: []int, n: int) {
+    for i in 1..n {
+        v: int = tmp[i];
+        j: int = i - 1;
+        while (j >= 0 && tmp[j] > v) {
+            tmp[j + 1] = tmp[j];
+            j = j - 1
+        }
+        tmp[j + 1] = v
+    }
+    hs_n = 0;
+    for i in 0..n {
+        if (hs_n == 0 || hs[hs_n - 1] != tmp[i]) {
+            hs[hs_n] = tmp[i];
+            hs_n = hs_n + 1
+        }
+    }
+}
+
+// A theorem at other types: its type variables as set by ty_inst_set.
+tag lemma
+instantiate_types(th: int) raises KernelError: int {
+    hn: int = thm_hn[th];
+    if (hn > len(hs)) kernel_fail("too many hypotheses");
+    c: int = subst_tvars(thm_concl[th]);
+    tmp: []int = inst_hyps;
+    for i in 0..hn tmp[i] = subst_tvars(hyp_pool[thm_h0[th] + i]);
+    sort_unique(tmp, hn);
+    thm_make(c, thm_oracle[th])
+}
+
+// ---- axioms and oracles ----
+const AXIOMS: int = 1024;
+
+ax_name: []int = new int[AXIOMS](0);
+
+ax_thm: []int = new int[AXIOMS](0);
+
+ax_n: int = 0;
+
+// Axioms come from the logic's file (hol.txt), which says what the logic
+// is: once it is read, axioms_closed stops more being added.
+axioms_closed: bool = false;
+
+tag lemma
+add_axiom(name: int, p: int) raises KernelError: int {
+    if (axioms_closed) kernel_fail("axioms are closed");
+    need_prop(p);
+    if (ax_n >= AXIOMS) kernel_fail("too many axioms");
+    hs_n = 0;
+    th: int = thm_make(norm(p), false);
+    ax_name[ax_n] = name;
+    ax_thm[ax_n] = th;
+    ax_n = ax_n + 1;
+    th
+}
+
+tag lemma
+close_axioms() {
+    axioms_closed = true
+}
+
+tag lemma
+axiom(name: int) raises KernelError: int {
+    for i in 0..ax_n {
+        if (ax_name[i] == name) return ax_thm[i]
+    }
+    kernel_why = "no such axiom";
+    raise KernelError
+}
+
+tag lemma
+axiom_count(): int {
+    ax_n
+}
+
+tag lemma
+axiom_name(i: int): int {
+    ax_name[i]
+}
+
+tag lemma
+axiom_thm(i: int): int {
+    ax_thm[i]
+}
+
+// A theorem an unchecked procedure vouches for: hyps (n of them) ⊢ p.
+// It is marked, and so is everything proved from it.
+tag lemma
+oracle(p: int, hyps: []int, n: int) raises KernelError: int {
+    need_prop(p);
+    if (n > len(inst_hyps)) kernel_fail("too many hypotheses");
+    for i in 0..n {
+        need_prop(hyps[i]);
+        inst_hyps[i] = norm(hyps[i])
+    }
+    sort_unique(inst_hyps, n);
+    thm_make(norm(p), true)
+}

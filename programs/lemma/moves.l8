@@ -1,0 +1,747 @@
+tag lemma;
+
+use_tag std;
+
+// What can be done where the player taps: the goal, a hypothesis, or a
+// part of either. Each candidate is a rule (of the logic, the region's
+// rulebook, a definition, or a lemma a level proved) that fits there, found
+// by matching; only moves the kernel will accept are offered. A candidate
+// may need witnesses: terms for the rule's variables nothing on the board
+// fixed (the N of "there is an N"), which the player picks from the board.
+//
+// After every move the game closes, by itself, any goal that is one of its
+// hypotheses, an equation with both sides the same, or (where the region
+// has it) arithmetic Calculate can do.
+const C_BACK: int = 1;
+
+const C_FWD: int = 2;
+
+const C_REWRITE: int = 3;
+
+const C_CALC: int = 4;
+
+// A rule applied backwards with another lemma proving its first premise
+// (to bound something: x ≤ y by a lemma, then show y < z).
+const C_CHAIN: int = 5;
+
+const CANDS: int = 256;
+
+cd_kind: []int = new int[CANDS](0);
+
+cd_lemma: []int = new int[CANDS](-1);
+
+cd_hyp: []int = new int[CANDS](-1);
+
+// A rewrite: backwards (right to left), by a hypothesis equation (or -1),
+// in which hypothesis (or -1 for the conclusion).
+cd_back: []bool = new bool[CANDS](false);
+
+cd_eqh: []int = new int[CANDS](0);
+
+cd_in: []int = new int[CANDS](-1);
+
+// A chain's tool.
+cd_tool: []int = new int[CANDS](-1);
+
+// The matcher's bindings for it (in cpool from cd_b0: var, value; then
+// type variable, type), and its witnesses needed (schematic variables).
+cd_b0: []int = new int[CANDS](0);
+
+cd_bn: []int = new int[CANDS](0);
+
+cd_tb0: []int = new int[CANDS](0);
+
+cd_tbn: []int = new int[CANDS](0);
+
+cd_w0: []int = new int[CANDS](0);
+
+cd_wn: []int = new int[CANDS](0);
+
+cd_path0: []int = new int[CANDS](0);
+
+cd_pathn: []int = new int[CANDS](0);
+
+// What the button says, and how likely it is wanted (higher first).
+cd_label: []int = new int[CANDS](0);
+
+cd_rank: []int = new int[CANDS](0);
+
+cd_n: int = 0;
+
+const CPOOL: int = 65536;
+
+cpool: []int = new int[CPOOL](0);
+
+cpool_n: int = 0;
+
+cpool_add(v: int) {
+    if (cpool_n < CPOOL) {
+        cpool[cpool_n] = v;
+        cpool_n = cpool_n + 1
+    }
+}
+
+cands_clear() {
+    cd_n = 0;
+    cpool_n = 0
+}
+
+// A candidate from the matcher's bindings now; its witnesses are the
+// rule's variables still unbound.
+add_cand(
+    kind: int,
+    l: int,
+    hyp: int,
+    rank: int
+): int {
+    if (cd_n >= CANDS) return -1;
+    c: int = cd_n;
+    cd_kind[c] = kind;
+    cd_lemma[c] = l;
+    cd_hyp[c] = hyp;
+    cd_back[c] = false;
+    cd_eqh[c] = 0;
+    cd_in[c] = -1;
+    cd_tool[c] = -1;
+    cd_rank[c] = rank;
+    cd_b0[c] = cpool_n;
+    for i in 0..mt_n {
+        cpool_add(mt_var[i]);
+        cpool_add(mt_val[i])
+    }
+    cd_bn[c] = mt_n;
+    cd_tb0[c] = cpool_n;
+    for i in 0..mt_tn {
+        cpool_add(mt_tvar[i]);
+        cpool_add(mt_tval[i])
+    }
+    cd_tbn[c] = mt_tn;
+    free_vars_n = 0;
+    if (l >= 0) unbound_vars(thm_prop(lm_thm[l]));
+    cd_w0[c] = cpool_n;
+    for i in 0..free_vars_n cpool_add(free_vars[i]);
+    cd_wn[c] = free_vars_n;
+    cd_path0[c] = cpool_n;
+    cd_pathn[c] = 0;
+    cd_label[c] = 0;
+    cd_n = c + 1;
+    c
+}
+
+// Put candidate c's bindings back into the matcher.
+cand_bindings(c: int) {
+    match_clear();
+    for i in 0..cd_bn[c] {
+        mt_var[i] = cpool[cd_b0[c] + 2 * i];
+        mt_val[i] = cpool[cd_b0[c] + 2 * i + 1]
+    }
+    mt_n = cd_bn[c];
+    for i in 0..cd_tbn[c] {
+        mt_tvar[i] = cpool[cd_tb0[c] + 2 * i];
+        mt_tval[i] = cpool[cd_tb0[c] + 2 * i + 1]
+    }
+    mt_tn = cd_tbn[c]
+}
+
+// Witness i of candidate c: the variable, and the type a term for it needs.
+cand_witness(c: int, i: int): int {
+    cpool[cd_w0[c] + i]
+}
+
+cand_witness_type(c: int, i: int) raises KernelError: int {
+    cand_bindings(c);
+    match_ty_subst(tm_type(cand_witness(c, i)))
+}
+
+// ---- which lemmas can be offered ----
+// The level being played (its tools), or -1.
+cur_level: int = -1;
+
+lemma_offered(l: int): bool {
+    if (lm_hidden[l]) return false;
+    k: int = lm_kind[l];
+    if (k == LM_AXIOM || k == LM_ASSUME || k == LM_DEF) return true;
+    if (cur_level < 0) return true;
+    for i in 0..lv_tooln[cur_level] {
+        if (pool[lv_tool0[cur_level] + i] == l) return true
+    }
+    false
+}
+
+// Whether a pattern is too loose to offer by itself: a variable, or a
+// variable applied (it would fit almost anything).
+loose_pattern(p: int): bool {
+    q: int = p;
+    // (Trueprop ?P is as loose as ?P.)
+    if (tm_kind(q) == TM_APP && tm_kind(tm_fun(q)) == TM_CONST && tm_name(tm_fun(q)) == role_name[ROLE_TRUE]) q = tm_arg(q);
+    while (tm_kind(q) == TM_APP) q = tm_fun(q);
+    tm_kind(q) == TM_VAR
+}
+
+// Whether a loose pattern's variable is bound already (by matching a
+// premise), so the conclusion is known after all.
+head_bound(p: int): bool {
+    q: int = p;
+    if (tm_kind(q) == TM_APP && tm_kind(tm_fun(q)) == TM_CONST && tm_name(tm_fun(q)) == role_name[ROLE_TRUE]) q = tm_arg(q);
+    while (tm_kind(q) == TM_APP) q = tm_fun(q);
+    tm_kind(q) == TM_VAR && match_val(q) != 0
+}
+
+lemma_is(l: int, name: str): bool {
+    lm_name[l] == sym(name)
+}
+
+// ---- tapping the goal ----
+cands_goal(n: int) raises KernelError {
+    cands_clear();
+    g: int = pn_goal[n];
+    c: int = gl_concl[g];
+    for l in 0..lm_n {
+        if (lemma_offered(l)) {
+            q: int = strip_rule(thm_prop(lm_thm[l]));
+            if (!loose_pattern(q)) {
+                match_clear();
+                if (match_term(q, c)) add_cand(C_BACK, l, -1, back_rank(l))
+            } else if (lemma_is(l, "ccontr")) {
+                match_clear();
+                if (match_term(q, c)) add_cand(C_BACK, l, -1, 1)
+            }
+        }
+    }
+    cands_chain(n);
+    if (region_calc) {
+        if (cd_n < CANDS) {
+            add_cand(C_CALC, -1, -1, 0);
+            cd_label[cd_n - 1] = sym("Calculate")
+        }
+    }
+    label_all(n)
+}
+
+// Rules of the logic that take a goal apart rank first; the region's own
+// rules next.
+back_rank(l: int): int {
+    if (lm_kind[l] == LM_AXIOM) return 10;
+    if (lm_kind[l] == LM_LEVEL) return 8;
+    5
+}
+
+// Chains: the goal x < z (or ≤), a chain rule x ≤ y ⟹ y < z ⟹ x < z,
+// and a lemma whose conclusion is x ≤ y for this x: y from the lemma.
+cands_chain(n: int) raises KernelError {
+    g: int = pn_goal[n];
+    c: int = gl_concl[g];
+    for r in 0..lm_n {
+        if (lm_kind[r] == LM_ASSUME && lm_words[r] == sym("chain")) {
+            q: int = strip_rule(thm_prop(lm_thm[r]));
+            if (prem_n == 2) {
+                p1: int = prem[0];
+                match_clear();
+                if (match_term(q, c)) chain_tools(r, p1)
+            }
+        }
+    }
+}
+
+// For chain rule r (bound to the goal), each tool whose conclusion's left
+// side fits p1's left side.
+chain_tools(r: int, p1: int) raises KernelError {
+    match_save();
+    want: int = match_subst(p1);
+    for t in 0..lm_n {
+        if (lemma_offered(t) && t != r && lm_words[t] != sym("chain")) {
+            tq: int = strip_rule(thm_prop(lm_thm[t]));
+            // (Both relations the same, and the tool's left side fits.)
+            if (same_relation(tq, want)) {
+                bind_save_n: int = mt_n;
+                bind_save_tn: int = mt_tn;
+                // (The tool's variables are its own: matched afresh.)
+                match_clear();
+                if (match_term(rel_left(tq), rel_left(want))) {
+                    k: int = add_cand(C_CHAIN, t, -1, 7);
+                    if (k >= 0) cd_tool[k] = r
+                }
+                mt_n = bind_save_n;
+                mt_tn = bind_save_tn
+            }
+        }
+    }
+    match_restore()
+}
+
+// The relation and sides of Trueprop (rel a b).
+rel_core(p: int): int {
+    if (tm_kind(p) == TM_APP && tm_kind(tm_fun(p)) == TM_CONST && tm_name(tm_fun(p)) == role_name[ROLE_TRUE]) return tm_arg(p);
+    p
+}
+
+rel_left(p: int): int {
+    q: int = rel_core(p);
+    if (spine_len(q) != 2) return 0;
+    spine_arg(q, 2, 0)
+}
+
+rel_right(p: int): int {
+    q: int = rel_core(p);
+    if (spine_len(q) != 2) return 0;
+    spine_arg(q, 2, 1)
+}
+
+same_relation(a: int, b: int): bool {
+    p: int = rel_core(a);
+    q: int = rel_core(b);
+    if (spine_len(p) != 2 || spine_len(q) != 2) return false;
+    spine_head(p) == spine_head(q)
+}
+
+// ---- tapping a hypothesis ----
+cands_hyp(n: int, j: int) {
+    cands_clear();
+    g: int = pn_goal[n];
+    h: int = goal_hyp(g, j);
+    c: int = gl_concl[g];
+    for l in 0..lm_n {
+        if (lemma_offered(l)) {
+            q: int = strip_rule(thm_prop(lm_thm[l]));
+            if (prem_n >= 1 && !loose_pattern(prem[0])) {
+                major: int = prem[0];
+                match_clear();
+                if (match_term(major, h)) {
+                    // (Backwards if the conclusion is or can be the goal,
+                    // else forwards.)
+                    match_save();
+                    if (match_term(q, c)) add_cand(C_BACK, l, j, 9) else {
+                        match_restore();
+                        if (!loose_pattern(q) || head_bound(q)) add_cand(C_FWD, l,
+                            j, 8)
+                    }
+                }
+            }
+        }
+    }
+    // (A hypothesis that is an equation rewrites the goal.)
+    hc: int = rel_core(h);
+    if (is_binary(hc, role_name[ROLE_EQ])) {
+        a: int = spine_arg(hc, 2, 0);
+        b: int = spine_arg(hc, 2, 1);
+        rw_hyp_cand(n, j, a, false);
+        rw_hyp_cand(n, j, b, true)
+    }
+    // (One that has a defined name in it can be opened.)
+    label_all(n)
+}
+
+// Rewriting the goal with hypothesis j (an equation) where side s is.
+rw_hyp_cand(
+    n: int,
+    j: int,
+    s: int,
+    back: bool
+) {
+    g: int = pn_goal[n];
+    if (!find_path(gl_concl[g], s)) return;
+    match_clear();
+    k: int = add_cand(C_REWRITE, -1, j, 6);
+    if (k < 0) return;
+    cd_back[k] = back;
+    cd_eqh[k] = goal_hyp(g, j);
+    cd_in[k] = -1;
+    cd_path0[k] = cpool_n;
+    for i in 0..fp_n cpool_add(fp_steps[i]);
+    cd_pathn[k] = fp_n
+}
+
+// The path to the first place s is in t (not under a binder that s's free
+// names would be caught by: s is closed, so any place), into fp_steps.
+fp_steps: []int = new int[256](0);
+
+fp_n: int = 0;
+
+find_path(t: int, s: int): bool {
+    fp_n = 0;
+    find_path_in(t, s)
+}
+
+find_path_in(t: int, s: int): bool {
+    if (t == s) return true;
+    if (fp_n >= len(fp_steps)) return false;
+    k: int = tm_kind(t);
+    if (k == TM_APP) {
+        fp_steps[fp_n] = P_FUN;
+        fp_n = fp_n + 1;
+        if (find_path_in(tm_fun(t), s)) return true;
+        fp_steps[fp_n - 1] = P_ARG;
+        if (find_path_in(tm_arg(t), s)) return true;
+        fp_n = fp_n - 1;
+        return false
+    }
+    if (k == TM_ABS) {
+        fp_steps[fp_n] = P_BODY;
+        fp_n = fp_n + 1;
+        if (find_path_in(tm_body(t), s)) return true;
+        fp_n = fp_n - 1
+    }
+    false
+}
+
+// ---- tapping a part ----
+// The part at a path (steps in sub_steps) of the conclusion (in < 0) or of
+// hypothesis `in`: each equation (rulebook, definition, lemma, or a
+// hypothesis) whose one side fits it, either way round.
+sub_steps: []int = new int[256](0);
+
+sub_n: int = 0;
+
+cands_sub(n: int, in_hyp: int) raises KernelError {
+    cands_clear();
+    g: int = pn_goal[n];
+    target: int = gl_concl[g];
+    if (in_hyp >= 0) target = goal_hyp(g, in_hyp);
+    rw_n = sub_n;
+    for i in 0..sub_n rw_steps[i] = sub_steps[i];
+    s: int = rw_sub(target, g);
+    under: bool = rw_under_binder();
+    for l in 0..lm_n {
+        if (lemma_offered(l)) {
+            q: int = strip_rule(thm_prop(lm_thm[l]));
+            if (!under || prem_n == 0) {
+                eq: int = rel_core(q);
+                if (is_eq(q) || is_binary(eq, role_name[ROLE_EQ])) {
+                    lhs: int = 0;
+                    rhs: int = 0;
+                    if (is_eq(q)) {
+                        lhs = lhs_of(q);
+                        rhs = rhs_of(q)
+                    } else {
+                        lhs = spine_arg(eq, 2, 0);
+                        rhs = spine_arg(eq, 2, 1)
+                    }
+                    match_clear();
+                    if (match_term(lhs, s) && lhs != rhs) rw_cand(l, in_hyp, false,
+                        6);
+                    // (Right to left: a bare variable on the right fits
+                    // anything, so that way ranks low.)
+                    match_clear();
+                    if (lm_kind[l] != LM_DEF && match_term(rhs, s)) {
+                        rk: int = 4;
+                        if (tm_kind(rhs) == TM_VAR) rk = 1;
+                        rw_cand(l, in_hyp, true, rk)
+                    }
+                }
+            }
+        }
+    }
+    for j in 0..gl_hypn[g] {
+        if (j != in_hyp) {
+            hc: int = rel_core(goal_hyp(g, j));
+            if (is_binary(hc, role_name[ROLE_EQ])) {
+                if (spine_arg(hc, 2, 0) == s) {
+                    match_clear();
+                    k: int = rw_cand(-1, in_hyp, false, 7);
+                    if (k >= 0) cd_eqh[k] = goal_hyp(g, j)
+                }
+                if (spine_arg(hc, 2, 1) == s) {
+                    match_clear();
+                    k: int = rw_cand(-1, in_hyp, true, 7);
+                    if (k >= 0) cd_eqh[k] = goal_hyp(g, j)
+                }
+            }
+        }
+    }
+    label_all(n)
+}
+
+rw_cand(
+    l: int,
+    in_hyp: int,
+    back: bool,
+    rank: int
+): int {
+    k: int = add_cand(C_REWRITE, l, in_hyp, rank);
+    if (k < 0) return -1;
+    cd_back[k] = back;
+    cd_in[k] = in_hyp;
+    cd_hyp[k] = -1;
+    cd_path0[k] = cpool_n;
+    for i in 0..sub_n cpool_add(sub_steps[i]);
+    cd_pathn[k] = sub_n;
+    k
+}
+
+// ---- making a candidate's move ----
+// Candidate c at node n, with its witnesses (terms, wn of them).
+cand_apply(
+    n: int,
+    c: int,
+    wits: []int,
+    wn: int
+) raises KernelError: int {
+    cand_bindings(c);
+    if (wn != cd_wn[c]) kernel_fail("the wrong number of witnesses");
+    for i in 0..wn {
+        v: int = cand_witness(c, i);
+        if (!match_type(tm_type(v), tm_type(wits[i]))) kernel_fail("a witness of the wrong type");
+        if (!match_bind(v, wits[i])) kernel_fail("a witness that does not fit")
+    }
+    hint: int = 0;
+    k: int = cd_kind[c];
+    m: int = -1;
+    if (k == C_BACK) {
+        hint = rule_hint(cd_lemma[c]);
+        m = apply_back(n, cd_lemma[c], cd_hyp[c], hint)
+    } else if (k == C_FWD) {
+        hint = rule_hint(cd_lemma[c]);
+        m = apply_fwd(n, cd_lemma[c], cd_hyp[c], hint)
+    } else if (k == C_REWRITE) {
+        rw_n = cd_pathn[c];
+        for i in 0..rw_n rw_steps[i] = cpool[cd_path0[c] + i];
+        m = apply_rewrite(n, cd_lemma[c], cd_eqh[c], cd_back[c], cd_in[c])
+    } else if (k == C_CALC) m = apply_calc(n) else if (k == C_CHAIN) m = apply_chain(n,
+        cd_tool[c], cd_lemma[c]);
+    if (m >= 0) {
+        mv_w0[m] = gpool_n;
+        for i in 0..wn gpool_add(wits[i]);
+        mv_wn[m] = wn
+    }
+    m
+}
+
+// A chain at node n: rule r with its middle from tool t (bound now).
+apply_chain(n: int, r: int, t: int) raises KernelError: int {
+    // (The tool instantiated first: its conclusion x ≤ y says what y is.)
+    tool_thm: int = match_instantiate(lm_thm[t]);
+    if (has_vars(thm_prop(tool_thm))) kernel_fail("a tool with a variable not chosen");
+    y: int = rel_right(strip_rule(thm_prop(tool_thm)));
+    g: int = pn_goal[n];
+    rq: int = strip_rule(thm_prop(lm_thm[r]));
+    match_clear();
+    if (!match_term(rq, gl_concl[g])) kernel_fail("the chain does not fit");
+    last_concl = strip_rule(thm_prop(lm_thm[r]));
+    p1: int = prem[0];
+    if (!match_term(rel_right(p1), y)) kernel_fail("the chain does not fit");
+    m: int = apply_back(n, r, -1, 0);
+    // (Then the first new goal, x ≤ y, by the tool.)
+    k: int = first_open_kid(n);
+    if (k >= 0) {
+        cand_tool_bind(t, tool_thm);
+        last_move = apply_back(k, t, -1, 0)
+    }
+    m
+}
+
+// Bind the matcher so lemma t instantiates to tool_thm: by matching its
+// statement against the instance.
+cand_tool_bind(t: int, tool_thm: int) {
+    match_clear();
+    match_term(thm_prop(lm_thm[t]), thm_prop(tool_thm))
+}
+
+first_open_kid(n: int): int {
+    for i in 0..pn_kidn[n] {
+        k: int = node_kid(n, i);
+        if (pn_thm[k] == 0 && pn_move[k] < 0) return k
+    }
+    -1
+}
+
+// The name a rule's new fixed thing takes from what it is about: for
+// ∃x. P x, the name P's binder has (∃N. ... gives N).
+rule_hint(l: int): int {
+    if (l < 0) return 0;
+    for i in 0..mt_n {
+        v: int = mt_val[i];
+        if (tm_kind(v) == TM_ABS) return tm_abs_hint(v)
+    }
+    0
+}
+
+// ---- labels ----
+label_all(n: int) {
+    for c in 0..cd_n {
+        if (cd_label[c] == 0) cd_label[c] = make_label(n, c)
+    }
+}
+
+// A button's words: the lemma's, with _ for what the move is about: the
+// term chosen for the rule's variable that the tapped thing does not fix
+// ("Use with ε/2"; "…" while still to choose), or else the name the move
+// brings in ("Take any ε").
+make_label(n: int, c: int): int {
+    l: int = cd_lemma[c];
+    line_clear();
+    if (cd_kind[c] == C_REWRITE && l < 0) {
+        line_add("Use it");
+        return line_sym_now()
+    }
+    if (l < 0) return sym("?");
+    w: int = lm_words[l];
+    if (w == 0) {
+        line_add("Use ");
+        line_sym(lm_name[l]);
+        return line_sym_now()
+    }
+    // (What _ stands for, worked out first: it uses the line.)
+    blank: int = 0;
+    for i in 0..sym_len[w] {
+        if (sym_byte(w, i) == 95) blank = label_blank(n, c)
+    }
+    line_clear();
+    for i in 0..sym_len[w] {
+        b: int = sym_byte(w, i);
+        if (b == 95) line_sym(blank) else line_byte(b)
+    }
+    line_sym_now()
+}
+
+label_blank(n: int, c: int): int {
+    l: int = cd_lemma[c];
+    cand_bindings(c);
+    v: int = label_var(c);
+    if (v != 0) {
+        val: int = match_val(v);
+        if (val == 0) return sym("\�\�\�");
+        show_line(val);
+        return line_sym_now()
+    }
+    h: int = rule_hint(l);
+    if (h != 0) return fresh_name(h, pn_goal[n]);
+    sym("x")
+}
+
+// The rule's first variable that what was tapped does not fix: not in
+// the major premise (a hypothesis tapped), or not in the conclusion.
+label_var(c: int): int {
+    l: int = cd_lemma[c];
+    q: int = strip_rule(thm_prop(lm_thm[l]));
+    anchor: int = q;
+    if (cd_hyp[c] >= 0 && prem_n > 0) anchor = prem[0];
+    vars_n = 0;
+    collect_vars(thm_prop(lm_thm[l]));
+    // (Not one that is the whole conclusion: that is the goal itself.)
+    whole: int = rel_core(q);
+    for i in 0..vars_n {
+        if (!occurs(vars[i], anchor) && vars[i] != whole) return vars[i]
+    }
+    0
+}
+
+// ---- playing a level ----
+root: int = 0;
+
+// Start level l: its goal, with its variables fixed.
+level_start(l: int) raises KernelError {
+    cur_level = l;
+    gl_n = 1;
+    gpool_n = 0;
+    pn_n = 0;
+    kpool_n = 0;
+    mv_n = 0;
+    p: int = lv_goal[l];
+    vars_n = 0;
+    collect_vars(p);
+    nf_n = 0;
+    for i in 0..vars_n {
+        v: int = vars[i];
+        x: int = mk_free(tm_name(v), tm_type(v));
+        p = subst_free(p, v, x);
+        add_fix(x)
+    }
+    nh_n = 0;
+    while (is_imp(p)) {
+        add_hyp(lhs_of(p));
+        p = rhs_of(p)
+    }
+    root = new_node(make_goal(p), -1);
+    auto_close()
+}
+
+// The open goals of the level, in order.
+level_open() {
+    open_n = 0;
+    collect_open(root)
+}
+
+level_done(): bool {
+    pn_thm[root] != 0
+}
+
+// Close what closes by itself: a goal that is a hypothesis, an equation
+// with both sides the same, True, and arithmetic (where the region has it).
+auto_close() raises KernelError {
+    more: bool = true;
+    while (more) {
+        more = false;
+        level_open();
+        for i in 0..open_n {
+            n: int = open_nodes[i];
+            if (pn_move[n] < 0 && auto_close_one(n)) more = true
+        }
+    }
+}
+
+auto_close_one(n: int) raises KernelError: bool {
+    g: int = pn_goal[n];
+    c: int = gl_concl[g];
+    if (goal_has_hyp(g, c)) {
+        last_move = apply_hyp(n);
+        return true
+    }
+    l: int = find_lemma(sym("refl"));
+    if (l >= 0) {
+        match_clear();
+        if (match_term(thm_prop(lm_thm[l]), c)) {
+            mv_auto[apply_back(n, l, -1, 0)] = true;
+            return true
+        }
+    }
+    l = find_lemma(sym("TrueI"));
+    if (l >= 0 && thm_prop(lm_thm[l]) == c) {
+        match_clear();
+        mv_auto[apply_back(n, l, -1, 0)] = true;
+        return true
+    }
+    if (region_calc && calc_decides(g)) {
+        mv_auto[apply_calc(n)] = true;
+        return true
+    }
+    false
+}
+
+// The level's theorem, once done: its goal proved, with its fixed names
+// made schematic again, so it is a tool for later levels.
+level_theorem() raises KernelError: int {
+    th: int = pn_thm[root];
+    g: int = pn_goal[root];
+    for i in 0..gl_fixn[g] {
+        x: int = goal_fix(g, i);
+        th = forall_elim(mk_var(tm_name(x), tm_type(x)), th)
+    }
+    th
+}
+
+// Record level l as solved: its lemma joins the tools.
+level_solved(l: int) raises KernelError {
+    th: int = level_theorem();
+    m: int = add_lemma(lv_name[l], LM_LEVEL, th, lv_title[l]);
+    if (m >= 0) lm_level[m] = l;
+    lv_lemma[l] = m
+}
+
+// ---- undo ----
+undo() {
+    // (Back past the moves the game made itself, to the player's last.)
+    while (mv_n > 0) {
+        m: int = mv_n - 1;
+        auto: bool = mv_auto[m];
+        reopen(mv_node[m]);
+        mv_n = m;
+        if (!auto) {
+            auto_close_after_undo();
+            return
+        }
+    }
+}
+
+// (A goal undone back to may close by itself again: only if it did before
+// the player's move, which it would have then, so nothing to do.)
+auto_close_after_undo() { }

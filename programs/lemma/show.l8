@@ -1,0 +1,513 @@
+tag lemma;
+
+use_tag std;
+
+// Showing terms as the subjects write them. The printer does not make
+// text directly: it makes a run of events (a subterm's box opens, a piece
+// of text, the box closes), so the screen can lay each subterm out as its
+// own block, find which one a finger is on, and slide blocks between one
+// goal and the next. For a test the events are just joined into a line.
+//
+// Each box knows its term and its path from the whole: the steps (into an
+// application's function or argument, or an abstraction's body) that reach
+// it, which is what a move needs to act on that one place.
+const EV_OPEN: int = 1;
+
+const EV_CLOSE: int = 2;
+
+const EV_TEXT: int = 3;
+
+// Text styles: plain; an operator; a name (variable or constant); a
+// subscript.
+const ST_PLAIN: int = 0;
+
+const ST_OP: int = 1;
+
+const ST_NAME: int = 2;
+
+const ST_SUB: int = 3;
+
+const EVS: int = 16384;
+
+ev_kind: []int = new int[EVS](0);
+
+// An open's term, or a text's name; an open's path, or a text's style.
+ev_a: []int = new int[EVS](0);
+
+ev_b: []int = new int[EVS](0);
+
+ev_n: int = 0;
+
+ev_add(k: int, a: int, b: int) {
+    if (ev_n < EVS) {
+        ev_kind[ev_n] = k;
+        ev_a[ev_n] = a;
+        ev_b[ev_n] = b;
+        ev_n = ev_n + 1
+    }
+}
+
+ev_text(s: str, style: int) {
+    ev_add(EV_TEXT, sym(s), style)
+}
+
+// ---- paths ----
+const P_FUN: int = 0;
+
+const P_ARG: int = 1;
+
+const P_BODY: int = 2;
+
+const PATHS: int = 65536;
+
+path_parent: []int = new int[PATHS](0);
+
+path_step: []int = new int[PATHS](0);
+
+path_depth: []int = new int[PATHS](0);
+
+// Path 0 is the whole.
+path_n: int = 1;
+
+path_to(parent: int, step: int): int {
+    if (path_n >= PATHS) return 0;
+    p: int = path_n;
+    path_parent[p] = parent;
+    path_step[p] = step;
+    path_depth[p] = path_depth[parent] + 1;
+    path_n = p + 1;
+    p
+}
+
+// ---- names of bound variables ----
+// Those around the term being shown, innermost last.
+bn_name: []int = new int[256](0);
+
+bn_n: int = 0;
+
+// Whether a free variable, schematic variable or constant named s occurs in t.
+name_in(s: int, t: int): bool {
+    k: int = tm_kind(t);
+    if (k == TM_FREE || k == TM_VAR || k == TM_CONST) return tm_name(t) == s;
+    if (k == TM_APP) return name_in(s, tm_fun(t)) || name_in(s, tm_arg(t));
+    if (k == TM_ABS) return name_in(s, tm_body(t));
+    false
+}
+
+// A name for the variable an abstraction binds: as written, primed until
+// it is not the name of another in scope or of a free variable in the body.
+pick_name(abs_t: int): int {
+    s: int = tm_abs_hint(abs_t);
+    if (s == 0 || sym_byte(s, 0) == 1) s = sym("x");
+    body: int = tm_body(abs_t);
+    tries: int = 0;
+    while (tries < 8 && name_taken(s, body)) {
+        line_clear();
+        line_sym(s);
+        line_cp(8242);
+        s = line_sym_now();
+        tries = tries + 1
+    }
+    s
+}
+
+name_taken(s: int, body: int): bool {
+    for i in 0..bn_n {
+        if (bn_name[i] == s) return true
+    }
+    name_in(s, body)
+}
+
+push_bound(s: int) {
+    if (bn_n < len(bn_name)) {
+        bn_name[bn_n] = s;
+        bn_n = bn_n + 1
+    }
+}
+
+// A name for the variable of an η-short binder (∀P): the first of x, y,
+// z, ... not taken.
+eta_names: []str = ["x", "y", "z", "u", "v", "w", "t", "s"];
+
+name_for_eta(f: int): int {
+    for nm in eta_names {
+        s: int = sym(nm);
+        if (!name_taken(s, f)) return s
+    }
+    sym("x\�\�\�")
+}
+
+// ---- the printer ----
+// Whether a name is a numeral (all digits).
+is_numeral(t: int): bool {
+    k: int = tm_kind(t);
+    if (k != TM_CONST && k != TM_FREE) return false;
+    s: int = tm_name(t);
+    if (sym_len[s] == 0) return false;
+    for i in 0..sym_len[s] {
+        c: int = sym_byte(s, i);
+        if (c < 48 || c > 57) return false
+    }
+    true
+}
+
+// The head of an application spine and its arguments (up to 8).
+sp_args: []int = new int[64](0);
+
+spine_head(t: int): int {
+    h: int = t;
+    while (tm_kind(h) == TM_APP) h = tm_fun(h);
+    h
+}
+
+spine_len(t: int): int {
+    n: int = 0;
+    h: int = t;
+    while (tm_kind(h) == TM_APP) {
+        n = n + 1;
+        h = tm_fun(h)
+    }
+    n
+}
+
+// Argument i (from 0, of n) of the spine t, and its path.
+spine_arg(t: int, n: int, i: int): int {
+    h: int = t;
+    for _ in 0..n - 1 - i h = tm_fun(h);
+    tm_arg(h)
+}
+
+spine_arg_path(path: int, n: int, i: int): int {
+    p: int = path;
+    for _ in 0..n - 1 - i p = path_to(p, P_FUN);
+    path_to(p, P_ARG)
+}
+
+spine_head_path(path: int, n: int): int {
+    p: int = path;
+    for _ in 0..n p = path_to(p, P_FUN);
+    p
+}
+
+// The notation a head is shown with, or -1.
+head_note(h: int): int {
+    k: int = tm_kind(h);
+    if (k == TM_CONST || k == TM_FREE) return note_for_name(tm_name(h));
+    -1
+}
+
+// How many arguments a notation takes.
+note_arity(i: int): int {
+    k: int = nt_kind[i];
+    if (k == N_INFIX || k == N_INFIXL || k == N_INFIXR || k == N_FLIP) return 2;
+    1
+}
+
+open_paren(need: bool) {
+    if (need) ev_text("(", ST_PLAIN)
+}
+
+close_paren(need: bool) {
+    if (need) ev_text(")", ST_PLAIN)
+}
+
+// Show t (at path), in a place that needs at least precedence prec.
+show(t: int, path: int, prec: int) {
+    k: int = tm_kind(t);
+    if (k == TM_APP) {
+        n: int = spine_len(t);
+        h: int = spine_head(t);
+        i: int = head_note(h);
+        if (i >= 0 && n == note_arity(i)) {
+            if (nt_kind[i] == N_HIDDEN) {
+                show(tm_arg(t), path_to(path, P_ARG), prec);
+                return
+            }
+            ev_add(EV_OPEN, t, path);
+            show_note(t, path, prec, i);
+            ev_add(EV_CLOSE, t, path);
+            return
+        }
+        // (A sequence: aₙ.)
+        if (n == 1 && sub_type(tm_type(h))) {
+            ev_add(EV_OPEN, t, path);
+            show(h, path_to(path, P_FUN), 1001);
+            ev_add(EV_OPEN, tm_arg(t), path_to(path, P_ARG));
+            show_sub(tm_arg(t));
+            ev_add(EV_CLOSE, tm_arg(t), 0);
+            ev_add(EV_CLOSE, t, path);
+            return
+        }
+        ev_add(EV_OPEN, t, path);
+        hp: int = spine_head_path(path, n);
+        show(h, hp, 1001);
+        ev_text("(", ST_PLAIN);
+        for j in 0..n {
+            if (j > 0) ev_text(", ", ST_PLAIN);
+            show(spine_arg(t, n, j), spine_arg_path(path, n, j), 0)
+        }
+        ev_text(")", ST_PLAIN);
+        ev_add(EV_CLOSE, t, path);
+        return
+    }
+    ev_add(EV_OPEN, t, path);
+    if (k == TM_ABS) {
+        need: bool = prec > 0;
+        open_paren(need);
+        s: int = pick_name(t);
+        ev_add(EV_TEXT, sym("\�\�"), ST_OP);
+        ev_add(EV_TEXT, s, ST_NAME);
+        ev_text(". ", ST_OP);
+        push_bound(s);
+        show(tm_body(t), path_to(path, P_BODY), 0);
+        bn_n = bn_n - 1;
+        close_paren(need)
+    } else if (k == TM_BOUND) {
+        i: int = bn_n - 1 - tm_bound_index(t);
+        if (i >= 0) ev_add(EV_TEXT, bn_name[i], ST_NAME) else ev_text("?", ST_NAME)
+    } else ev_add(EV_TEXT, tm_name(t), ST_NAME);
+    ev_add(EV_CLOSE, t, path)
+}
+
+// A subscript: a name or a numeral as it is, anything else in brackets.
+show_sub(t: int) {
+    k: int = tm_kind(t);
+    if (k == TM_BOUND) {
+        i: int = bn_n - 1 - tm_bound_index(t);
+        if (i >= 0) ev_add(EV_TEXT, bn_name[i], ST_SUB);
+        return
+    }
+    if (k == TM_FREE || k == TM_CONST || k == TM_VAR) {
+        ev_add(EV_TEXT, tm_name(t), ST_SUB);
+        return
+    }
+    // (Anything bigger is shown as a call, all small.)
+    from: int = ev_n;
+    show(t, 0, 1001);
+    for e in from..ev_n {
+        if (ev_kind[e] == EV_TEXT) ev_b[e] = ST_SUB
+    }
+}
+
+// Types whose terms are shown with a subscript (sequences).
+sub_types: []int = new int[16](0);
+
+sub_types_n: int = 0;
+
+sub_type(t: int): bool {
+    for i in 0..sub_types_n {
+        if (sub_types[i] == t) return true
+    }
+    false
+}
+
+add_sub_type(t: int) {
+    if (sub_types_n < len(sub_types)) {
+        sub_types[sub_types_n] = t;
+        sub_types_n = sub_types_n + 1
+    }
+}
+
+show_note(
+    t: int,
+    path: int,
+    prec: int,
+    i: int
+) {
+    k: int = nt_kind[i];
+    p: int = nt_prec[i];
+    if (k == N_INFIX || k == N_INFIXL || k == N_INFIXR) {
+        a: int = spine_arg(t, 2, 0);
+        b: int = spine_arg(t, 2, 1);
+        ap: int = spine_arg_path(path, 2, 0);
+        bp: int = spine_arg_path(path, 2, 1);
+        lp: int = p + 1;
+        rp: int = p + 1;
+        if (k == N_INFIXL) lp = p;
+        if (k == N_INFIXR) rp = p;
+        need: bool = p < prec;
+        open_paren(need);
+        f: int = note_flip_for_name(nt_name[i]);
+        if (f >= 0 && is_numeral(a) && !is_numeral(b)) {
+            show(b, bp, p + 1);
+            show_op(nt_tok[f]);
+            show(a, ap, p + 1)
+        } else {
+            show(a, ap, lp);
+            show_op(nt_tok[i]);
+            show(b, bp, rp)
+        }
+        close_paren(need);
+        return
+    }
+    x: int = tm_arg(t);
+    xp: int = path_to(path, P_ARG);
+    if (k == N_PREFIX) {
+        need: bool = p < prec;
+        open_paren(need);
+        ev_add(EV_TEXT, nt_tok[i], ST_OP);
+        show(x, xp, p);
+        close_paren(need)
+    } else if (k == N_POSTFIX) {
+        need: bool = p < prec;
+        open_paren(need);
+        show(x, xp, p);
+        ev_add(EV_TEXT, nt_tok[i], ST_OP);
+        close_paren(need)
+    } else if (k == N_OUTFIX) {
+        ev_add(EV_TEXT, nt_tok[i], ST_OP);
+        show(x, xp, 0);
+        ev_add(EV_TEXT, nt_tok2[i], ST_OP)
+    } else if (k == N_BINDER) {
+        if (tm_kind(x) != TM_ABS) {
+            // (∀P is shown ∀x. P(x), and ∀(R a) as ∀y. R(a, y).)
+            need: bool = prec > 0;
+            open_paren(need);
+            s: int = name_for_eta(x);
+            ev_add(EV_TEXT, nt_tok[i], ST_OP);
+            ev_add(EV_TEXT, s, ST_NAME);
+            ev_text(". ", ST_OP);
+            n2: int = spine_len(x);
+            h2: int = spine_head(x);
+            if (head_note(h2) < 0 && !sub_type(tm_type(h2))) {
+                ev_add(EV_OPEN, x, xp);
+                show(h2, spine_head_path(xp, n2), 1001);
+                ev_text("(", ST_PLAIN);
+                for j in 0..n2 {
+                    show(spine_arg(x, n2, j), spine_arg_path(xp, n2, j), 0);
+                    ev_text(", ", ST_PLAIN)
+                }
+                ev_add(EV_TEXT, s, ST_NAME);
+                ev_text(")", ST_PLAIN);
+                ev_add(EV_CLOSE, x, xp)
+            } else {
+                show(x, xp, 1001);
+                ev_text("(", ST_PLAIN);
+                ev_add(EV_TEXT, s, ST_NAME);
+                ev_text(")", ST_PLAIN)
+            }
+            close_paren(need);
+            return
+        }
+        need: bool = prec > 0;
+        open_paren(need);
+        s: int = pick_name(x);
+        ev_add(EV_TEXT, nt_tok[i], ST_OP);
+        ev_add(EV_TEXT, s, ST_NAME);
+        push_bound(s);
+        body: int = tm_body(x);
+        bp: int = path_to(xp, P_BODY);
+        // (∀x>0. P for ∀x. 0 < x ⟶ P, ∃x∈S. P for ∃x. x ∈ S ∧ P.)
+        link: int = 0;
+        if (nt_name[i] == role_name[ROLE_ALL]) link = role_name[ROLE_IMP];
+        if (nt_name[i] == role_name[ROLE_EX]) link = role_name[ROLE_CONJ];
+        cut: bool = false;
+        if (link != 0 && is_binary(body, link)) {
+            cond: int = spine_arg(body, 2, 0);
+            if (bounded_cond(cond)) {
+                cut = true;
+                show_bound_cond(cond);
+                ev_text(". ", ST_OP);
+                show(spine_arg(body, 2, 1), spine_arg_path(bp, 2, 1), 0)
+            }
+        }
+        if (!cut) {
+            ev_text(". ", ST_OP);
+            show(body, bp, 0)
+        }
+        bn_n = bn_n - 1;
+        close_paren(need)
+    } else {
+        ev_add(EV_TEXT, nt_tok[i], ST_OP);
+        show(x, xp, 1001)
+    }
+}
+
+show_op(tok: int) {
+    line_clear();
+    line_add(" ");
+    line_sym(tok);
+    line_add(" ");
+    ev_add(EV_TEXT, line_sym_now(), ST_OP)
+}
+
+// Whether t is the constant named c applied to two arguments.
+is_binary(t: int, c: int): bool {
+    if (spine_len(t) != 2) return false;
+    h: int = spine_head(t);
+    (tm_kind(h) == TM_CONST || tm_kind(h) == TM_FREE) && tm_name(h) == c
+}
+
+// Whether cond relates the innermost bound variable to something without
+// it (x < t, t < x, x ∈ S): a relation, by its notation's precedence.
+bounded_cond(cond: int): bool {
+    if (spine_len(cond) != 2) return false;
+    h: int = spine_head(cond);
+    if (tm_kind(h) != TM_CONST && tm_kind(h) != TM_FREE) return false;
+    i: int = note_for_name(tm_name(h));
+    if (i < 0 || nt_prec[i] < 40 || nt_prec[i] > 60 || note_arity(i) != 2) return false;
+    a: int = spine_arg(cond, 2, 0);
+    b: int = spine_arg(cond, 2, 1);
+    is_b0(a) && !has_b0(b) || is_b0(b) && !has_b0(a) && note_flip_for_name(tm_name(h)) >= 0
+}
+
+is_b0(t: int): bool {
+    tm_kind(t) == TM_BOUND && tm_bound_index(t) == 0
+}
+
+has_b0(t: int): bool {
+    k: int = tm_kind(t);
+    if (k == TM_BOUND) return tm_bound_index(t) == 0;
+    if (k == TM_APP) return has_b0(tm_fun(t)) || has_b0(tm_arg(t));
+    if (k == TM_ABS) return has_b1(tm_body(t), 1);
+    false
+}
+
+has_b1(t: int, i: int): bool {
+    k: int = tm_kind(t);
+    if (k == TM_BOUND) return tm_bound_index(t) == i;
+    if (k == TM_APP) return has_b1(tm_fun(t), i) || has_b1(tm_arg(t), i);
+    if (k == TM_ABS) return has_b1(tm_body(t), i + 1);
+    false
+}
+
+show_bound_cond(cond: int) {
+    h: int = spine_head(cond);
+    i: int = note_for_name(tm_name(h));
+    a: int = spine_arg(cond, 2, 0);
+    b: int = spine_arg(cond, 2, 1);
+    if (is_b0(a)) {
+        ev_add(EV_TEXT, nt_tok[i], ST_OP);
+        show(b, 0, nt_prec[i] + 1)
+    } else {
+        f: int = note_flip_for_name(tm_name(h));
+        ev_add(EV_TEXT, nt_tok[f], ST_OP);
+        show(a, 0, nt_prec[i] + 1)
+    }
+}
+
+// ---- as text ----
+// Events from..to as a line of text.
+events_line(from: int, to: int) {
+    line_clear();
+    for e in from..to {
+        if (ev_kind[e] == EV_TEXT) {
+            if (ev_b[e] == ST_SUB) line_byte(95);
+            line_sym(ev_a[e])
+        }
+    }
+}
+
+// A term as a line (in line).
+show_line(t: int) {
+    ev_n = 0;
+    path_n = 1;
+    bn_n = 0;
+    show(t, 0, 0);
+    events_line(0, ev_n)
+}
+
+print_term(t: int) raises IoError {
+    show_line(t);
+    line_print()
+}

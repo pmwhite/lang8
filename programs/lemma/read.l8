@@ -1,0 +1,602 @@
+tag lemma;
+
+use_tag std;
+
+// Reading terms and types as the theory files write them: tokens to a
+// tree (by the notations in syntax.l8), the tree's types worked out (by
+// unification, the constants' type variables fresh at each use), then the
+// kernel's terms made from it.
+//
+// Names not in scope are the statement's own variables: schematic in a
+// rule (they stand for anything), and fixed in a level's goal. A side of âŸ¹
+// or the body of â‹€ that is a bool (an object-logic statement) is wrapped
+// in the logic's Trueprop.
+tag lemma
+exception ReadError;
+
+tag lemma
+read_why: str = "";
+
+tag lemma
+read_line: int = 0;
+
+read_fail(why: str@immortal) raises ReadError: noreturn {
+    read_why = why;
+    read_line = tk_line;
+    raise ReadError
+}
+
+// ---- the tree ----
+const A_NAME: int = 1;
+
+const A_APP: int = 2;
+
+// A binder: its constant's name (Î» for none), the variable's name, its
+// written type (0 if none), and the body.
+const A_BIND: int = 3;
+
+const A_TYPED: int = 4;
+
+const ASTS: int = 65536;
+
+ast_k: []int = new int[ASTS](0);
+
+ast_a: []int = new int[ASTS](0);
+
+ast_b: []int = new int[ASTS](0);
+
+ast_c: []int = new int[ASTS](0);
+
+ast_d: []int = new int[ASTS](0);
+
+// Each node's type, as worked out; and whether it is where a proposition
+// goes (so a bool there is wrapped).
+ast_ty: []int = new int[ASTS](0);
+
+ast_prop: []bool = new bool[ASTS](false);
+
+ast_n: int = 1;
+
+// The type each binder's variable was given while types were worked out.
+bind_ty: []int = new int[ASTS](0);
+
+ast(
+    k: int,
+    a: int,
+    b: int,
+    c: int,
+    d: int
+) raises ReadError: int {
+    if (ast_n >= ASTS) read_fail("the statement is too long");
+    n: int = ast_n;
+    ast_k[n] = k;
+    ast_a[n] = a;
+    ast_b[n] = b;
+    ast_c[n] = c;
+    ast_d[n] = d;
+    ast_ty[n] = 0;
+    ast_prop[n] = false;
+    ast_n = n + 1;
+    n
+}
+
+ast_name(s: int) raises ReadError: int {
+    ast(A_NAME, s, 0, 0, 0)
+}
+
+ast_app(f: int, x: int) raises ReadError: int {
+    ast(A_APP, f, x, 0, 0)
+}
+
+ast_app2(f: int, x: int, y: int) raises ReadError: int {
+    ast_app(ast_app(f, x), y)
+}
+
+name_lambda: int = 0;
+
+name_pure_all: int = 0;
+
+name_pure_imp: int = 0;
+
+name_pure_eq: int = 0;
+
+// The notations and names Pure brings itself.
+read_init() raises KernelError {
+    if (name_lambda != 0) return;
+    kernel_init();
+    name_lambda = sym("\Î\»");
+    name_pure_all = sym("!!");
+    name_pure_imp = sym("==>");
+    name_pure_eq = sym("==");
+    add_token(name_lambda);
+    add_token(sym("=>"));
+    add_token(sym("\â\‡\’"));
+    add_token(sym("::"));
+    p: int = prop_type();
+    a: int = mk_tvar(sym("'a"));
+    add_ent(name_pure_imp, E_CONST, mk_fun(p, mk_fun(p, p)), 0);
+    add_ent(name_pure_eq, E_CONST, mk_fun(a, mk_fun(a, p)), 0);
+    add_ent(name_pure_all, E_CONST, mk_fun(mk_fun(a, p), p), 0);
+    add_ent(sym("prop"), E_TYPE, p, 0);
+    // (The last notation for a name is the one it is shown with.)
+    add_notation(N_INFIXR, 1, name_pure_imp, 0, name_pure_imp);
+    add_notation(N_INFIXR, 1, sym("\â\Ÿ\¹"), 0, name_pure_imp);
+    add_notation(N_INFIX, 2, name_pure_eq, 0, name_pure_eq);
+    add_notation(N_INFIX, 2, sym("\â\‰\¡"), 0, name_pure_eq);
+    add_notation(N_BINDER, 0, name_pure_all, 0, name_pure_all);
+    add_notation(N_BINDER, 0, sym("\â\‹\€"), 0, name_pure_all)
+}
+
+// ---- types, as written ----
+// 'a written in a rule is a type variable of the rule.
+read_type_atom() raises ReadError, KernelError: int {
+    if (tk_is("(")) {
+        lex();
+        t: int = read_type();
+        if (!tk_is(")")) read_fail("a ( without its )");
+        lex();
+        return t
+    }
+    if (tk_kind == K_SYM && tk_is("'")) {
+        lex();
+        if (tk_kind != K_NAME) read_fail("a ' without a type variable's name");
+        line_clear();
+        line_add("'");
+        line_sym(tk_sym);
+        lex();
+        return mk_tvar(line_sym_now())
+    }
+    if (tk_kind != K_NAME) read_fail("expected a type");
+    e: int = find_ent(tk_sym, 1 << E_TYPE | 1 << E_TFREE);
+    if (e < 0) read_fail("no such type");
+    lex();
+    ent_ty[e]
+}
+
+read_type() raises ReadError, KernelError: int {
+    a: int = read_type_atom();
+    if (tk_is("=>") || tk_is("\â\‡\’")) {
+        lex();
+        return mk_fun(a, read_type())
+    }
+    a
+}
+
+// ---- terms, as written ----
+// Whether the token can begin an argument (f x).
+starts_arg(): bool {
+    if (tk_bol || next_is_field()) return false;
+    if (tk_kind == K_NAME) return note_for_tok(tk_sym, 1 << N_BINDER) < 0;
+    tk_kind == K_SYM && tk_is("(")
+}
+
+read_atom() raises ReadError, KernelError: int {
+    if (tk_kind == K_NAME) {
+        s: int = tk_sym;
+        lex();
+        n: int = ast_name(s);
+        // (f(x, y) is f x y.)
+        if (tk_kind == K_SYM && tk_is("(") && tk_from == src_at - 1 && no_space_before()) {
+            lex();
+            more: bool = true;
+            while (more) {
+                n = ast_app(n, read_term(0));
+                if (tk_is(",")) lex() else more = false
+            }
+            if (!tk_is(")")) read_fail("a ( without its )");
+            lex()
+        }
+        return n
+    }
+    if (tk_is("(")) {
+        lex();
+        t: int = read_term(0);
+        if (tk_is("::")) {
+            lex();
+            t = ast(A_TYPED, t, read_type(), 0, 0)
+        }
+        if (!tk_is(")")) read_fail("a ( without its )");
+        lex();
+        return t
+    }
+    if (tk_kind == K_SYM) {
+        o: int = note_for_tok(tk_sym, 1 << N_OUTFIX);
+        if (o >= 0) {
+            lex();
+            t: int = read_term(0);
+            if (tk_sym != nt_tok2[o]) read_fail("an open bar without its close");
+            lex();
+            return ast_app(ast_name(nt_name[o]), t)
+        }
+    }
+    read_fail("expected a term")
+}
+
+// Whether the token just read had no space before it.
+no_space_before(): bool {
+    tk_from > 0 && src[tk_from - 1] as int != 32 && src[tk_from - 1] as int != 10
+}
+
+// A binder's variables, then its body (after the binder's token).
+read_binder(name: int) raises ReadError, KernelError: int {
+    if (tk_kind != K_NAME) read_fail("a binder without a variable");
+    v: int = tk_sym;
+    lex();
+    ty: int = 0;
+    if (tk_is(":")) {
+        lex();
+        ty = read_type_atom()
+    }
+    // (âˆ€Îµ>0. P is âˆ€Îµ. Îµ > 0 âŸ¶ P, and âˆƒxâˆˆS. P is âˆƒx. x âˆˆ S âˆ§ P.)
+    cond: int = 0;
+    if (tk_kind == K_SYM) {
+        r: int = note_for_tok(tk_sym, 1 << N_INFIX | 1 << N_INFIXL | 1 << N_INFIXR | 1 << N_FLIP);
+        if (r >= 0 && nt_prec[r] >= 40 && nt_prec[r] <= 60) {
+            lex();
+            bound_by: int = read_term(nt_prec[r] + 1);
+            if (nt_kind[r] == N_FLIP) cond = ast_app2(ast_name(nt_name[r]), bound_by,
+                ast_name(v)) else cond = ast_app2(ast_name(nt_name[r]), ast_name(v),
+                bound_by)
+        }
+    }
+    body: int = 0;
+    if (tk_kind == K_NAME) body = read_binder(name) else {
+        if (!tk_is(".")) read_fail("a binder's variable without a dot after it");
+        lex();
+        body = read_term(0)
+    }
+    if (cond != 0) {
+        if (name == role_name[ROLE_ALL]) body = ast_app2(ast_name(role_name[ROLE_IMP]),
+            cond, body) else if (name == role_name[ROLE_EX]) body = ast_app2(ast_name(role_name[ROLE_CONJ]),
+            cond, body) else read_fail("this binder cannot be bounded")
+    }
+    ast(A_BIND, name, v, ty, body)
+}
+
+// A term, of at least this precedence.
+read_term(min: int) raises ReadError, KernelError: int {
+    left: int = 0;
+    if (tk_kind == K_SYM && (tk_sym == name_lambda || tk_is("\\"))) {
+        lex();
+        return read_binder(name_lambda)
+    }
+    b: int = -1;
+    if (tk_kind == K_SYM || tk_kind == K_NAME) b = note_for_tok(tk_sym, 1 << N_BINDER);
+    if (b >= 0) {
+        lex();
+        return read_binder(nt_name[b])
+    }
+    p: int = -1;
+    if (tk_kind == K_SYM) p = note_for_tok(tk_sym, 1 << N_PREFIX);
+    if (p >= 0) {
+        lex();
+        left = ast_app(ast_name(nt_name[p]), read_term(nt_prec[p]))
+    } else left = read_atom();
+    more: bool = true;
+    while (more) {
+        i: int = -1;
+        if (tk_kind == K_SYM || tk_kind == K_NAME) i = note_for_tok(tk_sym, 1 << N_INFIX | 1 << N_INFIXL | 1 << N_INFIXR | 1 << N_FLIP | 1 << N_POSTFIX);
+        if (i >= 0 && nt_prec[i] >= min) {
+            lex();
+            k: int = nt_kind[i];
+            if (k == N_POSTFIX) left = ast_app(ast_name(nt_name[i]), left) else {
+                next: int = nt_prec[i] + 1;
+                if (k == N_INFIXR) next = nt_prec[i];
+                right: int = read_term(next);
+                if (k == N_FLIP) left = ast_app2(ast_name(nt_name[i]), right, left) else left = ast_app2(ast_name(nt_name[i]),
+                    left, right)
+            }
+        } else if (min <= 1000 && starts_arg()) left = ast_app(left, read_arg()) else more = false
+    }
+    left
+}
+
+// An argument: an atom and what is written after it (aâ»Â¹).
+read_arg() raises ReadError, KernelError: int {
+    a: int = read_atom();
+    more: bool = true;
+    while (more) {
+        i: int = -1;
+        if (tk_kind == K_SYM) i = note_for_tok(tk_sym, 1 << N_POSTFIX);
+        if (i >= 0) {
+            lex();
+            a = ast_app(ast_name(nt_name[i]), a)
+        } else more = false
+    }
+    a
+}
+
+// ---- types worked out ----
+// Unknown types are type variables named ?0, ?1...; meta_of says what each
+// stands for once known (by type number, 0 if not yet).
+meta_of: []int = new int[65536](0);
+
+is_meta: []bool = new bool[65536](false);
+
+meta_n: int = 0;
+
+fresh_meta() raises KernelError: int {
+    line_clear();
+    line_add("?");
+    line_int(meta_n);
+    meta_n = meta_n + 1;
+    t: int = mk_tvar(line_sym_now());
+    is_meta[t] = true;
+    meta_of[t] = 0;
+    t
+}
+
+walk_ty(t: int): int {
+    while (is_meta[t] && meta_of[t] != 0) t = meta_of[t];
+    t
+}
+
+zonk(t0: int) raises KernelError: int {
+    t: int = walk_ty(t0);
+    if (ty_kind(t) == TY_FUN) return mk_fun(zonk(ty_dom(t)), zonk(ty_cod(t)));
+    t
+}
+
+meta_occurs(m: int, t0: int): bool {
+    t: int = walk_ty(t0);
+    if (t == m) return true;
+    if (ty_kind(t) == TY_FUN) return meta_occurs(m, ty_dom(t)) || meta_occurs(m, ty_cod(t));
+    false
+}
+
+unify(a0: int, b0: int) raises ReadError {
+    a: int = walk_ty(a0);
+    b: int = walk_ty(b0);
+    if (a == b) return;
+    if (is_meta[a]) {
+        if (meta_occurs(a, b)) read_fail("a type would contain itself");
+        meta_of[a] = b;
+        return
+    }
+    if (is_meta[b]) {
+        unify(b, a);
+        return
+    }
+    if (ty_kind(a) == TY_FUN && ty_kind(b) == TY_FUN) {
+        unify(ty_dom(a), ty_dom(b));
+        unify(ty_cod(a), ty_cod(b));
+        return
+    }
+    read_fail("the types do not fit together")
+}
+
+// A constant's type scheme with its type variables fresh.
+sch_from: []int = new int[32](0);
+
+sch_to: []int = new int[32](0);
+
+sch_n: int = 0;
+
+fresh_scheme(t: int) raises KernelError: int {
+    k: int = ty_kind(t);
+    if (k == TY_VAR) {
+        for i in 0..sch_n {
+            if (sch_from[i] == t) return sch_to[i]
+        }
+        m: int = fresh_meta();
+        if (sch_n < len(sch_from)) {
+            sch_from[sch_n] = t;
+            sch_to[sch_n] = m;
+            sch_n = sch_n + 1
+        }
+        return m
+    }
+    if (k == TY_FUN) return mk_fun(fresh_scheme(ty_dom(t)), fresh_scheme(ty_cod(t)));
+    t
+}
+
+// Variables bound around the node being looked at: their names and types,
+// and, once terms are made, the free variable each stands for.
+env_name: []int = new int[256](0);
+
+env_ty: []int = new int[256](0);
+
+env_term: []int = new int[256](0);
+
+env_n: int = 0;
+
+// The statement's own variables (names not in scope): names and types.
+own_name: []int = new int[64](0);
+
+own_ty: []int = new int[64](0);
+
+own_n: int = 0;
+
+bool_t: int = 0;
+
+infer(n: int) raises ReadError, KernelError: int {
+    k: int = ast_k[n];
+    t: int = 0;
+    if (k == A_NAME) {
+        s: int = ast_a[n];
+        i: int = env_n - 1;
+        while (i >= 0 && t == 0) {
+            if (env_name[i] == s) t = env_ty[i];
+            i = i - 1
+        }
+        if (t == 0) {
+            e: int = find_ent(s, 1 << E_CONST | 1 << E_FIX);
+            if (e >= 0) {
+                if (ent_kind[e] == E_CONST) {
+                    sch_n = 0;
+                    t = fresh_scheme(ent_ty[e])
+                } else t = ent_ty[e]
+            }
+        }
+        if (t == 0) {
+            for j in 0..own_n {
+                if (own_name[j] == s) t = own_ty[j]
+            }
+        }
+        if (t == 0) {
+            if (own_n >= len(own_name)) read_fail("too many variables");
+            t = fresh_meta();
+            own_name[own_n] = s;
+            own_ty[own_n] = t;
+            own_n = own_n + 1
+        }
+    } else if (k == A_APP) {
+        f: int = infer(ast_a[n]);
+        x: int = infer(ast_b[n]);
+        if (ast_prop[ast_b[n]]) x = bool_or_prop(x);
+        t = fresh_meta();
+        unify(f, mk_fun(x, t))
+    } else if (k == A_BIND) {
+        vt: int = ast_c[n];
+        if (vt == 0) vt = fresh_meta();
+        if (env_n >= len(env_name)) read_fail("too deeply nested");
+        env_name[env_n] = ast_b[n];
+        env_ty[env_n] = vt;
+        env_n = env_n + 1;
+        bind_ty[n] = vt;
+        bt: int = infer(ast_d[n]);
+        env_n = env_n - 1;
+        if (ast_a[n] == name_pure_all) {
+            ast_prop[ast_d[n]] = true;
+            bt = bool_or_prop(bt)
+        }
+        if (ast_a[n] == name_lambda) t = mk_fun(vt, bt) else {
+            e: int = find_ent(ast_a[n], 1 << E_CONST | 1 << E_FIX);
+            if (e < 0) read_fail("a binder for no constant");
+            sch_n = 0;
+            ct: int = fresh_scheme(ent_ty[e]);
+            if (ent_kind[e] == E_FIX) ct = ent_ty[e];
+            t = fresh_meta();
+            unify(ct, mk_fun(mk_fun(vt, bt), t))
+        }
+    } else if (k == A_TYPED) {
+        t = infer(ast_a[n]);
+        unify(t, ast_b[n])
+    }
+    ast_ty[n] = t;
+    t
+}
+
+// Where a proposition goes: a bool is fine there too (it is wrapped).
+bool_or_prop(t: int): int {
+    w: int = walk_ty(t);
+    if (w == bool_t && bool_t != 0) return prop_type();
+    if (is_meta[w]) {
+        // (Not known: a statement of the logic, if there is one.)
+        if (bool_t != 0) meta_of[w] = bool_t else meta_of[w] = prop_type();
+        return prop_type()
+    }
+    w
+}
+
+// Mark the places a proposition goes: both sides of âŸ¹, and the whole.
+mark_props(n: int) {
+    if (ast_k[n] == A_APP && ast_k[ast_a[n]] == A_APP && ast_k[ast_a[ast_a[n]]] == A_NAME && ast_a[ast_a[ast_a[n]]] == name_pure_imp) {
+        ast_prop[ast_b[ast_a[n]]] = true;
+        ast_prop[ast_b[n]] = true;
+        mark_props(ast_b[ast_a[n]]);
+        mark_props(ast_b[n])
+    } else if (ast_k[n] == A_BIND && ast_a[n] == name_pure_all) mark_props(ast_d[n])
+}
+
+// ---- terms made ----
+// A free variable to stand for a bound one while its body is made: its
+// name is one no text can have.
+fresh_n: int = 0;
+
+fresh_free(ty: int) raises KernelError: int {
+    line_clear();
+    line_byte(1);
+    line_int(fresh_n);
+    fresh_n = fresh_n + 1;
+    mk_free(line_sym_now(), ty)
+}
+
+// Whether own variables are made schematic (in a rule) or fixed (a goal).
+own_schematic: bool = true;
+
+wrap_true(t: int) raises KernelError: int {
+    if (tm_type(t) == bool_t && bool_t != 0) {
+        e: int = find_ent(role_name[ROLE_TRUE], 1 << E_CONST);
+        if (e >= 0) return mk_app(mk_const(role_name[ROLE_TRUE], ent_ty[e]), t)
+    }
+    t
+}
+
+build(n: int) raises ReadError, KernelError: int {
+    k: int = ast_k[n];
+    r: int = 0;
+    if (k == A_NAME) {
+        s: int = ast_a[n];
+        i: int = env_n - 1;
+        while (i >= 0 && r == 0) {
+            if (env_name[i] == s) r = env_term[i];
+            i = i - 1
+        }
+        if (r == 0) {
+            e: int = find_ent(s, 1 << E_CONST | 1 << E_FIX);
+            if (e >= 0) {
+                if (ent_kind[e] == E_CONST) r = mk_const(s, zonk(ast_ty[n])) else r = ent_term[e]
+            }
+        }
+        if (r == 0) {
+            if (own_schematic) r = mk_var(s, zonk(ast_ty[n])) else r = mk_free(s,
+                zonk(ast_ty[n]))
+        }
+    } else if (k == A_APP) {
+        f: int = build(ast_a[n]);
+        x: int = build(ast_b[n]);
+        if (ast_prop[ast_b[n]]) x = wrap_true(x);
+        r = mk_app(f, x)
+    } else if (k == A_BIND) {
+        if (env_n >= len(env_name)) read_fail("too deeply nested");
+        v: int = fresh_free(zonk(bind_ty[n]));
+        env_name[env_n] = ast_b[n];
+        env_term[env_n] = v;
+        env_n = env_n + 1;
+        body: int = build(ast_d[n]);
+        if (ast_prop[ast_d[n]]) body = wrap_true(body);
+        env_n = env_n - 1;
+        lam: int = mk_abs_over(v, ast_b[n], body);
+        if (ast_a[n] == name_lambda) r = lam else {
+            e: int = find_ent(ast_a[n], 1 << E_CONST | 1 << E_FIX);
+            if (ent_kind[e] == E_CONST) r = mk_app(mk_const(ast_a[n], mk_fun(tm_type(lam),
+                zonk(ast_ty[n]))), lam) else r = mk_app(ent_term[e], lam)
+        }
+    } else if (k == A_TYPED) r = build(ast_a[n]);
+    r
+}
+
+// A whole statement: its tree read, its types worked out, its term made.
+// Own variables are schematic (rules) or fixed (goals).
+tag lemma
+read_statement(schematic: bool) raises ReadError, KernelError: int {
+    ast_n = 1;
+    own_n = 0;
+    env_n = 0;
+    n: int = read_term(0);
+    finish_term(n, schematic, true)
+}
+
+// Make the term for a tree, as read_statement does; a proposition if prop.
+finish_term(n: int, schematic: bool, prop: bool) raises ReadError, KernelError: int {
+    own_schematic = schematic;
+    mark_props(n);
+    if (prop) ast_prop[n] = true;
+    t: int = infer(n);
+    if (prop) t = bool_or_prop(t);
+    env_n = 0;
+    r: int = build(n);
+    if (prop) r = wrap_true(r);
+    r
+}
+
+// A term (not a statement): of whatever type.
+tag lemma
+read_term_only() raises ReadError, KernelError: int {
+    ast_n = 1;
+    own_n = 0;
+    env_n = 0;
+    n: int = read_term(0);
+    finish_term(n, false, false)
+}
