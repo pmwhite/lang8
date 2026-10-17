@@ -48,7 +48,7 @@ STAGE1_TESTS := tests/compiler/bool.l8 \
 # `build TOOL SOURCE`: build into $@ without leaving a partial file behind.
 build = ./$(1) build $(2) -o $@.tmp && mv -f $@.tmp $@
 
-.PHONY: all check fmt selfhost compiler-test game skate malton race race-test tempo tempo-test stdlib-test \
+.PHONY: all check fmt selfhost compiler-test game skate malton race race-test tempo tempo-test bible-test stdlib-test \
 	terminal terminal-test callback-test http http-test websocket websocket-test wasm-test web \
 	install-bootstrap promote promote-bin1 promote-bin2 promote-source clean help
 
@@ -57,7 +57,7 @@ all:
 	@$(MAKE) -s $(OK)/fmt $(OK)/stage1-tests
 	@$(MAKE) -s check
 
-check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(BUILD)/skate $(BUILD)/malton $(BUILD)/race $(OK)/race-tests $(BUILD)/tempo $(OK)/tempo-tests $(BUILD)/tempo-ios.s $(BUILD)/ios-check.s
+check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(BUILD)/skate $(BUILD)/malton $(BUILD)/race $(OK)/race-tests $(BUILD)/tempo $(OK)/tempo-tests $(BUILD)/tempo-ios.s $(BUILD)/ios-check.s $(OK)/bible-tests $(BUILD)/bible-ios.s
 
 # ---- compiler stages ----
 
@@ -175,6 +175,17 @@ $(BUILD)/tempo-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
 
 $(BUILD)/ios-check.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
 	@$(STEP) 'iOS check' sh -c './l8c3 arm64 --target ios programs/ios/check.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+# The Bible app: its text's layout, tested; and the app, as arm64 assembly
+# for iOS (see programs/bible/README.md).
+$(OK)/bible-tests: l8c3 $(PROGRAMS) $(RUNTIME) programs/bible/data/bsb.txt | $(OK)
+	+@$(STEP) 'bible tests' ./l8c3 test programs/bible/test_text.l8
+	@touch $@
+
+bible-test: $(OK)/bible-tests
+
+$(BUILD)/bible-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
+	@$(STEP) 'bible for iOS' sh -c './l8c3 arm64 --target ios programs/bible/ios.l8 -o $@.tmp && mv -f $@.tmp $@'
 
 # A terminal may be running from the previous output; `mv` replaces the
 # directory entry instead of rewriting its live inode.
@@ -332,7 +343,7 @@ help:
 	@echo '  fmt             format src2 with the stage-2 compiler'
 	@echo '  selfhost        build l8c1..l8c4, check the fixpoint, run compiler tests, install ./l8'
 	@echo '  compiler-test   stage-1 fixtures, then all fixtures and CLI cram tests (tests/)'
-	@echo '  stdlib-test, game, skate, race, race-test, tempo, tempo-test, terminal, terminal-test, callback-test'
+	@echo '  stdlib-test, game, skate, race, race-test, tempo, tempo-test, bible-test, terminal, terminal-test, callback-test'
 	@echo '  http, http-test, websocket, websocket-test'
 	@echo '  wasm-test       run the tests as WebAssembly under Node; check the wasm compiler fixpoint'
 	@echo '  web             build the playground site in .build/web'

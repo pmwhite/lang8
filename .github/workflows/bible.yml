@@ -1,0 +1,104 @@
+# The Bible app (programs/bible), built and run in the iOS simulator.
+#
+# A Linux job builds the compiler and compiles programs/bible/ios.l8 to
+# arm64 assembly (`l8 arm64 --target ios`); a macOS job assembles and links
+# it with Xcode's tools into Bible.app (tools/ios/build.sh, with
+# programs/bible/ios) and runs it in the simulator, which goes through it by
+# itself (programs/bible/ios/simulate.sh). The screenshots are kept as the
+# run's artifacts, and pushed to the ci-bible-shots branch (one commit, each
+# run replacing the last). Another macOS job builds Bible.ipa, for an
+# iPhone, onto the ci-bible-ipa branch (ad hoc signed).
+name: Bible
+
+on:
+  push:
+    branches: [bible]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the compiler
+        run: make -j4 l8c3
+      - name: Test the text's layout
+        run: ./l8c3 test programs/bible/test_text.l8
+      - name: Compile the app for iOS
+        run: ./l8c3 arm64 --target ios programs/bible/ios.l8 -o bible-ios.s
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bible-ios-assembly
+          path: bible-ios.s
+
+  device:
+    needs: compile
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: bible-ios-assembly
+      - name: Build the app for an iPhone
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          xcodebuild -version
+          tools/ios/build.sh device bible-ios.s device programs/bible/ios
+          mkdir -p ipa/Payload && cp -R device/Bible.app ipa/Payload/
+          (cd ipa && zip -qry ../Bible.ipa Payload)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bible-ipa
+          path: Bible.ipa
+      - name: Push it to ci-bible-ipa
+        run: |
+          mkdir -p publish && cp Bible.ipa publish/
+          echo "${GITHUB_SHA} run ${GITHUB_RUN_ID}" > publish/RUN.txt
+          cd publish
+          git init -q -b ci-bible-ipa
+          git config user.name "ci"
+          git config user.email "ci@users.noreply.github.com"
+          git add -A
+          git commit -qm "iPhone build of ${GITHUB_SHA}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ci-bible-ipa
+
+  simulator:
+    needs: compile
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: bible-ios-assembly
+      - name: Build Bible.app
+        run: tools/ios/build.sh sim bible-ios.s build programs/bible/ios 2>&1 | tee build.log
+      - name: Run it in the simulator
+        run: programs/bible/ios/simulate.sh build/Bible.app shots
+      - name: Keep the app (for another Mac's simulator)
+        if: always()
+        run: cd build && zip -qry ../Bible-simulator.zip Bible.app || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bible-simulator
+          path: |
+            shots
+            build.log
+            Bible-simulator.zip
+      - name: Push the screenshots to ci-bible-shots
+        if: always()
+        run: |
+          mkdir -p publish
+          cp -r shots/. publish/ 2>/dev/null || true
+          cp build.log publish/ 2>/dev/null || true
+          echo "${GITHUB_SHA} run ${GITHUB_RUN_ID}" > publish/RUN.txt
+          cd publish
+          git init -q -b ci-bible-shots
+          git config user.name "ci"
+          git config user.email "ci@users.noreply.github.com"
+          git add -A
+          git commit -qm "Simulator run ${GITHUB_RUN_ID} of ${GITHUB_SHA}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ci-bible-shots
