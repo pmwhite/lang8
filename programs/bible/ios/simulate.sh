@@ -26,6 +26,7 @@ xcrun simctl bootstatus "$dev" -b >/dev/null
 xcrun simctl ui "$dev" appearance light
 xcrun simctl ui "$dev" content_size large 2>/dev/null || true
 xcrun simctl install "$dev" "$app"
+old=$(xcrun simctl get_app_container "$dev" "$id" data 2>/dev/null) && rm -f "$old/Documents/demo.txt"
 shot() {
   xcrun simctl io "$dev" screenshot "$out/$1.png" >/dev/null 2>&1 && echo "shot $1"
 }
@@ -33,19 +34,25 @@ xcrun simctl spawn "$dev" log stream --predicate 'process == "Bible" AND message
 logger=$!
 SIMCTL_CHILD_L8_DEMO=1 xcrun simctl launch --console-pty "$dev" "$id" > "$out/console.txt" 2>&1 &
 console=$!
-# (From when it says it is up: the demo's clock starts then.)
-for i in $(seq 60); do
-  grep -q "bible: up" "$out/console.txt" 2>/dev/null && break
-  sleep 0.5
-done
-sleep 2.5; shot 01-genesis-1
-sleep 3; shot 02-books
-sleep 3; shot 03-psalms
-sleep 3; shot 04-psalm-23
-sleep 3; shot 05-footnote
-sleep 3; shot 06-john-3
-sleep 3; shot 07-reading-on
-sleep 3; shot 08-bars-back
+# Each step's screenshot once the app has come to it (it writes the step
+# to Documents/demo.txt), and its animations have finished.
+data=$(xcrun simctl get_app_container "$dev" "$id" data)
+step() {
+  for i in $(seq 80); do
+    [ "$(cat "$data/Documents/demo.txt" 2>/dev/null)" = "$1" ] && break
+    sleep 0.25
+  done
+  sleep 1.5
+  shot "$2"
+}
+step 1 01-genesis-1
+step 2 02-books
+step 3 03-psalms
+step 4 04-psalm-23
+step 5 05-footnote
+step 6 06-john-3
+step 7 07-reading-on
+step 8 08-bars-back
 xcrun simctl ui "$dev" appearance dark
 sleep 2; shot 09-dark
 xcrun simctl ui "$dev" content_size extra-extra-large 2>/dev/null || true

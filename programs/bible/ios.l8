@@ -83,6 +83,10 @@ cur: int = 0;
 
 restore_y: int = -1;
 
+// Or how far through it the reader was (a fraction), when the text was made
+// again at another size (-1: none).
+restore_frac: f64 = -1.0f64;
+
 bars_hidden: bool = false;
 
 // A drag's start (where the text was), to tell which way it went.
@@ -119,15 +123,17 @@ accent: int = 0;
 
 paper: int = 0;
 
-fonts: []int = new int[13](0);
+fonts: []int = new int[STYLES](0);
 
 // For each style and paragraph kind (with a stanza's break or not), its
 // paragraph style and attributes.
-paras: []int = new int[13 * 14](0);
+paras: []int = new int[STYLES * 14](0);
 
-attrs: []int = new int[13 * 14](0);
+attrs: []int = new int[STYLES * 14](0);
 
 keys: []int = new int[8](0);
+
+one_object: []int = new int[1](0);
 
 values: []int = new int[8](0);
 
@@ -144,6 +150,22 @@ serif(size: f64): int {
 serif_italic(size: f64): int {
     d: int = msg1(serif_desc, sel("fontDescriptorWithSymbolicTraits:"), 1);
     if (d == 0) d = serif_desc;
+    msg1_f(cls("UIFont"), sel("fontWithDescriptor:size:"), d, size)
+}
+
+// The serif with its capitals as small capitals (the font's own, through
+// its feature for them: type 38, kUpperCaseType; selector 1, small caps).
+small_caps(size: f64): int {
+    keys[0] = objc_const("UIFontFeatureTypeIdentifierKey");
+    values[0] = msg1(cls("NSNumber"), sel("numberWithLong:"), 38);
+    keys[1] = objc_const("UIFontFeatureSelectorIdentifierKey");
+    values[1] = msg1(cls("NSNumber"), sel("numberWithLong:"), 1);
+    one: []int = one_object;
+    one[0] = nsdictionary(keys, values, 2);
+    keys[0] = objc_const("UIFontDescriptorFeatureSettingsAttribute");
+    values[0] = nsarray(one, 1);
+    d: int = msg1(serif_desc, sel("fontDescriptorByAddingAttributes:"), nsdictionary(keys,
+        values, 1));
     msg1_f(cls("UIFont"), sel("fontWithDescriptor:size:"), d, size)
 }
 
@@ -189,6 +211,7 @@ make_look() {
     fonts[STYLE_ACROSTIC] = keep(sans(em * 0.7f64, 0.3f64));
     fonts[STYLE_NOTE] = keep(sans(em * 0.56f64, 0.4f64));
     fonts[STYLE_NEXT] = keep(sans(em * 0.88f64, 0.23f64));
+    fonts[STYLE_CAPS] = keep(small_caps(em));
     for i in 0..len(paras) {
         release(paras[i]);
         release(attrs[i]);
@@ -247,7 +270,7 @@ para_for(style: int, para: int): int {
 }
 
 color_for(style: int): int {
-    if (style == STYLE_BODY || style == STYLE_HEAD) return ink;
+    if (style == STYLE_BODY || style == STYLE_HEAD || style == STYLE_CAPS) return ink;
     if (style == STYLE_NUMERAL || style == STYLE_NOTE || style == STYLE_NEXT || style == STYLE_ACROSTIC) return accent;
     faint
 }
@@ -367,16 +390,19 @@ page_layout(self: int, cmd: int): int {
     if (t >= 0 || msg(self, sel("window")) == 0) return 0;
     msg1(self, sel("setTag:"), -t);
     y: f64 = -top_inset(self);
-    if (restore_y >= 0 && -t - 1 == cur) {
+    back: bool = (restore_y >= 0 || restore_frac >= 0.0f64) && -t - 1 == cur;
+    if (back) {
         l8_msg_hfa(hfa, self, sel("contentSize"), 0, 0, 0);
         most: f64 = hfa[1] - 200.0f64;
-        to: f64 = restore_y as f64;
+        to: f64 = if (restore_frac >= 0.0f64) restore_frac * hfa[1] else restore_y as f64;
         if (to > most) to = most;
         if (to < 0.0f64) to = 0.0f64;
         y = y + to;
-        restore_y = -1
+        restore_y = -1;
+        restore_frac = -1.0f64
     }
     msg_ff1(self, sel("setContentOffset:animated:"), 0.0f64, y, 0);
+    if (back) save_place();
     0
 }
 
@@ -897,6 +923,12 @@ app_background(_self: int, _cmd: int, _application: int): int {
 
 // The phone's text size changed: the text made again, at the same chapter.
 text_size_changed(_self: int, _cmd: int, _note: int): int {
+    tv: int = current_view();
+    if (tv != 0 && msg(tv, sel("tag")) > 0) {
+        l8_msg_hfa(hfa, tv, sel("contentSize"), 0, 0, 0);
+        h: f64 = hfa[1];
+        if (h > 0.0f64) restore_frac = (offset_y(tv) + top_inset(tv)) / h
+    }
     make_look();
     go(cur, false);
     0
@@ -907,9 +939,23 @@ text_size_changed(_self: int, _cmd: int, _note: int): int {
 // then John 3, read on (the bars hide), and the bars back.
 demo_t: int = 0;
 
+demo_path: str = "";
+
+// Which step it has come to, in Documents/demo.txt, for simulate.sh to
+// take its screenshot when it is there.
+demo_step(n: int) {
+    fd: int = open(demo_path, 577, 420);
+    if (fd < 0) return;
+    try {
+        write_int(fd, n)
+    } with IoError _e -> { }
+    close(fd)
+}
+
 demo_tick(_self: int, _cmd: int, _timer: int): int {
     demo_t = demo_t + 1;
     t: int = demo_t;
+    if (t % 3 == 1) demo_step(t / 3 + 1);
     if (t == 4) open_books();
     if (t == 7) show_chapters(18);
     if (t == 10) {
@@ -1020,6 +1066,17 @@ app_launched(
     1
 }
 
+// A file in the app's Documents, as a path.
+documents(name: str): []i8@new {
+    home: []i8 = nsstring_bytes(NSHomeDirectory());
+    tail: str = "/Documents/";
+    out_path: []i8 = new i8[len(home) + len(tail) + len(name)](0i8);
+    for i in 0..len(home) out_path[i] = home[i];
+    for i in 0..len(tail) out_path[len(home) + i] = tail[i];
+    for i in 0..len(name) out_path[len(home) + len(tail) + i] = name[i];
+    out_path
+}
+
 // The text, from the app's bundle.
 load_text() noregion {
     bundle: int = msg(cls("NSBundle"), sel("mainBundle"));
@@ -1044,6 +1101,7 @@ load_text() noregion {
 main() noregion: int {
     note("bible: starting");
     load_text();
+    if (getenv("L8_DEMO") != null) demo_path = cstr(documents("demo.txt"));
     // A chapter's page: a text view, put at its top when first laid out.
     page_class = objc_allocateClassPair(cls("UITextView"), "L8Page", 0);
     add_method0(page_class, sel("layoutSubviews"), &page_layout, "v@:");
