@@ -15,7 +15,8 @@
 # ISSUER_ID); nothing secret is kept in the repository. sign.sh signs the
 # app with what this makes. It is Better's unless $APPLE_BUNDLE and
 # $APPLE_NAME say another app's (space.trailingwhite.smoothbible, "Smooth
-# Bible", for programs/bible).
+# Bible", for programs/bible); its profiles are kept as
+# smoothbible.dev.mobileprovision and so on (the certificates are shared).
 import base64
 import hashlib
 import os
@@ -32,6 +33,8 @@ HOME = os.path.expanduser("~/.config/tempo-ios")
 API = "https://api.appstoreconnect.apple.com/v1"
 BUNDLE = os.environ.get("APPLE_BUNDLE", "space.trailingwhite.better")
 NAME = os.environ.get("APPLE_NAME", "Better")
+# Another app's profiles are kept apart from Better's: smoothbible.store...
+PREFIX = "" if BUNDLE == "space.trailingwhite.better" else BUNDLE.rsplit(".", 1)[1] + "."
 KINDS = {
     "dev": ("DEVELOPMENT", "IOS_APP_DEVELOPMENT"),
     "store": ("DISTRIBUTION", "IOS_APP_STORE"),
@@ -137,9 +140,9 @@ def profile(kind):
         rel["devices"] = {"data": devices}
         phones = len(devices)
     p = call("POST", "/profiles", {"data": {"type": "profiles", "attributes": {
-        "name": f"Better {kind} {int(time.time())}", "profileType": KINDS[kind][1]},
+        "name": f"{NAME} {kind} {int(time.time())}", "profileType": KINDS[kind][1]},
         "relationships": rel}})["data"]
-    save(f"{kind}.mobileprovision", base64.b64decode(p["attributes"]["profileContent"]))
+    save(f"{PREFIX}{kind}.mobileprovision", base64.b64decode(p["attributes"]["profileContent"]))
     print("profile", p["attributes"]["name"], f"({phones} phones)" if kind == "dev" else "",
           "until", p["attributes"]["expirationDate"])
 

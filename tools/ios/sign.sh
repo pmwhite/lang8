@@ -1,5 +1,5 @@
 #!/bin/sh
-# Sign CI's Tempo.ipa (ad hoc signed) on Linux, with what apple.py made:
+# Sign CI's Tempo.ipa (or another app's, as SmoothBible.ipa; ad hoc signed) on Linux, with what apple.py made:
 #   sign.sh dev IN.ipa OUT.ipa [install]   for the phones in the development
 #                                          profile (and put on the iPhone
 #                                          plugged in)
@@ -26,10 +26,18 @@ trap 'rm -rf "$work"' EXIT
 cd "$work"
 unzip -q "$in"
 app=$(ls -d Payload/*.app)
-cp "$home/$kind.mobileprovision" "$app/embedded.mobileprovision"
+# The app's bundle id, from its Info.plist; another app than Better has its
+# own profiles and build number (smoothbible.store.mobileprovision,
+# smoothbible.build-number), made by apple.py with $APPLE_BUNDLE.
+bundle=$(python3 -I -c '
+import plistlib, sys
+print(plistlib.load(open(sys.argv[1], "rb"))["CFBundleIdentifier"])' "$app/Info.plist")
+prefix=
+[ "$bundle" = space.trailingwhite.better ] || prefix="${bundle##*.}."
+cp "$home/$prefix$kind.mobileprovision" "$app/embedded.mobileprovision"
 if [ "$kind" = store ]; then
-  n=$(( $(cat "$home/build-number" 2>/dev/null || echo 0) + 1 ))
-  echo "$n" > "$home/build-number"
+  n=$(( $(cat "$home/${prefix}build-number" 2>/dev/null || echo 0) + 1 ))
+  echo "$n" > "$home/${prefix}build-number"
   python3 -I -c '
 import plistlib, sys
 p = sys.argv[1]
@@ -46,7 +54,7 @@ cat > entitlements.plist <<EOF
 <plist version="1.0">
 <dict>
   <key>application-identifier</key>
-  <string>$team.space.trailingwhite.better</string>
+  <string>$team.$bundle</string>
   <key>com.apple.developer.team-identifier</key>
   <string>$team</string>
   <key>get-task-allow</key>
