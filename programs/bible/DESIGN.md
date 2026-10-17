@@ -331,7 +331,7 @@ the ESV and Crossway convention.
 | Tray in | Translate from +(tray height + 24) to 0 with a CASpringAnimation (the §0 parameters), plus opacity 0→1 over 0.18 s |
 | Tray out | Translate down plus opacity to 0 over 0.2 s ease-in; hide on finish (timer at 0.22 s) |
 | Verse select wash | Immediate (no animation). The selection haptic carries the feel |
-| Jump-to-verse flash | The target verse gets `selection` × 2.5 alpha. After 0.9 s it's removed by an NSTimer, with a 0.4 s cross-fade done by setting the attributed text inside `beginAnimations` with `UIViewAnimationTransitionNone`. If a fade is impractical, just remove it at 1.2 s |
+| Jump-to-verse flash | The target verse gets a neutral wash of ink at 9% (light themes) or 14% (dark themes), with no underline (amended in review 1). After 0.9 s it's removed by an NSTimer, with a 0.4 s cross-fade done by setting the attributed text inside `beginAnimations` with `UIViewAnimationTransitionNone`. If a fade is impractical, just remove it at 1.2 s |
 | Back capsule | Fades and scales in (0.92→1) over 0.25 s; auto-hides after the user scrolls more than 2 screen heights from the arrival point, or after 12 s |
 | Theme change | Cross-fade the whole window: add a `CATransition` (type `kCATransitionFade`, 0.25 s) to `window.layer` before applying |
 | Font/size/spacing change | Reload in place, keeping the reading position (the existing restore logic). No animation |
@@ -423,7 +423,10 @@ When the reader jumps (from the picker, search, the library, a link, or R2 cross
 place before the jump is pushed onto history and a capsule appears:
 - Position: bottom-left, 16 pt from the leading edge and 12 pt above the safe-area bottom.
 - Height 36, with horizontal padding 14.
-- A `UIButton` with `UIButtonConfiguration` `grayButtonConfiguration`-style or `filled`,
+- (Amended in review 1.) On iOS 26, `UIButtonConfiguration glassButtonConfiguration`, with ink
+  title and image. Earlier: a `systemThickMaterial` capsule with the shadow below. It must
+  be clearly visible in every theme. Originally: a `UIButton` with `UIButtonConfiguration`
+  `grayButtonConfiguration`-style or `filled`,
   using background `cellBg` with a shadow (opacity 0.12, radius 12, y 4) and corner style
   capsule (`cornerStyle = 4`).
 - Title "Psalm 23" (the chapter name, plus `:v` when the origin was verse-precise).
@@ -567,7 +570,8 @@ system handles and loupe. Extend its menu without blocks:
   the `suggestedActions` elements:
   - `[UICommand commandWithTitle:@"Highlight" image:nil action:@selector(bibleHighlight:) propertyList:nil]`
   - `Note` → `bibleNote:`
-  - `Copy with Reference` → `bibleCopyRef:`
+  - `Copy with Reference` → `bibleCopyRef:` (**removed in review 1**: the menu is Highlight and
+    Note, then the system's actions)
   - `Share` → `bibleShare:`
 
   Use `menuWithTitle:@"" children:` if `menuWithChildren:` is unavailable.
@@ -668,7 +672,8 @@ run-time UITableViewController subclass (plain style, with `bg` as the backgroun
 - `navigationItem.searchController` with no results controller, never hidden, and
   placeholder "Search the Bible". It's activated on appear: set `active = YES` and make
   the search bar first responder in `viewDidAppear:`.
-- **Scope bar** (`searchBar.scopeButtonTitles`): "All", "Old Testament", "New Testament",
+- **Scope bar** (`searchBar.scopeButtonTitles`): "All", "OT", "NT" (amended in review 1;
+  the accessibility labels give the full names),
   and the current book's name (e.g. "John"). `showsScopeBar = YES`. The scope change
   delegate is `searchBar:selectedScopeButtonIndexDidChange:`.
 - Queries:

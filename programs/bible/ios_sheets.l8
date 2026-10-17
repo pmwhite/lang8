@@ -174,7 +174,7 @@ config_image(
     size: f64,
     color: int
 ) {
-    msg1(config, sel("setImage:"), symbol(name, size, 4, 0));
+    msg1(config, sel("setImage:"), symbol(name, size, 4, color));
     msg1(msg(config, sel("imageProperties")), sel("setTintColor:"), color)
 }
 
@@ -317,11 +317,18 @@ picker_query(text: int) {
         if (seen_letter && is_digit(k) && name_n == pq_n) name_n = i
     }
     if (pq_n > 0) {
-        for b in 0..books
-            if (pk_books < 8 && book_begins(b, pq, name_n)) {
-                pk_book[pk_books] = b;
-                pk_books = pk_books + 1
+        // (Exact short names first, then the books whose names begin so.)
+        for pass in 0..2 {
+            for b in 0..books {
+                if (pk_books < 8 && book_begins(b, pq, name_n)) {
+                    exact: bool = book_alias_exact(b);
+                    if (exact == (pass == 0)) {
+                        pk_book[pk_books] = b;
+                        pk_books = pk_books + 1
+                    }
+                }
             }
+        }
         // (The reference names its book again: once is enough, unless the
         // reference is the book alone.)
         if (pk_ref && ref_chapter < 0 && pk_books == 1 && pk_book[0] == ref_book) pk_books = 0
@@ -408,6 +415,104 @@ picker_header(s: int): int {
     nsstring(if (k == 0) "Recent" else if (k == 1) "Old Testament" else if (k == 2) "New Testament" else if (k == 3) "Go To" else "Books")
 }
 
+// ---- LORD and GOD in small capitals, outside the reader too ----
+caps_buf: []i8 = new i8[4096](0i8);
+
+caps_n: int = 0;
+
+// The divine name at caps_buf[i] (as divine_at in text.l8): its length,
+// or 0.
+caps_divine(i: int): int {
+    if (i > 0 && is_letter(caps_buf[i - 1] as int)) return 0;
+    n: int = 0;
+    if (caps_at(i, "LORD")) n = 4 else if (caps_at(i, "GOD")) n = 3;
+    if (n == 0 || i + n < caps_n && is_letter(caps_buf[i + n] as int)) return 0;
+    n
+}
+
+caps_at(i: int, word: str): bool {
+    if (i + len(word) > caps_n) return false;
+    for k in 0..len(word)
+        if (caps_buf[i + k] != word[k]) return false;
+    true
+}
+
+// The small capitals for a size: of the body (made smaller by hand, for
+// fonts without their own), or of the system's font.
+caps_font(serif_face: bool, size: f64): int {
+    if (serif_face && caps_by_hand) return body(size * 0.8f64);
+    if (serif_face) return small_caps(size);
+    keys[0] = objc_const("UIFontFeatureTypeIdentifierKey");
+    values[0] = msg1(cls("NSNumber"), sel("numberWithLong:"), 38);
+    keys[1] = objc_const("UIFontFeatureSelectorIdentifierKey");
+    values[1] = msg1(cls("NSNumber"), sel("numberWithLong:"), 1);
+    one_object[0] = nsdictionary(keys, values, 2);
+    keys[0] = objc_const("UIFontDescriptorFeatureSettingsAttribute");
+    values[0] = nsarray(one_object, 1);
+    d: int = msg1(msg(sans(size, 0.0f64), sel("fontDescriptor")), sel("fontDescriptorByAddingAttributes:"),
+        nsdictionary(keys, values, 1));
+    msg1_f(cls("UIFont"), sel("fontWithDescriptor:size:"), d, size)
+}
+
+// LORD and GOD in text (an NSString at UTF-16 base in s) set in small
+// capitals after their first letter.
+caps_into(
+    s: int,
+    base: int,
+    text: int,
+    serif_face: bool,
+    size: f64
+) {
+    caps_n = nsstring_into(text, caps_buf);
+    f: int = 0;
+    u: int = base;
+    i: int = 0;
+    while (i < caps_n) {
+        d: int = caps_divine(i);
+        if (d > 0) {
+            if (f == 0) f = caps_font(serif_face, size);
+            msg4(s, sel("addAttribute:value:range:"), k_font, f, u + 1, d - 1);
+            if (serif_face && caps_by_hand) msg4(s, sel("addAttribute:value:range:"),
+                k_kern, nsnumber_f(size * 0.02f64), u + 1, d - 1);
+            i = i + d;
+            u = u + d
+        } else {
+            k: int = caps_buf[i] as int & 255;
+            if (k < 128 || k >= 192) u = u + 1;
+            if (k >= 240) u = u + 1;
+            i = i + 1
+        }
+    }
+}
+
+// Text with attributes, its divine names in small capitals.
+with_caps(
+    text: int,
+    attributes: int,
+    serif_face: bool,
+    size: f64
+): int {
+    s: int = msg(msg2(msg(cls("NSMutableAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        text, attributes), sel("autorelease"));
+    caps_into(s, 0, text, serif_face, size);
+    s
+}
+
+// A verse's words for a list's second line: in the body's face or the
+// system's, at a size and color.
+preview(
+    text: int,
+    serif_face: bool,
+    size: f64,
+    color: int
+): int {
+    keys[0] = k_font;
+    values[0] = (if (serif_face) body(size) else sans(size, 0.0f64));
+    keys[1] = k_color;
+    values[1] = color;
+    with_caps(text, nsdictionary(keys, values, 2), serif_face, size)
+}
+
 // The first words of a verse (about 40 characters) as an NSString.
 opening_words(c: int, v: int, most: int): int {
     _n: int = verse_text(c, if (v > 0) v else 1);
@@ -446,7 +551,8 @@ picker_cell(t: int, path: int): int {
         c: int = pk_recent_c[r];
         v: int = pk_recent_v[r];
         msg1(config, sel("setText:"), place_name(c, v));
-        msg1(config, sel("setSecondaryText:"), opening_words(c, v, 40));
+        msg1(config, sel("setSecondaryAttributedText:"), preview(opening_words(c,
+            v, 40), false, 15.0f64, c_faint));
         msg1(text_props(config), sel("setColor:"), c_ink);
         msg1(detail_props(config), sel("setColor:"), c_faint);
         msg1(detail_props(config), sel("setNumberOfLines:"), 1);
@@ -471,8 +577,8 @@ picker_cell(t: int, path: int): int {
                 fbuf_n = 0;
                 put_range_ref(c, ref_verse, if (ref_verse_end > 0) ref_verse_end else ref_verse);
                 msg1(config, sel("setText:"), fstring());
-                msg1(config, sel("setSecondaryText:"), opening_words(c, ref_verse,
-                    60))
+                msg1(config, sel("setSecondaryAttributedText:"), preview(opening_words(c,
+                    ref_verse, 60), false, 15.0f64, c_faint))
             } else {
                 msg1(config, sel("setText:"), place_name(c, 0));
                 fbuf_n = 0;
@@ -664,10 +770,16 @@ open_search() {
     msg1(bar, sel("setDelegate:"), app_obj);
     msg1(bar, sel("setAutocorrectionType:"), 1);
     sr_book = ch_book[cur];
+    // (Short titles, so none is cut off; the full names for VoiceOver.)
     one[0] = nsstring("All");
-    one[1] = nsstring("Old Testament");
-    one[2] = nsstring("New Testament");
+    one[1] = scope_title("OT", "Old Testament");
+    one[2] = scope_title("NT", "New Testament");
     one[3] = book_name(sr_book);
+    if (book_name_end(sr_book) - book_name_start(sr_book) > 10) {
+        book_short(sr_book);
+        one[3] = nsstring_of(short_name, short_n);
+        msg1(one[3], sel("setAccessibilityLabel:"), book_name(sr_book))
+    }
     msg1(bar, sel("setScopeButtonTitles:"), nsarray(one, 4));
     msg1(bar, sel("setSelectedScopeButtonIndex:"), sr_scope);
     msg1(bar, sel("setShowsScopeBar:"), 1);
@@ -688,6 +800,13 @@ search_appeared(self: int, cmd: int, animated: int): int {
         msg(msg(sc, sel("searchBar")), sel("becomeFirstResponder"))
     }
     0
+}
+
+// A scope's title (a new string, its full name for VoiceOver).
+scope_title(title: str, full: str): int {
+    t: int = msg1(msg(cls("NSString"), sel("alloc")), sel("initWithString:"), nsstring(title));
+    msg1(t, sel("setAccessibilityLabel:"), nsstring(full));
+    msg(t, sel("autorelease"))
 }
 
 // Typing: the search a moment after it stops.
@@ -855,6 +974,8 @@ result_text(c: int, v: int): int {
         nsstring_at(bytes_address(vt) + start, vt_n - start), plain);
     msg1(s, sel("appendAttributedString:"), a);
     release(a);
+    caps_into(s, lead, nsstring_at(bytes_address(vt) + start, vt_n - start), true,
+        size);
     bold_font: int = bold(size);
     for i in 0..mr_count {
         if (mr_begin[i] >= start) {
@@ -901,7 +1022,8 @@ search_cell(t: int, path: int): int {
         if (ref_verse > 0) put_range_ref(c, ref_verse, if (ref_verse_end > 0) ref_verse_end else ref_verse) else put_ref(c,
             one_verse, 0);
         msg1(config, sel("setText:"), fstring());
-        msg1(config, sel("setSecondaryText:"), opening_words(c, ref_verse, 60));
+        msg1(config, sel("setSecondaryAttributedText:"), preview(opening_words(c,
+            ref_verse, 60), false, 15.0f64, c_faint));
         msg1(text_props(config), sel("setFont:"), sans(17.0f64, 0.3f64));
         msg1(text_props(config), sel("setColor:"), c_ink);
         msg1(detail_props(config), sel("setColor:"), c_faint);
@@ -1097,7 +1219,8 @@ lib_cell(t: int, path: int): int {
     soft: int = msg_set_f(c_ink, sel("colorWithAlphaComponent:"), 0.8f64);
     if (lib_seg == 0) {
         config_image(config, "circle.fill", 12.0f64, c_swatch[lr_color[r]]);
-        msg1(config, sel("setSecondaryText:"), range_words(c, lr_v[r], lr_last[r]));
+        msg1(config, sel("setSecondaryAttributedText:"), preview(range_words(c, lr_v[r],
+            lr_last[r]), true, 15.0f64, soft));
         msg1(detail_props(config), sel("setFont:"), body(15.0f64));
         msg1(detail_props(config), sel("setNumberOfLines:"), 3)
     } else if (lib_seg == 1) {
@@ -1107,7 +1230,8 @@ lib_cell(t: int, path: int): int {
         msg1(detail_props(config), sel("setNumberOfLines:"), 3)
     } else {
         config_image(config, "bookmark.fill", 15.0f64, c_accent);
-        msg1(config, sel("setSecondaryText:"), range_words(c, lr_v[r], lr_last[r]));
+        msg1(config, sel("setSecondaryAttributedText:"), preview(range_words(c, lr_v[r],
+            lr_last[r]), true, 15.0f64, soft));
         msg1(detail_props(config), sel("setFont:"), body(15.0f64));
         msg1(detail_props(config), sel("setNumberOfLines:"), 2)
     }
@@ -1292,7 +1416,7 @@ theme_cell(t: int): int {
         keys[1] = k_color;
         values[1] = color_hex(t_ink[if (i == 0) 1 else tt], 1.0f64);
         a: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
-            nsstring("Aa"), nsdictionary(keys, values, 2));
+            nsstring(if (i == 0) "" else "Aa"), nsdictionary(keys, values, 2));
         msg2(b, sel("setAttributedTitle:forState:"), a, 0);
         release(a);
         msg1(b, sel("setAccessibilityLabel:"), nsstring(theme_names[i]));
@@ -1515,10 +1639,8 @@ open_note(c: int, v: int, last: int) {
     keys[2] = k_para;
     values[2] = msg(para_style(0, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 1.25f64), sel("autorelease"));
     msg1(values[2], sel("setLineBreakMode:"), 4);
-    a: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
-        range_words(c, v, ne_last), nsdictionary(keys, values, 3));
-    msg1(quote, sel("setAttributedText:"), a);
-    release(a);
+    msg1(quote, sel("setAttributedText:"), with_caps(range_words(c, v, ne_last), nsdictionary(keys,
+        values, 3), true, em * 0.85f64));
     rule: int = make("UIView");
     msg1(rule, sel("setBackgroundColor:"), c_rule);
     msg1(rule, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);

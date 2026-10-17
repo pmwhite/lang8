@@ -46,6 +46,7 @@ step() {
   shot "$2"
 }
 step 1 01-genesis-1
+step 31 01b-bar-at-rest
 step 2 02-chapter-divider
 step 3 03-picker
 step 4 04-picker-query
@@ -60,6 +61,7 @@ step 12 12-highlight
 step 13 13-edit-menu
 step 14 14-note-editor
 step 15 15-reading-on
+step 32 15b-hidden-clean-top
 step 16 16-bars-back
 step 17 17-search
 step 18 18-search-scope
