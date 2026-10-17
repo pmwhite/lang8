@@ -232,12 +232,7 @@ cands_goal(n: int) raises KernelError {
         }
     }
     cands_chain(n);
-    if (region_calc) {
-        if (cd_n < CANDS) {
-            add_cand(C_CALC, -1, -1, 0);
-            cd_label[cd_n - 1] = sym("Calculate")
-        }
-    }
+    cands_open_defs(n, -1);
     label_all(n)
 }
 
@@ -366,6 +361,7 @@ cands_hyp(n: int, j: int) raises KernelError {
         rw_hyp_cand(n, j, b, true)
     }
     // (One that has a defined name in it can be opened.)
+    cands_open_defs(n, j);
     label_all(n)
 }
 
@@ -419,6 +415,45 @@ find_path_in(t: int, s: int): bool {
         if (find_path_in(tm_body(t), s)) return true;
         fp_n = fp_n - 1
     }
+    false
+}
+
+// Opening a definition, where the whole of the goal (in < 0) or of
+// hypothesis `in` is tapped: at the first place a defined name is applied.
+cands_open_defs(n: int, in_hyp: int) {
+    g: int = pn_goal[n];
+    target: int = gl_concl[g];
+    if (in_hyp >= 0) target = goal_hyp(g, in_hyp);
+    for l in 0..lm_n {
+        if (lm_kind[l] == LM_DEF && lemma_offered(l)) {
+            lhs: int = lhs_of(thm_prop(lm_thm[l]));
+            fp_n = 0;
+            if (find_match(target, lhs)) {
+                k: int = add_cand(C_REWRITE, l, -1, 9);
+                if (k >= 0) {
+                    cd_back[k] = false;
+                    cd_in[k] = in_hyp;
+                    cd_path0[k] = cpool_n;
+                    for i in 0..fp_n cpool_add(fp_steps[i]);
+                    cd_pathn[k] = fp_n
+                }
+            }
+        }
+    }
+}
+
+// The path (fp_steps) to the first part of t (not under a binder) that
+// pattern p matches, with the matcher's bindings for it.
+find_match(t: int, p: int): bool {
+    match_clear();
+    if (tm_closed(t) && match_term(p, t)) return true;
+    if (fp_n >= len(fp_steps) || tm_kind(t) != TM_APP) return false;
+    fp_steps[fp_n] = P_FUN;
+    fp_n = fp_n + 1;
+    if (find_match(tm_fun(t), p)) return true;
+    fp_steps[fp_n - 1] = P_ARG;
+    if (find_match(tm_arg(t), p)) return true;
+    fp_n = fp_n - 1;
     false
 }
 
@@ -721,6 +756,133 @@ label_var(c: int): int {
         if (!occurs(vars[i], anchor) && vars[i] != whole) return vars[i]
     }
     0
+}
+
+// ---- witnesses ----
+// The terms a player may pick for a witness of type ty at node n: the
+// level's kit filled in with names on the board (ε / 2, max(N, N₁)), the
+// fixed names, then the parts of the goal and its hypotheses. Into wc_.
+const WCS: int = 48;
+
+wc_term: []int = new int[WCS](0);
+
+wc_n: int = 0;
+
+wc_add(t: int) {
+    if (t == 0 || !tm_closed(t) || has_vars(t)) return;
+    for i in 0..wc_n {
+        if (wc_term[i] == t) return
+    }
+    if (wc_n < WCS) {
+        wc_term[wc_n] = t;
+        wc_n = wc_n + 1
+    }
+}
+
+witness_cands(n: int, ty: int) {
+    wc_n = 0;
+    g: int = pn_goal[n];
+    // (The kit, its holes filled from the fixed names, the latest first.)
+    if (cur_level >= 0) {
+        for k in 0..lv_kitn[cur_level] {
+            kit: int = pool[lv_kit0[cur_level] + k];
+            vars_n = 0;
+            collect_vars(kit);
+            if (vars_n == 0) {
+                if (tm_type(kit) == ty) wc_add(kit)
+            } else if (vars_n <= 2) kit_fill(g, kit, ty)
+        }
+    }
+    j: int = gl_fixn[g] - 1;
+    while (j >= 0) {
+        x: int = goal_fix(g, j);
+        if (tm_type(x) == ty) wc_add(x);
+        j = j - 1
+    }
+    i: int = gl_hypn[g] - 1;
+    while (i >= 0) {
+        board_parts(goal_hyp(g, i), ty);
+        i = i - 1
+    }
+    board_parts(gl_concl[g], ty)
+}
+
+// Kit term kit (with one or two holes) filled every way from the goal's
+// fixed names of the holes' types; those of type ty kept, different names
+// in different holes first.
+kit_fill(g: int, kit: int, ty: int) {
+    v0: int = vars[0];
+    v1: int = 0;
+    if (vars_n > 1) v1 = vars[1];
+    for pass in 0..2 {
+        a: int = gl_fixn[g] - 1;
+        while (a >= 0) {
+            x: int = goal_fix(g, a);
+            if (tm_type(x) == tm_type(v0) || !ty_concrete(tm_type(v0))) {
+                if (v1 == 0) {
+                    if (pass == 0) kit_try(kit, v0, x, 0, 0, ty)
+                } else {
+                    b: int = gl_fixn[g] - 1;
+                    while (b >= 0) {
+                        y: int = goal_fix(g, b);
+                        if (pass == 0 == a < b && x != y) kit_try(kit, v0, x, v1,
+                            y, ty);
+                        b = b - 1
+                    }
+                }
+            }
+            a = a - 1
+        }
+    }
+}
+
+ty_concrete(t: int): bool {
+    !ty_has_var(t)
+}
+
+kit_try(
+    kit: int,
+    v0: int,
+    x: int,
+    v1: int,
+    y: int,
+    ty: int
+) {
+    match_clear();
+    if (!match_type(tm_type(v0), tm_type(x))) return;
+    if (v1 != 0 && !match_type(tm_type(v1), tm_type(y))) return;
+    t: int = 0;
+    try {
+        t = match_subst_terms(kit, v0, x, v1, y)
+    } with KernelError -> {
+        return
+    }
+    if (tm_type(t) == ty) wc_add(t)
+}
+
+// kit with v0 := x and v1 := y (types as matched).
+match_subst_terms(
+    kit: int,
+    v0: int,
+    x: int,
+    v1: int,
+    y: int
+) raises KernelError: int {
+    mt_n = 0;
+    ok: bool = match_bind(v0, x);
+    if (v1 != 0) ok = ok && match_bind(v1, y);
+    if (!ok) kernel_fail("a kit's holes do not fit");
+    match_subst(kit)
+}
+
+// The closed parts of t of type ty (not names: those came first).
+board_parts(t: int, ty: int) {
+    k: int = tm_kind(t);
+    if (k == TM_APP) {
+        if (tm_type(t) == ty && tm_closed(t)) wc_add(t);
+        board_parts(tm_fun(t), ty);
+        board_parts(tm_arg(t), ty)
+    } else if (k == TM_ABS) board_parts(tm_body(t), ty)
 }
 
 // ---- playing a level ----

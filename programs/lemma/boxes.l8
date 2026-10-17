@@ -1,0 +1,600 @@
+tag lemma_ui;
+
+use_tag std, skate, lemma;
+
+// Terms on the screen, as blocks: each subterm a soft rounded block with
+// the blocks of its parts inside it, so what a finger can pick is what it
+// can see. A term too wide for its place goes on to more lines after a
+// binder's dot (∀ε>0. on one line, what is under it on the next), and is
+// made smaller if it still does not fit.
+//
+// Each block is known from one frame to the next by its term and which of
+// that term's places it is (the first a in a · a, or the second), so when
+// a move changes the goal, the blocks still in it slide to their new
+// places, new ones swell in and gone ones fade: the goal morphs.
+//
+// ---- laid out ----
+const BXS: int = 16384;
+
+// Each block: its term; its path (show.l8); the block it is in; how deep;
+// its corners, from the term's top left; and the key it is known by.
+bx_term: []int = new int[BXS](0);
+
+bx_path: []int = new int[BXS](0);
+
+bx_parent: []int = new int[BXS](-1);
+
+bx_depth: []int = new int[BXS](0);
+
+bx_x0: []f32 = new f32[BXS](0.0);
+
+bx_y0: []f32 = new f32[BXS](0.0);
+
+bx_x1: []f32 = new f32[BXS](0.0);
+
+bx_y1: []f32 = new f32[BXS](0.0);
+
+bx_key: []int = new int[BXS](0);
+
+bx_n: int = 0;
+
+// Each piece of writing: its block, where its baseline starts (from the
+// term's top left), its text, and how it is written.
+const RNS: int = 16384;
+
+rn_box: []int = new int[RNS](0);
+
+rn_x: []f32 = new f32[RNS](0.0);
+
+rn_y: []f32 = new f32[RNS](0.0);
+
+rn_sym: []int = new int[RNS](0);
+
+rn_style: []int = new int[RNS](0);
+
+rn_n: int = 0;
+
+// Each term laid out this frame: its blocks and pieces, its size, the
+// size of its writing, and the slot it is shown in (what it is on the
+// screen: the goal, a hypothesis, a button).
+const EXS: int = 512;
+
+ex_box0: []int = new int[EXS](0);
+
+ex_boxn: []int = new int[EXS](0);
+
+ex_run0: []int = new int[EXS](0);
+
+ex_runn: []int = new int[EXS](0);
+
+ex_w: []f32 = new f32[EXS](0.0);
+
+ex_h: []f32 = new f32[EXS](0.0);
+
+ex_size: []f32 = new f32[EXS](0.0);
+
+ex_slot: []int = new int[EXS](0);
+
+// Where it was drawn (its top left), for finding what a finger is on.
+ex_ox: []f32 = new f32[EXS](0.0);
+
+ex_oy: []f32 = new f32[EXS](0.0);
+
+ex_n: int = 0;
+
+// All laid out afresh each frame.
+boxes_reset() {
+    bx_n = 0;
+    rn_n = 0;
+    ex_n = 0;
+    // (Paths are kept for the whole frame: a block's path is how a move
+    // finds its place.)
+    path_n = 1
+}
+
+// How deep the blocks go before they stop getting their own color.
+const TINT_DEPTH: int = 6;
+
+lay_size: f32 = 20.0;
+
+lay_pad(): f32 {
+    lay_size * 0.17
+}
+
+// Whether the block opened at event i is a subscript (its writing small):
+// it takes no room of its own.
+sub_block(i: int): bool {
+    i + 1 < ev_n && ev_kind[i + 1] == EV_TEXT && ev_b[i + 1] == ST_SUB
+}
+
+// The line height, and how far each block's top and bottom come in from
+// the line's (so blocks inside blocks show).
+lay_line_h(): f32 {
+    lay_size * 1.62
+}
+
+lay_inset(depth: int): f32 {
+    minf(depth as f32, 4.0) * lay_size * 0.075
+}
+
+// Lay out the printer's events (ev_ from show.l8) as expression e, with
+// line breaks at the first `breaks` of the break marks, starting at
+// indent 0. Its width.
+lay_pass(e: int, breaks: int) {
+    bx_n = ex_box0[e];
+    rn_n = ex_run0[e];
+    pen: f32 = 0.0;
+    line_no: int = 0;
+    lh: f32 = lay_line_h();
+    pad: f32 = lay_pad();
+    // (The blocks open now, innermost last.)
+    stack_n: int = 0;
+    breaks_seen: int = 0;
+    widest: f32 = 0.0;
+    for i in 0..ev_n {
+        k: int = ev_kind[i];
+        if (k == EV_OPEN) {
+            if (bx_n < BXS && stack_n < len(lay_stack)) {
+                b: int = bx_n;
+                bx_term[b] = ev_a[i];
+                bx_path[b] = ev_b[i];
+                bx_parent[b] = -1;
+                if (stack_n > 0) bx_parent[b] = lay_stack[stack_n - 1];
+                bx_depth[b] = stack_n;
+                bx_x0[b] = pen;
+                bx_x1[b] = pen;
+                top: f32 = line_no as f32 * lh;
+                bx_y0[b] = top + lay_inset(stack_n);
+                bx_y1[b] = top + lh - lay_inset(stack_n);
+                bx_n = b + 1;
+                lay_stack[stack_n] = b;
+                stack_n = stack_n + 1;
+                if (sub_block(i)) {
+                    lay_nopad[stack_n - 1] = true;
+                    bx_y0[b] = top + lh * 0.45
+                } else {
+                    lay_nopad[stack_n - 1] = false;
+                    pen = pen + pad
+                }
+            }
+        } else if (k == EV_CLOSE) {
+            if (stack_n > 0) {
+                b: int = lay_stack[stack_n - 1];
+                stack_n = stack_n - 1;
+                if (!lay_nopad[stack_n]) pen = pen + pad;
+                bx_x1[b] = maxf(bx_x1[b], pen);
+                bot: f32 = line_no as f32 * lh + lh - lay_inset(bx_depth[b]);
+                bx_y1[b] = maxf(bx_y1[b], bot);
+                // (A block on more lines than one spans them all.)
+                if (stack_n > 0) {
+                    p: int = lay_stack[stack_n - 1];
+                    bx_x1[p] = maxf(bx_x1[p], bx_x1[b]);
+                    bx_x0[p] = minf(bx_x0[p], bx_x0[b] - pad)
+                }
+            }
+        } else if (k == EV_TEXT) {
+            s: int = ev_a[i];
+            size: f32 = lay_size;
+            dy: f32 = 0.0;
+            if (ev_b[i] == ST_SUB) {
+                size = lay_size * 0.64;
+                dy = lay_size * 0.2
+            }
+            if (rn_n < RNS && stack_n > 0) {
+                r: int = rn_n;
+                rn_box[r] = lay_stack[stack_n - 1];
+                rn_x[r] = pen;
+                rn_y[r] = line_no as f32 * lh + lh * 0.5 + lay_size * 0.36 + dy;
+                rn_sym[r] = s;
+                rn_style[r] = ev_b[i];
+                rn_n = r + 1
+            }
+            pen = pen + p_sym_w(0, size, s);
+            if (stack_n > 0) {
+                b: int = lay_stack[stack_n - 1];
+                bx_x1[b] = maxf(bx_x1[b], pen)
+            }
+        } else if (k == EV_BREAK) {
+            if (breaks_seen < breaks && stack_n > 0) {
+                // (On to the next line, in from where the block broken
+                // started.)
+                b: int = lay_stack[stack_n - 1];
+                indent: f32 = bx_x0[b] + lay_size * 1.0;
+                for j in 0..stack_n {
+                    o: int = lay_stack[j];
+                    bx_x1[o] = maxf(bx_x1[o], pen)
+                }
+                widest = maxf(widest, pen);
+                line_no = line_no + 1;
+                pen = indent
+            }
+            breaks_seen = breaks_seen + 1
+        }
+        widest = maxf(widest, pen)
+    }
+    ex_boxn[e] = bx_n - ex_box0[e];
+    ex_runn[e] = rn_n - ex_run0[e];
+    ex_w[e] = widest;
+    ex_h[e] = (line_no + 1) as f32 * lh;
+    lay_breaks_all = breaks_seen
+}
+
+lay_stack: []int = new int[256](0);
+
+lay_nopad: []bool = new bool[256](false);
+
+lay_breaks_all: int = 0;
+
+// Term t laid out to fit in width maxw, its writing at most size: a new
+// expression (its number), in this slot. Blocks get their keys.
+lay_term(
+    t: int,
+    size: f32,
+    maxw: f32,
+    slot: int
+): int {
+    if (ex_n >= EXS) return -1;
+    e: int = ex_n;
+    ex_n = e + 1;
+    ex_box0[e] = bx_n;
+    ex_run0[e] = rn_n;
+    ex_slot[e] = slot;
+    ev_n = 0;
+    bn_n = 0;
+    show(t, 0, 0);
+    lay_size = size;
+    breaks: int = 0;
+    lay_pass(e, 0);
+    // (Broken at more of its binders, then smaller, till it fits.)
+    while (ex_w[e] > maxw && breaks < lay_breaks_all) {
+        breaks = breaks + 1;
+        lay_pass(e, breaks)
+    }
+    while (ex_w[e] > maxw && lay_size > size * 0.62) {
+        lay_size = lay_size * 0.92;
+        lay_pass(e, breaks)
+    }
+    ex_size[e] = lay_size;
+    // (Keys: a block's term, and which of its places it is.)
+    for b in ex_box0[e]..bx_n {
+        occ: int = 0;
+        for c in ex_box0[e]..b {
+            if (bx_term[c] == bx_term[b]) occ = occ + 1
+        }
+        bx_key[b] = bx_term[b] * 16 + mini(occ, 15)
+    }
+    e
+}
+
+// Text (a name: a button's words) laid out as one block, unbroken.
+lay_words(s: int, size: f32, slot: int): int {
+    if (ex_n >= EXS || bx_n >= BXS || rn_n >= RNS) return -1;
+    e: int = ex_n;
+    ex_n = e + 1;
+    ex_box0[e] = bx_n;
+    ex_run0[e] = rn_n;
+    ex_slot[e] = slot;
+    b: int = bx_n;
+    w: f32 = p_sym_w(0, size, s);
+    lh: f32 = size * 1.62;
+    bx_term[b] = 0;
+    bx_path[b] = 0;
+    bx_parent[b] = -1;
+    bx_depth[b] = 0;
+    bx_x0[b] = 0.0;
+    bx_y0[b] = 0.0;
+    bx_x1[b] = w;
+    bx_y1[b] = lh;
+    bx_key[b] = 1;
+    bx_n = b + 1;
+    r: int = rn_n;
+    rn_box[r] = b;
+    rn_x[r] = 0.0;
+    rn_y[r] = lh * 0.5 + size * 0.36;
+    rn_sym[r] = s;
+    rn_style[r] = ST_PLAIN;
+    rn_n = r + 1;
+    ex_boxn[e] = 1;
+    ex_runn[e] = 1;
+    ex_w[e] = w;
+    ex_h[e] = lh;
+    ex_size[e] = size;
+    e
+}
+
+// ---- where the blocks are shown: eased from frame to frame ----
+// Each block shown, by slot and key: where it is now (its corners), how
+// much it shows, and the frame it was last laid out in.
+const ANS: int = 16384;
+
+an_slot: []int = new int[ANS](0);
+
+an_key: []int = new int[ANS](0);
+
+an_x0: []f32 = new f32[ANS](0.0);
+
+an_y0: []f32 = new f32[ANS](0.0);
+
+an_x1: []f32 = new f32[ANS](0.0);
+
+an_y1: []f32 = new f32[ANS](0.0);
+
+an_a: []f32 = new f32[ANS](0.0);
+
+an_seen: []int = new int[ANS](0);
+
+an_used: []bool = new bool[ANS](false);
+
+frame_no: int = 1;
+
+an_find(slot: int, key: int): int {
+    h: int = slot * 40503 + key * 2654435761 & ANS - 1;
+    if (h < 0) h = -h & ANS - 1;
+    tries: int = 0;
+    while (an_used[h] && tries < ANS) {
+        if (an_slot[h] == slot && an_key[h] == key) return h;
+        h = h + 1 & ANS - 1;
+        tries = tries + 1
+    }
+    -1
+}
+
+an_make(slot: int, key: int): int {
+    h: int = slot * 40503 + key * 2654435761 & ANS - 1;
+    if (h < 0) h = -h & ANS - 1;
+    tries: int = 0;
+    while (an_used[h] && an_seen[h] >= frame_no - 2 && tries < ANS) {
+        h = h + 1 & ANS - 1;
+        tries = tries + 1
+    }
+    an_used[h] = true;
+    an_slot[h] = slot;
+    an_key[h] = key;
+    an_a[h] = 0.0;
+    h
+}
+
+// How quickly blocks go to their places.
+const MORPH_RATE: f32 = 13.0;
+
+// Whether blocks jump straight to where they go (a page just opened), and
+// whether those being drawn move at all (a button's words do not).
+an_jump: bool = false;
+
+an_live: bool = true;
+
+// Block b of an expression drawn at (ox, oy): where it shows now.
+an_x0_now: f32 = 0.0;
+
+an_y0_now: f32 = 0.0;
+
+an_x1_now: f32 = 0.0;
+
+an_y1_now: f32 = 0.0;
+
+an_a_now: f32 = 0.0;
+
+an_step(slot: int, b: int, born_from: int) {
+    // (Kept from the expression's own corner: it moves as a whole with
+    // its card, and its blocks move within it.)
+    tx0: f32 = bx_x0[b];
+    ty0: f32 = bx_y0[b];
+    tx1: f32 = bx_x1[b];
+    ty1: f32 = bx_y1[b];
+    h: int = an_find(slot, bx_key[b]);
+    if (h < 0 || an_seen[h] < frame_no - 2) {
+        if (h < 0) h = an_make(slot, bx_key[b]);
+        // (New: it swells out of where the block it is in was, or at its
+        // own place.)
+        if (born_from >= 0 && !an_jump) {
+            an_x0[h] = an_x0[born_from];
+            an_y0[h] = an_y0[born_from];
+            an_x1[h] = an_x1[born_from];
+            an_y1[h] = an_y1[born_from]
+        } else {
+            cx: f32 = (tx0 + tx1) * 0.5;
+            cy: f32 = (ty0 + ty1) * 0.5;
+            k: f32 = 0.7;
+            if (an_jump) k = 1.0;
+            an_x0[h] = cx + (tx0 - cx) * k;
+            an_x1[h] = cx + (tx1 - cx) * k;
+            an_y0[h] = cy + (ty0 - cy) * k;
+            an_y1[h] = cy + (ty1 - cy) * k
+        }
+        an_a[h] = 0.0;
+        if (an_jump) an_a[h] = 1.0
+    }
+    if (an_jump || !an_live) {
+        an_x0[h] = tx0;
+        an_y0[h] = ty0;
+        an_x1[h] = tx1;
+        an_y1[h] = ty1;
+        an_a[h] = 1.0
+    } else {
+        an_x0[h] = ease_to(an_x0[h], tx0, MORPH_RATE);
+        an_y0[h] = ease_to(an_y0[h], ty0, MORPH_RATE);
+        an_x1[h] = ease_to(an_x1[h], tx1, MORPH_RATE);
+        an_y1[h] = ease_to(an_y1[h], ty1, MORPH_RATE);
+        an_a[h] = ease_to(an_a[h], 1.0, MORPH_RATE * 0.8)
+    }
+    an_seen[h] = frame_no;
+    an_x0_now = an_x0[h];
+    an_y0_now = an_y0[h];
+    an_x1_now = an_x1[h];
+    an_y1_now = an_y1[h];
+    an_a_now = an_a[h];
+    an_last = h
+}
+
+an_last: int = 0;
+
+// Each frame, blocks no longer shown are let go.
+an_frame() {
+    frame_no = frame_no + 1
+}
+
+// ---- cards, eased ----
+// Where each card (by slot) is shown, sliding to where it goes, and how
+// much it shows (a new one fades in).
+const CARDS: int = 512;
+
+cd_slot_k: []int = new int[CARDS](0);
+
+cd_y_now: []f32 = new f32[CARDS](0.0);
+
+cd_a_now: []f32 = new f32[CARDS](0.0);
+
+cd_seen: []int = new int[CARDS](0);
+
+cards_n: int = 0;
+
+// The y a card in this slot shows at, going to y; its showing in card_a.
+card_a: f32 = 1.0;
+
+card_y(slot: int, y: f32): f32 {
+    k: int = -1;
+    for i in 0..cards_n {
+        if (cd_slot_k[i] == slot) k = i
+    }
+    if (k < 0 || cd_seen[k] < frame_no - 2) {
+        if (k < 0) {
+            // (A free place: one not seen lately.)
+            for i in 0..cards_n {
+                if (k < 0 && cd_seen[i] < frame_no - 2) k = i
+            }
+            if (k < 0 && cards_n < CARDS) {
+                k = cards_n;
+                cards_n = cards_n + 1
+            }
+            if (k < 0) {
+                card_a = 1.0;
+                return y
+            }
+        }
+        cd_slot_k[k] = slot;
+        cd_y_now[k] = y + 8.0;
+        cd_a_now[k] = 0.0;
+        if (an_jump) {
+            cd_y_now[k] = y;
+            cd_a_now[k] = 1.0
+        }
+    }
+    cd_seen[k] = frame_no;
+    if (an_jump) cd_y_now[k] = y else cd_y_now[k] = ease_to(cd_y_now[k], y, MORPH_RATE);
+    cd_a_now[k] = ease_to(cd_a_now[k], 1.0, MORPH_RATE);
+    card_a = cd_a_now[k];
+    cd_y_now[k]
+}
+
+// ---- drawing ----
+// What is picked (a block, by its expression's slot and key), and the
+// block pressed now.
+pick_slot: int = 0;
+
+pick_key: int = 0;
+
+// Draw expression e with its top left at (ox, oy); ink its color, and the
+// whole of it shown as much as alpha. Blocks shown as blocks if `blocks`.
+draw_expr(
+    e: int,
+    ox: f32,
+    oy: f32,
+    ink: int,
+    alpha: f32,
+    blocks: bool
+) {
+    if (e < 0) return;
+    ex_ox[e] = ox;
+    ex_oy[e] = oy;
+    slot: int = ex_slot[e];
+    size: f32 = ex_size[e];
+    b0: int = ex_box0[e];
+    // (Where each block shows, kept for its writing.)
+    for b in b0..b0 + ex_boxn[e] {
+        born: int = -1;
+        p: int = bx_parent[b];
+        if (p >= 0) born = dr_anim[p - b0];
+        an_step(slot, b, born);
+        if (b - b0 < len(dr_anim)) {
+            dr_anim[b - b0] = an_last;
+            dr_x[b - b0] = an_x0_now - bx_x0[b];
+            dr_y[b - b0] = an_y0_now - bx_y0[b]
+        }
+        an_x0_now = an_x0_now + ox;
+        an_x1_now = an_x1_now + ox;
+        an_y0_now = an_y0_now + oy;
+        an_y1_now = an_y1_now + oy;
+        a: f32 = an_a_now * alpha;
+        picked: bool = slot == pick_slot && bx_key[b] == pick_key && pick_slot != 0;
+        w: f32 = an_x1_now - an_x0_now;
+        h: f32 = an_y1_now - an_y0_now;
+        r: f32 = minf(h * 0.42, size * 0.55);
+        if (picked) {
+            p_shadow(an_x0_now, an_y0_now, w, h, r, 2.0, 6.0, 0.18 * a);
+            p_box(an_x0_now, an_y0_now, w, h, r, C_PICK_SOFT, a);
+            p_outline(an_x0_now, an_y0_now, w, h, r, 2.0, C_PICK, a)
+        } else if (blocks && bx_depth[b] > 0 && compound(bx_term[b])) {
+            tint: int = block_tints[(bx_depth[b] - 1) % len(block_tints)];
+            p_box(an_x0_now, an_y0_now, w, h, r, tint, 0.85 * a)
+        }
+    }
+    for r in ex_run0[e]..ex_run0[e] + ex_runn[e] {
+        b: int = rn_box[r];
+        k: int = b - b0;
+        dx: f32 = 0.0;
+        dy: f32 = 0.0;
+        a: f32 = alpha;
+        if (k >= 0 && k < len(dr_anim)) {
+            dx = dr_x[k];
+            dy = dr_y[k];
+            a = an_a[dr_anim[k]] * alpha
+        }
+        s: f32 = size;
+        if (rn_style[r] == ST_SUB) s = size * 0.64;
+        col: int = ink;
+        if (rn_style[r] == ST_OP) col = mix_rgb(ink, C_BLUE, 0.35);
+        p_sym(0, s, ox + rn_x[r] + dx, oy + rn_y[r] + dy, rn_sym[r], col, a)
+    }
+}
+
+dr_anim: []int = new int[BXS](0);
+
+dr_x: []f32 = new f32[BXS](0.0);
+
+dr_y: []f32 = new f32[BXS](0.0);
+
+// Whether a term is more than a name (and so gets its own block color).
+compound(t: int): bool {
+    k: int = tm_kind(t);
+    k == TM_APP || k == TM_ABS
+}
+
+// ---- what a finger is on ----
+// The deepest block of expression e at (x, y), or -1.
+block_at(e: int, x: f32, y: f32): int {
+    if (e < 0) return -1;
+    best: int = -1;
+    for b in ex_box0[e]..ex_box0[e] + ex_boxn[e] {
+        x0: f32 = ex_ox[e] + bx_x0[b];
+        x1: f32 = ex_ox[e] + bx_x1[b];
+        y0: f32 = ex_oy[e] + bx_y0[b];
+        y1: f32 = ex_oy[e] + bx_y1[b];
+        if (x >= x0 - 2.0 && x <= x1 + 2.0 && y >= y0 - 2.0 && y <= y1 + 2.0) {
+            if (best < 0 || bx_depth[b] >= bx_depth[best]) best = b
+        }
+    }
+    best
+}
+
+// The steps of block b's path (show.l8's paths), into sub_steps.
+block_steps(b: int) {
+    p: int = bx_path[b];
+    n: int = path_depth[p];
+    sub_n = n;
+    i: int = n - 1;
+    while (i >= 0 && p != 0) {
+        sub_steps[i] = path_step[p];
+        p = path_parent[p];
+        i = i - 1
+    }
+}

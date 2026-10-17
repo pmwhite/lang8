@@ -1,0 +1,736 @@
+tag lemma_ui;
+
+use_tag std, skate, lemma;
+
+// The game's state, and what each tap does.
+//
+// Three pages: the map (the regions, each a row of levels), a level being
+// played, and a finished proof written out. On a level, a tap on the goal,
+// a hypothesis or a part of either picks it, and the tray rises with the
+// moves that fit there; a move that needs a witness asks for it next, from
+// the terms on the board. Undo takes back the last move.
+const PAGE_MAP: int = 0;
+
+const PAGE_LEVEL: int = 1;
+
+const PAGE_PROOF: int = 2;
+
+page: int = 0;
+
+// The buttons.
+const B_LEVEL: int = 1000;
+
+const B_BACK: int = 10;
+
+const B_UNDO: int = 11;
+
+const B_PROOF: int = 12;
+
+const B_NEXT: int = 13;
+
+const B_MAP: int = 14;
+
+const B_AGAIN: int = 15;
+
+const B_TRAY_CLOSE: int = 16;
+
+const B_INTRO: int = 17;
+
+const B_GOAL_NEXT: int = 18;
+
+const B_WATCH: int = 19;
+
+const B_MOVE: int = 2000;
+
+const B_WITNESS: int = 3000;
+
+// An expression a finger can pick a block of (by its number).
+const B_EXPR: int = 10000;
+
+// ---- regions ----
+const REGIONS: int = 8;
+
+region_files: []str = ["programs/lemma/regions/logic.txt", "programs/lemma/regions/groups.txt",
+    "programs/lemma/regions/analysis.txt"];
+
+const MAP_LEVELS: int = 64;
+
+// What the map shows of each region, read when the game starts: its name,
+// title and words, and its levels' names, titles and pars.
+rg_n: int = 0;
+
+rg_name: []int = new int[REGIONS](0);
+
+rg_title: []int = new int[REGIONS](0);
+
+rg_lv0: []int = new int[REGIONS](0);
+
+rg_lvn: []int = new int[REGIONS](0);
+
+ml_name: []int = new int[MAP_LEVELS](0);
+
+ml_title: []int = new int[MAP_LEVELS](0);
+
+ml_par: []int = new int[MAP_LEVELS](0);
+
+// The level's number in its region's file (its lv_ number when loaded).
+ml_index: []int = new int[MAP_LEVELS](0);
+
+ml_n: int = 0;
+
+// The player's progress: each map level solved, and in how few moves.
+ml_solved: []bool = new bool[MAP_LEVELS](false);
+
+ml_best: []int = new int[MAP_LEVELS](0);
+
+// The region loaded now (-1 none), and the map level being played.
+loaded_region: int = -1;
+
+playing: int = -1;
+
+// Read each region once, for the map.
+read_map() raises KernelError {
+    rg_n = 0;
+    ml_n = 0;
+    for r in 0..len(region_files) {
+        if (load_region_file(r)) {
+            rg_name[rg_n] = region_name;
+            rg_title[rg_n] = region_title;
+            rg_lv0[rg_n] = ml_n;
+            for l in 0..lv_n {
+                if (!lv_given[l] && ml_n < MAP_LEVELS) {
+                    ml_name[ml_n] = lv_name[l];
+                    ml_title[ml_n] = lv_title[l];
+                    ml_par[ml_n] = lv_par[l];
+                    ml_index[ml_n] = l;
+                    ml_n = ml_n + 1
+                }
+            }
+            rg_lvn[rg_n] = ml_n - rg_lv0[rg_n];
+            rg_n = rg_n + 1
+        }
+    }
+    loaded_region = -1
+}
+
+// The texts of the theory files, read once, one after another in files_buf:
+// the logic's (0), then each region's (1 on). Where each starts, and how
+// long it is (-1 if it could not be read).
+const FILES: int = 8;
+
+const FILES_BYTES: int = 1048576;
+
+files_buf: []i8 = new i8[FILES_BYTES](0i8);
+
+files_used: int = 0;
+
+file_at: []int = new int[FILES](0);
+
+file_len: []int = new int[FILES](-1);
+
+// File i's text, from a buffer read (n bytes of it).
+keep_file(i: int, t: []i8, n: int) {
+    if (n < 0 || files_used + n > FILES_BYTES) return;
+    file_at[i] = files_used;
+    for k in 0..n files_buf[files_used + k] = t[k];
+    file_len[i] = n;
+    files_used = files_used + n
+}
+
+// The logic read, and its derived rules proved. Whether it was.
+load_logic_file() raises KernelError: bool {
+    if (file_len[0] < 0) return false;
+    try {
+        load_theory_at(files_buf, file_at[0], file_at[0] + file_len[0])
+    } with TheoryError -> {
+        line_clear();
+        line_add("lemma: hol.txt line ");
+        line_int(theory_line);
+        line_add(": ");
+        line_add(theory_why);
+        toast_line();
+        return false
+    }
+    close_axioms();
+    if (!prove_given()) return false;
+    mark_logic();
+    true
+}
+
+// Region r's file loaded (the logic first, once). Whether it was.
+load_region_file(r: int) raises KernelError: bool {
+    reset_to_logic();
+    if (file_len[r + 1] < 0) return false;
+    try {
+        load_theory_at(files_buf, file_at[r + 1], file_at[r + 1] + file_len[r + 1])
+    } with TheoryError -> {
+        line_clear();
+        line_add("lemma: ");
+        line_add(region_files[r]);
+        line_add(" line ");
+        line_int(theory_line);
+        line_add(": ");
+        line_add(theory_why);
+        toast_line();
+        return false
+    }
+    if (!prove_given()) return false;
+    loaded_region = r;
+    true
+}
+
+// Region r loaded to play in: its levels' lemmas proved again (by their
+// written proofs), so a solved level is a tool for the ones after it.
+enter_region(r: int) raises KernelError {
+    if (loaded_region == r) return;
+    if (!load_region_file(r)) return;
+    for l in 0..lv_n {
+        if (!lv_given[l] && lv_lemma[l] < 0 && run_proof(l)) level_solved(l)
+    }
+}
+
+// ---- playing a level ----
+// Moves made by the player in this level so far.
+moves_made: int = 0;
+
+// When the level was finished (or -1), and whether the finish was seen.
+done_t: f32 = -1.0;
+
+// The words before the level shown (until the first move).
+intro_open: bool = true;
+
+start_level(m: int) raises KernelError {
+    r: int = region_of(m);
+    enter_region(r);
+    if (loaded_region != r) return;
+    playing = m;
+    level_start(ml_index[m]);
+    moves_made = 0;
+    done_t = -1.0;
+    intro_open = true;
+    unpick();
+    page = PAGE_LEVEL;
+    sc_pos[V_LEVEL] = 0.0;
+    an_jump = true;
+    pic_reset()
+}
+
+region_of(m: int): int {
+    for r in 0..rg_n {
+        if (m >= rg_lv0[r] && m < rg_lv0[r] + rg_lvn[r]) return r
+    }
+    0
+}
+
+// The node played: the goal the player chose, if still open, or the first.
+chosen_node: int = -1;
+
+play_node(): int {
+    level_open();
+    for i in 0..open_n {
+        if (open_nodes[i] == chosen_node) return chosen_node
+    }
+    if (open_n == 0) return -1;
+    open_nodes[0]
+}
+
+// ---- picking, and the tray ----
+// What is picked: where (the goal -1, or hypothesis j), the part's path
+// (sub_steps, sub_n; 0 steps for the whole), and the block shown picked.
+picked: bool = false;
+
+pick_hyp: int = -1;
+
+pick_whole: bool = true;
+
+pick_steps: []int = new int[256](0);
+
+pick_n: int = 0;
+
+// The tray: how far up it is, and whether it is choosing a witness for
+// candidate wit_cand (its witness wit_i, those chosen so far in wit_chosen).
+tray_t: f32 = 0.0;
+
+wit_cand: int = -1;
+
+wit_i: int = 0;
+
+wit_chosen: []int = new int[8](0);
+
+unpick() {
+    picked = false;
+    pick_slot = 0;
+    pick_key = 0;
+    wit_cand = -1;
+    cd_shown = 0
+}
+
+// A block of an expression picked: its moves listed.
+pick_block(e: int, b: int) raises KernelError {
+    n: int = play_node();
+    if (n < 0) return;
+    slot: int = ex_slot[e];
+    if (picked && slot == pick_slot && bx_key[b] == pick_key) {
+        unpick();
+        return
+    }
+    unpick();
+    hyp: int = -1;
+    if (slot != SLOT_GOAL) hyp = hyp_of_slot(n, slot);
+    if (slot != SLOT_GOAL && hyp < 0) return;
+    block_steps(b);
+    // (A block with the expression's own term is the whole of it.)
+    whole: bool = bx_parent[b] < 0 || sub_n == 0 || sub_n == 1 && is_trueprop_root(n,
+        hyp);
+    pick_n = sub_n;
+    for i in 0..sub_n pick_steps[i] = sub_steps[i];
+    if (whole) {
+        if (hyp < 0) cands_goal(n) else cands_hyp(n, hyp)
+    } else cands_sub(n, hyp);
+    pick_hyp = hyp;
+    pick_whole = whole;
+    pick_slot = slot;
+    pick_key = bx_key[b];
+    picked = true;
+    sc_pos[V_TRAY] = 0.0;
+    if (cd_shown == 0) {
+        toast("Nothing to do with that here");
+        unpick()
+    }
+}
+
+// Whether a path of one step is Trueprop's argument (the whole, as shown).
+is_trueprop_root(n: int, hyp: int): bool {
+    g: int = pn_goal[n];
+    t: int = gl_concl[g];
+    if (hyp >= 0) t = goal_hyp(g, hyp);
+    sub_steps[0] == P_ARG && tm_kind(t) == TM_APP && tm_kind(tm_fun(t)) == TM_CONST && tm_name(tm_fun(t)) == role_name[ROLE_TRUE]
+}
+
+// The slots: the goal's conclusion, and each hypothesis by its term.
+const SLOT_GOAL: int = 1;
+
+const SLOT_HYP: int = 3000000;
+
+hyp_slot(h: int): int {
+    SLOT_HYP + h
+}
+
+hyp_of_slot(n: int, slot: int): int {
+    g: int = pn_goal[n];
+    for i in 0..gl_hypn[g] {
+        if (hyp_slot(goal_hyp(g, i)) == slot) return i
+    }
+    -1
+}
+
+// A move's button tapped: made, or its first witness asked for.
+tap_move(k: int) raises KernelError {
+    if (k < 0 || k >= cd_shown) return;
+    c: int = cd_order[k];
+    if (cd_wn[c] > 0) {
+        wit_cand = c;
+        wit_i = 0;
+        witness_list();
+        sc_pos[V_TRAY] = 0.0;
+        return
+    }
+    make_move(c)
+}
+
+witness_list() raises KernelError {
+    n: int = play_node();
+    ty: int = cand_witness_type(wit_cand, wit_i);
+    if (ty == 0) ty = tm_type(cand_witness(wit_cand, wit_i));
+    witness_cands(n, ty)
+}
+
+tap_witness(k: int) raises KernelError {
+    if (wit_cand < 0 || k < 0 || k >= wc_n) return;
+    wit_chosen[wit_i] = wc_term[k];
+    wit_i = wit_i + 1;
+    if (wit_i < cd_wn[wit_cand]) {
+        witness_list();
+        return
+    }
+    make_move(wit_cand)
+}
+
+// Candidate c made at the node played (its witnesses chosen).
+make_move(c: int) raises KernelError {
+    n: int = play_node();
+    if (n < 0) return;
+    wn: int = 0;
+    if (wit_cand == c) wn = wit_i;
+    m: int = -1;
+    try {
+        m = cand_apply(n, c, wit_chosen, wn)
+    } with KernelError -> {
+        // (The kernel would not have it: say so, and nothing changes.)
+        line_clear();
+        line_add("That move does not work: ");
+        line_add(kernel_why);
+        toast_line();
+        unpick();
+        return
+    }
+    last_move = m;
+    auto_close();
+    moves_made = moves_made + 1;
+    intro_open = false;
+    unpick();
+    pic_moved();
+    if (level_done()) finish_level()
+}
+
+undo_move() {
+    if (mv_n == 0) return;
+    undo();
+    if (moves_made > 0) moves_made = moves_made - 1;
+    done_t = -1.0;
+    unpick();
+    pic_moved()
+}
+
+// ---- watching the written proof ----
+// The level's proof played from the start, a move at a time, as a finger
+// would: what is tapped picked, the tray up, the button pressed, the
+// witness chosen, the move made. Its step, and when the step's next part
+// is due.
+watching: bool = false;
+
+watch_step: int = 0;
+
+watch_phase: int = 0;
+
+watch_at: f32 = 0.0;
+
+// The candidate and witness the step will press (in cd_order, wc_term).
+watch_cand: int = -1;
+
+watch_wit: int = -1;
+
+start_watch() raises KernelError {
+    if (playing < 0) return;
+    start_level(playing);
+    parse_proof(ml_index[playing]);
+    watching = true;
+    watch_step = 0;
+    watch_phase = 0;
+    watch_at = now_t + 0.8;
+    intro_open = false
+}
+
+stop_watch() {
+    watching = false;
+    unpick()
+}
+
+step_watch() raises KernelError {
+    if (!watching) return;
+    busy = true;
+    if (now_t < watch_at) return;
+    if (watch_step >= st_n || done_t >= 0.0) {
+        watching = false;
+        return
+    }
+    s: int = watch_step;
+    if (st_kind[s] == 3) {
+        undo_move();
+        watch_step = s + 1;
+        watch_at = now_t + 0.6;
+        return
+    }
+    n: int = play_node();
+    if (n < 0) {
+        watching = false;
+        return
+    }
+    g: int = pn_goal[n];
+    if (watch_phase == 0) {
+        // (Pick what the step taps.)
+        unpick();
+        target: int = gl_concl[g];
+        slot: int = SLOT_GOAL;
+        if (st_hyp[s] >= 0 && st_hyp[s] < gl_hypn[g]) {
+            target = goal_hyp(g, st_hyp[s]);
+            slot = hyp_slot(target)
+        }
+        part: int = target;
+        if (st_kind[s] == 2) {
+            if (!find_part_text(target, st_part[s])) {
+                watching = false;
+                toast("The written proof does not fit here");
+                return
+            }
+            sub_n = fp_n;
+            for i in 0..fp_n sub_steps[i] = fp_steps[i];
+            part = rw_sub(target, g);
+            cands_sub(n, st_hyp[s]);
+            pick_whole = false
+        } else if (st_kind[s] == 1) cands_hyp(n, st_hyp[s]) else cands_goal(n);
+        // (Shown picked: the block whose term is the part, its first place.)
+        pick_slot = slot;
+        pick_key = rel_key(part);
+        picked = true;
+        pick_hyp = st_hyp[s];
+        watch_cand = -1;
+        for k in 0..cd_shown {
+            if (cd_label[cd_order[k]] == st_label[s]) watch_cand = k
+        }
+        if (watch_cand < 0) {
+            watching = false;
+            toast("The written proof does not fit here");
+            return
+        }
+        watch_phase = 1;
+        watch_at = now_t + 0.9;
+        return
+    }
+    c: int = cd_order[watch_cand];
+    if (watch_phase == 1) {
+        // (The button pressed.)
+        press_shown_id = B_MOVE + watch_cand;
+        press_show = 1.0;
+        watch_phase = 2;
+        watch_at = now_t + 0.45;
+        return
+    }
+    if (watch_phase == 2 && cd_wn[c] > 0 && wit_cand < 0) {
+        wit_cand = c;
+        wit_i = 0;
+        witness_list();
+        watch_at = now_t + 0.5;
+        return
+    }
+    if (watch_phase == 2 && wit_cand >= 0 && wit_i < cd_wn[c]) {
+        // (The witness: found among the choices, and pressed.)
+        w: int = st_w1[s];
+        if (wit_i == 1) w = st_w2[s];
+        t: int = witness_sym(n, w, cand_witness_type(c, wit_i));
+        watch_wit = -1;
+        for k in 0..wc_n {
+            if (wc_term[k] == t) watch_wit = k
+        }
+        if (watch_wit < 0) {
+            // (Not among the choices: chosen all the same.)
+            wit_chosen[wit_i] = t;
+            wit_i = wit_i + 1;
+            if (wit_i < cd_wn[c]) witness_list();
+            watch_at = now_t + 0.3;
+            return
+        }
+        press_shown_id = B_WITNESS + watch_wit;
+        press_show = 1.0;
+        watch_phase = 3;
+        watch_at = now_t + 0.45;
+        return
+    }
+    if (watch_phase == 3) {
+        wit_chosen[wit_i] = wc_term[watch_wit];
+        wit_i = wit_i + 1;
+        if (wit_i < cd_wn[c]) {
+            witness_list();
+            watch_phase = 2;
+            watch_at = now_t + 0.4;
+            return
+        }
+    }
+    make_move(c);
+    press_show = 0.0;
+    watch_step = s + 1;
+    watch_phase = 0;
+    watch_at = now_t + 1.0
+}
+
+// The key of the block showing term t (its first place).
+rel_key(t: int): int {
+    p: int = t;
+    if (tm_kind(p) == TM_APP && tm_kind(tm_fun(p)) == TM_CONST && tm_name(tm_fun(p)) == role_name[ROLE_TRUE]) p = tm_arg(p);
+    p * 16
+}
+
+// ---- finishing ----
+finish_level() raises KernelError {
+    done_t = now_t;
+    if (playing < 0) return;
+    level_solved(ml_index[playing]);
+    if (!ml_solved[playing] || moves_made < ml_best[playing]) ml_best[playing] = moves_made;
+    ml_solved[playing] = true;
+    wants_save = true
+}
+
+// Stars for a finish: 3 at par or better, 2 a little over, 1 otherwise.
+stars_for(m: int): int {
+    if (!ml_solved[m]) return 0;
+    par: int = ml_par[m];
+    if (par == 0 || ml_best[m] <= par) return 3;
+    if (ml_best[m] <= par + 2) return 2;
+    1
+}
+
+// ---- the player's progress, as a file ----
+//   solved NAME MOVES      (a line for each level solved)
+const PROGRESS_BYTES: int = 16384;
+
+progress_buf: []i8 = new i8[PROGRESS_BYTES](0i8);
+
+progress_n: int = 0;
+
+wants_save: bool = false;
+
+write_progress() {
+    progress_n = 0;
+    for m in 0..ml_n {
+        if (ml_solved[m]) {
+            line_clear();
+            line_add("solved ");
+            line_sym(ml_name[m]);
+            line_add(" ");
+            line_int(ml_best[m]);
+            line_byte(10);
+            for i in 0..line_n {
+                if (progress_n < PROGRESS_BYTES) {
+                    progress_buf[progress_n] = line[i];
+                    progress_n = progress_n + 1
+                }
+            }
+        }
+    }
+}
+
+read_progress(t: []i8, n: int) {
+    i: int = 0;
+    while (i < n) {
+        j: int = i;
+        while (j < n && t[j] as int != 10) j = j + 1;
+        // (solved NAME MOVES)
+        if (j - i > 7 && t[i] as int == 115) {
+            a: int = i + 7;
+            b: int = a;
+            while (b < j && t[b] as int != 32) b = b + 1;
+            name: int = sym_of(t, a, b);
+            moves: int = 0;
+            for k in b + 1..j {
+                c: int = t[k] as int;
+                if (c >= 48 && c <= 57) moves = moves * 10 + c - 48
+            }
+            for m in 0..ml_n {
+                if (ml_name[m] == name) {
+                    ml_solved[m] = true;
+                    ml_best[m] = moves
+                }
+            }
+        }
+        i = j + 1
+    }
+}
+
+// The next level to play after map level m: the next unsolved one in its
+// region, or the next in order.
+next_level(m: int): int {
+    r: int = region_of(m);
+    for k in rg_lv0[r]..rg_lv0[r] + rg_lvn[r] {
+        if (!ml_solved[k] && k != m) return k
+    }
+    if (m + 1 < ml_n) return m + 1;
+    -1
+}
+
+// ---- what each button does ----
+act(id: int) raises KernelError {
+    if (id >= B_EXPR) return;
+    if (id >= B_WITNESS) {
+        tap_witness(id - B_WITNESS);
+        return
+    }
+    if (id >= B_MOVE) {
+        tap_move(id - B_MOVE);
+        return
+    }
+    if (id >= B_LEVEL) {
+        start_level(id - B_LEVEL);
+        return
+    }
+    if (id == B_BACK) {
+        if (page == PAGE_PROOF) page = PAGE_LEVEL else page = PAGE_MAP;
+        unpick();
+        an_jump = true
+    } else if (id == B_UNDO) undo_move() else if (id == B_PROOF) {
+        write_proof();
+        page = PAGE_PROOF;
+        sc_pos[V_PROOF] = 0.0
+    } else if (id == B_NEXT) {
+        k: int = next_level(playing);
+        if (k >= 0) start_level(k) else page = PAGE_MAP
+    } else if (id == B_MAP) {
+        page = PAGE_MAP;
+        unpick()
+    } else if (id == B_AGAIN) {
+        if (playing >= 0) start_level(playing)
+    } else if (id == B_TRAY_CLOSE) {
+        if (wit_cand >= 0) wit_cand = -1 else unpick()
+    } else if (id == B_WATCH) {
+        if (watching) stop_watch() else start_watch()
+    } else if (id == B_INTRO) intro_open = false else if (id == B_GOAL_NEXT) {
+        // (The next open goal played.)
+        level_open();
+        n: int = play_node();
+        for i in 0..open_n {
+            if (open_nodes[i] == n) chosen_node = open_nodes[(i + 1) % open_n]
+        }
+        unpick()
+    }
+}
+
+// A tap on an expression (not on a button): the block under the finger.
+tap_expr(e: int, x: f32, y: f32) raises KernelError {
+    if (page != PAGE_LEVEL || done_t >= 0.0) return;
+    b: int = block_at(e, x, y);
+    if (b >= 0) pick_block(e, b)
+}
+
+// Keys (on a computer): Escape backs out, u or z undoes.
+key_press(ks: int) {
+    if (ks == 117 || ks == 122) undo_move() else if (ks == 65288 && page == PAGE_LEVEL) undo_move()
+}
+
+esc_key(): bool {
+    if (picked) {
+        unpick();
+        return true
+    }
+    if (page == PAGE_PROOF) {
+        page = PAGE_LEVEL;
+        return true
+    }
+    if (page == PAGE_LEVEL) {
+        page = PAGE_MAP;
+        return true
+    }
+    false
+}
+
+step_app(dt: f32) {
+    frame_dt = dt;
+    now_t = now_t + 0.0;
+    step_press();
+    for v in 0..VIEWS step_scroll(v);
+    target: f32 = 0.0;
+    if (picked) target = 1.0;
+    tray_t = ease_to(tray_t, target, 16.0);
+    last_raise = step_watch_safe()
+}
+
+last_raise: bool = false;
+
+step_watch_safe(): bool {
+    try {
+        step_watch()
+    } with KernelError -> {
+        watching = false;
+        toast("The kernel stopped the written proof");
+        return false
+    }
+    true
+}

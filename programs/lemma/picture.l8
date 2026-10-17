@@ -1,0 +1,860 @@
+tag lemma_ui;
+
+use_tag std, skate, lemma;
+
+// The picture above a level: the goal, on an example. The proof is about
+// every case; the picture shows one, and follows the proof as it goes.
+//
+// Limits (picture sequence): the sequences of the level, dot by dot, with
+// their limits. What a hypothesis or the goal says about a sequence
+// (from N on, within r of L: ∀n≥N. |sₙ − L| < r) is drawn as a band r
+// wide about L, from a gate at N on. The ε a player takes is the other
+// side's choice: it can be dragged, and every N found from it moves.
+//
+// Groups (picture square): the elements are the symmetries of a square
+// (turns, and turns after a flip), each shown by where it sends the
+// corners. The names in the goal are given such symmetries (ones that make
+// the hypotheses true); the goal's two sides are drawn as squares, the
+// same when they are equal.
+pic_reset() {
+    pic_eps = 0.6;
+    pic_n_extra = 2.0
+}
+
+pic_moved() { }
+
+// ---- numbers ----
+// The value a term has in the example, as a float (sequences are
+// functions of the natural numbers; natural numbers are floats too). NaN
+// for what cannot be worked out (a for-all over the reals).
+const NAN_V: f32 = 1.0e30;
+
+// Values of the fixed names now (by term).
+pv_term: []int = new int[64](0);
+
+pv_val: []f32 = new f32[64](0.0);
+
+pv_n: int = 0;
+
+// Bound variables' values, innermost last.
+pb_val: []f32 = new f32[64](0.0);
+
+pb_n: int = 0;
+
+pv_of(t: int): f32 {
+    for i in 0..pv_n {
+        if (pv_term[i] == t) return pv_val[i]
+    }
+    NAN_V
+}
+
+pv_set(t: int, v: f32) {
+    for i in 0..pv_n {
+        if (pv_term[i] == t) {
+            pv_val[i] = v;
+            return
+        }
+    }
+    if (pv_n < len(pv_term)) {
+        pv_term[pv_n] = t;
+        pv_val[pv_n] = v;
+        pv_n = pv_n + 1
+    }
+}
+
+// The example's sequences: by term, each a few numbers (its limit, how
+// far it starts from it, how it closes in).
+ps_term: []int = new int[16](0);
+
+ps_lim: []f32 = new f32[16](0.0);
+
+ps_amp: []f32 = new f32[16](0.0);
+
+ps_ratio: []f32 = new f32[16](0.0);
+
+ps_n: int = 0;
+
+seq_at(t: int, n: f32): f32 {
+    for i in 0..ps_n {
+        if (ps_term[i] == t) return ps_lim[i] + ps_amp[i] * powd(ps_ratio[i], n)
+    }
+    NAN_V
+}
+
+powd(r: f32, n: f32): f32 {
+    k: int = n as int;
+    v: f32 = 1.0;
+    for _ in 0..mini(k, 400) v = v * r;
+    v
+}
+
+absd(x: f32): f32 {
+    if (x < 0.0) return -x;
+    x
+}
+
+maxd(a: f32, b: f32): f32 {
+    if (a > b) return a;
+    b
+}
+
+// The value of t (bound variables in pb_).
+num(t: int): f32 {
+    k: int = tm_kind(t);
+    if (k == TM_BOUND) {
+        i: int = pb_n - 1 - tm_bound_index(t);
+        if (i >= 0) return pb_val[i];
+        return NAN_V
+    }
+    v: int = numeral_value(t);
+    if (v >= 0) return v as f32;
+    if (k == TM_FREE) return pv_of(t);
+    if (k != TM_APP) return NAN_V;
+    if (is_role(t, CR_PLUS, 2)) return bin(t, 0);
+    if (is_role(t, CR_MINUS, 2)) return bin(t, 1);
+    if (is_role(t, CR_TIMES, 2)) return bin(t, 2);
+    if (is_role(t, CR_DIVIDE, 2)) return bin(t, 3);
+    if (is_role(t, CR_NMAX, 2)) return bin(t, 4);
+    if (is_role(t, CR_NEG, 1)) {
+        a: f32 = num(tm_arg(t));
+        if (a == NAN_V) return NAN_V;
+        return -a
+    }
+    if (is_role(t, CR_ABS, 1)) {
+        a: f32 = num(tm_arg(t));
+        if (a == NAN_V) return NAN_V;
+        return absd(a)
+    }
+    // (A sequence at a place, or a λ applied.)
+    f: int = tm_fun(t);
+    if (tm_kind(f) == TM_FREE) {
+        n: f32 = num(tm_arg(t));
+        if (n == NAN_V) return NAN_V;
+        return seq_at(f, n)
+    }
+    if (tm_kind(f) == TM_ABS) {
+        a: f32 = num(tm_arg(t));
+        if (pb_n >= len(pb_val)) return NAN_V;
+        pb_val[pb_n] = a;
+        pb_n = pb_n + 1;
+        r: f32 = num(tm_body(f));
+        pb_n = pb_n - 1;
+        return r
+    }
+    NAN_V
+}
+
+bin(t: int, op: int): f32 {
+    a: f32 = num(spine_arg(t, 2, 0));
+    b: f32 = num(spine_arg(t, 2, 1));
+    if (a == NAN_V || b == NAN_V) return NAN_V;
+    if (op == 0) return a + b;
+    if (op == 1) return a - b;
+    if (op == 2) return a * b;
+    if (op == 3) {
+        if (b == 0.0) return NAN_V;
+        return a / b
+    }
+    maxd(a, b)
+}
+
+// ---- what the statements say about sequences ----
+// A band: sequence term (or λ), its limit's term, its width's term, and
+// its gate's (from n on; 0 if none), and whether it is the goal's.
+const BANDS: int = 16;
+
+bd_seq: []int = new int[BANDS](0);
+
+bd_lim: []int = new int[BANDS](0);
+
+bd_r: []int = new int[BANDS](0);
+
+bd_gate: []int = new int[BANDS](0);
+
+bd_goal: []bool = new bool[BANDS](false);
+
+bd_n: int = 0;
+
+// Whether p is |s n − L| < r, for the bound variable n (or the fixed n),
+// recording s, L, r (the sequence being s applied: s is what n is applied
+// to, or the λ of the whole). bd_at: the n if fixed.
+bf_seq: int = 0;
+
+bf_lim: int = 0;
+
+bf_r: int = 0;
+
+bf_at: int = 0;
+
+band_form(p0: int): bool {
+    p: int = rel_core(p0);
+    if (!is_role(p, CR_LT, 2)) return false;
+    l: int = spine_arg(p, 2, 0);
+    bf_r = spine_arg(p, 2, 1);
+    if (!is_role(l, CR_ABS, 1)) return false;
+    d: int = tm_arg(l);
+    if (!is_role(d, CR_MINUS, 2)) return false;
+    s: int = spine_arg(d, 2, 0);
+    bf_lim = spine_arg(d, 2, 1);
+    bf_seq = s;
+    bf_at = 0;
+    if (tm_kind(s) == TM_APP) {
+        bf_at = tm_arg(s);
+        bf_seq = tm_fun(s);
+        // (A sum like aₙ + bₙ: the whole, as a function of n.)
+        if (tm_kind(bf_seq) != TM_FREE) bf_seq = s
+    }
+    true
+}
+
+// What a statement says, as a band, if it says one: ∀n≥K. |sₙ − L| < r
+// (gated at K), ∃N. ∀n≥N. ... (to be gated), or |sₙ − L| < r.
+band_of(p0: int, goal: bool) {
+    p: int = rel_core(p0);
+    gate: int = 0;
+    under: int = 0;
+    if (is_binary(p, role_name[ROLE_EX]) || tm_kind(p) == TM_APP && tm_kind(tm_fun(p)) == TM_CONST && tm_name(tm_fun(p)) == role_name[ROLE_EX] && tm_kind(tm_arg(p)) == TM_ABS) {
+        p = tm_body(tm_arg(p));
+        under = 1
+    }
+    if (tm_kind(p) == TM_APP && tm_kind(tm_fun(p)) == TM_CONST && tm_name(tm_fun(p)) == role_name[ROLE_ALL] && tm_kind(tm_arg(p)) == TM_ABS) {
+        body: int = tm_body(tm_arg(p));
+        if (is_binary(body, role_name[ROLE_IMP])) {
+            cond: int = spine_arg(body, 2, 0);
+            if (is_role(cond, CR_NLE, 2) && tm_closed(spine_arg(cond, 2, 0))) gate = spine_arg(cond,
+                2, 0);
+            body = spine_arg(body, 2, 1)
+        }
+        if (band_form(body) && tm_closed(bf_lim) && tm_closed(bf_r) && under == 0) add_band(gate,
+            goal) else if (band_form(body) && under == 1 && tm_closed(bf_lim) && tm_closed(bf_r)) add_band(0,
+            goal);
+        return
+    }
+    if (under == 0 && band_form(p) && tm_closed(bf_lim) && tm_closed(bf_r)) add_band(bf_at,
+        goal)
+}
+
+add_band(gate: int, goal: bool) {
+    if (bd_n >= BANDS) return;
+    // (A sequence written with n bound: the λ of it is not closed, so the
+    // goal's is taken whole from the level's statement instead.)
+    s: int = bf_seq;
+    if (!tm_closed(s)) s = goal_seq;
+    if (s == 0) return;
+    bd_seq[bd_n] = s;
+    bd_lim[bd_n] = bf_lim;
+    bd_r[bd_n] = bf_r;
+    bd_gate[bd_n] = gate;
+    bd_goal[bd_n] = goal;
+    bd_n = bd_n + 1
+}
+
+// The level's own sequence: s in its statement's s → L (or 0).
+goal_seq: int = 0;
+
+goal_lim: int = 0;
+
+// ---- the ε handle ----
+pic_eps: f32 = 0.6;
+
+pic_n_extra: f32 = 2.0;
+
+// Where the handle is drawn (to be grabbed), and whether it is shown.
+handle_x: f32 = 0.0;
+
+handle_y: f32 = 0.0;
+
+handle_on: bool = false;
+
+handle_held: bool = false;
+
+// The picture's frame and scale, for dragging.
+pf_y0: f32 = 0.0;
+
+pf_y1: f32 = 0.0;
+
+pf_lo: f32 = 0.0;
+
+pf_hi: f32 = 1.0;
+
+pic_grab(x: f32, y: f32): bool {
+    if (!handle_on) return false;
+    if (absf(x - handle_x) < 30.0 && absf(y - handle_y) < 30.0) {
+        handle_held = true;
+        return true
+    }
+    false
+}
+
+// Dragged: ε is how far the handle is above the goal's limit line.
+pic_drag(x: f32, y: f32) {
+    if (!handle_held || pf_y1 <= pf_y0) return;
+    v: f32 = pf_lo + ((pf_y1 - y) / (pf_y1 - pf_y0)) as f32 * (pf_hi - pf_lo);
+    lim: f32 = pic_goal_lim_v;
+    pic_eps = maxd(absd(v - lim), 0.03);
+    if (pic_eps > (pf_hi - pf_lo) * 0.6) pic_eps = (pf_hi - pf_lo) * 0.6;
+    busy = true;
+    if (x < -1000.0) pic_eps = 0.6
+}
+
+pic_drop() {
+    handle_held = false
+}
+
+pic_goal_lim_v: f32 = 0.0;
+
+// ---- the example ----
+// Give the fixed names of goal g values: reals and sequences from the
+// level's statement, then each name a move brought in, in order.
+pic_values(g: int) {
+    pv_n = 0;
+    ps_n = 0;
+    if (cur_level < 0) return;
+    // (The level's statement, with its own names: its sequences, and
+    // what they tend to.)
+    g0: int = pn_goal[root];
+    reals: int = 0;
+    for i in 0..gl_fixn[pn_goal[root]] {
+        x: int = goal_fix(pn_goal[root], i);
+        ty: int = tm_type(x);
+        if (ty_kind(ty) == TY_FUN) {
+            if (ps_n < len(ps_term)) {
+                ps_term[ps_n] = x;
+                ps_amp[ps_n] = 1.3 - ps_n as f32 * 0.5;
+                if (ps_n % 2 == 1) ps_ratio[ps_n] = -0.72 else ps_ratio[ps_n] = 0.8;
+                ps_lim[ps_n] = 0.0;
+                ps_n = ps_n + 1
+            }
+        } else if (is_real_type(ty)) {
+            presets: []f32 = real_presets;
+            pv_set(x, presets[reals % len(presets)]);
+            reals = reals + 1
+        }
+    }
+    // (A sequence tends to what the statement says.)
+    for i in 0..ps_n {
+        for j in 0..gl_hypn[g0] set_limit_from(goal_hyp(g0, j), ps_term[i]);
+        set_limit_from(gl_concl[g0], ps_term[i])
+    }
+    goal_seq = 0;
+    goal_lim = 0;
+    find_goal_seq(gl_concl[g0]);
+    // (Then what the moves brought in.)
+    for i in gl_fixn[pn_goal[root]]..gl_fixn[g] {
+        x: int = goal_fix(g, i);
+        if (is_real_type(tm_type(x))) pv_set(x, pic_eps) else pv_set(x, nat_value(g,
+            x))
+    }
+}
+
+real_presets: []f32 = [1.0, -0.6, 0.7, 1.6];
+
+is_real_type(t: int): bool {
+    e: int = find_ent(calc_role[CR_LT], 1 << E_FIX);
+    e >= 0 && ty_dom(ent_ty[e]) == t
+}
+
+// In statement p, s → L: s's limit is L's value.
+set_limit_from(p: int, s: int) {
+    k: int = tm_kind(p);
+    if (k == TM_APP) {
+        if (spine_len(p) == 2 && tm_kind(spine_head(p)) == TM_FREE && sym_len[tm_name(spine_head(p))] > 0 && spine_arg(p,
+            2, 0) == s && is_tendsto(spine_head(p))) {
+            v: f32 = num(spine_arg(p, 2, 1));
+            for i in 0..ps_n {
+                if (ps_term[i] == s && v != NAN_V && ps_lim[i] == 0.0) ps_lim[i] = v
+            }
+        }
+        set_limit_from(tm_fun(p), s);
+        set_limit_from(tm_arg(p), s)
+    } else if (k == TM_ABS) set_limit_from(tm_body(p), s)
+}
+
+is_tendsto(h: int): bool {
+    tm_name(h) == sym("tendsto")
+}
+
+// The statement's conclusion s → L: the goal's sequence and limit.
+find_goal_seq(p: int) {
+    q: int = p;
+    while (is_imp(q)) q = rhs_of(q);
+    c: int = rel_core(q);
+    if (spine_len(c) == 2 && is_tendsto(spine_head(c))) {
+        goal_seq = spine_arg(c, 2, 0);
+        goal_lim = spine_arg(c, 2, 1)
+    }
+}
+
+// A natural number the moves brought in: the least gate that its band
+// holds from (an N from "there is an N"), or a little past its lower
+// bound (an n with n ≥ max(N, N₁)), or 0.
+nat_value(g: int, x: int): f32 {
+    for i in 0..gl_hypn[g] {
+        bd_n = 0;
+        band_of(goal_hyp(g, i), false);
+        if (bd_n > 0 && bd_gate[0] == x) return least_gate(bd_seq[0], bd_lim[0], bd_r[0])
+    }
+    for i in 0..gl_hypn[g] {
+        p: int = rel_core(goal_hyp(g, i));
+        if (is_role(p, CR_NLE, 2) && spine_arg(p, 2, 1) == x) {
+            lo: f32 = num(spine_arg(p, 2, 0));
+            if (lo != NAN_V) return lo + pic_n_extra
+        }
+    }
+    0.0
+}
+
+// The least N from which sequence s stays within r of L (as far as 400).
+least_gate(s: int, lim: int, r: int): f32 {
+    l: f32 = num(lim);
+    w: f32 = num(r);
+    if (l == NAN_V || w == NAN_V) return 0.0;
+    last_out: int = -1;
+    for n in 0..400 {
+        v: f32 = seq_value(s, n as f32);
+        if (v == NAN_V || absd(v - l) >= w) last_out = n
+    }
+    (last_out + 1) as f32
+}
+
+// Sequence s (a name, or a λ) at n.
+seq_value(s: int, n: f32): f32 {
+    if (tm_kind(s) == TM_FREE) return seq_at(s, n);
+    if (tm_kind(s) == TM_ABS) {
+        if (pb_n >= len(pb_val)) return NAN_V;
+        pb_val[pb_n] = n;
+        pb_n = pb_n + 1;
+        r: f32 = num(tm_body(s));
+        pb_n = pb_n - 1;
+        return r
+    }
+    NAN_V
+}
+
+// ---- drawing ----
+draw_picture(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32
+) {
+    p_shadow(x, y, w, h, 20.0, 3.0, 12.0, 0.12);
+    p_box(x, y, w, h, 20.0, C_CARD, 1.0);
+    handle_on = false;
+    n: int = play_node();
+    if (n < 0) n = root;
+    g: int = pn_goal[n];
+    p_clip(x + 2.0, y + 2.0, x + w - 2.0, y + h - 2.0);
+    if (region_picture == sym("sequence")) draw_sequences(x, y, w, h, g) else if (region_picture == sym("square")) draw_squares(x,
+        y, w, h, g);
+    p_noclip()
+}
+
+// The colors sequences are drawn in.
+seq_colors: []int = [3824544, 13784378, 4160846, 14518826];
+
+draw_sequences(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    g: int
+) {
+    pic_values(g);
+    pb_n = 0;
+    // (What is said about the sequences: the goal's band, and the
+    // hypotheses'.)
+    bd_n = 0;
+    band_of(gl_concl[g], true);
+    for i in 0..gl_hypn[g] band_of(goal_hyp(g, i), false);
+    // (The range: every value shown, and the limits.)
+    lo: f32 = 1.0e9;
+    hi: f32 = -1.0e9;
+    nmax: int = 24;
+    for i in 0..ps_n {
+        for k in 0..nmax {
+            v: f32 = seq_at(ps_term[i], k as f32);
+            if (v < lo) lo = v;
+            if (v > hi) hi = v
+        }
+    }
+    if (goal_seq != 0) {
+        for k in 0..nmax {
+            v: f32 = seq_value(goal_seq, k as f32);
+            if (v != NAN_V) {
+                if (v < lo) lo = v;
+                if (v > hi) hi = v
+            }
+        }
+    }
+    if (hi < lo) {
+        lo = -1.0;
+        hi = 1.0
+    }
+    // (Room for the bands too, but not past a little more than the dots
+    // need: a wide ε is just a wide band.)
+    if (hi - lo < 1.0) {
+        mid: f32 = (hi + lo) * 0.5;
+        lo = mid - 0.5;
+        hi = mid + 0.5
+    }
+    for b in 0..bd_n {
+        lim: f32 = num(bd_lim[b]);
+        r: f32 = num(bd_r[b]);
+        if (lim != NAN_V && r != NAN_V) {
+            room: f32 = minf(r, (hi - lo) * 0.6);
+            if (lim + room > hi) hi = lim + room;
+            if (lim - room < lo) lo = lim - room
+        }
+    }
+    span: f32 = hi - lo;
+    lo = lo - span * 0.12;
+    hi = hi + span * 0.12;
+    px0: f32 = x + 34.0;
+    px1: f32 = x + w - 16.0;
+    py0: f32 = y + 14.0;
+    py1: f32 = y + h - 26.0;
+    pf_y0 = py0;
+    pf_y1 = py1;
+    pf_lo = lo;
+    pf_hi = hi;
+    // (The axis of n.)
+    p_line(px0, py1, px1, py1, 1.5, C_LINE, 1.0);
+    p_str(0, 12.0, px1 - 8.0, py1 + 18.0, "n", C_MUTED, 1.0);
+    // (The bands, under the dots.)
+    for b in 0..bd_n {
+        lim: f32 = num(bd_lim[b]);
+        r: f32 = num(bd_r[b]);
+        if (lim != NAN_V && r != NAN_V && r > 0.0) {
+            gate: f32 = 0.0;
+            if (bd_gate[b] != 0) gate = num(bd_gate[b]);
+            if (gate == NAN_V) gate = 0.0;
+            gx: f32 = px0 + (px1 - px0) * (gate as f32 / nmax as f32);
+            ya: f32 = pic_y(lim + r, py0, py1, lo, hi);
+            yb: f32 = pic_y(lim - r, py0, py1, lo, hi);
+            col: int = C_GOLD;
+            if (bd_goal[b]) col = C_PICK;
+            if (gx < px1) {
+                p_box(gx, ya, px1 - gx, yb - ya, 6.0, col, 0.16);
+                if (bd_gate[b] != 0) {
+                    p_line(gx, py0, gx, py1, 2.0, col, 0.8);
+                    p_sym(1, 12.0, gx + 3.0, py0 + 12.0, gate_name(bd_gate[b]), col,
+                        1.0)
+                }
+            }
+            // (The goal's ε: a handle on the band's edge.)
+            if (bd_goal[b] && is_eps(bd_r[b])) {
+                handle_on = true;
+                handle_x = px1 - 14.0;
+                handle_y = ya;
+                pic_goal_lim_v = lim;
+                p_glow(handle_x, handle_y, 12.0, 4.0, C_PICK, 0.35);
+                p_disc(handle_x, handle_y, 8.0, C_PICK, 1.0);
+                p_sym(1, 13.0, handle_x - 22.0, handle_y - 8.0, sym_cp(949), C_PICK,
+                    1.0)
+            }
+        }
+    }
+    // (Each limit, a dashed line.)
+    for i in 0..ps_n {
+        ly: f32 = pic_y(ps_lim[i], py0, py1, lo, hi);
+        dashed(px0, ly, px1, seq_colors[i % len(seq_colors)])
+    }
+    // (The dots: each sequence, and the goal's if it is made of them.)
+    for i in 0..ps_n {
+        col: int = seq_colors[i % len(seq_colors)];
+        for k in 0..nmax {
+            v: f32 = seq_at(ps_term[i], k as f32);
+            p_disc(px0 + (px1 - px0) * (k as f32 / nmax as f32), pic_y(v, py0, py1,
+                lo, hi), 2.6, col, 0.75)
+        }
+        p_sym(1, 13.0, x + 10.0, pic_y(seq_at(ps_term[i], 0.0), py0, py1, lo, hi) + 5.0,
+            tm_name(ps_term[i]), col, 1.0)
+    }
+    if (goal_seq != 0 && tm_kind(goal_seq) == TM_ABS) {
+        for k in 0..nmax {
+            v: f32 = seq_value(goal_seq, k as f32);
+            if (v != NAN_V) p_disc(px0 + (px1 - px0) * (k as f32 / nmax as f32), pic_y(v,
+                py0, py1, lo, hi), 3.6, C_INK, 0.9)
+        }
+    }
+    // (The n taken, if any: its dot, ringed.)
+    for i in 0..gl_fixn[g] {
+        xn: int = goal_fix(g, i);
+        if (!is_real_type(tm_type(xn)) && ty_kind(tm_type(xn)) != TY_FUN && is_little_n(xn)) {
+            nv: f32 = pv_of(xn);
+            if (nv != NAN_V && nv < nmax as f32 && goal_seq != 0) {
+                v: f32 = seq_value(goal_seq, nv);
+                if (v != NAN_V) {
+                    cx: f32 = px0 + (px1 - px0) * (nv as f32 / nmax as f32);
+                    p_ring(cx, pic_y(v, py0, py1, lo, hi), 7.0, 2.0, C_PICK, 1.0)
+                }
+            }
+        }
+    }
+}
+
+pic_y(
+    v: f32,
+    y0: f32,
+    y1: f32,
+    lo: f32,
+    hi: f32
+): f32 {
+    y1 - ((v - lo) / (hi - lo)) as f32 * (y1 - y0)
+}
+
+dashed(
+    x0: f32,
+    y: f32,
+    x1: f32,
+    col: int
+) {
+    xx: f32 = x0;
+    while (xx < x1) {
+        p_line(xx, y, minf(xx + 6.0, x1), y, 1.2, col, 0.5);
+        xx = xx + 11.0
+    }
+}
+
+// A gate's name, shown (N, N₁, max(N, N₁)).
+gate_name(t: int): int {
+    show_line(t);
+    line_sym_now()
+}
+
+is_eps(t: int): bool {
+    tm_kind(t) == TM_FREE
+}
+
+// Whether a fixed name is a small n (an index, not a gate).
+is_little_n(x: int): bool {
+    s: int = tm_name(x);
+    sym_len[s] > 0 && sym_byte(s, 0) == 110
+}
+
+// ---- squares ----
+// The symmetries of a square: k turns (0 to 3), then a flip if f. As a
+// number 0 to 7: f * 4 + k. Where corner i (0 to 3, clockwise from the
+// top left) goes.
+sq_corner(e: int, i: int): int {
+    k: int = e % 4;
+    f: int = e / 4;
+    j: int = i;
+    if (f == 1) {
+        // (A flip about the upright line: 0 and 1 swap, 2 and 3.)
+        j = 3 - i
+    }
+    (j + k) % 4
+}
+
+// Doing a, then b.
+sq_mul(a: int, b: int): int {
+    // (By where they send the corners: the symmetry that sends each where
+    // a then b do.)
+    for e in 0..8 {
+        same: bool = true;
+        for i in 0..4 {
+            if (sq_corner(e, i) != sq_corner(b, sq_corner(a, i))) same = false
+        }
+        if (same) return e
+    }
+    0
+}
+
+sq_inv(a: int): int {
+    for e in 0..8 {
+        if (sq_mul(a, e) == 0) return e
+    }
+    0
+}
+
+// The group's names' values (by term), as symmetries.
+sqv_term: []int = new int[16](0);
+
+sqv_val: []int = new int[16](0);
+
+sqv_n: int = 0;
+
+sq_eval(t: int): int {
+    k: int = tm_kind(t);
+    if (k == TM_FREE) {
+        for i in 0..sqv_n {
+            if (sqv_term[i] == t) return sqv_val[i]
+        }
+        if (tm_name(t) == sym("e")) return 0;
+        return -1
+    }
+    if (k == TM_APP) {
+        if (spine_len(t) == 2 && tm_name(spine_head(t)) == sym("mul")) {
+            a: int = sq_eval(spine_arg(t, 2, 0));
+            b: int = sq_eval(spine_arg(t, 2, 1));
+            if (a < 0 || b < 0) return -1;
+            return sq_mul(a, b)
+        }
+        if (spine_len(t) == 1 && tm_kind(tm_fun(t)) == TM_FREE && tm_name(tm_fun(t)) == sym("inv")) {
+            a: int = sq_eval(tm_arg(t));
+            if (a < 0) return -1;
+            return sq_inv(a)
+        }
+    }
+    -1
+}
+
+// Whether a statement holds in the example (equations, and for-alls over
+// the group's elements; else it is taken to).
+sq_holds(p0: int): bool {
+    p: int = rel_core(p0);
+    if (is_binary(p, role_name[ROLE_EQ])) {
+        a: int = sq_eval(spine_arg(p, 2, 0));
+        b: int = sq_eval(spine_arg(p, 2, 1));
+        return a < 0 || b < 0 || a == b
+    }
+    true
+}
+
+// Values for the level's names: the first assignment (turns and flips,
+// not the identity first) that makes its hypotheses hold.
+sq_values() {
+    sqv_n = 0;
+    if (cur_level < 0) return;
+    g0: int = pn_goal[root];
+    k: int = 0;
+    for i in 0..gl_fixn[g0] {
+        if (k < len(sqv_term)) {
+            sqv_term[k] = goal_fix(g0, i);
+            k = k + 1
+        }
+    }
+    sqv_n = k;
+    // (Of those that make the hypotheses hold, the one with the most
+    // names moved, and the most of them different.)
+    tries: int = 1;
+    for _ in 0..k tries = tries * 8;
+    best: int = -1;
+    best_score: int = -1;
+    for t in 0..mini(tries, 32768) {
+        sq_assign(t, k);
+        ok: bool = true;
+        for j in 0..gl_hypn[g0] {
+            if (!sq_holds(goal_hyp(g0, j))) ok = false
+        }
+        if (ok) {
+            score: int = 0;
+            for i in 0..k {
+                if (sqv_val[i] != 0) score = score + 2;
+                for j in 0..i {
+                    if (sqv_val[j] != sqv_val[i]) score = score + 1
+                }
+            }
+            if (score > best_score) {
+                best_score = score;
+                best = t
+            }
+        }
+    }
+    if (best >= 0) sq_assign(best, k)
+}
+
+// Assignment number t of k names (each a symmetry, 8 ways).
+sq_assign(t: int, k: int) {
+    c: int = t;
+    for i in 0..k {
+        sqv_val[i] = (c % 8 + 1 + i * 3) % 8;
+        c = c / 8
+    }
+}
+
+draw_squares(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    g: int
+) {
+    sq_values();
+    // (The names, each with its symmetry, along the top.)
+    lx: f32 = x + 16.0;
+    for i in 0..sqv_n {
+        s: int = tm_name(sqv_term[i]);
+        p_sym(1, 15.0, lx, y + 28.0, s, C_INK, 1.0);
+        nw: f32 = p_sym_w(1, 15.0, s);
+        draw_square(lx + nw + 22.0, y + 22.0, 13.0, sqv_val[i], sqv_term[i] * 8 + 1);
+        lx = lx + nw + 56.0
+    }
+    // (The goal's two sides.)
+    c: int = rel_core(gl_concl[g]);
+    if (is_binary(c, role_name[ROLE_EQ])) {
+        a: int = sq_eval(spine_arg(c, 2, 0));
+        b: int = sq_eval(spine_arg(c, 2, 1));
+        size: f32 = minf(h * 0.26, w * 0.12);
+        cy: f32 = y + h * 0.62;
+        if (a >= 0) draw_square(x + w * 0.3, cy, size, a, 2);
+        if (b >= 0) draw_square(x + w * 0.7, cy, size, b, 3);
+        eq: bool = a == b && a >= 0;
+        mid: int = sym("=");
+        col: int = C_GREEN;
+        if (!eq) {
+            mid = sym_cp(8800);
+            col = C_MUTED
+        }
+        mw: f32 = p_sym_w(1, 26.0, mid);
+        p_sym(1, 26.0, x + w * 0.5 - mw * 0.5, cy + 9.0, mid, col, 1.0);
+        p_str_mid(0, 12.0, x + w * 0.3, cy + size + 22.0, "left side", C_MUTED, 1.0);
+        p_str_mid(0, 12.0, x + w * 0.7, cy + size + 22.0, "right side", C_MUTED, 1.0)
+    }
+}
+
+// A pudgy square about (cx, cy), half size r, its corners colored where
+// symmetry e sends them; its corners slide when e changes (key: which).
+corner_colors: []int = [13784378, 14852923, 4160846, 3824544];
+
+sqa_key: []int = new int[64](0);
+
+sqa_x: []f32 = new f32[256](0.0);
+
+sqa_y: []f32 = new f32[256](0.0);
+
+sqa_n: int = 0;
+
+draw_square(
+    cx: f32,
+    cy: f32,
+    r: f32,
+    e: int,
+    key: int
+) {
+    p_shadow(cx - r, cy - r, 2.0 * r, 2.0 * r, r * 0.35, 2.0, 6.0, 0.15);
+    p_box(cx - r, cy - r, 2.0 * r, 2.0 * r, r * 0.35, C_SUNK, 1.0);
+    // (The slot for this square's corners.)
+    s: int = -1;
+    for i in 0..sqa_n {
+        if (sqa_key[i] == key) s = i
+    }
+    fresh: bool = false;
+    if (s < 0 && sqa_n < len(sqa_key)) {
+        s = sqa_n;
+        sqa_key[s] = key;
+        sqa_n = sqa_n + 1;
+        fresh = true
+    }
+    for i in 0..4 {
+        pos: int = sq_corner(e, i);
+        tx: f32 = cx - r * 0.55;
+        ty: f32 = cy - r * 0.55;
+        if (pos == 1 || pos == 2) tx = cx + r * 0.55;
+        if (pos == 2 || pos == 3) ty = cy + r * 0.55;
+        k: int = s * 4 + i;
+        if (s >= 0 && k < len(sqa_x)) {
+            if (fresh) {
+                sqa_x[k] = tx;
+                sqa_y[k] = ty
+            }
+            sqa_x[k] = ease_to(sqa_x[k], tx, 9.0);
+            sqa_y[k] = ease_to(sqa_y[k], ty, 9.0);
+            tx = sqa_x[k];
+            ty = sqa_y[k]
+        }
+        p_disc(tx, ty, r * 0.26, corner_colors[i], 1.0)
+    }
+}
