@@ -20,9 +20,27 @@ draw_to: []int = new int[MAX_DRAWS](0);
 
 draw_morph: []f32 = new f32[MAX_DRAWS](0.0);
 
-// (And whether it is part of a ghost: drawn seen through, last, and
-// casting no shadow.)
+// (And whether only some of it shows: of a ghost, or a car near the
+// camera; and how much, from 0 to 1. And whether it is a ghost, pale, seen
+// through, and casting no shadow, drawn last; or a car in its own colors,
+// with only as many of its pixels drawn as show of it: see dither, in
+// render.l8.)
 draw_ghost: []bool = new bool[MAX_DRAWS](false);
+
+draw_shows: []f32 = new f32[MAX_DRAWS](1.0);
+
+draw_pale: []bool = new bool[MAX_DRAWS](false);
+
+// (And its paint, for the blocks of it that are painted (see paint_rgb, in
+// cars.l8; and mesh.l8): or -1, its car's own colors.)
+draw_paint: []int = new int[MAX_DRAWS](-1);
+
+// (And how much of its shadow there is, from 0 to 1: as much as shows of
+// it, and none for a ghost; and the point on the ground under the car,
+// which a smaller shadow is drawn in toward. See pose_cast.)
+draw_cast: []f32 = new f32[MAX_DRAWS](1.0);
+
+draw_under: []f32 = new f32[MAX_DRAWS * 3](0.0);
 
 ndraw: int = 0;
 
@@ -34,19 +52,58 @@ pose_to: int = 0;
 
 pose_morph: f32 = 0.0;
 
-// Whether the cars being posed are ghosts (see ghost.l8).
+// Whether only some of the cars being posed shows, how much, and whether
+// they are ghosts (see ghost.l8).
 pose_ghost: bool = false;
 
-// Where the picture is taken from: another car that is right up against it
-// (one close behind the player's is) is drawn seen through, as a ghost is,
-// so that it does not hide the road. And how near that is.
+pose_shows: f32 = 1.0;
+
+pose_pale: bool = false;
+
+// The paint of the cars being posed, or -1 (see draw_paint).
+pose_paint: int = -1;
+
+// How much shadow the cars being posed cast, of as much as shows of them:
+// less than 1 for the player's car while it is carried high (see
+// main.l8), where its shadow would fall far from it. And the point on the
+// ground under the car posed.
+pose_cast: f32 = 1.0;
+
+pose_under: V3 = V3 { x: 0.0, y: 0.0, z: 0.0 };
+
+// Where the picture is taken from, and where the player's car is. Another
+// car right up against the camera (one close behind the player's is) would
+// be huge, and fill the picture: less of it shows, and nearer, it goes.
+// All of it shows as far from the camera as NEAR_SEEN of the way to the
+// player's car, where it is not much bigger than that; and none of it at
+// NEAR_GONE of the way. (Not by how much nearer than the player's car it
+// is, as a ghost goes: one beside it, just behind, is not in the way.)
 pose_eye: V3 = V3 { x: 0.0, y: 1000.0, z: 0.0 };
 
-const POSE_NEAR: f32 = 4.6;
+pose_mine: V3 = V3 { x: 0.0, y: 0.0, z: 0.0 };
 
-pose_near(p: V3): bool {
-    d: V3 = v_sub(p, pose_eye);
-    d.x * d.x + d.z * d.z < POSE_NEAR * POSE_NEAR && absf(d.y) < 8.0
+const NEAR_SEEN: f32 = 0.7;
+
+const NEAR_GONE: f32 = 0.4;
+
+// (While the camera flies round the player's car, it may come nearer it
+// than it will be: the way to the car is taken as no shorter than the way
+// it will be, so that a car the camera passes close by is gone, not half
+// there.)
+pose_reach: f32 = 0.0;
+
+// How much shows of a car at p, from 0 to 1.
+pose_near(p: V3): f32 {
+    far: f32 = maxf(maxf(v_len(v_sub(pose_mine, pose_eye)), pose_reach), 1.0);
+    smoothstepf(NEAR_GONE * far, NEAR_SEEN * far, v_len(v_sub(p, pose_eye)))
+}
+
+// The next car posed is another, at p: as much of it shows as it is far
+// from the camera.
+fade_near(p: V3) {
+    pose_under = p;
+    pose_shows = pose_near(p);
+    pose_ghost = pose_shows < 0.999
 }
 
 pose_kind(from: int, to: int, morph: f32) {
@@ -70,6 +127,14 @@ put_part(part: int) {
     draw_to[ndraw] = pose_to;
     draw_morph[ndraw] = pose_morph;
     draw_ghost[ndraw] = pose_ghost;
+    draw_shows[ndraw] = pose_shows;
+    draw_pale[ndraw] = pose_pale;
+    draw_paint[ndraw] = pose_paint;
+    draw_cast[ndraw] = pose_cast * pose_shows;
+    if (pose_pale) draw_cast[ndraw] = 0.0;
+    draw_under[ndraw * 3] = pose_under.x;
+    draw_under[ndraw * 3 + 1] = pose_under.y;
+    draw_under[ndraw * 3 + 2] = pose_under.z;
     ndraw = ndraw + 1
 }
 
@@ -146,8 +211,9 @@ pose_car(
 }
 
 // ---- on the map ----
-// The cars as the map shows them (see hud.l8): where each is, its kind, and
-// which it is: a ghost, another car, or the player's own.
+// The cars as the map shows them (see hud.l8): where each is, its paint
+// (see paint_rgb), and which it is: a ghost, another car, or the player's
+// own.
 const MAX_DOTS: int = 32;
 
 const DOT_GHOST: int = 0;
@@ -160,7 +226,7 @@ dot_x: []f32 = new f32[MAX_DOTS](0.0);
 
 dot_z: []f32 = new f32[MAX_DOTS](0.0);
 
-dot_kind: []int = new int[MAX_DOTS](0);
+dot_paint: []int = new int[MAX_DOTS](0);
 
 dot_how: []int = new int[MAX_DOTS](0);
 
@@ -171,12 +237,12 @@ map_none() {
     ndots = 0
 }
 
-// A car of a kind is at p.
-map_put(p: V3, kind: int, how: int) {
+// A car of a paint is at p.
+map_put(p: V3, paint: int, how: int) {
     if (ndots >= MAX_DOTS) return;
     dot_x[ndots] = p.x;
     dot_z[ndots] = p.z;
-    dot_kind[ndots] = kind;
+    dot_paint[ndots] = paint;
     dot_how[ndots] = how;
     ndots = ndots + 1
 }

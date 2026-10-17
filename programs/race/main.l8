@@ -82,9 +82,6 @@ mono_ns(): int {
     ts.sec * 1000000000 + ts.nsec
 }
 
-// Where the car starts: a little before the start line.
-const START_S: f32 = -12.0;
-
 // ---- the camera ----
 // It follows behind and above the car, looking past it down the road, and
 // turns after the car a little late; it stays inside the canyon's walls.
@@ -93,7 +90,11 @@ const START_S: f32 = -12.0;
 // When the car is put somewhere else (back at the start: see Change), the
 // camera does not jump there: it flies, from where it was to where it
 // follows from now. If that is far, it goes up and over, and the canyon's
-// walls melt out of its way while it does.
+// walls melt out of its way while it does. It goes round the car, as the
+// car is carried (see Change): from as far out as it was, and the way it
+// was from the car, to as far and the way it is to be, by the shorter way
+// round. (Not straight there: from the menu's camera, in front of the car,
+// that would take it over the roof, close enough to fill the picture.)
 type Camera = {
     // Where it follows the car from, and what it looks at.
     eye: V3;
@@ -108,39 +109,72 @@ type Camera = {
     // flies.
     seen_eye: V3;
     seen_at: V3;
-    // A flight: where it began, how much of it is done (1: all, or there
-    // is none), how long it takes, and how high it goes on the way (0: not
-    // far enough to leave the canyon).
+    // A flight: where it began, and where the car was then; how much of it
+    // is done (1: all, or there is none), how long it takes, and how high
+    // it goes on the way (0: not far enough to leave the canyon).
     from_eye: V3;
     from_at: V3;
+    from_car: V3;
     fly: f32;
     fly_time: f32;
     lift: f32
 }
 
-// The car has been put somewhere else: fly to behind it there.
-start_flight(cam: *Camera, c: *Car, high: bool) {
+// The car has been put somewhere else, from where it was shown at `was`:
+// fly to behind it there. (Never quicker than FLY_LEAST, even if it is
+// near: the camera may have far to go round the car.)
+const FLY_LEAST: f32 = 0.9;
+
+start_flight(
+    cam: *Camera,
+    c: *Car,
+    was: V3,
+    high: bool
+) {
     cam.from_eye = cam.seen_eye;
     cam.from_at = cam.seen_at;
+    cam.from_car = was;
     cam.way = yaw_dir(c.yaw);
     update_chase(cam, c, car_point(c, 1.0), c.yaw, high, 0.0);
     far: f32 = v_len(v_sub(cam.eye, cam.from_eye));
     cam.fly = 0.0;
-    cam.fly_time = clampf(0.4 + far / 260.0, 0.4, 1.6);
+    cam.fly_time = clampf(0.4 + far / 260.0, FLY_LEAST, 1.6);
     cam.lift = 0.0;
     if (far > 30.0) cam.lift = minf(far * 0.3, 70.0)
 }
 
-// Carry a flight on by dt, and work out where the picture is taken from.
-fly_camera(cam: *Camera, dt: f32) {
+// Carry a flight on by dt, the car being at `car` now, and work out where
+// the picture is taken from.
+fly_camera(cam: *Camera, car: V3, dt: f32) {
     cam.seen_eye = cam.eye;
     cam.seen_at = cam.at;
     if (cam.fly >= 1.0) return;
     cam.fly = minf(cam.fly + dt / cam.fly_time, 1.0);
     k: f32 = smoothstepf(0.0, 1.0, cam.fly);
-    cam.seen_eye = v_lerp(cam.from_eye, cam.eye, k);
+    // Where the car is shown, on its way (see Change); and the camera, from
+    // it, then and to be: the way round it, how far out, and how high.
+    mid: V3 = v_lerp(cam.from_car, car, k);
+    was: V3 = v_sub(cam.from_eye, cam.from_car);
+    to: V3 = v_sub(cam.eye, car);
+    was_way: f32 = atan2f(was.x, was.z);
+    to_way: f32 = atan2f(to.x, to.z);
+    way: f32 = was_way + wrap_angle(to_way - was_way) * k;
+    out: f32 = lerpf(sqrtf(was.x * was.x + was.z * was.z), sqrtf(to.x * to.x + to.z * to.z),
+        k);
+    cam.seen_eye = v_add(mid, v3(sinf(way) * out, lerpf(was.y, to.y, k), cosf(way) * out));
     cam.seen_eye.y = cam.seen_eye.y + cam.lift * sinf(PI * cam.fly);
-    cam.seen_at = v_lerp(cam.from_at, cam.at, k)
+    // What it looks at turns round the car with it.
+    look_was: V3 = turn_y(v_sub(cam.from_at, cam.from_car), -was_way);
+    look_to: V3 = turn_y(v_sub(cam.at, car), -to_way);
+    cam.seen_at = v_add(mid, turn_y(v_lerp(look_was, look_to, k), way))
+}
+
+// v turned by a about the up axis: the way the camera's angle round the
+// car goes (atan2 of x over z).
+turn_y(v: V3, a: f32): V3 {
+    c: f32 = cosf(a);
+    s: f32 = sinf(a);
+    v3(v.x * c + v.z * s, v.y, v.z * c - v.x * s)
 }
 
 // How much the walls have melted out of a flight's way, from 0 to 1.
@@ -227,11 +261,10 @@ update_chase(
 // ---- another course ----
 // Choosing another course does not swap one world for another at a blink:
 // the canyon turns into the other where it stands, about the car, which
-// is at the same start in both: its road bends to the new line, its hills
-// rise and sink, its walls and its trees move, its ground changes color
-// (see keep_world, in world.l8). The camera goes on as it was. How long
-// the turning takes.
-const TURN_TIME: f32 = 1.0;
+// is at the same start in both: its road bends into the other's, and its
+// walls and trees go with it to where the other's are (see keep_world, in
+// world.l8). The camera goes on as it was. How long the turning takes.
+const TURN_TIME: f32 = 1.2;
 
 // How long, of each picture's time, the new world may be built for, while
 // it is being (see build_more, in world.l8): in thousand-millionths of a
@@ -306,6 +339,60 @@ driving_key(ks: int): bool {
 view_shift(): f32 {
     aspect: f32 = screen_w as f32 / maxf(screen_h as f32, 1.0);
     clampf((1.0 - aspect) * 0.8, 0.0, 0.45)
+}
+
+// Where the start's board, on its gantry, is in the picture: its top and
+// its foot, down from the window's top, in window heights (see
+// hud_board_top, in hud.l8). (Before the start, the words of the count
+// keep off it.)
+board_proj: []f32 = new f32[16](0.0);
+
+board_look: []f32 = new f32[16](0.0);
+
+see_board(v: View) {
+    mat_persp(board_proj, v.fovy, screen_w as f32 / maxf(screen_h as f32, 1.0), 0.2,
+        3000.0);
+    board_proj[9] = -v.shift;
+    mat_look(board_look, v.eye, v.at, v.up);
+    mat_mul(board_proj, board_proj, board_look);
+    m: []f32 = board_proj;
+    p: V3 = spot_point(spot_at(0.0, 0.0));
+    hud_board_top = -1.0;
+    for e in 0..2 {
+        y: f32 = track_h[0] + 5.1;
+        if (e == 0) y = track_h[0] + 6.1;
+        cy: f32 = m[1] * p.x + m[5] * y + m[9] * p.z + m[13];
+        cw: f32 = m[3] * p.x + m[7] * y + m[11] * p.z + m[15];
+        // (Behind the camera, it is not seen.)
+        if (cw <= 0.01) return;
+        at: f32 = 0.5 - 0.5 * cy / cw;
+        if (e == 0) hud_board_top = at else hud_board_foot = at
+    }
+}
+
+// Where the foot of the car is in the picture (see hud_car_foot, in
+// hud.l8): the back of it on the ground, and its shadow behind it, as
+// the chase camera has it behind the car once the car stands still (see
+// update_chase). At speed the camera is farther back and the car higher in
+// the picture, so this is the lowest the car comes, and a sheet kept under
+// it keeps still as the car slows after the finish.
+car_proj: []f32 = new f32[16](0.0);
+
+car_look: []f32 = new f32[16](0.0);
+
+see_car(kind: int) {
+    size: f32 = 0.5 + 0.5 * car_axle[kind] / car_axle[BUGGY];
+    back: f32 = -car_half[kind] - 1.0;
+    mat_persp(car_proj, view_fovy(0.92), screen_w as f32 / maxf(screen_h as f32, 1.0),
+        0.2, 3000.0);
+    car_proj[9] = -view_shift();
+    mat_look(car_look, v3(0.0, 2.9 * size, -6.4 * size), v3(0.0, 1.0, 3.5), v3(0.0,
+        1.0, 0.0));
+    mat_mul(car_proj, car_proj, car_look);
+    m: []f32 = car_proj;
+    cy: f32 = m[9] * back + m[13];
+    cw: f32 = m[11] * back + m[15];
+    hud_car_foot = 0.5 - 0.5 * cy / maxf(cw, 0.01)
 }
 
 // The camera's vertical field of view: wide enough across that a tall
@@ -434,7 +521,7 @@ main() raises IoError: int {
     env: []f32 = new f32[8](0.0);
     kind: int = BUGGY;
     if (env_numbers("L8_CAR=", env) > 0) kind = (env[0] as int % CARS + CARS) % CARS;
-    start: f32 = START_S;
+    start: f32 = WAIT_S;
     if (env_numbers("L8_START=", env) > 0) start = env[0];
     c: *Car = new_car(kind, start);
     cam: *Camera = new Camera {
@@ -448,6 +535,7 @@ main() raises IoError: int {
         seen_at: c.p,
         from_eye: c.p,
         from_at: c.p,
+        from_car: c.p,
         fly: 1.0,
         fly_time: 1.0,
         lift: 0.0
@@ -458,7 +546,7 @@ main() raises IoError: int {
         turn: 1.0,
         from_p: c.p,
         from_yaw: c.yaw,
-        at_s: START_S,
+        at_s: WAIT_S,
         at_d: 0.0
     };
     // Where the car is shown, and the way it points: where it is, but
@@ -466,7 +554,9 @@ main() raises IoError: int {
     shown: V3 = c.p;
     shown_yaw: f32 = c.yaw;
     view: int = view_from_env();
-    fixed: bool = env_numbers("L8_CAM=", env) >= 7;
+    // (Its own numbers: env is used again for others, below.)
+    fixed_cam: []f32 = new f32[8](0.0);
+    fixed: bool = env_numbers("L8_CAM=", fixed_cam) >= 7;
     // (L8_AUTO: it drives itself round, to watch. See auto_input.)
     auto: bool = getenv("L8_AUTO") != null;
     // (L8_NET: there is a page to tell where the car is, for the others.)
@@ -485,19 +575,14 @@ main() raises IoError: int {
     // against computer drivers at once.
     said: int = env_numbers("L8_SET=", env);
     if (said > 0) set_laps = clampf(env[0], 1.0, 9.0) as int;
-    if (said > 1) set_drivers = clampf(env[1], 1.0, MAX_BOTS as f32) as int;
+    if (said > 1) set_drivers = clampf(env[1], 0.0, MAX_BOTS as f32) as int;
     if (said > 2) set_skill = clampf(env[2], 0.0, 3.0) as int;
     if (getenv("L8_RACE") != null) {
         said = env_numbers("L8_RACE=", env);
         if (said > 0) set_drivers = clampf(env[0], 1.0, MAX_BOTS as f32) as int;
         if (said > 1) set_skill = clampf(env[1], 0.0, 3.0) as int;
         if (said > 2) set_laps = clampf(env[2], 1.0, 9.0) as int;
-        net_race = true;
-        net_race_wait = 4.0;
-        net_race_laps = set_laps;
-        net_race_bots = set_drivers;
-        net_race_skill = set_skill;
-        net_race_place = set_drivers
+        call_own(4.0)
     }
     // (What a page has been told to keep: the car, the course, and those.)
     kept_car: int = kind;
@@ -505,21 +590,43 @@ main() raises IoError: int {
     kept_laps: int = set_laps;
     kept_drivers: int = set_drivers;
     kept_skill: int = set_skill;
+    // (And what the room has a race be, till it says: what is here. See
+    // room_config, in net.l8.)
+    said_course = course;
+    said_laps = set_laps;
+    said_bots = set_drivers;
+    said_skill = set_skill;
+    // (The seat the car was put in its place for: when the room says
+    // another, with the menu up, it goes to that one's.)
+    placed_seat: int = 0;
     menu_eye: V3 = c.p;
     menu_at: V3 = c.p;
-    // (Whether the menu's camera has been anywhere yet: at first it is
-    // where it goes round the car from, not on its way there.)
+    // (Whether the menu's camera, or the camera, has been anywhere yet:
+    // at first it is where it goes round the car from, not on its way
+    // there.)
     menu_placed: bool = false;
+    // (And whether it was going round the car in the last picture: when
+    // it comes to the car again, from a flight, it goes on round from
+    // where it came down.)
+    orbiting: bool = false;
+    // (How far the picture is framed for the menu, from 0 to 1: it moves
+    // up and down gently, not as quickly as the menu comes and goes.)
+    menu_framed: f32 = 1.0;
     // The course asked for, if it is not the one built (or -1).
     course_to: int = -1;
+    // (And the one the page was last told is being gone to, for its
+    // ghosts, or -1: it is told once, however long the course waits to be
+    // gone to.)
+    told_to: int = -1;
     // A course turning into another: how long it has been at it (less
     // than 0: none is), and the course it was.
     turn: f32 = -1.0;
     turn_from: int = 0;
-    // (And how the building of the new world stands: 0, there is none; 1,
-    // what is round the start is being built, and the old world still
-    // shows; 2, the rest is.)
-    making: int = 0;
+    // (L8_SLOW=k: it takes k times as long, to be looked at.)
+    turn_time: f32 = TURN_TIME;
+    if (env_numbers("L8_SLOW=", env) > 0) turn_time = TURN_TIME * maxf(env[0], 1.0);
+    // (And whether the new world is still being built.)
+    making: bool = false;
     // How far round the car the menu's camera has gone.
     round: f32 = 0.5;
     // (And where the car was shown, and the way it pointed, in that one:
@@ -546,6 +653,27 @@ main() raises IoError: int {
     // Whether the driver has touched anything since the car was put where
     // it is: it waits there till then, and then it goes (see read_input).
     going: bool = false;
+    // Starting over (RESTART, AGAIN, or R) is not a flight: the game stands
+    // still while the picture goes dark, for a moment; the car is put back
+    // at the start, the camera behind it there; and the picture comes back.
+    // Whether it is going dark to start over; and whether the car, when it
+    // is next put somewhere, is to be put there at once (and how long the
+    // picture has waited dark for that: a race with others is called by the
+    // room, which may be slow).
+    again_dark: bool = false;
+    again_cut: bool = false;
+    cut_wait: f32 = 0.0;
+    // (And whether it goes dark for a race the room called, to take it up
+    // under the dark, out on the road: see below.)
+    call_dark: bool = false;
+    // How much of the car's shadow there is, from 0 to 1: carried high, it
+    // would fall far from the car, a dark car of its own sliding over the
+    // ground; so it shrinks away under the car as it is lifted, and grows
+    // back in under it as it is set down (see draw_cast, in pose.l8).
+    car_cast: f32 = 1.0;
+    // (Where the page was last told the name's box is: see name_box, in
+    // ui.l8. The left, -1, if it does not show.)
+    told_box: []int = [-1, 0, 0, 0];
     while (running) {
         while (XPending(dpy) != 0) {
             XNextEvent(dpy, &ev);
@@ -570,15 +698,12 @@ main() raises IoError: int {
                         if (ks == 65289 && !tab) pick = (now_kind + 1) % CARS
                     }
                     if (ks == 65289) tab = true;
-                    again: bool = ks == 114 && !menu && !ui_paused && !(race.on && !race.done);
-                    if (again || pick != now_kind) {
-                        if (again) {
-                            race.on = false;
-                            nbots = 0
-                        }
+                    if (ks == 114 && !menu && !ui_paused && !(race.on && !race.done)) ask(ACT_AGAIN,
+                        0);
+                    if (pick != now_kind) {
                         change.to = pick;
-                        change.at_s = START_S;
-                        change.at_d = 0.0
+                        change.at_s = wait_s(net_my_seat);
+                        change.at_d = wait_d(net_my_seat)
                     }
                     if (ks == 99) view = (view + 1) % 2;
                     if (driving_key(ks)) going = true;
@@ -625,92 +750,193 @@ main() raises IoError: int {
             dns: int = now - prev_ns;
             prev_ns = now;
             if (dns < 0) dns = 0;
+            // (Away a while, as when the page is hidden and no pictures
+            // are asked for: in a race the room called, the others did
+            // not wait, and its clock goes on by as long. See race_away.)
+            if (dns > 1000000000 && race_id > 0) race_away((dns - 100000000) as f32 / 1000000000.0);
             if (dns > 100000000) dns = 100000000;
             // What the menus ask (see ui.l8).
             act: int = ui_act;
             ui_act = ACT_NONE;
+            // (Starting over: first the dark, then the start. See
+            // again_dark.)
+            ui_dt: f32 = dns as f32 / 1000000000.0;
+            // (In a race with others, to start over is to ask the room for
+            // another, at once: the picture goes dark as it is called. It
+            // may wait for those still racing: see room_wait.)
+            room_call: bool = online && others_here(others) > 0;
+            if (act == ACT_AGAIN && race.on && room_call) act = ACT_RACE;
+            if (act == ACT_AGAIN && !again_dark && !again_cut) {
+                again_dark = true;
+                ui_paused = false
+            }
+            if (act == ACT_AGAIN || again_dark && (act == ACT_MENU || act == ACT_PAUSE)) act = ACT_NONE;
+            if (again_dark) {
+                ui_blink = minf(ui_blink + ui_dt / 0.25, 1.0);
+                if (ui_blink >= 1.0) {
+                    again_dark = false;
+                    again_cut = true;
+                    cut_wait = 0.0;
+                    if (!call_dark) act = ACT_AGAIN;
+                    call_dark = false;
+                    // (What was up is gone while it is dark: it does not
+                    // come back with the picture, to go again.)
+                    show_result = 0.0;
+                    show_pause = 0.0;
+                    show_side = 1.0
+                }
+            } else if (again_cut && (cut_wait < 1.5 || net_race)) cut_wait = cut_wait + ui_dt else {
+                again_cut = false;
+                ui_blink = maxf(ui_blink - ui_dt / 0.35, 0.0)
+            }
             if (act == ACT_CAR && menu) {
                 was_kind: int = c.kind;
                 if (change.to >= 0) was_kind = change.to;
                 change.to = ((was_kind + ui_arg) % CARS + CARS) % CARS;
-                change.at_s = START_S;
-                change.at_d = 0.0
+                change.at_s = wait_s(net_my_seat);
+                change.at_d = wait_d(net_my_seat)
             }
-            // (Another course: the ghosts are of this one, and go at once.
-            // A page gives the other's next, and joins its room.)
-            if (act == ACT_COURSE && menu && ui_arg != course) {
-                course_to = ui_arg;
+            // (Another course: the ghosts are of this one, and go at once,
+            // and the page gives the other's. The room is told, below.)
+            if (act == ACT_COURSE && menu) {
+                if (ui_arg != course) course_to = ui_arg else if (course_to >= 0 && course_to != course) {
+                    // (Asked for again before the other was begun: the
+                    // one built stays, and so do its ghosts.)
+                    course_to = -1;
+                    told_to = -1;
+                    forget_ghosts();
+                    if (online) {
+                        write(1, "L8ROOM ");
+                        write_int(1, course);
+                        write(1, "\n")
+                    }
+                }
+            }
+            // What the room says a race is to be, which everyone in it
+            // shares: taken up as if it had been chosen here (but for the
+            // course, while the car is out on the road). See room_config,
+            // in net.l8.
+            picked: bool = act == ACT_COURSE && menu;
+            room_to: int = room_config(menu, picked);
+            if (room_to >= 0) course_to = room_to;
+            if (menu && net_my_seat != placed_seat && change.to < 0 && change.turn >= 1.0 && !making) {
+                placed_seat = net_my_seat;
+                place_car_at(c, wait_s(net_my_seat), wait_d(net_my_seat))
+            }
+            if (act == ACT_MENU) {
+                waited: int = room_course_now();
+                if (waited >= 0) course_to = waited
+            }
+            if (course_to >= 0 && course_to != course && course_to != told_to) {
+                told_to = course_to;
                 forget_ghosts();
                 if (online) {
                     write(1, "L8ROOM ");
-                    write_int(1, ui_arg);
+                    write_int(1, course_to);
                     write(1, "\n")
                 }
             }
+            // And what the player chose here, the room is told: only that,
+            // never what the room said and this device has not taken up.
+            chosen: int = course_chosen(course_to);
+            ui_course = chosen;
+            if (online) tell_room(chosen, picked);
             // To the menu, or to drive alone (or to start that over): no
             // race is on, and the car goes to the start.
+            // (A race of its own asked for and not yet begun, as it waits for
+            // a course to be built, is let go: the player chose otherwise
+            // since. One the room called is not: it takes the car up.)
             if (act == ACT_MENU || act == ACT_TRIAL || act == ACT_AGAIN && !race.on) {
                 if (act != ACT_AGAIN) menu = act == ACT_MENU;
+                if (net_race && net_race_id < 0) net_race = false;
                 ui_paused = false;
                 race.on = false;
                 nbots = 0;
                 change.to = c.kind;
-                change.at_s = START_S;
-                change.at_d = 0.0
+                change.at_s = wait_s(net_my_seat);
+                change.at_d = wait_d(net_my_seat)
             }
             // A race: with others here, it is asked of them all (the page
             // asks the room, which calls it: see net_key); with nobody,
             // it is against computer drivers, here and now.
+            // (Asked of the room, the pause stays up till the race is
+            // called: RESTART shows that it waits, if it does. Asked again
+            // while the room holds it, it is asked for no more: the room
+            // waits on this car again, if it races, and if nobody else
+            // asked for the race, does not call it.)
             if (act == ACT_RACE || act == ACT_AGAIN && race.on) {
-                ui_paused = false;
-                if (online && others_here(others) > 0) {
-                    write(1, "L8RACE ");
-                    write_int(1, set_laps);
-                    write(1, "\n")
+                if (room_call && race_asked && room_wait >= 0) {
+                    write(1, "L8UNRACE\n");
+                    race_asked = false
+                } else if (room_call) {
+                    write(1, "L8RACE\n");
+                    race_asked = true;
+                    asked_wait = 2.0
                 } else {
-                    net_race = true;
-                    net_race_wait = 5.0;
-                    net_race_laps = set_laps;
-                    net_race_bots = set_drivers;
-                    net_race_skill = set_skill;
-                    net_race_place = set_drivers
+                    ui_paused = false;
+                    call_own(5.0)
                 }
             }
             if (act == ACT_PAUSE && !menu) ui_paused = true;
-            if (act == ACT_RESUME) ui_paused = false;
+            // (Going on with the race, the car no longer asks for the next:
+            // it is taken up once this one is finished.)
+            if (act == ACT_RESUME) {
+                ui_paused = false;
+                if (race_asked && online) write(1, "L8UNRACE\n");
+                race_asked = false
+            }
+            if (race_asked && room_wait < 0) {
+                asked_wait = asked_wait - ui_dt;
+                if (asked_wait <= 0.0) race_asked = false
+            }
             if (act == ACT_NAME && online) write(1, "L8NAME\n");
             // (The menus go on while the game stands still under the
             // pause: which it does, but in a race with others, who do
             // not wait.)
-            ui_dt: f32 = dns as f32 / 1000000000.0;
-            paused = ui_paused && !(race.on && others_here(others) > 0);
+            paused = (ui_paused || again_dark) && others_racing(others) == 0;
             if (paused) dns = 0;
             dt: f32 = dns as f32 / 1000000000.0;
             acc = acc + dt;
             steps: int = 0;
             high: bool = view == VIEW_HIGH;
+            // A course turning into another goes on: once what is seen of
+            // the new world is built (see world_near_built, in world.l8).
+            // (And with another asked for meanwhile, it hurries.)
+            if (turn >= 0.0) {
+                hurry_turn: f32 = 1.0;
+                if (course_to >= 0 && course_to != course) hurry_turn = 3.0;
+                if (!making || world_near_built()) turn = turn + hurry_turn * dt;
+                if (turn >= turn_time) turn = -1.0
+            }
             // Another course is asked for: it is built in this one's
             // place (this one being kept, to turn into it), and the car
             // is at its start, which is where this one's is, with no race
             // on, and no marks on its road.
-            if (turn >= 0.0) {
-                turn = turn + dt;
-                if (turn >= TURN_TIME) turn = -1.0
-            }
-            if (turn < 0.0 && making == 0) {
+            // (With the menu up, it waits till the car is down at the start
+            // and the camera has come to it: the world then turns round
+            // the car where it stands, as when a course is picked there.
+            // Back from the road onto a course the room chose meanwhile,
+            // the car would be put at the other's start while the camera
+            // was still on its way, and the camera would fly through
+            // bare ground and the walls to find it.)
+            landing: bool = menu && (change.to >= 0 || cam.fly < 1.0);
+            began: int = mono_ns();
+            if (turn < 0.0 && !making && !landing) {
                 if (course_to >= 0 && course_to != course) {
                     turn_from = course;
                     turn_p = shown;
                     turn_yaw = shown_yaw;
-                    keep_world(c.spot.i);
+                    keep_world();
                     set_course(course_to);
                     build_track();
                     begin_world(world);
-                    making = 1;
+                    upload_world(r, world);
+                    making = true;
+                    turn = 0.0;
                     race.on = false;
                     nbots = 0;
                     clear_marks();
-                    place_car_at(c, START_S, 0.0);
+                    place_car_at(c, wait_s(net_my_seat), wait_d(net_my_seat));
                     reset_laps();
                     going = false;
                     change.to = -1;
@@ -723,35 +949,73 @@ main() raises IoError: int {
                         cam.fly = 1.0
                     }
                 }
-                course_to = -1
+                course_to = -1;
+                told_to = -1
             }
-            // The new world is built a little in each picture's time: first
-            // what is round the start, and when that is done, the old
-            // world begins to turn into it; then the rest.
-            if (making > 0) {
-                began: int = mono_ns();
+            // The new world is built a little in each picture's time, what
+            // is nearest the car first, each piece sent to be drawn as it
+            // is built.
+            if (making) {
                 more: bool = true;
-                while (more && mono_ns() - began < BUILD_FOR && !(making == 1 && world_built >= world_first)) more = build_more(world);
-                if (making == 1 && world_built >= world_first) {
-                    upload_world(r, world);
-                    making = 2;
-                    turn = 0.0
-                } else if (making == 2 && world_built >= nchunks) {
-                    upload_more(r, world);
-                    making = 0
+                while (more && mono_ns() - began < BUILD_FOR) more = build_more(world);
+                upload_more(r, world);
+                if (!more) making = false
+            }
+            // A race called: it is to start in so long from when it was
+            // heard, and that goes on while it waits to be taken up.
+            if (net_race) net_race_wait = maxf(net_race_wait - ui_dt, 0.0);
+            // (One the room called, while the car is still in a race it
+            // has not finished, is let go: the car goes on with its own,
+            // and those in the new one see it faint, as it does them. It
+            // joins the next one called, from AGAIN or the menu. And the
+            // room holds a race called till those still racing have
+            // finished, for a while at most: see web/race-room/worker.js.)
+            if (net_race && net_race_id > 0 && !race_free()) {
+                net_race = false;
+                net_race_course = -1
+            }
+            // (One called while the car is out on the road, as how a race
+            // came out is up, is taken up under the dark, as a start over
+            // is. From the menu, the car flies to the grid.)
+            if (net_race && net_race_id > 0 && !menu && ui_blink < 1.0 && !again_dark) {
+                again_dark = true;
+                call_dark = true
+            }
+            call_ready: bool = menu || ui_blink >= 1.0 || net_race_id <= 0;
+            // (A race on another course: that course first.)
+            if (net_race && call_ready && net_race_course >= 0 && net_race_course != course && course_to < 0 && !making && turn < 0.0) {
+                course_to = net_race_course;
+                told_to = course_to;
+                forget_ghosts();
+                if (online) {
+                    write(1, "L8ROOM ");
+                    write_int(1, course_to);
+                    write(1, "\n")
                 }
             }
-            if (net_race && turn < 0.0 && making == 0) {
-                net_race = false;
+            if (net_race && call_ready && turn < 0.0 && !making && course_to < 0) {
                 menu = false;
                 ui_paused = false;
-                others_begin();
-                call_race(net_race_wait, net_race_laps);
-                start_bots(bots, net_race_bots, net_race_skill);
+                // (A course the room chose since the race was called waits
+                // for the menu, as one chosen during it does.)
+                room_course = -1;
+                if (online && said_course != course) room_course = said_course;
+                take_race(bots, mono_ns() / 1000);
+                // (Started over, under the dark, they are there when it
+                // lifts; from the menu, they come: see bots_shown. So too
+                // the others.)
+                others_hide(others);
+                if (ui_blink >= 1.0) {
+                    bots_shown = 1.0;
+                    others_come(others, 1.0)
+                }
                 change.to = c.kind;
                 change.at_s = grid_s(net_race_place);
                 change.at_d = grid_d(net_race_place)
             }
+            // (The race's computer drivers, given to this device to drive
+            // on, or to another: see heed_drive.)
+            heed_drive(bots, others, c);
             if (change.to >= 0 && change.turn >= 1.0) {
                 // It is taken up from where it is shown; and it is at the
                 // start, the car asked for.
@@ -773,7 +1037,17 @@ main() raises IoError: int {
                 break_marks();
                 drop_lap();
                 going = false;
-                if (!there) start_flight(cam, c, high)
+                // (Started over, the camera is behind it there at once,
+                // while the picture is dark.)
+                if (again_cut) {
+                    again_cut = false;
+                    change.from_p = c.p;
+                    change.from_yaw = c.yaw;
+                    cam.way = yaw_dir(c.yaw);
+                    update_chase(cam, c, car_point(c, 1.0), c.yaw, high, 0.0);
+                    cam.fly = 1.0;
+                    cam.lift = 0.0
+                } else if (!there) start_flight(cam, c, change.from_p, high)
             }
             hurry: f32 = 1.0;
             if (change.to >= 0) hurry = 3.0;
@@ -795,9 +1069,11 @@ main() raises IoError: int {
             };
             while (acc >= STEP_DT && steps < 12) {
                 step_car(c, inp, STEP_DT);
-                // (While it is carried to the start, it runs into nobody.)
-                if (solid) hit_others(others, c);
+                // (While it is carried to the start, it runs into nobody;
+                // nor while it waits there with the menu up.)
+                if (solid && !menu) hit_others(others, c);
                 step_bots(bots, c, solid, STEP_DT);
+                bots_hit_others(bots, others);
                 crossed: int = laps.crossed;
                 tick_laps(c, STEP_DT);
                 // (The lap is kept as it is driven, for a ghost: see
@@ -809,6 +1085,14 @@ main() raises IoError: int {
                 steps = steps + 1
             }
             if (acc > STEP_DT) acc = 0.0;
+            // (With the menu up, the car stays where it was put to wait,
+            // whatever goes by.)
+            if (menu && solid && change.to < 0 && change.turn >= 1.0 && !making && turn < 0.0 && placed_seat == net_my_seat) {
+                park: V3 = spot_point(spot_at(wait_s(net_my_seat), wait_d(net_my_seat)));
+                off: V3 = v_sub(c.p, park);
+                if (off.x * off.x + off.z * off.z > 0.0025) place_car_at(c, wait_s(net_my_seat),
+                    wait_d(net_my_seat))
+            }
             // How much it drafts whoever is ahead of it.
             ahead: f32 = maxf(draft_others(others, c), draft_bots(bots, c, dt));
             if (!solid || menu) ahead = 0.0;
@@ -816,7 +1100,8 @@ main() raises IoError: int {
             tick_marks(c);
             // What shows in the air: about the car's wheels and its tail,
             // the air it drafts in (or is pushed through), and about the
-            // wheels of the others near enough to see.
+            // wheels of the others near enough to see (and the tails of
+            // the computer drivers near it, for the pushes they earn).
             tick_fx(dt);
             if (solid && !menu) {
                 fx_wheels(c, dt);
@@ -825,32 +1110,33 @@ main() raises IoError: int {
                 if (c.push > 0.0) pushed = 0.7;
                 fx_air(c, maxf(c.draft, pushed), dt)
             }
-            for k in 0..nbots fx_wheels(bots[k].car, dt);
+            for k in 0..nbots {
+                fx_wheels(bots[k].car, dt);
+                if (v_len(v_sub(bots[k].car.p, c.p)) < 60.0) fx_tail(bots[k].car,
+                    dt)
+            }
             fx_others(others, c.p, dt);
             alpha: f32 = acc / STEP_DT;
             pos: V3 = car_point(c, alpha);
             yaw: f32 = car_yaw(c, alpha);
             if (fixed) {
-                cam.eye = v3(env[0], env[1], env[2]);
-                cam.at = v3(env[3], env[4], env[5]);
+                cam.eye = v3(fixed_cam[0], fixed_cam[1], fixed_cam[2]);
+                cam.at = v3(fixed_cam[3], fixed_cam[4], fixed_cam[5]);
                 cam.up = v3(0.0, 1.0, 0.0);
-                cam.fovy = env[6] * PI / 180.0
+                cam.fovy = fixed_cam[6] * PI / 180.0
             } else if (view == VIEW_MAP) set_map_view(cam) else update_chase(cam,
                 c, pos, yaw, high, dt);
             // (A flight is only from behind a car to behind a car.)
             if (fixed || view == VIEW_MAP) cam.fly = 1.0;
-            fly_camera(cam, dt);
+            fly_camera(cam, pos, dt);
             melt: f32 = flight_melt(cam);
-            // A course turning into another: how far it has (and, till the
-            // new one's first chunks are built, not at all); and where the
-            // car stands meanwhile: with the ground, from where it stood
-            // to where it stands.
+            // A course turning into another: how far it has, easing in and
+            // out; and where the car stands meanwhile: so far from where it
+            // stood to where it stands (which, at the start, are much the
+            // same).
             turning: f32 = -1.0;
-            if (making == 1) {
-                turning = 0.0;
-                set_theme_between(turn_from, turn_from, 0.0)
-            } else if (turn >= 0.0) {
-                turning = smoothstepf(0.0, 1.0, turn / TURN_TIME);
+            if (turn >= 0.0) {
+                turning = smoothstepf(0.0, 1.0, turn / turn_time);
                 set_theme_between(turn_from, course, turning)
             } else set_theme_between(course, course, 0.0);
             stand: V3 = pos;
@@ -860,19 +1146,30 @@ main() raises IoError: int {
                 stand_yaw = turn_yaw + wrap_angle(yaw - turn_yaw) * turning
             }
             // With the menu up, once it has come to the car, it goes
-            // slowly round it.
+            // slowly round it. It comes to where it goes round from by
+            // going round the car, out or in, and up or down: not straight
+            // there, which could take it over the roof, close enough to
+            // fill the picture. (Come down behind the car from a flight,
+            // it goes round from there.)
             round = round + 0.25 * dt;
             if (menu && cam.fly >= 1.0 && !fixed && view != VIEW_MAP) {
                 reach: f32 = 3.4 + 2.0 * car_axle[c.kind];
                 near: f32 = ease(3.0, dt);
-                if (!menu_placed) near = 1.0;
+                off: V3 = v_sub(menu_eye, stand);
+                if (!menu_placed) near = 1.0 else if (!orbiting) round = atan2f(off.x,
+                    off.z);
                 menu_placed = true;
-                menu_eye = v_lerp(menu_eye, v_add(stand, v3(sinf(round) * reach, 1.7,
-                    cosf(round) * reach)), near);
+                orbiting = true;
+                way: f32 = approach_angle(atan2f(off.x, off.z), round, near);
+                out: f32 = lerpf(sqrtf(off.x * off.x + off.z * off.z), reach, near);
+                menu_eye = v_add(stand, v3(sinf(way) * out, lerpf(off.y, 1.7, near),
+                    cosf(way) * out));
                 menu_at = v_lerp(menu_at, v_add(stand, v3(0.0, 0.6, 0.0)), near);
                 cam.seen_eye = menu_eye;
                 cam.seen_at = menu_at
             } else {
+                orbiting = false;
+                menu_placed = true;
                 menu_eye = cam.seen_eye;
                 menu_at = cam.seen_at
             }
@@ -883,10 +1180,12 @@ main() raises IoError: int {
             shown = pos;
             shown_yaw = yaw;
             held: f32 = 0.0;
+            lifted: f32 = 0.0;
             if (cam.fly < 1.0) {
                 k: f32 = smoothstepf(0.0, 1.0, cam.fly);
                 shown = v_lerp(change.from_p, pos, k);
-                shown.y = shown.y + CARRY_LIFT * cam.lift * sinf(PI * cam.fly);
+                lifted = CARRY_LIFT * cam.lift * sinf(PI * cam.fly);
+                shown.y = shown.y + lifted;
                 shown_yaw = change.from_yaw + wrap_angle(yaw - change.from_yaw) * k;
                 held = smoothstepf(0.0, 0.15, cam.fly) * (1.0 - smoothstepf(0.8, 1.0,
                     cam.fly))
@@ -894,40 +1193,77 @@ main() raises IoError: int {
                 shown = stand;
                 shown_yaw = stand_yaw
             }
+            car_cast = lerpf(car_cast, 1.0 - smoothstepf(0.3, 2.5, lifted), ease(12.0,
+                ui_dt));
             pose_none();
             pose_eye = cam.seen_eye;
-            if (menu) pose_eye = v3(0.0, 1000.0, 0.0);
+            pose_mine = shown;
+            pose_reach = 0.0;
+            if (cam.fly < 1.0) pose_reach = v_len(v_sub(cam.eye, pos));
             pose_kind(change.from, c.kind, smoothstepf(0.0, 1.0, change.turn));
             if (change.turn >= 1.0) pose_kind(c.kind, c.kind, 0.0);
+            pose_cast = car_cast;
+            pose_under = v3(shown.x, shown.y - lifted, shown.z);
             pose_car(c, shown, shown_yaw, held);
+            pose_cast = 1.0;
             blob_size: f32 = 0.55 + 0.45 * pose_shape(car_axle) / car_axle[BUGGY];
             // The others on the track; and word of where this car is, for
             // them.
+            // (They come as the computer drivers do, once the menu has
+            // gone: see bots_shown. And in the menu, as they turn up.)
             tick_others(others, dt);
+            // (Each car in a paint of its own: see paint_take.)
+            paints_none();
+            paint_take(NAME_ME, c.kind, true);
+            paint_others(others);
+            paint_bots();
+            if (menu || show_menu <= 0.0) others_come(others, ui_dt / BOTS_COME);
             pose_others(others, shown);
+            // (The computer drivers come onto the grid once the menu has
+            // gone: see bots_shown.)
+            if (show_menu <= 0.0) bots_shown = minf(bots_shown + ui_dt / BOTS_COME,
+                1.0);
             pose_bots(bots);
             tick_ghosts(ghosts, laps.time + acc, dt);
-            pose_ghosts(ghosts);
+            pose_ghosts(ghosts, shown);
             // Who is racing, and in what order (see racers.l8): the
             // player, the others, and the computer drivers.
-            racers_none();
-            racer_put(NAME_ME, c.kind, c.progress, race.done, race.done_time);
-            race_others(others);
-            race_bots(bots);
-            hud_place = racers_sort(race.on);
-            hud_of = nracers;
-            // And all of them on the map, with the car itself.
-            map_none();
-            map_ghosts(ghosts);
-            map_others(others);
-            map_bots(bots);
-            map_put(shown, c.kind, DOT_ME);
-            hud_menu = menu && show_menu > 0.5;
+            // (While what is over the driving goes, as the menu comes up,
+            // it says what it said, as the car is put back at the start:
+            // these, and the lap and the race, are kept as they were. See
+            // hud_laps, in hud.l8.)
+            if (!menu || show_drive <= 0.0) {
+                racers_none();
+                racer_put(NAME_ME, c.progress, race.done, race.done_time);
+                race_others(others, menu);
+                race_bots(bots);
+                // (In a race, nobody who finished it is lost from it, nor,
+                // once the car has, anyone: see racers_keep.)
+                if (race.on && !menu) racers_keep(race.done);
+                hud_place = racers_sort(race.on);
+                hud_of = nracers;
+                // And all of them on the map, with the car itself.
+                map_none();
+                map_ghosts(ghosts);
+                map_others(others);
+                map_bots(bots);
+                map_put(shown, paint_of[NAME_ME], DOT_ME);
+                hud_laps = laps;
+                hud_race = race;
+                hud_speed = v_len(c.v)
+            }
+            hud_menu = show_drive <= 0.0;
+            framed: f32 = 0.0;
+            if (menu) framed = 1.0;
+            menu_framed = lerpf(menu_framed, framed, ease(6.0, ui_dt));
             ui_menu = menu;
+            ui_again = again_dark;
             ui_others = others_here(others);
             tick_ui(ui_dt);
             if (online) {
                 say_place(c, (now - start_ns) as f32 / 1000000000.0, dt);
+                if (nbots > 0 && others_here(others) > 0) say_bots_net(bots, (now - start_ns) as f32 / 1000000000.0,
+                    dt);
                 say_finish();
                 say_ghost();
                 // (And what is to be kept, when it is another.)
@@ -964,7 +1300,6 @@ main() raises IoError: int {
                     write(1, "\n")
                 }
             }
-            hud_speed = v_len(c.v);
             hud_kind = c.kind;
             hud_card = cam.fly >= 1.0 || cam.lift == 0.0;
             tick_card(dt);
@@ -981,8 +1316,7 @@ main() raises IoError: int {
                 fade_from: lerpf(16.0, 1.0, melt),
                 fade_to: lerpf(85.0, 5.0, melt),
                 near: near,
-                turning: turning,
-                was: making == 1
+                turning: turning
             };
             // (The car's way is made longer for a small car: the dark under
             // it is as small as the car is. And over the walls, all of the
@@ -1004,9 +1338,49 @@ main() raises IoError: int {
             // (With the menu up, the car is shown above the middle, clear
             // of the menu's buttons.)
             if (!fixed && view != VIEW_MAP) v.shift = lerpf(v.shift, menu_shift(),
-                smoothstepf(0.0, 1.0, show_menu));
+                smoothstepf(0.0, 1.0, menu_framed));
+            // (Where the start's board is seen from where the camera is to
+            // be, behind the car on the grid: not from where it is on its
+            // way there, so that the count's words keep still.)
+            if (race_waits()) {
+                board: View = v;
+                if (!fixed && view != VIEW_MAP) {
+                    board.eye = cam.eye;
+                    board.at = cam.at;
+                    board.shift = view_shift()
+                }
+                see_board(board)
+            }
+            if (!fixed && view == VIEW_CHASE) see_car(c.kind) else hud_car_foot = 0.0;
             draw_scene(r, v, shadows);
             if (getenv("L8_NO_HUD") == null) draw_hud(r);
+            // Where the name is to be written, the page is told when that
+            // changes (see name_box, in ui.l8): its box, in the window's
+            // pixels, and the window's size.
+            if (online) {
+                box_x: int = -1;
+                if (name_box_on) box_x = name_box[0] as int;
+                moved: bool = box_x != told_box[0];
+                for k in 1..4 {
+                    if (name_box_on && name_box[k] as int != told_box[k]) moved = true
+                }
+                if (moved) {
+                    told_box[0] = box_x;
+                    if (box_x < 0) write(1, "L8NAMEAT -\n") else {
+                        write(1, "L8NAMEAT");
+                        for k in 0..4 {
+                            told_box[k] = name_box[k] as int;
+                            write(1, " ");
+                            write_int(1, told_box[k])
+                        }
+                        write(1, " ");
+                        write_int(1, screen_w);
+                        write(1, " ");
+                        write_int(1, screen_h);
+                        write(1, "\n")
+                    }
+                }
+            }
             glXSwapBuffers(dpy, win)
         }
     }

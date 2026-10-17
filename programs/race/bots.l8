@@ -10,21 +10,28 @@ import "../../stdlib/print.l8";
 // a car like the player's, driven by the same rules: it can do just what a
 // car of its kind can, no more. Its driver keeps to a line of its own along
 // the road, slows for the bends it can see coming, and pulls out to pass
-// what is in its way. They never drift.
+// what is in its way; and, if it is good enough, it drifts the bends that
+// are worth it, as a player does (see drift_input).
 const MAX_BOTS: int = 7;
 
 // How good a driver is, is a number from 0 to 1, and all of it is in the
 // driving. With more skill it takes a bend faster (at 1, as fast as the
 // tyres hold), brakes later for it, and keeps to the inside of it; and with
-// little, it does not go flat out even down a straight.
+// little, it does not go flat out even down a straight. And the better it
+// is, the more of the bends it drifts, and the faster, and the more cleanly
+// it lets go of them.
 //
 // How good they are in a race is as the player chose: one of three that
 // stay as they are; or as good as the player makes them, so that nobody is
-// left far behind, the player or they: each drives the better the farther
-// behind the player it is, and the worse the farther ahead; and all of
-// them together come, in time, to drive as well as the player does. (As
-// well as they can, that is: a player who is better than their best leaves
-// them.)
+// left far behind, the player or they. Then each has a place of its own in
+// the field round the player, some way ahead of it or behind (see
+// field_gap): it drives the better the farther behind that place it is,
+// and the worse the farther ahead; and all of them together come, in time,
+// to drive as well as the player does. (As well as they can, that is: a
+// player who is better than their best leaves them.) Who has which place
+// is dealt anew each race, and the places come and go a little as it is
+// run, so that now one and now another is ahead; and the last of it is
+// raced, not held (see FIELD_FREE).
 const SKILL_EASY: int = 0;
 
 const SKILL_MEDIUM: int = 1;
@@ -60,35 +67,200 @@ drive_eases: f32 = 0.72;
 
 const DRIVE_FLAT: f32 = 0.5;
 
-// As good as the player makes them: how far behind the player a driver
-// drives its best (and ahead, its worst), and how much skill that is; and
-// all of them together: their skill (it is kept from one race to the
-// next), and how fast it comes to what the player's driving asks, a
-// second, were they all as far behind as ADAPT_FAR.
+// As good as the player makes them: how far behind its place in the field
+// a driver drives its best (and ahead, its worst), and how much skill that
+// is; and how fast what it has learned (see Bot) comes to what holding its
+// place asks, a second, were it as far behind as ADAPT_FAR. And what they
+// have learned, one with another: it is kept from one race to the next,
+// and where each starts.
 const ADAPT_FAR: f32 = 60.0;
 
 const ADAPT_BY: f32 = 0.6;
 
+const ADAPT_LEARN: f32 = 0.02;
+
 adapt_all: f32 = 0.6;
 
-const ADAPT_LEARN: f32 = 0.01;
+// Their places in the field: some of them ahead of the player and the rest
+// behind, the nearest FIELD_FIRST from it either way, and the rest
+// FIELD_APART from one to the next (or less, with many of them, so that
+// the whole field is no longer than FIELD_LONG). A driver near its place,
+// within FIELD_NEAR, is not pulled to it at all: there it races the others
+// as it can. And the field opens out over the first FIELD_OPENS seconds of
+// a race: they all start together, on the grid.
+const FIELD_FIRST: f32 = 25.0;
+
+const FIELD_APART: f32 = 45.0;
+
+const FIELD_LONG: f32 = 220.0;
+
+const FIELD_NEAR: f32 = 15.0;
+
+const FIELD_OPENS: f32 = 20.0;
+
+// Each place sways slowly forward and back, by as much as FIELD_SWAY, once
+// in some time from SWAY_LEAST to SWAY_MOST seconds (each its own), so
+// that the ones next to each other change places now and then.
+const FIELD_SWAY: f32 = 40.0;
+
+const SWAY_LEAST: f32 = 60.0;
+
+const SWAY_MOST: f32 = 120.0;
+
+// The last of a race, its last lap (or, in a race of fewer than three, the
+// last FIELD_FREE of it), is the player's to win or lose. There nobody's place is by the
+// player as it is, but by where the player would be at the pace it drove
+// the lap before (see free_from): drive better than that, and it passes
+// them; worse, and they pass it. (Better, that is, by as much as
+// FREE_GAINS at the most: beyond that they come after it, as they would in
+// the rest of the race.)
+const FIELD_FREE: f32 = 0.4;
+
+const FREE_GAINS: f32 = 60.0;
+
+// How many of them are ahead of the player, as dealt for a race: one at
+// least, and one at least behind it, if there are two.
+field_ahead: int = 1;
+
+// How far ahead of the player (behind, less than 0) the k-th from the
+// front of n drivers has its place.
+field_gap(k: int, n: int): f32 {
+    ahead: int = field_ahead;
+    apart: f32 = FIELD_APART;
+    if (n > 2) apart = minf(apart, (FIELD_LONG - 2.0 * FIELD_FIRST) / (n - 2) as f32);
+    if (k < ahead) return FIELD_FIRST + (ahead - 1 - k) as f32 * apart;
+    -FIELD_FIRST - (k - ahead) as f32 * apart
+}
+
+// Where a driver's place is, now: as dealt, and as far as it has swayed.
+// (But not out past the first place, or the last: the field is no longer
+// for its swaying.)
+bot_place(b: *Bot): f32 {
+    clampf(b.gap + FIELD_SWAY * sinf(TAU * race.time / b.sway_for + b.sway_at), field_gap(nbots - 1,
+        nbots), field_gap(0, nbots))
+}
+
+// How far into the race the last of it begins (see FIELD_FREE). And the
+// pace the player drove before it: over the same road a lap before, as
+// much of it as was after the field opened out (or, in a race of one lap,
+// from then to where the last of it begins); from where it was, and when,
+// to where, and when. And where the player was, and when, as the last of
+// the race began: from that, and the pace, where it would be now, had it
+// kept to it.
+free_from(): f32 {
+    long: f32 = race.laps as f32 * track_len;
+    long - minf(track_len, FIELD_FREE * long)
+}
+
+paced_s: f32 = 0.0;
+
+paced_t: f32 = 0.0;
+
+lapped_s: f32 = 0.0;
+
+lapped_t: f32 = 0.0;
+
+free_s: f32 = 0.0;
+
+free_t: f32 = 0.0;
+
+// How hard a driver is pulled toward its place, by how far behind it
+// (ahead, less than 0) it is: from -1 to 1.
+field_pull(off: f32): f32 {
+    signf(off) * clampf((absf(off) - FIELD_NEAR) / (ADAPT_FAR - FIELD_NEAR), 0.0,
+        1.0)
+}
+
+// Chance, for dealing the places and their sways: a number from 0 to 1. It
+// is stirred at each race by the time (see main.l8), and set as a test
+// asks.
+bots_rng: int = 7;
+
+seed_bots(seed: int) {
+    bots_rng = seed % 2147483648;
+    if (bots_rng < 0) bots_rng = -bots_rng
+}
+
+bots_rand(): f32 {
+    bots_rng = (bots_rng * 1103515245 + 12345) % 2147483648;
+    (bots_rng / 4096 % 100000) as f32 / 100000.0
+}
+
+// The places, as dealt: the k-th driver has the dealt[k]-th from the front.
+// And the player's, among them.
+dealt: []int = new int[MAX_BOTS](0);
+
+deal_places(n: int) {
+    field_ahead = 1;
+    if (n > 1) field_ahead = 1 + (bots_rand() * (n - 1) as f32) as int;
+    for k in 0..n dealt[k] = k;
+    for k in 0..n {
+        j: int = k + (bots_rand() * (n - k) as f32) as int;
+        if (j >= n) j = n - 1;
+        was: int = dealt[k];
+        dealt[k] = dealt[j];
+        dealt[j] = was
+    }
+}
 
 type Bot = {
     car: *Car;
-    // How good it is: now; and more or less than the others, always.
+    // How good it is: now; and more or less than the others, always. And,
+    // as good as the player makes them, its place in the field (see
+    // field_gap), how long its place takes to sway forward and back and
+    // where in that it started; how good it has learned it must be to hold
+    // it; and how far ahead of the player it was as the last of the race
+    // began (see FIELD_FREE), or near its place then, if it was far from it.
     skill: f32;
     own: f32;
+    gap: f32;
+    sway_for: f32;
+    sway_at: f32;
+    learned: f32;
+    ahead_by: f32;
     // The line it keeps: how far out from the road's middle, now, and
     // where it means to be on a straight.
     lane: f32;
     home: f32;
-    // Whether it has finished the race, and in what time.
+    // Its drifting (see drift_input): the last bend it made up its mind
+    // about, by how far it will have come where that ends; whether it
+    // means to drift it, and has; and how soon it lets go (1: just in
+    // time).
+    minded: f32;
+    plan: bool;
+    drifted: bool;
+    timing: f32;
+    // Whether it has finished the race, and in what time; and whether
+    // the others have been told.
     done: bool;
-    done_time: f32
+    done_time: f32;
+    told: bool
 }
 
 // How many are racing.
 nbots: int = 0;
+
+// Whose names they have (see racers.l8), the first of them: their own; or,
+// in a race the room called, the seats after the people's, which are
+// theirs on every device in it, whichever drives them (see take_bots).
+bots_who: int = NAME_BOT;
+
+// (Their own names, in those seats.)
+name_bots() {
+    for k in 0..MAX_BOTS name_is(HUMAN_SEATS + k, bot_names[k])
+}
+
+// Whether the seat k is one of those, driven here.
+bots_seat(k: int): bool {
+    bots_who == HUMAN_SEATS && k >= HUMAN_SEATS && k < HUMAN_SEATS + nbots
+}
+
+// They are not on the grid at a blink, as the race is called: they come,
+// a little of them at first, once the menu has gone (see main.l8). How
+// much of them shows, from 0 to 1; and how long they take to come.
+bots_shown: f32 = 1.0;
+
+const BOTS_COME: f32 = 0.6;
 
 // By the grid's places from the front: the kind of car in each, and how
 // much better its driver is than the others (or worse).
@@ -101,10 +273,20 @@ new_bot(): *Bot@new {
         car: new_car(BUGGY, 0.0),
         skill: 0.5,
         own: 0.0,
+        gap: 0.0,
+        sway_for: SWAY_LEAST,
+        sway_at: 0.0,
+        learned: 0.0,
+        ahead_by: 0.0,
         lane: 0.0,
         home: 0.0,
+        minded: -1000.0,
+        plan: false,
+        drifted: false,
+        timing: 1.0,
         done: false,
-        done_time: 0.0
+        done_time: 0.0,
+        told: false
     }
 }
 
@@ -118,21 +300,56 @@ new_bots(): []*Bot@new {
 start_bots(bots: []*Bot, n: int, skill: int) {
     nbots = n;
     if (nbots > MAX_BOTS) nbots = MAX_BOTS;
+    bots_shown = 0.0;
     bot_skill = skill;
     if (skill < SKILL_EASY || skill > SKILL_ADAPTIVE) bot_skill = SKILL_MEDIUM;
+    deal_places(nbots);
     for k in 0..nbots {
         b: *Bot = bots[k];
         b.car.kind = bot_kinds[k];
         place_car_at(b.car, grid_s(k), grid_d(k));
         b.own = bot_own[k];
+        b.gap = field_gap(dealt[k], nbots);
+        b.sway_for = lerpf(SWAY_LEAST, SWAY_MOST, bots_rand());
+        b.sway_at = bots_rand() * TAU;
+        b.learned = adapt_all;
         level: f32 = adapt_all;
         if (bot_skill != SKILL_ADAPTIVE) level = skill_level[bot_skill];
         b.skill = clampf(level + b.own, 0.0, 1.0);
         b.home = grid_d(k) * 0.7;
         b.lane = grid_d(k);
+        b.minded = -1000.0;
+        b.plan = false;
         b.done = false;
-        b.done_time = 0.0
+        b.done_time = 0.0;
+        b.told = false
     }
+}
+
+// A race called is taken up (see net_race, in net.l8): it is on, counted
+// down from now, and nobody has finished it or is kept from the last (see
+// racers_forget). Its computer drivers are here; or, driven on another
+// device, they are among the others, which may give them to this one (see
+// take_bots). Their places are dealt by chance, stirred by `seed`: see
+// deal_places.
+take_race(bots: []*Bot, seed: int) {
+    net_race = false;
+    net_race_course = -1;
+    race_asked = false;
+    others_begin();
+    racers_forget();
+    call_race(net_race_wait, net_race_laps);
+    race_id = net_race_id;
+    race_drivers = net_race_bots;
+    race_drivers_skill = net_race_skill;
+    bots_who = NAME_BOT;
+    if (race_id > 0) {
+        bots_who = HUMAN_SEATS;
+        name_bots()
+    }
+    seed_bots(seed);
+    if (net_race_remote) start_bots(bots, 0, net_race_skill) else start_bots(bots,
+        net_race_bots, net_race_skill)
 }
 
 // What a driver so good asks of its car, to keep it `lane` out from the
@@ -140,21 +357,44 @@ start_bots(bots: []*Bot, n: int, skill: int) {
 // goes as fast as it dares into the tightest bend within reach of its
 // brakes.
 drive(c: *Car, lane: f32, skill: f32): Input {
+    drive_by(c, lane, skill, 0, 0, 0.0)
+}
+
+// The same, for a driver that means to drift the road from `from` samples
+// ahead of where the car is to `to` (see drift_input): there it dares go
+// as fast as a bend would be taken that pulls the car sideways `dare`
+// times as hard as the road grips. And while it drifts, it steers the way
+// the car goes, not the way it points.
+drive_by(
+    c: *Car,
+    lane: f32,
+    skill: f32,
+    from: int,
+    to: int,
+    dare: f32
+): Input {
     speed: f32 = v_dot(c.v, yaw_dir(c.yaw));
+    if (c.drift) speed = v_len(c.v);
     ahead: Spot = spot_at(c.spot.s + 7.0 + 0.5 * maxf(speed, 0.0), lane);
-    off: f32 = wrap_angle(dir_yaw(v_sub(spot_point(ahead), c.p)) - c.yaw);
-    tight: f32 = 0.0001;
+    to_it: V3 = v_sub(spot_point(ahead), c.p);
+    off: f32 = wrap_angle(dir_yaw(to_it) - c.yaw);
     brakes: f32 = car_brakes[c.kind] * lerpf(drive_brakes_least, drive_brakes_most,
         skill);
     reach: int = (12.0 + speed * speed / (2.0 * brakes)) as int;
-    for i in 0..reach tight = maxf(tight, absf(track_k[wrap_i(c.spot.i + i)]));
+    grip: f32 = car_grip[c.kind * GROUNDS + road_kind()];
     nerve: f32 = lerpf(drive_nerve_least, drive_nerve_most, skill);
-    // (A tight bend cannot be straightened as an easy one can, by using
-    // the road's width: the tighter, the nearer its speed is to what the
-    // tyres hold on the road's middle.)
-    nerve = minf(nerve, lerpf(drive_nerve_most, drive_nerve_tight, smoothstepf(1.0 / 70.0,
-        1.0 / 32.0, tight)));
-    safe: f32 = sqrtf(car_grip[c.kind * GROUNDS + road_kind()] * nerve / tight);
+    safe: f32 = 1000.0;
+    for i in 0..reach {
+        tight: f32 = maxf(absf(track_k[wrap_i(c.spot.i + i)]), 0.0001);
+        // (A tight bend cannot be straightened as an easy one can, by
+        // using the road's width: the tighter, the nearer its speed is to
+        // what the tyres hold on the road's middle. Drifted, it is as the
+        // drift can turn the car.)
+        dares: f32 = minf(nerve, lerpf(drive_nerve_most, drive_nerve_tight, smoothstepf(1.0 / 70.0,
+            1.0 / 32.0, tight)));
+        if (i >= from && i < to) dares = maxf(dares, dare);
+        safe = minf(safe, sqrtf(grip * dares / tight))
+    }
     // (With little skill, it does not go flat out anywhere.)
     safe = minf(safe, car_top[c.kind * GROUNDS + road_kind()] * lerpf(drive_eases,
         1.02, clampf(skill / DRIVE_FLAT, 0.0, 1.0)));
@@ -165,8 +405,180 @@ drive(c: *Car, lane: f32, skill: f32): Input {
         tidy: true,
         veer: false
     };
+    // Drifting, the wheel says how sharply the way the car goes turns (see
+    // drift_on, in car.l8): so it asks for the turn that brings the car
+    // round onto its line at the point ahead.
+    if (c.drift) {
+        near: Spot = spot_at(c.spot.s + DRIFT_LOOK + DRIFT_LOOK_BY * speed, lane);
+        to_it = v_sub(spot_point(near), c.p);
+        off = wrap_angle(dir_yaw(to_it) - dir_yaw(c.v));
+        need: f32 = 2.0 * speed * speed * sinf(off) / maxf(v_len(to_it), 1.0);
+        over: f32 = powf(minf(absf(need) / (c.grip * DRIFT_BITE), 1.0), 2.0 / 3.0);
+        inp.steer = -signf(need) * over
+    }
     if (speed < safe) inp.gas = 1.0 else if (speed > safe + 1.5) inp.brake = 1.0;
     inp
+}
+
+// ---- drifting ----
+// A good driver drifts the bends that are worth it, as a player does: it
+// holds the veer button as it comes into one, steers the drift round it,
+// and lets go as the bend ends, so that the tyres catch with the car
+// pointing out of it, and it has its push. (So it can take the bend
+// faster than its grip would, and comes out of it faster still.)
+//
+// A bend is worth it that turns at least DRIFT_K a metre at its tightest,
+// and BEND_TURN in all: it is all the road about that which turns at least
+// half as sharply, the same way.
+const DRIFT_K: f32 = 0.025;
+
+const BEND_TURN: f32 = 0.9;
+
+// (Whether they drift at all: they do, but for a test of what it gains
+// them.)
+bots_drift: bool = true;
+
+// What skill is to drifting: how likely a driver is to drift a bend that
+// is worth it (none with DRIFT_FROM of skill or less, and all with
+// DRIFT_ALL or more); how fast it dares take one, from the least skill to
+// the most, as a share of the most that a drift can turn the car (see
+// DRIFT_BITE, in car.l8); and how far wrong, with the least skill, it can
+// be about when to let go (too soon, and it cuts in across the bend's
+// end, or has not held the drift long enough for its push).
+const DRIFT_FROM: f32 = 0.3;
+
+const DRIFT_ALL: f32 = 0.95;
+
+drift_dare_least: f32 = 0.5;
+
+drift_dare_most: f32 = 0.85;
+
+const DRIFT_CLUMSY: f32 = 0.7;
+
+// It holds the button this long before the bend comes (in seconds, at the
+// speed it is going); and lets go no sooner than this long before its
+// end. Drifting, it steers for a point on its
+// line this far ahead, and farther by its speed (a good deal nearer than
+// it looks, gripping: a drift answers the wheel at once).
+const DRIFT_LEAD: f32 = 0.2;
+
+const DRIFT_OUT: f32 = 0.4;
+
+const DRIFT_LOOK: f32 = 4.0;
+
+const DRIFT_LOOK_BY: f32 = 0.3;
+
+// Coming out of a drift, it lets go once the car is no more than this much
+// more askew than the way out of the bend is round from the way it goes.
+const DRIFT_EVEN: f32 = 0.1;
+
+// The bend find_bend found: where it starts and ends, as samples ahead of
+// where it looked from (where it starts is less than 0 if that is in it),
+// which way it turns (1: to the left, as more than 0 is in track_k), and
+// how far round it goes.
+bend_from: int = 0;
+
+bend_to: int = 0;
+
+bend_way: f32 = 0.0;
+
+bend_turn: f32 = 0.0;
+
+// The first bend that comes within `reach` samples of sample i (or that
+// it is in): whether there is one.
+find_bend(i: int, reach: int): bool {
+    edge: f32 = DRIFT_K * 0.5;
+    at: int = 0;
+    while (at < reach) {
+        if (absf(track_k[wrap_i(i + at)]) > edge) {
+            bend_way = signf(track_k[wrap_i(i + at)]);
+            bend_from = at;
+            while (bend_from > at - track_n / 2 && track_k[wrap_i(i + bend_from - 1)] * bend_way > edge) bend_from = bend_from - 1;
+            bend_to = at;
+            while (bend_to < at + track_n / 2 && track_k[wrap_i(i + bend_to)] * bend_way > edge) bend_to = bend_to + 1;
+            bend_turn = 0.0;
+            most: f32 = 0.0;
+            for j in bend_from..bend_to {
+                bend_turn = bend_turn + absf(track_k[wrap_i(i + j)]) * track_ds;
+                most = maxf(most, absf(track_k[wrap_i(i + j)]))
+            }
+            if (most >= DRIFT_K) return true;
+            at = bend_to
+        }
+        at = at + 1
+    }
+    false
+}
+
+// A number from 0 to 1 for driver k, about the place `at` metres round,
+// that is always the same for the same two (and n), and as if by chance
+// from one to another.
+bot_dice(k: int, at: f32, n: int): f32 {
+    h: int = (at as int + 100000) * 7919 + k * 104729 + n * 1299709;
+    h = (h * 1103515245 + 12345) % 2147483648;
+    h = (h * 1103515245 + 12345) % 2147483648;
+    (h / 4096 % 100000) as f32 / 100000.0
+}
+
+// What driver k does about drifting: whether it holds the veer button now;
+// the road it means to drift, from drift_from samples ahead to drift_to,
+// and how fast it dares take it (as drive_by asks); and whether it holds
+// the wheel straight, to come out of the drift.
+drift_from: int = 0;
+
+drift_to: int = 0;
+
+drift_dare: f32 = 0.0;
+
+drift_even: bool = false;
+
+drift_input(b: *Bot, k: int): bool {
+    c: *Car = b.car;
+    drift_from = 0;
+    drift_to = 0;
+    drift_dare = 0.0;
+    drift_even = false;
+    fast: f32 = v_len(c.v);
+    reach: int = (12.0 + fast * fast / car_brakes[c.kind]) as int;
+    found: bool = bots_drift && find_bend(c.spot.i, reach) && bend_turn >= BEND_TURN;
+    at: f32 = c.progress - c.spot.f * track_ds;
+    // (Drifting still, past the end of the bend: it straightens the wheel,
+    // and lets go once the car is nearly straight.)
+    if (c.drift && !c.caught && (!found || at + bend_from as f32 * track_ds > b.minded)) {
+        drift_even = true;
+        return absf(c.askew) > DRIFT_EVEN
+    }
+    if (!found) return false;
+    // It makes up its mind about each bend once, as it comes in sight.
+    // (One that starts before the last ends is that one still: where a
+    // bend is seen to start and end shifts a little as the car goes.)
+    if (at + bend_from as f32 * track_ds > b.minded) {
+        b.plan = bot_dice(k, at, 0) < smoothstepf(DRIFT_FROM, DRIFT_ALL, b.skill);
+        b.drifted = false;
+        b.timing = 1.0 + (bot_dice(k, at, 1) * 2.0 - 1.0) * DRIFT_CLUMSY * (1.0 - b.skill)
+    }
+    b.minded = at + bend_to as f32 * track_ds;
+    if (!b.plan) return false;
+    // (A drift once over, the bend is driven out as any other.)
+    if (c.drift) b.drifted = true else if (b.drifted) return false;
+    drift_from = bend_from;
+    drift_to = bend_to;
+    drift_dare = DRIFT_BITE * lerpf(drift_dare_least, drift_dare_most, b.skill);
+    // Into the bend, it holds the button.
+    if (!c.drift) return bend_from as f32 * track_ds < fast * DRIFT_LEAD + 1.0 && bend_to > 0 && fast > DRIFT_SPEED + 1.0;
+    if (c.caught) return false;
+    // In it, it lets go as the bend ends, once what is left of it (how
+    // much farther round the road turns from the way the car is going, to
+    // its way out) is no more than the car is askew into it: the tyres
+    // catch, and it goes the way it points, which is out.
+    out: f32 = dir_yaw(track_t[wrap_i(c.spot.i + bend_to)]);
+    left: f32 = wrap_angle(out - dir_yaw(c.v)) * bend_way;
+    if (bend_to as f32 * track_ds > DRIFT_OUT * fast * b.timing) return true;
+    if (left > -c.askew * bend_way * b.timing) return true;
+    // (More askew than that, it would be sent into the bend's inside: it
+    // straightens the wheel, and lets go once it is no more.)
+    drift_even = -c.askew * bend_way * b.timing > left + DRIFT_EVEN;
+    drift_even
 }
 
 // How much the road turns, a little way ahead of a car going so fast: from
@@ -221,7 +633,12 @@ bot_input(bots: []*Bot, k: int, player: *Car): Input {
         }
     }
     b.lane = toward(b.lane, want, 4.0 * STEP_DT);
-    drive(c, b.lane, b.skill)
+    veer: bool = drift_input(b, k);
+    inp: Input = drive_by(c, b.lane, b.skill, drift_from, drift_to, drift_dare);
+    inp.veer = veer;
+    inp.tidy = !veer;
+    if (drift_even) inp.steer = 0.0;
+    inp
 }
 
 // A step of all their driving; and of their meeting one another, and the
@@ -234,23 +651,45 @@ step_bots(
     dt: f32
 ) {
     // As good as the player makes them: while the race is on, and the
-    // player in it, all of them together come toward the player's speed
-    // (by how far behind it they are, one with another).
+    // player in it, each comes toward the speed that holds its place by the
+    // player, by how far behind that place it is; and drives the better
+    // for being behind it, now. (Not at once: and its race run, it takes
+    // its ease.) In the last of the race, it keeps to where it was then,
+    // by where the player would be at the pace it was going.
     adapting: bool = bot_skill == SKILL_ADAPTIVE && race.on && !race.done && !race_waits();
-    if (adapting) {
-        behind: f32 = 0.0;
-        for k in 0..nbots behind = behind + clampf((player.progress - bots[k].car.progress) / ADAPT_FAR,
-            -1.0, 1.0) / nbots as f32;
-        adapt_all = clampf(adapt_all + ADAPT_LEARN * behind * dt, 0.0, 1.0)
+    opens: f32 = smoothstepf(0.0, FIELD_OPENS, race.time);
+    from: f32 = free_from();
+    free: bool = player.progress > from;
+    if (adapting && !free) {
+        if (race.time < FIELD_OPENS || player.progress < from - track_len) {
+            paced_s = player.progress;
+            paced_t = race.time
+        }
+        lap_end: f32 = race.laps as f32 * track_len - track_len;
+        if (player.progress < lap_end || paced_s >= lap_end) {
+            lapped_s = player.progress;
+            lapped_t = race.time
+        }
+        free_s = player.progress;
+        free_t = race.time
+    }
+    pace: f32 = (lapped_s - paced_s) / maxf(lapped_t - paced_t, 1.0);
+    paced: f32 = free_s + pace * (race.time - free_t);
+    paced = maxf(paced, player.progress - FREE_GAINS);
+    if (adapting && nbots > 0) {
+        adapt_all = 0.0;
+        for k in 0..nbots adapt_all = adapt_all + bots[k].learned / nbots as f32
     }
     for k in 0..nbots {
         b: *Bot = bots[k];
-        // (And each comes to drive as well as it must where it is, not at
-        // once. Its race run, it takes its ease.)
         if (adapting && !b.done) {
-            g: f32 = clampf((player.progress - b.car.progress) / ADAPT_FAR, -1.0,
-                1.0);
-            b.skill = lerpf(b.skill, clampf(adapt_all + b.own + ADAPT_BY * g, 0.0,
+            place: f32 = bot_place(b) * opens;
+            off: f32 = player.progress + place - b.car.progress;
+            if (free) off = paced + b.ahead_by - b.car.progress else b.ahead_by = clampf(b.car.progress - player.progress,
+                place - FIELD_NEAR, place + FIELD_NEAR);
+            g: f32 = field_pull(off);
+            b.learned = clampf(b.learned + ADAPT_LEARN * g * dt, 0.0, 1.0);
+            b.skill = lerpf(b.skill, clampf(b.learned + b.own + ADAPT_BY * g, 0.0,
                 1.0), ease(1.5, dt))
         }
         if (b.done) b.skill = 0.0;
@@ -317,19 +756,163 @@ pose_bots(bots: []*Bot) {
         pose_kind(c.kind, c.kind, 0.0);
         at: V3 = c.p;
         at.y = car_y(c);
-        pose_ghost = pose_near(at);
+        fade_near(at);
+        pose_shows = pose_shows * smoothstepf(0.0, 1.0, bots_shown);
+        pose_ghost = pose_shows < 0.999;
+        pose_paint = paint_of[bots_who + k];
         pose_car(c, at, c.yaw, 0.0)
     }
-    pose_ghost = false
+    pose_ghost = false;
+    pose_shows = 1.0;
+    pose_paint = -1
+}
+
+// Their paints: each the one it likes, if it may (see paint_take, in
+// racers.l8).
+paint_bots() {
+    for k in 0..nbots paint_take(bots_who + k, bot_paints[k], false)
 }
 
 // They are racers too (see racers.l8).
 race_bots(bots: []*Bot) {
-    for k in 0..nbots racer_put(NAME_BOT + k, bots[k].car.kind, bots[k].car.progress,
-        bots[k].done, bots[k].done_time)
+    for k in 0..nbots racer_put(bots_who + k, bots[k].car.progress, bots[k].done,
+        bots[k].done_time)
 }
 
 // And they are on the map (see hud.l8).
 map_bots(bots: []*Bot) {
-    for k in 0..nbots map_put(bots[k].car.p, bots[k].car.kind, DOT_OTHER)
+    for k in 0..nbots map_put(bots[k].car.p, paint_of[bots_who + k], DOT_OTHER)
+}
+
+// With others on the track, the computer drivers in a race are driven
+// here, on the device whose race it is, and everyone else is told where
+// they are, as each says where its own car is (see say_place, in net.l8):
+// every so often, a line of how many there are, when this is, and of each,
+// where it is (all in whole numbers); and of each that has finished, that
+// it has, and in what time. And now and then, how good each is now (in
+// thousandths), for a device that may be given them to drive (see
+// take_bots).
+bots_wait: f32 = 0.0;
+
+skill_wait: f32 = 0.0;
+
+say_bots_net(bots: []*Bot, time: f32, dt: f32) raises IoError {
+    skill_wait = skill_wait - dt;
+    if (skill_wait <= 0.0 && nbots > 0) {
+        skill_wait = 1.0;
+        write(1, "L8BOTSKILL");
+        for k in 0..nbots {
+            write(1, " ");
+            write_int(1, (clampf(bots[k].skill, 0.0, 1.0) * 1000.0) as int)
+        }
+        write(1, "\n")
+    }
+    for k in 0..nbots {
+        b: *Bot = bots[k];
+        if (b.done && !b.told) {
+            b.told = true;
+            write(1, "L8BOTDONE ");
+            write_int(1, k);
+            write(1, " ");
+            write_int(1, (b.done_time * 1000.0) as int);
+            write(1, "\n")
+        }
+    }
+    bots_wait = bots_wait - dt;
+    if (bots_wait > 0.0 || nbots == 0) return;
+    bots_wait = SAY_EVERY;
+    write(1, "L8BOTAT ");
+    write_int(1, (time * 100.0) as int % 256);
+    write(1, " ");
+    write_int(1, nbots);
+    for k in 0..nbots {
+        c: *Car = bots[k].car;
+        write(1, " ");
+        write_int(1, (c.p.x * 100.0) as int);
+        write(1, " ");
+        write_int(1, (c.p.z * 100.0) as int);
+        write(1, " ");
+        write_int(1, (c.yaw * 1000.0) as int);
+        write(1, " ");
+        write_int(1, c.spot.i);
+        write(1, " ");
+        write_int(1, (c.slip * 1000.0) as int);
+        write(1, " ");
+        write_int(1, (v_len(c.v) * 100.0) as int);
+        write(1, " ");
+        write_int(1, c.kind);
+        write(1, " ");
+        write_int(1, floorf(c.progress) as int)
+    }
+    write(1, "\n")
+}
+
+// ---- when the device that drives them leaves ----
+// The computer drivers of a race the room called are driven on one device
+// in it, which says where they are. When that one leaves the race (for the
+// menu, or another race; or its page is hidden, or it goes), the room gives
+// them to another still in it (see web/race-room/worker.js), and everyone
+// in the race is told. The one given them drives them on from where they
+// were, and says where they are from then on; and nobody sees any change.
+// If the one that left comes back to the race, they are not its any more.
+//
+// That word: taken up, if it is of the race the car is in. The player's car
+// is `player`.
+heed_drive(bots: []*Bot, others: []*Other, player: *Car) {
+    if (!drive_heard) return;
+    drive_heard = false;
+    if (!race.on || race_id <= 0 || drive_race != race_id) return;
+    if (!drive_mine) {
+        nbots = 0;
+        others_anew(others)
+    } else if (nbots == 0 && race_drivers > 0) take_bots(bots, others, player)
+}
+
+// They are driven here from now on. Each goes on from where it was last
+// shown, as it was going, as far round as it had come, and as good as it
+// was last said to be; and one that had finished has, in the time it did.
+// (One never heard of, as when the device given them never took the race
+// up, starts from its place on the grid.)
+take_bots(bots: []*Bot, others: []*Other, player: *Car) {
+    start_bots(bots, race_drivers, race_drivers_skill);
+    name_bots();
+    bots_shown = 1.0;
+    for k in 0..nbots {
+        b: *Bot = bots[k];
+        c: *Car = b.car;
+        seat: int = HUMAN_SEATS + k;
+        o: *Other = others[seat];
+        if (o.kept > 0 && o.race == race_id) {
+            c.p = v3(o.car.p.x, c.p.y, o.car.p.z);
+            c.yaw = o.car.yaw;
+            c.v = o.car.v;
+            c.slip = o.car.slip;
+            c.prev = c.p;
+            c.prev_yaw = c.yaw;
+            c.spot = locate(c.p, o.at, 30);
+            c.progress = other_far[seat] + wrap_s(c.spot.s - other_far[seat]);
+            feel_ground(c);
+            b.lane = c.spot.d
+        }
+        if (bot_heard_skill[k] >= 0.0) {
+            b.skill = bot_heard_skill[k];
+            b.learned = clampf(b.skill - b.own, 0.0, 1.0)
+        }
+        b.done = other_done[seat];
+        b.done_time = other_time[seat];
+        b.told = b.done;
+        b.ahead_by = c.progress - player.progress;
+        o.here = false
+    }
+}
+
+// They are knocked by the others' cars, as these are seen here: those in
+// the race (see with_me, in net.l8).
+bots_hit_others(bots: []*Bot, others: []*Other) {
+    for k in 0..nbots {
+        for j in 0..HUMAN_SEATS {
+            o: *Other = others[j];
+            if (with_me(o) && o.seen) hit_car(bots[k].car, o.car)
+        }
+    }
 }

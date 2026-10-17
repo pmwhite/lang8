@@ -30,10 +30,17 @@ type Renderer = {
     u_road: int;
     u_fade: int;
     u_ghost: int;
+    u_pale: int;
+    u_paint: int;
+    u_dither: int;
     u_shadow_map: int;
     u_smvp: int;
     u_morph: int;
     u_smorph: int;
+    // A course turning into another (see MORPH_GLSL), as the world's
+    // shader has it, and the shadow's.
+    u_frame_of: int;
+    u_sframe_of: int;
     u_cam_f: int;
     u_cam_r: int;
     u_cam_u: int;
@@ -45,6 +52,8 @@ type Renderer = {
     u_world_time: int;
     u_world_noise: int;
     u_sky_noise: int;
+    u_sky_eye: int;
+    u_land: int;
     noise_tex: u32;
     world_buf: u32;
     world_n: int;
@@ -53,6 +62,13 @@ type Renderer = {
     // world.l8), which is turned into this one.
     u_th: []int;
     world_old: u32;
+    // Where each corner of the world round the start is in its course's
+    // terms (see relate, in world.l8): of this world and the old one. And
+    // the frames of the course between the two and of each (see
+    // MORPH_GLSL).
+    rel_buf: u32;
+    rel_old: u32;
+    frame_tex: u32;
     part_buf: u32;
     sky_buf: u32;
     shadow_tex: u32;
@@ -132,6 +148,8 @@ link_program(vs: []i8, fs: []i8) raises IoError: int {
     glBindAttribLocation(prog, 5, "nrm2");
     glBindAttribLocation(prog, 6, "vcol2");
     glBindAttribLocation(prog, 7, "vuv2");
+    glBindAttribLocation(prog, 8, "rel");
+    glBindAttribLocation(prog, 9, "rel2");
     glLinkProgram(prog);
     st: []i32 = new i32[1](0i32);
     glGetProgramiv(prog, 35714, st);
@@ -223,11 +241,56 @@ vec3 tone(vec3 c) {
 }
 """;
 
+// A course turning into another (see keep_world, in world.l8). The
+// frames (see frame_between, in world.l8): of the course between the two
+// in row 0, and of the old one and the new one in rows 1 and 2; each a
+// place (x and z), a height, and a way. frame_of: how far along the lap
+// the first frame is; the rows of the courses the two corners drawn
+// together are of (0: nothing is turning); and how far each is drawn from
+// the first to the second. rel and rel2: where each of the two is in its
+// course's terms (see relate, in world.l8).
+MORPH_GLSL: str = """
+uniform sampler2D frames;
+uniform vec4 frame_of;
+attribute vec4 rel;
+attribute vec4 rel2;
+#define FRAME_N 1024.0
+// Row `row` of the frames, at s along the lap from the line (as
+// frame_lerp, in world.l8).
+vec4 frame_at(float row, float s) {
+  float u = clamp(s - frame_of.x, 0.0, FRAME_N - 1.001);
+  float i = floor(u);
+  float y = (row + 0.5) / 3.0;
+  vec4 a = texture2DLod(frames, vec2((i + 0.5) / FRAME_N, y), 0.0);
+  vec4 b = texture2DLod(frames, vec2((i + 1.5) / FRAME_N, y), 0.0);
+  return a + (b - a) * (u - i);
+}
+// v (x and z) turned by the angle a, from +x toward +z.
+vec2 spin(vec2 v, float a) {
+  float c = cos(a);
+  float s = sin(a);
+  return vec2(v.x * c - v.y * s, v.x * s + v.y * c);
+}
+// Where a corner is, turning: between where it is in the one course and
+// where in the other (a and b, in their terms), on the course between.
+// And how far the way of the course between is turned from each course's
+// there, and how much higher it is (for the way the corner faces, and the
+// height of a rock's foot).
+vec3 turned(vec4 a, vec4 b, out vec4 moved) {
+  float k = frame_of.w;
+  vec4 f = frame_at(0.0, mix(a.x, b.x, k));
+  vec4 fa = frame_at(frame_of.y, a.x);
+  vec4 fb = frame_at(frame_of.z, b.x);
+  vec3 o = mix(a.yzw, b.yzw, k);
+  moved = vec4(f.w - fa.w, f.w - fb.w, f.z - fa.z, f.z - fb.z);
+  return vec3(f.xy + spin(o.xy, f.w), f.z + o.z).xzy;
+}
+""";
+
 // (A car changing from one kind to another has each corner twice: as it is
 // in the one, and (pos2, nrm2, vcol2) as it is in the other, and is drawn
 // `morph` of the way between. Nothing else has the second: its morph is 0.)
 WORLD_VS: str = """
-#version 120
 attribute vec3 pos;
 attribute vec3 nrm;
 attribute vec4 vcol;
@@ -254,11 +317,26 @@ void main() {
     n = mix(nrm, nrm2, morph);
     vcolor.rgb = mix(vcol.rgb, vcol2.rgb, morph);
   }
+  vst = vuv;
+  if (morph > 0.0) vst = mix(vuv, vuv2, morph);
+  // A course turning into another: each corner of the world with the
+  // same corner of the other, on the course between (see MORPH_GLSL); the
+  // way it faces turned as that course is there, and the foot of rock
+  // raised or lowered as it is.
+  if (frame_of.y > 0.5) {
+    float k = frame_of.w;
+    vec4 moved;
+    p = turned(rel, rel2, moved);
+    vec2 na = spin(nrm.xz, moved.x);
+    vec2 nb = spin(nrm2.xz, moved.y);
+    n = mix(vec3(na.x, nrm.y, na.y), vec3(nb.x, nrm2.y, nb.y), k);
+    vcolor.rgb = mix(vcol.rgb, vcol2.rgb, k);
+    vec2 lift = vcol.a > 1.5 && vcol.a < 2.5 ? moved.zw : vec2(0.0);
+    vst = mix(vuv + vec2(lift.x, 0.0), vuv2 + vec2(lift.y, 0.0), k);
+  }
   vec4 w = model * vec4(p, 1.0);
   vworld = w.xyz;
   vnrm = mat3(model[0].xyz, model[1].xyz, model[2].xyz) * n;
-  vst = vuv;
-  if (morph > 0.0) vst = mix(vuv, vuv2, morph);
   // (Looked up in the shadow map from a little off the surface, so that
   // the surface does not shadow itself.)
   vlight = light_vp * vec4(w.xyz + normalize(vnrm) * 0.1, 1.0);
@@ -278,8 +356,20 @@ uniform vec2 blob_way;
 uniform float lap_len;
 // How high the walls start to fade into the sky, and are gone.
 uniform vec2 rock_fade;
-// How much of a ghost shows (see ghost.l8): 0, for all that is no ghost.
+// How much shows of what is seen through (see pose.l8): 0, for all that
+// is not. And whether that is a ghost, pale (1), or a car in its own
+// colors (0).
 uniform float ghost;
+uniform float pale;
+// A car's paint, for its painted blocks (see body_paint, in mesh.l8: they
+// are marked by vst.x), and how much of it: 0, its own colors.
+uniform vec4 paint;
+// How much shows of a car that is coming or going, near the camera (see
+// pose.l8): 1, all of it. It is not seen through, as a ghost is, but
+// solid, with fewer and fewer of its pixels drawn, by a fixed pattern on
+// the screen: so it is always one solid shape, its near side over its far
+// side, as it goes.
+uniform float dither;
 varying vec3 vworld;
 varying vec3 vnrm;
 varying vec4 vcolor;
@@ -315,6 +405,8 @@ uniform float road_half;
 // shoulder, and the road; of its rock, in three layers; and what its
 // leaves are tinted. And how much paint the road has, how much the open
 // ground is mown in bands and mottled yellow, and how wet its patches are.
+// (Turning into another course, between the two: see set_theme_between,
+// in world.l8.)
 uniform vec3 th_grass;
 uniform vec3 th_patch;
 uniform vec3 th_earth;
@@ -327,7 +419,33 @@ uniform vec3 th_leaf;
 uniform vec4 th_how;
 #define ROAD_HALF road_half
 
+// A number from 0 to 1 for each pixel, in a pattern 4 pixels across that
+// spreads every 16 evenly.
+float bayer2(vec2 a) {
+  a = floor(a);
+  return fract(a.x * 0.5 + a.y * a.y * 0.75);
+}
+
+float bayer4(vec2 a) {
+  return bayer2(a * 0.5) * 0.25 + bayer2(a);
+}
+
 void main() {
+  if (dither < 1.0 && dither <= bayer4(gl_FragCoord.xy) + 0.03) discard;
+  // A tree does not hide the car (see MAT_WOOD, in mesh.l8): what of it is
+  // between the camera and the car, and near the line from one to the
+  // other, goes, by the same pattern as a near car's pixels do; all of it
+  // close round the line, and less and less further out. (How far off the
+  // line is measured as it looks: as far off the car as it would be at
+  // the car.)
+  if (vcolor.a > 7.15 && vcolor.a < 7.35 || vcolor.a > 8.5 && vcolor.a < 9.5) {
+    vec3 sight = blob + vec3(0.0, 0.7, 0.0) - cam_pos;
+    vec3 q = vworld - cam_pos;
+    float t = dot(q, sight) / dot(sight, sight);
+    float off = length(q - sight * t) / max(t, 0.05);
+    float shows = max(smoothstep(1.4, 2.8, off), smoothstep(0.88, 1.0, t));
+    if (t > 0.0 && shows <= bayer4(gl_FragCoord.xy) + 0.03) discard;
+  }
   vec3 n = normalize(vnrm);
   // Ambient occlusion rides in the normal's length (see mesh.l8).
   float ao = clamp(length(vnrm), 0.0, 1.0);
@@ -342,6 +460,7 @@ void main() {
   float wrap = 0.25;
   float ground = 0.0;
   float fade = 0.0;
+  vec3 skyc = vec3(0.0);
   float mirror = 0.0;
   vec2 xz = vworld.xz;
   float near = 1.0 - smoothstep(30.0, 70.0, dist);
@@ -416,11 +535,16 @@ void main() {
     // wavy; they fade into the sky as they rise, and have no top.
     float h = vworld.y - vst.x;
     fade = smoothstep(rock_fade.x, rock_fade.y, h);
+    // (The sky is worked out first, for all the faded rock alike: its
+    // clouds are read from a picture, which is read wrong in a point whose
+    // neighbors have gone another way, and showed as a dotted line where
+    // the rock gives way to the sky.)
+    if (fade > 0.0) skyc = sky_full(-V);
     if (fade > 0.995) {
       // (Looked down on over the walls, or flown over while they melt,
       // what is behind them shows.)
       if (rock_fade.y < 80.0) discard;
-      gl_FragColor = vec4(tone(sky_full(-V)), 1.0);
+      gl_FragColor = vec4(tone(skyc), 1.0);
       return;
     }
     float lay = vworld.y * 0.42 + 2.2 * vnoise(xz * 0.035);
@@ -428,12 +552,16 @@ void main() {
     float fine = vnoise(vec2(lay * 3.7, 11.1));
     albedo = mix(th_rock_a, th_rock_b, smoothstep(0.3, 0.7, broad));
     albedo = mix(albedo, th_rock_c, smoothstep(0.62, 0.8, fine) * 0.55);
-    albedo *= vcolor.rgb * (0.9 + 0.2 * vnoise(vec2(xz.x + xz.y, vworld.y * 1.3) * 1.1));
+    // (Each column, and boulder, a little lighter or darker, and warmer or
+    // cooler, by its own: see MAT_ROCK.)
+    float tint = vcolor.b;
+    albedo *= tint * vec3(1.0, 0.96 + 0.08 * fract(tint * 41.3), 0.92 + 0.12 * fract(tint * 67.1));
+    albedo *= 0.9 + 0.2 * vnoise(vec2(xz.x + xz.y, vworld.y * 1.3) * 1.1);
     // Darker at its foot.
     albedo *= mix(0.72, 1.0, smoothstep(0.0, 3.5, h));
     wrap = 0.35;
   } else {
-    albedo = pow(vcolor.rgb, vec3(2.2));
+    albedo = pow(mix(vcolor.rgb, paint.rgb, paint.a * vst.x), vec3(2.2));
     if (mat < 4.5) {
       // Metal.
       spec = 0.35;
@@ -494,13 +622,14 @@ void main() {
     col += SUN_LIGHT * vis * spec * pow(max(dot(n, H), 0.0), gloss) * (gloss + 8.0) / 60.0;
   }
   col = haze(col, V, dist);
-  if (fade > 0.0) col = mix(col, sky_full(-V), fade);
-  // A ghost is pale and cool, and seen through, least at its edges.
+  if (fade > 0.0) col = mix(col, skyc, fade);
+  // A ghost is pale and cool, and seen through, least at its edges. A car
+  // near the camera is only seen through.
   if (ghost > 0.0) {
     float l = dot(col, vec3(0.3, 0.55, 0.15));
-    col = mix(vec3(l) * vec3(0.85, 0.97, 1.15) + 0.12, col, 0.35);
+    col = mix(col, mix(vec3(l) * vec3(0.85, 0.97, 1.15) + 0.12, col, 0.35), pale);
     float edge = pow(1.0 - max(dot(n, V), 0.0), 2.0);
-    gl_FragColor = vec4(tone(col), ghost * (0.6 + 0.4 * edge));
+    gl_FragColor = vec4(tone(col), ghost * mix(1.0, 0.6 + 0.4 * edge, pale));
     return;
   }
   gl_FragColor = vec4(tone(col), 1.0);
@@ -614,25 +743,36 @@ void main() {
 
 // Into the shadow map: everything but the canyon's floor (which is left
 // out of the drawing: see draw_scene), and of the walls, only their feet
-// (see WALL_CAST, in world.l8).
+// (see WALL_CAST, in world.l8). (And turning into another course, each
+// corner as it is drawn: see MORPH_GLSL.)
 SHADOW_VS: str = """
-#version 120
 attribute vec3 pos;
 attribute vec4 vcol;
 attribute vec2 vuv;
 attribute vec3 pos2;
+attribute vec2 vuv2;
 uniform mat4 mvp;
 uniform float morph;
 void main() {
   vec3 p = pos;
   if (morph > 0.0) p = mix(pos, pos2, morph);
-  if (vcol.a > 1.5 && vcol.a < 2.5) p.y = min(p.y, vuv.y);
+  bool rock = vcol.a > 1.5 && vcol.a < 2.5;
+  if (frame_of.y > 0.5) {
+    // (Of rock, only its foot, in each course.)
+    vec4 a = rel;
+    vec4 b = rel2;
+    if (rock) {
+      a.w = min(a.w, vuv.y - frame_at(frame_of.y, a.x).z);
+      b.w = min(b.w, vuv2.y - frame_at(frame_of.z, b.x).z);
+    }
+    vec4 moved;
+    p = turned(a, b, moved);
+  } else if (rock) p.y = min(p.y, vuv.y);
   gl_Position = mvp * vec4(p, 1.0);
 }
 """;
 
 SHADOW_FS: str = """
-#version 120
 void main() {
   gl_FragColor = vec4(1.0);
 }
@@ -656,29 +796,46 @@ uniform vec3 cam_r;
 uniform vec3 cam_u;
 uniform vec2 tan_half;
 uniform float shift;
+// Where the camera is; and the land round the canyon: its color, and how
+// high it lies.
+uniform vec3 eye;
+uniform vec4 land;
 varying vec2 vscreen;
 void main() {
   vec3 d = normalize(cam_f + vscreen.x * tan_half.x * cam_r + (vscreen.y - shift) * tan_half.y * cam_u);
-  gl_FragColor = vec4(tone(sky_full(d)), 1.0);
+  vec3 c = sky_full(d);
+  // Looking down past everything (over the walls, as they melt out of a
+  // flight's way): the land, flat and lit by the sun, in broad patches,
+  // fading into the air far off and into the sky at the horizon.
+  if (d.y < 0.0 && eye.y > land.w) {
+    float t = (land.w - eye.y) / d.y;
+    vec2 p = eye.xz + d.xz * t;
+    vec3 albedo = land.rgb * (0.85 + 0.22 * vnoise(p * 0.03) + 0.08 * vnoise(p * 0.17 + 7.0));
+    vec3 ground = albedo * (SUN_LIGHT * max((sky_sun.y + 0.4) / 1.4, 0.0) + look_sky_up);
+    ground = haze(ground, -d, t);
+    c = mix(c, ground, smoothstep(0.0, 0.06, -d.y));
+  }
+  gl_FragColor = vec4(tone(c), 1.0);
 }
 """;
 
-// GLSL source with a shared prelude after its version line.
-with_prelude(src: str): []i8@new {
+// GLSL source: a version line, then the parts given (what it shares with
+// other shaders, and its own).
+with_prelude(parts: []str): []i8@new {
     head: str = "#version 120\n";
-    out: []i8 = new i8[len(head) + len(SKY_GLSL) + len(src)](0i8);
-    n: int = 0;
+    n: int = len(head);
+    for part in parts n = n + len(part);
+    out: []i8 = new i8[n](0i8);
+    n = 0;
     for c in head {
         out[n] = c;
         n = n + 1
     }
-    for c in SKY_GLSL {
-        out[n] = c;
-        n = n + 1
-    }
-    for c in src {
-        out[n] = c;
-        n = n + 1
+    for part in parts {
+        for c in part {
+            out[n] = c;
+            n = n + 1
+        }
     }
     out
 }
@@ -704,18 +861,12 @@ bind_vertices(buf: u32) {
 
 // Where the world's shader keeps each part of the theme: its colors in
 // order, then the rest.
+theme_names: []str = ["th_grass", "th_patch", "th_earth", "th_worn", "th_road", "th_rock_a",
+    "th_rock_b", "th_rock_c", "th_leaf", "th_how"];
+
 theme_places(world: int): []int@new {
     at: []int = new int[THEME_COLORS + 1](0);
-    at[0] = glGetUniformLocation(world, "th_grass");
-    at[1] = glGetUniformLocation(world, "th_patch");
-    at[2] = glGetUniformLocation(world, "th_earth");
-    at[3] = glGetUniformLocation(world, "th_worn");
-    at[4] = glGetUniformLocation(world, "th_road");
-    at[5] = glGetUniformLocation(world, "th_rock_a");
-    at[6] = glGetUniformLocation(world, "th_rock_b");
-    at[7] = glGetUniformLocation(world, "th_rock_c");
-    at[8] = glGetUniformLocation(world, "th_leaf");
-    at[THEME_COLORS] = glGetUniformLocation(world, "th_how");
+    for k in 0..len(at) at[k] = glGetUniformLocation(world, theme_names[k]);
     at
 }
 
@@ -730,32 +881,65 @@ set_theme(r: *Renderer) {
 
 // The world is another (see build_world, in world.l8): it is the one drawn
 // from now on, and the one before it is kept, to be turned into it (see
-// View's turning). (As much of it as is built: see upload_more.)
+// View's turning); and so are their frames, to turn it by. As much of it
+// as is built is sent (see upload_more).
 upload_world(r: *Renderer, world_mesh: *Mesh) {
     was: u32 = r.world_buf;
     r.world_buf = r.world_old;
     r.world_old = was;
-    upload(r.world_buf, world_mesh);
-    r.world_n = world_mesh.n
+    was = r.rel_buf;
+    r.rel_buf = r.rel_old;
+    r.rel_old = was;
+    r.world_n = 0;
+    send_frames(r, frame_was, 1);
+    send_frames(r, frame_now, 2);
+    upload_more(r, world_mesh)
 }
 
-// More of the same world is built: all that is, is the one drawn.
+// More of the same world is built: what is new of it is sent, and where
+// its corners are in the course's terms. (A little at a time, as it is
+// built: all at once, it held up the picture.)
 upload_more(r: *Renderer, world_mesh: *Mesh) {
-    upload(r.world_buf, world_mesh);
+    if (world_mesh.n > r.world_n) {
+        glBindBuffer(34962, r.world_buf);
+        glBufferSubData(34962, r.world_n * VERTEX_FLOATS * 4, (world_mesh.n - r.world_n) * VERTEX_FLOATS * 4,
+            &world_mesh.data[r.world_n * VERTEX_FLOATS]);
+        rel_n: int = world_mesh.n;
+        if (rel_n > REL_MAX) rel_n = REL_MAX;
+        if (rel_n > r.world_n) {
+            glBindBuffer(34962, r.rel_buf);
+            glBufferSubData(34962, r.world_n * 16, (rel_n - r.world_n) * 16, &world_rel[r.world_n * 4])
+        }
+    }
     r.world_n = world_mesh.n
 }
 
-// Whether chunk k of the old world was near enough the car, along the
-// track, to be in the picture (see chunk_near).
-old_chunk_near(k: int): bool {
-    ahead: int = ((k - old_near) % old_chunks + old_chunks) % old_chunks;
-    ahead <= CHUNKS_AHEAD || ahead >= old_chunks - CHUNKS_BEHIND
+// Frames fr (see frame_between, in world.l8) to row `row` of the frames'
+// picture.
+send_frames(r: *Renderer, fr: []f32, row: int) {
+    glActiveTexture(33986);
+    glBindTexture(3553, r.frame_tex);
+    glTexSubImage2Df(3553, 0, 0, row, FRAME_N, 1, 6408, 5126, fr);
+    glActiveTexture(33984)
 }
+
+extern glTexSubImage2Df(
+    target: int,
+    level: int,
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    format: int,
+    typ: int,
+    pixels: *f32
+): int = glTexSubImage2D;
 
 new_renderer(world_mesh: *Mesh, parts: *Mesh) raises IoError: *Renderer@new {
-    world: int = link_program(bytes(WORLD_VS), with_prelude(WORLD_FS));
-    shadow: int = link_program(bytes(SHADOW_VS), bytes(SHADOW_FS));
-    sky: int = link_program(bytes(SKY_VS), with_prelude(SKY_FS));
+    world: int = link_program(with_prelude([MORPH_GLSL, WORLD_VS]), with_prelude([SKY_GLSL,
+        WORLD_FS]));
+    shadow: int = link_program(with_prelude([MORPH_GLSL, SHADOW_VS]), with_prelude([SHADOW_FS]));
+    sky: int = link_program(bytes(SKY_VS), with_prelude([SKY_GLSL, SKY_FS]));
     hud: int = link_program(bytes(HUD_VS), bytes(HUD_FS));
     text: int = link_program(bytes(TEXT_VS), bytes(TEXT_FS));
     mark: int = link_program(bytes(MARK_VS), bytes(MARK_FS));
@@ -780,10 +964,15 @@ new_renderer(world_mesh: *Mesh, parts: *Mesh) raises IoError: *Renderer@new {
         u_road: glGetUniformLocation(world, "road_half"),
         u_fade: glGetUniformLocation(world, "rock_fade"),
         u_ghost: glGetUniformLocation(world, "ghost"),
+        u_pale: glGetUniformLocation(world, "pale"),
+        u_paint: glGetUniformLocation(world, "paint"),
+        u_dither: glGetUniformLocation(world, "dither"),
         u_shadow_map: glGetUniformLocation(world, "shadow_map"),
         u_smvp: glGetUniformLocation(shadow, "mvp"),
         u_morph: glGetUniformLocation(world, "morph"),
         u_smorph: glGetUniformLocation(shadow, "morph"),
+        u_frame_of: glGetUniformLocation(world, "frame_of"),
+        u_sframe_of: glGetUniformLocation(shadow, "frame_of"),
         u_cam_f: glGetUniformLocation(sky, "cam_f"),
         u_cam_r: glGetUniformLocation(sky, "cam_r"),
         u_cam_u: glGetUniformLocation(sky, "cam_u"),
@@ -795,11 +984,16 @@ new_renderer(world_mesh: *Mesh, parts: *Mesh) raises IoError: *Renderer@new {
         u_world_time: glGetUniformLocation(world, "time"),
         u_world_noise: glGetUniformLocation(world, "noise_map"),
         u_sky_noise: glGetUniformLocation(sky, "noise_map"),
+        u_sky_eye: glGetUniformLocation(sky, "eye"),
+        u_land: glGetUniformLocation(sky, "land"),
         noise_tex: make_noise_texture(),
         world_buf: gen_buffer(),
         world_n: world_mesh.n,
         u_th: theme_places(world),
         world_old: gen_buffer(),
+        rel_buf: gen_buffer(),
+        rel_old: gen_buffer(),
+        frame_tex: 0u32,
         part_buf: gen_buffer(),
         sky_buf: gen_buffer(),
         shadow_tex: 0u32,
@@ -830,7 +1024,17 @@ new_renderer(world_mesh: *Mesh, parts: *Mesh) raises IoError: *Renderer@new {
         for u in 0..LOOK_UNIFORMS r.u_look[k * LOOK_UNIFORMS + u] = glGetUniformLocation(progs[k],
             look_names[u])
     }
-    upload(r.world_buf, world_mesh);
+    // (Both the world's buffers have room for as big a world as can be
+    // built, from the first, so that another is sent a piece at a time:
+    // see upload_world.)
+    for buf in [r.world_buf, r.world_old] {
+        glBindBuffer(34962, buf);
+        glBufferData(34962, len(world_mesh.data) * 4, world_mesh.data, 35044)
+    }
+    for buf in [r.rel_buf, r.rel_old] {
+        glBindBuffer(34962, buf);
+        glBufferData(34962, REL_MAX * 16, world_rel, 35044)
+    }
     glBindBuffer(34962, r.mark_buf);
     glBufferData(34962, MAX_MARKS * MARK_FLOATS * 4, mark_data, 35048);
     upload(r.part_buf, parts);
@@ -863,8 +1067,32 @@ new_renderer(world_mesh: *Mesh, parts: *Mesh) raises IoError: *Renderer@new {
     glBindFramebuffer(36160, 0u32);
     r.shadow_tex = stex[0];
     r.shadow_fbo = fbo[0];
+    make_frames(r);
     glEnable(2929);
     r
+}
+
+// The picture the frames are sent to (see MORPH_GLSL): a row of FRAME_N
+// for each of the three courses, four numbers each. It stays bound to
+// texture unit 2, for the world's and the shadow's shaders.
+make_frames(r: *Renderer) {
+    tex: []u32 = new u32[1](0u32);
+    glGenTextures(1, tex);
+    r.frame_tex = tex[0];
+    glActiveTexture(33986);
+    glBindTexture(3553, r.frame_tex);
+    glTexParameteri(3553, 10241, 9728);
+    glTexParameteri(3553, 10240, 9728);
+    glTexParameteri(3553, 10242, 33071);
+    glTexParameteri(3553, 10243, 33071);
+    glTexImage2D(3553, 0, 34836, FRAME_N, 3, 0, 6408, 5126, null);
+    glActiveTexture(33984);
+    for prog in [r.world, r.shadow] {
+        glUseProgram(prog);
+        glUniform1i(glGetUniformLocation(prog, "frames"), 2)
+    }
+    send_frames(r, frame_now, 1);
+    send_frames(r, frame_now, 2)
 }
 
 // Value noise for the shaders: a 64-cell lattice of random values over 256
@@ -981,11 +1209,9 @@ type View = {
     near: int;
     // How far the world has turned from the one it was into the one it is
     // (see upload_world), from 0 to 1: each corner is drawn so far from
-    // where it was to where it is. Less than 0: it is not turning.
-    turning: f32;
-    // Whether it is the old world that is to be drawn, as it was: the new
-    // one's first chunks are not built yet (see build_more, in world.l8).
-    was: bool
+    // where it was to where it is, on the course between (see MORPH_GLSL).
+    // Less than 0: it is not turning.
+    turning: f32
 }
 
 // ---- the light ----
@@ -1116,30 +1342,6 @@ unbind_parts() {
     for i in 4..8 glDisableVertexAttribArray(i)
 }
 
-// Draw chunk k of the world turning from what it was (chunk `was` of the
-// old world): each of the corners every course has, from the one `skip`
-// on, with the same corner of the old.
-draw_chunk_between(
-    r: *Renderer,
-    k: int,
-    was: int,
-    skip: int
-) {
-    a: int = (old_first[was] + skip) * VERTEX_FLOATS * 4;
-    b: int = (chunk_first[k] + skip) * VERTEX_FLOATS * 4;
-    glBindBuffer(34962, r.world_old);
-    glVertexAttribPointer(0, 3, 5126, 0, VERTEX_FLOATS * 4, a);
-    glVertexAttribPointer(1, 3, 5126, 0, VERTEX_FLOATS * 4, a + 12);
-    glVertexAttribPointer(2, 4, 5126, 0, VERTEX_FLOATS * 4, a + 24);
-    glVertexAttribPointer(3, 2, 5126, 0, VERTEX_FLOATS * 4, a + 40);
-    glBindBuffer(34962, r.world_buf);
-    glVertexAttribPointer(4, 3, 5126, 0, VERTEX_FLOATS * 4, b);
-    glVertexAttribPointer(5, 3, 5126, 0, VERTEX_FLOATS * 4, b + 12);
-    glVertexAttribPointer(6, 4, 5126, 0, VERTEX_FLOATS * 4, b + 24);
-    glVertexAttribPointer(7, 2, 5126, 0, VERTEX_FLOATS * 4, b + 40);
-    glDrawArrays(4, 0, chunk_same[k] - skip)
-}
-
 // Draw posed part i: of the car that was, each corner with the same corner
 // of that part of the car to be, as far between as u_morph is told.
 draw_part_between(r: *Renderer, i: int, u_morph: int) {
@@ -1157,6 +1359,133 @@ draw_part_between(r: *Renderer, i: int, u_morph: int) {
     glVertexAttribPointer(6, 4, 5126, 0, VERTEX_FLOATS * 4, b + 24);
     glVertexAttribPointer(7, 2, 5126, 0, VERTEX_FLOATS * 4, b + 40);
     glDrawArrays(4, 0, part_count[draw_from[i] * CAR_PARTS + part])
+}
+
+// The paint of posed part i, for the world's shader (see draw_paint).
+set_paint(r: *Renderer, i: int) {
+    k: int = draw_paint[i];
+    if (k < 0) glUniform4f(r.u_paint, 0.0, 0.0, 0.0, 0.0) else glUniform4f(r.u_paint,
+        paint_rgb[k * 3], paint_rgb[k * 3 + 1], paint_rgb[k * 3 + 2], 1.0)
+}
+
+// The world turning into another is about to be drawn (see
+// draw_turning): each corner is given twice, as it is in the one and in
+// the other, each with where it is in its course's terms.
+bind_turning() {
+    for i in 4..10 glEnableVertexAttribArray(i)
+}
+
+unbind_turning(u_frame_of: int) {
+    for i in 4..10 glDisableVertexAttribArray(i);
+    glUniform4f(u_frame_of, 0.0, 0.0, 0.0, 0.0)
+}
+
+// Draw `count` corners turning (see MORPH_GLSL): from `a` on of the old
+// world (or the new, if not `a_old`), each with the same corner from `b`
+// on of the new (or the old, if `b_old`), `k` of the way from the one to
+// the other. (The two may be the same: what is in one world only.)
+draw_turning(
+    r: *Renderer,
+    u_frame_of: int,
+    a_old: bool,
+    a: int,
+    b_old: bool,
+    b: int,
+    count: int,
+    k: f32
+) {
+    if (count <= 0) return;
+    row_a: f32 = 2.0;
+    if (a_old) row_a = 1.0;
+    row_b: f32 = 2.0;
+    if (b_old) row_b = 1.0;
+    glUniform4f(u_frame_of, FRAME_FROM, row_a, row_b, k);
+    for e in 0..2 {
+        old: bool = b_old;
+        at: int = b;
+        if (e == 0) {
+            old = a_old;
+            at = a
+        }
+        buf: u32 = r.world_buf;
+        rel: u32 = r.rel_buf;
+        if (old) {
+            buf = r.world_old;
+            rel = r.rel_old
+        }
+        v: int = at * VERTEX_FLOATS * 4;
+        glBindBuffer(34962, buf);
+        glVertexAttribPointer(e * 4, 3, 5126, 0, VERTEX_FLOATS * 4, v);
+        glVertexAttribPointer(e * 4 + 1, 3, 5126, 0, VERTEX_FLOATS * 4, v + 12);
+        glVertexAttribPointer(e * 4 + 2, 4, 5126, 0, VERTEX_FLOATS * 4, v + 24);
+        glVertexAttribPointer(e * 4 + 3, 2, 5126, 0, VERTEX_FLOATS * 4, v + 40);
+        glBindBuffer(34962, rel);
+        glVertexAttribPointer(8 + e, 4, 5126, 0, 16, at * 16)
+    }
+    glDrawArrays(4, 0, count)
+}
+
+// The world round the start turning into another (see keep_world, in
+// world.l8), `k` of the way: each chunk of the new world with the chunk
+// of the old as far from the line, corner by corner. (Its floor too, but
+// for the shadow map, `cast`.) A chunk of the new world not yet built is
+// drawn as the old one, as it is (and the turning waits for it: see
+// main.l8); one that has nothing like it in the other world gives way to
+// it half way. The kerbs, which go by the bends and so are not the same
+// in any two, sink into the old road as it begins to turn, and rise out
+// of the new as it ends (but for the shadow map).
+draw_world_turning(
+    r: *Renderer,
+    u_frame_of: int,
+    k: f32,
+    cast: bool
+) {
+    bind_turning();
+    for c in 0..nchunks {
+        if (chunk_turns(c) && chunk_count[c] > 0) {
+            skip: int = 0;
+            if (cast) skip = chunk_floor[c];
+            was: int = old_chunk(c);
+            if (was >= 0) draw_turning(r, u_frame_of, true, old_first[was] + skip,
+                false, chunk_first[c] + skip, chunk_same[c] - skip, k) else if (k >= 0.5) draw_turning(r,
+                u_frame_of, false, chunk_first[c] + skip, false, chunk_first[c] + skip,
+                chunk_same[c] - skip, 0.0)
+        }
+    }
+    for w in 0..old_chunks {
+        if (old_turns(w) && new_chunk(w) < 0 && k < 0.5) {
+            skip: int = 0;
+            if (cast) skip = old_floor[w];
+            draw_turning(r, u_frame_of, true, old_first[w] + skip, true, old_first[w] + skip,
+                old_same[w] - skip, 0.0)
+        }
+    }
+    if (!cast) {
+        sunk: f32 = smoothstepf(0.0, 0.25, k);
+        risen: f32 = smoothstepf(0.75, 1.0, k);
+        mat_identity(part_tmp);
+        part_tmp[13] = -0.3 * sunk;
+        glUniformMatrix4fv(r.u_model, 1, 0, part_tmp);
+        if (sunk < 1.0) {
+            for w in 0..old_chunks {
+                if (old_turns(w)) draw_turning(r, u_frame_of, true, old_first[w] + old_same[w],
+                    true, old_first[w] + old_same[w], old_count[w] - old_same[w],
+                    0.0)
+            }
+        }
+        part_tmp[13] = -0.3 * (1.0 - risen);
+        glUniformMatrix4fv(r.u_model, 1, 0, part_tmp);
+        if (risen > 0.0) {
+            for c in 0..nchunks {
+                if (chunk_turns(c) && chunk_count[c] > 0) draw_turning(r, u_frame_of,
+                    false, chunk_first[c] + chunk_same[c], false, chunk_first[c] + chunk_same[c],
+                    chunk_count[c] - chunk_same[c], 0.0)
+            }
+        }
+        glUniformMatrix4fv(r.u_model, 1, 0, ident_m)
+    }
+    unbind_turning(u_frame_of);
+    bind_vertices(r.world_buf)
 }
 
 // Whether chunk k is near enough along the track to be in the picture.
@@ -1199,6 +1528,12 @@ box_in_view(m: []f32, chunk_box: []f32, k: int): bool {
 
 draw_scene(r: *Renderer, view: View, shadows: bool) {
     mat_identity(ident_m);
+    // (Turning into another course: the course between, as far as it has,
+    // to the frames' picture.)
+    if (view.turning >= 0.0) {
+        frame_between(view.turning);
+        send_frames(r, frame_mid, 0)
+    }
     fit_shadow(view.focus);
     glBindFramebuffer(36160, r.shadow_fbo);
     glViewport(0, 0, SHADOW_SIZE, SHADOW_SIZE);
@@ -1212,24 +1547,10 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
         glUniform1f(r.u_smorph, 0.0);
         // (Of the world, what is near enough to cast a shadow that shows;
         // and none of its floor.)
-        if (view.was) {
-            bind_vertices(r.world_buf);
-            for k in 0..old_chunks {
-                if (old_chunk_near(k) && box_in_view(light_vp, old_box, k)) glDrawArrays(4,
-                    old_first[k] + old_floor[k], old_count[k] - old_floor[k])
-            }
-        } else if (view.turning >= 0.0) {
-            // (Turning: each chunk with what it was. One that was nothing
-            // like it casts no shadow till it is done.)
-            bind_parts();
-            glUniform1f(r.u_smorph, view.turning);
-            for k in 0..nchunks {
-                was: int = old_chunk(k);
-                if (was >= 0 && chunk_near(k, view)) draw_chunk_between(r, k, was,
-                    chunk_floor[k])
-            }
-            glUniform1f(r.u_smorph, 0.0);
-            unbind_parts()
+        if (view.turning >= 0.0) {
+            // (Turning: as it is drawn. Its chunks' boxes are not where
+            // they are drawn, so all of it round the start is.)
+            draw_world_turning(r, r.u_sframe_of, view.turning, true)
         } else {
             bind_vertices(r.world_buf);
             for k in 0..nchunks {
@@ -1240,9 +1561,20 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
         bind_parts();
         for i in 0..ndraw {
             for k in 0..16 part_tmp[k] = draw_m[i * 16 + k];
+            // (A ghost casts no shadow; a car near the camera casts as
+            // much as shows of it: or it would be a car's shadow, huge,
+            // with no car. A shadow map has a shadow or not, and cannot
+            // be fainter: so less of one is the shadow of the car made
+            // smaller, in toward the ground under it, where it grows in
+            // and shrinks away.)
+            cast: f32 = draw_cast[i];
+            if (cast < 0.999) {
+                for k in 0..12 part_tmp[k] = part_tmp[k] * cast;
+                for k in 0..3 part_tmp[12 + k] = draw_under[i * 3 + k] + (part_tmp[12 + k] - draw_under[i * 3 + k]) * cast
+            }
             mat_mul(mvp_m, light_vp, part_tmp);
             glUniformMatrix4fv(r.u_smvp, 1, 0, mvp_m);
-            if (!draw_ghost[i]) draw_part_between(r, i, r.u_smorph)
+            if (cast > 0.03) draw_part_between(r, i, r.u_smorph)
         }
         unbind_parts();
         glDisable(32823)
@@ -1280,57 +1612,9 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
     glUniformMatrix4fv(r.u_model, 1, 0, ident_m);
     glUniform1f(r.u_morph, 0.0);
     glUniform1f(r.u_ghost, 0.0);
-    if (view.was) {
-        bind_vertices(r.world_buf);
-        for k in 0..old_chunks {
-            if (old_chunk_near(k) && box_in_view(vp_m, old_box, k)) glDrawArrays(4,
-                old_first[k], old_count[k])
-        }
-    } else if (view.turning >= 0.0) {
-        // The world turning from what it was: each chunk with the chunk it
-        // was, corner by corner. (One that was nothing like it is the old
-        // one for the first half, and the new for the rest.)
-        bind_parts();
-        glUniform1f(r.u_morph, view.turning);
-        for k in 0..nchunks {
-            was: int = old_chunk(k);
-            if (was >= 0 && chunk_near(k, view) && (chunk_in_view(vp_m, k) || box_in_view(vp_m,
-                old_box, was))) draw_chunk_between(r, k, was, 0)
-        }
-        glUniform1f(r.u_morph, 0.0);
-        unbind_parts();
-        // What does not turn: the kerbs, which sink into the old road as it
-        // begins, and rise out of the new as it ends; and the chunks that
-        // have no like.
-        sunk: f32 = smoothstepf(0.0, 0.25, view.turning);
-        risen: f32 = smoothstepf(0.75, 1.0, view.turning);
-        if (sunk < 1.0) {
-            mat_identity(part_tmp);
-            part_tmp[13] = -0.3 * sunk;
-            glUniformMatrix4fv(r.u_model, 1, 0, part_tmp);
-            bind_vertices(r.world_old);
-            for k in 0..old_chunks {
-                if (box_in_view(vp_m, old_box, k)) glDrawArrays(4, old_first[k] + old_same[k],
-                    old_count[k] - old_same[k])
-            }
-        }
-        if (risen > 0.0) {
-            mat_identity(part_tmp);
-            part_tmp[13] = -0.3 * (1.0 - risen);
-            glUniformMatrix4fv(r.u_model, 1, 0, part_tmp);
-            bind_vertices(r.world_buf);
-            for k in 0..nchunks {
-                if (chunk_near(k, view) && chunk_in_view(vp_m, k)) glDrawArrays(4,
-                    chunk_first[k] + chunk_same[k], chunk_count[k] - chunk_same[k])
-            }
-        }
-        glUniformMatrix4fv(r.u_model, 1, 0, ident_m);
-        bind_vertices(r.world_buf);
-        for k in 0..nchunks {
-            if (old_chunk(k) < 0 && view.turning >= 0.5 && chunk_near(k, view) && chunk_in_view(vp_m,
-                k)) glDrawArrays(4, chunk_first[k], chunk_same[k])
-        }
-    } else {
+    glUniform4f(r.u_paint, 0.0, 0.0, 0.0, 0.0);
+    glUniform1f(r.u_dither, 1.0);
+    if (view.turning >= 0.0) draw_world_turning(r, r.u_frame_of, view.turning, false) else {
         bind_vertices(r.world_buf);
         for k in 0..nchunks {
             if (chunk_near(k, view) && chunk_in_view(vp_m, k)) glDrawArrays(4, chunk_first[k],
@@ -1341,15 +1625,35 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
     glUseProgram(r.world);
     bind_parts();
     for i in 0..ndraw {
-        if (!draw_ghost[i]) {
+        // (A ghost is drawn later, seen through; and a car near the
+        // camera, or coming, with as many of its pixels as show of it.)
+        if (!draw_pale[i] && draw_shows[i] > 0.003) {
             glUniformMatrix4fv(r.u_model, 1, 0, &draw_m[i * 16]);
+            set_paint(r, i);
+            dither: f32 = 1.0;
+            if (draw_ghost[i]) dither = draw_shows[i];
+            glUniform1f(r.u_dither, dither);
             draw_part_between(r, i, r.u_morph)
         }
     }
+    glUniform4f(r.u_paint, 0.0, 0.0, 0.0, 0.0);
+    glUniform1f(r.u_dither, 1.0);
     unbind_parts();
     glUniform1f(r.u_morph, 0.0);
-    // The sky last, and only where nothing else is: at the far end of the
-    // depth, which it passes by being no further.
+    // The sky last.
+    draw_sky(r, view, aspect, sun);
+    draw_ghosts(r);
+    draw_fx(r, view)
+}
+
+// The sky, only where nothing else is yet: at the far end of the depth,
+// which it passes by being no further.
+draw_sky(
+    r: *Renderer,
+    view: View,
+    aspect: f32,
+    sun: V3
+) {
     glDepthMask(0);
     glDepthFunc(515);
     glUseProgram(r.sky);
@@ -1366,12 +1670,17 @@ draw_scene(r: *Renderer, view: View, shadows: bool) {
     glUniform1f(r.u_time, view.time);
     set_look(r, 1);
     glUniform1i(r.u_sky_noise, 1);
+    // (The land is the color of the course's open ground, as high as its
+    // road is, about: see land_high. Turning into another course, it is
+    // as far between the two as the world is.)
+    glUniform3f(r.u_sky_eye, view.eye.x, view.eye.y, view.eye.z);
+    high: f32 = land_high();
+    if (view.turning >= 0.0) high = lerpf(old_land, high, view.turning);
+    glUniform4f(r.u_land, theme_now[0], theme_now[1], theme_now[2], high);
     bind_vertices(r.sky_buf);
     glDrawArrays(4, 0, 3);
     glDepthFunc(513);
-    glDepthMask(1);
-    draw_ghosts(r);
-    draw_fx(r, view)
+    glDepthMask(1)
 }
 
 // What shows in the air (see fx.l8), over everything else: the smoke and
@@ -1409,20 +1718,21 @@ const GHOST_SHOWS: f32 = 0.55;
 draw_ghosts(r: *Renderer) {
     any: bool = false;
     for i in 0..ndraw {
-        if (draw_ghost[i]) any = true
+        if (draw_pale[i]) any = true
     }
     if (!any) return;
     glUseProgram(r.world);
-    glUniform1f(r.u_ghost, GHOST_SHOWS);
     bind_parts();
     glEnable(3042);
+    glUniform1f(r.u_pale, 1.0);
     for pass in 0..2 {
         if (pass == 0) glBlendFunc(0, 1) else {
             glBlendFunc(770, 771);
             glDepthFunc(515)
         }
         for i in 0..ndraw {
-            if (draw_ghost[i]) {
+            if (draw_pale[i] && draw_shows[i] > 0.003) {
+                glUniform1f(r.u_ghost, GHOST_SHOWS * draw_shows[i]);
                 glUniformMatrix4fv(r.u_model, 1, 0, &draw_m[i * 16]);
                 draw_part_between(r, i, r.u_morph)
             }
