@@ -1,13 +1,13 @@
 #!/bin/sh
 # Run Bible.app in the iOS simulator, on a Mac, and keep what it showed:
 #   simulate.sh APP OUT
-# It boots an iPhone simulator and launches the app with L8_DEMO=1, which
-# goes through it by itself (see demo_tick in programs/bible/ios.l8): Genesis
-# 1 at first; the books at 4 s, Psalms' chapters at 7, Psalm 23 at 10, a
-# footnote at 13, John 3 at 16, read on (the bars hidden) at 19, the bars
-# back at 22. It takes a screenshot after each, then one in dark mode and
-# one with a larger text size, and one after the app is opened again (it
-# should be where it was). OUT gets the screenshots, the app's output and
+# It boots an iPhone simulator, launches the app with L8_DEMO=1, and takes it
+# through its demo with links (bsb://demo/N; see demo_do in
+# programs/bible/ios.l8): Genesis 1 at first, the books, Psalms' chapters,
+# Psalm 23, a footnote, John 3, read on (the bars hidden), the bars back. It
+# takes a screenshot after each, then one in dark mode and one with a larger
+# text size, one after the app is opened again (it should be where it was),
+# and one after a link to Romans 8. OUT gets the screenshots, the app's output and
 # log, and any crash report.
 set -u
 app=$1
@@ -26,7 +26,6 @@ xcrun simctl bootstatus "$dev" -b >/dev/null
 xcrun simctl ui "$dev" appearance light
 xcrun simctl ui "$dev" content_size large 2>/dev/null || true
 xcrun simctl install "$dev" "$app"
-old=$(xcrun simctl get_app_container "$dev" "$id" data 2>/dev/null) && rm -f "$old/Documents/demo.txt"
 shot() {
   xcrun simctl io "$dev" screenshot "$out/$1.png" >/dev/null 2>&1 && echo "shot $1"
 }
@@ -34,17 +33,17 @@ xcrun simctl spawn "$dev" log stream --predicate 'process == "Bible" AND message
 logger=$!
 SIMCTL_CHILD_L8_DEMO=1 xcrun simctl launch --console-pty "$dev" "$id" > "$out/console.txt" 2>&1 &
 console=$!
-# Each step's screenshot once the app has come to it (it writes the step
-# to Documents/demo.txt), and its animations have finished.
-data=$(xcrun simctl get_app_container "$dev" "$id" data)
+# (Once it says it is up: the first launch may take minutes.) Each step
+# is a link the app takes (bsb://demo/N), its screenshot after its
+# animations.
+for i in $(seq 1200); do
+  grep -q "bible: up" "$out/console.txt" 2>/dev/null && break
+  sleep 0.5
+done
+sleep 2
 step() {
-  tries=80
-  [ "$1" = 1 ] && tries=2400   # (the first launch may take minutes)
-  for i in $(seq $tries); do
-    [ "$(cat "$data/Documents/demo.txt" 2>/dev/null)" = "$1" ] && break
-    sleep 0.25
-  done
-  sleep 1.5
+  [ "$1" = 1 ] || xcrun simctl openurl "$dev" "bsb://demo/$1"
+  sleep 2
   shot "$2"
 }
 step 1 01-genesis-1
@@ -67,7 +66,14 @@ kill "$console" 2>/dev/null || true
 sleep 1
 xcrun simctl launch --console-pty "$dev" "$id" > "$out/console-again.txt" 2>&1 &
 console=$!
-sleep 4; shot 11-opened-again
+for i in $(seq 240); do
+  grep -q "bible: up" "$out/console-again.txt" 2>/dev/null && break
+  sleep 0.5
+done
+sleep 2; shot 11-opened-again
+# A link to a chapter.
+xcrun simctl openurl "$dev" "bsb://rom/8"
+sleep 2; shot 12-link-romans-8
 kill "$logger" "$console" 2>/dev/null || true
 find ~/Library/Logs/DiagnosticReports -newer "$app/Info.plist" -type f -exec cp {} "$out"/ \; 2>/dev/null || true
 ls -la "$out"
