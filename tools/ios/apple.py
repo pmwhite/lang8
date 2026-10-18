@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Signing Better (programs/tempo on an iPhone) and sending it to TestFlight
+# Signing Better (programs/better on an iPhone) and sending it to TestFlight
 # through the App Store Connect API, from Linux:
 #   apple.py bundle                 register the bundle id
 #   apple.py device NAME UDID       register a phone (for development)
@@ -10,7 +10,7 @@
 #   apple.py upload IPA             send a store-signed IPA to App Store
 #                                   Connect, and wait while it is processed
 #   apple.py builds                 the latest builds, and how they are
-# Keys and what Apple gives back are kept in ~/.config/tempo-ios (the API
+# Keys and what Apple gives back are kept in ~/.config/better-ios (the API
 # key there as AuthKey_KEYID.p8, its ids in asc.env as KEY_ID and
 # ISSUER_ID); nothing secret is kept in the repository. sign.sh signs the
 # app with what this makes.
@@ -26,7 +26,7 @@ import zipfile
 import jwt
 import requests
 
-HOME = os.path.expanduser("~/.config/tempo-ios")
+HOME = os.path.expanduser("~/.config/better-ios")
 API = "https://api.appstoreconnect.apple.com/v1"
 BUNDLE = "space.trailingwhite.better"
 KINDS = {

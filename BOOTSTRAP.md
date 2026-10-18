@@ -98,7 +98,7 @@ each other. A library's `native "NAME.s"` is `NAME.arm64-linux.s` or
 `NAME.arm64-darwin.s` there. Assemble and link the output with a toolchain
 for the target: `tools/arm64/linux.sh` uses clang and ld.lld, and runs the
 result under qemu-aarch64; `tools/ios/build.sh` uses Xcode's (see
-`programs/tempo/README.md`). `test --arm64` builds and runs tests that way,
+`programs/better/README.md`). `test --arm64` builds and runs tests that way,
 under qemu, so the compiler's tests check the arm64 code generator too.
 
 `unused` reports functions that are unreachable from every listed program.

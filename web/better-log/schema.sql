@@ -1,8 +1,8 @@
--- Tempo's logs (see worker.js). Run with:
---   npx wrangler d1 execute tempo-log --remote --file schema.sql
+-- Better's logs (see worker.js). Run with:
+--   npx wrangler d1 execute better-log --remote --file schema.sql
 
 -- A log: whose it is (by the hash of their link's secret), its text
--- (Tempo's log file: each activity's times, distances, speeds and
+-- (Better's log file: each activity's times, distances, speeds and
 -- climbing, and nothing of where), and how many times it has been saved.
 CREATE TABLE IF NOT EXISTS logs (
   id TEXT PRIMARY KEY,

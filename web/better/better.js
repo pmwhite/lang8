@@ -1,42 +1,42 @@
-// Tempo (programs/tempo) on a canvas that fills the screen, on the block
+// Better (programs/better) on a canvas that fills the screen, on the block
 // game's browser implementation of X11, GLX, and OpenGL
-// (../game/platform.js). Tempo draws everything; the page starts it, passes
+// (../game/platform.js). Better draws everything; the page starts it, passes
 // it fingers, keys, the phone's safe edges and the time, watches where the
 // phone is while it asks, keeps the screen on while it records, and keeps
 // its log.
 //
-// Where the phone is: Tempo says L8GPS 1 while it wants to know (while
+// Where the phone is: Better says L8GPS 1 while it wants to know (while
 // recording, and on Record, ready to), and L8GPS 0 when not; L8GPSRETRY
 // asks again after it was refused (`gps denied`). Each fix is passed on
 // only as how far it is east and north of the one before, and how much
 // higher, in centimeters, with how sure it is and the speed the phone
 // measured: `fix T DX DY ACC SPEED DZ ZACC`. The fix before is the only
-// position the page holds, in this closure, and it is dropped when Tempo
+// position the page holds, in this closure, and it is dropped when Better
 // stops asking; no position or height is passed on, written, or saved:
 // what is kept is how far was gone, how fast, and how much it climbed and
-// descended along the way. Lines for Tempo go in /inbox.txt (it reads and
+// descended along the way. Lines for Better go in /inbox.txt (it reads and
 // empties it when told, key 20).
 //
-// The log: Tempo writes /log.txt after each change, and /live.txt (a
+// The log: Better writes /log.txt after each change, and /live.txt (a
 // recording under way) every few seconds. Both are kept in this browser
 // (IndexedDB, store.js), and, with a personal link (#me=SECRET), the log
-// is also kept by the log's worker (../tempo-log/worker.js), the same on
+// is also kept by the log's worker (../better-log/worker.js), the same on
 // every device with the link and only there. Logs changed in two places
 // are put together (each activity is kept once; one deleted in either
 // stays deleted). A recording under way is kept in this browser only.
 //
-// Tempo is told how the log is kept (11): on this device only (0), saved
+// Better is told how the log is kept (11): on this device only (0), saved
 // (1), being saved (2), offline (3), or on this device only because its
 // link is not one the worker knows (4); that a newer log is in its file
 // (10); and whether the phone is set dark (12, and L8_DARK to begin
 // with). Light or dark as picked on this device is kept here (L8_THEME to
-// begin with; Tempo says L8THEME PICK light|dark when it changes).
+// begin with; Better says L8THEME PICK light|dark when it changes).
 //
-// The name field is drawn by Tempo, but a phone's keyboard comes up only
-// for a real text field touched by a finger: so Tempo says where its field
+// The name field is drawn by Better, but a phone's keyboard comes up only
+// for a real text field touched by a finger: so Better says where its field
 // is and what is written in it (L8FIELD x0 y0 x1 y1 TEXT, in CSS pixels
 // from the canvas's corner, or L8FIELD -), and an unseen <input> is laid
-// over it. What is typed there goes to Tempo as keys; it says L8BLUR when
+// over it. What is typed there goes to Better as keys; it says L8BLUR when
 // it is done with it.
 //
 // ?fresh starts with an empty log (kept nowhere); ?api=URL uses another
@@ -45,7 +45,7 @@
 // 1000000000 + 1000 * what + number (see page_says in app.l8).
 import { instantiate, runResumable, MemFS } from "../l8-runtime.js";
 import { createPlatform } from "../game/platform.js";
-import { kept } from "./store.js";
+import { kept, keptBefore } from "./store.js";
 
 const LOG = "/log.txt";
 const LIVE = "/live.txt";
@@ -70,21 +70,28 @@ for (const name of ["touchstart", "touchmove"]) {
 const touch = matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
 const nowLine = () => `now ${Date.now()} ${-new Date().getTimezoneOffset()}`;
 
-// What was kept in localStorage before IndexedDB: moved over, once.
+// What was kept before: in localStorage at first, then in IndexedDB, both
+// under Tempo's name. Moved over, once.
 async function moveOver() {
-  if (localStorage.getItem("tempo:moved")) return;
-  for (const [from, to] of [["tempo:log", "log"], ["tempo:live", "live"], ["tempo:me", "me"], ["tempo:rev", "rev"], ["tempo:dirty", "dirty"]]) {
-    const v = localStorage.getItem(from);
-    if (v !== null && (await kept.get(to)) === undefined) await kept.set(to, to === "rev" ? Number(v) : to === "dirty" ? v === "1" : v);
+  if (localStorage.getItem("better:moved")) return;
+  const keys = ["log", "live", "me", "rev", "dirty"];
+  const before = await keptBefore("tempo", keys);
+  for (const key of keys) {
+    let v = before[key];
+    const s = localStorage.getItem("tempo:" + key);
+    if (v === undefined && s !== null) v = key === "rev" ? Number(s) : key === "dirty" ? s === "1" : s;
+    if (v !== undefined && (await kept.get(key)) === undefined) await kept.set(key, v);
   }
-  localStorage.setItem("tempo:moved", "1");
+  const theme = localStorage.getItem("tempo:theme");
+  if (theme !== null && localStorage.getItem("better:theme") === null) localStorage.setItem("better:theme", theme);
+  localStorage.setItem("better:moved", "1");
 }
 
 async function main() {
   const params = new URLSearchParams(location.search);
   const fresh = params.has("fresh");
   const sim = Number(params.get("sim") || 0);
-  const modulePromise = WebAssembly.compileStreaming(fetch("tempo.wasm"));
+  const modulePromise = WebAssembly.compileStreaming(fetch("better.wasm"));
   sync.fresh = fresh;
   if (!fresh) await moveOver();
   const log = fresh ? "" : await startLog(params);
@@ -108,7 +115,7 @@ async function main() {
       else console.log(line);
     }
   };
-  const sys = fs.sys(["tempo", LOG, LIVE]);
+  const sys = fs.sys(["better", LOG, LIVE]);
   const close = sys.close;
   sys.close = (fd) => {
     const file = fs.fds.get(fd);
@@ -121,7 +128,7 @@ async function main() {
     }
     return status;
   };
-  const env = { L8_PAGE: "1", L8_THEME: localStorage.getItem("tempo:theme") || "0", L8_DARK: phoneDark.matches ? "1" : "0" };
+  const env = { L8_PAGE: "1", L8_THEME: localStorage.getItem("better:theme") || "0", L8_DARK: phoneDark.matches ? "1" : "0" };
   if (touch) env.L8_TOUCH = "1";
   if (sim > 0) env.L8_SIM = String(Math.round(sim));
   // (Kilometers, where miles are not what is used.)
@@ -142,7 +149,7 @@ async function main() {
   const { instance, mem } = await instantiate(module, sys, platform.imports);
   platform.attach(instance, mem);
   const send = (what, n) => platform.key(2, 1000000000 + 1000 * what + Math.max(0, Math.min(999, Math.round(n))));
-  // A line for Tempo: added to what it has not read yet.
+  // A line for Better: added to what it has not read yet.
   const post = (line) => {
     fs.writeFile(INBOX, decoder.decode(fs.readFile(INBOX)) + line + "\n");
     send(20, 0);
@@ -156,7 +163,7 @@ async function main() {
   sync.tell();
   phoneDark.addEventListener("change", () => send(12, phoneDark.matches ? 1 : 0));
 
-  // Tempo's pixels are the page's: how many window pixels to one, and the
+  // Better's pixels are the page's: how many window pixels to one, and the
   // phone's own edges (its notch, its home bar), measured each frame and
   // told when they change.
   let told = "";
@@ -237,11 +244,11 @@ async function main() {
   canvas.focus({ preventScroll: true });
   requestAnimationFrame(() => requestAnimationFrame(() => document.body.classList.remove("booting")));
   const status = await runResumable(instance, () => platform.nextFrame());
-  show(`Tempo stopped${status ? ` with status ${status}` : ""}.<br><a href="">Start again</a>`);
+  show(`Better stopped${status ? ` with status ${status}` : ""}.<br><a href="">Start again</a>`);
 }
 
 // ---- where the phone is ----
-// Only while Tempo asks; each fix as a step from the one before.
+// Only while Better asks; each fix as a step from the one before.
 const EARTH = 6371008.8;
 const RAD = Math.PI / 180;
 const gps = {
@@ -323,14 +330,14 @@ document.addEventListener("visibilitychange", () => {
 });
 
 // ---- light or dark ----
-// The page's own background and the phone's bar over it are Tempo's: dark
+// The page's own background and the phone's bar over it are Better's: dark
 // in the dark theme, and while recording (the recording is always dark).
 // The pick (0 as the phone is, 1 light, 2 dark) is kept on this device.
 const phoneDark = matchMedia("(prefers-color-scheme: dark)");
 const look = {
   dark: document.documentElement.classList.contains("dark"),
   set(pick, dark) {
-    localStorage.setItem("tempo:theme", pick);
+    localStorage.setItem("better:theme", pick);
     this.dark = dark;
     this.paint();
   },
@@ -368,7 +375,7 @@ document.addEventListener("visibilitychange", () => {
 
 // ---- keeping the log ----
 const sync = {
-  api: "https://trailingwhite.space/tempo/api",
+  api: "https://trailingwhite.space/better/api",
   secret: "",
   state: 0,
   send: null,
@@ -468,7 +475,7 @@ async function joined(local, there, reload) {
   return log;
 }
 
-// Tempo saved its log: kept here, and soon with the worker.
+// Better saved its log: kept here, and soon with the worker.
 async function saved(text) {
   if (sync.fresh) return;
   await kept.set("log", text);
@@ -534,5 +541,5 @@ setInterval(() => {
 main().catch((e) => {
   console.error(e);
   document.body.classList.remove("booting");
-  show(`Tempo stopped: ${e.message}`);
+  show(`Better stopped: ${e.message}`);
 });

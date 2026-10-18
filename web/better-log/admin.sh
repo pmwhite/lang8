@@ -1,19 +1,19 @@
 #!/bin/sh
-# Look after Tempo's logs (see worker.js). The admin secret is read from
-# ~/.config/tempo-log/admin-secret.
+# Look after Better's logs (see worker.js). The admin secret is read from
+# ~/.config/better-log/admin-secret.
 #   ./admin.sh new NAME     make a log, and print its owner's link (keep it: it is the key)
 #   ./admin.sh all          every log
 #   ./admin.sh relink ID    a new link for a log (the old one stops working)
 #   ./admin.sh past LINK    the texts a log had before, newest first
 #   ./admin.sh show LINK REV   one of them
 #   ./admin.sh restore LINK REV   make it the log again
-# TEMPO_API and TEMPO_ADMIN point it at another worker (a local one:
-# http://localhost:8799/tempo/api and the secret it was started with);
-# TEMPO_PAGE is Tempo's page the links are to.
+# BETTER_API and BETTER_ADMIN point it at another worker (a local one:
+# http://localhost:8799/better/api and the secret it was started with);
+# BETTER_PAGE is Better's page the links are to.
 set -eu
-api=${TEMPO_API:-https://trailingwhite.space/tempo/api}
-page=${TEMPO_PAGE:-https://menegroth.tail5f0149.ts.net/tempo/}
-admin() { echo "${TEMPO_ADMIN:-$(cat "$HOME/.config/tempo-log/admin-secret")}"; }
+api=${BETTER_API:-https://trailingwhite.space/better/api}
+page=${BETTER_PAGE:-https://menegroth.tail5f0149.ts.net/better/}
+admin() { echo "${BETTER_ADMIN:-$(cat "$HOME/.config/better-log/admin-secret")}"; }
 # (The secret, from a link or as it is.)
 secret_of() { echo "$1" | sed 's/.*#me=//'; }
 case "${1:-}" in

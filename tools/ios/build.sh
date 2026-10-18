@@ -1,10 +1,10 @@
 #!/bin/sh
-# Build Tempo.app from `l8 arm64 --target ios` output, on a Mac (Xcode's
+# Build Better.app from `l8 arm64 --target ios` output, on a Mac (Xcode's
 # command-line tools):
-#   build.sh sim TEMPO.s OUT        for the iOS simulator
-#   build.sh device TEMPO.s OUT     for an iPhone (signed with $IOS_IDENTITY,
+#   build.sh sim BETTER.s OUT        for the iOS simulator
+#   build.sh device BETTER.s OUT     for an iPhone (signed with $IOS_IDENTITY,
 #                                   and $IOS_PROFILE embedded, if given)
-# The app is OUT/Tempo.app. The code is the same for both; it is linked for
+# The app is OUT/Better.app. The code is the same for both; it is linked for
 # one platform or the other, against UIKit, Foundation, CoreLocation,
 # QuartzCore and OpenGLES.
 set -eu
@@ -17,12 +17,12 @@ case "$kind" in
   device) sdk=iphoneos; target=arm64-apple-ios16.0; platform=iPhoneOS ;;
   *) sed -n '2,9p' "$0"; exit 2 ;;
 esac
-app="$out/Tempo.app"
+app="$out/Better.app"
 rm -rf "$app"
 mkdir -p "$app"
 sysroot=$(xcrun --sdk "$sdk" --show-sdk-path)
-xcrun --sdk "$sdk" clang -target "$target" -c -x assembler "$src" -o "$out/tempo.o"
-xcrun --sdk "$sdk" clang -target "$target" -isysroot "$sysroot" "$out/tempo.o" -o "$app/Tempo" \
+xcrun --sdk "$sdk" clang -target "$target" -c -x assembler "$src" -o "$out/better.o"
+xcrun --sdk "$sdk" clang -target "$target" -isysroot "$sysroot" "$out/better.o" -o "$app/Better" \
   -framework UIKit -framework Foundation -framework CoreLocation -framework QuartzCore \
   -framework OpenGLES -lobjc -Wl,-dead_strip
 sed "s/PLATFORM/$platform/" "$here/Info.plist" > "$app/Info.plist"

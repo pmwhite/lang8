@@ -1,10 +1,11 @@
-// Tempo's logs: a Cloudflare Worker at /tempo/api/ with a D1 database
+// Better's logs: a Cloudflare Worker at /better/api/ (and /tempo/api/, its
+// name before, which iPhones not yet updated still ask) with a D1 database
 // behind it (schema.sql).
 //
-// A log is the text Tempo keeps of the activities recorded: when each
+// A log is the text Better keeps of the activities recorded: when each
 // was, how long, how far, how fast through it, and how much it climbed
-// and descended; never where (Tempo is not told). It is Tempo's log file,
-// kept here whole. Its owner has a link, Tempo's page with the log's
+// and descended; never where (Better is not told). It is Better's log file,
+// kept here whole. Its owner has a link, Better's page with the log's
 // secret after #me=; whoever opens it has that log, on any device, so it
 // is theirs alone to keep. Logs are made by the admin, who holds the admin
 // secret (see admin.sh).
@@ -109,7 +110,7 @@ const admin = async (env, what, body) => {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const parts = url.pathname.replace(/^\/tempo\/api/, "").split("/").filter(Boolean);
+    const parts = url.pathname.replace(/^\/(better|tempo)\/api/, "").split("/").filter(Boolean);
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers });
     // Not too often from one address (which is not kept).
     if (env.LIMIT) {
