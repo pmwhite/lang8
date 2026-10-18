@@ -26,7 +26,8 @@ level's words and its letters as tiles: lit when you hold one as a fact,
 soft when it is inside one, ringed when the goal wants it). When the
 board does not fit, the picture is a strip and the facts scroll. A
 fact used by a move shrinks to one small line after the next move, one
-not touched for three moves to one line. One
+not touched for three moves to one line (two with five facts or more,
+one with seven, so the goal stays in sight). One
 statement is focused (outlined orange), and the hand holds its moves, each
 a pudgy row that says what kind of move it is and shows **what it gives**:
 the statement as it will be (the changed part tinted), a new fact (blue), or
@@ -55,10 +56,14 @@ when the hand has no row at all.
   (gold, with a check, if it closes the goal). Terms that close the goal
   come first, then those that leave nothing new open, then the rest; the
   level's names, a region's own (e), and the parts of the board are
-  offered. Three show, then *More terms*; a term the kernel will not take
-  is not offered.
+  offered. Among equals the name just taken (an `n` with `n ≥ max(N, N₁)`)
+  comes first, and when it fits best it shows alone. A kit is never filled
+  with such a name (no `max(n, N)`), and a two-hole kit filled the other
+  way round (`max(N₁, N)`) is offered once. Three show, then *More
+  terms*; a term the kernel will not take is not offered.
 - Three rows show, then *More moves*: under it go the rest, and *Suppose
-  not* and *Flip sides* (unless the level's written proof uses them).
+  not* and *Flip sides* (unless the level's written proof uses them). When
+  no row shows (*Nothing to tidy here*), the button says *Other ideas*.
 - **Undo** (top right) takes back the last move. The **bulb** shows the
   written proof's next move (the row glows, a ghost finger points), or, off
   its path, how many undos get back on it (that word and the undo
@@ -84,7 +89,9 @@ side condition arithmetic closes as the move is made (`0 < ε/2` for
 small gold chip with it ticks at the end of the new fact's card. When
 a statement changes, its writing moves piece by piece: what leaves
 shrinks and fades where it was, then what stays slides, and the part a
-row brought flies in and becomes its block. Words
+row brought flies in and becomes its block. When the goal's whole shape
+changes (`∀n≥max(N, N₁).` comes off and it goes from two lines to one at
+another size) it is not torn apart: its new writing fades in on the card. Words
 for a moment (*Undo 1 to get back on the book's path*, *Your turn*) show
 just under the bar. Under the title, a dot for each
 move of par fills as moves are made, grey past par; apart from them, on a
@@ -107,6 +114,14 @@ picked (For every one), the cursor swiped across the goal (Only one e).
 A demo goes when the player does it (or asks for a hint) and is kept as
 seen in the progress file (`seen KIND`).
 
+The first time a level of a chapter that has a `chapter "..."` line
+(Groups, Limits) is opened from the map or by Next, the chapter's page
+comes first: CHAPTER k, its title, its cover picture, its one sentence,
+and its rulebook as tiles popping in (Groups: the five rules; Limits,
+whose rules are Calculate's: the definition and a Calculate tile), with
+*Begin* bobbing. Any tap or key puts it away (kept as `seen REGION` in the
+progress file) and the level's title card follows.
+
 The map is a chapter for each region: a cover strip with its picture and
 how much is proved, then its levels as pudgy round nodes along a winding
 path, stars under each, the next to play bobbing.
@@ -123,7 +138,10 @@ when it is worked out (A + 1, 2 · A), and an ε handle that can be
 dragged. A band asked for less than ε narrows to it; the goal's gate
 slides to where it is chosen; once it is chosen, a dot past it that its
 sequence's band does not yet hold (choosing N where max(N, N₁) is needed)
-turns red and jiggles. For groups: a letter train, each side of the goal
+turns red and jiggles. A taken n is drawn past its lower bound (at or past
+every gate), whatever is said at it; a fact said at n (`|aₙ − A| < ε/2`)
+is a band of its own, not the sequence's gated one; gates in one place
+have their names one under another. For groups: a letter train, each side of the goal
 a row of tiles (a⁻¹ hollow in a's color, e faint); how a product is
 grouped is how close its tiles sit, a pair x⁻¹ · x side by side glows,
 tiles slide, swell in and pop as the goal changes, and when the sides are
@@ -139,7 +157,10 @@ lit, the column of a y taken ringed.
   the progress file the rig uses is the game's argument (seen demos and
   solved levels change what shows);
   `L8_WATCH=1` plays its written proof (`L8_WATCH_PACE` in hundredths: 30
-  is quick).
+  is quick). `L8_CHAPTER=1` shows its chapter's page first, as the map
+  does the first time (if the progress file has not seen it); the first
+  tap or key then puts it away, so add one to the front of `L8_TAPS` or
+  `L8_KEYS` (`L8_LEVEL=9 L8_CHAPTER=1 L8_KEYS="enter;h;enter"`).
 - `L8_TAPS="x,y;x,y"` taps those places (the game's pixels), one every
   `L8_TAP_GAP` hundredths of a second (default 70), from 1.7 s on (the
   level's title card is gone by then). `x,y>x2,y2` swipes, `x,y+ms` holds
@@ -164,11 +185,19 @@ L8_LEVEL=12 L8_TAP_GAP=50 L8_KEYS="right;1;right;right;1;a;1;1;1;1;1" .build/lem
 ```
 
 Adding limits by the book up to Choose (eleven `h;enter` pairs: a step
-with a term takes two), then choosing `N` alone (the fourth term): the
-dots of b (teal) between N and N₁ go red.
+with a term takes two), then choosing `N` alone (the third term, after
+`max(N, N₁)` and `N₁`): the dots of b (teal) between N and N₁ go red; with
+`;1` after it (Take any n), n is drawn just past N and the b dots between
+n and N₁ stay red. By the book (`max(N, N₁)`) no dot goes red.
 
 ```sh
-L8_LEVEL=20 L8_TAP_GAP=40 L8_KEYS="$(for i in $(seq 11); do printf 'h;enter;'; done)d" .build/lemma
+L8_LEVEL=20 L8_TAP_GAP=40 L8_KEYS="$(for i in $(seq 11); do printf 'h;enter;'; done)c" .build/lemma
+```
+
+The chapter page of Groups, then its first level:
+
+```sh
+L8_LEVEL=9 L8_CHAPTER=1 L8_TAPS="200,400" .build/lemma
 ```
 
 A mistake and its way back: `e` put on the right (`b · e = c`), the hand
@@ -235,7 +264,7 @@ exported so; that is what the Foundations region will instantiate.
 ## Adding a region
 
 Write `regions/NAME.txt`: `region`, the types and fixed symbols with their
-notation, the rulebook (`assume`), definitions, and levels, each with
+notation, a `chapter "..."` sentence for its first page if it wants one, the rulebook (`assume`), definitions, and levels, each with
 `show:`, `par:`, a `kit:` if it needs witnesses built, `tools:` (earlier
 levels' lemmas it may use), a `demo:` if it brings in a control, and a `proof:` (which the tests play). Add it
 to `region_files` in `app.l8` and `FILES` in `web/lemma/lemma.js`. A
@@ -246,6 +275,5 @@ to `region_files` in `app.l8` and `FILES` in `web/lemma/lemma.js`. A
 The Foundations region (constructing ℕ, ℤ, ℚ, ℝ and proving each
 rulebook is satisfied); Calculate replaying a certificate through the
 kernel instead of being trusted; holding a row to preview it; a tilted
-Q.E.D. stamp (the painter has no rotation); a chapter intro page with the
-rulebook as tiles; more regions
+Q.E.D. stamp (the painter has no rotation); more regions
 (topology, linear algebra); a torus.
