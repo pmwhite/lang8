@@ -5,7 +5,8 @@
 # launched twice to warm up, then they take turns for 8 launches each; each
 # time is from `simctl launch` to "bible: up" in its output. OUT gets each
 # time and the medians (and NEW's own count from main to "bible: up",
-# "bible: launched in ms").
+# "bible: launched in ms"). The app is launched with L8_TIMING=1, which
+# lets it write those lines (a plain launch writes none).
 set -u
 new=$1
 old=$2
@@ -22,7 +23,7 @@ xcrun simctl install "$dev" "$new"
 xcrun simctl install "$dev" "$old"
 idof() { /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$1/Info.plist"; }
 python3 - "$dev" "$(idof "$new")" "$(idof "$old")" <<'PY' | tee "$out"
-import statistics, subprocess, sys, time
+import os, statistics, subprocess, sys, time
 dev, new, old = sys.argv[1:4]
 def once(app, tag):
     subprocess.run(["xcrun", "simctl", "terminate", dev, app], capture_output=True)
@@ -30,7 +31,8 @@ def once(app, tag):
     log = "/tmp/launch-%s.txt" % tag
     t0 = time.time()
     p = subprocess.Popen(["xcrun", "simctl", "launch", "--console-pty", dev, app],
-        stdout=open(log, "w"), stderr=subprocess.STDOUT)
+        stdout=open(log, "w"), stderr=subprocess.STDOUT,
+        env=dict(os.environ, SIMCTL_CHILD_L8_TIMING="1"))
     t, own = None, ""
     while time.time() - t0 < 90:
         s = open(log, errors="replace").read()

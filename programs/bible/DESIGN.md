@@ -5,9 +5,9 @@ designer reviews CI screenshots against it. If something here can't be built und
 constraints in `/tmp/bsb/brief.md`, the builder says so in the commit message and builds
 the nearest equivalent. The builder doesn't silently invent a different design.
 
-Status: **Round 1 is the work now** (§0.5–§6). **Round 2 (language tools and complete notes)
-is fully specified in §7** and starts after Round 1 passes review. Rounds 3 and 4 are
-outlined in §1. The owner's priorities, in order: distraction-free reading, note-taking,
+Status: Rounds 1 and 2 are approved and shipped (TestFlight build 6). **Round 3 is the work
+now, fully specified in §8.** Round 1 is §0.5–§6, and Round 2 is §7. Round 4 is outlined
+in §1. The owner's priorities, in order: distraction-free reading, note-taking,
 language tools. Above all: iPhone-native, HIG-proper, predictable UI.
 
 ---
@@ -146,30 +146,18 @@ ordered by the same list. Each Round 2 item is fully specified in §7.
 | R2.9 | Library search and sort | A search field over highlights, notes and bookmarks, and Bible order or Newest (§7.9) |
 | R2.10 | Add to note from study | Word study's toolbar adds "ἀγαπάω (agapaō, G25): to love" to the verse's note (§7.5) |
 
-### Round 3: reading and notes, deepened
-In priority order:
-1. **R3.1 Passage previews (cross-references).** The heading ranges (R lines), footnote
-   references ("See Revelation 7:17") and lexicon references become links. Tapping one
-   opens a medium-detent sheet that renders the passage in the reader's style, with an
-   **Open** button (`arrow.up.right`, top right) that jumps there and pushes history. This
-   is the system's own peek pattern applied as a sheet. No new data is needed.
-2. **R3.2 Export notes and highlights.** Library's nav bar gets a share item
-   (`square.and.arrow.up`). It writes a Markdown file (notes and highlights by book, with
-   verse text) and offers it through UIActivityViewController.
-3. **R3.3 Chapter notes.** A note on a whole chapter, from the chapter opener's context
-   menu (`UIContextMenuInteraction` with a delegate; its actions are `UICommand`s). It's
-   listed in Library → Notes under the chapter's reference.
-4. **R3.4 History.** The full navigation history (the last 50 places) appears in the
-   passage picker as "Recent" → "Show All", pushing a list.
-5. **R3.5 Keep screen awake** while reading (`idleTimerDisabled` while the reader is
-   foremost). Settings → Reading → switch, off by default.
-6. **R3.6 Listen.** `AVSpeechSynthesizer` reads the chapter aloud (delegate-based, no
-   blocks), with Play/Pause in a bottom toolbar while playing, and the word being spoken
-   underlined. Audio session category: playback.
-7. **R3.7 Words of Jesus in red** (from `\wj` in the new USFM): a settings switch, off by
-   default. It uses accent at 85%, not pure red.
-8. **R3.8 Highlight filters.** Library highlights can be filtered by color with the scope
-   bar.
+### Round 3: reading and notes, deepened (fully specified in §8)
+In priority order (re-ranked in §8.0):
+1. **R3.1 Passage previews.** References in headings, footnotes, definitions and notes open
+   a preview, and its Open in Reader button jumps there.
+2. **R3.2 Keep the screen on while reading.**
+3. **R3.3 History.**
+4. **R3.4 Chapter notes**, created with a compose button in Library → Notes.
+5. **R3.5 Export notes and highlights** as Markdown.
+6. **R3.6 Highlight color filter.**
+7. **R3.7 Listen** (AVSpeechSynthesizer, with a mini player).
+8. **R3.8 Words of Jesus in red**, off by default.
+9. **R3.H Pre-App-Store hygiene.**
 
 ### Round 4 and later
 - **R4.1 Per-verse cross-references** from openbible.info (CC BY, credited in
@@ -1559,3 +1547,553 @@ size, set back by the script before step 32.
     styles. There are no custom gestures.
 19. All screens follow the theme (light and dark, with paper and sepia tints) and Dynamic
     Type. VoiceOver labels are present on tiles and toolbar items.
+
+---
+
+## 8. Round 3 specification: reading and notes, deepened
+
+Round 2 is approved and shipped (TestFlight build 6, commit dfd9e0e7). Round 3 keeps every
+Round 1 and Round 2 behavior, except where this section explicitly replaces one. That
+replacement is §8.1: references that used to jump now preview.
+
+### 8.0 Priorities and order (re-ranked)
+These are ranked by the owner's priorities: distraction-free reading, then notes, then
+language tools. Cheap items that serve reading come early.
+
+| # | Item | Serves | Size |
+|---|------|--------|------|
+| R3.1 | Passage previews (headings, footnotes, definitions, notes) | Reading and study | M |
+| R3.2 | Keep the screen on while reading | Reading | S |
+| R3.3 | History | Reading | S–M |
+| R3.4 | Chapter notes | Notes | M |
+| R3.5 | Export notes and highlights | Notes | S–M |
+| R3.6 | Highlight color filter | Notes | S |
+| R3.7 | Listen (read aloud) | Reading | L |
+| R3.8 | Words of Jesus in red (off by default) | Reading (an option) | S |
+| R3.H | Pre-App-Store hygiene (§8.9) | Release | M |
+
+**One rule for references** (new, applies everywhere from Round 3 on):
+- **Tapping a reference that sits inside text** (headings, footnotes, definitions, notes)
+  **previews it.**
+- **Tapping a row in a navigation list** (search, concordance, library, history, picker)
+  **goes there.**
+- The preview's **Open in Reader** goes there too.
+
+**Nothing in Round 3 needs blocks or the block shim.** The two places one might reach for a
+block are handled without one:
+- The chapter-note context menu is replaced by a compose button (§8.4).
+- The popover-to-sheet handoff uses `performSelector:withObject:afterDelay:` (§8.1).
+
+### 8.1 R3.1 Passage previews
+**Link sources and styling:**
+1. **Heading passage ranges** (R lines, e.g. "(John 1:1–5; Hebrews 11:1–3)").
+   - `text.l8` parses each reference in the line with `parse_ref` and emits a `STYLE_REF`
+     run per reference. Its `run_arg` is an encoded reference (`book·2^24 | chapter·2^12 |
+     verse`, with verse_end in a parallel array `run_arg2`).
+   - The punctuation and parentheses stay `STYLE_RANGE` (faint italic).
+   - The references are **accent, italic, no underline.** They're the only accent text in a
+     heading, so they're discoverable but quiet.
+   - ios.l8 tags them with a new attribute `L8Ref` (an NSNumber of the encoded reference),
+     like `L8Link` for footnote marks.
+2. **Footnotes.**
+   - In the footnote popover, references written as `Book C:V` or `Book C:V–V` with a full
+     or alias book name ("Cited in 2 Corinthians 4:6", "See Revelation 7:17", "Cited in
+     Matthew 19:4 and Mark 10:6") become accent links.
+   - Relative references ("also in verses 7, 8, 14") stay plain.
+   - The popover becomes a non-editable, non-scrolling UITextView, so it can carry links
+     (`NSLinkAttributeName` = `bsb://BOOK/C/V[-V2]`, and `linkTextAttributes` = accent with
+     no underline).
+3. **Definitions** (Round 2 §7.6): references already render in app style. They now
+   **preview** instead of jumping.
+4. **Notes in read mode** (Round 2 §7.9): references **preview** instead of jumping.
+
+**Tap handling:**
+- **Reader:** in §3.1.3's tap priority list, insert "**on an `L8Ref` run (± 12 pt) →
+  preview**" after footnote marks and before note glyphs.
+- **Popover:** handle the tap in the text view delegate
+  `textView:shouldInteractWithURL:inRange:interaction:` and return NO. Then:
+  1. Dismiss the popover **animated**.
+  2. Present the preview from the reader after 0.3 s
+     (`performSelector:@selector(showPendingPreview) withObject:nil afterDelay:0.3`), so
+     the popover fades before the sheet rises. There's never an instant disappearance.
+- **Definitions and notes:** the same delegate method returns NO and **pushes** the preview
+  onto the current sheet's navigation stack, keeping the system back button with the
+  previous title.
+
+**The Passage view controller** (one run-time class, used presented and pushed):
+- **Presented from the reader:**
+  - A UINavigationController page sheet, with detents medium and large, starting at
+    **medium**, and the grabber visible. It's dimmed behind, and opening it expands the
+    collapsing bar (§3.1.4).
+  - **Pushed:** it takes the sheet's current detent.
+- **Nav bar:**
+  - The inline title is the reference in app style ("John 1:1–5", "2 Corinthians 4:6",
+    "Matthew 5:1–7:29").
+  - Done is on the right when presented. When pushed, there's a system back button.
+- **Bottom toolbar:** flexible space, a text item **Open in Reader**, flexible space.
+- **Content:** a non-editable, selectable UITextView, background `bg`, with the reader's
+  margins and typography (the same attributed-string builder, restricted to the range):
+  - The verses of the range, with their verse numbers, poetry indents, the section
+    headings inside the range (not the one before it), footnote marks (tappable,
+    showing a popover over the preview), and the user's highlights and note glyphs.
+  - A range that crosses chapters shows a small chapter label and numeral (0.62 em label
+    and 1.6 em numeral, centered) at each chapter start after the first.
+  - At most 80 verses. Beyond that, the text ends with a centered faint line "Continues in
+    the reader", and Open in Reader is the way on.
+  - Single verse: the verse alone, with "John 3:16" as the title.
+- **Interaction inside the preview:**
+  - Verse taps do nothing: no selection tray in previews.
+  - Long-press gives the plain system selection menu: Copy, Look Up, Translate, Share.
+    The app's own commands don't appear here.
+  - References inside the preview (its headings) push another preview.
+- **Open in Reader:** dismisses the whole sheet stack, then jumps to the first verse:
+  one third down, the neutral flash, history pushed, and the back capsule shown with the
+  origin place.
+
+**Motion:**
+- System sheet presentation and push.
+- The popover fades out for 0.3 s before the sheet rises.
+- The bar expands alongside the sheet (§3.1.4).
+- Nothing appears or disappears without animation.
+
+**Demo** (a new CI group, `more`; see §8.10):
+| Shot | Action | Expected |
+|---|---|---|
+| `60-xref-links` | Genesis 1 top | The range line under "The Creation" with "John 1:1–5" and "Hebrews 11:1–3" in accent italic, and the parentheses and semicolon faint |
+| `61-preview-xref` | Tap "John 1:1–5" | A medium sheet titled "John 1:1–5": verses 1–5 in reader style, the toolbar with Open in Reader, and Done |
+| `62-footnote-link` | Dismiss. Tap the footnote mark on Genesis 1:3 | The popover reading "Cited in **2 Corinthians 4:6**", with the reference in accent |
+| `63-preview-footnote` | Tap the reference | The popover gone (faded), and a sheet titled "2 Corinthians 4:6" |
+| `64-preview-open` | Tap Open in Reader | The reader at 2 Corinthians 4:6, flashed, with the back capsule "‹ Genesis 1:3"; no sheets |
+| `65-preview-in-study` | Open the word study of John 3:16 "loved" → Definition, then tap "Rom 8:37" | The preview pushed in the study sheet: back button "Definition", title "Romans 8:37" |
+| `66-preview-from-note` | Open the John 3:5 note (read mode) and tap "Ezekiel 36:25–27" | The preview pushed in the note sheet: back button "John 3:5", three verses |
+| `67-preview-cross-chapter` | Preview "Matthew 5:1–7:29" (from the demo hook) | Chapter labels at Matthew 6 and 7, then "Continues in the reader" at verse 80 |
+
+**Acceptance:**
+1. Every reference in R lines, footnotes, definitions and notes previews, and nothing in
+   those places jumps directly.
+2. Lists still go directly.
+3. Previews render exactly in reader style, including highlights. Cross-chapter labels and
+   the 80-verse cap work.
+4. The popover-to-sheet handoff shows no abrupt disappearance (recording sequence 7).
+5. Open in Reader lands one third down, with the flash and the back capsule.
+
+### 8.2 R3.2 Keep the screen on while reading
+- **Setting:** Reading settings gets a new section **"While Reading"**, placed before
+  Acknowledgements, with one switch row, **Keep Screen On** (off by default). Its footer
+  (SF 12, faint): "The screen stays on while you read. It turns off as usual after 10
+  minutes without scrolling."
+- **Behavior:** when the setting is on, set `UIApplication.sharedApplication.idleTimerDisabled
+  = YES` while all of these hold: the app is active, the reader is foremost (no sheet
+  presented), and the last scroll or tap in the reader was less than **10 minutes**
+  ago.
+  - Re-arm a single NSTimer (10 minutes) on every scroll end and tap. When it fires, set
+    `idleTimerDisabled = NO`.
+  - Presenting a sheet, entering the background, or turning the setting off sets it to NO
+    immediately.
+  - With L8_DEMO only, log `bible: idle timer off` or `bible: idle timer on` on each
+    change.
+- **Motion:** none (no visible change).
+- **Demo:** `68-keep-screen-on`: Reading settings scrolled to While Reading, with the switch
+  on and the footer.
+- **Acceptance:**
+  1. The switch persists (`keepScreenOn` in defaults).
+  2. The console (demo) shows "off" after the reader is touched with the setting on, and
+     "on" when a sheet opens.
+  3. With the setting off, the idle timer is never touched.
+
+### 8.3 R3.3 History
+**What's recorded** (`history.tsv`, the same format; keep the **last 200** entries, newest
+last):
+1. Every jump records its **origin** place (as now) and its **destination**.
+2. **Dwell:** when the reader comes to rest (scroll ends) on a chapter different from the
+   newest entry's chapter and stays there for **20 s**, record that chapter with the verse
+   at the top.
+3. **Merging:** a new entry for the same chapter as the newest one replaces it, updating
+   the verse and the time. History is a trail of chapters, not of every scroll.
+
+**Picker:**
+- The Recent section (§3.2) gets a final row, **Show All** (in accent, no image, with a
+  disclosure indicator), when there are more than 4 entries.
+- It pushes the **History** screen.
+
+**History screen** (a run-time UITableViewController, insetGrouped; the inline title is
+"History"):
+- **Sections by day:** "Today", "Yesterday", the weekday name for the last 7 days, then a
+  medium date ("12 October 2026"). Newest first.
+- **Row:** a subtitle cell. The text is the reference ("John 3:16", or "John 3" for a
+  dwell without a precise verse), and the secondary text is the first ~50 characters of
+  that verse (faint, small caps for LORD). The accessory is the time ("3:24 PM",
+  `UIListContentConfiguration valueCell` style, faint).
+- **Tap:** dismisses the picker, then jumps there (history pushed, back capsule).
+- **Swipe to delete** via `tableView:commitEditingStyle:forRowAtIndexPath:` (no blocks).
+  Rows are removed with `UITableViewRowAnimationAutomatic`. The day section is removed
+  when it empties.
+- **Clear:**
+  - The nav bar's right item is a `UIBarButtonItem` titled **Clear**, whose `menu` is a
+    `UIMenu` with one destructive `UICommand`, **Clear History**
+    (`attributes = UIMenuElementAttributesDestructive`). The menu is the confirmation
+    step, as in Safari.
+  - Choosing it empties history and shows the empty state.
+  - This uses the same mechanism as the Library sort menu, so it's pending the owner's
+    device check. Fallback: put it in edit mode (system **Edit** item), with a toolbar
+    item **Clear All** shown in systemRed.
+- **Empty state:** `UIContentUnavailableConfiguration` with `clock.arrow.circlepath`, "No
+  History", and "Places you read will appear here."
+
+**Motion:** system push, deletion animations, and the menu. When cleared, the rows fade out
+(`reloadSections:withRowAnimation:Fade`), then the empty state fades in.
+
+**Demo:**
+| Shot | Action | Expected |
+|---|---|---|
+| `69-picker-show-all` | After the read group's earlier jumps (the demo seeds 8 entries over 3 days with fixed times), open the picker | Recent with 4 rows and Show All |
+| `70-history` | Tap Show All | Today, Yesterday and a weekday section, rows with times |
+| `71-history-clear-menu` | Tap Clear | The menu with a red "Clear History" |
+
+**Acceptance:**
+1. Dwell and merge rules are as specified, and the demo seed shows correct grouping.
+2. Swipe to delete and Clear work. The empty state is present.
+3. Rows go to their place, with the back capsule.
+
+### 8.4 R3.4 Chapter notes
+**Model:** `notes.tsv` rows with `VERSE = 0` and `VERSE_END = 0` are chapter notes. There's
+one per chapter at most.
+
+**Creating and opening one** (no context menu, because `UIContextMenuConfiguration`'s
+action provider is a block):
+1. **Library → Notes** shows a bottom toolbar. A **compose** item (`square.and.pencil`) sits
+   on the right, as in the Notes app.
+   - It opens the note editor for **the chapter at the top of the reader** (`cur`), or
+     the existing note for that chapter.
+   - Library's bottom toolbar is shown on every segment, because Export (§8.5) lives there
+     too. The compose item is present on the Notes segment only. When the segment
+     changes, it's added or removed with `setToolbarItems:animated:YES`, so it fades.
+2. **In the reader:** an existing chapter note shows a `note.text` glyph (accent, 0.62 em)
+   **after the chapter label**, separated by a thin space ("JOHN ▭"), or after the book
+   title for chapter 1.
+   - Tapping it (± 16 pt) opens the note in read mode.
+   - Add it to §3.1.3's tap priority list next to verse note glyphs.
+
+**Editor** (Round 1 §3.4 and the Round 2 read mode, adapted):
+- The title is "John 3".
+- The quote block holds the chapter's **first section heading** (SF 15 semibold, heading
+  color), or "John 3" if the chapter has none. Under it is the chapter's first verse,
+  truncated to 2 lines (faint).
+- Everything else (read mode, Edit, trash, links) is as for verse notes.
+
+**Library → Notes:**
+- Chapter notes are listed in their book section, **before** that chapter's verse notes.
+- The reference is "John 3", the image is `note.text`, and the secondary text is the note.
+- Newest First sorting includes them by time.
+
+**Motion:** the toolbar is shown and hidden animated, and the sheets present as usual.
+
+**Demo:**
+| Shot | Action | Expected |
+|---|---|---|
+| `72-library-compose` | Library → Notes | The bottom toolbar with Export on the left and compose on the right |
+| `73-chapter-note-editor` | Tap compose (with John 3 at the top of the reader), type "Born from above: anōthen — again or from above." | The editor titled "John 3", the quote "Jesus and Nicodemus" with the first verse, and the text |
+| `74-chapter-note-glyph` | Done, dismiss, scroll to the John 3 opener | "JOHN ▭" with the glyph, and the numeral 3 |
+| `75-library-chapter-note` | Library → Notes | The JOHN section: "John 3" (chapter note) first, then John 3:5 and John 3:16 |
+
+**Acceptance:**
+1. There's one chapter note per chapter. Compose opens the existing one.
+2. The glyph appears only when a note exists, and it's tappable.
+3. Ordering in Library is correct. Read mode and links work as for verse notes.
+
+### 8.5 R3.5 Export notes and highlights
+**Entry:** Library's bottom toolbar (every segment) gets an **Export** item
+(`square.and.arrow.up`) on the left. It's disabled when there are no highlights, notes or
+bookmarks at all.
+
+**Action:**
+1. Write `Smooth Bible Notes YYYY-MM-DD.md` into `NSTemporaryDirectory()`.
+2. Present a `UIActivityViewController` with that file's NSURL
+   (`initWithActivityItems:applicationActivities:nil`; no completion handler needed). On
+   iPad-style presentation, its `popoverPresentationController.barButtonItem` = the Export
+   item.
+
+The file exports **everything** (all three kinds), regardless of the segment, filter or
+search. Format (UTF-8, LF):
+```markdown
+# Smooth Bible — Notes and Highlights
+Berean Standard Bible · exported 18 October 2026
+
+## John
+
+### John 3
+*Chapter note:* Born from above: anōthen — again or from above.
+
+**John 3:1** · Bookmark
+> Now there was a man of the Pharisees named Nicodemus, a leader of the Jews.
+
+**John 3:3** · Highlight (green)
+> Jesus replied, “Truly, truly, I tell you, no one can see the kingdom of God unless he is born again.”
+
+**John 3:5** · Note
+> Jesus answered, “Truly, truly, I tell you, no one can enter the kingdom of God unless he is born of water and the Spirit.”
+
+Water and Spirit: compare Ezekiel 36:25–27.
+```
+- Books and chapters are in canonical order, and verses in order.
+- A verse with several marks gets one entry listing them in the order Highlight, Bookmark,
+  Note: "**John 3:16** · Highlight (yellow) · Note".
+- Highlight ranges that were stored per verse merge into one entry per contiguous run of
+  the same color: "**John 3:16–17** · Highlight (yellow)", with the verses quoted
+  together.
+- Notes keep their line breaks. Note text is not quoted; the verse is.
+- LORD is written as "LORD". There are no footnote marks.
+
+**Motion:** the system activity sheet.
+
+**Demo:**
+- `76-export-sheet`: tap Export. The activity sheet shows the file name and a document
+  icon.
+- The demo also copies the file into the app's Documents directory. `simulate.sh` pulls it
+  with `xcrun simctl get_app_container booted space.trailingwhite.smoothbible data` and
+  publishes it as `notes-export.md` with the screenshots.
+
+**Acceptance:**
+1. `notes-export.md` matches the format exactly for the demo's data: John 3:1 bookmark, 3:3
+   green, 3:5 note, 3:16–17 yellow plus the 3:16 note, the John 3 chapter note, and the
+   Psalm 23:1 blue highlight (§8.6).
+2. Export is disabled when empty. The file name carries the date.
+
+### 8.6 R3.6 Highlight color filter
+**UI:** on the Highlights segment only, the table header view is a horizontal row:
+- An **All** button: `UIButtonConfiguration` with capsule corners, `filled` with accent when
+  selected, `gray` otherwise, titled "All".
+- Then **five color circles**: 28 pt `UIButton`s filled with the swatch colors. The
+  selected one gets a 2 pt accent ring (offset 2 pt) and a white `checkmark` (11 pt,
+  bold).
+- Insets are 16 pt horizontal and 8 pt vertical, with 12 pt spacing, leading-aligned.
+- Each circle has the accessibility label "Show Yellow Highlights", and so on, plus the
+  selected trait.
+
+**Behavior:**
+- Tapping a color shows only that color's highlights. Tapping it again, or tapping All,
+  shows all of them.
+- Search (Round 2) applies on top of the filter.
+- The filter resets to All each time Library opens.
+- An empty result shows `UIContentUnavailableConfiguration`: `highlighter`, "No Yellow
+  Highlights" (using the color name).
+
+**Motion:**
+- The rows change with `reloadSections:withRowAnimation:UITableViewRowAnimationFade`.
+- The selection ring moves with a 0.15 s fade: the old one fades out as the new one fades
+  in, via `CATransition` on the header stack.
+
+**Demo** (the `more` group seeds a **blue** highlight on Psalm 23:1, so three colors exist):
+| Shot | Action | Expected |
+|---|---|---|
+| `77-highlight-filter-all` | Library → Highlights | The chip row with All selected; John 3:3 (green), John 3:16–17 (yellow), Psalm 23:1 (blue) |
+| `78-highlight-filter-green` | Tap green | Only John 3:3, with the ring and checkmark on green |
+
+**Acceptance:**
+1. The filter works with search, and the empty state names the color.
+2. The changes fade (recording sequence 9).
+
+### 8.7 R3.7 Listen (read aloud)
+**Entry** (no new permanent control on the reading page, for distraction-free reading):
+- Reading settings (the Aa sheet) gets a **first section, above the text size row**, with:
+  1. A **Listen** button row: a cell whose content is a `UIButton`
+     (`filledButtonConfiguration`, accent, `play.fill` image plus the title "Listen from
+     John 3:14", full width, 50 pt tall, capsule corners). The title names the verse at
+     the top of the reader. Tapping it dismisses the sheet and starts playback from that
+     verse.
+  2. A **Speed** row: a `UISegmentedControl` [Slower, Normal, Faster] as the accessory,
+     with rates of 0.42, 0.50 and 0.56 (as `AVSpeechUtterance.rate`). It's persisted as
+     `listenRate`.
+- While audio is playing, the Listen button reads **Stop Listening** (`stop.fill`, gray
+  configuration).
+
+**Engine** (`AVSpeechSynthesizer`, with a delegate and no blocks):
+- **Audio session:** `AVAudioSession.sharedInstance`, category `AVAudioSessionCategoryPlayback`,
+  mode `AVAudioSessionModeSpokenAudio`, then `setActive:YES` when playback starts and
+  `setActive:NO` (with options 1, notify others) when it stops.
+- **Info.plist:** `UIBackgroundModes` = `[audio]`, so listening continues with the screen
+  locked.
+- **Utterances:** **one per verse**, all queued for the current chapter when playback starts
+  or reaches the chapter boundary.
+  - Before the first verse of each chapter, queue a short utterance with the chapter's
+    spoken name: "John, chapter 4" (or "Psalm 23").
+  - Text is `verse_text` with footnotes stripped. "LORD" becomes "Lord", and "GOD" in small
+    caps becomes "God". Headings aren't spoken.
+- **Voice:** the best installed English voice. Prefer `en-US` with quality Premium (3),
+  then Enhanced (2), then the default. Iterate over `AVSpeechSynthesisVoice speechVoices`
+  and compare `quality` and `language`.
+- **Progress:** in the delegate, `speechSynthesizer:didStartSpeechUtterance:` sets the
+  **spoken verse**. Map utterances to verses in a small array keyed by the utterance
+  pointer.
+  - At the end of the chapter (`didFinishSpeechUtterance:` for the last verse), queue the
+    next chapter.
+  - Stop after Revelation 22.
+- **Interruptions:** observe `AVAudioSessionInterruptionNotification` and pause on a began
+  interruption. Don't auto-resume.
+- **Remote controls:** `MPRemoteCommandCenter.sharedCommandCenter`. On its
+  `playCommand`, `pauseCommand` and `togglePlayPauseCommand`, use **`addTarget:action:`**
+  (the target-action form, with no block). The handlers return
+  `MPRemoteCommandHandlerStatusSuccess` (0).
+  - `MPNowPlayingInfoCenter.defaultCenter.nowPlayingInfo`: title = the chapter name
+    ("John 3"), artist = "Berean Standard Bible", album title = "Smooth Bible". Update it
+    on each chapter change.
+  - Link the **MediaPlayer** and **AVFAudio** frameworks (flag in the build if a new
+    framework entry is required).
+
+**On screen while playing:**
+- **The spoken verse** gets the `selection` wash (no underline) in the reader, so the
+  reader can follow. The wash moves verse to verse with a 0.2 s cross-fade (set attributes
+  inside `beginAnimations` on the text view's layer with a `CATransition` fade, or simply
+  re-set them with a fade transition on that text view).
+- **Follow:** when the spoken verse's first line falls below **70%** of the visible height,
+  or above the bar, scroll it to one third down with `setContentOffset:animated:YES`.
+  - Programmatic scrolls don't change the bar's collapse state.
+  - If the user drags, following pauses for 8 s after the drag ends, then resumes on the
+    next verse change.
+- **Mini player:** a floating glass capsule, bottom center, 12 pt above the safe area,
+  height 48, width min(view − 32, 360). It's a `UIVisualEffectView` with `UIGlassEffect` on
+  iOS 26 (`systemThickMaterial` earlier) and capsule corners. It contains:
+  - A 36 pt play/pause button (`pause.fill` / `play.fill`, ink).
+  - A label "John 3:14" (SF 15 semibold, ink), plus a faint second label "Listening" or
+    "Paused" (SF 12).
+  - A 28 pt close button (`xmark`) that stops playback.
+  - **Tapping the label** scrolls the reader to the spoken verse.
+  - The back capsule hides while the mini player is visible.
+  - The verse tray, when shown, sits **above** the mini player (move it up by 60 pt with
+    the same spring).
+- **Motion:** the mini player rises from below with the tray's spring and opacity
+  (§2.7), and leaves the same way. The play/pause symbol cross-fades over 0.15 s
+  (`setImage:` inside a `CATransition` fade).
+
+**Demo** (`more` group; the simulator speaks into the void, which is fine):
+| Shot | Action | Expected |
+|---|---|---|
+| `79-listen-entry` | Open Reading settings with John 3:14 at the top | The first section with the accent "▶ Listen from John 3:14" button and the Speed control |
+| `80-listening` | Tap Listen, wait 4 s | The mini player "John 3:14 · Listening" with pause; the spoken verse washed; no sheet |
+| `81-listen-paused` | Tap pause | "Paused", with a play symbol |
+| `82-listen-tray` | Select verse 16 while the mini player is up | The tray above the mini player; nothing overlaps |
+
+Also add recording sequence 8: start Listen at John 3:14, record 10 s at Faster (the demo
+uses a 2 s utterance limit by setting `postUtteranceDelay` 0 and a fast rate), showing the
+wash advancing and one follow-scroll.
+
+**Acceptance:**
+1. Playback starts from the top verse and continues across chapters. The wash follows,
+   with a cross-fade. The follow-scroll is smooth and pauses after a user drag.
+2. The mini player matches the spec and coexists with the tray.
+3. Stop, pause, interruption and Reduce Motion are respected.
+4. **Pending the owner's device check:** listening continues when the screen locks, and the
+   lock-screen play/pause works.
+
+### 8.8 R3.8 Words of Jesus in red
+- **Data:** W records (2,497 lines, from `\wj`) already lay out like T. `text.l8` gives W
+  words a new style flag (`STYLE_BODY` with `run_jesus = 1`, or a new `STYLE_JESUS` and
+  `STYLE_JESUS_CAPS` for LORD inside quotes).
+- **Setting:** in Reading settings → Show, a switch **Words of Jesus in Red**, placed after
+  Footnote Marks. It's **off** by default and persisted as `redLetter`.
+- **Rendering:** when on, W text uses **accent** (each theme's own accent: `#9C3A2C` Paper,
+  `#8E4426` Sepia, `#DC8873` Night, and so on) instead of ink. Highlights, selection and the
+  Listen wash apply on top as usual. Copy, share and export are unaffected.
+- **Motion:** toggling the setting re-renders the visible rows with a 0.2 s cross-fade
+  (`CATransition` fade on the table's layer), keeping the place.
+- **Demo:**
+  - `83-red-letter`: Matthew 5:3–10, setting on, Paper.
+  - `84-red-letter-night`: the same verses in Night.
+- **Acceptance:**
+  1. Off by default.
+  2. Only Jesus's words are colored: the narrative ("He said") stays ink.
+  3. It's legible in every theme. The accent-on-`bg` contrast is 6.5:1 Paper, 6.0:1 Sepia,
+     6.5:1 Night and 7.1:1 Black (all above 4.5:1).
+
+### 8.9 R3.H Pre-App-Store hygiene (required before submission)
+1. **Gate the diagnostics:**
+   - Every `note()`/`eprint` diagnostic, timing line and "bible: …" log runs only when
+     `L8_DEMO` or `L8_TIMING` is set in the environment.
+   - The release build prints nothing in normal use, except genuine fatal errors.
+   - `launch.sh` (the timing job) sets `L8_TIMING=1`.
+   - Acceptance: a plain launch (no environment) in the launch job yields a console with
+     **no** `bible:` lines. The job prints the count, which must be 0.
+2. **Older iOS check:**
+   - Add a CI job that boots an **iOS 18.x** simulator if the runner has a runtime for it
+     (`xcrun simctl list runtimes`; GitHub's macos-15 images normally include iOS 18
+     runtimes alongside the Xcode 26 default).
+   - It runs a subset of the `read` group and saves shots with a suffix of `-ios18`:
+     01-genesis-1, 15a and 15, 17-search, 23-settings, 28-night, and 33-interlinear.
+   - If no iOS 18 runtime exists, the job prints "no iOS 18 runtime; older-iOS path
+     unchecked" and succeeds. The review then notes the gap, and the owner is asked to
+     check on any iOS 18 device available.
+   - The minimum OS stays 16.0. iOS 16 and 17 aren't checkable in CI and are noted as
+     such.
+3. **Accessibility pass:**
+   - Shots at the largest accessibility text size
+     (`xcrun simctl ui booted content_size accessibility-extra-extra-extra-large`):
+     `85-ax-reader` (John 3), `86-ax-tray` (verse selected), `87-ax-word-study` and
+     `88-ax-settings`.
+   - Nothing clips or overlaps. Tray labels may wrap to 2 lines but must not truncate.
+   - VoiceOver labels exist on every icon button, swatch, chip, tile and mini-player
+     control (code review).
+4. **Defensive persistence:**
+   - Malformed lines in `highlights.tsv`, `bookmarks.tsv`, `notes.tsv` and `history.tsv`
+     are skipped, not fatal.
+   - Unknown book codes are dropped.
+   - The write is atomic (already `rename`).
+   - Add a test in `test_text.l8` (or a new `test_store.l8`) that feeds malformed lines and
+     checks that the good ones survive.
+5. **Privacy manifest and Info.plist:**
+   - `PrivacyInfo.xcprivacy` declares `NSPrivacyAccessedAPICategoryUserDefaults` with
+     reason `CA92.1`. If file timestamps are read (`stat`, `NSFileModificationDate`),
+     it also declares `NSPrivacyAccessedAPICategoryFileTimestamp` with reason `C617.1`.
+   - It declares no tracking and no collected data.
+   - Info.plist checks:
+     - `ITSAppUsesNonExemptEncryption` = false (present).
+     - `UIBackgroundModes` = audio (only with R3.7).
+     - Portrait only.
+     - `CFBundleDisplayName` = "Smooth Bible".
+     - The launch screen colors (Paper and Night) are correct.
+6. **App icon appearances (iOS 18+):** add **dark** and **tinted** variants to the AppIcon
+   set (`appearances` luminosity dark and tinted in `Contents.json`).
+   - Dark: the same mark on a near-black ground.
+   - Tinted: a grayscale mark on transparency.
+   - If `actool` in the build path can't compile them, say so and ship light only.
+7. **App Store screenshots:** a CI group `store` on the largest current iPhone simulator
+   (6.9", 1320 × 2868; iPhone 17 Pro Max or 16 Pro Max). Light, Paper, default size, with
+   no back capsule, tray or diagnostics:
+   1. Genesis 1 opener.
+   2. Psalm 23.
+   3. John 3 with the yellow and green highlights.
+   4. The John 3:16 interlinear.
+   5. The agapaō word study.
+   6. The settings sheet in Sepia.
+
+   They're published as `store-1.png` … `store-6.png`. They contain no simulator chrome
+   other than the status bar, with the time set by `xcrun simctl status_bar booted
+   override --time 9:41 --batteryState charged --batteryLevel 100`.
+8. **Pending owner device checks**, carried forward and not blocking the build. Each has a
+   fallback if it fails:
+   - The long-press edit menu shows Highlight, Note and Study (fallback: §3.3.5
+     `UIMenuController`).
+   - The Library sort menu commands fire (fallback: §7.9 toggle).
+   - History's Clear menu fires (same mechanism, fallback in §8.3).
+   - Listen continues when the screen locks, and the lock-screen controls work (§8.7).
+
+### 8.10 CI for Round 3
+- **Add a fourth demo group, `more`,** in `simulate.sh` and the workflow matrix (it runs in
+  parallel with `read`, `study` and `notes`).
+  - It seeds its own state through demo hooks: the John 3 marks from Round 1, the note, the
+    blue Psalm 23:1 highlight, and the 8 history entries with fixed times.
+  - It takes shots 60–84 in order. The accessibility shots 85–88 come at the end, after
+    `content_size` is set.
+- **Add the `store` group** (§8.9.7) and the iOS 18 job (§8.9.2).
+- **Extend the transitions recording:**
+  - **Sequence 7:** tap a heading reference, the preview rises, dismiss it; then a
+    footnote popover, a reference in it, the popover fades, and the sheet rises.
+  - **Sequence 8:** Listen at John 3:14, 10 s, with the wash advancing and one follow-scroll.
+  - **Sequence 9:** Library → Highlights. Tap green, then All. The rows fade both ways.
+- **Publish** `notes-export.md` with the screenshots.
+
+### 8.11 Round 3 acceptance (summary)
+Round 3 is approved when:
+- The acceptance criteria of §8.1–§8.8 hold.
+- The §8.9 items 1–7 are done (or, for 2 and 6, their gaps are explicitly reported).
+- The transitions recording shows no abrupt change in sequences 7–9.
+- No Round 1 or Round 2 shot regresses.
