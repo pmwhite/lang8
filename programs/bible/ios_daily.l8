@@ -69,12 +69,12 @@ save_plan() {
 // ended), and gone.
 plan_archive() {
     if (pl_active < 0) return;
-    read_file("plans-done.tsv");
+    fbuf_n = 0;
     put_plan();
     fput_str("END\t");
     fput_int(time(0));
     fput(10);
-    write_file("plans-done.tsv");
+    append_file("plans-done.tsv");
     msg2(msg(cls("NSFileManager"), sel("defaultManager")), sel("removeItemAtPath:error:"),
         file_path("plan.tsv"), 0);
     note("bible: plan archived");
@@ -268,8 +268,20 @@ circle_tag(b: int): int {
 
 // The configuration of a circle's row: the circle, a title and a line.
 circle_config(state: int, title: int, line: int): int {
+    circle_config_of(state, title, line, false)
+}
+
+// The same, the circle dimmed when it does nothing (a plan not started:
+// review r5-1).
+circle_config_of(
+    state: int,
+    title: int,
+    line: int,
+    dim: bool
+): int {
     config: int = list_config(2);
-    config_image(config, circle_name(state), 22.0f64, if (state == 0) c_faint else c_accent);
+    color: int = if (dim) msg_set_f(c_faint, sel("colorWithAlphaComponent:"), 0.4f64) else if (state == 0) c_faint else c_accent;
+    config_image(config, circle_name(state), 22.0f64, color);
     msg_ff(msg(config, sel("imageProperties")), sel("setReservedLayoutSize:"), 28.0f64,
         28.0f64);
     msg1(config, sel("setText:"), title);
@@ -291,6 +303,12 @@ circle_access(
 ) {
     msg1(cell, sel("setIsAccessibilityElement:"), 1);
     msg1(cell, sel("setAccessibilityLabel:"), label);
+    // (A circle that does nothing has no action.)
+    b0: int = msg1(msg(cell, sel("contentView")), sel("viewWithTag:"), 9100);
+    if (b0 != 0 && (msg(b0, sel("isEnabled")) & 255) == 0) {
+        msg1(cell, sel("setAccessibilityCustomActions:"), 0);
+        return
+    }
     a: int = msg(msg3(msg(cls("UIAccessibilityCustomAction"), sel("alloc")), sel("initWithName:target:selector:"),
         nsstring(if (state == 2) "Mark as Unread" else "Mark as Read"), app_obj, sel(action)),
         sel("autorelease"));
@@ -666,7 +684,13 @@ detail_fill(cell: int, d: int) {
     fbuf_n = 0;
     fput_day(di);
     line: int = fstring();
-    msg1(cell, sel("setContentConfiguration:"), circle_config(state, title, line));
+    // (A plan not followed: its circles dimmed and inert until it is
+    // started.)
+    inert: bool = detail_plan != pl_active;
+    msg1(cell, sel("setContentConfiguration:"), circle_config_of(state, title, line,
+        inert));
+    b: int = msg1(msg(cell, sel("contentView")), sel("viewWithTag:"), 9100);
+    if (b != 0) msg1(b, sel("setEnabled:"), if (inert) 0 else 1);
     is_today: bool = detail_plan == pl_active && d == plan_today(today());
     if (is_today) {
         l: int = today_label(msg1(cls("UIFont"), sel("preferredFontForTextStyle:"),
@@ -744,7 +768,9 @@ day_toggle(d: int) {
 // progress kept in plans-done.tsv; the rows faded in their new state, and
 // today's row brought into sight.
 plan_start(_self: int, _cmd: int, _b: int): int {
+    was: int = detail_wk0();
     plan_archive();
+    reminder_off();
     plan_begin(detail_plan, today());
     save_plan();
     note("bible: plan started");
@@ -752,7 +778,7 @@ plan_start(_self: int, _cmd: int, _b: int): int {
         pr_end[c] = false;
         pr_dwell[c] = 0.0f64
     }
-    detail_changed();
+    detail_changed(was);
     if (detail_table != 0) msg3(detail_table, sel("scrollToRowAtIndexPath:atScrollPosition:animated:"),
         detail_path(plan_today(today())), 2, 1);
     daily_reschedule();
@@ -760,22 +786,45 @@ plan_start(_self: int, _cmd: int, _b: int): int {
 }
 
 plan_stop(_self: int, _cmd: int, _b: int): int {
+    was: int = detail_wk0();
     plan_archive();
+    reminder_off();
     note("bible: plan stopped");
-    detail_changed();
+    detail_changed(was);
     daily_reschedule();
     0
 }
 
-detail_changed() {
+// The plan started or stopped (its reminder's section first if was is 1):
+// the toolbar's item changed, and in one update the header (its "will be
+// kept" line gone or come, its height animated), the reminder's section
+// inserted or deleted, and the days on the screen reloaded, each with a
+// fade (§10.1.4; review r5-1: not the whole list).
+detail_changed(was: int) {
     if (detail_vc != 0) detail_items(detail_vc, true);
     if (detail_table == 0) return;
     sheet_nav: int = presented();
     W: f64 = if (sheet_nav != 0) view_width(msg(sheet_nav, sel("view"))) else view_width(window);
-    msg1(detail_table, sel("setTableHeaderView:"), detail_header(W));
-    // (The reminder's section comes or goes with the plan: reloaded, faded.)
-    fade_layer(msg(detail_table, sel("layer")), 0.25f64);
-    msg(detail_table, sel("reloadData"))
+    head: int = detail_header(W);
+    vis: int = msg(detail_table, sel("indexPathsForVisibleRows"));
+    days: int = msg(cls("NSMutableArray"), sel("array"));
+    if (vis != 0) {
+        for i in 0..msg(vis, sel("count")) {
+            p: int = msg1(vis, sel("objectAtIndex:"), i);
+            if (msg(p, sel("section")) >= was) msg1(days, sel("addObject:"), p)
+        }
+    }
+    now: int = detail_wk0();
+    first: int = msg1(cls("NSIndexSet"), sel("indexSetWithIndex:"), 0);
+    msg(detail_table, sel("beginUpdates"));
+    msg1(detail_table, sel("setTableHeaderView:"), head);
+    fade_layer(msg(head, sel("layer")), 0.25f64);
+    if (now > was) msg2(detail_table, sel("insertSections:withRowAnimation:"), first,
+        0) else if (now < was) msg2(detail_table, sel("deleteSections:withRowAnimation:"),
+        first, 0);
+    msg2(detail_table, sel("reloadRowsAtIndexPaths:withRowAnimation:"), days, 0);
+    msg(detail_table, sel("endUpdates"));
+    note_num("bible: plan rows faded ", msg(days, sel("count")))
 }
 
 // The sheet gone: what its pushed lists held let go.
@@ -1050,7 +1099,43 @@ daily_reader_up() {
         pending_day = 0;
         notify_open_day(d)
     }
+    // (At launch, nothing pending but the plan's own reminders: none, with
+    // the switch off or no plan (an older build's verse of the day, or a
+    // stopped plan's), and the plan's scheduled again with it on; and the
+    // verse of the day's delivered ones put away. Review r5-1.)
+    if (!nt_on || pl_active < 0) {
+        center: int = notify_center();
+        if (center != 0) {
+            msg(center, sel("removeAllPendingNotificationRequests"));
+            msg1(center, sel("removeDeliveredNotificationsWithIdentifiers:"), votd_ids());
+            note("bible: pending reminders cleared")
+        }
+    }
     daily_reschedule()
+}
+
+// The ids an older build gave its verses of the day (votd-YYYY-MM-DD),
+// for the 31 days to today.
+votd_ids(): int {
+    a: int = msg(cls("NSMutableArray"), sel("array"));
+    for k in 0..32 {
+        fbuf_n = 0;
+        fput_str("votd-");
+        fput_iso_date(today() - k);
+        msg1(a, sel("addObject:"), fstring())
+    }
+    a
+}
+
+// The reminder turned off with its plan (stopped, or another started): the
+// switch is each plan's, off until asked for (review r5-1).
+reminder_off() {
+    if (nt_on) note("bible: reminder off with its plan");
+    nt_on = false;
+    set_def_bool("planReminder", false);
+    center: int = notify_center();
+    if (center != 0) msg(center, sel("removeAllPendingNotificationRequests"));
+    daily_switch = held(daily_switch, 0)
 }
 
 // ---- the reminder's rows (first in the plan followed's days) ----

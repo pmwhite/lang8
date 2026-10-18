@@ -884,7 +884,7 @@ title_settle() {
 // Chapter c, at y points down into it.
 go(c: int, y: f64) {
     if (c < 0 || c >= chapters) return;
-    moving_write();
+    if (offset_refused()) return;
     path: int = chapter_path(c);
     // (Twice: the rows above are only estimated until they have been laid
     // out, and the first jump lays out those around it.)
@@ -901,24 +901,48 @@ go(c: int, y: f64) {
 
 // Whether the reader's table is moving (a finger on it, gliding, or the
 // demo's glide): while it is, nothing writes its offset, scrolls it to a
-// row or reloads it (DESIGN.md §9.4.11); the demo counts any that does.
+// row or reloads it (DESIGN.md §9.4.11). go and set_offset themselves
+// refuse then (review r5-1), and the demo logs each refused; what must
+// happen still (a look changed, the text size) waits for rest
+// (reader_rested), and what the reader asks for (a jump, the back
+// capsule, Listen's name) stops the glide first (stop_moving). In
+// reader_rested it has stopped, whatever UIKit's flags still say.
 demo_moving: bool = false;
 
+resting: bool = false;
+
 reader_moving(): bool {
-    demo_moving || (msg(table, sel("isTracking")) & 255) != 0 || (msg(table, sel("isDecelerating")) & 255) != 0
+    if (table == 0) return false;
+    demo_moving || !resting && ((msg(table, sel("isTracking")) & 255) != 0 || (msg(table,
+        sel("isDecelerating")) & 255) != 0)
 }
 
 offset_writes_moving: int = 0;
 
-moving_write() {
-    if (!diag_on || table == 0 || !reader_moving()) return;
+// Whether a write of the reader's offset is refused (it is moving).
+offset_refused(): bool {
+    if (!reader_moving()) return false;
     offset_writes_moving = offset_writes_moving + 1;
-    note_num("bible: offset written while moving ", offset_writes_moving)
+    if (diag_on) note_num("bible: offset write while moving ", offset_writes_moving);
+    true
 }
+
+// A glide stopped where it is, for a place the reader asked for (the
+// demo's own glide is left to the demo).
+stop_moving() {
+    if (table == 0 || demo_moving || !reader_moving()) return;
+    msg_ff1(table, sel("setContentOffset:animated:"), 0.0f64, offset_y(table), 0)
+}
+
+// The look (or the text size) changed while the reader moved: the rows
+// made again at rest.
+relayout_due: bool = false;
+
+text_size_due: bool = false;
 
 // The table scrolled to y (within its content).
 set_offset(y: f64) {
-    moving_write();
+    if (offset_refused()) return;
     l8_msg_hfa(hfa, table, sel("contentSize"), 0, 0, 0);
     most: f64 = hfa[1] + bottom_inset(table) - view_height(table);
     to: f64 = y;
@@ -926,6 +950,17 @@ set_offset(y: f64) {
     if (to < -top_inset(table)) to = -top_inset(table);
     msg_ff1(table, sel("setContentOffset:animated:"), 0.0f64, to, 0);
     msg(table, sel("layoutIfNeeded"))
+}
+
+// The same, scrolled there by the system's animation (Listen following).
+set_offset_animated(y: f64) {
+    if (offset_refused()) return;
+    l8_msg_hfa(hfa, table, sel("contentSize"), 0, 0, 0);
+    most: f64 = hfa[1] + bottom_inset(table) - view_height(table);
+    to: f64 = y;
+    if (to > most) to = most;
+    if (to < -top_inset(table)) to = -top_inset(table);
+    msg_ff1(table, sel("setContentOffset:animated:"), 0.0f64, to, 1)
 }
 
 // Where verse v of chapter c begins, down from the table's top (or its
@@ -1046,8 +1081,13 @@ load_place() {
     }
 }
 
-// The rows made again (the look changed), at the same verse.
+// The rows made again (the look changed), at the same verse (at rest).
 relayout() {
+    if (reader_moving()) {
+        relayout_due = true;
+        return
+    }
+    relayout_due = false;
     measure_place();
     c: int = cur;
     v: int = place_v;
@@ -1120,12 +1160,19 @@ scroll_ended(_self: int, _cmd: int, sv: int): int {
 // The reader at rest after a scroll: the screen kept on (if asked), the
 // chapter perhaps dwelt in, listening's following let wait.
 reader_rested() {
+    resting = true;
+    if (text_size_due) {
+        text_size_due = false;
+        relayout_due = false;
+        _r: int = text_size_changed(0, 0, 0)
+    } else if (relayout_due) relayout();
     keep_screen_touched();
     dwell_check();
     plan_rest_began();
     esv_rest();
     listen_dragged();
-    esv_reader_wants()
+    esv_reader_wants();
+    resting = false
 }
 
 scroll_dragged(
@@ -1622,6 +1669,11 @@ app_background(_self: int, _cmd: int, _application: int): int {
 
 // The phone's text size changed: the text made again, at the same verse.
 text_size_changed(_self: int, _cmd: int, _note: int): int {
+    if (reader_moving()) {
+        // (At rest: reader_rested.)
+        text_size_due = true;
+        return 0
+    }
     measure_place();
     c: int = cur;
     v: int = place_v;

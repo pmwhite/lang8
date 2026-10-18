@@ -14,7 +14,9 @@ bsb_lang.py made them). Standard library only. It writes:
                    the line with no code); 1 when the base has one line,
                    whatever STEP says or if it has no word for it; 0 not
                    known (DESIGN.md's "0: the main entry" is not used: the
-                   main entry is line 1)
+                   main entry is line 1). A dStrong no line has (TAHOT's
+                   unlettered H3064, TAGNT's G3708) is given the one line
+                   whose gloss is the word's own sense gloss, if one is.
 
 A STEP word's dStrongs (H9003/{H7225G}, G1473=P-1NS + G2532=CONJ) give a word
 each, but for the prefixes and suffixes (H9000 and up). A verse's STEP words
@@ -25,10 +27,11 @@ do, and the BSB too, but for a psalm's title (verse 0: the BSB's verse 1,
 as in words.bin); words left over are tried at STEP's other numbering (the
 Hebrew's, in parentheses, or the brackets of TAGNT).
 
-It prints the coverage (of the words with a Strong's), Genesis 1:1's "God",
+It prints the coverage (of the words with a Strong's), Genesis 1:1's "God"
+and Exodus 20:3's "gods",
 and checks that each base's senses' counts sum to its count in conc.bin; it
-exits 1 if a check fails (under 95%, God not the sense glossed "God", the
-counts). --check DATA checks DATA/lang/senses.bin so, without STEP's files:
+exits 1 if a check fails (under 95%, God not the sense glossed "God", gods
+not H430J, the counts). --check DATA checks DATA/lang/senses.bin so, without STEP's files:
 
     python3 -I senses.py --check DATA
 """
@@ -71,16 +74,41 @@ def chapters(path):
 
 
 def lexicon(path):
-    # base -> [code of each line]
+    # base -> [code of each line], and base -> [gloss of each line]
     lex = {}
+    glosses = {}
     cur = None
     for line in open(path, encoding="utf-8"):
         line = line.rstrip("\n")
         if line.startswith("@"):
             cur = lex[line[1:]] = []
+            gl = glosses[line[1:]] = []
         elif cur is not None:
-            cur.append(line.split("\t", 1)[0])
-    return lex
+            f = line.split("\t")
+            cur.append(f[0])
+            gl.append(f[4] if len(f) > 4 else "")
+    return lex, glosses
+
+
+def plain(g):
+    # A gloss as compared: TBESG's "to see: see" is its sense's "see".
+    g = g.split(":")[-1] if ":" in g else g
+    return " ".join(re.sub(r"[^a-z ]", " ", g.lower()).split())
+
+
+def step_gloss(f, greek, code):
+    # A STEP word's own sense gloss: TAGNT's meaning before the "»"
+    # (": see»to see|1_see"); TAHOT's from its expansion, the part of
+    # CODE=lemma=gloss»... for its main word.
+    if greek:
+        return plain(f[9].split("»")[0]) if len(f) > 9 else ""
+    last = next((x for x in reversed(f) if "=" in x), "")
+    for part in re.split(r"[/{}]", last):
+        bits = part.split("=")
+        if len(bits) >= 3 and CODE.fullmatch(bits[0]) and \
+                bits[0][0] + str(int(bits[0][1:5])) + bits[0][5:] == code:
+            return plain(bits[2].split("»")[0])
+    return ""
 
 
 def conc_counts(path):
@@ -132,7 +160,7 @@ def step_words(step_dir):
                 if lang == "H" and n >= 9000:
                     continue
                 code = lang + str(n) + suf
-                yield ref, alt, code, lang + str(n)
+                yield ref, alt, code, lang + str(n), step_gloss(f, greek, code)
 
 
 def load(data):
@@ -155,8 +183,8 @@ def load(data):
         nxt = struct.unpack_from("<I", vb, vi * 8 + 8)[0]
         b, c = chap[ci]
         vwords[(b, c, v & 0x7fff)] = sorted(range(first, nxt), key=lambda i: order[i])
-    lex = lexicon(os.path.join(lang, "lexicon.txt"))
-    return lang, nw, base, vwords, lex
+    lex, glosses = lexicon(os.path.join(lang, "lexicon.txt"))
+    return lang, nw, base, vwords, lex, glosses
 
 
 def check(lang, nw, base, vwords, lex, senses):
@@ -188,6 +216,14 @@ def check(lang, nw, base, vwords, lex, senses):
     if gloss != "God":
         print("FAIL: Genesis 1:1's God is not the sense glossed God")
         ok = False
+    # Exodus 20:3's "other gods": H430J, the sense made for it (review r5-1).
+    g = [i for i in vwords[("EXO", 20, 3)] if base[i] == "H430"]
+    k = senses[g[0]] if g else 0
+    code = lex["H430"][k - 1] if k else "?"
+    print("Exodus 20:3 gods: sense %d, %s" % (k, code))
+    if code != "H430J":
+        print("FAIL: Exodus 20:3's gods is not H430J")
+        ok = False
     # Each base's senses' counts sum to its count; no sense past its lines.
     per = collections.defaultdict(collections.Counter)
     for i in range(nw):
@@ -211,16 +247,16 @@ def check(lang, nw, base, vwords, lex, senses):
 
 def main():
     if sys.argv[1] == "--check":
-        lang, nw, base, vwords, lex = load(sys.argv[2])
+        lang, nw, base, vwords, lex, _ = load(sys.argv[2])
         senses = open(os.path.join(lang, "senses.bin"), "rb").read()
         if len(senses) != nw:
             print("FAIL: senses.bin has %d bytes for %d words" % (len(senses), nw))
             sys.exit(1)
         sys.exit(0 if check(lang, nw, base, vwords, lex, senses) else 1)
     step_dir, data = sys.argv[1:3]
-    lang, nw, base, vwords, lex = load(data)
+    lang, nw, base, vwords, lex, glosses = load(data)
 
-    def sense(code, b):
+    def sense(code, b, gloss):
         lines = lex.get(b)
         if not lines:
             return 0
@@ -234,6 +270,16 @@ def main():
             for k, c in enumerate(lines):
                 if c.upper() == code.upper():
                     return k + 1
+        # No line has STEP's code (TAHOT's unlettered H3064, TAGNT's G3708):
+        # the one line whose gloss is the word's own, or ends it ("those of
+        # Judah", "of Judah"), before giving 0.
+        if gloss:
+            mine = [plain(g) for g in glosses[b]]
+            for same in (lambda g: g == gloss, lambda g: g and (gloss.endswith(" " + g) or g.endswith(" " + gloss))):
+                hits = [k for k, g in enumerate(mine) if same(g)]
+                if len(hits) == 1:
+                    stats["sense by its gloss"] += 1
+                    return hits[0] + 1
         return 0
 
     senses = bytearray(nw)
@@ -242,27 +288,27 @@ def main():
     unmatched_codes = collections.Counter()
     left = []
 
-    def place(ref, code, b):
+    def place(ref, code, b, gloss):
         if ref[2] == 0:
             ref = (ref[0], ref[1], 1)
         for i in vwords.get(ref, ()):
             if not used[i] and base[i] == b:
                 used[i] = 1
-                k = sense(code, b)
+                k = sense(code, b, gloss)
                 senses[i] = k
                 if not k:
                     unmatched_codes[code] += 1
                 return True
         return False
 
-    for ref, alt, code, b in step_words(step_dir):
+    for ref, alt, code, b, gloss in step_words(step_dir):
         stats["step words"] += 1
-        if place(ref, code, b):
+        if place(ref, code, b, gloss):
             stats["matched"] += 1
         else:
-            left.append((alt, code, b))
-    for alt, code, b in left:
-        if alt and place(alt, code, b):
+            left.append((alt, code, b, gloss))
+    for alt, code, b, gloss in left:
+        if alt and place(alt, code, b, gloss):
             stats["matched at the other numbering"] += 1
     # (A base of one line: known, though STEP's word wasn't found.)
     for i in range(nw):

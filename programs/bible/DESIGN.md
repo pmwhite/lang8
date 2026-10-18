@@ -7,8 +7,9 @@ the nearest equivalent. The builder doesn't silently invent a different design.
 
 Status: Rounds 1–3 are approved and on TestFlight as 1.0 (9). **Round 4 (versions, the
 ESV, Compare, cross references and commentary) is the work now, fully specified in §9.**
-Round 5 (reading plans, verse of the day, exact senses, related words, share as image)
-follows, specified in §10. Round 1 is §0.5–§6, Round 2 is §7 and Round 3 is §8. The
+Round 5 (reading plans and a plan's daily reminder, exact senses, related words, share as
+image) follows, specified in §10; the verse of the day was dropped (§10's owner
+amendment). Round 1 is §0.5–§6, Round 2 is §7 and Round 3 is §8. The
 owner's priorities, in order: distraction-free reading, note-taking, language tools.
 Above all: iPhone-native, HIG-proper, predictable UI. The app is **free forever**: no
 price, ads, in-app purchases or donation prompts (owner, 2026-10-18).
@@ -2990,9 +2991,32 @@ calls `scrollToRow…`, or reloads it.**
    both are handled the same way, in one update.
 3. **A placeholder on the screen is asked for first,** before the window's chapters, and
    past the 20-a-minute limit; `count=2` only when the next chapter is itself askable.
-4. **The glide starts at John 3:33 and steps from 160 pt a frame** (×0.97, 150 frames),
-   four times the design's 40: John's chapters are 5,000–6,000 pt on a phone, so the
-   design's 1,600 pt glide from John 3:1 never left John 3. It passes into John 5.
+4. **The glide starts at John 3:33 and steps from 220 pt a frame** (×0.97, 150 frames,
+   about 7,600 pt), not the design's 40: John's chapters are 4,000–6,000 pt on a phone, so
+   the design's 1,600 pt glide from John 3:1 never left John 3. It passes through John 4
+   and lands in John 5 (logged, `glide lands in`, and checked). (Review r5-1: at 160 pt it
+   landed in John 4, which the note wrongly called John 5.)
+   - **The answers are let go by the demo**, not by a timer (review r5-1): from John 4 on,
+     the fixture holds each answer (`esv_fixture_hold_from`) until the glide's frame
+     releases it, so that the two cases the design is for are exercised every run: John 4
+     arrives while its placeholder is on the screen below the reading line (filled in
+     place, moving, without animation), and John 5 once the glide is 200 pt into it (above
+     the reading line: kept, and swapped in at rest, `esv rest pending 1`).
+   - **The checks** (`glide.txt`) add: it lands in John 5; at least one arrival moving and
+     visible below the line; at least one moving and above it; a row kept for rest and
+     swapped in there; the fixed line at rest compared (failing if there is nothing to
+     compare); and the glide's placeholders within 10% of the filled height. Check 1 is
+     now "offset write while moving", which `go` and `set_offset` log when they refuse
+     (below), counted over every group's run (`moving.txt`).
+9. **One guard for every writer** (review r5-1): `go`, `set_offset` and the new
+   `set_offset_animated` refuse while `reader_moving()`, and log `bible: offset write while
+   moving N`. What must still happen waits for rest (`reader_rested`): a look or theme
+   change's `relayout` and a text-size change (`relayout_due`, `text_size_due`), and a
+   Listen follow asked for (`ls_follow_due`; Listen's follow now goes through
+   `set_offset_animated`, and checks `reader_moving()`, not only `isTracking`). What the
+   reader asks for (a jump, the back capsule, a version switch, Listen's name) first stops
+   a glide where it is (`stop_moving`), as a touch would. Inside `reader_rested` the reader
+   counts as at rest, whatever UIKit's flags still say in `didEndDragging`.
 5. **The demo writes the glide's offset itself** (`setContentOffset:` directly, not
    `set_offset`), so its own frames aren't counted as writes while moving; everything
    else's are.
@@ -3449,7 +3473,7 @@ dropped entirely ("isn't really a real thing, a bit frivolous and social-media-y
 | # | Item | Serves | Size |
 |---|------|--------|------|
 | R5.1 | Reading plans (computed; the Go To sheet's new Today section) | Reading | M–L |
-| R5.2 | Verse of the Day, and one daily notification | Reading | M (with the block shim) |
+| R5.2 | ~~Verse of the Day, and one daily notification~~ a plan's daily reminder (owner amendment) | Reading | M (with the block shim) |
 | R5.3 | Exact senses (extended Strong's, STEP TAHOT/TAGNT) | Language tools | M |
 | R5.4 | Related words (Clear MACULA proximity), **replacing semantic domains** | Language tools | S–M |
 | R5.5 | Share as Image | Sharing | M |
@@ -3461,9 +3485,10 @@ dropped entirely ("isn't really a real thing, a bit frivolous and social-media-y
    uses Clear's own CC BY **Proximity** data, which gives words used in similar
    contexts: the same question ("what else means this?") with a clean licence. See
    §10.7 for the open question.
-2. **One daily notification** carries both the verse of the day and, when a plan is
-   active, today's reading. There are no separate plan reminders, streaks or badges.
-   Calm, not nagging.
+2. ~~**One daily notification** carries both the verse of the day and, when a plan is
+   active, today's reading.~~ Superseded by the owner amendment above: the only
+   notification is a followed plan's optional reminder of the day's reading. There are no
+   streaks or badges. Calm, not nagging.
 3. **The only block in the app is a minimal global-block shim** (§10.2.3), used for the
    notification authorization call. If the shim can't be made to work, R5.2 ships
    in-app only and the notification setting is hidden. Nothing else depends on it.
@@ -3474,7 +3499,7 @@ dropped entirely ("isn't really a real thing, a bit frivolous and social-media-y
 
 **Demo clock:** every date-dependent feature reads "today" through one function,
 `today()`. In demo mode it returns the fixed local date **2026-10-19 08:00**, so the
-plans, the verse of the day and the notifications are deterministic.
+plans and the reminders are deterministic.
 
 ### 10.1 R5.1 Reading plans
 
@@ -3700,9 +3725,11 @@ chapters (T and W text), greedily: day d ends at the chapter boundary nearest to
   - **Join rule:** align the verse's words with `words.bin`'s words of that verse in
     original order (the `order` field), matching on base Strong's. Where the orders
     differ, take the first unused word in the verse with the same base number.
-  - **`data/lang/senses.bin`:** one `u8` per `words.bin` entry. 0 means the main entry or
-    unknown; k means the k-th sub-entry (1-based) under that base's `@` block in
-    `lexicon.txt`.
+  - **`data/lang/senses.bin`:** one `u8` per `words.bin` entry. 0 means "not known" only
+    (amended, review r5-1, as built: 10.7a-1); k means the k-th sub-entry (1-based) under
+    that base's `@` block in `lexicon.txt`. A word of sense 0 never shows a particular
+    sense's meaning: Meaning is the gloss its entries share, or "Sense not tagged", and
+    the definition's preview lists the senses it may be.
 - **`lexicon.txt` format change:** each sub-entry line gains a **first field**, its
   extended code (`H7462B`, or an empty field for an unsuffixed entry). `bsb_lang.py`
   writes it, and `lang.l8`'s parser and `test_lang.l8` are updated.
@@ -3745,7 +3772,9 @@ chapters (T and W text), greedily: day d ends at the chapter boundary nearest to
     Datasets, available at https://github.com/Clear-Bible/macula-greek/".
 - **Tool:** `tools/related.py`.
   - It normalizes keys: Aramaic `A` → `H`, and drops lowercase sense letters to the
-    base.
+    base, but only for a base with no unlettered key of its own (amended, review r5-1:
+    H2617a is a homonym, not chesed); pairs past 0.75 and function-word neighbours are
+    dropped (10.7a-2).
   - It drops pairs whose base isn't in our lexicon, dedupes per base keeping the nearest,
     and keeps the 10 nearest per key.
   - It writes `data/lang/related.bin`: per base key ascending, the key in ASCII, `\0`,
@@ -3830,17 +3859,17 @@ start one. Shots:
 
 | Shot | Action | Expected |
 |---|---|---|
-| `140-goto-today` | Open Go To | Today: Verse of the Day (entry for Oct 19), and "Reading Plans ›"; then Recent |
+| `140-goto-today` | Open Go To | Today: "Reading Plans ›"; then Recent (owner amendment: no Verse of the Day) |
 | `141-plans` | Push Reading Plans | Four plans with day and chapter counts |
 | `142-plan-detail` | Push Bible in a Year | The description, Week 1 rows (Day 1 "Genesis 1–3"…), toolbar "Start Plan" |
-| `143-plan-started` | Start; back to Go To (dismiss and reopen) | Today: the verse, "Genesis 1–3 · Bible in a Year · Day 1" with an empty circle, and "Bible in a Year · Day 1 of 365" |
+| `143-plan-started` | Start; back to Go To (dismiss and reopen) | Today: "Genesis 1–3 · Bible in a Year · Day 1" with an empty circle, and "Bible in a Year · Day 1 of 365" |
 | `144-plan-partial` | Read Genesis 1 (the demo hook dwells 20 s worth and shows the last verse), reopen Go To | Genesis 1–3 with the half-filled circle |
 | `145-day-done` | Mark Genesis 2–3 read in the reader the same way | The toast "Day 1 Done" over the reader |
 | `146-catch-up` | Demo clock +3 days; open Go To | "Genesis 8–10 · Day 4" (or as computed), and "Catch Up · 2 earlier days aren't finished" |
-| `147-votd-settings` | Aa → Verse of the Day | The switch off, and the footer |
+| `147-plan-reminder` | The plan's days (owner amendment) | Daily Reminder off, and its footer |
 | `148-notify-prompt` | Turn it on | The system authorization alert (proof the shim's call ran); the log shows no crash |
-| `149-time-row` | (The script relaunches; the demo forces the "granted" path through the shim's flag) | The Time row with 7:00 AM; the log line "scheduled 30 daily verses" |
-| `150-votd-open` | The demo hook calls the response handler with `JHN.3.16` | The reader at John 3:16, flashed, with the back capsule |
+| `149-time-row` | (The demo forces the "granted" path through the shim's flag) | The Time row with 7:00 AM; the log line "scheduled 30 daily reminders" |
+| `150-reminder-open` | The demo hook opens day 2's reminder | The reader at Genesis 4, day 2's first unread chapter, with the back capsule |
 | `151-share-sheet` | Select John 3:16; Share | The system share sheet with "Share as Image" among its actions |
 | `152-share-composer` | Choose it | The composer: square Paper card, the segments and swatches |
 | `153-share-night-portrait` | Portrait, Night | The re-rendered card |
@@ -3853,39 +3882,55 @@ start one. Shots:
 - **Published:** the demo writes the 152 card at full size to Documents, and
   `simulate.sh` publishes it as `share-card.png`. It must be exactly 1080 × 1080.
 - **Recording sequence 12:** tap a Today circle (the symbol cross-fades), push Plans and
-  back, and toggle Daily Notification on and off (the Time row fades in and out).
-- **Linux:** `test_plans.l8`, the new `test_lang.l8` cases (senses, related, lexicon
-  field), and `votd.py`'s self-check (366 lines, the date mapping) in `make bible-test`.
+  back, toggle the plan's Daily Reminder on and off (the Time row fades in and out), and
+  stop and start the plan (its rows and the reminder's section fade; review r5-1).
+- **Linux:** `test_plans.l8` and the new `test_lang.l8` cases (senses, related, lexicon
+  field) in `make bible-test`, and `senses.py --check` and `related.py --check`. (The
+  verse of the day's `votd.py` went with it: owner amendment.)
 
 ### 10.7 Questions only the owner can answer, and what the owner provides
 1. **Semantic domains.** Do you want us to ask UBS (semanticdictionary.org, MARBLE) for
    permission to show Louw–Nida domain names in a free app? If they grant it, domains can
    join Related Words in a later round. If not, R5.4 stands as specified.
-2. **The verse-of-the-day list.** The designer curates it in review. If you'd like any
-   verses always included (or a different balance between comfort and challenge), say so
-   before that review.
+2. ~~**The verse-of-the-day list.**~~ (Gone: owner amendment.)
 3. **On a device:**
    - Allow notifications, and receive one at the set time (the simulator can't show
      the Allow tap).
-   - Tap it, and see the app open at the verse.
+   - Tap it, and see the app open at that day's first unread chapter.
    - Save a shared image to Photos.
 
 ### 10.7a Builder notes (Round 5, as built)
 Where the build differs from the text above, and why:
 1. **`senses.bin`'s 0 means only "not known"**; k counts entries from 1, and a base with a
-   single entry is k = 1 (known trivially). Coverage is 99.70% of words with a Strong's
-   number (98.88% before single-entry bases are counted). 397 dStrongs have no line in
-   STEP's brief lexicon and get 0, the largest H430J (215, "gods", which TBESH lacks).
-   Genesis 1:1's "God" is H430G. Each sense's count sums to its base's (tool and test).
-2. **`related.bin`** is ordered by (letter, number), G before H; distances run 0–0.83,
+   single entry is k = 1 (known trivially). Review r5-1: `bsb_lang.py` makes the sense
+   TBESH lacks, **H430J "gods"** ("gods (of the nations); other gods"; `SYNTH`), so the 215
+   words STEP tags so (Exodus 20:3, Psalm 82:1b and 82:6) read "gods"; and `senses.py`
+   gives a dStrong no line has (TAHOT's unlettered H3064, TAGNT's G3708) the one line whose
+   gloss is the word's own (TAHOT's expansion, TAGNT's meaning column), before 0. Coverage
+   is 99.78%; 44 words are left at 0 (people of one name, as Anah, H6034, 12). A word of
+   sense 0 shows no particular sense (`meaning_entry`): its Meaning is the gloss all its
+   entries share, else "Sense not tagged", and the preview "One of 3 senses, not tagged in
+   this verse: …". Genesis 1:1's "God" is H430G, Exodus 20:3's "gods" H430J (tool and
+   test). Each sense's count sums to its base's.
+2. **`related.bin`** is ordered by (letter, number), G before H; distances run 0–0.75,
    stored as round(d·255); only Proximity's X1 keys are used (no reverse pairs added).
+   Review r5-1: a lettered code is folded into its base only when the base has no
+   unlettered code of its own (H2617a, "reproach", is not chesed's); a dozen lettered codes
+   that are MACULA's particles under an unrelated base (H2050b, "and", under H2050 "to
+   plot"; H871a "in") are left out; pairs past 0.75 are dropped; and function words (the
+   article, pronouns, conjunctions, prepositions and particles, G3588, G846, G240 and the
+   Hebrew H853, H834, H1931…) are never neighbours. 9,884 keys keep a list. Tests:
+   H2617's first three include H7356 (no shame word); no function word anywhere; nothing
+   past 0.75.
 3. (The Verse of the Day's `votd.py` notes are gone with it: owner amendment above.)
-4. **Go To opens at its top**, Today first, rather than scrolled to the book being read
-   (§3.2's Round 1 behavior): Today is always present, and shot 140 shows it.
+4. **Go To opens at its top, Today first, only while a plan is followed** (review r5-1's
+   condition): today's reading is a tap away. Without a plan it is scrolled to the book
+   being read, as §3.2 says, Today a flick above.
 5. **"Your progress in … will be kept"** is a line under the plan's description in its
    header, not a footer row (the last section's footer would be 53 weeks down).
 6. **A plan not followed shows its days unread**, and their circles do nothing until it is
-   started.
+   started: they are drawn at the faint color at 40%, the button disabled and without
+   VoiceOver's action (review r5-1's condition).
 7. **Day Done comes for hand marks too** (a Today or a day's circle finishing today's day),
    once a calendar day (`planDoneDay`); in the demo it stays 6 s, for the screenshot.
 8. **Rest is counted between scrolls while no sheet is over the reader**; the demo's hook
@@ -3924,15 +3969,36 @@ Where the build differs from the text above, and why:
     the demo (`demo_grant`), so the Time row and the scheduling are shown without an alert.
     The alert in 148 is the real request's, from the plan's switch.
 18. Not done: Isaiah 37's pointer as a reference (optional in review r4-2).
+19. **Review r5-1's other fixes:**
+    - **Start and Stop** change the plan's days in one `beginUpdates`/`endUpdates`: the
+      header set again (its "will be kept" line, the height animated by the update), the
+      reminder's section inserted or deleted, and the visible days reloaded, each with
+      `UITableViewRowAnimationFade`; no `reloadData`. Sequence 12 now stops and starts the
+      plan too.
+    - **The reminder is the plan's:** Start (or Start Instead) and Stop turn
+      `planReminder` off and remove what is pending; a newly started plan's switch is
+      off. At launch, with the switch off or no plan, every pending request is removed (an
+      older build's `votd-*` with it), and delivered `votd-*` ones for the last month are
+      put away; with it on, the plan's are scheduled again as before. Shot 149b: the plan
+      stopped with its reminder on and started again, the switch off.
+    - **`plans-done.tsv` is appended to** (`append_file`, an `NSFileHandle` at its end),
+      never read back through the 2 MB buffer.
+    - **The server off in CI** (`L8_ESV_OFF`) for every group but `versions`: no request is
+      made, the status is never asked, so store-7 shows the no-server path again.
+    - **The definition's preview** joins TBESH's paragraphs with " — " unless one ends a
+      sentence ("God" — Another name of…).
+    - New shots: 154b (Exodus 20:3's "gods"), 156b (Psalm 136:1's related words).
 
 ### 10.8 Round 5 acceptance (summary)
 Round 5 is approved when:
 - The plans are computed exactly as §10.1.1 says (tests). Progress counts by dwell,
   Listen and hand. Today, Catch Up and Day Done behave as specified. Stopping keeps the
   history in `plans-done.tsv`.
-- The verse of the day matches the date mapping. The notification schedule is 30 dated
-  requests, with the right body and subtitle, never ESV text. Opening one goes to the
-  verse. Or, if the shim failed, the fallback is reported and the setting is hidden.
+- (Owner amendment: no verse of the day.) A followed plan's reminder schedules 30 dated
+  requests, with the right title and body, never ESV text, and is the plan's alone (off
+  when it stops; off for a plan newly started). Opening one goes to that day's first
+  unread chapter. Or, if the shim failed, the fallback is reported and the setting is
+  hidden.
 - Word study shows the exact sense, and counts by it. The concordance filters by sense.
 - Related words show and push lemma studies, with MACULA credited in Acknowledgements:
   - A new **Study** row "Related Words" / "From MACULA Greek Linguistic Datasets,

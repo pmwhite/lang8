@@ -88,6 +88,10 @@ if [ "$group" = versions ]; then
     fixture=Library/esv-fixture
   fi
 fi
+# (Every other group: the server as if it were not there, L8_ESV_OFF, so
+# that no shot depends on the network or shows the ESV; review r5-1.)
+esv_off=1
+[ "$group" = versions ] && esv_off=
 # (The ios18 group's shots have -ios18 after their names.)
 suffix=
 [ "$group" = ios18 ] && suffix=-ios18
@@ -131,7 +135,7 @@ wait_done() {
 launch() {
   events=$((events + 1))
   wait_start
-  SIMCTL_CHILD_L8_DEMO=1 SIMCTL_CHILD_L8_ESV_FIXTURE=$fixture xcrun simctl launch --console-pty "$dev" "$id" > "$out/$1" 2>&1 &
+  SIMCTL_CHILD_L8_DEMO=1 SIMCTL_CHILD_L8_ESV_FIXTURE=$fixture SIMCTL_CHILD_L8_ESV_OFF=$esv_off xcrun simctl launch --console-pty "$dev" "$id" > "$out/$1" 2>&1 &
   console=$!
   # (The first launch may take minutes.)
   i=0
@@ -373,23 +377,41 @@ versions)
   step 227 126-study-commentary
   step 228 127-commentary-preview
   step 229 128-acknowledgements 6
-  # The glide through the ESV's John 3 to 5, its answers a second each
-  # (DESIGN.md §9.4.11), and its checks: no offset written while moving;
-  # every frame moved by its own step; JHN 5 asked for before its row was
-  # seen; the line kept at rest; the cache within 500.
+  # The glide through the ESV's John 3 to 5, its answers let go by the demo
+  # mid-glide (DESIGN.md §9.4.11, review r5-1), and its checks: no offset
+  # write while moving (anywhere in the run); every frame moved by its own
+  # step; it lands in John 5; John 4 filled in place while moving and on
+  # the screen; John 5, come once the glide was in it, kept for rest and
+  # swapped in there; JHN 5 asked for before its row was seen; the line kept
+  # at rest (and something to compare); the cache within 500; the glide's
+  # placeholders within 10% of the text.
   step 239 117b-esv-glide 16
   python3 - "$out/console.txt" <<'PY' | tee "$out/glide.txt"
 import re, sys
 log = open(sys.argv[1], errors="replace").read().splitlines()
 bad = []
-writes = [l for l in log if "offset written while moving" in l]
-if writes: bad.append("offset written while moving: %d" % len(writes))
+writes = [l for l in log if "offset write while moving" in l]
+print("offset writes while moving: %d" % len(writes))
+if writes: bad.append("offset write while moving: %d" % len(writes))
 steps = [int(l.split()[-1]) for l in log if l.startswith("bible: glide step ")]
 ys = [int(l.split()[-1]) for l in log if l.startswith("bible: glide y ")]
 off = [i for i in range(1, len(ys)) if abs(ys[i] - ys[i - 1] - steps[i]) > 50]
 print("glide frames %d, off by more than 0.5 pt: %d" % (len(ys), len(off)))
 if not ys or off: bad.append("glide frames off: %s" % off[:5])
 j5 = [int(l.split()[-1]) for l in log if l.startswith("bible: glide john 5 is ")]
+lands = [int(l.split()[-1]) for l in log if l.startswith("bible: glide lands in ")]
+print("glide lands in %s (John 5: %s)" % (lands[-1:], j5[-1:]))
+if not j5 or not lands or lands[-1] != j5[-1]: bad.append("the glide does not land in John 5")
+# Each arrival in the glide: c, moving, visible, above.
+g0 = max([i for i, l in enumerate(log) if l.startswith("bible: glide john 5 is ")] or [0])
+g1 = min([i for i, l in enumerate(log) if i > g0 and l == "bible: glide at rest"] or [len(log)])
+arr = []
+for i in range(g0, g1):
+    if log[i].startswith("bible: esv arrived ") and i + 3 < len(log):
+        arr.append(tuple(int(log[i + k].split()[-1]) for k in range(4)))
+print("arrivals in the glide (c, moving, visible, above): %s" % arr)
+if not [a for a in arr if a[1] == 1 and a[2] == 1 and a[3] == 0]: bad.append("no arrival on the screen while moving")
+if not [a for a in arr if a[1] == 1 and a[3] == 1]: bad.append("no arrival above the reading line while moving")
 if j5:
     j5 = j5[-1]
     start = max(i for i, l in enumerate(log) if l.startswith("bible: glide john 5 is "))
@@ -401,18 +423,26 @@ if j5:
 rest = [i for i, l in enumerate(log) if l == "bible: glide at rest"]
 done = [i for i, l in enumerate(log) if l == "bible: glide rested"]
 fixed = [int(l.split()[-1]) for l in log[rest[-1]:done[-1]] if l.startswith("bible: esv fixed line ")] if rest and done else []
+pend = [int(l.split()[-1]) for l in log[rest[-1]:done[-1]] if l.startswith("bible: esv rest pending ")] if rest and done else []
+print("rows kept for rest, swapped in at rest: %s" % pend)
+if not pend or pend[0] < 1: bad.append("no row kept for rest was swapped in at rest")
 if len(fixed) >= 2:
     print("fixed line at rest before/after: %d %d" % (fixed[-2], fixed[-1]))
     if abs(fixed[-2] - fixed[-1]) > 1: bad.append("the fixed line moved")
-else: print("at rest: nothing above the reading line to keep")
+else: bad.append("at rest: no fixed line to compare")
 if not rest: bad.append("the glide never rested")
 cache = [int(re.search(r"cache (\d+) verses", l).group(1)) for l in log if "bible: esv cache " in l]
 print("cache at most %d" % max(cache or [0]))
 if max(cache or [0]) > 500: bad.append("cache past 500")
-rows = [l for l in log if l.startswith("bible:   placeholder ") or l.startswith("bible:   filled ")]
-for a, b in zip(rows[::2], rows[1::2]):
+rows = [(i, l) for i, l in enumerate(log) if l.startswith("bible:   placeholder ") or l.startswith("bible:   filled ")]
+worst = 0.0
+for (i, a), (_, b) in zip(rows[::2], rows[1::2]):
     h0, h1 = int(a.split()[-1]), int(b.split()[-1])
-    print("placeholder %d filled %d (%.1f%%)" % (h0, h1, 100.0 * abs(h1 - h0) / max(h0, 1)))
+    e = 100.0 * abs(h1 - h0) / max(h0, 1)
+    if g0 < i < g1: worst = max(worst, e)
+    print("placeholder %d filled %d (%.1f%%)%s" % (h0, h1, e, " (in the glide)" if g0 < i < g1 else ""))
+print("the glide's worst placeholder: %.1f%%" % worst)
+if worst >= 10.0: bad.append("a glide placeholder %.1f%% off" % worst)
 print("FAILED: " + "; ".join(bad) if bad else "glide checks passed")
 PY
   grep -q "glide checks passed" "$out/glide.txt" || failed=1
@@ -465,6 +495,9 @@ plans)
   step 248 147-plan-reminder 8
   step 250 149-time-row 8
   step 251 150-reminder-open 6
+  # (The plan stopped with its reminder on, and started again: the switch
+  # off; review r5-1.)
+  step 272 149b-plan-again-reminder-off 10
   step 252 151-share-sheet 8
   step 253 152-share-composer 8
   # The card at full size, as the demo kept it: exactly 1080 × 1080.
@@ -480,8 +513,10 @@ plans)
   step 254 153-share-night-portrait 6
   step 255 154-word-sense 8
   step 256 155-concordance-sense 6
+  step 270 154b-word-gods 8
   step 257 156-related 8
   step 258 157-lemma-study 6
+  step 271 156b-related-chesed 8
   step 261 "" 10
   ui content_size accessibility-extra-extra-extra-large
   step 259 158-ax-goto-today 8
@@ -498,7 +533,7 @@ plans)
   sleep 0.5
   : > "$out/transitions.txt"
   a=$(now)
-  step 260 "" 18
+  step 260 "" 22
   b=$(now)
   echo "12 $(python3 -c "print(round($a - $rec0, 2), round($b - $rec0, 2))")" >> "$out/transitions.txt"
   sleep 0.5
@@ -534,6 +569,11 @@ ios18)
   step 41 33-interlinear 6
   ;;
 esac
+# (No path wrote the reader's offset while it moved: go and set_offset
+# refuse then, and say so; DESIGN.md §9.4.11, review r5-1.)
+n=$(cat "$out"/console*.txt 2>/dev/null | grep -c "offset write while moving")
+echo "offset writes refused while moving: $n" | tee "$out/moving.txt"
+[ "$n" = 0 ] || failed=1
 echo "total $(python3 -c "print(round($(now) - $start))") s" >> "$out/timing.txt"
 kill "$logger" "$console" 2>/dev/null || true
 find ~/Library/Logs/DiagnosticReports -newer "$app/Info.plist" -type f -exec cp {} "$out"/ \; 2>/dev/null || true

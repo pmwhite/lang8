@@ -38,7 +38,9 @@ OUT_DIR gets (all little-endian; see DESIGN.md §7.1):
                 (**bold**, _italic_, [[MAT.5.43|Mat 5:43]], and \\n between
                 paragraphs). The code is STEP's for the entry, as the app
                 writes numbers (H7462B, H430G), or empty when it has no
-                letter (G2316); TAHOT's and TAGNT's dStrongs name these.
+                letter (G2316); TAHOT's and TAGNT's dStrongs name these. SYNTH
+                adds the senses TAHOT tags that STEP's lexicon lacks
+                (H430J, "gods").
 
 The verses' tokens (the English words, as the regex TOKEN finds them) are
 compared with the tables' chunks: a verse is aligned when they are the same.
@@ -153,6 +155,11 @@ STEP_BOOKS = {
     "jude": "JUD", "rev": "REV",
 }
 SINGLE = {"OBA", "PHM", "2JN", "3JN", "JUD"}
+# Senses TAHOT's dStrongs name that STEP's brief lexicon lacks: base ->
+# (code, gloss, definition). H430J is "gods", 215 BSB words (Exodus 20:3).
+SYNTH = {
+    "H430": [("H430J", "gods", "gods (of the nations); other gods")],
+}
 
 
 def step_ref(target, have):
@@ -630,6 +637,14 @@ def main():
             gloss = e[6].strip()
             defn = markup(e[7], have, stats)
             lines.append("\t".join([ext_code(e[1]), lemma, tr, e[5].strip(), gloss, defn]))
+        # Senses TAHOT tags that TBESH has no line for (review r5-1): made
+        # after its first line's lemma, transliteration and part of speech.
+        for code, gloss, defn in SYNTH.get(k, ()):
+            if any(ext_code(e[1]) == code for e in entries):
+                continue
+            first = lines[-len(entries)].split("\t")
+            lines.append("\t".join([code] + first[1:4] + [gloss, defn]))
+            stats["senses made (not in STEP's lexicon)"] += 1
     stats["lemma translits from the tables"] = translit_from["tables"]
     stats["lemma translits made"] = translit_from["made"]
     w = lambda name, data, mode="wb": open(os.path.join(outdir, name), mode).write(data)
