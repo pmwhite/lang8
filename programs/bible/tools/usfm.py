@@ -137,6 +137,11 @@ def convert(path, out):
     def flush():
         t = re.sub(r"[ \t\r]+", " ", "".join(words))
         words.clear()
+        if ebible and t == " ":
+            # (A space between a note and markup after it, as "\f* \wj Satan":
+            # the next words' own.)
+            words.append(" ")
+            return
         if t.strip():
             if added[0]:
                 out.append(("J" if jesus[0] else "I") + t)
