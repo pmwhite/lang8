@@ -734,7 +734,7 @@ last_top: f64 = 0.0f64;
 // it.
 inset_changed(_self: int, _cmd: int, sv: int): int {
     if (!is_reader(sv) || !restored) return 0;
-    if ((msg(sv, sel("isTracking")) & 255) != 0 || (msg(sv, sel("isDecelerating")) & 255) != 0) return 0;
+    if (reader_moving()) return 0;
     note_num("bible: inset now ", top_inset(sv) as int);
     set_offset(last_top - top_inset(sv));
     find_place();
@@ -787,6 +787,7 @@ title_settle() {
 // Chapter c, at y points down into it.
 go(c: int, y: f64) {
     if (c < 0 || c >= chapters) return;
+    moving_write();
     path: int = chapter_path(c);
     // (Twice: the rows above are only estimated until they have been laid
     // out, and the first jump lays out those around it.)
@@ -801,8 +802,26 @@ go(c: int, y: f64) {
     find_place()
 }
 
+// Whether the reader's table is moving (a finger on it, gliding, or the
+// demo's glide): while it is, nothing writes its offset, scrolls it to a
+// row or reloads it (DESIGN.md §9.4.11); the demo counts any that does.
+demo_moving: bool = false;
+
+reader_moving(): bool {
+    demo_moving || (msg(table, sel("isTracking")) & 255) != 0 || (msg(table, sel("isDecelerating")) & 255) != 0
+}
+
+offset_writes_moving: int = 0;
+
+moving_write() {
+    if (!diag_on || table == 0 || !reader_moving()) return;
+    offset_writes_moving = offset_writes_moving + 1;
+    note_num("bible: offset written while moving ", offset_writes_moving)
+}
+
 // The table scrolled to y (within its content).
 set_offset(y: f64) {
+    moving_write();
     l8_msg_hfa(hfa, table, sel("contentSize"), 0, 0, 0);
     most: f64 = hfa[1] + bottom_inset(table) - view_height(table);
     to: f64 = y;
@@ -973,6 +992,9 @@ scroll_began(_self: int, _cmd: int, sv: int): int {
     drag_top = offset_y(sv);
     drag_low = drag_top;
     plan_rest_ended();
+    // (Scrolled: a place waiting for its ESV chapter is left behind.)
+    esv_wait_c = -1;
+    esv_jump_c = -1;
     bar_drag_began();
     listen_drag_began();
     0
@@ -1003,6 +1025,7 @@ reader_rested() {
     keep_screen_touched();
     dwell_check();
     plan_rest_began();
+    esv_rest();
     listen_dragged();
     esv_reader_wants()
 }
@@ -1437,6 +1460,37 @@ reader_appeared(self: int, cmd: int, animated: int): int {
     0
 }
 
+// A drag let go to glide: where it will land, its window of ESV chapters
+// asked for now (the target read, never written). (The velocity, a CGPoint,
+// comes in float registers: the target's pointer is the next whole one.)
+will_end_drag(
+    _self: int,
+    _cmd: int,
+    sv: int,
+    target: int
+): int {
+    if (!is_reader(sv) || text_cur != TEXT_ESV || target == 0) return 0;
+    memcpy_doubles(drag_target, target, 16);
+    path: int = msg_ff(table, sel("indexPathForRowAtPoint:"), 40.0f64, drag_target[1] + top_inset(table) + 1.0f64);
+    l: int = if (path != 0) msg(path, sel("row")) else -1;
+    if (l < 0) {
+        paths: int = msg(table, sel("indexPathsForVisibleRows"));
+        if (paths != 0 && msg(paths, sel("count")) > 0) l = msg(msg(paths, sel("lastObject")),
+            sel("row"))
+    }
+    note_num("bible: glide lands in ", l);
+    esv_window(l);
+    0
+}
+
+drag_target: []f64 = new f64[2](0.0f64);
+
+// An animated scroll (a jump's) at its end: as a rest.
+scroll_animated_end(_self: int, _cmd: int, sv: int): int {
+    if (is_reader(sv)) esv_rest();
+    0
+}
+
 app_background(_self: int, _cmd: int, _application: int): int {
     save_place();
     plan_rest_ended();
@@ -1736,6 +1790,10 @@ main() noregion: int {
     add_method1(app, sel("scrollViewDidChangeAdjustedContentInset:"), &inset_changed,
         "v@:@");
     add_method1(app, sel("scrollViewDidEndDecelerating:"), &scroll_ended, "v@:@");
+    add_method2(app, sel("scrollViewWillEndDragging:withVelocity:targetContentOffset:"),
+        &will_end_drag, "v@:@{CGPoint=dd}^{CGPoint=dd}");
+    add_method1(app, sel("scrollViewDidEndScrollingAnimation:"), &scroll_animated_end,
+        "v@:@");
     add_method2(app, sel("scrollViewDidEndDragging:willDecelerate:"), &scroll_dragged,
         "v@:@B");
     add_method1(app, sel("tapped:"), &tapped, "v@:@");

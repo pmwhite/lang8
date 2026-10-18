@@ -13,7 +13,7 @@ const fixture = (name) => readFileSync(new URL(name, here), "utf8");
 const pages = readdirSync(here).filter((f) => f.endsWith(".html"));
 
 test("each fixture converts to its records, its words unchanged", () => {
-  assert.equal(pages.length, 8);
+  assert.equal(pages.length, 12);
   for (const f of pages) {
     const [book, c] = f.replace(".html", "").split("-");
     const html = fixture(f);

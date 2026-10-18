@@ -421,6 +421,15 @@ esv_mark_loading(c: int) {
 esv_ask(c: int, count: int) {
     esv_inflight = c;
     esv_mark_loading(c);
+    // (Its start, for the client's own limit; and the BSB's heights of what
+    // is asked measured now, off the fling, for its placeholders.)
+    esv_req_t[esv_req_i % len(esv_req_t)] = CACurrentMediaTime();
+    esv_req_i = esv_req_i + 1;
+    note_num("bible: esv asked ", c * 10 + count);
+    if (text_cur == TEXT_ESV && table != 0) {
+        for x in c..c + count
+            if (x < chapters) _h: f64 = esv_bsb_height(x)
+    }
     if (esv_fixture_dir() != 0) {
         esv_fixture_c = c;
         esv_fixture_count = count;
@@ -440,12 +449,76 @@ esv_ask(c: int, count: int) {
     }
 }
 
-// The next request, if one waits.
+// The next request: one asked for directly (Compare, a preview, Listen,
+// Try Again), or else the reader's next (esv_pump).
 esv_next() {
-    if (esv_inflight >= 0 || esv_queued < 0) return;
+    if (esv_inflight >= 0) return;
+    if (esv_queued < 0) {
+        esv_pump();
+        return
+    }
     c: int = esv_queued;
     esv_queued = -1;
     esv_ask(c, esv_queued_count)
+}
+
+// ---- the reader's window (DESIGN.md §9.4.11) ----
+// The landing chapter (where a glide will rest, or the reader is): the
+// chapters wanted are L - 1 to L + 2, asked for L, L + 1, L + 2, then
+// L - 1, one request at a time, the newest window always winning.
+esv_win_l: int = -1;
+
+// The starts of the last 20 requests: past 20 in 60 s, only a chapter on
+// the screen is asked for.
+esv_req_t: []f64 = new f64[20](-1000.0f64);
+
+esv_req_i: int = 0;
+
+esv_rate_ok(): bool {
+    oldest: f64 = esv_req_t[esv_req_i % len(esv_req_t)];
+    CACurrentMediaTime() - oldest >= 60.0f64
+}
+
+esv_window(l: int) {
+    if (text_cur != TEXT_ESV || l < 0 || l >= chapters) return;
+    esv_win_l = l;
+    esv_pump()
+}
+
+// Whether chapter c is the reader's to ask for now: wanted, not on its way
+// or failed, and, if it is not on the screen, small enough and with room
+// to be held ahead, within the client's limit.
+esv_askable(c: int, on_screen: bool): bool {
+    if (c < 0 || c >= chapters || !esv_wanted(c, time(0)) || c == esv_inflight) return false;
+    st: int = esv_state[c];
+    if (st >= ESV_OFFLINE) return false;
+    if (on_screen) return true;
+    !esv_too_big(c) && esv_rate_ok() && esv_room_for(c)
+}
+
+// The client idle: the reader's next chapter asked for (a placeholder on
+// the screen first, then the window's).
+esv_pump() {
+    if (esv_inflight >= 0 || text_cur != TEXT_ESV || table == 0) return;
+    if (CACurrentMediaTime() < esv_hold_until) return;
+    esv_visible_rows();
+    if (ec_vis_lo >= 0) {
+        for c in ec_vis_lo..ec_vis_hi + 1 {
+            if (esv_askable(c, true)) {
+                esv_ask(c, if (esv_askable(c + 1, c + 1 <= ec_vis_hi || c + 1 == esv_win_l || c + 1 == esv_win_l + 1)) 2 else 1);
+                return
+            }
+        }
+    }
+    l: int = esv_win_l;
+    if (l < 0) return;
+    for d in [0, 1, 2, -1] {
+        c: int = l + d;
+        if (esv_askable(c, false)) {
+            esv_ask(c, if (d >= 0 && d < 2 && esv_askable(c + 1, false)) 2 else 1);
+            return
+        }
+    }
 }
 
 // ---- the fixture (CI) ----
@@ -589,11 +662,8 @@ esv_jump_v: int = 0;
 esv_reader_wants() {
     if (text_cur != TEXT_ESV) return;
     esv_visible_now();
-    c: int = cur;
-    if (c < 0 || c >= chapters) return;
-    t: int = time(0);
-    if (esv_wanted(c, t)) esv_want(c, if (c + 1 < chapters && esv_wanted(c + 1, t)) 2 else 1) else if (c + 1 < chapters && esv_wanted(c + 1,
-        t)) esv_want(c + 1, 1)
+    if (cur < 0 || cur >= chapters) return;
+    esv_window(cur)
 }
 
 // The rows on the screen, told to the cache, nothing let go yet.
@@ -644,33 +714,64 @@ esv_row_shown(c: int) {
     if (text_cur != TEXT_ESV || esv_held(c)) return;
     if (esv_state[c] == ESV_HERE) esv_state[c] = 0;
     if (esv_state[c] == ESV_LOADING && c != esv_inflight && c != esv_queued) esv_state[c] = 0;
-    if (esv_state[c] == 0) esv_want(c, 1)
+    if (!esv_seen[c]) {
+        esv_seen[c] = true;
+        note_num("bible: esv row visible ", c)
+    }
+    if (esv_state[c] == 0) esv_pump()
 }
 
-// Chapter c's text came: its row made again where it is, the same lines
-// kept where they were (no line seen moves); the place a switch or a jump
-// was waiting at, then; and whatever else waits (Compare, a preview,
-// Listen).
+// Which placeholders have been on the screen (the demo's log of when).
+esv_seen: []bool = new bool[1200](false);
+
+// Chapter c's text came (DESIGN.md §9.4.11): what waits for it told; and
+// in the reader, its row swapped in without touching the scroll: below
+// what is seen, nothing; on the screen at or below the reading line, its
+// text in place (its height taken with no animation while the table moves,
+// the system's at rest); above that line, or above the screen, only at
+// rest, the place kept (esv_rest).
+esv_pending_n: int = 0;
+
+esv_pending: []int = new int[16](0);
+
+esv_refresh_due: bool = false;
+
+esv_pend(c: int) {
+    for i in 0..esv_pending_n
+        if (esv_pending[i] == c) return;
+    if (esv_pending_n < len(esv_pending)) {
+        esv_pending[esv_pending_n] = c;
+        esv_pending_n = esv_pending_n + 1
+    }
+}
+
 esv_arrived(c: int) {
     compare_esv_arrived(c);
     preview_esv_arrived(c);
     listen_esv_arrived(c);
     if (text_cur != TEXT_ESV || table == 0) return;
-    esv_refresh_others(c);
+    moving: bool = reader_moving();
     tv: int = view_of(c);
-    if (tv != 0) {
+    top: f64 = offset_y(table) + top_inset(table);
+    above: bool = row_y(c) < top;
+    note_num("bible: esv arrived ", c);
+    note_num("bible:   moving ", if (moving) 1 else 0);
+    note_num("bible:   visible ", if (tv != 0) 1 else 0);
+    note_num("bible:   above ", if (above) 1 else 0);
+    waited: bool = esv_wait_c == c || esv_jump_c == c;
+    if (tv != 0 && !above && !waited) {
+        // On the screen, below the reading line: in place.
+        esv_fill(c, tv, !moving)
+    } else if (moving) {
+        // (Above the reading line, or above the screen: at rest.)
+        if (tv != 0 || above) esv_pend(c)
+    } else if (tv != 0 || waited) {
         measure_place();
         pc: int = cur;
         pv: int = place_v;
         pf: int = place_frac;
         before: f64 = esv_fixed_line(c);
-        fade_layer(msg(tv, sel("layer")), 0.2f64);
-        msg1(tv, sel("setAttributedText:"), chapter_text(c));
-        esv_dress(tv, c);
-        msg1(cls("UIView"), sel("setAnimationsEnabled:"), 0);
-        msg(table, sel("beginUpdates"));
-        msg(table, sel("endUpdates"));
-        msg1(cls("UIView"), sel("setAnimationsEnabled:"), 1);
+        if (tv != 0) esv_fill(c, tv, false);
         msg(table, sel("layoutIfNeeded"));
         if (esv_wait_c == c) {
             esv_wait_c = -1;
@@ -682,21 +783,113 @@ esv_arrived(c: int) {
         } else go_place(pc, pv, pf);
         note_num("bible: esv fixed line before ", before as int);
         note_num("bible: esv fixed line after ", esv_fixed_line(c) as int)
-    } else if (esv_wait_c == c) {
-        esv_wait_c = -1;
-        go_place(c, esv_wait_v, esv_wait_f)
-    } else if (esv_jump_c == c) {
-        esv_jump_c = -1;
-        go_verse(c, esv_jump_v);
-        flash(c, esv_jump_v)
-    }
+    } else if (above) esv_pend(c);
+    if (moving) esv_refresh_due = true else esv_refresh_others(c);
     esv_visible_now()
+}
+
+// Row c's text set where it is (a 0.2 s cross-fade), and its height taken:
+// with the system's animation (at rest, below the reading line) or none.
+esv_fill(c: int, tv: int, animated: bool) {
+    l8_msg_hfa(hfa, table, sel("rectForRowAtIndexPath:"), chapter_path(c), 0, 0);
+    h0: f64 = hfa[3];
+    fade_layer(msg(tv, sel("layer")), 0.2f64);
+    msg1(tv, sel("setAttributedText:"), chapter_text(c));
+    esv_dress(tv, c);
+    if (!animated) msg1(cls("UIView"), sel("setAnimationsEnabled:"), 0);
+    msg(table, sel("beginUpdates"));
+    msg(table, sel("endUpdates"));
+    if (!animated) msg1(cls("UIView"), sel("setAnimationsEnabled:"), 1);
+    l8_msg_hfa(hfa, table, sel("rectForRowAtIndexPath:"), chapter_path(c), 0, 0);
+    h1: f64 = hfa[3];
+    esv_learn(c);
+    note_num("bible: esv row ", c);
+    note_num("bible:   placeholder ", h0 as int);
+    note_num("bible:   filled ", h1 as int)
+}
+
+// The reader at rest: the rows that came while it moved swapped in, once,
+// the place kept; the others' text given again; the window's next asked.
+esv_rest() {
+    if (text_cur != TEXT_ESV || table == 0) return;
+    if (esv_pending_n > 0) {
+        measure_place();
+        pc: int = cur;
+        pv: int = place_v;
+        pf: int = place_frac;
+        before: f64 = esv_fixed_line(esv_pending[0]);
+        msg1(cls("UIView"), sel("setAnimationsEnabled:"), 0);
+        for i in 0..esv_pending_n {
+            c: int = esv_pending[i];
+            tv: int = view_of(c);
+            if (tv != 0) {
+                fade_layer(msg(tv, sel("layer")), 0.2f64);
+                msg1(tv, sel("setAttributedText:"), chapter_text(c));
+                esv_dress(tv, c);
+                esv_learn(c)
+            }
+        }
+        msg(table, sel("beginUpdates"));
+        msg(table, sel("endUpdates"));
+        msg1(cls("UIView"), sel("setAnimationsEnabled:"), 1);
+        msg(table, sel("layoutIfNeeded"));
+        go_place(pc, pv, pf);
+        note_num("bible: esv fixed line before ", before as int);
+        note_num("bible: esv fixed line after ", esv_fixed_line(esv_pending[0]) as int);
+        esv_pending_n = 0
+    }
+    if (esv_refresh_due) {
+        esv_refresh_due = false;
+        esv_refresh_others(-1)
+    }
+}
+
+// The ESV's height against the BSB's, learned at each fill (below the
+// opener and without the footer): their mean, kept, within 0.9 to 1.1.
+esv_learn(c: int) {
+    if (esv_h[c] <= 0.0f64 || esv_open_h[c] <= 0.0f64) return;
+    bsb_text: f64 = esv_h[c] - esv_open_h[c];
+    if (bsb_text < 100.0f64) return;
+    esv_text: f64 = esv_height_of(chapter_text(c)) - esv_open_h[c] - esv_footer_h();
+    compute_ranges(c);
+    r: f64 = esv_text / bsb_text;
+    if (r < 0.5f64 || r > 2.0f64) return;
+    n: int = def_int("esvRatioN");
+    mean: f64 = esv_ratio();
+    mean = (mean * n as f64 + r) / (n + 1) as f64;
+    set_def_int("esvRatioN", n + 1);
+    set_def_int("esvRatio", (mean * 10000.0f64) as int)
+}
+
+esv_ratio(): f64 {
+    k: int = def_int("esvRatio");
+    r: f64 = if (k <= 0) 1.0f64 else k as f64 / 10000.0f64;
+    if (r < 0.9f64) 0.9f64 else if (r > 1.1f64) 1.1f64 else r
+}
+
+// The footer's height ("(ESV) · esv.org" and its space), measured once a
+// size and width.
+esv_footer_key: f64 = 0.0f64;
+
+esv_footer_height: f64 = 0.0f64;
+
+esv_footer_h(): f64 {
+    key: f64 = em * 10000.0f64 + view_width(table);
+    if (key == esv_footer_key) return esv_footer_height;
+    esv_footer_key = key;
+    a: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    esv_put(a, nsstring("x"), em, c_ink, 0, 0.0f64);
+    h0: f64 = esv_height_of(a);
+    esv_footer(a);
+    esv_footer_height = esv_height_of(a) - h0;
+    esv_footer_height
 }
 
 // The other ESV rows on the screen given their text again (the same
 // words: text 5 was made again, and a footnote's mark says where its note is
 // in it).
 esv_refresh_others(c: int) {
+    if (table == 0) return;
     paths: int = msg(table, sel("indexPathsForVisibleRows"));
     if (paths == 0) return;
     for i in 0..msg(paths, sel("count")) {
@@ -936,7 +1129,11 @@ esv_placeholder(s: int, c: int) {
     }
     // (The space: one invisible line, as tall as the rest of the BSB's
     // chapter.)
-    pad: f64 = esv_bsb_height(c) - esv_height_of(s);
+    // (The BSB's text below the opener, scaled by what the ESV's has been
+    // to it, and the footer the filled row will have: the fill changes the
+    // row by a few lines at most.)
+    bsb_h: f64 = esv_bsb_height(c);
+    pad: f64 = (bsb_h - esv_open_h[c]) * esv_ratio() + esv_footer_h() - (esv_height_of(s) - esv_open_h[c]);
     if (pad < 96.0f64) pad = 96.0f64;
     p: int = msg(para_style(1, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 1.0f64), sel("autorelease"));
     msg_set_f(p, sel("setMinimumLineHeight:"), pad);
