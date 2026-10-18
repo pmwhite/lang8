@@ -31,6 +31,27 @@ for (const name of ["touchstart", "touchmove"]) {
 }
 const touch = matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
 
+// A soft low tone: a drop that does not fit (after a first touch, as
+// browsers allow sound only then).
+let audio = null;
+function tone() {
+  try {
+    audio = audio || new AudioContext();
+    const t = audio.currentTime;
+    const osc = audio.createOscillator();
+    const gain = audio.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(196, t);
+    osc.frequency.exponentialRampToValueAtTime(150, t + 0.16);
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.08, t + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.2);
+    osc.connect(gain).connect(audio.destination);
+    osc.start(t);
+    osc.stop(t + 0.22);
+  } catch (_e) {}
+}
+
 async function main() {
   const params = new URLSearchParams(location.search);
   const fresh = params.has("fresh");
@@ -51,7 +72,8 @@ async function main() {
       // (The game asks for a short buzz as a move lands: "@vibrate MS".)
       if (line.startsWith("@vibrate ")) {
         if (navigator.vibrate) navigator.vibrate(Number(line.slice(9)) || 8);
-      } else console.log(line);
+      } else if (line.startsWith("@tone")) tone();
+      else console.log(line);
     }
   };
   const sys = fs.sys(["lemma", PROGRESS]);

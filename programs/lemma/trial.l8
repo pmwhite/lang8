@@ -1,0 +1,392 @@
+tag lemma_ui;
+
+use_tag std, skate, lemma;
+
+// What a move made: it is tried (or made) and read off the proof, to stage
+// what it closed (the goal as the move left it, the fact that closed it, a
+// split's two parts). And which facts are in play: those not touched
+// lately are shown small. And the dead ends of Limits.
+
+// The term at a path (raw: under a binder, its bound names left bound).
+raw_at(
+    t: int,
+    steps: []int,
+    from: int,
+    n: int
+): int {
+    s: int = t;
+    for i in 0..n {
+        st: int = steps[from + i];
+        k: int = tm_kind(s);
+        if (st == P_FUN && k == TM_APP) s = tm_fun(s) else if (st == P_ARG && k == TM_APP) s = tm_arg(s) else if (st == P_BODY && k == TM_ABS) s = tm_body(s) else return 0
+    }
+    s
+}
+
+// How many nodes a term has (how big it is).
+term_size(t: int): int {
+    k: int = tm_kind(t);
+    if (k == TM_APP) return 1 + term_size(tm_fun(t)) + term_size(tm_arg(t));
+    if (k == TM_ABS) return 1 + term_size(tm_body(t));
+    1
+}
+
+// ---- a move tried, and taken back ----
+// What it gave: a fingerprint of the goals it leaves (equal moves give
+// equal ones), what to show (the statement as it will be, or the new
+// fact; a second goal or fact), its changed part, and whether it closes
+// the goal.
+tr_sig: int = 0;
+
+tr_res: int = 0;
+
+tr_res2: int = 0;
+
+tr_fact: bool = false;
+
+tr_fact2: bool = false;
+
+tr_hl: int = 0;
+
+tr_closes: bool = false;
+
+// Whether what it gives is parts each closed (shown ticked).
+tr_ticks: bool = false;
+
+tr_calc: bool = false;
+
+// Whether a move that closes the goal at once shows the fact it gave (a
+// chip's row) rather than the goal closed.
+tr_want_fact: bool = false;
+
+// Candidate c tried at node n, with its witnesses: whether the kernel took
+// it. The proof is as it was afterwards.
+trial(
+    n: int,
+    c: int,
+    wits: []int,
+    wn: int
+) raises KernelError: bool {
+    s_pn: int = pn_n;
+    s_gl: int = gl_n;
+    s_gp: int = gpool_n;
+    s_kp: int = kpool_n;
+    s_mv: int = mv_n;
+    s_last: int = last_move;
+    ok: bool = true;
+    try {
+        last_move = cand_apply(n, c, wits, wn);
+        auto_close()
+    } with KernelError -> {
+        ok = false
+    }
+    if (ok) trial_read(n, c);
+    reopen(n);
+    // (The lists a goal is made from are left as they were: a fresh name
+    // is fresh in the goal, not in the goal tried.)
+    nf_n = 0;
+    nh_n = 0;
+    pn_n = s_pn;
+    gl_n = s_gl;
+    gpool_n = s_gp;
+    kpool_n = s_kp;
+    mv_n = s_mv;
+    last_move = s_last;
+    ok
+}
+
+// The goals left under node n (open leaves), into tl_.
+tl_node: []int = new int[64](0);
+
+tl_n: int = 0;
+
+open_under(n: int) {
+    if (pn_thm[n] != 0) return;
+    if (pn_move[n] < 0) {
+        if (tl_n < len(tl_node)) {
+            tl_node[tl_n] = n;
+            tl_n = tl_n + 1
+        }
+        return
+    }
+    for i in 0..pn_kidn[n] open_under(node_kid(n, i))
+}
+
+// Whether a leaf under n was closed by Calculate.
+calc_under(n: int): bool {
+    m: int = pn_move[n];
+    if (m < 0) return false;
+    if (mv_kind[m] == MV_CALC) return true;
+    for i in 0..pn_kidn[n] {
+        if (calc_under(node_kid(n, i))) return true
+    }
+    false
+}
+
+// What node n's move (candidate c) gave, read off the proof; a move that
+// closes the goal shows what it closed as: the goal as the move left it
+// (c = c, both sides the same; struck through if arithmetic closed it).
+trial_read(n: int, c: int) raises KernelError {
+    trial_read0(n, c);
+    tr_strike = false;
+    tr_same = false;
+    if (!tr_closes || tr_ticks) return;
+    // (A chip: the fact its term gives, though it closes the goal at once.)
+    if (tr_want_fact && tr_fact && tr_res != 0) return;
+    if (tr_res == 0 && cd_kind[c] == C_BACK && cd_hyp[c] >= 0 && pn_kidn[n] == 0) {
+        // (A fact taken apart into just the goal: the goal, as a new fact.)
+        tr_res = gl_concl[pn_goal[n]];
+        tr_fact = true;
+        return
+    }
+    if (tr_res == 0 || !tr_fact && tr_res == gl_concl[pn_goal[n]]) {
+        tr_res = closed_shown(n);
+        tr_res2 = 0;
+        tr_fact = false;
+        tr_fact2 = false
+    }
+    if (tr_fact) return;
+    tr_strike = tr_calc;
+    q: int = rel_core(tr_res);
+    if (is_binary(q, role_name[ROLE_EQ]) && spine_arg(q, 2, 0) == spine_arg(q, 2,
+        1)) {
+        tr_same = true;
+        tr_hl = 0
+    }
+}
+
+// The fact a move at node n gave, in a goal under it that still shows
+// goal g (its main goal, not a side condition), or 0.
+fact_given(n: int, g: int): int {
+    if (pn_move[n] < 0 || pn_kidn[n] == 0) {
+        kg: int = pn_goal[n];
+        if (gl_concl[kg] != gl_concl[g]) return 0;
+        r: int = 0;
+        for j in 0..gl_hypn[kg] {
+            h: int = goal_hyp(kg, j);
+            if (!goal_has_hyp(g, h)) r = h
+        }
+        return r
+    }
+    for i in 0..pn_kidn[n] {
+        r: int = fact_given(node_kid(n, i), g);
+        if (r != 0) return r
+    }
+    0
+}
+
+// A side condition the move tried leaves open (another goal than the
+// goal), or 0.
+tr_need: int = 0;
+
+// Whether the move tried has holes for its terms.
+tr_holed: bool = false;
+
+// Whether what a closing move gives is struck through (arithmetic closed
+// it), or an equation with its two sides the same (shown gold).
+tr_strike: bool = false;
+
+tr_same: bool = false;
+
+// The goal a move at node n closed, as it is shown closing: the last goal
+// under n it proved (what a rewrite made it, a fact it matched, or
+// arithmetic's), into closed_leaf; a goal a rule matched whole is shown as
+// its smaller side twice.
+closed_leaf: int = -1;
+
+closed_shown(n: int) raises KernelError: int {
+    lf_n = 0;
+    leaves(n);
+    leaf: int = n;
+    for i in 0..lf_n {
+        if (pn_thm[lf_node[i]] != 0 && !quiet_leaf(lf_node[i])) leaf = lf_node[i]
+    }
+    closed_leaf = leaf;
+    t: int = gl_concl[pn_goal[leaf]];
+    q: int = rel_core(t);
+    if (leaf == n && is_binary(q, role_name[ROLE_EQ]) && spine_arg(q, 2, 0) != spine_arg(q,
+        2, 1)) {
+        sl: int = spine_arg(q, 2, 0);
+        if (term_size(spine_arg(q, 2, 1)) < term_size(sl)) sl = spine_arg(q, 2, 1);
+        return mk_app(mk_app(spine_head(q), sl), sl)
+    }
+    t
+}
+
+trial_read0(n: int, c: int) raises KernelError {
+    g: int = pn_goal[n];
+    tr_closes = pn_thm[n] != 0;
+    tr_calc = tr_closes && calc_under(n);
+    tr_res = 0;
+    tr_res2 = 0;
+    tr_fact = false;
+    tr_fact2 = false;
+    tr_hl = 0;
+    tl_n = 0;
+    open_under(n);
+    sig: int = 7;
+    for i in 0..tl_n sig = (sig * 1000003 + goal_prop(pn_goal[tl_node[i]])) % 2147483647;
+    if (tl_n == 0) sig = 1;
+    tr_sig = sig;
+    // (A goal left that is not the goal: a side condition still open.)
+    tr_need = 0;
+    for i in 0..tl_n {
+        cg: int = gl_concl[pn_goal[tl_node[i]]];
+        if (cg != gl_concl[g] && tr_need == 0) tr_need = cg
+    }
+    tr_ticks = false;
+    if ((tr_holed || tr_want_fact) && cd_kind[c] != C_REWRITE) {
+        // (A move tried with a hole for its term, or a term picked: the
+        // fact it gives (with the hole); not its side condition, which
+        // arithmetic closes once the term is there.)
+        tr_res = fact_given(n, g);
+        if (tr_res != 0) {
+            tr_fact = true;
+            return
+        }
+    }
+    sc: int = rel_core(gl_concl[g]);
+    if (tl_n == 0 && cd_label[c] == sym("Split") && spine_len(sc) == 2) {
+        // (Split, both parts known: each part, ticked.)
+        tr_res = spine_arg(sc, 2, 0);
+        tr_res2 = spine_arg(sc, 2, 1);
+        tr_ticks = true;
+        return
+    }
+    kg: int = 0;
+    if (tl_n > 0) kg = pn_goal[tl_node[0]] else if ((cd_kind[c] == C_REWRITE || tr_want_fact) && pn_kidn[n] > 0) kg = pn_goal[node_kid(n,
+        0)] else return;
+    if (cd_kind[c] == C_REWRITE) {
+        steps_n: int = cd_pathn[c];
+        if (cd_in[c] >= 0 && cd_in[c] < gl_hypn[kg]) {
+            tr_res = goal_hyp(kg, cd_in[c]);
+            tr_fact = true
+        } else tr_res = gl_concl[kg];
+        tr_hl = raw_at(tr_res, cpool, cd_path0[c], steps_n);
+        return
+    }
+    // (A new fact: the last the move brought in.)
+    newh: int = 0;
+    for i in 0..gl_hypn[kg] {
+        h: int = goal_hyp(kg, i);
+        if (!goal_has_hyp(g, h)) newh = h
+    }
+    if (gl_concl[kg] != gl_concl[g]) {
+        tr_res = gl_concl[kg];
+        tr_res2 = newh;
+        tr_fact2 = newh != 0
+    } else {
+        tr_res = newh;
+        tr_fact = true;
+        if (newh == 0) tr_res = gl_concl[kg]
+    }
+    if (tl_n > 1) {
+        tr_res2 = gl_concl[pn_goal[tl_node[1]]];
+        tr_fact2 = false
+    }
+}
+
+// ---- a dead end in Limits ----
+// Whether node n's goal is a dead end the player made: off the written
+// proof, a comparison of whole numbers only (N₁ ≤ n) that arithmetic does
+// not close from the facts (else it would be closed), or any comparison a
+// use of a fact for every ε > 0 left as its side condition (A > 0). No
+// gesture opens such a goal (it has no key, and the region's rules are
+// arithmetic's), and only facts about the indices could help it, of which
+// it has all there are.
+goal_dead(n: int): bool {
+    if (!region_calc || on_path >= moves_made) return false;
+    g: int = pn_goal[n];
+    c: int = rel_core(gl_concl[g]);
+    if (!(is_role(c, CR_LT, 2) || is_role(c, CR_LE, 2) || is_role(c, CR_NLE, 2))) return false;
+    index_only(c) || use_with_side(n)
+}
+
+// Whether node n is the side condition a use left (not the goal it was
+// made on).
+use_with_side(n: int): bool {
+    p: int = pn_parent[n];
+    if (p < 0) return false;
+    m: int = pn_move[p];
+    if (m < 0) return false;
+    l: int = mv_lemma[m];
+    if (l < 0 || lm_words[l] != sym("Use with _")) return false;
+    gl_concl[pn_goal[n]] != gl_concl[pn_goal[p]]
+}
+
+// Whether t's names are all whole numbers (no real, no sequence).
+index_only(t: int): bool {
+    k: int = tm_kind(t);
+    if (k == TM_FREE) {
+        ty: int = tm_type(t);
+        // (An operation (≤, max) is fixed too: not a sequence.)
+        if (ty_kind(ty) == TY_FUN) return !sub_type(ty);
+        return !is_real_type(ty)
+    }
+    if (k == TM_APP) return index_only(tm_fun(t)) && index_only(tm_arg(t));
+    if (k == TM_ABS) return false;
+    true
+}
+
+// How many undos get back to where the proof went wrong: back on the
+// written proof's path (1 if it is not known).
+dead_undo_k(): int {
+    if (on_path < moves_made) return moves_made - on_path;
+    1
+}
+
+// ---- facts not touched lately (shown small) ----
+ft_term: []int = new int[256](0);
+
+ft_move: []int = new int[256](0);
+
+ft_used: []bool = new bool[256](false);
+
+ft_n: int = 0;
+
+touch_fact(h: int) {
+    for i in 0..ft_n {
+        if (ft_term[i] == h) {
+            ft_move[i] = moves_made;
+            return
+        }
+    }
+    if (ft_n < len(ft_term)) {
+        ft_term[ft_n] = h;
+        ft_move[ft_n] = moves_made;
+        ft_used[ft_n] = false;
+        ft_n = ft_n + 1
+    }
+}
+
+// Fact h used by a move (it is squeezed small once the next move is made).
+use_fact(h: int) {
+    touch_fact(h);
+    for i in 0..ft_n {
+        if (ft_term[i] == h) ft_used[i] = true
+    }
+}
+
+// Whether fact h has been used, and a move made since: one small line.
+fact_squeezed(h: int): bool {
+    for i in 0..ft_n {
+        if (ft_term[i] == h) return ft_used[i] && moves_made - ft_move[i] >= 1
+    }
+    false
+}
+
+// Whether fact h has not been touched for three moves (two with five
+// facts or more, one with seven: a crowded board keeps only what is in
+// play full size, and the goal in sight).
+fact_quiet(h: int): bool {
+    quiet: int = 3;
+    n: int = play_node();
+    if (n >= 0) {
+        if (gl_hypn[pn_goal[n]] >= 7) quiet = 1 else if (gl_hypn[pn_goal[n]] >= 5) quiet = 2
+    }
+    for i in 0..ft_n {
+        if (ft_term[i] == h) return moves_made - ft_move[i] >= quiet
+    }
+    touch_fact(h);
+    false
+}

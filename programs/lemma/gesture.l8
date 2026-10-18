@@ -26,6 +26,23 @@ const SH_AND: int = 3;
 
 const SH_IMP: int = 4;
 
+// (A defined name at the top, a → A: it opens to its definition.)
+const SH_DEF: int = 5;
+
+// The definition statement t's head opens by (a lemma), or -1.
+def_of(t: int): int {
+    c: int = rel_core(t);
+    h: int = spine_head(c);
+    if (tm_kind(h) != TM_FREE && tm_kind(h) != TM_CONST) return -1;
+    for l in 0..lm_n {
+        if (lm_kind[l] == LM_DEF && lemma_offered(l)) {
+            d: int = spine_head(lhs_of(thm_prop(lm_thm[l])));
+            if ((tm_kind(d) == TM_FREE || tm_kind(d) == TM_CONST) && tm_name(d) == tm_name(h)) return l
+        }
+    }
+    -1
+}
+
 // The shape of a statement: its outermost symbol.
 shape_of(t: int): int {
     c: int = rel_core(t);
@@ -36,6 +53,7 @@ shape_of(t: int): int {
     }
     if (is_binary(c, role_name[ROLE_CONJ])) return SH_AND;
     if (is_binary(c, role_name[ROLE_IMP])) return SH_IMP;
+    if (def_of(t) >= 0) return SH_DEF;
     SH_NONE
 }
 
@@ -44,10 +62,10 @@ gs_has_key(n: int, j: int): bool {
     g: int = pn_goal[n];
     if (j < 0) {
         s: int = shape_of(gl_concl[g]);
-        return s == SH_ALL || s == SH_AND || s == SH_IMP
+        return s == SH_ALL || s == SH_AND || s == SH_IMP || s == SH_DEF
     }
     s: int = shape_of(goal_hyp(g, j));
-    s == SH_EX || s == SH_AND
+    s == SH_EX || s == SH_AND || s == SH_DEF
 }
 
 gs_has_notch(n: int, j: int): bool {
@@ -116,6 +134,9 @@ lemma_named(name: str): int {
 gs_key(n: int, j: int) raises KernelError: bool {
     if (n < 0 || !gs_has_key(n, j)) return false;
     g: int = pn_goal[n];
+    t0: int = gl_concl[g];
+    if (j >= 0) t0 = goal_hyp(g, j);
+    if (shape_of(t0) == SH_DEF) return gs_open_def(n, j);
     if (j < 0) {
         c: int = rel_core(gl_concl[g]);
         s: int = shape_of(c);
@@ -142,12 +163,44 @@ gs_key(n: int, j: int) raises KernelError: bool {
     gs_rule(n, lemma_named("conjE"), j, false, 0)
 }
 
-// Name t dropped into the notch of the goal (j < 0) or of fact j.
+// The definition at the top of the goal (j < 0) or of fact j opened.
+gs_open_def(n: int, j: int): bool {
+    gs_c = -1;
+    cands_clear();
+    cands_open_defs(n, j);
+    if (cd_n == 0) return false;
+    ok: bool = true;
+    try {
+        last_move = cand_apply(n, 0, gs_wits, 0);
+        auto_close()
+    } with KernelError -> {
+        ok = false
+    }
+    if (ok) gs_c = 0;
+    ok
+}
+
+// Name t dropped into the notch of the goal (j < 0) or of fact j. A fact
+// for every x with a condition (∀ε>0., ∀n≥N.) is used with its condition
+// at once: arithmetic closes it, or it is a goal of its own.
 gs_notch(n: int, j: int, t: int) raises KernelError: bool {
     if (n < 0 || t == 0 || !gs_has_notch(n, j)) return false;
     gs_wits[0] = t;
     if (j < 0) return gs_rule(n, lemma_named("exI"), -1, false, 1);
+    if (bounded_all(goal_hyp(pn_goal[n], j)) && gs_rule(n, lemma_named("spec_mp"),
+        j, true, 1)) return true;
+    gs_wits[0] = t;
     gs_rule(n, lemma_named("spec"), j, true, 1)
+}
+
+// Whether t says something of every x with a condition (∀ε>0. ...).
+bounded_all(t: int): bool {
+    c: int = rel_core(t);
+    if (shape_of(c) != SH_ALL) return false;
+    f: int = tm_arg(c);
+    if (tm_kind(f) != TM_ABS) return false;
+    b: int = tm_body(f);
+    is_binary(b, role_name[ROLE_IMP]) && bounded_cond(spine_arg(b, 2, 0))
 }
 
 // ---- a fact put onto the goal ----
@@ -158,7 +211,7 @@ apply_ok(c: int, h: int): bool {
     if (cd_kind[c] != C_BACK) return false;
     l: int = cd_lemma[c];
     if (l < 0) return true;
-    if (lm_name[l] == sym("FalseE")) return true;
+    if (lm_name[l] == sym("FalseE") || lm_name[l] == sym("notE")) return true;
     q: int = strip_rule(thm_prop(lm_thm[l]));
     if (!loose_pattern(q)) return true;
     if (prem_n == 0) return false;
@@ -290,12 +343,205 @@ gs_apply(n: int, j: int, t: int) raises KernelError: bool {
     false
 }
 
+// ---- an equation's face put onto a part: like on like ----
+// An equation is a tile with two faces (a rule of the rulebook, a lemma, a
+// fact): one face, gripped, put onto a part of the goal that looks like
+// it, turns the part into the other face. The tile: rule or lemma gf_l
+// (>= 0), else fact gf_j; the face gripped (gf_back: its right side); the
+// part (its path, gf_steps). A face that grows (e to □⁻¹ · □) needs a name
+// for what nothing fixes: t (0 if none).
+gf_l: int = -1;
+
+gf_j: int = -1;
+
+gf_back: bool = false;
+
+gf_steps: []int = new int[256](0);
+
+gf_n: int = 0;
+
+// The rewrite the face is at node n (in the cd_ tables), with wn names, or -1.
+gs_face_cand(n: int, wn: int): int {
+    g: int = pn_goal[n];
+    sub_n = gf_n;
+    for i in 0..gf_n sub_steps[i] = gf_steps[i];
+    eqh: int = 0;
+    if (gf_l < 0) {
+        if (gf_j < 0 || gf_j >= gl_hypn[g]) return -1;
+        eqh = goal_hyp(g, gf_j)
+    }
+    ok: bool = true;
+    try {
+        cands_sub(n, -1)
+    } with KernelError -> {
+        ok = false
+    }
+    if (!ok) return -1;
+    for c in 0..cd_n {
+        if (cd_kind[c] == C_REWRITE && cd_back[c] == gf_back && cd_lemma[c] == gf_l && (gf_l >= 0 || cd_eqh[c] == eqh) && (wn < 0 || cd_wn[c] == wn)) return c
+    }
+    -1
+}
+
+// How many names the face put there still needs (0 or 1), or -1 if it does
+// not fit.
+gs_face_wn(n: int) raises KernelError: int {
+    if (n < 0 || pn_move[n] >= 0) return -1;
+    if (gf_l < 0 && gf_j >= 0 && gf_j < gl_hypn[pn_goal[n]] && shape_of(goal_hyp(pn_goal[n],
+        gf_j)) == SH_ALL) {
+        if (gs_face_name(n) != 0) return 0;
+        return -1
+    }
+    c: int = gs_face_cand(n, -1);
+    if (c < 0) return -1;
+    cd_wn[c]
+}
+
+gs_face(n: int, t: int) raises KernelError: bool {
+    gs_c = -1;
+    if (n < 0 || pn_move[n] >= 0) return false;
+    g: int = pn_goal[n];
+    if (gf_l < 0 && gf_j >= 0 && gf_j < gl_hypn[g] && shape_of(goal_hyp(g, gf_j)) == SH_ALL) return gs_face_all(n);
+    wn: int = 0;
+    if (t != 0) wn = 1;
+    c: int = gs_face_cand(n, wn);
+    if (c < 0) return false;
+    gs_wits[0] = t;
+    ok: bool = true;
+    try {
+        last_move = cand_apply(n, c, gs_wits, wn);
+        auto_close()
+    } with KernelError -> {
+        ok = false
+    }
+    if (ok) gs_c = c;
+    ok
+}
+
+// A name standing for the one still to choose, in a face's preview: □.
+gs_hole(n: int) raises KernelError: int {
+    c: int = gs_face_cand(n, 1);
+    if (c < 0) return 0;
+    ty: int = cand_witness_type(c, 0);
+    if (ty == 0) return 0;
+    mk_free(sym_cp(9633), ty)
+}
+
+// A face of fact gf_j, an equation for every x (∀x. f · x = x): what x
+// the part makes it (0 if the face does not fit there).
+gs_face_name(n: int) raises KernelError: int {
+    g: int = pn_goal[n];
+    f: int = tm_arg(rel_core(goal_hyp(g, gf_j)));
+    if (tm_kind(f) != TM_ABS) return 0;
+    q: int = rel_core(open_abs(f, mk_var(tm_abs_hint(f), tm_abs_type(f))));
+    if (!is_binary(q, role_name[ROLE_EQ])) return 0;
+    face: int = spine_arg(q, 2, 0);
+    if (gf_back) face = spine_arg(q, 2, 1);
+    rw_n = gf_n;
+    for i in 0..gf_n rw_steps[i] = gf_steps[i];
+    if (rw_under_binder()) return 0;
+    s: int = rw_sub(gl_concl[g], g);
+    match_clear();
+    if (!match_term(face, s)) return 0;
+    vars_n = 0;
+    collect_vars(face);
+    if (vars_n != 1) return 0;
+    match_val(vars[0])
+}
+
+// The fact used with that x, then the part rewritten by what it gives (one
+// gesture: the rewrite is the game's own move).
+gs_face_all(n: int) raises KernelError: bool {
+    x: int = gs_face_name(n);
+    if (x == 0) return false;
+    j: int = gf_j;
+    back: bool = gf_back;
+    gs_save();
+    if (!gs_notch(n, j, x)) {
+        gs_restore(n);
+        return false
+    }
+    c0: int = gs_c;
+    if (pn_thm[n] != 0) {
+        gsv_n = gsv_n - 1;
+        gs_c = c0;
+        return true
+    }
+    // (The goal left, with the instance among its facts.)
+    k: int = first_leaf(n);
+    ok: bool = false;
+    if (k >= 0) {
+        f: int = gs_new_fact(n, pn_goal[n]);
+        kg: int = pn_goal[k];
+        fj: int = -1;
+        for i in 0..gl_hypn[kg] {
+            if (goal_hyp(kg, i) == f) fj = i
+        }
+        if (fj >= 0) {
+            gf_l = -1;
+            gf_j = fj;
+            m0: int = mv_n;
+            ok = gs_face(k, 0);
+            if (ok && mv_n > m0) mv_auto[mv_n - 1] = true;
+            gf_j = j;
+            gf_back = back
+        }
+    }
+    if (!ok) {
+        gs_restore(n);
+        return false
+    }
+    gsv_n = gsv_n - 1;
+    gs_c = c0;
+    true
+}
+
+// The first open goal under node n, or -1.
+first_leaf(n: int): int {
+    gl_leaf_n = 0;
+    gs_leaves(n);
+    if (gl_leaf_n == 0) return -1;
+    gl_leaf[0]
+}
+
+// ---- the goal itself: flipped (swiped), put into the facts (Suppose
+// not), a lemma put onto it ----
+gs_flip(n: int) raises KernelError: bool {
+    if (n < 0) return false;
+    if (!is_binary(rel_core(gl_concl[pn_goal[n]]), role_name[ROLE_EQ])) return false;
+    gs_rule(n, lemma_named("sym"), -1, false, 0)
+}
+
+gs_suppose(n: int) raises KernelError: bool {
+    if (n < 0) return false;
+    c: int = rel_core(gl_concl[pn_goal[n]]);
+    if (tm_kind(c) == TM_CONST && tm_name(c) == role_name[ROLE_FALSE]) return false;
+    gs_rule(n, lemma_named("ccontr"), -1, false, 0)
+}
+
+// Lemma l (a theorem proved, or a rule with premises) put onto the goal:
+// its conclusion the goal, its premises what is left.
+gs_lemma(n: int, l: int) raises KernelError: bool {
+    if (n < 0 || l < 0 || !lemma_offered(l)) return false;
+    gs_rule(n, l, -1, false, 0)
+}
+
 // ---- a gesture by its kind ----
 const GS_KEY: int = 1;
 
 const GS_NOTCH: int = 2;
 
 const GS_APPLY: int = 3;
+
+// (A face onto a part: the tile and the part in gf_.)
+const GS_FACE: int = 4;
+
+const GS_FLIP: int = 5;
+
+const GS_SUPPOSE: int = 6;
+
+// (A lemma's tile onto the goal: j is the lemma.)
+const GS_LEMMA: int = 7;
 
 gs_do(
     n: int,
@@ -306,7 +552,102 @@ gs_do(
     if (kind == GS_KEY) return gs_key(n, j);
     if (kind == GS_NOTCH) return gs_notch(n, j, t);
     if (kind == GS_APPLY) return gs_apply(n, j, t);
+    if (kind == GS_FACE) return gs_face(n, t);
+    if (kind == GS_FLIP) return gs_flip(n);
+    if (kind == GS_SUPPOSE) return gs_suppose(n);
+    if (kind == GS_LEMMA) return gs_lemma(n, j);
     false
+}
+
+// ---- the book's steps as gestures ----
+// The written proof's step k at node n as the gesture a player makes: its
+// kind, fact (or lemma), and name (bg_kind, bg_j, bg_t; a face's tile and
+// part in gf_). Whether it is one. Steps written as buttons' words (goal
+// "Take any ε", part "e" "□⁻¹ · □" with "a") are read the same way: the
+// move the words name, made by the gesture that makes it.
+bg_kind: int = 0;
+
+bg_j: int = -1;
+
+bg_t: int = 0;
+
+book_gesture(k: int, n: int) raises KernelError: bool {
+    if (k < 0 || k >= st_n || n < 0) return false;
+    s: int = st_kind[k];
+    bg_j = st_hyp[k];
+    bg_t = 0;
+    if (s >= ST_OPEN) {
+        bg_kind = GS_KEY;
+        if (s == ST_DROP) bg_kind = GS_NOTCH;
+        if (s == ST_APPLY) bg_kind = GS_APPLY;
+        if (st_w1[k] != 0) bg_t = witness_sym(n, st_w1[k], 0);
+        return true
+    }
+    if (s == 3) return false;
+    g: int = pn_goal[n];
+    if (bg_j >= gl_hypn[g]) return false;
+    if (s == 2) {
+        target: int = gl_concl[g];
+        if (bg_j >= 0) target = goal_hyp(g, bg_j);
+        if (!find_part_text(target, st_part[k])) return false;
+        sub_n = fp_n;
+        for i in 0..fp_n sub_steps[i] = fp_steps[i];
+        cands_sub(n, bg_j)
+    } else if (s == 1) cands_hyp(n, bg_j) else cands_goal(n);
+    c: int = -1;
+    for i in 0..cd_shown {
+        if (cd_label[cd_order[i]] == st_label[k]) c = cd_order[i]
+    }
+    if (c < 0) return false;
+    if (cd_wn[c] > 0) bg_t = witness_sym(n, st_w1[k], cand_witness_type(c, 0));
+    l: int = cd_lemma[c];
+    if (cd_kind[c] == C_REWRITE) {
+        if (l >= 0 && lm_kind[l] == LM_DEF) {
+            bg_kind = GS_KEY;
+            bg_j = cd_in[c];
+            return true
+        }
+        bg_kind = GS_FACE;
+        gf_l = l;
+        gf_j = -1;
+        if (l < 0) {
+            for i in 0..gl_hypn[g] {
+                if (goal_hyp(g, i) == cd_eqh[c]) gf_j = i
+            }
+        }
+        gf_back = cd_back[c];
+        gf_n = cd_pathn[c];
+        for i in 0..gf_n gf_steps[i] = cpool[cd_path0[c] + i];
+        return true
+    }
+    if (l < 0) {
+        bg_kind = GS_APPLY;
+        return true
+    }
+    w: int = lm_name[l];
+    if (w == sym("allI") || w == sym("allI_imp") || w == sym("conjI") || w == sym("impI") || w == sym("exE") || w == sym("conjE") || w == sym("conjunct1") || w == sym("conjunct2")) {
+        bg_kind = GS_KEY;
+        return true
+    }
+    if (w == sym("exI") || w == sym("spec") || w == sym("spec_mp")) {
+        bg_kind = GS_NOTCH;
+        return true
+    }
+    if (w == sym("sym")) {
+        bg_kind = GS_FLIP;
+        return true
+    }
+    if (w == sym("ccontr")) {
+        bg_kind = GS_SUPPOSE;
+        return true
+    }
+    if (bg_j < 0) {
+        bg_kind = GS_LEMMA;
+        bg_j = l;
+        return true
+    }
+    bg_kind = GS_APPLY;
+    true
 }
 
 // ---- trying a gesture, and taking it back ----

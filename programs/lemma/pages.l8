@@ -357,7 +357,8 @@ draw_node(
 // ---- a level ----
 // From the top: the bar (back, the rules, the title, the bulb, undo; under
 // the title the par dots and a pip for each goal), the picture, the facts
-// (newest at the bottom), the goal (pinned above the hand), and the hand.
+// (newest at the bottom), the goal (pinned above the shelf), and the
+// shelf (the names, the kit, the rules).
 // Where things were drawn, kept for what flies between them.
 goal_rx: f32 = 0.0;
 
@@ -376,10 +377,6 @@ fact_rw: f32 = 0.0;
 fact_rh: f32 = 0.0;
 
 fact_seen: bool = false;
-
-row_ry: []f32 = new f32[64](0.0);
-
-row_rh: []f32 = new f32[64](0.0);
 
 pip_x: []f32 = new f32[64](0.0);
 
@@ -426,10 +423,13 @@ draw_level() {
     if (intro_open && now_t - intro_t0 > 1.55) intro_open = false;
     hy: f32 = safe_top + 30.0;
     top: f32 = draw_level_bar(x, w, hy);
-    // (The hand first laid out: how tall it is says where the board ends.)
-    lang: bool = lang_on();
-    hand_h: f32 = 0.0;
-    if (lang) hand_h = shelf_height() else hand_h = hand_layout(w);
+    // (The shelf first laid out: how tall it is says where the board ends.)
+    if (done_t < 0.0) {
+        sn: int = play_node();
+        if (sn < 0) sn = n;
+        shelf_build(sn, x, w)
+    }
+    hand_h: f32 = shelf_height();
     hand_top: f32 = view_h() - safe_bottom - hand_h;
     // (Finished: the board stays where it was.)
     if (done_t >= 0.0) hand_top = hand_top_y;
@@ -439,21 +439,25 @@ draw_level() {
     if (deck < 0) deck = 0;
     g: int = 0;
     if (n >= 0) g = pn_goal[n];
-    // (The facts, laid out: how much room they want.)
-    // (Finished: the facts are put away under the trophy.)
+    // (The facts, laid out: how much room they want. Finished: they are
+    // put away under the trophy.)
     fn: int = 0;
     if (n >= 0 && (done_t < 0.0 || stg || fading)) fn = gl_hypn[g];
     if ((stg || fading) && stage_virtual) fn = fn + 1;
     gc: int = 0;
     if (n >= 0) gc = gl_concl[g];
     if (stg) gc = stage_concl;
-    if (lang && !stg) gc = lang_goal_term(gc);
+    real_gc: int = gc;
+    if (!stg) gc = lang_goal_term(gc);
+    live: bool = !stg && done_t < 0.0;
     fh: f32 = 0.0;
     for i in 0..fn {
         h: int = board_fact(g, i);
-        e: int = lay_fact(h, w);
-        if (lang && lang_previewing(i)) e = lay_term(lang_fact_term(i, h), 23.0, w - 32.0,
-            hyp_slot(h));
+        shown: int = h;
+        if (lang_previewing(i)) shown = lang_fact_term(i, h);
+        if (live) lay_notch_t = notch_term(n, i, shown);
+        e: int = lay_fact_of(h, shown, w);
+        lay_notch_t = 0;
         fact_e[i] = e;
         fh = fh + fact_card_h(h, e) + 8.0
     }
@@ -466,12 +470,14 @@ draw_level() {
     e_big: int = -1;
     e_small: int = -1;
     if (n >= 0) {
+        if (live) lay_notch_t = notch_term(n, -1, gc);
         e_big = lay_term(gc, 32.0, w - 40.0, SLOT_GOAL);
         gh_big = ex_h[e_big] + 30.0;
-        e_small = lay_term(gc, 23.0, w - 36.0, SLOT_GOAL);
-        gh_small = ex_h[e_small] + 24.0
+        e_small = lay_term(gc, 24.0, w - 36.0, SLOT_GOAL);
+        gh_small = ex_h[e_small] + 24.0;
+        lay_notch_t = 0
     }
-    // (Laid out from the bottom: the hand, the goal pinned just above it,
+    // (Laid out from the bottom: the shelf, the goal pinned just above it,
     // the facts above that; the picture, or in logic the level's words and
     // its tiles, has the room that is left.)
     say_s: int = 0;
@@ -542,8 +548,6 @@ draw_level() {
         y0 = area_top - sc_pos[V_LEVEL] + maxf(area_bot - area_top - fh, 0.0)
     }
     facts_seen_n = fn;
-    focus_s: int = focus_slot();
-    if (stg || lang) focus_s = -1;
     bf_n = 0;
     gk_ok = false;
     gn_ok = false;
@@ -551,6 +555,14 @@ draw_level() {
     y: f32 = y0;
     fact_seen = false;
     sf_seen = false;
+    // (The goal held up toward the facts: they glow, a place for it.)
+    if (dg_on && dg_kind == DG_GOAL && fn > 0) {
+        gg: f32 = 0.5 + 0.5 * sinf(now_t * 4.0);
+        a0: f32 = 0.1 + 0.1 * gg;
+        if (hv_kind == T_FACTS) a0 = 0.3;
+        p_shape(x - 4.0, y0 + 16.0, w + 8.0, fh - 16.0, 20.0, 10.0, 0.0, C_PICK, a0);
+        busy = true
+    }
     if (fn > 0) {
         y = y + 22.0;
         for i in 0..fn {
@@ -561,54 +573,62 @@ draw_level() {
             cy: f32 = card_y(slot, y) + fade_k * fade_k * 40.0;
             ca: f32 = card_a * (1.0 - fade_k);
             if (i == 0) p_str(1, 12.0, x + 6.0, cy - 9.0, "YOU HAVE", C_MUTED, 1.0 - fade_k);
-            // (A new fact flying in from its row: its card waits for it.)
+            // (A new fact flying in: its card waits for it.)
             flying: bool = fly_term == h && fly_fact && now_t - fly_t < FLY_TIME;
-            focused: bool = slot == focus_s;
             fill: int = C_BLUE_SOFT;
             if (fact_squeezed(h)) fill = mix_rgb(C_BLUE_SOFT, C_BG, 0.45);
-            if (focused) fill = mix_rgb(C_BLUE_SOFT, C_WHITE, 0.5);
             if (flying) ca = 0.0;
-            // (The board as a language: a card held is a ghost of itself;
-            // one a thing held fits breathes, one shaking says no.)
-            fx: f32 = x;
-            if (lang) {
-                fx = x + shake_dx(T_FACT, i) + pull_dx(T_FACT, i, x + w * 0.5);
-                if (dg_on && dg_kind == DG_FACT && dg_src == i || rb_on() && rb_kind == DG_FACT && rb_src == i) ca = ca * 0.3;
-                if (lang_previewing(i)) fill = mix_rgb(C_BLUE_SOFT, C_PICK_SOFT, 0.6);
-                if (dg_on && lf_fit(i) && !lang_previewing(i)) {
-                    gg: f32 = 0.5 + 0.5 * sinf(now_t * 4.0);
-                    p_shape(x - 3.0, cy - 3.0, w + 6.0, eh + 6.0, minf(19.0, eh * 0.5 + 3.0),
-                        6.0, 0.0, C_PICK, 0.18 + 0.15 * gg);
-                    busy = true
-                }
-                if (i < BF) {
-                    bf_term[i] = h;
-                    bf_x0[i] = x;
-                    bf_y0[i] = cy;
-                    bf_x1[i] = x + w;
-                    bf_y1[i] = cy + eh;
-                    bf_n = i + 1;
-                    bfk_ok[i] = false;
-                    bfn_ok[i] = false
-                }
+            // (A card held is a ghost of itself; one a thing held fits
+            // breathes; one shaking says no; one tapped leans toward
+            // where it fits.)
+            fx: f32 = x + shake_dx(T_FACT, i) + pull_dx(T_FACT, i, x + w * 0.5) + fact_nudge_x(i);
+            cy = cy + fact_nudge_y(i);
+            if (dg_on && (dg_kind == DG_FACT || dg_kind == DG_FACE) && dg_item < 0 && dg_src == i || rb_on() && (rb_kind == DG_FACT || rb_kind == DG_FACE) && rb_item < 0 && rb_src == i) ca = ca * 0.3;
+            prev: bool = lang_previewing(i);
+            if (prev) fill = mix_rgb(C_BLUE_SOFT, C_PICK_SOFT, 0.6);
+            if (prev && hv_closes) fill = C_GOLD_SOFT;
+            // (Tapped: it lifts as it leans, its shadow deeper.)
+            if (nd_on(DG_FACT, i)) p_shadow(fx, cy, w, eh, minf(18.0, eh * 0.5), 6.0 * nd_k(),
+                12.0, 0.25 * nd_k());
+            if (dg_on && lf_fit(i) && !prev && helping()) {
+                gg: f32 = 0.5 + 0.5 * sinf(now_t * 4.0);
+                p_shape(x - 3.0, cy - 3.0, w + 6.0, eh + 6.0, minf(19.0, eh * 0.5 + 3.0),
+                    6.0, 0.0, C_PICK, 0.18 + 0.15 * gg);
+                busy = true
             }
-            p_box(fx, cy, w, eh, minf(16.0, eh * 0.5), fill, ca);
-            if (focused) p_outline(x, cy, w, eh, minf(16.0, eh * 0.5), 2.5, C_PICK,
-                ca);
-            if (slot == focus_s) {
-                add_button(B_EXPR_SLOT, x, y, x + w, y + eh);
-                set_pick(slot)
+            if (i < BF) {
+                bf_term[i] = h;
+                bf_x0[i] = x;
+                bf_y0[i] = cy;
+                bf_x1[i] = x + w;
+                bf_y1[i] = cy + eh;
+                bf_seam[i] = 0.0;
+                bf_n = i + 1;
+                bfk_ok[i] = false;
+                bfn_ok[i] = false
             }
+            p_box(fx, cy, w, eh, minf(18.0, eh * 0.5), fill, ca);
             pad: f32 = 6.0;
             if (fact_quiet(h)) pad = 3.0;
             if (fact_squeezed(h)) pad = (eh - ex_h[e]) * 0.5;
-            if (lang && !flying && ca > 0.5) lang_under(e, h, i, fx + 16.0, cy + pad);
+            if (!flying && ca > 0.5 && !stg) lang_under(e, h, i, fx + 16.0, cy + pad);
             draw_board = true;
+            an_salt_extra = 0;
+            if (prev) {
+                an_salt_extra = fact_gen * 104729;
+                an_quick = now_t < quick_t
+            }
             if (!flying) draw_expr(e, fx + 16.0, cy + pad, C_INK, ca, true);
+            an_salt_extra = 0;
+            an_quick = false;
             draw_board = false;
-            if (lang && !flying && ca > 0.5) lang_over(e, h, i);
-            if (!lang) add_button(B_EXPR + e, x, y, x + w, y + eh);
-            if (focused) draw_nubs(x, cy, w, eh);
+            if (!flying && ca > 0.5 && !stg) lang_over(e, h, i);
+            // (An equation, or one for every x: a seam between its faces.)
+            if (i < BF && !prev && e >= 0 && eq_fact(h)) {
+                bf_seam[i] = fx + 16.0 + seam_x(e, -1);
+                if (ca > 0.5) draw_seam(bf_seam[i], cy, eh, mix_rgb(C_BLUE_SOFT, C_BLUE,
+                    0.35), ca)
+            }
             if (h == side_fact && side_fact != 0) draw_side_tick(x, cy, w, eh, ca);
             if (fly_term == h) {
                 fact_rx = x + 16.0;
@@ -649,6 +669,7 @@ draw_level() {
     if (fit) sc_most[V_LEVEL] = 0.0 else sc_most[V_LEVEL] = y + sc_pos[V_LEVEL] - area_bot + 6.0;
     if (!fit) p_noclip();
     // (The goal; not when it has closed for good.)
+    goal_real_e = -1;
     if (split_on()) {
         p_str(1, 12.0, x + 6.0, goal_y - 10.0, "SHOW", C_MUTED, 1.0);
         draw_split(x, goal_y, w, gh);
@@ -667,7 +688,6 @@ draw_level() {
         }
         gy: f32 = card_y(SLOT_GOAL, goal_y);
         p_str(1, 12.0, x + 6.0, gy - deck as f32 * 7.0 - 10.0, "SHOW", C_MUTED, 1.0);
-        focused: bool = focus_s == SLOT_GOAL;
         // (A goal closing squashes and flashes gold.)
         sq: f32 = 0.0;
         ct: f32 = now_t - close_t;
@@ -678,35 +698,32 @@ draw_level() {
         gx: f32 = x - w * sq * 0.5;
         gw: f32 = w * (1.0 + sq);
         gfill: int = C_CARD;
-        if (lang) {
-            gx = gx + shake_dx(T_GOAL, -1) + pull_dx(T_GOAL, -1, x + w * 0.5);
-            if (lang_previewing(-1)) {
-                gfill = mix_rgb(C_CARD, C_PICK_SOFT, 0.7);
-                if (hv_closes) gfill = C_GOLD_SOFT
-            }
-            if (dg_on && lf_goal && !lang_previewing(-1)) {
-                gg: f32 = 0.5 + 0.5 * sinf(now_t * 4.0);
-                p_shape(gx - 4.0, gy - 4.0, gw + 8.0, gh + 8.0, 24.0, 8.0, 0.0, C_PICK,
-                    0.2 + 0.18 * gg);
-                busy = true
-            }
+        gx = gx + shake_dx(T_GOAL, -1) + pull_dx(T_GOAL, -1, x + w * 0.5) + goal_swipe_dx();
+        gprev: bool = lang_previewing(-1);
+        gold: bool = lang_goal_gold() && !stg;
+        if (gprev) gfill = mix_rgb(C_CARD, C_PICK_SOFT, 0.7);
+        if (gold) gfill = C_GOLD_SOFT;
+        if (dg_on && lf_goal && !gprev && helping()) {
+            gg: f32 = 0.5 + 0.5 * sinf(now_t * 4.0);
+            p_shape(gx - 4.0, gy - 4.0, gw + 8.0, gh + 8.0, 24.0, 8.0, 0.0, C_PICK,
+                0.2 + 0.18 * gg);
+            busy = true
         }
-        p_shadow(gx, gy, gw, gh, 20.0, 4.0, 14.0, 0.16);
-        p_box(gx, gy, gw, gh, 20.0, gfill, 1.0);
-        // (Brown, thick: only the focus is orange.)
+        // (Held up toward the facts: its place is a ghost.)
+        ga: f32 = 1.0;
+        if (dg_on && dg_kind == DG_GOAL || rb_on() && rb_kind == DG_GOAL) ga = 0.35;
+        p_shadow(gx, gy, gw, gh, 20.0, 4.0, 14.0, 0.16 * ga);
+        p_box(gx, gy, gw, gh, 20.0, gfill, ga);
+        // (Brown, thick; orange when it shows a preview, gold when it
+        // would close.)
         bord: int = mix_rgb(C_LINE, C_MUTED, 0.45);
         th: f32 = 3.0;
-        if (focused) bord = C_PICK;
-        if (lang && lang_previewing(-1)) bord = C_PICK;
-        if (lang && lang_previewing(-1) && hv_closes) bord = C_GOLD;
-        dead: bool = lang && lang_dead() && !stg;
+        if (gprev) bord = C_PICK;
+        if (gold) bord = C_GOLD;
+        dead: bool = lang_dead() && !stg;
         if (dead) p_box(gx, gy, gw, gh, 20.0, mix_rgb(C_SUNK, C_FAINT, 0.3), 1.0);
-        if (!dead) p_outline(gx, gy, gw, gh, 20.0, th, bord, 1.0);
-        if (focused) {
-            add_button(B_EXPR_SLOT, x, goal_y, x + w, goal_y + gh);
-            set_pick(SLOT_GOAL)
-        }
-        // (A changed part flying in from its row: its block waits.)
+        if (!dead) p_outline(gx, gy, gw, gh, 20.0, th, bord, ga);
+        // (A changed part flying in: its block waits.)
         hide_term = 0;
         ft: f32 = (now_t - fly_t) / FLY_TIME;
         if (ft >= 0.0 && ft < 1.0 && fly_hl != 0 && !fly_fact && fly_hl_seen) {
@@ -715,22 +732,48 @@ draw_level() {
         }
         gox: f32 = gx + 20.0;
         goy: f32 = gy + (gh - ex_h[ge]) * 0.5;
-        if (lang && !stg) lang_under(ge, gc, -1, gox, goy);
+        if (!stg) lang_under(ge, gc, -1, gox, goy);
         draw_board = true;
         gink: int = C_INK;
         if (dead) gink = C_MUTED;
-        draw_expr(ge, gox, goy, gink, 1.0, true);
+        // (A face over a part: the part it changes tinted.)
+        hl_key = 0;
+        if (dg_on && hv_fit && hv_kind == T_PART && hv_goal != 0) {
+            pt: int = raw_at(hv_goal, hv_steps, 0, hv_n);
+            if (pt != 0) hl_key = pt * 16
+        }
+        an_salt_extra = goal_gen * 104729;
+        an_quick = now_t < quick_t;
+        if (ps_on) pulse_slot = SLOT_GOAL;
+        draw_expr(ge, gox, goy, gink, ga, true);
+        pulse_slot = -1;
+        an_salt_extra = 0;
+        an_quick = false;
+        hl_key = 0;
         draw_board = false;
         hide_term = 0;
-        if (lang && !stg) lang_over(ge, gc, -1);
-        if (lang && lang_previewing(-1) && hv_closes) {
-            p_disc(gx + gw - 30.0, gy + gh * 0.5, 13.0, C_GOLD, 1.0);
-            draw_icon(I_CHECK, gx + gw - 30.0, gy + gh * 0.5, 7.0, C_WHITE, 1.0)
+        if (!stg) lang_over(ge, gc, -1);
+        if (gold) {
+            p_disc(gx + gw - 30.0, gy + gh * 0.5, 15.0, C_GOLD, 1.0);
+            draw_icon(I_CHECK, gx + gw - 30.0, gy + gh * 0.5, 8.0, C_WHITE, 1.0)
         }
         if (dead) draw_dead_goal(gx, gy, gw, gh);
-        if (!lang) add_button(B_EXPR + ge, x, goal_y, x + w, goal_y + gh);
-        if (focused) draw_nubs(x, gy, w, gh);
         goal_ex = ge;
+        // (The goal as it really is, where it is: the parts a face goes
+        // onto are found in it.)
+        if (gc == real_gc) goal_real_e = ge else if (!stg) {
+            an_live = false;
+            lay_notch_t = notch_term(n, -1, real_gc);
+            er: int = lay_term(real_gc, if_big(big), w - 40.0, SLOT_GOAL + 1);
+            lay_notch_t = 0;
+            an_live = true;
+            if (er >= 0) {
+                ex_ox[er] = gox;
+                ex_oy[er] = gy + (gh - ex_h[er]) * 0.5;
+                goal_real_e = er
+            }
+        }
+        goal_paths_keep(goal_real_e);
         // (The peeking goals, tapped, come forward.)
         k: int = 0;
         for i in 0..open_n {
@@ -749,28 +792,32 @@ draw_level() {
         if (ge < 0) goal_ry = goal_y
     }
     leavers_step();
-    pick_slot = 0;
     hand_top_y = hand_top;
     bar_bottom_y = top;
-    if (lang) draw_shelf(x, w, hand_top) else if (done_t >= 0.0) {
-        // (The last move made: the hand slides down and away.)
-        if (hand_leaving()) {
-            busy = true;
-            draw_hand(x, w, hand_top + hand_away() * (hand_h + 60.0), hand_h);
-            p_noclip()
-        }
-    } else draw_hand(x, w, hand_top, hand_h);
+    draw_shelf(x, w, hand_top);
     draw_fly();
     draw_copy();
     draw_close();
     if (now_t - say_t < 3.5 && cur_level >= 0 && lv_intro[cur_level] != 0) draw_say(x,
         w, hy + 46.0);
     if (done_t >= 0.0) draw_done(x, w);
-    if (lang) draw_lang_top(x, w) else draw_demo_words(x, w);
+    draw_lang_top(x, w);
     draw_intro(x, w);
-    draw_ghost();
     draw_chapter(x, w);
-    if (lang) boxes_print()
+    boxes_print()
+}
+
+// The goal's writing size, big or not.
+if_big(big: bool): f32 {
+    if (big) return 32.0;
+    24.0
+}
+
+// Whether fact h is an equation, or one for every x: it has two faces.
+eq_fact(h: int): bool {
+    q: int = rel_core(h);
+    if (shape_of(q) == SH_ALL && tm_kind(tm_arg(q)) == TM_ABS) q = tm_body(tm_arg(q));
+    is_binary(q, role_name[ROLE_EQ])
 }
 
 // A side condition arithmetic closed (0 < ε/2) as the move giving the fact
@@ -854,66 +901,42 @@ hand_top_y: f32 = 10000.0;
 
 // A fact laid out: small, on one line, if it has not been touched lately.
 lay_fact(h: int, w: f32): int {
-    if (fact_squeezed(h)) {
+    lay_fact_of(h, h, w)
+}
+
+// Fact h laid out showing t (a preview of it, or itself). One with a
+// notch is never made so small its notch cannot be reached.
+lay_fact_of(h: int, t: int, w: f32): int {
+    notch: bool = lay_notch_t != 0;
+    if (fact_squeezed(h) && !notch) {
         lay_one_line = true;
-        e: int = lay_term(h, 12.5, w - 28.0, hyp_slot(h));
+        e: int = lay_term(t, 12.5, w - 28.0, hyp_slot(h));
         lay_one_line = false;
         return e
     }
-    if (fact_quiet(h)) {
+    if (fact_quiet(h) || fact_squeezed(h)) {
         lay_one_line = true;
-        e: int = lay_term(h, 14.0, w - 28.0, hyp_slot(h));
+        sz: f32 = 14.0;
+        if (notch) sz = 18.0;
+        e: int = lay_term(t, sz, w - 28.0, hyp_slot(h));
         lay_one_line = false;
         return e
     }
-    // (The board as a language: facts big enough to take hold of.)
-    if (lang_on()) return lay_term(h, 23.0, w - 32.0, hyp_slot(h));
-    lay_term(h, 18.0, w - 32.0, hyp_slot(h))
+    // (Facts big enough to take hold of: as big as the goal in Logic,
+    // where the picture needs little room.)
+    if (lang_first()) return lay_term(t, 28.0, w - 32.0, hyp_slot(h));
+    lay_term(t, 22.0, w - 32.0, hyp_slot(h))
 }
 
 fact_card_h(h: int, e: int): f32 {
+    if (e >= 0 && ex_nok[e]) return maxf(ex_h[e] + 12.0, 56.0);
     if (fact_squeezed(h)) return maxf(ex_h[e], 22.0);
     if (fact_quiet(h)) return ex_h[e] + 6.0;
-    ex_h[e] + 12.0
+    // (Room round a notch or a key: a thumb's height.)
+    maxf(ex_h[e] + 12.0, 56.0)
 }
 
 // The cursor's block shown picked (it alone is outlined).
-set_pick(slot: int) {
-    if (cur_at > 0 && cur_at < pc_n) {
-        pick_slot = slot;
-        pick_key = pc_key[cur_at]
-    } else pick_slot = 0
-}
-
-// The ‹ › nubs on the focused card: the cursor steps through its parts.
-draw_nubs(
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32
-) {
-    if (pc_n <= 1 || chip_row >= 0) return;
-    // (Not where no part has a move: nothing to swipe for.)
-    if (cur_at == 0 && (!hd_parts || hand_shown() == 0 && hd_empty != EMPTY_SWIPE)) return;
-    cy: f32 = y + h * 0.5;
-    for side in 0..2 {
-        cx: f32 = x + 2.0;
-        id: int = B_CUR_PREV;
-        icon: int = I_BACK;
-        if (side == 1) {
-            cx = x + w - 2.0;
-            id = B_CUR_NEXT;
-            icon = I_NEXT
-        }
-        k: f32 = pressed(id);
-        r: f32 = 11.0 - k * 1.5;
-        p_shadow(cx - r, cy - r, 2.0 * r, 2.0 * r, r, 1.5, 4.0, 0.14);
-        p_disc(cx, cy, r, C_PICK, 1.0);
-        draw_icon(icon, cx, cy, 5.5, C_WHITE, 1.0);
-        add_button(id, cx - 16.0, cy - 18.0, cx + 16.0, cy + 18.0)
-    }
-}
-
 // The bar: back, the rules, the title (tap: its words again), the bulb,
 // undo; under the title, a dot for each move of par and a pip for each
 // goal. Where what is under it starts.
@@ -1024,452 +1047,6 @@ draw_level_bar(x: f32, w: f32, hy: f32): f32 {
         }
     }
     hy + 40.0
-}
-
-// ---- the hand ----
-// Laid out before the board (its height says where the goal goes): the
-// rows' terms, each on one line. Its height.
-hand_e: []int = new int[64](0);
-
-hand_e2: []int = new int[64](0);
-
-hand_layout(w: f32): f32 {
-    if (done_t >= 0.0 && !hand_leaving()) return 24.0;
-    an_live = false;
-    hgt: f32 = 22.0;
-    if (chip_row >= 0) {
-        // (The chips: a row for each term, the term on the left, what it
-        // gives on the right.)
-        hgt = 58.0;
-        for k in 0..mini(chips_shown(), 63) {
-            lay_one_line = true;
-            e: int = lay_term(wc_term[k], 19.0, w * 0.4, 6000000 + k * 2);
-            hand_e[k] = e;
-            hand_e2[k] = -1;
-            if (ch_ok[k] && ch_res[k] != 0) {
-                mw: f32 = w - ex_w[e] - 76.0;
-                if (ch_closes[k]) mw = mw - 30.0;
-                hand_e2[k] = lay_term(ch_res[k], 17.0, mw, 6000000 + k * 2 + 1)
-            }
-            lay_one_line = false;
-            hgt = hgt + chip_row_h(k) + 8.0
-        }
-        if (chips_shown() < wc_n) hgt = hgt + 50.0;
-        an_live = true;
-        return minf(hgt + 16.0, view_h() * 0.56)
-    }
-    shown: int = hand_shown();
-    for q in 0..mini(shown, 63) {
-        r: int = hd_order[q];
-        hand_e[q] = -1;
-        hand_e2[q] = -1;
-        lay_one_line = true;
-        if (hd_res[r] != 0) {
-            mw: f32 = w - 36.0;
-            if (hd_res2[r] != 0) mw = (w - 60.0) * 0.6;
-            hand_e[q] = lay_term(hd_res[r], 18.0, mw, 5000000 + q * 2);
-            s2: f32 = 15.0;
-            if (hd_ticks[r]) s2 = 18.0;
-            if (hd_res2[r] != 0) hand_e2[q] = lay_term(hd_res2[r], s2, w - 60.0 - ex_w[hand_e[q]],
-                5000000 + q * 2 + 1)
-        } else if (hd_wit[r] && cd_kind_of_row(r) == C_REWRITE) hand_e[q] = lay_words(hd_label[r],
-            18.0, 5000000 + q * 2);
-        lay_one_line = false;
-        hgt = hgt + row_h(q) + 8.0
-    }
-    if (hand_has_more()) hgt = hgt + 42.0 + 8.0;
-    if (more_open) hgt = hgt + 46.0;
-    if (shown == 0 && hd_empty == EMPTY_DEAD && cur_at == 0) hgt = hgt + DEAD_H + 8.0 else if (shown == 0) hgt = hgt + 66.0 + 8.0;
-    an_live = true;
-    minf(hgt + 6.0, view_h() * 0.52)
-}
-
-chip_row_h(k: int): f32 {
-    eh: f32 = ex_h[hand_e[k]];
-    if (hand_e2[k] >= 0) eh = maxf(eh, ex_h[hand_e2[k]]);
-    maxf(eh + 22.0, 56.0)
-}
-
-// Whether row r's move is a rewrite (its words are a term with holes).
-cd_kind_of_row(r: int): int {
-    if (hd_whole[r] && hd_verb[r] == hd_label[r]) return C_BACK;
-    C_REWRITE
-}
-
-row_h(q: int): f32 {
-    e: int = hand_e[q];
-    eh: f32 = 29.0;
-    if (e >= 0) eh = ex_h[e];
-    maxf(26.0 + eh + 6.0, 52.0)
-}
-
-draw_hand(
-    x: f32,
-    w: f32,
-    top: f32,
-    h: f32
-) {
-    if (done_t >= 0.0 && !hand_leaving()) return;
-    // (A sheet, its rows pudgy pills on it.)
-    p_shadow(0.0, top, view_w(), h + safe_bottom + 40.0, 26.0, -3.0, 18.0, 0.16);
-    p_box(0.0, top, view_w(), h + safe_bottom + 40.0, 26.0, mix_rgb(C_BG, C_SUNK,
-        0.6), 1.0);
-    an_live = false;
-    if (chip_row >= 0) {
-        draw_chips(x, w, top);
-        an_live = true;
-        return
-    }
-    hy0: f32 = top;
-    if (more_open) {
-        // (Every move shown: a way back to the few, as the chips have.)
-        k0: f32 = pressed(B_MORE_BACK);
-        p_disc(x + 20.0, top + 30.0, 17.0 - k0 * 1.5, C_WHITE, 1.0);
-        draw_icon(I_BACK, x + 20.0, top + 30.0, 7.5, C_INK, 1.0);
-        p_str(1, 13.0, x + 48.0, top + 35.0, "ALL MOVES", C_MUTED, 1.0);
-        add_button(B_MORE_BACK, x, top + 8.0, x + 160.0, top + 52.0);
-        hy0 = top + 46.0
-    }
-    p_clip(0.0, hy0 + 6.0, view_w(), view_h());
-    y: f32 = hy0 + 14.0 - sc_pos[V_TRAY];
-    shown: int = hand_shown();
-    for q in 0..mini(shown, 63) {
-        r: int = hd_order[q];
-        rh: f32 = row_h(q);
-        row_ry[q] = y;
-        row_rh[q] = rh;
-        draw_row(q, r, x, y, w, rh);
-        y = y + rh + 8.0
-    }
-    if (shown == 0 && hd_empty == EMPTY_DEAD && cur_at == 0) {
-        draw_dead_end(x, y, w);
-        y = y + DEAD_H + 8.0
-    } else if (shown == 0) {
-        // (Nothing here: one soft row, the cursor's only words, when there
-        // is somewhere to put something in; else where to look instead.)
-        msg: str = "Nothing to tidy here. Swipe to choose a place to put something in.";
-        arrows: bool = true;
-        if (cur_at > 0) msg = "Nothing fits this part. Swipe on, or tap it again for the whole." else if (hd_empty == EMPTY_ELSEWHERE) {
-            arrows = false;
-            msg = "Nothing to do with this one. Tap another statement to work on it.";
-            if (hd_n > 0) msg = "No usual move here. Try Other ideas, or tap another statement."
-        }
-        p_box(x, y, w, 66.0, 22.0, mix_rgb(C_SUNK, C_BG, 0.3), 1.0);
-        p_outline(x, y, w, 66.0, 22.0, 1.5, C_LINE, 1.0);
-        if (arrows) {
-            draw_icon(I_BACK, x + 22.0, y + 33.0, 8.0, C_FAINT, 1.0);
-            draw_icon(I_NEXT, x + w - 22.0, y + 33.0, 8.0, C_FAINT, 1.0)
-        }
-        tx: f32 = x + 42.0;
-        if (!arrows) tx = x + 24.0;
-        draw_wrapped(0, 15.0, tx, y + 28.0, w - 2.0 * (tx - x), sym(msg), C_MUTED,
-            1.0);
-        y = y + 66.0 + 8.0
-    }
-    if (hand_has_more()) {
-        k: f32 = pressed(B_MORE);
-        line_clear();
-        // (Under nothing to tidy: the long shots, not more of the same.)
-        if (shown == 0) line_add("Other ideas (") else line_add("More moves (");
-        line_int(hd_n - shown);
-        line_add(")");
-        p_box(x + w * 0.5 - 90.0, y + k * 2.0, 180.0, 42.0, 21.0, mix_rgb(C_WHITE,
-            C_SUNK, k), 1.0);
-        p_outline(x + w * 0.5 - 90.0, y + k * 2.0, 180.0, 42.0, 21.0, 1.5, C_LINE,
-            1.0);
-        lw: f32 = p_line_w(1, 15.0);
-        p_line_text(1, 15.0, x + w * 0.5 - lw * 0.5, y + 26.0 + k * 2.0, C_MUTED,
-            1.0);
-        add_button(B_MORE, x + w * 0.5 - 90.0, y, x + w * 0.5 + 90.0, y + 42.0);
-        y = y + 50.0
-    }
-    sc_most[V_TRAY] = y + sc_pos[V_TRAY] - view_h() + safe_bottom + 10.0;
-    p_noclip();
-    an_live = true
-}
-
-// A dead end (a goal no move and no arithmetic can show: N₁ ≤ n with n
-// only past N): it says so, and its one row undoes back to where the
-// proof went wrong, in one tap.
-const DEAD_H: f32 = 132.0;
-
-draw_dead_end(x: f32, y: f32, w: f32) {
-    // (The words, on a soft red card: no arrows, nothing to swipe for.)
-    p_box(x, y, w, 52.0, 20.0, mix_rgb(C_RED, C_BG, 0.88), 1.0);
-    p_outline(x, y, w, 52.0, 20.0, 1.5, mix_rgb(C_RED, C_BG, 0.6), 1.0);
-    p_disc(x + 26.0, y + 26.0, 11.0, C_RED, 1.0);
-    draw_icon(I_CROSS, x + 26.0, y + 26.0, 5.0, C_WHITE, 1.0);
-    p_str(1, 15.0, x + 46.0, y + 31.0, "Can't be shown from what you have", mix_rgb(C_RED,
-        C_INK, 0.45), 1.0);
-    // (The way back: a pudgy row that breathes, as a row the hint lights.)
-    ry: f32 = y + 60.0;
-    rh: f32 = 64.0;
-    k: f32 = pressed(B_DEAD_UNDO);
-    s: f32 = 1.0 - 0.06 * k;
-    rw: f32 = w * s;
-    rx: f32 = x + (w - rw) * 0.5;
-    rh2: f32 = rh * s;
-    ry2: f32 = ry + (rh - rh2) * 0.5;
-    g: f32 = 0.5 + 0.5 * sinf(now_t * 4.0);
-    busy = true;
-    p_shape(rx - 4.0, ry2 - 4.0, rw + 8.0, rh2 + 8.0, 26.0, 8.0, 0.0, C_PICK, 0.2 + 0.2 * g);
-    p_shadow(rx, ry2, rw, rh2, 22.0, 3.0 - k * 2.0, 8.0 - k * 4.0, 0.16);
-    p_box(rx, ry2, rw, rh2, 22.0, C_WHITE, 1.0);
-    p_disc(rx + 32.0, ry2 + rh2 * 0.5, 17.0, C_PICK, 1.0);
-    draw_icon(I_UNDO, rx + 32.0, ry2 + rh2 * 0.5, 8.0, C_WHITE, 1.0);
-    line_clear();
-    line_add("Undo ");
-    line_int(dead_undo_k());
-    p_line_text(1, 19.0, rx + 60.0, ry2 + rh2 * 0.5 - 2.0, C_INK, 1.0);
-    p_str(0, 13.0, rx + 60.0, ry2 + rh2 * 0.5 + 16.0, "back to where it went wrong",
-        C_MUTED, 1.0);
-    add_button(B_DEAD_UNDO, rx, ry2, rx + rw, ry2 + rh2)
-}
-
-// One row: its verb, what it gives (the changed part tinted), pressed
-// squashed a little.
-draw_row(
-    q: int,
-    r: int,
-    x0: f32,
-    y0: f32,
-    w0: f32,
-    h0: f32
-) {
-    id: int = B_ROW + q;
-    k: f32 = pressed(id);
-    s: f32 = 1.0 - 0.06 * k;
-    w: f32 = w0 * s;
-    h: f32 = h0 * s;
-    x: f32 = x0 + (w0 - w) * 0.5;
-    y: f32 = y0 + (h0 - h) * 0.5;
-    fill: int = C_WHITE;
-    if (hd_fact[r]) fill = mix_rgb(C_BLUE_SOFT, C_WHITE, 0.3);
-    if (hd_closes[r]) fill = C_GOLD_SOFT;
-    if (hd_back[r]) fill = mix_rgb(C_SUNK, C_BG, 0.3);
-    if (hint_row == r) {
-        g: f32 = 0.5 + 0.5 * sinf((now_t - hint_t) * 5.0);
-        p_shape(x - 4.0, y - 4.0, w + 8.0, h + 8.0, 26.0, 8.0, 0.0, C_GOLD, 0.45 + 0.3 * g);
-        busy = true
-    }
-    p_shadow(x, y, w, h, 22.0, 3.0 - k * 2.0, 8.0 - k * 4.0, 0.16);
-    p_box(x, y, w, h, 22.0, fill, 1.0);
-    vc: int = C_PICK;
-    if (hd_tool[r]) vc = C_GOLD;
-    if (hd_closes[r]) vc = mix_rgb(C_GOLD, C_INK, 0.25);
-    if (hd_back[r]) vc = C_MUTED;
-    p_sym(1, 13.0, x + 18.0, y + 19.0, hd_verb[r], vc, 1.0);
-    if (hd_tool[r]) p_str(0, 12.0, pen_end + 8.0, y + 19.0, "your theorem", C_GOLD,
-        1.0);
-    // (What it gives: closes the goal, or the statement as it will be.)
-    if (hd_closes[r]) {
-        cx: f32 = x + w - 24.0;
-        p_disc(cx, y + 16.0, 9.0, C_GOLD, 1.0);
-        draw_icon(I_CHECK, cx, y + 16.0, 5.5, C_WHITE, 1.0);
-        word: str = "closes it";
-        if (hd_calc[r]) word = "by arithmetic";
-        ww: f32 = p_str_w(0, 12.0, word);
-        p_str(0, 12.0, cx - 14.0 - ww, y + 20.0, word, C_MUTED, 1.0)
-    }
-    e: int = hand_e[q];
-    if (e < 0 && hd_wit[r]) {
-        // (A term to pick: an empty slot for it.)
-        p_outline(x + 18.0, y + 27.0, 34.0, 23.0, 7.0, 1.5, C_FAINT, 1.0);
-        p_str_mid(1, 15.0, x + 35.0, y + 44.0, "?", C_FAINT, 1.0);
-        p_str(0, 14.0, x + 62.0, y + 44.0, "pick a term", C_MUTED, 1.0)
-    }
-    if (e >= 0) {
-        hl_key = 0;
-        hl_seen = false;
-        if (hd_hl[r] != 0) hl_key = hd_hl[r] * 16;
-        if (hd_same[r]) {
-            // (It closes: the two sides, the same, gold.)
-            side: int = spine_arg(rel_core(hd_res[r]), 2, 0);
-            hl_key = side * 16;
-            hl_key2 = side * 16 + 1;
-            hl_gold = true
-        }
-        if (hd_wit[r]) {
-            draw_expr(e, x + 18.0, y + 24.0, C_INK, 1.0, false);
-            // (Where the term goes is the hole; the words say so, top right.)
-            ww: f32 = p_str_w(0, 12.0, "pick a term");
-            p_outline(x + w - 40.0, y + 7.0, 22.0, 18.0, 6.0, 1.5, C_PICK, 1.0);
-            p_str_mid(1, 12.0, x + w - 29.0, y + 20.0, "?", C_PICK, 1.0);
-            p_str(0, 12.0, x + w - 48.0 - ww, y + 20.0, "pick a term", C_MUTED, 1.0)
-        } else if (hd_back[r]) draw_expr(e, x + 18.0, y + 24.0, C_MUTED, 0.8, true) else draw_expr(e,
-            x + 18.0, y + 24.0, C_INK, 1.0, true);
-        if (q < 64) {
-            row_ex_x[q] = x + 18.0;
-            row_ex_y[q] = y + 24.0;
-            row_ex_size[q] = ex_size[e];
-            row_hl_seen[q] = hl_seen;
-            row_hl_x[q] = hl_seen_x;
-            row_hl_y[q] = hl_seen_y
-        }
-        hl_key = 0;
-        hl_key2 = -1;
-        hl_gold = false;
-        e2: int = hand_e2[q];
-        if (e2 >= 0) {
-            ex: f32 = x + 18.0 + ex_w[e] + 12.0;
-            if (hd_ticks[r]) ex = ex + 22.0;
-            word: str = "and";
-            if (hd_fact2[r]) word = "with";
-            p_str(0, 12.0, ex, y + 24.0 + ex_h[e] * 0.5 + 4.0, word, C_MUTED, 1.0);
-            ex = ex + p_str_w(0, 12.0, word) + 6.0;
-            if (hd_fact2[r]) p_box(ex - 4.0, y + 24.0 + (ex_h[e] - ex_h[e2]) * 0.5,
-                ex_w[e2] + 8.0, ex_h[e2], 8.0, C_BLUE_SOFT, 1.0);
-            draw_expr(e2, ex, y + 24.0 + (ex_h[e] - ex_h[e2]) * 0.5, C_INK, 1.0, false);
-            if (hd_ticks[r]) {
-                // (Each part known already: ticked.)
-                cy: f32 = y + 24.0 + ex_h[e] * 0.5;
-                tx1: f32 = x + 18.0 + ex_w[e] + 8.0;
-                tx2: f32 = ex + ex_w[e2] + 12.0;
-                for i in 0..2 {
-                    tx: f32 = tx1;
-                    if (i == 1) tx = tx2;
-                    p_disc(tx + 7.0, cy, 7.5, C_GOLD, 1.0);
-                    draw_icon(I_CHECK, tx + 7.0, cy, 4.5, C_WHITE, 1.0)
-                }
-            }
-        }
-    }
-    add_button(id, x0, y0, x0 + w0, y0 + h0)
-}
-
-// The chips: the terms a move can take, with the move's words above, each
-// a pudgy row: the term, and the statement as it will be with the term
-// tinted (gold if it closes the goal).
-draw_chips(x: f32, w: f32, top: f32) {
-    k0: f32 = pressed(B_CHIP_BACK);
-    p_disc(x + 20.0, top + 30.0, 17.0 - k0 * 1.5, C_WHITE, 1.0);
-    draw_icon(I_BACK, x + 20.0, top + 30.0, 7.5, C_INK, 1.0);
-    add_button(B_CHIP_BACK, x, top + 8.0, x + 44.0, top + 52.0);
-    label: int = hd_label[chip_row];
-    p_str(1, 13.0, x + 48.0, top + 26.0, "PICK A TERM", C_MUTED, 1.0);
-    p_sym(1, 16.0, x + 48.0, top + 45.0, label, C_PICK, 1.0);
-    p_clip(0.0, top + 54.0, view_w(), view_h());
-    y: f32 = top + 62.0 - sc_pos[V_TRAY];
-    for k in 0..mini(chips_shown(), 63) {
-        rh: f32 = chip_row_h(k);
-        draw_chip_row(k, x, y, w, rh);
-        y = y + rh + 8.0
-    }
-    if (chips_shown() < wc_n) {
-        k: f32 = pressed(B_CHIP_MORE);
-        line_clear();
-        line_add("More terms (");
-        line_int(wc_n - chips_shown());
-        line_add(")");
-        p_box(x + w * 0.5 - 90.0, y + k * 2.0, 180.0, 42.0, 21.0, mix_rgb(C_WHITE,
-            C_SUNK, k), 1.0);
-        p_outline(x + w * 0.5 - 90.0, y + k * 2.0, 180.0, 42.0, 21.0, 1.5, C_LINE,
-            1.0);
-        lw: f32 = p_line_w(1, 15.0);
-        p_line_text(1, 15.0, x + w * 0.5 - lw * 0.5, y + 26.0 + k * 2.0, C_MUTED,
-            1.0);
-        add_button(B_CHIP_MORE, x + w * 0.5 - 90.0, y, x + w * 0.5 + 90.0, y + 42.0);
-        y = y + 50.0
-    }
-    sc_most[V_TRAY] = y + sc_pos[V_TRAY] - view_h() + safe_bottom + 10.0;
-    p_noclip()
-}
-
-// Chip k's row: its term in a soft chip on the left, then what it gives.
-draw_chip_row(
-    k: int,
-    x0: f32,
-    y0: f32,
-    w0: f32,
-    h0: f32
-) {
-    id: int = B_CHIP + k;
-    pk: f32 = pressed(id);
-    s: f32 = 1.0 - 0.06 * pk;
-    w: f32 = w0 * s;
-    h: f32 = h0 * s;
-    x: f32 = x0 + (w0 - w) * 0.5;
-    y: f32 = y0 + (h0 - h) * 0.5;
-    fill: int = C_WHITE;
-    if (ch_ok[k] && ch_fact[k]) fill = mix_rgb(C_BLUE_SOFT, C_WHITE, 0.3);
-    if (ch_ok[k] && ch_closes[k]) fill = C_GOLD_SOFT;
-    // (A term whose side condition cannot be shown: dimmed.)
-    dim: f32 = 1.0;
-    if (ch_need[k] != 0) {
-        fill = mix_rgb(C_SUNK, C_BG, 0.3);
-        dim = 0.5
-    }
-    if (hint_chip_term() == wc_term[k] && wc_term[k] != 0) {
-        g: f32 = 0.5 + 0.5 * sinf(now_t * 5.0);
-        p_shape(x - 4.0, y - 4.0, w + 8.0, h + 8.0, 26.0, 8.0, 0.0, C_GOLD, 0.45 + 0.3 * g);
-        busy = true
-    }
-    p_shadow(x, y, w, h, 22.0, 3.0 - pk * 2.0, 8.0 - pk * 4.0, 0.16);
-    p_box(x, y, w, h, 22.0, fill, 1.0);
-    // (The term, in its chip.)
-    e: int = hand_e[k];
-    tw: f32 = ex_w[e] + 24.0;
-    th: f32 = ex_h[e] + 10.0;
-    p_box(x + 10.0, y + (h - th) * 0.5, tw, th, minf(14.0, th * 0.5), C_PICK_SOFT,
-        dim);
-    p_outline(x + 10.0, y + (h - th) * 0.5, tw, th, minf(14.0, th * 0.5), 1.5, mix_rgb(C_PICK_SOFT,
-        C_PICK, 0.5), dim);
-    draw_expr(e, x + 22.0, y + (h - ex_h[e]) * 0.5, C_INK, dim, false);
-    if (ch_need[k] != 0) {
-        nw: f32 = p_sym_w(1, 12.0, ch_need[k]);
-        p_sym(1, 12.0, x + w - 18.0 - nw, y + 17.0, ch_need[k], C_RED, 0.85)
-    }
-    // (What it gives.)
-    e2: int = hand_e2[k];
-    ex: f32 = x + 10.0 + tw + 16.0;
-    if (e2 >= 0) {
-        hl_key = ch_hl[k] * 16;
-        hl_seen = false;
-        if (ch_same[k]) {
-            side: int = spine_arg(rel_core(ch_res[k]), 2, 0);
-            hl_key = side * 16;
-            hl_key2 = side * 16 + 1;
-            hl_gold = true
-        }
-        ey: f32 = y + (h - ex_h[e2]) * 0.5;
-        if (ch_need[k] != 0) ey = ey + 6.0;
-        draw_expr(e2, ex, ey, C_INK, dim, false);
-        if (k < 64) {
-            row_ex_x[k] = ex;
-            row_ex_y[k] = ey;
-            row_ex_size[k] = ex_size[e2];
-            row_hl_seen[k] = hl_seen;
-            row_hl_x[k] = hl_seen_x;
-            row_hl_y[k] = hl_seen_y
-        }
-        hl_key = 0;
-        hl_key2 = -1;
-        hl_gold = false
-    } else if (k < 64) {
-        row_ex_x[k] = x + 22.0;
-        row_ex_y[k] = y + (h - ex_h[e]) * 0.5;
-        row_ex_size[k] = ex_size[e];
-        row_hl_seen[k] = false
-    }
-    if (ch_ok[k] && ch_closes[k]) {
-        cx: f32 = x + w - 22.0;
-        p_disc(cx, y + h * 0.5, 10.0, C_GOLD, 1.0);
-        draw_icon(I_CHECK, cx, y + h * 0.5, 6.0, C_WHITE, 1.0);
-        if (ch_calc[k]) {
-            // (Arithmetic closes it: said so small, under the check.)
-            ww: f32 = p_str_w(0, 11.0, "by arithmetic");
-            p_str(0, 11.0, cx + 10.0 - ww, y + h - 5.0, "by arithmetic", C_MUTED,
-                1.0)
-        }
-    }
-    add_button(id, x0, y0, x0 + w0, y0 + h0)
-}
-
-// The term the hint wants picked now (or 0).
-hint_chip_term(): int {
-    if (hint_row < 0 || chip_row != hint_row) return 0;
-    if (wit_i < hint_wit_n) return hint_wit_terms[wit_i];
-    0
 }
 
 // ---- juice ----
@@ -1593,31 +1170,6 @@ fly_hx0: f32 = 0.0;
 fly_hy0: f32 = 0.0;
 
 fly_hl_seen: bool = false;
-
-fly_keep(q: int) {
-    fly_hl_seen = false;
-    if (q < 0 || q >= 64) return;
-    fly_x0 = row_ex_x[q];
-    fly_y0 = row_ex_y[q];
-    fly_s0 = row_ex_size[q];
-    fly_hx0 = row_hl_x[q];
-    fly_hy0 = row_hl_y[q];
-    fly_hl_seen = row_hl_seen[q]
-}
-
-// Where each row's writing was last drawn (its top left and size), and
-// its changed part's block, for what flies from it.
-row_ex_x: []f32 = new f32[64](0.0);
-
-row_ex_y: []f32 = new f32[64](0.0);
-
-row_ex_size: []f32 = new f32[64](18.0);
-
-row_hl_x: []f32 = new f32[64](0.0);
-
-row_hl_y: []f32 = new f32[64](0.0);
-
-row_hl_seen: []bool = new bool[64](false);
 
 // A goal closing: its card flashes gold, a check pops out, and the card,
 // its writing shrinking with it, flies into its pip at the top.
@@ -1936,121 +1488,6 @@ draw_intro(x: f32, w: f32) {
 ghost_x: f32 = 0.0;
 
 ghost_y: f32 = 0.0;
-
-draw_ghost() {
-    id: int = ghost_id;
-    on: bool = watching && ghost_on;
-    if (demo_kind != 0 && !watching) {
-        if (intro_open || now_t < demo_t0) return;
-        if (demo_kind == sym("swipe")) {
-            draw_swipe_demo();
-            return
-        }
-        if (demo_kind == sym("pips") && now_t - demo_t0 < 2.6) {
-            // (First the squares at the top: one for each goal.)
-            ghost_go(pip_x[0] + 4.0, pip_y + 30.0);
-            return
-        }
-    }
-    if (!watching && hint_row >= 0 && (now_t - hint_t < 4.0 || demo_kind != 0)) {
-        on = true;
-        q: int = row_place(hint_row);
-        id = B_ROW + q;
-        if (chip_row >= 0) {
-            id = 0;
-            t: int = hint_chip_term();
-            for k in 0..wc_n {
-                if (wc_term[k] == t) id = B_CHIP + k
-            }
-        }
-    }
-    if (!on || id == 0) return;
-    found: bool = false;
-    tx: f32 = 0.0;
-    ty: f32 = 0.0;
-    for k in 0..btn_n {
-        if (btn_id[k] == id && !found) {
-            bw: f32 = btn_x1[k] - btn_x0[k];
-            tx = (btn_x0[k] + btn_x1[k]) * 0.5;
-            ty = (btn_y0[k] + btn_y1[k]) * 0.5 + 14.0;
-            // (A row: the finger under its right end, clear of its words
-            // and its term.)
-            if (bw > 160.0) {
-                tx = btn_x1[k] - 56.0;
-                ty = btn_y1[k] + 6.0
-            }
-            found = true
-        }
-    }
-    if (!found) return;
-    ghost_go(tx, ty)
-}
-
-// The ghost finger eased toward (tx, ty), tapping.
-ghost_go(tx: f32, ty: f32) {
-    if (ghost_x == 0.0 && ghost_y == 0.0) {
-        ghost_x = tx;
-        ghost_y = ty
-    }
-    ghost_x = ease_to(ghost_x, tx, 9.0);
-    ghost_y = ease_to(ghost_y, ty, 9.0);
-    tap: f32 = 0.5 + 0.5 * sinf(now_t * 6.0);
-    busy = true;
-    r: f32 = 17.0 - tap * 2.0;
-    p_shadow(ghost_x - r, ghost_y - r + 4.0, 2.0 * r, 2.0 * r, r, 3.0, 10.0, 0.22);
-    p_disc(ghost_x, ghost_y, r, C_WHITE, 0.7);
-    p_ring(ghost_x, ghost_y, r, 2.5, C_INK, 0.35);
-    p_ring(ghost_x, ghost_y, r + 8.0 + tap * 6.0, 2.0, C_GOLD, 0.4 * (1.0 - tap))
-}
-
-// The swipe demo: the finger strokes across the goal, left to right,
-// over and over, leaving a short trail.
-draw_swipe_demo() {
-    if (goal_rw <= 0.0) return;
-    busy = true;
-    t: f32 = now_t - demo_t0;
-    cyc: f32 = t - floorf(t / 1.6) * 1.6;
-    k: f32 = clampf((cyc - 0.35) / 0.6, 0.0, 1.0);
-    k = k * k * (3.0 - 2.0 * k);
-    x0: f32 = goal_rx + goal_rw * 0.3;
-    x1: f32 = goal_rx + goal_rw * 0.72;
-    y: f32 = goal_ry + goal_rh * 0.5 + 18.0;
-    fx: f32 = x0 + (x1 - x0) * k;
-    a: f32 = clampf(cyc / 0.2, 0.0, 1.0) * clampf((1.6 - cyc) / 0.25, 0.0, 1.0);
-    if (k > 0.0 && k < 1.0) {
-        for i in 0..6 {
-            tx: f32 = fx - i as f32 * 12.0 * k;
-            if (tx > x0) p_disc(tx, y, 8.0 - i as f32, C_PICK, 0.3 * a * (1.0 - i as f32 / 6.0))
-        }
-    }
-    r: f32 = 17.0 - (1.0 - k) * 2.0;
-    p_shadow(fx - r, y - r + 4.0, 2.0 * r, 2.0 * r, r, 3.0, 10.0, 0.22 * a);
-    p_disc(fx, y, r, C_WHITE, 0.7 * a);
-    p_ring(fx, y, r, 2.5, C_INK, 0.35 * a)
-}
-
-// What a demo says, on a soft pill above the hand.
-draw_demo_words(x: f32, w: f32) {
-    if (demo_kind == 0 || watching || intro_open || now_t < demo_t0 || done_t >= 0.0) return;
-    s: str = "Tap a move to play it.";
-    if (demo_kind == sym("pips") && now_t - demo_t0 < 2.6) s = "A square up here for each goal. Fill them all.";
-    if (demo_kind == sym("chip")) {
-        s = "This move needs a term. Tap it.";
-        if (chip_row >= 0) s = "Pick the term to use."
-    }
-    if (demo_kind == sym("swipe")) s = "Swipe across the goal to step into it.";
-    a: f32 = clampf((now_t - demo_t0) * 4.0, 0.0, 1.0);
-    busy = true;
-    tw: f32 = p_str_w(1, 15.0, s) + 36.0;
-    if (tw > w) tw = w;
-    bx: f32 = x + w * 0.5 - tw * 0.5;
-    // (Over the foot of the picture, clear of the goal and the hand.)
-    by: f32 = hand_top_y - 50.0;
-    if (pic_bottom_y > 0.0) by = pic_bottom_y - 50.0;
-    p_shadow(bx, by, tw, 38.0, 19.0, 3.0, 10.0, 0.16 * a);
-    p_box(bx, by, tw, 38.0, 19.0, C_INK, 0.88 * a);
-    p_str_mid(1, 15.0, x + w * 0.5, by + 24.5, s, C_WHITE, a)
-}
 
 // ---- done: Q.E.D. ----
 // The theorem rises to the middle, a stamp slams onto it, and the stars
