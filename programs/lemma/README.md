@@ -36,7 +36,14 @@ a gold row that closes the goal, showing the goal as the move leaves it
 arithmetic closes it, the writing left readable). A move that gives back a
 state the proof was already in (the way out of a mistake) is a soft grey
 row, *Back*, after the others; the *Nothing to tidy here* line shows only
-when the hand has no row at all.
+when the hand has no row at all, and only for a statement with moves at
+its parts (the ‹ › nubs show then too); a statement with none says to
+tap another. A goal that cannot be shown (off the written proof, a
+comparison of whole numbers such as `N₁ ≤ n` with no move anywhere in it
+that arithmetic does not close from the facts) is a dead end: it is
+focused as soon as a move leaves it, and the hand says *Can't be shown
+from what you have* over one row, *Undo k* (the hint's k), that rewinds
+to where the proof went wrong in one tap (`1` or `enter` by keys).
 
 - **Tap a statement** to focus it. With the whole of it focused, the hand
   has its own moves (*Take any ε*, *Assume it*, *Split*, *Choose …*, *Get N*,
@@ -93,12 +100,14 @@ row brought flies in and becomes its block. When the goal's whole shape
 changes (`∀n≥max(N, N₁).` comes off and it goes from two lines to one at
 another size) it is not torn apart: its new writing fades in on the card. Words
 for a moment (*Undo 1 to get back on the book's path*, *Your turn*) show
-just under the bar. Under the title, a dot for each
+just under the bar, and go by shrinking away, pill and words together. Under the title, a dot for each
 move of par fills as moves are made, grey past par; apart from them, on a
 soft pill, a square for each goal fills as it closes. The last goal closes with the theorem stamped Q.E.D.: as the move is
 made the hand slides down and away, and as the goal flashes the facts
-fade and slide down; then the statement rises as a trophy card (on a line
-of its own under it, the stamp), with its stars (par or better: three)
+fade and slide down; then the statement rises as a trophy card (a statement too
+long for a line is broken after a ⟹, each line holding as many premises
+as fit, before any binder is broken; on a line of its own under it, the
+stamp), with its stars (par or better: three)
 on a card under it, the pair in the middle of the screen, and *Next* big
 and bobbing in the thumb's reach (it goes to the next level not solved
 after this one on the map, round to the first only if there is none),
@@ -141,7 +150,12 @@ sequence's band does not yet hold (choosing N where max(N, N₁) is needed)
 turns red and jiggles. A taken n is drawn past its lower bound (at or past
 every gate), whatever is said at it; a fact said at n (`|aₙ − A| < ε/2`)
 is a band of its own, not the sequence's gated one; gates in one place
-have their names one under another. For groups: a letter train, each side of the goal
+have their names one under another. Only a name's gate (N, N₁, n) or
+the goal's chosen one is drawn: a fact used with a term (`max(N, N₁)`)
+adds none. While the goal is `X ≤ n` (the side condition a Use with left),
+the picture stays on the goal it was for (its ε band, n, the red dots),
+and if X is past n in the example, X's gate is red with a red bracket
+from n to it: n is not far enough. For groups: a letter train, each side of the goal
 a row of tiles (a⁻¹ hollow in a's color, e faint); how a product is
 grouped is how close its tiles sit, a pair x⁻¹ · x side by side glows,
 tiles slide, swell in and pop as the goal changes, and when the sides are
@@ -212,6 +226,15 @@ Both at once, its Split staged as two goals (frames from 1.9 s to 4 s):
 
 ```sh
 L8_LEVEL=1 L8_KEYS="1" .build/lemma
+```
+
+A dead end in Adding limits: `N` alone chosen, n taken, b's fact used
+with n; the goal `N₁ ≤ n` cannot be shown, the hand says so with *Undo
+3*, the N₁ gate is red with a bracket from n (add `;1` to undo the
+three):
+
+```sh
+L8_LEVEL=20 L8_TAP_GAP=40 L8_KEYS="$(for i in $(seq 11); do printf 'h;enter;'; done)c;1;1;c" .build/lemma
 ```
 
 Adding limits to its Q.E.D. by hints alone (17 pairs):
