@@ -16,7 +16,41 @@ Off a page the window is phone shaped (`L8_W`, `L8_H`, `L8_UI` change
 it). On the page, `?fresh` starts with nothing proved, and `L8_` query
 parameters are passed on.
 
-## Playing
+## Playing: the logic chapter, a language
+
+In Logic there is no list of moves: **the formulas are the controls**.
+Every statement's outermost symbol is one of two things:
+
+| Symbol | On the goal | On a fact |
+|---|---|---|
+| ∀y. | raised **key**: tap it, an orange `y` (any y) pops onto the shelf | sunken **notch**: drop a name in, a new fact for it (the general one stays) |
+| ∃x. | **notch**: drop a name in, the goal becomes the body for it | **key**: tap it, a blue `x` (some x) pops onto the shelf, the body is the fact |
+| ∧ | key: two goals | key: two facts (*Take both parts*, a rule proved in hol.txt) |
+| ⟶ | key: P drops into the facts | flat: used by dragging it |
+
+A **fact dragged onto the goal** closes it or chains back (`P ⟶ Q` onto
+`Q` leaves `P`; `∀x. P x ⟶ Q` onto `Q` asks for a name: a socket shows
+on the goal, *a name for it?*, filled by dropping or tapping a name). The
+**shelf** at the bottom holds the names in scope (the level's own, cream;
+any, orange; some, blue). Held over a place it fits, the place shows what
+it would become (a goal it closes goes gold with a check); while held,
+the places it fits breathe. Let go elsewhere, it springs home and the
+place shakes no; the same refusal twice says why in grey (*Doesn't
+match*, *That needs a name, not a statement*). After 8 s idle, keys
+breathe. Each key tap or drop is one move (a filled socket is part of
+its drop). After a move off the book's path, a bounded search with the
+same gestures (keys opened first; names from the shelf) decides whether
+the goal can still be shown; if the search runs out of moves without a
+proof, the goal card greys, dashed, *Can't be shown from what you have*
+on its top edge and a bobbing *Undo k* pill on its corner (the relation
+grid of Someone for everyone rings the cell (y, y) red). The bulb's
+ghost hand performs the book's next gesture (taps the key, or carries the
+name or the card to its place); held, Watch plays the proof as gestures.
+Each level's `demo:` (key, goalkey, drag, token, notch, some) shows its
+new word once with the ghost hand and a line of words. Groups and Limits
+are still played with the hand, as below (round 2 brings them over).
+
+## Playing: groups and limits
 
 A level is **a goal and a hand of moves**. The screen is laid out from
 the bottom: the hand, the goal (*Show*, big when there is room) pinned
@@ -179,18 +213,39 @@ lit, the column of a y taken ringed.
 
 ## Playing in pictures (hooks)
 
-- `L8_LEVEL=k` opens map level k (logic 0-8, groups 9-16, limits 17-21);
+- `L8_LEVEL=k` opens map level k (logic 0-10, groups 11-18, limits 19-23);
   the progress file the rig uses is the game's argument (seen demos and
   solved levels change what shows);
   `L8_WATCH=1` plays its written proof (`L8_WATCH_PACE` in hundredths: 30
   is quick). `L8_CHAPTER=1` shows its chapter's page first, as the map
   does the first time (if the progress file has not seen it); the first
   tap or key then puts it away, so add one to the front of `L8_TAPS` or
-  `L8_KEYS` (`L8_LEVEL=9 L8_CHAPTER=1 L8_KEYS="enter;h;enter"`).
+  `L8_KEYS` (`L8_LEVEL=11 L8_CHAPTER=1 L8_KEYS="enter;h;enter"`).
 - `L8_TAPS="x,y;x,y"` taps those places (the game's pixels), one every
   `L8_TAP_GAP` hundredths of a second (default 70), from 1.7 s on (the
   level's title card is gone by then). `x,y>x2,y2` swipes, `x,y+ms` holds
   (`348,30+700` holds the bulb: Watch); `-1,0` undoes, `-2,0` waits.
+- `x,y>>x2,y2+ms` in `L8_TAPS` is a real drag: the finger comes down,
+  waits a moment (it picks the thing up), and is carried every frame to
+  `x2,y2` over `ms` (default 600), held there a moment and let go; a
+  trailing `!` (`30,640>>200,820+600!`) holds it there, so the hover
+  preview can be grabbed.
+- `L8_DO="open goal; token y > goal; undo; open fact 0; token x > goal;
+  token y > fact 0"` makes logic gestures by what they are; each is
+  found on the board and played as the same synthetic drag (or tap):
+  `open goal`, `open fact K` (a key); `token N > goal`, `token N > fact K`
+  (a name from the shelf into the notch, or onto the card); `fact K >
+  goal`; `fill N` (a name into the socket a fact left); `undo`, `hint`,
+  `enter`, `wait`. Each step starts `L8_DO_GAP` hundredths (default 90)
+  after the last ends; drags take `L8_DO_MS` (600). `L8_DO_STOP=k` holds
+  step k (from 1) over its place and stops there (the preview).
+- `L8_BOXES=1` prints the board after the title card and after each move
+  settles: the goal, each fact (by number), their keys and notches, and
+  the names on the shelf, each with its rectangle (`x0,y0 x1,y1`), plus
+  moves, the book's path, DEAD and DONE.
+- In Logic the keys are `h` (the hint: the ghost hand shows the gesture),
+  `enter` (the hinted gesture made, or the book's next; on a dead end,
+  Undo k), `1` (Undo k on a dead end), `u` undo, `w` watch.
 - `L8_KEYS="right;1;right;right;1;a"` presses keys the same way, after the
   taps: `left`/`right` move the cursor, `up`/`down` the focus; `1` to `4`
   play a row (the one after the rows shown is *More*), `0` opens *More
@@ -205,10 +260,22 @@ lit, the column of a y taken ringed.
   demos show only while unseen: start from a progress file without
   `seen` lines to see them.
 
+Someone for everyone: the trap, its dead end, and the way:
+
+```sh
+L8_LEVEL=10 L8_BOXES=1 L8_DO="open goal;token y > goal" .build/lemma
+L8_LEVEL=10 L8_DO="open goal;token y > goal;undo;open fact 0;token x > goal;token y > fact 0" .build/lemma
+L8_LEVEL=10 L8_DO="open goal;open fact 0;token x > goal;token y > fact 0" L8_DO_STOP=4 .build/lemma   # the preview
+L8_LEVEL=4 L8_TAPS="200,660>>200,830+700!" .build/lemma                  # If, then: P ⟶ Q held over Q
+```
+
+Every logic level by hints alone: `L8_KEYS` with `h;enter` once per par
+move (`L8_LEVEL=10 L8_KEYS="h;enter;h;enter;h;enter;h;enter;"`).
+
 For example, Cancel on the left by keys (seven moves, par):
 
 ```sh
-L8_LEVEL=12 L8_TAP_GAP=50 L8_KEYS="right;1;right;right;1;a;1;1;1;1;1" .build/lemma
+L8_LEVEL=14 L8_TAP_GAP=50 L8_KEYS="right;1;right;right;1;a;1;1;1;1;1" .build/lemma
 ```
 
 Adding limits by the book up to Choose (eleven `h;enter` pairs: a step
@@ -218,13 +285,13 @@ with a term takes two), then choosing `N` alone (the third term, after
 n and N₁ stay red. By the book (`max(N, N₁)`) no dot goes red.
 
 ```sh
-L8_LEVEL=20 L8_TAP_GAP=40 L8_KEYS="$(for i in $(seq 11); do printf 'h;enter;'; done)c" .build/lemma
+L8_LEVEL=22 L8_TAP_GAP=40 L8_KEYS="$(for i in $(seq 11); do printf 'h;enter;'; done)c" .build/lemma
 ```
 
 The chapter page of Groups, then its first level:
 
 ```sh
-L8_LEVEL=9 L8_CHAPTER=1 L8_TAPS="200,400" .build/lemma
+L8_LEVEL=11 L8_CHAPTER=1 L8_TAPS="200,400" .build/lemma
 ```
 
 A mistake and its way back: `e` put on the right (`b · e = c`), the hand
@@ -232,14 +299,14 @@ shows *Back · b = c*; the hint says *Undo 1*; undo and hint again, and the
 words and the undo pulse are gone:
 
 ```sh
-L8_LEVEL=12 L8_KEYS="right;2;h;u;h" .build/lemma
+L8_LEVEL=14 L8_KEYS="right;2;h;u;h" .build/lemma
 ```
 
 Only one e closed from the goal's hand: `e` put on the right (`f · e =
 e`), then the first row, *Use the fact with e*:
 
 ```sh
-L8_LEVEL=11 L8_KEYS="right;2;1" .build/lemma
+L8_LEVEL=13 L8_KEYS="right;2;1" .build/lemma
 ```
 
 Shifted at its first Use with: only `ε` shows; `0` opens *More terms*
@@ -248,7 +315,7 @@ same, and the goal `A > 0` is a dead end (*Undo 1*), the ε band still
 drawn:
 
 ```sh
-L8_LEVEL=18 L8_TAP_GAP=30 L8_KEYS="h;enter;h;enter;h;enter;h;enter;0" .build/lemma
+L8_LEVEL=20 L8_TAP_GAP=30 L8_KEYS="h;enter;h;enter;h;enter;h;enter;0" .build/lemma
 ```
 
 Both at once, its Split staged as two goals (frames from 1.9 s to 4 s):
@@ -263,13 +330,13 @@ with n; the goal `N₁ ≤ n` cannot be shown, the hand says so with *Undo
 three):
 
 ```sh
-L8_LEVEL=20 L8_TAP_GAP=40 L8_KEYS="$(for i in $(seq 11); do printf 'h;enter;'; done)c;1;1;c" .build/lemma
+L8_LEVEL=22 L8_TAP_GAP=40 L8_KEYS="$(for i in $(seq 11); do printf 'h;enter;'; done)c;1;1;c" .build/lemma
 ```
 
 Adding limits to its Q.E.D. by hints alone (17 pairs):
 
 ```sh
-L8_LEVEL=20 L8_TAP_GAP=30 L8_KEYS="$(for i in $(seq 17); do printf 'h;enter;'; done)" .build/lemma
+L8_LEVEL=22 L8_TAP_GAP=30 L8_KEYS="$(for i in $(seq 17); do printf 'h;enter;'; done)" .build/lemma
 ```
 
 ## How it is built
@@ -299,9 +366,17 @@ L8_LEVEL=20 L8_TAP_GAP=30 L8_KEYS="$(for i in $(seq 17); do printf 'h;enter;'; d
   (`says` in the files); rewrites of an equation read as a calculation.
 - `play.l8`: proofs written in the files (`proof:`), the same moves a
   player makes, played by the tests, by Watch, and to prove given lemmas.
+  Logic's proofs are written as gestures: `open goal`, `open hyp K`,
+  `drop "y" goal`, `drop "y" hyp K`, `apply hyp K [with "a"]`.
+- `gesture.l8`: the gestures (keys, notches, a fact onto the goal), each
+  one move of moves.l8; trying one and taking it back; and the bounded
+  search that says a goal cannot be shown (`gs_dead`: dead only if the
+  search ran out of moves, not if it was cut short).
 - The app: `paint.l8` (from the recipe book), `font.l8` (Rubik with Noto
   Sans Math, made by `tools/font.py`), `boxes.l8` (terms as nested blocks
-  that morph on springs), `hand.l8` (the focus, the cursor's places, and
+  that morph on springs), `board.l8` (the logic board as a language:
+  keys, notches, the shelf, holding and dropping, previews, refusals,
+  dead ends, the ghost hand, `L8_BOXES`), `hand.l8` (the focus, the cursor's places, and
   the hand: each candidate tried on the proof and taken back, to show what
   it gives and drop what the kernel refuses), `app.l8` (state, moves,
   hints and Watch), `pages.l8`, `picture.l8`, `touch.l8`, `main.l8`;
@@ -323,6 +398,13 @@ to `region_files` in `app.l8` and `FILES` in `web/lemma/lemma.js`. A
 `picture` needs code in `picture.l8`; `calculate` needs `calc` roles.
 
 ## Not built yet
+
+The language in Groups and Limits (rule tiles with like-on-like faces,
+growing sockets, swipe to flip, definition keys, bounded binders, kit
+tiles, the goal into the facts for Suppose not); a fact onto a fact; the
+unzip and pinch animations, haptics on native; Book pages per symbol and
+*New word* pops; the picture reacting to hover; help that waits for a
+pause outside Logic.
 
 The Foundations region (constructing ℕ, ℤ, ℚ, ℝ and proving each
 rulebook is satisfied); Calculate replaying a certificate through the

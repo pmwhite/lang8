@@ -1,0 +1,598 @@
+tag lemma;
+
+use_tag std;
+
+// The gestures: what a player does with the formulas themselves. Every
+// statement's outermost symbol is a key, a notch, or flat:
+//
+//   on the goal   ∀ key (take any), ∧ key (split), ⟶ key (assume it),
+//                 ∃ notch (a name dropped in chooses it)
+//   on a fact     ∃ key (get one), ∧ key (take both parts),
+//                 ∀ notch (a name dropped in uses the fact for it)
+//
+// and a fact can be put onto the goal (apply it, use it with the name
+// matching picks, or a name still to drop in). Each gesture is one move of
+// moves.l8, made by the kernel like any other; a gesture the kernel will
+// not take is no move at all. The same gestures are the proofs written in
+// the files (play.l8: open, drop, apply), the hints, and the search that
+// tells a goal that cannot be shown.
+const SH_NONE: int = 0;
+
+const SH_ALL: int = 1;
+
+const SH_EX: int = 2;
+
+const SH_AND: int = 3;
+
+const SH_IMP: int = 4;
+
+// The shape of a statement: its outermost symbol.
+shape_of(t: int): int {
+    c: int = rel_core(t);
+    if (tm_kind(c) == TM_APP && tm_kind(tm_fun(c)) == TM_CONST) {
+        h: int = tm_name(tm_fun(c));
+        if (h == role_name[ROLE_ALL]) return SH_ALL;
+        if (h == role_name[ROLE_EX]) return SH_EX
+    }
+    if (is_binary(c, role_name[ROLE_CONJ])) return SH_AND;
+    if (is_binary(c, role_name[ROLE_IMP])) return SH_IMP;
+    SH_NONE
+}
+
+// Whether the goal (j < 0) or fact j of node n has a key, or a notch.
+gs_has_key(n: int, j: int): bool {
+    g: int = pn_goal[n];
+    if (j < 0) {
+        s: int = shape_of(gl_concl[g]);
+        return s == SH_ALL || s == SH_AND || s == SH_IMP
+    }
+    s: int = shape_of(goal_hyp(g, j));
+    s == SH_EX || s == SH_AND
+}
+
+gs_has_notch(n: int, j: int): bool {
+    g: int = pn_goal[n];
+    if (j < 0) return shape_of(gl_concl[g]) == SH_EX;
+    shape_of(goal_hyp(g, j)) == SH_ALL
+}
+
+// Whether a type is one a name dropped into a notch can have: not a
+// statement, not a function (P, R are not names to drop).
+token_type(ty: int): bool {
+    k: int = ty_kind(ty);
+    if (k == TY_FUN) return false;
+    if (k == TY_CON && (ty_name(ty) == sym("bool") || ty_name(ty) == sym("prop"))) return false;
+    true
+}
+
+// The candidate the last gesture made (in the cd_ tables), or -1.
+gs_c: int = -1;
+
+gs_wits: []int = new int[4](0);
+
+// Rule l at node n: backwards (its conclusion the goal), or forwards if
+// `fwd`; its major premise fact j if j >= 0; with wn witnesses (gs_wits).
+// Whether the kernel took it.
+gs_rule(
+    n: int,
+    l: int,
+    j: int,
+    fwd: bool,
+    wn: int
+) raises KernelError: bool {
+    gs_c = -1;
+    if (l < 0 || n < 0 || pn_move[n] >= 0 || pn_thm[n] != 0) return false;
+    g: int = pn_goal[n];
+    if (j >= gl_hypn[g]) return false;
+    cands_clear();
+    q: int = strip_rule(thm_prop(lm_thm[l]));
+    major: int = 0;
+    if (prem_n > 0) major = prem[0];
+    match_clear();
+    if (j >= 0) {
+        if (major == 0 || !match_term(major, goal_hyp(g, j))) return false
+    }
+    kind: int = C_BACK;
+    if (fwd) kind = C_FWD else if (!match_term(q, gl_concl[g])) return false;
+    c: int = add_cand(kind, l, j, 10);
+    if (c < 0 || cd_wn[c] != wn) return false;
+    cd_label[c] = make_label(n, c);
+    ok: bool = true;
+    try {
+        last_move = cand_apply(n, c, gs_wits, wn);
+        auto_close()
+    } with KernelError -> {
+        ok = false
+    }
+    if (ok) gs_c = c;
+    ok
+}
+
+lemma_named(name: str): int {
+    find_lemma(sym(name))
+}
+
+// The key of the goal (j < 0) or of fact j, pressed: whether it opened.
+gs_key(n: int, j: int) raises KernelError: bool {
+    if (n < 0 || !gs_has_key(n, j)) return false;
+    g: int = pn_goal[n];
+    if (j < 0) {
+        c: int = rel_core(gl_concl[g]);
+        s: int = shape_of(c);
+        if (s == SH_AND) return gs_rule(n, lemma_named("conjI"), -1, false, 0);
+        if (s == SH_IMP) return gs_rule(n, lemma_named("impI"), -1, false, 0);
+        // (∀n≥N. P: n taken, n ≥ N a fact.)
+        f: int = tm_arg(c);
+        if (tm_kind(f) != TM_ABS) {
+            // (∀P is shown ∀y. P(y): the name taken is the one shown.)
+            cand_hint = name_for_eta(f);
+            ok: bool = gs_rule(n, lemma_named("allI"), -1, false, 0);
+            cand_hint = 0;
+            return ok
+        }
+        if (tm_kind(f) == TM_ABS) {
+            b: int = tm_body(f);
+            if (is_binary(b, role_name[ROLE_IMP]) && bounded_cond(spine_arg(b, 2,
+                0)) && gs_rule(n, lemma_named("allI_imp"), -1, false, 0)) return true
+        }
+        return gs_rule(n, lemma_named("allI"), -1, false, 0)
+    }
+    s: int = shape_of(goal_hyp(g, j));
+    if (s == SH_EX) return gs_rule(n, lemma_named("exE"), j, false, 0);
+    gs_rule(n, lemma_named("conjE"), j, false, 0)
+}
+
+// Name t dropped into the notch of the goal (j < 0) or of fact j.
+gs_notch(n: int, j: int, t: int) raises KernelError: bool {
+    if (n < 0 || t == 0 || !gs_has_notch(n, j)) return false;
+    gs_wits[0] = t;
+    if (j < 0) return gs_rule(n, lemma_named("exI"), -1, false, 1);
+    gs_rule(n, lemma_named("spec"), j, true, 1)
+}
+
+// ---- a fact put onto the goal ----
+// Whether candidate c (listed by cands_hyp for fact j) is a way to use
+// the fact on the goal: backwards, its conclusion fixed by the fact or the
+// goal (not one that takes the fact apart to any goal: that is its key).
+apply_ok(c: int, h: int): bool {
+    if (cd_kind[c] != C_BACK) return false;
+    l: int = cd_lemma[c];
+    if (l < 0) return true;
+    if (lm_name[l] == sym("FalseE")) return true;
+    q: int = strip_rule(thm_prop(lm_thm[l]));
+    if (!loose_pattern(q)) return true;
+    if (prem_n == 0) return false;
+    major: int = prem[0];
+    match_clear();
+    if (!match_term(major, h)) return false;
+    head_bound(q)
+}
+
+// How many names fact j put onto node n's goal still needs (0 or 1), or
+// -1 if it does not fit.
+gs_apply_wn(n: int, j: int) raises KernelError: int {
+    if (n < 0 || pn_move[n] >= 0) return -1;
+    g: int = pn_goal[n];
+    if (j < 0 || j >= gl_hypn[g]) return -1;
+    h: int = goal_hyp(g, j);
+    cands_hyp(n, j);
+    best: int = -1;
+    for c in 0..cd_n {
+        if (apply_ok(c, h) && cd_wn[c] <= 1 && (best < 0 || cd_wn[c] < best)) best = cd_wn[c]
+    }
+    if (best >= 0 || shape_of(h) != SH_ALL) return best;
+    // (A for-all fact that fits once a name in scope is put in.)
+    for i in 0..gl_fixn[g] {
+        x: int = goal_fix(g, i);
+        if (best < 0 && token_type(tm_type(x))) {
+            gs_save();
+            ok: bool = gs_apply_name(n, j, x);
+            gs_restore(n);
+            if (ok) best = 1
+        }
+    }
+    best
+}
+
+// A for-all fact j put onto the goal with name t for its variable, by a
+// rule (spec_mp, spec) whose conclusion, the name put in, is the goal
+// (matching alone cannot see that: Q x for Q has no x to match).
+gs_apply_name(n: int, j: int, t: int) raises KernelError: bool {
+    for k in 0..2 {
+        l: int = lemma_named("spec_mp");
+        if (k == 1) l = lemma_named("spec");
+        if (l >= 0 && gs_name_rule(n, l, j, t)) return true
+    }
+    false
+}
+
+gs_name_rule(
+    n: int,
+    l: int,
+    j: int,
+    t: int
+) raises KernelError: bool {
+    gs_c = -1;
+    g: int = pn_goal[n];
+    cands_clear();
+    q: int = strip_rule(thm_prop(lm_thm[l]));
+    if (prem_n == 0) return false;
+    major: int = prem[0];
+    match_clear();
+    if (!match_term(major, goal_hyp(g, j))) return false;
+    // (The rule's variable the fact does not fix: the name goes there.)
+    vars_n = 0;
+    collect_vars(thm_prop(lm_thm[l]));
+    v: int = 0;
+    for i in 0..vars_n {
+        if (match_val(vars[i]) == 0 && v == 0) v = vars[i]
+    }
+    if (v == 0 || !match_type(tm_type(v), tm_type(t)) || !match_bind(v, t)) return false;
+    inst: int = 0;
+    try {
+        inst = norm(match_subst(q))
+    } with KernelError -> {
+        return false
+    }
+    if (inst != gl_concl[g]) return false;
+    c: int = add_cand(C_BACK, l, j, 10);
+    if (c < 0 || cd_wn[c] != 0) return false;
+    cd_label[c] = make_label(n, c);
+    ok: bool = true;
+    try {
+        last_move = cand_apply(n, c, gs_wits, 0);
+        auto_close()
+    } with KernelError -> {
+        ok = false
+    }
+    if (ok) gs_c = c;
+    ok
+}
+
+// Fact j put onto the goal, with name t for what matching does not fix (0
+// if nothing is left). Whether it fit.
+gs_apply(n: int, j: int, t: int) raises KernelError: bool {
+    gs_c = -1;
+    if (n < 0 || pn_move[n] >= 0) return false;
+    g: int = pn_goal[n];
+    if (j < 0 || j >= gl_hypn[g]) return false;
+    h: int = goal_hyp(g, j);
+    wn: int = 0;
+    if (t != 0) wn = 1;
+    gs_wits[0] = t;
+    // (The candidates, best first: those ranked, then the rest.)
+    for pass in 0..2 {
+        cands_hyp(n, j);
+        k: int = cd_shown;
+        if (pass == 1) k = cd_n;
+        for i in 0..k {
+            c: int = i;
+            if (pass == 0) c = cd_order[i];
+            ok: bool = (pass == 0 || cd_rank[c] < 0) && apply_ok(c, h) && cd_wn[c] == wn;
+            if (ok) {
+                good: bool = true;
+                try {
+                    last_move = cand_apply(n, c, gs_wits, wn);
+                    auto_close()
+                } with KernelError -> {
+                    good = false
+                }
+                if (good) {
+                    gs_c = c;
+                    return true
+                }
+                // (Listed again: the try may have used the tables.)
+                cands_hyp(n, j)
+            }
+        }
+    }
+    if (t != 0) return gs_apply_name(n, j, t);
+    false
+}
+
+// ---- a gesture by its kind ----
+const GS_KEY: int = 1;
+
+const GS_NOTCH: int = 2;
+
+const GS_APPLY: int = 3;
+
+gs_do(
+    n: int,
+    kind: int,
+    j: int,
+    t: int
+) raises KernelError: bool {
+    if (kind == GS_KEY) return gs_key(n, j);
+    if (kind == GS_NOTCH) return gs_notch(n, j, t);
+    if (kind == GS_APPLY) return gs_apply(n, j, t);
+    false
+}
+
+// ---- trying a gesture, and taking it back ----
+const GSS: int = 512;
+
+gsv_pn: []int = new int[GSS](0);
+
+gsv_gl: []int = new int[GSS](0);
+
+gsv_gp: []int = new int[GSS](0);
+
+gsv_kp: []int = new int[GSS](0);
+
+gsv_mv: []int = new int[GSS](0);
+
+gsv_last: []int = new int[GSS](0);
+
+gsv_n: int = 0;
+
+gs_save() {
+    if (gsv_n >= GSS) return;
+    gsv_pn[gsv_n] = pn_n;
+    gsv_gl[gsv_n] = gl_n;
+    gsv_gp[gsv_n] = gpool_n;
+    gsv_kp[gsv_n] = kpool_n;
+    gsv_mv[gsv_n] = mv_n;
+    gsv_last[gsv_n] = last_move;
+    gsv_n = gsv_n + 1
+}
+
+// Node n as it was at the last save (the save let go).
+gs_restore(n: int) {
+    if (gsv_n == 0) return;
+    gsv_n = gsv_n - 1;
+    reopen(n);
+    nf_n = 0;
+    nh_n = 0;
+    pn_n = gsv_pn[gsv_n];
+    gl_n = gsv_gl[gsv_n];
+    gpool_n = gsv_gp[gsv_n];
+    kpool_n = gsv_kp[gsv_n];
+    mv_n = gsv_mv[gsv_n];
+    last_move = gsv_last[gsv_n]
+}
+
+// A fingerprint of what is left under node n: its open goals (1: none).
+gs_sig(n: int) raises KernelError: int {
+    gl_leaf_n = 0;
+    gs_leaves(n);
+    if (gl_leaf_n == 0) return 1;
+    sig: int = 7;
+    for i in 0..gl_leaf_n sig = (sig * 1000003 + goal_prop(pn_goal[gl_leaf[i]])) % 2147483647;
+    sig
+}
+
+gl_leaf: []int = new int[4096](0);
+
+gl_leaf_n: int = 0;
+
+gs_leaves(n: int) {
+    if (pn_thm[n] != 0) return;
+    if (pn_move[n] < 0) {
+        if (gl_leaf_n < len(gl_leaf)) {
+            gl_leaf[gl_leaf_n] = n;
+            gl_leaf_n = gl_leaf_n + 1
+        }
+        return
+    }
+    for i in 0..pn_kidn[n] gs_leaves(node_kid(n, i))
+}
+
+// What a gesture at n would leave (its fingerprint), or 0 if it does not
+// fit; the proof as it was afterwards. Also what it made: the first goal
+// it leaves (or 0 if it closes), and the new fact it gave (or 0).
+gt_goal: int = 0;
+
+gt_fact: int = 0;
+
+gt_closes: bool = false;
+
+gs_try(
+    n: int,
+    kind: int,
+    j: int,
+    t: int
+) raises KernelError: int {
+    gt_goal = 0;
+    gt_fact = 0;
+    gt_closes = false;
+    if (n < 0) return 0;
+    old: int = pn_goal[n];
+    gs_save();
+    ok: bool = gs_do(n, kind, j, t);
+    sig: int = 0;
+    if (ok) {
+        sig = gs_sig(n);
+        gt_closes = pn_thm[n] != 0;
+        if (gl_leaf_n > 0) gt_goal = gl_concl[pn_goal[gl_leaf[0]]];
+        gt_fact = gs_new_fact(n, old)
+    }
+    gs_restore(n);
+    sig
+}
+
+// The fact a move at n gave (in the first goal under it), or 0.
+gs_new_fact(n: int, old: int): int {
+    k: int = n;
+    while (pn_move[k] >= 0 && pn_kidn[k] > 0) k = node_kid(k, pn_kidn[k] - 1);
+    g: int = pn_goal[k];
+    r: int = 0;
+    for i in 0..gl_hypn[g] {
+        h: int = goal_hyp(g, i);
+        if (!goal_has_hyp(old, h)) r = h
+    }
+    r
+}
+
+// ---- can it be shown? ----
+// A bounded search from a goal with the same gestures (names only from
+// those in scope; every key opened first, as keys never lose anything):
+// 1 if no gesture can finish it (the search ran out of moves), 0 if one
+// can, -1 if the search was cut short (too deep, or too long).
+ds_nodes: int = 0;
+
+ds_budget: int = 3000;
+
+ds_out: bool = false;
+
+ds_cut: bool = false;
+
+ds_path: []int = new int[256](0);
+
+ds_pn: int = 0;
+
+// The moves listed, a frame of them for each depth.
+const DSM: int = 16384;
+
+ds_k: []int = new int[DSM](0);
+
+ds_j: []int = new int[DSM](0);
+
+ds_t: []int = new int[DSM](0);
+
+ds_top: int = 0;
+
+// The leaves being shown, a frame for each depth.
+ds_leaf: []int = new int[DSM](0);
+
+ds_ltop: int = 0;
+
+gs_dead(n: int, depth: int, budget: int) raises KernelError: int {
+    if (n < 0) return -1;
+    ds_nodes = 0;
+    ds_budget = budget;
+    ds_out = false;
+    ds_cut = false;
+    ds_pn = 0;
+    ds_top = 0;
+    ds_ltop = 0;
+    sv0: int = gsv_n;
+    r: bool = gs_provable(n, depth);
+    gsv_n = sv0;
+    if (r) return 0;
+    if (ds_out || ds_cut) return -1;
+    1
+}
+
+ds_push(k: int, j: int, t: int) {
+    if (ds_top >= DSM) return;
+    ds_k[ds_top] = k;
+    ds_j[ds_top] = j;
+    ds_t[ds_top] = t;
+    ds_top = ds_top + 1
+}
+
+gs_provable(n: int, depth: int) raises KernelError: bool {
+    if (pn_thm[n] != 0) return true;
+    ds_nodes = ds_nodes + 1;
+    if (ds_nodes > ds_budget) {
+        ds_out = true;
+        return false
+    }
+    g: int = pn_goal[n];
+    p: int = goal_prop(g);
+    for i in 0..ds_pn {
+        if (ds_path[i] == p) return false
+    }
+    if (ds_pn >= len(ds_path)) {
+        ds_cut = true;
+        return false
+    }
+    ds_path[ds_pn] = p;
+    ds_pn = ds_pn + 1;
+    r: bool = false;
+    // (A key first, and only it: opening never loses a way on.)
+    kj: int = -2;
+    if (gs_has_key(n, -1)) kj = -1;
+    for j in 0..gl_hypn[g] {
+        if (kj == -2 && gs_has_key(n, j)) kj = j
+    }
+    keyed: bool = false;
+    if (kj != -2) {
+        gs_save();
+        if (gs_key(n, kj)) {
+            keyed = true;
+            r = ds_kids(n, depth)
+        }
+        gs_restore(n)
+    }
+    if (!keyed) {
+        if (depth <= 0) {
+            ds_cut = true;
+            ds_pn = ds_pn - 1;
+            return false
+        }
+        base: int = ds_top;
+        ds_moves(n);
+        top: int = ds_top;
+        m: int = base;
+        while (m < top && !r && !ds_out) {
+            gs_save();
+            if (gs_do(n, ds_k[m], ds_j[m], ds_t[m]) && ds_progress(n, p)) r = ds_kids(n,
+                depth - 1);
+            gs_restore(n);
+            m = m + 1
+        }
+        ds_top = base
+    }
+    ds_pn = ds_pn - 1;
+    r
+}
+
+// Whether a move at n changed what is left (not one goal, the same).
+ds_progress(n: int, p: int) raises KernelError: bool {
+    gl_leaf_n = 0;
+    gs_leaves(n);
+    !(gl_leaf_n == 1 && goal_prop(pn_goal[gl_leaf[0]]) == p)
+}
+
+// Whether every goal a move at n left can be shown.
+ds_kids(n: int, depth: int) raises KernelError: bool {
+    gl_leaf_n = 0;
+    gs_leaves(n);
+    base: int = ds_ltop;
+    for i in 0..gl_leaf_n {
+        if (ds_ltop < DSM) {
+            ds_leaf[ds_ltop] = gl_leaf[i];
+            ds_ltop = ds_ltop + 1
+        }
+    }
+    top: int = ds_ltop;
+    r: bool = true;
+    i: int = base;
+    while (i < top && r) {
+        r = gs_provable(ds_leaf[i], depth);
+        i = i + 1
+    }
+    ds_ltop = base;
+    r
+}
+
+// The gestures at n that choose (keys aside): names into notches, facts
+// onto the goal.
+ds_moves(n: int) raises KernelError {
+    g: int = pn_goal[n];
+    tn: int = 0;
+    for i in 0..gl_fixn[g] {
+        if (token_type(tm_type(goal_fix(g, i))) && tn < len(ds_tok)) {
+            ds_tok[tn] = goal_fix(g, i);
+            tn = tn + 1
+        }
+    }
+    for j in 0..gl_hypn[g] {
+        wn: int = gs_apply_wn(n, j);
+        if (wn == 0) ds_push(GS_APPLY, j, 0) else if (wn == 1) {
+            for i in 0..tn ds_push(GS_APPLY, j, ds_tok[i])
+        }
+    }
+    if (gs_has_notch(n, -1)) {
+        for i in 0..tn ds_push(GS_NOTCH, -1, ds_tok[i])
+    }
+    for j in 0..gl_hypn[g] {
+        if (gs_has_notch(n, j)) {
+            for i in 0..tn ds_push(GS_NOTCH, j, ds_tok[i])
+        }
+    }
+}
+
+ds_tok: []int = new int[64](0)

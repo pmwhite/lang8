@@ -31,6 +31,8 @@ import "app.l8";
 
 import "hand.l8";
 
+import "board.l8";
+
 import "picture.l8";
 
 import "pages.l8";
@@ -144,6 +146,8 @@ main(argc: int, argv: []str@immortal) raises IoError, KernelError: int {
         if (getenv("L8_WATCH") != null) start_watch()
     }
     taps_read();
+    boxes_on = getenv("L8_BOXES") != null;
+    do_read();
     ev: XEvent = XEvent.Other;
     running: bool = true;
     alive: bool = true;
@@ -279,6 +283,8 @@ tap_y2: []f32 = new f32[TAPS](0.0);
 
 tap_ms: []f32 = new f32[TAPS](0.0);
 
+tap_hold: []bool = new bool[TAPS](false);
+
 tap_n: int = 0;
 
 tap_next: int = 0;
@@ -354,11 +360,20 @@ taps_read() {
             tap_x[k] = env_num();
             env_skip(44);
             tap_y[k] = env_num();
+            tap_hold[k] = false;
             if (env_skip(62)) {
                 tap_kind[k] = 1;
+                // (x,y>>x2,y2+ms: a slow drag, every frame between; ! at
+                // the end holds it there.)
+                if (env_skip(62)) {
+                    tap_kind[k] = 3;
+                    tap_ms[k] = 600.0
+                }
                 tap_x2[k] = env_num();
                 env_skip(44);
-                tap_y2[k] = env_num()
+                tap_y2[k] = env_num();
+                if (tap_kind[k] == 3 && env_skip(43)) tap_ms[k] = env_num();
+                if (env_skip(33)) tap_hold[k] = true
             } else if (env_skip(43)) {
                 tap_kind[k] = 2;
                 tap_ms[k] = env_num()
@@ -418,12 +433,16 @@ taps_step() raises KernelError {
                 finger_up(1, x, y);
                 gs_on = false
             }
+        } else if (tap_kind[k] == 3) {
+            if (job_step(tap_x[k], tap_y[k], tap_x2[k], tap_y2[k], tap_ms[k], tap_hold[k],
+                t)) gs_on = false
         } else if (t >= tap_ms[k] / 1000.0) {
             finger_up(1, tap_x[k], tap_y[k]);
             gs_on = false
         }
         return
     }
+    if (do_step_go()) return;
     if (tap_next < tap_n) {
         if (now_t < 1.7 + tap_next as f32 * gap) return;
         k: int = tap_next;
@@ -445,6 +464,7 @@ taps_step() raises KernelError {
     }
     if (key_next < key_n) {
         if (now_t < 1.7 + (tap_n + key_next) as f32 * gap) return;
+        if (do_n > 0 && do_next < do_n) return;
         ks: int = key_sym[key_next];
         key_next = key_next + 1;
         if (ks == 65307) esc_key_safe() else key_press(ks)
@@ -453,4 +473,255 @@ taps_step() raises KernelError {
 
 esc_key_safe() {
     if (esc_key()) { }
+}
+
+// A slow drag at time t of it: still a moment where it starts (so it is
+// picked up), then carried, every frame, to (x1, y1) over ms; let go
+// there unless held. Whether it is over.
+job_step(
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    ms: f32,
+    hold: bool,
+    t: f32
+) raises KernelError: bool {
+    busy = true;
+    if (t < 0.12) return false;
+    f: f32 = clampf((t - 0.12) / maxf(ms / 1000.0, 0.05), 0.0, 1.0);
+    k: f32 = f * f * (3.0 - 2.0 * f);
+    x: f32 = x0 + (x1 - x0) * k;
+    y: f32 = y0 + (y1 - y0) * k;
+    finger_move(256, x, y);
+    if (f < 1.0) return false;
+    if (hold) return false;
+    // (A moment over the place, then let go.)
+    if (t < 0.12 + ms / 1000.0 + 0.15) return false;
+    finger_up(1, x, y);
+    true
+}
+
+// ---- L8_DO: gestures by what they are, for pictures ----
+//   open goal | open fact K        a key tapped
+//   token N > goal | token N > fact K    name N carried to the notch
+//   fact K > goal                  fact K carried onto the goal
+//   fill N                         name N into the socket a fact left
+//   undo | hint | enter | wait     as the keys
+// Steps are ; apart, each when the last is done (L8_DO_GAP hundredths
+// after it, default 90). L8_DO_STOP=k holds step k (from 1) over its place
+// and does no more.
+do_buf: []i8 = new i8[4096](0i8);
+
+do_s0: []int = new int[64](0);
+
+do_s1: []int = new int[64](0);
+
+do_n: int = 0;
+
+do_next: int = 0;
+
+do_on: bool = false;
+
+do_t0: f32 = 0.0;
+
+do_free_t: f32 = 1.9;
+
+do_x0: f32 = 0.0;
+
+do_y0: f32 = 0.0;
+
+do_x1: f32 = 0.0;
+
+do_y1: f32 = 0.0;
+
+do_hold: bool = false;
+
+do_read() {
+    do_n = 0;
+    if (!env_text("L8_DO")) return;
+    for i in 0..env_len do_buf[i] = env_buf[i];
+    i: int = 0;
+    while (i < env_len && do_n < 64) {
+        j: int = i;
+        while (j < env_len && do_buf[j] as int != 59) j = j + 1;
+        a: int = i;
+        while (a < j && do_buf[a] as int == 32) a = a + 1;
+        b: int = j;
+        while (b > a && do_buf[b - 1] as int == 32) b = b - 1;
+        if (b > a) {
+            do_s0[do_n] = a;
+            do_s1[do_n] = b;
+            do_n = do_n + 1
+        }
+        i = j + 1
+    }
+}
+
+// The words of a step, one at a time.
+dw_at: int = 0;
+
+dw_end: int = 0;
+
+dw_a: int = 0;
+
+dw_b: int = 0;
+
+do_word(): bool {
+    while (dw_at < dw_end && do_buf[dw_at] as int == 32) dw_at = dw_at + 1;
+    if (dw_at >= dw_end) return false;
+    dw_a = dw_at;
+    while (dw_at < dw_end && do_buf[dw_at] as int != 32) dw_at = dw_at + 1;
+    dw_b = dw_at;
+    true
+}
+
+dw_is(w: str): bool {
+    if (dw_b - dw_a != len(w)) return false;
+    for k in 0..len(w) {
+        if (do_buf[dw_a + k] != w[k]) return false
+    }
+    true
+}
+
+dw_num(): int {
+    v: int = 0;
+    for k in dw_a..dw_b {
+        c: int = do_buf[k] as int;
+        if (c >= 48 && c <= 57) v = v * 10 + c - 48
+    }
+    v
+}
+
+// The name on the shelf written as the word now (its place), or -1.
+dw_token(): int {
+    s: int = sym_of(do_buf, dw_a, dw_b);
+    for k in 0..shn_n {
+        show_line(shn_term[k]);
+        if (line_sym_now() == s) return k
+    }
+    -1
+}
+
+// The place a thing goes: goal (its notch if it has one) or fact K.
+dw_place(): bool {
+    if (!do_word()) return false;
+    if (dw_is("goal")) {
+        do_x1 = goal_rx + goal_rw * 0.5;
+        do_y1 = goal_ry + goal_rh * 0.5;
+        if (gn_ok && !ps_on) {
+            do_x1 = (gn_x0 + gn_x1) * 0.5;
+            do_y1 = (gn_y0 + gn_y1) * 0.5
+        }
+        return true
+    }
+    if (dw_is("fact") && do_word()) {
+        k: int = dw_num();
+        if (k >= bf_n) return false;
+        do_x1 = bf_x0[k] + 60.0;
+        do_y1 = (bf_y0[k] + bf_y1[k]) * 0.5;
+        if (bfn_ok[k]) {
+            do_x1 = (bfn_x0[k] + bfn_x1[k]) * 0.5;
+            do_y1 = (bfn_y0[k] + bfn_y1[k]) * 0.5
+        }
+        return true
+    }
+    false
+}
+
+// Each frame: the step going on, or the next begun. Whether L8_DO is
+// still going.
+do_step_go() raises KernelError: bool {
+    if (do_n == 0 || do_next > do_n) return false;
+    if (do_on) {
+        if (job_step(do_x0, do_y0, do_x1, do_y1, env_int("L8_DO_MS", 600) as f32,
+            do_hold, now_t - do_t0)) {
+            do_on = false;
+            do_free_t = now_t + env_int("L8_DO_GAP", 90) as f32 / 100.0
+        }
+        return true
+    }
+    if (do_next >= do_n) return false;
+    if (now_t < do_free_t) return true;
+    stop: int = env_int("L8_DO_STOP", 0);
+    k: int = do_next;
+    do_next = k + 1;
+    if (stop > 0 && k >= stop) {
+        do_next = do_n + 1;
+        return true
+    }
+    do_hold = stop == k + 1;
+    dw_at = do_s0[k];
+    dw_end = do_s1[k];
+    do_free_t = now_t + env_int("L8_DO_GAP", 90) as f32 / 100.0;
+    if (!do_word()) return true;
+    if (dw_is("undo")) undo_move() else if (dw_is("hint")) key_press(104) else if (dw_is("enter")) key_press(65293) else if (dw_is("wait")) { } else if (dw_is("open")) {
+        if (!do_word()) return true;
+        x: f32 = -1.0;
+        y: f32 = 0.0;
+        if (dw_is("goal") && gk_ok) {
+            x = (gk_x0 + gk_x1) * 0.5;
+            y = (gk_y0 + gk_y1) * 0.5
+        } else if (dw_is("fact") && do_word()) {
+            j: int = dw_num();
+            if (j < bf_n && bfk_ok[j]) {
+                x = (bfk_x0[j] + bfk_x1[j]) * 0.5;
+                y = (bfk_y0[j] + bfk_y1[j]) * 0.5
+            }
+        }
+        if (x < 0.0) {
+            do_say("no such key");
+            return true
+        }
+        finger_down(1, x, y);
+        if (!do_hold) finger_up(1, x, y)
+    } else if (dw_is("token") || dw_is("fill")) {
+        fill: bool = dw_is("fill");
+        if (!do_word()) return true;
+        t: int = dw_token();
+        if (t < 0) {
+            do_say("no such name on the shelf");
+            return true
+        }
+        do_x0 = shn_x[t];
+        do_y0 = shn_y[t];
+        if (fill) {
+            do_x1 = goal_rx + goal_rw * 0.5;
+            do_y1 = goal_ry + goal_rh * 0.5
+        } else {
+            if (!do_word() || !dw_is(">") || !dw_place()) {
+                do_say("token N > goal, or > fact K");
+                return true
+            }
+        }
+        do_begin()
+    } else if (dw_is("fact")) {
+        if (!do_word()) return true;
+        j: int = dw_num();
+        if (j >= bf_n) {
+            do_say("no such fact");
+            return true
+        }
+        do_x0 = bf_x0[j] + 40.0;
+        do_y0 = (bf_y0[j] + bf_y1[j]) * 0.5;
+        if (!do_word() || !dw_is(">") || !dw_place()) {
+            do_say("fact K > goal");
+            return true
+        }
+        do_begin()
+    } else do_say("no such step");
+    true
+}
+
+do_begin() {
+    finger_down(1, do_x0, do_y0);
+    do_on = true;
+    do_t0 = now_t
+}
+
+do_say(why: str) {
+    line_clear();
+    line_add("L8_DO: ");
+    line_add(why);
+    line_print_safe()
 }
