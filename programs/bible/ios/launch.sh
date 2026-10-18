@@ -26,28 +26,26 @@ time_launches() {
     xcrun simctl terminate "$dev" "$id" 2>/dev/null || true
     sleep 1
     python3 - "$dev" "$id" "$1" "$i" >> "$out" <<'PY'
-import subprocess, sys, time
+import os, subprocess, sys, time
 dev, app, name, i = sys.argv[1:5]
+log = "/tmp/launch-%s-%s.txt" % (name, i)
 t0 = time.time()
 p = subprocess.Popen(["xcrun", "simctl", "launch", "--console-pty", dev, app],
-    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    stdout=open(log, "w"), stderr=subprocess.STDOUT)
+t = None
 own = ""
-for line in iter(p.stdout.readline, b""):
-    s = line.decode(errors="replace")
-    if "launched in ms" in s:
-        own = s.split()[-1]
-    if "bible: up" in s:
+while time.time() - t0 < 90:
+    s = open(log, errors="replace").read()
+    if t is None and "bible: up" in s:
         t = time.time() - t0
-        # (A moment for the app's own count, printed just after.)
-        end = time.time() + 1
-        while not own and time.time() < end:
-            l2 = p.stdout.readline().decode(errors="replace")
-            if "launched in ms" in l2:
-                own = l2.split()[-1]
+    if "launched in ms" in s:
+        own = s.split("launched in ms")[1].split()[0]
+    if t is not None and (own or time.time() - t0 > t + 1):
         break
+    time.sleep(0.01)
 p.kill()
 if i != "0":
-    print(name, round(t * 1000), "ms", ("(own " + own + " ms)") if own else "")
+    print(name, round(t * 1000) if t is not None else -1, "ms", ("(own " + own + " ms)") if own else "")
 PY
   done
 }
