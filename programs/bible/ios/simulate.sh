@@ -13,6 +13,14 @@
 #   notes   notes read and written, the library's search and sort, and the
 #           screen recording of transitions (transitions.mp4, with the
 #           times of its sequences in transitions.txt)
+#   more    Round 3 (DESIGN.md §8): previews, keeping the screen on,
+#           history, chapter notes, the export (notes-export.md), the color
+#           filter, Listen, the words of Jesus in red, and the largest text
+#   store   the App Store's screenshots (store-1.png to store-6.png), on
+#           the largest iPhone, and a plain launch's console (no bible:
+#           lines in it, plain-launch.txt)
+#   ios18   a few of read's and study's shots on an iOS 18 runtime (-ios18),
+#           if the Mac has one
 # After each step the script waits for the app to say it has settled (the
 # notification space.trailingwhite.smoothbible.done, from `notifyutil -1`),
 # with a timeout, rather than sleeping; then it takes the screenshot.
@@ -26,13 +34,18 @@ id=space.trailingwhite.smoothbible
 mkdir -p "$out"
 now() { python3 -c 'import time; print("%.3f" % time.time())'; }
 start=$(now)
-dev=$(xcrun simctl list devices available -j | python3 -c '
-import json, sys
-devices = json.load(sys.stdin)["devices"]
-phones = [d for runtime, ds in sorted(devices.items()) if "iOS" in runtime for d in ds if d["name"].startswith("iPhone")]
-pick = [d for d in phones if d["name"] in ("iPhone 16", "iPhone 15", "iPhone 16 Pro", "iPhone 17")] or phones
-print(pick[-1]["udid"])')
+dev=$("$(dirname "$0")/pick.sh" "$group")
+if [ -z "$dev" ]; then
+  if [ "$group" = ios18 ]; then
+    echo "no iOS 18 runtime; older-iOS path unchecked" | tee "$out/ios18.txt"
+    xcrun simctl list runtimes >> "$out/ios18.txt" 2>&1
+    exit 0
+  fi
+  echo "no simulator"
+  exit 1
+fi
 echo "simulator $dev"
+xcrun simctl list devices available | grep "$dev" | tee "$out/device.txt"
 xcrun simctl boot "$dev" 2>/dev/null || true
 xcrun simctl bootstatus "$dev" -b >/dev/null
 # (No keyboard tutorial over the first text field.)
@@ -44,8 +57,11 @@ xcrun simctl ui "$dev" content_size large 2>/dev/null || true
 echo "booted in $(python3 -c "print(round($(now) - $start))") s" >> "$out/timing.txt"
 xcrun simctl install "$dev" "$app"
 echo "booted and installed in $(python3 -c "print(round($(now) - $start))") s" >> "$out/timing.txt"
+# (The ios18 group's shots have -ios18 after their names.)
+suffix=
+[ "$group" = ios18 ] && suffix=-ios18
 shot() {
-  xcrun simctl io "$dev" screenshot "$out/$1.png" >/dev/null 2>&1 && echo "shot $1"
+  xcrun simctl io "$dev" screenshot "$out/$1$suffix.png" >/dev/null 2>&1 && echo "shot $1$suffix"
 }
 xcrun simctl spawn "$dev" log stream --predicate 'process == "SmoothBible" AND messageType >= 16' > "$out/log.txt" 2>&1 &
 logger=$!
@@ -110,6 +126,12 @@ step() {
   wait_done "$1" "$1 ${2:-}" "${3:-4}"
   [ -n "${2:-}" ] && shot "$2"
 }
+if [ "$group" = store ]; then
+  # The status bar as the App Store's screenshots have it.
+  xcrun simctl status_bar "$dev" override --time 9:41 --batteryState charged --batteryLevel 100 \
+    --cellularMode active --cellularBars 4 --wifiMode active --wifiBars 3 2>/dev/null || \
+    xcrun simctl status_bar "$dev" override --time 9:41 --batteryState charged --batteryLevel 100
+fi
 launch console.txt
 case "$group" in
 read)
@@ -201,9 +223,9 @@ notes)
   sleep 0.5
   : > "$out/transitions.txt"
   n=1
-  for s in 71 72 73 74 75 76; do
+  for s in 71 72 73 74 75 76 77 78 79; do
     a=$(now)
-    step "$s" "" 15
+    step "$s" "" 18
     b=$(now)
     echo "$n $(python3 -c "print(round($a - $rec0, 2), round($b - $rec0, 2))")" >> "$out/transitions.txt"
     n=$((n + 1))
@@ -211,6 +233,81 @@ notes)
   sleep 0.5
   kill -INT "$recorder" 2>/dev/null
   wait "$recorder" 2>/dev/null
+  ;;
+more)
+  # (DESIGN.md §8: shots 60 to 88.)
+  step 100 60-xref-links
+  step 101 61-preview-xref
+  step 102 62-footnote-link
+  step 103 63-preview-footnote
+  step 104 64-preview-open
+  step 105 65-preview-in-study 8
+  step 106 66-preview-from-note 6
+  step 107 67-preview-cross-chapter 6
+  step 108 68-keep-screen-on 6
+  step 109 69-picker-show-all 6
+  step 110 70-history
+  step 111 71-history-clear-menu
+  step 112 72-library-compose 6
+  step 113 73-chapter-note-editor 6
+  step 114 74-chapter-note-glyph 6
+  step 115 75-library-chapter-note 6
+  step 116 76-export-sheet 6
+  # The export's file (the demo keeps a copy in Documents).
+  data=$(xcrun simctl get_app_container "$dev" "$id" data 2>/dev/null)
+  cp "$data"/Documents/*.md "$out/notes-export.md" 2>/dev/null && echo "notes-export.md kept"
+  step 117 77-highlight-filter-all 6
+  step 118 78-highlight-filter-green
+  step 119 79-listen-entry 6
+  step 120 80-listening 10
+  step 121 81-listen-paused
+  step 122 82-listen-tray
+  step 123 83-red-letter
+  step 124 84-red-letter-night
+  step 125
+  ui content_size accessibility-extra-extra-extra-large
+  step 125 85-ax-reader
+  step 126 86-ax-tray
+  step 127 87-ax-word-study 6
+  step 128 88-ax-settings 6
+  ui content_size large
+  ;;
+store)
+  # The App Store's (DESIGN.md §8.9.7): light, Paper, the default size.
+  shot store-1
+  step 130 store-2
+  step 131 store-3
+  step 132 store-4 6
+  step 133 store-5 6
+  step 134 store-6 8
+  # A plain launch (no L8_DEMO, no L8_TIMING), as in normal use: its console
+  # must have no "bible:" lines.
+  xcrun simctl terminate "$dev" "$id" 2>/dev/null || true
+  kill "$console" 2>/dev/null || true
+  sleep 1
+  xcrun simctl launch --console-pty "$dev" "$id" > "$out/plain-console.txt" 2>&1 &
+  console=$!
+  sleep 10
+  xcrun simctl io "$dev" screenshot "$out/plain-launch.png" >/dev/null 2>&1
+  n=$(grep -c "bible:" "$out/plain-console.txt")
+  echo "plain launch: $n bible: lines" | tee "$out/plain-launch.txt"
+  ;;
+ios18)
+  shot 01-genesis-1
+  step 15 15a-before-collapse
+  step 16 15-collapsed
+  step 17 17-search
+  step 8
+  step 9
+  step 10
+  step 11
+  step 23 23-settings 6
+  step 28
+  ui appearance dark
+  shot 28-night
+  ui appearance light
+  step 40
+  step 41 33-interlinear 6
   ;;
 esac
 echo "total $(python3 -c "print(round($(now) - $start))") s" >> "$out/timing.txt"

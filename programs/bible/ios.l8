@@ -43,7 +43,17 @@ import "ios_study.l8";
 
 import "ios_bar.l8";
 
+import "ios_preview.l8";
+
+import "ios_listen.l8";
+
+import "ios_history.l8";
+
+import "ios_library.l8";
+
 import "ios_demo.l8";
+
+import "ios_demo3.l8";
 
 extern open(path: str, flags: int, mode: int): int;
 
@@ -220,7 +230,8 @@ rv_e: []int = new int[200](0);
 rv_joins: []bool = new bool[200](false);
 
 // The marks put in: where (before them), how many units, and what (0 a
-// bookmark, 1 a note), for which verse.
+// bookmark, 1 a note, 2 the chapter's note, after its label), for which
+// verse.
 ev_n: int = 0;
 
 ev_pos: []int = new int[400](0);
@@ -249,6 +260,8 @@ compute_ranges(c: int) {
     rv_c = c;
     rv_count = verse_count;
     ev_n = 0;
+    // (The chapter's own note: its mark after the chapter's label.)
+    if (note_of(c, 0) >= 0 && label_end > 0) add_event(u16_at[label_end], 2, 2, 0);
     for i in 0..verse_count {
         b: int = verse_begin[i];
         e: int = verse_end[i];
@@ -327,16 +340,18 @@ symbol_attachment(name: str, h: f64, y: f64): int {
 put_event(s: int, j: int) {
     pos: int = ev_pos[j];
     n: int = msg(s, sel("length"));
-    at: int = if (ev_kind[j] == 1) pos - 1 else pos;
+    at: int = if (ev_kind[j] >= 1) pos - 1 else pos;
     if (at < 0) at = 0;
     if (at >= n) at = n - 1;
     base: int = msg2(s, sel("attributesAtIndex:effectiveRange:"), at, 0);
     att: int = if (ev_kind[j] == 0) symbol_attachment("bookmark.fill", em * 0.55f64,
         em * 0.3f64) else symbol_attachment("note.text", em * 0.62f64, -em * 0.04f64);
+    msg1(att, sel("setAccessibilityLabel:"), nsstring(if (ev_kind[j] == 0) "Bookmark" else if (ev_kind[j] == 2) "Chapter Note" else "Note"));
     d: int = msg(base, sel("mutableCopy"));
     msg2(d, sel("setObject:forKey:"), att, k_attachment);
     if (ev_kind[j] == 1) msg2(d, sel("setObject:forKey:"), nsnumber_int(ev_verse[j]),
         nsstring(k_note_mark));
+    if (ev_kind[j] == 2) msg2(d, sel("setObject:forKey:"), nsnumber_int(1), nsstring(k_chapter_note));
     glyph: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
         ustr(65532, 0), d);
     space: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
@@ -361,6 +376,16 @@ flash_c: int = -1;
 
 flash_v: int = 0;
 
+// The verse being read aloud (its chapter, or -1): washed as a selection
+// is, without the underline.
+speak_c: int = -1;
+
+speak_v: int = 0;
+
+// A chapter painted for a preview: its highlights, not the reader's
+// selection, flash or reading aloud.
+painting_preview: bool = false;
+
 // The washes on chapter c's text s (the chapter measured): highlights,
 // the verses selected, and a verse flashed.
 paint_marks(s: int, c: int) {
@@ -380,15 +405,17 @@ paint_marks(s: int, c: int) {
             if (to > b) msg4(s, sel("addAttribute:value:range:"), k_background, c_hl[color],
                 b, to - b)
         }
-        if (c == sel_c && is_selected(v) && e > b && e <= n) {
+        if (painting_preview) { } else if (c == sel_c && is_selected(v) && e > b && e <= n) {
             msg4(s, sel("addAttribute:value:range:"), k_background, c_sel, b, e - b);
             msg4(s, sel("addAttribute:value:range:"), k_underline, nsnumber_int(257),
                 b, e - b);
             msg4(s, sel("addAttribute:value:range:"), k_underline_color, c_underline,
                 b, e - b)
         }
-        if (c == flash_c && v == flash_v && e > b && e <= n) msg4(s, sel("addAttribute:value:range:"),
-            k_background, c_flash, b, e - b)
+        if (!painting_preview && c == flash_c && v == flash_v && e > b && e <= n) msg4(s,
+            sel("addAttribute:value:range:"), k_background, c_flash, b, e - b);
+        if (!painting_preview && c == speak_c && v == speak_v && e > b && e <= n) msg4(s,
+            sel("addAttribute:value:range:"), k_background, c_sel, b, e - b)
     }
 }
 
@@ -909,6 +936,7 @@ scroll_began(_self: int, _cmd: int, sv: int): int {
     drag_top = offset_y(sv);
     drag_low = drag_top;
     bar_drag_began();
+    listen_drag_began();
     0
 }
 
@@ -924,9 +952,18 @@ scroll_ended(_self: int, _cmd: int, sv: int): int {
     if (is_reader(sv)) {
         bar_settle();
         title_settle();
-        save_place()
+        save_place();
+        reader_rested()
     }
     0
+}
+
+// The reader at rest after a scroll: the screen kept on (if asked), the
+// chapter perhaps dwelt in, listening's following let wait.
+reader_rested() {
+    keep_screen_touched();
+    dwell_check();
+    listen_dragged()
 }
 
 scroll_dragged(
@@ -938,7 +975,8 @@ scroll_dragged(
     if (is_reader(sv) && (decelerate & 255) == 0) {
         bar_settle();
         title_settle();
-        save_place()
+        save_place();
+        reader_rested()
     }
     0
 }
@@ -950,19 +988,32 @@ scroll_dragged(
 tapped(_self: int, _cmd: int, tap: int): int {
     tv: int = msg(tap, sel("view"));
     l8_msg_hfa(hfa, tap, sel("locationInView:"), tv, 0, 0);
-    x: f64 = hfa[0];
-    y: f64 = hfa[1];
+    reader_tap(tv, hfa[0], hfa[1]);
+    0
+}
+
+reader_tap(tv: int, x: f64, y: f64): int {
     range: int = msg(tv, sel("selectedTextRange"));
     if (range != 0 && (msg(range, sel("isEmpty")) & 255) == 0) return 0;
+    keep_screen_touched();
     c: int = chapter_of_view(tv);
     link: int = link_at(tv, x, y, k_link);
     if (link > 0) {
         show_footnote(tv, c, link, x, y);
         return 0
     }
+    ref: int = link_at_within(tv, x, y, k_xref, 12.0f64);
+    if (ref > 0) {
+        open_preview(ref);
+        return 0
+    }
     mark: int = link_at(tv, x, y, k_note_mark);
     if (mark > 0) {
         open_note(c, mark, mark);
+        return 0
+    }
+    if (link_at(tv, x, y, k_chapter_note) > 0) {
+        open_note(c, 0, 0);
         return 0
     }
     k: int = char_at(tv, x, y);
@@ -994,6 +1045,16 @@ link_at(
     y: f64,
     key_name: str
 ): int {
+    link_at_within(tv, x, y, key_name, 16.0f64)
+}
+
+link_at_within(
+    tv: int,
+    x: f64,
+    y: f64,
+    key_name: str,
+    slack: f64
+): int {
     i: int = char_at(tv, x, y);
     if (i < 0) return 0;
     storage: int = msg(tv, sel("textStorage"));
@@ -1004,7 +1065,7 @@ link_at(
         if (k >= 0 && k < n) {
             v: int = msg3(storage, sel("attribute:atIndex:effectiveRange:"), key,
                 k, 0);
-            if (v != 0 && near_char(tv, k, x, y, 16.0f64)) return msg(v, sel("longValue"))
+            if (v != 0 && near_char(tv, k, x, y, slack)) return msg(v, sel("longValue"))
         }
     }
     0
@@ -1033,8 +1094,13 @@ together(
 }
 
 // ---- footnotes ----
-// A footnote, in a popover pointing at its mark: which verse it is on, and
-// its words.
+// A footnote, in a popover pointing at its mark (over the reader, or over
+// a preview): which verse it is on, and its words, in a text view, its
+// references to verses (Book C:V) links that preview (DESIGN.md ยง8.1).
+fn_c: int = -1;
+
+fn_v: int = 0;
+
 show_footnote(
     tv: int,
     c: int,
@@ -1042,31 +1108,24 @@ show_footnote(
     x: f64,
     y: f64
 ) {
-    if (presented() != 0) return;
+    host: int = top_presented();
+    if (host != 0 && !preview_on_top(host)) return;
+    if (host == 0) host = nav;
     e: int = line_end(at);
     vc: int = make("UIViewController");
     view: int = msg(vc, sel("view"));
     bg: int = if (theme == 2 || theme == 4) msg(cls("UIColor"), sel("systemBackgroundColor")) else c_cell;
     msg1(view, sel("setBackgroundColor:"), bg);
     header: int = make("UILabel");
-    title_of(c);
     v: int = verse_at(c, at);
-    lay_str("");
+    fn_c = c;
+    fn_v = v;
     msg1(header, sel("setFont:"), sans(12.0f64, 0.3f64));
     msg1(header, sel("setTextColor:"), c_faint);
     fbuf_n = 0;
     fput_str("Footnote \ย\ท ");
-    for i in 0..out_n fput(out[i] as int);
-    if (v > 0 && book_count[ch_book[c]] > 1) {
-        fput(58);
-        fput_int(v)
-    } else if (v > 0) {
-        fput_str(" ");
-        fput_int(v)
-    }
+    fput_ref(c, v, 0);
     msg1(header, sel("setText:"), nsstring_of(fbuf, fbuf_n));
-    label: int = make("UILabel");
-    msg1(label, sel("setNumberOfLines:"), 0);
     size: f64 = em * 0.88f64;
     if (size < 15.0f64) size = 15.0f64;
     if (size > 22.0f64) size = 22.0f64;
@@ -1076,26 +1135,61 @@ show_footnote(
     values[1] = c_ink;
     keys[2] = k_para;
     values[2] = msg(para_style(0, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 1.25f64), sel("autorelease"));
-    a: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
-        nsstring_at(bytes_address(bsb) + at + 1, e - at - 1), nsdictionary(keys, values,
-        3));
+    n: int = e - at - 1;
+    if (n > len(note_buf)) n = len(note_buf);
+    for i in 0..n note_buf[i] = bsb[at + 1 + i];
+    a: int = msg(msg2(msg(cls("NSMutableAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        nsstring_of(note_buf, n), nsdictionary(keys, values, 3)), sel("autorelease"));
+    // (Its references with a verse: "Cited in 2 Corinthians 4:6".)
+    note_refs(note_buf, n);
+    for r in 0..nr_n {
+        if (nr_v[r] > 0) {
+            xr_book = nr_book[r];
+            xr_c = nr_c[r];
+            xr_v = nr_v[r];
+            xr_ce = (if (nr_ve[r] > 0) nr_c[r] else 0);
+            xr_ve = (if (nr_ve[r] > 0) nr_ve[r] else 0);
+            u: int = units_of(note_buf, 0, nr_b[r]);
+            un: int = units_of(note_buf, nr_b[r], nr_e[r]);
+            msg4(a, sel("addAttribute:value:range:"), k_color, c_accent, u, un);
+            msg4(a, sel("addAttribute:value:range:"), nsstring(k_xref), nsnumber_int(xref_both()),
+                u, un)
+        }
+    }
+    // (Measured as a label would set it; shown in a text view, which can
+    // say what is under a finger.)
+    label: int = make("UILabel");
+    msg1(label, sel("setNumberOfLines:"), 0);
     msg1(label, sel("setAttributedText:"), a);
-    release(a);
     msg_set_f(label, sel("setPreferredMaxLayoutWidth:"), 268.0f64);
     l8_msg_hfa(hfa, label, sel("intrinsicContentSize"), 0, 0, 0);
+    release(label);
     w: f64 = hfa[0];
-    h: f64 = hfa[1];
+    h: f64 = hfa[1] + 2.0f64;
     l8_msg_hfa(hfa, header, sel("intrinsicContentSize"), 0, 0, 0);
     hw: f64 = hfa[0];
     hh: f64 = hfa[1];
     if (hw > w) w = hw;
     if (w > 268.0f64) w = 268.0f64;
+    text: int = make("UITextView");
+    msg1(text, sel("setEditable:"), 0);
+    msg1(text, sel("setSelectable:"), 0);
+    msg1(text, sel("setScrollEnabled:"), 0);
+    msg1(text, sel("setBackgroundColor:"), msg(cls("UIColor"), sel("clearColor")));
+    msg_rect(text, sel("setTextContainerInset:"), 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    msg_set_f(msg(text, sel("textContainer")), sel("setLineFragmentPadding:"), 0.0f64);
+    msg1(text, sel("setAttributedText:"), a);
+    msg1(text, sel("setAccessibilityLabel:"), msg(a, sel("string")));
+    tap: int = msg2(msg(cls("UITapGestureRecognizer"), sel("alloc")), sel("initWithTarget:action:"),
+        app_obj, sel("footnoteTapped:"));
+    msg1(text, sel("addGestureRecognizer:"), tap);
+    release(tap);
     msg_rect(header, sel("setFrame:"), 16.0f64, 16.0f64, w, hh);
-    msg_rect(label, sel("setFrame:"), 16.0f64, 16.0f64 + hh + 6.0f64, w, h);
+    msg_rect(text, sel("setFrame:"), 16.0f64, 16.0f64 + hh + 6.0f64, w + 2.0f64, h);
     msg1(view, sel("addSubview:"), header);
-    msg1(view, sel("addSubview:"), label);
+    msg1(view, sel("addSubview:"), text);
     release(header);
-    release(label);
+    release(text);
     msg_ff(vc, sel("setPreferredContentSize:"), w + 32.0f64, h + hh + 38.0f64);
     msg1(vc, sel("setModalPresentationStyle:"), 7);
     pop: int = msg(vc, sel("popoverPresentationController"));
@@ -1104,9 +1198,59 @@ show_footnote(
     msg1(pop, sel("setPermittedArrowDirections:"), 3);
     msg1(pop, sel("setBackgroundColor:"), bg);
     msg1(pop, sel("setDelegate:"), app_obj);
-    bar_expand();
-    msg3(nav, sel("presentViewController:animated:completion:"), vc, 1, 0);
+    if (host == nav) {
+        bar_expand();
+        keep_screen_release()
+    }
+    msg3(host, sel("presentViewController:animated:completion:"), vc, 1, 0);
     release(vc)
+}
+
+// A reference in a footnote tapped: the popover fades away, and then (0.3 s
+// on, so the sheet does not rise through it) the reference's preview.
+pending_preview: int = 0;
+
+footnote_tapped(_self: int, _cmd: int, tap: int): int {
+    tv: int = msg(tap, sel("view"));
+    l8_msg_hfa(hfa, tap, sel("locationInView:"), tv, 0, 0);
+    footnote_tap_at(tv, hfa[0], hfa[1]);
+    0
+}
+
+footnote_tap_at(tv: int, x: f64, y: f64) {
+    ref: int = link_at_within(tv, x, y, k_xref, 8.0f64);
+    if (ref > 0) footnote_follow(ref)
+}
+
+footnote_follow(ref: int) {
+    pending_preview = ref;
+    // (Back to the footnote's verse, from the preview's Open in Reader.)
+    origin_c = fn_c;
+    origin_v = fn_v;
+    pop: int = top_presented();
+    if (pop != 0) msg2(msg(pop, sel("presentingViewController")), sel("dismissViewControllerAnimated:completion:"),
+        1, 0);
+    _t: int = after(0.3f64, "showPendingPreview:")
+}
+
+show_pending_preview(_self: int, _cmd: int, _timer: int): int {
+    ref: int = pending_preview;
+    if (ref <= 0) return 0;
+    top: int = top_presented();
+    // (The popover not yet gone: a moment more.)
+    if (top != 0 && (msg(top, sel("isBeingDismissed")) & 255) != 0) {
+        _t: int = after(0.1f64, "showPendingPreview:");
+        return 0
+    }
+    pending_preview = 0;
+    if (top != 0 && preview_on_top(top)) push_preview(ref) else if (top == 0) {
+        c: int = origin_c;
+        v: int = origin_v;
+        open_preview(ref);
+        origin_c = c;
+        origin_v = v
+    }
+    0
 }
 
 // (A popover stays one on a phone, rather than becoming a sheet.)
@@ -1235,6 +1379,7 @@ reader_appeared(self: int, cmd: int, animated: int): int {
 
 app_background(_self: int, _cmd: int, _application: int): int {
     save_place();
+    keep_screen_release();
     0
 }
 
@@ -1485,6 +1630,7 @@ main() noregion: int {
     objc_registerClassPair(reader_class);
     make_sheet_classes();
     make_study_classes();
+    make_preview_class();
     // The app's delegate, and every other delegate and data source.
     app: int = objc_allocateClassPair(cls("UIResponder"), "L8BibleApp", 0);
     add_method2(app, sel("application:didFinishLaunchingWithOptions:"), &app_launched,
@@ -1504,11 +1650,17 @@ main() noregion: int {
     add_method2(app, sel("adaptivePresentationStyleForPresentationController:traitCollection:"),
         &popover_style, "q@:@@");
     add_method1(app, sel("textSizeChanged:"), &text_size_changed, "v@:@");
+    add_method1(app, sel("footnoteTapped:"), &footnote_tapped, "v@:@");
+    add_method1(app, sel("showPendingPreview:"), &show_pending_preview, "v@:@");
     add_select_methods(app);
     add_bar_methods(app);
     add_commands(app);
     add_sheet_methods(app);
     add_study_methods(app);
+    add_preview_methods(app);
+    add_listen_methods(app);
+    add_history_methods(app);
+    add_library_methods(app);
     add_protocol(app, "UIApplicationDelegate");
     add_protocol(app, "UITableViewDataSource");
     add_protocol(app, "UITableViewDelegate");

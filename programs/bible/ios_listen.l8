@@ -1,0 +1,665 @@
+tag bible_ios;
+
+use_tag std, ios, bible;
+
+// Reading aloud (DESIGN.md §8.7), and keeping the screen on while reading
+// (§8.2).
+//
+// Listen speaks the Bible from the verse at the top of the reader with
+// AVSpeechSynthesizer: an utterance a verse, a chapter queued at a time
+// (its name said first), on into the next chapter, to Revelation 22. The
+// synthesizer's delegate says which verse is being spoken: it is washed in
+// the reader, followed down the page, and named in a small floating player
+// (play or pause, its name, stop). The audio session is for spoken audio
+// and goes on with the screen locked; the lock screen's play and pause come
+// through MPRemoteCommandCenter's target-action. AVFAudio and MediaPlayer
+// are loaded at the first Listen, not linked, so launching loads nothing
+// more.
+import "../ios/objc.l8";
+
+import "text.l8";
+
+// ---- keeping the screen on (§8.2) ----
+keep_on: bool = false;
+
+idle_disabled: bool = false;
+
+idle_timer: int = 0;
+
+set_idle_disabled(on: bool) {
+    if (on == idle_disabled) return;
+    idle_disabled = on;
+    msg1(msg(cls("UIApplication"), sel("sharedApplication")), sel("setIdleTimerDisabled:"),
+        if (on) 1 else 0);
+    note(if (on) "bible: idle timer off" else "bible: idle timer on")
+}
+
+// The reader touched (a scroll ended, a tap): with the setting on, the
+// screen kept on for 10 minutes more.
+keep_screen_touched() {
+    if (!keep_on || presented() != 0) return;
+    set_idle_disabled(true);
+    idle_timer = stop_timer(idle_timer);
+    idle_timer = after(600.0f64, "idleTimeout:")
+}
+
+// A sheet over the reader, the app gone to the background, or the setting
+// off: the screen turns off as usual again, at once.
+keep_screen_release() {
+    idle_timer = stop_timer(idle_timer);
+    if (idle_disabled) set_idle_disabled(false)
+}
+
+idle_timeout(_self: int, _cmd: int, _timer: int): int {
+    idle_timer = 0;
+    set_idle_disabled(false);
+    0
+}
+
+keep_on_switched(_self: int, _cmd: int, sw: int): int {
+    keep_on = (msg(sw, sel("isOn")) & 255) != 0;
+    set_def_bool("keepScreenOn", keep_on);
+    if (!keep_on) keep_screen_release();
+    0
+}
+
+// ---- the engine ----
+ls_synth: int = 0;
+
+// Listening at all (playing or paused), and playing now.
+ls_active: bool = false;
+
+ls_playing: bool = false;
+
+// The chapter queued last.
+ls_queued_c: int = -1;
+
+// The utterances queued (a ring): each one's object, chapter and verse (0:
+// the chapter's name).
+ls_ring: int = 512;
+
+ls_utt: []int = new int[512](0);
+
+ls_uc: []int = new int[512](0);
+
+ls_uv: []int = new int[512](0);
+
+ls_un: int = 0;
+
+ls_voice: int = 0;
+
+ls_ready: bool = false;
+
+// The speed (0 slower, 1 normal, 2 faster), and its rates.
+ls_speed: int = 1;
+
+ls_rates: []f64 = [0.42f64, 0.5f64, 0.56f64];
+
+// When a verse last began (CACurrentMediaTime), and following paused until
+// (after a drag).
+ls_began_at: f64 = 0.0f64;
+
+ls_follow_after: f64 = 0.0f64;
+
+ls_demo_timer: int = 0;
+
+// (The demo's recording: each verse cut to a few words, so the wash moves
+// on every two seconds or so.)
+ls_demo_fast: bool = false;
+
+// The frameworks, and the voice: once.
+listen_load() {
+    if (ls_ready) return;
+    ls_ready = true;
+    if (cls("AVSpeechSynthesizer") == 0) _h: int = dlopen("/System/Library/Frameworks/AVFAudio.framework/AVFAudio",
+        1);
+    if (cls("AVSpeechSynthesizer") == 0) _h2: int = dlopen("/System/Library/Frameworks/AVFoundation.framework/AVFoundation",
+        1);
+    if (cls("MPRemoteCommandCenter") == 0) _h3: int = dlopen("/System/Library/Frameworks/MediaPlayer.framework/MediaPlayer",
+        1);
+    // The best English voice installed: en-US, premium, then enhanced, then
+    // the default.
+    voices: int = msg(cls("AVSpeechSynthesisVoice"), sel("speechVoices"));
+    best: int = 0;
+    best_q: int = 1;
+    if (voices != 0) {
+        for i in 0..msg(voices, sel("count")) {
+            v: int = msg1(voices, sel("objectAtIndex:"), i);
+            q: int = msg(v, sel("quality"));
+            if (q > best_q && (msg1(msg(v, sel("language")), sel("isEqualToString:"),
+                nsstring("en-US")) & 255) != 0) {
+                best = v;
+                best_q = q
+            }
+        }
+    }
+    if (best == 0) best = msg1(cls("AVSpeechSynthesisVoice"), sel("voiceWithLanguage:"),
+        nsstring("en-US"));
+    if (best != 0) ls_voice = keep(best);
+    // The lock screen's controls, by target and action.
+    cc: int = msg(cls("MPRemoteCommandCenter"), sel("sharedCommandCenter"));
+    if (cc != 0) {
+        msg2(msg(cc, sel("playCommand")), sel("addTarget:action:"), app_obj, sel("remotePlay:"));
+        msg2(msg(cc, sel("pauseCommand")), sel("addTarget:action:"), app_obj, sel("remotePause:"));
+        msg2(msg(cc, sel("togglePlayPauseCommand")), sel("addTarget:action:"), app_obj,
+            sel("remoteToggle:"))
+    }
+    // Interruptions (a call): paused, not resumed by itself.
+    name: int = objc_const("AVAudioSessionInterruptionNotification");
+    if (name != 0) msg4(msg(cls("NSNotificationCenter"), sel("defaultCenter")), sel("addObserver:selector:name:object:"),
+        app_obj, sel("listenInterrupted:"), name, 0)
+}
+
+// Listening, from verse v of chapter c.
+listen_start(c: int, v: int) {
+    listen_load();
+    if (cls("AVSpeechSynthesizer") == 0) return;
+    listen_stop_engine();
+    ls_speed = clamp(def_int("listenRate"), 0, 2);
+    if (ls_synth == 0) {
+        ls_synth = make("AVSpeechSynthesizer");
+        msg1(ls_synth, sel("setDelegate:"), app_obj)
+    }
+    session: int = msg(cls("AVAudioSession"), sel("sharedInstance"));
+    if (session != 0) {
+        msg4(session, sel("setCategory:mode:options:error:"), objc_const("AVAudioSessionCategoryPlayback"),
+            objc_const("AVAudioSessionModeSpokenAudio"), 0, 0);
+        msg3(session, sel("setActive:withOptions:error:"), 1, 0, 0)
+    }
+    ls_active = true;
+    ls_playing = true;
+    ls_un = 0;
+    first: int = if (v < 1) 1 else v;
+    listen_queue(c, first);
+    // (The verse washed at once; the synthesizer says when it is begun.)
+    listen_at(c, first);
+    now_playing(c);
+    listen_show();
+    if (demo_on) {
+        ls_demo_timer = stop_timer(ls_demo_timer);
+        ls_demo_timer = msg_f4(cls("NSTimer"), sel("scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:"),
+            0.5f64, app_obj, sel("listenDemoTick:"), 0, 1)
+    }
+}
+
+// Chapter c queued, from verse first: its name (from its first verse), then
+// a verse an utterance.
+listen_queue(c: int, first: int) {
+    ls_queued_c = c;
+    if (first <= 1) {
+        fbuf_n = 0;
+        fput_spoken_title(c);
+        listen_say(fstring(), c, 0)
+    }
+    for v in first..ch_verses[c] + 1 {
+        _n: int = speak_text(c, v);
+        n: int = vt_n;
+        // (The demo's verses short: a few words each, so the wash moves on
+        // every two seconds or so.)
+        if (demo_on && ls_demo_fast) {
+            words: int = 0;
+            i: int = 0;
+            while (i < n && words < 7) {
+                if (vt[i] as int == 32) words = words + 1;
+                i = i + 1
+            }
+            n = i
+        }
+        listen_say(nsstring_of(vt, n), c, v)
+    }
+}
+
+listen_say(text: int, c: int, v: int) {
+    u: int = msg1(cls("AVSpeechUtterance"), sel("speechUtteranceWithString:"), text);
+    if (u == 0) return;
+    msg_set_f32(u, sel("setRate:"), ls_rates[ls_speed] as f32);
+    if (ls_voice != 0) msg1(u, sel("setVoice:"), ls_voice);
+    msg_set_f(u, sel("setPostUtteranceDelay:"), if (demo_on && ls_demo_fast) 0.0f64 else if (v == 0) 0.35f64 else 0.12f64);
+    i: int = ls_un % ls_ring;
+    ls_utt[i] = u;
+    ls_uc[i] = c;
+    ls_uv[i] = v;
+    ls_un = ls_un + 1;
+    msg1(ls_synth, sel("speakUtterance:"), u)
+}
+
+// Which utterance u is (-1 if none known).
+listen_find(u: int): int {
+    k: int = ls_un - 1;
+    while (k >= 0 && k >= ls_un - ls_ring) {
+        if (ls_utt[k % ls_ring] == u) return k % ls_ring;
+        k = k - 1
+    }
+    -1
+}
+
+// The synthesizer began an utterance: its verse washed and followed, and at
+// a chapter's last verse, the next chapter queued.
+listen_began(
+    _self: int,
+    _cmd: int,
+    _synth: int,
+    u: int
+): int {
+    i: int = listen_find(u);
+    if (i < 0 || !ls_active) return 0;
+    c: int = ls_uc[i];
+    v: int = ls_uv[i];
+    if (v == 0) {
+        now_playing(c);
+        return 0
+    }
+    listen_at(c, v);
+    if (v == ch_verses[c] && ls_queued_c == c && c + 1 < chapters) listen_queue(c + 1,
+        1);
+    0
+}
+
+listen_finished(
+    _self: int,
+    _cmd: int,
+    _synth: int,
+    u: int
+): int {
+    i: int = listen_find(u);
+    if (i < 0 || !ls_active) return 0;
+    // (Revelation 22's last verse said: done.)
+    if (ls_uc[i] == chapters - 1 && ls_uv[i] == ch_verses[chapters - 1]) listen_stop();
+    0
+}
+
+// The verse being spoken now: washed (a short cross-fade from the last),
+// named in the player, and followed down the page.
+listen_at(c: int, v: int) {
+    ls_began_at = CACurrentMediaTime();
+    old: int = speak_c;
+    speak_c = c;
+    speak_v = v;
+    if (old >= 0 && old != c) listen_repaint(old);
+    listen_repaint(c);
+    listen_label();
+    listen_follow(false)
+}
+
+// The verse spoken kept in sight: when its first line falls below 70% of
+// what is seen, or up under the bar, it is scrolled to a third of the way
+// down (not while a drag's pause lasts, unless asked).
+listen_follow(forced: bool) {
+    if (speak_c < 0) return;
+    if (!forced && CACurrentMediaTime() < ls_follow_after) return;
+    if ((msg(table, sel("isTracking")) & 255) != 0) return;
+    tv: int = view_of(speak_c);
+    if (tv == 0) {
+        if (forced) go_verse(speak_c, speak_v);
+        return
+    }
+    y: f64 = verse_y(speak_c, speak_v) - offset_y(table);
+    H: f64 = view_height(table);
+    if (!forced && y <= 0.7f64 * H && y >= bar_bottom()) return;
+    seen: f64 = H - top_inset(table) - bottom_inset(table);
+    to: f64 = verse_y(speak_c, speak_v) - top_inset(table) - seen / 3.0f64;
+    l8_msg_hfa(hfa, table, sel("contentSize"), 0, 0, 0);
+    most: f64 = hfa[1] + bottom_inset(table) - H;
+    if (to > most) to = most;
+    if (to < -top_inset(table)) to = -top_inset(table);
+    if (reduce_motion()) {
+        fade_layer(msg(table, sel("layer")), 0.15f64);
+        msg_ff1(table, sel("setContentOffset:animated:"), 0.0f64, to, 0)
+    } else msg_ff1(table, sel("setContentOffset:animated:"), 0.0f64, to, 1)
+}
+
+listen_repaint(c: int) {
+    tv: int = view_of(c);
+    if (tv == 0) return;
+    fade_layer(msg(tv, sel("layer")), 0.2f64);
+    repaint(c)
+}
+
+// A drag in the reader: following waits while it lasts, and until 8 s
+// after it ends.
+listen_drag_began() {
+    if (ls_active) ls_follow_after = CACurrentMediaTime() + 100000.0f64
+}
+
+listen_dragged() {
+    if (ls_active) ls_follow_after = CACurrentMediaTime() + 8.0f64
+}
+
+listen_pause() {
+    if (!ls_active || !ls_playing) return;
+    ls_playing = false;
+    if (ls_synth != 0) msg1(ls_synth, sel("pauseSpeakingAtBoundary:"), 0);
+    listen_label();
+    listen_symbol()
+}
+
+listen_resume() {
+    if (!ls_active || ls_playing) return;
+    ls_playing = true;
+    session: int = msg(cls("AVAudioSession"), sel("sharedInstance"));
+    if (session != 0) msg3(session, sel("setActive:withOptions:error:"), 1, 0, 0);
+    if (ls_synth != 0) msg(ls_synth, sel("continueSpeaking"));
+    ls_began_at = CACurrentMediaTime();
+    listen_label();
+    listen_symbol()
+}
+
+listen_stop_engine() {
+    ls_demo_timer = stop_timer(ls_demo_timer);
+    if (ls_synth != 0) msg1(ls_synth, sel("stopSpeakingAtBoundary:"), 0);
+    ls_un = 0
+}
+
+// Listening stopped: the speech, the wash, the player, the session.
+listen_stop() {
+    if (!ls_active) return;
+    ls_active = false;
+    ls_playing = false;
+    listen_stop_engine();
+    session: int = msg(cls("AVAudioSession"), sel("sharedInstance"));
+    if (session != 0) msg3(session, sel("setActive:withOptions:error:"), 0, 1, 0);
+    c: int = speak_c;
+    speak_c = -1;
+    tv: int = view_of(c);
+    if (tv != 0) {
+        fade_layer(msg(tv, sel("layer")), 0.2f64);
+        repaint(c)
+    }
+    listen_hide();
+    if (settings_table != 0) msg(settings_table, sel("reloadData"))
+}
+
+// The demo: the wash moves on every 2 s should the simulator's synthesizer
+// say nothing (it may have no voice to speak with).
+listen_demo_tick(_self: int, _cmd: int, _timer: int): int {
+    if (!ls_active || !ls_playing) return 0;
+    if (CACurrentMediaTime() - ls_began_at < (if (ls_demo_fast) 2.0f64 else 6.0f64)) return 0;
+    c: int = speak_c;
+    v: int = speak_v + 1;
+    if (c < 0) return 0;
+    if (v > ch_verses[c]) {
+        if (c + 1 >= chapters) return 0;
+        c = c + 1;
+        v = 1
+    }
+    listen_at(c, v);
+    0
+}
+
+listen_interrupted(_self: int, _cmd: int, notification: int): int {
+    info: int = msg(notification, sel("userInfo"));
+    if (info == 0) return 0;
+    kind: int = msg1(info, sel("objectForKey:"), objc_const("AVAudioSessionInterruptionTypeKey"));
+    if (kind != 0 && msg(kind, sel("integerValue")) == 1) listen_pause();
+    0
+}
+
+remote_play(_self: int, _cmd: int, _event: int): int {
+    listen_resume();
+    0
+}
+
+remote_pause(_self: int, _cmd: int, _event: int): int {
+    listen_pause();
+    0
+}
+
+remote_toggle(_self: int, _cmd: int, _event: int): int {
+    if (ls_playing) listen_pause() else listen_resume();
+    0
+}
+
+// What the lock screen shows: the chapter, the Bible, the app.
+np_keys: []int = new int[3](0);
+
+np_values: []int = new int[3](0);
+
+now_playing(c: int) {
+    center: int = msg(cls("MPNowPlayingInfoCenter"), sel("defaultCenter"));
+    if (center == 0) return;
+    k0: int = objc_const("MPMediaItemPropertyTitle");
+    k1: int = objc_const("MPMediaItemPropertyArtist");
+    k2: int = objc_const("MPMediaItemPropertyAlbumTitle");
+    if (k0 == 0 || k1 == 0 || k2 == 0) return;
+    np_keys[0] = k0;
+    fbuf_n = 0;
+    fput_title(c);
+    np_values[0] = fstring();
+    np_keys[1] = k1;
+    np_values[1] = nsstring("Berean Standard Bible");
+    np_keys[2] = k2;
+    np_values[2] = nsstring("Smooth Bible");
+    msg1(center, sel("setNowPlayingInfo:"), nsdictionary(np_keys, np_values, 3))
+}
+
+// ---- the player: a floating capsule at the bottom ----
+mp: int = 0;
+
+mp_effect: int = 0;
+
+mp_play: int = 0;
+
+mp_title: int = 0;
+
+mp_state: int = 0;
+
+mp_name: int = 0;
+
+mp_close: int = 0;
+
+listen_shown: bool = false;
+
+mp_timer: int = 0;
+
+MP_H: f64 = 48.0f64;
+
+make_player() {
+    if (mp != 0) return;
+    mp = make("UIView");
+    layer: int = msg(mp, sel("layer"));
+    msg1(layer, sel("setShadowColor:"), msg(msg(cls("UIColor"), sel("blackColor")),
+        sel("CGColor")));
+    msg_set_f32(layer, sel("setShadowOpacity:"), 0.15f64 as f32);
+    msg_set_f(layer, sel("setShadowRadius:"), 16.0f64);
+    msg_ff(layer, sel("setShadowOffset:"), 0.0f64, 4.0f64);
+    glass: int = cls("UIGlassEffect");
+    effect: int = if (glass != 0) make("UIGlassEffect") else msg1(cls("UIBlurEffect"),
+        sel("effectWithStyle:"), 9);
+    mp_effect = msg1(msg(cls("UIVisualEffectView"), sel("alloc")), sel("initWithEffect:"),
+        effect);
+    el: int = msg(mp_effect, sel("layer"));
+    msg_set_f(el, sel("setCornerRadius:"), MP_H / 2.0f64);
+    curve: int = objc_const("kCACornerCurveContinuous");
+    if (curve != 0) msg1(el, sel("setCornerCurve:"), curve);
+    msg1(mp_effect, sel("setClipsToBounds:"), 1);
+    msg1(mp, sel("addSubview:"), mp_effect);
+    content: int = msg(mp_effect, sel("contentView"));
+    mp_play = msg1(cls("UIButton"), sel("buttonWithType:"), 1);
+    msg3(mp_play, sel("addTarget:action:forControlEvents:"), app_obj, sel("listenPlayPause:"),
+        64);
+    msg1(content, sel("addSubview:"), mp_play);
+    // The name and the state, over a button that goes to the verse.
+    mp_name = msg1(cls("UIButton"), sel("buttonWithType:"), 0);
+    msg3(mp_name, sel("addTarget:action:forControlEvents:"), app_obj, sel("listenNameTapped:"),
+        64);
+    msg1(mp_name, sel("setAccessibilityHint:"), nsstring("Shows the verse being read"));
+    msg1(content, sel("addSubview:"), mp_name);
+    mp_title = make("UILabel");
+    msg1(mp_title, sel("setFont:"), sans(15.0f64, 0.3f64));
+    msg1(mp_title, sel("setUserInteractionEnabled:"), 0);
+    msg1(mp_name, sel("addSubview:"), mp_title);
+    release(mp_title);
+    mp_state = make("UILabel");
+    msg1(mp_state, sel("setFont:"), sans(12.0f64, 0.0f64));
+    msg1(mp_state, sel("setUserInteractionEnabled:"), 0);
+    msg1(mp_name, sel("addSubview:"), mp_state);
+    release(mp_state);
+    mp_close = msg1(cls("UIButton"), sel("buttonWithType:"), 1);
+    msg2(mp_close, sel("setImage:forState:"), symbol("xmark", 13.0f64, 6, 0), 0);
+    msg1(mp_close, sel("setAccessibilityLabel:"), nsstring("Stop Listening"));
+    msg3(mp_close, sel("addTarget:action:forControlEvents:"), app_obj, sel("listenClose:"),
+        64);
+    msg1(content, sel("addSubview:"), mp_close);
+    msg1(mp, sel("setHidden:"), 1);
+    msg1(window, sel("addSubview:"), mp)
+}
+
+// Its place (bottom center, 12 points above the safe area), its colors.
+layout_player() {
+    if (mp == 0) return;
+    root: int = window;
+    W: f64 = view_width(root);
+    H: f64 = view_height(root);
+    l8_msg_hfa(hfa, root, sel("safeAreaInsets"), 0, 0, 0);
+    bottom: f64 = hfa[2];
+    w: f64 = W - 32.0f64;
+    if (w > 360.0f64) w = 360.0f64;
+    msg_rect(mp, sel("setFrame:"), (W - w) / 2.0f64, H - bottom - 12.0f64 - MP_H,
+        w, MP_H);
+    msg_rect(mp_effect, sel("setFrame:"), 0.0f64, 0.0f64, w, MP_H);
+    msg_rect(mp_play, sel("setFrame:"), 8.0f64, (MP_H - 36.0f64) / 2.0f64, 36.0f64,
+        36.0f64);
+    msg_rect(mp_close, sel("setFrame:"), w - 10.0f64 - 28.0f64, (MP_H - 28.0f64) / 2.0f64,
+        28.0f64, 28.0f64);
+    msg_rect(mp_name, sel("setFrame:"), 52.0f64, 0.0f64, w - 52.0f64 - 46.0f64, MP_H);
+    msg_rect(mp_title, sel("setFrame:"), 0.0f64, 6.0f64, w - 52.0f64 - 46.0f64, 20.0f64);
+    msg_rect(mp_state, sel("setFrame:"), 0.0f64, 26.0f64, w - 52.0f64 - 46.0f64, 16.0f64);
+    msg1(mp_play, sel("setTintColor:"), c_ink);
+    msg1(mp_close, sel("setTintColor:"), c_ink);
+    msg1(mp_close, sel("setBackgroundColor:"), msg(cls("UIColor"), sel("systemFillColor")));
+    msg_set_f(msg(mp_close, sel("layer")), sel("setCornerRadius:"), 14.0f64);
+    msg1(mp_title, sel("setTextColor:"), c_ink);
+    msg1(mp_state, sel("setTextColor:"), c_faint)
+}
+
+listen_label() {
+    if (mp == 0 || speak_c < 0) return;
+    fbuf_n = 0;
+    fput_ref(speak_c, speak_v, 0);
+    msg1(mp_title, sel("setText:"), fstring());
+    msg1(mp_state, sel("setText:"), nsstring(if (ls_playing) "Listening" else "Paused"));
+    fput_str(if (ls_playing) ", Listening" else ", Paused");
+    msg1(mp_name, sel("setAccessibilityLabel:"), fstring())
+}
+
+// The play or pause symbol (a short cross-fade between them).
+listen_symbol() {
+    if (mp == 0) return;
+    fade_layer(msg(mp_play, sel("layer")), 0.15f64);
+    msg2(mp_play, sel("setImage:forState:"), symbol(if (ls_playing) "pause.fill" else "play.fill",
+        20.0f64, 6, 0), 0);
+    msg1(mp_play, sel("setAccessibilityLabel:"), nsstring(if (ls_playing) "Pause" else "Play"))
+}
+
+// The player rising (as the tray does), the capsule back out of its way,
+// and the tray above it.
+listen_show() {
+    make_player();
+    layout_player();
+    listen_label();
+    msg2(mp_play, sel("setImage:forState:"), symbol(if (ls_playing) "pause.fill" else "play.fill",
+        20.0f64, 6, 0), 0);
+    msg1(mp_play, sel("setAccessibilityLabel:"), nsstring(if (ls_playing) "Pause" else "Play"));
+    if (listen_shown) return;
+    listen_shown = true;
+    hide_back();
+    tray_raise(true);
+    mp_timer = stop_timer(mp_timer);
+    msg1(mp, sel("setHidden:"), 0);
+    msg1(window, sel("bringSubviewToFront:"), mp);
+    layer: int = msg(mp, sel("layer"));
+    msg_set_f32(layer, sel("setOpacity:"), 1.0f64 as f32);
+    if (reduce_motion()) {
+        animate(layer, "opacity", 0.0f64, 1.0f64, false, 0.15f64);
+        return
+    }
+    animate(layer, "transform.translation.y", MP_H + 24.0f64, 0.0f64, true, 0.0f64);
+    animate(layer, "opacity", 0.0f64, 1.0f64, false, 0.18f64)
+}
+
+listen_hide() {
+    if (!listen_shown) return;
+    listen_shown = false;
+    tray_raise(false);
+    layer: int = msg(mp, sel("layer"));
+    msg_set_f32(layer, sel("setOpacity:"), 0.0f64 as f32);
+    if (!reduce_motion()) animate(layer, "transform.translation.y", 0.0f64, MP_H + 24.0f64,
+        false, 0.2f64);
+    animate(layer, "opacity", 1.0f64, 0.0f64, false, 0.2f64);
+    mp_timer = stop_timer(mp_timer);
+    mp_timer = after(0.22f64, "listenHidden:")
+}
+
+listen_hidden(_self: int, _cmd: int, _timer: int): int {
+    mp_timer = 0;
+    if (!listen_shown && mp != 0) msg1(mp, sel("setHidden:"), 1);
+    0
+}
+
+// The tray's place: 60 points higher while the player is up (moved with
+// the tray's spring, if it is showing).
+tray_raise(up: bool) {
+    if (tray_bottom == 0) return;
+    msg_set_f(tray_bottom, sel("setConstant:"), if (up) -68.0f64 else -8.0f64);
+    msg(window, sel("layoutIfNeeded"));
+    if (tray_shown && !reduce_motion()) animate(msg(tray, sel("layer")), "transform.translation.y",
+        if (up) 60.0f64 else -60.0f64, 0.0f64, true, 0.0f64)
+}
+
+listen_play_pause(_self: int, _cmd: int, _b: int): int {
+    if (ls_playing) listen_pause() else listen_resume();
+    0
+}
+
+listen_close(_self: int, _cmd: int, _b: int): int {
+    listen_stop();
+    0
+}
+
+listen_name_tapped(_self: int, _cmd: int, _b: int): int {
+    ls_follow_after = 0.0f64;
+    listen_follow(true);
+    0
+}
+
+// The settings' Listen button: listening from the verse at the top (the
+// sheet put away), or stopped.
+listen_button_tapped(_self: int, _cmd: int, _b: int): int {
+    if (ls_active) {
+        listen_stop();
+        return 0
+    }
+    measure_place();
+    c: int = cur;
+    v: int = if (place_v > 0) place_v else 1;
+    dismiss_sheets();
+    listen_start(c, v);
+    0
+}
+
+listen_speed_picked(_self: int, _cmd: int, s: int): int {
+    ls_speed = msg(s, sel("selectedSegmentIndex"));
+    set_def_int("listenRate", ls_speed);
+    0
+}
+
+add_listen_methods(app: int) {
+    add_method1(app, sel("idleTimeout:"), &idle_timeout, "v@:@");
+    add_method1(app, sel("keepOnSwitched:"), &keep_on_switched, "v@:@");
+    add_method2(app, sel("speechSynthesizer:didStartSpeechUtterance:"), &listen_began,
+        "v@:@@");
+    add_method2(app, sel("speechSynthesizer:didFinishSpeechUtterance:"), &listen_finished,
+        "v@:@@");
+    add_method1(app, sel("listenDemoTick:"), &listen_demo_tick, "v@:@");
+    add_method1(app, sel("listenInterrupted:"), &listen_interrupted, "v@:@");
+    add_method1(app, sel("remotePlay:"), &remote_play, "q@:@");
+    add_method1(app, sel("remotePause:"), &remote_pause, "q@:@");
+    add_method1(app, sel("remoteToggle:"), &remote_toggle, "q@:@");
+    add_method1(app, sel("listenPlayPause:"), &listen_play_pause, "v@:@");
+    add_method1(app, sel("listenClose:"), &listen_close, "v@:@");
+    add_method1(app, sel("listenNameTapped:"), &listen_name_tapped, "v@:@");
+    add_method1(app, sel("listenHidden:"), &listen_hidden, "v@:@");
+    add_method1(app, sel("listenButton:"), &listen_button_tapped, "v@:@");
+    add_method1(app, sel("listenSpeed:"), &listen_speed_picked, "v@:@");
+    add_protocol(app, "AVSpeechSynthesizerDelegate")
+}
