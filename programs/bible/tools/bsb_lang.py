@@ -266,6 +266,11 @@ def cross_style(text, stats):
     text = CROSS.sub(lambda m: word(m.group(2), m.group(1), m.group(3), m.group(4), m.group(5)), text)
     text = CROSS_GLOSS_FIRST.sub(lambda m: word(m.group(3), m.group(2), m.group(1), m.group(4), m.group(5)),
                                  text)
+    # (The label a cross-reference begins its line with, in bold: "Also
+    # means:", "Another name of".)
+    text = re.sub(r"(^|\\n)((?:Also|Another|Aramaic|Group|Combined|A grammatical|A name|A shortened)"
+                  r"[A-Za-z ]{0,40}?:?)(?= [" + ORIG + r"][^\\]*? \u00b7 [HG]\d)",
+                  lambda m: m.group(1) + "**" + m.group(2) + "**", text)
     if re.search(r"_[a-z]+\.[a-z.]+_ \([" + ORIG + "]", text):
         stats["lexicon dotted transliterations left"] += 1
     return text
