@@ -189,6 +189,16 @@ export const searchReply = (body) => ({
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    // The site (../site): www sent to the bare name, and anything not the API
+    // the pages'.
+    if (url.hostname === "www.smoothbible.com") {
+      url.hostname = "smoothbible.com";
+      return Response.redirect(url.toString(), 301);
+    }
+    if (!url.pathname.startsWith("/api/")) {
+      if (env.ASSETS) return env.ASSETS.fetch(request);
+      return new Response("Not found", { status: 404 });
+    }
     const path = url.pathname.replace(/^\/api\/v1\//, "/");
     if (request.method !== "GET") return fail(400, "bad_request", "Only GET.");
     if (path === "/status" || path === "/health") return reply(200, { ok: true, esv: Boolean(env.ESV_KEY) });
