@@ -1,24 +1,29 @@
 #!/usr/bin/env python3
-"""The Berean Standard Bible, from ebible.org's USFM, as the app's text.
+"""The Berean Standard Bible, from the publisher's USFM, as the app's text.
 
-    bsb.py USFM_DIR OUT          (USFM_DIR: engbsb_usfm.zip, unpacked)
+    python3 -I bsb.py USFM_DIR OUT     (USFM_DIR: bsb_usfm.zip, unpacked)
 
-The BSB is in the public domain. OUT is one record a line: a letter saying
-what, then its text, in order through the Bible:
+The USFM is https://bereanbible.com/bsb_usfm.zip (see fetch.sh, which
+checks its sha256); the BSB is in the public domain. OUT is one record a
+line: a letter saying what, then its text, in order through the Bible:
 
     B<CODE> <name>   a book (GEN Genesis)
     C<n>             a chapter
     M<text>          a major section (BOOK I), m its range (Psalms 1-41)
     S<text>          a section heading, s a lesser one
     R<text>          the passages a heading points to
-    D<text>          a psalm's title
+    D<text>          a psalm's title (d: more of it, after a footnote in it)
     A<text>          an acrostic letter (Aleph)
     P<k>             a paragraph: m plain, o opening, 1 2 poetry,
                      l L a list, c centered, r to the right
     _                a break between stanzas
     V<n>             a verse begins
     T<text>          words
+    W<text>          words of Jesus (laid out as T)
     F<text>          a footnote, where it is marked
+
+Words have no space at their end; at their start only where they follow
+other words or a footnote's mark in the same line of text.
 """
 import os
 import re
@@ -26,16 +31,38 @@ import sys
 
 PARA = {"m": "m", "pmo": "o", "q1": "1", "q2": "2", "li1": "l", "li2": "L",
         "pc": "c", "qr": "r", "p": "m", "q": "1"}
-LINE = {"ms1": "M", "mr": "m", "s1": "S", "s2": "s", "r": "R", "d": "D",
-        "qa": "A"}
+LINE = {"ms1": "M", "ms": "M", "mr": "m", "s1": "S", "s2": "s", "r": "R",
+        "d": "D", "qa": "A"}
 # Names the books go by here, where \h is short.
-NAMES = {"SNG": "Song of Solomon"}
-SKIP = {"id", "h", "toc1", "toc2", "toc3", "mt1", "mt"}
+NAMES = {"SNG": "Song of Solomon", "PSA": "Psalms"}
+SKIP = {"id", "h", "toc1", "toc2", "toc3", "mt1", "mt", "mt2", "usfm"}
+
+
+# Slips in the publisher's USFM (2026-03-08), mended: a table's marker
+# left in the text, and two words run together.
+FIXES = [("she named vvv him", "she named him"), ("“evenif you", "“even if you")]
 
 
 def clean(text):
+    for a, b in FIXES:
+        text = text.replace(a, b)
     text = re.sub(r"\\w ([^|\\]*)\|[^\\]*\\w\*", r"\1", text)
     text = re.sub(r"\\\+?it\*?", "", text)
+    # A reference's visible text only: \ref John 3:16|JHN 3:16\ref*
+    text = re.sub(r"\\ref ([^|\\]*)(?:\|[^\\]*)?\\ref\*", r"\1", text)
+    # A verse's number inside a footnote: the number and a space.
+    text = re.sub(r"\\fv (\d+)\\fv\*", r"\1 ", text)
+    # Em dashes unspaced, as the BSB prints them.
+    text = re.sub(r"[ \t]*—[ \t]*", "—", text)
+    # A psalm's title holding verse 1's marker (\d \v 1 A Psalm of David.):
+    # the title, and the verse after it, where its first line begins.
+    text = re.sub(r"\\d \\v (\d+) ([^\n]*)\n((?:\\b *\n)?\\[a-z0-9]+)", r"\\d \2\n\3 \\v \1", text)
+    # An acrostic's letter is named only (ALEPH), as before.
+    text = re.sub(r"\\qa [\u05d0-\u05ea]\s*\n", "", text)
+    # A line after the text, set apart (Habakkuk 3:19's last words).
+    text = text.replace("\\mr ", "\\pc ")
+    # A range after a major section (\ms BOOK I, \d Psalms 1–41).
+    text = re.sub(r"(\\ms [^\n]*\n)\\d ", r"\1\\mr ", text)
     return text
 
 
@@ -45,23 +72,25 @@ def convert(path, out):
     name = re.search(r"\\h ([^\n]*)", src).group(1).strip()
     out.append("B%s %s" % (code, NAMES.get(code, name)))
     words = []
+    jesus = [False]
 
     def flush():
-        t = re.sub(r"\s+", " ", "".join(words))
+        t = re.sub(r"[ \t\r]+", " ", "".join(words))
         words.clear()
         if t.strip():
-            if out[-1][0] in "PV_" or out[-1][0] == "F":
-                t = t if out[-1][0] in "F" else t.lstrip()
-            out.append("T" + t)
+            out.append(("W" if jesus[0] else "T") + t)
 
     # Footnotes out of the way first: \f + \fr 1:3 \ft text\f*
     pieces = re.split(r"(\\f .*?\\f\*)", src, flags=re.S)
     for piece in pieces:
         if piece.startswith("\\f "):
             flush()
-            m = re.search(r"\\ft (.*?)\\f\*", piece, re.S)
-            note = re.sub(r"\\f[a-z]+\*? ?", "", m.group(1) if m else "")
-            out.append("F" + re.sub(r"\s+", " ", note).strip())
+            note = re.sub(r"^\\f \S*\s*", "", piece[:-3])
+            note = re.sub(r"\\fr [^\\]*", "", note)
+            note = re.sub(r"\\f[a-z]+\*? ?", " ", note)
+            note = re.sub(r"\s+", " ", note).strip()
+            note = re.sub(r" ([;,.:)])", r"\1", note)
+            out.append("F" + note)
             continue
         for tok in re.split(r"(\\[a-z0-9]+\*?)", piece):
             if not tok.startswith("\\"):
@@ -69,7 +98,10 @@ def convert(path, out):
                 continue
             mark = tok[1:]
             rest_needed = mark in LINE or mark in SKIP or mark in ("c", "v")
-            if not rest_needed and mark in PARA:
+            if mark in ("wj", "wj*"):
+                flush()
+                jesus[0] = mark == "wj"
+            elif not rest_needed and mark in PARA:
                 flush()
                 out.append("P" + PARA[mark])
             elif mark == "b":
@@ -85,33 +117,67 @@ def convert(path, out):
 
 def lines_of(records):
     # Markers that own the rest of their line, or a number (\c, \v), were
-    # left as \0mark\0 inside T records: split them out.
+    # left as \0mark\0 inside T (or W) records: split them out.
     out = []
     for r in records:
-        if r[0] != "T" or "\0" not in r:
+        if r[0] not in "TW" or "\0" not in r:
             out.append(r)
             continue
+        kind = r[0]
         parts = r[1:].split("\0")
         if parts[0].strip():
-            out.append("T" + parts[0])
+            out.append(kind + parts[0])
         i = 1
         while i < len(parts):
             mark, text = parts[i], parts[i + 1]
             i += 2
             if mark in ("c", "v"):
-                n, _, text = text.strip().partition(" ")
+                n, _, text = text.strip(" ").partition(" ")
+                n = n.strip()
                 out.append(("C" if mark == "c" else "V") + n)
                 if text.strip():
-                    out.append("T" + text.lstrip())
+                    out.append(kind + text.lstrip())
             elif mark in LINE:
                 body, nl, after = text.partition("\n")
                 out.append(LINE[mark] + body.strip())
                 if after.strip():
-                    out.append("T" + after.strip())
+                    out.append(kind + after.strip())
             elif mark in SKIP:
                 _, _, after = text.partition("\n")
                 if after.strip():
-                    out.append("T" + after.strip())
+                    out.append(kind + after.strip())
+    return out
+
+
+def tidy(records):
+    # A footnote marked inside a heading line (a psalm's title): the line
+    # goes on after it as more of the title (d).
+    fixed = []
+    for i, r in enumerate(records):
+        if r[0] in "TW" and len(fixed) >= 2 and fixed[-1][0] == "F" and fixed[-2][0] in "Dd" \
+                and "\n" not in r[1:].rstrip() and (i + 1 >= len(records) or records[i + 1][0] not in "TW"):
+            fixed.append("d" + r[1:])
+            continue
+        fixed.append(r)
+    # Words have no space at their end; at their start only after a
+    # footnote's mark or other words, where a space was between them (the
+    # app puts a space before each verse but a paragraph's first).
+    out = []
+    for i, r in enumerate(fixed):
+        if r[0] in "TWd":
+            body = re.sub(r"\s+", " ", r[1:])
+            if body.endswith(" ") and i + 1 < len(fixed) and fixed[i + 1][0] in "TW" \
+                    and not fixed[i + 1][1:2].isspace():
+                fixed[i + 1] = fixed[i + 1][0] + " " + fixed[i + 1][1:]
+            body = body.rstrip()
+            if not (out and out[-1][0] in "FTWd" and r[0] != "d"):
+                body = body.lstrip()
+            if r[0] == "d":
+                body = " " + body.lstrip() if body[:1] not in ",.;:" else body
+            if not body.strip():
+                continue
+            r = r[0] + body
+        out.append(r.rstrip())
     return out
 
 
@@ -121,22 +187,22 @@ def main():
     for f in sorted(os.listdir(src)):
         if f.endswith(".usfm"):
             convert(os.path.join(src, f), records)
-    records = lines_of(records)
-    # Words have no space at their end; at their start only after a
-    # footnote's mark, where a space follows it in the text (the app puts a
-    # space before each verse but a paragraph's first).
-    fixed = []
+    records = tidy(lines_of(records))
+    # The books in the Bible's order (the files are by name).
+    order = ("GEN EXO LEV NUM DEU JOS JDG RUT 1SA 2SA 1KI 2KI 1CH 2CH EZR NEH EST JOB PSA "
+             "PRO ECC SNG ISA JER LAM EZK DAN HOS JOL AMO OBA JON MIC NAM HAB ZEP HAG ZEC "
+             "MAL MAT MRK LUK JHN ACT ROM 1CO 2CO GAL EPH PHP COL 1TH 2TH 1TI 2TI TIT PHM "
+             "HEB JAS 1PE 2PE 1JN 2JN 3JN JUD REV").split()
+    books = {}
+    cur = None
     for r in records:
-        if r[0] == "T":
-            body = re.sub(r"\s+", " ", r[1:]).rstrip()
-            if not (fixed and fixed[-1][0] == "F"):
-                body = body.lstrip()
-            if not body:
-                continue
-            r = "T" + body
-        fixed.append(r.rstrip())
+        if r[0] == "B":
+            cur = r[1:4]
+            books[cur] = []
+        books[cur].append(r)
     with open(dst, "w", encoding="utf-8") as f:
-        f.write("\n".join(fixed) + "\n")
+        for b in order:
+            f.write("\n".join(books[b]) + "\n")
 
 
 main()
