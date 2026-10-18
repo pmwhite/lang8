@@ -2,17 +2,25 @@ tag bible;
 
 use_tag std;
 
-// The Berean Standard Bible as the app reads it: data/bsb.txt (made by
-// tools/bsb.py), held whole, indexed by book and chapter, and a chapter laid
+// The Bible as the app reads it: data/bsb.txt (made by tools/usfm.py), or
+// another version in its format (kjv.txt and the rest; the ESV's chapters,
+// as they come), held whole, indexed by book and chapter, and a chapter laid
 // out as runs of text, each in one style, for the platform to draw (on an
 // iPhone, ios.l8 makes each run an attributed string).
 //
 // The text is one record a line, its first letter saying what it is (see
-// tools/bsb.py): B a book, C a chapter, S s headings, R the passages a
+// tools/usfm.py): B a book, C a chapter, S s headings, R the passages a
 // heading points to, D a psalm's title, M m a major section and its range,
 // A an acrostic letter, P a paragraph (and its kind), _ a break between
-// stanzas, V a verse, T words (W the words of Jesus, laid out as T), F a
-// footnote (d: a psalm's title going on after a footnote in it).
+// stanzas, V a verse (V15>14: verse 15, keyed as 14), T words (W the words
+// of Jesus, laid out as T; I and J words supplied, in italic), F a footnote
+// (d: a psalm's title going on after a footnote in it).
+//
+// The globals below are the current text's. Each version's are kept
+// (text_load), and text_use(t) points the globals at text t's: arrays are
+// references, so that costs nothing. Books and chapters are numbered alike
+// in every version (DESIGN.md §9.1), so book_first, book_count, ch_book and
+// ch_num are the same for all.
 bsb: []i8 = new i8[1](0i8);
 
 bsb_n: int = 0;
@@ -42,11 +50,194 @@ ch_num: []int = new int[1200](0);
 // How many verses each chapter has (its last verse's number).
 ch_verses: []int = new int[1200](0);
 
+// ---- several texts (DESIGN.md §9.1.4) ----
+// 0 the BSB, 1 the KJV, 2 the WEB, 3 the ASV, 4 the YLT, 5 the ESV.
+TEXTS: int = 6;
+
+TEXT_BSB: int = 0;
+
+TEXT_ESV: int = 5;
+
+text_cur: int = 0;
+
+tx_ready: []bool = new bool[6](false);
+
+tx_buf: [][]i8 = new []i8[6](new i8[0](0i8));
+
+tx_n: []int = new int[6](0);
+
+tx_book_line: [][]int = new []int[6](new int[0](0));
+
+tx_ch_start: [][]int = new []int[6](new int[0](0));
+
+tx_ch_end: [][]int = new []int[6](new int[0](0));
+
+tx_ch_verses: [][]int = new []int[6](new int[0](0));
+
+// Their names, short and in full.
+text_abbrs: []str = ["BSB", "KJV", "WEB", "ASV", "YLT", "ESV"];
+
+text_names: []str = ["Berean Standard Bible", "King James Version", "World English Bible",
+    "American Standard Version", "Young's Literal Translation", "English Standard Version"];
+
+// The text t made the current one (if it has been loaded).
+text_use(t: int) {
+    if (t < 0 || t >= TEXTS || !tx_ready[t]) return;
+    bsb = tx_buf[t];
+    bsb_n = tx_n[t];
+    book_line = tx_book_line[t];
+    ch_start = tx_ch_start[t];
+    ch_end = tx_ch_end[t];
+    ch_verses = tx_ch_verses[t];
+    text_cur = t
+}
+
+// Text t's arrays (the BSB's the globals it began with), the globals
+// pointed at them.
+text_arrays(t: int) noregion {
+    if (len(tx_book_line[t]) == 0) {
+        if (t == 0) {
+            tx_book_line[0] = book_line;
+            tx_ch_start[0] = ch_start;
+            tx_ch_end[0] = ch_end;
+            tx_ch_verses[0] = ch_verses
+        } else {
+            tx_book_line[t] = new int[66](0);
+            tx_ch_start[t] = new int[1200](0);
+            tx_ch_end[t] = new int[1200](0);
+            tx_ch_verses[t] = new int[1200](0)
+        }
+    }
+    book_line = tx_book_line[t];
+    ch_start = tx_ch_start[t];
+    ch_end = tx_ch_end[t];
+    ch_verses = tx_ch_verses[t]
+}
+
+// Text t is the first n bytes of buf: indexed, and kept; the text current
+// before it is current again.
+text_load(t: int, buf: []i8@immortal, n: int) noregion {
+    was: int = text_cur;
+    text_arrays(t);
+    bsb = buf;
+    bible_index(n);
+    tx_buf[t] = buf;
+    tx_n[t] = n;
+    tx_ready[t] = true;
+    text_cur = t;
+    if (was != t && tx_ready[was]) text_use(was)
+}
+
+// Text t's index made by the caller (the ESV's, from its chapters): its
+// arrays current, to be filled; text_done(t, buf, n) then keeps it.
+text_begin(t: int) noregion {
+    text_arrays(t)
+}
+
+text_done(t: int, buf: []i8@immortal, n: int) {
+    tx_buf[t] = buf;
+    tx_n[t] = n;
+    tx_ready[t] = true;
+    bsb = buf;
+    bsb_n = n;
+    text_cur = t
+}
+
+// Whether text t has verse v of chapter c (scanned, as verse_text does).
+text_has(t: int, c: int, v: int): bool {
+    if (t == text_cur) return has_verse(c, v);
+    if (!tx_ready[t]) return false;
+    was: int = text_cur;
+    text_use(t);
+    found: bool = has_verse(c, v);
+    text_use(was);
+    found
+}
+
+has_verse(c: int, v: int): bool {
+    if (c < 0 || c >= chapters || ch_start[c] < 0) return false;
+    if (v > ch_verses[c]) return false;
+    p: int = ch_start[c];
+    while (p < ch_end[c]) {
+        e: int = line_end(p);
+        if (bsb[p] as int == 86 && key_at(p + 1) == v) return true;
+        p = e + 1
+    }
+    false
+}
+
+// The highest verse any bundled version has in chapter c: the BSB's, or
+// past it where refs.txt says (ROM 14 26: the WEB's doxology). A mark on a
+// verse up to it is kept (store.l8).
+refs_last: []int = new int[1200](0);
+
+ref_last(c: int): int {
+    if (c < 0 || c >= chapters) return 0;
+    base: int = if (tx_ready[0]) tx_ch_verses[0][c] else ch_verses[c];
+    if (refs_last[c] > base) refs_last[c] else base
+}
+
+// refs.txt (its first n bytes in b): BOOK, chapter and verse a line, by
+// the BSB's book codes.
+refs_read(b: []i8, n: int) {
+    p: int = 0;
+    while (p < n) {
+        e: int = p;
+        while (e < n && b[e] as int != 10) e = e + 1;
+        if (e - p > 5 && b[p + 3] as int == 9) {
+            bk: int = -1;
+            for x in 0..books {
+                same: bool = true;
+                for i in 0..3
+                    if (bsb[book_line[x] + 1 + i] != b[p + i]) same = false;
+                if (same) bk = x
+            }
+            q: int = p + 4;
+            cn: int = 0;
+            while (q < e && b[q] as int >= 48 && b[q] as int <= 57) {
+                cn = cn * 10 + b[q] as int - 48;
+                q = q + 1
+            }
+            q = q + 1;
+            vn: int = 0;
+            while (q < e && b[q] as int >= 48 && b[q] as int <= 57) {
+                vn = vn * 10 + b[q] as int - 48;
+                q = q + 1
+            }
+            if (bk >= 0 && cn >= 1 && cn <= book_count[bk]) refs_last[book_first[bk] + cn - 1] = vn
+        }
+        p = e + 1
+    }
+}
+
 // Where the line at p ends (its newline, or the end).
 line_end(p: int): int {
     e: int = p;
     while (e < bsb_n && bsb[e] as int != 10) e = e + 1;
     e
+}
+
+// A verse's key at p (its V line's number, or the number after > in
+// V15>14).
+key_at(p: int): int {
+    n: int = number_at(p);
+    i: int = p;
+    while (i < bsb_n && bsb[i] as int >= 48 && bsb[i] as int <= 57) i = i + 1;
+    if (i < bsb_n && bsb[i] as int == 62) number_at(i + 1) else n
+}
+
+// The highest number shown for the verse keyed k in chapter c (k itself,
+// but for the ESV's merged verses: 3 John 1:14 is shown as 14 and 15).
+verse_shown_last(c: int, k: int): int {
+    best: int = k;
+    if (c < 0 || c >= chapters || ch_start[c] < 0) return best;
+    p: int = ch_start[c];
+    while (p < ch_end[c]) {
+        e: int = line_end(p);
+        if (bsb[p] as int == 86 && key_at(p + 1) == k && number_at(p + 1) > best) best = number_at(p + 1);
+        p = e + 1
+    }
+    best
 }
 
 // The number at p, up to the line's end.
@@ -86,7 +277,7 @@ bible_index(n: int) {
             chapters = chapters + 1
         }
         if (k == 86 && chapters > 0) {
-            v: int = number_at(p + 1);
+            v: int = key_at(p + 1);
             if (v > ch_verses[chapters - 1]) ch_verses[chapters - 1] = v
         }
         p = e + 1
@@ -163,7 +354,13 @@ STYLE_JESUS_CAPS: int = 17;
 // (xref_code), run_arg2 its end; the line's punctuation stays STYLE_REF.
 STYLE_XREF: int = 18;
 
-STYLES: int = 19;
+// Words the translators supplied (I records; J inside the words of Jesus),
+// in italic as printed KJVs set them.
+STYLE_SUPPLIED: int = 19;
+
+STYLE_JESUS_SUPPLIED: int = 20;
+
+STYLES: int = 21;
 
 // Paragraph kinds: prose, poetry's two indents, a list's two, centered and
 // to the right, and a verse on a line of its own; with a stanza's break
@@ -216,10 +413,14 @@ lay_verse_lines: bool = false;
 
 // The verses of the chapter laid out: their numbers, and where each is in
 // out, from its number (or its first word, if it has no number shown) to the
-// end of its last words or footnote's mark.
+// end of its last words or footnote's mark. verse_num is a verse's key (as
+// marks and selection know it), verse_shown the number it is shown with:
+// the same, but for the ESV's V15>14.
 verse_count: int = 0;
 
 verse_num: []int = new int[200](0);
+
+verse_shown: []int = new int[200](0);
 
 verse_begin: []int = new int[200](0);
 
@@ -232,6 +433,10 @@ opener_at: int = 0;
 // Where the chapter's label (JOHN; or its book's name, for chapter 1) ends
 // in out: a chapter's note's mark goes there.
 label_end: int = 0;
+
+// Whether the chapter laid out is not here yet (the ESV's, not loaded): its
+// opener only, laid out, for the platform to put its placeholder under.
+lay_placeholder: bool = false;
 
 // What a chapter's runs are now being added in.
 lay_style: int = 0;
@@ -294,7 +499,17 @@ lay_words(
     para: int,
     jesus: bool
 ) {
-    plain: int = if (jesus) STYLE_JESUS else STYLE_BODY;
+    lay_words_as(p, e, para, jesus, false)
+}
+
+lay_words_as(
+    p: int,
+    e: int,
+    para: int,
+    jesus: bool,
+    supplied: bool
+) {
+    plain: int = if (supplied) if (jesus) STYLE_JESUS_SUPPLIED else STYLE_SUPPLIED else if (jesus) STYLE_JESUS else STYLE_BODY;
     caps: int = if (jesus) STYLE_JESUS_CAPS else STYLE_CAPS;
     i: int = p;
     // (The space that joins His words to the narration before them is the
@@ -377,10 +592,11 @@ lay_title(c: int) {
     }
 }
 
-// A verse begins (its number v): a row of the verse table.
-verse_open(v: int) {
+// A verse begins (its key k, shown as n): a row of the verse table.
+verse_open(k: int, n: int) {
     if (verse_count >= len(verse_num)) return;
-    verse_num[verse_count] = v;
+    verse_num[verse_count] = k;
+    verse_shown[verse_count] = n;
     verse_begin[verse_count] = -1;
     verse_end[verse_count] = -1;
     verse_count = verse_count + 1
@@ -412,6 +628,7 @@ layout_chapter(c: int) {
     verse_count = 0;
     opener_at = 0;
     label_end = 0;
+    lay_placeholder = ch_start[c] < 0;
     b: int = ch_book[c];
     first: bool = ch_num[c] == 1;
     single: bool = book_count[b] == 1;
@@ -468,8 +685,9 @@ layout_chapter(c: int) {
     while (p < e_ch) {
         e: int = line_end(p);
         k: int = bsb[p] as int;
-        jesus: bool = k == 87;
-        if (k == 87) k = 84;
+        jesus: bool = k == 87 || k == 74;
+        supplied: bool = k == 73 || k == 74;
+        if (k == 87 || k == 73 || k == 74) k = 84;
         if (in_title && k != 70 && k != 100) {
             if (lay_headings) lay_byte(10);
             in_title = false
@@ -510,7 +728,7 @@ layout_chapter(c: int) {
                 // V: a verse's number (not the first's, but on a line of its
                 // own).
                 v: int = number_at(p + 1);
-                verse_open(v);
+                verse_open(key_at(p + 1), v);
                 if (lines) {
                     if (words) lay_byte(10);
                     words = false;
@@ -539,7 +757,7 @@ layout_chapter(c: int) {
                 // T: words.
                 para: int = kind + (if (gap && !words) KINDS else 0);
                 verse_here();
-                lay_words(p + 1, e, para, jesus);
+                lay_words_as(p + 1, e, para, jesus, supplied);
                 verse_on();
                 words = true;
                 gap = false;
@@ -597,6 +815,14 @@ verse_index(v: int): int {
     best
 }
 
+// The index in the verse table of verse v exactly, or -1 if the chapter
+// laid out has none.
+verse_find(v: int): int {
+    for i in 0..verse_count
+        if (verse_num[i] == v) return i;
+    -1
+}
+
 // ---- verses as plain text ----
 // The verse a record of a chapter is in (its V line before p; 0 before
 // the first).
@@ -605,7 +831,7 @@ verse_at(c: int, p: int): int {
     q: int = ch_start[c];
     while (q < p && q < ch_end[c]) {
         e: int = line_end(q);
-        if (bsb[q] as int == 86) v = number_at(q + 1);
+        if (bsb[q] as int == 86) v = key_at(q + 1);
         q = e + 1
     }
     v
@@ -635,14 +861,17 @@ verse_text(c: int, v: int): int {
         e: int = line_end(p);
         k: int = bsb[p] as int;
         if (k == 86) {
-            n: int = number_at(p + 1);
-            if (inside) {
-                // The verse after it: done.
+            n: int = key_at(p + 1);
+            if (inside && n != v) {
+                // The verse after it: done (a verse keyed alike goes on).
                 e = e_ch;
                 inside = false
-            } else if (n == v) inside = true
+            } else if (n == v) {
+                if (inside) broke = true;
+                inside = true
+            }
         } else if (inside) {
-            if (k == 84 || k == 87) {
+            if (is_words(k)) {
                 vt_words(p + 1, e, broke);
                 broke = false
             } else if (k != 70) broke = true
@@ -650,6 +879,11 @@ verse_text(c: int, v: int): int {
         p = e + 1
     }
     vt_n
+}
+
+// Whether a record of kind k is words (T W I J).
+is_words(k: int): bool {
+    k == 84 || k == 87 || k == 73 || k == 74
 }
 
 // A T line's words onto vt (after a space, if a line broke before them).
@@ -1201,12 +1435,12 @@ search_chapter(c: int) {
     while (p < e_ch) {
         e: int = line_end(p);
         k: int = bsb[p] as int;
-        if (k == 86) {
+        if (k == 86 && key_at(p + 1) == v) broke = true else if (k == 86) {
             if (v > 0) search_verse(c, v);
-            v = number_at(p + 1);
+            v = key_at(p + 1);
             vt_n = 0;
             broke = false
-        } else if (k == 84 || k == 87) {
+        } else if (is_words(k)) {
             vt_words(p + 1, e, broke);
             broke = false
         } else if (k != 70) broke = true;

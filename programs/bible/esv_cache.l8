@@ -1,0 +1,415 @@
+tag bible;
+
+use_tag std;
+
+// The ESV's chapters the reader holds (DESIGN.md §9.4.5), apart from any
+// platform: never more than Crossway's terms allow. Each chapter's records
+// (the bsb.txt format, as the proxy sends them) are kept in a pool; the
+// ESV's text (text 5, text.l8) is made of them; and what is kept on disk is
+// said by index.tsv's lines (BOOK C VERSES FETCHED USED). ios_esv.l8 reads
+// and writes the files, and fetches; test_store.l8 tests the rules.
+//
+// The rules, checked after every insert: at most 500 verses held in all
+// (on disk and in memory); at most half a book's verses held of any book; a
+// chapter that is more than half its book even alone (Jude, Philemon,
+// Haggai 2) is held in memory only, never on disk, and only while it is on
+// screen; the least recently used go first, but never one on screen (nor
+// its neighbours, for the 500); a chapter fetched more than 30 days ago is
+// fetched again.
+import "text.l8";
+
+import "store.l8";
+
+ESV_MOST: int = 500;
+
+ESV_STALE: int = 2592000;
+
+// The chapters held, in no order: chapter (through the Bible), verses,
+// when fetched and last shown, whether on disk; their records in the pool.
+EC_MOST: int = 256;
+
+ec_n: int = 0;
+
+ec_c: []int = new int[256](0);
+
+ec_verses: []int = new int[256](0);
+
+ec_fetched: []int = new int[256](0);
+
+ec_used: []int = new int[256](0);
+
+ec_disk: []bool = new bool[256](false);
+
+ec_at: []int = new int[256](0);
+
+ec_len: []int = new int[256](0);
+
+ec_pool: []i8 = new i8[2097152](0i8);
+
+ec_pool_n: int = 0;
+
+ec_spare: []i8 = new i8[2097152](0i8);
+
+// What the reader shows now: chapters vis_lo to vis_hi (-1: none).
+ec_vis_lo: int = -1;
+
+ec_vis_hi: int = -1;
+
+// What eviction let go, for the platform to delete from disk: chapters.
+ec_gone_n: int = 0;
+
+ec_gone: []int = new int[256](0);
+
+// Where chapter c is held (-1: not).
+esv_find(c: int): int {
+    for i in 0..ec_n
+        if (ec_c[i] == c) return i;
+    -1
+}
+
+esv_held(c: int): bool {
+    esv_find(c) >= 0
+}
+
+// The verses of book b (the BSB's numbering, as the proxy's limits count
+// them, with the ESV's own two: 3 John 1:15 and Revelation 12:18).
+esv_book_verses(b: int): int {
+    n: int = 0;
+    for c in book_first[b]..book_first[b] + book_count[b] n = n + esv_chapter_verses(c);
+    n
+}
+
+esv_chapter_verses(c: int): int {
+    base: int = if (tx_ready[0]) tx_ch_verses[0][c] else ch_verses[c];
+    b: int = ch_book[c];
+    // (3JN 1 and REV 12: one more each in the ESV.)
+    if (book_is_code(b, 51, 74, 78) && ch_num[c] == 1 || book_is_code(b, 82, 69, 86) && ch_num[c] == 12) base + 1 else base
+}
+
+// Whether book b's code is the three letters k1 k2 k3.
+book_is_code(
+    b: int,
+    k1: int,
+    k2: int,
+    k3: int
+): bool {
+    was: int = text_cur;
+    text_use(TEXT_BSB);
+    p: int = book_line[b] + 1;
+    same: bool = bsb[p] as int == k1 && bsb[p + 1] as int == k2 && bsb[p + 2] as int == k3;
+    text_use(was);
+    same
+}
+
+// How many verses may be held of book b: half of them.
+esv_book_most(b: int): int {
+    esv_book_verses(b) / 2
+}
+
+// Whether chapter c is too big for its book to be kept on disk at all.
+esv_too_big(c: int): bool {
+    esv_chapter_verses(c) > esv_book_most(ch_book[c])
+}
+
+esv_total(): int {
+    n: int = 0;
+    for i in 0..ec_n n = n + ec_verses[i];
+    n
+}
+
+esv_book_total(b: int): int {
+    n: int = 0;
+    for i in 0..ec_n
+        if (ch_book[ec_c[i]] == b) n = n + ec_verses[i];
+    n
+}
+
+esv_visible(c: int): bool {
+    ec_vis_lo >= 0 && c >= ec_vis_lo && c <= ec_vis_hi
+}
+
+// On screen, or a neighbour of what is.
+esv_pinned(c: int): bool {
+    ec_vis_lo >= 0 && c >= ec_vis_lo - 1 && c <= ec_vis_hi + 1
+}
+
+// Chapter c's records, the first n bytes of b, fetched at time t: held
+// (in place of any it had), and the rules kept.
+esv_insert(
+    c: int,
+    b: []i8,
+    n: int,
+    t: int
+) {
+    i: int = esv_find(c);
+    if (i >= 0) esv_drop(i);
+    if (ec_n >= EC_MOST) return;
+    if (ec_pool_n + n > len(ec_pool)) esv_compact();
+    if (ec_pool_n + n > len(ec_pool)) return;
+    for x in 0..n ec_pool[ec_pool_n + x] = b[x];
+    k: int = ec_n;
+    ec_c[k] = c;
+    ec_at[k] = ec_pool_n;
+    ec_len[k] = n;
+    ec_pool_n = ec_pool_n + n;
+    ec_verses[k] = esv_count_verses(b, n);
+    ec_fetched[k] = t;
+    ec_used[k] = t;
+    ec_disk[k] = !esv_too_big(c);
+    ec_n = ec_n + 1;
+    esv_keep_rules()
+}
+
+// The verse lines of records (V15>14 counts: it is a verse shown).
+esv_count_verses(b: []i8, n: int): int {
+    v: int = 0;
+    start: bool = true;
+    for i in 0..n {
+        if (start && b[i] as int == 86) v = v + 1;
+        start = b[i] as int == 10
+    }
+    v
+}
+
+// Chapter c shown now (at time t): its use is newest.
+esv_touch(c: int, t: int) {
+    i: int = esv_find(c);
+    if (i >= 0) ec_used[i] = t
+}
+
+// What the reader shows now: chapters lo to hi. Memory-only chapters it
+// has left are let go.
+esv_set_visible(lo: int, hi: int) {
+    ec_vis_lo = lo;
+    ec_vis_hi = hi;
+    esv_keep_rules()
+}
+
+// Entry i let go (its disk file, for the platform, in ec_gone).
+esv_drop(i: int) {
+    if (ec_disk[i] && ec_gone_n < len(ec_gone)) {
+        ec_gone[ec_gone_n] = ec_c[i];
+        ec_gone_n = ec_gone_n + 1
+    }
+    for j in i..ec_n - 1 {
+        ec_c[j] = ec_c[j + 1];
+        ec_verses[j] = ec_verses[j + 1];
+        ec_fetched[j] = ec_fetched[j + 1];
+        ec_used[j] = ec_used[j + 1];
+        ec_disk[j] = ec_disk[j + 1];
+        ec_at[j] = ec_at[j + 1];
+        ec_len[j] = ec_len[j + 1]
+    }
+    ec_n = ec_n - 1
+}
+
+// The pool's records moved together (those let go given back).
+esv_compact() {
+    n: int = 0;
+    for i in 0..ec_n {
+        for x in 0..ec_len[i] ec_spare[n + x] = ec_pool[ec_at[i] + x];
+        ec_at[i] = n;
+        n = n + ec_len[i]
+    }
+    for x in 0..n ec_pool[x] = ec_spare[x];
+    ec_pool_n = n
+}
+
+// The least recently used entry (of book b, or any, if b is -1) that may
+// go: not on screen; and, if pins, not a neighbour of it. -1: none.
+esv_oldest(b: int, pins: bool): int {
+    best: int = -1;
+    for i in 0..ec_n {
+        c: int = ec_c[i];
+        ok: bool = (b < 0 || ch_book[c] == b) && !esv_visible(c) && !(pins && esv_pinned(c));
+        if (ok && (best < 0 || ec_used[i] < ec_used[best])) best = i
+    }
+    best
+}
+
+esv_keep_rules() {
+    // A memory-only chapter, only while it is on screen.
+    i: int = 0;
+    while (i < ec_n) {
+        if (!ec_disk[i] && !esv_visible(ec_c[i])) esv_drop(i) else i = i + 1
+    }
+    // Half a book at most, of each book held.
+    for b in 0..books {
+        more: bool = true;
+        while (more && esv_book_total(b) > esv_book_most(b)) {
+            j: int = esv_oldest(b, false);
+            if (j < 0) more = false else esv_drop(j)
+        }
+    }
+    // 500 verses at most: the neighbours kept while anything else can go.
+    more: bool = true;
+    while (more && esv_total() > ESV_MOST) {
+        j: int = esv_oldest(-1, true);
+        if (j < 0) j = esv_oldest(-1, false);
+        if (j < 0) more = false else esv_drop(j)
+    }
+}
+
+// Whether chapter c is to be fetched (again): not held, or held from more
+// than 30 days before t.
+esv_wanted(c: int, t: int): bool {
+    i: int = esv_find(c);
+    i < 0 || t - ec_fetched[i] > ESV_STALE
+}
+
+// ---- the ESV as a text ----
+// Text 5 made of the chapters held: every book's B line (its name from the
+// BSB, so the openers read the same), then each chapter held after its C
+// line. A chapter not held has ch_start = ch_end = -1: its opener alone is
+// laid out (lay_placeholder).
+ec_text: []i8 = new i8[2621440](0i8);
+
+ec_text_n: int = 0;
+
+ect_put(k: int) {
+    if (ec_text_n < len(ec_text)) {
+        ec_text[ec_text_n] = k trunc i8;
+        ec_text_n = ec_text_n + 1
+    }
+}
+
+esv_build() noregion {
+    was: int = text_cur;
+    text_use(TEXT_BSB);
+    ec_text_n = 0;
+    lines: []int = esv_lines;
+    for b in 0..books {
+        lines[b] = ec_text_n;
+        for x in book_line[b]..line_end(book_line[b]) ect_put(bsb[x] as int);
+        ect_put(10)
+    }
+    base_verses: []int = ch_verses;
+    text_begin(TEXT_ESV);
+    for b in 0..books book_line[b] = lines[b];
+    for c in 0..chapters {
+        ch_start[c] = -1;
+        ch_end[c] = -1;
+        ch_verses[c] = base_verses[c]
+    }
+    for i in 0..ec_n {
+        c: int = ec_c[i];
+        ect_put(67);
+        esv_put_int(ch_num[c]);
+        ect_put(10);
+        ch_start[c] = ec_text_n;
+        for x in 0..ec_len[i] ect_put(ec_pool[ec_at[i] + x] as int);
+        if (ec_text_n > 0 && ec_text[ec_text_n - 1] as int != 10) ect_put(10);
+        ch_end[c] = ec_text_n
+    }
+    text_done(TEXT_ESV, ec_text, ec_text_n);
+    // (Each chapter's last verse, by its keys.)
+    for i in 0..ec_n {
+        c: int = ec_c[i];
+        last: int = 0;
+        p: int = ch_start[c];
+        while (p < ch_end[c]) {
+            e: int = line_end(p);
+            if (bsb[p] as int == 86 && key_at(p + 1) > last) last = key_at(p + 1);
+            p = e + 1
+        }
+        if (last > 0) ch_verses[c] = last
+    }
+    text_use(was)
+}
+
+esv_lines: []int = new int[66](0);
+
+esv_put_int(n: int) {
+    if (n >= 10) esv_put_int(n / 10);
+    ect_put(48 + n % 10)
+}
+
+// ---- index.tsv, in fbuf ----
+// BOOK C VERSES FETCHED USED, a line for each chapter kept on disk.
+format_esv_index() {
+    fbuf_n = 0;
+    for i in 0..ec_n {
+        if (ec_disk[i]) {
+            c: int = ec_c[i];
+            fput_book(ch_book[c]);
+            fput_int(ch_num[c]);
+            fput(9);
+            fput_int(ec_verses[i]);
+            fput(9);
+            fput_int(ec_fetched[i]);
+            fput(9);
+            fput_int(ec_used[i]);
+            fput(10)
+        }
+    }
+}
+
+// The index's lines (in fbuf): for each, its chapter, and when fetched and
+// used, into ix_c and the rest (ix_n of them). The platform then reads each
+// chapter's file and inserts it with esv_restore.
+ix_n: int = 0;
+
+ix_c: []int = new int[256](0);
+
+ix_fetched: []int = new int[256](0);
+
+ix_used: []int = new int[256](0);
+
+parse_esv_index() {
+    begin_lines();
+    ix_n = 0;
+    while (next_line()) {
+        if (line_e > fpos && ix_n < len(ix_c)) {
+            c: int = field_chapter(fpos);
+            f3: int = field_after(field_after(fpos));
+            f4: int = field_after(f3);
+            f5: int = field_after(f4);
+            if (c >= 0 && field_num(f3, false) > 0) {
+                ix_c[ix_n] = c;
+                ix_fetched[ix_n] = field_time(f4);
+                ix_used[ix_n] = field_time(f5);
+                ix_n = ix_n + 1
+            }
+        }
+    }
+}
+
+// A chapter read back from disk: held as fetched then, used then.
+esv_restore(
+    c: int,
+    b: []i8,
+    n: int,
+    fetched: int,
+    used: int
+) {
+    esv_insert(c, b, n, fetched);
+    i: int = esv_find(c);
+    if (i >= 0) ec_used[i] = used;
+    ec_gone_n = 0
+}
+
+// "bible: esv cache 64 verses (JHN 3, JHN 4)" into fbuf, for the demo's
+// log.
+format_esv_summary() {
+    fbuf_n = 0;
+    fput_str("bible: esv cache ");
+    fput_int(esv_total());
+    fput_str(" verses (");
+    for i in 0..ec_n {
+        if (i > 0) fput_str(", ");
+        c: int = ec_c[i];
+        for x in 0..3 fput(bsb_code_byte(ch_book[c], x));
+        fput(32);
+        fput_int(ch_num[c]);
+        if (!ec_disk[i]) fput_str(" in memory")
+    }
+    fput_str(")\n")
+}
+
+bsb_code_byte(b: int, x: int): int {
+    was: int = text_cur;
+    text_use(TEXT_BSB);
+    k: int = bsb[book_line[b] + 1 + x] as int;
+    text_use(was);
+    k
+}
