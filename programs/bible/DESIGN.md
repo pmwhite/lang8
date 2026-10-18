@@ -422,7 +422,7 @@ choose by priority:
 3. Inside a verse's text (body, verse number, LORD caps or poetry): **toggle that verse's
    selection** (§3.3). If the bars are hidden, they stay hidden. The tray is the chrome.
 4. Anywhere else (the opener, headings, refs, gaps between chapters, the margins outside
-   the text container): if a selection exists, clear it; otherwise nothing. **The bar never toggles on a tap in the text** (owner, 2026-10-18: it follows the scroll alone, §3.1.4; the small title still expands it).
+   the text container): if a selection exists, clear it; otherwise nothing. **The bar never toggles on a tap in the text** (owner, 2026-10-18: it follows the scroll alone, §3.1.4; the small title still expands it). **A touch that lands while the text is still moving only stops it** (owner, 2026-10-18): the reader's tap ignores a touch while the table decelerates or within 0.12 s of its last move, as UIKit's own lists do.
 
 #### 3.1.4 The collapsing bar (R2-17, replaces the Round 1 hide/show behavior)
 The reader's top bar behaves like Safari's address bar. It **collapses in step with the
