@@ -2635,7 +2635,8 @@ A tolerant tag scanner over the API's known output (no DOM library in Workers):
   5. **Entries older than 30 days are refetched,** as Crossway encourages.
 - **Prefetch:** when the reader comes to rest in ESV chapter c and c+1 isn't held,
   request `count=2` starting at c (or `count=1` for c+1 if c is held). Scrolling up into
-  c−1 requests it. Nothing else is prefetched.
+  c−1 requests it. Nothing else is prefetched. **Superseded by §9.4.11** (owner report
+  2026-10-18): the window is c−1..c+2, asked for as a fling begins, not only at rest.
 - **Demo log:** `bible: esv cache N verses (JHN 3, JHN 4, …)` after every change.
 - **Tests:** the eviction logic is portable `esv_cache.l8`, tested by `test_store.l8`:
   - Visiting 14 Gospel chapters in a row never exceeds 500.
@@ -2663,6 +2664,7 @@ A tolerant tag scanner over the API's known output (no DOM library in Workers):
       layer).
     - If the row lies above the reading place, change `contentOffset` by the height
       difference **in the same layout pass**, so no visible line moves (principle 6).
+      **Only at rest:** while the table moves, §9.4.11 decides (no offset is written).
     - If the user was waiting at a jump target, restore the jump's verse one third down,
       and flash it.
 - **Offline** (the fetch failed with no connection or a timeout):
@@ -2755,6 +2757,211 @@ consent):
   `simulate.sh` copies that directory into the app's data container (`xcrun simctl
   get_app_container … data`) under `Library/esv-fixture`, and launches with
   `SIMCTL_CHILD_L8_ESV_FIXTURE=Library/esv-fixture`.
+
+#### 9.4.11 Scrolling through chapters that haven't arrived (owner report 2026-10-18)
+**The report** (a real iPhone, the ESV live): "sometimes the scrolling stops suddenly, I'm
+assuming because the verses below aren't loaded yet." A flick through the ESV loses its
+momentum at once.
+
+**Measured:** the proxy answers `chapters?…&count=2` in 0.43–0.57 s from a wired laptop
+(TLS about 0.08 s of it; the rest is the ESV API). On a phone, expect 0.6–1.5 s. A fling
+lasts 1–3 s, so an answer often lands while the table is still gliding.
+
+**Causes found in the code (as of 7f98edbd):**
+1. **Every arrival writes the scroll position.**
+   - `esv_arrived` (`ios_esv.l8:654–694`) always ends in `go_place(pc, pv, pf)` (line 682),
+     or in `go_place`/`go_verse` for a waiting switch or jump (677, 680).
+   - `go_place` → `go` (`ios.l8:788–803`) calls `scrollToRowAtIndexPath:…animated:NO`
+     twice, then `set_offset` (`ios.l8:805–812`) calls `setContentOffset:animated:NO`
+     twice more.
+   - Either call stops UIScrollView's deceleration on the spot. It does this even when
+     the chapter that came is off screen below, where no offset change is needed at all.
+     **This is the stop the owner sees.**
+2. **Requests start too late, so answers come mid-fling.**
+   - The reader asks for a chapter only when its placeholder cell is made
+     (`chapter_cell` → `esv_row_shown`, `ios.l8:593`, `ios_esv.l8:643–648`), that is, once
+     it's already on screen, or at rest (`reader_rested` → `esv_reader_wants`,
+     `ios.l8:1007`).
+   - So in a fling, the request starts when the blank row scrolls in, and its answer
+     arrives about 0.5–1.5 s later, while the table is still moving: exactly when cause 1
+     does harm.
+3. **The work at an arrival is heavy, on the main thread, mid-scroll** (hitches, not the
+   stop, but they make it feel worse).
+   - `esv_take` → `esv_build` (`ios_esv.l8:531`, `esv_cache.l8:280`) rebuilds all of
+     text 5.
+   - `esv_refresh_others` (`ios_esv.l8:699–707`) re-sets the attributed text of every
+     visible ESV row.
+   - `beginUpdates`/`endUpdates` (671–672) re-measures every visible self-sizing row.
+   - A placeholder's first appearance also lays out the **BSB** chapter twice, to measure
+     it (`esv_placeholder` → `esv_bsb_height`, `ios_esv.l8:921–989`, from inside
+     `chapter_cell`).
+4. **The placeholder's height is close, but not equal.**
+   - It's the BSB chapter's UILabel height (`ios_esv.l8:939`). The filled row is the
+     ESV's own wording **plus the footer line**: 0.7 em at 1.35, plus 24 pt, about 40 pt
+     that the placeholder never includes.
+   - So every fill changes the row's height. Cause 1's correction is then a visible
+     jump, or else (without it) a shift.
+   - (Ruled out: the content doesn't run out. Every chapter has a row, as tall as the
+     BSB's, and nothing calls `reloadData` on arrival.)
+
+**The rule:** **while the reader's table is moving, nothing writes its `contentOffset`,
+calls `scrollToRow…`, or reloads it.**
+- "Moving" means `isTracking || isDecelerating || demo_moving`, as `inset_changed`
+  (`ios.l8:735`) already checks.
+- One helper, `reader_moving()`, is used by every path below. `set_offset` and `go` add a
+  demo-log counter, `bible: offset written while moving N`, incremented when either is
+  called while `reader_moving()`; CI requires it to stay 0.
+
+**1. Prefetch: ask early, for where the reader is going.**
+- **The window:** a chapter wanted is any in **L−1 … L+2**, where L is the landing chapter.
+  Ask in this order, one request in flight (as now), with `count=2` wherever the server
+  allows (it reduces to 1 by itself):
+  1. L (with L+1),
+  2. L+1 (with L+2),
+  3. L+2,
+  4. L−1 (`count=1`).
+  Skip a chapter already held, and skip one that fails rule 2 of §9.4.5 alone
+  (`esv_too_big`: those are asked for only while on screen, as now).
+- **When it's asked:**
+  - **At the end of a drag that will glide:** implement
+    `scrollViewWillEndDragging:withVelocity:targetContentOffset:` (type
+    `v@:@{CGPoint=dd}^{CGPoint=dd}`). Read the target's y (the CGPoint the third argument
+    points to; read it, never write it). L is the row at `target.y + top_inset + 1`
+    (`indexPathForRowAtPoint:`; if nil, the last visible row). The request then starts
+    1–3 s before the table lands.
+  - **At rest** (`reader_rested`): L = `cur`.
+  - **After each arrival** (`esv_next`): the next missing chapter of the same window.
+- **The queue:** replace the single `esv_queued` with "recompute the next wanted chapter
+  from the current window when the client is idle". The newest window always wins, so a
+  fling past ten chapters never queues the ten.
+  - `esv_row_shown` still asks for a visible placeholder (a jump or a link can land
+    anywhere), but it goes through the same window logic.
+- **Limits on the client** (inside the server's 30 a minute per address):
+  - At most **20 chapter requests in any 60 s** (a ring of 20 start times). Past that,
+    only a chapter on screen is asked for.
+  - `esv_hold_until` (busy, resting) is honoured, as now.
+  - With `count=2`, reading costs about one request per two chapters, as before. Only
+    the two ahead are speculative.
+- **The cache (§9.4.5, portable, in `esv_cache.l8`):**
+  - `esv_pinned` widens from lo−1..hi+1 to **lo−1..hi+2**, the window.
+  - A prefetch (any chapter not on screen) is made only if
+    `esv_room_for(c)`: inserting it would not, under rules 1 and 2, evict a chapter in
+    lo−1..hi+1. If it would, that prefetch is skipped, never forced.
+  - So in Ruth (42 verses at most), with chapter 2 on screen, chapter 3 may come but
+    chapter 4 doesn't. In John, the window is about 200 verses, well inside 500.
+  - **Tests** (`test_store.l8`, added):
+    - Prefetching through 14 Gospel chapters never exceeds 500.
+    - Prefetching in Ruth never evicts the visible chapter.
+    - A two-chapter book's chapter is never prefetched.
+    - The widened pin survives eviction.
+
+**2. Placeholders the size of the text.**
+- **Height:** the pad becomes the BSB chapter's height **plus the ESV footer's height**
+  (measured once per em and width by `esv_height_of` on a footer string), minus the
+  opener's height.
+- **Learned ratio:** then scale the part below the opener by `esv_ratio`, the mean of
+  (ESV text height ÷ BSB text height) over the chapters filled so far. Start at 1.0, keep
+  it in defaults, and clamp it to 0.9–1.1. It's updated at each fill from the two heights
+  the code already has.
+- **The goal:** the fill changes the row by a few lines at most, not by a footer plus a
+  translation's difference.
+- **Measuring off the fling:** measure the BSB height when the chapter is **asked for**
+  (at drag end or rest, from the window), not in `chapter_cell`. A placeholder made in a
+  fling then finds `esv_h[c]` ready. If it isn't ready (an unprefetched jump), measure it
+  then, as now.
+- **The demo log:** `bible: esv row c placeholder H0 filled H1` at each fill, so the
+  error can be read.
+
+**3. A chapter arriving, swapped in without touching the scroll.**
+`esv_arrived(c)` does this in place of what it does now:
+1. **Always, at once:**
+   - Hold the chapter and rebuild text 5, as now. Then tell Compare, previews and Listen.
+   - **Defer `esv_refresh_others` until rest** (nothing can be tapped mid-fling; the
+     other rows' text is unchanged words).
+2. **Row c not visible** (not in `indexPathsForVisibleRows`):
+   - Do nothing to the table now. Below the viewport, the row sizes itself when it's
+     made.
+   - **Above** the viewport, its cached height is stale. Add c to `esv_pending_above` for
+     the rest step.
+3. **Row c visible, its top at or below the reading top**
+   (`row_y(c) ≥ offset + top_inset`):
+   - Set the text in place with the 0.2 s cross-fade (`fade_layer` + `setAttributedText:`,
+     as now), then `esv_dress`.
+   - Then apply the height:
+     - **Moving:** `beginUpdates`/`endUpdates` inside `setAnimationsEnabled:NO`. Only
+       content below row c's top moves, the offset isn't touched, and the deceleration
+       continues.
+     - **At rest:** the same, with animations **on** (the system's own row-height
+       animation), so a following opener on screen glides by the small difference, not
+       jumps (principle 6).
+   - **No `go_place`.**
+4. **Row c visible, its top above the reading top** (the reader is in it, or past it):
+   - **Moving:** put c in `esv_pending_visible`. The row keeps its opener and spinner
+     until rest (the spinner was already showing, so nothing appears to stop).
+   - **At rest:** do what `esv_arrived` does today. Measure the place, then cross-fade,
+     then `beginUpdates`/`endUpdates` with animations off, then `go_place(pc, pv, pf)` in
+     the same layout pass, so no visible line moves.
+5. **Rest** (`reader_rested`, and `scrollViewDidEndScrollingAnimation:` for an animated
+   jump):
+   - First, `measure_place()`.
+   - Then, for every chapter in `esv_pending_visible` and `esv_pending_above`, with
+     animations off: re-set the visible ones' text (cross-fade) and call
+     `beginUpdates`/`endUpdates` once. For the rows above, the table re-queries their
+     heights in this update, and the visible rows' heights are taken from their cells.
+   - Then one `go_place(pc, pv, pf)`.
+   - Then `esv_refresh_others`, then the window's next request. Clear both lists.
+6. **Waiting places:**
+   - `esv_wait_c`/`esv_jump_c` (a switch to the ESV, or a jump, waiting for its chapter)
+     are **cleared in `scroll_began`**. Once the reader scrolls, they've moved on, and the
+     arrival must not pull them back.
+   - Without a drag, they're honoured as now, at rest.
+
+**4. Calm (principle 6):**
+- Text appears by the same 0.2 s cross-fade. A placeholder never jumps under a finger.
+- A height difference below the reading line is the system's row animation at rest, and
+  unseen motion in a glide.
+- A difference above it is compensated exactly, and only at rest.
+- The spinner rules (0.4 s delay) are unchanged.
+- With prefetch, most chapters are held before their row is seen, so in practice the
+  reader rarely sees a placeholder at all.
+
+**5. CI check (fixture mode; `simulate.sh` step and `demo_sequence` 7):**
+- **Setup:**
+  - Empty the ESV cache.
+  - Set `esv_fixture_delay` to 1.0 s. The fixture needs JHN 3–8; add JHN 5–8 to
+    `worker/fixtures` in WEB words.
+  - Switch to the ESV at John 3:1 and wait for it to land.
+- **The glide:** frame-driven, like sequence 1.
+  - It drags 300 pt over 10 frames, then glides with a decaying step (starting at
+    40 pt a frame, ×0.97 a frame, for 150 frames), with `demo_moving = true` throughout.
+  - The glide passes through John 4–6 while their answers arrive.
+  - Each frame logs `bible: glide y Y`. At each arrival, it logs
+    `bible: esv arrived c moving 1 visible V above A`.
+- **Checks** (in `simulate.sh`, on `console.txt`):
+  1. `offset written while moving` is 0.
+  2. Every frame-to-frame step of `glide y` equals the commanded step within 0.5 pt (so
+     nothing moved the content under the glide).
+  3. A request for JHN 5 (the second of the window) is logged **before** row JHN 5 is
+     first visible.
+  4. After rest, `esv fixed line before/after` (the existing check) agree within 1 pt.
+  5. The cache summary never exceeds 500.
+  6. `esv row … placeholder H0 filled H1` is logged, informational: |H1−H0|/H0 for the
+     fixture.
+- **A real deceleration:** UIKit has no public way to make a real one in the simulator.
+  If the builder finds a reliable one (a synthesized touch through XCTest is not in our
+  stack), also log `isDecelerating` before and after an arrival. It must stay 1.
+  Otherwise, check 1 is the proxy: deceleration only stops if the app writes the offset
+  or reloads, and check 1 forbids exactly that.
+- **On the device:** the owner's next TestFlight build confirms this with a flick through
+  John 10–20 with an empty cache. Momentum must run out on its own.
+
+**Files:**
+- `ios_esv.l8`: `esv_arrived`, the window and the queue, the placeholder pad, the pending
+  lists.
+- `ios.l8`: `reader_moving`, the counter in `set_offset`/`go`, the new delegate method,
+  the rest hook, and `scroll_began` clearing the waits.
+- `esv_cache.l8`: `esv_pinned`, `esv_room_for`.
+- `test_store.l8`, `ios_demo*.l8`, `simulate.sh`, and the new fixtures.
 
 ### 9.5 R4.4 Compare
 **Entry:** the tray's action row gets a sixth action, **Compare** (`books.vertical`), after
