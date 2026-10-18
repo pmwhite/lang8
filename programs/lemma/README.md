@@ -77,7 +77,8 @@ everyone the grid follows: the row lights only once x is got from the
 fact, the cell (x, y) is ringed when the goal asks for it, (y, y) red.
 The picture follows a thing held in the other chapters too: in Groups the
 tiles take the shape the held face would give (a new `e` tile, a
-regrouping) and spring back; in Limits a name over a fact's notch brings
+regrouping), the new ones faint and breathing (would be, not is), and
+spring back; in Limits a name over a fact's notch brings
 the band it would give in faint and breathing, and N over the goal's
 notch slides the goal's gate to N.
 Let go elsewhere, it springs home and wobbles there, the place shakes no
@@ -85,7 +86,12 @@ Let go elsewhere, it springs home and wobbles there, the place shakes no
 twice says why in grey (*Doesn't match*, *Not a name here*, *That needs a
 name, not a statement*; a fact with an if or a for-all put on a goal it
 does not give says what it gives: *P ⟶ Q gives Q, not R*, or *It gives
-Q, not R* when that is too wide). A name dropped on a statement whose key is
+Q, not R* when that is too wide). A for-all fact put on a goal that a name
+dropped into its notch would give (at once, or once the new fact's key is
+opened) makes its notch hop, and the second time says *Drop y into ∀
+first*. The words sit in a pill in the clear room over the goal's top
+edge, right of SHOW (under a fact for a fact). A card lifted leaves an
+empty dent where it was, none of its writing behind. A name dropped on a statement whose key is
 still shut, or a fact dropped on the goal that would fit once its key is
 opened, makes the key hop and says *Open it first* at once. A tap on a
 thing that moves (a fact, a name) leans it toward where it fits and back:
@@ -135,7 +141,10 @@ down the side as x and along the top as y, a faint diagonal where each
 meets themself; the example has no one related to themself except on
 the full row, so y's own dot (y, y) is empty: it is ringed red on hover
 and when stuck, and the full row's dot in y's column flashes beside it
-(what you have gives that one, not this). In Limits a comparison of indices (`N₁ ≤ n`) or a use's side
+(what you have gives that one, not this). No letter stands over any one
+person: until names are taken only a faint *x ↓* and *y →* sit in the
+grid's corner; a taken y is its orange ball over its column, a got x
+its blue ball beside its row. In Limits a comparison of indices (`N₁ ≤ n`) or a use's side
 condition (`A > 0`) that arithmetic did not close is one (the gate red,
 a bracket from n). Groups says *Undo k* only when asked.
 
@@ -160,7 +169,13 @@ where it is chosen, a taken n is drawn past its gates, dots a band does
 not yet hold go red. Groups: a letter train, grouping as closeness,
 `x⁻¹ · x` side by side glowing. Someone for everyone: R as a square grid
 of the same people both ways, the row the fact gives lit, the column of a
-y taken ringed, the diagonal drawn.
+y taken ringed, the diagonal drawn. Levels about properties of one kind
+of thing (Any one at all, Show me one, One of them): the same people in
+a row, a chip for each property under each; a name stands over a person
+as its ball, a property a fact gives them lit (half lit inside an ∧,
+faint and breathing for the fact a name held over a notch would give),
+the one the goal wants ringed; proved for any y, every chip lights gold
+one after another, for some one only theirs.
 
 ## Playing in pictures (hooks)
 
@@ -258,6 +273,7 @@ L8_LEVEL=5 L8_DO="open goal;fact 0 > goal;fact 0 > goal" .build/lemma # P ⟶ Q 
 L8_LEVEL=20 L8_DO="open goal;open goal;open fact 0;token ε > fact 0" L8_DO_STOP=4 .build/lemma  # the band it would give
 L8_LEVEL=6 L8_DO="open goal;token y > fact 0" L8_DO_STOP=2 .build/lemma
 L8_LEVEL=6 L8_TAPS=63,757 .build/lemma      # the goal's ∀ key: grab frames from 1.75 s on
+L8_LEVEL=6 L8_DO="open goal;fact 0 > goal;fact 0 > goal" .build/lemma  # the notch hops; Drop y into ∀ first (~7.5 s)
 L8_LEVEL=6 L8_TAPS=82,28 .build/lemma       # the Book
 ```
 
@@ -341,9 +357,8 @@ to `region_files` in `app.l8` and `FILES` in `web/lemma/lemma.js`. A
 ## Not built yet
 
 A fact onto a fact (forward); haptics in the native build (it is a
-desktop window; the page buzzes through `navigator.vibrate`); the
-picture's hover preview in Groups is the new shape, not yet a ghosted
-one; a magnified preview clear of the thumb; long-pressing a part to
+desktop window; the page buzzes through `navigator.vibrate`); in Groups
+tiles a preview would take away vanish rather than ghost; a magnified preview clear of the thumb; long-pressing a part to
 pull out a copy; ∨; keyboard navigation of keys and tiles.
 
 The Foundations region (constructing ℕ, ℤ, ℚ, ℝ and proving each
