@@ -1,0 +1,1106 @@
+tag bible_ios;
+
+use_tag std, ios, bible;
+
+// The study screens (DESIGN.md Â§7): a verse's interlinear (a sheet from
+// the verse tray's Study), a word's study pushed from it, the word's
+// definition and its concordance, and the acknowledgements pushed from
+// the reading settings. What they show comes from lang.l8; the data
+// (data/lang/, in the app's bundle) is read at the first study, mapped by
+// NSData, not at launch.
+import "../ios/objc.l8";
+
+import "text.l8";
+
+import "lang.l8";
+
+// ---- the data, at first use ----
+lang_data(name: str, ext: str): int {
+    bundle: int = msg(cls("NSBundle"), sel("mainBundle"));
+    path: int = msg2(bundle, sel("pathForResource:ofType:"), nsstring(name), nsstring(ext));
+    if (path == 0) return 0;
+    // (Mapped if it can be: NSDataReadingMappedIfSafe.)
+    msg3(cls("NSData"), sel("dataWithContentsOfFile:options:error:"), path, 1, 0)
+}
+
+data_len(d: int): int {
+    if (d == 0) 0 else msg(d, sel("length"))
+}
+
+data_copy(d: int, b: []i8) {
+    n: int = data_len(d);
+    if (n > 0) memcpy_from(b, msg(d, sel("bytes")), n)
+}
+
+// A data file's size in the bundle (without reading it).
+lang_size(name: str, ext: str): int {
+    bundle: int = msg(cls("NSBundle"), sel("mainBundle"));
+    path: int = msg2(bundle, sel("pathForResource:ofType:"), nsstring(name), nsstring(ext));
+    if (path == 0) return 0;
+    attrs: int = msg2(msg(cls("NSFileManager"), sel("defaultManager")), sel("attributesOfItemAtPath:error:"),
+        path, 0);
+    if (attrs == 0) 0 else msg(attrs, sel("fileSize"))
+}
+
+// The arrays for the data, made at launch (L8's callbacks cannot make
+// them): only made, untouched pages of the heap's mapping; filled at the
+// first study (lang_load).
+lang_alloc() noregion {
+    lw = new i8[lang_size("words", "bin") + 1](0i8);
+    lv = new i8[lang_size("verses", "bin") + 1](0i8);
+    lsup = new i8[lang_size("supplied", "bin") + 1](0i8);
+    lforms = new i8[lang_size("forms", "txt") + 1](0i8);
+    lmorph = new i8[lang_size("morph", "txt") + 1](0i8);
+    lconc = new i8[lang_size("conc", "bin") + 1](0i8);
+    llex = new i8[lang_size("lexicon", "txt") + 1](0i8);
+    lgram = new i8[lang_size("grammar", "txt") + 1](0i8)
+}
+
+// A file into its array: how many bytes (0 if it does not fit).
+lang_fill(name: str, ext: str, b: []i8): int {
+    d: int = lang_data(name, ext);
+    n: int = data_len(d);
+    if (n + 1 > len(b)) return 0;
+    data_copy(d, b);
+    n
+}
+
+lang_load() {
+    if (lang_ready) return;
+    n: int = lang_fill("words", "bin", lw);
+    if (n == 0) {
+        note("bible: no language data");
+        return
+    }
+    lw_n = n / 12;
+    lv_n = lang_fill("verses", "bin", lv) / 8 - 1;
+    lsup_n = lang_fill("supplied", "bin", lsup) / 8;
+    lforms_len = lang_fill("forms", "txt", lforms);
+    lmorph_len = lang_fill("morph", "txt", lmorph);
+    lconc_len = lang_fill("conc", "bin", lconc);
+    llex_len = lang_fill("lexicon", "txt", llex);
+    lgram_len = lang_fill("grammar", "txt", lgram);
+    lang_index();
+    note("bible: language data read")
+}
+
+// Whether verse v of chapter c can be studied (the data read, if not yet).
+can_study(c: int, v: int): bool {
+    lang_load();
+    vi: int = lang_verse(c, v);
+    vi >= 0 && v_aligned(vi) && v_end(vi) > v_first(vi)
+}
+
+// Whether verse v of chapter c may be studied, as far as is known without
+// reading the data (so the tray does not read it).
+study_maybe(c: int, v: int): bool {
+    if (!lang_ready) return true;
+    vi: int = lang_verse(c, v);
+    vi >= 0 && v_aligned(vi) && v_end(vi) > v_first(vi)
+}
+
+// ---- fonts and text ----
+// Greek in New York, Hebrew in the system's font (its Hebrew), at a size
+// (scaled with the phone's text size).
+scaled(size: f64): f64 {
+    metrics: int = msg1(cls("UIFontMetrics"), sel("metricsForTextStyle:"), objc_const("UIFontTextStyleBody"));
+    msg_f_f(metrics, sel("scaledValueForValue:"), size)
+}
+
+serif(size: f64): int {
+    d: int = msg1(cls("UIFontDescriptor"), sel("preferredFontDescriptorWithTextStyle:"),
+        objc_const("UIFontTextStyleBody"));
+    s: int = msg1(d, sel("fontDescriptorWithDesign:"), objc_const("UIFontDescriptorSystemDesignSerif"));
+    msg1_f(cls("UIFont"), sel("fontWithDescriptor:size:"), if (s != 0) s else d, size)
+}
+
+original_font(greek: bool, greek_size: f64, hebrew_size: f64): int {
+    if (greek) serif(scaled(greek_size)) else sans(scaled(hebrew_size), 0.0f64)
+}
+
+italic_sans(size: f64): int {
+    f: int = sans(size, 0.0f64);
+    d: int = msg1(msg(f, sel("fontDescriptor")), sel("fontDescriptorWithSymbolicTraits:"),
+        1);
+    if (d == 0) return f;
+    msg1_f(cls("UIFont"), sel("fontWithDescriptor:size:"), d, size)
+}
+
+mono(size: f64): int {
+    msg_ff(cls("UIFont"), sel("monospacedDigitSystemFontOfSize:weight:"), size, 0.0f64)
+}
+
+// Bytes a to b of buffer x as an NSString.
+ns_of(x: []i8, a: int, b: int): int {
+    if (b <= a) return nsstring("");
+    nsstring_at(bytes_address(x) + a, b - a)
+}
+
+attributed(text: int, font: int, color: int): int {
+    keys[0] = k_font;
+    values[0] = font;
+    keys[1] = k_color;
+    values[1] = color;
+    msg(msg2(msg(cls("NSMutableAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        text, nsdictionary(keys, values, 2)), sel("autorelease"))
+}
+
+append(
+    s: int,
+    text: int,
+    font: int,
+    color: int
+) {
+    msg1(s, sel("appendAttributedString:"), attributed(text, font, color))
+}
+
+label_of(a: int): int {
+    l: int = msg(make("UILabel"), sel("autorelease"));
+    msg1(l, sel("setAttributedText:"), a);
+    msg1(l, sel("setTextAlignment:"), 1);
+    l
+}
+
+// A label's size: hfa[0], hfa[1].
+label_size(l: int, most: f64) {
+    msg_set_f(l, sel("setPreferredMaxLayoutWidth:"), most);
+    l8_msg_hfa(hfa, l, sel("intrinsicContentSize"), 0, 0, 0)
+}
+
+// A Strong's number into fbuf: G25.
+fput_key(greek: bool, num: int) {
+    fput(if (greek) 71 else 72);
+    fput_int(num)
+}
+
+// The view controller on top of the sheets.
+top_presented(): int {
+    top: int = presented();
+    if (top == 0) return 0;
+    while (msg(top, sel("presentedViewController")) != 0) top = msg(top, sel("presentedViewController"));
+    top
+}
+
+// A page in Safari's own view, over everything.
+open_web(url: str) {
+    u: int = msg1(cls("NSURL"), sel("URLWithString:"), nsstring(url));
+    sf: int = cls("SFSafariViewController");
+    if (sf == 0 || u == 0) return;
+    vc: int = msg1(msg(sf, sel("alloc")), sel("initWithURL:"), u);
+    top: int = top_presented();
+    msg3(if (top != 0) top else nav, sel("presentViewController:animated:completion:"),
+        vc, 1, 0);
+    release(vc)
+}
+
+// ---- the interlinear ----
+il_class: int = 0;
+
+il_vc: int = 0;
+
+il_scroll: int = 0;
+
+il_seg: int = 0;
+
+// (The tiles' view, in the scroll view.)
+il_content: int = 0;
+
+// The verse shown, and whether in the original order.
+il_vi: int = -1;
+
+il_original: bool = false;
+
+il_width: f64 = 0.0f64;
+
+tile_ws: []f64 = new f64[300](0.0f64);
+
+tile_hs: []f64 = new f64[300](0.0f64);
+
+tile_views: []int = new int[300](0);
+
+open_interlinear(c: int, v: int) {
+    if (!can_study(c, v)) return;
+    il_vi = lang_verse(c, v);
+    il_original = def_int("interlinearOrder") == 1;
+    vc: int = msg(msg(il_class, sel("alloc")), sel("init"));
+    il_vc = vc;
+    view: int = msg(vc, sel("view"));
+    msg1(view, sel("setBackgroundColor:"), c_bg);
+    il_scroll = make("UIScrollView");
+    msg1(il_scroll, sel("setAutoresizingMask:"), 18);
+    msg1(il_scroll, sel("setBackgroundColor:"), c_bg);
+    msg1(il_scroll, sel("setAlwaysBounceVertical:"), 1);
+    l8_msg_hfa(hfa, view, sel("bounds"), 0, 0, 0);
+    msg_rect(il_scroll, sel("setFrame:"), 0.0f64, 0.0f64, hfa[2], hfa[3]);
+    msg1(view, sel("addSubview:"), il_scroll);
+    release(il_scroll);
+    il_content = make("UIView");
+    msg1(il_scroll, sel("addSubview:"), il_content);
+    release(il_content);
+    item: int = msg(vc, sel("navigationItem"));
+    msg1(item, sel("setRightBarButtonItem:"), system_item(0, "closeSheet:"));
+    msg1(item, sel("setLargeTitleDisplayMode:"), 2);
+    il_set_title();
+    // The toolbar: the verse before, the order, the verse after.
+    prev: int = msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithImage:style:target:action:"),
+        symbol("chevron.up", 17.0f64, 4, 0), 0, app_obj, sel("ilPrevious:"));
+    msg1(prev, sel("setAccessibilityLabel:"), nsstring("Previous Verse"));
+    next: int = msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithImage:style:target:action:"),
+        symbol("chevron.down", 17.0f64, 4, 0), 0, app_obj, sel("ilNext:"));
+    msg1(next, sel("setAccessibilityLabel:"), nsstring("Next Verse"));
+    one[0] = nsstring("English Order");
+    one[1] = nsstring(if (w_greek(v_first(il_vi))) "Greek Order" else "Hebrew Order");
+    il_seg = msg1(msg(cls("UISegmentedControl"), sel("alloc")), sel("initWithItems:"),
+        nsarray(one, 2));
+    msg1(il_seg, sel("setSelectedSegmentIndex:"), if (il_original) 1 else 0);
+    msg3(il_seg, sel("addTarget:action:forControlEvents:"), app_obj, sel("ilOrder:"),
+        4096);
+    msg_rect(il_seg, sel("setFrame:"), 0.0f64, 0.0f64, 240.0f64, 32.0f64);
+    seg_item: int = msg1(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithCustomView:"),
+        il_seg);
+    release(il_seg);
+    flex: int = msg3(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithBarButtonSystemItem:target:action:"),
+        5, 0, 0);
+    flex2: int = msg3(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithBarButtonSystemItem:target:action:"),
+        5, 0, 0);
+    bar_items[0] = prev;
+    bar_items[1] = flex;
+    bar_items[2] = seg_item;
+    bar_items[3] = flex2;
+    bar_items[4] = next;
+    msg1(vc, sel("setToolbarItems:"), nsarray(bar_items, 5));
+    for i in 0..5 release(bar_items[i]);
+    il_width = 0.0f64;
+    sheet_nav: int = sheet_of(vc, 1);
+    sheet: int = msg(sheet_nav, sel("sheetPresentationController"));
+    if (sheet != 0) msg1(sheet, sel("setSelectedDetentIdentifier:"), objc_const("UISheetPresentationControllerDetentIdentifierMedium"));
+    msg2(sheet_nav, sel("setToolbarHidden:animated:"), 0, 0);
+    msg1(msg(sheet_nav, sel("toolbar")), sel("setTintColor:"), c_icon);
+    release(vc);
+    present(sheet_nav)
+}
+
+bar_items: []int = new int[6](0);
+
+il_set_title() {
+    fbuf_n = 0;
+    one_verse[0] = v_num(il_vi);
+    put_ref(v_chapter(il_vi), one_verse, 1);
+    msg1(il_vc, sel("setTitle:"), fstring())
+}
+
+// Laid out again when its width is known or changes.
+il_layout(self: int, cmd: int): int {
+    super0(self, il_class, cmd);
+    w: f64 = view_width(msg(self, sel("view")));
+    if (w != il_width && w > 0.0f64) {
+        il_width = w;
+        il_build()
+    }
+    0
+}
+
+// A tile: its labels, one under another, centered.
+tile_lines: []int = new int[4](0);
+
+make_tile(i: int): int {
+    w: int = tile_word[i];
+    n: int = 0;
+    soft: int = c_faint;
+    if (w < 0) {
+        tile_lines[0] = label_of(attributed(ns_of(st, tok_b[tile_t0[i]], tok_e[tile_t0[i] + tile_tn[i] - 1]),
+            italic_sans(15.0f64), soft));
+        n = 1
+    } else {
+        fl: int = w_flags(w);
+        eng: int = 0;
+        if (tile_tn[i] > 0) eng = attributed(ns_of(st, tok_b[tile_t0[i]], tok_e[tile_t0[i] + tile_tn[i] - 1]),
+            sans(15.0f64, 0.0f64), c_ink) else if ((fl & 2) != 0) eng = attributed(nsstring(if ((fl & 8) != 0) "(with previous)" else "(with next)"),
+            italic_sans(12.0f64), soft) else eng = attributed(nsstring("\â\€\”"),
+            sans(15.0f64, 0.0f64), soft);
+        tile_lines[0] = label_of(eng);
+        form_of(w);
+        tile_lines[1] = label_of(attributed(ns_of(lforms, wf_b, wf_e), original_font(w_greek(w),
+            21.0f64, 25.0f64), c_ink));
+        tile_lines[2] = label_of(attributed(ns_of(lforms, wt_b, wt_e), italic_sans(12.0f64),
+            soft));
+        fbuf_n = 0;
+        if (w_strongs(w) > 0) {
+            fput_key(w_greek(w), w_strongs(w));
+            fput_str(" \Â\· ")
+        }
+        morph_of(w_morph(w));
+        for x in mc_b..mc_e fput(lmorph[x] as int);
+        tile_lines[3] = label_of(attributed(fstring(), mono(11.0f64), soft));
+        n = 4
+    }
+    // Its width: the widest line's, and 16.
+    wide: f64 = 0.0f64;
+    h: f64 = 12.0f64;
+    for k in 0..n {
+        label_size(tile_lines[k], 600.0f64);
+        if (hfa[0] > wide) wide = hfa[0];
+        h = h + hfa[1] + (if (k > 0) 2.0f64 else 0.0f64)
+    }
+    tw: f64 = wide + 16.0f64;
+    t: int = msg(make(if (w >= 0) "UIControl" else "UIView"), sel("autorelease"));
+    y: f64 = 6.0f64;
+    for k in 0..n {
+        label_size(tile_lines[k], 600.0f64);
+        lh: f64 = hfa[1];
+        msg_rect(tile_lines[k], sel("setFrame:"), 0.0f64, y, tw, lh);
+        msg1(t, sel("addSubview:"), tile_lines[k]);
+        y = y + lh + 2.0f64
+    }
+    msg_set_f(msg(t, sel("layer")), sel("setCornerRadius:"), 10.0f64);
+    if (w >= 0) {
+        msg1(t, sel("setTag:"), w + 1);
+        msg3(t, sel("addTarget:action:forControlEvents:"), app_obj, sel("tileTapped:"),
+            64);
+        msg1(t, sel("setIsAccessibilityElement:"), 1);
+        fbuf_n = 0;
+        if (tile_tn[i] > 0) {
+            for x in tok_b[tile_t0[i]]..tok_e[tile_t0[i] + tile_tn[i] - 1] fput(st[x] as int)
+        } else fput_str("not translated");
+        fput_str(if (w_greek(w)) ", Greek " else ", Hebrew ");
+        for x in wt_b..wt_e fput(lforms[x] as int);
+        fput_str(", ");
+        plain_parsing(w_morph(w));
+        for x in 0..pl_n fput(pl[x] as int);
+        msg1(t, sel("setAccessibilityLabel:"), fstring());
+        msg1(t, sel("setAccessibilityHint:"), nsstring("Shows word study"));
+        msg1(t, sel("setAccessibilityTraits:"), objc_const("UIAccessibilityTraitButton"))
+    }
+    tile_ws[i] = tw;
+    tile_hs[i] = h;
+    t
+}
+
+il_build() {
+    if (il_scroll == 0 || il_vi < 0) return;
+    subs: int = msg(msg(il_content, sel("subviews")), sel("copy"));
+    for i in 0..msg(subs, sel("count")) msg(msg1(subs, sel("objectAtIndex:"), i),
+        sel("removeFromSuperview"));
+    release(subs);
+    W: f64 = il_width;
+    // The verse, as the reader sets it.
+    study_load(il_vi);
+    s: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    size: f64 = em * 0.9f64;
+    fbuf_n = 0;
+    fput_int(v_num(il_vi));
+    fput_str("\â\€\¯");
+    append(s, fstring(), msg_ff(cls("UIFont"), sel("monospacedDigitSystemFontOfSize:weight:"),
+        size * 0.62f64, 0.3f64), c_faint);
+    if (st_title > 0) {
+        append(s, ns_of(st, 0, st_title + 1), italic(size), c_faint);
+        append(s, ns_of(st, st_title + 1, st_n), body(size), c_ink)
+    } else append(s, ns_of(st, 0, st_n), body(size), c_ink);
+    caps_into(s, msg(s, sel("length")) - msg(ns_of(st, if (st_title > 0) st_title + 1 else 0,
+        st_n), sel("length")), ns_of(st, if (st_title > 0) st_title + 1 else 0, st_n),
+        true, size);
+    p: int = msg(para_style(0, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 1.3f64), sel("autorelease"));
+    msg4(s, sel("addAttribute:value:range:"), k_para, p, 0, msg(s, sel("length")));
+    verse: int = msg(make("UILabel"), sel("autorelease"));
+    msg1(verse, sel("setNumberOfLines:"), 0);
+    msg1(verse, sel("setAttributedText:"), s);
+    label_size(verse, W - 40.0f64);
+    msg_rect(verse, sel("setFrame:"), 20.0f64, 16.0f64, W - 40.0f64, hfa[1]);
+    msg1(il_content, sel("addSubview:"), verse);
+    y: f64 = 16.0f64 + hfa[1] + 14.0f64;
+    rule: int = msg(make("UIView"), sel("autorelease"));
+    msg1(rule, sel("setBackgroundColor:"), c_rule);
+    msg_rect(rule, sel("setFrame:"), 20.0f64, y, W - 40.0f64, 1.0f64);
+    msg1(il_content, sel("addSubview:"), rule);
+    y = y + 15.0f64;
+    // The tiles, in lines.
+    interlinear_tiles(il_vi, il_original);
+    for i in 0..tile_n tile_views[i] = make_tile(i);
+    wrap_tiles(tile_ws, tile_n, W - 28.0f64, 6.0f64);
+    rtl: bool = il_original && !w_greek(v_first(il_vi));
+    for l in 0..line_count {
+        a: int = line_first[l];
+        b: int = if (l + 1 < line_count) line_first[l + 1] else tile_n;
+        lh: f64 = 0.0f64;
+        for i in a..b
+            if (tile_hs[i] > lh) lh = tile_hs[i];
+        x: f64 = if (rtl) W - 14.0f64 else 14.0f64;
+        for i in a..b {
+            if (rtl) x = x - tile_ws[i];
+            msg_rect(tile_views[i], sel("setFrame:"), x, y, tile_ws[i], tile_hs[i]);
+            msg1(il_content, sel("addSubview:"), tile_views[i]);
+            if (rtl) x = x - 6.0f64 else x = x + tile_ws[i] + 6.0f64
+        }
+        y = y + lh + 14.0f64
+    }
+    msg_rect(il_content, sel("setFrame:"), 0.0f64, 0.0f64, W, y + 20.0f64);
+    msg_ff(il_scroll, sel("setContentSize:"), W, y + 20.0f64)
+}
+
+il_order(_self: int, _cmd: int, seg: int): int {
+    il_original = msg(seg, sel("selectedSegmentIndex")) == 1;
+    set_def_int("interlinearOrder", if (il_original) 1 else 0);
+    il_build();
+    0
+}
+
+// The verse before or after (across chapters; not one that cannot be
+// studied).
+il_step(d: int) {
+    vi: int = il_vi + d;
+    while (vi >= 0 && vi < lv_n && !(v_aligned(vi) && v_end(vi) > v_first(vi))) vi = vi + d;
+    if (vi < 0 || vi >= lv_n) return;
+    il_vi = vi;
+    il_set_title();
+    il_build();
+    msg_ff1(il_scroll, sel("setContentOffset:animated:"), 0.0f64, -top_inset(il_scroll),
+        0)
+}
+
+il_previous(_self: int, _cmd: int, _b: int): int {
+    il_step(-1);
+    0
+}
+
+il_next(_self: int, _cmd: int, _b: int): int {
+    il_step(1);
+    0
+}
+
+tile_tapped(_self: int, _cmd: int, t: int): int {
+    w: int = msg(t, sel("tag")) - 1;
+    if (w >= 0) open_study(il_vi, w);
+    0
+}
+
+// ---- word study ----
+study_table: int = 0;
+
+study_vc: int = 0;
+
+ws_vi: int = 0;
+
+ws_w: int = 0;
+
+// The word's lexicon entries (where the first is, and how many).
+ws_lex: int = -1;
+
+open_study(vi: int, w: int) {
+    sheet_nav: int = presented();
+    if (sheet_nav == 0) return;
+    ws_vi = vi;
+    ws_w = w;
+    ws_lex = lex_first(w_greek(w), w_strongs(w));
+    conc_load(w_greek(w), w_strongs(w));
+    renderings();
+    vc: int = msg(msg1(msg(cls("UITableViewController"), sel("alloc")), sel("initWithStyle:"),
+        2), sel("autorelease"));
+    study_vc = vc;
+    study_table = msg(vc, sel("tableView"));
+    msg1(study_table, sel("setDataSource:"), app_obj);
+    msg1(study_table, sel("setDelegate:"), app_obj);
+    style_table(study_table, true);
+    msg1(msg(vc, sel("navigationItem")), sel("setLargeTitleDisplayMode:"), 2);
+    // The title: the lemma's transliteration (or the form's).
+    form_of(w);
+    if (ws_lex >= 0) {
+        lex_field(ws_lex, 1);
+        msg1(vc, sel("setTitle:"), ns_of(llex, lf_b, lf_e))
+    } else msg1(vc, sel("setTitle:"), ns_of(lforms, wt_b, wt_e));
+    msg1(study_table, sel("setTableHeaderView:"), study_header(view_width(msg(sheet_nav,
+        sel("view")))));
+    msg2(sheet_nav, sel("setToolbarHidden:animated:"), 1, 1);
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1);
+    sheet: int = msg(sheet_nav, sel("sheetPresentationController"));
+    if (sheet != 0) msg1(sheet, sel("setSelectedDetentIdentifier:"), objc_const("UISheetPresentationControllerDetentIdentifierLarge"))
+}
+
+// The header: the form as it is in the verse, its transliteration, and
+// â€œlovedâ€ in John 3:16.
+study_header(W: f64): int {
+    w: int = ws_w;
+    study_load(ws_vi);
+    form_of(w);
+    v: int = msg(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
+        0.0f64, 0.0f64, W, 100.0f64), sel("autorelease"));
+    hero: int = label_of(attributed(ns_of(lforms, wf_b, wf_e), original_font(w_greek(w),
+        34.0f64, 40.0f64), c_ink));
+    tr: int = label_of(attributed(ns_of(lforms, wt_b, wt_e), italic_sans(17.0f64),
+        c_faint));
+    s: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    soft: int = msg_set_f(c_ink, sel("colorWithAlphaComponent:"), 0.8f64);
+    fbuf_n = 0;
+    one_verse[0] = v_num(ws_vi);
+    put_ref(v_chapter(ws_vi), one_verse, 1);
+    where: int = fstring();
+    chunk_of(w);
+    if (ch_e > ch_b) {
+        append(s, nsstring("\â\€\œ"), sans(15.0f64, 0.0f64), soft);
+        append(s, ns_of(st, ch_b, ch_e), sans(15.0f64, 0.4f64), soft);
+        append(s, nsstring("\â\€\ in "), sans(15.0f64, 0.0f64), soft)
+    } else append(s, nsstring("Not translated in "), sans(15.0f64, 0.0f64), soft);
+    append(s, where, sans(15.0f64, 0.0f64), soft);
+    line: int = label_of(s);
+    msg1(line, sel("setNumberOfLines:"), 0);
+    y: f64 = 24.0f64;
+    for x in [hero, tr, line] {
+        label_size(x, W - 40.0f64);
+        h: f64 = hfa[1];
+        msg_rect(x, sel("setFrame:"), 20.0f64, y, W - 40.0f64, h);
+        msg1(v, sel("addSubview:"), x);
+        y = y + h + (if (x == hero) 4.0f64 else 8.0f64)
+    }
+    msg_rect(v, sel("setFrame:"), 0.0f64, 0.0f64, W, y - 8.0f64 + 20.0f64);
+    v
+}
+
+study_sections(): int {
+    if (rd_n > 0) 4 else 3
+}
+
+study_rows(s: int): int {
+    if (s == 0) return 4;
+    if (s == 3) return if (rd_n > 6) 6 else rd_n;
+    1
+}
+
+study_header_title(s: int): int {
+    if (s == 1) return nsstring("Definition");
+    if (s == 2) return nsstring("Occurrences");
+    if (s == 3) return nsstring("Translated As");
+    0
+}
+
+study_footer(s: int): int {
+    if (s == 1 && ws_lex >= 0) return nsstring("From STEP Bible");
+    0
+}
+
+// The definition's first words, plain (its markup's text, its paragraphs
+// run together).
+definition_preview(): int {
+    if (ws_lex < 0) return nsstring("No definition.");
+    lex_field(ws_lex, 4);
+    lex_markup(lf_b, lf_e);
+    fbuf_n = 0;
+    for i in 0..lx_n {
+        if (fbuf_n < 600) {
+            k: int = lx[i] as int;
+            fput(if (k == 10) 32 else k)
+        }
+    }
+    fstring()
+}
+
+study_cell(t: int, path: int): int {
+    s: int = msg(path, sel("section"));
+    r: int = msg(path, sel("row"));
+    w: int = ws_w;
+    if (s == 0 && r == 3) {
+        cell: int = list_cell(t, "grammar", 2);
+        config: int = list_config(2);
+        msg1(config, sel("setText:"), nsstring("Grammar"));
+        plain_parsing(w_morph(w));
+        msg1(config, sel("setSecondaryText:"), nsstring_of(pl, pl_n));
+        msg1(text_props(config), sel("setColor:"), c_ink);
+        msg1(detail_props(config), sel("setColor:"), c_faint);
+        msg1(detail_props(config), sel("setNumberOfLines:"), 2);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        msg1(cell, sel("setSelectionStyle:"), 0);
+        return cell
+    }
+    if (s == 1) {
+        cell: int = list_cell(t, "definition", 0);
+        config: int = list_config(0);
+        msg1(config, sel("setText:"), definition_preview());
+        msg1(text_props(config), sel("setColor:"), c_ink);
+        msg1(text_props(config), sel("setNumberOfLines:"), 5);
+        msg1(text_props(config), sel("setLineBreakMode:"), 4);
+        msg1(text_props(config), sel("setFont:"), body(scaled(16.0f64)));
+        msg1(cell, sel("setContentConfiguration:"), config);
+        if (ws_lex >= 0) msg1(cell, sel("setAccessoryType:"), 1);
+        return cell
+    }
+    cell: int = list_cell(t, "value", 1);
+    config: int = list_config(1);
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    msg1(detail_props(config), sel("setColor:"), c_faint);
+    msg1(cell, sel("setSelectionStyle:"), 0);
+    if (s == 0) {
+        if (r == 0) {
+            msg1(config, sel("setText:"), nsstring("Dictionary Form"));
+            if (ws_lex >= 0) {
+                a: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+                lex_field(ws_lex, 0);
+                append(a, ns_of(llex, lf_b, lf_e), original_font(w_greek(w), 17.0f64,
+                    19.0f64), c_faint);
+                lex_field(ws_lex, 1);
+                append(a, nsstring(" ("), sans(17.0f64, 0.0f64), c_faint);
+                append(a, ns_of(llex, lf_b, lf_e), italic_sans(17.0f64), c_faint);
+                append(a, nsstring(")"), sans(17.0f64, 0.0f64), c_faint);
+                msg1(config, sel("setSecondaryAttributedText:"), a)
+            }
+        } else if (r == 1) {
+            msg1(config, sel("setText:"), nsstring("Meaning"));
+            if (ws_lex >= 0) {
+                lex_field(ws_lex, 3);
+                msg1(config, sel("setSecondaryText:"), ns_of(llex, lf_b, lf_e));
+                msg1(detail_props(config), sel("setColor:"), c_ink)
+            }
+        } else {
+            msg1(config, sel("setText:"), nsstring("Strong\â\€\™s"));
+            fbuf_n = 0;
+            fput_key(w_greek(w), w_strongs(w));
+            msg1(config, sel("setSecondaryText:"), fstring());
+            msg1(detail_props(config), sel("setFont:"), mono(17.0f64))
+        }
+    } else if (s == 2) {
+        msg1(config, sel("setText:"), nsstring("Concordance"));
+        fbuf_n = 0;
+        fput_int(cc_words);
+        fput_str(if (cc_words == 1) " time" else " times");
+        msg1(config, sel("setSecondaryText:"), fstring());
+        msg1(cell, sel("setAccessoryType:"), 1);
+        msg1(cell, sel("setSelectionStyle:"), 3)
+    } else {
+        msg1(config, sel("setText:"), nsstring_at(bytes_address(rd_pool) + rd_at[r],
+            rd_len[r]));
+        msg1(config, sel("setSecondaryText:"), nsnumber_text(rd_count[r]))
+    }
+    msg1(cell, sel("setContentConfiguration:"), config);
+    cell
+}
+
+study_picked(s: int, _r: int) {
+    if (s == 1 && ws_lex >= 0) open_definition();
+    if (s == 2) open_concordance()
+}
+
+// ---- the definition ----
+def_tv: int = 0;
+
+open_definition() {
+    sheet_nav: int = presented();
+    if (sheet_nav == 0) return;
+    vc: int = msg(make("UIViewController"), sel("autorelease"));
+    msg1(vc, sel("setTitle:"), nsstring("Definition"));
+    msg1(msg(vc, sel("navigationItem")), sel("setLargeTitleDisplayMode:"), 2);
+    view: int = msg(vc, sel("view"));
+    msg1(view, sel("setBackgroundColor:"), c_bg);
+    tv: int = make("UITextView");
+    def_tv = tv;
+    msg1(tv, sel("setEditable:"), 0);
+    msg1(tv, sel("setBackgroundColor:"), c_bg);
+    msg_rect(tv, sel("setTextContainerInset:"), 20.0f64, 20.0f64, 28.0f64, 20.0f64);
+    msg_set_f(msg(tv, sel("textContainer")), sel("setLineFragmentPadding:"), 0.0f64);
+    msg1(tv, sel("setAutoresizingMask:"), 18);
+    l8_msg_hfa(hfa, view, sel("bounds"), 0, 0, 0);
+    msg_rect(tv, sel("setFrame:"), 0.0f64, 0.0f64, hfa[2], hfa[3]);
+    msg1(tv, sel("setAttributedText:"), definition_text());
+    tap: int = msg2(msg(cls("UITapGestureRecognizer"), sel("alloc")), sel("initWithTarget:action:"),
+        app_obj, sel("definitionTapped:"));
+    msg1(tap, sel("setDelegate:"), app_obj);
+    msg1(tv, sel("addGestureRecognizer:"), tap);
+    release(tap);
+    msg1(view, sel("addSubview:"), tv);
+    release(tv);
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+k_ref: str = "L8Ref";
+
+k_web: str = "L8Web";
+
+// A paragraph style for the definition: hung for a sense.
+def_para(hang: bool, after: f64): int {
+    p: int = msg(para_style(0, 0.0f64, if (hang) scaled(16.0f64) * 1.4f64 else 0.0f64,
+        0.0f64, after, 1.3f64), sel("autorelease"));
+    p
+}
+
+definition_text(): int {
+    s: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    greek: bool = w_greek(ws_w);
+    size: f64 = scaled(16.0f64);
+    n: int = lex_count(ws_lex);
+    for e in 0..n {
+        p: int = lex_line(ws_lex, e);
+        start: int = msg(s, sel("length"));
+        if (e == 0) {
+            lex_field(p, 0);
+            append(s, ns_of(llex, lf_b, lf_e), original_font(greek, 34.0f64, 40.0f64),
+                c_ink);
+            append(s, nsstring("\n"), sans(10.0f64, 0.0f64), c_ink);
+            lex_field(p, 1);
+            append(s, ns_of(llex, lf_b, lf_e), italic_sans(17.0f64), c_faint);
+            fbuf_n = 0;
+            fput_str(" \Â\· ");
+            fput_key(greek, w_strongs(ws_w));
+            fput_str("\n");
+            append(s, fstring(), mono(15.0f64), c_faint);
+            lex_field(p, 3);
+            append(s, ns_of(llex, lf_b, lf_e), sans(20.0f64, 0.4f64), c_ink);
+            append(s, nsstring("\n"), sans(20.0f64, 0.0f64), c_ink);
+            msg4(s, sel("addAttribute:value:range:"), k_para, def_para(false, 16.0f64),
+                start, msg(s, sel("length")) - start)
+        } else {
+            fbuf_n = 0;
+            fput_str("Also: ");
+            lex_field(p, 0);
+            for x in lf_b..lf_e fput(llex[x] as int);
+            lex_field(p, 3);
+            fput_str(" \Â\· ");
+            for x in lf_b..lf_e fput(llex[x] as int);
+            fput_str("\n");
+            append(s, fstring(), sans(15.0f64, 0.4f64), c_heading);
+            msg4(s, sel("addAttribute:value:range:"), k_para, def_para(false, 6.0f64),
+                start, msg(s, sel("length")) - start)
+        }
+        lex_field(p, 4);
+        lex_markup(lf_b, lf_e);
+        a: int = 0;
+        for r in 0..lx_runs {
+            st_: int = lx_style[r];
+            f: int = 0;
+            if ((st_ & LX_HEBREW) != 0) f = sans(scaled(19.0f64), 0.0f64) else if ((st_ & LX_BOLD) != 0) f = bold(size) else if ((st_ & LX_ITALIC) != 0) f = italic(size) else f = body(size);
+            color: int = if ((st_ & LX_REF) != 0) c_accent else c_ink;
+            at: int = msg(s, sel("length"));
+            append(s, ns_of(lx, a, lx_end[r]), f, color);
+            n2: int = msg(s, sel("length")) - at;
+            msg4(s, sel("addAttribute:value:range:"), k_para, def_para(lx_sense[r],
+                size * 0.5f64), at, n2);
+            if ((st_ & LX_REF) != 0 && lx_book[r] >= 0) msg4(s, sel("addAttribute:value:range:"),
+                nsstring(k_ref), nsnumber_int(1 + lx_book[r] * 1000000 + lx_ch[r] * 1000 + lx_verse[r]),
+                at, n2);
+            a = lx_end[r]
+        }
+        append(s, nsstring("\n"), body(size), c_ink)
+    }
+    // The credit (CC BY): STEP Bible, linked.
+    at: int = msg(s, sel("length"));
+    append(s, nsstring("""
+
+Source: """), sans(13.0f64, 0.0f64), c_faint);
+    l: int = msg(s, sel("length"));
+    append(s, nsstring("STEP Bible"), sans(13.0f64, 0.0f64), c_accent);
+    msg4(s, sel("addAttribute:value:range:"), nsstring(k_web), nsnumber_int(1), l,
+        10);
+    msg4(s, sel("addAttribute:value:range:"), k_para, def_para(false, 0.0f64), at,
+        msg(s, sel("length")) - at);
+    s
+}
+
+// A tap on the definition: a reference goes there; the credit opens STEP
+// Bible.
+definition_tapped(_self: int, _cmd: int, tap: int): int {
+    tv: int = msg(tap, sel("view"));
+    l8_msg_hfa(hfa, tap, sel("locationInView:"), tv, 0, 0);
+    x: f64 = hfa[0];
+    y: f64 = hfa[1];
+    if (link_at(tv, x, y, k_web) > 0) {
+        open_web("https://www.STEPBible.org");
+        return 0
+    }
+    r: int = link_at(tv, x, y, k_ref) - 1;
+    if (r >= 0) {
+        b: int = r / 1000000;
+        c: int = r / 1000 % 1000;
+        v: int = r % 1000;
+        if (b < books) jump(chapter_of(b, c), v)
+    }
+    0
+}
+
+// ---- the concordance ----
+conc_table: int = 0;
+
+// Its sections (a book each): first verse (of cc_vi) and how many.
+cs_n: int = 0;
+
+cs_book: []int = new int[66](0);
+
+cs_start: []int = new int[66](0);
+
+cs_count: []int = new int[66](0);
+
+open_concordance() {
+    sheet_nav: int = presented();
+    if (sheet_nav == 0) return;
+    conc_load(w_greek(ws_w), w_strongs(ws_w));
+    cs_n = 0;
+    for i in 0..cc_n {
+        b: int = ch_book[v_chapter(cc_vi[i])];
+        if (cs_n == 0 || cs_book[cs_n - 1] != b) {
+            cs_book[cs_n] = b;
+            cs_start[cs_n] = i;
+            cs_count[cs_n] = 0;
+            cs_n = cs_n + 1
+        }
+        cs_count[cs_n - 1] = cs_count[cs_n - 1] + 1
+    }
+    vc: int = msg(msg1(msg(cls("UITableViewController"), sel("alloc")), sel("initWithStyle:"),
+        0), sel("autorelease"));
+    msg1(vc, sel("setTitle:"), nsstring("Concordance"));
+    msg1(msg(vc, sel("navigationItem")), sel("setLargeTitleDisplayMode:"), 2);
+    conc_table = msg(vc, sel("tableView"));
+    msg1(conc_table, sel("setDataSource:"), app_obj);
+    msg1(conc_table, sel("setDelegate:"), app_obj);
+    style_table(conc_table, false);
+    msg1(conc_table, sel("setSectionIndexColor:"), c_accent);
+    msg1(conc_table, sel("setSectionIndexBackgroundColor:"), msg(cls("UIColor"), sel("clearColor")));
+    msg_rect(conc_table, sel("setSeparatorInset:"), 0.0f64, 20.0f64, 0.0f64, 0.0f64);
+    // The header: á¼€Î³Î±Ï€Î¬Ï‰ Â· agapaÅ Â· G25 â€” 143 times in 110 verses.
+    fbuf_n = 0;
+    if (ws_lex >= 0) {
+        lex_field(ws_lex, 0);
+        for x in lf_b..lf_e fput(llex[x] as int);
+        fput_str(" \Â\· ");
+        lex_field(ws_lex, 1);
+        for x in lf_b..lf_e fput(llex[x] as int);
+        fput_str(" \Â\· ")
+    }
+    fput_key(w_greek(ws_w), w_strongs(ws_w));
+    fput_str(" \â\€\” ");
+    fput_int(cc_words);
+    fput_str(if (cc_words == 1) " time in " else " times in ");
+    fput_int(cc_n);
+    fput_str(if (cc_n == 1) " verse" else " verses");
+    W: f64 = view_width(msg(sheet_nav, sel("view")));
+    head: int = label_of(attributed(fstring(), sans(13.0f64, 0.0f64), c_faint));
+    msg1(head, sel("setNumberOfLines:"), 0);
+    label_size(head, W - 40.0f64);
+    h: f64 = hfa[1];
+    box: int = msg(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
+        0.0f64, 0.0f64, W, h + 20.0f64), sel("autorelease"));
+    msg_rect(head, sel("setFrame:"), 20.0f64, 10.0f64, W - 40.0f64, h);
+    msg1(box, sel("addSubview:"), head);
+    msg1(conc_table, sel("setTableHeaderView:"), box);
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+conc_header(s: int): int {
+    fbuf_n = 0;
+    b: int = cs_book[s];
+    for i in book_name_start(b)..book_name_end(b) fput(bsb[i] as int);
+    fput_str(" \Â\· ");
+    fput_int(cs_count[s]);
+    fstring()
+}
+
+// Short book names for the index, when there are many books.
+conc_index(): int {
+    if (cs_n <= 8) return 0;
+    a: int = make("NSMutableArray");
+    for s in 0..cs_n {
+        book_short(cs_book[s]);
+        msg1(a, sel("addObject:"), nsstring_of(short_name, short_n))
+    }
+    msg(a, sel("autorelease"))
+}
+
+// A verse of the concordance: its words, the number's English bold and
+// washed.
+conc_text(vi: int): int {
+    conc_marks(vi);
+    size: f64 = scaled(16.0f64);
+    soft: int = msg_set_f(c_ink, sel("colorWithAlphaComponent:"), 0.8f64);
+    start: int = 0;
+    if (mk_n > 0 && mk_b[0] > 170) {
+        words: int = 0;
+        start = mk_b[0];
+        while (start > 0 && words < 9) {
+            start = start - 1;
+            if (st[start] as int == 32) words = words + 1
+        }
+        if (st[start] as int == 32) start = start + 1
+    }
+    s: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    if (start > 0) append(s, nsstring("\â\€\¦ "), body(size), soft);
+    lead: int = msg(s, sel("length"));
+    text: int = ns_of(st, start, st_n);
+    append(s, text, body(size), soft);
+    caps_into(s, lead, text, true, size);
+    for i in 0..mk_n {
+        if (mk_b[i] >= start) {
+            b: int = lead + st_utf16(start, mk_b[i]);
+            n: int = st_utf16(mk_b[i], mk_e[i]);
+            msg4(s, sel("addAttribute:value:range:"), k_font, bold(size), b, n);
+            msg4(s, sel("addAttribute:value:range:"), k_color, c_ink, b, n);
+            msg4(s, sel("addAttribute:value:range:"), k_background, c_sel, b, n)
+        }
+    }
+    p: int = msg(para_style(0, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 1.25f64), sel("autorelease"));
+    msg1(p, sel("setLineBreakMode:"), 4);
+    msg4(s, sel("addAttribute:value:range:"), k_para, p, 0, msg(s, sel("length")));
+    s
+}
+
+st_utf16(p: int, e: int): int {
+    n: int = 0;
+    for i in p..e {
+        k: int = st[i] as int & 255;
+        if (k < 128 || k >= 192) n = n + 1;
+        if (k >= 240) n = n + 1
+    }
+    n
+}
+
+conc_cell(t: int, path: int): int {
+    vi: int = cc_vi[cs_start[msg(path, sel("section"))] + msg(path, sel("row"))];
+    cell: int = list_cell(t, "conc", 2);
+    config: int = list_config(2);
+    a: int = attributed(place_name(v_chapter(vi), v_num(vi)), sans(13.0f64, 0.3f64),
+        c_accent);
+    msg1(config, sel("setSecondaryAttributedText:"), conc_text(vi));
+    if (mk_untranslated) append(a, nsstring(" \Â\· not translated"), sans(13.0f64,
+        0.0f64), c_faint);
+    msg1(config, sel("setAttributedText:"), a);
+    msg1(detail_props(config), sel("setNumberOfLines:"), 4);
+    msg1(detail_props(config), sel("setLineBreakMode:"), 4);
+    msg_set_f(config, sel("setTextToSecondaryTextVerticalPadding:"), 3.0f64);
+    msg_rect(config, sel("setDirectionalLayoutMargins:"), 12.0f64, 20.0f64, 12.0f64,
+        20.0f64);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    cell
+}
+
+conc_picked(s: int, r: int) {
+    vi: int = cc_vi[cs_start[s] + r];
+    jump(v_chapter(vi), v_num(vi))
+}
+
+// ---- acknowledgements ----
+ack_table: int = 0;
+
+changes_table: int = 0;
+
+open_acknowledgements() {
+    if (settings_nav == 0) return;
+    vc: int = msg(msg1(msg(cls("UITableViewController"), sel("alloc")), sel("initWithStyle:"),
+        2), sel("autorelease"));
+    msg1(vc, sel("setTitle:"), nsstring("Acknowledgements"));
+    msg1(msg(vc, sel("navigationItem")), sel("setLargeTitleDisplayMode:"), 2);
+    ack_table = msg(vc, sel("tableView"));
+    msg1(ack_table, sel("setDataSource:"), app_obj);
+    msg1(ack_table, sel("setDelegate:"), app_obj);
+    style_table(ack_table, true);
+    sheet: int = msg(settings_nav, sel("sheetPresentationController"));
+    one[0] = msg(cls("UISheetPresentationControllerDetent"), sel("mediumDetent"));
+    one[1] = msg(cls("UISheetPresentationControllerDetent"), sel("largeDetent"));
+    if (sheet != 0) {
+        msg1(sheet, sel("setDetents:"), nsarray(one, 2));
+        msg1(sheet, sel("setSelectedDetentIdentifier:"), objc_const("UISheetPresentationControllerDetentIdentifierLarge"))
+    }
+    msg2(settings_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+ack_headers: []str = ["Text", "Original Languages", "Lexicons"];
+
+ack_titles: []str = ["Berean Standard Bible", "Berean Bible Translation Tables", "STEP Bible"];
+
+ack_lines: []str = ["The BSB text is in the public domain.", "Hebrew and Greek words, transliterations, parsing and Strong\â\€\™s numbers aligned to the BSB. Public domain.",
+    "Definitions from STEP Bible\â\€\™s brief Hebrew and Greek lexicons (TBESH, TBESG), licensed CC BY 4.0."];
+
+ack_links: []str = ["https://bereanbible.com", "https://bereanbible.com", "https://www.STEPBible.org"];
+
+ack_rows(s: int): int {
+    if (s == 2) 2 else 1
+}
+
+ack_footer(s: int): int {
+    if (s != 2) return 0;
+    bundle: int = msg(cls("NSBundle"), sel("mainBundle"));
+    fbuf_n = 0;
+    fput_str("Smooth Bible ");
+    for key in ["CFBundleShortVersionString", "CFBundleVersion"] {
+        v: int = msg1(bundle, sel("objectForInfoDictionaryKey:"), nsstring(key));
+        if (key[8] as int == 86) fput_str(" (");
+        if (v != 0) {
+            n: int = nsstring_into(v, number_buf);
+            for i in 0..n fput(number_buf[i] as int)
+        }
+    }
+    fput_str(")");
+    fstring()
+}
+
+ack_cell(t: int, path: int): int {
+    s: int = msg(path, sel("section"));
+    r: int = msg(path, sel("row"));
+    if (r == 1) {
+        cell: int = list_cell(t, "changes", 0);
+        config: int = list_config(0);
+        msg1(config, sel("setText:"), nsstring("Changes to the Lexicon Data"));
+        msg1(text_props(config), sel("setColor:"), c_ink);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        msg1(cell, sel("setAccessoryType:"), 1);
+        return cell
+    }
+    cell: int = list_cell(t, "credit", 2);
+    config: int = list_config(2);
+    msg1(config, sel("setText:"), nsstring(ack_titles[s]));
+    msg1(config, sel("setSecondaryText:"), nsstring(ack_lines[s]));
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    msg1(detail_props(config), sel("setColor:"), c_faint);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    iv: int = msg1(msg(cls("UIImageView"), sel("alloc")), sel("initWithImage:"), symbol("arrow.up.right",
+        13.0f64, 6, c_faint));
+    msg1(cell, sel("setAccessoryView:"), iv);
+    release(iv);
+    cell
+}
+
+ack_picked(s: int, r: int) {
+    if (r == 1) open_changes() else open_web(ack_links[s])
+}
+
+change_lines: []str = ["STEP Bible\â\€\™s HTML was converted to plain styled text: bold, italic, paragraphs and references kept; other markup dropped, and entities decoded.",
+    "Entries were grouped by base Strong\â\€\™s number, the sense matching the word\â\€\™s part of speech first.",
+    "Hebrew cantillation and paragraph marks were removed for display; vowel points kept.",
+    "Psalm titles were mapped to verse 1, as the BSB\â\€\™s tables have them.", "Transliterations of Hebrew lemmas are the tables\â\€\™ own, or made in their style."];
+
+open_changes() {
+    if (settings_nav == 0) return;
+    vc: int = msg(msg1(msg(cls("UITableViewController"), sel("alloc")), sel("initWithStyle:"),
+        2), sel("autorelease"));
+    msg1(vc, sel("setTitle:"), nsstring("Changes"));
+    msg1(msg(vc, sel("navigationItem")), sel("setLargeTitleDisplayMode:"), 2);
+    changes_table = msg(vc, sel("tableView"));
+    msg1(changes_table, sel("setDataSource:"), app_obj);
+    msg1(changes_table, sel("setDelegate:"), app_obj);
+    style_table(changes_table, true);
+    msg2(settings_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+changes_cell(t: int, path: int): int {
+    cell: int = list_cell(t, "change", 0);
+    config: int = list_config(0);
+    msg1(config, sel("setText:"), nsstring(change_lines[msg(path, sel("row"))]));
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    msg1(text_props(config), sel("setNumberOfLines:"), 0);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setSelectionStyle:"), 0);
+    cell
+}
+
+// ---- classes and methods ----
+make_study_classes() {
+    il_class = objc_allocateClassPair(cls("UIViewController"), "L8Interlinear", 0);
+    add_method0(il_class, sel("viewDidLayoutSubviews"), &il_layout, "v@:");
+    objc_registerClassPair(il_class)
+}
+
+study_index_titles(_self: int, _cmd: int, t: int): int {
+    if (t == conc_table && t != 0) return conc_index();
+    0
+}
+
+add_study_methods(app: int) {
+    add_method1(app, sel("ilPrevious:"), &il_previous, "v@:@");
+    add_method1(app, sel("ilNext:"), &il_next, "v@:@");
+    add_method1(app, sel("ilOrder:"), &il_order, "v@:@");
+    add_method1(app, sel("tileTapped:"), &tile_tapped, "v@:@");
+    add_method1(app, sel("definitionTapped:"), &definition_tapped, "v@:@");
+    add_method1(app, sel("sectionIndexTitlesForTableView:"), &study_index_titles,
+        "@@:@")
+}

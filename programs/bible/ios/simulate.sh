@@ -95,6 +95,23 @@ xcrun simctl spawn "$dev" notifyutil -p "$id.demo30"
 sleep 2; shot 31-link-romans-8
 xcrun simctl ui "$dev" content_size large 2>/dev/null || true
 xcrun simctl ui "$dev" appearance light
+sleep 2
+# Round 2: study (DESIGN.md §7.10; the steps are one later than its table,
+# the screenshots named as it names them).
+step 33 32-panel-study
+step 34 33-interlinear 3
+step 35 34-interlinear-greek 3
+step 36 35-word-study 3
+step 37 37-definition 3
+step 38 38-concordance 3
+step 39 40-concordance-jump 3
+step 40 43-interlinear-hebrew 4
+step 41 42-word-study-hebrew 3
+step 42 44-interlinear-untranslated 4
+step 43 45-word-study-night 5
+step 44 52-acknowledgements 5
+step 45 53-data-changes 3
+step 46 99-done 2
 kill "$logger" "$console" 2>/dev/null || true
 find ~/Library/Logs/DiagnosticReports -newer "$app/Info.plist" -type f -exec cp {} "$out"/ \; 2>/dev/null || true
 ls -la "$out"

@@ -28,12 +28,23 @@ read aloud by VoiceOver as it would be in the phone's own apps.
 - Where you were (the chapter, verse, and how far into it) is kept through
   size changes and relaunches. Highlights, bookmarks, notes and history are
   files in Application Support/SmoothBible, by book, chapter and verse.
+- Study (Round 2, in progress): the tray's fifth action opens the verse's
+  interlinear (English or original order, a verse before or after); a
+  word's tile opens its study (form, lemma, meaning, Strong's number,
+  parsing in plain English, a definition from STEP Bible, how often and how
+  it is translated), its definition, and its concordance (a verse there
+  goes to it). Reading settings → Acknowledgements credits the sources.
 - A link opens a chapter: `bsb://JHN/3` (or a verse, `bsb://JHN/3/16`).
 
 ## Files
 
 - `data/bsb.txt` is the text, one record a line (see `text.l8` and
-  `tools/bsb.py`, which made it from ebible.org's USFM, `engbsb_usfm.zip`).
+  `tools/bsb.py`, which made it from the publisher's USFM, `bsb_usfm.zip`);
+  `data/lang/` is the original-language data (`tools/bsb_lang.py`, from the
+  Berean translation tables and STEP Bible's lexicons). `tools/fetch.sh DIR
+  make` downloads the sources, checks their sha256, and makes both again.
+  `lang.l8` reads it for the study screens (`test_lang.l8`), and
+  `ios_study.l8` shows them.
   The BSB is in the public domain.
 - `text.l8` indexes it and lays a chapter out as runs of styled text;
   `test_text.l8` tests that (`make bible-test`).
