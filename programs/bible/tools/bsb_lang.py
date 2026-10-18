@@ -234,6 +234,8 @@ def markup(defn, have, stats):
             continue
         paras.append(p)
     text = cross_style("\\n".join(paras), stats)
+    # (Hebrew without its accents, as forms.txt has it: the points stay.)
+    text = re.sub("[\u0591-\u05af\u05c0\u05c3]", "", text)
     if "<" in text and re.search(r"<[a-zA-Z/]", text):
         stats["lexicon html left"] += 1
     return text
