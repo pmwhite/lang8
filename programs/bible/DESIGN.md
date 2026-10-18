@@ -2965,6 +2965,28 @@ calls `scrollToRow…`, or reloads it.**
 - `esv_cache.l8`: `esv_pinned`, `esv_room_for`.
 - `test_store.l8`, `ios_demo*.l8`, `simulate.sh`, and the new fixtures.
 
+#### 9.4.11a Builder notes (§9.4.11, as built)
+1. **`scrollViewWillEndDragging:withVelocity:targetContentOffset:`** gets the target's
+   pointer as its third whole-number argument: the velocity, a CGPoint, comes in float
+   registers, which an L8 method doesn't receive.
+2. **`esv_pending_visible` and `esv_pending_above` are one list** (`esv_pending`): at rest
+   both are handled the same way, in one update.
+3. **A placeholder on the screen is asked for first,** before the window's chapters, and
+   past the 20-a-minute limit; `count=2` only when the next chapter is itself askable.
+4. **The glide starts at John 3:33 and steps from 160 pt a frame** (×0.97, 150 frames),
+   four times the design's 40: John's chapters are 5,000–6,000 pt on a phone, so the
+   design's 1,600 pt glide from John 3:1 never left John 3. It passes into John 5.
+5. **The demo writes the glide's offset itself** (`setContentOffset:` directly, not
+   `set_offset`), so its own frames aren't counted as writes while moving; everything
+   else's are.
+6. **The fixture's missing chapters are not asked for again** (`esv_fixture_none`): a
+   chapter it has no file for (John 2, beside John 3) was asked for every second, holding
+   the one request in flight.
+7. **JHN 5–8's fixtures** are made from `web.txt` by `worker/web_fixture.mjs`, then their
+   `.records` by the converter, as `test.mjs` checks every fixture.
+8. **No real deceleration is measured**: there's no public way to make one in the
+   simulator, so check 1 (no offset written while moving) stands in for it.
+
 ### 9.5 R4.4 Compare
 **Entry:** the tray's action row gets a sixth action, **Compare** (`books.vertical`), after
 Study. The row is 6 across, fillEqually.
