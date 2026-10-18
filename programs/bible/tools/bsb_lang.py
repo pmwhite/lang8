@@ -33,9 +33,12 @@ OUT_DIR gets (all little-endian; see DESIGN.md §7.1):
   conc.bin      per Strong's key (G keys then H, by number): the key, \\0,
                 LEB128 words, LEB128 deltas of (verse index + 1), \\0
   lexicon.txt   per base Strong's key used: @KEY, then a line per STEP entry
-                (the main one first): lemma \\t transliteration \\t part of
-                speech \\t gloss \\t definition (**bold**, _italic_,
-                [[MAT.5.43|Mat 5:43]], and \\n between paragraphs)
+                (the main one first): extended code \\t lemma \\t
+                transliteration \\t part of speech \\t gloss \\t definition
+                (**bold**, _italic_, [[MAT.5.43|Mat 5:43]], and \\n between
+                paragraphs). The code is STEP's for the entry, as the app
+                writes numbers (H7462B, H430G), or empty when it has no
+                letter (G2316); TAHOT's and TAGNT's dStrongs name these.
 
 The verses' tokens (the English words, as the regex TOKEN finds them) are
 compared with the tables' chunks: a verse is aligned when they are the same.
@@ -280,6 +283,12 @@ def cross_style(text, stats):
     if re.search(r"_[a-z]+\.[a-z.]+_ \([" + ORIG + "]", text):
         stats["lexicon dotted transliterations left"] += 1
     return text
+
+
+def ext_code(f):
+    # "H0430G = a Name of" -> H430G; "H0002 = in Aramaic of" -> "".
+    m = re.match(r"\s*([HG])(\d{4})([A-Za-z]*)\s*=", f)
+    return m.group(1) + str(int(m.group(2))) + m.group(3) if m and m.group(3) else ""
 
 
 def read_step(paths):
@@ -620,7 +629,7 @@ def main():
                     translit_from["made"] += 1
             gloss = e[6].strip()
             defn = markup(e[7], have, stats)
-            lines.append("\t".join([lemma, tr, e[5].strip(), gloss, defn]))
+            lines.append("\t".join([ext_code(e[1]), lemma, tr, e[5].strip(), gloss, defn]))
     stats["lemma translits from the tables"] = translit_from["tables"]
     stats["lemma translits made"] = translit_from["made"]
     w = lambda name, data, mode="wb": open(os.path.join(outdir, name), mode).write(data)

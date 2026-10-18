@@ -1,0 +1,533 @@
+tag bible;
+
+use_tag std;
+
+// Reading plans and the verse of the day (DESIGN.md ¬ß10.1, ¬ß10.2), apart
+// from any platform: the four plans computed from the chapters (each a list
+// of days, a day a list of readings, a reading a run of chapters in one
+// book), balanced by the BSB's words; a plan's progress (plan.tsv's lines,
+// read and written in fbuf as store.l8's files are); and data/votd.txt, a
+// verse for each date. Days are local days, counted from 1 January 1970,
+// given by the platform (its today()). test_plans.l8 tests it.
+import "text.l8";
+
+import "store.l8";
+
+// ---- the plans ----
+PLANS: int = 4;
+
+PLAN_YEAR: int = 0;
+
+PLAN_NT90: int = 1;
+
+PLAN_PSPR: int = 2;
+
+PLAN_GOSPELS: int = 3;
+
+plan_ids: []str = ["year", "nt90", "pspr", "gospels"];
+
+plan_names: []str = ["Bible in a Year", "New Testament in 90 Days", "Psalms and Proverbs in a Month",
+    "The Gospels in 30 Days"];
+
+plan_blurbs: []str = ["The whole Bible in order, about fifteen minutes a day.", "The New Testament in three months.",
+    "Five psalms and a chapter of Proverbs a day.", "Matthew, Mark, Luke and John in a month."];
+
+plan_lengths: []int = [365, 90, 31, 30];
+
+// Each plan's days, one after another (pl_day0[p] its first), each its
+// readings (pl_r0 its first, pl_rn how many); each reading its first and
+// last chapter (through the Bible).
+pl_ready: bool = false;
+
+pl_day0: []int = new int[5](0);
+
+pl_r0: []int = new int[520](0);
+
+pl_rn: []int = new int[520](0);
+
+pl_rc0: []int = new int[1600](0);
+
+pl_rc1: []int = new int[1600](0);
+
+pl_readings: int = 0;
+
+// How many chapters each plan has.
+pl_chapters: []int = new int[4](0);
+
+// Each chapter's words (the BSB's T and W text, in characters).
+pl_chars: []int = new int[1200](0);
+
+// The chapters of the plan being made, and where each day ends among them.
+pl_seq: []int = new int[1200](0);
+
+pl_seq_n: int = 0;
+
+pl_cum: []int = new int[1201](0);
+
+pl_ends: []int = new int[366](0);
+
+// Each chapter's characters of words (T and W lines; a UTF-8 character
+// counted once), the BSB's.
+plan_weights() {
+    was: int = text_cur;
+    text_use(TEXT_BSB);
+    for c in 0..chapters {
+        n: int = 0;
+        p: int = ch_start[c];
+        while (p < ch_end[c]) {
+            e: int = line_end(p);
+            k: int = bsb[p] as int;
+            if (k == 84 || k == 87) {
+                for i in p + 1..e {
+                    x: int = bsb[i] as int & 255;
+                    if (x < 128 || x >= 192) n = n + 1
+                }
+            }
+            p = e + 1
+        }
+        pl_chars[c] = n
+    }
+    text_use(was)
+}
+
+// pl_seq's chapters into days days, balanced: day d ends at the chapter
+// boundary nearest total¬∑d/days, each with a chapter at least (pl_ends).
+plan_balance(days: int) {
+    n: int = pl_seq_n;
+    pl_cum[0] = 0;
+    for i in 0..n pl_cum[i + 1] = pl_cum[i] + pl_chars[pl_seq[i]];
+    total: int = pl_cum[n];
+    prev: int = 0;
+    for d in 1..days + 1 {
+        if (d == days) pl_ends[d - 1] = n else {
+            target: int = total * d / days;
+            most: int = n - (days - d);
+            b: int = prev + 1;
+            while (b < most && dist(pl_cum[b + 1], target) <= dist(pl_cum[b], target)) b = b + 1;
+            pl_ends[d - 1] = b;
+            prev = b
+        }
+    }
+}
+
+dist(a: int, b: int): int {
+    if (a > b) a - b else b - a
+}
+
+// A reading of chapters a to b (inclusive) onto the plans' readings.
+plan_reading(a: int, b: int) {
+    if (pl_readings >= len(pl_rc0)) return;
+    pl_rc0[pl_readings] = a;
+    pl_rc1[pl_readings] = b;
+    pl_readings = pl_readings + 1
+}
+
+// pl_seq's chapters from i to j (not j) as readings, a book at a time.
+plan_readings_of(i: int, j: int) {
+    k: int = i;
+    while (k < j) {
+        a: int = pl_seq[k];
+        e: int = k;
+        while (e + 1 < j && ch_book[pl_seq[e + 1]] == ch_book[a] && pl_seq[e + 1] == pl_seq[e] + 1) e = e + 1;
+        plan_reading(a, pl_seq[e]);
+        k = e + 1
+    }
+}
+
+// Chapters a (inclusive) to b (not) as the plan's chapters.
+plan_seq(a: int, b: int) {
+    pl_seq_n = 0;
+    for c in a..b {
+        pl_seq[pl_seq_n] = c;
+        pl_seq_n = pl_seq_n + 1
+    }
+}
+
+book_coded(code: str): int {
+    for b in 0..books
+        if (book_is(b, code)) return b;
+    -1
+}
+
+// The four plans, made (once).
+plans_make() {
+    if (pl_ready) return;
+    plan_weights();
+    pl_readings = 0;
+    day: int = 0;
+    mat: int = book_first[book_coded("MAT")];
+    jhn: int = book_coded("JHN");
+    psa: int = book_coded("PSA");
+    pro: int = book_coded("PRO");
+    for p in 0..PLANS {
+        pl_day0[p] = day;
+        days: int = plan_lengths[p];
+        if (p == PLAN_YEAR) plan_seq(0, chapters) else if (p == PLAN_NT90) plan_seq(mat,
+            chapters) else if (p == PLAN_GOSPELS) plan_seq(mat, book_first[jhn] + book_count[jhn]) else plan_seq(book_first[psa],
+            book_first[psa] + book_count[psa]);
+        pl_chapters[p] = pl_seq_n + (if (p == PLAN_PSPR) book_count[pro] else 0);
+        plan_balance(days);
+        from: int = 0;
+        for d in 0..days {
+            pl_r0[day + d] = pl_readings;
+            plan_readings_of(from, pl_ends[d]);
+            // (Proverbs d on day d.)
+            if (p == PLAN_PSPR && d < book_count[pro]) plan_reading(book_first[pro] + d,
+                book_first[pro] + d);
+            pl_rn[day + d] = pl_readings - pl_r0[day + d];
+            from = pl_ends[d]
+        }
+        day = day + days
+    }
+    pl_day0[PLANS] = day;
+    pl_ready = true
+}
+
+// Day d (from 1) of plan p: its index among the plans' days.
+plan_day(p: int, d: int): int {
+    pl_day0[p] + d - 1
+}
+
+// About how many chapters a day (rounded).
+plan_per_day(p: int): int {
+    (pl_chapters[p] * 2 + plan_lengths[p]) / (2 * plan_lengths[p])
+}
+
+// ---- labels ----
+// A reading: "Genesis 4‚Äì6", "Psalm 119", "Psalms 1‚Äì6", "Obadiah" (spoken:
+// "Genesis 4 to 6").
+fput_reading(r: int, spoken: bool) {
+    a: int = pl_rc0[r];
+    b: int = pl_rc1[r];
+    if (a == b) {
+        fput_title(a);
+        return
+    }
+    bk: int = ch_book[a];
+    fput_bytes(bsb, book_name_start(bk), book_name_end(bk));
+    fput(32);
+    fput_int(ch_num[a]);
+    if (spoken) fput_str(" to ") else fput_str("\‚\Ä\ì");
+    fput_int(ch_num[b])
+}
+
+// A day's readings: "Deuteronomy 34; Joshua 1‚Äì2".
+fput_day(di: int) {
+    for r in pl_r0[di]..pl_r0[di] + pl_rn[di] {
+        if (r > pl_r0[di]) fput_str("; ");
+        fput_reading(r, false)
+    }
+}
+
+// ---- progress (plan.tsv) ----
+// The plan followed (-1: none), the day it began, and the chapters read
+// since (and when).
+pl_active: int = -1;
+
+pl_start: int = 0;
+
+pl_read: []bool = new bool[1200](false);
+
+pl_read_t: []int = new int[1200](0);
+
+plan_clear() {
+    pl_active = -1;
+    pl_start = 0;
+    for c in 0..len(pl_read) {
+        pl_read[c] = false;
+        pl_read_t[c] = 0
+    }
+}
+
+// Plan p begun on day start, nothing read.
+plan_begin(p: int, start: int) {
+    plan_clear();
+    pl_active = p;
+    pl_start = start
+}
+
+// Today's day of the plan followed (from 1, at most its last).
+plan_today(today: int): int {
+    if (pl_active < 0) return 0;
+    n: int = today - pl_start + 1;
+    if (n < 1) n = 1;
+    if (n > plan_lengths[pl_active]) n = plan_lengths[pl_active];
+    n
+}
+
+// How much of reading r is read: 0 none, 1 some, 2 all.
+reading_state(r: int): int {
+    all: bool = true;
+    any: bool = false;
+    for c in pl_rc0[r]..pl_rc1[r] + 1 {
+        if (pl_read[c]) any = true else all = false
+    }
+    if (all) 2 else if (any) 1 else 0
+}
+
+day_state(di: int): int {
+    all: bool = true;
+    any: bool = false;
+    for r in pl_r0[di]..pl_r0[di] + pl_rn[di] {
+        s: int = reading_state(r);
+        if (s != 2) all = false;
+        if (s != 0) any = true
+    }
+    if (all) 2 else if (any) 1 else 0
+}
+
+// The first chapter of reading r not read (its first, if all are).
+reading_first_unread(r: int): int {
+    for c in pl_rc0[r]..pl_rc1[r] + 1
+        if (!pl_read[c]) return c;
+    pl_rc0[r]
+}
+
+day_first_unread(di: int): int {
+    for r in pl_r0[di]..pl_r0[di] + pl_rn[di]
+        if (reading_state(r) != 2) return reading_first_unread(r);
+    pl_rc0[pl_r0[di]]
+}
+
+// Reading r's chapters all read (at time t), or none.
+mark_reading(r: int, on: bool, t: int) {
+    for c in pl_rc0[r]..pl_rc1[r] + 1 {
+        pl_read[c] = on;
+        pl_read_t[c] = (if (on) t else 0)
+    }
+}
+
+mark_day(di: int, on: bool, t: int) {
+    for r in pl_r0[di]..pl_r0[di] + pl_rn[di] mark_reading(r, on, t)
+}
+
+// The day of the plan followed that chapter c is in (from 1), or 0.
+plan_day_of(c: int): int {
+    if (pl_active < 0) return 0;
+    for d in 0..plan_lengths[pl_active] {
+        di: int = pl_day0[pl_active] + d;
+        for r in pl_r0[di]..pl_r0[di] + pl_rn[di]
+            if (c >= pl_rc0[r] && c <= pl_rc1[r]) return d + 1
+    }
+    0
+}
+
+// Chapter c read, at time t: whether that finished today's day (it was
+// today's last unread).
+mark_chapter(c: int, t: int, today: int): bool {
+    d: int = plan_day_of(c);
+    if (d == 0 || pl_read[c]) return false;
+    pl_read[c] = true;
+    pl_read_t[c] = t;
+    d == plan_today(today) && day_state(plan_day(pl_active, d)) == 2
+}
+
+// The earlier days (before today's) not finished: how many, and the first
+// (from 1; 0 if none) in pl_first_behind.
+pl_first_behind: int = 0;
+
+plan_behind(today: int): int {
+    pl_first_behind = 0;
+    if (pl_active < 0) return 0;
+    n: int = 0;
+    for d in 1..plan_today(today) {
+        if (day_state(plan_day(pl_active, d)) != 2) {
+            if (pl_first_behind == 0) pl_first_behind = d;
+            n = n + 1
+        }
+    }
+    n
+}
+
+// The file: PLAN id start, then READ BOOK C TIME a chapter read.
+format_plan() {
+    fbuf_n = 0;
+    put_plan()
+}
+
+// The same, after what is in fbuf.
+put_plan() {
+    if (pl_active < 0) return;
+    fput_str("PLAN\t");
+    fput_str(plan_ids[pl_active]);
+    fput(9);
+    fput_iso_date(pl_start);
+    fput(10);
+    for c in 0..chapters {
+        if (pl_read[c]) {
+            fput_str("READ\t");
+            fput_book(ch_book[c]);
+            fput_int(ch_num[c]);
+            fput(9);
+            fput_int(pl_read_t[c]);
+            fput(10)
+        }
+    }
+}
+
+// A date field (YYYY-MM-DD) as a day, or -1.
+field_iso_day(p: int): int {
+    e: int = field_end(p);
+    if (e - p != 10 || fbuf[p + 4] as int != 45 || fbuf[p + 7] as int != 45) return -1;
+    y: int = 0;
+    m: int = 0;
+    d: int = 0;
+    for i in 0..10 {
+        k: int = fbuf[p + i] as int;
+        if (i != 4 && i != 7) {
+            if (k < 48 || k > 57) return -1;
+            if (i < 4) y = y * 10 + k - 48 else if (i < 7) m = m * 10 + k - 48 else d = d * 10 + k - 48
+        }
+    }
+    if (m < 1 || m > 12 || d < 1 || d > 31) return -1;
+    days_from_civil(y, m, d)
+}
+
+// A date as a day (counted from 1 January 1970).
+days_from_civil(y_in: int, m: int, d: int): int {
+    y: int = if (m <= 2) y_in - 1 else y_in;
+    era: int = (if (y >= 0) y else y - 399) / 400;
+    yoe: int = y - era * 400;
+    mp: int = if (m > 2) m - 3 else m + 9;
+    doy: int = (153 * mp + 2) / 5 + d - 1;
+    doe: int = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+// plan.tsv's lines (in fbuf): a bad line skipped; no plan if its first
+// good line is not a PLAN line.
+parse_plan() {
+    plan_clear();
+    begin_lines();
+    lines_read = 0;
+    lines_skipped = 0;
+    while (next_line()) {
+        if (line_e > fpos) {
+            lines_read = lines_read + 1;
+            f2: int = field_after(fpos);
+            if (field_is(fpos, "PLAN") && pl_active < 0) {
+                p: int = -1;
+                for i in 0..PLANS
+                    if (field_is(f2, plan_ids[i])) p = i;
+                day: int = field_iso_day(field_after(f2));
+                if (p >= 0 && day >= 0) {
+                    pl_active = p;
+                    pl_start = day
+                } else skip_line()
+            } else if (field_is(fpos, "READ") && pl_active >= 0) {
+                c: int = field_chapter(f2);
+                t: int = field_time(field_after(field_after(f2)));
+                if (c >= 0) {
+                    pl_read[c] = true;
+                    pl_read_t[c] = t
+                } else skip_line()
+            } else skip_line()
+        }
+    }
+}
+
+// ---- the verse of the day (data/votd.txt: BOOK C V [V_END] a line) ----
+VOTD_DAYS: int = 366;
+
+vd_n: int = 0;
+
+vd_c: []int = new int[366](0);
+
+vd_v: []int = new int[366](0);
+
+vd_ve: []int = new int[366](0);
+
+// votd.txt's lines, in fbuf.
+parse_votd() {
+    vd_n = 0;
+    begin_lines();
+    while (next_line()) {
+        if (line_e > fpos && vd_n < VOTD_DAYS) {
+            c: int = field_chapter(fpos);
+            f3: int = field_after(field_after(fpos));
+            v: int = if (c >= 0) field_verse(f3, c, false) else -1;
+            ve: int = field_num(field_after(f3), false);
+            if (c >= 0 && v > 0) {
+                vd_c[vd_n] = c;
+                vd_v[vd_n] = v;
+                vd_ve[vd_n] = (if (ve > v && ve <= ch_verses[c]) ve else v);
+                vd_n = vd_n + 1
+            }
+        }
+    }
+}
+
+is_leap(y: int): bool {
+    y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
+}
+
+// A date's line (from 0): its day of the year, Feb 29 the 60th, and in a
+// common year the days from March 1 one on, so a date always has the same.
+votd_index(y: int, m: int, d: int): int {
+    i: int = days_from_civil(y, m, d) - days_from_civil(y, 1, 1);
+    if (!is_leap(y) && m >= 3) i = i + 1;
+    i
+}
+
+// The entry of a day (local): its index into vd_c, vd_v and vd_ve (-1 if
+// none were read).
+votd_of(day: int): int {
+    if (vd_n == 0) return -1;
+    civil_date(day);
+    i: int = votd_index(date_y, date_m, date_d);
+    if (i >= vd_n) i = vd_n - 1;
+    i
+}
+
+// The verses of an entry (in text t) into fbuf, joined.
+fput_votd_text(i: int, t: int) {
+    for v in vd_v[i]..vd_ve[i] + 1 {
+        if (v > vd_v[i]) fput(32);
+        _n: int = verse_text_of(t, vd_c[i], v);
+        fput_bytes(vt, 0, vt_n)
+    }
+}
+
+// An entry's reference: John 3:16, John 3:16‚Äì17.
+fput_votd_ref(i: int) {
+    fput_ref(vd_c[i], vd_v[i], vd_ve[i])
+}
+
+// How many characters (not bytes) are in fbuf from a.
+fbuf_chars(a: int): int {
+    n: int = 0;
+    for i in a..fbuf_n {
+        x: int = fbuf[i] as int & 255;
+        if (x < 128 || x >= 192) n = n + 1
+    }
+    n
+}
+
+// The notification's body: the verses (text t) in curly quotes, then " ‚Äî
+// John 3:16", most characters in all (the verse cut at a word, with "‚Ä¶",
+// so the reference stays whole).
+fput_votd_body(i: int, t: int, most: int) {
+    fbuf_n = 0;
+    fput_str("\‚\Ä\ú");
+    fput_votd_text(i, t);
+    text_end: int = fbuf_n;
+    fput_str("\‚\Ä\ù \‚\Ä\î ");
+    fput_votd_ref(i);
+    if (fbuf_chars(0) <= most) return;
+    // (The reference, kept aside, and the verse cut until it fits.)
+    tail_n: int = fbuf_n - text_end;
+    for k in 0..tail_n vt_tail[k] = fbuf[text_end + k];
+    room: int = most - fbuf_chars(text_end) - 1;
+    fbuf_n = text_end;
+    while (fbuf_n > 1 && fbuf_chars(0) > room) fbuf_n = fbuf_n - 1;
+    // (At a character's start, then back to a space.)
+    while (fbuf_n > 1 && (fbuf[fbuf_n] as int & 255) >= 128 && (fbuf[fbuf_n] as int & 255) < 192) fbuf_n = fbuf_n - 1;
+    cut: int = fbuf_n;
+    while (cut > 1 && fbuf[cut] as int != 32) cut = cut - 1;
+    if (cut > 1) fbuf_n = cut;
+    while (fbuf_n > 1 && (fbuf[fbuf_n - 1] as int == 32 || fbuf[fbuf_n - 1] as int == 44 || fbuf[fbuf_n - 1] as int == 59 || fbuf[fbuf_n - 1] as int == 58)) fbuf_n = fbuf_n - 1;
+    fput_str("\‚\Ä\¶");
+    for k in 0..tail_n fput(vt_tail[k] as int)
+}
+
+vt_tail: []i8 = new i8[256](0i8)

@@ -3594,6 +3594,60 @@ start one. Shots:
    - Tap it, and see the app open at the verse.
    - Save a shared image to Photos.
 
+### 10.7a Builder notes (Round 5, as built)
+Where the build differs from the text above, and why:
+1. **`senses.bin`'s 0 means only "not known"**; k counts entries from 1, and a base with a
+   single entry is k = 1 (known trivially). Coverage is 99.70% of words with a Strong's
+   number (98.88% before single-entry bases are counted). 397 dStrongs have no line in
+   STEP's brief lexicon and get 0, the largest H430J (215, "gods", which TBESH lacks).
+   Genesis 1:1's "God" is H430G. Each sense's count sums to its base's (tool and test).
+2. **`related.bin`** is ordered by (letter, number), G before H; distances run 0–0.83,
+   stored as round(d·255); only Proximity's X1 keys are used (no reverse pairs added).
+3. **`votd.py`** also joins a verse that ends with a dash; takes the top 210 of each
+   Testament and interleaves them (OT on Jan 1), so OT/NT alternate exactly; writes
+   `votd.txt` only when it is missing (the designer's curated file is never overwritten;
+   the candidates always are); and `--check` rejects two days from the same book. Oct 19 is
+   Hosea 3:5. John 3:16 and Romans 8:28 are not candidates (John's cap of 12; "And").
+4. **Go To opens at its top**, Today first, rather than scrolled to the book being read
+   (§3.2's Round 1 behavior): Today is always present, and shot 140 shows it.
+5. **"Your progress in … will be kept"** is a line under the plan's description in its
+   header, not a footer row (the last section's footer would be 53 weeks down).
+6. **A plan not followed shows its days unread**, and their circles do nothing until it is
+   started.
+7. **Day Done comes for hand marks too** (a Today or a day's circle finishing today's day),
+   once a calendar day (`planDoneDay`); in the demo it stays 6 s, for the screenshot.
+8. **Rest is counted between scrolls while no sheet is over the reader**; the demo's hook
+   (`demo_read`) shows the chapter's last verse and counts 20 s.
+9. **The notification's body is cut in the verse**, at a word, with "…" before the closing
+   quote, so " — John 3:16" always stays whole within the 178 characters.
+10. **The block shim:** the authorization block is a global block (`programs/ios/block.l8`);
+    its invoke is the L8 function's C-entry stub, which sets L8's stack from the caller's
+    sp and so runs on the system's queue. It stores one word that carries the answer
+    (`auth_answered` = 1 + granted) besides `auth_granted`, so the order the two stores are
+    seen in cannot matter. **A block we are given is called by sending it `-invoke`**: L8
+    has no way to call a C function pointer held in an int. The demo checks both: step 251
+    calls a global block of ours through `call_block`, and the log says "completion
+    handler called".
+11. **The card is measured with a UILabel** (`intrinsicContentSize` at 860 px) and drawn with
+    `drawWithRect:options:context:`: `boundingRectWithSize:` takes a CGSize and returns a
+    CGRect, a shape objc.l8 cannot send.
+12. **In the demo the composer is shown by the demo** (152): UIKit's share sheet cannot be
+    tapped, so its action is not chosen; the composer, its Cancel and Share are the same.
+13. **The bookmarked verse number was already semibold**: §2's verse-number font is
+    `monospacedDigitSystemFontOfSize:weight:` at 0.3 for every number. The bookmarked one now
+    sets that font explicitly beside its accent (review r4-2, item 4).
+14. **This Sense / All** heads the concordance pushed from "N in this sense" only; Translated
+    As, in a sense, filters by the sense and its rendering, without the control.
+15. **(1.0 (11)'s crash, and the audit.)** Every global that names a pushed list or its
+    controller (History, Study, Grammar, Concordance, Changes, References, Plans, a plan's
+    days, and the Versions and Acknowledgements lists) now holds it (`held`, ios_look.l8)
+    until its sheet has gone: popped, a list was freed while its global still named it, and
+    a theme's change or a timer (History's Clear) messaged it, or another list at the same
+    address was taken for it. The `plans` group's step 261 pushes and pops Versions and
+    Acknowledgements, then changes the ESV's listing both ways and the theme twice.
+16. **The fixture's poetry lines are joined with a space** (`make_fixtures.mjs`, review r4-2).
+17. Not done: Isaiah 37's pointer as a reference (optional in review r4-2).
+
 ### 10.8 Round 5 acceptance (summary)
 Round 5 is approved when:
 - The plans are computed exactly as §10.1.1 says (tests). Progress counts by dwell,

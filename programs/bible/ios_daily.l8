@@ -1,0 +1,1235 @@
+tag bible_ios;
+
+use_tag std, ios, bible;
+
+// Daily reading (DESIGN.md Â§10.1, Â§10.2): the Go To sheet's Today section
+// (the verse of the day, today's readings of the plan followed, Catch Up,
+// and the way to the plans), the plans and a plan's days (pushed in that
+// sheet), a chapter counted as read (by rest and its end seen, by Listen,
+// or by hand) and the day's toast; and the daily notification: its setting,
+// its authorization (the one block, ../ios/block.l8), the 30 requests
+// scheduled ahead, and the reader taken to a verse when one is opened.
+// plans.l8 computes the plans and keeps their lines; every date here is
+// today()'s.
+import "../ios/objc.l8";
+
+import "../ios/block.l8";
+
+import "text.l8";
+
+import "plans.l8";
+
+extern objc_setAssociatedObject(
+    object: int,
+    key: int,
+    value: int,
+    policy: int
+): int;
+
+extern objc_getAssociatedObject(object: int, key: int): int;
+
+// ---- the day ----
+// "Today": the phone's local day; in the demo, 2026-10-19 at 08:00 (and as
+// many days on as a step has moved it).
+demo_day_shift: int = 0;
+
+today(): int {
+    if (demo_on) return days_from_civil(2026, 10, 19) + demo_day_shift;
+    local_day(time(0))
+}
+
+// Minutes past midnight now (local).
+now_minutes(): int {
+    if (demo_on) return 480;
+    t: int = time(0) + local_offset();
+    (t - day_of(t) * 86400) / 60
+}
+
+// What is kept, read at launch: the plan followed, and the verses of the
+// day (the app's votd.txt). The plans themselves are made at first use.
+load_daily() {
+    read_file("plan.tsv");
+    parse_plan();
+    note_num("bible: plan ", pl_active);
+    fbuf_n = 0;
+    path: int = msg2(msg(cls("NSBundle"), sel("mainBundle")), sel("pathForResource:ofType:"),
+        nsstring("votd"), nsstring("txt"));
+    data: int = if (path != 0) msg1(cls("NSData"), sel("dataWithContentsOfFile:"),
+        path) else 0;
+    if (data != 0) {
+        n: int = msg(data, sel("length"));
+        if (n > len(fbuf)) n = len(fbuf);
+        if (n > 0) memcpy_from(fbuf, msg(data, sel("bytes")), n);
+        fbuf_n = n
+    }
+    parse_votd();
+    note_num("bible: verses of the day ", vd_n)
+}
+
+daily_ready() {
+    if (pl_ready) return;
+    plans_make();
+    note_num("bible: plans made, readings ", pl_readings)
+}
+
+save_plan() {
+    format_plan();
+    write_file("plan.tsv")
+}
+
+// The plan followed, stopped: its file onto plans-done.tsv (with when it
+// ended), and gone.
+plan_archive() {
+    if (pl_active < 0) return;
+    read_file("plans-done.tsv");
+    put_plan();
+    fput_str("END\t");
+    fput_int(time(0));
+    fput(10);
+    write_file("plans-done.tsv");
+    msg2(msg(cls("NSFileManager"), sel("defaultManager")), sel("removeItemAtPath:error:"),
+        file_path("plan.tsv"), 0);
+    note("bible: plan archived");
+    plan_clear()
+}
+
+// The version the verse of the day is read in: the one read, or the
+// BSB's under the ESV (or where the version lacks it).
+votd_text(i: int): int {
+    t: int = quote_base();
+    if (!text_has(t, vd_c[i], vd_v[i])) t = TEXT_BSB;
+    t
+}
+
+// ---- a chapter read ----
+// How long the reader has rested in each chapter (seconds), and whether
+// its end has been on the screen; the chapter resting in now, since when.
+pr_dwell: []f64 = new f64[1200](0.0f64);
+
+pr_end: []bool = new bool[1200](false);
+
+pr_c: int = -1;
+
+pr_since: f64 = 0.0f64;
+
+pr_timer: int = 0;
+
+// The reader at rest (a scroll ended): resting in the chapter at the top,
+// checked again once it could have been 20 s.
+plan_rest_began() {
+    if (pl_active < 0 || cur < 0) return;
+    plan_rest_ended();
+    plan_seen();
+    pr_c = cur;
+    pr_since = CACurrentMediaTime();
+    left: f64 = 20.0f64 - pr_dwell[cur];
+    if (left < 0.5f64) left = 0.5f64;
+    pr_timer = stop_timer(pr_timer);
+    pr_timer = after(left, "planRested:")
+}
+
+// The rest over (a scroll began, the app went away): its time added.
+plan_rest_ended() {
+    if (pr_since <= 0.0f64 || pr_c < 0) return;
+    // (Not the time a sheet was over the reader.)
+    if (presented() == 0) pr_dwell[pr_c] = pr_dwell[pr_c] + CACurrentMediaTime() - pr_since;
+    pr_since = 0.0f64;
+    pr_timer = stop_timer(pr_timer);
+    plan_check(pr_c)
+}
+
+plan_rested(_self: int, _cmd: int, _timer: int): int {
+    pr_timer = 0;
+    if (pr_since <= 0.0f64) return 0;
+    c: int = pr_c;
+    plan_rest_ended();
+    if (presented() == 0 && c == cur) plan_rest_began();
+    0
+}
+
+// The ends of the chapters on the screen now, seen (from the scroll).
+plan_seen() {
+    if (pl_active < 0 || cur < 0 || table == 0) return;
+    bottom: f64 = offset_y(table) + view_height(table) - bottom_inset(table);
+    c: int = cur;
+    more: bool = true;
+    while (more && c < chapters) {
+        l8_msg_hfa(hfa, table, sel("rectForRowAtIndexPath:"), chapter_path(c), 0,
+            0);
+        if (hfa[1] + hfa[3] <= bottom + 1.0f64) {
+            if (!pr_end[c]) {
+                pr_end[c] = true;
+                plan_check(c)
+            }
+            c = c + 1
+        } else more = false
+    }
+}
+
+plan_check(c: int) {
+    if (pl_active < 0 || c < 0 || pl_read[c]) return;
+    if (pr_dwell[c] >= 20.0f64 && pr_end[c]) plan_mark_read(c)
+}
+
+// Listen said a chapter's last verse.
+plan_heard(c: int) {
+    if (pl_active >= 0 && c >= 0 && c < chapters && !pl_read[c]) plan_mark_read(c)
+}
+
+plan_mark_read(c: int) {
+    daily_ready();
+    if (plan_day_of(c) == 0) return;
+    done: bool = mark_chapter(c, time(0), today());
+    save_plan();
+    note_num("bible: read in the plan ", c);
+    if (done) day_done()
+}
+
+// Today's day finished: the toast, once a day.
+day_done() {
+    d: int = today();
+    if (def_int("planDoneDay") == d + 1) return;
+    set_def_int("planDoneDay", d + 1);
+    fbuf_n = 0;
+    fput_str("Day ");
+    fput_int(plan_today(d));
+    fput_str(" Done");
+    haptic_success();
+    toast_symbol(fstring(), "checkmark", if (demo_on) 6.0f64 else 1.6f64);
+    note("bible: day done")
+}
+
+// ---- the Go To sheet's Today section ----
+// Its rows: 0 the verse of the day, 1 a reading of today's (td_arg its
+// index), 2 Catch Up, 3 the plan (or Reading Plans).
+td_n: int = 0;
+
+td_kind: []int = new int[8](0);
+
+td_arg: []int = new int[8](0);
+
+td_behind: int = 0;
+
+today_add(kind: int, arg: int) {
+    if (td_n >= len(td_kind)) return;
+    td_kind[td_n] = kind;
+    td_arg[td_n] = arg;
+    td_n = td_n + 1
+}
+
+today_build() {
+    daily_ready();
+    td_n = 0;
+    d: int = today();
+    if (votd_of(d) >= 0) today_add(0, votd_of(d));
+    td_behind = 0;
+    if (pl_active >= 0) {
+        di: int = plan_day(pl_active, plan_today(d));
+        for r in pl_r0[di]..pl_r0[di] + pl_rn[di] today_add(1, r);
+        td_behind = plan_behind(d);
+        if (td_behind > 0) today_add(2, pl_first_behind)
+    }
+    today_add(3, 0)
+}
+
+// "Bible in a Year Â· Day 4".
+fput_plan_day() {
+    fput_str(plan_names[pl_active]);
+    fput_str(" \Â\· Day ");
+    fput_int(plan_today(today()))
+}
+
+// A circle for a reading's or a day's state (0 none, 1 some, 2 all read).
+circle_name(state: int): str {
+    if (state == 2) "checkmark.circle.fill" else if (state == 1) "circle.lefthalf.filled" else "circle"
+}
+
+state_words(state: int): str {
+    if (state == 2) "read" else if (state == 1) "partly read" else "not read"
+}
+
+// A row with a circle at its start (a button over the cell's image, 28
+// points), its title and secondary text: for the circle, tag and action.
+circle_key: []int = new int[1](0);
+
+circle_cell(
+    t: int,
+    id: str,
+    _state: int,
+    tag: int,
+    action: str
+): int {
+    cell: int = list_cell(t, id, 2);
+    b: int = msg1(msg(cell, sel("contentView")), sel("viewWithTag:"), 9100);
+    if (b == 0) {
+        b = msg1(cls("UIButton"), sel("buttonWithType:"), 0);
+        msg1(b, sel("setTag:"), 9100);
+        msg1(b, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+        content: int = msg(cell, sel("contentView"));
+        msg1(content, sel("addSubview:"), b);
+        pin(b, content, "leadingAnchor");
+        pin(b, content, "topAnchor");
+        pin(b, content, "bottomAnchor");
+        pin_size(b, "widthAnchor", 60.0f64);
+        msg3(b, sel("addTarget:action:forControlEvents:"), app_obj, sel(action), 64)
+    }
+    objc_setAssociatedObject(b, ints_address(circle_key), nsnumber_int(tag), 1);
+    msg1(cell, sel("setAccessoryType:"), 0);
+    cell
+}
+
+circle_tag(b: int): int {
+    n: int = objc_getAssociatedObject(b, ints_address(circle_key));
+    if (n == 0) -1 else msg(n, sel("longValue"))
+}
+
+// The configuration of a circle's row: the circle, a title and a line.
+circle_config(state: int, title: int, line: int): int {
+    config: int = list_config(2);
+    config_image(config, circle_name(state), 22.0f64, if (state == 0) c_faint else c_accent);
+    msg_ff(msg(config, sel("imageProperties")), sel("setReservedLayoutSize:"), 28.0f64,
+        28.0f64);
+    msg1(config, sel("setText:"), title);
+    msg1(config, sel("setSecondaryText:"), line);
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    msg1(text_props(config), sel("setFont:"), msg1(cls("UIFont"), sel("preferredFontForTextStyle:"),
+        objc_const("UIFontTextStyleBody")));
+    msg1(detail_props(config), sel("setColor:"), c_faint);
+    config
+}
+
+// A row's VoiceOver: what it says, and its action (Mark as Read, or as
+// Unread).
+circle_access(
+    cell: int,
+    label: int,
+    state: int,
+    action: str
+) {
+    msg1(cell, sel("setIsAccessibilityElement:"), 1);
+    msg1(cell, sel("setAccessibilityLabel:"), label);
+    a: int = msg(msg3(msg(cls("UIAccessibilityCustomAction"), sel("alloc")), sel("initWithName:target:selector:"),
+        nsstring(if (state == 2) "Mark as Unread" else "Mark as Read"), app_obj, sel(action)),
+        sel("autorelease"));
+    b: int = msg1(msg(cell, sel("contentView")), sel("viewWithTag:"), 9100);
+    objc_setAssociatedObject(a, ints_address(circle_key), objc_getAssociatedObject(b,
+        ints_address(circle_key)), 1);
+    one[0] = a;
+    msg1(cell, sel("setAccessibilityCustomActions:"), nsarray(one, 1))
+}
+
+reading_line(r: int, spoken: bool): int {
+    fbuf_n = 0;
+    fput_reading(r, spoken);
+    fstring()
+}
+
+today_reading_fill(cell: int, r: int) {
+    state: int = reading_state(r);
+    title: int = reading_line(r, false);
+    fbuf_n = 0;
+    fput_plan_day();
+    msg1(cell, sel("setContentConfiguration:"), circle_config(state, title, fstring()));
+    fbuf_n = 0;
+    fput_reading(r, true);
+    fput_str(", Day ");
+    fput_int(plan_today(today()));
+    fput_str(", ");
+    fput_str(state_words(state));
+    circle_access(cell, fstring(), state, "todayMark:")
+}
+
+// A label for the Today rows (wrapping, at the phone's size).
+today_label(font: int, color: int, lines: int): int {
+    l: int = msg(make("UILabel"), sel("autorelease"));
+    msg1(l, sel("setFont:"), font);
+    msg1(l, sel("setTextColor:"), color);
+    msg1(l, sel("setNumberOfLines:"), lines);
+    msg1(l, sel("setAdjustsFontForContentSizeCategory:"), 0);
+    l
+}
+
+// The verse of the day's row: its caption, reference and words.
+votd_cell(_t: int, i: int): int {
+    cell: int = msg(msg2(msg(cls("UITableViewCell"), sel("alloc")), sel("initWithStyle:reuseIdentifier:"),
+        0, 0), sel("autorelease"));
+    msg1(cell, sel("setBackgroundColor:"), cell_bg());
+    content: int = msg(cell, sel("contentView"));
+    column: int = stack(1, 3.0f64);
+    cap: int = today_label(sans(scaled(12.0f64), 0.3f64), c_faint, 0);
+    msg1(cap, sel("setText:"), nsstring("Verse of the Day"));
+    ref: int = today_label(sans(scaled(15.0f64), 0.3f64), c_accent, 0);
+    fbuf_n = 0;
+    fput_votd_ref(i);
+    msg1(ref, sel("setText:"), fstring());
+    words: int = today_label(body(scaled(16.0f64)), c_ink, 4);
+    msg1(words, sel("setLineBreakMode:"), 4);
+    fbuf_n = 0;
+    fput_votd_text(i, votd_text(i));
+    msg1(words, sel("setAttributedText:"), preview(fstring(), true, scaled(16.0f64),
+        msg_set_f(c_ink, sel("colorWithAlphaComponent:"), 0.85f64)));
+    for x in [cap, ref, words] msg1(column, sel("addArrangedSubview:"), x);
+    msg_set_f(column, sel("setSpacing:"), 2.0f64);
+    msg_f1(column, sel("setCustomSpacing:afterView:"), 6.0f64, ref);
+    msg1(content, sel("addSubview:"), column);
+    pin_by(column, content, "leadingAnchor", 16.0f64);
+    pin_by(column, content, "trailingAnchor", -16.0f64);
+    pin_by(column, content, "topAnchor", 12.0f64);
+    pin_by(column, content, "bottomAnchor", -12.0f64);
+    // (Read as one: the caption, the reference, the verse.)
+    msg1(cell, sel("setIsAccessibilityElement:"), 1);
+    fbuf_n = 0;
+    fput_str("Verse of the Day, ");
+    fput_votd_ref(i);
+    fput_str(". ");
+    fput_votd_text(i, votd_text(i));
+    msg1(cell, sel("setAccessibilityLabel:"), fstring());
+    cell
+}
+
+today_cell(t: int, row: int): int {
+    k: int = td_kind[row];
+    if (k == 0) return votd_cell(t, td_arg[row]);
+    if (k == 1) {
+        r: int = td_arg[row];
+        cell: int = circle_cell(t, "today-reading", reading_state(r), r, "todayCircle:");
+        today_reading_fill(cell, r);
+        return cell
+    }
+    if (k == 2) {
+        cell: int = list_cell(t, "catchup", 2);
+        config: int = list_config(2);
+        msg1(config, sel("setText:"), nsstring("Catch Up"));
+        msg1(text_props(config), sel("setColor:"), c_accent);
+        fbuf_n = 0;
+        fput_int(td_behind);
+        fput_str(if (td_behind == 1) " earlier day isn\â\€\™t finished" else " earlier days aren\â\€\™t finished");
+        msg1(config, sel("setSecondaryText:"), fstring());
+        msg1(detail_props(config), sel("setColor:"), c_faint);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        msg1(cell, sel("setAccessoryType:"), 1);
+        return cell
+    }
+    if (pl_active >= 0) {
+        cell: int = list_cell(t, "plan", 1);
+        config: int = list_config(1);
+        msg1(config, sel("setText:"), nsstring(plan_names[pl_active]));
+        fbuf_n = 0;
+        fput_str("Day ");
+        fput_int(plan_today(today()));
+        fput_str(" of ");
+        fput_int(plan_lengths[pl_active]);
+        msg1(config, sel("setSecondaryText:"), fstring());
+        msg1(text_props(config), sel("setColor:"), c_ink);
+        msg1(detail_props(config), sel("setColor:"), c_faint);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        msg1(cell, sel("setAccessoryType:"), 1);
+        return cell
+    }
+    cell: int = list_cell(t, "plans", 0);
+    config: int = list_config(0);
+    msg1(config, sel("setText:"), nsstring("Reading Plans"));
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    config_image(config, "calendar", 17.0f64, c_ink);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setAccessoryType:"), 1);
+    cell
+}
+
+today_picked(row: int) {
+    k: int = td_kind[row];
+    if (k == 0) {
+        i: int = td_arg[row];
+        jump(vd_c[i], vd_v[i])
+    } else if (k == 1) jump(reading_first_unread(td_arg[row]), 0) else if (k == 2) open_plan(pl_active,
+        td_arg[row]) else if (pl_active >= 0) open_plan(pl_active, plan_today(today())) else open_plans()
+}
+
+// A circle of Today tapped: the reading read (or not), the symbol
+// cross-fading.
+today_circle(_self: int, _cmd: int, b: int): int {
+    r: int = circle_tag(b);
+    if (r >= 0) today_toggle(r);
+    0
+}
+
+today_mark(_self: int, _cmd: int, a: int): int {
+    n: int = objc_getAssociatedObject(a, ints_address(circle_key));
+    if (n != 0) today_toggle(msg(n, sel("longValue")));
+    1
+}
+
+today_toggle(r: int) {
+    on: bool = reading_state(r) != 2;
+    d: int = today();
+    di: int = plan_day(pl_active, plan_today(d));
+    was: int = day_state(di);
+    mark_reading(r, on, time(0));
+    save_plan();
+    haptic_select();
+    if (on && was != 2 && day_state(di) == 2 && pl_r0[di] <= r && r < pl_r0[di] + pl_rn[di]) day_done();
+    for row in 0..td_n {
+        if (td_kind[row] == 1 && td_arg[row] == r && picker_table != 0) {
+            cell: int = msg1(picker_table, sel("cellForRowAtIndexPath:"), msg2(cls("NSIndexPath"),
+                sel("indexPathForRow:inSection:"), row, 0));
+            if (cell != 0) {
+                fade_layer(msg(msg(cell, sel("contentView")), sel("layer")), 0.15f64);
+                today_reading_fill(cell, r)
+            }
+        }
+    }
+    daily_reschedule()
+}
+
+picker_appeared: bool = false;
+
+// The picker about to show (first, or again from a screen pushed over it):
+// its Today section as it is now.
+books_will_appear(self: int, cmd: int, animated: int): int {
+    _r: int = super1(self, books_class, cmd, animated);
+    if (picker_table == 0 || pq_n > 0) return 0;
+    if (!picker_appeared) {
+        picker_appeared = true;
+        return 0
+    }
+    had: int = td_n;
+    today_build();
+    if (had > 0 && had == td_n) msg2(picker_table, sel("reloadSections:withRowAnimation:"),
+        msg1(cls("NSIndexSet"), sel("indexSetWithIndex:"), 0), 5) else msg(picker_table,
+        sel("reloadData"));
+    0
+}
+
+// ---- the plans (pushed in the Go To sheet) ----
+plans_table: int = 0;
+
+detail_table: int = 0;
+
+detail_vc: int = 0;
+
+// The plan whose days are shown.
+detail_plan: int = 0;
+
+plans_class: int = 0;
+
+detail_class: int = 0;
+
+// A pushed list of the Go To sheet's (kept while the sheet is up, as the
+// Versions list is, since a theme's change may come after it is popped).
+pushed_list(c: int, title: str): int {
+    vc: int = msg(msg1(msg(c, sel("alloc")), sel("initWithStyle:"), 2), sel("autorelease"));
+    msg1(vc, sel("setTitle:"), nsstring(title));
+    msg1(msg(vc, sel("navigationItem")), sel("setLargeTitleDisplayMode:"), 2);
+    msg1(msg(vc, sel("navigationItem")), sel("setRightBarButtonItem:"), system_item(0,
+        "closeSheet:"));
+    t: int = msg(vc, sel("tableView"));
+    msg1(t, sel("setDataSource:"), app_obj);
+    msg1(t, sel("setDelegate:"), app_obj);
+    style_table(t, true);
+    vc
+}
+
+open_plans() {
+    sheet_nav: int = presented();
+    if (sheet_nav == 0) return;
+    daily_ready();
+    vc: int = pushed_list(plans_class, "Reading Plans");
+    plans_table = held(plans_table, msg(vc, sel("tableView")));
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+// The Day 4 (in accent) and the disclosure, as a row's accessory.
+value_disclosure(text: int, color: int): int {
+    l: int = today_label(msg1(cls("UIFont"), sel("preferredFontForTextStyle:"), objc_const("UIFontTextStyleBody")),
+        color, 1);
+    msg1(l, sel("setText:"), text);
+    msg(l, sel("sizeToFit"));
+    lw: f64 = view_width(l);
+    lh: f64 = view_height(l);
+    chevron: int = msg(msg1(msg(cls("UIImageView"), sel("alloc")), sel("initWithImage:"),
+        symbol("chevron.right", 13.0f64, 6, msg(cls("UIColor"), sel("tertiaryLabelColor")))),
+        sel("autorelease"));
+    msg(chevron, sel("sizeToFit"));
+    cw: f64 = view_width(chevron);
+    ch: f64 = view_height(chevron);
+    h: f64 = if (lh > ch) lh else ch;
+    box: int = msg(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
+        0.0f64, 0.0f64, lw + 8.0f64 + cw, h), sel("autorelease"));
+    msg_rect(l, sel("setFrame:"), 0.0f64, (h - lh) / 2.0f64, lw, lh);
+    msg_rect(chevron, sel("setFrame:"), lw + 8.0f64, (h - ch) / 2.0f64, cw, ch);
+    msg1(box, sel("addSubview:"), l);
+    msg1(box, sel("addSubview:"), chevron);
+    box
+}
+
+plans_cell(t: int, r: int): int {
+    cell: int = list_cell(t, "plan-list", 2);
+    config: int = list_config(2);
+    msg1(config, sel("setText:"), nsstring(plan_names[r]));
+    fbuf_n = 0;
+    fput_int(plan_lengths[r]);
+    fput_str(" days \Â\· about ");
+    fput_int(plan_per_day(r));
+    fput_str(if (plan_per_day(r) == 1) " chapter a day" else " chapters a day");
+    msg1(config, sel("setSecondaryText:"), fstring());
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    msg1(detail_props(config), sel("setColor:"), c_faint);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    if (r == pl_active) {
+        fbuf_n = 0;
+        fput_str("Day ");
+        fput_int(plan_today(today()));
+        msg1(cell, sel("setAccessoryView:"), value_disclosure(fstring(), c_accent))
+    } else msg1(cell, sel("setAccessoryType:"), 1);
+    cell
+}
+
+plans_will_appear(self: int, cmd: int, animated: int): int {
+    _r: int = super1(self, plans_class, cmd, animated);
+    if (plans_table != 0) msg(plans_table, sel("reloadData"));
+    0
+}
+
+// A plan's days, pushed, scrolled to day d (from 1; 0 the top).
+detail_scroll_to: int = 0;
+
+open_plan(p: int, d: int) {
+    sheet_nav: int = presented();
+    if (sheet_nav == 0) return;
+    daily_ready();
+    detail_plan = p;
+    vc: int = pushed_list(detail_class, plan_names[p]);
+    detail_vc = vc;
+    detail_table = held(detail_table, msg(vc, sel("tableView")));
+    W: f64 = view_width(msg(sheet_nav, sel("view")));
+    msg1(detail_table, sel("setTableHeaderView:"), detail_header(W));
+    detail_items(vc, false);
+    detail_scroll_to = d;
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+// The description, and (another plan followed) that its progress is kept.
+detail_header(W: f64): int {
+    v: int = msg(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
+        0.0f64, 0.0f64, W, 100.0f64), sel("autorelease"));
+    text: int = label_of(attributed(nsstring(plan_blurbs[detail_plan]), sans(scaled(15.0f64),
+        0.0f64), msg_set_f(c_ink, sel("colorWithAlphaComponent:"), 0.8f64)));
+    msg1(text, sel("setNumberOfLines:"), 0);
+    y: f64 = 20.0f64;
+    label_size(text, W - 40.0f64);
+    msg_rect(text, sel("setFrame:"), 20.0f64, y, W - 40.0f64, hfa[1]);
+    msg1(v, sel("addSubview:"), text);
+    y = y + hfa[1];
+    if (pl_active >= 0 && pl_active != detail_plan) {
+        fbuf_n = 0;
+        fput_str("Your progress in ");
+        fput_str(plan_names[pl_active]);
+        fput_str(" will be kept.");
+        kept: int = label_of(attributed(fstring(), sans(scaled(13.0f64), 0.0f64),
+            c_faint));
+        msg1(kept, sel("setNumberOfLines:"), 0);
+        label_size(kept, W - 40.0f64);
+        msg_rect(kept, sel("setFrame:"), 20.0f64, y + 8.0f64, W - 40.0f64, hfa[1]);
+        msg1(v, sel("addSubview:"), kept);
+        y = y + 8.0f64 + hfa[1]
+    }
+    msg_rect(v, sel("setFrame:"), 0.0f64, 0.0f64, W, y + 4.0f64);
+    v
+}
+
+// The toolbar's one item, centered: Start Plan, Start Instead or Stop Plan.
+detail_items(vc: int, animated: bool) {
+    flex: int = msg(msg3(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithBarButtonSystemItem:target:action:"),
+        5, 0, 0), sel("autorelease"));
+    following: bool = pl_active == detail_plan;
+    title: str = if (following) "Stop Plan" else if (pl_active >= 0) "Start Instead" else "Start Plan";
+    item: int = msg(msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithTitle:style:target:action:"),
+        nsstring(title), if (following) 0 else 2, app_obj, sel(if (following) "planStop:" else "planStart:")),
+        sel("autorelease"));
+    if (following) msg1(item, sel("setTintColor:"), msg(cls("UIColor"), sel("systemRedColor")));
+    bar_items[0] = flex;
+    bar_items[1] = item;
+    bar_items[2] = flex;
+    msg2(vc, sel("setToolbarItems:animated:"), nsarray(bar_items, 3), if (animated) 1 else 0)
+}
+
+detail_will_appear(self: int, cmd: int, animated: int): int {
+    _r: int = super1(self, detail_class, cmd, animated);
+    nav_sheet: int = msg(self, sel("navigationController"));
+    if (nav_sheet != 0) msg2(nav_sheet, sel("setToolbarHidden:animated:"), 0, animated & 255);
+    if (detail_scroll_to > 0 && detail_table != 0) {
+        msg(detail_table, sel("layoutIfNeeded"));
+        msg3(detail_table, sel("scrollToRowAtIndexPath:atScrollPosition:animated:"),
+            detail_path(detail_scroll_to), 1, 0);
+        detail_scroll_to = 0
+    }
+    0
+}
+
+detail_will_go(self: int, cmd: int, animated: int): int {
+    _r: int = super1(self, detail_class, cmd, animated);
+    nav_sheet: int = msg(self, sel("navigationController"));
+    if (nav_sheet != 0) msg2(nav_sheet, sel("setToolbarHidden:animated:"), 1, animated & 255);
+    0
+}
+
+// Day d's row (weeks are sections).
+detail_path(d: int): int {
+    msg2(cls("NSIndexPath"), sel("indexPathForRow:inSection:"), (d - 1) % 7, (d - 1) / 7)
+}
+
+detail_sections(): int {
+    (plan_lengths[detail_plan] + 6) / 7
+}
+
+detail_rows(s: int): int {
+    n: int = plan_lengths[detail_plan] - s * 7;
+    if (n > 7) 7 else n
+}
+
+detail_header_title(s: int): int {
+    fbuf_n = 0;
+    fput_str("Week ");
+    fput_int(s + 1);
+    fstring()
+}
+
+// Day d's state (in the plan followed: its chapters read; another plan's
+// days are its own, unread).
+detail_state(di: int): int {
+    if (detail_plan != pl_active) 0 else day_state(di)
+}
+
+detail_fill(cell: int, d: int) {
+    di: int = plan_day(detail_plan, d);
+    state: int = detail_state(di);
+    fbuf_n = 0;
+    fput_str("Day ");
+    fput_int(d);
+    title: int = fstring();
+    fbuf_n = 0;
+    fput_day(di);
+    line: int = fstring();
+    msg1(cell, sel("setContentConfiguration:"), circle_config(state, title, line));
+    is_today: bool = detail_plan == pl_active && d == plan_today(today());
+    if (is_today) {
+        l: int = today_label(msg1(cls("UIFont"), sel("preferredFontForTextStyle:"),
+            objc_const("UIFontTextStyleBody")), c_accent, 1);
+        msg1(l, sel("setText:"), nsstring("Today"));
+        msg(l, sel("sizeToFit"));
+        msg1(cell, sel("setAccessoryView:"), l)
+    } else msg1(cell, sel("setAccessoryView:"), 0);
+    fbuf_n = 0;
+    fput_str("Day ");
+    fput_int(d);
+    fput_str(", ");
+    for r in pl_r0[di]..pl_r0[di] + pl_rn[di] {
+        if (r > pl_r0[di]) fput_str("; ");
+        fput_reading(r, true)
+    }
+    if (is_today) fput_str(", Today");
+    fput_str(", ");
+    fput_str(state_words(state));
+    circle_access(cell, fstring(), state, "dayMark:")
+}
+
+detail_cell(t: int, path: int): int {
+    d: int = msg(path, sel("section")) * 7 + msg(path, sel("row")) + 1;
+    di: int = plan_day(detail_plan, d);
+    cell: int = circle_cell(t, "plan-day", detail_state(di), d, "dayCircle:");
+    detail_fill(cell, d);
+    cell
+}
+
+detail_picked(s: int, r: int) {
+    d: int = s * 7 + r + 1;
+    jump(day_first_unread(plan_day(detail_plan, d)), 0)
+}
+
+day_circle(_self: int, _cmd: int, b: int): int {
+    d: int = circle_tag(b);
+    if (d > 0) day_toggle(d);
+    0
+}
+
+day_mark(_self: int, _cmd: int, a: int): int {
+    n: int = objc_getAssociatedObject(a, ints_address(circle_key));
+    if (n != 0) day_toggle(msg(n, sel("longValue")));
+    1
+}
+
+// A day's chapters read (or not), in the plan followed (a circle of
+// another plan's starts nothing).
+day_toggle(d: int) {
+    if (detail_plan != pl_active) return;
+    di: int = plan_day(detail_plan, d);
+    on: bool = day_state(di) != 2;
+    mark_day(di, on, time(0));
+    save_plan();
+    haptic_select();
+    if (on && d == plan_today(today())) day_done();
+    if (detail_table != 0) {
+        cell: int = msg1(detail_table, sel("cellForRowAtIndexPath:"), detail_path(d));
+        if (cell != 0) {
+            fade_layer(msg(msg(cell, sel("contentView")), sel("layer")), 0.15f64);
+            detail_fill(cell, d)
+        }
+    }
+    daily_reschedule()
+}
+
+// Start Plan (or Start Instead): the plan followed from today, the old one's
+// progress kept in plans-done.tsv; the rows faded in their new state, and
+// today's row brought into sight.
+plan_start(_self: int, _cmd: int, _b: int): int {
+    plan_archive();
+    plan_begin(detail_plan, today());
+    save_plan();
+    note("bible: plan started");
+    for c in 0..len(pr_end) {
+        pr_end[c] = false;
+        pr_dwell[c] = 0.0f64
+    }
+    detail_changed();
+    if (detail_table != 0) msg3(detail_table, sel("scrollToRowAtIndexPath:atScrollPosition:animated:"),
+        detail_path(plan_today(today())), 2, 1);
+    daily_reschedule();
+    0
+}
+
+plan_stop(_self: int, _cmd: int, _b: int): int {
+    plan_archive();
+    note("bible: plan stopped");
+    detail_changed();
+    daily_reschedule();
+    0
+}
+
+detail_changed() {
+    if (detail_vc != 0) detail_items(detail_vc, true);
+    if (detail_table == 0) return;
+    sheet_nav: int = presented();
+    W: f64 = if (sheet_nav != 0) view_width(msg(sheet_nav, sel("view"))) else view_width(window);
+    msg1(detail_table, sel("setTableHeaderView:"), detail_header(W));
+    msg2(detail_table, sel("reloadSections:withRowAnimation:"), msg2(cls("NSIndexSet"),
+        sel("indexSetWithIndexesInRange:"), 0, detail_sections()), 0)
+}
+
+// The sheet gone: what its pushed lists held let go.
+daily_sheet_gone() {
+    plans_table = held(plans_table, 0);
+    detail_table = held(detail_table, 0);
+    detail_vc = 0
+}
+
+// ---- the daily notification (Â§10.2.2) ----
+// The setting (dailyVerse), its time (minutes past midnight), and whether
+// the phone's Settings turned notifications off for the app.
+nt_on: bool = false;
+
+nt_minutes: int = 420;
+
+nt_denied: bool = false;
+
+notify_center(): int {
+    if (cls("UNUserNotificationCenter") == 0) _h: int = dlopen("/System/Library/Frameworks/UserNotifications.framework/UserNotifications",
+        1);
+    c: int = cls("UNUserNotificationCenter");
+    if (c == 0) 0 else msg(c, sel("currentNotificationCenter"))
+}
+
+// The answer to an authorization request, from the block, on a queue of
+// the system's: auth_granted the answer, auth_answered 1 plus it (one store
+// that says both, so the order of the two stores cannot matter to the main
+// thread, which reads only auth_answered).
+auth_granted: int = 0;
+
+auth_answered: int = 0;
+
+// The block's invoke (DESIGN.md Â§10.2.3). It runs on a background queue:
+// it must not allocate, send a message, or touch a region; it stores two
+// ints and returns.
+auth_done(_block: int, granted: int, _error: int): int {
+    auth_granted = granted & 255;
+    auth_answered = 1 + (granted & 255);
+    0
+}
+
+auth_block: int = 0;
+
+// Why the answer is waited for (1 the switch turned on, 2 the app active
+// again), and how long it has been (0.2 s ticks).
+auth_why: int = 0;
+
+auth_ticks: int = 0;
+
+auth_timer: int = 0;
+
+notify_ask(why: int) {
+    center: int = notify_center();
+    if (center == 0) return;
+    if (auth_block == 0) auth_block = global_block(&auth_done);
+    auth_why = why;
+    auth_answered = 0;
+    auth_ticks = 0;
+    note_num("bible: notification authorization asked, why ", why);
+    msg2(center, sel("requestAuthorizationWithOptions:completionHandler:"), 6, auth_block);
+    auth_timer = stop_timer(auth_timer);
+    auth_timer = after(0.2f64, "authTick:")
+}
+
+// (The demo's own answer, through the same flag: the simulator cannot tap
+// Allow.)
+demo_grant() {
+    auth_why = 1;
+    auth_ticks = 0;
+    auth_answered = 2;
+    auth_timer = stop_timer(auth_timer);
+    auth_timer = after(0.2f64, "authTick:")
+}
+
+auth_tick(_self: int, _cmd: int, _timer: int): int {
+    auth_timer = 0;
+    a: int = auth_answered;
+    if (a == 0) {
+        auth_ticks = auth_ticks + 1;
+        if (auth_ticks < 600) auth_timer = after(0.2f64, "authTick:") else note("bible: notification authorization never answered");
+        return 0
+    }
+    granted: bool = a == 2;
+    note_num("bible: notification authorization answered ", a - 1);
+    if (granted) {
+        nt_denied = false;
+        was: bool = nt_on;
+        had_denied: bool = nt_denied;
+        nt_on = true;
+        set_def_bool("dailyVerse", true);
+        notify_schedule();
+        if (!was) votd_rows_changed(!had_denied)
+    } else {
+        was_denied: bool = nt_denied;
+        nt_denied = true;
+        if (nt_on || auth_why == 1) {
+            nt_on = false;
+            set_def_bool("dailyVerse", false);
+            center: int = notify_center();
+            if (center != 0) msg(center, sel("removeAllPendingNotificationRequests"));
+            if (daily_switch != 0) msg2(daily_switch, sel("setOn:animated:"), 0, 1)
+        }
+        if (!was_denied || auth_why == 2) votd_rows_changed(false)
+    }
+    demo_event();
+    0
+}
+
+// The settings' rows changed: the Time row faded in (insert), or else (Open
+// Settings and the footer for the denied) the section reloaded, faded.
+votd_rows_changed(insert: bool) {
+    if (settings_table == 0) return;
+    if (insert) {
+        one[0] = msg2(cls("NSIndexPath"), sel("indexPathForRow:inSection:"), 1, VOTD_SECTION + 1);
+        msg2(settings_table, sel("insertRowsAtIndexPaths:withRowAnimation:"), nsarray(one,
+            1), 0);
+        return
+    }
+    msg2(settings_table, sel("reloadSections:withRowAnimation:"), msg1(cls("NSIndexSet"),
+        sel("indexSetWithIndex:"), VOTD_SECTION + 1), 0)
+}
+
+load_notify_settings() {
+    nt_on = def_bool("dailyVerse");
+    nt_minutes = def_int("dailyVerseMinutes");
+    if (nt_minutes <= 0 || nt_minutes >= 1440) nt_minutes = 420
+}
+
+// Every launch, return, and change of the setting, its time, the plan or
+// the version: the 30 days ahead scheduled again.
+daily_reschedule() {
+    if (nt_on) notify_schedule()
+}
+
+// The app active again: the permission asked again (no prompt now), which
+// flips the switch off if Settings has turned it off; then scheduled.
+daily_active() {
+    if (nt_on) notify_ask(2)
+}
+
+notify_schedule() {
+    center: int = notify_center();
+    if (center == 0) return;
+    daily_ready();
+    msg(center, sel("removeAllPendingNotificationRequests"));
+    first: int = today();
+    if (now_minutes() >= nt_minutes) first = first + 1;
+    for k in 0..30 notify_add(center, first + k);
+    if (diag_on) {
+        fbuf_n = 0;
+        fput_str("bible: scheduled 30 daily verses from ");
+        fput_iso_date(first);
+        fput(32);
+        put2(nt_minutes / 60);
+        fput(58);
+        put2(nt_minutes % 60);
+        note_ns(fstring())
+    }
+}
+
+put2(n: int) {
+    if (n < 10) fput(48);
+    fput_int(n)
+}
+
+// A line of the log, an NSString.
+note_ns(s: int) {
+    n: int = nsstring_into(s, link_buf);
+    try {
+        write_bytes_n(2, link_buf, n);
+        write(2, "\n")
+    } with IoError _e -> { }
+}
+
+notify_add(center: int, day: int) {
+    i: int = votd_of(day);
+    if (i < 0) return;
+    content: int = msg(make("UNMutableNotificationContent"), sel("autorelease"));
+    msg1(content, sel("setTitle:"), nsstring("Verse of the Day"));
+    // (Never the ESV's words: the current offline version's, or the BSB's.)
+    fput_votd_body(i, votd_text(i), 178);
+    msg1(content, sel("setBody:"), fstring());
+    if (pl_active >= 0) {
+        d: int = day - pl_start + 1;
+        if (d >= 1 && d <= plan_lengths[pl_active]) {
+            fbuf_n = 0;
+            fput_str("Today: ");
+            fput_day(plan_day(pl_active, d));
+            msg1(content, sel("setSubtitle:"), fstring())
+        }
+    }
+    fbuf_n = 0;
+    c: int = vd_c[i];
+    for x in 0..3 fput(bsb[book_line[ch_book[c]] + 1 + x] as int);
+    fput(46);
+    fput_int(ch_num[c]);
+    fput(46);
+    fput_int(vd_v[i]);
+    keys[0] = nsstring("ref");
+    values[0] = fstring();
+    msg1(content, sel("setUserInfo:"), nsdictionary(keys, values, 1));
+    msg1(content, sel("setSound:"), msg(cls("UNNotificationSound"), sel("defaultSound")));
+    msg1(content, sel("setThreadIdentifier:"), nsstring("votd"));
+    civil_date(day);
+    parts: int = msg(make("NSDateComponents"), sel("autorelease"));
+    msg1(parts, sel("setYear:"), date_y);
+    msg1(parts, sel("setMonth:"), date_m);
+    msg1(parts, sel("setDay:"), date_d);
+    msg1(parts, sel("setHour:"), nt_minutes / 60);
+    msg1(parts, sel("setMinute:"), nt_minutes % 60);
+    trigger: int = msg2(cls("UNCalendarNotificationTrigger"), sel("triggerWithDateMatchingComponents:repeats:"),
+        parts, 0);
+    fbuf_n = 0;
+    fput_str("votd-");
+    fput_iso_date(day);
+    request: int = msg3(cls("UNNotificationRequest"), sel("requestWithIdentifier:content:trigger:"),
+        fstring(), content, trigger);
+    msg2(center, sel("addNotificationRequest:withCompletionHandler:"), request, 0)
+}
+
+// ---- a notification opened ----
+notify_obj: int = 0;
+
+// A verse to go to once the reader is up (a notification that launched
+// the app): its chapter, or -1.
+pending_votd_c: int = -1;
+
+pending_votd_v: int = 0;
+
+notify_setup() {
+    center: int = notify_center();
+    if (center == 0) return;
+    k: int = objc_allocateClassPair(cls("NSObject"), "L8Notify", 0);
+    add_method3(k, sel("userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:"),
+        &notify_opened, "v@:@@@?");
+    add_protocol(k, "UNUserNotificationCenterDelegate");
+    objc_registerClassPair(k);
+    notify_obj = make("L8Notify");
+    msg1(center, sel("setDelegate:"), notify_obj)
+}
+
+notify_opened(
+    _self: int,
+    _cmd: int,
+    _center: int,
+    response: int,
+    handler: int
+): int {
+    info: int = msg(msg(msg(msg(response, sel("notification")), sel("request")), sel("content")),
+        sel("userInfo"));
+    ref: int = if (info != 0) msg1(info, sel("objectForKey:"), nsstring("ref")) else 0;
+    if (ref != 0) notify_open_ref(ref);
+    call_block(handler);
+    0
+}
+
+// "JHN.3.16": the reader there (the sheets put away, the way back shown,
+// the verse flashed), or once it is up.
+notify_open_ref(ref: int) {
+    n: int = nsstring_into(ref, link_buf);
+    if (n < 5) return;
+    b: int = -1;
+    for x in 0..books {
+        same: bool = true;
+        for i in 0..3
+            if (bsb[book_line[x] + 1 + i] != link_buf[i]) same = false;
+        if (same) b = x
+    }
+    if (b < 0) return;
+    num: int = 0;
+    verse: int = 0;
+    second: bool = false;
+    for i in 4..n {
+        k: int = link_buf[i] as int;
+        if (k == 46) second = true else if (k >= 48 && k <= 57) {
+            if (second) verse = verse * 10 + k - 48 else num = num * 10 + k - 48
+        }
+    }
+    c: int = chapter_of(b, num);
+    note_num("bible: notification opened at ", c * 1000 + verse);
+    if (!restored) {
+        pending_votd_c = c;
+        pending_votd_v = verse;
+        return
+    }
+    jump(c, verse)
+}
+
+// (The reader up: a notification's verse that came before it.)
+daily_reader_up() {
+    if (pending_votd_c >= 0) {
+        c: int = pending_votd_c;
+        pending_votd_c = -1;
+        jump(c, pending_votd_v)
+    }
+    daily_reschedule()
+}
+
+// ---- the reading settings' Verse of the Day section ----
+// (Its index among the settings' own sections, after While Reading.)
+VOTD_SECTION: int = 7;
+
+daily_switch: int = 0;
+
+votd_rows(): int {
+    1 + (if (nt_on) 1 else 0) + (if (nt_denied && !nt_on) 1 else 0)
+}
+
+votd_footer(): int {
+    nsstring(if (nt_denied && !nt_on) "Notifications are turned off for Smooth Bible in Settings." else "A verse each morning, and today\â\€\™s reading when you follow a plan.")
+}
+
+// A local time today (minutes past midnight) as a date.
+date_at_minutes(m: int): int {
+    t: int = local_day(time(0)) * 86400 - local_offset() + m * 60;
+    msg_set_f(cls("NSDate"), sel("dateWithTimeIntervalSince1970:"), t as f64)
+}
+
+votd_setting_cell(t: int, r: int): int {
+    cell: int = fresh_cell(t);
+    config: int = list_config(0);
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    if (r == 0) {
+        msg1(config, sel("setText:"), nsstring("Daily Notification"));
+        sw: int = make("UISwitch");
+        msg1(sw, sel("setOn:"), if (nt_on) 1 else 0);
+        msg1(sw, sel("setOnTintColor:"), c_accent);
+        msg3(sw, sel("addTarget:action:forControlEvents:"), app_obj, sel("dailySwitched:"),
+            4096);
+        msg1(cell, sel("setAccessoryView:"), sw);
+        daily_switch = sw;
+        release(sw)
+    } else if (r == 1 && nt_on) {
+        msg1(config, sel("setText:"), nsstring("Time"));
+        picker: int = make("UIDatePicker");
+        msg1(picker, sel("setDatePickerMode:"), 0);
+        if (responds(picker, "setPreferredDatePickerStyle:")) msg1(picker, sel("setPreferredDatePickerStyle:"),
+            2);
+        msg1(picker, sel("setDate:"), date_at_minutes(nt_minutes));
+        msg3(picker, sel("addTarget:action:forControlEvents:"), app_obj, sel("dailyTime:"),
+            4096);
+        msg(picker, sel("sizeToFit"));
+        msg1(cell, sel("setAccessoryView:"), picker);
+        release(picker)
+    } else {
+        msg1(config, sel("setText:"), nsstring("Open Settings"));
+        msg1(text_props(config), sel("setColor:"), c_accent);
+        msg1(cell, sel("setSelectionStyle:"), 3)
+    }
+    msg1(cell, sel("setContentConfiguration:"), config);
+    cell
+}
+
+votd_picked(r: int) {
+    if (r == votd_rows() - 1 && nt_denied && !nt_on) {
+        app: int = msg(cls("UIApplication"), sel("sharedApplication"));
+        url: int = msg1(cls("NSURL"), sel("URLWithString:"), objc_const("UIApplicationOpenSettingsURLString"));
+        msg3(app, sel("openURL:options:completionHandler:"), url, nsdictionary(keys,
+            values, 0), 0)
+    }
+}
+
+// The switch: on asks for permission first (the switch stays on while the
+// alert is up; off again if it is refused); off takes every request away.
+daily_switched(_self: int, _cmd: int, sw: int): int {
+    on: bool = (msg(sw, sel("isOn")) & 255) != 0;
+    if (on) {
+        notify_ask(1);
+        return 0
+    }
+    nt_on = false;
+    set_def_bool("dailyVerse", false);
+    center: int = notify_center();
+    if (center != 0) msg(center, sel("removeAllPendingNotificationRequests"));
+    if (settings_table != 0) {
+        one[0] = msg2(cls("NSIndexPath"), sel("indexPathForRow:inSection:"), 1, VOTD_SECTION + 1);
+        msg2(settings_table, sel("deleteRowsAtIndexPaths:withRowAnimation:"), nsarray(one,
+            1), 0)
+    }
+    note("bible: daily notification off");
+    0
+}
+
+daily_time(_self: int, _cmd: int, picker: int): int {
+    cal: int = msg(cls("NSCalendar"), sel("currentCalendar"));
+    date: int = msg(picker, sel("date"));
+    h: int = msg2(cal, sel("component:fromDate:"), 32, date);
+    m: int = msg2(cal, sel("component:fromDate:"), 64, date);
+    nt_minutes = h * 60 + m;
+    set_def_int("dailyVerseMinutes", nt_minutes);
+    daily_reschedule();
+    0
+}
+
+// ---- classes and methods ----
+make_daily_classes() {
+    plans_class = objc_allocateClassPair(cls("UITableViewController"), "L8Plans",
+        0);
+    add_method1(plans_class, sel("viewWillAppear:"), &plans_will_appear, "v@:B");
+    objc_registerClassPair(plans_class);
+    detail_class = objc_allocateClassPair(cls("UITableViewController"), "L8PlanDays",
+        0);
+    add_method1(detail_class, sel("viewWillAppear:"), &detail_will_appear, "v@:B");
+    add_method1(detail_class, sel("viewWillDisappear:"), &detail_will_go, "v@:B");
+    objc_registerClassPair(detail_class)
+}
+
+add_daily_methods(app: int) {
+    add_method1(app, sel("planRested:"), &plan_rested, "v@:@");
+    add_method1(app, sel("todayCircle:"), &today_circle, "v@:@");
+    add_method1(app, sel("todayMark:"), &today_mark, "B@:@");
+    add_method1(app, sel("dayCircle:"), &day_circle, "v@:@");
+    add_method1(app, sel("dayMark:"), &day_mark, "B@:@");
+    add_method1(app, sel("planStart:"), &plan_start, "v@:@");
+    add_method1(app, sel("planStop:"), &plan_stop, "v@:@");
+    add_method1(app, sel("authTick:"), &auth_tick, "v@:@");
+    add_method1(app, sel("dailySwitched:"), &daily_switched, "v@:@");
+    add_method1(app, sel("dailyTime:"), &daily_time, "v@:@")
+}

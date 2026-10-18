@@ -100,6 +100,11 @@ lang_load() {
     llex_len = lang_mapped;
     lgram = lang_map("grammar", "txt");
     lgram_len = lang_mapped;
+    // (Senses and related words: DESIGN.md ¬ß10.3, ¬ß10.4.)
+    lsen = lang_map("senses", "bin");
+    lsen_n = lang_mapped;
+    lrel = lang_map("related", "bin");
+    lrel_n = lang_mapped;
     // (Cross references and the commentary: DESIGN.md ¬ß9.6, ¬ß9.7.)
     lxi = lang_map("xref_index", "bin");
     lxi_n = lang_mapped / 4;
@@ -571,15 +576,51 @@ study_table: int = 0;
 
 study_vc: int = 0;
 
+study_class: int = 0;
+
 ws_vi: int = 0;
 
 ws_w: int = 0;
 
-// How many times the word studied occurs.
+// The number studied (the word's, or a lemma's: ws_lemma, with no verse).
+ws_greek: bool = false;
+
+ws_num: int = 0;
+
+ws_lemma: bool = false;
+
+// How many times the word studied occurs (in its sense, if counted so).
 ws_words: int = 0;
 
 // The word's lexicon entries (where the first is, and how many).
 ws_lex: int = -1;
+
+// Its sense (DESIGN.md ¬ß10.3): which entry (from 1; 0 not known), the
+// entry's line (else the first's), and whether it is counted by sense (the
+// number has more than one sense in use): then how often in it, and in all.
+ws_sense: int = 0;
+
+ws_entry: int = -1;
+
+ws_by_sense: bool = false;
+
+ws_all: int = 0;
+
+// Related words (¬ß10.4): up to 5 of its language, and 3 of the other, each
+// its number and how often it occurs.
+ws_rel_n: int = 0;
+
+ws_rel_greek: []bool = new bool[5](false);
+
+ws_rel_num: []int = new int[5](0);
+
+ws_rel_count: []int = new int[5](0);
+
+ws_far_n: int = 0;
+
+ws_far_num: []int = new int[3](0);
+
+ws_far_count: []int = new int[3](0);
 
 // A word's study pushed in the sheet (from the interlinear).
 open_study(vi: int, w: int) {
@@ -590,6 +631,17 @@ open_study(vi: int, w: int) {
     msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1);
     sheet: int = msg(sheet_nav, sel("sheetPresentationController"));
     if (sheet != 0) msg1(sheet, sel("setSelectedDetentIdentifier:"), objc_const("UISheetPresentationControllerDetentIdentifierLarge"))
+}
+
+// A related word's lemma study pushed (no verse: no grammar, nor Add to
+// Note).
+open_lemma(greek: bool, num: int) {
+    sheet_nav: int = top_presented();
+    if (sheet_nav == 0) return;
+    vc: int = make_study_of(-1, -1, greek, num, view_width(msg(sheet_nav, sel("view"))),
+        true);
+    msg1(vc, sel("setHidesBottomBarWhenPushed:"), 1);
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
 }
 
 // A word's study as a sheet of its own, large (from the edit menu's Study).
@@ -622,35 +674,117 @@ study_toolbar(vc: int, from_il: bool) {
     msg1(vc, sel("setToolbarItems:"), nsarray(bar_items, n))
 }
 
+// The study's numbers made (for word w of verse vi, or a lemma's with no
+// word: w -1): its entries, its sense, its counts and renderings, and its
+// related words.
+study_set(
+    vi: int,
+    w: int,
+    greek: bool,
+    num: int
+) {
+    ws_vi = vi;
+    ws_w = w;
+    ws_lemma = w < 0;
+    ws_greek = greek;
+    ws_num = num;
+    ws_lex = lex_first(greek, num);
+    ws_sense = (if (w >= 0) w_sense(w) else 0);
+    ws_entry = sense_entry(greek, num, ws_sense);
+    if (ws_entry < 0) {
+        ws_entry = ws_lex;
+        ws_sense = 0
+    }
+    _ok: bool = conc_load(greek, num);
+    ws_all = cc_words;
+    ws_by_sense = ws_sense > 0 && senses_in_use() > 1;
+    if (ws_by_sense) conc_sense(ws_sense);
+    ws_words = cc_words;
+    renderings();
+    // (Then the related words, and how often each occurs.)
+    related_load(greek, num);
+    ws_rel_n = 0;
+    ws_far_n = 0;
+    for i in 0..rl_n {
+        if (rl_greek[i] == greek && ws_rel_n < 5) {
+            ws_rel_greek[ws_rel_n] = rl_greek[i];
+            ws_rel_num[ws_rel_n] = rl_num[i];
+            ws_rel_n = ws_rel_n + 1
+        } else if (rl_greek[i] != greek && ws_far_n < 3) {
+            ws_far_num[ws_far_n] = rl_num[i];
+            ws_far_n = ws_far_n + 1
+        }
+    }
+    for i in 0..ws_rel_n ws_rel_count[i] = occurrences(greek, ws_rel_num[i]);
+    for i in 0..ws_far_n ws_far_count[i] = occurrences(!greek, ws_far_num[i]);
+    // (The number's own verses loaded again, as the concordance has them.)
+    _again: bool = conc_load(greek, num);
+    if (ws_by_sense) conc_sense(ws_sense)
+}
+
 make_study(
     vi: int,
     w: int,
     W: f64,
     from_il: bool
 ): int {
-    ws_vi = vi;
-    ws_w = w;
-    ws_lex = lex_first(w_greek(w), w_strongs(w));
-    conc_load(w_greek(w), w_strongs(w));
-    ws_words = cc_words;
-    renderings();
-    vc: int = msg(msg1(msg(cls("UITableViewController"), sel("alloc")), sel("initWithStyle:"),
-        2), sel("autorelease"));
+    make_study_of(vi, w, w_greek(w), w_strongs(w), W, from_il)
+}
+
+make_study_of(
+    vi: int,
+    w: int,
+    greek: bool,
+    num: int,
+    W: f64,
+    from_il: bool
+): int {
+    study_set(vi, w, greek, num);
+    vc: int = msg(msg1(msg(study_class, sel("alloc")), sel("initWithStyle:"), 2),
+        sel("autorelease"));
     study_vc = vc;
-    study_table = msg(vc, sel("tableView"));
+    study_table = held(study_table, msg(vc, sel("tableView")));
     msg1(study_table, sel("setDataSource:"), app_obj);
     msg1(study_table, sel("setDelegate:"), app_obj);
     style_table(study_table, true);
     msg1(msg(vc, sel("navigationItem")), sel("setLargeTitleDisplayMode:"), 2);
+    // (What it studies, kept with it: shown again when it comes back from
+    // a study pushed over it.)
+    one[0] = nsnumber_int(vi);
+    one[1] = nsnumber_int(w);
+    one[2] = nsnumber_int(if (greek) 1 else 0);
+    one[3] = nsnumber_int(num);
+    objc_setAssociatedObject(vc, ints_address(circle_key), nsarray(one, 4), 1);
     // The title: the lemma's transliteration (or the form's).
-    form_of(w);
-    if (ws_lex >= 0) {
-        lex_field(ws_lex, 1);
+    if (ws_entry >= 0) {
+        lex_field(ws_entry, 1);
         msg1(vc, sel("setTitle:"), ns_of(llex, lf_b, lf_e))
-    } else msg1(vc, sel("setTitle:"), ns_of(lforms, wt_b, wt_e));
-    msg1(study_table, sel("setTableHeaderView:"), study_header(W));
-    study_toolbar(vc, from_il);
+    } else if (w >= 0) {
+        form_of(w);
+        msg1(vc, sel("setTitle:"), ns_of(lforms, wt_b, wt_e))
+    }
+    msg1(study_table, sel("setTableHeaderView:"), if (ws_lemma) lemma_header(W) else study_header(W));
+    if (!ws_lemma) study_toolbar(vc, from_il);
     vc
+}
+
+// A study about to show again (from one pushed over it): its numbers made
+// again, if another's are loaded.
+study_will_appear(self: int, cmd: int, animated: int): int {
+    _r: int = super1(self, study_class, cmd, animated);
+    a: int = objc_getAssociatedObject(self, ints_address(circle_key));
+    if (a == 0) return 0;
+    vi: int = msg(msg1(a, sel("objectAtIndex:"), 0), sel("longValue"));
+    w: int = msg(msg1(a, sel("objectAtIndex:"), 1), sel("longValue"));
+    greek: bool = msg(msg1(a, sel("objectAtIndex:"), 2), sel("longValue")) == 1;
+    num: int = msg(msg1(a, sel("objectAtIndex:"), 3), sel("longValue"));
+    t: int = msg(self, sel("tableView"));
+    if (t == study_table && w == ws_w && num == ws_num && greek == ws_greek) return 0;
+    study_set(vi, w, greek, num);
+    study_vc = self;
+    study_table = held(study_table, t);
+    msg(t, sel("reloadData"));
+    0
 }
 
 // Add to Note: "·ºÄŒ≥Œ±œÄŒ¨œâ (agapa≈ç, G25): to love" on a line of its own at the
@@ -712,16 +846,10 @@ study_header(W: f64): int {
     w: int = ws_w;
     study_load(ws_vi);
     form_of(w);
-    v: int = msg(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
-        0.0f64, 0.0f64, W, 100.0f64), sel("autorelease"));
     hero: int = label_of(attributed(ns_of(lforms, wf_b, wf_e), original_font(w_greek(w),
         34.0f64, 40.0f64), c_ink));
-    // (Made smaller to fit, rather than cut off, at the largest text sizes.)
-    msg1(hero, sel("setAdjustsFontSizeToFitWidth:"), 1);
-    msg_set_f(hero, sel("setMinimumScaleFactor:"), 0.3f64);
     tr: int = label_of(attributed(ns_of(lforms, wt_b, wt_e), italic_sans(17.0f64),
         c_faint));
-    msg1(tr, sel("setNumberOfLines:"), 0);
     s: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
     soft: int = msg_set_f(c_ink, sel("colorWithAlphaComponent:"), 0.8f64);
     fbuf_n = 0;
@@ -735,7 +863,36 @@ study_header(W: f64): int {
         append(s, nsstring("\‚\Ä\ù in "), sans(15.0f64, 0.0f64), soft)
     } else append(s, nsstring("Not translated in "), sans(15.0f64, 0.0f64), soft);
     append(s, where, sans(15.0f64, 0.0f64), soft);
-    line: int = label_of(s);
+    study_header_of(W, hero, tr, label_of(s))
+}
+
+// A lemma's: its dictionary form, transliteration, and "143 times".
+lemma_header(W: f64): int {
+    lex_field(ws_lex, 0);
+    hero: int = label_of(attributed(ns_of(llex, lf_b, lf_e), original_font(ws_greek,
+        34.0f64, 40.0f64), c_ink));
+    lex_field(ws_lex, 1);
+    tr: int = label_of(attributed(ns_of(llex, lf_b, lf_e), italic_sans(17.0f64), c_faint));
+    fbuf_n = 0;
+    fput_int(ws_all);
+    fput_str(if (ws_all == 1) " time" else " times");
+    line: int = label_of(attributed(fstring(), sans(15.0f64, 0.0f64), msg_set_f(c_ink,
+        sel("colorWithAlphaComponent:"), 0.8f64)));
+    study_header_of(W, hero, tr, line)
+}
+
+study_header_of(
+    W: f64,
+    hero: int,
+    tr: int,
+    line: int
+): int {
+    v: int = msg(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
+        0.0f64, 0.0f64, W, 100.0f64), sel("autorelease"));
+    // (Made smaller to fit, rather than cut off, at the largest text sizes.)
+    msg1(hero, sel("setAdjustsFontSizeToFitWidth:"), 1);
+    msg_set_f(hero, sel("setMinimumScaleFactor:"), 0.3f64);
+    msg1(tr, sel("setNumberOfLines:"), 0);
     msg1(line, sel("setNumberOfLines:"), 0);
     y: f64 = 24.0f64;
     for x in [hero, tr, line] {
@@ -749,25 +906,57 @@ study_header(W: f64): int {
     v
 }
 
+// The sections: 0 the word, 1 its definition, 2 occurrences, 3 Translated
+// As (if any), 4 Related Words, 5 those of the other Testament (if any).
+ws_kinds: []int = new int[6](0);
+
+ws_kinds_n: int = 0;
+
+study_kinds() {
+    ws_kinds_n = 0;
+    for k in 0..6 {
+        if (k <= 2 || k == 3 && rd_n > 0 || k == 4 && ws_rel_n > 0 || k == 5 && ws_far_n > 0) {
+            ws_kinds[ws_kinds_n] = k;
+            ws_kinds_n = ws_kinds_n + 1
+        }
+    }
+}
+
+study_kind(s: int): int {
+    study_kinds();
+    if (s < ws_kinds_n) ws_kinds[s] else -1
+}
+
 study_sections(): int {
-    if (rd_n > 0) 4 else 3
+    study_kinds();
+    ws_kinds_n
 }
 
 study_rows(s: int): int {
-    if (s == 0) return 4;
-    if (s == 3) return if (rd_n > 6) 6 else rd_n;
+    k: int = study_kind(s);
+    if (k == 0) return if (ws_lemma) 3 else 4;
+    if (k == 2) return if (ws_by_sense) 2 else 1;
+    if (k == 3) return if (rd_n > 6) 6 else rd_n;
+    if (k == 4) return ws_rel_n;
+    if (k == 5) return ws_far_n;
     1
 }
 
 study_header_title(s: int): int {
-    if (s == 1) return nsstring("Definition");
-    if (s == 2) return nsstring("Occurrences");
-    if (s == 3) return nsstring("Translated As");
+    k: int = study_kind(s);
+    if (k == 1) return nsstring("Definition");
+    if (k == 2) return nsstring("Occurrences");
+    if (k == 3) return nsstring("Translated As");
+    if (k == 4) return nsstring("Related Words");
+    if (k == 5) return nsstring(if (ws_greek) "In the Old Testament" else "In the New Testament");
     0
 }
 
 study_footer(s: int): int {
-    if (s == 1 && ws_lex >= 0) return nsstring("From STEP Bible");
+    k: int = study_kind(s);
+    if (k == 1 && ws_lex >= 0) return nsstring("From STEP Bible");
+    if (k == 3 && ws_by_sense) return nsstring("In this sense");
+    if (k >= 4 && s == ws_kinds_n - 1) return nsstring("Words used in similar contexts, from MACULA.");
     0
 }
 
@@ -775,7 +964,7 @@ study_footer(s: int): int {
 // with " ¬∑ ", or its paragraphs run together (lang.l8).
 definition_preview(): int {
     if (ws_lex < 0) return nsstring("No definition.");
-    definition_preview_of(ws_lex);
+    definition_preview_of(ws_entry);
     // (Up to 600 bytes, stopping between characters.)
     n: int = pv_n;
     if (n > 600) {
@@ -785,11 +974,57 @@ definition_preview(): int {
     nsstring_of(pv, n)
 }
 
+// A related word's row: its lemma and transliteration, gloss, and count.
+related_cell(
+    t: int,
+    greek: bool,
+    num: int,
+    count: int
+): int {
+    cell: int = list_cell(t, "related", 2);
+    config: int = list_config(2);
+    p: int = lex_first(greek, num);
+    a: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    if (p >= 0) {
+        lex_field(p, 0);
+        append(a, ns_of(llex, lf_b, lf_e), original_font(greek, 17.0f64, 19.0f64),
+            c_ink);
+        append(a, nsstring("  "), sans(17.0f64, 0.0f64), c_ink);
+        lex_field(p, 1);
+        append(a, ns_of(llex, lf_b, lf_e), italic_sans(17.0f64), c_faint);
+        lex_field(p, 3);
+        msg1(config, sel("setSecondaryText:"), ns_of(llex, lf_b, lf_e))
+    } else {
+        fbuf_n = 0;
+        fput_key(greek, num);
+        append(a, fstring(), mono(17.0f64), c_ink)
+    }
+    msg1(config, sel("setAttributedText:"), a);
+    msg1(detail_props(config), sel("setColor:"), c_faint);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setAccessoryView:"), value_disclosure(nsnumber_text(count), c_faint));
+    msg1(cell, sel("setSelectionStyle:"), 3);
+    cell
+}
+
+// The sense's code (H430G), or the number's (H430).
+fput_sense_code() {
+    if (ws_sense > 0 && ws_entry >= 0) {
+        lex_code(ws_entry);
+        if (lf_e > lf_b) {
+            for x in lf_b..lf_e fput(llex[x] as int);
+            return
+        }
+    }
+    fput_key(ws_greek, ws_num)
+}
+
 study_cell(t: int, path: int): int {
     s: int = msg(path, sel("section"));
     r: int = msg(path, sel("row"));
+    k: int = study_kind(s);
     w: int = ws_w;
-    if (s == 0 && r == 3) {
+    if (k == 0 && r == 3) {
         cell: int = list_cell(t, "grammar", 2);
         config: int = list_config(2);
         msg1(config, sel("setText:"), nsstring("Grammar"));
@@ -803,7 +1038,7 @@ study_cell(t: int, path: int): int {
         msg1(cell, sel("setSelectionStyle:"), 3);
         return cell
     }
-    if (s == 1) {
+    if (k == 1) {
         cell: int = list_cell(t, "definition", 0);
         config: int = list_config(0);
         msg1(config, sel("setText:"), definition_preview());
@@ -815,22 +1050,25 @@ study_cell(t: int, path: int): int {
         if (ws_lex >= 0) msg1(cell, sel("setAccessoryType:"), 1);
         return cell
     }
+    if (k == 4) return related_cell(t, ws_greek, ws_rel_num[r], ws_rel_count[r]);
+    if (k == 5) return related_cell(t, !ws_greek, ws_far_num[r], ws_far_count[r]);
     cell: int = list_cell(t, "value", 1);
     config: int = list_config(1);
     msg1(text_props(config), sel("setColor:"), c_ink);
     msg1(detail_props(config), sel("setColor:"), c_faint);
     msg1(cell, sel("setSelectionStyle:"), 0);
-    if (s == 0) {
+    msg1(cell, sel("setAccessibilityLabel:"), 0);
+    if (k == 0) {
         if (r == 0) {
             msg1(config, sel("setText:"), nsstring("Dictionary Form"));
-            if (ws_lex >= 0) {
+            if (ws_entry >= 0) {
                 a: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
                 // (Left to right, though it begins in Hebrew.)
                 append(a, nsstring("\‚\Ä\é"), sans(17.0f64, 0.0f64), c_faint);
-                lex_field(ws_lex, 0);
-                append(a, ns_of(llex, lf_b, lf_e), original_font(w_greek(w), 17.0f64,
+                lex_field(ws_entry, 0);
+                append(a, ns_of(llex, lf_b, lf_e), original_font(ws_greek, 17.0f64,
                     19.0f64), c_faint);
-                lex_field(ws_lex, 1);
+                lex_field(ws_entry, 1);
                 append(a, nsstring(" ("), sans(17.0f64, 0.0f64), c_faint);
                 append(a, ns_of(llex, lf_b, lf_e), italic_sans(17.0f64), c_faint);
                 append(a, nsstring(")"), sans(17.0f64, 0.0f64), c_faint);
@@ -838,23 +1076,36 @@ study_cell(t: int, path: int): int {
             }
         } else if (r == 1) {
             msg1(config, sel("setText:"), nsstring("Meaning"));
-            if (ws_lex >= 0) {
-                lex_field(ws_lex, 3);
+            if (ws_entry >= 0) {
+                lex_field(ws_entry, 3);
                 msg1(config, sel("setSecondaryText:"), ns_of(llex, lf_b, lf_e));
                 msg1(detail_props(config), sel("setColor:"), c_ink)
             }
         } else {
             msg1(config, sel("setText:"), nsstring("Strong\‚\Ä\ôs"));
             fbuf_n = 0;
-            fput_key(w_greek(w), w_strongs(w));
-            msg1(config, sel("setSecondaryText:"), fstring());
-            msg1(detail_props(config), sel("setFont:"), mono(17.0f64))
+            fput_sense_code();
+            code: int = fstring();
+            msg1(config, sel("setSecondaryText:"), code);
+            msg1(detail_props(config), sel("setFont:"), mono(17.0f64));
+            // (Read as "Strong's H 430 G".)
+            fbuf_n = 0;
+            fput_str("Strong\‚\Ä\ôs ");
+            n: int = nsstring_into(code, link_buf);
+            for i in 0..n {
+                x: int = link_buf[i] as int;
+                if (i > 0 && is_digit(x) != is_digit(link_buf[i - 1] as int)) fput(32);
+                fput(x)
+            }
+            msg1(cell, sel("setAccessibilityLabel:"), fstring())
         }
-    } else if (s == 2) {
-        msg1(config, sel("setText:"), nsstring("Concordance"));
+    } else if (k == 2) {
+        msg1(config, sel("setText:"), nsstring(if (r == 1) "All Senses" else "Concordance"));
         fbuf_n = 0;
-        fput_int(ws_words);
-        fput_str(if (ws_words == 1) " time" else " times");
+        if (r == 1) fput_int(ws_all) else {
+            fput_int(ws_words);
+            if (ws_by_sense) fput_str(" in this sense") else fput_str(if (ws_words == 1) " time" else " times")
+        }
         msg1(config, sel("setSecondaryText:"), fstring());
         msg1(cell, sel("setAccessoryType:"), 1);
         msg1(cell, sel("setSelectionStyle:"), 3)
@@ -868,10 +1119,13 @@ study_cell(t: int, path: int): int {
 }
 
 study_picked(s: int, r: int) {
-    if (s == 0 && r == 3) open_grammar();
-    if (s == 1 && ws_lex >= 0) open_definition();
-    if (s == 2) open_concordance(-1);
-    if (s == 3) open_concordance(r)
+    k: int = study_kind(s);
+    if (k == 0 && r == 3) open_grammar();
+    if (k == 1 && ws_lex >= 0) open_definition();
+    if (k == 2) open_concordance_of(-1, ws_by_sense && r == 0);
+    if (k == 3) open_concordance_of(r, ws_by_sense);
+    if (k == 4) open_lemma(ws_greek, ws_rel_num[r]);
+    if (k == 5) open_lemma(!ws_greek, ws_far_num[r])
 }
 
 // ---- grammar (DESIGN.md ¬ß7.5.3) ----
@@ -904,7 +1158,7 @@ open_grammar() {
     msg1(vc, sel("setTitle:"), nsstring("Grammar"));
     msg1(vc, sel("setHidesBottomBarWhenPushed:"), 1);
     msg1(msg(vc, sel("navigationItem")), sel("setLargeTitleDisplayMode:"), 2);
-    grammar_table = msg(vc, sel("tableView"));
+    grammar_table = held(grammar_table, msg(vc, sel("tableView")));
     msg1(grammar_table, sel("setDataSource:"), app_obj);
     msg1(grammar_table, sel("setDelegate:"), app_obj);
     style_table(grammar_table, true);
@@ -1036,12 +1290,24 @@ def_outline_para(level: int, after: f64): int {
 
 definition_text(): int {
     s: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
-    greek: bool = w_greek(ws_w);
+    greek: bool = ws_greek;
     size: f64 = scaled(16.0f64);
     n: int = lex_count(ws_lex);
+    // (The verse's sense first, captioned "In John 3:16"; the rest in
+    // their order.)
+    first: int = if (ws_sense > 0 && !ws_lemma) ws_sense - 1 else 0;
     for e in 0..n {
-        p: int = lex_line(ws_lex, e);
+        x_: int = if (e == 0) first else if (e <= first) e - 1 else e;
+        p: int = lex_line(ws_lex, x_);
         start: int = msg(s, sel("length"));
+        if (e == 0 && ws_sense > 0 && !ws_lemma && n > 1) {
+            fbuf_n = 0;
+            fput_str("In ");
+            one_verse[0] = v_num(ws_vi);
+            put_ref(v_chapter(ws_vi), one_verse, 1);
+            fput_str("\n");
+            append(s, fstring(), sans(12.0f64, 0.3f64), c_accent)
+        }
         if (e == 0) {
             lex_field(p, 0);
             append(s, ns_of(llex, lf_b, lf_e), original_font(greek, 34.0f64, 40.0f64),
@@ -1051,7 +1317,8 @@ definition_text(): int {
             append(s, ns_of(llex, lf_b, lf_e), italic_sans(17.0f64), c_faint);
             fbuf_n = 0;
             fput_str(" \¬\∑ ");
-            fput_key(greek, w_strongs(ws_w));
+            if (e == 0 && ws_sense > 0 && !ws_lemma) fput_sense_code() else fput_key(greek,
+                ws_num);
             fput_str("\n");
             append(s, fstring(), mono(15.0f64), c_faint);
             lex_field(p, 3);
@@ -1152,14 +1419,34 @@ cq_n: int = 0;
 conc_search: int = 0;
 
 // The concordance of the word studied: all its verses, or (r >= 0) those
-// where it is rendered as rendering r.
+// where it is rendered as rendering r; in its sense only, if sensed (with
+// This Sense and All above it, when it was asked for from "in this sense").
+conc_by_sense: bool = false;
+
+conc_r: int = -1;
+
+conc_seg: int = 0;
+
+conc_head: int = 0;
+
 open_concordance(r: int) {
+    open_concordance_of(r, false)
+}
+
+conc_reload_data() {
+    _ok: bool = conc_load(ws_greek, ws_num);
+    if (conc_by_sense) conc_sense(ws_sense);
+    if (conc_r >= 0) conc_only(conc_r);
+    conc_sections()
+}
+
+open_concordance_of(r: int, sensed: bool) {
     sheet_nav: int = top_presented();
     if (sheet_nav == 0) return;
-    conc_load(w_greek(ws_w), w_strongs(ws_w));
-    if (r >= 0) conc_only(r);
+    conc_r = r;
+    conc_by_sense = sensed;
     cq_n = 0;
-    conc_sections();
+    conc_reload_data();
     vc: int = msg(msg1(msg(cls("UITableViewController"), sel("alloc")), sel("initWithStyle:"),
         0), sel("autorelease"));
     fbuf_n = 0;
@@ -1172,7 +1459,7 @@ open_concordance(r: int) {
     msg1(vc, sel("setHidesBottomBarWhenPushed:"), 1);
     item: int = msg(vc, sel("navigationItem"));
     msg1(item, sel("setLargeTitleDisplayMode:"), 2);
-    conc_table = msg(vc, sel("tableView"));
+    conc_table = held(conc_table, msg(vc, sel("tableView")));
     msg1(conc_table, sel("setDataSource:"), app_obj);
     msg1(conc_table, sel("setDelegate:"), app_obj);
     style_table(conc_table, false);
@@ -1193,46 +1480,90 @@ open_concordance(r: int) {
     msg1(item, sel("setHidesSearchBarWhenScrolling:"), 0);
     conc_search = sc;
     release(sc);
-    // The header: ·ºÄŒ≥Œ±œÄŒ¨œâ ¬∑ agapa≈ç ¬∑ G25 ‚Äî 143 times in 110 verses; or
-    // agapa≈ç translated ‚Äúloved‚Äù ‚Äî 22 times.
+    W: f64 = view_width(msg(sheet_nav, sel("view")));
+    conc_seg = 0;
+    if (sensed && r < 0) {
+        // This Sense (42) | All (173).
+        fbuf_n = 0;
+        fput_str("This Sense (");
+        fput_int(ws_words);
+        fput_str(")");
+        one[0] = fstring();
+        fbuf_n = 0;
+        fput_str("All (");
+        fput_int(ws_all);
+        fput_str(")");
+        one[1] = fstring();
+        conc_seg = msg(msg1(msg(cls("UISegmentedControl"), sel("alloc")), sel("initWithItems:"),
+            nsarray(one, 2)), sel("autorelease"));
+        msg1(conc_seg, sel("setSelectedSegmentIndex:"), 0);
+        msg3(conc_seg, sel("addTarget:action:forControlEvents:"), app_obj, sel("concSense:"),
+            4096)
+    }
+    msg1(conc_table, sel("setTableHeaderView:"), conc_header_view(W));
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+// The header: ·ºÄŒ≥Œ±œÄŒ¨œâ ¬∑ agapa≈ç ¬∑ G25 ‚Äî 143 times in 110 verses; or agapa≈ç
+// translated ‚Äúloved‚Äù ‚Äî 22 times (and This Sense and All above it).
+conc_header_view(W: f64): int {
     fbuf_n = 0;
+    r: int = conc_r;
     if (r >= 0) {
-        if (ws_lex >= 0) {
-            lex_field(ws_lex, 1);
+        if (ws_entry >= 0) {
+            lex_field(ws_entry, 1);
             for x in lf_b..lf_e fput(llex[x] as int)
-        } else fput_key(w_greek(ws_w), w_strongs(ws_w));
+        } else fput_key(ws_greek, ws_num);
         fput_str(" translated \‚\Ä\ú");
         for x in 0..rd_len[r] fput(rd_pool[rd_at[r] + x] as int);
         fput_str("\‚\Ä\ù \‚\Ä\î ");
         fput_int(cc_words);
         fput_str(if (cc_words == 1) " time" else " times")
     } else {
-        if (ws_lex >= 0) {
-            lex_field(ws_lex, 0);
+        if (ws_entry >= 0) {
+            lex_field(ws_entry, 0);
             for x in lf_b..lf_e fput(llex[x] as int);
             fput_str(" \¬\∑ ");
-            lex_field(ws_lex, 1);
+            lex_field(ws_entry, 1);
             for x in lf_b..lf_e fput(llex[x] as int);
             fput_str(" \¬\∑ ")
         }
-        fput_key(w_greek(ws_w), w_strongs(ws_w));
+        if (conc_by_sense) fput_sense_code() else fput_key(ws_greek, ws_num);
         fput_str(" \‚\Ä\î ");
         fput_int(cc_words);
         fput_str(if (cc_words == 1) " time in " else " times in ");
         fput_int(cc_n);
         fput_str(if (cc_n == 1) " verse" else " verses")
     }
-    W: f64 = view_width(msg(sheet_nav, sel("view")));
     head: int = label_of(attributed(fstring(), sans(13.0f64, 0.0f64), c_faint));
     msg1(head, sel("setNumberOfLines:"), 0);
     label_size(head, W - 40.0f64);
     h: f64 = hfa[1];
+    y: f64 = 10.0f64;
     box: int = msg(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
         0.0f64, 0.0f64, W, h + 20.0f64), sel("autorelease"));
-    msg_rect(head, sel("setFrame:"), 20.0f64, 10.0f64, W - 40.0f64, h);
+    if (conc_seg != 0) {
+        msg_rect(conc_seg, sel("setFrame:"), 20.0f64, 10.0f64, W - 40.0f64, 32.0f64);
+        msg1(box, sel("addSubview:"), conc_seg);
+        y = 52.0f64
+    }
+    msg_rect(head, sel("setFrame:"), 20.0f64, y, W - 40.0f64, h);
     msg1(box, sel("addSubview:"), head);
-    msg1(conc_table, sel("setTableHeaderView:"), box);
-    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+    msg_rect(box, sel("setFrame:"), 0.0f64, 0.0f64, W, y + h + 10.0f64);
+    conc_head = box;
+    box
+}
+
+// This Sense or All: the verses loaded again, faded in.
+conc_sense_switched(_self: int, _cmd: int, seg: int): int {
+    conc_by_sense = msg(seg, sel("selectedSegmentIndex")) == 0;
+    conc_reload_data();
+    if (conc_table == 0) return 0;
+    fade_layer(msg(conc_table, sel("layer")), 0.2f64);
+    W: f64 = view_width(conc_table);
+    msg1(conc_table, sel("setTableHeaderView:"), conc_header_view(W));
+    msg(conc_table, sel("reloadData"));
+    0
 }
 
 // The sections (a book each) of the verses the filter finds.
@@ -1448,27 +1779,29 @@ ack_header(s: int): int {
 // Each row: its title, its line, its page (by section, then row).
 ack_titles: []str = ["Berean Standard Bible", "King James Version", "World English Bible",
     "American Standard Version", "Young\‚\Ä\ôs Literal Translation", "ESV.org", "Berean Bible Translation Tables",
-    "STEP Bible", "Cross References", "Matthew Henry\‚\Ä\ôs Concise Commentary", "Privacy"];
+    "STEP Bible", "Cross References", "Matthew Henry\‚\Ä\ôs Concise Commentary", "Related Words",
+    "Privacy"];
 
 ack_lines: []str = ["The BSB text is in the public domain.", "The 1769 standard text, from eBible.org. Public domain outside the United Kingdom, where the rights are vested in the Crown.",
     "Public domain. \‚\Ä\úWorld English Bible\‚\Ä\ù is a trademark of eBible.org; the text here is unchanged.",
     "1901. Public domain.", "1898. Public domain.", "", "Hebrew and Greek words, transliterations, parsing and Strong\‚\Ä\ôs numbers aligned to the BSB. Public domain.",
-    "Definitions from STEP Bible\‚\Ä\ôs brief Hebrew and Greek lexicons (TBESH, TBESG), licensed CC BY 4.0.",
+    "Definitions from STEP Bible\‚\Ä\ôs brief Hebrew and Greek lexicons (TBESH, TBESG), and the senses of words from their Translators Amalgamated Hebrew OT and Greek NT (TAHOT, TAGNT), licensed CC BY 4.0.",
     "From OpenBible.info, licensed CC BY 4.0. Ranked by votes; those without a positive vote are left out.",
-    "From the Christian Classics Ethereal Library. Public domain.", ""];
+    "From the Christian Classics Ethereal Library. Public domain.", "From MACULA Greek Linguistic Datasets, available at https://github.com/Clear-Bible/macula-greek/ (Clear Bible / Biblica), licensed CC BY 4.0.",
+    ""];
 
 ack_links: []str = ["https://bereanbible.com", "https://ebible.org/eng-kjv2006/",
     "https://ebible.org/engwebp/", "https://ebible.org/eng-asv/", "https://ebible.org/engylt/",
     "https://www.esv.org", "https://bereanbible.com", "https://www.STEPBible.org",
     "https://www.openbible.info/labs/cross-references/", "https://ccel.org/ccel/henry/mhcc",
-    "https://smoothbible.com/privacy/"];
+    "https://github.com/Clear-Bible/macula-greek/", "https://smoothbible.com/privacy/"];
 
 // Where section kind k's rows begin in those lists.
-ack_first: []int = [0, 5, 6, 7, 8, 10];
+ack_first: []int = [0, 5, 6, 7, 8, 11];
 
 ack_rows(s: int): int {
     k: int = ack_kind(s);
-    if (k == ACK_TEXT) 5 else if (k == ACK_LEX || k == ACK_STUDY) 2 else 1
+    if (k == ACK_TEXT) 5 else if (k == ACK_STUDY) 3 else if (k == ACK_LEX) 2 else 1
 }
 
 ack_footer(s: int): int {
@@ -1528,7 +1861,9 @@ change_lines: []str = ["STEP Bible\‚\Ä\ôs HTML was converted to plain styled tex
     "Entries were grouped by base Strong\‚\Ä\ôs number, the sense matching the word\‚\Ä\ôs part of speech first.",
     "Hebrew cantillation and paragraph marks were removed for display; vowel points kept.",
     "Psalm titles were mapped to verse 1, as the BSB\‚\Ä\ôs tables have them.", "Transliterations of Hebrew lemmas are the tables\‚\Ä\ô own, or made in their style.",
-    "Cross references to 3 John 1:15 are given at 1:14, as the BSB numbers it.", "The commentary\‚\Ä\ôs markup was converted to plain styled text."];
+    "Cross references to 3 John 1:15 are given at 1:14, as the BSB numbers it.", "The commentary\‚\Ä\ôs markup was converted to plain styled text.",
+    "Each word\‚\Ä\ôs sense is STEP\‚\Ä\ôs disambiguated Strong\‚\Ä\ôs number in TAHOT and TAGNT, matched to the BSB\‚\Ä\ôs words of the verse by base number, in the original order.",
+    "MACULA\‚\Ä\ôs Proximity pairs were reduced to base Strong\‚\Ä\ôs numbers (Aramaic as Hebrew), each word\‚\Ä\ôs ten nearest kept."];
 
 open_changes() {
     if (settings_nav == 0) return;
@@ -1536,7 +1871,7 @@ open_changes() {
         2), sel("autorelease"));
     msg1(vc, sel("setTitle:"), nsstring("Changes"));
     msg1(msg(vc, sel("navigationItem")), sel("setLargeTitleDisplayMode:"), 2);
-    changes_table = msg(vc, sel("tableView"));
+    changes_table = held(changes_table, msg(vc, sel("tableView")));
     msg1(changes_table, sel("setDataSource:"), app_obj);
     msg1(changes_table, sel("setDelegate:"), app_obj);
     style_table(changes_table, true);
@@ -1556,6 +1891,10 @@ changes_cell(t: int, path: int): int {
 
 // ---- classes and methods ----
 make_study_classes() {
+    study_class = objc_allocateClassPair(cls("UITableViewController"), "L8Study",
+        0);
+    add_method1(study_class, sel("viewWillAppear:"), &study_will_appear, "v@:B");
+    objc_registerClassPair(study_class);
     il_class = objc_allocateClassPair(cls("UIViewController"), "L8Interlinear", 0);
     add_method0(il_class, sel("viewDidLayoutSubviews"), &il_layout, "v@:");
     objc_registerClassPair(il_class)
@@ -1567,6 +1906,7 @@ study_index_titles(_self: int, _cmd: int, t: int): int {
 }
 
 add_study_methods(app: int) {
+    add_method1(app, sel("concSense:"), &conc_sense_switched, "v@:@");
     add_method1(app, sel("ilPrevious:"), &il_previous, "v@:@");
     add_method1(app, sel("ilNext:"), &il_next, "v@:@");
     add_method1(app, sel("ilOrder:"), &il_order, "v@:@");

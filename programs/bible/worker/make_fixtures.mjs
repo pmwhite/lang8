@@ -36,9 +36,13 @@ let book = null;
 let chapter = 0;
 let verse = 0;
 let words = "";
+// (A line of poetry or a paragraph broke the verse's words: a space between
+// them, as the app's verse_text joins them.)
+let broke = false;
 const flush = () => {
   if (verse && /\blight\b/i.test(words)) hits.push({ reference: `${book} ${chapter}:${verse}`, content: words.trim() });
   words = "";
+  broke = false;
 };
 for (const line of readFileSync(new URL("../data/web.txt", import.meta.url), "utf8").split("\n")) {
   const k = line[0];
@@ -50,7 +54,10 @@ for (const line of readFileSync(new URL("../data/web.txt", import.meta.url), "ut
     chapter = parseInt(line.slice(1), 10);
     verse = 0;
   } else if (k === "V") verse = parseInt(line.slice(1), 10);
-  else if ("TWIJ".includes(k)) words += line.slice(1);
+  else if ("TWIJ".includes(k)) {
+    words = (broke ? `${words} ${line.slice(1)}` : words + line.slice(1)).replace(/ {2,}/g, " ");
+    broke = false;
+  } else if (k && k !== "F") broke = true;
 }
 flush();
 const pages = Math.ceil(hits.length / 100);

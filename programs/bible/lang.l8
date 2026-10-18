@@ -49,6 +49,16 @@ lgram_len: int = 0;
 
 lang_ready: bool = false;
 
+// senses.bin: a byte a word, its sense (DESIGN.md §10.3); related.bin: words
+// used in similar contexts (§10.4).
+lsen: []i8 = new i8[1](0i8);
+
+lsen_n: int = 0;
+
+lrel: []i8 = new i8[1](0i8);
+
+lrel_n: int = 0;
+
 // A byte, and little-endian numbers of two and four bytes.
 byte_of(b: []i8, i: int): int {
     b[i] as int & 255
@@ -87,6 +97,12 @@ conc_h: []int = new int[STRONGS_MAX](-1);
 lex_g: []int = new int[STRONGS_MAX](-1);
 
 lex_h: []int = new int[STRONGS_MAX](-1);
+
+// Where each number's related words are in related.bin (its count's
+// byte; -1: none).
+rel_g: []int = new int[STRONGS_MAX](-1);
+
+rel_h: []int = new int[STRONGS_MAX](-1);
 
 // Each verse's V line in bsb, and each chapter's first verse.
 vb_at: []int = new int[32000](0);
@@ -159,6 +175,21 @@ lang_index_bsb() {
         }
         while (p < llex_len && llex[p] as int != 10) p = p + 1;
         p = p + 1
+    }
+    // related.bin: KEY, 0, n, then n entries of 3 bytes.
+    p = 0;
+    while (p < lrel_n) {
+        greek: bool = lrel[p] as int == 71;
+        num: int = 0;
+        q: int = p + 1;
+        while (q < lrel_n && lrel[q] as int != 0) {
+            num = num * 10 + lrel[q] as int - 48;
+            q = q + 1
+        }
+        if (num < STRONGS_MAX && q + 1 < lrel_n) {
+            if (greek) rel_g[num] = q + 1 else rel_h[num] = q + 1
+        }
+        p = q + 2 + 3 * (if (q + 1 < lrel_n) byte_of(lrel, q + 1) else 0)
     }
     // The verses' V lines, in order through the text.
     k: int = 0;
@@ -676,6 +707,7 @@ conc_load(greek: bool, num: int): bool {
     cc_words = 0;
     cc_greek = greek;
     cc_num = num;
+    cc_sense = 0;
     if (!lang_ready || num <= 0 || num >= STRONGS_MAX) return false;
     p: int = if (greek) conc_g[num] else conc_h[num];
     if (p < 0) return false;
@@ -697,10 +729,13 @@ conc_load(greek: bool, num: int): bool {
     true
 }
 
-// Whether word w is the number loaded.
+// Whether word w is the number loaded (and of the sense loaded, if one is:
+// cc_sense, 0 any).
 is_cc(w: int): bool {
-    w_strongs(w) == cc_num && w_greek(w) == cc_greek
+    w_strongs(w) == cc_num && w_greek(w) == cc_greek && (cc_sense == 0 || w_sense(w) == cc_sense)
 }
+
+cc_sense: int = 0;
 
 // The English of verse vi's words of the number loaded (vi studied): where
 // each is in st (mk_b to mk_e), and whether every one is untranslated.
@@ -884,12 +919,23 @@ lex_line(p: int, i: int): int {
 }
 
 // Field k of the entry line at p (0 lemma, 1 its transliteration, 2 part of
-// speech, 3 gloss, 4 definition): lf_b to lf_e in llex.
+// speech, 3 gloss, 4 definition; after the line's first, its extended
+// Strong's code, lex_code's): lf_b to lf_e in llex.
 lf_b: int = 0;
 
 lf_e: int = 0;
 
 lex_field(p: int, k: int) {
+    lex_field_at(p, k + 1)
+}
+
+// The entry's extended Strong's code (H7462B; empty for an entry without a
+// letter): lf_b to lf_e.
+lex_code(p: int) {
+    lex_field_at(p, 0)
+}
+
+lex_field_at(p: int, k: int) {
     q: int = p;
     for _i in 0..k {
         while (q < llex_len && llex[q] as int != 9 && llex[q] as int != 10) q = q + 1;
@@ -2046,4 +2092,99 @@ mh_markup(p: int, e: int) {
             q = q + 1
         }
     }
+}
+
+// ---- exact senses (DESIGN.md §10.3) ----
+// Word w's sense: k for the k-th entry under its number in lexicon.txt
+// (from 1), 0 if not known.
+w_sense(w: int): int {
+    if (w < 0 || w >= lsen_n) 0 else byte_of(lsen, w)
+}
+
+// Entry k (from 1) of a number's, or -1.
+sense_entry(greek: bool, num: int, k: int): int {
+    p: int = lex_first(greek, num);
+    if (p < 0 || k < 1 || k > lex_count(p)) return -1;
+    lex_line(p, k - 1)
+}
+
+// Of the number loaded (conc_load, every sense): how many of its words
+// are of each sense (sn_count, from 1; sn_count[0] those not known), and
+// how many senses are in use.
+sn_count: []int = new int[256](0);
+
+senses_in_use(): int {
+    for k in 0..len(sn_count) sn_count[k] = 0;
+    was: int = cc_sense;
+    cc_sense = 0;
+    for x in 0..cc_n {
+        vi: int = cc_vi[x];
+        for w in v_first(vi)..v_end(vi) {
+            if (is_cc(w)) {
+                k: int = w_sense(w);
+                sn_count[k] = sn_count[k] + 1
+            }
+        }
+    }
+    cc_sense = was;
+    n: int = 0;
+    for k in 1..len(sn_count)
+        if (sn_count[k] > 0) n = n + 1;
+    n
+}
+
+// The verses loaded, kept only where the number is of sense k (and how
+// many times it is, in cc_words); is_cc from now on that sense's.
+conc_sense(k: int) {
+    cc_sense = k;
+    n: int = 0;
+    words: int = 0;
+    for x in 0..cc_n {
+        vi: int = cc_vi[x];
+        here: int = 0;
+        for w in v_first(vi)..v_end(vi)
+            if (is_cc(w)) here = here + 1;
+        if (here > 0) {
+            cc_vi[n] = vi;
+            n = n + 1;
+            words = words + here
+        }
+    }
+    cc_n = n;
+    cc_words = words
+}
+
+// ---- related words (DESIGN.md §10.4) ----
+// A number's words used in similar contexts, nearest first: rl_n of them,
+// each its language, number and distance (0 to 255).
+rl_n: int = 0;
+
+rl_greek: []bool = new bool[32](false);
+
+rl_num: []int = new int[32](0);
+
+rl_dist: []int = new int[32](0);
+
+related_load(greek: bool, num: int) {
+    rl_n = 0;
+    if (!lang_ready || num <= 0 || num >= STRONGS_MAX) return;
+    p: int = if (greek) rel_g[num] else rel_h[num];
+    if (p < 0) return;
+    n: int = byte_of(lrel, p);
+    for i in 0..n {
+        q: int = p + 1 + 3 * i;
+        if (q + 2 < lrel_n && rl_n < len(rl_num)) {
+            x: int = le16(lrel, q);
+            rl_greek[rl_n] = (x & 32768) != 0;
+            rl_num[rl_n] = x & 32767;
+            rl_dist[rl_n] = byte_of(lrel, q + 2);
+            rl_n = rl_n + 1
+        }
+    }
+}
+
+// How many times a number occurs (every sense).
+occurrences(greek: bool, num: int): int {
+    if (!conc_load(greek, num)) return 0;
+    cc_words
 }

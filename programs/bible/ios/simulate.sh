@@ -28,6 +28,14 @@
 #           under it, Study's segments, the acknowledgements, the largest
 #           text; and the recording of sequences 10 and 11
 #           (versions-transitions.mp4, with versions-transitions.txt)
+#   plans   Round 5 (DESIGN.md §10.6), on the demo clock: Today in Go To,
+#           the reading plans, a plan started and read, Day Done, Catch Up;
+#           the Verse of the Day's setting, its authorization alert, then
+#           (relaunched) the Time row and a notification opened; Share as
+#           Image (the card kept as share-card.png); exact senses, related
+#           words, the largest text; the recording of sequence 12
+#           (plans-transitions.mp4); and Versions and Acknowledgements
+#           popped before a theme's change (1.0 (11)'s crash), checked
 # After each step the script waits for the app to say it has settled (the
 # notification space.trailingwhite.smoothbible.done, from `notifyutil -1`),
 # with a timeout, rather than sleeping; then it takes the screenshot.
@@ -391,6 +399,73 @@ versions)
     echo "FAILED: the ESV's search showed more than 100 at once (or nothing)" | tee -a "$out/esv-search.txt"
     failed=1
   fi
+  ;;
+plans)
+  # (DESIGN.md §10.6: shots 140 to 158.)
+  step 240
+  step 241 140-goto-today 6
+  step 242 141-plans
+  step 243 142-plan-detail
+  step 244 143-plan-started 8
+  step 245 144-plan-partial 8
+  step 246 145-day-done 6
+  step 247 146-catch-up 6
+  step 248 147-votd-settings 6
+  step 249 148-notify-prompt 6
+  # (The alert can't be answered here: the app is launched again, and the
+  # demo gives the shim its answer.)
+  xcrun simctl terminate "$dev" "$id" 2>/dev/null || true
+  kill "$console" 2>/dev/null || true
+  events=0
+  launch console-again.txt
+  step 250 149-time-row 8
+  step 251 150-votd-open 6
+  step 252 151-share-sheet 8
+  step 253 152-share-composer 8
+  # The card at full size, as the demo kept it: exactly 1080 × 1080.
+  data=$(xcrun simctl get_app_container "$dev" "$id" data 2>/dev/null)
+  if cp "$data/Documents/share-card.png" "$out/share-card.png" 2>/dev/null; then
+    size=$(sips -g pixelWidth -g pixelHeight "$out/share-card.png" | awk '/pixel/ { printf "%s ", $2 }')
+    echo "share-card.png: $size" | tee "$out/share-card.txt"
+    [ "$size" = "1080 1080 " ] || { echo "FAILED: the card is not 1080 x 1080" | tee -a "$out/share-card.txt"; failed=1; }
+  else
+    echo "FAILED: no share-card.png" | tee "$out/share-card.txt"
+    failed=1
+  fi
+  step 254 153-share-night-portrait 6
+  step 255 154-word-sense 8
+  step 256 155-concordance-sense 6
+  step 257 156-related 8
+  step 258 157-lemma-study 6
+  step 261 "" 10
+  ui content_size accessibility-extra-extra-extra-large
+  step 259 158-ax-goto-today 8
+  ui content_size large
+  # The screen recording of sequence 12.
+  xcrun simctl io "$dev" recordVideo --codec h264 --force "$out/transitions.mp4" > "$out/record.txt" 2>&1 &
+  recorder=$!
+  i=0
+  while ! grep -qi "started" "$out/record.txt" 2>/dev/null && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  rec0=$(now)
+  sleep 0.5
+  : > "$out/transitions.txt"
+  a=$(now)
+  step 260 "" 18
+  b=$(now)
+  echo "12 $(python3 -c "print(round($a - $rec0, 2), round($b - $rec0, 2))")" >> "$out/transitions.txt"
+  sleep 0.5
+  kill -INT "$recorder" 2>/dev/null
+  wait "$recorder" 2>/dev/null
+  # What was scheduled, the shim's answers and the handler called; the
+  # lists that were popped under a theme's change.
+  grep -h "scheduled 30 daily verses\|notification authorization\|completion handler\|notification opened\|popped lists\|card size\|card w\|card h" \
+    "$out/console.txt" "$out/console-again.txt" > "$out/notify.txt" 2>/dev/null
+  cat "$out/notify.txt"
+  grep -q "scheduled 30 daily verses" "$out/notify.txt" || { echo "FAILED: nothing scheduled" | tee -a "$out/notify.txt"; failed=1; }
+  grep -q "popped lists survived" "$out/notify.txt" || { echo "FAILED: the popped lists' step did not finish" | tee -a "$out/notify.txt"; failed=1; }
   ;;
 ios18)
   shot 01-genesis-1
