@@ -238,6 +238,12 @@ start_level(m: int) raises KernelError {
     an_jump = true;
     pic_reset();
     focus_start(false);
+    // (A level whose proof starts by putting something into the goal
+    // starts on the goal, demo or not.)
+    if (st_n > 0 && st_kind[0] == 2 && st_hyp[0] < 0 && !fc_goal) {
+        focus_on_goal();
+        hand_build()
+    }
     demo_begin()
 }
 
@@ -438,6 +444,7 @@ play_row(r: int, c0: int) raises KernelError {
         return
     }
     last_move = m;
+    path_toast_end();
     demo_end();
     auto_close();
     trial_read(n, c);
@@ -456,6 +463,8 @@ chip_played: int = -1;
 // After any move: what closed is shown closing, the focus moves on.
 after_move(n: int, old_goal: int) raises KernelError {
     intro_open = false;
+    // (The last move: its hand, chips or rows, slides away as it was.)
+    fin_chip = chip_row;
     chip_back();
     hint_row = -1;
     hint_chip = -1;
@@ -464,6 +473,8 @@ after_move(n: int, old_goal: int) raises KernelError {
     stage_node = -1;
     stage_fact = 0;
     close_lead = 0.0;
+    side_t = -10.0;
+    side_note(n);
     // (A goal closed: shown snapping shut, and into its pip.)
     if (leaves_done() > leaves_before) {
         close_t = now_t;
@@ -475,7 +486,7 @@ after_move(n: int, old_goal: int) raises KernelError {
         leaves(n);
         for i in 0..lf_n {
             k: int = lf_node[lf_n - 1 - i];
-            if (pn_thm[k] != 0 && pn_thm[n] == 0) {
+            if (pn_thm[k] != 0 && pn_thm[n] == 0 && !quiet_leaf(k)) {
                 close_term = gl_concl[pn_goal[k]];
                 m: int = pn_move[k];
                 close_calc = m >= 0 && mv_kind[m] == MV_CALC
@@ -487,7 +498,7 @@ after_move(n: int, old_goal: int) raises KernelError {
         lf_n = 0;
         leaves(n);
         for i in 0..lf_n {
-            if (pn_thm[lf_node[i]] != 0) pic_close_eq = gl_concl[pn_goal[lf_node[i]]]
+            if (pn_thm[lf_node[i]] != 0 && !quiet_leaf(lf_node[i])) pic_close_eq = gl_concl[pn_goal[lf_node[i]]]
         }
         if (pic_close_eq == 0) pic_close_eq = gl_concl[old_goal];
         sp_n = 0;
@@ -509,7 +520,8 @@ after_move(n: int, old_goal: int) raises KernelError {
     pic_moved();
     if (level_done()) {
         finish_level();
-        hd_n = 0;
+        fin_t0 = now_t;
+        chip_row = fin_chip;
         return
     }
     focus_after(old_goal)
@@ -625,6 +637,7 @@ undo_move() raises KernelError {
     undo();
     if (moves_made > 0) moves_made = moves_made - 1;
     if (on_path > moves_made) on_path = moves_made;
+    path_toast_end();
     chip_back();
     hint_row = -1;
     undo_t = now_t;
@@ -644,6 +657,27 @@ undo_move() raises KernelError {
 
 undo_t: f32 = -10.0;
 
+// The last move: when it was made, and the chips its hand showed (-1 for
+// rows). The hand slides down and away, and the facts after it as the
+// goal flashes.
+fin_t0: f32 = -10.0;
+
+fin_chip: int = -1;
+
+const HAND_AWAY: f32 = 0.22;
+
+const FACTS_AWAY: f32 = 0.24;
+
+hand_leaving(): bool {
+    done_t >= 0.0 && now_t - fin_t0 < HAND_AWAY
+}
+
+// How far the hand has gone (0 to 1, eased).
+hand_away(): f32 {
+    k: f32 = clampf((now_t - fin_t0) / HAND_AWAY, 0.0, 1.0);
+    k * k
+}
+
 // The goals (leaves of the proof) closed so far.
 leaves_before: int = 0;
 
@@ -661,7 +695,65 @@ leaves_done(): int {
 // for each part.
 pips_of(n: int): int {
     if (n == sp_node && pn_thm[n] != 0) return sp_w;
+    if (quiet_leaf(n)) return 0;
     1
+}
+
+// Whether leaf n is a side condition arithmetic closed as the move that
+// made it was made (0 < ε/2, N ≤ n): never an open goal to the player, so
+// no pip and no close of its own, only a tick by the new fact. It is one
+// when a sibling goal has a new fact (the move's main goal) and it has none.
+quiet_leaf(n: int): bool {
+    if (pn_thm[n] == 0) return false;
+    m: int = pn_move[n];
+    if (m < 0 || mv_kind[m] != MV_CALC) return false;
+    p: int = pn_parent[n];
+    if (p < 0 || pn_kidn[p] < 2) return false;
+    pg: int = pn_goal[p];
+    if (side_new_fact(pn_goal[n], pg) != 0) return false;
+    for i in 0..pn_kidn[p] {
+        s: int = node_kid(p, i);
+        if (s != n && side_new_fact(pn_goal[s], pg) != 0) return true
+    }
+    false
+}
+
+// A fact goal g has that goal pg has not (0 if none).
+side_new_fact(g: int, pg: int): int {
+    r: int = 0;
+    for j in 0..gl_hypn[g] {
+        h: int = goal_hyp(g, j);
+        if (!goal_has_hyp(pg, h)) r = h
+    }
+    r
+}
+
+// A side condition closed by arithmetic as a move was made: shown as a
+// small chip that ticks by the fact the move gave.
+side_t: f32 = -10.0;
+
+side_term: int = 0;
+
+side_fact: int = 0;
+
+// The quiet leaves under node n (made by its move): the last one's
+// condition and its sibling's new fact noted for the tick.
+side_note(n: int) {
+    lf_n = 0;
+    leaves(n);
+    for i in 0..lf_n {
+        k: int = lf_node[i];
+        if (quiet_leaf(k)) {
+            side_term = gl_concl[pn_goal[k]];
+            p: int = pn_parent[k];
+            for s0 in 0..pn_kidn[p] {
+                s: int = node_kid(p, s0);
+                f: int = side_new_fact(pn_goal[s], pn_goal[p]);
+                if (s != k && f != 0) side_fact = f
+            }
+            side_t = now_t + FLY_TIME
+        }
+    }
 }
 
 // The leaves of the proof (the goals, open or closed by one move), in
@@ -858,6 +950,7 @@ give_hint() raises KernelError {
         line_add(" to get back on the book's path");
         toast_line();
         undo_pulse_t = now_t;
+        path_toast = true;
         return
     }
     r: int = hint_find(moves_made);
@@ -871,6 +964,17 @@ give_hint() raises KernelError {
 }
 
 undo_pulse_t: f32 = -10.0;
+
+// Whether the toast showing says how far back the path is (it goes, and
+// the undo button stops pulsing, as soon as a move or an undo is made).
+path_toast: bool = false;
+
+path_toast_end() {
+    if (!path_toast) return;
+    path_toast = false;
+    toast_t = 10.0;
+    undo_pulse_t = -10.0
+}
 
 // The hand's place (in the order shown) of row r, or -1.
 row_place(r: int): int {
@@ -1154,12 +1258,16 @@ read_progress(t: []i8, n: int) {
     }
 }
 
-// The next level to play after map level m: the next unsolved one in its
-// region, or the next in order.
+// The next level to play after map level m: the next unsolved one after
+// it on the map, else the first unsolved, else the next in order.
 next_level(m: int): int {
-    r: int = region_of(m);
-    for k in rg_lv0[r]..rg_lv0[r] + rg_lvn[r] {
-        if (!ml_solved[k] && k != m) return k
+    // (On along the path: the next level not solved after this one; back
+    // round to the first not solved only if there is none after.)
+    for k in m + 1..ml_n {
+        if (!ml_solved[k]) return k
+    }
+    for k in 0..m {
+        if (!ml_solved[k]) return k
     }
     if (m + 1 < ml_n) return m + 1;
     -1

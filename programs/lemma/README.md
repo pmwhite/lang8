@@ -31,7 +31,11 @@ statement is focused (outlined orange), and the hand holds its moves, each
 a pudgy row that says what kind of move it is and shows **what it gives**:
 the statement as it will be (the changed part tinted), a new fact (blue), or
 a gold row that closes the goal, showing the goal as the move leaves it
-(`c = c`, both sides gold; struck through when arithmetic closes it).
+(`c = c`, both sides gold; *by arithmetic* beside the check when
+arithmetic closes it, the writing left readable). A move that gives back a
+state the proof was already in (the way out of a mistake) is a soft grey
+row, *Back*, after the others; the *Nothing to tidy here* line shows only
+when the hand has no row at all.
 
 - **Tap a statement** to focus it. With the whole of it focused, the hand
   has its own moves (*Take any ε*, *Assume it*, *Split*, *Choose …*, *Get N*,
@@ -42,21 +46,29 @@ a gold row that closes the goal, showing the goal as the move leaves it
   move the cursor through the parts of the focused statement, outside in.
   At a part, the hand has every rewrite of it, the growing ones too
   (`b` to `e · b`, `e` to `□⁻¹ · □`). Nothing on the board opens a menu.
-- **Tap a row** to play it. A row that needs a term shows the statement
-  with a hole `□` where the term goes (*pick a term*). Tapped, the hand
+- **Tap a row** to play it. A row that needs a term shows what it gives
+  with a hole `□` where the term goes (*pick a term*): for *Use with* on a
+  fact, the fact it gives (`∃N. ∀n≥N. |aₙ − A| < □`), not its side
+  condition. Tapped, the hand
   becomes the terms, each a full-width row: the term on the left, the
   statement as that term makes it on the right with the term tinted
-  (gold, with a check, if it closes the goal). Three show, then *More
-  terms*; a term the kernel will not take is not offered.
-- Three rows show, then *More moves*: under it go the rest, *Suppose not*
-  and *Flip sides* (unless the level's written proof uses them), and moves
-  that would give back a state the proof was already in.
+  (gold, with a check, if it closes the goal). Terms that close the goal
+  come first, then those that leave nothing new open, then the rest; the
+  level's names, a region's own (e), and the parts of the board are
+  offered. Three show, then *More terms*; a term the kernel will not take
+  is not offered.
+- Three rows show, then *More moves*: under it go the rest, and *Suppose
+  not* and *Flip sides* (unless the level's written proof uses them).
 - **Undo** (top right) takes back the last move. The **bulb** shows the
   written proof's next move (the row glows, a ghost finger points), or, off
-  its path, how many undos get back on it; held, it plays the whole proof
+  its path, how many undos get back on it (that word and the undo
+  button's pulse go at the next move or undo); held, it plays the whole proof
   (Watch), then says *Your turn* and starts the level afresh (watching
   does not solve it).
 
+A level starts with the goal focused if it has moves, or if its written
+proof starts by putting something into the goal (Only one e, Cancel on
+the left); else the first fact with moves.
 After a move the focus goes to what it made (a new fact with moves, or the
 changed goal). A new fact flies from its row to its card, and the changed
 part of a rewritten goal flies to the block it becomes, each carrying its
@@ -66,16 +78,24 @@ first morphs to what the move made of it (`e · c = c` to `c = c`); a new
 fact drops in, pulses, and a copy of it flies into the goal; then the card
 flashes gold and, its writing shrinking with it, flies into its pip at the
 top. A Split whose parts are both known is staged as two goals: the card
-divides in two, a second pip pops in, and each part closes in turn. When
+divides in two, a second pip pops in, and each part closes in turn. A
+side condition arithmetic closes as the move is made (`0 < ε/2` for
+*Use with ε/2*, `N ≤ n`) is never a goal of its own: no pip, no close; a
+small gold chip with it ticks at the end of the new fact's card. When
 a statement changes, its writing moves piece by piece: what leaves
 shrinks and fades where it was, then what stays slides, and the part a
 row brought flies in and becomes its block. Words
 for a moment (*Undo 1 to get back on the book's path*, *Your turn*) show
 just under the bar. Under the title, a dot for each
 move of par fills as moves are made, grey past par; apart from them, on a
-soft pill, a square for each goal fills as it closes. The last goal closes with the theorem stamped Q.E.D. (on a line of
-its own under the statement), its stars (par or better: three), and its
-proof written out as a book would. A theorem later levels use is a new
+soft pill, a square for each goal fills as it closes. The last goal closes with the theorem stamped Q.E.D.: as the move is
+made the hand slides down and away, and as the goal flashes the facts
+fade and slide down; then the statement rises as a trophy card (on a line
+of its own under it, the stamp), with its stars (par or better: three)
+on a card under it, the pair in the middle of the screen, and *Next* big
+and bobbing in the thumb's reach (it goes to the next level not solved
+after this one on the map, round to the first only if there is none),
+and *Read the proof*, its proof written out as a book would. A theorem later levels use is a new
 move: the finish card says so and its card flies into the Book (the book
 button), which holds the rulebook, the theorems proved (each with its
 stars and the levels it is used in) and those still to prove.
@@ -107,11 +127,17 @@ turns red and jiggles. For groups: a letter train, each side of the goal
 a row of tiles (a⁻¹ hollow in a's color, e faint); how a product is
 grouped is how close its tiles sit, a pair x⁻¹ · x side by side glows,
 tiles slide, swell in and pop as the goal changes, and when the sides are
-the same the rows slide together into one.
+the same the rows slide together into one; tiles leaving shrink and fade
+first, then those that stay slide, then new ones swell in (as the
+writing does). For a level about a relation R x y (Someone for
+everyone): R as a grid of x rows and y columns, the row the fact gives
+lit, the column of a y taken ringed.
 
 ## Playing in pictures (hooks)
 
 - `L8_LEVEL=k` opens map level k (logic 0-8, groups 9-16, limits 17-21);
+  the progress file the rig uses is the game's argument (seen demos and
+  solved levels change what shows);
   `L8_WATCH=1` plays its written proof (`L8_WATCH_PACE` in hundredths: 30
   is quick).
 - `L8_TAPS="x,y;x,y"` taps those places (the game's pixels), one every
@@ -143,6 +169,14 @@ dots of b (teal) between N and N₁ go red.
 
 ```sh
 L8_LEVEL=20 L8_TAP_GAP=40 L8_KEYS="$(for i in $(seq 11); do printf 'h;enter;'; done)d" .build/lemma
+```
+
+A mistake and its way back: `e` put on the right (`b · e = c`), the hand
+shows *Back · b = c*; the hint says *Undo 1*; undo and hint again, and the
+words and the undo pulse are gone:
+
+```sh
+L8_LEVEL=12 L8_KEYS="right;2;h;u;h" .build/lemma
 ```
 
 Both at once, its Split staged as two goals (frames from 1.9 s to 4 s):
