@@ -5,10 +5,13 @@ designer reviews CI screenshots against it. If something here can't be built und
 constraints in `/tmp/bsb/brief.md`, the builder says so in the commit message and builds
 the nearest equivalent. The builder doesn't silently invent a different design.
 
-Status: Rounds 1 and 2 are approved and shipped (TestFlight build 6). **Round 3 is the work
-now, fully specified in §8.** Round 1 is §0.5–§6, and Round 2 is §7. Round 4 is outlined
-in §1. The owner's priorities, in order: distraction-free reading, note-taking,
-language tools. Above all: iPhone-native, HIG-proper, predictable UI.
+Status: Rounds 1–3 are approved and on TestFlight as 1.0 (9). **Round 4 (versions, the
+ESV, Compare, cross references and commentary) is the work now, fully specified in §9.**
+Round 5 (reading plans, verse of the day, exact senses, related words, share as image)
+follows, specified in §10. Round 1 is §0.5–§6, Round 2 is §7 and Round 3 is §8. The
+owner's priorities, in order: distraction-free reading, note-taking, language tools.
+Above all: iPhone-native, HIG-proper, predictable UI. The app is **free forever**: no
+price, ads, in-app purchases or donation prompts (owner, 2026-10-18).
 
 ---
 
@@ -44,9 +47,10 @@ language tools. Above all: iPhone-native, HIG-proper, predictable UI.
      (`[CATransaction setDisableActions:YES]`), so they don't lag behind the scroll.
    - Reviews check this with the CI screen recording (§5, "Transitions"), not only the
      still screenshots.
-7. **No blocks in Round 1.** Every API chosen below works with target-action, delegates or
-   selector-based commands. Where a feature truly needs a block, it's flagged
-   **[BLOCK SHIM]** and deferred.
+7. **No blocks.** Every API chosen works with target-action, delegates or selector-based
+   commands. Where a feature truly needs a block, it's flagged **[BLOCK SHIM]**. The only
+   sanctioned shim is §10.2.3's global block, for notification authorization in Round 5.
+   Nothing else may use it without a design change here.
 
 ### Animation without blocks (applies everywhere)
 `+[UIView animateWithDuration:…]` and `UIViewPropertyAnimator` take blocks, so use these
@@ -159,20 +163,38 @@ In priority order (re-ranked in §8.0):
 8. **R3.8 Words of Jesus in red**, off by default.
 9. **R3.H Pre-App-Store hygiene.**
 
-### Round 4 and later
-- **R4.1 Per-verse cross-references** from openbible.info (CC BY, credited in
-  Acknowledgements), shown in the passage preview.
-- **R4.2 Semantic domains** from Clear-Bible MACULA in word study (CC BY).
-- **R4.3 Extended Strong's senses** (TAHOT/TAGNT, e.g. H7462B), so word study shows the
-  exact sense and not only the base number.
-- **R4.4 Reading plans,** computed from the chapter list: Bible in a Year, New Testament in
-  90 Days, Psalms and Proverbs in a Month.
-- **R4.5 Share as Image.** Selected verses on a themed card, drawn with
-  `UIGraphicsBeginImageContextWithOptions` (the renderer API needs a block).
-- **R4.6 Verse of the Day.** This needs new data (366 curated references). Its daily
-  notification needs the **[BLOCK SHIM]** (the authorization completion handler).
-- **Out of scope.** Widgets, Live Activities and App Intents (these need Swift or app
-  extensions), SwiftUI, sync and accounts, other translations, and audio recordings.
+### Round 4: versions, and study resources (fully specified in §9)
+In build order:
+1. **R4.1 One model for many texts.** Marks stay keyed by BSB-numbered reference and show
+   in every version that has the verse.
+2. **R4.2 KJV, WEB, ASV and YLT,** bundled offline from eBible.org USFM.
+3. **R4.3 Version picker** in Reading settings, switching in place with a cross-fade.
+4. **R4.4 Compare:** a sixth tray action, the selected verses in every version.
+5. **R4.5 The ESV,** online only, through our own Cloudflare Worker that holds the key,
+   with a cache that never exceeds Crossway's 500-verse, half-a-book limit.
+6. **R4.6 Cross references** (openbible.info, CC BY) in a References segment of Study.
+7. **R4.7 Matthew Henry's Concise Commentary** (CCEL, public domain) in a Commentary
+   segment of Study.
+8. **R4.8 Acknowledgements,** the ESV copyright page, and a privacy page.
+
+### Round 5: daily reading, exact senses, sharing (fully specified in §10)
+1. **R5.1 Reading plans,** computed (a year, the NT in 90 days, Psalms and Proverbs in a
+   month, the Gospels in 30 days), with a Today section in Go To.
+2. **R5.2 Verse of the Day,** and one daily notification (the one **[BLOCK SHIM]**).
+3. **R5.3 Exact senses** (STEP's extended Strong's) in word study and the concordance.
+4. **R5.4 Related words** (MACULA proximity, CC BY). This **replaces semantic domains**,
+   whose Louw–Nida data isn't licensed to us.
+5. **R5.5 Share as Image,** a custom action in the system share sheet.
+
+### Out of scope (all rounds so far)
+- Widgets, Live Activities and App Intents (these need Swift or app extensions).
+- SwiftUI.
+- Sync and accounts.
+- Audio recordings.
+- Copyrighted versions other than the ESV (NIV, NASB, NLT and others need licences that
+  are granted only to organizations).
+- SWORD modules.
+- Downloadable content.
 
 ---
 
@@ -2094,3 +2116,1403 @@ Round 3 is approved when:
 - The §8.9 items 1–7 are done (or, for 2 and 6, their gaps are explicitly reported).
 - The transitions recording shows no abrupt change in sequences 7–9.
 - No Round 1 or Round 2 shot regresses.
+
+---
+
+## 9. Round 4 specification: versions, and study resources
+
+Rounds 1–3 are approved and on TestFlight as 1.0 (9) (a5ca7e46). Round 4 keeps every earlier
+behavior unless this section explicitly replaces it. The owner decided on 2026-10-18 that
+the app is **free forever**: no price, ads, in-app purchases or donation prompts, ever. That
+is what makes the ESV possible (§9.4), and it's a constraint on every later round.
+
+### 9.0 Priorities, order and decisions
+
+| # | Item | Serves | Size |
+|---|------|--------|------|
+| R4.1 | One model for many texts; marks keyed by reference (§9.1) | Everything below | M |
+| R4.2 | KJV, WEB, ASV and YLT bundled offline (§9.2) | Reading | M |
+| R4.3 | Version picker, and switching in place (§9.3) | Reading | S–M |
+| R4.4 | Compare (tray action, §9.5) | Reading and study | M |
+| R4.5 | The ESV, online, through our own proxy (§9.4) | Reading | L |
+| R4.6 | Cross references (openbible.info) in Study (§9.6) | Study | M |
+| R4.7 | Matthew Henry's Concise Commentary in Study (§9.7) | Study | M |
+| R4.8 | Acknowledgements, copyright page and privacy (§9.8) | Release | S |
+
+Build in this order. R4.1–R4.4 need no network and no new server, so they can land and
+be reviewed before the ESV.
+
+**Decisions** (the designer's, with reasons):
+1. **Bundle every public-domain version; download nothing.** Each converted text is about
+   4.4 MB raw and 1.3 MB compressed. The four add about 18 MB installed and about 5.3 MB
+   to the download, next to about 19 MB of study data already bundled. On-demand
+   downloads would need hosting, a download UI, progress, failure states and storage
+   management, all to save 5 MB. The simplest excellent thing is that every version
+   works offline on first launch.
+2. **The ESV is online only.** Crossway's terms allow at most 500 verses (or half a book,
+   whichever is less) to be stored or shown on one page. The app holds a small rolling
+   cache within that limit. The API key lives in a Cloudflare Worker, never in the app.
+3. **The BSB stays the base.** It's the default, and the interlinear, word study,
+   concordance, cross references, commentary and export all use the BSB's versification
+   and words. Other versions change only what the reader shows.
+4. **Versions chosen:** KJV, WEB, ASV and YLT, plus the ESV online. Darby and the LSV are
+   left out:
+   - **Darby** adds little that the ASV and YLT don't already give, for the same
+     maintenance cost.
+   - **The LSV** is CC BY-SA, not public domain. It would be legal to bundle, but the
+     share-alike terms are a licence question we don't need to have.
+   - Both can come later through the same pipeline at almost no cost.
+5. **Study resources chosen:** openbible.info cross references (vote-ranked, and built
+   from the Treasury of Scripture Knowledge, so they cover the TSK), and Matthew Henry's
+   **Concise** Commentary (CCEL ThML). Left out:
+   - Matthew Henry Complete: 15 MB, and the Concise is the same mind in a readable
+     length.
+   - JFB and Barnes: archaic, and verse-by-verse duplication of what MHCC already gives.
+   - Easton's dictionary: lower value than the lexicons we already have.
+
+   None of these uses SWORD. Every resource is converted by our own tool into our own
+   format.
+
+### 9.1 R4.1 One model for many texts
+
+#### 9.1.1 Versification (verified)
+The designer checked every candidate file against our `bsb.txt` (`/tmp/r4tools/vc.py`, to
+be turned into a tool, §9.2.4):
+- **Chapters:** eBible.org normalizes its English texts to one versification. KJV, WEB,
+  ASV, YLT and Darby all have exactly the BSB's 66 books and 1,189 chapters, with the
+  same chapter numbers: Malachi has 4 chapters, Joel 3, and psalm titles are unnumbered
+  (D records) in all of them.
+- **The chapter index `c`** (Genesis 1 = 0) is therefore the same in every bundled
+  version.
+- **Extra verses.** The other versions have all of the BSB's 31,086 verses, plus verses
+  the BSB gives only in footnotes: Matthew 17:21, 18:11, 23:14; Mark 7:16, 9:44, 9:46,
+  11:26, 15:28; Luke 17:36, 23:17; John 5:4; Acts 8:37, 15:34, 24:7, 28:29; and
+  Romans 16:24. (Darby lacks Acts 8:37, 15:34 and Matthew 23:14.)
+- **One placement difference:** the WEB puts the closing doxology at Romans 14:24–26 and
+  has no Romans 16:25–27. The BSB, KJV and ASV have it at 16:25–27.
+- **The ESV** follows the same English numbering, except:
+  - **3 John 1:15**: the ESV's verse 15 is the end of the BSB's verse 14 ("Peace to
+    you…").
+  - **Revelation 12:18**: the ESV's "And he stood on the sand of the sea" is the end of
+    the BSB's 12:17.
+  - Like the BSB, the ESV omits the footnoted verses listed above.
+  - The builder confirms this list with the real API once the key exists (§9.4.9).
+
+#### 9.1.2 The rule
+- **A mark** (highlight, bookmark or note) or a history entry **is a reference in BSB
+  numbering**: `BOOK, chapter, verse`, as the files already store it (§4.3). Nothing in
+  the files changes, so there's no migration of their format.
+- **A mark shows in every version that has that reference.** It doesn't show in versions
+  that don't, and it's never moved or dropped:
+  - A bookmark on KJV Matthew 17:21 shows in KJV, WEB and ASV, not in the BSB.
+  - A highlight on BSB Romans 16:25 doesn't show in the WEB.
+- **A version's own verse numbers are mapped at the record level** (§9.1.4). The only
+  mapped verses are the ESV's 3 John 1:15 → 14 and Revelation 12:18 → 17. Selecting or
+  marking the ESV's verse 15 marks reference 14, and both ESV verses 14 and 15 wash
+  together.
+- **Labels use the version's own numbers.** The tray, copy, share and Compare all do:
+  "3 John 1:14–15" in the ESV, and "3 John 1:14" in the BSB.
+
+#### 9.1.3 Store change (the one real migration)
+- Today, `field_verse` (store.l8) rejects a verse above `ch_verses[c]`, the BSB's last
+  verse. Romans 14:24–26 (WEB) would be dropped on the next launch.
+- Replace that check with `ref_last(c)`: the highest verse number in any bundled version.
+  It's the BSB's `ch_verses[c]`, raised by `data/refs.txt` (one line per chapter where a
+  version exceeds the BSB, `ROM\t14\t26`; the tool writes it and, today, it has that one
+  line).
+- Add a `test_store.l8` case: `ROM 14 25` survives a reload, and `ROM 14 27` is skipped.
+- **The Library, export, history and notes quote the verse** with:
+  1. The current version's text, if it's offline and has the verse.
+  2. Otherwise the BSB's text, if it has the verse.
+  3. Otherwise the first bundled version that has it, in Versions order, with that
+     version's abbreviation after the reference ("Matthew 17:21 · KJV", in faint).
+  - The ESV is never used for these, because they're lists and files that persist
+    beyond a page.
+
+#### 9.1.4 `text.l8`: several texts, one layout
+- **A text** is a buffer of records (the `bsb.txt` format) plus its index: `book_line`,
+  `ch_start`, `ch_end`, `ch_verses`, and the verse offsets.
+- Keep today's globals as **the current text**. Add `text_use(t)`, which swaps the
+  globals' array references to text `t`'s. Arrays are references, so the swap is O(1).
+  - `layout_chapter`, `verse_text`, search and `verse_at` stay unchanged.
+  - Every caller that works on a text other than the reader's (Compare, the Library's
+    quote rule, search under the ESV) wraps its work in `text_use(t)` … `text_use(cur)`.
+- **Text ids:** 0 BSB, 1 KJV, 2 WEB, 3 ASV, 4 YLT, 5 ESV. The ESV's buffer is assembled
+  from its cache (§9.4.5). Its chapters that aren't loaded have `ch_start = ch_end = -1`,
+  and `layout_chapter` then lays out the **opener only**, plus a placeholder flag that
+  the platform reads (§9.4.6).
+- **Loading:** the BSB and the current version are indexed at launch, and any other
+  version at first use. The launch job's time may grow by at most 40 ms over build 9.
+  Load each file with the same open/read path as `load_text` (or `mmap`, as
+  `ios_study.l8` does). Never load all five at launch.
+- **New record types** (written by the converter, laid out by `text.l8`):
+  - `I<text>`: supplied words (KJV and ASV `\add`), laid out like T but **italic**, as
+    printed KJVs set them.
+  - `J<text>`: supplied words inside the words of Jesus (italic, and red when red
+    letters are on).
+  - `V<n>>k`: verse n, **keyed as reference k** (only the ESV's two merged verses).
+    `verse_num` holds n for display, and `verse_key` holds k for marks and selection.
+    Two verses with the same key select, wash and mark as one.
+- **Tests** (`test_text.l8`):
+  - KJV John 3:16 lays out with "only begotten" as body text.
+  - KJV Genesis 1:4 has an `I` run "it was".
+  - KJV Matthew 17:21 exists, and the BSB has no verse 21 there (`verse_index` = -1).
+  - A synthetic `V15>14` record selects with 14.
+  - `ref_last` for ROM 14 is 26.
+  - Switching texts and back leaves BSB John 3's layout byte-identical.
+
+### 9.2 R4.2 Public-domain versions, bundled
+
+#### 9.2.1 Sources (checked with curl on 2026-10-18; each is USFM in a zip)
+| Abbr. | Name shown | eBible id | URL | sha256 (2026-10-18) | Licence |
+|---|---|---|---|---|---|
+| KJV | King James Version | `eng-kjv2006` (1769 text, protocanon) | `https://ebible.org/Scriptures/eng-kjv2006_usfm.zip` | `16b08c9248b3600662f66f1e055f61fc3a6c7275e347236ee45feb35dfb20cb3` | Public domain (Crown patent in the UK: see §9.10, question 2) |
+| WEB | World English Bible | `engwebp` (WEB Updated, 66 books, "LORD") | `https://ebible.org/Scriptures/engwebp_usfm.zip` | `732c17d3325563fc5d8d98157a6c3d128c887f6b8e5a5ad0f71f58e5d5eebfcb` | Public domain; "World English Bible" is an eBible.org trademark, usable while the text is unchanged |
+| ASV | American Standard Version | `eng-asv` (1901) | `https://ebible.org/Scriptures/eng-asv_usfm.zip` | `fa116257643253288c48a46f499faaaa501dfdd8381c78e1c67b745a9e1a999a` | Public domain |
+| YLT | Young's Literal Translation | `engylt` (1898) | `https://ebible.org/Scriptures/engylt_usfm.zip` | `63ef17706cc59cdbf7921627a40dc819e59ae2903d6f85ab23efc49d6da723f2` | Public domain |
+
+- **Note on updates:** eBible republishes these zips (ASV's file is dated today), so a
+  sum will eventually fail. When it does:
+  1. Rerun `make`.
+  2. Review `git diff` of the made text.
+  3. Update the sum in the same commit.
+  - Never skip the check.
+- `eng-kjv` (with the Apocrypha) and `eng-web` (the "Yahweh" Classic edition) are **not**
+  used.
+
+#### 9.2.2 Converter: `tools/usfm.py` replaces `tools/bsb.py`
+1. Generalize `bsb.py` into `usfm.py VERSION USFM_DIR OUT`, with `VERSION` one of `bsb`,
+   `kjv`, `web`, `asv` or `ylt`.
+   - `bsb.py`'s FIXES and its psalm-title handling become the `bsb` profile.
+   - **Acceptance:** `data/bsb.txt` comes out byte-identical to the committed file.
+2. **Input:**
+   - Only files whose `\id` is one of the 66 codes. Front matter, glossaries and
+     introductions (`FRT`, `INT`, `GLO`, `\ip`, `\is1`, `\ib`, `\ili`, `\ide`) are
+     skipped.
+   - The book name comes from `\h`, with the existing `NAMES` overrides (Psalms, Song of
+     Solomon) applied to all versions, so the openers read the same.
+3. **Markers** (in addition to `bsb.py`'s):
+   - Word markup: `\w text|strong="…"\w*`, and **nested `\+w … \+w*`** inside `\wj`
+     (WEB) → the text only.
+   - `\add … \add*` → `I` records (`J` inside `\wj`).
+   - `\nd LORD\nd*` → the text uppercased (KJV's "LORD" is already caps).
+   - `\qs Selah\qs*` → T text, preceded by a space.
+   - `\sc`, `\bd`, `\it`, `\tl`, `\k` and `\bk` → their text only.
+   - `\x … \x*` cross references → dropped. We have our own (§9.6).
+   - `\f … \f*` → F, as now (`\fqa`, `\fq` and `\fr` handled by the existing cleanup).
+   - Paragraphs:
+     - `\pi1` and `\nb` → `m`. `\nb` continues the paragraph when it starts a chapter.
+     - `\mi` and `\q3` → `2`.
+     - `\qc` → `c`.
+     - `\li1` → `l`.
+   - Headings:
+     - `\s1` → S.
+     - `\ms1` → M.
+     - `\sp` (speakers in the Song) → `s`.
+     - KJV's epistle subscriptions (a `\s1` after a book's last verse, "The first epistle
+       to the Corinthians was written…") → `s`.
+     - KJV `\s1 \tl א ALEPH.\tl*` (Psalm 119) → `A` "ALEPH", like the BSB.
+   - Unknown markers stop the tool with the file and the marker, as now.
+4. **YLT has no paragraphs** (one `\p` per chapter): the `ylt` profile emits `Pm` before
+   every verse, which is the printed YLT's own verse-by-verse layout.
+5. **Output:** `data/kjv.txt`, `data/web.txt`, `data/asv.txt` and `data/ylt.txt`, in the
+   `bsb.txt` format, in canonical book order.
+   - About 4.4–4.6 MB each, about 18 MB together.
+   - Add them to `ios/resources`, and commit them as `bsb.txt` is.
+
+#### 9.2.3 What each version looks like (expected; the screenshots check it)
+| Version | Headings | Footnotes | Words of Jesus | Notes |
+|---|---|---|---|---|
+| KJV | Few: Psalm 119 letters and the epistle subscriptions | Marginal notes (~6,960, "Heb. between the light…") | Yes | Italic supplied words; paragraphs from the ¶ marks |
+| WEB | None (the WEB has no section headings) | ~1,230 | Yes | Poetry at two levels |
+| ASV | None | ~16 | No | "Jehovah" in the OT, as printed; italic supplied words |
+| YLT | None | None | No | One verse per line |
+
+- **Psalm titles** (D) appear in KJV, WEB and ASV as in the BSB.
+- Where a version has no headings, the Section Headings switch simply has nothing to
+  hide.
+- **Red letters:** when the current version has no W records (ASV, YLT), the Show
+  section's footer says "The ASV doesn't mark the words of Jesus." (or "The YLT…"). The
+  footer fades with the section reload when the version changes.
+
+#### 9.2.4 Tools
+- **`fetch.sh DIR make`** downloads the four zips (into `DIR/ebible/<id>/`, each in its
+  own empty directory), checks them against the sums above, and runs `usfm.py` for each
+  version.
+- **`tools/versify.py`** (`python3 -I`) compares every version's chapter and verse sets
+  with the BSB's:
+  - It prints the extra and missing verses (the list in §9.1.1 is what's expected).
+  - It writes `data/refs.txt`.
+  - It fails if any version's chapter list differs from the BSB's.
+  - The commit message includes its output.
+
+### 9.3 R4.3 Version picker, and switching in place
+
+#### 9.3.1 Where it lives
+**Reading settings (Aa) gets a new first section, "Version"**, above Listen.
+- Choosing a translation is a reading setting. Like a theme or a font, it's seen applied
+  live behind the medium-detent sheet. It doesn't earn a permanent control on the page,
+  which keeps the page distraction-free.
+- The bar stays Search · title · Library · Aa.
+
+**The section:** one `UITableViewCellStyleValue1` row:
+- Label "Version", ink.
+- Value: the abbreviation ("BSB"), faint.
+- Disclosure indicator.
+- Accessibility label "Version, Berean Standard Bible", hint "Choose a translation".
+- The section footer (SF 12, faint, system footer): "Study, the interlinear and the
+  concordance always use the BSB."
+
+#### 9.3.2 Versions screen (pushed in the settings sheet)
+- A run-time UITableViewController, insetGrouped, with the §3.7 sheet background rules.
+- Inline title "Version". Done stays on the right, as on the settings root.
+
+| Section header | Rows (subtitle cells: title = full name in SF 17, ink; secondary = SF 13 faint) |
+|---|---|
+| On This iPhone | **Berean Standard Bible** · "BSB · Modern, word-for-word and readable" |
+| | **King James Version** · "KJV · 1769 · The Authorized Version" |
+| | **World English Bible** · "WEB · Modern, public domain" |
+| | **American Standard Version** · "ASV · 1901" |
+| | **Young's Literal Translation** · "YLT · 1898 · Very literal" |
+| Online | **English Standard Version** · "ESV · Needs an internet connection" |
+
+- The Online footer: "The ESV comes from Crossway's ESV API. Only the chapters you're
+  reading are kept on this iPhone."
+- **The checkmark** (`UITableViewCellAccessoryCheckmark`, accent) marks the current
+  version.
+- **Tapping a row:**
+  - It switches the version **immediately**: the reader behind the sheet cross-fades
+    (§9.3.3).
+  - It moves the checkmark: deselect animated, and reload the two rows with
+    `UITableViewRowAnimationNone` inside a 0.15 s `CATransition` fade.
+  - It stays on this screen, as iOS Settings lists do.
+  - It gives a selection haptic.
+  - Back returns to Reading settings, whose Version value now reads the new
+    abbreviation (set in `viewWillAppear:`, so it's never seen changing).
+- Persisted as `version` (a string: BSB, KJV, WEB, ASV, YLT or ESV). The default is BSB.
+- Accessibility: each row reads "King James Version, KJV, 1769, The Authorized Version",
+  plus the selected trait.
+
+#### 9.3.3 Switching in place (motion)
+1. Take the place: `(chapter, verse key, fraction into verse)`, as for a size change (§0.5
+   item 3).
+2. Set the current text, then rebuild and reload the table (heights change).
+3. Restore the same verse at the same distance below the bar. If the verse doesn't exist
+   in the new version, use the nearest earlier verse that does. If the chapter isn't
+   loaded (ESV), restore to the placeholder row's top; the place follows when the text
+   arrives (§9.4.6).
+4. The visible change is a **0.25 s cross-fade** of the table's layer (`CATransition`
+   fade, set before the reload), exactly as for red letters (§8.8). The text never slides
+   or jumps.
+5. With Reduce Motion, use the 0.15 s cross-fade.
+6. Selection is cleared, and the tray (if up) leaves with its spring before the switch.
+7. If Listen is playing, it stops at the end of the current utterance and resumes in the
+   new version from the same verse.
+
+There's **one place for all versions**. There's no per-version place, because the
+reference is the place.
+
+#### 9.3.4 Elsewhere
+- **Copy and share** suffix the version: "John 3:16 KJV" (§3.3.6 already ends with
+  "BSB").
+- **The passage picker's** "Go to John 3:16" row shows the opening words from the current
+  version (the BSB under the ESV).
+- **The edit menu's Study** (a word) appears **only in the BSB**, because a KJV word
+  can't be mapped to the BSB's tokens. In other versions the tray's Study (a verse) is
+  the way.
+- **Search** searches the current offline version (§9.4.8 for the ESV). The results
+  header reads "348 verses in the KJV" (it always names the version, including "in the
+  BSB").
+- **Previews** (§8.1) render in the current version. Under the ESV, they fetch the
+  chapter (§9.4.7).
+- **Listen** speaks the current version, and the Now Playing artist is the version's full
+  name.
+- **Export** keeps quoting by the §9.1.3 rule. Its header line names what it quotes:
+  "Berean Standard Bible · exported …", or "King James Version · exported …".
+
+### 9.4 R4.5 The ESV, online
+
+#### 9.4.1 Terms we build to (api.esv.org, read 2026-10-18)
+1. Non-commercial use only. A free-forever app with no ads, purchases or donation
+   requests qualifies. Use in mobile apps is permitted without asking, provided every
+   condition is met.
+2. At most **500 verses or half a book, whichever is less**, per query; per page shown;
+   and stored. Single- and two-chapter books are excepted for queries.
+3. At most **5,000 queries a day, 1,000 an hour and 60 a minute**, for the key (that is,
+   for all of our users together).
+4. The ESV copyright notice on a copyright page. Passages identified as ESV, and any
+   notice sent with the text shown. **Every page using the text links to
+   www.esv.org.**
+5. No change to the wording (features like headings, footnotes and verse numbers may be
+   omitted).
+6. The key is never published or shared.
+7. Use consistent with Crossway's statement of faith (the owner's own call: §9.10,
+   question 1).
+
+#### 9.4.2 The proxy: `programs/bible/worker/` (Cloudflare Worker `smooth-bible-api`)
+Files:
+- `worker.js` (ES module, no dependencies).
+- `esv.js` (the HTML→records converter, a pure function, also imported by tests).
+- `wrangler.toml`.
+- `schema.sql`.
+- `test.mjs` (`node --test`).
+- `fixtures/` (§9.4.10).
+
+Its configuration follows `web/tempo-log` in the main repo:
+```toml
+name = "smooth-bible-api"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+routes = [{ pattern = "trailingwhite.space/bible/api/*", zone_name = "trailingwhite.space" }]
+workers_dev = false
+[[d1_databases]]
+binding = "DB"
+database_name = "smooth-bible-api"
+database_id = "(made at deploy)"
+[[ratelimits]]          # per client address
+name = "PER_IP"
+namespace_id = "1101"
+simple = { limit = 30, period = 60 }
+# Secret: ESV_KEY (wrangler secret put ESV_KEY). Var: UPSTREAM = "https://api.esv.org" (tests point it at a mock).
+```
+`schema.sql`: `CREATE TABLE usage (bucket TEXT PRIMARY KEY, n INTEGER NOT NULL);`
+
+**Endpoints** (all GET; every response is JSON with `Cache-Control: no-store`; nothing is
+cached by Cloudflare, and nothing is stored but the counters):
+
+1. **`/bible/api/v1/esv/chapters?book=JHN&chapter=3&count=2`**
+   - **Validation:** `book` must be one of the 66 codes, `chapter` must be within the
+     book, and `count` must be 1 or 2.
+   - **Limits:** if the requested chapters exceed 500 verses, or half the book's verses
+     in a book of more than 2 chapters, `count` is reduced to 1. It's never an error.
+     The Worker carries the 1,189 chapter verse counts (`versecounts.js`, generated from
+     `bsb.txt` with the ESV's two extra verses).
+   - **Upstream:** `GET {UPSTREAM}/v3/passage/html/?q=<Name C[-C2]>` with
+     `Authorization: Token {ESV_KEY}` and these options:
+     `include-passage-references=false`, `include-verse-numbers=true`,
+     `include-first-verse-numbers=true`, `include-footnotes=true`,
+     `include-footnote-body=true`, `include-headings=true`, `include-subheadings=true`,
+     `include-short-copyright=true`, `include-copyright=false`,
+     `include-passage-horizontal-lines=false`, `include-heading-horizontal-lines=false`,
+     `include-selahs=true`, `include-css-link=false`, `inline-styles=false`,
+     `wrapping-div=false`, `include-book-titles=false`, `include-verse-anchors=false`,
+     `include-chapter-numbers=true`, `include-crossrefs=false`,
+     `include-surrounding-chapters=false`, `include-surrounding-chapters-below=false`,
+     `include-audio-link=false`.
+     - HTML, not text, because it keeps poetry lines, indents, headings, psalm titles,
+       the words of Christ and footnote placement as structure. The text endpoint
+       encodes them as spaces.
+   - **200 response:**
+     `{"v":1,"version":"ESV","notice":"(ESV)","chapters":[{"book":"JHN","chapter":3,"verses":36,"records":"S…\nPm\nV1\nT…"}]}`
+     - `records` is exactly the `bsb.txt` record format (§9.4.3), so `text.l8` lays it out
+       unchanged.
+     - `notice` is the short copyright the API sent ("(ESV)"), which the app shows
+       (§9.4.6).
+2. **`/bible/api/v1/esv/search?q=born%20again&page=1`**
+   - Upstream: `/v3/passage/search/?q=…&page-size=100&page=…`.
+   - Response:
+     `{"v":1,"total":12,"page":1,"pages":1,"results":[{"book":"JHN","chapter":3,"verse":3,"key":3,"text":"…"}]}`.
+     The Worker parses each `reference` ("John 3:3") into codes and applies the two
+     mappings to `key`.
+   - The query is at most 100 characters; anything longer is a 400.
+3. **`/bible/api/v1/health`** → `{"ok":true}`. It makes no upstream call.
+
+**Limits, in order:**
+1. `PER_IP` (30 a minute, keyed by `CF-Connecting-IP`).
+2. A global budget in D1, kept under the terms with headroom: **55 a minute, 950 an hour
+   and 4,800 a day** (UTC), counted for every upstream call.
+   - One statement upserts `m:YYYY-MM-DDTHH:MM`, `h:YYYY-MM-DDTHH` and `d:YYYY-MM-DD`,
+     and returns the counts. Buckets older than 2 days are deleted by the first request
+     of each day.
+3. A request must carry the header `X-Smooth-Bible: <version> (<build>)`. Without it, the
+   Worker returns 400. This isn't security; it stops casual reuse.
+
+**Error shapes** (always JSON `{"error":"<code>","message":"<English>","retry":<seconds or 0>}`):
+| Status | `error` | When | App state |
+|---|---|---|---|
+| 400 | `bad_request` | Bad book, chapter, count, or a missing header | A bug: the "unavailable" state, and logged in demo |
+| 429 | `slow_down` | `PER_IP` exceeded; `retry` = 60 | Busy (§9.4.6) |
+| 429 | `busy` | Global minute or hour budget spent; `retry` = seconds to the next bucket | Busy |
+| 503 | `daily_limit` | Global day budget spent; `retry` = seconds to 00:00 UTC | Resting for today |
+| 502 | `upstream` | ESV answered non-200 (its own 429 maps to `busy`) | Unavailable |
+| 504 | `timeout` | No upstream answer within 8 s | Unavailable |
+
+- **Privacy:** the Worker logs nothing of its own (no `console.log` of queries or
+  addresses). `[observability]` is off. The ratelimit binding holds addresses only for
+  its 60 s window.
+- **Residual risk (accepted):** anyone who reads the app's traffic could call the proxy.
+  The per-address limit and the global budget keep it within Crossway's terms whatever
+  happens. If abuse appears, the next step is App Attest, which needs the block shim of
+  §10.
+
+#### 9.4.3 Converter: ESV HTML → records (`esv.js`)
+A tolerant tag scanner over the API's known output (no DOM library in Workers):
+| ESV HTML | Record |
+|---|---|
+| `<b class="chapter-num">3:1 </b>` | `C3` (when a request spans two chapters; the first chapter's C is implicit), then `V1`. The number text is dropped |
+| `<b class="verse-num">16 </b>` | `V16`. For 3JN 1:15 → `V15>14`; for REV 12:18 → `V18>17` |
+| `<h3>` (section heading) | `S` |
+| `<h4 class="psalm-title">`, `<h4 class="speaker">` (and other `h4` subheadings: `psalm-acrostic-title` → `A`) | `D` for psalm titles; `s` for speakers and other subheadings |
+| `<h3 class="psalm-book">` (BOOK ONE) | `M` |
+| `<p>` / `<p class="…">` prose | `Pm` (the first in a chapter `Po` if it follows a heading, as the BSB does) |
+| poetry `<p class="block-indent">` with `<span class="line">` and `<span class="indent line">` (and `indent-2`) | `P1` / `P2` per line |
+| `<span class="woc">` | W records for its words |
+| `<span class="divine-name">Lord</span>` | "LORD" in T (small caps are drawn by `text.l8` as today) |
+| `<span class="selah">` | T text |
+| `<sup class="footnote"><a href="#fN">` | F, with the body from the `footnotes` block's matching `fN` entry, without its "3:3" reference prefix |
+| `<p>(<a class="copyright">ESV</a>)</p>` | Not a record. Its text is returned as `notice` |
+| `&nbsp;`, entities, `<br>` | Decoded; spacing as `bsb.py`'s tidy rules |
+
+- **Wording:** every word in the HTML's text nodes is kept, in order. **The converter
+  never edits words.** The test asserts that the concatenated T/W text equals the HTML's
+  visible text minus verse numbers, headings and footnotes.
+- **Verification:** the builder confirms the class names against the first real
+  responses, once the key exists, and adjusts only the scanner and the fixture structure.
+  Real ESV HTML is **never committed**.
+
+#### 9.4.4 App networking (no blocks)
+- **Session:** `NSURLSession sessionWithConfiguration:delegate:delegateQueue:` with a
+  run-time delegate class `L8Net`, and `delegateQueue` = `NSOperationQueue mainQueue`, so
+  every callback is on the main thread.
+- **Configuration:** `ephemeralSessionConfiguration` (no disk cache, no cookies),
+  `timeoutIntervalForRequest` 12, `requestCachePolicy` = 1 (reload, ignoring the local
+  cache), `URLCache` nil.
+- **Tasks:** `dataTaskWithRequest:` (the form without a completion block), then `resume`.
+  - The delegate implements `URLSession:dataTask:didReceiveData:` (append to an
+    `NSMutableData` kept per task) and `URLSession:task:didCompleteWithError:`.
+  - On completion it reads `task.response.statusCode` and parses with
+    `NSJSONSerialization JSONObjectWithData:options:error:`.
+  - Don't implement `didReceiveResponse:completionHandler:`; the default allows the
+    response.
+- **Base URL:** `https://trailingwhite.space/bible/api/v1/`. Header
+  `X-Smooth-Bible: 1.0 (12)` (from the bundle).
+- **One chapter request in flight at a time.** A newer wanted chapter replaces a queued
+  one. A running one is never cancelled, because its result is still useful.
+- **Fixture mode (CI, §9.4.10):** when the environment has `L8_ESV_FIXTURE` (a path
+  relative to the app's home), the client reads `<path>/<BOOK>-<C>.json` (or
+  `search-<q>.json`) after a delay the demo sets (default 0.6 s), instead of using the
+  network. `<path>/mode` (`ok`, `offline`, `busy` or `daily`) makes it answer with that
+  error instead.
+
+#### 9.4.5 The cache: never more than the terms allow
+- **Where:** `Library/Caches/SmoothBible/esv/`. It's the system's purgeable place and
+  isn't backed up. One file per chapter, `JHN-3.txt` (the records), plus `index.tsv`
+  (`BOOK\tC\tVERSES\tFETCHED\tUSED`).
+- **Rules,** checked after every insert:
+  1. **Total ≤ 500 verses**, counting everything the reader holds: disk and memory.
+  2. **Per book ≤ ⌊book's verses / 2⌋.**
+  3. A chapter that can't fit rule 2 even alone (a one- or two-chapter book, such as
+     Jude, Philemon or Haggai 2) is **held in memory only while it's on screen**, never
+     written to disk, and dropped when the reader leaves it.
+  4. **Evict least-recently-used chapters first** (`USED` is updated whenever a chapter
+     is shown). Chapters visible now, or in the reader's ±1 neighbours, are pinned.
+  5. **Entries older than 30 days are refetched,** as Crossway encourages.
+- **Prefetch:** when the reader comes to rest in ESV chapter c and c+1 isn't held,
+  request `count=2` starting at c (or `count=1` for c+1 if c is held). Scrolling up into
+  c−1 requests it. Nothing else is prefetched.
+- **Demo log:** `bible: esv cache N verses (JHN 3, JHN 4, …)` after every change.
+- **Tests:** the eviction logic is portable `esv_cache.l8`, tested by `test_store.l8`:
+  - Visiting 14 Gospel chapters in a row never exceeds 500.
+  - Jude is never written.
+  - Ruth never holds more than 42 verses.
+  - The pinned chapters survive eviction.
+
+#### 9.4.6 The reader under the ESV (states and motion)
+- **Loaded chapter:** laid out like any version. At the end of the chapter, after the last
+  verse, comes one centered **footer line**, 0.7 em, 24 pt above it:
+  - "(ESV) · esv.org", with "(ESV)" in faint and "esv.org" in accent.
+  - Tapping "esv.org" (± 12 pt) opens `SFSafariViewController` at
+    `https://www.esv.org/<Book>+<C>/` (for example `https://www.esv.org/John+3/`).
+  - This one line meets "identify the passage", "show the notice sent" and "link to
+    esv.org on each page", for each chapter shown.
+  - Accessibility: "ESV. Link: esv.org".
+- **Not yet loaded:**
+  - The row shows the chapter's **opener** (book label and numeral, from our own data),
+    then 48 pt below it a `UIActivityIndicatorView` (medium, color faint). The spinner
+    fades in over 0.2 s **only after 0.4 s**, so fast loads never flash it.
+  - The row's height is the **BSB's laid-out height of the same chapter**, so the scroll
+    position is believable before the text comes.
+  - When the text arrives:
+    - Rebuild the row's text with a 0.2 s cross-fade (`CATransition` on the text view's
+      layer).
+    - If the row lies above the reading place, change `contentOffset` by the height
+      difference **in the same layout pass**, so no visible line moves (principle 6).
+    - If the user was waiting at a jump target, restore the jump's verse one third down,
+      and flash it.
+- **Offline** (the fetch failed with no connection or a timeout):
+  - The spinner cross-fades to a centered message, body font 0.9 em, faint, line height
+    1.35: "The ESV needs an internet connection." Below it, links in accent: "Try Again ·
+    Read in the BSB".
+  - **Try Again** refetches. **Read in the BSB** switches the version (§9.3.3) at the
+    same place.
+  - It retries automatically when the app becomes active, and every 30 s while the row
+    is visible (one timer).
+- **Busy** (429): "Many people are reading the ESV just now. It will try again in a
+  minute." with "Read in the BSB". It retries after `retry` seconds.
+- **Resting for today** (`daily_limit`): "The ESV has reached its daily limit for Smooth
+  Bible. It will be back tomorrow." with "Read in the BSB". No automatic retry until
+  `retry` passes.
+- **Unavailable** (400, 502): "The ESV isn't available right now." with "Try Again ·
+  Read in the BSB".
+- **No alerts, badges or banners.** The message sits in the page where the text would be,
+  calm and in the reader's own type.
+- **Marks, selection, notes, copy and Listen** work on loaded ESV text exactly as in any
+  version.
+  - Listen fetches the next chapter at the chapter end. If that fails, it stops with the
+    mini player reading "Paused · Offline".
+  - Copy and Share say "John 3:16 ESV". A selection is at most one chapter, which is well
+    inside the redistribution limit.
+
+#### 9.4.7 Previews, Compare and Study under the ESV
+- **Previews** fetch their chapter(s) with the same client, and the result is cached by
+  the same rules. While loading, the preview shows the spinner centered.
+  - If the fetch fails, the preview shows the passage **in the BSB**, with a faint first
+    line: "Shown in the BSB. The ESV needs a connection."
+  - The ESV footer line ends every ESV preview.
+- **Compare** (§9.5) has its own ESV section states.
+- **Study:** the interlinear stays BSB-aligned and says so (§9.6.2). Cross references and
+  commentary are BSB-numbered and shown in the BSB when the current version is the ESV.
+  The References footer says "Verses shown in the BSB."
+
+#### 9.4.8 Search under the ESV (decided)
+- **The search sheet searches the BSB offline**, instantly, as it does today. Results go
+  to the reader, which is in the ESV. The header reads "348 verses in the BSB".
+- **The last row** of the results (or the only row, under "No Results") is an accent text
+  row: "Search the ESV for “born again”" (`globe`).
+  - Tapping it makes **one** search request (100 results a page).
+  - It replaces the section with the ESV results: header "12 verses in the ESV", the
+    same result cells with our matcher's bold applied to the ESV snippet, and a section
+    footer "(ESV) · esv.org" (link).
+  - If there are more pages, a final "Show More" row fetches the next page.
+  - Errors show as the row's secondary text, in faint: "No connection", "Busy, try again
+    in a minute" or "Resting for today".
+- **Why not live ESV search:** the debounce-as-you-type design would spend the shared
+  5,000-a-day budget on keystrokes. An explicit tap costs one request per search, and the
+  offline BSB search stays instant and complete. ESV results are shown, never stored.
+
+#### 9.4.9 Versification check (builder, once the key exists)
+`tools/esv_versify.py` (run by hand, through the deployed proxy, with the owner's
+consent):
+- It requests these chapters with `count=1`: 3JN 1, REV 12, REV 13, ROM 16, 2CO 13, ACT
+  19, MAL 4, JOL 2, JOL 3, PSA 51, NEH 4, DAN 4, NUM 16, MAT 17, MRK 9 and LUK 17.
+- It compares their verse sets with the BSB's, and prints the differences. The expected
+  ones are the two mapped verses and none other.
+- It keeps no text.
+- If others appear, add them to the mapping in `esv.js` and to the Worker's verse
+  counts, and say so in the commit.
+
+#### 9.4.10 Fixtures and tests (no key in CI, no ESV text in the repo)
+- **`worker/fixtures/*.html`** are hand-written in **the ESV API's HTML structure**:
+  - The same tags and classes as §9.4.3, with **WEB words** (public domain).
+  - Their first heading reads "Fixture: …", so no screenshot can be mistaken for real
+    ESV text.
+  - Chapters: JHN 3, JHN 4, PSA 23, GEN 1, 3JN 1 (with a verse 15, to exercise
+    `V15>14`), and REV 12 (with an 18).
+  - Plus `search-born-again.json`, in the upstream search shape.
+- **`node --test programs/bible/worker/test.mjs`** (added to the Linux CI job):
+  - The converter turns each fixture into the expected records
+    (`fixtures/*.records`), and the words-unchanged assertion passes.
+  - With `UPSTREAM` pointed at an in-test mock `fetch`:
+    - Each limit gives its error code.
+    - `count` is reduced for Joel 2–3.
+    - Missing headers give 400.
+    - The day bucket reset works.
+    - Responses carry `no-store`.
+- **`worker/make_fixtures.mjs`** runs the converter over the fixtures and writes the
+  app's fixture JSON to `programs/bible/ios/esv-fixture/` (committed, WEB text).
+  `simulate.sh` copies that directory into the app's data container (`xcrun simctl
+  get_app_container … data`) under `Library/esv-fixture`, and launches with
+  `SIMCTL_CHILD_L8_ESV_FIXTURE=Library/esv-fixture`.
+
+### 9.5 R4.4 Compare
+**Entry:** the tray's action row gets a sixth action, **Compare** (`books.vertical`), after
+Study. The row is 6 across, fillEqually.
+- At default text sizes the titles fit on a 375 pt-wide phone (about 53 pt each).
+- At accessibility sizes the tray's existing rule applies: titles may wrap to 2 lines
+  and must not truncate.
+- Accessibility label: "Compare Versions".
+
+**The sheet** (UINavigationController page sheet, detents medium and large, starting
+**medium**, grabber; dimmed behind; the bar expands with it as for every sheet):
+- **Nav bar:** inline title = the selection's reference in the current version's
+  numbering ("John 3:16"). Done is on the right.
+- **Bottom toolbar:** `chevron.up`, flexible space, `chevron.down`, as in the interlinear.
+  - They move to the previous or next verse; a multi-verse range moves by its own
+    length.
+  - They cross chapter boundaries.
+  - The title updates with a 0.15 s fade.
+- **Content:** an insetGrouped UITableView, **one section per version**:
+  - The current version first, then BSB, ESV, KJV, WEB, ASV and YLT, without repeating
+    the current one.
+  - **Header:** the full name ("King James Version"), system header style. The current
+    version's header also carries "· Reading" in faint.
+  - **One cell:** the verse(s) in the reader's body font at 0.9 em, ink, line height 1.3.
+    - Several verses get superscript-free verse numbers in faint, 0.7 em, followed by a
+      thin space.
+    - Highlights aren't shown.
+    - LORD in small caps; red letters if on.
+    - Insets 16/14.
+    - A verse the version lacks shows "Not in the BSB" (or "…in this version"; for BSB
+      Matthew 17:21: "Not in the BSB; see the footnote at Matthew 17:20") in faint
+      italic.
+  - **The ESV section:**
+    - While loading, a cell with a small spinner and "Loading…" (faint), the spinner
+      after 0.4 s as in the reader.
+    - When loaded, the text, and a section footer "(ESV) · esv.org" (link).
+    - Offline: "The ESV needs an internet connection." (faint), with no retry button;
+      reopening retries.
+- **Tap a section's cell:** dismiss the sheet, then **switch the reader to that version**
+  at that verse (§9.3.3), with the flash. This is a list row, so it goes (the Round 3
+  rule). Accessibility hint: "Reads in King James Version".
+- **Long-press** a cell: the system context menu would need a block, so there isn't one.
+  Copy stays in the tray.
+- **Cap:** a selection of more than 20 verses compares its first 20, and the sheet's last
+  row reads "Compare shows up to 20 verses." in faint.
+- **Motion:**
+  - System sheet presentation.
+  - Chevron moves reload the sections with `UITableViewRowAnimationFade`.
+  - The ESV cell's text arrives with a 0.2 s cross-fade, and its height change is
+    animated by `beginUpdates`/`endUpdates`.
+- **Acceptance:**
+  1. Every version's text for John 3:16 is correct.
+  2. The ESV loads through the fixture, with its footer.
+  3. The cross-version tap lands at the same verse.
+  4. Matthew 17:21 shows the "Not in the BSB" line in the BSB section.
+  5. The chevrons cross chapters.
+
+### 9.6 R4.6 Cross references in Study
+
+#### 9.6.1 Data
+- **Source:** openbible.info "Bible Cross References",
+  `https://a.openbible.info/data/cross-references.zip` (sha256
+  `3b694f0db9ea81e125c78e88b1845ec18e8b99e63ac94eee3be58ab92cca27f1`, file dated
+  2026-10-12). Licence CC BY 4.0. It's seeded from the Treasury of Scripture Knowledge and
+  ranked by readers' votes.
+- **What's in it:** 344,799 pairs `From\tTo\tVotes`, with OSIS-style references (`Gen.1.1`,
+  `Ps.115.15`, ranges `Rom.1.19-Rom.1.20`).
+  - Keep votes ≥ 1 (341,295 pairs). 87,437 targets are ranges, and 647 of those cross a
+    chapter.
+  - The only reference outside the BSB's verses is `3John.1.15` (5 pairs): map it to
+    3JN 1:14.
+- **Tool:** `tools/xrefs.py ZIP data/` (added to `fetch.sh`) writes:
+  - `data/xref_index.bin`: a `u32` offset per BSB verse, in `verses.bin` order (31,086
+    verses), plus a sentinel. About 124 KB.
+  - `data/xrefs.bin`: for each verse, its targets **sorted by votes descending**, 4 bytes
+    each, little-endian:
+    - bits 0–10: chapter index.
+    - bits 11–18: first verse.
+    - bits 19–26: last verse (0 for a single verse).
+    - bit 27: the last verse is in the next chapter.
+    - bits 28–31: the vote tier min(15, ⌊log2(votes)⌋).
+    - Ranges longer than into the next chapter are cut at the end of the next chapter.
+    - About 1.4 MB.
+  - It prints the counts, and the top 5 for John 3:16 and Genesis 1:1 (for the commit
+    message).
+- **`lang.l8`:** `xref_count(verse)` and `xref_at(verse, i)`, which decode a target.
+  - Test: John 3:16's targets include Romans 5:8 within its first 5.
+  - Test: Genesis 1:1's first target is a Psalm, Hebrews or John 1 reference, as ranked.
+
+#### 9.6.2 The Study sheet gains segments
+The tray's **Study** opens the same sheet as today, but its nav bar's **titleView** becomes
+a `UISegmentedControl` **["Words", "References", "Commentary"]** (width 300, target-action
+ValueChanged).
+- **The reference moves into the content:** each segment's content begins with the
+  **verse header**:
+  - The reference ("John 3:16", SF 13 semibold, faint).
+  - Then the verse in the reader's body font at 0.9 em, as today's interlinear top,
+    16 pt above.
+  - In the Words segment, when the current version isn't the BSB, the header shows the
+    **BSB's** verse with a faint trailing "BSB" tag, and the Words content ends with the
+    footer "The interlinear follows the Berean Standard Bible."
+- **The remembered segment** is `studySegment` (0–2) in defaults, set before the sheet is
+  presented (principle 6).
+- **The bottom toolbar** keeps `chevron.up` and `chevron.down` in every segment.
+  - In **Words** they skip unaligned verses (as now), and the order segment stays in the
+    middle.
+  - In **References** and **Commentary** they move verse by verse, and the middle is a
+    flexible space. The toolbar items change with `setToolbarItems:animated:YES` (a
+    fade).
+- **Switching segments** cross-fades the content container (0.2 s `CATransition` fade).
+- **Edit-menu Study** (a word) still opens the word study directly, unchanged.
+- **A verse absent from the BSB** (KJV Matthew 17:21), in the Words segment:
+  `UIContentUnavailableConfiguration` with `character.book.closed`, "Not in the BSB", and
+  "The BSB gives Matthew 17:21 in a footnote. The interlinear follows the BSB." The other
+  segments show their own empty states.
+
+#### 9.6.3 The References segment
+- **A UITableView** (insetGrouped) under the verse header (`tableHeaderView`).
+- **Section** (no header). Footer: "From OpenBible.info, ranked by readers' votes." Under
+  the ESV, add "Verses shown in the BSB."
+- **Rows:** custom cells, insets 16/12:
+  - The reference, SF 15 semibold, accent: "Romans 5:8", or "Psalm 33:6–9" for a range,
+    or "John 1:1–2:3" across chapters.
+  - 3 pt below it, the first verse of the target in the body font at 16 pt (scaled by
+    UIFontMetrics), ink at 80%, at most 3 lines, with a tail ellipsis. The text comes
+    from the current version if it's offline, otherwise the BSB.
+  - Accessibility: "Romans 5:8. But God proves His love for us…", hint "Shows the
+    passage".
+- **The first 12 rows,** then a row **"Show All 34"** (accent, centered). Tapping it
+  inserts the rest with `insertRowsAtIndexPaths:…Fade`, and the row fades away.
+- **Tap a row → push the passage preview** (§8.1) onto the Study sheet's stack. The back
+  button reads "John 3:16".
+  - This is a deliberate **refinement of the Round 3 rule**: lists of **places** (search,
+    history, library, picker, Compare) go there; lists of **related passages**
+    (references) preview, because their purpose is reading beside the verse. The
+    preview's Open in Reader goes.
+- **Empty:** `UIContentUnavailableConfiguration` with `arrow.triangle.branch`, "No Cross
+  References", and "OpenBible.info lists none for John 3:16."
+- **Motion:** system push; insertions fade.
+
+### 9.7 R4.7 Matthew Henry's Concise Commentary in Study
+
+#### 9.7.1 Data
+- **Source:** CCEL ThML, `https://ccel.org/ccel/henry/mhcc.xml` (sha256
+  `4a5509ba5064b54572397ae1a796561ff6ce4a1e18f366af0141a09c5d06fcd6` on 2026-10-18;
+  7.9 MB). It's public domain (CCEL: "Rights: Public Domain"; it's also the source
+  CrossWire's PD module MHCC 2.0 was rebuilt from).
+- **Structure:** 3,364 `<div class="Commentary" id="Bible:Gen.1.1-Gen.1.2">` sections,
+  each with an `<h3>` "Verses 1–2" and `<p>` paragraphs. 841 chapter-outline tables
+  ("Chapter Outline" rows with `scripRef` ranges). Book introductions are the `<p>`s
+  before a book's first chapter. 8,417 `scripRef` elements with normalized `osisRef`.
+- **Tool:** `tools/mhcc.py XML data/mhcc.txt` (in `fetch.sh`) writes records, one a line:
+  ```
+  B<CODE>                  a book; its introduction follows as p lines
+  C<n>                     a chapter
+  O<text>\t<v1>[-<v2>]     a line of the chapter's outline
+  K<c>:<v>-<c2>:<v2>       a section of comment on those verses
+  p<text>                  a paragraph
+  ```
+  - Inside `p` and `O`, use the lexicon's markup (§7.1): `[[JHN.3.16|John 3:16]]` for each
+    `scripRef` (the visible text kept as written, e.g. "ver. 5"), and `_italic_` for
+    `<i>`/`<em>`. Every other tag is dropped and entities are decoded.
+  - KJV versification matches ours; the 3 John 1:15 rule applies if it's ever met.
+  - About 3.2 MB raw. The tool prints its section count and the sections for John 3.
+- **`lang.l8`:** `mhcc_index()` (at first use) and `mhcc_section(c, v)`. The latter
+  returns the section whose range contains (c, v), or the nearest preceding one in the
+  chapter, plus its range.
+  - Test: John 3:16 → a section that includes verse 16.
+  - Test: Genesis 1:1 → `K1:1-1:2`.
+  - Test: the markup yields a reference run.
+
+#### 9.7.2 The Commentary segment
+- **A non-editable, selectable UITextView** (background `bg`, the reader's margins) under
+  the verse header:
+  1. The section's range as a small header, "Verses 16–21" (SF 13 semibold, faint, 20 pt
+     above).
+  2. The paragraphs in the reader's body font at 0.95 em, ink, line height 1.4, with
+     12 pt between paragraphs. References are accent with no underline, and **tapping
+     one pushes its preview** (the Round 3 rule for references in text).
+  3. At the end, a faint attribution at 0.75 em: "Matthew Henry, Concise Commentary on
+     the Whole Bible (1706–1721)".
+- **Chevrons:** when the next verse is in the **same** section, the text doesn't change
+  (no animation; only the verse header updates with a 0.15 s fade). When the section
+  changes, the text cross-fades (0.2 s) and scrolls to the top.
+- **Long-press** gives the plain system menu (Copy, Look Up, Share), as in previews.
+- **Empty** (a verse with no section in its chapter): `text.book.closed`, "No Commentary
+  Here", and "Matthew Henry's Concise Commentary has no comment on John 3:16."
+
+### 9.8 R4.8 Acknowledgements, copyright page and privacy
+Acknowledgements (§7.8) becomes, in this order:
+1. **Text**:
+   - BSB (unchanged).
+   - "King James Version" / "The 1769 standard text, from eBible.org. Public domain
+     outside the United Kingdom, where the rights are vested in the Crown." →
+     `https://ebible.org/eng-kjv2006/`
+   - "World English Bible" / "Public domain. “World English Bible” is a trademark of
+     eBible.org; the text here is unchanged." → `https://ebible.org/engwebp/`
+   - "American Standard Version" / "1901. Public domain." → `https://ebible.org/eng-asv/`
+   - "Young's Literal Translation" / "1898. Public domain." → `https://ebible.org/engylt/`
+2. **English Standard Version** (its own section; this is the copyright page the terms
+   require):
+   - A row "ESV.org" → `https://www.esv.org`.
+   - The section footer, verbatim: "Scripture quotations marked “ESV” are from the ESV®
+     Bible (The Holy Bible, English Standard Version®), © 2001 by Crossway, a publishing
+     ministry of Good News Publishers. Used by permission. All rights reserved. The ESV
+     text may not be quoted in any publication made available to the public by a
+     Creative Commons license. The ESV may not be translated into any other language.
+     Users may not copy or download more than 500 verses of the ESV Bible or more than
+     one half of any book of the ESV Bible."
+3. **Original Languages** and **Lexicons**: unchanged.
+4. **Study**:
+   - "Cross References" / "From OpenBible.info, licensed CC BY 4.0. Ranked by votes;
+     those without a positive vote are left out." → `https://www.openbible.info/labs/cross-references/`
+   - "Matthew Henry's Concise Commentary" / "From the Christian Classics Ethereal Library.
+     Public domain." → `https://ccel.org/ccel/henry/mhcc`
+   - The "Changes to the Lexicon Data" screen gains two lines: "Cross references to 3
+     John 1:15 are given at 1:14, as the BSB numbers it." and "The commentary's markup was
+     converted to plain styled text."
+5. Footer: version and build (unchanged).
+
+- **Reading settings' Version footer** (§9.3.1) is the only other new text.
+- **Privacy:**
+  - `PrivacyInfo.xcprivacy` stays "collects nothing". Its comment changes to say the app
+    sends ESV chapter requests to our proxy, which keeps nothing.
+  - The App Store privacy answer stays **Data Not Collected**.
+  - A short privacy page goes at `https://trailingwhite.space/bible/privacy/` (owner's
+    blog). It says what the proxy receives (a book, a chapter, the client's address for
+    one minute of rate limiting) and that nothing is kept.
+  - The Acknowledgements footer gets a row "Privacy" → that page.
+- **Info.plist:** no change. HTTPS to our own domain needs no ATS exception.
+
+### 9.9 CI for Round 4
+**A new demo group, `versions`** (in `simulate.sh` and the workflow matrix, in parallel with
+the others). It installs the ESV fixture (§9.4.10) and seeds these marks through the demo
+hooks:
+- John 3:16–17 yellow, John 3:3 green, and the John 3:5 note.
+- A bookmark on **KJV Matthew 17:21** (made while reading the KJV).
+
+Shots, in order:
+
+| Shot | Action | Expected |
+|---|---|---|
+| `100-settings-version` | John 3:14 at the top; open Aa | The Version section first: "Version · BSB ›", the footer about Study; Listen below |
+| `101-versions` | Push Version | "On This iPhone" (five rows, BSB checked) and "Online" (ESV) with its footer |
+| `102-kjv-behind` | Tap King James Version (the sheet stays) | The checkmark on KJV; behind the sheet, John 3 in the KJV with **3:14 still at the top** (the log prints the place before and after; they're equal) |
+| `103-kjv-john-3` | Dismiss; scroll to 3:16 | KJV text ("only begotten"), the yellow wash on 16–17 and the note glyph after 5; italic supplied words visible in the chapter |
+| `104-kjv-matt-17` | Go to Matthew 17:20 | Verse 21 present, with the bookmark glyph and accent number |
+| `105-bsb-matt-17` | Switch to the BSB (demo hook through the same function) | Verse 21 absent (the footnote mark at 20), no bookmark shown, same place |
+| `106-library-kjv-only` | Library → Bookmarks | "Matthew 17:21 · KJV" with the KJV's text |
+| `107-web-psalm-23` | WEB, Psalm 23 | Its psalm title, poetry at two levels, "Yahweh" absent ("LORD") |
+| `108-asv-psalm-23` | ASV | "Jehovah is my shepherd", italic supplied words |
+| `109-ylt-genesis-1` | YLT, Genesis 1 | One verse per line |
+| `110-red-letter-asv` | ASV, Aa scrolled to Show, red letters on | The footer "The ASV doesn't mark the words of Jesus." |
+| `111-compare` | BSB, John 3:16 selected → Compare | The sheet at medium: BSB "· Reading" first, then ESV loading (spinner shown after 0.4 s; the fixture delay is 2 s for this step), KJV, WEB… |
+| `112-compare-esv` | Wait | The ESV section with fixture text and the "(ESV) · esv.org" footer |
+| `113-compare-next` | Tap `chevron.down` | Title "John 3:17"; every section shows 3:17 |
+| `114-compare-to-kjv` | Tap the KJV cell | The sheet gone; the reader in the KJV at 3:17, flashed |
+| `115-esv-loading` | Version → ESV, go to John 4 (fixture delay 3 s) | The John 4 opener and the faint spinner below it; no other change |
+| `116-esv-john-4` | Wait | The fixture text in place (heading "Fixture: …"), no jump (the log prints the offset of a fixed line before and after: equal) |
+| `117-esv-footer` | Scroll to the end of John 4 | "(ESV) · esv.org" centered under the last verse |
+| `118-esv-3john` | 3 John, select ESV verse 15 | Verses 14 and 15 washed together; tray "3 John 1:14–15" |
+| `119-esv-offline` | Fixture mode `offline`; go to Romans 8 | The opener, then "The ESV needs an internet connection." with "Try Again · Read in the BSB" in accent |
+| `120-esv-busy` | Mode `busy`; Try Again | The busy message |
+| `121-esv-search` | Mode `ok`; search "born again" | "N verses in the BSB", then the last row "Search the ESV for “born again”" |
+| `122-esv-search-online` | Tap it | "12 verses in the ESV" with bold matches, and the "(ESV) · esv.org" footer |
+| `123-study-words` | Under the ESV, Study on John 3:16 | The segmented title [Words · References · Commentary], the BSB verse with the "BSB" tag, the tiles, and the footer line |
+| `124-study-references` | References | Rows ranked (Romans 5:8 among the first), "Show All N", and the footer with "Verses shown in the BSB." |
+| `125-xref-preview` | Tap Romans 5:8 | The preview pushed, with back "John 3:16" |
+| `126-study-commentary` | Back; Commentary | "Verses 16–21", Henry's paragraphs, references in accent, the attribution |
+| `127-commentary-preview` | Tap a reference in it | The preview pushed |
+| `128-acknowledgements` | Aa → Acknowledgements, scrolled | The Text section's five versions; the ESV section with the full notice in its footer |
+| `129-ax-compare` | (accessibility content size) Compare on John 3:16 | Nothing clipped; the headers wrap |
+| `130-ax-tray-six` | The tray at that size | Six actions; the titles wrap to two lines, none truncated |
+
+- **Logs checked** (in `log.txt`): the place equalities for 102 and 116, and the cache line
+  after the group has visited John 3–4, 3 John and Romans 8 (≤ 500 verses; 3 John never
+  written to disk).
+- **Transitions recording** (in the `notes` group's recording, or a new one in
+  `versions`):
+  - **Sequence 10:** switch BSB → KJV → BSB from the Versions screen at John 3:14. Both
+    cross-fades show no text movement.
+  - **Sequence 11:** the ESV placeholder → text arrival for John 4, with a fixed line
+    above unchanged frame to frame.
+- **The Linux job** adds `node --test programs/bible/worker/test.mjs` and the new
+  `test_text`/`test_store` cases. `make bible-test` runs them.
+- **The store group** adds `store-7.png`: Compare on John 3:16 at large detent, light,
+  Paper.
+
+### 9.10 Questions only the owner can answer, and what the owner provides
+**Questions:**
+1. **ESV terms of use.**
+   - Crossway allows the API only for uses "consistent with the historic Christian
+     understanding of doctrine", per their statement of faith, which the registrant
+     affirms.
+   - Do you agree to register under those terms? If not, the ESV is dropped and Round 4
+     ships without §9.4 (everything else stands).
+2. **The KJV in the United Kingdom.** In the UK, the KJV is under Crown letters patent
+   held by Cambridge University Press. Options:
+   - (a) Write to CUP for permission. Recommended: they routinely permit free use.
+   - (b) Ship worldwide as most free Bible apps do.
+   - (c) Leave the KJV out of the UK storefront. That's impossible per feature without
+     hiding it by region, which we won't do.
+   - Until you decide, the build carries the KJV and the credit says the rights are
+     vested in the Crown.
+3. **Growth.** 5,000 ESV requests a day is shared by every user. With two-chapter
+   requests and the cache, that's roughly 1,000–2,000 daily ESV readers. If the app
+   outgrows it, Crossway licenses only organizations. Are you content to let the
+   "resting for today" state be the ceiling?
+
+**The owner provides:**
+1. **An ESV API application:**
+   - Log in at `https://api.esv.org/login/`, then go to
+     `https://api.esv.org/account/create-application/`.
+   - Name: "Smooth Bible". Description: "A free iPhone Bible reader; no ads, purchases or
+     donations." Website: `https://trailingwhite.space/bible/`.
+   - Save the key to `~/.config/smooth-bible/esv-key`. **Don't paste it in chat.** The
+     builder runs `npx wrangler secret put ESV_KEY < ~/.config/smooth-bible/esv-key`.
+2. **Consent to deploy:**
+   - Creating the D1 database `smooth-bible-api`, the Worker and its route
+     `trailingwhite.space/bible/api/*`.
+   - Publishing the two small pages on the blog (`/bible/` and `/bible/privacy/`).
+3. **On a device:** a check that the ESV loads over cellular, and that turning on
+   Airplane Mode shows the calm offline state.
+
+### 9.11 Round 4 acceptance (summary)
+Round 4 is approved when:
+- `bsb.txt` is byte-identical out of `usfm.py`. The four versions are converted, and
+  `versify.py`'s output matches §9.1.1.
+- Marks follow references across versions exactly as §9.1.2 says. Romans 14:25 survives a
+  reload.
+- Switching versions keeps the verse and only cross-fades (recording sequence 10).
+- Compare works for all six versions, and its tap reads in the chosen version.
+- The ESV:
+  - Loads through the proxy (fixture in CI, real on device).
+  - The cache never exceeds 500 verses or half a book (test plus log).
+  - Every ESV page (chapter, preview, Compare, search results) shows "(ESV) · esv.org".
+  - Offline, busy and daily states are calm and in place.
+  - The placeholder → text arrival moves nothing (recording sequence 11).
+- The Worker's tests pass. The key is only a Worker secret, and nothing is cached
+  server-side.
+- References and Commentary segments work, with previews, and their data is credited.
+- Shots 100–130 match. No Round 1–3 shot regresses.
+
+---
+
+## 10. Round 5 specification: daily reading, exact senses, sharing
+
+Round 5 is the old Round 4 list, re-planned now that versions exist. It keeps everything
+from Rounds 1–4.
+
+### 10.0 Priorities, order and decisions
+| # | Item | Serves | Size |
+|---|------|--------|------|
+| R5.1 | Reading plans (computed; the Go To sheet's new Today section) | Reading | M–L |
+| R5.2 | Verse of the Day, and one daily notification | Reading | M (with the block shim) |
+| R5.3 | Exact senses (extended Strong's, STEP TAHOT/TAGNT) | Language tools | M |
+| R5.4 | Related words (Clear MACULA proximity), **replacing semantic domains** | Language tools | S–M |
+| R5.5 | Share as Image | Sharing | M |
+
+**Decisions:**
+1. **Semantic domains are dropped.** MACULA's `@ln`/`@domain` fields are UBS MARBLE data,
+   "used with permission" by Clear. That permission is Clear's, not ours, and the
+   domain names (Louw–Nida's titles) aren't in the data at all. In their place, R5.4
+   uses Clear's own CC BY **Proximity** data, which gives words used in similar
+   contexts: the same question ("what else means this?") with a clean licence. See
+   §10.7 for the open question.
+2. **One daily notification** carries both the verse of the day and, when a plan is
+   active, today's reading. There are no separate plan reminders, streaks or badges.
+   Calm, not nagging.
+3. **The only block in the app is a minimal global-block shim** (§10.2.3), used for the
+   notification authorization call. If the shim can't be made to work, R5.2 ships
+   in-app only and the notification setting is hidden. Nothing else depends on it.
+4. **Plans are computed** from the chapter list, so no plan data is licensed. The
+   M'Cheyne and chronological plans are out of scope; they need sourced tables.
+5. **Share as Image** lives inside the system share sheet as a custom `UIActivity`. It
+   adds no new button to the tray.
+
+**Demo clock:** every date-dependent feature reads "today" through one function,
+`today()`. In demo mode it returns the fixed local date **2026-10-19 08:00**, so the
+plans, the verse of the day and the notifications are deterministic.
+
+### 10.1 R5.1 Reading plans
+
+#### 10.1.1 Plans (portable `plans.l8`, tested by `test_plans.l8`)
+Each plan is a list of days. A day is a list of **readings**, and a reading is a contiguous
+run of chapters in one book. Days are balanced by **the BSB's character count** of their
+chapters (T and W text), greedily: day d ends at the chapter boundary nearest to
+`total·d/days`. Each day gets at least one chapter.
+
+| id | Name | Days | Chapters |
+|---|---|---|---|
+| `year` | Bible in a Year | 365 | Genesis 1 – Revelation 22, in order |
+| `nt90` | New Testament in 90 Days | 90 | Matthew 1 – Revelation 22 |
+| `pspr` | Psalms and Proverbs in a Month | 31 | Psalms split into 31 balanced days, **plus Proverbs d on day d** (two readings a day) |
+| `gospels` | The Gospels in 30 Days | 30 | Matthew 1 – John 21 |
+
+- **Reading labels:** "Genesis 4–6", "Psalm 119", "Psalms 1–6", "Deuteronomy 34; Joshua
+  1–2" (two readings when a day crosses a book), "Obadiah".
+- **Tests:**
+  - Every plan covers its chapters exactly once, in order.
+  - `year` has 365 days, and day 1 begins with Genesis 1.
+  - Psalm 119 is a day of its own in `pspr`.
+  - No `year` day exceeds 2.2 times the mean length.
+  - The labels match the examples above.
+
+#### 10.1.2 Progress (`plan.tsv`; one plan active at a time)
+- **The file:**
+  - Line 1: `PLAN\t<id>\t<start: YYYY-MM-DD, local>`.
+  - Then `READ\t<BOOK>\t<C>\t<UNIXTIME>` for each chapter read since the start.
+  - Malformed lines are skipped, as in §8.9.4.
+- **Day number:** N = (today − start in local days) + 1, capped at the plan's length.
+- **A chapter counts as read** when either holds:
+  1. The reader has rested in it for **20 s** in total (dwell, as history counts it, §8.3),
+     **and** its last verse has been on screen.
+  2. Listen finished its last verse.
+- **It can also be marked by hand** (§10.1.4).
+- **It doesn't matter when or in what version** it was read. Each chapter belongs to the
+  one day that contains it.
+- **Stopping or replacing a plan** appends the whole file to `plans-done.tsv`, with a line
+  `END\t<UNIXTIME>`, then removes `plan.tsv`. Nothing is lost, so no confirmation is
+  needed.
+- **Day done:** when the reader marks the last unread chapter of **today's** day:
+  - Show the toast (§3.3.3's style) "Day 4 Done", with a leading `checkmark`, for 1.6 s.
+  - Give a success haptic.
+  - It happens once per day.
+  - There are no other celebrations, streaks or counts.
+
+#### 10.1.3 The Go To sheet gains a Today section
+- It's the **first section**, above Recent, with the header **"Today"**, and present
+  whenever there's anything in it.
+- **Rows:**
+  1. **Verse of the Day** (§10.2): a custom cell, insets 16/12.
+     - A caption "Verse of the Day" (SF 12 semibold, faint).
+     - The reference in SF 15 semibold, accent.
+     - The verse in the body font at 16 pt (scaled), ink at 85%, up to 4 lines.
+     - The text is in the current offline version; under the ESV, the BSB.
+     - Tap → go there (it's a list row).
+  2. **With a plan:** one row per reading of day N.
+     - A leading 28 pt button: `circle` (faint) when unread, `checkmark.circle.fill`
+       (accent) when every chapter of the reading is read, and `circle.lefthalf.filled`
+       (accent) when some are.
+     - The title: the reading's label (SF 17, ink).
+     - Secondary text: "Bible in a Year · Day 4" (faint).
+     - Tap the row → go to the reading's first unread chapter (or its first chapter if
+       all are read).
+     - Tap the circle → mark every chapter of the reading read, or clear them. The
+       symbol cross-fades over 0.15 s, with a selection haptic.
+     - Accessibility: "Genesis 4 to 6, Day 4, not read", with a custom action "Mark as
+       Read".
+  3. **If earlier days are unfinished:** a row **"Catch Up"** (accent text), with the
+     secondary "2 earlier days aren't finished" (faint). It pushes the plan's detail
+     scrolled to the first unfinished day.
+  4. **A last row:**
+     - With a plan: "Bible in a Year", value "Day 4 of 365", disclosure → plan detail.
+     - Without one: "Reading Plans" (`calendar`, ink), disclosure → Plans.
+- **Configuration:** this section is configured in `viewWillAppear:` like everything else
+  in the sheet (principle 6). The picker never rearranges after it lands.
+
+#### 10.1.4 Plans and plan detail (pushed in the Go To sheet)
+**Plans:**
+- insetGrouped, inline title "Reading Plans".
+- One row per plan, as a subtitle cell: title = the name; secondary = "365 days · about 3
+  chapters a day" (computed: chapters ÷ days, rounded). The active plan's row has the
+  value "Day 4" in accent.
+- Disclosure → detail.
+
+**Plan detail:**
+- insetGrouped, inline title = the plan's name.
+- **Header:** a one-paragraph description in SF 15, ink at 80%, insets 20.
+  - `year`: "The whole Bible in order, about fifteen minutes a day."
+  - `nt90`: "The New Testament in three months."
+  - `pspr`: "Five psalms and a chapter of Proverbs a day."
+  - `gospels`: "Matthew, Mark, Luke and John in a month."
+- **Sections by week** ("Week 1", Days 1–7).
+  - Rows: title "Day 1", secondary = the readings ("Genesis 1–3").
+  - The leading circle, as in Today, toggles that day's chapters.
+  - Today's row has the value "Today" in accent.
+  - Tapping a row (not the circle) goes to the day's first unread chapter, dismissing
+    the sheet.
+- **Toolbar** (centered, one item):
+  - No plan active: **Start Plan** (`UIBarButtonItemStyleDone`).
+  - Another plan active: **Start Instead**. Its footer row reads "Your progress in Bible
+    in a Year will be kept."
+  - This plan active: **Stop Plan** (tinted systemRed).
+  - After starting, Today shows day 1 the next time Go To appears. The detail scrolls to
+    Today with `scrollToRowAtIndexPath:…animated:YES`.
+- **Motion:** system push, row reloads with fade, toolbar item changes with
+  `setToolbarItems:animated:YES`.
+
+### 10.2 R5.2 Verse of the Day, and the daily notification
+
+#### 10.2.1 Data (`data/votd.txt`, 366 lines `BOOK\tC\tV[\tV_END]`)
+1. **Candidates:** `tools/votd.py` scores every BSB verse by the **sum of votes of
+   openbible.info cross references pointing at it** (the data from §9.6). Famous verses
+   are the most cited.
+2. **Filters:**
+   - 40–320 characters.
+   - It doesn't begin with "And", "Then", "So", "Now", "But" or "Therefore", or with a
+     quotation's closing.
+   - It isn't a genealogy, list or census chapter (Numbers 1–4, 7, 26; 1 Chronicles
+     1–9; Ezra 2; Nehemiah 7).
+   - At most 30 from Psalms, 20 from Proverbs and 12 from any other book.
+   - Two- or three-verse ranges are allowed where the verse alone is incomplete. The tool
+     joins a verse with its successor when the verse ends with ",", ":" or ";".
+3. **Order:** it alternates OT and NT, and never puts two from the same book on
+   consecutive days.
+4. **Curation:** it writes 420 ranked candidates to `data/votd-candidates.txt`. The
+   **designer** curates the final 366 in review, committing `data/votd.txt` by hand. The
+   builder ships the tool's first 366 as a placeholder until then.
+5. **Date → entry:** the day of the year, counting Feb 29 as day 60. In common years,
+   days from Mar 1 on add one, so every calendar date always has the same verse.
+
+#### 10.2.2 The notification
+- **Setting:** Reading settings gets a section **"Verse of the Day"** after "While
+  Reading":
+  - A switch row, **Daily Notification** (off by default; `dailyVerse`).
+  - When it's on, a row **Time** with a `UIDatePicker` as its accessory
+    (`datePickerMode` time, `preferredDatePickerStyle` compact; `dailyVerseMinutes`,
+    default 420 = 7:00 AM; target-action ValueChanged). The row is inserted and removed
+    with `UITableViewRowAnimationFade`.
+  - Footer: "A verse each morning, and today's reading when you follow a plan."
+- **Turning it on** requests authorization (§10.2.3).
+  - Granted: schedule.
+  - Denied:
+    - The switch animates back off (`setOn:animated:YES`).
+    - The footer becomes "Notifications are turned off for Smooth Bible in Settings."
+    - An accent row **Open Settings** appears. It calls `openURL:options:completionHandler:`
+      with `UIApplicationOpenSettingsURLString`, an empty dictionary, and a nil handler
+      (nil is allowed).
+- **Scheduling** (no blocks: `addNotificationRequest:withCompletionHandler:` with nil):
+  1. On every launch, become-active, change of the setting or time, plan change or
+     version change, call `removeAllPendingNotificationRequests`, then add **30
+     requests**, one for each of the next 30 days at the chosen time.
+     - Each has a `UNCalendarNotificationTrigger` with year, month, day, hour and minute,
+       `repeats:NO`.
+     - Each id is `votd-YYYY-MM-DD`.
+     - Thirty separate requests are needed because each day's text differs, which a
+       repeating trigger can't do. 30 is well under iOS's limit of 64 pending.
+  2. **Content** (`UNMutableNotificationContent`):
+     - Title "Verse of the Day".
+     - Body: the verse text in curly quotes, then " — John 3:16" (cut at 178 characters
+       with "…").
+     - When a plan is active, the subtitle is "Today: Genesis 4–6" (the readings of that
+       future day).
+     - userInfo `{"ref":"JHN.3.16"}`. Default sound. Thread identifier `votd`.
+     - The text is in the current offline version, or the BSB under the ESV. ESV text is
+       never put in a scheduled notification.
+  3. Demo log: `bible: scheduled 30 daily verses from 2026-10-20 07:00`.
+- **Opening one:**
+  - At launch (`application:didFinishLaunchingWithOptions:`, before it returns),
+    `UNUserNotificationCenter.currentNotificationCenter.delegate` = a run-time
+    `L8Notify` object. It implements
+    `userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:`.
+  - That method reads the ref, jumps there (dismissing any sheet, history pushed, back
+    capsule, flash), then **calls the completion handler** (§10.2.3).
+  - `willPresentNotification:` isn't implemented, so a notification arriving in the
+    foreground isn't shown. That's fine: the reader is already in the app.
+
+#### 10.2.3 The block shim (`programs/ios/block.l8`; the one sanctioned use)
+- **What it builds:** a **global block**, a 32-byte struct in a global `[]int` that is
+  never freed:
+  - `isa` = `dlsym(RTLD_DEFAULT, "_NSConcreteGlobalBlock")`.
+  - `flags` = `1 << 28` (BLOCK_IS_GLOBAL) in the low 32 bits, `reserved` 0.
+  - `invoke` = the address of an L8 function.
+  - `descriptor` = the address of a global `[0, 32]` (reserved and size).
+  - Global blocks have no captures, and `_Block_copy` returns them as they are, so the
+    runtime never frees or moves them.
+- **`global_block(f)` returns the struct's address,** to pass wherever a block parameter
+  is expected.
+- **For `requestAuthorizationWithOptions:completionHandler:`** (options alert | sound =
+  6), the invoke is `auth_done(block, granted, error)`.
+  - It runs **on a background queue**. It must do nothing but store `granted & 255`
+    into a global int, set a second global flag, and return.
+  - It must not allocate, send messages, or touch regions; mark it so, and say so in its
+    comment.
+  - A main-thread `NSTimer` (0.2 s, for at most 120 s) watches the flag and then
+    continues on the main thread.
+- **Calling a block we're given** (the response handler):
+  - Read its `invoke` pointer (offset 16) and call it with the block as its only
+    argument, through a function-typed value if L8 allows one.
+  - If it doesn't, send `invoke` to the block object (`msg(handler, sel("invoke"))`);
+    NSBlock responds to it. The builder reports which path was used.
+- **On every become-active while the setting is on,** call
+  `requestAuthorizationWithOptions:` again. It returns at once without a prompt. If
+  permission was revoked in Settings, flip the switch off as above.
+- **Fallback:** if the shim crashes or never calls back in CI, ship R5.2 **without the
+  notification**: the Today row stays, and the settings section is hidden. Say so in the
+  commit message.
+
+### 10.3 R5.3 Exact senses (extended Strong's)
+
+#### 10.3.1 Data
+- **Sources:** STEPBible-Data at the commit already pinned in `fetch.sh`
+  (`ed476a8ee6e3f7b3a46fc48af6c7dabc02387b1d`), folder `Translators Amalgamated OT+NT/`.
+  The licence is CC BY 4.0 (STEP's credit, as for the lexicons).
+  - TAHOT: `Gen-Deu`, `Jos-Est`, `Job-Sng` and `Isa-Mal` (about 70 MB).
+  - TAGNT: `Mat-Jhn` and `Act-Rev` (about 30 MB).
+  - Their sha256s go into `fetch.sh` as the others are.
+- **Tool:** `tools/senses.py` (`python3 -I`).
+  - For each verse, it reads each word's **disambiguated Strong's** (dStrong: `H7225G`,
+    `G2316`, with prefixes like `H9003/` split off; the `{…}` braces mark the main word
+    in TAHOT).
+  - **Join rule:** align the verse's words with `words.bin`'s words of that verse in
+    original order (the `order` field), matching on base Strong's. Where the orders
+    differ, take the first unused word in the verse with the same base number.
+  - **`data/lang/senses.bin`:** one `u8` per `words.bin` entry. 0 means the main entry or
+    unknown; k means the k-th sub-entry (1-based) under that base's `@` block in
+    `lexicon.txt`.
+- **`lexicon.txt` format change:** each sub-entry line gains a **first field**, its
+  extended code (`H7462B`, or an empty field for an unsuffixed entry). `bsb_lang.py`
+  writes it, and `lang.l8`'s parser and `test_lang.l8` are updated.
+- **Coverage:** the tool prints the share of words with a known sense. Expect at least
+  95%, and say so in the commit. Words whose base has only one sub-entry are trivially
+  known.
+- **Tests:**
+  - Genesis 1:1's "God" maps to the sub-entry whose gloss is "God", not "gods". The tool
+    prints its code.
+  - Each sense's occurrence count, summed over the senses of a base, equals the base's
+    count.
+
+#### 10.3.2 Word study changes (§7.5)
+- **Strong's** row: the extended code ("H430G"), monospaced, when the sense is known.
+- **Meaning** row: the sense's gloss.
+- **Definition** section: the preview shows the verse's sense first.
+  - On the Definition screen, a base with several senses lists all of them, as now, but
+    the verse's sense comes first.
+  - The verse's sense carries a small accent caption above it, "In John 3:16" (SF 12
+    semibold).
+- **Occurrences:**
+  - When the base has more than one sense in use, the Concordance row's value reads "42
+    in this sense", and a second row "All Senses" (value "173") follows.
+  - **Translated As** counts this sense only, and its footer says "In this sense".
+- **Concordance** (§7.7), when pushed from "42 in this sense", filters to that sense. Its
+  header gains a `UISegmentedControl` ["This Sense (42)", "All (173)"]. Switching reloads
+  the sections with a fade.
+- **Accessibility:** the Strong's row reads "Strong's H 430 G".
+
+### 10.4 R5.4 Related words (replaces semantic domains)
+
+#### 10.4.1 Data
+- **Source:** `https://raw.githubusercontent.com/Clear-Bible/macula-greek/8423afe47b9e8f24b7772e808af45c7159a6fe7e/sources/Clear/synonyms/Proximity.tsv`
+  (sha256 `dd4faa737a91d98b77620f636520d763df60e51c44ed2a1207cc2e98643f586c`; 174,824
+  rows; 13,226 keys).
+  - Columns: `StrongNumberX1`, `StrongNumberX2`, `Distance`.
+  - **Lower distance is nearer.** This was verified: G25's nearest are G27 (agapētos),
+    G5368 (phileō), H160 (ahavah) and H2245.
+  - The licence is CC BY 4.0, with the required attribution: "MACULA Greek Linguistic
+    Datasets, available at https://github.com/Clear-Bible/macula-greek/".
+- **Tool:** `tools/related.py`.
+  - It normalizes keys: Aramaic `A` → `H`, and drops lowercase sense letters to the
+    base.
+  - It drops pairs whose base isn't in our lexicon, dedupes per base keeping the nearest,
+    and keeps the 10 nearest per key.
+  - It writes `data/lang/related.bin`: per base key ascending, the key in ASCII, `\0`,
+    `u8 n`, then n × (`u16` Strong's, bit 15 = Greek; `u8` round(distance·255)).
+  - About 0.4 MB.
+  - Test: G25's first three include G5368, and H157's first five include G25.
+
+#### 10.4.2 Word study
+- **A new section after Translated As.**
+- **"Related Words":** up to 5 same-language neighbours, nearest first. Subtitle cells:
+  - Title: the lemma in the original font at inline size, then two spaces and the
+    transliteration in italic faint ("φιλέω  phileō").
+  - Secondary text: the gloss ("to love, be fond of").
+  - Value: its occurrence count, faint.
+  - Disclosure indicator.
+- **"In the Old Testament"** (from a Greek word) or **"In the New Testament"** (from a
+  Hebrew one): up to 3 cross-language neighbours, in the same cells.
+- **Footer** (the last of these sections): "Words used in similar contexts, from MACULA."
+- **Tap → push a lemma study.** This is the word study for a dictionary form, without a
+  verse:
+  - The header shows the lemma in the hero size, its transliteration, and "143 times"
+    instead of the verse line.
+  - It has no Grammar row and no Add to Note.
+  - Translated As and Concordance cover all senses.
+- **Empty:** no section at all (there's no empty state for absence here).
+
+### 10.5 R5.5 Share as Image
+- **Entry:** the tray's Share and the edit menu's Share present the system share sheet,
+  as now, with `applicationActivities` = @[an `L8ImageActivity`]. That's a run-time
+  `UIActivity` subclass:
+  - `activityType`: "space.trailingwhite.smoothbible.image".
+  - `activityTitle`: "Share as Image".
+  - `activityImage`: the SF Symbol `photo`.
+  - `+activityCategory`: `UIActivityCategoryAction` (0).
+  - `canPerformWithActivityItems:` → YES for at most **8 verses and 700 characters**.
+  - `prepareWithActivityItems:` keeps the selection.
+  - `activityViewController` returns the composer (UIKit presents it in the share
+    sheet's place).
+- **The composer** (a UINavigationController):
+  - Inline title "Share Image". Cancel on the left; **Share** on the right (bold).
+  - Background `secondarySystemBackground`.
+  - **Preview:** a `UIImageView` (aspect fit) of the card, with 20 pt margins, corner
+    radius 14 (continuous), and a shadow (opacity 0.12, radius 16).
+  - **Below the preview:**
+    1. A `UISegmentedControl` ["Square", "Portrait"] (1080 × 1080 or 1080 × 1350 px).
+    2. A row of five 36 pt theme swatches (Paper, White, Sepia, Night, Black), drawn as
+       in §3.7. The selected one has the accent ring.
+  - **Defaults:** the reader's theme (Auto resolves to Paper or Night) and Square. Both
+    are remembered (`shareShape`, `shareTheme`).
+  - **Changing either** re-renders, and the preview cross-fades over 0.15 s.
+  - **Share** calls `activityDidFinish:YES` (which dismisses the composer). After 0.35 s
+    (`performSelector:withObject:afterDelay:`), the reader presents a
+    `UIActivityViewController` with the UIImage, the same handoff as §8.1. **Cancel**
+    calls `activityDidFinish:NO`.
+- **The card** (drawn with `UIGraphicsBeginImageContextWithOptions(size, YES, 1.0)`,
+  then `NSAttributedString drawWithRect:options:context:`, then
+  `UIGraphicsGetImageFromCurrentImageContext` and `UIGraphicsEndImageContext`; these are
+  C calls, with no block):
+  - The fill is the theme's `bg`, with margins of 110 px.
+  - **The verse text** in the reader's current font, ink, line height 1.35,
+    leading-aligned. Poetry keeps its lines (q2 indented 40 px). LORD is in small caps,
+    with red letters if on. There are no footnote marks, highlights or attachments.
+    Several verses carry faint verse numbers at 0.6 of the text size.
+  - **The size** is the largest from 64 px down to 34 px (in steps of 2) that fits the
+    space above the reference.
+  - **The reference** 44 px below the text: "John 3:16" in SF Pro semibold 34 px, accent,
+    then " BSB" (the version's abbreviation, always present; required for the ESV) in SF
+    Pro regular 30 px, faint.
+  - The text and reference are a block, vertically centered.
+  - **No app name or logo.**
+- **Info.plist:** add `NSPhotoLibraryAddUsageDescription` = "Smooth Bible saves the verse
+  images you choose to your photo library." This is required, because the share sheet
+  offers Save Image.
+- **Accessibility:**
+  - The preview's label is the verse and reference.
+  - The swatches are labelled "Paper Background", and so on.
+  - Rendering ignores Dynamic Type: the card is a fixed-size image.
+
+### 10.6 CI for Round 5
+**A new demo group, `plans`**, with the demo clock (§10.0). It seeds no plan; the steps
+start one. Shots:
+
+| Shot | Action | Expected |
+|---|---|---|
+| `140-goto-today` | Open Go To | Today: Verse of the Day (entry for Oct 19), and "Reading Plans ›"; then Recent |
+| `141-plans` | Push Reading Plans | Four plans with day and chapter counts |
+| `142-plan-detail` | Push Bible in a Year | The description, Week 1 rows (Day 1 "Genesis 1–3"…), toolbar "Start Plan" |
+| `143-plan-started` | Start; back to Go To (dismiss and reopen) | Today: the verse, "Genesis 1–3 · Bible in a Year · Day 1" with an empty circle, and "Bible in a Year · Day 1 of 365" |
+| `144-plan-partial` | Read Genesis 1 (the demo hook dwells 20 s worth and shows the last verse), reopen Go To | Genesis 1–3 with the half-filled circle |
+| `145-day-done` | Mark Genesis 2–3 read in the reader the same way | The toast "Day 1 Done" over the reader |
+| `146-catch-up` | Demo clock +3 days; open Go To | "Genesis 8–10 · Day 4" (or as computed), and "Catch Up · 2 earlier days aren't finished" |
+| `147-votd-settings` | Aa → Verse of the Day | The switch off, and the footer |
+| `148-notify-prompt` | Turn it on | The system authorization alert (proof the shim's call ran); the log shows no crash |
+| `149-time-row` | (The script relaunches; the demo forces the "granted" path through the shim's flag) | The Time row with 7:00 AM; the log line "scheduled 30 daily verses" |
+| `150-votd-open` | The demo hook calls the response handler with `JHN.3.16` | The reader at John 3:16, flashed, with the back capsule |
+| `151-share-sheet` | Select John 3:16; Share | The system share sheet with "Share as Image" among its actions |
+| `152-share-composer` | Choose it | The composer: square Paper card, the segments and swatches |
+| `153-share-night-portrait` | Portrait, Night | The re-rendered card |
+| `154-word-sense` | Word study of Genesis 1:1 "God" | Strong's with its letter, the Meaning "God", and "N in this sense" plus "All Senses" |
+| `155-concordance-sense` | Push "in this sense" | The segmented header "This Sense (N)" and "All (M)" |
+| `156-related` | Word study of John 3:16 "loved", scrolled down | "Related Words" with agapētos (G27) and phileō (G5368), and "In the Old Testament" with H2245 and ʾahăḇâ (H160) |
+| `157-lemma-study` | Tap φιλέω | The lemma study: no verse line, "N times" |
+| `158-ax-goto-today` | (Accessibility size) Go To | Today rows wrap; nothing clipped |
+
+- **Published:** the demo writes the 152 card at full size to Documents, and
+  `simulate.sh` publishes it as `share-card.png`. It must be exactly 1080 × 1080.
+- **Recording sequence 12:** tap a Today circle (the symbol cross-fades), push Plans and
+  back, and toggle Daily Notification on and off (the Time row fades in and out).
+- **Linux:** `test_plans.l8`, the new `test_lang.l8` cases (senses, related, lexicon
+  field), and `votd.py`'s self-check (366 lines, the date mapping) in `make bible-test`.
+
+### 10.7 Questions only the owner can answer, and what the owner provides
+1. **Semantic domains.** Do you want us to ask UBS (semanticdictionary.org, MARBLE) for
+   permission to show Louw–Nida domain names in a free app? If they grant it, domains can
+   join Related Words in a later round. If not, R5.4 stands as specified.
+2. **The verse-of-the-day list.** The designer curates it in review. If you'd like any
+   verses always included (or a different balance between comfort and challenge), say so
+   before that review.
+3. **On a device:**
+   - Allow notifications, and receive one at the set time (the simulator can't show
+     the Allow tap).
+   - Tap it, and see the app open at the verse.
+   - Save a shared image to Photos.
+
+### 10.8 Round 5 acceptance (summary)
+Round 5 is approved when:
+- The plans are computed exactly as §10.1.1 says (tests). Progress counts by dwell,
+  Listen and hand. Today, Catch Up and Day Done behave as specified. Stopping keeps the
+  history in `plans-done.tsv`.
+- The verse of the day matches the date mapping. The notification schedule is 30 dated
+  requests, with the right body and subtitle, never ESV text. Opening one goes to the
+  verse. Or, if the shim failed, the fallback is reported and the setting is hidden.
+- Word study shows the exact sense, and counts by it. The concordance filters by sense.
+- Related words show and push lemma studies, with MACULA credited in Acknowledgements:
+  - A new **Study** row "Related Words" / "From MACULA Greek Linguistic Datasets,
+    available at https://github.com/Clear-Bible/macula-greek/ (Clear Bible / Biblica),
+    licensed CC BY 4.0."
+  - STEP's row adds "Translators Amalgamated Hebrew OT and Greek NT (TAHOT, TAGNT)".
+- Share as Image makes the card exactly as specified, at exact pixel sizes. Saving
+  works on a device.
+- Shots 140–158 match. Recording sequence 12 shows no abrupt change. No earlier shot
+  regresses.
