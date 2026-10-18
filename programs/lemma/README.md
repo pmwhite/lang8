@@ -28,7 +28,8 @@ its words as a soft card at the top. One
 statement is focused (outlined orange), and the hand holds its moves, each
 a pudgy row that says what kind of move it is and shows **what it gives**:
 the statement as it will be (the changed part tinted), a new fact (blue), or
-a gold row that closes the goal.
+a gold row that closes the goal, showing the goal as the move leaves it
+(`c = c`, both sides gold; struck through when arithmetic closes it).
 
 - **Tap a statement** to focus it. With the whole of it focused, the hand
   has its own moves (*Take any ε*, *Assume it*, *Split*, *Choose …*, *Get N*,
@@ -54,14 +55,36 @@ After a move the focus goes to what it made (a new fact with moves, or the
 changed goal). A new fact flies from its row to its card, and the changed
 part of a rewritten goal flies to the block it becomes, each carrying its
 writing. Goals that are something known, both sides the same, or (where
-the region has it) arithmetic close by themselves: the card flashes gold
-and, its writing shrinking with it, flies into its pip at the top. Words
+the region has it) arithmetic close by themselves, staged: the goal card
+first morphs to what the move made of it (`e · c = c` to `c = c`); a new
+fact drops in, pulses, and a copy of it flies into the goal; then the card
+flashes gold and, its writing shrinking with it, flies into its pip at the
+top. Words
 for a moment (*Undo 1 to get back on the book's path*, *Your turn*) show
 just under the bar. Under the title, a dot for each
 move of par fills as moves are made, grey past par; a pip for each goal
-fills as it closes. The last goal closes with the theorem stamped Q.E.D.,
-its stars (par or better: three), and its proof written out as a book
-would.
+fills as it closes. The last goal closes with the theorem stamped Q.E.D. (on a line of
+its own under the statement), its stars (par or better: three), and its
+proof written out as a book would. A theorem later levels use is a new
+move: the finish card says so and its card flies into the Book (the book
+button), which holds the rulebook, the theorems proved (each with its
+stars and the levels it is used in) and those still to prove.
+
+The first time a level that brings in a control is played, a ghost
+finger shows it once (`demo:` in its region file): a row tapped (Take
+what you need), the goals' squares at the top (Both at once), a term
+picked (For every one), the cursor swiped across the goal (Only one e).
+A demo goes when the player does it (or asks for a hint) and is kept as
+seen in the progress file (`seen KIND`).
+
+The map is a chapter for each region: a cover strip with its picture and
+how much is proved, then its levels as pudgy round nodes along a winding
+path, stars under each, the next to play bobbing.
+
+On the screen a sequence is written by its terms (`(aₙ + 1) → A + 1`, not
+`λn. a n + 1`) and an inverse of an inverse bracketed (`(a⁻¹)⁻¹`); proof
+scripts and the tests see terms as the printer writes them without this
+(`show_display` in show.l8).
 
 The picture above a level shows the goal on an example, and follows the
 proof. For limits: the sequences, with the band each hypothesis says they
@@ -88,11 +111,15 @@ the same the rows slide together into one.
 - `L8_KEYS="right;1;right;right;1;a"` presses keys the same way, after the
   taps: `left`/`right` move the cursor, `up`/`down` the focus; `1` to `4`
   play a row (the one after the rows shown is *More*); while chips show, a
-  letter or digit picks the k-th chip (`a` or `1` the first); `enter` plays
-  the hinted row (or the first), `u` (or `back`) undoes, `h` asks for a
+  letter or digit picks the k-th chip (`a` or `1` the first; `h` is the
+  hint, not the eighth), `enter` the hinted chip (or the first); `enter`
+  plays the hinted row (or the first), `u` (or `back`) undoes, `h` asks for a
   hint, `w` watches, `esc` backs out (from the chips, from *More moves*).
   The same keys work on a computer and on the page. `h;enter` repeated
-  follows the written proof (a letter after it where it needs a term).
+  follows the written proof to the end (chips too); on the finish card
+  `enter` is Next, so give no more pairs than the proof needs. The
+  demos show only while unseen: start from a progress file without
+  `seen` lines to see them.
 
 For example, Cancel on the left by keys (seven moves, par):
 
@@ -105,6 +132,12 @@ fourth chip): the dots of b between N and N₁ go red.
 
 ```sh
 L8_LEVEL=20 L8_TAP_GAP=40 L8_KEYS="h;enter;h;enter;h;enter;h;enter;a;h;enter;h;enter;h;enter;a;h;enter;h;enter;d" .build/lemma
+```
+
+Adding limits to its Q.E.D. by hints alone (17 pairs):
+
+```sh
+L8_LEVEL=20 L8_TAP_GAP=30 L8_KEYS="$(for i in $(seq 17); do printf 'h;enter;'; done)" .build/lemma
 ```
 
 ## How it is built
@@ -153,7 +186,7 @@ exported so; that is what the Foundations region will instantiate.
 Write `regions/NAME.txt`: `region`, the types and fixed symbols with their
 notation, the rulebook (`assume`), definitions, and levels, each with
 `show:`, `par:`, a `kit:` if it needs witnesses built, `tools:` (earlier
-levels' lemmas it may use), and a `proof:` (which the tests play). Add it
+levels' lemmas it may use), a `demo:` if it brings in a control, and a `proof:` (which the tests play). Add it
 to `region_files` in `app.l8` and `FILES` in `web/lemma/lemma.js`. A
 `picture` needs code in `picture.l8`; `calculate` needs `calc` roles.
 
@@ -161,8 +194,7 @@ to `region_files` in `app.l8` and `FILES` in `web/lemma/lemma.js`. A
 
 The Foundations region (constructing ℕ, ℤ, ℚ, ℝ and proving each
 rulebook is satisfied); Calculate replaying a certificate through the
-kernel instead of being trusted; ghost-finger first-time demos; holding a
-row to preview it; a new fact landing before it closes the goal it
-matches; chapter covers and a winding map; the Book as a collection of
-earned theorems; sequence notation (`aₙ` rather than `λn.`); more regions
+kernel instead of being trusted; holding a row to preview it; a tilted
+Q.E.D. stamp (the painter has no rotation); a chapter intro page with the
+rulebook as tiles; more regions
 (topology, linear algebra); the logic region's picture; a torus.
