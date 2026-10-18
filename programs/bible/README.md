@@ -34,6 +34,14 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   parsing in plain English, a definition from STEP Bible, how often and how
   it is translated), its definition, and its concordance (a verse there
   goes to it). Reading settings → Acknowledgements credits the sources.
+- Versions (Round 4): the KJV, WEB, ASV and YLT are bundled beside the BSB,
+  chosen in Reading settings → Version; the reader switches in place, at the
+  same verse. Marks are by reference, so each shows in every version that
+  has its verse. The ESV is read online through our own proxy (`worker/`),
+  never more of it kept than Crossway's terms allow, and is offered only
+  once that proxy says it can give it. The tray's Compare shows the verses
+  in every version; Study gains References (OpenBible.info) and Commentary
+  (Matthew Henry's Concise).
 - A link opens a chapter: `bsb://JHN/3` (or a verse, `bsb://JHN/3/16`).
 
 ## Files
@@ -59,7 +67,16 @@ read aloud by VoiceOver as it would be in the phone's own apps.
 - `ios.l8` is the app: the reader and its classes; `ios_look.l8` the themes,
   fonts and styles; `ios_store.l8` what is kept; `ios_select.l8` selection,
   the tray, the edit menu and jumps; `ios_sheets.l8` the sheets;
-  `ios_demo.l8` the demo CI runs.
+  `ios_versions.l8` the versions and switching; `ios_esv.l8` the ESV's
+  client, cache on disk and the reader's states while a chapter comes
+  (`esv_cache.l8` its portable rules, tested in `test_store.l8`);
+  `ios_compare.l8` Compare; `ios_study2.l8` the Study sheet's segments;
+  `ios_demo.l8` (and `ios_demo3.l8`, `ios_demo4.l8`) the demo CI runs.
+- `worker/` is the ESV proxy, a Cloudflare Worker (`worker.js`; `esv.js`
+  turns the ESV API's HTML into our records), with its tests
+  (`node --test programs/bible/worker/test.mjs`, against `fixtures/`: the
+  ESV's tags with the WEB's words) and `make_fixtures.mjs`, which writes the
+  app's fixture (`ios/esv-fixture/`) for CI. It is not deployed (below).
 - `ios/` is what goes into the app besides its code: its Info.plist, icon
   (`AppIcon.svg`, drawn to `AppIcon.png` in Chromium, and as
   `AppIcon.svg#dark` and `#tinted` to `AppIcon-dark.png` and
@@ -80,4 +97,33 @@ GitHub builds it on every push to the `bible` branch
 the app, and macOS jobs build it for the simulator, run it there with
 `L8_DEMO=1`, taking it through the books, a psalm, a footnote and John 3
 (each step a Darwin notification, sent with `notifyutil`), and push the screenshots to the `ci-bible-shots` branch, and build
-`SmoothBible.ipa` for an iPhone onto `ci-bible-ipa`.
+`SmoothBible.ipa` for an iPhone onto `ci-bible-ipa`. The `versions` group
+runs with the ESV's fixture (`L8_ESV_FIXTURE`), so no key or network is
+needed.
+
+## The ESV proxy: deploying it (each step needs the owner's consent)
+
+Nothing below has been done. The app works without it: the ESV is simply
+not offered until `https://smoothbible.com/api/v1/status` answers.
+
+1. The ESV API key: register the application at
+   `https://api.esv.org/account/create-application/` (DESIGN.md §9.10) and
+   save the key to `~/.config/smooth-bible/esv-key` (never in chat or the
+   repository).
+2. Cloudflare: the `smoothbible.com` zone on the owner's account, and
+   wrangler logged in (`npx wrangler login`).
+3. In `programs/bible/worker/`:
+   ```sh
+   npx wrangler d1 create smooth-bible-api      # its id into wrangler.toml's database_id
+   npx wrangler d1 execute smooth-bible-api --remote --file schema.sql
+   npx wrangler secret put ESV_KEY < ~/.config/smooth-bible/esv-key
+   npx wrangler deploy                          # the route smoothbible.com/api/*
+   curl -s https://smoothbible.com/api/v1/status   # {"ok":true,"esv":true}
+   ```
+4. The two pages, `https://smoothbible.com/` and
+   `https://smoothbible.com/privacy/` (what the proxy receives: a book, a
+   chapter, a search, and the address for one minute of rate limiting;
+   nothing kept).
+5. Once deployed: `tools/esv_versify.py` (DESIGN.md §9.4.9) checks the ESV's
+   verse numbering through the proxy, and the converter's class names are
+   checked against real answers (real ESV HTML is never committed).

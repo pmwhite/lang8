@@ -2126,6 +2126,24 @@ behavior unless this section explicitly replaces it. The owner decided on 2026-1
 the app is **free forever**: no price, ads, in-app purchases or donation prompts, ever. That
 is what makes the ESV possible (§9.4), and it's a constraint on every later round.
 
+**Owner amendments (2026-10-18), after this section was written:**
+1. **The server is `smoothbible.com`, not trailingwhite.space.** The ESV proxy's base is
+   `https://smoothbible.com/api/v1/` (route `smoothbible.com/api/*`), and the web pages are
+   `https://smoothbible.com/` and `https://smoothbible.com/privacy/`. Every address below
+   is read with that change. Nothing is deployed yet; the owner has no Cloudflare set up.
+2. **The app ships and is fully robust without that server.** The ESV appears in
+   Versions, Compare and "Search the ESV" **only after the server has answered a cheap
+   status request**, `GET /api/v1/status` → `{"ok":true,"esv":true}`, asked quietly in the
+   background at most once a day and whenever the reading settings open; the answer is
+   kept (`esvAvailable`). Until then the ESV simply isn't listed: no dead entries and no
+   error states for testers. If someone was reading the ESV and the server later can't be
+   reached, the calm offline state with "Read in the BSB" applies (§9.4.6). CI's fixture
+   mode lists the ESV, so its screens are tested. (`/api/v1/status` replaces §9.4.2's
+   `/health`, which stays as an alias.)
+3. **Answers to §9.10:** the owner accepts the ESV terms (including the statement of
+   faith) and the shared daily limit as the ceiling; the KJV ships everywhere, with the
+   Crown-rights credit.
+
 ### 9.0 Priorities, order and decisions
 
 | # | Item | Serves | Size |
@@ -2463,7 +2481,7 @@ Its configuration follows `web/tempo-log` in the main repo:
 name = "smooth-bible-api"
 main = "worker.js"
 compatibility_date = "2026-10-01"
-routes = [{ pattern = "trailingwhite.space/bible/api/*", zone_name = "trailingwhite.space" }]
+routes = [{ pattern = "smoothbible.com/api/*", zone_name = "smoothbible.com" }]
 workers_dev = false
 [[d1_databases]]
 binding = "DB"
@@ -2480,7 +2498,7 @@ simple = { limit = 30, period = 60 }
 **Endpoints** (all GET; every response is JSON with `Cache-Control: no-store`; nothing is
 cached by Cloudflare, and nothing is stored but the counters):
 
-1. **`/bible/api/v1/esv/chapters?book=JHN&chapter=3&count=2`**
+1. **`/api/v1/esv/chapters?book=JHN&chapter=3&count=2`**
    - **Validation:** `book` must be one of the 66 codes, `chapter` must be within the
      book, and `count` must be 1 or 2.
    - **Limits:** if the requested chapters exceed 500 verses, or half the book's verses
@@ -2508,14 +2526,15 @@ cached by Cloudflare, and nothing is stored but the counters):
        unchanged.
      - `notice` is the short copyright the API sent ("(ESV)"), which the app shows
        (§9.4.6).
-2. **`/bible/api/v1/esv/search?q=born%20again&page=1`**
+2. **`/api/v1/esv/search?q=born%20again&page=1`**
    - Upstream: `/v3/passage/search/?q=…&page-size=100&page=…`.
    - Response:
      `{"v":1,"total":12,"page":1,"pages":1,"results":[{"book":"JHN","chapter":3,"verse":3,"key":3,"text":"…"}]}`.
      The Worker parses each `reference` ("John 3:3") into codes and applies the two
      mappings to `key`.
    - The query is at most 100 characters; anything longer is a 400.
-3. **`/bible/api/v1/health`** → `{"ok":true}`. It makes no upstream call.
+3. **`/api/v1/status`** → `{"ok":true,"esv":true}` (`esv` is whether the key is set; owner
+   amendment 2; `/api/v1/health` is the same). It makes no upstream call.
 
 **Limits, in order:**
 1. `PER_IP` (30 a minute, keyed by `CF-Connecting-IP`).
@@ -2584,7 +2603,7 @@ A tolerant tag scanner over the API's known output (no DOM library in Workers):
     `NSJSONSerialization JSONObjectWithData:options:error:`.
   - Don't implement `didReceiveResponse:completionHandler:`; the default allows the
     response.
-- **Base URL:** `https://trailingwhite.space/bible/api/v1/`. Header
+- **Base URL:** `https://smoothbible.com/api/v1/` (owner amendment 1). Header
   `X-Smooth-Bible: 1.0 (12)` (from the bundle).
 - **One chapter request in flight at a time.** A newer wanted chapter replaces a queued
   one. A running one is never cancelled, because its result is still useful.
@@ -2948,7 +2967,7 @@ Acknowledgements (§7.8) becomes, in this order:
   - `PrivacyInfo.xcprivacy` stays "collects nothing". Its comment changes to say the app
     sends ESV chapter requests to our proxy, which keeps nothing.
   - The App Store privacy answer stays **Data Not Collected**.
-  - A short privacy page goes at `https://trailingwhite.space/bible/privacy/` (owner's
+  - A short privacy page goes at `https://smoothbible.com/privacy/` (owner's
     blog). It says what the proxy receives (a book, a chapter, the client's address for
     one minute of rate limiting) and that nothing is kept.
   - The Acknowledgements footer gets a row "Privacy" → that page.
@@ -3037,15 +3056,48 @@ Shots, in order:
    - Log in at `https://api.esv.org/login/`, then go to
      `https://api.esv.org/account/create-application/`.
    - Name: "Smooth Bible". Description: "A free iPhone Bible reader; no ads, purchases or
-     donations." Website: `https://trailingwhite.space/bible/`.
+     donations." Website: `https://smoothbible.com/`.
    - Save the key to `~/.config/smooth-bible/esv-key`. **Don't paste it in chat.** The
      builder runs `npx wrangler secret put ESV_KEY < ~/.config/smooth-bible/esv-key`.
 2. **Consent to deploy:**
    - Creating the D1 database `smooth-bible-api`, the Worker and its route
-     `trailingwhite.space/bible/api/*`.
-   - Publishing the two small pages on the blog (`/bible/` and `/bible/privacy/`).
+     `smoothbible.com/api/*`.
+   - Publishing the two small pages (`https://smoothbible.com/` and `/privacy/`).
 3. **On a device:** a check that the ESV loads over cellular, and that turning on
    Airplane Mode shows the calm offline state.
+
+### 9.10a Builder notes (Round 4, as built)
+Where the build differs from the text above, and why:
+1. **Verses with no words are left out of the other versions** (`usfm.py`): the ASV's
+   Matthew 17:21 and the 15 others it gives only in footnotes, and the WEB's Luke 17:36,
+   Acts 8:37, 15:34 and 24:7 (footnotes) and Romans 16:25–27 (given at 14:24–26), as the
+   BSB leaves out a verse it footnotes. So `versify.py` reports the ASV with exactly the
+   BSB's 31,086 verses and the WEB with 31,098, not "all of the BSB's plus the 16"; and a
+   bookmark on KJV Matthew 17:21 shows in the KJV, WEB and YLT, not the ASV.
+2. **KJV's ¶ marks are dropped**: its paragraphs (eBible's `\p`) are already there, and
+   every ¶ begins one.
+3. **The commentary's sections run on to the next section** in their chapter: CCEL's John
+   3 has sections 1–8 and 22–36 only, the first holding the comment on 9–21 (its outline
+   lists 9–21). So John 3:16's header reads "Verses 1–21", not "Verses 16–21". CCEL's 2
+   Kings 1 and 2 Chronicles 1 are read from their books' first lines, and Jude's osisRefs
+   (which say Judges) as Jude.
+4. **`verse_num` holds the key** (what marks and selection use) and `verse_shown` the number
+   shown, the reverse of §9.1.4's names (`verse_key` is store.l8's already). The test for
+   a verse the BSB lacks uses a new `verse_find` (-1), `verse_index` keeping its
+   nearest-before meaning.
+5. **ESV prose paragraphs are always `Pm`**: the BSB opens a chapter after a heading with
+   `Pm`, not `Po`.
+6. **Study opens for every verse**, as its References and Commentary are every verse's. A
+   BSB verse without an interlinear shows, in Words, `character.book.closed`, "No
+   Interlinear", "John 3:16 isn't aligned with the original words."
+7. **Listen, on a switch, starts again at once** at the same verse in the new version,
+   rather than at the end of the utterance.
+8. **The ESV's acknowledgement section shows only while the ESV is listed** (amendment 2).
+9. **The ESV line's "esv.org" is a tap target in the reader's text**, not a system link, so
+   VoiceOver reads "(ESV) · esv.org" without the link trait; in lists it is a button with
+   the label "ESV. Link: esv.org".
+10. **The fixture answers a two-chapter request with its first chapter**; the second is
+    asked for on its own, as the reader comes to it.
 
 ### 9.11 Round 4 acceptance (summary)
 Round 4 is approved when:
