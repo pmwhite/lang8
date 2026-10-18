@@ -37,6 +37,7 @@ xcrun simctl boot "$dev" 2>/dev/null || true
 xcrun simctl bootstatus "$dev" -b >/dev/null
 xcrun simctl ui "$dev" appearance light
 xcrun simctl ui "$dev" content_size large 2>/dev/null || true
+echo "booted in $(python3 -c "print(round($(now) - $start))") s" >> "$out/timing.txt"
 xcrun simctl install "$dev" "$app"
 echo "booted and installed in $(python3 -c "print(round($(now) - $start))") s" >> "$out/timing.txt"
 shot() {
@@ -45,7 +46,7 @@ shot() {
 xcrun simctl spawn "$dev" log stream --predicate 'process == "SmoothBible" AND messageType >= 16' > "$out/log.txt" 2>&1 &
 logger=$!
 # Waiting for the app's word that it has settled: a waiter started before
-# the step is sent, then waited for (at most $1 tenths of a second).
+# the step is sent, then waited for (at most $1 seconds).
 waiter=0
 wait_start() {
   xcrun simctl spawn "$dev" notifyutil -1 "$id.done" >/dev/null 2>&1 &
@@ -54,10 +55,9 @@ wait_start() {
 }
 wait_done() {
   t0=$(now)
-  i=0
-  while kill -0 "$waiter" 2>/dev/null && [ "$i" -lt "${1:-100}" ]; do
+  end=$(( $(date +%s) + ${1:-8} ))
+  while kill -0 "$waiter" 2>/dev/null && [ "$(date +%s)" -lt "$end" ]; do
     sleep 0.05
-    i=$((i + 1))
   done
   if kill -0 "$waiter" 2>/dev/null; then
     kill "$waiter" 2>/dev/null
@@ -76,14 +76,14 @@ launch() {
     sleep 0.1
     i=$((i + 1))
   done
-  wait_done 80 "launch"
+  wait_done 15 "launch"
 }
 # A step: its notification, the wait for it to settle, its screenshot. With
 # no name, no screenshot (a step that sets things up).
 step() {
   wait_start
   xcrun simctl spawn "$dev" notifyutil -p "$id.demo$1"
-  wait_done "${3:-100}" "$1 ${2:-}"
+  wait_done "${3:-8}" "$1 ${2:-}"
   [ -n "${2:-}" ] && shot "$2"
 }
 launch console.txt
@@ -126,11 +126,11 @@ read)
   step 28
   wait_start
   xcrun simctl ui "$dev" appearance dark
-  wait_done 60 "dark"
+  wait_done 8 "dark"
   shot 28-night
   wait_start
   xcrun simctl ui "$dev" content_size extra-extra-large 2>/dev/null || true
-  wait_done 60 "larger text"
+  wait_done 8 "larger text"
   shot 29-larger-text
   xcrun simctl terminate "$dev" "$id" 2>/dev/null || true
   kill "$console" 2>/dev/null || true
@@ -182,7 +182,7 @@ notes)
   n=1
   for s in 71 72 73 74 75 76; do
     a=$(now)
-    step "$s" "" 150
+    step "$s" "" 15
     b=$(now)
     echo "$n $(python3 -c "print(round($a - $rec0, 2), round($b - $rec0, 2))")" >> "$out/transitions.txt"
     n=$((n + 1))
