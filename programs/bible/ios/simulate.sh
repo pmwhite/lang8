@@ -50,27 +50,39 @@ shot() {
 xcrun simctl spawn "$dev" log stream --predicate 'process == "SmoothBible" AND messageType >= 16' > "$out/log.txt" 2>&1 &
 logger=$!
 # Waiting for the app's word that it has settled: a waiter started before
-# the step is sent, then waited for (at most $1 seconds).
+# the step is sent, then waited for (at most 4 seconds). Should the waiter
+# have been too late for the notification, its state (`notifyutil -g`)
+# says what settled last: the step's number, or 1000 and a count of other
+# settlings (a launch, the phone's appearance or text size), which the
+# script counts too (events).
 waiter=0
+events=0
 wait_start() {
   xcrun simctl spawn "$dev" notifyutil -1 "$id.done" >/dev/null 2>&1 &
   waiter=$!
   sleep 0.2
 }
+# wait_done EXPECTED_STATE LABEL [SECONDS]
 wait_done() {
-  t0=$(now)
-  end=$(( $(date +%s) + ${1:-8} ))
+  end=$(( $(date +%s) + ${3:-4} ))
   while kill -0 "$waiter" 2>/dev/null && [ "$(date +%s)" -lt "$end" ]; do
     sleep 0.05
   done
   if kill -0 "$waiter" 2>/dev/null; then
     kill "$waiter" 2>/dev/null
-    echo "$2 timed out" >> "$out/timing.txt"
+    # (Missed, or not yet settled: its state, a few times.)
+    for i in 1 2 3 4 5 6; do
+      state=$(xcrun simctl spawn "$dev" notifyutil -g "$id.done" 2>/dev/null | awk '{print $NF}')
+      [ "$state" = "$1" ] && break
+      sleep 1
+    done
+    if [ "$state" = "$1" ]; then echo "$2: waiter late, state $state" >> "$out/timing.txt"
+    else echo "$2: timed out (state $state, expected $1)" >> "$out/timing.txt"; fi
   fi
   wait "$waiter" 2>/dev/null
-  echo "$2 $(python3 -c "print(round($(now) - $t0, 2))") s" >> "$out/timing.txt"
 }
 launch() {
+  events=$((events + 1))
   wait_start
   SIMCTL_CHILD_L8_DEMO=1 xcrun simctl launch --console-pty "$dev" "$id" > "$out/$1" 2>&1 &
   console=$!
@@ -80,14 +92,22 @@ launch() {
     sleep 0.1
     i=$((i + 1))
   done
-  wait_done 15 "launch"
+  wait_done $((1000 + events)) "launch" 6
+}
+# A setting of the simulator's (appearance, text size), which the app
+# settles after.
+ui() {
+  events=$((events + 1))
+  wait_start
+  xcrun simctl ui "$dev" "$@" 2>/dev/null || true
+  wait_done $((1000 + events)) "ui $*"
 }
 # A step: its notification, the wait for it to settle, its screenshot. With
 # no name, no screenshot (a step that sets things up).
 step() {
   wait_start
   xcrun simctl spawn "$dev" notifyutil -p "$id.demo$1"
-  wait_done "${3:-8}" "$1 ${2:-}"
+  wait_done "$1" "$1 ${2:-}" "${3:-4}"
   [ -n "${2:-}" ] && shot "$2"
 }
 launch console.txt
@@ -128,16 +148,13 @@ read)
   step 26 26-black-large
   step 27 27-verse-lines
   step 28
-  wait_start
-  xcrun simctl ui "$dev" appearance dark
-  wait_done 8 "dark"
+  ui appearance dark
   shot 28-night
-  wait_start
-  xcrun simctl ui "$dev" content_size extra-extra-large 2>/dev/null || true
-  wait_done 8 "larger text"
+  ui content_size extra-extra-large
   shot 29-larger-text
   xcrun simctl terminate "$dev" "$id" 2>/dev/null || true
   kill "$console" 2>/dev/null || true
+  events=0
   launch console-again.txt
   shot 30-opened-again
   step 30 31-link-romans-8
