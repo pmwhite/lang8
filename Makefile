@@ -181,7 +181,7 @@ $(BUILD)/ios-check.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
 $(OK)/bible-tests: l8c3 $(PROGRAMS) $(RUNTIME) $(wildcard programs/bible/tools/*.py programs/bible/data/*.txt programs/bible/data/*.bin programs/bible/data/lang/* programs/bible/worker/*.js programs/bible/worker/*.mjs programs/bible/worker/fixtures/*) | $(OK)
 	+@$(STEP) 'bible tests' ./l8c3 test programs/bible/test_text.l8 programs/bible/test_lang.l8 programs/bible/test_store.l8 programs/bible/test_plans.l8
 	+@$(STEP) 'bible worker tests' node --test programs/bible/worker/test.mjs
-	+@$(STEP) 'bible data checks' sh -c 'for t in votd senses related; do python3 -I programs/bible/tools/$$t.py --check programs/bible/data || exit 1; done'
+	+@$(STEP) 'bible data checks' sh -c 'for t in senses related; do python3 -I programs/bible/tools/$$t.py --check programs/bible/data || exit 1; done'
 	@touch $@
 
 bible-test: $(OK)/bible-tests

@@ -30,9 +30,9 @@
 #           (versions-transitions.mp4, with versions-transitions.txt)
 #   plans   Round 5 (DESIGN.md §10.6), on the demo clock: Today in Go To,
 #           the reading plans, a plan started and read, Day Done, Catch Up;
-#           the Verse of the Day's setting, the Time row (the shim's answer
-#           forced) and a notification opened, its authorization alert (last:
-#           it outlives the app); Share as
+#           the plan's Daily Reminder, its Time row (the shim's answer
+#           forced) and a reminder opened, its authorization alert (last: it
+#           outlives the app); Share as
 #           Image (the card kept as share-card.png); exact senses, related
 #           words, the largest text; the recording of sequence 12
 #           (plans-transitions.mp4); and Versions and Acknowledgements
@@ -449,9 +449,9 @@ plans)
   step 245 144-plan-partial 8
   step 246 145-day-done 6
   step 247 146-catch-up 6
-  step 248 147-votd-settings 6
+  step 248 147-plan-reminder 8
   step 250 149-time-row 8
-  step 251 150-votd-open 6
+  step 251 150-reminder-open 6
   step 252 151-share-sheet 8
   step 253 152-share-composer 8
   # The card at full size, as the demo kept it: exactly 1080 × 1080.
@@ -491,16 +491,16 @@ plans)
   sleep 0.5
   kill -INT "$recorder" 2>/dev/null
   wait "$recorder" 2>/dev/null
-  # Daily Notification turned on, its authorization alert: last, as the
+  # The Daily Reminder turned on, its authorization alert: last, as the
   # system's alert outlives the app and can't be answered here (the Time
   # row's shot, before, had the shim's answer forced by the demo).
   step 249 148-notify-prompt 8
   # What was scheduled, the shim's answers and the handler called; the
   # lists that were popped under a theme's change.
-  grep -h "scheduled 30 daily verses\|notification authorization\|completion handler\|notification opened\|popped lists\|card size\|card w\|card h" \
+  grep -h "daily reminders\|notification authorization\|completion handler\|reminder opened\|popped lists\|card size\|card w\|card h" \
     "$out/console.txt" > "$out/notify.txt" 2>/dev/null
   cat "$out/notify.txt"
-  grep -q "scheduled 30 daily verses" "$out/notify.txt" || { echo "FAILED: nothing scheduled" | tee -a "$out/notify.txt"; failed=1; }
+  grep -q "scheduled [0-9]* daily reminders" "$out/notify.txt" || { echo "FAILED: nothing scheduled" | tee -a "$out/notify.txt"; failed=1; }
   grep -q "popped lists survived" "$out/notify.txt" || { echo "FAILED: the popped lists' step did not finish" | tee -a "$out/notify.txt"; failed=1; }
   ;;
 ios18)

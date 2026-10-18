@@ -180,7 +180,9 @@ In build order:
 ### Round 5: daily reading, exact senses, sharing (fully specified in §10)
 1. **R5.1 Reading plans,** computed (a year, the NT in 90 days, Psalms and Proverbs in a
    month, the Gospels in 30 days), with a Today section in Go To.
-2. **R5.2 Verse of the Day,** and one daily notification (the one **[BLOCK SHIM]**).
+2. ~~R5.2 Verse of the Day~~ **dropped by the owner (2026-10-18)**; what is left of it is an
+   optional daily reminder of a plan's reading (the one **[BLOCK SHIM]**; §10, owner
+   amendment).
 3. **R5.3 Exact senses** (STEP's extended Strong's) in word study and the concordance.
 4. **R5.4 Related words** (MACULA proximity, CC BY). This **replaces semantic domains**,
    whose Louw–Nida data isn't licensed to us.
@@ -3376,6 +3378,34 @@ Round 4 is approved when:
 Round 5 is the old Round 4 list, re-planned now that versions exist. It keeps everything
 from Rounds 1–4.
 
+**Owner amendment (2026-10-18), after Round 5's first build:** the Verse of the Day is
+dropped entirely ("isn't really a real thing, a bit frivolous and social-media-y"). Read
+§10.1–§10.2 with these changes:
+1. **No Verse of the Day anywhere:** not in Go To's Today section (§10.1.3 row 1 goes), not
+   in Reading settings (§10.2.2's "Verse of the Day" section goes), not in notifications or
+   shares. `data/votd.txt`, `data/votd-candidates.txt` and `tools/votd.py` (§10.2.1) are
+   removed. Without a plan, Today is just "Reading Plans ›" (Recent below it, as now).
+2. **The daily notification survives only as a plan's reminder,** optional and off by
+   default (`planReminder`, `planReminderMinutes`, default 7:00 AM):
+   - It exists only while a plan is followed. Stopping the plan removes every pending
+     request.
+   - **Its switch lives with the plan:** the followed plan's days (§10.1.4) gain a first
+     section, a switch row **Daily Reminder**, and when it's on a **Time** row with the
+     compact `UIDatePicker` (inserted and removed with a fade). Footer: "A notification each
+     day with that day's reading." Denied: the switch animates back off, the footer becomes
+     "Notifications are turned off for Smooth Bible in Settings.", and an accent **Open
+     Settings** row appears (§10.2.2's behaviour, moved here).
+   - **Content:** title the plan's name ("Bible in a Year"); body "Today's reading: John
+     4–6" (that day's readings); userInfo `{"day": N}`; thread `plan`; ids
+     `plan-YYYY-MM-DD`; 30 dated requests ahead, none past the plan's last day; scheduled
+     again on launch, return, switch, time, plan change or progress.
+   - **Opening one** goes to that day's first unread chapter (dismissing sheets, the way
+     back shown), through the same `L8Notify` delegate and completion handler.
+   - Authorization is §10.2.3's, unchanged: the block shim stays, for this reminder only.
+3. **CI (§10.6):** 140 shows Today with "Reading Plans ›" and Recent; 147 is the plan's
+   Daily Reminder (off, with its footer); 149 its Time row; 150 a reminder opened (Genesis
+   4, day 2's first chapter); 148 the authorization alert, from the plan's switch.
+
 ### 10.0 Priorities, order and decisions
 | # | Item | Serves | Size |
 |---|------|--------|------|
@@ -3810,11 +3840,7 @@ Where the build differs from the text above, and why:
    Genesis 1:1's "God" is H430G. Each sense's count sums to its base's (tool and test).
 2. **`related.bin`** is ordered by (letter, number), G before H; distances run 0–0.83,
    stored as round(d·255); only Proximity's X1 keys are used (no reverse pairs added).
-3. **`votd.py`** also joins a verse that ends with a dash; takes the top 210 of each
-   Testament and interleaves them (OT on Jan 1), so OT/NT alternate exactly; writes
-   `votd.txt` only when it is missing (the designer's curated file is never overwritten;
-   the candidates always are); and `--check` rejects two days from the same book. Oct 19 is
-   Hosea 3:5. John 3:16 and Romans 8:28 are not candidates (John's cap of 12; "And").
+3. (The Verse of the Day's `votd.py` notes are gone with it: owner amendment above.)
 4. **Go To opens at its top**, Today first, rather than scrolled to the book being read
    (§3.2's Round 1 behavior): Today is always present, and shot 140 shows it.
 5. **"Your progress in … will be kept"** is a line under the plan's description in its
@@ -3825,8 +3851,8 @@ Where the build differs from the text above, and why:
    once a calendar day (`planDoneDay`); in the demo it stays 6 s, for the screenshot.
 8. **Rest is counted between scrolls while no sheet is over the reader**; the demo's hook
    (`demo_read`) shows the chapter's last verse and counts 20 s.
-9. **The notification's body is cut in the verse**, at a word, with "…" before the closing
-   quote, so " — John 3:16" always stays whole within the 178 characters.
+9. **The reminder's open path is checked by the demo:** step 251 opens day 2's reminder
+   (`notify_open_day`), and the reader goes to Genesis 4.
 10. **The block shim:** the authorization block is a global block (`programs/ios/block.l8`);
     its invoke is the L8 function's C-entry stub, which sets L8's stack from the caller's
     sp and so runs on the system's queue. It stores one word that carries the answer
@@ -3857,6 +3883,7 @@ Where the build differs from the text above, and why:
     the system's alert outlives the app (a relaunch showed it over every later shot), and
     the simulator cannot answer it. 149 comes before it, the shim's flag given "granted" by
     the demo (`demo_grant`), so the Time row and the scheduling are shown without an alert.
+    The alert in 148 is the real request's, from the plan's switch.
 18. Not done: Isaiah 37's pointer as a reference (optional in review r4-2).
 
 ### 10.8 Round 5 acceptance (summary)

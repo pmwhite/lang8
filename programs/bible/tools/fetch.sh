@@ -7,9 +7,8 @@
 #                         versions (usfm.py, versify.py), the language data
 #                         (bsb_lang.py), each word's sense (senses.py),
 #                         related words (related.py), cross references
-#                         (xrefs.py), the Verse of the Day's candidates
-#                         (votd.py) and Matthew Henry's Concise Commentary
-#                         (mhcc.py)
+#                         (xrefs.py) and Matthew Henry's Concise
+#                         Commentary (mhcc.py)
 # bereanbible.com turns away curl's own User-Agent, so a browser's is sent.
 # The files are data, not code: the tools read them with python3 -I.
 set -eu
@@ -90,4 +89,3 @@ python3 -I "$here/bsb_lang.py" "$dir/bsb_tables.tsv" "$dir/TBESH.txt" "$dir/TBES
   "$data/bsb.txt" "$data/lang"
 python3 -I "$here/senses.py" "$dir" "$data"
 python3 -I "$here/related.py" "$dir/Proximity.tsv" "$data"
-python3 -I "$here/votd.py" "$dir/cross-references.zip" "$data"

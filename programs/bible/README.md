@@ -42,14 +42,14 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   once that proxy says it can give it. The tray's Compare shows the verses
   in every version; Study gains References (OpenBible.info) and Commentary
   (Matthew Henry's Concise).
-- Daily reading (Round 5): Go To's Today section has the verse of the day
-  and, with a reading plan (a year, the NT in 90 days, Psalms and Proverbs
-  in a month, the Gospels in 30 days, computed by `plans.l8`), today's
-  readings, which count as read by rest, Listen or a tap. Reading settings
-  → Verse of the Day schedules one notification a day (its authorization
-  through the one block, `../ios/block.l8`). Word study shows a word's
-  exact sense (STEP's TAHOT and TAGNT) and related words (MACULA), and the
-  share sheet has Share as Image (`ios_share.l8`).
+- Daily reading (Round 5): reading plans (a year, the NT in 90 days,
+  Psalms and Proverbs in a month, the Gospels in 30 days, computed by
+  `plans.l8`) in Go To's Today section, today's readings counting as read
+  by rest, Listen or a tap; a plan's optional daily reminder of the day's
+  reading (its authorization through the one block, `../ios/block.l8`).
+  Word study shows a word's exact sense (STEP's TAHOT and TAGNT) and
+  related words (MACULA), and the share sheet has Share as Image
+  (`ios_share.l8`).
 - A link opens a chapter: `bsb://JHN/3` (or a verse, `bsb://JHN/3/16`).
 
 ## Files
@@ -66,8 +66,7 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   `data/mhcc.txt` Matthew Henry's Concise Commentary (`tools/mhcc.py`, from
   CCEL's ThML); `data/lang/senses.bin` each word's sense (`tools/senses.py`,
   from STEP's TAHOT and TAGNT) and `related.bin` related words
-  (`tools/related.py`, MACULA's Proximity, CC BY 4.0); `data/votd.txt` the
-  verse of each date (`tools/votd.py`, which writes the candidates).
+  (`tools/related.py`, MACULA's Proximity, CC BY 4.0).
   `tools/fetch.sh DIR make` downloads the sources, checks
   their sha256, and makes them all again.
   `lang.l8` reads the study data for the study screens (`test_lang.l8`), and
@@ -83,7 +82,7 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   client, cache on disk and the reader's states while a chapter comes
   (`esv_cache.l8` its portable rules, tested in `test_store.l8`);
   `ios_compare.l8` Compare; `ios_study2.l8` the Study sheet's segments;
-  `ios_daily.l8` Today, the plans and the daily notification (`plans.l8`
+  `ios_daily.l8` Today, the plans and their reminder (`plans.l8`
   their portable part, tested in `test_plans.l8`); `ios_share.l8` Share as
   Image; `ios_demo.l8` (and `ios_demo3.l8`, `ios_demo4.l8`, `ios_demo5.l8`)
   the demo CI runs.
