@@ -178,8 +178,9 @@ $(BUILD)/ios-check.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
 
 # The Bible app: its text's layout, tested; and the app, as arm64 assembly
 # for iOS (see programs/bible/README.md).
-$(OK)/bible-tests: l8c3 $(PROGRAMS) $(RUNTIME) $(wildcard programs/bible/data/*.txt programs/bible/data/*.bin programs/bible/data/lang/*) | $(OK)
+$(OK)/bible-tests: l8c3 $(PROGRAMS) $(RUNTIME) $(wildcard programs/bible/data/*.txt programs/bible/data/*.bin programs/bible/data/lang/* programs/bible/worker/*.js programs/bible/worker/*.mjs programs/bible/worker/fixtures/*) | $(OK)
 	+@$(STEP) 'bible tests' ./l8c3 test programs/bible/test_text.l8 programs/bible/test_lang.l8 programs/bible/test_store.l8
+	+@$(STEP) 'bible worker tests' node --test programs/bible/worker/test.mjs
 	@touch $@
 
 bible-test: $(OK)/bible-tests
