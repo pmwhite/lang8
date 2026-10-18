@@ -245,15 +245,16 @@ def markup(defn, have, stats):
 # transliteration as the tables write them (never STEP's dotted one), the
 # gloss in curly quotes, and the number as the app shows it (H7473).
 ORIG = "\u0590-\u05ff\u0370-\u03ff\u1f00-\u1fff"
-CROSS = re.compile(r'_([^_ ]+)_ \(([' + ORIG + r'][^()"]*?)(?: "([^"]*)")? ([HG])0*(\d+)[A-Za-z]?\)')
-CROSS_GLOSS_FIRST = re.compile(r'"([^"]*)" \(_([^_ ]+)_ ([' + ORIG + r'][^()"]*?) ([HG])0*(\d+)[A-Za-z]?\)')
+CROSS = re.compile(r'_([^_]+)_ \(([' + ORIG + r'][^()"]*?)(?: "([^"]*)")? ([HG])0*(\d+)[A-Za-z]{0,2}\)')
+CROSS_GLOSS_FIRST = re.compile(r'"([^"]*)" \(_([^_]+)_ ([' + ORIG + r'][^()"]*?) ([HG])0*(\d+)[A-Za-z]{0,2}\)')
 
 
 def cross_style(text, stats):
     def word(orig, tr, gloss, kind, num):
         first = orig.split(",")[0].strip()
         if kind == "H":
-            tr = hebrew_translit(first)
+            # (A name of several words, transliterated a word at a time.)
+            tr = " ".join(hebrew_translit(x) for x in first.split())
         else:
             tr = tr.replace(".", "")
         out = orig.strip() + " _" + tr + "_"
@@ -271,6 +272,9 @@ def cross_style(text, stats):
     text = re.sub(r"(^|\\n)((?:Also|Another|Aramaic|Group|Combined|A grammatical|A name|A shortened)"
                   r"[A-Za-z ]{0,40}?:?)(?= [" + ORIG + r"][^\\]*? \u00b7 [HG]\d)",
                   lambda m: m.group(1) + "**" + m.group(2) + "**", text)
+    # Every other Strong's number in the text as the app shows them: no
+    # leading zeros, no sense letter ("Ehud (H0164H)" reads "Ehud (H164)").
+    text = re.sub(r"\b([HG])0*([0-9]{1,4})[A-Za-z]{0,2}\b", r"\1\2", text)
     if re.search(r"_[a-z]+\.[a-z.]+_ \([" + ORIG + "]", text):
         stats["lexicon dotted transliterations left"] += 1
     return text
