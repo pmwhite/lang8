@@ -30,7 +30,21 @@ language tools. Above all: iPhone-native, HIG-proper, predictable UI.
    places, with system gestures and system wording (Done, Edit, Cancel, Search). Where a
    system pattern exists, use it rather than inventing an interaction. One gesture means
    one thing everywhere.
-6. **No blocks in Round 1.** Every API chosen below works with target-action, delegates or
+6. **Nothing changes abruptly.** Every visible state change of a bar, a backdrop, a
+   search field, a scope bar, a clear button, a toolbar, a title or a material must either
+   animate (fade, slide or system-animated change, at least 0.2 s, or the system's own
+   duration) or not happen at all.
+   - No appearance may swap on a scroll threshold. If a bar looks different scrolled and
+     at rest, the difference is a continuous function of the scroll offset; otherwise, it
+     looks the same in both states.
+   - Controls in a sheet must be in their final state **before** the sheet's presentation
+     animation begins. Configure them in `viewDidLoad` or `viewWillAppear:`, never in
+     `viewDidAppear:`. A sheet must never visibly rearrange itself after it lands.
+   - Disable implicit `CALayer` animations on layers the app drives frame by frame
+     (`[CATransaction setDisableActions:YES]`), so they don't lag behind the scroll.
+   - Reviews check this with the CI screen recording (§5, "Transitions"), not only the
+     still screenshots.
+7. **No blocks in Round 1.** Every API chosen below works with target-action, delegates or
    selector-based commands. Where a feature truly needs a block, it's flagged
    **[BLOCK SHIM]** and deferred.
 
@@ -327,7 +341,7 @@ the ESV and Crossway convention.
 ### 2.7 Motion
 | What | How |
 |---|---|
-| Bars hide/show | `setNavigationBarHidden:animated:YES` plus the status bar (`preferredStatusBarUpdateAnimation` = fade) |
+| Bar collapse/expand | Proportional to the scroll while dragging; settles with a 0.25 s ease-out (§3.1.4, R2-17). The status bar never hides |
 | Tray in | Translate from +(tray height + 24) to 0 with a CASpringAnimation (the §0 parameters), plus opacity 0→1 over 0.18 s |
 | Tray out | Translate down plus opacity to 0 over 0.2 s ease-in; hide on finish (timer at 0.22 s) |
 | Verse select wash | Immediate (no animation). The selection haptic carries the feel |
@@ -396,13 +410,116 @@ choose by priority:
 3. Inside a verse's text (body, verse number, LORD caps or poetry): **toggle that verse's
    selection** (§3.3). If the bars are hidden, they stay hidden. The tray is the chrome.
 4. Anywhere else (the opener, headings, refs, gaps between chapters, the margins outside
-   the text container): if a selection exists, clear it; otherwise **toggle the bars**.
+   the text container): if a selection exists, clear it; otherwise **toggle the bar between expanded and collapsed** (§3.1.4).
 
-#### 3.1.4 Bars on scroll
-Keep "scrolling down through the text hides the bars". **Add: a deliberate upward drag of
-more than 40 pt shows them again** (like Safari and Books), as does reaching the top.
-While verses are selected, the bars don't auto-hide. The status bar hides with the nav
-bar, as now.
+#### 3.1.4 The collapsing bar (R2-17, replaces the Round 1 hide/show behavior)
+The reader's top bar behaves like Safari's address bar. It **collapses in step with the
+scroll** to a compact title under the status bar, and expands again the same way. **The
+text never moves** because of the bar.
+
+**Structure (how it's built):**
+- The reader's navigation controller keeps its `UINavigationBar` **hidden permanently**.
+  Set `navigationBarHidden = YES` once, before the first appearance, unanimated, and never
+  change it again. Sheets keep their own standard bars.
+- The reader draws its own bar from real controls: a top-pinned container `UIView` (the
+  **reader bar**) holding:
+  - The page-colored backdrop with its fade (§3.1.1, as built).
+  - The three `UIButton`s (`plainButtonConfiguration`; the same SF Symbols, size and ink
+    tint as now; 44 × 44 hit areas).
+  - The title button (as now).
+  - A **compact title**: a `UIButton` with `plainButtonConfiguration`, its title in SF Pro
+    **12 pt semibold**, ink at 75%, with no chevron.
+- The status bar **stays visible at all times**, as in Safari. `prefersStatusBarHidden`
+  is always NO. Hiding it changes the safe area and moves the layout, and the Dynamic
+  Island band can't hold text anyway, so keeping it costs no reading lines.
+
+**Geometry:**
+- `S` = the status bar height (`view.safeAreaInsets.top`).
+- Expanded bar height `E` = 44 pt. Compact bar height `C` = 20 pt.
+- Collapse progress `p` runs from 0 (expanded) to 1 (collapsed).
+- The bar's visible height is `S + E − (E − C)·p`, so it shrinks by 24 pt.
+- The backdrop's height follows it, plus its 18 pt fade.
+
+**No text movement (a hard rule):**
+- The table uses `contentInsetAdjustmentBehavior = never`.
+- `contentInset.top` and `verticalScrollIndicatorInsets.top` are set to **`S + E`**,
+  constant, and recomputed only in `viewSafeAreaInsetsDidChange` and after a text-size
+  change.
+- The bar **overlays** the text: collapsing reveals the lines that were underneath, and
+  expanding covers them again. `contentOffset` is never changed because of the bar.
+- `go()`, the saved place and the title fade all measure against this constant inset, and
+  `adjustedContentInset` no longer changes.
+- Acceptance: with the content still, changing `p` from 0 to 1 changes no pixel below
+  `S + E` points.
+
+**Proportional collapse (while the finger is down):**
+- Track the scroll delta while `isTracking` is true, and while decelerating after a
+  drag.
+- **Downward reading** (content moving up): `p` increases by `delta / 48` (**48 pt of
+  scroll fully collapses it**, which is twice the 24 pt the bar loses, so the bar shrinks
+  at half the speed of the text and feels attached but calm).
+- **Upward scrolling**: reveal begins only after **12 pt of continuous upward travel**,
+  a hysteresis that keeps small corrections while rereading a line from shaking the bar.
+  After that, `p` decreases by `delta / 48`.
+- **Near the top**: `p` is capped at `(contentOffset.y + S + E) / 48`, so the bar
+  expands continuously as the text returns to its top, and is always fully expanded at
+  the very top.
+- Rubber-banding past the top or bottom doesn't change `p`.
+- Apply `p` directly (no animation) inside `scrollViewDidScroll:`, with implicit layer
+  actions disabled (principle 6). This is direct manipulation, so it never lags.
+
+**Settling (when scrolling stops):**
+- When scrolling ends (`scrollViewDidEndDragging:willDecelerate:NO`, or
+  `scrollViewDidEndDecelerating:`) with `0 < p < 1`, animate `p` to 1 if the last
+  movement was downward, or to 0 if it was upward.
+- Use a 0.25 s ease-out (`UIView` legacy animations or a CA spring with no bounce). The
+  content isn't touched.
+- With Reduce Motion on, use a 0.15 s cross-fade between the two states.
+
+**What happens to each element as `p` goes from 0 to 1:**
+| Element | Behavior |
+|---|---|
+| Search, Library and Aa buttons | alpha `1 − 2p` (gone by p = 0.5), and scale `1 − 0.15p` about their centers. `userInteractionEnabled = NO` when p > 0.5 |
+| Full title button | alpha `(1 − 2p)·f`, where `f` is the opener fade (below) |
+| Compact title | alpha `(2p − 1)·f` (appears from p = 0.5). It's centered in the compact band: top at `S`, height `C` |
+| Backdrop | follows the bar height. The fade's alpha is unchanged |
+| Back capsule, verse tray | unaffected |
+
+**The title fade (no duplicate chapter name):**
+- The opener-fade factor `f` (§0.5 item 1, as built) now measures the current chapter's
+  opener against the **current bar bottom**, `S + E − 24p`.
+- The full title and the compact title both use `f`, so neither ever shows while the
+  chapter's opener is visible below the bar, and only one of them is ever visible at a
+  time. At p = 0.5 both are at 0, a deliberate empty moment.
+- The compact title's text is the chapter name, e.g. "John 3" or "Psalm 23", updated with
+  `cur`.
+
+**Revealing the bar (to p = 0, animated over 0.25 s unless noted):**
+- Upward scroll after the 12 pt hysteresis (proportional, as above).
+- **Tap on the compact title** or anywhere in the compact band.
+- Reaching the top (continuous, via the cap), and a tap on the status bar (the system's
+  scroll-to-top, which reaches the top).
+- **Opening any sheet** from the reader (search, picker, library, settings, note, study):
+  start the expansion animation in the same run-loop turn as the presentation, so the two
+  animate together. A sheet never opens over a collapsed bar.
+- Any jump (picker, search, link, concordance, back capsule): expand alongside the jump.
+- A tap on a non-verse area (§3.1.3, item 4) toggles between p = 0 and p = 1, animated.
+- **VoiceOver running** (`UIAccessibilityIsVoiceOverRunning()`): the bar never collapses
+  (p stays 0).
+
+Selecting verses doesn't change `p`. The tray is independent of the bar.
+
+**The resting reading state is the compact title, not nothing.** This is decided against the
+owner's first priority, distraction-free reading:
+1. A 12 pt, 75%-ink chapter name in the band beside the Dynamic Island costs **no reading
+   lines**, because that band can't hold text.
+2. In a continuous scroll through 1,189 chapters with no page breaks, knowing where you
+   are is part of calm reading. Without it, the reader has to scroll or tap to find out.
+3. Hiding the status bar or the strip would change the layout, which is exactly the
+   "lose a few lines" jolt the owner disliked.
+4. It's the system's own answer to the same problem (Safari), so it's predictable.
+
+The Round 1 "bars hidden, status bar hidden" state no longer exists.
 
 #### 3.1.5 Footnote popover
 The popover stays a popover on a phone (as now). Its background is `cellBg` for the
@@ -896,6 +1013,46 @@ hygiene.
 
 ---
 
+### Collapsing-bar evidence (R2-17)
+These replace shots 15 and 15b, and add a few more. The demo drives scrolling with the same
+handlers as a real drag: a demo flag makes the handlers treat programmatic
+`setContentOffset` steps as tracking.
+
+| Shot | Demo action | Expected |
+|---|---|---|
+| `15a-before-collapse` | John 3 scrolled so 3:14 is near the top, p = 0, content still | Expanded bar; the text positions are the reference |
+| `15-collapsed` | Same offset, then set p = 1 with no scroll (the demo hook) | Compact "John 3" under the status bar; the buttons are gone; the status bar is visible; **every text pixel below S + E is identical to 15a** (the CI script computes the pixel difference of that region and prints it to `log.txt`; it must be 0) |
+| `15b-half` | Freeze p = 0.5 | Bar halfway: no button or title visible (both alphas 0), and the backdrop is at the intermediate height |
+| `15c-collapsed-opener` | Collapsed, then scroll so that the John 4 opener is visible mid-screen | The compact band shows **no title** (f = 0); there's no duplicate chapter name |
+| `16-bars-back` | From collapsed, simulated upward drag of 8 pt, then a further 60 pt | After 8 pt it's still collapsed (log p); after 68 pt it's expanded |
+| `16b-compact-tap` | From collapsed, tap the compact title | Expanded |
+| `16c-sheet-from-collapsed` | From collapsed, open search | The sheet is presented and the reader's bar behind it is expanded |
+
+Add a recording sequence 6 to Transitions: from expanded, step the offset down 4 pt per
+frame for 30 frames (120 pt), lift (settle), step up 2 pt per frame for 6 frames (12 pt,
+no reveal), then 4 pt per frame for 15 frames (reveal), then tap the compact title from a
+collapsed state.
+
+The reviewer checks that:
+- Over sequence 6, p changes by at most 4/48 per frame while tracking.
+- A fixed text line moves by exactly the scroll step every frame (no extra jump).
+- No element appears or disappears between two frames, except by the alpha ramps
+  above.
+
+### Transitions (screen recording, added in review r2-1)
+`simulate.sh` also records the screen (`xcrun simctl io booted recordVideo --codec h264
+transitions.mp4`) through these sequences, which run in demo mode and are triggered by
+additional notifications:
+1. Scroll the reader from the top of John 3 down 600 pt over 1 s, then back up.
+2. Hide and show the bars.
+3. Open search (with a previous query present) and dismiss it.
+4. Open the passage picker and dismiss it.
+5. Open the verse panel, and close it.
+
+It then extracts frames at 30 fps with ffmpeg into `transitions/` and a contact sheet,
+`transitions-sheet.png` (one row per sequence, every 3rd frame, at 25% scale), and pushes
+both with the screenshots. The designer reviews these for abrupt changes (principle 6).
+
 ## 6. Acceptance criteria (what the designer checks in review)
 
 ### Typography and page
@@ -917,7 +1074,7 @@ hygiene.
 ### Chrome and behavior
 7. The bar has exactly Search · Title · Library · Aa. The icons are ink-tinted, not red.
    The bar background is translucent over text and invisible at the top.
-8. The bars hide on scroll down and return on scroll up. The status bar follows them.
+8. The bar collapses and expands in proportion to the scroll, as specified in §3.1.4 (R2-17). The text never moves because of it. The status bar always stays.
 9. The back capsule appears after every jump, reads the origin, and doesn't cover text that
    can't be scrolled out from under it (the last chapter has enough bottom inset).
 10. A jump to a verse lands it about a third of the way down, with a visible but brief
@@ -1338,6 +1495,23 @@ size, set back by the script before step 32.
 | 52 | Dismiss, open Reading settings, scroll to the end, push Acknowledgements | `52-acknowledgements`: the three sections, the STEP Bible row with the arrow, and the version footer |
 | 53 | Push Changes to the Lexicon Data | `53-data-changes`: the list of changes |
 | 54 | Go to a known unaligned verse (Exodus 38:28) and select it | `54-study-disabled`: the panel with Study greyed |
+
+### 7.10a Amendments from review r2-1
+- **Tiles in columns:** the interlinear's tiles are laid out in an even column grid (as
+  built) instead of a width-wrapped flow. This is accepted, provided no tile text is ever
+  truncated (a long chunk spans two columns).
+- **Supplied words:** the translators' supplied words stay inside their neighbour's tile,
+  because that's how the tables record them. Accepted.
+- **Step 54 is dropped**, because every verse aligns. Keep the disable logic as a safeguard.
+- **Cut from Round 2:** the "All Renderings" screen (show the top 6 renderings only) and the
+  concordance's scope bar (keep its filter field).
+- **Display references in app style:** references inside definitions are displayed in the
+  app's style ("Rom 8:37", "John 3:35", "1 John 2:15"), never in STEP's ("Rom.8:37",
+  "Jhn.3:35").
+- **Hebrew outline definitions** (BDB style "1) … 1a) … 1a1) …"): each sense starts a new
+  line, indented 1.2 em per level (level = the number of alternating digit/letter groups
+  minus 1), with the label in faint. The 5-line preview shows the top-level senses only,
+  joined with " · ".
 
 ### 7.11 Round 2 acceptance criteria
 **Data**

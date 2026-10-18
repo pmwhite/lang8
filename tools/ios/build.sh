@@ -74,6 +74,11 @@ if [ "$kind" = device ]; then
     /usr/libexec/PlistBuddy -c "Add :$1 $2 $3" "$app/Info.plist"
   done
 fi
+# A build number given (CI's run number for the simulator's build), written
+# into the bundle's own Info.plist before it is signed: the app reads it there.
+if [ -n "${BUILD_NUMBER:-}" ]; then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$app/Info.plist"
+fi
 plutil -lint "$app/Info.plist"
 printf 'APPL????' > "$app/PkgInfo"
 cp "$dir/PrivacyInfo.xcprivacy" "$app/"

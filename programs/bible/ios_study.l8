@@ -15,73 +15,86 @@ import "text.l8";
 import "lang.l8";
 
 // ---- the data, at first use ----
-lang_data(name: str, ext: str): int {
+// Each file mapped (mmap) at the first study, never at launch: nothing is
+// read or allocated for a reader who never studies. A mapping is an L8
+// array: its length in the (anonymous, writable) page before the file's
+// pages, the file itself mapped read-only after them.
+extern mmap(
+    addr: int,
+    n: int,
+    prot: int,
+    flags: int,
+    fd: int,
+    offset: int
+): int;
+
+extern open_c(path: int, flags: int, mode: int): int = open;
+
+extern bytes_at(p: int): []i8 = l8_as_int;
+
+extern ints_bytes(a: []int): []i8 = l8_as_int;
+
+extern CFAbsoluteTimeGetCurrent(): f64;
+
+lang_page: int = 16384;
+
+lang_none: []i8 = new i8[1](0i8);
+
+// The size of the file last mapped (0 if it is missing).
+lang_mapped: int = 0;
+
+lang_map(name: str, ext: str): []i8 {
+    lang_mapped = 0;
     bundle: int = msg(cls("NSBundle"), sel("mainBundle"));
     path: int = msg2(bundle, sel("pathForResource:ofType:"), nsstring(name), nsstring(ext));
-    if (path == 0) return 0;
-    // (Mapped if it can be: NSDataReadingMappedIfSafe.)
-    msg3(cls("NSData"), sel("dataWithContentsOfFile:options:error:"), path, 1, 0)
-}
-
-data_len(d: int): int {
-    if (d == 0) 0 else msg(d, sel("length"))
-}
-
-data_copy(d: int, b: []i8) {
-    n: int = data_len(d);
-    if (n > 0) memcpy_from(b, msg(d, sel("bytes")), n)
-}
-
-// A data file's size in the bundle (without reading it).
-lang_size(name: str, ext: str): int {
-    bundle: int = msg(cls("NSBundle"), sel("mainBundle"));
-    path: int = msg2(bundle, sel("pathForResource:ofType:"), nsstring(name), nsstring(ext));
-    if (path == 0) return 0;
+    if (path == 0) return lang_none;
     attrs: int = msg2(msg(cls("NSFileManager"), sel("defaultManager")), sel("attributesOfItemAtPath:error:"),
         path, 0);
-    if (attrs == 0) 0 else msg(attrs, sel("fileSize"))
-}
-
-// The arrays for the data, made at launch (L8's callbacks cannot make
-// them): only made, untouched pages of the heap's mapping; filled at the
-// first study (lang_load).
-lang_alloc() noregion {
-    lw = new i8[lang_size("words", "bin") + 1](0i8);
-    lv = new i8[lang_size("verses", "bin") + 1](0i8);
-    lsup = new i8[lang_size("supplied", "bin") + 1](0i8);
-    lforms = new i8[lang_size("forms", "txt") + 1](0i8);
-    lmorph = new i8[lang_size("morph", "txt") + 1](0i8);
-    lconc = new i8[lang_size("conc", "bin") + 1](0i8);
-    llex = new i8[lang_size("lexicon", "txt") + 1](0i8);
-    lgram = new i8[lang_size("grammar", "txt") + 1](0i8)
-}
-
-// A file into its array: how many bytes (0 if it does not fit).
-lang_fill(name: str, ext: str, b: []i8): int {
-    d: int = lang_data(name, ext);
-    n: int = data_len(d);
-    if (n + 1 > len(b)) return 0;
-    data_copy(d, b);
-    n
+    n: int = if (attrs == 0) 0 else msg(attrs, sel("fileSize"));
+    if (n <= 0) return lang_none;
+    fd: int = open_c(msg(path, sel("fileSystemRepresentation")), 0, 0);
+    if (fd < 0) return lang_none;
+    // (PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON; then PROT_READ,
+    // MAP_PRIVATE|MAP_FIXED over all but its first page.)
+    base: int = mmap(0, n + lang_page, 3, 4098, -1, 0);
+    if (base == -1 || base == 0) {
+        close(fd);
+        return lang_none
+    }
+    at: int = mmap(base + lang_page, n, 1, 18, fd, 0);
+    close(fd);
+    if (at != base + lang_page) return lang_none;
+    one[0] = n;
+    memcpy_to(base + lang_page - 8, ints_bytes(one), 8);
+    lang_mapped = n;
+    bytes_at(base + lang_page)
 }
 
 lang_load() {
     if (lang_ready) return;
-    n: int = lang_fill("words", "bin", lw);
-    if (n == 0) {
+    t0: f64 = CFAbsoluteTimeGetCurrent();
+    lw = lang_map("words", "bin");
+    if (lang_mapped == 0) {
         note("bible: no language data");
         return
     }
-    lw_n = n / 12;
-    lv_n = lang_fill("verses", "bin", lv) / 8 - 1;
-    lsup_n = lang_fill("supplied", "bin", lsup) / 8;
-    lforms_len = lang_fill("forms", "txt", lforms);
-    lmorph_len = lang_fill("morph", "txt", lmorph);
-    lconc_len = lang_fill("conc", "bin", lconc);
-    llex_len = lang_fill("lexicon", "txt", llex);
-    lgram_len = lang_fill("grammar", "txt", lgram);
+    lw_n = lang_mapped / 12;
+    lv = lang_map("verses", "bin");
+    lv_n = lang_mapped / 8 - 1;
+    lsup = lang_map("supplied", "bin");
+    lsup_n = lang_mapped / 8;
+    lforms = lang_map("forms", "txt");
+    lforms_len = lang_mapped;
+    lmorph = lang_map("morph", "txt");
+    lmorph_len = lang_mapped;
+    lconc = lang_map("conc", "bin");
+    lconc_len = lang_mapped;
+    llex = lang_map("lexicon", "txt");
+    llex_len = lang_mapped;
+    lgram = lang_map("grammar", "txt");
+    lgram_len = lang_mapped;
     lang_index();
-    note("bible: language data read")
+    note_num("bible: language data mapped, ms ", ((CFAbsoluteTimeGetCurrent() - t0) * 1000.0f64) as int)
 }
 
 // Whether verse v of chapter c can be studied (the data read, if not yet).
@@ -334,21 +347,29 @@ make_tile(i: int): int {
         tile_lines[3] = label_of(attributed(fstring(), mono(11.0f64), soft));
         n = 4
     }
-    // Its width: the widest line's, and 16.
+    // Its width: the widest line's, and 16; never wider than a row, its
+    // lines wrapping within that rather than cut short.
     wide: f64 = 0.0f64;
+    for k in 0..n {
+        label_size(tile_lines[k], 2000.0f64);
+        if (hfa[0] > wide) wide = hfa[0]
+    }
+    most: f64 = il_width - 28.0f64 - 16.0f64;
+    if (most > 40.0f64 && wide > most) wide = most;
+    wide = (wide + 0.99f64) as int as f64;
     h: f64 = 12.0f64;
     for k in 0..n {
-        label_size(tile_lines[k], 600.0f64);
-        if (hfa[0] > wide) wide = hfa[0];
+        msg1(tile_lines[k], sel("setNumberOfLines:"), 0);
+        label_size(tile_lines[k], wide);
         h = h + hfa[1] + (if (k > 0) 2.0f64 else 0.0f64)
     }
     tw: f64 = wide + 16.0f64;
     t: int = msg(make(if (w >= 0) "UIControl" else "UIView"), sel("autorelease"));
     y: f64 = 6.0f64;
     for k in 0..n {
-        label_size(tile_lines[k], 600.0f64);
+        label_size(tile_lines[k], wide);
         lh: f64 = hfa[1];
-        msg_rect(tile_lines[k], sel("setFrame:"), 0.0f64, y, tw, lh);
+        msg_rect(tile_lines[k], sel("setFrame:"), 8.0f64, y, wide, lh);
         msg1(t, sel("addSubview:"), tile_lines[k]);
         y = y + lh + 2.0f64
     }
@@ -390,8 +411,12 @@ il_build() {
     fbuf_n = 0;
     fput_int(v_num(il_vi));
     fput_str("\â\€\¯");
+    // (Its number exactly as the reader sets one: 0.58 em semibold, faint,
+    // raised 0.36 em, then a narrow no-break space.)
     append(s, fstring(), msg_ff(cls("UIFont"), sel("monospacedDigitSystemFontOfSize:weight:"),
-        size * 0.62f64, 0.3f64), c_faint);
+        size * 0.58f64, 0.3f64), c_faint);
+    msg4(s, sel("addAttribute:value:range:"), k_baseline, nsnumber_f(size * 0.36f64),
+        0, msg(s, sel("length")));
     if (st_title > 0) {
         append(s, ns_of(st, 0, st_title + 1), italic(size), c_faint);
         append(s, ns_of(st, st_title + 1, st_n), body(size), c_ink)
@@ -440,8 +465,20 @@ il_build() {
 il_order(_self: int, _cmd: int, seg: int): int {
     il_original = msg(seg, sel("selectedSegmentIndex")) == 1;
     set_def_int("interlinearOrder", if (il_original) 1 else 0);
+    // (The tiles cross-fade into their new order.)
+    fade_layer(msg(il_scroll, sel("layer")), 0.2f64);
     il_build();
     0
+}
+
+// A cross-fade of whatever changes in a layer next, over t seconds.
+fade_layer(layer: int, t: f64) {
+    if (layer == 0) return;
+    tr: int = make("CATransition");
+    msg1(tr, sel("setType:"), objc_const("kCATransitionFade"));
+    msg_set_f(tr, sel("setDuration:"), t);
+    msg2(layer, sel("addAnimation:forKey:"), tr, 0);
+    release(tr)
 }
 
 // The verse before or after (across chapters; not one that cannot be
@@ -576,24 +613,18 @@ study_footer(s: int): int {
     0
 }
 
-// The definition's first words, plain (its markup's text, its paragraphs
-// run together).
+// The definition's first words, plain: an outline's top senses joined
+// with " Â· ", or its paragraphs run together (lang.l8).
 definition_preview(): int {
     if (ws_lex < 0) return nsstring("No definition.");
-    lex_field(ws_lex, 4);
-    lex_markup(lf_b, lf_e);
-    fbuf_n = 0;
-    open: bool = true;
-    for i in 0..lx_n {
-        // (Up to 600 bytes, stopping between characters.)
-        cont: bool = byte_of(lx, i) >= 128 && byte_of(lx, i) < 192;
-        if (fbuf_n >= 600 && !cont) open = false;
-        if (open) {
-            k: int = lx[i] as int;
-            fput(if (k == 10) 32 else k)
-        }
+    definition_preview_of(ws_lex);
+    // (Up to 600 bytes, stopping between characters.)
+    n: int = pv_n;
+    if (n > 600) {
+        n = 600;
+        while (n > 0 && byte_of(pv, n) >= 128 && byte_of(pv, n) < 192) n = n - 1
     }
-    fstring()
+    nsstring_of(pv, n)
 }
 
 study_cell(t: int, path: int): int {
@@ -717,11 +748,19 @@ k_ref: str = "L8Ref";
 
 k_web: str = "L8Web";
 
-// A paragraph style for the definition: hung for a sense.
+// A paragraph style for the definition: hung for a sense; an outline's
+// line indented 1.2 em a level (level 1 at the margin), its wrapped lines
+// hung past its label.
 def_para(hang: bool, after: f64): int {
     p: int = msg(para_style(0, 0.0f64, if (hang) scaled(16.0f64) * 1.4f64 else 0.0f64,
         0.0f64, after, 1.3f64), sel("autorelease"));
     p
+}
+
+def_outline_para(level: int, after: f64): int {
+    size: f64 = scaled(16.0f64);
+    x: f64 = (level - 1) as f64 * 1.2f64 * size;
+    msg(para_style(0, x, x + 1.4f64 * size, 0.0f64, after, 1.3f64), sel("autorelease"))
 }
 
 definition_text(): int {
@@ -769,12 +808,12 @@ definition_text(): int {
             st_: int = lx_style[r];
             f: int = 0;
             if ((st_ & LX_HEBREW) != 0) f = sans(scaled(19.0f64), 0.0f64) else if ((st_ & LX_BOLD) != 0) f = bold(size) else if ((st_ & LX_ITALIC) != 0) f = italic(size) else f = body(size);
-            color: int = if ((st_ & LX_REF) != 0) c_accent else c_ink;
+            color: int = if ((st_ & LX_REF) != 0) c_accent else if ((st_ & LX_LABEL) != 0) c_faint else c_ink;
             at: int = msg(s, sel("length"));
             append(s, ns_of(lx, a, lx_end[r]), f, color);
             n2: int = msg(s, sel("length")) - at;
-            msg4(s, sel("addAttribute:value:range:"), k_para, def_para(lx_sense[r],
-                size * 0.5f64), at, n2);
+            msg4(s, sel("addAttribute:value:range:"), k_para, if (lx_level[r] > 0) def_outline_para(lx_level[r],
+                size * 0.25f64) else def_para(lx_sense[r], size * 0.5f64), at, n2);
             if ((st_ & LX_REF) != 0 && lx_book[r] >= 0) msg4(s, sel("addAttribute:value:range:"),
                 nsstring(k_ref), nsnumber_int(1 + lx_book[r] * 1000000 + lx_ch[r] * 1000 + lx_verse[r]),
                 at, n2);
@@ -1019,7 +1058,9 @@ ack_footer(s: int): int {
     fbuf_n = 0;
     fput_str("Smooth Bible ");
     for key in ["CFBundleShortVersionString", "CFBundleVersion"] {
-        v: int = msg1(bundle, sel("objectForInfoDictionaryKey:"), nsstring(key));
+        // (Read from the bundle's own Info.plist at run time: the build
+        // number written into it when it was built or signed.)
+        v: int = msg1(msg(bundle, sel("infoDictionary")), sel("objectForKey:"), nsstring(key));
         if (key[8] as int == 86) fput_str(" (");
         if (v != 0) {
             n: int = nsstring_into(v, number_buf);
