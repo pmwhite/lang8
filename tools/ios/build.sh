@@ -83,6 +83,13 @@ if ! actool; then
   actool || { cat "$out/actool.txt"; exit 1; }
 fi
 grep -i "warning\|error" "$out/actool.txt" || true
+# What actool put in the catalog: the icon's entries, and the appearances
+# (UIAppearanceDark, the tinted one) if they were compiled in.
+if [ -f "$app/Assets.car" ]; then
+  echo "assetutil: the icon's appearances in $app/Assets.car"
+  xcrun --sdk iphoneos assetutil --info "$app/Assets.car" > "$out/assetutil.json" 2>&1 || true
+  grep -iE '"Appearance"|AppIcon' "$out/assetutil.json" || echo "assetutil: no AppIcon or Appearance entries"
+fi
 /usr/libexec/PlistBuddy -c "Merge $out/icon.plist" "$app/Info.plist"
 # What it was built with (Xcode adds this, and App Store Connect checks it).
 if [ "$kind" = device ]; then

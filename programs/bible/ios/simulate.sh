@@ -269,6 +269,7 @@ more)
   step 122 82-listen-tray
   step 123 83-red-letter
   step 124 84-red-letter-night
+  step 129 79b-listen-entry-night 6
   step 125
   ui content_size accessibility-extra-extra-extra-large
   step 125 85-ax-reader
