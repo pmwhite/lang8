@@ -47,7 +47,7 @@ def main():
     found = []
     for book, c in CHAPTERS:
         url = "%sesv/chapters?book=%s&chapter=%d&count=1" % (base, book, c)
-        req = urllib.request.Request(url, headers={"X-Smooth-Bible": "versify (1)"})
+        req = urllib.request.Request(url, headers={"X-Smooth-Bible": "versify (1)", "User-Agent": "SmoothBible-versify/1"})
         with urllib.request.urlopen(req, timeout=20) as r:
             body = json.load(r)
         records = body["chapters"][0]["records"].split("\n")

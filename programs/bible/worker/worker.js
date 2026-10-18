@@ -137,7 +137,8 @@ const chapters = async (env, q, now) => {
   const n = chaptersFor(b, c, count);
   const spent = await spend(env, now);
   if (spent) return spent;
-  const passage = n === 2 ? `${b[1]} ${c}-${c + 1}` : `${b[1]} ${c}`;
+  // (Whole chapters by verse range: "3 John 1" alone is its first verse.)
+  const passage = n === 2 ? `${b[1]} ${c}:1-${c + 1}:999` : `${b[1]} ${c}:1-999`;
   const got = await upstream(env, "/v3/passage/html/", { q: passage, ...HTML_OPTIONS });
   if (got.error) return got.error;
   const html = (got.body.passages ?? []).join("\n");

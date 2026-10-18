@@ -101,7 +101,7 @@ test("a chapter, through the mock ESV API", async () => {
   assert.equal(upstreamCalls.length, 1);
   const u = new URL(upstreamCalls[0].url);
   assert.equal(u.origin, "https://esv.test");
-  assert.equal(u.searchParams.get("q"), "John 3");
+  assert.equal(u.searchParams.get("q"), "John 3:1-999");
   assert.equal(u.searchParams.get("include-short-copyright"), "true");
   assert.equal(upstreamCalls[0].init.headers.authorization, "Token test-key");
 });
@@ -119,9 +119,15 @@ test("count is cut to 1 where two chapters would pass the terms", () => {
 test("Joel 2-3 is asked for as Joel 2 alone", async () => {
   mockFetch();
   await get(env(), "esv/chapters?book=JOL&chapter=2&count=2");
-  assert.equal(new URL(upstreamCalls[0].url).searchParams.get("q"), "Joel 2");
+  assert.equal(new URL(upstreamCalls[0].url).searchParams.get("q"), "Joel 2:1-999");
   await get(env(), "esv/chapters?book=JHN&chapter=3&count=2");
-  assert.equal(new URL(upstreamCalls[1].url).searchParams.get("q"), "John 3-4");
+  assert.equal(new URL(upstreamCalls[1].url).searchParams.get("q"), "John 3:1-4:999");
+});
+
+test("a one-chapter book is asked for whole, not its first verse", async () => {
+  mockFetch();
+  await get(env(), "esv/chapters?book=3JN&chapter=1&count=1");
+  assert.equal(new URL(upstreamCalls[0].url).searchParams.get("q"), "3 John 1:1-999");
 });
 
 test("bad requests and a missing header are 400s", async () => {
@@ -205,4 +211,20 @@ test("a search, its references as codes and keys", async () => {
   assert.deepEqual(j.results[0], { book: "JHN", chapter: 3, verse: 3, key: 3, text: j.results[0].text });
   assert.equal(j.results[6].book, "1PE");
   assert.equal(new URL(upstreamCalls[0].url).searchParams.get("page-size"), "100");
+});
+
+test("footnotes as the API gives them: one <p>, a <br /> between", () => {
+  // (Its layout, with the WEB's words, as the fixtures are.)
+  const html = `<h3 id="h">Test</h3>
+<p class="starts-chapter"><b class="chapter-num" id="v43003001-1">3:1&nbsp;</b>Now there was a man<sup class="footnote"><a class="fn" href="#f1-1" id="fb1-1" title="">1</a></sup> of the Pharisees. <b class="verse-num" id="v43003002-1">2&nbsp;</b>He came by night<sup class="footnote"><a class="fn" href="#f2-1" id="fb2-1" title="">2</a></sup> to Jesus.</p>
+<div class="footnotes extra_text">
+<h3>Footnotes</h3>
+<p><span class="footnote"><a href="#fb1-1" id="f1-1">[1]</a></span> <span class="footnote-ref">3:1</span> <note class="translation">Greek <i>a person</i></note>
+<br />
+<span class="footnote"><a href="#fb2-1" id="f2-1">[2]</a></span> <span class="footnote-ref">3:2</span> <note class="alternative">Or <i>in the dark</i></note>
+</p>
+</div>
+<p>(<a href="http://www.esv.org" class="copyright">ESV</a>)</p>`;
+  const recs = convert(html, "JHN", 3).chapters[0].records.split("\n").filter((r) => r[0] === "F");
+  assert.deepEqual(recs, ["FGreek a person", "FOr in the dark"]);
 });
