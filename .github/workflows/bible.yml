@@ -1,13 +1,16 @@
 # Smooth Bible (programs/bible), built and run in the iOS simulator.
 #
 # A Linux job builds the compiler and compiles programs/bible/ios.l8 to
-# arm64 assembly (`l8 arm64 --target ios`); a macOS job assembles and links
-# it with Xcode's tools into SmoothBible.app (tools/ios/build.sh, with
-# programs/bible/ios) and runs it in the simulator, which goes through it by
-# itself (programs/bible/ios/simulate.sh). The screenshots are kept as the
-# run's artifacts, and pushed to the ci-bible-shots branch (one commit, each
-# run replacing the last). Another macOS job builds SmoothBible.ipa, for an
-# iPhone, onto the ci-bible-ipa branch (ad hoc signed).
+# arm64 assembly (`l8 arm64 --target ios`). macOS jobs assemble and link it
+# with Xcode's tools into SmoothBible.app (tools/ios/build.sh, with
+# programs/bible/ios): three run it in simulators side by side, each a group
+# of the demo (programs/bible/ios/simulate.sh: read, study, notes, which
+# also records the screen); another builds SmoothBible.ipa, for an iPhone,
+# onto the ci-bible-ipa branch (ad hoc signed); another times launches
+# against Round 1's app. A last Linux job puts the groups' screenshots
+# together (programs/bible/ios/shots.py: the collapsing bar's pixel check,
+# the recording's frames and contact sheet) and pushes them to the
+# ci-bible-shots branch (one commit, each run replacing the last).
 name: Smooth Bible
 
 on:
@@ -23,16 +26,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Build the compiler
         run: make -j4 l8c3
       - name: Test the text's layout
         run: ./l8c3 test programs/bible/test_text.l8 programs/bible/test_lang.l8
       - name: Compile the app for iOS
         run: ./l8c3 arm64 --target ios programs/bible/ios.l8 -o bible-ios.s
+      - name: Compile Round 1's app (to time launches against)
+        run: |
+          git worktree add -q r1 8ee6fccb
+          (cd r1 && make -j4 l8c3 >/dev/null && ./l8c3 arm64 --target ios programs/bible/ios.l8 -o ../bible-ios-r1.s)
       - uses: actions/upload-artifact@v4
         with:
           name: bible-ios-assembly
-          path: bible-ios.s
+          path: |
+            bible-ios.s
+            bible-ios-r1.s
 
   device:
     needs: compile
@@ -68,32 +79,84 @@ jobs:
   simulator:
     needs: compile
     runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [read, study, notes]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: bible-ios-assembly
       - name: Build SmoothBible.app
-        run: tools/ios/build.sh sim bible-ios.s build programs/bible/ios 2>&1 | tee build.log
-      - name: Run it in the simulator
-        run: programs/bible/ios/simulate.sh build/SmoothBible.app shots
+        run: BUILD_NUMBER=${{ github.run_number }} tools/ios/build.sh sim bible-ios.s build programs/bible/ios 2>&1 | tee build.log
+      - name: Run its demo's ${{ matrix.group }} group in the simulator
+        run: programs/bible/ios/simulate.sh build/SmoothBible.app shots ${{ matrix.group }}
       - name: Keep the app (for another Mac's simulator)
-        if: always()
+        if: always() && matrix.group == 'read'
         run: cd build && zip -qry ../SmoothBible-simulator.zip SmoothBible.app || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: bible-simulator
+          name: shots-${{ matrix.group }}
           path: |
             shots
             build.log
             SmoothBible-simulator.zip
-      - name: Push the screenshots to ci-bible-shots
+
+  launch:
+    needs: compile
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: bible-ios-assembly
+      - name: Build this app and Round 1's
+        run: |
+          tools/ios/build.sh sim bible-ios.s now programs/bible/ios > /dev/null
+          git worktree add -q r1 8ee6fccb
+          (cd r1 && tools/ios/build.sh sim ../bible-ios-r1.s ../r1app programs/bible/ios > /dev/null)
+      - name: Time their launches
+        run: programs/bible/ios/launch.sh now/SmoothBible.app r1app/SmoothBible.app launch.txt
+      - uses: actions/upload-artifact@v4
         if: always()
+        with:
+          name: launch
+          path: launch.txt
+
+  publish:
+    needs: [simulator, launch]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: groups
+      - name: Put the groups together
         run: |
           mkdir -p publish
-          cp -r shots/. publish/ 2>/dev/null || true
-          cp build.log publish/ 2>/dev/null || true
+          for g in read study notes; do
+            s=groups/shots-$g/shots
+            [ -d "$s" ] || continue
+            cp "$s"/*.png publish/ 2>/dev/null || true
+            for f in "$s"/*; do
+              case "$f" in *.png) ;; *) cp -r "$f" "publish/$g-$(basename "$f")" ;; esac
+            done
+            cp groups/shots-$g/build.log publish/$g-build.log 2>/dev/null || true
+          done
+          cp groups/launch/launch.txt publish/ 2>/dev/null || true
+          mv publish/notes-transitions.mp4 publish/transitions.mp4 2>/dev/null || true
+          mv publish/notes-transitions.txt publish/transitions.txt 2>/dev/null || true
+      - name: The collapsing bar's pixel check, and the recording's frames
+        run: |
+          pip install --quiet pillow av
+          python3 -I programs/bible/ios/shots.py publish | tee -a publish/read-log.txt
+      - name: Push the screenshots to ci-bible-shots
+        run: |
           echo "${GITHUB_SHA} run ${GITHUB_RUN_ID}" > publish/RUN.txt
           cd publish
           git init -q -b ci-bible-shots

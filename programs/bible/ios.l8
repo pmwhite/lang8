@@ -41,6 +41,8 @@ import "lang.l8";
 
 import "ios_study.l8";
 
+import "ios_bar.l8";
+
 import "ios_demo.l8";
 
 extern open(path: str, flags: int, mode: int): int;
@@ -689,11 +691,30 @@ title_fade() {
     if (tv != 0 && range_rect(tv, opener16[cur], 1)) {
         foot: f64 = hfa[1] + hfa[3];
         foot = foot + row_y(cur);
-        a = (offset_y(table) + top_inset(table) - foot) / (em * 1.2f64);
+        // (Measured against the bar's bottom now, as it collapses.)
+        a = (offset_y(table) + bar_bottom() - foot) / (em * 1.2f64);
         if (a < 0.0f64) a = 0.0f64;
         if (a > 1.0f64) a = 1.0f64
     }
-    msg_set_f(title_fader, sel("setAlpha:"), a)
+    bar_f = a;
+    msg_set_f(title_fader, sel("setAlpha:"), clamp01(1.0f64 - 2.0f64 * bar_p) * a);
+    if (compact_button != 0) msg_set_f(compact_button, sel("setAlpha:"), clamp01(2.0f64 * bar_p - 1.0f64) * a)
+}
+
+// The titles' fade settled when scrolling stops (0.15 s, should the
+// measure have changed under them).
+title_settle() {
+    was: f64 = msg_f(title_fader, sel("alpha"));
+    was2: f64 = if (compact_button != 0) msg_f(compact_button, sel("alpha")) else 0.0f64;
+    title_fade();
+    now: f64 = msg_f(title_fader, sel("alpha"));
+    if (now - was > 0.01f64 || was - now > 0.01f64) animate(msg(title_fader, sel("layer")),
+        "opacity", was, now, false, 0.15f64);
+    if (compact_button != 0) {
+        now2: f64 = msg_f(compact_button, sel("alpha"));
+        if (now2 - was2 > 0.01f64 || was2 - now2 > 0.01f64) animate(msg(compact_button,
+            sel("layer")), "opacity", was2, now2, false, 0.15f64)
+    }
 }
 
 // Chapter c, at y points down into it.
@@ -855,25 +876,14 @@ relayout() {
 }
 
 // ---- the bars ----
+// The reader's bar collapsed, or expanded (animated; ios_bar.l8). The
+// status bar stays.
 show_bars(hidden: bool) {
-    if (hidden == bars_hidden) return;
-    bars_hidden = hidden;
-    msg2(nav, sel("setNavigationBarHidden:animated:"), if (hidden) 1 else 0, 1);
-    // (With the bars hidden, the page runs clean to the top edge.)
-    if (backdrop != 0) {
-        for v in [backdrop, backdrop_fade] {
-            layer: int = msg(v, sel("layer"));
-            msg_set_f32(layer, sel("setOpacity:"), (if (hidden) 0.0f64 else 1.0f64) as f32);
-            animate(layer, "opacity", if (hidden) 1.0f64 else 0.0f64, if (hidden) 0.0f64 else 1.0f64,
-                false, 0.25f64)
-        }
-        if (!hidden) place_backdrop()
-    }
-    msg(nav, sel("setNeedsStatusBarAppearanceUpdate"))
+    bar_animate_to(if (hidden) 1.0f64 else 0.0f64)
 }
 
 nav_status_hidden(_self: int, _cmd: int): int {
-    if (bars_hidden) 1 else 0
+    0
 }
 
 nav_status_child(_self: int, _cmd: int): int {
@@ -889,32 +899,30 @@ nav_status_style(_self: int, _cmd: int): int {
     if (is_dark()) 1 else 3
 }
 
-// Scrolling on through the text hides the bars; a deliberate drag back up
-// (more than 40 points), or the top, shows them.
+// The scroll: the place found, the bar following it (ios_bar.l8), and the
+// capsule let go once far from where it came.
 scroll_began(_self: int, _cmd: int, sv: int): int {
     if (!is_reader(sv)) return 0;
     drag_top = offset_y(sv);
     drag_low = drag_top;
+    bar_drag_began();
     0
 }
 
 scrolled(_self: int, _cmd: int, sv: int): int {
     if (!is_reader(sv)) return 0;
+    bar_scrolled(sv);
     find_place();
-    y: f64 = offset_y(sv);
-    if ((msg(sv, sel("isTracking")) & 255) != 0) {
-        if (y > drag_top) drag_top = y;
-        if (y < drag_low) drag_low = y;
-        if (y > drag_low + 30.0f64 && y > 0.0f64 && sel_n == 0) show_bars(true);
-        if (y < drag_top - 40.0f64) show_bars(false)
-    }
-    if (y + top_inset(sv) < 4.0f64 && bars_hidden && (msg(sv, sel("isDragging")) & 255) != 0) show_bars(false);
-    back_scrolled(y);
+    back_scrolled(offset_y(sv));
     0
 }
 
 scroll_ended(_self: int, _cmd: int, sv: int): int {
-    if (is_reader(sv)) save_place();
+    if (is_reader(sv)) {
+        bar_settle();
+        title_settle();
+        save_place()
+    }
     0
 }
 
@@ -924,7 +932,11 @@ scroll_dragged(
     sv: int,
     decelerate: int
 ): int {
-    if (is_reader(sv) && (decelerate & 255) == 0) save_place();
+    if (is_reader(sv) && (decelerate & 255) == 0) {
+        bar_settle();
+        title_settle();
+        save_place()
+    }
     0
 }
 
@@ -959,7 +971,7 @@ tapped(_self: int, _cmd: int, tap: int): int {
             return 0
         }
     }
-    if (sel_n > 0) clear_selection() else show_bars(!bars_hidden);
+    if (sel_n > 0) clear_selection() else bar_animate_to(if (bar_p >= 0.5f64) 0.0f64 else 1.0f64);
     0
 }
 
@@ -1089,6 +1101,7 @@ show_footnote(
     msg1(pop, sel("setPermittedArrowDirections:"), 3);
     msg1(pop, sel("setBackgroundColor:"), bg);
     msg1(pop, sel("setDelegate:"), app_obj);
+    bar_expand();
     msg3(nav, sel("presentViewController:animated:completion:"), vc, 1, 0);
     release(vc)
 }
@@ -1126,6 +1139,7 @@ set_title() {
     msg1(title_button, sel("setConfiguration:"), config);
     msg1(title_button, sel("setAccessibilityLabel:"), name);
     msg1(title_button, sel("setAccessibilityHint:"), nsstring("Choose a book and chapter"));
+    set_compact_title(name);
     // (Its size: the title's, the chevron's and the button's insets.)
     l8_msg_hfa(hfa, t, sel("size"), 0, 0, 0);
     w: f64 = hfa[0] + 44.0f64;
@@ -1141,78 +1155,14 @@ presented(): int {
 }
 
 // ---- the theme, applied ----
-// The bar's look for the theme: clear, the same scrolled or not, over the
-// page's own backdrop (below), so nothing about it changes as the text
-// goes under it.
-style_bar() {
-    bar: int = msg(nav, sel("navigationBar"));
-    standard: int = make("UINavigationBarAppearance");
-    clear: int = msg(cls("UIColor"), sel("clearColor"));
-    msg(standard, sel("configureWithTransparentBackground"));
-    msg1(standard, sel("setShadowColor:"), clear);
-    keys[0] = k_color;
-    values[0] = c_ink;
-    msg1(standard, sel("setTitleTextAttributes:"), nsdictionary(keys, values, 1));
-    edge: int = make("UINavigationBarAppearance");
-    msg(edge, sel("configureWithTransparentBackground"));
-    msg1(edge, sel("setShadowColor:"), clear);
-    msg1(edge, sel("setTitleTextAttributes:"), nsdictionary(keys, values, 1));
-    msg1(bar, sel("setStandardAppearance:"), standard);
-    msg1(bar, sel("setCompactAppearance:"), standard);
-    msg1(bar, sel("setCompactScrollEdgeAppearance:"), edge);
-    msg1(bar, sel("setScrollEdgeAppearance:"), edge);
-    release(standard);
-    release(edge);
-    msg1(bar, sel("setTintColor:"), c_icon);
-    place_backdrop()
-}
-
 // The page's color behind the bar and the status bar, and below it a short
 // fade from the page's color to clear, so the text goes softly under the
-// bar in every theme (the system's own edge effect is a material of its own
-// colors), the same whether scrolled or not. It fades out and in with the
-// bars (show_bars), and only there: placing it again (on each layout) only
-// moves it.
+// bar in every theme; its height follows the bar's (ios_bar.l8).
 backdrop: int = 0;
 
 backdrop_fade: int = 0;
 
 backdrop_gradient: int = 0;
-
-place_backdrop() {
-    if (nav == 0) return;
-    root: int = msg(nav, sel("view"));
-    bar: int = msg(nav, sel("navigationBar"));
-    if (backdrop == 0) {
-        backdrop = make("UIView");
-        msg1(backdrop, sel("setUserInteractionEnabled:"), 0);
-        msg1(backdrop, sel("setAutoresizingMask:"), 2);
-        backdrop_fade = make("UIView");
-        msg1(backdrop_fade, sel("setUserInteractionEnabled:"), 0);
-        msg1(backdrop_fade, sel("setAutoresizingMask:"), 2);
-        backdrop_gradient = make("CAGradientLayer");
-        msg1(msg(backdrop_fade, sel("layer")), sel("addSublayer:"), backdrop_gradient);
-        msg2(root, sel("insertSubview:belowSubview:"), backdrop, bar);
-        msg2(root, sel("insertSubview:belowSubview:"), backdrop_fade, bar);
-        if (responds(table, "topEdgeEffect")) msg1(msg(table, sel("topEdgeEffect")),
-            sel("setHidden:"), 1)
-    }
-    // (Without Core Animation's implicit animations: a layer of its own
-    // would otherwise ease to each new place and color, a beat behind.)
-    msg(cls("CATransaction"), sel("begin"));
-    msg1(cls("CATransaction"), sel("setDisableActions:"), 1);
-    l8_msg_hfa(hfa, bar, sel("frame"), 0, 0, 0);
-    foot: f64 = hfa[1] + hfa[3];
-    w: f64 = view_width(root);
-    msg_rect(backdrop, sel("setFrame:"), 0.0f64, 0.0f64, w, foot);
-    msg_rect(backdrop_fade, sel("setFrame:"), 0.0f64, foot, w, 18.0f64);
-    msg_rect(backdrop_gradient, sel("setFrame:"), 0.0f64, 0.0f64, w, 18.0f64);
-    msg1(backdrop, sel("setBackgroundColor:"), c_bg);
-    one[0] = msg(c_bg, sel("CGColor"));
-    one[1] = msg(msg_set_f(c_bg, sel("colorWithAlphaComponent:"), 0.0f64), sel("CGColor"));
-    msg1(backdrop_gradient, sel("setColors:"), nsarray(one, 2));
-    msg(cls("CATransaction"), sel("commit"))
-}
 
 // The theme (and the look made from it) applied everywhere: crossfaded,
 // when asked.
@@ -1251,6 +1201,7 @@ reader_traits(self: int, cmd: int, previous: int): int {
         apply_theme(false);
         relayout()
     }
+    demo_settle_start();
     0
 }
 
@@ -1263,15 +1214,19 @@ reader_appeared(self: int, cmd: int, animated: int): int {
         save_place();
         note("bible: up");
         launch_ms((CFAbsoluteTimeGetCurrent() - launch_t0) * 1000.0f64);
-        if (demo_on) demo_listen();
+        if (demo_on) {
+            demo_listen();
+            demo_settle_start()
+        }
         if (pending_link != 0) {
             open_link(pending_link);
             release(pending_link);
             pending_link = 0
         }
     }
+    set_insets();
     title_fade();
-    place_backdrop();
+    layout_bar();
     0
 }
 
@@ -1287,10 +1242,12 @@ text_size_changed(_self: int, _cmd: int, _note: int): int {
     v: int = place_v;
     f: int = place_frac;
     make_look();
+    set_insets();
     msg(table, sel("reloadData"));
     msg(table, sel("layoutIfNeeded"));
     go_place(c, v, f);
     save_place();
+    demo_settle_start();
     0
 }
 
@@ -1390,15 +1347,6 @@ app_launched(
     1
 }
 
-// A bar button of a symbol, sending action to the app.
-bar_item(name: str, action: str, label: str): int {
-    image: int = symbol(name, 17.0f64, 4, 0);
-    item: int = msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithImage:style:target:action:"),
-        image, 0, app_obj, sel(action));
-    msg1(item, sel("setAccessibilityLabel:"), nsstring(label));
-    msg(item, sel("autorelease"))
-}
-
 // The app's one scene, connected: its window, the chapters in it.
 scene_connected(
     _self: int,
@@ -1430,7 +1378,7 @@ scene_connected(
     msg_set_f(table, sel("setSectionFooterHeight:"), 0.0f64);
     msg_set_f(table, sel("setEstimatedSectionHeaderHeight:"), 0.0f64);
     msg_set_f(table, sel("setEstimatedSectionFooterHeight:"), 0.0f64);
-    msg1(table, sel("setContentInsetAdjustmentBehavior:"), 0);
+    msg1(table, sel("setContentInsetAdjustmentBehavior:"), 2);
     msg1(reader, sel("setEdgesForExtendedLayout:"), 15);
     // (The text fades softly under the bar, where there is glass.)
     if (responds(table, "topEdgeEffect")) {
@@ -1459,20 +1407,18 @@ scene_connected(
     msg1(title_view, sel("addSubview:"), title_fader);
     msg1(title_fader, sel("addSubview:"), title_button);
     msg_set_f(title_fader, sel("setAlpha:"), 0.0f64);
-    item: int = msg(reader, sel("navigationItem"));
-    msg1(item, sel("setTitleView:"), title_view);
-    msg1(item, sel("setLeftBarButtonItem:"), bar_item("magnifyingglass", "showSearch:",
-        "Search"));
-    one[0] = bar_item("textformat.size", "showSettings:", "Reading Settings");
-    one[1] = bar_item("bookmark", "showLibrary:", "Library");
-    msg1(item, sel("setRightBarButtonItems:"), nsarray(one, 2));
     nav = msg1(msg(nav_class, sel("alloc")), sel("initWithRootViewController:"), reader);
+    // (Its own bar hidden for good: the reader's is ios_bar.l8's.)
+    msg2(nav, sel("setNavigationBarHidden:animated:"), 1, 0);
+    make_bar();
     msg1(window, sel("setRootViewController:"), nav);
     msg(window, sel("makeKeyAndVisible"));
     msg(window, sel("layoutIfNeeded"));
     make_tray();
     make_back();
     apply_theme(false);
+    set_insets();
+    layout_bar();
     links: int = msg(options, sel("URLContexts"));
     if (links != 0) open_links(links);
     0
@@ -1525,6 +1471,8 @@ main() noregion: int {
         0);
     add_method1(reader_class, sel("traitCollectionDidChange:"), &reader_traits, "v@:@");
     add_method1(reader_class, sel("viewDidAppear:"), &reader_appeared, "v@:B");
+    add_method0(reader_class, sel("viewSafeAreaInsetsDidChange"), &reader_safe_area,
+        "v@:");
     add_commands(reader_class);
     objc_registerClassPair(reader_class);
     make_sheet_classes();
@@ -1549,6 +1497,7 @@ main() noregion: int {
         &popover_style, "q@:@@");
     add_method1(app, sel("textSizeChanged:"), &text_size_changed, "v@:@");
     add_select_methods(app);
+    add_bar_methods(app);
     add_commands(app);
     add_sheet_methods(app);
     add_study_methods(app);

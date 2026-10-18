@@ -36,7 +36,7 @@ settings_nav: int = 0;
 // A navigation controller of root, as a sheet with a grabber: detents
 // (0 large, 1 medium and large starting large, 2 medium only).
 sheet_of(root: int, detents: int): int {
-    sheet_nav: int = msg1(msg(cls("UINavigationController"), sel("alloc")), sel("initWithRootViewController:"),
+    sheet_nav: int = msg1(msg(sheet_nav_class, sel("alloc")), sel("initWithRootViewController:"),
         root);
     sheet: int = msg(sheet_nav, sel("sheetPresentationController"));
     if (sheet != 0) {
@@ -64,7 +64,10 @@ system_item(kind: int, action: str): int {
         kind, app_obj, sel(action)), sel("autorelease"))
 }
 
+// A sheet over the reader, its bar expanding alongside (never a sheet
+// over a collapsed bar).
 present(vc: int) {
+    bar_expand();
     msg3(nav, sel("presentViewController:animated:completion:"), vc, 1, 0)
 }
 
@@ -84,13 +87,15 @@ dismiss_sheets() {
 sheet_dismissed(_self: int, _cmd: int, _controller: int): int {
     if (note_tv != 0) {
         save_note_editor();
-        note_tv = 0;
+        note_tv = 0
+    }
+    // (A sheet over another swiped away: the one under it stays.)
+    if (presented() != 0 && (msg(presented(), sel("isBeingDismissed")) & 255) == 0) {
         if (lib_table != 0) {
             lib_build();
-            msg(lib_table, sel("reloadData"));
-            lib_empty_state();
-            return 0
+            lib_reload(false)
         }
+        return 0
     }
     sheet_gone();
     0
@@ -107,10 +112,14 @@ sheet_gone() {
     search_table = 0;
     settings_table = 0;
     lib_vc = 0;
+    lib_search = 0;
+    lib_sort_button = 0;
     search_vc = 0;
     settings_nav = 0;
     study_table = 0;
+    grammar_table = 0;
     conc_table = 0;
+    conc_search = 0;
     ack_table = 0;
     changes_table = 0;
     il_scroll = 0;
@@ -351,7 +360,7 @@ picker_query(text: int) {
 // The search controller's text changed: the picker's, or search's.
 search_updated(_self: int, _cmd: int, sc: int): int {
     text: int = msg(msg(sc, sel("searchBar")), sel("text"));
-    if (sc == picker_search && picker_table != 0) picker_query(text) else if (search_table != 0) search_typed(text);
+    if (sc == picker_search && picker_table != 0) picker_query(text) else if (sc == lib_search && lib_table != 0) library_typed(text) else if (sc == conc_search && conc_table != 0) conc_filtered(text) else if (search_table != 0) search_typed(text);
     0
 }
 
@@ -750,6 +759,9 @@ sr_done: bool = false;
 
 sr_timer: int = 0;
 
+// What search shows now (1 results, 2 recent searches).
+sr_shown_kind: int = 0;
+
 open_search() {
     if (presented() != 0) return;
     vc: int = sheet_table(search_class, 0, "Search");
@@ -795,6 +807,9 @@ open_search() {
     msg1(item, sel("setSearchController:"), sc);
     msg1(item, sel("setHidesSearchBarWhenScrolling:"), 0);
     release(sc);
+    // (Results scrolled away drag the keyboard down with them.)
+    msg1(search_table, sel("setKeyboardDismissMode:"), 1);
+    sr_shown_kind = 0;
     run_search();
     present(sheet_of(vc, 0))
 }
@@ -843,6 +858,11 @@ run_search() {
         sr_done = true
     }
     if (search_table == 0) return;
+    // (Recent searches giving way to results, or results to recent
+    // searches: a cross-fade, not a jump.)
+    kind: int = if (sr_n == 0) 2 else 1;
+    if (kind != sr_shown_kind) fade_layer(msg(search_table, sel("layer")), 0.2f64);
+    sr_shown_kind = kind;
     msg(search_table, sel("reloadData"));
     if (sr_n == 0) {
         if (recent_count() == 0) empty_state(search_vc, search_table, "magnifyingglass",
@@ -1093,7 +1113,8 @@ lib_seg: int = 0;
 seg_control: int = 0;
 
 // The library's rows (for the segment shown): chapter, first and last
-// verse, color, note; and its sections (a book each): first row and count.
+// verse, color, note, and when it was made; and its sections (a book each,
+// or one of them all, newest first): first row and count.
 lr_n: int = 0;
 
 lr_c: []int = new int[32768](0);
@@ -1106,6 +1127,8 @@ lr_color: []int = new int[32768](0);
 
 lr_note: []int = new int[32768](0);
 
+lr_time: []int = new int[32768](0);
+
 ls_n: int = 0;
 
 ls_book: []int = new int[66](0);
@@ -1114,28 +1137,84 @@ ls_start: []int = new int[66](0);
 
 ls_count: []int = new int[66](0);
 
+// How many sections the table shows now (for a fade from them).
+ls_shown: int = 0;
+
+// The library's search (what is typed, lower case) and sort (0 Bible
+// order, 1 newest first).
+lq: []i8 = new i8[256](0i8);
+
+lq_n: int = 0;
+
+lib_sort: int = 0;
+
+lib_search: int = 0;
+
+lib_sort_button: int = 0;
+
 lib_row(
     c: int,
     v: int,
     last: int,
     color: int,
-    n: int
+    n: int,
+    t: int
 ) {
     if (lr_n >= len(lr_c)) return;
-    b: int = ch_book[c];
-    if (ls_n == 0 || ls_book[ls_n - 1] != b) {
-        ls_book[ls_n] = b;
-        ls_start[ls_n] = lr_n;
-        ls_count[ls_n] = 0;
-        ls_n = ls_n + 1
-    }
+    if (lq_n > 0 && !lib_matches(c, v, last, n)) return;
     lr_c[lr_n] = c;
     lr_v[lr_n] = v;
     lr_last[lr_n] = last;
     lr_color[lr_n] = color;
     lr_note[lr_n] = n;
-    lr_n = lr_n + 1;
-    ls_count[ls_n - 1] = ls_count[ls_n - 1] + 1
+    lr_time[lr_n] = t;
+    lr_n = lr_n + 1
+}
+
+// Whether a row has the search's words: in its book's name, its verses'
+// words or its note (case aside).
+lm: []i8 = new i8[8192](0i8);
+
+lm_n: int = 0;
+
+lm_add(k: int) {
+    if (lm_n < len(lm)) {
+        lm[lm_n] = (if (k >= 65 && k <= 90) k + 32 else k) trunc i8;
+        lm_n = lm_n + 1
+    }
+}
+
+lib_matches(
+    c: int,
+    v: int,
+    last: int,
+    n: int
+): bool {
+    lm_n = 0;
+    b: int = ch_book[c];
+    for i in book_name_start(b)..book_name_end(b) lm_add(bsb[i] as int);
+    lm_add(10);
+    x: int = v;
+    while (x <= last && lm_n < 6000) {
+        _k: int = verse_text(c, x);
+        for i in 0..vt_n lm_add(vt[i] as int);
+        lm_add(32);
+        x = x + 1
+    }
+    if (n >= 0) {
+        lm_add(10);
+        for i in 0..nt_len[n] lm_add(nt_pool[nt_at[n] + i] as int)
+    }
+    for i in 0..lm_n - lq_n + 1 {
+        same: bool = true;
+        j: int = 0;
+        while (same && j < lq_n) {
+            if (lm[i + j] != lq[j]) same = false;
+            j = j + 1
+        }
+        if (same) return true
+    }
+    false
 }
 
 lib_build() {
@@ -1145,23 +1224,59 @@ lib_build() {
         i: int = 0;
         while (i < hl_n) {
             j: int = i;
-            while (j + 1 < hl_n && hl_key[j + 1] == hl_key[j] + 1 && hl_color[j + 1] == hl_color[i]) j = j + 1;
+            t: int = hl_time[i];
+            while (j + 1 < hl_n && hl_key[j + 1] == hl_key[j] + 1 && hl_color[j + 1] == hl_color[i]) {
+                j = j + 1;
+                if (hl_time[j] > t) t = hl_time[j]
+            }
             lib_row(key_chapter(hl_key[i]), key_verse(hl_key[i]), key_verse(hl_key[j]),
-                hl_color[i], -1);
+                hl_color[i], -1, t);
             i = j + 1
         }
     } else if (lib_seg == 1) {
         for i in 0..nt_n lib_row(key_chapter(nt_key[i]), key_verse(nt_key[i]), nt_end[i],
-            -1, i)
+            -1, i, nt_time[i])
     } else {
         for i in 0..bm_n lib_row(key_chapter(bm_key[i]), key_verse(bm_key[i]), key_verse(bm_key[i]),
-            -1, -1)
+            -1, -1, bm_time[i])
+    }
+    if (lib_sort == 1) {
+        // Newest first, in one section (insertion, stable).
+        for i in 1..lr_n {
+            j: int = i;
+            while (j > 0 && lr_time[j - 1] < lr_time[j]) {
+                for a in [lr_c, lr_v, lr_last, lr_color, lr_note, lr_time] swap(a,
+                    j);
+                j = j - 1
+            }
+        }
+        if (lr_n > 0) {
+            ls_book[0] = -1;
+            ls_start[0] = 0;
+            ls_count[0] = lr_n;
+            ls_n = 1
+        }
+        return
+    }
+    for r in 0..lr_n {
+        b: int = ch_book[lr_c[r]];
+        if (ls_n == 0 || ls_book[ls_n - 1] != b) {
+            ls_book[ls_n] = b;
+            ls_start[ls_n] = r;
+            ls_count[ls_n] = 0;
+            ls_n = ls_n + 1
+        }
+        ls_count[ls_n - 1] = ls_count[ls_n - 1] + 1
     }
 }
+
+lib_placeholders: []str = ["Search Highlights", "Search Notes", "Search Bookmarks"];
 
 open_library() {
     if (presented() != 0) return;
     lib_seg = clamp(def_int("librarySegment"), 0, 2);
+    lib_sort = clamp(def_int("librarySort"), 0, 1);
+    lq_n = 0;
     vc: int = sheet_table(cls("UITableViewController"), 2, "Library");
     lib_vc = vc;
     lib_table = msg(vc, sel("tableView"));
@@ -1174,17 +1289,109 @@ open_library() {
     msg1(seg_control, sel("setSelectedSegmentIndex:"), lib_seg);
     msg3(seg_control, sel("addTarget:action:forControlEvents:"), app_obj, sel("librarySegment:"),
         4096);
-    msg_rect(seg_control, sel("setFrame:"), 0.0f64, 0.0f64, 300.0f64, 32.0f64);
-    msg1(msg(vc, sel("navigationItem")), sel("setTitleView:"), seg_control);
+    msg_rect(seg_control, sel("setFrame:"), 0.0f64, 0.0f64, 260.0f64, 32.0f64);
+    item: int = msg(vc, sel("navigationItem"));
+    msg1(item, sel("setTitleView:"), seg_control);
     release(seg_control);
+    // Search: the rows filtered as they are typed for.
+    sc: int = msg1(msg(cls("UISearchController"), sel("alloc")), sel("initWithSearchResultsController:"),
+        0);
+    msg1(sc, sel("setObscuresBackgroundDuringPresentation:"), 0);
+    msg1(sc, sel("setHidesNavigationBarDuringPresentation:"), 0);
+    msg1(sc, sel("setSearchResultsUpdater:"), app_obj);
+    msg1(msg(sc, sel("searchBar")), sel("setPlaceholder:"), nsstring(lib_placeholders[lib_seg]));
+    msg1(item, sel("setSearchController:"), sc);
+    msg1(item, sel("setHidesSearchBarWhenScrolling:"), 1);
+    lib_search = sc;
+    release(sc);
+    // Sort: the system's "Sort By" menu, its commands answered by the app
+    // (through the responder chain).
+    config: int = msg(cls("UIButtonConfiguration"), sel("plainButtonConfiguration"));
+    msg1(config, sel("setImage:"), symbol("arrow.up.arrow.down", 17.0f64, 4, 0));
+    lib_sort_button = msg2(cls("UIButton"), sel("buttonWithConfiguration:primaryAction:"),
+        config, 0);
+    msg1(lib_sort_button, sel("setShowsMenuAsPrimaryAction:"), 1);
+    msg1(lib_sort_button, sel("setAccessibilityLabel:"), nsstring("Sort"));
+    lib_sort_menu();
+    sort_item: int = msg1(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithCustomView:"),
+        lib_sort_button);
+    msg1(item, sel("setLeftBarButtonItem:"), sort_item);
+    release(sort_item);
     lib_build();
+    ls_shown = ls_n;
     lib_empty_state();
     present(sheet_of(vc, 1))
 }
 
+sort_titles: []str = ["Bible Order", "Newest First"];
+
+sort_sels: []str = ["librarySortBible:", "librarySortNewest:"];
+
+lib_sort_menu() {
+    for i in 0..2 {
+        one[i] = msg4(cls("UICommand"), sel("commandWithTitle:image:action:propertyList:"),
+            nsstring(sort_titles[i]), 0, sel(sort_sels[i]), 0);
+        msg1(one[i], sel("setState:"), if (i == lib_sort) 1 else 0)
+    }
+    m: int = msg2(cls("UIMenu"), sel("menuWithTitle:children:"), nsstring("Sort By"),
+        nsarray(one, 2));
+    msg1(lib_sort_button, sel("setMenu:"), m)
+}
+
+library_sorted(n: int) {
+    lib_sort = n;
+    set_def_int("librarySort", n);
+    if (lib_table == 0) return;
+    lib_sort_menu();
+    lib_build();
+    lib_reload(true)
+}
+
+library_sort_bible(_self: int, _cmd: int, _sender: int): int {
+    library_sorted(0);
+    0
+}
+
+library_sort_newest(_self: int, _cmd: int, _sender: int): int {
+    library_sorted(1);
+    0
+}
+
+// What is typed in the library's search, lower case.
+library_typed(text: int) {
+    lq_n = nsstring_into(text, lq);
+    for i in 0..lq_n {
+        k: int = lq[i] as int;
+        if (k >= 65 && k <= 90) lq[i] = (k + 32) trunc i8
+    }
+    lib_build();
+    lib_reload(false)
+}
+
+// The table shown anew: its sections faded out and in (a change of
+// segment or sort), or at once (typing).
+lib_reload(fade: bool) {
+    if (lib_table == 0) return;
+    if (fade) {
+        msg(lib_table, sel("beginUpdates"));
+        if (ls_shown > 0) msg2(lib_table, sel("deleteSections:withRowAnimation:"),
+            msg2(cls("NSIndexSet"), sel("indexSetWithIndexesInRange:"), 0, ls_shown),
+            0);
+        if (ls_n > 0) msg2(lib_table, sel("insertSections:withRowAnimation:"), msg2(cls("NSIndexSet"),
+            sel("indexSetWithIndexesInRange:"), 0, ls_n), 0);
+        ls_shown = ls_n;
+        msg(lib_table, sel("endUpdates"))
+    } else {
+        ls_shown = ls_n;
+        msg(lib_table, sel("reloadData"))
+    }
+    lib_empty_state()
+}
+
 lib_empty_state() {
     if (lib_vc == 0) return;
-    if (lr_n > 0) empty_state(lib_vc, lib_table, "", 0, "") else if (lib_seg == 0) empty_state(lib_vc,
+    if (lr_n > 0) empty_state(lib_vc, lib_table, "", 0, "") else if (lq_n > 0) empty_state(lib_vc,
+        lib_table, "magnifyingglass", nsstring("No Results"), "Try other words.") else if (lib_seg == 0) empty_state(lib_vc,
         lib_table, "highlighter", nsstring("No Highlights"), "Tap a verse while reading and choose a color.") else if (lib_seg == 1) empty_state(lib_vc,
         lib_table, "note.text", nsstring("No Notes"), "Tap a verse and choose Note to write one.") else empty_state(lib_vc,
         lib_table, "bookmark", nsstring("No Bookmarks"), "Tap a verse and choose Bookmark.")
@@ -1193,9 +1400,10 @@ lib_empty_state() {
 library_segment(_self: int, _cmd: int, control: int): int {
     lib_seg = msg(control, sel("selectedSegmentIndex"));
     set_def_int("librarySegment", lib_seg);
+    if (lib_search != 0) msg1(msg(lib_search, sel("searchBar")), sel("setPlaceholder:"),
+        nsstring(lib_placeholders[lib_seg]));
     lib_build();
-    msg(lib_table, sel("reloadData"));
-    lib_empty_state();
+    lib_reload(true);
     0
 }
 
@@ -1244,8 +1452,62 @@ lib_cell(t: int, path: int): int {
     }
     msg1(detail_props(config), sel("setColor:"), soft);
     msg_set_f(config, sel("setTextToSecondaryTextVerticalPadding:"), 3.0f64);
+    // The words searched for, semibold where they are.
+    if (lq_n > 0) {
+        if (lib_seg == 1) msg1(config, sel("setSecondaryAttributedText:"), preview(note_string(lr_note[r]),
+            false, 15.0f64, soft));
+        q: int = nsstring_of(lq, lq_n);
+        for k in [0, 1] {
+            a: int = msg(msg(config, sel(if (k == 0) "attributedText" else "secondaryAttributedText")),
+                sel("mutableCopy"));
+            if (a != 0) {
+                f: int = if (k == 0 || lib_seg == 1) sans(15.0f64, 0.4f64) else bold(15.0f64);
+                bold_matches(a, q, f);
+                msg1(config, sel(if (k == 0) "setAttributedText:" else "setSecondaryAttributedText:"),
+                    a);
+                release(a)
+            }
+        }
+    }
+    // Newest first: when each was made, as the row's value.
+    if (lib_sort == 1) {
+        l: int = msg(make("UILabel"), sel("autorelease"));
+        msg1(l, sel("setText:"), relative_date(lr_time[r]));
+        msg1(l, sel("setFont:"), sans(15.0f64, 0.0f64));
+        msg1(l, sel("setTextColor:"), c_faint);
+        msg(l, sel("sizeToFit"));
+        msg1(cell, sel("setAccessoryView:"), l)
+    }
     msg1(cell, sel("setContentConfiguration:"), config);
     cell
+}
+
+// Each place q is in a (case aside), in font f, in ink.
+bold_matches(a: int, q: int, f: int) {
+    text: int = msg(a, sel("string"));
+    n: int = msg(text, sel("length"));
+    ql: int = msg(q, sel("length"));
+    at: int = 0;
+    more: bool = ql > 0;
+    while (more && at < n) {
+        loc: int = msg4(text, sel("rangeOfString:options:range:"), q, 1, at, n - at);
+        if (loc < 0 || loc >= n) more = false else {
+            msg4(a, sel("addAttribute:value:range:"), k_font, f, loc, ql);
+            msg4(a, sel("addAttribute:value:range:"), k_color, c_ink, loc, ql);
+            at = loc + ql
+        }
+    }
+}
+
+// "Today", "Yesterday", or the date (medium), of a time (seconds since
+// 1970).
+relative_date(t: int): int {
+    f: int = msg(make("NSDateFormatter"), sel("autorelease"));
+    msg1(f, sel("setDateStyle:"), 2);
+    msg1(f, sel("setTimeStyle:"), 0);
+    msg1(f, sel("setDoesRelativeDateFormatting:"), 1);
+    msg1(f, sel("stringFromDate:"), msg_set_f(cls("NSDate"), sel("dateWithTimeIntervalSince1970:"),
+        t as f64))
 }
 
 lib_picked(s: int, row: int) {
@@ -1278,6 +1540,7 @@ lib_delete(path: int) {
     if (had == 1) msg2(lib_table, sel("deleteSections:withRowAnimation:"), msg1(cls("NSIndexSet"),
         sel("indexSetWithIndex:"), s), 100) else msg2(lib_table, sel("deleteRowsAtIndexPaths:withRowAnimation:"),
         nsarray(one, 1), 100);
+    ls_shown = ls_n;
     lib_empty_state();
     remake(c)
 }
@@ -1635,16 +1898,14 @@ open_note(c: int, v: int, last: int) {
     put_range_ref(c, v, ne_last);
     msg1(vc, sel("setTitle:"), fstring());
     item: int = msg(vc, sel("navigationItem"));
+    note_item = item;
     msg1(item, sel("setLargeTitleDisplayMode:"), 2);
-    done: int = system_item(0, "noteDone:");
-    msg1(done, sel("setStyle:"), 2);
-    msg1(item, sel("setRightBarButtonItem:"), done);
-    if (existing >= 0) {
-        trash: int = system_item(16, "noteTrash:");
-        msg1(trash, sel("setTintColor:"), msg(cls("UIColor"), sel("systemRedColor")));
-        msg1(trash, sel("setAccessibilityLabel:"), nsstring("Delete Note"));
-        msg1(item, sel("setLeftBarButtonItem:"), trash)
-    } else msg1(item, sel("setLeftBarButtonItem:"), system_item(1, "noteCancel:"));
+    // An existing note opens to be read (Done on the left, Edit on the
+    // right); a new one, or one being added to, to be written.
+    note_reading = existing >= 0 && !note_force_edit;
+    note_from_read = note_reading;
+    note_force_edit = false;
+    if (note_reading) note_read_items(false) else note_edit_items(existing >= 0, false);
     // The verse, quoted, with an accent bar beside it.
     bar: int = make("UIView");
     msg1(bar, sel("setBackgroundColor:"), c_accent);
@@ -1676,6 +1937,12 @@ open_note(c: int, v: int, last: int) {
         0.0f64);
     if (existing >= 0) msg1(note_tv, sel("setText:"), note_string(existing));
     msg1(note_tv, sel("setDelegate:"), app_obj);
+    tap: int = msg2(msg(cls("UITapGestureRecognizer"), sel("alloc")), sel("initWithTarget:action:"),
+        app_obj, sel("noteTapped:"));
+    msg1(tap, sel("setDelegate:"), app_obj);
+    msg1(note_tv, sel("addGestureRecognizer:"), tap);
+    release(tap);
+    if (note_reading) note_show_read(existing);
     note_placeholder = make("UILabel");
     msg1(note_placeholder, sel("setText:"), nsstring("Write a note\â\€\¦"));
     msg1(note_placeholder, sel("setFont:"), body(em));
@@ -1717,10 +1984,122 @@ make_note_vc(): int {
     make("L8Note")
 }
 
-// The editor on screen: the keyboard up.
+// The editor on screen: the keyboard up (not while it is being read), the
+// cursor at the end.
 note_appeared(self: int, cmd: int, animated: int): int {
     _r: int = super1(self, note_class, cmd, animated);
-    if (note_tv != 0 && !demo_no_keyboard) msg(note_tv, sel("becomeFirstResponder"));
+    if (note_tv != 0 && !note_reading && !demo_no_keyboard) {
+        msg(note_tv, sel("becomeFirstResponder"));
+        msg2(note_tv, sel("setSelectedRange:"), msg(msg(note_tv, sel("text")), sel("length")),
+            0)
+    }
+    0
+}
+
+// ---- the note, read (DESIGN.md §7.9) ----
+note_item: int = 0;
+
+note_reading: bool = false;
+
+// Whether the editor was opened to read (so Done goes back to reading).
+note_from_read: bool = false;
+
+// The next note opened to be written even if it exists (Add to Note).
+note_force_edit: bool = false;
+
+note_read_items(animated: bool) {
+    msg2(note_item, sel("setLeftBarButtonItem:animated:"), system_item(0, "noteClose:"),
+        if (animated) 1 else 0);
+    msg2(note_item, sel("setRightBarButtonItem:animated:"), system_item(2, "noteEdit:"),
+        if (animated) 1 else 0)
+}
+
+note_edit_items(existing: bool, animated: bool) {
+    done: int = system_item(0, "noteDone:");
+    msg1(done, sel("setStyle:"), 2);
+    msg2(note_item, sel("setRightBarButtonItem:animated:"), done, if (animated) 1 else 0);
+    left: int = 0;
+    if (existing) {
+        left = system_item(16, "noteTrash:");
+        msg1(left, sel("setTintColor:"), msg(cls("UIColor"), sel("systemRedColor")));
+        msg1(left, sel("setAccessibilityLabel:"), nsstring("Delete Note"))
+    } else left = system_item(1, "noteCancel:");
+    msg2(note_item, sel("setLeftBarButtonItem:animated:"), left, if (animated) 1 else 0)
+}
+
+// Note i in the text view, to be read: its references to verses links, in
+// the accent.
+note_show_read(i: int) {
+    msg1(note_tv, sel("setEditable:"), 0);
+    msg1(note_tv, sel("setSelectable:"), 1);
+    n: int = nt_len[i];
+    for x in 0..n note_buf[x] = nt_pool[nt_at[i] + x];
+    keys[0] = k_font;
+    values[0] = body(em);
+    keys[1] = k_color;
+    values[1] = c_ink;
+    keys[2] = k_para;
+    values[2] = msg(para_style(0, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 1.25f64), sel("autorelease"));
+    a: int = msg(msg2(msg(cls("NSMutableAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        nsstring_of(note_buf, n), nsdictionary(keys, values, 3)), sel("autorelease"));
+    note_refs(note_buf, n);
+    for r in 0..nr_n {
+        b: int = units_of(note_buf, 0, nr_b[r]);
+        u: int = units_of(note_buf, nr_b[r], nr_e[r]);
+        msg4(a, sel("addAttribute:value:range:"), k_color, c_accent, b, u);
+        msg4(a, sel("addAttribute:value:range:"), nsstring(k_ref), nsnumber_int(1 + nr_book[r] * 1000000 + nr_c[r] * 1000 + (if (nr_v[r] > 0) nr_v[r] else 0)),
+            b, u)
+    }
+    msg1(note_tv, sel("setAttributedText:"), a)
+}
+
+// How many UTF-16 units bytes a to b of x are.
+units_of(x: []i8, a: int, b: int): int {
+    n: int = 0;
+    for i in a..b {
+        k: int = x[i] as int & 255;
+        if (k < 128 || k >= 192) n = n + 1;
+        if (k >= 240) n = n + 1
+    }
+    n
+}
+
+// A tap on the note read: a reference goes there (the sheet dismissed, the
+// capsule back).
+note_tapped(_self: int, _cmd: int, tap: int): int {
+    if (!note_reading) return 0;
+    tv: int = msg(tap, sel("view"));
+    l8_msg_hfa(hfa, tap, sel("locationInView:"), tv, 0, 0);
+    r: int = link_at(tv, hfa[0], hfa[1], k_ref) - 1;
+    if (r >= 0) {
+        b: int = r / 1000000;
+        c: int = r / 1000 % 1000;
+        v: int = r % 1000;
+        note_tv = 0;
+        if (b < books) jump(chapter_of(b, c), v)
+    }
+    0
+}
+
+// Edit: the editor in place, the keyboard up.
+note_edit(_self: int, _cmd: int, _b: int): int {
+    if (note_tv == 0) return 0;
+    note_reading = false;
+    fade_layer(msg(note_tv, sel("layer")), 0.2f64);
+    i: int = note_of(ne_c, ne_v);
+    msg1(note_tv, sel("setText:"), if (i >= 0) note_string(i) else nsstring(""));
+    msg1(note_tv, sel("setFont:"), body(em));
+    msg1(note_tv, sel("setTextColor:"), c_ink);
+    msg1(note_tv, sel("setEditable:"), 1);
+    note_edit_items(true, true);
+    if (!demo_no_keyboard) msg(note_tv, sel("becomeFirstResponder"));
+    msg2(note_tv, sel("setSelectedRange:"), msg(msg(note_tv, sel("text")), sel("length")),
+        0);
+    0
+}
+
+note_close(_self: int, _cmd: int, _b: int): int {
+    close_note();
     0
 }
 
@@ -1762,14 +2141,23 @@ close_note() {
         msg2(top, sel("dismissViewControllerAnimated:completion:"), 1, 0);
         if (lib_table != 0) {
             lib_build();
-            msg(lib_table, sel("reloadData"));
-            lib_empty_state()
+            lib_reload(false)
         }
     } else dismiss_sheets()
 }
 
 note_done(_self: int, _cmd: int, _sender: int): int {
     save_note_editor();
+    // (Opened to be read: back to reading it, unless it is gone.)
+    i: int = note_of(ne_c, ne_v);
+    if (note_from_read && i >= 0 && note_tv != 0) {
+        msg(note_tv, sel("resignFirstResponder"));
+        fade_layer(msg(note_tv, sel("layer")), 0.2f64);
+        note_reading = true;
+        note_show_read(i);
+        note_read_items(true);
+        return 0
+    }
     close_note();
     0
 }
@@ -1795,6 +2183,7 @@ table_sections(_self: int, _cmd: int, t: int): int {
     if (t == search_table) return search_sections();
     if (t == settings_table) return 6;
     if (t == study_table && t != 0) return study_sections();
+    if (t == grammar_table && t != 0) return gr_n;
     if (t == conc_table && t != 0) return cs_n;
     if (t == ack_table && t != 0) return 3;
     if (t == changes_table && t != 0) return 1;
@@ -1813,6 +2202,7 @@ table_rows(
     if (t == search_table) return search_rows(section);
     if (t == settings_table) return settings_rows(section);
     if (t == study_table && t != 0) return study_rows(section);
+    if (t == grammar_table && t != 0) return grammar_rows(section);
     if (t == conc_table && t != 0) return cs_count[section];
     if (t == ack_table && t != 0) return ack_rows(section);
     if (t == changes_table && t != 0) return len(change_lines);
@@ -1826,10 +2216,11 @@ table_header(
     section: int
 ): int {
     if (t == picker_table) return picker_header(section);
-    if (t == lib_table) return if (section < ls_n) book_name(ls_book[section]) else 0;
+    if (t == lib_table) return if (section < ls_n && ls_book[section] >= 0) book_name(ls_book[section]) else 0;
     if (t == search_table) return search_header(section);
     if (t == settings_table) return settings_header(section);
     if (t == study_table && t != 0) return study_header_title(section);
+    if (t == grammar_table && t != 0) return grammar_header(section);
     if (t == conc_table && t != 0) return conc_header(section);
     if (t == ack_table && t != 0) return nsstring(ack_headers[section]);
     0
@@ -1868,6 +2259,7 @@ table_cell(
     if (t == lib_table) return lib_cell(t, path);
     if (t == search_table) return search_cell(t, path);
     if (t == study_table && t != 0) return study_cell(t, path);
+    if (t == grammar_table && t != 0) return grammar_cell(t, path);
     if (t == conc_table && t != 0) return conc_cell(t, path);
     if (t == ack_table && t != 0) return ack_cell(t, path);
     if (t == changes_table && t != 0) return changes_cell(t, path);
@@ -1911,7 +2303,24 @@ table_commit(
     0
 }
 
+// A sheet's navigation controller: once it has gone (its dismissal
+// finished), the back capsule of a jump made from it comes up.
+sheet_nav_class: int = 0;
+
+sheet_disappeared(self: int, cmd: int, animated: int): int {
+    _r: int = super1(self, sheet_nav_class, cmd, animated);
+    if (back_after_sheet && presented() == 0) {
+        back_after_sheet = false;
+        show_back()
+    }
+    0
+}
+
 make_sheet_classes() {
+    sheet_nav_class = objc_allocateClassPair(cls("UINavigationController"), "L8Sheet",
+        0);
+    add_method1(sheet_nav_class, sel("viewDidDisappear:"), &sheet_disappeared, "v@:B");
+    objc_registerClassPair(sheet_nav_class);
     books_class = objc_allocateClassPair(cls("UITableViewController"), "L8Books",
         0);
     add_method0(books_class, sel("viewDidLayoutSubviews"), &books_layout, "v@:");
@@ -1955,6 +2364,8 @@ add_sheet_methods(app: int) {
     add_method1(app, sel("searchFire:"), &search_fire, "v@:@");
     add_method1(app, sel("clearRecent:"), &clear_recent, "v@:@");
     add_method1(app, sel("librarySegment:"), &library_segment, "v@:@");
+    add_method1(app, sel("librarySortBible:"), &library_sort_bible, "v@:@");
+    add_method1(app, sel("librarySortNewest:"), &library_sort_newest, "v@:@");
     add_method1(app, sel("sizeSlid:"), &size_slid, "v@:@");
     add_method1(app, sel("sizeSmaller:"), &size_smaller, "v@:@");
     add_method1(app, sel("sizeLarger:"), &size_larger, "v@:@");
@@ -1965,5 +2376,8 @@ add_sheet_methods(app: int) {
     add_method1(app, sel("noteDone:"), &note_done, "v@:@");
     add_method1(app, sel("noteCancel:"), &note_cancel, "v@:@");
     add_method1(app, sel("noteTrash:"), &note_trash, "v@:@");
+    add_method1(app, sel("noteTapped:"), &note_tapped, "v@:@");
+    add_method1(app, sel("noteEdit:"), &note_edit, "v@:@");
+    add_method1(app, sel("noteClose:"), &note_close, "v@:@");
     add_method1(app, sel("textViewDidChange:"), &text_changed, "v@:@")
 }
