@@ -1,0 +1,1435 @@
+tag bible;
+
+use_tag std;
+
+// The original languages behind the text, for its study screens: each
+// verse's Hebrew or Greek words (in the BSB's English order, with where in
+// the verse's English each one's chunk is), their forms, parsings and
+// Strong's numbers; where each number occurs; and STEP Bible's lexicon.
+// The data are data/lang/ (made by tools/bsb_lang.py; see DESIGN.md §7.1),
+// read by the platform into the arrays below at first use, then indexed
+// (lang_index). Nothing here draws: it says what to show (as text.l8 does
+// for the reader), and ios.l8 shows it.
+import "text.l8";
+
+// ---- the files ----
+// words.bin: 12 bytes a word; verses.bin: 8 bytes a verse, then one more;
+// supplied.bin: 8 bytes a run of supplied English; the rest text.
+lw: []i8 = new i8[1](0i8);
+
+lw_n: int = 0;
+
+lv: []i8 = new i8[1](0i8);
+
+lv_n: int = 0;
+
+lsup: []i8 = new i8[1](0i8);
+
+lsup_n: int = 0;
+
+lforms: []i8 = new i8[1](0i8);
+
+lforms_len: int = 0;
+
+lmorph: []i8 = new i8[1](0i8);
+
+lmorph_len: int = 0;
+
+lconc: []i8 = new i8[1](0i8);
+
+lconc_len: int = 0;
+
+llex: []i8 = new i8[1](0i8);
+
+llex_len: int = 0;
+
+lgram: []i8 = new i8[1](0i8);
+
+lgram_len: int = 0;
+
+lang_ready: bool = false;
+
+// A byte, and little-endian numbers of two and four bytes.
+byte_of(b: []i8, i: int): int {
+    b[i] as int & 255
+}
+
+le16(b: []i8, i: int): int {
+    byte_of(b, i) | byte_of(b, i + 1) << 8
+}
+
+le32(b: []i8, i: int): int {
+    le16(b, i) | le16(b, i + 2) << 16
+}
+
+// ---- the indexes, made once the files are read ----
+// Where each line of forms.txt, morph.txt and grammar.txt begins.
+form_at: []int = new int[1](0);
+
+form_n: int = 0;
+
+morph_at: []int = new int[1](0);
+
+morph_n: int = 0;
+
+gram_at: []int = new int[1](0);
+
+gram_n: int = 0;
+
+// Where each Strong's number's entry is in conc.bin and lexicon.txt (-1:
+// none), Greek and Hebrew.
+STRONGS_MAX: int = 10000;
+
+conc_g: []int = new int[1](0);
+
+conc_h: []int = new int[1](0);
+
+lex_g: []int = new int[1](0);
+
+lex_h: []int = new int[1](0);
+
+// Each verse's V line in bsb, and each chapter's first verse.
+vb_at: []int = new int[1](0);
+
+ch_vi: []int = new int[1200](0);
+
+// The lines of the first n bytes of b, into a new array (their starts).
+line_starts(b: []i8, n: int): []int@new {
+    count: int = 0;
+    for i in 0..n
+        if (b[i] as int == 10) count = count + 1;
+    at: []int = new int[count + 1](0);
+    k: int = 0;
+    start: int = 0;
+    for i in 0..n {
+        if (b[i] as int == 10) {
+            at[k] = start;
+            k = k + 1;
+            start = i + 1
+        }
+    }
+    at[k] = n;
+    at
+}
+
+lang_index() noregion {
+    form_at = line_starts(lforms, lforms_len);
+    form_n = len(form_at) - 1;
+    morph_at = line_starts(lmorph, lmorph_len);
+    morph_n = len(morph_at) - 1;
+    gram_at = line_starts(lgram, lgram_len);
+    gram_n = len(gram_at) - 1;
+    conc_g = new int[STRONGS_MAX](-1);
+    conc_h = new int[STRONGS_MAX](-1);
+    lex_g = new int[STRONGS_MAX](-1);
+    lex_h = new int[STRONGS_MAX](-1);
+    // conc.bin: key, 0, then numbers to a 0 byte.
+    p: int = 0;
+    while (p < lconc_len) {
+        greek: bool = lconc[p] as int == 71;
+        num: int = 0;
+        q: int = p + 1;
+        while (q < lconc_len && lconc[q] as int != 0) {
+            num = num * 10 + lconc[q] as int - 48;
+            q = q + 1
+        }
+        if (num < STRONGS_MAX) {
+            if (greek) conc_g[num] = p else conc_h[num] = p
+        }
+        q = q + 1;
+        // (The count, then deltas to the 0 that ends them.)
+        while (q < lconc_len && byte_of(lconc, q) >= 128) q = q + 1;
+        q = q + 1;
+        while (q < lconc_len && lconc[q] as int != 0) q = q + 1;
+        p = q + 1
+    }
+    // lexicon.txt: @G25 lines, each before its entries.
+    p = 0;
+    while (p < llex_len) {
+        if (llex[p] as int == 64) {
+            greek: bool = llex[p + 1] as int == 71;
+            num: int = 0;
+            q: int = p + 2;
+            while (q < llex_len && is_digit(llex[q] as int)) {
+                num = num * 10 + llex[q] as int - 48;
+                q = q + 1
+            }
+            if (num < STRONGS_MAX) {
+                if (greek) lex_g[num] = q + 1 else lex_h[num] = q + 1
+            }
+        }
+        while (p < llex_len && llex[p] as int != 10) p = p + 1;
+        p = p + 1
+    }
+    // The verses' V lines, in order through the text.
+    vb_at = new int[lv_n + 1](0);
+    k: int = 0;
+    p = 0;
+    c: int = -1;
+    while (p < bsb_n) {
+        e: int = line_end(p);
+        x: int = bsb[p] as int;
+        if (x == 67) c = c + 1;
+        if (x == 86 && k < lv_n) {
+            if (c >= 0 && c < len(ch_vi) && (k == 0 || v_chapter(k - 1) != c)) ch_vi[c] = k;
+            vb_at[k] = p;
+            k = k + 1
+        }
+        p = e + 1
+    }
+    lang_ready = true
+}
+
+// ---- verses and words ----
+v_first(vi: int): int {
+    le32(lv, vi * 8)
+}
+
+v_end(vi: int): int {
+    le32(lv, vi * 8 + 8)
+}
+
+v_chapter(vi: int): int {
+    le16(lv, vi * 8 + 4)
+}
+
+v_num(vi: int): int {
+    le16(lv, vi * 8 + 6) & 32767
+}
+
+// Whether the verse's English and its words agree, so it can be studied.
+v_aligned(vi: int): bool {
+    (le16(lv, vi * 8 + 6) & 32768) == 0
+}
+
+// The index of verse v of chapter c (-1 if there is none).
+lang_verse(c: int, v: int): int {
+    if (!lang_ready || c < 0 || c >= chapters) return -1;
+    vi: int = ch_vi[c];
+    while (vi < lv_n && v_chapter(vi) == c) {
+        if (v_num(vi) == v) return vi;
+        vi = vi + 1
+    }
+    -1
+}
+
+w_strongs(w: int): int {
+    le16(lw, w * 12) & 32767
+}
+
+w_greek(w: int): bool {
+    (le16(lw, w * 12) & 32768) != 0
+}
+
+w_morph(w: int): int {
+    le16(lw, w * 12 + 2)
+}
+
+w_ntok(w: int): int {
+    byte_of(lw, w * 12 + 4)
+}
+
+w_order(w: int): int {
+    byte_of(lw, w * 12 + 5)
+}
+
+// 1 untranslated, 2 rendered with a neighbour (8: the one before), 4 no
+// English.
+w_flags(w: int): int {
+    byte_of(lw, w * 12 + 6)
+}
+
+w_tok(w: int): int {
+    byte_of(lw, w * 12 + 7)
+}
+
+w_form(w: int): int {
+    le32(lw, w * 12 + 8)
+}
+
+// The word's form (its original, then its transliteration): where each is
+// in lforms (wf_b to wf_e, wt_b to wt_e).
+wf_b: int = 0;
+
+wf_e: int = 0;
+
+wt_b: int = 0;
+
+wt_e: int = 0;
+
+form_of(w: int) {
+    f: int = w_form(w);
+    p: int = form_at[f];
+    e: int = form_at[f + 1] - 1;
+    t: int = p;
+    while (t < e && lforms[t] as int != 9) t = t + 1;
+    wf_b = p;
+    wf_e = t;
+    wt_b = (if (t < e) t + 1 else e);
+    wt_e = e
+}
+
+// A parsing: its code and its description (in lmorph).
+mc_b: int = 0;
+
+mc_e: int = 0;
+
+md_b: int = 0;
+
+md_e: int = 0;
+
+morph_of(m: int) {
+    p: int = morph_at[m];
+    e: int = morph_at[m + 1] - 1;
+    t: int = p;
+    while (t < e && lmorph[t] as int != 9) t = t + 1;
+    mc_b = p;
+    mc_e = t;
+    md_b = (if (t < e) t + 1 else e);
+    md_e = e
+}
+
+// ---- a verse's English, as its words are counted ----
+// The verse studied: its index, and its English (st): a psalm's title
+// first, for its verse 1 (st_title bytes, then a space), then the verse's
+// words; its tokens (where each begins and ends in st), and whether each
+// was supplied by the translators (1 within a word's chunk, 2 apart from
+// any word).
+st: []i8 = new i8[20000](0i8);
+
+st_n: int = 0;
+
+st_title: int = 0;
+
+st_vi: int = -1;
+
+TOKENS: int = 512;
+
+tok_n: int = 0;
+
+tok_b: []int = new int[TOKENS](0);
+
+tok_e: []int = new int[TOKENS](0);
+
+tok_sup: []int = new int[TOKENS](0);
+
+st_add(k: int) {
+    if (st_n < len(st)) {
+        st[st_n] = k trunc i8;
+        st_n = st_n + 1
+    }
+}
+
+// The tokens of the first n bytes of b (as the tool's regex finds them:
+// letters and digits, and an apostrophe with letters after it): into tk_b,
+// tk_e and tk_n.
+tk_n: int = 0;
+
+tk_b: []int = new int[TOKENS](0);
+
+tk_e: []int = new int[TOKENS](0);
+
+is_alnum(k: int): bool {
+    is_letter(k) || is_digit(k)
+}
+
+// The length of an apostrophe at b[i] followed by a letter (' or ’), or 0.
+apostrophe_at(b: []i8, i: int, n: int): int {
+    if (i < n && b[i] as int == 39 && i + 1 < n && is_letter(b[i + 1] as int)) return 1;
+    if (i + 3 < n && byte_of(b, i) == 226 && byte_of(b, i + 1) == 128 && byte_of(b,
+        i + 2) == 153 && is_letter(b[i + 3] as int)) return 3;
+    0
+}
+
+tokenize(b: []i8, n: int) {
+    tk_n = 0;
+    i: int = 0;
+    while (i < n) {
+        if (is_alnum(b[i] as int)) {
+            start: int = i;
+            while (i < n && is_alnum(b[i] as int)) i = i + 1;
+            more: bool = true;
+            while (more) {
+                a: int = apostrophe_at(b, i, n);
+                if (a > 0) {
+                    i = i + a;
+                    while (i < n && is_letter(b[i] as int)) i = i + 1
+                } else more = false
+            }
+            if (tk_n < TOKENS) {
+                tk_b[tk_n] = start;
+                tk_e[tk_n] = i;
+                tk_n = tk_n + 1
+            }
+        } else i = i + 1
+    }
+}
+
+// Verse vi's English into st, and its tokens.
+study_load(vi: int) {
+    if (vi == st_vi) return;
+    st_vi = vi;
+    st_n = 0;
+    c: int = v_chapter(vi);
+    v: int = v_num(vi);
+    if (v == 1) {
+        // (A psalm's title: its D line, and its d lines after a footnote.)
+        p: int = ch_start[c];
+        while (p < vb_at[vi]) {
+            e: int = line_end(p);
+            k: int = bsb[p] as int;
+            if (k == 68 || k == 100) {
+                for i in p + 1..e st_add(bsb[i] as int)
+            }
+            p = e + 1
+        }
+    }
+    st_title = st_n;
+    if (st_n > 0) st_add(32);
+    // The verse's words, from its V line to the next (as verse_text).
+    p: int = line_end(vb_at[vi]) + 1;
+    e_ch: int = ch_end[c];
+    broke: bool = false;
+    words: int = st_n;
+    done: bool = false;
+    while (p < e_ch && !done) {
+        e: int = line_end(p);
+        k: int = bsb[p] as int;
+        if (k == 86) done = true else if (k == 84 || k == 87) {
+            if (broke && st_n > words && st[st_n - 1] as int != 32 && p + 1 < e && bsb[p + 1] as int != 32) st_add(32);
+            for i in p + 1..e st_add(bsb[i] as int);
+            broke = false
+        } else if (k != 70) broke = true;
+        p = e + 1
+    }
+    tokenize(st, st_n);
+    tok_n = tk_n;
+    for i in 0..tk_n {
+        tok_b[i] = tk_b[i];
+        tok_e[i] = tk_e[i];
+        tok_sup[i] = 0
+    }
+    // The supplied runs of the verse (supplied.bin is in verse order).
+    lo: int = 0;
+    hi: int = lsup_n;
+    while (lo < hi) {
+        mid: int = (lo + hi) / 2;
+        if (le32(lsup, mid * 8) < vi) lo = mid + 1 else hi = mid
+    }
+    r: int = lo;
+    while (r < lsup_n && le32(lsup, r * 8) == vi) {
+        t0: int = byte_of(lsup, r * 8 + 4);
+        n: int = byte_of(lsup, r * 8 + 5);
+        kind: int = if ((le16(lsup, r * 8 + 6) & 1) != 0) 2 else 1;
+        for t in t0..t0 + n
+            if (t < tok_n) tok_sup[t] = kind;
+        r = r + 1
+    }
+}
+
+// The word whose English covers token t of verse vi (-1: none).
+word_of_token(vi: int, t: int): int {
+    for w in v_first(vi)..v_end(vi) {
+        n: int = w_ntok(w);
+        if (n > 0 && t >= w_tok(w) && t < w_tok(w) + n) return w
+    }
+    -1
+}
+
+// Where word w's English is in st (its verse studied): ch_b to ch_e, empty
+// if it has none.
+ch_b: int = 0;
+
+ch_e: int = 0;
+
+chunk_of(w: int) {
+    n: int = w_ntok(w);
+    t: int = w_tok(w);
+    if (n == 0 || t + n > tok_n) {
+        ch_b = 0;
+        ch_e = 0;
+        return
+    }
+    ch_b = tok_b[t];
+    ch_e = tok_e[t + n - 1]
+}
+
+// ---- a word picked in the reader ----
+// Bytes b to e of chapter c as laid out (layout_chapter(c), in out): the
+// verse they are in, and its tokens they touch (pick_t0 to pick_t1), and
+// the word of the first of those that is a word's (pick_word, -1 if only
+// supplied or untranslated English is picked). False if no verse is.
+pick_vi: int = -1;
+
+pick_t0: int = 0;
+
+pick_t1: int = 0;
+
+pick_word: int = -1;
+
+pk_buf: []i8 = new i8[20000](0i8);
+
+pk_n: int = 0;
+
+// For each byte of pk_buf, where it is in out.
+pk_from: []int = new int[20000](0);
+
+pk_add_run(r: int, from: int) {
+    for i in from..run_end[r] {
+        if (pk_n < len(pk_buf)) {
+            pk_buf[pk_n] = out[i];
+            pk_from[pk_n] = i;
+            pk_n = pk_n + 1
+        }
+    }
+}
+
+study_pick(c: int, b: int, e: int): bool {
+    pick_vi = -1;
+    pick_word = -1;
+    if (!lang_ready) return false;
+    // The verse: the one whose text the bytes begin in, or verse 1 for a
+    // psalm's title.
+    title_at: bool = false;
+    p: int = 0;
+    for r in 0..runs {
+        if (run_style[r] == STYLE_TITLE && b >= p && b < run_end[r]) title_at = true;
+        p = run_end[r]
+    }
+    vn: int = -1;
+    at: int = -1;
+    if (title_at) vn = 1 else {
+        for i in 0..verse_count
+            if (verse_begin[i] >= 0 && b >= verse_begin[i] && b < verse_end[i]) at = i;
+        // (Or the verse the bytes end in, if they begin before its words.)
+        if (at < 0) {
+            for i in 0..verse_count
+                if (verse_begin[i] >= 0 && e > verse_begin[i] && e <= verse_end[i]) at = i
+        }
+        if (at < 0) return false;
+        vn = verse_num[at]
+    }
+    vi: int = lang_verse(c, vn);
+    if (vi < 0) return false;
+    if (at < 0) {
+        for i in 0..verse_count
+            if (verse_num[i] == vn) at = i
+    }
+    // The verse's words as laid out: the title's, then a space, then its
+    // body's (not its number, nor footnotes' marks).
+    pk_n = 0;
+    if (vn == 1) {
+        p = 0;
+        for r in 0..runs {
+            if (run_style[r] == STYLE_TITLE) pk_add_run(r, p);
+            p = run_end[r]
+        }
+        if (pk_n > 0 && pk_n < len(pk_buf)) {
+            pk_buf[pk_n] = 32i8;
+            pk_from[pk_n] = -1;
+            pk_n = pk_n + 1
+        }
+    }
+    if (at >= 0) {
+        p = 0;
+        for r in 0..runs {
+            s: int = run_style[r];
+            if ((s == STYLE_BODY || s == STYLE_CAPS) && run_end[r] > verse_begin[at] && p < verse_end[at]) {
+                from: int = if (p < verse_begin[at]) verse_begin[at] else p;
+                pk_add_run(r, from);
+                // (Not past the verse's end.)
+                while (pk_n > 0 && pk_from[pk_n - 1] >= verse_end[at]) pk_n = pk_n - 1
+            }
+            p = run_end[r]
+        }
+    }
+    tokenize(pk_buf, pk_n);
+    study_load(vi);
+    if (tk_n != tok_n) return false;
+    t0: int = -1;
+    t1: int = -1;
+    for t in 0..tk_n {
+        tb: int = pk_from[tk_b[t]];
+        te: int = pk_from[tk_e[t] - 1] + 1;
+        if (tb < e && te > b) {
+            if (t0 < 0) t0 = t;
+            t1 = t
+        }
+    }
+    if (t0 < 0) return false;
+    pick_vi = vi;
+    pick_t0 = t0;
+    pick_t1 = t1;
+    for t in t0..t1 + 1 {
+        if (pick_word < 0 && tok_sup[t] == 0) pick_word = word_of_token(vi, t)
+    }
+    true
+}
+
+// ---- the interlinear: tiles of a verse ----
+// In English order: a tile a word (in the tables' order), and one for each
+// run of English supplied apart from any word; in the original order, a
+// tile a word. Each: its word (-1 for supplied English), and its tokens.
+tile_n: int = 0;
+
+tile_word: []int = new int[300](0);
+
+tile_t0: []int = new int[300](0);
+
+tile_tn: []int = new int[300](0);
+
+tile_add(w: int, t0: int, n: int) {
+    if (tile_n >= len(tile_word)) return;
+    tile_word[tile_n] = w;
+    tile_t0[tile_n] = t0;
+    tile_tn[tile_n] = n;
+    tile_n = tile_n + 1
+}
+
+interlinear_tiles(vi: int, original: bool) {
+    study_load(vi);
+    tile_n = 0;
+    first: int = v_first(vi);
+    last: int = v_end(vi);
+    if (original) {
+        for o in 0..last - first {
+            for w in first..last
+                if (w_order(w) == o) tile_add(w, w_tok(w), w_ntok(w))
+        }
+        return
+    }
+    w: int = first;
+    t: int = 0;
+    while (w < last || t < tok_n) {
+        if (t < tok_n && tok_sup[t] == 2) {
+            t0: int = t;
+            while (t < tok_n && tok_sup[t] == 2) t = t + 1;
+            tile_add(-1, t0, t - t0)
+        } else if (w < last) {
+            tile_add(w, w_tok(w), w_ntok(w));
+            if (w_ntok(w) > 0) t = w_tok(w) + w_ntok(w);
+            w = w + 1
+        } else t = t + 1
+    }
+}
+
+// Tiles of widths ws (n of them) in lines no wider than room, gap apart:
+// where each line begins (line_first; line_count lines).
+line_count: int = 0;
+
+line_first: []int = new int[300](0);
+
+wrap_tiles(
+    ws: []f64,
+    n: int,
+    room: f64,
+    gap: f64
+) {
+    line_count = 0;
+    x: f64 = 0.0f64;
+    for i in 0..n {
+        if (i == 0 || x + gap + ws[i] > room) {
+            if (line_count < len(line_first)) {
+                line_first[line_count] = i;
+                line_count = line_count + 1
+            }
+            x = ws[i]
+        } else x = x + gap + ws[i]
+    }
+}
+
+// ---- where a Strong's number is ----
+// The verses (cc_vi, cc_n of them) and how many words (cc_words).
+cc_vi: []int = new int[8192](0);
+
+cc_n: int = 0;
+
+cc_words: int = 0;
+
+cc_greek: bool = false;
+
+cc_num: int = 0;
+
+leb_at: int = 0;
+
+leb(): int {
+    n: int = 0;
+    shift: int = 0;
+    more: bool = true;
+    while (more && leb_at < lconc_len) {
+        x: int = byte_of(lconc, leb_at);
+        leb_at = leb_at + 1;
+        n = n | (x & 127) << shift;
+        shift = shift + 7;
+        more = x >= 128
+    }
+    n
+}
+
+conc_load(greek: bool, num: int): bool {
+    cc_n = 0;
+    cc_words = 0;
+    cc_greek = greek;
+    cc_num = num;
+    if (!lang_ready || num <= 0 || num >= STRONGS_MAX) return false;
+    p: int = if (greek) conc_g[num] else conc_h[num];
+    if (p < 0) return false;
+    while (lconc[p] as int != 0) p = p + 1;
+    leb_at = p + 1;
+    cc_words = leb();
+    at: int = 0;
+    more: bool = true;
+    while (more) {
+        d: int = leb();
+        if (d == 0) more = false else {
+            at = at + d;
+            if (cc_n < len(cc_vi)) {
+                cc_vi[cc_n] = at - 1;
+                cc_n = cc_n + 1
+            }
+        }
+    }
+    true
+}
+
+// Whether word w is the number loaded.
+is_cc(w: int): bool {
+    w_strongs(w) == cc_num && w_greek(w) == cc_greek
+}
+
+// The English of verse vi's words of the number loaded (vi studied): where
+// each is in st (mk_b to mk_e), and whether every one is untranslated.
+mk_n: int = 0;
+
+mk_b: []int = new int[64](0);
+
+mk_e: []int = new int[64](0);
+
+mk_untranslated: bool = false;
+
+conc_marks(vi: int) {
+    study_load(vi);
+    mk_n = 0;
+    any: bool = false;
+    for w in v_first(vi)..v_end(vi) {
+        if (is_cc(w)) {
+            any = true;
+            chunk_of(w);
+            if (ch_e > ch_b && mk_n < len(mk_b)) {
+                mk_b[mk_n] = ch_b;
+                mk_e[mk_n] = ch_e;
+                mk_n = mk_n + 1
+            }
+        }
+    }
+    mk_untranslated = any && mk_n == 0
+}
+
+// ---- renderings: how the BSB translates the number loaded ----
+// Each distinct rendering (lower case), most frequent first: its text in
+// rd_pool, and how many times.
+rd_n: int = 0;
+
+rd_at: []int = new int[4096](0);
+
+rd_len: []int = new int[4096](0);
+
+rd_count: []int = new int[4096](0);
+
+rd_pool: []i8 = new i8[131072](0i8);
+
+rd_pool_n: int = 0;
+
+// How many occurrences are untranslated.
+rd_none: int = 0;
+
+// A rendering: word w's English (its verse studied), lower case, into rq_w.
+rw: []i8 = new i8[512](0i8);
+
+rw_n: int = 0;
+
+rendering_of(w: int) {
+    chunk_of(w);
+    rw_n = 0;
+    for i in ch_b..ch_e {
+        if (rw_n < len(rw)) {
+            k: int = byte_of(st, i);
+            rw[rw_n] = (if (k >= 65 && k <= 90) k + 32 else k) trunc i8;
+            rw_n = rw_n + 1
+        }
+    }
+}
+
+// The rendering in rw: its index among those found (-1 if new).
+rd_find(): int {
+    for r in 0..rd_n {
+        if (rd_len[r] == rw_n) {
+            same: bool = true;
+            for i in 0..rw_n
+                if (rd_pool[rd_at[r] + i] != rw[i]) same = false;
+            if (same) return r
+        }
+    }
+    -1
+}
+
+renderings() {
+    rd_n = 0;
+    rd_pool_n = 0;
+    rd_none = 0;
+    for x in 0..cc_n {
+        vi: int = cc_vi[x];
+        study_load(vi);
+        for w in v_first(vi)..v_end(vi) {
+            if (is_cc(w)) {
+                if (w_ntok(w) == 0) rd_none = rd_none + 1 else {
+                    rendering_of(w);
+                    r: int = rd_find();
+                    if (r < 0 && rd_n < len(rd_at) && rd_pool_n + rw_n <= len(rd_pool)) {
+                        r = rd_n;
+                        rd_at[r] = rd_pool_n;
+                        rd_len[r] = rw_n;
+                        rd_count[r] = 0;
+                        for i in 0..rw_n rd_pool[rd_pool_n + i] = rw[i];
+                        rd_pool_n = rd_pool_n + rw_n;
+                        rd_n = rd_n + 1
+                    }
+                    if (r >= 0) rd_count[r] = rd_count[r] + 1
+                }
+            }
+        }
+    }
+    // Most frequent first (and in the order first found, among equals).
+    for i in 1..rd_n {
+        j: int = i;
+        while (j > 0 && rd_count[j - 1] < rd_count[j]) {
+            swap(rd_at, j);
+            swap(rd_len, j);
+            swap(rd_count, j);
+            j = j - 1
+        }
+    }
+}
+
+swap(a: []int, j: int) {
+    t: int = a[j];
+    a[j] = a[j - 1];
+    a[j - 1] = t
+}
+
+// Whether word w (its verse studied) is rendered as rendering r.
+rendered_as(w: int, r: int): bool {
+    if (w_ntok(w) == 0) return false;
+    rendering_of(w);
+    if (rw_n != rd_len[r]) return false;
+    for i in 0..rw_n
+        if (rd_pool[rd_at[r] + i] != rw[i]) return false;
+    true
+}
+
+// The verses loaded, kept only where the number is rendered as r (and how
+// many times it is, in cc_words).
+conc_only(r: int) {
+    n: int = 0;
+    words: int = 0;
+    for x in 0..cc_n {
+        vi: int = cc_vi[x];
+        study_load(vi);
+        here: int = 0;
+        for w in v_first(vi)..v_end(vi)
+            if (is_cc(w) && rendered_as(w, r)) here = here + 1;
+        if (here > 0) {
+            cc_vi[n] = vi;
+            n = n + 1;
+            words = words + here
+        }
+    }
+    cc_n = n;
+    cc_words = words
+}
+
+// ---- the lexicon ----
+// A number's entries: where the first begins in llex (-1: none), and how
+// many there are.
+lex_first(greek: bool, num: int): int {
+    if (!lang_ready || num <= 0 || num >= STRONGS_MAX) return -1;
+    if (greek) lex_g[num] else lex_h[num]
+}
+
+lex_count(p: int): int {
+    if (p < 0) return 0;
+    n: int = 0;
+    q: int = p;
+    while (q < llex_len && llex[q] as int != 64) {
+        n = n + 1;
+        while (q < llex_len && llex[q] as int != 10) q = q + 1;
+        q = q + 1
+    }
+    n
+}
+
+// The line of entry i (from the first, at p).
+lex_line(p: int, i: int): int {
+    q: int = p;
+    for _k in 0..i {
+        while (q < llex_len && llex[q] as int != 10) q = q + 1;
+        q = q + 1
+    }
+    q
+}
+
+// Field k of the entry line at p (0 lemma, 1 its transliteration, 2 part of
+// speech, 3 gloss, 4 definition): lf_b to lf_e in llex.
+lf_b: int = 0;
+
+lf_e: int = 0;
+
+lex_field(p: int, k: int) {
+    q: int = p;
+    for _i in 0..k {
+        while (q < llex_len && llex[q] as int != 9 && llex[q] as int != 10) q = q + 1;
+        if (q < llex_len && llex[q] as int == 9) q = q + 1
+    }
+    e: int = q;
+    while (e < llex_len && llex[e] as int != 9 && llex[e] as int != 10) e = e + 1;
+    lf_b = q;
+    lf_e = e
+}
+
+// A definition's markup (**bold**, _italic_, [[MAT.5.43|Mat 5:43]], \n
+// between paragraphs) as runs of text in lx: each run's end, style (bits: 1
+// bold, 2 italic, 4 a reference, 8 Greek, 16 Hebrew), and for a
+// reference, its book, chapter and verse; each paragraph a sense (a
+// numbered meaning, to hang) or not.
+LX_BOLD: int = 1;
+
+LX_ITALIC: int = 2;
+
+LX_REF: int = 4;
+
+LX_GREEK: int = 8;
+
+LX_HEBREW: int = 16;
+
+lx: []i8 = new i8[16384](0i8);
+
+lx_n: int = 0;
+
+lx_runs: int = 0;
+
+lx_end: []int = new int[2048](0);
+
+lx_style: []int = new int[2048](0);
+
+lx_book: []int = new int[2048](0);
+
+lx_ch: []int = new int[2048](0);
+
+lx_verse: []int = new int[2048](0);
+
+// For each run, whether its paragraph is a sense.
+lx_sense: []bool = new bool[2048](false);
+
+lx_cur: int = 0;
+
+lx_cur_sense: bool = false;
+
+lx_ref_b: int = -1;
+
+lx_ref_c: int = 0;
+
+lx_ref_v: int = 0;
+
+// The script of the character whose first byte is k (and next byte k2): 8
+// Greek, 16 Hebrew, -1 neither (spaces and marks: as before), 0 Latin.
+script_of(k: int, k2: int): int {
+    if (k == 206 || k == 207) return LX_GREEK;
+    if (k == 225 && k2 >= 188 && k2 <= 191) return LX_GREEK;
+    if (k == 214 || k == 215) return LX_HEBREW;
+    if (k < 128 && !is_letter(k)) return -1;
+    if (k >= 128 && k < 192) return -1;
+    0
+}
+
+lx_put(k: int, style: int) {
+    if (lx_n >= len(lx)) return;
+    s: int = style;
+    if (lx_runs == 0 || lx_style[lx_runs - 1] != s || lx_sense[lx_runs - 1] != lx_cur_sense || (s & LX_REF) != 0 && (lx_book[lx_runs - 1] != lx_ref_b || lx_ch[lx_runs - 1] != lx_ref_c || lx_verse[lx_runs - 1] != lx_ref_v)) {
+        if (lx_runs < len(lx_end)) {
+            lx_style[lx_runs] = s;
+            lx_sense[lx_runs] = lx_cur_sense;
+            lx_book[lx_runs] = lx_ref_b;
+            lx_ch[lx_runs] = lx_ref_c;
+            lx_verse[lx_runs] = lx_ref_v;
+            lx_runs = lx_runs + 1
+        }
+    }
+    lx[lx_n] = k trunc i8;
+    lx_n = lx_n + 1;
+    lx_end[lx_runs - 1] = lx_n
+}
+
+// Whether the paragraph at llex[p] (to e) begins with a sense's number:
+// "1.", "1a)", "(a)", "b." and so on.
+sense_at(p: int, e: int): bool {
+    q: int = p;
+    if (q < e && llex[q] as int == 40) q = q + 1;
+    n: int = 0;
+    while (q < e && is_alnum(llex[q] as int) && n < 6) {
+        q = q + 1;
+        n = n + 1
+    }
+    if (n == 0 || q >= e) return false;
+    k: int = llex[q] as int;
+    if (k != 46 && k != 41) return false;
+    // (A word, as "Of." or "Lit.", is not a number.)
+    first: int = llex[if (llex[p] as int == 40) p + 1 else p] as int;
+    is_digit(first) || n == 1
+}
+
+lex_markup(p: int, e: int) {
+    lx_n = 0;
+    lx_runs = 0;
+    style: int = 0;
+    script: int = 0;
+    lx_ref_b = -1;
+    lx_cur_sense = sense_at(p, e);
+    q: int = p;
+    while (q < e) {
+        k: int = byte_of(llex, q);
+        if (k == 92 && q + 1 < e && llex[q + 1] as int == 110) {
+            lx_put(10, style & 3 | script);
+            q = q + 2;
+            lx_cur_sense = sense_at(q, e)
+        } else if (k == 42 && q + 1 < e && llex[q + 1] as int == 42) {
+            style = style ^ LX_BOLD;
+            q = q + 2
+        } else if (k == 95) {
+            style = style ^ LX_ITALIC;
+            q = q + 1
+        } else if (k == 91 && q + 1 < e && llex[q + 1] as int == 91) {
+            // [[BOOK.C.V|text]]
+            r: int = q + 2;
+            bk: int = -1;
+            for b in 0..books {
+                if (r + 3 <= e && bsb[book_line[b] + 1] == llex[r] && bsb[book_line[b] + 2] == llex[r + 1] && bsb[book_line[b] + 3] == llex[r + 2]) bk = b
+            }
+            r = r + 4;
+            cn: int = 0;
+            while (r < e && is_digit(llex[r] as int)) {
+                cn = cn * 10 + llex[r] as int - 48;
+                r = r + 1
+            }
+            r = r + 1;
+            vn: int = 0;
+            while (r < e && is_digit(llex[r] as int)) {
+                vn = vn * 10 + llex[r] as int - 48;
+                r = r + 1
+            }
+            while (r < e && llex[r] as int != 124) r = r + 1;
+            r = r + 1;
+            lx_ref_b = bk;
+            lx_ref_c = cn;
+            lx_ref_v = vn;
+            while (r < e && !(llex[r] as int == 93 && r + 1 < e && llex[r + 1] as int == 93)) {
+                lx_put(byte_of(llex, r), (if (bk >= 0) LX_REF else 0) | style & 3);
+                r = r + 1
+            }
+            lx_ref_b = -1;
+            q = r + 2
+        } else {
+            k2: int = if (q + 1 < e) byte_of(llex, q + 1) else 0;
+            sc: int = script_of(k, k2);
+            if (sc >= 0) script = sc;
+            lx_put(k, style | script);
+            q = q + 1
+        }
+    }
+}
+
+// ---- grammar: a parsing's terms, and what each means ----
+// The terms of a parsing, in order: each one's name (in pt_buf), which
+// part of the word it is of (0 a prefix, 1 the word, 2 a suffix), its
+// chunk (terms of a chunk run together: "3rd person singular"), and its
+// explanation's line in grammar.txt (-1 if none).
+pt_n: int = 0;
+
+pt_b: []int = new int[48](0);
+
+pt_e: []int = new int[48](0);
+
+pt_part: []int = new int[48](0);
+
+pt_chunk: []int = new int[48](0);
+
+pt_gram: []int = new int[48](0);
+
+pt_buf: []i8 = new i8[2048](0i8);
+
+pt_buf_n: int = 0;
+
+// How many parts the parsing has (a word with a prefix or a suffix has
+// two or more).
+pt_parts: int = 0;
+
+// The words of a chunk being matched: lower case, in cw.
+cw: []i8 = new i8[512](0i8);
+
+cw_b: []int = new int[32](0);
+
+cw_e: []int = new int[32](0);
+
+cw_n: int = 0;
+
+lower(k: int): int {
+    if (k >= 65 && k <= 90) k + 32 else k
+}
+
+// The line of grammar.txt one of whose names is words a to b (of cw), or
+// -1.
+gram_find(a: int, b: int): int {
+    for g in 0..gram_n {
+        p: int = gram_at[g];
+        e: int = gram_at[g + 1];
+        if (p < e && lgram[p] as int != 35) {
+            // Each name, to | or the tab.
+            q: int = p;
+            more: bool = true;
+            while (more && q < e) {
+                ne: int = q;
+                while (ne < e && lgram[ne] as int != 124 && lgram[ne] as int != 9) ne = ne + 1;
+                if (gram_name_is(q, ne, a, b)) return g;
+                if (ne < e && lgram[ne] as int == 124) q = ne + 1 else more = false
+            }
+        }
+    }
+    -1
+}
+
+// Whether lgram[q..ne] is words a to b of cw (single spaces between).
+gram_name_is(
+    q: int,
+    ne: int,
+    a: int,
+    b: int
+): bool {
+    i: int = q;
+    for w in a..b {
+        if (w > a) {
+            if (i >= ne || lgram[i] as int != 32) return false;
+            i = i + 1;
+            // (" / " is a space, too.)
+            if (i + 1 < ne && lgram[i] as int == 47 && lgram[i + 1] as int == 32) i = i + 2
+        }
+        for x in cw_b[w]..cw_e[w] {
+            if (i >= ne || lower(lgram[i] as int) != cw[x] as int) return false;
+            i = i + 1
+        }
+    }
+    i == ne
+}
+
+// Where grammar line g's first name (its display) and its explanation are.
+gn_b: int = 0;
+
+gn_e: int = 0;
+
+gx_b: int = 0;
+
+gx_e: int = 0;
+
+gram_parts(g: int) {
+    p: int = gram_at[g];
+    e: int = gram_at[g + 1] - 1;
+    q: int = p;
+    while (q < e && lgram[q] as int != 124 && lgram[q] as int != 9) q = q + 1;
+    gn_b = p;
+    gn_e = q;
+    while (q < e && lgram[q] as int != 9) q = q + 1;
+    gx_b = (if (q < e) q + 1 else e);
+    gx_e = e
+}
+
+pt_add(
+    part: int,
+    chunk: int,
+    g: int,
+    from: []i8,
+    a: int,
+    b: int
+) {
+    if (pt_n >= len(pt_b)) return;
+    pt_b[pt_n] = pt_buf_n;
+    for i in a..b {
+        if (pt_buf_n < len(pt_buf)) {
+            pt_buf[pt_buf_n] = from[i];
+            pt_buf_n = pt_buf_n + 1
+        }
+    }
+    pt_e[pt_n] = pt_buf_n;
+    pt_part[pt_n] = part;
+    pt_chunk[pt_n] = chunk;
+    pt_gram[pt_n] = g;
+    pt_n = pt_n + 1
+}
+
+// The chunk of the description from a to b (in lmorph) as terms.
+chunk_terms(
+    a: int,
+    b: int,
+    part: int,
+    chunk: int
+) {
+    // Its words, lower case: "-" and "/" as spaces between them.
+    cw_n = 0;
+    n: int = 0;
+    i: int = a;
+    while (i < b) {
+        k: int = lower(lmorph[i] as int);
+        if (k == 32 || k == 45 || k == 47) i = i + 1 else {
+            if (cw_n < len(cw_b)) {
+                cw_b[cw_n] = n;
+                while (i < b && lmorph[i] as int != 32 && lmorph[i] as int != 45 && lmorph[i] as int != 47) {
+                    if (n < len(cw)) {
+                        cw[n] = lower(lmorph[i] as int) trunc i8;
+                        n = n + 1
+                    }
+                    i = i + 1
+                }
+                cw_e[cw_n] = n;
+                cw_n = cw_n + 1
+            } else i = i + 1
+        }
+    }
+    // The longest names first, four words at most.
+    w: int = 0;
+    while (w < cw_n) {
+        found: int = -1;
+        upto: int = 0;
+        span: int = 4;
+        while (span >= 1 && found < 0) {
+            if (w + span <= cw_n) {
+                g: int = gram_find(w, w + span);
+                if (g >= 0) {
+                    found = g;
+                    upto = w + span
+                }
+            }
+            span = span - 1
+        }
+        if (found >= 0) {
+            gram_parts(found);
+            pt_add(part, chunk, found, lgram, gn_b, gn_e);
+            w = upto
+        } else {
+            // (A word not known: kept, unless it is a stray code, as "cdc".)
+            wl: int = cw_e[w] - cw_b[w];
+            digit: bool = false;
+            for x in cw_b[w]..cw_e[w]
+                if (is_digit(cw[x] as int)) digit = true;
+            if (wl > 3 || digit) pt_add(part, chunk, -1, cw, cw_b[w], cw_e[w]);
+            w = w + 1
+        }
+    }
+}
+
+part_starts: []int = new int[8](0);
+
+part_ends: []int = new int[8](0);
+
+// Parsing m as terms.
+parse_terms(m: int) {
+    pt_n = 0;
+    pt_buf_n = 0;
+    morph_of(m);
+    // The parts, between " | ".
+    starts: []int = part_starts;
+    ends: []int = part_ends;
+    np: int = 0;
+    p: int = md_b;
+    i: int = md_b;
+    while (i <= md_e) {
+        if (i == md_e || i + 2 < md_e && lmorph[i] as int == 32 && lmorph[i + 1] as int == 124 && lmorph[i + 2] as int == 32) {
+            if (np < len(starts)) {
+                starts[np] = p;
+                ends[np] = i;
+                np = np + 1
+            }
+            i = i + 3;
+            p = i
+        } else i = i + 1
+    }
+    pt_parts = np;
+    // The word's own part: the last that is not a suffix (a suffix begins
+    // with a person: "first person common singular").
+    word: int = np - 1;
+    if (np >= 2 && suffix_part(starts[np - 1], ends[np - 1])) word = np - 2;
+    chunk: int = 0;
+    for x in 0..np {
+        part: int = if (x < word) 0 else if (x == word) 1 else 2;
+        // The chunks, between " - " and ", ".
+        a: int = starts[x];
+        j: int = a;
+        while (j <= ends[x]) {
+            at_end: bool = j == ends[x];
+            dash: bool = !at_end && j + 2 < ends[x] && lmorph[j] as int == 32 && lmorph[j + 1] as int == 45 && lmorph[j + 2] as int == 32;
+            comma: bool = !at_end && j + 1 < ends[x] && lmorph[j] as int == 44 && lmorph[j + 1] as int == 32;
+            if (at_end || dash || comma) {
+                chunk_terms(a, j, part, chunk);
+                chunk = chunk + 1;
+                j = j + (if (dash) 3 else if (comma) 2 else 1);
+                a = j
+            } else j = j + 1
+        }
+    }
+}
+
+suffix_part(a: int, b: int): bool {
+    for word in ["first person", "second person", "third person", "1st person", "2nd person",
+        "3rd person"] {
+        if (b - a >= len(word)) {
+            same: bool = true;
+            for i in 0..len(word)
+                if (lower(lmorph[a + i] as int) != word[i] as int) same = false;
+            if (same) return true
+        }
+    }
+    false
+}
+
+// Whether term t is of person, gender or number (which run together).
+pgn(t: int): bool {
+    g: int = pt_gram[t];
+    if (g < 0) return false;
+    gram_parts(g);
+    for word in ["1st person", "2nd person", "3rd person", "singular", "plural", "dual",
+        "masculine", "feminine", "neuter", "common"] {
+        if (gn_e - gn_b == len(word)) {
+            same: bool = true;
+            for i in 0..len(word)
+                if (lgram[gn_b + i] != word[i]) same = false;
+            if (same) return true
+        }
+    }
+    false
+}
+
+// The parsing in plain English on one line ("Verb · aorist · indicative ·
+// active · 3rd person singular"): in pl.
+pl: []i8 = new i8[1024](0i8);
+
+pl_n: int = 0;
+
+pl_add(k: int) {
+    if (pl_n < len(pl)) {
+        pl[pl_n] = k trunc i8;
+        pl_n = pl_n + 1
+    }
+}
+
+plain_parsing(m: int) {
+    parse_terms(m);
+    pl_n = 0;
+    for t in 0..pt_n {
+        if (t > 0) {
+            if (pgn(t) && pgn(t - 1) && pt_chunk[t] == pt_chunk[t - 1]) pl_add(32) else {
+                // " · "
+                pl_add(32);
+                pl_add(194);
+                pl_add(183);
+                pl_add(32)
+            }
+        }
+        for i in pt_b[t]..pt_e[t] {
+            k: int = pt_buf[i] as int;
+            if (pl_n == 0 && k >= 97 && k <= 122) k = k - 32;
+            pl_add(k)
+        }
+    }
+}
+
+// ---- references in a note ----
+// The references found in the first n bytes of s ("Ezekiel 36:25–27", "jn
+// 3:16", "Rom 8"): where each is (nr_b to nr_e), and its book, chapter
+// and verse (-1: none).
+nr_n: int = 0;
+
+nr_b: []int = new int[64](0);
+
+nr_e: []int = new int[64](0);
+
+nr_book: []int = new int[64](0);
+
+nr_c: []int = new int[64](0);
+
+nr_v: []int = new int[64](0);
+
+nr_buf: []i8 = new i8[128](0i8);
+
+// Past a number like 36, 36:25 or 36:25–27 at s[i]: where it ends (i if
+// none), and whether it had a verse.
+num_verse: bool = false;
+
+number_end(s: []i8, i: int, n: int): int {
+    j: int = i;
+    num_verse = false;
+    if (j >= n || !is_digit(s[j] as int)) return i;
+    while (j < n && is_digit(s[j] as int)) j = j + 1;
+    if (j + 1 < n && (s[j] as int == 58 || s[j] as int == 46) && is_digit(s[j + 1] as int)) {
+        num_verse = true;
+        j = j + 1;
+        while (j < n && is_digit(s[j] as int)) j = j + 1;
+        // (A range: - or a dash, and a number.)
+        d: int = 0;
+        if (j < n && s[j] as int == 45) d = 1 else if (j + 2 < n && byte_of(s, j) == 226 && byte_of(s,
+            j + 1) == 128 && (byte_of(s, j + 2) == 147 || byte_of(s, j + 2) == 148)) d = 3;
+        if (d > 0 && j + d < n && is_digit(s[j + d] as int)) {
+            j = j + d;
+            while (j < n && is_digit(s[j] as int)) j = j + 1
+        }
+    }
+    j
+}
+
+note_refs(s: []i8, n: int) {
+    nr_n = 0;
+    i: int = 0;
+    while (i < n) {
+        at_word: bool = (i == 0 || !is_alnum(s[i - 1] as int)) && is_alnum(s[i] as int);
+        found: int = -1;
+        if (at_word) {
+            // A name of up to three words (perhaps after 1, 2 or 3), then a
+            // number.
+            j: int = i;
+            lead: bool = false;
+            if (j + 1 < n && s[j] as int >= 49 && s[j] as int <= 51 && (s[j + 1] as int == 32 || is_letter(s[j + 1] as int))) {
+                lead = true;
+                j = j + 1;
+                if (s[j] as int == 32) j = j + 1
+            }
+            words: int = 0;
+            while (j < n && is_letter(s[j] as int) && words < 3) {
+                while (j < n && is_letter(s[j] as int)) j = j + 1;
+                words = words + 1;
+                if (j + 1 < n && s[j] as int == 32 && is_letter(s[j + 1] as int) && words < 3) j = j + 1
+            }
+            if (words > 0 && j < n && s[j] as int == 32) {
+                e: int = number_end(s, j + 1, n);
+                capital: bool = s[i] as int >= 65 && s[i] as int <= 90 || lead;
+                if (e > j + 1 && (capital || num_verse) && e - i < len(nr_buf)) {
+                    for x in i..e nr_buf[x - i] = s[x];
+                    if (parse_ref(nr_buf, e - i) && ref_chapter > 0 && nr_n < len(nr_b)) {
+                        nr_b[nr_n] = i;
+                        nr_e[nr_n] = e;
+                        nr_book[nr_n] = ref_book;
+                        nr_c[nr_n] = ref_chapter;
+                        nr_v[nr_n] = ref_verse;
+                        nr_n = nr_n + 1;
+                        found = e
+                    }
+                }
+            }
+        }
+        if (found > 0) i = found else i = i + 1
+    }
+}
