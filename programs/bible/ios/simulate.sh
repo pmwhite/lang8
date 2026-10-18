@@ -21,6 +21,13 @@
 #           lines in it, plain-launch.txt)
 #   ios18   a few of read's and study's shots on an iOS 18 runtime (-ios18),
 #           if the Mac has one
+#   versions  Round 4 (DESIGN.md §9.9): the version picker, switching in
+#           place, marks across versions, Compare, the ESV (through its
+#           fixture, esv-fixture/, copied into the app's Library and named
+#           by L8_ESV_FIXTURE: no key, no network), its states, search
+#           under it, Study's segments, the acknowledgements, the largest
+#           text; and the recording of sequences 10 and 11
+#           (versions-transitions.mp4, with versions-transitions.txt)
 # After each step the script waits for the app to say it has settled (the
 # notification space.trailingwhite.smoothbible.done, from `notifyutil -1`),
 # with a timeout, rather than sleeping; then it takes the screenshot.
@@ -62,6 +69,16 @@ xcrun simctl ui "$dev" content_size large 2>/dev/null || true
 echo "booted in $(python3 -c "print(round($(now) - $start))") s" >> "$out/timing.txt"
 xcrun simctl install "$dev" "$app"
 echo "booted and installed in $(python3 -c "print(round($(now) - $start))") s" >> "$out/timing.txt"
+# (The versions group's ESV: the fixture, in the app's data container.)
+fixture=
+if [ "$group" = versions ]; then
+  data=$(xcrun simctl get_app_container "$dev" "$id" data 2>/dev/null)
+  if [ -n "$data" ]; then
+    mkdir -p "$data/Library/esv-fixture"
+    cp "$(dirname "$0")"/esv-fixture/* "$data/Library/esv-fixture/" && echo "esv fixture installed"
+    fixture=Library/esv-fixture
+  fi
+fi
 # (The ios18 group's shots have -ios18 after their names.)
 suffix=
 [ "$group" = ios18 ] && suffix=-ios18
@@ -105,7 +122,7 @@ wait_done() {
 launch() {
   events=$((events + 1))
   wait_start
-  SIMCTL_CHILD_L8_DEMO=1 xcrun simctl launch --console-pty "$dev" "$id" > "$out/$1" 2>&1 &
+  SIMCTL_CHILD_L8_DEMO=1 SIMCTL_CHILD_L8_ESV_FIXTURE=$fixture xcrun simctl launch --console-pty "$dev" "$id" > "$out/$1" 2>&1 &
   console=$!
   # (The first launch may take minutes.)
   i=0
@@ -286,6 +303,7 @@ store)
   step 132 store-4 6
   step 133 store-5 6
   step 134 store-6 8
+  step 135 store-7 6
   # A plain launch (no L8_DEMO, no L8_TIMING), as in normal use: its console
   # must have no "bible:" lines.
   xcrun simctl terminate "$dev" "$id" 2>/dev/null || true
@@ -297,6 +315,64 @@ store)
   xcrun simctl io "$dev" screenshot "$out/plain-launch.png" >/dev/null 2>&1
   n=$(grep -c "bible:" "$out/plain-console.txt")
   echo "plain launch: $n bible: lines" | tee "$out/plain-launch.txt"
+  ;;
+versions)
+  # (DESIGN.md §9.9: shots 100 to 130.)
+  step 200
+  step 201 100-settings-version
+  step 202 101-versions
+  step 203 102-kjv-behind
+  step 204 103-kjv-john-3
+  step 205 104-kjv-matt-17
+  step 206 105-bsb-matt-17
+  step 207 106-library-kjv-only 6
+  step 208 107-web-psalm-23
+  step 209 108-asv-psalm-23
+  step 210 109-ylt-genesis-1
+  step 211 110-red-letter-asv 6
+  step 212 111-compare
+  step 213 112-compare-esv 6
+  step 214 113-compare-next
+  step 215 114-compare-to-kjv
+  step 216 115-esv-loading 6
+  step 217 116-esv-john-4 8
+  step 218 117-esv-footer 6
+  step 219 118-esv-3john 6
+  step 220 119-esv-offline 6
+  step 221 120-esv-busy 6
+  step 222 121-esv-search 6
+  step 223 122-esv-search-online 6
+  step 224 123-study-words 6
+  step 225 124-study-references
+  step 226 125-xref-preview
+  step 227 126-study-commentary
+  step 228 127-commentary-preview
+  step 229 128-acknowledgements 6
+  step 230
+  ui content_size accessibility-extra-extra-extra-large
+  step 231 129-ax-compare 6
+  step 232 130-ax-tray-six 6
+  ui content_size large
+  # The screen recording of sequences 10 and 11.
+  xcrun simctl io "$dev" recordVideo --codec h264 --force "$out/transitions.mp4" > "$out/record.txt" 2>&1 &
+  recorder=$!
+  i=0
+  while ! grep -qi "started" "$out/record.txt" 2>/dev/null && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  rec0=$(now)
+  sleep 0.5
+  : > "$out/transitions.txt"
+  for s in 236 237; do
+    a=$(now)
+    step "$s" "" 18
+    b=$(now)
+    echo "$((s - 226)) $(python3 -c "print(round($a - $rec0, 2), round($b - $rec0, 2))")" >> "$out/transitions.txt"
+  done
+  sleep 0.5
+  kill -INT "$recorder" 2>/dev/null
+  wait "$recorder" 2>/dev/null
   ;;
 ios18)
   shot 01-genesis-1

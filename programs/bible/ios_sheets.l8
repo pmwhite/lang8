@@ -131,6 +131,11 @@ sheet_gone() {
     hist_vc = 0;
     lib_filter_row = 0;
     lib_all_button = 0;
+    versions_table = 0;
+    versions_vc = 0;
+    compare_gone();
+    xref_table = 0;
+    study_sheet_gone();
     origin_v = 0
 }
 
@@ -540,7 +545,8 @@ preview(
 
 // The first words of a verse (about 40 characters) as an NSString.
 opening_words(c: int, v: int, most: int): int {
-    _n: int = verse_text(c, if (v > 0) v else 1);
+    // (The current version's, or the BSB's under the ESV.)
+    _n: int = verse_text_of(quote_base(), c, if (v > 0) v else 1);
     n: int = vt_n;
     if (n > most) {
         n = most;
@@ -878,9 +884,15 @@ run_search() {
         sr_ref = parse_ref(sr, sr_n) && ref_chapter > 0;
         from: int = if (sr_scope == 2) 39 else if (sr_scope == 3) sr_book else 0;
         last: int = if (sr_scope == 1) 38 else if (sr_scope == 3) sr_book else 65;
+        // (The version read, offline; the BSB's under the ESV, at once,
+        // and the ESV itself a tap away.)
+        was: int = text_cur;
+        text_use(quote_base());
         search(sr, sr_n, from, last);
+        text_use(was);
         sr_done = true
     }
+    esv_sr_reset();
     if (search_table == 0) return;
     // (Recent searches giving way to results, or results to recent
     // searches: a cross-fade, not a jump.)
@@ -892,7 +904,7 @@ run_search() {
         if (recent_count() == 0) empty_state(search_vc, search_table, "magnifyingglass",
             nsstring("Search the Bible"), "Find words and phrases across all 66 books.") else empty_state(search_vc,
             search_table, "", 0, "")
-    } else if (hit_count == 0 && !sr_ref) {
+    } else if (hit_count == 0 && !sr_ref && !esv_search_row()) {
         fbuf_n = 0;
         fput_str("No Results for \â\€\œ");
         for i in 0..sr_n fput(sr[i] as int);
@@ -930,33 +942,172 @@ clear_recent(_self: int, _cmd: int, _sender: int): int {
     0
 }
 
-// Search's sections: 0 go to, 1 results, 2 recent searches.
+// Search's sections: 0 go to, 1 results, 2 recent searches, 3 the ESV's
+// results (in place of 1, once asked for).
 sr_kind(s: int): int {
     if (sr_n == 0) return 2;
     if (sr_ref && s == 0) return 0;
-    1
+    if (esv_sr_on) 3 else 1
 }
 
 search_sections(): int {
     if (sr_n == 0) return if (recent_count() > 0) 1 else 0;
-    (if (sr_ref) 1 else 0) + (if (hit_count > 0) 1 else 0)
+    (if (sr_ref) 1 else 0) + (if (hit_count > 0 || esv_search_row() || esv_sr_on) 1 else 0)
 }
 
 search_rows(s: int): int {
     k: int = sr_kind(s);
     if (k == 0) return 1;
     if (k == 2) return recent_count();
-    hit_count
+    if (k == 3) return esv_sr_n + (if (esv_sr_page < esv_sr_pages) 1 else 0);
+    hit_count + (if (esv_search_row()) 1 else 0)
+}
+
+// Whether the results end with "Search the ESV for â€¦": under the ESV, once
+// it is listed.
+esv_search_row(): bool {
+    text_cur == TEXT_ESV && esv_listed() && sr_n > 0 && sr_done
 }
 
 search_header(s: int): int {
     k: int = sr_kind(s);
-    if (k != 1) return 0;
+    if (k != 1 && k != 3) return 0;
     fbuf_n = 0;
-    fput_int(hit_count);
-    if (hit_more) fput(43);
-    fput_str(if (hit_count == 1) " verse" else " verses");
+    if (k == 1 && hit_count == 0) return nsstring("No Results");
+    fput_int(if (k == 3) esv_sr_total else hit_count);
+    if (k == 1 && hit_more) fput(43);
+    fput_str(if ((if (k == 3) esv_sr_total else hit_count) == 1) " verse in the " else " verses in the ");
+    fput_str(text_abbrs[if (k == 3) TEXT_ESV else quote_base()]);
     fstring()
+}
+
+// ---- the ESV's results (Â§9.4.8) ----
+// Shown in place of the BSB's once asked for: each one's verse and words
+// (the server's), the matches bold as ours are; and the request's state
+// (0 none, 1 asking, else ios_esv.l8's) on the row that asks.
+esv_sr_on: bool = false;
+
+esv_sr_state: int = 0;
+
+esv_sr_n: int = 0;
+
+esv_sr_total: int = 0;
+
+esv_sr_page: int = 0;
+
+esv_sr_pages: int = 0;
+
+esv_sr_c: []int = new int[1000](0);
+
+esv_sr_v: []int = new int[1000](0);
+
+esv_sr_texts: int = 0;
+
+esv_sr_reset() {
+    esv_sr_on = false;
+    esv_sr_state = 0;
+    esv_sr_n = 0;
+    esv_sr_page = 0;
+    esv_sr_pages = 0;
+    if (esv_sr_texts != 0) msg(esv_sr_texts, sel("removeAllObjects"))
+}
+
+// The ESV asked (page p of it).
+esv_search_ask(p: int) {
+    esv_sr_state = 1;
+    esv_search(nsstring_of(sr, sr_n), p);
+    if (search_table != 0) msg(search_table, sel("reloadData"))
+}
+
+// Its answer: the results on, or the row's line saying why not.
+esv_search_answered(state: int, json: int) {
+    if (search_table == 0) return;
+    if (state != ESV_HERE || json == 0) {
+        esv_sr_state = state;
+        msg(search_table, sel("reloadData"));
+        return
+    }
+    if (esv_sr_texts == 0) esv_sr_texts = keep(make("NSMutableArray"));
+    if (!esv_sr_on) {
+        esv_sr_n = 0;
+        msg(esv_sr_texts, sel("removeAllObjects"))
+    }
+    esv_sr_total = msg(msg1(json, sel("objectForKey:"), nsstring("total")), sel("longValue"));
+    esv_sr_page = msg(msg1(json, sel("objectForKey:"), nsstring("page")), sel("longValue"));
+    esv_sr_pages = msg(msg1(json, sel("objectForKey:"), nsstring("pages")), sel("longValue"));
+    list: int = msg1(json, sel("objectForKey:"), nsstring("results"));
+    if (list != 0) {
+        for i in 0..msg(list, sel("count")) {
+            r: int = msg1(list, sel("objectAtIndex:"), i);
+            b: int = esv_book_of(msg1(r, sel("objectForKey:"), nsstring("book")));
+            cn: int = msg(msg1(r, sel("objectForKey:"), nsstring("chapter")), sel("longValue"));
+            k: int = msg(msg1(r, sel("objectForKey:"), nsstring("key")), sel("longValue"));
+            text: int = msg1(r, sel("objectForKey:"), nsstring("text"));
+            if (b >= 0 && cn >= 1 && cn <= book_count[b] && esv_sr_n < len(esv_sr_c) && text != 0) {
+                esv_sr_c[esv_sr_n] = book_first[b] + cn - 1;
+                esv_sr_v[esv_sr_n] = k;
+                msg1(esv_sr_texts, sel("addObject:"), text);
+                esv_sr_n = esv_sr_n + 1
+            }
+        }
+    }
+    esv_sr_on = true;
+    esv_sr_state = 0;
+    fade_layer(msg(search_table, sel("layer")), 0.2f64);
+    msg(search_table, sel("reloadData"))
+}
+
+// The row that asks: "Search the ESV for â€œborn againâ€", and why it could
+// not, faint, under it.
+esv_ask_cell(t: int): int {
+    cell: int = list_cell(t, "esvask", 2);
+    config: int = list_config(2);
+    fbuf_n = 0;
+    fput_str("Search the ESV for \â\€\œ");
+    for i in 0..sr_n fput(sr[i] as int);
+    fput_str("\â\€\");
+    msg1(config, sel("setText:"), fstring());
+    msg1(text_props(config), sel("setColor:"), c_accent);
+    config_image(config, "globe", 17.0f64, c_accent);
+    st: int = esv_sr_state;
+    if (st >= ESV_OFFLINE || st == 1) {
+        msg1(config, sel("setSecondaryText:"), nsstring(if (st == 1) "Searching\â\€\¦" else if (st == ESV_OFFLINE) "No connection" else if (st == ESV_BUSY) "Busy, try again in a minute" else if (st == ESV_DAILY) "Resting for today" else "Not available right now"));
+        msg1(detail_props(config), sel("setColor:"), c_faint)
+    }
+    msg1(cell, sel("setContentConfiguration:"), config);
+    cell
+}
+
+// An ESV result: its verse, and the server's words with ours bold.
+esv_result_cell(t: int, r: int): int {
+    cell: int = list_cell(t, "hit", 2);
+    config: int = list_config(2);
+    if (r >= esv_sr_n) {
+        config2: int = list_config(0);
+        msg1(config2, sel("setText:"), nsstring("Show More"));
+        msg1(text_props(config2), sel("setColor:"), c_accent);
+        msg1(text_props(config2), sel("setAlignment:"), 1);
+        msg1(cell, sel("setContentConfiguration:"), config2);
+        return cell
+    }
+    keys[0] = k_font;
+    values[0] = sans(13.0f64, 0.3f64);
+    keys[1] = k_color;
+    values[1] = c_accent;
+    a: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        place_name(esv_sr_c[r], esv_sr_v[r]), nsdictionary(keys, values, 2));
+    msg1(config, sel("setAttributedText:"), a);
+    release(a);
+    vt_n = nsstring_into(msg1(esv_sr_texts, sel("objectAtIndex:"), r), vt);
+    match_in_vt();
+    msg1(config, sel("setSecondaryAttributedText:"), result_text_vt());
+    msg1(detail_props(config), sel("setNumberOfLines:"), 4);
+    msg1(detail_props(config), sel("setLineBreakMode:"), 4);
+    msg_set_f(config, sel("setTextToSecondaryTextVerticalPadding:"), 3.0f64);
+    msg_rect(config, sel("setDirectionalLayoutMargins:"), 12.0f64, 20.0f64, 12.0f64,
+        20.0f64);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    cell
 }
 
 // The recent searches' header: its title, and Clear.
@@ -992,6 +1143,11 @@ search_header_view(s: int): int {
 // (and washed), the rest softer; begun nearer the first if it is far in.
 result_text(c: int, v: int): int {
     match_ranges(c, v);
+    result_text_vt()
+}
+
+// The verse in vt, its matches found (mr_beginâ€¦): as result_text sets it.
+result_text_vt(): int {
     metrics: int = msg1(cls("UIFontMetrics"), sel("metricsForTextStyle:"), objc_const("UIFontTextStyleBody"));
     size: f64 = msg_f_f(metrics, sel("scaledValueForValue:"), 16.0f64);
     start: int = 0;
@@ -1052,9 +1208,20 @@ utf16_of(p: int, e: int): int {
 }
 
 search_cell(t: int, path: int): int {
+    // (Under the ESV, the BSB's words: what was searched.)
+    was: int = text_cur;
+    text_use(quote_base());
+    cell: int = search_cell_in(t, path);
+    text_use(was);
+    cell
+}
+
+search_cell_in(t: int, path: int): int {
     s: int = msg(path, sel("section"));
     r: int = msg(path, sel("row"));
     k: int = sr_kind(s);
+    if (k == 3) return esv_result_cell(t, r);
+    if (k == 1 && r >= hit_count) return esv_ask_cell(t);
     if (k == 2) {
         cell: int = list_cell(t, "recent", 0);
         config: int = list_config(0);
@@ -1113,9 +1280,21 @@ search_picked(s: int, r: int) {
         run_search();
         return
     }
+    if (k == 1 && r >= hit_count) {
+        if (esv_sr_state != 1) esv_search_ask(1);
+        return
+    }
+    if (k == 3 && r >= esv_sr_n) {
+        if (esv_sr_state != 1) esv_search_ask(esv_sr_page + 1);
+        return
+    }
     remember_search();
     if (k == 0) {
         go_search_ref();
+        return
+    }
+    if (k == 3) {
+        jump(esv_sr_c[r], esv_sr_v[r]);
         return
     }
     jump(hit_chapter[r], hit_verse[r])
@@ -1219,8 +1398,9 @@ lib_matches(
     for i in book_name_start(b)..book_name_end(b) lm_add(bsb[i] as int);
     lm_add(10);
     x: int = v;
-    while (x <= last && lm_n < 6000) {
-        _k: int = verse_text(c, x);
+    qt: int = quote_text(c, v);
+    while (x <= last && lm_n < 6000 && qt >= 0) {
+        _k: int = verse_text_of(qt, c, x);
         for i in 0..vt_n lm_add(vt[i] as int);
         lm_add(32);
         x = x + 1
@@ -1242,6 +1422,7 @@ lib_matches(
 }
 
 lib_build() {
+    ensure_quotable();
     lr_n = 0;
     ls_n = 0;
     if (lib_seg == 0) {
@@ -1453,8 +1634,9 @@ library_segment(_self: int, _cmd: int, control: int): int {
 range_words(c: int, v: int, last: int): int {
     fbuf_n = 0;
     x: int = v;
-    while (x <= last && fbuf_n < 600) {
-        _n: int = verse_text(c, x);
+    t: int = quote_text(c, v);
+    while (x <= last && fbuf_n < 600 && t >= 0) {
+        _n: int = verse_text_of(t, c, x);
         if (x > v) fput(32);
         for i in 0..vt_n fput(vt[i] as int);
         x = x + 1
@@ -1470,7 +1652,24 @@ lib_cell(t: int, path: int): int {
     c: int = lr_c[r];
     fbuf_n = 0;
     fput_ref(c, lr_v[r], lr_last[r]);
-    msg1(config, sel("setText:"), fstring());
+    // (Quoted from a version other than the one read: which, in faint.)
+    qt: int = quote_text(c, lr_v[r]);
+    if (qt >= 0 && qt != quote_base()) {
+        keys[0] = k_font;
+        values[0] = sans(15.0f64, 0.3f64);
+        keys[1] = k_color;
+        values[1] = c_ink;
+        title: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+        msg1(title, sel("appendAttributedString:"), attributed_str(fstring(), nsdictionary(keys,
+            values, 2)));
+        values[1] = c_faint;
+        fbuf_n = 0;
+        fput_str(" \Â\· ");
+        fput_str(text_abbrs[qt]);
+        msg1(title, sel("appendAttributedString:"), attributed_str(fstring(), nsdictionary(keys,
+            values, 2)));
+        msg1(config, sel("setAttributedText:"), title)
+    } else msg1(config, sel("setText:"), fstring());
     msg1(text_props(config), sel("setFont:"), sans(15.0f64, 0.3f64));
     msg1(text_props(config), sel("setColor:"), c_ink);
     soft: int = msg_set_f(c_ink, sel("colorWithAlphaComponent:"), 0.8f64);
@@ -1595,6 +1794,8 @@ show_settings(_self: int, _cmd: int, _sender: int): int {
 
 open_settings() {
     if (presented() != 0) return;
+    // (Whether our server gives the ESV, asked quietly as the sheet opens.)
+    esv_check(true);
     vc: int = sheet_table(cls("UITableViewController"), 2, "Reading");
     settings_table = msg(vc, sel("tableView"));
     style_table(settings_table, true);
@@ -1603,9 +1804,12 @@ open_settings() {
     present(settings_nav)
 }
 
-// The settings' sections: 0 Listen, 1 the text's size, 2 theme, 3 font,
-// 4 layout, 5 what is shown, 6 while reading, 7 acknowledgements.
-settings_rows(s: int): int {
+// The settings' sections: 0 the version, then (s - 1 below) 0 Listen, 1
+// the text's size, 2 theme, 3 font, 4 layout, 5 what is shown, 6 while
+// reading, 7 acknowledgements.
+settings_rows(s_in: int): int {
+    if (s_in == 0) return 1;
+    s: int = s_in - 1;
     if (s == 0) return 2;
     if (s == 1 || s == 2 || s == 6 || s == 7) return 1;
     if (s == 3) return 5;
@@ -1613,12 +1817,17 @@ settings_rows(s: int): int {
     5
 }
 
-settings_header(s: int): int {
+settings_header(s_in: int): int {
+    if (s_in == 0) return 0;
+    s: int = s_in - 1;
     if (s <= 1 || s == 7) return 0;
     nsstring(if (s == 2) "Theme" else if (s == 3) "Font" else if (s == 4) "Layout" else if (s == 5) "Show" else "While Reading")
 }
 
-settings_footer(s: int): int {
+settings_footer(s_in: int): int {
+    if (s_in == 0) return version_footer();
+    s: int = s_in - 1;
+    if (s == 5) return show_footer();
     if (s == 6) return nsstring("The screen stays on while you read. It turns off as usual after 10 minutes without scrolling.");
     if (s != 7) return 0;
     nsstring("Berean Standard Bible \Â\· Public Domain")
@@ -1798,7 +2007,8 @@ show_titles: []str = ["Verse Numbers", "Section Headings", "Footnote Marks", "Wo
     "One Verse per Line"];
 
 settings_cell(t: int, path: int): int {
-    s: int = msg(path, sel("section"));
+    if (msg(path, sel("section")) == 0) return version_cell(t);
+    s: int = msg(path, sel("section")) - 1;
     r: int = msg(path, sel("row"));
     if (s == 0) return if (r == 0) listen_cell(t) else speed_cell(t);
     if (s == 1) return size_cell(t);
@@ -2022,7 +2232,12 @@ set_red_letter(on: bool) {
     relayout()
 }
 
-settings_picked(s: int, r: int) {
+settings_picked(s_in: int, r: int) {
+    if (s_in == 0) {
+        open_versions();
+        return
+    }
+    s: int = s_in - 1;
     if (s == 7) {
         open_acknowledgements();
         return
@@ -2382,11 +2597,14 @@ table_sections(_self: int, _cmd: int, t: int): int {
     if (t == picker_table) return pk_sections();
     if (t == lib_table) return ls_n;
     if (t == search_table) return search_sections();
-    if (t == settings_table) return 8;
+    if (t == settings_table) return 9;
+    if (t == versions_table && t != 0) return versions_sections();
+    if (t == compare_table && t != 0) return compare_sections();
+    if (t == xref_table && t != 0) return 1;
     if (t == study_table && t != 0) return study_sections();
     if (t == grammar_table && t != 0) return gr_n;
     if (t == conc_table && t != 0) return cs_n;
-    if (t == ack_table && t != 0) return 3;
+    if (t == ack_table && t != 0) return ack_sections();
     if (t == changes_table && t != 0) return 1;
     if (t == hist_table && t != 0) return hd_n;
     0
@@ -2403,6 +2621,9 @@ table_rows(
     if (t == lib_table) return if (section < ls_n) ls_count[section] else 0;
     if (t == search_table) return search_rows(section);
     if (t == settings_table) return settings_rows(section);
+    if (t == versions_table && t != 0) return versions_rows(section);
+    if (t == compare_table && t != 0) return compare_rows(section);
+    if (t == xref_table && t != 0) return xref_rows();
     if (t == study_table && t != 0) return study_rows(section);
     if (t == grammar_table && t != 0) return grammar_rows(section);
     if (t == conc_table && t != 0) return cs_count[section];
@@ -2422,10 +2643,11 @@ table_header(
     if (t == lib_table) return if (section < ls_n && ls_book[section] >= 0) book_name(ls_book[section]) else 0;
     if (t == search_table) return search_header(section);
     if (t == settings_table) return settings_header(section);
+    if (t == versions_table && t != 0) return versions_header(section);
     if (t == study_table && t != 0) return study_header_title(section);
     if (t == grammar_table && t != 0) return grammar_header(section);
     if (t == conc_table && t != 0) return conc_header(section);
-    if (t == ack_table && t != 0) return nsstring(ack_headers[section]);
+    if (t == ack_table && t != 0) return ack_header(section);
     if (t == hist_table && t != 0) return if (section < hd_n) hist_header(section) else 0;
     0
 }
@@ -2437,6 +2659,8 @@ table_footer(
     section: int
 ): int {
     if (t == settings_table) return settings_footer(section);
+    if (t == versions_table && t != 0) return versions_footer(section);
+    if (t == xref_table && t != 0) return xref_footer();
     if (t == study_table && t != 0) return study_footer(section);
     if (t == ack_table && t != 0) return ack_footer(section);
     0
@@ -2449,6 +2673,43 @@ table_header_view(
     section: int
 ): int {
     if (t == search_table) return search_header_view(section);
+    if (t == compare_table && t != 0) return compare_header_view(section);
+    0
+}
+
+table_footer_view(
+    _self: int,
+    _cmd: int,
+    t: int,
+    section: int
+): int {
+    if (t == search_table && t != 0 && sr_kind(section) == 3) return esv_footer_view();
+    if (t == compare_table && t != 0) return compare_footer_view(section);
+    0
+}
+
+// "(ESV) Â· esv.org" under ESV text in a list (the link to esv.org).
+esv_footer_view(): int {
+    b: int = msg1(cls("UIButton"), sel("buttonWithType:"), 0);
+    s: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    keys[0] = k_font;
+    values[0] = sans(13.0f64, 0.0f64);
+    keys[1] = k_color;
+    values[1] = c_faint;
+    msg1(s, sel("appendAttributedString:"), attributed_str(nsstring("(ESV) \Â\· "),
+        nsdictionary(keys, values, 2)));
+    values[1] = c_accent;
+    msg1(s, sel("appendAttributedString:"), attributed_str(nsstring("esv.org"), nsdictionary(keys,
+        values, 2)));
+    msg2(b, sel("setAttributedTitle:forState:"), s, 0);
+    msg3(b, sel("addTarget:action:forControlEvents:"), app_obj, sel("esvOrg:"), 64);
+    msg1(b, sel("setAccessibilityLabel:"), nsstring("ESV. Link: esv.org"));
+    msg_rect(b, sel("setFrame:"), 0.0f64, 0.0f64, 300.0f64, 44.0f64);
+    b
+}
+
+esv_org(_self: int, _cmd: int, _b: int): int {
+    open_web_ns(nsstring("https://www.esv.org"));
     0
 }
 
@@ -2463,6 +2724,9 @@ table_cell(
     if (t == lib_table) return lib_cell(t, path);
     if (t == search_table) return search_cell(t, path);
     if (t == study_table && t != 0) return study_cell(t, path);
+    if (t == versions_table && t != 0) return versions_cell(t, path);
+    if (t == compare_table && t != 0) return compare_cell(t, path);
+    if (t == xref_table && t != 0) return xref_cell(t, path);
     if (t == grammar_table && t != 0) return grammar_cell(t, path);
     if (t == conc_table && t != 0) return conc_cell(t, path);
     if (t == ack_table && t != 0) return ack_cell(t, path);
@@ -2485,7 +2749,8 @@ table_picked(
         r) else if (t == search_table) search_picked(s, r) else if (t == settings_table) settings_picked(s,
         r) else if (t == study_table) study_picked(s, r) else if (t == conc_table) conc_picked(s,
         r) else if (t == ack_table) ack_picked(s, r) else if (t == hist_table && t != 0) hist_picked(s,
-        r);
+        r) else if (t == versions_table && t != 0) versions_picked(s, r) else if (t == compare_table && t != 0) compare_picked(s,
+        r) else if (t == xref_table && t != 0) xref_picked(r);
     0
 }
 
@@ -2554,6 +2819,9 @@ add_sheet_methods(app: int) {
     add_method2(app, sel("tableView:titleForFooterInSection:"), &table_footer, "@@:@q");
     add_method2(app, sel("tableView:viewForHeaderInSection:"), &table_header_view,
         "@@:@q");
+    add_method2(app, sel("tableView:viewForFooterInSection:"), &table_footer_view,
+        "@@:@q");
+    add_method1(app, sel("esvOrg:"), &esv_org, "v@:@");
     add_method2(app, sel("tableView:cellForRowAtIndexPath:"), &table_cell, "@@:@@");
     add_method2(app, sel("tableView:didSelectRowAtIndexPath:"), &table_picked, "v@:@@");
     add_method2(app, sel("tableView:canEditRowAtIndexPath:"), &table_can_edit, "B@:@@");

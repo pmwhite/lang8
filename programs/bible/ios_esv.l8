@@ -1,0 +1,1005 @@
+tag bible_ios;
+
+use_tag std, ios, bible;
+
+// The ESV, online (DESIGN.md Â§9.4): its chapters asked of our own server
+// (smoothbible.com/api/v1/, worker/worker.js, which holds the ESV API's
+// key), kept by esv_cache.l8's rules (Library/Caches/SmoothBible/esv/),
+// made into text 5 (text.l8), and the reader's states while a chapter is
+// not here: its opener, a quiet spinner under it, and, if it cannot come,
+// a calm line in the reader's own type with what can be done.
+//
+// The ESV is listed (in Versions, Compare, Search) only once the server has
+// said, to a cheap status request, that it can give it (the owner's rule,
+// 2026-10-18): asked quietly at most once a day, and when the reading
+// settings open; the answer kept. Until then it is not offered at all.
+//
+// No blocks: the session's delegate is a class made here (L8Net), on the
+// main queue, given each task's data and its end. With L8_ESV_FIXTURE in the
+// environment (CI), a directory under the app's home, the answers are read
+// from its files (worker/make_fixtures.mjs made them) after a delay, and its
+// mode (ok, offline, busy, daily) answers with that state instead.
+import "../ios/objc.l8";
+
+import "text.l8";
+
+import "esv_cache.l8";
+
+ESV_BASE: str = "https://smoothbible.com/api/v1/";
+
+extern getenv_address(name: str): int = getenv;
+
+// ---- whether the ESV is offered ----
+esv_fixture: int = 0;
+
+// The fixture's mode (0 ok, 1 offline, 2 busy, 3 daily) and delay; the demo
+// sets them.
+esv_fixture_mode: int = 0;
+
+esv_fixture_delay: f64 = 0.6f64;
+
+esv_fixture_checked: bool = false;
+
+esv_fixture_dir(): int {
+    if (esv_fixture_checked) return esv_fixture;
+    esv_fixture_checked = true;
+    p: int = getenv_address("L8_ESV_FIXTURE");
+    if (p == 0 || strlen(p) == 0) return 0;
+    rel: int = msg1(cls("NSString"), sel("stringWithUTF8String:"), p);
+    esv_fixture = keep(msg1(NSHomeDirectory(), sel("stringByAppendingPathComponent:"),
+        rel));
+    // (Its mode, as the directory says: ok unless it says otherwise.)
+    m: int = msg3(cls("NSString"), sel("stringWithContentsOfFile:encoding:error:"),
+        msg1(esv_fixture, sel("stringByAppendingPathComponent:"), nsstring("mode")),
+        4, 0);
+    if (m != 0) {
+        for i in 1..4
+            if ((msg1(m, sel("hasPrefix:"), nsstring(esv_mode_names[i])) & 255) != 0) esv_fixture_mode = i
+    }
+    note("bible: esv fixture");
+    esv_fixture
+}
+
+esv_mode_names: []str = ["ok", "offline", "busy", "daily"];
+
+// Whether the ESV is listed: the fixture's, or our server said so.
+esv_listed(): bool {
+    if (esv_fixture_dir() != 0) return true;
+    def_bool("esvAvailable")
+}
+
+// The server asked whether it gives the ESV: if forced (the reading
+// settings opening), or else if a day has passed since it was last asked.
+esv_check(forced: bool) {
+    if (esv_fixture_dir() != 0) return;
+    now: int = time(0);
+    if (!forced && now - def_int("esvChecked") < 86400) return;
+    if (esv_status_task != 0) return;
+    set_def_int("esvChecked", now);
+    esv_status_task = net_get("status", NET_STATUS, -1, 0)
+}
+
+esv_status_task: int = 0;
+
+// ---- the session ----
+NET_CHAPTERS: int = 0;
+
+NET_SEARCH: int = 1;
+
+NET_STATUS: int = 2;
+
+net_class: int = 0;
+
+net_session: int = 0;
+
+// The tasks running: each one's data so far, what it asks, and of what.
+NET_MOST: int = 8;
+
+net_task: []int = new int[8](0);
+
+net_data: []int = new int[8](0);
+
+net_kind: []int = new int[8](0);
+
+net_c: []int = new int[8](0);
+
+net_count: []int = new int[8](0);
+
+session(): int {
+    if (net_session != 0) return net_session;
+    config: int = msg(cls("NSURLSessionConfiguration"), sel("ephemeralSessionConfiguration"));
+    msg_set_f(config, sel("setTimeoutIntervalForRequest:"), 12.0f64);
+    msg1(config, sel("setRequestCachePolicy:"), 1);
+    msg1(config, sel("setURLCache:"), 0);
+    delegate: int = msg(make_net_delegate(), sel("autorelease"));
+    net_session = keep(msg3(cls("NSURLSession"), sel("sessionWithConfiguration:delegate:delegateQueue:"),
+        config, delegate, msg(cls("NSOperationQueue"), sel("mainQueue"))));
+    net_session
+}
+
+make_net_delegate(): int {
+    msg(msg(net_class, sel("alloc")), sel("init"))
+}
+
+// A GET of path (under the base) begun: its task (0 if none could be).
+net_get(
+    path: str,
+    kind: int,
+    c: int,
+    count: int
+): int {
+    net_get_ns(nsstring(path), kind, c, count)
+}
+
+net_get_ns(
+    path: int,
+    kind: int,
+    c: int,
+    count: int
+): int {
+    slot: int = -1;
+    for i in 0..NET_MOST
+        if (net_task[i] == 0 && slot < 0) slot = i;
+    if (slot < 0) return 0;
+    url: int = msg1(cls("NSURL"), sel("URLWithString:"), msg1(nsstring(ESV_BASE),
+        sel("stringByAppendingString:"), path));
+    if (url == 0) return 0;
+    req: int = msg1(cls("NSMutableURLRequest"), sel("requestWithURL:"), url);
+    info: int = msg(msg(cls("NSBundle"), sel("mainBundle")), sel("infoDictionary"));
+    v: int = msg1(info, sel("objectForKey:"), nsstring("CFBundleShortVersionString"));
+    b: int = msg1(info, sel("objectForKey:"), nsstring("CFBundleVersion"));
+    head: int = msg1(msg1(msg1(if (v != 0) v else nsstring("1.0"), sel("stringByAppendingString:"),
+        nsstring(" (")), sel("stringByAppendingString:"), if (b != 0) b else nsstring("1")),
+        sel("stringByAppendingString:"), nsstring(")"));
+    msg2(req, sel("setValue:forHTTPHeaderField:"), head, nsstring("X-Smooth-Bible"));
+    task: int = msg1(session(), sel("dataTaskWithRequest:"), req);
+    if (task == 0) return 0;
+    net_task[slot] = keep(task);
+    net_data[slot] = make("NSMutableData");
+    net_kind[slot] = kind;
+    net_c[slot] = c;
+    net_count[slot] = count;
+    msg(task, sel("resume"));
+    task
+}
+
+net_slot(task: int): int {
+    for i in 0..NET_MOST
+        if (net_task[i] == task && task != 0) return i;
+    -1
+}
+
+net_received(
+    _self: int,
+    _cmd: int,
+    _session: int,
+    task: int,
+    data: int
+): int {
+    i: int = net_slot(task);
+    if (i >= 0) msg1(net_data[i], sel("appendData:"), data);
+    0
+}
+
+// A task's end: its status and its JSON, to what asked.
+net_completed(
+    _self: int,
+    _cmd: int,
+    _session: int,
+    task: int,
+    error: int
+): int {
+    i: int = net_slot(task);
+    if (i < 0) return 0;
+    kind: int = net_kind[i];
+    c: int = net_c[i];
+    count: int = net_count[i];
+    data: int = net_data[i];
+    status: int = if (error == 0) msg(msg(task, sel("response")), sel("statusCode")) else 0;
+    json: int = if (error == 0) msg3(cls("NSJSONSerialization"), sel("JSONObjectWithData:options:error:"),
+        data, 0, 0) else 0;
+    net_task[i] = 0;
+    net_data[i] = 0;
+    // (The answer handled before the task and its data are let go.)
+    net_answer(kind, c, count, status, json);
+    release(data);
+    release(task);
+    0
+}
+
+// An answer: status 0 for no answer (no connection, or no answer in time).
+net_answer(
+    kind: int,
+    c: int,
+    count: int,
+    status: int,
+    json: int
+) {
+    if (kind == NET_STATUS) {
+        esv_status_task = 0;
+        if (status == 200 && json != 0) {
+            ok: int = msg1(json, sel("objectForKey:"), nsstring("esv"));
+            on: bool = ok != 0 && (msg(ok, sel("boolValue")) & 255) != 0;
+            was: bool = def_bool("esvAvailable");
+            set_def_bool("esvAvailable", on);
+            if (on != was && versions_table != 0) msg(versions_table, sel("reloadData"))
+        } else if (status != 0 && status != 429 && status < 500) set_def_bool("esvAvailable",
+            false);
+        return
+    }
+    state: int = esv_state_of(status, json);
+    if (kind == NET_SEARCH) {
+        esv_search_answered(state, json);
+        return
+    }
+    esv_inflight = -1;
+    if (state == ESV_HERE) esv_take(json) else esv_failed(c, count, state, esv_retry_of(json));
+    esv_next()
+}
+
+// ---- states ----
+ESV_HERE: int = 0;
+
+ESV_LOADING: int = 1;
+
+ESV_OFFLINE: int = 2;
+
+ESV_BUSY: int = 3;
+
+ESV_DAILY: int = 4;
+
+ESV_UNAVAILABLE: int = 5;
+
+// Each chapter's state, while it is not here.
+esv_state: []int = new int[1200](0);
+
+// When each began loading (for the spinner's 0.4 s).
+esv_since: []f64 = new f64[1200](0.0f64);
+
+// Not to ask again before this (busy, resting for today).
+esv_hold_until: f64 = 0.0f64;
+
+esv_state_of(status: int, json: int): int {
+    if (status == 200) return ESV_HERE;
+    if (status == 0) return ESV_OFFLINE;
+    if (status == 429) return ESV_BUSY;
+    if (status == 503 && json != 0) {
+        e: int = msg1(json, sel("objectForKey:"), nsstring("error"));
+        if (e != 0 && (msg1(e, sel("isEqualToString:"), nsstring("daily_limit")) & 255) != 0) return ESV_DAILY
+    }
+    if (status == 504) return ESV_OFFLINE;
+    ESV_UNAVAILABLE
+}
+
+esv_retry_of(json: int): int {
+    if (json == 0) return 0;
+    r: int = msg1(json, sel("objectForKey:"), nsstring("retry"));
+    if (r == 0) 0 else msg(r, sel("longValue"))
+}
+
+// ---- the cache, on disk ----
+esv_dir_ns: int = 0;
+
+esv_dir(): int {
+    if (esv_dir_ns != 0) return esv_dir_ns;
+    dirs: int = NSSearchPathForDirectoriesInDomains(13, 1, 1);
+    base: int = msg(dirs, sel("firstObject"));
+    if (base == 0) base = NSHomeDirectory();
+    esv_dir_ns = keep(msg1(msg1(base, sel("stringByAppendingPathComponent:"), nsstring("SmoothBible")),
+        sel("stringByAppendingPathComponent:"), nsstring("esv")));
+    msg4(msg(cls("NSFileManager"), sel("defaultManager")), sel("createDirectoryAtPath:withIntermediateDirectories:attributes:error:"),
+        esv_dir_ns, 1, 0, 0);
+    esv_dir_ns
+}
+
+// The file of chapter c (JHN-3.txt).
+esv_file(c: int): int {
+    fbuf_n = 0;
+    for x in 0..3 fput(bsb_code_byte(ch_book[c], x));
+    fput(45);
+    fput_int(ch_num[c]);
+    fput_str(".txt");
+    msg1(esv_dir(), sel("stringByAppendingPathComponent:"), fstring())
+}
+
+esv_buf: []i8 = new i8[262144](0i8);
+
+esv_opened: bool = false;
+
+// The ESV made a text: what is on disk held again (by index.tsv, a
+// chapter whose file is missing left out), then text 5 made of it.
+esv_open() {
+    if (!esv_opened) {
+        esv_opened = true;
+        data: int = msg1(cls("NSData"), sel("dataWithContentsOfFile:"), msg1(esv_dir(),
+            sel("stringByAppendingPathComponent:"), nsstring("index.tsv")));
+        fbuf_n = 0;
+        if (data != 0) {
+            n: int = msg(data, sel("length"));
+            if (n > len(fbuf)) n = len(fbuf);
+            if (n > 0) memcpy_from(fbuf, msg(data, sel("bytes")), n);
+            fbuf_n = n
+        }
+        parse_esv_index();
+        for i in 0..ix_n {
+            c: int = ix_c[i];
+            d: int = msg1(cls("NSData"), sel("dataWithContentsOfFile:"), esv_file(c));
+            if (d != 0) {
+                n: int = msg(d, sel("length"));
+                if (n > len(esv_buf)) n = len(esv_buf);
+                if (n > 0) memcpy_from(esv_buf, msg(d, sel("bytes")), n);
+                esv_restore(c, esv_buf, n, ix_fetched[i], ix_used[i])
+            }
+        }
+        esv_save()
+    }
+    esv_build()
+}
+
+// What is held written: each chapter on disk its file (those let go
+// deleted), and the index.
+esv_save() {
+    fm: int = msg(cls("NSFileManager"), sel("defaultManager"));
+    for i in 0..ec_gone_n {
+        if (esv_find(ec_gone[i]) < 0) msg2(fm, sel("removeItemAtPath:error:"), esv_file(ec_gone[i]),
+            0)
+    }
+    ec_gone_n = 0;
+    format_esv_index();
+    data: int = msg2(cls("NSData"), sel("dataWithBytes:length:"), bytes_address(fbuf),
+        fbuf_n);
+    msg2(data, sel("writeToFile:atomically:"), msg1(esv_dir(), sel("stringByAppendingPathComponent:"),
+        nsstring("index.tsv")), 1)
+}
+
+esv_write_chapter(c: int) {
+    i: int = esv_find(c);
+    if (i < 0 || !ec_disk[i]) return;
+    data: int = msg2(cls("NSData"), sel("dataWithBytes:length:"), bytes_address(ec_pool) + ec_at[i],
+        ec_len[i]);
+    msg2(data, sel("writeToFile:atomically:"), esv_file(c), 1)
+}
+
+esv_log() {
+    if (!diag_on) return;
+    format_esv_summary();
+    try {
+        write_bytes_n(2, fbuf, fbuf_n)
+    } with IoError _e -> { }
+}
+
+// ---- asking for chapters: one request at a time ----
+// The request running (its chapter, -1: none), and the one waiting (a
+// newer one replaces it).
+esv_inflight: int = -1;
+
+esv_queued: int = -1;
+
+esv_queued_count: int = 1;
+
+// The notice the server sent with the text ("(ESV)").
+esv_notice: int = 0;
+
+// Chapter c wanted (and count chapters from it): asked for, or queued.
+esv_want(c: int, count: int) {
+    if (c < 0 || c >= chapters) return;
+    if (!esv_wanted(c, time(0)) && (count < 2 || c + 1 >= chapters || !esv_wanted(c + 1,
+        time(0)))) return;
+    if (esv_inflight == c) return;
+    if (CACurrentMediaTime() < esv_hold_until) return;
+    if (esv_inflight >= 0) {
+        esv_queued = c;
+        esv_queued_count = count;
+        esv_mark_loading(c);
+        return
+    }
+    esv_ask(c, count)
+}
+
+esv_mark_loading(c: int) {
+    if (esv_state[c] != ESV_LOADING) {
+        esv_state[c] = ESV_LOADING;
+        esv_since[c] = CACurrentMediaTime()
+    }
+}
+
+esv_ask(c: int, count: int) {
+    esv_inflight = c;
+    esv_mark_loading(c);
+    if (esv_fixture_dir() != 0) {
+        esv_fixture_c = c;
+        esv_fixture_count = count;
+        _t: int = after(esv_fixture_delay, "esvFixture:");
+        return
+    }
+    fbuf_n = 0;
+    fput_str("esv/chapters?book=");
+    for x in 0..3 fput(bsb_code_byte(ch_book[c], x));
+    fput_str("&chapter=");
+    fput_int(ch_num[c]);
+    fput_str("&count=");
+    fput_int(count);
+    if (net_get_ns(fstring(), NET_CHAPTERS, c, count) == 0) {
+        esv_inflight = -1;
+        esv_failed(c, count, ESV_OFFLINE, 0)
+    }
+}
+
+// The next request, if one waits.
+esv_next() {
+    if (esv_inflight >= 0 || esv_queued < 0) return;
+    c: int = esv_queued;
+    esv_queued = -1;
+    esv_ask(c, esv_queued_count)
+}
+
+// ---- the fixture (CI) ----
+esv_fixture_c: int = 0;
+
+esv_fixture_count: int = 1;
+
+// The fixture's answer for the chapter asked: its file, or the mode's
+// error.
+esv_fixture_answer(_self: int, _cmd: int, _timer: int): int {
+    c: int = esv_fixture_c;
+    if (esv_fixture_mode != 0) {
+        esv_inflight = -1;
+        esv_failed(c, esv_fixture_count, if (esv_fixture_mode == 1) ESV_OFFLINE else if (esv_fixture_mode == 2) ESV_BUSY else ESV_DAILY,
+            if (esv_fixture_mode == 2) 60 else 0);
+        esv_next();
+        return 0
+    }
+    fbuf_n = 0;
+    for x in 0..3 fput(bsb_code_byte(ch_book[c], x));
+    fput(45);
+    fput_int(ch_num[c]);
+    fput_str(".json");
+    data: int = msg1(cls("NSData"), sel("dataWithContentsOfFile:"), msg1(esv_fixture,
+        sel("stringByAppendingPathComponent:"), fstring()));
+    json: int = if (data != 0) msg3(cls("NSJSONSerialization"), sel("JSONObjectWithData:options:error:"),
+        data, 0, 0) else 0;
+    net_answer(NET_CHAPTERS, c, esv_fixture_count, if (json != 0) 200 else 404, json);
+    0
+}
+
+// ---- chapters come ----
+esv_ch_buf: []i8 = new i8[262144](0i8);
+
+// The chapters of a 200 answer held, kept on disk, text 5 made again, and
+// each one's arrival told to what waits for it.
+esv_take(json: int) {
+    list: int = msg1(json, sel("objectForKey:"), nsstring("chapters"));
+    note_ns: int = msg1(json, sel("objectForKey:"), nsstring("notice"));
+    if (note_ns != 0) {
+        release(esv_notice);
+        esv_notice = keep(note_ns)
+    }
+    if (list == 0) return;
+    got: []int = esv_got;
+    got_n: int = 0;
+    now: int = time(0);
+    for i in 0..msg(list, sel("count")) {
+        ch: int = msg1(list, sel("objectAtIndex:"), i);
+        book: int = msg1(ch, sel("objectForKey:"), nsstring("book"));
+        num: int = msg(msg1(ch, sel("objectForKey:"), nsstring("chapter")), sel("longValue"));
+        records: int = msg1(ch, sel("objectForKey:"), nsstring("records"));
+        b: int = esv_book_of(book);
+        if (b >= 0 && records != 0 && num >= 1 && num <= book_count[b]) {
+            c: int = book_first[b] + num - 1;
+            n: int = nsstring_into(records, esv_ch_buf);
+            if (n < len(esv_ch_buf)) {
+                esv_ch_buf[n] = 10i8;
+                n = n + 1
+            }
+            esv_insert(c, esv_ch_buf, n, now);
+            esv_touch(c, now);
+            esv_write_chapter(c);
+            esv_state[c] = ESV_HERE;
+            if (got_n < len(got)) {
+                got[got_n] = c;
+                got_n = got_n + 1
+            }
+        }
+    }
+    esv_save();
+    esv_build();
+    esv_log();
+    for i in 0..got_n esv_arrived(got[i])
+}
+
+esv_got: []int = new int[4](0);
+
+// The book whose code is ns (JHN), or -1.
+esv_book_of(ns: int): int {
+    n: int = nsstring_into(ns, esv_code);
+    if (n != 3) return -1;
+    for b in 0..books {
+        same: bool = true;
+        for x in 0..3
+            if (bsb_code_byte(b, x) != esv_code[x] as int) same = false;
+        if (same) return b
+    }
+    -1
+}
+
+esv_code: []i8 = new i8[8](0i8);
+
+// A request failed: its chapters' state, the hold if the server is busy or
+// resting, and the reader's line where its text would be.
+esv_failed(
+    c: int,
+    count: int,
+    state: int,
+    retry: int
+) {
+    note_num("bible: esv failed, state ", state);
+    for x in c..c + count {
+        if (x < chapters && !esv_held(x)) esv_state[x] = state
+    }
+    if (state == ESV_BUSY || state == ESV_DAILY) esv_hold_until = CACurrentMediaTime() + (if (retry > 0) retry as f64 else 60.0f64);
+    esv_show_state(c);
+    compare_esv_failed(state);
+    preview_esv_failed(c);
+    listen_esv_failed(c);
+    esv_retry_timer()
+}
+
+// ---- the reader ----
+// Where the reader waits for a chapter: the place a switch to the ESV was
+// at (esv_wait_c), and the verse a jump went to (esv_jump_c).
+esv_wait_c: int = -1;
+
+esv_wait_v: int = 0;
+
+esv_wait_f: int = 0;
+
+esv_jump_c: int = -1;
+
+esv_jump_v: int = 0;
+
+// What the reader in the ESV wants now: the chapter at its top, and the
+// one after it (two at once, if neither is held), or the one before it
+// when it has been scrolled up into.
+esv_reader_wants() {
+    if (text_cur != TEXT_ESV) return;
+    esv_visible_now();
+    c: int = cur;
+    if (c < 0 || c >= chapters) return;
+    t: int = time(0);
+    if (esv_wanted(c, t)) esv_want(c, if (c + 1 < chapters && esv_wanted(c + 1, t)) 2 else 1) else if (c + 1 < chapters && esv_wanted(c + 1,
+        t)) esv_want(c + 1, 1)
+}
+
+// The rows on the screen, told to the cache (what it may not let go), each
+// one's use now.
+esv_visible_now() {
+    paths: int = msg(table, sel("indexPathsForVisibleRows"));
+    lo: int = -1;
+    hi: int = -1;
+    if (paths != 0) {
+        for i in 0..msg(paths, sel("count")) {
+            r: int = msg(msg1(paths, sel("objectAtIndex:"), i), sel("row"));
+            if (lo < 0 || r < lo) lo = r;
+            if (r > hi) hi = r
+        }
+    }
+    t: int = time(0);
+    if (lo >= 0) {
+        for c in lo..hi + 1 esv_touch(c, t)
+    }
+    was: int = ec_n;
+    esv_set_visible(lo, hi);
+    if (ec_n != was) {
+        esv_save();
+        esv_build();
+        esv_log()
+    }
+}
+
+// A placeholder row being shown (chapter c): asked for, if it is not on its
+// way.
+esv_row_shown(c: int) {
+    if (text_cur != TEXT_ESV || esv_held(c)) return;
+    if (esv_state[c] == ESV_HERE) esv_state[c] = 0;
+    if (esv_state[c] == 0) esv_want(c, 1)
+}
+
+// Chapter c's text came: its row made again where it is, the same lines
+// kept where they were (no line seen moves); the place a switch or a jump
+// was waiting at, then; and whatever else waits (Compare, a preview,
+// Listen).
+esv_arrived(c: int) {
+    compare_esv_arrived(c);
+    preview_esv_arrived(c);
+    listen_esv_arrived(c);
+    if (text_cur != TEXT_ESV || table == 0) return;
+    esv_refresh_others(c);
+    tv: int = view_of(c);
+    if (tv != 0) {
+        measure_place();
+        pc: int = cur;
+        pv: int = place_v;
+        pf: int = place_frac;
+        before: f64 = esv_fixed_line();
+        fade_layer(msg(tv, sel("layer")), 0.2f64);
+        msg1(tv, sel("setAttributedText:"), chapter_text(c));
+        esv_dress(tv, c);
+        msg1(cls("UIView"), sel("setAnimationsEnabled:"), 0);
+        msg(table, sel("beginUpdates"));
+        msg(table, sel("endUpdates"));
+        msg1(cls("UIView"), sel("setAnimationsEnabled:"), 1);
+        msg(table, sel("layoutIfNeeded"));
+        if (esv_wait_c == c) {
+            esv_wait_c = -1;
+            go_place(c, esv_wait_v, esv_wait_f)
+        } else if (esv_jump_c == c) {
+            esv_jump_c = -1;
+            go_verse(c, esv_jump_v);
+            flash(c, esv_jump_v)
+        } else go_place(pc, pv, pf);
+        note_num("bible: esv fixed line before ", before as int);
+        note_num("bible: esv fixed line after ", esv_fixed_line() as int)
+    } else if (esv_wait_c == c) {
+        esv_wait_c = -1;
+        go_place(c, esv_wait_v, esv_wait_f)
+    } else if (esv_jump_c == c) {
+        esv_jump_c = -1;
+        go_verse(c, esv_jump_v);
+        flash(c, esv_jump_v)
+    }
+    esv_visible_now()
+}
+
+// The other ESV rows on the screen given their text again (the same
+// words: text 5 was made again, and a footnote's mark says where its note is
+// in it).
+esv_refresh_others(c: int) {
+    paths: int = msg(table, sel("indexPathsForVisibleRows"));
+    if (paths == 0) return;
+    for i in 0..msg(paths, sel("count")) {
+        r: int = msg(msg1(paths, sel("objectAtIndex:"), i), sel("row"));
+        tv: int = if (r != c && ch_start[r] >= 0) view_of(r) else 0;
+        if (tv != 0) msg1(tv, sel("setAttributedText:"), chapter_text(r))
+    }
+}
+
+// Where the line at the top of the screen is, on the screen (the demo's
+// check that nothing moved): the chapter at the top's opener, from the
+// screen's top.
+esv_fixed_line(): f64 {
+    tv: int = view_of(cur);
+    if (tv == 0 || !range_rect(tv, opener16[cur], 1)) return 0.0f64;
+    row_y(cur) + hfa[1] - offset_y(table)
+}
+
+// A chapter's state changed while it is not here: its row's line or
+// spinner, cross-fading.
+esv_show_state(c: int) {
+    if (text_cur != TEXT_ESV) return;
+    tv: int = view_of(c);
+    if (tv == 0) return;
+    fade_layer(msg(tv, sel("layer")), 0.2f64);
+    msg1(tv, sel("setAttributedText:"), chapter_text(c));
+    esv_dress(tv, c)
+}
+
+// ---- a row not here yet: its opener, the spinner, the line ----
+SPINNER_TAG: int = 4242;
+
+// The spinner over text view tv of chapter c: there (48 pt under the
+// opener) while it loads, fading in only after 0.4 s; gone otherwise.
+esv_dress(tv: int, c: int) {
+    sp: int = msg1(tv, sel("viewWithTag:"), SPINNER_TAG);
+    loading: bool = text_cur == TEXT_ESV && ch_start[c] < 0 && (esv_state[c] == ESV_LOADING || esv_state[c] == 0);
+    if (!loading) {
+        if (sp != 0) msg(sp, sel("removeFromSuperview"));
+        return
+    }
+    if (sp == 0) {
+        sp = msg1(msg(cls("UIActivityIndicatorView"), sel("alloc")), sel("initWithActivityIndicatorStyle:"),
+            100);
+        msg1(sp, sel("setTag:"), SPINNER_TAG);
+        msg1(sp, sel("setColor:"), c_faint);
+        msg(sp, sel("startAnimating"));
+        msg_set_f(sp, sel("setAlpha:"), 0.0f64);
+        msg1(tv, sel("addSubview:"), sp);
+        release(sp)
+    }
+    msg1(sp, sel("setColor:"), c_faint);
+    // (Under the opener: its last character's foot, and 48 pt.)
+    y: f64 = 120.0f64;
+    if (range_rect(tv, opener16[c], 1)) y = hfa[1] + hfa[3] + 48.0f64;
+    w: f64 = view_width(tv);
+    if (w <= 0.0f64) w = view_width(table);
+    msg_rect(sp, sel("setFrame:"), w / 2.0f64 - 10.0f64, y, 20.0f64, 20.0f64);
+    if (CACurrentMediaTime() - esv_since[c] >= 0.4f64) msg_set_f(sp, sel("setAlpha:"),
+        1.0f64) else _t: int = after(0.4f64 - (CACurrentMediaTime() - esv_since[c]) + 0.01f64,
+        "esvSpinner:")
+}
+
+// The spinners due, faded in (0.2 s).
+esv_spinner(_self: int, _cmd: int, _timer: int): int {
+    if (table == 0) return 0;
+    paths: int = msg(table, sel("indexPathsForVisibleRows"));
+    if (paths == 0) return 0;
+    for i in 0..msg(paths, sel("count")) {
+        c: int = msg(msg1(paths, sel("objectAtIndex:"), i), sel("row"));
+        tv: int = view_of(c);
+        sp: int = if (tv != 0) msg1(tv, sel("viewWithTag:"), SPINNER_TAG) else 0;
+        if (sp != 0 && msg_f(sp, sel("alpha")) < 0.5f64 && CACurrentMediaTime() - esv_since[c] >= 0.39f64) {
+            msg_set_f(sp, sel("setAlpha:"), 1.0f64);
+            animate(msg(sp, sel("layer")), "opacity", 0.0f64, 1.0f64, false, 0.2f64)
+        }
+    }
+    0
+}
+
+// What a tap on the ESV's own words does (a value of k_esv): try again,
+// read in the BSB, or esv.org.
+k_esv: str = "L8ESV";
+
+ESV_TRY: int = 1;
+
+ESV_BSB: int = 2;
+
+ESV_SITE: int = 3;
+
+esv_tapped(c: int, what: int) {
+    if (what == ESV_TRY) {
+        esv_state[c] = 0;
+        esv_hold_until = 0.0f64;
+        esv_want(c, 1);
+        esv_show_state(c)
+    } else if (what == ESV_BSB) switch_version(TEXT_BSB) else if (what == ESV_SITE) esv_site(c)
+}
+
+// esv.org's page of chapter c (John+3), in Safari's own view.
+esv_site(c: int) {
+    fbuf_n = 0;
+    fput_str("https://www.esv.org/");
+    b: int = ch_book[c];
+    if (book_is(b, "PSA")) fput_str("Psalm") else {
+        for i in book_name_start(b)..book_name_end(b) {
+            k: int = bsb[i] as int;
+            fput(if (k == 32) 43 else k)
+        }
+    }
+    if (book_count[b] > 1) {
+        fput(43);
+        fput_int(ch_num[c])
+    }
+    fput(47);
+    open_web_ns(fstring())
+}
+
+// A page (its address an NSString) in Safari's own view, over everything.
+open_web_ns(address: int) {
+    u: int = msg1(cls("NSURL"), sel("URLWithString:"), address);
+    if (cls("SFSafariViewController") == 0) _h: int = dlopen("/System/Library/Frameworks/SafariServices.framework/SafariServices",
+        1);
+    sf: int = cls("SFSafariViewController");
+    if (sf == 0 || u == 0) return;
+    vc: int = msg1(msg(sf, sel("alloc")), sel("initWithURL:"), u);
+    top: int = top_presented();
+    msg3(if (top != 0) top else nav, sel("presentViewController:animated:completion:"),
+        vc, 1, 0);
+    release(vc)
+}
+
+// The attributes of the ESV's lines: size, color, centered, a tap's value.
+esv_attrs(
+    size: f64,
+    color: int,
+    what: int,
+    before: f64
+): int {
+    keys[0] = k_font;
+    values[0] = body(size);
+    keys[1] = k_color;
+    values[1] = color;
+    p: int = msg(para_style(1, 0.0f64, 0.0f64, before, 0.0f64, 1.35f64), sel("autorelease"));
+    keys[2] = k_para;
+    values[2] = p;
+    n: int = 3;
+    if (what > 0) {
+        keys[3] = nsstring(k_esv);
+        values[3] = nsnumber_int(what);
+        n = 4
+    }
+    nsdictionary(keys, values, n)
+}
+
+esv_put(
+    s: int,
+    text: int,
+    size: f64,
+    color: int,
+    what: int,
+    before: f64
+) {
+    msg1(s, sel("appendAttributedString:"), attributed_str(text, esv_attrs(size, color,
+        what, before)))
+}
+
+// The line ending an ESV chapter (and every ESV page): "(ESV) Â· esv.org",
+// the notice faint, the link accent.
+esv_footer(s: int) {
+    size: f64 = em * 0.7f64;
+    esv_put(s, nsstring("\n"), size, c_faint, 0, 0.0f64);
+    // (24 pt above it.)
+    k: int = msg(s, sel("length"));
+    esv_put(s, if (esv_notice != 0) esv_notice else nsstring("(ESV)"), size, c_faint,
+        0, 24.0f64);
+    esv_put(s, nsstring(" \Â\· "), size, c_faint, 0, 24.0f64);
+    esv_put(s, nsstring("esv.org"), size, c_accent, ESV_SITE, 24.0f64);
+    _k: int = k
+}
+
+// The rest of a row not here: under its opener, the state's line (if the
+// chapter cannot come now), then space to the BSB's height of the same
+// chapter, so the scroll is believable before the text comes.
+esv_placeholder(s: int, c: int) {
+    st: int = esv_state[c];
+    size: f64 = em * 0.9f64;
+    if (st >= ESV_OFFLINE) {
+        msg1(s, sel("appendAttributedString:"), attributed_str(nsstring("\n"), esv_attrs(size,
+            c_faint, 0, 0.0f64)));
+        line: str = if (st == ESV_OFFLINE) "The ESV needs an internet connection." else if (st == ESV_BUSY) "Many people are reading the ESV just now. It will try again in a minute." else if (st == ESV_DAILY) "The ESV has reached its daily limit for Smooth Bible. It will be back tomorrow." else "The ESV isn\â\€\™t available right now.";
+        esv_put(s, nsstring(line), size, c_faint, 0, 36.0f64);
+        esv_put(s, nsstring("\n"), size, c_faint, 0, 0.0f64);
+        if (st == ESV_OFFLINE || st == ESV_UNAVAILABLE) {
+            esv_put(s, nsstring("Try Again"), size, c_accent, ESV_TRY, 8.0f64);
+            esv_put(s, nsstring(" \Â\· "), size, c_faint, 0, 8.0f64)
+        }
+        esv_put(s, nsstring("Read in the BSB"), size, c_accent, ESV_BSB, 8.0f64)
+    }
+    // (The space: one invisible line, as tall as the rest of the BSB's
+    // chapter.)
+    pad: f64 = esv_bsb_height(c) - esv_height_of(s);
+    if (pad < 96.0f64) pad = 96.0f64;
+    p: int = msg(para_style(1, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 1.0f64), sel("autorelease"));
+    msg_set_f(p, sel("setMinimumLineHeight:"), pad);
+    msg_set_f(p, sel("setMaximumLineHeight:"), pad);
+    keys[0] = k_font;
+    values[0] = body(em);
+    keys[1] = k_para;
+    values[1] = p;
+    msg1(s, sel("appendAttributedString:"), attributed_str(ustr(10, 8203), nsdictionary(keys,
+        values, 2)))
+}
+
+// The height of an attributed string as the reader would set it (a
+// label's, at the text's width).
+esv_label: int = 0;
+
+esv_height_of(s: int): f64 {
+    if (esv_label == 0) {
+        esv_label = make("UILabel");
+        msg1(esv_label, sel("setNumberOfLines:"), 0)
+    }
+    msg1(esv_label, sel("setAttributedText:"), s);
+    w: f64 = view_width(table) - 2.0f64 * side_margin();
+    if (w < 100.0f64) w = 300.0f64;
+    label_size(esv_label, w);
+    hfa[1]
+}
+
+// The BSB's chapter c, set: its height (kept, for the look and the width
+// it was measured at).
+esv_h: []f64 = new f64[1200](0.0f64);
+
+esv_h_key: f64 = 0.0f64;
+
+esv_bsb_height(c: int): f64 {
+    key: f64 = em * 10000.0f64 + view_width(table);
+    if (key != esv_h_key) {
+        esv_h_key = key;
+        for i in 0..len(esv_h) esv_h[i] = 0.0f64
+    }
+    if (esv_h[c] > 0.0f64) return esv_h[c];
+    was: int = text_cur;
+    text_use(TEXT_BSB);
+    s: int = chapter_text(c);
+    text_use(was);
+    esv_h[c] = esv_height_of(s);
+    // (The ranges measured again, for the chapter as it is shown.)
+    compute_ranges(c);
+    esv_h[c]
+}
+
+// ---- trying again ----
+esv_timer: int = 0;
+
+// Every 30 s while a row that could not come is on the screen (one timer):
+// asked again.
+esv_retry_timer() {
+    if (esv_timer != 0) return;
+    esv_timer = after(30.0f64, "esvRetry:")
+}
+
+esv_retry(_self: int, _cmd: int, _timer: int): int {
+    esv_timer = 0;
+    if (text_cur != TEXT_ESV || table == 0) return 0;
+    any: bool = false;
+    paths: int = msg(table, sel("indexPathsForVisibleRows"));
+    if (paths != 0) {
+        for i in 0..msg(paths, sel("count")) {
+            c: int = msg(msg1(paths, sel("objectAtIndex:"), i), sel("row"));
+            st: int = esv_state[c];
+            if (!esv_held(c) && (st == ESV_OFFLINE || st == ESV_UNAVAILABLE || (st == ESV_BUSY || st == ESV_DAILY) && CACurrentMediaTime() >= esv_hold_until)) {
+                any = true;
+                esv_want(c, 1)
+            }
+        }
+    }
+    if (any) esv_retry_timer();
+    0
+}
+
+// The app active again: what could not come, asked again.
+esv_app_active() {
+    esv_check(false);
+    if (text_cur == TEXT_ESV && table != 0) esv_retry(0, 0, 0)
+}
+
+// ---- the ESV searched (Â§9.4.8): one request a tap ----
+esv_search_q: int = 0;
+
+esv_search_page: int = 1;
+
+esv_search(q: int, page: int) {
+    release(esv_search_q);
+    esv_search_q = keep(q);
+    esv_search_page = page;
+    if (esv_fixture_dir() != 0) {
+        _t: int = after(esv_fixture_delay, "esvFixtureSearch:");
+        return
+    }
+    allowed: int = msg(cls("NSCharacterSet"), sel("URLQueryAllowedCharacterSet"));
+    enc: int = msg1(q, sel("stringByAddingPercentEncodingWithAllowedCharacters:"),
+        allowed);
+    fbuf_n = 0;
+    fput_str("&page=");
+    fput_int(page);
+    path: int = msg1(msg1(nsstring("esv/search?q="), sel("stringByAppendingString:"),
+        msg2(enc, sel("stringByReplacingOccurrencesOfString:withString:"), nsstring("&"),
+        nsstring("%26"))), sel("stringByAppendingString:"), fstring());
+    if (net_get_ns(path, NET_SEARCH, -1, 0) == 0) esv_search_answered(ESV_OFFLINE,
+        0)
+}
+
+esv_fixture_search(_self: int, _cmd: int, _timer: int): int {
+    if (esv_fixture_mode != 0) {
+        esv_search_answered(if (esv_fixture_mode == 1) ESV_OFFLINE else if (esv_fixture_mode == 2) ESV_BUSY else ESV_DAILY,
+            0);
+        return 0
+    }
+    name: int = msg2(msg(esv_search_q, sel("lowercaseString")), sel("stringByReplacingOccurrencesOfString:withString:"),
+        nsstring(" "), nsstring("-"));
+    file: int = msg1(msg1(nsstring("search-"), sel("stringByAppendingString:"), name),
+        sel("stringByAppendingString:"), nsstring(".json"));
+    data: int = msg1(cls("NSData"), sel("dataWithContentsOfFile:"), msg1(esv_fixture,
+        sel("stringByAppendingPathComponent:"), file));
+    json: int = if (data != 0) msg3(cls("NSJSONSerialization"), sel("JSONObjectWithData:options:error:"),
+        data, 0, 0) else 0;
+    esv_search_answered(if (json != 0) ESV_HERE else ESV_UNAVAILABLE, json);
+    0
+}
+
+// ---- classes and methods ----
+make_esv_class() {
+    net_class = objc_allocateClassPair(cls("NSObject"), "L8Net", 0);
+    add_method3(net_class, sel("URLSession:dataTask:didReceiveData:"), &net_received,
+        "v@:@@@");
+    add_method3(net_class, sel("URLSession:task:didCompleteWithError:"), &net_completed,
+        "v@:@@@");
+    add_protocol(net_class, "NSURLSessionDataDelegate");
+    objc_registerClassPair(net_class)
+}
+
+add_esv_methods(app: int) {
+    add_method1(app, sel("esvFixture:"), &esv_fixture_answer, "v@:@");
+    add_method1(app, sel("esvFixtureSearch:"), &esv_fixture_search, "v@:@");
+    add_method1(app, sel("esvSpinner:"), &esv_spinner, "v@:@");
+    add_method1(app, sel("esvRetry:"), &esv_retry, "v@:@")
+}
