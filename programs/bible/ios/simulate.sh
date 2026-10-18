@@ -365,7 +365,7 @@ versions)
   step 227 126-study-commentary
   step 228 127-commentary-preview
   step 229 128-acknowledgements 6
-  # The glide through the ESV's John 3 to 8, its answers a second each
+  # The glide through the ESV's John 3 to 5, its answers a second each
   # (DESIGN.md §9.4.11), and its checks: no offset written while moving;
   # every frame moved by its own step; JHN 5 asked for before its row was
   # seen; the line kept at rest; the cache within 500.
@@ -385,14 +385,19 @@ j5 = [int(l.split()[-1]) for l in log if l.startswith("bible: glide john 5 is ")
 if j5:
     j5 = j5[-1]
     start = max(i for i, l in enumerate(log) if l.startswith("bible: glide john 5 is "))
-    asked = [i for i, l in enumerate(log) if i > start and l.startswith("bible: esv asked ") and (int(l.split()[-1]) // 10 == j5 or int(l.split()[-1]) == (j5 - 1) * 10 + 2)]
-    seen = [i for i, l in enumerate(log) if i > start and l == "bible: esv row visible %d" % j5]
+    end = min([i for i, l in enumerate(log) if i > start and l == "bible: glide rested"] or [len(log)])
+    asked = [i for i, l in enumerate(log) if start < i < end and l.startswith("bible: esv asked ") and (int(l.split()[-1]) // 10 == j5 or int(l.split()[-1]) == (j5 - 1) * 10 + 2)]
+    seen = [i for i, l in enumerate(log) if start < i < end and l == "bible: esv row visible %d" % j5]
     print("JHN 5 asked at line %s, its row first seen at %s" % (asked[:1], seen[:1]))
     if not asked or seen and seen[0] < asked[0]: bad.append("JHN 5 not asked before its row was seen")
-fixed = [int(l.split()[-1]) for l in log if l.startswith("bible: esv fixed line ")]
+rest = [i for i, l in enumerate(log) if l == "bible: glide at rest"]
+done = [i for i, l in enumerate(log) if l == "bible: glide rested"]
+fixed = [int(l.split()[-1]) for l in log[rest[-1]:done[-1]] if l.startswith("bible: esv fixed line ")] if rest and done else []
 if len(fixed) >= 2:
-    print("fixed line before/after (last): %d %d" % (fixed[-2], fixed[-1]))
+    print("fixed line at rest before/after: %d %d" % (fixed[-2], fixed[-1]))
     if abs(fixed[-2] - fixed[-1]) > 1: bad.append("the fixed line moved")
+else: print("at rest: nothing above the reading line to keep")
+if not rest: bad.append("the glide never rested")
 cache = [int(re.search(r"cache (\d+) verses", l).group(1)) for l in log if "bible: esv cache " in l]
 print("cache at most %d" % max(cache or [0]))
 if max(cache or [0]) > 500: bad.append("cache past 500")
