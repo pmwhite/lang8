@@ -98,6 +98,8 @@ def clean_ebible(text):
     text = re.sub(r"\\qs (.*?)\\qs\*", r" \1", text)
     # Psalm 119's letters (KJV: \s1 \tl א ALEPH.\tl*), named as the BSB's.
     text = re.sub(r"\\s1 \\tl\s+[\u05d0-\u05ea]\s*([A-Z]+)\.?\\tl\*", r"\\qa \1", text)
+    # (WEB: \d ALEPH, a psalm title's marker, but a letter all the same.)
+    text = re.sub(r"\\d ([A-Z]+)[ \t]*\n", r"\\qa \1\n", text)
     # (Supplied words in a heading's line, as in KJV's subscriptions, are
     # the heading's.)
     text = re.sub(r"(?m)^(\\(?:s[0-9]?|d|sp|ms[0-9]?) .*)$",
@@ -283,6 +285,40 @@ def no_empty_verses(records):
     return out
 
 
+def curl_quotes(records):
+    # The YLT's straight quotes curled (typography, not wording: the other
+    # sources are curly already). Between letters, an apostrophe; after a
+    # space, a line's start, [, ( or —, an opening quote; else a closing
+    # one. A verse is a line (its own paragraph), and its words run on
+    # across records.
+    out = []
+    before = ""
+    for r in records:
+        if r[0] in "PVCB":
+            before = ""
+        if r[0] not in "TWIJdDS":
+            out.append(r)
+            continue
+        t = r[1:]
+        cs = []
+        for i, ch in enumerate(t):
+            if ch in "'\"":
+                prev = cs[-1] if cs else before
+                nxt = t[i + 1] if i + 1 < len(t) else ""
+                if ch == "'" and prev.isalpha() and nxt.isalpha():
+                    ch = "\u2019"
+                elif prev == "" or prev.isspace() or prev in "[(\u2014":
+                    ch = "\u2018" if ch == "'" else "\u201c"
+                else:
+                    ch = "\u2019" if ch == "'" else "\u201d"
+            cs.append(ch)
+        t = "".join(cs)
+        if t:
+            before = t[-1]
+        out.append(r[0] + t)
+    return out
+
+
 def main():
     global profile
     profile, src, dst = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -295,6 +331,8 @@ def main():
     records = tidy(lines_of(records))
     if profile != "bsb":
         records = no_empty_verses(records)
+    if profile == "ylt":
+        records = curl_quotes(records)
     # The books in the Bible's order (the files are by name).
     books = {}
     cur = None

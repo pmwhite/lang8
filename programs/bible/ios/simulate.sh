@@ -255,6 +255,16 @@ notes)
   sleep 0.5
   kill -INT "$recorder" 2>/dev/null
   wait "$recorder" 2>/dev/null
+  # The ESV's search never shows more than its page of 100 (DESIGN.md
+  # §9.4.1: at most 500 verses on a page): every "esv search shown N".
+  grep -o "esv search shown [0-9]*" "$out/console.txt" > "$out/esv-search.txt"
+  n=$(wc -l < "$out/esv-search.txt")
+  most=$(awk '$4 > m { m = $4 } END { print m + 0 }' "$out/esv-search.txt")
+  echo "pages shown: $n; most shown at once: $most" | tee -a "$out/esv-search.txt"
+  if [ "$most" -gt 100 ] || [ "$n" -eq 0 ]; then
+    echo "FAILED: the ESV's search showed more than 100 at once (or nothing)" | tee -a "$out/esv-search.txt"
+    failed=1
+  fi
   ;;
 more)
   # (DESIGN.md §8: shots 60 to 88.)
@@ -332,6 +342,10 @@ versions)
   step 211 110-red-letter-asv 6
   step 212 111-compare
   step 213 112-compare-esv 6
+  # (Compare with the ESV in the dark: Night.)
+  ui appearance dark
+  shot 112b-compare-esv-night
+  ui appearance light
   step 214 113-compare-next
   step 215 114-compare-to-kjv
   step 216 115-esv-loading 6
@@ -342,6 +356,10 @@ versions)
   step 221 120-esv-busy 6
   step 222 121-esv-search 6
   step 223 122-esv-search-online 6
+  step 233 121b-esv-search-none 6
+  step 234 122b-esv-search-light 6
+  step 235 122c-esv-search-more 6
+  step 238 122d-esv-search-last 6
   step 224 123-study-words 6
   step 225 124-study-references
   step 226 125-xref-preview
@@ -373,6 +391,16 @@ versions)
   sleep 0.5
   kill -INT "$recorder" 2>/dev/null
   wait "$recorder" 2>/dev/null
+  # The ESV's search never shows more than its page of 100 (DESIGN.md
+  # §9.4.1: at most 500 verses on a page): every "esv search shown N".
+  grep -o "esv search shown [0-9]*" "$out/console.txt" > "$out/esv-search.txt"
+  n=$(wc -l < "$out/esv-search.txt")
+  most=$(awk '$4 > m { m = $4 } END { print m + 0 }' "$out/esv-search.txt")
+  echo "pages shown: $n; most shown at once: $most" | tee -a "$out/esv-search.txt"
+  if [ "$most" -gt 100 ] || [ "$n" -eq 0 ]; then
+    echo "FAILED: the ESV's search showed more than 100 at once (or nothing)" | tee -a "$out/esv-search.txt"
+    failed=1
+  fi
   ;;
 ios18)
   shot 01-genesis-1
@@ -397,3 +425,4 @@ kill "$logger" "$console" 2>/dev/null || true
 find ~/Library/Logs/DiagnosticReports -newer "$app/Info.plist" -type f -exec cp {} "$out"/ \; 2>/dev/null || true
 ls -la "$out"
 cat "$out/timing.txt"
+exit "${failed:-0}"

@@ -63,6 +63,6 @@ for v in kjv:eng-kjv2006 web:engwebp asv:eng-asv ylt:engylt; do
 done
 python3 -I "$here/versify.py" "$data"
 python3 -I "$here/xrefs.py" "$dir/cross-references.zip" "$data"
-python3 -I "$here/mhcc.py" "$dir/mhcc.xml" "$data/mhcc.txt"
+python3 -I "$here/mhcc.py" "$dir/mhcc.xml" "$data/bsb.txt" "$data/mhcc.txt"
 python3 -I "$here/bsb_lang.py" "$dir/bsb_tables.tsv" "$dir/TBESH.txt" "$dir/TBESG.txt" \
   "$data/bsb.txt" "$data/lang"

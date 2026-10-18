@@ -2202,10 +2202,16 @@ be turned into a tool, §9.2.4):
   (D records) in all of them.
 - **The chapter index `c`** (Genesis 1 = 0) is therefore the same in every bundled
   version.
-- **Extra verses.** The other versions have all of the BSB's 31,086 verses, plus verses
-  the BSB gives only in footnotes: Matthew 17:21, 18:11, 23:14; Mark 7:16, 9:44, 9:46,
-  11:26, 15:28; Luke 17:36, 23:17; John 5:4; Acts 8:37, 15:34, 24:7, 28:29; and
-  Romans 16:24. (Darby lacks Acts 8:37, 15:34 and Matthew 23:14.)
+- **Extra verses.** The other versions have all of the BSB's 31,086 verses, and some
+  of the verses the BSB gives only in footnotes (Matthew 17:21, 18:11, 23:14; Mark 7:16,
+  9:44, 9:46, 11:26, 15:28; Luke 17:36, 23:17; John 5:4; Acts 8:37, 15:34, 24:7, 28:29;
+  and Romans 16:24). A verse a version itself gives only in a footnote is left out, as
+  the BSB does (§9.10a, note 1; accepted in review r4-1):
+  - **KJV and YLT:** all 16 (31,102 verses).
+  - **WEB:** 12 of them, without Luke 17:36 and Acts 8:37, 15:34 and 24:7 (31,098, with
+    the doxology at 14:24–26 below).
+  - **ASV:** none of them (31,086): it footnotes all 16.
+  - (Darby lacks Acts 8:37, 15:34 and Matthew 23:14.)
 - **One placement difference:** the WEB puts the closing doxology at Romans 14:24–26 and
   has no Romans 16:25–27. The BSB, KJV and ASV have it at 16:25–27.
 - **The ESV** follows the same English numbering, except:
@@ -2222,7 +2228,8 @@ be turned into a tool, §9.2.4):
   the files changes, so there's no migration of their format.
 - **A mark shows in every version that has that reference.** It doesn't show in versions
   that don't, and it's never moved or dropped:
-  - A bookmark on KJV Matthew 17:21 shows in KJV, WEB and ASV, not in the BSB.
+  - A bookmark on KJV Matthew 17:21 shows in KJV, WEB and YLT, not in the BSB or the
+    ASV.
   - A highlight on BSB Romans 16:25 doesn't show in the WEB.
 - **A version's own verse numbers are mapped at the record level** (§9.1.4). The only
   mapped verses are the ESV's 3 John 1:15 → 14 and Revelation 12:18 → 17. Selecting or
@@ -2702,7 +2709,13 @@ A tolerant tag scanner over the API's known output (no DOM library in Workers):
   - It replaces the section with the ESV results: header "12 verses in the ESV", the
     same result cells with our matcher's bold applied to the ESV snippet, and a section
     footer "(ESV) · esv.org" (link).
-  - If there are more pages, a final "Show More" row fetches the next page.
+  - **One page at a time** (review r4-1): the API's page of 100 replaces the section, so
+    no more than 100 ESV verses are ever shown at once (§9.4.1 item 2). After the first
+    page, the first row is "Previous Results"; if there are more pages, the row after
+    the last result is "Show More". Both are accent text rows, centered, and each
+    reloads the section with the 0.2 s fade and scrolls to its top.
+  - "(ESV) · esv.org" is the section's **last row** (not a footer, which would float
+    over the results in a plain list), after the last result.
   - Errors show as the row's secondary text, in faint: "No connection", "Busy, try again
     in a minute" or "Resting for today".
 - **Why not live ESV search:** the debounce-as-you-type design would spend the shared
@@ -2893,7 +2906,8 @@ ValueChanged).
   each with an `<h3>` "Verses 1–2" and `<p>` paragraphs. 841 chapter-outline tables
   ("Chapter Outline" rows with `scripRef` ranges). Book introductions are the `<p>`s
   before a book's first chapter. 8,417 `scripRef` elements with normalized `osisRef`.
-- **Tool:** `tools/mhcc.py XML data/mhcc.txt` (in `fetch.sh`) writes records, one a line:
+- **Tool:** `tools/mhcc.py XML data/bsb.txt data/mhcc.txt` (in `fetch.sh`) writes records,
+  one a line:
   ```
   B<CODE>                  a book; its introduction follows as p lines
   C<n>                     a chapter
@@ -2997,16 +3011,21 @@ Shots, in order:
 | `110-red-letter-asv` | ASV, Aa scrolled to Show, red letters on | The footer "The ASV doesn't mark the words of Jesus." |
 | `111-compare` | BSB, John 3:16 selected → Compare | The sheet at medium: BSB "· Reading" first, then ESV loading (spinner shown after 0.4 s; the fixture delay is 2 s for this step), KJV, WEB… |
 | `112-compare-esv` | Wait | The ESV section with fixture text and the "(ESV) · esv.org" footer |
+| `112b-compare-esv-night` | The phone's appearance dark (Auto: Night) | 112 in Night: the ESV's text and its line on the sheet's dark background |
 | `113-compare-next` | Tap `chevron.down` | Title "John 3:17"; every section shows 3:17 |
 | `114-compare-to-kjv` | Tap the KJV cell | The sheet gone; the reader in the KJV at 3:17, flashed |
 | `115-esv-loading` | Version → ESV, go to John 4 (fixture delay 3 s) | The John 4 opener and the faint spinner below it; no other change |
 | `116-esv-john-4` | Wait | The fixture text in place (heading "Fixture: …"), no jump (the log prints the offset of a fixed line before and after: equal) |
 | `117-esv-footer` | Scroll to the end of John 4 | "(ESV) · esv.org" centered under the last verse |
-| `118-esv-3john` | 3 John, select ESV verse 15 | Verses 14 and 15 washed together; tray "3 John 1:14–15" |
+| `118-esv-3john` | 3 John, from verse 12, select ESV verse 15 | Verses 14 and 15 washed together; tray "3 John 1:14–15" |
 | `119-esv-offline` | Fixture mode `offline`; go to Romans 8 | The opener, then "The ESV needs an internet connection." with "Try Again · Read in the BSB" in accent |
 | `120-esv-busy` | Mode `busy`; Try Again | The busy message |
 | `121-esv-search` | Mode `ok`; search "born again" | "N verses in the BSB", then the last row "Search the ESV for “born again”" |
 | `122-esv-search-online` | Tap it | "12 verses in the ESV" with bold matches, and the "(ESV) · esv.org" footer |
+| `121b-esv-search-none` | Search "qqqz" | "No Results", and under it the ESV's row, the only one |
+| `122b-esv-search-light` | Search "light", tap the ESV's row | "217 verses in the ESV", page 1 of 3 (100 results), from its top |
+| `122c-esv-search-more` | Show More | Page 2 in place of page 1, "Previous Results" first (the log never says more than 100 shown) |
+| `122d-esv-search-last` | Show More, to the end | Page 3's last results, no Show More, "(ESV) · esv.org" the last row |
 | `123-study-words` | Under the ESV, Study on John 3:16 | The segmented title [Words · References · Commentary], the BSB verse with the "BSB" tag, the tiles, and the footer line |
 | `124-study-references` | References | Rows ranked (Romans 5:8 among the first), "Show All N", and the footer with "Verses shown in the BSB." |
 | `125-xref-preview` | Tap Romans 5:8 | The preview pushed, with back "John 3:16" |
@@ -3023,8 +3042,9 @@ Shots, in order:
   `versions`):
   - **Sequence 10:** switch BSB → KJV → BSB from the Versions screen at John 3:14. Both
     cross-fades show no text movement.
-  - **Sequence 11:** the ESV placeholder → text arrival for John 4, with a fixed line
-    above unchanged frame to frame.
+  - **Sequence 11:** the ESV placeholder → text arrival for John 4, read from John 3:33
+    (John 3's end, the divider, John 4's opener and spinner on the screen), with a
+    fixed line unchanged frame to frame (the log's: John 4's opener).
 - **The Linux job** adds `node --test programs/bible/worker/test.mjs` and the new
   `test_text`/`test_store` cases. `make bible-test` runs them.
 - **The store group** adds `store-7.png`: Compare on John 3:16 at large detent, light,
@@ -3105,6 +3125,23 @@ Where the build differs from the text above, and why:
     real server wouldn't give.
 13. **`usfm.py` keeps the space between a footnote and markup after it** (WEB, KJV: "…\f*
     \wj Satan"), 118 places where the words would otherwise have run together.
+14. **(Review r4-1.) A chapter with one comment** (316 of them, Psalm 23 among them) is
+    written by CCEL as the chapter's own `<p>`s, with no Commentary div: `mhcc.py` makes it
+    one section, the whole chapter (`K23:1-23:6`, the last verse from `bsb.txt`), its bold
+    summary the first paragraph, in italics, and the dash that joins the summary to the
+    comment ("—The Lord is my shepherd") dropped. **No chapter is left without a section:**
+    Isaiah 36, 37 and 39, which the review counted as having none, each have one line
+    pointing to 2 Kings ("See II Kin. 18:17-37, and the commentary thereon."), kept as
+    their section, since a reference to the comment is better than "No Commentary Here".
+15. **(Review r4-1.) The YLT's quotes are curled** by `usfm.py`'s `ylt` profile, and the
+    WEB's Psalm 119 letters (`\d ALEPH`) are `A` records, as the KJV's and BSB's.
+16. **(Review r4-1.) The ESV's preview fallback names why:** "Shown in the BSB. The ESV
+    needs a connection." (offline), "… The ESV is busy just now." (busy), or "Shown in the
+    BSB." (unavailable, resting, or a chapter the fixture has not). The fixture gains ROM 5
+    and JHN 1 (for 125 and 127), and "light"'s three search pages (made from the WEB by
+    `make_fixtures.mjs`).
+17. **(Review r4-1.) An ESV chapter's row has the VoiceOver action "Open esv.org"**
+    (`accessibilityCustomActions`, selector-based).
 
 ### 9.11 Round 4 acceptance (summary)
 Round 4 is approved when:
