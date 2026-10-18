@@ -45,7 +45,12 @@ if [ -z "$dev" ]; then
   exit 1
 fi
 echo "simulator $dev"
-xcrun simctl list devices available | grep "$dev" | tee "$out/device.txt"
+xcrun simctl list devices available -j | python3 -c '
+import json, sys
+for rt, ds in json.load(sys.stdin)["devices"].items():
+    for d in ds:
+        if d["udid"] == sys.argv[1]:
+            print(d["name"], rt.split(".")[-1])' "$dev" | tee "$out/device.txt"
 xcrun simctl boot "$dev" 2>/dev/null || true
 xcrun simctl bootstatus "$dev" -b >/dev/null
 # (No keyboard tutorial over the first text field.)
