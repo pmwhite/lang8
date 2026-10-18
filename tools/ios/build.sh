@@ -54,9 +54,35 @@ cat > "$icons/Contents.json" <<'JSON'
 {"images": [{"filename": "icon.png", "idiom": "universal", "platform": "ios", "size": "1024x1024"}],
  "info": {"author": "xcode", "version": 1}}
 JSON
-xcrun actool --compile "$app" --platform "$sdk" --minimum-deployment-target 16.0 \
-  --target-device iphone --app-icon AppIcon $accent --output-partial-info-plist "$out/icon.plist" \
-  "$out/Assets.xcassets" >/dev/null
+# (DIR's AppIcon-dark.png and AppIcon-tinted.png, if it has them: the icon's
+# dark and tinted appearances, iOS 18's; the light icon alone if actool
+# cannot compile them.)
+light_json=$(cat "$icons/Contents.json")
+if [ -f "$dir/AppIcon-dark.png" ] && [ -f "$dir/AppIcon-tinted.png" ]; then
+  cp "$dir/AppIcon-dark.png" "$icons/icon-dark.png"
+  cp "$dir/AppIcon-tinted.png" "$icons/icon-tinted.png"
+  cat > "$icons/Contents.json" <<'JSON'
+{"images": [{"filename": "icon.png", "idiom": "universal", "platform": "ios", "size": "1024x1024"},
+  {"appearances": [{"appearance": "luminosity", "value": "dark"}], "filename": "icon-dark.png",
+   "idiom": "universal", "platform": "ios", "size": "1024x1024"},
+  {"appearances": [{"appearance": "luminosity", "value": "tinted"}], "filename": "icon-tinted.png",
+   "idiom": "universal", "platform": "ios", "size": "1024x1024"}],
+ "info": {"author": "xcode", "version": 1}}
+JSON
+fi
+actool() {
+  xcrun actool --compile "$app" --platform "$sdk" --minimum-deployment-target 16.0 \
+    --target-device iphone --app-icon AppIcon $accent --output-partial-info-plist "$out/icon.plist" \
+    "$out/Assets.xcassets" > "$out/actool.txt" 2>&1
+}
+if ! actool; then
+  cat "$out/actool.txt"
+  echo "actool could not compile the icon's appearances; the light icon alone"
+  rm -f "$icons/icon-dark.png" "$icons/icon-tinted.png"
+  echo "$light_json" > "$icons/Contents.json"
+  actool || { cat "$out/actool.txt"; exit 1; }
+fi
+grep -i "warning\|error" "$out/actool.txt" || true
 /usr/libexec/PlistBuddy -c "Merge $out/icon.plist" "$app/Info.plist"
 # What it was built with (Xcode adds this, and App Store Connect checks it).
 if [ "$kind" = device ]; then
