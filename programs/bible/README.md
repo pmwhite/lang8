@@ -53,7 +53,10 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   the tray, the edit menu and jumps; `ios_sheets.l8` the sheets;
   `ios_demo.l8` the demo CI runs.
 - `ios/` is what goes into the app besides its code: its Info.plist, icon
-  (`AppIcon.svg`, drawn to `AppIcon.png` in Chromium), privacy manifest,
+  (`AppIcon.svg`, drawn to `AppIcon.png` in Chromium, and as
+  `AppIcon.svg#dark` and `#tinted` to `AppIcon-dark.png` and
+  `AppIcon-tinted.png`, the tinted one on a transparent background),
+  privacy manifest,
   named colors (`Colors/`: Paper, Ink, Faint, Accent, each light and dark),
   frameworks and resources; and `simulate.sh`, which runs it in the
   simulator.
