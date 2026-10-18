@@ -573,8 +573,18 @@ draw_level() {
             cy: f32 = card_y(slot, y) + fade_k * fade_k * 40.0;
             ca: f32 = card_a * (1.0 - fade_k);
             if (i == 0) p_str(1, 12.0, x + 6.0, cy - 9.0, "YOU HAVE", C_MUTED, 1.0 - fade_k);
-            // (A new fact flying in: its card waits for it.)
+            // (A new fact flying in: its card waits for it; a part of a fact
+            // being pinched in two: the pinch draws it.)
             flying: bool = fly_term == h && fly_fact && now_t - fly_t < FLY_TIME;
+            pp: int = pinch_part(h);
+            if (pp >= 0) {
+                pc_seen[pp] = true;
+                pc_rx[pp] = x;
+                pc_ry[pp] = y;
+                pc_rw[pp] = w;
+                pc_rh[pp] = eh;
+                flying = true
+            }
             fill: int = C_BLUE_SOFT;
             if (fact_squeezed(h)) fill = mix_rgb(C_BLUE_SOFT, C_BG, 0.45);
             if (flying) ca = 0.0;
@@ -585,12 +595,18 @@ draw_level() {
             cy = cy + fact_nudge_y(i);
             if (dg_on && (dg_kind == DG_FACT || dg_kind == DG_FACE) && dg_item < 0 && dg_src == i || rb_on() && (rb_kind == DG_FACT || rb_kind == DG_FACE) && rb_item < 0 && rb_src == i) ca = ca * 0.3;
             prev: bool = lang_previewing(i);
-            if (prev) fill = mix_rgb(C_BLUE_SOFT, C_PICK_SOFT, 0.6);
-            if (prev && hv_closes) fill = C_GOLD_SOFT;
+            tgt: bool = lang_fact_target(i);
+            if (prev || tgt) fill = mix_rgb(C_BLUE_SOFT, C_PICK_SOFT, 0.6);
+            if (tgt) {
+                nf_ok = true;
+                nf_x = x;
+                nf_y = cy + eh;
+                nf_w = w
+            }
             // (Tapped: it lifts as it leans, its shadow deeper.)
             if (nd_on(DG_FACT, i)) p_shadow(fx, cy, w, eh, minf(18.0, eh * 0.5), 6.0 * nd_k(),
                 12.0, 0.25 * nd_k());
-            if (dg_on && lf_fit(i) && !prev && helping()) {
+            if (dg_on && lf_fit(i) && !prev && !tgt && helping()) {
                 gg: f32 = 0.5 + 0.5 * sinf(now_t * 4.0);
                 p_shape(x - 3.0, cy - 3.0, w + 6.0, eh + 6.0, minf(19.0, eh * 0.5 + 3.0),
                     6.0, 0.0, C_PICK, 0.18 + 0.15 * gg);
@@ -742,8 +758,10 @@ draw_level() {
             pt: int = raw_at(hv_goal, hv_steps, 0, hv_n);
             if (pt != 0) hl_key = pt * 16
         }
-        an_salt_extra = goal_gen * 104729;
-        an_quick = now_t < quick_t;
+        // (A preview morphs block by block, as a move does: what stays
+        // slides, what goes fades before what comes swells in.)
+        an_salt_extra = 0;
+        an_quick = false;
         if (ps_on) pulse_slot = SLOT_GOAL;
         draw_expr(ge, gox, goy, gink, ga, true);
         pulse_slot = -1;
@@ -792,6 +810,9 @@ draw_level() {
         if (ge < 0) goal_ry = goal_y
     }
     leavers_step();
+    draw_new_fact_preview();
+    nf_ok = false;
+    draw_fact_pinch();
     hand_top_y = hand_top;
     bar_bottom_y = top;
     draw_shelf(x, w, hand_top);
@@ -802,6 +823,7 @@ draw_level() {
         w, hy + 46.0);
     if (done_t >= 0.0) draw_done(x, w);
     draw_lang_top(x, w);
+    draw_new_word(x, w);
     draw_intro(x, w);
     draw_chapter(x, w);
     boxes_print()
@@ -1221,7 +1243,8 @@ draw_close_card(
     p_outline(x, y, w, h, r, 3.0 * sc, C_GOLD, a);
     if (h > 14.0) {
         an_live = false;
-        e: int = lay_term(term, 23.0 * sc, maxf(w - 36.0 * sc - 30.0, 10.0), 9200000);
+        e: int = lay_term(term, if_big(done_big) * sc, maxf(w - 36.0 * sc - 30.0,
+            10.0), 9200000);
         ta: f32 = a * clampf((h - 14.0) / 20.0, 0.0, 1.0);
         if (e >= 0) draw_expr(e, x + 18.0 * sc, y + (h - ex_h[e]) * 0.5, C_INK, ta,
             false);
@@ -1270,27 +1293,129 @@ draw_split(
 ) {
     busy = true;
     t: f32 = now_t - sp_t0;
-    k: f32 = clampf(t / SPLIT_TIME, 0.0, 1.0);
-    // (Eased out, a little past and back: a cell dividing.)
-    k = 1.0 - (1.0 - k) * (1.0 - k);
-    k = k + sinf(k * 3.1416) * 0.12;
     gap: f32 = 12.0;
     pw: f32 = (w - gap * (sp_n - 1) as f32) / sp_n as f32;
-    // (The whole goal, fading as it divides.)
-    if (t < SPLIT_TIME) {
-        a0: f32 = 1.0 - clampf(t / (SPLIT_TIME * 0.6), 0.0, 1.0);
-        an_live = false;
-        e: int = lay_term(stage_concl, 23.0, w - 40.0, 9250000);
-        if (e >= 0) draw_expr(e, x + 20.0, y + (h - ex_h[e]) * 0.5, C_INK, a0, false);
-        an_live = true
+    if (t < SPLIT_TIME + PINCH_IN && sp_n == 2) {
+        // (Pinched like dough: the card stretches, a waist forms at its
+        // ∧, and it parts into two, each half carrying its own writing.)
+        pinch_draw(x, y, w, h, stage_concl, if_big(done_big), x + 20.0, t, x, y, pw,
+            h, x + pw + gap, y, pw, h, C_CARD, false);
+        return
     }
     for i in 0..sp_n {
-        px: f32 = x + i as f32 * (pw + gap) * k;
-        cw: f32 = w + (pw - w) * k;
+        px: f32 = x + i as f32 * (pw + gap);
         tc: f32 = now_t - sp_t[i];
-        if (tc >= 0.0) draw_close_card(tc, px, y, cw, h, sp_term[i], sp_calc[i], sp_pip[i]) else draw_part(i,
-            t, px, y, cw, h)
+        if (tc >= 0.0) draw_close_card(tc, px, y, pw, h, sp_term[i], sp_calc[i], sp_pip[i]) else draw_part(i,
+            t + PINCH_IN, px, y, pw, h)
     }
+}
+
+// How long the waist takes to form before the halves part.
+const PINCH_IN: f32 = 0.14;
+
+// A statement A ∧ B on a card (x, y, w, h; its writing at size, from ox)
+// pinched into two cards, (ax, ay, aw, ah) and (bx, by, bw, bh), t since it
+// began: a waist forms at the ∧ (the ∧ puffs), then the halves part, a
+// little past their places and back, each with its writing. Facts are
+// blue (fact).
+pinch_draw(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    t0: int,
+    size: f32,
+    ox: f32,
+    t: f32,
+    ax: f32,
+    ay: f32,
+    aw: f32,
+    ah: f32,
+    bx: f32,
+    by: f32,
+    bw: f32,
+    bh: f32,
+    fill: int,
+    fact: bool
+) {
+    busy = true;
+    q: int = rel_core(t0);
+    if (spine_len(q) != 2) return;
+    pa: int = spine_arg(q, 2, 0);
+    pb: int = spine_arg(q, 2, 1);
+    an_live = false;
+    e: int = lay_term(q, size, w - 40.0, 9250000);
+    an_live = true;
+    if (e < 0) return;
+    ty: f32 = y + (h - ex_h[e]) * 0.5;
+    // (Where the ∧ is, and where each part's writing starts.)
+    xs: f32 = x + w * 0.5;
+    if (key_rect(e, q, ox, ty)) xs = (kr_x0 + kr_x1) * 0.5;
+    a_x: f32 = ox;
+    b_x: f32 = xs + 20.0;
+    for b in ex_box0[e]..ex_box0[e] + ex_boxn[e] {
+        if (bx_term[b] == pb && bx_parent[b] == ex_box0[e]) b_x = ox + bx_x0[b]
+    }
+    s1: f32 = clampf(t / PINCH_IN, 0.0, 1.0);
+    u: f32 = clampf((t - PINCH_IN) / SPLIT_TIME, 0.0, 1.0);
+    k: f32 = 1.0 - (1.0 - u) * (1.0 - u) * (1.0 - u) + sinf(u * 3.1416) * 0.1;
+    // (Stretching: a little wider while the waist forms.)
+    st: f32 = sinf(s1 * 3.1416 * 0.5) * (1.0 - u) * 0.04 * w;
+    r: f32 = minf(20.0, h * 0.5);
+    // (The halves now.)
+    l0: f32 = x - st + (ax - (x - st)) * k;
+    l1: f32 = xs - 3.0 * s1 + (ax + aw - (xs - 3.0 * s1)) * k;
+    lt: f32 = y + (ay - y) * k;
+    lh: f32 = h + (ah - h) * k;
+    m0: f32 = xs + 3.0 * s1 + (bx - (xs + 3.0 * s1)) * k;
+    m1: f32 = x + w + st + (bx + bw - (x + w + st)) * k;
+    mt: f32 = y + (by - y) * k;
+    mh: f32 = h + (bh - h) * k;
+    edge: int = mix_rgb(C_LINE, C_MUTED, 0.45);
+    if (fact) edge = mix_rgb(C_BLUE_SOFT, C_BLUE, 0.3);
+    // (The waist: thinner as it forms, gone as they part.)
+    if (u < 0.25) {
+        nh: f32 = h * (1.0 - 0.85 * s1) * (1.0 - u * 4.0);
+        p_box(xs - 14.0, y + h * 0.5 - nh * 0.5, 28.0, nh, minf(nh * 0.5, 14.0), fill,
+            1.0)
+    }
+    sh: f32 = 0.16;
+    if (fact) sh = 0.08;
+    rl: f32 = minf(r, (l1 - l0) * 0.5);
+    rm: f32 = minf(r, (m1 - m0) * 0.5);
+    p_shadow(l0, lt, l1 - l0, lh, rl, 4.0, 14.0, sh);
+    p_box(l0, lt, l1 - l0, lh, rl, fill, 1.0);
+    p_shadow(m0, mt, m1 - m0, mh, rm, 4.0, 14.0, sh);
+    p_box(m0, mt, m1 - m0, mh, rm, fill, 1.0);
+    if (!fact) {
+        p_outline(l0, lt, l1 - l0, lh, rl, 3.0, edge, 1.0);
+        p_outline(m0, mt, m1 - m0, mh, rm, 3.0, edge, 1.0)
+    }
+    // (The ∧ puffs away from the waist.)
+    if (u < 0.35) {
+        line_clear();
+        line_add(" ");
+        line_cp(8743);
+        line_add(" ");
+        g: int = line_sym_now();
+        gs: f32 = size * (1.0 + 0.8 * u);
+        gw: f32 = p_sym_w(0, gs, g);
+        p_sym(0, gs, xs - gw * 0.5, ty + ex_h[e] * 0.5 + gs * 0.36 - 14.0 * u, g,
+            C_INK, (1.0 - s1 * 0.4) * (1.0 - u / 0.35))
+    }
+    // (Each half's writing, carried along.)
+    an_live = false;
+    ea: int = lay_term(pa, size, maxf(l1 - l0 - 30.0, 30.0), 9251000);
+    if (ea >= 0) {
+        tx: f32 = a_x + (ax + 18.0 - a_x) * k;
+        draw_expr(ea, tx, lt + (lh - ex_h[ea]) * 0.5, C_INK, 1.0, false)
+    }
+    eb: int = lay_term(pb, size, maxf(m1 - m0 - 30.0, 30.0), 9252000);
+    if (eb >= 0) {
+        tx: f32 = b_x + (bx + 18.0 - b_x) * k;
+        draw_expr(eb, tx, mt + (mh - ex_h[eb]) * 0.5, C_INK, 1.0, false)
+    }
+    an_live = true
 }
 
 // Part i of a split goal, waiting to close (t since the split).
@@ -1310,7 +1435,7 @@ draw_part(
     p_box(px, y, cw, h, 20.0, C_CARD, 1.0);
     p_outline(px, y, cw, h, 20.0, 3.0, bord, 1.0);
     an_live = false;
-    e: int = lay_term(sp_term[i], 23.0, maxf(cw - 30.0, 10.0), 9260000 + i);
+    e: int = lay_term(sp_term[i], if_big(done_big), maxf(cw - 30.0, 10.0), 9260000 + i);
     ta: f32 = clampf((t - SPLIT_TIME * 0.4) / 0.2, 0.0, 1.0);
     if (e >= 0) draw_expr(e, px + 18.0, y + (h - ex_h[e]) * 0.5, C_INK, ta, false);
     an_live = true;
@@ -1715,6 +1840,9 @@ draw_rules_page() {
     y: f32 = top + 10.0 - sc_pos[V_PROOF];
     y = y + draw_wrapped(0, 15.0, x + 6.0, y + 6.0, w - 12.0, sym("The rulebook is all you are given: everything proved holds for whatever obeys it. Each theorem you prove joins it as a new move."),
         C_MUTED, 1.0) + 10.0;
+    // (The language first where it is being learned; elsewhere after the
+    // rules.)
+    if (lang_first()) y = draw_words_section(x, y, w);
     for pass in 0..3 {
         heading: str = "RULEBOOK";
         if (pass == 1) heading = "DEFINITIONS";
@@ -1770,6 +1898,7 @@ draw_rules_page() {
         }
         if (shown) y = y + 10.0
     }
+    if (!lang_first()) y = draw_words_section(x, y, w);
     // (Still to prove: each a faint card, its title and statement.)
     first: bool = true;
     for l in 0..lv_n {
@@ -1791,6 +1920,32 @@ draw_rules_page() {
     }
     sc_most[V_PROOF] = y + 40.0 + sc_pos[V_PROOF] - view_h();
     p_noclip()
+}
+
+word_h: []f32 = new f32[8](200.0);
+
+// The words of the language learned so far, each a page with its gestures
+// playing, from y; where it ends.
+draw_words_section(x: f32, y0: f32, w: f32): f32 {
+    y: f32 = y0;
+    shown: bool = false;
+    for k in 0..WORDS {
+        if (word_known(k)) {
+            if (!shown) {
+                pen_end = p_str(1, 13.0, x + 6.0, y + 14.0, "THE LANGUAGE", C_MUTED,
+                    1.0);
+                y = y + 24.0;
+                shown = true
+            }
+            // (Its card as tall as it was last drawn.)
+            p_shadow(x, y, w, word_h[k], 16.0, 2.0, 8.0, 0.08);
+            p_box(x, y, w, word_h[k], 16.0, C_CARD, 1.0);
+            word_h[k] = draw_word_page(k, x, y, w);
+            y = y + word_h[k] + 8.0
+        }
+    }
+    if (shown) y = y + 10.0;
+    y
 }
 
 // "Used in A, B" for level l's theorem (the later levels that may use

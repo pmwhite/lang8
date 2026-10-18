@@ -68,16 +68,33 @@ above the finger):
   opposite.
 
 Held over a place it fits, the place swells toward it and shows what it
-would become (crossfaded in, the changed part tinted; gold with a check
-when it would close the goal, from a fact too). Let go elsewhere, it
-springs home with a wobble, the place shakes no and a low tone plays
-(on a page); the same refusal twice says why in grey (*Doesn't match*,
-*Not a name here*, *That needs a name, not a statement*). A tap on a
+would become, morphing glyph by glyph as a move does (what stays slides,
+what goes fades before what comes swells in; the changed part tinted;
+gold with a check when it would close the goal). A name held over a
+fact's notch leaves the general fact as it is: the new fact it would give
+slides out under it as a card of its own, with a plus. In Someone for
+everyone the grid follows: the row lights only once x is got from the
+fact, the cell (x, y) is ringed when the goal asks for it, (y, y) red.
+Let go elsewhere, it springs home and wobbles there, the place shakes no
+(±6 px, three times) and a low tone plays (on a page); the same refusal
+twice says why in grey (*Doesn't match*, *Not a name here*, *That needs a
+name, not a statement*). A name dropped on a statement whose key is
+still shut, or a fact dropped on the goal that would fit once its key is
+opened, makes the key hop and says *Open it first* at once. A tap on a
 thing that moves (a fact, a name) leans it toward where it fits and back:
 not a menu, the object showing that it moves. Help comes when you pause:
 in Logic the places a held thing fits breathe at once; from Groups on,
 only once it has been held still 1.2 s. After 8 s idle, unpressed keys
 breathe; just back from a dead end, at once.
+
+A key pressed sinks a moment before the statement opens; the binder puffs
+away, the rest slides over to close the gap (writing on the board is known
+by what it writes, so nothing is ever drawn twice), and a name it gives
+flies out of the key as a ball, arcs to its place on the shelf and
+bounces. An ∧ key pinches its card like dough: a waist forms at the ∧,
+and the halves part into two cards (two goals, or two facts), each with
+its writing. The shelf always keeps room for a row of names (an empty
+tray, faint), so the board never moves because a name arrived.
 
 Each key tap or drop is a move (par and stars count them); a socket's
 name, kit building and the game's own closes are free. A level's
@@ -87,6 +104,12 @@ is played: the book's first gestures made by a puppet finger (the key
 tapped and the name flying to the shelf, the name carried into its notch
 with the preview) and taken back, twice, with a line of words; a gesture
 that would finish the level is only shown. A touch stops it.
+
+The language's words (`word:` in a level: and, if, all, ex, eq, def, kit,
+not): the first time a level brings one in, *New word* pops with its
+symbol on a keycap, and the Book gains its page under THE LANGUAGE (first
+in Logic, after the rules elsewhere): the symbol on the goal and on a
+fact, each gesture played over and over by a little finger (`words.l8`).
 
 The bulb's ghost hand performs the book's next gesture (taps the key or
 carries the thing to its place); off the book's path it says *Undo k*.
@@ -206,6 +229,19 @@ L8_LEVEL=23 L8_DO="suppose" L8_DO_STOP=1 .build/lemma
 L8_LEVEL=22 L8_DO_GAP=40 L8_DO="$(for i in $(seq 8); do printf 'hint;enter;'; done)token N > goal; open goal; token n > fact 3; token n > fact 4" .build/lemma
 ```
 
+A name dropped on the fact whose ∃ key is still shut (the key hops, *Open
+it first*), the new fact a notch would give previewed under the general
+one, a key's name flying to the shelf, and the Book's words (a progress
+file with `seen word_and` ... lines; without them each level that brings
+a word in pops *New word*):
+
+```sh
+L8_LEVEL=10 L8_DO="open goal;token y > fact 0" .build/lemma
+L8_LEVEL=6 L8_DO="open goal;token y > fact 0" L8_DO_STOP=2 .build/lemma
+L8_LEVEL=6 L8_TAPS=63,757 .build/lemma      # the goal's ∀ key: grab frames from 1.75 s on
+L8_LEVEL=6 L8_TAPS=82,28 .build/lemma       # the Book
+```
+
 Watch, and a demo (a progress file without `seen` lines):
 
 ```sh
@@ -264,7 +300,8 @@ grep -v '^seen' .build/lemma-progress.txt > /tmp/p.txt; L8_LEVEL=6 .build/lemma 
   finger and ghost hand for hints, Watch and demos, `L8_BOXES`),
   `trial.l8` (what a move made, read off the proof for staging; facts in
   play; Limits' dead ends), `app.l8` (state, moves, demos, Watch),
-  `pages.l8`, `picture.l8`, `touch.l8`, `main.l8` (`L8_DO` and the other
+  `pages.l8`, `picture.l8`, `words.l8` (the words: New word, the Book's
+  pages), `touch.l8`, `main.l8` (`L8_DO` and the other
   hooks); `web/lemma` runs it in a browser.
 
 A region's theorem can be exported (`export_theorem` in moves.l8): its
@@ -284,10 +321,10 @@ to `region_files` in `app.l8` and `FILES` in `web/lemma/lemma.js`. A
 
 ## Not built yet
 
-A fact onto a fact (forward); the unzip and pinch animations, haptics
-on native; Book pages per symbol with looping demos and *New word* pops;
-the picture reacting to hover (the grid cell, the band, the gate, the
-tiles); a magnified preview clear of the thumb; long-pressing a part to
+A fact onto a fact (forward); haptics in the native build (it is a
+desktop window; the page buzzes through `navigator.vibrate`); the
+picture reacting to hover in Groups and Limits (the band, the gate, the
+tiles; Someone for everyone's grid does); a magnified preview clear of the thumb; long-pressing a part to
 pull out a copy; ∨; keyboard navigation of keys and tiles.
 
 The Foundations region (constructing ℕ, ℤ, ℚ, ℝ and proving each
