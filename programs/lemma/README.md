@@ -75,10 +75,17 @@ fact's notch leaves the general fact as it is: the new fact it would give
 slides out under it as a card of its own, with a plus. In Someone for
 everyone the grid follows: the row lights only once x is got from the
 fact, the cell (x, y) is ringed when the goal asks for it, (y, y) red.
+The picture follows a thing held in the other chapters too: in Groups the
+tiles take the shape the held face would give (a new `e` tile, a
+regrouping) and spring back; in Limits a name over a fact's notch brings
+the band it would give in faint and breathing, and N over the goal's
+notch slides the goal's gate to N.
 Let go elsewhere, it springs home and wobbles there, the place shakes no
 (±6 px, three times) and a low tone plays (on a page); the same refusal
 twice says why in grey (*Doesn't match*, *Not a name here*, *That needs a
-name, not a statement*). A name dropped on a statement whose key is
+name, not a statement*; a fact with an if or a for-all put on a goal it
+does not give says what it gives: *P ⟶ Q gives Q, not R*, or *It gives
+Q, not R* when that is too wide). A name dropped on a statement whose key is
 still shut, or a fact dropped on the goal that would fit once its key is
 opened, makes the key hop and says *Open it first* at once. A tap on a
 thing that moves (a fact, a name) leans it toward where it fits and back:
@@ -107,8 +114,11 @@ that would finish the level is only shown. A touch stops it.
 
 The language's words (`word:` in a level: and, if, all, ex, eq, def, kit,
 not): the first time a level brings one in, *New word* pops with its
-symbol on a keycap, and the Book gains its page under THE LANGUAGE (first
-in Logic, after the rules elsewhere): the symbol on the goal and on a
+symbol on a keycap (it fades away whole), and the Book gains its page
+under THE LANGUAGE (first in Logic, after the rules elsewhere; the
+chapter's own words first). A word is known once seen, or once a level
+that brings it in (or a later one in its chapter) is solved, so older
+progress has its words: the symbol on the goal and on a
 fact, each gesture played over and over by a little finger (`words.l8`).
 
 The bulb's ghost hand performs the book's next gesture (taps the key or
@@ -119,8 +129,13 @@ book's path, a bounded search with the same gestures (keys opened first,
 names from the shelf) decides whether the goal can still be shown; if it
 runs out of moves without a proof, the goal card greys, dashed, *Can't be
 shown from what you have* on its top edge, a bobbing *Undo k* pill on its
-corner (the relation grid of Someone for everyone rings the cell (y, y)
-red). In Limits a comparison of indices (`N₁ ≤ n`) or a use's side
+corner; the bulb then makes the ghost finger tap that pill. Someone for
+everyone's grid is square, the same people (little coloured figures)
+down the side as x and along the top as y, a faint diagonal where each
+meets themself; the example has no one related to themself except on
+the full row, so y's own dot (y, y) is empty: it is ringed red on hover
+and when stuck, and the full row's dot in y's column flashes beside it
+(what you have gives that one, not this). In Limits a comparison of indices (`N₁ ≤ n`) or a use's side
 condition (`A > 0`) that arithmetic did not close is one (the gate red,
 a bracket from n). Groups says *Undo k* only when asked.
 
@@ -143,8 +158,9 @@ proof. Limits: the sequences, the band each hypothesis says they stay in
 from its N on, the goal's limit, an ε handle; the goal's gate slides to
 where it is chosen, a taken n is drawn past its gates, dots a band does
 not yet hold go red. Groups: a letter train, grouping as closeness,
-`x⁻¹ · x` side by side glowing. Someone for everyone: R as a grid, the row
-the fact gives lit, the column of a y taken ringed.
+`x⁻¹ · x` side by side glowing. Someone for everyone: R as a square grid
+of the same people both ways, the row the fact gives lit, the column of a
+y taken ringed, the diagonal drawn.
 
 ## Playing in pictures (hooks)
 
@@ -237,6 +253,9 @@ a word in pops *New word*):
 
 ```sh
 L8_LEVEL=10 L8_DO="open goal;token y > fact 0" .build/lemma
+L8_LEVEL=10 L8_DO="open goal;token y > goal;hint" .build/lemma         # stuck: the finger taps Undo 1 (from ~6.5 s)
+L8_LEVEL=5 L8_DO="open goal;fact 0 > goal;fact 0 > goal" .build/lemma # P ⟶ Q gives Q, not R (~7 s)
+L8_LEVEL=20 L8_DO="open goal;open goal;open fact 0;token ε > fact 0" L8_DO_STOP=4 .build/lemma  # the band it would give
 L8_LEVEL=6 L8_DO="open goal;token y > fact 0" L8_DO_STOP=2 .build/lemma
 L8_LEVEL=6 L8_TAPS=63,757 .build/lemma      # the goal's ∀ key: grab frames from 1.75 s on
 L8_LEVEL=6 L8_TAPS=82,28 .build/lemma       # the Book
@@ -323,8 +342,8 @@ to `region_files` in `app.l8` and `FILES` in `web/lemma/lemma.js`. A
 
 A fact onto a fact (forward); haptics in the native build (it is a
 desktop window; the page buzzes through `navigator.vibrate`); the
-picture reacting to hover in Groups and Limits (the band, the gate, the
-tiles; Someone for everyone's grid does); a magnified preview clear of the thumb; long-pressing a part to
+picture's hover preview in Groups is the new shape, not yet a ghosted
+one; a magnified preview clear of the thumb; long-pressing a part to
 pull out a copy; ∨; keyboard navigation of keys and tiles.
 
 The Foundations region (constructing ℕ, ℤ, ℚ, ℝ and proving each
