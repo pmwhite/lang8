@@ -3853,7 +3853,11 @@ Where the build differs from the text above, and why:
     address was taken for it. The `plans` group's step 261 pushes and pops Versions and
     Acknowledgements, then changes the ESV's listing both ways and the theme twice.
 16. **The fixture's poetry lines are joined with a space** (`make_fixtures.mjs`, review r4-2).
-17. Not done: Isaiah 37's pointer as a reference (optional in review r4-2).
+17. **The authorization alert's shot (148) is the group's last**, not followed by a relaunch:
+    the system's alert outlives the app (a relaunch showed it over every later shot), and
+    the simulator cannot answer it. 149 comes before it, the shim's flag given "granted" by
+    the demo (`demo_grant`), so the Time row and the scheduling are shown without an alert.
+18. Not done: Isaiah 37's pointer as a reference (optional in review r4-2).
 
 ### 10.8 Round 5 acceptance (summary)
 Round 5 is approved when:

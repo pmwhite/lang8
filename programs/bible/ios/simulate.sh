@@ -30,8 +30,9 @@
 #           (versions-transitions.mp4, with versions-transitions.txt)
 #   plans   Round 5 (DESIGN.md §10.6), on the demo clock: Today in Go To,
 #           the reading plans, a plan started and read, Day Done, Catch Up;
-#           the Verse of the Day's setting, its authorization alert, then
-#           (relaunched) the Time row and a notification opened; Share as
+#           the Verse of the Day's setting, the Time row (the shim's answer
+#           forced) and a notification opened, its authorization alert (last:
+#           it outlives the app); Share as
 #           Image (the card kept as share-card.png); exact senses, related
 #           words, the largest text; the recording of sequence 12
 #           (plans-transitions.mp4); and Versions and Acknowledgements
@@ -411,13 +412,6 @@ plans)
   step 246 145-day-done 6
   step 247 146-catch-up 6
   step 248 147-votd-settings 6
-  step 249 148-notify-prompt 6
-  # (The alert can't be answered here: the app is launched again, and the
-  # demo gives the shim its answer.)
-  xcrun simctl terminate "$dev" "$id" 2>/dev/null || true
-  kill "$console" 2>/dev/null || true
-  events=0
-  launch console-again.txt
   step 250 149-time-row 8
   step 251 150-votd-open 6
   step 252 151-share-sheet 8
@@ -459,10 +453,14 @@ plans)
   sleep 0.5
   kill -INT "$recorder" 2>/dev/null
   wait "$recorder" 2>/dev/null
+  # Daily Notification turned on, its authorization alert: last, as the
+  # system's alert outlives the app and can't be answered here (the Time
+  # row's shot, before, had the shim's answer forced by the demo).
+  step 249 148-notify-prompt 8
   # What was scheduled, the shim's answers and the handler called; the
   # lists that were popped under a theme's change.
   grep -h "scheduled 30 daily verses\|notification authorization\|completion handler\|notification opened\|popped lists\|card size\|card w\|card h" \
-    "$out/console.txt" "$out/console-again.txt" > "$out/notify.txt" 2>/dev/null
+    "$out/console.txt" > "$out/notify.txt" 2>/dev/null
   cat "$out/notify.txt"
   grep -q "scheduled 30 daily verses" "$out/notify.txt" || { echo "FAILED: nothing scheduled" | tee -a "$out/notify.txt"; failed=1; }
   grep -q "popped lists survived" "$out/notify.txt" || { echo "FAILED: the popped lists' step did not finish" | tee -a "$out/notify.txt"; failed=1; }
