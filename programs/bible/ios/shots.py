@@ -1,4 +1,4 @@
-# The CI's screenshots, finished (python3 -I, with Pillow and PyAV):
+# The CI's screenshots, finished (Python with Pillow and PyAV):
 #   shots.py DIR
 # DIR holds every group's screenshots, and the notes group's screen
 # recording (transitions.mp4, and transitions.txt: a line a sequence, its
@@ -30,13 +30,17 @@ def collapse_diff():
                 break
     ia, ib = Image.open(a).convert("RGB"), Image.open(b).convert("RGB")
     scale = round(ia.width / 400.0)
-    top = (s + 44) * scale
-    # (Above the home indicator; the capsule and tray are not shown.)
-    box = (0, top, ia.width, ia.height)
-    diff = ImageChops.difference(ia.crop(box), ib.crop(box))
-    n = sum(1 for px in diff.getdata() if px != (0, 0, 0))
-    return "S %d pt, scale %d: %d pixels differ below y=%d px (of %d)" % (s, scale, n, top,
-        (box[2] - box[0]) * (box[3] - box[1]))
+    out = []
+    # Below the expanded bar, and below the fade under it (whose 18 points
+    # follow the bar up as it collapses, by design): only the second is
+    # nothing but the text, which must not have moved.
+    for name, pts in (("below S + 44", s + 44), ("below S + 44 + 18 (the fade)", s + 62)):
+        top = pts * scale
+        box = (0, top, ia.width, ia.height)
+        diff = ImageChops.difference(ia.crop(box), ib.crop(box))
+        n = diff.convert("L").point(lambda v: 255 if v else 0).histogram()[255]
+        out.append("%s: %d pixels differ (y >= %d px)" % (name, n, top))
+    return "S %d pt, scale %d; " % (s, scale) + "; ".join(out)
 
 def transitions():
     video = os.path.join(d, "transitions.mp4")
@@ -59,6 +63,22 @@ def transitions():
     if not decoded:
         return "no frames"
     t0 = decoded[0][0]
+    # When the screen changed (to trim each sequence to what moved in it:
+    # the script's times include the notifications' own delays).
+    changes = []
+    prev = None
+    for t, im in decoded:
+        small = im.convert("L").resize((100, 216))
+        if prev is not None and ImageChops.difference(small, prev).getbbox():
+            changes.append(t - t0)
+        prev = small
+    trimmed = []
+    for n, a, b in seqs:
+        moved = [t for t in changes if a <= t <= b + 0.5]
+        if moved:
+            a, b = max(a, moved[0] - 0.3), moved[-1] + 0.3
+        trimmed.append((n, a, b))
+    seqs = trimmed
     os.makedirs(os.path.join(d, "transitions"), exist_ok=True)
     rows = []
     for n, a, b in seqs:

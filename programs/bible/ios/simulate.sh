@@ -35,6 +35,10 @@ print(pick[-1]["udid"])')
 echo "simulator $dev"
 xcrun simctl boot "$dev" 2>/dev/null || true
 xcrun simctl bootstatus "$dev" -b >/dev/null
+# (No keyboard tutorial over the first text field.)
+for key in DidShowContinuousPathIntroduction KeyboardDidShowContinuousPathIntroduction; do
+  xcrun simctl spawn "$dev" defaults write com.apple.keyboard.preferences "$key" -bool true 2>/dev/null || true
+done
 xcrun simctl ui "$dev" appearance light
 xcrun simctl ui "$dev" content_size large 2>/dev/null || true
 echo "booted in $(python3 -c "print(round($(now) - $start))") s" >> "$out/timing.txt"
