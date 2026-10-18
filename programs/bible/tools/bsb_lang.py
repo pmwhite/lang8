@@ -233,9 +233,41 @@ def markup(defn, have, stats):
         if not p:
             continue
         paras.append(p)
-    text = "\\n".join(paras)
+    text = cross_style("\\n".join(paras), stats)
     if "<" in text and re.search(r"<[a-zA-Z/]", text):
         stats["lexicon html left"] += 1
+    return text
+
+
+# STEP's cross-references to other words ("Also means: _ro.i_ (רֹעִי "to
+# shepherd" H7473)", "Another name of _ev.ya.saph_ (אֶבְיָסָף, אֲבִיאָסָף
+# ...)", or the gloss first) in the app's style: the word, its
+# transliteration as the tables write them (never STEP's dotted one), the
+# gloss in curly quotes, and the number as the app shows it (H7473).
+ORIG = "\u0590-\u05ff\u0370-\u03ff\u1f00-\u1fff"
+CROSS = re.compile(r'_([^_ ]+)_ \(([' + ORIG + r'][^()"]*?)(?: "([^"]*)")? ([HG])0*(\d+)[A-Za-z]?\)')
+CROSS_GLOSS_FIRST = re.compile(r'"([^"]*)" \(_([^_ ]+)_ ([' + ORIG + r'][^()"]*?) ([HG])0*(\d+)[A-Za-z]?\)')
+
+
+def cross_style(text, stats):
+    def word(orig, tr, gloss, kind, num):
+        first = orig.split(",")[0].strip()
+        if kind == "H":
+            tr = hebrew_translit(first)
+        else:
+            tr = tr.replace(".", "")
+        out = orig.strip() + " _" + tr + "_"
+        gloss = (gloss or "").strip().lstrip(":").strip()
+        if gloss:
+            out += " \u201c" + gloss + "\u201d"
+        stats["lexicon cross-references styled"] += 1
+        return out + " \u00b7 " + kind + num
+
+    text = CROSS.sub(lambda m: word(m.group(2), m.group(1), m.group(3), m.group(4), m.group(5)), text)
+    text = CROSS_GLOSS_FIRST.sub(lambda m: word(m.group(3), m.group(2), m.group(1), m.group(4), m.group(5)),
+                                 text)
+    if re.search(r"_[a-z]+\.[a-z.]+_ \([" + ORIG + "]", text):
+        stats["lexicon dotted transliterations left"] += 1
     return text
 
 
