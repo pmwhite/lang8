@@ -34,6 +34,20 @@ Three tabs along the bottom; a finger slides between them too.
   shown, so it is ready by the time Start is tapped). Under it, this
   week's distance and time for the sport. If location is refused, it says
   how to allow it on an iPhone, with **Try again**.
+- **Goal pace** (a speed for rides), set for each sport with a switch and
+  − and + (5 s a mile or km for a run, 15 for a walk, half a mph or km/h
+  for a ride; kept on each device). The goal is an *effort pace*: the
+  pace that effort would give on the flat, so a hill asks for less speed
+  and allows more down it (`pace.l8` has the model: ACSM-like for runs,
+  Minetti's measured costs for walks, the power it takes for rides).
+  While recording, a card shows the effort pace over the last 150 m or so,
+  the grade, and a gauge against the goal; and soft chimes say when it is
+  off by more than 6% for 15 s: two notes up, faster; two down, ease off;
+  one, back on it. A chime is said again only a minute later, then two,
+  then four; nothing in the first minute, after a stop, while the grade
+  is changing, or (for faster) downhill or for half a minute after. On an
+  iPhone they play with the screen locked, over music, which ducks for
+  the moment.
 - **The recording** comes up over everything, dark: the moving time big,
   the time in all, distance, the speed now and on average (a pace for runs
   and walks, a speed for rides), the last mile's time (or the top speed),
@@ -51,12 +65,14 @@ Three tabs along the bottom; a finger slides between them too.
   own setting; the pick is kept on each device, and the colors ease from
   one to the other); each sport's totals (all time, and this
   year); each sport's records (the fastest stretch of each standard length
-  ever gone; a tap opens the activity).
+  ever gone; a tap opens the activity); and the goal's chimes, on or off,
+  with **Hear them**.
 
 An activity's page slides in over them (slide it back to the right, or
 the arrow): its distance, moving and elapsed time, average pace or speed,
 fastest mile or top speed; its elevation (how much higher or lower than
-the start it was, along the way, with the climbing and descending); its
+the start it was, along the way, with the climbing and descending, and its
+effort pace: what it was with the hills taken out); its
 speed through it as a chart (a finger on
 it reads it: when, how far by then, how fast); its splits, a bar each;
 its best efforts; and Delete (asked twice).

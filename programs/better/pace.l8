@@ -1,0 +1,361 @@
+tag better;
+
+use_tag std, skate;
+
+// A goal pace, and chimes that say when the effort is off it.
+//
+// The goal is an effort: the pace (or, riding, the speed) it would be on
+// the flat. Up a hill the same effort is slower and down one faster, so
+// what is held to the goal is the effort pace: the speed now, made into
+// the speed on the flat that is as hard.
+//
+// How much harder a grade is:
+//
+// - Running: a meter up a grade g costs 1 + 4.5 g + 4 g^2 times a meter
+//   on the flat (half as much again at 10%, as the ACSM's running
+//   equation has it, a little more when steeper); down, 1 + 2.4 g + 12 g^2
+//   (the easiest about 12% less, near -10%, and as hard as the flat again
+//   by -20%, where holding back costs what falling saves).
+// - Walking: Minetti's (2002) measured cost of walking up and down
+//   grades, against walking on the flat. A walk feels a hill far more
+//   than a run does (twice the flat's cost at 10%).
+// - Riding: the power it takes (rolling, the air, and lifting rider and
+//   bike), made into the speed on the flat that takes as much. Coasting
+//   down takes none, and is not judged.
+//
+// Never asked to go faster downhill (nor for half a minute after): easing
+// off down a hill is the person's to choose (knees), so only "ease off"
+// is said there.
+//
+// The goal for each sport (meters a second; kept, off, as the last one
+// set) and whether chimes are wanted, as this device keeps them (the page
+// in its storage, the iPhone in its settings).
+goal_v: []f32 = [2.98, 6.71, 1.49];
+
+goal_on: []bool = [false, false, false];
+
+cues_on: bool = true;
+
+// ---- the model ----
+// How hard a grade is, against the flat, for a run or a walk.
+effort_factor(sport: int, grade: f32): f32 {
+    g: f32 = clampf(grade, -0.3, 0.3);
+    if (sport == S_WALK) {
+        // (Minetti's walking cost, J/kg/m, over the flat's 2.5.)
+        g2: f32 = g * g;
+        c: f32 = 280.5 * g2 * g2 * g - 58.7 * g2 * g2 - 76.8 * g2 * g + 51.9 * g2 + 19.6 * g + 2.5;
+        return maxf(c / 2.5, 0.3)
+    }
+    if (g >= 0.0) return 1.0 + 4.5 * g + 4.0 * g * g;
+    1.0 + 2.4 * g + 12.0 * g * g
+}
+
+// Riding: a rider and bike of 85 kg, rolling resistance 0.005, and CdA
+// 0.32 m^2 in air of 1.2 kg/m^3.
+const RIDE_MG: f32 = 833.85;
+
+const RIDE_CRR: f32 = 0.005;
+
+const RIDE_AIR: f32 = 0.192;
+
+// The power (W) of riding at v up a grade.
+ride_power(v: f32, grade: f32): f32 {
+    v * RIDE_MG * (RIDE_CRR + grade) + RIDE_AIR * v * v * v
+}
+
+// The speed on the flat that takes p watts.
+ride_flat_speed(p: f32): f32 {
+    if (p <= 0.0) return 0.0;
+    v: f32 = 8.0;
+    for _i in 0..12 {
+        f: f32 = ride_power(v, 0.0) - p;
+        d: f32 = RIDE_MG * RIDE_CRR + 3.0 * RIDE_AIR * v * v;
+        v = maxf(v - f / d, 0.1)
+    }
+    v
+}
+
+// The speed on the flat as hard as going at v up a grade.
+effort_speed(sport: int, v: f32, grade: f32): f32 {
+    if (sport == S_RIDE) return ride_flat_speed(ride_power(v, clampf(grade, -0.3,
+        0.3)));
+    v * effort_factor(sport, grade)
+}
+
+// ---- now, while recording ----
+// Lately: the last 150 m of moving or so (at most 75 seconds). Its speed
+// and its grade are taken over the same stretch, so that at a hill's top
+// or foot they agree on how much of it was up and how much down; the
+// grade is the line fitted through its heights (a phone's heights wander
+// a meter or so: the ends alone would make it 2% up or down at random).
+//
+// Where the stretch of the last dm decimeters (at most secs seconds)
+// starts.
+rec_since(dm: int, secs: int): int {
+    n: int = fine_n - 1;
+    i: int = n;
+    while (i > 0 && n - i < secs && fine[n] - fine[i] < dm) i = i - 1;
+    i
+}
+
+// The grade from second i to now, fitted; 0 if unknown, or under 30 m.
+rec_slope(i: int): f32 {
+    n: int = fine_n - 1;
+    if (!rec_z_known || fine[n] - fine[i] < 300) return 0.0;
+    k: f32 = (n - i + 1) as f32;
+    md: f32 = 0.0;
+    mz: f32 = 0.0;
+    for j in i..n + 1 {
+        md = md + (fine[j] - fine[i]) as f32;
+        mz = mz + (fine_z[j] - fine_z[i]) as f32
+    }
+    md = md / k;
+    mz = mz / k;
+    sdd: f32 = 0.0;
+    sdz: f32 = 0.0;
+    for j in i..n + 1 {
+        d: f32 = (fine[j] - fine[i]) as f32 - md;
+        sdd = sdd + d * d;
+        sdz = sdz + d * ((fine_z[j] - fine_z[i]) as f32 - mz)
+    }
+    if (sdd <= 0.0) return 0.0;
+    clampf(sdz / sdd, -0.3, 0.3)
+}
+
+rec_grade(): f32 {
+    rec_slope(rec_since(1500, 75))
+}
+
+// The effort pace lately (meters a second).
+rec_effort_speed(): f32 {
+    i: int = rec_since(1500, 75);
+    n: int = fine_n - 1;
+    if (n - i < 5) return 0.0;
+    v: f32 = (fine[n] - fine[i]) as f32 * 0.1 / (n - i) as f32;
+    effort_speed(rec_sport, v, rec_slope(i))
+}
+
+// Until when (on the clock) it is taken to be going downhill: for half a
+// minute after the stretch was down more than 3%, or the last 50 m more
+// than 5% (a steeper sign, as heights wander more over less).
+down_until: int = 0;
+
+// ---- the chimes ----
+// A chime wanted (the platform plays it): faster, ease off, back on it.
+const CUE_NONE: int = 0;
+
+const CUE_FASTER: int = 1;
+
+const CUE_EASIER: int = 2;
+
+const CUE_ON: int = 3;
+
+cue_wanted: int = 0;
+
+// Off the goal by more than this (a fraction: 6% is about 30 s a mile at
+// 9:00) is off it; back within the smaller, back on it.
+const CUE_OFF: f32 = 0.06;
+
+const CUE_BACK: f32 = 0.03;
+
+// Which way it is off (-1 slow, 1 fast, 0 not), and for how long (ms, as
+// counted: not while the grade is changing), as of when (on the clock);
+// the last chime said (0 none since it was on it), when, and how
+// long until it is said again (longer each time).
+off_dir: int = 0;
+
+off_ms: int = 0;
+
+off_seen: int = 0;
+
+cue_said: int = 0;
+
+cue_said_ms: int = 0;
+
+cue_gap_ms: int = 0;
+
+// When moving began again (after a stop, or a pause).
+moving_since: int = 0;
+
+was_moving: bool = false;
+
+// (A sample of each chime, one after another, from the clock's now_t.)
+hear_t: f32 = -1.0;
+
+// The goal for the sport now being recorded, judged: whether one is set.
+goal_judged(): bool {
+    goal_on[rec_sport] && rec_on
+}
+
+// The effort against the goal: 1 on it, more faster.
+goal_ratio(): f32 {
+    if (goal_v[rec_sport] <= 0.0) return 1.0;
+    rec_effort_speed() / goal_v[rec_sport]
+}
+
+pace_step() {
+    // (The samples, when asked to hear them.)
+    if (hear_t >= 0.0) {
+        k: f32 = now_t - hear_t;
+        if (k >= 0.0 && cue_wanted == 0 && k < 0.1) cue_wanted = CUE_FASTER;
+        if (k >= 1.4 && k < 1.5) cue_wanted = CUE_EASIER;
+        if (k >= 2.8) {
+            cue_wanted = CUE_ON;
+            hear_t = -1.0
+        }
+    }
+    now: int = clock_ms();
+    short: f32 = 0.0;
+    if (rec_on) short = rec_slope(rec_since(500, 30));
+    if (rec_on && (short < -0.05 || rec_grade() < -0.03)) down_until = now + 30000;
+    moving: bool = rec_on && !rec_paused && rec_moving;
+    if (moving && !was_moving) moving_since = now;
+    was_moving = moving;
+    // Judged only while moving, with a good enough fix, after the first
+    // minute and a little while after each stop.
+    if (!goal_judged() || !moving || gps_state != GPS_GOOD && gps_state != GPS_WEAK || rec_moving_ms < 60000 || now - moving_since < 15000) {
+        off_dir = 0;
+        if (!moving) cue_said = 0;
+        return
+    }
+    r: f32 = goal_ratio();
+    dir: int = 0;
+    if (r < 1.0 - CUE_OFF) dir = -1;
+    if (r > 1.0 + CUE_OFF) dir = 1;
+    // (Not pushed down a hill, nor while coasting.)
+    if (dir < 0 && (now < down_until || rec_sport == S_RIDE && rec_effort_speed() <= 0.0)) dir = 0;
+    if (cue_said != 0 && absf(r - 1.0) < CUE_BACK) {
+        if (cues_on) cue_wanted = CUE_ON;
+        cue_said = 0;
+        off_dir = 0;
+        return
+    }
+    if (dir == 0) {
+        off_dir = 0;
+        return
+    }
+    if (dir != off_dir) {
+        off_dir = dir;
+        off_ms = 0
+    } else if (absf(short - rec_grade()) < 0.03) off_ms = off_ms + mini(now - off_seen,
+        2000);
+    // (While the grade changes, at a hill's foot or top, the stretch is
+    // part one and part the other, and the effort is not yet sure: the
+    // time off is not counted, nor forgotten.)
+    off_seen = now;
+    // Said once it has been off for 15 seconds (on top of the stretch's
+    // own lag); again, if still off the same way, after a minute, then
+    // two, then four.
+    if (off_ms < 15000) return;
+    if (cue_said == dir && now - cue_said_ms < cue_gap_ms) return;
+    if (cue_said == dir) cue_gap_ms = mini(cue_gap_ms * 2, 240000) else cue_gap_ms = 60000;
+    cue_said = dir;
+    cue_said_ms = now;
+    if (cues_on) cue_wanted = (if (dir < 0) CUE_FASTER else CUE_EASIER)
+}
+
+// ---- setting it ----
+// The goal as it is said: seconds a mile or km (runs, walks), or tenths
+// of a mph or km/h (rides).
+goal_said(sport: int): int {
+    v: f32 = maxf(goal_v[sport], 0.1);
+    if (by_pace(sport)) return (unit_m() / v + 0.5) as int;
+    (v * 36000.0 / unit_m() + 0.5) as int
+}
+
+goal_from_said(sport: int, k: int) {
+    if (by_pace(sport)) goal_v[sport] = unit_m() / k as f32 else goal_v[sport] = k as f32 * unit_m() / 36000.0
+}
+
+// One step faster (up 1) or slower (-1): 5 seconds a unit for a run, 15
+// for a walk, half a mph or km/h for a ride; on the step, within reason.
+goal_nudge(sport: int, up: int) {
+    k: int = goal_said(sport);
+    if (sport == S_RIDE) {
+        k = (k + 2) / 5 * 5 + up * 5;
+        goal_from_said(sport, clampi(k, 50, 600));
+        return
+    }
+    st: int = 5;
+    if (sport == S_WALK) st = 15;
+    k = (k + st / 2) / st * st - up * st;
+    lo: int = 150;
+    hi: int = 1500;
+    if (sport == S_WALK) {
+        lo = 360;
+        hi = 2700
+    }
+    // (Per km, the bounds are less: about 0.62 of a mile's.)
+    if (!miles) {
+        lo = lo * 62 / 100;
+        hi = hi * 62 / 100
+    }
+    goal_from_said(sport, clampi(k, lo, hi))
+}
+
+// As kept: each sport's goal (mm a second; less than 0 if off), and the
+// chimes (1 on).
+line_goals() {
+    for s in 0..SPORTS {
+        if (s > 0) line_byte(32);
+        mm: int = (goal_v[s] * 1000.0 + 0.5) as int;
+        if (!goal_on[s]) line_byte(45);
+        line_int(mm)
+    }
+    line_byte(32);
+    line_int(if (cues_on) 1 else 0)
+}
+
+goal_set(s: int, mm: int) {
+    if (mm == 0) return;
+    goal_on[s] = mm > 0;
+    goal_v[s] = clampf(absf(mm as f32) / 1000.0, 0.3, 25.0)
+}
+
+// What was last kept (told_goals): a number made of all of it.
+goals_sum(): int {
+    t: int = if (cues_on) 1 else 0;
+    for s in 0..SPORTS {
+        t = t * 7 + (goal_v[s] * 1000.0) as int;
+        if (goal_on[s]) t = t * 3 + 1
+    }
+    t
+}
+
+// ---- an activity's effort pace, from its samples and heights ----
+// Its effort pace on average (meters a second; 0 if it had no heights).
+act_effort_speed(a: int): f32 {
+    n: int = mini(act_eln[a], act_spn[a]);
+    if (n < 4 || act_moving[a] <= 0) return 0.0;
+    s: int = act_sport[a];
+    step: f32 = act_step[a] as f32;
+    b: int = act_sp0[a];
+    e: int = act_el0[a];
+    // (Each step's grade over 100 m or so about it.)
+    gone: f32 = 0.0;
+    hard: f32 = 0.0;
+    for i in 0..n {
+        lo: int = i;
+        hi: int = i;
+        d: f32 = sp[b + i] as f32 * 0.1;
+        while (d < 100.0 && (lo > 0 || hi < n - 1)) {
+            if (lo > 0) {
+                lo = lo - 1;
+                d = d + sp[b + lo] as f32 * 0.1
+            }
+            if (hi < n - 1 && d < 100.0) {
+                hi = hi + 1;
+                d = d + sp[b + hi] as f32 * 0.1
+            }
+        }
+        // (Heights are at each step's end: from the one before lo.)
+        z0: f32 = if (lo > 0) el[e + lo - 1] as f32 * 0.1 else 0.0;
+        g: f32 = 0.0;
+        if (d >= 30.0) g = (el[e + hi] as f32 * 0.1 - z0) / d;
+        v: f32 = sp[b + i] as f32 * 0.1 / step;
+        gone = gone + v;
+        hard = hard + effort_speed(s, v, g)
+    }
+    if (gone <= 0.0) return 0.0;
+    act_speed(a) * hard / gone
+}

@@ -24,7 +24,7 @@ sysroot=$(xcrun --sdk "$sdk" --show-sdk-path)
 xcrun --sdk "$sdk" clang -target "$target" -c -x assembler "$src" -o "$out/better.o"
 xcrun --sdk "$sdk" clang -target "$target" -isysroot "$sysroot" "$out/better.o" -o "$app/Better" \
   -framework UIKit -framework Foundation -framework CoreLocation -framework QuartzCore \
-  -framework OpenGLES -lobjc -Wl,-dead_strip
+  -framework OpenGLES -framework AVFoundation -lobjc -Wl,-dead_strip
 sed "s/PLATFORM/$platform/" "$here/Info.plist" > "$app/Info.plist"
 # The icon (AppIcon.png, drawn from AppIcon.svg), compiled into the app and
 # named in its Info.plist.

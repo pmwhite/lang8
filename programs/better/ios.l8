@@ -33,6 +33,8 @@ import "log.l8";
 
 import "record.l8";
 
+import "pace.l8";
+
 import "ui.l8";
 
 import "touch.l8";
@@ -56,6 +58,8 @@ extern time(t: int): int;
 extern localtime_r(t: *int, out: *Tm): int;
 
 extern rename(from: str, to: str): int;
+
+extern dlsym(handle: int, name: str): int;
 
 // C's struct tm: its offset from UTC (seconds) is after nine ints.
 type Tm = {
@@ -208,6 +212,142 @@ platform_theme(_pick: int, _dark: bool) raises IoError {
     ios_style()
 }
 
+platform_goals() raises IoError {
+    ios_save_settings()
+}
+
+// ---- chimes ----
+// Each chime (see pace.l8 for when) is made here as a short WAV: soft
+// struck notes, a sine with a little of its octave and twelfth that fade
+// sooner. Faster: up a fourth, G to C; ease off: down, C to G; back on
+// it: one A, quieter. They are played by AVAudioPlayer in a session that
+// mixes with what else is playing (music, a podcast) and ducks it for the
+// moment, then lets it go.
+const CUE_RATE: int = 22050;
+
+cue_wav: []i8 = new i8[44 + 2 * 22050](0i8);
+
+cue_pcm: []f32 = new f32[22050](0.0);
+
+ios_cue_player: int = 0;
+
+// (When the session is to be let go, on the monotonic clock; 0 if it is
+// not held.)
+ios_cue_until: int = 0;
+
+ios_cue_category: int = 0;
+
+// A note of f Hz, from at seconds in, at loudness a, into cue_pcm.
+cue_note(f: f32, at: f32, a: f32) {
+    from: int = (at * CUE_RATE as f32) as int;
+    n: int = len(cue_pcm);
+    p1: f32 = 0.0;
+    p2: f32 = 0.0;
+    p3: f32 = 0.0;
+    d: f32 = TAU * f / CUE_RATE as f32;
+    for i in from..n {
+        t: f32 = (i - from) as f32 / CUE_RATE as f32;
+        env: f32 = minf(t / 0.008, 1.0) * expf(-t / 0.16);
+        v: f32 = sinf(p1) + 0.3 * expf(-t / 0.06) * sinf(p2) + 0.1 * expf(-t / 0.04) * sinf(p3);
+        cue_pcm[i] = cue_pcm[i] + a * env * v;
+        p1 = fmodf(p1 + d, TAU);
+        p2 = fmodf(p2 + 2.0 * d, TAU);
+        p3 = fmodf(p3 + 3.0 * d, TAU)
+    }
+}
+
+cue_put(at: int, v: int, bytes: int) {
+    for k in 0..bytes cue_wav[at + k] = (v >> 8 * k & 255) trunc i8
+}
+
+// The chime k as a WAV in cue_wav: how many bytes.
+cue_make(k: int): int {
+    for i in 0..len(cue_pcm) cue_pcm[i] = 0.0;
+    secs: f32 = 0.75;
+    if (k == CUE_FASTER) {
+        cue_note(783.99, 0.0, 0.32);
+        cue_note(1046.5, 0.15, 0.32)
+    }
+    if (k == CUE_EASIER) {
+        cue_note(1046.5, 0.0, 0.32);
+        cue_note(783.99, 0.15, 0.32)
+    }
+    if (k == CUE_ON) {
+        cue_note(880.0, 0.0, 0.22);
+        secs = 0.6
+    }
+    n: int = (secs * CUE_RATE as f32) as int;
+    data: int = 2 * n;
+    for i in 0..4 cue_wav[i] = "RIFF"[i];
+    cue_put(4, 36 + data, 4);
+    for i in 0..4 cue_wav[8 + i] = "WAVE"[i];
+    for i in 0..4 cue_wav[12 + i] = "fmt "[i];
+    cue_put(16, 16, 4);
+    cue_put(20, 1, 2);
+    cue_put(22, 1, 2);
+    cue_put(24, CUE_RATE, 4);
+    cue_put(28, CUE_RATE * 2, 4);
+    cue_put(32, 2, 2);
+    cue_put(34, 16, 2);
+    for i in 0..4 cue_wav[36 + i] = "data"[i];
+    cue_put(40, data, 4);
+    for i in 0..n {
+        // (The last 20 ms fade to nothing.)
+        fade: f32 = clampf((n - i) as f32 / (0.02 * CUE_RATE as f32), 0.0, 1.0);
+        s: int = (clampf(cue_pcm[i] * fade, -1.0, 1.0) * 32767.0) as int;
+        cue_put(44 + 2 * i, s & 65535, 2)
+    }
+    44 + data
+}
+
+// What a pointer points at (a word).
+word8: []i8 = new i8[8](0i8);
+
+ios_word_at(p: int): int {
+    memcpy_from(word8, p, 8);
+    v: int = 0;
+    for k in 0..8 v = v | (word8[k] as int & 255) << 8 * k;
+    v
+}
+
+platform_cue(k: int) {
+    session: int = msg(cls("AVAudioSession"), sel("sharedInstance"));
+    if (ios_cue_category == 0) {
+        // (Playback, mixing with others (1) and ducking them (2).)
+        at: int = dlsym(-2, "AVAudioSessionCategoryPlayback");
+        if (at != 0) ios_cue_category = ios_word_at(at);
+        if (ios_cue_category == 0) ios_cue_category = nsstring("AVAudioSessionCategoryPlayback");
+        msg3(session, sel("setCategory:withOptions:error:"), ios_cue_category, 3,
+            0)
+    }
+    active: int = msg2(session, sel("setActive:error:"), 1, 0) & 255;
+    n: int = cue_make(k);
+    data: int = msg2(cls("NSData"), sel("dataWithBytes:length:"), bytes_address(cue_wav),
+        n);
+    if (ios_cue_player != 0) msg(ios_cue_player, sel("release"));
+    ios_cue_player = msg2(msg(cls("AVAudioPlayer"), sel("alloc")), sel("initWithData:error:"),
+        data, 0);
+    played: int = 0;
+    if (ios_cue_player != 0) played = msg(ios_cue_player, sel("play")) & 255;
+    ios_cue_until = clock_ns(1) + 1200000000;
+    line_clear();
+    line_add("better: chime ");
+    line_int(k);
+    line_add(", session ");
+    line_int(active);
+    line_add(", played ");
+    line_int(played);
+    ios_note_line()
+}
+
+// The session let go once the chime is over (others come back up).
+ios_cue_done() {
+    if (ios_cue_until == 0 || clock_ns(1) < ios_cue_until) return;
+    ios_cue_until = 0;
+    session: int = msg(cls("AVAudioSession"), sel("sharedInstance"));
+    msg3(session, sel("setActive:withOptions:error:"), 0, 1, 0)
+}
+
 platform_blur() {
     if (ios_keyboard) {
         ios_keyboard = false;
@@ -271,6 +411,10 @@ ios_save_settings() raises IoError {
         line_int(if (sync_dirty) 1 else 0);
         lt_line()
     }
+    line_clear();
+    line_add("goals ");
+    line_goals();
+    lt_line();
     write_file(settings_path)
 }
 
@@ -293,6 +437,12 @@ ios_load_settings() {
         }
         if (merge_starts(lg_t, i, e, "rev ")) sync_rev = merge_key(lg_t, i, e);
         if (merge_starts(lg_t, i, e, "dirty ")) sync_dirty = merge_key(lg_t, i, e) == 1;
+        if (merge_starts(lg_t, i, e, "goals ")) {
+            lg_i = i + 6;
+            lg_to = e;
+            for s in 0..SPORTS goal_set(s, read_int());
+            cues_on = read_int() != 0
+        }
         i = e + 1
     }
 }
@@ -454,6 +604,7 @@ ios_step() raises IoError {
     ios_prev_ns = now;
     better_step(dt, (now - ios_start_ns) as f32 / 1000000000.0);
     ios_demo();
+    ios_cue_done();
     saving: bool = wants_save;
     better_after();
     if (saving) sync_saved();
@@ -799,6 +950,8 @@ app_launched(
 ios_demo() {
     if (ios_demo_t <= 0.0) return;
     t: f32 = now_t - ios_demo_t;
+    // (The chimes, one after another, from 1 s: a check that they play.)
+    if (hear_t < 0.0 && t > 1.0 && t < 1.5) hear_t = now_t;
     if (ios_demo_step == 0 && t > 3.0) {
         ios_demo_step = 1;
         start()
@@ -828,6 +981,7 @@ main() noregion: int {
     touch_ui = true;
     ios_set_clock();
     ios_load_settings();
+    told_goals = goals_sum();
     better_open();
     ios_start_ns = clock_ns(1);
     ios_prev_ns = ios_start_ns;

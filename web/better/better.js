@@ -32,6 +32,12 @@
 // with). Light or dark as picked on this device is kept here (L8_THEME to
 // begin with; Better says L8THEME PICK light|dark when it changes).
 //
+// Each sport's goal pace and whether chimes are wanted are kept here too
+// (Better says L8GOALS RUN RIDE WALK CUES when they change: mm a second,
+// less than 0 when off; L8_GOAL_RUN and so on to begin with), and Better
+// says L8CUE K for a chime to be played (1 faster, 2 ease off, 3 back on
+// it: see chime below).
+//
 // The name field is drawn by Better, but a phone's keyboard comes up only
 // for a real text field touched by a finger: so Better says where its field
 // is and what is written in it (L8FIELD x0 y0 x1 y1 TEXT, in CSS pixels
@@ -112,6 +118,8 @@ async function main() {
       else if (word === "L8GPS") gps.want(arg === "1" && !sim);
       else if (word === "L8WAKE") wake.want(arg === "1");
       else if (word === "L8THEME") look.set(arg, line.split(" ")[2] === "dark");
+      else if (word === "L8GOALS") localStorage.setItem("better:goals", line.slice(8));
+      else if (word === "L8CUE") chime(Number(arg));
       else console.log(line);
     }
   };
@@ -129,6 +137,10 @@ async function main() {
     return status;
   };
   const env = { L8_PAGE: "1", L8_THEME: localStorage.getItem("better:theme") || "0", L8_DARK: phoneDark.matches ? "1" : "0" };
+  const goals = (localStorage.getItem("better:goals") || "").split(" ");
+  if (goals.length === 4) {
+    ["L8_GOAL_RUN", "L8_GOAL_RIDE", "L8_GOAL_WALK", "L8_CUES"].forEach((k, i) => (env[k] = goals[i]));
+  }
   if (touch) env.L8_TOUCH = "1";
   if (sim > 0) env.L8_SIM = String(Math.round(sim));
   // (Kilometers, where miles are not what is used.)
@@ -372,6 +384,56 @@ const wake = {
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && wake.wanted) wake.want(true);
 });
+
+// ---- chimes ----
+// Soft struck notes (a sine, with a little of its octave and twelfth that
+// fade sooner), as the iPhone app makes them: faster is G up to C, ease
+// off C down to G, back on it one quieter A. A browser lets a page make
+// sound only after a touch, so the first touch wakes it; and it asks to
+// mix with the phone's other sound, not stop it.
+let audio = null;
+function wakeAudio() {
+  if (!audio) {
+    try {
+      if (navigator.audioSession) navigator.audioSession.type = "transient";
+      audio = new AudioContext();
+    } catch (e) {
+      console.warn(e);
+      return;
+    }
+  }
+  if (audio.state === "suspended") audio.resume().catch(() => {});
+}
+document.addEventListener("pointerdown", wakeAudio, { capture: true });
+function note(f, at, loud) {
+  const t0 = audio.currentTime + 0.02 + at;
+  const out = audio.createGain();
+  out.connect(audio.destination);
+  for (const [k, a, fade] of [[1, 1, 0.16], [2, 0.3, 0.06], [3, 0.1, 0.04]]) {
+    const o = audio.createOscillator();
+    const g = audio.createGain();
+    o.frequency.value = f * k;
+    g.gain.setValueAtTime(0, t0);
+    g.gain.linearRampToValueAtTime(loud * a, t0 + 0.008);
+    g.gain.setTargetAtTime(0, t0 + 0.008, fade);
+    o.connect(g).connect(out);
+    o.start(t0);
+    o.stop(t0 + 0.9);
+  }
+}
+function chime(k) {
+  wakeAudio();
+  if (!audio) return;
+  if (k === 1) {
+    note(783.99, 0, 0.32);
+    note(1046.5, 0.15, 0.32);
+  }
+  if (k === 2) {
+    note(1046.5, 0, 0.32);
+    note(783.99, 0.15, 0.32);
+  }
+  if (k === 3) note(880, 0, 0.22);
+}
 
 // ---- keeping the log ----
 const sync = {
