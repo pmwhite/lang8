@@ -39,13 +39,21 @@ read aloud by VoiceOver as it would be in the phone's own apps.
 ## Files
 
 - `data/bsb.txt` is the text, one record a line (see `text.l8` and
-  `tools/bsb.py`, which made it from the publisher's USFM, `bsb_usfm.zip`);
+  `tools/usfm.py`, which made it from the publisher's USFM, `bsb_usfm.zip`);
+  `data/kjv.txt`, `web.txt`, `asv.txt` and `ylt.txt` are the other versions,
+  made by the same tool from eBible.org's USFM, and `data/refs.txt` the
+  chapters where one has verses past the BSB's (`tools/versify.py`, which
+  prints how each version's verses differ from the BSB's).
   `data/lang/` is the original-language data (`tools/bsb_lang.py`, from the
-  Berean translation tables and STEP Bible's lexicons). `tools/fetch.sh DIR
-  make` downloads the sources, checks their sha256, and makes both again.
-  `lang.l8` reads it for the study screens (`test_lang.l8`), and
+  Berean translation tables and STEP Bible's lexicons); `data/xrefs.bin` and
+  `xref_index.bin` OpenBible.info's cross references (`tools/xrefs.py`);
+  `data/mhcc.txt` Matthew Henry's Concise Commentary (`tools/mhcc.py`, from
+  CCEL's ThML). `tools/fetch.sh DIR make` downloads the sources, checks
+  their sha256, and makes them all again.
+  `lang.l8` reads the study data for the study screens (`test_lang.l8`), and
   `ios_study.l8` shows them.
-  The BSB is in the public domain.
+  The BSB, KJV, WEB, ASV, YLT and the commentary are in the public domain;
+  the cross references are CC BY 4.0.
 - `text.l8` indexes it and lays a chapter out as runs of styled text;
   `test_text.l8` tests that (`make bible-test`).
 - `ios.l8` is the app: the reader and its classes; `ios_look.l8` the themes,

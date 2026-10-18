@@ -6,7 +6,7 @@
 TABLES is the Berean Bible Translation Tables (bsb_tables.tsv, public
 domain); TBESH and TBESG are STEP Bible's brief Hebrew and Greek lexicons
 (CC BY 4.0, www.STEPBible.org); BSB_TXT is the app's text (data/bsb.txt, made
-by bsb.py from the same revision of the BSB as the tables). See fetch.sh for
+by usfm.py from the same revision of the BSB as the tables). See fetch.sh for
 where each comes from and its sha256. Standard library only.
 
 OUT_DIR gets (all little-endian; see DESIGN.md §7.1):
