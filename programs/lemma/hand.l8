@@ -316,6 +316,10 @@ fact_given(n: int, g: int): int {
     0
 }
 
+// A side condition the move tried leaves open (another goal than the
+// goal), or 0.
+tr_need: int = 0;
+
 // Whether the move tried has holes for its terms.
 tr_holed: bool = false;
 
@@ -365,6 +369,12 @@ trial_read0(n: int, c: int) raises KernelError {
     for i in 0..tl_n sig = (sig * 1000003 + goal_prop(pn_goal[tl_node[i]])) % 2147483647;
     if (tl_n == 0) sig = 1;
     tr_sig = sig;
+    // (A goal left that is not the goal: a side condition still open.)
+    tr_need = 0;
+    for i in 0..tl_n {
+        cg: int = gl_concl[pn_goal[tl_node[i]]];
+        if (cg != gl_concl[g] && tr_need == 0) tr_need = cg
+    }
     tr_ticks = false;
     if ((tr_holed || tr_want_fact) && cd_kind[c] != C_REWRITE) {
         // (A move tried with a hole for its term, or a term picked: the
@@ -462,6 +472,9 @@ hd_back: []bool = new bool[ROWS](false);
 
 hd_tool: []bool = new bool[ROWS](false);
 
+// The term a row's move takes already (picked by matching the goal), or 0.
+hd_pre: []int = new int[ROWS](0);
+
 hd_ticks: []bool = new bool[ROWS](false);
 
 hd_strike: []bool = new bool[ROWS](false);
@@ -530,12 +543,27 @@ hand_build() raises KernelError {
     if (cur_at == 0) {
         if (j < 0) cands_goal(n) else cands_hyp(n, j);
         rows_from_cands(n, j, -1, target, false);
+        if (j < 0) {
+            for i in 0..gl_hypn[g] {
+                nf_n = 0;
+                nh_n = 0;
+                cands_hyp(n, i);
+                rf_pre = true;
+                rows_from_cands(n, i, -1, target, false);
+                rf_pre = false
+            }
+        }
+        hd_parts = false;
         for p in 1..pc_n {
             place_steps(p);
+            nf_n = 0;
+            nh_n = 0;
             cands_sub(n, j);
+            if (cd_shown > 0) hd_parts = true;
             rows_from_cands(n, j, p, target, true)
         }
     } else {
+        hd_parts = true;
         place_steps(cur_at);
         cands_sub(n, j);
         rows_from_cands(n, j, cur_at, target, false)
@@ -544,7 +572,7 @@ hand_build() raises KernelError {
     // (No row shows: what to say instead.)
     hd_empty = EMPTY_SWIPE;
     if (hand_shown() == 0 && cur_at == 0) {
-        if (goal_dead(n)) hd_empty = EMPTY_DEAD else if (!cursor_moves(n, j)) hd_empty = EMPTY_ELSEWHERE
+        if (goal_dead(n)) hd_empty = EMPTY_DEAD else if (!hd_parts) hd_empty = EMPTY_ELSEWHERE
     }
 }
 
@@ -552,6 +580,10 @@ hand_build() raises KernelError {
 // statement has moves at its parts), this goal cannot be shown (Undo k
 // back), or work on another statement.
 const EMPTY_SWIPE: int = 0;
+
+// Whether some part of the focused statement has moves (the ‹ › nubs
+// show only then, or with the cursor on a part already).
+hd_parts: bool = false;
 
 const EMPTY_DEAD: int = 1;
 
@@ -581,7 +613,9 @@ goal_dead(n: int) raises KernelError: bool {
     g: int = pn_goal[n];
     c: int = rel_core(gl_concl[g]);
     if (!(is_role(c, CR_LT, 2) || is_role(c, CR_LE, 2) || is_role(c, CR_NLE, 2))) return false;
-    if (!index_only(c)) return false;
+    // (Or any comparison a Use with left as its side condition: A > 0 for
+    // Use with A on a fact for every ε > 0. Arithmetic had its try.)
+    if (!index_only(c) && !use_with_side(n)) return false;
     // (Its own moves, whole and at each part.)
     places_build(gl_concl[g]);
     nf_n = 0;
@@ -597,6 +631,18 @@ goal_dead(n: int) raises KernelError: bool {
     r: bool = !cursor_moves(n, -1);
     places_build_focus(n);
     r
+}
+
+// Whether node n is the side condition a Use with left (not the goal it
+// was made on).
+use_with_side(n: int): bool {
+    p: int = pn_parent[n];
+    if (p < 0) return false;
+    m: int = pn_move[p];
+    if (m < 0) return false;
+    l: int = mv_lemma[m];
+    if (l < 0 || lm_words[l] != sym("Use with _")) return false;
+    gl_concl[pn_goal[n]] != gl_concl[pn_goal[p]]
 }
 
 // The focused statement's places built again (after another's were).
@@ -644,7 +690,20 @@ rows_from_cands(
         def: bool = rw && cd_lemma[c] >= 0 && lm_kind[cd_lemma[c]] == LM_DEF;
         byfact: bool = rw && cd_lemma[c] < 0;
         keep: bool = hd_n < ROWS && !(tidy && wit);
-        if (keep && !wit) keep = trial(n, c, wit_none, 0);
+        // (A fact's Use with whose term matching the goal picks, if that
+        // closes it: a row of the goal's hand with the term in.)
+        pre: int = 0;
+        if (rf_pre) {
+            keep = false;
+            if (hd_n < ROWS && cd_wn[c] == 1 && cd_kind[c] == C_FWD) pre = fact_term_for(c,
+                gl_concl[pn_goal[n]]);
+            if (pre != 0) {
+                pre_w[0] = pre;
+                keep = trial(n, c, pre_w, 1) && tr_closes
+            }
+            wit = false
+        }
+        if (keep && !wit && pre == 0) keep = trial(n, c, wit_none, 0);
         // (A move that needs a term: tried with a hole □ for each, to show
         // where the term goes.)
         holed: bool = false;
@@ -685,6 +744,7 @@ rows_from_cands(
                 hd_pn[r] = hd_pool_n - hd_p0[r]
             }
             hd_c[r] = c;
+            hd_pre[r] = pre;
             hd_label[r] = cd_label[c];
             hd_wit[r] = wit;
             hd_tool[r] = cd_lemma[c] >= 0 && lm_kind[cd_lemma[c]] == LM_LEVEL;
@@ -727,6 +787,14 @@ rows_from_cands(
             // Back; the way out a player who went wrong is looking for.)
             hd_back[r] = !wit && !hd_low[r] && !hd_closes[r] && goes_back(tr_sig);
             if (hd_back[r]) hd_verb[r] = sym("Back");
+            if (pre != 0) {
+                show_line(pre);
+                ts: int = line_sym_now();
+                line_clear();
+                line_add("Use the fact with ");
+                line_sym(ts);
+                hd_verb[r] = line_sym_now()
+            }
             // (Order: the statement's own moves, then rewrites by a fact,
             // then those that make it smaller, by rank.)
             s: int = 0;
@@ -735,12 +803,42 @@ rows_from_cands(
             if (hd_closes[r]) s = s - 800;
             s = s - cd_rank[c] * 20 + (size_after - before) * 5 + k;
             if (hd_back[r]) s = s + 100000;
+            if (pre != 0) s = -100000;
             hd_sort[r] = s
         }
     }
 }
 
 wit_none: []int = new int[1](0);
+
+// Whether rows_from_cands is listing a fact's moves for the goal's hand
+// (only Use with rows whose term the goal picks), and the term.
+rf_pre: bool = false;
+
+pre_w: []int = new int[1](0);
+
+// The term for candidate c's one witness that makes its conclusion the
+// goal (matched), or 0.
+fact_term_for(c: int, goal: int): int {
+    cand_bindings(c);
+    q: int = strip_rule(thm_prop(cd_thm[c]));
+    w: int = cand_witness(c, 0);
+    inst: int = 0;
+    try {
+        inst = match_subst(q)
+    } with KernelError -> {
+        return 0
+    }
+    match_clear();
+    if (!match_term(inst, goal)) return 0;
+    for i in 0..mt_n {
+        if (tm_kind(mt_var[i]) == TM_VAR && tm_name(mt_var[i]) == tm_name(w)) {
+            t: int = mt_val[i];
+            if (tm_closed(t) && !has_vars(t)) return t
+        }
+    }
+    0
+}
 
 an_sig: []int = new int[256](0);
 
@@ -836,7 +934,12 @@ has_moves(j: int) raises KernelError: bool {
     }
     cur_at = 0;
     hand_build();
-    r: bool = hd_prim > 0;
+    // (A fact's Use with offered in the goal's hand does not count: the
+    // fact is where that move is learnt.)
+    r: bool = false;
+    for q in 0..hd_prim {
+        if (hd_pre[hd_order[q]] == 0) r = true
+    }
     fc_goal = sg;
     fc_term = st;
     cur_at = sc;
@@ -981,6 +1084,11 @@ ch_same: []bool = new bool[WCS](false);
 
 ch_hl: []int = new int[WCS](0);
 
+// What a term needs that arithmetic cannot show from the facts (the side
+// condition A > 0 of Use with A, on a fact for every ε > 0), written; or 0.
+// Such a term is dimmed, under More terms.
+ch_need: []int = new int[WCS](0);
+
 // How well a term fits (chips are shown in this order, then as found): 0
 // closes the goal, 2 leaves nothing new open, 4 leaves a side condition
 // (one less for the name just taken).
@@ -1019,7 +1127,10 @@ chip_swap(i: int, j: int) {
     ch_hl[j] = t;
     t = ch_rank[i];
     ch_rank[i] = ch_rank[j];
-    ch_rank[j] = t
+    ch_rank[j] = t;
+    t = ch_need[i];
+    ch_need[i] = ch_need[j];
+    ch_need[j] = t
 }
 
 // Whether every term shows (else three, then More).
@@ -1071,6 +1182,19 @@ chips_build() raises KernelError {
         // (Among equals, the name just taken (the n with n ≥ max(N, N₁))
         // first: a fact about every n from N on is for it.)
         if (lower_bounded(pn_goal[n], t)) rank = rank - 1;
+        // (A fact's term whose side condition arithmetic could not close:
+        // last, dimmed, with what it needs.)
+        need: int = 0;
+        if (ok && full && region_calc && cd_kind[c] == C_FWD && tr_need != 0) {
+            nt: int = tr_need;
+            show_line(nt);
+            ts: int = line_sym_now();
+            line_clear();
+            line_add("needs ");
+            line_sym(ts);
+            need = line_sym_now();
+            rank = 7
+        }
         if (ok || !full) {
             wc_term[k2] = t;
             ch_ok[k2] = ok;
@@ -1078,6 +1202,7 @@ chips_build() raises KernelError {
             ch_res2[k2] = 0;
             ch_hl[k2] = t;
             ch_rank[k2] = rank;
+            ch_need[k2] = need;
             if (ok) {
                 ch_res[k2] = tr_res;
                 ch_res2[k2] = tr_res2;
@@ -1113,6 +1238,7 @@ chip_append(t: int): int {
     if (wc_n >= len(wc_term)) return 0;
     wc_term[wc_n] = t;
     ch_ok[wc_n] = false;
+    ch_need[wc_n] = 0;
     ch_res[wc_n] = 0;
     ch_res2[wc_n] = 0;
     ch_hl[wc_n] = t;
@@ -1127,6 +1253,12 @@ chips_shown(): int {
     // rest under More.)
     n: int = play_node();
     if (wc_n > 1 && n >= 0 && lower_bounded(pn_goal[n], wc_term[0]) && ch_rank[1] > ch_rank[0]) return 1;
+    // (Terms whose side condition cannot be shown: under More.)
+    good: int = 0;
+    for k in 0..wc_n {
+        if (ch_need[k] == 0) good = good + 1
+    }
+    if (good > 0 && good < wc_n) return mini(good, 3);
     if (wc_n <= 3) return wc_n;
     3
 }

@@ -37,10 +37,12 @@ arithmetic closes it, the writing left readable). A move that gives back a
 state the proof was already in (the way out of a mistake) is a soft grey
 row, *Back*, after the others; the *Nothing to tidy here* line shows only
 when the hand has no row at all, and only for a statement with moves at
-its parts (the ‹ › nubs show then too); a statement with none says to
+its parts; the ‹ › nubs show only on a statement with moves at its parts
+(or with the cursor on a part already); a statement with none says to
 tap another. A goal that cannot be shown (off the written proof, a
-comparison of whole numbers such as `N₁ ≤ n` with no move anywhere in it
-that arithmetic does not close from the facts) is a dead end: it is
+comparison of whole numbers such as `N₁ ≤ n`, or any comparison a *Use
+with* left as its side condition, such as `A > 0`, with no move anywhere
+in it, that arithmetic does not close from the facts) is a dead end: it is
 focused as soon as a move leaves it, and the hand says *Can't be shown
 from what you have* over one row, *Undo k* (the hint's k), that rewinds
 to where the proof went wrong in one tap (`1` or `enter` by keys).
@@ -49,7 +51,12 @@ to where the proof went wrong in one tap (`1` or `enter` by keys).
   has its own moves (*Take any ε*, *Assume it*, *Split*, *Choose …*, *Get N*,
   *Use with …*, *Apply it*, a theorem you proved) and every rewrite
   anywhere inside it that does not make it bigger (tidying, a known fact,
-  opening a definition).
+  opening a definition). The goal's hand also has, first, each fact that
+  says something of every x (`∀x. f · x = x`, or bounded, `∀ε>0. …`) whose
+  instance closes the goal, its term picked by matching: *Use the fact
+  with e* (the fact's own *Use with* move, the term already in; the fact
+  is still where that move is learnt: such a row does not draw the focus
+  to the goal).
 - **Swipe sideways** on the board (or tap the ‹ › nubs, or tap a part) to
   move the cursor through the parts of the focused statement, outside in.
   At a part, the hand has every rewrite of it, the growing ones too
@@ -67,7 +74,11 @@ to where the proof went wrong in one tap (`1` or `enter` by keys).
   comes first, and when it fits best it shows alone. A kit is never filled
   with such a name (no `max(n, N)`), and a two-hole kit filled the other
   way round (`max(N₁, N)`) is offered once. Three show, then *More
-  terms*; a term the kernel will not take is not offered.
+  terms*; a term the kernel will not take is not offered. A term for a
+  fact's *Use with* whose side condition arithmetic cannot close from the
+  facts (`A` for `∀ε>0. …` needs `A > 0`) goes last, under *More terms*,
+  dimmed, with what it needs (*needs A > 0*) in red; so by default only the
+  terms that work show.
 - Three rows show, then *More moves*: under it go the rest, and *Suppose
   not* and *Flip sides* (unless the level's written proof uses them). When
   no row shows (*Nothing to tidy here*), the button says *Other ideas*.
@@ -153,10 +164,11 @@ is a band of its own, not the sequence's gated one; gates in one place
 have their names one under another. Only a name's gate (N, N₁, n) or
 the goal's chosen one is drawn: a fact used with a term (`max(N, N₁)`)
 adds none. While the goal is `X ≤ n` (the side condition a Use with left),
-the picture stays on the goal it was for (its ε band, n, the red dots),
+the picture stays on the goal it was for (its ε band, n, the red dots;
+so does any side condition a Use with left, `A > 0`),
 and if X is past n in the example, X's gate is red with a red bracket
 from n to it: n is not far enough. For groups: a letter train, each side of the goal
-a row of tiles (a⁻¹ hollow in a's color, e faint); how a product is
+a row of tiles (a⁻¹ hollow in a's color, e faint, f purple); how a product is
 grouped is how close its tiles sit, a pair x⁻¹ · x side by side glows,
 tiles slide, swell in and pop as the goal changes, and when the sides are
 the same the rows slide together into one; tiles leaving shrink and fade
@@ -181,7 +193,8 @@ lit, the column of a y taken ringed.
   (`348,30+700` holds the bulb: Watch); `-1,0` undoes, `-2,0` waits.
 - `L8_KEYS="right;1;right;right;1;a"` presses keys the same way, after the
   taps: `left`/`right` move the cursor, `up`/`down` the focus; `1` to `4`
-  play a row (the one after the rows shown is *More*); while chips show, a
+  play a row (the one after the rows shown is *More*), `0` opens *More
+  moves* (or, while chips show, *More terms*); while chips show, a
   letter or digit picks the k-th chip (`a` or `1` the first; `h` is the
   hint, not the eighth), `enter` the hinted chip (or the first); `enter`
   plays the hinted row (or the first), `u` (or `back`) undoes, `h` asks for a
@@ -220,6 +233,22 @@ words and the undo pulse are gone:
 
 ```sh
 L8_LEVEL=12 L8_KEYS="right;2;h;u;h" .build/lemma
+```
+
+Only one e closed from the goal's hand: `e` put on the right (`f · e =
+e`), then the first row, *Use the fact with e*:
+
+```sh
+L8_LEVEL=11 L8_KEYS="right;2;1" .build/lemma
+```
+
+Shifted at its first Use with: only `ε` shows; `0` opens *More terms*
+(`A`, `A + 1` dimmed, *needs A > 0*); `2` instead of `0` picks `A` all the
+same, and the goal `A > 0` is a dead end (*Undo 1*), the ε band still
+drawn:
+
+```sh
+L8_LEVEL=18 L8_TAP_GAP=30 L8_KEYS="h;enter;h;enter;h;enter;h;enter;0" .build/lemma
 ```
 
 Both at once, its Split staged as two goals (frames from 1.9 s to 4 s):
