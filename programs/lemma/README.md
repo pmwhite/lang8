@@ -18,9 +18,13 @@ parameters are passed on.
 
 ## Playing
 
-A level is **a goal and a hand of moves**. The goal (*Show*) is pinned
-above the hand; what is known (*You have*) sits above it, newest at the
-bottom (a fact not touched for three moves shrinks to one line). One
+A level is **a goal and a hand of moves**. The facts (*You have*, newest
+at the bottom) and the goal (*Show*, big when there is room) sit in the
+middle of the room between the picture and the hand; when they no longer
+fit, the goal is pinned above the hand and the facts scroll above it. A
+fact used by a move shrinks to one small line after the next move, one
+not touched for three moves to one line. A level with no picture shows
+its words as a soft card at the top. One
 statement is focused (outlined orange), and the hand holds its moves, each
 a pudgy row that says what kind of move it is and shows **what it gives**:
 the statement as it will be (the changed part tinted), a new fact (blue), or
@@ -47,19 +51,30 @@ a gold row that closes the goal.
   does not solve it).
 
 After a move the focus goes to what it made (a new fact with moves, or the
-changed goal); goals that are something known, both sides the same, or
-(where the region has it) arithmetic close by themselves: the card flashes
-gold and flies into its pip at the top. Under the title, a dot for each
+changed goal). A new fact flies from its row to its card, and the changed
+part of a rewritten goal flies to the block it becomes, each carrying its
+writing. Goals that are something known, both sides the same, or (where
+the region has it) arithmetic close by themselves: the card flashes gold
+and, its writing shrinking with it, flies into its pip at the top. Words
+for a moment (*Undo 1 to get back on the book's path*, *Your turn*) show
+just under the bar. Under the title, a dot for each
 move of par fills as moves are made, grey past par; a pip for each goal
 fills as it closes. The last goal closes with the theorem stamped Q.E.D.,
 its stars (par or better: three), and its proof written out as a book
 would.
 
 The picture above a level shows the goal on an example, and follows the
-proof: for limits, the sequences, with the band each hypothesis says they
-stay in from its N on (the N found from the example), and an ε handle
-that can be dragged; for groups, symmetries of a square, the goal's two
-sides drawn as squares.
+proof. For limits: the sequences, with the band each hypothesis says they
+stay in from its N on (the N found from the example), the goal's limit
+when it is worked out (A + 1, 2 · A), and an ε handle that can be
+dragged. A band asked for less than ε narrows to it; the goal's gate
+slides to where it is chosen; once it is chosen, a dot past it that its
+sequence's band does not yet hold (choosing N where max(N, N₁) is needed)
+turns red and jiggles. For groups: a letter train, each side of the goal
+a row of tiles (a⁻¹ hollow in a's color, e faint); how a product is
+grouped is how close its tiles sit, a pair x⁻¹ · x side by side glows,
+tiles slide, swell in and pop as the goal changes, and when the sides are
+the same the rows slide together into one.
 
 ## Playing in pictures (hooks)
 
@@ -75,13 +90,21 @@ sides drawn as squares.
   play a row (the one after the rows shown is *More*); while chips show, a
   letter or digit picks the k-th chip (`a` or `1` the first); `enter` plays
   the hinted row (or the first), `u` (or `back`) undoes, `h` asks for a
-  hint, `w` watches, `esc` backs out. The same keys work on a computer and
-  on the page.
+  hint, `w` watches, `esc` backs out (from the chips, from *More moves*).
+  The same keys work on a computer and on the page. `h;enter` repeated
+  follows the written proof (a letter after it where it needs a term).
 
 For example, Cancel on the left by keys (seven moves, par):
 
 ```sh
 L8_LEVEL=12 L8_TAP_GAP=50 L8_KEYS="right;1;right;right;1;a;1;1;1;1;1" .build/lemma
+```
+
+Adding limits by the book up to Choose, then choosing `N` alone (the
+fourth chip): the dots of b between N and N₁ go red.
+
+```sh
+L8_LEVEL=20 L8_TAP_GAP=40 L8_KEYS="h;enter;h;enter;h;enter;h;enter;a;h;enter;h;enter;h;enter;a;h;enter;h;enter;d" .build/lemma
 ```
 
 ## How it is built
@@ -138,7 +161,8 @@ to `region_files` in `app.l8` and `FILES` in `web/lemma/lemma.js`. A
 
 The Foundations region (constructing ℕ, ℤ, ℚ, ℝ and proving each
 rulebook is satisfied); Calculate replaying a certificate through the
-kernel instead of being trusted; the limits picture reacting to Use with
-and Choose; chapter covers and a winding map; the Book as a collection of
+kernel instead of being trusted; ghost-finger first-time demos; holding a
+row to preview it; a new fact landing before it closes the goal it
+matches; chapter covers and a winding map; the Book as a collection of
 earned theorems; sequence notation (`aₙ` rather than `λn.`); more regions
 (topology, linear algebra); the logic region's picture; a torus.
