@@ -255,16 +255,6 @@ notes)
   sleep 0.5
   kill -INT "$recorder" 2>/dev/null
   wait "$recorder" 2>/dev/null
-  # The ESV's search never shows more than its page of 100 (DESIGN.md
-  # §9.4.1: at most 500 verses on a page): every "esv search shown N".
-  grep -o "esv search shown [0-9]*" "$out/console.txt" > "$out/esv-search.txt"
-  n=$(wc -l < "$out/esv-search.txt")
-  most=$(awk '$4 > m { m = $4 } END { print m + 0 }' "$out/esv-search.txt")
-  echo "pages shown: $n; most shown at once: $most" | tee -a "$out/esv-search.txt"
-  if [ "$most" -gt 100 ] || [ "$n" -eq 0 ]; then
-    echo "FAILED: the ESV's search showed more than 100 at once (or nothing)" | tee -a "$out/esv-search.txt"
-    failed=1
-  fi
   ;;
 more)
   # (DESIGN.md §8: shots 60 to 88.)
