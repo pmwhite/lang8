@@ -12,13 +12,13 @@ use_tag std, ios, bible;
 // a text view of one attributed string (text.l8 lays the chapter out as
 // runs; each run here is a string in its style, ios_look.l8), with the
 // reader's highlights, bookmarks and notes in it (ios_store.l8 keeps them).
-// The bar's title is the chapter being read, shown once its opener has
-// scrolled up under the bar; it opens the passage picker. The bar's other
-// buttons open search, the library and the reading settings (sheets,
-// ios_sheets.l8). A tap on a verse selects it, and a tray of what can be
-// done with the verses selected comes up (ios_select.l8); a tap elsewhere
-// hides or shows the bars, which scrolling on through the text hides too
-// and scrolling back shows. Where the reader was is kept, by its verse.
+// The bar's title is the chapter being read, the next one's name pushing
+// it out as that one's opener scrolls up under the bar; it opens the
+// passage picker. The bar's other buttons open search, the library and the
+// reading settings (sheets, ios_sheets.l8). A tap on a verse selects it,
+// and a tray of what can be done with the verses selected comes up
+// (ios_select.l8). Scrolling on through the text collapses the bar, and
+// scrolling back expands it. Where the reader was is kept, by its verse.
 //
 // Links (bsb://JHN/3) open a chapter. With L8_DEMO=1 in the environment,
 // Darwin notifications take it through a demo, for the simulator in CI (see
@@ -134,14 +134,37 @@ reader: int = 0;
 
 table: int = 0;
 
-// The chapter's name at the top: a button in a view (whose alpha fades it).
+// The chapter's name at the top: two buttons in a view (the bar scales
+// it), in a view that fades and clips them (title_mask, its layer's mask),
+// so that the next chapter's name can push the last one's up and out as
+// its opener goes up under the bar.
 title_view: int = 0;
 
-// (The view inside it that fades: the bar sets the title view's own alpha
-// as it changes.)
 title_fader: int = 0;
 
-title_button: int = 0;
+title_mask: int = 0;
+
+title_btn: []int = new int[2](0);
+
+// The chapter each button shows (-1: none yet), and its width.
+title_btn_c: []int = new int[2](-1);
+
+title_btn_w: []f64 = new f64[2](0.0f64);
+
+// What the title shows: the button coming in (title_in, its chapter's),
+// the chapter going out (title_out_c, -1 above Genesis 1), and how far the
+// one has pushed the other (title_t, 0 to 1).
+title_in: int = 0;
+
+title_out_c: int = -1;
+
+title_t: f64 = 1.0f64;
+
+// The title's height in its view, and how far a push moves a name (the
+// clipped band's height, so a name pushed goes wholly out of it).
+TITLE_H: f64 = 44.0f64;
+
+TITLE_PUSH: f64 = 30.0f64;
 
 nav_class: int = 0;
 
@@ -720,8 +743,7 @@ find_place() {
         note_num("bible: chapter ", c);
         note_num("bible:   top ", top as int);
         note_num("bible:   row ", hfa[1] as int);
-        note_num("bible:   inset ", top_inset(table) as int);
-        set_title()
+        note_num("bible:   inset ", top_inset(table) as int)
     }
     title_fade()
 }
@@ -755,33 +777,108 @@ note_frame(what: str, v: int) {
     note_num("bible:   of ", msg(sv, sel("count")))
 }
 
-// The title shows the chapter only once its opener (its label, book's name
-// and number) has gone up under the bar, fading in over 1.2 em more: the
-// chapter's name is not shown twice.
+// The title names the chapter whose text is at the bar's bottom edge: as
+// the next chapter's opener (its label, book's name and number) goes up
+// under the bar, its name pushes the last one's up and out of the title's
+// place, as far as the opener's foot has gone past the bar's bottom, over
+// the pushed name's height on the screen; following the scroll either way,
+// with no animation of its own. So the chapter's name is never shown twice,
+// and never gone (but above Genesis 1, which has none before it).
 title_fade() {
-    // (Unmeasured: shown once the chapter's top is well up under the bar.)
-    a: f64 = if (cur_y > em * 8.0f64) 1.0f64 else 0.0f64;
-    tv: int = current_view();
-    if (tv != 0 && range_rect(tv, opener16[cur], 1)) {
-        foot: f64 = hfa[1] + hfa[3];
-        foot = foot + row_y(cur);
-        // (Measured against the bar's bottom now, as it collapses.)
-        a = (offset_y(table) + bar_bottom() - foot) / (em * 1.2f64);
-        if (a < 0.0f64) a = 0.0f64;
-        if (a > 1.0f64) a = 1.0f64
-    }
-    bar_f = a;
-    msg_set_f(title_fader, sel("setAlpha:"), title_alpha())
+    if (table == 0 || title_view == 0) return;
+    line: f64 = offset_y(table) + bar_bottom();
+    c: int = cur;
+    path: int = msg_ff(table, sel("indexPathForRowAtPoint:"), 40.0f64, line);
+    if (path != 0) c = msg(path, sel("row"));
+    if (c < 0 || c >= chapters) return;
+    // (Unmeasured: pushed once the chapter's top is well up under the bar.)
+    d: f64 = line - row_y(c) - em * 8.0f64;
+    tv: int = view_of(c);
+    if (tv != 0 && range_rect(tv, opener16[c], 1)) d = line - (row_y(c) + hfa[1] + hfa[3]);
+    t: f64 = clamp01(d / (TITLE_PUSH * title_scale()));
+    title_show(c - 1, c, t);
+    title_place()
 }
 
-// The title's fade settled when scrolling stops (0.15 s, should the
-// measure have changed under them).
+// The bar's scale of the title (17 pt type to 12 pt as it collapses).
+title_scale(): f64 {
+    1.0f64 - 5.0f64 / 17.0f64 * bar_p
+}
+
+// The title's buttons made to show chapter b coming in, pushing chapter a
+// (-1, none) out, t of the way: a button already showing either kept.
+title_show(a: int, b: int, t: f64) {
+    i: int = if (title_btn_c[0] == b) 0 else if (title_btn_c[1] == b) 1 else if (title_btn_c[0] == a) 1 else 0;
+    if (title_btn_c[i] != b) title_config(i, b);
+    if (a >= 0 && t < 1.0f64 && title_btn_c[1 - i] != a) title_config(1 - i, a);
+    title_in = i;
+    title_out_c = (if (t < 1.0f64) a else -1);
+    title_t = t
+}
+
+// The button that is the title now (the one more than half in): it alone
+// takes taps and is read by VoiceOver.
+title_settled(): int {
+    if (title_out_c >= 0 && title_t < 0.5f64) 1 - title_in else title_in
+}
+
+// The title's buttons placed for the push and the bar's state (no implicit
+// animations: it follows the finger), clipped to the band between the
+// status bar and the text.
+title_place() {
+    if (title_view == 0) return;
+    msg(cls("CATransaction"), sel("begin"));
+    msg1(cls("CATransaction"), sel("setDisableActions:"), 1);
+    tw: f64 = 120.0f64;
+    if (window != 0) tw = view_width(window) - 2.0f64 * 104.0f64;
+    if (tw < 80.0f64) tw = 80.0f64;
+    msg_rect(title_view, sel("setBounds:"), 0.0f64, 0.0f64, tw, TITLE_H);
+    msg_rect(title_fader, sel("setFrame:"), 0.0f64, 0.0f64, tw, TITLE_H);
+    msg_rect(title_mask, sel("setFrame:"), 0.0f64, (TITLE_H - TITLE_PUSH) / 2.0f64,
+        tw, TITLE_PUSH);
+    msg_set_f(title_fader, sel("setAlpha:"), title_alpha());
+    t: f64 = title_t;
+    settled: int = title_settled();
+    for i in 0..2 {
+        b: int = title_btn[i];
+        w: f64 = title_btn_w[i];
+        if (w > tw) w = tw;
+        shown: bool = title_btn_c[i] >= 0;
+        y: f64 = TITLE_H / 2.0f64;
+        alpha: f64 = 1.0f64;
+        if (i == title_in) {
+            y = y + (1.0f64 - t) * TITLE_PUSH;
+            if (t <= 0.0f64) shown = false
+        } else {
+            y = y - t * TITLE_PUSH;
+            alpha = 1.0f64 - t;
+            if (title_out_c < 0 || title_btn_c[i] != title_out_c) shown = false
+        }
+        msg_rect(b, sel("setBounds:"), 0.0f64, 0.0f64, w, TITLE_H);
+        msg_ff(b, sel("setCenter:"), tw / 2.0f64, y);
+        msg_set_f(b, sel("setAlpha:"), alpha);
+        msg1(b, sel("setHidden:"), if (shown) 0 else 1);
+        msg1(b, sel("setUserInteractionEnabled:"), if (i == settled && bar_p <= 0.5f64) 1 else 0);
+        msg1(b, sel("setAccessibilityElementsHidden:"), if (i == settled) 0 else 1)
+    }
+    set_compact_title(msg(title_btn[settled], sel("accessibilityLabel")));
+    msg(cls("CATransaction"), sel("commit"))
+}
+
+// The title settled when scrolling stops (crossfaded over 0.15 s, should
+// the measure have changed under it).
 title_settle() {
-    was: f64 = msg_f(title_fader, sel("alpha"));
+    was_c: int = title_btn_c[title_settled()];
+    was_t: f64 = title_t;
     title_fade();
-    now: f64 = msg_f(title_fader, sel("alpha"));
-    if (now - was > 0.01f64 || was - now > 0.01f64) animate(msg(title_fader, sel("layer")),
-        "opacity", was, now, false, 0.15f64)
+    d: f64 = title_t - was_t;
+    if (title_btn_c[title_settled()] != was_c || d > 0.01f64 || d < -0.01f64) {
+        tr: int = make("CATransition");
+        msg1(tr, sel("setType:"), objc_const("kCATransitionFade"));
+        msg_set_f(tr, sel("setDuration:"), 0.15f64);
+        msg2(msg(title_fader, sel("layer")), sel("addAnimation:forKey:"), tr, 0);
+        release(tr)
+    }
 }
 
 // Chapter c, at y points down into it.
@@ -1362,9 +1459,19 @@ title_attrs(): int {
     nsdictionary(keys, values, 2)
 }
 
+// The title made again (the theme's or the version's changed): both its
+// buttons, for the place now, with no push.
 set_title() {
-    if (cur < 0) return;
-    title_of(cur);
+    title_btn_c[0] = -1;
+    title_btn_c[1] = -1;
+    title_fade()
+}
+
+// Button i of the title made to show chapter c's name.
+title_config(i: int, c: int) {
+    b: int = title_btn[i];
+    title_btn_c[i] = c;
+    title_of(c);
     name: int = nsstring_at(bytes_address(out), out_n);
     config: int = msg(cls("UIButtonConfiguration"), sel("plainButtonConfiguration"));
     t: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
@@ -1375,25 +1482,21 @@ set_title() {
     msg_set_f(config, sel("setImagePadding:"), 4.0f64);
     // (One line, cut at its end if it must be: never broken in a word.)
     msg1(config, sel("setTitleLineBreakMode:"), 4);
-    msg1(title_button, sel("setConfiguration:"), config);
-    msg1(title_button, sel("setAccessibilityLabel:"), name);
-    msg1(title_button, sel("setLargeContentTitle:"), name);
-    msg1(title_button, sel("setAccessibilityHint:"), nsstring("Choose a book and chapter"));
-    set_compact_title(name);
+    msg1(b, sel("setConfiguration:"), config);
+    msg1(b, sel("setAccessibilityLabel:"), name);
+    msg1(b, sel("setLargeContentTitle:"), name);
+    msg1(b, sel("setAccessibilityHint:"), nsstring("Choose a book and chapter"));
     // (Its size: the title's at 17 pt (it doesn't grow, above), the
     // chevron's and the button's insets, or the button's own, if more;
     // never wider than the room between the bar's buttons, where it is cut
-    // at its end. The configured button's sizeThatFits: is not yet its new
-    // title's here: the configuration is applied at its next layout.)
+    // at its end (title_place). The configured button's sizeThatFits: is
+    // not yet its new title's here: the configuration is applied at its
+    // next layout.)
     l8_msg_hfa(hfa, t, sel("size"), 0, 0, 0);
     w: f64 = hfa[0] + 44.0f64;
-    l8_msg_hfa(hfa, title_button, sel("intrinsicContentSize"), 0, 0, 0);
+    l8_msg_hfa(hfa, b, sel("intrinsicContentSize"), 0, 0, 0);
     if (hfa[0] + 4.0f64 > w) w = hfa[0] + 4.0f64;
-    room: f64 = view_width(window) - 2.0f64 * 104.0f64;
-    if (window != 0 && room > 80.0f64 && w > room) w = room;
-    msg_rect(title_view, sel("setBounds:"), 0.0f64, 0.0f64, w, 36.0f64);
-    msg_rect(title_fader, sel("setFrame:"), 0.0f64, 0.0f64, w, 36.0f64);
-    msg_rect(title_button, sel("setFrame:"), 0.0f64, 0.0f64, w, 36.0f64);
+    title_btn_w[i] = w;
     release(t)
 }
 
@@ -1688,20 +1791,40 @@ scene_connected(
     // The bar: search; the chapter's name (shown once its opener is under
     // the bar), which opens the passage picker; the library and the reading
     // settings.
-    title_button = keep(msg1(cls("UIButton"), sel("buttonWithType:"), 1));
-    msg3(title_button, sel("addTarget:action:forControlEvents:"), self, sel("showPicker:"),
-        64);
-    // (As a system bar's title: it doesn't grow with the text; a long press
-    // at the largest sizes shows it large, ios_bar.l8's interaction.)
-    msg1(title_button, sel("setMaximumContentSizeCategory:"), objc_const("UIContentSizeCategoryLarge"));
-    msg1(title_button, sel("setShowsLargeContentViewer:"), 1);
+    for i in 0..2 {
+        b: int = keep(msg1(cls("UIButton"), sel("buttonWithType:"), 1));
+        msg3(b, sel("addTarget:action:forControlEvents:"), self, sel("showPicker:"),
+            64);
+        // (As a system bar's title: it doesn't grow with the text; a long
+        // press at the largest sizes shows it large, ios_bar.l8's
+        // interaction.)
+        msg1(b, sel("setMaximumContentSizeCategory:"), objc_const("UIContentSizeCategoryLarge"));
+        msg1(b, sel("setShowsLargeContentViewer:"), 1);
+        msg1(b, sel("setHidden:"), 1);
+        title_btn[i] = b
+    }
     title_view = keep(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
-        0.0f64, 0.0f64, 120.0f64, 32.0f64));
+        0.0f64, 0.0f64, 120.0f64, TITLE_H));
     title_fader = keep(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
-        0.0f64, 0.0f64, 120.0f64, 32.0f64));
+        0.0f64, 0.0f64, 120.0f64, TITLE_H));
     msg1(title_view, sel("addSubview:"), title_fader);
-    msg1(title_fader, sel("addSubview:"), title_button);
-    msg_set_f(title_fader, sel("setAlpha:"), 0.0f64);
+    msg1(title_fader, sel("addSubview:"), title_btn[0]);
+    msg1(title_fader, sel("addSubview:"), title_btn[1]);
+    // (The band the names show in, its edges soft: a name pushed goes out
+    // of it at the top, and the next comes into it from below, never over
+    // the status bar or the text.)
+    title_mask = keep(make("CAGradientLayer"));
+    one[0] = msg(msg(cls("UIColor"), sel("clearColor")), sel("CGColor"));
+    one[1] = msg(msg(cls("UIColor"), sel("blackColor")), sel("CGColor"));
+    one[2] = one[1];
+    one[3] = one[0];
+    msg1(title_mask, sel("setColors:"), nsarray(one, 4));
+    one[0] = nsnumber_f(0.0f64);
+    one[1] = nsnumber_f(0.1f64);
+    one[2] = nsnumber_f(0.9f64);
+    one[3] = nsnumber_f(1.0f64);
+    msg1(title_mask, sel("setLocations:"), nsarray(one, 4));
+    msg1(msg(title_fader, sel("layer")), sel("setMask:"), title_mask);
     nav = msg1(msg(nav_class, sel("alloc")), sel("initWithRootViewController:"), reader);
     // (Its own bar hidden for good: the reader's is ios_bar.l8's.)
     msg2(nav, sel("setNavigationBarHidden:animated:"), 1, 0);

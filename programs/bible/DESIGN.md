@@ -72,21 +72,31 @@ instead:
 ## 0.5 Defects seen in the CI run for 019e3ae1 (fix first, in Round 1)
 These are confirmed in the continuous-scroll screenshots (run 39066212450). Each one is
 also an acceptance criterion (§6, items 26–30).
-1. **The bar title shows while the chapter opener is visible.** In 01 ("Genesis 1" above a
-   visible "Genesis / 1"), 04 and 06, the title is at full alpha. It must be **alpha 0**
-   while any part of the current chapter's opener (label, numeral or book title) is below
-   the bar's bottom edge. It fades to 1 over the next 1.2 em of scrolling once the
-   numeral's baseline has passed under the bar.
-   - Don't estimate the opener's height from em constants, as `title_fade` does now. Measure
-     it: record the numeral's character offset when building the attributed string, then
-     get its rect with `firstRectForRange:` on the row's text view (or, if the row isn't
-     laid out yet, use `layoutManager boundingRectForGlyphRange:`). Convert it to table
-     coordinates and compare it with `contentOffset.y + adjustedContentInset.top`.
-   - Also call the fade after `go()`, after relayout, and on `viewDidAppear`. The title
-     button must start at alpha 0. Don't let `sizeToFit` or `setConfiguration:` reset the
-     alpha: set it on the button's container, the `titleView`, not the button.
-   - When scrolling upward into the previous chapter, the title switches to that chapter
-     immediately, at alpha 1, because its opener is off-screen above.
+1. **The bar title shows while the chapter opener is visible.** (Owner amendment
+   2026-10-18: the title fade is replaced, because on a real iPhone the title faded
+   out while the next chapter's opener came up, "John 3" → nothing → "John 4", a flicker.)
+   - **The title never disappears**, except above Genesis 1 (no chapter before it), where
+     it stays hidden while Genesis 1's opener is visible.
+   - It names the chapter whose text is at the bar's bottom edge. While John 4's opener
+     comes up the page, the title still says "John 3": the bar shows John 3, the text
+     John 4, so there's no duplicate.
+   - **As John 4's opener passes up under the bar, "John 4" pushes "John 3" up and out of
+     the title's place**, driven directly by the scroll (no timed animation). Progress
+     `t` = how far the opener's foot (the numeral's measured bottom, below) has gone past
+     the bar's current bottom, over the pushed name's on-screen height (30 pt, times the
+     bar's scale of the title). The old name moves up by `30·t` and fades as `1 − t`; the
+     new one comes up from 30 pt below into place. Both are clipped to the title's band
+     (30 pt tall, soft 3 pt edges; under the scale it is 21 pt in the compact band), so
+     nothing draws over the status bar or the text. Scrolling back pushes the other way.
+   - Built as two title buttons in a masked container inside the scaled title view; only
+     the one more than half in takes taps and is read by VoiceOver (the compact band's
+     accessibility label follows it). Positions are set with implicit actions disabled.
+   - Jumps (Go To, links, version switch) set the title with no push.
+   - Measure the opener: record the numeral's character offset when building the
+     attributed string, then get its rect with `firstRectForRange:` on the row's text view
+     (laying it out if it isn't yet). Convert it to table coordinates and compare it with
+     `contentOffset.y` + the bar's bottom.
+   - Also update the title after `go()`, after relayout, and on `viewDidAppear`.
 2. **John 3 (and every chapter ≥ 2) is missing its book label.** It shows only "3". The
    "JOHN" label (§3.1.2) is required. Psalms correctly show "PSALM".
 3. **The place is lost on a text size change.** 10 jumped from John 3 to John 2. After
@@ -394,8 +404,8 @@ UITableView where each row is one chapter's UITextView. Changes:
     tint and title colors.
 - Bar items:
   - **Leading**: `magnifyingglass` → Search sheet.
-  - **Title view**: the title button (existing behavior: it fades in once the chapter opener
-    has scrolled under the bar) → Passage picker.
+  - **Title view**: the title button (the chapter read, pushed out by the next one's name
+    as that one's opener goes under the bar, §0.5 item 1) → Passage picker.
   - **Trailing**: `rightBarButtonItems = @[Aa, Library]`. Aa (`textformat.size`) is
     outermost and opens Reading settings. Library (`bookmark`) opens the Library sheet.
   - All bar icons are tinted ink at 85%, not accent, which keeps the page calm. Accent is
@@ -460,7 +470,7 @@ text never moves** because of the bar.
   change.
 - The bar **overlays** the text: collapsing reveals the lines that were underneath, and
   expanding covers them again. `contentOffset` is never changed because of the bar.
-- `go()`, the saved place and the title fade all measure against this constant inset, and
+- `go()`, the saved place and the title push all measure against this constant inset, and
   `adjustedContentInset` no longer changes.
 - Acceptance: with the content still, changing `p` from 0 to 1 changes no pixel below
   `S + E` points.
@@ -493,15 +503,19 @@ text never moves** because of the bar.
 | Element | Behavior |
 |---|---|
 | Search, Library and Aa buttons | alpha `1 − 1.6p` (gone by p = 0.625), and scale `1 − 0.5p` about their centers, so coming back they fade in while growing to full size. `userInteractionEnabled = NO` when p > 0.5 |
-| Title button | never fades for `p`: it stays centered in the bar's row and scales `1 − (5/17)p` (17 pt type to 12 pt), ending centered in the compact band (top at `S`, height `C`). Alpha `(1 − 0.25p)·f`, where `f` is the opener fade (below), so it ends as ink at 75% |
+| Title button | never fades for `p`: it stays centered in the bar's row and scales `1 − (5/17)p` (17 pt type to 12 pt), ending centered in the compact band (top at `S`, height `C`). Alpha `1 − 0.25p`, so it ends as ink at 75%; the title push (below) happens inside it |
 | Backdrop | follows the bar height. The fade's alpha is unchanged |
 | Back capsule, verse tray | unaffected |
 
-**The title fade (no duplicate chapter name):**
-- The opener-fade factor `f` (§0.5 item 1, as built) now measures the current chapter's
-  opener against the **current bar bottom**, `S + E − 24p`.
-- The title uses `f` at every size, so it never shows while the chapter's opener is
-  visible below the bar. There is one title, so no moment where it is gone.
+**The title push (no duplicate chapter name; owner amendment 2026-10-18, replacing the
+title fade):**
+- The title names the chapter whose text is at the **current bar bottom**, `S + E − 24p`,
+  and the next chapter's name pushes it up and out as that chapter's opener passes under
+  that edge (§0.5 item 1, as amended). The push is inside the title view's scale, so it
+  works the same at every `p`, and collapsing or expanding the bar with the content still
+  moves the push only as far as the bar's bottom moves past the opener.
+- So the title is never gone (except above Genesis 1) and never shows a chapter whose
+  opener is visible below the bar.
 
 **Revealing the bar (to p = 0, animated over 0.25 s unless noted):**
 - Upward scroll after the 12 pt hysteresis (proportional, as above).
@@ -1032,7 +1046,9 @@ handlers as a real drag: a demo flag makes the handlers treat programmatic
 | `15a-before-collapse` | John 3 scrolled so 3:14 is near the top, p = 0, content still | Expanded bar; the text positions are the reference |
 | `15-collapsed` | Same offset, then set p = 1 with no scroll (the demo hook) | Compact "John 3" under the status bar; the buttons are gone; the status bar is visible; **every text pixel below S + E is identical to 15a** (the CI script computes the pixel difference of that region and prints it to `log.txt`; it must be 0) |
 | `15b-half` | Freeze p = 0.5 | Bar halfway: no button or title visible (both alphas 0), and the backdrop is at the intermediate height |
-| `15c-collapsed-opener` | Collapsed, then scroll so that the John 4 opener is visible mid-screen | The compact band shows **no title** (f = 0); there's no duplicate chapter name |
+| `15c-collapsed-opener` | Collapsed, then scroll so that the John 4 opener is visible mid-screen | The compact band still shows **"John 3"** (amended 2026-10-18); there's no duplicate chapter name |
+| `15d-push-before`, `15e-push-mid`, `15f-push-after` | Expanded; John 4's opener walked up a point at a time until its foot is 8 pt below the bar's bottom, then half the push past it, then 12 pt past the whole push | "John 3" alone; "John 3" half up and fading with "John 4" half in from below, both inside the title band; "John 4" alone. `read-console.txt` logs each point's `bible: push` lines (the foot's distance, `t`, both names' chapters, offsets and the old one's alpha), which change by at most one point's worth per step |
+| `15g-push-compact-before`, `15h-push-compact-mid`, `15i-push-compact-after` | The same at p = 1 | The same, in the compact band, nothing over the status bar |
 | `16-bars-back` | From collapsed, simulated upward drag of 8 pt, then a further 60 pt | After 8 pt it's still collapsed (log p); after 68 pt it's expanded |
 | `16b-compact-tap` | From collapsed, tap the compact title | Expanded |
 | `16c-sheet-from-collapsed` | From collapsed, open search | The sheet is presented and the reader's bar behind it is expanded |
@@ -1125,10 +1141,11 @@ both with the screenshots. The designer reviews these for abrupt changes (princi
 25. VoiceOver labels exist for every icon button and swatch (checked in code review).
 
 ### Defects from the 019e3ae1 run
-26. In `01-genesis-1`, `06-psalm-23`, `08-john-3-16` (if the opener is visible) and
-    `31-link-romans-8`, **the bar shows no title** while the opener is on screen. In
-    `02-chapter-divider` and `15`/`16`, the title is visible and names the chapter at the top
-    of the screen.
+26. In `01-genesis-1`, **the bar shows no title** while the opener is on screen. In
+    `06-psalm-23`, `08-john-3-16` (if the opener is visible) and `31-link-romans-8`, the
+    bar names the chapter before (amended 2026-10-18: the title never disappears and
+    never repeats an opener in view). In `02-chapter-divider` and `15`/`16`, the title is
+    visible and names the chapter at the bar's bottom edge; `15d`–`15i` show the push.
 27. Every chapter ≥ 2 shows its book label above the numeral.
 28. `29-larger-text` shows the same verses at the top as `28-night`.
 29. `30-opened-again` shows the same place as `29-larger-text`.

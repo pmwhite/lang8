@@ -186,6 +186,14 @@ read)
   step 16 15-collapsed
   step 32 15b-half
   step 33 15c-collapsed-opener
+  # The title's push (owner, 2026-10-18): John 4's opener under the bar,
+  # expanded and compact; console.txt has each point's "bible: push" lines.
+  step 262 15d-push-before
+  step 263 15e-push-mid
+  step 264 15f-push-after
+  step 265 15g-push-compact-before
+  step 266 15h-push-compact-mid
+  step 267 15i-push-compact-after
   step 34 16-bars-back
   step 35 16b-compact-tap
   step 36 16c-sheet-from-collapsed
