@@ -3098,6 +3098,13 @@ Where the build differs from the text above, and why:
    the label "ESV. Link: esv.org".
 10. **The fixture answers a two-chapter request with its first chapter**; the second is
     asked for on its own, as the reader comes to it.
+11. **A one-chapter book's label keeps the app's form**: the ESV's 3 John 1:14–15 reads
+    "3 John 14–15", as "Jude 3" does elsewhere.
+12. **A chapter the CI fixture has no file for stays "coming"** (its spinner) in the
+    reader, and a preview of it shows the BSB's words, so no screenshot shows a failure the
+    real server wouldn't give.
+13. **`usfm.py` keeps the space between a footnote and markup after it** (WEB, KJV: "…\f*
+    \wj Satan"), 118 places where the words would otherwise have run together.
 
 ### 9.11 Round 4 acceptance (summary)
 Round 4 is approved when:
