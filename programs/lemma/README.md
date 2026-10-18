@@ -18,13 +18,15 @@ parameters are passed on.
 
 ## Playing
 
-A level is **a goal and a hand of moves**. The facts (*You have*, newest
-at the bottom) and the goal (*Show*, big when there is room) sit in the
-middle of the room between the picture and the hand; when they no longer
-fit, the goal is pinned above the hand and the facts scroll above it. A
+A level is **a goal and a hand of moves**. The screen is laid out from
+the bottom: the hand, the goal (*Show*, big when there is room) pinned
+just above it, the facts (*You have*, newest at the bottom) above that,
+and the picture takes all the room left (in logic, a card with the
+level's words and its letters as tiles: lit when you hold one as a fact,
+soft when it is inside one, ringed when the goal wants it). When the
+board does not fit, the picture is a strip and the facts scroll. A
 fact used by a move shrinks to one small line after the next move, one
-not touched for three moves to one line. A level with no picture shows
-its words as a soft card at the top. One
+not touched for three moves to one line. One
 statement is focused (outlined orange), and the hand holds its moves, each
 a pudgy row that says what kind of move it is and shows **what it gives**:
 the statement as it will be (the changed part tinted), a new fact (blue), or
@@ -40,8 +42,12 @@ a gold row that closes the goal, showing the goal as the move leaves it
   move the cursor through the parts of the focused statement, outside in.
   At a part, the hand has every rewrite of it, the growing ones too
   (`b` to `e · b`, `e` to `□⁻¹ · □`). Nothing on the board opens a menu.
-- **Tap a row** to play it. One that needs a term shows chips (`ε / 2`,
-  `max(N, N₁)`, `a`) in place of the hand; tap one.
+- **Tap a row** to play it. A row that needs a term shows the statement
+  with a hole `□` where the term goes (*pick a term*). Tapped, the hand
+  becomes the terms, each a full-width row: the term on the left, the
+  statement as that term makes it on the right with the term tinted
+  (gold, with a check, if it closes the goal). Three show, then *More
+  terms*; a term the kernel will not take is not offered.
 - Three rows show, then *More moves*: under it go the rest, *Suppose not*
   and *Flip sides* (unless the level's written proof uses them), and moves
   that would give back a state the proof was already in.
@@ -59,11 +65,15 @@ the region has it) arithmetic close by themselves, staged: the goal card
 first morphs to what the move made of it (`e · c = c` to `c = c`); a new
 fact drops in, pulses, and a copy of it flies into the goal; then the card
 flashes gold and, its writing shrinking with it, flies into its pip at the
-top. Words
+top. A Split whose parts are both known is staged as two goals: the card
+divides in two, a second pip pops in, and each part closes in turn. When
+a statement changes, its writing moves piece by piece: what leaves
+shrinks and fades where it was, then what stays slides, and the part a
+row brought flies in and becomes its block. Words
 for a moment (*Undo 1 to get back on the book's path*, *Your turn*) show
 just under the bar. Under the title, a dot for each
-move of par fills as moves are made, grey past par; a pip for each goal
-fills as it closes. The last goal closes with the theorem stamped Q.E.D. (on a line of
+move of par fills as moves are made, grey past par; apart from them, on a
+soft pill, a square for each goal fills as it closes. The last goal closes with the theorem stamped Q.E.D. (on a line of
 its own under the statement), its stars (par or better: three), and its
 proof written out as a book would. A theorem later levels use is a new
 move: the finish card says so and its card flies into the Book (the book
@@ -127,11 +137,18 @@ For example, Cancel on the left by keys (seven moves, par):
 L8_LEVEL=12 L8_TAP_GAP=50 L8_KEYS="right;1;right;right;1;a;1;1;1;1;1" .build/lemma
 ```
 
-Adding limits by the book up to Choose, then choosing `N` alone (the
-fourth chip): the dots of b between N and N₁ go red.
+Adding limits by the book up to Choose (eleven `h;enter` pairs: a step
+with a term takes two), then choosing `N` alone (the fourth term): the
+dots of b (teal) between N and N₁ go red.
 
 ```sh
-L8_LEVEL=20 L8_TAP_GAP=40 L8_KEYS="h;enter;h;enter;h;enter;h;enter;a;h;enter;h;enter;h;enter;a;h;enter;h;enter;d" .build/lemma
+L8_LEVEL=20 L8_TAP_GAP=40 L8_KEYS="$(for i in $(seq 11); do printf 'h;enter;'; done)d" .build/lemma
+```
+
+Both at once, its Split staged as two goals (frames from 1.9 s to 4 s):
+
+```sh
+L8_LEVEL=1 L8_KEYS="1" .build/lemma
 ```
 
 Adding limits to its Q.E.D. by hints alone (17 pairs):
@@ -197,4 +214,4 @@ rulebook is satisfied); Calculate replaying a certificate through the
 kernel instead of being trusted; holding a row to preview it; a tilted
 Q.E.D. stamp (the painter has no rotation); a chapter intro page with the
 rulebook as tiles; more regions
-(topology, linear algebra); the logic region's picture; a torus.
+(topology, linear algebra); a torus.

@@ -447,7 +447,9 @@ an_step(slot: int, b: int, born_from: int) {
         an_vy1[h] = 0.0;
         if (an_jump) an_a[h] = 1.0
     }
-    if (an_jump || !an_live) {
+    if (now_t < morph_hold_t && !an_jump && an_live) {
+        // (Held while what left fades: then it moves.)
+    } else if (an_jump || !an_live) {
         an_x0[h] = tx0;
         an_y0[h] = ty0;
         an_x1[h] = tx1;
@@ -629,6 +631,18 @@ draw_expr(
             p_box(an_x0_now, an_y0_now, w, h, r, tint, k * a)
         }
     }
+    // (On the board, each piece of writing moves on its own, so an = or a
+    // · slides with the parts beside it; the block a fly is bringing in is
+    // not written till it lands.)
+    own: bool = draw_board && an_live && !an_jump;
+    hide_b: int = -1;
+    if (own && hide_term != 0 && slot == hide_slot) {
+        for b in b0..b0 + ex_boxn[e] {
+            if (hide_b < 0 && bx_term[b] == hide_term) hide_b = b
+        }
+        if (hide_b == b0 || hide_b >= 0 && bx_y1[hide_b] - bx_y0[hide_b] > size * 1.7) hide_b = -1
+    }
+    for b in b0..b0 + mini(ex_boxn[e], len(dr_n)) dr_n[b - b0] = 0;
     for r in ex_run0[e]..ex_run0[e] + ex_runn[e] {
         b: int = rn_box[r];
         k: int = b - b0;
@@ -644,7 +658,190 @@ draw_expr(
         if (rn_style[r] == ST_SUB) s = size * 0.64;
         col: int = ink;
         if (rn_style[r] == ST_OP) col = mix_rgb(ink, C_BLUE, 0.35);
-        p_sym(0, s, ox + rn_x[r] + dx, oy + rn_y[r] + dy, rn_sym[r], col, a)
+        px: f32 = ox + rn_x[r] + dx;
+        py: f32 = oy + rn_y[r] + dy;
+        if (own && k >= 0 && k < len(dr_n)) {
+            j: int = dr_n[k];
+            dr_n[k] = j + 1;
+            // (The whole statement's own writing (its = or ⟶) is kept as
+            // the statement changes: keyed by its slot alone.)
+            rk: int = bx_key[b];
+            if (bx_parent[b] < 0) rk = 1;
+            run_step(slot, rk * 64 + mini(j, 63), rn_x[r], rn_y[r]);
+            px = ox + an_x0_now;
+            py = oy + an_y0_now;
+            a = an_a_now * alpha;
+            // (Swelling in: from a little smaller.)
+            if (an_a_now < 0.98) s = s * (0.7 + 0.3 * an_a_now);
+            hidden: bool = false;
+            if (hide_b >= 0) {
+                q: int = b;
+                while (q >= 0 && q != hide_b) q = bx_parent[q];
+                hidden = q == hide_b
+            }
+            if (!hidden) leaver_note(an_last, px, py, rn_sym[r], s, col, a) else a = 0.0
+        }
+        if (a > 0.0) p_sym(0, s, px, py, rn_sym[r], col, a)
+    }
+}
+
+// Pieces of writing per block seen so far (each piece's key).
+dr_n: []int = new int[BXS](0);
+
+// Whether what is drawn now is on the board (its writing morphs piece by
+// piece, and what leaves fades where it was).
+draw_board: bool = false;
+
+// The term whose block a fly is bringing into slot hide_slot (0: none).
+hide_term: int = 0;
+
+hide_slot: int = 0;
+
+// The pieces of writing have their own springs, in slots apart.
+const RUN_SLOT: int = 900000000;
+
+// A piece of writing (by its slot and key) going to (tx, ty) from its
+// expression's corner: where it shows now (an_x0_now, an_y0_now, an_a_now).
+run_step(
+    slot: int,
+    key: int,
+    tx: f32,
+    ty: f32
+) {
+    rs: int = slot + RUN_SLOT;
+    h: int = an_find(rs, key);
+    if (h < 0 || an_seen[h] < frame_no - 2) {
+        if (h < 0) h = an_make(rs, key);
+        an_x0[h] = tx;
+        an_y0[h] = ty;
+        an_vx0[h] = 0.0;
+        an_vy0[h] = 0.0;
+        an_a[h] = 0.0
+    }
+    if (now_t < morph_hold_t) { } else if (morph_fast) {
+        an_x0[h] = ease_to(an_x0[h], tx, MORPH_RATE * 2.2);
+        an_y0[h] = ease_to(an_y0[h], ty, MORPH_RATE * 2.2);
+        an_vx0[h] = 0.0;
+        an_vy0[h] = 0.0
+    } else {
+        an_x0[h] = spring(an_x0[h], an_vx0[h], tx, MORPH_STIFF, MORPH_DAMP);
+        an_vx0[h] = spring_v;
+        an_y0[h] = spring(an_y0[h], an_vy0[h], ty, MORPH_STIFF, MORPH_DAMP);
+        an_vy0[h] = spring_v
+    }
+    if (now_t >= morph_hold_t) an_a[h] = ease_to(an_a[h], 1.0, MORPH_RATE * 0.8);
+    an_seen[h] = frame_no;
+    an_x0_now = an_x0[h];
+    an_y0_now = an_y0[h];
+    an_a_now = an_a[h];
+    an_last = h
+}
+
+// ---- what leaves fades where it was ----
+// The board's pieces of writing drawn this frame and last (their spring,
+// where, what, how); one drawn last frame and not this one leaves: it
+// shrinks and fades in place.
+const LVS: int = 2048;
+
+lv_h: []int = new int[LVS * 2](0);
+
+lv_x: []f32 = new f32[LVS * 2](0.0);
+
+lv_y: []f32 = new f32[LVS * 2](0.0);
+
+lv_sym: []int = new int[LVS * 2](0);
+
+lv_size: []f32 = new f32[LVS * 2](0.0);
+
+lv_col: []int = new int[LVS * 2](0);
+
+lv_a: []f32 = new f32[LVS * 2](0.0);
+
+// Which half is this frame's, and how many in each.
+lv_cur: int = 0;
+
+lv_cn: []int = new int[2](0);
+
+leaver_note(
+    h: int,
+    x: f32,
+    y: f32,
+    s: int,
+    size: f32,
+    col: int,
+    a: f32
+) {
+    n: int = lv_cn[lv_cur];
+    if (n >= LVS) return;
+    i: int = lv_cur * LVS + n;
+    lv_h[i] = h;
+    lv_x[i] = x;
+    lv_y[i] = y;
+    lv_sym[i] = s;
+    lv_size[i] = size;
+    lv_col[i] = col;
+    lv_a[i] = a;
+    lv_cn[lv_cur] = n + 1
+}
+
+// Those leaving, fading.
+const GONE: int = 256;
+
+gn_x: []f32 = new f32[GONE](0.0);
+
+gn_y: []f32 = new f32[GONE](0.0);
+
+gn_sym: []int = new int[GONE](0);
+
+gn_size: []f32 = new f32[GONE](0.0);
+
+gn_col: []int = new int[GONE](0);
+
+gn_a: []f32 = new f32[GONE](0.0);
+
+gn_t: []f32 = new f32[GONE](-10.0);
+
+gn_next: int = 0;
+
+const GONE_TIME: f32 = 0.13;
+
+// Until when what stays waits (what left is fading).
+morph_hold_t: f32 = -10.0;
+
+// After the board is drawn: what left it is found, and all that is
+// leaving drawn.
+leavers_step() {
+    prev: int = 1 - lv_cur;
+    if (!an_jump) {
+        for k in 0..lv_cn[prev] {
+            i: int = prev * LVS + k;
+            if (an_seen[lv_h[i]] != frame_no && lv_a[i] > 0.05) {
+                g: int = gn_next;
+                gn_next = (gn_next + 1) % GONE;
+                gn_x[g] = lv_x[i];
+                gn_y[g] = lv_y[i];
+                gn_sym[g] = lv_sym[i];
+                gn_size[g] = lv_size[i];
+                gn_col[g] = lv_col[i];
+                gn_a[g] = lv_a[i];
+                gn_t[g] = now_t;
+                if (!morph_fast) morph_hold_t = now_t + GONE_TIME * 0.8
+            }
+        }
+    } else {
+        for g in 0..GONE gn_t[g] = -10.0
+    }
+    lv_cur = prev;
+    lv_cn[lv_cur] = 0;
+    for g in 0..GONE {
+        t: f32 = (now_t - gn_t[g]) / GONE_TIME;
+        if (t >= 0.0 && t < 1.0) {
+            busy = true;
+            sc: f32 = 1.0 - 0.55 * t;
+            w: f32 = p_sym_w(0, gn_size[g], gn_sym[g]);
+            p_sym(0, gn_size[g] * sc, gn_x[g] + w * (1.0 - sc) * 0.5, gn_y[g] - gn_size[g] * 0.35 * (1.0 - sc),
+                gn_sym[g], gn_col[g], gn_a[g] * (1.0 - t))
+        }
     }
 }
 

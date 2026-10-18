@@ -196,6 +196,10 @@ tr_ticks: bool = false;
 
 tr_calc: bool = false;
 
+// Whether a move that closes the goal at once shows the fact it gave (a
+// chip's row) rather than the goal closed.
+tr_want_fact: bool = false;
+
 // Candidate c tried at node n, with its witnesses: whether the kernel took
 // it. The proof is as it was afterwards.
 trial(
@@ -268,6 +272,8 @@ trial_read(n: int, c: int) raises KernelError {
     tr_strike = false;
     tr_same = false;
     if (!tr_closes || tr_ticks) return;
+    // (A chip: the fact its term gives, though it closes the goal at once.)
+    if (tr_want_fact && tr_fact && tr_res != 0) return;
     if (tr_res == 0 && cd_kind[c] == C_BACK && cd_hyp[c] >= 0 && pn_kidn[n] == 0) {
         // (A fact taken apart into just the goal: the goal, as a new fact.)
         tr_res = gl_concl[pn_goal[n]];
@@ -346,7 +352,7 @@ trial_read0(n: int, c: int) raises KernelError {
         return
     }
     kg: int = 0;
-    if (tl_n > 0) kg = pn_goal[tl_node[0]] else if (cd_kind[c] == C_REWRITE && pn_kidn[n] > 0) kg = pn_goal[node_kid(n,
+    if (tl_n > 0) kg = pn_goal[tl_node[0]] else if ((cd_kind[c] == C_REWRITE || tr_want_fact) && pn_kidn[n] > 0) kg = pn_goal[node_kid(n,
         0)] else return;
     if (cd_kind[c] == C_REWRITE) {
         steps_n: int = cd_pathn[c];
@@ -519,6 +525,19 @@ rows_from_cands(
         byfact: bool = rw && cd_lemma[c] < 0;
         keep: bool = hd_n < ROWS && !(tidy && wit);
         if (keep && !wit) keep = trial(n, c, wit_none, 0);
+        // (A move that needs a term: tried with a hole □ for each, to show
+        // where the term goes.)
+        holed: bool = false;
+        if (keep && wit) {
+            hn: int = mini(cd_wn[c], 8);
+            holes: bool = true;
+            for i in 0..hn {
+                hz: int = hole_term(c, i);
+                if (hz == 0) holes = false;
+                chip_wits[i] = hz
+            }
+            if (holes) holed = trial(n, c, chip_wits, hn)
+        }
         if (keep && !wit) {
             for r in 0..hd_n {
                 if (!hd_wit[r] && hd_sig[r] == tr_sig) keep = false
@@ -559,6 +578,14 @@ rows_from_cands(
             hd_ticks[r] = false;
             hd_strike[r] = false;
             hd_same[r] = false;
+            if (holed) {
+                hd_res[r] = tr_res;
+                hd_res2[r] = tr_res2;
+                hd_fact[r] = tr_fact;
+                hd_fact2[r] = tr_fact2;
+                hd_hl[r] = tr_hl;
+                if (!rw) hd_hl[r] = chip_wits[0]
+            }
             if (!wit) {
                 hd_strike[r] = tr_strike;
                 hd_same[r] = tr_same;
@@ -790,4 +817,116 @@ fact_quiet(h: int): bool {
     }
     touch_fact(h);
     false
+}
+
+// ---- the chips: each term a row, showing what it gives ----
+// For each term offered (wc_term), the move tried with it (and, if the
+// move needs more terms, a hole □ for each of the rest): what it gives,
+// as a hand row shows it. A term the kernel will not take is not offered.
+ch_ok: []bool = new bool[WCS](false);
+
+ch_res: []int = new int[WCS](0);
+
+ch_res2: []int = new int[WCS](0);
+
+ch_fact: []bool = new bool[WCS](false);
+
+ch_closes: []bool = new bool[WCS](false);
+
+ch_calc: []bool = new bool[WCS](false);
+
+ch_strike: []bool = new bool[WCS](false);
+
+ch_same: []bool = new bool[WCS](false);
+
+ch_hl: []int = new int[WCS](0);
+
+// Whether every term shows (else three, then More).
+chips_all: bool = false;
+
+chip_wits: []int = new int[8](0);
+
+// A hole of the type candidate c's i-th term has (□), or 0.
+hole_term(c: int, i: int) raises KernelError: int {
+    ty: int = cand_witness_type(c, i);
+    if (ty == 0) ty = tm_type(cand_witness(c, i));
+    if (ty == 0) return 0;
+    r: int = 0;
+    try {
+        r = mk_free(sym_cp(9633), ty)
+    } with KernelError -> {
+        r = 0
+    }
+    r
+}
+
+// The terms offered now, each tried (wit_cand at the node played, with
+// the terms picked so far).
+chips_build() raises KernelError {
+    chips_all = false;
+    n: int = play_node();
+    c: int = wit_cand;
+    if (n < 0 || c < 0) return;
+    for i in 0..wit_i chip_wits[i] = wit_chosen[i];
+    k2: int = 0;
+    for k in 0..wc_n {
+        t: int = wc_term[k];
+        chip_wits[wit_i] = t;
+        wn: int = wit_i + 1;
+        full: bool = wn >= cd_wn[c];
+        holes: bool = true;
+        while (wn < cd_wn[c] && wn < 8) {
+            hz: int = hole_term(c, wn);
+            if (hz == 0) holes = false;
+            chip_wits[wn] = hz;
+            wn = wn + 1
+        }
+        ok: bool = false;
+        tr_want_fact = true;
+        if (holes) ok = trial(n, c, chip_wits, wn);
+        tr_want_fact = false;
+        if (ok || !full) {
+            wc_term[k2] = t;
+            ch_ok[k2] = ok;
+            ch_res[k2] = 0;
+            ch_res2[k2] = 0;
+            ch_hl[k2] = t;
+            if (ok) {
+                ch_res[k2] = tr_res;
+                ch_res2[k2] = tr_res2;
+                ch_fact[k2] = tr_fact;
+                ch_closes[k2] = tr_closes;
+                ch_calc[k2] = tr_calc;
+                ch_strike[k2] = tr_strike;
+                ch_same[k2] = tr_same;
+                if (tr_closes && tr_res == 0) ch_res[k2] = gl_concl[pn_goal[n]]
+            }
+            k2 = k2 + 1
+        }
+    }
+    wc_n = k2;
+    // (The hint's term under More: every term shown.)
+    t: int = hint_chip_term();
+    for k in 0..wc_n {
+        if (wc_term[k] == t && t != 0 && k >= 3) chips_all = true
+    }
+}
+
+// A term picked that was not offered (Watch, or the hint's): added, with
+// nothing to show. Its place.
+chip_append(t: int): int {
+    if (wc_n >= len(wc_term)) return 0;
+    wc_term[wc_n] = t;
+    ch_ok[wc_n] = false;
+    ch_res[wc_n] = 0;
+    ch_res2[wc_n] = 0;
+    ch_hl[wc_n] = t;
+    wc_n = wc_n + 1;
+    wc_n - 1
+}
+
+// How many chips show before More.
+chips_shown(): int {
+    if (chips_all || wc_n <= 4) return wc_n;
+    3
 }
