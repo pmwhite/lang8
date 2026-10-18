@@ -9,7 +9,7 @@
 //
 // ?fresh starts with nothing proved (not kept). L8_ query parameters are
 // passed to the game's environment (L8_LEVEL=9&L8_WATCH=1 opens a level
-// and plays its proof).
+// and plays its proof; L8_KEYS and L8_TAPS play it, as in the README).
 import { instantiate, runResumable, MemFS } from "../l8-runtime.js";
 import { createPlatform } from "../game/platform.js";
 
@@ -47,7 +47,12 @@ async function main() {
     pending += decoder.decode(data);
     const lines = pending.split("\n");
     pending = lines.pop();
-    for (const line of lines) console.log(line);
+    for (const line of lines) {
+      // (The game asks for a short buzz as a move lands: "@vibrate MS".)
+      if (line.startsWith("@vibrate ")) {
+        if (navigator.vibrate) navigator.vibrate(Number(line.slice(9)) || 8);
+      } else console.log(line);
+    }
   };
   const sys = fs.sys(["lemma", PROGRESS]);
   const close = sys.close;

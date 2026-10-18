@@ -1,0 +1,678 @@
+tag lemma_ui;
+
+use_tag std, skate, lemma;
+
+// The hand: the moves that can be made now, each a row that shows what it
+// gives. The player works on one statement at a time (the focus: the goal,
+// or a fact), and the hand holds its moves: when the whole of it is
+// focused, its own moves and every rewrite anywhere inside it that does
+// not make it bigger; when the cursor is on a part, every rewrite of that
+// part, the growing ones too (b to e · b). Every row is a candidate
+// moves.l8 found, tried on the proof (and taken back) to see what it gives;
+// one the kernel will not have is not shown.
+//
+// ---- the focus ----
+// The statement worked on: the goal, or a fact (by its term).
+fc_goal: bool = true;
+
+fc_term: int = 0;
+
+// The cursor: a place in the focused statement (0: the whole of it).
+cur_at: int = 0;
+
+// The focused fact's number in the goal played now, or -1 for the goal.
+focus_hyp(): int {
+    if (fc_goal) return -1;
+    n: int = play_node();
+    if (n < 0) return -1;
+    g: int = pn_goal[n];
+    for i in 0..gl_hypn[g] {
+        if (goal_hyp(g, i) == fc_term) return i
+    }
+    -1
+}
+
+// The slot the focused statement is shown in.
+focus_slot(): int {
+    if (focus_hyp() < 0) return SLOT_GOAL;
+    hyp_slot(fc_term)
+}
+
+focus_on_goal() {
+    fc_goal = true;
+    fc_term = 0;
+    cur_at = 0;
+    more_open = false
+}
+
+focus_on_fact(h: int) {
+    fc_goal = false;
+    fc_term = h;
+    cur_at = 0;
+    more_open = false;
+    touch_fact(h)
+}
+
+// ---- the places of the focused statement, in reading order ----
+// The whole first, then each part from the outside in: each its path
+// (steps from pc_s0 in pc_pool) and the key its block has on the board.
+const PLACES: int = 256;
+
+pc_s0: []int = new int[PLACES](0);
+
+pc_sn: []int = new int[PLACES](0);
+
+pc_key: []int = new int[PLACES](0);
+
+pc_n: int = 0;
+
+pc_pool: []int = new int[16384](0);
+
+pc_pool_n: int = 0;
+
+places_build(t: int) {
+    pc_n = 0;
+    pc_pool_n = 0;
+    ev_n = 0;
+    bn_n = 0;
+    path_n = 1;
+    show(t, 0, 0);
+    first: bool = true;
+    for i in 0..ev_n {
+        if (ev_kind[i] == EV_OPEN && pc_n < PLACES) {
+            s: int = ev_a[i];
+            occ: int = 0;
+            for j in 0..i {
+                if (ev_kind[j] == EV_OPEN && ev_a[j] == s) occ = occ + 1
+            }
+            key: int = s * 16 + mini(occ, 15);
+            // (Not a bound name, nor a function by itself: no move fits.)
+            keep: bool = first || tm_kind(s) != TM_BOUND && ty_kind(tm_type(s)) != TY_FUN;
+            if (keep) {
+                p: int = ev_b[i];
+                d: int = path_depth[p];
+                if (pc_pool_n + d <= len(pc_pool)) {
+                    pc_s0[pc_n] = pc_pool_n;
+                    pc_sn[pc_n] = d;
+                    k: int = d - 1;
+                    while (k >= 0 && p != 0) {
+                        pc_pool[pc_pool_n + k] = path_step[p];
+                        p = path_parent[p];
+                        k = k - 1
+                    }
+                    // (Only a place whose path leads to its term: a block
+                    // drawn for a part of a binder's condition has none.)
+                    if (first || d > 0 && raw_at(t, pc_pool, pc_pool_n, d) == s) {
+                        pc_pool_n = pc_pool_n + d;
+                        pc_key[pc_n] = key;
+                        pc_n = pc_n + 1
+                    }
+                }
+            }
+            first = false
+        }
+    }
+}
+
+// Place p's path into sub_steps.
+place_steps(p: int) {
+    sub_n = pc_sn[p];
+    for i in 0..sub_n sub_steps[i] = pc_pool[pc_s0[p] + i]
+}
+
+// The place whose block has this key, or -1.
+place_of_key(key: int): int {
+    for p in 0..pc_n {
+        if (pc_key[p] == key) return p
+    }
+    -1
+}
+
+// The cursor stepped on (or back), round the places.
+cursor_step(d: int) raises KernelError {
+    if (chip_row >= 0 || pc_n == 0) return;
+    cur_at = (cur_at + d + pc_n) % pc_n;
+    more_open = false;
+    hint_row = -1;
+    hand_build()
+}
+
+// The term at a path (raw: under a binder, its bound names left bound).
+raw_at(
+    t: int,
+    steps: []int,
+    from: int,
+    n: int
+): int {
+    s: int = t;
+    for i in 0..n {
+        st: int = steps[from + i];
+        k: int = tm_kind(s);
+        if (st == P_FUN && k == TM_APP) s = tm_fun(s) else if (st == P_ARG && k == TM_APP) s = tm_arg(s) else if (st == P_BODY && k == TM_ABS) s = tm_body(s) else return 0
+    }
+    s
+}
+
+// How many nodes a term has (how big it is).
+term_size(t: int): int {
+    k: int = tm_kind(t);
+    if (k == TM_APP) return 1 + term_size(tm_fun(t)) + term_size(tm_arg(t));
+    if (k == TM_ABS) return 1 + term_size(tm_body(t));
+    1
+}
+
+// ---- a move tried, and taken back ----
+// What it gave: a fingerprint of the goals it leaves (equal moves give
+// equal ones), what to show (the statement as it will be, or the new
+// fact; a second goal or fact), its changed part, and whether it closes
+// the goal.
+tr_sig: int = 0;
+
+tr_res: int = 0;
+
+tr_res2: int = 0;
+
+tr_fact: bool = false;
+
+tr_fact2: bool = false;
+
+tr_hl: int = 0;
+
+tr_closes: bool = false;
+
+tr_calc: bool = false;
+
+// Candidate c tried at node n, with its witnesses: whether the kernel took
+// it. The proof is as it was afterwards.
+trial(
+    n: int,
+    c: int,
+    wits: []int,
+    wn: int
+) raises KernelError: bool {
+    s_pn: int = pn_n;
+    s_gl: int = gl_n;
+    s_gp: int = gpool_n;
+    s_kp: int = kpool_n;
+    s_mv: int = mv_n;
+    s_last: int = last_move;
+    ok: bool = true;
+    try {
+        last_move = cand_apply(n, c, wits, wn);
+        auto_close()
+    } with KernelError -> {
+        ok = false
+    }
+    if (ok) trial_read(n, c);
+    reopen(n);
+    // (The lists a goal is made from are left as they were: a fresh name
+    // is fresh in the goal, not in the goal tried.)
+    nf_n = 0;
+    nh_n = 0;
+    pn_n = s_pn;
+    gl_n = s_gl;
+    gpool_n = s_gp;
+    kpool_n = s_kp;
+    mv_n = s_mv;
+    last_move = s_last;
+    ok
+}
+
+// The goals left under node n (open leaves), into tl_.
+tl_node: []int = new int[64](0);
+
+tl_n: int = 0;
+
+open_under(n: int) {
+    if (pn_thm[n] != 0) return;
+    if (pn_move[n] < 0) {
+        if (tl_n < len(tl_node)) {
+            tl_node[tl_n] = n;
+            tl_n = tl_n + 1
+        }
+        return
+    }
+    for i in 0..pn_kidn[n] open_under(node_kid(n, i))
+}
+
+// Whether a leaf under n was closed by Calculate.
+calc_under(n: int): bool {
+    m: int = pn_move[n];
+    if (m < 0) return false;
+    if (mv_kind[m] == MV_CALC) return true;
+    for i in 0..pn_kidn[n] {
+        if (calc_under(node_kid(n, i))) return true
+    }
+    false
+}
+
+// What node n's move (candidate c) gave, read off the proof.
+trial_read(n: int, c: int) raises KernelError {
+    g: int = pn_goal[n];
+    tr_closes = pn_thm[n] != 0;
+    tr_calc = tr_closes && calc_under(n);
+    tr_res = 0;
+    tr_res2 = 0;
+    tr_fact = false;
+    tr_fact2 = false;
+    tr_hl = 0;
+    tl_n = 0;
+    open_under(n);
+    sig: int = 7;
+    for i in 0..tl_n sig = (sig * 1000003 + goal_prop(pn_goal[tl_node[i]])) % 2147483647;
+    if (tl_n == 0) sig = 1;
+    tr_sig = sig;
+    kg: int = 0;
+    if (tl_n > 0) kg = pn_goal[tl_node[0]] else if (cd_kind[c] == C_REWRITE && pn_kidn[n] > 0) kg = pn_goal[node_kid(n,
+        0)] else return;
+    if (cd_kind[c] == C_REWRITE) {
+        steps_n: int = cd_pathn[c];
+        if (cd_in[c] >= 0 && cd_in[c] < gl_hypn[kg]) {
+            tr_res = goal_hyp(kg, cd_in[c]);
+            tr_fact = true
+        } else tr_res = gl_concl[kg];
+        tr_hl = raw_at(tr_res, cpool, cd_path0[c], steps_n);
+        return
+    }
+    // (A new fact: the last the move brought in.)
+    newh: int = 0;
+    for i in 0..gl_hypn[kg] {
+        h: int = goal_hyp(kg, i);
+        if (!goal_has_hyp(g, h)) newh = h
+    }
+    if (gl_concl[kg] != gl_concl[g]) {
+        tr_res = gl_concl[kg];
+        tr_res2 = newh;
+        tr_fact2 = newh != 0
+    } else {
+        tr_res = newh;
+        tr_fact = true;
+        if (newh == 0) tr_res = gl_concl[kg]
+    }
+    if (tl_n > 1) {
+        tr_res2 = gl_concl[pn_goal[tl_node[1]]];
+        tr_fact2 = false
+    }
+}
+
+// ---- the rows ----
+const ROWS: int = 128;
+
+// Each row: where its move is found (in the goal, -1, or fact `src`; the
+// whole statement, or the part at its path in hd_pool), the candidate's
+// number there, its words and verb, what it gives (as tried), and whether
+// it needs a term picked, is low (under More), or is a theorem the player
+// proved.
+hd_src: []int = new int[ROWS](-1);
+
+hd_whole: []bool = new bool[ROWS](true);
+
+hd_p0: []int = new int[ROWS](0);
+
+hd_pn: []int = new int[ROWS](0);
+
+hd_c: []int = new int[ROWS](0);
+
+hd_label: []int = new int[ROWS](0);
+
+hd_verb: []int = new int[ROWS](0);
+
+hd_res: []int = new int[ROWS](0);
+
+hd_res2: []int = new int[ROWS](0);
+
+hd_fact: []bool = new bool[ROWS](false);
+
+hd_fact2: []bool = new bool[ROWS](false);
+
+hd_hl: []int = new int[ROWS](0);
+
+hd_closes: []bool = new bool[ROWS](false);
+
+hd_calc: []bool = new bool[ROWS](false);
+
+hd_wit: []bool = new bool[ROWS](false);
+
+hd_low: []bool = new bool[ROWS](false);
+
+hd_tool: []bool = new bool[ROWS](false);
+
+hd_sig: []int = new int[ROWS](0);
+
+hd_sort: []int = new int[ROWS](0);
+
+hd_n: int = 0;
+
+hd_pool: []int = new int[16384](0);
+
+hd_pool_n: int = 0;
+
+// The rows in the order shown (primary first), and how many are primary.
+hd_order: []int = new int[ROWS](0);
+
+hd_prim: int = 0;
+
+// Whether More is open (every row shown).
+more_open: bool = false;
+
+// The row choosing a term now (its chips shown), or -1.
+chip_row: int = -1;
+
+// The labels the level's written proof uses (a low move it uses is not
+// put under More).
+script_uses(label: int): bool {
+    for s in 0..st_n {
+        if (st_label[s] == label) return true
+    }
+    false
+}
+
+low_label(label: int): bool {
+    label == sym("Suppose not") || label == sym("Flip sides")
+}
+
+// The rows for the focus now.
+hand_build() raises KernelError {
+    hd_n = 0;
+    hd_pool_n = 0;
+    hd_prim = 0;
+    chip_row = -1;
+    nf_n = 0;
+    nh_n = 0;
+    n: int = play_node();
+    if (n < 0 || done_t >= 0.0) return;
+    g: int = pn_goal[n];
+    j: int = focus_hyp();
+    if (j < 0) fc_goal = true;
+    target: int = gl_concl[g];
+    if (j >= 0) target = goal_hyp(g, j);
+    places_build(target);
+    if (cur_at >= pc_n) cur_at = 0;
+    // (The states the proof has been in: a move back to one is low.)
+    an_sig_n = 0;
+    a: int = n;
+    while (a >= 0 && an_sig_n < len(an_sig)) {
+        an_sig[an_sig_n] = (7 * 1000003 + goal_prop(pn_goal[a])) % 2147483647;
+        an_sig_n = an_sig_n + 1;
+        a = pn_parent[a]
+    }
+    if (cur_at == 0) {
+        if (j < 0) cands_goal(n) else cands_hyp(n, j);
+        rows_from_cands(n, j, -1, target, false);
+        for p in 1..pc_n {
+            place_steps(p);
+            cands_sub(n, j);
+            rows_from_cands(n, j, p, target, true)
+        }
+    } else {
+        place_steps(cur_at);
+        cands_sub(n, j);
+        rows_from_cands(n, j, cur_at, target, false)
+    }
+    hand_order()
+}
+
+// A row for each candidate listed now (found at place p, -1 the whole);
+// only those that do not make it bigger if `tidy`.
+rows_from_cands(
+    n: int,
+    j: int,
+    p: int,
+    target: int,
+    tidy: bool
+) raises KernelError {
+    before: int = term_size(target);
+    for k in 0..cd_shown {
+        c: int = cd_order[k];
+        wit: bool = cd_wn[c] > 0;
+        rw: bool = cd_kind[c] == C_REWRITE;
+        def: bool = rw && cd_lemma[c] >= 0 && lm_kind[cd_lemma[c]] == LM_DEF;
+        byfact: bool = rw && cd_lemma[c] < 0;
+        keep: bool = hd_n < ROWS && !(tidy && wit);
+        if (keep && !wit) keep = trial(n, c, wit_none, 0);
+        if (keep && !wit) {
+            for r in 0..hd_n {
+                if (!hd_wit[r] && hd_sig[r] == tr_sig) keep = false
+            }
+        }
+        size_after: int = before;
+        if (keep && !wit && tr_res != 0 && rw) size_after = term_size(tr_res);
+        if (keep && tidy && !def && !byfact && size_after > before) keep = false;
+        if (keep) {
+            r: int = hd_n;
+            hd_n = r + 1;
+            hd_src[r] = j;
+            hd_whole[r] = p < 0;
+            hd_p0[r] = hd_pool_n;
+            hd_pn[r] = 0;
+            if (p >= 0) {
+                for i in 0..pc_sn[p] {
+                    if (hd_pool_n < len(hd_pool)) {
+                        hd_pool[hd_pool_n] = pc_pool[pc_s0[p] + i];
+                        hd_pool_n = hd_pool_n + 1
+                    }
+                }
+                hd_pn[r] = hd_pool_n - hd_p0[r]
+            }
+            hd_c[r] = c;
+            hd_label[r] = cd_label[c];
+            hd_wit[r] = wit;
+            hd_tool[r] = cd_lemma[c] >= 0 && lm_kind[cd_lemma[c]] == LM_LEVEL;
+            hd_verb[r] = row_verb(c);
+            hd_res[r] = 0;
+            hd_res2[r] = 0;
+            hd_hl[r] = 0;
+            hd_closes[r] = false;
+            hd_calc[r] = false;
+            hd_fact[r] = false;
+            hd_fact2[r] = false;
+            hd_sig[r] = 0;
+            if (!wit) {
+                hd_res[r] = tr_res;
+                hd_res2[r] = tr_res2;
+                hd_fact[r] = tr_fact;
+                hd_fact2[r] = tr_fact2;
+                hd_hl[r] = tr_hl;
+                hd_closes[r] = tr_closes;
+                hd_calc[r] = tr_calc;
+                hd_sig[r] = tr_sig
+            }
+            if (hd_closes[r] && hd_res[r] == 0) hd_res[r] = gl_concl[pn_goal[n]];
+            hd_low[r] = low_label(cd_label[c]) && !script_uses(cd_label[c]) || !wit && goes_back(tr_sig);
+            // (Order: the statement's own moves, then rewrites by a fact,
+            // then those that make it smaller, by rank.)
+            s: int = 0;
+            if (p >= 0) s = 1000;
+            if (byfact || def) s = s - 500;
+            if (hd_closes[r]) s = s - 800;
+            s = s - cd_rank[c] * 20 + (size_after - before) * 5 + k;
+            hd_sort[r] = s
+        }
+    }
+}
+
+wit_none: []int = new int[1](0);
+
+an_sig: []int = new int[256](0);
+
+an_sig_n: int = 0;
+
+// Whether a move gives back a state the proof was in (it undoes).
+goes_back(sig: int): bool {
+    for i in 0..an_sig_n {
+        if (an_sig[i] == sig) return true
+    }
+    false
+}
+
+// The small word a row starts with: what kind of move it is.
+row_verb(c: int): int {
+    l: int = cd_lemma[c];
+    if (cd_kind[c] == C_REWRITE) {
+        if (l < 0) return sym("Use the fact");
+        if (lm_words[l] != 0) return lm_words[l];
+        return lm_name[l]
+    }
+    cd_label[c]
+}
+
+hand_order() {
+    k: int = 0;
+    for pass in 0..2 {
+        // (Primary rows, then low ones; each by its sort.)
+        used: []bool = hand_used;
+        for r in 0..hd_n used[r] = false;
+        for _ in 0..hd_n {
+            best: int = -1;
+            for r in 0..hd_n {
+                if (!used[r] && hd_low[r] == (pass == 1)) {
+                    if (best < 0 || hd_sort[r] < hd_sort[best]) best = r
+                }
+            }
+            if (best >= 0) {
+                used[best] = true;
+                hd_order[k] = best;
+                k = k + 1
+            }
+        }
+        if (pass == 0) hd_prim = k
+    }
+}
+
+hand_used: []bool = new bool[ROWS](false);
+
+// How many rows show before More (all of them if few).
+hand_shown(): int {
+    if (more_open) return hd_n;
+    if (hd_prim <= 4 && hd_prim == hd_n) return hd_n;
+    mini(hd_prim, 3)
+}
+
+hand_has_more(): bool {
+    !more_open && hand_shown() < hd_n
+}
+
+// Row r's candidates listed again (where it was found): its candidate.
+row_cands(r: int) raises KernelError: int {
+    n: int = play_node();
+    if (n < 0) return -1;
+    nf_n = 0;
+    nh_n = 0;
+    j: int = hd_src[r];
+    if (hd_whole[r]) {
+        if (j < 0) cands_goal(n) else cands_hyp(n, j)
+    } else {
+        sub_n = hd_pn[r];
+        for i in 0..sub_n sub_steps[i] = hd_pool[hd_p0[r] + i];
+        cands_sub(n, j)
+    }
+    c: int = hd_c[r];
+    if (c < cd_n && cd_label[c] == hd_label[r]) return c;
+    for k in 0..cd_shown {
+        if (cd_label[cd_order[k]] == hd_label[r]) return cd_order[k]
+    }
+    -1
+}
+
+// Whether a statement (the goal, -1, or fact j) has primary moves.
+has_moves(j: int) raises KernelError: bool {
+    sg: bool = fc_goal;
+    st: int = fc_term;
+    sc: int = cur_at;
+    n: int = play_node();
+    if (n < 0) return false;
+    if (j < 0) fc_goal = true else {
+        fc_goal = false;
+        fc_term = goal_hyp(pn_goal[n], j)
+    }
+    cur_at = 0;
+    hand_build();
+    r: bool = hd_prim > 0;
+    fc_goal = sg;
+    fc_term = st;
+    cur_at = sc;
+    r
+}
+
+// The focus at the start of a goal: the goal if it has moves, else the
+// first fact that does (the newest if `newest`), else the goal.
+focus_start(newest: bool) raises KernelError {
+    focus_on_goal();
+    n: int = play_node();
+    if (n < 0) return;
+    if (has_moves(-1)) {
+        hand_build();
+        return
+    }
+    g: int = pn_goal[n];
+    pick: int = -1;
+    for i in 0..gl_hypn[g] {
+        if ((pick < 0 || newest) && has_moves(i)) pick = i
+    }
+    if (pick >= 0) focus_on_fact(goal_hyp(g, pick));
+    hand_build()
+}
+
+// The focus after a move: what it made (a new fact with moves, or the
+// goal if it changed and has moves), else as at the start.
+focus_after(old_goal: int) raises KernelError {
+    n: int = play_node();
+    if (n < 0) {
+        hd_n = 0;
+        return
+    }
+    g: int = pn_goal[n];
+    newh: int = -1;
+    for i in 0..gl_hypn[g] {
+        if (!goal_has_hyp(old_goal, goal_hyp(g, i))) newh = i
+    }
+    if (newh >= 0 && has_moves(newh)) {
+        focus_on_fact(goal_hyp(g, newh));
+        hand_build();
+        return
+    }
+    same_goal: bool = gl_concl[g] == gl_concl[old_goal];
+    if (!same_goal && has_moves(-1)) {
+        focus_on_goal();
+        hand_build();
+        return
+    }
+    // (A fact rewritten: still the one worked on.)
+    if (!fc_goal && focus_hyp() >= 0 && has_moves(focus_hyp())) {
+        cur_at = 0;
+        hand_build();
+        return
+    }
+    focus_start(true)
+}
+
+// ---- facts not touched lately (shown small) ----
+ft_term: []int = new int[256](0);
+
+ft_move: []int = new int[256](0);
+
+ft_n: int = 0;
+
+touch_fact(h: int) {
+    for i in 0..ft_n {
+        if (ft_term[i] == h) {
+            ft_move[i] = moves_made;
+            return
+        }
+    }
+    if (ft_n < len(ft_term)) {
+        ft_term[ft_n] = h;
+        ft_move[ft_n] = moves_made;
+        ft_n = ft_n + 1
+    }
+}
+
+// Whether fact h has not been touched for three moves.
+fact_quiet(h: int): bool {
+    if (!fc_goal && fc_term == h) return false;
+    for i in 0..ft_n {
+        if (ft_term[i] == h) return moves_made - ft_move[i] >= 3
+    }
+    touch_fact(h);
+    false
+}

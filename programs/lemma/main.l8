@@ -29,6 +29,8 @@ import "boxes.l8";
 
 import "app.l8";
 
+import "hand.l8";
+
 import "picture.l8";
 
 import "pages.l8";
@@ -252,58 +254,201 @@ env_int(key: str, fallback: int): int {
     fallback
 }
 
-// ---- taps from the environment, for pictures of play ----
+// ---- taps and keys from the environment, for pictures of play ----
 // L8_TAPS="x,y;x,y;..." taps those places (in the game's pixels), one
-// every L8_TAP_GAP hundredths of a second (default 70), from the first
-// second on. A tap at x = -1 undoes; at x = -2 does nothing (a pause).
-tap_x: []f32 = new f32[64](0.0);
+// every L8_TAP_GAP hundredths of a second (default 70), from 1.7 s on (the
+// level's title card is gone by then). "x,y>x2,y2" swipes from one place
+// to the other; "x,y+ms" holds that long (on the bulb: Watch). A tap at
+// x = -1 undoes; at x = -2 does nothing (a pause).
+//
+// L8_KEYS="right;1;a;..." presses keys the same way (after the taps):
+// left, right, up, down, enter, esc, back, or one letter or digit.
+const TAPS: int = 64;
 
-tap_y: []f32 = new f32[64](0.0);
+tap_kind: []int = new int[TAPS](0);
+
+tap_x: []f32 = new f32[TAPS](0.0);
+
+tap_y: []f32 = new f32[TAPS](0.0);
+
+tap_x2: []f32 = new f32[TAPS](0.0);
+
+tap_y2: []f32 = new f32[TAPS](0.0);
+
+tap_ms: []f32 = new f32[TAPS](0.0);
 
 tap_n: int = 0;
 
 tap_next: int = 0;
 
+key_sym: []int = new int[TAPS](0);
+
+key_n: int = 0;
+
+key_next: int = 0;
+
+// The text of an environment variable, into env_buf (env_len bytes);
+// whether it is set.
+env_buf: []i8 = new i8[4096](0i8);
+
+env_len: int = 0;
+
+env_text(key: str): bool {
+    env_len = 0;
+    if (getenv(key) == null) return false;
+    for e in l8_environment() {
+        if (len(e) > len(key) && e[len(key)] == '=') {
+            same: bool = true;
+            for i in 0..len(key) {
+                if (e[i] != key[i]) same = false
+            }
+            if (same) {
+                for i in len(key) + 1..len(e) {
+                    if (env_len < len(env_buf)) {
+                        env_buf[env_len] = e[i];
+                        env_len = env_len + 1
+                    }
+                }
+                return true
+            }
+        }
+    }
+    false
+}
+
+// A number in env_buf from env_at (an optional minus first).
+env_at: int = 0;
+
+env_num(): f32 {
+    neg: bool = false;
+    if (env_at < env_len && env_buf[env_at] == '-') {
+        neg = true;
+        env_at = env_at + 1
+    }
+    v: f32 = 0.0;
+    while (env_at < env_len && env_buf[env_at] as int >= 48 && env_buf[env_at] as int <= 57) {
+        v = v * 10.0 + (env_buf[env_at] as int - 48) as f32;
+        env_at = env_at + 1
+    }
+    if (neg) return -v;
+    v
+}
+
+env_skip(c: int): bool {
+    if (env_at < env_len && env_buf[env_at] as int == c) {
+        env_at = env_at + 1;
+        return true
+    }
+    false
+}
+
 taps_read() {
     tap_n = 0;
-    if (getenv("L8_TAPS") == null) return;
-    for e in l8_environment() {
-        if (len(e) > 8 && e[0] == 'L' && e[1] == '8' && e[2] == '_' && e[3] == 'T' && e[4] == 'A' && e[5] == 'P' && e[6] == 'S' && e[7] == '=') {
-            v: f32 = 0.0;
-            neg: bool = false;
-            first: bool = true;
-            for i in 8..len(e) + 1 {
-                c: int = 59;
-                if (i < len(e)) c = e[i] as int;
-                if (c >= 48 && c <= 57) v = v * 10.0 + (c - 48) as f32 else if (c == 45) neg = true else if (c == 44 || c == 59) {
-                    if (neg) v = -v;
-                    if (first) {
-                        if (tap_n < len(tap_x)) tap_x[tap_n] = v
-                    } else if (tap_n < len(tap_x)) {
-                        tap_y[tap_n] = v;
-                        tap_n = tap_n + 1
-                    }
-                    first = c == 59;
-                    v = 0.0;
-                    neg = false
-                }
+    if (env_text("L8_TAPS")) {
+        env_at = 0;
+        while (env_at < env_len && tap_n < TAPS) {
+            k: int = tap_n;
+            tap_kind[k] = 0;
+            tap_x[k] = env_num();
+            env_skip(44);
+            tap_y[k] = env_num();
+            if (env_skip(62)) {
+                tap_kind[k] = 1;
+                tap_x2[k] = env_num();
+                env_skip(44);
+                tap_y2[k] = env_num()
+            } else if (env_skip(43)) {
+                tap_kind[k] = 2;
+                tap_ms[k] = env_num()
             }
+            tap_n = k + 1;
+            // (On to the next ;.)
+            while (env_at < env_len && env_buf[env_at] as int != 59) env_at = env_at + 1;
+            env_skip(59)
+        }
+    }
+    key_n = 0;
+    if (env_text("L8_KEYS")) {
+        i: int = 0;
+        while (i < env_len && key_n < TAPS) {
+            j: int = i;
+            while (j < env_len && env_buf[j] as int != 59) j = j + 1;
+            ks: int = 0;
+            if (j - i == 1) ks = env_buf[i] as int else if (env_word(i, j, "left")) ks = 65361 else if (env_word(i,
+                j, "right")) ks = 65363 else if (env_word(i, j, "up")) ks = 65362 else if (env_word(i,
+                j, "down")) ks = 65364 else if (env_word(i, j, "enter")) ks = 65293 else if (env_word(i,
+                j, "esc")) ks = 65307 else if (env_word(i, j, "back")) ks = 65288;
+            if (ks != 0) {
+                key_sym[key_n] = ks;
+                key_n = key_n + 1
+            }
+            i = j + 1
         }
     }
 }
 
+env_word(i: int, j: int, w: str): bool {
+    if (j - i != len(w)) return false;
+    for k in 0..len(w) {
+        if (env_buf[i + k] != w[k]) return false
+    }
+    true
+}
+
+// A gesture being made by script: which, and when it started.
+gs_on: bool = false;
+
+gs_k: int = 0;
+
+gs_t: f32 = 0.0;
+
 taps_step() raises KernelError {
-    if (tap_next >= tap_n) return;
     gap: f32 = env_int("L8_TAP_GAP", 70) as f32 / 100.0;
-    if (now_t < 1.0 + tap_next as f32 * gap) return;
-    x: f32 = tap_x[tap_next];
-    y: f32 = tap_y[tap_next];
-    tap_next = tap_next + 1;
-    if (x == -1.0) {
-        undo_move();
+    if (gs_on) {
+        k: int = gs_k;
+        t: f32 = now_t - gs_t;
+        if (tap_kind[k] == 1) {
+            f: f32 = clampf(t / 0.18, 0.0, 1.0);
+            x: f32 = tap_x[k] + (tap_x2[k] - tap_x[k]) * f;
+            y: f32 = tap_y[k] + (tap_y2[k] - tap_y[k]) * f;
+            finger_move(256, x, y);
+            if (f >= 1.0) {
+                finger_up(1, x, y);
+                gs_on = false
+            }
+        } else if (t >= tap_ms[k] / 1000.0) {
+            finger_up(1, tap_x[k], tap_y[k]);
+            gs_on = false
+        }
         return
     }
-    if (x < 0.0) return;
-    finger_down(1, x, y);
-    finger_up(1, x, y)
+    if (tap_next < tap_n) {
+        if (now_t < 1.7 + tap_next as f32 * gap) return;
+        k: int = tap_next;
+        x: f32 = tap_x[k];
+        y: f32 = tap_y[k];
+        tap_next = k + 1;
+        if (x == -1.0) {
+            undo_move();
+            return
+        }
+        if (x < 0.0) return;
+        finger_down(1, x, y);
+        if (tap_kind[k] == 0) finger_up(1, x, y) else {
+            gs_on = true;
+            gs_k = k;
+            gs_t = now_t
+        }
+        return
+    }
+    if (key_next < key_n) {
+        if (now_t < 1.7 + (tap_n + key_next) as f32 * gap) return;
+        ks: int = key_sym[key_next];
+        key_next = key_next + 1;
+        if (ks == 65307) esc_key_safe() else key_press(ks)
+    }
+}
+
+esc_key_safe() {
+    if (esc_key()) { }
 }

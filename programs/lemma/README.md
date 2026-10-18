@@ -1,8 +1,8 @@
 # Lemma
 
 A puzzle game made of real proofs. Each level is a theorem; the player
-proves it from the ground up by tapping what to work on and picking a
-move, and every move is checked by a small kernel. A solved level becomes a
+proves it from the ground up by playing moves from a hand, and every move
+is checked by a small kernel. A solved level becomes a
 tool for the levels after it, so the map of a region is the dependency
 graph of its subject.
 
@@ -13,39 +13,76 @@ make lemma-web                          # the page, in .build/web/lemma (after m
 ```
 
 Off a page the window is phone shaped (`L8_W`, `L8_H`, `L8_UI` change
-it). `L8_LEVEL=k` opens map level k; with `L8_WATCH=1` it plays the
-level's written proof. `L8_TAPS="x,y;x,y"` taps those places, one every
-0.7 s (`L8_TAP_GAP` in hundredths), for pictures of play. On the page,
-`?fresh` starts with nothing proved, and `L8_` query parameters are passed
-on.
+it). On the page, `?fresh` starts with nothing proved, and `L8_` query
+parameters are passed on.
 
 ## Playing
 
-The goal to show is the big card; what is known is above it. A tap on
-either, or on any part of them (every subterm is its own block), picks it,
-and the tray rises with the moves that fit there:
+A level is **a goal and a hand of moves**. The goal (*Show*) is pinned
+above the hand; what is known (*You have*) sits above it, newest at the
+bottom (a fact not touched for three moves shrinks to one line). One
+statement is focused (outlined orange), and the hand holds its moves, each
+a pudgy row that says what kind of move it is and shows **what it gives**:
+the statement as it will be (the changed part tinted), a new fact (blue), or
+a gold row that closes the goal.
 
-- the goal: the logic's ways in (*Take any ε*, *Assume it*, *Split*,
-  *Choose …*), a lemma whose conclusion it is, *Open the definition*;
-- something known: the ways out (*Use with …*, *Get N*, *Cases*), a lemma
-  it is the first premise of, *Apply it*;
-- a part: an equation (of the region's rulebook, a lemma, or something
-  known) that rewrites it: the button shows what it becomes.
+- **Tap a statement** to focus it. With the whole of it focused, the hand
+  has its own moves (*Take any ε*, *Assume it*, *Split*, *Choose …*, *Get N*,
+  *Use with …*, *Apply it*, a theorem you proved) and every rewrite
+  anywhere inside it that does not make it bigger (tidying, a known fact,
+  opening a definition).
+- **Swipe sideways** on the board (or tap the ‹ › nubs, or tap a part) to
+  move the cursor through the parts of the focused statement, outside in.
+  At a part, the hand has every rewrite of it, the growing ones too
+  (`b` to `e · b`, `e` to `□⁻¹ · □`). Nothing on the board opens a menu.
+- **Tap a row** to play it. One that needs a term shows chips (`ε / 2`,
+  `max(N, N₁)`, `a`) in place of the hand; tap one.
+- Three rows show, then *More moves*: under it go the rest, *Suppose not*
+  and *Flip sides* (unless the level's written proof uses them), and moves
+  that would give back a state the proof was already in.
+- **Undo** (top right) takes back the last move. The **bulb** shows the
+  written proof's next move (the row glows, a ghost finger points), or, off
+  its path, how many undos get back on it; held, it plays the whole proof
+  (Watch), then says *Your turn* and starts the level afresh (watching
+  does not solve it).
 
-A move that needs a witness (the N of "there is an N", the ε/2 to use a
-limit with) offers the terms on the board and the level's kit of term
-shapes (`max(x, y)`, `x / 2`) filled with them. After every move, goals
-that are something known, both sides the same, or (where the region has
-it) arithmetic, close by themselves. **Undo** takes back the last move;
-**Watch** plays the level's written proof as a finger would. A finished
-level shows its stars (par or better: three) and its proof written out as
-a book would.
+After a move the focus goes to what it made (a new fact with moves, or the
+changed goal); goals that are something known, both sides the same, or
+(where the region has it) arithmetic close by themselves: the card flashes
+gold and flies into its pip at the top. Under the title, a dot for each
+move of par fills as moves are made, grey past par; a pip for each goal
+fills as it closes. The last goal closes with the theorem stamped Q.E.D.,
+its stars (par or better: three), and its proof written out as a book
+would.
 
 The picture above a level shows the goal on an example, and follows the
 proof: for limits, the sequences, with the band each hypothesis says they
 stay in from its N on (the N found from the example), and an ε handle
 that can be dragged; for groups, symmetries of a square, the goal's two
 sides drawn as squares.
+
+## Playing in pictures (hooks)
+
+- `L8_LEVEL=k` opens map level k (logic 0-8, groups 9-16, limits 17-21);
+  `L8_WATCH=1` plays its written proof (`L8_WATCH_PACE` in hundredths: 30
+  is quick).
+- `L8_TAPS="x,y;x,y"` taps those places (the game's pixels), one every
+  `L8_TAP_GAP` hundredths of a second (default 70), from 1.7 s on (the
+  level's title card is gone by then). `x,y>x2,y2` swipes, `x,y+ms` holds
+  (`348,30+700` holds the bulb: Watch); `-1,0` undoes, `-2,0` waits.
+- `L8_KEYS="right;1;right;right;1;a"` presses keys the same way, after the
+  taps: `left`/`right` move the cursor, `up`/`down` the focus; `1` to `4`
+  play a row (the one after the rows shown is *More*); while chips show, a
+  letter or digit picks the k-th chip (`a` or `1` the first); `enter` plays
+  the hinted row (or the first), `u` (or `back`) undoes, `h` asks for a
+  hint, `w` watches, `esc` backs out. The same keys work on a computer and
+  on the page.
+
+For example, Cancel on the left by keys (seven moves, par):
+
+```sh
+L8_LEVEL=12 L8_TAP_GAP=50 L8_KEYS="right;1;right;right;1;a;1;1;1;1;1" .build/lemma
+```
 
 ## How it is built
 
@@ -76,7 +113,10 @@ sides drawn as squares.
   player makes, played by the tests, by Watch, and to prove given lemmas.
 - The app: `paint.l8` (from the recipe book), `font.l8` (Rubik with Noto
   Sans Math, made by `tools/font.py`), `boxes.l8` (terms as nested blocks
-  that morph), `app.l8`, `pages.l8`, `picture.l8`, `touch.l8`, `main.l8`;
+  that morph on springs), `hand.l8` (the focus, the cursor's places, and
+  the hand: each candidate tried on the proof and taken back, to show what
+  it gives and drop what the kernel refuses), `app.l8` (state, moves,
+  hints and Watch), `pages.l8`, `picture.l8`, `touch.l8`, `main.l8`;
   `web/lemma` runs it in a browser.
 
 A region's theorem can be exported (`export_theorem` in moves.l8): its
@@ -98,5 +138,7 @@ to `region_files` in `app.l8` and `FILES` in `web/lemma/lemma.js`. A
 
 The Foundations region (constructing ℕ, ℤ, ℚ, ℝ and proving each
 rulebook is satisfied); Calculate replaying a certificate through the
-kernel instead of being trusted; hints beyond Watch; more regions
+kernel instead of being trusted; the limits picture reacting to Use with
+and Choose; chapter covers and a winding map; the Book as a collection of
+earned theorems; sequence notation (`aₙ` rather than `λn.`); more regions
 (topology, linear algebra); the logic region's picture; a torus.

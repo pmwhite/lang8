@@ -4,11 +4,12 @@ use_tag std, skate, lemma;
 
 // The game's state, and what each tap does.
 //
-// Three pages: the map (the regions, each a row of levels), a level being
-// played, and a finished proof written out. On a level, a tap on the goal,
-// a hypothesis or a part of either picks it, and the tray rises with the
-// moves that fit there; a move that needs a witness asks for it next, from
-// the terms on the board. Undo takes back the last move.
+// Pages: the map (the regions, each a row of levels), a level being
+// played, a finished proof written out, and the region's rules. On a
+// level, the player focuses a statement (a tap on it) and plays a row of
+// the hand (hand.l8); a move that needs a term offers chips to pick it
+// from. Undo takes back the last move; the bulb gives a hint, or (held)
+// plays the written proof.
 const PAGE_MAP: int = 0;
 
 const PAGE_LEVEL: int = 1;
@@ -35,19 +36,9 @@ const B_MAP: int = 14;
 
 const B_AGAIN: int = 15;
 
-const B_TRAY_CLOSE: int = 16;
-
-const B_INTRO: int = 17;
-
-const B_GOAL_NEXT: int = 18;
-
 const B_WATCH: int = 19;
 
 const B_RULES: int = 20;
-
-const B_MOVE: int = 2000;
-
-const B_WITNESS: int = 3000;
 
 // An expression a finger can pick a block of (by its number).
 const B_EXPR: int = 10000;
@@ -108,6 +99,8 @@ read_map() raises KernelError {
                     ml_title[ml_n] = lv_title[l];
                     ml_par[ml_n] = lv_par[l];
                     ml_index[ml_n] = l;
+                    ml_tool[ml_n] = 0;
+                    if (lv_tooln[l] > 0) ml_tool[ml_n] = pool[lv_tool0[l]];
                     ml_n = ml_n + 1
                 }
             }
@@ -198,11 +191,17 @@ enter_region(r: int) raises KernelError {
 // Moves made by the player in this level so far.
 moves_made: int = 0;
 
-// When the level was finished (or -1), and whether the finish was seen.
+// When the level was finished (or -1).
 done_t: f32 = -1.0;
 
-// The words before the level shown (until the first move).
+// When the level was opened (its title card shows a moment), and whether
+// that card was put away.
+intro_t0: f32 = 0.0;
+
 intro_open: bool = true;
+
+// When the level's words were last asked for (a tap on the title).
+say_t: f32 = -10.0;
 
 start_level(m: int) raises KernelError {
     r: int = region_of(m);
@@ -210,14 +209,25 @@ start_level(m: int) raises KernelError {
     if (loaded_region != r) return;
     playing = m;
     level_start(ml_index[m]);
+    parse_proof(ml_index[m]);
     moves_made = 0;
     done_t = -1.0;
     intro_open = true;
-    unpick();
+    intro_t0 = now_t;
+    chosen_node = -1;
+    ft_n = 0;
+    on_path = 0;
+    hint_row = -1;
+    hint_chip = -1;
+    close_t = -10.0;
+    fly_t = -10.0;
+    watch_done_t = -1.0;
     page = PAGE_LEVEL;
     sc_pos[V_LEVEL] = 0.0;
+    sc_pos[V_TRAY] = 0.0;
     an_jump = true;
-    pic_reset()
+    pic_reset();
+    focus_start(false)
 }
 
 region_of(m: int): int {
@@ -239,79 +249,6 @@ play_node(): int {
     open_nodes[0]
 }
 
-// ---- picking, and the tray ----
-// What is picked: where (the goal -1, or hypothesis j), the part's path
-// (sub_steps, sub_n; 0 steps for the whole), and the block shown picked.
-picked: bool = false;
-
-pick_hyp: int = -1;
-
-pick_whole: bool = true;
-
-pick_steps: []int = new int[256](0);
-
-pick_n: int = 0;
-
-// The tray: how far up it is, and whether it is choosing a witness for
-// candidate wit_cand (its witness wit_i, those chosen so far in wit_chosen).
-tray_t: f32 = 0.0;
-
-wit_cand: int = -1;
-
-wit_i: int = 0;
-
-wit_chosen: []int = new int[8](0);
-
-unpick() {
-    picked = false;
-    pick_slot = 0;
-    pick_key = 0;
-    wit_cand = -1;
-    cd_shown = 0
-}
-
-// A block of an expression picked: its moves listed.
-pick_block(e: int, b: int) raises KernelError {
-    n: int = play_node();
-    if (n < 0) return;
-    slot: int = ex_slot[e];
-    if (picked && slot == pick_slot && bx_key[b] == pick_key) {
-        unpick();
-        return
-    }
-    unpick();
-    hyp: int = -1;
-    if (slot != SLOT_GOAL) hyp = hyp_of_slot(n, slot);
-    if (slot != SLOT_GOAL && hyp < 0) return;
-    block_steps(b);
-    // (A block with the expression's own term is the whole of it.)
-    whole: bool = bx_parent[b] < 0 || sub_n == 0 || sub_n == 1 && is_trueprop_root(n,
-        hyp);
-    pick_n = sub_n;
-    for i in 0..sub_n pick_steps[i] = sub_steps[i];
-    if (whole) {
-        if (hyp < 0) cands_goal(n) else cands_hyp(n, hyp)
-    } else cands_sub(n, hyp);
-    pick_hyp = hyp;
-    pick_whole = whole;
-    pick_slot = slot;
-    pick_key = bx_key[b];
-    picked = true;
-    sc_pos[V_TRAY] = 0.0;
-    if (cd_shown == 0) {
-        toast("Nothing to do with that here");
-        unpick()
-    }
-}
-
-// Whether a path of one step is Trueprop's argument (the whole, as shown).
-is_trueprop_root(n: int, hyp: int): bool {
-    g: int = pn_goal[n];
-    t: int = gl_concl[g];
-    if (hyp >= 0) t = goal_hyp(g, hyp);
-    sub_steps[0] == P_ARG && tm_kind(t) == TM_APP && tm_kind(tm_fun(t)) == TM_CONST && tm_name(tm_fun(t)) == role_name[ROLE_TRUE]
-}
-
 // The slots: the goal's conclusion, and each hypothesis by its term.
 const SLOT_GOAL: int = 1;
 
@@ -321,26 +258,35 @@ hyp_slot(h: int): int {
     SLOT_HYP + h
 }
 
-hyp_of_slot(n: int, slot: int): int {
-    g: int = pn_goal[n];
-    for i in 0..gl_hypn[g] {
-        if (hyp_slot(goal_hyp(g, i)) == slot) return i
-    }
-    -1
-}
+// ---- playing a row ----
+// The candidate a term is being picked for (wit_cand), which of its terms
+// (wit_i), and those picked so far.
+wit_cand: int = -1;
 
-// A move's button tapped: made, or its first witness asked for.
-tap_move(k: int) raises KernelError {
-    if (k < 0 || k >= cd_shown) return;
-    c: int = cd_order[k];
+wit_i: int = 0;
+
+wit_chosen: []int = new int[8](0);
+
+// A row of the hand tapped (its place in the order shown): its move made,
+// or its terms asked for.
+tap_row(k: int) raises KernelError {
+    if (k < 0 || k >= hd_n || done_t >= 0.0) return;
+    r: int = hd_order[k];
+    c: int = row_cands(r);
+    if (c < 0) return;
+    last_input_t = now_t;
+    fly_from_row = k;
     if (cd_wn[c] > 0) {
+        chip_row = r;
         wit_cand = c;
         wit_i = 0;
         witness_list();
         sc_pos[V_TRAY] = 0.0;
+        // (The written proof's term glows if this is its move.)
+        if (hint_row != r) hint_chip = -1;
         return
     }
-    make_move(c)
+    play_row(r, c)
 }
 
 witness_list() raises KernelError {
@@ -350,58 +296,356 @@ witness_list() raises KernelError {
     witness_cands(n, ty)
 }
 
-tap_witness(k: int) raises KernelError {
-    if (wit_cand < 0 || k < 0 || k >= wc_n) return;
+// A chip tapped: the term picked; the move made when it has all it needs.
+tap_chip(k: int) raises KernelError {
+    if (chip_row < 0 || k < 0 || k >= wc_n) return;
+    last_input_t = now_t;
     wit_chosen[wit_i] = wc_term[k];
     wit_i = wit_i + 1;
-    if (wit_i < cd_wn[wit_cand]) {
+    r: int = chip_row;
+    c: int = row_cands(r);
+    if (c < 0) {
+        chip_back();
+        return
+    }
+    wit_cand = c;
+    if (wit_i < cd_wn[c]) {
         witness_list();
         return
     }
-    make_move(wit_cand)
+    play_row(r, c)
 }
 
-// Candidate c made at the node played (its witnesses chosen).
-make_move(c: int) raises KernelError {
+chip_back() {
+    chip_row = -1;
+    wit_cand = -1;
+    wit_i = 0
+}
+
+// Row r's move (candidate c, listed now) made at the node played.
+play_row(r: int, c0: int) raises KernelError {
     n: int = play_node();
     if (n < 0) return;
     wn: int = 0;
-    if (wit_cand == c) wn = wit_i;
+    if (wit_cand == c0 && chip_row == r) wn = wit_i;
+    for i in 0..wn move_wits[i] = wit_chosen[i];
+    // (Whether it is the written proof's next move: what that would give.)
+    want: int = 0;
+    if (on_path == moves_made) want = script_sig(moves_made, n);
+    c: int = row_cands(r);
+    if (c < 0) return;
+    old_goal: int = pn_goal[n];
+    j: int = hd_src[r];
+    if (j >= 0) touch_fact(goal_hyp(old_goal, j));
+    leaves_before = leaves_done();
+    fly_term = hd_res[r];
+    fly_fact = hd_fact[r];
     m: int = -1;
     try {
-        m = cand_apply(n, c, wit_chosen, wn)
+        m = cand_apply(n, c, move_wits, wn)
     } with KernelError -> {
-        // (The kernel would not have it: say so, and nothing changes.)
         line_clear();
         line_add("That move does not work: ");
         line_add(kernel_why);
         toast_line();
-        unpick();
+        chip_back();
+        hand_build();
         return
     }
     last_move = m;
     auto_close();
+    trial_read(n, c);
+    if (want != 0 && tr_sig == want) on_path = moves_made + 1;
     moves_made = moves_made + 1;
-    intro_open = false;
-    unpick();
-    pic_moved();
-    if (level_done()) finish_level()
+    after_move(n, old_goal)
 }
 
-undo_move() {
-    if (mv_n == 0) return;
+move_wits: []int = new int[8](0);
+
+// After any move: what closed is shown closing, the focus moves on.
+after_move(n: int, old_goal: int) raises KernelError {
+    intro_open = false;
+    chip_back();
+    hint_row = -1;
+    hint_chip = -1;
+    fly_t = now_t;
+    if (fly_term == 0) fly_t = -10.0;
+    // (A goal closed: shown snapping shut, and into its pip.)
+    if (leaves_done() > leaves_before) {
+        close_t = now_t;
+        // (What closed: the first goal under the move that is proved now,
+        // the goal itself or a side condition.)
+        close_term = gl_concl[old_goal];
+        close_calc = calc_under(n);
+        lf_n = 0;
+        leaves(n);
+        for i in 0..lf_n {
+            k: int = lf_node[lf_n - 1 - i];
+            if (pn_thm[k] != 0) {
+                close_term = gl_concl[pn_goal[k]];
+                m: int = pn_move[k];
+                close_calc = m >= 0 && mv_kind[m] == MV_CALC
+            }
+        }
+        close_pip = leaves_before;
+        fly_t = -10.0;
+        page_vibrate(20)
+    } else page_vibrate(8);
+    pic_moved();
+    if (level_done()) {
+        finish_level();
+        hd_n = 0;
+        return
+    }
+    focus_after(old_goal)
+}
+
+undo_move() raises KernelError {
+    if (mv_n == 0 || done_t >= 0.0) return;
     undo();
     if (moves_made > 0) moves_made = moves_made - 1;
-    done_t = -1.0;
-    unpick();
-    pic_moved()
+    if (on_path > moves_made) on_path = moves_made;
+    chip_back();
+    hint_row = -1;
+    undo_t = now_t;
+    close_t = -10.0;
+    fly_t = -10.0;
+    pic_moved();
+    // (The focus kept if it is still there.)
+    if (!fc_goal && focus_hyp() < 0) focus_on_goal();
+    cur_at = 0;
+    hand_build();
+    if (!fc_goal || hd_prim == 0) focus_start(false)
+}
+
+undo_t: f32 = -10.0;
+
+// The goals (leaves of the proof) closed so far.
+leaves_before: int = 0;
+
+leaves_done(): int {
+    lf_n = 0;
+    leaves(root);
+    k: int = 0;
+    for i in 0..lf_n {
+        if (pn_thm[lf_node[i]] != 0) k = k + 1
+    }
+    k
+}
+
+// The leaves of the proof (the goals, open or closed by one move), in
+// order, into lf_node.
+lf_node: []int = new int[256](0);
+
+lf_n: int = 0;
+
+leaves(n: int) {
+    if (pn_move[n] < 0 || pn_kidn[n] == 0) {
+        if (lf_n < len(lf_node)) {
+            lf_node[lf_n] = n;
+            lf_n = lf_n + 1
+        }
+        return
+    }
+    for i in 0..pn_kidn[n] leaves(node_kid(n, i))
+}
+
+// ---- juice: what a move looks like ----
+// A copy of what the move gives flies from its row to the board.
+fly_t: f32 = -10.0;
+
+fly_term: int = 0;
+
+fly_fact: bool = false;
+
+fly_from_row: int = 0;
+
+// A goal closing: when, what it was, whether by arithmetic, which pip.
+close_t: f32 = -10.0;
+
+close_term: int = 0;
+
+close_calc: bool = false;
+
+close_pip: int = 0;
+
+// On a page, a short buzz (the page does it, if the phone can).
+page_vibrate(ms: int) {
+    if (on_page) {
+        line_clear();
+        line_add("@vibrate ");
+        line_int(ms);
+        line_print_safe()
+    }
+}
+
+// ---- the written proof: hints, and watching it ----
+// How many of the player's moves so far are the written proof's first
+// moves (equal to moves_made while on its path).
+on_path: int = 0;
+
+// The row the hint points at (in hd_ numbers), and the chip (wc_ number).
+hint_row: int = -1;
+
+hint_chip: int = -1;
+
+hint_t: f32 = -10.0;
+
+// When the player last did anything (the bulb breathes after a while).
+last_input_t: f32 = 0.0;
+
+// The candidate the written proof's step k makes at node n, listed now
+// (cands_ tables), with its terms in hint_wits: or -1.
+hint_wits: []int = new int[8](0);
+
+hint_wn: int = 0;
+
+script_cand(k: int, n: int) raises KernelError: int {
+    if (k < 0 || k >= st_n || st_kind[k] == 3) return -1;
+    g: int = pn_goal[n];
+    if (st_hyp[k] >= gl_hypn[g]) return -1;
+    if (st_kind[k] == 2) {
+        target: int = gl_concl[g];
+        if (st_hyp[k] >= 0) target = goal_hyp(g, st_hyp[k]);
+        if (!find_part_text(target, st_part[k])) return -1;
+        sub_n = fp_n;
+        for i in 0..fp_n sub_steps[i] = fp_steps[i];
+        cands_sub(n, st_hyp[k])
+    } else if (st_kind[k] == 1) cands_hyp(n, st_hyp[k]) else cands_goal(n);
+    c: int = -1;
+    for i in 0..cd_shown {
+        if (cd_label[cd_order[i]] == st_label[k]) c = cd_order[i]
+    }
+    if (c < 0) return -1;
+    hint_wn = cd_wn[c];
+    for i in 0..hint_wn {
+        w: int = st_w1[k];
+        if (i == 1) w = st_w2[k];
+        hint_wits[i] = witness_sym(n, w, cand_witness_type(c, i))
+    }
+    c
+}
+
+// What the written proof's step k would give at node n (a trial's
+// fingerprint), or 0.
+script_sig(k: int, n: int) raises KernelError: int {
+    if (n != focus_node()) return 0;
+    c: int = script_cand(k, n);
+    if (c < 0) return 0;
+    for i in 0..hint_wn {
+        if (hint_wits[i] == 0) return 0
+    }
+    if (!trial(n, c, hint_wits, hint_wn)) return 0;
+    tr_sig
+}
+
+// The node the written proof plays: the first open goal.
+focus_node(): int {
+    level_open();
+    if (open_n == 0) return -1;
+    open_nodes[0]
+}
+
+// The hand's row that is the written proof's step k: the focus moved to
+// its statement (and the cursor to its part, if only there), the row
+// found (-1 if none). Its term's chip, once shown, in hint_chip.
+hint_find(k: int) raises KernelError: int {
+    n: int = focus_node();
+    if (n < 0) return -1;
+    chosen_node = n;
+    c: int = script_cand(k, n);
+    if (c < 0) return -1;
+    label: int = st_label[k];
+    sig: int = 0;
+    wit: bool = hint_wn > 0;
+    for i in 0..hint_wn hint_wit_terms[i] = hint_wits[i];
+    hint_wit_n = hint_wn;
+    path_n_k: int = 0;
+    if (st_kind[k] == 2) {
+        path_n_k = sub_n;
+        for i in 0..sub_n hint_path[i] = sub_steps[i]
+    }
+    if (!wit && trial(n, c, hint_wits, 0)) sig = tr_sig;
+    g: int = pn_goal[n];
+    if (st_hyp[k] >= 0) focus_on_fact(goal_hyp(g, st_hyp[k])) else focus_on_goal();
+    for pass in 0..2 {
+        if (pass == 1) {
+            // (Not among the whole statement's moves: at its part.)
+            if (st_kind[k] != 2) return -1;
+            cur_at = -1;
+            for p in 0..pc_n {
+                if (pc_sn[p] == path_n_k) {
+                    same: bool = true;
+                    for i in 0..path_n_k {
+                        if (pc_pool[pc_s0[p] + i] != hint_path[i]) same = false
+                    }
+                    if (same && cur_at < 0) cur_at = p
+                }
+            }
+            if (cur_at < 0) {
+                cur_at = 0;
+                return -1
+            }
+        }
+        hand_build();
+        for r in 0..hd_n {
+            hit: bool = false;
+            if (wit) hit = hd_wit[r] && hd_label[r] == label else hit = !hd_wit[r] && hd_sig[r] == sig;
+            if (hit) {
+                for q in 0..hd_n {
+                    if (hd_order[q] == r && q >= hand_shown()) more_open = true
+                }
+                return r
+            }
+        }
+    }
+    -1
+}
+
+hint_wit_terms: []int = new int[8](0);
+
+hint_wit_n: int = 0;
+
+hint_path: []int = new int[256](0);
+
+// The bulb tapped: the next step shown, or how far back the path is.
+give_hint() raises KernelError {
+    if (done_t >= 0.0 || watching) return;
+    last_input_t = now_t;
+    chip_back();
+    if (on_path < moves_made) {
+        line_clear();
+        line_add("Undo ");
+        line_int(moves_made - on_path);
+        line_add(" to get back on the book's path");
+        toast_line();
+        undo_pulse_t = now_t;
+        return
+    }
+    r: int = hint_find(moves_made);
+    if (r < 0) {
+        toast("No hint here: try Watch (hold the bulb)");
+        hand_build();
+        return
+    }
+    hint_row = r;
+    hint_t = now_t
+}
+
+undo_pulse_t: f32 = -10.0;
+
+// The hand's place (in the order shown) of row r, or -1.
+row_place(r: int): int {
+    for q in 0..hd_n {
+        if (hd_order[q] == r) return q
+    }
+    -1
 }
 
 // ---- watching the written proof ----
 // The level's proof played from the start, a move at a time, as a finger
-// would: what is tapped picked, the tray up, the button pressed, the
-// witness chosen, the move made. Its step, and when the step's next part
-// is due.
+// would: the statement focused, the row pressed, the term picked. Its
+// step, and when the step's next part is due.
 watching: bool = false;
 
 // How long its pauses are (1 as a person would watch; less for tests).
@@ -413,155 +657,134 @@ watch_phase: int = 0;
 
 watch_at: f32 = 0.0;
 
-// The candidate and witness the step will press (in cd_order, wc_term).
-watch_cand: int = -1;
+watch_row: int = -1;
 
-watch_wit: int = -1;
+watch_chip: int = -1;
+
+// When watching finished (then: "Your turn", and the level afresh).
+watch_done_t: f32 = -1.0;
+
+// The ghost finger: where it is going (a button), and whether it shows.
+ghost_id: int = 0;
+
+ghost_on: bool = false;
 
 start_watch() raises KernelError {
     if (playing < 0) return;
     start_level(playing);
-    parse_proof(ml_index[playing]);
     watching = true;
+    intro_open = false;
     watch_step = 0;
     watch_phase = 0;
-    watch_at = now_t + 0.8 * watch_pace;
-    intro_open = false
+    watch_at = now_t + 0.6 * watch_pace;
+    ghost_on = true;
+    ghost_id = 0
 }
 
 stop_watch() {
     watching = false;
-    unpick()
+    ghost_on = false;
+    press_show = 0.0
 }
 
 step_watch() raises KernelError {
+    if (watch_done_t >= 0.0) {
+        busy = true;
+        if (now_t > watch_done_t + 1.6) {
+            watch_done_t = -1.0;
+            if (playing >= 0) start_level(playing);
+            intro_open = false;
+            toast("Your turn")
+        }
+        return
+    }
     if (!watching) return;
     busy = true;
     if (now_t < watch_at) return;
-    if (watch_step >= st_n || done_t >= 0.0) {
-        watching = false;
+    if (done_t >= 0.0 || watch_step >= st_n) {
+        stop_watch();
         return
     }
-    s: int = watch_step;
-    if (st_kind[s] == 3) {
-        undo_move();
-        watch_step = s + 1;
-        watch_at = now_t + 0.6 * watch_pace;
-        return
-    }
-    n: int = play_node();
-    if (n < 0) {
-        watching = false;
-        return
-    }
-    g: int = pn_goal[n];
     if (watch_phase == 0) {
-        // (Pick what the step taps.)
-        unpick();
-        target: int = gl_concl[g];
-        slot: int = SLOT_GOAL;
-        if (st_hyp[s] >= 0 && st_hyp[s] < gl_hypn[g]) {
-            target = goal_hyp(g, st_hyp[s]);
-            slot = hyp_slot(target)
-        }
-        part: int = target;
-        if (st_kind[s] == 2) {
-            if (!find_part_text(target, st_part[s])) {
-                watching = false;
-                toast("The written proof does not fit here");
-                return
-            }
-            sub_n = fp_n;
-            for i in 0..fp_n sub_steps[i] = fp_steps[i];
-            part = rw_sub(target, g);
-            cands_sub(n, st_hyp[s]);
-            pick_whole = false
-        } else if (st_kind[s] == 1) cands_hyp(n, st_hyp[s]) else cands_goal(n);
-        // (Shown picked: the block whose term is the part, its first place.)
-        pick_slot = slot;
-        pick_key = rel_key(part);
-        picked = true;
-        pick_hyp = st_hyp[s];
-        watch_cand = -1;
-        for k in 0..cd_shown {
-            if (cd_label[cd_order[k]] == st_label[s]) watch_cand = k
-        }
-        if (watch_cand < 0) {
-            watching = false;
+        watch_row = hint_find(watch_step);
+        if (watch_row < 0) {
+            stop_watch();
             toast("The written proof does not fit here");
             return
         }
+        ghost_id = B_EXPR_SLOT;
         watch_phase = 1;
-        watch_at = now_t + 0.9 * watch_pace;
+        watch_at = now_t + 0.8 * watch_pace;
         return
     }
-    c: int = cd_order[watch_cand];
+    k: int = row_place(watch_row);
     if (watch_phase == 1) {
-        // (The button pressed.)
-        press_shown_id = B_MOVE + watch_cand;
+        ghost_id = B_ROW + k;
+        press_shown_id = B_ROW + k;
         press_show = 1.0;
         watch_phase = 2;
-        watch_at = now_t + 0.45 * watch_pace;
-        return
-    }
-    if (watch_phase == 2 && cd_wn[c] > 0 && wit_cand < 0) {
-        wit_cand = c;
-        wit_i = 0;
-        witness_list();
         watch_at = now_t + 0.5 * watch_pace;
         return
     }
-    if (watch_phase == 2 && wit_cand >= 0 && wit_i < cd_wn[c]) {
-        // (The witness: found among the choices, and pressed.)
-        w: int = st_w1[s];
-        if (wit_i == 1) w = st_w2[s];
-        t: int = witness_sym(n, w, cand_witness_type(c, wit_i));
-        watch_wit = -1;
-        for k in 0..wc_n {
-            if (wc_term[k] == t) watch_wit = k
-        }
-        if (watch_wit < 0) {
-            // (Not among the choices: chosen all the same.)
-            wit_chosen[wit_i] = t;
-            wit_i = wit_i + 1;
-            if (wit_i < cd_wn[c]) witness_list();
-            watch_at = now_t + 0.3 * watch_pace;
+    if (watch_phase == 2) {
+        press_show = 0.0;
+        tap_row(k);
+        if (chip_row < 0) {
+            watch_next();
             return
         }
-        press_shown_id = B_WITNESS + watch_wit;
-        press_show = 1.0;
         watch_phase = 3;
-        watch_at = now_t + 0.45 * watch_pace;
+        watch_at = now_t + 0.5 * watch_pace;
         return
     }
     if (watch_phase == 3) {
-        wit_chosen[wit_i] = wc_term[watch_wit];
-        wit_i = wit_i + 1;
-        if (wit_i < cd_wn[c]) {
-            witness_list();
-            watch_phase = 2;
-            watch_at = now_t + 0.4 * watch_pace;
-            return
+        // (The term: found among the chips, and pressed.)
+        t: int = hint_wit_terms[mini(wit_i, 7)];
+        watch_chip = -1;
+        for i in 0..wc_n {
+            if (wc_term[i] == t) watch_chip = i
         }
+        if (watch_chip < 0) {
+            // (Not among them: picked all the same.)
+            if (wc_n < len(wc_term)) {
+                wc_term[wc_n] = t;
+                watch_chip = wc_n;
+                wc_n = wc_n + 1
+            }
+        }
+        ghost_id = B_CHIP + watch_chip;
+        press_shown_id = B_CHIP + watch_chip;
+        press_show = 1.0;
+        watch_phase = 4;
+        watch_at = now_t + 0.45 * watch_pace;
+        return
     }
-    make_move(c);
     press_show = 0.0;
-    watch_step = s + 1;
-    watch_phase = 0;
-    watch_at = now_t + 1.0
+    tap_chip(watch_chip);
+    if (chip_row >= 0) {
+        watch_phase = 3;
+        watch_at = now_t + 0.4 * watch_pace;
+        return
+    }
+    watch_next()
 }
 
-// The key of the block showing term t (its first place).
-rel_key(t: int): int {
-    p: int = t;
-    if (tm_kind(p) == TM_APP && tm_kind(tm_fun(p)) == TM_CONST && tm_name(tm_fun(p)) == role_name[ROLE_TRUE]) p = tm_arg(p);
-    p * 16
+watch_next() {
+    watch_step = watch_step + 1;
+    watch_phase = 0;
+    watch_at = now_t + 0.9 * watch_pace;
+    if (done_t >= 0.0) {
+        watching = false;
+        watch_done_t = now_t + 1.4
+    }
 }
 
 // ---- finishing ----
 finish_level() raises KernelError {
     done_t = now_t;
     if (playing < 0) return;
+    // (Watching the written proof does not solve the level.)
+    if (watching) return;
     level_solved(ml_index[playing]);
     if (!ml_solved[playing] || moves_made < ml_best[playing]) ml_best[playing] = moves_made;
     ml_solved[playing] = true;
@@ -571,11 +794,29 @@ finish_level() raises KernelError {
 // Stars for a finish: 3 at par or better, 2 a little over, 1 otherwise.
 stars_for(m: int): int {
     if (!ml_solved[m]) return 0;
-    par: int = ml_par[m];
-    if (par == 0 || ml_best[m] <= par) return 3;
-    if (ml_best[m] <= par + 2) return 2;
+    stars_of(ml_best[m], ml_par[m])
+}
+
+stars_of(moves: int, par: int): int {
+    if (par == 0 || moves <= par) return 3;
+    if (moves <= par + 2) return 2;
     1
 }
+
+// The lemma a level needs that the player has not proved (its words), or
+// 0: the level shows a lock till it is.
+level_lock(m: int): int {
+    r: int = region_of(m);
+    // (Its tools are levels of its region, by name.)
+    want: int = ml_tool[m];
+    if (want == 0) return 0;
+    for k in rg_lv0[r]..rg_lv0[r] + rg_lvn[r] {
+        if (ml_name[k] == want && !ml_solved[k]) return ml_title[k]
+    }
+    0
+}
+
+ml_tool: []int = new int[MAP_LEVELS](0);
 
 // ---- the player's progress, as a file ----
 //   solved NAME MOVES      (a line for each level solved)
@@ -646,23 +887,68 @@ next_level(m: int): int {
 }
 
 // ---- what each button does ----
+const B_ROW: int = 2000;
+
+const B_CHIP: int = 3000;
+
+const B_DECK: int = 4000;
+
+const B_MORE: int = 21;
+
+const B_CHIP_BACK: int = 22;
+
+const B_HINT: int = 23;
+
+const B_TITLE: int = 24;
+
+const B_CUR_PREV: int = 25;
+
+const B_CUR_NEXT: int = 26;
+
+// (Where the ghost finger goes to show a statement: the focused card.)
+const B_EXPR_SLOT: int = 27;
+
 act(id: int) raises KernelError {
     if (id >= B_EXPR) return;
-    if (id >= B_WITNESS) {
-        tap_witness(id - B_WITNESS);
+    if (page == PAGE_LEVEL && intro_open && now_t - intro_t0 < 1.2) {
+        intro_open = false;
         return
     }
-    if (id >= B_MOVE) {
-        tap_move(id - B_MOVE);
+    if (id >= B_DECK) {
+        // (Another goal brought forward.)
+        level_open();
+        k: int = id - B_DECK;
+        if (k < open_n) chosen_node = open_nodes[k];
+        focus_start(false);
+        return
+    }
+    if (id >= B_CHIP) {
+        tap_chip(id - B_CHIP);
+        return
+    }
+    if (id >= B_ROW) {
+        tap_row(id - B_ROW);
         return
     }
     if (id >= B_LEVEL) {
-        start_level(id - B_LEVEL);
+        k: int = id - B_LEVEL;
+        lock: int = level_lock(k);
+        if (lock != 0) {
+            line_clear();
+            line_add("Prove ");
+            line_sym(lock);
+            line_add(" first");
+            toast_line();
+            return
+        }
+        start_level(k);
         return
     }
     if (id == B_BACK) {
-        if (page == PAGE_PROOF || page == PAGE_RULES) page = PAGE_LEVEL else page = PAGE_MAP;
-        unpick();
+        if (page == PAGE_PROOF || page == PAGE_RULES) page = PAGE_LEVEL else {
+            page = PAGE_MAP;
+            stop_watch()
+        }
         an_jump = true
     } else if (id == B_UNDO) undo_move() else if (id == B_PROOF) {
         write_proof();
@@ -671,47 +957,104 @@ act(id: int) raises KernelError {
     } else if (id == B_NEXT) {
         k: int = next_level(playing);
         if (k >= 0) start_level(k) else page = PAGE_MAP
-    } else if (id == B_MAP) {
-        page = PAGE_MAP;
-        unpick()
-    } else if (id == B_AGAIN) {
+    } else if (id == B_MAP) page = PAGE_MAP else if (id == B_AGAIN) {
         if (playing >= 0) start_level(playing)
-    } else if (id == B_TRAY_CLOSE) {
-        if (wit_cand >= 0) wit_cand = -1 else unpick()
     } else if (id == B_RULES) {
         page = PAGE_RULES;
-        unpick();
         sc_pos[V_PROOF] = 0.0
     } else if (id == B_WATCH) {
         if (watching) stop_watch() else start_watch()
-    } else if (id == B_INTRO) intro_open = false else if (id == B_GOAL_NEXT) {
-        // (The next open goal played.)
-        level_open();
-        n: int = play_node();
-        for i in 0..open_n {
-            if (open_nodes[i] == n) chosen_node = open_nodes[(i + 1) % open_n]
+    } else if (id == B_HINT) give_hint() else if (id == B_MORE) {
+        more_open = true;
+        sc_pos[V_TRAY] = 0.0
+    } else if (id == B_CHIP_BACK) chip_back() else if (id == B_TITLE) say_t = now_t else if (id == B_CUR_PREV) cursor_step(-1) else if (id == B_CUR_NEXT) cursor_step(1)
+}
+
+// A tap on an expression (not on a button): its statement focused, and
+// the cursor on the part under the finger (never a menu).
+tap_expr(e: int, x: f32, y: f32) raises KernelError {
+    if (page != PAGE_LEVEL || done_t >= 0.0) return;
+    if (intro_open && now_t - intro_t0 < 1.2) {
+        intro_open = false;
+        return
+    }
+    last_input_t = now_t;
+    slot: int = ex_slot[e];
+    n: int = play_node();
+    if (n < 0) return;
+    chip_back();
+    hint_row = -1;
+    b: int = block_at(e, x, y);
+    if (slot == SLOT_GOAL) {
+        if (!fc_goal) {
+            focus_on_goal();
+            hand_build()
         }
-        unpick()
+    } else if (slot >= SLOT_HYP && slot < SLOT_HYP + 100000000) {
+        h: int = slot - SLOT_HYP;
+        if (fc_goal || fc_term != h) {
+            focus_on_fact(h);
+            hand_build()
+        }
+    } else return;
+    // (A part: the cursor there; the same part again: the whole.)
+    p: int = 0;
+    if (b >= 0 && bx_parent[b] >= 0) p = place_of_key(bx_key[b]);
+    if (p < 0) p = 0;
+    if (p == cur_at && p != 0) p = 0;
+    if (p != cur_at) {
+        cur_at = p;
+        more_open = false;
+        hand_build()
     }
 }
 
-// A tap on an expression (not on a button): the block under the finger.
-tap_expr(e: int, x: f32, y: f32) raises KernelError {
-    if (page != PAGE_LEVEL || done_t >= 0.0) return;
-    // (Off the writing but on its card: the whole of it.)
-    b: int = block_at(e, x, y);
-    if (b < 0 && e >= 0 && ex_boxn[e] > 0) b = ex_box0[e];
-    if (b >= 0) pick_block(e, b)
+// Keys (on a computer, and L8_KEYS): arrows move the cursor (left, right)
+// and the focus (up, down); 1 to 4 play a row (4 is More when it shows);
+// while terms are offered, a letter or number picks one; Enter plays the
+// first row; u undoes, h asks for a hint, w watches.
+key_press(ks: int) raises KernelError {
+    last_input_t = now_t;
+    if (page != PAGE_LEVEL) return;
+    if (intro_open && now_t - intro_t0 < 1.2) intro_open = false;
+    if (done_t >= 0.0) {
+        if (ks == 65293 || ks == 110) act(B_NEXT);
+        return
+    }
+    if (chip_row >= 0) {
+        if (ks >= 97 && ks <= 122) tap_chip(ks - 97) else if (ks >= 49 && ks <= 57) tap_chip(ks - 49) else if (ks == 65288) chip_back();
+        return
+    }
+    if (ks == 65363) cursor_step(1) else if (ks == 65361) cursor_step(-1) else if (ks == 65362) focus_step(-1) else if (ks == 65364) focus_step(1) else if (ks == 117 || ks == 122 || ks == 65288) undo_move() else if (ks == 104) give_hint() else if (ks == 119) act(B_WATCH) else if (ks == 65293) {
+        if (hint_row >= 0) tap_row(row_place(hint_row)) else tap_row(0)
+    } else if (ks >= 49 && ks <= 57) {
+        k: int = ks - 49;
+        if (k == hand_shown() && hand_has_more()) act(B_MORE) else if (k < hand_shown()) tap_row(k)
+    }
 }
 
-// Keys (on a computer): Escape backs out, u or z undoes.
-key_press(ks: int) {
-    if (ks == 117 || ks == 122) undo_move() else if (ks == 65288 && page == PAGE_LEVEL) undo_move()
+// The focus moved to the statement above (-1) or below (1): the facts in
+// order, then the goal.
+focus_step(d: int) raises KernelError {
+    n: int = play_node();
+    if (n < 0) return;
+    g: int = pn_goal[n];
+    k: int = gl_hypn[g];
+    at: int = focus_hyp();
+    if (at < 0) at = k;
+    at = (at + d + k + 1) % (k + 1);
+    if (at == k) focus_on_goal() else focus_on_fact(goal_hyp(g, at));
+    chip_back();
+    hand_build()
 }
 
 esc_key(): bool {
-    if (picked) {
-        unpick();
+    if (chip_row >= 0) {
+        chip_back();
+        return true
+    }
+    if (more_open) {
+        more_open = false;
         return true
     }
     if (page == PAGE_PROOF || page == PAGE_RULES) {
@@ -720,6 +1063,7 @@ esc_key(): bool {
     }
     if (page == PAGE_LEVEL) {
         page = PAGE_MAP;
+        stop_watch();
         return true
     }
     false
@@ -727,12 +1071,9 @@ esc_key(): bool {
 
 step_app(dt: f32) {
     frame_dt = dt;
-    now_t = now_t + 0.0;
     step_press();
     for v in 0..VIEWS step_scroll(v);
-    target: f32 = 0.0;
-    if (picked) target = 1.0;
-    tray_t = ease_to(tray_t, target, 16.0);
+    if (page == PAGE_LEVEL && intro_open && now_t - intro_t0 < 1.6) busy = true;
     last_raise = step_watch_safe()
 }
 
@@ -742,9 +1083,16 @@ step_watch_safe(): bool {
     try {
         step_watch()
     } with KernelError -> {
-        watching = false;
+        stop_watch();
         toast("The kernel stopped the written proof");
         return false
     }
     true
+}
+
+// A line printed, if it can be (the page reads some as requests).
+line_print_safe() {
+    try {
+        line_print()
+    } with IoError _e -> { }
 }
