@@ -420,7 +420,7 @@ choose by priority:
 3. Inside a verse's text (body, verse number, LORD caps or poetry): **toggle that verse's
    selection** (§3.3). If the bars are hidden, they stay hidden. The tray is the chrome.
 4. Anywhere else (the opener, headings, refs, gaps between chapters, the margins outside
-   the text container): if a selection exists, clear it; otherwise **toggle the bar between expanded and collapsed** (§3.1.4).
+   the text container): if a selection exists, clear it; otherwise nothing. **The bar never toggles on a tap in the text** (owner, 2026-10-18: it follows the scroll alone, §3.1.4; the small title still expands it).
 
 #### 3.1.4 The collapsing bar (R2-17, replaces the Round 1 hide/show behavior)
 The reader's top bar behaves like Safari's address bar. It **collapses in step with the
@@ -510,7 +510,7 @@ text never moves** because of the bar.
   start the expansion animation in the same run-loop turn as the presentation, so the two
   animate together. A sheet never opens over a collapsed bar.
 - Any jump (picker, search, link, concordance, back capsule): expand alongside the jump.
-- A tap on a non-verse area (§3.1.3, item 4) toggles between p = 0 and p = 1, animated.
+- A tap on a non-verse area (§3.1.3, item 4) no longer changes the bar (owner, 2026-10-18).
 - **VoiceOver running** (`UIAccessibilityIsVoiceOverRunning()`): the bar never collapses
   (p stays 0).
 
