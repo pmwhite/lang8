@@ -415,8 +415,9 @@ text never moves** because of the bar.
   - The three `UIButton`s (`plainButtonConfiguration`; the same SF Symbols, size and ink
     tint as now; 44 × 44 hit areas).
   - The title button (as now).
-  - A **compact title**: a `UIButton` with `plainButtonConfiguration`, its title in SF Pro
-    **12 pt semibold**, ink at 75%, with no chevron.
+  - A **compact band button**: a `UIButton` over the compact band that expands the bar
+    when tapped. It shows nothing itself: the title button shrinks into the band (owner,
+    2026-10-18: "the smaller version should not disappear and then reappear").
 - The status bar **stays visible at all times**, as in Safari. `prefersStatusBarHidden`
   is always NO. Hiding it changes the safe area and moves the layout, and the Dynamic
   Island band can't hold text anyway, so keeping it costs no reading lines.
@@ -467,24 +468,20 @@ text never moves** because of the bar.
 **What happens to each element as `p` goes from 0 to 1:**
 | Element | Behavior |
 |---|---|
-| Search, Library and Aa buttons | alpha `1 − 2p` (gone by p = 0.5), and scale `1 − 0.15p` about their centers. `userInteractionEnabled = NO` when p > 0.5 |
-| Full title button | alpha `(1 − 2p)·f`, where `f` is the opener fade (below) |
-| Compact title | alpha `(2p − 1)·f` (appears from p = 0.5). It's centered in the compact band: top at `S`, height `C` |
+| Search, Library and Aa buttons | alpha `1 − 1.6p` (gone by p = 0.625), and scale `1 − 0.5p` about their centers, so coming back they fade in while growing to full size. `userInteractionEnabled = NO` when p > 0.5 |
+| Title button | never fades for `p`: it stays centered in the bar's row and scales `1 − (5/17)p` (17 pt type to 12 pt), ending centered in the compact band (top at `S`, height `C`). Alpha `(1 − 0.25p)·f`, where `f` is the opener fade (below), so it ends as ink at 75% |
 | Backdrop | follows the bar height. The fade's alpha is unchanged |
 | Back capsule, verse tray | unaffected |
 
 **The title fade (no duplicate chapter name):**
 - The opener-fade factor `f` (§0.5 item 1, as built) now measures the current chapter's
   opener against the **current bar bottom**, `S + E − 24p`.
-- The full title and the compact title both use `f`, so neither ever shows while the
-  chapter's opener is visible below the bar, and only one of them is ever visible at a
-  time. At p = 0.5 both are at 0, a deliberate empty moment.
-- The compact title's text is the chapter name, e.g. "John 3" or "Psalm 23", updated with
-  `cur`.
+- The title uses `f` at every size, so it never shows while the chapter's opener is
+  visible below the bar. There is one title, so no moment where it is gone.
 
 **Revealing the bar (to p = 0, animated over 0.25 s unless noted):**
 - Upward scroll after the 12 pt hysteresis (proportional, as above).
-- **Tap on the compact title** or anywhere in the compact band.
+- **Tap on the small title** or anywhere in the compact band.
 - Reaching the top (continuous, via the cap), and a tap on the status bar (the system's
   scroll-to-top, which reaches the top).
 - **Opening any sheet** from the reader (search, picker, library, settings, note, study):
