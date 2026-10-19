@@ -144,7 +144,10 @@ tools/ios/build-linux.sh device programs/bible/ios.l8 device programs/bible/ios 
 programs/bible/ios/simulate.sh build/SmoothBible.app shots                    # on a Mac
 ```
 
-`build-linux.sh` needs no Mac: the compiler links the executable itself
+Both builds are linked with iOS 26.2's SDK, so on iOS 26 the app has iOS
+26's design (the owner's choice); CI runs every group but `ios18` on the
+iOS 26.2 simulator runtime (`ios/pick.sh`), and `ios18` shows the older
+design. `build-linux.sh` needs no Mac: the compiler links the executable itself
 (`l8 arm64 --exe`), and the asset catalog (the icon and the named colors) is
 kept compiled in `ios/assets/`. When the icon or colors change, the Smooth
 Bible assets workflow (`.github/workflows/bible-assets.yml`) compiles them

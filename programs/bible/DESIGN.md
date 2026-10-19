@@ -2112,6 +2112,13 @@ wash advancing and one follow-scroll.
      check on any iOS 18 device available.
    - The minimum OS stays 16.0. iOS 16 and 17 aren't checkable in CI and are noted as
      such.
+   - (Owner decision, 2026-10-19.) The app is linked with iOS 26.2's SDK, for the
+     simulator as for the iPhone (`tools/ios/build-linux.sh`), so on iOS 26 it has iOS
+     26's design (Liquid Glass bars, sheets and buttons); the owner keeps that look. Every
+     CI group but `ios18` runs on the iOS 26.2 runtime the runners have installed
+     (`ios/pick.sh`), so all groups show that design; `ios18` remains the check of the
+     older look. (Before 2026-10-19 the simulator's app was linked with iOS 18.5's SDK by
+     the runner's default Xcode, and its screenshots showed the pre-26 design.)
 3. **Accessibility pass:**
    - Shots at the largest accessibility text size
      (`xcrun simctl ui booted content_size accessibility-extra-extra-extra-large`):

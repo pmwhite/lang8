@@ -4,7 +4,10 @@
 # store: the largest iPhone (17 Pro Max, else 16 Pro Max), for the App
 # Store's 6.9-inch screenshots. ios18: an iPhone on an iOS 18 runtime, if the
 # Mac has one (nothing printed if not). Any other: an iPhone 16 (15, 16 Pro
-# or 17) on the newest runtime.
+# or 17). Every group but ios18 runs on iOS 26.2 (the runtime the runners
+# have installed, and the SDK the app is linked with: iOS 26's design), or
+# else the newest iOS 26, or else the newest runtime, so the groups agree
+# and nothing is downloaded.
 xcrun simctl list devices available -j | python3 -c '
 import json, sys
 group = sys.argv[1]
@@ -18,6 +21,12 @@ elif group == "store":
     names = ("iPhone 16 Pro Max", "iPhone 17 Pro Max")
 else:
     names = ("iPhone 16", "iPhone 15", "iPhone 16 Pro", "iPhone 17")
+if group != "ios18":
+    for want in ("iOS-26-2", "iOS-26-"):
+        chosen = [(rt, d) for rt, d in phones if rt.endswith(want) or want.endswith("-") and want in rt]
+        if chosen:
+            phones = chosen
+            break
 pick = [d for rt, d in phones if d["name"] in names] or [d for rt, d in phones]
 if group == "store":
     best = [d for rt, d in phones if d["name"] == "iPhone 17 Pro Max"] or [d for rt, d in phones if d["name"] == "iPhone 16 Pro Max"]
