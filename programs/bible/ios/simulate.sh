@@ -28,8 +28,9 @@
 #           under it, Study's segments, the acknowledgements, the largest
 #           text; and the recording of sequences 10 and 11
 #           (versions-transitions.mp4, with versions-transitions.txt)
-#   plans   Round 5 (DESIGN.md §10.6), on the demo clock: Today in Go To,
-#           the reading plans, a plan started and read, Day Done, Catch Up;
+#   plans   Round 5 (DESIGN.md §10.6, §11.6), on the demo clock: Go To's
+#           New Ribbon… and Reading Plans, the plans and a plan's detail, a
+#           plan started there and read, Day Done, its unfinished days;
 #           the plan's Daily Reminder, its Time row (the shim's answer
 #           forced) and a reminder opened, its authorization alert (last: it
 #           outlives the app); Share as
@@ -37,12 +38,15 @@
 #           words, the largest text; the recording of sequence 12
 #           (plans-transitions.mp4); and Versions and Acknowledgements
 #           popped before a theme's change (1.0 (11)'s crash), checked
-#   reading Round 6 (DESIGN.md §11.4), on the demo clock, from a history
-#           written before the first launch (Acts 9:1 and 10:9, Psalm 23,
-#           yesterday): the readings seeded, started, moved, met, removed;
-#           Start Reading from Go To, the title's menu and a book's grid; A
-#           Chapter a Day; and the recording of sequence 13
-#           (reading-transitions.mp4); its log's checks in reading.txt
+#   ribbons Round 6 as revised (DESIGN.md §11.6), on the demo clock, from a
+#           1.0 (15) readings.tsv and a history written before the first
+#           launch: the readings made ribbons; New Ribbon Here… from the
+#           title's menu; a carried ribbon following rests and a read
+#           chapter, put down by a jump, picked up by the capsule, kept by
+#           sheets, carried by Listen; Leave Here, Move Ribbon Here; the
+#           Ribbon screen, rename, delete; New Ribbon… in Go To; Reading
+#           Plans and A Chapter a Day; and the recording of sequence 13
+#           (ribbons-transitions.mp4); its log's checks in ribbons.txt
 #   listen  Round 7 (DESIGN.md §12.7), with the audio fixture and the ESV's:
 #           the Listen section, Voice, a recording followed, Loading…, a
 #           reader changed, Faster, the next chapter, offline, the ESV by
@@ -113,22 +117,34 @@ if [ -n "$data" ]; then
   echo ok > "$data/Library/audio-fixture/mode"
   audio_fixture=Library/audio-fixture
 fi
-# (The reading group's history, before the first launch: Psalm 23:1 and
-# Acts 9:1 and 10:9, yesterday at 20:40, 21:00 and 21:20, local time.)
-if [ "$group" = reading ]; then
+# (The ribbons group's 1.0 (15), before the first launch: its history,
+# Psalm 23:1 and Acts 9:1 and 10:9, yesterday at 20:40, 21:00 and 21:20,
+# local time; four readings, Romans 3 two hours ago, Acts 10:9 yesterday at
+# 21:20, John 15 three days ago and Psalm 24 twenty days ago, and a
+# CLEARED line; readingsSeeded set. DESIGN.md §11.6.)
+if [ "$group" = ribbons ]; then
   data=$(xcrun simctl get_app_container "$dev" "$id" data 2>/dev/null)
   if [ -n "$data" ]; then
     mkdir -p "$data/Library/Application Support/SmoothBible"
-    python3 - "$data/Library/Application Support/SmoothBible/history.tsv" <<'PY'
+    python3 - "$data/Library/Application Support/SmoothBible" <<'PY'
 import datetime, sys, time
 d = datetime.date.today() - datetime.timedelta(days=1)
 def t(h, m):
     return int(time.mktime(datetime.datetime(d.year, d.month, d.day, h, m).timetuple()))
-with open(sys.argv[1], "w") as f:
+now = int(time.time())
+day = 86400
+with open(sys.argv[1] + "/history.tsv", "w") as f:
     f.write("PSA\t23\t1\t%d\t0\t1\nACT\t9\t1\t%d\t0\t1\nACT\t10\t9\t%d\t0\t1\n" % (t(20, 40), t(21, 0), t(21, 20)))
+with open(sys.argv[1] + "/readings.tsv", "w") as f:
+    f.write("READING\tROM\t3\t0\t0\t%d\t%d\n" % (now - 4 * day, now - 2 * 3600))
+    f.write("READING\tACT\t10\t9\t0\t%d\t%d\n" % (t(21, 0), t(21, 20)))
+    f.write("READING\tJHN\t15\t0\t0\t%d\t%d\n" % (now - 6 * day, now - 3 * day))
+    f.write("READING\tPSA\t24\t0\t0\t%d\t%d\n" % (now - 25 * day, now - 20 * day))
+    f.write("CLEARED\t%d\n" % (now - 5 * day))
 PY
-    echo "reading history written"; cat "$data/Library/Application Support/SmoothBible/history.tsv"
+    echo "ribbons group's 1.0 (15) files written"; cat "$data/Library/Application Support/SmoothBible/"*.tsv
   fi
+  xcrun simctl spawn "$dev" defaults write "$id" readingsSeeded -bool true 2>/dev/null || true
 fi
 # (Every other group: the server as if it were not there, L8_ESV_OFF, so
 # that no shot depends on the network or shows the ESV; review r5-1.)
@@ -601,34 +617,34 @@ plans)
   grep -q "scheduled [0-9]* daily reminders" "$out/notify.txt" || { echo "FAILED: nothing scheduled" | tee -a "$out/notify.txt"; failed=1; }
   grep -q "popped lists survived" "$out/notify.txt" || { echo "FAILED: the popped lists' step did not finish" | tee -a "$out/notify.txt"; failed=1; }
   ;;
-reading)
-  # (DESIGN.md §11.4: shots 160 to 182.)
-  step 290 160-reading-seeded 6
-  step 291 161-reading-started 8
-  step 292 162-casual-visits 14
-  step 293 163-reading-moved 10
-  step 294 164-jump-moves-nothing 10
-  step 295 165-two-in-a-row 8
-  step 296 166-continue-exact 6
-  step 297 167-with-plan 14
-  step 298 168-show-all 6
-  step 299 169-reading-all 6
-  step 300 170-met 8
-  step 301 171-across-books 10
-  step 302 171b-removed 6
+ribbons)
+  # (DESIGN.md §11.6: shots 160 to 182.)
+  step 290 160-ribbons-migrated 6
+  step 291 161-title-menu 10
+  step 292 162-new-ribbon 8
+  step 293 163-ribbon-made 6
+  step 294 164-carried-menu 6
+  step 295 165-follows 8
+  step 296 166-back-a-little 6
+  step 297 167-chapter-read 6
+  step 298 168-jump-puts-down 10
+  step 299 169-capsule-picks-up 6
+  step 300 170-sheets-keep 10
+  step 301 171-open-another 6
+  step 302 172-listen-carries 10
+  step 303 173-leave-here 8
+  step 304 174-move-here 10
+  step 305 175-ribbon-details 8
+  step 306 176-renamed 6
+  step 307 177-deleted 6
+  step 308 178a-new-ribbon-jude 10
+  step 309 178-new-from-go-to 6
   ui content_size accessibility-extra-extra-extra-large
-  step 303 172-ax-goto-reading 8
+  step 310 179-ax-goto-ribbons 8
   ui content_size large
-  step 304 173-title-menu 8
-  step 305 174-start-sheet 8
-  step 306 175-started-toast 6
-  step 307 176-goto-one-list 6
-  step 308 177-grid-toolbar 6
-  step 309 178-start-from-grid 8
-  step 310 179-plan-preview 6
-  step 311 180-chapter-a-day 12
-  step 312 181-plan-removed 6
-  step 313 182-chosen-jude 12
+  step 311 180-plans 6
+  step 312 181-chapter-a-day 10
+  step 313 182-plan-and-ribbons 10
   # The screen recording of sequence 13.
   # (Sequence 13's setup, before the mark: review r6-1.)
   step 342 "" 10
@@ -643,26 +659,37 @@ reading)
   sleep 0.5
   : > "$out/transitions.txt"
   a=$(now)
-  step 314 "" 30
+  step 314 "" 24
   b=$(now)
   echo "13 $(python3 -c "print(round($a - $rec0, 2), round($b - $rec0, 2))")" >> "$out/transitions.txt"
   sleep 0.5
   kill -INT "$recorder" 2>/dev/null
   wait "$recorder" 2>/dev/null
-  # The walk, from the log: each start, move, meeting, removal; nothing
-  # started by the casual visits (162) or by the plan's chapters (167).
-  grep -h "bible: reading\|bible: readings\|bible: chapter read\|bible: title menu\|bible: toast\|bible: plan\|plans-done\|CLEARED\|bible: demo step\|bible: start" \
-    "$out/console.txt" > "$out/reading.txt" 2>/dev/null
-  for want in "readings seeded 1" "reading started at ROM 2" "chapter read 1CO 13" "reading moved to ROM 3:9" \
-      "reading started at JHN 15" "readings met at JHN 17" "reading moved to COL 1" "reading removed at ACT 10" \
-      "readings.tsv CLEARED lines 1" "title menu: Start Reading Here… · Mark 1" "reading started at MRK 1 (chosen)" \
-      "toast Reading from Mark 1" "plan archived" "reading started at JUD 1 (chosen)"; do
-    grep -qF "$want" "$out/reading.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/reading.txt"; failed=1; }
+  # The walk, from the log: each make, pick-up, move, put-down, move-here,
+  # rename, delete and the migration (§11.6); nothing moved while put down.
+  grep -h "bible: ribbon\|bible: readings\|bible: chapter read\|bible: chapter heard\|bible: title menu\|bible: toast\|bible: plan\|bible: demo step\|table off the window" \
+    "$out/console.txt" > "$out/ribbons.txt" 2>/dev/null
+  for want in "ribbons migrated 3 of 4" "readings-r6.tsv there 1" "New Ribbon Here… · Mark 1 / Move Ribbon Here: Romans, Acts, John" \
+      "ribbon made: Morning at MRK 1" "ribbon picked up: Morning" "toast Reading with Morning" \
+      "Reading with Morning [Leave Morning Here / New Ribbon Here…" \
+      "ribbon moved: Morning to MRK 2:5" "ribbon moved: Morning to MRK 2:3" "ribbon moved: Morning to MRK 3" \
+      "ribbon put down: Morning at MRK 3" "ribbon picked up: Morning (back)" "ribbon moved: Morning to MRK 3:7" \
+      "ribbon put down: Morning at MRK 3:7" "ribbon picked up: Acts" "toast Reading with Acts" \
+      "chapter heard ACT 10" "ribbon moved: Acts to ACT 11" "ribbon put down: Acts at ACT 11" "toast Acts left at Acts 11" \
+      "ribbon moved here: Romans to ROM 8" "toast Reading with Romans" "ribbon renamed: Morning to With Anna" \
+      "ribbon deleted: John" "ribbon made: Jude at JUD 1" "toast Reading with Jude" "ribbon put down: Jude at JUD 1" \
+      "toast Started Hebrews, a Chapter a Day"; do
+    grep -qF "$want" "$out/ribbons.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/ribbons.txt"; failed=1; }
   done
-  for bad in "reading started at 1CO" "reading started at ISA" "reading started at GEN" "reading started at ROM 9"; do
-    grep -qF "$bad" "$out/reading.txt" && { echo "FAILED: \"$bad\"" | tee -a "$out/reading.txt"; failed=1; }
+  for bad in "ribbon moved: Acts to ACT 11:5" "ribbon made: Psalms" "ribbon moved: Morning to 1CO" "ribbon moved: Morning to ISA"; do
+    grep -qF "$bad" "$out/ribbons.txt" && { echo "FAILED: \"$bad\"" | tee -a "$out/ribbons.txt"; failed=1; }
   done
-  tail -5 "$out/reading.txt"
+  # (Put down by the search's jump: nothing moves Morning until the capsule
+  # picks it up again.)
+  awk '/ribbon put down: Morning at MRK 3$/ { down = 1 } /ribbon picked up: Morning \(back\)/ { down = 0 }
+    down && /ribbon moved: Morning/ { print "FAILED: moved while put down: " $0; bad = 1 } END { exit bad }' "$out/ribbons.txt" \
+    || { echo "FAILED: Morning moved while put down" | tee -a "$out/ribbons.txt"; failed=1; }
+  tail -5 "$out/ribbons.txt"
   ;;
 listen)
   # (DESIGN.md §12.7: shots 190 to 203.)

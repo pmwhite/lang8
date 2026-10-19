@@ -1,0 +1,697 @@
+tag bible;
+
+use_tag std;
+
+// Ribbons (DESIGN.md §11.1), apart from any platform: named places, made
+// only by the reader, kept in the order made (at most 12); one at a time
+// carried, which then takes every rest's place (a read chapter's end
+// being the next one's top) and moves on as its chapter is read; put down
+// by any jump, by Leave Here or by its deletion, and picked up again by
+// the capsule back from the jump that put it down; ribbons.tsv's lines in
+// fbuf, as store.l8's files are; up to three of Round 6's readings
+// (readings.tsv) made ribbons once; and the words a row says. Times are
+// unix seconds, given by the platform. test_ribbons.l8 tests it.
+import "text.l8";
+
+import "store.l8";
+
+RB_MOST: int = 12;
+
+// A name's most characters, and bytes (four a character).
+RB_NAME_MOST: int = 40;
+
+RB_NAME_BYTES: int = 160;
+
+DAY_S: int = 86400;
+
+// ---- the ribbons, in the order made ----
+rb_n: int = 0;
+
+rb_id: []int = new int[12](0);
+
+rb_name: []i8 = new i8[1920](0i8);
+
+rb_name_n: []int = new int[12](0);
+
+rb_c: []int = new int[12](0);
+
+rb_v: []int = new int[12](0);
+
+rb_frac: []int = new int[12](0);
+
+rb_made: []int = new int[12](0);
+
+rb_last: []int = new int[12](0);
+
+// The next id given (ids are never reused while ribbons.tsv is kept).
+rb_next: int = 1;
+
+// The ribbon carried (its id), or 0.
+rb_carried: int = 0;
+
+// The ribbon the last jump put down (P4: the capsule back from it picks
+// it up again), or 0; and, while the capsule's own jump is made, the one
+// its arrival is to pick up.
+rb_back: int = 0;
+
+rb_back_due: int = 0;
+
+// The chapters counted read since the carried ribbon was picked up (M1's
+// exception).
+rb_read: []bool = new bool[1200](false);
+
+rb_index(id: int): int {
+    if (id <= 0) return -1;
+    for i in 0..rb_n
+        if (rb_id[i] == id) return i;
+    -1
+}
+
+// The ribbon carried's index, or -1.
+rb_carried_i(): int {
+    rb_index(rb_carried)
+}
+
+// ---- what happened (for the log): lines, drained by the platform ----
+rbe: []i8 = new i8[4096](0i8);
+
+rbe_n: int = 0;
+
+ev(k: int) {
+    if (rbe_n < len(rbe)) {
+        rbe[rbe_n] = k trunc i8;
+        rbe_n = rbe_n + 1
+    }
+}
+
+ev_str(s: str) {
+    for k in s ev(k as int)
+}
+
+ev_int(n: int) {
+    if (n < 0) {
+        ev(45);
+        ev_int(-n);
+        return
+    }
+    if (n >= 10) ev_int(n / 10);
+    ev(48 + n % 10)
+}
+
+ev_name(i: int) {
+    for k in 0..rb_name_n[i] ev(rb_name[i * RB_NAME_BYTES + k] as int)
+}
+
+// A place as the log has it: ROM 3, ROM 3:9.
+ev_place(c: int, v: int) {
+    for i in 0..3 ev(bsb[book_line[ch_book[c]] + 1 + i] as int);
+    ev(32);
+    ev_int(ch_num[c]);
+    if (v >= 2) {
+        ev(58);
+        ev_int(v)
+    }
+}
+
+// "ribbon <what>: <name>", the line not yet ended.
+ev_begin(what: str, i: int) {
+    ev_str("ribbon ");
+    ev_str(what);
+    ev_str(": ");
+    ev_name(i)
+}
+
+ev_end() {
+    ev(10)
+}
+
+// ---- names ----
+// A name typed (or read): tabs and line ends made spaces, trimmed, cut at
+// 40 characters (and trimmed again), into slot i; its length.
+nm_buf: []i8 = new i8[160](0i8);
+
+nm_n: int = 0;
+
+// The name in nb (n bytes) made a name, into nm_buf.
+name_clean(nb: []i8, n: int) {
+    nm_n = 0;
+    chars: int = 0;
+    for j in 0..n {
+        k: int = nb[j] as int & 255;
+        if (k == 9 || k == 10 || k == 13) k = 32;
+        // (A character begins at any byte that is not a continuation.)
+        starts: bool = k < 128 || k >= 192;
+        if (k != 32 || nm_n > 0) {
+            if (starts) chars = chars + 1;
+            if (chars <= RB_NAME_MOST && nm_n < RB_NAME_BYTES) {
+                nm_buf[nm_n] = k trunc i8;
+                nm_n = nm_n + 1
+            }
+        }
+    }
+    while (nm_n > 0 && nm_buf[nm_n - 1] as int == 32) nm_n = nm_n - 1
+}
+
+name_set(i: int, b: []i8, n: int) {
+    for k in 0..n rb_name[i * RB_NAME_BYTES + k] = b[k];
+    rb_name_n[i] = n
+}
+
+// Whether ribbon i is named b (n bytes), exactly.
+name_is(i: int, b: []i8, n: int): bool {
+    if (rb_name_n[i] != n) return false;
+    for k in 0..n
+        if (rb_name[i * RB_NAME_BYTES + k] != b[k]) return false;
+    true
+}
+
+name_taken(b: []i8, n: int): bool {
+    for i in 0..rb_n
+        if (name_is(i, b, n)) return true;
+    false
+}
+
+// The default name for chapter c, into nm_buf: its book's ("Romans",
+// "Psalms"), or "Romans (2)", "(3)" if a ribbon has it.
+name_default(c: int) {
+    b: int = ch_book[c];
+    s: int = book_name_start(b);
+    e: int = book_name_end(b);
+    base: int = e - s;
+    for k in 0..base nm_buf[k] = bsb[s + k];
+    nm_n = base;
+    m: int = 2;
+    while (name_taken(nm_buf, nm_n) && m < 100) {
+        nm_n = base;
+        for k in " (" {
+            nm_buf[nm_n] = k;
+            nm_n = nm_n + 1
+        }
+        if (m >= 10) {
+            nm_buf[nm_n] = (48 + m / 10) trunc i8;
+            nm_n = nm_n + 1
+        }
+        nm_buf[nm_n] = (48 + m % 10) trunc i8;
+        nm_buf[nm_n + 1] = 41i8;
+        nm_n = nm_n + 2;
+        m = m + 1
+    }
+}
+
+// ---- the list ----
+rb_add(
+    id: int,
+    c: int,
+    v: int,
+    frac: int,
+    made: int,
+    last: int
+): int {
+    if (rb_n >= RB_MOST) return -1;
+    i: int = rb_n;
+    rb_id[i] = id;
+    rb_c[i] = c;
+    rb_v[i] = v;
+    rb_frac[i] = frac;
+    rb_made[i] = made;
+    rb_last[i] = last;
+    rb_name_n[i] = 0;
+    rb_n = rb_n + 1;
+    if (id >= rb_next) rb_next = id + 1;
+    i
+}
+
+rb_remove(i: int) {
+    if (i < 0 || i >= rb_n) return;
+    for j in i..rb_n - 1 {
+        rb_id[j] = rb_id[j + 1];
+        rb_c[j] = rb_c[j + 1];
+        rb_v[j] = rb_v[j + 1];
+        rb_frac[j] = rb_frac[j + 1];
+        rb_made[j] = rb_made[j + 1];
+        rb_last[j] = rb_last[j + 1];
+        for k in 0..rb_name_n[j + 1] rb_name[j * RB_NAME_BYTES + k] = rb_name[(j + 1) * RB_NAME_BYTES + k];
+        rb_name_n[j] = rb_name_n[j + 1]
+    }
+    rb_n = rb_n - 1
+}
+
+// Nothing at all (no ribbons, none carried; ids from 1).
+ribbons_clear() {
+    rb_n = 0;
+    rb_next = 1;
+    rb_carried = 0;
+    rb_back = 0;
+    rb_back_due = 0;
+    for c in 0..len(rb_read) rb_read[c] = false
+}
+
+// ---- making a ribbon (§11.1.2) ----
+// A ribbon named nb (n bytes; empty: the default) at (c, v, frac), made
+// at now, last in the list: its id, or 0 (12 already, or no such place).
+// It is not picked up here (the platform does that, after its jump).
+ribbon_make(
+    nb: []i8,
+    n: int,
+    c: int,
+    v: int,
+    frac: int,
+    now: int
+): int {
+    if (rb_n >= RB_MOST || c < 0 || c >= chapters) return 0;
+    name_clean(nb, n);
+    if (nm_n == 0) name_default(c);
+    id: int = rb_next;
+    i: int = rb_add(id, c, if (v < 0) 0 else v, frac, now, now);
+    name_set(i, nm_buf, nm_n);
+    ev_begin("made", i);
+    ev_str(" at ");
+    ev_place(c, rb_v[i]);
+    ev_end();
+    id
+}
+
+// ---- picking up and putting down (§11.1.3) ----
+// Ribbon id picked up (by opening it, making it, Move Ribbon Here, or the
+// capsule: back): carried, its place and time as they are; the chapters
+// read since begun again.
+ribbon_pick_up(id: int, back: bool) {
+    i: int = rb_index(id);
+    if (i < 0) return;
+    if (rb_carried != 0 && rb_carried != id) _p: bool = ribbon_put_down();
+    rb_carried = id;
+    if (rb_back == id) rb_back = 0;
+    for c in 0..len(rb_read) rb_read[c] = false;
+    ev_begin("picked up", i);
+    if (back) ev_str(" (back)");
+    ev_end()
+}
+
+// The ribbon carried put down where it is (never measured again):
+// whether one was.
+ribbon_put_down(): bool {
+    i: int = rb_carried_i();
+    rb_carried = 0;
+    if (i < 0) return false;
+    ev_begin("put down", i);
+    ev_str(" at ");
+    ev_place(rb_c[i], rb_v[i]);
+    ev_end();
+    true
+}
+
+// P1: a jump, before it moves the reader: the ribbon carried put down
+// where it is. kind 0, a jump with an origin the capsule goes back to (the
+// one put down remembered with it, P4); 1, the capsule's own (what it is
+// to pick up kept for its arrival, ribbon_capsule_back); 2, a jump that
+// leaves the capsule as it is (the status bar's, the chapter on the
+// screen's own row): nothing remembered. Whether one was put down.
+ribbon_jumped(kind: int): bool {
+    was: int = rb_carried;
+    if (kind == 1) rb_back_due = rb_back else rb_back_due = 0;
+    put: bool = ribbon_put_down();
+    rb_back = (if (kind == 2) 0 else was);
+    put
+}
+
+// P4: the capsule arrived: the ribbon the jump it undid put down, picked
+// up again (its id, or 0).
+ribbon_capsule_back(): int {
+    id: int = rb_back_due;
+    rb_back_due = 0;
+    if (rb_index(id) < 0) return 0;
+    ribbon_pick_up(id, true);
+    id
+}
+
+// ---- how the carried ribbon moves (§11.1.4) ----
+// Its place set (and its time): the log says so if the place changed.
+rb_move_to(
+    i: int,
+    c: int,
+    v: int,
+    frac: int,
+    now: int
+) {
+    moved: bool = rb_c[i] != c || rb_v[i] != v;
+    rb_c[i] = c;
+    rb_v[i] = v;
+    rb_frac[i] = frac;
+    rb_last[i] = now;
+    if (moved) {
+        ev_begin("moved", i);
+        ev_str(" to ");
+        ev_place(c, v);
+        ev_end()
+    }
+}
+
+// M1: a scroll's rest at (c, v, frac), end_seen if c's last verse is on
+// the screen: the ribbon carried takes it, either way; a chapter read
+// since it was picked up, and its end in sight, gives the next one's top
+// (not past Revelation 22). Whether one was carried (ribbons.tsv to be
+// written).
+ribbon_rest(
+    c: int,
+    v: int,
+    frac: int,
+    end_seen: bool,
+    now: int
+): bool {
+    i: int = rb_carried_i();
+    if (i < 0 || c < 0 || c >= chapters) return false;
+    if (rb_read[c] && end_seen && c + 1 < chapters) rb_move_to(i, c + 1, 0, 0, now) else rb_move_to(i,
+        c, if (v < 0) 0 else v, frac, now);
+    true
+}
+
+// M2: chapter c counted read (by rest or by Listen): with the ribbon
+// carried in it, it moves to the next one's top (Revelation 22's end
+// keeps it). Whether it moved.
+ribbon_read(c: int, now: int): bool {
+    if (c < 0 || c >= chapters) return false;
+    i: int = rb_carried_i();
+    if (i < 0) return false;
+    rb_read[c] = true;
+    if (rb_c[i] != c || c + 1 >= chapters) return false;
+    rb_move_to(i, c + 1, 0, 0, now);
+    true
+}
+
+// P2: Leave Here: the place measured once (a rest), then put down.
+ribbon_leave_here(
+    c: int,
+    v: int,
+    frac: int,
+    end_seen: bool,
+    now: int
+): bool {
+    if (rb_carried_i() < 0) return false;
+    _r: bool = ribbon_rest(c, v, frac, end_seen, now);
+    ribbon_put_down()
+}
+
+// ---- Move Ribbon Here, rename, delete (§11.1.5) ----
+ribbon_move_here(
+    id: int,
+    c: int,
+    v: int,
+    frac: int,
+    now: int
+) {
+    i: int = rb_index(id);
+    if (i < 0 || c < 0 || c >= chapters) return;
+    if (rb_carried != 0 && rb_carried != id) _p: bool = ribbon_put_down();
+    rb_c[i] = c;
+    rb_v[i] = (if (v < 0) 0 else v);
+    rb_frac[i] = frac;
+    rb_last[i] = now;
+    ev_begin("moved here", i);
+    ev_str(" to ");
+    ev_place(c, rb_v[i]);
+    ev_end();
+    if (rb_carried != id) ribbon_pick_up(id, false) else {
+        if (rb_back == id) rb_back = 0;
+        for x in 0..len(rb_read) rb_read[x] = false
+    }
+}
+
+// Renamed to nb (n bytes), trimmed; empty keeps the old name. Whether the
+// name changed.
+ribbon_rename(id: int, nb: []i8, n: int): bool {
+    i: int = rb_index(id);
+    if (i < 0) return false;
+    name_clean(nb, n);
+    if (nm_n == 0 || name_is(i, nm_buf, nm_n)) return false;
+    ev_begin("renamed", i);
+    ev_str(" to ");
+    for k in 0..nm_n ev(nm_buf[k] as int);
+    ev_end();
+    name_set(i, nm_buf, nm_n);
+    true
+}
+
+ribbon_delete(id: int) {
+    i: int = rb_index(id);
+    if (i < 0) return;
+    ev_begin("deleted", i);
+    ev_end();
+    if (rb_carried == id) rb_carried = 0;
+    if (rb_back == id) rb_back = 0;
+    if (rb_back_due == id) rb_back_due = 0;
+    rb_remove(i)
+}
+
+// ---- the file (§11.1.6) ----
+// ribbons.tsv: RIBBON ID NAME BOOK C V FRAC MADE LAST in the order made;
+// CARRIED ID while one is; NEXT ID (the next id to give, so none is given
+// twice).
+format_ribbons() {
+    fbuf_n = 0;
+    for i in 0..rb_n {
+        fput_str("RIBBON\t");
+        fput_int(rb_id[i]);
+        fput(9);
+        for k in 0..rb_name_n[i] fput(rb_name[i * RB_NAME_BYTES + k] as int);
+        fput(9);
+        fput_book(ch_book[rb_c[i]]);
+        fput_int(ch_num[rb_c[i]]);
+        fput(9);
+        fput_int(rb_v[i]);
+        fput(9);
+        fput_int(rb_frac[i]);
+        fput(9);
+        fput_int(rb_made[i]);
+        fput(9);
+        fput_int(rb_last[i]);
+        fput(10)
+    }
+    if (rb_carried_i() >= 0) {
+        fput_str("CARRIED\t");
+        fput_int(rb_carried);
+        fput(10)
+    }
+    fput_str("NEXT\t");
+    fput_int(rb_next);
+    fput(10)
+}
+
+// Malformed lines skipped; a second line of an id, and a CARRIED naming
+// none, ignored.
+parse_ribbons() {
+    begin_lines();
+    ribbons_clear();
+    carried: int = 0;
+    next: int = 1;
+    lines_read = 0;
+    lines_skipped = 0;
+    while (next_line()) {
+        if (line_e > fpos) {
+            lines_read = lines_read + 1;
+            f2: int = field_after(fpos);
+            if (field_is(fpos, "RIBBON")) {
+                f3: int = field_after(f2);
+                f4: int = field_after(f3);
+                f6: int = field_after(field_after(f4));
+                f7: int = field_after(f6);
+                f8: int = field_after(f7);
+                f9: int = field_after(f8);
+                id: int = field_num(f2, false);
+                c: int = field_chapter(f4);
+                v: int = if (c >= 0) field_verse(f6, c, true) else -1;
+                frac: int = field_num(f7, true);
+                made: int = field_num(f8, false);
+                last: int = field_num(f9, false);
+                nn: int = 0;
+                if (f3 <= line_e) {
+                    e: int = field_end(f3);
+                    for q in f3..e {
+                        if (nn < len(rd_name)) {
+                            rd_name[nn] = fbuf[q];
+                            nn = nn + 1
+                        }
+                    }
+                }
+                name_clean(rd_name, nn);
+                if (id > 0 && c >= 0 && v >= 0 && frac != missing_num && made >= 0 && last >= 0 && nm_n > 0 && rb_n < RB_MOST) {
+                    if (rb_index(id) < 0) {
+                        i: int = rb_add(id, c, v, frac, made, last);
+                        name_set(i, nm_buf, nm_n)
+                    }
+                } else skip_line()
+            } else if (field_is(fpos, "CARRIED")) {
+                id: int = field_num(f2, false);
+                if (id > 0) carried = id else skip_line()
+            } else if (field_is(fpos, "NEXT")) {
+                id: int = field_num(f2, false);
+                if (id > 0) next = id else skip_line()
+            } else skip_line()
+        }
+    }
+    if (next > rb_next) rb_next = next;
+    if (rb_index(carried) >= 0) rb_carried = carried
+}
+
+rd_name: []i8 = new i8[512](0i8);
+
+// ---- from Round 6's readings (§11.4) ----
+// Whether to: once, at the first launch with ribbons (readings.tsv there,
+// ribbons.tsv not).
+ribbons_migrate_due(readings_exist: bool, ribbons_exist: bool): bool {
+    readings_exist && !ribbons_exist
+}
+
+// readings.tsv in fbuf (READING BOOK C V FRAC STARTED LAST; CLEARED
+// ignored): of its readings, those last read in the 14 days to now,
+// newest first, at most 3, made ribbons (named by the default rule, at
+// their places; MADE their start, LAST their last), none carried. How
+// many were made; mg_of how many readings there were.
+mg_of: int = 0;
+
+mg_c: []int = new int[256](0);
+
+mg_v: []int = new int[256](0);
+
+mg_frac: []int = new int[256](0);
+
+mg_started: []int = new int[256](0);
+
+mg_last: []int = new int[256](0);
+
+mg_used: []bool = new bool[256](false);
+
+migrate_readings(now: int): int {
+    begin_lines();
+    n: int = 0;
+    while (next_line()) {
+        if (line_e > fpos && field_is(fpos, "READING") && n < len(mg_c)) {
+            f2: int = field_after(fpos);
+            c: int = field_chapter(f2);
+            f4: int = field_after(field_after(f2));
+            f5: int = field_after(f4);
+            f6: int = field_after(f5);
+            f7: int = field_after(f6);
+            v: int = if (c >= 0) field_verse(f4, c, true) else -1;
+            frac: int = field_num(f5, true);
+            started: int = field_num(f6, false);
+            last: int = field_num(f7, false);
+            if (c >= 0 && v >= 0 && frac != missing_num && started >= 0 && last >= 0) {
+                mg_c[n] = c;
+                mg_v[n] = v;
+                mg_frac[n] = frac;
+                mg_started[n] = started;
+                mg_last[n] = last;
+                mg_used[n] = false;
+                n = n + 1
+            }
+        }
+    }
+    mg_of = n;
+    made: int = 0;
+    while (made < 3 && rb_n < RB_MOST) {
+        best: int = -1;
+        for j in 0..n {
+            if (!mg_used[j] && mg_last[j] >= now - 14 * DAY_S && (best < 0 || mg_last[j] > mg_last[best])) best = j
+        }
+        if (best < 0) return made;
+        mg_used[best] = true;
+        name_default(mg_c[best]);
+        i: int = rb_add(rb_next, mg_c[best], mg_v[best], mg_frac[best], mg_started[best],
+            mg_last[best]);
+        name_set(i, nm_buf, nm_n);
+        made = made + 1
+    }
+    made
+}
+
+// ---- what a row says (§11.2.1) ----
+// The name.
+fput_ribbon_name(i: int) {
+    for k in 0..rb_name_n[i] fput(rb_name[i * RB_NAME_BYTES + k] as int)
+}
+
+// Where it is: "Romans 8:12" (from verse 2), else "Romans 8"; "Psalm
+// 41"; "Jude".
+fput_ribbon_place(i: int) {
+    c: int = rb_c[i];
+    if (rb_v[i] >= 2) fput_ref(c, rb_v[i], 0) else fput_title(c)
+}
+
+// The same, said: "Romans, chapter 8, verse 12".
+fput_ribbon_spoken(i: int) {
+    fput_spoken_title(rb_c[i]);
+    if (rb_v[i] >= 2) {
+        fput_str(", verse ");
+        fput_int(rb_v[i])
+    }
+}
+
+// When: "Now" (the last 10 minutes), "Today", "Yesterday", a weekday (the
+// week past), else "12 October" (and its year, if not this one); off is
+// the local time's offset from UTC. when_kind: 0 to 4, which of these.
+when_kind: int = 0;
+
+fput_when(t: int, now: int, off: int) {
+    if (now - t < 600 && now >= t) {
+        when_kind = 0;
+        fput_str("Now");
+        return
+    }
+    d: int = day_of(t + off);
+    today: int = day_of(now + off);
+    if (d == today) {
+        when_kind = 1;
+        fput_str("Today")
+    } else if (d == today - 1) {
+        when_kind = 2;
+        fput_str("Yesterday")
+    } else if (d > today - 7 && d < today) {
+        when_kind = 3;
+        fput_str(weekday_names[weekday_of(d)])
+    } else {
+        when_kind = 4;
+        civil_date(today);
+        y: int = date_y;
+        civil_date(d);
+        fput_int(date_d);
+        fput(32);
+        fput_str(month_names[date_m - 1]);
+        if (date_y != y) {
+            fput(32);
+            fput_int(date_y)
+        }
+    }
+}
+
+// Its second line: "Romans 8:12 · Yesterday".
+fput_ribbon_line(i: int, now: int, off: int) {
+    fput_ribbon_place(i);
+    fput_str(" \�\� ");
+    fput_when(rb_last[i], now, off)
+}
+
+// "Read yesterday", "Read just now", "Read on Monday", "Read on 12
+// October".
+fput_ribbon_read(i: int, now: int, off: int) {
+    fput_str("Read ");
+    at: int = fbuf_n;
+    fput_when(rb_last[i], now, off);
+    if (when_kind == 0) {
+        fbuf_n = at;
+        fput_str("just now")
+    } else if (when_kind <= 2) fbuf[at] = (fbuf[at] as int + 32) trunc i8 else {
+        fbuf_n = at;
+        fput_str("on ");
+        fput_when(rb_last[i], now, off)
+    }
+}
+
+// VoiceOver's: "Morning. Romans, chapter 8, verse 12. Read yesterday."
+fput_ribbon_label(i: int, now: int, off: int) {
+    fput_ribbon_name(i);
+    fput_str(". ");
+    fput_ribbon_spoken(i);
+    fput_str(". ");
+    fput_ribbon_read(i, now, off);
+    fput(46)
+}
