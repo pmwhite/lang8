@@ -570,6 +570,8 @@ plans)
   step 259 158-ax-goto-today 8
   ui content_size large
   # The screen recording of sequence 12.
+  # (Sequence 12's setup, before the mark: review r6-1.)
+  step 341 "" 8
   xcrun simctl io "$dev" recordVideo --codec h264 --force "$out/transitions.mp4" > "$out/record.txt" 2>&1 &
   recorder=$!
   i=0
@@ -628,6 +630,8 @@ reading)
   step 312 181-plan-removed 6
   step 313 182-chosen-jude 12
   # The screen recording of sequence 13.
+  # (Sequence 13's setup, before the mark: review r6-1.)
+  step 342 "" 10
   xcrun simctl io "$dev" recordVideo --codec h264 --force "$out/transitions.mp4" > "$out/record.txt" 2>&1 &
   recorder=$!
   i=0

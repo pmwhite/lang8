@@ -5487,3 +5487,74 @@ Its shape, place and motion are §8.7's. Its **second label** changes:
    - Optionally, write a courtesy note to OpenBible.com and eBible.org that the app
      streams from them. Streaming is within what both offer, and no permission is
      needed.
+
+### 12.10 Builder notes (Round 7, as built)
+**Done:** the Worker's `/api/v1/esv/audio` is deployed (D1 `audio_url` made from
+`schema.sql`, 2026-10-18; `/api/v1/status` answers `{"ok":true,"esv":true,"esvAudio":true}`;
+John 3 answers `https://audio.esv.org/hw/John%203.mp3`). The privacy page's Listening
+paragraph is published with it.
+
+**Deviations, each with its reason:**
+1. **The aligner plays the audio to the model twice as fast** (ffmpeg `atempo=2`, pitch
+   kept). On this laptop (shared, often fully loaded) wav2vec2 ran at about real time per
+   core, so the four recordings (about 290 hours) would have taken several days, not the
+   10 hours §12.2.5 expected. At 2× the starts found on the test chapters (John 3,
+   Genesis 1, 1 Chronicles 1; Souer, Henson, Gilbert) differ from those at normal speed by
+   0.02 s median, 0.04 s at the 90th percentile; at 3× they did not hold (0.56 s p90), so 2×
+   it is. Spot transcriptions are made on the same 2× audio. The first 37 Souer chapters
+   (Matthew, Mark 1–11) were aligned at normal speed.
+2. **Starts were checked by ear's stand-in:** cuts of 1.2 s before and 1.6 s after a
+   start, transcribed with Whisper (base): before each start the end of the verse before,
+   after it the verse's first words (John 3:16, 17, 22, 30; Genesis 1:2, 14, 27; Psalm
+   119:1, 88, 176; 1 Chronicles 1:22, 33, 54).
+3. **A chapter not yet aligned is flagged `chapter`, not `missing`,** with its size from
+   the listings (the zips' central directories, eBible.org's listing, openbible.com's
+   directory listing). `missing` would hand it to the voice; `chapter` plays the
+   recording and follows by chapter. The timing files are committed as the run goes and
+   finished when it ends (`align.py finish`).
+4. **A timing line has a start for every verse key 1…N** of that version's text, so the
+   app indexes it by `speak_v`; an empty verse (one the BSB leaves out, Matthew 17:21)
+   starts where the next does and is never washed; a psalm's title (spoken text's verse
+   0) is aligned but not written.
+5. **Henson's text:** "the LORD" is read "Yahweh" alone (the Classic WEB says "Yahweh is my
+   shepherd"), besides LORD and GOD as "Yahweh".
+6. **Checks' limits:** 2.5 to 30 letters a second for verses of 20 letters or more
+   (genealogies are read slowly), the score floor −1.6 a letter, more than 3 verses below
+   it flagging the chapter; `finish` applies them again, so they can be retuned without
+   re-aligning.
+7. **Zips:** 7-Zip extracts them (Info-ZIP's unzip cannot read Souer's 4.5 GB OT zip).
+   Gilbert's chapters are fetched one at a time with a 1 s pause, as specified.
+8. **Names:** `verse_at` and `time_of` are `audio_verse_at` and `audio_time_of`
+   (`text.l8` has a `verse_at` already). The player's state is `ap_…` (`pl_` is the plans').
+9. **The Worker asks the ESV API for a one-chapter book by its name** ("Jude"): the
+   audio endpoint answers 400 to "Jude 1:1-999", and "Jude 1" is its first verse alone.
+10. **Shot 193's log** reads "from 3:14 at 14.70 s": fixture.tim puts verse 14 at 15.0 s
+   (verse 1 at 2.0 s, a second each), so its start less 0.3 s is 14.70, not 15.70.
+11. **Stop Downloading John?** is the progress ring's own menu (a destructive command,
+   titled with the question, as History's Clear), not an action sheet: UIAlertAction
+   takes a block.
+12. **The preview's fade** steps the player's volume down at 20 Hz over the last 0.5 s
+   (the audio mix's ramp takes a CMTimeRange; this is simpler and sounds the same).
+13. **The fixture's network is always up:** in `offline` mode its items fail, so the
+   fallback itself is exercised (198); in `slow` mode an item is queued after 2 s.
+   Every CI group has the audio fixture (so 80 reads "Bob Souer", and nothing is fetched
+   from openbible.com in CI); `listen` also has the ESV's.
+14. **Reachability** reads `SCNetworkReachabilityGetFlags` synchronously, linking
+   SystemConfiguration (`ios/frameworks`).
+15. **`nowplaying.png`** is `AppIcon.png` (already the artwork on its paper colour, 1024 px).
+16. **A new chapter begun by the queue** scrolls its opener to the top (animated), so the
+   title moves with it (197); within a chapter, following is §8.7's.
+17. **The ESV's recording** is offered only when the status says `esvAudio` (or in the
+   fixture).
+
+**Review r6-1's Minor items, done here:** 1 (a reading tapped in the chapter on screen:
+no capsule, no history), 2 (the plan's days open at today from day 8), 3 (the status
+bar's tap is a jump for readings), 4 (the two tests), 5 (the push and the landing logged
+on one line each), 6 (the status bar's correction animated, never a step), 7 (sequences
+12 and 13 set up before their marks, pops animated, Start Reading opened at Mark 1 before
+Jude is chosen), 8 (17-point row icons follow the body text style), 9a (the reading
+sentence without "read"), 9c (Go To and Reading not updated off the window), 10 (the
+flick-stop window opened only by the finger's scroll or its glide). **Not done:** 9b
+(raḥam's gloss: the related list's gloss would need each number's dominant BSB rendering
+computed into `related.bin`, a data pipeline change), 9d (the scroll indicator in 176,
+179, 180: not reproduced from the code; left for the next run's shots).
