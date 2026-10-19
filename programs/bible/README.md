@@ -160,14 +160,16 @@ workflow's header):
   cache otherwise) and uploads `bible-ios.s`; `test` runs the tests and the
   data checks beside it.
 - Five `simulator (…)` jobs (macOS: the account runs at most five at once,
-  so there are five, and nothing waits for a runner) start at once, boot a
-  simulator and warm Xcode while `compile` runs, take the assembly as soon as
-  it is uploaded (`tools/ios/artifact.py`), build `SmoothBible.app`, and run
-  two groups each, one after another, each on an erased simulator, each
-  uploaded (`shots-GROUP`) as it ends. The groups are paired by their times
-  (`timing.txt`'s `total`) so the jobs end together: rebalance the
-  workflow's matrix when a group grows. One also builds the IPA and pushes
-  `ci-bible-ipa`.
+  so there are five, and nothing waits for a runner) start at once. The
+  first takes the assembly as soon as it is uploaded
+  (`tools/ios/artifact.py`), builds `SmoothBible.app` for all of them, then
+  the IPA (pushed to `ci-bible-ipa`); the others boot a simulator meanwhile
+  (a first boot takes about three minutes) and take the app. Each runs two
+  groups one after another, each on a simulator of its own (the second
+  booting during the first group), each uploaded (`shots-GROUP`) as it
+  ends. The groups are paired by their times (`timing.txt`'s `total`) so
+  the jobs end together: rebalance the workflow's matrix when a group
+  grows.
 - `frames` (Linux) makes the notes recording's frames as soon as the notes
   group is uploaded; `publish` puts it all on `ci-bible-shots`.
 - A push during a run waits for it (and of several only the newest runs),

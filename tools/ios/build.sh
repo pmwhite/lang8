@@ -12,6 +12,10 @@
 # Tempo's, if not given. The app is OUT/NAME.app. The code is the same for
 # both; it is linked for one platform or the other.
 set -eu
+# (Each part's time, in the build's output: build.sh: PART N s.)
+hires() { perl -MTime::HiRes=time -e 'printf "%.2f", time'; }
+last=$(hires)
+lap() { t=$(hires); echo "build.sh: $1 $(perl -e "printf '%.2f', $t - $last") s"; last=$t; }
 kind=$1
 src=$2
 out=$3
@@ -32,13 +36,17 @@ frameworks="UIKit Foundation CoreLocation QuartzCore OpenGLES"
 links=
 for f in $frameworks; do links="$links -framework $f"; done
 sysroot=$(xcrun --sdk "$sdk" --show-sdk-path)
+lap "sdk lookup"
 xcrun --sdk "$sdk" clang -target "$target" -c -x assembler "$src" -o "$out/$name.o"
+lap "assemble"
 xcrun --sdk "$sdk" clang -target "$target" -isysroot "$sysroot" "$out/$name.o" -o "$app/$name" \
   $links -lobjc -Wl,-dead_strip
+lap "link"
 sed "s/PLATFORM/$platform/" "$dir/Info.plist" > "$app/Info.plist"
 if [ -f "$dir/resources" ]; then
   while read -r f; do [ -n "$f" ] && cp "$top/$f" "$app/"; done < "$dir/resources"
 fi
+lap "resources"
 # The icon (AppIcon.png, drawn from AppIcon.svg), and any named colors,
 # compiled into the app and named in its Info.plist.
 rm -rf "$out/Assets.xcassets"
@@ -82,6 +90,7 @@ if ! actool; then
   echo "$light_json" > "$icons/Contents.json"
   actool || { cat "$out/actool.txt"; exit 1; }
 fi
+lap "actool"
 grep -i "warning\|error" "$out/actool.txt" || true
 # What actool put in the catalog: the icon's entries, and the appearances
 # (UIAppearanceDark, the tinted one) if they were compiled in.
@@ -90,6 +99,7 @@ if [ -f "$app/Assets.car" ]; then
   xcrun --sdk iphoneos assetutil --info "$app/Assets.car" > "$out/assetutil.json" 2>&1 || true
   grep -iE '"Appearance"|AppIcon' "$out/assetutil.json" || echo "assetutil: no AppIcon or Appearance entries"
 fi
+lap "assetutil"
 /usr/libexec/PlistBuddy -c "Merge $out/icon.plist" "$app/Info.plist"
 # What it was built with (Xcode adds this, and App Store Connect checks it).
 if [ "$kind" = device ]; then
@@ -118,5 +128,7 @@ cp "$dir/PrivacyInfo.xcprivacy" "$app/"
 if [ "$kind" = device ] && [ -n "${IOS_PROFILE:-}" ]; then
   cp "$IOS_PROFILE" "$app/embedded.mobileprovision"
 fi
+lap "plists"
 codesign --force --sign "${IOS_IDENTITY:--}" --timestamp=none "$app"
+lap "codesign"
 echo "built $app"

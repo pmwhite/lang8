@@ -23,5 +23,13 @@ if group == "store":
     best = [d for rt, d in phones if d["name"] == "iPhone 17 Pro Max"] or [d for rt, d in phones if d["name"] == "iPhone 16 Pro Max"]
     pick = best or pick
 if pick:
-    print(pick[-1]["udid"])
-' "$1"
+    rt = [rt for rt, d in phones if d is pick[-1]][0]
+    print(pick[-1]["udid"], pick[-1]["deviceTypeIdentifier"], rt, pick[-1]["name"])
+' "$1" | {
+  read -r udid type runtime name || exit 0
+  if [ "${2:-}" = new ]; then
+    xcrun simctl create "$name" "$type" "$runtime"
+  else
+    echo "$udid"
+  fi
+}

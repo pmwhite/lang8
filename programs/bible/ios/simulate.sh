@@ -5,8 +5,8 @@
 # through one group of its demo with Darwin notifications
 # (space.trailingwhite.smoothbible.demoN; see demo_do in
 # programs/bible/ios_demo.l8, and DESIGN.md §5 and §7.10 for what each
-# screenshot should show). CI runs the groups on five Macs, a few one after
-# another on each, every group on a fresh (erased) simulator:
+# screenshot should show). CI runs the groups on five Macs, two one after
+# another on each, every group on a fresh simulator of its own:
 #   read    reading, the picker, selection and marks, the collapsing bar,
 #           search, the library, the settings and themes, a relaunch
 #   study   the interlinear, word study, grammar, definition, concordance
@@ -69,7 +69,8 @@ id=space.trailingwhite.smoothbible
 mkdir -p "$out"
 now() { python3 -c 'import time; print("%.3f" % time.time())'; }
 start=$(now)
-dev=$("$(dirname "$0")/pick.sh" "$group")
+# (SIM_DEVICE, if given: the simulator, CI's, booted ahead; else pick.sh's.)
+dev=${SIM_DEVICE:-$("$(dirname "$0")/pick.sh" "$group")}
 if [ -z "$dev" ]; then
   if [ "$group" = ios18 ]; then
     echo "no iOS 18 runtime; older-iOS path unchecked" | tee "$out/ios18.txt"
@@ -86,26 +87,15 @@ for rt, ds in json.load(sys.stdin)["devices"].items():
     for d in ds:
         if d["udid"] == sys.argv[1]:
             print(d["name"], rt.split(".")[-1])' "$dev" | tee "$out/device.txt"
-# (CI runs a few groups one after another on a Mac. Another group's
-# simulator is shut down; this one, if a group has used it (the app is on
-# it), is erased and booted again, so that each group starts as from a fresh
-# simulator: nothing on the pasteboard, no permission granted, no defaults.)
 touch "$out/.started"
-xcrun simctl list devices booted -j | python3 -c '
-import json, sys
-for ds in json.load(sys.stdin)["devices"].values():
-    for d in ds:
-        if d["udid"] != sys.argv[1]:
-            print(d["udid"])' "$dev" | while read -r other; do
-  xcrun simctl shutdown "$other" 2>/dev/null && echo "shut down $other"
-done
-if xcrun simctl get_app_container "$dev" "$id" >/dev/null 2>&1; then
-  xcrun simctl shutdown "$dev" 2>/dev/null || true
-  xcrun simctl erase "$dev"
-  echo "erased in $(python3 -c "print(round($(now) - $start))") s" >> "$out/timing.txt"
-fi
 xcrun simctl boot "$dev" 2>/dev/null || true
-xcrun simctl bootstatus "$dev" -b >/dev/null
+# (Its boot's stages, and when each began, in timing.txt.)
+xcrun simctl bootstatus "$dev" -b 2>&1 | while read -r line; do
+  stage=$(echo "$line" | sed 's/[0-9.]*%//; s/ *$//')
+  [ "$stage" = "${prev:-}" ] && continue
+  prev=$stage
+  echo "boot at $(python3 -c "print(round($(now) - $start))") s: $stage" >> "$out/timing.txt"
+done
 # (No keyboard tutorial over the first text field.)
 for key in DidShowContinuousPathIntroduction KeyboardDidShowContinuousPathIntroduction; do
   xcrun simctl spawn "$dev" defaults write com.apple.keyboard.preferences "$key" -bool true 2>/dev/null || true

@@ -3,17 +3,19 @@
 # compile (Linux) builds the compiler (kept in a cache while its sources
 # are unchanged) and compiles programs/bible/ios.l8 to arm64 assembly (`l8
 # arm64 --target ios`); test, beside it, runs the tests and data checks.
-# Five simulator jobs (macOS) start at once, without waiting: each boots its
-# first simulator and warms Xcode's tools while the assembly is compiled,
-# fetches it as soon as it is uploaded (tools/ios/artifact.py), assembles
-# and links SmoothBible.app (tools/ios/build.sh, with programs/bible/ios),
-# and runs two or three groups of the demo one after another
-# (programs/bible/ios/simulate.sh; each group on an erased simulator, its
-# shots uploaded as soon as it ends, as shots-GROUP). The groups are split
-# so the five jobs end together: GitHub runs at most five macOS jobs of
-# this account at a time, and a sixth would wait for one of them. One of
-# them also builds SmoothBible.ipa, for an iPhone, onto the ci-bible-ipa
-# branch (ad hoc signed). frames (Linux) waits for the notes group's
+# Five simulator jobs (macOS) start at once, without waiting. The first
+# fetches the assembly as soon as it is uploaded (tools/ios/artifact.py),
+# assembles and links SmoothBible.app (tools/ios/build.sh, with
+# programs/bible/ios) and uploads it for all five, then builds
+# SmoothBible.ipa, for an iPhone, onto the ci-bible-ipa branch (ad hoc
+# signed). The other four boot their first simulator meanwhile (a first boot
+# takes about three minutes) and fetch the app. Each runs two groups of the
+# demo one after another (programs/bible/ios/simulate.sh), each on a
+# simulator of its own, the second booting while the first group runs; each
+# group's shots are uploaded as it ends (shots-GROUP). The groups are paired
+# so the five jobs end together: GitHub runs at most five macOS jobs of this
+# account at a time, and a sixth would wait for one of them to end.
+# frames (Linux) waits for the notes group's
 # recording and makes its frames and contact sheet while the others run
 # (programs/bible/ios/shots.py transitions). A last Linux job, publish, puts
 # the groups' screenshots together (and the collapsing bar's pixel check)
@@ -92,37 +94,49 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # (Balanced by the groups' times: about 4 to 5 minutes of demo a job.)
+        # (Paired by the groups' times, so the jobs end together; the first
+        # job builds the app for all five, and the IPA.)
         include:
+          - {name: build store ios18, build: true, g1: store, g2: ios18}
           - {name: notes versions, g1: notes, g2: versions}
-          - {name: read ribbons, g1: read, g2: ribbons}
-          - {name: listen more, g1: listen, g2: more}
-          - {name: plans ios18, g1: plans, g2: ios18}
-          - {name: study store ipa, g1: study, g2: store, ipa: true}
+          - {name: read study, g1: read, g2: study}
+          - {name: plans more, g1: plans, g2: more}
+          - {name: ribbons listen, g1: ribbons, g2: listen}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
-      - name: Boot a simulator, and warm Xcode's tools (while the app is compiled)
+      - name: Boot the first group's simulator (a first boot takes minutes)
+        if: ${{ !matrix.build }}
         run: |
-          dev=$(programs/bible/ios/pick.sh ${{ matrix.g1 }})
+          mkdir -p devices
+          programs/bible/ios/pick.sh ${{ matrix.g1 }} > devices/${{ matrix.g1 }}
+          dev=$(cat devices/${{ matrix.g1 }})
           echo "simulator for ${{ matrix.g1 }}: $dev"
           [ -n "$dev" ] && (xcrun simctl boot "$dev" >/dev/null 2>&1 &) || true
-          # (A trivial app built the same way, so the real build finds the
-          # tools already read from disk.)
-          mkdir -p warm && printf '.globl _main\n_main:\n  mov w0, #0\n  ret\n' > warm/warm.s
-          (tools/ios/build.sh sim warm/warm.s warm/sim programs/bible/ios > warm/sim.log 2>&1 &)
-          if [ "${{ matrix.ipa }}" = true ]; then
-            export DEVELOPER_DIR="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)/Contents/Developer"
-            (tools/ios/build.sh device warm/warm.s warm/device programs/bible/ios > warm/device.log 2>&1 &)
-          fi
       - name: Wait for the assembly
+        if: matrix.build
         run: python3 -I tools/ios/artifact.py bible-ios-assembly . compile
-      - name: Build SmoothBible.app
-        id: build
-        run: BUILD_NUMBER=${{ github.run_number }} tools/ios/build.sh sim bible-ios.s build programs/bible/ios 2>&1 | tee build.log
+      - name: Build SmoothBible.app (for every job's simulator)
+        if: matrix.build
+        run: |
+          BUILD_NUMBER=${{ github.run_number }} tools/ios/build.sh sim bible-ios.s build programs/bible/ios 2>&1 | tee build.log
+          mkdir -p app && cp build.log app/ && (cd build && zip -qry ../app/SmoothBible-simulator.zip SmoothBible.app)
+      - uses: actions/upload-artifact@v4
+        if: matrix.build
+        with:
+          name: bible-sim-app
+          path: app
+      - name: Boot the first group's simulator
+        if: matrix.build
+        run: |
+          mkdir -p devices
+          programs/bible/ios/pick.sh ${{ matrix.g1 }} > devices/${{ matrix.g1 }}
+          dev=$(cat devices/${{ matrix.g1 }})
+          echo "simulator for ${{ matrix.g1 }}: $dev"
+          [ -n "$dev" ] && (xcrun simctl boot "$dev" >/dev/null 2>&1 &) || true
       - name: Build the app for an iPhone, and push it to ci-bible-ipa
-        if: matrix.ipa
+        if: matrix.build
         run: |
           export DEVELOPER_DIR="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)/Contents/Developer"
           xcodebuild -version
@@ -139,19 +153,36 @@ jobs:
           git commit -qm "iPhone build of ${GITHUB_SHA}"
           git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ci-bible-ipa
       - uses: actions/upload-artifact@v4
-        if: matrix.ipa
+        if: matrix.build
         with:
           name: bible-ipa
           path: SmoothBible.ipa
+      - name: Wait for SmoothBible.app (from the first job)
+        if: ${{ !matrix.build }}
+        id: app
+        run: |
+          python3 -I tools/ios/artifact.py bible-sim-app app "simulator (build"
+          mkdir -p build && (cd build && unzip -q ../app/SmoothBible-simulator.zip) && cp app/build.log .
+      - name: The app is here
+        id: build
+        run: test -d build/SmoothBible.app
       - name: Run its demo's ${{ matrix.g1 }} group in the simulator
         if: always() && matrix.g1 && steps.build.outcome == 'success'
         run: |
-          programs/bible/ios/simulate.sh build/SmoothBible.app out/${{ matrix.g1 }}/shots ${{ matrix.g1 }}
+          # (The next group's simulator, a new one, boots meanwhile.)
+          if [ -n "${{ matrix.g2 }}" ]; then
+            programs/bible/ios/pick.sh ${{ matrix.g2 }} new > devices/${{ matrix.g2 }}
+            next=$(cat devices/${{ matrix.g2 }})
+            echo "simulator for ${{ matrix.g2 }}: $next"
+            [ -n "$next" ] && (xcrun simctl boot "$next" >/dev/null 2>&1 &) || true
+          fi
+          SIM_DEVICE=$(cat devices/${{ matrix.g1 }} 2>/dev/null) programs/bible/ios/simulate.sh build/SmoothBible.app out/${{ matrix.g1 }}/shots ${{ matrix.g1 }}
       - name: Keep the ${{ matrix.g1 }} group's build log (and read's app, for another Mac's simulator)
         if: always() && matrix.g1
         run: |
           mkdir -p out/${{ matrix.g1 }} && cp build.log out/${{ matrix.g1 }}/ 2>/dev/null || true
-          [ "${{ matrix.g1 }}" = read ] && (cd build && zip -qry ../out/read/SmoothBible-simulator.zip SmoothBible.app) || true
+          [ "${{ matrix.g1 }}" = read ] && cp app/SmoothBible-simulator.zip out/read/ 2>/dev/null || true
+          dev=$(cat devices/${{ matrix.g1 }} 2>/dev/null) && [ -n "$dev" ] && xcrun simctl shutdown "$dev" 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         if: always() && matrix.g1
         with:
@@ -160,12 +191,20 @@ jobs:
       - name: Run its demo's ${{ matrix.g2 }} group in the simulator
         if: always() && matrix.g2 && steps.build.outcome == 'success'
         run: |
-          programs/bible/ios/simulate.sh build/SmoothBible.app out/${{ matrix.g2 }}/shots ${{ matrix.g2 }}
+          # (The next group's simulator, a new one, boots meanwhile.)
+          if [ -n "${{ matrix.g3 }}" ]; then
+            programs/bible/ios/pick.sh ${{ matrix.g3 }} new > devices/${{ matrix.g3 }}
+            next=$(cat devices/${{ matrix.g3 }})
+            echo "simulator for ${{ matrix.g3 }}: $next"
+            [ -n "$next" ] && (xcrun simctl boot "$next" >/dev/null 2>&1 &) || true
+          fi
+          SIM_DEVICE=$(cat devices/${{ matrix.g2 }} 2>/dev/null) programs/bible/ios/simulate.sh build/SmoothBible.app out/${{ matrix.g2 }}/shots ${{ matrix.g2 }}
       - name: Keep the ${{ matrix.g2 }} group's build log (and read's app, for another Mac's simulator)
         if: always() && matrix.g2
         run: |
           mkdir -p out/${{ matrix.g2 }} && cp build.log out/${{ matrix.g2 }}/ 2>/dev/null || true
-          [ "${{ matrix.g2 }}" = read ] && (cd build && zip -qry ../out/read/SmoothBible-simulator.zip SmoothBible.app) || true
+          [ "${{ matrix.g2 }}" = read ] && cp app/SmoothBible-simulator.zip out/read/ 2>/dev/null || true
+          dev=$(cat devices/${{ matrix.g2 }} 2>/dev/null) && [ -n "$dev" ] && xcrun simctl shutdown "$dev" 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         if: always() && matrix.g2
         with:
@@ -174,12 +213,13 @@ jobs:
       - name: Run its demo's ${{ matrix.g3 }} group in the simulator
         if: always() && matrix.g3 && steps.build.outcome == 'success'
         run: |
-          programs/bible/ios/simulate.sh build/SmoothBible.app out/${{ matrix.g3 }}/shots ${{ matrix.g3 }}
+          SIM_DEVICE=$(cat devices/${{ matrix.g3 }} 2>/dev/null) programs/bible/ios/simulate.sh build/SmoothBible.app out/${{ matrix.g3 }}/shots ${{ matrix.g3 }}
       - name: Keep the ${{ matrix.g3 }} group's build log (and read's app, for another Mac's simulator)
         if: always() && matrix.g3
         run: |
           mkdir -p out/${{ matrix.g3 }} && cp build.log out/${{ matrix.g3 }}/ 2>/dev/null || true
-          [ "${{ matrix.g3 }}" = read ] && (cd build && zip -qry ../out/read/SmoothBible-simulator.zip SmoothBible.app) || true
+          [ "${{ matrix.g3 }}" = read ] && cp app/SmoothBible-simulator.zip out/read/ 2>/dev/null || true
+          dev=$(cat devices/${{ matrix.g3 }} 2>/dev/null) && [ -n "$dev" ] && xcrun simctl shutdown "$dev" 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         if: always() && matrix.g3
         with:
