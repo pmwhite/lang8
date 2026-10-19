@@ -5519,7 +5519,7 @@ paragraph is published with it.
 5. **Henson's text:** "the LORD" is read "Yahweh" alone (the Classic WEB says "Yahweh is my
    shepherd"), besides LORD and GOD as "Yahweh".
 6. **Checks' limits:** 2.5 to 30 letters a second for verses of 20 letters or more
-   (genealogies are read slowly), the score floor −1.6 a letter, more than 3 verses below
+   (genealogies are read slowly), the score floor −2.6 a letter (the bottom 1% of verses at 2×), more than 3 verses below
    it flagging the chapter; `finish` applies them again, so they can be retuned without
    re-aligning.
 7. **Zips:** 7-Zip extracts them (Info-ZIP's unzip cannot read Souer's 4.5 GB OT zip).
