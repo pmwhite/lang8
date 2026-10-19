@@ -204,7 +204,7 @@ The Groups chapter has no formulas on its board (`beads.l8` makes its
 moves, `beadboard.l8` is its board). Its statements are the same HOL as
 anywhere, and every move is the kernel's; the beads are a view of them.
 
-**The tile** (the first three levels). A cream square with a flag on it,
+**The tile** (the first four levels). A cream square with a flag on it,
 its shadow beside it (where it must get to), and a slot under them for
 each move the level asks for. Tap the tile: a quarter turn; swipe it
 sideways: it flips over. Each move fills the next slot with its icon.
@@ -213,8 +213,10 @@ Above, a little map of where the tile has been: each place it has lain
 place ringed; places not yet found are faint dots. Every walk level
 starts from the same place, so the map grows across them (the eight
 symmetries of a square and the two moves: its Cayley graph, though no
-word says so). A level whose shadow was got by a longer walk (*A short
-cut*) shows that walk faint on the map. Out of moves and not there, the
+word says so). *The other way round* asks for a quarter turn back in
+three moves: three turns, or a flip, a turn and a flip (the book's way).
+A level whose shadow was got by a longer walk (*A short cut*) shows that
+walk faint on the map. Out of moves and not there, the
 tile greys, *It can't get there in the moves left*, and an *Undo k* pill.
 
 In the kernel the square is concrete: `sq(a, b, c, d)` is the tile by its
@@ -286,8 +288,8 @@ show it); its files and tests stay.
 
 ## Playing in pictures (hooks)
 
-- `L8_LEVEL=k` opens map level k (logic 0-10, groups 11-19: the tile
-  11-13, beads 14-19; limits, when it is on the map, 20-24);
+- `L8_LEVEL=k` opens map level k (logic 0-10, groups 11-20: the tile
+  11-14, beads 15-20; limits, when it is on the map, 21-25);
   the progress file the rig uses is the game's argument (seen demos and
   solved levels change what shows; without `seen KIND` lines the demos
   play). `L8_WATCH=1` plays its written proof as ghost-hand gestures
@@ -342,7 +344,7 @@ undo; a kit tile, with Limits on the map):
 
 ```sh
 L8_LEVEL=10 L8_DO='open goal; tap token y; tap notch goal; wait; undo; open fact 0; tap notch goal; tap token x; tap token y; tap fact 0' .build/lemma
-L8_LEVEL=22 L8_DO='open goal; open goal; open fact 0; tap token ε; tap kit 0; tap fact 0; tap token "ε / 2"' .build/lemma
+L8_LEVEL=23 L8_DO='open goal; open goal; open fact 0; tap token ε; tap kit 0; tap fact 0; tap token "ε / 2"' .build/lemma
 ```
 
 The tile (two turns; a flip then a turn; a flip twice: can't get there),
@@ -354,12 +356,12 @@ pinched stretch):
 L8_LEVEL=11 L8_DO='tile; tile' .build/lemma
 L8_LEVEL=12 L8_DO='swipe; tile' .build/lemma
 L8_LEVEL=11 L8_DO='swipe; swipe' .build/lemma
-L8_LEVEL=14 L8_DO='tap bead top 1; tap bead top 2; pop top 0; tap bead bottom 0; tap bead bottom 1' .build/lemma
-L8_LEVEL=14 L8_DO='tap bead top 1; tap bead top 2' L8_DO_STOP=2 .build/lemma   # pressed: the card over the shelf
-L8_LEVEL=16 L8_DO="tap shelf a'; tap gap top 0; tap bead top 1; tap bead top 2; tap stamp 0 face 0; pop top 0" .build/lemma
-L8_LEVEL=17 L8_DO='swipe; tap stamp 0 face 1; tap bead top 0' .build/lemma
-L8_LEVEL=19 L8_DO='tap stamp 0 face 1; tap gap bottom 0; tap shelf a; stamp 0 face 1 > gap bottom 4; tap shelf b; pinch bottom 1 4; tap stamp 0 face 0' .build/lemma
-L8_LEVEL=16 L8_WATCH=1 L8_WATCH_PACE=60 .build/lemma
+L8_LEVEL=15 L8_DO='tap bead top 1; tap bead top 2; pop top 0; tap bead bottom 0; tap bead bottom 1' .build/lemma
+L8_LEVEL=15 L8_DO='tap bead top 1; tap bead top 2' L8_DO_STOP=2 .build/lemma   # pressed: the card over the shelf
+L8_LEVEL=17 L8_DO="tap shelf a'; tap gap top 0; tap bead top 1; tap bead top 2; tap stamp 0 face 0; pop top 0" .build/lemma
+L8_LEVEL=18 L8_DO='swipe; tap stamp 0 face 1; tap bead top 0' .build/lemma
+L8_LEVEL=20 L8_DO='tap stamp 0 face 1; tap gap bottom 0; tap shelf a; stamp 0 face 1 > gap bottom 4; tap shelf b; pinch bottom 1 4; tap stamp 0 face 0' .build/lemma
+L8_LEVEL=17 L8_WATCH=1 L8_WATCH_PACE=60 .build/lemma
 ```
 
 Someone for everyone: the trap, its dead end, and the way:
@@ -375,10 +377,10 @@ With Limits on the map: Doubled with the kit (ε onto `□ / 2`, then `ε /
 Adding limits' trap (`N` alone; `N₁ ≤ n` is a dead end, *Undo 4*):
 
 ```sh
-L8_LEVEL=22 L8_DO='open goal; open goal; open fact 0; token ε > kit 0; token "ε / 2" > fact 0;
+L8_LEVEL=23 L8_DO='open goal; open goal; open fact 0; token ε > kit 0; token "ε / 2" > fact 0;
   open fact 2; token N > goal; open goal; token n > fact 2' .build/lemma
-L8_LEVEL=24 L8_DO="suppose" L8_DO_STOP=1 .build/lemma
-L8_LEVEL=23 L8_DO_GAP=40 L8_DO="$(for i in $(seq 8); do printf 'hint;enter;'; done)token N > goal; open goal; token n > fact 3; token n > fact 4" .build/lemma
+L8_LEVEL=25 L8_DO="suppose" L8_DO_STOP=1 .build/lemma
+L8_LEVEL=24 L8_DO_GAP=40 L8_DO="$(for i in $(seq 8); do printf 'hint;enter;'; done)token N > goal; open goal; token n > fact 3; token n > fact 4" .build/lemma
 ```
 
 A name dropped on the fact whose ∃ key is still shut (*Open it first*),
@@ -390,7 +392,7 @@ name going to the shelf, and the Book's words (a progress file with
 L8_LEVEL=10 L8_DO="open goal;token y > fact 0" .build/lemma
 L8_LEVEL=10 L8_DO="open goal;token y > goal;hint" .build/lemma         # stuck: the finger taps Undo 1 (from ~6.5 s)
 L8_LEVEL=5 L8_DO="open goal;fact 0 > goal;fact 0 > goal" .build/lemma # P ⟶ Q gives Q, not R (~7 s)
-L8_LEVEL=21 L8_DO="open goal;open goal;open fact 0;token ε > fact 0" L8_DO_STOP=4 .build/lemma  # the band it would give (Limits on)
+L8_LEVEL=22 L8_DO="open goal;open goal;open fact 0;token ε > fact 0" L8_DO_STOP=4 .build/lemma  # the band it would give (Limits on)
 L8_LEVEL=6 L8_DO="open goal;token y > fact 0" L8_DO_STOP=2 .build/lemma
 L8_LEVEL=6 L8_TAPS=63,757 .build/lemma      # the goal's ∀ key: grab frames from 1.75 s on
 L8_LEVEL=6 L8_DO="open goal;fact 0 > goal;fact 0 > goal" .build/lemma  # Drop y into ∀ first (~7.5 s)
@@ -400,7 +402,7 @@ L8_TAPS=100,170 .build/lemma                # the map: Logic's cover opens its B
 Watch, and a demo (a progress file without `seen` lines):
 
 ```sh
-L8_LEVEL=19 L8_WATCH=1 L8_WATCH_PACE=60 .build/lemma
+L8_LEVEL=20 L8_WATCH=1 L8_WATCH_PACE=60 .build/lemma
 grep -v '^seen' .build/lemma-progress.txt > /tmp/p.txt; L8_LEVEL=6 .build/lemma /tmp/p.txt
 ```
 
