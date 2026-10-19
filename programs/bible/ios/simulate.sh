@@ -239,6 +239,27 @@ step() {
   wait_done "$1" "$1 ${2:-}" "${3:-4}"
   [ -n "${2:-}" ] && shot "$2"
 }
+# A step whose shot is of a toast: taken as soon as the app logs the toast
+# (TEXT, its words), whether or not the settling's notification is caught
+# in time (review r8-1: 163's waiter was late, and the toast gone).
+step_toast() {
+  n0=$(grep -c "bible: toast $3" "$out/console.txt" 2>/dev/null)
+  wait_start
+  xcrun simctl spawn "$dev" notifyutil -p "$id.demo$1"
+  i=0
+  while [ "$(grep -c "bible: toast $3" "$out/console.txt" 2>/dev/null)" -le "$n0" ] && [ "$i" -lt 160 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  sleep 0.4
+  shot "$2"
+  wait_done "$1" "$1 $2" 4
+}
+# When the app began step N (seconds, its own clock: "at unix ms" after
+# "demo step N"), to mark a recording from (review r8-1).
+step_at() {
+  awk -v want="bible: demo step $1" '$0 == want { found = 1; next } found && /at unix ms/ { t = $NF; found = 0 } END { printf "%.3f", t / 1000 }' "$out/console.txt"
+}
 if [ "$group" = store ]; then
   # The status bar as the App Store's screenshots have it.
   xcrun simctl status_bar "$dev" override --time 9:41 --batteryState charged --batteryLevel 100 \
@@ -641,7 +662,7 @@ ribbons)
   step 290 160-ribbons-migrated 6
   step 291 161-title-menu 10
   step 292 162-new-ribbon 8
-  step 293 163-ribbon-made 6
+  step_toast 293 163-ribbon-made "Reading with Morning"
   step 294 164-carried-menu 6
   step 295 165-follows 8
   step 296 166-back-a-little 6
@@ -675,18 +696,23 @@ ribbons)
     i=$((i + 1))
   done
   rec0=$(now)
-  sleep 0.5
+  # (A still lead-in: the recorder writes nothing for its first seconds;
+  # review r8-1.)
+  sleep 6
   : > "$out/transitions.txt"
-  a=$(now)
   step 314 "" 24
+  a=$(step_at 314)
   b=$(now)
   echo "13 $(python3 -c "print(round($a - $rec0, 2), round($b - $rec0, 2))")" >> "$out/transitions.txt"
   sleep 0.5
   kill -INT "$recorder" 2>/dev/null
   wait "$recorder" 2>/dev/null
+  # Twelve ribbons, logged only: the footer, New Ribbon… and the menu's
+  # item disabled; then one deleted (review r8-1).
+  step 315 "" 10
   # The walk, from the log: each make, pick-up, move, put-down, move-here,
   # rename, delete and the migration (§11.6); nothing moved while put down.
-  grep -h "bible: ribbon\|bible: readings\|bible: chapter read\|bible: chapter heard\|bible: title menu\|bible: toast\|bible: plan\|bible: demo step\|table off the window" \
+  grep -h "bible: limit\|bible: ribbon\|bible: readings\|bible: chapter read\|bible: chapter heard\|bible: title menu\|bible: toast\|bible: plan\|bible: demo step\|table off the window" \
     "$out/console.txt" > "$out/ribbons.txt" 2>/dev/null
   for want in "ribbons migrated 3 of 4" "readings-r6.tsv there 1" "New Ribbon Here… · Mark 1 / Move Ribbon Here: Romans, Acts, John" \
       "ribbon made: Morning at MRK 1" "ribbon picked up: Morning" "toast Reading with Morning" \
@@ -697,7 +723,8 @@ ribbons)
       "chapter heard ACT 10" "ribbon moved: Acts to ACT 11" "ribbon put down: Acts at ACT 11" "toast Acts left at Acts 11" \
       "ribbon moved here: Romans to ROM 8" "toast Reading with Romans" "ribbon renamed: Morning to With Anna" \
       "ribbon deleted: John" "ribbon made: Jude at JUD 1" "toast Reading with Jude" "ribbon put down: Jude at JUD 1" \
-      "toast Started Hebrews, a Chapter a Day"; do
+      "toast Started Hebrews, a Chapter a Day" "limit at 12: ribbons 12, footer 12 ribbons is the most., New Ribbon… enabled 0" \
+      " (disabled) / Move Ribbon Here" "limit after a delete: ribbons 11, footer none, New Ribbon… enabled 1"; do
     grep -qF "$want" "$out/ribbons.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/ribbons.txt"; failed=1; }
   done
   for bad in "ribbon moved: Acts to ACT 11:5" "ribbon made: Psalms" "ribbon moved: Morning to 1CO" "ribbon moved: Morning to ISA"; do
@@ -745,7 +772,9 @@ listen)
     i=$((i + 1))
   done
   rec0=$(now)
-  sleep 0.5
+  # (A still lead-in: the recorder writes nothing for its first seconds;
+  # review r8-1.)
+  sleep 6
   : > "$out/transitions.txt"
   # (Marked from the app's own start of Listen, not the step's sending:
   # review r7-1.)

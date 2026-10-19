@@ -4768,6 +4768,27 @@ Where the build differs from the text above, or settles what it left open, and w
 18. **The `more` group's 70-history** had shown Start Reading since Round 6: its step chose
     Go To's section 0 as Recent's. It now chooses Recent's own section (after Ribbons and
     Reading Plan), so History shows again.
+19. **The toast lasts 6 s in the demo** (1.6 s on a phone), so a shot taken after a step
+    settles still has it (Round 5's Day Done does the same). It's why the toast still shows
+    over sequence 13's title menu.
+20. **Review r8-1's fixes:**
+    - The title's menus are made again from a measured place after every arrival (a
+      jump, the capsule, a ribbon opened, and their settles: `title_menus_fresh`). So New
+      Ribbon Here… names the chapter arrived at ("· Romans 8" after the grid's jump, not
+      Acts 11:5's verse).
+    - Sequences 13 and 14 begin after a 6 s still lead-in, as the recorder writes nothing
+      for its first seconds. Sequence 13 is marked from the step's own logged start
+      ("at unix ms").
+    - At 12 → 11 the footer's emptied text is followed by an empty
+      `beginUpdates`/`endUpdates`, so its height animates away. The `ribbons` group's step
+      315 (log only) makes twelve ribbons. It logs "limit at 12" (the footer, and New
+      Ribbon… not enabled) and the title menu's disabled New Ribbon Here…, deletes one,
+      then logs "limit after a delete". `simulate.sh` checks all three.
+    - Shot 163 is taken when the toast's log line appears (`step_toast`). Shot 158 is
+      scrolled to the Reading Plan section.
+    - Now Playing after a seek (§12, review r8-1): the seek's target is the elapsed time
+      given until the player's own time is within 0.1 s of it, either way. A backward
+      seek no longer clears it at the first poll.
 
 ---
 
