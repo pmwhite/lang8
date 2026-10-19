@@ -4398,7 +4398,7 @@ rest of the sheet (principle 6), and the sheet never rearranges after it lands.
   menu, §8.3), so there are no blocks. Long-pressing the title shows it, as with any
   `UIButton` whose `showsMenuAsPrimaryAction` is NO.
   - The command is **"Start Reading Here…"**, image `book`, subtitle (iOS 15+
-    `discoverabilityTitle`) "Romans 3".
+    `subtitle`) "Romans 3".
   - Choosing it presents the Start Reading sheet (§11.2.5) with Begin At = the current
     chapter (`cur`).
   - When a reading already sits at this chapter (R.c = cur), the command reads **"Reading
@@ -4407,8 +4407,8 @@ rest of the sheet (principle 6), and the sheet never rearranges after it lands.
 - **Accessibility:** the title gains the custom action "Start Reading Here".
 - **Nothing else changes in the reader:** no new button, badge or tray action. The tray
   stays as it is (a seventh action would be clutter for something done once a book).
-- **The toast** (§3.3.3's style, 1.6 s, a leading `checkmark`, a light impact haptic and
-  no success chime) confirms a start made from anywhere: "Reading from Romans 3", or for
+- **The toast** (§3.3.3's style, 1.6 s, a leading `checkmark`, a light impact haptic)
+  confirms a start made from anywhere: "Reading from Romans 3", or for
   a plan "Started Bible in a Year". It's the only thing of this feature the reader ever
   shows on its own.
 
@@ -4452,8 +4452,10 @@ given, before the push or presentation begins (principle 6).
   disabled, because those plans begin where they begin. Their values stay what the
   reader chose, so choosing At My Own Pace again restores them.
 
-**Section 2, header "Pace":** one choice in the whole screen (sections 2 and 3 share it),
-shown with the system checkmark accessory. The rows are subtitle cells:
+**Section 2, header "Pace":** one choice in the whole screen (sections 2 and 3 share it).
+The rows are subtitle cells. The choice shows as a leading `checkmark` image (accent,
+17 pt) on the chosen row, with the same blank space on the others so the titles line up.
+That leaves the trailing accessory free for the plans' ⓘ:
 1. **At My Own Pace** (checked by default). Secondary: "Keeps your place as you read on,
    into the next book."
 2. **A Chapter a Day.** Secondary: "Romans 3–16 · 14 days". It's present only when the
@@ -4463,9 +4465,8 @@ shown with the system checkmark accessory. The rows are subtitle cells:
 
 **Section 3, header "Plans":** the four Round 5 plans, as §10.1.4's Plans list had them:
 - Title: the name. Secondary: "365 days · about 3 chapters a day".
-- Accessory: the checkmark when chosen, and always a detail button (ⓘ), so
-  `UITableViewCellAccessoryDetailButton` alongside the checkmark through
-  `accessoryView`, as Settings does. ⓘ pushes the plan's days as a **preview** (§11.2.7).
+- Accessory: `UITableViewCellAccessoryDetailButton` (ⓘ), which pushes the plan's days as
+  a **preview** (§11.2.7). The choice is shown by the leading checkmark, as above.
 - The followed plan's row has the value "Day 4" (accent) and is disabled, because
   starting it again would mean nothing.
 - **Footer**, shown only while a schedule (row 2.2, or a plan) is chosen and another plan
