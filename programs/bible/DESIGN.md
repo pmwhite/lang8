@@ -4412,7 +4412,7 @@ and whenever ribbons change). Its contents:
   question 1 the way its fallback offered, so carrying can be seen without long-pressing
   the title.
   - While a ribbon is carried, the ribbon glyph (§11.2.6, 15 pt, accent) sits just left of
-    the bar title's name, 5 pt from it and vertically centered. It's in the title's view,
+    the bar title's name, about 6 pt from it and vertically centered. It's in the title's view,
     so it scales and fades with the title as the bar collapses into the compact band.
   - It fades in on pickup and out on put-down (0.2 s; at once with Reduce Motion).
   - The bar shows no name: it stays quiet. The long-press menu is unchanged. The title's

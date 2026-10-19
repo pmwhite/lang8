@@ -223,7 +223,16 @@ wait_done() {
       sleep 1
     done
     if [ "$state" = "$1" ]; then echo "$2: waiter late, state $state" >> "$out/timing.txt"
-    else echo "$2: timed out (state $state, expected $1)" >> "$out/timing.txt"; fi
+    else
+      echo "$2: timed out (state $state, expected $1)" >> "$out/timing.txt"
+      # (The first time out: what the app's threads are doing, from the
+      # host's sample(1) of its process, to find a hang.)
+      if [ -z "${sampled:-}" ]; then
+        sampled=1
+        pid=$(grep -ao "$id: [0-9]*" "$out/console.txt" 2>/dev/null | tail -1 | awk '{print $2}')
+        [ -n "$pid" ] && sample "$pid" 3 -file "$out/hang-sample.txt" >/dev/null 2>&1 && echo "$2: sampled $pid into hang-sample.txt" >> "$out/timing.txt"
+      fi
+    fi
   fi
   wait "$waiter" 2>/dev/null
 }
