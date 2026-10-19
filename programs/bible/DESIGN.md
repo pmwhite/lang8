@@ -4745,8 +4745,9 @@ Where the build differs from the text above, or settles what it left open, and w
 13. **The ribbon glyph** is drawn per size and kept: rows at the body text style's point size
     (so it grows with Dynamic Type, as the 17-point symbols do since review r6-1), menus at
     17, the toast at 13 with a 2-point baseline offset (as a symbol sits).
-14. **New Ribbon's keyboard** rises with the sheet or push on first appearance only; back
-    from the Book or Chapter chooser it stays down (Add needs no keyboard). Add "at the
+14. **New Ribbon's keyboard** rises with the sheet or push (the field made first responder
+    in `viewWillAppear:` on the first appearance); back from the Book or Chapter chooser,
+    UIKit gives the field its focus back, so the keyboard returns with the pop. Add "at the
     reader's own place" compares chapter and verse (verses 0 and 1 are the same top).
 15. **Starting a plan** where the reader already is (A Chapter a Day from the chapter on the
     screen) dismisses Go To without a jump, so a carried ribbon stays carried.
