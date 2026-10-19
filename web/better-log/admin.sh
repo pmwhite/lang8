@@ -7,8 +7,8 @@
 #   ./admin.sh unadmin ID   not an admin any more
 #   ./admin.sh new NAME     make a log, and print its owner's link (keep it: it is the key)
 #   ./admin.sh all          every log
-#   ./admin.sh relink ID    a new link for a log (the old one, and every device
-#                           signed in, stop working)
+#   ./admin.sh relink ID    a lost phone: a new link for a log, and every device
+#                           signed in to it signed out (the old link stops working)
 #   ./admin.sh past LINK    the texts a log had before, newest first
 #   ./admin.sh show LINK REV   one of them
 #   ./admin.sh restore LINK REV   make it the log again

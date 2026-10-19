@@ -130,14 +130,14 @@ const accountLine = (a) => `account ${a?.id || "-"} ${a?.admin ? 1 : 0} ${a?.nam
 
 async function main() {
   const params = new URLSearchParams(location.search);
-  const people = params.get("people");
+  const people = params.get("people") ?? params.get("L8_PEOPLE");
   const fresh = params.has("fresh");
   const sim = Number(params.get("sim") || 0);
   const code = codeInLink();
   const modulePromise = WebAssembly.compileStreaming(fetch("better.wasm"));
   // (A made-up account: nothing kept, or sent.)
   sync.fresh = fresh || people !== null;
-  if (!fresh) await moveOver();
+  if (!fresh && people === null) await moveOver();
   const log = fresh ? "" : people !== null ? (await kept.get("log")) || "" : await startLog(params);
   const live = fresh ? "" : (await kept.get("live")) || "";
   const module = await modulePromise;
@@ -156,9 +156,10 @@ async function main() {
       const [word, arg] = line.split(" ");
       if (word === "L8FIELD") placeField(line.split(" ").slice(1));
       else if (word === "L8FIELDKIND") fieldKind(arg);
-      else if (word === "L8HTTP") ask(arg, line.split(" ")[2]);
-      else if (word === "L8ME") signedIn(arg);
-      else if (word === "L8ACCOUNT") keepAccount(line.split(" "));
+      // (A made-up account asks nothing, and keeps nothing.)
+      else if (word === "L8HTTP") people === null && ask(arg, line.split(" ")[2]);
+      else if (word === "L8ME") people === null && signedIn(arg);
+      else if (word === "L8ACCOUNT") people === null && keepAccount(line.split(" "));
       else if (word === "L8SHARE") share(line.slice(8).replace(/\\(n|\\)/g, (_, c) => (c === "n" ? "\n" : "\\")));
       else if (word === "L8BLUR") input.blur();
       else if (word === "L8GPSRETRY") gps.retry();
@@ -176,7 +177,7 @@ async function main() {
     const file = fs.fds.get(fd);
     const status = close(fd);
     if (file?.writable && file.path === LOG) saved(decoder.decode(fs.readFile(LOG)));
-    if (file?.writable && file.path === LIVE && !fresh) {
+    if (file?.writable && file.path === LIVE && !sync.fresh) {
       const text = decoder.decode(fs.readFile(LIVE));
       if (text) kept.set("live", text);
       else kept.remove("live");
