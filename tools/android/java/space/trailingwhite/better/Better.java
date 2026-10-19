@@ -88,9 +88,15 @@ public final class Better extends Activity {
     });
     App.start(this);
     link(getIntent());
-    // (A made-up course, for a test: adb shell am start ... --ei sim K.)
+    // (For a test, adb shell am start ...: a made-up course K times as fast,
+    // --ei sim K; another worker, --es api URL; a made-up account, --es
+    // people demo.)
     int sim = getIntent().getIntExtra("sim", 0);
     if (sim > 0) Native.push("sim " + sim);
+    String api = getIntent().getStringExtra("api");
+    if (api != null) Native.push("api " + api);
+    String people = getIntent().getStringExtra("people");
+    if (people != null) Native.push("people " + people);
   }
 
   @Override
@@ -99,7 +105,8 @@ public final class Better extends Activity {
     link(i);
   }
 
-  // Opened with the personal link: better://link#me=SECRET.
+  // Opened with a link: better://link#c=CODE, or (from before codes) the
+  // personal link, better://link#me=SECRET.
   private void link(Intent i) {
     Uri u = i == null ? null : i.getData();
     if (u != null && "better".equals(u.getScheme())) Native.push("link " + u.toString());
@@ -158,6 +165,9 @@ public final class Better extends Activity {
             w[1].equals("dark") ? 0xfff4f4f1 : 0xff121317);
         break;
       }
+      case "L8FIELDKIND":
+        keys.kind(w[1]);
+        break;
       case "L8KEYS": {
         InputMethodManager im = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
         if (w[1].equals("1")) {
@@ -174,6 +184,25 @@ public final class Better extends Activity {
   void keepOn(boolean on) {
     if (on) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+  }
+
+  // ---- sending ----
+  // The chooser, with the text; once it is gone, L8 is told (says 13).
+  void share(String text) {
+    Intent send = new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text);
+    try {
+      startActivityForResult(Intent.createChooser(send, null), SHARE);
+    } catch (Exception e) {
+      Native.push("says 13 0");
+    }
+  }
+
+  private static final int SHARE = 13;
+
+  @Override
+  protected void onActivityResult(int code, int result, Intent data) {
+    super.onActivityResult(code, result, data);
+    if (code == SHARE) Native.push("says 13 1");
   }
 
   // ---- asking for the phone's location ----
@@ -216,12 +245,23 @@ public final class Better extends Activity {
     else Native.push("gps denied");
   }
 
-  // The keyboard's view: what is typed goes to L8 as it would from keys.
+  // The keyboard's view: what is typed goes to L8 as it would from keys. Its
+  // kind is the field's (L8FIELDKIND): a name of anything, a code
+  // (capitals, no suggestions), or a person's name.
   static final class Keys extends View {
+    private String kind = "plain";
+
     Keys(Context c) {
       super(c);
       setFocusable(true);
       setFocusableInTouchMode(true);
+    }
+
+    void kind(String k) {
+      if (k.equals(kind)) return;
+      kind = k;
+      InputMethodManager im = (InputMethodManager) getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+      im.restartInput(this);
     }
 
     @Override
@@ -233,6 +273,13 @@ public final class Better extends Activity {
     public InputConnection onCreateInputConnection(EditorInfo info) {
       info.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS
           | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+      if (kind.equals("code")) {
+        info.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+            | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+      } else if (kind.equals("name")) {
+        info.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS
+            | InputType.TYPE_TEXT_VARIATION_PERSON_NAME;
+      }
       info.imeOptions = EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI;
       return new BaseInputConnection(this, false) {
         // (A word being written, as the keyboard has it so far: already

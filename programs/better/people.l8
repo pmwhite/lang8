@@ -1,0 +1,1690 @@
+tag better;
+
+use_tag std, skate;
+
+// People: an account (the log kept by the worker, web/better-log/worker.js,
+// which a device is signed in to with a short code), friends, and the
+// admin's list of everyone. The token a code gives a device is kept where
+// a personal link's secret was (sync_secret in the apps, the page's own
+// store on a page), so the log is kept with it as before (sync.l8, or
+// web/better/better.js on a page).
+//
+// Requests to the worker go one at a time, in a queue, through the
+// platform's platform_http (the apps') or the page's (main.l8), and wait
+// for the log's own to be done. Codes are 8 letters and digits, shown
+// K7QM-3XPA; one field takes any kind, and the worker says which it is. A
+// code is sent on with the platform's share sheet (platform_share): the
+// text, and a link that opens Better's page with the code in it.
+//
+// L8_PEOPLE=demo (?people=demo on the page) makes up an account, friends
+// and their activities, and the admin's list, with no worker: see
+// demo_answer.
+
+// ---- the account ----
+// Whose it is, and whether they are an admin (from the worker, kept with
+// the settings); on a page, whether the page keeps a token (it says so).
+acct_name: []i8 = new i8[64](0i8);
+
+acct_name_n: int = 0;
+
+acct_id: []i8 = new i8[16](0i8);
+
+acct_id_n: int = 0;
+
+acct_admin: bool = false;
+
+acct_page_token: bool = false;
+
+acct_has_token(): bool {
+    if (sync_native) return sync_linked();
+    acct_page_token
+}
+
+// Signed in, and the worker still knows this device.
+acct_on(): bool {
+    acct_has_token() && sync_state != 4
+}
+
+// Signed out by the worker (another device signed it out, say): signed in
+// again with a code, what is here goes with the account's.
+acct_lost(): bool {
+    acct_has_token() && sync_state == 4
+}
+
+// The account, from a line's words: its id, whether admin, and its name.
+acct_set(
+    t: []i8,
+    id_from: int,
+    id_to: int,
+    admin: bool,
+    name_from: int,
+    name_to: int
+) {
+    acct_id_n = mini(id_to - id_from, len(acct_id));
+    for i in 0..acct_id_n acct_id[i] = t[id_from + i];
+    acct_name_n = mini(name_to - name_from, len(acct_name));
+    for i in 0..acct_name_n acct_name[i] = t[name_from + i];
+    acct_admin = admin
+}
+
+acct_is(t: []i8, n: int): bool {
+    if (n != acct_id_n || n == 0) return false;
+    for i in 0..n {
+        if (t[i] != acct_id[i]) return false
+    }
+    true
+}
+
+line_acct_name() {
+    for i in 0..acct_name_n line_byte(acct_name[i] as int)
+}
+
+// What the platform is to be told: a new token (the page keeps it), that
+// it is forgotten, and the account (see platform_account).
+acct_tell: bool = false;
+
+acct_token: []i8 = new i8[64](0i8);
+
+acct_token_n: int = 0;
+
+acct_forget: bool = false;
+
+// What the worker says of the log (GET /log): whose it is.
+acct_heard(body: []i8, n: int) {
+    k: int = json_string(body, n, "name", pp_word);
+    if (k < 0) return;
+    k2: int = json_string(body, n, "id", pp_word2);
+    acct_set(pp_word2, 0, maxi(k2, 0), json_int(body, n, "admin", 0) == 1, 0, 0);
+    acct_name_n = mini(k, len(acct_name));
+    for i in 0..acct_name_n acct_name[i] = pp_word[i];
+    sync_settings_changed = true
+}
+
+// ---- codes ----
+// A code as typed or pasted: big or small letters, dashes and spaces, or
+// a whole link (the 8 after c=); anything else dropped. Into code_buf: how
+// many (more than 8: not a code).
+const CODE_LEN: int = 8;
+
+code_letters: str = "abcdefghijkmnpqrstuvwxyz23456789";
+
+code_buf: []i8 = new i8[16](0i8);
+
+code_n: int = 0;
+
+code_norm(t: []i8, from: int, to: int): int {
+    at: int = from;
+    for i in from..to - 1 {
+        if (t[i] as int == 99 && t[i + 1] as int == 61) at = i + 2
+    }
+    code_n = 0;
+    for i in at..to {
+        c: int = lower(t[i] as int);
+        good: bool = false;
+        for l in code_letters {
+            if (c == l as int) good = true
+        }
+        if (good && code_n < len(code_buf)) {
+            code_buf[code_n] = c trunc i8;
+            code_n = code_n + 1
+        }
+    }
+    code_n
+}
+
+// The code in field f, into code_buf: whether it is a whole one.
+code_in_field(f: int): bool {
+    code_norm(fq, f * FIELD_BYTES, f * FIELD_BYTES + fq_n[f]) == CODE_LEN
+}
+
+// As shown: K7QM-3XPA.
+line_code_shown(t: []i8, n: int) {
+    for i in 0..n {
+        if (i == 4) line_byte(45);
+        c: int = t[i] as int;
+        if (c >= 97 && c <= 122) c = c - 32;
+        line_byte(c)
+    }
+}
+
+page_link: str = "https://trailingwhite.space/better/#c=";
+
+// ---- inline errors, under a field ----
+// What went wrong with field f's code (or name), until it is typed in; and
+// the name some say.
+const E_WRONG: int = 1;
+
+const E_USED: int = 2;
+
+const E_EXPIRED: int = 3;
+
+const E_OWN: int = 4;
+
+const E_ALREADY: int = 5;
+
+const E_SIGN_IN_FIRST: int = 6;
+
+const E_SIGNED_IN: int = 7;
+
+const E_OTHER: int = 8;
+
+const E_SLOW: int = 9;
+
+const E_OFFLINE: int = 10;
+
+field_err: []int = new int[FIELDS](0);
+
+err_name: []i8 = new i8[64](0i8);
+
+err_name_n: int = 0;
+
+line_err_name() {
+    for i in 0..err_name_n line_byte(err_name[i] as int)
+}
+
+line_error(e: int) {
+    if (e == E_WRONG) line_add("That code isn't right. Check it and try again.");
+    if (e == E_USED) line_add("That code has been used. Ask for a new one.");
+    if (e == E_EXPIRED) line_add("That code has run out. Ask for a new one.");
+    if (e == E_OWN) line_add("That's your own code. Send it to a friend.");
+    if (e == E_ALREADY) {
+        line_add("You and ");
+        line_err_name();
+        line_add(" are already friends.")
+    }
+    if (e == E_SIGN_IN_FIRST) line_add("That's a friend code. Sign in first, then enter it under Friends.");
+    if (e == E_SIGNED_IN) line_add("You're already signed in.");
+    if (e == E_OTHER) {
+        line_add("That's a sign-in code for ");
+        line_err_name();
+        line_add(". Sign out first to use it.")
+    }
+    if (e == E_SLOW) line_add("Too many tries. Wait a minute and try again.");
+    if (e == E_OFFLINE) line_add("Can't reach Better. Check you're online and try again.")
+}
+
+// The worker's answer to a code as one of those (0: none), with the name it
+// says, if any.
+error_of(status: int, body: []i8, n: int): int {
+    err_name_n = maxi(json_string(body, n, "name", err_name), 0);
+    if (status == 0 || status >= 500) return E_OFFLINE;
+    if (status == 429) return E_SLOW;
+    k: int = maxi(json_string(body, n, "error", pp_word), 0);
+    if (word_in(pp_word, k, "used")) return E_USED;
+    if (word_in(pp_word, k, "expired")) return E_EXPIRED;
+    if (word_in(pp_word, k, "own")) return E_OWN;
+    if (word_in(pp_word, k, "already")) return E_ALREADY;
+    if (word_in(pp_word, k, "sign-in-first")) return E_SIGN_IN_FIRST;
+    if (word_in(pp_word, k, "signed-in")) return E_SIGNED_IN;
+    if (word_in(pp_word, k, "other")) return E_OTHER;
+    if (status >= 400) return E_WRONG;
+    0
+}
+
+word_in(t: []i8, n: int, w: str): bool {
+    if (n != len(w)) return false;
+    for i in 0..n {
+        if (t[i] != w[i]) return false
+    }
+    true
+}
+
+// A toast of words.
+toast_say(t: str) {
+    line_clear();
+    line_add(t);
+    toast_line()
+}
+
+toast_unreachable() {
+    toast_say("Can't reach Better right now")
+}
+
+// ---- the share sheet ----
+// The text to send (shared by the platform once a frame is done), and what
+// it was for (what is done once the sheet closes).
+share_buf: []i8 = new i8[2048](0i8);
+
+share_n: int = 0;
+
+share_wanted: bool = false;
+
+const SH_NONE: int = 0;
+
+const SH_DEVICE: int = 1;
+
+const SH_FRIEND: int = 2;
+
+const SH_INVITE: int = 3;
+
+const SH_NEW_CODE: int = 4;
+
+share_for: int = 0;
+
+share_add(t: str) {
+    for c in t {
+        if (share_n < len(share_buf)) {
+            share_buf[share_n] = c as i8;
+            share_n = share_n + 1
+        }
+    }
+}
+
+// (The line, added.)
+share_line() {
+    for i in 0..line_n {
+        if (share_n < len(share_buf)) {
+            share_buf[share_n] = line[i];
+            share_n = share_n + 1
+        }
+    }
+}
+
+share_link(code: []i8) {
+    share_add(page_link);
+    line_clear();
+    for i in 0..CODE_LEN line_byte(code[i] as int);
+    share_line()
+}
+
+share_code(code: []i8) {
+    line_clear();
+    line_code_shown(code, CODE_LEN);
+    share_line()
+}
+
+share_until(until_ms: int) {
+    line_clear();
+    line_day_short(day_of_ms(until_ms));
+    share_line()
+}
+
+// The day (from 1970, here) a time in ms from 1970 was on.
+day_of_ms(ms: int): int {
+    s: int = ms / 1000 + clock_tz * 60;
+    if (s < 0) return (s - 86399) / 86400;
+    s / 86400
+}
+
+// An invite, from the admin (from: their name).
+share_invite(code: []i8, until_ms: int) {
+    share_n = 0;
+    line_clear();
+    line_acct_name();
+    share_line();
+    share_add("""
+ added you to Better, for keeping your runs, rides and walks.
+
+Open """);
+    share_link(code);
+    share_add("""
+
+or in the Better app, go to You, Sign in, and enter """);
+    share_code(code);
+    share_add("""
+.
+
+Good until """);
+    share_until(until_ms);
+    share_add(".")
+}
+
+share_friend(code: []i8, until_ms: int) {
+    share_n = 0;
+    share_add("""
+Be friends on Better? We'd each see the other's runs, rides and walks.
+
+Open """);
+    share_link(code);
+    share_add("""
+
+or in Better, go to Friends, Add, and enter """);
+    share_code(code);
+    share_add("""
+.
+
+Good until """);
+    share_until(until_ms);
+    share_add(".")
+}
+
+share_device(code: []i8) {
+    share_n = 0;
+    share_add("Better sign-in code: ");
+    share_code(code);
+    share_add("\n");
+    share_link(code);
+    share_add("""
+
+Good for 10 minutes.""")
+}
+
+share_new_code(code: []i8, until_ms: int) {
+    share_n = 0;
+    share_add("Here's a new code to sign in to Better: ");
+    share_code(code);
+    share_add("""
+
+
+Open """);
+    share_link(code);
+    share_add("""
+
+or in the Better app, go to You, Sign in, and enter it.
+
+Good until """);
+    share_until(until_ms);
+    share_add(".")
+}
+
+share_now(why: int) {
+    share_for = why;
+    share_wanted = true
+}
+
+// The share line for a platform: L8SHARE, then the text with \ as \\ and
+// a new line as \n.
+line_share() {
+    line_clear();
+    line_add("L8SHARE ");
+    for i in 0..share_n {
+        c: int = share_buf[i] as int;
+        if (c == 92) line_add("\\\\") else if (c == 10) line_add("\\n") else line_byte(c)
+    }
+}
+
+// How the sheet went: 1 shared or closed, 2 copied (a desktop page), 0
+// failed.
+people_shared(v: int) {
+    why: int = share_for;
+    share_for = SH_NONE;
+    if (why == SH_FRIEND) fc_shown = true;
+    if (v == 2) {
+        toast_say("Copied. Paste it into a message.");
+        return
+    }
+    if (v == 1 && why == SH_NEW_CODE) {
+        line_clear();
+        line_add("New code for ");
+        for i in 0..nc_name_n line_byte(nc_name[i] as int);
+        line_add(" made");
+        toast_line()
+    }
+}
+
+// ---- requests ----
+const RQ_LOOK: int = 1;
+
+const RQ_USE: int = 2;
+
+const RQ_DEVICE_CODE: int = 3;
+
+const RQ_FRIEND_CODE: int = 4;
+
+const RQ_FEED: int = 5;
+
+const RQ_REMOVE: int = 6;
+
+const RQ_SIGNOUT: int = 7;
+
+const RQ_ADMIN_ALL: int = 8;
+
+const RQ_INVITE: int = 9;
+
+const RQ_ADMIN_CODE: int = 10;
+
+// Those waiting their turn: each its kind, the button that asked (it shows
+// it is waiting), what it is about (a code, an id, a name) and a flag (an
+// invite's friends with you; a code used from the Add a friend page).
+const QUEUE: int = 8;
+
+const RQ_ARG: int = 64;
+
+rq_kind: []int = new int[QUEUE](0);
+
+rq_btn: []int = new int[QUEUE](0);
+
+rq_arg: []i8 = new i8[QUEUE * RQ_ARG](0i8);
+
+rq_arg_n: []int = new int[QUEUE](0);
+
+rq_flag: []bool = new bool[QUEUE](false);
+
+rq_n: int = 0;
+
+// The one on its way (0 none), as the queue's were.
+pp_out: int = 0;
+
+pp_btn: int = 0;
+
+pp_arg: []i8 = new i8[RQ_ARG](0i8);
+
+pp_arg_n: int = 0;
+
+pp_flag: bool = false;
+
+// (Words out of an answer.)
+pp_word: []i8 = new i8[256](0i8);
+
+pp_word2: []i8 = new i8[256](0i8);
+
+people_ask(
+    kind: int,
+    btn: int,
+    arg: []i8,
+    from: int,
+    to: int,
+    flag: bool
+) {
+    // (Asked already, and not yet answered: once is enough.)
+    if (pp_out == kind && (kind == RQ_FEED || kind == RQ_ADMIN_ALL)) return;
+    for q in 0..rq_n {
+        if (rq_kind[q] == kind) return
+    }
+    if (rq_n >= QUEUE) return;
+    rq_kind[rq_n] = kind;
+    rq_btn[rq_n] = btn;
+    rq_flag[rq_n] = flag;
+    k: int = mini(to - from, RQ_ARG);
+    for i in 0..k rq_arg[rq_n * RQ_ARG + i] = arg[from + i];
+    rq_arg_n[rq_n] = k;
+    rq_n = rq_n + 1
+}
+
+people_ask_plain(kind: int, btn: int) {
+    people_ask(kind, btn, pp_word, 0, 0, false)
+}
+
+// Whether a button's request is waiting or on its way (it says so).
+people_waiting(btn: int): bool {
+    if (btn == 0) return false;
+    if (pp_out != 0 && pp_btn == btn) return true;
+    for q in 0..rq_n {
+        if (rq_btn[q] == btn) return true
+    }
+    false
+}
+
+// The body of the request on its way.
+pp_body: []i8 = new i8[1024](0i8);
+
+pp_body_n: int = 0;
+
+pp_put(c: int) {
+    pp_body_n = json_byte(pp_body, pp_body_n, c)
+}
+
+pp_put_str(s: str) {
+    for c in s pp_put(c as int)
+}
+
+// {"KEY":"WHAT"}, what being the request's.
+pp_body_of(key: str) {
+    pp_body_n = 0;
+    pp_put_str("{\"");
+    pp_put_str(key);
+    pp_put_str("\":\"");
+    for i in 0..pp_arg_n {
+        c: int = pp_arg[i] as int & 255;
+        if (c == 34 || c == 92) pp_put(92);
+        if (c >= 32) pp_put(c)
+    }
+    pp_put(34);
+    if (pp_out == RQ_INVITE) {
+        if (pp_flag) pp_put_str(",\"friend\":true") else pp_put_str(",\"friend\":false")
+    }
+    pp_put(125)
+}
+
+// Each frame: the next request sent, once nothing else is on its way; a
+// made-up answer given (L8_PEOPLE); the feed fetched when it is wanted.
+people_step() {
+    if (pp_out == 0 && rq_n > 0 && (!sync_native || sync_busy == SY_NONE)) people_send();
+    if (demo_due > 0.0 && now_t >= demo_due) {
+        demo_due = 0.0;
+        people_answer(demo_status, demo_text, demo_n)
+    }
+    // (The Friends tab come to: its feed, if it is a minute old.)
+    shown: bool = acct_on() && tab_kind() == TK_FRIENDS && !page_open;
+    if (shown && !friends_shown && (feed_t < 0.0 || now_t - feed_t > 60.0)) people_ask_plain(RQ_FEED,
+        0);
+    friends_shown = shown;
+    // (A code for another device: drawn again when it runs out.)
+    out: bool = dc_n > 0 && clock_ms() >= dc_until;
+    if (out != dc_out) {
+        dc_out = out;
+        busy = true
+    }
+}
+
+// Looked at again (the app, or the page): the feed, if it is shown.
+people_shown() {
+    if (acct_on() && tab_kind() == TK_FRIENDS && !page_open) people_ask_plain(RQ_FEED,
+        0)
+}
+
+people_send() {
+    pp_out = rq_kind[0];
+    pp_btn = rq_btn[0];
+    pp_flag = rq_flag[0];
+    pp_arg_n = rq_arg_n[0];
+    for i in 0..pp_arg_n pp_arg[i] = rq_arg[i];
+    for q in 1..rq_n {
+        rq_kind[q - 1] = rq_kind[q];
+        rq_btn[q - 1] = rq_btn[q];
+        rq_flag[q - 1] = rq_flag[q];
+        rq_arg_n[q - 1] = rq_arg_n[q];
+        for i in 0..RQ_ARG rq_arg[(q - 1) * RQ_ARG + i] = rq_arg[q * RQ_ARG + i]
+    }
+    rq_n = rq_n - 1;
+    pp_body_n = 0;
+    kind: int = pp_out;
+    if (kind == RQ_LOOK || kind == RQ_USE) pp_body_of("code");
+    if (kind == RQ_REMOVE || kind == RQ_ADMIN_CODE) pp_body_of("id");
+    if (kind == RQ_INVITE) pp_body_of("name");
+    if (demo_on) {
+        demo_answer(kind);
+        return
+    }
+    if (sync_native) sync_busy = SY_PEOPLE;
+    platform_http(rq_method(kind), rq_path(kind), pp_body, pp_body_n)
+}
+
+rq_method(kind: int): str {
+    if (kind == RQ_FEED || kind == RQ_ADMIN_ALL) return "GET";
+    "POST"
+}
+
+rq_path(kind: int): str {
+    if (kind == RQ_LOOK) return "/code/look";
+    if (kind == RQ_USE) return "/code/use";
+    if (kind == RQ_DEVICE_CODE) return "/device/code";
+    if (kind == RQ_FRIEND_CODE) return "/friends/code";
+    if (kind == RQ_FEED) return "/friends";
+    if (kind == RQ_REMOVE) return "/friends/remove";
+    if (kind == RQ_ADMIN_ALL) return "/admin/all";
+    if (kind == RQ_INVITE) return "/admin/invite";
+    if (kind == RQ_ADMIN_CODE) return "/admin/code";
+    "/signout"
+}
+
+// How the request on its way went: its HTTP status (0: no answer) and the
+// answer's n bytes in body.
+people_answer(status: int, body: []i8, n: int) {
+    kind: int = pp_out;
+    pp_out = 0;
+    busy = true;
+    if (kind == 0) return;
+    // (A token the worker no longer knows: signed out, elsewhere.)
+    if (status == 401 && kind != RQ_LOOK && kind != RQ_USE && kind != RQ_SIGNOUT) {
+        people_lost();
+        return
+    }
+    ok: bool = status == 200;
+    if (kind == RQ_LOOK) looked(status, body, n);
+    if (kind == RQ_USE) used(status, body, n);
+    if (kind == RQ_DEVICE_CODE) {
+        if (ok) {
+            dc_n = json_string(body, n, "code", dc_code);
+            dc_until = json_int(body, n, "until", 0);
+            dc_out = false
+        } else toast_unreachable()
+    }
+    if (kind == RQ_FRIEND_CODE) {
+        if (ok) {
+            fc_n = json_string(body, n, "code", fc_code);
+            fc_until = json_int(body, n, "until", 0);
+            fc_shown = false;
+            share_friend(fc_code, fc_until);
+            share_now(SH_FRIEND)
+        } else toast_unreachable()
+    }
+    if (kind == RQ_FEED) {
+        if (ok) {
+            for i in 0..n lg_t[i] = body[i];
+            feed_read(n);
+            feed_t = now_t;
+            feed_failed = false
+        } else feed_failed = true
+    }
+    if (kind == RQ_REMOVE) {
+        if (ok) {
+            line_clear();
+            line_add("Removed ");
+            for i in 0..rm_name_n line_byte(rm_name[i] as int);
+            toast_line();
+            fr_pick = -1;
+            people_ask_plain(RQ_FEED, 0)
+        } else toast_unreachable()
+    }
+    if (kind == RQ_SIGNOUT) {
+        if (ok || status == 401) sign_out_here() else toast_unreachable()
+    }
+    if (kind == RQ_ADMIN_ALL) {
+        if (ok) admin_read(body, n);
+        ad_loading = false
+    }
+    if (kind == RQ_INVITE) {
+        if (ok) {
+            inv_made = true;
+            inv_name_n = maxi(json_string(body, n, "name", inv_name), 0);
+            inv_n = json_string(body, n, "code", inv_code);
+            inv_until = json_int(body, n, "until", 0);
+            share_invite(inv_code, inv_until);
+            share_now(SH_INVITE);
+            people_ask_plain(RQ_ADMIN_ALL, 0)
+        } else toast_unreachable()
+    }
+    if (kind == RQ_ADMIN_CODE) {
+        if (ok) {
+            nc_name_n = maxi(json_string(body, n, "name", nc_name), 0);
+            k: int = json_string(body, n, "code", pp_word2);
+            until: int = json_int(body, n, "until", 0);
+            if (k == CODE_LEN) {
+                if (json_int(body, n, "joined", 1) == 1) share_new_code(pp_word2,
+                    until) else share_invite(pp_word2, until);
+                share_now(SH_NEW_CODE)
+            }
+            people_ask_plain(RQ_ADMIN_ALL, 0)
+        } else toast_unreachable()
+    }
+}
+
+// The worker no longer knows this device: signed out, quietly; what is
+// here is kept, to go with the account's when signed in again.
+people_lost() {
+    sync_state = 4;
+    if (sync_native) {
+        sync_dirty = true;
+        sync_settings_changed = true
+    }
+}
+
+// A code, looked at (it came in a link): the page it is for, with it
+// written in, to be confirmed with a tap.
+looked(status: int, body: []i8, n: int) {
+    e: int = error_of(status, body, n);
+    k: int = maxi(json_string(body, n, "kind", pp_word), 0);
+    friend: bool = word_in(pp_word, k, "friend");
+    id_n: int = maxi(json_string(body, n, "id", pp_word2), 0);
+    if (e == 0 && !friend && acct_on()) {
+        if (acct_is(pp_word2, id_n)) toast_say("You're already signed in.") else {
+            line_clear();
+            line_error(E_OTHER);
+            toast_line()
+        }
+        return
+    }
+    close_pages();
+    if (acct_on()) open_sheet(PG_ADDFRIEND) else open_sheet(PG_SIGNIN);
+    fq_n[1] = 0;
+    if (e == 0 && friend && !acct_on()) e = E_SIGN_IN_FIRST else {
+        for i in 0..pp_arg_n field_type(1, pp_arg[i] as int)
+    }
+    field_err[1] = e
+}
+
+// A code, used: signed in, or friends; or what was wrong with it.
+used(status: int, body: []i8, n: int) {
+    e: int = error_of(status, body, n);
+    if (e != 0) {
+        field_err[1] = e;
+        return
+    }
+    k: int = maxi(json_string(body, n, "kind", pp_word), 0);
+    friend: bool = word_in(pp_word, k, "friend");
+    name_n: int = maxi(json_string(body, n, "name", pp_word), 0);
+    id_n: int = maxi(json_string(body, n, "id", pp_word2), 0);
+    if (friend) {
+        // (A friend.)
+        line_clear();
+        line_add("You and ");
+        for i in 0..name_n line_byte(pp_word[i] as int);
+        line_add(" are friends now");
+        toast_line();
+        fq_n[1] = 0;
+        field_retell = true;
+        close_pages();
+        go_tab(kind_slot(TK_FRIENDS, tabs_n()));
+        pick_id_n = mini(id_n, len(pick_id));
+        for i in 0..pick_id_n pick_id[i] = pp_word2[i];
+        people_ask_plain(RQ_FEED, 0);
+        return
+    }
+    // (Signed in: the token kept, and what is here put together with the
+    // account's.)
+    acct_set(pp_word2, 0, id_n, json_int(body, n, "admin", 0) == 1, 0, 0);
+    acct_name_n = mini(name_n, len(acct_name));
+    for i in 0..acct_name_n acct_name[i] = pp_word[i];
+    acct_token_n = maxi(json_string(body, n, "token", acct_token), 0);
+    if (sync_native) {
+        sync_secret_n = mini(acct_token_n, len(sync_secret));
+        for i in 0..sync_secret_n sync_secret[i] = acct_token[i];
+        sync_rev = 0;
+        sync_dirty = true;
+        sync_settings_changed = true;
+        sync_state = 2;
+        sync_pull()
+    } else {
+        acct_page_token = true;
+        sync_state = 2
+    }
+    if (demo_on) {
+        acct_token_n = 0;
+        sync_state = 1
+    }
+    acct_tell = true;
+    fq_n[1] = 0;
+    field_retell = true;
+    close_pages();
+    tabs_seen = tabs_n();
+    tab = kind_slot(TK_YOU, tabs_seen);
+    tab_x = tab as f32;
+    line_clear();
+    line_add("Signed in as ");
+    line_acct_name();
+    toast_line();
+    people_ask_plain(RQ_FEED, 0)
+}
+
+// Whether there are changes here not yet with the worker (signing out
+// would lose them).
+log_unsaved(): bool {
+    if (sync_native) return sync_dirty;
+    sync_state == 2 || sync_state == 3
+}
+
+// Signed out: the token forgotten, and the account's activities, its
+// friends and its list; what is on this device to begin with (units,
+// light or dark, goals) stays.
+sign_out_here() {
+    if (sync_native) {
+        sync_secret_n = 0;
+        sync_rev = 0;
+        sync_dirty = false;
+        sync_push_at = -1.0;
+        sync_settings_changed = true
+    }
+    acct_page_token = false;
+    acct_forget = true;
+    acct_tell = true;
+    acct_id_n = 0;
+    acct_name_n = 0;
+    acct_admin = false;
+    sync_state = 0;
+    feed_clear();
+    feed_t = -1.0;
+    feed_failed = false;
+    ad_n = 0;
+    dc_n = 0;
+    fc_n = 0;
+    close_pages();
+    page_a = -1;
+    clear_log();
+    sort_log();
+    units_said = true;
+    wants_save = true;
+    tabs_seen = tabs_n();
+    tab = kind_slot(TK_YOU, tabs_seen);
+    tab_x = tab as f32;
+    toast_say("Signed out")
+}
+
+// ---- a code for another device ----
+dc_code: []i8 = new i8[16](0i8);
+
+dc_n: int = 0;
+
+dc_until: int = 0;
+
+dc_out: bool = false;
+
+// ---- a friend code ----
+fc_code: []i8 = new i8[16](0i8);
+
+fc_n: int = 0;
+
+fc_until: int = 0;
+
+// (Shown once the sheet has closed.)
+fc_shown: bool = false;
+
+// ---- an invite made (Add someone) ----
+inv_made: bool = false;
+
+inv_friend: bool = true;
+
+inv_code: []i8 = new i8[16](0i8);
+
+inv_n: int = 0;
+
+inv_until: int = 0;
+
+inv_name: []i8 = new i8[64](0i8);
+
+inv_name_n: int = 0;
+
+// (A new code's person, for the toast once it is sent.)
+nc_name: []i8 = new i8[64](0i8);
+
+nc_name_n: int = 0;
+
+// ---- friends, and their last four weeks ----
+const FRIENDS: int = 100;
+
+const FEED: int = 2000;
+
+// Each friend: their id, name (in the pool), and since when (ms).
+fr_n: int = 0;
+
+fr_id: []i8 = new i8[FRIENDS * 16](0i8);
+
+fr_id_n: []int = new int[FRIENDS](0);
+
+fr_name0: []int = new int[FRIENDS](0);
+
+fr_name_n: []int = new int[FRIENDS](0);
+
+fr_since: []int = new int[FRIENDS](0);
+
+// Each activity: whose (a friend), and its act and up lines' numbers.
+fd_n: int = 0;
+
+fd_friend: []int = new int[FEED](0);
+
+fd_start: []int = new int[FEED](0);
+
+fd_tz: []int = new int[FEED](0);
+
+fd_sport: []int = new int[FEED](0);
+
+fd_elapsed: []int = new int[FEED](0);
+
+fd_moving: []int = new int[FEED](0);
+
+fd_dist: []int = new int[FEED](0);
+
+fd_gain: []int = new int[FEED](0);
+
+fd_name0: []int = new int[FEED](0);
+
+fd_name_n: []int = new int[FEED](0);
+
+// The names, one after another.
+pp_pool: []i8 = new i8[131072](0i8);
+
+pp_pool_n: int = 0;
+
+// Newest first, all of them.
+fd_order: []int = new int[FEED](0);
+
+// When it was last fetched (-1 never), whether the last try failed; the
+// friend picked (-1 All), or to be once it comes (by id).
+feed_t: f32 = -1.0;
+
+feed_failed: bool = false;
+
+friends_shown: bool = false;
+
+fr_pick: int = -1;
+
+pick_id: []i8 = new i8[16](0i8);
+
+pick_id_n: int = 0;
+
+// (Whose removal the toast says.)
+rm_name: []i8 = new i8[64](0i8);
+
+rm_name_n: int = 0;
+
+feed_clear() {
+    fr_n = 0;
+    fd_n = 0;
+    pp_pool_n = 0;
+    fr_pick = -1
+}
+
+// The pool's bytes from the reader to the line's end: where they start.
+pool_rest(): int {
+    skip_spaces();
+    e: int = lg_i;
+    while (e < lg_to && lg_t[e] as int != 10 && lg_t[e] as int != 13) e = e + 1;
+    while (e > lg_i && lg_t[e - 1] as int == 32) e = e - 1;
+    at: int = pp_pool_n;
+    for i in lg_i..e {
+        if (pp_pool_n < len(pp_pool)) {
+            pp_pool[pp_pool_n] = lg_t[i];
+            pp_pool_n = pp_pool_n + 1
+        }
+    }
+    lg_i = e;
+    at
+}
+
+// The feed, from its n bytes in lg_t:
+//
+//   friend ID SINCE NAME...
+//   act START TZ SPORT ELAPSED MOVING DIST MAX NAME...
+//   up GAIN LOSS
+feed_read(n: int) {
+    // (The friend picked stays picked, by id.)
+    if (fr_pick >= 0 && pick_id_n == 0) {
+        pick_id_n = fr_id_n[fr_pick];
+        for i in 0..pick_id_n pick_id[i] = fr_id[fr_pick * 16 + i]
+    }
+    feed_clear();
+    lg_to = n;
+    lg_i = 0;
+    while (lg_i < lg_to) {
+        read_word();
+        if (word_is("friend") && fr_n < FRIENDS) {
+            f: int = fr_n;
+            read_word();
+            k: int = mini(word_to - word_from, 16);
+            for i in 0..k fr_id[f * 16 + i] = lg_t[word_from + i];
+            fr_id_n[f] = k;
+            fr_since[f] = read_int();
+            fr_name0[f] = pool_rest();
+            fr_name_n[f] = pp_pool_n - fr_name0[f];
+            fr_n = fr_n + 1;
+            if (pick_id_n == k) {
+                same: bool = true;
+                for i in 0..k {
+                    if (pick_id[i] != fr_id[f * 16 + i]) same = false
+                }
+                if (same) fr_pick = f
+            }
+        }
+        if (word_is("act") && fr_n > 0 && fd_n < FEED) {
+            a: int = fd_n;
+            fd_friend[a] = fr_n - 1;
+            fd_start[a] = read_int();
+            fd_tz[a] = read_int();
+            read_word();
+            fd_sport[a] = S_RUN;
+            for s in 0..SPORTS {
+                if (word_is(sport_key[s])) fd_sport[a] = s
+            }
+            fd_elapsed[a] = read_int();
+            fd_moving[a] = read_int();
+            fd_dist[a] = read_int();
+            read_int();
+            fd_gain[a] = 0;
+            fd_name0[a] = pool_rest();
+            fd_name_n[a] = pp_pool_n - fd_name0[a];
+            fd_n = fd_n + 1
+        }
+        if (word_is("up") && fd_n > 0) fd_gain[fd_n - 1] = read_int();
+        next_line()
+    }
+    pick_id_n = 0;
+    // (Newest first.)
+    for a2 in 0..fd_n {
+        k2: int = a2;
+        while (k2 > 0 && fd_start[fd_order[k2 - 1]] < fd_start[a2]) {
+            fd_order[k2] = fd_order[k2 - 1];
+            k2 = k2 - 1
+        }
+        fd_order[k2] = a2
+    }
+}
+
+// A friend's name: whole, or the first word (cut to 14 bytes).
+line_friend(f: int) {
+    for i in 0..fr_name_n[f] line_byte(pp_pool[fr_name0[f] + i] as int)
+}
+
+line_friend_first(f: int) {
+    k: int = 0;
+    while (k < fr_name_n[f] && pp_pool[fr_name0[f] + k] as int != 32) k = k + 1;
+    k = mini(k, 14);
+    // (Not in the middle of a letter.)
+    while (k > 0 && k < fr_name_n[f] && (pp_pool[fr_name0[f] + k] as int & 192) == 128) k = k - 1;
+    for i in 0..k line_byte(pp_pool[fr_name0[f] + i] as int)
+}
+
+line_feed_name(a: int) {
+    for i in 0..fd_name_n[a] line_byte(pp_pool[fd_name0[a] + i] as int)
+}
+
+fd_day(a: int): int {
+    s: int = fd_start[a] + fd_tz[a] * 60;
+    if (s < 0) return (s - 86399) / 86400;
+    s / 86400
+}
+
+fd_minute(a: int): int {
+    s: int = fd_start[a] + fd_tz[a] * 60;
+    (s % 86400 + 86400) % 86400 / 60
+}
+
+// ---- everyone (the admin's) ----
+const ADMIN_MOST: int = 100;
+
+ad_n: int = 0;
+
+ad_loading: bool = false;
+
+ad_id: []i8 = new i8[ADMIN_MOST * 16](0i8);
+
+ad_id_n: []int = new int[ADMIN_MOST](0);
+
+ad_name: []i8 = new i8[ADMIN_MOST * 64](0i8);
+
+ad_name_n: []int = new int[ADMIN_MOST](0);
+
+ad_joined: []bool = new bool[ADMIN_MOST](false);
+
+ad_until: []int = new int[ADMIN_MOST](0);
+
+ad_acts: []int = new int[ADMIN_MOST](0);
+
+// (One of the list's objects, alone.)
+pp_obj: []i8 = new i8[4096](0i8);
+
+// The list: [{"id": ..., "name": ..., "joined": ..., "invite_until": ...,
+// "acts": ...}, ...], in the order they were made.
+admin_read(body: []i8, n: int) {
+    ad_n = 0;
+    i: int = 0;
+    depth: int = 0;
+    from: int = -1;
+    in_str: bool = false;
+    while (i < n) {
+        c: int = body[i] as int;
+        if (in_str) {
+            if (c == 92) i = i + 1 else if (c == 34) in_str = false
+        } else if (c == 34) in_str = true else if (c == 123) {
+            if (depth == 0) from = i;
+            depth = depth + 1
+        } else if (c == 125) {
+            depth = depth - 1;
+            if (depth == 0 && from >= 0 && ad_n < ADMIN_MOST) {
+                m: int = mini(i + 1 - from, len(pp_obj));
+                for k in 0..m pp_obj[k] = body[from + k];
+                admin_one(m);
+                from = -1
+            }
+        }
+        i = i + 1
+    }
+}
+
+admin_one(m: int) {
+    a: int = ad_n;
+    ad_id_n[a] = mini(maxi(json_string(pp_obj, m, "id", pp_word), 0), 16);
+    for i in 0..ad_id_n[a] ad_id[a * 16 + i] = pp_word[i];
+    ad_name_n[a] = mini(maxi(json_string(pp_obj, m, "name", pp_word), 0), 64);
+    for i in 0..ad_name_n[a] ad_name[a * 64 + i] = pp_word[i];
+    ad_joined[a] = json_int(pp_obj, m, "joined", -1) >= 0;
+    ad_until[a] = json_int(pp_obj, m, "invite_until", 0);
+    ad_acts[a] = json_int(pp_obj, m, "acts", 0);
+    ad_n = ad_n + 1
+}
+
+ad_is_me(a: int): bool {
+    if (ad_id_n[a] != acct_id_n) return false;
+    for i in 0..acct_id_n {
+        if (ad_id[a * 16 + i] != acct_id[i]) return false
+    }
+    acct_id_n > 0
+}
+
+line_ad_name(a: int) {
+    for i in 0..ad_name_n[a] line_byte(ad_name[a * 64 + i] as int)
+}
+
+// ---- what the buttons do ----
+const B_ACCOUNT: int = 200;
+
+const B_SIGNIN_GO: int = 201;
+
+const B_DEVICE_CODE: int = 202;
+
+const B_DEVICE_SEND: int = 203;
+
+const B_SIGNOUT: int = 204;
+
+const B_ADD_SOMEONE: int = 205;
+
+const B_INVITE_GO: int = 206;
+
+const B_INVITE_ON: int = 207;
+
+const B_INVITE_OFF: int = 208;
+
+const B_INVITE_SEND: int = 209;
+
+const B_INVITE_DONE: int = 210;
+
+const B_FRIEND_SEND: int = 211;
+
+const B_FRIEND_USE: int = 212;
+
+const B_FEED_RETRY: int = 213;
+
+const B_FRIEND_ADD: int = 214;
+
+const B_FRIEND_REMOVE: int = 215;
+
+// (All, then each friend.)
+const B_FRIEND_PICK: int = 240;
+
+const B_PERSON_CODE: int = 400;
+
+// When signing out, or removing a friend, was asked for (each twice).
+signout_asked_t: f32 = -10.0;
+
+remove_asked_t: f32 = -10.0;
+
+people_act(id: int) {
+    if (id == B_ACCOUNT) {
+        if (acct_on()) open_sheet(PG_ACCOUNT) else open_sheet(PG_SIGNIN)
+    }
+    if (id == B_SIGNIN_GO || id == B_FRIEND_USE) people_submit(1);
+    if (id == B_DEVICE_CODE) people_ask_plain(RQ_DEVICE_CODE, id);
+    if (id == B_DEVICE_SEND && dc_n == CODE_LEN) {
+        share_device(dc_code);
+        share_now(SH_DEVICE)
+    }
+    if (id == B_SIGNOUT && !log_unsaved()) {
+        if (now_t - signout_asked_t >= 3.0) signout_asked_t = now_t else {
+            signout_asked_t = -10.0;
+            people_ask_plain(RQ_SIGNOUT, id)
+        }
+    }
+    if (id == B_ADD_SOMEONE) {
+        inv_made = false;
+        inv_friend = true;
+        fq_n[2] = 0;
+        field_err[2] = 0;
+        open_sheet(PG_INVITE)
+    }
+    if (id == B_INVITE_GO) people_submit(2);
+    if (id == B_INVITE_ON) inv_friend = true;
+    if (id == B_INVITE_OFF) inv_friend = false;
+    if (id == B_INVITE_SEND && inv_n == CODE_LEN) {
+        share_invite(inv_code, inv_until);
+        share_now(SH_INVITE)
+    }
+    if (id == B_INVITE_DONE) close_page();
+    if (id == B_FRIEND_SEND) people_ask_plain(RQ_FRIEND_CODE, id);
+    if (id == B_FEED_RETRY) people_ask_plain(RQ_FEED, id);
+    if (id == B_FRIEND_ADD) {
+        field_err[1] = 0;
+        open_sheet(PG_ADDFRIEND)
+    }
+    if (id == B_FRIEND_REMOVE && fr_pick >= 0) {
+        if (now_t - remove_asked_t >= 3.0) remove_asked_t = now_t else {
+            remove_asked_t = -10.0;
+            f: int = fr_pick;
+            line_clear();
+            line_friend_first(f);
+            rm_name_n = mini(line_n, len(rm_name));
+            for i in 0..rm_name_n rm_name[i] = line[i];
+            people_ask(RQ_REMOVE, id, fr_id, f * 16, f * 16 + fr_id_n[f], false)
+        }
+    }
+    if (id >= B_FRIEND_PICK && id <= B_FRIEND_PICK + fr_n) {
+        fr_pick = id - B_FRIEND_PICK - 1;
+        remove_asked_t = -10.0
+    }
+    if (id >= B_PERSON_CODE && id < B_PERSON_CODE + ad_n) {
+        a: int = id - B_PERSON_CODE;
+        people_ask(RQ_ADMIN_CODE, id, ad_id, a * 16, a * 16 + ad_id_n[a], false)
+    }
+}
+
+// Enter, or the button under the field: the code used, or the invite made.
+people_submit(f: int) {
+    if (f == 1) {
+        if (!code_in_field(1) || people_waiting(B_SIGNIN_GO) || people_waiting(B_FRIEND_USE)) return;
+        field_blur();
+        btn: int = B_SIGNIN_GO;
+        if (page_kind == PG_ADDFRIEND) btn = B_FRIEND_USE;
+        people_ask(RQ_USE, btn, code_buf, 0, CODE_LEN, false)
+    }
+    if (f == 2) {
+        n: int = fq_n[2];
+        while (n > 0 && fq[2 * FIELD_BYTES + n - 1] as int == 32) n = n - 1;
+        k: int = 0;
+        while (k < n && fq[2 * FIELD_BYTES + k] as int == 32) k = k + 1;
+        if (k >= n || people_waiting(B_INVITE_GO)) return;
+        field_blur();
+        people_ask(RQ_INVITE, B_INVITE_GO, fq, 2 * FIELD_BYTES + k, 2 * FIELD_BYTES + n,
+            inv_friend)
+    }
+}
+
+// The page says a code came in its link (#c=): looked at.
+people_code(t: []i8, from: int, to: int) {
+    if (code_norm(t, from, to) != CODE_LEN) return;
+    people_ask(RQ_LOOK, 0, code_buf, 0, CODE_LEN, false)
+}
+
+// ---- made up (L8_PEOPLE) ----
+// An account (Philip, an admin) with friends and their weeks, and the
+// admin's list; requests answered here, a moment later. demo has three
+// friends, many eight, alone none; offline answers nothing; out is signed
+// out, to sign in to it. A code
+// beginning with a digit is answered as wrong (2), used (3), run out (4),
+// your own (5), already friends (6), no answer (7), too many tries (8),
+// or someone else's sign-in code (9).
+demo_on: bool = false;
+
+demo_kind: int = 0;
+
+const DEMO_SOME: int = 0;
+
+const DEMO_MANY: int = 1;
+
+const DEMO_ALONE: int = 2;
+
+const DEMO_OFFLINE: int = 3;
+
+demo_due: f32 = 0.0;
+
+demo_status: int = 0;
+
+demo_text: []i8 = new i8[65536](0i8);
+
+demo_n: int = 0;
+
+// (The friends left, by number in demo_names; and those added.)
+demo_friends: []bool = new bool[12](false);
+
+demo_names: []str = ["Sam Ortiz", "Ana", "Jo", "Mia Laurent", "Theo", "Rosa", "Kwame",
+    "Lou", "Rosa Lind"];
+
+demo_invited: int = 0;
+
+// A kind of made-up account, by its word.
+demo_word(t: []i8, from: int, to: int) {
+    if (word_in_at(t, from, to, "demo")) demo_start(DEMO_SOME);
+    if (word_in_at(t, from, to, "many")) demo_start(DEMO_MANY);
+    if (word_in_at(t, from, to, "alone")) demo_start(DEMO_ALONE);
+    if (word_in_at(t, from, to, "offline")) demo_start(DEMO_OFFLINE);
+    // (Signed out, to sign in to it.)
+    if (word_in_at(t, from, to, "out")) {
+        demo_start(DEMO_SOME);
+        acct_page_token = false;
+        acct_id_n = 0;
+        acct_name_n = 0;
+        acct_admin = false;
+        sync_secret_n = 0
+    }
+}
+
+word_in_at(
+    t: []i8,
+    from: int,
+    to: int,
+    w: str
+): bool {
+    if (to - from != len(w)) return false;
+    for i in 0..len(w) {
+        if (t[from + i] != w[i]) return false
+    }
+    true
+}
+
+demo_start(kind: int) {
+    demo_on = true;
+    demo_kind = kind;
+    line_clear();
+    line_add("demo0001");
+    for i in 0..8 acct_id[i] = line[i];
+    acct_id_n = 8;
+    line_clear();
+    line_add("Philip");
+    acct_name_n = line_n;
+    for i in 0..line_n acct_name[i] = line[i];
+    acct_admin = true;
+    acct_page_token = true;
+    if (sync_native) {
+        line_clear();
+        line_add("demodemodemodemodemodemo");
+        sync_secret_n = line_n;
+        for i in 0..line_n sync_secret[i] = line[i]
+    }
+    for k in 0..len(demo_friends) demo_friends[k] = false;
+    n: int = 3;
+    if (kind == DEMO_MANY) n = 8;
+    if (kind == DEMO_ALONE) n = 0;
+    for k in 0..n demo_friends[k] = true
+}
+
+demo_add(t: str) {
+    for c in t {
+        if (demo_n < len(demo_text)) {
+            demo_text[demo_n] = c as i8;
+            demo_n = demo_n + 1
+        }
+    }
+}
+
+demo_line() {
+    for i in 0..line_n {
+        if (demo_n < len(demo_text)) {
+            demo_text[demo_n] = line[i];
+            demo_n = demo_n + 1
+        }
+    }
+}
+
+demo_int(v: int) {
+    line_clear();
+    line_int(v);
+    demo_line()
+}
+
+// A made-up activity: days ago, at a minute of the day, its sport, moving
+// minutes, meters, climbed meters, name.
+demo_act(
+    days: int,
+    minute: int,
+    sport: int,
+    mins: int,
+    meters: int,
+    up: int,
+    name: str
+) {
+    tz: int = clock_tz;
+    day: int = (clock_ms() / 1000 + tz * 60) / 86400 - days;
+    start: int = day * 86400 + minute * 60 - tz * 60;
+    if (start > clock_ms() / 1000) return;
+    demo_add("act ");
+    demo_int(start);
+    demo_add(" ");
+    demo_int(tz);
+    demo_add(" ");
+    demo_add(sport_key[sport]);
+    demo_add(" ");
+    demo_int(mins * 66);
+    demo_add(" ");
+    demo_int(mins * 60);
+    demo_add(" ");
+    demo_int(meters * 10);
+    demo_add(" 500 ");
+    demo_add(name);
+    demo_add("""
+
+up """);
+    demo_int(up * 10);
+    demo_add(" ");
+    demo_int(up * 10);
+    demo_add("\n")
+}
+
+demo_friend(k: int) {
+    demo_add("friend demof00");
+    demo_int(k);
+    demo_add(" ");
+    // (Friends since a while ago.)
+    demo_int(clock_ms() - (40 + 30 * k) * 86400000);
+    demo_add(" ");
+    demo_add(demo_names[k]);
+    demo_add("\n");
+    if (k == 0) {
+        demo_act(0, 412, S_RUN, 38, 7300, 64, "Morning run");
+        demo_act(2, 1080, S_RIDE, 95, 41200, 380, "Hills after work");
+        demo_act(5, 445, S_RUN, 52, 10100, 88, "Long and easy");
+        demo_act(9, 1110, S_WALK, 41, 3600, 20, "Evening walk")
+    }
+    if (k == 1) {
+        demo_act(1, 380, S_RUN, 27, 5000, 12, "Park run");
+        demo_act(4, 620, S_WALK, 74, 6400, 140, "Up the ridge with Bea");
+        demo_act(12, 400, S_RUN, 31, 5600, 30, "Tempo");
+        demo_act(20, 430, S_RUN, 90, 16200, 210, "Long run")
+    }
+    if (k == 2) {
+        demo_act(3, 1020, S_RIDE, 62, 24800, 190, "Commute home");
+        demo_act(8, 540, S_RIDE, 140, 61000, 720, "Sunday loop");
+        demo_act(16, 520, S_WALK, 35, 3100, 15, "Lunch walk");
+        demo_act(23, 500, S_RIDE, 48, 18700, 90, "Errands")
+    }
+    if (k == 3) demo_act(6, 700, S_RUN, 44, 8000, 50, "Canal")
+}
+
+demo_answer(kind: int) {
+    demo_n = 0;
+    demo_status = 200;
+    demo_due = now_t + 0.4;
+    // (A code: what it is, by its first letter.)
+    c: int = 0;
+    if (pp_arg_n > 0) c = pp_arg[0] as int - 48;
+    if (kind == RQ_LOOK || kind == RQ_USE) {
+        if (c >= 2 && c <= 9) {
+            demo_status = 404;
+            if (c == 3 || c == 4) demo_status = 410;
+            if (c >= 5 && c <= 9 && c != 7 && c != 8) demo_status = 409;
+            if (c == 7) demo_status = 0;
+            if (c == 8) demo_status = 429;
+            demo_add("{\"error\":\"");
+            if (c == 2) demo_add("wrong");
+            if (c == 3) demo_add("used");
+            if (c == 4) demo_add("expired");
+            if (c == 5) demo_add("own");
+            if (c == 6) demo_add("already");
+            if (c == 9) demo_add("other");
+            demo_add("\",\"name\":\"Sam\"}");
+            return
+        }
+        if (acct_on()) {
+            if (kind == RQ_USE) demo_friends[8] = true;
+            demo_add("{\"kind\":\"friend\",\"id\":\"demof008\",\"name\":\"Rosa Lind\"}")
+        } else demo_add("{\"kind\":\"signin\",\"token\":\"demodemodemodemodemodemo\",\"id\":\"demo0001\",\"name\":\"Philip\",\"admin\":1}");
+        return
+    }
+    if (kind == RQ_FEED) {
+        if (demo_kind == DEMO_OFFLINE) {
+            demo_status = 0;
+            return
+        }
+        for k in 0..len(demo_friends) {
+            if (demo_friends[k]) demo_friend(k)
+        }
+        return
+    }
+    if (kind == RQ_REMOVE) {
+        k2: int = pp_arg[pp_arg_n - 1] as int - 48;
+        if (k2 >= 0 && k2 < len(demo_friends)) demo_friends[k2] = false;
+        demo_add("{}");
+        return
+    }
+    if (kind == RQ_DEVICE_CODE || kind == RQ_FRIEND_CODE || kind == RQ_ADMIN_CODE || kind == RQ_INVITE) {
+        good: int = 600000;
+        demo_add("{\"code\":\"");
+        if (kind == RQ_DEVICE_CODE) demo_add("k7qm3xpa");
+        if (kind == RQ_FRIEND_CODE) {
+            demo_add("p4wn7tqd");
+            good = 7 * 86400000
+        }
+        if (kind == RQ_ADMIN_CODE || kind == RQ_INVITE) {
+            demo_add("h2rv9mke");
+            good = 14 * 86400000
+        }
+        demo_add("\",\"until\":");
+        demo_int(clock_ms() + good);
+        if (kind == RQ_INVITE) {
+            demo_invited = demo_invited + 1;
+            demo_add(",\"id\":\"demoinv1\",\"name\":\"");
+            for i in 0..pp_arg_n {
+                b: int = pp_arg[i] as int;
+                if (b != 34 && b != 92 && demo_n < len(demo_text)) {
+                    demo_text[demo_n] = b trunc i8;
+                    demo_n = demo_n + 1
+                }
+            }
+            demo_add("\"")
+        }
+        if (kind == RQ_ADMIN_CODE) {
+            demo_add(",\"name\":\"");
+            for a in 0..ad_n {
+                if (ad_id_n[a] == pp_arg_n) {
+                    same: bool = true;
+                    for i in 0..pp_arg_n {
+                        if (ad_id[a * 16 + i] != pp_arg[i]) same = false
+                    }
+                    if (same) {
+                        for i in 0..ad_name_n[a] {
+                            if (demo_n < len(demo_text)) {
+                                demo_text[demo_n] = ad_name[a * 64 + i];
+                                demo_n = demo_n + 1
+                            }
+                        }
+                        if (!ad_joined[a]) demo_add("\",\"joined\":0") else demo_add("\",\"joined\":1")
+                    }
+                }
+            }
+        }
+        demo_add("}");
+        return
+    }
+    if (kind == RQ_ADMIN_ALL) {
+        now: int = clock_ms();
+        demo_add("[{\"id\":\"demo0001\",\"name\":\"Philip\",\"admin\":1,\"joined\":1,\"acts\":84},");
+        demo_add("{\"id\":\"demof000\",\"name\":\"Sam Ortiz\",\"admin\":0,\"joined\":1,\"acts\":12},");
+        demo_add("{\"id\":\"demof003\",\"name\":\"Lee\",\"admin\":0,\"joined\":null,\"invite_until\":");
+        demo_int(now + 7 * 86400000);
+        demo_add(",\"acts\":0},");
+        demo_add("{\"id\":\"demof005\",\"name\":\"Kim\",\"admin\":0,\"joined\":null,\"invite_until\":null,\"acts\":0}");
+        if (demo_invited > 0) {
+            demo_add(",{\"id\":\"demoinv1\",\"name\":\"");
+            for i in 0..inv_name_n {
+                if (demo_n < len(demo_text)) {
+                    demo_text[demo_n] = inv_name[i];
+                    demo_n = demo_n + 1
+                }
+            }
+            demo_add("\",\"joined\":null,\"invite_until\":");
+            demo_int(now + 14 * 86400000);
+            demo_add("}")
+        }
+        demo_add("]");
+        return
+    }
+    demo_add("{}")
+}
+
+// ---- JSON, as much as the worker's answers need ----
+// The string after "key": in body, decoded, into out: its length (-1 if
+// there is none).
+json_string(
+    body: []i8,
+    n: int,
+    key: str,
+    out: []i8
+): int {
+    at: int = json_find(body, n, key);
+    if (at < 0) return -1;
+    i: int = at;
+    while (i < n && body[i] as int == 32) i = i + 1;
+    if (i >= n || body[i] as int != 34) return -1;
+    i = i + 1;
+    o: int = 0;
+    while (i < n && body[i] as int != 34) {
+        c: int = body[i] as int & 255;
+        if (c == 92 && i + 1 < n) {
+            i = i + 1;
+            e: int = body[i] as int;
+            if (e == 110) c = 10 else if (e == 116) c = 9 else if (e == 114) c = 13 else if (e == 98) c = 8 else if (e == 102) c = 12 else if (e == 117 && i + 4 < n) {
+                // \uXXXX: as UTF-8 (a surrogate pair as one character).
+                u: int = json_hex4(body, i + 1);
+                i = i + 4;
+                if (u >= 55296 && u < 56320 && i + 6 < n && body[i + 1] as int == 92 && body[i + 2] as int == 117) {
+                    low: int = json_hex4(body, i + 3);
+                    u = 65536 + (u - 55296) * 1024 + (low - 56320);
+                    i = i + 6
+                }
+                o = json_utf8(out, o, u);
+                c = -1
+            } else c = e
+        }
+        if (c >= 0 && o < len(out)) {
+            out[o] = c trunc i8;
+            o = o + 1
+        }
+        i = i + 1
+    }
+    o
+}
+
+// The whole number after "key": in body (fallback if there is none).
+json_int(
+    body: []i8,
+    n: int,
+    key: str,
+    fallback: int
+): int {
+    at: int = json_find(body, n, key);
+    if (at < 0) return fallback;
+    i: int = at;
+    while (i < n && body[i] as int == 32) i = i + 1;
+    v: int = 0;
+    neg: bool = false;
+    if (i < n && body[i] as int == 45) {
+        neg = true;
+        i = i + 1
+    }
+    if (i >= n || body[i] as int < 48 || body[i] as int > 57) return fallback;
+    while (i < n && body[i] as int >= 48 && body[i] as int <= 57) {
+        v = v * 10 + body[i] as int - 48;
+        i = i + 1
+    }
+    if (neg) return 0 - v;
+    v
+}
+
+// Where the value of "key" begins (after its colon), or -1.
+json_find(body: []i8, n: int, key: str): int {
+    for i in 0..n - len(key) - 2 {
+        if (body[i] as int == 34 && body[i + len(key) + 1] as int == 34) {
+            same: bool = true;
+            for k in 0..len(key) {
+                if (body[i + 1 + k] != key[k]) same = false
+            }
+            if (same) {
+                j: int = i + len(key) + 2;
+                while (j < n && body[j] as int == 32) j = j + 1;
+                if (j < n && body[j] as int == 58) return j + 1
+            }
+        }
+    }
+    -1
+}
+
+json_hex4(t: []i8, at: int): int {
+    v: int = 0;
+    for k in 0..4 {
+        c: int = t[at + k] as int;
+        d: int = 0;
+        if (c >= 48 && c <= 57) d = c - 48 else if (c >= 97 && c <= 102) d = c - 87 else if (c >= 65 && c <= 70) d = c - 55;
+        v = v * 16 + d
+    }
+    v
+}
+
+json_utf8(out: []i8, at: int, u: int): int {
+    o: int = at;
+    if (u < 128) return json_byte(out, o, u);
+    if (u < 2048) {
+        o = json_byte(out, o, 192 + (u >> 6));
+        return json_byte(out, o, 128 + (u & 63))
+    }
+    if (u < 65536) {
+        o = json_byte(out, o, 224 + (u >> 12));
+        o = json_byte(out, o, 128 + (u >> 6 & 63));
+        return json_byte(out, o, 128 + (u & 63))
+    }
+    o = json_byte(out, o, 240 + (u >> 18));
+    o = json_byte(out, o, 128 + (u >> 12 & 63));
+    o = json_byte(out, o, 128 + (u >> 6 & 63));
+    json_byte(out, o, 128 + (u & 63))
+}
+
+json_byte(out: []i8, at: int, c: int): int {
+    if (at >= len(out)) return at;
+    out[at] = c trunc i8;
+    at + 1
+}

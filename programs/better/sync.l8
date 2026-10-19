@@ -6,7 +6,10 @@ use_tag std, skate;
 // iPhone; in a web page, web/better/better.js does): the worker's log
 // (web/better-log/worker.js) is fetched and put together with this device's,
 // and what changes here is saved back, as the page does. The platform only
-// makes a request (platform_http) and says how it went (sync_answer).
+// makes a request (platform_http) and says how it went (sync_answer);
+// people.l8's requests take turns with these, and are answered the same
+// way. The secret is a signed-in device's token, or (from before codes) a
+// personal link's.
 //
 // Two logs are put together activity by activity: each kept once (this
 // device's copy if both have it), less those deleted in either.
@@ -185,128 +188,6 @@ merge_logs() {
 
 merge_chosen: []int = new int[BLOCKS](0);
 
-// ---- JSON, as much as the worker's answers need ----
-// The string after "key": in body, decoded, into out: its length (-1 if
-// there is none).
-json_string(
-    body: []i8,
-    n: int,
-    key: str,
-    out: []i8
-): int {
-    at: int = json_find(body, n, key);
-    if (at < 0) return -1;
-    i: int = at;
-    while (i < n && body[i] as int == 32) i = i + 1;
-    if (i >= n || body[i] as int != 34) return -1;
-    i = i + 1;
-    o: int = 0;
-    while (i < n && body[i] as int != 34) {
-        c: int = body[i] as int & 255;
-        if (c == 92 && i + 1 < n) {
-            i = i + 1;
-            e: int = body[i] as int;
-            if (e == 110) c = 10 else if (e == 116) c = 9 else if (e == 114) c = 13 else if (e == 98) c = 8 else if (e == 102) c = 12 else if (e == 117 && i + 4 < n) {
-                // \uXXXX: as UTF-8 (a surrogate pair as one character).
-                u: int = json_hex4(body, i + 1);
-                i = i + 4;
-                if (u >= 55296 && u < 56320 && i + 6 < n && body[i + 1] as int == 92 && body[i + 2] as int == 117) {
-                    low: int = json_hex4(body, i + 3);
-                    u = 65536 + (u - 55296) * 1024 + (low - 56320);
-                    i = i + 6
-                }
-                o = json_utf8(out, o, u);
-                c = -1
-            } else c = e
-        }
-        if (c >= 0 && o < len(out)) {
-            out[o] = c trunc i8;
-            o = o + 1
-        }
-        i = i + 1
-    }
-    o
-}
-
-// The whole number after "key": in body (fallback if there is none).
-json_int(
-    body: []i8,
-    n: int,
-    key: str,
-    fallback: int
-): int {
-    at: int = json_find(body, n, key);
-    if (at < 0) return fallback;
-    i: int = at;
-    while (i < n && body[i] as int == 32) i = i + 1;
-    v: int = 0;
-    neg: bool = false;
-    if (i < n && body[i] as int == 45) {
-        neg = true;
-        i = i + 1
-    }
-    if (i >= n || body[i] as int < 48 || body[i] as int > 57) return fallback;
-    while (i < n && body[i] as int >= 48 && body[i] as int <= 57) {
-        v = v * 10 + body[i] as int - 48;
-        i = i + 1
-    }
-    if (neg) return 0 - v;
-    v
-}
-
-// Where the value of "key" begins (after its colon), or -1.
-json_find(body: []i8, n: int, key: str): int {
-    for i in 0..n - len(key) - 2 {
-        if (body[i] as int == 34 && body[i + len(key) + 1] as int == 34) {
-            same: bool = true;
-            for k in 0..len(key) {
-                if (body[i + 1 + k] != key[k]) same = false
-            }
-            if (same) {
-                j: int = i + len(key) + 2;
-                while (j < n && body[j] as int == 32) j = j + 1;
-                if (j < n && body[j] as int == 58) return j + 1
-            }
-        }
-    }
-    -1
-}
-
-json_hex4(t: []i8, at: int): int {
-    v: int = 0;
-    for k in 0..4 {
-        c: int = t[at + k] as int;
-        d: int = 0;
-        if (c >= 48 && c <= 57) d = c - 48 else if (c >= 97 && c <= 102) d = c - 87 else if (c >= 65 && c <= 70) d = c - 55;
-        v = v * 16 + d
-    }
-    v
-}
-
-json_utf8(out: []i8, at: int, u: int): int {
-    o: int = at;
-    if (u < 128) return json_byte(out, o, u);
-    if (u < 2048) {
-        o = json_byte(out, o, 192 + (u >> 6));
-        return json_byte(out, o, 128 + (u & 63))
-    }
-    if (u < 65536) {
-        o = json_byte(out, o, 224 + (u >> 12));
-        o = json_byte(out, o, 128 + (u >> 6 & 63));
-        return json_byte(out, o, 128 + (u & 63))
-    }
-    o = json_byte(out, o, 240 + (u >> 18));
-    o = json_byte(out, o, 128 + (u >> 12 & 63));
-    o = json_byte(out, o, 128 + (u >> 6 & 63));
-    json_byte(out, o, 128 + (u & 63))
-}
-
-json_byte(out: []i8, at: int, c: int): int {
-    if (at >= len(out)) return at;
-    out[at] = c trunc i8;
-    at + 1
-}
-
 // {"text": TEXT, "base": BASE} for a save, in sync_body.
 sync_body: []i8 = new i8[8388608](0i8);
 
@@ -357,6 +238,9 @@ const SY_NONE: int = 0;
 const SY_PULL: int = 1;
 
 const SY_PUSH: int = 2;
+
+// (One of people.l8's.)
+const SY_PEOPLE: int = 3;
 
 sync_busy: int = 0;
 
@@ -442,8 +326,14 @@ sync_step() {
 sync_answer(status: int, body: []i8, n: int) {
     kind: int = sync_busy;
     sync_busy = SY_NONE;
+    if (kind == SY_PEOPLE) {
+        people_answer(status, body, n);
+        return
+    }
+    // (Not known: signed out elsewhere. What is here waits for the next
+    // sign in.)
     if (status == 401) {
-        sync_state = 4;
+        people_lost();
         return
     }
     if (status == 0 || status >= 500) {
@@ -453,6 +343,7 @@ sync_answer(status: int, body: []i8, n: int) {
         return
     }
     if (kind == SY_PULL && status == 200) {
+        acct_heard(body, n);
         rev: int = json_int(body, n, "rev", sync_rev);
         merge_there_n = maxi(json_string(body, n, "text", merge_there), 0);
         if (rev != sync_rev && sync_dirty) {
