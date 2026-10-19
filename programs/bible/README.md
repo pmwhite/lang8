@@ -153,6 +153,26 @@ the app, and macOS jobs build it for the simulator, run it there with
 runs with the ESV's fixture (`L8_ESV_FIXTURE`), so no key or network is
 needed.
 
+The CI's layout, for speed (a full run is about ten minutes; see the
+workflow's header):
+
+- `compile` (Linux) builds the compiler only when its sources change (a
+  cache otherwise) and uploads `bible-ios.s`; `test` runs the tests and the
+  data checks beside it.
+- Five `simulator (…)` jobs (macOS: the account runs at most five at once,
+  so there are five, and nothing waits for a runner) start at once, boot a
+  simulator and warm Xcode while `compile` runs, take the assembly as soon as
+  it is uploaded (`tools/ios/artifact.py`), build `SmoothBible.app`, and run
+  two groups each, one after another, each on an erased simulator, each
+  uploaded (`shots-GROUP`) as it ends. The groups are paired by their times
+  (`timing.txt`'s `total`) so the jobs end together: rebalance the
+  workflow's matrix when a group grows. One also builds the IPA and pushes
+  `ci-bible-ipa`.
+- `frames` (Linux) makes the notes recording's frames as soon as the notes
+  group is uploaded; `publish` puts it all on `ci-bible-shots`.
+- A push during a run waits for it (and of several only the newest runs),
+  so every run publishes.
+
 ## The ESV proxy: deploying it (each step needs the owner's consent)
 
 All of this has been done (Round 7's `audio_url` table added with

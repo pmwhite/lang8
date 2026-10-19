@@ -1,19 +1,29 @@
 # Smooth Bible (programs/bible), built and run in the iOS simulator.
 #
-# A Linux job builds the compiler and compiles programs/bible/ios.l8 to
-# arm64 assembly (`l8 arm64 --target ios`). macOS jobs assemble and link it
-# with Xcode's tools into SmoothBible.app (tools/ios/build.sh, with
-# programs/bible/ios): six run it in simulators side by side, each a group
-# of the demo (programs/bible/ios/simulate.sh: read, study, notes, which
-# also records the screen; more, Round 3's; store, the App Store's
-# screenshots on the largest iPhone; ios18, a few shots on an iOS 18
-# runtime, if there is one); another builds SmoothBible.ipa, for an iPhone,
-# onto the ci-bible-ipa branch (ad hoc signed). (Launches were timed against
-# Round 1's app with programs/bible/ios/launch.sh in a job of their own, for
-# review r2-1.) A last Linux job puts the groups' screenshots
-# together (programs/bible/ios/shots.py: the collapsing bar's pixel check,
-# the recording's frames and contact sheet) and pushes them to the
-# ci-bible-shots branch (one commit, each run replacing the last).
+# compile (Linux) builds the compiler (kept in a cache while its sources
+# are unchanged) and compiles programs/bible/ios.l8 to arm64 assembly (`l8
+# arm64 --target ios`); test, beside it, runs the tests and data checks.
+# Five simulator jobs (macOS) start at once, without waiting: each boots its
+# first simulator and warms Xcode's tools while the assembly is compiled,
+# fetches it as soon as it is uploaded (tools/ios/artifact.py), assembles
+# and links SmoothBible.app (tools/ios/build.sh, with programs/bible/ios),
+# and runs two or three groups of the demo one after another
+# (programs/bible/ios/simulate.sh; each group on an erased simulator, its
+# shots uploaded as soon as it ends, as shots-GROUP). The groups are split
+# so the five jobs end together: GitHub runs at most five macOS jobs of
+# this account at a time, and a sixth would wait for one of them. One of
+# them also builds SmoothBible.ipa, for an iPhone, onto the ci-bible-ipa
+# branch (ad hoc signed). frames (Linux) waits for the notes group's
+# recording and makes its frames and contact sheet while the others run
+# (programs/bible/ios/shots.py transitions). A last Linux job, publish, puts
+# the groups' screenshots together (and the collapsing bar's pixel check)
+# and pushes them to the ci-bible-shots branch (one commit, each run
+# replacing the last). The groups: read, study, notes (which also records
+# the screen), more (Round 3's), store (the App Store's screenshots on the
+# largest iPhone), ios18 (a few shots on an iOS 18 runtime, if there is
+# one), versions, plans, ribbons, listen. (Launches were timed against Round
+# 1's app with programs/bible/ios/launch.sh in a job of their own, for
+# review r2-1.)
 name: Smooth Bible
 
 on:
@@ -23,18 +33,46 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
-# (A newer push stops the run before it.)
+# (A push while a run is going waits for it, rather than stopping it, so a
+# run always finishes and publishes; of the pushes made meanwhile only the
+# newest then runs.)
 concurrency:
   group: bible
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   compile:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        id: compiler
+        with:
+          path: l8c3
+          key: l8c3-${{ hashFiles('bootstrap', 'Makefile', 'tools/step.sh', 'runtime*.s', 'src1/**', 'src2/**', 'stdlib/**') }}
       - name: Build the compiler
+        if: steps.compiler.outputs.cache-hit != 'true'
+        run: make -j4 l8c3
+      - name: Compile the app for iOS
+        run: ./l8c3 arm64 --target ios programs/bible/ios.l8 -o bible-ios.s
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bible-ios-assembly
+          path: bible-ios.s
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        id: compiler
+        with:
+          path: l8c3
+          key: l8c3-${{ hashFiles('bootstrap', 'Makefile', 'tools/step.sh', 'runtime*.s', 'src1/**', 'src2/**', 'stdlib/**') }}
+      - name: Build the compiler
+        if: steps.compiler.outputs.cache-hit != 'true'
         run: make -j4 l8c3
       - name: Test the text's layout
         run: ./l8c3 test programs/bible/test_text.l8 programs/bible/test_lang.l8 programs/bible/test_store.l8 programs/bible/test_plans.l8 programs/bible/test_ribbons.l8 programs/bible/test_audio.l8
@@ -46,34 +84,51 @@ jobs:
         run: ./l8c3 build programs/bible/tools/spoken.l8 -o bible-spoken && ./bible-spoken programs/bible/data/bsb.txt | head -3
       - name: Test the ESV proxy (against fixtures, no key)
         run: node --test programs/bible/worker/test.mjs
-      - name: Compile the app for iOS
-        run: ./l8c3 arm64 --target ios programs/bible/ios.l8 -o bible-ios.s
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bible-ios-assembly
-          path: bible-ios.s
 
-  device:
-    needs: compile
+  simulator:
+    name: simulator (${{ matrix.name }})
     runs-on: macos-15
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # (Balanced by the groups' times: about 4 to 5 minutes of demo a job.)
+        include:
+          - {name: notes versions, g1: notes, g2: versions}
+          - {name: read ribbons, g1: read, g2: ribbons}
+          - {name: listen more, g1: listen, g2: more}
+          - {name: plans ios18, g1: plans, g2: ios18}
+          - {name: study store ipa, g1: study, g2: store, ipa: true}
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: bible-ios-assembly
-      - name: Build the app for an iPhone
+      - name: Boot a simulator, and warm Xcode's tools (while the app is compiled)
         run: |
-          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          dev=$(programs/bible/ios/pick.sh ${{ matrix.g1 }})
+          echo "simulator for ${{ matrix.g1 }}: $dev"
+          [ -n "$dev" ] && (xcrun simctl boot "$dev" >/dev/null 2>&1 &) || true
+          # (A trivial app built the same way, so the real build finds the
+          # tools already read from disk.)
+          mkdir -p warm && printf '.globl _main\n_main:\n  mov w0, #0\n  ret\n' > warm/warm.s
+          (tools/ios/build.sh sim warm/warm.s warm/sim programs/bible/ios > warm/sim.log 2>&1 &)
+          if [ "${{ matrix.ipa }}" = true ]; then
+            export DEVELOPER_DIR="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)/Contents/Developer"
+            (tools/ios/build.sh device warm/warm.s warm/device programs/bible/ios > warm/device.log 2>&1 &)
+          fi
+      - name: Wait for the assembly
+        run: python3 -I tools/ios/artifact.py bible-ios-assembly . compile
+      - name: Build SmoothBible.app
+        id: build
+        run: BUILD_NUMBER=${{ github.run_number }} tools/ios/build.sh sim bible-ios.s build programs/bible/ios 2>&1 | tee build.log
+      - name: Build the app for an iPhone, and push it to ci-bible-ipa
+        if: matrix.ipa
+        run: |
+          export DEVELOPER_DIR="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)/Contents/Developer"
           xcodebuild -version
           tools/ios/build.sh device bible-ios.s device programs/bible/ios
           mkdir -p ipa/Payload && cp -R device/SmoothBible.app ipa/Payload/
           (cd ipa && zip -qry ../SmoothBible.ipa Payload)
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bible-ipa
-          path: SmoothBible.ipa
-      - name: Push it to ci-bible-ipa
-        run: |
           mkdir -p publish && cp SmoothBible.ipa publish/
           echo "${GITHUB_SHA} run ${GITHUB_RUN_ID}" > publish/RUN.txt
           cd publish
@@ -83,51 +138,98 @@ jobs:
           git add -A
           git commit -qm "iPhone build of ${GITHUB_SHA}"
           git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ci-bible-ipa
+      - uses: actions/upload-artifact@v4
+        if: matrix.ipa
+        with:
+          name: bible-ipa
+          path: SmoothBible.ipa
+      - name: Run its demo's ${{ matrix.g1 }} group in the simulator
+        if: always() && matrix.g1 && steps.build.outcome == 'success'
+        run: |
+          programs/bible/ios/simulate.sh build/SmoothBible.app out/${{ matrix.g1 }}/shots ${{ matrix.g1 }}
+      - name: Keep the ${{ matrix.g1 }} group's build log (and read's app, for another Mac's simulator)
+        if: always() && matrix.g1
+        run: |
+          mkdir -p out/${{ matrix.g1 }} && cp build.log out/${{ matrix.g1 }}/ 2>/dev/null || true
+          [ "${{ matrix.g1 }}" = read ] && (cd build && zip -qry ../out/read/SmoothBible-simulator.zip SmoothBible.app) || true
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.g1
+        with:
+          name: shots-${{ matrix.g1 }}
+          path: out/${{ matrix.g1 }}
+      - name: Run its demo's ${{ matrix.g2 }} group in the simulator
+        if: always() && matrix.g2 && steps.build.outcome == 'success'
+        run: |
+          programs/bible/ios/simulate.sh build/SmoothBible.app out/${{ matrix.g2 }}/shots ${{ matrix.g2 }}
+      - name: Keep the ${{ matrix.g2 }} group's build log (and read's app, for another Mac's simulator)
+        if: always() && matrix.g2
+        run: |
+          mkdir -p out/${{ matrix.g2 }} && cp build.log out/${{ matrix.g2 }}/ 2>/dev/null || true
+          [ "${{ matrix.g2 }}" = read ] && (cd build && zip -qry ../out/read/SmoothBible-simulator.zip SmoothBible.app) || true
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.g2
+        with:
+          name: shots-${{ matrix.g2 }}
+          path: out/${{ matrix.g2 }}
+      - name: Run its demo's ${{ matrix.g3 }} group in the simulator
+        if: always() && matrix.g3 && steps.build.outcome == 'success'
+        run: |
+          programs/bible/ios/simulate.sh build/SmoothBible.app out/${{ matrix.g3 }}/shots ${{ matrix.g3 }}
+      - name: Keep the ${{ matrix.g3 }} group's build log (and read's app, for another Mac's simulator)
+        if: always() && matrix.g3
+        run: |
+          mkdir -p out/${{ matrix.g3 }} && cp build.log out/${{ matrix.g3 }}/ 2>/dev/null || true
+          [ "${{ matrix.g3 }}" = read ] && (cd build && zip -qry ../out/read/SmoothBible-simulator.zip SmoothBible.app) || true
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.g3
+        with:
+          name: shots-${{ matrix.g3 }}
+          path: out/${{ matrix.g3 }}
 
-  simulator:
-    needs: compile
-    runs-on: macos-15
+  frames:
+    # The notes group's recording, made into frames while the other groups
+    # still run. (Never keeping the shots from being published.)
+    runs-on: ubuntu-latest
+    continue-on-error: true
     timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        group: [read, study, notes, more, store, ios18, versions, plans, ribbons, listen]
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
-      - name: Boot a simulator (while the app is built)
+      - name: Pillow and PyAV
+        # (Wheels only, so a runner without them fails fast rather than compiling.)
         run: |
-          xcrun simctl list runtimes
-          dev=$(programs/bible/ios/pick.sh ${{ matrix.group }})
-          echo "simulator for ${{ matrix.group }}: $dev"
-          [ -n "$dev" ] && (xcrun simctl boot "$dev" &) || true
-      - uses: actions/download-artifact@v4
-        with:
-          name: bible-ios-assembly
-      - name: Build SmoothBible.app
-        run: BUILD_NUMBER=${{ github.run_number }} tools/ios/build.sh sim bible-ios.s build programs/bible/ios 2>&1 | tee build.log
-      - name: Run its demo's ${{ matrix.group }} group in the simulator
-        run: programs/bible/ios/simulate.sh build/SmoothBible.app shots ${{ matrix.group }}
-      - name: Keep the app (for another Mac's simulator)
-        if: always() && matrix.group == 'read'
-        run: cd build && zip -qry ../SmoothBible-simulator.zip SmoothBible.app || true
+          python3 -m venv venv
+          timeout 300 venv/bin/pip install --quiet --only-binary=:all: pillow av || echo "frames: no wheels"
+      - name: Wait for the notes group
+        run: python3 -I tools/ios/artifact.py shots-notes notes simulator
+      - name: The recording's frames
+        run: |
+          mkdir -p frames
+          cp notes/shots/transitions.mp4 notes/shots/transitions.txt frames/ 2>/dev/null || true
+          timeout 600 venv/bin/python programs/bible/ios/shots.py frames transitions | tee frames.txt || true
+          rm -f frames/transitions.mp4 frames/transitions.txt
+          mv frames.txt frames/frames.txt
       - uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: shots-${{ matrix.group }}
-          path: |
-            shots
-            build.log
-            SmoothBible-simulator.zip
+          name: frames
+          path: frames
 
   publish:
-    needs: simulator
+    needs: [simulator, frames]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
+          pattern: shots-*
           path: groups
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: frames
+          path: frames
       - name: Put the groups together
         run: |
           mkdir -p publish
@@ -144,15 +246,20 @@ jobs:
           mv publish/more-notes-export.md publish/notes-export.md 2>/dev/null || true
           cat publish/store-plain-launch.txt publish/ios18-ios18.txt 2>/dev/null || true
           mv publish/notes-transitions.txt publish/transitions.txt 2>/dev/null || true
-      - name: The collapsing bar's pixel check, and the recording's frames
+      - name: The collapsing bar's pixel check, and the recording's frames (from frames)
         # (Never keeping the shots from being published.)
-        # (Wheels only, so a runner without them fails fast rather than
-        # compiling; and at most 10 minutes: the push below runs regardless.)
         continue-on-error: true
         run: |
           python3 -m venv venv
-          timeout 300 venv/bin/pip install --quiet --only-binary=:all: pillow av || echo "pixel check: no wheels"
-          timeout 600 venv/bin/python programs/bible/ios/shots.py publish | tee -a publish/read-log.txt || true
+          timeout 300 venv/bin/pip install --quiet --only-binary=:all: pillow || echo "pixel check: no wheels"
+          timeout 300 venv/bin/python programs/bible/ios/shots.py publish collapse | tee -a publish/read-log.txt || true
+          if [ -f frames/frames.txt ]; then
+            cat frames/frames.txt | tee -a publish/read-log.txt
+            rm frames/frames.txt
+            cp -R frames/. publish/
+          else
+            echo "transitions failed: no frames from the frames job" | tee -a publish/read-log.txt
+          fi
       - name: Push the screenshots to ci-bible-shots
         if: always()
         run: |

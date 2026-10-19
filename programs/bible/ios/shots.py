@@ -1,5 +1,5 @@
 # The CI's screenshots, finished (Python with Pillow and PyAV):
-#   shots.py DIR
+#   shots.py DIR [collapse | transitions]
 # DIR holds every group's screenshots, and the notes group's screen
 # recording (transitions.mp4, and transitions.txt: a line a sequence, its
 # number and its start and end in seconds). It writes:
@@ -11,6 +11,8 @@
 #   (JPEG, half size);
 # - transitions-sheet.png: a row a sequence, every 3rd frame, at a quarter
 #   size.
+# With collapse or transitions, only that one (CI makes the recording's
+# frames in a job of their own, while other groups still run).
 import os, re, sys
 from PIL import Image, ImageChops
 
@@ -112,11 +114,14 @@ def transitions():
     sheet.save(os.path.join(d, "transitions-sheet.png"))
     return "%d sequences, %d decoded frames" % (len(rows), len(decoded))
 
-with open(os.path.join(d, "collapse-diff.txt"), "w") as f:
-    r = collapse_diff()
-    print(r)
-    f.write(r + "\n")
-try:
-    print(transitions())
-except Exception as e:
-    print("transitions failed:", e)
+only = sys.argv[2] if len(sys.argv) > 2 else None
+if only != "transitions":
+    with open(os.path.join(d, "collapse-diff.txt"), "w") as f:
+        r = collapse_diff()
+        print(r)
+        f.write(r + "\n")
+if only != "collapse":
+    try:
+        print(transitions())
+    except Exception as e:
+        print("transitions failed:", e)

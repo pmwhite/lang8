@@ -5,8 +5,8 @@
 # through one group of its demo with Darwin notifications
 # (space.trailingwhite.smoothbible.demoN; see demo_do in
 # programs/bible/ios_demo.l8, and DESIGN.md §5 and §7.10 for what each
-# screenshot should show). The groups run in parallel CI jobs, each from a
-# fresh install:
+# screenshot should show). CI runs the groups on five Macs, a few one after
+# another on each, every group on a fresh (erased) simulator:
 #   read    reading, the picker, selection and marks, the collapsing bar,
 #           search, the library, the settings and themes, a relaunch
 #   study   the interlinear, word study, grammar, definition, concordance
@@ -86,6 +86,24 @@ for rt, ds in json.load(sys.stdin)["devices"].items():
     for d in ds:
         if d["udid"] == sys.argv[1]:
             print(d["name"], rt.split(".")[-1])' "$dev" | tee "$out/device.txt"
+# (CI runs a few groups one after another on a Mac. Another group's
+# simulator is shut down; this one, if a group has used it (the app is on
+# it), is erased and booted again, so that each group starts as from a fresh
+# simulator: nothing on the pasteboard, no permission granted, no defaults.)
+touch "$out/.started"
+xcrun simctl list devices booted -j | python3 -c '
+import json, sys
+for ds in json.load(sys.stdin)["devices"].values():
+    for d in ds:
+        if d["udid"] != sys.argv[1]:
+            print(d["udid"])' "$dev" | while read -r other; do
+  xcrun simctl shutdown "$other" 2>/dev/null && echo "shut down $other"
+done
+if xcrun simctl get_app_container "$dev" "$id" >/dev/null 2>&1; then
+  xcrun simctl shutdown "$dev" 2>/dev/null || true
+  xcrun simctl erase "$dev"
+  echo "erased in $(python3 -c "print(round($(now) - $start))") s" >> "$out/timing.txt"
+fi
 xcrun simctl boot "$dev" 2>/dev/null || true
 xcrun simctl bootstatus "$dev" -b >/dev/null
 # (No keyboard tutorial over the first text field.)
@@ -203,6 +221,7 @@ launch() {
     i=$((i + 1))
   done
   wait_done $((1000 + events)) "launch" 6
+  echo "$1 up at $(python3 -c "print(round($(now) - $start))") s" >> "$out/timing.txt"
 }
 # A setting of the simulator's (appearance, text size), which the app
 # settles after.
@@ -782,7 +801,7 @@ echo "offset writes refused while moving: $n" | tee "$out/moving.txt"
 [ "$n" = 0 ] || failed=1
 echo "total $(python3 -c "print(round($(now) - $start))") s" >> "$out/timing.txt"
 kill "$logger" "$console" 2>/dev/null || true
-find ~/Library/Logs/DiagnosticReports -newer "$app/Info.plist" -type f -exec cp {} "$out"/ \; 2>/dev/null || true
+find ~/Library/Logs/DiagnosticReports -newer "$out/.started" -type f -exec cp {} "$out"/ \; 2>/dev/null || true
 ls -la "$out"
 cat "$out/timing.txt"
 exit "${failed:-0}"
