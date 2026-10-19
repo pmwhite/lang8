@@ -10,7 +10,11 @@ ESV, Compare, cross references and commentary) is the work now, fully specified 
 Round 5 (reading plans and a plan's daily reminder, exact senses, related words, share as
 image) follows, specified in §10; the verse of the day was dropped (§10's owner
 amendment). Round 6 (what you are reading: Continue Reading, one list of readings and plans, each
-kept as you read on, started by one Start Reading sheet) is specified in §11. Round 1 is
+kept as you read on, started by one Start Reading sheet) is specified in §11 and is being
+built now. Round 7 (recorded readings: Listen reads every version, the BSB and WEB by
+human readers streamed from openbible.com and eBible.org and followed verse by verse with
+bundled timings, the ESV by its own recording through our Worker, the rest by the
+iPhone's best voice) is specified in §12 and follows. Round 1 is
 §0.5–§6, Round 2 is §7 and Round 3 is §8. The owner's priorities, in order: distraction-free reading, note-taking, language tools.
 Above all: iPhone-native, HIG-proper, predictable UI. The app is **free forever**: no
 price, ads, in-app purchases or donation prompts (owner, 2026-10-18).
@@ -217,15 +221,29 @@ In build order:
    - Plans keep their data and reminder. Round 5's Today, Plans list and Start Plan
      buttons are migrated (§11.2.8).
 
+### Round 7: recorded readings (fully specified in §12)
+1. **R7.1 Every version read aloud.**
+   - The BSB by Bob Souer (default), Barry Hays or Jordan Gilbert (CC0), streamed from
+     openbible.com.
+   - The WEB by Winfred Henson (public domain), from eBible.org.
+   - The ESV by David Cochran Heath, through the ESV API via our Worker.
+   - The KJV, ASV and YLT by the best installed iPhone voice, with a one-time pointer to
+     downloading a better one.
+2. **R7.2 Following along with recordings:** verse timings computed offline by forced
+   alignment and bundled (about 130 KB a reader). The ESV follows by chapter.
+3. **R7.3 Never stopping for the network:** chapters fetched ahead into a 500 MB cache,
+   optional book downloads, and a fall-back to the iPhone voice at the same verse.
+4. **R7.4 Voice settings, lock-screen controls** (chapter skip, scrubbing, artwork),
+   **speed for recordings, credits, and the privacy page's Listening paragraph.**
+
 ### Out of scope (all rounds so far)
 - Widgets, Live Activities and App Intents (these need Swift or app extensions).
 - SwiftUI.
 - Sync and accounts.
-- Audio recordings.
 - Copyrighted versions other than the ESV (NIV, NASB, NLT and others need licences that
   are granted only to organizations).
 - SWORD modules.
-- Downloadable content.
+- Downloadable content, except Listen's recordings (§12).
 
 ---
 
@@ -1959,6 +1977,9 @@ Water and Spirit: compare Ezekiel 36:25–27.
 2. The changes fade (recording sequence 9).
 
 ### 8.7 R3.7 Listen (read aloud)
+*Round 7 (§12) adds recorded readings: where §12 says otherwise (sources, the voice choice, speed for
+recordings, the player's second label, Now Playing and the remote commands), §12 wins.*
+
 **Entry** (no new permanent control on the reading page, for distraction-free reading):
 - Reading settings (the Aa sheet) gets a **first section, above the text size row**, with:
   1. A **Listen** button row: a cell whose content is a `UIButton`
@@ -4719,3 +4740,750 @@ things:
 2. Whether the title's long-press menu is easy enough to find for Start Reading Here. If
    it isn't, the fallback is a "Start Reading Here…" row at the end of Go To's Continue
    Reading section, because the tray is kept clear.
+
+---
+
+## 12. Round 7 specification: recorded readings
+
+Round 7 is one feature, asked for by the owner on 2026-10-18: Listen's computer voice
+doesn't sound good, so the Bible should be read by people. The owner's calls, built into
+what follows:
+1. **Every version is read aloud.** Good recordings where they exist; the iPhone's better
+   voices (Enhanced or Premium) where they don't; the standard voice last.
+2. **The BSB is read by its CC0 human recordings** (Bob Souer, Barry Hays, Jordan
+   Gilbert), **streamed directly from openbible.com**. We host no audio.
+3. **The WEB** uses eBible.org's public-domain recording; **the KJV** uses openbible.com's
+   only if it's licensed (LibriVox isn't wanted); **the ESV** uses the ESV API's audio
+   endpoint, through our Worker; **the ASV and YLT** use iPhone voices.
+4. Everything else is the designer's call.
+
+It keeps everything from Rounds 1–6 except where this section replaces §8.7 (Listen).
+
+### 12.0 What was checked (2026-10-18), and the decisions
+
+#### 12.0.1 The recordings (each checked with listings, HEAD requests and the first bytes of sample files; nothing large downloaded)
+| Version | Source | Reader | Licence | Files | Quality | Used? |
+|---|---|---|---|---|---|---|
+| BSB | `https://openbible.com/audio/souer/` | Bob Souer (human, professional) | CC0 1.0 (bereanbible.com/audio: "dedicated to the public domain (CC0 1.0)") | 1,189 chapters, `BSB_<NN>_<Abr>_<CCC>.mp3` | MP3 192 kbps mono 44.1 kHz; 5.1 GB in all, about 85 MB an hour | **Yes, the default** |
+| BSB | `https://openbible.com/audio/hays/` | Barry Hays (human) | CC0 1.0 (same statement) | 1,189, `…_<CCC>_H.mp3` | MP3 about 100 kbps VBR mono (re-encoded 2025-10); 3.8 GB, about 45 MB an hour | Yes, a choice |
+| BSB | `https://openbible.com/audio/gilbert/` | Jordan Scott Gilbert (human) | CC0 1.0 (same statement) | 1,189, `…_<CCC>_G.mp3` | MP3 192 kbps mono; 5.8 GB, about 85 MB an hour | Yes, a choice |
+| WEB | `https://ebible.org/eng-web/audio/` | Winfred W. Henson (human, "a professional voice recording artist") | Public domain ("You may download, copy, and listen to this recording … freely") | 1,189 chapters (plus two duplicates, Psalm 71 and Luke 17, named "… (1).mp3"), irregular names such as `43_John/0999 John-Chapter Three.mp3` | MP3 128 kbps mono, 2016; 5.4 GB, about 58 MB an hour | **Yes** (with one caveat, below) |
+| WEB | `https://ebible.org/webaudio/` | Michael Paul Johnson and volunteers | Public domain | 93 files: part of the Psalms and Gospels, whole-book files for the letters, some "plus music" | 2008–2010, stereo, incomplete | No (incomplete, mixed readers, music) |
+| KJV | `https://openbible.com/audio/kjv/` | "David" (openbible.com/audio.htm: "KJV - David") | **None stated anywhere** (not on bereanbible.com/audio, which names only the three BSB readers; not in the files' tags) | 1,189, `KJV_<NN>_<Abr>_<CCC>.mp3`, 192 kbps, 7.3 GB, 2025 | "David" sits with the site's new voices (sophia, arabella, frederick_surrey, msb_*), whose names are those of a synthetic-voice library; almost certainly synthetic | **No** (unlicensed; §12.9 question 2) |
+| ESV | `GET https://api.esv.org/v3/passage/audio/?q=John+3` | David Cochran Heath (human; the file's tag "Read by: David Cochran Heath", 2008) | Crossway, through the API (the owner's judgement: §12.0.2 decision 5) | One request answered **302** with `Location: https://audio.esv.org/hw/John%203.mp3` (no key and no signature in it; the body empty). That address answers **301** to `https://audio.esv.org/hw/mq/John%203.mp3`, which is **200** `audio/mpeg`, `Accept-Ranges: bytes`, 4.2 MB | MP3 128 kbps mono | **Yes** |
+| ASV, YLT | — | — | — | No recording of either exists that is free, complete and human | — | iPhone voices |
+
+What the readers say (checked by transcribing the first 20 s of a few chapters):
+- **Section headings are not read** by any reader. **Psalm titles are read** ("Psalm 23. A
+  Psalm of David."), as part of the chapter's start.
+- **Gilbert announces every chapter** ("John, chapter 3."). Souer and Hays announce only
+  the Psalms. So Souer goes from one chapter into the next without a spoken marker; that
+  is how the recording is, and the reader's title push (§0.5) marks the change on screen.
+- The recordings were made from **earlier BSB revisions**: there are small wording
+  differences ("the signs you are doing" in Souer, "were doing" in Gilbert). The
+  alignment (§12.2) tolerates them.
+- **Henson reads the WEB's Classic edition, which says "Yahweh"** ("Yahweh is my shepherd")
+  where our WEB (`engwebp`, §9.2.1) says "LORD". Everything else matches. Decision 3
+  covers this.
+
+**openbible.com's book abbreviations** (from the listings; identical for the three BSB
+readers, and for the KJV), in book order 01–66: Gen Exo Lev Num Deu Jos Jdg Rut 1Sa 2Sa
+1Ki 2Ki 1Ch 2Ch Ezr Neh Est Job Psa Pro Ecc Sng Isa Jer Lam Ezk Dan Hos Jol Amo Oba Jon Mic
+Nam Hab Zep Hag Zec Mal Mat Mrk Luk Jhn Act Rom 1Co 2Co Gal Eph Php Col 1Th 2Th 1Ti 2Ti Tts
+Phm Heb Jas 1Pe 2Pe 1Jn 2Jn 3Jn Jud Rev. Chapters are always 3 digits (`BSB_19_Psa_119.mp3`,
+`BSB_65_Jud_001.mp3`). So the address is built, not listed:
+`https://openbible.com/audio/<souer|hays|gilbert>/BSB_<NN>_<Abr>_<CCC><""|_H|_G>.mp3`.
+Every file answered HEAD with `200`, `audio/mpeg`, `Accept-Ranges: bytes` (so AVPlayer can
+stream and seek). eBible.org's names are irregular and must come from a manifest (§12.2.4).
+eBible.org also answered **403** when its listings were fetched quickly one after another,
+so everything that fetches from it in bulk is slow and polite (§12.2.2).
+
+#### 12.0.2 Decisions (the designer's, with reasons)
+1. **Sources, per version:**
+   | Version | Source (default first) | Follows along |
+   |---|---|---|
+   | BSB | **Bob Souer** · Barry Hays · Jordan Gilbert · iPhone Voice | Verse by verse |
+   | WEB | **Winfred Henson** · iPhone Voice | Verse by verse |
+   | ESV | **David Cochran Heath** (ESV API) · iPhone Voice | **By chapter** (decision 4) |
+   | KJV, ASV, YLT | iPhone Voice | Verse by verse (as now) |
+   - **Bob Souer is the default BSB reader:** the best-known professional of the three,
+     the recording the BSB itself leads with, and full 192 kbps. Barry Hays is the choice
+     to suggest for cellular data (about half the size). The owner listens to all three
+     and may change the default (§12.9 question 1); it's one constant.
+   - **The choice is offered**, in one place (Voice, §12.4). People care who reads to
+     them, and the three are equally licensed and equally aligned, so it costs only the
+     timing files.
+2. **When a recording can't play, Listen goes on in the iPhone's voice** from the same
+   verse, and says so quietly ("iPhone Voice · Offline" in the player). It returns to the
+   recording at the next chapter when the network is back. Listening never just stops
+   because of a tunnel.
+3. **The WEB is read by Henson despite "Yahweh".** A human reading of the WEB is far better
+   than any synthetic one, and the difference is one name, read consistently. The Voice
+   screen says so in its WEB footer. The alignment treats LORD/GOD as Yahweh. The text is
+   not changed: §9.2's decision to ship `engwebp` stands.
+4. **Verse following:**
+   - **For the BSB and WEB, verse timings are computed once, offline, by forced
+     alignment of each recording to our own text, and bundled** as small timing files
+     (§12.2): about 130 KB each, about 520 KB for all four, about 200 KB more in the
+     download. The reader then washes and follows the verse being read exactly as Round 3
+     does, at no cost on the phone.
+   - **The ESV follows by chapter.** Aligning it would mean holding the whole ESV text on
+     our machine, past Crossway's 500-verse limit, so it isn't done. The player names the
+     chapter ("John 3"), there is no verse wash, and following moves only at each chapter's
+     start. Starting from a verse seeks to an estimate (§12.3.5).
+   - On-device alignment was considered and rejected: a speech model on the phone, for
+     work that never changes, is waste.
+5. **The ESV audio goes through our Worker, which returns the address, not the sound.**
+   The key stays on the server; the redirect target holds no key, so streaming it from
+   audio.esv.org directly is safe and costs us no bandwidth. Each answer is remembered
+   by the Worker for 30 days (the address only), so a chapter costs one API query a
+   month, not one per listen. Audio queries count in the shared budget, but stop at
+   **4,000 a day**, leaving 800 for reading the text (§12.6).
+6. **Streaming, with a small cache and optional downloads.** The playing chapter
+   streams. The next chapters are fetched ahead into a cache (10 ahead on Wi-Fi, 1 on
+   cellular or in Low Data Mode, capped at 500 MB). That covers a commute's dead spots
+   with no UI. For flights, a **book can be downloaded** in Voice → Downloads (§12.4.3).
+   **The ESV is stream-only**: never cached or downloaded beyond AVPlayer's own buffer.
+7. **The engine is AVQueuePlayer, with no blocks:**
+   - KVO by `observeValueForKeyPath:ofObject:change:context:`.
+   - Notifications by selector.
+   - Time by polling a 10 Hz NSTimer in the run loop's common modes. Periodic time
+     observers need blocks, so they aren't used.
+   - CMTime is read with KVC and `-[NSValue getValue:size:]`, and passed by pointer
+     (§12.3.1).
+8. **The iPhone voice gets better, not just kept.** Listen picks the best installed English
+   voice of any accent (Premium > Enhanced > standard; en-US preferred at equal quality;
+   novelty voices excluded), and the user may choose one. When no Enhanced or Premium
+   voice is installed, the app says once, calmly, where to download one (§12.4.2). Apple
+   provides no public link to that Settings page, so the app gives the path in words.
+9. **Speed** keeps its three segments. Recordings play at **0.85×, 1.0× and 1.25×** with
+   the time-domain pitch algorithm (Apple's choice for speech). The speech rates stay
+   0.42, 0.50 and 0.56.
+10. **Lock screen and Control Center:** title, reader, version, artwork, elapsed time and
+    duration. Play/pause, **previous/next chapter**, and scrubbing (for recordings).
+11. **What isn't in this round:** a sleep timer, CarPlay-specific UI (Now Playing appears
+    in CarPlay by itself), AirPlay pickers (Control Center has one), background URL
+    sessions (their app-delegate hook needs a block), and audio for the interlinear or
+    word study.
+
+### 12.1 Model (portable `audio.l8`, tested by `test_audio.l8`)
+- **Sources:** `SRC_SOUER`, `SRC_HAYS`, `SRC_GILBERT`, `SRC_HENSON`, `SRC_ESV` and `SRC_VOICE`.
+  Each has:
+  - its version;
+  - its reader's name ("Bob Souer", "Barry Hays", "Jordan Gilbert", "Winfred Henson",
+    "David Cochran Heath", "iPhone Voice");
+  - its address rule (`audio_url(src, c)`: built for openbible.com, from the manifest for
+    eBible.org, asked of the Worker for the ESV);
+  - its timing file (none for the ESV and the voice);
+  - whether it may be cached (not the ESV).
+- **Chosen source per version:** defaults `listenSourceBSB` = souer, `listenSourceWEB` =
+  henson, `listenSourceESV` = esv. The KJV, ASV and YLT are always the voice.
+  `audio_source(text)` returns the chosen one.
+- **Effective source for a chapter,** `audio_effective(text, c, online)`:
+  1. The chosen recording, if the chapter is downloaded or cached, or the network is up and
+     the source hasn't failed in the last 60 s.
+  2. Otherwise the voice.
+  A chapter whose timing line is flagged `missing` uses the voice.
+- **Timing lookup:**
+  - `verse_at(timing, c, t)` is the verse whose start ≤ t + 0.15 s, by binary search. It
+    returns 0 before verse 1 (a psalm's title, Gilbert's "John, chapter 3"): nothing is
+    washed, and the player names the chapter.
+  - `time_of(timing, c, v)` is verse v's start, minus 0.3 s, clamped at 0.
+- **The cache's rules** (`audio_cache_*`, pure functions over an index):
+  - The total stays ≤ 500 MB.
+  - Least-recently-played goes first.
+  - Pinned: the playing chapter and the next two, and every downloaded book (those live
+    elsewhere and aren't counted).
+- **Tests** (`test_audio.l8`, in `make bible-test`):
+  - All 1,189 openbible.com addresses for each reader. Spot-check exact strings:
+    `BSB_19_Psa_119.mp3`, `BSB_65_Jud_001_H.mp3`, `BSB_26_Ezk_048_G.mp3`,
+    `BSB_57_Phm_001.mp3`.
+  - The manifest's 1,189 eBible.org paths parse.
+  - `verse_at` at the edges: before verse 1, exactly at a start, past the end.
+  - `time_of` clamps.
+  - `audio_effective` covers each case.
+  - The cache: 30 chapters of Souer never pass 500 MB; pinned chapters survive.
+  - The timing files: every chapter's starts are increasing, and every chapter has a line.
+
+### 12.2 Verse timings: the alignment pipeline (offline, run once by the builder on the laptop)
+
+#### 12.2.1 What it makes
+`programs/bible/data/audio/<id>.tim`, for `souer`, `hays`, `gilbert` and `henson`. It's
+UTF-8 text, one line per chapter in Bible order (1,189 lines), after a header:
+```
+# smooth-bible timings 1 · souer · BSB · https://openbible.com/audio/souer/ · made 2026-10-19 · align.py 1 · WAV2VEC2_ASR_BASE_960H
+GEN	1	27269	6545950	ok	412 655 731 …
+```
+- The fields are: book, chapter, duration (centiseconds), file size (bytes, for the
+  download sizes of §12.4.3), and the flag.
+- **Flags:**
+  - `ok`: follow by verse.
+  - `chapter`: the alignment wasn't trusted, so follow by chapter.
+  - `missing`: no recording, so the voice is used.
+- Then **N + 1 numbers**, in centiseconds:
+  - verse 1's start (absolute);
+  - each following verse's start, as the difference from the one before;
+  - the end of the last verse's speech, as a difference.
+- **Verses** are those of that version's text as `text.l8` lays it out, in record order,
+  so the BSB's numbering quirks (3 John 1:15, Revelation 12:18) and the WEB's own are
+  what the reader shows.
+- Size: about 4 characters a verse × 31,100 verses ≈ 130 KB a file.
+- They're bundled in the app's data like the texts.
+
+#### 12.2.2 Getting the audio (polite, temporary)
+- **One zip per recording,** not 1,189 requests:
+  - Souer: `BSB_00_Souer_OT.zip` (4.2 GB) and `BSB_00_Souer_NT.zip` (0.9 GB).
+  - Hays: `BSB_00_Chapters_Hays.zip` (3.7 GB).
+  - Henson: `https://ebible.org/eng-web/audio/eng-web_audio.zip` (5.4 GB).
+  - Gilbert has no chapter zip in its directory: fetch its 1,189 files one at a time,
+    with a 1 s pause, resumable (`gilbert_books/` has book zips if they prove simpler).
+- `curl -C -` so interrupted downloads resume.
+- Everything goes in `~/.cache/smooth-bible-audio/` (outside the repo), about 20 GB, and
+  is deleted when the timing files are committed. Downloaded archives are untrusted:
+  unzip into their own empty directory and pass paths as arguments.
+- **No audio is ever committed.**
+
+#### 12.2.3 The spoken text (exactly the app's)
+- A tiny L8 tool, `tools/spoken.l8` (`make bible-spoken VERSION=bsb`), prints
+  `BOOK\tC\tV\ttext` for every verse, using `text.l8`'s own `speak_text`:
+  - footnotes stripped;
+  - headings left out (no reader reads them);
+  - "LORD" as "Lord".
+- A psalm's title (`D`) is printed as verse 0, because readers read it.
+- Python never re-implements the text rules.
+
+#### 12.2.4 The eBible.org manifest
+- `tools/web_audio_manifest.py` reads the 66 book listings (with a 3 s pause between
+  them, retrying a 403 after 30 s) and writes `data/audio/henson.paths`: 1,189 lines of
+  `BOOK\tC\t<percent-encoded path under https://ebible.org/eng-web/audio/>`.
+- Chapter numbers are read from the spelled-out names ("Chapter Twenty One",
+  "Psalms-One Hundred Nineteen"). Every book's count is checked against the BSB's
+  chapter counts.
+- For the two duplicates (Psalm 71, Luke 17), both are aligned and the better-scoring
+  one is kept.
+- The paths file is bundled (about 60 KB).
+
+#### 12.2.5 The aligner: `tools/align.py`
+- **Environment:**
+  - Python 3.11 in a venv at `~/.cache/smooth-bible-align/venv`.
+  - CPU-only `torch` and `torchaudio`, **pinned at 2.8**, the last with
+    `torchaudio.functional.forced_align`. Plus `num2words`.
+  - Run with `python -I`.
+  - **Model:** `torchaudio.pipelines.WAV2VEC2_ASR_BASE_960H` (fairseq, MIT-licensed;
+    English letters). Not the MMS models, whose weights are CC BY-NC.
+- **Per chapter:**
+  1. **Audio:** ffmpeg decodes to 16 kHz mono. Emissions come from 30 s windows with
+     2 s overlap, joined (20 ms frames).
+  2. **Text:** each verse's text is lowercased. Numbers become words ("4,000" → "four
+     thousand"). Everything but letters, apostrophes and spaces goes, and spaces become
+     the word separator `|`.
+     - For Henson, "Lord" from LORD, and "God" from small-caps GOD, are read as
+       "yahweh". "Lord GOD" is read as "lord yahweh".
+     - A **star token** (a wildcard that may match any audio, or none) goes before
+       verse 1, between every verse and after the last. It absorbs "John, chapter 3",
+       pauses, any heading or word a reader added, and the end-of-file silence.
+  3. **Alignment, in blocks of at most 5 minutes of audio:** the chapter's verses are split
+     into blocks by character share. Each block is aligned against its audio window
+     (estimated, ±20 s), with stars at both ends. The start found for the next block's
+     first verse fixes the next window. Psalm 119 (about 25 minutes) is 6 blocks.
+     - Short chapters are one block.
+     - Memory stays under 2 GB.
+  4. **The verse's start** is the first frame of its first letter, and its end is the
+     last frame of its last letter.
+- **Checks (any failure flags the chapter `chapter`, and the run lists them):**
+  1. Starts strictly increase. Each verse lasts at least 0.4 s and has 6–30 letters a
+     second.
+  2. The mean log-probability per letter over the verse is above a threshold the
+     builder sets from the score distribution (expected: the bottom 1% of verses), and
+     no more than 3 verses in the chapter are below it.
+  3. **Across readers:** the three BSB readers read the same text, so each verse's share
+     of its chapter (duration ÷ chapter speech) should agree. A verse whose share in one
+     reader differs from the other two's median by more than 50% (and by more than 1.5 s)
+     flags that reader's chapter.
+  4. **Spot transcription:** 300 random verses per reader are cut at their timings and
+     transcribed greedily with the same model. The character error rate against the
+     text is reported (expected below 15%; above 25% for any verse prints it for a look).
+- **Expected:**
+  - Fewer than 1% of chapters flagged `chapter`.
+  - Roughly 10 hours of CPU for all four on the laptop. It's resumable: a chapter's line
+    is written as soon as it's done, to `<id>.tim.partial`.
+- **Re-running:** only when a reader re-records (the files' `Last-Modified` changes) or the
+  text changes. `align.py --check` re-reads every `Last-Modified` and `Content-Length`
+  with HEAD requests (1 a second) and lists the chapters that changed.
+
+### 12.3 The engine (`ios_listen.l8`, reworked)
+
+#### 12.3.1 Two engines behind one Listen
+- Listen keeps its state (`ls_active`, `ls_playing`, the spoken chapter and verse, the
+  wash, following, the player) and gains **`ls_engine`**: `ENGINE_PLAYER` or
+  `ENGINE_VOICE`.
+- **The voice engine is §8.7's synthesizer, unchanged** apart from the voice choice
+  (§12.4.2).
+- **The player engine:**
+  - One `AVQueuePlayer` (AVFoundation, loaded as now), made once:
+    - `automaticallyWaitsToMinimizeStalling` YES;
+    - `actionAtItemEnd` advance;
+    - `allowsExternalPlayback` NO.
+  - **Items:** `AVPlayerItem playerItemWithURL:` with a cached or downloaded chapter's file
+    URL, else its remote URL. Each item:
+    - `audioTimePitchAlgorithm` = `AVAudioTimePitchAlgorithmTimeDomain`;
+    - `preferredForwardBufferDuration` 60.
+  - A small table maps item → (source, chapter).
+  - **KVO** (with the app object as the observer, removed before an item is let go):
+    - the player's `currentItem` (a new chapter began: wash, title, Now Playing, the next
+      item queued);
+    - its `timeControlStatus` (playing, paused, or waiting: "Loading…");
+    - each item's `status` (failed, so fall back, §12.3.4).
+  - **Notifications** (`addObserver:selector:name:object:`):
+    - `AVPlayerItemDidPlayToEndTimeNotification`: a chapter was heard, so call
+      `plan_heard` (§10.1.2, which also moves a reading, §11);
+    - `AVPlayerItemFailedToPlayToEndTimeNotification` and
+      `AVPlayerItemPlaybackStalledNotification`: §12.3.4;
+    - `AVAudioSessionInterruptionNotification`: pause, as now;
+    - `AVAudioSessionRouteChangeNotification` with reason
+      `OldDeviceUnavailable` (2): pause, so unplugged headphones don't start the speaker.
+  - **Time** (no blocks):
+    - `[player valueForKey:@"currentTime"]` gives an NSValue. `getValue:size:` (24 bytes)
+      gives a CMTime, and seconds = value ÷ timescale.
+    - Seeks build a 24-byte CMTime (value = cs, timescale = 100, flags = 1) and pass its
+      address: `seekToTime:toleranceBefore:toleranceAfter:` with zero tolerances. On
+      arm64, a struct over 16 bytes is passed by pointer, so `msg3` with three addresses
+      is the correct call. **Flag in the build log** if the simulator slice isn't arm64.
+    - The duration comes from `[item valueForKey:@"duration"]` the same way.
+  - **Polling:** a 10 Hz `NSTimer` (made with `timerWithTimeInterval:…` and added for
+    `NSRunLoopCommonModes`, so it fires during scrolling) runs only while playing **and**
+    in the foreground.
+    - It computes `verse_at`. When the verse changes, it calls `listen_at(c, v)`, so the
+      wash, the follow-scroll and the player label work exactly as in §8.7.
+    - In the background it stops: nothing is drawn there. Chapters still advance (the
+      queue does it) and `currentItem` KVO still keeps Now Playing right.
+    - On return to the foreground, a poll runs at once, so the wash is right before the
+      first frame.
+- **Audio session:** as §8.7 (playback, spoken audio). It's activated before `play`.
+
+#### 12.3.2 Starting, and continuing
+- **Listen from verse v of chapter c:**
+  1. Choose `audio_effective`.
+  2. For the player: make c's item, seek to `time_of(c, v)` (verse 1 → 0, so a psalm's
+     title and Gilbert's announcement are heard), then `play` at the speed's rate.
+  3. Queue c+1's item at once: AVQueuePlayer buffers it near the end, so chapters join
+     without a gap.
+- **On each `currentItem` change:**
+  - Queue the chapter after it (across books: Malachi 4 → Matthew 1).
+  - Nothing after Revelation 22. Its end stops Listen, as now.
+- **Following:** as §8.7 (70% / a third / 8 s after a drag). The player's chapter change
+  also moves the title, through the reader's own scroll.
+
+#### 12.3.3 Fetching ahead, and the cache
+- **Downloader:** `L8Net` (§9.4.4) gains download tasks, `downloadTaskWithRequest:` with
+  the delegate's `URLSession:downloadTask:didFinishDownloadingToURL:`. The file is moved
+  synchronously in that callback to `Library/Caches/SmoothBible/audio/<src>/<BOOK>-<C>.mp3`.
+  `index.tsv` there holds `SRC\tBOOK\tC\tBYTES\tUSED`. The LRU is kept in this index, not
+  in file dates, so no required-reason file-timestamp API is touched.
+  - A separate session from the ESV text: `defaultSessionConfiguration`, with:
+    - `allowsConstrainedNetworkAccess` YES (the app itself fetches only one chapter
+      ahead on cellular);
+    - `waitsForConnectivity` NO.
+  - One download at a time.
+- **What's fetched:** while the player engine is playing a cacheable source:
+  - the next 10 chapters on Wi-Fi;
+  - the next 1 on cellular or in Low Data Mode, unless Download Ahead on Cellular
+    (§12.4.3) is on.
+  - **Wi-Fi or cellular:** `NWPathMonitor` needs a block, so it isn't used. Before each
+    fetch-ahead decision, the app reads `SCNetworkReachability`'s flags synchronously
+    (`SCNetworkReachabilityCreateWithName` for "openbible.com", then
+    `SCNetworkReachabilityGetFlags`; `kSCNetworkReachabilityFlagsIsWWAN` means
+    cellular). No callback is registered.
+  - **Low Data Mode** can't be read without a block, so **cellular is always treated as
+    constrained** (1 chapter ahead). That's simple and safe.
+- **The playing chapter is streamed, not double-fetched.** If it's already cached, it
+  plays from the file.
+- Cache rules: §12.1. Log `bible: audio cache N MB (souer JHN 4, JHN 5, …)` after every
+  change.
+
+#### 12.3.4 Failure and fallback
+An item's `status` failed, `FailedToPlayToEndTime`, or a stall that lasts **10 s**
+(waiting with no progress) means the source has failed:
+1. Mark it failed for 60 s.
+2. Switch to the voice engine at the current verse (for the ESV: the verse estimated,
+   §12.3.5).
+3. The player's state line reads "iPhone Voice · Offline".
+4. At the next chapter boundary, if the network answers (the next chapter's item becomes
+   ready, or one tiny HEAD succeeds), go back to the recording.
+
+The log reads `bible: listen fell back to voice at JHN 3:16 (souer: offline)` and
+`bible: listen back to souer at JHN 4`. A 403 or 404 from openbible.com or eBible.org is
+treated as offline. While the voice engine stands in, the wash follows its utterances as
+in Round 3.
+
+#### 12.3.5 The ESV
+- **Before each chapter,** `GET /api/v1/esv/audio?book=JHN&chapter=3` (§12.6) returns
+  `{"v":1,"url":"https://audio.esv.org/hw/John%203.mp3","notice":"(ESV)"}`.
+  - Asked when the chapter is about to be queued. For the next chapter, that's as soon
+    as the current one begins.
+  - Kept in memory for the session only.
+  - The item is made from that URL; AVPlayer follows the 301.
+- **No timings:**
+  - The player names "John 3", with no verse.
+  - The wash isn't shown.
+  - Following scrolls to the chapter's opener when a new chapter begins (unless paused
+    by a drag).
+- **Starting from verse v > 1:** seek to (characters of the chapter's spoken text before
+  verse v ÷ all of them) × duration, minus 3 s, clamped at 0. The ESV chapter's records
+  are already held (§9.4.5) when it's shown.
+- **A Worker error** (`daily_limit`, `busy` or offline) falls back to the voice, as in
+  §12.3.4. The player reads "iPhone Voice".
+- **Never cached or downloaded.**
+
+#### 12.3.6 Switching mid-listen
+- **A new reader** (Voice, §12.4.1) or **a new version** (§9.3) while listening:
+  1. Note the verse being spoken.
+  2. Stop the current engine.
+  3. Start the new effective source at that verse (`time_of` in the new reader's timings,
+     or §12.3.5's estimate for the ESV).
+
+  There's no pause and no sound but the change of voice. The player's state line
+  cross-fades (0.2 s) to the new reader's name.
+- **Speed** applies at once: the player's `rate` (and `defaultRate` on iOS 16 or later),
+  or the voice's next utterances.
+- **Pausing and resuming** keep the place, and resuming re-checks `audio_effective`.
+
+#### 12.3.7 Now Playing and the remote commands
+- **`nowPlayingInfo`, set on every chapter change, pause, play, seek and rate change**
+  (never polled):
+  - title: "John 3";
+  - artist: the reader ("Bob Souer", "iPhone Voice");
+  - album title: the version's full name ("Berean Standard Bible");
+  - `MPMediaItemPropertyPlaybackDuration` and `MPNowPlayingInfoPropertyElapsedPlaybackTime`
+    (recordings only);
+  - `MPNowPlayingInfoPropertyPlaybackRate`: the rate, or 0 when paused;
+  - `MPNowPlayingInfoPropertyDefaultPlaybackRate`: 1;
+  - `MPMediaItemPropertyArtwork`: `[[MPMediaItemArtwork alloc] initWithImage:]`, from a
+    bundled `nowplaying.png` (1024 × 1024: the app icon's artwork on its paper color).
+    This initializer is deprecated but works and needs no block; the build log says so.
+    The block form is not used.
+- **Commands** (`addTarget:action:`, as now):
+  - play, pause, toggle;
+  - **`nextTrackCommand`**: the next chapter;
+  - **`previousTrackCommand`**: this chapter's start if more than 3 s in, else the
+    previous chapter;
+  - **`changePlaybackPositionCommand`**: the event's `positionTime`; enabled for
+    recordings only, and for the voice disabled (`setEnabled:NO`);
+  - `skipForwardCommand` and `skipBackwardCommand` disabled, so the lock screen shows
+    chapter skips.
+- Each handler returns 0.
+
+### 12.4 Screens
+
+#### 12.4.1 Reading settings: the Listen section
+§8.7's section keeps its Listen / Stop Listening button and Speed row, and gains:
+- **A third row, "Voice"** (a disclosure row), whose value is the current version's reader
+  ("Bob Souer", "Winfred Henson", "David Cochran Heath" or "iPhone Voice"). It pushes
+  **Voice** (§12.4.2) in the settings sheet.
+- **The Listen button's title** stays "Listen from John 3:14". There's no subtitle,
+  because the Voice row names the reader.
+- **A footer, only while it applies:** when the current version would be read by the
+  iPhone voice **and** no Enhanced or Premium English voice is installed **and** the
+  Voice screen has never been opened, the footer reads "This version is read by the
+  iPhone's voice. A more natural voice can be downloaded in Voice." Once Voice has been
+  opened (`voiceScreenSeen`), it never shows again. It's configured before the sheet
+  lands (principle 6).
+
+#### 12.4.2 Voice (pushed; insetGrouped)
+The title is "Voice". The sections, in this order (ESV only when `esvAvailable`):
+1. **Berean Standard Bible:** checkmark rows "Bob Souer", "Barry Hays", "Jordan Gilbert",
+   "iPhone Voice".
+   - Footer: "Recordings dedicated to the public domain, streamed from OpenBible.com.
+     About 85 MB an hour; Barry Hays about 45 MB."
+2. **World English Bible:** "Winfred Henson", "iPhone Voice".
+   - Footer: "A public-domain recording, streamed from eBible.org. It reads the Classic
+     edition, which says “Yahweh” where this text says “LORD”."
+3. **English Standard Version:** "David Cochran Heath", "iPhone Voice".
+   - Footer: "Streamed from esv.org through the ESV API. The ESV recording is followed
+     chapter by chapter, not verse by verse."
+4. **iPhone Voice:** one disclosure row, "Voice", with the value "Best Available" or the
+   chosen voice's name. It pushes the voice list.
+   - Footer: "Reads the King James Version, the American Standard Version and Young's
+     Literal Translation, and any version when a recording can't be reached."
+   - When no Enhanced or Premium English voice is installed, the footer adds: "For a more
+     natural voice, download an Enhanced or Premium English voice in the Settings app:
+     Accessibility › Read & Speak › Voices › English." (The owner confirms the wording of
+     the path on iOS 26, §12.8.)
+5. **Downloads:** rows "Download Ahead on Cellular" (a switch, off) and "Downloaded
+   Books" (a disclosure row, whose value is the total size, "312 MB", or "None").
+   - Footer: "On Wi-Fi, the next ten chapters are kept ready, so listening goes on
+     without a connection."
+
+- **Choosing a reader** sets the checkmark (the standard cell checkmark, no animation of
+  its own) and saves at once. While listening, it switches as §12.3.6.
+- **Previews:** tapping a reader's row while *not* listening plays a **5-second preview**
+  of that reader (Psalm 23 from its start, or a voice reading "The LORD is my shepherd; I
+  shall not want."), faded out over the last 0.5 s with the player's volume ramp. Tapping
+  again or leaving the screen stops it. While listening, there's no preview: the change
+  is heard in place.
+- **The voice list** (pushed): "Best Available" first (checked by default). Then the
+  installed English voices in sections "Premium", "Enhanced" and "Standard", each row
+  showing the name and the region ("Ava · United States"). Novelty voices aren't listed
+  (`voiceTraits` bit 1).
+  - Tapping a row selects it (`listenVoiceID`) and speaks the Psalm 23 line.
+  - A voice that's later uninstalled falls back to Best Available silently.
+  - The voice list is read again in `viewWillAppear`, so a voice just downloaded in
+    Settings appears when the user comes back.
+
+#### 12.4.3 Downloaded Books (pushed from Voice)
+- **Section "Downloaded":** each downloaded book for the current reader ("John · Bob
+  Souer · 96 MB"), with swipe-to-Delete and Edit, the standard way.
+  - If none: footer "No books are downloaded."
+- **Section "Download a Book":** a row "Download a Book…" pushes the Books list
+  (Old/New Testament, as Go To's).
+  - Each book shows its size for the chosen reader (from the timing file's bytes) as the
+    value.
+  - Tapping one starts its download. The row's accessory becomes a small progress ring
+    (a `CAShapeLayer` stroke, updated from `didWriteData`), then a checkmark.
+  - Tapping a downloading row asks "Stop Downloading John?" (an action sheet: Stop
+    Downloading, Cancel).
+  - Downloading happens only while the app is running. If it's interrupted, it resumes
+    the next time Downloads or Listen is used. The footer says: "Downloads continue while
+    Smooth Bible is open or listening."
+- **Storage:** `Application Support/SmoothBible/audio/<src>/<BOOK>-<C>.mp3`, marked
+  excluded from backup (`NSURLIsExcludedFromBackupKey`). Downloads are pinned: the cache
+  rules never touch them.
+- **For the voice** (KJV, ASV or YLT, or a version set to iPhone Voice), the screen says:
+  "The iPhone's voice works without a connection."
+- **The ESV is never offered here.**
+
+#### 12.4.4 The mini player
+Its shape, place and motion are §8.7's. Its **second label** changes:
+| State | Second label |
+|---|---|
+| Playing a recording | the reader, "Bob Souer" |
+| Playing the voice | "iPhone Voice" |
+| Voice standing in after a failure | "iPhone Voice · Offline" |
+| Waiting for data for more than 0.5 s (`timeControlStatus` waiting) | "Loading…" |
+| Paused | "Paused" |
+
+- Changes cross-fade over 0.2 s.
+- "Loading…" never flickers: it appears only after 0.5 s of waiting, and stays at least
+  0.5 s.
+- **The first label** is the verse ("John 3:14"). Before verse 1, and for the ESV, it's
+  the chapter ("John 3").
+- The accessibility label joins both ("John 3:14, Bob Souer").
+- Everything else is unchanged: play/pause, the label's tap to the verse, close, and the
+  tray above it.
+
+### 12.5 Acknowledgements, notices and privacy
+- **Acknowledgements (§9.8) gains a section "Audio"** after Text:
+  - "Berean Standard Bible" / "Read by Bob Souer, Barry Hays and Jordan Gilbert.
+    Dedicated to the public domain (CC0 1.0). Streamed from OpenBible.com." →
+    `https://bereanbible.com/audio/`
+  - "World English Bible" / "Read by Winfred W. Henson. Public domain. Streamed from
+    eBible.org." → `https://ebible.org/eng-web/audio/`
+  - "Verse Timings" / "Computed by Smooth Bible from these recordings. They may be a moment
+    early or late."
+- **The English Standard Version section** gains, above its copyright footer, a row
+  "ESV Audio" / "Read by David Cochran Heath. Provided by the ESV API from Crossway." →
+  `https://www.esv.org`.
+  - The ESV's footer stays verbatim, and the reader's "(ESV) · esv.org" footer line is
+    unchanged.
+  - Now Playing's album title is "English Standard Version", so the passage is
+    identified as ESV wherever it's heard.
+- **The "Changes" screen** gains: "Recordings are played as published. Verse timings for
+  them were computed by forced alignment."
+- **Privacy:**
+  - **App Store answer:** stays **Data Not Collected**. Nothing is collected by us, and
+    the audio hosts receive only what any web request carries.
+  - **`PrivacyInfo.xcprivacy`:** stays "collects nothing". Its comment adds that the app
+    streams recordings from openbible.com, ebible.org and audio.esv.org.
+  - **The privacy page** (`programs/bible/site/privacy/index.html`) **must be updated
+    before Round 7 ships.** The designer hasn't edited it; the builder makes this change.
+    A new paragraph, "Listening":
+    - Recordings are streamed directly from OpenBible.com (the BSB), eBible.org (the WEB)
+      and audio.esv.org (the ESV).
+    - Those servers receive your device's address and which chapter's file is asked for,
+      as with any web request, under their own policies. We don't send them anything
+      else.
+    - For the ESV, our server is asked for the recording's address. It receives the book
+      and chapter, as for the text, and keeps nothing but counts.
+    - Downloaded and cached recordings stay on your iPhone.
+    - The iPhone's voice works on the device.
+  - **Info.plist:** no change. Every host is HTTPS (checked), and `UIBackgroundModes`
+    already has `audio`.
+
+### 12.6 The Worker: `GET /api/v1/esv/audio?book=JHN&chapter=3`
+- **Validation:** as for chapters (the 66 codes, the chapter within the book, the
+  `X-Smooth-Bible` header, `PER_IP`).
+- **Cache first:** a new D1 table in `schema.sql`:
+  `CREATE TABLE audio_url (passage TEXT PRIMARY KEY, url TEXT NOT NULL, fetched INTEGER NOT NULL);`
+  - A row younger than 30 days answers at once, with **no upstream call and no budget
+    spent**.
+  - It holds an address, not ESV text, so it doesn't count against the 500 verses.
+- **Upstream:** `fetch({UPSTREAM}/v3/passage/audio/?q=<Name C>, { redirect: "manual", headers:
+  { authorization } })`. For a one-chapter book, `q` is `Jude 1:1-999`, as the text uses.
+  - Accept 301, 302, 303, 307 or 308 whose `Location` matches
+    `^https://audio\.esv\.org/`. Anything else is `502 upstream`.
+  - The Worker never follows the redirect, never fetches the mp3, and never streams audio.
+- **Budget:**
+  - Counted in the same `spend()` as text: every upstream call counts in the minute,
+    hour and day buckets.
+  - **In addition, audio stops at 4,000 a day:** `503 daily_limit` for audio only, while
+    text continues to 4,800.
+  - On the minute and hour limits, audio is refused first: it's refused at 45 a minute
+    and 800 an hour.
+- **Reply:** `{"v":1,"url":"<Location>","notice":"(ESV)"}` with `Cache-Control: no-store`.
+  It logs nothing, as before.
+- **`/api/v1/status`** becomes `{"ok":true,"esv":true,"esvAudio":true}`. The app shows ESV
+  audio as a source only when `esvAudio` is true. Until the Worker is redeployed, the ESV
+  is read by the iPhone voice, as today.
+- **Tests (`test.mjs`):**
+  - A mock upstream answering 302 to an `audio.esv.org` address gives 200 and the address.
+  - A `Location` on another host gives 502.
+  - A second request within 30 days makes no upstream call.
+  - A day count of 4,000 refuses audio but serves text.
+  - The key never appears in any reply.
+- **Deploy** (with the owner's consent, as before): `npx wrangler d1 execute
+  smooth-bible-api --remote --command "CREATE TABLE …"`, then `npx wrangler deploy`.
+
+### 12.7 CI for Round 7
+- **Fixtures (no network):** `programs/bible/demo/audio/`:
+  - **`tone.mp3`:** 40 s, 24 kbps mono, about 120 KB. Made by `make_fixture.sh` with
+    ffmpeg from sine tones: a 0.3 s 330 Hz blip at each "verse" start and soft 220 Hz
+    hum between, so it's licence-free and its timings are known. It's committed.
+  - **`fixture.tim`:** JHN 3 (36 verses, 1.0 s each from 2.0 s; the 2 s before verse 1
+    stand for an announcement) and JHN 4 (the same file, its first 38 s, 38 verses not
+    all reached), flagged `ok`.
+  - **`esv-audio-JHN-3.json` and `esv-audio-JHN-4.json`:** `{"v":1,"url":"file:…/tone.mp3"}`
+    (the path filled in by the demo).
+- **Fixture mode:** when the environment has `L8_AUDIO_FIXTURE` (a path relative to the
+  app's home, like `L8_ESV_FIXTURE`):
+  - every recording address becomes the fixture's file URL;
+  - timings come from `fixture.tim`;
+  - downloads copy the fixture after a 0.3 s delay per chapter;
+  - `<path>/mode` (`ok`, `offline` or `slow`) makes items fail (offline) or start after
+    2 s of "Loading…" (slow).
+  - The demo clock isn't used: AVPlayer plays in real time on the simulator, into the
+    void.
+  - If the simulator's player never advances `currentTime`, the demo logs
+    `bible: audio fixture did not advance` and the shots that depend on it fail
+    visibly. They don't fake it.
+- **A new demo group, `listen`** (in `simulate.sh` and the workflow matrix). It installs
+  both fixtures. Shots:
+
+| Shot | Action | Expected |
+|---|---|---|
+| `190-listen-section` | Reader at John 3:14 (BSB); open Reading settings | Listen section: "▶ Listen from John 3:14", Speed, and "Voice · Bob Souer"; no footer |
+| `191-voice` | Tap Voice | Voice: BSB (Bob Souer ✓, Barry Hays, Jordan Gilbert, iPhone Voice), WEB (Winfred Henson ✓ …, the Yahweh footer), ESV (David Cochran Heath ✓), iPhone Voice (Best Available, with the download path footer, since the simulator has no Enhanced voice), Downloads |
+| `192-voice-list` | Tap iPhone Voice › Voice | Best Available ✓, then the simulator's voices by quality; no novelty voices |
+| `193-recording` | Back, back; tap Listen; wait until the fixture's time is 18.4 s (verse 17) | Mini player "John 3:17 · Bob Souer"; verse 17 washed; the log has "bible: listen souer JHN 3 from 3:14 at 15.70 s" |
+| `194-loading` | `mode` = slow; Listen from John 3:1 | Mini player "John 3 · Loading…" (the chapter, before verse 1), then after 2 s "John 3:1 · Bob Souer" (a second shot `194b`) |
+| `195-reader-switched` | While at verse 5, choose Barry Hays in Voice; close the sheet | Still verse 5 (or 6), "Barry Hays"; the log has "bible: listen switched to hays at JHN 3:5" |
+| `196-faster` | Speed: Faster | The log has "bible: listen rate 1.25"; the wash moves faster (a second shot after 2 s shows 2–3 verses on) |
+| `197-next-chapter` | Listen from John 3:34 at Normal; wait 5 s | Mini player "John 4 · Bob Souer" or "John 4:1"; the title "John 4"; the log has "bible: chapter heard JHN 3" and "bible: listen next JHN 4" |
+| `198-offline` | `mode` = offline; Listen from John 3:16 | Mini player "John 3:16 · iPhone Voice · Offline" (two lines as specified); the log has "bible: listen fell back to voice at JHN 3:16 (souer: offline)" |
+| `199-esv-chapter` | `mode` = ok; switch to the ESV (fixture); Listen from John 3:16 | Mini player "John 3 · David Cochran Heath"; **no wash**; the log has "bible: esv audio JHN 3 (fixture)" and the seek estimate |
+| `200-kjv-voice` | Switch to the KJV; open Reading settings | "Voice · iPhone Voice", and the footer "This version is read by the iPhone's voice. …" (Voice not yet opened in this group's state; the demo clears `voiceScreenSeen` first) |
+| `201-downloads` | Voice › Downloaded Books › Download a Book… › John | The Books list with sizes ("John · 96 MB" from the bundled souer timings); John's ring, then its checkmark; back: "Downloaded: John · Bob Souer · 96 MB" |
+| `202-ack-audio` | Acknowledgements | The Audio section's three rows; the ESV section's "ESV Audio" row above the unchanged footer |
+| `203-ax-voice` | (Accessibility size) Voice | Rows and footers wrap; nothing clipped |
+
+- **Now Playing:** the demo logs `bible: now playing {title: John 3, artist: Bob Souer,
+  album: Berean Standard Bible, duration: 40.0, elapsed: 15.7, rate: 1.0, artwork: 1024}`
+  at 193, 195, 196 and 197, so the dictionary is checked from text. The lock screen
+  itself is a device check.
+- **Recording sequence 14:** Listen from John 3:30 at Faster.
+  - The wash moves verse to verse with its cross-fade.
+  - One follow-scroll.
+  - Into John 4: the title push, and the player's label changes.
+  - Choose Barry Hays in Voice mid-way (the state line cross-fades), then pause (the
+    symbol cross-fades).
+
+  Nothing jumps.
+- **Linux:**
+  - `test_audio.l8` in `make bible-test`.
+  - `node --test` for the Worker.
+  - `tools/spoken.l8` builds.
+  - The bundled `.tim` files pass the checks of §12.1's tests: 1,189 lines each,
+    increasing starts, flags valid.
+- **The `more` group's 79–82 (§8.7)** keep passing. 80's second label now reads
+  "Bob Souer" (the BSB's recording in fixture mode) where it read "Listening". This is the
+  one expected change to an earlier shot.
+
+### 12.8 Acceptance, and what needs a real phone
+**Approved when:**
+1. **Sources:**
+   - Every version is read aloud by §12.0.2's sources, with Souer as the BSB's default.
+   - The reader can be chosen per version in Voice, and the choice is kept.
+   - KJV, ASV and YLT use the best installed English voice, or the chosen one.
+2. **Following:**
+   - BSB and WEB recordings wash and follow verse by verse, within about 0.3 s, as Round
+     3 did.
+   - The ESV follows by chapter, with no false wash.
+   - The alignment run's report is committed in the commit message: chapters flagged
+     per reader, CER per reader.
+3. **Continuing:**
+   - Chapters and books join without a gap (sequence 14, 197).
+   - Revelation 22's end stops Listen.
+   - Chapters heard count for plans and readings.
+4. **Never stopping for the network:**
+   - Offline falls back to the iPhone voice at the same verse, and returns at a chapter
+     boundary (198).
+   - Fetching ahead and Downloads follow §12.3.3 and §12.4.3, and the cache stays under
+     500 MB (tests).
+5. **Lock screen:**
+   - The dictionary is as §12.3.7 (logs).
+   - Next/previous chapter and scrubbing work.
+6. **Switching:** reader, version and speed changes mid-listen keep the verse (195, 196).
+7. **Calm:**
+   - The player's second label cross-fades.
+   - "Loading…" never flickers.
+   - The one-time footer appears only as specified.
+   - Nothing changes abruptly (sequence 14).
+8. **Credits and privacy:**
+   - Acknowledgements as §12.5.
+   - The privacy page has its Listening paragraph before release.
+   - The Worker logs nothing, and the key never leaves it (tests).
+9. Shots 190–203 match, and no earlier shot regresses except 80's label.
+
+**On a device (the owner):**
+1. **Listen to the three BSB readers** (Psalm 23, John 1, Romans 8) and confirm or change
+   the default (§12.9 question 1).
+2. With the screen locked:
+   - Listening runs through at least two chapter changes.
+   - The lock screen shows the title, reader, artwork and progress.
+   - Next and previous chapter, scrubbing, and AirPods' double-tap work.
+3. **On cellular, in a car or a train:**
+   - Listening survives short dead spots (the cache).
+   - A long one falls back to the voice and returns.
+   - Data use looks like §12.4.2's figures.
+4. **Following on real recordings:**
+   - The wash lands as each verse begins, including in Psalm 119 and a genealogy
+     (1 Chronicles 1).
+   - Report any chapter where it drifts. Its line is flagged `chapter` and re-run.
+5. **The iPhone voice path:**
+   - Download an Enhanced or Premium voice following the footer's words.
+   - Confirm the Settings path wording on iOS 26.
+   - Confirm it appears in the voice list on return.
+6. A phone call and unplugging headphones pause, and nothing resumes by itself.
+7. **The ESV**, once the Worker is redeployed: the recording plays, and a chapter skip
+   asks the Worker once (D1's `audio_url` gains rows; the budget doesn't move on the
+   second listen).
+
+### 12.9 Questions only the owner can answer, and what the owner does
+1. **The default BSB reader** (the designer's pick: Bob Souer). It's one constant to
+   change after listening.
+2. **The KJV recording:** openbible.com's KJV ("David", 2025) has no reader credit or
+   licence anywhere, and is very likely synthetic. If the owner wants it, the owner can
+   write to the Berean Bible team (berean.bible/contact.htm) and ask whether the KJV
+   audio is CC0 like the BSB's, and whether it's human. If it's CC0, it's a fifth source
+   (the KJV address pattern is verified: `KJV_<NN>_<Abr>_<CCC>.mp3`), aligned like the
+   others. Until then, the KJV is read by the iPhone voice.
+3. **The WEB's "Yahweh":** the designer chose Henson anyway (decision 3). If the owner
+   would rather the WEB be read exactly as shown, the WEB's default becomes iPhone Voice,
+   with Henson still a choice.
+4. **The owner does:**
+   - Consent to the alignment run's downloads: about 20 GB, temporary, from openbible.com
+     and eBible.org, at a polite pace.
+   - Redeploy the Worker with the new table (§12.6).
+   - Approve the privacy page's new paragraph.
+   - Optionally, write a courtesy note to OpenBible.com and eBible.org that the app
+     streams from them. Streaming is within what both offer, and no permission is
+     needed.
