@@ -248,7 +248,7 @@ step_toast() {
 # When the app began step N (seconds, its own clock: "at unix ms" after
 # "demo step N"), to mark a recording from (review r8-1).
 step_at() {
-  awk -v want="bible: demo step $1" '$0 == want { found = 1; next } found && /at unix ms/ { t = $NF; found = 0 } END { printf "%.3f", t / 1000 }' "$out/console.txt"
+  awk -v want="bible: demo step $1" '{ sub(/\r$/, "") } $0 == want { found = 1; next } found && /at unix ms/ { t = $NF; found = 0 } END { printf "%.3f", t / 1000 }' "$out/console.txt"
 }
 if [ "$group" = store ]; then
   # The status bar as the App Store's screenshots have it.
