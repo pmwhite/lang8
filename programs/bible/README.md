@@ -59,6 +59,17 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   book's chapter grid, or the title's long-press, Start Reading Here), at
   your own pace or as a plan (A Chapter a Day among them); kept as you read
   on, never moved by a jump; merged when two meet; swiped away with Remove.
+- Recorded readings (Round 7): Listen plays people reading, streamed from
+  where they are published: the BSB by Bob Souer (or Barry Hays, Jordan
+  Gilbert; CC0, openbible.com), the WEB by Winfred Henson (public domain,
+  eBible.org), the ESV by David Cochran Heath (its address from our
+  Worker); the KJV, ASV and YLT by the best installed iPhone voice. The
+  verse being read is washed and followed from timings computed offline
+  (`tools/align.py`, bundled as `data/audio/*.tim`); the ESV is followed
+  by chapter. The next chapters are fetched ahead, books can be downloaded
+  (Reading settings → Voice → Downloaded Books), and a recording that
+  can't be reached is stood in for by the voice. Lock screen controls go
+  by chapter.
 - A link opens a chapter: `bsb://JHN/3` (or a verse, `bsb://JHN/3/16`).
 
 ## Files
@@ -97,11 +108,24 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   menu (`readings.l8` their portable part, tested in `test_readings.l8`); `ios_share.l8` Share as
   Image; `ios_demo.l8` (and `ios_demo3.l8` to `ios_demo6.l8`)
   the demo CI runs.
+- `audio.l8` is recorded readings' portable part (sources, addresses,
+  timings, which source a chapter is heard from, the cache's rules), tested
+  in `test_audio.l8`; `ios_audio.l8` the Voice screens, voices, the cache
+  and downloads; `ios_listen.l8` both engines (AVQueuePlayer, no blocks;
+  AVSpeechSynthesizer). `data/audio/<reader>.tim` are the verse timings
+  and `henson.paths` eBible.org's file names
+  (`tools/web_audio_manifest.py`); `tools/align.py` made the timings
+  (wav2vec2 forced alignment of each recording to `tools/spoken.l8`'s text,
+  `make bible-spoken VERSION=bsb`; see its docstring for running it), in a
+  venv outside the repository; no audio is ever committed.
+  `demo/audio/` is CI's audio fixture (`make_fixture.sh`: a tone, its
+  timings, the ESV's answers), installed in every group (`L8_AUDIO_FIXTURE`).
 - `worker/` is the ESV proxy, a Cloudflare Worker (`worker.js`; `esv.js`
   turns the ESV API's HTML into our records), with its tests
   (`node --test programs/bible/worker/test.mjs`, against `fixtures/`: the
   ESV's tags with the WEB's words) and `make_fixtures.mjs`, which writes the
-  app's fixture (`ios/esv-fixture/`) for CI. It is not deployed (below).
+  app's fixture (`ios/esv-fixture/`) for CI. It is deployed at
+  smoothbible.com (below), with `/api/v1/esv/audio` (Round 7).
 - `ios/` is what goes into the app besides its code: its Info.plist, icon
   (`AppIcon.svg`, drawn to `AppIcon.png` in Chromium, and as
   `AppIcon.svg#dark` and `#tinted` to `AppIcon-dark.png` and
@@ -128,8 +152,10 @@ needed.
 
 ## The ESV proxy: deploying it (each step needs the owner's consent)
 
-Nothing below has been done. The app works without it: the ESV is simply
-not offered until `https://smoothbible.com/api/v1/status` answers.
+All of this has been done (Round 7's `audio_url` table added with
+`wrangler d1 execute … --file schema.sql`, 2026-10-18). The app works
+without it: the ESV is simply not offered until
+`https://smoothbible.com/api/v1/status` answers.
 
 1. The ESV API key: register the application at
    `https://api.esv.org/account/create-application/` (DESIGN.md §9.10) and

@@ -100,7 +100,14 @@ BLOCK_SECONDS = 300
 WINDOW_MARGIN = 20
 STAR_SCORE = 0.0
 
+# The audio is played to the model twice as fast (ffmpeg's atempo, pitch
+# kept): half the work, and on the test chapters (John 3, Genesis 1,
+# 1 Chronicles 1; Souer, Henson, Gilbert) the starts found differ from
+# those at normal speed by 0.02 s (median), 0.04 s (90th percentile).
+TEMPO = 2.0
+# A model frame, in the model's time and in the recording's.
 FRAME = 320 / 16000
+REAL = FRAME * TEMPO
 
 
 def log(msg):
@@ -192,9 +199,11 @@ def model():
     return _model, _labels
 
 
-def decode(path):
+def decode(path, tempo=None):
     import numpy as np
-    raw = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", path, "-ac", "1", "-ar",
+    tempo = TEMPO if tempo is None else tempo
+    af = ["-af", "atempo=%g" % tempo] if tempo != 1 else []
+    raw = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", path] + af + ["-ac", "1", "-ar",
                           "16000", "-f", "f32le", "-"], check=True, capture_output=True).stdout
     return np.frombuffer(raw, dtype=np.float32).copy()
 
@@ -351,7 +360,7 @@ def checks(rows):
         if st <= last:
             reasons.append("%d: starts before the one before" % v)
         last = st
-        dur = (e - st) * FRAME
+        dur = (e - st) * REAL
         if dur < MIN_SECONDS:
             reasons.append("%d: %.2f s" % (v, dur))
         rate = n / max(dur, 0.01)
@@ -389,7 +398,7 @@ def starts_line(book, c, verses, got, centis, size, flag):
             if starts[i] is None:
                 starts[i] = nxt
             nxt = starts[i]
-        cs = [int(round(f * FRAME * 100)) for f in starts] + [int(round(end * FRAME * 100))]
+        cs = [int(round(f * REAL * 100)) for f in starts] + [int(round(end * REAL * 100))]
         prev = 0
         for i, x in enumerate(cs):
             nums.append(x if i == 0 else x - prev)
@@ -401,7 +410,7 @@ def starts_line(book, c, verses, got, centis, size, flag):
 def align_file(reader, path, book, c, verses, spot_seed=None):
     """One chapter: its line's parts and details."""
     wave = decode(path)
-    seconds = len(wave) / 16000
+    seconds = len(wave) / 16000 * TEMPO
     em = emissions(wave)
     vl = verse_letters(reader, verses)
     got = align_chapter(em, vl)
@@ -447,8 +456,8 @@ def cmd_try(args):
             print("%4d  (none)" % v)
             continue
         n = len(text.replace("|", ""))
-        dur = (e - s) * FRAME
-        print("%4d %8.2f %8.2f %6.2f %5.1f/s  %s" % (v, s * FRAME, e * FRAME,
+        dur = (e - s) * REAL
+        print("%4d %8.2f %8.2f %6.2f %5.1f/s  %s" % (v, s * REAL, e * REAL,
                                                       sc if sc is not None else 0, n / max(dur, .01),
                                                       text[:50]))
     for v, er, heard in detail["spots"]:
@@ -504,7 +513,8 @@ def unzip_into(zpath, dest):
     if os.path.exists(dest):
         shutil.rmtree(dest)
     os.makedirs(dest)
-    subprocess.run(["unzip", "-q", "-o", zpath, "-d", dest], check=True)
+    # (7-Zip: Info-ZIP's unzip cannot read zips past 4 GB, as Souer's OT is.)
+    subprocess.run(["7z", "x", "-y", "-bd", "-o" + dest, zpath], check=True, stdout=subprocess.DEVNULL)
 
 
 def find_files(root):

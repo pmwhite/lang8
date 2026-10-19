@@ -43,6 +43,15 @@
 #           Start Reading from Go To, the title's menu and a book's grid; A
 #           Chapter a Day; and the recording of sequence 13
 #           (reading-transitions.mp4); its log's checks in reading.txt
+#   listen  Round 7 (DESIGN.md §12.7), with the audio fixture and the ESV's:
+#           the Listen section, Voice, a recording followed, Loading…, a
+#           reader changed, Faster, the next chapter, offline, the ESV by
+#           chapter, the KJV's voice, Downloads, the acknowledgements, the
+#           largest text; and the recording of sequence 14
+#           (listen-transitions.mp4); its log's checks in listen.txt
+# Every group has the audio fixture (programs/bible/demo/audio, copied into
+# the app's Library and named by L8_AUDIO_FIXTURE), so no recording is
+# fetched from the network in CI.
 # After each step the script waits for the app to say it has settled (the
 # notification space.trailingwhite.smoothbible.done, from `notifyutil -1`),
 # with a timeout, rather than sleeping; then it takes the screenshot.
@@ -86,13 +95,23 @@ xcrun simctl install "$dev" "$app"
 echo "booted and installed in $(python3 -c "print(round($(now) - $start))") s" >> "$out/timing.txt"
 # (The versions group's ESV: the fixture, in the app's data container.)
 fixture=
-if [ "$group" = versions ]; then
+if [ "$group" = versions ] || [ "$group" = listen ]; then
   data=$(xcrun simctl get_app_container "$dev" "$id" data 2>/dev/null)
   if [ -n "$data" ]; then
     mkdir -p "$data/Library/esv-fixture"
     cp "$(dirname "$0")"/esv-fixture/* "$data/Library/esv-fixture/" && echo "esv fixture installed"
     fixture=Library/esv-fixture
   fi
+fi
+# (Every group's audio: the fixture.)
+audio_fixture=
+data=$(xcrun simctl get_app_container "$dev" "$id" data 2>/dev/null)
+if [ -n "$data" ]; then
+  mkdir -p "$data/Library/audio-fixture"
+  cp "$(dirname "$0")"/../demo/audio/tone.mp3 "$(dirname "$0")"/../demo/audio/fixture.tim \
+    "$(dirname "$0")"/../demo/audio/esv-audio-*.json "$data/Library/audio-fixture/" && echo "audio fixture installed"
+  echo ok > "$data/Library/audio-fixture/mode"
+  audio_fixture=Library/audio-fixture
 fi
 # (The reading group's history, before the first launch: Psalm 23:1 and
 # Acts 9:1 and 10:9, yesterday at 20:40, 21:00 and 21:20, local time.)
@@ -115,6 +134,7 @@ fi
 # that no shot depends on the network or shows the ESV; review r5-1.)
 esv_off=1
 [ "$group" = versions ] && esv_off=
+[ "$group" = listen ] && esv_off=
 # (The ios18 group's shots have -ios18 after their names.)
 suffix=
 [ "$group" = ios18 ] && suffix=-ios18
@@ -158,7 +178,7 @@ wait_done() {
 launch() {
   events=$((events + 1))
   wait_start
-  SIMCTL_CHILD_L8_DEMO=1 SIMCTL_CHILD_L8_ESV_FIXTURE=$fixture SIMCTL_CHILD_L8_ESV_OFF=$esv_off xcrun simctl launch --console-pty "$dev" "$id" > "$out/$1" 2>&1 &
+  SIMCTL_CHILD_L8_DEMO=1 SIMCTL_CHILD_L8_ESV_FIXTURE=$fixture SIMCTL_CHILD_L8_ESV_OFF=$esv_off SIMCTL_CHILD_L8_AUDIO_FIXTURE=$audio_fixture xcrun simctl launch --console-pty "$dev" "$id" > "$out/$1" 2>&1 &
   console=$!
   # (The first launch may take minutes.)
   i=0
@@ -639,6 +659,60 @@ reading)
     grep -qF "$bad" "$out/reading.txt" && { echo "FAILED: \"$bad\"" | tee -a "$out/reading.txt"; failed=1; }
   done
   tail -5 "$out/reading.txt"
+  ;;
+listen)
+  # (DESIGN.md §12.7: shots 190 to 203.)
+  step 320 190-listen-section 6
+  step 321 191-voice 6
+  step 322 192-voice-list 6
+  step 323 193-recording 20
+  step 324 194-loading 8
+  step 325 194b-loading-done 20
+  step 326 195-reader-switched 24
+  step 327 196-faster 6
+  step 328 196b-faster-later 6
+  step 329 197-next-chapter 12
+  step 330 198-offline 8
+  step 331 199-esv-chapter 10
+  step 332 200-kjv-voice 8
+  step 333 201-downloads 10
+  step 334 201b-downloaded 12
+  step 335 201c-downloaded-books 6
+  step 336 202-ack-audio 6
+  step 337 202b-ack-esv-audio 6
+  ui content_size accessibility-extra-extra-extra-large
+  step 338 203-ax-voice 8
+  ui content_size large
+  # The screen recording of sequence 14.
+  step 339 "" 6
+  xcrun simctl io "$dev" recordVideo --codec h264 --force "$out/transitions.mp4" > "$out/record.txt" 2>&1 &
+  recorder=$!
+  i=0
+  while ! grep -qi "started" "$out/record.txt" 2>/dev/null && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  rec0=$(now)
+  sleep 0.5
+  : > "$out/transitions.txt"
+  a=$(now)
+  step 340 "" 20
+  b=$(now)
+  echo "14 $(python3 -c "print(round($a - $rec0, 2), round($b - $rec0, 2))")" >> "$out/transitions.txt"
+  sleep 0.5
+  kill -INT "$recorder" 2>/dev/null
+  wait "$recorder" 2>/dev/null
+  # The log's checks (§12.7).
+  grep -h "bible: listen\|bible: chapter heard\|bible: now playing\|bible: esv audio\|bible: audio\|bible: download\|bible: book downloaded\|bible: voice\|bible: demo listen\|bible: demo step\|Offline\|Loading" \
+    "$out/console.txt" > "$out/listen.txt" 2>/dev/null
+  for want in "bible: listen souer JHN 3 from 3:14 at 14.70 s" "bible: listen switched to hays at JHN 3:5" \
+      "bible: listen rate 1.25" "bible: chapter heard JHN 3" "bible: listen next JHN 4" \
+      "bible: listen fell back to voice at JHN 3:16 (souer: offline)" "bible: esv audio JHN 3 (fixture)" \
+      "bible: book downloaded JHN" "bible: now playing {title: John 3, artist: Bob Souer, album: Berean Standard Bible"; do
+    grep -qF "$want" "$out/listen.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/listen.txt"; failed=1; }
+  done
+  grep -qF "audio fixture did not advance" "$out/listen.txt" && { echo "FAILED: the fixture did not advance" | tee -a "$out/listen.txt"; failed=1; }
+  tail -5 "$out/listen.txt"
   ;;
 ios18)
   shot 01-genesis-1
