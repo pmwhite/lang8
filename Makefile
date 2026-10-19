@@ -48,7 +48,7 @@ STAGE1_TESTS := tests/compiler/bool.l8 \
 # `build TOOL SOURCE`: build into $@ without leaving a partial file behind.
 build = ./$(1) build $(2) -o $@.tmp && mv -f $@.tmp $@
 
-.PHONY: all check fmt selfhost compiler-test game skate malton race race-test tempo tempo-test bible-test stdlib-test \
+.PHONY: all check fmt selfhost compiler-test game skate malton race race-test tempo tempo-test bible-test bible-spoken stdlib-test \
 	terminal terminal-test callback-test http http-test websocket websocket-test wasm-test web \
 	install-bootstrap promote promote-bin1 promote-bin2 promote-source clean help
 
@@ -178,13 +178,20 @@ $(BUILD)/ios-check.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
 
 # The Bible app: its text's layout, tested; and the app, as arm64 assembly
 # for iOS (see programs/bible/README.md).
-$(OK)/bible-tests: l8c3 $(PROGRAMS) $(RUNTIME) $(wildcard programs/bible/tools/*.py programs/bible/data/*.txt programs/bible/data/*.bin programs/bible/data/lang/* programs/bible/worker/*.js programs/bible/worker/*.mjs programs/bible/worker/fixtures/*) | $(OK)
-	+@$(STEP) 'bible tests' ./l8c3 test programs/bible/test_text.l8 programs/bible/test_lang.l8 programs/bible/test_store.l8 programs/bible/test_plans.l8 programs/bible/test_readings.l8
+$(OK)/bible-tests: l8c3 $(PROGRAMS) $(RUNTIME) $(wildcard programs/bible/tools/*.py programs/bible/tools/*.l8 programs/bible/data/*.txt programs/bible/data/*.bin programs/bible/data/lang/* programs/bible/data/audio/* programs/bible/worker/*.js programs/bible/worker/*.mjs programs/bible/worker/fixtures/*) | $(OK)
+	+@$(STEP) 'bible tests' ./l8c3 test programs/bible/test_text.l8 programs/bible/test_lang.l8 programs/bible/test_store.l8 programs/bible/test_plans.l8 programs/bible/test_readings.l8 programs/bible/test_audio.l8
 	+@$(STEP) 'bible worker tests' node --test programs/bible/worker/test.mjs
-	+@$(STEP) 'bible data checks' sh -c 'for t in senses related; do python3 -I programs/bible/tools/$$t.py --check programs/bible/data || exit 1; done'
+	+@$(STEP) 'bible data checks' sh -c 'for t in senses related; do python3 -I programs/bible/tools/$$t.py --check programs/bible/data || exit 1; done; python3 -I programs/bible/tools/web_audio_manifest.py --check programs/bible/data'
+	+@$(STEP) 'bible spoken text' sh -c './l8c3 build programs/bible/tools/spoken.l8 -o $(BUILD)/bible-spoken.tmp && mv -f $(BUILD)/bible-spoken.tmp $(BUILD)/bible-spoken'
 	@touch $@
 
 bible-test: $(OK)/bible-tests
+
+# What the app says aloud, a verse a line (DESIGN.md §12.2.3), for the
+# aligner: make bible-spoken VERSION=bsb (or web).
+VERSION ?= bsb
+bible-spoken: l8c3 $(PROGRAMS) $(RUNTIME)
+	@./l8c3 build programs/bible/tools/spoken.l8 -o $(BUILD)/bible-spoken && $(BUILD)/bible-spoken programs/bible/data/$(VERSION).txt
 
 $(BUILD)/bible-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
 	@$(STEP) 'bible for iOS' sh -c './l8c3 arm64 --target ios programs/bible/ios.l8 -o $@.tmp && mv -f $@.tmp $@'

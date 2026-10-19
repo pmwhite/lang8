@@ -1,0 +1,370 @@
+tag bible_audio_tests;
+
+use_tag std, bible;
+
+// Recorded readings (audio.l8, DESIGN.md §12.1): every openbible.com
+// address, eBible.org's paths, the bundled timing files (a line for every
+// chapter, starts that only increase, flags that are known), the verse at a
+// time and the time of a verse at their edges, which source a chapter is
+// heard from, and the cache's rules.
+need "libc.so.6";
+
+import "../../stdlib/print.l8";
+
+import "text.l8";
+
+import "store.l8";
+
+import "audio.l8";
+
+extern open(path: str, flags: int, mode: int): int;
+
+extern close(fd: int): int;
+
+loaded: bool = false;
+
+load() noregion {
+    if (loaded) return;
+    loaded = true;
+    buf: []i8 = read_into("programs/bible/data/bsb.txt");
+    bsb = buf;
+    text_use(0);
+    text_load(TEXT_BSB, buf, read_n)
+}
+
+read_n: int = 0;
+
+read_into(path: str): []i8@new {
+    fd: int = open(path, 0, 0);
+    n: int = 8388608;
+    buf: []i8 = new i8[n](0i8);
+    got: int = 0;
+    more: bool = fd >= 0;
+    while (more && got < n) {
+        r: int = read(fd, buf, got, n - got);
+        if (r <= 0) more = false else got = got + r
+    }
+    if (fd >= 0) close(fd);
+    read_n = got;
+    buf
+}
+
+tim_files: []str = ["programs/bible/data/audio/souer.tim", "programs/bible/data/audio/hays.tim",
+    "programs/bible/data/audio/gilbert.tim", "programs/bible/data/audio/henson.tim"];
+
+load_timings() noregion {
+    load();
+    for s in 0..4 {
+        if (!tim_ready[s]) {
+            buf: []i8 = read_into(tim_files[s]);
+            _n: int = tim_load(s, buf, read_n)
+        }
+    }
+    if (hp_n == 0) {
+        buf: []i8 = read_into("programs/bible/data/audio/henson.paths");
+        _m: int = henson_paths_load(buf, read_n)
+    }
+}
+
+print_au() raises IoError {
+    write_bytes_n(1, au, au_n);
+    print("")
+}
+
+// A chapter by its book's code and number.
+chap(code: str, n: int): int {
+    b: int = 0;
+    while (b < books && !book_is(b, code)) b = b + 1;
+    book_first[b] + n - 1
+}
+
+test "every openbible.com address, and some exactly" {
+    load();
+    bad: int = 0;
+    for s in 0..3 {
+        for c in 0..chapters {
+            audio_url(s, c);
+            // https://openbible.com/audio/<id>/BSB_NN_Abr_CCC<sfx>.mp3 (28, the id,
+            // 1, 14, the suffix, 4)
+            want: int = 28 + len(src_ids[s]) + 1 + 14 + len(ob_suffix[s]) + 4;
+            if (au_n != want || au[au_n - 4] as int != 46) bad = bad + 1
+        }
+    }
+    write_int(1, bad);
+    print(" bad");
+    audio_url(SRC_SOUER, chap("PSA", 119));
+    print_au();
+    audio_url(SRC_HAYS, chap("JUD", 1));
+    print_au();
+    audio_url(SRC_GILBERT, chap("EZK", 48));
+    print_au();
+    audio_url(SRC_SOUER, chap("PHM", 1));
+    print_au();
+    audio_url(SRC_ESV, chap("JHN", 3));
+    write_int(1, au_n);
+    print(" for the ESV (asked of the Worker)");
+    audio_file_name(chap("JHN", 3));
+    print_au();
+    expect {|
+        0 bad
+        https://openbible.com/audio/souer/BSB_19_Psa_119.mp3
+        https://openbible.com/audio/hays/BSB_65_Jud_001_H.mp3
+        https://openbible.com/audio/gilbert/BSB_26_Ezk_048_G.mp3
+        https://openbible.com/audio/souer/BSB_57_Phm_001.mp3
+        0 for the ESV (asked of the Worker)
+        JHN-3.mp3
+    |}
+}
+
+test "eBible.org's paths, a chapter each" {
+    load_timings();
+    write_int(1, hp_n);
+    print(" chapters");
+    missing: int = 0;
+    for c in 0..chapters {
+        audio_url(SRC_HENSON, c);
+        if (au_n <= len(HENSON_BASE) + 4) missing = missing + 1
+    }
+    write_int(1, missing);
+    print(" without a path");
+    audio_url(SRC_HENSON, chap("JHN", 3));
+    print_au();
+    // (Psalm 71's two files: the one kept, the first.)
+    audio_url(SRC_HENSON, chap("PSA", 71));
+    print_au();
+    expect {|
+        1189 chapters
+        0 without a path
+        https://ebible.org/eng-web/audio/43_John/0999%20John-Chapter%20Three.mp3
+        https://ebible.org/eng-web/audio/19_Psalms/0549%20Psalms-Seventy%20One.mp3
+    |}
+}
+
+test "the bundled timing files" {
+    load_timings();
+    for s in 0..4 {
+        lines: int = 0;
+        ok: int = 0;
+        by_chapter: int = 0;
+        bad: int = 0;
+        for c in 0..chapters {
+            f: int = tim_flag(s, c);
+            if (f != TIM_MISSING || tim_size[s][c] > 0) lines = lines + 1;
+            if (f == TIM_OK) ok = ok + 1;
+            if (f == TIM_CHAPTER) by_chapter = by_chapter + 1;
+            n: int = tim_starts(s, c);
+            if (f == TIM_OK) {
+                // (A start a verse, and the end; never going back.)
+                if (n != ch_verses_of(s, c) + 1) bad = bad + 1;
+                for i in 1..n
+                    if (ts[i] < ts[i - 1]) bad = bad + 1
+            }
+            if (f != TIM_MISSING && tim_size[s][c] <= 0) bad = bad + 1
+        }
+        write(1, src_ids[s]);
+        write(1, ": ");
+        write_int(1, lines);
+        write(1, " lines, ");
+        write_int(1, if (bad == 0) 0 else 1);
+        print(" bad");
+        if (ok + by_chapter != lines) print("  a flag not known")
+    }
+    expect {|
+        souer: 1189 lines, 0 bad
+        hays: 1189 lines, 0 bad
+        gilbert: 1189 lines, 0 bad
+        henson: 1189 lines, 0 bad
+    |}
+}
+
+// Chapter c's verses in source s's version (the WEB's own for Henson).
+web_loaded: bool = false;
+
+ch_verses_of(s: int, c: int) noregion: int {
+    if (s != SRC_HENSON) return ch_verses[c];
+    load_web();
+    tx_ch_verses[2][c]
+}
+
+load_web() noregion {
+    if (web_loaded) return;
+    web_loaded = true;
+    buf: []i8 = read_into("programs/bible/data/web.txt");
+    text_load(2, buf, read_n);
+    text_use(0)
+}
+
+// A timing line of the test's own, for the edges.
+own: []i8 = new i8[256](0i8);
+
+own_n: int = 0;
+
+own_str(s: str) {
+    for k in s {
+        own[own_n] = k;
+        own_n = own_n + 1
+    }
+}
+
+test "the verse at a time, and a verse's time" {
+    load();
+    // Jude, 25 verses: verse 1 at 2.00 s, each 1.00 s on; the end at 27.5 s.
+    own_n = 0;
+    own_str("""
+# test
+JUD	1	3000	1000	ok	200""");
+    for _i in 0..24 own_str(" 100");
+    own_str(" 150\n");
+    _n: int = tim_load(SRC_HAYS, own, own_n);
+    c: int = chap("JUD", 1);
+    for t in [0, 184, 185, 200, 299, 1350, 2600, 2749, 5000] {
+        write_int(1, t);
+        write(1, " cs: ");
+        write_int(1, audio_verse_at(SRC_HAYS, c, t));
+        print("")
+    }
+    for v in [1, 2, 3, 25, 40] {
+        write(1, "verse ");
+        write_int(1, v);
+        write(1, " at ");
+        write_int(1, audio_time_of(SRC_HAYS, c, v));
+        print("")
+    }
+    // (A chapter without timings: none, and its verses from 0.)
+    write_int(1, audio_verse_at(SRC_HAYS, chap("JHN", 3), 500));
+    write(1, " ");
+    write_int(1, audio_time_of(SRC_HAYS, chap("JHN", 3), 16));
+    print("");
+    write_int(1, estimate_time(500, 1000, 30000));
+    write(1, " ");
+    write_int(1, estimate_time(10, 1000, 30000));
+    print("");
+    tim_ready[SRC_HAYS] = false;
+    expect {|
+        0 cs: 0
+        184 cs: 0
+        185 cs: 1
+        200 cs: 1
+        299 cs: 2
+        1350 cs: 12
+        2600 cs: 25
+        2749 cs: 25
+        5000 cs: 25
+        verse 1 at 0
+        verse 2 at 270
+        verse 3 at 370
+        verse 25 at 2570
+        verse 40 at 2570
+        -1 0
+        14700 0
+    |}
+}
+
+test "which source a chapter is heard from" {
+    load_timings();
+    c: int = chap("JHN", 3);
+    now: f64 = 1000.0f64;
+    for s in [SRC_SOUER, SRC_ESV, SRC_VOICE] {
+        write(1, src_ids[s]);
+        write(1, ":");
+        // Kept here; online; online but failed 10 s ago; failed 70 s ago;
+        // offline; offline and kept.
+        for k in 0..6 {
+            kept: bool = k == 0 || k == 5;
+            online: bool = k >= 1 && k <= 3;
+            failed: f64 = if (k == 2) 990.0f64 else if (k == 3) 930.0f64 else 0.0f64;
+            write(1, " ");
+            write(1, src_ids[audio_effective(s, c, kept, online, failed, now)])
+        }
+        print("")
+    }
+    // (A chapter its timings call missing: the voice.)
+    flags: []int = tim_flag_of[SRC_SOUER];
+    was: int = flags[c];
+    flags[c] = TIM_MISSING;
+    print(src_ids[audio_effective(SRC_SOUER, c, true, true, 0.0f64, now)]);
+    flags[c] = was;
+    expect {|
+        souer: souer souer voice souer voice souer
+        esv: voice esv voice esv voice voice
+        voice: voice voice voice voice voice voice
+        voice
+    |}
+}
+
+test "the cache stays within 500 MB, and keeps what plays" {
+    load_timings();
+    ac_n = 0;
+    s: int = SRC_SOUER;
+    gone: int = 0;
+    first: int = chap("PSA", 100);
+    playing: int = first;
+    // 30 chapters of Souer fetched ahead, the playing one moving on.
+    for k in 0..30 {
+        c: int = chap("PSA", 101 + k);
+        audio_cache_add(s, c, tim_bytes(s, c) * 8, k + 1);
+        if (k % 3 == 0) {
+            playing = c - 1;
+            audio_cache_touch(s, playing, k + 1)
+        }
+        v: int = audio_cache_victim(AC_LIMIT, s, playing);
+        while (v >= 0) {
+            if (audio_cache_pinned(v, s, playing)) print("a pinned chapter let go");
+            audio_cache_remove(v);
+            gone = gone + 1;
+            v = audio_cache_victim(AC_LIMIT, s, playing)
+        }
+        if (audio_cache_total() > AC_LIMIT) print("over 500 MB")
+    }
+    write(1, if (gone > 0) "some let go" else "none let go");
+    print("");
+    for x in playing..playing + 3 {
+        if (audio_cache_find(s, x) < 0 && x > first) print("pinned missing")
+    }
+    // The index, written and read back.
+    out: []i8 = new i8[262144](0i8);
+    n: int = audio_cache_format(out);
+    kept: int = ac_n;
+    total: int = audio_cache_total();
+    _m: int = audio_cache_parse(out, n);
+    write_int(1, if (ac_n == kept && audio_cache_total() == total) 1 else 0);
+    print(" read back");
+    // (A bad line skipped; the ESV never kept.)
+    own_n = 0;
+    own_str("""
+souer	JHN	3	100	5
+esv	JHN	3	100	5
+hays	XYZ	1	1	1
+hays	JHN	99	1	1
+gilbert	JHN	4	200	6
+""");
+    write_int(1, audio_cache_parse(own, own_n));
+    print(" kept");
+    ac_n = 0;
+    expect {|
+        some let go
+        1 read back
+        2 kept
+    |}
+}
+
+test "sizes, as the screens say them" {
+    load_timings();
+    for b in [0, 1048575, 1048576, 100663296, 1073741824, 5905580032] {
+        fbuf_n = 0;
+        fput_size(b);
+        write_bytes_n(1, fbuf, fbuf_n);
+        print("")
+    }
+    write_int(1, if (book_bytes(SRC_SOUER, 42) > 50000000) 1 else 0);
+    print(" John is more than 50 MB");
+    expect {|
+        None
+        1 MB
+        1 MB
+        96 MB
+        1.0 GB
+        5.5 GB
+        1 John is more than 50 MB
+    |}
+}

@@ -13,8 +13,14 @@
 //       {v, version, notice, chapters: [{book, chapter, verses, records}]}
 //   GET /api/v1/esv/search?q=born%20again&page=1
 //       {v, total, page, pages, results: [{book, chapter, verse, key, text}]}
+//   GET /api/v1/esv/audio?book=JHN&chapter=3
+//       {v, url, notice}: where the ESV API's recording of the chapter is
+//       (its redirect's target, on audio.esv.org, which holds no key);
+//       remembered for 30 days in D1 (the address only), so a chapter
+//       costs one query a month (DESIGN.md §12.6). The Worker never
+//       fetches or streams the sound itself.
 //
-// Errors are {error, message, retry} (seconds): 400 bad_request, 429
+// Status is {ok, esv, esvAudio}. Errors are {error, message, retry} (seconds): 400 bad_request, 429
 // slow_down (this address) or busy (the minute's or hour's budget), 503
 // daily_limit, 502 upstream, 504 timeout. Every request must say
 // X-Smooth-Bible: <version> (<build>). UPSTREAM (a var) is the ESV API's
@@ -24,6 +30,10 @@ import { convert, keyOf } from "./esv.js";
 
 // The budget for every call upstream, under the terms with room to spare.
 export const BUDGET = { minute: 55, hour: 950, day: 4800 };
+// Audio's share of it: refused first, so the text always has room.
+export const AUDIO_BUDGET = { minute: 45, hour: 800, day: 4000 };
+// How long a recording's address is remembered.
+export const AUDIO_KEEP = 30 * 86400000;
 const MOST_VERSES = 500;
 const TIMEOUT = 8000;
 
@@ -65,7 +75,7 @@ export const buckets = (now) => {
 // One more call upstream counted (in one statement), and the counts back;
 // the first call of a day lets go of buckets two days old. An error
 // response if the budget is spent, else null.
-const spend = async (env, now) => {
+const spend = async (env, now, budget = BUDGET) => {
   const k = buckets(now);
   const rows = await env.DB.prepare(
     "INSERT INTO usage (bucket, n) VALUES (?1, 1), (?2, 1), (?3, 1) ON CONFLICT (bucket) DO UPDATE SET n = n + 1 RETURNING bucket, n",
@@ -78,10 +88,10 @@ const spend = async (env, now) => {
     const old = new Date(now - 2 * 86400000).toISOString().slice(0, 10);
     await env.DB.prepare("DELETE FROM usage WHERE substr(bucket, 3, 10) < ?1").bind(old).run();
   }
-  if ((n[k.d] ?? 0) > BUDGET.day)
+  if ((n[k.d] ?? 0) > budget.day)
     return fail(503, "daily_limit", "The ESV has reached its daily limit for Smooth Bible.", k.toDay);
-  if ((n[k.h] ?? 0) > BUDGET.hour) return fail(429, "busy", "Many people are reading the ESV just now.", k.toHour);
-  if ((n[k.m] ?? 0) > BUDGET.minute) return fail(429, "busy", "Many people are reading the ESV just now.", k.toMinute);
+  if ((n[k.h] ?? 0) > budget.hour) return fail(429, "busy", "Many people are reading the ESV just now.", k.toHour);
+  if ((n[k.m] ?? 0) > budget.minute) return fail(429, "busy", "Many people are reading the ESV just now.", k.toMinute);
   return null;
 };
 
@@ -151,6 +161,46 @@ const chapters = async (env, q, now) => {
   });
 };
 
+// A chapter's recording: the address remembered, or the ESV API's redirect
+// (its key sent, the redirect not followed).
+const REDIRECTS = [301, 302, 303, 307, 308];
+const AUDIO_HOST = /^https:\/\/audio\.esv\.org\//;
+
+const audio = async (env, q, now) => {
+  const b = book(q.get("book") ?? "");
+  const c = parseInt(q.get("chapter") ?? "", 10);
+  if (!b || !(c >= 1 && c <= b[2].length) || String(c) !== q.get("chapter")) return fail(400, "bad_request", "No such chapter.");
+  const key = `${b[0]} ${c}`;
+  const row = await env.DB.prepare("SELECT url, fetched FROM audio_url WHERE passage = ?1").bind(key).first();
+  if (row && now - row.fetched < AUDIO_KEEP && AUDIO_HOST.test(row.url)) return reply(200, { v: 1, url: row.url, notice: "(ESV)" });
+  const spent = await spend(env, now, AUDIO_BUDGET);
+  if (spent) return spent;
+  // (A one-chapter book by its name: the audio endpoint refuses "Jude
+  // 1:1-999", and "Jude 1" is its first verse alone.)
+  const passage = b[2].length === 1 ? b[1] : `${b[1]} ${c}`;
+  const url = new URL("/v3/passage/audio/", env.UPSTREAM || "https://api.esv.org");
+  url.searchParams.set("q", passage);
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), TIMEOUT);
+  let r;
+  try {
+    r = await fetch(url, { redirect: "manual", headers: { authorization: `Token ${env.ESV_KEY}` }, signal: ctl.signal });
+  } catch (e) {
+    return fail(504, "timeout", "The ESV didn't answer in time.");
+  } finally {
+    clearTimeout(timer);
+  }
+  if (r.status === 429) return fail(429, "busy", "Many people are reading the ESV just now.", 60);
+  const to = r.headers.get("location") ?? "";
+  if (!REDIRECTS.includes(r.status) || !AUDIO_HOST.test(to)) return fail(502, "upstream", "The ESV isn't available right now.");
+  await env.DB.prepare(
+    "INSERT INTO audio_url (passage, url, fetched) VALUES (?1, ?2, ?3) ON CONFLICT (passage) DO UPDATE SET url = ?2, fetched = ?3",
+  )
+    .bind(key, to, now)
+    .run();
+  return reply(200, { v: 1, url: to, notice: "(ESV)" });
+};
+
 // "John 3:3", "1 John 3:9", "Song of Solomon 1:1": book, chapter, verse.
 export const parseReference = (ref) => {
   const m = String(ref).match(/^(.+?) (\d+):(\d+)/);
@@ -202,7 +252,7 @@ export default {
     }
     const path = url.pathname.replace(/^\/api\/v1\//, "/");
     if (request.method !== "GET") return fail(400, "bad_request", "Only GET.");
-    if (path === "/status" || path === "/health") return reply(200, { ok: true, esv: Boolean(env.ESV_KEY) });
+    if (path === "/status" || path === "/health") return reply(200, { ok: true, esv: Boolean(env.ESV_KEY), esvAudio: Boolean(env.ESV_KEY) });
     if (!/^\S+ \(\S+\)$/.test(request.headers.get("x-smooth-bible") ?? "")) return fail(400, "bad_request", "Who is asking?");
     if (env.PER_IP) {
       const ip = request.headers.get("cf-connecting-ip") ?? "";
@@ -212,6 +262,7 @@ export default {
     const now = Date.now();
     if (path === "/esv/chapters") return chapters(env, url.searchParams, now);
     if (path === "/esv/search") return search(env, url.searchParams, now);
+    if (path === "/esv/audio") return audio(env, url.searchParams, now);
     return fail(400, "bad_request", "No such request.");
   },
 };

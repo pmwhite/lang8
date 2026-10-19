@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { convert, recordWords, htmlWords } from "./esv.js";
-import worker, { BUDGET, buckets, chaptersFor } from "./worker.js";
+import worker, { AUDIO_BUDGET, AUDIO_KEEP, BUDGET, buckets, chaptersFor } from "./worker.js";
 import { BOOKS } from "./versecounts.js";
 
 const here = new URL("./fixtures/", import.meta.url);
@@ -44,11 +44,25 @@ test("a request spanning two chapters gives each its own records", () => {
 // ---- the Worker ----
 const mockDB = () => {
   const rows = new Map();
+  const audio = new Map();
   return {
     rows,
+    audio,
     prepare(sql) {
       return {
         bind(...args) {
+          if (/audio_url/.test(sql))
+            return {
+              async first() {
+                assert.match(sql, /^SELECT url, fetched FROM audio_url WHERE passage = \?1$/);
+                return audio.get(args[0]) ?? null;
+              },
+              async run() {
+                assert.match(sql, /^INSERT INTO audio_url/);
+                audio.set(args[0], { url: args[1], fetched: args[2] });
+                return {};
+              },
+            };
           return {
             async all() {
               assert.match(sql, /^INSERT INTO usage/);
@@ -145,7 +159,7 @@ test("bad requests and a missing header are 400s", async () => {
 test("status answers without asking the ESV", async () => {
   mockFetch();
   const r = await get(env(), "status", null);
-  assert.deepEqual(await r.json(), { ok: true, esv: true });
+  assert.deepEqual(await r.json(), { ok: true, esv: true, esvAudio: true });
   assert.equal(upstreamCalls.length, 0);
 });
 
@@ -227,4 +241,114 @@ test("footnotes as the API gives them: one <p>, a <br /> between", () => {
 <p>(<a href="http://www.esv.org" class="copyright">ESV</a>)</p>`;
   const recs = convert(html, "JHN", 3).chapters[0].records.split("\n").filter((r) => r[0] === "F");
   assert.deepEqual(recs, ["FGreek a person", "FOr in the dark"]);
+});
+
+// ---- the ESV's recordings (DESIGN.md §12.6) ----
+const mockAudio = (status = 302, location = "https://audio.esv.org/hw/John%203.mp3") => {
+  upstreamCalls = [];
+  globalThis.fetch = async (url, init) => {
+    upstreamCalls.push({ url: String(url), init });
+    return new Response(null, { status, headers: location ? { location } : {} });
+  };
+};
+
+test("a chapter's recording: the redirect's target, not followed", async () => {
+  mockAudio();
+  const e = env();
+  const r = await get(e, "esv/audio?book=JHN&chapter=3");
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await r.json(), { v: 1, url: "https://audio.esv.org/hw/John%203.mp3", notice: "(ESV)" });
+  assert.equal(upstreamCalls.length, 1);
+  const u = new URL(upstreamCalls[0].url);
+  assert.equal(u.origin + u.pathname, "https://esv.test/v3/passage/audio/");
+  assert.equal(u.searchParams.get("q"), "John 3");
+  assert.equal(upstreamCalls[0].init.redirect, "manual");
+  assert.equal(upstreamCalls[0].init.headers.authorization, "Token test-key");
+  // (Counted in the shared budget.)
+  assert.equal(e.DB.rows.get(buckets(Date.now()).d), 1);
+  // Every redirect status is taken; a one-chapter book is asked by its name.
+  for (const s of [301, 303, 307, 308]) {
+    mockAudio(s, "https://audio.esv.org/hw/Jude.mp3");
+    const j = await (await get(env(), "esv/audio?book=JUD&chapter=1")).json();
+    assert.equal(j.url, "https://audio.esv.org/hw/Jude.mp3", String(s));
+    assert.equal(new URL(upstreamCalls[0].url).searchParams.get("q"), "Jude");
+  }
+});
+
+test("a recording elsewhere, or no redirect, is 502", async () => {
+  for (const [s, loc] of [
+    [302, "https://evil.example/John%203.mp3"],
+    [302, "http://audio.esv.org/hw/John%203.mp3"],
+    [302, "https://audio.esv.org.example/x.mp3"],
+    [302, null],
+    [200, null],
+    [404, null],
+  ]) {
+    mockAudio(s, loc);
+    const e = env();
+    const r = await get(e, "esv/audio?book=JHN&chapter=3");
+    assert.equal(r.status, 502, `${s} ${loc}`);
+    assert.equal((await r.json()).error, "upstream");
+    assert.equal(e.DB.audio.size, 0);
+  }
+});
+
+test("a second request within 30 days asks nothing upstream", async () => {
+  mockAudio();
+  const e = env();
+  await get(e, "esv/audio?book=JHN&chapter=3");
+  assert.equal(upstreamCalls.length, 1);
+  const r = await get(e, "esv/audio?book=JHN&chapter=3");
+  assert.equal((await r.json()).url, "https://audio.esv.org/hw/John%203.mp3");
+  assert.equal(upstreamCalls.length, 1);
+  assert.equal(e.DB.rows.get(buckets(Date.now()).d), 1);
+  // Older than 30 days: asked again, and remembered anew.
+  e.DB.audio.get("JHN 3").fetched = Date.now() - AUDIO_KEEP - 1000;
+  await get(e, "esv/audio?book=JHN&chapter=3");
+  assert.equal(upstreamCalls.length, 2);
+  assert.ok(Date.now() - e.DB.audio.get("JHN 3").fetched < 60000);
+});
+
+test("audio stops at its own limits while the text goes on", async () => {
+  const k = buckets(Date.now());
+  for (const [bucket, n, status, error] of [
+    [k.d, AUDIO_BUDGET.day, 503, "daily_limit"],
+    [k.h, AUDIO_BUDGET.hour, 429, "busy"],
+    [k.m, AUDIO_BUDGET.minute, 429, "busy"],
+  ]) {
+    const e = env();
+    e.DB.rows.set(bucket, n);
+    mockAudio();
+    let r = await get(e, "esv/audio?book=JHN&chapter=3");
+    assert.equal(r.status, status, bucket);
+    assert.equal((await r.json()).error, error);
+    assert.equal(upstreamCalls.length, 0);
+    // The text, with the same counts (one more spent by the refusal).
+    mockFetch();
+    r = await get(e, "esv/chapters?book=JHN&chapter=3");
+    assert.equal(r.status, 200, bucket + " text");
+  }
+});
+
+test("bad audio requests are 400s, and the key is in no reply", async () => {
+  mockAudio();
+  for (const q of ["esv/audio?book=XYZ&chapter=1", "esv/audio?book=JHN&chapter=22", "esv/audio?book=JHN&chapter=03", "esv/audio?book=JHN"]) {
+    const r = await get(env(), q);
+    assert.equal(r.status, 400, q);
+  }
+  assert.equal(upstreamCalls.length, 0);
+  const r = await get(env(), "esv/audio?book=JHN&chapter=3", null);
+  assert.equal(r.status, 400);
+  for (const [s, loc] of [
+    [302, "https://audio.esv.org/hw/John%203.mp3"],
+    [302, "https://elsewhere.example/"],
+    [500, null],
+  ]) {
+    mockAudio(s, loc);
+    const res = await get(env(), "esv/audio?book=JHN&chapter=3");
+    const text = await res.text();
+    assert.ok(!text.includes("test-key"), text);
+    for (const [, v] of res.headers) assert.ok(!v.includes("test-key"));
+  }
 });
