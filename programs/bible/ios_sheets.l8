@@ -115,6 +115,7 @@ sheet_gone() {
     search_table = 0;
     settings_table = 0;
     lib_vc = 0;
+    lib_header_gone();
     lib_search = 0;
     lib_sort_button = 0;
     search_vc = 0;
@@ -1619,10 +1620,9 @@ open_library() {
     msg1(seg_control, sel("setSelectedSegmentIndex:"), lib_seg);
     msg3(seg_control, sel("addTarget:action:forControlEvents:"), app_obj, sel("librarySegment:"),
         4096);
-    msg_rect(seg_control, sel("setFrame:"), 0.0f64, 0.0f64, 260.0f64, 32.0f64);
+    // (The segments on a row of their own, under the bar: lib_header.)
     item: int = msg(vc, sel("navigationItem"));
-    msg1(item, sel("setTitleView:"), seg_control);
-    release(seg_control);
+    lib_header_gone();
     // Search: the rows filtered as they are typed for.
     sc: int = msg1(msg(cls("UISearchController"), sel("alloc")), sel("initWithSearchResultsController:"),
         0);
@@ -1650,6 +1650,7 @@ open_library() {
     lib_build();
     ls_shown = ls_n;
     lib_header();
+    release(seg_control);
     lib_empty_state();
     // The toolbar: Export, and on Notes, compose a chapter's note.
     sheet_nav: int = sheet_of(vc, 1);
@@ -2864,6 +2865,26 @@ table_header_view(
     0
 }
 
+// A plain list's header about to show (search's count of verses found):
+// the page's own color behind it, so pinned under the bar it covers the
+// rows passing under it rather than lying over their words (iOS 26 draws
+// no material behind a plain header).
+table_will_show_header(
+    _self: int,
+    _cmd: int,
+    t: int,
+    header: int,
+    _section: int
+): int {
+    if (t == 0 || t == table || msg(t, sel("style")) != 0) return 0;
+    if ((msg1(header, sel("isKindOfClass:"), cls("UITableViewHeaderFooterView")) & 255) == 0) return 0;
+    config: int = msg(cls("UIBackgroundConfiguration"), sel("listPlainHeaderFooterConfiguration"));
+    if (config == 0) return 0;
+    msg1(config, sel("setBackgroundColor:"), c_bg);
+    msg1(header, sel("setBackgroundConfiguration:"), config);
+    0
+}
+
 table_footer_view(
     _self: int,
     _cmd: int,
@@ -3032,10 +3053,119 @@ sheet_disappeared(self: int, cmd: int, animated: int): int {
     0
 }
 
+// ---- iOS 26: a sheet's edges (DESIGN.md §2.9) ----
+// The scroll view a sheet's screen shows its content in: its view, or the
+// first found in it (a text view, the interlinear's, a list in a box).
+content_scroll(view: int, depth: int): int {
+    if (view == 0) return 0;
+    if ((msg1(view, sel("isKindOfClass:"), cls("UIScrollView")) & 255) != 0) return view;
+    if (depth == 0) return 0;
+    subs: int = msg(view, sel("subviews"));
+    n: int = msg(subs, sel("count"));
+    for i in 0..n {
+        f: int = content_scroll(msg1(subs, sel("objectAtIndex:"), i), depth - 1);
+        if (f != 0) return f
+    }
+    0
+}
+
+// A view's top, from its window's: its frame's, up through each view it is
+// in, less each one's scroll.
+window_top(v: int): f64 {
+    y: f64 = 0.0f64;
+    while (v != 0) {
+        l8_msg_hfa(hfa, v, sel("frame"), 0, 0, 0);
+        y = y + hfa[1];
+        up: int = msg(v, sel("superview"));
+        if (up != 0) {
+            l8_msg_hfa(hfa, up, sel("bounds"), 0, 0, 0);
+            y = y - hfa[1]
+        }
+        v = up
+    }
+    y
+}
+
+// A sheet's screen, made ready before it is seen (as it is pushed, as the
+// sheet rises, as its toolbar comes or goes): the bar and the toolbar told
+// which scroll view is under them, so the system's edge effect is drawn
+// there (a text view or a list in a box is not found by itself); on iOS 26,
+// the top edge's effect the hard one, nearly opaque under the title, so no
+// words scrolled up show through it; and its bottom inset at least what
+// the toolbar's floating buttons cover, so the last row scrolls clear of
+// them.
+sheet_edges(vc: int) {
+    if (vc == 0 || !responds(vc, "setContentScrollView:forEdge:")) return;
+    sv: int = content_scroll(msg(vc, sel("view")), 3);
+    if (sv == 0) return;
+    if (msg1(vc, sel("contentScrollViewForEdge:"), 1) != sv) msg2(vc, sel("setContentScrollView:forEdge:"),
+        sv, 1);
+    if (msg1(vc, sel("contentScrollViewForEdge:"), 4) != sv) msg2(vc, sel("setContentScrollView:forEdge:"),
+        sv, 4);
+    if (responds(sv, "topEdgeEffect")) {
+        hard: int = msg(cls("UIScrollEdgeEffectStyle"), sel("hardStyle"));
+        edge: int = msg(sv, sel("topEdgeEffect"));
+        if (hard != 0 && msg(edge, sel("style")) != hard) msg1(edge, sel("setStyle:"),
+            hard)
+    }
+    sheet_nav: int = msg(vc, sel("navigationController"));
+    if (sheet_nav == 0 || (msg(sheet_nav, sel("isToolbarHidden")) & 255) != 0) return;
+    if (msg(sv, sel("window")) == 0) return;
+    bar: int = msg(sheet_nav, sel("toolbar"));
+    if (bar == 0 || view_height(bar) <= 0.0f64) return;
+    covered: f64 = window_top(sv) + view_height(sv) - window_top(bar);
+    if (covered <= 0.0f64 || covered > 160.0f64) return;
+    l8_msg_hfa(hfa, sv, sel("adjustedContentInset"), 0, 0, 0);
+    if (hfa[2] >= covered) return;
+    short: f64 = covered - hfa[2];
+    l8_msg_hfa(hfa, sv, sel("contentInset"), 0, 0, 0);
+    msg_rect(sv, sel("setContentInset:"), hfa[0], hfa[1], hfa[2] + short, hfa[3]);
+    note_num("bible: sheet bottom inset raised by ", short as int)
+}
+
+sheet_top(sheet_nav: int): int {
+    msg(sheet_nav, sel("topViewController"))
+}
+
+sheet_will_appear(self: int, cmd: int, animated: int): int {
+    _r: int = super1(self, sheet_nav_class, cmd, animated);
+    sheet_edges(sheet_top(self));
+    0
+}
+
+sheet_laid_out(self: int, cmd: int): int {
+    super0(self, sheet_nav_class, cmd);
+    sheet_edges(sheet_top(self));
+    0
+}
+
+extern msg_super2(
+    sup: *ObjcSuper,
+    selector: int,
+    a: int,
+    b: int
+): int = objc_msgSendSuper;
+
+sheet_pushed(
+    self: int,
+    cmd: int,
+    vc: int,
+    animated: int
+): int {
+    sup: ObjcSuper = ObjcSuper { receiver: self, super_class: class_getSuperclass(sheet_nav_class) };
+    msg_super2(&sup, cmd, vc, animated);
+    sheet_edges(vc);
+    0
+}
+
 make_sheet_classes() {
     sheet_nav_class = objc_allocateClassPair(cls("UINavigationController"), "L8Sheet",
         0);
     add_method1(sheet_nav_class, sel("viewDidDisappear:"), &sheet_disappeared, "v@:B");
+    add_method1(sheet_nav_class, sel("viewWillAppear:"), &sheet_will_appear, "v@:B");
+    add_method0(sheet_nav_class, sel("viewDidLayoutSubviews"), &sheet_laid_out, "v@:");
+    add_method2(sheet_nav_class, sel("pushViewController:animated:"), &sheet_pushed,
+        "v@:@B");
     objc_registerClassPair(sheet_nav_class);
     books_class = objc_allocateClassPair(cls("UITableViewController"), "L8Books",
         0);
@@ -3064,6 +3194,8 @@ add_sheet_methods(app: int) {
     add_method2(app, sel("tableView:titleForFooterInSection:"), &table_footer, "@@:@q");
     add_method2(app, sel("tableView:viewForHeaderInSection:"), &table_header_view,
         "@@:@q");
+    add_method3(app, sel("tableView:willDisplayHeaderView:forSection:"), &table_will_show_header,
+        "v@:@@q");
     add_method2(app, sel("tableView:viewForFooterInSection:"), &table_footer_view,
         "@@:@q");
     add_method1(app, sel("esvOrg:"), &esv_org, "v@:@");

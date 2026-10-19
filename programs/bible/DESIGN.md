@@ -417,6 +417,38 @@ the ESV and Crossway convention.
 - Theme swatch tapped: selectionChanged.
 - Long jumps (picker, search result): none.
 
+### 2.9 iOS 26 (Liquid Glass): bars, edges and floating controls
+(Added 2026-10-19, after the first CI run on iOS 26.2.) The owner keeps iOS 26's look; these
+rules make the app's layout sit right under its floating glass, with UIKit's own iOS 26 APIs.
+Each is checked with `responds`/`NSClassFromString`, so iOS 16–18 keep their look.
+- **Sheets' top edge** (`sheet_edges`, run by the sheets' navigation controller, `L8Sheet`,
+  as it appears, lays out, or pushes a screen): each screen's scroll view is named to its
+  bars with `setContentScrollView:forEdge:` (top and bottom), so the system's scroll edge
+  effect is drawn there even where the scroll view is not the screen's own view (the
+  passage preview's text view, the Study sheet's segments, the definition, the note).
+  Its `topEdgeEffect` uses `UIScrollEdgeEffectStyle hardStyle`: nearly opaque under the
+  title, so no words scrolled up show through a sheet's title or scope bar (shots 67, 68,
+  110, 122d, 202b). The reader keeps its own bar and its soft top edge (§3.1.4).
+- **Plain lists' headers** (search's "219 verses in the ESV", the concordance's): a
+  background of the page's color (`listPlainHeaderFooterConfiguration`), so pinned under
+  the bar they cover the rows passing under them.
+- **Toolbars' floating buttons** (Open in Reader, ⌃/⌄, Add to Note, Interlinear, Stop
+  Plan, the search field at the bottom): the bottom edge's effect (system, soft) is drawn
+  under them on the screen's scroll view (as above), and `sheet_edges` makes sure the scroll
+  view's bottom inset is at least what the toolbar covers, so the last row scrolls clear
+  (raised only if the system's adjusted inset falls short; the console says so).
+- **Library segments**: Highlights, Notes, Bookmarks sit on a row of their own at the top
+  of the list (the table's header, 16 pt margins, the full width), not in the bar's title,
+  where iOS 26's glass buttons left too little room ("Highlig…", "Bookma…"). The bar's
+  title is "Library", Sort on the left, Done on the right. The highlights' color filter
+  sits under the segments on Highlights. (On every iOS, so all show the same layout.)
+- **Back capsule** (§3.1.6): while it is shown, a `UIScrollEdgeElementContainerInteraction`
+  (edge bottom) on it draws the reader's bottom edge effect under it, as under the system's
+  floating controls; it is let go once the capsule has faded out. The reader's insets never
+  change for it (the text does not move when it comes or goes); instead the table's footer
+  is 60 pt of room (12 + 36 + 12) after Revelation 22, so the very end can scroll clear above
+  it. Anywhere else the text scrolls on under it, as under any floating control.
+
 ---
 
 ## 3. Screens and states
@@ -613,6 +645,8 @@ place before the jump is pushed onto history and a capsule appears:
 - Title "Psalm 23" (the chapter name, plus `:v` when the origin was verse-precise).
 - Tapping it jumps back (and pushes the current place, so you can return).
 - It hides as described in §2.7, and while the tray is visible.
+- (iOS 26, §2.9.) The reader's bottom edge effect is drawn under it while it is shown; 60 pt of
+  room after Revelation 22 lets the end scroll clear of it, with no change of inset.
 
 #### 3.1.7 Reader in verse-per-line mode (setting)
 Each verse starts a new paragraph, with prose paragraphs flattened. The verse number sits
@@ -808,7 +842,8 @@ This is a UINavigationController (page sheet; detents medium and large, starting
 This is a UINavigationController (page sheet; detents medium and large, starting at large;
 grabber). Its root is a run-time UITableViewController subclass, using the insetGrouped
 style.
-- `navigationItem.titleView` = a `UISegmentedControl` ["Highlights", "Notes", "Bookmarks"],
+- (Amended 2026-10-19, §2.9: the segments are on their own row at the top of the list, the
+  bar's title "Library".) `navigationItem.titleView` = a `UISegmentedControl` ["Highlights", "Notes", "Bookmarks"],
   width 300, wired with target-action on `UIControlEventValueChanged` (4096). The
   selected segment is remembered in defaults. Done is on the right.
 - The table sections are **books in canonical order**, with the header showing the book
