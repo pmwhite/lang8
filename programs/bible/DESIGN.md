@@ -5689,3 +5689,32 @@ voice list titled "iPhone Voice"; 191b and 191c), 9 (audio's limits read before 
 a refused request counts for nothing; tested with 900 refusals). Minor 6 (the
 layout-outside-window warning) is left for the §11 ribbons build, which remakes those
 screens, as the review allows; 9b (raḥam) stays for the next data pass.
+
+### 12.11 Owner amendment (2026-10-19): changing narrator or version keeps the verse
+Changing the narrator (Voice) or the version while listening continues from the verse being
+heard, never from the chapter's start:
+- **The verse kept** is the one washed; in a recording without verse timings (a chapter
+  flagged `chapter`, or not yet aligned), it is the verse whose words' share of the chapter
+  matches the player's time (`audio_estimate_verse`).
+- **In the new source** it is found by its timings (its start less 0.3 s, held on screen
+  until reached: review r7-1, Major 2), or, without timings, by its words' share of the
+  recording's length (`audio_estimate_start`), the verse held until the next one's share
+  begins; the iPhone voice begins speaking at it.
+- **Playing stays playing** (only the buffer's moment between them), the wash staying on
+  the verse. **Paused stays paused** at that verse: Play goes on from it, and the lock
+  screen shows the new reader and the time.
+- **A version change** keeps the verse by reference: a verse the new version lacks goes to
+  the nearest before it that it has.
+- Tests: `test_audio` ("a verse kept across sources"); CI: the listen group's 197b
+  (narrator changed while playing, into a chapter without timings: Gilbert's John 3 is
+  left without the fixture's timings for this), 197c (while paused) and 197d (Play), each
+  logging the verse before and after.
+
+**Builder notes (CI stalls, 2026-10-19):** two listen runs stalled (24cb4eda at 195: the
+app's main thread answered no timer for 44 s after the Reading sheet came up while a
+recording played, then went on; 318f2b1b at 201: silent after a download began). Changes:
+the iPhone's voices are read once per screen of voices, not again at every cell whenever
+the list came back empty (the simulator's voice database fails its queries); the demo's,
+downloads' and Listen's own timers run in the run loop's common modes; and a step that
+begins before the last settled logs what was pending and the run loop's mode, so a
+recurrence names its cause.

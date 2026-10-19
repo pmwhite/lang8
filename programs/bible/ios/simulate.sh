@@ -794,6 +794,11 @@ listen)
   step 327 196-faster 6
   step 328 196b-faster-later 6
   step 329 197-next-chapter 12
+  # (A narrator changed mid-chapter, playing and paused: the same verse
+  # kept; owner, 2026-10-19.)
+  step 345 197b-switch-playing 20
+  step 346 197c-switch-paused 8
+  step 347 197d-switch-resumed 8
   step 330 198-offline 8
   step 331 199-esv-chapter 10
   step 332 200-kjv-voice 8
@@ -847,7 +852,8 @@ listen)
   for want in "bible: listen souer JHN 3 from 3:14 at 14.70 s" "bible: listen switched to hays at JHN 3:5" \
       "bible: listen rate 1.25" "bible: chapter heard JHN 3" "bible: listen next JHN 4" \
       "bible: listen fell back to voice at JHN 3:16 (souer: offline)" "bible: esv audio JHN 3 (fixture)" \
-      "bible: book downloaded JHN" "bible: now playing {title: John 3, artist: Bob Souer, album: Berean Standard Bible"; do
+      "bible: book downloaded JHN" "bible: now playing {title: John 3, artist: Bob Souer, album: Berean Standard Bible" \
+      "bible: listen switch from souer to gilbert at JHN 3:8, playing" "to hays at JHN 3:" ", paused"; do
     grep -qF "$want" "$out/listen.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/listen.txt"; failed=1; }
   done
   grep -qF "audio fixture did not advance" "$out/listen.txt" && { echo "FAILED: the fixture did not advance" | tee -a "$out/listen.txt"; failed=1; }
