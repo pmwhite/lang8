@@ -3005,7 +3005,11 @@ calls `scrollToRow…`, or reloads it.**
    - **The checks** (`glide.txt`) add: it lands in John 5; at least one arrival moving and
      visible below the line; at least one moving and above it; a row kept for rest and
      swapped in there; the fixed line at rest compared (failing if there is nothing to
-     compare); and the glide's placeholders within 10% of the filled height. Check 1 is
+     compare); and the glide's placeholders within 10% of the filled height. When the
+     place is inside a placeholder (no verse yet), the line kept, and compared, is the
+     row's top (the opener's offset in text that has not come means nothing); and the
+     rest's swap runs once at a time (a jump's own end of scrolling had run it again
+     inside itself). Check 1 is
      now "offset write while moving", which `go` and `set_offset` log when they refuse
      (below), counted over every group's run (`moving.txt`).
 9. **One guard for every writer** (review r5-1): `go`, `set_offset` and the new
