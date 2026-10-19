@@ -25,7 +25,7 @@ bottom. Every symbol is one of two physical things:
 | Surface | Look | Gesture | Meaning |
 |---|---|---|---|
 | **Key** | a raised, pudgy keycap on a statement's outermost symbol | tap it | open it: always safe |
-| **Notch** | a hollow socket where the binder's name was, after the binder | drop a name into it | I choose this one |
+| **Notch** | a hollow socket where the binder's name was, after the binder | tap a name and the notch (either first), or drop a name into it | I choose this one |
 
 | Symbol | On the goal | On a fact |
 |---|---|---|
@@ -41,19 +41,40 @@ are opened show as dimmed rims (pressed in), so the plan is in sight.
 A binder's name is the one the level wrote (`∀y. P(y)`, a `y` token), so
 the difference between names is the lesson (*drop y into x*).
 
-Drags (pick up a whole card, a name, or a tile's face; the thing rides
-above the finger):
+Two things brought together: **two taps, in either order** (the main
+way), or a drag. The first tapped is held: it lifts a little where it is,
+its edge drawn in quiet grey (a name ringed; a fact card, a tile's face,
+a kit tile, a fact's notch, or a part of the goal outlined). Tapping its
+partner makes the move, with the same morph a drop makes: tap the part
+`e · a`, then the `e · □` face, or the face, then the part; tap y, then
+the notch, or the notch, then y. Tapping the held thing again, or nothing,
+lets it go; tapping another of the same sort (another name, another face,
+another place) moves the hold to it; a partner that does not fit leaves
+the first held (the second time, the grey words say why). Nothing lights
+up to list what fits. On the goal a tap holds the deepest part under the
+finger; tapped again inside it, the part round it; from the whole goal
+(its edge, or its notch), it lets go. A face tapped second goes onto the
+deepest part it fits under the finger. While the partner is pressed, a
+card shows what the move would make (*The goal becomes ...*, *A new
+fact*, *That shows the goal*, *Then a name for its slot*) where the
+finger is not: over the board's top, or over the shelf when the finger is
+high; the move is made as the finger comes up. Keys are single taps and
+open at once; the swipe and Suppose not are drags. A drag picks up a
+whole card, a name, or a tile's face, which rides well above the
+fingertip; the same card shows what it would make, and the goal stays as
+it is under the finger (the part a face would change tinted).
 
 - **A fact onto the goal**: the same, it closes; one whose conclusion
   fits (`P ⟶ Q` onto `Q`, a for-all fact, `¬P` onto anything) leaves
   what it still needs; one that needs a name leaves a socket on the goal,
-  *Drop a name into the slot*, filled by dropping or tapping a name.
+  *Drop a name into the slot*, filled by tapping a name (or the goal
+  and then a name, or dropping one).
 - **A name into a notch** (the whole card counts as its notch).
 - **An equation's face onto a part of the goal: like on like.** Rules
   (the rulebook), proved lemmas that are equations, and equation facts
-  are two-faced tiles with a seam (a notch in each edge). Grip one face,
-  drop it on a part that looks like it, and the part becomes the other
-  face: the `□` face of `e · □ = □` onto `b` gives `e · b`; the `e` face
+  are two-faced tiles with a seam (a notch in each edge). Tap one face
+  and a part that looks like it (or drag the face there), and the part
+  becomes the other face: the `□` face of `e · □ = □` onto `b` gives `e · b`; the `e` face
   of `□⁻¹ · □ = e` onto `e` gives `□⁻¹ · □` with a socket (ringed
   orange) for the name. Rule variables are grey hollow slots, never letters. A for-all
   equation fact (`∀x. f · x = x`) is gripped the same way: its face
@@ -67,20 +88,16 @@ above the finger):
   up into the facts**: Suppose not; over the facts it shows as its
   opposite.
 
-Held over a place it fits, the place leans toward it and shows what it
-would become, morphing glyph by glyph as a move does (what stays slides,
-what goes fades before what comes swells in; the changed part tinted; a
-small check when it would close the goal). The goal's parts show as faint
-blocks only while a face is held. A name held over a fact's notch leaves
-the general fact as it is: the new fact it would give slides out under
-it as a card of its own, with a plus. In Someone for everyone the grid
-follows: the row lights only once x is got from the fact, the cell (x, y)
-is ringed when the goal asks for it, (y, y) soft red. The picture follows
-a thing held in the other chapters too: in Groups the tiles take the
-shape the held face would give (a new `e` tile, a regrouping), the new
-ones faint (would be, not is), and spring back; in Limits a name over a
-fact's notch brings the band it would give in faint, and N over the
-goal's notch slides the goal's gate to N.
+Held over a place it fits (or a partner pressed), the place leans toward
+it and the card over the board shows what it would become; the goal's
+parts show as faint blocks only while a face is dragged. In Someone for
+everyone the grid follows: the row lights only once x is got from the
+fact, the cell (x, y) is ringed when the goal asks for it, (y, y) soft
+red. The picture follows the other chapters too: in Groups the tiles take
+the shape the face would give (a new `e` tile, a regrouping), the new ones
+faint (would be, not is), and spring back; in Limits a name over a fact's
+notch brings the band it would give in faint, and N over the goal's notch
+slides the goal's gate to N.
 Let go elsewhere, it slides gently home; no shake, no sound. The same
 refusal twice says why in small grey words (*Doesn't match*, *Not a name
 here*, *That needs a name, not a statement*; a fact with an if or a
@@ -92,9 +109,7 @@ time. The words sit over the goal's top edge, right of SHOW (under a fact
 for a fact). A card lifted leaves an empty dent where it was, none of its
 writing behind. A name dropped on a statement whose key is still shut,
 or a fact dropped on the goal that would fit once its key is opened,
-says *Open it first* at once. A tap on a thing that moves (a fact, a
-name) leans it toward where it fits and back: not a menu, the object
-showing that it moves. While a thing is held, the places it fits have a
+says *Open it first* at once. While a thing is dragged, the places it fits have a
 soft edge (in Logic at once; from Groups on, once it has been held still
 1.2 s). Nothing breathes, pulses or hops; there are no sounds or buzzes.
 
@@ -107,14 +122,14 @@ and the halves part into two cards (two goals, or two facts), each with
 its writing. The shelf always keeps room for a row of names (an empty
 tray, faint), so the board never moves because a name arrived.
 
-Each key tap or drop is a move (counted, kept in the progress file, not
+Each key tap, drop or second tap is a move (counted, kept in the progress file, not
 shown; a level's `par:` bounds the dead-end search); a socket's name, kit
 building and the game's own closes are free. There is no score. A level's
 `demo:` (key, goalkey, drag, token, notch, some; face, flip; def, kit,
 suppose) is performed once by the ghost hand the first time the level
 is played: the book's first gestures made by a puppet finger (the key
-tapped and the name going to the shelf, the name carried into its notch
-with the preview) and taken back, twice, with one small grey line of
+tapped and the name going to the shelf, the name tapped and then its
+notch, held down a moment so what it makes shows) and taken back, twice, with one small grey line of
 words; a gesture that would finish the level is only shown. A touch
 stops it.
 
@@ -126,9 +141,10 @@ once a level that brings it in (or a later one in its chapter) is solved,
 so older progress has its words: the symbol on the goal and on a fact,
 each gesture played over and over by a little finger (`words.l8`).
 
-The bulb's ghost hand performs the book's next gesture (taps the key or
-carries the thing to its place); off the book's path it says *Undo k*.
-Held, the bulb plays the whole proof as ghost-hand gestures (Watch),
+The bulb's ghost hand performs the book's next gesture (taps the key, or
+taps the thing, a grey ring left round it, then its place); off the book's path it says *Undo k*.
+Held, the bulb plays the whole proof as ghost-hand gestures, two taps
+each (Watch),
 then says *Your turn*. A dead end: in Logic, after each move off the
 book's path, a bounded search with the same gestures (keys opened first,
 names from the shelf) decides whether the goal can still be shown; if it
@@ -204,13 +220,15 @@ lit, for some one only theirs.
   | `fact K face L > part "T"` | an equation fact's face onto a part |
   | `lemma K > goal` | the K-th lemma tile onto the goal |
   | `flip`, `suppose` | the goal swiped; dragged up into the facts |
-  | `tap fact K`, `tap token N` | a tap (the thing leans toward where it fits) |
+  | `tap token N`, `tap fact K [face L]`, `tap rule K face L`, `tap lemma K`, `tap kit K` | a tap on a thing (held, or the held one's partner: the move) |
+  | `tap part "T"`, `tap goal`, `tap notch goal`, `tap notch fact K` | a tap on a place: the goal's part shown as T (on it, not on a part inside it), the whole goal (by its edge), a notch |
   | `undo`, `hint`, `enter`, `wait` | as the keys |
 
   Each step starts `L8_DO_GAP` hundredths (default 90) after the last
   ends; carries take `L8_DO_MS` (600). `L8_DO_STOP=k` holds step k (from
-  1) over its place and stops there (the preview). A script's gesture is
-  the player's: a demo playing stops.
+  1) over its place and stops there (the preview; for a tap, the finger
+  stays down: what the move would make shows). A script's gesture is the
+  player's: a demo playing stops.
 - `L8_BOXES=1` prints the board after the title card and after each move
   settles: the goal, its parts, each fact (by number), keys, notches and
   seams, the names on the shelf, the kit, rule and lemma tiles (by item),
@@ -226,6 +244,17 @@ lit, for some one only theirs.
   book's next; on a dead end, Undo k), `1` Undo k on a dead end, `u`
   undo (or cancels a socket), `w` watch, `esc` back. `h;enter` once per
   par move follows the book to the end, in every chapter.
+
+By taps, either order (Nothing changes; Someone for everyone with its
+trap, dead end and undo; a face that wants a name; a kit tile; a press):
+
+```sh
+L8_LEVEL=11 L8_DO='tap rule 2 face 0; tap part "(e · a) · e"; tap part "e · a"; tap rule 1 face 0' .build/lemma
+L8_LEVEL=10 L8_DO='open goal; tap token y; tap notch goal; wait; undo; open fact 0; tap notch goal; tap token x; tap token y; tap fact 0' .build/lemma
+L8_LEVEL=14 L8_DO='tap rule 1 face 1; tap part "b"; tap part "e"; tap rule 3 face 1; tap token a' .build/lemma
+L8_LEVEL=21 L8_DO='open goal; open goal; open fact 0; tap token ε; tap kit 0; tap fact 0; tap token "ε / 2"' .build/lemma
+L8_LEVEL=11 L8_DO='tap rule 2 face 0; tap part "(e · a) · e"' L8_DO_STOP=2 .build/lemma   # pressed: The goal becomes e · a = a
+```
 
 Someone for everyone: the trap, its dead end, and the way:
 
@@ -266,7 +295,7 @@ L8_LEVEL=22 L8_DO_GAP=40 L8_DO="$(for i in $(seq 8); do printf 'hint;enter;'; do
 ```
 
 A name dropped on the fact whose ∃ key is still shut (*Open it first*),
-the new fact a notch would give previewed under the general one, a key's
+the new fact a notch would give on the card over the board, a key's
 name going to the shelf, and the Book's words (a progress file with
 `seen word_and` ... lines):
 
@@ -335,7 +364,7 @@ grep -v '^seen' .build/lemma-progress.txt > /tmp/p.txt; L8_LEVEL=6 .build/lemma 
   that morph on springs; a notch's room in the layout; rule variables as
   hollow slots), `board.l8` (the board as a language: keys, notches, the
   shelf of names, kit, rule and lemma tiles, holding and dropping,
-  previews, sockets, refusals, nudges, the swipe, dead ends, the puppet
+  previews, two taps, sockets, refusals, the swipe, dead ends, the puppet
   finger and ghost hand for hints, Watch and demos, `L8_BOXES`),
   `trial.l8` (what a move made, read off the proof for staging; facts in
   play; Limits' dead ends), `app.l8` (state, moves, demos, Watch),
@@ -360,7 +389,7 @@ to `region_files` in `app.l8` and `FILES` in `web/lemma/lemma.js`. A
 ## Not built yet
 
 A fact onto a fact (forward); in Groups
-tiles a preview would take away vanish rather than ghost; a magnified preview clear of the thumb; long-pressing a part to
+tiles a preview would take away vanish rather than ghost; long-pressing a part to
 pull out a copy; ∨; keyboard navigation of keys and tiles.
 
 The Foundations region (constructing ℕ, ℤ, ℚ, ℝ and proving each
