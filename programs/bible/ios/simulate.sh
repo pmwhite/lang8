@@ -678,6 +678,10 @@ ribbons)
   # The screen recording of sequence 13.
   # (Sequence 13's setup, before the mark: review r6-1.)
   step 342 "" 10
+  # (The video's time 0 is the recorder's launch, not its "started",
+  # which comes some 4.7 s later: the marks are from the launch; review
+  # r8-1.)
+  rec0=$(now)
   xcrun simctl io "$dev" recordVideo --codec h264 --force "$out/transitions.mp4" > "$out/record.txt" 2>&1 &
   recorder=$!
   i=0
@@ -685,7 +689,6 @@ ribbons)
     sleep 0.05
     i=$((i + 1))
   done
-  rec0=$(now)
   # (A still lead-in: the recorder writes nothing for its first seconds;
   # review r8-1.)
   sleep 6
@@ -754,6 +757,10 @@ listen)
   ui content_size large
   # The screen recording of sequence 14.
   step 339 "" 6
+  # (The video's time 0 is the recorder's launch, not its "started",
+  # which comes some 4.7 s later: the marks are from the launch; review
+  # r8-1.)
+  rec0=$(now)
   xcrun simctl io "$dev" recordVideo --codec h264 --force "$out/transitions.mp4" > "$out/record.txt" 2>&1 &
   recorder=$!
   i=0
@@ -761,7 +768,6 @@ listen)
     sleep 0.05
     i=$((i + 1))
   done
-  rec0=$(now)
   # (A still lead-in: the recorder writes nothing for its first seconds;
   # review r8-1.)
   sleep 6
