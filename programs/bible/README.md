@@ -165,9 +165,11 @@ workflow's header):
   (`tools/ios/artifact.py`), builds `SmoothBible.app` for all of them, then
   the IPA (pushed to `ci-bible-ipa`); the others boot a simulator meanwhile
   (a first boot takes about three minutes) and take the app. Each runs two
-  groups one after another, each on a simulator of its own (the second
-  booting during the first group), each uploaded (`shots-GROUP`) as it
-  ends. The groups are paired by their times (`timing.txt`'s `total`) so
+  groups one after another, each on a simulator of its own (the second a
+  copy, `simctl clone`, of the first once booted and before it is used: a
+  copy boots in seconds), each uploaded (`shots-GROUP`) as it ends. actool's
+  output is cached (`ACTOOL_CACHE`), since it alone took most of the
+  build. The groups are paired by their times (`timing.txt`'s `total`) so
   the jobs end together: rebalance the workflow's matrix when a group
   grows.
 - `frames` (Linux) makes the notes recording's frames as soon as the notes

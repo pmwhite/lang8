@@ -79,17 +79,39 @@ if [ -f "$dir/AppIcon-dark.png" ] && [ -f "$dir/AppIcon-tinted.png" ]; then
 JSON
 fi
 actool() {
-  xcrun actool --compile "$app" --platform "$sdk" --minimum-deployment-target 16.0 \
+  rm -rf "$out/actool-out"
+  mkdir -p "$out/actool-out"
+  xcrun actool --compile "$out/actool-out" --platform "$sdk" --minimum-deployment-target 16.0 \
     --target-device iphone --app-icon AppIcon $accent --output-partial-info-plist "$out/icon.plist" \
     "$out/Assets.xcassets" > "$out/actool.txt" 2>&1
 }
-if ! actool; then
-  cat "$out/actool.txt"
-  echo "actool could not compile the icon's appearances; the light icon alone"
-  rm -f "$icons/icon-dark.png" "$icons/icon-tinted.png"
-  echo "$light_json" > "$icons/Contents.json"
-  actool || { cat "$out/actool.txt"; exit 1; }
+# (actool takes a minute and more on a fresh Mac. With $ACTOOL_CACHE, what
+# it made is kept there, by its inputs and Xcode's version, and used again.)
+cached=
+if [ -n "${ACTOOL_CACHE:-}" ]; then
+  key=$( { echo "$sdk $accent"; xcodebuild -version; (cd "$out/Assets.xcassets" && find . -type f | sort | xargs shasum); } | shasum | cut -c1-20)
+  cached="$ACTOOL_CACHE/$key"
 fi
+if [ -n "$cached" ] && [ -f "$cached/icon.plist" ]; then
+  echo "actool: kept output $key"
+  rm -rf "$out/actool-out"
+  cp -R "$cached/out" "$out/actool-out"
+  cp "$cached/icon.plist" "$cached/actool.txt" "$out/"
+else
+  if ! actool; then
+    cat "$out/actool.txt"
+    echo "actool could not compile the icon's appearances; the light icon alone"
+    rm -f "$icons/icon-dark.png" "$icons/icon-tinted.png"
+    echo "$light_json" > "$icons/Contents.json"
+    actool || { cat "$out/actool.txt"; exit 1; }
+  fi
+  if [ -n "$cached" ]; then
+    rm -rf "$cached" && mkdir -p "$cached"
+    cp -R "$out/actool-out" "$cached/out"
+    cp "$out/icon.plist" "$out/actool.txt" "$cached/"
+  fi
+fi
+cp -R "$out/actool-out/." "$app/"
 lap "actool"
 grep -i "warning\|error" "$out/actool.txt" || true
 # What actool put in the catalog: the icon's entries, and the appearances
