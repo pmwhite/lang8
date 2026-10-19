@@ -5536,7 +5536,7 @@ paragraph is published with it.
 12. **The preview's fade** steps the player's volume down at 20 Hz over the last 0.5 s
    (the audio mix's ramp takes a CMTimeRange; this is simpler and sounds the same).
 13. **The fixture's network is always up:** in `offline` mode its items fail, so the
-   fallback itself is exercised (198); in `slow` mode an item is queued after 3.5 s (2 s, as §12.7 had it, was over before the screenshot after the settling).
+   fallback itself is exercised (198); in `slow` mode an item is queued after 6 s (2 s, as §12.7 had it, was over before the screenshot, which comes some seconds after the settling).
    Every CI group has the audio fixture (so 80 reads "Bob Souer", and nothing is fetched
    from openbible.com in CI); `listen` also has the ESV's.
 14. **Reachability** reads `SCNetworkReachabilityGetFlags` synchronously, linking
