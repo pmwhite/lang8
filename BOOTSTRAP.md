@@ -63,7 +63,7 @@ l8 as [-p|--profile] -o file.o file.s runtime.s
 l8 elfpack file.o -o file
 l8 build [--profile|-p] [--unchecked-index] file.l8 -o file
 l8 wasm [--profile|-p] [--unchecked-index] [--async import]... file.l8 -o file.wasm
-l8 arm64 [--target linux|ios|ios-sim] [--unchecked-index] [--exe [--framework NAME]... [--imports FILE]] file.l8 -o file
+l8 arm64 [--target linux|ios|ios-sim] [--unchecked-index] [--exe [--framework NAME]... [--imports FILE] [--sdk X.Y]] file.l8 -o file
 l8 test [--accept] [--wasm] [--arm64] [--unchecked-index] [-j N] file.l8|file.t ...
 ```
 

@@ -9,7 +9,7 @@
   macho.py check EXE       checks the code signature's page hashes (and the
                            fixup chains' shape); exits 1 if one is wrong
 
-The L8 compiler's Mach-O writer (src2/macho.l8) is checked with it, and the
+The L8 compiler's Mach-O writer (src2/a64link.l8) is checked with it, and the
 symbol table of imports (tools/ios/imports.txt) was first made with it from
 an executable Apple's linker made.
 """
