@@ -741,9 +741,21 @@ ribbons)
   # Twelve ribbons, logged only: the footer, New Ribbon… and the menu's
   # item disabled; then one deleted (review r8-1).
   step 315 "" 10
+  # The ribbon's glyph, before and after; the carried ribbon by the title
+  # at Song of Solomon 8, expanded and compact, at the default and the
+  # largest text, then put down (owner, 2026-10-19).
+  step 316 183-glyph-before-after 6
+  step 350 184-carried-long-title 10
+  step 351 185-carried-compact 6
+  ui content_size accessibility-extra-extra-extra-large
+  step 352 186-carried-ax 6
+  step 353 187-carried-ax-compact 6
+  step 354 188-not-carried-ax-compact 6
+  step 355 189-not-carried-ax 6
+  ui content_size large
   # The walk, from the log: each make, pick-up, move, put-down, move-here,
   # rename, delete and the migration (§11.6); nothing moved while put down.
-  grep -h "bible: limit\|bible: ribbon\|bible: readings\|bible: chapter read\|bible: chapter heard\|bible: title menu\|bible: toast\|bible: plan\|bible: demo step\|table off the window" \
+  grep -h "bible: limit\|bible: ribbon\|bible: readings\|bible: chapter read\|bible: chapter heard\|bible: title\|bible: toast\|bible: plan\|bible: demo step\|table off the window" \
     "$out/console.txt" > "$out/ribbons.txt" 2>/dev/null
   for want in "ribbons migrated 3 of 4" "readings-r6.tsv there 1" "New Ribbon Here… · Mark 1 / Move Ribbon Here: Romans, Acts, John" \
       "ribbon made: Morning at MRK 1" "ribbon picked up: Morning" "toast Reading with Morning" \
@@ -755,7 +767,7 @@ ribbons)
       "ribbon moved here: Romans to ROM 8" "toast Reading with Romans" "ribbon renamed: Morning to With Anna" \
       "ribbon deleted: John" "ribbon made: Jude at JUD 1" "toast Reading with Jude" "ribbon put down: Jude at JUD 1" \
       "toast Started Hebrews, a Chapter a Day" "limit at 12: ribbons 12, footer 12 ribbons is the most., New Ribbon… enabled 0" \
-      " (disabled) / Move Ribbon Here" "limit after a delete: ribbons 11, footer none, New Ribbon… enabled 1"; do
+      " (disabled) / Move Ribbon Here" "title ribbon shown 1" "title ribbon shown 0" "title Song of Solomon 8, ribbon shown 1" "limit after a delete: ribbons 11, footer none, New Ribbon… enabled 1"; do
     grep -qF "$want" "$out/ribbons.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/ribbons.txt"; failed=1; }
   done
   for bad in "ribbon moved: Acts to ACT 11:5" "ribbon made: Psalms" "ribbon moved: Morning to 1CO" "ribbon moved: Morning to ISA"; do

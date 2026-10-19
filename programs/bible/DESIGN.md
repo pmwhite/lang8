@@ -4371,7 +4371,21 @@ and whenever ribbons change). Its contents:
   - The title's `accessibilityValue` is "Reading with Morning" while carried.
   - Custom actions: **New Ribbon Here**, plus **Leave Morning Here** while carried.
     (Move Ribbon Here is in Go To for VoiceOver users: open the ribbon.)
-- **Nothing else changes in the reader:** no button, badge, glyph or tray action.
+- **Nothing else changes in the reader:** no button, badge or tray action. (Owner
+  amendment 2026-10-19: one exception, the carried ribbon's glyph by the title, below.)
+- **Owner amendment 2026-10-19: the carried ribbon by the title.** This answers §11.8
+  question 1 the way its fallback offered, so carrying can be seen without long-pressing
+  the title.
+  - While a ribbon is carried, the ribbon glyph (§11.2.6, 15 pt, accent) sits just left of
+    the bar title's name, 5 pt from it and vertically centered. It's in the title's view,
+    so it scales and fades with the title as the bar collapses into the compact band.
+  - It fades in on pickup and out on put-down (0.2 s; at once with Reduce Motion).
+  - The bar shows no name: it stays quiet. The long-press menu is unchanged. The title's
+    VoiceOver value is "Reading with Morning", as before.
+  - The title stays centered. Only when a long name ("Song of Solomon 8") leaves no room
+    does the title move right, just as far as the glyph needs, and its name is cut at its
+    end if it must be. The title doesn't grow past the Large text size, so the largest
+    text size changes nothing here (shots 184–189).
 
 #### 11.2.3 New Ribbon
 A run-time UITableViewController, insetGrouped, with the inline title **"New Ribbon"**. Its
@@ -4449,18 +4463,21 @@ SF Symbols has no ribbon marker, and `bookmark` is taken by the Library and vers
 bookmarks, so the ribbon is a **template image drawn once in code** with `UIBezierPath`
 inside `UIGraphicsBeginImageContextWithOptions` (as `ios_look.l8` already does), with
 `imageWithRenderingMode:` AlwaysTemplate so it takes the tint.
-- **Shape:**
-  - A narrow strip, 0.32 of its height wide, filled, with a short straight top.
-  - It falls with one gentle S-curve, its centerline offset by ±0.06 of the height.
-  - It ends in a **swallowtail fork**: a V cut 0.22 of the height deep.
-- **Sizes:** drawn at 17 × 17 pt (rows, menus, the toast) at the screen's scale, with the
-  strip centered.
-- **The test:** beside `bookmark.fill` it must read as a different thing at a glance:
-  narrower, longer, curved, forked.
+- **Shape (owner amendment 2026-10-19, replacing the curved, forked strip, which read
+  too much like the bookmark and was too detailed):**
+  - **One straight, narrow, vertical strip**, 0.2 of its height wide (about a third of
+    `bookmark.fill`'s width), filled, from 0.06 to 0.94 of the height.
+  - A **small V notch** at its foot, 0.16 of the height deep.
+  - No curve, no fork, no shading. It's drawn in the ribbon's tint.
+- **Sizes:** drawn at the size it is shown, at the screen's scale, with the strip centered:
+  the body text's size in Go To's rows, 17 pt in menus, 15 pt by the title, and 13 pt in
+  the toast.
+- **The test:** at small sizes it reads as "a thin ribbon", not "a bookmark". Shot 183
+  shows round 8's glyph and this one at 13, 17 and 28 pt, each beside `bookmark.fill`.
 - Add to §2.6's table: "Ribbon (Go To rows, title menu, toast): the ribbon glyph (drawn,
   template)".
 
-### 11.3 Plans, on their own list
+### 11.3 Plans, on their own list### 11.3 Plans, on their own list
 
 #### 11.3.1 Go To: the Reading Plan section
 The second section, under Ribbons:
@@ -4768,6 +4785,14 @@ Where the build differs from the text above, or settles what it left open, and w
 17. The Begin At choosers are shared by New Ribbon's Place and A Chapter a Day's Begin At
     (`bg_*` in `ios_ribbons.l8`); the grid in choose mode is a plain
     `UICollectionViewController`, its toolbar gone with Start Reading.
+17b. **Owner amendments 2026-10-19 (after review r8-1):** the glyph is now a straight,
+    narrow strip with a V notch (§11.2.6). The carried ribbon's glyph sits by the title
+    (§11.2.2). The `ribbons` group adds 183 (the glyph before and after, a card the demo
+    draws over the reader with round 8's drawing kept in the demo for it) and 184–189 (Song
+    of Solomon 8 with Romans carried, expanded and compact, at the default and the
+    largest text, then Leave Here, the glyph faded out). The log has "title ribbon shown
+    1/0" and the glyph's and title's places ("bible: title Song of Solomon 8, ribbon
+    shown 1, glyph x …, title x … w …").
 18. **The `more` group's 70-history** had shown Start Reading since Round 6: its step chose
     Go To's section 0 as Recent's. It now chooses Recent's own section (after Ribbons and
     Reading Plan), so History shows again.
