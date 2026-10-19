@@ -19,33 +19,18 @@
 //
 // The log: Better writes /log.txt after each change, and /live.txt (a
 // recording under way) every few seconds. Both are kept in this browser
-// (IndexedDB, store.js), and, once signed in, the log is also kept by the
-// log's worker (../better-log/worker.js), the same on every device signed
-// in to the account and only there. Logs changed in two places are put
-// together (each activity is kept once; one deleted in either stays
-// deleted). A recording under way is kept in this browser only.
-//
-// Signing in: Better asks the worker itself (programs/better/people.l8),
-// by way of this page: it says L8HTTP METHOD PATH with the body in
-// /http.txt, and is told the answer's status (14) once it is in
-// /http-answer.txt (with this device's token). A code signed in with gives
-// a token, which Better passes on (L8ME TOKEN) to be kept here and the log
-// kept with (L8ME -: forgotten, with the log); and whose account it is
-// (L8ACCOUNT ID ADMIN NAME), kept here and said back to Better when it
-// starts (account ...). A link with a code (#c=CODE) is taken out of the
-// address at once and passed on (code CODE), for Better to look at and
-// ask a tap to use; a personal link (#me=SECRET, from before codes) still
-// signs in. Better says L8SHARE TEXT (\n a new line) to send something:
-// the phone's share sheet, or the clipboard (13: 1 shared or closed, 2
-// copied, 0 neither).
+// (IndexedDB, store.js), and, with a personal link (#me=SECRET), the log
+// is also kept by the log's worker (../better-log/worker.js), the same on
+// every device with the link and only there. Logs changed in two places
+// are put together (each activity is kept once; one deleted in either
+// stays deleted). A recording under way is kept in this browser only.
 //
 // Better is told how the log is kept (11): on this device only (0), saved
 // (1), being saved (2), offline (3), or on this device only because its
-// token is not one the worker knows (4, signed out elsewhere); that a newer
-// log is in its file (10); whether the phone is set dark (12, and L8_DARK
-// to begin with); and that the page is looked at again (15). Light or dark
-// as picked on this device is kept here (L8_THEME to begin with; Better
-// says L8THEME PICK light|dark when it changes).
+// link is not one the worker knows (4); that a newer log is in its file
+// (10); and whether the phone is set dark (12, and L8_DARK to begin
+// with). Light or dark as picked on this device is kept here (L8_THEME to
+// begin with; Better says L8THEME PICK light|dark when it changes).
 //
 // Each sport's goal pace and whether chimes are wanted are kept here too
 // (Better says L8GOALS RUN RIDE WALK CUES when they change: mm a second,
@@ -53,20 +38,17 @@
 // says L8CUE K for a chime to be played (1 faster, 2 ease off, 3 back on
 // it: see chime below).
 //
-// The fields are drawn by Better, but a phone's keyboard comes up only
+// The name field is drawn by Better, but a phone's keyboard comes up only
 // for a real text field touched by a finger: so Better says where its field
 // is and what is written in it (L8FIELD x0 y0 x1 y1 TEXT, in CSS pixels
-// from the canvas's corner, or L8FIELD -), and what kind it is before
-// (L8FIELDKIND code|name|plain), and an unseen <input> is laid over it.
-// What is typed there goes to Better as keys; it says L8BLUR when it is
-// done with it.
+// from the canvas's corner, or L8FIELD -), and an unseen <input> is laid
+// over it. What is typed there goes to Better as keys; it says L8BLUR when
+// it is done with it.
 //
 // ?fresh starts with an empty log (kept nowhere); ?api=URL uses another
 // worker; ?sim=K records a made-up course K times as fast as the clock
-// (no location asked for); ?people=demo (or many, alone, offline) makes up
-// an account and friends, with no worker (nothing is kept or sent). Keys
-// from the page are 1000000000 + 1000 * what + number (see page_says in
-// app.l8).
+// (no location asked for). Keys from the page are
+// 1000000000 + 1000 * what + number (see page_says in app.l8).
 import { instantiate, runResumable, MemFS } from "../l8-runtime.js";
 import { createPlatform } from "../game/platform.js";
 import { kept, keptBefore } from "./store.js";
@@ -74,8 +56,6 @@ import { kept, keptBefore } from "./store.js";
 const LOG = "/log.txt";
 const LIVE = "/live.txt";
 const INBOX = "/inbox.txt";
-const ASKED = "/http.txt";
-const ANSWER = "/http-answer.txt";
 const $ = (id) => document.getElementById(id);
 const canvas = $("screen");
 const input = $("type");
@@ -113,39 +93,17 @@ async function moveOver() {
   localStorage.setItem("better:moved", "1");
 }
 
-// A code in the address (#c=CODE): taken out of it at once, so that it is
-// not left there or in the history.
-function codeInLink() {
-  const hash = new URLSearchParams(location.hash.slice(1));
-  const code = hash.get("c");
-  if (code === null) return null;
-  hash.delete("c");
-  const rest = hash.toString();
-  history.replaceState(null, "", location.pathname + location.search + (rest ? `#${rest}` : ""));
-  return code.replace(/[^A-Za-z0-9]/g, "");
-}
-
-// Whose account it is, as Better is told it.
-const accountLine = (a) => `account ${a?.id || "-"} ${a?.admin ? 1 : 0} ${a?.name || ""}`;
-
 async function main() {
   const params = new URLSearchParams(location.search);
-  const people = params.get("people") ?? params.get("L8_PEOPLE");
   const fresh = params.has("fresh");
   const sim = Number(params.get("sim") || 0);
-  const code = codeInLink();
   const modulePromise = WebAssembly.compileStreaming(fetch("better.wasm"));
-  // (A made-up account: nothing kept, or sent.)
-  sync.fresh = fresh || people !== null;
-  if (!fresh && people === null) await moveOver();
-  const log = fresh ? "" : people !== null ? (await kept.get("log")) || "" : await startLog(params);
+  sync.fresh = fresh;
+  if (!fresh) await moveOver();
+  const log = fresh ? "" : await startLog(params);
   const live = fresh ? "" : (await kept.get("live")) || "";
   const module = await modulePromise;
-  let inbox = nowLine() + "\n";
-  if (people !== null) inbox += `people ${people}\n`;
-  else if (sync.secret) inbox += accountLine(await kept.get("account")) + "\n";
-  if (code) inbox += `code ${code}\n`;
-  const fs = new MemFS({ [LOG]: log, [LIVE]: live, [INBOX]: inbox });
+  const fs = new MemFS({ [LOG]: log, [LIVE]: live, [INBOX]: nowLine() + "\n" });
   let platform = null;
   let pending = "";
   fs.onOutput = (_fd, data) => {
@@ -155,12 +113,6 @@ async function main() {
     for (const line of lines) {
       const [word, arg] = line.split(" ");
       if (word === "L8FIELD") placeField(line.split(" ").slice(1));
-      else if (word === "L8FIELDKIND") fieldKind(arg);
-      // (A made-up account asks nothing, and keeps nothing.)
-      else if (word === "L8HTTP") people === null && ask(arg, line.split(" ")[2]);
-      else if (word === "L8ME") people === null && signedIn(arg);
-      else if (word === "L8ACCOUNT") people === null && keepAccount(line.split(" "));
-      else if (word === "L8SHARE") share(line.slice(8).replace(/\\(n|\\)/g, (_, c) => (c === "n" ? "\n" : "\\")));
       else if (word === "L8BLUR") input.blur();
       else if (word === "L8GPSRETRY") gps.retry();
       else if (word === "L8GPS") gps.want(arg === "1" && !sim);
@@ -177,7 +129,7 @@ async function main() {
     const file = fs.fds.get(fd);
     const status = close(fd);
     if (file?.writable && file.path === LOG) saved(decoder.decode(fs.readFile(LOG)));
-    if (file?.writable && file.path === LIVE && !sync.fresh) {
+    if (file?.writable && file.path === LIVE && !fresh) {
       const text = decoder.decode(fs.readFile(LIVE));
       if (text) kept.set("live", text);
       else kept.remove("live");
@@ -216,83 +168,6 @@ async function main() {
   };
   gps.post = post;
   sync.send = send;
-  sync.post = post;
-  if (people !== null) window.betterPost = post;
-  // (Another link with a code, while open.)
-  addEventListener("hashchange", () => {
-    const more = codeInLink();
-    if (more) post(`code ${more}`);
-  });
-
-  // Better's requests to the worker (see people.l8): the answer written for
-  // it, and its status said (0: none came).
-  async function ask(method, path) {
-    let status = 0;
-    let text = "";
-    try {
-      const body = method === "POST" ? decoder.decode(fs.readFile(ASKED)) : undefined;
-      const r = await fetch(sync.api + path, {
-        method,
-        headers: { ...(sync.secret ? { authorization: `Bearer ${sync.secret}` } : {}), ...(body ? { "content-type": "application/json" } : {}) },
-        body: body || undefined,
-        signal: AbortSignal.timeout(15000),
-      });
-      status = r.status;
-      text = await r.text();
-      // (Not known any more: signed out elsewhere. What is here waits for
-      // the next sign in.)
-      if (status === 401 && !path.startsWith("/code/") && path !== "/signout") {
-        sync.unknown = true;
-        await kept.set("dirty", true);
-        sync.set(4);
-      }
-    } catch (e) {
-      console.warn(e);
-    }
-    fs.writeFile(ANSWER, text);
-    send(14, status);
-  }
-
-  // The keyboard for the field Better is about to say is there.
-  function fieldKind(kind) {
-    const attrs = {
-      code: { autocapitalize: "characters", autocomplete: "one-time-code" },
-      name: { autocapitalize: "words", autocomplete: "off" },
-      plain: { autocapitalize: "sentences", autocomplete: "off" },
-    }[kind] ?? {};
-    for (const [k, v] of Object.entries(attrs)) input.setAttribute(k, v);
-    input.spellcheck = false;
-  }
-
-  // Sent: the share sheet, or (on a computer) the clipboard.
-  async function share(text) {
-    let how = 0;
-    if (navigator.share && (!navigator.canShare || navigator.canShare({ text }))) {
-      try {
-        await navigator.share({ text });
-        how = 1;
-      } catch (e) {
-        if (e.name === "AbortError") how = 1;
-        else console.warn(e);
-      }
-    }
-    if (how === 0) {
-      try {
-        await navigator.clipboard.writeText(text);
-        how = 2;
-      } catch (e) {
-        // (An older way, where the clipboard is not allowed.)
-        const t = document.createElement("textarea");
-        t.value = text;
-        document.body.append(t);
-        t.select();
-        if (document.execCommand("copy")) how = 2;
-        t.remove();
-        canvas.focus({ preventScroll: true });
-      }
-    }
-    send(13, how);
-  }
   sync.reload = (text) => {
     fs.writeFile(LOG, text);
     send(10, 0);
@@ -373,7 +248,7 @@ async function main() {
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === "Escape") {
       e.preventDefault();
-      platform.key(2, e.key === "Escape" ? 65307 : 65293);
+      if (e.key === "Escape") platform.key(2, 65307);
       input.blur();
     }
   });
@@ -566,7 +441,6 @@ const sync = {
   secret: "",
   state: 0,
   send: null,
-  post: null,
   reload: null,
   timer: 0,
   unknown: false,
@@ -617,10 +491,7 @@ const call = async (path, body, keepalive = false) => {
     keepalive,
     signal: keepalive ? undefined : AbortSignal.timeout(15000),
   });
-  if (r.status === 401) {
-    sync.unknown = true;
-    await kept.set("dirty", true);
-  }
+  if (r.status === 401) sync.unknown = true;
   if (r.status === 409) return { conflict: true, ...(await r.json()) };
   if (!r.ok) throw new Error(`${path}: ${r.status}`);
   return r.json();
@@ -649,47 +520,9 @@ async function startLog(params) {
   }
 }
 
-// Signed in with a code: the token Better was given, kept (and the log
-// with it, as a new device's: what is here goes with the account's); or
-// signed out (-): the token forgotten, and the account's log.
-async function signedIn(token) {
-  clearTimeout(sync.timer);
-  sync.unknown = false;
-  if (token === "-") {
-    sync.secret = "";
-    for (const key of ["me", "rev", "dirty", "account"]) await kept.remove(key);
-    await kept.set("log", "");
-    sync.set(0);
-    return;
-  }
-  sync.secret = token;
-  await kept.set("me", token);
-  await kept.set("rev", 0);
-  await kept.set("dirty", true);
-  sync.set(2);
-  push();
-}
-
-async function keepAccount(words) {
-  const account = { id: words[1] === "-" ? "" : words[1], admin: words[2] === "1", name: words.slice(3).join(" ") };
-  await kept.set("account", account);
-}
-
-// Whose account it is, as the worker says (with the log): kept, and Better
-// told, if that is news.
-async function heard(there) {
-  if (typeof there.name !== "string") return;
-  const account = { id: there.id || "", admin: there.admin === 1, name: there.name };
-  const was = await kept.get("account");
-  if (was && was.id === account.id && was.admin === account.admin && was.name === account.name) return;
-  await kept.set("account", account);
-  sync.post?.(accountLine(account));
-}
-
 // The worker's log and this device's as one; saved back if this device's
 // had changes the worker has not. The log to go on with.
 async function joined(local, there, reload) {
-  await heard(there);
   let log = there.text;
   if ((await kept.get("dirty")) || (!there.text && local)) {
     log = mergeLogs(local, there.text);
@@ -751,10 +584,7 @@ async function pull() {
   try {
     const there = await call("/log");
     if (there.rev !== ((await kept.get("rev")) || 0) && !(await kept.get("dirty"))) await joined((await kept.get("log")) || "", there, true);
-    else {
-      await heard(there);
-      sync.set(1);
-    }
+    else sync.set(1);
   } catch (e) {
     console.warn(e);
     sync.set(sync.unknown ? 4 : 3);
@@ -762,10 +592,8 @@ async function pull() {
 }
 
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") {
-    pull();
-    sync.send?.(15, 1);
-  } else push(true);
+  if (document.visibilityState === "visible") pull();
+  else push(true);
 });
 addEventListener("online", () => push());
 setInterval(() => {

@@ -88,15 +88,9 @@ public final class Better extends Activity {
     });
     App.start(this);
     link(getIntent());
-    // (For a test, adb shell am start ...: a made-up course K times as fast,
-    // --ei sim K; another worker, --es api URL; a made-up account, --es
-    // people demo.)
+    // (A made-up course, for a test: adb shell am start ... --ei sim K.)
     int sim = getIntent().getIntExtra("sim", 0);
     if (sim > 0) Native.push("sim " + sim);
-    String api = getIntent().getStringExtra("api");
-    if (api != null) Native.push("api " + api);
-    String people = getIntent().getStringExtra("people");
-    if (people != null) Native.push("people " + people);
   }
 
   @Override
@@ -105,8 +99,7 @@ public final class Better extends Activity {
     link(i);
   }
 
-  // Opened with a link: better://link#c=CODE, or (from before codes) the
-  // personal link, better://link#me=SECRET.
+  // Opened with the personal link: better://link#me=SECRET.
   private void link(Intent i) {
     Uri u = i == null ? null : i.getData();
     if (u != null && "better".equals(u.getScheme())) Native.push("link " + u.toString());
@@ -165,9 +158,6 @@ public final class Better extends Activity {
             w[1].equals("dark") ? 0xfff4f4f1 : 0xff121317);
         break;
       }
-      case "L8FIELDKIND":
-        keys.kind(w[1]);
-        break;
       case "L8KEYS": {
         InputMethodManager im = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
         if (w[1].equals("1")) {
@@ -184,25 +174,6 @@ public final class Better extends Activity {
   void keepOn(boolean on) {
     if (on) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-  }
-
-  // ---- sending ----
-  // The chooser, with the text; once it is gone, L8 is told (says 13).
-  void share(String text) {
-    Intent send = new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text);
-    try {
-      startActivityForResult(Intent.createChooser(send, null), SHARE);
-    } catch (Exception e) {
-      Native.push("says 13 0");
-    }
-  }
-
-  private static final int SHARE = 13;
-
-  @Override
-  protected void onActivityResult(int code, int result, Intent data) {
-    super.onActivityResult(code, result, data);
-    if (code == SHARE) Native.push("says 13 1");
   }
 
   // ---- asking for the phone's location ----
@@ -245,36 +216,12 @@ public final class Better extends Activity {
     else Native.push("gps denied");
   }
 
-  // The keyboard's view: what is typed goes to L8 as it would from keys. Its
-  // kind is the field's (L8FIELDKIND): a name of anything, a code
-  // (capitals, no suggestions), or a person's name.
+  // The keyboard's view: what is typed goes to L8 as it would from keys.
   static final class Keys extends View {
-    private String kind = "plain";
-
     Keys(Context c) {
       super(c);
       setFocusable(true);
       setFocusableInTouchMode(true);
-    }
-
-    void kind(String k) {
-      if (k.equals(kind)) return;
-      kind = k;
-      InputMethodManager im = (InputMethodManager) getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
-      im.restartInput(this);
-    }
-
-    // Keys the keyboard passes on as they are (and a hardware keyboard's).
-    @Override
-    public boolean onKeyDown(int code, KeyEvent e) {
-      if (code == KeyEvent.KEYCODE_DEL) Native.push("key 65288");
-      else if (code == KeyEvent.KEYCODE_ENTER) Native.push("key 65293");
-      else {
-        int c = e.getUnicodeChar();
-        if (c < 32 || c >= 127) return super.onKeyDown(code, e);
-        Native.push("type " + (char) c);
-      }
-      return true;
     }
 
     @Override
@@ -286,16 +233,6 @@ public final class Better extends Activity {
     public InputConnection onCreateInputConnection(EditorInfo info) {
       info.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS
           | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
-      if (kind.equals("code")) {
-        // (Keyboards suggest words anyway, except for what looks like a
-        // password shown as it is typed; Better shows the code in
-        // capitals whatever the keys are.)
-        info.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
-            | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD;
-      } else if (kind.equals("name")) {
-        info.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS
-            | InputType.TYPE_TEXT_VARIATION_PERSON_NAME;
-      }
       info.imeOptions = EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI;
       return new BaseInputConnection(this, false) {
         // (A word being written, as the keyboard has it so far: already
@@ -332,13 +269,6 @@ public final class Better extends Activity {
           composing = "";
           for (int i = 0; i < Math.max(before, 1); i++) Native.push("key 65288");
           return true;
-        }
-
-        // (Capitals for a code, as the keyboard asks where it is.)
-        @Override
-        public int getCursorCapsMode(int reqModes) {
-          if (kind.equals("code")) return InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS;
-          return super.getCursorCapsMode(reqModes);
         }
 
         @Override

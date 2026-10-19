@@ -34,12 +34,6 @@ final class App {
 
   // What L8 says (see android.l8).
   static void said(String line) {
-    // (Something to send: the rest of the line, \n a new line.)
-    if (line.startsWith("L8SHARE ")) {
-      if (activity != null) activity.share(unescape(line.substring(8)));
-      else Native.push("says 13 0");
-      return;
-    }
     String[] w = line.split(" ");
     switch (w[0]) {
       case "L8GPS":
@@ -138,17 +132,5 @@ final class App {
     prev = l;
     Native.push("fix " + l.getTime() + " " + dx + " " + dy + " "
         + Math.round(l.getAccuracy() * 10) + " " + spd + " " + dz + " " + zacc);
-  }
-
-  static String unescape(String s) {
-    StringBuilder b = new StringBuilder();
-    for (int i = 0; i < s.length(); i++) {
-      char c = s.charAt(i);
-      if (c == '\\' && i + 1 < s.length()) {
-        char d = s.charAt(++i);
-        b.append(d == 'n' ? '\n' : d);
-      } else b.append(c);
-    }
-    return b.toString();
   }
 }

@@ -10,12 +10,11 @@ and north of the one before, and how much higher (it holds that one fix,
 in memory, until the next comes); Better smooths the steps, and what it
 keeps is how far was gone by each second, and how much higher or lower
 than the start it was then. No position, route or height above the sea is
-saved, sent, or shown. Signed in to an account, the log is kept by a
-worker, the same on every device signed in to it, and only there.
+saved, sent, or shown. With a personal link the log is kept by a worker,
+the same on every device with the link, and only there.
 
 ```sh
 make better && .build/better [LOG [LIVE]]
-L8_PEOPLE=demo .build/better           # a made-up account and friends
 make better-test                      # programs/better/test_better.l8
 make web                             # the page is .build/web/better/
 ```
@@ -25,16 +24,10 @@ make web                             # the page is .build/web/better/
 records a made-up course K times as fast as the clock (`?sim=K` on the
 page). `L8_W`, `L8_H` and `L8_UI` set the window's size and its pixels
 to Better's (in hundredths); `L8_TZ` its minutes ahead of UTC.
-`L8_PEOPLE=demo` (`?people=demo` on the page) makes up an account, an
-admin's, with three friends and their weeks and a list of people, with no
-worker; `many` has eight friends, `alone` none, `offline` cannot reach the
-worker, and `out` is signed out (see `people.l8` for codes that are answered
-as wrong, used and so on).
 
 ## Using it
 
-Three tabs along the bottom (four signed in: Friends, before You); a
-finger slides between them too.
+Three tabs along the bottom; a finger slides between them too.
 
 - **Record**: pick Run, Ride or Walk, and **Start**. The chip at the top
   says whether the GPS has found the phone (it looks while this tab is
@@ -68,14 +61,7 @@ finger slides between them too.
   columns (a tap on one says what that week was); then the activities by
   the week, newest first, each with its distance, pace or speed, and time
   (a medal if it holds a record). The pills show one sport.
-- **Friends** (signed in): friends' runs, rides and walks of the last four
-  weeks, by the week, with whose each is and when; each friend's alone
-  (picked out by name), with since when, and **Remove** (asked twice).
-  **+ Add**: **Send a code** (the share sheet: Messages, say), or enter one
-  that came. Friends see each other's last four weeks, and only when, the
-  sport, how long and far, its name and the climbing: never where.
-- **You**: the account (**Sign in**, or its name: its page);
-  miles or kilometers; light or dark (Auto follows the phone's
+- **You**: miles or kilometers; light or dark (Auto follows the phone's
   own setting; the pick is kept on each device, and the colors ease from
   one to the other); each sport's totals (all time, and this
   year); each sport's records (the fastest stretch of each standard length
@@ -91,31 +77,8 @@ speed through it as a chart (a finger on
 it reads it: when, how far by then, how fast); its splits, a bar each;
 its best efforts; and Delete (asked twice).
 
-Keys: Space starts, pauses and resumes; Tab or `1` to `4` the tabs;
-Escape or Backspace goes back; Enter saves when finishing, and sends a code
-or a name.
-
-## Accounts and friends
-
-A log is an account. **Sign in** (on You) takes a code of 8 letters and
-digits (`K7QM-3XPA`; big or small, dashes and spaces left out, or the whole
-link pasted); every code comes with a link too,
-`https://trailingwhite.space/better/#c=k7qm3xpa`, which opens the page with
-the code written in, for a tap to use. Signing in puts what was recorded
-on the device together with the account's; each device gets a token of its
-own. The account's page (the name on You) gives **a code for another
-device** (good 10 minutes, once), and **signs out**: the device forgets
-the account's activities (not while some are not yet saved); units, light
-or dark and goals stay. If a device is signed out elsewhere, You says
-**Sign in again** and nothing on it is lost.
-
-An admin (`admin.sh admin ID`) sees **People** on the account's page:
-everyone, whether they have signed in, **New code** for someone who lost
-theirs (7 days; 14 if not signed in yet), and **Add someone**: a name, and
-an invite (14 days), sent with the share sheet as it is made, optionally
-making them the admin's friend. Codes are sent with the phone's share
-sheet, or copied on a computer. `people.l8` keeps the account and asks the
-worker; `people_pages.l8` draws its pages.
+Keys: Space starts, pauses and resumes; Tab or `1` `2` `3` the tabs;
+Escape or Backspace goes back; Enter saves when finishing.
 
 ## On an iPhone
 
@@ -125,8 +88,10 @@ wrapper). Its view is an OpenGL ES layer that takes touches and, for the
 name field, the keyboard; CoreLocation watches where the phone is while
 Better wants it, with the screen locked too, and passes each fix on only as
 a step from the one before, as the page does. The log is kept in the app's
-Documents, and with the account once signed in (with a code, as on the
-page). The app keeps it with the worker itself (`sync.l8`, as `better.js` does on the page): the
+Documents, and with a personal link once the app has been opened with it:
+`better://link#me=SECRET` (the page's link with `better://link` in place of
+its address, opened in Safari on the phone). The app then keeps it with
+the worker itself (`sync.l8`, as `better.js` does on the page): the
 worker's log when it starts or is looked at again, and its own changes
 sent a second after each save.
 
@@ -159,45 +124,36 @@ is between them. Where the phone is is watched with Android's GPS while
 Better wants it; while recording, a foreground service (its notification
 says so) keeps it measuring with the screen off, with only "while using
 the app" allowed. The chimes duck other sound for the moment. The log and
-settings are kept in the app's files, and with the account once signed in,
-as on an iPhone.
+settings are kept in the app's files, and with a personal link once it is
+opened with `better://link#me=SECRET`, as on an iPhone.
 
 ```sh
 tools/android/build.sh better.apk [VERSION_CODE]   # on Linux, no Gradle
 adb install -r better.apk
 adb shell am start -n space.trailingwhite.better/.Better --ei sim 10
-adb shell am start -n space.trailingwhite.better/.Better --es people demo
-adb shell am start -n space.trailingwhite.better/.Better --es api http://10.0.2.2:8799/better/api
 ```
 
 It needs the Android SDK's build-tools, platform 36 and the NDK (under
 `~/android-sdk`), and a JDK. It is signed with the key in
 `~/.config/better-android` (made the first time; every update must be
-signed with it). `--ei sim K` records a made-up course K times as fast;
-`--es people MODE` makes up an account as `L8_PEOPLE` does; `--es api URL`
-asks another worker (one run on the computer, from the emulator).
+signed with it). `--ei sim K` records a made-up course K times as fast.
 
 ## Keeping it
 
 The log is one text file, written after each change. On the page it is
-kept in the browser (IndexedDB), and, signed in, in a Cloudflare D1
-database by the worker in `web/better-log/`: the same on every device
-signed in to the account, and only for its owner. Logs changed in two places are put together: each activity
+kept in the browser (IndexedDB), and, with a personal link
+(`.../better/#me=SECRET`), in a Cloudflare D1 database by the worker in
+`web/better-log/`: the same on every device with the link, and only for
+whoever has it. Logs changed in two places are put together: each activity
 is kept once, and one deleted in either stays deleted. The worker also
 keeps the text from before a save (one an hour, the last 500); `admin.sh
 past LINK` and `restore LINK REV` get them back.
 
 ```sh
 cd web/better-log
-./admin.sh invite NAME       # an account for someone, and the text to send them
-./admin.sh admin ID          # mark someone an admin (People in the app)
-./admin.sh all               # everyone
-./admin.sh past LINK         # a log's texts before (with its #me= link)
+./admin.sh new NAME          # a log, and its link
+./admin.sh past LINK         # its texts before
 ```
-
-The first logs were made with a personal link instead of a code
-(`admin.sh new`: Better's page with the log's secret after `#me=`, or
-`better://link#me=` in the apps); those still work, as a token does.
 
 A recording under way is written every few seconds to its own file (kept
 in this browser only, never sent), so a page shut mid-run (a phone may do
@@ -243,5 +199,4 @@ distance between the fix before and the next one is counted straight.
 ## Not built yet
 
 Heart rate and cadence; calories; laps; editing an activity's name or
-sport after it is saved; adding one by hand; a friend's activity opened;
-links that open the apps (a code is typed or pasted there).
+sport after it is saved; adding one by hand; goals; sharing.
