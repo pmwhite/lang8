@@ -6,7 +6,7 @@
 # (space.trailingwhite.smoothbible.demoN; see demo_do in
 # programs/bible/ios_demo.l8, and DESIGN.md §5 and §7.10 for what each
 # screenshot should show). CI runs the groups on five Macs, two one after
-# another on each, every group on a fresh simulator of its own:
+# another on each, the second on the first's simulator, reset (below):
 #   read    reading, the picker, selection and marks, the collapsing bar,
 #           search, the library, the settings and themes, a relaunch
 #   study   the interlinear, word study, grammar, definition, concordance
@@ -88,9 +88,35 @@ for rt, ds in json.load(sys.stdin)["devices"].items():
         if d["udid"] == sys.argv[1]:
             print(d["name"], rt.split(".")[-1])' "$dev" | tee "$out/device.txt"
 touch "$out/.started"
+# (CI runs two groups one after another on a Mac, on one simulator: a boot
+# costs minutes. Another simulator, booted for another group, is shut down.
+# This one, if a group has used it (the app is on it), is reset as the
+# group found it: the app and its defaults, permissions and keychain gone,
+# the pasteboard emptied, the status bar as it was, the app's notification
+# state cleared.)
+xcrun simctl list devices booted -j | python3 -c '
+import json, sys
+for ds in json.load(sys.stdin)["devices"].values():
+    for d in ds:
+        if d["udid"] != sys.argv[1]:
+            print(d["udid"])' "$dev" | while read -r other; do
+  xcrun simctl shutdown "$other" 2>/dev/null && echo "shut down $other"
+done
+if xcrun simctl get_app_container "$dev" "$id" >/dev/null 2>&1; then
+  xcrun simctl terminate "$dev" "$id" 2>/dev/null || true
+  xcrun simctl privacy "$dev" reset all "$id" 2>/dev/null || true
+  xcrun simctl spawn "$dev" defaults delete "$id" 2>/dev/null || true
+  xcrun simctl uninstall "$dev" "$id"
+  xcrun simctl keychain "$dev" reset 2>/dev/null || true
+  printf '' | xcrun simctl pbcopy "$dev" 2>/dev/null || true
+  xcrun simctl status_bar "$dev" clear 2>/dev/null || true
+  xcrun simctl spawn "$dev" notifyutil -s "$id.done" 0 2>/dev/null || true
+  echo "reset after the last group in $(python3 -c "print(round($(now) - $start))") s" >> "$out/timing.txt"
+fi
 xcrun simctl boot "$dev" 2>/dev/null || true
 # (Its boot's stages, and when each began, in timing.txt.)
 xcrun simctl bootstatus "$dev" -b 2>&1 | while read -r line; do
+  case "$line" in \[*) continue ;; esac
   stage=$(echo "$line" | sed 's/[0-9.]*%//; s/ *$//')
   [ "$stage" = "${prev:-}" ] && continue
   prev=$stage

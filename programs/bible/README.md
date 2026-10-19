@@ -179,9 +179,12 @@ workflow's header):
   soon as it is uploaded (`tools/ios/artifact.py`). (With the workflow's
   `MAC_BUILD` set, the first builds the app and the IPA instead, with
   Xcode's tools, from `compile`'s `bible-ios.s`.) Each runs two
-  groups one after another, each on a simulator of its own (the second a
-  copy, `simctl clone`, of the first once booted and before it is used: a
-  copy boots in seconds), each uploaded (`shots-GROUP`) as it ends. (In the
+  groups one after another on one simulator, reset between them by
+  `simulate.sh` (app, defaults, permissions, keychain, pasteboard, status
+  bar): any boot, a copy's or an erased simulator's too, costs minutes on
+  these Macs, and slows whatever runs beside it. store and ios18 share the
+  fifth Mac, each on its own simulator. Each group is uploaded
+  (`shots-GROUP`) as it ends. (In the
   Mac build actool's output is cached, `ACTOOL_CACHE`, since it alone took
   most of the build.) The groups are paired by their times (`timing.txt`'s `total`) so
   the jobs end together: rebalance the workflow's matrix when a group

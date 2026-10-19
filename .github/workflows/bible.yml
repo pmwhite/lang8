@@ -12,10 +12,11 @@
 # the app as soon as it is uploaded (tools/ios/artifact.py). With MAC_BUILD
 # set (below), the first simulator job builds the app and the IPA instead,
 # from compile's assembly, with Xcode's tools (tools/ios/build.sh; actool's
-# output cached), as before the Linux build. Each runs two groups of the demo one after another
-# (programs/bible/ios/simulate.sh), each on a simulator of its own, the
-# second a copy of the first once booted, before it is used; each
-# group's shots are uploaded as it ends (shots-GROUP). The groups are paired
+# output cached), as before the Linux build. Each runs two groups of the
+# demo one after another (programs/bible/ios/simulate.sh), the second on the
+# first's simulator, reset (a boot, with what the simulator does after it,
+# takes minutes; store and ios18 have simulators of their own); each group's
+# shots are uploaded as it ends (shots-GROUP). The groups are paired
 # so the five jobs end together: GitHub runs at most five macOS jobs of this
 # account at a time, and a sixth would wait for one of them to end.
 # frames (Linux) waits for the notes group's
@@ -148,25 +149,35 @@ jobs:
         # the app for all five, and the IPA.)
         include:
           - {name: build store ios18, build: true, g1: store, g2: ios18}
-          - {name: notes read, g1: notes, g2: read}
-          - {name: versions listen, g1: versions, g2: listen}
-          - {name: ribbons more, g1: ribbons, g2: more}
-          - {name: plans study, g1: plans, g2: study}
+          - {name: notes read, g1: notes, g2: read, prefetch: true}
+          - {name: versions plans, g1: versions, g2: plans}
+          - {name: ribbons more, g1: ribbons, g2: more, prefetch: true}
+          - {name: study listen, g1: study, g2: listen}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
-      - name: Boot the simulators (a first boot takes minutes)
+      - name: Boot the first group's simulator (a boot takes minutes)
         run: |
           mkdir -p devices
           # (What the Mac is busy with, meanwhile, every 15 s.)
-          (for i in $(seq 1 24); do date +%T; ps -Ao pcpu,rss,comm -r | head -8 | cut -c1-110; sleep 15; done > cpu.txt 2>&1 &)
-          for g in ${{ matrix.g1 }} ${{ matrix.build && matrix.g2 || '' }}; do
-            programs/bible/ios/pick.sh $g > devices/$g
-            dev=$(cat devices/$g)
-            echo "simulator for $g: $dev"
-            [ -n "$dev" ] && (xcrun simctl boot "$dev" >/dev/null 2>&1 &) || true
-          done
+          (for i in $(seq 1 30); do date +%T; ps -Ao pcpu,rss,comm -r | head -8 | awk '{ n = split($3, a, "/"); print $1, $2, a[n] }'; sleep 15; done > cpu.txt 2>&1 &)
+          programs/bible/ios/pick.sh ${{ matrix.g1 }} > devices/${{ matrix.g1 }}
+          dev=$(cat devices/${{ matrix.g1 }})
+          echo "simulator for ${{ matrix.g1 }}: $dev"
+          [ "${{ matrix.build }}" = true ] || cp devices/${{ matrix.g1 }} devices/${{ matrix.g2 }}
+          [ -n "$dev" ] && (xcrun simctl boot "$dev" >/dev/null 2>&1 &) || true
+          if [ "${{ matrix.prefetch }}" = true ]; then
+            # (Its runtime's disk image read through once, in order, to see
+            # whether that makes the boot quicker than reading it as needed.)
+            img=$(xcrun simctl list devices -j | python3 -c '
+          import json, subprocess, sys
+          rt = [r for r, ds in json.load(sys.stdin)["devices"].items() for d in ds if d["udid"] == sys.argv[1]][0]
+          rts = json.loads(subprocess.run(["xcrun", "simctl", "runtime", "list", "-j"], capture_output=True, text=True).stdout)
+          print("".join(r.get("path", "") for r in rts.values() if r.get("runtimeIdentifier") == rt and r.get("path", "").endswith(".dmg"))[:1000])' "$dev")
+            echo "runtime image: $img"; ls -la "$img" 2>/dev/null || true
+            [ -f "$img" ] && (sh -c "s=\$(date +%s); dd if='$img' of=/dev/null bs=8m 2>&1 | tail -1; echo read in \$(( \$(date +%s) - s )) s" > prefetch.txt 2>&1 &) || true
+          fi
       - uses: actions/cache@v4
         if: matrix.build && env.MAC_BUILD == 'true'
         with:
@@ -214,20 +225,6 @@ jobs:
         run: |
           python3 -I tools/ios/artifact.py bible-sim-app app "${{ env.MAC_BUILD == 'true' && 'simulator (build' || 'compile' }}"
           mkdir -p build && (cd build && unzip -q ../app/SmoothBible-simulator.zip) && cp app/build.log .
-      - name: The second group's simulator, a copy of the first once booted
-        # (A first boot is minutes of work; a copy of a booted simulator,
-        # never yet used, boots in seconds and is as fresh.)
-        if: ${{ !matrix.build }}
-        run: |
-          dev=$(cat devices/${{ matrix.g1 }})
-          xcrun simctl bootstatus "$dev" -b > /dev/null 2>&1
-          echo "booted $(date +%T)"
-          xcrun simctl shutdown "$dev"
-          name=$(xcrun simctl list devices -j | python3 -c '
-          import json, sys
-          print([d["name"] for ds in json.load(sys.stdin)["devices"].values() for d in ds if d["udid"] == sys.argv[1]][0])' "$dev")
-          xcrun simctl clone "$dev" "$name" > devices/${{ matrix.g2 }}
-          echo "copied $(date +%T): $(cat devices/${{ matrix.g2 }})"
       - name: The app is here
         id: build
         run: test -d build/SmoothBible.app
@@ -240,8 +237,8 @@ jobs:
         run: |
           mkdir -p out/${{ matrix.g1 }}/shots && cp build.log out/${{ matrix.g1 }}/ 2>/dev/null || true
           [ "${{ matrix.g1 }}" = read ] && cp app/SmoothBible-simulator.zip out/read/ 2>/dev/null || true
-          cp cpu.txt out/${{ matrix.g1 }}/shots/cpu.txt 2>/dev/null || true
-          dev=$(cat devices/${{ matrix.g1 }} 2>/dev/null) && [ -n "$dev" ] && xcrun simctl shutdown "$dev" 2>/dev/null || true
+          # (For now: what the Mac was busy with while booting.)
+          cat cpu.txt prefetch.txt > out/${{ matrix.g1 }}/shots/cpu.txt 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -256,7 +253,6 @@ jobs:
         run: |
           mkdir -p out/${{ matrix.g2 }}/shots && cp build.log out/${{ matrix.g2 }}/ 2>/dev/null || true
           [ "${{ matrix.g2 }}" = read ] && cp app/SmoothBible-simulator.zip out/read/ 2>/dev/null || true
-          
           dev=$(cat devices/${{ matrix.g2 }} 2>/dev/null) && [ -n "$dev" ] && xcrun simctl shutdown "$dev" 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         if: always()
