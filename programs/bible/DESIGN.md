@@ -4696,6 +4696,74 @@ These four are decided above; the owner may overrule:
    after their books, and the rest are dropped (still in History). Alternatively, convert
    none and start clean.
 
+The owner left these four to the design (2026-10-19); they're built as decided above.
+
+### 11.9 Builder notes (Round 6 revised, as built)
+Where the build differs from the text above, or settles what it left open, and why:
+1. **`ribbons.tsv` has a third line kind, `NEXT\tID`** (the next id to give). Without it,
+   deleting the newest ribbon and relaunching would give its id again, and §11.1.1 says
+   ids are never reused while the file exists. A file without it takes the greatest id plus
+   one (tested). Unknown lines are skipped, so the format stays as §11.1.6 says otherwise.
+2. **Kinds of jump for P4.** A jump with an origin (Go To, search, links, a preview's Open,
+   Compare's switch, a reminder, a plan's start) remembers the ribbon it put down with the
+   origin the capsule now points at. The capsule's own jump keeps what it is to pick up for
+   its arrival, then remembers what it put down in turn, so tapping the capsule again (it
+   toggles) picks that one up. **The status bar's tap, and opening the ribbon of the
+   chapter on the screen** (no capsule, no history: review r6-1), put the carried ribbon
+   down and remember nothing, as they leave the capsule pointing where it was.
+3. **"Read since pickup"** (M1's exception) is kept in memory only, cleared at every pickup;
+   a relaunch begins it again. **Leave Here** is a rest, so the exception applies to it
+   (173's "Acts left at Acts 11", from the reader at Acts 10's end).
+4. **A chapter's end "on screen"** is its row's foot between the bar and the bottom inset.
+5. **The demo's times are real** (`time(0)`; only `today()` is the demo clock), so rows
+   whose ribbon was moved in the last ten minutes read "Now": 175's Place reads "Read just
+   now", and 176's row "Mark 3:7 · Now". The migrated ones read "Today", "Yesterday" and a
+   weekday as 160 expects.
+6. **166 rests at Mark 2:3, not 2:1:** by §11.2.1's rule a ribbon at verse 1 reads "Mark 2",
+   which would not show the step back. 2:3 shows it.
+7. **178's placeholder reads "Romans (2)":** the reader is at Romans 8 and a ribbon named
+   "Romans" exists, so §11.1.2's default rule gives "Romans (2)". After Book → Jude it reads
+   "Jude", and Add with the field empty makes "Jude". A shot **178a** (New Ribbon after
+   Book → Jude: placeholder "Jude", Chapter "1" dimmed) is taken before Add; 178 is the
+   reader at Jude with the toast.
+8. **177 leaves three ribbons** (Romans, Acts, With Anna): John was the fourth. Jude (178)
+   makes the four of 182 and of sequence 13.
+9. **172's Listen:** the demo starts Listen at Acts 10:9 (the audio fixture), then gives the
+   rest its following scroll would end in at Acts 10's end, then calls Listen's
+   chapter-end hook (`chapter_heard`; counted in the demo for this group only,
+   `demo_heard`, as plan_heard skips it elsewhere in CI), then stops Listen. The log has
+   "chapter heard ACT 10" and "ribbon moved: Acts to ACT 11".
+10. **161 and 164:** the title's menu is opened through its context-menu interaction where
+    the simulator allows it, and always logged whole ("title menu: Reading with Morning
+    [Leave Morning Here / New Ribbon Here… · Mark 1 / Move Ribbon Here: Romans, Acts,
+    John]"), which `simulate.sh` checks.
+11. **From 12 to 11 ribbons**, New Ribbon… is reloaded (faded) in the deletion's update, and
+    the footer's "12 ribbons is the most." is cleared with a 0.2 s fade (a row update can't
+    reload its section's footer).
+12. **The plan row's Remove** reloads the Reading Plan section with a fade, so its header goes
+    with the row (Reading Plans stays).
+13. **The ribbon glyph** is drawn per size and kept: rows at the body text style's point size
+    (so it grows with Dynamic Type, as the 17-point symbols do since review r6-1), menus at
+    17, the toast at 13 with a 2-point baseline offset (as a symbol sits).
+14. **New Ribbon's keyboard** rises with the sheet or push on first appearance only; back
+    from the Book or Chapter chooser it stays down (Add needs no keyboard). Add "at the
+    reader's own place" compares chapter and verse (verses 0 and 1 are the same top).
+15. **Starting a plan** where the reader already is (A Chapter a Day from the chapter on the
+    screen) dismisses Go To without a jump, so a carried ribbon stays carried.
+16. **Review r7-1, Minor 6.** Go To, back from a screen pushed over it, was set again with
+    `reloadSections:withRowAnimation:` in `viewWillAppear:`, while it was not yet on the
+    window: the warning's cause in both groups. It now reloads whole (`reloadData`, which
+    lays out nothing) while off the window, and in place otherwise. Every in-place update of
+    Go To's sections first asks `on_window()`, which logs "table off the window, not
+    updated: …" (with the demo's log) and leaves it to that reload. The Plans list, A
+    Chapter a Day and New Ribbon reload whole in `viewWillAppear:` too.
+17. The Begin At choosers are shared by New Ribbon's Place and A Chapter a Day's Begin At
+    (`bg_*` in `ios_ribbons.l8`); the grid in choose mode is a plain
+    `UICollectionViewController`, its toolbar gone with Start Reading.
+18. **The `more` group's 70-history** had shown Start Reading since Round 6: its step chose
+    Go To's section 0 as Recent's. It now chooses Recent's own section (after Ribbons and
+    Reading Plan), so History shows again.
+
 ---
 
 ## 12. Round 7 specification: recorded readings

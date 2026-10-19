@@ -46,19 +46,21 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   (Matthew Henry's Concise).
 - Daily reading (Round 5): reading plans (a year, the NT in 90 days,
   Psalms and Proverbs in a month, the Gospels in 30 days, computed by
-  `plans.l8`) in Go To's Today section, today's readings counting as read
-  by rest, Listen or a tap; a plan's optional daily reminder of the day's
+  `plans.l8`) in Go To's Reading Plan section and Reading Plans (A Chapter
+  a Day among them), today's readings counting as read by rest, Listen or
+  a tap; a plan's optional daily reminder of the day's
   reading (its authorization through the one block, `../ios/block.l8`).
   Word study shows a word's exact sense (STEP's TAHOT and TAGNT) and
   related words (MACULA), and the share sheet has Share as Image
   (`ios_share.l8`).
-- What you are reading (Round 6): Go To's Continue Reading lists the plan
-  followed (one row) and the readings, each a place moving forward through
-  the whole Bible (`readings.l8`): started by reading a book's first chapter
-  or two chapters in a row, or by Start Reading (from Continue Reading, a
-  book's chapter grid, or the title's long-press, Start Reading Here), at
-  your own pace or as a plan (A Chapter a Day among them); kept as you read
-  on, never moved by a jump; merged when two meet; swiped away with Remove.
+- Ribbons (Round 6, as revised): named places you carry while you read
+  (`ribbons.l8`), made only by you (the title's long-press, New Ribbon
+  Here…, or Go To's New Ribbon…), listed first in Go To in the order made
+  (up to 12; ⓘ to rename or delete, a swipe to delete). Opening one picks it
+  up: it then takes every rest's place, either way, and a read chapter's
+  end is the next one's top (Listen too); any jump puts it down where you
+  were, and the capsule back picks it up again; Leave Here puts it down by
+  hand. Up to three of 1.0 (15)'s recent readings became ribbons once.
 - Recorded readings (Round 7): Listen plays people reading, streamed from
   where they are published: the BSB by Bob Souer (or Barry Hays, Jordan
   Gilbert; CC0, openbible.com), the WEB by Winfred Henson (public domain,
@@ -102,10 +104,11 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   client, cache on disk and the reader's states while a chapter comes
   (`esv_cache.l8` its portable rules, tested in `test_store.l8`);
   `ios_compare.l8` Compare; `ios_study2.l8` the Study sheet's segments;
-  `ios_daily.l8` Continue Reading, the plans' days and their reminder
-  (`plans.l8` their portable part, tested in `test_plans.l8`);
-  `ios_reading.l8` the readings, Reading, Start Reading and the title's
-  menu (`readings.l8` their portable part, tested in `test_readings.l8`); `ios_share.l8` Share as
+  `ios_daily.l8` Go To's Ribbons and Reading Plan sections, the plans, a
+  plan's days, A Chapter a Day and the reminder (`plans.l8` their portable
+  part, tested in `test_plans.l8`); `ios_ribbons.l8` the ribbons' rows, New
+  Ribbon, Ribbon, the title's menu, the glyph and the toasts (`ribbons.l8`
+  their portable part, tested in `test_ribbons.l8`); `ios_share.l8` Share as
   Image; `ios_demo.l8` (and `ios_demo3.l8` to `ios_demo6.l8`)
   the demo CI runs.
 - `audio.l8` is recorded readings' portable part (sources, addresses,
