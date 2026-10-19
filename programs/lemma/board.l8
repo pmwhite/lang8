@@ -121,6 +121,7 @@ lang_start() {
     made_n = 0;
     goal_gen = goal_gen + 1;
     pp_cancel();
+    bb_start();
     boxes_at = now_t + 1.9
 }
 
@@ -1043,6 +1044,7 @@ const LIFT_UP: f32 = 64.0;
 
 // Whether a finger at (x, y) is on something to pick up.
 lang_grab(x: f32, y: f32): bool {
+    if (bb_on()) return bb_grab(x, y);
     gr_kind = 0;
     gr_src = -1;
     gr_item = -1;
@@ -1094,6 +1096,10 @@ held_x(x: f32): f32 {
 
 // The thing under the finger lifted.
 lang_lift(x: f32, y: f32) raises KernelError {
+    if (bb_on()) {
+        bb_lift(x, y);
+        return
+    }
     if (gr_kind == 0) return;
     dg_on = true;
     dg_kind = gr_kind;
@@ -1311,6 +1317,10 @@ hv_steps: []int = new int[256](0);
 hv_n: int = 0;
 
 lang_drag(x: f32, y: f32) raises KernelError {
+    if (bb_on()) {
+        bb_drag(x, y);
+        return
+    }
     if (!dg_on) return;
     if (frame_dt > 0.0) {
         dg_vx = lerpf(dg_vx, (x - dg_x) / frame_dt, 0.4);
@@ -1486,6 +1496,10 @@ quick_t: f32 = -10.0;
 
 // The thing held let go.
 lang_drop(x: f32, y: f32) raises KernelError {
+    if (bb_on()) {
+        bb_drop(x, y);
+        return
+    }
     if (!dg_on) return;
     lang_drag(x, y);
     dg_on = false;
@@ -1678,7 +1692,9 @@ pv_y: f32 = 0.0;
 
 pk_clear() {
     pk_kind = 0;
-    pv_on = false
+    pv_on = false;
+    bk_clear();
+    bsk_on = false
 }
 
 pk_is(kind: int, src: int): bool {
@@ -1777,6 +1793,7 @@ pk_valid(): bool {
 // A tap at (x, y) on the board: held, let go, or the move made. Whether
 // it was on something of the board.
 lang_tap(x: f32, y: f32) raises KernelError: bool {
+    if (bb_on()) return bb_tap(x, y);
     pv_on = false;
     if (!lang_on() || done_t >= 0.0 || intro_open || chapter_open) return false;
     if (!pk_valid()) pk_kind = 0;
@@ -1928,6 +1945,10 @@ pair_setup(x: f32, y: f32, preview: bool) raises KernelError: bool {
 // A finger come down at (x, y) while something is held: if it is the
 // held one's partner, what the move would make shows (pv_on).
 lang_press(x: f32, y: f32) raises KernelError {
+    if (bb_on()) {
+        bb_press(x, y);
+        return
+    }
     pv_on = false;
     if (!lang_on() || done_t >= 0.0 || !pk_valid()) return;
     if (!tap_target(x, y)) return;
@@ -2226,6 +2247,10 @@ lang_swipe_end(x: f32) raises KernelError {
     sw_t0 = now_t;
     sw_from = sw_dx;
     sw_dx = 0.0;
+    if (bb_on()) {
+        bb_swipe_end(d);
+        return
+    }
     if (absf(d) < 50.0) return;
     n: int = play_node();
     if (n < 0) return;
@@ -2395,6 +2420,7 @@ fk_steps: []int = new int[256](0);
 fk_n: int = 0;
 
 face_keep() {
+    gq_keep();
     fk_l = gf_l;
     fk_j = gf_j;
     fk_back = gf_back;
@@ -2403,6 +2429,7 @@ face_keep() {
 }
 
 face_restore() {
+    gq_restore();
     gf_l = fk_l;
     gf_j = fk_j;
     gf_back = fk_back;
@@ -2436,6 +2463,13 @@ lang_settle() {
         if (playing >= 0) par = ml_par[playing];
         try {
             r = gs_dead(n, par + 3, 3000)
+        } with KernelError -> {
+            r = -1
+        }
+    } else if (bb_walk()) {
+        // (The tile: no walk of the moves left gets there.)
+        try {
+            if (bd_walk_dead()) r = 1
         } with KernelError -> {
             r = -1
         }
@@ -2548,12 +2582,28 @@ lang_hint() raises KernelError: bool {
     lh_back = gf_back;
     lh_n = gf_n;
     for i in 0..gf_n lh_steps[i] = gf_steps[i];
+    lh_side = gq_side;
+    lh_i = gq_i;
+    lh_k = gq_k;
+    lh_face = gq_face;
     lh_on = true;
     lh_t = now_t;
     true
 }
 
+lh_side: int = 0;
+
+lh_i: int = 0;
+
+lh_k: int = 0;
+
+lh_face: int = 0;
+
 lh_restore() {
+    gq_side = lh_side;
+    gq_i = lh_i;
+    gq_k = lh_k;
+    gq_face = lh_face;
     gf_l = lh_l;
     gf_j = lh_fj;
     gf_back = lh_back;
@@ -2815,6 +2865,9 @@ pp_cancel() {
 // carry that puts the next name into its tile. Whether it can be found.
 ga_tap: bool = false;
 
+// (A swipe, carried from (ga_x0, ga_y0) to (ga_x1, ga_y1).)
+ga_swipe: bool = false;
+
 ga_x0: f32 = 0.0;
 
 ga_y0: f32 = 0.0;
@@ -2828,7 +2881,9 @@ ga_fill: int = 0;
 
 gesture_at(kind: int, j: int, t: int): bool {
     ga_tap = false;
+    ga_swipe = false;
     ga_fill = 0;
+    if (kind >= GS_POP) return bb_gesture_at(kind, j, t);
     if (kind == GS_KEY) {
         ga_tap = true;
         if (j < 0 && gk_ok) {
@@ -3081,15 +3136,16 @@ wp_step() raises KernelError: bool {
         return false
     }
     ms: f32 = 900.0 * watch_pace;
-    if (wp_stage == 1 && ps_on) {
-        if (token_at(wp_fill)) {
+    if (wp_stage == 1 && (ps_on || bsk_valid())) {
+        if (bb_on() && bb_shelf_at(wp_fill) || !bb_on() && token_at(wp_fill)) {
             // (The socket waits: its name tapped.)
             pp_tap(ga_x0, ga_y0, true);
             wp_main = false;
             wp_stage = 0;
             return true
         }
-        ps_fill(wp_fill, ga_x0, ga_y0);
+        if (bsk_valid()) bb_fill(wp_fill, ga_x0, ga_y0) else ps_fill(wp_fill, ga_x0,
+            ga_y0);
         wp_stage = 0;
         return true
     }
@@ -3105,12 +3161,12 @@ wp_step() raises KernelError: bool {
         wp_wait_t = now_t + 0.5 * watch_pace;
         return true
     }
-    if (ga_tap) pp_tap(ga_x0, ga_y0, true) else if (bg_kind == GS_FLIP || bg_kind == GS_SUPPOSE) pp_carry(ga_x0,
+    if (ga_tap) pp_tap(ga_x0, ga_y0, true) else if (bg_kind == GS_FLIP || bg_kind == GS_SUPPOSE || ga_swipe) pp_carry(ga_x0,
         ga_y0, ga_x1, ga_y1, ms, false, true) else pp_tap2(ga_x0, ga_y0, ga_x1, ga_y1,
         ms * 0.7, true);
     wp_main = !ga_kit;
     // (A socket after: its name next.)
-    if (!ga_kit && ga_fill != 0 && (bg_kind == GS_APPLY || bg_kind == GS_FACE)) {
+    if (!ga_kit && ga_fill != 0 && (bg_kind == GS_APPLY || bg_kind == GS_FACE || bg_kind == GS_STAMP)) {
         wp_fill = ga_fill;
         wp_stage = 1
     }
@@ -3495,7 +3551,7 @@ draw_lang_ghost() {
     }
     // (Two taps: the thing, a quiet ring left round it, then its place.
     // A flip or Suppose not: carried.)
-    if (lh_kind == GS_FLIP || lh_kind == GS_SUPPOSE) {
+    if (lh_kind == GS_FLIP || lh_kind == GS_SUPPOSE || ga_swipe) {
         cyc: f32 = 2.2;
         c: f32 = t - floorf(t / cyc) * cyc;
         k: f32 = clampf((c - 0.35) / 1.0, 0.0, 1.0);
@@ -3541,6 +3597,12 @@ draw_lang_demo_words(x: f32, w: f32) {
     if (demo_kind == sym("def")) s = "The arrow is a key: it opens to what it means.";
     if (demo_kind == sym("kit")) s = "Tap a name, then a kit tile, to build a new one.";
     if (demo_kind == sym("suppose")) s = "Drag the goal up into the facts: suppose it is not so.";
+    if (demo_kind == sym("walk")) s = "Tap the tile to turn it a quarter.";
+    if (demo_kind == sym("flipwalk")) s = "Swipe the tile sideways to flip it over.";
+    if (demo_kind == sym("pop")) s = "Tap a bead, then its turned-over twin beside it.";
+    if (demo_kind == sym("stamp")) s = "Tap a side of the card, then beads like it.";
+    if (demo_kind == sym("pair")) s = "Tap a bead below, then a gap: it comes out with its twin.";
+    if (demo_kind == sym("turn")) s = "Swipe the strings sideways to turn them around.";
     a: f32 = clampf((now_t - demo_t0) * 4.0, 0.0, 1.0);
     busy = true;
     fs: f32 = 14.0;

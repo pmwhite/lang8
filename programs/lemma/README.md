@@ -198,14 +198,102 @@ name stands over a person as its ball, a property a fact gives them lit
 give), the one the goal wants ringed; proved for any y, every chip is
 lit, for some one only theirs.
 
+## Groups: beads and a tile
+
+The Groups chapter has no formulas on its board (`beads.l8` makes its
+moves, `beadboard.l8` is its board). Its statements are the same HOL as
+anywhere, and every move is the kernel's; the beads are a view of them.
+
+**The tile** (the first three levels). A cream square with a flag on it,
+its shadow beside it (where it must get to), and a slot under them for
+each move the level asks for. Tap the tile: a quarter turn; swipe it
+sideways: it flips over. Each move fills the next slot with its icon.
+Above, a little map of where the tile has been: each place it has lain
+(a small tile in that pose), the roads it took (dotted), the shadow's
+place ringed; places not yet found are faint dots. Every walk level
+starts from the same place, so the map grows across them (the eight
+symmetries of a square and the two moves: its Cayley graph, though no
+word says so). A level whose shadow was got by a longer walk (*A short
+cut*) shows that walk faint on the map. Out of moves and not there, the
+tile greys, *It can't get there in the moves left*, and an *Undo k* pill.
+
+In the kernel the square is concrete: `sq(a, b, c, d)` is the tile by its
+corners, and the region's two rules say what a move does to them
+(`act(turn, sq(a, b, c, d)) = sq(d, a, b, c)`, `act(flip, sq(a, b, c, d))
+= sq(b, a, d, c)`). A walk level is `∃x. ∃y. act(y, act(x, S)) = T`;
+each move chooses the next ∃ (Choose, `exI`) with `turn` or `flip`, and
+the game rewrites by the two rules till the tile is a `sq(...)` again;
+when the slots are full and the sides are the same, it closes.
+
+**Beads** (the rest). A product is a string of beads on a cord: `a · b⁻¹
+· c` is three beads; `b⁻¹` is the `b` bead turned over (the same color,
+its face the other way about: pale, a rim and the letter in its color).
+No brackets (a string), no `e` (no bead: an empty cord is nothing), no
+`⁻¹`. The goal is two strings, one over the other, in a card; it is
+proved when they are the same, and the lower slides up into the upper.
+Facts are stamps: a blue card with a string on each side of a seam; *X*
+on a stamp (a hollow bead) is any beads at all, even none. When a level
+has a fact, the shelf at the foot holds each name's bead both ways up.
+
+| Two taps (either first), or a drag | Move |
+|---|---|
+| a bead, then its turned-over twin beside it; or a bead dragged onto it | the pair pops (`a · a⁻¹ = e`, `a⁻¹ · a = e`) |
+| a bead, then the bead beside it (or a drag along beads: a pinch) | the stretch grows, held (lifted, a grey edge) |
+| a stretch, then a stamp's face (or the face, then a bead) | the stretch becomes the stamp's other face; face first, the shortest stretch through that bead it fits |
+| a shelf bead, then a gap (or a bead: the gap on the finger's side) | it and its twin come out of nothing there (the inverse rules backwards) |
+| a stamp's empty face, then a gap | its other face comes out there; if that has X, the gap opens with two hollow beads, *Tap a bead below for X*, and a shelf bead fills it |
+| the strings swiped sideways | both turned round, every bead turned over (`x⁻¹ = y⁻¹` is enough for `x = y`) |
+
+Tapping what is held, or nothing, lets go; a gap held shows as a thin
+caret with the beads parted. While the partner is pressed, or a thing
+carried hovers where it fits, the goal card tints and a card away from
+the finger (over the stamps, or over the shelf when the finger is high)
+shows what the strings would become. A pop is a soft squish; new beads
+swell in; turned strings swing round, each bead turning over. Refusals
+are the board's (*Doesn't match* the second time). Dead ends are not
+looked for in beads (the bulb says *Undo k* off the book's path).
+
+Behind it the goal is kept in order by the game's own kernel moves:
+right-nested, no `e`, inverses on names only, by Regroup, e on the left
+and right and three lemmas groups.txt proves from the rulebook (`inv_mul`,
+`inv_inv`, `inv_e`; with `inv_unique` and `turn_round`, these are
+`lemma`s with written proofs, not levels). A move on a stretch regroups
+the string so the stretch is one part (assoc backwards), makes it the
+term the equation names (its normal form taken back: `f` into `f · e`),
+rewrites it by the rule or fact (a for-all stamp by the instance `Use
+with` gives, X read off the stretch), and puts the whole in order again.
+The first kernel step is the player's move, the rest the game's (so undo
+takes the whole gesture back, and the move count is one); the level's
+first ordering, before any move, is never undone. A proof written out
+reads as a calculation through every step.
+
+Proofs in groups.txt are written as these gestures: `walk turn`, `walk
+flip`; `pop top 1` (beads 1 and 2); `pair "a⁻¹" top 0` (that bead and its
+twin at gap 0); `stamp 0 face 1 top 1 2` (fact 0's face 1 onto top beads
+1, 2; 0 beads is a gap); `stamp 0 face 1 bottom 4 0 with "b"` (x given);
+`turn`. The hint, Watch and the first-time demos (`walk`, `flipwalk`,
+`pop`, `stamp`, `pair`, `turn`) play them by the ghost hand as two taps,
+a tap on the tile, or a swipe.
+
+The chapter's first page has no rulebook: its cover (the tile and a few
+beads) and three small pictures with a line each. Its Book says what the
+pictures stand for in the words books use (a bead turned over is its
+inverse, no bead is e, ...), each with its rule written out, then the
+theorems proved, each as beads and as books write it.
+
+Limits is off the map for now (`region_shown` in `app.l8`: set it true to
+show it); its files and tests stay.
+
 ## Playing in pictures (hooks)
 
-- `L8_LEVEL=k` opens map level k (logic 0-10, groups 11-18, limits 19-23);
+- `L8_LEVEL=k` opens map level k (logic 0-10, groups 11-19: the tile
+  11-13, beads 14-19; limits, when it is on the map, 20-24);
   the progress file the rig uses is the game's argument (seen demos and
   solved levels change what shows; without `seen KIND` lines the demos
   play). `L8_WATCH=1` plays its written proof as ghost-hand gestures
   (`L8_WATCH_PACE` in hundredths: 40 is quick). `L8_CHAPTER=1` shows its
-  chapter's page first, as the map does the first time.
+  chapter's page first, as the map does the first time. `L8_BOOK=r` opens
+  chapter r's Book (from 0).
 - `L8_DO` makes gestures by what they are; each is found on the board
   and played as a real drag (or tap) by the puppet finger, every frame
   between, so hovers show:
@@ -223,6 +311,10 @@ lit, for some one only theirs.
   | `tap token N`, `tap fact K [face L]`, `tap rule K face L`, `tap lemma K`, `tap kit K` | a tap on a thing (held, or the held one's partner: the move) |
   | `tap part "T"`, `tap goal`, `tap notch goal`, `tap notch fact K` | a tap on a place: the goal's part shown as T (on it, not on a part inside it), the whole goal (by its edge), a notch |
   | `undo`, `hint`, `enter`, `wait` | as the keys |
+  | `tile`, `swipe` | the tile tapped (a turn); the tile, or the strings, swiped |
+  | `tap bead top I`, `tap gap bottom I`, `tap stamp J face F`, `tap shelf a`, `tap shelf a'`, `tap tile` | beads: a tap on a bead, a gap (before bead I), a stamp's face, a shelf bead (`a'` or `"a⁻¹"` turned over) |
+  | `pop top I`, `pinch top I J` | bead I dragged onto bead I + 1; beads I to J pinched |
+  | `shelf a' > top I`, `stamp J face F > top I`, `stamp J face F > gap top I` | carried to gap I, onto bead I, onto gap I |
 
   Each step starts `L8_DO_GAP` hundredths (default 90) after the last
   ends; carries take `L8_DO_MS` (600). `L8_DO_STOP=k` holds step k (from
@@ -245,15 +337,29 @@ lit, for some one only theirs.
   undo (or cancels a socket), `w` watch, `esc` back. `h;enter` once per
   par move follows the book to the end, in every chapter.
 
-By taps, either order (Nothing changes; Someone for everyone with its
-trap, dead end and undo; a face that wants a name; a kit tile; a press):
+By taps, either order (Someone for everyone with its trap, dead end and
+undo; a kit tile, with Limits on the map):
 
 ```sh
-L8_LEVEL=11 L8_DO='tap rule 2 face 0; tap part "(e · a) · e"; tap part "e · a"; tap rule 1 face 0' .build/lemma
 L8_LEVEL=10 L8_DO='open goal; tap token y; tap notch goal; wait; undo; open fact 0; tap notch goal; tap token x; tap token y; tap fact 0' .build/lemma
-L8_LEVEL=14 L8_DO='tap rule 1 face 1; tap part "b"; tap part "e"; tap rule 3 face 1; tap token a' .build/lemma
-L8_LEVEL=21 L8_DO='open goal; open goal; open fact 0; tap token ε; tap kit 0; tap fact 0; tap token "ε / 2"' .build/lemma
-L8_LEVEL=11 L8_DO='tap rule 2 face 0; tap part "(e · a) · e"' L8_DO_STOP=2 .build/lemma   # pressed: The goal becomes e · a = a
+L8_LEVEL=22 L8_DO='open goal; open goal; open fact 0; tap token ε; tap kit 0; tap fact 0; tap token "ε / 2"' .build/lemma
+```
+
+The tile (two turns; a flip then a turn; a flip twice: can't get there),
+and beads (pops, a press showing what it would make, a pair out of
+nothing and a stamp, the strings turned round, x x out of nothing and a
+pinched stretch):
+
+```sh
+L8_LEVEL=11 L8_DO='tile; tile' .build/lemma
+L8_LEVEL=12 L8_DO='swipe; tile' .build/lemma
+L8_LEVEL=11 L8_DO='swipe; swipe' .build/lemma
+L8_LEVEL=14 L8_DO='tap bead top 1; tap bead top 2; pop top 0; tap bead bottom 0; tap bead bottom 1' .build/lemma
+L8_LEVEL=14 L8_DO='tap bead top 1; tap bead top 2' L8_DO_STOP=2 .build/lemma   # pressed: the card over the shelf
+L8_LEVEL=16 L8_DO="tap shelf a'; tap gap top 0; tap bead top 1; tap bead top 2; tap stamp 0 face 0; pop top 0" .build/lemma
+L8_LEVEL=17 L8_DO='swipe; tap stamp 0 face 1; tap bead top 0' .build/lemma
+L8_LEVEL=19 L8_DO='tap stamp 0 face 1; tap gap bottom 0; tap shelf a; stamp 0 face 1 > gap bottom 4; tap shelf b; pinch bottom 1 4; tap stamp 0 face 0' .build/lemma
+L8_LEVEL=16 L8_WATCH=1 L8_WATCH_PACE=60 .build/lemma
 ```
 
 Someone for everyone: the trap, its dead end, and the way:
@@ -264,34 +370,15 @@ L8_LEVEL=10 L8_DO="open goal;token y > goal;undo;open fact 0;token x > goal;toke
 L8_LEVEL=10 L8_DO="open goal;open fact 0;token x > goal;token y > fact 0" L8_DO_STOP=4 .build/lemma   # the preview, it would close
 ```
 
-Cancel on the left by faces (seven moves; step 2 leaves a socket,
-step 3 fills it):
+With Limits on the map: Doubled with the kit (ε onto `□ / 2`, then `ε /
+2` into the notch), Only one limit's Suppose not held over the facts, and
+Adding limits' trap (`N` alone; `N₁ ≤ n` is a dead end, *Undo 4*):
 
 ```sh
-L8_LEVEL=14 L8_DO='rule 1 face 1 > part "b"; rule 3 face 1 > part "e"; fill a;
-  rule 0 face 0 > part "(a⁻¹ · a) · b"; fact 0 face 0 > part "a · b";
-  rule 0 face 1 > part "a⁻¹ · (a · c)"; rule 3 face 0 > part "a⁻¹ · a";
-  rule 1 face 0 > part "e · c"' .build/lemma
-L8_LEVEL=14 L8_DO='rule 1 face 1 > part "b"' L8_DO_STOP=1 .build/lemma    # the hover: e · b
-```
-
-Only one e (a for-all fact's face), The inverse of the inverse (a swipe
-and a lemma tile):
-
-```sh
-L8_LEVEL=13 L8_DO='rule 2 face 1 > part "f"; fact 0 face 0 > part "f · e"' .build/lemma
-L8_LEVEL=16 L8_DO='flip; lemma 0 > goal; rule 3 face 0 > part "a⁻¹ · a"' .build/lemma
-```
-
-Doubled with the kit (ε onto `□ / 2`, then `ε / 2` into the notch), Only
-one limit's Suppose not held over the facts, and Adding limits' trap (`N`
-alone; `N₁ ≤ n` is a dead end, *Undo 4*):
-
-```sh
-L8_LEVEL=21 L8_DO='open goal; open goal; open fact 0; token ε > kit 0; token "ε / 2" > fact 0;
+L8_LEVEL=22 L8_DO='open goal; open goal; open fact 0; token ε > kit 0; token "ε / 2" > fact 0;
   open fact 2; token N > goal; open goal; token n > fact 2' .build/lemma
-L8_LEVEL=23 L8_DO="suppose" L8_DO_STOP=1 .build/lemma
-L8_LEVEL=22 L8_DO_GAP=40 L8_DO="$(for i in $(seq 8); do printf 'hint;enter;'; done)token N > goal; open goal; token n > fact 3; token n > fact 4" .build/lemma
+L8_LEVEL=24 L8_DO="suppose" L8_DO_STOP=1 .build/lemma
+L8_LEVEL=23 L8_DO_GAP=40 L8_DO="$(for i in $(seq 8); do printf 'hint;enter;'; done)token N > goal; open goal; token n > fact 3; token n > fact 4" .build/lemma
 ```
 
 A name dropped on the fact whose ∃ key is still shut (*Open it first*),
@@ -303,7 +390,7 @@ name going to the shelf, and the Book's words (a progress file with
 L8_LEVEL=10 L8_DO="open goal;token y > fact 0" .build/lemma
 L8_LEVEL=10 L8_DO="open goal;token y > goal;hint" .build/lemma         # stuck: the finger taps Undo 1 (from ~6.5 s)
 L8_LEVEL=5 L8_DO="open goal;fact 0 > goal;fact 0 > goal" .build/lemma # P ⟶ Q gives Q, not R (~7 s)
-L8_LEVEL=20 L8_DO="open goal;open goal;open fact 0;token ε > fact 0" L8_DO_STOP=4 .build/lemma  # the band it would give
+L8_LEVEL=21 L8_DO="open goal;open goal;open fact 0;token ε > fact 0" L8_DO_STOP=4 .build/lemma  # the band it would give (Limits on)
 L8_LEVEL=6 L8_DO="open goal;token y > fact 0" L8_DO_STOP=2 .build/lemma
 L8_LEVEL=6 L8_TAPS=63,757 .build/lemma      # the goal's ∀ key: grab frames from 1.75 s on
 L8_LEVEL=6 L8_DO="open goal;fact 0 > goal;fact 0 > goal" .build/lemma  # Drop y into ∀ first (~7.5 s)
@@ -313,7 +400,7 @@ L8_TAPS=100,170 .build/lemma                # the map: Logic's cover opens its B
 Watch, and a demo (a progress file without `seen` lines):
 
 ```sh
-L8_LEVEL=23 L8_WATCH=1 L8_WATCH_PACE=60 .build/lemma
+L8_LEVEL=19 L8_WATCH=1 L8_WATCH_PACE=60 .build/lemma
 grep -v '^seen' .build/lemma-progress.txt > /tmp/p.txt; L8_LEVEL=6 .build/lemma /tmp/p.txt
 ```
 
@@ -370,9 +457,16 @@ grep -v '^seen' .build/lemma-progress.txt > /tmp/p.txt; L8_LEVEL=6 .build/lemma 
   play; Limits' dead ends), `app.l8` (state, moves, demos, Watch),
   `pages.l8`, `picture.l8`, `words.l8` (the words: the Book's pages), `touch.l8`, `main.l8` (`L8_DO` and the other
   hooks); `web/lemma` runs it in a browser.
+- `beads.l8` (the engine: strings of beads read off a product, the goal
+  kept in order, a stretch exposed, rewritten and put back, pops, pairs,
+  stamps, turning round, the tile's walk and its dead end) and
+  `beadboard.l8` (Groups' board: beads, stamps, the shelf, the tile, its
+  shadow, slots and map, two taps and drags, previews, the ghost hand's
+  places, `L8_DO` and `L8_BOXES` for it, the chapter's page and Book);
+  `paint.l8`'s `p_quad_xf` draws anything turned, squashed or mirrored.
 
-A region's theorem can be exported (`export_theorem` in moves.l8): its
-rulebook discharged, its symbols quantified and its carrier types made
+A region's theorem can be exported (`export_theorem` in moves.l8): the
+rules of its rulebook it uses discharged, the symbols it speaks of quantified and its carrier types made
 any types, it is a theorem with no hypotheses at all, ready to be used of
 any structure that obeys the rulebook. The test shows (a·b)⁻¹ = b⁻¹·a⁻¹
 exported so; that is what the Foundations region will instantiate.
@@ -388,9 +482,9 @@ to `region_files` in `app.l8` and `FILES` in `web/lemma/lemma.js`. A
 
 ## Not built yet
 
-A fact onto a fact (forward); in Groups
-tiles a preview would take away vanish rather than ghost; long-pressing a part to
-pull out a copy; ∨; keyboard navigation of keys and tiles.
+A fact onto a fact (forward); long-pressing a part to pull out a copy;
+in Groups, a stretch dragged onto a stamp, dead ends among beads, the
+map's discoveries kept in the progress file; ∨; keyboard navigation of keys and tiles.
 
 The Foundations region (constructing ℕ, ℤ, ℚ, ℝ and proving each
 rulebook is satisfied); Calculate replaying a certificate through the

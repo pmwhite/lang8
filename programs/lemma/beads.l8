@@ -1,0 +1,927 @@
+tag lemma;
+
+use_tag std;
+
+// Beads and a tile: how the Groups chapter is played (README.md).
+//
+// A product is a string of beads: a · b⁻¹ · c is three beads in a row, b⁻¹
+// the b bead turned over. Brackets and e are not shown: the goal is kept
+// in order (right-nested, no e, inverses only on names) by the kernel's
+// own rewrites (Regroup, e on the left and right, and the lemmas proved in
+// groups.txt that turn an inverse of a product round), each made as a move
+// of the game's, so what the player sees is the string and every step
+// under it is checked. A bead and its turned-over twin side by side pop
+// (the inverse rules); a pair can be pulled out of nothing (the same,
+// backwards); a fact that is an equation is a stamp, its one side swapped
+// for its other where it shows in the string; and the whole goal can be
+// turned round (both strings reversed, every bead turned over).
+//
+// Each of these is one move of the player's: the first kernel step it
+// makes is counted as the player's (undo goes back to it), the rest are
+// the game's. To work on a stretch of beads, the string is regrouped so the
+// stretch is one part of it (the exposure), the stretch is made into the
+// term the equation names (its normal form taken back), then rewritten,
+// then the whole put back in order.
+//
+// The tile: a square, its four corners A B C D (sq(A, B, C, D)), moved by
+// a quarter turn and a flip (act(turn, p), act(flip, p), the region's two
+// rules). A walk level asks for moves (∃x. ∃y. act(y, act(x, S)) = T):
+// each move the player makes chooses the next one (exI), and the kernel
+// computes where the tile is.
+
+// ---- the region's symbols ----
+bd_mul: int = 0;
+
+bd_e: int = 0;
+
+bd_inv: int = 0;
+
+bd_act: int = 0;
+
+bd_sq: int = 0;
+
+bd_turn: int = 0;
+
+bd_flip: int = 0;
+
+bd_fix(name: str): int {
+    i: int = find_ent(sym(name), 1 << E_FIX);
+    if (i < 0) return 0;
+    ent_term[i]
+}
+
+bd_syms() {
+    bd_mul = bd_fix("mul");
+    bd_e = bd_fix("e");
+    bd_inv = bd_fix("inv");
+    bd_act = bd_fix("act");
+    bd_sq = bd_fix("sq");
+    bd_turn = bd_fix("turn");
+    bd_flip = bd_fix("flip")
+}
+
+// Whether the loaded region is played with beads and a tile.
+bd_region(): bool {
+    region_picture == sym("beads")
+}
+
+// How level l is played: 0 as formulas, 1 beads, 2 the tile.
+const BM_NONE: int = 0;
+
+const BM_BEADS: int = 1;
+
+const BM_WALK: int = 2;
+
+bd_mode_of(l: int): int {
+    if (l < 0 || !bd_region()) return BM_NONE;
+    bd_syms();
+    if (bd_act != 0 && bd_occurs(lv_goal[l], tm_name(bd_act))) return BM_WALK;
+    BM_BEADS
+}
+
+// Whether a free name called s occurs in t.
+bd_occurs(t: int, s: int): bool {
+    k: int = tm_kind(t);
+    if (k == TM_FREE || k == TM_VAR) return tm_name(t) == s;
+    if (k == TM_APP) return bd_occurs(tm_fun(t), s) || bd_occurs(tm_arg(t), s);
+    if (k == TM_ABS) return bd_occurs(tm_body(t), s);
+    false
+}
+
+bd_is_mul(t: int): bool {
+    tm_kind(t) == TM_APP && tm_kind(tm_fun(t)) == TM_APP && tm_fun(tm_fun(t)) == bd_mul
+}
+
+bd_is_inv(t: int): bool {
+    tm_kind(t) == TM_APP && tm_fun(t) == bd_inv
+}
+
+bd_mk_mul(a: int, b: int) raises KernelError: int {
+    mk_app(mk_app(bd_mul, a), b)
+}
+
+bd_mk_inv(a: int) raises KernelError: int {
+    mk_app(bd_inv, a)
+}
+
+// ---- a product as a string ----
+// The beads of a term, left to right: each a name (its term) and whether
+// it is turned over. e is no bead; an inverse of a product is its string
+// turned round.
+const BS: int = 128;
+
+bs_atom: []int = new int[BS](0);
+
+bs_flip: []bool = new bool[BS](false);
+
+bs_n: int = 0;
+
+bd_flatten(t: int, flip: bool) {
+    if (bd_is_mul(t)) {
+        a: int = tm_arg(tm_fun(t));
+        b: int = tm_arg(t);
+        if (flip) {
+            bd_flatten(b, true);
+            bd_flatten(a, true)
+        } else {
+            bd_flatten(a, false);
+            bd_flatten(b, false)
+        }
+        return
+    }
+    if (bd_is_inv(t)) {
+        bd_flatten(tm_arg(t), !flip);
+        return
+    }
+    if (t == bd_e) return;
+    if (bs_n < BS) {
+        bs_atom[bs_n] = t;
+        bs_flip[bs_n] = flip;
+        bs_n = bs_n + 1
+    }
+}
+
+// A side of the goal's equation (0 the left, 1 the right).
+bd_side_term(concl: int, side: int): int {
+    q: int = rel_core(concl);
+    if (!is_binary(q, role_name[ROLE_EQ])) return 0;
+    spine_arg(q, 2, side)
+}
+
+// The string of beads from..to (as bs_ holds them), as a term in order.
+bd_term_of(
+    atom: []int,
+    flip: []bool,
+    from: int,
+    to: int
+) raises KernelError: int {
+    if (from >= to) return bd_e;
+    a: int = atom[from];
+    if (flip[from]) a = bd_mk_inv(a);
+    if (from + 1 == to) return a;
+    bd_mk_mul(a, bd_term_of(atom, flip, from + 1, to))
+}
+
+// ---- paths ----
+bp_steps: []int = new int[256](0);
+
+bp_n: int = 0;
+
+bp_push(s: int) {
+    if (bp_n < len(bp_steps)) {
+        bp_steps[bp_n] = s;
+        bp_n = bp_n + 1
+    }
+}
+
+// The path to side `side` of the goal's equation.
+bp_side(concl: int, side: int) {
+    bp_n = 0;
+    if (tm_kind(concl) == TM_APP && tm_kind(tm_fun(concl)) == TM_CONST && tm_name(tm_fun(concl)) == role_name[ROLE_TRUE]) bp_push(P_ARG);
+    if (side == 0) bp_push(P_FUN);
+    bp_push(P_ARG)
+}
+
+// The subterm of t at the path bp_ (0 if it is not there).
+bp_sub(t: int): int {
+    s: int = t;
+    for i in 0..bp_n {
+        if (tm_kind(s) != TM_APP) return 0;
+        if (bp_steps[i] == P_FUN) s = tm_fun(s) else s = tm_arg(s)
+    }
+    s
+}
+
+// A path kept (the place being worked on).
+qp_steps: []int = new int[256](0);
+
+qp_n: int = 0;
+
+qp_keep() {
+    qp_n = bp_n;
+    for i in 0..bp_n qp_steps[i] = bp_steps[i]
+}
+
+qp_back() {
+    bp_n = qp_n;
+    for i in 0..qp_n bp_steps[i] = qp_steps[i]
+}
+
+// ---- the kernel's rewrites, at the path bp_ of the goal ----
+// A name for what a rule's other side has that its matched side does not
+// fix (a in e = a · a⁻¹), or 0.
+bd_wit: int = 0;
+
+bd_eq_sides(q: int) {
+    if (is_eq(q)) {
+        bq_lhs = lhs_of(q);
+        bq_rhs = rhs_of(q)
+    } else {
+        c: int = rel_core(q);
+        bq_lhs = spine_arg(c, 2, 0);
+        bq_rhs = spine_arg(c, 2, 1)
+    }
+}
+
+bq_lhs: int = 0;
+
+bq_rhs: int = 0;
+
+// Rule l (an equation) at the path, forwards or back. The move, or -1.
+bd_rw(l: int, back: bool) raises KernelError: int {
+    n: int = focus();
+    if (n < 0 || l < 0) return -1;
+    rw_n = bp_n;
+    for i in 0..bp_n rw_steps[i] = bp_steps[i];
+    g: int = pn_goal[n];
+    s: int = rw_sub(gl_concl[g], g);
+    bd_eq_sides(strip_rule(thm_prop(lm_thm[l])));
+    side: int = bq_lhs;
+    other: int = bq_rhs;
+    if (back) {
+        side = bq_rhs;
+        other = bq_lhs
+    }
+    match_clear();
+    if (!match_term(side, s)) return -1;
+    if (bd_wit != 0) {
+        vars_n = 0;
+        collect_vars(other);
+        for i in 0..vars_n {
+            v: int = vars[i];
+            if (match_val(v) == 0) {
+                if (!match_type(tm_type(v), tm_type(bd_wit)) || !match_bind(v, bd_wit)) return -1
+            }
+        }
+    }
+    m: int = apply_rewrite(n, l, 0, back, -1);
+    last_move = m;
+    m
+}
+
+// The fact h (or the theorem th it gives, if not 0) at the path.
+bd_rw_fact(h: int, th: int, back: bool) raises KernelError: int {
+    n: int = focus();
+    if (n < 0) return -1;
+    rw_n = bp_n;
+    for i in 0..bp_n rw_steps[i] = bp_steps[i];
+    rw_given = th;
+    m: int = -1;
+    try {
+        m = apply_rewrite(n, -1, h, back, -1)
+    } with KernelError -> {
+        rw_given = 0;
+        kernel_fail("a stamp that does not fit")
+    }
+    rw_given = 0;
+    last_move = m;
+    m
+}
+
+// ---- in order ----
+// The rewrites that put a goal in order, each forwards: brackets to the
+// right, no e, inverses on names only; and where the tile is.
+bd_norm_names: []str = ["assoc", "id_left", "id_right", "inv_mul", "inv_inv", "inv_e",
+    "turn_def", "flip_def"];
+
+bd_norm_l: []int = new int[8](-1);
+
+bd_norm_setup() {
+    for i in 0..len(bd_norm_names) bd_norm_l[i] = find_lemma(sym(bd_norm_names[i]))
+}
+
+// The first part of t (from the outside in, left first) that one of them
+// fits: its path (added to bp_), and the rule (bd_fl). Whether there is one.
+bd_fl: int = -1;
+
+bd_find_at(t: int): bool {
+    if (tm_closed(t)) {
+        for i in 0..len(bd_norm_names) {
+            l: int = bd_norm_l[i];
+            if (l >= 0) {
+                bd_eq_sides(strip_rule(thm_prop(lm_thm[l])));
+                match_clear();
+                if (match_term(bq_lhs, t)) {
+                    bd_fl = l;
+                    return true
+                }
+            }
+        }
+    }
+    k: int = tm_kind(t);
+    if (k == TM_APP) {
+        // (Not into the statement's own constants.)
+        bp_push(P_FUN);
+        if (bd_find_at(tm_fun(t))) return true;
+        bp_steps[bp_n - 1] = P_ARG;
+        if (bd_find_at(tm_arg(t))) return true;
+        bp_n = bp_n - 1;
+        return false
+    }
+    if (k == TM_ABS) {
+        bp_push(P_BODY);
+        if (bd_find_at(tm_body(t))) return true;
+        bp_n = bp_n - 1
+    }
+    false
+}
+
+// The goal put in order, by the game's own moves.
+bd_normalise() raises KernelError {
+    bd_norm_setup();
+    for _ in 0..400 {
+        n: int = focus();
+        if (n < 0) return;
+        bp_n = 0;
+        if (!bd_find_at(gl_concl[pn_goal[n]])) {
+            auto_close();
+            return
+        }
+        m: int = bd_rw(bd_fl, false);
+        if (m < 0) kernel_fail("a goal that would not go in order");
+        mv_auto[m] = true
+    }
+}
+
+// A level begun: its goal in order at once (the game's moves; undo never
+// goes past them).
+bd_level_start() raises KernelError {
+    if (!bd_region() || cur_level < 0 || lv_given[cur_level]) return;
+    bd_syms();
+    bd_normalise()
+}
+
+// ---- in order, on a term alone (no moves): for taking it back ----
+// The steps that put t in order, each its path and rule (bdr_), and the
+// term in order.
+const BDR: int = 128;
+
+bdr_l: []int = new int[BDR](0);
+
+bdr_p0: []int = new int[BDR](0);
+
+bdr_pn: []int = new int[BDR](0);
+
+bdr_pool: []int = new int[4096](0);
+
+bdr_pooln: int = 0;
+
+bdr_n: int = 0;
+
+bd_pure_norm(t0: int) raises KernelError: int {
+    bd_norm_setup();
+    bdr_n = 0;
+    bdr_pooln = 0;
+    t: int = t0;
+    for _ in 0..BDR {
+        bp_n = 0;
+        if (!bd_find_at(t)) return t;
+        if (bdr_n >= BDR || bdr_pooln + bp_n > len(bdr_pool)) kernel_fail("too long to put in order");
+        bdr_l[bdr_n] = bd_fl;
+        bdr_p0[bdr_n] = bdr_pooln;
+        bdr_pn[bdr_n] = bp_n;
+        for i in 0..bp_n bdr_pool[bdr_pooln + i] = bp_steps[i];
+        bdr_pooln = bdr_pooln + bp_n;
+        bdr_n = bdr_n + 1;
+        t = bd_pure_at(t, 0, bd_fl)
+    }
+    t
+}
+
+// t with its part at the path bp_ (from step i) rewritten by rule l.
+bd_pure_at(t: int, i: int, l: int) raises KernelError: int {
+    if (i == bp_n) {
+        bd_eq_sides(strip_rule(thm_prop(lm_thm[l])));
+        match_clear();
+        if (!match_term(bq_lhs, t)) kernel_fail("a rewrite that does not fit");
+        return norm(match_subst(bq_rhs))
+    }
+    if (tm_kind(t) != TM_APP) kernel_fail("a path that does not fit");
+    if (bp_steps[i] == P_FUN) return mk_app(bd_pure_at(tm_fun(t), i + 1, l), tm_arg(t));
+    mk_app(tm_fun(t), bd_pure_at(tm_arg(t), i + 1, l))
+}
+
+// ---- a stretch worked on ----
+// The stretch [i, i + k) of side `side` (k = 0: the gap before bead i) made
+// into the term L, then rewritten (rule l, back; or, l < 0, fact h, by the
+// theorem th if not 0), then all put in order. The first kernel move is the
+// player's; the rest the game's. Whether it was made (if not, nothing is).
+bd_replace(
+    side: int,
+    i: int,
+    k: int,
+    big_l: int,
+    l: int,
+    h: int,
+    th: int,
+    back: bool
+): bool {
+    n0: int = focus();
+    if (n0 < 0) return false;
+    m0: int = mv_n;
+    gs_save();
+    ok: bool = false;
+    try {
+        ok = bd_replace_go(side, i, k, big_l, l, h, th, back)
+    } with KernelError -> {
+        ok = false
+    }
+    bd_wit = 0;
+    if (!ok) {
+        gs_restore(n0);
+        return false
+    }
+    gsv_n = gsv_n - 1;
+    bd_mark(m0);
+    true
+}
+
+// The moves from m0 on: the first the player's, the rest the game's.
+bd_mark(m0: int) {
+    for m in m0..mv_n mv_auto[m] = m != m0
+}
+
+bd_replace_go(
+    side: int,
+    i: int,
+    k: int,
+    big_l: int,
+    l: int,
+    h: int,
+    th: int,
+    back: bool
+) raises KernelError: bool {
+    n: int = focus();
+    concl: int = gl_concl[pn_goal[n]];
+    st: int = bd_side_term(concl, side);
+    if (st == 0) return false;
+    bs_n = 0;
+    bd_flatten(st, false);
+    ln: int = bs_n;
+    if (i < 0 || k < 0 || i + k > ln) return false;
+    lid_left: int = find_lemma(sym("id_left"));
+    lid_right: int = find_lemma(sym("id_right"));
+    lassoc: int = find_lemma(sym("assoc"));
+    keep_wit: int = bd_wit;
+    bd_wit = 0;
+    // (The place: the stretch made one part of its side.)
+    bp_side(concl, side);
+    if (k == 0) {
+        if (ln > 0 && i < ln) {
+            for _ in 0..i bp_push(P_ARG);
+            qp_keep();
+            if (bd_rw(lid_left, true) < 0) return false;
+            qp_back();
+            bp_push(P_FUN);
+            bp_push(P_ARG)
+        } else if (ln > 0) {
+            // (After the last bead: it is the part at the end, z of
+            // x · (... · z).)
+            for _ in 0..ln - 1 bp_push(P_ARG);
+            qp_keep();
+            if (bd_rw(lid_right, true) < 0) return false;
+            qp_back();
+            bp_push(P_ARG)
+        }
+    } else {
+        for _ in 0..i bp_push(P_ARG);
+        if (i + k < ln) {
+            qp_keep();
+            if (!bd_split(lassoc, k)) return false;
+            qp_back();
+            bp_push(P_FUN);
+            bp_push(P_ARG)
+        }
+    }
+    qp_keep();
+    // (The part now is the stretch in order; made into L, taken back from
+    // L in order.)
+    n = focus();
+    sub: int = bp_sub(gl_concl[pn_goal[n]]);
+    want: int = bd_pure_norm(big_l);
+    if (want != sub) return false;
+    j: int = bdr_n - 1;
+    while (j >= 0) {
+        qp_back();
+        for s in 0..bdr_pn[j] bp_push(bdr_pool[bdr_p0[j] + s]);
+        if (bd_rw(bdr_l[j], true) < 0) return false;
+        j = j - 1
+    }
+    // (The move itself.)
+    qp_back();
+    m: int = -1;
+    bd_wit = keep_wit;
+    if (l >= 0) m = bd_rw(l, back) else m = bd_rw_fact(h, th, back);
+    bd_wit = 0;
+    if (m < 0) return false;
+    bd_normalise();
+    true
+}
+
+// The suffix at the path (x₁ · (x₂ · (... · rest))) regrouped so its
+// first k beads are one part: (x₁ · ... · x_k) · rest.
+bd_split(lassoc: int, k: int) raises KernelError: bool {
+    if (k <= 1) return true;
+    bp_push(P_ARG);
+    if (!bd_split(lassoc, k - 1)) return false;
+    bp_n = bp_n - 1;
+    bd_rw(lassoc, true) >= 0
+}
+
+// ---- the gestures ----
+// Beads i and i + 1 of side `side`, twins, popped.
+bd_pop(side: int, i: int) raises KernelError: bool {
+    n: int = focus();
+    if (n < 0) return false;
+    bd_syms();
+    st: int = bd_side_term(gl_concl[pn_goal[n]], side);
+    if (st == 0) return false;
+    bs_n = 0;
+    bd_flatten(st, false);
+    if (i < 0 || i + 1 >= bs_n) return false;
+    if (bs_atom[i] != bs_atom[i + 1] || bs_flip[i] == bs_flip[i + 1]) return false;
+    x: int = bs_atom[i];
+    rule: str = "inv_right";
+    big_l: int = bd_mk_mul(x, bd_mk_inv(x));
+    if (bs_flip[i]) {
+        rule = "inv_left";
+        big_l = bd_mk_mul(bd_mk_inv(x), x)
+    }
+    bd_replace(side, i, 2, big_l, find_lemma(sym(rule)), 0, 0, false)
+}
+
+// A pair pulled out of nothing at gap i of side `side`: bead w (a name, or
+// a name turned over), then its twin.
+bd_pair(side: int, i: int, w: int): bool {
+    if (focus() < 0 || w == 0) return false;
+    bd_syms();
+    rule: str = "inv_right";
+    x: int = w;
+    if (bd_is_inv(w)) {
+        rule = "inv_left";
+        x = tm_arg(w)
+    }
+    if (bd_is_inv(x) || bd_is_mul(x) || x == bd_e) return false;
+    bd_wit = x;
+    bd_replace(side, i, 0, bd_e, find_lemma(sym(rule)), 0, 0, true)
+}
+
+// Fact j as a stamp: what each face says (bf_ strings), and whether it is
+// for every x (its x, the free name standing for it).
+bst_x: int = 0;
+
+bst_all: bool = false;
+
+// The body of fact h: an equation (opened for its x if it is for every x).
+bd_stamp_eq(h: int) raises KernelError: int {
+    bst_all = false;
+    bst_x = 0;
+    q: int = rel_core(h);
+    if (shape_of(q) == SH_ALL) {
+        f: int = tm_arg(q);
+        if (tm_kind(f) != TM_ABS) return 0;
+        bst_all = true;
+        bst_x = mk_free(sym("X"), tm_abs_type(f));
+        q = rel_core(open_abs(f, bst_x))
+    }
+    if (!is_binary(q, role_name[ROLE_EQ])) return 0;
+    q
+}
+
+// Whether fact h is a stamp.
+bd_is_stamp(h: int) raises KernelError: bool {
+    bd_syms();
+    bd_stamp_eq(h) != 0
+}
+
+// The stretch of the goal a face of a for-all stamp is put on: what x is
+// (as a string, into xs_), the face's string in pf_. Whether it fits.
+xs_atom: []int = new int[BS](0);
+
+xs_flip: []bool = new bool[BS](false);
+
+xs_n: int = 0;
+
+pf_atom: []int = new int[BS](0);
+
+pf_flip: []bool = new bool[BS](false);
+
+pf_n: int = 0;
+
+// Face f (0 left, 1 right) of fact h, as a string, into pf_.
+bd_face_string(h: int, f: int) raises KernelError: bool {
+    q: int = bd_stamp_eq(h);
+    if (q == 0) return false;
+    bs_n = 0;
+    bd_flatten(spine_arg(q, 2, f), false);
+    pf_n = bs_n;
+    for i in 0..bs_n {
+        pf_atom[i] = bs_atom[i];
+        pf_flip[i] = bs_flip[i]
+    }
+    true
+}
+
+// The face pf_ (with x for bst_x) against the beads sa_ (from a, k long):
+// what x must be, into xs_. Whether it fits.
+bd_solve_x(
+    sa: []int,
+    sfl: []bool,
+    a: int,
+    k: int
+): bool {
+    nx: int = 0;
+    nc: int = 0;
+    for i in 0..pf_n {
+        if (pf_atom[i] == bst_x && bst_x != 0) nx = nx + 1 else nc = nc + 1
+    }
+    lx: int = 0;
+    while (lx <= k) {
+        if (nc + nx * lx == k && (nx > 0 || lx == 0) && bd_try_x(sa, sfl, a, lx)) return true;
+        lx = lx + 1
+    }
+    false
+}
+
+bd_try_x(
+    sa: []int,
+    sfl: []bool,
+    a: int,
+    lx: int
+): bool {
+    xs_n = -1;
+    at: int = a;
+    for i in 0..pf_n {
+        if (pf_atom[i] == bst_x && bst_x != 0) {
+            if (xs_n < 0) {
+                // (x is read off its first place: turned round if it is
+                // turned over there.)
+                xs_n = lx;
+                for j in 0..lx {
+                    if (pf_flip[i]) {
+                        xs_atom[j] = sa[at + lx - 1 - j];
+                        xs_flip[j] = !sfl[at + lx - 1 - j]
+                    } else {
+                        xs_atom[j] = sa[at + j];
+                        xs_flip[j] = sfl[at + j]
+                    }
+                }
+            } else {
+                for j in 0..lx {
+                    want_a: int = xs_atom[j];
+                    want_f: bool = xs_flip[j];
+                    if (pf_flip[i]) {
+                        want_a = xs_atom[lx - 1 - j];
+                        want_f = !xs_flip[lx - 1 - j]
+                    }
+                    if (sa[at + j] != want_a || sfl[at + j] != want_f) return false
+                }
+            }
+            at = at + lx
+        } else {
+            if (sa[at] != pf_atom[i] || sfl[at] != pf_flip[i]) return false;
+            at = at + 1
+        }
+    }
+    if (xs_n < 0) xs_n = 0;
+    true
+}
+
+// Fact j put on the stretch [i, i + k) of side `side` (k = 0: the gap
+// before bead i) by its face f, which becomes its other face. A for-all
+// fact is used with x the stretch makes it, or with w if the face has no x
+// to read (an x x pulled out of nothing).
+bd_stamp(
+    j: int,
+    f: int,
+    side: int,
+    i: int,
+    k: int,
+    w: int
+) raises KernelError: bool {
+    n: int = focus();
+    if (n < 0) return false;
+    bd_syms();
+    g: int = pn_goal[n];
+    if (j < 0 || j >= gl_hypn[g]) return false;
+    h: int = goal_hyp(g, j);
+    q: int = bd_stamp_eq(h);
+    if (q == 0) return false;
+    if (!bst_all) return bd_replace(side, i, k, spine_arg(q, 2, f), -1, h, 0, f == 1);
+    // (For every x: x from the stretch, or w.)
+    x: int = w;
+    if (x == 0) {
+        st: int = bd_side_term(gl_concl[g], side);
+        if (st == 0) return false;
+        bs_n = 0;
+        bd_flatten(st, false);
+        if (i < 0 || k < 0 || i + k > bs_n) return false;
+        for t in 0..bs_n {
+            sa_atom[t] = bs_atom[t];
+            sa_flip[t] = bs_flip[t]
+        }
+        if (!bd_face_string(h, f)) return false;
+        // (A face with no x to read: x must be given.)
+        has_x: bool = false;
+        for t in 0..pf_n {
+            if (pf_atom[t] == bst_x) has_x = true
+        }
+        if (!has_x) return false;
+        if (!bd_solve_x(sa_atom, sa_flip, i, k)) return false;
+        x = bd_term_of(xs_atom, xs_flip, 0, xs_n)
+    }
+    th: int = bd_spec(h, x);
+    if (th == 0) return false;
+    p: int = rel_core(thm_prop(th));
+    bd_replace(side, i, k, spine_arg(p, 2, f), -1, h, th, f == 1)
+}
+
+sa_atom: []int = new int[BS](0);
+
+sa_flip: []bool = new bool[BS](false);
+
+// ⊢ P(x) from the fact ∀x. P(x) (assumed): by the logic's Use with.
+bd_spec(h: int, x: int) raises KernelError: int {
+    l: int = find_lemma(sym("spec"));
+    if (l < 0) return 0;
+    if (strip_rule(thm_prop(lm_thm[l])) == 0 || prem_n != 1) return 0;
+    match_clear();
+    if (!match_term(prem[0], h)) return 0;
+    vars_n = 0;
+    collect_vars(thm_prop(lm_thm[l]));
+    for i in 0..vars_n {
+        v: int = vars[i];
+        if (match_val(v) == 0) {
+            if (!match_type(tm_type(v), tm_type(x)) || !match_bind(v, x)) return 0
+        }
+    }
+    implies_elim(match_instantiate(lm_thm[l]), assume(h))
+}
+
+// The whole goal turned round: both strings reversed, each bead turned
+// over (x⁻¹ = y⁻¹ is enough for x = y).
+bd_turn_round(): bool {
+    n: int = focus();
+    if (n < 0) return false;
+    bd_syms();
+    if (bd_side_term(gl_concl[pn_goal[n]], 0) == 0) return false;
+    m0: int = mv_n;
+    gs_save();
+    ok: bool = false;
+    try {
+        ok = gs_rule(n, lemma_named("turn_round"), -1, false, 0);
+        if (ok) bd_normalise()
+    } with KernelError -> {
+        ok = false
+    }
+    if (!ok) {
+        gs_restore(n);
+        return false
+    }
+    gsv_n = gsv_n - 1;
+    bd_mark(m0);
+    true
+}
+
+// ---- the tile ----
+// The tile moved by w (turn or flip): the next move chosen, and where the
+// tile is worked out.
+bd_walk(w: int): bool {
+    n: int = focus();
+    if (n < 0 || w == 0) return false;
+    bd_syms();
+    m0: int = mv_n;
+    gs_save();
+    ok: bool = false;
+    try {
+        ok = gs_notch(n, -1, w);
+        if (ok) bd_normalise()
+    } with KernelError -> {
+        ok = false
+    }
+    if (!ok) {
+        gs_restore(n);
+        return false
+    }
+    gsv_n = gsv_n - 1;
+    bd_mark(m0);
+    true
+}
+
+// How many moves the goal still asks for (its ∃s).
+bd_walk_left(concl: int): int {
+    k: int = 0;
+    q: int = rel_core(concl);
+    while (shape_of(q) == SH_EX && tm_kind(tm_arg(q)) == TM_ABS) {
+        k = k + 1;
+        q = rel_core(tm_body(tm_arg(q)))
+    }
+    k
+}
+
+// Whether no walk of the moves left gets there.
+bd_walk_dead() raises KernelError: bool {
+    if (level_done()) return false;
+    n: int = focus();
+    if (n < 0) return false;
+    if (bd_walk_left(gl_concl[pn_goal[n]]) == 0) return true;
+    bd_syms();
+    for i in 0..2 {
+        w: int = bd_turn;
+        if (i == 1) w = bd_flip;
+        gs_save();
+        ok: bool = bd_walk(w);
+        reach: bool = ok && !bd_walk_dead();
+        gs_restore(n);
+        if (reach) return false
+    }
+    true
+}
+
+// Where the tile is in a walk's goal: the sq(...) its moves start from (or
+// have reached), and the moves still to make on it written in (0 if none).
+bd_tile_pos(concl: int): int {
+    q: int = rel_core(concl);
+    while (shape_of(q) == SH_EX && tm_kind(tm_arg(q)) == TM_ABS) q = rel_core(tm_body(tm_arg(q)));
+    if (!is_binary(q, role_name[ROLE_EQ])) return 0;
+    bd_innermost(spine_arg(q, 2, 0))
+}
+
+bd_innermost(t: int): int {
+    s: int = t;
+    while (tm_kind(s) == TM_APP && spine_len(s) == 2 && spine_head(s) == bd_act) s = tm_arg(s);
+    s
+}
+
+bd_tile_target(concl: int): int {
+    q: int = rel_core(concl);
+    while (shape_of(q) == SH_EX && tm_kind(tm_arg(q)) == TM_ABS) q = rel_core(tm_body(tm_arg(q)));
+    if (!is_binary(q, role_name[ROLE_EQ])) return 0;
+    spine_arg(q, 2, 1)
+}
+
+// A tile's pose: its corners (sq(w, x, y, z)) read against the level's A
+// B C D: how many quarter turns from the start (0 to 3), and whether it
+// is flipped. -1 if it cannot be read.
+bd_pose_turns: int = 0;
+
+bd_pose_flipped: bool = false;
+
+bd_pose(p: int, corner_a: int, corner_b: int): bool {
+    if (spine_len(p) != 4 || spine_head(p) != bd_sq) return false;
+    ia: int = -1;
+    for i in 0..4 {
+        if (spine_arg(p, 4, i) == corner_a) ia = i
+    }
+    if (ia < 0) return false;
+    nb: int = spine_arg(p, 4, (ia + 1) % 4);
+    bd_pose_flipped = nb != corner_b;
+    if (bd_pose_flipped) bd_pose_turns = (ia + 3) % 4 else bd_pose_turns = ia;
+    true
+}
+
+// ---- a gesture with beads, by its kind ----
+// Where it is made: the side (0 the top string, 1 the bottom), the bead or
+// gap (gq_i), how many beads (gq_k), and a stamp's face (gq_face).
+gq_side: int = 0;
+
+gq_i: int = 0;
+
+gq_k: int = 0;
+
+gq_face: int = 0;
+
+// (Kept round a try, as a face's place is.)
+gqk_side: int = 0;
+
+gqk_i: int = 0;
+
+gqk_k: int = 0;
+
+gqk_face: int = 0;
+
+gq_keep() {
+    gqk_side = gq_side;
+    gqk_i = gq_i;
+    gqk_k = gq_k;
+    gqk_face = gq_face
+}
+
+gq_restore() {
+    gq_side = gqk_side;
+    gq_i = gqk_i;
+    gq_k = gqk_k;
+    gq_face = gqk_face
+}
+
+// Kind GS_POP (beads gq_i, gq_i + 1), GS_PAIR (bead t at gap gq_i),
+// GS_STAMP (fact j's face gq_face on beads gq_i.. (gq_k of them), with t
+// for x if it is wanted), GS_TURN, GS_WALK (the tile moved by t).
+bd_do(kind: int, j: int, t: int) raises KernelError: bool {
+    if (kind == GS_POP) return bd_pop(gq_side, gq_i);
+    if (kind == GS_PAIR) return bd_pair(gq_side, gq_i, t);
+    if (kind == GS_STAMP) return bd_stamp(j, gq_face, gq_side, gq_i, gq_k, t);
+    if (kind == GS_TURN) return bd_turn_round();
+    if (kind == GS_WALK) return bd_walk(t);
+    false
+}
