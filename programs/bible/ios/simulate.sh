@@ -313,14 +313,14 @@ read)
   step 16 15-collapsed
   step 32 15b-half
   step 33 15c-collapsed-opener
-  # The title's push (owner, 2026-10-18): John 4's opener under the bar,
-  # expanded and compact; console.txt has each point's "bible: push" lines.
-  step 262 15d-push-before
-  step 263 15e-push-mid
-  step 264 15f-push-after
-  step 265 15g-push-compact-before
-  step 266 15h-push-compact-mid
-  step 267 15i-push-compact-after
+  # The title changed in place (owner, 2026-10-19): John 4's row 8 points
+  # short of the bar's bottom (John 3 named), then 8 points past it (John
+  # 4), expanded and compact; console.txt has the "bible: title" changes and
+  # "bible: title shows" at each.
+  step 262 15d-title-before
+  step 263 15e-title-after
+  step 264 15f-title-compact-before
+  step 265 15g-title-compact-after
   # Genesis 1's top: its name in the bar (the way to Go To). The status bar
   # tapped (owner, 2026-10-18): to John 3's top, then to John 2's.
   step 268 15j-genesis-1-title
