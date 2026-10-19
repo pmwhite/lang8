@@ -229,7 +229,9 @@ wait_done() {
       # host's sample(1) of its process, to find a hang.)
       if [ -z "${sampled:-}" ]; then
         sampled=1
-        pid=$(grep -ao "$id: [0-9]*" "$out/console.txt" 2>/dev/null | tail -1 | awk '{print $2}')
+        # (The simulator's app is a process of the host's; simctl writes its
+        # pid to the console only as it closes.)
+        pid=$(pgrep -n -f "SmoothBible.app/SmoothBible" 2>/dev/null)
         [ -n "$pid" ] && sample "$pid" 3 -file "$out/hang-sample.txt" >/dev/null 2>&1 && echo "$2: sampled $pid into hang-sample.txt" >> "$out/timing.txt"
       fi
     fi
