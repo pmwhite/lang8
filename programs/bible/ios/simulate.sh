@@ -37,6 +37,12 @@
 #           words, the largest text; the recording of sequence 12
 #           (plans-transitions.mp4); and Versions and Acknowledgements
 #           popped before a theme's change (1.0 (11)'s crash), checked
+#   reading Round 6 (DESIGN.md §11.4), on the demo clock, from a history
+#           written before the first launch (Acts 9:1 and 10:9, Psalm 23,
+#           yesterday): the readings seeded, started, moved, met, removed;
+#           Start Reading from Go To, the title's menu and a book's grid; A
+#           Chapter a Day; and the recording of sequence 13
+#           (reading-transitions.mp4); its log's checks in reading.txt
 # After each step the script waits for the app to say it has settled (the
 # notification space.trailingwhite.smoothbible.done, from `notifyutil -1`),
 # with a timeout, rather than sleeping; then it takes the screenshot.
@@ -86,6 +92,23 @@ if [ "$group" = versions ]; then
     mkdir -p "$data/Library/esv-fixture"
     cp "$(dirname "$0")"/esv-fixture/* "$data/Library/esv-fixture/" && echo "esv fixture installed"
     fixture=Library/esv-fixture
+  fi
+fi
+# (The reading group's history, before the first launch: Psalm 23:1 and
+# Acts 9:1 and 10:9, yesterday at 20:40, 21:00 and 21:20, local time.)
+if [ "$group" = reading ]; then
+  data=$(xcrun simctl get_app_container "$dev" "$id" data 2>/dev/null)
+  if [ -n "$data" ]; then
+    mkdir -p "$data/Library/Application Support/SmoothBible"
+    python3 - "$data/Library/Application Support/SmoothBible/history.tsv" <<'PY'
+import datetime, sys, time
+d = datetime.date.today() - datetime.timedelta(days=1)
+def t(h, m):
+    return int(time.mktime(datetime.datetime(d.year, d.month, d.day, h, m).timetuple()))
+with open(sys.argv[1], "w") as f:
+    f.write("PSA\t23\t1\t%d\t0\t1\nACT\t9\t1\t%d\t0\t1\nACT\t10\t9\t%d\t0\t1\n" % (t(20, 40), t(21, 0), t(21, 20)))
+PY
+    echo "reading history written"; cat "$data/Library/Application Support/SmoothBible/history.tsv"
   fi
 fi
 # (Every other group: the server as if it were not there, L8_ESV_OFF, so
@@ -555,6 +578,67 @@ plans)
   cat "$out/notify.txt"
   grep -q "scheduled [0-9]* daily reminders" "$out/notify.txt" || { echo "FAILED: nothing scheduled" | tee -a "$out/notify.txt"; failed=1; }
   grep -q "popped lists survived" "$out/notify.txt" || { echo "FAILED: the popped lists' step did not finish" | tee -a "$out/notify.txt"; failed=1; }
+  ;;
+reading)
+  # (DESIGN.md §11.4: shots 160 to 182.)
+  step 290 160-reading-seeded 6
+  step 291 161-reading-started 8
+  step 292 162-casual-visits 14
+  step 293 163-reading-moved 10
+  step 294 164-jump-moves-nothing 10
+  step 295 165-two-in-a-row 8
+  step 296 166-continue-exact 6
+  step 297 167-with-plan 14
+  step 298 168-show-all 6
+  step 299 169-reading-all 6
+  step 300 170-met 8
+  step 301 171-across-books 10
+  step 302 171b-removed 6
+  ui content_size accessibility-extra-extra-extra-large
+  step 303 172-ax-goto-reading 8
+  ui content_size large
+  step 304 173-title-menu 8
+  step 305 174-start-sheet 8
+  step 306 175-started-toast 6
+  step 307 176-goto-one-list 6
+  step 308 177-grid-toolbar 6
+  step 309 178-start-from-grid 8
+  step 310 179-plan-preview 6
+  step 311 180-chapter-a-day 12
+  step 312 181-plan-removed 6
+  step 313 182-chosen-jude 12
+  # The screen recording of sequence 13.
+  xcrun simctl io "$dev" recordVideo --codec h264 --force "$out/transitions.mp4" > "$out/record.txt" 2>&1 &
+  recorder=$!
+  i=0
+  while ! grep -qi "started" "$out/record.txt" 2>/dev/null && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  rec0=$(now)
+  sleep 0.5
+  : > "$out/transitions.txt"
+  a=$(now)
+  step 314 "" 30
+  b=$(now)
+  echo "13 $(python3 -c "print(round($a - $rec0, 2), round($b - $rec0, 2))")" >> "$out/transitions.txt"
+  sleep 0.5
+  kill -INT "$recorder" 2>/dev/null
+  wait "$recorder" 2>/dev/null
+  # The walk, from the log: each start, move, meeting, removal; nothing
+  # started by the casual visits (162) or by the plan's chapters (167).
+  grep -h "bible: reading\|bible: readings\|bible: chapter read\|bible: title menu\|bible: toast\|bible: plan\|plans-done\|CLEARED\|bible: demo step\|bible: start" \
+    "$out/console.txt" > "$out/reading.txt" 2>/dev/null
+  for want in "readings seeded 1" "reading started at ROM 2" "chapter read 1CO 13" "reading moved to ROM 3:9" \
+      "reading started at JHN 15" "readings met at JHN 17" "reading moved to COL 1" "reading removed at ACT 10" \
+      "readings.tsv CLEARED lines 1" "title menu: Start Reading Here… · Mark 1" "reading started at MRK 1 (chosen)" \
+      "toast Reading from Mark 1" "plan archived" "reading started at JUD 1 (chosen)"; do
+    grep -qF "$want" "$out/reading.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/reading.txt"; failed=1; }
+  done
+  for bad in "reading started at 1CO" "reading started at ISA" "reading started at GEN" "reading started at ROM 9"; do
+    grep -qF "$bad" "$out/reading.txt" && { echo "FAILED: \"$bad\"" | tee -a "$out/reading.txt"; failed=1; }
+  done
+  tail -5 "$out/reading.txt"
   ;;
 ios18)
   shot 01-genesis-1

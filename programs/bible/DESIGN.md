@@ -4561,6 +4561,61 @@ detail buttons are labelled "Plan Details". Every row wraps at accessibility siz
 - Strings are plain. There's no "track", "progress", "streak" or "finished" anywhere in
   the UI.
 
+### 11.3a Builder notes (Round 6, as built)
+Where the build differs from the text above, and why:
+1. **"Two chapters in a row" carries only a reading in x−1's book** (rule 3's third case):
+   R moves when x > R.c, x−1 is recently read **and R.c is in the book of x−1** (so at or
+   after that book's first chapter). Read literally, the rule moved the nearest reading
+   behind from anywhere in the Bible: with a reading at Genesis 5, reading John 13 and 14
+   would have carried it to John 15 and lost its place, which is the opposite of reading
+   several books at once. Within a book (Romans 8, then 12 and 13 read: Romans 14) and
+   across one boundary (Romans 16's reading, then 1 Corinthians 1 and 2 read) it carries as
+   specified. Tested.
+2. **Rule 2's 20 s is a timer of its own** (`readingDwelt:`), started at a scroll's rest in
+   R.c + 1 when no reading is at R.c + 1 itself, and stopped by the next scroll, jump or
+   sheet; not history's `dwell_done`, which doesn't fire when the chapter is already
+   history's newest.
+3. **A chapter counted read begins again:** once the signal fires, that chapter's rest and
+   end-seen are reset, so it counts again only when it is read again (read.tsv's line then
+   moves). With no plan, nothing else guards it (Round 5's guard was the plan's own mark).
+4. **In the demo only the demo's hook counts a chapter read** (`demo_read`): under
+   `L8_DEMO`, real rest isn't added and Listen's end doesn't count, so CI's own pauses can't
+   start a reading in another group's shots (the read group rests in Genesis 1 and John 3
+   for long stretches). Outside the demo the signal is exactly §10.1.2's.
+5. **A one-chapter book's reading row** has only the time as its second line: the row reads
+   "Jude" over "Now" (shot 182's "Jude · Now"; §11.2.1's "Jude · Today" is the whole row).
+   VoiceOver says "Jude. Read just now."; the time words in a sentence are "just now",
+   "today", "yesterday", "on Monday", "on 12 October".
+6. **The followed plan's row in Start Reading** shows "Day 4" (accent) as its accessory
+   instead of ⓘ, its title faint, and can't be chosen. Its days are the plan row's ⓘ in
+   Continue Reading.
+7. **The "will stop" footer** fades by reloading the Plans section with a fade inside one
+   `beginUpdates`/`endUpdates` (a footer's text can't change otherwise); its rows are
+   re-made unchanged, and only the checkmark moves.
+8. **A reading's tap is placed again 0.6 s later** (as a jump's `jump_settle` is), unless the
+   reader has scrolled: the sheet's dismissal changes the reader's insets.
+9. **A plan's preview** has only its description in its header (the "will be kept" line
+   moved to Start Reading's footer). A Chapter a Day's description of Psalms reads "Psalms
+   23–150, one psalm a day."
+10. **Start Reading's Chapter row for a one-chapter book** reads "1", dimmed, with no
+    disclosure. Book's list shows each book's chapter count as Go To's does, a checkmark on
+    the chosen one.
+11. **Demo stand-ins** (each the same function a tap reaches): 162's preview Open in Reader
+    is its `jump` (what `preview_open` calls); 164's "25 s of demo time" adds 25 s of rest
+    in Romans 8 and runs rule 2's check (nothing moves: no scroll since the jump); 173 opens
+    the title's menu through its interaction's `_presentMenuAtLocation:` when the simulator
+    has it, and always logs "title menu: Start Reading Here… · Mark 1"; 174 calls the
+    command's action with the command (as the responder chain does).
+12. **Recording sequence 13** starts with a plan followed (New Testament in 90 Days, so the
+    footer has something to say) and six readings (the demo adds Genesis 30), then removes
+    the second reading twice: first the fifth fades in as the fourth and Show All's count
+    fades (6 → 5), then Show All goes with a fade. Reading is pushed and popped between, as
+    the spec's order asks for a Show All to push.
+13. **The `plans` group's sequence 12**: Today's circles are gone, so its first step is the
+    plan row's Mark as Read (VoiceOver's action; the row's circle cross-fades), and the plan
+    is followed again by the demo inside its days (as Start Reading's Start would; the
+    days screen has no Start now), so the reminder's section still fades in.
+
 ### 11.4 CI for Round 6
 **A new demo group, `reading`**, with the demo clock (§10.0). Before the first launch it
 seeds `history.tsv` with Acts 9:1 and Acts 10:9 (both yesterday, 21:00 and 21:20) and

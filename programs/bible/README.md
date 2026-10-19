@@ -52,6 +52,13 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   Word study shows a word's exact sense (STEP's TAHOT and TAGNT) and
   related words (MACULA), and the share sheet has Share as Image
   (`ios_share.l8`).
+- What you are reading (Round 6): Go To's Continue Reading lists the plan
+  followed (one row) and the readings, each a place moving forward through
+  the whole Bible (`readings.l8`): started by reading a book's first chapter
+  or two chapters in a row, or by Start Reading (from Continue Reading, a
+  book's chapter grid, or the title's long-press, Start Reading Here), at
+  your own pace or as a plan (A Chapter a Day among them); kept as you read
+  on, never moved by a jump; merged when two meet; swiped away with Remove.
 - A link opens a chapter: `bsb://JHN/3` (or a verse, `bsb://JHN/3/16`).
 
 ## Files
@@ -84,9 +91,11 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   client, cache on disk and the reader's states while a chapter comes
   (`esv_cache.l8` its portable rules, tested in `test_store.l8`);
   `ios_compare.l8` Compare; `ios_study2.l8` the Study sheet's segments;
-  `ios_daily.l8` Today, the plans and their reminder (`plans.l8`
-  their portable part, tested in `test_plans.l8`); `ios_share.l8` Share as
-  Image; `ios_demo.l8` (and `ios_demo3.l8`, `ios_demo4.l8`, `ios_demo5.l8`)
+  `ios_daily.l8` Continue Reading, the plans' days and their reminder
+  (`plans.l8` their portable part, tested in `test_plans.l8`);
+  `ios_reading.l8` the readings, Reading, Start Reading and the title's
+  menu (`readings.l8` their portable part, tested in `test_readings.l8`); `ios_share.l8` Share as
+  Image; `ios_demo.l8` (and `ios_demo3.l8` to `ios_demo6.l8`)
   the demo CI runs.
 - `worker/` is the ESV proxy, a Cloudflare Worker (`worker.js`; `esv.js`
   turns the ESV API's HTML into our records), with its tests

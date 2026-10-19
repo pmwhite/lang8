@@ -67,6 +67,8 @@ system_item(kind: int, action: str): int {
 // A sheet over the reader, its bar expanding alongside (never a sheet
 // over a collapsed bar).
 present(vc: int) {
+    // (A sheet over the reader is a rest of its: DESIGN.md §11.1.1.)
+    reading_rest_now();
     bar_expand();
     keep_screen_release();
     msg3(nav, sel("presentViewController:animated:completion:"), vc, 1, 0)
@@ -132,6 +134,7 @@ sheet_gone() {
     hist_vc = held(hist_vc, 0);
     lib_filter_row = 0;
     daily_sheet_gone();
+    reading_sheet_gone();
     lib_all_button = 0;
     release(versions_table);
     versions_table = 0;
@@ -166,11 +169,10 @@ style_sheets() {
     style_table(lib_table, true);
     style_table(search_table, false);
     style_table(settings_table, true);
-    style_table(plans_table, true);
     style_table(detail_table, true);
-    for t in [picker_table, lib_table, search_table, settings_table, plans_table,
-        detail_table]
+    for t in [picker_table, lib_table, search_table, settings_table, detail_table]
         if (t != 0) msg(t, sel("reloadData"));
+    style_reading_sheets();
     // (Round 4's lists, open when Auto turns to Night: Compare, Versions,
     // the acknowledgements.)
     for t in [compare_table, versions_table, ack_table] {
@@ -314,7 +316,10 @@ open_picker() {
     i: int = hs_n - 1;
     while (i >= 0 && pk_recent < 4) {
         c: int = hs_ch[i];
+        // (Not the chapter read, nor one a reading's row shows: §11.2.1.)
         seen: bool = c == cur;
+        for row in 0..td_n
+            if (td_kind[row] == 2 && rg_c[td_arg[row]] == c) seen = true;
         for j in 0..pk_recent
             if (pk_recent_c[j] == c) seen = true;
         if (!seen) {
@@ -440,10 +445,10 @@ books_layout(self: int, cmd: int): int {
     list: int = msg(self, sel("tableView"));
     if (msg(list, sel("tag")) != 0) return 0;
     msg1(list, sel("setTag:"), 1);
-    // (Today at the top while a plan is followed, today's reading a tap
-    // away; without one, at the book being read, as §3.2 says, Today a
-    // flick above it: DESIGN.md §10.7a-4, review r5-1.)
-    if (pl_active >= 0) return 0;
+    // (Continue Reading at the top while it has a plan or a reading, a tap
+    // away; without, at the book being read, as §3.2 says: DESIGN.md
+    // §10.7a-4, §11.2.1.)
+    if (today_has()) return 0;
     b: int = ch_book[cur];
     // (Not if the recent places are showing and the book is near the top.)
     if (pk_recent > 0 && b < 6) return 0;
@@ -466,7 +471,10 @@ picker_rows(s: int): int {
 
 picker_header(s: int): int {
     k: int = pk_kind(s);
-    nsstring(if (k == 5) "Today" else if (k == 0) "Recent" else if (k == 1) "Old Testament" else if (k == 2) "New Testament" else if (k == 3) "Go To" else "Books")
+    // (Continue Reading only with something to continue: a lone Start
+    // Reading… needs no title.)
+    if (k == 5 && !today_has()) return 0;
+    nsstring(if (k == 5) "Continue Reading" else if (k == 0) "Recent" else if (k == 1) "Old Testament" else if (k == 2) "New Testament" else if (k == 3) "Go To" else "Books")
 }
 
 // ---- LORD and GOD in small capitals, outside the reader too ----
@@ -712,6 +720,14 @@ picker_picked(s: int, r: int) {
 picker_book: int = 0;
 
 show_chapters(b: int) {
+    show_chapters_mode(b, false)
+}
+
+// The grid of book b's chapters: Go To's (a tap goes there; its toolbar's
+// Start Reading Romans…), or Start Reading's (choosing: a tap chooses it
+// and pops, the chapter chosen filled). Its view's tag is the book (plus
+// one), 1000 more when choosing.
+show_chapters_mode(b: int, choosing: bool) {
     picker_book = b;
     sheet_nav: int = presented();
     if (sheet_nav == 0) return;
@@ -724,13 +740,16 @@ show_chapters(b: int) {
     msg_set_f(layout, sel("setMinimumInteritemSpacing:"), 9.0f64);
     msg_set_f(layout, sel("setMinimumLineSpacing:"), 10.0f64);
     msg_rect(layout, sel("setSectionInset:"), 20.0f64, 20.0f64, 32.0f64, 20.0f64);
-    grid: int = msg1(msg(cls("UICollectionViewController"), sel("alloc")), sel("initWithCollectionViewLayout:"),
+    grid: int = msg1(msg(grid_class, sel("alloc")), sel("initWithCollectionViewLayout:"),
         layout);
     release(layout);
-    msg1(grid, sel("setTitle:"), book_name(b));
+    msg1(grid, sel("setTitle:"), if (choosing) nsstring("Chapter") else book_name(b));
+    msg1(msg(grid, sel("navigationItem")), sel("setLargeTitleDisplayMode:"), if (choosing) 2 else 0);
+    if (!choosing) grid_toolbar(grid, b);
     msg1(msg(grid, sel("navigationItem")), sel("setRightBarButtonItem:"), system_item(0,
         "closeSheet:"));
     view: int = msg(grid, sel("collectionView"));
+    msg1(view, sel("setTag:"), b + 1 + (if (choosing) 1000 else 0));
     msg1(view, sel("setBackgroundColor:"), sheet_bg());
     msg2(view, sel("registerClass:forCellWithReuseIdentifier:"), cls("UICollectionViewCell"),
         nsstring("chapter"));
@@ -740,13 +759,24 @@ show_chapters(b: int) {
     release(grid)
 }
 
+// A grid's book, and whether it is choosing (its view's tag).
+grid_book(view: int): int {
+    k: int = msg(view, sel("tag"));
+    if (k <= 0) return picker_book;
+    (k - 1) % 1000
+}
+
+grid_choosing(view: int): bool {
+    msg(view, sel("tag")) > 1000
+}
+
 grid_items(
     _self: int,
     _cmd: int,
-    _view: int,
+    view: int,
     _section: int
 ): int {
-    book_count[picker_book]
+    book_count[grid_book(view)]
 }
 
 grid_cell(
@@ -775,7 +805,7 @@ grid_cell(
         msg1(content, sel("setClipsToBounds:"), 1)
     }
     n: int = msg(path, sel("item"));
-    here: bool = book_first[picker_book] + n == cur;
+    here: bool = book_first[grid_book(view)] + n == (if (grid_choosing(view)) sta_c else cur);
     msg1(label, sel("setText:"), nsnumber_text(n + 1));
     msg1(label, sel("setFont:"), sans(19.0f64, 0.23f64));
     msg1(label, sel("setTextColor:"), if (here) on_accent() else c_ink);
@@ -786,10 +816,11 @@ grid_cell(
 grid_picked(
     _self: int,
     _cmd: int,
-    _view: int,
+    view: int,
     path: int
 ): int {
-    jump(book_first[picker_book] + msg(path, sel("item")), 0);
+    c: int = book_first[grid_book(view)] + msg(path, sel("item"));
+    if (grid_choosing(view)) sta_choose_chapter(c) else jump(c, 0);
     0
 }
 
@@ -2670,8 +2701,10 @@ table_sections(_self: int, _cmd: int, t: int): int {
     if (t == lib_table) return ls_n;
     if (t == search_table) return search_sections();
     if (t == settings_table) return 9;
-    if (t == plans_table && t != 0) return 1;
     if (t == detail_table && t != 0) return detail_sections();
+    if (t == rdl_table && t != 0) return 1;
+    if (t == sta_table && t != 0) return sta_sections();
+    if (t == sta_books_table && t != 0) return 2;
     if (t == versions_table && t != 0) return versions_sections();
     if (t == compare_table && t != 0) return compare_sections();
     if (t == xref_table && t != 0) return 1;
@@ -2695,8 +2728,10 @@ table_rows(
     if (t == lib_table) return if (section < ls_n) ls_count[section] else 0;
     if (t == search_table) return search_rows(section);
     if (t == settings_table) return settings_rows(section);
-    if (t == plans_table && t != 0) return PLANS;
     if (t == detail_table && t != 0) return detail_rows(section);
+    if (t == rdl_table && t != 0) return rdl_rows();
+    if (t == sta_table && t != 0) return sta_rows(section);
+    if (t == sta_books_table && t != 0) return sta_books_rows(section);
     if (t == versions_table && t != 0) return versions_rows(section);
     if (t == compare_table && t != 0) return compare_rows(section);
     if (t == xref_table && t != 0) return xref_rows();
@@ -2720,6 +2755,8 @@ table_header(
     if (t == search_table) return search_header(section);
     if (t == settings_table) return settings_header(section);
     if (t == detail_table && t != 0) return detail_header_title(section);
+    if (t == sta_table && t != 0) return sta_header(section);
+    if (t == sta_books_table && t != 0) return nsstring(if (section == 0) "Old Testament" else "New Testament");
     if (t == versions_table && t != 0) return versions_header(section);
     if (t == study_table && t != 0) return study_header_title(section);
     if (t == grammar_table && t != 0) return grammar_header(section);
@@ -2737,6 +2774,8 @@ table_footer(
 ): int {
     if (t == settings_table) return settings_footer(section);
     if (t == detail_table && t != 0) return detail_footer(section);
+    if (t == rdl_table && t != 0) return rdl_footer();
+    if (t == sta_table && t != 0) return sta_footer(section);
     if (t == versions_table && t != 0) return versions_footer(section);
     if (t == xref_table && t != 0) return xref_footer();
     if (t == study_table && t != 0) return study_footer(section);
@@ -2798,8 +2837,10 @@ table_cell(
 ): int {
     if (is_reader(t)) return chapter_cell(t, path);
     if (t == picker_table) return picker_cell(t, path);
-    if (t == plans_table && t != 0) return plans_cell(t, msg(path, sel("row")));
     if (t == detail_table && t != 0) return detail_cell(t, path);
+    if (t == rdl_table && t != 0) return rdl_cell(t, msg(path, sel("row")));
+    if (t == sta_table && t != 0) return sta_cell(t, path);
+    if (t == sta_books_table && t != 0) return sta_books_cell(t, path);
     if (t == lib_table) return lib_cell(t, path);
     if (t == search_table) return search_cell(t, path);
     if (t == study_table && t != 0) return study_cell(t, path);
@@ -2824,7 +2865,8 @@ table_picked(
     msg2(t, sel("deselectRowAtIndexPath:animated:"), path, 1);
     s: int = msg(path, sel("section"));
     r: int = msg(path, sel("row"));
-    if (t == plans_table && t != 0) open_plan(r, 0) else if (t == detail_table && t != 0) detail_picked(s,
+    if (t == rdl_table && t != 0) rdl_picked(r) else if (t == sta_table && t != 0) sta_picked(s,
+        r) else if (t == sta_books_table && t != 0) sta_books_picked(s, r) else if (t == detail_table && t != 0) detail_picked(s,
         r) else if (t == picker_table) picker_picked(s, r) else if (t == lib_table) lib_picked(s,
         r) else if (t == search_table) search_picked(s, r) else if (t == settings_table) settings_picked(s,
         r) else if (t == study_table) study_picked(s, r) else if (t == conc_table) conc_picked(s,
@@ -2838,9 +2880,15 @@ table_can_edit(
     _self: int,
     _cmd: int,
     t: int,
-    _path: int
+    path: int
 ): int {
-    if (t == lib_table || t == hist_table && t != 0) 1 else 0
+    if (t == lib_table || t == hist_table && t != 0 || t == rdl_table && t != 0) return 1;
+    // (Continue Reading's plan and readings: Remove.)
+    if (t == picker_table && t != 0 && pq_n == 0 && pk_kind(msg(path, sel("section"))) == 5) {
+        r: int = msg(path, sel("row"));
+        if (r < td_n && (td_kind[r] == 1 || td_kind[r] == 2)) return 1
+    }
+    0
 }
 
 table_commit(
@@ -2852,6 +2900,31 @@ table_commit(
 ): int {
     if (t == lib_table && style == 1) lib_delete(path);
     if (t == hist_table && t != 0 && style == 1) hist_delete(path);
+    if (t == picker_table && t != 0 && style == 1) today_remove(msg(path, sel("row")));
+    if (t == rdl_table && t != 0 && style == 1) rdl_remove(msg(path, sel("row")));
+    0
+}
+
+// The swipe's word: Remove for what you are reading (nothing is lost:
+// §11.2.1), Delete elsewhere.
+table_delete_title(
+    _self: int,
+    _cmd: int,
+    t: int,
+    _path: int
+): int {
+    if (t == picker_table && t != 0 || t == rdl_table && t != 0) nsstring("Remove") else nsstring("Delete")
+}
+
+// A row's ⓘ: the plan's days (the plan followed's), or a plan's preview
+// (Start Reading's).
+table_accessory(
+    _self: int,
+    _cmd: int,
+    t: int,
+    path: int
+): int {
+    if (t == sta_table && t != 0) sta_accessory(msg(path, sel("row"))) else if (t == picker_table && t != 0 || t == rdl_table && t != 0) plan_row_details();
     0
 }
 
@@ -2908,6 +2981,10 @@ add_sheet_methods(app: int) {
     add_method2(app, sel("tableView:canEditRowAtIndexPath:"), &table_can_edit, "B@:@@");
     add_method3(app, sel("tableView:commitEditingStyle:forRowAtIndexPath:"), &table_commit,
         "v@:@q@");
+    add_method2(app, sel("tableView:titleForDeleteConfirmationButtonForRowAtIndexPath:"),
+        &table_delete_title, "@@:@@");
+    add_method2(app, sel("tableView:accessoryButtonTappedForRowWithIndexPath:"), &table_accessory,
+        "v@:@@");
     add_method2(app, sel("collectionView:numberOfItemsInSection:"), &grid_items, "q@:@q");
     add_method2(app, sel("collectionView:cellForItemAtIndexPath:"), &grid_cell, "@@:@@");
     add_method2(app, sel("collectionView:didSelectItemAtIndexPath:"), &grid_picked,

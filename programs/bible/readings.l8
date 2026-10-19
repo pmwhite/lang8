@@ -1,0 +1,586 @@
+tag bible;
+
+use_tag std;
+
+// What you are reading (DESIGN.md §11.1), apart from any platform: each
+// reading a place moving forward through the whole Bible (a chapter, through
+// the Bible, its verse and how far into it), started by what is read (a
+// book's first chapter, or two chapters in a row) or by choice, moved only
+// by reading on (a scroll's rest, 20 s in the next chapter, a chapter read),
+// and merged with any it reaches; the chapters read (read.tsv) and the
+// readings (readings.tsv, with the time of the last removal) as lines in
+// fbuf, as store.l8's files are; the readings seeded once from history; and
+// the words a row says. Times are unix seconds, given by the platform; days
+// are local days (the platform's today()). test_readings.l8 tests it.
+import "text.l8";
+
+import "store.l8";
+
+import "plans.l8";
+
+// ---- the readings ----
+// Kept newest (LAST) first: rg_sort after every change.
+RG_MOST: int = 256;
+
+rg_n: int = 0;
+
+rg_c: []int = new int[256](0);
+
+rg_v: []int = new int[256](0);
+
+rg_frac: []int = new int[256](0);
+
+rg_started: []int = new int[256](0);
+
+rg_last: []int = new int[256](0);
+
+// The latest removal's time (0: none): chapters read before it are not
+// recently read.
+rg_cleared: int = 0;
+
+DAY_S: int = 86400;
+
+// ---- the chapters read (read.tsv), newest last ----
+RLOG_MOST: int = 300;
+
+rlog_n: int = 0;
+
+rlog_c: []int = new int[301](0);
+
+rlog_t: []int = new int[301](0);
+
+rlog_index(c: int): int {
+    for i in 0..rlog_n
+        if (rlog_c[i] == c) return i;
+    -1
+}
+
+// Chapter c read at t: its line moved to the end, the oldest let go past
+// 300.
+read_log_add(c: int, t: int) {
+    if (c < 0 || c >= chapters) return;
+    i: int = rlog_index(c);
+    if (i >= 0) {
+        for j in i..rlog_n - 1 {
+            rlog_c[j] = rlog_c[j + 1];
+            rlog_t[j] = rlog_t[j + 1]
+        }
+        rlog_n = rlog_n - 1
+    }
+    if (rlog_n >= RLOG_MOST) {
+        for j in 0..rlog_n - 1 {
+            rlog_c[j] = rlog_c[j + 1];
+            rlog_t[j] = rlog_t[j + 1]
+        }
+        rlog_n = rlog_n - 1
+    }
+    rlog_c[rlog_n] = c;
+    rlog_t[rlog_n] = t;
+    rlog_n = rlog_n + 1
+}
+
+// Read in the last 14 days, and since the last removal.
+recently_read(c: int, now: int): bool {
+    if (c < 0) return false;
+    i: int = rlog_index(c);
+    i >= 0 && rlog_t[i] > now - 14 * DAY_S && rlog_t[i] > rg_cleared
+}
+
+// ---- what happened (for the log) ----
+// Kinds: 1 started, 2 started by choice, 3 moved, 4 met, 5 removed, 6
+// reached the end.
+EV_STARTED: int = 1;
+
+EV_CHOSEN: int = 2;
+
+EV_MOVED: int = 3;
+
+EV_MET: int = 4;
+
+EV_REMOVED: int = 5;
+
+EV_END: int = 6;
+
+rev_n: int = 0;
+
+rev_kind: []int = new int[16](0);
+
+rev_c: []int = new int[16](0);
+
+rev_v: []int = new int[16](0);
+
+rg_event(kind: int, c: int, v: int) {
+    if (rev_n >= len(rev_kind)) return;
+    rev_kind[rev_n] = kind;
+    rev_c[rev_n] = c;
+    rev_v[rev_n] = v;
+    rev_n = rev_n + 1
+}
+
+// A place as the log has it: ROM 3, ROM 3:9.
+fput_code_place(c: int, v: int) {
+    for i in 0..3 fput(bsb[book_line[ch_book[c]] + 1 + i] as int);
+    fput(32);
+    fput_int(ch_num[c]);
+    if (v >= 2) {
+        fput(58);
+        fput_int(v)
+    }
+}
+
+// Event i as a line: "reading started at ROM 2".
+fput_event(i: int) {
+    k: int = rev_kind[i];
+    if (k == EV_END) {
+        fput_str("reading reached the end");
+        return
+    }
+    fput_str(if (k == EV_STARTED || k == EV_CHOSEN) "reading started at " else if (k == EV_MOVED) "reading moved to " else if (k == EV_MET) "readings met at " else "reading removed at ");
+    fput_code_place(rev_c[i], if (k == EV_MOVED) rev_v[i] else 0);
+    if (k == EV_CHOSEN) fput_str(" (chosen)")
+}
+
+// ---- the list ----
+rg_find(c: int): int {
+    for i in 0..rg_n
+        if (rg_c[i] == c) return i;
+    -1
+}
+
+rg_delete(i: int) {
+    if (i < 0 || i >= rg_n) return;
+    for j in i..rg_n - 1 {
+        rg_c[j] = rg_c[j + 1];
+        rg_v[j] = rg_v[j + 1];
+        rg_frac[j] = rg_frac[j + 1];
+        rg_started[j] = rg_started[j + 1];
+        rg_last[j] = rg_last[j + 1]
+    }
+    rg_n = rg_n - 1
+}
+
+rg_add(
+    c: int,
+    v: int,
+    frac: int,
+    started: int,
+    last: int
+): int {
+    if (rg_n >= RG_MOST) {
+        // (Past the most kept: the oldest let go.)
+        rg_sort();
+        rg_n = rg_n - 1
+    }
+    i: int = rg_n;
+    rg_c[i] = c;
+    rg_v[i] = v;
+    rg_frac[i] = frac;
+    rg_started[i] = started;
+    rg_last[i] = last;
+    rg_n = rg_n + 1;
+    i
+}
+
+rg_swap(i: int, j: int) {
+    a: int = rg_c[i];
+    rg_c[i] = rg_c[j];
+    rg_c[j] = a;
+    a = rg_v[i];
+    rg_v[i] = rg_v[j];
+    rg_v[j] = a;
+    a = rg_frac[i];
+    rg_frac[i] = rg_frac[j];
+    rg_frac[j] = a;
+    a = rg_started[i];
+    rg_started[i] = rg_started[j];
+    rg_started[j] = a;
+    a = rg_last[i];
+    rg_last[i] = rg_last[j];
+    rg_last[j] = a
+}
+
+// Newest (LAST) first; the same time, the later place first.
+rg_sort() {
+    for i in 1..rg_n {
+        j: int = i;
+        while (j > 0 && (rg_last[j] > rg_last[j - 1] || rg_last[j] == rg_last[j - 1] && rg_c[j] > rg_c[j - 1])) {
+            rg_swap(j, j - 1);
+            j = j - 1
+        }
+    }
+}
+
+// Reading i moved to (c, v, frac), at now: every other reading it passed
+// (from its chapter, not counting it, to c) merged into it (rule 5), the
+// earlier start kept. Its index after (the list sorted).
+rg_move(
+    i_in: int,
+    c: int,
+    v: int,
+    frac: int,
+    now: int
+) {
+    i: int = i_in;
+    a: int = rg_c[i];
+    rg_c[i] = c;
+    rg_v[i] = v;
+    rg_frac[i] = frac;
+    rg_last[i] = now;
+    if (c != a || v != 0) rg_event(EV_MOVED, c, v);
+    if (c > a) {
+        j: int = 0;
+        while (j < rg_n) {
+            if (j != i && rg_c[j] > a && rg_c[j] <= c) {
+                if (rg_started[j] < rg_started[i]) rg_started[i] = rg_started[j];
+                rg_delete(j);
+                if (j < i) i = i - 1;
+                rg_event(EV_MET, c, 0)
+            } else j = j + 1
+        }
+    }
+    rg_sort()
+}
+
+// ---- how a reading moves, and starts (§11.1.2, §11.1.3) ----
+// A scroll's rest at (c, v, frac) (after the finger, or Listen's scroll,
+// moved the text since the last jump); dwelt: it has lasted 20 s. Whether a
+// reading moved (readings.tsv to be written).
+reading_rest(
+    c: int,
+    v: int,
+    frac: int,
+    dwelt: bool,
+    now: int
+): bool {
+    if (c < 0 || c >= chapters) return false;
+    // (Rule 1: in R.c, R takes the place, either way.)
+    i: int = rg_find(c);
+    if (i >= 0) {
+        same: bool = rg_v[i] == v;
+        rg_v[i] = v;
+        rg_frac[i] = frac;
+        rg_last[i] = now;
+        if (!same) rg_event(EV_MOVED, c, v);
+        rg_sort();
+        return true
+    }
+    // (Rule 2: 20 s in R.c + 1, R moves there.)
+    if (!dwelt || c == 0) return false;
+    k: int = rg_find(c - 1);
+    if (k < 0) return false;
+    rg_move(k, c, v, frac, now);
+    true
+}
+
+// Whether chapter x is the followed plan's, on a day up to tomorrow's.
+plan_holds(x: int, today: int): bool {
+    if (pl_active < 0 || !pl_ready) return false;
+    d: int = plan_day_of(x);
+    d > 0 && d <= plan_today(today) + 1
+}
+
+// Chapter x read (§10.1.2's signal), at now on day today: onto read.tsv;
+// the nearest reading behind it moved (rule 3), or else a reading started
+// at the next chapter's top. Whether the readings changed.
+chapter_read(x: int, now: int, today: int): bool {
+    if (x < 0 || x >= chapters) return false;
+    read_log_add(x, now);
+    last: int = chapters - 1;
+    // Rule 3: R.c = x, R.c + 1 = x, or behind x with x - 1 read (in x - 1's
+    // book: DESIGN.md §11.3a, note 1); the greatest such R.c moves.
+    two: bool = x > 0 && recently_read(x - 1, now);
+    near: int = if (x > 0) book_first[ch_book[x - 1]] else 0;
+    best: int = -1;
+    for i in 0..rg_n {
+        rc: int = rg_c[i];
+        if (rc <= x && (rc == x || rc + 1 == x || two && rc >= near)) {
+            if (best < 0 || rc > rg_c[best]) best = i
+        }
+    }
+    if (best >= 0) {
+        if (x == last) {
+            rg_delete(best);
+            rg_event(EV_END, x, 0);
+            return true
+        }
+        rg_move(best, x + 1, 0, 0, now);
+        return true
+    }
+    if (x == last) return false;
+    // Starting: a book's first chapter (of more than one), or x - 1 read;
+    // and not the plan's.
+    b: int = ch_book[x];
+    first: bool = x == book_first[b] && book_count[b] > 1;
+    if (!first && !two) return false;
+    if (plan_holds(x, today)) return false;
+    i: int = rg_find(x + 1);
+    if (i >= 0) {
+        // (One there already: the two meet, at once.)
+        rg_last[i] = now;
+        rg_sort();
+        return true
+    }
+    _i: int = rg_add(x + 1, 0, 0, now, now);
+    rg_event(EV_STARTED, x + 1, 0);
+    rg_sort();
+    true
+}
+
+// Start Reading, At My Own Pace (§11.1.2a): a reading at chapter c's top,
+// or the one there touched.
+reading_start(c: int, now: int) {
+    if (c < 0 || c >= chapters) return;
+    i: int = rg_find(c);
+    if (i >= 0) rg_last[i] = now else _i: int = rg_add(c, 0, 0, now, now);
+    rg_event(EV_CHOSEN, c, 0);
+    rg_sort()
+}
+
+// Reading i removed (§11.1.4): CLEARED is now.
+reading_remove(i: int, now: int) {
+    if (i < 0 || i >= rg_n) return;
+    rg_event(EV_REMOVED, rg_c[i], 0);
+    rg_delete(i);
+    rg_cleared = now
+}
+
+// ---- seeded once from history (§11.1.6) ----
+sd_has: []bool = new bool[1200](false);
+
+sd_t: []int = new int[1200](0);
+
+sd_i: []int = new int[1200](0);
+
+// The history's last 30 days, its chapters in runs (x - 1 and x both in
+// it, across books): a reading of each run of two or more at its newest
+// entry.
+seed_readings(now: int) {
+    for c in 0..chapters {
+        sd_has[c] = false;
+        sd_t[c] = 0;
+        sd_i[c] = -1
+    }
+    for i in 0..hs_n {
+        c: int = hs_ch[i];
+        if (c >= 0 && c < chapters && hs_time[i] >= now - 30 * DAY_S) {
+            if (!sd_has[c] || hs_time[i] >= sd_t[c]) {
+                sd_t[c] = hs_time[i];
+                sd_i[c] = i
+            }
+            sd_has[c] = true
+        }
+    }
+    c: int = 0;
+    while (c < chapters) {
+        if (sd_has[c]) {
+            e: int = c;
+            while (e + 1 < chapters && sd_has[e + 1]) e = e + 1;
+            if (e > c) {
+                best: int = c;
+                for x in c..e + 1
+                    if (sd_t[x] >= sd_t[best]) best = x;
+                h: int = sd_i[best];
+                v: int = if (hs_exact[h]) hs_v[h] else 0;
+                if (!(best == chapters - 1 && v >= 2) && rg_find(best) < 0) {
+                    _i: int = rg_add(best, v, 0, sd_t[best], sd_t[best]);
+                    rg_event(EV_STARTED, best, 0)
+                }
+            }
+            c = e + 1
+        } else c = c + 1
+    }
+    rg_sort()
+}
+
+// ---- the files ----
+// readings.tsv: READING BOOK C V FRAC STARTED LAST, and CLEARED TIME.
+format_readings() {
+    fbuf_n = 0;
+    for i in 0..rg_n {
+        fput_str("READING\t");
+        fput_book(ch_book[rg_c[i]]);
+        fput_int(ch_num[rg_c[i]]);
+        fput(9);
+        fput_int(rg_v[i]);
+        fput(9);
+        fput_int(rg_frac[i]);
+        fput(9);
+        fput_int(rg_started[i]);
+        fput(9);
+        fput_int(rg_last[i]);
+        fput(10)
+    }
+    if (rg_cleared > 0) {
+        fput_str("CLEARED\t");
+        fput_int(rg_cleared);
+        fput(10)
+    }
+}
+
+// Two lines of one chapter merged (rule 5): the later place kept, the
+// earlier start.
+parse_readings() {
+    begin_lines();
+    rg_n = 0;
+    rg_cleared = 0;
+    lines_read = 0;
+    lines_skipped = 0;
+    while (next_line()) {
+        if (line_e > fpos) {
+            lines_read = lines_read + 1;
+            f2: int = field_after(fpos);
+            if (field_is(fpos, "READING")) {
+                c: int = field_chapter(f2);
+                f4: int = field_after(field_after(f2));
+                f5: int = field_after(f4);
+                f6: int = field_after(f5);
+                f7: int = field_after(f6);
+                v: int = if (c >= 0) field_verse(f4, c, true) else -1;
+                frac: int = field_num(f5, true);
+                started: int = field_num(f6, false);
+                last: int = field_num(f7, false);
+                if (c >= 0 && v >= 0 && frac != missing_num && started >= 0 && last >= 0) {
+                    i: int = rg_find(c);
+                    if (i < 0) _i: int = rg_add(c, v, frac, started, last) else {
+                        if (last > rg_last[i]) {
+                            rg_v[i] = v;
+                            rg_frac[i] = frac;
+                            rg_last[i] = last
+                        }
+                        if (started < rg_started[i]) rg_started[i] = started
+                    }
+                } else skip_line()
+            } else if (field_is(fpos, "CLEARED")) {
+                t: int = field_num(f2, false);
+                if (t >= 0) {
+                    if (t > rg_cleared) rg_cleared = t
+                } else skip_line()
+            } else skip_line()
+        }
+    }
+    rg_sort()
+}
+
+// read.tsv: BOOK C TIME, newest last.
+format_read_log() {
+    fbuf_n = 0;
+    for i in 0..rlog_n {
+        fput_book(ch_book[rlog_c[i]]);
+        fput_int(ch_num[rlog_c[i]]);
+        fput(9);
+        fput_int(rlog_t[i]);
+        fput(10)
+    }
+}
+
+parse_read_log() {
+    begin_lines();
+    rlog_n = 0;
+    lines_read = 0;
+    lines_skipped = 0;
+    while (next_line()) {
+        if (line_e > fpos) {
+            lines_read = lines_read + 1;
+            c: int = field_chapter(fpos);
+            t: int = field_num(field_after(field_after(fpos)), false);
+            if (c >= 0 && t >= 0) read_log_add(c, t) else skip_line()
+        }
+    }
+}
+
+// ---- what a row says (§11.2.1) ----
+// Where reading i continues: "Romans 3:9" (from verse 2), else "Romans 3";
+// "Psalm 41"; "Jude".
+fput_reading_place(i: int) {
+    c: int = rg_c[i];
+    if (rg_v[i] >= 2) fput_ref(c, rg_v[i], 0) else fput_title(c)
+}
+
+// The same, said: "Romans, chapter 3, verse 9".
+fput_reading_spoken(i: int) {
+    fput_spoken_title(rg_c[i]);
+    if (rg_v[i] >= 2) {
+        fput_str(", verse ");
+        fput_int(rg_v[i])
+    }
+}
+
+// When: "Now" (the last 10 minutes), "Today", "Yesterday", a weekday (the
+// week past), else "12 October" (and its year, if not this one); off is
+// the local time's offset from UTC. when_kind: 0 to 4, which of these.
+when_kind: int = 0;
+
+fput_when(t: int, now: int, off: int) {
+    if (now - t < 600 && now >= t) {
+        when_kind = 0;
+        fput_str("Now");
+        return
+    }
+    d: int = day_of(t + off);
+    today: int = day_of(now + off);
+    if (d == today) {
+        when_kind = 1;
+        fput_str("Today")
+    } else if (d == today - 1) {
+        when_kind = 2;
+        fput_str("Yesterday")
+    } else if (d > today - 7 && d < today) {
+        when_kind = 3;
+        fput_str(weekday_names[weekday_of(d)])
+    } else {
+        when_kind = 4;
+        civil_date(today);
+        y: int = date_y;
+        civil_date(d);
+        fput_int(date_d);
+        fput(32);
+        fput_str(month_names[date_m - 1]);
+        if (date_y != y) {
+            fput(32);
+            fput_int(date_y)
+        }
+    }
+}
+
+// Its second line: "Chapter 3 of 16 · Yesterday", "Psalm 41 of 150 ·
+// Today", or for a book of one chapter only when.
+fput_reading_line(i: int, now: int, off: int) {
+    c: int = rg_c[i];
+    b: int = ch_book[c];
+    if (book_count[b] > 1) {
+        fput_str(if (book_is(b, "PSA")) "Psalm " else "Chapter ");
+        fput_int(ch_num[c]);
+        fput_str(" of ");
+        fput_int(book_count[b]);
+        fput_str(" \�\� ")
+    }
+    fput_when(rg_last[i], now, off)
+}
+
+// VoiceOver's: "Romans, chapter 3, verse 9. Chapter 3 of 16, read
+// yesterday."
+fput_reading_label(i: int, now: int, off: int) {
+    fput_reading_spoken(i);
+    fput_str(". ");
+    c: int = rg_c[i];
+    b: int = ch_book[c];
+    if (book_count[b] > 1) {
+        fput_str(if (book_is(b, "PSA")) "Psalm " else "Chapter ");
+        fput_int(ch_num[c]);
+        fput_str(" of ");
+        fput_int(book_count[b]);
+        fput_str(", read ")
+    } else fput_str("Read ");
+    // (Said in the sentence: "just now", "today", "on Monday".)
+    at: int = fbuf_n;
+    fput_when(rg_last[i], now, off);
+    if (when_kind == 0) {
+        fbuf_n = at;
+        fput_str("just now")
+    } else if (when_kind <= 2) fbuf[at] = (fbuf[at] as int + 32) trunc i8 else {
+        fbuf_n = at;
+        fput_str("on ");
+        fput_when(rg_last[i], now, off)
+    }
+    fput(46)
+}
