@@ -87,7 +87,6 @@ for rt, ds in json.load(sys.stdin)["devices"].items():
     for d in ds:
         if d["udid"] == sys.argv[1]:
             print(d["name"], rt.split(".")[-1])' "$dev" | tee "$out/device.txt"
-touch "$out/.started"
 # (CI runs two groups one after another on a Mac, on one simulator: a boot
 # costs minutes. Another simulator, booted for another group, is shut down.
 # This one, if a group has used it (the app is on it), is reset as the
@@ -102,6 +101,9 @@ for ds in json.load(sys.stdin)["devices"].values():
             print(d["udid"])' "$dev" | while read -r other; do
   xcrun simctl shutdown "$other" 2>/dev/null && echo "shut down $other"
 done
+# (Crash reports from here on are this group's: not the other simulator's,
+# shut down above.)
+touch "$out/.started"
 if xcrun simctl get_app_container "$dev" "$id" >/dev/null 2>&1; then
   xcrun simctl terminate "$dev" "$id" 2>/dev/null || true
   xcrun simctl privacy "$dev" reset all "$id" 2>/dev/null || true

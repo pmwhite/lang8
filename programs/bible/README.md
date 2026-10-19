@@ -169,33 +169,40 @@ the app, and macOS jobs build it for the simulator, run it there with
 runs with the ESV's fixture (`L8_ESV_FIXTURE`), so no key or network is
 needed.
 
-The CI's layout, for speed (a full run is about ten minutes; see the
-workflow's header):
+The CI's layout, for speed (a full run takes 12 to 17 minutes, against
+about 27 when each group had a Mac of its own; see the workflow's header):
 
 - `compile` (Linux) builds the compiler only when its sources change (a
   cache otherwise), then `SmoothBible.app` (`build-linux.sh`), uploaded for
   the simulator jobs, then the IPA (pushed to `ci-bible-ipa`); `test` runs
-  the tests and the data checks beside it.
+  the tests and the data checks beside it. Both take under half a minute.
 - Five `simulator (…)` jobs (macOS: the account runs at most five at once,
-  so there are five, and nothing waits for a runner) start at once, boot a
-  simulator (a first boot takes about three minutes) and take the app as
-  soon as it is uploaded (`tools/ios/artifact.py`). (With the workflow's
-  `MAC_BUILD` set, the first builds the app and the IPA instead, with
-  Xcode's tools, from `compile`'s `bible-ios.s`.) Each runs two
-  groups one after another on one simulator, reset between them by
-  `simulate.sh` (app, defaults, permissions, keychain, pasteboard, status
-  bar): any boot, a copy's or an erased simulator's too, costs minutes on
-  these Macs, and slows whatever runs beside it. store and ios18 share the
-  fifth Mac, each on its own simulator. Each group is uploaded
-  (`shots-GROUP`) as it ends. (In the
-  Mac build actool's output is cached, `ACTOOL_CACHE`, since it alone took
-  most of the build.) The groups are paired by their times (`timing.txt`'s `total`) so
-  the jobs end together: rebalance the workflow's matrix when a group
-  grows.
+  so there are five, and none waits for a runner) start at once, boot a
+  simulator and take the app as soon as it is uploaded
+  (`tools/ios/artifact.py`). (With the workflow's `MAC_BUILD` set, the
+  first builds the app and the IPA instead, with Xcode's tools, from
+  `compile`'s `bible-ios.s`; actool's output is cached then,
+  `ACTOOL_CACHE`, since it alone took 81 of the build's 91 s.)
+- A boot is what costs: two to four minutes on these Macs (seven once),
+  before a group's first launch, for a fresh, erased or copied simulator
+  alike, and it slows whatever runs beside it threefold (the first launch
+  after it once waited four minutes). So each Mac boots one simulator and
+  runs two groups on it one after another, `simulate.sh` resetting it
+  between them (the app and its defaults, permissions, keychain,
+  pasteboard, status bar, notification state); a group that leaves
+  something outside the app (plans' alert, more's share sheet) goes
+  second. store and ios18 share the fifth Mac, each on its own simulator,
+  one after the other. Each group is uploaded (`shots-GROUP`) as it ends,
+  and `timing.txt` says when its boot, install, launch and settling came.
+- The groups are paired by their times so the jobs end together (a group
+  takes 1 to 4 minutes once booted; `timing.txt`'s `total` minus its
+  `settled at`); rebalance the workflow's matrix when one grows.
 - `frames` (Linux) makes the notes recording's frames as soon as the notes
-  group is uploaded; `publish` puts it all on `ci-bible-shots`.
+  group is uploaded; `publish` (under a minute) puts it all on
+  `ci-bible-shots`.
 - A push during a run waits for it (and of several only the newest runs),
-  so every run publishes.
+  so every run publishes: the screenshots come at most two runs after a
+  push, where before a stream of pushes could cancel run after run.
 
 ## The ESV proxy: deploying it (each step needs the owner's consent)
 
