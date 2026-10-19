@@ -29,7 +29,7 @@ bottom. Every symbol is one of two physical things:
 
 | Symbol | On the goal | On a fact |
 |---|---|---|
-| ∀y. ∀n≥N. ∀ε>0. | key: a fresh *any* name (white, ringed orange) pops onto the shelf; a bound's `n ≥ N` drops into the facts | notch: a new fact for that name (the general one stays); a bound's side condition ticks with a gold chip when arithmetic closes it, else it is a goal |
+| ∀y. ∀n≥N. ∀ε>0. | key: a fresh *any* name (white, ringed orange) goes onto the shelf; a bound's `n ≥ N` drops into the facts | notch: a new fact for that name (the general one stays); a bound's side condition shows a moment as a small grey chip with a check when arithmetic closes it, else it is a goal |
 | ∃x. | notch: the goal becomes the body for that name | key: a *some* name (blue) pops onto the shelf, the body is the fact |
 | ∧ | key: two goals | key: two facts (*Take both parts*, a rule proved in hol.txt) |
 | ⟶ | key: P drops into the facts | flat: used by dragging it |
@@ -54,78 +54,77 @@ above the finger):
   are two-faced tiles with a seam (a notch in each edge). Grip one face,
   drop it on a part that looks like it, and the part becomes the other
   face: the `□` face of `e · □ = □` onto `b` gives `e · b`; the `e` face
-  of `□⁻¹ · □ = e` onto `e` gives `□⁻¹ · □` with a pulsing socket for
-  the name. Rule variables are grey hollow slots, never letters. A for-all
+  of `□⁻¹ · □ = e` onto `e` gives `□⁻¹ · □` with a socket (ringed
+  orange) for the name. Rule variables are grey hollow slots, never letters. A for-all
   equation fact (`∀x. f · x = x`) is gripped the same way: its face
   onto `f · e` uses it with `e` and rewrites, one gesture.
 - **A lemma's tile onto the goal** (*Only one inverse*): its conclusion
   the goal, its premises what is left.
 - **A name onto a kit tile** (`□ / 2`, `max(□, □)`, `|□ − □| / 2`):
-  it fills the next hole; full, the name it builds (`ε / 2`) pops onto
-  the shelf, gold-ringed. Witnesses are built, never picked from a list.
+  it fills the next hole; full, the name it builds (`ε / 2`) goes onto
+  the shelf, cream. Witnesses are built, never picked from a list.
 - **The goal swiped sideways**: flipped (an equation). **The goal dragged
   up into the facts**: Suppose not; over the facts it shows as its
   opposite.
 
-Held over a place it fits, the place swells toward it and shows what it
+Held over a place it fits, the place leans toward it and shows what it
 would become, morphing glyph by glyph as a move does (what stays slides,
-what goes fades before what comes swells in; the changed part tinted;
-gold with a check when it would close the goal). A name held over a
-fact's notch leaves the general fact as it is: the new fact it would give
-slides out under it as a card of its own, with a plus. In Someone for
-everyone the grid follows: the row lights only once x is got from the
-fact, the cell (x, y) is ringed when the goal asks for it, (y, y) red.
-The picture follows a thing held in the other chapters too: in Groups the
-tiles take the shape the held face would give (a new `e` tile, a
-regrouping), the new ones faint and breathing (would be, not is), and
-spring back; in Limits a name over a fact's notch brings
-the band it would give in faint and breathing, and N over the goal's
-notch slides the goal's gate to N.
-Let go elsewhere, it springs home and wobbles there, the place shakes no
-(±6 px, three times) and a low tone plays (on a page); the same refusal
-twice says why in grey (*Doesn't match*, *Not a name here*, *That needs a
-name, not a statement*; a fact with an if or a for-all put on a goal it
-does not give says what it gives: *P ⟶ Q gives Q, not R*, or *It gives
-Q, not R* when that is too wide). A for-all fact put on a goal that a name
-dropped into its notch would give (at once, or once the new fact's key is
-opened) makes its notch hop, and the second time says *Drop y into ∀
-first*. The words sit in a pill in the clear room over the goal's top
-edge, right of SHOW (under a fact for a fact). A card lifted leaves an
-empty dent where it was, none of its writing behind. A name dropped on a statement whose key is
-still shut, or a fact dropped on the goal that would fit once its key is
-opened, makes the key hop and says *Open it first* at once. A tap on a
-thing that moves (a fact, a name) leans it toward where it fits and back:
-not a menu, the object showing that it moves. Help comes when you pause:
-in Logic the places a held thing fits breathe at once; from Groups on,
-only once it has been held still 1.2 s. After 8 s idle, unpressed keys
-breathe; just back from a dead end, at once.
+what goes fades before what comes swells in; the changed part tinted; a
+small check when it would close the goal). The goal's parts show as faint
+blocks only while a face is held. A name held over a fact's notch leaves
+the general fact as it is: the new fact it would give slides out under
+it as a card of its own, with a plus. In Someone for everyone the grid
+follows: the row lights only once x is got from the fact, the cell (x, y)
+is ringed when the goal asks for it, (y, y) soft red. The picture follows
+a thing held in the other chapters too: in Groups the tiles take the
+shape the held face would give (a new `e` tile, a regrouping), the new
+ones faint (would be, not is), and spring back; in Limits a name over a
+fact's notch brings the band it would give in faint, and N over the
+goal's notch slides the goal's gate to N.
+Let go elsewhere, it slides gently home; no shake, no sound. The same
+refusal twice says why in small grey words (*Doesn't match*, *Not a name
+here*, *That needs a name, not a statement*; a fact with an if or a
+for-all put on a goal it does not give says what it gives: *P ⟶ Q gives
+Q, not R*, or *It gives Q, not R* when that is too wide). A for-all fact
+put on a goal that a name dropped into its notch would give (at once, or
+once the new fact's key is opened) says *Drop y into ∀ first* the second
+time. The words sit over the goal's top edge, right of SHOW (under a fact
+for a fact). A card lifted leaves an empty dent where it was, none of its
+writing behind. A name dropped on a statement whose key is still shut,
+or a fact dropped on the goal that would fit once its key is opened,
+says *Open it first* at once. A tap on a thing that moves (a fact, a
+name) leans it toward where it fits and back: not a menu, the object
+showing that it moves. While a thing is held, the places it fits have a
+soft edge (in Logic at once; from Groups on, once it has been held still
+1.2 s). Nothing breathes, pulses or hops; there are no sounds or buzzes.
 
 A key pressed sinks a moment before the statement opens; the binder puffs
 away, the rest slides over to close the gap (writing on the board is known
 by what it writes, so nothing is ever drawn twice), and a name it gives
-flies out of the key as a ball, arcs to its place on the shelf and
-bounces. An ∧ key pinches its card like dough: a waist forms at the ∧,
+leaves the key as a ball and arcs to its place on the shelf. An ∧ key
+pinches its card like dough: a waist forms at the ∧,
 and the halves part into two cards (two goals, or two facts), each with
 its writing. The shelf always keeps room for a row of names (an empty
 tray, faint), so the board never moves because a name arrived.
 
-Each key tap or drop is a move (par and stars count them); a socket's
-name, kit building and the game's own closes are free. A level's
+Each key tap or drop is a move (counted, kept in the progress file, not
+shown; a level's `par:` bounds the dead-end search); a socket's name, kit
+building and the game's own closes are free. There is no score. A level's
 `demo:` (key, goalkey, drag, token, notch, some; face, flip; def, kit,
 suppose) is performed once by the ghost hand the first time the level
 is played: the book's first gestures made by a puppet finger (the key
-tapped and the name flying to the shelf, the name carried into its notch
-with the preview) and taken back, twice, with a line of words; a gesture
-that would finish the level is only shown. A touch stops it.
+tapped and the name going to the shelf, the name carried into its notch
+with the preview) and taken back, twice, with one small grey line of
+words; a gesture that would finish the level is only shown. A touch
+stops it.
 
 The language's words (`word:` in a level: and, if, all, ex, eq, def, kit,
-not): the first time a level brings one in, *New word* pops with its
-symbol on a keycap (it fades away whole), and the Book gains its page
+not): the first time a level brings one in, the Book gains its page
 under THE LANGUAGE (first in Logic, after the rules elsewhere; the
-chapter's own words first). A word is known once seen, or once a level
-that brings it in (or a later one in its chapter) is solved, so older
-progress has its words: the symbol on the goal and on a
-fact, each gesture played over and over by a little finger (`words.l8`).
+chapter's own words first); nothing pops. A word is known once seen, or
+once a level that brings it in (or a later one in its chapter) is solved,
+so older progress has its words: the symbol on the goal and on a fact,
+each gesture played over and over by a little finger (`words.l8`).
 
 The bulb's ghost hand performs the book's next gesture (taps the key or
 carries the thing to its place); off the book's path it says *Undo k*.
@@ -133,49 +132,55 @@ Held, the bulb plays the whole proof as ghost-hand gestures (Watch),
 then says *Your turn*. A dead end: in Logic, after each move off the
 book's path, a bounded search with the same gestures (keys opened first,
 names from the shelf) decides whether the goal can still be shown; if it
-runs out of moves without a proof, the goal card greys, dashed, *Can't be
-shown from what you have* on its top edge, a bobbing *Undo k* pill on its
-corner; the bulb then makes the ghost finger tap that pill. Someone for
-everyone's grid is square, the same people (little coloured figures)
-down the side as x and along the top as y, a faint diagonal where each
-meets themself; the example has no one related to themself except on
-the full row, so y's own dot (y, y) is empty: it is ringed red on hover
-and when stuck, and the full row's dot in y's column flashes beside it
-(what you have gives that one, not this). No letter stands over any one
-person: until names are taken only a faint *x ↓* and *y →* sit in the
-grid's corner; a taken y is its orange ball over its column, a got x
-its blue ball beside its row. In Limits a comparison of indices (`N₁ ≤ n`) or a use's side
-condition (`A > 0`) that arithmetic did not close is one (the gate red,
-a bracket from n). Groups says *Undo k* only when asked.
+runs out of moves without a proof, the goal card greys, *Can't be shown
+from what you have* in small grey words on its top edge, a plain *Undo k*
+pill on its corner; the bulb then makes the ghost finger tap that pill.
+Someone for everyone's grid is square, the same people (little coloured
+figures) down the side as x and along the top as y, a faint diagonal
+where each meets themself; the example has no one related to themself
+except on the full row, so y's own dot (y, y) is empty: it is ringed soft
+red on hover and when stuck, and stuck, the full row's dot in y's column
+shows beside it (what you have gives that one, not this). No letter
+stands over any one person: until names are taken only a faint *x ↓* and
+*y →* sit in the grid's corner; a taken y is its orange ball over its
+column, a got x its blue ball beside its row. In Limits a comparison of
+indices (`N₁ ≤ n`) or a use's side condition (`A > 0`) that arithmetic
+did not close is one (the gate soft red, a bracket from n). Groups says
+*Undo k* only when asked. Toasts are a small pale pill with grey words.
 
 Goals that are a fact, both sides the same, or (where the region has it)
 arithmetic close by themselves, staged: the goal card first morphs to
 what the move made of it (`e · c = c` to `c = c`); a new fact drops in,
-pulses, and a copy of it flies into the goal; then the card flashes gold
-and flies into its pip at the top. Under the title, a dot for each move
-of par, and on a soft pill a square for each goal. The last goal closes
-with the theorem stamped Q.E.D., its stars, *Next* bobbing in the
-thumb's reach, and *Read the proof*, written out as a book would. A
-theorem later levels use is a new tile on the shelf there; the Book holds
-the rulebook, the theorems proved and those still to prove. The first
-level of a chapter with a `chapter "..."` line opens on its page (its
-cover picture, its sentence, its rulebook as tiles). The map is a chapter
-for each region, levels as pudgy nodes on a winding path.
+and a copy of it moves into the goal; then the card shows a small grey
+check (and *by arithmetic* under it if that closed it) and fades where it
+is. The bar is back, the title (tap: its words again), the bulb and undo;
+no counters. When the last goal closes the facts fade away, the shelf
+slides down, and the goal card settles where it is into the theorem
+proved (its writing morphing from the last goal's); over it *Proved.*
+(and *Later levels can use it.* for a theorem later levels use, a new
+tile on the shelf there), under it *Read the proof* as a small link
+(written out as a book would) and a plain *Next* pill. The Book (a tap on
+a chapter's cover on the map) holds the language, the rulebook, the
+theorems proved and those still to prove. The first level of a chapter
+with a `chapter "..."` line opens on its page (its cover picture, its
+sentence, its rulebook as tiles, Begin). The map is a chapter for each
+region (*k of n proved*, *Book*), levels as pudgy nodes on a winding
+path: a quiet grey check when proved, a thin orange ring on the next.
 
 The picture above a level shows the goal on an example and follows the
 proof. Limits: the sequences, the band each hypothesis says they stay in
 from its N on, the goal's limit, an ε handle; the goal's gate slides to
 where it is chosen, a taken n is drawn past its gates, dots a band does
-not yet hold go red. Groups: a letter train, grouping as closeness,
-`x⁻¹ · x` side by side glowing. Someone for everyone: R as a square grid
-of the same people both ways, the row the fact gives lit, the column of a
-y taken ringed, the diagonal drawn. Levels about properties of one kind
-of thing (Any one at all, Show me one, One of them): the same people in
-a row, a chip for each property under each; a name stands over a person
-as its ball, a property a fact gives them lit (half lit inside an ∧,
-faint and breathing for the fact a name held over a notch would give),
-the one the goal wants ringed; proved for any y, every chip lights gold
-one after another, for some one only theirs.
+not yet hold are ringed soft red. Groups: a letter train, grouping as
+closeness, `x⁻¹ · x` side by side on a warmer pill. Someone for everyone:
+R as a square grid of the same people both ways, the row the fact gives
+lit, the column of a y taken ringed, the diagonal drawn. Levels about
+properties of one kind of thing (Any one at all, Show me one, One of
+them): the same people in a row, a chip for each property under each; a
+name stands over a person as its ball, a property a fact gives them lit
+(half lit inside an ∧, faint for the fact a name held over a notch would
+give), the one the goal wants ringed; proved for any y, every chip is
+lit, for some one only theirs.
 
 ## Playing in pictures (hooks)
 
@@ -227,10 +232,10 @@ Someone for everyone: the trap, its dead end, and the way:
 ```sh
 L8_LEVEL=10 L8_BOXES=1 L8_DO="open goal;token y > goal" .build/lemma
 L8_LEVEL=10 L8_DO="open goal;token y > goal;undo;open fact 0;token x > goal;token y > fact 0" .build/lemma
-L8_LEVEL=10 L8_DO="open goal;open fact 0;token x > goal;token y > fact 0" L8_DO_STOP=4 .build/lemma   # the preview, the goal gold
+L8_LEVEL=10 L8_DO="open goal;open fact 0;token x > goal;token y > fact 0" L8_DO_STOP=4 .build/lemma   # the preview, it would close
 ```
 
-Cancel on the left by faces (seven moves, par; step 2 leaves a socket,
+Cancel on the left by faces (seven moves; step 2 leaves a socket,
 step 3 fills it):
 
 ```sh
@@ -260,11 +265,10 @@ L8_LEVEL=23 L8_DO="suppose" L8_DO_STOP=1 .build/lemma
 L8_LEVEL=22 L8_DO_GAP=40 L8_DO="$(for i in $(seq 8); do printf 'hint;enter;'; done)token N > goal; open goal; token n > fact 3; token n > fact 4" .build/lemma
 ```
 
-A name dropped on the fact whose ∃ key is still shut (the key hops, *Open
-it first*), the new fact a notch would give previewed under the general
-one, a key's name flying to the shelf, and the Book's words (a progress
-file with `seen word_and` ... lines; without them each level that brings
-a word in pops *New word*):
+A name dropped on the fact whose ∃ key is still shut (*Open it first*),
+the new fact a notch would give previewed under the general one, a key's
+name going to the shelf, and the Book's words (a progress file with
+`seen word_and` ... lines):
 
 ```sh
 L8_LEVEL=10 L8_DO="open goal;token y > fact 0" .build/lemma
@@ -273,8 +277,8 @@ L8_LEVEL=5 L8_DO="open goal;fact 0 > goal;fact 0 > goal" .build/lemma # P ⟶ Q 
 L8_LEVEL=20 L8_DO="open goal;open goal;open fact 0;token ε > fact 0" L8_DO_STOP=4 .build/lemma  # the band it would give
 L8_LEVEL=6 L8_DO="open goal;token y > fact 0" L8_DO_STOP=2 .build/lemma
 L8_LEVEL=6 L8_TAPS=63,757 .build/lemma      # the goal's ∀ key: grab frames from 1.75 s on
-L8_LEVEL=6 L8_DO="open goal;fact 0 > goal;fact 0 > goal" .build/lemma  # the notch hops; Drop y into ∀ first (~7.5 s)
-L8_LEVEL=6 L8_TAPS=82,28 .build/lemma       # the Book
+L8_LEVEL=6 L8_DO="open goal;fact 0 > goal;fact 0 > goal" .build/lemma  # Drop y into ∀ first (~7.5 s)
+L8_TAPS=100,170 .build/lemma                # the map: Logic's cover opens its Book
 ```
 
 Watch, and a demo (a progress file without `seen` lines):
@@ -335,8 +339,7 @@ grep -v '^seen' .build/lemma-progress.txt > /tmp/p.txt; L8_LEVEL=6 .build/lemma 
   finger and ghost hand for hints, Watch and demos, `L8_BOXES`),
   `trial.l8` (what a move made, read off the proof for staging; facts in
   play; Limits' dead ends), `app.l8` (state, moves, demos, Watch),
-  `pages.l8`, `picture.l8`, `words.l8` (the words: New word, the Book's
-  pages), `touch.l8`, `main.l8` (`L8_DO` and the other
+  `pages.l8`, `picture.l8`, `words.l8` (the words: the Book's pages), `touch.l8`, `main.l8` (`L8_DO` and the other
   hooks); `web/lemma` runs it in a browser.
 
 A region's theorem can be exported (`export_theorem` in moves.l8): its
@@ -356,13 +359,11 @@ to `region_files` in `app.l8` and `FILES` in `web/lemma/lemma.js`. A
 
 ## Not built yet
 
-A fact onto a fact (forward); haptics in the native build (it is a
-desktop window; the page buzzes through `navigator.vibrate`); in Groups
+A fact onto a fact (forward); in Groups
 tiles a preview would take away vanish rather than ghost; a magnified preview clear of the thumb; long-pressing a part to
 pull out a copy; ∨; keyboard navigation of keys and tiles.
 
 The Foundations region (constructing ℕ, ℤ, ℚ, ℝ and proving each
 rulebook is satisfied); Calculate replaying a certificate through the
-kernel instead of being trusted; holding a row to preview it; a tilted
-Q.E.D. stamp (the painter has no rotation); more regions
+kernel instead of being trusted; holding a row to preview it; more regions
 (topology, linear algebra); a torus.
