@@ -5513,3 +5513,16 @@ flick-stop window opened only by the finger's scroll or its glide). **Not done:*
 (raḥam's gloss: the related list's gloss would need each number's dominant BSB rendering
 computed into `related.bin`, a data pipeline change), 9d (the scroll indicator in 176,
 179, 180: not reproduced from the code; left for the next run's shots).
+
+**Review r7-1's fixes (as built):** Major 1, reachability of the zero address (no name
+lookup; `bible: net flags 0x…` logged at each read). Major 2, the verse asked for held on
+screen until playback reaches it (`audio_verse_shown` / `audio_hold_ended`, tested); the
+hold ends at a new chapter or a scrub. Major 3, the timing files committed as the run
+goes (this commit: Souer 389 chapters); the finished files follow with their report.
+Minors: 4 (Now Playing gives a seek's target as the elapsed time until the player gets
+there), 5 (sequence 14 placed in step 339, marked from the app's start of Listen, 1 s of
+rest after the pause), 7 (the ring's percent and "John downloaded" for VoiceOver), 8 (the
+voice list titled "iPhone Voice"; 191b and 191c), 9 (audio's limits read before counting:
+a refused request counts for nothing; tested with 900 refusals). Minor 6 (the
+layout-outside-window warning) is left for the §11 ribbons build, which remakes those
+screens, as the review allows; 9b (raḥam) stays for the next data pass.

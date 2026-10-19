@@ -668,6 +668,8 @@ listen)
   # (DESIGN.md §12.7: shots 190 to 203.)
   step 320 190-listen-section 6
   step 321 191-voice 6
+  step 343 191b-voice-web-esv 6
+  step 344 191c-voice-downloads 6
   step 322 192-voice-list 6
   step 323 193-recording 20
   step 324 194-loading 8
@@ -699,8 +701,18 @@ listen)
   rec0=$(now)
   sleep 0.5
   : > "$out/transitions.txt"
+  # (Marked from the app's own start of Listen, not the step's sending:
+  # review r7-1.)
+  wait_start
+  xcrun simctl spawn "$dev" notifyutil -p "$id.demo340"
+  i=0
+  while ! grep -q "bible: listen souer JHN 3 from 3:30" "$out/console.txt" 2>/dev/null && [ "$i" -lt 200 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
   a=$(now)
-  step 340 "" 20
+  wait_done 340 "340" 22
+  sleep 1
   b=$(now)
   echo "14 $(python3 -c "print(round($a - $rec0, 2), round($b - $rec0, 2))")" >> "$out/transitions.txt"
   sleep 0.5

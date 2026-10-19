@@ -161,6 +161,20 @@ const chapters = async (env, q, now) => {
   });
 };
 
+// Audio's limits, read without counting: an error if any bucket is at its
+// limit, else null.
+const audioRefused = async (env, now) => {
+  const k = buckets(now);
+  const rows = await env.DB.prepare("SELECT bucket, n FROM usage WHERE bucket IN (?1, ?2, ?3)").bind(k.m, k.h, k.d).all();
+  const n = {};
+  for (const r of rows.results ?? []) n[r.bucket] = r.n;
+  if ((n[k.d] ?? 0) >= AUDIO_BUDGET.day)
+    return fail(503, "daily_limit", "The ESV has reached its daily limit for Smooth Bible.", k.toDay);
+  if ((n[k.h] ?? 0) >= AUDIO_BUDGET.hour) return fail(429, "busy", "Many people are reading the ESV just now.", k.toHour);
+  if ((n[k.m] ?? 0) >= AUDIO_BUDGET.minute) return fail(429, "busy", "Many people are reading the ESV just now.", k.toMinute);
+  return null;
+};
+
 // A chapter's recording: the address remembered, or the ESV API's redirect
 // (its key sent, the redirect not followed).
 const REDIRECTS = [301, 302, 303, 307, 308];
@@ -173,6 +187,10 @@ const audio = async (env, q, now) => {
   const key = `${b[0]} ${c}`;
   const row = await env.DB.prepare("SELECT url, fetched FROM audio_url WHERE passage = ?1").bind(key).first();
   if (row && now - row.fetched < AUDIO_KEEP && AUDIO_HOST.test(row.url)) return reply(200, { v: 1, url: row.url, notice: "(ESV)" });
+  // (Audio's limits read first: a refused request makes no call upstream,
+  // so it counts for nothing, and never eats the text's share; review r7-1.)
+  const refused = await audioRefused(env, now);
+  if (refused) return refused;
   const spent = await spend(env, now, AUDIO_BUDGET);
   if (spent) return spent;
   // (A one-chapter book by its name: the audio endpoint refuses "Jude

@@ -495,6 +495,7 @@ player_start(s: int, c: int, v: int) {
     if (old >= 0) listen_repaint(old);
     if (old != c) listen_repaint(c);
     ap_seek_v = v;
+    ap_hold_v = (if (v > 1) v else 0);
     ap_seek = (if (s == SRC_ESV) if (v > 1) -2 else -1 else audio_time_of(s, c, v));
     if (ap_seek == 0) ap_seek = -1;
     if (s == SRC_ESV || !follows_verses(s, c)) {
@@ -601,6 +602,9 @@ ap_release(i: int) {
 
 ap_resetting: bool = false;
 
+// The verse asked for, held on screen until playback reaches it (0: none).
+ap_hold_v: int = 0;
+
 // The chapter last heard to its end (one notice a chapter).
 ap_heard_c: int = -1;
 
@@ -644,8 +648,14 @@ ap_duration(): int {
     if (val == 0) -1 else cm_read(val)
 }
 
+// A seek in flight: its target (centiseconds, -1: none), which is the
+// elapsed time Now Playing gives until the player's own time reaches it
+// (review r7-1).
+ap_seek_target: int = -1;
+
 // To t centiseconds into the current item, exactly.
 ap_seek_to(t: int) {
+    ap_seek_target = t;
     cm[0] = t;
     cm[1] = 100 | 1 << 32;
     cm[2] = 0;
@@ -743,6 +753,8 @@ ap_item_changed() {
         ap_c = c;
         ap_begun = msg(item, sel("status")) == 1;
         ap_seek = -1;
+        ap_hold_v = 0;
+        ap_seek_target = -1;
         fbuf_n = 0;
         fput_str("bible: listen next ");
         fput_code_ref(c, 0);
@@ -851,11 +863,18 @@ ap_poll_once() {
     ap_waiting_check();
     t: int = ap_time();
     if (t < 0 || !ap_begun) return;
+    // (A seek landed: the lock screen told the time from here.)
+    if (ap_seek_target >= 0 && t >= ap_seek_target - 5) {
+        ap_seek_target = -1;
+        now_playing()
+    }
     if (demo_on && t != ap_demo_t && t > 0) ap_demo_moved = true;
     ap_demo_t = t;
     if (!follows_verses(ls_src, ap_c)) return;
-    v: int = audio_verse_at(ls_src, ap_c, t);
+    // (The verse asked for held until playback reaches it: review r7-1.)
+    v: int = audio_verse_shown(ls_src, ap_c, t, ap_hold_v);
     if (v < 0) return;
+    if (ap_hold_v > 0 && audio_hold_ended(ls_src, ap_c, t, ap_hold_v)) ap_hold_v = 0;
     if (v != speak_v || speak_c != ap_c) listen_at(ap_c, v)
 }
 
@@ -1209,6 +1228,7 @@ remote_previous(_self: int, _cmd: int, _event: int): int {
 remote_position(_self: int, _cmd: int, event: int): int {
     if (!ls_active || ls_engine != ENGINE_PLAYER || event == 0) return 0;
     t: f64 = msg_f(event, sel("positionTime"));
+    ap_hold_v = 0;
     ap_seek_to((t * 100.0f64) as int);
     ap_poll_once();
     now_playing();
@@ -1247,6 +1267,7 @@ now_playing() {
     if (ls_engine == ENGINE_PLAYER) {
         duration = ap_duration();
         elapsed = ap_time();
+        if (ap_seek_target >= 0 && elapsed < ap_seek_target - 5) elapsed = ap_seek_target;
         if (duration > 0) {
             np_keys[n] = objc_const("MPMediaItemPropertyPlaybackDuration");
             np_values[n] = nsnumber_f(duration as f64 / 100.0f64);

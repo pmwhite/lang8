@@ -65,6 +65,7 @@ const mockDB = () => {
             };
           return {
             async all() {
+              if (/^SELECT bucket, n FROM usage/.test(sql)) return { results: args.filter((b) => rows.has(b)).map((b) => ({ bucket: b, n: rows.get(b) })) };
               assert.match(sql, /^INSERT INTO usage/);
               const results = args.map((b) => {
                 rows.set(b, (rows.get(b) ?? 0) + 1);
@@ -324,11 +325,29 @@ test("audio stops at its own limits while the text goes on", async () => {
     assert.equal(r.status, status, bucket);
     assert.equal((await r.json()).error, error);
     assert.equal(upstreamCalls.length, 0);
-    // The text, with the same counts (one more spent by the refusal).
+    // (The refusal spent nothing.)
+    assert.equal(e.DB.rows.get(bucket), n, bucket + " unchanged");
+    // The text, with the same counts.
     mockFetch();
     r = await get(e, "esv/chapters?book=JHN&chapter=3");
     assert.equal(r.status, 200, bucket + " text");
   }
+});
+
+test("refused audio never eats the text's share", async () => {
+  const k = buckets(Date.now());
+  const e = env();
+  e.DB.rows.set(k.d, AUDIO_BUDGET.day);
+  mockAudio();
+  for (let i = 0; i < 900; i++) {
+    const r = await get(e, `esv/audio?book=JHN&chapter=${(i % 21) + 1}`);
+    assert.equal(r.status, 503);
+  }
+  assert.equal(upstreamCalls.length, 0);
+  assert.equal(e.DB.rows.get(k.d), AUDIO_BUDGET.day);
+  mockFetch();
+  const r = await get(e, "esv/chapters?book=JHN&chapter=3");
+  assert.equal(r.status, 200);
 });
 
 test("bad audio requests are 400s, and the key is in no reply", async () => {

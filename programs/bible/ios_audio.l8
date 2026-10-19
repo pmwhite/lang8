@@ -37,7 +37,7 @@ extern msg_arc(
     clockwise: int
 ): int = objc_msgSend;
 
-extern SCNetworkReachabilityCreateWithName(allocator: int, name: str): int;
+extern SCNetworkReachabilityCreateWithAddress(allocator: int, address: []i8): int;
 
 extern SCNetworkReachabilityGetFlags(target: int, flags: []i8): int;
 
@@ -420,7 +420,7 @@ open_voice_list() {
     if (settings_nav == 0) return;
     vc: int = msg(msg1(msg(vlist_class, sel("alloc")), sel("initWithStyle:"), 2),
         sel("autorelease"));
-    msg1(vc, sel("setTitle:"), nsstring("Voice"));
+    msg1(vc, sel("setTitle:"), nsstring("iPhone Voice"));
     item: int = msg(vc, sel("navigationItem"));
     msg1(item, sel("setLargeTitleDisplayMode:"), 2);
     msg1(item, sel("setRightBarButtonItem:"), system_item(0, "closeSheet:"));
@@ -1053,17 +1053,38 @@ dl_start(s: int, b: int) {
 }
 
 // ---- reachability, read synchronously (no callback: §12.3.3) ----
+// (Of the zero address, 0.0.0.0, made once: "any network, and is it
+// cellular", with no host name looked up on the main thread, which can
+// block for many seconds in a tunnel; review r7-1. Whether openbible.com
+// itself answers, its item says: §12.3.4.)
 reach: int = 0;
 
 reach_flags: []i8 = new i8[8](0i8);
 
+// A sockaddr_in: sin_len 16, sin_family AF_INET (2), port and address 0.
+reach_zero: []i8 = new i8[16](0i8);
+
 reach_read(): int {
-    if (reach == 0) reach = SCNetworkReachabilityCreateWithName(0, "openbible.com");
+    if (reach == 0) {
+        reach_zero[0] = 16i8;
+        reach_zero[1] = 2i8;
+        reach = SCNetworkReachabilityCreateWithAddress(0, reach_zero)
+    }
     if (reach == 0) return 2;
     for i in 0..8 reach_flags[i] = 0i8;
     if ((SCNetworkReachabilityGetFlags(reach, reach_flags) & 255) == 0) return 0;
-    byte_of(reach_flags, 0) | byte_of(reach_flags, 1) << 8 | byte_of(reach_flags,
-        2) << 16
+    f: int = byte_of(reach_flags, 0) | byte_of(reach_flags, 1) << 8 | byte_of(reach_flags,
+        2) << 16 | byte_of(reach_flags, 3) << 24;
+    if (diag_on) {
+        fbuf_n = 0;
+        fput_str("bible: net flags 0x");
+        for k in 0..8 {
+            d: int = f >> 28 - 4 * k & 15;
+            fput(if (d < 10) 48 + d else 87 + d)
+        }
+        note_ns(fstring())
+    }
+    f
 }
 
 // Reachable (2), and not needing a connection made first (4, unless it
@@ -1322,8 +1343,18 @@ ring_set(b: int) {
     end: f64 = (have as f64 + part) / book_count[b] as f64;
     CATransaction_quiet();
     msg_set_f(ring_layer[b], sel("setStrokeEnd:"), end);
-    msg(cls("CATransaction"), sel("commit"))
+    msg(cls("CATransaction"), sel("commit"));
+    // (VoiceOver hears the percent, as it changes: review r7-1.)
+    if (ring_btn[b] != 0) {
+        fbuf_n = 0;
+        fput_int((end * 100.0f64) as int);
+        fput_str(" percent");
+        msg1(ring_btn[b], sel("setAccessibilityValue:"), fstring());
+        msg1(ring_btn[b], sel("setAccessibilityTraits:"), objc_const("UIAccessibilityTraitUpdatesFrequently") | objc_const("UIAccessibilityTraitButton"))
+    }
 }
+
+extern UIAccessibilityPostNotification(notification: int, argument: int): int;
 
 CATransaction_quiet() {
     msg(cls("CATransaction"), sel("begin"));
@@ -1347,6 +1378,12 @@ dl_book_changed(b: int) {
         if (ring_btn[b] != 0) release(ring_btn[b]);
         ring_btn[b] = 0;
         ring_layer[b] = 0;
+        // ("John downloaded", said to VoiceOver.)
+        fbuf_n = 0;
+        fput_bytes(bsb, book_name_start(b), book_name_end(b));
+        fput_str(" downloaded");
+        UIAccessibilityPostNotification(objc_const("UIAccessibilityAnnouncementNotification"),
+            fstring());
         fbuf_n = 0;
         fput_str("bible: book downloaded ");
         fput_bytes(bsb, book_line[b] + 1, book_line[b] + 4);
