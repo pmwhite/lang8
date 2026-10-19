@@ -73,31 +73,33 @@ instead:
 ## 0.5 Defects seen in the CI run for 019e3ae1 (fix first, in Round 1)
 These are confirmed in the continuous-scroll screenshots (run 39066212450). Each one is
 also an acceptance criterion (§6, items 26–30).
-1. **The bar title shows while the chapter opener is visible.** (Owner amendment
+1. **The bar title shows while the chapter opener is visible.** (Owner amendments
    2026-10-18: the title fade is replaced, because on a real iPhone the title faded
-   out while the next chapter's opener came up, "John 3" → nothing → "John 4", a flicker.)
-   - **The title never disappears**, except above Genesis 1 (no chapter before it), where
-     it stays hidden while Genesis 1's opener is visible.
-   - It names the chapter whose text is at the bar's bottom edge. While John 4's opener
-     comes up the page, the title still says "John 3": the bar shows John 3, the text
-     John 4, so there's no duplicate.
-   - **As John 4's opener passes up under the bar, "John 4" pushes "John 3" up and out of
-     the title's place**, driven directly by the scroll (no timed animation). Progress
-     `t` = how far the opener's foot (the numeral's measured bottom, below) has gone past
-     the bar's current bottom, over the pushed name's on-screen height (30 pt, times the
-     bar's scale of the title). The old name moves up by `30·t` and fades as `1 − t`; the
-     new one comes up from 30 pt below into place. Both are clipped to the title's band
-     (30 pt tall, soft 3 pt edges; under the scale it is 21 pt in the compact band), so
-     nothing draws over the status bar or the text. Scrolling back pushes the other way.
+   out while the next chapter's opener came up, "John 3" → nothing → "John 4", a flicker;
+   then, the same day, the push made earlier and the title never empty.)
+   - **The title never disappears**, at Genesis 1 too: at its top the bar says
+     "Genesis 1" (the title is the way into Go To, so it must be there and tappable).
+   - It names the chapter being read. While John 4's divider and opener come up the
+     page from below, it says "John 3".
+   - **As John 4's row comes up to the bar, "John 4" pushes "John 3" up and out of the
+     title's place**, driven directly by the scroll (no timed animation). Progress
+     `t = 1 − (rowTop − barBottom) / (30 pt × the bar's scale of the title)`, clamped to
+     0…1, where `rowTop` is the top of John 4's row (its divider, then its opener) in the
+     table and `barBottom` the bar's current bottom: the push runs over the last 30 pt
+     (21 pt compact) before the row's top reaches the bar, and is complete when it
+     does. So after a jump to Psalm 23 (its opener just under the bar) the bar says
+     "Psalm 23", never the chapter before. Mid-scroll, the bar and the opener's numeral
+     may both say "John 4" for a moment; accepted. The old name moves up by `30·t` and
+     fades as `1 − t`; the new one comes up from 30 pt below into place. Both are
+     clipped to the title's band (30 pt tall, soft 3 pt edges; under the scale it is
+     21 pt in the compact band), so nothing draws over the status bar or the text.
+     Scrolling back pushes the other way.
    - Built as two title buttons in a masked container inside the scaled title view; only
      the one more than half in takes taps and is read by VoiceOver (the compact band's
      accessibility label follows it). Positions are set with implicit actions disabled.
    - Jumps (Go To, links, version switch) set the title with no push.
-   - Measure the opener: record the numeral's character offset when building the
-     attributed string, then get its rect with `firstRectForRange:` on the row's text view
-     (laying it out if it isn't yet). Convert it to table coordinates and compare it with
-     `contentOffset.y` + the bar's bottom.
-   - Also update the title after `go()`, after relayout, and on `viewDidAppear`.
+   - No text measurement is needed: the row's rect (`rectForRowAtIndexPath:`) gives its
+     top. Also update the title after `go()`, after relayout, and on `viewDidAppear`.
 2. **John 3 (and every chapter ≥ 2) is missing its book label.** It shows only "3". The
    "JOHN" label (§3.1.2) is required. Psalms correctly show "PSALM".
 3. **The place is lost on a text size change.** 10 jumped from John 3 to John 2. After
@@ -508,21 +510,27 @@ text never moves** because of the bar.
 | Backdrop | follows the bar height. The fade's alpha is unchanged |
 | Back capsule, verse tray | unaffected |
 
-**The title push (no duplicate chapter name; owner amendment 2026-10-18, replacing the
-title fade):**
-- The title names the chapter whose text is at the **current bar bottom**, `S + E − 24p`,
-  and the next chapter's name pushes it up and out as that chapter's opener passes under
-  that edge (§0.5 item 1, as amended). The push is inside the title view's scale, so it
-  works the same at every `p`, and collapsing or expanding the bar with the content still
-  moves the push only as far as the bar's bottom moves past the opener.
-- So the title is never gone (except above Genesis 1) and never shows a chapter whose
-  opener is visible below the bar.
+**The title push (owner amendments 2026-10-18, replacing the title fade):**
+- The title names the chapter being read, and the next chapter's name pushes it up and
+  out over the last 30 pt × scale before that chapter's row reaches the **current bar
+  bottom**, `S + E − 24p` (§0.5 item 1, as amended). The push is inside the title view's
+  scale, so it works the same at every `p`, and collapsing or expanding the bar with the
+  content still moves the push only as far as the bar's bottom moves.
+- So the title is never gone (Genesis 1 included) and a chapter placed at the top, as
+  every jump places it, is the one named.
 
 **Revealing the bar (to p = 0, animated over 0.25 s unless noted):**
 - Upward scroll after the 12 pt hysteresis (proportional, as above).
 - **Tap on the small title** or anywhere in the compact band.
-- Reaching the top (continuous, via the cap), and a tap on the status bar (the system's
-  scroll-to-top, which reaches the top).
+- Reaching the top (continuous, via the cap).
+- **A tap on the status bar** (owner amendment 2026-10-18): the whole Bible is one table,
+  so the system's scroll-to-top went all the way to Genesis 1. The reader's
+  `scrollViewShouldScrollToTop:` returns NO and instead scrolls, animated
+  (`setContentOffset:animated:YES`, the system's own feel), to the **top of the chapter
+  read** (its opener under the bar, as `go()` places a chapter); if it is already within
+  1 pt of that top, to the **previous chapter's top**. The bar expands with it. A row
+  above that was only estimated is made exact when the scroll ends
+  (`scrollViewDidEndScrollingAnimation:`). Sheets' tables keep the system's behavior.
 - **Opening any sheet** from the reader (search, picker, library, settings, note, study):
   start the expansion animation in the same run-loop turn as the presentation, so the two
   animate together. A sheet never opens over a collapsed bar.
@@ -1047,9 +1055,12 @@ handlers as a real drag: a demo flag makes the handlers treat programmatic
 | `15a-before-collapse` | John 3 scrolled so 3:14 is near the top, p = 0, content still | Expanded bar; the text positions are the reference |
 | `15-collapsed` | Same offset, then set p = 1 with no scroll (the demo hook) | Compact "John 3" under the status bar; the buttons are gone; the status bar is visible; **every text pixel below S + E is identical to 15a** (the CI script computes the pixel difference of that region and prints it to `log.txt`; it must be 0) |
 | `15b-half` | Freeze p = 0.5 | Bar halfway: no button or title visible (both alphas 0), and the backdrop is at the intermediate height |
-| `15c-collapsed-opener` | Collapsed, then scroll so that the John 4 opener is visible mid-screen | The compact band still shows **"John 3"** (amended 2026-10-18); there's no duplicate chapter name |
-| `15d-push-before`, `15e-push-mid`, `15f-push-after` | Expanded; John 4's opener walked up a point at a time until its foot is 8 pt below the bar's bottom, then half the push past it, then 12 pt past the whole push | "John 3" alone; "John 3" half up and fading with "John 4" half in from below, both inside the title band; "John 4" alone. `read-console.txt` logs each point's `bible: push` lines (the foot's distance, `t`, both names' chapters, offsets and the old one's alpha), which change by at most one point's worth per step |
+| `15c-collapsed-opener` | Collapsed, then scroll so that the John 4 opener is visible mid-screen, its row's top 10 pt under the band | The compact band is about halfway through pushing "John 3" out for "John 4" (amended 2026-10-18) |
+| `15d-push-before`, `15e-push-mid`, `15f-push-after` | Expanded; John 4's row walked up a point at a time until its top is 8 pt below where the push begins (30 pt below the bar's bottom), then halfway through the push, then 12 pt past the bar's bottom | "John 3" alone; "John 3" half up and fading with "John 4" half in from below, both inside the title band; "John 4" alone. `read-console.txt` logs each point's `bible: push` lines (the row top's distance, `t`, both names' chapters, offsets and the old one's alpha), which change by at most one point's worth per step |
 | `15g-push-compact-before`, `15h-push-compact-mid`, `15i-push-compact-after` | The same at p = 1 | The same, in the compact band, nothing over the status bar |
+| `15j-genesis-1-title` | Genesis 1's top, expanded | "Genesis 1" in the bar; the log says it is shown and takes taps |
+| `15k-status-bar-chapter-top` | From John 3:14, collapsed, the status bar's tap (the same path, `status_top`) | Expanded, John 3's opener under the bar; the log's `bible: status bar landed at` names John 3, off its top by under 1 pt |
+| `15l-status-bar-previous-chapter` | The status bar's tap again | John 2's top, landed exactly |
 | `16-bars-back` | From collapsed, simulated upward drag of 8 pt, then a further 60 pt | After 8 pt it's still collapsed (log p); after 68 pt it's expanded |
 | `16b-compact-tap` | From collapsed, tap the compact title | Expanded |
 | `16c-sheet-from-collapsed` | From collapsed, open search | The sheet is presented and the reader's bar behind it is expanded |
@@ -1142,11 +1153,10 @@ both with the screenshots. The designer reviews these for abrupt changes (princi
 25. VoiceOver labels exist for every icon button and swatch (checked in code review).
 
 ### Defects from the 019e3ae1 run
-26. In `01-genesis-1`, **the bar shows no title** while the opener is on screen. In
-    `06-psalm-23`, `08-john-3-16` (if the opener is visible) and `31-link-romans-8`, the
-    bar names the chapter before (amended 2026-10-18: the title never disappears and
-    never repeats an opener in view). In `02-chapter-divider` and `15`/`16`, the title is
-    visible and names the chapter at the bar's bottom edge; `15d`–`15i` show the push.
+26. (Amended 2026-10-18.) In `01-genesis-1` the bar says "Genesis 1"; in `06-psalm-23`,
+    `08-john-3-16` and `31-link-romans-8` it names the chapter jumped to ("Psalm 23").
+    In `02-chapter-divider` and `15`/`16`, the title is visible and names the chapter
+    read; `15c`–`15i` show the push.
 27. Every chapter ≥ 2 shows its book label above the numeral.
 28. `29-larger-text` shows the same verses at the top as `28-night`.
 29. `30-opened-again` shows the same place as `29-larger-text`.

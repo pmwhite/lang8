@@ -13,8 +13,9 @@ read aloud by VoiceOver as it would be in the phone's own apps.
 
 - Every chapter is a row of one table, read on by scrolling; a hairline
   divides chapters, each headed by its book's name (JOHN, PSALM) and number.
-  The bar names the chapter read; as the next one's opener goes up under
-  the bar, its name pushes the last one's out, in step with the scroll.
+  The bar names the chapter read; as the next one's row comes up to the
+  bar, its name pushes the last one's out, in step with the scroll. A tap
+  on the status bar goes to the top of the chapter (or the one before).
 - Themes (Auto, Paper, White, Sepia, Night, Black), five fonts, a text size
   on top of the phone's, line spacing, margins, and what to show (verse
   numbers, headings, footnote marks, a verse a line): the reading settings

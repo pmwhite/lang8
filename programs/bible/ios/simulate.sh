@@ -198,6 +198,11 @@ read)
   step 265 15g-push-compact-before
   step 266 15h-push-compact-mid
   step 267 15i-push-compact-after
+  # Genesis 1's top: its name in the bar (the way to Go To). The status bar
+  # tapped (owner, 2026-10-18): to John 3's top, then to John 2's.
+  step 268 15j-genesis-1-title
+  step 269 15k-status-bar-chapter-top
+  step 285 15l-status-bar-previous-chapter
   step 34 16-bars-back
   step 35 16b-compact-tap
   step 36 16c-sheet-from-collapsed

@@ -13,7 +13,7 @@ use_tag std, ios, bible;
 // runs; each run here is a string in its style, ios_look.l8), with the
 // reader's highlights, bookmarks and notes in it (ios_store.l8 keeps them).
 // The bar's title is the chapter being read, the next one's name pushing
-// it out as that one's opener scrolls up under the bar; it opens the
+// it out as that one's row comes up to the bar; it opens the
 // passage picker. The bar's other buttons open search, the library and the
 // reading settings (sheets, ios_sheets.l8). A tap on a verse selects it,
 // and a tray of what can be done with the verses selected comes up
@@ -777,33 +777,23 @@ note_frame(what: str, v: int) {
     note_num("bible:   of ", msg(sv, sel("count")))
 }
 
-// The title names the chapter whose text is at the bar's bottom edge: as
-// the next chapter's opener (its label, book's name and number) goes up
-// under the bar, its name pushes the last one's up and out of the title's
-// place, as far as the opener's foot has gone past the bar's bottom, over
-// the pushed name's height on the screen; following the scroll either way,
-// with no animation of its own. So the chapter's name is never shown twice,
-// and never gone (but above Genesis 1, which has none before it).
+// The title names the chapter being read: as the next chapter's row (its
+// divider, then its opener) comes up to the bar's bottom, its name pushes
+// the last one's up and out of the title's place, over the last 30 points
+// (times the bar's scale of the title) before the row's top reaches the
+// bar; following the scroll either way, with no animation of its own. So a
+// chapter at the top of the screen, as a jump leaves it, is named, and the
+// title is never empty (at Genesis 1 too: it is the way to Go To). Owner,
+// 2026-10-18.
 title_fade() {
     if (table == 0 || title_view == 0) return;
     line: f64 = offset_y(table) + bar_bottom();
+    D: f64 = TITLE_PUSH * title_scale();
     c: int = cur;
-    path: int = msg_ff(table, sel("indexPathForRowAtPoint:"), 40.0f64, line);
+    path: int = msg_ff(table, sel("indexPathForRowAtPoint:"), 40.0f64, line + D);
     if (path != 0) c = msg(path, sel("row"));
     if (c < 0 || c >= chapters) return;
-    // (Unmeasured: pushed once the chapter's top is well up under the bar.
-    // Measured only near the bar: an opener far above it is off the
-    // screen, where the text view has not laid it out, and the rect it
-    // would give is not its own.)
-    d: f64 = line - row_y(c) - em * 8.0f64;
-    tv: int = view_of(c);
-    if (d < em * 8.0f64 && tv != 0 && range_rect(tv, opener16[c], 1)) {
-        // (Its foot taken before row_y, which uses hfa too.)
-        foot: f64 = hfa[1] + hfa[3];
-        d = line - (row_y(c) + foot)
-    }
-    t: f64 = clamp01(d / (TITLE_PUSH * title_scale()));
-    title_show(c - 1, c, t);
+    title_show(c - 1, c, clamp01((line + D - row_y(c)) / D));
     title_place()
 }
 
@@ -1135,6 +1125,8 @@ scroll_began(_self: int, _cmd: int, sv: int): int {
     if (!is_reader(sv)) return 0;
     drag_top = offset_y(sv);
     drag_low = drag_top;
+    // (A finger on it: the status bar's scroll, if any, is the finger's.)
+    status_c = -1;
     plan_rest_ended();
     // (Scrolled: a place waiting for its ESV chapter is left behind.)
     esv_wait_c = -1;
@@ -1661,10 +1653,77 @@ will_end_drag(
 
 drag_target: []f64 = new f64[2](0.0f64);
 
-// An animated scroll (a jump's) at its end: as a rest.
+// An animated scroll (a jump's) at its end: as a rest (and the status
+// bar's scroll to a chapter's top made exact, should the rows above have
+// been estimated).
 scroll_animated_end(_self: int, _cmd: int, sv: int): int {
-    if (is_reader(sv)) esv_rest();
+    if (is_reader(sv)) {
+        if (status_c >= 0) {
+            c: int = status_c;
+            status_c = -1;
+            y: f64 = chapter_top_y(c);
+            d: f64 = y - offset_y(table);
+            if (y > -1.0e8f64 && (d > 1.0f64 || d < -1.0f64)) set_offset(y);
+            find_place();
+            save_place();
+            note_num("bible: status bar landed at ", cur);
+            note_num("bible:   off its top by x10 ", ((offset_y(table) - chapter_top_y(c)) * 10.0f64) as int)
+        }
+        esv_rest()
+    }
     0
+}
+
+// The offset that puts chapter c's opener under the bar, as go_top does
+// (-1e9 if its row is not laid out).
+chapter_top_y(c: int): f64 {
+    tv: int = view_of(c);
+    if (c == 0) return -top_inset(table);
+    if (tv == 0 || !range_rect(tv, 2, 1)) return -1.0e9f64;
+    y: f64 = hfa[1] + cap_gap(tv, 2);
+    row_y(c) + y - em * 0.8f64 - top_inset(table)
+}
+
+// The chapter the status bar's tap is taking the reader to the top of
+// (-1, none).
+status_c: int = -1;
+
+// A tap on the status bar (scrollViewShouldScrollToTop:): the whole Bible
+// is one table, so the reader's goes not to Genesis 1 but to the top of the
+// chapter read, or of the one before if it is there already, animated as
+// the system's is, the bar expanding with it (owner, 2026-10-18). Other
+// tables keep the system's.
+should_scroll_top(_self: int, _cmd: int, sv: int): int {
+    if (!is_reader(sv)) return 1;
+    status_top();
+    0
+}
+
+status_top() {
+    if (table == 0 || cur < 0) return;
+    stop_moving();
+    c: int = cur;
+    y: f64 = chapter_top_y(c);
+    if (y < -1.0e8f64 || offset_y(table) <= y + 1.0f64) {
+        if (c == 0) return;
+        c = c - 1;
+        y = chapter_top_y(c);
+        // (Not laid out: its estimated row, made exact at the end.)
+        if (y < -1.0e8f64) y = row_y(c) - top_inset(table)
+    }
+    note_num("bible: status bar to ", c);
+    status_c = c;
+    bar_expand();
+    l8_msg_hfa(hfa, table, sel("contentSize"), 0, 0, 0);
+    most: f64 = hfa[1] + bottom_inset(table) - view_height(table);
+    if (y > most) y = most;
+    if (y < -top_inset(table)) y = -top_inset(table);
+    d: f64 = y - offset_y(table);
+    if (d < 0.5f64 && d > -0.5f64) {
+        status_c = -1;
+        return
+    }
+    msg_ff1(table, sel("setContentOffset:animated:"), 0.0f64, y, 1)
 }
 
 app_background(_self: int, _cmd: int, _application: int): int {
@@ -1995,6 +2054,7 @@ main() noregion: int {
         &will_end_drag, "v@:@{CGPoint=dd}^{CGPoint=dd}");
     add_method1(app, sel("scrollViewDidEndScrollingAnimation:"), &scroll_animated_end,
         "v@:@");
+    add_method1(app, sel("scrollViewShouldScrollToTop:"), &should_scroll_top, "B@:@");
     add_method2(app, sel("scrollViewDidEndDragging:willDecelerate:"), &scroll_dragged,
         "v@:@B");
     add_method1(app, sel("tapped:"), &tapped, "v@:@");
