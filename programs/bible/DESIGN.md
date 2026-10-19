@@ -9,7 +9,8 @@ Status: Rounds 1–3 are approved and on TestFlight as 1.0 (9). **Round 4 (versi
 ESV, Compare, cross references and commentary) is the work now, fully specified in §9.**
 Round 5 (reading plans and a plan's daily reminder, exact senses, related words, share as
 image) follows, specified in §10; the verse of the day was dropped (§10's owner
-amendment). Round 1 is §0.5–§6, Round 2 is §7 and Round 3 is §8. The
+amendment). Round 6 (what you are reading: the books you're going through, each keeping
+its place as you read on, in Go To's Continue Reading) is specified in §11. Round 1 is §0.5–§6, Round 2 is §7 and Round 3 is §8. The
 owner's priorities, in order: distraction-free reading, note-taking, language tools.
 Above all: iPhone-native, HIG-proper, predictable UI. The app is **free forever**: no
 price, ads, in-app purchases or donation prompts (owner, 2026-10-18).
@@ -200,6 +201,15 @@ In build order:
 4. **R5.4 Related words** (MACULA proximity, CC BY). This **replaces semantic domains**,
    whose Louw–Nida data isn't licensed to us.
 5. **R5.5 Share as Image,** a custom action in the system share sheet.
+
+### Round 6: what you are reading (fully specified in §11)
+1. **R6.1 Readings.** A book becomes a reading when you read its first chapter, or two of
+   its chapters in a row. It keeps your place as you read on (scrolling, Listen, chapters
+   read), never moved by jumps or sheets. Readings are listed in Go To's first section,
+   now **Continue Reading**, after a followed plan's rows. Swipe to remove; a toast on
+   finishing; seeded once from History. Not a generalization of plans: a plan is a
+   schedule, a reading is a place that moves; they share the "chapter read" signal and
+   the section (§11.0).
 
 ### Out of scope (all rounds so far)
 - Widgets, Live Activities and App Intents (these need Swift or app extensions).
@@ -4023,3 +4033,351 @@ Round 5 is approved when:
   works on a device.
 - Shots 140–158 match. Recording sequence 12 shows no abrupt change. No earlier shot
   regresses.
+
+---
+
+## 11. Round 6 specification: what you are reading
+
+Round 6 is one feature, asked for by the owner on 2026-10-18:
+
+> "I want to be able to keep track of what things I am reading. Sometimes I'm going
+> through a book, and sometimes I am going through multiple books concurrently, and it is
+> hard to remember where I left off. Is this a generalization of reading plans? Or
+> something else? I will let the designer figure out how to support this user story."
+
+It keeps everything from Rounds 1–5.
+
+### 11.0 The answer, and the decisions
+
+**Is it a generalization of reading plans? No. It sits beside them, and they share two
+things.** A plan is a **schedule**: chosen in advance, it says what to read on which day,
+and it can fall behind (Catch Up). What the owner describes is a **place that moves**:
+the chapter and verse where you stopped in a book you're going through, with no days, no
+pace and nothing to fall behind on. Turning plans into a general "thing being read" would
+mean either giving every book a pace to choose ("Romans in 16 days"), which is the
+ceremony and the guilt the owner doesn't want, or stripping plans of the days that make
+them plans. So they stay separate, and they share:
+1. **The signal.** A chapter counts as read exactly as it does for plans (§10.1.2): 20 s
+   of rest in it in total **and** its last verse on screen, or Listen finishing it. Plans
+   and readings use one counter. It now runs whether or not a plan is followed.
+2. **The place they're shown.** Go To's first section (Round 5's Today) becomes
+   **Continue Reading**. A followed plan's rows come first, as now, and the books you're
+   going through follow. To the reader, a plan is one more thing they're reading. Under
+   the hood, a plan is a schedule and a reading is a bookmark that moves by itself.
+
+**Decisions:**
+1. **A reading is one book.** There's at most one reading per book, and its place is one
+   chapter and verse. Spans like "the Sermon on the Mount" are a plan's job and aren't
+   part of this round. Single-chapter books (Obadiah, Philemon, 2 John, 3 John, Jude) are
+   never readings, because there's nothing in them to lose your place in.
+2. **Readings come from what you do. There's no Start button** (owner's taste: driven by
+   what the reader actually does, with no ceremony). A book becomes a reading when you
+   **read its first chapter**, or **read two of its chapters in a row** (§11.1.2). Reading
+   one chapter you were sent to never makes a reading, so casual visits leave no trace
+   here. Recent and History already keep those.
+3. **Only reading moves a reading.** Scrolling, Listen and chapters counted read move it.
+   A jump's arrival (Go To, search, a link, a preview's Open in Reader, Compare, History,
+   the back capsule, a plan's row, or a reading's own row) **never** moves one. Neither
+   do sheets: rest isn't counted while a sheet is over the reader, as now.
+4. **No pause state and no limit.** Readings are listed most recently read first, so
+   books you've set down sink by themselves. Up to 4 show in Go To, and the rest are one
+   tap away (Show All). The reader removes a reading with a swipe.
+5. **Finishing** a book's last chapter shows the same small toast as a plan's day
+   ("Finished Romans") and takes the reading out of the list. There are no counts, streaks
+   or badges.
+6. **The reader screen gets no new chrome.** The only thing the reader ever shows of
+   this feature is the finishing toast.
+7. **On first launch, readings are seeded from History** (§11.1.6), so the owner sees the
+   books they're already going through without starting over.
+
+### 11.1 Model and rules (portable `readings.l8`, tested by `test_readings.l8`)
+
+#### 11.1.1 Terms
+- A **chapter read**: §10.1.2's signal (rest 20 s in total and the end seen, or Listen
+  finished it). Chapters are the BSB-numbered chapters of R4.1, so it doesn't matter
+  which version, the ESV included, was on screen. A placeholder chapter (§9.4.11) counts
+  once its text is there and the signal holds.
+- A **scroll rest**: the reader comes to rest (a scroll ends, the app goes to the
+  background, or a sheet is presented) **after the finger, or Listen's following scroll,
+  has moved the text since the last jump**. A rest that is only a jump's arrival, or its
+  settle (§3.1.6's `jump_settle`), isn't a scroll rest. The place at a rest is
+  `measure_place()`'s: the chapter `cur`, the verse at the top `place_v`, and
+  `place_frac`.
+- A **reading** R of book B has a kept place (R.c, R.v, R.frac): where to continue. It
+  also has R.started and R.last (unix times).
+- **Recently read**: in `read.tsv` (§11.1.5) with a time in the last 14 days.
+
+#### 11.1.2 How a reading starts
+When chapter x of book B is **read**, and B has no reading, B starts a reading at
+**(x+1, 0, 0)** (the top of the next chapter) if all of these hold:
+1. B has more than one chapter, and x isn't B's last chapter.
+2. x is B's chapter 1, **or** chapter x−1 of B is recently read.
+3. B wasn't removed in the last 30 days (§11.1.4), unless x is chapter 1.
+4. x isn't the followed plan's chapter on a day up to tomorrow's (day ≤ N+1). Those
+   chapters are the plan's reading, and a reading of the same book alongside would be
+   clutter. A plan's chapter from a later day (Romans while on day 4 of Bible in a Year)
+   doesn't count as the plan's here, so reading it can start a reading.
+
+Examples (each tested):
+- Read Romans 1 → reading "Romans 2".
+- A search to Psalm 23, read to the end → no reading (Psalm 22 wasn't read).
+- John 13 then John 14, read on one evening or a week apart → reading "John 15".
+- Genesis 1 read as Bible in a Year's day 1 → no Genesis reading.
+- Philippians 3 and 4 read → no reading (4 is the last chapter).
+- Jude read → no reading.
+
+#### 11.1.3 How a reading moves
+For the reading R of book B:
+1. **Scroll rest in R.c**: R takes the rest's place (R.v, R.frac), in either direction.
+   This is where you left off, the same way the app's own place works. R.last = now.
+2. **Scroll rest in R.c + 1 that lasts 20 s** (history's dwell, §8.3): R moves to that
+   chapter and verse. You read on into the next chapter. A glance that doesn't last 20 s
+   moves nothing. R.last = now.
+3. **Chapter x of B read**, where x = R.c, **or** x = R.c + 1, **or** (x > R.c and x−1
+   recently read): R moves to (x+1, 0, 0), and R.last = now. Two chapters in a row read
+   ahead also carry a reading past chapters you skipped. If x is B's last chapter, R is
+   **finished** (§11.1.4).
+4. **Nothing else moves it.** That covers chapters behind R.c, a single chapter read
+   further ahead (a cross reference to Romans 12 while at Romans 8), and every jump's
+   arrival.
+
+Only rules 1–3 set R.last, which orders the list. Visiting a reading's book without
+reading it (a jump, a sheet) doesn't change R.last.
+
+#### 11.1.4 Finishing and removing
+- **Finished** (rule 3 on B's last chapter):
+  - The reading leaves `readings.tsv`.
+  - The line `FINISHED\tBOOK\tSTARTED\tUNIXTIME` is appended to `readings-done.tsv`.
+  - The toast (§3.3.3's style, §10.1.2's Day Done) reads "Finished Romans", with a leading
+    `checkmark`, for 1.6 s, with a success haptic.
+  - If a plan's Day Done toast is due on the same read, it shows first, and this one
+    follows it as soon as it has gone.
+- **Removed** (a swipe, §11.2.3):
+  - The reading leaves `readings.tsv`.
+  - `REMOVED\tBOOK\tC\tV\tSTARTED\tUNIXTIME` is appended to `readings-done.tsv`, so
+    nothing is lost.
+  - `readings.tsv` keeps a line `GONE\tBOOK\tUNIXTIME` for 30 days, which stops rule 2 of
+    §11.1.2 starting B again. Reading B's chapter 1 starts it at once. Lines older than 30
+    days are dropped at the next write.
+- **Starting over:** a finished or removed book starts again by the same rules.
+
+#### 11.1.5 Files (Application Support/SmoothBible/, §4.3's conventions)
+These are UTF-8, tab-separated, one record per line. Each file is rewritten whole
+(`name.tmp`, then `rename`) except `readings-done.tsv`, which is appended to
+(`append_file`, as `plans-done.tsv` is). Malformed lines are skipped (§8.9.4). Books are
+USFM codes and chapters are BSB numbering.
+- `readings.tsv`:
+  - `READING\tBOOK\tC\tV\tFRAC\tSTARTED\tLAST` (V = 0 means the chapter's top.)
+  - `GONE\tBOOK\tUNIXTIME`
+  - Line order doesn't matter. The list is sorted by LAST, newest first, when shown.
+- `read.tsv`: `BOOK\tC\tUNIXTIME`, one line per chapter read, newest last. Reading a
+  chapter again moves its line to the end with the new time. The file keeps the last 300
+  lines. It holds every chapter read, plan or not, and it's what "recently read" asks.
+  `plan.tsv`'s `READ` lines are unchanged.
+- `readings-done.tsv`: `FINISHED…` and `REMOVED…` lines, as above. Nothing reads it in
+  this round. It keeps the record for later (§11.6, question 1).
+- No NSUserDefaults keys except `readingsSeeded` (bool, §11.1.6).
+
+#### 11.1.6 Migration: seeded once from History
+At the first launch with this build (`readingsSeeded` unset), with no `readings.tsv`:
+- For each book with more than one chapter, find `history.tsv` entries of that book from
+  the last 30 days. If they include two consecutive chapters (x−1 and x, in any order),
+  seed a reading at the book's **newest** history entry: its chapter, and its verse if
+  exact, else 0, with frac 0. Set STARTED = LAST = that entry's time.
+- Seed nothing for a book whose newest entry is its last chapter at verse ≥ 2, since the
+  book is likely finished.
+- Then set `readingsSeeded`. This runs once: removing a seeded reading doesn't bring it
+  back. History is only read, never changed.
+
+#### 11.1.7 Tests (`test_readings.l8`, in `make bible-test`)
+- Every example in §11.1.2.
+- Moves:
+  - A rest in R.c updates the verse both ways.
+  - A 19 s rest in R.c+1 moves nothing; 20 s moves R.
+  - Reading R.c moves R to the next chapter's top.
+  - A single read further ahead doesn't move R; two in a row do.
+  - A chapter behind R.c doesn't move it.
+- Finishing on the last chapter writes `FINISHED`.
+- Removing writes `REMOVED` and `GONE`.
+  - The `GONE` line blocks rule 2 for 30 days but not chapter 1.
+  - It's dropped after 30 days.
+- `read.tsv`:
+  - Re-reading a chapter moves its line.
+  - The file is capped at 300 lines.
+  - Malformed lines are skipped.
+- Seeding:
+  - Acts 9 and 10 in history yesterday seed "Acts 10:v".
+  - Psalm 23 alone seeds nothing.
+  - Entries 31 days old seed nothing.
+  - It runs once.
+- Sorting by LAST.
+
+### 11.2 Screens
+
+#### 11.2.1 Go To: the first section becomes Continue Reading
+This replaces §10.1.3's section header and extends its rows. It's configured in
+`viewWillAppear:` like the rest of the sheet (principle 6), and the sheet never rearranges
+after it lands.
+- **Header:**
+  - **"Continue Reading"** when there's a followed plan or at least one reading.
+  - With neither, the section is just the "Reading Plans ›" row, **with no header**. A
+    lone link needs no title, and 140 changes only by losing the word "Today".
+- **Rows, in order:**
+  1. The followed plan's rows, exactly as §10.1.3: today's readings with their circles,
+     Catch Up, and the plan's row "Bible in a Year · Day 4 of 365 ›".
+  2. **The readings,** most recent (LAST) first, **up to 4**:
+     - A subtitle cell (`UIListContentConfiguration subtitleCellConfiguration`), with
+       insets as Recent's rows.
+     - Image: `book` (SF Symbol, 17 pt regular), faint, the same size and place as
+       Recent's `clock.arrow.circlepath`, so the column of icons lines up.
+     - Text: where you'll continue, in the body style (SF 17, ink): "Romans 3:9" when
+       R.v ≥ 2, otherwise "Romans 3". Psalms reads "Psalm 41".
+     - Secondary text (faint): "Chapter 3 of 16 · Yesterday". The time word is History's
+       (§8.3): "Now" if R.last is in the last 10 minutes, then "Today", "Yesterday", the
+       weekday within 7 days, else "12 October" (with the year only if it isn't this
+       year). Psalms reads "Psalm 41 of 150 · Today".
+     - No accessory. A row goes somewhere, as Recent's rows do.
+  3. **Show All** when there are more than 4 readings: accent text, no image, a
+     disclosure indicator, and the value "6" (the count, faint). It pushes Reading
+     (§11.2.2).
+  4. **Reading Plans ›** (`calendar`), only while no plan is followed, as now.
+- **Recent** drops any chapter a reading row shows, as it already drops the current
+  chapter, so Romans 3 isn't listed twice.
+- **Opening position:** Go To opens at its top whenever this section has a plan or a
+  reading (§10.7a note 4 extended). Otherwise it's scrolled to the current book, as §3.2
+  says.
+- **Tap a reading** → **a jump to the kept place**, exact: dismiss the sheet, then go to
+  (R.c, R.v, R.frac) the way launch restores a place (`go_place`), **with no flash**,
+  because this is a place and not a reference. History is pushed and the back capsule
+  shows, as for every jump. The arrival doesn't move the reading (§11.0, decision 3).
+- **Swipe to remove** a reading row, through §3.5's mechanism: `canEditRowAtIndexPath:`
+  is YES for reading rows only, `titleForDeleteConfirmationButtonForRowAtIndexPath:`
+  returns **"Remove"**, and `commitEditingStyle:` removes the row (§11.1.4). The update is
+  one `beginUpdates`/`endUpdates`:
+  - The row is deleted with `UITableViewRowAnimationAutomatic`.
+  - If a fifth reading exists, it's inserted as the fourth row (Fade), and Show All's
+    count is reloaded (Fade) or Show All is deleted when the count falls to 4.
+  - If the section loses its last reading with no plan, the header goes. Use
+    `reloadSections:withRowAnimation:Fade` for that section only, so the header and the
+    "Reading Plans" row fade, with nothing jumping.
+  - Recent may regain a chapter it had dropped. Its section isn't touched until the sheet
+    next appears, because nothing outside the swiped section moves.
+- **Accessibility:**
+  - Label: "Romans, chapter 3, verse 9. Chapter 3 of 16, read yesterday."
+  - Hint: "Opens where you left off."
+  - A custom action **Remove**: `UIAccessibilityCustomAction`
+    `initWithName:target:selector:`, which is selector-based, so there are no blocks.
+  - The rows wrap at accessibility sizes, with nothing clipped (shot 172).
+
+#### 11.2.2 Reading (pushed from Show All)
+- A run-time UITableViewController, insetGrouped, with the inline title **"Reading"**.
+  Its global is held (`held`) until the sheet has gone (§10.7a note 15).
+- One section: every reading, most recent first, with the same cells, taps, swipe and
+  accessibility as in Go To.
+- Footer (the system footer style): "A book appears here when you read its first chapter,
+  or two of its chapters in a row. It keeps your place as you read on." This is the one
+  place the rule is explained, in plain words.
+- If a removal leaves 4 or fewer readings, the screen stays until the reader goes back,
+  and Go To's section is set again (without Show All) in its `viewWillAppear:`. That's
+  not visible during the pop, because the section is under the pushed screen until it
+  slides away.
+- No Edit button. Swipe is the one way to remove, as in Go To. There's no empty state,
+  since the screen is reached only with more than 4 readings (if a removal empties it
+  somehow, show `book`, "Nothing Being Read", and the footer's text).
+
+#### 11.2.3 The reader
+- No new chrome, no badge, and no change to the title, bar or capsule.
+- The finishing toast (§11.1.4) is the only thing shown, above the reader as Day Done is.
+
+#### 11.2.4 Motion (principle 6)
+- Go To arrives already configured, with no row appearing after it lands.
+- Removal uses the animations above. Show All is a system push.
+- A reading's tap is the existing jump: sheet dismissal, an unanimated scroll, and the
+  capsule fading in.
+- The toast is Day Done's: its fade, its haptic and its 1.6 s.
+- Reduce Motion: as everywhere (principle 3).
+
+### 11.3 Builder notes (where it goes)
+- **`readings.l8`** (portable, `tag bible`) holds the rules of §11.1, the three files'
+  lines, seeding from history lines, and the time words. It has no UIKit.
+  `test_readings.l8` drives it with fixed times.
+- **The read signal** (`ios_daily.l8`'s `plan_rest_began`, `plan_rest_ended`,
+  `plan_seen`, `plan_check` and `plan_heard`) runs **without a plan**. Its early
+  `pl_active < 0` returns go. `plan_check` calls one `chapter_read(c)`, which appends to
+  `read.tsv`, applies §11.1.2–§11.1.4, and then calls `plan_mark_read` only when a plan is
+  followed. The demo's `demo_read` goes through `chapter_read`.
+- **Scroll rests:** the reader keeps a flag `scrolled_since_jump`. `jump()` and `arrive()`
+  clear it. `scrollViewWillBeginDragging:` and Listen's following scroll set it. The
+  existing rest moment that calls `save_place()` (and history's dwell, `dwell_done`, for
+  rule 2) calls `reading_rest(cur, place_v, place_frac, dwelt)` only when the flag is set.
+- **`readings.tsv` is written** when a reading moves. That's at most once per rest, which
+  is the same rate as `save_place`.
+- **Go To:** the section is built in `today_build` (`today_add` kinds for a reading and
+  for Show All). The Reading screen can live in `ios_daily.l8` or a small
+  `ios_reading.l8`.
+- Strings are plain. There's no "track", "progress" or "streak" anywhere in the UI.
+
+### 11.4 CI for Round 6
+**A new demo group, `reading`**, with the demo clock (§10.0). Before the first launch it
+seeds `history.tsv` with Acts 9:1 and Acts 10:9 (both yesterday, 21:00 and 21:20) and
+Psalm 23 (yesterday). It doesn't seed `readings.tsv` or a plan. Shots:
+
+| Shot | Action | Expected |
+|---|---|---|
+| `160-reading-seeded` | Launch; open Go To | "Continue Reading": "Acts 10:9 · Chapter 10 of 28 · Yesterday", then "Reading Plans ›"; Recent without Acts 10, with Psalm 23. The sheet is at its top |
+| `161-reading-started` | Jump to Romans 1; `demo_read` it; open Go To | "Romans 2 · Chapter 2 of 16 · Now" first, then Acts 10:9 |
+| `162-casual-visits` | Search "love" → open a result in 1 Corinthians 13 and `demo_read` it; a preview of Isaiah 53:5 → Open in Reader; Compare on John 3:16; open Go To | Still only Romans 2 and Acts 10:9 (no 1 Corinthians, Isaiah or John reading); Recent shows the visits. The log has "bible: chapter read 1CO 13" and no "reading started" |
+| `163-reading-moved` | Tap Romans 2 (the reader at Romans 2's top, no flash, capsule shown); `demo_read` Romans 2; the scroll hook (`demo_scroll_rest`) rests at Romans 3:9 as a finger scroll; open Go To | "Romans 3:9 · Chapter 3 of 16 · Now" |
+| `164-jump-moves-nothing` | Jump by Go To's grid to Romans 8 (no scroll); wait 25 s of demo time; open Go To | Still "Romans 3:9" (a jump's arrival moves nothing) |
+| `165-two-in-a-row` | Jump to John 13; `demo_read` John 13 and John 14; open Go To | "John 15" first, then Romans 3:9, then Acts 10:9 |
+| `166-continue-exact` | Tap Romans 3:9 | The reader with Romans 3:9 at the kept place, exactly as left, no flash, and the capsule "‹ John 14" |
+| `167-with-plan` | Start Bible in a Year; `demo_read` Genesis 1 and 2; open Go To | Plan rows first (Genesis 1–3 half-filled, "Bible in a Year · Day 1 of 365"), then John 15, Romans 3:9, Acts 10:9; **no Genesis reading** |
+| `168-show-all` | The demo seeds readings Mark 5 and Philippians 4 (LAST older than Acts's); open Go To | The 4 newest readings (John 15, Romans 3:9, Acts 10:9, Mark 5), then "Show All" with the value 5 |
+| `169-reading-all` | Push Show All | Reading: all 5 rows and the footer's text |
+| `170-removed` | Remove Mark 5 (the demo calls `commitEditingStyle:` on its row) | 4 rows; back in Go To, no Show All. The log has "bible: reading removed MRK" and `readings-done.tsv` has the `REMOVED` line |
+| `171-finished` | Jump to Philippians 4; `demo_read` it | The toast "Finished Philippians" over the reader |
+| `172-ax-goto-reading` | (Accessibility size) Go To | The reading rows wrap; nothing clipped |
+
+- **Recording sequence 13:** in Go To with 5 readings, swipe Remove on the second (the
+  row slides away, the fifth fades in as the fourth, and Show All goes with a fade). Push
+  Show All and back. Tap a reading (the sheet dismisses, the reader is at the place, and
+  the capsule fades in). Nothing jumps or appears after the sheet lands.
+- **Logs:** each start, move, finish and removal is logged
+  ("bible: reading started ROM 2", "bible: reading moved ROM 3:9",
+  "bible: reading finished PHP", "bible: reading removed MRK") so the walk can be checked
+  from text.
+- **Linux:** `test_readings.l8` in `make bible-test`.
+
+### 11.5 Round 6 acceptance
+Round 6 is approved when:
+- The rules are exactly §11.1's, and the tests pass.
+  - Casual visits (search, links, previews, Compare, History, the capsule) never start or
+    move a reading (162, 164).
+  - Reading on does move it (163, 165).
+  - A followed plan's chapters don't start readings (167).
+- Go To:
+  - The section is configured before the sheet lands.
+  - The header shows only when there's something to continue (140 loses "Today"; 160
+    has "Continue Reading").
+  - Recent doesn't repeat a reading's chapter.
+  - Show All appears past 4.
+  - Removal animates as specified.
+- A reading's tap returns to the exact kept place, with no flash and with the capsule
+  (166).
+- Finishing shows the toast once and takes the reading away. `readings-done.tsv` keeps
+  `FINISHED` and `REMOVED` lines.
+- Seeding from History happens once and is correct (160).
+- VoiceOver reads the labels and the custom action Remove. Accessibility sizes wrap (172).
+- Shots 160–172 match. Recording sequence 13 shows no abrupt change. No earlier shot
+  regresses, except 140, 143, 146 and 158, whose header now reads "Continue Reading" (or
+  has no header in 140).
+
+### 11.6 Questions only the owner can answer
+1. **Finished books.** Do you want a record you can see, such as a "Finished" section in
+   the Reading screen ("Romans · finished 12 October")? It's kept in `readings-done.tsv`
+   either way, but not shown in this round, because a visible tally starts to look like
+   the counts and streaks you've avoided.
+2. **On a device, the feel of the thresholds:** whether 20 s and "first chapter, or two
+   chapters in a row" start readings when you mean them to and not otherwise. Psalms and
+   Proverbs, which people often dip into, are treated like any other book. Tell us if they
+   should only start from chapter 1.
