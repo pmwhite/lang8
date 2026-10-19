@@ -4757,7 +4757,11 @@ Where the build differs from the text above, or settles what it left open, and w
     lays out nothing) while off the window, and in place otherwise. Every in-place update of
     Go To's sections first asks `on_window()`, which logs "table off the window, not
     updated: …" (with the demo's log) and leaves it to that reload. The Plans list, A
-    Chapter a Day and New Ribbon reload whole in `viewWillAppear:` too.
+    Chapter a Day and New Ribbon reload whole in `viewWillAppear:` too. With each demo
+    step's wall-clock time now logged, the plans group's remaining warning was placed in
+    step 261: `esv_set_listed` inserted and deleted the ESV's section in the Versions and
+    Acknowledgements lists after they had been popped. Off the window they now reload
+    whole (logged the same way).
 17. The Begin At choosers are shared by New Ribbon's Place and A Chapter a Day's Begin At
     (`bg_*` in `ios_ribbons.l8`); the grid in choose mode is a plain
     `UICollectionViewController`, its toolbar gone with Start Reading.
