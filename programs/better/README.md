@@ -112,6 +112,32 @@ Never on the App Store), which `tools/ios/sign.sh` signs on Linux, for a
 phone plugged in or for TestFlight, and `tools/ios/apple.py` sends to App
 Store Connect through its API (the keys in `~/.config/better-ios`).
 
+## On Android
+
+`android.l8` is Better as a native Android app, the same way: the program
+compiled by `l8 arm64 --target android` into `libbetter.so`, which runs on
+a thread of its own and draws with OpenGL ES on the app's surface (no web
+view). A little Java (`tools/android/java`) passes it lines as the page
+does (`fix`, `touch`, `type`, the phone's edges; see `android.l8`) and
+does what it asks (`L8GPS`, `L8WAKE`, `L8CUE`...); `tools/android/glue.c`
+is between them. Where the phone is is watched with Android's GPS while
+Better wants it; while recording, a foreground service (its notification
+says so) keeps it measuring with the screen off, with only "while using
+the app" allowed. The chimes duck other sound for the moment. The log and
+settings are kept in the app's files, and with a personal link once it is
+opened with `better://link#me=SECRET`, as on an iPhone.
+
+```sh
+tools/android/build.sh better.apk [VERSION_CODE]   # on Linux, no Gradle
+adb install -r better.apk
+adb shell am start -n space.trailingwhite.better/.Better --ei sim 10
+```
+
+It needs the Android SDK's build-tools, platform 36 and the NDK (under
+`~/android-sdk`), and a JDK. It is signed with the key in
+`~/.config/better-android` (made the first time; every update must be
+signed with it). `--ei sim K` records a made-up course K times as fast.
+
 ## Keeping it
 
 The log is one text file, written after each change. On the page it is

@@ -57,7 +57,7 @@ all:
 	@$(MAKE) -s $(OK)/fmt $(OK)/stage1-tests
 	@$(MAKE) -s check
 
-check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(BUILD)/skate $(BUILD)/malton $(BUILD)/race $(OK)/race-tests $(BUILD)/better $(OK)/better-tests $(BUILD)/better-ios.s $(BUILD)/ios-check.s
+check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(BUILD)/skate $(BUILD)/malton $(BUILD)/race $(OK)/race-tests $(BUILD)/better $(OK)/better-tests $(BUILD)/better-ios.s $(BUILD)/ios-check.s $(BUILD)/better-android.s
 
 # ---- compiler stages ----
 
@@ -172,6 +172,11 @@ better-test: $(OK)/better-tests
 # for iOS (built into an app on a Mac: see programs/better/README.md).
 $(BUILD)/better-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
 	@$(STEP) 'better for iOS' sh -c './l8c3 arm64 --target ios programs/better/ios.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+# Better as an Android app's code, as arm64 assembly (built into an APK by
+# tools/android/build.sh: see programs/better/README.md).
+$(BUILD)/better-android.s: l8c3 $(PROGRAMS) runtime-arm64-android.s stdlib/write.arm64-android.s | $(OK)
+	@$(STEP) 'better for Android' sh -c './l8c3 arm64 --target android programs/better/android.l8 -o $@.tmp && mv -f $@.tmp $@'
 
 $(BUILD)/ios-check.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
 	@$(STEP) 'iOS check' sh -c './l8c3 arm64 --target ios programs/ios/check.l8 -o $@.tmp && mv -f $@.tmp $@'
