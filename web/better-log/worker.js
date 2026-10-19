@@ -176,6 +176,14 @@ const codeIn = async (env, body) => {
   return { c };
 };
 
+// The code marked used, if it still was not (two using it at once: only
+// one has it).
+const claim = async (env, c, now) => {
+  const r = await env.DB.prepare("UPDATE codes SET used = ? WHERE code_hash = ? AND used IS NULL AND until > ?")
+    .bind(now, c.code_hash, now).run();
+  return r.meta.changes === 1;
+};
+
 // Friends, both ways.
 const befriend = (env, a, b, now) => [
   env.DB.prepare("INSERT OR IGNORE INTO friends (a, b, since) VALUES (?, ?, ?)").bind(a, b, now),
@@ -189,9 +197,9 @@ const useCode = async (env, request, body) => {
   const now = Date.now();
   if (c.kind === "signin") {
     if (k) return c.log === k.id ? fail(409, "signed-in") : reply(409, { error: "other", name: c.name });
+    if (!(await claim(env, c, now))) return fail(410, "used");
     const token = random(24);
     const steps = [
-      env.DB.prepare("UPDATE codes SET used = ? WHERE code_hash = ?").bind(now, c.code_hash),
       env.DB.prepare("INSERT INTO devices (token_hash, log, made) VALUES (?, ?, ?)").bind(await sha256(token), c.log, now),
       env.DB.prepare("UPDATE logs SET joined = ? WHERE id = ? AND joined IS NULL").bind(now, c.log),
     ];
@@ -208,7 +216,8 @@ const useCode = async (env, request, body) => {
   if (await env.DB.prepare("SELECT 1 FROM friends WHERE a = ? AND b = ?").bind(k.id, c.log).first()) {
     return reply(409, { error: "already", name: c.name });
   }
-  await env.DB.batch([env.DB.prepare("UPDATE codes SET used = ? WHERE code_hash = ?").bind(now, c.code_hash), ...befriend(env, k.id, c.log, now)]);
+  if (!(await claim(env, c, now))) return fail(410, "used");
+  await env.DB.batch(befriend(env, k.id, c.log, now));
   return reply(200, { kind: "friend", id: c.log, name: c.name });
 };
 
