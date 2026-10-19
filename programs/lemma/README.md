@@ -217,7 +217,9 @@ word says so). *The other way round* asks for a quarter turn back in
 three moves: three turns, or a flip, a turn and a flip (the book's way).
 A level whose shadow was got by a longer walk (*A short cut*) shows that
 walk faint on the map. Out of moves and not there, the
-tile greys, *It can't get there in the moves left*, and an *Undo k* pill.
+tile greys, *It can't get there in the moves left* on the card's edge,
+and an *Undo k* pill on its corner. Proved, the tile slides onto its
+shadow and *Read the proof* and *Next* take the slots' place in the card.
 
 In the kernel the square is concrete: `sq(a, b, c, d)` is the tile by its
 corners, and the region's two rules say what a move does to them
@@ -277,11 +279,21 @@ twin at gap 0); `stamp 0 face 1 top 1 2` (fact 0's face 1 onto top beads
 `pop`, `stamp`, `pair`, `turn`) play them by the ghost hand as two taps,
 a tap on the tile, or a swipe.
 
+The level's words sit quietly at the top of its board. The levels: *A
+quarter turn* (two taps), *Over* (a flip, then a turn: the other order
+does not get there), *The other way round*, *A short cut* (a flip and
+three turns is a turn and a flip), *Pop*, *A stamp* (`a · b = c ⟹ a⁻¹ · c
+= b`), *Out of nothing* (cancelling: `a · b = a · c ⟹ b = c`), *Turned
+around* (if a and b can swap, so can their inverses), *Does nothing*
+(`(∀x. f · x = x) ⟹ f = e`: X is nothing) and *Twice is nothing*
+(`(∀x. x · x = e) ⟹ a · b = b · a`).
+
 The chapter's first page has no rulebook: its cover (the tile and a few
 beads) and three small pictures with a line each. Its Book says what the
 pictures stand for in the words books use (a bead turned over is its
 inverse, no bead is e, ...), each with its rule written out, then the
-theorems proved, each as beads and as books write it.
+theorems proved, each as beads and as books write it, and those still to
+prove as beads only.
 
 Limits is off the map for now (`region_shown` in `app.l8`: set it true to
 show it); its files and tests stay.
