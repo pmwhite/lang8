@@ -231,13 +231,21 @@ launch() {
   SIMCTL_CHILD_L8_DEMO=1 SIMCTL_CHILD_L8_ESV_FIXTURE=$fixture SIMCTL_CHILD_L8_ESV_OFF=$esv_off SIMCTL_CHILD_L8_AUDIO_FIXTURE=$audio_fixture xcrun simctl launch --console-pty "$dev" "$id" > "$out/$1" 2>&1 &
   console=$!
   # (The first launch may take minutes.)
+  # (Or until the app says it has settled, should its console be late; and
+  # when the console said it was up, and when it settled, in timing.txt.)
   i=0
-  while ! grep -q "bible: up\|Terminating app" "$out/$1" 2>/dev/null && [ "$i" -lt 2400 ]; do
+  t_up=
+  while [ "$i" -lt 2400 ]; do
+    if [ -z "$t_up" ] && grep -q "bible: up\|Terminating app" "$out/$1" 2>/dev/null; then
+      t_up=$(python3 -c "print(round($(now) - $start))")
+    fi
+    [ -n "$t_up" ] && break
+    kill -0 "$waiter" 2>/dev/null || break
     sleep 0.1
     i=$((i + 1))
   done
   wait_done $((1000 + events)) "launch" 6
-  echo "$1 up at $(python3 -c "print(round($(now) - $start))") s" >> "$out/timing.txt"
+  echo "$1 up at ${t_up:-?} s, settled at $(python3 -c "print(round($(now) - $start))") s" >> "$out/timing.txt"
 }
 # A setting of the simulator's (appearance, text size), which the app
 # settles after.
