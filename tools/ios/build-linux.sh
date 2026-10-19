@@ -12,7 +12,9 @@
 # the PATH, or ~/.config/tempo-ios/bin), or left with the linker's signature
 # if there is none. For TestFlight, tools/ios/sign.sh re-signs the IPA.
 # $L8 is the compiler (./l8c3 if not given); $BUILD_NUMBER, if given, is the
-# bundle's CFBundleVersion.
+# bundle's CFBundleVersion; $SDK_VERSION, if given, the SDK the executable
+# says it was linked with (DIR/assets' iphoneos SDK if not: UIKit gives an
+# app linked with iOS 26's SDK the iOS 26 design).
 set -eu
 hires() { python3 -c 'import time; print("%.2f" % time.time())'; }
 last=$(hires)
@@ -41,7 +43,7 @@ frameworks="UIKit Foundation CoreLocation QuartzCore OpenGLES"
 [ -f "$dir/frameworks" ] && frameworks=$(cat "$dir/frameworks")
 links=
 for f in $frameworks; do links="$links --framework $f"; done
-sdkv=$(python3 -I "$here/assets.py" get "$dir" iphoneos DTPlatformVersion)
+sdkv=${SDK_VERSION:-$(python3 -I "$here/assets.py" get "$dir" iphoneos DTPlatformVersion)}
 "$l8" arm64 --target "$target" --exe --sdk "$sdkv" --imports "$here/imports.txt" $links "$src" -o "$app/$name"
 lap "compile and link"
 python3 -I "$here/macho.py" check "$app/$name"
