@@ -1,5 +1,9 @@
 tag compiler_internal;
 
+import "a64asm.l8";
+
+import "a64link.l8";
+
 // AArch64 (arm64) target: `l8 arm64` writes assembly text for Linux (ELF) or
 // for Apple's systems (Mach-O: iOS, and its simulator).
 //
@@ -791,14 +795,69 @@ compiler_build_arm64(src_path: []i8@immortal, out: int) noregion: int {
     }
 }
 
+// How `l8 arm64 --exe` links: for Apple's systems, the platform (2 iOS, 7
+// the simulator), the frameworks, and the imports table's path.
+arm_platform: int = 2;
+
+arm_frameworks: [][]i8 = new []i8[64]("");
+
+arm_nframeworks: int = 0;
+
+arm_imports_path: []i8 = "";
+
+// The program as an executable at exe: its assembly text (as
+// compiler_build_arm64 writes it), assembled and linked here.
+compiler_link_arm64(src_path: []i8@immortal, exe: []i8) noregion: int {
+    fd: int = a64_memfd();
+    if (fd < 0) {
+        raw::raw_write(2, "error: arm64: cannot keep the assembly text\n");
+        return 1
+    }
+    rc: int = compiler_build_arm64(src_path, fd);
+    if (rc != 0) return rc;
+    text: []i8 = a64_read_fd(fd);
+    close(fd);
+    a64_reset(cg_arm_darwin);
+    a64_assemble(text, len(text));
+    if (!cg_arm_darwin) {
+        a64_write_elf(exe);
+        return 0
+    }
+    imports: ?[]i8 = null;
+    if (len(arm_imports_path) > 0) {
+        imports = a64_read_file(arm_imports_path);
+        if (imports == null) {
+            raw::raw_write(2, "error: cannot read the imports table\n");
+            return 1
+        }
+    }
+    // (The signature's identifier: the executable's file name.)
+    slash: int = 0;
+    for i in 0..len(exe) {
+        if (exe[i] == '/') slash = i + 1
+    }
+    try {
+        a64_write_macho(exe, arm_platform, arm_platform == 2, arm_frameworks, arm_nframeworks,
+            imports, strdup_n(exe, slash, len(exe) - slash))
+    } with Error _e -> {
+        raw::raw_write(2, "error: arm64 linker: out of memory\n");
+        return 1
+    }
+    0
+}
+
 arm64_usage(): int {
-    raw::raw_write(2, "error: usage: l8 arm64 [--target linux|ios] [--unchecked-index] <source.l8> -o <file.s>\n");
+    raw::raw_write(2, "error: usage: l8 arm64 [--target linux|ios|ios-sim] [--unchecked-index] [--exe [--framework NAME]... [--imports FILE]] <source.l8> -o <file>\n");
     1
 }
 
-// `l8 arm64 [--target linux|ios] file.l8 -o file.s`: the program and its
-// runtime as one arm64 assembly file, for Linux (ELF) or iOS and the iOS
-// simulator (Mach-O; the same code, linked for either).
+// `l8 arm64 [--target linux|ios|ios-sim] file.l8 -o file.s`: the program
+// and its runtime as one arm64 assembly file, for Linux (ELF) or iOS and
+// the iOS simulator (Mach-O; the same code, linked for either). With --exe,
+// the executable instead, assembled and linked by the compiler (see
+// a64asm.l8 and a64link.l8): for Linux, static; for iOS (ios: an iPhone's,
+// ios-sim: the simulator's), linked to each --framework, to libobjc and to
+// libSystem, its imports bound as --imports's table says.
 compiler_arm64_main(argc: int, argv: []str) noregion: int {
     do_profile = false;
     check_index_mode = true;
@@ -806,6 +865,7 @@ compiler_arm64_main(argc: int, argv: []str) noregion: int {
     output: str = "";
     have_s: bool = false;
     have_o: bool = false;
+    exe: bool = false;
     want: int = 0;
     for ai in 1..argc {
         arg: str = argv[ai];
@@ -814,15 +874,30 @@ compiler_arm64_main(argc: int, argv: []str) noregion: int {
             have_o = true;
             want = 0
         } else if (want == 2) {
-            if (arg == "ios") cg_arm_darwin = true else if (arg == "linux") cg_arm_darwin = false else return arm64_usage();
+            if (arg == "ios") {
+                cg_arm_darwin = true;
+                arm_platform = 2
+            } else if (arg == "ios-sim") {
+                cg_arm_darwin = true;
+                arm_platform = 7
+            } else if (arg == "linux") cg_arm_darwin = false else return arm64_usage();
             want = 0
-        } else if (arg == "-o") want = 1 else if (arg == "--target") want = 2 else if (is_unchecked_flag(arg)) check_index_mode = false else {
+        } else if (want == 3) {
+            if (arm_nframeworks >= len(arm_frameworks)) return arm64_usage();
+            arm_frameworks[arm_nframeworks] = bytes(arg);
+            arm_nframeworks = arm_nframeworks + 1;
+            want = 0
+        } else if (want == 4) {
+            arm_imports_path = bytes(arg);
+            want = 0
+        } else if (arg == "-o") want = 1 else if (arg == "--target") want = 2 else if (arg == "--framework") want = 3 else if (arg == "--imports") want = 4 else if (arg == "--exe") exe = true else if (is_unchecked_flag(arg)) check_index_mode = false else {
             if (have_s) return arm64_usage();
             source = arg;
             have_s = true
         }
     }
     if (!have_s || !have_o || want != 0) return arm64_usage();
+    if (exe) return compiler_link_arm64(bytes(source), bytes(output));
     fd: int = open(output, 577, 420);
     if (fd < 0) {
         raw::raw_write(2, "error: cannot write the output\n");

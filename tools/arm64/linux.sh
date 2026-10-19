@@ -1,6 +1,7 @@
 #!/bin/sh
-# Assemble and link arm64 Linux assembly from `l8 arm64 --target linux`, or
-# run the result under qemu-aarch64:
+# Assemble and link arm64 Linux assembly from `l8 arm64 --target linux` with
+# LLVM's tools (`l8 arm64 --exe` links it without them; `l8 test --arm64`
+# does), or run an arm64 executable under qemu-aarch64:
 #   linux.sh build FILE.s OUT    (OUT may be a /proc/self/fd/N path)
 #   linux.sh run EXE ARGS...
 # Tools come from L8_ARM64_CC (clang with the AArch64 target), L8_ARM64_LD

@@ -57,7 +57,7 @@ all:
 	@$(MAKE) -s $(OK)/fmt $(OK)/stage1-tests
 	@$(MAKE) -s check
 
-check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(BUILD)/skate $(BUILD)/malton $(BUILD)/race $(OK)/race-tests $(BUILD)/tempo $(OK)/tempo-tests $(BUILD)/tempo-ios.s $(BUILD)/ios-check.s $(OK)/bible-tests $(BUILD)/bible-ios.s
+check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(BUILD)/skate $(BUILD)/malton $(BUILD)/race $(OK)/race-tests $(BUILD)/tempo $(OK)/tempo-tests $(BUILD)/tempo-ios.s $(BUILD)/ios-check.s $(BUILD)/tempo-ios-sim $(OK)/bible-tests $(BUILD)/bible-ios.s $(BUILD)/bible-ios-sim
 
 # ---- compiler stages ----
 
@@ -176,6 +176,13 @@ $(BUILD)/tempo-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
 $(BUILD)/ios-check.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
 	@$(STEP) 'iOS check' sh -c './l8c3 arm64 --target ios programs/ios/check.l8 -o $@.tmp && mv -f $@.tmp $@'
 
+# The same, assembled and linked by the compiler into Mach-O executables
+# for the simulator (see src2/a64link.l8), whose code signatures and fixups
+# tools/ios/macho.py checks.
+IOS_LINK = ./l8c3 arm64 --target ios-sim --exe --imports tools/ios/imports.txt
+$(BUILD)/tempo-ios-sim: l8c3 $(PROGRAMS) runtime-arm64-darwin.s tools/ios/imports.txt | $(OK)
+	@$(STEP) 'tempo for the simulator' sh -c '$(IOS_LINK) $(foreach f,UIKit Foundation CoreLocation QuartzCore OpenGLES,--framework $(f)) programs/tempo/ios.l8 -o $@.tmp && python3 -I tools/ios/macho.py check $@.tmp && mv -f $@.tmp $@'
+
 # The Bible app: its text's layout, tested; and the app, as arm64 assembly
 # for iOS (see programs/bible/README.md).
 $(OK)/bible-tests: l8c3 $(PROGRAMS) $(RUNTIME) $(wildcard programs/bible/tools/*.py programs/bible/tools/*.l8 programs/bible/data/*.txt programs/bible/data/*.bin programs/bible/data/lang/* programs/bible/data/audio/* programs/bible/worker/*.js programs/bible/worker/*.mjs programs/bible/worker/fixtures/*) | $(OK)
@@ -195,6 +202,9 @@ bible-spoken: l8c3 $(PROGRAMS) $(RUNTIME)
 
 $(BUILD)/bible-ios.s: l8c3 $(PROGRAMS) runtime-arm64-darwin.s | $(OK)
 	@$(STEP) 'bible for iOS' sh -c './l8c3 arm64 --target ios programs/bible/ios.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+$(BUILD)/bible-ios-sim: l8c3 $(PROGRAMS) runtime-arm64-darwin.s tools/ios/imports.txt programs/bible/ios/frameworks | $(OK)
+	@$(STEP) 'bible for the simulator' sh -c '$(IOS_LINK) $(foreach f,$(shell cat programs/bible/ios/frameworks),--framework $(f)) programs/bible/ios.l8 -o $@.tmp && python3 -I tools/ios/macho.py check $@.tmp && mv -f $@.tmp $@'
 
 # A terminal may be running from the previous output; `mv` replaces the
 # directory entry instead of rewriting its live inode.
