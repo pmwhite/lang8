@@ -9,8 +9,8 @@ Status: Rounds 1–3 are approved and on TestFlight as 1.0 (9). **Round 4 (versi
 ESV, Compare, cross references and commentary) is the work now, fully specified in §9.**
 Round 5 (reading plans and a plan's daily reminder, exact senses, related words, share as
 image) follows, specified in §10; the verse of the day was dropped (§10's owner
-amendment). Round 6 (what you are reading: places moving forward through the Bible,
-each kept as you read on, in Go To's Continue Reading) is specified in §11. Round 1 is
+amendment). Round 6 (what you are reading: Continue Reading, one list of readings and plans, each
+kept as you read on, started by one Start Reading sheet) is specified in §11. Round 1 is
 §0.5–§6, Round 2 is §7 and Round 3 is §8. The owner's priorities, in order: distraction-free reading, note-taking, language tools.
 Above all: iPhone-native, HIG-proper, predictable UI. The app is **free forever**: no
 price, ads, in-app purchases or donation prompts (owner, 2026-10-18).
@@ -203,14 +203,19 @@ In build order:
 5. **R5.5 Share as Image,** a custom action in the system share sheet.
 
 ### Round 6: what you are reading (fully specified in §11)
-1. **R6.1 Readings.** A reading is a place moving forward through the whole Bible, from
-   one book into the next (owner, 2026-10-18). It starts when you read a book's first
-   chapter, or two chapters in a row. It keeps your place as you read on (scrolling,
-   Listen, chapters read), and jumps and sheets never move it. Readings that meet become
-   one. Readings are listed in Go To's first section, now **Continue Reading**, after a
-   followed plan's rows. Swipe to remove; no finishing; seeded once from History. Not a
-   generalization of plans: a plan is a schedule and a reading is a place that moves.
-   They share the "chapter read" signal and the section (§11.0).
+1. **R6.1 Continue Reading: one list, two kinds** (owner, 2026-10-18).
+   - A **reading** is a place moving forward through the whole Bible at your own pace,
+     from one book into the next. A **plan** is the same with a daily schedule.
+   - Both sit in Go To's first section, the plan first, then the readings by recency.
+     They share one row shape, one tap, one swipe (Remove) and one Start Reading sheet
+     (Pace: At My Own Pace, A Chapter a Day from the chosen chapter, or the four plans).
+   - A reading also starts by itself when you read a book's first chapter or two
+     chapters in a row, and by choice through **Start Reading Here** (the reader title's
+     long-press menu) or a book's chapter grid.
+   - Only reading moves a reading: never jumps or sheets. Readings that meet merge.
+   - Seeded once from History.
+   - Plans keep their data and reminder. Round 5's Today, Plans list and Start Plan
+     buttons are migrated (§11.2.8).
 
 ### Out of scope (all rounds so far)
 - Widgets, Live Activities and App Intents (these need Swift or app extensions).
@@ -4050,26 +4055,38 @@ Round 6 is one feature, asked for by the owner on 2026-10-18:
 1. There's no finished book: "Sometimes I read from one book into the next one." A
    reading is **a place moving forward through the whole Bible**, not a book.
 2. Psalms and Proverbs get no special rule.
+3. Keep the automatic starts, **and** add an explicit **Start Reading Here** on a
+   chapter, from Go To and from the reader: "sometimes I want to explicitly choose to
+   start reading a book."
+4. **"One list, two kinds."** Plans and readings sit together in Continue Reading as the
+   same kind of thing. A **reading** is a place you go through at your own pace. A
+   **plan** is the same with a daily schedule. Both are started with one sheet.
 
-It keeps everything from Rounds 1–5.
+It keeps everything from Rounds 1–5, except where §11.2.8 replaces Round 5's screens.
 
 ### 11.0 The answer, and the decisions
 
-**Is it a generalization of reading plans? No. It sits beside them, and they share two
-things.** A plan is a **schedule**: chosen in advance, it says what to read on which day,
-and it can fall behind (Catch Up). What the owner describes is a **place that moves**:
-where you stopped in what you're reading through, with no days, no pace and nothing to
-fall behind on. Turning plans into a general "thing being read" would mean either giving
-every reading a pace to choose, which is the ceremony and the guilt the owner doesn't
-want, or stripping plans of the days that make them plans. So they stay separate, and
-they share:
+**Is it a generalization of reading plans? Almost. It's one list with two kinds.** To the
+reader, both are "something I'm reading through", and the app treats them alike: one
+section (Continue Reading), one row shape (where you go next, and how you're doing), one
+tap (go there), one swipe (Remove), and one way to start (the Start Reading sheet, with a
+**Pace**: At My Own Pace, or a schedule). Under the hood they stay two models, because
+they are different:
+- A **reading** is a place that moves as you read. It has no days and nothing to fall
+  behind on (`readings.tsv`).
+- A **plan** is a schedule, chosen in advance. It says what to read on which day and can
+  fall behind (`plan.tsv`, its reminder and Catch Up, unchanged from Round 5).
+
+Folding plans into readings, or the reverse, would either give every reading days to keep
+or strip plans of the days that make them plans. They share:
 1. **The signal.** A chapter counts as read exactly as it does for plans (§10.1.2): 20 s
    of rest in it in total **and** its last verse on screen, or Listen finishing it. Plans
    and readings use one counter. It now runs whether or not a plan is followed.
-2. **The place they're shown.** Go To's first section (Round 5's Today) becomes
-   **Continue Reading**. A followed plan's rows come first, as now, and the readings
-   follow. To the reader, a plan is one more thing they're reading. Under the hood, a plan
-   is a schedule and a reading is a bookmark that moves by itself.
+2. **The list.** Go To's first section (Round 5's Today) becomes **Continue Reading**:
+   the followed plan's one row first, then the readings (§11.2.1).
+3. **The start.** The Start Reading sheet (§11.2.5) begins either kind, from Continue
+   Reading, from a book's chapter grid, or from the reader's title (**Start Reading
+   Here**).
 
 **Decisions:**
 1. **A reading is a place, not a book.** It's one chapter and verse in the Bible's
@@ -4079,11 +4096,13 @@ they share:
      "1 Corinthians 1".
    - It's named only by where it is now. It has no title of its own.
    - It ends only when the reader removes it, or when Revelation 22 is read.
-2. **Readings come from what you do. There's no Start button** (owner's taste: driven by
-   what the reader actually does, with no ceremony). A reading starts when you **read a
-   book's first chapter**, or **read two chapters in a row**, across a book boundary too
-   (Malachi 4 then Matthew 1). Reading one chapter you were sent to never starts one, so
-   casual visits leave no trace here. Recent and History already keep those.
+2. **Readings start in two ways.**
+   - **By what you do:** read a **book's first chapter**, or **two chapters in a row**,
+     across a book boundary too (Malachi 4 then Matthew 1). Reading one chapter you were
+     sent to never starts one, so casual visits leave no trace. Recent and History
+     already keep those.
+   - **By choice:** Start Reading, At My Own Pace, from a chosen chapter (§11.1.2a). It
+     starts at once, even in a one-chapter book.
 3. **Only reading moves a reading.** Scrolling, Listen and chapters counted read move it.
    A jump's arrival (Go To, search, a link, a preview's Open in Reader, Compare, History,
    the back capsule, a plan's row, or a reading's own row) **never** moves one. Neither
@@ -4095,8 +4114,15 @@ they share:
    first, so what you've set down sinks by itself. Up to 4 show in Go To, and the rest are
    one tap away (Show All). The reader removes a reading with a swipe. There's no
    "Finished" toast or finished list: reaching the end of a book is just reading on.
-6. **The reader screen gets no new chrome** and shows nothing of this feature.
-7. **On first launch, readings are seeded from History** (§11.1.6), so the owner sees what
+6. **The plan comes first.** There's at most one plan, and it's the only thing with a
+   date, so its row stays at the top, where Round 5 put it. Readings follow by recency.
+   This is predictable: the list never reorders around a daily duty.
+7. **A schedule from the chosen book is offered only in its cheapest, calmest form:** "A
+   Chapter a Day", from the chosen chapter to the end of its book ("Romans 3–16 · 14
+   days"). There are no day-count steppers or balancing choices (§11.1.2b).
+8. **The reader screen gets no new chrome.** Its only new thing is a menu on the title's
+   long-press (Start Reading Here), plus the short toast that confirms a start.
+9. **On first launch, readings are seeded from History** (§11.1.6), so the owner sees what
    he's already reading through without starting over.
 
 ### 11.1 Model and rules (portable `readings.l8`, tested by `test_readings.l8`)
@@ -4144,6 +4170,31 @@ Examples (each tested):
 - Jude read alone → no reading. 3 John then Jude → reading "Revelation 1" (two chapters
   in a row).
 - Revelation 21 then 22 → no reading (nothing after).
+
+#### 11.1.2a Started by choice
+`reading_start(b)`, from the Start Reading sheet with **At My Own Pace** (§11.2.5),
+creates a reading at **(b, 0, 0)**, the top of chapter b, with STARTED = LAST = now:
+- **Any chapter is allowed**, including a one-chapter book (Jude) and a followed plan's
+  chapters. The reader asked for it.
+- **If a reading already has R.c = b**, nothing new is made. That reading is touched
+  (R.last = now), and the confirmation toast still says it's started.
+- **Other readings aren't merged by a start.** They merge later, by rule 5, if one reads
+  into the other.
+- **No `CLEARED` check:** a removal never blocks a chosen start.
+- The log says "bible: reading started at ROM 3 (chosen)".
+
+#### 11.1.2b A Chapter a Day (a plan from the chosen chapter)
+A fifth kind of plan, computed in `plans.l8` like the four others (§10.1.1):
+- **Id:** `day1-<BOOK>-<C>`, e.g. `day1-ROM-3`. It goes on `plan.tsv`'s line 1 like any
+  plan id.
+- **Days:** one per chapter, from chapter C to the book's last chapter. Each day is one
+  reading of one chapter. It's offered only when that's at least 2 days.
+- **Name:** "Romans, a Chapter a Day". Psalms reads "Psalms, a Psalm a Day".
+- **Description** (the days screen's header, §10.1.4): "Romans 3–16, one chapter a day."
+- **In every other respect it's a plan:** one at a time, Day Done, Catch Up, the reminder
+  ("Today's reading: Romans 5"), and stopping archives to `plans-done.tsv`.
+- **Tests:** `day1-ROM-3` has 14 days, day 1 is Romans 3, day 14 is Romans 16; a
+  malformed id is skipped like a malformed line; `day1-JUD-1` isn't offered.
 
 #### 11.1.3 How a reading moves
 For a reading R:
@@ -4245,20 +4296,36 @@ At the first launch with this build (`readingsSeeded` unset), with no `readings.
 
 ### 11.2 Screens
 
-#### 11.2.1 Go To: the first section becomes Continue Reading
-This replaces §10.1.3's section header and extends its rows. It's configured in
-`viewWillAppear:` like the rest of the sheet (principle 6), and the sheet never rearranges
-after it lands.
+#### 11.2.1 Go To: Continue Reading, one list with two kinds
+This replaces §10.1.3's section (Today). It's configured in `viewWillAppear:` like the
+rest of the sheet (principle 6), and the sheet never rearranges after it lands.
 - **Header:**
   - **"Continue Reading"** when there's a followed plan or at least one reading.
-  - With neither, the section is just the "Reading Plans ›" row, **with no header**. A
-    lone link needs no title, and 140 changes only by losing the word "Today".
+  - With neither, the section is just the "Start Reading…" row, **with no header**. A
+    lone action needs no title.
 - **Rows, in order:**
-  1. The followed plan's rows, exactly as §10.1.3: today's readings with their circles,
-     Catch Up, and the plan's row "Bible in a Year · Day 4 of 365 ›".
-  2. **The readings,** most recent (LAST) first, **up to 4**:
+  1. **The followed plan, one row.** The two kinds have one row shape:
      - A subtitle cell (`UIListContentConfiguration subtitleCellConfiguration`), with
        insets as Recent's rows.
+     - Image: today's state as §10.1.3's circle, now **an image, not a button**: `circle`
+       (faint), `circle.lefthalf.filled` or `checkmark.circle.fill` (accent), 17 pt, in
+       the same column as the readings' `book`.
+     - Text: where you go next, which is today's readings' labels joined with "; "
+       ("Genesis 12–15", "Psalms 6–10; Proverbs 2", "Romans 5").
+     - Secondary text (faint): "Bible in a Year · Day 4 of 365". When earlier days are
+       unfinished, " · 2 days unfinished" is added. When today is done, " · Done" is
+       added, and the text stays today's.
+     - Accessory: `UITableViewCellAccessoryDetailButton` (ⓘ), which pushes the plan's days
+       (§10.1.4: circles, Catch Up's scroll, Daily Reminder, Stop Plan). When earlier days
+       are unfinished, the days open scrolled to the first one, which is what Catch Up
+       did.
+     - Tap → today's first unread chapter (or the day's first chapter if all are read): a
+       jump, as Round 5.
+     - Accessibility: "Genesis 12 to 15. Bible in a Year, day 4 of 365, not read." The
+       custom actions are **Mark as Read** (or **Mark as Unread**), **Remove**, and
+       **Plan Details**.
+  2. **The readings,** most recent (LAST) first, **up to 4**:
+     - The same subtitle cell and insets.
      - Image: `book` (SF Symbol, 17 pt regular), faint, the same size and place as
        Recent's `clock.arrow.circlepath`, so the column of icons lines up.
      - Text: where you'll continue, in the body style (SF 17, ink): "Romans 3:9" when
@@ -4271,9 +4338,11 @@ after it lands.
        "Psalm 41 of 150 · Today". A single-chapter book reads "Jude · Today".
      - No accessory. A row goes somewhere, as Recent's rows do.
   3. **Show All** when there are more than 4 readings: accent text, no image, a
-     disclosure indicator, and the value "6" (the count, faint). It pushes Reading
-     (§11.2.2).
-  4. **Reading Plans ›** (`calendar`), only while no plan is followed, as now.
+     disclosure indicator, and the value "6" (the count of readings, faint). It pushes
+     Reading (§11.2.2).
+  4. **Start Reading…**, always last: accent text, image `plus` (accent, 17 pt), and no
+     accessory. It pushes the Start Reading sheet's screen (§11.2.5) with Begin At set to
+     the reader's current chapter. It replaces Round 5's "Reading Plans ›".
 - **Recent** drops any chapter a reading row shows, as it already drops the current
   chapter, so Romans 3 isn't listed twice.
 - **Opening position:** Go To opens at its top whenever this section has a plan or a
@@ -4283,44 +4352,65 @@ after it lands.
   (R.c, R.v, R.frac) the way launch restores a place (`go_place`), **with no flash**,
   because this is a place and not a reference. History is pushed and the back capsule
   shows, as for every jump. The arrival doesn't move the reading (§11.0, decision 3).
-- **Swipe to remove** a reading row, through §3.5's mechanism: `canEditRowAtIndexPath:`
-  is YES for reading rows only, `titleForDeleteConfirmationButtonForRowAtIndexPath:`
-  returns **"Remove"**, and `commitEditingStyle:` removes the reading (§11.1.4). The
-  update is one `beginUpdates`/`endUpdates`:
-  - The row is deleted with `UITableViewRowAnimationAutomatic`.
-  - If a fifth reading exists, it's inserted as the fourth row (Fade), and Show All's
-    count is reloaded (Fade) or Show All is deleted when the count falls to 4.
-  - If the section loses its last reading with no plan, the header goes. Use
-    `reloadSections:withRowAnimation:Fade` for that section only, so the header and the
-    "Reading Plans" row fade, with nothing jumping.
-  - Recent may regain a chapter it had dropped. Its section isn't touched until the sheet
-    next appears, because nothing outside the swiped section moves.
-- **Accessibility:**
+- **Swipe to remove**, for the plan row and the reading rows alike, through §3.5's
+  mechanism: `canEditRowAtIndexPath:` is YES for those rows only,
+  `titleForDeleteConfirmationButtonForRowAtIndexPath:` returns **"Remove"**, and
+  `commitEditingStyle:` removes it.
+  - A reading: §11.1.4.
+  - The plan: exactly Round 5's Stop Plan (archived to `plans-done.tsv`, its reminder
+    off and pending requests removed). It needs no confirmation because nothing is lost.
+  - The update is one `beginUpdates`/`endUpdates`:
+    - The row is deleted with `UITableViewRowAnimationAutomatic`.
+    - If a fifth reading exists, it's inserted as the fourth reading row (Fade), and
+      Show All's count is reloaded (Fade) or Show All is deleted when the count falls to
+      4.
+    - If the section loses its last plan or reading, the header goes. Use
+      `reloadSections:withRowAnimation:Fade` for that section only, so the header and the
+      "Start Reading…" row fade, with nothing jumping.
+    - Recent may regain a chapter it had dropped. Its section isn't touched until the
+      sheet next appears.
+- **Accessibility (readings):**
   - Label: "Romans, chapter 3, verse 9. Chapter 3 of 16, read yesterday."
   - Hint: "Opens where you left off."
   - A custom action **Remove**: `UIAccessibilityCustomAction`
     `initWithName:target:selector:`, which is selector-based, so there are no blocks.
-  - The rows wrap at accessibility sizes, with nothing clipped (shot 172).
+  - Every row wraps at accessibility sizes, with nothing clipped (shot 172).
 
 #### 11.2.2 Reading (pushed from Show All)
 - A run-time UITableViewController, insetGrouped, with the inline title **"Reading"**.
   Its global is held (`held`) until the sheet has gone (§10.7a note 15).
-- One section: every reading, most recent first, with the same cells, taps, swipe and
-  accessibility as in Go To.
-- Footer (the system footer style): "Reading starts here when you read a book's first
-  chapter, or two chapters in a row. It keeps your place as you read on, from one book
-  into the next." This is the one place the rule is explained, in plain words.
+- One section: the plan's row, if one is followed, then every reading, most recent
+  first, with the same cells, taps, swipe and accessibility as in Go To.
+- Footer (the system footer style): "A reading starts when you choose Start Reading, or
+  read a book's first chapter or two chapters in a row. It keeps your place as you read
+  on, from one book into the next." This is the one place the rule is explained, in
+  plain words.
 - If a removal leaves 4 or fewer readings, the screen stays until the reader goes back,
   and Go To's section is set again (without Show All) in its `viewWillAppear:`. That's
   not visible during the pop, because the section is under the pushed screen until it
   slides away.
-- No Edit button. Swipe is the one way to remove, as in Go To. There's no empty state,
-  since the screen is reached only with more than 4 readings (if a removal empties it
-  somehow, show `book`, "Nothing Being Read", and the footer's text).
+- No Edit button. Swipe is the one way to remove, as in Go To. If a removal empties it,
+  show `book`, "Nothing Being Read", and the footer's text.
 
-#### 11.2.3 The reader
-No new chrome, no badge, no toast, and no change to the title, bar or capsule. The
-feature lives entirely in Go To.
+#### 11.2.3 The reader: Start Reading Here
+- **The title's long-press menu.** The bar's title button (§3.1.1) keeps its tap (Go To)
+  and gains `menu` = a `UIMenu` with one `UICommand` (selector-based, as History's Clear
+  menu, §8.3), so there are no blocks. Long-pressing the title shows it, as with any
+  `UIButton` whose `showsMenuAsPrimaryAction` is NO.
+  - The command is **"Start Reading Here…"**, image `book`, subtitle (iOS 15+
+    `discoverabilityTitle`) "Romans 3".
+  - Choosing it presents the Start Reading sheet (§11.2.5) with Begin At = the current
+    chapter (`cur`).
+  - When a reading already sits at this chapter (R.c = cur), the command reads **"Reading
+    Here"** and is disabled (`UIMenuElementAttributesDisabled`), so the menu is honest.
+  - The compact title (§3.1.4's collapsed bar) has the same menu.
+- **Accessibility:** the title gains the custom action "Start Reading Here".
+- **Nothing else changes in the reader:** no new button, badge or tray action. The tray
+  stays as it is (a seventh action would be clutter for something done once a book).
+- **The toast** (§3.3.3's style, 1.6 s, a leading `checkmark`, a light impact haptic and
+  no success chime) confirms a start made from anywhere: "Reading from Romans 3", or for
+  a plan "Started Bible in a Year". It's the only thing of this feature the reader ever
+  shows on its own.
 
 #### 11.2.4 Motion (principle 6)
 - Go To arrives already configured, with no row appearing after it lands.
@@ -4329,7 +4419,114 @@ feature lives entirely in Go To.
   capsule fading in.
 - Meeting and moving happen while Go To is closed, so they're never seen as motion. Go
   To simply shows the new rows when it next appears.
+- In Start Reading:
+  - Choosing a pace moves the checkmark at once (the system's own change).
+  - Begin At's rows dim or undim with a 0.2 s alpha animation.
+  - The Chapter a Day row and the "will stop" footer fade in and out inside one
+    `beginUpdates`/`endUpdates`.
+  - Nothing appears after the screen lands.
 - Reduce Motion: as everywhere (principle 3).
+
+#### 11.2.5 Start Reading (one sheet for both kinds)
+A run-time UITableViewController, insetGrouped, with the inline title **"Start Reading"**.
+Its global is held until its sheet has gone. It's shown two ways:
+- **Pushed in Go To**, from "Start Reading…" or a book's chapter grid (§11.2.6): the
+  back button on the left, and **Start** on the right.
+- **Presented from the reader** (Start Reading Here): a `UINavigationController` page
+  sheet, detents medium and large, starting at large, with the grabber. **Cancel** is on
+  the left (system Cancel) and **Start** on the right.
+- **Start** is `UIBarButtonItemStyleDone` and always enabled, because a pace is always
+  chosen.
+
+Everything is configured in `viewDidLoad`/`viewWillAppear:` from the Begin At it was
+given, before the push or presentation begins (principle 6).
+
+**Section 1, header "Begin At":**
+- **Book** (value cell): "Romans", with a disclosure indicator. It pushes a book list (Go
+  To's own Old and New Testament rows, insetGrouped, inline title "Book", a checkmark on
+  the chosen book). Tapping a book chooses it, sets Chapter to 1, and pops.
+- **Chapter** (value cell): "3", with a disclosure indicator. It pushes the book's chapter
+  grid (§3.2's grid, inline title "Chapter", the chosen chapter in accent fill). Tapping
+  a cell chooses it and pops. For a one-chapter book the row reads "1" and is disabled.
+- While a whole-Bible plan (row 3 below) is chosen, the two rows dim to alpha 0.4 and are
+  disabled, because those plans begin where they begin. Their values stay what the
+  reader chose, so choosing At My Own Pace again restores them.
+
+**Section 2, header "Pace":** one choice in the whole screen (sections 2 and 3 share it),
+shown with the system checkmark accessory. The rows are subtitle cells:
+1. **At My Own Pace** (checked by default). Secondary: "Keeps your place as you read on,
+   into the next book."
+2. **A Chapter a Day.** Secondary: "Romans 3–16 · 14 days". It's present only when the
+   chosen chapter leaves at least 2 days (§11.1.2b), and it's inserted or removed with a
+   fade as Begin At changes. Psalms reads "A Psalm a Day" with "Psalms 23–150 · 128
+   days".
+
+**Section 3, header "Plans":** the four Round 5 plans, as §10.1.4's Plans list had them:
+- Title: the name. Secondary: "365 days · about 3 chapters a day".
+- Accessory: the checkmark when chosen, and always a detail button (ⓘ), so
+  `UITableViewCellAccessoryDetailButton` alongside the checkmark through
+  `accessoryView`, as Settings does. ⓘ pushes the plan's days as a **preview** (§11.2.7).
+- The followed plan's row has the value "Day 4" (accent) and is disabled, because
+  starting it again would mean nothing.
+- **Footer**, shown only while a schedule (row 2.2, or a plan) is chosen and another plan
+  is followed: "Bible in a Year will stop. Your progress in it is kept." It fades in and
+  out.
+
+**Start:**
+- **At My Own Pace** → `reading_start(b)` (§11.1.2a).
+- **A schedule** → Round 5's Start (or Start Instead): `plan.tsv` is written, the old plan
+  archived, its reminder off, and the new plan's reminder off (§10.7a note 19).
+- **Then, in both cases:** the sheet (or Go To) is dismissed, and the reader goes to where
+  it begins (Begin At's chapter top for a reading or a Chapter a Day, day 1's first
+  chapter for the others) as a jump, with history pushed and the capsule shown. When the
+  reader is already in that chapter (Start Reading Here at cur), it doesn't move.
+- Then the toast (§11.2.3).
+
+**Cancel** (or the back button, or a swipe down) starts nothing.
+
+**Accessibility:** the rows are buttons with the selected trait on the chosen pace. The
+detail buttons are labelled "Plan Details". Every row wraps at accessibility sizes.
+
+#### 11.2.6 Go To's chapter grid: Start Reading This Book
+- The chapter grid pushed for a book (§3.2) gets a bottom toolbar
+  (`setToolbarHidden:NO animated:` in `viewWillAppear:`, hidden again in the grid's
+  `viewWillDisappear:`, both animated by the system). It has one centered plain item,
+  **"Start Reading Romans…"**.
+- The item pushes Start Reading with Begin At = the book's chapter 1.
+- Single-chapter books skip the grid as now, so they're started from the reader's title
+  or by changing Book in Start Reading.
+- **The grid's cells are unchanged:** a tap still goes there. There's no long-press,
+  because a context menu needs blocks (`UIContextMenuConfiguration`'s providers) and
+  §0's rule 7 forbids them.
+
+#### 11.2.7 The plan's days (§10.1.4), changed
+- **Reached** from the plan row's ⓘ in Continue Reading (the followed plan) or from a
+  plan's ⓘ in Start Reading (a preview).
+- **The followed plan's days** are as Round 5 built them: the header, the Daily Reminder
+  section, weeks with circles that mark by hand, Today's value, and the toolbar's **Stop
+  Plan**. Stop Plan and the row's swipe Remove do the same thing.
+- **A preview** (a plan not followed) has no toolbar and no reminder section, and its
+  circles are disabled (§10.7a note 6). Starting is done only by Start Reading's Start,
+  so there is one way to start. "Start Plan" and "Start Instead" are gone.
+- **A Chapter a Day plan's days** are one section ("Days"), with rows "Day 1 · Romans
+  3".
+
+#### 11.2.8 Round 5's screens, migrated
+| Round 5 | Round 6 |
+|---|---|
+| Today section header | **Continue Reading** (no header when empty) |
+| Today's reading rows with tappable circles | One plan row; the circle is an image; marking by hand is in the plan's days and in VoiceOver's action |
+| Catch Up row | " · 2 days unfinished" in the plan row's secondary text; the days open scrolled to the first unfinished one |
+| "Bible in a Year · Day 4 of 365 ›" row | Folded into the plan row (its ⓘ) |
+| "Reading Plans ›" row and the Plans list | **Start Reading…** and its Plans section |
+| Plan detail's Start Plan / Start Instead | Start Reading's Start; the detail is a preview |
+| Stop Plan | Unchanged, and also the plan row's swipe Remove |
+
+- **Data doesn't change:** `plan.tsv`, `plans-done.tsv`, `planReminder`,
+  `planReminderMinutes` and `planDoneDay` are read and written as before. A followed plan
+  carries over with its progress and reminder, and its row simply appears in Continue
+  Reading.
+- **Day Done's toast** (§10.1.2) stays as it is.
 
 ### 11.3 Builder notes (where it goes)
 - **`readings.l8`** (portable, `tag bible`) holds the rules of §11.1 (start, move, meet,
@@ -4347,9 +4544,19 @@ feature lives entirely in Go To.
   rule 2) calls `reading_rest(cur, place_v, place_frac, dwelt)` only when the flag is set.
 - **`readings.tsv` is written** when a reading moves. That's at most once per rest, which
   is the same rate as `save_place`.
-- **Go To:** the section is built in `today_build` (`today_add` kinds for a reading and
-  for Show All). The Reading screen can live in `ios_daily.l8` or a small
-  `ios_reading.l8`.
+- **Go To:** the section is built in `today_build`, with `today_add` kinds for the plan
+  row, a reading, Show All and Start Reading…. Round 5's per-reading circle buttons, the
+  Catch Up row and the plan's own row kinds go. The Reading screen and Start Reading can
+  live in a new `ios_reading.l8`. Start Reading reuses Go To's book rows and §3.2's grid
+  in a "choose" mode (a flag that makes a tap choose and pop instead of jump).
+- **The title's menu:** `setMenu:` on the title button, with a `UICommand`
+  (`commandWithTitle:image:action:propertyList:`) whose action is a selector on the
+  reader's controller. The responder chain delivers it, so there are no blocks. The menu
+  is rebuilt in `title_place()` whenever the chapter changes, so its title and disabled
+  state are right before it's opened.
+- **Chapter a Day** is one more case in `plans.l8`'s `plan_days(id)`, parsing the
+  `day1-` id. Everything downstream (Today's row, the days, the reminder) already works
+  from days.
 - Strings are plain. There's no "track", "progress", "streak" or "finished" anywhere in
   the UI.
 
@@ -4360,25 +4567,52 @@ Psalm 23 (yesterday). It doesn't seed `readings.tsv` or a plan. Shots:
 
 | Shot | Action | Expected |
 |---|---|---|
-| `160-reading-seeded` | Launch; open Go To | "Continue Reading": "Acts 10:9 · Chapter 10 of 28 · Yesterday", then "Reading Plans ›"; Recent without Acts 10, with Psalm 23. The sheet is at its top |
+| `160-reading-seeded` | Launch; open Go To | "Continue Reading": "Acts 10:9 · Chapter 10 of 28 · Yesterday", then "Start Reading…"; Recent without Acts 10, with Psalm 23. The sheet is at its top |
 | `161-reading-started` | Jump to Romans 1; `demo_read` it; open Go To | "Romans 2 · Chapter 2 of 16 · Now" first, then Acts 10:9 |
 | `162-casual-visits` | Search "love" → open a result in 1 Corinthians 13 and `demo_read` it; a preview of Isaiah 53:5 → Open in Reader; Compare on John 3:16; open Go To | Still only Romans 2 and Acts 10:9 (no new reading); Recent shows the visits. The log has "bible: chapter read 1CO 13" and no "reading started" |
 | `163-reading-moved` | Tap Romans 2 (the reader at Romans 2's top, no flash, capsule shown); `demo_read` Romans 2; the scroll hook (`demo_scroll_rest`) rests at Romans 3:9 as a finger scroll; open Go To | "Romans 3:9 · Chapter 3 of 16 · Now" |
 | `164-jump-moves-nothing` | Jump by Go To's grid to Romans 8 (no scroll); wait 25 s of demo time; open Go To | Still "Romans 3:9" (a jump's arrival moves nothing) |
 | `165-two-in-a-row` | Jump to John 13; `demo_read` John 13 and John 14; open Go To | "John 15" first, then Romans 3:9, then Acts 10:9 |
 | `166-continue-exact` | Tap Romans 3:9 | The reader with Romans 3:9 at the kept place, exactly as left, no flash, and the capsule "‹ John 14" |
-| `167-with-plan` | Start Bible in a Year; `demo_read` Genesis 1 and 2; open Go To | Plan rows first (Genesis 1–3 half-filled, "Bible in a Year · Day 1 of 365"), then John 15, Romans 3:9, Acts 10:9; **no Genesis reading** |
+| `167-with-plan` | Start Reading… → Bible in a Year → Start (the reader goes to Genesis 1; toast "Started Bible in a Year"); `demo_read` Genesis 1 and 2; open Go To | The plan's one row first: half-filled circle image, "Genesis 1–3", "Bible in a Year · Day 1 of 365", ⓘ; then John 15, Romans 3:9, Acts 10:9; **no Genesis reading** |
 | `168-show-all` | The demo seeds readings at John 17 and Philippians 4 (LAST older than Acts's); open Go To | The 4 newest readings (John 15, Romans 3:9, Acts 10:9, John 17), then "Show All" with the value 5 |
 | `169-reading-all` | Push Show All | Reading: all 5 rows and the footer's text |
 | `170-met` | Jump to John 15; `demo_read` John 15 and John 16; open Go To | One John row, "John 17 · Chapter 17 of 21 · Now", first; 4 readings, no Show All; the log has "bible: readings met at JHN 17" |
 | `171-across-books` | Tap Philippians 4 (the reader there); `demo_read` it; open Go To | Its row reads "Colossians 1 · Chapter 1 of 4 · Now", first; no toast was shown over the reader |
 | `171b-removed` | Remove Acts 10:9 (the demo calls `commitEditingStyle:` on its row) | 3 readings; the log has "bible: reading removed at ACT 10"; `readings.tsv` has its `CLEARED` line |
-| `172-ax-goto-reading` | (Accessibility size) Go To | The reading rows wrap; nothing clipped |
+| `172-ax-goto-reading` | (Accessibility size) Go To | The plan and reading rows wrap; nothing clipped |
+| `173-title-menu` | Jump to Mark 1; long-press the title (the demo opens the menu, or, if the simulator can't, logs its items: "title menu: Start Reading Here… · Mark 1") | The menu with "Start Reading Here…" and "Mark 1" under it |
+| `174-start-sheet` | Choose it | The Start Reading sheet: Begin At "Mark", "1"; Pace with At My Own Pace checked, "A Chapter a Day · Mark 1–16 · 16 days"; Plans with Bible in a Year's "Day 1", disabled; Cancel and Start |
+| `175-started-toast` | Start | The reader still at Mark 1 (not moved) with the toast "Reading from Mark 1"; the log has "reading started at MRK 1 (chosen)" |
+| `176-goto-one-list` | Open Go To | Continue Reading: the plan's row, then Mark 1 (Now), Colossians 1, John 17 and Romans 3:9, with no Show All, then "Start Reading…" |
+| `177-grid-toolbar` | Push Hebrews (the chapter grid) | The grid with the toolbar's "Start Reading Hebrews…" |
+| `178-start-from-grid` | Tap it; choose A Chapter a Day | Start Reading pushed: Begin At "Hebrews", "1"; "A Chapter a Day · Hebrews 1–13 · 13 days" checked; the footer "Bible in a Year will stop. Your progress in it is kept." |
+| `179-plan-preview` | Tap ⓘ on The Gospels in 30 Days | Its days as a preview: no toolbar, no reminder, faint disabled circles |
+| `180-chapter-a-day` | Back; Start; open Go To | The plan's row: "Hebrews 1 · Hebrews, a Chapter a Day · Day 1 of 13"; `plans-done.tsv` has Bible in a Year's lines |
+| `181-plan-removed` | Remove the plan's row (the demo calls `commitEditingStyle:`) | Only the readings and Start Reading…; the log has "bible: plan archived" and no pending reminders |
+| `182-chosen-jude` | Start Reading Here at Jude (the demo opens the sheet at Jude 1); Start; open Go To | A reading "Jude · Now" (a one-chapter book, started by choice) |
 
 - **Recording sequence 13:** in Go To with 5 readings, swipe Remove on the second (the
   row slides away, the fifth fades in as the fourth, and Show All goes with a fade). Push
   Show All and back. Tap a reading (the sheet dismisses, the reader is at the place, and
-  the capsule fades in). Nothing jumps or appears after the sheet lands.
+  the capsule fades in). Then open Start Reading from the title's menu:
+  - Choose Bible in a Year (Begin At dims, and the footer fades in if a plan is
+    followed), then At My Own Pace (it undims).
+  - Change Book to Jude (A Chapter a Day fades out), then Cancel.
+  Nothing jumps or appears after a sheet lands.
+- **The `plans` group (§10.6) follows the new way:**
+  - 140 has no header, only "Start Reading…".
+  - 141 is Start Reading pushed, with its Plans section.
+  - 142 is Bible in a Year's preview (no toolbar).
+  - 143 starts it with Start and shows the one plan row "Genesis 1–3 · Bible in a Year
+    · Day 1 of 365".
+  - 144 shows the row's half-filled circle.
+  - 146 shows "Genesis 12–15 · Bible in a Year · Day 4 of 365 · 2 days unfinished" (no
+    Catch Up row).
+  - 147–149 are reached through the row's ⓘ.
+  - 149b stops with Stop Plan and starts again through Start Reading.
+  - 158 is the new row at an accessibility size.
+  - The other shots are unchanged.
 - **Logs:** each start, move, meeting, removal and end is logged
   ("bible: reading started at ROM 2", "bible: reading moved to ROM 3:9",
   "bible: readings met at JHN 17", "bible: reading removed at ACT 10",
@@ -4402,16 +4636,30 @@ Round 6 is approved when:
   - Removal animates as specified.
 - A reading's tap returns to the exact kept place, with no flash and with the capsule
   (166).
-- No toast or anything else of the feature appears in the reader. A reading ends only by
-  Remove or at the end of Revelation.
+- Nothing of the feature appears in the reader except the title's menu and the start
+  toast. A reading ends only by Remove or at the end of Revelation.
+- **One list, two kinds:**
+  - The plan's row and the reading rows share one shape, one tap, one swipe (Remove; for
+    the plan, Stop Plan's archiving) and one start (Start Reading).
+  - The plan stays first.
+  - Round 5's data, reminder and Day Done keep working, and a plan followed before the
+    update carries over (§11.2.8).
+- **Start Reading:**
+  - It's reached from Continue Reading, a book's grid and the reader's title.
+  - At My Own Pace starts a reading at once, at any chapter, Jude included (175, 182).
+  - A Chapter a Day is computed as §11.1.2b (tests; 178, 180).
+  - The Begin At dimming, the footer and the row fades animate (recording sequence 13).
 - Seeding from History happens once and is correct (160).
 - VoiceOver reads the labels and the custom action Remove. Accessibility sizes wrap (172).
-- Shots 160–172 match. Recording sequence 13 shows no abrupt change. No earlier shot
-  regresses, except 140, 143, 146 and 158, whose header now reads "Continue Reading" (or
-  has no header in 140).
+- Shots 160–182 match. Recording sequence 13 shows no abrupt change. No earlier shot
+  regresses, except the `plans` group's 140–149b and 158, which change as listed in
+  §11.4.
 
 ### 11.6 Questions only the owner can answer
-None open. Both were answered on 2026-10-18 (above): there's no finished book, and
-Psalms and Proverbs get no special rule. On a device, the owner checks that the starting
-rules (a book's first chapter, or two chapters in a row, with 20 s of rest) start readings
-when he means them to and not otherwise.
+None open. All four were answered on 2026-10-18 (above). On a device, the owner checks two
+things:
+1. Whether the starting rules (a chosen start; a book's first chapter, or two chapters in
+   a row, with 20 s of rest) start readings when he means them to and not otherwise.
+2. Whether the title's long-press menu is easy enough to find for Start Reading Here. If
+   it isn't, the fallback is a "Start Reading Here…" row at the end of Go To's Continue
+   Reading section, because the tray is kept clear.
