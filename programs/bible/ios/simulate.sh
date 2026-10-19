@@ -715,6 +715,7 @@ ribbons)
     sleep 0.05
     i=$((i + 1))
   done
+  rec1=$(now)
   # (A still lead-in: the recorder writes nothing for its first seconds;
   # review r8-1.)
   sleep 6
@@ -723,6 +724,7 @@ ribbons)
   a=$(step_at 314)
   b=$(now)
   echo "13 $(python3 -c "print(round($a - $rec0, 2), round($b - $rec0, 2))")" >> "$out/transitions.txt"
+  echo "13 from-started $(python3 -c "print(round($a - $rec1, 2), round($b - $rec1, 2))")" >> "$out/transitions.txt"
   sleep 0.5
   kill -INT "$recorder" 2>/dev/null
   wait "$recorder" 2>/dev/null
@@ -794,6 +796,7 @@ listen)
     sleep 0.05
     i=$((i + 1))
   done
+  rec1=$(now)
   # (A still lead-in: the recorder writes nothing for its first seconds;
   # review r8-1.)
   sleep 6
@@ -812,6 +815,7 @@ listen)
   sleep 1
   b=$(now)
   echo "14 $(python3 -c "print(round($a - $rec0, 2), round($b - $rec0, 2))")" >> "$out/transitions.txt"
+  echo "14 from-started $(python3 -c "print(round($a - $rec1, 2), round($b - $rec1, 2))")" >> "$out/transitions.txt"
   sleep 0.5
   kill -INT "$recorder" 2>/dev/null
   wait "$recorder" 2>/dev/null

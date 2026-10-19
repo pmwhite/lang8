@@ -4779,6 +4779,12 @@ Where the build differs from the text above, or settles what it left open, and w
     - Sequences 13 and 14 begin after a 6 s still lead-in, as the recorder writes nothing
       for its first seconds. Sequence 13 is marked from the step's own logged start
       ("at unix ms").
+    - Where the video's time 0 falls differs from Mac to Mac: about 4.7 s before the
+      recorder says "started" in one run, and about 3.9 s after its launch in another. So
+      `*-transitions.txt` gives each sequence's marks twice: from the launch (the first
+      line), and from "started" (`from-started`). Either can be a few seconds off. A
+      sequence begins where the still lead-in (6 s or more with no change) ends. In
+      sequence 13 that is the swipe Delete, which takes several frames either way.
     - At 12 → 11 the footer's emptied text is followed by an empty
       `beginUpdates`/`endUpdates`, so its height animates away. The `ribbons` group's step
       315 (log only) makes twelve ribbons. It logs "limit at 12" (the footer, and New
