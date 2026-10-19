@@ -4512,7 +4512,39 @@ inside `UIGraphicsBeginImageContextWithOptions` (as `ios_look.l8` already does),
 - Add to §2.6's table: "Ribbon (Go To rows, title menu, toast): the ribbon glyph (drawn,
   template)".
 
-### 11.3 Plans, on their own list### 11.3 Plans, on their own list
+#### 11.2.7 Each ribbon's color (owner amendment 2026-10-19)
+So the bar's glyph tells which ribbon is carried, each ribbon has its own color.
+- **The palette:** like a printed Bible's ribbons, in this order: **Red, Gold, Navy, Green,
+  Purple, Brown, Slate**.
+  - Each is a solid, deep shade on the light pages (Paper, White), a little deeper on
+    Sepia's, and a lighter shade on the dark ones (Night, Black), so it reads on each
+    page.
+  - As a narrow solid strip, it never looks like a highlight's pale wash.
+  - Light: B03A2E, B07D12, 2D4C80, 3A7A4C, 6F4C94, 7C5434, 5C6670. Sepia: A3352A,
+    96680C, 2A4574, 346C43, 634387, 6A4628, 525A63. Dark: E8806F, E0B651, 86A8E0,
+    82C292, BB9CE0, CFA27A, A8B0BA.
+- **Default:** a new ribbon (and a migrated one) gets the first color no ribbon has. With
+  all seven taken, it gets the one fewest ribbons have.
+- **Choosing:** New Ribbon and Ribbon have a **Color** section (after the name, before
+  Place) with one row of seven round swatches (30 pt, 12 pt apart).
+  - Each swatch is a button whose VoiceOver label is its color's name. The chosen one has
+    a checkmark in the page's color and the selected trait, so VoiceOver reads "Gold,
+    selected, button".
+  - A tap applies at once: in Ribbon, to the ribbon, kept, and everywhere its glyph is;
+    in New Ribbon, to the ribbon Add makes.
+  - The check moves with a 0.15 s cross-fade and a selection haptic. The bar's glyph, if
+    it's that ribbon's, cross-fades too (0.2 s). There's no motion under Reduce Motion.
+- **Where:** the glyph takes the ribbon's color everywhere. That means the bar's glyph,
+  Go To's rows, the title menu (Leave … Here, and each Move Ribbon Here item), and the
+  toast. On the toast's ink, the glyph uses the other themes' shade.
+- **Kept:** `ribbons.tsv`'s `RIBBON` line gains a tenth field, the color's name in lower
+  case (`gold`). A line without it (an older file's), or with an unknown name, is given
+  the default, in order, and the file is written again. Tested in `test_ribbons.l8`.
+- **Shots:** 183a (Go To with several colors), 183b (New Ribbon's swatches), 183c
+  (Ribbon's, with Romans changed to Green), 183d and 183e (the bar's glyph green, then
+  navy), and 183f and 183g (Night: Go To and the bar).
+
+### 11.3 Plans, on their own list
 
 #### 11.3.1 Go To: the Reading Plan section
 The second section, under Ribbons:
