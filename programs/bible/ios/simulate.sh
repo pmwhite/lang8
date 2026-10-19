@@ -764,6 +764,17 @@ ribbons)
   step 354 188-not-carried-ax-compact 6
   step 355 189-not-carried-ax 6
   ui content_size large
+  # Each ribbon's color (owner, 2026-10-19): Go To with several; New
+  # Ribbon's and Ribbon's swatches (Romans given Green); the title's glyph
+  # in two colors; Night.
+  step 356 183a-goto-colors 6
+  step 357 183b-new-ribbon-colors 8
+  step 358 183c-ribbon-colors 8
+  step 359 183d-indicator-green 8
+  step 360 183e-indicator-navy 8
+  step 361 183f-goto-night 8
+  step 362 183g-indicator-night 6
+  step 363 "" 6
   # The walk, from the log: each make, pick-up, move, put-down, move-here,
   # rename, delete and the migration (§11.6); nothing moved while put down.
   grep -h "bible: limit\|bible: ribbon\|bible: readings\|bible: chapter read\|bible: chapter heard\|bible: title\|bible: toast\|bible: plan\|bible: demo step\|table off the window" \
@@ -778,7 +789,7 @@ ribbons)
       "ribbon moved here: Romans to ROM 8" "toast Reading with Romans" "ribbon renamed: Morning to With Anna" \
       "ribbon deleted: John" "ribbon made: Jude at JUD 1" "toast Reading with Jude" "ribbon put down: Jude at JUD 1" \
       "toast Started Hebrews, a Chapter a Day" "limit at 12: ribbons 12, footer 12 ribbons is the most., New Ribbon… enabled 0" \
-      " (disabled) / Move Ribbon Here" "title ribbon shown 1" "title ribbon shown 0" "title Song of Solomon 8, ribbon shown 1" "limit after a delete: ribbons 11, footer none, New Ribbon… enabled 1"; do
+      " (disabled) / Move Ribbon Here" "title ribbon shown 1" "title ribbon shown 0" "title Song of Solomon 8, ribbon shown 1" "ribbon color: Romans Green" "ribbon shown 1 (Romans, Green)" "ribbon shown 1 (Jude, Navy)" "limit after a delete: ribbons 11, footer none, New Ribbon… enabled 1"; do
     grep -qF "$want" "$out/ribbons.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/ribbons.txt"; failed=1; }
   done
   for bad in "ribbon moved: Acts to ACT 11:5" "ribbon made: Psalms" "ribbon moved: Morning to 1CO" "ribbon moved: Morning to ISA"; do
