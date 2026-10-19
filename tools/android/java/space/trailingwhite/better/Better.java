@@ -264,6 +264,19 @@ public final class Better extends Activity {
       im.restartInput(this);
     }
 
+    // Keys the keyboard passes on as they are (and a hardware keyboard's).
+    @Override
+    public boolean onKeyDown(int code, KeyEvent e) {
+      if (code == KeyEvent.KEYCODE_DEL) Native.push("key 65288");
+      else if (code == KeyEvent.KEYCODE_ENTER) Native.push("key 65293");
+      else {
+        int c = e.getUnicodeChar();
+        if (c < 32 || c >= 127) return super.onKeyDown(code, e);
+        Native.push("type " + (char) c);
+      }
+      return true;
+    }
+
     @Override
     public boolean onCheckIsTextEditor() {
       return true;
@@ -274,8 +287,11 @@ public final class Better extends Activity {
       info.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS
           | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
       if (kind.equals("code")) {
+        // (Keyboards suggest words anyway, except for what looks like a
+        // password shown as it is typed; Better shows the code in
+        // capitals whatever the keys are.)
         info.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
-            | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+            | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD;
       } else if (kind.equals("name")) {
         info.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS
             | InputType.TYPE_TEXT_VARIATION_PERSON_NAME;
@@ -316,6 +332,13 @@ public final class Better extends Activity {
           composing = "";
           for (int i = 0; i < Math.max(before, 1); i++) Native.push("key 65288");
           return true;
+        }
+
+        // (Capitals for a code, as the keyboard asks where it is.)
+        @Override
+        public int getCursorCapsMode(int reqModes) {
+          if (kind.equals("code")) return InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS;
+          return super.getCursorCapsMode(reqModes);
         }
 
         @Override
