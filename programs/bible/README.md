@@ -139,9 +139,22 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   simulator.
 
 ```sh
+tools/ios/build-linux.sh sim programs/bible/ios.l8 build programs/bible/ios     # anywhere
+tools/ios/build-linux.sh device programs/bible/ios.l8 device programs/bible/ios # and the IPA
+programs/bible/ios/simulate.sh build/SmoothBible.app shots                    # on a Mac
+```
+
+`build-linux.sh` needs no Mac: the compiler links the executable itself
+(`l8 arm64 --exe`), and the asset catalog (the icon and the named colors) is
+kept compiled in `ios/assets/`. When the icon or colors change, the Smooth
+Bible assets workflow (`.github/workflows/bible-assets.yml`) compiles them
+on a Mac and pushes them to `ci-bible-assets`; bring them in with `git
+checkout origin/ci-bible-assets -- programs/bible/ios/assets` (the build
+stops, saying so, until then). On a Mac, the Xcode way still works:
+
+```sh
 ./l8c3 arm64 --target ios programs/bible/ios.l8 -o bible-ios.s
-tools/ios/build.sh sim bible-ios.s build programs/bible/ios   # on a Mac
-programs/bible/ios/simulate.sh build/SmoothBible.app shots
+tools/ios/build.sh sim bible-ios.s build programs/bible/ios
 ```
 
 GitHub builds it on every push to the `bible` branch
@@ -157,19 +170,20 @@ The CI's layout, for speed (a full run is about ten minutes; see the
 workflow's header):
 
 - `compile` (Linux) builds the compiler only when its sources change (a
-  cache otherwise) and uploads `bible-ios.s`; `test` runs the tests and the
-  data checks beside it.
+  cache otherwise), then `SmoothBible.app` (`build-linux.sh`), uploaded for
+  the simulator jobs, then the IPA (pushed to `ci-bible-ipa`); `test` runs
+  the tests and the data checks beside it.
 - Five `simulator (…)` jobs (macOS: the account runs at most five at once,
-  so there are five, and nothing waits for a runner) start at once. The
-  first takes the assembly as soon as it is uploaded
-  (`tools/ios/artifact.py`), builds `SmoothBible.app` for all of them, then
-  the IPA (pushed to `ci-bible-ipa`); the others boot a simulator meanwhile
-  (a first boot takes about three minutes) and take the app. Each runs two
+  so there are five, and nothing waits for a runner) start at once, boot a
+  simulator (a first boot takes about three minutes) and take the app as
+  soon as it is uploaded (`tools/ios/artifact.py`). (With the workflow's
+  `MAC_BUILD` set, the first builds the app and the IPA instead, with
+  Xcode's tools, from `compile`'s `bible-ios.s`.) Each runs two
   groups one after another, each on a simulator of its own (the second a
   copy, `simctl clone`, of the first once booted and before it is used: a
-  copy boots in seconds), each uploaded (`shots-GROUP`) as it ends. actool's
-  output is cached (`ACTOOL_CACHE`), since it alone took most of the
-  build. The groups are paired by their times (`timing.txt`'s `total`) so
+  copy boots in seconds), each uploaded (`shots-GROUP`) as it ends. (In the
+  Mac build actool's output is cached, `ACTOOL_CACHE`, since it alone took
+  most of the build.) The groups are paired by their times (`timing.txt`'s `total`) so
   the jobs end together: rebalance the workflow's matrix when a group
   grows.
 - `frames` (Linux) makes the notes recording's frames as soon as the notes

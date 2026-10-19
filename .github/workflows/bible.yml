@@ -1,16 +1,18 @@
 # Smooth Bible (programs/bible), built and run in the iOS simulator.
 #
 # compile (Linux) builds the compiler (kept in a cache while its sources
-# are unchanged) and compiles programs/bible/ios.l8 to arm64 assembly (`l8
-# arm64 --target ios`); test, beside it, runs the tests and data checks.
-# Five simulator jobs (macOS) start at once, without waiting. The first
-# fetches the assembly as soon as it is uploaded (tools/ios/artifact.py),
-# assembles and links SmoothBible.app (tools/ios/build.sh, with
-# programs/bible/ios) and uploads it for all five, then builds
-# SmoothBible.ipa, for an iPhone, onto the ci-bible-ipa branch (ad hoc
-# signed); actool's output is cached. The other four boot their first
-# simulator meanwhile (a first boot takes about three minutes) and fetch the
-# app. Each runs two groups of the demo one after another
+# are unchanged) and the app with it, no Mac needed: SmoothBible.app for the
+# simulator, uploaded for all five simulator jobs, then SmoothBible.ipa,
+# for an iPhone, onto the ci-bible-ipa branch (tools/ios/build-linux.sh:
+# the compiler assembles and links the executable itself, `l8 arm64 --exe`;
+# the asset catalog is the one kept compiled in programs/bible/ios/assets;
+# the bundle is signed ad hoc with rcodesign). test, beside it, runs the
+# tests and data checks. Five simulator jobs (macOS) start at once, boot
+# their first simulator (a first boot takes about three minutes) and fetch
+# the app as soon as it is uploaded (tools/ios/artifact.py). With MAC_BUILD
+# set (below), the first simulator job builds the app and the IPA instead,
+# from compile's assembly, with Xcode's tools (tools/ios/build.sh; actool's
+# output cached), as before the Linux build. Each runs two groups of the demo one after another
 # (programs/bible/ios/simulate.sh), each on a simulator of its own, the
 # second a copy of the first once booted, before it is used; each
 # group's shots are uploaded as it ends (shots-GROUP). The groups are paired
@@ -45,6 +47,11 @@ concurrency:
   group: bible
   cancel-in-progress: false
 
+env:
+  # 'true': the app built on the first Mac with Xcode's tools (build.sh),
+  # as before; otherwise on Linux, in compile (build-linux.sh).
+  MAC_BUILD: 'false'
+
 jobs:
   compile:
     runs-on: ubuntu-latest
@@ -64,6 +71,42 @@ jobs:
         with:
           name: bible-ios-assembly
           path: bible-ios.s
+      - name: rcodesign (to sign the app ad hoc)
+        if: env.MAC_BUILD != 'true'
+        run: |
+          v=0.29.0
+          f=apple-codesign-$v-x86_64-unknown-linux-musl
+          curl -sSfL -o rcodesign.tgz "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F$v/$f.tar.gz"
+          echo "dbe85cedd8ee4217b64e9a0e4c2aef92ab8bcaaa41f20bde99781ff02e600002  rcodesign.tgz" | sha256sum -c -
+          tar xzf rcodesign.tgz && mv $f/rcodesign . && rm -rf $f rcodesign.tgz
+      - name: Build SmoothBible.app (for every simulator job)
+        if: env.MAC_BUILD != 'true'
+        run: |
+          RCODESIGN=$PWD/rcodesign BUILD_NUMBER=${{ github.run_number }} tools/ios/build-linux.sh sim programs/bible/ios.l8 build programs/bible/ios 2>&1 | tee build.log
+          mkdir -p app && cp build.log app/ && (cd build && zip -qry ../app/SmoothBible-simulator.zip SmoothBible.app)
+      - uses: actions/upload-artifact@v4
+        if: env.MAC_BUILD != 'true'
+        with:
+          name: bible-sim-app
+          path: app
+      - name: Build the app for an iPhone, and push it to ci-bible-ipa
+        if: env.MAC_BUILD != 'true'
+        run: |
+          RCODESIGN=$PWD/rcodesign tools/ios/build-linux.sh device programs/bible/ios.l8 device programs/bible/ios
+          mkdir -p publish && cp device/SmoothBible.ipa SmoothBible.ipa && cp SmoothBible.ipa publish/
+          echo "${GITHUB_SHA} run ${GITHUB_RUN_ID}" > publish/RUN.txt
+          cd publish
+          git init -q -b ci-bible-ipa
+          git config user.name "ci"
+          git config user.email "ci@users.noreply.github.com"
+          git add -A
+          git commit -qm "iPhone build of ${GITHUB_SHA}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ci-bible-ipa
+      - uses: actions/upload-artifact@v4
+        if: env.MAC_BUILD != 'true'
+        with:
+          name: bible-ipa
+          path: SmoothBible.ipa
 
   test:
     runs-on: ubuntu-latest
@@ -87,6 +130,11 @@ jobs:
         run: ./l8c3 build programs/bible/tools/spoken.l8 -o bible-spoken && ./bible-spoken programs/bible/data/bsb.txt | head -3
       - name: Test the ESV proxy (against fixtures, no key)
         run: node --test programs/bible/worker/test.mjs
+      - name: Check the compiler's arm64 encoding against LLVM's (llvm-mc)
+        run: |
+          bin=$(dirname "$(ls /usr/lib/llvm-*/bin/llvm-mc | sort -V | tail -1)")
+          LLVM_BIN=$bin python3 -I tools/arm64/check.py ios programs/bible/ios.l8
+          LLVM_BIN=$bin python3 -I tools/arm64/check.py fuzz 20000 1
 
   simulator:
     name: simulator (${{ matrix.name }})
@@ -96,7 +144,8 @@ jobs:
       fail-fast: false
       matrix:
         # (Paired by the groups' times, so the jobs end together; the first
-        # job builds the app for all five, and the IPA.)
+        # job boots both its simulators at once, and with MAC_BUILD builds
+        # the app for all five, and the IPA.)
         include:
           - {name: build store ios18, build: true, g1: store, g2: ios18}
           - {name: notes read, g1: notes, g2: read}
@@ -119,27 +168,27 @@ jobs:
             [ -n "$dev" ] && (xcrun simctl boot "$dev" >/dev/null 2>&1 &) || true
           done
       - uses: actions/cache@v4
-        if: matrix.build
+        if: matrix.build && env.MAC_BUILD == 'true'
         with:
           path: actool-cache
           key: actool-${{ hashFiles('programs/bible/ios/AppIcon*.png', 'programs/bible/ios/Colors/**') }}-${{ github.run_id }}
           restore-keys: |
             actool-${{ hashFiles('programs/bible/ios/AppIcon*.png', 'programs/bible/ios/Colors/**') }}-
       - name: Wait for the assembly
-        if: matrix.build
+        if: matrix.build && env.MAC_BUILD == 'true'
         run: python3 -I tools/ios/artifact.py bible-ios-assembly . compile
       - name: Build SmoothBible.app (for every job's simulator)
-        if: matrix.build
+        if: matrix.build && env.MAC_BUILD == 'true'
         run: |
           ACTOOL_CACHE=$PWD/actool-cache BUILD_NUMBER=${{ github.run_number }} tools/ios/build.sh sim bible-ios.s build programs/bible/ios 2>&1 | tee build.log
           mkdir -p app && cp build.log app/ && (cd build && zip -qry ../app/SmoothBible-simulator.zip SmoothBible.app)
       - uses: actions/upload-artifact@v4
-        if: matrix.build
+        if: matrix.build && env.MAC_BUILD == 'true'
         with:
           name: bible-sim-app
           path: app
       - name: Build the app for an iPhone, and push it to ci-bible-ipa
-        if: matrix.build
+        if: matrix.build && env.MAC_BUILD == 'true'
         run: |
           export DEVELOPER_DIR="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)/Contents/Developer"
           xcodebuild -version
@@ -156,14 +205,14 @@ jobs:
           git commit -qm "iPhone build of ${GITHUB_SHA}"
           git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ci-bible-ipa
       - uses: actions/upload-artifact@v4
-        if: matrix.build
+        if: matrix.build && env.MAC_BUILD == 'true'
         with:
           name: bible-ipa
           path: SmoothBible.ipa
-      - name: Wait for SmoothBible.app (from the first job)
-        if: ${{ !matrix.build }}
+      - name: Wait for SmoothBible.app (from compile, or the first job)
+        if: ${{ !matrix.build || env.MAC_BUILD != 'true' }}
         run: |
-          python3 -I tools/ios/artifact.py bible-sim-app app "simulator (build"
+          python3 -I tools/ios/artifact.py bible-sim-app app "${{ env.MAC_BUILD == 'true' && 'simulator (build' || 'compile' }}"
           mkdir -p build && (cd build && unzip -q ../app/SmoothBible-simulator.zip) && cp app/build.log .
       - name: The second group's simulator, a copy of the first once booted
         # (A first boot is minutes of work; a copy of a booted simulator,
