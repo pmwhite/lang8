@@ -237,6 +237,19 @@ export function domHost() {
       obj(h).innerHTML = range(b, start, end);
       return 0n;
     },
+    dom_insert_html_of(h, where, b, start, end) {
+      const n = obj(h);
+      const w = Number(where);
+      const html = range(b, start, end);
+      const at = [n.previousElementSibling, n.firstElementChild, n.lastElementChild, n.nextElementSibling][w];
+      n.insertAdjacentHTML(["beforebegin", "afterbegin", "beforeend", "afterend"][w], html);
+      // The first element put in: the one after what was there before.
+      const first = w === 0 ? (at ? at.nextElementSibling : n.parentElement.firstElementChild)
+        : w === 1 ? n.firstElementChild
+        : w === 2 ? (at ? at.nextElementSibling : n.firstElementChild)
+        : n.nextElementSibling;
+      return first === n || first === at ? 0n : hold(first);
+    },
     dom_set_attr(h, name, value) {
       obj(h).setAttribute(str(name), str(value));
       return 0n;
@@ -273,6 +286,13 @@ export function domHost() {
       obj(h).classList.toggle(str(name), on !== 0n);
       return 0n;
     },
+    dom_class_all(h, selector, name, on) {
+      const list = obj(h).querySelectorAll(str(selector));
+      const k = str(name);
+      for (const e of list) e.classList.toggle(k, on !== 0n);
+      return BigInt(list.length);
+    },
+    dom_count: (h, selector) => BigInt(obj(h).querySelectorAll(str(selector)).length),
     dom_set_style(h, property, value) {
       const v = str(value);
       if (v === "") obj(h).style.removeProperty(str(property));
@@ -302,6 +322,7 @@ export function domHost() {
       const v = obj(h)?.[str(name)];
       return typeof v === "string" ? give(v, out) : -1n;
     },
+    dom_has_prop: (h, name) => (str(name) in obj(h) ? 1n : 0n),
     dom_prop_handle(h, name) {
       const v = obj(h)?.[str(name)];
       return v !== null && (typeof v === "object" || typeof v === "function") ? hold(v) : 0n;
@@ -325,6 +346,16 @@ export function domHost() {
         doubles(out, [scrollX, scrollY, d.scrollWidth, d.scrollHeight, innerWidth, innerHeight]);
       } else doubles(out, [o.scrollLeft, o.scrollTop, o.scrollWidth, o.scrollHeight, o.clientWidth, o.clientHeight]);
       return 0n;
+    },
+    dom_rects(h, out) {
+      const list = [...obj(h).getClientRects()];
+      doubles(out, list.flatMap((r) => [r.x, r.y, r.width, r.height]));
+      return BigInt(list.length);
+    },
+    dom_point(x, y, selector) {
+      const e = document.elementFromPoint(x, y);
+      const sel = str(selector);
+      return hold(e && sel ? e.closest(sel) : e);
     },
     dom_scroll_to(h, x, y, smooth) {
       obj(h).scrollTo({ left: x, top: y, behavior: smooth ? "smooth" : "instant" });
@@ -356,6 +387,12 @@ export function domHost() {
       listeners.delete(Number(id));
       return 0n;
     },
+    dom_event_attr(name, out) {
+      const k = str(name);
+      const e = current?.target?.closest?.(`[${CSS.escape(k)}]`);
+      return e ? give(e.getAttribute(k), out) : -1n;
+    },
+    dom_event_closest: (selector) => hold(current?.target?.closest?.(str(selector))),
     dom_prevent_default() {
       current?.preventDefault();
       return 0n;
@@ -407,21 +444,18 @@ export function domHost() {
       return 0n;
     },
 
-    dom_fetch(url, f, data) {
-      const id = nextId++;
-      const done = (status, body) => {
-        fetches.set(id, body);
-        call(f, data, (v) => {
-          setInt(v, 0, id);
-          setInt(v, 9, status);
-          setInt(v, 10, body.length);
-        });
-      };
-      fetch(str(url))
-        .then(async (r) => done(r.status, new Uint8Array(await r.arrayBuffer())))
-        .catch(() => done(0, new Uint8Array(0)));
-      return BigInt(id);
+    dom_push(url, un, state, sn) {
+      history.pushState(range(state, 0, sn), "", range(url, 0, un));
+      return 0n;
     },
+    dom_replace(url, un, state, sn) {
+      history.replaceState(range(state, 0, sn), "", range(url, 0, un));
+      return 0n;
+    },
+    dom_state: (out) => (typeof history.state === "string" ? give(history.state, out) : -1n),
+
+    dom_fetch: (url, f, data) => fetchInto(str(url), f, data, false),
+    dom_fetch_gz: (url, f, data) => fetchInto(str(url), f, data, true),
     dom_fetch_take(id, out, at) {
       const body = fetches.get(Number(id)) ?? new Uint8Array(0);
       fetches.delete(Number(id));
@@ -498,6 +532,17 @@ export function domHost() {
       return 0n;
     },
 
+    dom_wake_lock(on) {
+      if (!navigator.wakeLock) return 0n;
+      wakeWanted = on !== 0n;
+      if (wakeWanted) wake();
+      else {
+        wakeLock?.release();
+        wakeLock = null;
+      }
+      return 1n;
+    },
+
     dom_media: (query) => (matchMedia(str(query)).matches ? 1n : 0n),
     dom_media_listen(query, f, data) {
       const id = nextId++;
@@ -511,6 +556,40 @@ export function domHost() {
       return BigInt(id);
     },
   };
+
+  // A GET, its body kept until the program takes it; unzipped if gz.
+  const fetchInto = (url, f, data, gz) => {
+    const id = nextId++;
+    const done = (status, body) => {
+      fetches.set(id, body);
+      call(f, data, (v) => {
+        setInt(v, 0, id);
+        setInt(v, 9, status);
+        setInt(v, 10, body.length);
+      });
+    };
+    fetch(url)
+      .then(async (r) => {
+        if (!r.ok || !gz) return done(r.status, new Uint8Array(await r.arrayBuffer()));
+        const plain = r.body.pipeThrough(new DecompressionStream("gzip"));
+        done(r.status, new Uint8Array(await new Response(plain).arrayBuffer()));
+      })
+      .catch(() => done(0, new Uint8Array(0)));
+    return BigInt(id);
+  };
+
+  let wakeWanted = false;
+  let wakeLock = null;
+  const wake = () => {
+    if (!wakeWanted || wakeLock || document.visibilityState !== "visible") return;
+    navigator.wakeLock.request("screen").then((l) => {
+      wakeLock = l;
+      l.addEventListener("release", () => {
+        if (wakeLock === l) wakeLock = null;
+      });
+    }).catch(() => {});
+  };
+  document.addEventListener("visibilitychange", wake);
 
   const freeTree = (n) => {
     if (n[HANDLE] !== undefined) release(n[HANDLE]);

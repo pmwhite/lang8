@@ -221,7 +221,7 @@ bible-web: $(OK)/bible-web
 # .build/dom-test: open dom.html and read window.l8_results.
 $(OK)/dom-test-site: l8c3 $(PROGRAMS) web/tests/dom.l8 web/tests/dom.html web/l8-runtime.js web/dom.js | $(OK)
 	@$(STEP) 'dom test site' sh -c 'mkdir -p $(BUILD)/dom-test && ./l8c3 wasm web/tests/dom.l8 -o $(BUILD)/dom-test/dom.wasm && \
-		cp web/tests/dom.html web/l8-runtime.js web/dom.js $(BUILD)/dom-test/'
+		cp web/tests/dom.html web/l8-runtime.js web/dom.js $(BUILD)/dom-test/ && gzip -9nkf $(BUILD)/dom-test/dom.html'
 	@touch $@
 
 # What the app says aloud, a verse a line (DESIGN.md §12.2.3), for the

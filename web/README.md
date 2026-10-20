@@ -250,7 +250,13 @@ attributes, classes, styles and any property or no-argument method (an
 `<audio>` element's `play`, `currentTime`); boxes and scrolling; listeners,
 with `preventDefault`; the selection as handles and byte offsets;
 `pushState`, `replaceState` and `popstate`; `fetch`; `localStorage`;
-timers and animation frames; and media queries. A callback cannot be
+timers and animation frames; media queries; and, for the Bible's reader,
+HTML put in beside or inside a node (answering the first element as a
+handle), a class on every match of a selector, every box of a node, the
+element at a point, the attribute or selector nearest an event's own
+target (actions written into HTML as `data-act`), history entries with a
+state string, gzipped fetches unzipped, and the screen wake lock. A
+callback cannot be
 `noregion`, so a fetched body it keeps comes as memory from the host
 (`dom_fetch_body`), as a mapped file does on an iPhone.
 
