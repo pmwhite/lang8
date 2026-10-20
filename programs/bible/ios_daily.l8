@@ -48,24 +48,108 @@ now_minutes(): int {
     (t - day_of(t) * 86400) / 60
 }
 
-// What is kept, read at launch: the plan followed. The plans themselves
-// are made at first use.
-// (The plans are made first: a plan's lines name its days' passages. A
-// plan this build has not is kept in plans-done.tsv, and cleared.)
+// What is kept, read at launch: the plans followed, a file each,
+// plan-N.tsv, in N's order (the order they were started; Â§16.11.6). 1.0's
+// plan.tsv becomes plan-1.tsv first (its reminder's switch as REMIND). The
+// plans are made first: a plan's lines name its days' passages. A plan
+// this build has not is kept in plans-done.tsv, and its file removed.
 load_daily() {
     daily_ready();
-    read_file("plan.tsv");
-    parse_plan();
-    if (pl_unknown) {
-        fput_str("END\t");
-        fput_int(time(0));
-        fput(10);
-        append_file("plans-done.tsv");
-        msg2(msg(cls("NSFileManager"), sel("defaultManager")), sel("removeItemAtPath:error:"),
-            file_path("plan.tsv"), 0);
-        note("bible: plan unknown")
+    plans_migrate();
+    plans_clear();
+    fm: int = msg(cls("NSFileManager"), sel("defaultManager"));
+    names: int = msg2(fm, sel("contentsOfDirectoryAtPath:error:"), dir_path(), 0);
+    nums_n: int = 0;
+    if (names != 0) {
+        for i in 0..msg(names, sel("count")) {
+            n: int = plan_file_num(msg1(names, sel("objectAtIndex:"), i));
+            if (n > 0 && nums_n < len(pf_nums)) {
+                // (Kept in order, as they come.)
+                at: int = nums_n;
+                while (at > 0 && pf_nums[at - 1] > n) {
+                    pf_nums[at] = pf_nums[at - 1];
+                    at = at - 1
+                }
+                pf_nums[at] = n;
+                nums_n = nums_n + 1
+            }
+        }
     }
-    note_num("bible: plan ", pl_active)
+    for x in 0..nums_n {
+        n: int = pf_nums[x];
+        read_path(plan_path(n));
+        i: int = parse_plan(n);
+        if (i < 0) {
+            fput_str("END\t");
+            fput_int(time(0));
+            fput(10);
+            append_file("plans-done.tsv");
+            msg2(fm, sel("removeItemAtPath:error:"), plan_path(n), 0);
+            note_num("bible: plan unknown, file ", n)
+        }
+        if (n >= def_int("planNext")) set_def_int("planNext", n + 1)
+    }
+    note_num("bible: plans followed ", fw_n)
+}
+
+pf_nums: []int = new int[64](0);
+
+// The number of a file named plan-N.tsv (0 if it is not one).
+plan_file_num(name: int): int {
+    k: int = nsstring_into(name, link_buf);
+    if (k < 10 || link_buf[0] as int != 112 || link_buf[4] as int != 45 || link_buf[k - 4] as int != 46) return 0;
+    n: int = 0;
+    for i in 5..k - 4 {
+        d: int = link_buf[i] as int;
+        if (d < 48 || d > 57) return 0;
+        n = n * 10 + d - 48
+    }
+    n
+}
+
+// plan-N.tsv's path.
+plan_path(n: int): int {
+    fbuf_n = 0;
+    fput_str("plan-");
+    fput_int(n);
+    fput_str(".tsv");
+    msg1(dir_path(), sel("stringByAppendingPathComponent:"), fstring())
+}
+
+// A file at path into fbuf (empty if there is none).
+read_path(path: int) {
+    data: int = msg1(cls("NSData"), sel("dataWithContentsOfFile:"), path);
+    fbuf_n = 0;
+    if (data == 0) return;
+    n: int = msg(data, sel("length"));
+    if (n > len(fbuf)) n = len(fbuf);
+    if (n > 0) memcpy_from(fbuf, msg(data, sel("bytes")), n);
+    fbuf_n = n
+}
+
+// 1.0's (and Â§16's first build's) plan.tsv, when no plan-N.tsv is there yet:
+// renamed plan-1.tsv, with REMIND if planReminder was on; planNext 2; logged
+// "plans migrated 1".
+plans_migrate() {
+    fm: int = msg(cls("NSFileManager"), sel("defaultManager"));
+    old: int = file_path("plan.tsv");
+    if ((msg1(fm, sel("fileExistsAtPath:"), old) & 255) == 0) return;
+    names: int = msg2(fm, sel("contentsOfDirectoryAtPath:error:"), dir_path(), 0);
+    if (names != 0) {
+        for i in 0..msg(names, sel("count"))
+            if (plan_file_num(msg1(names, sel("objectAtIndex:"), i)) > 0) return
+    }
+    // (plan_path writes its name in fbuf: before the file is read.)
+    to: int = plan_path(1);
+    read_path(old);
+    plan_migrate(def_bool("planReminder"));
+    data: int = msg2(cls("NSData"), sel("dataWithBytes:length:"), bytes_address(fbuf),
+        fbuf_n);
+    msg2(data, sel("writeToFile:atomically:"), to, 1);
+    msg2(fm, sel("removeItemAtPath:error:"), old, 0);
+    set_def_int("planNext", 2);
+    msg1(defaults(), sel("removeObjectForKey:"), nsstring("planReminder"));
+    note("bible: plans migrated 1")
 }
 
 daily_ready() {
@@ -85,25 +169,36 @@ plans_files_load() {
     plan_file_set(PLAN_CHRONO, k, lang_mapped)
 }
 
-save_plan() {
-    format_plan();
-    write_file("plan.tsv")
+// Slot i's file written (whole).
+save_plan(i: int) {
+    if (i < 0 || i >= fw_n) return;
+    path: int = plan_path(fw_num[i]);
+    format_plan(i);
+    data: int = msg2(cls("NSData"), sel("dataWithBytes:length:"), bytes_address(fbuf),
+        fbuf_n);
+    msg2(data, sel("writeToFile:atomically:"), path, 1)
 }
 
-// The plan followed, stopped: its file onto plans-done.tsv (with when it
-// ended), and gone.
-plan_archive() {
-    if (pl_active < 0) return;
+// The same, by plan.
+save_plan_p(p: int) {
+    save_plan(plan_slot(p))
+}
+
+// Slot i's plan stopped: its file onto plans-done.tsv (with when it
+// ended), and gone; the others go on (Â§16.11.1).
+plan_archive(i: int) {
+    if (i < 0 || i >= fw_n) return;
+    n: int = fw_num[i];
     fbuf_n = 0;
-    put_plan();
+    put_plan(i);
     fput_str("END\t");
     fput_int(time(0));
     fput(10);
     append_file("plans-done.tsv");
     msg2(msg(cls("NSFileManager"), sel("defaultManager")), sel("removeItemAtPath:error:"),
-        file_path("plan.tsv"), 0);
-    note("bible: plan archived");
-    plan_clear()
+        plan_path(n), 0);
+    note_num("bible: plan archived, file ", n);
+    plan_end(i)
 }
 
 // ---- a chapter read ----
@@ -207,15 +302,15 @@ plan_heard(c: int) {
 // (The ribbons group's: Listen's chapter's end counts, as on a phone.)
 demo_heard: bool = false;
 
-// Today's day finished: the toast, once a day.
-day_done() {
+// Slot i's today finished: the toast, once a day for each plan (DONEDAY;
+// naming the plan when more than one is followed, Â§16.11.4).
+day_done(i: int) {
     d: int = today();
-    if (def_int("planDoneDay") == d + 1) return;
-    set_def_int("planDoneDay", d + 1);
+    if (!plan_day_done_due(i, d)) return;
+    fw_doneday[i] = d;
+    save_plan(i);
     fbuf_n = 0;
-    fput_str("Day ");
-    fput_int(plan_today(d));
-    fput_str(" Done");
+    fput_day_done(i, d);
     haptic_success();
     toast_symbol(fstring(), "checkmark", if (demo_on) 6.0f64 else 1.6f64);
     note("bible: day done")
@@ -228,17 +323,19 @@ day_done() {
 // row is (then Reading Plans).
 gt_rb: int = 0;
 
-gt_plan: bool = false;
+// How many plans' rows (one a plan followed, in the order started:
+// Â§16.11.3).
+gt_np: int = 0;
 
 today_build() {
     daily_ready();
     gt_rb = rb_n;
-    gt_plan = pl_active >= 0
+    gt_np = fw_n
 }
 
 // Whether Go To opens at its top (a ribbon, or a plan followed).
 today_has(): bool {
-    rb_n > 0 || pl_active >= 0
+    rb_n > 0 || fw_n > 0
 }
 
 ribbons_rows(): int {
@@ -246,7 +343,7 @@ ribbons_rows(): int {
 }
 
 plan_rows(): int {
-    if (gt_plan) 2 else 1
+    gt_np + 1
 }
 
 // The Ribbons header only with a ribbon; its footer with none (what a
@@ -259,9 +356,10 @@ ribbons_footer(): int {
     if (gt_rb == 0) nsstring(NR_FOOTER) else if (gt_rb >= RB_MOST) nsstring("12 ribbons is the most.") else 0
 }
 
-// "Reading Plan" over the plan's row; a lone Reading Plans needs no title.
+// "Reading Plan" over the plan's row, "Reading Plans" over two or more; a
+// lone Reading Plans needs no title.
 plan_header(): int {
-    if (gt_plan) nsstring("Reading Plan") else 0
+    if (gt_np > 1) nsstring("Reading Plans") else if (gt_np == 1) nsstring("Reading Plan") else 0
 }
 
 // A circle for a reading's or a day's state (0 none, 1 some, 2 all read).
@@ -381,16 +479,17 @@ today_label(font: int, color: int, lines: int): int {
     l
 }
 
-// The plan followed's one row (DESIGN.md Â§11.2.1): today's state as a
-// circle (an image), where you go next ("Genesis 12â€“15"), "Bible in a
-// Year Â· Day 4 of 365" (and " Â· 2 days unfinished", " Â· Done"), and â“˜ to
-// its days.
-plan_row_fill(cell: int) {
+// A plan followed's row (DESIGN.md Â§11.2.1, Â§16.11.3), slot i: today's
+// state as a circle (an image), today's passages ("Genesis 12â€“14; Psalm
+// 105", two lines at most), "Chronological Â· Day 32 of 365" (and " Â· 2 days
+// unfinished", " Â· Done"), and â“˜ to its days.
+plan_row_fill(cell: int, i: int) {
     d: int = today();
-    n: int = plan_today(d);
-    di: int = plan_day(pl_active, n);
+    p: int = fw_plan[i];
+    n: int = plan_today_of(i, d);
+    di: int = plan_day(p, n);
     state: int = day_state(di);
-    behind: int = plan_behind(d);
+    behind: int = plan_behind_of(i, d);
     config: int = list_config(2);
     config_image(config, circle_name(state), 17.0f64, if (state == 0) c_faint else c_accent);
     fbuf_n = 0;
@@ -399,11 +498,11 @@ plan_row_fill(cell: int) {
     // (Today's passages: two lines at most, then "â€¦"; Â§16.6.)
     msg1(text_props(config), sel("setNumberOfLines:"), 2);
     fbuf_n = 0;
-    fput_plan_name(pl_active);
+    fput_plan_name(p);
     fput_str(" \Â\· Day ");
     fput_int(n);
     fput_str(" of ");
-    fput_int(plan_lengths[pl_active]);
+    fput_int(plan_lengths[p]);
     if (behind > 0) {
         fput_str(" \Â\· ");
         fput_int(behind);
@@ -416,16 +515,13 @@ plan_row_fill(cell: int) {
     msg1(cell, sel("setAccessoryType:"), 4);
     // "Genesis 12 to 15. Bible in a Year, day 4 of 365, not read."
     fbuf_n = 0;
-    for r in pl_r0[di]..pl_r0[di] + pl_rn[di] {
-        if (r > pl_r0[di]) fput_str("; ");
-        fput_reading(r, true)
-    }
+    fput_day_spoken(di);
     fput_str(". ");
-    fput_plan_name(pl_active);
+    fput_plan_name(p);
     fput_str(", day ");
     fput_int(n);
     fput_str(" of ");
-    fput_int(plan_lengths[pl_active]);
+    fput_int(plan_lengths[p]);
     fput_str(", ");
     fput_str(state_words(state));
     if (behind > 0) {
@@ -437,10 +533,23 @@ plan_row_fill(cell: int) {
     msg1(cell, sel("setIsAccessibilityElement:"), 1);
     msg1(cell, sel("setAccessibilityLabel:"), fstring());
     msg1(cell, sel("setAccessibilityHint:"), nsstring("Opens today\â\€\™s reading on a page of its own."));
-    one[0] = custom_action(if (state == 2) "Mark as Unread" else "Mark as Read", "planRowMark:");
-    one[1] = custom_action("Remove", "planRowRemove:");
-    one[2] = custom_action("Plan Details", "planRowDetails:");
+    one[0] = slot_action(if (state == 2) "Mark as Unread" else "Mark as Read", "planRowMark:",
+        i);
+    one[1] = slot_action("Remove", "planRowRemove:", i);
+    one[2] = slot_action("Plan Details", "planRowDetails:", i);
     msg1(cell, sel("setAccessibilityCustomActions:"), nsarray(one, 3))
+}
+
+// A VoiceOver action of a plan's row, saying its slot.
+slot_action(name: str, action: str, i: int): int {
+    a: int = custom_action(name, action);
+    objc_setAssociatedObject(a, ints_address(circle_key), nsnumber_int(i), 1);
+    a
+}
+
+action_slot(a: int): int {
+    n: int = objc_getAssociatedObject(a, ints_address(circle_key));
+    if (n == 0) -1 else msg(n, sel("longValue"))
 }
 
 // A row's text in the body style (ink), its line faint; both wrap.
@@ -456,9 +565,9 @@ ribbons_cell(t: int, r: int): int {
 }
 
 plan_cell(t: int, r: int): int {
-    if (gt_plan && r == 0) {
+    if (r < gt_np && r < fw_n) {
         cell: int = list_cell(t, "cr-plan", 2);
-        plan_row_fill(cell);
+        plan_row_fill(cell, r);
         return cell
     }
     // Reading Plans: calendar, ink, disclosure.
@@ -486,63 +595,62 @@ ribbons_picked(r: int) {
 // The plan's row: today's day, in the day's reader (Â§16.1); Reading Plans:
 // the plans.
 plan_picked(r: int) {
-    if (gt_plan && r == 0) day_open_today() else open_plans()
+    if (r < gt_np && r < fw_n) day_open_today_of(r) else open_plans()
 }
 
 // The plan's days, as its row's â“˜ opens them: at the first unfinished
 // day, if one is (as Catch Up did); else at today, once today is past the
 // first screen (day 8 on: review r6-1); else at their top (the Daily
 // Reminder in sight early in a plan).
-plan_row_details() {
-    if (pl_active < 0) return;
+plan_row_details(i: int) {
+    if (i < 0 || i >= fw_n) return;
     daily_ready();
-    td: int = plan_today(today());
-    open_plan(pl_active, if (plan_behind(today()) > 0) pl_first_behind else if (td > 7) td else 0)
+    td: int = plan_today_of(i, today());
+    open_plan(fw_plan[i], if (plan_behind_of(i, today()) > 0) pl_first_behind else if (td > 7) td else 0)
 }
 
-plan_row_details_action(_self: int, _cmd: int, _a: int): int {
-    plan_row_details();
+plan_row_details_action(_self: int, _cmd: int, a: int): int {
+    plan_row_details(action_slot(a));
     1
 }
 
 // Today's day read (or not), from VoiceOver's action on the plan's row
 // (marking by hand is in the plan's days; Â§11.2.8): the row's circle
 // cross-fading.
-plan_row_mark(_self: int, _cmd: int, _a: int): int {
-    plan_row_toggle();
+plan_row_mark(_self: int, _cmd: int, a: int): int {
+    plan_row_toggle(action_slot(a));
     1
 }
 
-plan_row_toggle() {
-    if (pl_active < 0) return;
+plan_row_toggle(i: int) {
+    if (i < 0 || i >= fw_n) return;
     daily_ready();
     d: int = today();
-    di: int = plan_day(pl_active, plan_today(d));
+    di: int = plan_day(fw_plan[i], plan_today_of(i, d));
     on: bool = day_state(di) != 2;
     mark_day(di, on, time(0));
-    save_plan();
+    save_plan(i);
     haptic_select();
-    if (on) day_done();
-    if (picker_table != 0 && gt_plan) {
+    if (on) day_done(i);
+    if (picker_table != 0 && i < gt_np) {
         cell: int = msg1(picker_table, sel("cellForRowAtIndexPath:"), msg2(cls("NSIndexPath"),
-            sel("indexPathForRow:inSection:"), 0, GT_PLAN_SECTION));
+            sel("indexPathForRow:inSection:"), i, GT_PLAN_SECTION));
         if (cell != 0) {
             fade_layer(msg(msg(cell, sel("contentView")), sel("layer")), 0.15f64);
-            plan_row_fill(cell)
+            plan_row_fill(cell, i)
         }
     }
     daily_reschedule()
 }
 
-plan_row_remove(_self: int, _cmd: int, _a: int): int {
-    if (picker_table != 0 && gt_plan) today_remove_plan();
+plan_row_remove(_self: int, _cmd: int, a: int): int {
+    if (picker_table != 0) today_remove_plan(action_slot(a));
     1
 }
 
-// The plan stopped, as Stop Plan does (archived, its reminder off).
-plan_stop_now() {
-    plan_archive();
-    reminder_off();
+// Slot i's plan stopped, as Stop Plan does (archived; the others go on).
+plan_stop_now(i: int) {
+    plan_archive(i);
     note("bible: plan stopped");
     daily_reschedule()
 }
@@ -612,8 +720,9 @@ today_delete_ribbon(i: int) {
 
 // The plan's row swiped away (Remove): the plan stopped; the section faded
 // to Reading Plans alone (its header gone).
-today_remove_plan() {
-    plan_stop_now();
+today_remove_plan(i: int) {
+    if (i < 0 || i >= fw_n) return;
+    plan_stop_now(i);
     if (picker_table == 0 || pq_n > 0) return;
     if (!on_window(picker_table, "Go To, the plan removed")) return;
     today_build();
@@ -710,22 +819,36 @@ open_plans() {
     msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
 }
 
-// The plans offered, in Reading Plans' order (a listed one whose file is
-// missing left out).
+// Reading Plans' sections (Â§16.11.2): Following (the plans followed, in
+// the order started; only with one), the plans not followed in Reading
+// Plans' order (a listed one whose file is missing left out), and From a
+// Book: 0, 1 and 2.
+plans_sections(): int {
+    if (fw_n > 0) 3 else 2
+}
+
+plans_kind(s: int): int {
+    if (fw_n > 0) s else s + 1
+}
+
 plans_rows(s: int): int {
-    if (s != 0) return 1;
+    k: int = plans_kind(s);
+    if (k == 0) return fw_n;
+    if (k == 2) return 1;
     n: int = 0;
-    for i in 0..PLANS
-        if (plan_lengths[plan_order[i]] > 0) n = n + 1;
+    for i in 0..PLANS {
+        p: int = plan_order[i];
+        if (plan_lengths[p] > 0 && plan_slot(p) < 0) n = n + 1
+    }
     n
 }
 
-// Reading Plans' row r: its plan.
+// The plans' row r (of those not followed): its plan.
 plans_row_plan(r: int): int {
     n: int = 0;
     for i in 0..PLANS {
         p: int = plan_order[i];
-        if (plan_lengths[p] > 0) {
+        if (plan_lengths[p] > 0 && plan_slot(p) < 0) {
             if (n == r) return p;
             n = n + 1
         }
@@ -734,20 +857,34 @@ plans_row_plan(r: int): int {
 }
 
 plans_header(s: int): int {
-    if (s == 1) nsstring("From a Book") else 0
+    k: int = plans_kind(s);
+    if (k == 0) nsstring("Following") else if (k == 2) nsstring("From a Book") else 0
 }
 
-// A plan's row: its name, "365 days Â· about 3 chapters a day", the followed
-// one's "Day 4" in accent; A Chapter a Day's line.
+// A plan's row: its name, "365 days Â· about 3 chapters a day"; a followed
+// one's "Day 32 Â· Genesis 12â€“14; Psalm 105", with a check (faint) once
+// today's is read; A Chapter a Day's line.
 plans_cell(t: int, path: int): int {
-    s: int = msg(path, sel("section"));
+    k: int = plans_kind(msg(path, sel("section")));
     r: int = msg(path, sel("row"));
     cell: int = list_cell(t, "plan-list", 2);
     config: int = list_config(2);
     fbuf_n = 0;
-    if (s == 1) {
+    read: bool = false;
+    if (k == 2) {
         msg1(config, sel("setText:"), nsstring("A Chapter a Day"));
         fput_str("One chapter a day through a book you choose")
+    } else if (k == 0 && r < fw_n) {
+        p: int = fw_plan[r];
+        fput_plan_name(p);
+        msg1(config, sel("setText:"), fstring());
+        n: int = plan_today_of(r, today());
+        fbuf_n = 0;
+        fput_str("Day ");
+        fput_int(n);
+        fput_str(" \Â\· ");
+        fput_day(plan_day(p, n));
+        read = day_state(plan_day(p, n)) == 2
     } else {
         p: int = plans_row_plan(r);
         fput_plan_name(p);
@@ -760,18 +897,36 @@ plans_cell(t: int, path: int): int {
     }
     msg1(config, sel("setSecondaryText:"), fstring());
     row_text_style(config);
+    msg1(detail_props(config), sel("setNumberOfLines:"), 1);
     msg1(cell, sel("setContentConfiguration:"), config);
-    if (s == 0 && plans_row_plan(r) == pl_active) {
-        fbuf_n = 0;
-        fput_str("Day ");
-        fput_int(plan_today(today()));
-        msg1(cell, sel("setAccessoryView:"), value_disclosure(fstring(), c_accent))
-    } else msg1(cell, sel("setAccessoryType:"), 1);
+    if (read) {
+        img: int = msg(msg1(msg(cls("UIImageView"), sel("alloc")), sel("initWithImage:"),
+            symbol("checkmark", 15.0f64, 5, c_faint)), sel("autorelease"));
+        msg(img, sel("sizeToFit"));
+        msg1(img, sel("setAccessibilityLabel:"), nsstring("Today\â\€\™s read"));
+        msg1(cell, sel("setAccessoryView:"), img)
+    } else {
+        msg1(cell, sel("setAccessoryView:"), 0);
+        msg1(cell, sel("setAccessoryType:"), 1)
+    }
     cell
 }
 
 plans_picked(s: int, r: int) {
-    if (s == 0) open_plan(plans_row_plan(r), 0) else open_day1()
+    k: int = plans_kind(s);
+    if (k == 0 && r < fw_n) open_plan(fw_plan[r], 0) else if (k == 1) open_plan(plans_row_plan(r),
+        0) else open_day1()
+}
+
+// Plan p's row in Reading Plans tapped (the demo's).
+plans_tap(p: int) {
+    i: int = plan_slot(p);
+    if (i >= 0) {
+        plans_picked(0, i);
+        return
+    }
+    for r in 0..plans_rows(if (fw_n > 0) 1 else 0)
+        if (plans_row_plan(r) == p) plans_picked(if (fw_n > 0) 1 else 0, r)
 }
 
 // (Back from a plan: its row as it is now; reloaded whole, which lays out
@@ -805,8 +960,7 @@ open_plan(p: int, d: int) {
     msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
 }
 
-// The description, and (another plan followed) that its progress is kept
-// (Â§10.7a note 5).
+// The description.
 detail_header(W: f64): int {
     v: int = msg(msg_rect(msg(cls("UIView"), sel("alloc")), sel("initWithFrame:"),
         0.0f64, 0.0f64, W, 100.0f64), sel("autorelease"));
@@ -821,29 +975,16 @@ detail_header(W: f64): int {
     msg_rect(text, sel("setFrame:"), 20.0f64, y, W - 40.0f64, hfa[1]);
     msg1(v, sel("addSubview:"), text);
     y = y + hfa[1];
-    if (pl_active >= 0 && pl_active != detail_plan) {
-        fbuf_n = 0;
-        fput_str("Your progress in ");
-        fput_plan_name(pl_active);
-        fput_str(" will be kept.");
-        kept: int = label_of(attributed(fstring(), sans(scaled(13.0f64), 0.0f64),
-            c_faint));
-        msg1(kept, sel("setNumberOfLines:"), 0);
-        msg1(kept, sel("setTextAlignment:"), 4);
-        label_size(kept, W - 40.0f64);
-        msg_rect(kept, sel("setFrame:"), 20.0f64, y + 8.0f64, W - 40.0f64, hfa[1]);
-        msg1(v, sel("addSubview:"), kept);
-        y = y + 8.0f64 + hfa[1]
-    }
     msg_rect(v, sel("setFrame:"), 0.0f64, 0.0f64, W, y + 4.0f64);
     v
 }
 
-// The toolbar's one item, centered: Start Plan, Start Instead (another
-// followed) or Stop Plan.
+// The toolbar's one item, centered: Start Plan, or Stop Plan for a plan
+// followed (never Start Instead: starting one never stops another,
+// Â§16.11.1).
 detail_items(vc: int, animated: bool) {
-    following: bool = pl_active == detail_plan;
-    title: str = if (following) "Stop Plan" else if (pl_active >= 0) "Start Instead" else "Start Plan";
+    following: bool = plan_slot(detail_plan) >= 0;
+    title: str = if (following) "Stop Plan" else "Start Plan";
     item: int = msg(msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithTitle:style:target:action:"),
         nsstring(title), if (following) 0 else 2, app_obj, sel(if (following) "planStop:" else "planStart:")),
         sel("autorelease"));
@@ -902,7 +1043,7 @@ detail_day(s: int, r: int): int {
 
 // Whether the reminder's section is shown (the plan followed's), first.
 detail_wk0(): int {
-    if (detail_plan == pl_active) 1 else 0
+    if (plan_slot(detail_plan) >= 0) 1 else 0
 }
 
 detail_sections(): int {
@@ -935,7 +1076,7 @@ detail_footer(s: int): int {
 // Day d's state (in the plan followed: its chapters read; another plan's
 // days are its own, unread).
 detail_state(di: int): int {
-    if (detail_plan != pl_active) 0 else day_state(di)
+    if (plan_slot(detail_plan) < 0) 0 else day_state(di)
 }
 
 detail_fill(cell: int, d: int) {
@@ -950,12 +1091,12 @@ detail_fill(cell: int, d: int) {
     line: int = fstring();
     // (A plan not followed: its circles dimmed and inert until it is
     // started.)
-    inert: bool = detail_plan != pl_active;
+    inert: bool = plan_slot(detail_plan) < 0;
     msg1(cell, sel("setContentConfiguration:"), circle_config_of(state, title, line,
         inert));
     b: int = msg1(msg(cell, sel("contentView")), sel("viewWithTag:"), 9100);
     if (b != 0) msg1(b, sel("setEnabled:"), if (inert) 0 else 1);
-    is_today: bool = detail_plan == pl_active && d == plan_today(today());
+    is_today: bool = !inert && d == plan_today_p(detail_plan, today());
     if (is_today) {
         l: int = today_label(msg1(cls("UIFont"), sel("preferredFontForTextStyle:"),
             objc_const("UIFontTextStyleBody")), c_accent, 1);
@@ -1011,13 +1152,14 @@ day_mark(_self: int, _cmd: int, a: int): int {
 // A day's chapters read (or not), in the plan followed (a circle of
 // another plan's starts nothing).
 day_toggle(d: int) {
-    if (detail_plan != pl_active) return;
+    i: int = plan_slot(detail_plan);
+    if (i < 0) return;
     di: int = plan_day(detail_plan, d);
     on: bool = day_state(di) != 2;
     mark_day(di, on, time(0));
-    save_plan();
+    save_plan(i);
     haptic_select();
-    if (on && d == plan_today(today())) day_done();
+    if (on && d == plan_today_of(i, today())) day_done(i);
     if (detail_table != 0) {
         cell: int = msg1(detail_table, sel("cellForRowAtIndexPath:"), detail_path(d));
         if (cell != 0) {
@@ -1028,22 +1170,22 @@ day_toggle(d: int) {
     daily_reschedule()
 }
 
-// A plan followed from today (Start Plan or Start Instead; A Chapter a Day
-// from chapter c): the old one's progress kept in plans-done.tsv, its
-// reminder off, and the new one's off until asked for (Â§10.7a note 19).
-plan_follow(p: int, c: int) {
+// A plan followed from today (Start Plan; A Chapter a Day from chapter c),
+// beside any others (Â§16.11.1), in a new file, its reminder's switch off
+// until asked for: its plan (-1 if it is followed already).
+plan_follow(p_in: int, c: int): int {
     daily_ready();
-    plan_archive();
-    reminder_off();
-    if (p == PLAN_DAY1) _ok: bool = plan_day1_choose(c);
-    plan_begin(p, today());
-    save_plan();
-    note("bible: plan started");
-    for k in 0..len(pr_end) {
-        pr_end[k] = false;
-        pr_dwell[k] = 0.0f64
-    }
-    daily_reschedule()
+    p: int = if (plan_is_day1(p_in)) plan_day1_choose(c) else p_in;
+    if (p < 0 || plan_slot(p) >= 0) return -1;
+    n: int = def_int("planNext");
+    if (n < 1) n = 1;
+    set_def_int("planNext", n + 1);
+    i: int = plan_begin(p, today(), n);
+    if (i < 0) return -1;
+    save_plan(i);
+    note_num("bible: plan started, file ", n);
+    daily_reschedule();
+    p
 }
 
 // Start Plan (or Start Instead), a plan's detail's: Round 6's start.
@@ -1055,8 +1197,9 @@ plan_start(_self: int, _cmd: int, _b: int): int {
 // Plan p followed from today (A Chapter a Day from chapter c), then Go To
 // away and day 1 in the day's reader (Â§16.1), and the toast "Started
 // Chronological".
-plans_start_now(p: int, c: int) {
-    plan_follow(p, c);
+plans_start_now(p_in: int, c: int) {
+    p: int = plan_follow(p_in, c);
+    if (p < 0) return;
     fbuf_n = 0;
     fput_str("Started ");
     fput_plan_name(p);
@@ -1111,14 +1254,16 @@ open_day1() {
     msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
 }
 
-// Start Plan (Start Instead with a plan followed), disabled with fewer
-// than 2 days left in the book.
+// Start Plan, disabled with fewer than 2 days left in the book, or that
+// one followed already (another book's is a plan of its own: Â§16.11.1).
 day1_items(animated: bool) {
     if (day1_vc == 0) return;
     item: int = msg(msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithTitle:style:target:action:"),
-        nsstring(if (pl_active >= 0) "Start Instead" else "Start Plan"), 2, app_obj,
-        sel("day1Start:")), sel("autorelease"));
-    msg1(item, sel("setEnabled:"), if (day1_days(bg_c) > 0) 1 else 0);
+        nsstring("Start Plan"), 2, app_obj, sel("day1Start:")), sel("autorelease"));
+    followed: bool = false;
+    for i in 0..fw_n
+        if (plan_is_day1(fw_plan[i]) && pl_day1_c[fw_plan[i]] == bg_c) followed = true;
+    msg1(item, sel("setEnabled:"), if (day1_days(bg_c) > 0 && !followed) 1 else 0);
     toolbar_one(day1_vc, item, animated)
 }
 
@@ -1198,8 +1343,7 @@ day1_start(_self: int, _cmd: int, _b: int): int {
 
 plan_stop(_self: int, _cmd: int, _b: int): int {
     was: int = detail_wk0();
-    plan_archive();
-    reminder_off();
+    plan_archive(plan_slot(detail_plan));
     note("bible: plan stopped");
     // (A day of it up: read on, not marked.)
     if (day_on) {
@@ -1259,11 +1403,39 @@ daily_sheet_gone() {
     detail_vc = 0
 }
 
-// ---- the plan's daily reminder (Â§10, owner amendment) ----
-// The switch (planReminder; only while a plan is followed), its time
-// (minutes past midnight), and whether the phone's Settings turned
-// notifications off for the app.
-nt_on: bool = false;
+// ---- the daily reminder (Â§10, owner amendment; Â§16.11.5) ----
+// Each plan's switch (REMIND in its file: the one notification names it),
+// the shared time (minutes past midnight), and whether the phone's Settings
+// turned notifications off for the app.
+// The switch of the plan whose days are shown.
+nt_on_detail(): bool {
+    i: int = plan_slot(detail_plan);
+    i >= 0 && fw_remind[i]
+}
+
+nt_set_detail(on: bool) {
+    i: int = plan_slot(detail_plan);
+    if (i < 0) return;
+    fw_remind[i] = on;
+    save_plan(i)
+}
+
+// Whether any plan's switch is on.
+reminders_any(): bool {
+    for i in 0..fw_n
+        if (fw_remind[i]) return true;
+    false
+}
+
+// Every plan's switch off (Settings turned notifications off).
+reminders_all_off() {
+    for i in 0..fw_n {
+        if (fw_remind[i]) {
+            fw_remind[i] = false;
+            save_plan(i)
+        }
+    }
+}
 
 nt_minutes: int = 420;
 
@@ -1344,19 +1516,17 @@ auth_tick(_self: int, _cmd: int, _timer: int): int {
         return 0
     }
     if (granted) {
-        was: bool = nt_on;
+        was: bool = nt_on_detail();
         had_denied: bool = nt_denied;
         nt_denied = false;
-        nt_on = true;
-        set_def_bool("planReminder", true);
+        if (auth_why == 1) nt_set_detail(true);
         notify_schedule();
-        if (!was) remind_rows_changed(!had_denied)
+        if (!was && auth_why == 1) remind_rows_changed(!had_denied)
     } else {
         was_denied: bool = nt_denied;
         nt_denied = true;
-        if (nt_on || auth_why == 1) {
-            nt_on = false;
-            set_def_bool("planReminder", false);
+        if (reminders_any() || auth_why == 1) {
+            reminders_all_off();
             center: int = notify_center();
             if (center != 0) msg(center, sel("removeAllPendingNotificationRequests"));
             if (daily_switch != 0) msg2(daily_switch, sel("setOn:animated:"), 0, 1)
@@ -1383,7 +1553,6 @@ remind_rows_changed(insert: bool) {
 }
 
 load_notify_settings() {
-    nt_on = def_bool("planReminder");
     nt_minutes = def_int("planReminderMinutes");
     if (nt_minutes <= 0 || nt_minutes >= 1440) nt_minutes = 420
 }
@@ -1401,14 +1570,14 @@ daily_reschedule() {
 // The app active again: the permission asked again (no prompt now), which
 // flips the switch off if Settings has turned it off; then scheduled.
 daily_active() {
-    if (nt_on && pl_active >= 0 || mm_reminder) notify_ask(2)
+    if (reminders_any() || mm_reminder) notify_ask(2)
 }
 
 notify_schedule() {
     center: int = notify_center();
     if (center == 0) return;
     msg(center, sel("removeAllPendingNotificationRequests"));
-    plan_on: bool = nt_on && pl_active >= 0;
+    plan_on: bool = reminders_any();
     if (!plan_on && !mm_reminder) {
         note("bible: reminders 0 pending");
         return
@@ -1421,16 +1590,10 @@ notify_schedule() {
     memory_n: int = 0;
     for k in 0..30 {
         d: int = first + k;
-        di: int = -1;
-        if (plan_on) {
-            pd: int = d - pl_start + 1;
-            if (pd >= 1 && pd <= plan_lengths[pl_active]) di = plan_day(pl_active,
-                pd)
-        }
         mem: bool = mm_reminder && memory_due_on(d) > 0;
-        if (notify_add(center, d, di, mem)) {
+        if (notify_add(center, d, mem)) {
             n = n + 1;
-            if (di >= 0) plans_n = plans_n + 1;
+            if (rmp_n > 0) plans_n = plans_n + 1;
             if (mem) memory_n = memory_n + 1;
             if (n == 1 && diag_on) {
                 // (The first request's words, for the demo's log.)
@@ -1488,25 +1651,22 @@ note_ns(s: int) {
     } with IoError _e -> { }
 }
 
-// The reminder for day d (plan_di its day's index, -1: no plan part; mem,
-// Memory's part): the plan's name or "Memory", the day's reading and/or
-// the passages to review (memory.l8's words); no scripture. False if
-// neither.
-notify_add(
-    center: int,
-    d: int,
-    plan_di: int,
-    mem: bool
-): bool {
-    if (!fput_reminder_both(pl_active, plan_di, mem, d)) return false;
+// The reminder for day d (mem, Memory's part too): the plans' (each whose
+// switch is on and whose day isn't read: Â§16.11.5) and/or the passages to
+// review (memory.l8's words); no scripture. False if neither.
+notify_add(center: int, d: int, mem: bool): bool {
+    if (!fput_reminder_all(d, mem)) return false;
     content: int = msg(make("UNMutableNotificationContent"), sel("autorelease"));
     msg1(content, sel("setTitle:"), nsstring_of(fbuf, rm_title));
     for x in rm_title..fbuf_n rm_spare[x - rm_title] = fbuf[x];
     msg1(content, sel("setBody:"), nsstring_of(rm_spare, fbuf_n - rm_title));
     n: int = 0;
-    if (plan_di >= 0) {
-        keys[n] = nsstring("day");
-        values[n] = nsnumber_int(d - pl_start + 1);
+    // ({"plans": the files' numbers of the plans it names, in the order
+    // started}.)
+    if (rmp_n > 0) {
+        for j in 0..rmp_n nf_ids[j] = nsnumber_int(fw_num[rmp_slot[j]]);
+        keys[n] = nsstring("plans");
+        values[n] = nsarray(nf_ids, rmp_n);
         n = n + 1
     }
     if (mem) {
@@ -1543,6 +1703,8 @@ notify_add(
 
 nf_spare: []i8 = new i8[1024](0i8);
 
+nf_ids: []int = new int[16](0);
+
 // ---- a reminder opened ----
 notify_obj: int = 0;
 
@@ -1571,32 +1733,41 @@ notify_opened(
 ): int {
     info: int = msg(msg(msg(msg(response, sel("notification")), sel("request")), sel("content")),
         sel("userInfo"));
+    plans: int = if (info != 0) msg1(info, sel("objectForKey:"), nsstring("plans")) else 0;
     day: int = if (info != 0) msg1(info, sel("objectForKey:"), nsstring("day")) else 0;
     mem: int = if (info != 0) msg1(info, sel("objectForKey:"), nsstring("memory")) else 0;
-    if (day != 0) notify_open_day(msg(day, sel("longValue"))) else if (mem != 0) memory_reminder_opened();
+    // (The first plan it names; an older build's {"day"}, the first
+    // followed.)
+    num: int = if (plans != 0 && msg(plans, sel("count")) > 0) msg(msg1(plans, sel("objectAtIndex:"),
+        0), sel("longValue")) else if (day != 0 && fw_n > 0) fw_num[0] else 0;
+    if (num > 0) notify_open_plan(num) else if (mem != 0) memory_reminder_opened();
     call_block(handler);
     0
 }
 
-// Day d of the plan followed: the reader at its first unread chapter (the
-// sheets put away, the way back shown), or once it is up.
-notify_open_day(d: int) {
-    if (pl_active < 0 || d < 1 || d > plan_lengths[pl_active]) return;
-    note_num("bible: reminder opened, day ", d);
+// The reminder opened: the first plan it names (its file's number), its
+// today in the day's reader (the sheets put away), or once the reader is
+// up; its end offers the others (Also today).
+notify_open_plan(num: int) {
+    i: int = -1;
+    for j in 0..fw_n
+        if (fw_num[j] == num) i = j;
+    if (i < 0) return;
+    note_num("bible: reminder opened, plan file ", num);
     if (!restored) {
-        pending_day = d;
+        pending_day = num;
         return
     }
-    day_open(pl_active, d, -1)
+    day_open_today_of(i)
 }
 
 // (The reader up: a reminder's day that came before it; else the day's
 // reader, if it was up when the app was last shut.)
 daily_reader_up() {
     if (pending_day > 0) {
-        d: int = pending_day;
+        num: int = pending_day;
         pending_day = 0;
-        notify_open_day(d)
+        notify_open_plan(num)
     } else if (pending_memory) {
         pending_memory = false;
         memory_reminder_opened()
@@ -1605,7 +1776,7 @@ daily_reader_up() {
     // the switch off or no plan (an older build's verse of the day, or a
     // stopped plan's), and the plan's scheduled again with it on; and the
     // verse of the day's delivered ones put away. Review r5-1.)
-    if ((!nt_on || pl_active < 0) && !mm_reminder) {
+    if (!reminders_any() && !mm_reminder) {
         center: int = notify_center();
         if (center != 0) {
             msg(center, sel("removeAllPendingNotificationRequests"));
@@ -1629,28 +1800,16 @@ votd_ids(): int {
     a
 }
 
-// The reminder turned off with its plan (stopped, or another started): the
-// switch is each plan's, off until asked for (review r5-1).
-reminder_off() {
-    if (nt_on) note("bible: reminder off with its plan");
-    nt_on = false;
-    set_def_bool("planReminder", false);
-    center: int = notify_center();
-    if (center != 0) msg(center, sel("removeAllPendingNotificationRequests"));
-    daily_switch = held(daily_switch, 0);
-    // (Memory's reason stays.)
-    daily_reschedule()
-}
-
 // ---- the reminder's rows (first in the plan followed's days) ----
 daily_switch: int = 0;
 
 remind_rows(): int {
-    1 + (if (nt_on) 1 else 0) + (if (nt_denied && !nt_on) 1 else 0)
+    on: bool = nt_on_detail();
+    1 + (if (on) 1 else 0) + (if (nt_denied && !on) 1 else 0)
 }
 
 remind_footer(): int {
-    nsstring(if (nt_denied && !nt_on) "Notifications are turned off for Smooth Bible in Settings." else "A notification each day with that day\â\€\™s reading.")
+    nsstring(if (nt_denied && !nt_on_detail()) "Notifications are turned off for Smooth Bible in Settings." else "One notification a day, at this time, names each plan you\â\€\™ve turned this on for, and Memory\â\€\™s reviews.")
 }
 
 // A local time today (minutes past midnight) as a date.
@@ -1666,14 +1825,14 @@ remind_cell(t: int, r: int): int {
     if (r == 0) {
         msg1(config, sel("setText:"), nsstring("Daily Reminder"));
         sw: int = make("UISwitch");
-        msg1(sw, sel("setOn:"), if (nt_on) 1 else 0);
+        msg1(sw, sel("setOn:"), if (nt_on_detail()) 1 else 0);
         msg1(sw, sel("setOnTintColor:"), c_accent);
         msg3(sw, sel("addTarget:action:forControlEvents:"), app_obj, sel("dailySwitched:"),
             4096);
         msg1(cell, sel("setAccessoryView:"), sw);
         daily_switch = held(daily_switch, sw);
         release(sw)
-    } else if (r == 1 && nt_on) {
+    } else if (r == 1 && nt_on_detail()) {
         msg1(config, sel("setText:"), nsstring("Time"));
         picker: int = make("UIDatePicker");
         msg1(picker, sel("setDatePickerMode:"), 0);
@@ -1695,7 +1854,7 @@ remind_cell(t: int, r: int): int {
 }
 
 remind_picked(r: int) {
-    if (r == remind_rows() - 1 && nt_denied && !nt_on) {
+    if (r == remind_rows() - 1 && nt_denied && !nt_on_detail()) {
         app: int = msg(cls("UIApplication"), sel("sharedApplication"));
         url: int = msg1(cls("NSURL"), sel("URLWithString:"), objc_const("UIApplicationOpenSettingsURLString"));
         msg3(app, sel("openURL:options:completionHandler:"), url, nsdictionary(keys,
@@ -1711,10 +1870,8 @@ daily_switched(_self: int, _cmd: int, sw: int): int {
         notify_ask(1);
         return 0
     }
-    nt_on = false;
-    set_def_bool("planReminder", false);
-    center: int = notify_center();
-    if (center != 0) msg(center, sel("removeAllPendingNotificationRequests"));
+    // (This plan's alone: the others' stay, and Memory's.)
+    nt_set_detail(false);
     daily_reschedule();
     if (detail_table != 0 && detail_wk0() == 1) {
         one[0] = msg2(cls("NSIndexPath"), sel("indexPathForRow:inSection:"), 1, 0);

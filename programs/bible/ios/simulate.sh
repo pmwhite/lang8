@@ -844,15 +844,26 @@ plans)
   events=0
   launch console-again.txt
   shot 454-relaunch
+  # §16.11, several plans at once: the Chronological, then M'Cheyne's
+  # started beside it (shots 455 to 459b; 459 is the log's).
+  step 509 "" 8
+  step 510 459b-start-second 10
+  step 511 "" 10
+  step 512 455-goto-two-plans 8
+  step 513 456-plans-following 8
+  step 514 457-day-end-also 10
+  step 515 458-also-today-open 8
+  step 516 "" 6
   # The day's reader's log, checked (days.txt).
-  cat "$out/console.txt" "$out/console-again.txt" 2>/dev/null | grep -a "bible: day \|bible: demo chronological\|bible: left the day\|bible: ribbon \|bible: 1.0 day state\|bible: sequence 21\|bible: started" > "$out/days.txt"
+  cat "$out/console.txt" "$out/console-again.txt" 2>/dev/null | grep -a "bible: day \|bible: demo chronological\|bible: left the day\|bible: ribbon \|bible: 1.0 day state\|bible: sequence 21\|bible: started\|bible: plans migrated\|bible: reminder first\|bible: also today\|bible: plan started\|bible: plan archived" > "$out/days.txt"
   cat "$out/days.txt"
   for want in "bible: demo chronological, today day 114" "bible: day open 6 114" "bible: day title " \
     "bible: day passage read .* (by hand)" "bible: day marked read 114" "bible: day replaced 6 115" \
     "bible: left the day for .*, the capsule to its day" "bible: day passage heard " "bible: day passage read .* (by itself)" \
     "bible: day replaced 6 102" "bible: day esv rows filled" "bible: 1.0 day state x10 11" "bible: 1.0 day state x10 22" \
     "bible: 1.0 day state x10 31" "bible: ribbon unmoved by the day, the reader where it was" "bible: day reopened at launch" \
-    "bible: sequence 21 part 5"; do
+    "bible: sequence 21 part 5" "bible: plans migrated 1" "bible: day also today, plan 5" \
+    "bible: also today from the Chronological 1" "bible: reminder first: Today’s Reading | Chronological: "; do
     grep -q "$want" "$out/days.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/days.txt"; failed=1; }
   done
   # The Daily Reminder turned on, its authorization alert: last, as the
