@@ -442,9 +442,11 @@ export const flows = {
     await page.size(...ctx.SIZES.phone);
     await setSettings(page, base, "/read/bsb/psalms/23", "lines=1");
     await ctx.shot("wa-18-verse-lines-phone-paper");
+    const t = await reading(page);
+    ctx.check("a verse a line: the title names the chapter", t.title === "Psalm 23" && t.c === 500, t.title);
     await page.eval(`localStorage.clear()`);
     await page.size(320, 640, 2, true);
-    await page.send("Page.addScriptToEvaluateOnNewDocument", { source: `document.documentElement.style.fontSize = "200%"` });
+    await page.send("Page.addScriptToEvaluateOnNewDocument", { source: `(function big() { if (document.documentElement) document.documentElement.style.fontSize = "200%"; else requestAnimationFrame(big); })()` });
     await page.open(base + "/read/bsb/john/3");
     await page.rest();
     const wide = await page.eval(`document.documentElement.scrollWidth <= innerWidth`);
