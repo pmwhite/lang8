@@ -1,0 +1,339 @@
+tag bible_web;
+
+use_tag std, bible, dom;
+
+// Smooth Bible on the web: the reader as HTML text, through the page bridge
+// (../web/dom.l8), built with `l8 wasm` and run by web/bible/bible.js.
+//
+// Phase 0, the plumbing only: the BSB fetched and indexed, a chapter laid
+// out by text.l8 and made paragraphs (<p>, a class for their kind) of spans
+// (a class for their style), split where verses begin, so a click names its
+// verse. The page's address is the chapter (?John+3), pushed as it changes,
+// and back goes back. Timings go to window.l8_*_ms.
+import "text.l8";
+
+import "../web/dom.l8";
+
+root: int = 0;
+
+next_button: int = 0;
+
+chapter: int = -1;
+
+// The verse each span shows (by handle).
+span_verse: []int = new int[65536](0);
+
+spans: int = 0;
+
+style_names: []str = ["body", "verse", "book", "numeral", "head", "subhead", "ref",
+    "title", "major", "range", "acrostic", "note", "booklabel", "caps", "rule", "numeral1",
+    "jesus", "jesuscaps", "xref", "supplied", "jesussupplied"];
+
+para_names: []str = ["prose", "q1", "q2", "l1", "l2", "center", "right", "verse",
+    "prose stanza", "q1 stanza", "q2 stanza", "l1 stanza", "l2 stanza", "center stanza",
+    "right stanza", "verse stanza"];
+
+t_main: f64 = 0.0f64;
+
+t_fetch: f64 = 0.0f64;
+
+// A line for the console, and the page's address, made here.
+line: []i8 = new i8[512](0i8);
+
+line_n: int = 0;
+
+put(s: str) {
+    for c in s put_byte(c as int)
+}
+
+put_byte(c: int) {
+    if (line_n < len(line)) {
+        line[line_n] = c trunc i8;
+        line_n = line_n + 1
+    }
+}
+
+put_int(n: int) {
+    if (n < 0) {
+        put_byte(45);
+        put_int(0 - n);
+        return
+    }
+    if (n >= 10) put_int(n / 10);
+    put_byte(48 + n % 10)
+}
+
+// Chapter c's book and number, with sep between ("John 3", "John+3").
+put_chapter(c: int, sep: int) {
+    b: int = ch_book[c];
+    for i in book_name_start(b)..book_name_end(b) {
+        k: int = bsb[i] as int;
+        put_byte(if (k == 32) sep else k)
+    }
+    if (book_count[b] > 1) {
+        put_byte(sep);
+        put_int(ch_num[c])
+    }
+}
+
+main(): int {
+    dom_start();
+    t_main = dom_now();
+    dom_set_prop(DOM_WINDOW, "l8_ready", 0.0f64);
+    root = dom_by_id("text");
+    next_button = dom_by_id("next");
+    dom_listen(root, "click", 0, &on_click, 0);
+    dom_listen(next_button, "click", 0, &on_next, 0);
+    dom_listen(DOM_WINDOW, "popstate", 0, &on_pop, 0);
+    dom_fetch("bsb.txt", &on_text, 0);
+    0
+}
+
+on_text(_data: int) {
+    t_fetch = dom_now();
+    if (dom_ev[DE_STATUS] != 200) {
+        dom_set_text(root, "The text could not be loaded.");
+        return
+    }
+    buf: []i8 = dom_fetch_body(dom_ev[DE_ID]);
+    got: int = len(buf);
+    t0: f64 = dom_now();
+    text_load(TEXT_BSB, buf, got);
+    t1: f64 = dom_now();
+    dom_set_prop(DOM_WINDOW, "l8_fetch_ms", t_fetch - t_main);
+    dom_set_prop(DOM_WINDOW, "l8_bytes", got as f64);
+    dom_set_prop(DOM_WINDOW, "l8_index_ms", t1 - t0);
+    c: int = chapter_at_location();
+    show(if (c < 0) chapter_of(42, 3) else c);
+    dom_replace_state_here();
+    dom_frame(&on_shown, 0);
+    bench: int = dom_get_prop(DOM_WINDOW, "l8_bench") as int;
+    if (bench > 0) run_bench(bench)
+}
+
+// The chapter the address names (?John+3), or -1.
+loc: []i8 = new i8[256](0i8);
+
+chapter_at_location(): int {
+    n: int = dom_get_prop_s(DOM_LOCATION, "search", loc);
+    if (n < 2 || n > len(loc)) return -1;
+    // (After the ?, + and %20 as spaces.)
+    m: int = 0;
+    i: int = 1;
+    while (i < n) {
+        k: int = loc[i] as int;
+        if (k == 37 && i + 2 < n && loc[i + 1] as int == 50 && loc[i + 2] as int == 48) {
+            loc[m] = 32i8;
+            i = i + 3
+        } else {
+            loc[m] = (if (k == 43) 32 else k) trunc i8;
+            i = i + 1
+        }
+        m = m + 1
+    }
+    if (!parse_ref(loc, m) || ref_book < 0) return -1;
+    chapter_of(ref_book, if (ref_chapter < 1) 1 else ref_chapter)
+}
+
+dom_replace_state_here() {
+    line_n = 0;
+    put_byte(63);
+    put_chapter(chapter, 43);
+    dom_replace_state_of(line, 0, line_n)
+}
+
+push_here() {
+    line_n = 0;
+    put_byte(63);
+    put_chapter(chapter, 43);
+    dom_push_state_of(line, 0, line_n)
+}
+
+title_here() {
+    line_n = 0;
+    put_chapter(chapter, 32);
+    dom_set_prop_of(DOM_DOCUMENT, "title", line, 0, line_n)
+}
+
+// Chapter c laid out and made the page's text.
+show(c: int) {
+    t0: f64 = dom_now();
+    layout_chapter(c);
+    t1: f64 = dom_now();
+    if (dom_get_prop(DOM_WINDOW, "l8_html") > 0.0f64) build_html() else build_nodes();
+    t2: f64 = dom_now();
+    chapter = c;
+    title_here();
+    dom_set_prop(DOM_WINDOW, "l8_layout_ms", t1 - t0);
+    dom_set_prop(DOM_WINDOW, "l8_build_ms", t2 - t1);
+    dom_set_prop(DOM_WINDOW, "l8_spans", spans as f64);
+    dom_set_prop(DOM_WINDOW, "l8_handles", dom_handles() as f64);
+    dom_set_prop(DOM_WINDOW, "l8_chapter", c as f64)
+}
+
+// Walking out from its start: the verse table's next verse to begin
+// (vk), and the verse a byte is in (its key; 0 before the first).
+vk: int = 0;
+
+verse_walk(a: int): int {
+    while (vk < verse_count && verse_begin[vk] <= a) vk = vk + 1;
+    if (vk == 0) 0 else verse_num[vk - 1]
+}
+
+// Where the piece from a stops: the run's end e, a newline, or the next
+// verse's start.
+piece_end(a: int, e: int): int {
+    stop: int = a + 1;
+    limit: int = if (vk < verse_count && verse_begin[vk] > a && verse_begin[vk] < e) verse_begin[vk] else e;
+    while (stop < limit && out[stop] as int != 10) stop = stop + 1;
+    stop
+}
+
+// Each paragraph a <p>, each piece of a run (to a newline or a verse's
+// start) a <span>, built in a fragment and put in at once.
+build_nodes() {
+    dom_clear(root);
+    frag: int = dom_fragment();
+    p: int = 0;
+    a: int = 0;
+    vk = 0;
+    spans = 0;
+    for r in 0..runs {
+        e: int = run_end[r];
+        while (a < e) {
+            if (out[a] as int == 10) {
+                if (p != 0) dom_free(p);
+                p = 0;
+                a = a + 1
+            } else {
+                if (p == 0) {
+                    p = dom_create("p");
+                    dom_set_class(p, para_names[run_para[r] % 16]);
+                    dom_append(frag, p)
+                }
+                v: int = verse_walk(a);
+                stop: int = piece_end(a, e);
+                s: int = dom_create("span");
+                dom_set_class(s, style_names[run_style[r]]);
+                dom_set_text_of(s, out, a, stop);
+                dom_append(p, s);
+                if (s < len(span_verse)) span_verse[s] = v;
+                spans = spans + 1;
+                a = stop
+            }
+        }
+    }
+    if (p != 0) dom_free(p);
+    dom_append(root, frag);
+    dom_free(frag)
+}
+
+// The same as one string of HTML (to compare).
+html: []i8 = new i8[1048576](0i8);
+
+html_n: int = 0;
+
+hput(s: str) {
+    for c in s hbyte(c as int)
+}
+
+hbyte(c: int) {
+    if (html_n < len(html)) {
+        html[html_n] = c trunc i8;
+        html_n = html_n + 1
+    }
+}
+
+hint(n: int) {
+    if (n >= 10) hint(n / 10);
+    hbyte(48 + n % 10)
+}
+
+build_html() {
+    dom_clear(root);
+    html_n = 0;
+    open: bool = false;
+    a: int = 0;
+    vk = 0;
+    spans = 0;
+    for r in 0..runs {
+        e: int = run_end[r];
+        while (a < e) {
+            if (out[a] as int == 10) {
+                if (open) hput("</p>");
+                open = false;
+                a = a + 1
+            } else {
+                if (!open) {
+                    hput("<p class=\"");
+                    hput(para_names[run_para[r] % 16]);
+                    hput("\">");
+                    open = true
+                }
+                v: int = verse_walk(a);
+                stop: int = piece_end(a, e);
+                hput("<span class=\"");
+                hput(style_names[run_style[r]]);
+                hput("\" data-v=\"");
+                hint(v);
+                hput("\">");
+                for i in a..stop {
+                    k: int = out[i] as int;
+                    if (k == 60) hput("&lt;") else if (k == 62) hput("&gt;") else if (k == 38) hput("&amp;") else hbyte(k)
+                }
+                hput("</span>");
+                spans = spans + 1;
+                a = stop
+            }
+        }
+    }
+    if (open) hput("</p>");
+    dom_set_html_of(root, html, 0, html_n)
+}
+
+run_bench(n: int) {
+    c: int = chapter;
+    best: f64 = 1000000.0f64;
+    total: f64 = 0.0f64;
+    for _i in 0..n {
+        t0: f64 = dom_now();
+        show(c);
+        t1: f64 = dom_now();
+        // (Layout forced, so the time includes the browser's.)
+        _h: f64 = dom_get_prop(root, "offsetHeight");
+        t2: f64 = dom_now();
+        if (t2 - t0 < best) best = t2 - t0;
+        total = total + (t1 - t0)
+    }
+    dom_set_prop(DOM_WINDOW, "l8_bench_best_ms", best);
+    dom_set_prop(DOM_WINDOW, "l8_bench_mean_build_ms", total / n as f64)
+}
+
+on_shown(_data: int) {
+    dom_set_prop(DOM_WINDOW, "l8_shown_ms", dom_evf[DF_VALUE]);
+    dom_set_prop(DOM_WINDOW, "l8_ready", 1.0f64)
+}
+
+on_click(_data: int) {
+    t: int = dom_ev[DE_TARGET];
+    if (t <= 0 || t >= len(span_verse) || span_verse[t] == 0) return;
+    v: int = span_verse[t];
+    line_n = 0;
+    put_chapter(chapter, 32);
+    put_byte(58);
+    put_int(v);
+    dom_log_of(line, 0, line_n);
+    dom_set_prop(DOM_WINDOW, "l8_clicked", v as f64)
+}
+
+on_next(_data: int) {
+    if (chapter + 1 >= chapters) return;
+    show(chapter + 1);
+    push_here();
+    dom_scroll_to(DOM_WINDOW, 0.0f64, 0.0f64, 0)
+}
+
+on_pop(_data: int) {
+    c: int = chapter_at_location();
+    if (c >= 0) show(c)
+}

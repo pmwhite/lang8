@@ -48,7 +48,7 @@ STAGE1_TESTS := tests/compiler/bool.l8 \
 # `build TOOL SOURCE`: build into $@ without leaving a partial file behind.
 build = ./$(1) build $(2) -o $@.tmp && mv -f $@.tmp $@
 
-.PHONY: all check fmt selfhost compiler-test game skate malton race race-test tempo tempo-test bible-test bible-spoken stdlib-test \
+.PHONY: all check fmt selfhost compiler-test game skate malton race race-test tempo tempo-test bible-test bible-wasm-test bible-web bible-spoken stdlib-test \
 	terminal terminal-test callback-test http http-test websocket websocket-test wasm-test web \
 	install-bootstrap promote promote-bin1 promote-bin2 promote-source clean help
 
@@ -57,7 +57,7 @@ all:
 	@$(MAKE) -s $(OK)/fmt $(OK)/stage1-tests
 	@$(MAKE) -s check
 
-check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(BUILD)/skate $(BUILD)/malton $(BUILD)/race $(OK)/race-tests $(BUILD)/tempo $(OK)/tempo-tests $(BUILD)/tempo-ios.s $(BUILD)/ios-check.s $(BUILD)/tempo-ios-sim $(OK)/bible-tests $(BUILD)/bible-ios.s $(BUILD)/bible-ios-sim
+check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(BUILD)/skate $(BUILD)/malton $(BUILD)/race $(OK)/race-tests $(BUILD)/tempo $(OK)/tempo-tests $(BUILD)/tempo-ios.s $(BUILD)/ios-check.s $(BUILD)/tempo-ios-sim $(OK)/bible-tests $(OK)/bible-wasm-tests $(OK)/bible-web $(BUILD)/bible-ios.s $(BUILD)/bible-ios-sim
 
 # ---- compiler stages ----
 
@@ -193,6 +193,29 @@ $(OK)/bible-tests: l8c3 $(PROGRAMS) $(RUNTIME) $(wildcard programs/bible/tools/*
 	@touch $@
 
 bible-test: $(OK)/bible-tests
+
+# The same tests built as WebAssembly and run under Node (the modules the
+# web app shares with the iPhone's), and the web app's module.
+BIBLE_TESTS := $(wildcard programs/bible/test_*.l8)
+$(OK)/bible-wasm-tests: l8c3 $(PROGRAMS) web/l8-runtime.js web/run.mjs $(wildcard programs/bible/data/*.txt programs/bible/data/lang/* programs/bible/data/audio/*) | $(OK)
+	+@$(STEP) 'bible wasm tests' ./l8c3 test --wasm $(BIBLE_TESTS)
+	@touch $@
+
+bible-wasm-test: $(OK)/bible-wasm-tests
+
+$(BUILD)/bible.wasm: l8c3 $(PROGRAMS) | $(OK)
+	@$(STEP) 'bible wasm' sh -c './l8c3 wasm programs/bible/web.l8 -o $@.tmp && mv -f $@.tmp $@'
+
+# The web app as a static site in .build/bible-web (its page in bible/):
+# python3 -m http.server -b 127.0.0.1 -d .build/bible-web 8000.
+BIBLE_WEB := $(BUILD)/bible-web
+$(OK)/bible-web: $(BUILD)/bible.wasm web/l8-runtime.js web/dom.js $(wildcard web/bible/*) programs/bible/data/bsb.txt | $(OK)
+	@$(STEP) 'bible web site' sh -c 'rm -rf $(BIBLE_WEB) && mkdir -p $(BIBLE_WEB)/bible && \
+		cp web/l8-runtime.js web/dom.js $(BIBLE_WEB)/ && \
+		cp web/bible/* $(BUILD)/bible.wasm programs/bible/data/bsb.txt $(BIBLE_WEB)/bible/'
+	@touch $@
+
+bible-web: $(OK)/bible-web
 
 # What the app says aloud, a verse a line (DESIGN.md §12.2.3), for the
 # aligner: make bible-spoken VERSION=bsb (or web).
@@ -362,7 +385,8 @@ help:
 	@echo '  fmt             format src2 with the stage-2 compiler'
 	@echo '  selfhost        build l8c1..l8c4, check the fixpoint, run compiler tests, install ./l8'
 	@echo '  compiler-test   stage-1 fixtures, then all fixtures and CLI cram tests (tests/)'
-	@echo '  stdlib-test, game, skate, race, race-test, tempo, tempo-test, bible-test, terminal, terminal-test, callback-test'
+	@echo '  stdlib-test, game, skate, race, race-test, tempo, tempo-test, bible-test, bible-wasm-test, bible-web'
+	@echo '  terminal, terminal-test, callback-test'
 	@echo '  http, http-test, websocket, websocket-test'
 	@echo '  wasm-test       run the tests as WebAssembly under Node; check the wasm compiler fixpoint'
 	@echo '  web             build the playground site in .build/web'

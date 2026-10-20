@@ -224,3 +224,43 @@ log (409) so that the page puts the two together; a recording under way
 goes to `/live.txt`, kept in this browser only. `?sim=K` records a
 made-up course K times as fast as the clock; `?fresh` starts empty, kept
 nowhere; `?api=URL` uses another worker.
+
+## Pages from L8 (`dom.js`)
+
+`programs/web/dom.l8` lets a program build and run an ordinary page, as
+`programs/ios/objc.l8` lets one drive UIKit; `dom.js` is its host. Nodes
+and other host objects (the window, document, location) are handles, small
+ints in a table the host keeps. Text goes in as `str`, or as bytes of a
+`[]i8` (the `_of` calls, so a buffer of laid-out text needs no copies), and
+comes back into a `[]i8` the caller owns. Offsets in text are UTF-8 bytes.
+
+```js
+const dom = domHost();
+const { instance } = await instantiate(module, sys, dom.imports);
+dom.attach(instance);   // before _start
+runStart(instance);     // main sets the page up and returns
+```
+
+The program lives on in callbacks: `fn(data: int)` function values, called
+with the data given when they were set up, the event record (`dom_ev`,
+`dom_evf`, `dom_evs`: the target as the nearest node with a handle, the
+type, key, pointer, modifiers, a fetch's status and size, a frame's time)
+filled first. It covers creating, inserting and removing nodes; text,
+attributes, classes, styles and any property or no-argument method (an
+`<audio>` element's `play`, `currentTime`); boxes and scrolling; listeners,
+with `preventDefault`; the selection as handles and byte offsets;
+`pushState`, `replaceState` and `popstate`; `fetch`; `localStorage`;
+timers and animation frames; and media queries. A callback cannot be
+`noregion`, so a fetched body it keeps comes as memory from the host
+(`dom_fetch_body`), as a mapped file does on an iPhone.
+
+Calls cost about a microsecond each: Psalm 119 as 378 paragraphs and 608
+spans, built call by call, takes 14 ms with the browser's layout, against
+11 ms for the same nodes made by JavaScript alone and 14 ms as one string
+of HTML.
+
+## Smooth Bible
+
+`bible/` runs `programs/bible/web.l8`, the reader on the web (see
+`programs/bible/README.md`). `make bible-web` builds it into
+`.build/bible-web`; serve that directory and open `bible/`.
