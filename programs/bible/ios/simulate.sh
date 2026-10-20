@@ -72,6 +72,15 @@
 #           Read, Memory's rows, Hebrew, the reminder, Night, the largest
 #           text, Practise Reading; and the recording of sequence 16
 #           (languages-transitions.mp4); its log's checks in languages.txt
+#   help    the manual and quick tips (DESIGN.md §15.7), on the demo clock,
+#           from a fresh install with tips on (every other group turns
+#           them off before its first launch, so their shots of Go To are
+#           as they were): the first tip, Next, the same day and the next,
+#           the highlight tips skipped, a tip's action and More, Reading
+#           settings' Help, the Manual, a page, a link, its search, tips off
+#           and on, Night, the largest text, the Greek and Hebrew and Memory
+#           pages, every tip seen; and the recording of sequence 20
+#           (help-transitions.mp4); its log's checks in tips.txt
 # Every group has the audio fixture (programs/bible/demo/audio, copied into
 # the app's Library and named by L8_AUDIO_FIXTURE), so no recording is
 # fetched from the network in CI.
@@ -247,6 +256,9 @@ PY
   xcrun simctl spawn "$dev" defaults write "$id" learnSeen -bool false 2>/dev/null || true
   xcrun simctl spawn "$dev" defaults write "$id" memorySeen -bool true 2>/dev/null || true
 fi
+# (Every group but help: no tip at the top of Go To, so that their shots
+# are as they were before §15. DESIGN.md §15.7.)
+[ "$group" = help ] || xcrun simctl spawn "$dev" defaults write "$id" showTips -bool false 2>/dev/null || true
 # (Every other group: the server as if it were not there, L8_ESV_OFF, so
 # that no shot depends on the network or shows the ESV; review r5-1.)
 esv_off=1
@@ -1119,6 +1131,71 @@ languages)
   [ -n "$t240" ] && [ "$t240" = "$t251" ] || { echo "FAILED: the tiles moved between 240 and 251" | tee -a "$out/languages.txt"; failed=1; }
   grep -q "reminder first:.*Greek word" "$out/languages.txt" || { echo "FAILED: the reminder has no Greek words" | tee -a "$out/languages.txt"; failed=1; }
   tail -5 "$out/languages.txt"
+  ;;
+help)
+  # (DESIGN.md §15.7: shots 400 to 419.)
+  step 440 400-tip-first 10
+  step 441 401-tip-next 6
+  step 442 402-tip-same-day 8
+  step 443 403-tip-next-day 8
+  step 444 404-tip-skipped 8
+  step 445 405-tip-action 10
+  step 446 406-tip-more 8
+  step 447 407-manual 10
+  step 448 408-manual-contents 8
+  step 449 409-manual-page 8
+  step 450 410-manual-link 8
+  step 451 411-manual-search 8
+  step 452 412-tips-off 8
+  step 453 413-tips-on 8
+  step 454 414-night 8
+  step 455 414b-night-page 8
+  ui content_size accessibility-extra-extra-extra-large
+  step 456 415-ax-tip 10
+  step 457 416-ax-page 8
+  ui content_size large
+  step 458 417-languages-page 12
+  step 459 418-memory-page 8
+  step 460 419-wrap 8
+  # The screen recording of sequence 20 (its setup before the mark).
+  step 461 "" 8
+  rec0=$(now)
+  xcrun simctl io "$dev" recordVideo --codec h264 --force "$out/transitions.mp4" > "$out/record.txt" 2>&1 &
+  recorder=$!
+  i=0
+  while ! grep -qi "started" "$out/record.txt" 2>/dev/null && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  rec1=$(now)
+  sleep 2
+  : > "$out/transitions.txt"
+  step 462 "" 20
+  sleep 7
+  a=$(step_at 462)
+  b=$(now)
+  echo "20 $(python3 -c "print(round($a - $rec0, 2), round($b - $rec0, 2))")" >> "$out/transitions.txt"
+  echo "20 from-started $(python3 -c "print(round($a - $rec1, 2), round($b - $rec1, 2))")" >> "$out/transitions.txt"
+  sleep 0.5
+  kill -INT "$recorder" 2>/dev/null
+  wait "$recorder" 2>/dev/null
+  step 463 "" 6
+  # The log's checks (§15.7): the tips shown and why, the buttons, the
+  # Manual's pages, link and search, the switch; nothing wrong in help.txt.
+  grep -h "bible: tip\|bible: help\|bible: manual\|bible: show tips\|bible: new ribbon at\|bible: demo step\|bible: demo link\|bible: demo every" \
+    "$out/console.txt" > "$out/tips.txt" 2>/dev/null
+  for want in "tip shown goto-type (level 1, day 2026-10-19)" "tip next → tap-select" "tip shown tap-select (level 1, day 2026-10-19)" \
+      "tip shown highlight (level 1, day 2026-10-20)" "tips skipped tap-select (highlight), highlight (highlight)" \
+      "tip shown note (level 1, day 2026-10-21)" "tip action new-ribbon" "new ribbon at" "tip more ribbons#making" \
+      "manual washed ribbons#making" "manual page tray" "manual link memory#adding" \
+      "manual search ribbon: going#goto, ribbons#about, ribbons#making, ribbons#carry, ribbons#edit" \
+      "show tips off" "show tips on" "manual page languages" "manual page memory" "demo every tip seen"; do
+    grep -qF "$want" "$out/tips.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/tips.txt"; failed=1; }
+  done
+  # (Every tip seen: one is still shown, the first not skipped.)
+  grep -A3 "demo every tip seen" "$out/tips.txt" | grep -q "tip shown goto-type" || { echo "FAILED: no tip after every tip was seen" | tee -a "$out/tips.txt"; failed=1; }
+  grep -q "help problems" "$out/tips.txt" && { echo "FAILED: help.txt has problems" | tee -a "$out/tips.txt"; failed=1; }
+  tail -5 "$out/tips.txt"
   ;;
 ios18)
   shot 01-genesis-1

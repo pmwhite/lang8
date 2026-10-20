@@ -1,0 +1,1161 @@
+tag bible_ios;
+
+use_tag std, ios, bible;
+
+// The manual and the quick tips (DESIGN.md ยง15): help.txt mapped at the
+// first Go To with tips, or the first Manual (never at launch); the tip at
+// the top of Go To (its row, Next cross-faded in place, More, its action,
+// VoiceOver's actions); which tip, and when (help.l8's rule on tipCurrent,
+// tipDay and tipSeen, with the conditions: the app's data now, and
+// helpUsed's flags, each set by its feature's own code at its first use);
+// the Manual (its contents, its search, a page: headings, paragraphs,
+// symbols drawn inline, links, opened at a part with its heading washed,
+// and read by VoiceOver part by part); and Reading settings' Help section
+// (Manual, Show Tips).
+import "../ios/objc.l8";
+
+import "text.l8";
+
+import "store.l8";
+
+import "help.l8";
+
+extern msg_f32_i(
+    receiver: int,
+    selector: int,
+    p: f32,
+    axis: int
+): int = objc_msgSend;
+
+// ---- the file, and what is kept ----
+help_mapped: bool = false;
+
+help_load() {
+    if (help_mapped) return;
+    help_mapped = true;
+    hlp = lang_map("help", "txt");
+    hlp_n = lang_mapped;
+    help_index();
+    note_num("bible: help tips ", htp_n);
+    if (he_n > 0 && diag_on) {
+        note_num("bible: help problems ", he_n);
+        note_ns(nsstring_of(hlog, hlog_n))
+    }
+    help_state_read()
+}
+
+// A string of the defaults' into out: its length.
+def_string(key: str, out: []i8): int {
+    nsstring_into(msg1(defaults(), sel("stringForKey:"), nsstring(key)), out)
+}
+
+set_def_string(key: str, b: []i8, n: int) {
+    msg2(defaults(), sel("setObject:forKey:"), nsstring_of(b, n), nsstring(key))
+}
+
+hsb: []i8 = new i8[8192](0i8);
+
+help_state_read() {
+    n: int = def_string("tipCurrent", hsb);
+    ht_cur = (if (n > 0) help_tip_named(hsb, n) else -1);
+    ht_day = def_int("tipDay");
+    n = def_string("tipSeen", hsb);
+    help_read_seen(hsb, n);
+    help_used_load()
+}
+
+help_state_save() {
+    fbuf_n = 0;
+    help_fput_id(ht_cur);
+    set_def_string("tipCurrent", fbuf, fbuf_n);
+    set_def_int("tipDay", ht_day);
+    help_fput_seen();
+    set_def_string("tipSeen", fbuf, fbuf_n)
+}
+
+// ---- used flags (ยง15.2.2) ----
+hu_loaded: bool = false;
+
+hub: []i8 = new i8[1024](0i8);
+
+help_used_load() {
+    if (hu_loaded) return;
+    hu_loaded = true;
+    help_read_used(hub, def_string("helpUsed", hub))
+}
+
+// A feature used for the first time (its condition's name): kept, once.
+// (Its own buffer, not fbuf, which its caller may be writing.)
+help_used(name: str) {
+    help_used_load();
+    c: int = help_condition(name);
+    if (c < 0 || hu_used[c]) return;
+    hu_used[c] = true;
+    n: int = 0;
+    for k in 0..len(hc_names) {
+        if (hu_used[k]) {
+            if (n > 0) {
+                hub[n] = 32i8;
+                n = n + 1
+            }
+            for x in hc_names[k] {
+                hub[n] = x;
+                n = n + 1
+            }
+        }
+    }
+    set_def_string("helpUsed", hub, n);
+    if (diag_on) {
+        try {
+            write(2, "bible: help used ");
+            write(2, name);
+            write(2, "\n")
+        } with IoError _e -> { }
+    }
+}
+
+// ---- the conditions from the app's data, now ----
+hc_set(name: str, on: bool) {
+    c: int = help_condition(name);
+    if (c >= 0) hc_on[c] = on
+}
+
+// The size of a file of ours (0: none), without reading it or its dates.
+help_file_bytes(name: str): int {
+    fd: int = open_c(msg(file_path(name), sel("fileSystemRepresentation")), 0, 0);
+    if (fd < 0) return 0;
+    n: int = lseek(fd, 0, 2);
+    close(fd);
+    n
+}
+
+help_conditions_now() {
+    hc_set("highlight", hl_n > 0);
+    verse_note: bool = false;
+    chapter_note: bool = false;
+    for i in 0..nt_n {
+        if (key_verse(nt_key[i]) == 0) chapter_note = true else verse_note = true
+    }
+    hc_set("note", verse_note);
+    hc_set("chapter-note", chapter_note);
+    hc_set("bookmark", bm_n > 0);
+    hc_set("ribbon", rb_n > 0);
+    hc_set("plan", pl_active >= 0 || help_file_bytes("plans-done.tsv") > 0);
+    hc_set("memory", mq_n > 0);
+    hc_set("practice", help_file_bytes("memory-log.tsv") > 0 || help_file_bytes("cards-log.tsv") > 0);
+    hc_set("reminder", mm_reminder);
+    greek: bool = false;
+    hebrew: bool = false;
+    for k in 0..cd_n {
+        if (cd_lang[k] == 0) greek = true else hebrew = true
+    }
+    hc_set("greek", greek);
+    hc_set("hebrew", hebrew);
+    hc_set("red-letters", red_letter);
+    hc_set("keep-awake", keep_on)
+}
+
+// ---- the tip in Go To (ยง15.1) ----
+// The tip shown (-1: none, and no section for it).
+gt_tip: int = -1;
+
+help_tips_on(): bool {
+    def_bool("showTips")
+}
+
+// Go To opening: today's tip, if tips are on; the sections after it one
+// further down.
+help_tip_open() {
+    gt_tip = -1;
+    if (help_tips_on()) {
+        help_load();
+        help_conditions_now();
+        was: int = ht_cur;
+        was_day: int = ht_day;
+        i: int = help_tip_for(today());
+        if (i != was || ht_day != was_day) {
+            help_log_skipped();
+            help_state_save()
+        }
+        gt_tip = i;
+        if (i >= 0 && diag_on) {
+            fbuf_n = 0;
+            fput_str("bible: tip shown ");
+            help_fput_id(i);
+            fput_str(" (level ");
+            fput_int(htp_level[i]);
+            fput_str(", day ");
+            fput_iso_date(today());
+            fput_str(")");
+            note_ns(fstring())
+        }
+    }
+    GT_RIBBONS_SECTION = (if (gt_tip >= 0) 1 else 0);
+    GT_PLAN_SECTION = GT_RIBBONS_SECTION + 1;
+    tip_cell = held(tip_cell, 0)
+}
+
+// The tips skipped now, and why: "bible: tips skipped tap-select
+// (highlight), highlight (highlight), โ€ฆ", when a tip is chosen anew.
+help_log_skipped() {
+    if (!diag_on) return;
+    fbuf_n = 0;
+    fput_str("bible: tips skipped");
+    n: int = 0;
+    for k in 0..htp_n {
+        i: int = htp_order[k];
+        if (help_skipped(i)) {
+            fput_str(if (n == 0) " " else ", ");
+            help_fput_id(i);
+            fput_str(" (");
+            fput_str(hc_names[htp_unless[i]]);
+            fput_str(")");
+            n = n + 1
+        }
+    }
+    note_ns(fstring())
+}
+
+// Its row: made once a sheet, and filled again for Next.
+tip_cell: int = 0;
+
+tip_label: int = 0;
+
+tip_image: int = 0;
+
+tip_row: int = 0;
+
+tip_spacer: int = 0;
+
+tip_image_y: int = 0;
+
+// The tip's words, and its buttons' (SF 15, scaled with the phone's text
+// size).
+help_font(size: f64, weight: f64): int {
+    m: int = msg1(cls("UIFontMetrics"), sel("metricsForTextStyle:"), objc_const("UIFontTextStyleBody"));
+    msg1(m, sel("scaledFontForFont:"), sans(size, weight))
+}
+
+help_tip_cell(_t: int): int {
+    if (tip_cell == 0) help_tip_make();
+    help_tip_fill();
+    tip_cell
+}
+
+help_tip_make() {
+    cell: int = msg(msg2(msg(cls("UITableViewCell"), sel("alloc")), sel("initWithStyle:reuseIdentifier:"),
+        0, 0), sel("autorelease"));
+    tip_cell = held(tip_cell, cell);
+    msg1(cell, sel("setSelectionStyle:"), 0);
+    msg1(cell, sel("setBackgroundColor:"), cell_bg());
+    content: int = msg(cell, sel("contentView"));
+    // (Recent's row, unseen, under it: its image's column and its text's,
+    // which the tip's take, at every size.)
+    ref: int = 0;
+    if (cls("UIListContentView") != 0) {
+        config: int = list_config(2);
+        config_image(config, "clock.arrow.circlepath", 17.0f64, c_faint);
+        msg1(config, sel("setText:"), nsstring("Recent"));
+        ref = msg(msg1(msg(cls("UIListContentView"), sel("alloc")), sel("initWithConfiguration:"),
+            config), sel("autorelease"));
+        msg1(ref, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+        msg_set_f(ref, sel("setAlpha:"), 0.0f64);
+        msg1(ref, sel("setUserInteractionEnabled:"), 0);
+        msg1(ref, sel("setAccessibilityElementsHidden:"), 1);
+        msg1(content, sel("addSubview:"), ref);
+        pin(ref, content, "leadingAnchor");
+        pin(ref, content, "trailingAnchor");
+        pin(ref, content, "topAnchor")
+    }
+    image: int = msg(make("UIImageView"), sel("autorelease"));
+    msg1(image, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+    msg1(image, sel("setIsAccessibilityElement:"), 0);
+    msg1(content, sel("addSubview:"), image);
+    tip_image = held(tip_image, image);
+    label: int = msg(make("UILabel"), sel("autorelease"));
+    msg1(label, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
+    msg1(label, sel("setNumberOfLines:"), 0);
+    msg1(label, sel("setAdjustsFontForContentSizeCategory:"), 0);
+    msg1(content, sel("addSubview:"), label);
+    tip_label = held(tip_label, label);
+    row: int = stack(0, 0.0f64);
+    msg1(content, sel("addSubview:"), row);
+    tip_row = held(tip_row, row);
+    text_guide: int = if (ref != 0 && responds(ref, "textLayoutGuide")) msg(ref, sel("textLayoutGuide")) else 0;
+    image_guide: int = if (ref != 0 && responds(ref, "imageLayoutGuide")) msg(ref,
+        sel("imageLayoutGuide")) else 0;
+    margins: int = msg(content, sel("layoutMarginsGuide"));
+    if (text_guide != 0) pin(label, text_guide, "leadingAnchor") else pin_by(label,
+        margins, "leadingAnchor", 40.0f64);
+    pin(label, margins, "trailingAnchor");
+    pin_by(label, content, "topAnchor", 11.0f64);
+    if (image_guide != 0) pin(image, image_guide, "centerXAnchor") else pin_to(image,
+        "centerXAnchor", margins, "leadingAnchor", 14.0f64);
+    tip_image_y = held(tip_image_y, msg1_f(msg(image, sel("centerYAnchor")), sel("constraintEqualToAnchor:constant:"),
+        msg(label, sel("topAnchor")), 10.0f64));
+    msg1(tip_image_y, sel("setActive:"), 1);
+    pin(row, label, "leadingAnchor");
+    pin(row, label, "trailingAnchor");
+    // (The buttons' titles 8 points under the words: a 44-point button's
+    // title sits about 12 under its top.)
+    pin_to(row, "topAnchor", label, "bottomAnchor", -4.0f64);
+    pin(row, content, "bottomAnchor")
+}
+
+// The tip's words and buttons, for gt_tip (the row's layout for the text
+// size now: the buttons under one another at the accessibility sizes).
+help_tip_fill() {
+    i: int = gt_tip;
+    if (tip_cell == 0 || i < 0) return;
+    msg1(tip_cell, sel("setBackgroundColor:"), cell_bg());
+    font: int = help_font(15.0f64, 0.0f64);
+    msg1(tip_label, sel("setFont:"), font);
+    msg1(tip_label, sel("setTextColor:"), c_icon);
+    msg1(tip_label, sel("setText:"), ns_of(hlp, htp_text_b[i], htp_text_e[i]));
+    msg1(tip_image, sel("setImage:"), symbol("lightbulb", msg_f(font, sel("pointSize")),
+        4, c_faint));
+    msg_set_f(tip_image_y, sel("setConstant:"), msg_f(font, sel("lineHeight")) / 2.0f64);
+    // VoiceOver: the tip, with Next Tip, More and its action.
+    fbuf_n = 0;
+    fput_str("Tip: ");
+    fput_bytes(hlp, htp_text_b[i], htp_text_e[i]);
+    msg1(tip_label, sel("setAccessibilityLabel:"), fstring());
+    n: int = 0;
+    one[n] = custom_action("Next Tip", "helpTipNext:");
+    n = n + 1;
+    one[n] = custom_action("More", "helpTipMore:");
+    n = n + 1;
+    if (htp_action[i] >= 0) {
+        one[n] = msg(msg3(msg(cls("UIAccessibilityCustomAction"), sel("alloc")), sel("initWithName:target:selector:"),
+            help_action_words(i), app_obj, sel("helpTipAction:")), sel("autorelease"));
+        n = n + 1
+    }
+    msg1(tip_label, sel("setAccessibilityCustomActions:"), nsarray(one, n));
+    msg1(tip_cell, sel("setIsAccessibilityElement:"), 0);
+    // The buttons.
+    subs: int = msg(msg(tip_row, sel("arrangedSubviews")), sel("copy"));
+    for k in 0..msg(subs, sel("count")) {
+        v: int = msg1(subs, sel("objectAtIndex:"), k);
+        msg1(tip_row, sel("removeArrangedSubview:"), v);
+        msg(v, sel("removeFromSuperview"))
+    }
+    release(subs);
+    stacked: bool = ax_size();
+    msg1(tip_row, sel("setAxis:"), if (stacked) 1 else 0);
+    msg1(tip_row, sel("setAlignment:"), if (stacked) 1 else 3);
+    first: bool = true;
+    if (htp_action[i] >= 0) {
+        msg1(tip_row, sel("addArrangedSubview:"), help_tip_button(ns_of(hlp, htp_act_b[i],
+            htp_act_e[i]), "helpTipAction:", help_action_words(i), false, true, stacked));
+        first = false
+    }
+    msg1(tip_row, sel("addArrangedSubview:"), help_tip_button(nsstring("More"), "helpTipMore:",
+        nsstring("More about this"), false, first || stacked, stacked));
+    spacer: int = msg(make("UIView"), sel("autorelease"));
+    msg_f32_i(spacer, sel("setContentHuggingPriority:forAxis:"), 1.0f64 as f32, 0);
+    msg1(spacer, sel("setHidden:"), if (stacked) 1 else 0);
+    msg1(tip_row, sel("addArrangedSubview:"), spacer);
+    msg1(tip_row, sel("addArrangedSubview:"), help_tip_button(nsstring("Next"), "helpTipNext:",
+        nsstring("Next tip"), true, stacked, !stacked))
+}
+
+// The action's title without its "โ€ฆ" (VoiceOver's, and its custom
+// action's): "New Ribbon".
+help_action_words(i: int): int {
+    e: int = htp_act_e[i];
+    if (e - htp_act_b[i] > 3 && hlb(e - 3) == 226 && hlb(e - 2) == 128 && hlb(e - 1) == 166) e = e - 3;
+    ns_of(hlp, htp_act_b[i], e)
+}
+
+// A small plain button (accent, SF 15; 44 points tall to touch; with no
+// inset before it if it begins a line, so its title lines up with the
+// words, or after it if it ends one; Next with chevron.forward after it).
+help_tip_button(
+    title: int,
+    action: str,
+    label: int,
+    chevron: bool,
+    lead0: bool,
+    trail0: bool
+): int {
+    config: int = msg(cls("UIButtonConfiguration"), sel("plainButtonConfiguration"));
+    keys[0] = k_font;
+    values[0] = help_font(15.0f64, 0.0f64);
+    t: int = msg2(msg(cls("NSAttributedString"), sel("alloc")), sel("initWithString:attributes:"),
+        title, nsdictionary(keys, values, 1));
+    msg1(config, sel("setAttributedTitle:"), t);
+    release(t);
+    msg1(config, sel("setBaseForegroundColor:"), c_accent);
+    msg_rect(config, sel("setContentInsets:"), 0.0f64, if (lead0) 0.0f64 else 12.0f64,
+        0.0f64, if (trail0) 0.0f64 else 12.0f64);
+    if (chevron) {
+        msg1(config, sel("setImage:"), symbol("chevron.forward", 11.0f64, 6, 0));
+        msg1(config, sel("setImagePlacement:"), 8);
+        msg_set_f(config, sel("setImagePadding:"), 4.0f64)
+    }
+    b: int = msg2(cls("UIButton"), sel("buttonWithConfiguration:primaryAction:"),
+        config, 0);
+    msg3(b, sel("addTarget:action:forControlEvents:"), app_obj, sel(action), 64);
+    msg1(b, sel("setAccessibilityLabel:"), label);
+    msg1(msg_set_f(msg(b, sel("heightAnchor")), sel("constraintGreaterThanOrEqualToConstant:"),
+        44.0f64), sel("setActive:"), 1);
+    b
+}
+
+// Next: the next tip in the same row, its contents cross-faded (at once
+// under Reduce Motion), the row's height changed only if its lines are.
+help_tip_next(_self: int, _cmd: int, _sender: int): int {
+    if (gt_tip < 0) return 0;
+    i: int = help_next(today());
+    if (i < 0) return 0;
+    help_state_save();
+    if (diag_on) {
+        fbuf_n = 0;
+        fput_str("bible: tip next \โ\\’ ");
+        help_fput_id(i);
+        note_ns(fstring())
+    }
+    gt_tip = i;
+    if (tip_cell == 0 || picker_table == 0) return 0;
+    if (!reduce_motion()) fade_layer(msg(msg(tip_cell, sel("contentView")), sel("layer")),
+        0.2f64);
+    help_tip_fill();
+    msg(picker_table, sel("beginUpdates"));
+    msg(picker_table, sel("endUpdates"));
+    if (demo_on) demo_event();
+    1
+}
+
+// More: the manual's page at the tip's part, in Go To's own stack.
+help_tip_more(_self: int, _cmd: int, _sender: int): int {
+    if (gt_tip < 0) return 0;
+    t: int = htp_more[gt_tip];
+    if (diag_on) {
+        fbuf_n = 0;
+        fput_str("bible: tip more ");
+        help_fput_anchor(t);
+        note_ns(fstring())
+    }
+    help_open_page(hpt_page[t], t, true);
+    1
+}
+
+// The action: what it names, as if chosen where it is.
+help_tip_action(_self: int, _cmd: int, _sender: int): int {
+    if (gt_tip < 0 || htp_action[gt_tip] < 0) return 0;
+    a: int = htp_action[gt_tip];
+    if (diag_on) {
+        fbuf_n = 0;
+        fput_str("bible: tip action ");
+        fput_str(ha_names[a]);
+        note_ns(fstring())
+    }
+    if (a == 0) {
+        if (rb_n >= RB_MOST) return 1;
+        if (table != 0) measure_place();
+        open_new_ribbon(cur, place_v, place_frac, true)
+    } else if (a == 1) open_plans() else if (a == 6) open_history() else {
+        // (Go To put away first: another sheet comes once it has gone.)
+        help_then = a;
+        help_then_tries = 0;
+        dismiss_sheets();
+        _t: int = after_common(0.3f64, "helpThen:")
+    }
+    1
+}
+
+help_then: int = -1;
+
+help_then_tries: int = 0;
+
+help_then_do(_self: int, _cmd: int, _timer: int): int {
+    a: int = help_then;
+    if (a < 0) return 0;
+    if (presented() != 0) {
+        help_then_tries = help_then_tries + 1;
+        if (help_then_tries <= 10) _t: int = after_common(0.3f64, "helpThen:") else help_then = -1;
+        return 0
+    }
+    help_then = -1;
+    if (a == 2) open_search() else if (a == 3 || a == 4 || a == 5) {
+        set_def_int("librarySegment", 3);
+        open_library();
+        if (a != 3 && presented() != 0) open_language(a - 4)
+    } else if (a == 7 || a == 8) {
+        open_settings();
+        if (presented() != 0) {
+            if (a == 7) open_versions() else open_voice()
+        }
+    }
+    0
+}
+
+// ---- the Manual (ยง15.3) ----
+mn_table: int = 0;
+
+mn_vc: int = 0;
+
+mn_class: int = 0;
+
+mn_search: int = 0;
+
+mn_q: []i8 = new i8[256](0i8);
+
+mn_q_n: int = 0;
+
+// While searching: a section a page with parts that match (the first of
+// them in hm_part, and how many).
+mn_secs: int = 0;
+
+mn_sec_page: []int = new int[32](0);
+
+mn_sec_first: []int = new int[32](0);
+
+mn_sec_n: []int = new int[32](0);
+
+// The contents, pushed in the sheet on top (Go To's or Reading settings').
+help_open_manual() {
+    sheet_nav: int = top_presented();
+    if (sheet_nav == 0) return;
+    help_load();
+    help_grow(sheet_nav);
+    vc: int = msg(msg1(msg(mn_class, sel("alloc")), sel("initWithStyle:"), 2), sel("autorelease"));
+    msg1(vc, sel("setTitle:"), nsstring("Manual"));
+    item: int = msg(vc, sel("navigationItem"));
+    msg1(item, sel("setLargeTitleDisplayMode:"), 2);
+    msg1(item, sel("setRightBarButtonItem:"), system_item(0, "closeSheet:"));
+    mn_vc = held(mn_vc, vc);
+    mn_table = held(mn_table, msg(vc, sel("tableView")));
+    msg1(mn_table, sel("setDataSource:"), app_obj);
+    msg1(mn_table, sel("setDelegate:"), app_obj);
+    style_table(mn_table, true);
+    sc: int = msg1(msg(cls("UISearchController"), sel("alloc")), sel("initWithSearchResultsController:"),
+        0);
+    msg1(sc, sel("setObscuresBackgroundDuringPresentation:"), 0);
+    msg1(sc, sel("setHidesNavigationBarDuringPresentation:"), 0);
+    msg1(sc, sel("setSearchResultsUpdater:"), app_obj);
+    bar: int = msg(sc, sel("searchBar"));
+    msg1(bar, sel("setPlaceholder:"), nsstring("Search the Manual"));
+    msg1(item, sel("setSearchController:"), sc);
+    msg1(item, sel("setHidesSearchBarWhenScrolling:"), 0);
+    mn_search = held(mn_search, sc);
+    release(sc);
+    mn_q_n = 0;
+    note("bible: manual");
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+// Reading settings' sheet (medium only) made large for the Manual, as
+// for the acknowledgements.
+help_grow(sheet_nav: int) {
+    if (sheet_nav != settings_nav || settings_nav == 0) return;
+    sheet: int = msg(settings_nav, sel("sheetPresentationController"));
+    if (sheet == 0) return;
+    one[0] = msg(cls("UISheetPresentationControllerDetent"), sel("mediumDetent"));
+    one[1] = msg(cls("UISheetPresentationControllerDetent"), sel("largeDetent"));
+    msg1(sheet, sel("setDetents:"), nsarray(one, 2));
+    msg1(sheet, sel("setSelectedDetentIdentifier:"), objc_const("UISheetPresentationControllerDetentIdentifierLarge"))
+}
+
+help_is_table(t: int): bool {
+    t != 0 && t == mn_table
+}
+
+// The search field's text: the parts that match, by page.
+help_search_updated(sc: int): bool {
+    if (sc == 0 || sc != mn_search || mn_table == 0) return false;
+    mn_q_n = nsstring_into(msg(msg(sc, sel("searchBar")), sel("text")), mn_q);
+    help_find();
+    msg(mn_table, sel("reloadData"));
+    if (mn_q_n > 0 && mn_secs == 0) empty_state(mn_vc, mn_table, "magnifyingglass",
+        nsstring("No Matches"), "") else empty_state(mn_vc, mn_table, "", 0, "");
+    true
+}
+
+help_find() {
+    mn_secs = 0;
+    if (mn_q_n == 0) return;
+    help_search(mn_q, mn_q_n);
+    for m in 0..hm_n {
+        g: int = hpt_page[hm_part[m]];
+        if (mn_secs == 0 || mn_sec_page[mn_secs - 1] != g) {
+            if (mn_secs < len(mn_sec_page)) {
+                mn_sec_page[mn_secs] = g;
+                mn_sec_first[mn_secs] = m;
+                mn_sec_n[mn_secs] = 0;
+                mn_secs = mn_secs + 1
+            }
+        }
+        mn_sec_n[mn_secs - 1] = mn_sec_n[mn_secs - 1] + 1
+    }
+    if (diag_on) {
+        fbuf_n = 0;
+        fput_str("bible: manual search ");
+        fput_bytes(mn_q, 0, mn_q_n);
+        fput_str(": ");
+        for m in 0..hm_n {
+            if (m > 0) fput_str(", ");
+            help_fput_anchor(hm_part[m])
+        }
+        note_ns(fstring())
+    }
+}
+
+help_sections(_t: int): int {
+    if (mn_q_n == 0) 1 else mn_secs
+}
+
+help_rows(_t: int, s: int): int {
+    if (mn_q_n == 0) hpg_n else if (s < mn_secs) mn_sec_n[s] else 0
+}
+
+help_header(_t: int, s: int): int {
+    if (mn_q_n == 0 || s >= mn_secs) return 0;
+    g: int = mn_sec_page[s];
+    ns_of(hlp, hpg_title_b[g], hpg_title_e[g])
+}
+
+help_footer(_t: int, _s: int): int {
+    if (mn_q_n > 0) 0 else app_version_line()
+}
+
+help_cell(t: int, path: int): int {
+    s: int = msg(path, sel("section"));
+    r: int = msg(path, sel("row"));
+    if (mn_q_n == 0) {
+        // A page: its symbol, its title, its parts' headings.
+        cell: int = list_cell(t, "mn-page", 2);
+        config: int = list_config(2);
+        g: int = r;
+        config_image(config, hsym_names[hpg_sym[g]], 17.0f64, c_accent);
+        msg1(config, sel("setText:"), ns_of(hlp, hpg_title_b[g], hpg_title_e[g]));
+        fbuf_n = 0;
+        for x in hpg_part0[g]..hpg_part0[g] + hpg_parts[g] {
+            if (x > hpg_part0[g]) fput_str(" \ย\ท ");
+            fput_bytes(hlp, hpt_head_b[x], hpt_head_e[x])
+        }
+        msg1(config, sel("setSecondaryText:"), fstring());
+        msg1(text_props(config), sel("setColor:"), c_ink);
+        msg1(text_props(config), sel("setFont:"), msg1(cls("UIFont"), sel("preferredFontForTextStyle:"),
+            objc_const("UIFontTextStyleBody")));
+        msg1(detail_props(config), sel("setColor:"), c_faint);
+        msg1(detail_props(config), sel("setNumberOfLines:"), 2);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        msg1(cell, sel("setAccessoryType:"), 1);
+        return cell
+    }
+    // A part that matches: its heading, and its paragraph around the first
+    // match, the matches semibold.
+    cell: int = list_cell(t, "mn-find", 2);
+    config: int = list_config(2);
+    tp: int = hm_part[mn_sec_first[s] + r];
+    msg1(config, sel("setText:"), ns_of(hlp, hpt_head_b[tp], hpt_head_e[tp]));
+    msg1(text_props(config), sel("setFont:"), help_font(15.0f64, 0.3f64));
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    msg1(config, sel("setSecondaryAttributedText:"), help_snippet_text(tp));
+    msg1(detail_props(config), sel("setNumberOfLines:"), 2);
+    msg_set_f(config, sel("setTextToSecondaryTextVerticalPadding:"), 3.0f64);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    msg1(cell, sel("setAccessoryType:"), 1);
+    cell
+}
+
+// A matching part's snippet (help.l8's), the matches in ink, semibold.
+help_snippet_text(tp: int): int {
+    help_snippet(tp);
+    s: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    plain: int = help_font(15.0f64, 0.0f64);
+    strong: int = help_font(15.0f64, 0.3f64);
+    if (hsn_from > 0) append(s, nsstring("\โ\€\ฆ "), plain, c_faint);
+    p: int = hsn_from;
+    for k in 0..hsn_n {
+        append(s, ns_of(hx, p, hsn_mb[k]), plain, c_faint);
+        append(s, ns_of(hx, hsn_mb[k], hsn_me[k]), strong, c_ink);
+        p = hsn_me[k]
+    }
+    append(s, ns_of(hx, p, hx_n), plain, c_faint);
+    s
+}
+
+help_picked(_t: int, s: int, r: int) {
+    if (mn_q_n == 0) {
+        help_open_page(r, -1, false);
+        return
+    }
+    tp: int = hm_part[mn_sec_first[s] + r];
+    help_open_page(hpt_page[tp], tp, true)
+}
+
+// ---- a page (ยง15.3.3) ----
+// The pages pushed (a page may push another, by a link): each one's
+// controller, text view, page, the part to scroll to once laid out (-1
+// none) and whether to wash its heading, its wash, and the width its
+// VoiceOver parts were placed for.
+HPV_MOST: int = 8;
+
+hpv_vc: []int = new int[8](0);
+
+hpv_tv: []int = new int[8](0);
+
+hpv_page: []int = new int[8](0);
+
+hpv_part: []int = new int[8](-1);
+
+hpv_washes: []bool = new bool[8](false);
+
+hpv_wash: []int = new int[8](0);
+
+hpv_w: []f64 = new f64[8](0.0f64);
+
+hpv_next: int = 0;
+
+help_page_class: int = 0;
+
+// Each part's heading, and each paragraph, where it is in its page's text
+// (UTF-16), as last made.
+hpt_at: []int = new int[256](0);
+
+hpt_len: []int = new int[256](0);
+
+hpa_at: []int = new int[1024](0);
+
+hpa_len: []int = new int[1024](0);
+
+k_help_link: str = "L8HelpLink";
+
+// Page g pushed in the sheet on top, at part t (-1: its top), its heading
+// washed if wash.
+help_open_page(g: int, t: int, wash: bool) {
+    sheet_nav: int = top_presented();
+    if (sheet_nav == 0 || g < 0 || g >= hpg_n) return;
+    help_load();
+    help_grow(sheet_nav);
+    k: int = hpv_next;
+    hpv_next = (hpv_next + 1) % HPV_MOST;
+    hpv_vc[k] = held(hpv_vc[k], 0);
+    hpv_tv[k] = held(hpv_tv[k], 0);
+    hpv_wash[k] = held(hpv_wash[k], 0);
+    vc: int = msg(make_class_object(help_page_class), sel("autorelease"));
+    msg1(vc, sel("setTitle:"), ns_of(hlp, hpg_title_b[g], hpg_title_e[g]));
+    item: int = msg(vc, sel("navigationItem"));
+    msg1(item, sel("setLargeTitleDisplayMode:"), 2);
+    msg1(item, sel("setRightBarButtonItem:"), system_item(0, "closeSheet:"));
+    view: int = msg(vc, sel("view"));
+    msg1(view, sel("setBackgroundColor:"), sheet_bg());
+    tv: int = 0;
+    if (responds(cls("UITextView"), "textViewUsingTextLayoutManager:")) tv = msg1(cls("UITextView"),
+        sel("textViewUsingTextLayoutManager:"), 0) else tv = msg(make("UITextView"),
+        sel("autorelease"));
+    msg1(tv, sel("setEditable:"), 0);
+    msg1(tv, sel("setSelectable:"), 1);
+    msg1(tv, sel("setBackgroundColor:"), sheet_bg());
+    msg1(tv, sel("setTintColor:"), c_accent);
+    msg_rect(tv, sel("setTextContainerInset:"), 20.0f64, 20.0f64, 28.0f64, 20.0f64);
+    msg_set_f(msg(tv, sel("textContainer")), sel("setLineFragmentPadding:"), 0.0f64);
+    msg1(tv, sel("setAutoresizingMask:"), 18);
+    msg1(tv, sel("setTag:"), g + 1);
+    l8_msg_hfa(hfa, view, sel("bounds"), 0, 0, 0);
+    msg_rect(tv, sel("setFrame:"), 0.0f64, 0.0f64, hfa[2], hfa[3]);
+    msg1(tv, sel("setAttributedText:"), help_page_text(g));
+    tap: int = msg2(msg(cls("UITapGestureRecognizer"), sel("alloc")), sel("initWithTarget:action:"),
+        app_obj, sel("helpPageTapped:"));
+    msg1(tap, sel("setDelegate:"), app_obj);
+    msg1(tv, sel("addGestureRecognizer:"), tap);
+    release(tap);
+    msg1(tv, sel("setIsAccessibilityElement:"), 0);
+    msg1(view, sel("addSubview:"), tv);
+    hpv_vc[k] = held(0, vc);
+    hpv_tv[k] = held(0, tv);
+    hpv_page[k] = g;
+    hpv_part[k] = t;
+    hpv_washes[k] = wash && t >= 0;
+    hpv_w[k] = 0.0f64;
+    if (diag_on) {
+        fbuf_n = 0;
+        fput_str("bible: manual page ");
+        fput_bytes(hlp, hpg_id_b[g], hpg_id_e[g]);
+        if (t >= 0) {
+            fput_str(" at ");
+            help_fput_anchor(t)
+        }
+        note_ns(fstring())
+    }
+    msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
+}
+
+make_class_object(c: int): int {
+    msg(msg(c, sel("alloc")), sel("init"))
+}
+
+// The page's text: each part's heading (Headline), its paragraphs (Body,
+// 0.6 em apart), **bold** semibold, _italic_ italic, symbols drawn at the
+// text's size and weight in ink, links in the accent.
+help_page_text(g: int): int {
+    s: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    head: int = msg1(cls("UIFont"), sel("preferredFontForTextStyle:"), objc_const("UIFontTextStyleHeadline"));
+    body_font: int = msg1(cls("UIFont"), sel("preferredFontForTextStyle:"), objc_const("UIFontTextStyleBody"));
+    size: f64 = msg_f(body_font, sel("pointSize"));
+    bold: int = help_font(17.0f64, 0.3f64);
+    ital: int = help_scaled(italic_sans(17.0f64));
+    bold_ital: int = bold;
+    first: bool = true;
+    for t in hpg_part0[g]..hpg_part0[g] + hpg_parts[g] {
+        start: int = msg(s, sel("length"));
+        hpt_at[t] = start;
+        append(s, ns_of(hlp, hpt_head_b[t], hpt_head_e[t]), head, c_ink);
+        hpt_len[t] = msg(s, sel("length")) - hpt_at[t];
+        append(s, nsstring("\n"), head, c_ink);
+        msg4(s, sel("addAttribute:value:range:"), k_para, help_para(if (first) 0.0f64 else 20.0f64,
+            6.0f64), start, msg(s, sel("length")) - start);
+        first = false;
+        last: int = hpt_para0[t] + hpt_paras[t] - 1;
+        for a in hpt_para0[t]..last + 1 {
+            p0: int = msg(s, sel("length"));
+            hpa_at[a] = p0;
+            help_runs(a);
+            for r in 0..hrun_n {
+                if (hrun_kind[r] == HRUN_SYM) {
+                    if (hrun_sym[r] >= 0) msg1(s, sel("appendAttributedString:"),
+                        help_symbol(hsym_names[hrun_sym[r]], body_font, if (hrun_bold[r]) 6 else 4))
+                } else {
+                    f: int = if (hrun_bold[r] && hrun_italic[r]) bold_ital else if (hrun_bold[r]) bold else if (hrun_italic[r]) ital else body_font;
+                    color: int = if (hrun_kind[r] == HRUN_LINK) c_accent else c_ink;
+                    at: int = msg(s, sel("length"));
+                    append(s, ns_of(hlp, hrun_b[r], hrun_e[r]), f, color);
+                    if (hrun_kind[r] == HRUN_LINK && hrun_link[r] >= 0) msg4(s, sel("addAttribute:value:range:"),
+                        nsstring(k_help_link), nsnumber_int(hrun_link[r] + 1), at,
+                        msg(s, sel("length")) - at)
+                }
+            }
+            hpa_len[a] = msg(s, sel("length")) - p0;
+            if (a < last || t < hpg_part0[g] + hpg_parts[g] - 1) append(s, nsstring("\n"),
+                body_font, c_ink);
+            msg4(s, sel("addAttribute:value:range:"), k_para, help_para(0.0f64, if (a < last) size * 0.6f64 else 0.0f64),
+                p0, msg(s, sel("length")) - p0)
+        }
+    }
+    s
+}
+
+help_scaled(f: int): int {
+    m: int = msg1(cls("UIFontMetrics"), sel("metricsForTextStyle:"), objc_const("UIFontTextStyleBody"));
+    msg1(m, sel("scaledFontForFont:"), f)
+}
+
+help_para(before: f64, after: f64): int {
+    msg(para_style(0, 0.0f64, 0.0f64, before, after, 1.0f64), sel("autorelease"))
+}
+
+// A symbol as an attachment: at the text's size and weight, in ink,
+// centred on the capitals' height.
+help_symbol(name: str, font: int, weight: int): int {
+    size: f64 = msg_f(font, sel("pointSize"));
+    image: int = symbol(name, size, weight, c_ink);
+    att: int = msg1(cls("NSTextAttachment"), sel("textAttachmentWithImage:"), image);
+    l8_msg_hfa(hfa, image, sel("size"), 0, 0, 0);
+    w: f64 = hfa[0];
+    h: f64 = hfa[1];
+    cap: f64 = msg_f(font, sel("capHeight"));
+    msg_rect(att, sel("setBounds:"), 0.0f64, (cap - h) / 2.0f64, w, h);
+    a: int = msg1(cls("NSAttributedString"), sel("attributedStringWithAttachment:"),
+        att);
+    m: int = msg(make("NSMutableAttributedString"), sel("autorelease"));
+    msg1(m, sel("appendAttributedString:"), a);
+    msg4(m, sel("addAttribute:value:range:"), k_font, font, 0, msg(m, sel("length")));
+    m
+}
+
+// The slot of a page's controller, or of its text view (-1: none).
+help_slot_of_vc(vc: int): int {
+    for k in 0..HPV_MOST
+        if (hpv_vc[k] == vc && vc != 0) return k;
+    -1
+}
+
+help_slot_of_tv(tv: int): int {
+    for k in 0..HPV_MOST
+        if (hpv_tv[k] == tv && tv != 0) return k;
+    -1
+}
+
+// The page's text laid out whole (its own TextKit 1 layout manager).
+help_page_laid_out(tv: int) {
+    if (!responds(tv, "layoutManager")) return;
+    lm: int = msg(tv, sel("layoutManager"));
+    if (lm != 0) msg1(lm, sel("ensureLayoutForTextContainer:"), msg(tv, sel("textContainer")));
+    msg(tv, sel("layoutIfNeeded"))
+}
+
+// Laid out: VoiceOver's parts placed (again, at a new width); the first
+// time, scrolled to its part (before the push is seen) and washed.
+help_page_layout(self: int, cmd: int): int {
+    super0(self, help_page_class, cmd);
+    k: int = help_slot_of_vc(self);
+    if (k < 0) return 0;
+    tv: int = hpv_tv[k];
+    w: f64 = view_width(tv);
+    if (w <= 0.0f64) return 0;
+    if (w != hpv_w[k]) {
+        hpv_w[k] = w;
+        help_page_laid_out(tv);
+        help_page_access(k)
+    }
+    if (hpv_part[k] >= 0) {
+        t: int = hpv_part[k];
+        hpv_part[k] = -1;
+        help_page_scroll(k, t, false);
+        if (hpv_washes[k]) help_wash(k, t)
+    }
+    0
+}
+
+// Part t's heading 8 points under the top (the whole text laid out
+// first: a page is short).
+help_page_scroll(k: int, t: int, animated: bool) {
+    tv: int = hpv_tv[k];
+    if (tv == 0) return;
+    help_page_laid_out(tv);
+    if (!range_rect(tv, hpt_at[t], 1)) return;
+    y: f64 = hfa[1];
+    l8_msg_hfa(hfa, tv, sel("adjustedContentInset"), 0, 0, 0);
+    top: f64 = hfa[0];
+    bottom: f64 = hfa[2];
+    l8_msg_hfa(hfa, tv, sel("contentSize"), 0, 0, 0);
+    most: f64 = hfa[1] + bottom - view_height(tv);
+    off: f64 = y - 8.0f64 - top;
+    if (off > most) off = most;
+    if (off < -top) off = -top;
+    msg_ff1(tv, sel("setContentOffset:animated:"), 0.0f64, off, if (animated) 1 else 0)
+}
+
+// Its heading washed in the selection's color, fading over a second (in
+// the demo, six, for the screenshot); not under Reduce Motion.
+help_wash(k: int, t: int) {
+    tv: int = hpv_tv[k];
+    if (tv == 0 || reduce_motion()) return;
+    if (!range_rect(tv, hpt_at[t], if (hpt_len[t] > 0) hpt_len[t] else 1)) return;
+    y: f64 = hfa[1];
+    hh: f64 = hfa[3];
+    if (hpv_wash[k] != 0) msg(hpv_wash[k], sel("removeFromSuperview"));
+    v: int = msg(make("UIView"), sel("autorelease"));
+    msg_rect(v, sel("setFrame:"), 12.0f64, y - 4.0f64, view_width(tv) - 24.0f64, hh + 8.0f64);
+    msg1(v, sel("setBackgroundColor:"), c_sel);
+    msg1(v, sel("setUserInteractionEnabled:"), 0);
+    msg_set_f(msg(v, sel("layer")), sel("setCornerRadius:"), 6.0f64);
+    msg2(tv, sel("insertSubview:atIndex:"), v, 0);
+    hpv_wash[k] = held(hpv_wash[k], v);
+    layer: int = msg(v, sel("layer"));
+    msg_set_f32(layer, sel("setOpacity:"), 0.0f64 as f32);
+    animate(layer, "opacity", 1.0f64, 0.0f64, false, if (demo_on) 6.0f64 else 1.0f64);
+    if (diag_on) {
+        fbuf_n = 0;
+        fput_str("bible: manual washed ");
+        help_fput_anchor(t);
+        note_ns(fstring())
+    }
+}
+
+// VoiceOver: each heading (a header, so the rotor's Headings moves by
+// part) and each paragraph (its symbols by name; its links as actions),
+// placed where they are in the text.
+help_page_access(k: int) {
+    tv: int = hpv_tv[k];
+    g: int = hpv_page[k];
+    list: int = msg(cls("NSMutableArray"), sel("array"));
+    header: int = objc_const("UIAccessibilityTraitHeader") | objc_const("UIAccessibilityTraitStaticText");
+    for t in hpg_part0[g]..hpg_part0[g] + hpg_parts[g] {
+        e: int = help_element(tv, hpt_at[t], hpt_len[t], ns_of(hlp, hpt_head_b[t],
+            hpt_head_e[t]), header);
+        if (e != 0) msg1(list, sel("addObject:"), e);
+        for a in hpt_para0[t]..hpt_para0[t] + hpt_paras[t] {
+            help_plain(a, true);
+            e2: int = help_element(tv, hpa_at[a], hpa_len[a], nsstring_of(hx, hx_n),
+                objc_const("UIAccessibilityTraitStaticText"));
+            if (e2 != 0) {
+                help_runs(a);
+                n: int = 0;
+                for r in 0..hrun_n {
+                    if (hrun_kind[r] == HRUN_LINK && hrun_link[r] >= 0 && n < 8) {
+                        fbuf_n = 0;
+                        fput_str("Open ");
+                        fput_bytes(hlp, hrun_b[r], hrun_e[r]);
+                        act: int = msg(msg3(msg(cls("UIAccessibilityCustomAction"),
+                            sel("alloc")), sel("initWithName:target:selector:"), fstring(),
+                            app_obj, sel("helpLinkAction:")), sel("autorelease"));
+                        objc_setAssociatedObject(act, ints_address(hlink_key), nsnumber_int(hrun_link[r]),
+                            1);
+                        one[n] = act;
+                        n = n + 1
+                    }
+                }
+                if (n > 0) msg1(e2, sel("setAccessibilityCustomActions:"), nsarray(one,
+                    n));
+                msg1(list, sel("addObject:"), e2)
+            }
+        }
+    }
+    msg1(tv, sel("setAccessibilityElements:"), list)
+}
+
+hlink_key: []int = new int[1](0);
+
+// An element of the text from UTF-16 unit at, n long: its words, traits,
+// and frame (from its first line's top to its last's bottom, the text's
+// width).
+help_element(
+    tv: int,
+    at: int,
+    n: int,
+    words: int,
+    traits: int
+): int {
+    if (n <= 0 || !range_rect(tv, at, 1)) return 0;
+    y0: f64 = hfa[1];
+    if (!range_rect(tv, at + n - 1, 1)) return 0;
+    y1: f64 = hfa[1] + hfa[3];
+    e: int = msg(msg1(msg(cls("UIAccessibilityElement"), sel("alloc")), sel("initWithAccessibilityContainer:"),
+        tv), sel("autorelease"));
+    msg1(e, sel("setAccessibilityLabel:"), words);
+    msg1(e, sel("setAccessibilityTraits:"), traits);
+    msg_rect(e, sel("setAccessibilityFrameInContainerSpace:"), 16.0f64, y0 - 2.0f64,
+        view_width(tv) - 32.0f64, y1 - y0 + 4.0f64);
+    e
+}
+
+// A link tapped: its part, in this page (scrolled to, washed) or another
+// (pushed).
+help_page_tapped(_self: int, _cmd: int, tap: int): int {
+    tv: int = msg(tap, sel("view"));
+    l8_msg_hfa(hfa, tap, sel("locationInView:"), tv, 0, 0);
+    t: int = link_at(tv, hfa[0], hfa[1], k_help_link) - 1;
+    if (t >= 0) help_follow(help_slot_of_tv(tv), t);
+    0
+}
+
+help_follow(k: int, t: int) {
+    if (k < 0 || t < 0 || t >= hpt_n) return;
+    if (diag_on) {
+        fbuf_n = 0;
+        fput_str("bible: manual link ");
+        help_fput_anchor(t);
+        note_ns(fstring())
+    }
+    if (hpt_page[t] == hpv_page[k]) {
+        help_page_scroll(k, t, !reduce_motion());
+        help_wash(k, t)
+    } else help_open_page(hpt_page[t], t, true)
+}
+
+help_link_action(_self: int, _cmd: int, a: int): int {
+    v: int = objc_getAssociatedObject(a, ints_address(hlink_key));
+    if (v == 0) return 0;
+    t: int = msg(v, sel("longValue"));
+    // (The page on top: the one VoiceOver is in.)
+    top: int = top_presented();
+    if (top != 0 && responds(top, "topViewController")) help_follow(help_slot_of_vc(msg(top,
+        sel("topViewController"))), t);
+    1
+}
+
+// ---- Reading settings' Help (ยง15.3.1, ยง15.4) ----
+// Its rows: Manual, then Show Tips.
+help_settings_cell(t: int, r: int): int {
+    if (r == 0) {
+        cell: int = fresh_cell(t);
+        config: int = list_config(0);
+        msg1(config, sel("setText:"), nsstring("Manual"));
+        msg1(text_props(config), sel("setColor:"), c_ink);
+        config_image(config, "book.closed", 17.0f64, c_accent);
+        msg1(cell, sel("setContentConfiguration:"), config);
+        msg1(cell, sel("setAccessoryType:"), 1);
+        msg1(cell, sel("setSelectionStyle:"), 3);
+        return cell
+    }
+    cell: int = fresh_cell(t);
+    config: int = list_config(0);
+    msg1(config, sel("setText:"), nsstring("Show Tips"));
+    msg1(text_props(config), sel("setColor:"), c_ink);
+    msg1(cell, sel("setContentConfiguration:"), config);
+    sw: int = make("UISwitch");
+    msg1(sw, sel("setOn:"), if (help_tips_on()) 1 else 0);
+    msg1(sw, sel("setOnTintColor:"), c_accent);
+    msg3(sw, sel("addTarget:action:forControlEvents:"), app_obj, sel("helpTipsSwitched:"),
+        4096);
+    msg1(cell, sel("setAccessoryView:"), sw);
+    release(sw);
+    cell
+}
+
+HELP_FOOTER: str = "A tip at the top of Go To, changing once a day.";
+
+help_tips_switched(_self: int, _cmd: int, sw: int): int {
+    on: bool = (msg(sw, sel("isOn")) & 255) != 0;
+    set_def_bool("showTips", on);
+    note(if (on) "bible: show tips on" else "bible: show tips off");
+    0
+}
+
+// ---- the sheet gone, the theme, the text size ----
+help_sheet_gone() {
+    tip_cell = held(tip_cell, 0);
+    tip_label = held(tip_label, 0);
+    tip_image = held(tip_image, 0);
+    tip_row = held(tip_row, 0);
+    tip_image_y = held(tip_image_y, 0);
+    mn_table = held(mn_table, 0);
+    mn_vc = held(mn_vc, 0);
+    mn_search = held(mn_search, 0);
+    mn_q_n = 0;
+    for k in 0..HPV_MOST {
+        hpv_vc[k] = held(hpv_vc[k], 0);
+        hpv_tv[k] = held(hpv_tv[k], 0);
+        hpv_wash[k] = held(hpv_wash[k], 0)
+    }
+}
+
+// The theme changed, or the text size: the Manual's list and pages made
+// again in it (each page's place kept), the tip filled.
+help_restyle() {
+    if (mn_table != 0) {
+        style_table(mn_table, true);
+        msg(mn_table, sel("reloadData"))
+    }
+    for k in 0..HPV_MOST {
+        tv: int = hpv_tv[k];
+        if (tv != 0) {
+            y: f64 = offset_y(tv);
+            msg1(tv, sel("setBackgroundColor:"), sheet_bg());
+            msg1(msg(hpv_vc[k], sel("view")), sel("setBackgroundColor:"), sheet_bg());
+            msg1(tv, sel("setAttributedText:"), help_page_text(hpv_page[k]));
+            msg_ff1(tv, sel("setContentOffset:animated:"), 0.0f64, y, 0);
+            hpv_w[k] = 0.0f64;
+            msg(msg(hpv_vc[k], sel("view")), sel("setNeedsLayout"))
+        }
+    }
+    if (tip_cell != 0 && picker_table != 0) {
+        help_tip_fill();
+        msg(picker_table, sel("beginUpdates"));
+        msg(picker_table, sel("endUpdates"))
+    }
+}
+
+// ---- classes and methods ----
+make_help_classes() {
+    mn_class = objc_allocateClassPair(cls("UITableViewController"), "L8Manual", 0);
+    objc_registerClassPair(mn_class);
+    help_page_class = objc_allocateClassPair(cls("UIViewController"), "L8ManualPage",
+        0);
+    add_method0(help_page_class, sel("viewDidLayoutSubviews"), &help_page_layout,
+        "v@:");
+    objc_registerClassPair(help_page_class)
+}
+
+add_help_methods(app: int) {
+    add_method1(app, sel("helpTipNext:"), &help_tip_next, "B@:@");
+    add_method1(app, sel("helpTipMore:"), &help_tip_more, "B@:@");
+    add_method1(app, sel("helpTipAction:"), &help_tip_action, "B@:@");
+    add_method1(app, sel("helpThen:"), &help_then_do, "v@:@");
+    add_method1(app, sel("helpPageTapped:"), &help_page_tapped, "v@:@");
+    add_method1(app, sel("helpLinkAction:"), &help_link_action, "B@:@");
+    add_method1(app, sel("helpTipsSwitched:"), &help_tips_switched, "v@:@")
+}
