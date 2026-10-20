@@ -72,6 +72,20 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   (Reading settings → Voice → Downloaded Books), and a recording that
   can't be reached is stood in for by the voice. Lock screen controls go
   by chapter.
+- Memory (Round 9): the tray's seventh action, Memorize, keeps the verses
+  selected as a passage to learn, in the version read (Memorizing, once
+  they are one, opens it); Add Passage takes a reference across chapters
+  (`isa 52:13-53:12`, `ps 23`, up to 40 verses). The Library's Memory
+  segment lists Today, New and Later. Practice shows a passage at Full,
+  Some, Letters or Blank, the hidden letters kept in their places so the
+  text never moves; a tap shows a word, Check shows them all, and Type
+  takes each word's first letter. A long passage is learned a part a day,
+  each joined to the one before; then Not Yet, Mostly or Knew It sets the
+  next review (1 day to 6 months), with no streaks or scores. Listen and
+  Echo play the passage from the recordings' verse timings (or the
+  iPhone's voice), Echo pausing after each verse for you to say it. Memory
+  can be a second reason for the plan's one daily reminder. ESV passages
+  are kept within Crossway's terms (at most 200 verses of the 500).
 - A link opens a chapter: `bsb://JHN/3` (or a verse, `bsb://JHN/3/16`).
 
 ## Files
@@ -109,8 +123,12 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   part, tested in `test_plans.l8`); `ios_ribbons.l8` the ribbons' rows, New
   Ribbon, Ribbon, the title's menu, the glyph and the toasts (`ribbons.l8`
   their portable part, tested in `test_ribbons.l8`); `ios_share.l8` Share as
-  Image; `ios_demo.l8` (and `ios_demo3.l8` to `ios_demo6.l8`)
-  the demo CI runs.
+  Image; `ios_memory.l8` Memory's files, the tray's Memorize, the
+  Library's Memory segment, Add Passage and Passage, and `ios_practice.l8`
+  Practice (`memory.l8` their portable part: words and key letters, parts,
+  hiding, the schedule, Today, the files and the reminder's words, tested
+  in `test_memory.l8`); `ios_demo.l8` (and `ios_demo3.l8` to
+  `ios_demo8.l8`) the demo CI runs.
 - `audio.l8` is recorded readings' portable part (sources, addresses,
   timings, which source a chapter is heard from, the cache's rules), tested
   in `test_audio.l8`; `ios_audio.l8` the Voice screens, voices, the cache
@@ -191,8 +209,8 @@ about 27 when each group had a Mac of its own; see the workflow's header):
   between them (the app and its defaults, permissions, keychain,
   pasteboard, status bar, notification state); a group that leaves
   something outside the app (plans' alert, more's share sheet) goes
-  second. store and ios18 share the fifth Mac, each on its own simulator,
-  one after the other. Each group is uploaded (`shots-GROUP`) as it ends,
+  second. store, ios18 and memory share the fifth Mac, each on its own
+  simulator, one after another. Each group is uploaded (`shots-GROUP`) as it ends,
   and `timing.txt` says when its boot, install, launch and settling came.
 - The groups are paired by their times so the jobs end together (a group
   takes 1 to 4 minutes once booted; `timing.txt`'s `total` minus its

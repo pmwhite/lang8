@@ -193,7 +193,8 @@ fi
 # 4:6–7 to review (box 3, due yesterday), Romans 8:28–39 learning (four
 # parts, due today), Psalm 23 in the KJV later (box 4, due 2 November);
 # memorySeen and memoryType off; and ROM 8 in the fixture's timings, a
-# verse a second from 2.0 s. DESIGN.md §13.8.2.)
+# verse a half second from 2.0 s but 8:32, 12 s long, so that Echo's wash
+# is still on it when 226 is taken. DESIGN.md §13.8.2.)
 if [ "$group" = memory ]; then
   data=$(xcrun simctl get_app_container "$dev" "$id" data 2>/dev/null)
   if [ -n "$data" ]; then
@@ -201,7 +202,7 @@ if [ "$group" = memory ]; then
     t=$(python3 -c 'import time; print(int(time.time()) - 5 * 86400)')
     printf 'PASSAGE\t1\tbsb\tPHP\t4\t6\t4\t7\t%s\treview\t0\t3\t2026-10-18\tblank\nPASSAGE\t2\tbsb\tROM\t8\t28\t8\t39\t%s\tlearning\t4\t0\t2026-10-19\tfull\nPASSAGE\t3\tkjv\tPSA\t23\t1\t23\t6\t%s\treview\t0\t4\t2026-11-02\tblank\nNEXT\t4\n' \
       "$t" "$((t + 60))" "$((t + 120))" > "$data/Library/Application Support/SmoothBible/memory.tsv"
-    { printf 'ROM\t8\t4000\t0\tok\t200'; i=1; while [ "$i" -lt 39 ]; do printf ' 100'; i=$((i + 1)); done; printf ' 30\n'; } \
+    { printf 'ROM\t8\t4000\t0\tok\t200'; i=1; while [ "$i" -lt 39 ]; do if [ "$i" = 32 ]; then printf ' 1200'; else printf ' 50'; fi; i=$((i + 1)); done; printf ' 30\n'; } \
       >> "$data/Library/audio-fixture/fixture.tim"
     echo "memory group's passages written"; cat "$data/Library/Application Support/SmoothBible/memory.tsv"
   fi

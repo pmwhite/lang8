@@ -6465,6 +6465,102 @@ These are decided above; the owner may overrule:
    smaller title size. The alternative is Memorize only in the long-press edit menu and Add
    Passage, which keeps the tray as it is but is harder to find.
 
+### 13.12 Builder notes (Round 9, as built)
+Built as §13 says, with the owner's approvals (Memory as the Library's fourth segment,
+reviews opening at Blank, Memorize as the tray's seventh action). `memory.l8` is the
+portable part (`test_memory.l8`, with the parser's forms in `test_text.l8` and the ESV's
+pins in `test_store.l8`); `ios_memory.l8` is what is kept, the tray's action, the Memory
+segment, Add Passage and Passage; `ios_practice.l8` is Practice; `ios_demo8.l8` is the
+`memory` group.
+
+**Deviations, each with its reason:**
+1. **The tray's one size is fitted to the default titles** (Copy … Compare, Memorize), not
+   to the state titles. "Bookmarked" and "Memorizing" are longer, and fitting to them would
+   make all seven smaller only so that a state title fits. A state title may instead shrink
+   to 80% within its own button (`adjustsFontSizeToFitWidth`, `minimumScaleFactor` 0.8),
+   and only when it doesn't fit at the fitted size. The fit is logged ("tray titles at …
+   tenths of a point, room …").
+2. **Sort in Memory:** the Library's Sort menu ("Bible Order", "Newest First") orders New
+   and Later. With Bible Order (the Library's default), Later is in Bible order, not
+   soonest first. The menu is the Library's one sort, shared by all four segments, and a
+   second meaning for Bible Order on one segment would surprise. Today always keeps
+   §13.1.6's order.
+3. **Type's keyboard follows `keyboardLayoutGuide`:** the text view's bottom is pinned to
+   the guide's top (iOS 15 and later), rather than adjusting the inset from
+   `UIKeyboardWillChangeFrameNotification`. The guide moves with the keyboard's own
+   animation and needs no observer. While the keyboard is up, the sheet's toolbar is
+   behind it, so a bar above the keys (the view's `inputAccessoryView`) holds
+   `keyboard.chevron.compact.down` (Hide Keyboard). Check comes by itself after the last
+   word (§13.3.6), and Hide Keyboard brings the toolbar back.
+4. **The touch-down line sits above the toolbar**, not under it. The toolbar is the
+   sheet's bottom edge, so there is no room under it. The line is pinned 6 pt above the
+   safe area's bottom, which is the toolbar's top.
+5. **Verse 1's number is shown** in Practice, although the reader shows a chapter's
+   number in its place. In Practice the number is the tap target that shows a verse's
+   hidden words (§13.3.3), and a passage starting at verse 1 would otherwise have no
+   target for its first verse.
+6. **After the warm-up's Check, the main button reads Next.** §13.3.4 asks no judgement
+   there but doesn't name the step to the new part. Next takes you to the new part at
+   Full.
+7. **The last part is recorded when Next Verse or Done is tapped, before the joined step
+   shows.** The passage then moves to review (box 1, due tomorrow) even if Practice is
+   closed during the joined step, so a closed sheet never loses a learned part
+   (principle 4).
+8. **Practice opened with nothing due** (Today empty, from the toolbar or a reminder)
+   shows the end screen at once: "That's all for today." and the next review. A blank
+   sheet would say less. 227 shows this.
+9. **The suggestion's tint uses the accent** (`baseBackgroundColor` and
+   `baseForegroundColor` set to the accent). The sheet's toolbar is tinted with the icon
+   color, and `tintedButtonConfiguration` takes its tint from it, which would make the
+   suggestion grey.
+10. **The ESV's pinned verses** are kept in `memory.txt` as `PIN ID BOOK C V1 V2 FETCHED
+    BYTES` lines, each followed by its verses' records. They are fetched with the chapter
+    requests §9.4.4 makes (the records of the passage's verses kept), and fetched again
+    after 30 days when online (`ESV_STALE`). They are read as a text of their own,
+    `TEXT_PIN`, so Practice and Passage don't depend on the chapter cache.
+11. **VoiceOver's elements** are framed from the layout manager's glyph ranges for each
+    part's characters. The passage has no ligatures that change the count, so a
+    character's range is its glyph range.
+12. **Notification ids** are `daily-YYYY-MM-DD` for both reasons, as §13.5 says. Pending
+    `plan-*` ids from 1.0 are removed with the rest on the first scheduling.
+13. **"memory started"** (a `new` passage opened, so it becomes `learning`) is written to
+    the console log only. `memory-log.tsv`'s WHAT values (§13.1.7) don't include it, and
+    its first `part` line marks the same thing.
+14. **Echo's "your turn" underlines show at every level, Full included.** At Full no word
+    is underlined, so without them the pause would show nothing. The heard verse's words
+    are underlined in accent at 50% for the pause.
+15. **A solid underline is a thin view of its own, not the text's underline.** The text's
+    underline skips the descenders of the letters above it, clear or not, so a hidden
+    "everyone" showed a gap at its y and "gave" began late: the hidden letters' shapes
+    showed through (the first CI run, 216–218). Each solid underline (a hidden word, a word
+    shown with help, the current word, Echo's "your turn") is a 1 pt view in the text
+    view, under the word's letters at a tenth of the text size below the baseline, placed
+    from the layout (glyph ranges, a line each if a word is broken across two) after every
+    paint and whenever the text view's width changes. Only colors change, inside the same
+    0.2 s fade, so the text still never moves. A miss's dotted underline stays the text's
+    own: its word is shown, so skipping its descenders is right. The text view is TextKit
+    1 from the start (its `layoutManager` asked for at once), so the layout the views are
+    placed by never changes under them.
+16. **Underlines use the theme's `rule` at 2.5 times its alpha, 1 pt thick** (not 1.5
+    times the hairline). At the rule's own alpha and a hairline's thickness the
+    underlines were too faint to show a word's length at Blank. The color is still the
+    rule's.
+17. **The `memory` group runs third on the store job's Mac, on a simulator of its own**
+    (`pick.sh memory`, after ios18's). store's is the largest iPhone and ios18's an older
+    runtime, so neither could be shared, and five Macs is the account's limit. Its
+    recording is published as `memory-transitions.mp4`, its log's checks in
+    `memory-memory.txt`. In the fixture, ROM 8's verses are half a second each except
+    8:32, which is 12 s long, so that Echo's wash is still on it when 226 is taken; 226b
+    then calls the verse's end at once to show the pause. 231 and 232 open Practice over
+    the Library, as "from its row" says (presenting from the reader just after the
+    Library was dismissed failed: "whose view is not in the window hierarchy").
+18. **A new part, or the two joined, is scrolled into sight** (`scrollRangeToVisible:`)
+    when its step begins. In a long passage the new part can begin low on the page,
+    under the floating toolbar (Romans 8:32 in 226).
+19. **The tray's buttons have no side insets** (0 pt, not 1). Their insets grow with the
+    text size, and at the accessibility sizes 1 pt grew enough to clip "Bookmark" and
+    "Memorize" at 9 pt (130). The fit leaves 2 pt to spare in the button's whole width.
+
 ---
 
 ## 14. Round 10 specification: learning Greek and Hebrew

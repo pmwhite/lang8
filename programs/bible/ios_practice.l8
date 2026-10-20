@@ -191,6 +191,9 @@ px_open(n: int) {
     msg1(tv, sel("setTranslatesAutoresizingMaskIntoConstraints:"), 0);
     msg_set_f(msg(tv, sel("textContainer")), sel("setLineFragmentPadding:"), 0.0f64);
     msg1(tv, sel("setAdjustsFontForContentSizeCategory:"), 0);
+    // (TextKit 1 from the start: the words' places are read from its
+    // layout, which then never changes under them.)
+    _lm: int = msg(tv, sel("layoutManager"));
     tap: int = msg2(msg(cls("UITapGestureRecognizer"), sel("alloc")), sel("initWithTarget:action:"),
         app_obj, sel("practiceTapped:"));
     msg1(tv, sel("addGestureRecognizer:"), tap);
@@ -479,6 +482,10 @@ px_color(
         px_at16(e) - px_at16(p))
 }
 
+// A solid underline is a thin view of its own under the word, not the
+// text's underline: the text's skips the descenders of the letters it
+// runs under, clear or not, so a hidden "everyone" or "only" showed a
+// gap where its y was. A dotted one (a miss, its word shown) is the text's.
 px_underline(
     storage: int,
     p: int,
@@ -487,10 +494,130 @@ px_underline(
     dotted: bool
 ) {
     if (e <= p) return;
-    msg4(storage, sel("addAttribute:value:range:"), k_underline, nsnumber_int(if (dotted) 257 else 1),
+    if (!dotted) {
+        if (px_ul_n < len(px_ul_b)) {
+            px_ul_b[px_ul_n] = p;
+            px_ul_e[px_ul_n] = e;
+            px_ul_c[px_ul_n] = keep(color);
+            px_ul_n = px_ul_n + 1
+        }
+        return
+    }
+    msg4(storage, sel("addAttribute:value:range:"), k_underline, nsnumber_int(257),
         px_at16(p), px_at16(e) - px_at16(p));
     msg4(storage, sel("addAttribute:value:range:"), k_underline_color, color, px_at16(p),
         px_at16(e) - px_at16(p))
+}
+
+// ---- the underlines' views ----
+px_ul_b: []int = new int[1024](0);
+
+px_ul_e: []int = new int[1024](0);
+
+px_ul_c: []int = new int[1024](0);
+
+px_ul_n: int = 0;
+
+// The views, px_ul_tv's subviews (made as wanted, kept while it is).
+px_ul_views: []int = new int[1024](0);
+
+px_ul_made: int = 0;
+
+px_ul_tv: int = 0;
+
+px_ul_reset() {
+    for k in 0..px_ul_n release(px_ul_c[k]);
+    px_ul_n = 0
+}
+
+// (The sheet gone: its views let go, before its text view's address can
+// be another's.)
+px_ul_forget() {
+    px_ul_reset();
+    px_ul_drop();
+    px_ul_tv = 0
+}
+
+px_ul_drop() {
+    for j in 0..px_ul_made {
+        msg(px_ul_views[j], sel("removeFromSuperview"));
+        release(px_ul_views[j])
+    }
+    px_ul_made = 0
+}
+
+px_ul_view(k: int): int {
+    if (px_ul_tv != px_tv) {
+        px_ul_drop();
+        px_ul_tv = px_tv
+    }
+    while (px_ul_made <= k) {
+        v: int = make("UIView");
+        msg1(v, sel("setUserInteractionEnabled:"), 0);
+        msg1(v, sel("setHidden:"), 1);
+        msg1(px_tv, sel("addSubview:"), v);
+        px_ul_views[px_ul_made] = v;
+        px_ul_made = px_ul_made + 1
+    }
+    px_ul_views[k]
+}
+
+px_line_rect: []f64 = new f64[4](0.0f64);
+
+px_glyph_at: []f64 = new f64[4](0.0f64);
+
+// Each underline put under its letters as the text is laid out now (after
+// a paint, and whenever the text view's width changes): 1 point thick,
+// a tenth of the text's size under the baseline, a line each where a word
+// is broken across two.
+px_ul_place() {
+    if (px_tv == 0) return;
+    lm: int = msg(px_tv, sel("layoutManager"));
+    container: int = msg(px_tv, sel("textContainer"));
+    msg1(lm, sel("ensureLayoutForTextContainer:"), container);
+    l8_msg_hfa(hfa, px_tv, sel("textContainerInset"), 0, 0, 0);
+    top: f64 = hfa[0];
+    left: f64 = hfa[1];
+    below: f64 = em * 0.1f64;
+    if (below < 2.0f64) below = 2.0f64;
+    n: int = 0;
+    glyphs: int = msg(lm, sel("numberOfGlyphs"));
+    for k in 0..px_ul_n {
+        g: int = px_at16(px_ul_b[k]);
+        g1: int = px_at16(px_ul_e[k]);
+        if (g1 > glyphs) g1 = g;
+        while (g < g1) {
+            // (This line's part of it.)
+            l8_msg_hfa(px_line_rect, lm, sel("lineFragmentRectForGlyphAtIndex:effectiveRange:"),
+                g, 0, 0);
+            y0: f64 = px_line_rect[1];
+            e: int = g + 1;
+            same: bool = true;
+            while (same && e < g1) {
+                l8_msg_hfa(hfa, lm, sel("lineFragmentRectForGlyphAtIndex:effectiveRange:"),
+                    e, 0, 0);
+                if (hfa[1] != y0) same = false else e = e + 1
+            }
+            l8_msg_hfa(px_glyph_at, lm, sel("locationForGlyphAtIndex:"), g, 0, 0);
+            l8_msg_hfa(hfa, lm, sel("boundingRectForGlyphRange:inTextContainer:"),
+                g, e - g, container);
+            v: int = px_ul_view(n);
+            msg_rect(v, sel("setFrame:"), left + hfa[0], top + y0 + px_glyph_at[1] + below,
+                hfa[2], 1.0f64);
+            msg1(v, sel("setBackgroundColor:"), px_ul_c[k]);
+            msg1(v, sel("setHidden:"), 0);
+            n = n + 1;
+            g = e
+        }
+    }
+    for j in n..px_ul_made msg1(px_ul_views[j], sel("setHidden:"), 1)
+}
+
+// The sheet laid out: the underlines under their words again.
+px_laid_out(self: int, cmd: int): int {
+    super0(self, px_class, cmd);
+    px_ul_place();
+    0
 }
 
 // How word w shows now: 0 whole, 1 its key letter, 2 none.
@@ -516,6 +643,7 @@ px_paint(fade: bool) {
     msg3(storage, sel("removeAttribute:range:"), k_underline, px_base, all);
     msg3(storage, sel("removeAttribute:range:"), k_underline_color, px_base, all);
     msg3(storage, sel("removeAttribute:range:"), k_background, px_base, all);
+    px_ul_reset();
     px_color(storage, 0, mt_n, px_clear);
     learned: int = msg_set_f(c_ink, sel("colorWithAlphaComponent:"), 0.35f64);
     rule: int = msg_set_f(color_hex(t_rule[theme], 1.0f64), sel("colorWithAlphaComponent:"),
@@ -563,6 +691,7 @@ px_paint(fade: bool) {
     if (px_wash >= 0 && px_wash < mv_n) msg4(storage, sel("addAttribute:value:range:"),
         k_background, c_sel, px_at16(mv_b[px_wash]), px_at16(mv_e[px_wash]) - px_at16(mv_b[px_wash]));
     msg(storage, sel("endEditing"));
+    px_ul_place();
     px_access()
 }
 
@@ -747,6 +876,10 @@ memory_again() {
 px_after_step(_passage: bool) {
     px_paint(true);
     px_toolbar(true);
+    // (A new part, or the two joined, brought into sight: it may begin
+    // low on the page, under the toolbar.)
+    if ((px_step == PX_NEW || px_step == PX_JOINED) && px_a1 > px_a0) msg2(px_tv,
+        sel("scrollRangeToVisible:"), px_at16(mw_b[px_a0]), px_at16(mw_e[px_a1 - 1]) - px_at16(mw_b[px_a0]));
     px_log_step()
 }
 
@@ -1017,6 +1150,7 @@ practice_close(dismiss: bool) {
 
 practice_gone() {
     px_au_stop();
+    px_ul_forget();
     px_nav = held(px_nav, 0);
     px_vc = held(px_vc, 0);
     px_tv = held(px_tv, 0);
@@ -1697,6 +1831,7 @@ practice_backgrounded() {
 make_practice_classes() {
     px_class = objc_allocateClassPair(cls("UIViewController"), "L8Practice", 0);
     add_method1(px_class, sel("viewDidAppear:"), &px_appeared, "v@:B");
+    add_method0(px_class, sel("viewDidLayoutSubviews"), &px_laid_out, "v@:");
     objc_registerClassPair(px_class);
     px_keys_class = objc_allocateClassPair(cls("UIView"), "L8Keys", 0);
     add_method1(px_keys_class, sel("insertText:"), &keys_insert, "v@:@");
