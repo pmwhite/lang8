@@ -321,3 +321,11 @@ without it: the ESV is simply not offered until
 5. Once deployed: `tools/esv_versify.py` (DESIGN.md §9.4.9) checks the ESV's
    verse numbering through the proxy, and the converter's class names are
    checked against real answers (real ESV HTML is never committed).
+
+Since the web reader (WEB.md §W2.1a), the Worker's static assets are
+`.build/bible-site` (the site's pages and `/read/`), so every deploy is
+preceded by `make bible-web` at the repository's root; deploying it puts
+the web reader live, which needs the owner's consent like the rest. Check
+afterwards that `curl -sI https://smoothbible.com/read/bsb/john/3` carries
+the `Content-Security-Policy` and that `/` and `/api/v1/status` are as
+before.
