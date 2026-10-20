@@ -174,12 +174,14 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   broken link or anchor, an unknown condition, action or symbol, or a tip
   out of the house style); `ios_demo.l8` (and `ios_demo3.l8` to
   `ios_demo15.l8`) the demo CI runs.
-- `web.l8` is the reader on the web, through the page bridge
-  (`../web/dom.l8`, `web/dom.js`), for now the plumbing only: the BSB
-  fetched and indexed, a chapter laid out by `text.l8` as paragraphs of
-  spans, a click naming its verse, the chapter in the address (`?John+3`)
-  with back. `make bible-web` builds it into `.build/bible-web` (page
-  `bible/`); `make bible-wasm-test` runs the tests as WebAssembly.
+- The web (`WEB.md`): `html.l8` writes a chapter as HTML (tested in
+  `test_html.l8`), the same for `prerender.l8`, which makes every chapter's
+  page at build time, and for the app, `web.l8` (start, settings, keys,
+  history) and `web_reader.l8` (the window of chapters, the bar, the place,
+  footnotes), which run in the browser through the page bridge
+  (`../web/dom.l8`, `web/dom.js`). `make bible-web` builds the site into
+  `.build/bible-site` (`web/bible/`); `make bible-wasm-test` runs the tests
+  as WebAssembly.
 - `audio.l8` is recorded readings' portable part (sources, addresses,
   timings, which source a chapter is heard from, the cache's rules), tested
   in `test_audio.l8`; `ios_audio.l8` the Voice screens, voices, the cache

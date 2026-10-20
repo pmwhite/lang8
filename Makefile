@@ -206,13 +206,16 @@ bible-wasm-test: $(OK)/bible-wasm-tests
 $(BUILD)/bible.wasm: l8c3 $(PROGRAMS) | $(OK)
 	@$(STEP) 'bible wasm' sh -c './l8c3 wasm programs/bible/web.l8 -o $@.tmp && mv -f $@.tmp $@'
 
-# The web app as a static site in .build/bible-web (its page in bible/):
-# python3 -m http.server -b 127.0.0.1 -d .build/bible-web 8000.
-BIBLE_WEB := $(BUILD)/bible-web
-$(OK)/bible-web: $(BUILD)/bible.wasm web/l8-runtime.js web/dom.js $(wildcard web/bible/*) programs/bible/data/bsb.txt | $(OK)
-	@$(STEP) 'bible web site' sh -c 'rm -rf $(BIBLE_WEB) && mkdir -p $(BIBLE_WEB)/bible && \
-		cp web/l8-runtime.js web/dom.js $(BIBLE_WEB)/ && \
-		cp web/bible/* $(BUILD)/bible.wasm programs/bible/data/bsb.txt $(BIBLE_WEB)/bible/'
+# The web reader's site (WEB.md §W1.9) in .build/bible-site: the marketing
+# pages, and read/ with every chapter prerendered (prerender.l8), the app
+# and its assets under hashed names, then checked (web/bible/build.py).
+# Serve it as smoothbible.com does: node web/bible/test/serve.mjs.
+$(BUILD)/bible-prerender: l8c3 $(PROGRAMS) $(RUNTIME) | $(OK)
+	@$(STEP) 'bible prerender' sh -c '$(call build,l8c3,programs/bible/prerender.l8)'
+
+$(OK)/bible-web: $(BUILD)/bible-prerender $(BUILD)/bible.wasm web/l8-runtime.js web/dom.js $(wildcard web/bible/* web/bible/fonts/* programs/bible/site/* programs/bible/site/*/*) programs/bible/data/bsb.txt | $(OK)
+	@$(STEP) 'bible web site' python3 -I web/bible/build.py $(BUILD)/bible-prerender $(BUILD)/bible.wasm $(BUILD)/bible-site
+	@$(STEP) 'bible web check' python3 -I web/bible/build.py --check $(BUILD)/bible-site
 	@touch $@
 
 bible-web: $(OK)/bible-web

@@ -1,13 +1,14 @@
-// Smooth Bible on the web (programs/bible/web.l8): the module started with
-// the page bridge (../dom.js). Main sets the page up and returns; the
-// reader lives on in its callbacks. #html builds chapters as one string of
-// HTML instead of nodes (to compare); #bench=N builds one N times.
+// Smooth Bible on the web: starts the reader (programs/bible/web.l8) with
+// the page bridge (../dom.js). The boot script imports this once the
+// browser is known to run the module. build.py puts the assets' hashed
+// names in for the {{...}} and the imports' paths.
 import { instantiate, runStart } from "../l8-runtime.js";
 import { domHost } from "../dom.js";
 
-const hash = new URLSearchParams(location.hash.slice(1));
-window.l8_html = hash.has("html") ? 1 : 0;
-window.l8_bench = Number(hash.get("bench") || 0);
+window.sbData = {
+  bsb: "{{data_bsb}}", kjv: "{{data_kjv}}", web: "{{data_web}}", asv: "{{data_asv}}", ylt: "{{data_ylt}}",
+  icons: "{{icons}}",
+};
 
 const decoder = new TextDecoder();
 const sys = {
@@ -22,11 +23,8 @@ const sys = {
   close: () => -9,
 };
 
-const t0 = performance.now();
-const module = await WebAssembly.compileStreaming(fetch("bible.wasm"));
-window.l8_compile_ms = performance.now() - t0;
+const module = await WebAssembly.compileStreaming(fetch("{{wasm}}"));
 const dom = domHost();
 const { instance } = await instantiate(module, sys, dom.imports);
 dom.attach(instance);
-window.l8_start_ms = performance.now();
 runStart(instance);

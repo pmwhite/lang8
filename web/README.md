@@ -267,6 +267,11 @@ of HTML.
 
 ## Smooth Bible
 
-`bible/` runs `programs/bible/web.l8`, the reader on the web (see
-`programs/bible/README.md`). `make bible-web` builds it into
-`.build/bible-web`; serve that directory and open `bible/`.
+`bible/` is the Bible reader on the web (`programs/bible/WEB.md`):
+`page.html` the page template, `boot.js` its inline boot script,
+`read.css`, `icons.svg` (Lucide), `fonts/` (Source Serif 4 and Charis SIL,
+OFL), `about.html`, and `bible.js`, which starts `programs/bible/web.l8`.
+`make bible-web` prerenders every chapter of the five bundled versions and
+builds the site in `.build/bible-site` (`bible/build.py`); `node
+bible/test/serve.mjs` serves it as smoothbible.com does, through the real
+Worker.

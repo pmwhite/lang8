@@ -1,0 +1,57 @@
+// The site as smoothbible.com serves it, for the driver and by hand:
+//   node web/bible/test/serve.mjs [SITE] [PORT]   (.build/bible-site, 8470)
+// Requests go to the real Worker (programs/bible/worker/worker.js), with
+// ASSETS standing in for Cloudflare's static assets over SITE as
+// wrangler.toml configures them (html_handling "auto-trailing-slash",
+// not_found_handling "404-page"). The Worker has no ESV key here, so the
+// ESV is not offered.
+//
+// One thing is added in front of the Worker until it does it itself
+// (WEB.md §W2.1, a change to worker.js that is not ours to make): a path
+// under /read/ with no page of its own, shaped like a reader's address,
+// answers read/shell.html with 200.
+import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
+import worker from "../../../programs/bible/worker/worker.js";
+
+const site = path.resolve(process.argv[2] || ".build/bible-site");
+const port = Number(process.argv[3] || 8470);
+const types = { ".html": "text/html; charset=utf-8", ".css": "text/css", ".js": "text/javascript", ".wasm": "application/wasm",
+  ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg", ".woff2": "font/woff2", ".gz": "application/gzip",
+  ".txt": "text/plain; charset=utf-8", ".xml": "application/xml" };
+
+const file = (rel) => {
+  const p = path.join(site, rel);
+  if (!p.startsWith(site)) return null;
+  try {
+    return fs.statSync(p).isFile() ? p : null;
+  } catch {
+    return null;
+  }
+};
+const answer = (p, status = 200) =>
+  new Response(fs.readFileSync(p), { status, headers: { "content-type": types[path.extname(p)] || "application/octet-stream" } });
+
+// Cloudflare's assets: /x/ is x/index.html, /x is x.html; a missing page
+// is the site's 404 page.
+const ASSETS = {
+  async fetch(request) {
+    const url = new URL(request.url);
+    const rel = decodeURIComponent(url.pathname);
+    let p = rel.endsWith("/") ? file(rel + "index.html") : file(rel) || file(rel + ".html");
+    if (!p && !rel.endsWith("/") && file(rel + "/index.html")) return Response.redirect(url.origin + rel + "/", 307);
+    if (p) return answer(p);
+    if (/^\/read\/(bsb|kjv|web|asv|ylt|esv)\/[a-z0-9-]+(\/\d+)?$|^\/read\/search$/.test(rel)) return answer(file("read/shell.html"));
+    return answer(file("404.html"), 404);
+  },
+};
+const env = { ASSETS, UPSTREAM: "http://127.0.0.1:9/", PER_IP: { limit: async () => ({ success: true }) } };
+
+http.createServer(async (req, res) => {
+  const request = new Request(`http://smoothbible.com${req.url}`, { method: req.method, headers: req.headers });
+  const r = await worker.fetch(request, env);
+  const body = Buffer.from(await r.arrayBuffer());
+  res.writeHead(r.status, Object.fromEntries(r.headers));
+  res.end(body);
+}).listen(port, "127.0.0.1", () => console.log(`http://127.0.0.1:${port}/read/`));

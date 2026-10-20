@@ -1,0 +1,714 @@
+tag bible_web;
+
+use_tag std, bible, dom;
+
+// The reader on the web (WEB.md ยงW3): the page's window of chapters, the
+// bar, the place, the title and address, and footnotes.
+//
+// The document scrolls. It holds a window of chapters around the place
+// (ยงW3.3), each an <article> html.l8 wrote: one added below at once
+// whenever the reading line nears the window's end (that moves nothing);
+// above, or taken away, only at rest, with the scroll moved by what was
+// added or taken in the same task, so nothing on screen moves.
+import "text.l8";
+
+import "html.l8";
+
+import "../web/dom.l8";
+
+// The page's parts.
+r_main: int = 0;
+
+r_bar: int = 0;
+
+r_title: int = 0;
+
+// The title's two texts, one shown (r_t_on), for the cross-fade.
+r_t: []int = new int[2](0);
+
+r_t_on: int = 0;
+
+// The text read (TEXT_BSB ...), and its verses on lines of their own.
+r_text: int = 0;
+
+r_lines: bool = false;
+
+// ---- a writer for addresses, titles and states ----
+wb: []i8 = new i8[1024](0i8);
+
+wb_n: int = 0;
+
+w_byte(c: int) {
+    if (wb_n < len(wb)) {
+        wb[wb_n] = c trunc i8;
+        wb_n = wb_n + 1
+    }
+}
+
+w_str(s: str) {
+    for c in s w_byte(c as int)
+}
+
+w_int(n: int) {
+    if (n < 0) {
+        w_byte(45);
+        w_int(0 - n);
+        return
+    }
+    if (n >= 10) w_int(n / 10);
+    w_byte(48 + n % 10)
+}
+
+// x with three decimals (0.250).
+w_f3(x: f64) {
+    if (x < 0.0f64) {
+        w_byte(45);
+        w_f3(0.0f64 - x);
+        return
+    }
+    m: int = (x * 1000.0f64 + 0.5f64) as int;
+    w_int(m / 1000);
+    w_byte(46);
+    w_byte(48 + m / 100 % 10);
+    w_byte(48 + m / 10 % 10);
+    w_byte(48 + m % 10)
+}
+
+// Chapter c's name: John 3, Psalm 23, Jude.
+w_title(c: int) {
+    b: int = ch_book[c];
+    if (book_is(b, "PSA")) w_str("Psalm") else {
+        for i in book_name_start(b)..book_name_end(b) w_byte(bsb[i] as int)
+    }
+    if (book_count[b] > 1) {
+        w_byte(32);
+        w_int(ch_num[c])
+    }
+}
+
+// Chapter c's address: /read/bsb/john/3, and #v if v > 0.
+w_url(c: int, v: int) {
+    w_str("/read/");
+    for k in text_abbrs[r_text] w_byte(lower(k as int));
+    w_byte(47);
+    b: int = ch_book[c];
+    for i in book_name_start(b)..book_name_end(b) {
+        k: int = bsb[i] as int;
+        w_byte(if (k == 32) 45 else lower(k))
+    }
+    w_byte(47);
+    w_int(ch_num[c]);
+    if (v > 0) {
+        w_byte(35);
+        w_int(v)
+    }
+}
+
+// A number from b's p on (its digits), and where they end (num_end).
+num_end: int = 0;
+
+num_at(b: []i8, p: int, e: int): int {
+    n: int = 0;
+    i: int = p;
+    while (i < e && b[i] as int >= 48 && b[i] as int <= 57) {
+        n = n * 10 + b[i] as int - 48;
+        i = i + 1
+    }
+    num_end = i;
+    n
+}
+
+// A fraction (0.250) from b's p on.
+frac_at(b: []i8, p: int, e: int): f64 {
+    whole: int = num_at(b, p, e);
+    x: f64 = whole as f64;
+    i: int = num_end;
+    if (i < e && b[i] as int == 46) {
+        scale: f64 = 0.1f64;
+        i = i + 1;
+        while (i < e && b[i] as int >= 48 && b[i] as int <= 57) {
+            x = x + scale * (b[i] as int - 48) as f64;
+            scale = scale / 10.0f64;
+            i = i + 1
+        }
+    }
+    num_end = i;
+    x
+}
+
+// ---- measures ----
+box: []f64 = new f64[8](0.0f64);
+
+rects: []f64 = new f64[8192](0.0f64);
+
+abuf: []i8 = new i8[256](0i8);
+
+scroll_y: f64 = 0.0f64;
+
+view_w: f64 = 0.0f64;
+
+view_h: f64 = 0.0f64;
+
+// The expanded bar's height (with the top safe area): the reading line is
+// just under it.
+bar_h: f64 = 44.0f64;
+
+measure() {
+    dom_scroll(DOM_WINDOW, box);
+    scroll_y = box[1];
+    view_w = box[4];
+    view_h = box[5];
+    bar_h = dom_get_prop(r_bar, "offsetHeight")
+}
+
+reading_y(): f64 {
+    bar_h + 1.0f64
+}
+
+scroll_by(dy: f64) {
+    if (dy == 0.0f64) return;
+    dom_scroll(DOM_WINDOW, box);
+    dom_scroll_to(DOM_WINDOW, 0.0f64, box[1] + dy, 0)
+}
+
+// ---- the window of chapters ----
+win_first: int = -1;
+
+win_last: int = -1;
+
+win_h: []int = new int[1200](0);
+
+WIN_MOST: int = 12;
+
+win_size(): int {
+    win_last - win_first + 1
+}
+
+win_verses(): int {
+    n: int = 0;
+    for c in win_first..win_last + 1 n = n + ch_verses[c];
+    n
+}
+
+art_top(c: int): f64 {
+    dom_rect(win_h[c], box);
+    box[1]
+}
+
+art_bottom(c: int): f64 {
+    dom_rect(win_h[c], box);
+    box[1] + box[3]
+}
+
+// Chapter c's article written into hb.
+write_chapter(c: int) {
+    hb_n = 0;
+    html_chapter(r_text, c, r_lines)
+}
+
+// The next chapter added below the window (moves nothing).
+add_below(): bool {
+    c: int = win_last + 1;
+    if (c >= chapters) return false;
+    write_chapter(c);
+    win_h[c] = dom_insert_html_of(win_h[win_last], 3, hb, 0, hb_n);
+    win_last = c;
+    true
+}
+
+// The chapter before added above, the scroll moved by its height.
+add_above(): bool {
+    c: int = win_first - 1;
+    if (c < 0) return false;
+    y0: f64 = art_top(win_first);
+    write_chapter(c);
+    win_h[c] = dom_insert_html_of(win_h[win_first], 0, hb, 0, hb_n);
+    scroll_by(art_top(win_first) - y0);
+    win_first = c;
+    true
+}
+
+drop(c: int) {
+    dom_remove(win_h[c]);
+    dom_free_tree(win_h[c]);
+    win_h[c] = 0
+}
+
+drop_first() {
+    y0: f64 = art_top(win_first + 1);
+    drop(win_first);
+    win_first = win_first + 1;
+    scroll_by(art_top(win_first) - y0)
+}
+
+drop_last() {
+    drop(win_last);
+    win_last = win_last - 1
+}
+
+// The window made chapter c alone (to be filled around it).
+rebuild(c: int) {
+    if (win_first >= 0) {
+        for k in win_first..win_last + 1 drop(k)
+    }
+    write_chapter(c);
+    win_h[c] = dom_insert_html_of(r_main, 1, hb, 0, hb_n);
+    win_first = c;
+    win_last = c
+}
+
+// The chapter in the window at y (in the view), the nearest at either end.
+chapter_at(y: f64): int {
+    found: int = win_first;
+    for c in win_first..win_last + 1 {
+        if (art_top(c) <= y) found = c
+    }
+    found
+}
+
+// The window at rest (ยงW3.3): at least two chapters and a screen and a
+// half of text above the reading line, three chapters and three screens
+// below; no more than that, and never more than 12 chapters or 2,000
+// verses.
+settle_window() {
+    measure();
+    y: f64 = reading_y();
+    r: int = chapter_at(y);
+    more: bool = true;
+    while (more) {
+        more = false;
+        if (win_size() < WIN_MOST && win_first > 0 && (r - win_first < 2 || y - art_top(win_first) < 1.5f64 * view_h)) more = add_above()
+    }
+    more = true;
+    while (more) {
+        more = false;
+        if (win_size() < WIN_MOST && win_last + 1 < chapters && (win_last - r < 3 || art_bottom(win_last) - y < 3.0f64 * view_h)) more = add_below()
+    }
+    more = true;
+    while (more) {
+        more = false;
+        if (r - (win_first + 1) >= 2 && y - art_top(win_first + 1) >= 1.5f64 * view_h) {
+            drop_first();
+            more = true
+        } else if (win_last - 1 - r >= 3 && art_bottom(win_last - 1) - y >= 3.0f64 * view_h) {
+            drop_last();
+            more = true
+        } else if (win_size() > WIN_MOST || win_verses() > 2000) {
+            if (r - win_first > win_last - r) drop_first() else drop_last();
+            more = r >= win_first && r <= win_last && win_size() > 1
+        }
+    }
+}
+
+// While the page moves: a chapter below whenever the reading line is
+// within three screens of the window's end.
+fill_below() {
+    if (win_size() < WIN_MOST && art_bottom(win_last) - reading_y() < 3.0f64 * view_h) _a: bool = add_below()
+}
+
+// ---- the place (ยงW3.5) ----
+// The chapter, the verse and how far through it, at the reading line.
+pl_c: int = 0;
+
+pl_v: int = 1;
+
+pl_f: f64 = 0.0f64;
+
+// Verse v's spans in chapter c's article: their top and bottom in the view
+// (v_top, v_bottom); false if it has none.
+v_top: f64 = 0.0f64;
+
+v_bottom: f64 = 0.0f64;
+
+// (Verse 0 is the chapter's opener: from the article's top to its first
+// verse.)
+verse_box(c: int, v: int): bool {
+    if (c < win_first || c > win_last) return false;
+    if (v == 0) {
+        n0: int = dom_rects_all(win_h[c], "[data-v]", rects);
+        v_top = art_top(c);
+        v_bottom = (if (n0 > 0) rects[1] else art_bottom(c));
+        return true
+    }
+    wb_n = 0;
+    w_str("[data-v=\"");
+    w_int(v);
+    w_str("\"]");
+    n: int = dom_rects_all_of(win_h[c], wb, 0, wb_n, rects);
+    if (n <= 0) return false;
+    if (n > len(rects) / 4) n = len(rects) / 4;
+    v_top = rects[1];
+    v_bottom = rects[1] + rects[3];
+    for i in 1..n {
+        if (rects[4 * i + 1] < v_top) v_top = rects[4 * i + 1];
+        if (rects[4 * i + 1] + rects[4 * i + 3] > v_bottom) v_bottom = rects[4 * i + 1] + rects[4 * i + 3]
+    }
+    true
+}
+
+// The verse key of a node with data-v (0 if none).
+verse_of(h: int): int {
+    n: int = dom_get_attr(h, "data-v", abuf);
+    if (n <= 0) return 0;
+    num_at(abuf, 0, n)
+}
+
+// Where the text's column is in the view: its left and width.
+col_x: f64 = 0.0f64;
+
+col_w: f64 = 0.0f64;
+
+place_now() {
+    measure();
+    dom_rect(r_main, box);
+    col_x = box[0];
+    col_w = box[2];
+    y: f64 = reading_y();
+    pl_c = chapter_at(y);
+    // (A point a quarter across the column, clear of a popover on the
+    // right; in a gap or a heading, the nearest verse above.)
+    x: f64 = col_x + col_w * 0.25f64;
+    v: int = 0;
+    k: f64 = y;
+    top: f64 = art_top(pl_c);
+    while (v == 0 && k > y - 240.0f64 && k > top) {
+        h: int = dom_point(x, k, "[data-v]");
+        if (h != 0) {
+            v = verse_of(h);
+            dom_free(h)
+        }
+        k = k - 6.0f64
+    }
+    // (None above the line in this chapter: the line is in its opener.)
+    if (!verse_box(pl_c, v) || v > 0 && v_top > y) {
+        v = 0;
+        _b: bool = verse_box(pl_c, 0)
+    }
+    pl_v = v;
+    pl_f = (if (v_bottom > v_top) (y - v_top) / (v_bottom - v_top) else 0.0f64);
+    if (pl_f < 0.0f64) pl_f = 0.0f64;
+    if (pl_f > 1.0f64) pl_f = 1.0f64
+}
+
+// The place put back at the reading line (the window rebuilt around it if
+// it is not in it), then the window settled.
+restore_place() {
+    if (pl_c < win_first || pl_c > win_last) rebuild(pl_c);
+    measure();
+    if (verse_box(pl_c, pl_v)) scroll_by(v_top + pl_f * (v_bottom - v_top) - reading_y()) else scroll_by(art_top(pl_c) - reading_y());
+    settle_window()
+}
+
+// The place as a state for history and storage: "c v f".
+w_place() {
+    w_int(pl_c);
+    w_byte(32);
+    w_int(pl_v);
+    w_byte(32);
+    w_f3(pl_f)
+}
+
+// A place read back from b's first n bytes; false if it is not one.
+read_place(b: []i8, n: int): bool {
+    c: int = num_at(b, 0, n);
+    if (num_end == 0 || num_end >= n) return false;
+    v: int = num_at(b, num_end + 1, n);
+    if (num_end + 1 >= n) return false;
+    f: f64 = frac_at(b, num_end + 1, n);
+    if (c < 0 || c >= chapters) return false;
+    pl_c = c;
+    pl_v = v;
+    pl_f = f;
+    true
+}
+
+// The place kept: localStorage (sb.place: its address, then the place) and
+// the history entry's state.
+save_place() {
+    wb_n = 0;
+    w_url(pl_c, 0);
+    url_n: int = wb_n;
+    w_byte(32);
+    state_at: int = wb_n;
+    w_place();
+    dom_store_set("sb.place", wb, wb_n);
+    // (The entry's state: wb from state_at; its address before it.)
+    for i in 0..wb_n - state_at sb_state[i] = wb[state_at + i];
+    dom_replace(wb, url_n, sb_state, wb_n - state_at)
+}
+
+sb_state: []i8 = new i8[64](0i8);
+
+// ---- the title and the address (ยงW3.4, ยงW2.3) ----
+title_c: int = -1;
+
+// The chapter named: the one under the bar's bottom edge. The address and
+// the page's title follow it (replaceState: reading on is not a jump).
+set_title(c: int, address: bool) {
+    if (c == title_c) return;
+    title_c = c;
+    wb_n = 0;
+    w_title(c);
+    off: int = r_t_on;
+    on: int = 1 - r_t_on;
+    dom_set_text_of(r_t[on], wb, 0, wb_n);
+    dom_toggle_class(r_t[on], "out", 0);
+    dom_toggle_class(r_t[off], "out", 1);
+    r_t_on = on;
+    dom_set_attr_of(r_title, "aria-label", wb, 0, wb_n);
+    w_str(" \ย\ท ");
+    w_str(text_abbrs[r_text]);
+    w_str(" \ย\ท Smooth Bible");
+    dom_set_prop_of(DOM_DOCUMENT, "title", wb, 0, wb_n);
+    if (!address) return;
+    wb_n = 0;
+    w_url(c, 0);
+    url_n: int = wb_n;
+    n: int = dom_state(sb_state);
+    dom_replace(wb, url_n, sb_state, if (n < 0 || n > len(sb_state)) 0 else n)
+}
+
+// ---- the bar (DESIGN.md ยง3.1.4) ----
+bar_p: f64 = 0.0f64;
+
+last_y: f64 = 0.0f64;
+
+up_travel: f64 = 0.0f64;
+
+// The last movement: down (1) or up (0).
+last_down: bool = true;
+
+set_p(p: f64) {
+    bar_p = p;
+    wb_n = 0;
+    w_f3(p);
+    dom_set_style_of(r_bar, "--p", wb, 0, wb_n);
+    dom_toggle_class(r_bar, "tucked", if (p > 0.5f64) 1 else 0)
+}
+
+// The bar followed the scroll from last_y to scroll_y.
+follow_scroll() {
+    y: f64 = scroll_y;
+    dy: f64 = y - last_y;
+    last_y = y;
+    if (y < 0.0f64) return;
+    p: f64 = bar_p;
+    if (dy > 0.0f64) {
+        up_travel = 0.0f64;
+        last_down = true;
+        p = p + dy / 48.0f64
+    } else if (dy < 0.0f64) {
+        before: f64 = up_travel;
+        up_travel = up_travel - dy;
+        last_down = false;
+        if (up_travel > 12.0f64) {
+            past: f64 = if (before >= 12.0f64) 0.0f64 - dy else up_travel - 12.0f64;
+            p = p - past / 48.0f64
+        }
+    }
+    if (p > y / 48.0f64) p = y / 48.0f64;
+    if (p < 0.0f64) p = 0.0f64;
+    if (p > 1.0f64) p = 1.0f64;
+    if (p != bar_p) set_p(p)
+}
+
+settle_timer: int = 0;
+
+// At rest, a bar between its states eases to the nearer end of the last
+// movement (0.25 s).
+settle_bar() {
+    if (bar_p <= 0.0f64 || bar_p >= 1.0f64) return;
+    dom_add_class(r_bar, "settle");
+    set_p(if (last_down) 1.0f64 else 0.0f64);
+    dom_cancel(settle_timer);
+    settle_timer = dom_timeout(300.0f64, &on_settled, 0)
+}
+
+on_settled(_data: int) {
+    dom_remove_class(r_bar, "settle")
+}
+
+// The bar expanded, eased (on a jump, a dialog, a click on the title).
+expand_bar() {
+    if (bar_p == 0.0f64) return;
+    dom_add_class(r_bar, "settle");
+    set_p(0.0f64);
+    up_travel = 0.0f64;
+    dom_cancel(settle_timer);
+    settle_timer = dom_timeout(300.0f64, &on_settled, 0)
+}
+
+// ---- moving through the page ----
+frame_asked: bool = false;
+
+rest_timer: int = 0;
+
+has_scrollend: bool = false;
+
+on_scroll(_data: int) {
+    if (!frame_asked) {
+        frame_asked = true;
+        dom_frame(&on_frame, 0)
+    }
+    if (!has_scrollend) {
+        dom_cancel(rest_timer);
+        rest_timer = dom_timeout(120.0f64, &on_rest, 0)
+    }
+}
+
+on_frame(_data: int) {
+    frame_asked = false;
+    measure();
+    follow_scroll();
+    set_title(chapter_at(bar_h - 24.0f64 * bar_p), true);
+    fill_below();
+    fn_follow()
+}
+
+// At rest: the bar settled, the window settled, the place kept.
+on_rest(_data: int) {
+    settle_bar();
+    place_now();
+    settle_window();
+    set_title(chapter_at(bar_h - 24.0f64 * bar_p), true);
+    save_place()
+}
+
+// ---- jumps ----
+// A jump (ยงW2.3): the place before kept in its entry, then a new entry for
+// chapter c, verse v placed a third of the way down the space under the
+// bar and flashed (or, for v 0, the chapter's opener under the bar).
+jump(c: int, v: int) {
+    place_now();
+    save_place();
+    if (c < win_first || c > win_last) rebuild(c);
+    measure();
+    if (v > 0 && verse_box(c, v)) {
+        scroll_by(v_top - reading_y() - (view_h - bar_h) / 3.0f64);
+        flash(c, v)
+    } else top_of(c);
+    expand_bar();
+    settle_window();
+    place_now();
+    wb_n = 0;
+    w_place();
+    n: int = wb_n;
+    for i in 0..n sb_state[i] = wb[i];
+    wb_n = 0;
+    w_url(c, v);
+    dom_push(wb, wb_n, sb_state, n);
+    title_c = -1;
+    set_title(c, false)
+}
+
+// Chapter c's opener placed under the bar.
+top_of(c: int) {
+    n: int = dom_rects_all(win_h[c], "h2.op", rects);
+    top: f64 = if (n > 0) rects[1] else art_top(c);
+    scroll_by(top - reading_y() - 12.0f64)
+}
+
+// Verse v of chapter c flashed (every span of it: a verse can cross
+// paragraphs); one flashing before is stopped, so this one runs again.
+flash(c: int, v: int) {
+    dom_class_all(r_main, ".flash", "flash", 0);
+    _w: f64 = dom_get_prop(r_main, "offsetWidth");
+    wb_n = 0;
+    w_str("[data-v=\"");
+    w_int(v);
+    w_str("\"]");
+    dom_class_all_of(win_h[c], wb, 0, wb_n, "flash", 1)
+}
+
+// The chapter read's top, or the one before's if already there (Home;
+// DESIGN.md ยง3.1.4's status bar tap).
+home() {
+    place_now();
+    measure();
+    n: int = dom_rects_all(win_h[pl_c], "h2.op", rects);
+    top: f64 = if (n > 0) rects[1] else art_top(pl_c);
+    c: int = if (top >= reading_y() - 1.0f64 && pl_c > 0) pl_c - 1 else pl_c;
+    jump(c, 0)
+}
+
+// ---- footnotes (ยงW3.6) ----
+fn_pop: int = 0;
+
+fn_head: int = 0;
+
+fn_body: int = 0;
+
+fn_mark: int = 0;
+
+fn_keyboard: bool = false;
+
+fn_make() {
+    hb_n = 0;
+    h_str("<div class=\"fnpop\" popover=\"auto\" role=\"dialog\" aria-labelledby=\"fnpop-h\" tabindex=\"-1\"><h2 id=\"fnpop-h\"></h2><p></p></div>");
+    fn_pop = dom_insert_html_of(DOM_BODY, 2, hb, 0, hb_n);
+    fn_head = dom_query(fn_pop, "h2");
+    fn_body = dom_query(fn_pop, "p");
+    dom_listen(fn_pop, "toggle", 0, &on_fn_toggle, 0)
+}
+
+// A footnote's mark was clicked: its note in the popover beside it.
+fn_open(c: int, v: int, at: int) {
+    if (fn_mark != 0) dom_free(fn_mark);
+    fn_mark = dom_event_closest("a.fn");
+    fn_keyboard = dom_ev[DE_DETAIL] == 0;
+    wb_n = 0;
+    w_str("Footnote \ย\ท ");
+    w_title(c);
+    if (v > 0) {
+        w_byte(58);
+        w_int(v)
+    }
+    dom_set_text_of(fn_head, wb, 0, wb_n);
+    if (at >= 0 && at < bsb_n) dom_set_text_of(fn_body, bsb, at + 1, line_end(at));
+    dom_call(fn_pop, "showPopover");
+    fn_place();
+    if (fn_keyboard) dom_call(fn_pop, "focus")
+}
+
+// Above the mark if there is room, else below; 16 px from the edges.
+fn_place() {
+    if (fn_mark == 0) return;
+    measure();
+    dom_rect(fn_mark, box);
+    mx: f64 = box[0] + box[2] / 2.0f64;
+    mt: f64 = box[1];
+    mb: f64 = box[1] + box[3];
+    dom_rect(fn_pop, box);
+    w: f64 = box[2];
+    h: f64 = box[3];
+    x: f64 = mx - w / 2.0f64;
+    if (x > view_w - 16.0f64 - w) x = view_w - 16.0f64 - w;
+    if (x < 16.0f64) x = 16.0f64;
+    y: f64 = if (mt - h - 8.0f64 >= bar_h + 8.0f64) mt - h - 8.0f64 else mb + 8.0f64;
+    wb_n = 0;
+    w_f3(x);
+    w_str("px");
+    dom_set_style_of(fn_pop, "--x", wb, 0, wb_n);
+    wb_n = 0;
+    w_f3(y);
+    w_str("px");
+    dom_set_style_of(fn_pop, "--y", wb, 0, wb_n)
+}
+
+fn_open_now(): bool {
+    fn_pop != 0 && dom_call_s(fn_pop, "matches", ":popover-open") == 1.0f64
+}
+
+// While it is open: closed once its mark scrolls off the screen.
+fn_follow() {
+    if (fn_mark == 0 || !fn_open_now()) return;
+    dom_rect(fn_mark, box);
+    if (box[1] + box[3] < bar_h || box[1] > view_h) dom_call(fn_pop, "hidePopover")
+}
+
+on_fn_toggle(_data: int) {
+    if (fn_open_now()) return;
+    if (fn_keyboard && fn_mark != 0) dom_call(fn_mark, "focus");
+    if (fn_mark != 0) dom_free(fn_mark);
+    fn_mark = 0
+}

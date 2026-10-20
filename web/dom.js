@@ -190,6 +190,7 @@ export function domHost() {
     dom_fragment: () => hold(document.createDocumentFragment()),
     dom_by_id: (id) => hold(document.getElementById(str(id))),
     dom_query: (h, sel) => hold(obj(h)?.querySelector(str(sel))),
+    dom_query_of: (h, b, start, end) => hold(obj(h)?.querySelector(range(b, start, end))),
     dom_parent: (h) => hold(obj(h)?.parentNode),
     dom_append(parent, child) {
       obj(parent).appendChild(obj(child));
@@ -286,8 +287,18 @@ export function domHost() {
       obj(h).classList.toggle(str(name), on !== 0n);
       return 0n;
     },
+    dom_set_style_of(h, property, b, start, end) {
+      obj(h).style.setProperty(str(property), range(b, start, end));
+      return 0n;
+    },
     dom_class_all(h, selector, name, on) {
       const list = obj(h).querySelectorAll(str(selector));
+      const k = str(name);
+      for (const e of list) e.classList.toggle(k, on !== 0n);
+      return BigInt(list.length);
+    },
+    dom_class_all_of(h, b, start, end, name, on) {
+      const list = obj(h).querySelectorAll(range(b, start, end));
       const k = str(name);
       for (const e of list) e.classList.toggle(k, on !== 0n);
       return BigInt(list.length);
@@ -349,6 +360,16 @@ export function domHost() {
     },
     dom_rects(h, out) {
       const list = [...obj(h).getClientRects()];
+      doubles(out, list.flatMap((r) => [r.x, r.y, r.width, r.height]));
+      return BigInt(list.length);
+    },
+    dom_rects_all(h, selector, out) {
+      const list = [...obj(h).querySelectorAll(str(selector))].flatMap((e) => [...e.getClientRects()]);
+      doubles(out, list.flatMap((r) => [r.x, r.y, r.width, r.height]));
+      return BigInt(list.length);
+    },
+    dom_rects_all_of(h, b, start, end, out) {
+      const list = [...obj(h).querySelectorAll(range(b, start, end))].flatMap((e) => [...e.getClientRects()]);
       doubles(out, list.flatMap((r) => [r.x, r.y, r.width, r.height]));
       return BigInt(list.length);
     },
