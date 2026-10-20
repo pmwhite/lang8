@@ -778,51 +778,158 @@ way to read the Bible on the web than most, and links to it can be shared. Navig
    space under the bar and adds `flash` (§2.7), so a shared verse link lands right even
    before the app has started.
 
-### W3.3 Continuous scroll in a document: the window of chapters
+### W3.3 Continuous scroll: the Bible laid out by a height table (amended 2026-10-20)
 
-The iPhone's table holds all 1,189 chapters as rows of estimated height. A web page can't
-hold the Bible's 31,000 verses in its DOM without making every phone slow, so the page
-holds a **window of chapters** around the place and moves it as you read.
+**Why it changed.** The owner, on an iPhone, on phase (a) as first built: "there is an
+issue when scrolling intentionally around chapter boundaries. Sometimes the position jumps
+suddenly", and "I was able to scroll so fast I got to the book list at the bottom of the
+DOM". Both come from the first design:
+- it added and removed chapters in the page's flow and wrote the scroll position to make
+  up for them "at rest";
+- on iOS a pause with the finger still down looks like rest, and a write then jumps;
+- a page made only of the chapters held has an end a fling can reach.
 
-**The window:**
-- At rest it holds the chapter at the reading line, **at least two chapters above and
-  three below it** (more if they're short: at least 1.5 viewport heights of text above and
-  3 below), and at most 12 chapters or 2,000 verses (Psalm 119 is 176). Across a book's
-  end it continues into the next book, from Genesis 1 to Revelation 22, without a break,
-  as the iPhone.
-- Chapters are added by `html_chapter`: one `<article>` made and its HTML set, inserted before or after the window.
-- **Adding below never moves anything,** so it happens at once, whenever the reading line
-  is within 3 viewport heights of the window's end, mid-scroll or not.
-- **Adding above or removing anything above changes the scroll height above the reader,**
-  so it happens **only at rest** (scroll end), and in the same frame the app scrolls by
-  the height added or removed (`dom_scroll_to` from where it was), measured with `dom_rect` before and after
-  in one task, so no pixel moves on screen. This is §9.4.11's lesson: never write the
-  scroll position while the page is moving, because on iOS that stops a fling dead.
-  (Chrome's and Firefox's scroll anchoring would do this by themselves, but Safari's
-  can't be relied on, so the app does it everywhere and sets `overflow-anchor: none` so
-  the two never fight.)
-- **A fast fling upward can reach the window's top before any rest.** The page then
-  stops there, as any page stops at its top, and the chapters above go in at the rest
-  (the reader scrolls on into them). To make that rare, the window keeps 1.5 screens above
-  at rest, and while the page moves upward faster than 3 viewport heights a second the app
-  prepares the next chapters above as HTML strings, so they go in at the first rest without
-  delay. The CI counts how often a scripted fling meets the edge (§W14.3).
-- **Removing below** (beyond the window's limit) happens at rest too, though it moves
-  nothing, so the page's length doesn't jump under a scroll bar being dragged.
-- **The scroll bar** is the window's, not the Bible's: its thumb shows your place within
-  the dozen chapters held. Accepted: the web's readers know the bar as the page's, and
-  Go To is the way to move far.
-- **The end and the start:** after Revelation 22, 120 px and nothing else (§2.4); above
-  Genesis 1, the top gap only.
+The owner proposed the answer, and it is the right one for a fixed text: **never move the
+scroll position to make up for content; place the content where the scroll position says
+it is.**
 
-**Nothing moves when marks arrive.** Highlights and selection only colour a background. The
-bookmark glyph is an inline `::before` on the verse number, 0.55 em tall and
-`line-height: 0`, and a note's glyph a 0.62 em inline button at the verse's end; either can
-re-wrap the line it sits in. To keep that from moving the text above the reading line,
-marks for a newly adopted or added chapter are applied in the same task that adds it (the
-app knows them before the HTML goes in: `html_chapter` takes the marks and writes the
-classes and glyphs into the HTML itself), and a mark made by the reader re-wraps only its
-own verse's lines, below where the eye is.
+**The model.**
+1. **One scroller, the whole Bible in the version read.**
+   - `<main>` holds a spacer whose height is the whole Bible's: `pos[0]` (the space above
+     Genesis 1), plus every chapter's height, plus the 120 px after Revelation 22.
+   - Each chapter in the DOM is an `<article>` positioned absolutely at `top: pos[c]`
+     (`contain: layout paint`).
+   - The document is the scroller, as before (§W3.2), so the browser's own scrolling,
+     address bar, keys and scroll bar all work, and the bar's thumb now shows the place in
+     the whole Bible.
+   - The pager and the credit line come after the spacer, so they can only be reached
+     after Revelation 22.
+2. **The height table:** `height[c]` for the 1,189 chapters, with `pos[c+1] = pos[c] +
+   height[c]`. Each height is either *estimated* or *measured*.
+   - **Estimated,** by the app in L8 from the chapter's laid-out runs (`layout_chapter`)
+     and two measured constants:
+     - the column's characters per line, from one sample paragraph set at the current
+       font, size and width;
+     - the line height.
+     The estimate is the opener and dividers, plus each heading's lines and margins, plus,
+     for each paragraph, `ceil(characters / per line)` lines (poetry and list lines each
+     count their own wrap) and its spacing. Estimating the whole table takes a few
+     milliseconds and is done once per version and settings.
+   - **Measured** exactly, three ways:
+     - when a chapter enters the DOM, in the same task, before paint;
+     - in the background, by writing chapters into a hidden measuring box (`position:
+       absolute; visibility: hidden; contain: strict`, the column's width) one chapter per
+       slice of at most 8 ms, outward from the place in both directions, only while
+       nothing scrolls and no finger or button is down;
+     - from storage: the table is kept in `localStorage` (`sb.heights`, the three most
+       recent keys). The key is the version, the column's width in CSS px, the font,
+       size step, spacing and margins, the show switches, verse-per-line, and the root
+       font size (the browser's text size).
+   - **Thrown away and re-estimated** on any change of those, and when web fonts finish
+     loading (`document.fonts` `loadingdone`).
+3. **The anchor:** the chapter holding the reading line. **A correction never moves the
+   anchor.** When a chapter's measured height differs from its estimate by `d`:
+   - **above the anchor,** the chapter keeps its bottom: it and every chapter above it
+     move up by `d` (`pos[k] −= d` for k up to it). The space above Genesis 1 (`pos[0]`)
+     takes up the error;
+   - **below the anchor** (or the anchor itself), the chapter keeps its top: every chapter
+     after it moves by `d`, and the spacer grows or shrinks at its end.
+
+   Nothing on screen moves except what was a placeholder becoming text of the same place.
+4. **The window:** the chapters overlapping two screens above the viewport and three
+   below are in the DOM, written by `html_chapter` (and kept if they hold a selection,
+   text or verse). At most two chapters are written per animation frame. While the page
+   moves fast, the window reaches ahead in the direction of motion by the distance the
+   page will cover in 0.4 s at its current speed. Chapters leave the DOM when they're more
+   than four screens away. Adding and removing never changes the layout of anything else,
+   so it can happen at any time, mid-fling or mid-drag.
+5. **Placeholders,** so a fling never shows emptiness or the page's end:
+   - The spacer's own background is the page colour with faint lines at the text's line
+     height (`repeating-linear-gradient` of `rule`, inset by the margins).
+   - Every chapter's opener ("JOHN / 4") is drawn on it at `pos[c]`, a small absolutely
+     positioned element written for the whole Bible at once (1,189 elements of two
+     words, cheap).
+   - A chapter not written yet therefore shows its name and its lines at its place, and
+     its text arrives over them.
+6. **When the scroll position is written,** and only then. Each time, the place
+   (chapter, verse, fraction) is placed at the reading line in the same frame:
+   1. **Adoption**, once (below).
+   2. **A jump:** Go To, a link, `]` `[`, Back and Forward, Home.
+   3. **A relayout** after a resize or rotation, a settings change, a version change, or
+      fonts loading. The table is re-estimated, the anchor is kept, and the write waits
+      until no finger is down and nothing has scrolled for 300 ms.
+   4. **Taking up the surplus above Genesis 1:**
+      - only when `pos[0]` differs from its exact value by more than half a screen, all
+        chapters above the anchor have been measured, and the reader is at **true rest**
+        (no pointer or touch down, nothing scrolled for 500 ms);
+      - in one frame: everything moves by the surplus and the scroll by the same amount;
+      - it is rare, since background measuring makes the table exact before a reader
+        could scroll that far.
+
+   The bridge logs every write with its reason (`scroll write: jump`). Any write during a
+   touch, a drag or momentum is a defect, and the CI fails on one.
+7. **Adopting the prerendered page without a pixel moving:**
+   - the app builds the table (the adopted chapter's height measured at once) and the
+     spacer;
+   - in one frame it moves the static article to `top: pos[c]` and sets the scroll so the
+     article stays exactly where it was on screen;
+   - it waits for true rest if the reader is touching or scrolling the static page when
+     the app arrives;
+   - `pos[0]` starts with slack, 5% of the estimated height above the chapter plus one
+     screen, so corrections above never push Genesis 1 below zero.
+8. **The size limit.** Browsers cap an element's height: Firefox about 17.9 million px,
+   Chrome and WebKit about 33.5 million. The whole Bible is about 3.5 million px on a
+   phone at the default size, and about 10–14 million at the largest step with a large
+   browser text size.
+   - When the estimated total passes **12 million px,** the scroller holds one testament.
+   - When a testament passes it, the scroller holds one book.
+   - Crossing between them is a jump at a boundary, made by a link at the end of the
+     scroller ("Matthew 1 ›", or the next book). The CI covers this at the largest step
+     with a 200% root size.
+9. **What follows from it:**
+   - **The title and the address** come from the table (a binary search of `pos` for the
+     reading line), with no DOM measuring, so they're right over placeholders too.
+   - **History places** stay (chapter, verse, fraction); a position is computed from the
+     table when one is restored.
+   - **Find in page** finds only the chapters in the window (about the five around the
+     place). Search (b) finds anything. The manual says so in one line.
+   - **Text selection:** a chapter holding the selection stays in the window until the
+     selection is cleared, so a selection can't lose its end.
+   - **Anchoring:** `overflow-anchor: none` on the document, so the browser's anchoring
+     never adds writes of its own.
+   - **Print:** on `beforeprint` the chapter read is put back in the flow with nothing
+     else, and on `afterprint` returned to its place (§W3.8).
+   - **Keyboard and screen readers:**
+     - Space and Page Down scroll the document natively, and the window follows.
+     - Each window end has a visually hidden link, "Continue to John 5" (the next chapter
+       beyond the window, a real link). Swiping or tabbing past the window's last element
+       reaches it, and following it is a jump.
+     - VoiceOver's own scrolling to the next element moves the page, and the window
+       follows, as for any scroll.
+   - **The bar:** writes of the scroll position never count as the reader's movement
+     (`last_y` takes them), so a write never collapses or expands the bar by itself
+     (REVIEW-web-a1 M1).
+10. **What replaces the old limits:** "two chapters above, three below, at most 12" becomes
+    the window of item 4. §W3.9's items 3 and 4 become the checks below.
+
+**CI checks for this section** (replacing §W3.9 items 3 and 4):
+- **Slow, intentional scrolling across chapter boundaries:** CDP touch drags of 40–200 px
+  with pauses of 0.3–1.5 s while the finger stays down, then lifted, across John 3/4,
+  Psalms 118/119/120 and Malachi 4/Matthew 1. The first visible verse's top moves exactly
+  by the scroll each frame (to 1 px), and no scroll position is written.
+- **Fast flings** (`Input.synthesizeScrollGesture` at 8,000 and 20,000 px/s, both
+  directions, for 3 s): no frame shows the page's end, the pager or the credit line
+  before Revelation, and none shows a strip with neither text nor placeholder.
+  Placeholders may show; the shot list gains one mid-fling shot.
+- **Adoption:** no pixel of the text moves (as §W3.9 item 2).
+- **The estimates:** after calibration, the CI logs estimated against measured heights
+  for all 1,189 BSB chapters at phone and desktop widths. The mean error must be at most
+  2%, the largest at most 6%, and the sum of signed errors above John 3 at most 1.5% of
+  their total.
+- **A pause with the finger down over an unmeasured chapter** above the anchor, while its
+  measurement lands: nothing visible moves.
+- **The size limit:** step 7 with a 200% root size keeps the scroller under 12 million px,
+  or uses the testament scroller, and its boundary link works.
 
 ### W3.4 The bar
 
@@ -871,7 +978,8 @@ own verse's lines, below where the eye is.
   verse-per-line), a version change, fonts finishing loading (`document.fonts.ready` and
   `loadingdone`), and Back and Forward. The app computes the verse's new top with
   the verse's spans' rects and scrolls so the same fraction of the same verse sits at the reading
-  line. Restoring is an instant scroll at rest; during a scroll it waits for the rest.
+  line. Restoring is one of §W3.3 item 6's writes, made only when no finger is down and
+  nothing has scrolled for 300 ms.
 - On the first paint of a prerendered page the place is the fragment's verse, or the
   chapter's top.
 
@@ -937,8 +1045,7 @@ prints at the end.
    the title changing in place, the URL following with `replaceState`, the history length
    unchanged, and no frame where the text jumps (the CI records the verse at the reading
    line every frame; it must change monotonically with the scroll).
-4. The window never holds more than 12 chapters; at rest, never fewer than 2 above and 3
-   below (except at the Bible's ends).
+4. §W3.3's CI checks (slow scrolling with pauses, fast flings, estimates, the size limit).
 5. A resize from 390 to 1280 px wide and back, a font change, a size change to step 7 and
    back, and a theme change each keep the same verse at the reading line (to within one
    line).
