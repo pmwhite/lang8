@@ -19,12 +19,11 @@ iPhone's best voice) is specified in §12 and follows. **Round 9 (memorization, 
 the owner on 2026-10-19: passages chosen from the verse tray in any version, a calm Practice
 screen with fading cues and first-letter typing, a quiet Leitner schedule with no streaks or
 scores, Listen and Echo from the recordings, the Library's Memory segment, and Memory as a
-second reason for the one daily reminder) is specified in §13 and follows.** **Round 10
-(learning Greek and Hebrew, asked for by the owner on 2026-10-19 and scoped on 2026-10-20:
-no course, no video; what you know hides the English in the interlinear's original order,
-words learned most common first or from your own passages on §13's schedule, the Bible's
-own forms of each word, short grammar notes adapted from unfoldingWord's grammars, CC BY-SA)
-is specified in §14 and follows Round 9.** Round 1 is
+second reason for the one daily reminder) is specified in §13 and follows.** **Rounds 10–14
+(learning Greek and Hebrew, asked for by the owner on 2026-10-19; first scoped small, then,
+on 2026-10-20, opened to "the optimal Greek and Hebrew learning": foundations and
+vocabulary, the original text in the reader glossed by what you know, a Greek course, a
+Hebrew course, and Aramaic with recordings) are specified in §14 and follow Round 9.** Round 1 is
 §0.5–§6, Round 2 is §7 and Round 3 is §8. The owner's priorities, in order: distraction-free reading, note-taking, language tools.
 Above all: iPhone-native, HIG-proper, predictable UI. The app is **free forever**: no
 price, ads, in-app purchases or donation prompts (owner, 2026-10-18).
@@ -256,23 +255,32 @@ In build order:
 5. **R9.5 The Library's Memory segment** (Today, New, Later), and Memory as a second,
    optional reason for the one daily reminder.
 
-### Round 10: learning Greek and Hebrew (fully specified in §14)
-Not a course: small additions to Study and Memory, so that reading and learning feed each
-other. The reader doesn't change.
-1. **R10.1 What you know changes what you see:** in the interlinear's Greek or Hebrew
-   order, the English under words you know (and the transliteration, once you know the
-   alphabet) is hidden, keeping its space; a tap shows it.
-2. **R10.2 Words on §13's schedule:** letters, Hebrew's joined words, and words added in
-   sets of up to 20, most common first or from the passages you read, memorize or carry a
-   ribbon in, each reviewed inside a verse you care about. Coverage in one plain sentence
-   ("These 120 words make up 67% of the words of the New Testament").
-3. **R10.3 A page per language** (from Memory's Languages section and the end of the
-   interlinear): the alphabet with the iPhone's voices, your words, Add Words, verses you
-   can read, grammar notes, and two switches.
-4. **R10.4 Forms and notes one tap from the word:** each word's forms as the Bible has
-   them, with counts and the concordance a tap away; about 60 short grammar notes adapted
-   from unfoldingWord's Greek and Hebrew grammars (CC BY-SA 4.0, credited), in Machen's and
-   Davidson's order.
+### Rounds 10–14: learning Greek and Hebrew (fully specified in §14; revised 2026-10-20)
+The best way this app can teach a reader to read the Greek New Testament and the Hebrew
+Bible, over five rounds, each worth having alone. Learning and reading feed each other
+throughout: what you know changes what you see, words come from the passages you read
+and memorize, and every exercise is a real verse.
+1. **Round 10, foundations:** a page per language (from Memory's Languages section and the
+   end of the interlinear); the alphabet and its sounds in a chosen pronunciation
+   (Erasmian, reconstructed Koine or modern; Israeli or Tiberian), with the iPhone's
+   voices; words as cards on §13's schedule, added in sets most common first or from your
+   passages, each reviewed in a verse you care about; the interlinear's original order
+   hiding what you know; each word's forms; verses you can already read; coverage in one
+   plain sentence.
+2. **Round 11, the original in the reader:** the Hebrew Bible and Greek New Testament
+   (STEP's TAHOT and TAGNT, CC BY) as a version, **Hebrew and Greek**, right to left for
+   Hebrew, glossed like a reader's edition for exactly the words you haven't learned; read
+   aloud, memorized (with our own letter keyboard), searched (by Greek, Hebrew or Latin
+   letters), compared and shared.
+3. **Round 12, a Greek course:** 30 short lessons of our own in Machen's order with
+   Mounce's approach, model paradigms, principal parts, exercises made from real verses
+   (read, parse, recall), form, paradigm and both-ways cards, reference notes adapted from
+   unfoldingWord's Greek Grammar (CC BY-SA).
+4. **Round 13, a Hebrew course:** 34 lessons in Davidson's order including the weak verbs,
+   root families, the same kinds of paradigm, exercise and note (unfoldingWord's Hebrew
+   Grammar).
+5. **Round 14, Biblical Aramaic and recordings:** a short Aramaic course (Daniel, Ezra);
+   human recordings of the original texts if their rights holders agree (§14.14.2).
 
 ### Out of scope (all rounds so far)
 - Widgets, Live Activities and App Intents (these need Swift or app extensions).
@@ -438,8 +446,9 @@ the ESV and Crossway convention.
 | Tray: Memorize / Memorizing; Library's Memory rows and empty state (§13) | `brain` (Memorizing: accent) |
 | Memory's language rows in Today (§14.3.1) | `character.book.closed` (accent) |
 | A word's or form's menu in Your Words and Add Words (§14.3.4) | `ellipsis.circle` |
-| Speak a letter or word (§14.6.4) | `speaker.wave.2` |
-| Known, in Related Words and the Alphabet (§14.6.2, §14.3.3) | `checkmark`, faint |
+| Speak a letter, word or verse (§14.5.4, §14.12.4) | `speaker.wave.2` |
+| Known, in Related Words and the Alphabet; a lesson marked done (§14.5.2, §14.3.3, §14.12.2) | `checkmark`, faint |
+| The letter keyboard's delete key (§14.11.5) | `delete.left` |
 
 ### 2.7 Motion
 | What | How |
@@ -6563,37 +6572,94 @@ segment, Add Passage and Passage; `ios_practice.l8` is Practice; `ios_demo8.l8` 
 
 ---
 
-## 14. Round 10 specification: learning Greek and Hebrew
+## 14. Rounds 10–14 specification: learning Greek and Hebrew
 
 The owner, 2026-10-19, asked for tools for learning Greek and Hebrew, and whether we must
-write our own course or can use a public-domain one. On 2026-10-20 they set the frame:
-"I don't want to fall prey to extreme scope creep, so this of course shouldn't be a video
-streaming app, or a full course platform. But I think there are a lot of ways that having
-Greek and Hebrew learning built into a Bible app can have compounding advantages, so I'm
-keen on trying to take advantage of that."
+write our own course or can use a public-domain one. On 2026-10-20 they first asked us to
+avoid scope creep. A first design (d06bfd3e) kept to small additions to Study and Memory.
+The same day the owner **retracted** that steer: "I want to retract my previous statement.
+Please revisit the design, but don't worry too much about scope creep. I fear that in
+mentioning that I scared you from doing the optimal Greek and Hebrew learning stuff."
 
-So this round is **not a course.** It adds a few small things to Study and Memory, the
-parts of the app that already deal with the original languages and with remembering, so
-that reading and learning feed each other:
-- **What you know changes what you see.** In the interlinear's Greek or Hebrew order, the
-  English under a word you know is hidden, and so is the transliteration once you know the
-  alphabet. You read the original. A tap shows anything.
-- **Vocabulary comes from the text**, most common first or from the passages you read,
-  memorize or carry a ribbon in. Coverage is said plainly: "These 120 words make up 67% of
-  the words of the New Testament."
-- **Review uses the verses you already care about.** Each word is shown inside a verse from
-  your Memory passages, highlights, notes or recent reading.
-- **Forms and grammar are one tap from the word in front of you.** Every word study gains
-  the word's forms as they occur in the Bible, and every term on the Grammar screen gains a
-  short note.
-- **The review is §13's** (the same Practice sheet, judgements and Leitner gaps, and the
-  same one daily reminder).
+So this section designs **the best way to learn to read the Greek New Testament and the
+Hebrew Bible that this app can give**, over five rounds. Each round is one builder's work,
+and each is worth having on its own:
 
-Round 10 keeps everything from Rounds 1–9. The reader itself does not change at all.
+| Round | What it gives | Specified in |
+|---|---|---|
+| **10. Foundations** | The alphabet and its sounds; words learned by frequency or from your passages, on §13's schedule, each reviewed in a verse you care about; the interlinear hiding what you know; each word's forms; verses you can already read | §14.1–§14.10 |
+| **11. The original text in the reader** | The Greek New Testament and the Hebrew Bible as versions in the reader, with a reader's edition's glosses for the words you don't know, a tap on any word, read aloud by the iPhone's voices, memorized in Memory, searched | §14.11 |
+| **12. A Greek course** | 30 short lessons we write ourselves, in Machen's and Mounce's tested order, with model paradigms, exercises made from real verses, parsing practice, principal parts, both-ways cards, and reference notes adapted from unfoldingWord's Greek Grammar | §14.12 |
+| **13. A Hebrew course** | 34 lessons in Davidson's and Pratico and Van Pelt's order, including the weak verbs, with the same kinds of paradigm, exercise and reference note | §14.13 |
+| **14. Aramaic, and recorded readings** | Biblical Aramaic (Daniel, Ezra) as a short third course; human recordings of the original texts if the owner obtains permission (§14.14.2) | §14.14 |
 
-### 14.0 What was checked (2026-10-20), and the decisions
+Rounds 10–14 keep everything from Rounds 1–9. The owner's taste holds throughout: calm,
+native, plain words, offline, and no streaks, scores, badges or praise.
 
-#### 14.0.1 The language data we already ship (counted from `data/lang/` at 5e0befa6)
+### 14.0 What works, what was checked (2026-10-20), and the decisions
+
+#### 14.0.1 How people learn to read Koine Greek and Biblical Hebrew, and what we take
+The designer's summary of the research and of the main courses, with what each means here.
+
+**What the research says** (second-language reading and memory):
+1. **Comprehension needs nearly every word known.** Readers understand a text without help
+   when they know about 98% of its running words, and with effort at about 95% (Laufer
+   1989; Hu and Nation 2000; Nation 2006). The New Testament's 2,000 commonest words, with
+   its names, cover only 96.8% (§14.0.3), and the Hebrew Bible's far less. So for years a
+   learner reads with help. **Glosses for exactly the words you don't know** close the gap
+   from the first week. This is what reader's editions do: the UBS *Reader's Greek New
+   Testament* glosses every word used 30 times or fewer, and *A Reader's Hebrew Bible*
+   every word used fewer than 100 times, so a second-year student can read straight
+   through. We can do better than a printed edition, because we know which words *this*
+   reader knows.
+2. **Lots of comprehensible reading and listening builds fluency** (Krashen's input
+   hypothesis; Day and Bamford's extensive reading). Reading much that is easy matters
+   more than reading a little that is hard. A Bible app holds the one text the learner
+   wants to read, and passages they already know in English, which is the easiest kind of
+   comprehensible input there is.
+3. **Retrieval, spaced out, fixes words and forms** (Roediger and Karpicke 2006, the
+   testing effect; Cepeda et al. 2006, spacing). §13's Leitner schedule is that.
+4. **Meeting a word in several real contexts** gives it depth and keeps it (Webb 2007).
+   So a card shows its word in a different verse each time.
+5. **High-frequency words first, deliberately** (Nation): the first 300 Greek words are
+   78% of the New Testament. Rare words are better glossed than drilled.
+6. **Explicit grammar helps adult learners, when it is a few patterns practised in real
+   text** (Norris and Ortega 2000; DeKeyser). Morphology is learned by recognizing it
+   repeatedly, not by reading about it once.
+
+**What the courses do, and why:**
+| Course | Method | What we take |
+|---|---|---|
+| J. Gresham Machen, *New Testament Greek for Beginners* (1923; public domain) | Grammar-translation: a lesson a week, paradigms, vocabulary lists, invented sentences both ways ("A servant is writing a law") | **Its order** (verbs and second-declension nouns first, the aorist mid-course, μι verbs last), proven over a century. Not its sentences (invented, archaic "thou loosest") |
+| William Mounce, *Basics of Biblical Greek* (4th ed., 2019; in copyright) | Morphology: learn a small set of rules (the case-ending chart, the verb's tense formatives) and recognize forms rather than memorize every table; vocabulary in frequency order; exercises from real New Testament sentences | **The approach**: a few master patterns, frequency vocabulary, real sentences. (Ideas and orders are not copyrightable; no text of Mounce's is used.) |
+| David Alan Black, *Learn to Read New Testament Greek* (3rd ed., 2009) | Linguistics-aware, short lessons, aspect explained plainly | Plain explanations of aspect (the aorist as "the whole", not "the past") |
+| Randall Buth, Biblical Language Center ("Living Koine Greek", "Living Biblical Hebrew") | Communicative immersion: speaking and hearing from day one, pictures, Total Physical Response, a restored Koine pronunciation | **Listening and reading aloud from the start**; hearing passages you know. The app can't converse, and says so (§14.15) |
+| Polis Institute, Jerusalem (Christophe Rico, *Polis*) | Full immersion in the classroom; ancient Greek spoken | Same as above; we point to such courses in "Learning Elsewhere" (§14.12.8) |
+| Aleph with Beth (Andrew Case; free videos) | Immersion Biblical Hebrew by video: pictures, gestures, Hebrew only, graded | The same idea of graded comprehensible input. Linked from "Learning Elsewhere", not hosted (§14.0.2) |
+| A. B. Davidson, *An Introductory Hebrew Grammar* (1874; 13th ed. 1896, public domain) | Grammar-translation with progressive exercises; reading the vowel points carefully | **Its order** (sounds and points, article, pronouns, prepositions, nouns, construct, suffixes, the verb, stems, then the weak verbs) |
+| Gary Pratico and Miles Van Pelt, *Basics of Biblical Hebrew* (3rd ed., 2019); Mark Futato, *Beginning Biblical Hebrew* | Morphology: recognize a verb's stem and conjugation by a few diagnostic marks; frequency vocabulary; real verses | **The approach** for Hebrew: diagnostics over tables, weak verbs as a few patterns |
+| UBS *Reader's Greek NT*; Brown and Smith, *A Reader's Hebrew Bible* (2008) | Running text with footnoted glosses for rare words | **The reader's text** (Round 11), glossed by what *you* know |
+
+**So the app does five things, in this order of rounds:** teaches the sounds (Round 10);
+gives the commonest words in context on a schedule (Round 10); lets you read the text
+itself from the start, glossed exactly where you need it, and hear it (Rounds 10–11);
+teaches the grammar as a few patterns practised on real verses (Rounds 12–13); and keeps
+everything you've learned alive by meeting it in the passages you read, memorize and
+carry ribbons in (every round).
+
+#### 14.0.2 What a Bible app can do that a course can't (the compounding)
+- **It knows the text and the reader.** Every word of both testaments, with its lemma,
+  gloss, parsing and frequency; and which passages this reader reads, highlights,
+  memorizes and carries a ribbon in. Exercises, examples and contexts come from those.
+- **Coverage is measured on real text:** "You know 67% of the words of the New
+  Testament", and "of the chapters you've read this month, 58%".
+- **The same passage in two languages.** A learner memorizes Psalm 23 in English, then
+  reads it in Hebrew with only its new words glossed, then memorizes it in Hebrew.
+- **One tap from any word to everything:** its forms, its grammar, its lesson, its card.
+- **No second app.** Lessons, cards and reading all live in the app the learner opens
+  every day anyway.
+
+#### 14.0.3 The language data we already ship (counted from `data/lang/` at 5e0befa6)
 Counted by the designer with a throwaway script over `words.bin` and `lexicon.txt`.
 "Names" are lexicon entries whose part of speech starts with `N:`. "Aramaic" ones start
 with `A:`.
@@ -6605,7 +6671,7 @@ with `A:`.
 | Different words, names left out | 4,775 | 5,253, plus 6,038 words with no Strong's number (a preposition with a pronoun ending, לוֹ "to him") |
 | The 10 most common make up | 37.2% | 18.8% |
 | The 50 / 120 / 300 most common | 57.3% / 67.3% / 77.9% | 37.8% / 50.9% / 64.2% |
-| The 500 / 1,000 most common | 83.0% / 88.8% | 70.6% / 77.9% |
+| The 500 / 1,000 / 2,000 most common | 83.0% / 88.8% / 93.2% | 70.6% / 77.9% / 83.2% |
 | Words needed for 50% / 75% / 90% | 29 / 232 / 1,187 | 114 / 746 / (80% at 1,263) |
 | Verses where every word is known, at 120 known words (names counted as known) | 102 of 7,906, and 351 more with one unknown word | — |
 | The same at 300 known words | 651, and 1,237 more with one unknown | — |
@@ -6618,69 +6684,118 @@ Hebrew writes some words joined to the front of the next one. In the morphology 
 `Prep-k` and `Prep-m`. Pronoun endings are written after `|`, as in `N-msc | 3ms`. No
 Strong's number counts them, yet a reader must know them. §14.1.2 makes them cards.
 
-So **our own data is the course material.** It has every word, its gloss, its parsing, its
-frequency and every verse it occurs in. No book can match that for choosing what to learn
-next, or for showing it in a verse you know.
+**We also already fetch** (pinned in `fetch.sh`, CC BY 4.0, STEP Bible) **the whole
+Greek New Testament and Hebrew Bible as running text**: TAGNT, with each verse's text and
+punctuation (`# Mat.1.1	Βίβλος 	γενέσεως 	…	Ἀβραάμ.`) and, for each word, the editions
+that have it (`NA28+NA27+Tyn+SBL+WH+Treg+TR+Byz`); and TAHOT, the Leningrad Codex with
+its accents, maqaf and paragraph marks, each word's morphology and its prefixes split off
+(`בְּ/רֵאשִׁ֖ית`, `H9003/{H7225G}`, `HR/Ncfsa`). Round 11's reader's text is made from
+them. No new text source is needed.
 
-#### 14.0.2 The outside sources (each checked on 2026-10-20)
+#### 14.0.4 Pronunciation (decided)
+- **Greek has three living choices, and none is "right":**
+  1. **Erasmian**, the 16th-century scholars' system, gives each letter its own sound
+     (η ≠ ι ≠ υ), which helps spelling. Machen, Mounce and Black teach it, so it matches
+     nearly every book, teacher and seminary a learner will meet. **The app's default.**
+  2. **Koine (Reconstructed)**, the pronunciation of the first century as historians now
+     reconstruct it (Buth's restored Koine; Benjamin Kantor, *The Pronunciation of New
+     Testament Greek*, 2023). Closer to what Paul heard; taught by the living-language
+     schools.
+  3. **Modern Greek**, the Greek Orthodox Church's and every native speaker's. The only
+     one the iPhone can speak.
+  The learner chooses in the language page (§14.3.2). The choice changes the letter
+  table and letter cards. The voice is always modern Greek, and says so (§14.4.2).
+- **Hebrew has two:** **Israeli** (modern Israeli Hebrew applied to the pointed text, the
+  default in nearly every course and the iPhone's voice), and **Tiberian
+  (Reconstructed)**, the Masoretes' own reading as Geoffrey Khan describes it (2020). The
+  Ashkenazi, Sephardi and Yemenite traditions are described in Round 13's sounds lesson,
+  not offered as settings.
+
+#### 14.0.5 The outside sources (each checked on 2026-10-20)
 | Source | What it is | Licence (checked) | Used? |
 |---|---|---|---|
-| **unfoldingWord Hebrew Grammar**, `https://git.door43.org/unfoldingWord/en_uhg`, commit `ddad74ff2632140569c8ab49cf2950bd4cccf768` (2026-01-15); read at `https://uhg.readthedocs.io` | A modern reference grammar in reStructuredText, one article a term (`content/stem_qal.rst`, `verb_sequential_imperfect.rst` …), each with Summary, Article, Form (tables) and Function (examples from the Hebrew Bible). About 540 KB of text in 230 files. Clear and well organized, with occasional typos ("whe was caused to kill") | `LICENSE.md`: **CC BY-SA 4.0**. A derivative must remove the unfoldingWord® trademark, say what was changed, credit "The original work by unfoldingWord is available from unfoldingword.org/uhg", and be shared under CC BY-SA | **Yes: short notes adapted from it** (§14.4) |
-| **unfoldingWord Greek Grammar**, `https://git.door43.org/unfoldingWord/en_ugg`, commit `905f15973461d311dc9a312486665d9fc548a6d2` (2026-10-15); read at `https://ugg.readthedocs.io` | The same kind of grammar for Greek. Articles are longer and less even (`tense_aorist.rst` is 58 KB) and start with a Glossary section. About 1.4 MB of text, not counting the font | `LICENSE.md`: **CC BY-SA 4.0**, word for word the same as the UHG's. Its credit line also says ".../uhg", an error carried over from the Hebrew licence. We credit ".../ugg" for Greek, which is the true source | **Yes: short notes adapted from it** (§14.4) |
-| **J. Gresham Machen, *New Testament Greek for Beginners*** (Macmillan, 1923). Scan: `https://archive.org/details/newtestamentgree00mach_2` (Princeton Theological Seminary Library; a 1946 printing of the 1923 text). OCR: `newtestamentgree00mach_2_djvu.txt`, sha256 `d7a2f48a51d0d62b4cd3ec51239729bc731f9c77ae0a151932c2597115e7d600` | 33+ lessons, each with a vocabulary, paradigms and made-up exercise sentences ("A servant is writing a law") | **Public domain in the US** (published 1923; archive.org's record: "Public domain according to HathiTrust rights database"). The 1998 revision is not used | **Only the order of its lessons**, which orders the Greek notes (§14.4.3). Its Greek OCR has about one error a line ("Ave" for λύει, "viol" for υἱοί, "Av-" for λυ-). Its vocabularies are replaced by frequency, and its exercises by real verses |
-| **A. B. Davidson, *An Introductory Hebrew Grammar*** (13th ed., 1896). Scan: `https://archive.org/details/cu31924020348649` (Cornell). OCR sha256 `dffddf63f24a8b7a0abddd3d07907301f47e23a7aa909d61fe634ac67d464f6e` | 49 sections with progressive exercises | **Public domain** (1896; the author died in 1902). Later revisions by McFadyen and Martin are not used | **Only the order of its sections**, which orders the Hebrew notes (§14.4.3). Its Hebrew OCR is unusable: every pointed word is garbled ("^Ijsn", "D^'inn") |
-| "Aleph with Beth" (videos) | Immersion lessons in Hebrew | An archive.org copy claims CC0. That can't be verified from the publisher | **No.** Video is out of scope anyway |
-| The iPhone's Greek (`el-GR`) and Hebrew (`he-IL`) voices | `AVSpeechSynthesizer`, offline once installed | Apple's, on the device | **Yes, for letters and words** (§14.5). The Greek voice speaks modern Greek (decision 7) |
+| **TAGNT and TAHOT**, STEPBible-Data at the commit pinned in `fetch.sh` (`ed476a8e…`) | Greek New Testament and Hebrew Bible, word by word, with morphology and editions | **CC BY 4.0** (STEP Bible; already credited) | **Yes: Round 11's reader's text** |
+| **unfoldingWord Greek Grammar**, `https://git.door43.org/unfoldingWord/en_ugg`, commit `905f15973461d311dc9a312486665d9fc548a6d2`; `https://ugg.readthedocs.io` | Reference grammar, one article a term, in reStructuredText, about 1.4 MB | `LICENSE.md`: **CC BY-SA 4.0**; a derivative removes the unfoldingWord® trademark, says what changed, credits "The original work by unfoldingWord is available from …", and is shared alike. (Its credit line says ".../uhg", an error copied from the Hebrew licence; we credit ".../ugg") | **Yes: Round 12's reference notes**, adapted (§14.12.6) |
+| **unfoldingWord Hebrew Grammar**, `https://git.door43.org/unfoldingWord/en_uhg`, commit `ddad74ff2632140569c8ab49cf2950bd4cccf768`; `https://uhg.readthedocs.io` | The same for Hebrew, about 540 KB; follows the OSHB morphology. Clear, regular, with occasional typos | **CC BY-SA 4.0**, the same terms | **Yes: Round 13's reference notes** |
+| **unfoldingWord Aramaic Grammar**, `https://git.door43.org/unfoldingWord/en_uag`, commit `6babf1977048702caa3bddf12f57507e318caf0e` (2025-08-29) | The same for Biblical Aramaic, 75 articles | **CC BY-SA 4.0**, the same terms | **Yes: Round 14's notes** |
+| **Machen**, *New Testament Greek for Beginners* (1923); scan `https://archive.org/details/newtestamentgree00mach_2` (Princeton Theological Seminary; a 1946 printing of the 1923 text; OCR sha256 `d7a2f48a51d0d62b4cd3ec51239729bc731f9c77ae0a151932c2597115e7d600`) | 33 lessons | **Public domain in the US** (1923; "Public domain according to HathiTrust") | **Its lesson order only.** A proper transcription was considered (§14.0.6 decision 11) |
+| **Davidson**, *An Introductory Hebrew Grammar* (13th ed., 1896); scan `https://archive.org/details/cu31924020348649` (Cornell; OCR sha256 `dffddf63f24a8b7a0abddd3d07907301f47e23a7aa909d61fe634ac67d464f6e`) | 49 sections with exercises | **Public domain** (1896; Davidson died in 1902). The McFadyen and Martin revisions are not used | **Its section order only.** Its Hebrew OCR is unusable (every pointed word garbled) |
+| **Greek audio: Marilyn Phemister**, the Westcott–Hort text (1881), all 27 books, chapter MP3s; `https://ccel.org/a/anonymous/gnt/home.html` and `https://archive.org/details/AudiogreeknewtestamentOfWescott.hort.readByMarilynPhemister` | Human, complete, one reader | CCEL: "Copyright 2001 by Marilyn Phemister. Used by permission." archive.org (uploaded by a third party "with M. Phemister's permission"): "©2001, free use for non-commercial purposes. Please credit the Reader", tagged CC BY-NC 3.0 US | **Only with her written permission** (§14.14.2; owner question 6). The app is free, but the terms reached us second-hand |
+| Greek audio: the Ecumenical Patriarchal Text (1904) read by Apostolos Vavylis; `https://archive.org/details/greek-ecumenical-patriarchal-text` | Modern Greek pronunciation, complete; a different text (Byzantine) | The uploader tagged it CC0 because bible.is called it "Public Domain"; the files themselves carry "℗ 2011 Apostolos Vavylis" and come from Faith Comes By Hearing | **No**: the CC0 is the uploader's, not the rights holder's |
+| Greek audio: Eddy Lanz's SBLGNT readings, `https://www.lanz.li/` | Complete, chapter MP3s | **No licence stated** | No (could be asked) |
+| Greek audio: Peter Gilbert, `https://bekkos.wordpress.com/the-new-testament-read-in-greek/` | Complete, modern pronunciation, a non-native reader with his own stumbles | CC BY-NC-ND 3.0 | No (quality, as he says himself) |
+| Greek audio: Carla Hurt, Matthew in "Lucian" Koine pronunciation (`https://foundinantiquity.com/2022/04/23/the-gospel-of-matthew-greek-audiobook-in-lucian/`) | Matthew 1–5 so far; Nestle 1904 | CC BY 4.0 | Not yet: five chapters. Worth watching |
+| **Hebrew audio: Abraham Schmuelof**, the whole Hebrew Bible (modern Israeli reading); `https://archive.org/details/hebrewbible` | Human, complete, 929 chapter files, about 1.2 GB | The uploader says: "None of these sites make any copyright claims … a Creative Commons license … has been added here" (CC BY-NC-ND 3.0, added by the uploader). The recordings were entrusted to the Carmelites; Audio Scriptures International digitized them | **Only with permission** from the Carmelites (§14.14.2; owner question 6) |
+| Hebrew audio: Rabbi Dan Be'eri, Sephardi reading; `https://archive.org/details/TanakhAudioRecordingByRabbiDanBeeri-BookByBook` | 30 of 39 books, one file per book, two of his recordings combined by a compiler | Tagged CC BY-SA 3.0 by the compiler | Not unless his own release confirms the licence (§14.14.2) |
+| Eliran Wong's MP3 Open Hebrew Greek Bible (GitHub) | **Text-to-speech**, verse by verse | CC BY 4.0 | No: the phone's own voices do the same, offline |
+| **Septuagint data**: CATSS LXX morphology (`ccat.sas.upenn.edu`), Eliran Wong's LXX-Rahlfs-1935 | Text with morphology | CATSS: a signed user declaration, restricted; Wong's derivative CC BY-NC-SA 4.0. Rahlfs 1935 may be in US copyright through 2030 | **No** (§14.15) |
+| "Aleph with Beth" (videos) | Immersion Hebrew | A copy on archive.org claims CC0; unverified | **Linked, not hosted** (Round 13's "Learning Elsewhere") |
+| The iPhone's Greek (`el-GR`) and Hebrew (`he-IL`) voices | `AVSpeechSynthesizer`, offline once installed | Apple's, on the device | **Yes**, from Round 10 |
 
-No open recording of the Greek New Testament or the Hebrew Bible has been verified for
-both licence and quality, so none is used (§14.11).
+**So:** every text and note we ship is openly licensed or ours. No complete human
+recording of either testament is verifiably open; the iPhone's voices read until the
+owner obtains permission for one (Round 14).
 
-#### 14.0.3 Decisions (the designer's, with reasons)
-1. **No "Learn" tab, course or lesson sequence.** There's a page for each language (§14.3),
-   pushed from two places that already exist: the Library's **Memory** segment (where
-   review lives) and the end of the interlinear (where the language is). The page holds the
-   alphabet, your words, verses you can read, grammar notes and two switches. It has no
-   lessons, levels, units, scores or progress bars.
-2. **Words are cards on §13's schedule.** A card can be a word (a lemma: one base Strong's
-   number), a letter, or one of Hebrew's joined words. Cards use §13.1.5's boxes and gaps
-   and the same three judgements. They're practised in §13.3's Practice sheet, and they
-   join Memory's Today and its daily reminder. One engine, one habit.
-3. **"Known" is one plain rule.** A card is known once you've answered **Knew It** for it,
-   so its box is 2 or more. If Not Yet sends it back to box 1, it's not known again. Nothing
-   else (time spent, how many times you've looked) counts.
-4. **You choose what to learn, in small sets.** Nothing is added for you. Add Words offers
-   the next ten most common words, or the words of a passage you read, memorize or carry a
-   ribbon in, most common first. You can mark a word you already know as **Known**.
-5. **Recognition only: original → meaning.** The goal is reading the Bible. Producing Greek
-   from English, typing and parsing drills are left out (§14.11).
-6. **Grammar notes are adapted from unfoldingWord's grammars** (CC BY-SA), short and plain,
-   with their examples replaced by live ones from our data. Machen and Davidson give only
-   the order of the notes. Writing our own notes was considered and rejected: the
-   unfoldingWord articles are written and checked by scholars. Adapting them costs only
-   the ShareAlike terms, which §14.4.4 meets.
-7. **Sound comes from the iPhone's voices, and says what it is.** The Hebrew voice speaks
-   modern Israeli Hebrew, which is close to what grammars teach. The Greek voice speaks
-   modern Greek, which differs from the pronunciation most courses teach (β as "v", η as
-   "ee"). The letter table gives the teaching sounds, and the Greek page says plainly that
-   the voice is modern Greek. Each language has its own **Speak** switch (on; §14.13
-   question 1).
-8. **Names are never cards.** Once you know the alphabet, a name counts as readable: its
-   English is hidden like a known word's, so you sound it out.
-9. **Calm, not casino.** Coverage is one sentence of fact, never a bar, ring, streak, level
-   or badge. There's no praise. A session ends with "That's all for today."
+#### 14.0.6 Decisions (the designer's, with reasons)
+1. **A language page per language, not a new tab.** "Greek" and "Hebrew" are pushed from
+   the Library's Memory segment (where review already lives), from the end of the
+   interlinear, and (Round 11) from a word's popover in the reader. Each page grows by
+   rounds: sounds and words (10), reading (11), lessons and reference (12, 13). The reader's
+   bar gains nothing (§14.16 question 2).
+2. **Cards are §13's.** Letters, Hebrew's joined words, words (and, from Round 12, forms,
+   paradigms and English → original) are cards on §13.1.5's boxes and gaps, with the
+   same three judgements, in the same Practice sheet, Memory's Today and its one daily
+   reminder. One engine, one habit.
+3. **"Known" is one plain rule.** A card is known once you've answered Knew It for it (box
+   2 or more), and not after Not Yet sends it back to box 1.
+4. **You choose what to learn, in sets.** Nothing is added for you. Add Words offers the
+   next ten most common words, or the words of a passage you read, memorize or carry a
+   ribbon in; a lesson offers its own words. Mark as Known is for words you already have.
+5. **What you know changes what you see, everywhere the original appears:** hidden
+   English in the interlinear's original order (Round 10); glosses only for unknown words
+   in the reader's text (Round 11); examples from known words in lessons (Rounds 12–13).
+6. **Read the text itself, early.** The reader's text arrives in Round 11, before the
+   courses, because glossed reading of passages you know is the most comprehensible input
+   there is (§14.0.1, points 1–2), and every later lesson exercises on it.
+7. **Our own lessons, our own words.** The lessons are written for this app (§14.12.3):
+   short, plain, each built around a few patterns, exercised on real verses chosen by what
+   the learner knows. They are ours and public domain, like `grammar.txt`. The reference
+   notes beside them are adapted from unfoldingWord (CC BY-SA) and credited.
+8. **Exercises are made from the Bible, not invented.** Machen's "A servant is writing a
+   law" becomes "Parse ἔλυσεν in Revelation 1:5 (and loosed us)". The data supplies
+   unlimited exercises at the right level. There are no marks, scores or pass/fail: each
+   answer shows plainly what's right.
+9. **Both directions, by choice.** Recognition (original → English) is the default.
+   Producing the original (English → Greek) strengthens memory too, and is a switch per
+   language from Round 12, typed with the app's own letter keyboard (Round 11).
+10. **Pronunciation is a choice** (§14.0.4), default Erasmian and Israeli.
+11. **Machen and Davidson give only their order.** A proper transcription of Machen (about
+    300 pages; the OCR checked word by word against our forms list) is feasible, but his
+    pedagogy (invented sentences, "thou loosest", English-to-Greek composition from day
+    one) is what modern courses moved away from. Davidson's Hebrew would have to be
+    retyped by hand. Our own lessons, exercised on real verses, serve the learner better
+    for the same effort.
+12. **Names are never cards.** Once you know the alphabet, a name counts as known: its
+    English is hidden in the interlinear and never glossed in the reader's text, so you
+    sound it out. A tap still shows it.
+13. **Calm, not casino.** Coverage is one sentence of fact. Lessons have a quiet checkmark
+    when you mark them done, nothing more: no percent, bar, ring, streak, level, badge or
+    praise. A session ends with "That's all for today."
 
-#### 14.0.4 Build order (and where to stop if the round runs long)
-1. `learn.py` and `vocab.bin`; `learn.l8` with its tests (§14.1, §14.8).
+#### 14.0.7 Build order for Round 10 (and where to stop if it runs long)
+1. `learn.py` and `vocab.bin`; `learn.l8` with its tests (§14.1, §14.7).
 2. Cards in Practice and Memory, the language page, Add Words, Your Words (§14.3.1–14.3.5,
-   §14.6.4, §14.7).
-3. Hiding in the interlinear, and word study's Your Words row (§14.6.1, §14.6.2).
-4. The alphabet, its data and speaking (§14.3.3, §14.5).
-5. Forms (§14.6.3).
-6. Grammar notes, their credits and the site page (§14.4).
-7. Verses You Can Read, and the Passage details row (§14.3.6, §14.3.7).
+   §14.5.4, §14.6).
+3. Hiding in the interlinear, and word study's Your Words row (§14.5.1, §14.5.2).
+4. The alphabet, its sounds in each pronunciation, Practise Reading, and speaking
+   (§14.3.3, §14.4).
+5. Forms (§14.5.3).
+6. Verses You Can Read, and the Passage details row (§14.3.6, §14.3.7).
 
-Items 1–5 are the round's core. If time runs out, 6 and 7 move to a Round 10b with
-this text unchanged; the builder says so in the commit.
+Items 1–5 are the round's core. If time runs out, 6 moves into Round 11 unchanged; the
+builder says so in the commit.
+
+**Round 10: Foundations** is §14.1–§14.10.
 
 ### 14.1 Model (portable `learn.l8`, tested by `test_learn.l8`)
 `learn.l8` has no UIKit. It reads `lang.l8`'s arrays and `vocab.bin`, and it uses
@@ -6697,7 +6812,7 @@ this text unchanged; the builder says so in the commit.
 - **state:** `new` (added, not yet seen) or `review`.
 - **box** (1–8), **due** (a local date), **added** (unix time), **from** (where it was
   added from, for the log only: `freq`, `passage`, `study`, `alphabet`, `known`), and
-  **seen** (how many times it's been shown, which picks its next verse, §14.6.2).
+  **seen** (how many times it's been shown, which picks its next verse, §14.5.2).
 - **A new card** is due the day it's added. When first shown it's `review`, box 1, and its
   first judgement goes through `memory_grade` like any other. So Knew It gives box 2, due in
   3 days.
@@ -6720,12 +6835,13 @@ A word of the text `w` (an index in `words.bin`) is **known** when:
   or it has no Strong's number; **and**
 - (Hebrew) every joined part of it has a known card.
 
-Aramaic words are never known (no cards; their English always shows).
+Aramaic words are never known until Round 14's Aramaic cards (§14.14.1); their English
+always shows.
 
 **The alphabet is known** when every `letter` card of that language is known (§14.1.1's
 rule, so "I Know These Letters" counts).
 
-#### 14.1.4 Frequency and coverage (`vocab.bin`, §14.8)
+#### 14.1.4 Frequency and coverage (`vocab.bin`, §14.7)
 - `learn_next(lang, n)`: the n most common words, names left out, that have no card yet, in
   `vocab.bin`'s order.
 - `learn_coverage(lang)`: (the occurrences of every known word's lemma) ÷ (the
@@ -6771,7 +6887,7 @@ rule, so "I Know These Letters" counts).
   come before `review` ones, in the order added. Then the most overdue, then the most
   common.
 - **Later** isn't extended. Cards aren't listed in Memory, only counted (§14.3.1).
-- `memory_due_on(list, date)` counts due cards too, for the reminder (§14.7).
+- `memory_due_on(list, date)` counts due cards too, for the reminder (§14.6).
 
 #### 14.1.9 Files (Application Support/SmoothBible/, §4.3's conventions)
 - **`cards.tsv`**, rewritten whole after each change: `CARD\tLANG\tKIND\tKEY\tSTATE\tBOX\tDUE\tADDED\tSEEN`.
@@ -6783,18 +6899,18 @@ rule, so "I Know These Letters" counts).
   `learnSpeakHebrew` (on), `learnSeen` (bool: the card's one-time line has been shown).
 - Export (§8.5) doesn't include cards.
 
-### 14.2 Where it lives (nothing in the reader)
+### 14.2 Where it lives (Round 10 touches nothing in the reader)
 | Place | What's added |
 |---|---|
-| Study → Words (the interlinear, §7.4, §9.6.2) | Hiding what you know in Greek or Hebrew order (§14.6.1); one link at the end, **Learn Greek** / **Learn Hebrew**, or **Greek** / **Hebrew** once started, which pushes the language page |
-| Word study (§7.5) | A **Your Words** row, a **Forms** row (§14.6.3) and a known mark on related words (§14.6.2) |
-| Grammar screen (§7.5.3) | A disclosure on each term that has a note, which pushes the note (§14.4) |
+| Study → Words (the interlinear, §7.4, §9.6.2) | Hiding what you know in Greek or Hebrew order (§14.5.1); one link at the end, **Learn Greek** / **Learn Hebrew**, or **Greek** / **Hebrew** once started, which pushes the language page |
+| Word study (§7.5) | A **Your Words** row, a **Forms** row (§14.5.3) and a known mark on related words (§14.5.2) |
 | Library → Memory (§13.4) | Due cards in Today (one row per language), a **Languages** section, and Practice running cards after passages |
 | Memory's Passage details (§13.4.1) | A **Greek Words** / **Hebrew Words** row (§14.3.6) |
 | Daily reminder (§13.5) | Due cards are a memory reason, with no new switch |
-| Acknowledgements (§7.8) | unfoldingWord's credit, the changes made, and where the notes can be had (§14.4.4) |
 
-The reading page, the tray, the edit menu, the bar and Go To are **unchanged**.
+The reading page, the tray, the edit menu, the bar and Go To are **unchanged** in Round 10.
+Round 11 adds the Greek and Hebrew texts to the reader as versions (§14.11); the bar
+still gains nothing.
 
 ### 14.3 Screens
 
@@ -6842,17 +6958,26 @@ Everything below is computed before the push (principle 6).
   - **Add Words…** → §14.3.5.
 - **Section "Reading"**: **Verses You Can Read**, value "102", or before the alphabet is
   known, secondary "After the alphabet". → §14.3.7.
-- **Section "Grammar"**: **Grammar Notes**, value "29" → the notes' list (§14.4.3).
+- **Later rounds add rows here, nothing else:** Round 11 a **Read in Greek** row in
+  Reading (§14.11.6); Round 12 (Greek) and 13 (Hebrew) a **Lessons** section first, and
+  **Paradigms** and **Grammar Notes** in a "Reference" section (§14.12.2).
 - **Section "Settings"**:
   - Switch **Hide What I Know**, footer: "In Greek order, the interlinear hides the English
     under words you know, and the transliteration once you know the alphabet. Tap a word to
     show it." (Hebrew: "In Hebrew order …").
-  - Switch **Speak Greek**, footer: "Letters and words are read by the iPhone's Greek
-    voice, which speaks modern Greek. The Sound column gives the pronunciation most
-    courses teach." For Hebrew: "… by the iPhone's Hebrew voice (modern Israeli
-    pronunciation)." When no voice of that language is installed, the switch is disabled
-    and the footer reads "To hear Greek, add a Greek voice in Settings › Accessibility ›
-    Spoken Content › Voices." (The path is given in words, as in §12.0.2 decision 8.)
+  - Row **Pronunciation** (value "Erasmian"; disclosure) → a checkmark list (§14.0.4):
+    Greek **Erasmian** · **Koine (Reconstructed)** · **Modern Greek**; Hebrew **Israeli**
+    · **Tiberian (Reconstructed)**. Each row has a one-line description as its subtitle
+    ("Taught in most grammars and seminaries. Every letter has its own sound."). The
+    choice changes the Alphabet's Sound column, the letter cards' answers and the
+    pronunciation lesson; nothing else. Footer: "The Greek you hear from the iPhone is
+    modern Greek, whichever you choose here."
+  - Switch **Speak Greek** (on), footer: "Letters, words and verses are read by the
+    iPhone's Greek voice, which speaks modern Greek." For Hebrew: "… by the iPhone's
+    Hebrew voice, which speaks modern Israeli Hebrew." When no voice of that language is
+    installed, the switch is disabled and the footer reads "To hear Greek, add a Greek
+    voice in Settings › Accessibility › Spoken Content › Voices." (The path is given in
+    words, as in §12.0.2 decision 8.)
 - No toolbar.
 
 #### 14.3.3 The Alphabet (pushed; insetGrouped)
@@ -6861,8 +6986,10 @@ Everything below is computed before the push (principle 6).
   run-time cell:
   - leading, the glyph in a 56 pt-wide column at 34 pt (Greek, upper and lower: "Α α") or
     40 pt (Hebrew, final form after it: "כ ך"; a vowel on bet: "בָ");
-  - then the name (SF 17, ink: "Alpha", "Bet", "Qamets") over the sound (SF 15, faint:
-    "a as in father"; "v; with its dot, b"; "a as in father, under the letter");
+  - then the name (SF 17, ink: "Alpha", "Bet", "Qamets") over the sound **in the chosen
+    pronunciation** (SF 15, faint: Erasmian "a as in father"; Koine and Modern the same
+    for α, but η is "e as in they" / "ee as in see" / "ee as in see"; Hebrew "v; with
+    its dot, b"; "a as in father, under the letter");
   - trailing, the example word (§7.3 inline size), the letter in it in accent, over its
     gloss (SF 13 faint): "ἀγάπη · love".
   - A known letter shows a faint `checkmark` accessory. Otherwise there's none.
@@ -6877,6 +7004,11 @@ Everything below is computed before the push (principle 6).
   - on the left, **I Know These**: a bar button whose `menu` holds one `UICommand`, "Mark
     All 32 as Known". The menu is the confirmation, as History's Clear (§8.3). It marks
     every letter Known (§14.1.1).
+- **Practise Reading** (a row in its own last section, once 8 letters are known): a
+  Practice session of 10 common words made only of letters you know, chosen from verses
+  you care about (§14.1.7), for **sounding out**, not meaning. The card shows the word;
+  Check shows its transliteration (the tables' spelling, as everywhere) and speaks it. No judgement is asked and nothing is scheduled: it's practice, ended by
+  Done or after 10 words ("That's 10 words. Again?" with **Again** and **Done**).
 - **Footer:** Greek: "Greek has 24 letters. Words also carry breathing marks and accents;
   only the rough breathing (ʽ, an h sound) changes how a word sounds." Hebrew: "Hebrew is
   read right to left. Its 22 letters are consonants; the vowels are the dots and dashes
@@ -6953,187 +7085,38 @@ the two rounds: learning the Greek of what you're memorizing.
 - **Empty:** "No verses yet. As you learn words, verses where you know every word appear
   here."
 
-### 14.4 Grammar notes (adapted from unfoldingWord, CC BY-SA 4.0)
+### 14.4 Alphabet data and sound
 
-#### 14.4.1 Which articles
-About 60 notes, one per term the Grammar screen shows, each 60–150 words. The sources are
-the `content/*.rst` files at the pinned commits (§14.0.2).
-
-**Greek** (Machen's lesson order), from en_ugg:
-1. Verb (`verb.rst`)
-2. Person and Number (`person.rst`, `number.rst`)
-3. Present (`tense_present.rst`)
-4. Active, Middle, Passive (`voice.rst`, `voice_active.rst`, `voice_middle.rst`,
-   `voice_passive.rst`)
-5. Indicative (`mood_indicative.rst`)
-6. Noun and Case (`noun.rst`, `case.rst`)
-7. Nominative (`case_nominative.rst`)
-8. Genitive (`case_genitive.rst`)
-9. Dative (`case_dative.rst`)
-10. Accusative (`case_accusative.rst`)
-11. Vocative (`case_vocative.rst`)
-12. Gender (`gender.rst`)
-13. The Article (`determiner_article.rst`)
-14. Adjective (`adjective.rst`, its Glossary only)
-15. Preposition (`preposition.rst`)
-16. Personal Pronoun (`pronoun_personal.rst`, `person_first.rst`, `person_third.rst`)
-17. Demonstrative (`pronoun_demonstrative.rst`)
-18. Relative Pronoun (`pronoun_relative.rst`)
-19. Imperfect (`tense_imperfect.rst`)
-20. Future (`tense_future.rst`)
-21. Aorist (`tense_aorist.rst`)
-22. Participle (`mood_participle.rst`)
-23. Infinitive (`mood_infinitive.rst`)
-24. Subjunctive (`mood_subjunctive.rst`)
-25. Imperative (`mood_imperative.rst`)
-26. Perfect (`tense_perfect.rst`)
-27. Pluperfect (`tense_pluperfect.rst`)
-28. Optative (`mood_optative.rst`)
-29. Conjunction (`conjunction.rst`)
-
-**Hebrew** (Davidson's section order), from en_uhg:
-1. The Article (`particle_definite_article.rst`)
-2. Personal Pronoun (`pronoun_personal.rst`)
-3. Demonstrative (`pronoun_demonstrative.rst`)
-4. Prepositions Joined to a Word, and מִן (`preposition.rst`)
-5. Conjunctive Waw (`conjunction.rst`)
-6. Gender (`gender_masculine.rst`, `gender_feminine.rst`)
-7. Number: Singular, Plural, Dual (`number_singular.rst`, `number_plural.rst`,
-   `number_dual.rst`)
-8. Construct and Absolute (`state_construct.rst`, `state_absolute.rst`)
-9. Pronoun Endings (`suffix_pronominal.rst`)
-10. Verb (`verb.rst`)
-11. Perfect (`verb_perfect.rst`)
-12. Imperfect (`verb_imperfect.rst`)
-13. Consecutive Imperfect (`verb_sequential_imperfect.rst`; our parsing calls it
-    "consecutive", so the note is titled that way and says unfoldingWord calls it
-    "sequential")
-14. Consecutive Perfect (`verb_sequential_perfect.rst`)
-15. Imperative (`verb_imperative.rst`)
-16. Jussive (`verb_jussive.rst`)
-17. Cohortative (`verb_cohortative.rst`)
-18. Infinitive Construct (`infinitive_construct.rst`)
-19. Infinitive Absolute (`infinitive_absolute.rst`)
-20. Participle (`participle_active.rst`, `participle_passive.rst`)
-21. Stems (`stem.rst`)
-22. Qal (`stem_qal.rst`)
-23. Niphal (`stem_niphal.rst`)
-24. Piel (`stem_piel.rst`)
-25. Pual (`stem_pual.rst`)
-26. Hiphil (`stem_hiphil.rst`)
-27. Hophal (`stem_hophal.rst`)
-28. Hithpael (`stem_hithpael.rst`)
-29. Direct Object Marker (`particle_direct_object_marker.rst`)
-30. Negatives (`particle_negative.rst`)
-31. Adjective (`adjective.rst`)
-
-Weak verbs, the rare stems (Polel, Pilpel …) and Aramaic are left for later.
-
-#### 14.4.2 How they're adapted (the builder, by hand, helped by a tool)
-- `fetch.sh` gains the listed `.rst` files from
-  `https://git.door43.org/unfoldingWord/en_ugg/raw/commit/905f15973461d311dc9a312486665d9fc548a6d2/content/<file>`
-  and `https://git.door43.org/unfoldingWord/en_uhg/raw/commit/ddad74ff2632140569c8ab49cf2950bd4cccf768/content/<file>`,
-  plus each repository's `LICENSE.md`, with their sha256s recorded as the others are.
-- **`tools/grammar_notes.py DIR`** (`python3 -I`, standard library) makes
-  `DIR/notes-draft.txt`. For each listed file, it takes the **Summary** section (UHG) or the
-  **Glossary** section (UGG), then the first paragraph of **Article**. It strips RST roles
-  (`:ref:`x<y>`` → x), emphasis markers, tables and directives. The draft is never
-  shipped.
-- **The builder writes `data/lang/notes.txt`** from the draft. Each note:
-  - is in plain English in the app's voice, with no jargon a term's own note doesn't
-    explain (as `grammar.txt`'s sentences);
-  - is 60–150 words, in one to three paragraphs;
-  - has **no examples or tables of its own.** The app adds live ones (§14.4.3). This keeps
-    each note short, and every example is real and in the BSB;
-  - keeps the source's meaning. Where a source is unclear or wrong (a typo), the note says
-    it plainly, and the builder lists it in the commit.
-- **Format** (the lexicon's markup, §7.1: `**bold**`, `_italic_`, `\n` paragraphs):
-  ```
-  # Smooth Bible grammar notes. Adapted from the Greek Grammar and the Hebrew Grammar
-  # by unfoldingWord (CC BY-SA 4.0); see the end of this file for the changes made.
-  # This file is licensed CC BY-SA 4.0.
-  @G aorist	Aorist	tense_aorist.rst	Tense aorist
-  Presents an action simply as a whole …\n…
-  @H consecutive imperfect	Consecutive Imperfect	verb_sequential_imperfect.rst	Verb Sequential Imperfect
-  …
-  ```
-  The `@` line is: language and the `grammar.txt` term it belongs to; the title; the source
-  file; the source article's title. The body follows on one line.
-- **Feasibility (checked):** the UHG articles are short, regular and clean. Their Summary
-  sections are already one to three sentences. The UGG articles are long but each opens
-  with a Glossary definition that is the note's core. Sixty notes of about 100 words is
-  about 6,000 words of careful writing: a day of the round, not a project.
-
-#### 14.4.3 The note screen, and the list
-- **Note** (pushed; run-time UIViewController with a non-editable, selectable UITextView,
-  insets 20 pt, background `bg`; §7.6's styles). The inline title is the note's title.
-  1. **Body** (body font, 16 pt scaled).
-  2. **"In John 3:16"** (when pushed from a word's Grammar screen): SF 13 semibold accent
-     caption, then one line: "ἠγάπησεν is aorist: _loved_." (the form, the term, the BSB
-     chunk).
-  3. **"Examples You Know"**: up to 5 lines, from known words first, then the most common:
-     the form (inline size), its gloss in this form ("he said") and "613 times" (faint).
-     Each is a link that pushes that word's concordance filtered to the form (§14.6.3).
-     With no known words, the heading reads "Examples".
-  4. **Credit** (required), after a hairline, SF 13 faint: "Adapted from “Tense aorist” in
-     the Greek Grammar by unfoldingWord, licensed CC BY-SA 4.0. The original work by
-     unfoldingWord is available from **unfoldingword.org/ugg**." The link opens
-     `https://ugg.readthedocs.io/en/latest/tense_aorist.html` in `SFSafariViewController`
-     (the article itself; unfoldingword.org/ugg now lands on a general page). Hebrew:
-     "…in the Hebrew Grammar by unfoldingWord…", `unfoldingword.org/uhg` →
-     `https://uhg.readthedocs.io/en/latest/<file>.html`. The "®" and logo never appear.
-- **Grammar Notes** (the list, pushed from the language page): plain list, one row per note
-  in §14.4.1's order, the title (SF 17), and in faint the `grammar.txt` sentence (one line).
-  A footer: "In the order of J. Gresham Machen's _New Testament Greek for Beginners_
-  (1923)." / "In the order of A. B. Davidson's _Introductory Hebrew Grammar_ (1896)."
-  No checkmarks, read state or progress.
-- **The Grammar screen (§7.5.3)**: a term with a note gets a disclosure indicator and pushes
-  it. Terms without one stay plain rows.
-
-#### 14.4.4 Meeting the licence
-- **Attribution**, on every note (above) and in Acknowledgements (§7.8), as a new
-  section **"Grammar Notes"**:
-  - row "unfoldingWord Greek and Hebrew Grammars", subtitle "Grammar notes adapted from
-    the Greek Grammar and the Hebrew Grammar by unfoldingWord, licensed CC BY-SA 4.0. The
-    original works are available from unfoldingword.org/ugg and unfoldingword.org/uhg." →
-    `https://ugg.readthedocs.io`.
-  - row **"Changes to the Grammar Notes"** (disclosure) → a text screen, as STEP's changes
-    (§7.8): "Each note was shortened and rewritten in plain English from the article's
-    summary and opening. The articles' examples and tables were left out; the examples
-    shown are taken from the Berean Bible Translation Tables. Some terms were renamed to
-    match the app (sequential → consecutive). unfoldingWord's trademark was removed, as
-    its licence requires."
-  - row **"The Notes, to Share"** → `https://smoothbible.com/grammar/` (a static page in
-    `programs/bible/site/grammar/` listing both files `greek-notes.txt` and
-    `hebrew-notes.txt`, copies of `notes.txt` split by language, with the licence and the
-    changes). This is ShareAlike in practice: anyone can take the adapted notes, outside
-    the app, under the same licence.
-- **Trademark:** no "unfoldingWord®" product name, logo or wording implying endorsement.
-  "by unfoldingWord" is attribution, which the licence asks for.
-- **Only `notes.txt` is CC BY-SA.** It's a separate data file, bundled alongside the app (an
-  aggregate), like STEP's CC BY lexicons. The app's code and its other data are unaffected.
-- **Machen and Davidson** need no credit (public domain), but the list's footers name them
-  as a courtesy, and Acknowledgements has one plain line under Grammar Notes: "The order of
-  the notes follows J. Gresham Machen (1923) and A. B. Davidson (1896)."
-
-### 14.5 Alphabet data and sound
-
-#### 14.5.1 `data/lang/letters.txt` (written by hand, public domain like `grammar.txt`)
-- One line per card: `LANG\tID\tGLYPH\tNAME\tSOUND\tSPEAK\tEXAMPLE_KEY\tEXAMPLE_FORM\tEXAMPLE_REF`.
+#### 14.4.1 `data/lang/letters.txt` (written by hand, public domain like `grammar.txt`)
+- One line per card: `LANG\tID\tGLYPH\tNAME\tSOUNDS\tSPEAK\tEXAMPLE_KEY\tEXAMPLE_FORM\tEXAMPLE_REF`.
+  `SOUNDS` holds one sound per pronunciation system, separated by `|`, in §14.0.4's
+  order (Greek: Erasmian | Koine | Modern; Hebrew: Israeli | Tiberian).
 - **Greek, 32 cards:**
   - the 24 letters ("Α α", "Σ σ ς");
   - the pairs αι, ει, οι, υι, αυ, ευ, ου;
   - the rough breathing (ʽ).
-  - Sounds are the ones most English-language courses teach: α "a as in father", β "b",
-    γ "g as in go; before γ, κ, χ, ξ: ng", η "e as in they", θ "th as in thin", υ "u as
-    in French tu", ου "oo as in food" …
+  - **Erasmian** sounds are the ones most English-language grammars teach (Machen,
+    Mounce): α "a as in father", β "b", γ "g as in go; before γ, κ, χ, ξ: ng", η "e as in
+    they", θ "th as in thin", υ "u as in French tu", ου "oo as in food" …
+  - **Koine (Reconstructed)** follows Benjamin Kantor's reconstruction for the first
+    century (*The Pronunciation of New Testament Greek*, 2023), as far as English
+    spellings can say it: β "v", γ "a soft g, almost y before e and i", δ "th as in this",
+    η "e as in they", αι "e as in bet", ει "ee", οι and υ "French u", φ θ χ "p, t, k with
+    a puff of breath" …
+  - **Modern Greek**: β "v", η, ι, υ, ει, οι "ee", αι "e as in bet", φ "f", θ "th as in
+    thin", χ "ch as in loch" …
 - **Hebrew, 41 cards:**
   - 22 letters, with the finals shown beside theirs ("כ ך"), where בּ/ב, כּ/כ, פּ/פ are
     split into "Letters With a Dot" (3 more), and שׁ and שׂ are two;
   - 15 vowels on bet: qamets, patach, tsere, segol, hireq, holem, holem-vav, shureq,
     qibbuts, sheva, hatef-patach, hatef-segol, hatef-qamets, hireq-yod, tsere-yod.
-  - Sounds are the standard academic ones (qamets "a as in father"; sheva "a short e, or
-    silent").
+  - **Israeli** sounds are the ones most grammars teach (Pratico and Van Pelt, Futato):
+    qamets "a as in father", sheva "a short e, or silent", ט and ת both "t", כ and ק both
+    "k", ע and א both silent.
+  - **Tiberian (Reconstructed)** follows Geoffrey Khan's description of the Masoretes'
+    reading (*The Tiberian Pronunciation Tradition of Biblical Hebrew*, 2020): qamets "o
+    as in British hot", א "a catch in the throat", ע "a voiced sound deep in the
+    throat", ח "h from deep in the throat", ט, צ and ק "emphatic", and בגדכפת without their dot "v, gh, dh, kh, f, th".
 - **The 16 Hebrew joined words** (`joined` cards) are in the same file, `LANG` = `H`, kind
   given by an id starting `j-`.
   - Glyph: on a dotted circle, "וְ◌" … Or for endings, "◌וֹ" ("his").
@@ -7144,7 +7127,7 @@ Weak verbs, the rare stems (Polel, Pilpel …) and Aramaic are left for later.
   plain to see) and writes it in. The example's verse is the most-read candidate the tool
   prints (e.g. ἀγάπη, 1 John 4:8).
 
-#### 14.5.2 Speaking (`ios_learn.l8`)
+#### 14.4.2 Speaking (`ios_learn.l8`)
 - `AVSpeechSynthesizer` with the best installed voice for `el-GR` or `he-IL` (Premium >
   Enhanced > compact, as §12.0.2 decision 8; any region of the language accepted), rate
   0.40, through its delegate. No blocks.
@@ -7161,11 +7144,11 @@ Weak verbs, the rare stems (Polel, Pilpel …) and Aramaic are left for later.
   don't highlight on tap), and the page's footer says where to get one (§14.3.2). The log
   says "bible: learn voice el-GR none" or "… Melina (enhanced)".
 
-### 14.6 How what you know changes Study
+### 14.5 How what you know changes Study
 
-#### 14.6.1 The interlinear (§7.4, Words segment)
+#### 14.5.1 The interlinear (§7.4, Words segment)
 Applies when **Hide What I Know** is on and the order is **Greek Order** or **Hebrew Order**.
-English Order always shows everything (it is the study view; §14.13 question 3).
+English Order always shows everything (it is the study view; §14.16 question 3).
 - **A known word's English line** (§14.1.3) is drawn in the clear color. Its space is
   kept, so the tile grid (§7.10a) is identical hidden or shown: **nothing moves**.
 - **The transliteration line** is hidden in the same way on every tile once the alphabet
@@ -7190,7 +7173,7 @@ English Order always shows everything (it is the study view; §14.13 question 3)
   it shows, as a tap does.
 - **Log:** "bible: learn hide JHN 3:16 known 11 of 14 translit hidden".
 
-#### 14.6.2 Word study (§7.5) and lemma study (§10.4.2)
+#### 14.5.2 Word study (§7.5) and lemma study (§10.4.2)
 - **Section 1 gains a last row, Your Words:**
   - no card: a button-like row **Learn This Word** (accent text, no value). Tap → adds the
     card (`from` = `study`), and the row changes in place (fade) to "New · in your next
@@ -7200,13 +7183,13 @@ English Order always shows everything (it is the study view; §14.13 question 3)
   - names and Aramaic words: no row.
 - **Forms row** (verbs, nouns, adjectives, pronouns, the article; not particles,
   prepositions, conjunctions or indeclinables): "Forms" | "23 forms", disclosure → Forms
-  (§14.6.3). It sits after Grammar, and in a lemma study after Meaning.
+  (§14.5.3). It sits after Grammar, and in a lemma study after Meaning.
 - **Related Words** (§10.4.2): a known word's row gets a faint `checkmark` after its count
   (VoiceOver "known"). This shows quietly which neighbours you already have.
 - **Hebrew:** the Grammar screen's Prefix and Suffix sections (§7.5.3) name the joined
   word's card ("Joined word: וְ and · known").
 
-#### 14.6.3 Forms (pushed; insetGrouped; title "Forms")
+#### 14.5.3 Forms (pushed; insetGrouped; title "Forms")
 The lemma's forms **as they occur in the Bible**, made at push time from the lemma's
 verses (`conc.bin`) and their words' morph codes (`lang.l8` `forms_of(lemma)`). No data is
 added.
@@ -7235,10 +7218,10 @@ added.
   As's filtering (`conc_only` by a predicate).
 - **VoiceOver:** each cell is an element: "Aorist active indicative, 3rd person singular,
   ēgapēsen, 6 times."
-- **No model paradigms** (λύω, קָטַל) this round. The words' own forms are what's read
-  (§14.11).
+- **Model paradigms** (λύω, קָטַל) come with the courses (§14.12.5, §14.13.2); this
+  screen shows the word's own forms, which is what a reader meets.
 
-#### 14.6.4 Practice with cards (§13.3, extended)
+#### 14.5.4 Practice with cards (§13.3, extended)
 Cards use the same sheet as passages. The differences:
 - **Title** "Greek Words" (or "Hebrew Words"; "Greek Letters" while only letters are in the
   session). The counter on the left counts all items in the session ("3 of 16").
@@ -7281,7 +7264,7 @@ Cards use the same sheet as passages. The differences:
   (the word, the verse, the meaning). Activating the word speaks it.
 - **Log:** "bible: learn card G25 knew box 2→3 due 2026-10-27 context PHP 4:6 (seen 3)".
 
-### 14.7 The reminder
+### 14.6 The reminder
 §13.5's notification gains the cards:
 - **memory only:** "To review: Psalm 23 and 14 Greek words". Cards alone: "To review: 14
   Greek words". Hebrew is named as such.
@@ -7290,7 +7273,7 @@ Cards use the same sheet as passages. The differences:
 - `reminders_schedule` counts cards in `memory_due_on`. A card added, graded, marked
   known or deleted reschedules, as a passage does.
 
-### 14.8 Data pipeline
+### 14.7 Data pipeline
 - **`tools/learn.py`** (`python3 -I`, standard library), run by `fetch.sh … make` after
   `related.py`. It reads `data/lang/words.bin`, `verses.bin`, `morph.txt` and
   `lexicon.txt` (the app's own data; no new download), and writes **`data/lang/vocab.bin`**:
@@ -7300,20 +7283,15 @@ Cards use the same sheet as passages. The differences:
     2 = Aramaic), u32 count`, ordered by count descending, then number ascending. Names are
     included but flagged (so §14.1.3 can tell them), and Aramaic too.
   - About 85 KB.
-- **It prints** the table in §14.0.1 (coverage at 10, 50, 120, 300, 500 and 1,000; the
+- **It prints** the table in §14.0.3 (coverage at 10, 50, 120, 300, 500 and 1,000; the
   readable-verse counts at 120 and 300 known words), the joined-word counts, and each
   letter card's example candidates. The commit message carries the table.
-- **`tools/grammar_notes.py`** (§14.4.2) makes the drafts. It also **checks** `notes.txt`:
-  every `@` line names a listed source file, every Greek and Hebrew term in §14.4.1 has a
-  note, and no body exceeds 150 words.
-- **Hand-written:** `data/lang/letters.txt` (§14.5.1, about 8 KB), `data/lang/notes.txt`
-  (about 60 KB).
-- **Bundle:** about 150 KB more, read at first use of a language page, card or interlinear
+- **Hand-written:** `data/lang/letters.txt` (§14.4.1, about 10 KB).
+- **Bundle:** about 100 KB more, read at first use of a language page, card or interlinear
   with hiding, never at launch.
-- **`fetch.sh`** gains the en_ugg and en_uhg files (§14.4.2), with sums. Machen and
-  Davidson aren't downloaded (only their lesson order is used, written into §14.4.1).
+- **`fetch.sh`** doesn't change in Round 10 (no new download).
 
-### 14.9 Typography, right to left, and accessibility
+### 14.8 Typography, right to left, and accessibility
 - **Fonts and sizes** are §7.3's (Greek: New York; Hebrew: the system font, SF Hebrew),
   scaled with `UIFontMetrics`. New sizes: letters on the Alphabet page 34/40 pt, and on
   cards 56 pt.
@@ -7326,7 +7304,7 @@ Cards use the same sheet as passages. The differences:
   points, dagesh, shin/sin dots and maqaf). A vowel shown alone sits on bet ("בָ"), never
   on a bare dotted circle, because SF Hebrew's dotted-circle placement varies. Joined-word
   glyphs use U+25CC only where the mark joins a letter (וְ◌), and the CI shot checks them
-  (§14.10). If they render badly, use the example word instead, and note it in the commit.
+  (§14.9). If they render badly, use the example word instead, and note it in the commit.
 - **Line height** for Hebrew with points is 1.35 (the points need room above and below);
   for Greek 1.25.
 - **VoiceOver** reads Greek and Hebrew with `accessibilityLanguage` set (`el`, `he`), so
@@ -7340,9 +7318,9 @@ Cards use the same sheet as passages. The differences:
   "helped" underlines.
 - **Reduce Motion:** every cross-fade above is immediate.
 
-### 14.10 CI and tests
+### 14.9 CI and tests
 
-#### 14.10.1 Linux (`make bible-test`)
+#### 14.9.1 Linux (`make bible-test`)
 - **`test_learn.l8`:**
   - `vocab.bin`: G3588 is first; the top-120 Greek coverage equals what `learn.py`
     printed (67%); names are flagged (G2424 Jesus) and never offered by `learn_next`.
@@ -7362,11 +7340,11 @@ Cards use the same sheet as passages. The differences:
   - `cards.tsv` round trip, malformed lines, duplicate keys.
   - `forms_of(G25)`: the Aorist Active Indicative 3rd singular is ἠγάπησεν with the
     printed count; `forms_of(H559)`: the Qal Consecutive Imperfect 3ms is וַיֹּאמֶר.
-  - `speak_greek`: the two examples in §14.5.2.
-- **`grammar_notes.py --check`** in `make bible-test`: every note present, the sources
-  named, no note over 150 words.
+  - `speak_greek`: the two examples in §14.4.2.
+- `letters.txt`: every letter has a sound in every pronunciation system, and every
+  example word is one of `vocab.bin`'s lemmas.
 
-#### 14.10.2 The `languages` demo group
+#### 14.9.2 The `languages` demo group
 A new group in `simulate.sh` and the workflow matrix, on the demo clock (2026-10-19 08:00).
 Before the first launch it seeds:
 - `memory.tsv`: Philippians 4:6–7 (BSB, review, due 2026-10-25), so the passage sources
@@ -7379,7 +7357,7 @@ Before the first launch it seeds:
 | Shot | Action | Expected |
 |---|---|---|
 | `240-interlinear-link` | Study John 3:16, Greek Order, scrolled to the end | Every tile as before; "Learn Greek" centred under the last row |
-| `241-greek-new` | Tap Learn Greek | The Greek page: "The New Testament has 138,088 words … The 120 most common make up 67% of it."; Alphabet "not started"; Your Words; Add Words…; Verses You Can Read "After the alphabet"; Grammar Notes 29; the two switches, with Speak's footer (or the no-voice footer: CI has no Greek voice; the log says which) |
+| `241-greek-new` | Tap Learn Greek | The Greek page: "The New Testament has 138,088 words … The 120 most common make up 67% of it."; Alphabet "not started"; Your Words; Add Words…; Verses You Can Read "After the alphabet"; Pronunciation "Erasmian"; the two switches, with Speak's footer (or the no-voice footer: CI has no Greek voice; the log says which) |
 | `242-alphabet` | The Alphabet | Letters with names, sounds, examples (α in ἀγάπη in accent); toolbar Learn 8 Letters, I Know These |
 | `243-letter-new` | Learn 8 Letters | Practice "Greek Letters", "1 of 8": "New", Α α at 56 pt, ἀγάπη with α in accent, the answer shown ("Alpha · a as in father"), Next; the one-time line |
 | `244-letter-check` | Next ×8, then the first comes back | The hidden answer (its space kept); Check |
@@ -7394,7 +7372,7 @@ Before the first launch it seeds:
 | `253-word-study-yours` | Tap it again | Word study: Your Words "Known · next review …", Forms "… forms"; Related Words with checkmarks on known ones |
 | `254-forms` | Forms | ἀγαπάω's sections (Present Active Indicative, Aorist Active Indicative …), grid cells with counts and "—" |
 | `255-forms-conc` | Tap ἠγάπησεν | Concordance "ἠγάπησεν · aorist active indicative 3rd singular — N times" |
-| `256-note-aorist` | Back ×2, Grammar, Aorist | The note: body, "In John 3:16" line, Examples You Know, the credit with unfoldingword.org/ugg |
+| `256-pronunciation` | Back ×2; the Greek page → Pronunciation, choose Koine (Reconstructed), back to the Alphabet | The three choices with their descriptions; then the Sound column in Koine (η "e as in they"; β "v"; αι "e as in bet") |
 | `257-readable` | The Greek page → Verses You Can Read | Sections From Your Highlights and Notes / From What You've Read / Elsewhere / One Word to Learn; Greek text only |
 | `258-readable-open` | Tap the first | The interlinear for that verse in Greek Order, all English hidden |
 | `259-memory` | Library → Memory | Today: Greek Words "14 to review"; Languages: Greek "120 words · 67% of the New Testament", Hebrew "The language of the Old Testament" |
@@ -7407,7 +7385,7 @@ Before the first launch it seeds:
 | `266-night-card` | Night theme; a word card after Check | Dark page; semibold form in the window; the judgement row |
 | `267-ax-card` | Accessibility size | The card wraps; the judgement row stacks; nothing clipped |
 | `268-ax-forms` | Accessibility size, Forms | The columns stacked, labelled |
-| `269-acknowledgements` | Settings → Acknowledgements, scrolled | The Grammar Notes section: the credit, Changes, The Notes, to Share, and the Machen/Davidson line |
+| `269-reading-practice` | Back to Erasmian; the Alphabet → Practise Reading; Check on the first | A common word of known letters (λόγος), its transliteration *logos*, Check gone; Next |
 
 - **Recording sequence 16:** Study John 3:16 in Greek Order with hiding on: tap three tiles
   (each English fades in; nothing moves), switch to English Order and back (hiding
@@ -7418,39 +7396,10 @@ Before the first launch it seeds:
 - **No earlier shot changes,** except 213/228's Memory segment, which gains the Languages
   section at its end (below the fold in 213).
 
-### 14.11 What's deferred, and what we're not doing
-
-**Deferred** (good, but not this round):
-- **A Greek or Hebrew text in the reader** (a "version" read continuously in the original,
-  with glosses for unknown words as footnotes, like a printed reader's edition). It's the
-  natural next step after §14.6.1, and the BSB tables can make the text. But it touches
-  the reader, versions and layout, so it is its own round.
-- **Model paradigms** (λύω, the article, קָטַל) as full tables, and weak-verb notes.
-  The words' own forms come first.
-- **Recorded readings** of the Greek New Testament or the Hebrew Bible. None has been
-  verified as open and good. If one is, it would follow along in the interlinear the way
-  §12 does in the reader.
-- **Producing Greek from English, typing words, parsing drills, principal parts.**
-- **Aramaic** cards and notes (4,331 words in Daniel, Ezra and Jeremiah 10:11).
-- **The Septuagint.**
-- **Concordance and search by Greek or Hebrew form typed in** (a keyboard for them).
-
-**Not doing** (the owner's scope steer, 2026-10-20):
-- No video, no streaming, no hosted course, no accounts, no syncing of progress.
-- No lessons, units, curriculum, quizzes, tests, certificates or "course complete".
-- No streaks, points, XP, levels, badges, leaderboards, progress rings, charts or
-  dashboards. The coverage sentence is the only measure, and it's a fact about the text.
-- No AI tutor, chat or generated explanations.
-- No pronunciation scoring or speech recognition (§13.9's reasons apply even more to
-  ancient languages).
-- No Modern Greek or Modern Hebrew conversation.
-- No machine-made course text: the notes are adapted by hand and credited; Machen's and
-  Davidson's text isn't used (and their OCR isn't fit to use).
-
-### 14.12 Round 10 acceptance
+### 14.10 Round 10 acceptance
 Approved when:
-1. **Data:** `vocab.bin`'s printed table matches §14.0.1 (or the commit explains a
-   difference); `learn.py` and `grammar_notes.py --check` run clean; `test_learn.l8`
+1. **Data:** `vocab.bin`'s printed table matches §14.0.3 (or the commit explains a
+   difference); `learn.py` runs clean; `test_learn.l8`
    passes; launch time is unchanged.
 2. **Placement:** the reader, tray, edit menu and Go To are unchanged. The language page
    is reached from Memory's Languages section and the interlinear's link (240, 241, 259).
@@ -7463,36 +7412,626 @@ Approved when:
 5. **Practice:** cards in §13's sheet, the answer's space kept, new cards first shown with
    their answer, the three judgements on §13.1.5's schedule (243–249, 262, 266); Today and
    the reminder include cards (259, 265).
-6. **Forms and notes:** Forms show the Bible's own forms in a clear grid with counts
-   (254, 264, 268); a tap filters the concordance (255); notes are short, plain and
-   correctly credited (256, 269), with live examples.
+6. **Forms:** Forms show the Bible's own forms in a clear grid with counts (254, 264,
+   268); a tap filters the concordance (255).
 7. **Hebrew:** right to left everywhere, clean points, joined words and endings handled
    (261–264).
-8. **Licences:** every note carries unfoldingWord's credit, with no trademark; the changes
-   are listed; the notes are published at smoothbible.com/grammar/ under CC BY-SA.
+8. **Sounds:** the Pronunciation choice changes the table and the letter cards only
+   (256); Practise Reading sounds out real words (269).
 9. **Calm:** no streak, score, badge, chart or praise anywhere (every shot).
 10. **Accessibility:** VoiceOver labels in the right language, Show Meaning on hidden
     tiles, stacked layouts at large sizes (267, 268), Reduce Motion.
 
 **On a device (the owner):**
 - Install the Greek and Hebrew voices (Settings › Accessibility › Spoken Content ›
-  Voices). Listen to the letters, and say whether the modern Greek voice helps or
-  confuses.
+  Voices). Listen to the letters in each pronunciation, and say whether the modern Greek
+  voice helps or confuses beside the Erasmian table.
 - Learn the Greek alphabet and the first 30 words over a week. Then read John 1:1–5 in
   Greek Order with hiding on.
-- Say whether anything feels like a course or a game.
+- Say whether anything feels like a game.
 
-### 14.13 Questions only the owner can answer
+
+### 14.11 Round 11: the original text in the reader
+
+Round 11 puts the Hebrew Bible and the Greek New Testament in the reader as one more
+version, **Hebrew and Greek**, set like a printed reader's edition: the text itself, with
+glosses only for the words this reader doesn't know. Everything the reader does (ribbons,
+plans, history, marks, Memory, Listen, Compare, Search, Share) works in it.
+
+#### 14.11.1 Data: `tools/orig.py` (`python3 -I`, run by `fetch.sh … make`)
+- **Sources:** TAGNT and TAHOT (§14.0.3), already downloaded and checked by `fetch.sh`.
+  No new download.
+- **The Greek text** is each verse's TAGNT text line (`# Mat.1.1 …`), with its punctuation.
+  Its words are the word lines whose edition list includes `NA28` (the modern critical
+  text, the base the BSB follows). The tool fails if a verse's text line and its NA28
+  words disagree, and prints the list.
+- **The Hebrew text** is TAHOT's, with:
+  - the cantillation kept in a second form (shown only with Show Accents, §14.11.3), and
+    the display form cleaned as `forms.txt` is (§7.1);
+  - the Qere read and shown, the Ketiv kept for the popover; a Qere word is followed by a
+    faint "°" (as the circle in printed Hebrew Bibles);
+  - maqaf kept (words joined by it are one word for the eye, two for the data);
+  - petuha (פ) and setuma (ס) as paragraph breaks;
+  - the Aramaic portions (Daniel 2:4b–7:28, Ezra 4:8–6:18, 7:12–26, Jeremiah 10:11,
+    Genesis 31:47's two words) flagged per word.
+- **Paragraphs and lines:** paragraph breaks at verse boundaries follow the BSB's (a
+  mid-verse break is dropped). In the Hebrew poetic books (Psalms, Proverbs, Job 3:1–42:6,
+  Song of Songs, Lamentations) each verse starts a line, as BHS sets poetry by verse when
+  it can't by line. Psalm titles are `D` records, as in the BSB.
+- **Versification:** keyed by the BSB's verse numbers (R4.1), so marks show. Where the
+  Hebrew numbering differs (the psalm titles counted as verse 1, Malachi 3:19–24 = 4:1–6,
+  Joel 2:28–3:21, and so on), each verse also records its Hebrew number, shown faint in
+  the popover ("Hebrew 3:19"). The tool prints the differences; `versify.py` checks the
+  chapter lists as for every version.
+- **Outputs:**
+  - `data/orig.txt`: the 66 books in the `bsb.txt` record format, OT Hebrew then NT Greek,
+    about 7 MB. New record types: `H<text>` a run of Hebrew (laid out right to left),
+    `R<text>` a run of Aramaic (the same, flagged).
+  - `data/lang/orig-words.bin`: 12 bytes per word in reading order: `u16 strongs` (bit 15
+    Greek), `u16 morph` (a line of `morph.txt`, the BSB tables' style: the tool converts
+    TAHOT's OSHB codes, `HVqp3ms` → `V-Qal-Perf-3ms`, and adds the lines it needs), `u8
+    sense` (as `senses.bin`), `u8 flags` (1 name, 2 Aramaic, 4 Qere, 8 joined by maqaf to
+    the next), `u16 0`, `u32 words.bin index` of the same word (the join of `senses.py`;
+    `0xFFFFFFFF` when the BSB's tables don't have it, as for a variant). About 5.3 MB.
+  - `data/lang/orig-ketiv.txt` (`REF\tWORD\tKETIV`) and the cantillated forms
+    (`orig-accents.txt`, one line per Hebrew word, about 4 MB, read only when Show Accents
+    is on).
+- **Tests** (`test_lang.l8`): the token count of every verse equals its word count; John
+  3:16 is 25 words, its 3rd ἠγάπησεν (G25, `V-AIA-3S`); Genesis 1:1's 1st word is
+  בְּרֵאשִׁית with prefix `Prep-b`; Psalm 23:1's title words are in its `D` record; the
+  Hebrew number of Malachi 4:1 is 3:19; an Aramaic word in Daniel 2:4 is flagged.
+
+#### 14.11.2 The version
+- **Versions (§9.3.2)** gains, after the English versions, a section "Original Languages"
+  with one row: **Hebrew and Greek**, secondary "The Hebrew Bible (Leningrad Codex) and the
+  Greek New Testament, word by word from STEP Bible". Text id 6.
+- **Its short name** is "Hebrew and Greek" where a version is named (Compare, Memory
+  rows: "Psalm 23 · Hebrew").
+- **Switching to it** is §9.3.3's cross-fade, keeping the verse.
+- **Acknowledgements** gains its text credit: "Hebrew Bible and Greek New Testament:
+  STEP Bible's Translators Amalgamated texts (TAHOT, TAGNT), CC BY 4.0, from the Leningrad
+  Codex and the editions of the Greek New Testament."
+
+#### 14.11.3 How it looks
+- **Greek:** New York at the reader's size and line height; verse numbers and openers as
+  in every version.
+- **Hebrew:** SF Hebrew (the system font) at the reader's size × 1.15 (Hebrew's letters
+  are small for their size), line height 1.5 (the points need room). Each paragraph is
+  right to left (`NSWritingDirectionRightToLeft`, alignment natural), so verse numbers
+  stand at the right, before their verse. Maqaf joins without a space. The chapter opener
+  is the app's (the numeral and "GENESIS"), so the chrome stays English.
+- **Show Accents** (Reading settings, only in this version; off): shows the cantillation
+  marks, for those who read with them.
+- **No headings** (the original has none); the Section Headings switch has nothing to
+  hide here.
+- **Marks** (highlights, notes, bookmarks) draw as in every version; red letters don't
+  apply (the original doesn't mark them).
+
+#### 14.11.4 Glosses (the reader's edition)
+- **Which words are glossed**, a Reading settings row in this version, **Glosses**, with a
+  checkmark list:
+  - **Words I Haven't Learned** (§14.1.3; the default once the language has any card);
+  - **Rare Words**: Greek words used 30 times or fewer, Hebrew fewer than 100 (the
+    printed reader's editions' rule; the default before then);
+  - **None**.
+- **In the text,** a glossed word has a dotted underline in the `rule` color, thin enough
+  to read past. Nothing else marks it.
+- **The apparatus:** after each paragraph, 6 pt below, in SF at 0.78 em, faint: the
+  paragraph's glossed words in reading order, each "form gloss", separated by " · ":
+  "μονογενῆ one and only · ἀπόληται perish · αἰώνιον eternal". The gloss is the BSB's
+  rendering of that word in that verse (through the join), lowercased, or, without a join,
+  the lexicon's gloss of its sense. The same lemma glossed twice in a paragraph is listed
+  once. Hebrew entries are isolated right to left (§14.8). A paragraph with nothing
+  glossed has no apparatus.
+- **Names** are glossed only before the alphabet is known (decision 12).
+- **A tap on an apparatus entry** opens the word's popover (§3.1.5's style, as a footnote
+  does): the form (hero size), transliteration, the gloss, the plain parsing ("Verb ·
+  aorist · subjunctive · middle · 3rd person singular"), the Ketiv for a Qere word, the
+  Hebrew verse number where it differs, and two buttons: **Word Study** (pushes §7.5 in a
+  sheet) and **Learn This Word** (or "Learning · next review Thursday").
+- **Tapping a word in the text selects its verse**, as in every version (§7.2: one
+  gesture, one meaning). Long-press selects a word, and the edit menu's **Study** opens its
+  word study. The tray's Study opens the interlinear.
+- **A learned word stops being glossed** the next time the chapter is laid out (a card
+  graded Knew It in Practice relays out the reader's visible chapters when Practice
+  closes).
+- **Log:** "bible: orig JHN 3 glossed 41 of 512 (words I haven't learned)".
+
+#### 14.11.5 The letter keyboard
+A small keyboard of our own, for typing Greek and Hebrew without adding a system keyboard:
+- A run-time `UIView` used as the `inputView` of §13.3.6's `UIKeyInput` view (and, from
+  Round 12, of the answer fields). It adopts `UIInputViewAudioFeedback` (`enableInputClicksWhenVisible`
+  YES) and plays `[[UIDevice currentDevice] playInputClick]`.
+- **Greek:** three rows in the Greek system keyboard's order (ς ε ρ τ υ θ ι ο π / α σ δ φ γ
+  η ξ κ λ / ζ χ ψ ω β ν μ), then space, delete (`delete.left`) and Return.
+- **Hebrew:** the Israeli layout (/ ' ק ר א ט ו ן ם פ / ש ד ג כ ע י ח ל ך ף / ז ס ב ה נ מ צ
+  ת ץ), then the same.
+- **No accents, breathings or points.** Every comparison folds them (and final forms,
+  and the sigmas).
+- **Keys** are `UIButton`s with system backgrounds, sized like the system keyboard's
+  (the height follows the device's keyboard height, measured once from
+  `UIKeyboardWillChangeFrameNotification` of a system keyboard if seen, else 216 pt), with
+  VoiceOver labels ("alpha", "aleph").
+- **Used by:** Practice's Type for passages in this version (§14.11.7), and from Round 12
+  the answers that are typed.
+
+#### 14.11.6 Listening, and the language page
+- **Listen** in this version uses the iPhone's voice (§12.0.2's source `SRC_VOICE`), with
+  `he-IL` for the Old Testament (and its Aramaic) and `el-GR` for the New, read verse by
+  verse with the reader's wash following, exactly as the KJV's. Greek is spoken monotonic
+  (§14.4.2). The Voice screen (§12.4.2) shows this version's row: "iPhone Voice · Hebrew:
+  Carmit · Greek: Melina" (the installed names), or "Add a Hebrew voice in Settings ›
+  Accessibility › Spoken Content › Voices." Speed is Listen's.
+- **The language page** gains a row in Reading: **Read in Greek** ("Read in Hebrew"):
+  dismisses the sheets and switches the reader to this version at the same place, or, if
+  the reader is in the other testament, at the carried ribbon's chapter in this one, else
+  Matthew 1 (Genesis 1). It says what it will do in its secondary text ("John 3, where
+  you are").
+- **Verses You Can Read** opens a verse in the reader (this version, the back capsule)
+  instead of the interlinear.
+
+#### 14.11.7 Memory, Search, Compare and Share in the original
+- **Memory:** Memorize in this version makes a passage in it (§13.2). Practice works as
+  for any version: key letters are each word's first letter (for Hebrew, of the word as
+  written, so a prefix's letter: וַיֹּאמֶר → ו), Some/Letters/Blank hide in the same
+  clear-color way, right to left for Hebrew. **Type** uses the letter keyboard (§14.11.5).
+  Listen and Echo use the iPhone voice of the language. So a learner can memorize Psalm 23
+  in Hebrew.
+- **Search** (§3.6) in this version matches:
+  - Greek or Hebrew typed (the system keyboard or none): accents, breathings and points
+    folded;
+  - **Latin letters**, against each word's transliteration, folded (ē → e, š → s, ḥ →
+    h, marks and syllable dots dropped): "agape" finds ἀγάπη, ἀγάπην, ἀγάπης …; "shalom"
+    finds שָׁלוֹם.
+  - Results in context as now, the matching words semibold; whole-word matching as now.
+- **Compare** (§9.5) gains the row "Hebrew and Greek", right to left for Hebrew.
+- **Share as Image** (§10.5) sets the Hebrew right to left in New York or SF Hebrew; the
+  reference stays English.
+- **Copy** copies the text as shown (without accents unless Show Accents is on).
+
+#### 14.11.8 Accessibility
+- VoiceOver reads each verse with `accessibilityLanguage` `he` or `el` (the installed
+  voice), and the apparatus as "Glossed: monogenē, one and only; …" with the
+  transliterations, so it makes sense without the voice.
+- Dynamic Type: the reader's size applies; the apparatus scales with it.
+- Reduce Motion: as the reader.
+
+#### 14.11.9 CI and tests (Round 11)
+- **Linux:** §14.11.1's tests; the gloss rule (Words I Haven't Learned with a fixture set;
+  Rare Words' 30 and 100); search folding ("agape", "shalom", a pointed and an unpointed
+  query); the key letters of Hebrew words with prefixes; the letter keyboard's folding.
+- **The `original` demo group**, shots **270–295**, on the demo clock, seeding Greek cards
+  as known (`demo_learn_known("G",120)`) and Hebrew 300 with the alphabet and joined words:
+  - 270 the Versions screen with Hebrew and Greek; 271 John 1 in Greek, glossed by words I
+    haven't learned (the apparatus after each paragraph); 272 the same with Rare Words;
+    273 the popover from μονογενής in John 1:14; 274 Learn This Word from it, the toast;
+    275 John 3 after a Practice where μονογενής was graded Knew It: no longer glossed;
+  - 276 Genesis 1 in Hebrew, right to left, verse numbers at the right, the apparatus; 277
+    Psalm 23 (its title as `D`, poetry by verse); 278 Show Accents on; 279 a Qere word's
+    popover with its Ketiv; 280 Malachi 4:1's popover ("Hebrew 3:19"); 281 Daniel 2:4b,
+    Aramaic, glossed (no Aramaic cards yet);
+  - 282 Listen in Greek (the mini player, the wash on verse 1, the log names the voice or
+    none); 283 Listen in Hebrew;
+  - 284 Memorize Psalm 23:1–3 in Hebrew; 285 its Practice at Letters, right to left; 286
+    Type with the Hebrew letter keyboard; 287 Greek letter keyboard on John 1:1;
+  - 288 Search "agape"; 289 Search "שלום" (unpointed); 290 Compare John 3:16 with the
+    Greek row; 291 Share as Image of Psalm 23:1 in Hebrew;
+  - 292 Night theme, Hebrew; 293 accessibility size, Greek with apparatus; 294 Read in
+    Greek from the Greek page; 295 a highlight made in the BSB on John 3:16, shown in
+    Greek.
+- **Recording sequence 17:** switch BSB → Hebrew and Greek at John 3 (the cross-fade,
+  the verse kept), scroll into John 4, tap an apparatus entry, Learn This Word, close.
+
+#### 14.11.10 Round 11 acceptance
+1. The text: every verse of both testaments present, keyed by the BSB's numbers, the
+   tool's checks clean (tests).
+2. Hebrew right to left everywhere it appears in the reader, Memory, Search, Compare and
+   Share; clean points; Qere and Ketiv; Aramaic flagged (276–281, 284–291).
+3. Glosses exactly for the chosen words, in an apparatus that reads calmly; learned words
+   stop being glossed (271–275).
+4. One gesture, one meaning: a tap selects the verse; the apparatus opens popovers.
+5. Listen reads both languages with the installed voices, following verse by verse
+   (282, 283).
+6. Memory, Type with the letter keyboard, Search by Greek, Hebrew or Latin letters
+   (284–289).
+7. Launch time unchanged (the text and words are read at first use of this version).
+
+### 14.12 Round 12: a Greek course
+
+Round 12 adds what a course gives: a sequence of short lessons that teach the grammar as a
+few patterns, with model paradigms and exercises made from real verses. It's the Greek
+page's first section. Nothing is locked: any lesson opens any time; the order is a
+suggestion.
+
+#### 14.12.1 The lessons (Machen's order, Mounce's approach; written by us)
+Each lesson is one topic, 300–700 words of explanation, one or two model paradigms, and
+10–15 words to learn (chosen by frequency among the words that show the lesson's
+pattern). The titles, and what each covers:
+1. **Sounds and Marks**: the alphabet (linking §14.3.3), the pronunciation choice,
+   breathings, accents (to recognize, not to place), punctuation (; is a question mark,
+   · a semicolon).
+2. **The Verb: Present Active Indicative**: λύω; person and number in the ending;
+   the stem.
+3. **Nouns and the Article (1)**: second declension λόγος, ἔργον; nominative and
+   accusative; word order is free, the endings tell.
+4. **Nouns and the Article (2)**: genitive and dative; the whole article.
+5. **First Declension**: γραφή, ἡμέρα, δόξα, προφήτης; the master case endings (Mounce's
+   idea: one chart, a few rules).
+6. **Adjectives**: ἀγαθός; attributive and predicate position; adjectives as nouns.
+7. **Prepositions**: case after preposition; the commonest (ἐν, εἰς, ἐκ, ἀπό, διά, ἐπί,
+   κατά, μετά, περί, πρός, ὑπό); elision (δι’, ἀπ’).
+8. **Personal Pronouns**: ἐγώ, σύ, αὐτός (three uses).
+9. **Εἰμί; Middle and Passive (Present)**: λύομαι; "deponent" verbs (ἔρχομαι) as
+   middles.
+10. **Demonstratives**: οὗτος, ἐκεῖνος.
+11. **The Imperfect**: augment, secondary endings; continuous past.
+12. **Third Declension (1)**: σάρξ, ὄνομα; the stem from the genitive.
+13. **Third Declension (2)**: πόλις, βασιλεύς, πατήρ; πᾶς, εἷς, οὐδείς.
+14. **The Future**: σ; liquid futures (μενῶ).
+15. **Contract Verbs**: ἀγαπάω, ποιέω, πληρόω; the contraction chart.
+16. **The First Aorist**: σα; aspect plainly (the whole, not "the past").
+17. **The Second Aorist and Principal Parts**: εἶπον, ἦλθον, εἶδον; the six principal
+    parts; the commonest irregular verbs.
+18. **The Aorist and Future Passive**: θη.
+19. **Relative and Interrogative Pronouns**: ὅς, τίς, τις.
+20. **Participles (1): the Present Participle, and Adverbial Use.**
+21. **Participles (2): Aorist Participles; Attributive and Substantival Use.**
+22. **Participles (3): the Genitive Absolute; Periphrastic Forms.**
+23. **The Infinitive**: purpose, result, with the article (ἐν τῷ + infinitive).
+24. **The Subjunctive**: ἵνα, ἐάν, hortatory, prohibition with μή.
+25. **The Imperative**: present and aorist; prohibitions.
+26. **The Perfect and Pluperfect**: reduplication, κα; the result that stands.
+27. **Μι Verbs**: δίδωμι, τίθημι, ἵστημι, ἀφίημι.
+28. **Comparison, Adverbs and Numbers.**
+29. **Conditions; οὐ and μή.**
+30. **Reading On**: guided readings of 1 John 1:1–10 and John 1:1–18: every form met in
+    the course, glossed only where new, with notes on what to notice.
+
+Machen's lessons 1–36 map into these (the builder's notes list the mapping). Mounce's
+book is not followed or quoted; only the idea of master charts and frequency vocabulary.
+
+#### 14.12.2 Where it lives
+The Greek page (§14.3.2) gains, **first**, a section "Lessons":
+- **Continue** (accent text): "Lesson 7 · Prepositions", the lesson after the last one
+  marked done (or Lesson 1).
+- **All Lessons** → the list: a plain table, one row per lesson, its number and title
+  (SF 17) and a one-line summary (faint); a faint `checkmark` on the ones you marked done.
+  No percent or count.
+
+And, after Reading, a section **"Reference"**: **Paradigms** (§14.12.5), **Principal
+Parts** (§14.12.5), **Grammar Notes** (§14.12.6), **Learning Elsewhere** (§14.12.8).
+
+Settings gains **Practise Both Ways** (off), footer: "Also asks for the Greek word from
+its meaning. Type it with the letter keyboard, or say it and Check."
+
+The Memory segment's Greek row (§14.3.1) reads "120 words · Lesson 7".
+
+#### 14.12.3 A lesson (pushed; a scrolling page)
+- **Title** (inline): "7 · Prepositions".
+- **Body**, a non-editable text view in the body font (16 pt, scaled), with the
+  lexicon's markup (§7.1) plus:
+  - `[[table:paradigm-id]]`: a model paradigm drawn inline as §14.5.3's grid (from
+    `paradigms-grc.txt`), with its title; a tap on it pushes the Paradigm screen;
+  - `[[ref:JHN.1.1]]`: a reference link (a preview, R3.1);
+  - `[[note:aorist]]`: a link to a reference note.
+- **"In the Bible"** (generated, after the body): up to 6 real forms showing the lesson's
+  pattern, known words first, each in its verse window (§14.5.4's style) with the BSB's
+  chunk; a tap opens the verse in the reader. The pattern is a predicate on the morph
+  code, given in the lesson file (`@match V-I?A-*` …).
+- **"Words for This Lesson"**: its 10–15 words with gloss and count; **Add These Words**
+  (those without cards).
+- **Toolbar:** **Exercises** (Done style) and, on the right, **Mark as Done** (a toggle,
+  "Done ✓" when done; it only moves Continue on).
+- **Files:** `data/learn/lessons-grc.txt`:
+  ```
+  @7	Prepositions	Prepositions take a case …
+  match	Prep
+  words	G1722 G1519 G1537 G575 G1223 …
+  body
+  Greek has about a dozen common **prepositions** …\n…[[table:article]]…
+  ```
+  The lesson text is **written by the builder for this app** and is **public domain**
+  (stated at the top of the file, as `grammar.txt`). It's checked against the reference
+  grammars (UGG, and the designer's review of each lesson); it quotes none of them.
+- **Published** at `https://smoothbible.com/learn/greek/` as plain pages made from the
+  file (`programs/bible/site/learn/`), so anyone can use them.
+
+#### 14.12.4 Exercises (a Practice-style sheet, "Exercises · Lesson 7")
+Each set is 10 items, made fresh from the Bible at the learner's level. There's no score,
+mark or count of right answers: each answer shows what's right, and the set ends with
+**Again** (a new set) or **Done**.
+- **How verses are chosen:** verses containing a form that matches the lesson's pattern
+  (and nothing from later lessons, as far as the morph tells), where every other word is
+  known or glossed; from Memory passages, marked verses and recent reading first
+  (§14.1.7's order), then by how few words are unknown.
+- **Three kinds, mixed:**
+  1. **Read.** The verse in the original, glossed as the reader's text glosses it, the
+     lesson's form in semibold. Read it (aloud: Speak plays it). **Show English** shows
+     the BSB verse with the form's chunk semibold. Then Next.
+  2. **Parse.** The form in its verse. Under it, rows of segmented controls for what the
+     form can have (for a finite verb: Tense, Voice, Mood, Person, Number; for a noun:
+     Case, Number, Gender), each with only the values taught so far and "?" first.
+     **Check** marks each row: the right segment gets a small `checkmark` (accent), and
+     where yours differs a faint line says so plainly ("Aorist, not imperfect: see σα
+     after the stem"). The explanation is from the lesson's `hint` lines keyed by
+     category, never generated free text. Then the lemma, gloss and the matching cell of
+     the model paradigm (highlighted) are shown.
+  3. **Recall.** A row of the lesson's paradigm with one cell hidden (§13.1.4's hidden
+     letters, so nothing moves). Say it or type it (the letter keyboard), then Check.
+     Typed answers are compared with accents folded.
+- **After a set,** "Add These Forms to Practice": the set's parse items become `form`
+  cards (§14.12.7). Optional; one tap.
+
+#### 14.12.5 Paradigms and principal parts
+- **`data/learn/paradigms-grc.txt`**, written by hand (facts are not copyright; checked
+  by the tool against the data): the article; λόγος, ἔργον, γραφή, ἡμέρα, δόξα, προφήτης,
+  σάρξ, ὄνομα, πόλις, βασιλεύς, πατήρ; ἀγαθός, πᾶς, μέγας, πολύς, ἀληθής; ἐγώ, σύ, αὐτός,
+  οὗτος, ἐκεῖνος, ὅς, τίς; λύω in every tense, voice and mood with the participles and
+  infinitives; εἰμί; ἀγαπάω, ποιέω, πληρόω; δίδωμι, τίθημι, ἵστημι; the endings charts
+  (Mounce's idea, our layout): the case endings and the verb's primary and secondary
+  endings.
+  - Format: `@id\tTitle\tlemma`, then `section\tcolumns`, then `row\tlabel\tform|form…`.
+  - **Check (`tools/paradigms.py`):** for a real lemma, every form the data has with that
+    exact parsing must appear in its cell (accents aside); a mismatch fails the tool and
+    is printed. Forms the Bible never uses are marked `*` in the file and drawn faint
+    ("not in the New Testament").
+- **Paradigms** (pushed from Reference): the list, grouped (Article, Nouns, Adjectives,
+  Pronouns, Verbs, Endings), each → a Paradigm screen: §14.5.3's grid, with each cell's
+  count in the Bible and a tap to its concordance; **Practise This Table** in the toolbar
+  makes a `paradigm` card.
+- **Principal Parts:** the 70 commonest verbs with more than one stem, each a row "ἔρχομαι
+  · ἐλεύσομαι · ἦλθον · ἐλήλυθα · — · —", tap → its Forms (§14.5.3). **Practise These**
+  makes `parts` cards (a verb's six parts), in sets of 10.
+
+#### 14.12.6 Grammar notes (reference, adapted from unfoldingWord's Greek Grammar)
+Short reference notes, one per grammar term, adapted from the UGG (CC BY-SA 4.0).
+- **Which:** 29 notes, from these `content/*.rst` files at commit `905f1597…`: `verb`;
+  `person` and `number`; `tense_present`; `voice` with `voice_active`, `voice_middle` and
+  `voice_passive`; `mood_indicative`; `noun` and `case`; `case_nominative`;
+  `case_genitive`; `case_dative`; `case_accusative`; `case_vocative`; `gender`;
+  `determiner_article`; `adjective` (its Glossary only); `preposition`;
+  `pronoun_personal` with `person_first` and `person_third`; `pronoun_demonstrative`;
+  `pronoun_relative`; `tense_imperfect`; `tense_future`; `tense_aorist`;
+  `mood_participle`; `mood_infinitive`; `mood_subjunctive`; `mood_imperative`;
+  `tense_perfect`; `tense_pluperfect`; `mood_optative`; `conjunction`.
+- **How:** `fetch.sh` gains those files from
+  `https://git.door43.org/unfoldingWord/en_ugg/raw/commit/905f15973461d311dc9a312486665d9fc548a6d2/content/<file>`
+  and the `LICENSE.md`, with sha256s. `tools/grammar_notes.py DIR` makes a draft of each
+  (the Glossary section and the first paragraph of the Article, with RST roles and
+  directives stripped). The builder writes each note from its draft by hand: 60–150
+  words, plain English, no examples or tables of its own (the app adds live ones), the
+  source's meaning kept, any error found in the source listed in the commit.
+  `grammar_notes.py --check` (in `make bible-test`) checks that every note names its
+  source and none is over 150 words.
+- **File:** `data/learn/notes-grc.txt`, headed "Adapted from the Greek Grammar by
+  unfoldingWord (CC BY-SA 4.0). This file is licensed CC BY-SA 4.0." Each note:
+  `@term\tTitle\tsource.rst\tSource Title`, then its body on one line.
+- **The note screen** (pushed from the Grammar screen's terms, §7.5.3, which gain a
+  disclosure, from lessons' `[[note:…]]` links, and from Reference → Grammar Notes):
+  the body; "In John 3:16" (when reached from a word): "ἠγάπησεν is aorist: _loved_.";
+  "Examples You Know" (up to 5 forms with that term from known words, each linked to its
+  concordance by form); then the **credit**: "Adapted from “Tense aorist” in the Greek
+  Grammar by unfoldingWord, licensed CC BY-SA 4.0. The original work by unfoldingWord is
+  available from **unfoldingword.org/ugg**." The link opens the article on
+  `https://ugg.readthedocs.io/en/latest/<file>.html`.
+- **The licence, met:**
+  - attribution on every note and in Acknowledgements (a section "Grammar Notes": the
+    credit; **Changes to the Grammar Notes**: "Each note was shortened and rewritten in
+    plain English from the article's summary and opening. The articles' examples and
+    tables were left out; the examples shown are taken from the Berean Bible Translation
+    Tables. Some terms were renamed to match the app. unfoldingWord's trademark was
+    removed, as its licence requires."; **The Notes, to Share** →
+    `https://smoothbible.com/grammar/`, where the notes files are published under CC
+    BY-SA);
+  - no "unfoldingWord®" name, logo or suggestion of endorsement;
+  - only the notes files are CC BY-SA; they're separate data bundled with the app, as
+    STEP's CC BY lexicons are.
+
+#### 14.12.7 New kinds of card
+All on §13.1.5's schedule, in Practice, with the three judgements:
+- **`form`:** a real form in its verse window → its parsing, lemma and gloss. With the
+  switch **Parse in Practice** (on), the answer is given with §14.12.4's segmented rows
+  first, and the judgement is suggested from them (all right → Knew It; one wrong →
+  Mostly; more → Not Yet), as §13.3.5 suggests from typing; you choose.
+- **`paradigm`:** a model table, practised with §13.1.4's levels on its cells (Some,
+  Letters, Blank): the table never moves, only cells hide. One judgement for the table.
+- **`parts`:** a verb's lexical form → its principal parts, hidden the same way.
+- **`reverse`** (Practise Both Ways): the gloss and the BSB verse with the chunk semibold
+  → the lemma. Say it or type it.
+- `cards.tsv`'s KIND gains these; their KEY is `G25` (reverse), `G25@JHN.3.16#3`
+  (form: the word in a verse), `P:luo-aorist-active` (paradigm), `V:G2064` (parts).
+
+#### 14.12.8 Learning Elsewhere
+A plain list (pushed from Reference), each row a link opened in `SFSafariViewController`,
+with one line on what it is: the Biblical Language Center (Living Koine Greek, immersion
+courses), the Polis Institute (immersion, Jerusalem), Daily Dose of Greek (a verse a day
+on video), and Benjamin Kantor's writing on Koine pronunciation. The builder checks each
+address answers 200 before shipping and lists them in the commit. No affiliation, no
+ranking.
+
+#### 14.12.9 CI, tests and acceptance (Round 12)
+- **Linux:** lessons file parsing; every lesson's `match` finds at least 20 forms; every
+  lesson's words exist; `paradigms.py`'s check clean; exercise selection is deterministic
+  for a fixture known set (the first Parse item of Lesson 16 for the top 300 words);
+  parse checking (each category); the new cards through `memory_grade`; notes checked.
+- **The `greek-course` demo group**, shots **300–329**: the Greek page with Lessons
+  first (300); All Lessons (301); Lesson 2 with λύω's table (302); Lesson 16 (303) and its
+  In the Bible (304); its Words, Add These Words (305); Exercises: Read (306), Show English
+  (307), Parse (308), Check with one wrong row (309), Recall (310), Recall typed with the
+  letter keyboard (311), the end, Again (312); Add These Forms (313); a `form` card in
+  Practice with parse rows (314) and its suggested judgement (315); Paradigms list (316);
+  λύω aorist (317); Practise This Table at Letters (318); Principal Parts (319); a
+  `parts` card (320); Practise Both Ways on and a `reverse` card (321); the Grammar
+  screen's Aorist → its note with In John 3:16 and Examples You Know and the credit
+  (322); Grammar Notes list (323); Acknowledgements' Grammar Notes section (324); Learning
+  Elsewhere (325); Lesson 30's guided reading (326); Night (327); accessibility size: a
+  lesson (328) and Parse rows stacked (329).
+- **Recording sequence 18:** Exercises: a Parse item answered, Checked, Next, a Recall
+  item (cells hide and show; nothing moves).
+- **Acceptance:** lessons are short, plain, accurate (the designer reviews every lesson's
+  text in the round's review), each exercised on real verses at the learner's level;
+  parse checking is exact and plain; paradigms match the Bible's forms (the tool); notes
+  credited as the licence asks; no score, mark, percent or praise anywhere; the reader
+  and the earlier rounds unchanged.
+
+### 14.13 Round 13: a Hebrew course
+The same shape as Round 12, for Hebrew, with the weak verbs. Everything in §14.12.2–
+§14.12.8 applies with Hebrew in place of Greek; what differs is below.
+
+#### 14.13.1 The lessons (Davidson's order, Pratico and Van Pelt's approach; written by us)
+1. **Consonants** (linking the alphabet), the final forms, reading right to left.
+2. **Vowels**: the signs, long and short, vowel letters (matres lectionis).
+3. **Syllables, Sheva and Dagesh**: vocal and silent sheva; dagesh lene and forte; the
+   gutturals' ways. The pronunciation choice (Israeli, Tiberian) and a page on the
+   reading traditions (Ashkenazi, Sephardi, Yemenite).
+4. **The Article and the Conjunction**: הַ with its doubling; וְ and its forms.
+5. **Prepositions Joined to a Word, and מִן.**
+6. **Nouns: Gender and Number**, dual included.
+7. **Adjectives**: attributive and predicate.
+8. **Pronouns and Demonstratives.**
+9. **The Construct Chain.**
+10. **Pronoun Endings on Nouns.**
+11. **Pronoun Endings on Prepositions and אֵת.**
+12. **The Qal Perfect** (the strong verb).
+13. **The Qal Imperfect.**
+14. **The Consecutive Imperfect**: how narrative moves (וַיֹּאמֶר).
+15. **The Consecutive Perfect.**
+16. **Imperative, Jussive and Cohortative.**
+17. **The Infinitive Construct.**
+18. **The Infinitive Absolute.**
+19. **Participles.**
+20. **The Stems: an Overview**, with the diagnostics (Pratico and Van Pelt's idea: a few
+    marks identify the stem).
+21. **Niphal.**
+22. **Piel and Pual.**
+23. **Hiphil and Hophal.**
+24. **Hithpael.**
+25. **Weak Verbs: Gutturals** (I-, II-, III-Guttural).
+26. **III-Aleph and III-He.**
+27. **I-Nun.**
+28. **I-Yod and I-Waw.**
+29. **Hollow Verbs (II-Waw and II-Yod).**
+30. **Geminate Verbs.**
+31. **Pronoun Endings on Verbs.**
+32. **Numbers.**
+33. **Reading Narrative**: Ruth 1 and Genesis 22, guided.
+34. **Reading Poetry**: Psalm 23 and Psalm 1, guided; parallelism.
+
+#### 14.13.2 What differs from Greek
+- **Paradigms** (`paradigms-hbo.txt`): the article and prefixes; nouns (סוּס, תּוֹרָה,
+  segolates מֶלֶךְ, סֵפֶר, נַעַר, the construct of each); suffixes on סוּס and on לְ, בְּ,
+  אֵת, עִם; the strong verb in every stem and conjugation, with **קָטַל as the model**
+  (the grammars' convention; it occurs three times, so each cell also shows a real verb's
+  form from the data: שָׁמַר, דִּבֶּר …), and real model verbs for the weak classes:
+  עָמַד (I-Guttural), גָּאַל (II-Guttural), שָׁמַע (III-Guttural), מָצָא (III-Aleph), בָּנָה
+  (III-He), נָפַל (I-Nun), יָשַׁב (I-Yod), קוּם (Hollow), סָבַב (Geminate). Checked by
+  `paradigms.py` as for Greek.
+- **Parse rows** for a Hebrew verb: Stem, Conjugation, Person, Gender, Number (and
+  "Prefix" and "Ending" rows when the form has joined words or a pronoun ending); for a
+  noun: Gender, Number, State, Ending.
+- **Root families:** a Hebrew word study gains **Same Root**: other common words from the
+  same root (from the lexicon's entries; STEP's TBESH gives the root in many
+  definitions; where it doesn't, the builder's `roots.txt` from the tool's suggestions,
+  checked by hand for the 1,000 commonest words). Learning by root is how Hebrew
+  vocabulary holds together. A lesson's words are grouped by root where they share one.
+- **Principal Parts** becomes **Verb Classes**: the 100 commonest verbs with their weak
+  class and a tap to its model paradigm.
+- **Notes** from the UHG at commit `ddad74ff…` (31 notes: `particle_definite_article`,
+  `pronoun_personal`, `pronoun_demonstrative`, `preposition`, `conjunction`,
+  `gender_masculine` and `gender_feminine`, `number_singular`, `number_plural` and
+  `number_dual`, `state_construct` and `state_absolute`, `suffix_pronominal`, `verb`,
+  `verb_perfect`, `verb_imperfect`, `verb_sequential_imperfect` (titled "Consecutive
+  Imperfect", as our parsing calls it, saying unfoldingWord's "sequential"),
+  `verb_sequential_perfect`, `verb_imperative`, `verb_jussive`, `verb_cohortative`,
+  `infinitive_construct`, `infinitive_absolute`, `participle_active` and
+  `participle_passive`, `stem`, `stem_qal`, `stem_niphal`, `stem_piel`, `stem_pual`,
+  `stem_hiphil`, `stem_hophal`, `stem_hithpael`, `particle_direct_object_marker`,
+  `particle_negative`, `adjective`), credited to unfoldingword.org/uhg as §14.12.6.
+- **Learning Elsewhere:** Aleph with Beth (immersion videos, free), the Biblical Language
+  Center (Living Biblical Hebrew), Daily Dose of Hebrew.
+- **Typography:** every table and exercise right to left, the Parse rows in English left
+  to right beneath.
+- **Published** at `https://smoothbible.com/learn/hebrew/`.
+
+#### 14.13.3 CI, tests and acceptance (Round 13)
+The `hebrew-course` demo group, shots **330–359**, mirroring 300–329 with Hebrew (the
+consecutive imperfect lesson and its exercises from Genesis; a hollow-verb paradigm; Same
+Root on מֶלֶךְ; Verb Classes), and recording sequence 19. Acceptance as Round 12's, plus:
+the weak-verb paradigms check clean against the data, and every Hebrew screen is right to
+left with clean points.
+
+### 14.14 Round 14: Biblical Aramaic, and recorded readings
+
+#### 14.14.1 Biblical Aramaic (a short third course)
+- About 270 verses (Daniel 2:4b–7:28, Ezra 4:8–6:18 and 7:12–26, Jeremiah 10:11) and about
+  650 different words, which the reader's text (Round 11) already shows, glossed.
+- **An "Aramaic" page**, pushed from a row at the end of the Hebrew page ("Biblical
+  Aramaic · Daniel and Ezra"), with Words (Aramaic cards: `lang` `A`, from `vocab.bin`'s
+  Aramaic flag, which Round 10 already writes), Verses You Can Read, and **8 lessons**:
+  how Aramaic differs from Hebrew (the same script; the emphatic state ־ָא instead of the
+  article); nouns and states; pronouns; the Peal perfect and imperfect; the derived stems
+  (Pael, Haphel/Aphel, Hithpeel); participles (much used); reading Daniel 3; reading Ezra
+  5.
+- **Notes** adapted from the unfoldingWord Aramaic Grammar (`en_uag`, commit
+  `6babf1977048702caa3bddf12f57507e318caf0e`, CC BY-SA 4.0), credited as §14.12.6
+  (unfoldingword.org/uag).
+- Shots 360–369.
+
+#### 14.14.2 Recorded readings of the original (only with permission)
+No complete recording is verifiably open (§14.0.5). The two best candidates need the rights
+holder's word, which the owner asks for (the designer drafts the letters):
+- **Greek: Marilyn Phemister**, all 27 books, the Westcott–Hort text. With permission:
+  - streamed from CCEL's or archive.org's files (we host no audio, as §12), or bundled per
+    book as Round 7's downloads;
+  - verse timings by forced alignment as §12.2, but with torchaudio's multilingual
+    aligner (`MMS_FA`, on romanized text), because §12.2's model is English; the spoken
+    text is TAGNT's words whose editions include `WH`, so it matches what she reads;
+  - Listen in Greek then plays her by default, the iPhone voice as the fallback, and Echo
+    in Memory works for Greek passages;
+  - credit: "Read by Marilyn Phemister. © 2001, used by permission."
+- **Hebrew: Abraham Schmuelof**, the whole Hebrew Bible (modern Israeli reading), rights
+  with the Carmelites to whom it was entrusted (and Audio Scriptures International, who
+  digitized it). With permission, the same treatment.
+- **If either says no,** the iPhone voices stay, and Rabbi Dan Be'eri's Sephardi
+  recordings (30 books, CC BY-SA 3.0 as tagged by a compiler) are checked against his own
+  release; if confirmed, they're used for those books only.
+- Shots 370–379 when built.
+
+### 14.15 What we're not doing, and why
+- **Video, live classes, tutors or conversation practice.** A Bible app can't be a
+  classroom; the living-language schools are linked from Learning Elsewhere instead.
+- **Speech recognition or pronunciation scoring** (§13.9's reasons, more so for ancient
+  languages with three pronunciations).
+- **The Septuagint.** The only full morphology (CATSS) is under a restricted user
+  agreement and its derivatives are non-commercial; Rahlfs's 1935 text may be in US
+  copyright through 2030. Reconsider when an open, morphologically tagged LXX exists (for
+  example, Swete's text with open tagging).
+- **Transcribing Machen or Davidson** (§14.0.6 decision 11).
+- **Generated explanations or a chat tutor.** Every word of teaching is written, checked
+  and fixed in the files.
+- **Accounts, sync, progress dashboards, scores, streaks, badges, certificates.**
+- **Modern Greek or Modern Hebrew as spoken languages.**
+- **Hiding the English in English Order** (§14.16 question 3).
+
+### 14.16 Questions only the owner can answer
 These are decided above; the owner may overrule:
-1. **The Greek voice speaks modern Greek** (decided: on, labelled as modern, with the
-   teaching sounds in the table). The alternative is Greek voice off by default, so
-   beginners hear nothing that disagrees with the table.
-2. **Where the language page lives:** in Memory's Languages section and at the end of the
-   interlinear (decided). Alternatives: a fifth Library segment, or a row in Reading
-   settings.
-3. **Hiding only in Greek/Hebrew Order** (decided), or in English Order too.
-4. **Names count as readable once you know the alphabet** (decided), or always show their
-   English.
-5. **Pronunciation in the table:** the common teaching (Erasmian) sounds for Greek and
-   the standard academic sounds for Hebrew (decided), or modern pronunciations to match
-   the voices.
+1. **Greek pronunciation:** Erasmian by default (decided: it matches nearly every book and
+   teacher), Koine (Reconstructed) and Modern offered. Alternatively, default to Koine.
+2. **Where learning lives:** a page per language, from Memory's Languages section, the
+   end of the interlinear and (Round 11) the reader's popovers (decided). Alternatives: a
+   Learn button on the reader's bar, or a fifth Library segment.
+3. **Hiding what you know only in Greek or Hebrew Order** (decided): English Order is for
+   seeing how the English maps, and the reader's text (Round 11) is where you read the
+   original. Or hide in English Order too.
+4. **Names count as known once you know the alphabet** (decided), or always gloss them.
+5. **The modern Greek voice:** on, and labelled as modern Greek beside an Erasmian table
+   (decided). Or off by default until a recording in the chosen pronunciation exists.
+6. **Recordings:** will the owner write to Marilyn Phemister and to the Carmelites (the
+   designer drafts both letters)? Default: yes, and the iPhone voices read until they
+   answer.
+7. **Our lessons' licence:** public domain and published at smoothbible.com/learn/
+   (decided), or kept in the app only.
+8. **The version's name:** "Hebrew and Greek" (decided), or "Original Languages".
+9. **The order of Rounds 11 and 12:** the reader's text before the Greek course
+   (decided: reading early is the strongest input, and lessons exercise on it). Or the
+   course first.
