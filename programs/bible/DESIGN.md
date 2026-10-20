@@ -23,7 +23,9 @@ second reason for the one daily reminder) is specified in §13 and follows.** **
 (learning Greek and Hebrew, asked for by the owner on 2026-10-19; first scoped small, then,
 on 2026-10-20, opened to "the optimal Greek and Hebrew learning": foundations and
 vocabulary, the original text in the reader glossed by what you know, a Greek course, a
-Hebrew course, and Aramaic with recordings) are specified in §14 and follow Round 9.** **The
+Hebrew course, and Aramaic with recordings) are specified in §14 and follow Round 9;
+§14.10b amends Round 10 (owner, 2026-10-20): pronunciation written, not spoken, until
+recordings are commissioned, and meaning first.** **The
 manual and quick tips (owner request 2026-10-20: a tip always at the top of Go To with Next,
 More and an action, changing once a day and skipping what you already do; a 12-page
 Manual with search, reached from Reading settings' Help; Show Tips on by default; the
@@ -7618,6 +7620,166 @@ the Speak switches are disabled there); the letter names spoken by them, and whe
 Greek voice helps beside the Erasmian table; VoiceOver in Greek and Hebrew (the
 `accessibilityLanguage` given); the menus' commands and swipe to delete in Your Words; how the
 Forms grid's columns line up under their header on each width.
+
+### 14.10b Amendment (owner, 2026-10-20): written pronunciation, meaning first
+The owner tried the alphabet on build 23. β sounded like "v": the iPhone has only a modern
+Greek voice, and modern Greek contradicts the Erasmian table for β, γ, δ, θ, η, ι, υ, οι
+and αι. The owner's words: "For now, let's have the greek and hebrew focus less on
+pronunciation (as in, just write out what it should be), and focus more on semantics, at
+least until I can commission someone to do recordings."
+
+So this is a **small builder round**, done soon, before §15. It changes Round 10 as below
+and nothing else.
+
+#### 14.10b.1 Pronunciation written, not spoken
+1. **No synthesized Greek or Hebrew speech anywhere.** Gone:
+   - the Alphabet's tap-to-hear (rows no longer highlight or speak);
+   - the cards' speaker button and their tap-to-speak;
+   - Practise Reading's speech;
+   - the language page's **Speak Greek** / **Speak Hebrew** switches and their footers;
+   - §14.11.6's iPhone-voice Listen for the Hebrew and Greek version (Round 11). Until
+     recordings exist, that version's Listen row reads "No recording of the original yet."
+     and is disabled.
+
+   The code stays behind one constant, `LEARN_SPEECH` (false), so the commissioned
+   recordings can use the same places later (§14.14.2). Hebrew is treated the same, though
+   CC0 recordings of its letter names exist (Lingua Libre, modern Israeli): the owner asked
+   for both, and one rule is easier to explain.
+2. **Sounds are written plainly.** Every letter's sound in `letters.txt` names an English
+   word with that sound:
+   - "b as in bat", "g as in go", "th as in thin";
+   - η "e as in they", ου "oo as in food";
+   - qamets "a as in father".
+
+   Every row and card says it the same way. The checks in `learn.py` require an "as in" in
+   every Erasmian and Israeli sound.
+3. **The pronunciation choice stays, as a choice of how the sounds are written**, and moves
+   off the language page into the Alphabet page, as its last row: **Sounds Written As**,
+   value "Erasmian". Footer: "How the table writes each sound. There are no recordings yet."
+   - Words keep the tables' transliteration (one academic scheme, the same everywhere).
+     It's labelled where it first appears as "transliteration, a guide to the letters".
+   - The choice changes the letter table and the letter cards only, as now.
+4. **Practise Reading stays**, as reading to yourself:
+   - the one-time line reads "Read it to yourself, then Check.";
+   - Check shows the transliteration to compare with, and nothing speaks.
+5. **Listen in the reader** (English recordings and voices, §12) is unchanged.
+
+#### 14.10b.2 Meaning first
+1. **A word card asks for its meaning in the verse.**
+   - **Front:** the word as it stands in the verse window (§14.5.4: the form in semibold),
+     the lemma above it, and a faint line "What does it mean here?" (only on the first
+     cards a session shows).
+   - **The answer, in this order:**
+     1. **the BSB's words for it in this verse**, large ("loved", from the verse's chunk);
+     2. the sense's gloss when the lemma has more than one sense (§10.3: "God", not
+        "gods"), as "Here: God";
+     3. the BSB's verse with the chunk semibold;
+     4. faint, "agapaō · to love · 143 times" (transliteration, lemma gloss, count).
+   - The judgement is still Not Yet · Mostly · Knew It, now judged against "did I know what
+     it means here".
+2. **Families: related words.**
+   - A card's answer ends with up to two **related words you know** (§10.4's list, filtered
+     to known cards): "Related: φιλέω to love, ἀγάπη love". This hooks a new word to old
+     ones.
+   - **Add Words** gains a source, **"Related to Words You Know"**: the unlearned words of
+     §10.4's lists for your known words, most common first, in sets as the others. Its row
+     reads "24 words".
+3. **Forms show what a form does.**
+   - Each Forms cell (§14.5.3) gains, under the form, the BSB's commonest rendering of that
+     parsing for this lemma, in italic: ἠγάπησεν "*loved*", ἀγαπήσουσιν "*will love*".
+     The count stays, smaller.
+   - Tapping still opens the concordance by form.
+   - It's computed from the BSB chunks of those occurrences, as Translated As counts them
+     (§7.5.1). No new data.
+4. **Verses You Can Read stays central:** the language page lists it first after Practice,
+   before the Alphabet, once the alphabet is known.
+5. **What's left out:** reading aloud, listening drills, and any judgement of how a word was
+   said.
+
+#### 14.10b.3 A semantic resource, checked (2026-10-20): UBS's open dictionaries
+- **United Bible Societies publish, under CC BY-SA 4.0,** in
+  `https://github.com/ubsicap/ubs-open-license` (commit
+  `33dcc8c671511151551804e073f1d461bc5d5b1a`, 2026-09-22; README and per-folder
+  `LICENSE.md` state the licence):
+  - **The UBS Dictionary of the Greek New Testament** (v1.1, English JSON, 15.5 MB,
+    `dictionaries/greek/JSON/UBSGreekNTDic-v1.1-en.JSON`, sha256
+    `d84bb9077a43fa4a4f7e571fe2ffa460fa655d7b78439b366281ce527fd56893`), with its domains
+    (`UBSGreekNTDicLexicalDomains-v1.1-en.JSON`, sha256
+    `a816a6bb2bdbdd7df6f46f771b5ddb1b9c019d73c3f0147e5a5cead5cfef8b4b`).
+    - It's "adapted from Semantic Dictionary of Biblical Greek … which is adapted from
+      Greek-English Lexicon of the New Testament: Based on Semantic Domains, Eds. J P Louw,
+      Eugene Albert Nida © United Bible Societies 1988, 1989".
+    - 5,507 entries, each with its Strong's codes.
+    - Each **meaning** has its Louw–Nida code ("25.43"), domain ("Attitudes and Emotions")
+      and subdomain ("Love, Affection, Compassion"), a short definition ("to have love for
+      someone or something, based on sincere appreciation and high regard"), glosses, and
+      **every New Testament occurrence to the word** (`BBBCCCVVVSSWWW`).
+  - **The UBS Dictionary of Biblical Hebrew** (v0.9.3, from SDBH, about 90% of the Old
+    Testament's words so far), the same shape, with lexical and contextual domains.
+- **What it adds:** the meaning of **each occurrence**, finer than STEP's senses, with
+  plain definitions and **semantic domains**.
+  - That brings back what Round 5 dropped (§10.0 decision 1). There, Louw–Nida came to us
+    only through Clear's permission. Now its owner, UBS, licenses it openly.
+  - It's the best single resource for "meaning first": cards could say "*to love* (here:
+    to have love for someone … based on … high regard) · Love, Affection, Compassion", and
+    a learner could study by domain.
+- **Not this round.** Mapping its word positions (`WWW`) onto our `words.bin` is a
+  pipeline of its own (like `senses.py`, with checks), and the Hebrew is still 90%. That's
+  more than a small round.
+- **Next:** with Round 11's reader's text (§14.11), whose popover is where meaning in
+  context matters most. Round 11 gains **R11.0 Meanings and domains (UBS)**:
+  - `tools/ubs.py` writes `data/lang/meanings.bin` (a meaning id per `words.bin` word, Greek
+    first; Hebrew where SDBH has it) and `meanings.txt` (id, domain, subdomain, short
+    definition, glosses), CC BY-SA 4.0 as a separate file, credited "UBS Dictionary of the
+    Greek New Testament, © United Bible Societies 2023, CC BY-SA 4.0" (and the Hebrew's
+    line);
+  - the word study's Meaning row and the cards' answer show the meaning here and its
+    domain;
+  - "Related Words" gains "In the same domain".
+
+  The designer specifies it when Round 11 is next.
+
+#### 14.10b.4 data/help.txt
+- **Greek and Hebrew → The alphabet:** "tap a letter to hear it" and the voice sentence go.
+  New text: "**The Alphabet** lists each letter with its name, its sound written out (b as
+  in bat) and an example word. … **Sounds Written As** chooses how the sounds are written:
+  Erasmian, reconstructed Koine or modern Greek; Israeli or Tiberian Hebrew. There are no
+  recordings yet."
+- **Greek and Hebrew → Words:** "Each word is practised in a verse … what it means there,
+  with words you already know from its family."
+- **No tip mentions hearing Greek or Hebrew.** The `greek` tip stays.
+
+  (Done in this commit.)
+
+#### 14.10b.5 Shots
+- **Changed:**
+  - 241: no Speak switches;
+  - 242: the Sounds Written As row at its end;
+  - 243–245, 248, 249, 262, 266 and 267: cards without the speaker, and the meaning-first
+    answer;
+  - 254 and 264: Forms with renderings;
+  - 256a: reached from the Alphabet;
+  - 269: Practise Reading, silent.
+- **New:**
+  - `246b-add-related` (Add Words with Related to Words You Know);
+  - `249b-word-answer` (λέγω's answer: "says" here, the verse, related words you know).
+- **Gone:** none. The log's "learn voice …" lines go.
+
+#### 14.10b.6 What this changes in later rounds
+- **Round 11:**
+  - no iPhone-voice Listen for the original (above);
+  - R11.0 adds UBS's meanings and domains (§14.10b.3).
+- **Rounds 12 and 13:**
+  - the sounds lessons (Greek 1, Hebrew 1–3) are written-only;
+  - reading-aloud exercises become reading-to-yourself, with the transliteration to check;
+  - English → Greek cards stay (typed or said to yourself).
+- **Round 14:**
+  - "Recorded readings" becomes **the commissioned recordings**: the letters, the
+    alphabet's example words and the commonest words (in Erasmian Greek and Israeli
+    Hebrew, and, if the owner wishes, reconstructed Koine), and later the texts;
+  - they're played where `LEARN_SPEECH` once spoke;
+  - the Phemister and Schmuelof permission letters remain an option for whole-text
+    listening.
 
 ### 14.11 Round 11: the original text in the reader
 
