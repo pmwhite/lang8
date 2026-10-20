@@ -6616,6 +6616,44 @@ segment, Add Passage and Passage; `ios_practice.l8` is Practice; `ios_demo8.l8` 
     again (a theme or text size changed while Practice is open). It was dropped on a
     rebuild, since `memorySeen` was already set, and the words moved up a line.
 
+
+**Review r9-1's fixes (as built):**
+- **Major 1:** Practice's left bar item is the count's, set only while the count has words
+  (`px_count_sync`, after every step, for passages and Round 10's cards alike) and with
+  `hidesSharedBackground` on iOS 26, so "1 of 2" is plain faint text and a one-passage
+  session has nothing at the top left.
+- **Major 5:** the underlines' arrays hold 8,192 (`MW_MOST` words, two pieces each), the
+  view pool is guarded, and pieces are placed only once the text view has its width.
+  Step 399 (shot 234) opens the BSB's longest 40 verses in one book, 2 Kings 22:12–23:31
+  (1,501 words), at Blank, and the log's check needs an underline for every word.
+- **Major 6:** `memory_esv_refresh` runs at launch and on return to the app (with
+  `esv_app_active`) and when Practice opens: a pin fetched more than 30 days ago is asked
+  for again when online ("esv pin refetched"), or filled from the reading cache when that
+  holds the chapter fresh. Offline, the held text stays. Tested in `test_store.l8` (a
+  pin's age). The `memory` group now has the ESV fixture for this (step 397); none of its
+  shots shows the ESV.
+- **Major 7:** a memory-only reminder that launches the app is kept (`pending_memory`)
+  until the reader is up, as the plan's day is, then opens the Library on Memory ("opened
+  Library on Memory"; step 397).
+- **Major 8:** `daily_reschedule` always removes what is pending, then schedules nothing
+  when neither reason is on ("reminders 0 pending"; step 397).
+- **Minors:**
+  - 2: sequence 15 waits 1.6 s after each Check, so the judgement row is seen.
+  - 3: the Library's rows (all four segments) are 15 pt grown as Subheadline is
+    (`lib_pt`).
+  - 4: 229b, Passage scrolled to its end. The text size steps wait for the app's "text
+    size changed" line (`ui_size`), not an event count.
+  - 9: a chapter fetched for pins alone goes to the pins, not the reading cache.
+  - 10: a full pin table is refused as the 200 verses are; pins are kept by passage id,
+    of any size.
+  - 11: a verse with no words begins and ends where the next with words begins.
+  - 12: a Not Yet's second try at the session's end changes nothing, whatever its grade
+    (`memory_grade_again`, tested).
+  - 13: a one-passage session's end names that passage's next review.
+  - 14: the count counts each passage once.
+  - 15: after Show Next Word or Show Verse, VoiceOver is told the layout changed, on that
+    part's new element. A split verse's second half is framed from its own first word,
+    and the halves read "Verse 9, first half, hidden" and "… second half …".
 ---
 
 ## 14. Rounds 10–14 specification: learning Greek and Hebrew

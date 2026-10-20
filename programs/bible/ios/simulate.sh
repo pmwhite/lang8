@@ -59,7 +59,10 @@
 #           learned in parts, a review typed and judged, Echo (ROM 8 given
 #           the fixture's timings), the end, Passage, the reminder, Night,
 #           the largest text; and the recording of sequence 15
-#           (memory-transitions.mp4); its log's checks in memory.txt
+#           (memory-transitions.mp4); then (review r9-1) a reminder opened
+#           on a cold launch, the reminder off, an ESV pin fetched again
+#           (the ESV fixture), Passage scrolled (229b) and the longest 40
+#           verses at Blank (234); its log's checks in memory.txt
 #   languages  Round 10 (DESIGN.md §14.9.2), on the demo clock, from a
 #           memory.tsv, a highlight and a History written before the first
 #           launch, no cards: the interlinear's link, the Greek page, the
@@ -151,7 +154,7 @@ xcrun simctl install "$dev" "$app"
 echo "booted and installed in $(python3 -c "print(round($(now) - $start))") s" >> "$out/timing.txt"
 # (The versions group's ESV: the fixture, in the app's data container.)
 fixture=
-if [ "$group" = versions ] || [ "$group" = listen ]; then
+if [ "$group" = versions ] || [ "$group" = listen ] || [ "$group" = memory ]; then
   data=$(xcrun simctl get_app_container "$dev" "$id" data 2>/dev/null)
   if [ -n "$data" ]; then
     mkdir -p "$data/Library/esv-fixture"
@@ -249,6 +252,9 @@ fi
 esv_off=1
 [ "$group" = versions ] && esv_off=
 [ "$group" = listen ] && esv_off=
+# (memory: an ESV passage's pin fetched, then again at 31 days; review
+# r9-1 Major 6. Nothing in its shots shows the ESV.)
+[ "$group" = memory ] && esv_off=
 # (The ios18 group's shots have -ios18 after their names.)
 suffix=
 [ "$group" = ios18 ] && suffix=-ios18
@@ -332,6 +338,20 @@ ui() {
 }
 # A step: its notification, the wait for it to settle, its screenshot. With
 # no name, no screenshot (a step that sets things up).
+# A text size set, waiting for the app's own line that it has followed
+# it (not a count of events, which another step's event can put out of
+# step: review r9-1 Minor 4).
+ui_size() {
+  n0=$(grep -c "bible: text size changed" "$out/console.txt" 2>/dev/null)
+  xcrun simctl ui "$dev" content_size "$1" 2>/dev/null || true
+  i=0
+  while [ "$(grep -c "bible: text size changed" "$out/console.txt" 2>/dev/null)" -le "$n0" ] && [ "$i" -lt 200 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ "$i" -lt 200 ] || echo "ui content_size $1: no size line" >> "$out/timing.txt"
+  sleep 1.5
+}
 step() {
   wait_start
   xcrun simctl spawn "$dev" notifyutil -p "$id.demo$1"
@@ -966,12 +986,13 @@ memory)
   step 388 227-done-today 10
   step 389 228-library-after 8
   step 390 229-passage 6
+  step 398 229b-passage-end 6
   step 391 230-reminder 8
   step 392 231-night-letters 10
-  ui content_size accessibility-extra-extra-extra-large
+  ui_size accessibility-extra-extra-extra-large
   step 393 232-ax-practice 10
   step 394 233-ax-memory 8
-  ui content_size large
+  ui_size large
   # The screen recording of sequence 15 (its setup before the mark).
   step 395 "" 8
   rec0=$(now)
@@ -993,23 +1014,32 @@ memory)
   sleep 0.5
   kill -INT "$recorder" 2>/dev/null
   wait "$recorder" 2>/dev/null
-  step 397 "" 6
+  step 397 "" 14
+  # (Review r9-1 Major 5: the BSB's longest 40 verses at Blank.)
+  step 399 234-long-passage 15
   # The log's checks (§13.8.2): each add, part, grade and schedule; the
   # words in the same places at every level, reveal and Check.
-  grep -h "bible: memory\|bible: practice\|bible: reminder\|bible: scheduled\|bible: tray titles\|bible: add passage\|bible: toast\|bible: demo step\|bible: demo echo\|bible: demo memorizing\|Next review\|Again tomorrow" \
+  grep -h "bible: memory\|bible: practice\|bible: reminder\|bible: scheduled\|bible: tray titles\|bible: add passage\|bible: toast\|bible: demo step\|bible: demo echo\|bible: demo memorizing\|bible: opened Library\|bible: esv pin\|bible: demo esv\|Next review\|Again tomorrow" \
     "$out/console.txt" > "$out/memory.txt" 2>/dev/null
   for want in "memory added: JHN 3:16-17 bsb" "toast Added to Memory" "add passage footer Isaiah 52:13" ", 15, Add enabled" \
       "memory part: JHN 3:16-17 1 of 2" "memory part: JHN 3:16-17 2 of 2" "memory learned: JHN 3:16-17 box 1 due 2026-10-20" \
       "practice checked, helps 0, misses 1, suggested mostly" "Next review 2 November" \
       "memory graded: PHP 4:6-7 mostly box 3" "due 2026-10-26" "practice warm-up ROM 8:28-39" \
       "memory echo verse ROM 8:32" "memory echo pause ROM 8:32" "memory part: ROM 8:28-39 5 of 12" "practice end" \
-      "reminders 30 days from 2026-10-20 07:00" "reminder first:"; do
+      "reminders 30 days from 2026-10-20 07:00" "reminder first:" \
+      "memory reminder opened" "opened Library on Memory" "reminders 0 pending" "esv pin refetched" "memory esv verses kept"; do
     grep -qF "$want" "$out/memory.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/memory.txt"; failed=1; }
   done
   # (215 to 220: one layout.)
   n=$(grep "practice layout" "$out/memory.txt" | head -6 | awk '{print $NF}' | sort -u | wc -l | tr -d ' ')
   echo "layouts of 215-220: $n different" | tee -a "$out/memory.txt"
   [ "$n" = 1 ] || { echo "FAILED: the words moved between 215 and 220" | tee -a "$out/memory.txt"; failed=1; }
+  # (234: every word of the long passage underlined.)
+  long=$(grep "practice long passage" "$out/memory.txt" | tail -1)
+  w=$(echo "$long" | sed -n 's/.*words \([0-9]*\), underlines \([0-9]*\).*/\1/p')
+  u=$(echo "$long" | sed -n 's/.*words \([0-9]*\), underlines \([0-9]*\).*/\2/p')
+  echo "long passage: ${w:-?} words, ${u:-?} underlines" | tee -a "$out/memory.txt"
+  [ -n "$w" ] && [ "$w" -gt 1024 ] && [ "$w" = "$u" ] || { echo "FAILED: the long passage's underlines" | tee -a "$out/memory.txt"; failed=1; }
   tail -5 "$out/memory.txt"
   ;;
 languages)
