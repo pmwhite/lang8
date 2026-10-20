@@ -193,7 +193,9 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   footnotes), which run in the browser through the page bridge
   (`../web/dom.l8`, `web/dom.js`). `make bible-web` builds the site into
   `.build/bible-site` (`web/bible/`); `make bible-wasm-test` runs the tests
-  as WebAssembly.
+  as WebAssembly. The workflow's `web` job (Linux) builds the site, runs
+  the driver's checks (`web/bible/test/drive.mjs`) and pushes the shots to
+  `ci-bible-web-shots`.
 - `audio.l8` is recorded readings' portable part (sources, addresses,
   timings, which source a chapter is heard from, the cache's rules), tested
   in `test_audio.l8`; `ios_audio.l8` the Voice screens, voices, the cache
