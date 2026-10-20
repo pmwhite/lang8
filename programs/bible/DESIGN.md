@@ -8535,13 +8535,16 @@ These are decided above; the owner may overrule:
    "the bookmark button", "the Reading Settings button", "the pencil button", "the More Info
    button" for ⓘ…). A page is read part by part: each heading is a header, each paragraph one
    element with its symbols by name, its links as custom actions ("Open Memory").
-5. **The tip's columns** are Recent's row's: a copy of it (a `UIListContentView` with its
-   clock image) is laid out alone at the text size now, and the lightbulb is centred on its
-   image column, the words begin at its text column (at the accessibility sizes, where the
-   system puts a row's image above its text, the words begin after the lightbulb). The
-   lightbulb is centred on the first line. The buttons' titles sit 8 points under the words;
-   the first has no inset before it, Next none after it; they never compress (the space
-   between gives way); at the accessibility sizes they are one under another.
+5. **The tip's columns** are those of Go To's rows at the default size: the lightbulb
+   centred 28 points from the cell's edge (on the plus of New Ribbon… and Recent's clock), the
+   words from 56.5. (Measuring a list row's layout guides on a copy laid out alone gives
+   nothing without a window, and an unseen copy inside the cell placed its guides only after
+   the table had measured the row, which cut three-line tips at two.) At the accessibility
+   sizes the words begin after the lightbulb, clear of it; at the larger standard sizes the
+   other rows' text moves a point or two right while the tip's stays. The lightbulb is centred
+   on the first line. The buttons' titles sit 8 points under the words; the first has no inset
+   before it, Next none after it; they never compress (the space between gives way); at the
+   accessibility sizes they are one under another.
 6. **More and links** push the page in the sheet's own stack (Go To's, or Reading
    settings', which grows to large for the Manual as for the acknowledgements). The page is a
    TextKit 1 text view (`textViewUsingTextLayoutManager:NO`), laid out whole, so a part's
