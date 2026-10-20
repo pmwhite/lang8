@@ -105,6 +105,8 @@ export async function newPage(port, problems) {
   await send("Runtime.enable");
   await send("Page.enable");
   await send("Network.enable");
+  // (Focus events as in a window the reader is looking at.)
+  await send("Emulation.setFocusEmulationEnabled", { enabled: true });
   Object.assign(page, {
     async close() {
       ws.close();

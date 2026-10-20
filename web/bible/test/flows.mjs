@@ -333,6 +333,16 @@ export const flows = {
     await page.rest();
     const q = await page.eval(`getComputedStyle(document.querySelector(".bar")).getPropertyValue("--p")`);
     ctx.check("reading back up expands it", Number(q) === 0, "--p " + q);
+    await page.eval("scrollBy(0, 300)");
+    await page.rest();
+    await page.eval(`document.querySelector(".bar .aa").focus()`);
+    await page.rest();
+    const f = await page.eval(`getComputedStyle(document.querySelector(".bar")).getPropertyValue("--p")`);
+    await page.eval("scrollBy(0, 200)");
+    await page.rest();
+    const g = await page.eval(`getComputedStyle(document.querySelector(".bar")).getPropertyValue("--p")`);
+    ctx.check("focus in the bar expands it, and keeps it so", Number(f) === 0 && Number(g) === 0, `--p ${f}, then ${g}`);
+    await page.eval(`document.activeElement.blur()`);
     // A chapter's boundary mid-scroll, the bar half collapsed.
     await page.eval(`(() => { const a = document.querySelector('article[data-c="1000"]'); scrollBy(0, a.getBoundingClientRect().top - 120); })()`);
     await page.rest();
