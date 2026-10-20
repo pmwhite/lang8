@@ -26,9 +26,14 @@
     const spans = [];
     for (let v = +m[1]; v <= +(m[2] || m[1]); v++) spans.push(...ch.querySelectorAll(`[data-v="${v}"]`));
     if (!spans.length) return;
-    const bar = document.querySelector(".bar")?.offsetHeight || 44;
-    scrollTo(0, spans[0].getBoundingClientRect().top + scrollY - bar - (innerHeight - bar) / 3);
+    const place = () => {
+      const bar = document.querySelector(".bar")?.offsetHeight || 44;
+      scrollTo(0, spans[0].getBoundingClientRect().top + scrollY - bar - (innerHeight - bar) / 3);
+      return scrollY;
+    };
+    const at = place();
     for (const e of spans) e.classList.add("flash");
-    d.dataset.placed = m[0];
+    // (Again once the fonts are in, unless the reader has moved.)
+    document.fonts.ready.then(() => scrollY === at && place());
   });
 })();
