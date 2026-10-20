@@ -50,16 +50,39 @@ now_minutes(): int {
 
 // What is kept, read at launch: the plan followed. The plans themselves
 // are made at first use.
+// (The plans are made first: a plan's lines name its days' passages. A
+// plan this build has not is kept in plans-done.tsv, and cleared.)
 load_daily() {
+    daily_ready();
     read_file("plan.tsv");
     parse_plan();
+    if (pl_unknown) {
+        fput_str("END\t");
+        fput_int(time(0));
+        fput(10);
+        append_file("plans-done.tsv");
+        msg2(msg(cls("NSFileManager"), sel("defaultManager")), sel("removeItemAtPath:error:"),
+            file_path("plan.tsv"), 0);
+        note("bible: plan unknown")
+    }
     note_num("bible: plan ", pl_active)
 }
 
 daily_ready() {
     if (pl_ready) return;
+    t0: f64 = CFAbsoluteTimeGetCurrent();
+    plans_files_load();
     plans_make();
-    note_num("bible: plans made, readings ", pl_readings)
+    note_num("bible: plans made, passages ", pl_readings);
+    note_num("bible:   in ms ", ((CFAbsoluteTimeGetCurrent() - t0) * 1000.0f64) as int)
+}
+
+// The listed plans' files, from the app's bundle (mapped, kept).
+plans_files_load() {
+    m: []i8 = lang_map("mcheyne", "txt");
+    plan_file_set(PLAN_MCHEYNE, m, lang_mapped);
+    k: []i8 = lang_map("chrono", "txt");
+    plan_file_set(PLAN_CHRONO, k, lang_mapped)
 }
 
 save_plan() {
@@ -163,22 +186,14 @@ plan_check(c: int) {
     }
 }
 
-// Listen said a chapter's last verse.
+// Listen said a chapter's last verse (for the carried ribbon: a plan is
+// read only in its day's reader, DESIGN.md ยง16.0 decision 7).
 plan_heard(c: int) {
     if (c >= 0 && c < chapters && (!demo_on || demo_heard)) chapter_read_now(c)
 }
 
 // (The ribbons group's: Listen's chapter's end counts, as on a phone.)
 demo_heard: bool = false;
-
-plan_mark_read(c: int) {
-    daily_ready();
-    if (pl_active < 0 || pl_read[c] || plan_day_of(c) == 0) return;
-    done: bool = mark_chapter(c, time(0), today());
-    save_plan();
-    note_num("bible: read in the plan ", c);
-    if (done) day_done()
-}
 
 // Today's day finished: the toast, once a day.
 day_done() {
@@ -458,7 +473,7 @@ ribbons_picked(r: int) {
 plan_picked(r: int) {
     if (gt_plan && r == 0) {
         daily_ready();
-        jump(day_first_unread(plan_day(pl_active, plan_today(today()))), 0)
+        passage_jump(day_first_unread(plan_day(pl_active, plan_today(today()))))
     } else open_plans()
 }
 
@@ -683,8 +698,27 @@ open_plans() {
     msg2(sheet_nav, sel("pushViewController:animated:"), vc, 1)
 }
 
+// The plans offered, in Reading Plans' order (a listed one whose file is
+// missing left out).
 plans_rows(s: int): int {
-    if (s == 0) PLANS else 1
+    if (s != 0) return 1;
+    n: int = 0;
+    for i in 0..PLANS
+        if (plan_lengths[plan_order[i]] > 0) n = n + 1;
+    n
+}
+
+// Reading Plans' row r: its plan.
+plans_row_plan(r: int): int {
+    n: int = 0;
+    for i in 0..PLANS {
+        p: int = plan_order[i];
+        if (plan_lengths[p] > 0) {
+            if (n == r) return p;
+            n = n + 1
+        }
+    }
+    0
 }
 
 plans_header(s: int): int {
@@ -703,16 +737,19 @@ plans_cell(t: int, path: int): int {
         msg1(config, sel("setText:"), nsstring("A Chapter a Day"));
         fput_str("One chapter a day through a book you choose")
     } else {
-        msg1(config, sel("setText:"), nsstring(plan_names[r]));
-        fput_int(plan_lengths[r]);
+        p: int = plans_row_plan(r);
+        fput_plan_name(p);
+        msg1(config, sel("setText:"), fstring());
+        fbuf_n = 0;
+        fput_int(plan_lengths[p]);
         fput_str(" days \ย\ท about ");
-        fput_int(plan_per_day(r));
-        fput_str(if (plan_per_day(r) == 1) " chapter a day" else " chapters a day")
+        fput_int(plan_per_day(p));
+        fput_str(if (plan_per_day(p) == 1) " chapter a day" else " chapters a day")
     }
     msg1(config, sel("setSecondaryText:"), fstring());
     row_text_style(config);
     msg1(cell, sel("setContentConfiguration:"), config);
-    if (s == 0 && r == pl_active) {
+    if (s == 0 && plans_row_plan(r) == pl_active) {
         fbuf_n = 0;
         fput_str("Day ");
         fput_int(plan_today(today()));
@@ -722,7 +759,7 @@ plans_cell(t: int, path: int): int {
 }
 
 plans_picked(s: int, r: int) {
-    if (s == 0) open_plan(r, 0) else open_day1()
+    if (s == 0) open_plan(plans_row_plan(r), 0) else open_day1()
 }
 
 // (Back from a plan: its row as it is now; reloaded whole, which lays out
@@ -936,7 +973,12 @@ detail_picked(s: int, r: int) {
         return
     }
     d: int = detail_day(s - detail_wk0(), r);
-    jump(day_first_unread(plan_day(detail_plan, d)), 0)
+    passage_jump(day_first_unread(plan_day(detail_plan, d)))
+}
+
+// The reader to passage k's start.
+passage_jump(k: int) {
+    jump(pl_c1[k], if (pl_v1[k] > 1) pl_v1[k] else 0)
 }
 
 day_circle(_self: int, _cmd: int, b: int): int {
@@ -1000,7 +1042,7 @@ plan_start(_self: int, _cmd: int, _b: int): int {
 // ribbon put down), and the toast "Started Bible in a Year".
 plans_start_now(p: int, c: int) {
     plan_follow(p, c);
-    target: int = if (p == PLAN_DAY1) c else pl_rc0[pl_r0[plan_day(p, 1)]];
+    target: int = if (p == PLAN_DAY1) c else pl_c1[pl_r0[plan_day(p, 1)]];
     fbuf_n = 0;
     fput_str("Started ");
     fput_plan_name(p);
@@ -1519,7 +1561,7 @@ notify_open_day(d: int) {
         return
     }
     daily_ready();
-    jump(day_first_unread(plan_day(pl_active, d)), 0)
+    passage_jump(day_first_unread(plan_day(pl_active, d)))
 }
 
 // (The reader up: a reminder's day that came before it.)

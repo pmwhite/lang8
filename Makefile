@@ -185,10 +185,10 @@ $(BUILD)/tempo-ios-sim: l8c3 $(PROGRAMS) runtime-arm64-darwin.s tools/ios/import
 
 # The Bible app: its text's layout, tested; and the app, as arm64 assembly
 # for iOS (see programs/bible/README.md).
-$(OK)/bible-tests: l8c3 $(PROGRAMS) $(RUNTIME) $(wildcard programs/bible/tools/*.py programs/bible/tools/*.l8 programs/bible/data/*.txt programs/bible/data/*.bin programs/bible/data/lang/* programs/bible/data/audio/* programs/bible/worker/*.js programs/bible/worker/*.mjs programs/bible/worker/fixtures/*) | $(OK)
+$(OK)/bible-tests: l8c3 $(PROGRAMS) $(RUNTIME) $(wildcard programs/bible/tools/*.py programs/bible/tools/*.l8 programs/bible/data/*.txt programs/bible/data/*.bin programs/bible/data/plans/* programs/bible/data/lang/* programs/bible/data/audio/* programs/bible/worker/*.js programs/bible/worker/*.mjs programs/bible/worker/fixtures/*) | $(OK)
 	+@$(STEP) 'bible tests' ./l8c3 test programs/bible/test_text.l8 programs/bible/test_lang.l8 programs/bible/test_store.l8 programs/bible/test_plans.l8 programs/bible/test_ribbons.l8 programs/bible/test_audio.l8 programs/bible/test_memory.l8 programs/bible/test_learn.l8 programs/bible/test_help.l8 programs/bible/test_html.l8
 	+@$(STEP) 'bible worker tests' node --test programs/bible/worker/test.mjs
-	+@$(STEP) 'bible data checks' sh -c 'for t in senses related learn; do python3 -I programs/bible/tools/$$t.py --check programs/bible/data || exit 1; done; python3 -I programs/bible/tools/web_audio_manifest.py --check programs/bible/data'
+	+@$(STEP) 'bible data checks' sh -c 'for t in senses related learn; do python3 -I programs/bible/tools/$$t.py --check programs/bible/data || exit 1; done; python3 -I programs/bible/tools/web_audio_manifest.py --check programs/bible/data && python3 -I programs/bible/tools/chrono.py --check programs/bible/data >/dev/null'
 	+@$(STEP) 'bible spoken text' sh -c './l8c3 build programs/bible/tools/spoken.l8 -o $(BUILD)/bible-spoken.tmp && mv -f $(BUILD)/bible-spoken.tmp $(BUILD)/bible-spoken'
 	@touch $@
 
@@ -197,7 +197,7 @@ bible-test: $(OK)/bible-tests
 # The same tests built as WebAssembly and run under Node (the modules the
 # web app shares with the iPhone's), and the web app's module.
 BIBLE_TESTS := $(wildcard programs/bible/test_*.l8)
-$(OK)/bible-wasm-tests: l8c3 $(PROGRAMS) web/l8-runtime.js web/run.mjs $(wildcard programs/bible/data/*.txt programs/bible/data/lang/* programs/bible/data/audio/*) | $(OK)
+$(OK)/bible-wasm-tests: l8c3 $(PROGRAMS) web/l8-runtime.js web/run.mjs $(wildcard programs/bible/data/*.txt programs/bible/data/plans/* programs/bible/data/lang/* programs/bible/data/audio/*) | $(OK)
 	+@$(STEP) 'bible wasm tests' ./l8c3 test --wasm $(BIBLE_TESTS)
 	@touch $@
 
