@@ -345,6 +345,70 @@ export const flows = {
     }
   },
 
+  // The owner's report (2026-10-20): slow, deliberate touch scrolls back
+  // and forth across a chapter's boundary, with pauses and the finger held
+  // still, and the browser's bars changing the viewport's height mid-drag
+  // as Safari's do. While a finger is down the text must stay under it;
+  // while it is still, and after it lifts, nothing may move. Also with no
+  // scrollend (Safari's case), where a rest is a quiet spell.
+  async boundary(ctx) {
+    const { page, base } = ctx;
+    for (const noScrollend of [false, true]) {
+      const p = noScrollend ? await ctx.newPage() : page;
+      if (noScrollend) await p.send("Page.addScriptToEvaluateOnNewDocument", { source: "delete Window.prototype.onscrollend; delete window.onscrollend;" });
+      await p.size(390, 760, 2, true);
+      await p.open(base + "/read/bsb/john/3");
+      await p.rest();
+      // (John 4's top about the middle of the screen.)
+      await p.eval(`(() => { const a = document.querySelector('article[data-c="1000"]'); scrollBy(0, a.getBoundingClientRect().top - 380); })()`);
+      await p.rest();
+      const track = `(() => { const bar = document.querySelector(".bar").offsetHeight; const m = document.querySelector("main").getBoundingClientRect();
+        window.__el = document.elementFromPoint(m.x + m.width * 0.25, 400); return window.__el ? window.__el.getBoundingClientRect().top : null; })()`;
+      const top = `window.__el && window.__el.isConnected ? window.__el.getBoundingClientRect().top : null`;
+      const bad = [];
+      let x = 200;
+      let y = 600;
+      const touch = (type) => p.send("Input.dispatchTouchEvent", { type, touchPoints: type === "touchEnd" ? [{ x, y }] : [{ x, y }] });
+      for (let round = 0; round < 6; round++) {
+        const dir = round % 2 ? 1 : -1;
+        y = dir < 0 ? 600 : 300;
+        await touch("touchStart");
+        // (Past the touch's slop, after which the text follows the finger.)
+        for (let k = 0; k < 4; k++) {
+          y += dir * 6;
+          await touch("touchMove");
+          await sleep(16);
+        }
+        const t0 = await p.eval(track);
+        const off = t0 === null ? null : t0 - y;
+        for (let k = 0; k < 40; k++) {
+          y += dir * 6;
+          await touch("touchMove");
+          await sleep(16);
+          if (k === 20 && round === 2) await p.size(390, 820, 2, true);
+          if (k === 20 && round === 3) await p.size(390, 760, 2, true);
+          if (k % 10 === 9) {
+            // (The finger held still a while.)
+            const h0 = await p.eval(top);
+            await sleep(350);
+            const h1 = await p.eval(top);
+            if (h0 !== null && h1 !== null && Math.abs(h1 - h0) > 2) bad.push(`round ${round}: moved ${(h1 - h0).toFixed(0)} px under a still finger`);
+          }
+        }
+        const t1 = await p.eval(top);
+        if (off !== null && t1 !== null && Math.abs(t1 - y - off) > 12) bad.push(`round ${round}: the text left the finger by ${(t1 - y - off).toFixed(0)} px`);
+        await touch("touchEnd");
+        const r0 = await p.eval(top);
+        await sleep(600);
+        await p.frames(2);
+        const r1 = await p.eval(top);
+        if (r0 !== null && r1 !== null && Math.abs(r1 - r0) > 2) bad.push(`round ${round}: moved ${(r1 - r0).toFixed(0)} px after the finger lifted`);
+      }
+      ctx.check(`slow drags across a boundary, pauses and the bars changing: nothing jumps${noScrollend ? " (no scrollend)" : ""}`, bad.length === 0, bad.slice(0, 4).join("; "));
+      if (noScrollend) await p.close();
+    }
+  },
+
   // §W3.9 item 9: the bar collapses without moving the text.
   async bar(ctx) {
     const { page, base } = ctx;
