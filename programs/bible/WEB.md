@@ -126,10 +126,10 @@ show the text but not the reader's tools. A newer browser has them." No banner.
 | The data files | `programs/bible/data/` | Shared, unchanged in format; the web serves them gzipped (§W12.1) |
 | `html.l8`: text and screens to HTML | `programs/bible/html.l8` (portable, new) | **New**, tested by `test_html.l8` natively and in wasm |
 | Screen logic now inside `ios_*.l8` that both need | moved into portable modules as each web screen is built | **Moved, not copied** (below) |
-| The web UI | `programs/bible/web/web*.l8` | **New** (about the size of the iPhone's UI less UIKit's ceremony; an estimate of 12–18 thousand lines over all phases) |
-| The bridge | `programs/bible/web/dom.l8` (externs) and `web/bridge.js` | **New**, small (§W1.3) |
-| Styles, page template, Service Worker, manifest, icons | `programs/bible/web/` | **New** |
-| The prerenderer | `programs/bible/web/prerender.l8` (native, build time) | **New** (§W1.8) |
+| The web UI | `programs/bible/web.l8` (begun) and `web_*.l8` | **New** (about the size of the iPhone's UI less UIKit's ceremony; an estimate of 12–18 thousand lines over all phases) |
+| The bridge | `programs/web/dom.l8` and `web/dom.js` | **Built** (9befcaab), general; small additions per phase (§W1.3) |
+| Styles, page template, Service Worker, manifest, icons | `web/bible/` | **New** |
+| The prerenderer | `programs/bible/prerender.l8` (native, build time) | **New** (§W1.8) |
 | The Worker | `programs/bible/worker/` | Two small changes: serving `/read/` (§W2.1) and the web's share of the ESV budget (§W12.6) |
 
 **Moving shared screen logic.** When a web screen needs logic the iPhone keeps inside an
@@ -150,81 +150,68 @@ from their own storage.
 
 ### W1.3 The bridge
 
-Two files: `web/dom.l8` declares the externs; `web/bridge.js` implements them on top of
-`web/l8-runtime.js`'s `instantiate` (its `extra` imports and memory helpers). The module is
-started once (`_start` runs `main`, which registers the handler and builds the page, then
-returns); from then on everything is a call from the browser into L8 through the handler.
-The builder may rename calls and add the ones a phase needs; the shape below is the
-design.
+**As built (9befcaab):** `programs/web/dom.l8` declares the calls and `web/dom.js` is their
+host, over `web/l8-runtime.js`. It is general (any L8 page can use it), in the manner of
+`objc.l8`: nodes and host objects are handles; text goes in as `str` or bytes of a `[]i8`
+and comes back into a buffer the caller owns; callbacks are `fn(data: int)` values with an
+event record (`dom_ev`, `dom_evf`, `dom_evs`) filled before each call; `main` sets the page
+up and returns, and the program lives on in its callbacks. It already has elements, text,
+HTML, attributes, classes, styles, any property or no-argument method (so `showModal`,
+`showPopover`, `focus`, `play` need no calls of their own), boxes and scrolling,
+listeners, the selection, `pushState`/`replaceState`/`popstate`, `fetch`, `localStorage`,
+timers and frames, and media queries. **This is the bridge the design builds on;** the
+builder's measurement (a call costs about a microsecond; Psalm 119 built node by node in
+14 ms, the same as one string of HTML) settles that the bridge's cost is no reason to
+prefer one way of making content over the other (§W1.4).
 
-**Calling convention** (from the compiler, checked 2026-10-20):
-- `str` and `[]i8` arguments cross as a pointer to UTF-8 bytes with the length in the 8
-  bytes before it; integers as `i64` (BigInt in JavaScript), floats as numbers.
-- **Callbacks** (L8 functions the browser calls) may take only scalar, raw-pointer or `fn`
-  parameters, and can't declare `raises`. So the browser never passes a string to L8 in a
-  call: it calls `on_event(handle, kind)` and L8 then **pulls** what it needs into its own
-  buffer (`dom_event_text(buf)`), like the iPhone's pattern of reading back from UIKit.
-  Each handler catches its own errors and logs them (`dom_log`); an uncaught one must not
-  leave the page half-changed.
-- **Memory:** each handler's body runs in `region { }`, so its allocations are freed at
-  its end. State that lives between events is in globals and immortal buffers, as the
-  portable modules already keep it. Big data (a version's text, the language data) is
-  copied once into an immortal buffer the bridge asks L8 to allocate (`l8_malloc`).
+**Rules the design relies on** (from the compiler and the bridge, checked 2026-10-20):
+- A callback can't be `noregion` and can't `raise`: each handler catches its own errors
+  and logs them (`dom_log`); an uncaught one must not leave the page half-changed.
+- Each handler's own allocations are freed at its end (it runs in a region). State that
+  lives between events is in globals and immortal buffers, as the portable modules
+  already keep it. Big data (a version's text, the language data) is kept as host memory
+  (`dom_fetch_body`), as a mapped file is on the iPhone.
+- The event record is good until the callback returns or calls into the page in a way
+  that dispatches another event: read what's needed first.
 
-**Handles.** An element L8 keeps is a small integer: an index into the bridge's array of
-elements. Handle 0 is "none". `dom_find(id)` gives the handle of an element in the page
-template by its `id`. Handles are released with `dom_release`. Content L8 rebuilds often
-(a list, a chapter) is not held element by element: L8 writes its HTML (§W1.4) and finds
-parts of it again by selector when it needs them.
+**What the later phases add to it** (each a few lines in `dom.js`; names are the
+builder's to choose):
 
-**The calls** (each a one-liner or close to it in the bridge):
+| Need | Addition | Phase |
+|---|---|---|
+| Delegated actions on HTML written as a string (§W1.4) | the nearest ancestor of the event's real target with a given attribute: `dom_event_attr(name, out)` (its value) and `dom_event_closest(selector): int` (a handle to it, on demand) | a |
+| Exact Back (§W2.3) | a state string with `pushState`/`replaceState`, and `history.state` read back on `popstate` | a |
+| The place (§W3.5) | `dom_point(x, y): int`: `elementFromPoint`, answering the nearest `[data-v]` node at or above it as a handle; and all client rects of a node (a verse that wraps) | a |
+| Marks in one call (§W1.5) | `dom_class_all(h, selector, name, on)`: a class on every match under h | a |
+| Gzipped data (§W12.1) | a fetch that decompresses with `DecompressionStream("gzip")` before handing the body over | a |
+| Files in IndexedDB (§W12.2) | `file_read(name, f, data)`, `file_write(name, bytes)` (queued, whole file, in a Web Lock), `file_list`; a callback when another tab wrote a file (BroadcastChannel) | b |
+| Out of the page | `clip_write(text)`, `share(title, text, url)` (0 when `navigator.share` is missing), `download(name, mime, bytes)` (a Blob and an `<a download>`), `file_pick(accept, f, data)` | b, c |
+| The device's voice (§W7.1) | `speech_say(text, lang, rate, voice)`, `speech_stop()`, `speech_voices(out)`, and its boundary and end events | d |
+| Lock screen controls (§W7.1) | `media_meta(title, artist, album, artwork)` and Media Session actions as events | d |
+| Keep the Screen On (§8.2) | `wake_lock(on)` (re-requested when the page becomes visible) | a |
+| Storage that stays (§W9.4) | `navigator.storage.persist()` and `estimate()` | f |
 
-| Group | Calls |
-|---|---|
-| Elements | `dom_find(id): int` · `dom_create(tag, cls): int` · `dom_append(parent, h)` · `dom_before(h, ref)` · `dom_remove(h)` · `dom_release(h)` · `dom_query(h, sel): int` (first match under h) · `dom_count(h, sel): int` |
-| Content | `dom_html(h, html)` (replace children) · `dom_insert_html(h, where, html): int` (`beforebegin`/`afterbegin`/`beforeend`/`afterend`, 0–3; returns the first inserted element) · `dom_text(h, s)` · `dom_value(h, s)` / `dom_get_value(h, buf): int` (inputs) |
-| Attributes and classes | `dom_attr(h, name, value)` · `dom_unattr(h, name)` · `dom_class(h, cls, on)` · `dom_class_all(h, sel, cls, on)` (every match under h: marks and selection in one call) · `dom_var(h, name, value)` (a CSS custom property; the only style L8 sets) |
-| Dialogs and focus | `dom_modal(h)` (`showModal`) · `dom_show(h)` (non-modal) · `dom_close(h)` · `dom_popover(h, anchor, on)` · `dom_focus(h)` · `dom_blur()` |
-| Geometry and scroll | `dom_rect(h, out: []f64)` (top, left, width, height, viewport-relative) · `dom_viewport(out)` (width, height, safe-area insets, device pixel ratio) · `dom_scroll_y(): f64` · `dom_scroll_to(y, smooth)` · `dom_scroll_by(dy)` · `dom_place(y, out)` (the verse under the reading line: chapter key, verse, fraction through it; §W3.5) · `dom_verse_top(chapter_h, v, fraction): f64` |
-| Text selection | `dom_selection(out): int` (the selection's first and last verse as chapter and verse keys, 0 if none or outside the text; and the selected text's length) · `dom_selection_text(buf): int` · `dom_unselect()` |
-| Events | `dom_handler(fn(h: int, kind: int): int)` (once, at start) · `dom_listen(h, kinds)` (a bit set) · `dom_event_text(buf): int` (the key, the input's value, a link's href, a message) · `dom_event_data(name, buf): int` (a `data-` attribute of the nearest element that has it) · `dom_event_flags(): int` (modifiers, button, pointer type: mouse, touch or pen) · `dom_event_xy(out)` · `dom_prevent()` |
-| Time | `dom_now(): f64` (ms since 1970) · `dom_today(): int` (local days since 1970, what the portable modules call "today") · `dom_timer(ms, tag): int` · `dom_frame(tag)` (next animation frame) · `dom_cancel(id)` |
-| History | `dom_push(url, title, state)` · `dom_replace(url, title, state)` · `dom_back()` · `dom_location(buf): int` · `dom_state(buf): int` (the current entry's state, a short string L8 wrote) |
-| Settings (sync) | `kv_get(key, buf): int` · `kv_set(key, value)` (`localStorage`, §W12.2) |
-| Files (async) | `file_read(name, req)` · `file_write(name, bytes)` (queued, whole file, §W12.2) · `file_list(req)` |
-| Network (async) | `net_get(url, req)` (adds the `X-Smooth-Bible` header for `/api/`) · `data_get(path, req)` (fetches a `.gz`, decompresses it with `DecompressionStream`, copies it into an immortal L8 buffer) · `dom_take(req, buf): int` (the answer's bytes or status) |
-| Out of the page | `clip_write(text): int` · `share(title, text, url): int` (`navigator.share`; 0 when absent) · `download(name, mime, bytes)` · `file_pick(accept, req)` · `open_tab(url)` |
-| Audio (phase d) | `audio_src(url)` · `audio_play()` · `audio_pause()` · `audio_seek(s)` · `audio_rate(r)` · `audio_time(): f64` · `audio_duration(): f64` · `speech_say(text, rate, voice)` · `speech_stop()` · `speech_voices(buf): int` · `media_meta(title, artist, album, art)` |
-| Device | `wake_lock(on)` · `dom_prefers(what): int` (reduced motion, dark scheme, coarse pointer, forced colours) · `dom_log(s)` |
+### W1.4 How screens are made: L8 writes the text as HTML; screens as the builder finds best
 
-**Event kinds** delivered to the handler: click (an element with `data-act`, §W1.4),
-link (a plain click on an `<a>` inside `/read/`, already prevented), input, change,
-keydown (when no field has focus, or a dialog asked for keys), submit, scroll (the
-window's, throttled to one per animation frame), scroll end (no scroll for 120 ms, or
-`scrollend` where it exists), resize (after 100 ms of quiet), popstate, selection change
-(debounced 100 ms), visibility hidden and shown, pagehide, a dialog's close, a popover's
-toggle, a timer or frame by tag, an async request done (with its `req`), another tab's
-change (§W12.3), and audio events (play, pause, ended, waiting, error, time, a Media
-Session action).
-
-### W1.4 How screens are made: L8 writes HTML, the page reports actions
-
-- **Content is written as HTML strings by L8** (`html.l8` for the text and shared pieces;
-  each screen's own module for its rows) and set in one call (`dom_html`). A Go To list of
-  66 books is one call, not 66 × 4 element calls. The browser parses HTML far faster than
-  any element-by-element bridge.
-- **Interactive elements say what they do in attributes:** `data-act="goto.book"
-  data-arg="43"`. The bridge has one click listener on the document; a click on (or in) an
-  element with `data-act` sends a click event, and L8 reads `data-act` and `data-arg` with
-  `dom_event_data`. Buttons are `<button type=button data-act=…>`; places are
-  `<a href=… >`, also with `data-act` when the app does more than go there.
-- **Live controls are kept as handles:** a search field, the note's textarea, the size
-  slider, the tray. Their values are read with `dom_get_value` on input.
-- **Escaping is the one safety rule.** Everything not written by the app itself (note text,
-  ribbon names, search queries, a backup's contents, the ESV's text) goes through
-  `h_text`/`h_attr` in `html.l8`, which escape `& < > " '`. `test_html.l8` checks it,
-  including a note containing `<img src=x onerror=…>` and a ribbon named
-  `"><script>`. The page's Content Security Policy backs it up (§W12.7).
+- **The Bible's text is HTML written by `html.l8`** (§W1.5), set with `dom_set_html`
+  (or the `_of` form, straight from L8's buffer). It has to be a string because the
+  prerendered pages (§W1.8) are the same markup written to files, and the app must adopt
+  them unchanged. The same goes for anything else that is also a static page: the book
+  index, the manual (§W14.4), the About page.
+- **Screens may be built either way:** node by node with handles, or a list's HTML in one
+  string. The builder chooses per screen. Where a screen's rows are written as HTML, their
+  buttons say what they do in attributes (`data-act="goto.book" data-arg="43"`) and one
+  listener on the dialog reads them (`dom_event_attr`), so 66 books need no 66 listeners.
+- **Places are links.** Whatever builds them, a row that goes to a place is an
+  `<a href="/read/bsb/john/3#16">`. The app listens for clicks on links inside `/read/`
+  and handles a plain one in place (§W0.2); with a modifier key or the middle button it
+  lets the browser do what it does.
+- **Escaping is the one safety rule.** Everything not written by the app itself (note
+  text, ribbon names, search queries, a backup's contents, the ESV's text) is escaped when
+  it goes into HTML (`h_text`/`h_attr` in `html.l8` escape `& < > " '`), or set as text
+  (`dom_set_text`), never as HTML. `test_html.l8` checks it, including a note containing
+  `<img src=x onerror=…>` and a ribbon named `"><script>`. The page's Content Security
+  Policy backs it up (§W12.7).
 - **UIKit's controls, on the web:**
 
 | iPhone | Web |
@@ -459,9 +446,9 @@ compression), plus a book index per version (`/read/bsb/`). Decided because:
 
 The ESV is never prerendered (§W12.6): its pages are the app's shell, drawn in the browser.
 
-**The prerenderer** (`web/prerender.l8`) is a native L8 program run by `make bible-web`:
+**The prerenderer** (`programs/bible/prerender.l8`) is a native L8 program run by `make bible-web`:
 it loads each version with `text_load`, calls `html_chapter` for each chapter, and fills
-the page template (`web/page.html`) with the chapter's title, description, canonical
+the page template (`web/bible/page.html`) with the chapter's title, description, canonical
 link and neighbours' links. It writes `.build/bible-site/read/<v>/<book>/<n>.html`.
 
 **What a prerendered page holds:** the boot script (inline, about 1 KB, §W3.2), the
@@ -481,25 +468,28 @@ shows Library, Aa and the reader's tools only under `.app`.
 
 ### W1.9 Files and building
 
+The builder began with `programs/bible/web.l8` and `web/bible/` (9befcaab); the design
+keeps those places:
+
 | Path | What |
 |---|---|
 | `programs/bible/html.l8`, `test_html.l8` | Portable (§W1.5) |
-| `programs/bible/web/dom.l8` | The bridge's externs |
-| `programs/bible/web/web.l8` | `main`: boot, routing, the event handler's dispatch, settings |
-| `programs/bible/web/web_reader.l8` | The page, the window of chapters, the bar, the place, footnotes |
-| `programs/bible/web/web_*.l8` | One per feature, as phases add them: `goto`, `search`, `tray`, `library`, `note`, `settings`, `versions`, `esv`, `compare`, `ribbons`, `plans`, `day`, `listen`, `study`, `memory`, `practice`, `learn`, `help`, `backup` |
-| `programs/bible/web/prerender.l8` | Build-time pages (§W1.8) |
-| `programs/bible/web/bridge.js` | The bridge, over `web/l8-runtime.js` |
-| `programs/bible/web/page.html` | The page template (prerendered chapters and the shell) |
-| `programs/bible/web/read.css` | §W1.6 |
-| `programs/bible/web/icons.svg` | The sprite (§W1.7) |
-| `programs/bible/web/sw.js`, `manifest.webmanifest` | Phase f |
-| `programs/bible/web/fonts/` | The subsets (§W1.6), with their licences |
-| `programs/bible/web/test/` | The CDP driver and the shot list (§W14) |
+| `programs/web/dom.l8`, `web/dom.js` | The bridge (§W1.3) |
+| `programs/bible/web.l8` | `main`: boot, routing, the events' dispatch, settings |
+| `programs/bible/web_reader.l8` | The page, the window of chapters, the bar, the place, footnotes |
+| `programs/bible/web_*.l8` | One per feature, as phases add them: `goto`, `search`, `tray`, `library`, `note`, `settings`, `versions`, `esv`, `compare`, `ribbons`, `plans`, `day`, `listen`, `study`, `memory`, `practice`, `learn`, `help`, `backup` |
+| `programs/bible/prerender.l8` | Build-time pages (§W1.8) |
+| `web/bible/bible.js` | Starts the module (begun) |
+| `web/bible/page.html` | The page template (prerendered chapters and the shell) |
+| `web/bible/read.css` | §W1.6 |
+| `web/bible/icons.svg` | The sprite (§W1.7) |
+| `web/bible/sw.js`, `manifest.webmanifest` | Phase f |
+| `web/bible/fonts/` | The subsets (§W1.6), with their licences |
+| `web/bible/test/` | The CDP driver and the shot list (§W14) |
 
-`make bible-web` builds `.build/bible-site/`: a copy of `programs/bible/site/` (the
+`make bible-web` (begun; it builds `.build/bible-web` today) grows to build the whole site to deploy, in `.build/bible-site/`: a copy of `programs/bible/site/` (the
 marketing pages, unchanged) plus `read/`: the shell (`read/shell.html`), the prerendered
-pages, `read/app.<hash>.wasm`, `read/bridge.<hash>.js`, `read/read.<hash>.css`,
+pages, `read/app.<hash>.wasm`, `read/bible.<hash>.js`, `read/dom.<hash>.js`, `read/read.<hash>.css`,
 `read/icons.<hash>.svg`, `read/data/<name>.<hash>.gz` (§W12.1), `read/sw.js`,
 `read/manifest.webmanifest`, `robots.txt` and `sitemap.xml`. Hashed names are cached
 forever (`Cache-Control: public, max-age=31536000, immutable`, set by the Worker); the
@@ -694,7 +684,7 @@ way to read the Bible on the web than most, and links to it can be shared. Navig
 3. On a page whose version isn't the reader's saved version, it does nothing: the URL
    wins (a shared KJV link shows the KJV), and the reader's version becomes the KJV only
    if they then change the version themselves (phase b).
-4. Tests WebAssembly support (§W1.1), then loads `bridge.<hash>.js` as a module.
+4. Tests WebAssembly support (§W1.1), then loads `bible.<hash>.js` as a module.
 5. A fragment (`#16`): once the article is parsed, scrolls verse 16 to one third down the
    space under the bar and adds `flash` (§2.7), so a shared verse link lands right even
    before the app has started.
@@ -711,12 +701,12 @@ holds a **window of chapters** around the place and moves it as you read.
   3 below), and at most 12 chapters or 2,000 verses (Psalm 119 is 176). Across a book's
   end it continues into the next book, from Genesis 1 to Revelation 22, without a break,
   as the iPhone.
-- Chapters are added by `html_chapter`, one `dom_insert_html` each.
+- Chapters are added by `html_chapter`: one `<article>` made and its HTML set, inserted before or after the window.
 - **Adding below never moves anything,** so it happens at once, whenever the reading line
   is within 3 viewport heights of the window's end, mid-scroll or not.
 - **Adding above or removing anything above changes the scroll height above the reader,**
   so it happens **only at rest** (scroll end), and in the same frame the app scrolls by
-  the height added or removed (`dom_scroll_by`), measured with `dom_rect` before and after
+  the height added or removed (`dom_scroll_to` from where it was), measured with `dom_rect` before and after
   in one task, so no pixel moves on screen. This is §9.4.11's lesson: never write the
   scroll position while the page is moving, because on iOS that stops a fling dead.
   (Chrome's and Firefox's scroll anchoring would do this by themselves, but Safari's
@@ -780,7 +770,7 @@ own verse's lines, below where the eye is.
 
 - **The place is (chapter key, verse key, fraction through the verse) at the reading
   line,** a line just under the expanded bar's bottom (§0.5 item 3). The bridge's
-  `dom_place` finds the verse span under that line with `elementFromPoint` at the column's
+  `dom_point` finds the verse span under that line with `elementFromPoint` at the column's
   centre (falling back to the nearest `[data-v]` above it in a gap or heading), and the
   fraction from the span's client rects.
 - **Saved** to `localStorage` (`sb.place`, with the version) at every scroll end, on
@@ -790,7 +780,7 @@ own verse's lines, below where the eye is.
   ms of quiet), a settings change (size, font, spacing, margins, the show switches,
   verse-per-line), a version change, fonts finishing loading (`document.fonts.ready` and
   `loadingdone`), and Back and Forward. The app computes the verse's new top with
-  `dom_verse_top` and scrolls so the same fraction of the same verse sits at the reading
+  the verse's spans' rects and scrolls so the same fraction of the same verse sits at the reading
   line. Restoring is an instant scroll at rest; during a scroll it waits for the rest.
 - On the first paint of a prerendered page the place is the fragment's verse, or the
   chapter's top.
