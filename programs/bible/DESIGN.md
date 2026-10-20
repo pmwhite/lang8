@@ -32,7 +32,7 @@ Manual with search, reached from Reading settings' Help; Show Tips on by default
 words in `data/help.txt`) are specified in §15, built after Round 10 and before Round 11.** **A plan's day in a reader of
 its own (owner request 2026-10-20: the day's passages alone on one page, Mark Read always on
 screen, days of any passages; M'Cheyne's Calendar, a Chronological plan of our own and Old
-and New Together added) is specified in §16, built after §15 and before Round 11.** **iPad (owner request 2026-10-20:
+and New Together added; several plans at once, §16.11) is specified in §16, built after §15 and before Round 11.** **iPad (owner request 2026-10-20:
 iPhone and iPad as one app following size classes, a centred column of about 70 characters at
 any width, the verse kept across rotation and resizing, form sheets and popovers, keyboard
 shortcuts and hover, Study beside the text on a wide window) is specified in §17, built after §16 and before Round
@@ -9153,6 +9153,133 @@ These are decided above; the owner may overrule:
 5. **Ship Chronological as our own order from Townsend and Robertson** (decided), or not
    ship a chronological plan until a licensed one is found.
 
+### 16.11 Several plans at once (owner, 2026-10-20)
+The owner: "only one reading plan is usable at once, which seems perhaps a bit wrong …
+Probably it should be allowed to have multiple reading plans open at once." So you can follow
+any number of plans side by side, for example Chronological in the morning and M'Cheyne's
+Psalms at night. This replaces "one plan at a time" everywhere in §10, §11.3 and §16. The
+rest of §16 holds for each plan.
+
+#### 16.11.1 Starting and stopping
+- **Start Plan** is offered on every plan that isn't being followed. There is no **Start
+  Instead**, and starting one never stops another.
+- **A plan already followed** shows **Stop Plan** in its detail. The same plan can't be
+  followed twice. A Chapter a Day for another book is a different plan (its own id), so two
+  can run.
+- **No limit.** Each plan is one row in Go To. More than four makes Go To long, but that's
+  your choice, so there's no cap and no warning.
+- **Starting** opens the new plan's day 1 in the day's reader (§16.1), with the toast
+  "Started M'Cheyne's Calendar". **Stopping** archives that plan alone (§10.1.2's
+  `plans-done.tsv`).
+
+#### 16.11.2 The plans list (Reading Plans, §11.3.2)
+- **First section, "Following"** (only when any): one row per followed plan, in **the order
+  you started them** (a stable order; "most recently read" would reorder rows under your
+  finger):
+  - title: the plan's name;
+  - secondary: "Day 32 · Genesis 12–14; Psalm 105 …" (today's passages, one line);
+  - value: a `checkmark` (faint) when today's day is read;
+  - tap: its detail (the days).
+- **Then the plans not followed**, as now, and **From a Book**.
+
+#### 16.11.3 Go To
+- **The Reading Plan section** (§11.3.1) has one row per followed plan, in the same order.
+  Each is §11.3.1's plan row, compact:
+  - leading, the day's circle (read, part read, or not);
+  - title: today's passages ("Genesis 12–14; Psalm 105; Hebrews 11:8–19"), at most two
+    lines;
+  - secondary: "Chronological · Day 32", with " · 2 days unfinished" when there are some;
+  - ⓘ: the plan's days;
+  - a tap opens that plan's today in the day's reader.
+- **Then Reading Plans** (the list), as now.
+- **Header:** "Reading Plans" when two or more are followed, "Reading Plan" with one.
+- **The tip and Go To's opening position** (§15, §11.2.1) are unchanged: any followed plan
+  counts as "a plan".
+
+#### 16.11.4 The day's reader
+- **One plan's day at a time.** The title's second line names it ("Day 32 · Chronological").
+- **The end panel** (§16.3.2):
+  - **Next: Day 33 · …** of the same plan, as before;
+  - then, for each **other** followed plan whose **today** isn't read, a row **"Also
+    today: M'Cheyne's Calendar · Day 32"** (SF 15, accent). It replaces the page with that
+    plan's day, by the same cross-fade as Next;
+  - after a plan's last day, "The last day of Chronological" and then the Also today rows.
+- **The title's tap** opens this plan's days (§16.2.2), unchanged.
+- **Day Done** is per plan: "Chronological, Day 32 Done" when more than one plan is
+  followed, "Day 32 Done" with one. It shows once a day per plan.
+
+#### 16.11.5 The one daily reminder
+- **Still one notification a day**, at the shared time (§13.5).
+- **Which plans it names:** each plan's days screen keeps its **Daily Reminder** switch, now
+  meaning "include this plan". The switch is stored per plan (§16.11.6), and the Time row is
+  the shared `planReminderMinutes`. Footer: "One notification a day, at this time, names
+  each plan you've turned this on for, and Memory's reviews."
+- **Content** (folded as §13.5 folded Memory):
+  | Parts | Title | Body |
+  |---|---|---|
+  | one plan | the plan's name | "Today's reading: Genesis 12–14; Psalm 105" |
+  | several plans | "Today's Reading" | one line per plan, in started order: "Chronological: Genesis 12–14; Psalm 105" / "M'Cheyne: Genesis 1; Matthew 1; Ezra 1; Acts 1" |
+  | plans and Memory | as above | then "To review: Psalm 23 and 14 Greek words" |
+
+  The whole body is cut at 178 characters, with "… and N more" (N plans or passages left
+  out).
+- **A plan already read today** isn't named that day. A day with nothing to name sends
+  nothing.
+- **Opening it** opens the first named plan's today (in started order) in the day's reader.
+  Its end panel offers the others (Also today).
+- `userInfo` is `{"plans": [ids]}` (and `{"memory": 1}`). The ids stay `daily-YYYY-MM-DD`.
+
+#### 16.11.6 Persistence (replacing §16.5's single `plan.tsv`)
+- **One file per followed plan:** `plan-<N>.tsv`, where N is a number never reused
+  (`planNext` in defaults, from 1). Each file is exactly §16.5's format: `PLAN\t<id>\t<start>`,
+  then `DONE`/`UNDONE` lines (and 1.0's `READ` lines, still read), plus `REMIND\t1` when its
+  switch is on.
+- **The order started** is N's order.
+- **Migration:** at launch, if `plan.tsv` exists and no `plan-*.tsv` does:
+  - rename it `plan-1.tsv`;
+  - add `REMIND\t1` if `planReminder` was on;
+  - set `planNext` to 2;
+  - remove `planReminder`.
+
+  Logged "plans migrated 1". An older build never sees the new files; there's no downgrade
+  path, as before.
+- **Stopping** appends the plan's file to `plans-done.tsv` with `END\t<UNIXTIME>` and
+  removes it (§10.1.2).
+- `planDoneDay` becomes per plan, stored in its file as `DONEDAY\t<YYYY-MM-DD>`, rewritten.
+
+#### 16.11.7 Marking, and the rest of the app
+- **Each plan keeps its own marks.** Marking a passage read in one plan's day never marks
+  another plan, even when both have Genesis 12 today: the day's reader and Go To's circles
+  mark only their plan (§16.0 decision 7). Each plan's progress is its own file's.
+- **Ribbons, Memory, History:** unaffected (a plan is still not a ribbon; Memory's reason
+  in the reminder is unchanged).
+- **The ESV:** opening a day fetches that plan's passages only.
+
+#### 16.11.8 help.txt (done with this section)
+- The Plans page's "Plans" part adds: "You can follow several plans at once: start another
+  from Reading Plans, and each has its own row in Go To."
+- The reminder part says the switch includes that plan in the one daily notification.
+- **A tip, added by §16.11's builder with the tests' counts** (level 3, MORE
+  `plans#about`): "You can follow more than one reading plan; each has its own row in Go To."
+
+#### 16.11.9 Tests and CI
+- **`test_plans.l8`:**
+  - two plans' files read together, each with its own marks, and the same chapter marked in
+    one plan only;
+  - the migration from `plan.tsv`;
+  - the reminder's body for one plan, two plans, and plans with Memory, including the cut;
+  - Also today's list;
+  - Day Done per plan.
+- **Shots,** in the `plans` group (after 454):
+  - `455-goto-two-plans`: Chronological and M'Cheyne followed. Go To's "Reading Plans"
+    section has two rows (passages, "· Day 32" and "· Day 1"), then Reading Plans;
+  - `456-plans-following`: the list's Following section with both;
+  - `457-day-end-also`: Chronological's day end with "Also today: M'Cheyne's Calendar · Day 1";
+  - `458-also-today-open`: tapping it shows M'Cheyne's day 1 (four passages);
+  - `459-reminder-two`: (log only) the reminder's title "Today's Reading" and its two lines;
+  - `459b-start-second`: M'Cheyne's detail with Start Plan (no Start Instead) while
+    Chronological is followed.
+
 ### 16.10 What's deferred
 - **Plans you write yourself** (choose passages per day). The format allows it; the
   screens don't yet.
@@ -9160,7 +9287,6 @@ These are decided above; the owner may overrule:
   on the day you start them.
 - **More listed plans** (a Psalm a day with a Proverb, a Gospel and its letters): one data
   file each, once their order is settled.
-- **Reading two plans at once**: still one plan at a time.
 - **A shared plan** with friends.
 
 ---
