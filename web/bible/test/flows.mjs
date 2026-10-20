@@ -2,7 +2,7 @@
 // design asks of the reader and takes its shots. drive.mjs runs them.
 import fs from "node:fs";
 import path from "node:path";
-import { differ, sleep } from "./pixels.mjs";
+import { decodePNG, differ, sleep } from "./pixels.mjs";
 
 const here = path.dirname(new URL(import.meta.url).pathname);
 const AXE = path.join(here, "node_modules", "axe-core", "axe.min.js");
@@ -60,6 +60,9 @@ const SCROLL = (step, frames) => `new Promise((done) => {
 })`;
 
 const ordered = (keys, down) => keys.every((k, i) => i === 0 || (down ? k >= keys[i - 1] : k <= keys[i - 1]));
+
+// The bar's collapse and the title's text.
+const BAR = `({ p: Number(getComputedStyle(document.querySelector(".bar")).getPropertyValue("--p")), title: document.querySelector(".bar .t:not(.out)")?.textContent })`;
 
 // The reading line's element must not move across a rest (the app's work at
 // rest moves the scroll by what it adds or takes above).
@@ -171,8 +174,18 @@ export const flows = {
     const urlBad = [];
     let restOk = true;
     let windowOk = true;
+    let barOk = true;
+    const barBad = [];
     const atRest = async () => {
+      const b0 = await page.eval(BAR);
       restOk = (await restStill(page)) && restOk;
+      const b1 = await page.eval(BAR);
+      // (The rest's own work moves neither; a bar caught between its states
+      // settles to one, as it should.)
+      if (b0.title !== b1.title || (b0.p === 0 || b0.p === 1 ? b1.p !== b0.p : b1.p !== 0 && b1.p !== 1)) {
+        barOk = false;
+        barBad.push(JSON.stringify([b0, b1]));
+      }
       const r = await reading(page);
       titles.add(r.title);
       if (!r.path.endsWith("/" + r.title.toLowerCase().replace(/ /g, "/").replace("psalm/", "psalms/"))) {
@@ -210,6 +223,7 @@ export const flows = {
     ctx.check("no frame where the text jumps, going up", jumps.length === 0, JSON.stringify(jumps.slice(0, 5)));
     ctx.check("the verses at the reading line in order, going up", ordered(keys, false));
     ctx.check("nothing moves at rest", restOk);
+    ctx.check("the bar and title unchanged by the window's settling at rest", barOk, barBad.slice(0, 3).join(" "));
     ctx.check("the title named every chapter on the way", titles.size >= 20, titles.size + " titles");
     ctx.check("the address follows the title", urlsOk, urlBad.slice(0, 4).join("; "));
     ctx.check("the history's length unchanged", r.history === start.history, `${start.history} → ${r.history}`);
@@ -293,6 +307,11 @@ export const flows = {
     await page.rest();
     const f = await reading(page);
     ctx.check("Back returns to the place", f.c === a.c && f.v === a.v && Math.abs(a.into - f.into) <= 2, `${f.c}:${f.v}`);
+    await page.key("Home");
+    await sleep(900);
+    await page.rest();
+    const g = await reading(page);
+    ctx.check("Home scrolls to the chapter's top, with no history entry", g.c === a.c && g.v === 0 && g.history === f.history, `${g.c}:${g.v}, history ${f.history} → ${g.history}`);
     await page.eval(`localStorage.clear()`);
   },
 
@@ -312,6 +331,20 @@ export const flows = {
     await page.eval(`localStorage.clear()`);
   },
 
+  // REVIEW-web-a1 M1: the window's settling (chapters added above, the
+  // scroll moved by them) leaves the bar as it was, at every size.
+  async settle(ctx) {
+    const { page, base } = ctx;
+    for (const size of ["phone", "tablet", "desktop"]) {
+      await page.size(...ctx.SIZES[size]);
+      await page.open(base + "/read/bsb/john/3");
+      await page.rest();
+      const b = await page.eval(BAR);
+      const r = await reading(page);
+      ctx.check(`John 3 at ${size}: the bar expanded and named John 3 after the window settled`, b.p === 0 && b.title === "John 3" && r.chapters[0] < 999, JSON.stringify({ ...b, chapters: r.chapters }));
+    }
+  },
+
   // §W3.9 item 9: the bar collapses without moving the text.
   async bar(ctx) {
     const { page, base } = ctx;
@@ -324,6 +357,16 @@ export const flows = {
     ctx.check("reading down collapses the bar", Number(p) === 1, "--p " + p);
     await ctx.shot("wa-05-bar-collapsed-phone-paper");
     const a = await page.png();
+    {
+      // (The bar's own field, left of the title, over text: the page's bg.)
+      const P = decodePNG(a);
+      let worst = 0;
+      for (const [x, y] of [[8, 4], [60, 10], [120, 14], [330, 8]]) {
+        const i = ((y * 2) * P.w + x * 2) * 4;
+        worst = Math.max(worst, Math.abs(P.px[i] - 0xfb), Math.abs(P.px[i + 1] - 0xf8), Math.abs(P.px[i + 2] - 0xf2));
+      }
+      ctx.check("the collapsed bar's backdrop is Paper's bg", worst <= 2, "off by " + worst);
+    }
     await page.eval(`document.querySelector(".bar").style.setProperty("--p", "0")`);
     await page.frames(3);
     const b = await page.png();
@@ -431,8 +474,12 @@ export const flows = {
         await page.theme(dark);
         for (const [n, what, url] of [["10", "john3", "/read/bsb/john/3"], ["11", "genesis1", "/read/bsb/genesis/1"], ["12", "psalm23", "/read/bsb/psalms/23"],
           ["13", "psalm119", "/read/bsb/psalms/119"], ["14", "jude", "/read/bsb/jude/1"], ["15", "index", "/read/bsb/"]]) {
-          await page.open(base + url, what !== "index");
-          if (what !== "index") await page.rest();
+          await page.open(base + url);
+          await page.rest();
+          if (what === "index") {
+            const ix = await page.eval(`({ arts: document.querySelectorAll("article.ch").length, first: document.querySelector("main a")?.getAttribute("href"), app: document.documentElement.classList.contains("app") })`);
+            ctx.check(`the book index stays the book index (${size}, ${theme})`, ix.arts === 0 && ix.first === "/read/bsb/genesis/1" && ix.app, JSON.stringify(ix));
+          }
           await ctx.shot(`wa-${n}-${what}-${size}-${theme}`);
           if (size === "phone" && !dark && (what === "john3" || what === "index")) await axe(ctx, what);
         }
@@ -454,6 +501,21 @@ export const flows = {
     await ctx.shot("wa-18-verse-lines-phone-paper");
     const t = await reading(page);
     ctx.check("a verse a line: the title names the chapter", t.title === "Psalm 23" && t.c === 500, t.title);
+    const left = await page.eval(`(() => {
+      const art = document.querySelector('article[data-c="500"]');
+      const vl = art.querySelector(".vl");
+      const words = vl.getBoundingClientRect().left + parseFloat(getComputedStyle(vl).paddingLeft);
+      let least = Infinity;
+      const walk = document.createTreeWalker(art, NodeFilter.SHOW_TEXT);
+      for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+        if (n.parentElement.closest(".vn, .op, .s, .r, .d, .fns") || !n.data.trim()) continue;
+        const r = document.createRange();
+        r.selectNodeContents(n);
+        for (const b of r.getClientRects()) least = Math.min(least, b.left);
+      }
+      return least - words;
+    })()`);
+    ctx.check("a verse a line: no line of Psalm 23 left of its verse's words", left >= -1, left.toFixed(1) + " px");
     await page.eval(`localStorage.clear()`);
     await page.size(320, 640, 2, true);
     await page.send("Page.addScriptToEvaluateOnNewDocument", { source: `(function big() { if (document.documentElement) document.documentElement.style.fontSize = "200%"; else requestAnimationFrame(big); })()` });
