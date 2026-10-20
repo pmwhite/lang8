@@ -27,7 +27,10 @@ Hebrew course, and Aramaic with recordings) are specified in §14 and follow Rou
 manual and quick tips (owner request 2026-10-20: a tip always at the top of Go To with Next,
 More and an action, changing once a day and skipping what you already do; a 12-page
 Manual with search, reached from Reading settings' Help; Show Tips on by default; the
-words in `data/help.txt`) are specified in §15, built after Round 10 and before Round 11.** Round 1 is
+words in `data/help.txt`) are specified in §15, built after Round 10 and before Round 11.** **A plan's day in a reader of
+its own (owner request 2026-10-20: the day's passages alone on one page, Mark Read always on
+screen, days of any passages; M'Cheyne's Calendar, a Chronological plan of our own and Old
+and New Together added) is specified in §16, built after §15 and before Round 11.** Round 1 is
 §0.5–§6, Round 2 is §7 and Round 3 is §8. The owner's priorities, in order: distraction-free reading, note-taking, language tools.
 Above all: iPhone-native, HIG-proper, predictable UI. The app is **free forever**: no
 price, ads, in-app purchases or donation prompts (owner, 2026-10-18).
@@ -296,6 +299,20 @@ and memorize, and every exercise is a real verse.
 4. **The words** (48 tips, 12 pages) in `data/help.txt`, kept true by `test_help.l8` and by
    the rule that every round updates it with its features.
 
+### A plan's day in a reader of its own (fully specified in §16; after §15, before Round 11)
+1. **The day's reader:** a plan's day opens full screen with only its passages, each
+   under its name; the title names the passage you're in, with the day under it; Done
+   returns to the reader as you left it (ribbons and place untouched).
+2. **Mark Read** always at the bottom right, for the passage you're in; the page's end
+   marks the whole day and opens the next. Passages also mark themselves when read or
+   heard to the end.
+3. **Days of any passages:** verse ranges, several books, repeats; listed plans from data
+   files; progress kept per passage (`plan.tsv` stays compatible).
+4. **New plans:** M'Cheyne's Calendar (1842, public domain), Chronological (our own order
+   from Townsend and Robertson, public domain) and Old and New Together (computed).
+5. **Listen** reads a day straight through; the ESV fetches each passage; the reminder
+   opens the day.
+
 ### Out of scope (all rounds so far)
 - Widgets, Live Activities and App Intents (these need Swift or app extensions).
 - SwiftUI.
@@ -465,6 +482,7 @@ the ESV and Crossway convention.
 | The letter keyboard's delete key (§14.11.5) | `delete.left` |
 | The tip in Go To (§15.1.1) | `lightbulb`, faint |
 | The Manual in Reading settings' Help (§15.3.1) | `book.closed` |
+| Mark Read in the day's reader (§16.2.3) | `circle` / `checkmark.circle.fill` (read: accent) |
 
 ### 2.7 Motion
 | What | How |
@@ -8348,7 +8366,7 @@ the test fails on any other.
 - **Pages now** (12): Reading; Going Places; Selecting Verses; Notes, Highlights and
   Bookmarks; Ribbons; Reading Plans; Versions and Compare; Listening; Study; Memory; Greek
   and Hebrew; Reading Settings. They describe the app as of Round 10.
-- **Tips now** (48): 10 at level 1, 15 at level 2, 23 at level 3.
+- **Tips now** (51, after §16's three): 10 at level 1, 17 at level 2, 24 at level 3.
 
 ### 15.6 Keeping it true
 - **`test_help.l8`** (in `make bible-test`) fails when:
@@ -8428,3 +8446,387 @@ These are decided above; the owner may overrule:
 4. **The tip changes once a day** (decided), or every time Go To opens.
 5. **The tips cycle forever** (decided: "always shown"), or stop after the last one until
    the next build adds new ones.
+
+---
+
+## 16. Reading a plan's day in a reader of its own (owner request 2026-10-20; built after Round 10 and §15, before Round 11)
+
+The owner, 2026-10-20: "I feel like for reading plans, it would be nice to have all the
+reading isolated to one reader view, and then have the button to mark read be readily
+available without going to look for it. And this may also make it easier to have a plan
+that has non contiguous sections in it, like a chronological plan."
+
+This revises §10.1 and §11.3. A plan's day opens in **the day's reader**: the same page,
+type and verse tray as the reader, holding only that day's passages, one after another,
+with **Mark Read** always on screen. Days can now be any passages (verse ranges, several
+books), so the app can ship M'Cheyne's calendar, a chronological plan and both testaments
+together. Everything not named here stays as §10 and §11 have it.
+
+### 16.0 Decisions (the designer's, with reasons)
+1. **The day's reader is the reader in a mode, not a second app.** It's presented over
+   the reader as a full-screen view (`UIModalPresentationFullScreen`, the system's push-up),
+   and it is the same code: `text.l8` lays out the day's passages as one page, the bar
+   collapses as the reader's does, and the tray, marks, footnotes, previews, Study and
+   Aa all work. You can't scroll out of the day: the page begins with the day and ends
+   with it.
+2. **The main reader is untouched by it.** Its place, History's jumps, the back capsule and
+   a carried ribbon stay exactly as they were, and you return to them with **Done**. A
+   plan isn't a ribbon: reading a day never moves or puts down a ribbon (this replaces
+   §11.3.4's "moves the ribbon too"). History records the chapters you rest in, as the
+   reader does (§8.3, dwell), so Recent knows what you read.
+3. **A reference you open from it leaves it, and the capsule brings you back.** A preview
+   (§8.1) opens over the day as anywhere. Its **Open in Reader**, a concordance row, a
+   cross reference or a link in a note closes the day's reader and jumps the main reader;
+   the back capsule there reads **"‹ Day 32"** and reopens the day at the same spot.
+4. **The title names the passage you're in; the line under it names the day.** "Psalm
+   105" over "Day 32 · Chronological", in the reader's title style, changing in place as
+   you cross passages (§0.5 item 1's cross-fade). The passage is what you need while
+   reading; the day is constant and quiet.
+5. **Mark Read is a floating capsule at the bottom right**, always on screen in the day's
+   reader (it doesn't hide with the bar), mirroring the back capsule's place on the left.
+   It marks **the passage you're in**: a day of several passages is read passage by
+   passage, which is how a chronological or M'Cheyne day is actually read. The page's end
+   offers **Mark Day 32 as Read** for the whole day, and the next day.
+6. **Passages still mark themselves** as §10.1.2 counts a chapter: when its last verse has
+   been on screen and you've rested in it 20 s in all, or Listen has read it to its end.
+   The capsule then shows it read; tapping it again unmarks. (§16.9 question 1: only by
+   hand.)
+7. **Only the day's reader and Go To's circles mark a plan.** Reading Genesis 12 in the
+   main reader no longer counts for a plan (§10.1.2's dwell and §12's `plan_heard` in the
+   main reader go). With days that repeat chapters (M'Cheyne reads the Psalms twice) or
+   split them (chronological), "which day was that chapter for?" has no honest answer;
+   the day's reader always knows. (§16.9 question 2.)
+8. **A day is a list of passages, each a verse range in one book.** `plans.l8`'s reading
+   becomes (book, c1:v1 – c2:v2); a whole-chapter reading is v1 = 1, v2 = the chapter's
+   last. Computed plans are unchanged in what they read; listed plans come from data files
+   (§16.4).
+9. **Progress is kept per passage, not per chapter**, with older files still read
+   (§16.5).
+10. **Ship eight plans** (§16.4.3): the four computed ones, A Chapter a Day, and three new:
+    **M'Cheyne's Calendar** (1842, public domain), **Chronological** (our own order, built
+    from public-domain scholarship), and **Old and New Together** (computed).
+11. **Calm, not casino:** Day Done's toast stays the only acknowledgement; no streaks,
+    percentages or counts of days.
+
+### 16.1 Opening a day
+- **From Go To's Reading Plan section:** the plan's row (§11.3.1) now opens **today's
+  day** in the day's reader (it used to jump to the first unread chapter), at the first
+  unread passage. Its ⓘ still pushes the plan's days.
+- **From a plan's days** (§11.3.2): tapping a day's row opens that day (read ahead or
+  behind freely). The leading circle still marks the whole day.
+- **From the daily reminder** (§10.2.2): the notification opens today's day (in place of
+  §10.2.2's jump), after any sheet is dismissed. On a cold launch it's kept pending and
+  opened after the first layout (as `pending_day`).
+- **From the back capsule** after a reference left it (decision 3).
+- **Starting a plan** (§11.3.2's Start Plan) opens day 1 in the day's reader, with the
+  toast "Started Chronological".
+- **Opening position:** the first unread passage's heading, under the bar; a day you've
+  read before opens where you left it in it (`dayPlace`, §16.5).
+- **Motion:** the system's full-screen presentation (slide up); Done slides it down.
+  Under Reduce Motion, a cross-fade (`UIModalTransitionStyleCrossDissolve`).
+
+### 16.2 The day's reader
+#### 16.2.1 The page
+Laid out by `text.l8` (`layout_day(plan, day)`), in the reader's version, font, size,
+theme and settings:
+1. **The day's opener** (like a chapter opener, §3.1.2, smaller): "DAY 32" in the book
+   label's style, then the plan's name in the heading color, then a rule. No numeral.
+2. **Each passage:**
+   - a **passage heading** in the section-heading style (§2.3), larger by a step:
+     "Genesis 12–14", "Psalm 105", "Hebrews 11:8–19"; with `UIAccessibilityTraitHeader`;
+   - then the text, with chapter dividers and the chapter number where a chapter begins
+     inside it (as the reader shows them), verse numbers, the version's own section
+     headings and psalm titles where they fall in the range, and footnotes;
+   - a passage that starts mid-chapter starts at its verse, with the verse number shown
+     and no chapter opener;
+   - 1.5 em between passages.
+3. **The day's end** (§16.3.2).
+- The page never shows text outside the day. Pulling past either end bounces as a scroll
+  view does.
+
+#### 16.2.2 The bar
+- **Leading:** a plain text item **Done**, which closes the day's reader. (The trailing
+  side keeps the reader's Aa, so Done takes the leading place; the reader's Search isn't
+  shown here.)
+- **Title:** two lines (the reader's title button, with a second line): the passage under
+  the bar (SF 17 semibold, as the reader's), and "Day 32 · Chronological" (SF 12, faint).
+  The first line cross-fades as the passage under the bar changes, by §0.5 item 1's rule
+  with passages in place of chapters. A tap on the title opens the plan's days (a sheet,
+  §11.3.2), scrolled to this day; choosing another day there replaces the page (a 0.2 s
+  cross-fade of the content).
+- **Trailing:** **Aa** (Reading settings, as the reader's: a version or theme change
+  applies in place). The Library isn't on this bar.
+- The bar collapses and returns with scrolling exactly as the reader's (§3.1.4).
+
+#### 16.2.3 Mark Read (the capsule)
+- **Placement:** bottom right, 16 pt from the trailing edge and 12 pt above the safe-area
+  bottom: the back capsule's metrics (§3.1.6) on the other side, with the same material
+  (glass on iOS 26, `systemThickMaterial` before). It's present for the whole time the
+  day's reader is, and doesn't hide with the bar. It moves up above the tray when the tray
+  is up, and above the mini player while Listen plays (both slide; the capsule rides with
+  them).
+- **States** (for the passage under the bar):
+  - not read: image `circle`, title **Mark Read** (ink);
+  - read: image `checkmark.circle.fill` (accent), title **Read** (accent).
+  The change is a 0.15 s cross-fade of the image and title, with a selection haptic.
+- **Tap:** marks the passage under the bar read, or unmarks it. If it completes **today's**
+  day, Day Done (§10.1.2: toast "Day 32 Done", success haptic, once a day).
+- **Automatic marks** (decision 6) change the capsule the same way, without a haptic.
+- **VoiceOver:** "Mark Psalm 105 as read" / "Psalm 105, read. Double-tap to mark it unread."
+  Its accessibility frame is its own; it's last in the reading order after the page.
+- **Which passage is "under the bar":** the one whose text holds the bar's bottom (the
+  title's rule). Between two passages, the one above until the next heading reaches the
+  bar.
+
+#### 16.2.4 What works as in the reader
+- **The verse tray** (§3.3) with all seven actions, highlights, notes, bookmarks, Compare,
+  Study, Memorize. Marks show in the day as everywhere.
+- **The long-press edit menu**, footnotes, previews, **Study** (the sheet over the day).
+- **Listen** (§16.3.3), Keep Screen On, Words of Jesus in Red, the reader's settings.
+- **Not here:** Go To and Search (Done first), the reader's title menu for ribbons (§11.2.2),
+  the back capsule (the day has nowhere to jump within it).
+
+### 16.3 Reading through, the end of the day, Listen
+#### 16.3.1 Crossing passages
+Scrolling crosses from one passage to the next without a break, the title changing as
+§16.2.2 says. Nothing marks a passage by being passed.
+
+#### 16.3.2 The day's end
+After the last passage, centred, 32 pt below, in the sheet's grouped style (an inset
+rounded panel of `cellBg`, 16 pt margins):
+- "End of Day 32" (SF 13, faint);
+- **Mark Day 32 as Read** (accent text, SF 17), present while any passage is unread; it
+  marks them all (Day Done if today). When all are read, the line reads "Day 32 is read"
+  with `checkmark.circle.fill` (accent), not a button.
+- **Day 33 · Genesis 15–17** (ink, with "Next" above in SF 12 faint), a button: replaces
+  the page with day 33 (cross-fade 0.2 s; the title and capsule update). Present unless
+  this is the plan's last day; a plan's last day shows "The last day of Chronological"
+  instead.
+- **Done** isn't repeated here; the bar's Done returns to the reader.
+- VoiceOver: each is a button; the panel is a container.
+
+#### 16.3.3 Listen
+- **Listen** in Reading settings (§12.4.1) in the day's reader reads **the day**: from the
+  passage under the bar (its first verse, or the verse at the top if inside it) through
+  the day's last passage, crossing passages, then stops. The button reads "Listen to Day
+  32" ("from Psalm 105").
+- **Recordings** (§12): a passage that is whole chapters plays those chapters; a partial
+  chapter seeks to its first verse and stops after its last, from the verse timings (as
+  Memory's Listen, §13.3.7). The ESV's recording, which has no timings, is used only for
+  whole chapters; a partial ESV passage is read by the iPhone voice.
+- **Following:** the wash follows the verse, and the page scrolls with it, crossing
+  passages, as §8.7 follows chapters.
+- **Marking:** a passage heard to its end is marked read (decision 6).
+- **The mini player** names the passage and "Day 32"; Next and Previous on the lock screen
+  move by passage within the day.
+- **Never continues** past the day into the Bible.
+
+### 16.4 Plans
+#### 16.4.1 The model (`plans.l8`, tested by `test_plans.l8`)
+- **A passage:** book, (c1, v1) – (c2, v2), BSB-numbered (R4.1), within one book.
+  Labels: whole chapters by chapter only ("Genesis 12–14", "Psalm 105", "Obadiah"), and
+  anything else with verses ("Hebrews 11:8–19", "Matthew 26:57–27:10").
+- **A day:** 1–6 passages in reading order.
+- **A plan:** an id, a name, a description, its days.
+  - **Computed** (`year`, `nt90`, `pspr`, `gospels`, `both`, and `day1-<BOOK>-<C>`): made by
+    `plans_make` as now, each reading a whole-chapter passage.
+  - **Listed** (`mcheyne`, `chrono`): read from `data/plans/<id>.txt` at first use.
+- `pl_rc0`/`pl_rc1` (chapters) become passage records (`pl_b`, `pl_c1`, `pl_v1`, `pl_c2`,
+  `pl_v2`); the arrays grow to hold `chrono` (about 1,300 passages) and `mcheyne` (1,460).
+- **`plan_day_of(c)`** (a chapter's day) is removed: it can't be answered for listed plans,
+  and nothing needs it now (decision 7).
+
+#### 16.4.2 The data files (`data/plans/<id>.txt`, about 30 KB each)
+```
+# M'Cheyne's Calendar for Daily Readings (Robert Murray M'Cheyne, 1842; public domain).
+# Transcribed from <source>; checked by test_plans.l8.
+@id	mcheyne
+@name	M'Cheyne's Calendar
+@blurb	Four chapters a day: the Old Testament once and the New Testament and Psalms twice in a year.
+1	GEN 1	MAT 1	EZR 1	ACT 1
+2	GEN 2	MAT 2	EZR 2	ACT 2
+…
+```
+- A day's line: its number, then its passages separated by tabs, each `BOOK C`, `BOOK
+  C-C2`, `BOOK C:V-V2`, `BOOK C:V-C2:V2` (book codes as `bsb.txt`'s).
+- Lines in day order; every day from 1 to the last present; at most 6 passages.
+- The test parses each file and checks its stated rule (§16.4.3).
+
+#### 16.4.3 The plans to ship
+| id | Name | Days | What it reads | Source and licence |
+|---|---|---|---|---|
+| `year` | Bible in a Year | 365 | Genesis to Revelation in order | Computed (§10.1.1) |
+| `chrono` | **Chronological** | 365 | The whole Bible in the order the events happened, prophets with their kings, psalms with their occasions, the Gospels side by side, letters where Acts places them | **Our own order** (§16.4.4), from public-domain scholarship; ours, public domain |
+| `mcheyne` | **M'Cheyne's Calendar** | 365 | Four chapters a day, two for the family and two alone: the Old Testament once, the New Testament and Psalms twice | Robert Murray M'Cheyne, *Daily Bread*, 1842; public domain (Scotland, 1842; M'Cheyne died 1843). Transcribed from *Memoir and Remains* (A. A. Bonar, 1878 ed.), `https://archive.org/details/memoirremainsofr00bona` (the OCR of its table is unusable, so it's transcribed from the page images) |
+| `both` | **Old and New Together** | 365 | Each day a reading from the Old Testament and one from the New (and, through the year, the Psalms once) | Computed: the OT balanced into 365 days, the NT into 365, the Psalms into 365 by verses, three passages a day |
+| `nt90` | New Testament in 90 Days | 90 | | Computed |
+| `pspr` | Psalms and Proverbs in a Month | 31 | | Computed |
+| `gospels` | The Gospels in 30 Days | 30 | | Computed |
+| `day1-…` | A Chapter a Day | — | | Computed (§11.3.3) |
+- **Not shipped:** published modern chronological plans (Reese's *Chronological Bible*,
+  Tyndale's *One Year Chronological Bible*, Bible Gateway's and YouVersion's), which are
+  copyrighted compilations; the Navigators' and *Discipleship Journal* plans
+  (copyrighted); Professor Horner's ten lists (no licence stated).
+- **Tests for each listed plan:**
+  - `mcheyne`: 365 days of exactly 4 passages; the Old Testament's chapters once each,
+    the New Testament's and the Psalms' twice each (Psalm 119 split as the calendar
+    splits it), in the calendar's order.
+  - `chrono`: every verse of the BSB exactly once; 365 days; no day over 2.2 times the
+    mean length (by characters, §10.1.1's measure).
+  - `both`: every chapter of the OT and NT and every psalm once; 365 days of 2–3
+    passages.
+
+#### 16.4.4 The chronological order (`data/plans/chrono-order.txt`, then `tools/chrono.py`)
+The order is **facts about the text** (which events come before which), arranged by us.
+It follows two public-domain works, cited in the file and in Acknowledgements, and
+departs from them only where noted in the file:
+- **The Old Testament and Acts–Revelation:** George Townsend, *The Old Testament arranged
+  in historical and chronological order* (1821; Boston ed. 1838,
+  `https://archive.org/details/oldtestamentarra00bostrich`, "NOT_IN_COPYRIGHT") and *The
+  New Testament arranged in chronological and historical order* (1825; ed. 1837,
+  `https://archive.org/details/newtestamentarra00townrich`).
+- **The Gospels:** A. T. Robertson, *A Harmony of the Gospels for Students of the Life of
+  Christ* (1922; public domain in the US, `https://archive.org/details/harmonyofgospels00robe`):
+  its 184 sections in order, each section's parallel passages read one after another
+  (Matthew, Mark, Luke, John).
+- **The skeleton** (the builder fills in the verse-level placements from the two sources,
+  and the designer reviews the file):
+  1. Genesis 1–11; Job; Genesis 12–50.
+  2. Exodus, Leviticus, Numbers, Deuteronomy; Psalm 90 (Moses).
+  3. Joshua; Judges; Ruth.
+  4. 1 Samuel to 2 Samuel, with 1 Chronicles' parallels beside them (its genealogies,
+     1 Chronicles 1–9, before David), and David's psalms placed by their titles: 59 (1
+     Samuel 19), 56 and 34 (21), 52 (22), 142 and 57 (22–24), 54 (23), 63 (wilderness),
+     18 (2 Samuel 22), 60 (8), 51 and 32 (12), 3 and 7 (15–16), 30 (the temple site); his
+     other psalms after 1 Chronicles 16.
+  5. 1 Kings 1–11 with 2 Chronicles 1–9; Proverbs, Song of Songs, Ecclesiastes with
+     Solomon; the Asaph and Korah psalms of the kingdom.
+  6. The divided kingdom: 1 Kings 12 – 2 Kings 17 with 2 Chronicles 10–28, and the
+     prophets in their kings' reigns: Obadiah and Joel (early), Jonah (2 Kings 14:25),
+     Amos and Hosea (Jeroboam II), Isaiah 1–39 and Micah (Uzziah to Hezekiah).
+  7. Judah alone: 2 Kings 18–25 with 2 Chronicles 29–36; Isaiah 40–66 (with Hezekiah, as
+     Townsend places it), Nahum, Zephaniah, Habakkuk, Jeremiah (in its own chronological
+     order, which is not the book's), Lamentations.
+  8. Exile: Ezekiel; Daniel; Psalm 137 and the exile psalms.
+  9. Return: Ezra 1–6 with Haggai and Zechariah; Esther; Ezra 7–10; Nehemiah; Malachi;
+     Psalm 126 and the remaining psalms of the return (those without a place go here, in
+     the Psalter's order).
+  10. The Gospels by Robertson's harmony.
+  11. Acts with the letters at their places: James (Acts 15 or before), Galatians (after
+      Acts 14), 1–2 Thessalonians (Acts 18), 1 Corinthians (Acts 19), 2 Corinthians (Acts
+      20:2), Romans (Acts 20:3), Ephesians, Colossians, Philemon, Philippians (Acts 28);
+      then 1 Timothy, Titus, 1 Peter, 2 Timothy, 2 Peter, Hebrews, Jude; 1–3 John;
+      Revelation.
+- **`tools/chrono.py`** (`python3 -I`) reads the order (one block a line: a passage, or
+  `|`-joined parallel passages to be read together), checks that every verse of the BSB is
+  in it exactly once (printing any gap or overlap), and balances it into 365 days by
+  characters: a day ends at the block boundary nearest `total·d/365`; a block longer than
+  1.6 days' mean is split at chapter boundaries; parallels in one block are never split.
+  It writes `data/plans/chrono.txt` (§16.4.2's format). Its printed summary goes in the
+  commit.
+
+### 16.5 Persistence (`plan.tsv`, compatible)
+- **New lines:** `DONE\t<DAY>\t<PASSAGE>\t<UNIXTIME>` (the passage's index in the day,
+  from 0) and `UNDONE\t<DAY>\t<PASSAGE>\t<UNIXTIME>`. The last line for a (day, passage)
+  decides.
+- **Older lines** (`READ\t<BOOK>\t<C>\t<T>`, 1.0's): still read. For a computed plan, a
+  passage is read when all of its chapters have a `READ` line, unless a later `UNDONE`
+  says otherwise. They're never written again.
+- **`PLAN\t<id>\t<start>`** is unchanged; listed plans' ids are their file ids.
+- **NSUserDefaults:**
+  - `dayPlace`: "plan day passage verse frac" of the open day's reader, so a relaunch
+    reopens it where it was (principle 4), and so a day reopens where you left it in it.
+  - `dayOpen` (bool): the day's reader was showing when the app went to the background.
+- `plans-done.tsv` (§10.1.2) is unchanged, now with `DONE` lines in what it keeps.
+- **Tests** (`test_plans.l8`): an old file with `READ` lines gives the same day states it
+  gave in 1.0; `DONE`/`UNDONE` round trips; a malformed line is skipped; a `PLAN` line
+  naming a plan this build doesn't have is kept in `plans-done.tsv` and the plan cleared,
+  with the log "plan unknown".
+
+### 16.6 With the rest of the app
+- **The ESV:** opening a day fetches each passage's chapters by the cache's rules
+  (§9.4.4–§9.4.5); a passage still arriving shows §9.4.6's placeholder in its place;
+  offline without it, "This passage needs a connection in the ESV." with Change Version. A
+  long day may exceed what the cache may keep: its passages are fetched again next time.
+- **Offline:** every other version is offline.
+- **The reminder:** opens today's day (§16.1). Its text is unchanged ("Today's reading:
+  Genesis 12–14; Psalm 105; Hebrews 11:8–19", cut at 178 characters as §13.5).
+- **Ribbons** (decision 2) and **History** (dwell only) as stated.
+- **Memory:** Memorize from the day's tray works as in the reader.
+- **Go To's plan row** (§11.3.1): its title lists today's passages ("Genesis 12–14; Psalm
+  105; Hebrews 11:8–19", two lines at most, then "…"); a tap opens today's day (§16.1);
+  its circle and VoiceOver's Mark as Read mark the whole day.
+- **The manual and tips** (§15): `data/help.txt`'s Reading Plans page and its tips are
+  updated with this section (done in the same commit as this design).
+
+### 16.7 Accessibility
+- The passage headings are headers (the rotor's Headings moves by passage).
+- The title's two lines are one element: "Psalm 105, Day 32, Chronological".
+- Mark Read and the day's end are buttons with plain labels; Mark Read's label names the
+  passage (§16.2.3).
+- Dynamic Type: the page follows the reader's size; the capsule, the title's second line
+  and the end panel use text styles; at accessibility sizes the capsule shows its image
+  only (with its label for VoiceOver), like the back capsule.
+- Reduce Motion: every cross-fade above is immediate; the presentation is a cross-fade.
+
+### 16.8 CI and tests
+- **Linux:** `test_plans.l8` as §16.4.3 and §16.5 say; passage labels; `chrono.py`'s
+  coverage check (a test runs it on the committed order).
+- **The `plans` demo group** gains steps (shots **430–454**), on the demo clock, with
+  Chronological started 31 days earlier (seeded `plan.tsv`, day 32 today) and an ESV
+  fixture:
+  | Shot | Action | Expected |
+  |---|---|---|
+  | `430-plans-list` | Go To → Reading Plans | Eight plans: Bible in a Year, Chronological, M'Cheyne's Calendar, Old and New Together, … and From a Book |
+  | `431-chrono-detail` | Chronological | Its description and days ("Day 32 · Genesis 12–14; Psalm 105; Hebrews 11:8–19" if that is day 32's reading as the tool makes it) |
+  | `432-goto-today` | Back to Go To | The Reading Plan row with today's passages |
+  | `433-day-open` | Tap the plan row | The day's reader: "DAY 32", Chronological, the first passage's heading; the title "Genesis 12" over "Day 32 · Chronological"; Done, Aa; Mark Read at the bottom right |
+  | `434-day-scrolled` | Scroll to the second passage | The title now names it (cross-faded); the capsule shows its state |
+  | `435-mark-read` | Tap Mark Read | "Read" in accent, the check |
+  | `436-day-end` | Scroll to the end | The end panel: "End of Day 32", Mark Day 32 as Read, Next: Day 33 · … |
+  | `437-day-done` | Mark Day 32 as Read | "Day 32 Done" toast; the panel's "Day 32 is read" |
+  | `438-next-day` | Next | Day 33's page, title and capsule |
+  | `439-tray-in-day` | Select a verse | The tray over the day; the capsule raised above it |
+  | `440-preview-leave` | Tap a heading's reference, Open in Reader | The main reader at that passage; the back capsule "‹ Day 33" |
+  | `441-back-to-day` | Tap the capsule | The day's reader where it was |
+  | `442-listen-day` | Aa → Listen to Day 33 | The mini player naming the passage and the day; the capsule above it |
+  | `443-listen-crossing` | (Fixture) the first passage ends | The wash in the second passage; the first marked read |
+  | `444-mcheyne-day` | Start M'Cheyne's Calendar (Start Instead); day 1 | Four passages: Genesis 1, Matthew 1, Ezra 1, Acts 1 |
+  | `445-partial` | A chrono day with a partial chapter | "Hebrews 11:8–19" starting at verse 8, no chapter opener |
+  | `446-reminder-day` | (Demo) open the reminder | The day's reader at today's day |
+  | `447-esv-day` | The ESV, a day with a passage not cached | The placeholder in that passage only |
+  | `448-old-file` | (Seeded 1.0 `plan.tsv` with READ lines) | Go To's circles as they were |
+  | `449-ribbon-untouched` | Carry a ribbon, open the day, read, Done | The ribbon unmoved (the log says so); the reader where it was |
+  | `450-night-day` | Night | The day's reader and capsule in the dark theme |
+  | `451-ax-day` | Accessibility size | The capsule image-only; headings and end panel wrap |
+  | `452-day-title` | Tap the title | The plan's days, today's row selected |
+  | `453-both` | Old and New Together's detail | Days with 2–3 passages |
+  | `454-relaunch` | Relaunch with the day open | The day's reader reopened where it was |
+- **Recording sequence 21:** open the day (the slide up), scroll across a passage boundary
+  (the title's cross-fade; the capsule changing state), Mark Read, scroll to the end, Next
+  (the cross-fade), Done (the slide down). Nothing jumps.
+- Earlier plan shots (140–149b, 180–182) change only where the plan's row now opens the
+  day's reader (step 251's reminder path, §10.7a note 9).
+
+### 16.9 Questions only the owner can answer
+These are decided above; the owner may overrule:
+1. **Passages mark themselves** when read to the end with time spent, or heard (decided),
+   or only by tapping Mark Read.
+2. **Only the day's reader and Go To's circles count for a plan** (decided), or the main
+   reader's reading of a plan's chapters still counts (possible only for plans that never
+   repeat a chapter).
+3. **Mark Read marks the passage you're in** (decided), or the whole day at once.
+4. **The day's reader is full screen with Done** (decided), or a large sheet (swiped down
+   to close, with the reader dimmed behind).
+5. **Ship Chronological as our own order from Townsend and Robertson** (decided), or not
+   ship a chronological plan until a licensed one is found.
+
+### 16.10 What's deferred
+- **Plans you write yourself** (choose passages per day). The format allows it; the
+  screens don't yet.
+- **Starting a dated plan on its calendar day** (M'Cheyne began on 1 January): plans begin
+  on the day you start them.
+- **More listed plans** (a Psalm a day with a Proverb, a Gospel and its letters): one data
+  file each, once their order is settled.
+- **Reading two plans at once**: still one plan at a time.
+- **A shared plan** with friends.
