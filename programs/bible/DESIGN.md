@@ -6575,8 +6575,9 @@ segment, Add Passage and Passage; `ios_practice.l8` is Practice; `ios_demo8.l8` 
     remembered on but the keyboard down (after an automatic Check, or on the next
     passage), the first word was marked as if being typed (226).
 21. **At the accessibility sizes the stacked judgement row has the page's color behind
-    it** (12 pt above the buttons), so the text doesn't show through the gray buttons'
-    fills (232); the text's bottom inset lets it scroll clear.
+    it**, from 12 pt above the buttons to the sheet's bottom edge, so the text doesn't
+    show through the gray buttons' fills or under them (232); the text's bottom inset
+    lets it scroll clear.
 22. **The one-time line is kept for the sheet's first passage** when its text is made
     again (a theme or text size changed while Practice is open). It was dropped on a
     rebuild, since `memorySeen` was already set, and the words moved up a line.
