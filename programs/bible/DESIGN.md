@@ -7797,6 +7797,10 @@ Words You Know (`learn_related_words`); `lang.l8` gains `forms_renderings`; all 
 2. **"Here: …" is the sense's gloss after its colon** for STEP's split senses ("son: child" →
    "Here: child"), the whole gloss otherwise ("Here: to say"), and is left out when it is the
    BSB's words again, case aside (Genesis 1:1's "God" above "Here: God" says nothing more).
+   After review r10-2 it is also left out when it is the lemma's gloss that the faint line
+   already shows (λέγω's "Here: to say", 249b), tested. So it shows for a sense the card does
+   not otherwise name (Genesis 10:1's "sons", "Here: child"); Exodus 20:3's "gods" is still left
+   out, being the BSB's word there.
 3. **Related words on a card are of its own language** (§10.4's same-testament list), nearest
    first, known cards only.
 4. **Related to Words You Know** is a row in its own section after Most Common, with no header
