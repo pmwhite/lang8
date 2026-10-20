@@ -86,6 +86,22 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   iPhone's voice), Echo pausing after each verse for you to say it. Memory
   can be a second reason for the plan's one daily reminder. ESV passages
   are kept within Crossway's terms (at most 200 verses of the 500).
+- Greek and Hebrew (Round 10): a page per language, from Memory's
+  Languages section or the interlinear's Learn Greek (Learn Hebrew) link,
+  says in one sentence how much of its Testament the words you know make
+  up. The Alphabet shows each letter's sound in the pronunciation chosen
+  (Erasmian, Koine or Modern Greek; Israeli or Tiberian Hebrew) and an
+  example, spoken by the iPhone's Greek or Hebrew voice; letters are
+  learned eight at a time, and Practise Reading gives common words of the
+  letters known to sound out. Add Words offers the next ten most common
+  words, or a passage's you read, carry a ribbon in or memorize; words
+  are cards on Memory's schedule, each shown in a verse you care about,
+  in Memory's Today and its reminder. In Greek or Hebrew Order the
+  interlinear hides the English of the words you know (and the
+  transliteration once you know the alphabet), nothing moving; a tap
+  shows it. A word study gains Learn This Word and Forms (the lemma's
+  forms as the Bible has them, a tap their concordance); Verses You Can
+  Read lists the verses whose every word you know.
 - A link opens a chapter: `bsb://JHN/3` (or a verse, `bsb://JHN/3/16`).
 
 ## Files
@@ -102,7 +118,10 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   `data/mhcc.txt` Matthew Henry's Concise Commentary (`tools/mhcc.py`, from
   CCEL's ThML); `data/lang/senses.bin` each word's sense (`tools/senses.py`,
   from STEP's TAHOT and TAGNT) and `related.bin` related words
-  (`tools/related.py`, MACULA's Proximity, CC BY 4.0).
+  (`tools/related.py`, MACULA's Proximity, CC BY 4.0); `data/lang/vocab.bin`
+  how often each word occurs (`tools/learn.py`, from the app's own data;
+  it prints DESIGN.md §14.0.3's table) and `letters.txt` the letter cards,
+  written by hand (public domain).
   `tools/fetch.sh DIR make` downloads the sources, checks
   their sha256, and makes them all again.
   `lang.l8` reads the study data for the study screens (`test_lang.l8`), and
@@ -127,8 +146,15 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   Library's Memory segment, Add Passage and Passage, and `ios_practice.l8`
   Practice (`memory.l8` their portable part: words and key letters, parts,
   hiding, the schedule, Today, the files and the reminder's words, tested
-  in `test_memory.l8`); `ios_demo.l8` (and `ios_demo3.l8` to
-  `ios_demo8.l8`) the demo CI runs.
+  in `test_memory.l8`); `ios_learn.l8` Greek's and Hebrew's pages (the
+  language page, Pronunciation, the Alphabet, Your Words, Add Words and its
+  preview, Verses You Can Read, Forms), cards.tsv and the voices, and
+  `ios_cards.l8` cards and Practise Reading in Practice (`learn.l8` their
+  portable part: vocab.bin and letters.txt, cards on `memory.l8`'s
+  schedule, what is known, coverage, a passage's words, readable verses,
+  a card's verse, cards.tsv; `lang.l8` a lemma's forms and Greek for the
+  voice; tested in `test_learn.l8`); `ios_demo.l8` (and `ios_demo3.l8` to
+  `ios_demo10.l8`) the demo CI runs.
 - `audio.l8` is recorded readings' portable part (sources, addresses,
   timings, which source a chapter is heard from, the cache's rules), tested
   in `test_audio.l8`; `ios_audio.l8` the Voice screens, voices, the cache
@@ -209,8 +235,9 @@ about 27 when each group had a Mac of its own; see the workflow's header):
   between them (the app and its defaults, permissions, keychain,
   pasteboard, status bar, notification state); a group that leaves
   something outside the app (plans' alert, more's share sheet) goes
-  second. store, ios18 and memory share the fifth Mac, each on its own
-  simulator, one after another. Each group is uploaded (`shots-GROUP`) as it ends,
+  second. store and memory share a Mac, each on its own simulator; ios18
+  follows ribbons and study on an iOS 18 iPhone of its own; languages
+  (Round 10) follows notes and listen on their iPhone, reset. Each group is uploaded (`shots-GROUP`) as it ends,
   and `timing.txt` says when its boot, install, launch and settling came.
 - The groups are paired by their times so the jobs end together (a group
   takes 1 to 4 minutes once booted; `timing.txt`'s `total` minus its

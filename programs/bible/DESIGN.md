@@ -7443,6 +7443,77 @@ Approved when:
 - Say whether anything feels like a game.
 
 
+### 14.10a Builder notes (Round 10, as built)
+Built as §14.1–§14.9 say, with the owner's approvals of 2026-10-20 (Erasmian by default,
+Koine and modern Greek offered, Israeli and Tiberian Hebrew; learning reached from Memory's
+Languages section, the interlinear's link and (Round 11) the reader's popovers; known words
+hidden only in Greek or Hebrew Order; names known once the alphabet is; the modern Greek
+voice on and labelled). `tools/learn.py` makes `vocab.bin` and checks `letters.txt`;
+`learn.l8` is the portable part (`test_learn.l8`), with the card table and the schedule's
+`sched_would` in `memory.l8` and `forms_of`, its layout and `speak_greek` in `lang.l8`;
+`ios_learn.l8` is the pages, `ios_cards.l8` cards in Practice, `ios_study.l8` the
+interlinear's hiding and the word study's rows, `ios_memory.l8` Memory's rows and the
+passage's words; `ios_demo10.l8` is the `languages` group.
+
+**The data (§14.7):** the table matches §14.0.3 but for 643 verses readable at 300 known
+words (§14.0.3 has 651; the 1,237 with one unknown agree), 7,941 New Testament verses with
+words (7,906), and four ranks off by a few places among words of equal count (μονογενής
+1,129, ἀπολλύω 187, מִזְמוֹר 582, חָסֵר 1,172; ὥστε 199, αἰώνιος 230, רָעָה 242 agree).
+The Greek total leaves out its 43 Aramaic-tagged words (πάσχα and nine others), which is
+how 138,088 comes out. `vocab.bin` is 111 KB rather than about 85: it keeps every number,
+names and Aramaic flagged, as §14.7 asks.
+
+**Deviations, each with its reason:**
+1. **Hebrew's joined words are learned on the Alphabet page**, in a fourth section,
+   "Joined Words", after the Vowels: §14.3 gives them cards but no screen to add them from.
+   Learn 8 Letters goes on to "Learn 8 Joined Words" once every letter has a card, and I
+   Know These offers "Mark All 16 Joined Words as Known" beside "Mark All 41 as Known".
+   They do not count toward "the alphabet is known".
+2. **letters.txt** marks each example's letter with brackets (`[ἀ]γάπη`, the form as the
+   verse has it), and begins each section with a line `#\tName` ("Letters", "Pairs and
+   Marks", "Letters With a Dot", "Vowels", "Joined Words"). Both keep its nine fields and let
+   the Alphabet colour exactly the letter meant (a diphthong's two, a vowel's point with its
+   letter). `learn.py --check` proves every example is that lemma's form in that verse.
+3. **Koine η is "e as in they"**, as §14.4.1 and shot 256 have it; §14.3.3's "ee as in see"
+   for Koine is the later merger, which Kantor dates after the first century.
+4. **The counter counts each item once** ("1 of 8" for eight new letters, as 243 and 248
+   show), not each showing: a new card's return for its judgement, or a Not Yet's, is not
+   counted again. "3 of 16" counting showings would have grown as the session went.
+5. **A new card's first showing counts as a showing**, so its return for a judgement comes
+   in the next verse (§14.1.7: a new verse each time).
+6. **Hebrew nouns' Forms are one column** (the form, by number, in Absolute and Construct
+   sections): §14.5.3 names rows Singular, Plural, Dual, so the grid's two columns have no
+   second meaning there. "With Endings" lists any parsing with an ending (verbs' object
+   suffixes too), each named from its joined word's card ("his, him").
+7. **Shot 256 is two:** `256a-pronunciation-list` (the choices and their descriptions) and
+   `256-pronunciation` (the Alphabet in Koine). One screenshot cannot show both. Choosing a
+   pronunciation goes back to the page, as a checklist does.
+8. **Memory without passages** shows its empty Verses section first, then Today (if cards
+   are due), Languages, and the Daily Reminder (whose section now shows whenever there are
+   passages or cards: cards are a reason for it too).
+9. **cards.tsv is read at launch only if it exists**; then (and only then) `vocab.bin` and
+   `letters.txt` are mapped too, which the cards need to be read; the language data
+   (`words.bin` and the rest) still waits for the first page, card or interlinear. A reader
+   with no cards reads nothing more at launch.
+10. **Pages with no toolbar** set an empty one rather than hiding the sheet's: hiding it
+    would leave the Library's own toolbar hidden on the way back.
+11. **Practise Reading's "common words"** are the 500 most common lemmas' forms, with no
+    joined word (a prefix's letters would be read as the word's), each form once.
+12. **An interlinear pushed from Verses You Can Read over the Study sheet's** keeps the one
+    under it: the interlinear's state is one set of globals, so the pushed one's is put back
+    (and its tiles made again) when it is popped.
+13. **Forms is not offered for names** (their forms are not what a learner reads for), nor
+    where no parsing places in a grid or list (particles, prepositions, conjunctions).
+14. **The languages group runs third on the notes job's iPhone**, after listen, without a
+    second boot (the workflow shuts a simulator down after its second group only when the
+    third is not to run on it).
+
+**What needs a real phone:** the Greek and Hebrew voices (CI has none, so nothing speaks and
+the Speak switches are disabled there); the letter names spoken by them, and whether the modern
+Greek voice helps beside the Erasmian table; VoiceOver in Greek and Hebrew (the
+`accessibilityLanguage` given); the menus' commands and swipe to delete in Your Words; how the
+Forms grid's columns line up under their header on each width.
+
 ### 14.11 Round 11: the original text in the reader
 
 Round 11 puts the Hebrew Bible and the Greek New Testament in the reader as one more
