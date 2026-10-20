@@ -30,7 +30,11 @@ Manual with search, reached from Reading settings' Help; Show Tips on by default
 words in `data/help.txt`) are specified in §15, built after Round 10 and before Round 11.** **A plan's day in a reader of
 its own (owner request 2026-10-20: the day's passages alone on one page, Mark Read always on
 screen, days of any passages; M'Cheyne's Calendar, a Chronological plan of our own and Old
-and New Together added) is specified in §16, built after §15 and before Round 11.** Round 1 is
+and New Together added) is specified in §16, built after §15 and before Round 11.** **iPad (owner request 2026-10-20:
+iPhone and iPad as one app following size classes, a centred column of about 70 characters at
+any width, the verse kept across rotation and resizing, form sheets and popovers, keyboard
+shortcuts and hover, no sidebar yet) is specified in §17, built after §16 and before Round
+11.** Round 1 is
 §0.5–§6, Round 2 is §7 and Round 3 is §8. The owner's priorities, in order: distraction-free reading, note-taking, language tools.
 Above all: iPhone-native, HIG-proper, predictable UI. The app is **free forever**: no
 price, ads, in-app purchases or donation prompts (owner, 2026-10-18).
@@ -312,6 +316,19 @@ and memorize, and every exercise is a real verse.
    from Townsend and Robertson, public domain) and Old and New Together (computed).
 5. **Listen** reads a day straight through; the ESV fetches each passage; the reminder
    opens the day.
+
+### iPad (fully specified in §17; after §16, before Round 11)
+1. **One app for iPhone and iPad,** following size classes: a narrow iPad window is the
+   iPhone app; all orientations, any window size, the verse kept across rotation and
+   resizing; the iPhone gains landscape.
+2. **The column:** at most 34 em (about 70 characters), centred, at every width; the
+   capsules, tray and mini player sized to it.
+3. **Screens:** form sheets for lists and studies, a popover for Reading settings; the day
+   reader full screen; no sidebar or split view this round.
+4. **Keyboard and pointer:** ⌘L Go To, ⌘F Search, ⌘] and ⌘[ chapters, ⌘← back, ⌘⇧P Listen,
+   in the menu bar; hover on our controls; Practice by keyboard.
+5. **CI:** an `ipad` group on the study job's Mac (13-inch, both orientations, a narrow
+   stand-in), iPad App Store screenshots; iPhone shots unchanged.
 
 ### Out of scope (all rounds so far)
 - Widgets, Live Activities and App Intents (these need Swift or app extensions).
@@ -8924,3 +8941,425 @@ These are decided above; the owner may overrule:
   file each, once their order is settled.
 - **Reading two plans at once**: still one plan at a time.
 - **A shared plan** with friends.
+
+---
+
+## 17. iPad (owner request 2026-10-20; built after §15 and §16, before Round 11)
+
+The owner, 2026-10-20: make Smooth Bible work properly on iPad, so an iPad user can be
+invited. Today the app is iPhone-only (`UIDeviceFamily` [1], portrait only), so on an iPad
+it runs as an enlarged iPhone app.
+
+This section makes it a real iPad app with as little new UI as possible. The page is still
+the interface. On a large screen the text keeps a comfortable column, and the other screens
+take the iPad's own forms: centred sheets, and popovers for small choices. A keyboard and
+pointer work as an iPad user expects. Everything follows the window's **size class**, not
+the device:
+- In a narrow window (Split View, Slide Over, a small Stage Manager window), the iPad is an
+  iPhone, exactly as today.
+- At regular width, the adaptations below apply.
+
+So the iPhone doesn't change (§17.8.3).
+
+### 17.0 What was checked (2026-10-20), and the decisions
+
+#### 17.0.1 Apple's current requirements
+- **`UIRequiresFullScreen` is deprecated from iPadOS 26.** From iOS 27 and iPadOS 27 (apps
+  built with the iOS 27 SDK) it no longer opts an app out of resizing on either platform.
+  The system resizes the scene discretely instead (TN3192, "Migrating your app from the
+  deprecated UIRequiresFullScreen key", revised 2026-10-09).
+- **To support resizable scenes, an app should:**
+  - have a launch screen (required for App Store submission from iOS 27; we have
+    `UILaunchScreen`);
+  - support all interface orientations;
+  - not use `UIRequiresFullScreen`.
+- **The app already uses the scene life cycle** (`UIApplicationSceneManifest`,
+  `L8BibleScene`), which TN3187 asks for, and has never set `UIRequiresFullScreen`.
+- **Window size changes reach a scene** through its delegate's
+  `windowScene:didUpdateEffectiveGeometry:` (iOS 26), or
+  `windowScene:didUpdateCoordinateSpace:interfaceOrientation:traitCollection:` before. A
+  preferred minimum size is set on `UIWindowScene.sizeRestrictions` (iOS 16).
+- **Orientation:** on iPads all four orientations are expected ("support for all
+  orientations will soon be required"). On iPhones without a Home button, the system
+  excludes upside-down whatever the app declares.
+
+#### 17.0.2 Where the code assumes a width (found in the code, 2026-10-20)
+| Where | Assumption | Change |
+|---|---|---|
+| `ios.l8` `side_margin()` (§2.4) | The text is at most 600 pt wide, a fixed cap | The measure in em (§17.2.1) |
+| `ios.l8` `title_place()` | The title's room is the **window's** width − 208 pt | The bar's own width, so it's right in a narrow window and beside a sheet |
+| `ios_select.l8` (§3.3.3) | The tray is 12 pt from the screen's edges | At most 560 pt wide, centred over the column (§17.3.2) |
+| §3.1.6, §16.2.3, §8.7 | The back capsule, Mark Read and the mini player sit at the screen's corners | Aligned to the column's edges (§17.2.3) |
+| `ios_study.l8` (§7.10a) | The interlinear's tile columns fill the sheet's width | Its content at most 680 pt, centred (§17.3.4) |
+| `ios_practice.l8` | Practice's text is "at the reader's measure" | Unchanged, now the em measure |
+| `ios_sheets.l8` (§3.2) | The chapter grid's columns are computed from the width | Unchanged (it already computes) |
+| `ios_share.l8` | Share as Image's card is drawn at a fixed pixel size | Unchanged (an image, not a view) |
+| Every sheet | Page sheets with medium/large detents | Regular width: form sheets or popovers (§17.3.1) |
+| `Info.plist` | `UIDeviceFamily` [1], portrait only | [1, 2], orientations (§17.1) |
+
+#### 17.0.3 Decisions (the designer's, with reasons)
+1. **iPhone and iPad, one app**, following size classes. A narrow iPad window is the
+   iPhone app. There's no separate iPad interface to keep in step.
+2. **The text is a column of about 70 characters**, centred, at any width (§17.2.1). On a
+   13-inch iPad in landscape that leaves wide, quiet margins, like a printed page on a
+   desk.
+3. **No sidebar or split view this round.**
+   - A permanent book list beside the text would be Go To always on screen. It would
+     compete with the page, which principle 1 forbids.
+   - Study beside the text (an inspector column) is the one split that would serve a
+     reader. It's a change to the app's structure, so it's deferred to a round of its own,
+     and the owner decides (§17.10 question 2).
+4. **Sheets become the iPad's forms:**
+   - lists and studies are **form sheets**, centred, the page dimmed behind;
+   - small choices from a button (Reading settings, menus) are **popovers**, which leave
+     the page undimmed, so a change of theme or size is seen live as on the iPhone;
+   - full-screen reading modes (§16's day reader) stay full screen.
+5. **Resizing and rotation keep the verse exactly.** The place is saved as (chapter,
+   verse, fraction within the verse) before the width changes, and restored after (§0.5
+   item 3's rule, at every size change).
+6. **All four orientations on iPad; any window size from 320 × 480.** One window at a time
+   (no second window of the app). The app's state is one reader; multiple windows are
+   deferred (§17.9).
+7. **The iPhone gains landscape too** (not upside down), because Apple now expects every
+   orientation and resizable scenes on both platforms, and the column makes landscape
+   reading good. (§17.10 question 1.)
+8. **Keyboard: a few plain shortcuts**, listed in the iPad's menu bar and its ⌘ overlay.
+   **Pointer:** the system hover on buttons, rows, tiles and capsules. **Apple Pencil:**
+   nothing of our own; Scribble already writes into every text field.
+9. **No blocks.** Every API below is selector- or delegate-based, or takes a nil block.
+
+### 17.1 Info.plist and the scene
+- `UIDeviceFamily`: `[1, 2]`.
+- `UISupportedInterfaceOrientations` (iPhone): portrait, landscape left and landscape right.
+- `UISupportedInterfaceOrientations~ipad`: all four.
+- `UIRequiresFullScreen`: absent (never added).
+- `UIApplicationSupportsMultipleScenes`: stays `false`.
+- **The scene** (`L8BibleScene`):
+  - in `scene:willConnectToSession:options:`, sets `sizeRestrictions.minimumSize` to 320
+    × 480 where `sizeRestrictions` exists;
+  - implements `windowScene:didUpdateCoordinateSpace:interfaceOrientation:traitCollection:`,
+    and on iOS 26 `windowScene:didUpdateEffectiveGeometry:`, to learn of size changes
+    (§17.2.2).
+- **The root view controller's `supportedInterfaceOrientations`** returns the plist's
+  masks (all on iPad; all but upside down on iPhone). Practice and the sheets never lock
+  orientation.
+- **The App Store listing** gains iPad screenshots (§17.8.4). `PrivacyInfo.xcprivacy` is
+  unchanged.
+
+### 17.2 The reader at any width
+
+#### 17.2.1 The column
+- **The text's width** is `min(view width − 2 × margin, 34 em)`, centred in the view. Here
+  margin is the setting's 20, 28 or 40 pt (§2.4), and em is the reading size (§2.3).
+  - 34 em is about 70 characters a line in the five fonts at every size. A larger text
+    size makes the column wider, not the lines longer in characters.
+  - This replaces §2.4's fixed 600 pt cap. Below the cap nothing changes: every iPhone's
+    width minus its margins is narrower than 34 em, so iPhone layouts are byte-identical
+    (§17.8.3).
+- **What follows the column:** chapter openers, dividers, headings and footnote marks are
+  laid out within it; the background (`bg`) fills the window.
+- **The bar** spans the window (the system's). Its title is centred in the bar, as now.
+- **One Verse per Line** and the poetry indents are em-based already, unchanged.
+- **Dynamic Type and the text-size slider** change em, so they change the column with it,
+  as now.
+
+#### 17.2.2 Keeping the place when the width changes
+- **Before a size change** (`viewWillTransitionToSize:withTransitionCoordinator:` for
+  rotation, and the scene's geometry callbacks for window resizes): measure and keep the
+  place (chapter, verse, fraction), as `measure_place()` does. The coordinator's animation
+  blocks are not used.
+- **After layout at the new width** (`viewDidLayoutSubviews` seeing a new width): set every
+  visible row's insets for the new column, let the table recompute heights
+  (`beginUpdates`/`endUpdates` with animations disabled), and scroll to the kept place.
+  - The back capsule, title and toolbar stay as they were.
+  - Rotation is the system's animation. The text appears at its new width with the verse
+    where it was.
+- **While a window is being resized** (`isInteractivelyResizing`, iOS 26): relayout at
+  most every 0.1 s, keeping the place each time, and once more when the resize ends. With
+  iOS 27's discrete resizing, there is one change, at the end.
+- **The same applies in the day reader** (§16), Practice and the interlinear: each keeps
+  what was under its top across the change.
+- **Log:** "bible: width 1024 → 1366, kept JHN 3:16 +0.42".
+
+#### 17.2.3 Floating controls
+- **The back capsule** (§3.1.6) and **Mark Read** (§16.2.3) sit at the **column's** bottom
+  corners: their outer edge is the column's edge, at least 16 pt from the window's.
+- **The mini player** (§8.7) is at most 560 pt wide, centred under the column.
+- **The verse tray** is described in §17.3.2.
+- **Toasts** are centred over the column.
+- In a narrow window all of these are exactly as on the iPhone.
+
+### 17.3 Each screen at regular width
+#### 17.3.1 Sheets and popovers
+| Screen | iPhone (and narrow iPad) | iPad, regular width |
+|---|---|---|
+| Go To (§3.2, with §15's tip) | Page sheet, large | **Form sheet** (`UIModalPresentationFormSheet`), with `preferredContentSize` 540 × 720 (the system fits it to the window) |
+| Search (§3.6) | Page sheet | Form sheet, 620 × 760 |
+| Library and its Memory segment (§3.5, §13.4) | Page sheet, medium/large | Form sheet, 620 × 800 |
+| Reading settings (Aa) (§3.7) | Sheet, medium, undimmed | **Popover** from the Aa button (`barButtonItem`), 375 × 640, undimmed. Changes show live on the page beside it. Its pushed screens (Versions, Voice, Acknowledgements, Manual) push inside the popover |
+| Study: interlinear, word study, References, Commentary (§7, §9.6) | Page sheet, medium/large | Form sheet, 700 × 860. Its content is at most 680 pt wide, centred (§17.3.4) |
+| Compare (§9.5) | Page sheet | Form sheet, 620 × 760 |
+| Passage preview (§8.1) | Sheet | Form sheet, 620 × 640 |
+| Note editor (§3.4) | Sheet | Form sheet, 620 × 640, the keyboard's shortcuts bar standard |
+| Practice (§13.3) and its card sessions (§14.5.4) | Page sheet, large | Form sheet, 700 × 900. Its text is at the reader's column measure |
+| The language pages, Add Words, Forms (§14.3) | Pushed in their sheet | The same, inside the form sheet |
+| Footnote popover (§3.1.5) | Popover | Popover (unchanged) |
+| Title menu (§11.2.2), sort menu (§7.9) | Menus | Menus (unchanged) |
+| The day's reader (§16) | Full screen | Full screen, the column centred |
+| Share sheet, Share as Image composer (§10.5) | System sheet | System popover from the tray's Share; the composer a form sheet |
+| Manual (§15) | Pushed in Reading settings | Pushed in Reading settings' popover; from a tip's More, pushed in Go To's form sheet |
+- **Size classes decide**, at presentation time and on change:
+  - `traitCollection.horizontalSizeClass` regular uses the iPad column, compact the
+    iPhone's;
+  - a form sheet whose window becomes compact adapts to a page sheet (UIKit does this
+    itself, through `adaptivePresentationStyleForPresentationController:traitCollection:`
+    returning `UIModalPresentationPageSheet`).
+- **Detents** (medium/large) apply only to page sheets, so only in compact width.
+- **Esc** dismisses sheets and popovers on a hardware keyboard (the system's).
+
+#### 17.3.2 The verse tray
+- **Stays a floating panel at the bottom**, not a popover. A popover from the selected verse
+  would cover the text being read and move with every selection; the tray's place is part
+  of the app's habit.
+- **At regular width:** at most 560 pt wide, centred over the column, 16 pt above the safe
+  area. Its seven actions keep one title size, now with room to spare (§13.2.1's fit).
+- **The page scrolls under it** as now. The selected verse is never hidden behind it (the
+  table's bottom inset grows by the tray's height while it's up, as now).
+
+#### 17.3.3 Go To
+- **As a form sheet:** the tip row (§15.1) on top, then Ribbons, Reading Plan, Recent and
+  the books.
+- **The chapter grid** computes its columns from the sheet's width (7 or 8 columns at 540
+  pt).
+- **The search field** is first responder when the sheet appears and a hardware keyboard is
+  attached (it isn't on the iPhone, where the keyboard would cover the list): typing a
+  reference and Return goes there.
+
+#### 17.3.4 Study
+- **The interlinear's tiles** lay out within a 680 pt content width, centred. That gives 4
+  or 5 columns rather than 3, with the even columns of §7.10a. The hiding of §14.5.1 is
+  unchanged: the grid is fixed per width, so nothing moves.
+- **Word study, Definition and Concordance:** the system's inset-grouped tables, which
+  already read well at 700 pt.
+- **Study beside the text** (an inspector column) is deferred (decision 3).
+
+#### 17.3.5 Practice, Memory and the language pages
+- **Practice's passage** at the column measure inside the 700 pt form sheet. The level row
+  and toolbar are the sheet's.
+- **Cards** are centred in the sheet, as on the iPhone.
+- **The Library's Memory segment, the language pages, Add Words, Forms:** insetGrouped
+  tables in the form sheet, unchanged in content. The Forms grid's columns line up under
+  their header at 620 pt.
+
+#### 17.3.6 Listen and Reading settings
+- **Reading settings** as a popover (§17.3.1). The theme swatches row fits 375 pt.
+- **Listen's mini player** is centred and capped (§17.2.3). Now Playing and the lock
+  screen are the system's.
+
+#### 17.3.7 Plans and the day reader
+- The plan lists push inside Go To's form sheet.
+- **The day reader** (§16) is full screen with the column centred. Mark Read is at the
+  column's trailing corner, the end panel at most 560 pt wide.
+
+### 17.4 Keyboard
+#### 17.4.1 Shortcuts (`UIKeyCommand`, selector-based, from the reader's `keyCommands`, and listed in the menu bar)
+| Keys | Command | Title shown |
+|---|---|---|
+| ⌘L | Go To | Go To… |
+| ⌘F | Search | Search… |
+| ⌘] | The next chapter's start (a jump: history, capsule) | Next Chapter |
+| ⌘[ | The previous chapter's start | Previous Chapter |
+| ⌘← | The back capsule's jump, while it shows | Back |
+| ⌘⇧B | The Library | Library |
+| ⌘, | Reading settings | Reading Settings |
+| ⌘⇧P | Listen / Pause | Listen / Pause |
+| Space, ⇧Space | Page down / up (the table's `allowsKeyboardScrolling`, iOS 17; and our own on 16) | (not listed) |
+| ↓ ↑ | Scroll a line (the system's) | (not listed) |
+- **Created with** `UIKeyCommand commandWithTitle:image:action:input:modifierFlags:propertyList:`.
+  `wantsPriorityOverSystemBehavior` is set on ⌘[ and ⌘] (so a text field's own handling
+  doesn't swallow them when none is focused).
+- **The menu bar** (iPadOS 26) and the ⌘ overlay show them:
+  - the app delegate's `buildMenuWithBuilder:` inserts a menu **"Go"** (Go To…, Search…,
+    Next Chapter, Previous Chapter, Back, Library) and adds **Listen / Pause** to the
+    system's View menu;
+  - it uses `UIMenu menuWithTitle:image:identifier:options:children:` and
+    `insertSiblingMenu:afterMenuForIdentifier:`; no blocks.
+- **While a sheet is up,** the reader's commands are not offered. The sheet's own are:
+  - **Go To:** Return goes to the top suggestion (as now).
+  - **Practice:** Return is the main button (Next, Check); ⌘1, ⌘2, ⌘3 are Not Yet, Mostly
+    and Knew It while the judgement row shows. Letters type first letters as now (§13.3.6);
+    a hardware keyboard needs no Type button. Practice's text view takes keys when the
+    sheet appears, if a hardware keyboard is attached.
+  - **The day reader** (§16): ⌘D is Mark Read (the passage you're in), ⌘] the next day
+    from the day's end.
+  - **Cards:** Return is Check or Next; ⌘1–⌘3 judge.
+- **Discoverability:** holding ⌘ shows the system overlay. The manual's Keyboard part lists
+  them (§17.7).
+
+#### 17.4.2 Typing elsewhere
+Go To, Search, notes and Add Passage take a hardware keyboard as any text field does. Tab
+and arrows follow the system's focus.
+
+### 17.5 Pointer and Pencil
+- **Hover:**
+  - system buttons, bar items, rows and segmented controls hover by themselves;
+  - our own controls take the system's automatic hover (`hoverStyle` =
+    `UIHoverStyle automaticStyle`, iOS 17): the capsules, the tray's swatches and
+    actions, interlinear tiles, Practice's words (tap to show), Forms cells and the tip's
+    buttons. Before iOS 17 they have none.
+- **Clicking a verse** selects it, as a tap does. A click-drag selects words (the text
+  view's own).
+- **No right-click menus:** a context menu configuration takes blocks (as §8.4 notes).
+  Long-press equivalents remain.
+- **The page doesn't hover.** Verses don't highlight under the pointer, so reading stays
+  still.
+- **Apple Pencil:** Scribble writes into Go To, Search, notes and Add Passage by itself.
+  Nothing else (no handwriting in the margin) this round.
+
+### 17.6 What objc.l8 and the runtime need
+- **Overriding a method that takes a `CGSize` by value**
+  (`viewWillTransitionToSize:withTransitionCoordinator:`), and calls that pass one
+  (`setMinimumSize:`, `setPreferredContentSize:`): the arm64 homogeneous-float aggregate
+  (two doubles in d0/d1), as `msg_rect` does for CGRect.
+- **A getter override returning an `NSArray`** (`keyCommands`).
+- **`buildMenuWithBuilder:`** on the app delegate.
+- **`requestGeometryUpdateWithPreferences:errorHandler:`** with a nil handler: only the demo
+  uses it, to rotate (§17.8).
+- **`traitOverrides`** (iOS 17): the demo's narrow window only.
+- **`responds()` checks** guard every iOS 17 or 26 call on iOS 16.
+
+### 17.7 The manual and tips (`data/help.txt`)
+- The Reading page gains a part **"keys" "With a keyboard"**:
+  - the shortcuts of §17.4.1 in a short list: "⌘L Go To · ⌘F Search · ⌘] and ⌘[ next and
+    previous chapter · ⌘← back · ⌘⇧P Listen";
+  - and: "On iPad, hold ⌘ to see them."
+- The Memory page's Practice part adds "With a keyboard, Return checks, and ⌘1, ⌘2 and ⌘3
+  choose Not Yet, Mostly and Knew It."
+- **A tip** (level 2, shown only on iPad): "With a keyboard, ⌘L opens Go To and ⌘F opens
+  Search."
+  - It needs a new condition `iphone` (true on an iPhone, so the tip is skipped there),
+    added to §15.2.2's closed set and `test_help.l8`.
+  - Its MORE is `reading#keys`.
+- No other iPad-specific text: the app works the same way.
+
+### 17.8 CI, tests and shots
+#### 17.8.1 Linux
+- `test_text.l8`: the column width at given view widths and em (393 → 337, 1366 → 34 em);
+  the place kept across a width change (a laid-out chapter at 393, then 1024: the same
+  verse and fraction).
+- `test_help.l8`: the new condition and part.
+
+#### 17.8.2 The `ipad` demo group
+- **The device:** iPad Pro 13-inch (M4), iOS 26, booted on the **study job's Mac** after its
+  own groups (about 4 minutes), as `languages` runs on the versions job's. No sixth Mac is
+  needed.
+- **Rotation:** through `requestGeometryUpdateWithPreferences:errorHandler:nil` (portrait,
+  then landscape), with a 1.5 s settle and the log's "width … kept …".
+- **A narrow window:** a demo-only mode lays the root out at 375 pt wide, centred in the
+  window, with `traitOverrides.horizontalSizeClass` compact (iOS 17). It's a stand-in for a
+  Split View window, since the simulator can't be driven into one. The owner checks a real
+  one (§17.9).
+- **Shots 460–489:**
+  | Shot | Expected |
+  |---|---|
+  | `460-ipad-portrait` | The reader at John 3, the column centred with wide margins, the bar across |
+  | `461-ipad-landscape` | The same verse at the top after rotating (log: "kept JHN 3:16 …") |
+  | `462-ipad-largest-text` | AX size: the column wider, the same characters a line |
+  | `463-ipad-tray` | The tray, 560 pt, centred over the column |
+  | `464-ipad-goto` | Go To as a form sheet with the tip row |
+  | `465-ipad-goto-grid` | The chapter grid in the sheet |
+  | `466-ipad-search` | Search as a form sheet, the keyboard's shortcuts bar |
+  | `467-ipad-settings-popover` | Reading settings as a popover from Aa, the page undimmed beside it |
+  | `468-ipad-theme-live` | Night chosen in the popover: the page dark beside it |
+  | `469-ipad-study` | The interlinear in a form sheet, five tile columns |
+  | `470-ipad-word-study` | Word study |
+  | `471-ipad-compare` | Compare |
+  | `472-ipad-library-memory` | The Library on Memory |
+  | `473-ipad-practice` | Practice at Letters in its form sheet |
+  | `474-ipad-card` | A Greek card |
+  | `475-ipad-greek-page` | The Greek page |
+  | `476-ipad-day-reader` | §16's day reader, full screen, Mark Read at the column's corner |
+  | `477-ipad-capsule` | The back capsule at the column's corner after a jump |
+  | `478-ipad-listen` | The mini player, centred |
+  | `479-ipad-menu-bar` | (Log only if the menu bar can't be shown: the Go menu's items logged) |
+  | `480-ipad-key-goto` | ⌘L (sent through the key command's action): Go To open with the field active |
+  | `481-ipad-narrow` | The narrow window: the iPhone's layout, sheets as page sheets |
+  | `482-ipad-narrow-tray` | The tray at the iPhone's width |
+  | `483-ipad-landscape-practice` | Practice in landscape |
+  | `484-ipad-preview` | A passage preview as a form sheet |
+  | `485-ipad-manual` | The manual's "With a keyboard" part |
+  | `486-ipad-night` | Night theme, landscape |
+  | `487-ipad-sepia-ax` | Sepia at an accessibility size |
+  | `488-ipad-note` | The note editor as a form sheet |
+  | `489-ipad-share` | The share popover from the tray |
+- **Recording sequence 22:** rotate portrait → landscape → portrait at John 3:16 (the verse
+  stays put), open and close Go To's form sheet, the settings popover with a theme change.
+
+#### 17.8.3 The iPhone shots stay as they are
+- Every iPhone width is below the 34 em cap, so `side_margin` gives today's margins. The
+  layout tests compare iPhone layouts with the committed ones (byte-identical).
+- Compact width runs every code path it runs today; regular width is new code behind size
+  class checks.
+- **Expected changes to existing shots: none.** The script fails a group whose iPhone shots
+  change at 393 pt, except where a round says so.
+- The iPhone's new landscape (decision 7) gets two shots in the `read` group: `490-iphone-landscape`
+  (John 3, the column of 34 em or less in a 852 pt-wide window, centred) and
+  `491-iphone-landscape-tray`.
+
+#### 17.8.4 App Store iPad screenshots
+- 13-inch, 2064 × 2752 portrait (and 2752 × 2064 landscape), from the `ipad` group by the
+  store job's script, as the iPhone's are:
+  1. the reader in landscape (461);
+  2. Go To with the tip (464);
+  3. the interlinear (469);
+  4. Practice (473);
+  5. the Greek page (475).
+- Apple requires iPad screenshots once the app supports iPad. They are made, not drawn.
+
+### 17.9 Acceptance, the phone list, and what's deferred
+**Approved when:**
+1. **iPad:** all four orientations, any window from 320 × 480, and the verse kept across
+   every rotation and resize (461, sequence 22, the tests).
+2. **The column:** about 70 characters at every width and size (460–462), centred. iPhone
+   layouts are unchanged (§17.8.3).
+3. **Screens:** form sheets and popovers as §17.3.1; the settings popover shows changes
+   live (467, 468); the tray, capsules and mini player sized to the column.
+4. **Narrow windows** are the iPhone app (481, 482).
+5. **The keyboard shortcuts** work and are listed (480; the menu bar's log); Practice and
+   cards take Return and ⌘1–⌘3.
+6. **Hover** on our controls; no hover on the page.
+7. The 13-inch App Store screenshots are made.
+
+**On an iPad (the owner, and the iPad user):**
+- Split View and Slide Over with another app.
+- Stage Manager windows, resized slowly and quickly: the verse stays.
+- A Magic Keyboard: the shortcuts, Space to page, Practice typing, the ⌘ overlay and the
+  menu bar.
+- The trackpad's hover.
+- Reading in landscape for half an hour: is the column right?
+
+**Deferred:**
+- **Study beside the text** (an inspector column in landscape), a structural change for its
+  own round (question 2).
+- **More than one window** (two passages side by side): the app's reader is one set of
+  state.
+- **Drag and drop** of verses into other apps: drag sessions use item providers whose
+  loading takes blocks.
+- **Right-click menus** (they take blocks).
+- **Pencil annotation in the margin.**
+- **A Mac build** (Mac Catalyst, or "Designed for iPad" on Apple silicon): the iPad app
+  can be offered on the Mac App Store as "Designed for iPad" later with no code change;
+  not this round.
+
+### 17.10 Questions only the owner can answer
+These are decided above; the owner may overrule:
+1. **The iPhone gains landscape** (decided: Apple's direction, and the column makes it
+   good), or the iPhone stays portrait-only for now.
+2. **No sidebar or Study column this round** (decided: calm, one page), or build Study as
+   an inspector beside the text in landscape now.
+3. **Reading settings as a popover on iPad** (decided: changes seen live, the HIG's form for
+   a toolbar button's options), or a form sheet like the others.
+4. **The shortcuts** (⌘L Go To, ⌘F Search, ⌘] and ⌘[ chapters, ⌘← back, ⌘⇧B Library, ⌘,
+   settings, ⌘⇧P Listen) as listed, or other keys. (⌘P is left alone: it means Print.)
+5. **The column is about 70 characters** (34 em), or wider (40 em, about 80 characters) on
+   iPad.
