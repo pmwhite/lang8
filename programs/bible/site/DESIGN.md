@@ -216,35 +216,17 @@ h1:
 
 > Privacy policy
 
-Date line (sans, 14px, `--faint`, `margin-top: -0.5rem`):
+Date line (sans, 14px, `--faint`, `margin-top: -0.5rem`), then the policy's
+sections as h2s: Information, Sharing, Keeping and deleting, Changes, Contact
+(the address a `mailto:` link). The page itself holds the wording.
 
-> Last updated 18 October 2026
-
-h2 "The app", then:
-
-> Highlights, bookmarks, notes, reading history, reading plans and settings
-> are stored on the iPhone. They are not sent to Smooth Bible or to anyone
-> else. The app has no accounts, analytics or advertising.
-
-> Listen uses the iPhone’s built-in voices, and reading-plan reminders are
-> scheduled on the iPhone.
-
-h2 "The English Standard Version", then:
-
-> When the English Standard Version is read or searched, the app fetches the
-> passage or the search results over the internet through smoothbible.com.
-> These requests are not logged or kept.
-
-h2 "This website", then:
-
-> This website uses no cookies or analytics.
-
-h2 "Contact", then:
-
-> Questions about this policy can be sent to contact@smoothbible.com.
-
-(The address is a `mailto:` link.) The policy keeps its facts; it is the one
-page where the ESV fetch is described, because a privacy policy must say so.
+The policy is deliberately broad (owner, 2026-10-20): it promises little,
+so that accounts, syncing or other features can come without taking a
+promise back; it is made more specific over time, never the other way. It
+names no features, servers or absences (no "no accounts", "not logged",
+"no cookies"), but stays true of what the app and site do, as App Review's
+guideline 5.1.1 asks: what is collected, how it is used and shared, how
+long it is kept, and how to ask for it to be deleted.
 
 ### 404 (`/404.html`)
 
