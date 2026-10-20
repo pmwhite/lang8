@@ -7781,6 +7781,57 @@ and nothing else.
   - the Phemister and Schmuelof permission letters remain an option for whole-text
     listening.
 
+#### 14.10b.7 Builder notes (as built)
+Built as §14.10b.1–§14.10b.5 say. `LEARN_SPEECH` (false) is in `ios_learn.l8`; with it off
+`ln_can_speak` and `ln_voice_of` answer at once, so no voice is looked for and the log has no
+"learn voice" or "learn speak" lines (simulate.sh fails the group if one appears). Every place
+that spoke still calls the same code, behind the flag. `learn.l8` gains the answer's parts
+(`fput_words_here`, `fput_sense_here`, `fput_card_meta`, `learn_related_known`) and Related to
+Words You Know (`learn_related_words`); `lang.l8` gains `forms_renderings`; all tested in
+`test_learn.l8`.
+
+**Deviations and choices, each with its reason:**
+1. **"What does it mean here?" shows on the session's first word card** (whatever its state),
+   between the verse window and the answer; it replaces the word cards' one-time line ("Say
+   what it means, then Check."), which said the same. Letters and joined words keep theirs.
+2. **"Here: …" is the sense's gloss after its colon** for STEP's split senses ("son: child" →
+   "Here: child"), the whole gloss otherwise ("Here: to say"), and is left out when it is the
+   BSB's words again, case aside (Genesis 1:1's "God" above "Here: God" says nothing more).
+3. **Related words on a card are of its own language** (§10.4's same-testament list), nearest
+   first, known cards only.
+4. **Related to Words You Know** is a row in its own section after Most Common, with no header
+   (its title says what it is), "N words" under it, shown once a known word has an unlearned
+   neighbour. Its preview is titled "Related"; its header "These N words are related to words
+   you know, most common first."; cards added from it log `from` = `related` (a sixth value in
+   §14.1.1's list, for the log only).
+5. **Forms' renderings are counted only when Forms is pushed** (`forms_renderings`), not for the
+   word study's "23 forms", so a word study costs no more than before. A rendering is lower case
+   as Translated As counts it, unless it has a capital wherever it is not a sentence's first
+   word ("I have loved"; 254's first CI run showed a subjunctive's "Love", from sentences'
+   starts, now "love"). A form never translated shows no rendering. List rows (participles, infinitives) show
+   it before the parsing, in italic. The count went from 12 to 11 points.
+6. **"transliteration, a guide to the letters"** labels the transliteration where a learner
+   first meets it as the thing to check: under it on Practise Reading's Check. The word lists
+   and cards show it as before, unlabelled.
+7. **Sounds Written As's list** (titled so, pushed from the Alphabet's last row) keeps the three
+   (two) choices and their descriptions, with the footer "Changes the sounds in the letter
+   table and on letter cards. Words keep one transliteration." in place of the voice's.
+8. **Alphabet rows read** "Beta: b as in bat. Example: basileia, kingdom." (was "sounds like").
+9. **Koine's and modern Greek's κ, π, τ** are "k as in skip", "p as in spin", "t as in stop"
+   (unaspirated), and the Tiberian joined words keep their scholarly spellings (wə, ḵā): only the
+   Erasmian and Israeli columns are checked for "as in", as §14.10b.1 asks.
+10. **Shots:** 242 is taken scrolled to the Alphabet's end, so Sounds Written As shows;
+    249b checks the λέγω card of 249 (its verse John 1:29, "said": John 1–3 have no "says"), with
+    ἀποκρίνομαι (rank 68, so 250 still knows 120 words) marked known in 249's setup so the answer
+    has a related word; 246b is taken after 250, when words are known, so it has related words.
+
+**What needs a real phone:** that nothing in Greek or Hebrew speaks anywhere (the Alphabet's rows,
+cards, Practise Reading; CI has no Greek or Hebrew voice, so it could not have spoken there);
+reading the written sounds against the Erasmian table, and whether "as in" words are clear; the
+card's answer in a week's practice ("What does it mean here?", the BSB's words, Here:, Related:);
+the Forms grid with renderings on each width and text size; VoiceOver on a card after Check (the
+word, the window, the meaning, the verse, related words).
+
 ### 14.11 Round 11: the original text in the reader
 
 Round 11 puts the Hebrew Bible and the Greek New Testament in the reader as one more
