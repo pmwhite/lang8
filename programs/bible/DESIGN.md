@@ -15,7 +15,11 @@ To's Ribbons section) with **plans on their own list** again, specified in §11 
 built now. Round 7 (recorded readings: Listen reads every version, the BSB and WEB by
 human readers streamed from openbible.com and eBible.org and followed verse by verse with
 bundled timings, the ESV by its own recording through our Worker, the rest by the
-iPhone's best voice) is specified in §12 and follows. Round 1 is
+iPhone's best voice) is specified in §12 and follows. **Round 9 (memorization, asked for by
+the owner on 2026-10-19: passages chosen from the verse tray in any version, a calm Practice
+screen with fading cues and first-letter typing, a quiet Leitner schedule with no streaks or
+scores, Listen and Echo from the recordings, the Library's Memory segment, and Memory as a
+second reason for the one daily reminder) is specified in §13 and follows.** Round 1 is
 §0.5–§6, Round 2 is §7 and Round 3 is §8. The owner's priorities, in order: distraction-free reading, note-taking, language tools.
 Above all: iPhone-native, HIG-proper, predictable UI. The app is **free forever**: no
 price, ads, in-app purchases or donation prompts (owner, 2026-10-18).
@@ -234,6 +238,19 @@ In build order:
 4. **R7.4 Voice settings, lock-screen controls** (chapter skip, scrubbing, artwork),
    **speed for recordings, credits, and the privacy page's Listening paragraph.**
 
+### Round 9: memorization (fully specified in §13)
+1. **R9.1 Choosing passages:** a seventh tray action, **Memorize** (Memorizing when the verses
+   are already a passage), and Add Passage… for ranges across chapters; up to 40 verses, in
+   the version they're added in, keyed by reference.
+2. **R9.2 Practice:** Full · Some · Letters · Blank, with hidden letters keeping their space
+   so the text never moves; tap a word to see it; say it and Check, or type first letters.
+3. **R9.3 Learning in parts and a quiet schedule:** long passages a verse or two a day,
+   joined as they go; then Not Yet · Mostly · Knew It on a Leitner schedule (1 day to 6
+   months). No streaks, scores or praise.
+4. **R9.4 Listen and Echo** from the recordings' verse timings (the iPhone voice elsewhere).
+5. **R9.5 The Library's Memory segment** (Today, New, Later), and Memory as a second,
+   optional reason for the one daily reminder.
+
 ### Out of scope (all rounds so far)
 - Widgets, Live Activities and App Intents (these need Swift or app extensions).
 - SwiftUI.
@@ -395,6 +412,7 @@ the ESV and Crossway convention.
 | Recent (picker) | `clock.arrow.circlepath` |
 | Go to reference row | `arrow.right.circle.fill` (accent) |
 | Ribbon (Go To rows, title menu, toast; §11.2.6) | the ribbon glyph (drawn in code, template; not `bookmark`) |
+| Tray: Memorize / Memorizing; Library's Memory rows and empty state (§13) | `brain` (Memorizing: accent) |
 
 ### 2.7 Motion
 | What | How |
@@ -5750,3 +5768,672 @@ the list came back empty (the simulator's voice database fails its queries); the
 downloads' and Listen's own timers run in the run loop's common modes; and a step that
 begins before the last settled logs what was pending and the run loop's mode, so a
 recurrence names its cause.
+
+---
+
+## 13. Round 9 specification: memorization
+
+The owner, 2026-10-19: "Next, I think we should work on a set of features for verse
+memorization. I'm not sure what that will look like, I think. I'll just let the designer
+figure that out and I'll see what it comes up with."
+
+Round 9 keeps everything from Rounds 1–7 and §11. It adds one thing to the reader (a
+seventh tray action), one segment to the Library, one new screen (Practice), and a second
+reason for the one daily notification. Nothing else changes.
+
+### 13.0 What helps people memorize Scripture, and the decisions
+
+#### 13.0.1 What works (and what it means here)
+Each technique below is well supported by memory research or long practice, and each one
+fits a calm app:
+1. **Recalling beats rereading.** Trying to say a passage from memory, then checking,
+   fixes it far better than reading it again (the testing effect). So practice is mostly
+   *trying*, with the text hidden, and help only when asked for.
+2. **Cues that fade.** Start with the whole text, then hide some words, then leave only each
+   word's first letter, then nothing (vanishing cues). First letters are the best-known
+   Scripture-memory aid: enough to unlock a word you half know, not enough to read.
+3. **Spacing.** Reviews spread out over growing gaps (a day, three days, a week, two weeks,
+   a month…) keep a passage for years at a few minutes a week. A passage that slips comes
+   back sooner. The schedule is kept quietly. There are no streaks, scores or points.
+4. **Small parts, joined.** A long passage is learned a verse or two at a time, each new
+   part joined to the ones before. Psalm 23 isn't learned in one sitting; it's learned in
+   a week, a verse a day.
+5. **Saying it aloud, and hearing it.** Speaking fixes words better than silent reading.
+   Hearing a good reader gives the passage's rhythm. The app already has human recordings
+   with verse timings (§12), so it can read a passage, or read a verse and then leave a
+   pause for you to say it back.
+6. **The reference goes with the text.** The reference is shown above the passage at every
+   level, so it's learned with the words.
+7. **Checking yourself honestly.** You judge how it went, in plain words. When you type, the
+   app can see your misses, and it suggests a judgement, but you choose.
+
+#### 13.0.2 Decisions (the designer's, with reasons)
+1. **A passage is chosen by you, from the verse tray or by reference.** The tray gains a
+   seventh action, **Memorize**. The Library's Memory segment has **Add Passage…** for
+   ranges the tray can't select (across chapters: Isaiah 52:13–53:12). Nothing is ever
+   suggested or added for you. There's no Verse of the Day by another name.
+2. **A passage keeps its version.** It's learned in the version it was added in (the
+   reader's at the time), shown with that version's lines and words, whatever the reader
+   later shows. It's keyed by BSB-numbered reference like every mark (R4.1), so its
+   version can be changed later in its details. Every offline version works offline. The
+   ESV works within Crossway's limits (§13.6).
+3. **The list lives in the Library, as a fourth segment, Memory.** Highlight, Bookmark and
+   Note from the tray all land in the Library, so Memorize does too. Go To stays for going
+   somewhere to read (ribbons, the plan, Recent). One list in one place.
+4. **One practice screen, Practice, with four levels** chosen by a segmented control:
+   **Full · Some · Letters · Blank**. Hidden letters keep their space, so **the text never
+   reflows** when the level changes or a word is shown. Only colors cross-fade (principle
+   6). Tap a word to see it.
+5. **Two ways to answer, neither required:**
+   - **Say it** (aloud or in your head), then **Check**. This is the default, and needs no
+     keyboard.
+   - **Type the first letter of each word.** It's quick on a phone, exact to check, and the
+     app sees each miss.
+6. **Three plain judgements: Not Yet · Mostly · Knew It.** They drive a Leitner schedule,
+   with fixed gaps that are easy to explain ("Next review 2 November"), not SM-2's hidden
+   ease factor. Missing days costs nothing: a passage waits until you come back.
+7. **Long passages are learned in parts across days** ("Learning · 4 of 12 verses"). A
+   passage enters the review schedule only once all its parts are learned.
+8. **Listening uses the recordings and their verse timings.** **Listen** plays exactly the
+   passage. **Echo** plays a verse, then leaves a pause as long as the verse for you to say
+   it back, verse by verse. The iPhone voice reads where there's no recording with timings.
+9. **No speech recognition this round** (§13.9 says why, and what would bring it in).
+10. **No mark in the text.** A memorized verse looks like any other verse on the page. The
+    tray says it quietly: with a memory passage's verse selected, the action reads
+    **Memorizing**, and it opens that passage's practice.
+11. **The reminder stays one notification a day.** Memory adds an optional second reason to
+    the plan's daily reminder, at the same time. If both are on, one notification names
+    both. A day with nothing due sends nothing for Memory (§13.5).
+12. **Calm, not casino.** No streaks, totals, percentages, levels earned, badges, sounds,
+    confetti or "great job". The end of a session says "That's all for today." and the next
+    review's date.
+
+### 13.1 Model (portable `memory.l8`, tested by `test_memory.l8`)
+`memory.l8` has no UIKit. Times and "today" are given by the platform (`today()`, §10.0's
+demo clock).
+
+#### 13.1.1 A passage
+A passage P has:
+- an **id** (a positive integer, never reused while the file exists; `NEXT` as in
+  `ribbons.tsv`, §11.9 note 1);
+- a **version** (`bsb`, `kjv`, `web`, `asv`, `ylt`, `esv`);
+- a **range**: book, c1:v1 – c2:v2, BSB-numbered, in one book, with **at most 40 verses**
+  (Romans 8 is 39). Psalm titles (`D`) and headings are never part of it;
+- **added** (unix time);
+- **state**: `new` (not started), `learning`, or `review`;
+- **learned**: the number of parts learned (`learning` only);
+- **box** (1–8) and **due** (a local date, `YYYY-MM-DD`; `review` only, and `learning`
+  passages are due every day they're started);
+- **level**: the level Practice last opened it at, used next time (default: Full while
+  learning, Blank in review).
+
+Passages may overlap. Two passages over John 3:16 are two passages.
+
+#### 13.1.2 Words (`memory_words(text, range)`)
+The passage's words come from the version's text as `text.l8` lays it out: footnote marks
+removed, headings and psalm titles left out, poetry lines kept as line breaks, verse
+numbers kept (drawn faint, never hidden).
+- **A word** is a run between spaces. An em dash or en dash also separates words
+  ("heaven—the" is two). A hyphen doesn't ("well-pleasing" is one).
+- **Its key letter** is its first letter or digit after leading punctuation (quotes,
+  brackets), case- and diacritic-folded. So "“For" → f, "God’s" → g, "LORD" → l, "4,000" → 4.
+  - A number also accepts its spoken first letter ("4,000" → 4 or f), from `num2words`'
+    rules ported to a small table in `memory.l8` (1–1,000,000 only).
+- **Punctuation** stays visible at every level. Only letters and digits are hidden.
+
+#### 13.1.3 Parts (`memory_parts(words, verses)`)
+Learning goes a part at a time. Parts follow verses:
+- A part is one verse.
+- A verse of fewer than 8 words is joined to the next verse (up to 30 words together).
+- A verse of more than 40 words is split in two at the clause mark (`;`, `:`, `.`, `?`,
+  `!`, `—`, then `,`) nearest its middle word.
+- A passage of 30 words or fewer is one part, whatever its verses.
+- **Examples (tested):** John 3:16 (BSB) is one part. John 3:16–17 is two. Psalm 23 (BSB) is
+  six. Romans 8:28–39 is twelve, except where a short verse joins. Esther 8:9 (BSB, about 90
+  words) is two halves.
+- Progress is shown in **verses**, not parts: "Learning · 4 of 12 verses" counts the verses
+  the learned parts cover (a split verse counts once both halves are learned).
+
+#### 13.1.4 Hiding (`memory_hidden(P, level)`)
+- **Full:** nothing hidden.
+- **Some:** about 40% of the words hidden entirely. Which ones is fixed per passage: a
+  shuffle seeded by the passage's id gives every word a rank, and Some hides the words
+  whose rank is in the first 40%. So the same words hide each time, which helps, and hiding
+  only grows from level to level (Some's words keep only their first letter at Letters).
+  - Never two hidden words in a row at the start of a line, so a line always begins with
+    something to hold on to. (The shuffle skips such a word and takes the next.)
+- **Letters:** every word shows only its key letter. The rest of its letters are hidden.
+- **Blank:** every letter is hidden. The verse numbers, punctuation and line breaks stay,
+  and so does each word's underline (§13.3.3), which shows its length.
+
+#### 13.1.5 The schedule (Leitner, `memory_grade(P, grade, today)`)
+The boxes' gaps, in days: **1, 3, 7, 14, 30, 60, 120, 180**. A passage is never left more
+than six months, because a memorized passage still wants an occasional visit.
+
+| P's state | Grade | Result |
+|---|---|---|
+| `review`, due ≤ today | **Knew It** | box + 1 (at most 8); due = today + gap(box) |
+| `review`, due ≤ today | **Mostly** | box unchanged; due = today + gap(box) |
+| `review`, any | **Not Yet** | box = max(1, box − 2); due = tomorrow; shown once more at the end of this session |
+| `review`, due > today (practised early) | Knew It or Mostly | **nothing changes** (practice is never wasted, but it doesn't skip the schedule) |
+| `learning`, its last part checked | (no grade) | state = `review`, box = 1, due = tomorrow |
+| `learning`, a part checked | (no grade) | learned + 1; due = tomorrow |
+
+- A passage that's late is graded the same as one that's on time. Nothing is lost for
+  missing days, and nothing says it's late.
+- **Start Over** (in its details) sets state = `learning`, learned = 0, due = today.
+- **Tests:** every row above; box 8 stays 8; Not Yet from box 1 stays 1; 30 days missed then
+  Knew It at box 4 → box 5, due today + 30; early Mostly changes nothing.
+
+#### 13.1.6 Today (`memory_today(list, today)`)
+- **Today** = `review` passages with due ≤ today (the most overdue first, then Bible order),
+  then `learning` passages (the oldest added first).
+- **New** = `new` passages (the newest first).
+- **Later** = `review` passages with due > today (the soonest first), and `learning`
+  passages already practised today ("Learning · 4 of 12 verses · tomorrow").
+- A `learning` passage practised today leaves Today until tomorrow, so a session ends.
+- `memory_due_on(list, date)` counts what would be in Today on a future date if nothing
+  were practised before then (for §13.5's notification).
+
+#### 13.1.7 Files (Application Support/SmoothBible/, §4.3's conventions)
+- **`memory.tsv`**, rewritten whole after every change:
+  - `PASSAGE\tID\tVERSION\tBOOK\tC1\tV1\tC2\tV2\tADDED\tSTATE\tLEARNED\tBOX\tDUE\tLEVEL`,
+    in the order added. `DUE` is `-` when not set. `LEVEL` is `full`, `some`, `letters` or
+    `blank`.
+  - `NEXT\tID`.
+  - Malformed lines are skipped (§8.9.4). A range over 40 verses or across books is
+    skipped. Duplicate ids keep the first.
+- **`memory-log.tsv`**, appended (§10.7a note 19's `append_file`), never read by the app:
+  `ID\tUNIXTIME\tWHAT\tBOX_BEFORE\tBOX_AFTER\tHELPS\tMISSES`, with WHAT one of `knew`,
+  `mostly`, `notyet`, `part`, `learned`, `start-over`, `deleted`. It's a local record so
+  the gaps can be tuned later from real use. It's never shown, and never leaves the phone.
+- **NSUserDefaults:** `memoryReminder` (bool, off), `memoryType` (bool: the keyboard was
+  last used in Practice, so it comes up again; off), `memorySeen` (bool: Practice's one-time
+  line has been shown; off).
+- **Export (§8.5)** is unchanged. Memory isn't exported this round.
+
+### 13.2 Choosing passages
+
+#### 13.2.1 The tray's seventh action
+- **Memorize** (`brain`, title "Memorize") is appended after Compare (§3.3.3's action row:
+  Copy, Share, Bookmark, Note, Study, Compare, Memorize).
+- **Seven fit by one fitted size.** Shot 130 already shows "Bookmark" clipped at six
+  ("3ookmark"). The row now measures its titles (with a UILabel's `intrinsicContentSize`,
+  as §10.7a note 11) and sets **one** font size for all of them: 11 pt, or the largest size
+  from 11 down to 9 pt, in half-points, at which the longest title fits its button with
+  2 pt to spare. It's measured once per tray width, before the tray appears. Each button
+  stays at least 44 pt wide: on a 375 pt screen each is 46 pt. Images stay 19 pt.
+- **Tapping Memorize** with verses selected:
+  1. A passage is made from the first selected verse to the last (a gap in the selection
+     is filled: "John 3:16, 18" becomes 3:16–18), in the reader's current version, state
+     `new`.
+  2. The selection clears, the tray leaves, a light impact haptic.
+  3. The toast (§3.3.3's style, 1.6 s, `brain` leading): "Added to Memory".
+  4. The log says "bible: memory added: JHN 3:16-17 bsb (id 4)".
+- **More than 40 verses selected:** the action is disabled (faint), with the VoiceOver hint
+  "Memory passages are up to 40 verses."
+- **Memorizing:** when every selected verse lies inside one existing passage, the action
+  reads **Memorizing**, its image tinted accent (as Bookmarked). Tapping it presents
+  Practice for that passage (the newest, if several hold the verses). It never adds a
+  second copy.
+- **Accessibility:** "Memorize", hint "Adds these verses to Memory in the Library."; or
+  "Memorizing", hint "Practises this passage."
+- §2.6 gains "Tray: Memorize / memorizing | `brain` (memorizing: accent)".
+
+#### 13.2.2 Add Passage (for ranges the tray can't make)
+Pushed from the Memory segment's `plus` (§13.4), in the Library's navigation controller.
+insetGrouped, inline title **"Add Passage"**, **Add** on the right (Done style, enabled
+when the reference parses).
+- **Section 1:** one text-field cell (§11.2.3's): placeholder "Psalm 23, Romans 8:28–39",
+  `autocapitalizationType` Words, `returnKeyType` Done (Return = Add), first responder in
+  `viewWillAppear:`. As you type, the footer becomes the parsed reference ("Isaiah
+  52:13–53:12 · 15 verses"), or "Not a passage yet." The footer is updated in place without
+  reloading the section (its footer view's label is set; no flicker).
+- **The parser (§4.2) gains, tested in `test_text.l8`:**
+  - Ranges across chapters: `isa 52:13-53:12`, `isa 52:13–53:12`.
+  - A whole chapter is the chapter's verses: `ps 23` → Psalm 23:1–6 (titles excluded),
+    `ps 117` → 1–2.
+  - `rom 8:28-39`. A range over 40 verses parses, but Add stays disabled and the footer
+    reads "Romans 8–9 · 72 verses. A passage is up to 40 verses."
+- **Section 2, "Version":** one row, value the reader's version ("Berean Standard Bible"),
+  disclosure, pushing a checkmark list of the versions (the ESV only when available,
+  §13.6).
+- **Section 3, "Text":** one row, not selectable, showing the passage in the chosen
+  version, in the body font at 15 pt, up to 8 lines with a tail ellipsis. It changes in
+  place as the reference does, without moving the field.
+- **Add** makes the passage (`new`), pops, and the Memory list shows it under New with a
+  0.2 s fade of the new row.
+
+### 13.3 Practice
+
+#### 13.3.1 Where it opens
+Practice is presented over the Library (or over the reader, from the tray's Memorizing): a
+`UINavigationController`, page sheet, large detent only, grabber visible. Swiping it down
+closes it. Nothing is lost by closing: every part checked and every grade is saved at once
+(principle 4).
+- **Practice** (the Memory segment's toolbar): a session of everything in Today, in
+  §13.1.6's order.
+- **A row tapped:** a session of that one passage, whatever its state. (A `new` passage
+  becomes `learning` when Practice opens it.)
+- **Memorizing** in the tray: that passage alone.
+
+#### 13.3.2 Layout
+Everything below is configured before the sheet rises (principle 6).
+- **Navigation bar:** inline title, the passage's reference ("Psalm 23"; "John 3:16–17").
+  **Done** on the right. On the left, while a session has more than one passage, a plain
+  label "2 of 3" (SF 15, faint) as a custom view. It changes by cross-fade.
+- **Level row:** under the bar, a `UISegmentedControl` [**Full**, **Some**, **Letters**,
+  **Blank**], 16 pt margins, the full width, as the Library's segments row (§2.9). It's
+  target-action ValueChanged.
+- **The passage:** a non-editable, non-selectable `UITextView` in a scroll view, on the
+  theme's `bg`, at the reader's measure and margins, in **the reader's font and size**
+  (so Dynamic Type and the size slider apply).
+  - At the top, a caption in SF 13 semibold, faint: "Psalm 23:1–6 · BSB" (with the version
+    always named, since it may not be the reader's).
+  - Then the words, with poetry's indents and line breaks as the reader draws them, and
+    verse numbers as the reader's (faint, never hidden). No headings, footnote marks,
+    highlights, red letters or note glyphs.
+  - While learning, only the part being learned is ink. Parts already learned are faint
+    (ink at 35%), and parts not reached aren't shown at all (they'd be read by accident).
+- **Toolbar** (the sheet's bottom toolbar, floating on iOS 26), left to right:
+  - **Listen** and **Echo** (images in §13.3.7), plain items;
+  - flexible space;
+  - **Type** (`keyboard` / `keyboard.chevron.compact.down`), a plain item;
+  - flexible space;
+  - the **main button**, Done style: **Next** (learning, below Blank), **Check**, or after
+    Check the judgement row (§13.3.5).
+
+#### 13.3.3 How a hidden word looks (the text never moves)
+- A hidden letter is drawn with its own glyph in the **clear color**, so it keeps its
+  width. A hidden word (or its hidden part, at Letters) has a thin underline
+  (`NSUnderlineStyleSingle`, the theme's `rule` color, at 1.5× the hairline), from its
+  first hidden letter to its last. Punctuation and spaces aren't underlined.
+- **Every level and every reveal is only a change of foreground and underline colors** on
+  the same attributed string's runs. The layout is computed once per passage. Changing the
+  level, showing a word or checking re-sets attributes inside `beginEditing`/`endEditing`
+  (§3.3.2's method), with a `CATransition` fade of 0.2 s on the text view's layer (at once
+  under Reduce Motion). Nothing reflows or jumps.
+- **Showing a word:** a tap on a hidden word (± 6 pt) shows it in ink, with its underline
+  turned to the accent at 50%, which marks it as helped. That's one **help**. A tap on a
+  verse number shows that verse's hidden words (each a help). Helps are only for the
+  suggestion (§13.3.5), never shown as a count.
+- **Check** shows every word: words shown without help in ink with no underline; helped
+  words keep the accent underline; with typing, missed words are ink with a dotted accent
+  underline (`NSUnderlinePatternDot`). So after Check you see where you hesitated.
+
+#### 13.3.4 Learning a passage (state `learning`, part k+1 of n)
+1. **From the beginning** (only when k > 0): the learned parts, at **Letters**. Say them
+   (or type), then **Check**. No judgement is asked: it's a warm-up.
+2. **The new part:** it's shown at **Full**, and the main button is **Next**.
+   - Each Next moves the level one step: Full → Some → Letters → Blank. The segmented
+     control moves with it. You may also move the control yourself, either way.
+   - The first time anyone opens Practice (`memorySeen`), one line in SF 13, faint, sits
+     under the caption: "Read it aloud a few times. Then hide a little more each time."
+     It's never shown again.
+   - At **Blank**, the main button reads **Check**.
+3. **After Check,** the toolbar's main button is replaced (by
+   `setToolbarItems:animated:YES`) with two: **Again** (back to Some for this part) and
+   **Next Verse** (or **Done** if this was the last part, or "Next Passage" in a session
+   with more).
+   - Next Verse records the part learned (§13.1.5) and, when k+1 > 1, first shows the new
+     part **joined with the part before it**, at Blank, to say together, then Check. Then
+     it offers the next part at Full in the same way.
+   - So a sitting can learn as many parts as you like. **Done**, or closing, stops: the
+     passage is due tomorrow and resumes at the next part.
+4. **The last part checked** moves it to review (box 1, due tomorrow), quietly: the next
+   screen is the next passage or the end.
+
+#### 13.3.5 Reviewing a passage (state `review`)
+1. The whole passage at its **level** (default Blank). For a passage of more than one part,
+   it's shown all at once, hidden.
+2. Say it (or type it), showing words as needed. Then **Check**.
+3. **The judgement row** replaces the toolbar's items (`setToolbarItems:animated:YES`):
+   three bordered buttons (`UIButtonConfiguration grayButtonConfiguration`, equal widths, in
+   the toolbar's centre): **Not Yet**, **Mostly**, **Knew It**.
+   - **The suggestion:** one of them is drawn `tintedButtonConfiguration` (accent), from
+     what the app saw:
+     - no helps and no misses → Knew It;
+     - helps plus misses up to one word in ten → Mostly;
+     - more → Not Yet.
+     It's a suggestion only. You tap the one that's true.
+   - Under the toolbar, one faint SF 13 line says what each would do, for the button under
+     the finger only (on touch-down, `UIControlEventTouchDown`): "Next review 2 November",
+     "Next review 26 October", "Again tomorrow". Nothing otherwise.
+   - A tap grades (§13.1.5), gives a selection haptic, and moves on.
+4. **Moving on:** the next passage's caption, text and title cross-fade in (0.25 s; at once
+   under Reduce Motion). The level row takes that passage's level without animation of its
+   own. A Not Yet passage comes once more at the end.
+5. **The end of a session:** the text view is replaced (cross-fade) by two centred lines,
+   in the body font: "That's all for today." and, faint, "Next review: Thursday" (the
+   soonest due of all passages, as a weekday within six days, else "2 November"). The
+   toolbar is empty; Done closes. There's no summary, count or praise.
+   - Practising one passage ends the same way with that passage's next review.
+
+#### 13.3.6 Type (first letters)
+- **Type** shows the keyboard: a run-time `UIView` subclass adopting `UIKeyInput`
+  (`insertText:`, `deleteBackward`, `hasText`, `canBecomeFirstResponder` YES), with
+  `autocorrectionType` No, `autocapitalizationType` None, `spellCheckingType` No and
+  `keyboardType` ASCIICapable (a hardware keyboard works too). The scroll view's bottom
+  inset follows the keyboard (`UIKeyboardWillChangeFrameNotification`, by selector), and
+  the word being typed is kept visible (scrolled with `setContentOffset:animated:YES`).
+- **The word being typed** has its underline in accent (full opacity). Then for each
+  letter or digit typed (anything else is ignored; Backspace does nothing, as words once
+  shown stay shown):
+  - **its key letter:** the word shows in ink, and the next word becomes current;
+  - **wrong, the first time:** nothing changes but a faint cross-fade of the current
+    underline (0.15 s); no sound, no haptic;
+  - **wrong, the second time:** the word shows with its dotted accent underline (a
+    **miss**), and the next word becomes current.
+- After the last word, Check happens by itself (the one automatic step, because there's
+  nothing left to check).
+- Type can be turned off at any time (the keyboard goes; the words shown stay). It's
+  remembered (`memoryType`).
+- **VoiceOver:** each word shown by typing isn't announced (it would be noisy); a miss is
+  announced ("Missed: shepherd"), with `UIAccessibilityAnnouncementNotification`.
+
+#### 13.3.7 Listen and Echo
+These use Round 7's engine (§12.3) for the passage's version, with these differences:
+- **Listen** plays the passage (or, while learning, the part being learned, joined parts
+  included), once, then stops.
+  - With a recording with verse timings (BSB, WEB; `ok` chapters): seek to
+    `audio_time_of(first verse)`, play, and pause when the poll passes the last verse's end
+    of speech (the timing line's last difference) plus 0.3 s. A range across chapters plays
+    the first chapter's tail, then the next chapter's item from its start (verse 1's start
+    less 0.3 s).
+  - Otherwise (the KJV, ASV, YLT, the ESV, a chapter flagged `chapter` or `missing`, or
+    offline without the chapter held): the iPhone voice reads the verses (§12.4.2's
+    choice), one utterance a verse. The ESV's recording isn't used here: without timings it
+    can't start and stop at a verse.
+  - The verse being heard gets the reader's `selection` wash in Practice's text, over the
+    level as it is (hidden words stay hidden, so you can listen along at Letters).
+- **Echo** plays one verse, then pauses for as long as that verse took plus 1 s, then the
+  next, to the end. In the pause the wash leaves the heard verse and its underlines turn
+  accent at 50%: "your turn". Typing during Echo works as usual.
+  - Images: Listen `play.fill`/`pause.fill`; Echo `repeat` (playing: `pause.fill`).
+    VoiceOver: "Listen", "Echo, plays a verse then pauses for you to say it."
+- Speed is Listen's (`listenRate`, §12.0.2 decision 9).
+- **One player.** Starting Listen or Echo stops the reader's Listen if it's playing (its
+  mini player leaves as §8.7). Closing Practice, moving to the next passage, or pressing
+  either button again stops playback. Practice's audio doesn't go on in the background;
+  it pauses when the app does.
+- Now Playing shows the passage ("Psalm 23:1–6", the reader, the version) while it plays.
+- Chapters heard here **never** count for plans or move ribbons (`plan_heard` isn't
+  called).
+- Log: "bible: memory listen JHN 3:16-17 souer from 21.40 s to 38.95 s",
+  "bible: memory echo verse JHN 3:16 pause 9.8 s".
+
+#### 13.3.8 Accessibility, sizes, themes
+- **VoiceOver:** the passage exposes one element per part (`accessibilityElements`), in
+  order, framed to the part's lines. Its label follows the level:
+  - Full: the text.
+  - Some: the text with each hidden word read as "blank".
+  - Letters: "First letters: T, L, i, m, s" (the key letters, comma-separated so each is
+    spoken).
+  - Blank: "Verse 1, hidden".
+  - Custom actions (selector-based): **Show Next Word**, **Show Verse**. Activating the
+    element is Show Next Word.
+  - Helps from these count as taps do.
+- The judgement buttons, Listen, Echo, Type and Check are buttons with plain labels. The
+  "2 of 3" label reads "Passage 2 of 3".
+- **No keyboard is ever needed.** Say-and-Check works by touch, Switch Control and Voice
+  Control (each control has a visible title for Voice Control to name; "Tap Check").
+- **Dynamic Type:** the passage follows the reader's size. Captions, the end screen and the
+  judgement buttons use text styles. At accessibility sizes the judgement row stacks
+  vertically above the toolbar (a vertical `UIStackView`, full width), nothing truncated.
+- **Themes:** Practice uses the theme's `bg`, `ink`, `faint`, `rule`, `accent` and
+  `selection`, and follows a theme change live (it's in the sheet's
+  `overrideUserInterfaceStyle`, as Reading settings).
+- **Reduce Motion:** every cross-fade above becomes immediate.
+
+### 13.4 The Library's Memory segment
+- **Segments:** "Highlights", "Notes", "Bookmarks", **"Memory"** (§2.9's row; four fit at
+  the full width). The chosen segment is remembered as now.
+- **Sections**, configured before the sheet lands or the segment changes:
+  1. **Today** (header "Today"): §13.1.6's Today.
+  2. **New** (header "New").
+  3. **Later** (header "Later").
+  Empty sections aren't shown.
+- **A row** (`subtitleCellConfiguration`, insets as the Library's other rows):
+  - Image: `brain`, accent (17 pt, following the body text style, §11.9 note 13).
+  - Text: the reference, SF 15 semibold, ink, with the version when it isn't the reader's:
+    "Psalm 23 · KJV".
+  - Secondary text: the passage's first words in the body font at 15 pt, ink at 80%, 2
+    lines; then on a third line, SF 13, faint, its state in plain words:
+    - `new`: "New"
+    - due: "To review" (never "overdue", however late)
+    - learning: "Learning · 4 of 12 verses"
+    - learning, done today: "Learning · 4 of 12 verses · tomorrow"
+    - later: "Next review Thursday" (within six days), else "Next review 2 November".
+  - Accessory: the detail button (ⓘ) → Passage (§13.4.1).
+  - **Tap** → Practice for that passage (§13.3.1).
+  - **Swipe to delete** (the system Delete, no confirmation, as bookmarks). Logged in
+    `memory-log.tsv`.
+  - VoiceOver: "Psalm 23, King James Version. Next review Thursday." Custom actions:
+    **Passage Details**, **Delete**.
+- **The Library's search field** filters Memory rows by reference and text, as for the
+  other segments. **Sort** (Bible order or Newest) orders rows within New and Later; Today
+  keeps §13.1.6's order.
+- **Toolbar on Memory** (changed with `setToolbarItems:animated:YES` when the segment
+  changes, as §8.4's compose):
+  - centred, **Practice** (Done style), present only when Today has a passage. VoiceOver:
+    "Practice, 3 passages".
+  - on the right, `plus` → Add Passage (§13.2.2).
+  - Export isn't on this segment (it exports notes and highlights).
+- **Empty state:** `brain`, "No Memory Verses", "Select verses while reading and choose
+  Memorize."
+- **Last section, "Daily Reminder"** (only when there's at least one passage): §13.5's rows.
+
+#### 13.4.1 Passage (pushed by ⓘ)
+insetGrouped, inline title = the reference.
+1. **Text:** the passage in its version (body font, 15 pt, not selectable, up to 12 lines),
+   with the caption "Berean Standard Bible".
+2. **Version:** a disclosure row → the checkmark list. Changing it keeps the state and the
+   schedule (the words are the same passage in other words), recomputes the parts
+   (learning keeps the number of verses learned, rounded down to a part's end), and is
+   logged.
+3. **Schedule:** one row, not selectable: "Next review 2 November" / "Learning · 4 of 12
+   verses" / "New"; secondary "Added 19 October" (faint).
+4. **Open in Reader:** accent text. It dismisses the Library and jumps to the passage's
+   first verse in the reader's version (history, capsule, flash; a jump, so P1 puts a
+   carried ribbon down). It doesn't change the reader's version.
+5. **Start Over:** accent text; §13.1.5. The schedule row changes in place (fade).
+6. **Delete Passage:** centred, systemRed, no confirmation; pops.
+
+### 13.5 The daily reminder, with a second reason
+The notification of §10's owner amendment stays **one a day**. Memory may add to it.
+- **The switch:** the Memory segment's last section, header "Daily Reminder": a switch row
+  **Remind Me to Practise** (`memoryReminder`, off), and while it's on, a **Time** row with
+  the compact `UIDatePicker` (inserted and removed with a fade).
+  - **The time is shared** with the plan's reminder: one value, `planReminderMinutes`
+    (default 7:00 AM), shown and changed in both places.
+  - Footer: "A notification on days a passage is due." While the plan's reminder is on as
+    well: "A notification on days a passage is due. It comes with your reading plan's
+    reminder, at the same time."
+  - **Authorization** is §10.2.3's, unchanged (the shim's one use is this daily reminder,
+    now with two reasons; no new block). Denied: the switch animates back off, the footer
+    becomes "Notifications are turned off for Smooth Bible in Settings." and **Open
+    Settings** appears, as the plan's.
+- **Scheduling** (`reminders_schedule`, replacing the plan's): on every launch, return,
+  either switch, the time, a plan change or progress, **and** a passage added, deleted,
+  started over or graded: remove all pending requests, then for each of the next 30 days
+  at the time:
+  - **plan part:** the plan's reminder is on and the day is within the plan;
+  - **memory part:** Memory's reminder is on and `memory_due_on(day)` > 0;
+  - neither: no request that day.
+- **Content:**
+  | Parts | Title | Body |
+  |---|---|---|
+  | plan only | the plan's name | "Today's reading: John 4–6" (as now) |
+  | memory only | "Memory" | "To review: Psalm 23, John 3:16–17" (references in Today's order, cut at 178 characters with "…"; "and 3 more" when cut) |
+  | both | the plan's name | "Today's reading: John 4–6" then a new line, "To review: Psalm 23, John 3:16–17" |
+  - ids `daily-YYYY-MM-DD` (pending `plan-*` ids are removed with the rest), thread
+    `daily`, userInfo `{"day": N}` and/or `{"memory": 1}`. Default sound.
+  - No scripture text is ever put in a notification (so the ESV's terms are never in
+    question).
+- **Opening one:**
+  - with a plan part: as now (the day's first unread chapter);
+  - memory only: dismiss any sheet, open the Library on Memory (Today at the top). Practice
+    isn't started for you.
+- Log: "bible: reminders 30 days from 2026-10-20 07:00 (plan 0, memory 18)".
+
+### 13.6 The ESV
+Memory may hold ESV passages, within Crossway's terms (§9.4.1, §9.4.5):
+- **The verses of ESV passages are held** in the ESV cache as **pinned** verse records
+  (`Library/Caches/SmoothBible/esv/memory.txt`, the records of those verses only), never
+  evicted while their passage exists.
+- **They count toward the cache's limits:** at most **200** verses pinned for Memory in all
+  (so reading keeps at least 300 of the 500), and the per-book rule (⌊book's verses / 2⌋)
+  counts pinned verses with cached chapters. Pinned verses never break rule 3's memory-only
+  chapters, because only the passage's verses are written.
+- **Adding one that won't fit** (Memorize or Add in the ESV): nothing is added; the toast
+  reads "ESV passages are limited to 200 verses" (or "… to half of Jude"). Add Passage's
+  footer says the same before Add.
+- **Refetched** when older than 30 days and online (§9.4.5 rule 5); offline, the held text
+  is used.
+- **Fetching:** a new ESV passage's verses are fetched when it's added (the chapter
+  request §9.4.4 makes, the records kept only for the passage's verses). Until they arrive,
+  its row reads "Waiting for the ESV…" and Practice shows §9.4.6's loading state; if the
+  server is off or unavailable (`esvAvailable` false), "The ESV isn't available. Change
+  this passage's version in its details." Deleting the passage, or changing its version,
+  unpins its verses at once.
+- Tested in `test_store.l8` (the pin's limits with the cache's rules).
+
+### 13.7 How Memory sits with the rest
+- **Bookmarks, highlights and notes** are untouched, and memory passages don't show among
+  them. A verse can be all four.
+- **Ribbons and plans:** Practice is a sheet; it never moves the reader, never puts a
+  ribbon down, and its listening never counts for a plan. Only Open in Reader is a jump.
+- **History** isn't written by Practice.
+- **Versions:** changing the reader's version doesn't change any passage's.
+- **Listen:** one player for the app (§13.3.7).
+- **Privacy:** nothing new leaves the phone (the ESV's text requests are §9.4's; recordings
+  are §12's). The App Store answer stays **Data Not Collected**; `PrivacyInfo.xcprivacy`,
+  Info.plist and the privacy page don't change (no microphone, no speech recognition).
+
+### 13.8 CI and tests
+
+#### 13.8.1 Linux
+- `test_memory.l8` in `make bible-test`: words and key letters (quotes, "God’s", LORD, dashes,
+  hyphens, numbers and their spoken letters); parts (§13.1.3's examples, in the BSB and the
+  KJV); hiding (Some ⊂ Letters, deterministic by id, the line-start rule); every schedule
+  row (§13.1.5); Today, New and Later, and `memory_due_on`; the reminder's content for a
+  plan only, memory only and both (and the cut at 178); the file's round trip, malformed
+  lines, over-40 and cross-book ranges, `NEXT`.
+- `test_text.l8`: the parser's new forms (§13.2.2).
+- `test_store.l8`: the ESV pins (§13.6).
+
+#### 13.8.2 The `memory` demo group
+A new group in `simulate.sh` and the workflow matrix, on the demo clock (2026-10-19 08:00),
+with the audio fixture (§12.7). Before the first launch it seeds `memory.tsv`:
+- **Philippians 4:6–7** (BSB), review, box 3, due 2026-10-18 (to review);
+- **Romans 8:28–39** (BSB), learning, learned 4 parts (practised yesterday, so due today);
+- **Psalm 23** (KJV), review, box 4, due 2026-11-02;
+- `memorySeen` false, `memoryType` false.
+
+The demo drives taps through the same functions the controls call (`memory_show_word`,
+`memory_type`, `memory_grade`), and logs every add, part, grade and schedule.
+
+| Shot | Action | Expected |
+|---|---|---|
+| `210-tray-memorize` | John 3:16–17 selected | The tray with seven actions, Memorize last; every title whole ("Bookmark", "Compare", "Memorize"), one size |
+| `211-memorize-toast` | Tap Memorize | The toast "Added to Memory"; the log "memory added: JHN 3:16-17 bsb" |
+| `212-tray-memorizing` | Select 3:16 again | The action reads "Memorizing", accent |
+| `213-library-memory` | Library → Memory | Today: Philippians 4:6–7 "To review", Romans 8:28–39 "Learning · 4 of 12 verses"; New: John 3:16–17; Later: "Psalm 23 · KJV", "Next review 2 November". Toolbar: Practice, `plus` |
+| `214-add-passage` | `plus`; the demo types "isa 52:13-53:12" | The footer "Isaiah 52:13–53:12 · 15 verses", Version BSB, the text; Add enabled. (The demo then goes back without adding.) |
+| `215-learn-full` | Tap John 3:16–17 | Practice: "John 3:16–17", Full selected, the caption "John 3:16–17 · BSB", verse 16 only, the one-time line, Listen, Echo, Type, Next |
+| `216-learn-some` | Next | Some: about 40% of 3:16's words underlined blanks; every other word **in exactly the place it had in 215** (the script compares the two shots' text rows) |
+| `217-learn-letters` | Next | Letters: "F G s l t w t H g …" with underlines, same places |
+| `218-learn-blank` | Next | Blank: underlines and punctuation only; Check |
+| `219-show-word` | Tap the word "loved" | "loved" in ink with the accent underline |
+| `220-learn-checked` | Check | All words; "loved" marked; Again and Next Verse |
+| `221-learn-joined` | Next Verse, then (the demo) Next ×3 on verse 17 and Check | 3:16–17 joined at Blank, then Done offered; the log "memory part: JHN 3:16-17 2 of 2", "memory learned: … box 1 due 2026-10-20" |
+| `222-review-type` | Done; Practice (Today: Philippians, Romans) | "1 of 2"; Philippians at Blank; Type on: the keyboard, the demo types the first 14 key letters with one wrong twice: one dotted miss, the current word's accent underline |
+| `223-judgement` | The demo types the rest | Checked by itself; Not Yet, Mostly (suggested, tinted), Knew It |
+| `224-touch-down` | Touch down on Knew It (the demo calls its touch-down action) | The faint line "Next review 2 November" (box 3 → 4, 14 days) |
+| `225-learn-romans` | Tap Mostly | The log "memory graded: PHP 4:6-7 mostly box 3→3 due 2026-10-26"; Romans 8:28–39: verses 28–31 at Letters (warm-up), "2 of 2" |
+| `226-echo` | Check; the new part (8:32) at Full; Echo (fixture: ROM 8 is given the fixture's timings in this group) | Verse 32 washed while heard; then 226b in the pause: the underlines accent, no wash |
+| `227-done-today` | Done, then close and reopen Practice | "That's all for today." and "Next review: Tuesday" (Romans and John due tomorrow, the 20th) |
+| `228-library-after` | Close | Today empty (so no Practice button); Later: Romans "Learning · 5 of 12 verses · tomorrow", John "Next review Tuesday" … |
+| `229-passage` | ⓘ on Psalm 23 · KJV | Its KJV text, Version KJV, "Next review 2 November", Open in Reader, Start Over, Delete Passage |
+| `230-reminder` | The reminder switch on (`demo_grant`) | Remind Me to Practise on, the Time row 7:00 AM, the footer; the log "reminders 30 days from 2026-10-20 07:00 (plan 0, memory …)" and the first request's content |
+| `231-night-letters` | Night theme; Practice John 3:16–17 from its row, Letters | The dark page, underlines in the dark `rule`, the accent current word |
+| `232-ax-practice` | (Accessibility size) Practice, after Check in review | Large text, the judgement row stacked, nothing clipped |
+| `233-ax-memory` | (Accessibility size) Library → Memory | Rows wrap; state lines whole |
+
+- **Recording sequence 15:** Practice on John 3:16 from Full: the level row stepped Full →
+  Some → Letters → Blank → Letters (only colors fade; nothing moves), a word tapped, Check,
+  Next Passage (the cross-fade), the judgement row in and out. Nothing jumps or reflows.
+- **The `notes` or `read` group's 09–12** still pass with the seven-action tray (09 and 10
+  gain "Memorize"; this is the one expected change to earlier shots, with 130's "Bookmark"
+  no longer clipped).
+- **Logs:** "memory added/part/learned/graded/start-over/deleted", "memory listen/echo",
+  "reminders …".
+
+### 13.9 What's deliberately left out, and why
+- **Speech recognition** (say it and the app checks). `SFSpeechRecognizer` with
+  `requiresOnDeviceRecognition` is private and good for everyday English, and its task
+  has a delegate form, but:
+  - live audio needs `AVAudioEngine`'s tap, which is a block, and its authorization is
+    another block (a second shim use);
+  - it needs microphone and speech permissions and a privacy page change;
+  - most of all, it mishears exactly what matters: names (Melchizedek, Zerubbabel), "thee"
+    and "thou" in the KJV, rare words. A recogniser that marks a correctly said verse wrong
+    is worse than none, and fuzzy matching would hide real mistakes. Saying it aloud and
+    checking honestly is how people have always done this, and typing first letters gives
+    the app exact checking when wanted.
+  - It's worth reconsidering if Apple's on-device recognition accepts a custom vocabulary
+    for the passage (iOS 17's `SFSpeechLanguageModel` customisation) and works without
+    blocks. Its own round, if the owner wants it.
+- **Listening to Memory in the background** (a playlist of today's passages, each read
+  twice, for a walk or a drive). It's a good next step built on §13.3.7, deferred to keep
+  this round to one builder's work.
+- **Suggested passages, topic packs, verse-of-the-day-style picks**: not wanted (the
+  owner's taste, and decision 1).
+- **Streaks, totals, progress charts, a "memorized" count, badges, sharing, groups**: not
+  wanted (calm, not casino).
+- **Typing whole words**, reference drills ("Where is this?") and reverse prompts:
+  deferred; first letters and the reference always shown cover most of their value.
+- **A mark in the text** for memorized verses: left out (decision 10). If the owner wants
+  one, a faint dotted underline of the verse number is the quietest candidate.
+- **Cross-chapter selection in the tray:** the tray stays within one chapter (§3.3.1); Add
+  Passage covers longer ranges.
+- **Memory in Export, widgets, the Watch, sync**: out of scope, as for everything else.
+
+### 13.10 Round 9 acceptance
+Approved when:
+1. **Choosing:** Memorize adds from the tray in the reader's version (211); Memorizing shows
+   and opens Practice (212); Add Passage parses cross-chapter ranges and the 40-verse limit
+   (214); every version works offline, the ESV within §13.6's pins (tests).
+2. **The tray:** seven actions, all titles whole at one fitted size on 375 and 393 pt
+   screens (210; 09, 10, 130 no longer clipped).
+3. **Practice:** the four levels as §13.1.4 (215–218); **nothing moves** between levels,
+   reveals and Check (216's comparison; sequence 15); tap to show (219); learning by parts,
+   joined, across days (220, 221, 225, 228); review, typing with misses (222, 223); the
+   judgement row with a suggestion only, and the touch-down line (223, 224); the plain end
+   (227).
+4. **The schedule** is §13.1.5's exactly (tests; 225's and 228's logs). No streak, score,
+   count or praise appears anywhere.
+5. **Listening:** Listen plays exactly the passage; Echo pauses for you (226); the voice
+   stands in where there are no timings; nothing counts for plans or ribbons.
+6. **The Library:** the Memory segment, its sections, rows, toolbar and empty state (213,
+   228); Passage details (229).
+7. **The reminder:** still one notification a day, with Memory's reason only on days
+   something is due, the time shared (230; tests).
+8. **Accessibility:** VoiceOver's elements and actions per level; no keyboard needed; large
+   sizes stack (232, 233); themes (231); Reduce Motion.
+9. Shots 210–233 match; no earlier shot regresses except 09, 10 and 130's tray.
+
+**On a device (the owner):** learn a passage over a few days (Psalm 23 in the BSB, a verse a
+day), review with and without typing, try Echo with Bob Souer on a walk with the screen on,
+and turn the reminder on for a week. Say whether the gaps feel right, and whether anything
+feels like a game.
+
+### 13.11 Questions only the owner can answer
+These are decided above; the owner may overrule:
+1. **Where the list lives:** the Library's fourth segment (decided), or a section in Go To
+   beside the reading plan.
+2. **The default review level:** Blank (decided; hardest, best for memory), or Letters
+   (gentler).
+3. **The tray's seventh action:** Memorize in the tray (decided) makes seven, at a slightly
+   smaller title size. The alternative is Memorize only in the long-press edit menu and Add
+   Passage, which keeps the tray as it is but is harder to find.
