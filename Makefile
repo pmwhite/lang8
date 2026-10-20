@@ -57,7 +57,7 @@ all:
 	@$(MAKE) -s $(OK)/fmt $(OK)/stage1-tests
 	@$(MAKE) -s check
 
-check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(BUILD)/skate $(BUILD)/malton $(BUILD)/race $(OK)/race-tests $(BUILD)/tempo $(OK)/tempo-tests $(BUILD)/tempo-ios.s $(BUILD)/ios-check.s $(BUILD)/tempo-ios-sim $(OK)/bible-tests $(OK)/bible-wasm-tests $(OK)/bible-web $(BUILD)/bible-ios.s $(BUILD)/bible-ios-sim
+check: $(OK)/stage1-tests l8 $(OK)/stdlib-tests $(BUILD)/block-game $(BUILD)/skate $(BUILD)/malton $(BUILD)/race $(OK)/race-tests $(BUILD)/tempo $(OK)/tempo-tests $(BUILD)/tempo-ios.s $(BUILD)/ios-check.s $(BUILD)/tempo-ios-sim $(OK)/bible-tests $(OK)/bible-wasm-tests $(OK)/bible-web $(OK)/dom-test-site $(BUILD)/bible-ios.s $(BUILD)/bible-ios-sim
 
 # ---- compiler stages ----
 
@@ -216,6 +216,13 @@ $(OK)/bible-web: $(BUILD)/bible.wasm web/l8-runtime.js web/dom.js $(wildcard web
 	@touch $@
 
 bible-web: $(OK)/bible-web
+
+# The page bridge's own checks (web/tests/dom.l8), as a site in
+# .build/dom-test: open dom.html and read window.l8_results.
+$(OK)/dom-test-site: l8c3 $(PROGRAMS) web/tests/dom.l8 web/tests/dom.html web/l8-runtime.js web/dom.js | $(OK)
+	@$(STEP) 'dom test site' sh -c 'mkdir -p $(BUILD)/dom-test && ./l8c3 wasm web/tests/dom.l8 -o $(BUILD)/dom-test/dom.wasm && \
+		cp web/tests/dom.html web/l8-runtime.js web/dom.js $(BUILD)/dom-test/'
+	@touch $@
 
 # What the app says aloud, a verse a line (DESIGN.md §12.2.3), for the
 # aligner: make bible-spoken VERSION=bsb (or web).

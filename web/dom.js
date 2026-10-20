@@ -27,6 +27,11 @@ export function domHost() {
   const objects = [null, window, document, document.body, document.head, document.documentElement, location, history];
   const free = [];
   const FIXED = objects.length;
+  objects.forEach((o, h) => {
+    try {
+      if (o) o[HANDLE] = h;
+    } catch {}
+  });
   const hold = (o) => {
     if (o == null) return 0n;
     if (o[HANDLE] !== undefined && objects[o[HANDLE]] === o) return BigInt(o[HANDLE]);
@@ -296,6 +301,10 @@ export function domHost() {
     dom_get_prop_s(h, name, out) {
       const v = obj(h)?.[str(name)];
       return typeof v === "string" ? give(v, out) : -1n;
+    },
+    dom_prop_handle(h, name) {
+      const v = obj(h)?.[str(name)];
+      return v !== null && (typeof v === "object" || typeof v === "function") ? hold(v) : 0n;
     },
     dom_call(h, name) {
       return result(obj(h)[str(name)]());
