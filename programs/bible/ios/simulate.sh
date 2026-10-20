@@ -53,6 +53,13 @@
 #           chapter, the KJV's voice, Downloads, the acknowledgements, the
 #           largest text; and the recording of sequence 14
 #           (listen-transitions.mp4); its log's checks in listen.txt
+#   memory  Round 9 (DESIGN.md §13.8.2), on the demo clock, from a
+#           memory.tsv written before the first launch: the tray's Memorize
+#           and Memorizing, the Library's Memory, Add Passage, a passage
+#           learned in parts, a review typed and judged, Echo (ROM 8 given
+#           the fixture's timings), the end, Passage, the reminder, Night,
+#           the largest text; and the recording of sequence 15
+#           (memory-transitions.mp4); its log's checks in memory.txt
 # Every group has the audio fixture (programs/bible/demo/audio, copied into
 # the app's Library and named by L8_AUDIO_FIXTURE), so no recording is
 # fetched from the network in CI.
@@ -181,6 +188,25 @@ PY
     echo "ribbons group's 1.0 (15) files written"; cat "$data/Library/Application Support/SmoothBible/"*.tsv
   fi
   xcrun simctl spawn "$dev" defaults write "$id" readingsSeeded -bool true 2>/dev/null || true
+fi
+# (The memory group's passages, before the first launch: Philippians
+# 4:6–7 to review (box 3, due yesterday), Romans 8:28–39 learning (four
+# parts, due today), Psalm 23 in the KJV later (box 4, due 2 November);
+# memorySeen and memoryType off; and ROM 8 in the fixture's timings, a
+# verse a second from 2.0 s. DESIGN.md §13.8.2.)
+if [ "$group" = memory ]; then
+  data=$(xcrun simctl get_app_container "$dev" "$id" data 2>/dev/null)
+  if [ -n "$data" ]; then
+    mkdir -p "$data/Library/Application Support/SmoothBible"
+    t=$(python3 -c 'import time; print(int(time.time()) - 5 * 86400)')
+    printf 'PASSAGE\t1\tbsb\tPHP\t4\t6\t4\t7\t%s\treview\t0\t3\t2026-10-18\tblank\nPASSAGE\t2\tbsb\tROM\t8\t28\t8\t39\t%s\tlearning\t4\t0\t2026-10-19\tfull\nPASSAGE\t3\tkjv\tPSA\t23\t1\t23\t6\t%s\treview\t0\t4\t2026-11-02\tblank\nNEXT\t4\n' \
+      "$t" "$((t + 60))" "$((t + 120))" > "$data/Library/Application Support/SmoothBible/memory.tsv"
+    { printf 'ROM\t8\t4000\t0\tok\t200'; i=1; while [ "$i" -lt 39 ]; do printf ' 100'; i=$((i + 1)); done; printf ' 30\n'; } \
+      >> "$data/Library/audio-fixture/fixture.tim"
+    echo "memory group's passages written"; cat "$data/Library/Application Support/SmoothBible/memory.tsv"
+  fi
+  xcrun simctl spawn "$dev" defaults write "$id" memorySeen -bool false 2>/dev/null || true
+  xcrun simctl spawn "$dev" defaults write "$id" memoryType -bool false 2>/dev/null || true
 fi
 # (Every other group: the server as if it were not there, L8_ESV_OFF, so
 # that no shot depends on the network or shows the ESV; review r5-1.)
@@ -880,6 +906,75 @@ listen)
   done
   grep -qF "audio fixture did not advance" "$out/listen.txt" && { echo "FAILED: the fixture did not advance" | tee -a "$out/listen.txt"; failed=1; }
   tail -5 "$out/listen.txt"
+  ;;
+memory)
+  # (DESIGN.md §13.8.2: shots 210 to 233.)
+  step 370 210-tray-memorize 6
+  step_toast 371 211-memorize-toast "Added to Memory"
+  step 372 212-tray-memorizing 6
+  step 373 213-library-memory 8
+  step 374 214-add-passage 8
+  step 375 215-learn-full 8
+  step 376 216-learn-some 6
+  step 377 217-learn-letters 6
+  step 378 218-learn-blank 6
+  step 379 219-show-word 6
+  step 380 220-learn-checked 6
+  step 381 221-learn-joined 10
+  step 382 222-review-type 10
+  step 383 223-judgement 6
+  step 384 224-touch-down 6
+  step 385 225-learn-romans 6
+  step 386 226-echo 6
+  step 387 226b-echo-pause 6
+  step 388 227-done-today 10
+  step 389 228-library-after 8
+  step 390 229-passage 6
+  step 391 230-reminder 8
+  step 392 231-night-letters 10
+  ui content_size accessibility-extra-extra-extra-large
+  step 393 232-ax-practice 10
+  step 394 233-ax-memory 8
+  ui content_size large
+  # The screen recording of sequence 15 (its setup before the mark).
+  step 395 "" 8
+  rec0=$(now)
+  xcrun simctl io "$dev" recordVideo --codec h264 --force "$out/transitions.mp4" > "$out/record.txt" 2>&1 &
+  recorder=$!
+  i=0
+  while ! grep -qi "started" "$out/record.txt" 2>/dev/null && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  rec1=$(now)
+  sleep 6
+  : > "$out/transitions.txt"
+  step 396 "" 20
+  a=$(step_at 396)
+  b=$(now)
+  echo "15 $(python3 -c "print(round($a - $rec0, 2), round($b - $rec0, 2))")" >> "$out/transitions.txt"
+  echo "15 from-started $(python3 -c "print(round($a - $rec1, 2), round($b - $rec1, 2))")" >> "$out/transitions.txt"
+  sleep 0.5
+  kill -INT "$recorder" 2>/dev/null
+  wait "$recorder" 2>/dev/null
+  step 397 "" 6
+  # The log's checks (§13.8.2): each add, part, grade and schedule; the
+  # words in the same places at every level, reveal and Check.
+  grep -h "bible: memory\|bible: practice\|bible: reminder\|bible: scheduled\|bible: tray titles\|bible: add passage\|bible: toast\|bible: demo step\|bible: demo echo\|bible: demo memorizing\|Next review\|Again tomorrow" \
+    "$out/console.txt" > "$out/memory.txt" 2>/dev/null
+  for want in "memory added: JHN 3:16-17 bsb" "toast Added to Memory" "add passage footer Isaiah 52:13" ", 15, Add enabled" \
+      "memory part: JHN 3:16-17 1 of 2" "memory part: JHN 3:16-17 2 of 2" "memory learned: JHN 3:16-17 box 1 due 2026-10-20" \
+      "practice checked, helps 0, misses 1, suggested mostly" "Next review 2 November" \
+      "memory graded: PHP 4:6-7 mostly box 3" "due 2026-10-26" "practice warm-up ROM 8:28-39" \
+      "memory echo verse ROM 8:32" "memory echo pause ROM 8:32" "memory part: ROM 8:28-39 5 of 12" "practice end" \
+      "reminders 30 days from 2026-10-20 07:00" "reminder first:"; do
+    grep -qF "$want" "$out/memory.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/memory.txt"; failed=1; }
+  done
+  # (215 to 220: one layout.)
+  n=$(grep "practice layout" "$out/memory.txt" | head -6 | awk '{print $NF}' | sort -u | wc -l | tr -d ' ')
+  echo "layouts of 215-220: $n different" | tee -a "$out/memory.txt"
+  [ "$n" = 1 ] || { echo "FAILED: the words moved between 215 and 220" | tee -a "$out/memory.txt"; failed=1; }
+  tail -5 "$out/memory.txt"
   ;;
 ios18)
   shot 01-genesis-1

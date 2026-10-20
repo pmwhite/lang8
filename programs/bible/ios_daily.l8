@@ -1267,6 +1267,13 @@ auth_tick(_self: int, _cmd: int, _timer: int): int {
     }
     granted: bool = a == 2;
     note_num("bible: notification authorization answered ", a - 1);
+    // (Memory's switch, DESIGN.md §13.5: the same authorization.)
+    if (auth_why == 3) {
+        nt_denied = !granted;
+        mm_remind_answer(granted);
+        demo_event();
+        return 0
+    }
     if (granted) {
         was: bool = nt_on;
         had_denied: bool = nt_denied;
@@ -1312,34 +1319,61 @@ load_notify_settings() {
     if (nt_minutes <= 0 || nt_minutes >= 1440) nt_minutes = 420
 }
 
-// Every launch, return, and change of the switch, its time, the plan or
-// its progress: the 30 days ahead scheduled again (none without a plan).
+// Every launch, return, and change of either switch, the time, the plan
+// or its progress, and a passage added, deleted, begun again or graded:
+// the 30 days ahead scheduled again (§13.5: one notification a day, the
+// plan's reading and Memory's passages its two reasons).
 daily_reschedule() {
-    if (!nt_on) return;
-    if (pl_active < 0) {
-        center: int = notify_center();
-        if (center != 0) msg(center, sel("removeAllPendingNotificationRequests"));
-        return
-    }
+    if (!nt_on && !mm_reminder) return;
     notify_schedule()
 }
 
 // The app active again: the permission asked again (no prompt now), which
 // flips the switch off if Settings has turned it off; then scheduled.
 daily_active() {
-    if (nt_on && pl_active >= 0) notify_ask(2)
+    if (nt_on && pl_active >= 0 || mm_reminder) notify_ask(2)
 }
 
 notify_schedule() {
     center: int = notify_center();
-    if (center == 0 || pl_active < 0) return;
-    daily_ready();
+    if (center == 0) return;
     msg(center, sel("removeAllPendingNotificationRequests"));
+    plan_on: bool = nt_on && pl_active >= 0;
+    if (!plan_on && !mm_reminder) return;
+    if (plan_on) daily_ready();
     first: int = today();
     if (now_minutes() >= nt_minutes) first = first + 1;
     n: int = 0;
-    for k in 0..30
-        if (notify_add(center, first + k)) n = n + 1;
+    plans_n: int = 0;
+    memory_n: int = 0;
+    for k in 0..30 {
+        d: int = first + k;
+        di: int = -1;
+        if (plan_on) {
+            pd: int = d - pl_start + 1;
+            if (pd >= 1 && pd <= plan_lengths[pl_active]) di = plan_day(pl_active,
+                pd)
+        }
+        mem: bool = mm_reminder && memory_due_on(d) > 0;
+        if (notify_add(center, d, di, mem)) {
+            n = n + 1;
+            if (di >= 0) plans_n = plans_n + 1;
+            if (mem) memory_n = memory_n + 1;
+            if (n == 1 && diag_on) {
+                // (The first request's words, for the demo's log.)
+                for x in 0..fbuf_n
+                    if (fbuf[x] as int == 10) fbuf[x] = 47i8;
+                for x in 0..fbuf_n rm_spare[x] = fbuf[x];
+                at: int = fbuf_n;
+                fbuf_n = 0;
+                fput_str("bible: reminder first: ");
+                for x in 0..rm_title fput(rm_spare[x] as int);
+                fput_str(" | ");
+                for x in rm_title..at fput(rm_spare[x] as int);
+                note_ns(fstring())
+            }
+        }
+    }
     if (diag_on) {
         fbuf_n = 0;
         fput_str("bible: scheduled ");
@@ -1350,6 +1384,19 @@ notify_schedule() {
         put2(nt_minutes / 60);
         fput(58);
         put2(nt_minutes % 60);
+        note_ns(fstring());
+        fbuf_n = 0;
+        fput_str("bible: reminders 30 days from ");
+        fput_iso_date(first);
+        fput(32);
+        put2(nt_minutes / 60);
+        fput(58);
+        put2(nt_minutes % 60);
+        fput_str(" (plan ");
+        fput_int(plans_n);
+        fput_str(", memory ");
+        fput_int(memory_n);
+        fput(41);
         note_ns(fstring())
     }
 }
@@ -1368,23 +1415,36 @@ note_ns(s: int) {
     } with IoError _e -> { }
 }
 
-// The reminder for a day: the plan's name, "Today's reading: John 4â€“6",
-// the plan's day kept to open it. False past the plan's last day.
-notify_add(center: int, day: int): bool {
-    d: int = day - pl_start + 1;
-    if (d < 1 || d > plan_lengths[pl_active]) return false;
+// The reminder for day d (plan_di its day's index, -1: no plan part; mem,
+// Memory's part): the plan's name or "Memory", the day's reading and/or
+// the passages to review (memory.l8's words); no scripture. False if
+// neither.
+notify_add(
+    center: int,
+    d: int,
+    plan_di: int,
+    mem: bool
+): bool {
+    if (!fput_reminder_both(pl_active, plan_di, mem, d)) return false;
     content: int = msg(make("UNMutableNotificationContent"), sel("autorelease"));
-    fbuf_n = 0;
-    fput_plan_name(pl_active);
-    msg1(content, sel("setTitle:"), fstring());
-    fput_reminder(plan_day(pl_active, d));
-    msg1(content, sel("setBody:"), fstring());
-    keys[0] = nsstring("day");
-    values[0] = nsnumber_int(d);
-    msg1(content, sel("setUserInfo:"), nsdictionary(keys, values, 1));
+    msg1(content, sel("setTitle:"), nsstring_of(fbuf, rm_title));
+    for x in rm_title..fbuf_n rm_spare[x - rm_title] = fbuf[x];
+    msg1(content, sel("setBody:"), nsstring_of(rm_spare, fbuf_n - rm_title));
+    n: int = 0;
+    if (plan_di >= 0) {
+        keys[n] = nsstring("day");
+        values[n] = nsnumber_int(d - pl_start + 1);
+        n = n + 1
+    }
+    if (mem) {
+        keys[n] = nsstring("memory");
+        values[n] = nsnumber_int(1);
+        n = n + 1
+    }
+    msg1(content, sel("setUserInfo:"), nsdictionary(keys, values, n));
     msg1(content, sel("setSound:"), msg(cls("UNNotificationSound"), sel("defaultSound")));
-    msg1(content, sel("setThreadIdentifier:"), nsstring("plan"));
-    civil_date(day);
+    msg1(content, sel("setThreadIdentifier:"), nsstring("daily"));
+    civil_date(d);
     parts: int = msg(make("NSDateComponents"), sel("autorelease"));
     msg1(parts, sel("setYear:"), date_y);
     msg1(parts, sel("setMonth:"), date_m);
@@ -1393,14 +1453,22 @@ notify_add(center: int, day: int): bool {
     msg1(parts, sel("setMinute:"), nt_minutes % 60);
     trigger: int = msg2(cls("UNCalendarNotificationTrigger"), sel("triggerWithDateMatchingComponents:repeats:"),
         parts, 0);
+    // (fbuf kept for the caller's log: the id made apart.)
+    keep_n: int = fbuf_n;
+    for x in 0..keep_n nf_spare[x] = fbuf[x];
     fbuf_n = 0;
-    fput_str("plan-");
-    fput_iso_date(day);
+    fput_str("daily-");
+    fput_iso_date(d);
+    id: int = fstring();
+    fbuf_n = 0;
+    for x in 0..keep_n fput(nf_spare[x] as int);
     request: int = msg3(cls("UNNotificationRequest"), sel("requestWithIdentifier:content:trigger:"),
-        fstring(), content, trigger);
+        id, content, trigger);
     msg2(center, sel("addNotificationRequest:withCompletionHandler:"), request, 0);
     true
 }
+
+nf_spare: []i8 = new i8[1024](0i8);
 
 // ---- a reminder opened ----
 notify_obj: int = 0;
@@ -1431,7 +1499,8 @@ notify_opened(
     info: int = msg(msg(msg(msg(response, sel("notification")), sel("request")), sel("content")),
         sel("userInfo"));
     day: int = if (info != 0) msg1(info, sel("objectForKey:"), nsstring("day")) else 0;
-    if (day != 0) notify_open_day(msg(day, sel("longValue")));
+    mem: int = if (info != 0) msg1(info, sel("objectForKey:"), nsstring("memory")) else 0;
+    if (day != 0) notify_open_day(msg(day, sel("longValue"))) else if (mem != 0) memory_reminder_opened();
     call_block(handler);
     0
 }
@@ -1460,7 +1529,7 @@ daily_reader_up() {
     // the switch off or no plan (an older build's verse of the day, or a
     // stopped plan's), and the plan's scheduled again with it on; and the
     // verse of the day's delivered ones put away. Review r5-1.)
-    if (!nt_on || pl_active < 0) {
+    if ((!nt_on || pl_active < 0) && !mm_reminder) {
         center: int = notify_center();
         if (center != 0) {
             msg(center, sel("removeAllPendingNotificationRequests"));
@@ -1492,7 +1561,9 @@ reminder_off() {
     set_def_bool("planReminder", false);
     center: int = notify_center();
     if (center != 0) msg(center, sel("removeAllPendingNotificationRequests"));
-    daily_switch = held(daily_switch, 0)
+    daily_switch = held(daily_switch, 0);
+    // (Memory's reason stays.)
+    daily_reschedule()
 }
 
 // ---- the reminder's rows (first in the plan followed's days) ----
@@ -1568,6 +1639,7 @@ daily_switched(_self: int, _cmd: int, sw: int): int {
     set_def_bool("planReminder", false);
     center: int = notify_center();
     if (center != 0) msg(center, sel("removeAllPendingNotificationRequests"));
+    daily_reschedule();
     if (detail_table != 0 && detail_wk0() == 1) {
         one[0] = msg2(cls("NSIndexPath"), sel("indexPathForRow:inSection:"), 1, 0);
         msg2(detail_table, sel("deleteRowsAtIndexPaths:withRowAnimation:"), nsarray(one,
@@ -1584,6 +1656,7 @@ daily_time(_self: int, _cmd: int, picker: int): int {
     m: int = msg2(cal, sel("component:fromDate:"), 64, date);
     nt_minutes = h * 60 + m;
     set_def_int("planReminderMinutes", nt_minutes);
+    note_num("bible: reminder time minutes ", nt_minutes);
     daily_reschedule();
     0
 }
@@ -1619,4 +1692,14 @@ add_daily_methods(app: int) {
     add_method1(app, sel("authTick:"), &auth_tick, "v@:@");
     add_method1(app, sel("dailySwitched:"), &daily_switched, "v@:@");
     add_method1(app, sel("dailyTime:"), &daily_time, "v@:@")
+}
+
+// A reminder with only Memory's reason opened: the Library on Memory, Today
+// at the top (Practice not begun for you).
+memory_reminder_opened() {
+    note("bible: memory reminder opened");
+    if (!restored) return;
+    if (presented() != 0) demo_dismiss();
+    set_def_int("librarySegment", 3);
+    open_library()
 }
