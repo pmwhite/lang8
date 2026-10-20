@@ -1055,7 +1055,7 @@ memory)
   tail -5 "$out/memory.txt"
   ;;
 languages)
-  # (DESIGN.md §14.9.2: shots 240 to 269.)
+  # (DESIGN.md §14.9.2: shots 240 to 269; §14.10b.5: 246b and 249b.)
   step 400 240-interlinear-link 10
   step 401 241-greek-new 8
   step 402 242-alphabet 6
@@ -1066,7 +1066,9 @@ languages)
   step 407 247-add-preview 6
   step 408 248-word-new 10
   step 409 249-word-front 10
+  step 436 249b-word-answer 6
   step 410 250-greek-started 10
+  step 435 246b-add-related 8
   step 411 251-interlinear-hidden 10
   step 412 252-tile-shown 6
   step 413 253-word-study-yours 8
@@ -1120,7 +1122,7 @@ languages)
   for want in "learn added G:alpha from alphabet" "learn shown G:alpha new" "learn card G:alpha knew box 1→2" \
       "learn preview most common, words 10" "toast 10 words added" "learn added G3588 from freq" "learn shown G3588 new, context PHP 4:7" \
       "learn known G3588 box 4" "learn hide JHN 3:16 known 21 of 25 translit hidden" "learn shown in the interlinear ēgapēsen" \
-      "learn forms G25" "learn pronunciation 1" "learn readable" "learn hide PSA 23:1" "learn voice el-GR" \
+      "learn forms G25" "learn pronunciation 1" "learn readable" "learn hide PSA 23:1" "learn answer G3004" "learn add words, related" \
       "learn practise reading, words 10" "reminder first:"; do
     grep -qF "$want" "$out/languages.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/languages.txt"; failed=1; }
   done
@@ -1130,6 +1132,8 @@ languages)
   echo "John 3:16's tiles: 240 $t240, 251 $t251" | tee -a "$out/languages.txt"
   [ -n "$t240" ] && [ "$t240" = "$t251" ] || { echo "FAILED: the tiles moved between 240 and 251" | tee -a "$out/languages.txt"; failed=1; }
   grep -q "reminder first:.*Greek word" "$out/languages.txt" || { echo "FAILED: the reminder has no Greek words" | tee -a "$out/languages.txt"; failed=1; }
+  # (No synthesized Greek or Hebrew, §14.10b.1.)
+  if grep -q "learn voice\|learn speak" "$out/languages.txt"; then echo "FAILED: Greek or Hebrew spoken" | tee -a "$out/languages.txt"; failed=1; fi
   tail -5 "$out/languages.txt"
   ;;
 help)

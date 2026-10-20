@@ -26,8 +26,10 @@ vowel, the pair or the joined word, and the first verse where the lemma's
 own form occurs), from which data/lang/letters.txt's examples were chosen
 by hand. With --check DATA it reads vocab.bin and letters.txt and checks
 them: G3588 first, the names flagged (G2424), every letter a sound in each
-of its language's pronunciations, every example a lemma of vocab.bin's,
-its form marked and its verse holding it; it exits 1 if one fails.
+of its language's pronunciations, every Erasmian and Israeli sound (the
+first) written against an English word, "b as in bat" (§14.10b.1), every
+example a lemma of vocab.bin's, its form marked and its verse holding it;
+it exits 1 if one fails.
 
     python3 -I learn.py --check DATA
 """
@@ -391,6 +393,8 @@ def check(data):
             bad.append("%s %s: %d sounds" % (lang, ident, len(sounds.split("|"))))
         if not all(x.strip() for x in sounds.split("|")) or not name or not speak:
             bad.append("%s %s: an empty field" % (lang, ident))
+        if " as in " not in sounds.split("|")[0]:
+            bad.append("%s %s: %s has no \"as in\"" % (lang, ident, sounds.split("|")[0]))
         num = int(key[1:]) if key[1:].isdigit() else -1
         if key[:1] != lang or (lang, num) not in flags:
             bad.append("%s %s: %s is not one of vocab.bin's lemmas" % (lang, ident, key))

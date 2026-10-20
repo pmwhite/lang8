@@ -89,19 +89,24 @@ read aloud by VoiceOver as it would be in the phone's own apps.
 - Greek and Hebrew (Round 10): a page per language, from Memory's
   Languages section or the interlinear's Learn Greek (Learn Hebrew) link,
   says in one sentence how much of its Testament the words you know make
-  up. The Alphabet shows each letter's sound in the pronunciation chosen
-  (Erasmian, Koine or Modern Greek; Israeli or Tiberian Hebrew) and an
-  example, spoken by the iPhone's Greek or Hebrew voice; letters are
-  learned eight at a time, and Practise Reading gives common words of the
-  letters known to sound out. Add Words offers the next ten most common
-  words, or a passage's you read, carry a ribbon in or memorize; words
-  are cards on Memory's schedule, each shown in a verse you care about,
-  in Memory's Today and its reminder. In Greek or Hebrew Order the
+  up. The Alphabet shows each letter's sound written against an English
+  word ("b as in bat"), as Sounds Written As chooses (Erasmian, Koine or
+  Modern Greek; Israeli or Tiberian Hebrew), and an example; nothing is
+  spoken (§14.10b: the code waits behind `LEARN_SPEECH` for commissioned
+  recordings). Letters are learned eight at a time, and Practise Reading
+  gives common words of the letters known to read to yourself, Check
+  showing the transliteration. Add Words offers the next ten most common
+  words, words related to ones you know, or a passage's you read, carry
+  a ribbon in or memorize; words are cards on Memory's schedule, each
+  shown in a verse you care about and asking what it means there (the
+  answer: the BSB's words for it in that verse, the sense, the verse, and
+  related words you know), in Memory's Today and its reminder. In Greek or Hebrew Order the
   interlinear hides the English of the words you know (and the
   transliteration once you know the alphabet), nothing moving; a tap
   shows it. A word study gains Learn This Word and Forms (the lemma's
-  forms as the Bible has them, a tap their concordance); Verses You Can
-  Read lists the verses whose every word you know.
+  forms as the Bible has them, each with the BSB's commonest rendering, a
+  tap their concordance); Verses You Can Read lists the verses whose
+  every word you know, first on the page once the alphabet is known.
 - The manual and quick tips (§15): a tip at the top of Go To, one
   sentence with More (the manual at its part), Next and sometimes an
   action (New Ribbon…, Reading Plans, Open Memory…); the same tip all day,
@@ -155,8 +160,9 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   Practice (`memory.l8` their portable part: words and key letters, parts,
   hiding, the schedule, Today, the files and the reminder's words, tested
   in `test_memory.l8`); `ios_learn.l8` Greek's and Hebrew's pages (the
-  language page, Pronunciation, the Alphabet, Your Words, Add Words and its
-  preview, Verses You Can Read, Forms), cards.tsv and the voices, and
+  language page, the Alphabet and Sounds Written As, Your Words, Add Words
+  and its preview, Verses You Can Read, Forms), cards.tsv and the voices
+  (off, behind `LEARN_SPEECH`), and
   `ios_cards.l8` cards and Practise Reading in Practice (`learn.l8` their
   portable part: vocab.bin and letters.txt, cards on `memory.l8`'s
   schedule, what is known, coverage, a passage's words, readable verses,
