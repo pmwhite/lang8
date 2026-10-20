@@ -373,8 +373,11 @@ the tray use `cellBg` in every theme.
   Dynamic Type; Reading settings says "Also follows the browser's text size."
 - Every size in §2.3's table becomes the same `em` multiple; line height from the spacing
   setting (1.18, 1.32, 1.48); paragraph spacing 0.55 em; `hyphens: auto` with `lang="en"`
-  (the browser's hyphenation dictionaries; no factor control exists, so it is on for
-  prose and poetry alike, and §W16 lets the owner turn it off if the rag looks wrong).
+  for prose only, limited to words of 8 letters or more and never two lines in a row
+  (`hyphenate-limit-chars: 8 4 4`; Safari's `-webkit-hyphenate-limit-before/after: 4`
+  and `-webkit-hyphenate-limit-lines: 1`), the nearest the web has to the iPhone's 0.3
+  factor; poetry, lists and centred lines `hyphens: manual` (amended in REVIEW-web-a1,
+  m5).
 - Small caps for LORD: `font-variant-caps: small-caps` where the font has them, else
   `font-synthesis-small-caps` (the browser synthesizes them, as §2.2 does for Georgia).
 - Verse numbers: the chrome font's tabular figures, 0.58 em, weight 600, `faint`,
@@ -543,6 +546,67 @@ chapter, a manual page, a mistyped book), it answers with `read/shell.html` and 
 the cache headers of §W1.9 and the security headers of §W12.7 on everything under
 `/read/`.
 
+### W2.1a The Worker's changes, exactly (REVIEW-web-a1, 2026-10-20)
+
+**Part 1, for phase (a): `/read/`.** One commit, "Smooth Bible: worker — /read/", made by
+the web builder; deploying it is the owner's step.
+1. **Routing,** in `fetch`, after the `www` redirect and before the API:
+   - `/read` → `301` to `/read/`.
+   - A path starting `/read/` → `read(request, env, url)`:
+     1. `r = await env.ASSETS.fetch(request)`.
+     2. If `r.status === 404` and the path matches `READER`, answer
+        `env.ASSETS.fetch(new Request(new URL("/read/shell", url), request))` with
+        status 200 and `X-Robots-Tag: noindex`.
+     3. Otherwise `r` as it is (a page, a file, or the site's 404 page with status 404).
+   - `READER = /^\/read\/(?:(?:bsb|kjv|web|asv|ylt|esv)(?:\/[a-z0-9-]+(?:\/\d{1,3})?)?\/?|search|plans\/[a-z0-9-]+\/\d{1,3}|manual(?:\/[a-z0-9-]+)?|[A-Za-z0-9.:%-]{1,40})$/`:
+     a version's chapter or book, search, a plan's day, the manual, or one short
+     passage-like segment (`/read/jn3%3A16`) for the app to make canonical.
+2. **Headers** on every `/read/` answer (copied into a new `Response`; a 304 keeps them
+   too):
+   - All: `X-Content-Type-Options: nosniff`, `Referrer-Policy:
+     strict-origin-when-cross-origin`, `Permissions-Policy: screen-wake-lock=(self),
+     camera=(), microphone=(), geolocation=()`.
+   - HTML (`content-type` `text/html`): §W12.7's `Content-Security-Policy` with
+     `'${BOOT_HASH}'`, and `Cache-Control: public, max-age=0, must-revalidate`.
+   - Hashed files (the path ends `.<10 hex>.css|js|wasm|svg|gz|woff2`) and everything
+     under `/read/data/` and `/read/fonts/`: `Cache-Control: public, max-age=31536000,
+     immutable`.
+   - `/read/sw.js` (phase f): `Cache-Control: no-cache` and `Service-Worker-Allowed: /read/`.
+   - Pages outside `/read/` (the marketing site) and `/api/` keep exactly what they send
+     now.
+3. **The boot script is the same in every build,** so its CSP hash can be committed:
+   - The page carries the hashed names in its head:
+     `<meta name="sb-app" content="bible.<hash>.js">`.
+   - The boot script imports `"/read/" + that meta's content`, not a name filled in by
+     the build.
+   - `build.py` inlines `web/bible/boot.js` byte for byte, and writes
+     `programs/bible/worker/boot_hash.js` (`export const BOOT_HASH = "sha256-…";`), which
+     is committed.
+   - `test.mjs` recomputes the hash from `boot.js` and fails if the two differ.
+4. **`wrangler.toml`:** `[assets] directory = "../../../.build/bible-site"`. `build.py`
+   copies `programs/bible/site/` into it, leaving out `DESIGN.md`.
+5. **`test.mjs` cases** (with an `ASSETS` stand-in as `serve.mjs` has):
+   - `/read` gives 301;
+   - `/read/bsb/john/3` gives the page with the CSP and `must-revalidate`;
+   - `/read/esv/john/3` and `/read/kjv/ps/23` give the shell, 200 and `noindex`;
+   - `/read/a/b/c/d` gives 404;
+   - a hashed `.wasm` is `immutable`;
+   - `/` and `/api/v1/status` are unchanged.
+6. **`serve.mjs`** drops its own routing in front of the Worker.
+
+**Part 2, for phase (b), before the web offers the ESV: the web's share of the budget**
+(§W12.6).
+- **Who is the web:** a request whose `X-Smooth-Bible` begins `web ` is the web's.
+- **Counting:** `spend` counts a web request in the shared buckets as now, and in one
+  more bucket in the same `INSERT`:
+  - `w:YYYY-MM-DD` for text, `x:YYYY-MM-DD` for audio;
+  - both prefixes are two characters, so the day's clean-up (`substr(bucket, 3, 10)`)
+    still covers them.
+- **Limits:** `WEB_BUDGET = { day: 1500 }` and `WEB_AUDIO_BUDGET = { day: 1000 }`. Past
+  them, a web request gets `503 daily_limit`, with `retry` to the day's end.
+- **Tests:** the 1,501st web text request of a day gets `daily_limit` while an iPhone
+  request still passes, and the same for audio at 1,001.
+
 ### W2.2 The URLs
 
 | URL | What | Made by |
@@ -559,8 +623,8 @@ the cache headers of §W1.9 and the security headers of §W12.7 on everything un
 | `/read/manual/`, `/read/manual/ribbons` | The manual (§15), as pages | Prerendered from `help.txt` (phase c) |
 | `/read/about` | Acknowledgements, the ESV's copyright page, credits, Privacy link (§W12.8) | Prerendered |
 
-- **Book names** are lower-case full names with hyphens: `genesis`, `1-samuel`,
-  `song-of-songs`, `psalms`, `1-john`, `revelation`. A one-chapter book still has `/1`
+- **Book names** are the BSB's names in lower case with hyphens: `genesis`, `1-samuel`,
+  `song-of-solomon`, `psalms`, `1-john`, `revelation` (REVIEW-web-a1). A one-chapter book still has `/1`
   (`/read/bsb/jude/1`); `/read/bsb/jude` goes there.
 - **The version is always in the URL,** so a shared link shows what the sharer saw. The
   first-time default is the BSB.
@@ -707,7 +771,9 @@ way to read the Bible on the web than most, and links to it can be shared. Navig
 3. On a page whose version isn't the reader's saved version, it does nothing: the URL
    wins (a shared KJV link shows the KJV), and the reader's version becomes the KJV only
    if they then change the version themselves (phase b).
-4. Tests WebAssembly support (§W1.1), then loads `bible.<hash>.js` as a module.
+4. Tests WebAssembly support (§W1.1), then loads the app as a module, its hashed name read
+   from `<meta name="sb-app">` so the script itself never changes between builds
+   (§W2.1a).
 5. A fragment (`#16`): once the article is parsed, scrolls verse 16 to one third down the
    space under the bar and adds `flash` (§2.7), so a shared verse link lands right even
    before the app has started.
@@ -764,9 +830,10 @@ own verse's lines, below where the eye is.
 - **Expanded:** 44 px (plus the top safe area): Search on the left, the title in the
   middle ("John 3" with a small chevron, linking to the book index in (a) and opening Go
   To from (b)), Library and Aa on the right (Library from phase c). 17 px semibold title,
-  icons in ink at 85%, 44 × 44 px targets. A backdrop of `bg` at 92% with
-  `backdrop-filter: blur(20px)` and an 18 px fade below it into the page; a `rule`
-  hairline when collapsed.
+  icons in ink at 85%, 44 × 44 px targets. A backdrop of the theme's `bg`, **opaque**,
+  with no blur (amended in REVIEW-web-a1, M3: at 92% the lines under it stayed legible
+  and fought the compact title), and an 18 px fade below it from `bg` to transparent; a
+  `rule` hairline when collapsed.
 - **Collapsed:** 20 px tall: the title alone, scaled to 12/17 and at 75% ink, centred.
   The icons fade out (`opacity: 1 − 1.6p`, `scale: 1 − 0.5p`) and stop taking clicks
   past `p = 0.5`.
