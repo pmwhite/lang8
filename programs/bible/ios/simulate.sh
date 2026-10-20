@@ -1091,7 +1091,7 @@ languages)
   sleep 2
   : > "$out/transitions.txt"
   step 432 "" 20
-  sleep 9
+  sleep 13
   a=$(step_at 432)
   b=$(now)
   echo "16 $(python3 -c "print(round($a - $rec0, 2), round($b - $rec0, 2))")" >> "$out/transitions.txt"

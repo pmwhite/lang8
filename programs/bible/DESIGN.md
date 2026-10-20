@@ -7587,6 +7587,14 @@ names and Aramaic flagged, as §14.7 asks.
 15. **Ὁ's first verse is Philippians 4:7**, not §14.9.2's 4:6: in 4:6 its article is not
     translated (only occurrences where the word is translated count, §14.1.7).
 
+**After review r10-1** (its five Minors): a session tells a new card's return for its first
+judgement (graded; back once more at the end on Not Yet) from a Not Yet's retry (nothing
+changed, logged "again, nothing changed", as a passage's), in `learn.l8`'s `learn_judged`,
+tested; letter cards' one-time line is "Say its name and sound, then Check."; וְ's example is
+Genesis 1:2's וְהָאָרֶץ; lists, cards and the Alphabet show a STEP gloss's part before its
+colon ("son"), the word study's Meaning the whole; sequence 16 grades its card, the row
+going out, then rests.
+
 **What needs a real phone:** the Greek and Hebrew voices (CI has none, so nothing speaks and
 the Speak switches are disabled there); the letter names spoken by them, and whether the modern
 Greek voice helps beside the Erasmian table; VoiceOver in Greek and Hebrew (the
