@@ -6485,9 +6485,10 @@ segment, Add Passage and Passage; `ios_practice.l8` is Practice; `ios_demo8.l8` 
 **Deviations, each with its reason:**
 1. **The tray's one size is fitted to the default titles** (Copy … Compare, Memorize), not
    to the state titles. "Bookmarked" and "Memorizing" are longer, and fitting to them would
-   make all seven smaller only so that a state title fits. A state title may instead shrink
-   to 80% within its own button (`adjustsFontSizeToFitWidth`, `minimumScaleFactor` 0.8),
-   and only when it doesn't fit at the fitted size. The fit is logged ("tray titles at …
+   make all seven smaller only so that a state title fits. A state title instead gets a
+   size of its own in its button, the largest from the one size down to 80% of it at which
+   it fits (measured as the one size is; not `adjustsFontSizeToFitWidth`, which clipped an
+   attributed title rather than shrinking it). The fit is logged ("tray titles at …
    tenths of a point, room …").
 2. **Sort in Memory:** the Library's Sort menu ("Bible Order", "Newest First") orders New
    and Later. With Bible Order (the Library's default), Later is in Bible order, not
@@ -6566,9 +6567,19 @@ segment, Add Passage and Passage; `ios_practice.l8` is Practice; `ios_demo8.l8` 
 18. **A new part, or the two joined, is scrolled into sight** (`scrollRangeToVisible:`)
     when its step begins. In a long passage the new part can begin low on the page,
     under the floating toolbar (Romans 8:32 in 226).
-19. **The tray's buttons have no side insets** (0 pt, not 1). Their insets grow with the
-    text size, and at the accessibility sizes 1 pt grew enough to clip "Bookmark" and
-    "Memorize" at 9 pt (130). The fit leaves 2 pt to spare in the button's whole width.
+19. **At the accessibility sizes the tray's titles may be 8 pt.** There a button gives its
+    title about 4 pt less than its width (130 clipped "Bookmark" and "Memorize" at 9 pt,
+    with 1 pt side insets and with none), so the fit's room is 4 pt less and its floor 8 pt
+    rather than 9. The buttons' side insets are 0 (they were 1).
+20. **The current word's accent underline shows only while the keys are up.** With Type
+    remembered on but the keyboard down (after an automatic Check, or on the next
+    passage), the first word was marked as if being typed (226).
+21. **At the accessibility sizes the stacked judgement row has the page's color behind
+    it** (12 pt above the buttons), so the text doesn't show through the gray buttons'
+    fills (232); the text's bottom inset lets it scroll clear.
+22. **The one-time line is kept for the sheet's first passage** when its text is made
+    again (a theme or text size changed while Practice is open). It was dropped on a
+    rebuild, since `memorySeen` was already set, and the words moved up a line.
 
 ---
 
