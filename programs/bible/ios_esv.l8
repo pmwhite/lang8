@@ -567,6 +567,8 @@ esv_askable(c: int, on_screen: bool): bool {
 esv_pump() {
     if (esv_inflight >= 0 || text_cur != TEXT_ESV || table == 0) return;
     if (CACurrentMediaTime() < esv_hold_until) return;
+    // (A plan's day: its passages' chapters, those on the screen first.)
+    if (day_on && day_esv_pump()) return;
     esv_visible_rows();
     note_num("bible: esv pump, on screen from ", ec_vis_lo);
     note_num("bible:   to ", ec_vis_hi);
@@ -756,6 +758,10 @@ esv_reader_wants() {
 // The rows on the screen, told to the cache, nothing let go yet.
 esv_visible_rows() {
     if (table == 0 || text_cur != TEXT_ESV) return;
+    if (day_on) {
+        day_visible_chapters();
+        return
+    }
     paths: int = msg(table, sel("indexPathsForVisibleRows"));
     if (paths == 0) return;
     lo: int = -1;
@@ -775,15 +781,17 @@ esv_visible_now() {
     paths: int = msg(table, sel("indexPathsForVisibleRows"));
     lo: int = -1;
     hi: int = -1;
+    t: int = time(0);
     if (paths != 0) {
         for i in 0..msg(paths, sel("count")) {
-            r: int = msg(msg1(paths, sel("objectAtIndex:"), i), sel("row"));
-            if (lo < 0 || r < lo) lo = r;
+            // (A day's rows: their chapters, which need not be in a row.)
+            r: int = row_chapter(msg(msg1(paths, sel("objectAtIndex:"), i), sel("row")));
+            if (day_on && r >= 0) esv_touch(r, t);
+            if (r >= 0 && (lo < 0 || r < lo)) lo = r;
             if (r > hi) hi = r
         }
     }
-    t: int = time(0);
-    if (lo >= 0) {
+    if (lo >= 0 && !day_on) {
         for c in lo..hi + 1 esv_touch(c, t)
     }
     was: int = ec_n;
@@ -837,6 +845,14 @@ esv_arrived(c: int) {
     preview_esv_arrived(c);
     listen_esv_arrived(c);
     if (text_cur != TEXT_ESV || table == 0) return;
+    // (A plan's day: its rows of the chapter made again, the place kept, at
+    // rest.)
+    if (day_on) {
+        if (day_row_first(c) < 0) return;
+        if (reader_moving()) esv_refresh_due = true else day_esv_reload();
+        esv_visible_now();
+        return
+    }
     moving: bool = reader_moving();
     tv: int = view_of(c);
     top: f64 = offset_y(table) + top_inset(table);
@@ -907,6 +923,13 @@ esv_in_rest: bool = false;
 
 esv_rest() {
     if (text_cur != TEXT_ESV || table == 0 || esv_in_rest) return;
+    if (day_on) {
+        if (esv_refresh_due) {
+            esv_refresh_due = false;
+            day_esv_reload()
+        }
+        return
+    }
     esv_in_rest = true;
     if (esv_pending_n > 0) {
         note_num("bible: esv rest pending ", esv_pending_n);
@@ -992,7 +1015,7 @@ esv_footer_h(): f64 {
 // words: text 5 was made again, and a footnote's mark says where its note is
 // in it).
 esv_refresh_others(c: int) {
-    if (table == 0) return;
+    if (table == 0 || day_on) return;
     paths: int = msg(table, sel("indexPathsForVisibleRows"));
     if (paths == 0) return;
     for i in 0..msg(paths, sel("count")) {
@@ -1054,7 +1077,7 @@ esv_dress(tv: int, c: int) {
     msg1(sp, sel("setColor:"), c_faint);
     // (Under the opener: its height as set, under the row's top inset,
     // and 48 pt, less the numeral's own space after it.)
-    y: f64 = (if (c == 0) top_gap() else em * 2.4f64) + esv_open_h[c] + 48.0f64 - em * 0.9f64;
+    y: f64 = (if (day_on) day_row_gap(chapter_row(c)) else if (c == 0) top_gap() else em * 2.4f64) + esv_open_h[c] + 48.0f64 - em * 0.9f64;
     // (Centered on the row's width, the table's: a new row's text view is
     // not yet as wide as the row it is laid out in.)
     w: f64 = view_width(table);
@@ -1121,13 +1144,18 @@ ESV_BSB: int = 2;
 
 ESV_SITE: int = 3;
 
+ESV_VERSION: int = 4;
+
 esv_tapped(c: int, what: int) {
     if (what == ESV_TRY) {
         esv_state[c] = 0;
         esv_hold_until = 0.0f64;
         esv_want(c, 1);
         esv_show_state(c)
-    } else if (what == ESV_BSB) switch_version(TEXT_BSB) else if (what == ESV_SITE) esv_site(c)
+    } else if (what == ESV_BSB) switch_version(TEXT_BSB) else if (what == ESV_SITE) esv_site(c) else if (what == ESV_VERSION) {
+        open_settings();
+        _t: int = after(0.5f64, "dayVersions:")
+    }
 }
 
 // esv.org's page of chapter c (John+3), in Safari's own view.
@@ -1224,14 +1252,17 @@ esv_placeholder(s: int, c: int) {
     if (st >= ESV_OFFLINE) {
         msg1(s, sel("appendAttributedString:"), attributed_str(nsstring("\n"), esv_attrs(size,
             c_faint, 0, 0.0f64)));
-        line: str = if (st == ESV_OFFLINE) "The ESV needs an internet connection." else if (st == ESV_BUSY) "Many people are reading the ESV just now. It will try again in a minute." else if (st == ESV_DAILY) "The ESV has reached its daily limit for Smooth Bible. It will be back tomorrow." else "The ESV isn\â\€\™t available right now.";
+        line: str = if (st == ESV_OFFLINE && day_on) "This passage needs a connection in the ESV." else if (st == ESV_OFFLINE) "The ESV needs an internet connection." else if (st == ESV_BUSY) "Many people are reading the ESV just now. It will try again in a minute." else if (st == ESV_DAILY) "The ESV has reached its daily limit for Smooth Bible. It will be back tomorrow." else "The ESV isn\â\€\™t available right now.";
         esv_put(s, nsstring(line), size, c_faint, 0, 36.0f64);
         esv_put(s, nsstring("\n"), size, c_faint, 0, 0.0f64);
         if (st == ESV_OFFLINE || st == ESV_UNAVAILABLE) {
             esv_put(s, nsstring("Try Again"), size, c_accent, ESV_TRY, 8.0f64);
             esv_put(s, nsstring(" \Â\· "), size, c_faint, 0, 8.0f64)
         }
-        esv_put(s, nsstring("Read in the BSB"), size, c_accent, ESV_BSB, 8.0f64)
+        // (In a plan's day: Change Version, Reading settings' versions.)
+        if (day_on) esv_put(s, nsstring("Change Version"), size, c_accent, ESV_VERSION,
+            8.0f64) else esv_put(s, nsstring("Read in the BSB"), size, c_accent, ESV_BSB,
+            8.0f64)
     }
     // (The space: one invisible line, as tall as the rest of the BSB's
     // chapter.)

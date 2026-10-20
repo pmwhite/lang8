@@ -222,7 +222,7 @@ listen_start(c: int, v: int) {
     ls_return_c = -1;
     first: int = if (v < 1) 1 else v;
     ls_chosen = audio_source(text_cur);
-    s: int = listen_effective(ls_chosen, c);
+    s: int = day_source(listen_effective(ls_chosen, c), c, first);
     if (s == SRC_VOICE) voice_start(c, first) else player_start(s, c, first);
     listen_show();
     dl_pump()
@@ -244,8 +244,8 @@ listen_restart_at(c: int, v: int) {
     ls_return_c = -1;
     ls_voice_pending = false;
     ls_chosen = audio_source(text_cur);
-    s: int = listen_effective(ls_chosen, c);
     first: int = if (v < 1) 1 else v;
+    s: int = day_source(listen_effective(ls_chosen, c), c, first);
     ls_playing = playing;
     if (s == SRC_VOICE) {
         if (playing) voice_start(c, first) else {
@@ -360,8 +360,12 @@ voice_start(c: int, first: int) {
 }
 
 // Chapter c queued, from verse first: its name (from its first verse), then
-// a verse an utterance.
+// a verse an utterance (to its last, or in a plan's day, its row's).
 listen_queue(c: int, first: int) {
+    listen_queue_to(c, first, listen_last_of(c))
+}
+
+listen_queue_to(c: int, first: int, last: int) {
     ls_queued_c = c;
     // (An ESV chapter not here: asked for, and queued when it comes.)
     if (text_cur == TEXT_ESV && ch_start[c] < 0) {
@@ -375,7 +379,7 @@ listen_queue(c: int, first: int) {
         fput_spoken_title(c);
         listen_say(fstring(), c, 0)
     }
-    for v in first..ch_verses[c] + 1 {
+    for v in first..last + 1 {
         _n: int = speak_text(c, v);
         n: int = vt_n;
         // (The demo's verses short: a few words each, so the wash moves on
@@ -434,7 +438,17 @@ listen_began(
         now_playing();
         return 0
     }
+    // (In a plan's day: the row the verse is in, and at its last verse the
+    // next row queued, if there is one.)
+    if (ls_day) day_listen_at(c, v);
     listen_at(c, v);
+    if (ls_day) {
+        if (v == listen_last_of(c) && ls_queued_c == c) {
+            nr: int = listen_next_row();
+            if (nr >= 0) listen_queue_to(dy_c[nr], dy_v1[nr], day_row_last(nr))
+        }
+        return 0
+    }
     if (v == ch_verses[c] && ls_queued_c == c && c + 1 < chapters) {
         if (ls_fallback && listen_effective(ls_chosen, c + 1) != SRC_VOICE) ls_return_c = c + 1 else listen_queue(c + 1,
             1)
@@ -452,6 +466,15 @@ listen_finished(
     if (i < 0 || !ls_active || ls_engine != ENGINE_VOICE) return 0;
     c: int = ls_uc[i];
     v: int = ls_uv[i];
+    // (A plan's day: its row's last verse said, its passage heard; the
+    // day's last, done.)
+    if (ls_day) {
+        if (v > 0 && v == listen_last_of(c)) {
+            day_row_heard();
+            if (listen_next_row() < 0) listen_stop()
+        }
+        return 0
+    }
     // (A chapter's last verse said: read, for a plan, DESIGN.md §10.1.2.)
     if (v > 0 && v == ch_verses[c]) chapter_heard(c);
     // (Revelation 22's last verse said: done.)
@@ -842,6 +865,15 @@ ap_item_changed() {
         now_playing();
         dl_pump()
     } else if (msg(item, sel("status")) == 1) ap_ready();
+    // (In a plan's day: the next row's chapter, if it follows this row's
+    // end from its first verse; else it is sought at this row's end.)
+    if (ls_day) {
+        day_listen_row(c);
+        nr: int = listen_next_row();
+        if (nr >= 0 && ls_row >= 0 && dy_v2[ls_row] == 0 && dy_v1[nr] <= 1) ap_enqueue(ls_src,
+            dy_c[nr]);
+        return
+    }
     // (The chapter after it, queued at once: the queue joins them.)
     if (c + 1 < chapters) ap_enqueue(ls_src, c + 1)
 }
@@ -853,6 +885,10 @@ listen_item_ended(_self: int, _cmd: int, note_obj: int): int {
     if (i < 0 || !ls_active || pi_c[i] == ap_heard_c) return 0;
     c: int = pi_c[i];
     ap_heard_c = c;
+    if (ls_day) {
+        day_item_ended(c);
+        return 0
+    }
     chapter_heard(c);
     if (c == chapters - 1) listen_stop();
     0
@@ -992,6 +1028,11 @@ ap_poll_once() {
     // (The verse asked for held until playback reaches it: review r7-1.)
     v: int = audio_verse_shown(ls_src, ap_c, t, ap_hold_v);
     if (v < 0) return;
+    // (A plan's day: past its row's last verse, on to the next row.)
+    if (ls_day && ls_row >= 0 && dy_c[ls_row] == ap_c && v > listen_last_of(ap_c)) {
+        day_row_end_reached();
+        return
+    }
     if (ap_hold_v > 0 && audio_hold_ended(ls_src, ap_c, t, ap_hold_v)) ap_hold_v = 0;
     if (v != speak_v || speak_c != ap_c) listen_at(ap_c, v)
 }
@@ -1259,6 +1300,8 @@ listen_stop_engine() {
 listen_stop() {
     if (!ls_active) return;
     ls_active = false;
+    ls_day = false;
+    ls_row = -1;
     ls_playing = false;
     ls_fallback = false;
     listen_stop_engine();
@@ -1286,7 +1329,19 @@ listen_demo_tick(_self: int, _cmd: int, _timer: int): int {
     c: int = speak_c;
     v: int = speak_v + 1;
     if (c < 0) return 0;
-    if (v > ch_verses[c]) {
+    if (ls_day) {
+        if (v > listen_last_of(c)) {
+            day_row_heard();
+            nr: int = listen_next_row();
+            if (nr < 0) {
+                listen_stop();
+                return 0
+            }
+            ls_row = nr;
+            c = dy_c[nr];
+            v = dy_v1[nr]
+        }
+    } else if (v > ch_verses[c]) {
         if (c + 1 >= chapters) return 0;
         c = c + 1;
         v = 1
@@ -1331,6 +1386,11 @@ remote_toggle(_self: int, _cmd: int, _event: int): int {
 
 // The next chapter.
 remote_next(_self: int, _cmd: int, _event: int): int {
+    // (A plan's day: by passage, within the day.)
+    if (ls_day) {
+        day_listen_step(1);
+        return 0
+    }
     if (!ls_active || speak_c < 0 || speak_c + 1 >= chapters) return 0;
     listen_restart_at(speak_c + 1, 1);
     0
@@ -1338,6 +1398,10 @@ remote_next(_self: int, _cmd: int, _event: int): int {
 
 // This chapter's start if more than 3 s into it, else the chapter before.
 remote_previous(_self: int, _cmd: int, _event: int): int {
+    if (ls_day) {
+        day_listen_step(-1);
+        return 0
+    }
     if (!ls_active || speak_c < 0) return 0;
     c: int = speak_c;
     into: bool = if (ls_engine == ENGINE_PLAYER) ap_time() > 300 else speak_v > 1;
@@ -1582,8 +1646,10 @@ fput_listen_state() {
 listen_label() {
     if (mp == 0 || speak_c < 0) return;
     fbuf_n = 0;
-    // (The verse; before verse 1, and for the ESV, the chapter.)
-    if (speak_v > 0) fput_ref(speak_c, speak_v, 0) else fput_title(speak_c);
+    // (The verse; before verse 1, and for the ESV, the chapter; in a plan's
+    // day, the passage and the day.)
+    if (ls_day) fput_listen_day_name() else if (speak_v > 0) fput_ref(speak_c, speak_v,
+        0) else fput_title(speak_c);
     msg1(mp_title, sel("setText:"), fstring());
     title_n: int = fbuf_n;
     fput_listen_state();
@@ -1604,7 +1670,8 @@ listen_label() {
     }
     // "John 3:14, Bob Souer"
     fbuf_n = 0;
-    if (speak_v > 0) fput_ref(speak_c, speak_v, 0) else fput_title(speak_c);
+    if (ls_day) fput_listen_day_name() else if (speak_v > 0) fput_ref(speak_c, speak_v,
+        0) else fput_title(speak_c);
     fput_str(", ");
     fput_listen_state();
     msg1(mp_name, sel("setAccessibilityLabel:"), fstring())
@@ -1633,6 +1700,7 @@ listen_show() {
     listen_shown = true;
     hide_back();
     tray_raise(true);
+    mark_reposition();
     mp_timer = stop_timer(mp_timer);
     msg1(mp, sel("setHidden:"), 0);
     msg1(window, sel("bringSubviewToFront:"), mp);
@@ -1650,6 +1718,7 @@ listen_hide() {
     if (!listen_shown) return;
     listen_shown = false;
     tray_raise(false);
+    mark_reposition();
     layer: int = msg(mp, sel("layer"));
     msg_set_f32(layer, sel("setOpacity:"), 0.0f64 as f32);
     if (!reduce_motion()) animate(layer, "transform.translation.y", 0.0f64, MP_H + 24.0f64,
@@ -1699,9 +1768,16 @@ listen_button_tapped(_self: int, _cmd: int, _b: int): int {
         listen_stop();
         return 0
     }
+    // (In a plan's day: the day, from the passage under the bar.)
+    if (day_on) {
+        dismiss_sheets();
+        day_listen_start();
+        return 0
+    }
     v: int = listen_top_verse();
     c: int = cur;
     dismiss_sheets();
+    ls_day = false;
     listen_start(c, v);
     0
 }

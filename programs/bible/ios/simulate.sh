@@ -36,8 +36,17 @@
 #           outlives the app); Share as
 #           Image (the card kept as share-card.png); exact senses, related
 #           words, the largest text; the recording of sequence 12
-#           (plans-transitions.mp4); and Versions and Acknowledgements
-#           popped before a theme's change (1.0 (11)'s crash), checked
+#           (plans-transitions.mp4); Versions and Acknowledgements
+#           popped before a theme's change (1.0 (11)'s crash), checked;
+#           and §16's day's reader (DESIGN.md §16.8, shots 430 to 454, the
+#           Chronological followed, day 114 today, with the ESV's fixture):
+#           opened from Go To, its passages, Mark Read, its end, Next, the
+#           tray, a reference left and come back to, Listen through it,
+#           M'Cheyne's Calendar, a passage begun mid-chapter, the reminder,
+#           the ESV, 1.0's plan.tsv, a carried ribbon, Night, the largest
+#           text, its title, Old and New Together, a relaunch with it up;
+#           the recording of sequence 21 (days-transitions.mp4); its log's
+#           checks in days.txt
 #   ribbons Round 6 as revised (DESIGN.md §11.6), on the demo clock, from a
 #           1.0 (15) readings.tsv and a history written before the first
 #           launch: the readings made ribbons; New Ribbon Here… from the
@@ -163,7 +172,7 @@ xcrun simctl install "$dev" "$app"
 echo "booted and installed in $(python3 -c "print(round($(now) - $start))") s" >> "$out/timing.txt"
 # (The versions group's ESV: the fixture, in the app's data container.)
 fixture=
-if [ "$group" = versions ] || [ "$group" = listen ] || [ "$group" = memory ]; then
+if [ "$group" = versions ] || [ "$group" = listen ] || [ "$group" = memory ] || [ "$group" = plans ]; then
   data=$(xcrun simctl get_app_container "$dev" "$id" data 2>/dev/null)
   if [ -n "$data" ]; then
     mkdir -p "$data/Library/esv-fixture"
@@ -776,6 +785,76 @@ plans)
   sleep 0.5
   kill -INT "$recorder" 2>/dev/null
   wait "$recorder" 2>/dev/null
+  # §16, the day's reader (DESIGN.md §16.8): shots 430 to 454, the
+  # Chronological followed from 113 days before (day 114 today).
+  step 480 "" 8
+  step 481 430-plans-list 8
+  step 482 431-chrono-detail 6
+  step 483 432-goto-today 6
+  step 484 433-day-open 10
+  step 485 434-day-scrolled 6
+  step 486 435-mark-read 6
+  step 487 436-day-end 6
+  step 488 437-day-done 6
+  step 489 438-next-day 8
+  step 490 439-tray-in-day 6
+  step 491 440-preview-leave 10
+  step 492 441-back-to-day 8
+  step 493 442-listen-day 10
+  step 494 443-listen-crossing 12
+  step 495 444-mcheyne-day 12
+  step 496 445-partial 8
+  step 497 446-reminder-day 8
+  step 498 447-esv-day 10
+  # The screen recording of sequence 21 (days-transitions.mp4): Go To up
+  # before the mark; the day up from its row, a passage crossed, Mark Read,
+  # the end, Next, Done.
+  step 507 "" 8
+  rec0=$(now)
+  xcrun simctl io "$dev" recordVideo --codec h264 --force "$out/days-transitions.mp4" > "$out/days-record.txt" 2>&1 &
+  recorder=$!
+  i=0
+  while ! grep -qi "started" "$out/days-record.txt" 2>/dev/null && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  # (A still lead-in: the recorder writes nothing for its first seconds.)
+  sleep 6
+  : > "$out/days-transitions.txt"
+  step 508 "" 24
+  a=$(step_at 508)
+  b=$(now)
+  echo "21 $(python3 -c "print(round($a - $rec0, 2), round($b - $rec0, 2))")" >> "$out/days-transitions.txt"
+  sleep 0.5
+  kill -INT "$recorder" 2>/dev/null
+  wait "$recorder" 2>/dev/null
+  step 499 448-old-file 8
+  step 500 449-ribbon-untouched 12
+  step 501 450-night-day 8
+  step 502 "" 6
+  ui content_size accessibility-extra-extra-extra-large
+  step 503 451-ax-day 8
+  ui content_size large
+  step 504 452-day-title 8
+  step 505 453-both 8
+  step 506 "" 8
+  # 454: the app shut with the day's reader up, and launched again.
+  xcrun simctl terminate "$dev" "$id" 2>/dev/null || true
+  kill "$console" 2>/dev/null || true
+  events=0
+  launch console-again.txt
+  shot 454-relaunch
+  # The day's reader's log, checked (days.txt).
+  cat "$out/console.txt" "$out/console-again.txt" 2>/dev/null | grep -a "bible: day \|bible: demo chronological\|bible: left the day\|bible: ribbon \|bible: 1.0 day state\|bible: sequence 21\|bible: started" > "$out/days.txt"
+  cat "$out/days.txt"
+  for want in "bible: demo chronological, today day 114" "bible: day open 6 114" "bible: day title " \
+    "bible: day passage read .* (by hand)" "bible: day marked read 114" "bible: day replaced 6 115" \
+    "bible: left the day for .*, the capsule to its day" "bible: day passage heard " "bible: day passage read .* (by itself)" \
+    "bible: day replaced 6 102" "bible: day esv rows filled" "bible: 1.0 day state x10 11" "bible: 1.0 day state x10 22" \
+    "bible: 1.0 day state x10 31" "bible: ribbon unmoved by the day, the reader where it was" "bible: day reopened at launch" \
+    "bible: sequence 21 part 5"; do
+    grep -q "$want" "$out/days.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/days.txt"; failed=1; }
+  done
   # The Daily Reminder turned on, its authorization alert: last, as the
   # system's alert outlives the app and can't be answered here (the Time
   # row's shot, before, had the shim's answer forced by the demo).

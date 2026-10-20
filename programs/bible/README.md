@@ -44,12 +44,20 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   once that proxy says it can give it. The tray's Compare shows the verses
   in every version; Study gains References (OpenBible.info) and Commentary
   (Matthew Henry's Concise).
-- Daily reading (Round 5): reading plans (a year, the NT in 90 days,
-  Psalms and Proverbs in a month, the Gospels in 30 days, computed by
-  `plans.l8`) in Go To's Reading Plan section and Reading Plans (A Chapter
-  a Day among them), today's readings counting as read by rest, Listen or
-  a tap; a plan's optional daily reminder of the day's
-  reading (its authorization through the one block, `../ios/block.l8`).
+- Daily reading (Round 5, and §16): reading plans in Go To's Reading Plan
+  section and Reading Plans: Bible in a Year, Chronological (our own order,
+  from Townsend's and Robertson's public-domain arrangements), M'Cheyne's
+  Calendar (transcribed from Bonar's 1878 edition), Old and New Together,
+  the NT in 90 days, Psalms and Proverbs in a month, the Gospels in 30
+  days, and A Chapter a Day; a day is up to six passages (verse ranges).
+  A plan's day opens in a reader of its own (`ios_day.l8`): the reader in
+  a mode, its page only that day's passages, the title the passage you're
+  in over the day, Done, Mark Read at the bottom right (a passage also
+  marks itself, read to its end and rested in, or heard), the day's end
+  with Mark Day as Read and Next, Listen through the day; a reference
+  opened from it leaves it, and the capsule ("‹ Day 32") brings it back.
+  A plan's optional daily reminder opens the day (its authorization
+  through the one block, `../ios/block.l8`).
   Word study shows a word's exact sense (STEP's TAHOT and TAGNT) and
   related words (MACULA), and the share sheet has Share as Image
   (`ios_share.l8`).
@@ -151,8 +159,12 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   (`esv_cache.l8` its portable rules, tested in `test_store.l8`);
   `ios_compare.l8` Compare; `ios_study2.l8` the Study sheet's segments;
   `ios_daily.l8` Go To's Ribbons and Reading Plan sections, the plans, a
-  plan's days, A Chapter a Day and the reminder (`plans.l8` their portable
-  part, tested in `test_plans.l8`); `ios_ribbons.l8` the ribbons' rows, New
+  plan's days, A Chapter a Day and the reminder, and `ios_day.l8` a plan's
+  day's reader (`plans.l8` their portable part: the plans, their days of
+  passages, progress, a day laid out; tested in `test_plans.l8`);
+  `data/plans/mcheyne.txt` and `chrono.txt` the listed plans
+  (`tools/chrono.py` makes the second from `chrono-order.txt` and checks
+  that it has every verse once); `ios_ribbons.l8` the ribbons' rows, New
   Ribbon, Ribbon, the title's menu, the glyph and the toasts (`ribbons.l8`
   their portable part, tested in `test_ribbons.l8`); `ios_share.l8` Share as
   Image; `ios_memory.l8` Memory's files, the tray's Memorize, the
@@ -173,7 +185,7 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   one, the Manual's search; tested in `test_help.l8`, which fails on a
   broken link or anchor, an unknown condition, action or symbol, or a tip
   out of the house style); `ios_demo.l8` (and `ios_demo3.l8` to
-  `ios_demo15.l8`) the demo CI runs.
+  `ios_demo16.l8`) the demo CI runs.
 - The web (`WEB.md`): `html.l8` writes a chapter as HTML (tested in
   `test_html.l8`), the same for `prerender.l8`, which makes every chapter's
   page at build time, and for the app, `web.l8` (start, settings, keys,
@@ -265,8 +277,8 @@ about 27 when each group had a Mac of its own; see the workflow's header):
   second. store and memory share a Mac, each on its own simulator; ios18
   follows ribbons and study on an iOS 18 iPhone of its own; languages
   (Round 10, about 3 minutes) goes first on the versions job's iPhone,
-  more last; help (§15, about 3 minutes) between read and plans on
-  theirs. Every group but help turns Show Tips off before its first
+  more last; help (§15, about 3 minutes) third after notes and listen,
+  and plans (grown by §16's day's reader) after read. Every group but help turns Show Tips off before its first
   launch, so its shots of Go To have no tip. Each group is uploaded (`shots-GROUP`) as it ends,
   and `timing.txt` says when its boot, install, launch and settling came.
 - The groups are paired by their times so the jobs end together (a group
