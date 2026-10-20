@@ -60,6 +60,15 @@
 #           the fixture's timings), the end, Passage, the reminder, Night,
 #           the largest text; and the recording of sequence 15
 #           (memory-transitions.mp4); its log's checks in memory.txt
+#   languages  Round 10 (DESIGN.md §14.9.2), on the demo clock, from a
+#           memory.tsv, a highlight and a History written before the first
+#           launch, no cards: the interlinear's link, the Greek page, the
+#           Alphabet and letters in Practice, Add Words, words in Practice,
+#           what is known hidden in John 3:16 (its tiles where they were),
+#           the word study's rows, Forms, Pronunciation, Verses You Can
+#           Read, Memory's rows, Hebrew, the reminder, Night, the largest
+#           text, Practise Reading; and the recording of sequence 16
+#           (languages-transitions.mp4); its log's checks in languages.txt
 # Every group has the audio fixture (programs/bible/demo/audio, copied into
 # the app's Library and named by L8_AUDIO_FIXTURE), so no recording is
 # fetched from the network in CI.
@@ -208,6 +217,32 @@ if [ "$group" = memory ]; then
   fi
   xcrun simctl spawn "$dev" defaults write "$id" memorySeen -bool false 2>/dev/null || true
   xcrun simctl spawn "$dev" defaults write "$id" memoryType -bool false 2>/dev/null || true
+fi
+# (The languages group's, before the first launch: Philippians 4:6–7 in
+# Memory, to review on 2026-10-25; a highlight on John 3:16; History with
+# John 1, 2 and 3 this week; no cards; learnSeen and memorySeen off.
+# DESIGN.md §14.9.2.)
+if [ "$group" = languages ]; then
+  data=$(xcrun simctl get_app_container "$dev" "$id" data 2>/dev/null)
+  if [ -n "$data" ]; then
+    mkdir -p "$data/Library/Application Support/SmoothBible"
+    python3 - "$data/Library/Application Support/SmoothBible" <<'PY'
+import sys, time
+now = int(time.time())
+day = 86400
+d = sys.argv[1]
+with open(d + "/memory.tsv", "w") as f:
+    f.write("PASSAGE\t1\tbsb\tPHP\t4\t6\t4\t7\t%d\treview\t0\t3\t2026-10-25\tblank\nNEXT\t2\n" % (now - 9 * day))
+with open(d + "/highlights.tsv", "w") as f:
+    f.write("JHN\t3\t16\tyellow\t%d\n" % (now - 2 * day))
+with open(d + "/history.tsv", "w") as f:
+    for i, c in enumerate((1, 2, 3)):
+        f.write("JHN\t%d\t1\t%d\t0\t1\n" % (c, now - (5 - i) * day))
+PY
+    echo "languages group's files written"; cat "$data/Library/Application Support/SmoothBible/"*.tsv
+  fi
+  xcrun simctl spawn "$dev" defaults write "$id" learnSeen -bool false 2>/dev/null || true
+  xcrun simctl spawn "$dev" defaults write "$id" memorySeen -bool true 2>/dev/null || true
 fi
 # (Every other group: the server as if it were not there, L8_ESV_OFF, so
 # that no shot depends on the network or shows the ESV; review r5-1.)
@@ -976,6 +1011,84 @@ memory)
   echo "layouts of 215-220: $n different" | tee -a "$out/memory.txt"
   [ "$n" = 1 ] || { echo "FAILED: the words moved between 215 and 220" | tee -a "$out/memory.txt"; failed=1; }
   tail -5 "$out/memory.txt"
+  ;;
+languages)
+  # (DESIGN.md §14.9.2: shots 240 to 269.)
+  step 400 240-interlinear-link 10
+  step 401 241-greek-new 8
+  step 402 242-alphabet 6
+  step 403 243-letter-new 8
+  step 404 244-letter-check 6
+  step 405 245-letter-judgement 6
+  step 406 246-add-words 10
+  step 407 247-add-preview 6
+  step 408 248-word-new 10
+  step 409 249-word-front 10
+  step 410 250-greek-started 10
+  step 411 251-interlinear-hidden 10
+  step 412 252-tile-shown 6
+  step 413 253-word-study-yours 8
+  step 414 254-forms 6
+  step 415 255-forms-conc 6
+  step 416 256a-pronunciation-list 8
+  step 417 256-pronunciation 8
+  step 418 257-readable 8
+  step 419 258-readable-open 8
+  step 420 259-memory 10
+  step 421 260-passage-words 8
+  step 422 261-hebrew-alphabet 10
+  step 423 262-hebrew-joined 10
+  step 424 263-hebrew-hidden 12
+  step 425 264-hebrew-forms 10
+  step 426 265-reminder 10
+  step 427 266-night-card 10
+  ui content_size accessibility-extra-extra-extra-large
+  step 428 267-ax-card 8
+  step 429 268-ax-forms 12
+  ui content_size large
+  step 430 269-reading-practice 12
+  # The screen recording of sequence 16 (its setup before the mark).
+  step 431 "" 10
+  rec0=$(now)
+  xcrun simctl io "$dev" recordVideo --codec h264 --force "$out/transitions.mp4" > "$out/record.txt" 2>&1 &
+  recorder=$!
+  i=0
+  while ! grep -qi "started" "$out/record.txt" 2>/dev/null && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  rec1=$(now)
+  sleep 2
+  : > "$out/transitions.txt"
+  step 432 "" 20
+  sleep 9
+  a=$(step_at 432)
+  b=$(now)
+  echo "16 $(python3 -c "print(round($a - $rec0, 2), round($b - $rec0, 2))")" >> "$out/transitions.txt"
+  echo "16 from-started $(python3 -c "print(round($a - $rec1, 2), round($b - $rec1, 2))")" >> "$out/transitions.txt"
+  sleep 0.5
+  kill -INT "$recorder" 2>/dev/null
+  wait "$recorder" 2>/dev/null
+  step 433 "" 6
+  # The log's checks (§14.9.2): the data's figures, cards added, known and
+  # graded, the hiding, the reminder; John 3:16's tiles where they were
+  # (251 against 240).
+  grep -h "bible: learn\|bible: interlinear tiles\|bible: practice\|bible: reminder\|bible: scheduled\|bible: toast\|bible: demo step\|bible: demo learn\|Next review\|Again tomorrow\|That’s" \
+    "$out/console.txt" > "$out/languages.txt" 2>/dev/null
+  for want in "learn added G:alpha from alphabet" "learn shown G:alpha new" "learn card G:alpha knew box 1→2" \
+      "learn preview most common, words 10" "10 words added" "learn added G3588 from freq" "learn shown G3588 new, context PHP 4:6" \
+      "learn known G3588 box 4" "learn hide JHN 3:16 known 21 of 25 translit hidden" "learn shown in the interlinear ēgapēsen" \
+      "learn forms G25" "learn pronunciation 1" "learn readable" "learn hide PSA 23:1" "learn voice el-GR" \
+      "learn practise reading, words 10" "reminder first:"; do
+    grep -qF "$want" "$out/languages.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/languages.txt"; failed=1; }
+  done
+  # (251's tiles in 240's places.)
+  t240=$(grep "interlinear tiles JHN 3:16 original" "$out/languages.txt" | head -1 | awk '{print $NF}')
+  t251=$(grep "interlinear tiles JHN 3:16 original" "$out/languages.txt" | sed -n 2p | awk '{print $NF}')
+  echo "John 3:16's tiles: 240 $t240, 251 $t251" | tee -a "$out/languages.txt"
+  [ -n "$t240" ] && [ "$t240" = "$t251" ] || { echo "FAILED: the tiles moved between 240 and 251" | tee -a "$out/languages.txt"; failed=1; }
+  grep -q "reminder first:.*Greek word" "$out/languages.txt" || { echo "FAILED: the reminder has no Greek words" | tee -a "$out/languages.txt"; failed=1; }
+  tail -5 "$out/languages.txt"
   ;;
 ios18)
   shot 01-genesis-1
