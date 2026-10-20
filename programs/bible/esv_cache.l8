@@ -301,17 +301,19 @@ esv_keep_rules() {
     while (i < ec_n) {
         if (!ec_disk[i] && !esv_visible(ec_c[i])) esv_drop(i) else i = i + 1
     }
-    // Half a book at most, of each book held.
+    // Half a book at most, of each book held (Memory's pinned verses
+    // counted with it, §13.6).
     for b in 0..books {
         more: bool = true;
-        while (more && esv_book_total(b) > esv_book_most(b)) {
+        while (more && esv_book_total(b) + esv_pin_book(b) > esv_book_most(b)) {
             j: int = esv_oldest(b, false);
             if (j < 0) more = false else esv_drop(j)
         }
     }
-    // 500 verses at most: the neighbours kept while anything else can go.
+    // 500 verses at most, Memory's pinned among them: the neighbours kept
+    // while anything else can go.
     more: bool = true;
-    while (more && esv_total() > ESV_MOST) {
+    while (more && esv_total() + esv_pin_total() > ESV_MOST) {
         j: int = esv_oldest(-1, true);
         if (j < 0) j = esv_oldest(-1, false);
         if (j < 0) more = false else esv_drop(j)
@@ -480,4 +482,335 @@ bsb_code_byte(b: int, x: int): int {
     k: int = bsb[book_line[b] + 1 + x] as int;
     text_use(was);
     k
+}
+
+// ---- Memory's ESV passages: pinned verses (DESIGN.md §13.6) ----
+// Each ESV passage's verses, a chapter's run of them a pin: its passage's
+// id, chapter, first and last verse (keys), and their records (only those
+// verses', with the paragraphs' marks before them) once fetched. They count
+// toward the 500 and each book's half, and are never let go while their
+// passage is kept: at most 200 verses pinned in all.
+PIN_MOST: int = 200;
+
+pn_n: int = 0;
+
+pn_id: []int = new int[128](0);
+
+pn_c: []int = new int[128](0);
+
+pn_v1: []int = new int[128](0);
+
+pn_v2: []int = new int[128](0);
+
+pn_fetched: []int = new int[128](0);
+
+pn_at: []int = new int[128](0);
+
+pn_len: []int = new int[128](-1);
+
+pn_pool: []i8 = new i8[262144](0i8);
+
+pn_pool_n: int = 0;
+
+esv_pin_total(): int {
+    n: int = 0;
+    for i in 0..pn_n n = n + pn_v2[i] - pn_v1[i] + 1;
+    n
+}
+
+esv_pin_book(b: int): int {
+    n: int = 0;
+    for i in 0..pn_n
+        if (ch_book[pn_c[i]] == b) n = n + pn_v2[i] - pn_v1[i] + 1;
+    n
+}
+
+// Whether c1:v1 to c2:v2 (one book) may be pinned: 0 it may; 1, it would
+// pass 200 verses; 2, half its book.
+esv_pin_check(
+    c1: int,
+    v1: int,
+    c2: int,
+    v2: int
+): int {
+    n: int = range_verses(c1, v1, c2, v2);
+    if (esv_pin_total() + n > PIN_MOST) return 1;
+    if (esv_pin_book(ch_book[c1]) + n > esv_book_most(ch_book[c1])) return 2;
+    0
+}
+
+// Passage id's verses, c1:v1 to c2:v2, pinned (nothing held of them yet);
+// the cache's rules kept. False if they may not be.
+esv_pin_add(
+    id: int,
+    c1: int,
+    v1: int,
+    c2: int,
+    v2: int
+): bool {
+    if (esv_pin_check(c1, v1, c2, v2) != 0) return false;
+    for c in c1..c2 + 1 {
+        if (pn_n < len(pn_id)) {
+            k: int = pn_n;
+            pn_id[k] = id;
+            pn_c[k] = c;
+            pn_v1[k] = (if (c == c1) v1 else 1);
+            pn_v2[k] = (if (c == c2) v2 else esv_chapter_verses(c));
+            pn_fetched[k] = 0;
+            pn_at[k] = 0;
+            pn_len[k] = -1;
+            pn_n = pn_n + 1
+        }
+    }
+    esv_keep_rules();
+    true
+}
+
+// Passage id's pins let go (deleted, or its version changed).
+esv_pin_remove(id: int) {
+    i: int = 0;
+    while (i < pn_n) {
+        if (pn_id[i] == id) {
+            for j in i..pn_n - 1 {
+                pn_id[j] = pn_id[j + 1];
+                pn_c[j] = pn_c[j + 1];
+                pn_v1[j] = pn_v1[j + 1];
+                pn_v2[j] = pn_v2[j + 1];
+                pn_fetched[j] = pn_fetched[j + 1];
+                pn_at[j] = pn_at[j + 1];
+                pn_len[j] = pn_len[j + 1]
+            }
+            pn_n = pn_n - 1
+        } else i = i + 1
+    }
+    pin_compact()
+}
+
+// The pool's records moved together.
+pin_compact() {
+    n: int = 0;
+    for i in 0..pn_n {
+        if (pn_len[i] > 0) {
+            for x in 0..pn_len[i] ec_spare[n + x] = pn_pool[pn_at[i] + x];
+            pn_at[i] = n;
+            n = n + pn_len[i]
+        }
+    }
+    for x in 0..n pn_pool[x] = ec_spare[x];
+    pn_pool_n = n
+}
+
+// Whether passage id's verses are all here.
+esv_pin_ready(id: int): bool {
+    any: bool = false;
+    for i in 0..pn_n {
+        if (pn_id[i] == id) {
+            any = true;
+            if (pn_len[i] < 0) return false
+        }
+    }
+    any
+}
+
+// Whether any pin of chapter c wants its records (missing, or fetched
+// more than 30 days before t).
+esv_pin_wants(c: int, t: int): bool {
+    for i in 0..pn_n
+        if (pn_c[i] == c && (pn_len[i] < 0 || t - pn_fetched[i] > ESV_STALE)) return true;
+    false
+}
+
+// Chapter c's records came (the first n bytes of b, at t): each pin of it
+// keeps its verses' records. How many pins took them.
+esv_pin_fill(
+    c: int,
+    b: []i8,
+    n: int,
+    t: int
+): int {
+    got: int = 0;
+    for i in 0..pn_n {
+        if (pn_c[i] == c) {
+            pin_take(i, b, n);
+            pn_fetched[i] = t;
+            got = got + 1
+        }
+    }
+    if (got > 0) pin_compact();
+    got
+}
+
+// Pin i's records from b: its verses' lines, and the paragraph's and
+// stanza's marks just before its first.
+pin_take(i: int, b: []i8, n: int) {
+    if (pn_pool_n + n > len(pn_pool)) pin_compact();
+    at: int = pn_pool_n;
+    p: int = 0;
+    key: int = 0;
+    // (Where the marks before the next verse began, -1: none since words.)
+    marks: int = -1;
+    while (p < n) {
+        e: int = p;
+        while (e < n && b[e] as int != 10) e = e + 1;
+        k: int = b[p] as int;
+        if (k == 86) {
+            key = pin_key(b, p + 1, e);
+            if (key >= pn_v1[i] && key <= pn_v2[i] && marks >= 0)
+                for q in marks..p pin_put(b[q] as int);
+            marks = -1
+        }
+        inside: bool = key >= pn_v1[i] && key <= pn_v2[i];
+        if (inside) {
+            for q in p..e pin_put(b[q] as int);
+            pin_put(10)
+        } else if (k == 80 || k == 95) {
+            if (marks < 0) marks = p
+        } else if (k != 86) marks = -1;
+        p = e + 1
+    }
+    pn_at[i] = at;
+    pn_len[i] = pn_pool_n - at
+}
+
+pin_put(k: int) {
+    if (pn_pool_n < len(pn_pool)) {
+        pn_pool[pn_pool_n] = k trunc i8;
+        pn_pool_n = pn_pool_n + 1
+    }
+}
+
+// A verse's key at b[p] (V15>14: 14).
+pin_key(b: []i8, p: int, e: int): int {
+    n: int = 0;
+    q: int = p;
+    while (q < e && b[q] as int >= 48 && b[q] as int <= 57) {
+        n = n * 10 + b[q] as int - 48;
+        q = q + 1
+    }
+    if (q < e && b[q] as int == 62) {
+        m: int = 0;
+        q = q + 1;
+        while (q < e && b[q] as int >= 48 && b[q] as int <= 57) {
+            m = m * 10 + b[q] as int - 48;
+            q = q + 1
+        }
+        return m
+    }
+    n
+}
+
+// Text TEXT_PIN made of passage id's pinned verses: every book's B line,
+// then each of its chapters' records after their C line; other chapters
+// have none. The current text kept.
+pin_text: []i8 = new i8[524288](0i8);
+
+pin_text_n: int = 0;
+
+pin_text_put(k: int) {
+    if (pin_text_n < len(pin_text)) {
+        pin_text[pin_text_n] = k trunc i8;
+        pin_text_n = pin_text_n + 1
+    }
+}
+
+pin_lines: []int = new int[66](0);
+
+esv_pin_build(id: int) {
+    was: int = text_cur;
+    text_use(TEXT_BSB);
+    pin_text_n = 0;
+    for b in 0..books {
+        pin_lines[b] = pin_text_n;
+        for x in book_line[b]..line_end(book_line[b]) pin_text_put(bsb[x] as int);
+        pin_text_put(10)
+    }
+    base_verses: []int = ch_verses;
+    text_begin(TEXT_PIN);
+    for b in 0..books book_line[b] = pin_lines[b];
+    for c in 0..chapters {
+        ch_start[c] = -1;
+        ch_end[c] = -1;
+        ch_verses[c] = base_verses[c]
+    }
+    for i in 0..pn_n {
+        if (pn_id[i] == id && pn_len[i] >= 0) {
+            c: int = pn_c[i];
+            pin_text_put(67);
+            n: int = ch_num[c];
+            if (n >= 100) pin_text_put(48 + n / 100);
+            if (n >= 10) pin_text_put(48 + n / 10 % 10);
+            pin_text_put(48 + n % 10);
+            pin_text_put(10);
+            ch_start[c] = pin_text_n;
+            for x in 0..pn_len[i] pin_text_put(pn_pool[pn_at[i] + x] as int);
+            ch_end[c] = pin_text_n
+        }
+    }
+    text_done(TEXT_PIN, pin_text, pin_text_n);
+    text_use(was)
+}
+
+// memory.txt, in fbuf: a PIN ID BOOK C V1 V2 FETCHED BYTES line for each
+// pin, its records' bytes after it (none until they have come).
+format_pins() {
+    fbuf_n = 0;
+    for i in 0..pn_n {
+        fput_str("PIN\t");
+        fput_int(pn_id[i]);
+        fput(9);
+        for x in 0..3 fput(bsb_code_byte(ch_book[pn_c[i]], x));
+        fput(9);
+        fput_int(ch_num[pn_c[i]]);
+        fput(9);
+        fput_int(pn_v1[i]);
+        fput(9);
+        fput_int(pn_v2[i]);
+        fput(9);
+        fput_int(pn_fetched[i]);
+        fput(9);
+        fput_int(pn_len[i]);
+        fput(10);
+        if (pn_len[i] > 0)
+            for x in 0..pn_len[i] fput(pn_pool[pn_at[i] + x] as int)
+    }
+}
+
+// memory.txt read back (in fbuf): the pins of passages that exist (keep,
+// whether an id is one); a bad line ends the reading.
+parse_pins(keep: []bool) {
+    pn_n = 0;
+    pn_pool_n = 0;
+    begin_lines();
+    while (next_line()) {
+        if (!field_is(fpos, "PIN") || pn_n >= len(pn_id)) return;
+        f2: int = field_after(fpos);
+        f3: int = field_after(f2);
+        f5: int = field_after(field_after(f3));
+        f6: int = field_after(f5);
+        f7: int = field_after(f6);
+        f8: int = field_after(f7);
+        id: int = field_num(f2, false);
+        c: int = field_chapter(f3);
+        v1: int = field_num(f5, false);
+        v2: int = field_num(f6, false);
+        t: int = field_num(f7, false);
+        nb: int = field_num(f8, true);
+        if (id <= 0 || c < 0 || v1 < 1 || v2 < v1 || t < 0 || nb == missing_num || nb < -1) return;
+        at: int = line_e + 1;
+        if (nb > 0 && at + nb > fbuf_n) return;
+        if (id < len(keep) && keep[id]) {
+            k: int = pn_n;
+            pn_id[k] = id;
+            pn_c[k] = c;
+            pn_v1[k] = v1;
+            pn_v2[k] = v2;
+            pn_fetched[k] = t;
+            pn_at[k] = pn_pool_n;
+            pn_len[k] = nb;
+            if (nb > 0)
+                for x in 0..nb pin_put(fbuf[at + x] as int);
+            pn_n = pn_n + 1
+        }
+        if (nb > 0) line_e = at + nb - 1
+    }
 }

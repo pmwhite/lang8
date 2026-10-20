@@ -1,0 +1,1383 @@
+tag bible;
+
+use_tag std;
+
+// Memory (DESIGN.md Â§13.1), apart from any platform: passages chosen by
+// the reader, each in the version it was added in and keyed by the BSB's
+// reference (at most 40 verses, in one book); a passage's words as its
+// version lays them out (verse numbers kept, headings and notes left
+// out), each with its key letter; its parts, learned one at a time and
+// joined; what each level hides (fixed per passage, by a shuffle of its
+// id); the Leitner schedule (gaps of 1, 3, 7, 14, 30, 60, 120 and 180
+// days); Today, New and Later; memory.tsv's lines in fbuf, as store.l8's
+// files are; memory-log.tsv's lines; and the words a row, a caption and
+// the reminder say. Days are counted from 1970 (store.l8), "today" given
+// by the platform. test_memory.l8 tests it.
+import "text.l8";
+
+import "store.l8";
+
+import "plans.l8";
+
+MEM_MOST: int = 256;
+
+MEM_VERSES: int = 40;
+
+// States, levels and grades.
+MS_NEW: int = 0;
+
+MS_LEARNING: int = 1;
+
+MS_REVIEW: int = 2;
+
+LV_FULL: int = 0;
+
+LV_SOME: int = 1;
+
+LV_LETTERS: int = 2;
+
+LV_BLANK: int = 3;
+
+G_NOTYET: int = 0;
+
+G_MOSTLY: int = 1;
+
+G_KNEW: int = 2;
+
+mem_state_ids: []str = ["new", "learning", "review"];
+
+mem_level_ids: []str = ["full", "some", "letters", "blank"];
+
+mem_level_names: []str = ["Full", "Some", "Letters", "Blank"];
+
+mem_grade_ids: []str = ["notyet", "mostly", "knew"];
+
+mem_version_ids: []str = ["bsb", "kjv", "web", "asv", "ylt", "esv"];
+
+// The boxes' gaps, in days.
+mem_gaps: []int = [1, 3, 7, 14, 30, 60, 120, 180];
+
+// ---- the passages, in the order added ----
+mp_n: int = 0;
+
+mp_id: []int = new int[256](0);
+
+mp_ver: []int = new int[256](0);
+
+mp_c1: []int = new int[256](0);
+
+mp_v1: []int = new int[256](0);
+
+mp_c2: []int = new int[256](0);
+
+mp_v2: []int = new int[256](0);
+
+mp_added: []int = new int[256](0);
+
+mp_state: []int = new int[256](0);
+
+mp_learned: []int = new int[256](0);
+
+mp_box: []int = new int[256](0);
+
+// A day, or -1 (not set).
+mp_due: []int = new int[256](-1);
+
+mp_level: []int = new int[256](0);
+
+// The next id given (never reused while memory.tsv is kept).
+mp_next: int = 1;
+
+memory_clear() {
+    mp_n = 0;
+    mp_next = 1
+}
+
+mem_index(id: int): int {
+    if (id <= 0) return -1;
+    for i in 0..mp_n
+        if (mp_id[i] == id) return i;
+    -1
+}
+
+// How many verses passage i has.
+mem_verses(i: int): int {
+    range_verses(mp_c1[i], mp_v1[i], mp_c2[i], mp_v2[i])
+}
+
+// Whether c1:v1 to c2:v2 may be a passage: in one book, in order, at most
+// 40 verses.
+mem_range_ok(
+    c1: int,
+    v1: int,
+    c2: int,
+    v2: int
+): bool {
+    if (c1 < 0 || c2 < 0 || c1 >= chapters || c2 >= chapters) return false;
+    if (ch_book[c1] != ch_book[c2] || c2 < c1 || c1 == c2 && v2 < v1) return false;
+    if (v1 < 1 || v2 < 1) return false;
+    range_verses(c1, v1, c2, v2) <= MEM_VERSES
+}
+
+mem_put(
+    id: int,
+    ver: int,
+    c1: int,
+    v1: int,
+    c2: int,
+    v2: int,
+    added: int
+): int {
+    if (mp_n >= MEM_MOST) return -1;
+    i: int = mp_n;
+    mp_id[i] = id;
+    mp_ver[i] = ver;
+    mp_c1[i] = c1;
+    mp_v1[i] = v1;
+    mp_c2[i] = c2;
+    mp_v2[i] = v2;
+    mp_added[i] = added;
+    mp_state[i] = MS_NEW;
+    mp_learned[i] = 0;
+    mp_box[i] = 0;
+    mp_due[i] = -1;
+    mp_level[i] = LV_FULL;
+    mp_n = mp_n + 1;
+    if (id >= mp_next) mp_next = id + 1;
+    i
+}
+
+mem_remove(i: int) {
+    if (i < 0 || i >= mp_n) return;
+    for j in i..mp_n - 1 {
+        mp_id[j] = mp_id[j + 1];
+        mp_ver[j] = mp_ver[j + 1];
+        mp_c1[j] = mp_c1[j + 1];
+        mp_v1[j] = mp_v1[j + 1];
+        mp_c2[j] = mp_c2[j + 1];
+        mp_v2[j] = mp_v2[j + 1];
+        mp_added[j] = mp_added[j + 1];
+        mp_state[j] = mp_state[j + 1];
+        mp_learned[j] = mp_learned[j + 1];
+        mp_box[j] = mp_box[j + 1];
+        mp_due[j] = mp_due[j + 1];
+        mp_level[j] = mp_level[j + 1]
+    }
+    mp_n = mp_n - 1
+}
+
+// ---- what happened (the console's log), drained by the platform ----
+mev: []i8 = new i8[8192](0i8);
+
+mev_n: int = 0;
+
+me(k: int) {
+    if (mev_n < len(mev)) {
+        mev[mev_n] = k trunc i8;
+        mev_n = mev_n + 1
+    }
+}
+
+me_str(s: str) {
+    for k in s me(k as int)
+}
+
+me_int(n: int) {
+    if (n < 0) {
+        me(45);
+        me_int(-n);
+        return
+    }
+    if (n >= 10) me_int(n / 10);
+    me(48 + n % 10)
+}
+
+me_date(d: int) {
+    civil_date(d);
+    me_int(date_y);
+    me(45);
+    if (date_m < 10) me(48);
+    me_int(date_m);
+    me(45);
+    if (date_d < 10) me(48);
+    me_int(date_d)
+}
+
+// A passage as the log has it: JHN 3:16-17, ISA 52:13-53:12, PSA 23:1-6.
+me_ref(i: int) {
+    b: int = ch_book[mp_c1[i]];
+    for x in 0..3 me(bsb_code_at(b, x));
+    me(32);
+    me_int(ch_num[mp_c1[i]]);
+    me(58);
+    me_int(mp_v1[i]);
+    if (mp_c2[i] != mp_c1[i]) {
+        me(45);
+        me_int(ch_num[mp_c2[i]]);
+        me(58);
+        me_int(mp_v2[i])
+    } else if (mp_v2[i] != mp_v1[i]) {
+        me(45);
+        me_int(mp_v2[i])
+    }
+}
+
+// Book b's code's byte x (the BSB's, whatever text is current).
+bsb_code_at(b: int, x: int): int {
+    if (tx_ready[0]) tx_buf[0][tx_book_line[0][b] + 1 + x] as int else bsb[book_line[b] + 1 + x] as int
+}
+
+// "memory <what>: JHN 3:16-17", the line not yet ended.
+me_begin(what: str, i: int) {
+    me_str("memory ");
+    me_str(what);
+    me_str(": ");
+    me_ref(i)
+}
+
+me_end() {
+    me(10)
+}
+
+// ---- memory-log.tsv's lines (appended by the platform, never read) ----
+// ID UNIXTIME WHAT BOX_BEFORE BOX_AFTER HELPS MISSES.
+mlog: []i8 = new i8[8192](0i8);
+
+mlog_n: int = 0;
+
+ml(k: int) {
+    if (mlog_n < len(mlog)) {
+        mlog[mlog_n] = k trunc i8;
+        mlog_n = mlog_n + 1
+    }
+}
+
+ml_int(n: int) {
+    if (n < 0) {
+        ml(45);
+        ml_int(-n);
+        return
+    }
+    if (n >= 10) ml_int(n / 10);
+    ml(48 + n % 10)
+}
+
+mlog_add(
+    id: int,
+    now: int,
+    what: str,
+    b0: int,
+    b1: int,
+    helps: int,
+    misses: int
+) {
+    ml_int(id);
+    ml(9);
+    ml_int(now);
+    ml(9);
+    for k in what ml(k as int);
+    ml(9);
+    ml_int(b0);
+    ml(9);
+    ml_int(b1);
+    ml(9);
+    ml_int(helps);
+    ml(9);
+    ml_int(misses);
+    ml(10)
+}
+
+// ---- adding, opening, deleting (Â§13.2, Â§13.4.1) ----
+// A passage of c1:v1 to c2:v2 in version ver, added at now: its id, or 0
+// (not a passage: across books, backwards, over 40 verses; or 256 already).
+memory_add(
+    ver: int,
+    c1: int,
+    v1: int,
+    c2: int,
+    v2: int,
+    now: int
+): int {
+    if (!mem_range_ok(c1, v1, c2, v2) || mp_n >= MEM_MOST) return 0;
+    id: int = mp_next;
+    i: int = mem_put(id, ver, c1, v1, c2, v2, now);
+    me_begin("added", i);
+    me(32);
+    me_str(mem_version_ids[ver]);
+    me_str(" (id ");
+    me_int(id);
+    me(41);
+    me_end();
+    id
+}
+
+// The newest passage holding every verse from v to last of chapter c (the
+// tray's Memorizing), or -1.
+memory_holding(c: int, v: int, last: int): int {
+    best: int = -1;
+    for i in 0..mp_n {
+        from_ok: bool = mp_c1[i] < c || mp_c1[i] == c && mp_v1[i] <= v;
+        to_ok: bool = mp_c2[i] > c || mp_c2[i] == c && mp_v2[i] >= last;
+        if (from_ok && to_ok && (best < 0 || mp_added[i] >= mp_added[best])) best = i
+    }
+    best
+}
+
+// Practice opened passage i: a new one begun (learning, due today).
+memory_open(i: int, today: int) {
+    if (i < 0 || mp_state[i] != MS_NEW) return;
+    mp_state[i] = MS_LEARNING;
+    mp_learned[i] = 0;
+    mp_due[i] = today;
+    mp_level[i] = LV_FULL;
+    me_begin("started", i);
+    me_end()
+}
+
+memory_delete(i: int, now: int) {
+    if (i < 0 || i >= mp_n) return;
+    me_begin("deleted", i);
+    me_end();
+    mlog_add(mp_id[i], now, "deleted", mp_box[i], 0, 0, 0);
+    mem_remove(i)
+}
+
+// Start Over: learning from its first part, due today.
+memory_start_over(i: int, today: int, now: int) {
+    if (i < 0) return;
+    b0: int = mp_box[i];
+    mp_state[i] = MS_LEARNING;
+    mp_learned[i] = 0;
+    mp_box[i] = 0;
+    mp_due[i] = today;
+    mp_level[i] = LV_FULL;
+    me_begin("start-over", i);
+    me_end();
+    mlog_add(mp_id[i], now, "start-over", b0, 0, 0, 0)
+}
+
+// Its version changed: the state and the schedule kept; a learning
+// passage keeps the parts that cover the verses it had learned (learned,
+// the platform's count of them in the new version's parts).
+memory_set_version(i: int, ver: int, learned: int) {
+    if (i < 0 || ver == mp_ver[i]) return;
+    mp_ver[i] = ver;
+    if (mp_state[i] == MS_LEARNING) mp_learned[i] = learned;
+    me_begin("version", i);
+    me(32);
+    me_str(mem_version_ids[ver]);
+    me_end()
+}
+
+// ---- the schedule (Â§13.1.5) ----
+// A part of learning passage i checked (of parts in all): learned + 1 and
+// due tomorrow; the last moves it to review (box 1, due tomorrow, level
+// Blank).
+memory_part_checked(
+    i: int,
+    parts: int,
+    today: int,
+    now: int
+) {
+    if (i < 0 || mp_state[i] != MS_LEARNING) return;
+    mp_learned[i] = mp_learned[i] + 1;
+    mp_due[i] = today + 1;
+    me_begin("part", i);
+    me(32);
+    me_int(mp_learned[i]);
+    me_str(" of ");
+    me_int(parts);
+    me_end();
+    mlog_add(mp_id[i], now, "part", 0, 0, 0, 0);
+    if (mp_learned[i] >= parts) {
+        mp_state[i] = MS_REVIEW;
+        mp_learned[i] = 0;
+        mp_box[i] = 1;
+        mp_due[i] = today + 1;
+        mp_level[i] = LV_BLANK;
+        me_begin("learned", i);
+        me_str(" box 1 due ");
+        me_date(mp_due[i]);
+        me_end();
+        mlog_add(mp_id[i], now, "learned", 0, 1, 0, 0)
+    }
+}
+
+// What a grade would do to passage i today: the box and due day it
+// would leave (gr_box, gr_due), and whether it changes anything.
+gr_box: int = 0;
+
+gr_due: int = 0;
+
+memory_would(i: int, grade: int, today: int): bool {
+    gr_box = mp_box[i];
+    gr_due = mp_due[i];
+    if (mp_state[i] != MS_REVIEW) return false;
+    if (grade == G_NOTYET) {
+        gr_box = (if (mp_box[i] - 2 < 1) 1 else mp_box[i] - 2);
+        gr_due = today + 1;
+        return true
+    }
+    if (mp_due[i] > today) return false;
+    if (grade == G_KNEW && gr_box < 8) gr_box = gr_box + 1;
+    if (gr_box < 1) gr_box = 1;
+    gr_due = today + mem_gaps[gr_box - 1];
+    true
+}
+
+// Review passage i graded today (helps and misses seen, for the log):
+// whether it changed.
+memory_grade(
+    i: int,
+    grade: int,
+    today: int,
+    helps: int,
+    misses: int,
+    now: int
+): bool {
+    if (i < 0 || mp_state[i] != MS_REVIEW) return false;
+    b0: int = mp_box[i];
+    changed: bool = memory_would(i, grade, today);
+    if (changed) {
+        mp_box[i] = gr_box;
+        mp_due[i] = gr_due
+    }
+    me_begin("graded", i);
+    me(32);
+    me_str(mem_grade_ids[grade]);
+    if (changed) {
+        me_str(" box ");
+        me_int(b0);
+        me_str("\â\†\’");
+        me_int(mp_box[i]);
+        me_str(" due ");
+        me_date(mp_due[i])
+    } else me_str(" early, nothing changed");
+    me_end();
+    mlog_add(mp_id[i], now, mem_grade_ids[grade], b0, mp_box[i], helps, misses);
+    changed
+}
+
+// ---- Today, New and Later (Â§13.1.6) ----
+// Into td (passage indices): Today's (td_today of them), then New's
+// (td_new), then Later's (td_later). sort 0: New and Later as Â§13.1.6
+// orders them (newest first; soonest first); 1, Bible order; 2, newest
+// first. Today keeps its own order.
+td: []int = new int[256](0);
+
+td_today: int = 0;
+
+td_new: int = 0;
+
+td_later: int = 0;
+
+memory_today(today: int, sort: int) {
+    n: int = 0;
+    // Review due, most overdue first, then Bible order.
+    for i in 0..mp_n
+        if (mp_state[i] == MS_REVIEW && mp_due[i] <= today) {
+            td[n] = i;
+            n = n + 1
+        }
+    td_sort(0, n, 1);
+    m: int = n;
+    for i in 0..mp_n
+        if (mp_state[i] == MS_LEARNING && mp_due[i] <= today) {
+            td[n] = i;
+            n = n + 1
+        }
+    td_sort(m, n, 2);
+    td_today = n;
+    m = n;
+    for i in 0..mp_n
+        if (mp_state[i] == MS_NEW) {
+            td[n] = i;
+            n = n + 1
+        }
+    td_sort(m, n, if (sort == 1) 3 else 4);
+    td_new = n - m;
+    m = n;
+    for i in 0..mp_n
+        if (mp_state[i] != MS_NEW && mp_due[i] > today) {
+            td[n] = i;
+            n = n + 1
+        }
+    td_sort(m, n, if (sort == 1) 3 else if (sort == 2) 4 else 5);
+    td_later = n - m
+}
+
+// Whether passage a comes before b, by order k: 1 the most overdue (then
+// Bible order), 2 the oldest added, 3 Bible order, 4 the newest added, 5
+// the soonest due (then Bible order).
+td_before(a: int, b: int, k: int): bool {
+    if (k == 1 && mp_due[a] != mp_due[b]) return mp_due[a] < mp_due[b];
+    if (k == 5 && mp_due[a] != mp_due[b]) return mp_due[a] < mp_due[b];
+    if (k == 2) return mp_added[a] < mp_added[b];
+    if (k == 4) return mp_added[a] > mp_added[b];
+    if (mp_c1[a] != mp_c1[b]) return mp_c1[a] < mp_c1[b];
+    if (mp_v1[a] != mp_v1[b]) return mp_v1[a] < mp_v1[b];
+    mp_id[a] < mp_id[b]
+}
+
+// td[from..to] sorted by order k (insertion, stable).
+td_sort(from: int, to: int, k: int) {
+    for x in from + 1..to {
+        j: int = x;
+        while (j > from && td_before(td[j], td[j - 1], k)) {
+            t: int = td[j];
+            td[j] = td[j - 1];
+            td[j - 1] = t;
+            j = j - 1
+        }
+    }
+}
+
+// How many would be in Today on day d if nothing were practised before
+// then.
+memory_due_on(d: int): int {
+    n: int = 0;
+    for i in 0..mp_n
+        if (mp_state[i] != MS_NEW && mp_due[i] >= 0 && mp_due[i] <= d) n = n + 1;
+    n
+}
+
+// The soonest due of all passages begun (a day), or -1.
+memory_soonest(): int {
+    best: int = -1;
+    for i in 0..mp_n
+        if (mp_state[i] != MS_NEW && mp_due[i] >= 0 && (best < 0 || mp_due[i] < best)) best = mp_due[i];
+    best
+}
+
+// ---- memory.tsv (Â§13.1.7), in fbuf ----
+// PASSAGE ID VERSION BOOK C1 V1 C2 V2 ADDED STATE LEARNED BOX DUE LEVEL in
+// the order added; NEXT ID.
+format_memory() {
+    fbuf_n = 0;
+    for i in 0..mp_n {
+        fput_str("PASSAGE\t");
+        fput_int(mp_id[i]);
+        fput(9);
+        fput_str(mem_version_ids[mp_ver[i]]);
+        fput(9);
+        fput_book(ch_book[mp_c1[i]]);
+        fput_int(ch_num[mp_c1[i]]);
+        fput(9);
+        fput_int(mp_v1[i]);
+        fput(9);
+        fput_int(ch_num[mp_c2[i]]);
+        fput(9);
+        fput_int(mp_v2[i]);
+        fput(9);
+        fput_int(mp_added[i]);
+        fput(9);
+        fput_str(mem_state_ids[mp_state[i]]);
+        fput(9);
+        fput_int(mp_learned[i]);
+        fput(9);
+        fput_int(mp_box[i]);
+        fput(9);
+        if (mp_due[i] >= 0) fput_iso_date(mp_due[i]) else fput(45);
+        fput(9);
+        fput_str(mem_level_ids[mp_level[i]]);
+        fput(10)
+    }
+    fput_str("NEXT\t");
+    fput_int(mp_next);
+    fput(10)
+}
+
+// The field at p, one of words: its index, or -1.
+field_word(p: int, words: []str): int {
+    for k in 0..len(words)
+        if (field_is(p, words[k])) return k;
+    -1
+}
+
+// Malformed lines skipped, and ranges across books or over 40 verses; a
+// second line of an id ignored.
+parse_memory() {
+    begin_lines();
+    memory_clear();
+    next: int = 1;
+    lines_read = 0;
+    lines_skipped = 0;
+    while (next_line()) {
+        if (line_e > fpos) {
+            lines_read = lines_read + 1;
+            f2: int = field_after(fpos);
+            if (field_is(fpos, "PASSAGE")) {
+                f3: int = field_after(f2);
+                f4: int = field_after(f3);
+                f6: int = field_after(field_after(f4));
+                f7: int = field_after(f6);
+                f8: int = field_after(f7);
+                f9: int = field_after(f8);
+                f10: int = field_after(f9);
+                f11: int = field_after(f10);
+                f12: int = field_after(f11);
+                f13: int = field_after(f12);
+                f14: int = field_after(f13);
+                id: int = field_num(f2, false);
+                ver: int = field_word(f3, mem_version_ids);
+                c1: int = field_chapter(f4);
+                v1: int = if (c1 >= 0) field_verse(f6, c1, false) else -1;
+                n2: int = field_num(f7, false);
+                c2: int = if (c1 >= 0 && n2 >= 1 && n2 <= book_count[ch_book[c1]]) book_first[ch_book[c1]] + n2 - 1 else -1;
+                v2: int = if (c2 >= 0) field_verse(f8, c2, false) else -1;
+                added: int = field_num(f9, false);
+                state: int = field_word(f10, mem_state_ids);
+                learned: int = field_num(f11, false);
+                box: int = field_num(f12, false);
+                due: int = if (field_is(f13, "-")) -1 else field_iso_day(f13);
+                due_ok: bool = field_is(f13, "-") || due >= 0;
+                level: int = field_word(f14, mem_level_ids);
+                good: bool = id > 0 && ver >= 0 && c1 >= 0 && v1 >= 1 && c2 >= 0 && v2 >= 1 && added >= 0 && state >= 0 && learned >= 0 && box >= 0 && box <= 8 && due_ok && level >= 0;
+                if (good && state == MS_REVIEW && (box < 1 || due < 0)) good = false;
+                if (good && state == MS_LEARNING && due < 0) good = false;
+                if (good && mem_range_ok(c1, v1, c2, v2) && mp_n < MEM_MOST) {
+                    if (mem_index(id) < 0) {
+                        i: int = mem_put(id, ver, c1, v1, c2, v2, added);
+                        mp_state[i] = state;
+                        mp_learned[i] = learned;
+                        mp_box[i] = box;
+                        mp_due[i] = due;
+                        mp_level[i] = level
+                    }
+                } else skip_line()
+            } else if (field_is(fpos, "NEXT")) {
+                id: int = field_num(f2, false);
+                if (id > 0) next = id else skip_line()
+            } else skip_line()
+        }
+    }
+    if (next > mp_next) mp_next = next
+}
+
+// ---- a passage's words (Â§13.1.2) ----
+// The passage laid out (its version's text current) in mt, as runs of
+// text.l8's styles and paragraph kinds (mx_end, mx_style, mx_para), with
+// each verse's number (verse 1's too), poetry's lines, no headings or
+// notes; its verses (mv_*: chapter, key, where its number and words are)
+// and words (mw_*).
+mt: []i8 = new i8[65536](0i8);
+
+mt_n: int = 0;
+
+// Whether a byte of mt is a verse's number (or the space after it).
+mt_vn: []bool = new bool[65536](false);
+
+mx_n: int = 0;
+
+mx_end: []int = new int[4096](0);
+
+mx_style: []int = new int[4096](0);
+
+mx_para: []int = new int[4096](0);
+
+MV_MOST: int = 64;
+
+mv_n: int = 0;
+
+mv_c: []int = new int[64](0);
+
+mv_v: []int = new int[64](0);
+
+mv_b: []int = new int[64](0);
+
+mv_e: []int = new int[64](0);
+
+mv_num_b: []int = new int[64](0);
+
+mv_num_e: []int = new int[64](0);
+
+mv_w0: []int = new int[64](0);
+
+mv_w1: []int = new int[64](0);
+
+// Words: where each is in mt (b to e), its key letter (k to k2; key, the
+// letter folded; alt, a number's spoken first letter, or 0), the end of
+// its last hidden letter (h2), its verse, part and rank (the shuffle's),
+// whether Some hides it, whether a line begins with it, and whether a
+// clause ends after it (2 . ; : ? ! or a dash, 1 a comma, 0 none).
+MW_MOST: int = 4096;
+
+mw_n: int = 0;
+
+mw_b: []int = new int[4096](0);
+
+mw_e: []int = new int[4096](0);
+
+mw_k: []int = new int[4096](0);
+
+mw_k2: []int = new int[4096](0);
+
+mw_h2: []int = new int[4096](0);
+
+mw_key: []int = new int[4096](0);
+
+mw_alt: []int = new int[4096](0);
+
+mw_vi: []int = new int[4096](0);
+
+mw_part: []int = new int[4096](0);
+
+mw_rank: []int = new int[4096](0);
+
+mw_some: []bool = new bool[4096](false);
+
+mw_line: []bool = new bool[4096](false);
+
+mw_clause: []int = new int[4096](0);
+
+mt_byte(k: int) {
+    if (mt_n >= len(mt) || mx_n == 0) return;
+    mt[mt_n] = k trunc i8;
+    mt_vn[mt_n] = mx_style[mx_n - 1] == STYLE_VERSE;
+    mt_n = mt_n + 1;
+    mx_end[mx_n - 1] = mt_n
+}
+
+mt_run(style: int, para: int) {
+    if (mx_n > 0 && mx_style[mx_n - 1] == style && mx_para[mx_n - 1] == para) return;
+    if (mx_n >= len(mx_end)) return;
+    mx_end[mx_n] = mt_n;
+    mx_style[mx_n] = style;
+    mx_para[mx_n] = para;
+    mx_n = mx_n + 1
+}
+
+mt_int(n: int) {
+    if (n >= 10) mt_int(n / 10);
+    mt_byte(48 + n % 10)
+}
+
+// The passage c1:v1 to c2:v2 laid out from the current text, its words
+// found, its parts made (Â§13.1.3) and its words ranked for Some by seed
+// (the passage's id).
+memory_layout(
+    c1: int,
+    v1: int,
+    c2: int,
+    v2: int,
+    seed: int
+) {
+    mt_n = 0;
+    mx_n = 0;
+    mv_n = 0;
+    mw_n = 0;
+    keep_numbers: bool = lay_verse_numbers;
+    keep_headings: bool = lay_headings;
+    keep_notes: bool = lay_notes;
+    keep_lines: bool = lay_verse_lines;
+    lay_verse_numbers = true;
+    lay_headings = false;
+    lay_notes = false;
+    lay_verse_lines = false;
+    for c in c1..c2 + 1 {
+        if (c >= 0 && c < chapters && ch_start[c] >= 0) {
+            lo: int = if (c == c1) v1 else 1;
+            hi: int = if (c == c2) v2 else 100000;
+            layout_chapter(c);
+            // (A chapter after the first begins on a line of its own.)
+            if (mt_n > 0 && mt[mt_n - 1] as int != 10) mt_byte(10);
+            for x in 0..verse_count {
+                v: int = verse_num[x];
+                if (v >= lo && v <= hi && verse_begin[x] >= 0 && mv_n < MV_MOST) {
+                    b: int = verse_begin[x];
+                    e: int = verse_end[x];
+                    if (x + 1 < verse_count && verse_num[x + 1] <= hi && verse_begin[x + 1] > b) e = verse_begin[x + 1];
+                    mt_copy_verse(c, v, b, e, c != c1 && v == 1)
+                }
+            }
+        }
+    }
+    // (No line's end after the last words.)
+    while (mt_n > 0 && (mt[mt_n - 1] as int == 10 || mt[mt_n - 1] as int == 32)) {
+        mt_n = mt_n - 1;
+        if (mx_n > 0) mx_end[mx_n - 1] = mt_n;
+        while (mx_n > 0 && mx_end[mx_n - 1] <= (if (mx_n > 1) mx_end[mx_n - 2] else 0)) mx_n = mx_n - 1
+    }
+    lay_verse_numbers = keep_numbers;
+    lay_headings = keep_headings;
+    lay_notes = keep_notes;
+    lay_verse_lines = keep_lines;
+    if (mv_n > 0) mv_e[mv_n - 1] = mt_n;
+    mem_find_words();
+    mem_rank(seed);
+    memory_parts()
+}
+
+// Verse v of chapter c, out's bytes b to e (from its number, or its first
+// word), into mt; a number put before verse 1 ("53:1" if chap, a chapter
+// after the first).
+mt_copy_verse(
+    c: int,
+    v: int,
+    b: int,
+    e: int,
+    chap: bool
+) {
+    i: int = mv_n;
+    mv_c[i] = c;
+    mv_v[i] = v;
+    mv_b[i] = mt_n;
+    mv_num_b[i] = -1;
+    mv_num_e[i] = -1;
+    mv_n = mv_n + 1;
+    // The runs over b to e, cut there.
+    r: int = 0;
+    first: bool = true;
+    while (r < runs) {
+        rs: int = if (r == 0) 0 else run_end[r - 1];
+        re: int = run_end[r];
+        from: int = if (rs > b) rs else b;
+        to: int = if (re < e) re else e;
+        if (from < to) {
+            if (first && run_style[r] != STYLE_VERSE) {
+                // (Verse 1: its number, as the others have.)
+                mt_run(STYLE_VERSE, run_para[r]);
+                mv_num_b[i] = mt_n;
+                if (chap) {
+                    mt_int(ch_num[c]);
+                    mt_byte(58)
+                }
+                mt_int(v);
+                mv_num_e[i] = mt_n;
+                mt_byte(226);
+                mt_byte(128);
+                mt_byte(175)
+            }
+            if (first && run_style[r] == STYLE_VERSE) mv_num_b[i] = mt_n;
+            first = false;
+            mt_run(run_style[r], run_para[r]);
+            for q in from..to {
+                mt_byte(out[q] as int);
+                if (run_style[r] == STYLE_VERSE && mv_num_e[i] < 0 && (out[q] as int < 48 || out[q] as int > 57)) mv_num_e[i] = mt_n - 1
+            }
+        }
+        r = r + 1
+    }
+    mv_e[i] = mt_n
+}
+
+// The code point at mt[p] (and its length in mt_cl).
+mt_cl: int = 1;
+
+mt_cp(p: int): int {
+    k: int = mt[p] as int & 255;
+    mt_cl = 1;
+    if (k < 128) return k;
+    if (k < 224 && p + 1 < mt_n) {
+        mt_cl = 2;
+        return (k & 31) * 64 + (mt[p + 1] as int & 63)
+    }
+    if (k < 240 && p + 2 < mt_n) {
+        mt_cl = 3;
+        return (k & 15) * 4096 + (mt[p + 1] as int & 63) * 64 + (mt[p + 2] as int & 63)
+    }
+    if (p + 3 < mt_n) {
+        mt_cl = 4;
+        return (k & 7) * 262144 + (mt[p + 1] as int & 63) * 4096 + (mt[p + 2] as int & 63) * 64 + (mt[p + 3] as int & 63)
+    }
+    k
+}
+
+// Whether a code point is a letter or digit (what is hidden): ASCII's, and
+// Latin letters with marks.
+mem_hideable(cp: int): bool {
+    if (cp >= 48 && cp <= 57 || cp >= 65 && cp <= 90 || cp >= 97 && cp <= 122) return true;
+    cp >= 192 && cp <= 591 && cp != 215 && cp != 247
+}
+
+// Whether a code point separates words: spaces of every width, a line's
+// end, and the em and en dashes.
+mem_separator(cp: int): bool {
+    cp == 32 || cp == 10 || cp == 9 || cp == 160 || cp == 8239 || cp == 8201 || cp == 8202 || cp == 8194 || cp == 8195 || cp == 8212 || cp == 8211
+}
+
+mem_fold_tab: str = "aaaaaaaceeeeiiiidnooooo-ouuuuytsaaaaaaaceeeeiiiidnooooo-ouuuuyty";
+
+// A letter case- and diacritic-folded (lower case ASCII), or itself.
+mem_fold(cp: int): int {
+    if (cp >= 65 && cp <= 90) return cp + 32;
+    if (cp >= 192 && cp <= 255) return mem_fold_tab[cp - 192] as int;
+    if (cp >= 256 && cp <= 383) {
+        // (Latin Extended-A: each base letter's pair, near enough.)
+        if (cp <= 261) return 97;
+        if (cp <= 269) return 99;
+        if (cp <= 273) return 100;
+        if (cp <= 283) return 101;
+        if (cp <= 291) return 103;
+        if (cp <= 295) return 104;
+        if (cp <= 307) return 105;
+        if (cp <= 309) return 106;
+        if (cp <= 312) return 107;
+        if (cp <= 322) return 108;
+        if (cp <= 331) return 110;
+        if (cp <= 339) return 111;
+        if (cp <= 345) return 114;
+        if (cp <= 353) return 115;
+        if (cp <= 359) return 116;
+        if (cp <= 371) return 117;
+        if (cp <= 373) return 119;
+        if (cp <= 376) return 121;
+        return 122
+    }
+    cp
+}
+
+// The words of mt: runs of anything but separators and verse numbers that
+// hold a letter or digit.
+mem_find_words() {
+    p: int = 0;
+    vi: int = 0;
+    line: bool = true;
+    while (p < mt_n) {
+        while (vi + 1 < mv_n && p >= mv_b[vi + 1]) vi = vi + 1;
+        cp: int = mt_cp(p);
+        if (cp == 10) line = true;
+        if (mt_vn[p] || mem_separator(cp)) {
+            // (A dash after a word ends its clause.)
+            if ((cp == 8212 || cp == 8211) && mw_n > 0 && mw_e[mw_n - 1] == p) mw_clause[mw_n - 1] = 2;
+            p = p + mt_cl
+        } else {
+            b: int = p;
+            k: int = -1;
+            k2: int = -1;
+            h2: int = -1;
+            while (p < mt_n && !mt_vn[p] && !mem_separator(mt_cp(p))) {
+                c: int = mt_cp(p);
+                if (mem_hideable(c)) {
+                    if (k < 0) {
+                        k = p;
+                        k2 = p + mt_cl
+                    }
+                    h2 = p + mt_cl
+                }
+                p = p + mt_cl
+            }
+            if (k >= 0 && mw_n < MW_MOST) {
+                w: int = mw_n;
+                mw_b[w] = b;
+                mw_e[w] = p;
+                mw_k[w] = k;
+                mw_k2[w] = k2;
+                mw_h2[w] = h2;
+                mw_key[w] = mem_fold(mt_cp(k));
+                mw_alt[w] = 0;
+                if (mt[k] as int >= 48 && mt[k] as int <= 57) mw_alt[w] = number_letter(mt_number(k,
+                    p));
+                mw_vi[w] = vi;
+                mw_line[w] = line;
+                mw_some[w] = false;
+                mw_part[w] = 0;
+                // (Its clause: the marks after its last letter.)
+                mw_clause[w] = 0;
+                q: int = h2;
+                while (q < p) {
+                    x: int = mt[q] as int;
+                    if (x == 59 || x == 58 || x == 46 || x == 63 || x == 33) mw_clause[w] = 2 else if (x == 44 && mw_clause[w] == 0) mw_clause[w] = 1;
+                    q = q + 1
+                }
+                mw_n = mw_n + 1;
+                line = false
+            }
+        }
+    }
+    for x in 0..mv_n {
+        mv_w0[x] = mw_n;
+        mv_w1[x] = mw_n
+    }
+    for w in 0..mw_n {
+        x: int = mw_vi[w];
+        if (mv_w0[x] == mw_n || w < mv_w0[x]) mv_w0[x] = w;
+        mv_w1[x] = w + 1
+    }
+    for x in 0..mv_n
+        if (mv_w0[x] == mw_n) mv_w1[x] = mw_n
+}
+
+// The number written from p to e (its digits, commas aside).
+mt_number(p: int, e: int): int {
+    n: int = 0;
+    q: int = p;
+    while (q < e) {
+        k: int = mt[q] as int;
+        if (k >= 48 && k <= 57) {
+            if (n < 100000000) n = n * 10 + k - 48
+        } else if (k != 44) q = e;
+        q = q + 1
+    }
+    n
+}
+
+// A number's first letter, said ("4,000": four thousand, f), from 1 to
+// 1,000,000; 0 otherwise.
+num_first: str = "ottffssentettffssenttttttttttttttttttttffffffffffffffffffffsssssssssssssssssssseeeeeeeeeennnnnnnnnn";
+
+number_letter(n: int): int {
+    if (n < 1 || n > 1000000) return 0;
+    if (n == 1000000) return 111;
+    if (n >= 1000) return number_letter(n / 1000);
+    if (n >= 100) return number_letter(n / 100);
+    num_first[n - 1] as int
+}
+
+// Whether typed letter k (folded) is word w's.
+memory_key_is(w: int, k: int): bool {
+    f: int = mem_fold(k);
+    f == mw_key[w] || mw_alt[w] != 0 && f == mw_alt[w]
+}
+
+// ---- Some's words (Â§13.1.4) ----
+// Every word ranked by a shuffle seeded by the passage's id; Some hides the
+// first 40% by rank, but never the first two words of a line together
+// (the second of such a pair skipped, the next ranked taken).
+mem_rand: int = 1;
+
+mem_next_rand(): int {
+    mem_rand = (mem_rand * 1103515245 + 12345) % 2147483648;
+    mem_rand / 65536
+}
+
+mw_order: []int = new int[4096](0);
+
+mem_rank(seed: int) {
+    mem_rand = seed * 7919 + 17;
+    for w in 0..mw_n mw_order[w] = w;
+    // (Fisher and Yates.)
+    w: int = mw_n - 1;
+    while (w > 0) {
+        j: int = mem_next_rand() % (w + 1);
+        t: int = mw_order[w];
+        mw_order[w] = mw_order[j];
+        mw_order[j] = t;
+        w = w - 1
+    }
+    for r in 0..mw_n mw_rank[mw_order[r]] = r;
+    want: int = (mw_n * 2 + 2) / 5;
+    got: int = 0;
+    r: int = 0;
+    while (got < want && r < mw_n) {
+        x: int = mw_order[r];
+        if (!mem_pair_at_line(x)) {
+            mw_some[x] = true;
+            got = got + 1
+        }
+        r = r + 1
+    }
+}
+
+// Whether hiding word x would hide a line's first two words together.
+mem_pair_at_line(x: int): bool {
+    if (mw_line[x] && x + 1 < mw_n && !mw_line[x + 1] && mw_some[x + 1]) return true;
+    x > 0 && mw_line[x - 1] && !mw_line[x] && mw_some[x - 1]
+}
+
+// How word w shows at a level: 0 whole, 1 its key letter only, 2 none of
+// its letters.
+memory_hidden(w: int, level: int): int {
+    if (level == LV_FULL) return 0;
+    if (level == LV_SOME) return if (mw_some[w]) 2 else 0;
+    if (level == LV_LETTERS) return 1;
+    2
+}
+
+// ---- parts (Â§13.1.3) ----
+// Each part's words (pt_w0 to pt_w1) and verses (pt_v0 to pt_v1).
+pt_n: int = 0;
+
+pt_w0: []int = new int[128](0);
+
+pt_w1: []int = new int[128](0);
+
+pt_v0: []int = new int[128](0);
+
+pt_v1: []int = new int[128](0);
+
+pt_add(
+    w0: int,
+    w1: int,
+    v0: int,
+    v1: int
+) {
+    if (pt_n >= len(pt_w0) || w1 <= w0) return;
+    pt_w0[pt_n] = w0;
+    pt_w1[pt_n] = w1;
+    pt_v0[pt_n] = v0;
+    pt_v1[pt_n] = v1;
+    for w in w0..w1 mw_part[w] = pt_n;
+    pt_n = pt_n + 1
+}
+
+// A verse a part; one of fewer than 8 words joined to the next (to 30
+// words together); one of more than 40 split at the clause mark nearest
+// its middle word; 30 words or fewer in all, one part.
+memory_parts() {
+    pt_n = 0;
+    if (mw_n <= 30) {
+        pt_add(0, mw_n, 0, if (mv_n > 0) mv_n - 1 else 0);
+        return
+    }
+    x: int = 0;
+    while (x < mv_n) {
+        w0: int = mv_w0[x];
+        w1: int = mv_w1[x];
+        y: int = x;
+        while (w1 - w0 < 8 && y + 1 < mv_n && mv_w1[y + 1] - w0 <= 30) {
+            y = y + 1;
+            w1 = mv_w1[y]
+        }
+        if (w1 - w0 > 40 && y == x) {
+            s: int = mem_split(w0, w1);
+            pt_add(w0, s, x, x);
+            pt_add(s, w1, x, x)
+        } else pt_add(w0, w1, x, y);
+        x = y + 1
+    }
+}
+
+// Where to split the words w0 to w1: after the clause mark (the strong
+// ones first, then commas) nearest the middle word; else at the middle.
+mem_split(w0: int, w1: int): int {
+    mid: int = (w0 + w1) / 2;
+    for strength in [2, 1] {
+        best: int = -1;
+        for w in w0..w1 - 1 {
+            if (mw_clause[w] >= strength && (best < 0 || abs_int(w + 1 - mid) < abs_int(best - mid))) best = w + 1
+        }
+        if (best > w0) return best
+    }
+    mid
+}
+
+abs_int(n: int): int {
+    if (n < 0) -n else n
+}
+
+// How many verses the first k parts cover whole (a verse split in two
+// counts once both halves are).
+memory_verses_learned(k: int): int {
+    if (k <= 0) return 0;
+    if (k >= pt_n) return mv_n;
+    // (The verses before part k's first; and part k - 1's last too, unless
+    // part k goes on in it.)
+    last: int = pt_v1[k - 1];
+    if (pt_v0[k] == last) last else last + 1
+}
+
+// The parts that cover the first n verses whole (Passage's version
+// change: learning keeps the verses learned, rounded down to a part's
+// end).
+memory_parts_for_verses(n: int): int {
+    k: int = 0;
+    while (k < pt_n && memory_verses_learned(k + 1) <= n) k = k + 1;
+    k
+}
+
+// ---- what a row, a caption and the reminder say ----
+// The passage's reference: "Psalm 23" (a chapter whole), "John
+// 3:16â€“17", "Isaiah 52:13â€“53:12", "Jude 3â€“5".
+fput_passage(i: int) {
+    fput_range(mp_c1[i], mp_v1[i], mp_c2[i], mp_v2[i])
+}
+
+fput_range(
+    c1: int,
+    v1: int,
+    c2: int,
+    v2: int
+) {
+    whole: bool = v1 == 1 && v2 >= bsb_verses(c2);
+    single: bool = book_count[ch_book[c1]] == 1;
+    if (whole && !single) {
+        fput_title(c1);
+        if (c2 != c1) {
+            fput_str("\â\€\“");
+            fput_int(ch_num[c2])
+        }
+        return
+    }
+    if (c1 == c2) {
+        fput_ref(c1, v1, v2);
+        return
+    }
+    fput_ref(c1, v1, 0);
+    fput_str("\â\€\“");
+    fput_int(ch_num[c2]);
+    fput(58);
+    fput_int(v2)
+}
+
+// The caption over the words: "Psalm 23:1â€“6 Â· BSB" (the verses always
+// named).
+fput_caption(i: int) {
+    c1: int = mp_c1[i];
+    c2: int = mp_c2[i];
+    if (c1 == c2) fput_ref(c1, mp_v1[i], if (mp_v2[i] > mp_v1[i]) mp_v2[i] else 0) else {
+        fput_ref(c1, mp_v1[i], 0);
+        fput_str("\â\€\“");
+        fput_int(ch_num[c2]);
+        fput(58);
+        fput_int(mp_v2[i])
+    }
+    fput_str(" \Â\· ");
+    fput_str(text_abbrs[mp_ver[i]])
+}
+
+// A day as the schedule says it: a weekday within six days of today
+// ("Thursday"), else "2 November" (and its year, if not this one).
+fput_day_word(d: int, today: int) {
+    if (d > today && d - today <= 6) {
+        fput_str(weekday_names[weekday_of(d)]);
+        return
+    }
+    civil_date(today);
+    y: int = date_y;
+    civil_date(d);
+    fput_int(date_d);
+    fput(32);
+    fput_str(month_names[date_m - 1]);
+    if (date_y != y) {
+        fput(32);
+        fput_int(date_y)
+    }
+}
+
+// Its state in plain words (verses, the platform's count of verses the
+// learned parts cover, and in all): "New", "To review", "Learning Â· 4 of
+// 12 verses", "â€¦ Â· tomorrow", "Next review Thursday".
+fput_memory_state(
+    i: int,
+    today: int,
+    learned_verses: int,
+    verses: int
+) {
+    if (mp_state[i] == MS_NEW) {
+        fput_str("New");
+        return
+    }
+    if (mp_state[i] == MS_LEARNING) {
+        fput_str("Learning \Â\· ");
+        fput_int(learned_verses);
+        fput_str(" of ");
+        fput_int(verses);
+        fput_str(" verses");
+        if (mp_due[i] > today) fput_str(" \Â\· tomorrow");
+        return
+    }
+    if (mp_due[i] <= today) {
+        fput_str("To review");
+        return
+    }
+    fput_str("Next review ");
+    fput_day_word(mp_due[i], today)
+}
+
+// What a grade would do, under the finger: "Next review 2 November",
+// "Again tomorrow" (Not Yet), or, practised early, "No change: next
+// review Thursday".
+fput_would(i: int, grade: int, today: int) {
+    changed: bool = memory_would(i, grade, today);
+    if (grade == G_NOTYET) {
+        fput_str("Again tomorrow");
+        return
+    }
+    if (!changed) fput_str("No change: next review ") else fput_str("Next review ");
+    fput_day_word(gr_due, today)
+}
+
+// The suggestion from what was seen (Â§13.3.5): no helps and no misses,
+// Knew It; helps and misses up to one word in ten, Mostly; more, Not Yet.
+memory_suggest(helps: int, misses: int, words: int): int {
+    n: int = helps + misses;
+    if (n == 0) return G_KNEW;
+    if (n * 10 <= words) return G_MOSTLY;
+    G_NOTYET
+}
+
+// The end's second line: "Next review: Thursday" (the soonest due), or
+// none (nothing begun).
+fput_next_review(today: int): bool {
+    d: int = memory_soonest();
+    if (d < 0) return false;
+    fput_str("Next review: ");
+    if (d <= today) fput_str("Today") else fput_day_word(d, today);
+    true
+}
+
+// ---- the reminder (Â§13.5) ----
+// The passages due on day d (Today's order then), into td.
+memory_due_list(d: int): int {
+    memory_today(d, 0);
+    td_today
+}
+
+// The memory part of a reminder's body: "To review: Psalm 23, John
+// 3:16â€“17", cut at 178 characters ("â€¦ and 3 more").
+fput_memory_body(d: int) {
+    n: int = memory_due_list(d);
+    fput_str("To review: ");
+    start: int = fbuf_n;
+    for k in 0..n {
+        at: int = fbuf_n;
+        if (k > 0) fput_str(", ");
+        fput_passage(td[k]);
+        // (Cut if this one passes 178 characters, room left for the rest's
+        // count.)
+        if (utf8_chars(fbuf, start - 11, fbuf_n) > 178 - (if (k + 1 < n) 14 else 0)) {
+            fbuf_n = at;
+            fput_str(" \â\€\¦ and ");
+            fput_int(n - k);
+            fput_str(" more");
+            return
+        }
+    }
+}
+
+// The characters (not bytes) of b from p to e.
+utf8_chars(b: []i8, p: int, e: int): int {
+    n: int = 0;
+    for i in p..e {
+        k: int = b[i] as int & 255;
+        if (k < 128 || k >= 192) n = n + 1
+    }
+    n
+}
+
+// A day's reminder, title in rm_title (fbuf's first rm_title bytes) and
+// body after: the plan's part (plan_di its day's index, -1 none) and/or
+// memory's (memory, on day d). False if neither.
+rm_title: int = 0;
+
+fput_reminder_both(
+    plan_p: int,
+    plan_di: int,
+    memory: bool,
+    d: int
+): bool {
+    fbuf_n = 0;
+    if (plan_di < 0 && !memory) return false;
+    if (plan_di >= 0) {
+        fput_reminder(plan_di);
+        // (fput_reminder begins fbuf again: the title put before it.)
+        body_n: int = fbuf_n;
+        for x in 0..body_n rm_spare[x] = fbuf[x];
+        fbuf_n = 0;
+        fput_plan_name(plan_p);
+        rm_title = fbuf_n;
+        for x in 0..body_n fput(rm_spare[x] as int);
+        if (memory) {
+            fput(10);
+            fput_memory_body(d)
+        }
+        return true
+    }
+    fput_str("Memory");
+    rm_title = fbuf_n;
+    fput_memory_body(d);
+    true
+}
+
+rm_spare: []i8 = new i8[1024](0i8)
