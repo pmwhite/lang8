@@ -33,7 +33,7 @@ screen, days of any passages; M'Cheyne's Calendar, a Chronological plan of our o
 and New Together added) is specified in §16, built after §15 and before Round 11.** **iPad (owner request 2026-10-20:
 iPhone and iPad as one app following size classes, a centred column of about 70 characters at
 any width, the verse kept across rotation and resizing, form sheets and popovers, keyboard
-shortcuts and hover, no sidebar yet) is specified in §17, built after §16 and before Round
+shortcuts and hover, Study beside the text on a wide window) is specified in §17, built after §16 and before Round
 11.** Round 1 is
 §0.5–§6, Round 2 is §7 and Round 3 is §8. The owner's priorities, in order: distraction-free reading, note-taking, language tools.
 Above all: iPhone-native, HIG-proper, predictable UI. The app is **free forever**: no
@@ -323,8 +323,9 @@ and memorize, and every exercise is a real verse.
    resizing; the iPhone gains landscape.
 2. **The column:** at most 34 em (about 70 characters), centred, at every width; the
    capsules, tray and mini player sized to it.
-3. **Screens:** form sheets for lists and studies, a popover for Reading settings; the day
-   reader full screen; no sidebar or split view this round.
+3. **Screens:** form sheets for lists, a popover for Reading settings, the day reader full
+   screen; **Study beside the text** on a wide window (a 390 pt panel that stays while you
+   read, ⌥⌘I), and no other sidebar.
 4. **Keyboard and pointer:** ⌘L Go To, ⌘F Search, ⌘] and ⌘[ chapters, ⌘← back, ⌘⇧P Listen,
    in the menu bar; hover on our controls; Practice by keyboard.
 5. **CI:** an `ipad` group on the study job's Mac (13-inch, both orientations, a narrow
@@ -9006,12 +9007,11 @@ So the iPhone doesn't change (§17.8.3).
 2. **The text is a column of about 70 characters**, centred, at any width (§17.2.1). On a
    13-inch iPad in landscape that leaves wide, quiet margins, like a printed page on a
    desk.
-3. **No sidebar or split view this round.**
-   - A permanent book list beside the text would be Go To always on screen. It would
-     compete with the page, which principle 1 forbids.
-   - Study beside the text (an inspector column) is the one split that would serve a
-     reader. It's a change to the app's structure, so it's deferred to a round of its own,
-     and the owner decides (§17.10 question 2).
+3. **One split only: Study beside the text** (owner, 2026-10-20; §17.3.8).
+   - On a wide iPad window, Study opens in a panel beside the page and stays while you
+     read.
+   - **No other sidebar.** A permanent book list beside the text would be Go To always on
+     screen, competing with the page, which principle 1 forbids.
 4. **Sheets become the iPad's forms:**
    - lists and studies are **form sheets**, centred, the page dimmed behind;
    - small choices from a button (Reading settings, menus) are **popovers**, which leave
@@ -9100,7 +9100,7 @@ So the iPhone doesn't change (§17.8.3).
 | Search (§3.6) | Page sheet | Form sheet, 620 × 760 |
 | Library and its Memory segment (§3.5, §13.4) | Page sheet, medium/large | Form sheet, 620 × 800 |
 | Reading settings (Aa) (§3.7) | Sheet, medium, undimmed | **Popover** from the Aa button (`barButtonItem`), 375 × 640, undimmed. Changes show live on the page beside it. Its pushed screens (Versions, Voice, Acknowledgements, Manual) push inside the popover |
-| Study: interlinear, word study, References, Commentary (§7, §9.6) | Page sheet, medium/large | Form sheet, 700 × 860. Its content is at most 680 pt wide, centred (§17.3.4) |
+| Study: interlinear, word study, References, Commentary (§7, §9.6) | Page sheet, medium/large | **Beside the text** where it fits (§17.3.8); otherwise a form sheet, 700 × 860, its content at most 680 pt wide, centred (§17.3.4) |
 | Compare (§9.5) | Page sheet | Form sheet, 620 × 760 |
 | Passage preview (§8.1) | Sheet | Form sheet, 620 × 640 |
 | Note editor (§3.4) | Sheet | Form sheet, 620 × 640, the keyboard's shortcuts bar standard |
@@ -9144,7 +9144,7 @@ So the iPhone doesn't change (§17.8.3).
   unchanged: the grid is fixed per width, so nothing moves.
 - **Word study, Definition and Concordance:** the system's inset-grouped tables, which
   already read well at 700 pt.
-- **Study beside the text** (an inspector column) is deferred (decision 3).
+- **Beside the text** on a wide window (§17.3.8). The form sheet is used below that width.
 
 #### 17.3.5 Practice, Memory and the language pages
 - **Practice's passage** at the column measure inside the 700 pt form sheet. The level row
@@ -9164,6 +9164,133 @@ So the iPhone doesn't change (§17.8.3).
 - **The day reader** (§16) is full screen with the column centred. Mark Read is at the
   column's trailing corner, the end panel at most 560 pt wide.
 
+#### 17.3.8 Study beside the text (owner, 2026-10-20: "a good thing to do right away")
+On a wide iPad window, Study opens **beside** the page instead of over it, and stays while
+you read on. It's the one split in the app: the page on the left, Study on the right, and
+no other sidebar.
+
+**When it's beside, and when it's a sheet:**
+- **Beside** when the window is regular width and the page beside a **390 pt panel** still
+  keeps a column of at least **28 em** (about 58 characters) with its margins. That is,
+  window width ≥ 390 + 1 + 2 × margin + 28 em. At the default text size and Normal margins
+  this is about **980 pt**:
+  - every iPad in landscape (11-inch 1180 or 1194 pt; 13-inch 1366 pt);
+  - the 13-inch iPad in portrait (1032 pt);
+  - a Stage Manager window at least that wide.
+- **Not beside** (a sheet, as §17.3.1 has it) in an 11-inch iPad's portrait (834 pt), a
+  narrow window, any iPhone (a Pro Max in landscape is 956 pt and short), and at the
+  accessibility text sizes, where 28 em doesn't fit.
+- **The rule is recomputed** at every size change, rotation and text size change
+  (`study_beside_fits()`).
+
+**Opening and closing:**
+- **The tray's Study** opens the panel at that verse's interlinear (Words), when it fits.
+  The tray stays up, as for Copy or Compare.
+- **A word's Study** (the edit menu) opens the panel at that word's study.
+- **A bar button** (trailing, before Aa; `sidebar.right`, title "Study") shows and hides the
+  panel. It's present only while Study can be beside, and is shown selected (accent) while
+  the panel is open.
+- **⌥⌘I** shows and hides it ("Show Study" / "Hide Study" in the menu bar's View menu).
+- **The panel's own close:** its top bar has `xmark` on the trailing side (not Done: it
+  isn't modal).
+- **It stays open** while you read, jump, use Go To or Search, and across launches
+  (`studyBeside` in defaults: open or closed, and its verse).
+- **When the window narrows below the rule** (a rotation to an 11-inch portrait, a Stage
+  Manager window made narrower), the panel goes, and the page takes its width. Nothing opens
+  as a sheet by itself. When the window widens again, the panel returns as it was: same
+  verse, same stack.
+
+**Which verse it shows:**
+- **The verse you chose** (the tray's or the word's Study), and it stays there while you
+  scroll on. A study that followed the reading would change under your eyes as you read.
+  (§17.10 question 6.)
+- **With the panel open, selecting verses** (a tap) shows the first selected verse in the
+  panel at once (a 0.2 s cross-fade of its content). Deselecting leaves it where it is. The
+  tray's Study action is then redundant, so it reads **Studying** (accent) and does nothing
+  more.
+- **The panel's own `chevron.up` and `chevron.down`** move it verse by verse, as the sheet's
+  do, without moving the page.
+- **"Show in Text"** (the panel's leading bar item, `text.magnifyingglass`) scrolls the page
+  to the panel's verse and flashes it. It's a jump: history and the capsule.
+
+**Layout:**
+- **The split:** the page on the left, a 1 pt `rule` divider, the panel (390 pt) on the
+  right, both full height under the status bar. The reader's bar spans only the page's
+  side. The panel has its own bar (title the verse, e.g. "John 3:16"; `xmark`;
+  `text.magnifyingglass`) and its own toolbar (the order control and the chevrons), as the
+  sheet has.
+- **The panel's width is fixed** at 390 pt. Not resizable this round: one width that every
+  Study screen is laid out for, iPhone-like inside (§17.10 question 7).
+- **The column** stays centred in the page's side and keeps 34 em if there's room, else
+  narrows down to 28 em. So on a 13-inch in landscape (1366 − 391 = 975 pt) the column is
+  unchanged at 34 em; on a 13-inch in portrait (641 pt) it narrows to about 31 em.
+- **The verse at the top is kept exactly** as the panel opens or closes: the page's width
+  changes, so §17.2.2's rule applies (keep, relayout, restore).
+- **Motion:** the panel slides in from the trailing edge (a spring of 0.35 s, §0's panel
+  spring), and the page's text cross-fades to its new layout (0.2 s) at the start, so no
+  line visibly reflows. Closing is the reverse. Under Reduce Motion, both are a 0.15 s
+  cross-fade.
+
+**What the panel shows:** the whole Study sheet of today, in its own navigation stack:
+- the **segments** Words, References, Commentary in its bar's title view (§9.6.2);
+- **Words:** the interlinear in the panel's width (three tile columns, as on the iPhone),
+  with Round 10's **hiding of what you know** (§14.5.1) and the "Learn Greek" link;
+- **a tile tapped** pushes its word study in the panel (back to the interlinear with the
+  panel's back button). Word study's Grammar, Definition, Concordance, Forms, Related
+  Words, Your Words and **Learn This Word** all push or act in the panel;
+- **References and Commentary** as in the sheet. A reference's preview opens as a form
+  sheet over everything;
+- **Concordance, a cross reference's Open in Reader, a definition's link:** the page jumps
+  (history, capsule), and the panel stays where it is;
+- **Add to Note** opens the note editor as a form sheet;
+- **The language pages** (from the "Learn Greek" link) push in the panel. Practice opens as
+  its form sheet.
+
+**With the rest of the page:**
+- **The verse tray** sits centred over the page's column, not under the panel.
+- **The back capsule and §16's Mark Read** sit at the page column's corners (§17.2.3).
+- **Listen's mini player** is centred under the page's column. Listen's verse wash and
+  following happen in the page only. The panel doesn't follow Listen.
+- **§16's day reader:** it's full screen, and Study is beside it the same way: the panel
+  inside the day reader's presentation, with the same rule, button and shortcut. The
+  panel's Show in Text scrolls within the day if the verse is in it, else it is disabled.
+- **Sheets** (Go To, Search, Library …) are presented over both. The panel stays under them.
+
+**Keyboard, focus and VoiceOver:**
+- **⌥⌘I** toggles. With a keyboard, the page and the panel are two focus groups
+  (`focusGroupIdentifier` "page" and "study"): Tab and ⇧Tab move between them, arrows within
+  them, as the system's focus does.
+- **The reader's shortcuts** (§17.4.1) act on the page wherever the focus is. The panel's
+  ⌘↑ and ⌘↓ move its verse.
+- **VoiceOver order:** the page's bar, the page, then the panel. The panel is a container
+  labelled "Study, John 3:16" (`accessibilityContainerType` semantic group). Opening the
+  panel moves VoiceOver's focus to its first element (`UIAccessibilityScreenChangedNotification`
+  with the panel's title). Closing it returns focus to the verse it showed.
+
+**How it's built (no blocks):**
+- **Our own container view controller**, not `UISplitViewController`:
+  - The app's root becomes a small run-time container (`L8RootContainer`) holding the
+    reader's navigation controller and, when beside, Study's navigation controller as
+    **child view controllers** (`addChildViewController:`, `didMoveToParentViewController:`,
+    `willMoveToParentViewController:`, `removeFromParentViewController`), laid out by
+    frames in its `viewDidLayoutSubviews`.
+  - Why not `UISplitViewController`:
+    - Its column style collapses and expands by its own rules (a primary column, display
+      modes, its own bar buttons), which would fight §3.1.4's collapsing bar and the
+      reader's single page.
+    - Its inspector column exists only on iOS 26, and the app supports 16.
+    - Reparenting the reader under it changes how every sheet is presented.
+  - A plain container changes nothing for the reader but its width.
+- **Study's view controllers are the sheet's**, created once and moved between the sheet
+  and the panel: when the panel can't be beside, Study presents its navigation controller
+  as the form sheet (or page sheet) as before. The interlinear's state is one set of
+  globals (§14.10a note 12), so only one Study exists at a time: opening the sheet while
+  the panel is hidden by width moves the stack there.
+- **Size changes** come from §17.2.2's hooks. The container re-evaluates
+  `study_beside_fits()` and lays out (panel in or out) with the place kept.
+
+**Shots and sequence** (in the `ipad` group, §17.8.2): 492–503 and recording sequence 23.
+
 ### 17.4 Keyboard
 #### 17.4.1 Shortcuts (`UIKeyCommand`, selector-based, from the reader's `keyCommands`, and listed in the menu bar)
 | Keys | Command | Title shown |
@@ -9176,6 +9303,7 @@ So the iPhone doesn't change (§17.8.3).
 | ⌘⇧B | The Library | Library |
 | ⌘, | Reading settings | Reading Settings |
 | ⌘⇧P | Listen / Pause | Listen / Pause |
+| ⌥⌘I | Show or hide Study beside the text (where it fits, §17.3.8) | Show Study / Hide Study |
 | Space, ⇧Space | Page down / up (the table's `allowsKeyboardScrolling`, iOS 17; and our own on 16) | (not listed) |
 | ↓ ↑ | Scroll a line (the system's) | (not listed) |
 - **Created with** `UIKeyCommand commandWithTitle:image:action:input:modifierFlags:propertyList:`.
@@ -9243,6 +9371,12 @@ and arrows follow the system's focus.
   - It needs a new condition `iphone` (true on an iPhone, so the tip is skipped there),
     added to §15.2.2's closed set and `test_help.l8`.
   - Its MORE is `reading#keys`.
+- The Study page gains a part **"beside" "Study beside the text"**: "On iPad, held sideways
+  or in a wide window, Study opens beside the text instead of over it, and stays while you
+  read. It shows the verse you chose; select another verse to study it. The Study button
+  at the top, or ⌥⌘I, shows and hides it."
+- **A second iPad-only tip** (level 3, `UNLESS iphone`, MORE `study#beside`): "On iPad held
+  sideways, Study opens beside the text and stays while you read."
 - No other iPad-specific text: the app works the same way.
 
 ### 17.8 CI, tests and shots
@@ -9295,8 +9429,27 @@ and arrows follow the system's focus.
   | `487-ipad-sepia-ax` | Sepia at an accessibility size |
   | `488-ipad-note` | The note editor as a form sheet |
   | `489-ipad-share` | The share popover from the tray |
+- **Study beside the text, shots 492–503** (13-inch, landscape unless noted):
+  | Shot | Expected |
+  |---|---|
+  | `492-beside-open` | John 3:16 selected, the tray's Study: the panel at the right with Words (three tile columns), the page's column unchanged at 34 em, the divider, the bar's Study button selected; the tray still up, its action reading Studying |
+  | `493-beside-word` | A tile tapped: ἀγαπάω's word study pushed in the panel, its back button "John 3:16" |
+  | `494-beside-hidden` | With 120 Greek words known: the panel's interlinear in Greek Order, known English hidden (§14.5.1) |
+  | `495-beside-select` | Another verse (3:17) tapped in the page: the panel shows it (cross-faded) |
+  | `496-beside-scroll` | The page scrolled to John 4: the panel still on John 3:17 |
+  | `497-beside-show-in-text` | Show in Text: the page back at 3:17, flashed; the capsule "‹ John 4" at the column's corner |
+  | `498-beside-references` | References in the panel |
+  | `499-beside-portrait` | 13-inch portrait: still beside, the column narrowed (log: the em) |
+  | `500-beside-narrowed` | The demo's narrow stand-in (900 pt): the panel gone, the page full width; log "study beside: hidden (width)" |
+  | `501-beside-back` | Widened again: the panel back, same verse and stack |
+  | `502-beside-day` | §16's day reader with Study beside it |
+  | `503-beside-closed` | ⌥⌘I: the panel closed, the verse at the top unchanged (log: "kept …") |
 - **Recording sequence 22:** rotate portrait → landscape → portrait at John 3:16 (the verse
   stays put), open and close Go To's form sheet, the settings popover with a theme change.
+- **Recording sequence 23:** in landscape, select John 3:16, Study (the panel slides in, the
+  text cross-fades, nothing reflows visibly), tap a tile (the push), select 3:17 (the
+  panel's cross-fade), scroll the page, then the narrow stand-in and back (the panel out and
+  in), and close it.
 
 #### 17.8.3 The iPhone shots stay as they are
 - Every iPhone width is below the 34 em cap, so `side_margin` gives today's margins. The
@@ -9314,7 +9467,7 @@ and arrows follow the system's focus.
   store job's script, as the iPhone's are:
   1. the reader in landscape (461);
   2. Go To with the tip (464);
-  3. the interlinear (469);
+  3. Study beside the text (492);
   4. Practice (473);
   5. the Greek page (475).
 - Apple requires iPad screenshots once the app supports iPad. They are made, not drawn.
@@ -9331,7 +9484,14 @@ and arrows follow the system's focus.
 5. **The keyboard shortcuts** work and are listed (480; the menu bar's log); Practice and
    cards take Return and ⌘1–⌘3.
 6. **Hover** on our controls; no hover on the page.
-7. The 13-inch App Store screenshots are made.
+7. **Study beside the text** (§17.3.8):
+   - it opens beside where it fits, and is a sheet where it doesn't (492, 499, 500);
+   - it stays on its verse while you read, and follows your selection (495, 496);
+   - its stack works inside the panel (493, 498);
+   - the verse at the top is kept as it opens and closes and as the width crosses the rule
+     (503, 500, 501; sequence 23);
+   - the day reader has it too (502).
+8. The 13-inch App Store screenshots are made, one with Study beside the text.
 
 **On an iPad (the owner, and the iPad user):**
 - Split View and Slide Over with another app.
@@ -9340,10 +9500,11 @@ and arrows follow the system's focus.
   menu bar.
 - The trackpad's hover.
 - Reading in landscape for half an hour: is the column right?
+- Reading with Study beside the text for a chapter: helpful, or busy?
 
 **Deferred:**
-- **Study beside the text** (an inspector column in landscape), a structural change for its
-  own round (question 2).
+- **A resizable split** (dragging the divider), and Study beside on an iPhone.
+- **Study that follows the reading** as you scroll (question 6).
 - **More than one window** (two passages side by side): the app's reader is one set of
   state.
 - **Drag and drop** of verses into other apps: drag sessions use item providers whose
@@ -9357,12 +9518,17 @@ and arrows follow the system's focus.
 ### 17.10 Questions only the owner can answer
 These are decided above; the owner may overrule:
 1. **The iPhone gains landscape** (decided: Apple's direction, and the column makes it
-   good), or the iPhone stays portrait-only for now.
-2. **No sidebar or Study column this round** (decided: calm, one page), or build Study as
-   an inspector beside the text in landscape now.
+   good), or the iPhone stays portrait-only for now. *(Approved: landscape.)*
+2. ~~No sidebar or Study column this round~~ **Answered by the owner (2026-10-20): Study
+   beside the text this round** (§17.3.8), and no other sidebar.
 3. **Reading settings as a popover on iPad** (decided: changes seen live, the HIG's form for
-   a toolbar button's options), or a form sheet like the others.
+   a toolbar button's options), or a form sheet like the others. *(Approved: popover.)*
 4. **The shortcuts** (⌘L Go To, ⌘F Search, ⌘] and ⌘[ chapters, ⌘← back, ⌘⇧B Library, ⌘,
    settings, ⌘⇧P Listen) as listed, or other keys. (⌘P is left alone: it means Print.)
+   *(Approved.)*
 5. **The column is about 70 characters** (34 em), or wider (40 em, about 80 characters) on
-   iPad.
+   iPad. *(Approved: 70.)*
+6. **Study beside stays on the verse you chose** (decided, and selecting a verse moves it),
+   or follows the verse at the top of the page as you scroll.
+7. **The panel is a fixed 390 pt** (decided: every Study screen is laid out for it), or
+   resizable by dragging the divider.
