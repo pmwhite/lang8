@@ -5,7 +5,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { convert, recordWords, htmlWords } from "./esv.js";
-import worker, { AUDIO_BUDGET, AUDIO_KEEP, BUDGET, buckets, chaptersFor } from "./worker.js";
+import { createHash } from "node:crypto";
+import worker, { AUDIO_BUDGET, AUDIO_KEEP, BUDGET, CSP, buckets, chaptersFor } from "./worker.js";
+import { BOOT_HASH } from "./boot_hash.js";
 import { BOOKS } from "./versecounts.js";
 
 const here = new URL("./fixtures/", import.meta.url);
@@ -370,4 +372,76 @@ test("bad audio requests are 400s, and the key is in no reply", async () => {
     assert.ok(!text.includes("test-key"), text);
     for (const [, v] of res.headers) assert.ok(!v.includes("test-key"));
   }
+});
+
+// ---- the reader on the web, /read/ (WEB.md §W2.1a) ----
+// ASSETS as Cloudflare's static assets over a small site: /x/ is
+// x/index.html, /x is x.html, a missing file the site's 404 page.
+const site = {
+  "/index.html": ["text/html; charset=utf-8", "<p>home</p>"],
+  "/404.html": ["text/html; charset=utf-8", "<p>not found</p>"],
+  "/read/index.html": ["text/html; charset=utf-8", "<p>books</p>"],
+  "/read/shell.html": ["text/html; charset=utf-8", "<p>shell</p>"],
+  "/read/bsb/john/3.html": ["text/html; charset=utf-8", "<p>John 3</p>"],
+  "/read/app.0123456789.wasm": ["application/wasm", "\0asm"],
+  "/read/data/bsb.0123456789.gz": ["application/gzip", "gz"],
+};
+const ASSETS = {
+  async fetch(request) {
+    const p = new URL(request.url).pathname;
+    const hit = site[p.endsWith("/") ? p + "index.html" : p] || site[p + ".html"];
+    const [type, body] = hit || site["/404.html"];
+    return new Response(body, { status: hit ? 200 : 404, headers: { "content-type": type } });
+  },
+};
+const page = (path) => worker.fetch(new Request("https://smoothbible.com" + path), env({ ASSETS }));
+
+test("the boot script's hash is the one the CSP names", () => {
+  const boot = readFileSync(new URL("../../../web/bible/boot.js", import.meta.url));
+  const hash = "sha256-" + createHash("sha256").update(boot).digest("base64");
+  assert.equal(BOOT_HASH, hash, "run make bible-web and commit worker/boot_hash.js");
+  assert.ok(CSP.includes(`'${hash}'`));
+});
+
+test("/read: a page with the CSP, revalidated; the shell for a reader's address; 404 otherwise", async () => {
+  let r = await page("/read");
+  assert.equal(r.status, 301);
+  assert.equal(r.headers.get("location"), "https://smoothbible.com/read/");
+  r = await page("/read/bsb/john/3");
+  assert.equal(r.status, 200);
+  assert.equal(await r.text(), "<p>John 3</p>");
+  assert.equal(r.headers.get("content-security-policy"), CSP);
+  assert.equal(r.headers.get("cache-control"), "public, max-age=0, must-revalidate");
+  assert.equal(r.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(r.headers.get("referrer-policy"), "strict-origin-when-cross-origin");
+  assert.match(r.headers.get("permissions-policy"), /screen-wake-lock=\(self\)/);
+  assert.equal(r.headers.get("x-robots-tag"), null);
+  for (const path of ["/read/esv/john/3", "/read/kjv/ps/23", "/read/search", "/read/jn3%3A16", "/read/manual/ribbons", "/read/plans/mcheyne/32"]) {
+    r = await page(path);
+    assert.equal(r.status, 200, path);
+    assert.equal(await r.text(), "<p>shell</p>", path);
+    assert.equal(r.headers.get("x-robots-tag"), "noindex", path);
+    assert.equal(r.headers.get("content-security-policy"), CSP, path);
+  }
+  r = await page("/read/a/b/c/d");
+  assert.equal(r.status, 404);
+  assert.equal(await r.text(), "<p>not found</p>");
+  assert.equal(r.headers.get("x-content-type-options"), "nosniff");
+});
+
+test("/read: hashed files and data kept a year; the site and the API as they were", async () => {
+  for (const path of ["/read/app.0123456789.wasm", "/read/data/bsb.0123456789.gz"]) {
+    const r = await page(path);
+    assert.equal(r.status, 200, path);
+    assert.equal(r.headers.get("cache-control"), "public, max-age=31536000, immutable", path);
+    assert.equal(r.headers.get("content-security-policy"), null, path);
+  }
+  let r = await page("/");
+  assert.equal(await r.text(), "<p>home</p>");
+  assert.equal(r.headers.get("content-security-policy"), null);
+  assert.equal(r.headers.get("x-content-type-options"), null);
+  r = await page("/api/v1/status");
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get("content-security-policy"), null);
+  assert.deepEqual(await r.json(), { ok: true, esv: true, esvAudio: true });
 });

@@ -20,12 +20,17 @@
 //       costs one query a month (DESIGN.md §12.6). The Worker never
 //       fetches or streams the sound itself.
 //
+// It also serves the site's pages (ASSETS), and the reader on the web at
+// /read/ with its headers, a reader's address with no page answered by the
+// app's shell (WEB.md §W2.1a; `read` below).
+//
 // Status is {ok, esv, esvAudio}. Errors are {error, message, retry} (seconds): 400 bad_request, 429
 // slow_down (this address) or busy (the minute's or hour's budget), 503
 // daily_limit, 502 upstream, 504 timeout. Every request must say
 // X-Smooth-Bible: <version> (<build>). UPSTREAM (a var) is the ESV API's
 // address; tests point it at a mock.
 import { BOOKS } from "./versecounts.js";
+import { BOOT_HASH } from "./boot_hash.js";
 import { convert, keyOf } from "./esv.js";
 
 // The budget for every call upstream, under the terms with room to spare.
@@ -255,6 +260,61 @@ export const searchReply = (body) => ({
     .filter(Boolean),
 });
 
+// ---- the reader on the web, /read/ (WEB.md §W2.1a) ----
+// A reader's address with no page of its own (an ESV chapter, search, a
+// plan's day, the manual, a passage typed into the address) is answered
+// by the app's shell, which draws it.
+export const READER =
+  /^\/read\/(?:(?:bsb|kjv|web|asv|ylt|esv)(?:\/[a-z0-9-]+(?:\/\d{1,3})?)?\/?|search|plans\/[a-z0-9-]+\/\d{1,3}|manual(?:\/[a-z0-9-]+)?|[A-Za-z0-9.:%-]{1,40})$/;
+
+export const CSP = [
+  "default-src 'self'",
+  `script-src 'self' 'wasm-unsafe-eval' '${BOOT_HASH}'`,
+  "style-src 'self'",
+  "style-src-attr 'unsafe-inline'",
+  "img-src 'self' data:",
+  "font-src 'self'",
+  "connect-src 'self'",
+  "media-src 'self' https://openbible.com https://ebible.org https://audio.esv.org",
+  "frame-ancestors 'none'",
+  "base-uri 'none'",
+  "form-action 'self'",
+].join("; ");
+
+const HASHED = /\.[0-9a-f]{10}\.(?:css|js|wasm|svg|gz|woff2)$/;
+
+// An answer under /read/ with the reader's headers: for every answer, the
+// security ones; pages revalidated, with the CSP; hashed files and data
+// kept for a year.
+const readerHeaders = (r, path, extra = {}) => {
+  const h = new Headers(r.headers);
+  h.set("X-Content-Type-Options", "nosniff");
+  h.set("Referrer-Policy", "strict-origin-when-cross-origin");
+  h.set("Permissions-Policy", "screen-wake-lock=(self), camera=(), microphone=(), geolocation=()");
+  if ((h.get("content-type") || "").startsWith("text/html")) {
+    h.set("Content-Security-Policy", CSP);
+    h.set("Cache-Control", "public, max-age=0, must-revalidate");
+  } else if (path === "/read/sw.js") {
+    h.set("Cache-Control", "no-cache");
+    h.set("Service-Worker-Allowed", "/read/");
+  } else if (HASHED.test(path) || path.startsWith("/read/data/") || path.startsWith("/read/fonts/")) {
+    h.set("Cache-Control", "public, max-age=31536000, immutable");
+  }
+  for (const [k, v] of Object.entries(extra)) h.set(k, v);
+  return new Response(r.body, { status: extra.status ?? r.status, statusText: r.statusText, headers: h });
+};
+
+async function read(request, env, url) {
+  const r = await env.ASSETS.fetch(request);
+  if (r.status === 404 && READER.test(url.pathname)) {
+    const shell = await env.ASSETS.fetch(new Request(new URL("/read/shell", url), request));
+    const h = new Headers(shell.headers);
+    h.set("X-Robots-Tag", "noindex");
+    return readerHeaders(new Response(shell.body, { status: 200, headers: h }), url.pathname);
+  }
+  return readerHeaders(r, url.pathname);
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -264,6 +324,8 @@ export default {
       url.hostname = "smoothbible.com";
       return Response.redirect(url.toString(), 301);
     }
+    if (url.pathname === "/read") return Response.redirect(url.origin + "/read/" + url.search, 301);
+    if (url.pathname.startsWith("/read/") && env.ASSETS) return read(request, env, url);
     if (!url.pathname.startsWith("/api/")) {
       if (env.ASSETS) return env.ASSETS.fetch(request);
       return new Response("Not found", { status: 404 });

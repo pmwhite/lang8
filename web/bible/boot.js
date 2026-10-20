@@ -1,6 +1,8 @@
 // Inlined in every page's head (WEB.md §W3.2): the settings on <html>
 // before the first paint, /read/ sent to the place, the app started where
 // the browser can run it, and a verse in the address placed and flashed.
+// It is the same in every build (the app's name is in <meta name="sb-app">),
+// so the Worker's CSP can name its hash (worker/boot_hash.js, §W2.1a).
 (() => {
   const d = document.documentElement;
   const s = new URLSearchParams(localStorage.getItem("sb.settings") || "");
@@ -17,7 +19,8 @@
   }
   // try_table (exception handling), which L8's modules use.
   const wasm = typeof WebAssembly === "object" && WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 2, 1, 0, 10, 8, 1, 6, 0, 31, 64, 0, 11, 11]));
-  if (wasm) import("/read/{{js}}");
+  const app = document.querySelector('meta[name="sb-app"]')?.content;
+  if (wasm && app) import("/read/" + app);
   addEventListener("DOMContentLoaded", () => {
     if (!wasm) document.querySelector(".old")?.removeAttribute("hidden");
     const m = /^#(\d+)(?:-(\d+))?$/.exec(location.hash);

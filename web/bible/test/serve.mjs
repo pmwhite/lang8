@@ -4,12 +4,8 @@
 // ASSETS standing in for Cloudflare's static assets over SITE as
 // wrangler.toml configures them (html_handling "auto-trailing-slash",
 // not_found_handling "404-page"). The Worker has no ESV key here, so the
-// ESV is not offered.
-//
-// One thing is added in front of the Worker until it does it itself
-// (WEB.md §W2.1, a change to worker.js that is not ours to make): a path
-// under /read/ with no page of its own, shaped like a reader's address,
-// answers read/shell.html with 200.
+// ESV is not offered. The Worker routes /read/ and sets its headers (the
+// CSP among them), as it will live (WEB.md §W2.1a).
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
@@ -54,8 +50,6 @@ export function serve(site, port) {
       let p = rel.endsWith("/") ? file(rel + "index.html") : file(rel) || file(rel + ".html");
       if (!p && !rel.endsWith("/") && file(rel + "/index.html")) return Response.redirect(url.origin + rel + "/", 307);
       if (p) return answer(p);
-      if (/^\/read\/(bsb|kjv|web|asv|ylt|esv)\/[a-z0-9-]+(\/\d+)?$|^\/read\/search$/.test(rel))
-        return answer(file("read/shell.html"));
       return answer(file("404.html"), 404);
     },
   };

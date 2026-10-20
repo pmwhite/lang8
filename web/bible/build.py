@@ -47,13 +47,33 @@ def text(path):
         return f.read()
 
 
+BOOT_HASH = os.path.join(ROOT, "programs", "bible", "worker", "boot_hash.js")
+
+
+def boot_hash():
+    """worker/boot_hash.js as it should be for web/bible/boot.js."""
+    with open(os.path.join(HERE, "boot.js"), "rb") as f:
+        h = base64.b64encode(hashlib.sha256(f.read()).digest()).decode()
+    return ("// The CSP hash of web/bible/boot.js, inlined in every reader page (WEB.md\n"
+            "// §W2.1a). Written by web/bible/build.py; test.mjs checks it.\n"
+            f'export const BOOT_HASH = "sha256-{h}";\n')
+
+
 def build(prerender, wasm, site):
     if os.path.isdir(site):
         shutil.rmtree(site)
-    shutil.copytree(os.path.join(ROOT, "programs", "bible", "site"), site)
+    shutil.copytree(os.path.join(ROOT, "programs", "bible", "site"), site, ignore=shutil.ignore_patterns("DESIGN.md"))
     read = os.path.join(site, "read")
     os.makedirs(os.path.join(read, "data"))
-    shutil.copytree(os.path.join(HERE, "fonts"), os.path.join(read, "fonts"))
+    os.makedirs(os.path.join(read, "fonts"))
+    css = text(os.path.join(HERE, "read.css"))
+    for name in sorted(os.listdir(os.path.join(HERE, "fonts"))):
+        src = os.path.join(HERE, "fonts", name)
+        if name.endswith(".woff2"):
+            hashed = put(os.path.join(read, "fonts"), name[:-6], "woff2", open(src, "rb").read())
+            css = css.replace(f"fonts/{name}", f"fonts/{hashed}")
+        else:
+            shutil.copy(src, os.path.join(read, "fonts", name))
 
     names = {}
     for v in VERSIONS + ["refs"]:
@@ -64,16 +84,15 @@ def build(prerender, wasm, site):
     names["dom"] = put(read, "dom", "js", open(os.path.join(WEB, "dom.js"), "rb").read())
     names["wasm"] = put(read, "app", "wasm", open(wasm, "rb").read())
     names["icons"] = put(read, "icons", "svg", open(os.path.join(HERE, "icons.svg"), "rb").read())
-    names["css"] = put(read, "read", "css", open(os.path.join(HERE, "read.css"), "rb").read())
+    names["css"] = put(read, "read", "css", css.encode())
     js = text(os.path.join(HERE, "bible.js"))
     js = js.replace("../l8-runtime.js", "./" + names["runtime"]).replace("../dom.js", "./" + names["dom"])
     for k, n in names.items():
         js = js.replace("{{" + k + "}}", "/read/" + n)
     names["js"] = put(read, "bible", "js", js.encode())
 
-    # (Inlined without its comments.)
-    boot = "\n".join(l for l in text(os.path.join(HERE, "boot.js")).splitlines() if not l.strip().startswith("//"))
-    boot = boot.replace("{{js}}", names["js"]).strip() + "\n"
+    # (Inlined byte for byte: the Worker's CSP names its hash.)
+    boot = text(os.path.join(HERE, "boot.js"))
     page = text(os.path.join(HERE, "page.html")).replace("{{boot}}", boot)
     for k in ("css", "js", "dom", "runtime", "icons"):
         page = page.replace("{{" + k + "}}", names[k])
@@ -100,9 +119,13 @@ def build(prerender, wasm, site):
         f.write('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n')
         f.writelines(f"<url><loc>{u}</loc></url>\n" for u in urls)
         f.write("</urlset>\n")
-    csp = base64.b64encode(hashlib.sha256(boot.encode()).digest()).decode()
-    with open(os.path.join(os.path.dirname(site), "bible-headers.txt"), "w") as f:
-        f.write(f"boot-script sha256-{csp}\nimmutable /read/*.{{css,js,wasm,svg}} /read/data/*\n")
+    hashed = boot_hash()
+    with open(BOOT_HASH, encoding="utf-8") as f:
+        kept = f.read()
+    if kept != hashed:
+        with open(BOOT_HASH, "w", encoding="utf-8") as f:
+            f.write(hashed)
+        print("worker/boot_hash.js rewritten: commit it")
     print(r.stdout.strip() + ", " + str(len(urls)) + " in the sitemap")
 
 
