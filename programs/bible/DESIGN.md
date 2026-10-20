@@ -23,7 +23,11 @@ second reason for the one daily reminder) is specified in §13 and follows.** **
 (learning Greek and Hebrew, asked for by the owner on 2026-10-19; first scoped small, then,
 on 2026-10-20, opened to "the optimal Greek and Hebrew learning": foundations and
 vocabulary, the original text in the reader glossed by what you know, a Greek course, a
-Hebrew course, and Aramaic with recordings) are specified in §14 and follow Round 9.** Round 1 is
+Hebrew course, and Aramaic with recordings) are specified in §14 and follow Round 9.** **The
+manual and quick tips (owner request 2026-10-20: a tip always at the top of Go To with Next,
+More and an action, changing once a day and skipping what you already do; a 12-page
+Manual with search, reached from Reading settings' Help; Show Tips on by default; the
+words in `data/help.txt`) are specified in §15, built after Round 10 and before Round 11.** Round 1 is
 §0.5–§6, Round 2 is §7 and Round 3 is §8. The owner's priorities, in order: distraction-free reading, note-taking, language tools.
 Above all: iPhone-native, HIG-proper, predictable UI. The app is **free forever**: no
 price, ads, in-app purchases or donation prompts (owner, 2026-10-18).
@@ -282,6 +286,16 @@ and memorize, and every exercise is a real verse.
 5. **Round 14, Biblical Aramaic and recordings:** a short Aramaic course (Daniel, Ezra);
    human recordings of the original texts if their rights holders agree (§14.14.2).
 
+### The manual and quick tips (fully specified in §15; after Round 10, before Round 11)
+1. **A tip at the top of Go To**, one sentence, with **Next**, **More** (the manual at its
+   part) and sometimes an action ("New Ribbon…"); basics first, skipping what you already
+   do, changing once a day, cycling so there's always one.
+2. **The Manual:** 12 short pages, one per feature area, searchable, with SF Symbols drawn
+   inline and no screenshots; reached from Reading settings → Help and from a tip's More.
+3. **Show Tips** (on by default) in the same Help section.
+4. **The words** (48 tips, 12 pages) in `data/help.txt`, kept true by `test_help.l8` and by
+   the rule that every round updates it with its features.
+
 ### Out of scope (all rounds so far)
 - Widgets, Live Activities and App Intents (these need Swift or app extensions).
 - SwiftUI.
@@ -449,6 +463,8 @@ the ESV and Crossway convention.
 | Speak a letter, word or verse (§14.5.4, §14.12.4) | `speaker.wave.2` |
 | Known, in Related Words and the Alphabet; a lesson marked done (§14.5.2, §14.3.3, §14.12.2) | `checkmark`, faint |
 | The letter keyboard's delete key (§14.11.5) | `delete.left` |
+| The tip in Go To (§15.1.1) | `lightbulb`, faint |
+| The Manual in Reading settings' Help (§15.3.1) | `book.closed` |
 
 ### 2.7 Motion
 | What | How |
@@ -8118,3 +8134,294 @@ These are decided above; the owner may overrule:
 9. **The order of Rounds 11 and 12:** the reader's text before the Greek course
    (decided: reading early is the strongest input, and lessons exercise on it). Or the
    course first.
+
+---
+
+## 15. The manual and quick tips (owner request 2026-10-20; built after Round 10, before Round 11)
+
+The owner, 2026-10-20: "I think something that needs to exist is an in-app manual and a
+quick tips thing. So, somewhere that the user would see often, like the go to panel, there
+should be a quick tip always shown, a way to go to the next step. You should be able to
+jump to a longer manual explanation, and there should be a setting to turn off the quick
+tips section if it is annoying."
+
+This adds one quiet row at the top of Go To, a Help section in Reading settings, and a
+Manual. Everything else stays as it is. The words themselves (48 tips and 12 manual
+pages) are in **`programs/bible/data/help.txt`**, written with this section, so the
+builder builds the screens and the file is the content.
+
+### 15.0 Decisions (the designer's, with reasons)
+1. **The tip lives at the top of Go To, as its first row.** Go To is opened several times a
+   day by everyone (it's how you go anywhere), and its top already holds the personal
+   things: ribbons, the plan, Recent. A tip there is seen often without interrupting
+   reading. It is a list row like the others, not a banner, card, popup or coach mark.
+2. **While tips are on, Go To always opens at its top** (§3.2's rule of scrolling to the
+   current book applies only when tips are off and there's no ribbon or plan; §11.2.1
+   already opens at the top with either). Typing in the search field, which is how most
+   people go somewhere, is unaffected. (§15.9 question 1.)
+3. **"The next step" is two things:** **Next** shows the next tip at once, and a tip may
+   carry an **action** that starts the thing it describes ("New Ribbon…", "Reading Plans",
+   "Open Memory"). Every tip has **More**, which opens the manual at the part that
+   explains it.
+4. **Tips come in order, basics first,** in three levels: (1) reading, going places,
+   selecting, highlighting, notes, search; (2) ribbons, plans, listening, versions,
+   settings; (3) study, Memory, languages and the quieter features. Within a level, the
+   file's order.
+5. **A tip about something you already do is skipped.** Each tip may name a condition
+   (`UNLESS`) that the app can tell is true: you have a highlight, a ribbon, a plan, a
+   Memory passage; you've used Search, Listen, Compare, Study … (§15.2.2). Once it's true,
+   that tip never shows.
+6. **A tip changes once a day,** not every time Go To opens: the same tip all day, the next
+   one the next day you open Go To. Next moves on at once. A tip that becomes skipped
+   during the day (you made the ribbon it suggested) is replaced the next time Go To opens.
+7. **After the last tip, it starts again** from the first that isn't skipped, so there is
+   always a tip, as the owner asked, but never a count, progress or "all done".
+8. **The manual is one short page per feature area**, written plainly, reached from a tip's
+   More and from **Help** in Reading settings. It has a search field. It has no
+   screenshots: pictures go out of date with every round and can't follow the theme; the
+   text names the SF Symbols it means and draws them inline, in the theme's colors.
+   (§15.9 question 3.)
+9. **Show Tips is on by default**, in Reading settings' Help section. Off removes the row
+   from Go To (and Go To opens as before). The manual stays.
+10. **The manual and tips stay true by rule and by test:** every round's builder updates
+    `help.txt` with the feature (§15.6), and `test_help.l8` fails on any broken link,
+    missing anchor, unknown condition or action, or a tip that breaks the house style.
+11. **Calm, not casino.** No badges, dots or counts of tips left; no "You've learned X";
+    no animation calling attention; no tip on first launch over the reader. The tip
+    appears where you already look, and leaves when you turn it off.
+
+### 15.1 The tip in Go To
+#### 15.1.1 Placement and look
+- **Section 0 of Go To** (above Ribbons, §11.2.1), present only when Show Tips is on and
+  the query is empty. No header. No footer.
+- **One cell** (a run-time `UITableViewCell` with a content configuration built in
+  `viewWillAppear:`, so it's final before the sheet lands, principle 6):
+  - leading image `lightbulb` (SF 15, **faint**, not accent), top-aligned with the first
+    line, in the same column as Recent's and the ribbons' images;
+  - **the tip**: the sentence in the body text style (SF 15, scaled), ink at 85%, up to 4
+    lines, never truncated (at accessibility sizes it wraps further);
+  - 8 pt below, **a row of small plain buttons** (`UIButtonConfiguration
+    plainButtonConfiguration`, SF 15, accent, no images, 44 pt tall touch areas,
+    content insets trimmed so the first lines up with the text):
+    - the tip's **action**, when it has one (its title from `help.txt`: "New Ribbon…");
+    - **More**;
+    - and at the trailing edge, **Next** (with `chevron.forward` at 11 pt after it).
+  - The cell itself isn't selectable (no highlight on tap); only its buttons act.
+  - Background: the grouped cell background like every Go To row.
+- No close button: the setting turns tips off (§15.4). (§15.9 question 2.)
+
+#### 15.1.2 What the buttons do
+- **Next:** the next tip (§15.2.3) replaces this one in place: the cell's contents
+  cross-fade (0.2 s `CATransition` fade on the cell's content view; immediate under
+  Reduce Motion), and the row's height changes with `beginUpdates`/`endUpdates` if the
+  line count differs. Nothing else in Go To moves except by that height. The new tip
+  becomes today's tip.
+- **More:** pushes the Manual page in Go To's own navigation stack, scrolled to the tip's
+  part (§15.3.3), the part's heading briefly washed (`selection` color, fading over 1 s;
+  none under Reduce Motion). Back returns to Go To as it was.
+- **The action:** does what it names, as if chosen elsewhere:
+  | Action id | Title in `help.txt` | Does |
+  |---|---|---|
+  | `new-ribbon` | New Ribbon… | Pushes New Ribbon (§11.2.3) with the current place |
+  | `plans` | Reading Plans | Pushes the Plans list (§11.3.2) |
+  | `search` | Open Search | Dismisses Go To and presents Search (§3.6) |
+  | `memory` | Open Memory | Dismisses Go To and presents the Library on Memory (§13.4) |
+  | `greek`, `hebrew` | Greek, Hebrew | Dismisses Go To and presents the Library on Memory with the language page pushed (§14.3.2) |
+  | `history` | Show History | Pushes History (§8.3) |
+  | `versions` | Versions | Dismisses Go To and presents Reading settings with Versions pushed (§9.3.2) |
+  | `voice` | Voice | Dismisses Go To and presents Reading settings with Voice pushed (§12.4.2) |
+  Actions that need a selection (highlight, note, compare …) don't exist: those tips have
+  More only, and say in words what to do.
+- **VoiceOver:** the cell is a container; the tip is read as "Tip: Type a reference here,
+  such as …". The buttons are buttons ("New Ribbon", "More about this", "Next tip").
+  Custom actions on the tip element: **Next Tip**, **More**, and the action.
+- **Log:** "bible: tip shown goto-type (level 1, day 2026-10-20)", "bible: tip next →
+  tap-select", "bible: tip more going#goto", "bible: tip action new-ribbon".
+
+### 15.2 Which tip, and when
+#### 15.2.1 The order
+The tips in `help.txt` are sorted by level (1, 2, 3), then by their order in the file. That
+sorted list is **the order**.
+
+#### 15.2.2 Skipping: conditions
+A tip's `UNLESS` is one of these, each true or false from data the app already keeps, or
+from a **used** flag recorded the first time the thing is done (`helpUsed`, a set of
+strings in defaults):
+| Condition | True when |
+|---|---|
+| `highlight`, `note`, `bookmark`, `chapter-note` | One exists (`marks.tsv`, `notes.tsv`) |
+| `ribbon` | A ribbon exists |
+| `plan` | A plan is followed, or `plans-done.tsv` has a line |
+| `memory` | A Memory passage exists |
+| `practice` | A passage or card has been graded (`memory-log.tsv` or `cards-log.tsv` has a line) |
+| `reminder` | `memoryReminder` is on |
+| `greek`, `hebrew` | That language has a card |
+| `hide-known` | `learnHideKnown` has ever hidden a word (used flag) |
+| `library` | The Library has been opened (used flag) |
+| `capsule`, `search`, `preview`, `title-menu`, `listen`, `voice`, `download`, `compare`, `study`, `wordstudy`, `concordance`, `export`, `share-image` | Used flag, set by the feature's own code at its first use |
+| `version` | The reader's version has ever been other than the BSB (used flag) |
+| `theme`, `size` | The theme or text size has ever been changed (used flag) |
+| `red-letters`, `keep-awake` | The setting is on |
+A tip with `-` is never skipped. The set of conditions is closed: `help.l8` lists them, and
+the test fails on any other.
+
+#### 15.2.3 The rule (`help_tip_for(today, state)` in `help.l8`, tested)
+- **State** (NSUserDefaults): `tipCurrent` (a tip id), `tipDay` (the local date it became
+  current), `tipSeen` (the ids shown at least once, as one string).
+- **On Go To's `viewWillAppear:`** with tips on:
+  1. If `tipCurrent` is set, `tipDay` is today and the tip isn't skipped: show it.
+  2. Otherwise: the first tip after `tipCurrent` in the order (wrapping to the start) that
+     isn't skipped and isn't in `tipSeen`; if every unskipped tip has been seen, the first
+     unskipped tip after `tipCurrent` (so the cycle continues). Make it current, today.
+  3. If every tip is skipped (unlikely), the section isn't shown.
+- **Next:** step 2 from the current tip, made current today.
+- **A new install** starts at the first tip. Updating the app keeps the state; tips added in
+  a new build appear in their place in the order, unseen, and come up as the cycle reaches
+  them.
+- **Tests:** a fresh state gives `goto-type`; Next gives `tap-select`; with a highlight,
+  `tap-select` and `highlight` are skipped; the same day keeps the tip; the next day moves
+  on; after the last, it wraps to the first unskipped; tipSeen and skipped combine as
+  stated; an unknown id in `tipCurrent` (a tip removed in an update) is treated as unset.
+
+### 15.3 The Manual
+#### 15.3.1 Where it's reached
+- **Reading settings** gains a section **"Help"**, before While Reading (§8.2): a row
+  **Manual** (`book.closed`, disclosure) and the switch **Show Tips** (on). Footer: "A tip at
+  the top of Go To, changing once a day."
+- **A tip's More** (§15.1.2), opening at its part.
+- (Not this round: Help links from the Library, Study or the language pages; §15.8.)
+
+#### 15.3.2 The contents (pushed; insetGrouped; inline title "Manual")
+- **Search field** (`navigationItem.searchController`, no results controller, placeholder
+  "Search the Manual", `hidesSearchBarWhenScrolling` NO).
+- **Rows**, one per page in `help.txt`'s order, a subtitle cell: image the page's SF
+  Symbol (accent, 17 pt), text its title (SF 17), secondary its part headings joined with
+  " · " (faint, 2 lines). Disclosure. Tap → the page.
+- **Footer:** "Smooth Bible 1.0 (build)", as Acknowledgements'.
+- **While searching:** sections per page with the parts that match: each row the part's
+  heading (SF 15 semibold) and the matching paragraph's text around the first match (2
+  lines, the match semibold), as Search's results do (§3.6). Matching is
+  case-insensitive, whole-word, all words (Search's rules), over headings and paragraphs.
+  Tap → the page at that part, washed. Empty: "No Matches" (`magnifyingglass`).
+
+#### 15.3.3 A page (pushed; title the page's title)
+- A non-editable, selectable `UITextView` (insets 20 pt, background the sheet's), built
+  from the page's parts:
+  - each part's **heading** in SF 17 semibold (scaled, `UIFontTextStyleHeadline`), 20 pt
+    above (none above the first);
+  - its **paragraphs** in the body text style (SF 17, scaled; not the reading font: this is
+    the app's own help, set like Settings), ink, paragraph spacing 0.6 em;
+  - `**bold**` semibold; `_italic_` italic;
+  - `{sym:name}` an `NSTextAttachment` with that SF Symbol, configured at the text's point
+    size and weight and tinted ink (a template image), baseline-aligned. Unknown symbols
+    fail the test (§15.6);
+  - `[[page#part|words]]` an accent link (no underline) that pushes that page at that
+    part, or scrolls within this page.
+- **Scrolling to a part:** after layout, the part's heading is scrolled to 8 pt below the
+  top (`setContentOffset:animated:NO` before the push completes, so it lands in place),
+  and washed (§15.1.2).
+- **VoiceOver:** headings carry `UIAccessibilityTraitHeader` (through the text view's
+  accessibility, so the rotor's Headings moves by part); symbols are read by name ("the
+  bookmark button"), from an accessibility label per symbol listed in `help.l8`.
+- **Themes:** the sheet's colors; Night and Black as everywhere.
+
+### 15.4 The setting
+- **Show Tips** (`showTips`, default **on**), in Reading settings' Help section.
+- Turning it off: the next time Go To opens, there's no tip section, and Go To opens as
+  §3.2 and §11.2.1 say. Turning it on: the tip comes back where the order was (the state is
+  kept while off).
+- The Manual is always in Help, whatever the switch.
+
+### 15.5 The file (`data/help.txt`, about 20 KB)
+- **Format** (its header comment says the same):
+  - `= ID<TAB>Title<TAB>symbol` starts a page; `== ID<TAB>Heading` starts a part, whose
+    anchor is `page#part`; any other non-empty, non-comment line is a paragraph of the
+    current part.
+  - `tip<TAB>ID<TAB>LEVEL<TAB>UNLESS<TAB>ACTION<TAB>MORE<TAB>Text`, ACTION as
+    `id:Title` or `-`.
+- **Read** by `help.l8` (portable, no UIKit) at the first Go To (tips) or Manual opening,
+  never at launch; about 20 KB, parsed in well under a millisecond.
+- **Licence:** written for the app, public domain (its header says so).
+- **Pages now** (12): Reading; Going Places; Selecting Verses; Notes, Highlights and
+  Bookmarks; Ribbons; Reading Plans; Versions and Compare; Listening; Study; Memory; Greek
+  and Hebrew; Reading Settings. They describe the app as of Round 10.
+- **Tips now** (48): 10 at level 1, 15 at level 2, 23 at level 3.
+
+### 15.6 Keeping it true
+- **`test_help.l8`** (in `make bible-test`) fails when:
+  - a tip's MORE names a page or part that doesn't exist, or a `[[link]]` does;
+  - a tip's UNLESS isn't one of §15.2.2's conditions, or its ACTION isn't one of
+    §15.1.2's;
+  - a `{sym:…}` isn't in `help.l8`'s list of symbols the app uses (each with its
+    VoiceOver name);
+  - a tip breaks the house style: more than one sentence (a ". " inside it), longer than
+    140 characters, an exclamation mark, or the words "Pro tip", "Did you know", "awesome",
+    "easily", "simply" or "just";
+  - two tips or two parts share an id;
+  - a page has no part, or a part no paragraph.
+- **The rule for every later round** (added to this file's builder instructions, and the
+  designer checks it in review): **a round that adds, removes or renames a feature, a
+  control's title or a place updates `help.txt` in the same round**: the manual's part,
+  and a tip if the feature is worth one. The round's acceptance includes "the manual and
+  tips describe the round's features". The designer reviews the text as part of the
+  round.
+- **A screenshot check:** the help group's shots (§15.7) show the pages, so a reviewer
+  reading them against the app's other shots will see a manual that has drifted.
+
+### 15.7 CI and tests
+- **Linux:** `test_help.l8`: the file's parse; §15.6's checks; §15.2.3's rule (all its
+  cases); the Manual search over the file ("ribbon" finds Ribbons' parts and the Going
+  Places part that links to them; "born again" finds Search's part).
+- **The `help` demo group** (`simulate.sh` and the workflow), on the demo clock, shots
+  **400–419**:
+  | Shot | Action | Expected |
+  |---|---|---|
+  | `400-tip-first` | Fresh install; tap the title | Go To at its top: the tip "Type a reference here, such as "jn 3:16" or "ps 23", to go straight to it." with `lightbulb`, More, Next; then New Ribbon…, Reading Plans, the books |
+  | `401-tip-next` | Next | The next tip in the same row, the rest of Go To unmoved but for the row's height |
+  | `402-tip-same-day` | Close and reopen Go To | The same tip |
+  | `403-tip-next-day` | (Demo clock + 1 day) reopen | The following tip |
+  | `404-tip-skipped` | Highlight John 3:16, then reopen next day | The highlight tips skipped; the log names the skipped ids |
+  | `405-tip-action` | (Demo) make `ribbon-new` current; tap New Ribbon… | New Ribbon pushed with the current place |
+  | `406-tip-more` | Back; More | The Ribbons page at "Making one", its heading washed |
+  | `407-manual` | Reading settings → Help | The Help section (Manual, Show Tips on, footer) |
+  | `408-manual-contents` | Manual | The 12 pages with symbols and their parts |
+  | `409-manual-page` | Selecting Verses | Headings, paragraphs, inline symbols (bookmark, note, Study) |
+  | `410-manual-link` | Tap "Memory" in its last paragraph | The Memory page at "Choosing a passage" |
+  | `411-manual-search` | Search "ribbon" | Matching parts with "ribbon" semibold |
+  | `412-tips-off` | Show Tips off; open Go To | No tip; Go To as before (scrolled to the current book when there's no ribbon or plan) |
+  | `413-tips-on` | Back on | The tip that was current |
+  | `414-night` | Night theme; Go To and a manual page | Dark, inline symbols tinted |
+  | `415-ax-tip` | Accessibility size | The tip wraps, buttons stack under it, nothing clipped |
+  | `416-ax-page` | Accessibility size | A manual page |
+  | `417-languages-page` | Manual → Greek and Hebrew | Round 10's features described |
+  | `418-memory-page` | Manual → Memory | Round 9's features described |
+  | `419-wrap` | (Demo) every tip seen | A tip still shown: the first unskipped one; no "all done" |
+- **Recording sequence 20:** Go To opened, Next twice (the cross-fade, only the row's height
+  changing), More, back, close.
+- Earlier shots that show Go To at its top (160–182, 140–149b and others) gain the tip row
+  at the top: the one expected change. The demo groups that predate this turn Show Tips
+  **off** before their first launch (`showTips` false), so their shots don't change; only
+  the `help` group shows tips.
+
+### 15.8 What's deferred
+- **Screenshots in the manual** (decision 8): reconsider if the owner wants them, from the
+  CI shots, regenerated each round, with a dark copy each.
+- **Help links elsewhere:** a ⓘ or "How this works" link from empty states (Memory, Notes,
+  the language pages) to the manual's part. Small; a later round if the owner wants it.
+- **Tips that point at the reader** (an arrow at the title, a highlight round a control):
+  coach marks are noise; the tip says where in words.
+- **A What's New page** after an update, listing a round's features: could be a manual
+  page that updates with each build, shown once from a tip. Not now.
+- **Localized manuals:** the app is English only.
+
+### 15.9 Questions only the owner can answer
+These are decided above; the owner may overrule:
+1. **Go To opens at its top while tips are on** (decided, so the tip is seen), or keep
+   scrolling to the current book and let the tip be found by scrolling up.
+2. **No close button on the tip** (decided: Next moves on, and the setting turns tips off),
+   or a small `xmark` that hides tips for good (the same as the setting).
+3. **No screenshots in the manual** (decided: they go stale), or pictures from the CI
+   shots.
+4. **The tip changes once a day** (decided), or every time Go To opens.
+5. **The tips cycle forever** (decided: "always shown"), or stop after the last one until
+   the next build adds new ones.
