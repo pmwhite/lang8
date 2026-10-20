@@ -18,9 +18,10 @@ with three standing translations: "tap" in the copy becomes "click or tap" only 
 mouse is likely (the manual's web text, §W14.4); UIKit's controls become the HTML
 controls named in §W1.4; and an SF Symbol becomes the web icon named in §W1.7.
 
-**Status.** Written 2026-10-20. Nothing is built. The builder has started on UI-neutral
-groundwork (the bridge and the portable modules in wasm); §W1 and §W3 (phase a) came
-first so that work can follow them.
+**Status.** Written 2026-10-20. The builder's phase 0 (9befcaab) built the bridge
+(`programs/web/dom.l8`, `web/dom.js`), ran the portable modules' tests in wasm, and drew
+John 3 in a spike; §W1 and §W3 (phase a) were pushed first so the work can follow them.
+Phases (a)–(f) are specified; none is built.
 
 Contents: W0 principles · W1 architecture · W2 URLs, history and the site · W3 phase (a),
 the reader alone · W4 phases at a glance · W5 phase (b), navigation, search and versions ·
@@ -71,6 +72,28 @@ them.
    chase, install nags, update banners, "rate us", or attention-seeking motion.
 9. **It works offline once visited** (phase f), and reads without JavaScript at all
    (§W1.8), because a Bible page should never be blank.
+
+### A visit, start to finish (what the design adds up to)
+
+A friend sends a link: `smoothbible.com/read/bsb/john/3#16`. On her phone the page shows
+John 3 at once, in the iPhone app's paper colour and serif type, verse 16 a third of the
+way down with a faint wash that fades; the bar above reads "John 3". It's an ordinary web
+page so far, and it would read the same with scripts off. A moment later, unseen, the app
+has taken the page over: she scrolls, and John 4 follows without a break, the bar tucking
+itself into a small "John 4" while the address bar says `/read/bsb/john/4`. She taps
+verse 24; it takes a dotted wash and a tray rises from the bottom with its reference,
+five colours and Copy, Share, Bookmark, Note, Study, Compare and Memorize. She picks
+yellow. She taps the title, Go To opens as a sheet, she types "ps 23", presses Go, and is
+in Psalm 23; a capsule at the bottom left says "‹ John 4", and her phone's Back does the
+same. Aa gives her the six themes and the type, changing the page live under the sheet.
+
+At her desk the next day she opens `smoothbible.com/read/` on her laptop: a different
+browser, so it starts fresh (there's no sync), at Genesis 1. The column is the same 34 em
+in a wide window, quiet margins on both sides. She presses G and types "rom 8", / and
+searches "more than conquerors"; Study on a verse opens beside the text on the right and
+stays there while she reads on. Before closing the tab she chooses Back Up… in Reading
+settings, and keeps the file. On her phone she later adds the page to the Home Screen; it
+opens like an app, without the browser's bars, and reads on a plane with no connection.
 
 ---
 
@@ -886,4 +909,1021 @@ a hashed name and a year's `immutable` cache header, so a returning visitor's br
 already holds the app and the text and loads them without the network's round trips;
 (f) adds working with no network at all.
 
-*(§W5–§W16 follow.)*
+---
+
+## W5. Phase (b): navigation, search and versions
+
+**What it adds:** going anywhere (Go To, Back, History, previews), finding anything
+(Search), selecting verses with the tray's first actions, and every version (switching,
+the ESV, Compare). **Worth having alone:** with (a), a complete reading and study-by-
+reading site, still with nothing of the reader's own kept beyond the place, history and
+recent searches.
+
+### W5.1 In phase (b)
+1. Go To (§W5.2), the back capsule (§W2.3), History (§8.3) pushed from Recent.
+2. Passage previews (§8.1): headings' ranges and footnotes' references.
+3. Search (§3.6), with the ESV's search row (§9.4.8).
+4. Verse selection and the tray with Copy, Share and Compare (§W5.5); the colours,
+   Bookmark, Note, Study and Memorize join it in (c), (d) and (e).
+5. Versions: the Version row and screen, switching in place (§9.3), the ESV (§W5.7),
+   Compare (§9.5).
+6. The app reads any passage-like URL under `/read/` (§W2.2).
+7. IndexedDB storage begins (§W12.2), for `history.tsv` and recent searches.
+
+### W5.2 Go To
+
+A dialog (§W1.4: a full-screen sheet when narrow, a centred panel otherwise), title "Go
+To", Done on the right, opened by the title, by **G** and from the tips (c).
+- **The field** (`<input type=search>`, placeholder `Book, chapter or verse — "jn 3:16"`,
+  no autocorrect or capitalisation, `enterkeyhint="go"`) sits at the top, under the title,
+  always visible. It takes focus when the dialog opens on a device with a fine pointer
+  (a keyboard is likely); on touch it doesn't, so the keyboard doesn't cover the list
+  (§3.2's iPhone sheet doesn't raise it either).
+- **Sections with an empty query,** in §11.2.1's order: (the tip, c) · Ribbons (c) ·
+  Reading Plan (c) · Recent · Old Testament · New Testament. Recent as §3.2 and §8.3 (up to
+  4, Show All pushes History).
+- **Books** are rows that open in place: a book's row is a `<details>` whose `<summary>`
+  is "John" with "21" (its chapter count, faint) and a chevron that turns; opening it shows
+  its chapters below it as a grid of links (56 × 56 px cells, 10 px apart, as §3.2), the
+  current chapter filled with accent. Opening one book closes the one open before. A
+  one-chapter book's row is a link straight to its chapter. This replaces the iPhone's
+  pushed chapter grid: on the web a disclosure keeps the list where it is, and every
+  chapter is a link that can be opened in a new tab. On widths of 900 px and more the
+  dialog is 720 px wide and the two testaments sit side by side as two columns.
+- **On opening,** the current book's row is open and scrolled to the middle, unless
+  §15.0.2's rule keeps Go To at its top (tips on, or a ribbon or a plan).
+- **With a query:** "Go to" (one row, §3.2) and up to 8 matching books (§3.2's matching),
+  each a link. **Enter** goes to the first row; **↓/↑** move a highlight through the rows
+  (the field is a combobox: `role="combobox"`, `aria-activedescendant` on the
+  highlighted row), Enter goes to it. "No Matches" as §3.2.
+- **Every jump** closes the dialog (its history entry replaced by the jump, §W2.3), goes
+  to the place, flashes a verse-precise one, and shows the capsule.
+
+### W5.3 Previews
+
+A reference inside text (a heading's range, a footnote's reference; notes and definitions
+from c and d) is a link; a plain click previews it, as §8.1:
+- **Wider than 600 px:** a popover beside the link, 420 px wide and up to 60 vh tall, with
+  the passage in the reader's type at 0.9 em, its reference as the header, and **Open in
+  Reader** (a link to the place) at its foot. It scrolls inside itself.
+- **Narrow:** a sheet from the bottom, half the screen's height, the page dimmed, with the
+  same contents.
+- Escape or a click outside closes it. Inside a footnote's popover, a reference's preview
+  replaces the footnote (one popover at a time).
+
+### W5.4 Search
+
+A dialog, title "Search", opened by the search icon and **/**. Its query is in the URL
+(`/read/search?q=…`, replaced as you type, pushed when you open a result), so a search can
+be shared, bookmarked and returned to with Back.
+- The field at the top (focused on open, on every device: searching means typing),
+  `enterkeyhint="search"`; under it the scope as a group of four segments: All, OT, NT and
+  the current book's name.
+- Queries, the "Go to" row, results (one link per verse, the reference in accent, the
+  verse with matched words in `<b>` on the selection wash), "1000+", recent searches with
+  Clear, empty and no-result states: all §3.6, word for word.
+- **Speed:** the search runs in the app (`search` in `text.l8`), debounced 0.2 s. The CI
+  measures it on the throttled profile (§W13); if "the" over All takes more than 50 ms,
+  the builder moves search into a Web Worker running a second instance of the module with
+  its own copy of the text, and says so.
+- **The ESV:** as §9.4.8: the BSB is searched; the last row offers "Search the ESV for
+  “…”", which makes one request and shows one page of up to 100 results with the footer
+  "(ESV) · esv.org".
+
+### W5.5 Selecting verses, and the tray
+
+**Selecting** (§3.3.1's model: a set of verses in one chapter):
+- **A click or tap on a verse's text toggles it**, unless it made a text selection (a drag,
+  a double-click's word, a long press) or landed on a link, a footnote mark or a note
+  glyph. On touch, a tap while the page is still moving only stops it (the browser does
+  this by itself).
+- **A text selection** (the browser's own: drag, double-click, long-press on touch) that
+  lies in the text **selects the verses it touches**, and the tray shows for them; the
+  browser's own selection handles and menu stay as they are (we add nothing to them, and
+  on iPhone and Android the system's menu appears above the selection while our tray sits
+  at the bottom). Clearing the text selection keeps the verse selection until a click
+  elsewhere or Escape.
+- **From the keyboard** (§W10.1): with the text focused, **Enter** selects the verse at the
+  reading line; **↓/↑** then move the selection verse by verse (scrolling to keep it in
+  view), **Shift+↓/↑** extend it, **Escape** clears it, and **Tab** moves into the tray.
+  Without a selection, the arrow keys scroll as always.
+- Selected verses get class `sel`: the `selection` wash and a dotted underline in accent at
+  70% (§3.3.2).
+
+**The tray** (§3.3.3): a `<div role="toolbar">` labelled with its reference, fixed at the
+bottom, centred under the column (12 px from the edges when narrow; at most 34 em + 24 px
+wide), `cellBg` at 92% with `backdrop-filter: blur(20px)`, radius 26 px, §3.3.3's shadow,
+above the bottom safe area. It rises with the §2.7 motion (a translate and fade; a fade
+under reduced motion) and falls when the selection empties.
+- **Header:** the reference ("John 3:16–18", §3.3.3's rules), and a close button (`x`,
+  28 px circle, label "Clear Selection").
+- **Colours row** (from c): five 34 px swatches and, when needed, `circle-slash`, as §3.3.3.
+- **Actions row:** the actions present, equal widths, icon above an 11 px label: **Copy**,
+  **Share**, **Bookmark** (c), **Note** (c), **Study** (d), **Compare**, **Memorize** (e).
+  In (b) it's Copy, Share and Compare.
+- **Copy** writes §3.3.6's text and reference to the clipboard (`navigator.clipboard`),
+  clears the selection and shows the toast "Copied".
+- **Share** uses `navigator.share({ text, url })` with §3.3.6's text and the verse's link
+  (§W2.4). Where the browser has no share (desktop Firefox, some others), it copies the
+  text, reference and link on three lines and shows "Copied with Link".
+- **Compare** opens Compare (§W5.8).
+- With a text selection that is one word, **Study** reads "Study ‘loved’" and opens that
+  word's study (§7.2's word path) instead of the verse's (d).
+- The tray never covers the verse it acts on: when a selected verse would sit under it,
+  the page scrolls it up just enough, once, at the selection (`scroll-padding-bottom` is
+  the tray's height while it shows, so keyboard focus and Find also stay clear of it,
+  WCAG 2.4.11).
+
+### W5.6 Versions
+
+- **Reading settings' Version row** (§9.3.1), above the text size: "Version · Berean
+  Standard Bible", pushing the Versions screen (§9.3.2) inside the sheet or popover:
+  BSB, ESV, KJV, WEB, ASV, YLT with their full names and §9.3.2's one-line descriptions, a
+  check on the current one. Without a connection the ESV row says "Needs a connection"
+  (faint) and stays selectable.
+- **Switching in place** (§9.3.3): the page fades to 0 over 0.15 s, the window is redrawn in
+  the new version, the place kept by reference (a verse the version lacks goes to the
+  nearest before it), and it fades back in 0.15 s. The URL is replaced
+  (`/read/kjv/john/3`), not pushed: a setting is not a journey. The version is saved as the
+  reader's (`sb.version`), used for `/read/` and passage URLs without a version.
+- **A version's text arrives on first choice** (about 1.3–1.45 MB each, §W12.1): the row
+  shows "Getting the King James Version…" with a small spinner in place of its check, and
+  the switch happens when it has arrived. It's kept for next time (the HTTP cache, then
+  the Service Worker, f).
+- **A shared link in another version** (§W3.2 step 3) is shown in its version without
+  changing the reader's.
+
+### W5.7 The ESV
+
+Everything §9.4 says about the reader under the ESV holds, through the same Worker, with
+these web specifics (the terms are §W12.6):
+- **Not prerendered.** `/read/esv/…` is the shell; the chapter is fetched
+  (`/api/v1/esv/chapters?book=JHN&chapter=3&count=2`, header `X-Smooth-Bible: web
+  (<build>)`) and drawn by `html_chapter` as any version once its records are in
+  `text.l8` (`esv_build`, as on the iPhone).
+- **Placeholders** (§9.4.6): a chapter not yet here is its opener and a spinner (after
+  0.4 s), as tall as the BSB's same chapter laid out at the current settings, so the page
+  length is believable. When it arrives below the reading line it replaces the
+  placeholder at once; above it, at rest only, with the height difference scrolled away in
+  the same frame (§W3.3).
+- **Requests start early** (§9.4.11): for the window's chapters as soon as the window
+  decides it wants them, not when they come into view.
+- **The window under the ESV** holds no more than `esv_cache.l8` allows the page to show:
+  at most 500 ESV verses and never more than half of any book (a one-chapter book only
+  while its chapter is on screen). In Ruth (85 verses) that is one chapter at a time,
+  with Judges and 1 Samuel around it; the next chapter of Ruth replaces the last as you
+  read. The CI checks the count at every step of a scroll through Ruth and through Psalm
+  119's neighbours.
+- **States and messages** (offline, busy, resting for today, unavailable) are §9.4.6's, in
+  the page, in the reader's type; "Read in the BSB" switches the version in place.
+- **Each ESV chapter ends with** "(ESV) · esv.org", the link opening
+  `https://www.esv.org/John+3/` in a new tab (`rel="noopener"`).
+- **Copy and Share** say "John 3:16 ESV"; Share's link is the ESV URL.
+- **The cache** (`esv_cache.l8`'s rules over IndexedDB's `esv` store, §W12.2) holds at most
+  500 verses with the page; nothing of the ESV is written anywhere else (the Worker sends
+  `no-store`, and the Service Worker never caches `/api/`).
+
+### W5.8 Compare
+
+As §9.5: a dialog with the selection's reference as its title, the verses in each version
+(the current first, then BSB, ESV, KJV, WEB, ASV, YLT), "· Reading" after the current
+one's name, previous and next (`chevron-up`, `chevron-down`, also **K** and **J**) in its
+footer. Versions not yet loaded fill in as they arrive, each section showing "Getting the
+King James Version…" until then (all five public-domain texts are about 7 MB together,
+fetched only the first time Compare is used). The ESV section follows §9.5's states.
+
+### W5.9 Phase (b) acceptance
+1. Go To by typing (`jn 3:16`, `ps 23`, `1 cor 13`, `jude 3`, `john 30`: §4.2's table) and by
+   books and chapters; each jump flashes, shows the capsule, and Back returns to the exact
+   verse; Forward goes again.
+2. Back closes each dialog; a jump from a dialog leaves no dialog entry behind (history
+   length checked).
+3. Ctrl/⌘-click and middle-click on a book's chapter, a search result and Recent open a
+   new tab at that place (CDP: a new target appears) and the dialog stays.
+4. Search: "born again" with and without quotes, scopes, the ESV row against the mock;
+   `/read/search?q=born+again` opens with the results.
+5. Selecting by click, by a dragged text selection and by keyboard; the tray's Copy (the
+   clipboard's text checked), Share's fallback, Compare.
+6. Switching version keeps the verse (John 3:16 → KJV → ESV (mock) → BSB).
+7. The ESV against the Worker's fixtures: placeholders, arrival above and below the
+   reading line with no pixel moving, offline and busy states, the footer link, no more
+   than 500 verses or half a book in the DOM at any step.
+8. `/read/jn3:16` and `/read/kjv/ps/23` become their canonical URLs.
+
+---
+
+## W6. Phase (c): marks, notes, ribbons, plans and the rest
+
+**What it adds:** everything of the reader's own: highlights, bookmarks, notes and chapter
+notes, the Library, ribbons, reading plans and the day reader, the manual and tips, and
+the ways to take it all out and back in. **Worth having alone:** the owner's second
+priority, notes, complete.
+
+### W6.1 In phase (c)
+1. Storage for all of it (§W12.2), several tabs (§W12.3), backup and restore (§W12.4).
+2. The tray's colours, Bookmark and Note; marks in the text (§W1.5); the edit-menu path
+   of §3.3.5 becomes the text-selection path of §W5.5.
+3. The note editor (§3.4, §7.9) and chapter notes (§8.4).
+4. The Library (§3.5, §7.9, §8.5, §8.6).
+5. Ribbons (§11).
+6. Plans, a plan's days and the day reader (§10.1, §11.3, §16).
+7. The manual and tips (§15) with the web's words (§W14.4).
+8. Reading settings' Help and This Browser sections.
+
+### W6.2 Highlights and bookmarks
+As §3.3.3–§3.3.4: a swatch colours every selected verse and clears the selection; the
+checked swatch or `circle-slash` removes it; the last colour is remembered. Bookmark toggles
+the first selected verse's bookmark. Marks appear by class with no movement of the text
+above (§W3.3). The toasts are §3.3.3's.
+
+### W6.3 Notes
+- **The editor** (§3.4) is a dialog: the reference as its title; the verse quoted (0.85 em,
+  faint, at most 4 lines, a 3 px accent bar at its left); a hairline; a `<textarea>`
+  filling the rest in the body font at 1.0 em, placeholder "Write a note…", focused on
+  open. It **saves as you type** (0.5 s after the last key) and on close. Done closes it;
+  an empty note is deleted.
+- **Deleting** an existing note is a `trash-2` button in the header's left; it deletes at
+  once and closes, and the toast reads "Note deleted · Undo" for 6 s (the web has the
+  confirmation the iPhone couldn't make without blocks, but an Undo is calmer than a
+  question).
+- **Read mode** (§7.9): an existing note opens readable, its references as links (a plain
+  click previews, §W5.3), with Edit in the header; Edit turns it into the textarea at the
+  same scroll.
+- **Chapter notes** (§8.4): the glyph after the chapter label; created from the Library's
+  Notes tab with a compose button (`square-pen`, "New Chapter Note") at the top right of
+  the tab, for the chapter at the reading line.
+- **The note glyph** in the text is a button (§W1.5); a click opens the note.
+
+### W6.4 The Library
+A dialog, title "Library", opened by its bar button and **B**:
+- **Tabs** under the title (`role="tablist"`): Highlights, Notes, Bookmarks, and Memory
+  from (e). The last chosen is remembered. Under Highlights, the colour filter (§8.6) as
+  six small round toggles.
+- A **search field** (§7.9) and **Sort** (Bible Order, Newest) as a small `<select>` beside
+  it.
+- **Rows** as §3.5, grouped by book with headers; each row is a link to its place (notes
+  open the note instead). A **delete button** (`trash-2`, faint, label "Delete highlight,
+  John 3:16") at each row's end: shown on hover and focus with a mouse, always shown on
+  touch. Deleting removes the row (its height closes over 0.2 s) and shows "Highlight
+  deleted · Undo" for 6 s. No swipe gestures: a swipe in a web list conflicts with the
+  browser's own back swipe and scrolling.
+- **Export** (§8.5): a button at the foot of every tab, "Export Notes and Highlights",
+  downloading `Smooth Bible Notes 2026-10-20.md` in §8.5's format (a Blob and
+  `<a download>`), or, where `navigator.share` takes files (phones), offering it to the
+  share sheet as the iPhone does.
+- **Empty states** as §3.5's, word for word ("Tap a verse while reading…" reads
+  naturally with a mouse too).
+- **The foot of the Library** holds one faint line: "Kept in this browser on this device.
+  Back up from Reading settings." (§W12.4), linking to that section. It is the only place
+  the web reminds anyone of anything about their data, and it never changes or flashes.
+
+### W6.5 Ribbons
+As §11, with one change of place: the iPhone keeps "New Ribbon Here…", "Leave Morning
+Here" and "Reading with Morning" in the title's long-press menu, and a long press isn't a
+web gesture. On the web they all live in **Go To's Ribbons section**, which already holds
+New Ribbon…:
+- A ribbon's row (§11.2.1) is a link that opens it; its trailing `ellipsis` button (label
+  "Ribbon options, Morning") opens the Ribbon screen (§11.2.4: rename, delete, move here),
+  pushed inside the dialog.
+- **While carrying one,** its row is first, with the secondary text "Reading with it now"
+  and a trailing text button **Leave Here** (which puts it down at the place and closes Go
+  To with the toast "Morning left at Romans 8").
+- **New Ribbon…** pushes New Ribbon (§11.2.3) with a text field for the name.
+- Carrying, putting down by a jump, the capsule's undo picking it up again, the toast
+  "Reading with Morning", the 12-ribbon limit: all §11, unchanged.
+
+### W6.6 Plans and the day reader
+- **Go To's Reading Plan section, Plans, a plan's days, Start Plan** (§11.3, §16.1) are
+  screens pushed inside Go To, as on the iPhone.
+- **The day reader** (§16) is the reader in a mode, with its own URL:
+  `/read/plans/chronological/32`. Opening a day pushes that URL; the page's window is
+  replaced by the day (with §16.1's slide up, or a fade under reduced motion), and
+  **Done** (a text button at the bar's left, in place of Search) or **Back** returns to the
+  main reader exactly as it was. Reloading the URL reopens the day.
+- **The page** is §16.2.1's, written by `html.l8` from `layout_day` (`html_day`): the day's
+  opener, each passage under its heading, the page's end with **Mark Day 32 as Read**. The
+  window of §W3.3 doesn't apply: a day is short enough to be one page (the longest
+  M'Cheyne day is about 4 chapters). Under the ESV, §16's per-passage fetches, within the
+  page limits (§W12.6).
+- **The bar:** the passage's name as the title, "Day 32 · Chronological" under it (12 px,
+  faint), Aa on the right; the collapsed bar keeps the passage's name.
+- **Mark Read** is the floating capsule at the bottom right (§16.0.5), always shown, also
+  **M** on the keyboard; passages mark themselves by §16.0.6's rule.
+- References that leave the day (§16.0.3) push the main reader's URL; its capsule reads
+  "‹ Day 32", and Back reopens the day at the same place.
+- **No reminder** on the web (§W15.1).
+
+### W6.7 The manual and quick tips
+- **The tip** is Go To's first row as §15.1, with Next, More and its action. "Once a day"
+  and "skipping what you already do" use the same `help_tip_for(today, state)`; the state
+  is the web's own (a highlight made here, a ribbon here…).
+- **The manual** is prerendered as pages, `/read/manual/` (contents) and
+  `/read/manual/<page>` (each of the 12), written by `html.l8` from `help.txt` with the
+  web's paragraphs (§W14.4), searchable by the browser's Find and by search engines. Inside
+  the app, More and Help open the same page in a dialog (the contents, a page, its search
+  field, as §15.3) without leaving the reader; the page's address is shown as a link
+  "Open in a new tab".
+- **Reading settings' Help section:** Manual, Show Tips (on), Keyboard Shortcuts (the list,
+  §W10.1).
+
+### W6.8 Phase (c) acceptance
+1. Highlights, bookmarks and notes are made, shown, edited, deleted with Undo, survive a
+   reload, and appear in a second tab within a second without a reload (§W12.3).
+2. The Library: tabs, filter, search, sort, rows as links (new tab with a modifier),
+   delete and Undo, Export's Markdown matches §8.5 for the fixture marks byte for byte.
+3. Backup, Erase Everything and Restore bring back every record (§W12.4); Restore into a
+   browser with other marks merges by the rules, the counts shown before adding.
+4. A note containing HTML shows as text; a backup with a crafted note restores as text
+   (§W1.4).
+5. Ribbons: New Ribbon Here, carrying across chapters, put down by a jump, picked up by the
+   capsule, Leave Here, the limit of 12.
+6. A plan started, a day opened by its URL, Mark Read, the page's end, the day's ESV
+   passages against the mock, Done and Back returning to the main reader's exact place.
+7. The tip changes once a day (the CI sets the date), skips what is done, and More opens
+   the right manual part; the manual's pages are prerendered and pass the accessibility
+   checks.
+
+---
+
+## W7. Phase (d): Listen and Study
+
+### W7.1 Listen
+
+**Entry and controls** are §8.7 and §12.4: Reading settings' first section (the Listen
+button naming the verse at the reading line, Speed), the mini player above the bottom
+edge (the verse, the reader's name, play and pause, close; the label goes to the verse),
+and **L** to listen or pause.
+
+**Sources** (§12.0.2's table, unchanged):
+
+| Version | Web source | How |
+|---|---|---|
+| BSB | Bob Souer (default) · Barry Hays · Jordan Gilbert · Device Voice | `<audio>` from openbible.com, verse by verse with the bundled timings |
+| WEB | Winfred Henson · Device Voice | `<audio>` from eBible.org, verse by verse |
+| ESV | David Cochran Heath · Device Voice | the Worker's `/api/v1/esv/audio` answers the address; `<audio>` plays it from audio.esv.org; by chapter |
+| KJV, ASV, YLT | Device Voice | the Web Speech API (`speechSynthesis`), verse by verse as §8.7 |
+
+- **Playing across origins:** an `<audio>` element plays from another site without CORS,
+  and every host answers range requests with `audio/mpeg` (checked 2026-10-20: openbible.com,
+  ebible.org and audio.esv.org all answer 206 and none sends `Access-Control-Allow-Origin`).
+  So the web streams exactly as the iPhone does. Without CORS the page can't read the
+  bytes, so it can't cache or download recordings (§W15.2), and can't route them through
+  Web Audio (not needed). The `<audio>` has `referrerpolicy="no-referrer"` and
+  `preload="metadata"` until played.
+- **Following the verse:** the timings (`souer.tim`, `hays.tim`, `gilbert.tim`,
+  `henson.tim`, about 130 KB each raw) load with the first Listen in that voice. While the
+  page is visible, the verse is read from `currentTime` once per animation frame and the
+  wash follows (§8.7); while hidden, on `timeupdate`.
+- **The next chapter** plays from a second `<audio>` element prepared when 30 s remain
+  (the browser's own buffering is the "fetch ahead"); at `ended` the two swap. If that
+  fails while the page is hidden (a phone locked), the player says "Paused" and
+  continuing is one tap; the CI can't see this, so it's on the phone list (§W14.6).
+- **When a recording can't play** (offline, error), Listen goes on in the device's voice
+  from the same verse, "Device Voice · Offline" in the player (§12.0.2 decision 2), and
+  returns to the recording at the next chapter when it can.
+- **The device's voice** ("Device Voice", the web's name for "iPhone Voice"): the best
+  English voice `speechSynthesis.getVoices()` offers, preferring local voices, then
+  en-US; the Voice screen lists the English voices by name to choose from. Its quality
+  depends on the device; the web has no "download a better voice" path to point to, so
+  there's no such line.
+- **Speed:** Slower, Normal, Faster: `playbackRate` 0.85, 1.0, 1.25 with pitch preserved
+  for recordings; speech rates 0.85, 1.0, 1.15 (the Web Speech API's scale).
+- **The lock screen and media keys:** the Media Session API with §12.0.2 decision 10's
+  metadata (title "John 3:14", artist the reader, album the version, artwork the app
+  icon) and actions play, pause, previous and next chapter, and seeking for recordings.
+- **Changing the narrator or the version while listening keeps the verse** (§12.11).
+- **The ESV is stream-only**, as on the iPhone.
+
+### W7.2 Study
+
+A dialog (or the panel beside the text, §W7.3) titled with the verse, with **tabs** Words,
+References, Commentary (§9.6.2) and §9.6.2's previous and next in its footer (also **K**
+and **J**).
+- **Words:** the interlinear (§7.4) with its English order and original order switch, each
+  word a button opening its **word study** (§7.5) pushed inside; from there the
+  **definition** (§7.6), the **concordance** (§7.7), exact senses (§10.3) and related
+  words (§10.4), each pushed inside, each with "‹" back. Concordance rows are links.
+  Greek in Gentium Plus (`lang="grc"`), Hebrew in Ezra SIL (`lang="hbo" dir="rtl"`) at
+  §7.3's sizes in px, transliteration in the chrome font's italic.
+- **References** (§9.6.3) and **Commentary** (§9.7.2): as the iPhone, references as links
+  that preview, "Verses shown in the BSB." under the ESV.
+- **Add to Note** (R2.10, §7.5) from word study adds the line to the verse's note.
+- **The tray's Study** opens it at the selected verse; with a one-word text selection,
+  "Study ‘loved’" opens that word's study (§W5.5).
+- **Data** loads on first use, per tab (§W12.1): Words needs the language data (about 6 MB
+  compressed, once), References the cross references (about 0.5 MB), Commentary Matthew
+  Henry (about 1.2 MB). Until it's here the tab shows the verse header and, under it, one
+  faint line with a thin progress bar: "Getting the Greek and Hebrew data (6 MB, once)…".
+  It's kept for next time (the HTTP cache, then the Service Worker). If the CI's 4G profile
+  makes the first Words wait more than 4 s, the builder splits `words.bin` by book (the
+  format is the builder's to change, `lang.l8` reading it) and says so.
+
+### W7.3 Study beside the text
+
+§17.3.8 on the web: when the window is wide enough for a **400 px panel** beside a column
+of at least 28 em with its margins (`400 + 1 + 2 × margin + 28 em`, about 990 px at the
+default size), Study opens as an `<aside>` on the right, the full height under the bar,
+and stays while you read; otherwise as a dialog.
+- The column re-centres in the space left, the verse at the reading line kept (§W3.5),
+  the panel sliding in over 0.25 s (a fade under reduced motion).
+- It stays on the verse chosen; selecting another verse moves it (§17.3.8's decision; the
+  owner's question 6 there applies here too). Its `x` closes it; **I** shows and hides it
+  where it fits.
+- Recomputed at every resize and size change; when it no longer fits, it closes, and
+  returns as it was when it fits again.
+- The tray stays at the column's foot; the panel scrolls on its own.
+- The panel is fixed at 400 px (§17.10 question 7 answered for the iPad holds; a divider is
+  not offered).
+
+### W7.4 About, complete
+The About page (§W12.8) gains the study and recording credits with this phase, the STEP
+Bible credit and change record, and the fonts.
+
+### W7.5 Phase (d) acceptance
+1. Listen in each source against local fixture recordings (a short silent MP3 per source,
+   served by the test server in place of the hosts) and their timings: the wash follows,
+   the chapter's end moves on, Speed, pause and resume, the device voice for the KJV (in
+   Chromium headless, `speechSynthesis` is checked for being called with the right text,
+   not for sound).
+2. A recording failing falls back to the device voice at the same verse.
+3. The Media Session metadata and actions are set (read back through CDP).
+4. Study's three tabs, word study, definition, concordance (rows as links), in Greek and
+   Hebrew; the coverage test of the bundled faces.
+5. Study beside the text at 1280 and 1440 px, as a dialog at 900 px; resizing across the
+   threshold keeps the verse.
+6. The first Words on the CI's 4G profile within 4 s, or the split made.
+
+---
+
+## W8. Phase (e): Memory and languages
+
+### W8.1 Memory (§13)
+- **Memorize** joins the tray; **Memorizing** opens the passage's Practice (§13.2.1). Add
+  Passage… (§13.2.2) is in the Library's Memory tab.
+- **The Library's Memory tab** (§13.4): Today, New, Later, then Languages (§14.3.1), and
+  Practice at the tab's foot. The passage screen (§13.4.1) is pushed inside the dialog.
+- **Practice** (§13.3) is a dialog, full screen on narrow widths and a centred panel 720
+  px wide otherwise: the passage at the reader's measure and type, the level segments
+  (Full, Some, Letters, Blank) above it, the toolbar (Listen, Echo, Type, the main button)
+  at its foot.
+  - **Hidden letters keep their space** (§13.3.3): each word is a `<span>` whose letters
+    are drawn in transparent ink with the hidden-letter underline, so changing the level
+    changes only colours, never the layout. A click or tap on a hidden word shows it.
+  - **Type** (§13.3.6): on touch, a visible one-line field at the foot raises the keyboard;
+    with a keyboard attached (a fine pointer), Practice takes first letters as soon as it
+    opens, and **Type** isn't needed (it toggles the field for those who want it).
+  - **Keys inside Practice** (they don't need the global shortcuts switch, because they
+    act only while Practice has focus, WCAG 2.1.4's exception): Enter is the main button;
+    1, 2, 3 are Not Yet, Mostly, Knew It while the judgement row shows; Escape closes.
+  - **Listen and Echo** (§13.3.7) use §W7.1's recordings and timings, and the device's
+    voice where there are none.
+  - "That's all for today." and the next review's date, as §13.0.2 decision 12.
+- **The ESV in Memory** (§13.6): pinned verses in IndexedDB's `esv` store, counted in the
+  500, at most 200 pinned.
+- **No reminder** on the web (§W15.1): Today in the Memory tab is where due passages show.
+
+### W8.2 Greek and Hebrew (§14, Round 10 as §14.10b amends it)
+Everything Round 10 builds, as amended on 2026-10-20: the language pages (from the Memory
+tab and the end of the interlinear), the Alphabet with **Sounds Written As** (nothing
+speaks: the web has no Greek or Hebrew recordings either), Your Words, Add Words (including
+Related to Words You Know), word cards asking "What does it mean here?" with the BSB's
+words in this verse first, Forms with the BSB's renderings, Verses You Can Read, hiding
+what you know in the interlinear's original order, coverage in one plain sentence. Each
+is a screen pushed inside the Library dialog (or Study's, from the interlinear), built
+from `learn.l8` as the iPhone's are.
+- The language pages' Settings section has Hide What I Know; there are no Speak switches
+  and no voice paths (§14.10b.1).
+- Cards practise in Practice, with the same keys.
+- Rounds 11–14 (the original text in the reader, the courses, Aramaic) come to the web
+  after the iPhone has them, by the same pattern (§W15.2).
+
+### W8.3 Phase (e) acceptance
+1. A passage memorized from the tray in the BSB and one in the ESV (the mock); Practice at
+   every level with no layout change (the CI compares word positions between levels);
+   typing first letters; the three judgements by click and by keys; the schedule's next
+   date.
+2. The language page, the Alphabet, adding ten words, a card's meaning-first answer,
+   Forms, Verses You Can Read, hiding in the interlinear: each shot at 390 and 1280 px.
+3. No speech is attempted anywhere in the language screens.
+
+---
+
+## W9. Phase (f): offline, and installing
+
+### W9.1 The Service Worker
+`/read/sw.js`, scope `/read/`, registered by the app after it has started (never during
+the first paint).
+- **On install** it caches the shell: `read/shell.html`, the CSS, the scripts, the wasm,
+  the icon sprite, the About page and the manual. About 400 KB compressed.
+- **Data** (versions, language data, commentary, cross references, timings, fonts) is
+  cached the first time the app uses it, by its hashed name, and served from the cache
+  ever after. A version or the language data is never fetched twice.
+- **Navigations under `/read/`** are answered from the cache with the shell, which draws the
+  chapter from the cached text: so after one visit every chapter of every version used
+  opens with no network. When the shell isn't cached yet, the network (the prerendered
+  page) answers.
+- **Never cached:** `/api/` (the ESV's text and audio addresses), and any recording.
+- **Updates are quiet.** A new build's Service Worker installs in the background and takes
+  over the next time the app is opened with no tab of it open (the browser's default). No
+  "update available" banner, no reload prompt. Old caches are deleted when the new one
+  activates.
+
+### W9.2 The manifest and installing
+`/read/manifest.webmanifest`: name "Smooth Bible", short name "Smooth Bible", `start_url`
+`/read/`, `scope` `/read/`, `display` `standalone`, `background_color` Paper's `bg`,
+`theme_color` Paper's `bg`, the icon at 192 and 512 px and a maskable version. No install
+prompt of our own: browsers offer installing in their own menus. The manual's Reading part
+gains a paragraph, "On the Home Screen", saying in two sentences how to add it in Safari
+and Chrome and that it then works offline.
+
+### W9.3 Is it worth it?
+**Yes.** The Service Worker and manifest are about 150 lines and one JSON file. They give:
+reading with no connection after one visit (the whole Bible in every version used, and
+Study once opened), instant opening on later visits, an app on the Home Screen with no
+browser bars, and on iPhones the one way to keep a site's data from Safari's clearing
+(§W9.4).
+
+### W9.4 Keeping the data
+- Safari deletes a site's storage (IndexedDB, `localStorage`, caches) after **seven days of
+  Safari use without visiting the site**, unless the site has been added to the Home
+  Screen. A reader who comes back weekly keeps everything; one who doesn't loses it. The
+  design answers with what it can: the backup (§W12.4), the Library's one line, This
+  Browser's paragraph (below), and the manual's "On the Home Screen".
+- The app asks the browser to keep its storage (`navigator.storage.persist()`) when the
+  first highlight, note, bookmark, ribbon, plan or passage is made, in browsers that
+  decide without asking the person (Chromium, Safari). Firefox asks the person, so there
+  it's asked only from This Browser's **Keep This Browser's Data** button.
+- **Reading settings → This Browser** (the last section, from c): the paragraph "Notes,
+  highlights and the rest are kept in this browser on this device." and, in Safari when
+  not on the Home Screen, "Safari may clear them after a week without a visit, unless
+  Smooth Bible is on the Home Screen."; then **Back Up…**, **Restore from Backup…**,
+  **Downloaded Data** (the versions and study data kept, their sizes, each removable) and
+  **Erase Everything in This Browser…**.
+
+### W9.5 Phase (f) acceptance
+1. After one visit (John 3, then Romans 8 by Go To, a search, Study opened once), with the
+   network off (CDP): reloading, Go To to any chapter in the BSB, a search, Study's three
+   tabs, a highlight and a note all work; the ESV shows its offline message.
+2. A second visit's text on screen within 1 s on the CI's profile.
+3. A new build installs and takes over on the next opening, with no prompt; old caches are
+   gone.
+4. The manifest passes Chromium's installability check (CDP
+   `Page.getInstallabilityErrors` is empty).
+
+---
+
+## W10. Keyboard, mouse and touch
+
+### W10.1 Keys
+**The page** (when no field has focus and no dialog is open), while Keyboard Shortcuts is
+on (the default; Reading settings turns it off, WCAG 2.1.4):
+
+| Key | Does | iPad's |
+|---|---|---|
+| G | Go To | ⌘L |
+| / | Search | ⌘F |
+| ] and [ | The next and previous chapter's start (a jump) | ⌘] ⌘[ |
+| B | The Library | ⌘⇧B |
+| , | Reading settings | ⌘, |
+| L | Listen or pause | ⌘⇧P |
+| I | Study beside the text, where it fits | ⌥⌘I |
+| Home | The top of the chapter read, then the previous chapter's (§W3.4) | (the status bar tap) |
+| Enter, ↓ ↑, Shift+↓ ↑, Escape | Select and move the verse selection (§W5.5) | |
+| M | Mark Read, in the day reader | ⌘D |
+| ? | The list of keys (a small dialog) | ⌘ held |
+
+**Never taken:** ⌘/Ctrl with any letter (the browser's: Find, the address bar, Print,
+reload, tabs), Space and Shift+Space, Page Up and Down, End, the arrows without a
+selection, Alt+arrows (history), Tab. The browser's Back (Alt+←, ⌘[) is the app's Back.
+The iPad's ⌘ shortcuts are not used because on the web every one of them belongs to the
+browser.
+
+**In dialogs:** Escape closes (and goes Back, §W2.3); Tab moves through the dialog only
+(the native modal dialog makes the page behind inert); Enter in Go To or Search goes to
+the first row; ↓ ↑ move through suggestions; K and J are previous and next in Compare and
+Study when no field has focus; Practice's keys are §W8.1's.
+
+### W10.2 Mouse and trackpad
+- Hover gives buttons, rows and swatches a background of `ink` at 6% (0.1 s); links in
+  text get no underline on hover (they're accent already) but the cursor is a pointer.
+- The text keeps the text cursor: it's text to select, and a click on a verse selects it.
+- The right-click menu is the browser's, everywhere.
+- Scrolling is the browser's (wheel, trackpad, scroll bar); the bar's collapse follows it
+  the same way.
+
+### W10.3 Touch
+- A tap on a verse selects it; a long press is the browser's text selection (§W5.5); no
+  other gestures: no swipes between chapters (the page is continuous), no swipe to delete
+  (§W6.4), nothing that competes with the browser's back swipe.
+- Every target is at least 44 × 44 px (WCAG 2.5.8 asks 24).
+- `touch-action: manipulation` on buttons and the tray (no double-tap zoom delay on them);
+  the text keeps double-tap and pinch zoom. **Zoom is never disabled** (no
+  `user-scalable=no`, no `maximum-scale`).
+
+---
+
+## W11. Accessibility (WCAG 2.2 AA)
+
+- **Structure:** the landmarks of §W3.2; one hidden `h1`, chapters `h2`, sections `h3`;
+  a "Skip to the text" link as the first focusable element (visible on focus); dialogs
+  labelled by their titles; the tray a labelled toolbar; tabs as tab lists; the Go To
+  field a combobox.
+- **Focus:** always visible, a 2 px accent outline 2 px outside the element (accent passes
+  3:1 against every theme's `bg`); never hidden by the bar, the tray or the mini player
+  (`scroll-padding` top and bottom follow them, 2.4.11); returned to the opener when a
+  dialog or popover closes.
+- **Text contrast** 4.5:1 for all text, including verse numbers and faint labels (§W1.6's
+  table); icons and control edges 3:1.
+- **Screen readers:**
+  - The text reads as text: verse numbers as numbers, LORD as "Lord" (the small caps are
+    styling), footnote marks as buttons named "Footnote".
+  - A verse's marks are said after its number in visually hidden text ("16, highlighted
+    yellow, bookmarked"), and its note glyph is a button "Note on John 3:16".
+  - Selecting a verse announces "John 3:16 selected" through a polite live region; toasts
+    are `role="status"`.
+  - Listen's verse wash isn't announced (it would talk over the recording).
+- **Reduced motion:** every slide and scale becomes a 0.15 s fade or nothing; the bar's
+  settle, the jump flash's fade and theme cross-fade are kept as fades.
+- **Forced colours** (Windows' contrast themes): the washes vanish there, so highlights
+  gain a 2 px underline in `Mark`, selection keeps its dotted underline, and the swatches
+  show their names on hover and focus.
+- **Reflow and zoom:** usable at 320 px wide and at 400% zoom (1.4.10): the column fills
+  the width, the bar keeps one row (the title truncates with an ellipsis), dialogs become
+  sheets. Text spacing overrides (1.4.12) clip nothing (no fixed heights on text).
+- **Languages:** `lang="en"` on the page, `grc` on Greek, `hbo` on Hebrew with `dir="rtl"`.
+- **Checked by** axe-core on every shot's state in CI (§W14.4), and by hand on the phone
+  list (VoiceOver on iPhone and Mac, TalkBack, NVDA).
+
+---
+
+## W12. Data
+
+### W12.1 What loads, and when
+
+Every data file is served gzipped under a hashed name (`read/data/bsb.<hash>.gz`) with a
+year's `immutable` cache, fetched by the app, decompressed with `DecompressionStream`, and
+kept in L8's memory as on the iPhone.
+
+| Data | Raw | Gzipped | When |
+|---|---|---|---|
+| The app (wasm), phase a / e | — | about 150 / 350 KB | Every visit (cached) |
+| CSS, scripts, icons | — | about 40 KB | Every visit (cached) |
+| A prerendered chapter page | 8–40 KB | 4–15 KB | The first page |
+| The reader's version text (`bsb.txt` and the others) | 4.4–4.6 MB | 1.3–1.45 MB | After the first paint, at low priority; the app is ready when it arrives |
+| `refs.txt`, `help.txt` | 23 KB | 8 KB | With the text |
+| Other versions | 4.4 MB each | about 1.35 MB each | On choosing one, or the first Compare |
+| Language data (`data/lang/`, Study's Words, word study, Learn) | about 16 MB | about 6.2 MB | First use of Words, word study or a language page |
+| Cross references (`xrefs.bin`, `xref_index.bin`) | 1.5 MB | about 0.5 MB | First References tab |
+| Matthew Henry (`mhcc.txt`) | 3.95 MB | about 1.2 MB | First Commentary tab |
+| Verse timings (`*.tim`, `henson.paths`) | 130 KB each | about 40 KB each | First Listen in that voice |
+| Fonts (only where the device lacks them) | — | 80–90 KB a face pair; Greek and Hebrew about 150 KB | When first drawn |
+
+**If the text makes the app late** on the CI's profile (§W13), the builder splits each
+version by book and loads the reader's book first, so the app is ready with the chapters
+around the place while the rest arrives; `text.l8` already builds a text from parts for
+the ESV (`text_begin`, `text_done`). The split is a measured fallback, not the plan.
+
+### W12.2 Storage
+
+- **`localStorage`** (synchronous, small, there before the first paint): the settings
+  (`sb.settings`, one line of `key=value` pairs), the place and version (`sb.place`,
+  `sb.version`), recent searches, the remembered tab and segment choices. These are what
+  the iPhone keeps in `NSUserDefaults`.
+- **IndexedDB**, database `smoothbible`:
+  - store **`files`**: one record per file, keyed by the iPhone's file name
+    (`highlights.tsv`, `bookmarks.tsv`, `notes.tsv`, `history.tsv`, the ribbons', plan's,
+    memory's and cards' files, §4.3, §11.1.6, §13.1.7, §14.1.9, §16.5), the value the
+    file's UTF-8 text in exactly the iPhone's format. `store.l8` and the other modules
+    read and write those formats already, so the web adds no format and no code to parse
+    one; a backup is these files (§W12.4), and a later iPhone import would read them as
+    its own.
+  - store **`esv`**: the ESV cache's records and index, as §9.4.5's files, governed by
+    `esv_cache.l8`.
+- **Writing:** each file is rewritten whole after a change (as §4.3), 0.3 s after the last
+  change, and at once on `visibilitychange` to hidden and on `pagehide`.
+
+### W12.3 Several tabs
+Two tabs of the app must not overwrite each other's work (whole-file writes would lose the
+other tab's newest change):
+- Each write holds a Web Lock (`navigator.locks`, "smoothbible-files") for its file, and
+  **re-reads the file inside the lock, applies its own change to what it read, and writes
+  that**. A change is therefore a small operation (add this highlight, delete that note)
+  applied to the newest file, not a stale copy written back. `store.l8` gains the few
+  functions this needs (apply one change to a file's text), tested.
+- After writing, it posts the file's name on a BroadcastChannel ("smoothbible"); other
+  tabs re-read that file and redraw what it shows (marks in the window, an open Library).
+- Settings changed in one tab reach the others through the `storage` event, and are
+  applied as if chosen there (keeping each tab's place).
+
+### W12.4 Moving data in and out
+
+**Back Up…** (Reading settings → This Browser) downloads `Smooth Bible backup
+2026-10-20.txt`: plain UTF-8 text, readable in any editor:
+
+```
+# Smooth Bible backup 1 · web · 2026-10-20 14:03 · smoothbible.com
+== highlights.tsv
+JHN	3	16	yellow	1792252800
+…
+== notes.tsv
+…
+== settings
+theme=paper
+…
+```
+
+Every file of §W12.2 is in it, and the settings. No ESV text (the terms, §W12.6): Memory's
+ESV passages are listed by reference and fetched again after a restore.
+
+**Restore from Backup…** opens a file picker; the chosen file is read (in L8, by a new
+portable `backup.l8`, tested) and a sheet says what it holds: "214 highlights, 31 notes,
+12 bookmarks, 3 ribbons, a reading plan, 12 passages and 140 words", with **Add to This
+Browser** and Cancel. Adding **merges**, so nothing here is lost:
+- Highlights, bookmarks, notes: by verse (a note by its verse and range); where both have
+  one, the newer (by its time) is kept.
+- Ribbons: by name; a same-named ribbon keeps the newer place; beyond 12, the oldest added
+  are left out and the sheet says how many.
+- The reading plan: added only if no plan is followed here; otherwise it's left out and the
+  sheet says so.
+- Memory passages and cards: by reference and by word; the one reviewed more recently wins.
+- History: joined and trimmed to its 200.
+- Settings are not applied (they belong to each device), unless the browser has none.
+- Deletions don't travel: a note deleted here but in the backup comes back. The sheet says
+  so in its footer: "Notes or marks deleted since this backup was made will return."
+
+**Export Notes and Highlights** (the Library) is the iPhone's Markdown, for reading, not
+restoring.
+
+**Erase Everything in This Browser…** asks once (a dialog: "Erase all notes, highlights,
+bookmarks, ribbons, plans, passages and words in this browser? This can't be undone."
+with Erase and Cancel) and deletes the database, the settings and the caches.
+
+### W12.5 The Bible texts' licences on the web (checked 2026-10-20)
+- **BSB:** "dedicated to the public domain as of April 30, 2023. All uses are freely
+  permitted" (berean.bible/terms.htm); the attribution is "appreciated but not required",
+  and the About page gives it. The publisher asks that a text that "varies from the
+  official text" not use the Berean name: the builder confirms in the phase (a) commit that
+  the converted text's words are the publisher's (layout only); any word-level fix listed
+  in `tools/usfm.py` is named on the About page.
+- **WEB:** public domain; the name is eBible.org's trademark for the unchanged text, which
+  ours is (§9.8's line).
+- **KJV:** the Crown's patent concerns printing and importing printed copies in the United
+  Kingdom; it has no bearing on a website. §9.8's line stays.
+- **ASV, YLT:** public domain.
+
+### W12.6 The ESV on the web
+Crossway's terms (api.esv.org, read 2026-10-20) are written for websites first ("Crossway
+allows you to access the ESV Bible text from our server and include it on your website,
+free of charge for non-commercial use"). What they require, and how the design meets it:
+
+| Term (quoted) | Design |
+|---|---|
+| "You may not display more than 500 verses or one-half of any book (whichever is less) on any page." | The window of chapters is limited by `esv_cache.l8`'s rules (§W5.7): never more than 500 ESV verses or half a book in the DOM; a one-chapter book only while on screen. Compare shows at most one selection; search one page of 100 |
+| "You may not locally store more than 500 verses or one-half of any book…" | IndexedDB's `esv` store under the same rules, counted together with the page; nothing in `localStorage`, the HTTP cache (`no-store`) or the Service Worker; backups hold references, not text |
+| "Each page on which you use the text must include a link to www.esv.org." and "identify the passages as coming from the ESV" | Every ESV chapter ends "(ESV) · esv.org" with the link; previews, Compare's section, search results and Memory's practice end with it too |
+| "On a "copyright" page of your website, you need to include one of the following…" | `/read/about#esv`, with §9.8's notice verbatim, linked from every ESV chapter's footer line and from Reading settings |
+| "You must use the text for non-commercial purposes, and your website must be non-commercial." | The whole of smoothbible.com is free, with no ads, sponsors or donation requests (the owner's rule already) |
+| "You won't be able to access the service using only HTML." / "You may not … share, or publish your access key." | The browser calls our Worker; the key stays its secret |
+| "You may not change any of the words in the text." | `esv.js` converts markup only, as for the iPhone |
+
+**Search engines and the budget.** The terms' 5,000 queries a day are shared by every
+reader of both apps through one key. The web must not spend them on crawlers or let a
+busy day on the web starve the iPhone:
+- ESV pages are never prerendered, carry `noindex`, are disallowed in `robots.txt` and
+  absent from the sitemap; `/api/` is disallowed.
+- **The Worker gives the web a share** (its one budget change): requests whose
+  `X-Smooth-Bible` begins `web ` count in the shared budget as now and also in a web count
+  of their own, which stops at **1,500 a day** for text and **1,000** for audio, answering
+  `daily_limit` beyond it (the reader's existing calm message). One constant each, in
+  `worker.js`, tested in `test.mjs`.
+- The web asks for two chapters per request (`count=2`) like the iPhone.
+
+### W12.7 Security headers (set by the Worker on `/read/`)
+- `Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'
+  'sha256-<the boot script>'; style-src 'self'; style-src-attr 'unsafe-inline';
+  img-src 'self' data:; font-src 'self'; connect-src 'self'; media-src 'self'
+  https://openbible.com https://ebible.org https://audio.esv.org; frame-ancestors 'none';
+  base-uri 'none'; form-action 'self'` (`style-src-attr` because settings and positions
+  are set as custom properties on elements; the builder adds a media host if a redirect
+  needs it, and says so).
+- `Referrer-Policy: strict-origin-when-cross-origin`, `X-Content-Type-Options: nosniff`,
+  `Permissions-Policy: screen-wake-lock=(self), camera=(), microphone=(), geolocation=()`.
+
+### W12.8 The About page (`/read/about`)
+Prerendered; the web's Acknowledgements (§7.8, §9.8, §12.5):
+1. **Text:** each version's line and link (§9.8).
+2. **English Standard Version** (`#esv`): ESV.org and the notice, verbatim.
+3. **Original languages and lexicons:** STEP Bible's credit as its licence asks ("STEP
+   Bible" linked to www.STEPBible.org) and the record of changes (the iPhone's "Changes to
+   the Lexicon Data", as a section); MACULA Greek's line "MACULA Greek Linguistic
+   Datasets, available at https://github.com/Clear-Bible/macula-greek/"; the others as
+   §7.8.
+4. **Study:** OpenBible.info's cross references (CC BY 4.0, our changes named), Matthew
+   Henry (CCEL, public domain).
+5. **Recordings:** §12.5's credits.
+6. **Fonts and icons:** Source Serif 4, Charis SIL, Gentium Plus, Ezra SIL (SIL Open Font
+   License), Lucide (ISC).
+7. **Privacy policy** and **Contact** (the site's pages), and the build.
+
+The CC BY credits are met by this page being linked from every reader page (the credit
+line at each page's foot, §W1.8) and from Reading settings, which CC BY 4.0's "any
+reasonable manner" allows.
+
+---
+
+## W13. Performance
+
+**Server rendering: yes**, as prerendered static pages (§W1.8): the fastest first paint
+there is, good for search engines, and free at run time.
+
+**The CI's profile** for budgets: 9 Mbps down, 1.5 Mbps up, 150 ms round trips, the CPU
+slowed 4× (a mid-range phone on good 4G), a cold cache. A second, report-only profile:
+1.6 Mbps, 150 ms (slow 4G).
+
+| Measure | Budget (first visit) | Second visit |
+|---|---|---|
+| The text on screen (Largest Contentful Paint: the first paragraph) | ≤ 1.5 s | ≤ 1.0 s (f: from the Service Worker, offline too) |
+| Layout shift (CLS) | ≤ 0.01 (the text never moves) | the same |
+| The app ready (a verse tap shows the tray) | ≤ 3.5 s | ≤ 1.0 s |
+| A chapter added to the window (main-thread task) | ≤ 16 ms; Psalm 119 ≤ 50 ms, at rest | |
+| A search over All | ≤ 50 ms or in a Worker (§W5.4) | |
+| Version switch (text cached) | ≤ 300 ms to the fade back in | |
+| First Words in Study | ≤ 4 s (§W7.2) | ≤ 0.5 s |
+
+**Sizes** (gzipped): a chapter page ≤ 20 KB; CSS ≤ 16 KB; scripts ≤ 15 KB; wasm ≤ 150 KB
+in phase (a) and ≤ 350 KB by (e) (the compiler doesn't strip unused functions yet; if it
+learns to, these fall). Fonts never on Apple devices.
+
+**Order of loading:** the HTML and CSS (render-blocking, small); the boot script (inline);
+`bible.js` and `dom.js` as modules (deferred); the wasm compiled while streaming
+(`WebAssembly.compileStreaming`); the version text after the `load` event with
+`fetch(…, { priority: "low" })`. Nothing else until a feature asks.
+
+**Memory:** the text of one version is about 4.5 MB in wasm memory; Study's data 16 MB more;
+Compare's five versions 22 MB more. All well inside a phone browser's limits.
+
+---
+
+## W14. Testing and CI
+
+### W14.1 Unit tests
+- `test_html.l8` (new): the markup for Genesis 1, Psalm 23, Psalm 119:1–8, John 3 and
+  Jude (openers, poetry, footnotes, small caps, red letters, a verse across paragraphs);
+  marks written into a chapter; escaping (§W1.4); the manual's paragraphs; a passage
+  range for the day reader.
+- `test_store.l8` gains the change-applying functions (§W12.3); `test_backup.l8` (new):
+  writing and reading a backup, every merge rule of §W12.4, a malformed file refused
+  with a plain message.
+- All `test_*.l8` run natively and with `--wasm` (`make bible-test`,
+  `make bible-wasm-test`, both in `make check`, as built).
+- The prerender's check: every page made; each parsed by a small checker (Python's
+  `html.parser`: balanced elements, unique ids, every `href` under `/read/` existing).
+
+### W14.2 The driver
+`web/bible/test/drive.mjs`: Node, Chrome DevTools Protocol over the global WebSocket (no
+dependencies), after the rig the repo used for Better and the race game (`drive.mjs` in
+`/var/tmp/race/`, which the builder copies into the repo and keeps there):
+- It starts headless Chrome (`--headless=new`, the runner's preinstalled Google Chrome in
+  CI) and `web/bible/test/serve.mjs`, which **runs the real `worker.js`** in Node with an
+  `ASSETS` stand-in reading `.build/bible-site/` and `UPSTREAM` pointed at a mock ESV API
+  serving the worker's existing fixtures (as `test.mjs` does), plus fixture recordings in
+  place of the audio hosts. So the CI tests the Worker's routing, headers and budget as
+  deployed, with no key and no network.
+- Each flow is one CDP session, with `Emulation.setDeviceMetricsOverride` set first, the
+  cache disabled where a flow needs a cold start, `Network.emulateNetworkConditions` and
+  `Emulation.setCPUThrottlingRate` for the performance flows, a fixed date (the app
+  reads "today" through one function, which the test server's page sets to 2026-10-19
+  08:00, as the iPhone's demo clock), and its steps: url, wait, tap, click, key, type, scroll (smooth, by script),
+  eval, shot, pdf, offline.
+- It logs every request (a request to any host outside the test server fails the run),
+  every console error (fails the run), and, during scripted scrolls, the verse at the
+  reading line each frame (§W3.9 item 3).
+
+### W14.3 Shots
+Three sizes: **phone** 390 × 844 at 2× (touch emulation on), **tablet** 820 × 1180 at 2×,
+**desktop** 1440 × 900 at 1×. Paper and Night for every shot, the other themes once.
+Named `w<phase>-<nn>-<what>-<size>-<theme>.png`, pushed by CI to the branch
+**`ci-bible-web-shots`** (its own branch, so the web job and the iPhone jobs never race
+to push), with a `RUN.txt` naming the run and commit, as `ci-bible-shots` has.
+
+Per phase, at least:
+- **(a)** John 3 without the app; John 3 adopted; Genesis 1; Psalm 23 and 119; Jude; a
+  chapter boundary mid-scroll with the bar half collapsed; the bar collapsed; the
+  footnote popover; Reading settings open (each section); every theme; verse-per-line;
+  320 px wide at 200% text; the print PDF's first page; the old-browser line (a page with
+  WebAssembly disabled).
+- **(b)** Go To empty, with a book open, with a query; the capsule; History; a preview
+  (popover and sheet); Search with results, with no results, the ESV row and page; the
+  tray with one and several verses; Copy's toast; Versions; the KJV, the ESV loading,
+  loaded, offline and resting; Compare.
+- **(c)** Highlights in five colours and a run; bookmark and note glyphs; the note editor,
+  read mode, chapter note; the Library's tabs, filter, search, empty states, the delete
+  Undo; ribbons in Go To and New Ribbon; Plans, a plan's days, the day reader with Mark
+  Read and the day's end; the tip; the manual; This Browser; the restore sheet.
+- **(d)** The mini player in each state; Voice; Study's three tabs; word study, definition,
+  concordance in Greek and Hebrew; Study beside the text at 1440 px.
+- **(e)** Memory tab; Practice at each level and Type; a word card's answer; the language
+  page; the Alphabet; Forms; Verses You Can Read.
+- **(f)** Offline: John 3, a jump, Study; the installed look (standalone display mode).
+
+### W14.4 Checks and the manual's web text
+- **Accessibility:** axe-core (pinned in `web/bible/test/package.json`, installed by `npm
+  ci` in CI only, never shipped) runs at each shot's state; any violation at WCAG 2.2 A or
+  AA fails the run. The contrast check of §W3.9 item 8.
+- **Performance:** §W13's budgets, measured with `PerformanceObserver` (LCP, layout
+  shift, long tasks) under the profile; a budget missed fails the run in the phase that
+  set it.
+- **The text never moves:** §W3.9's frame-by-frame check, run in (a) and again with marks
+  (c) and the ESV (b).
+- **`help.txt` on the web:** a paragraph may begin `@ios ` or `@web ` to be shown on one
+  platform only (iPhone gestures and settings paths in one, clicks, keys and Home Screen
+  words in the other); `help.l8` skips the other platform's, and `test_help.l8` checks
+  both renderings (links, anchors, conditions, actions; every `{sym:…}` has a web icon,
+  §W1.7). The iPhone's paragraphs are unchanged by this; the web designer writes the
+  `@web` paragraphs with the phase that needs them.
+
+### W14.5 The CI job
+A job **`web`** in `.github/workflows/bible.yml`, on `ubuntu-latest` (cheap; no Mac),
+run when `programs/bible/**`, `programs/web/**`, `web/**` or the workflow changes:
+1. Build the compiler (as the other Linux job).
+2. `make bible-web` (prerendered site, wasm, data) and the prerender check.
+3. Unit tests natively and in wasm (already in `make check`; run again only if `check`
+   isn't).
+4. `npm ci` in `web/bible/test/`, then the flows and shots of every built phase (about 5
+   minutes with three sizes; split into two parallel jobs if it passes 10).
+5. Push the shots to `ci-bible-web-shots`.
+
+### W14.6 What needs a real device (the owner's list)
+The CI's Chrome can't show Safari's behaviour, sound or a locked screen. Before each phase
+is approved, on the owner's iPhone in Safari (and once Added to the Home Screen) and on a
+laptop's Safari and Firefox:
+- (a) A fast fling up and down through several chapters: no stop, no jump; the address bar
+  shrinking with the bar; rotation keeping the verse; Find in page.
+- (b) Back by the edge swipe closing a dialog and undoing a jump; Share to Messages; the
+  ESV live.
+- (c) A note typed with the keyboard up (the sheet stays above it); two tabs at once.
+- (d) Listen with the screen locked, through a chapter's end; the lock screen's controls;
+  the device voice for the KJV; VoiceOver on the page and the tray.
+- (f) Reading in flight mode after one visit; installed to the Home Screen.
+
+---
+
+## W15. Out of scope, deferred, and iPhone-only
+
+### W15.1 Out of scope (as the owner set it)
+- **Sync** of anything between the iPhone and the web, or between browsers; **accounts**.
+- **Anything server-side beyond what the Worker does,** except the two small changes
+  (§W2.1's `/read/` routing and headers, §W12.6's web share of the ESV budget).
+- **Reminders and notifications** (the plan's and Memory's daily reminder): on the web
+  they need push messages from a server, which is out. Memory's Today and Go To's plan
+  row are where the day's work shows.
+- Analytics, logging of readers, cookies.
+
+### W15.2 Deferred (worth doing later, in this order)
+1. **Verse previews in shared links** (the verse's text in a link's preview): the Worker
+   would read the chapter page and put the verse into the head (`HTMLRewriter`).
+2. **Rounds 11–14** (the original text in the reader, the Greek and Hebrew courses,
+   Aramaic): each comes to the web after the iPhone has it, by the same pattern.
+3. **Share as Image** (§10.5): drawing the verse on a canvas with the reader's fonts.
+4. **Downloaded recordings for offline listening**: the hosts send no CORS headers, so the
+   recordings would have to be served from our own origin; the BSB's are CC0 and the
+   WEB's public domain, so it's allowed, but it's bandwidth and storage the owner should
+   decide on (§W16).
+5. **Importing a web backup on the iPhone**: the backup is the iPhone's own files, so it's
+   a small iPhone feature when wanted.
+
+### W15.3 iPhone-only for now
+The daily reminder; downloaded recordings and the 500 MB listening cache; Share as Image;
+haptics; Keep the Screen On's per-app behaviour where the browser lacks Wake Lock;
+VoiceOver's rotor actions (the web has its own equivalents); the iPad's menu bar.
+
+---
+
+## W16. Questions only the owner can answer
+
+Each is decided above; the owner may overrule.
+1. **The home page's change** (§W2.5): "a free Bible reader for iPhone and the web" and a
+   closing sentence linking to smoothbible.com/read. Or no change, or other words.
+2. **Where it lives** (§W2.1): `smoothbible.com/read/` (decided), or the root, or
+   `read.smoothbible.com`.
+3. **The ESV on the web from the start** (decided: yes), with the web's own share of the
+   daily budget (1,500 text, 1,000 audio queries a day; §W12.6). Or the ESV left out of the
+   web until the budget is understood.
+4. **The `faint` colour** (§W1.6): darkened on the web for WCAG AA (decided). Should the
+   iPhone take the same values? (Default: no change on the iPhone; a note for its
+   designer.)
+5. **Downloaded fonts** where the device lacks the iPhone's (§W1.6): Source Serif 4 and
+   Charis SIL (decided), or system fonts only (the site's own rule, which would leave
+   Windows and Android with Times-like serifs).
+6. **Prerendering all five versions** (decided) or the BSB alone (fewer files; other
+   versions drawn in the browser).
+7. **The privacy policy** stays as it is, covering the web app (decided: it already speaks
+   of "the app and site" broadly).
+8. **Restore merges** (decided) rather than replacing everything.
+9. **Single-key shortcuts on by default** (G, /, [, ], B, L, I), with a switch to turn them
+   off (decided).
+10. **Iowan offered only where the device has it** (decided), or not on the web at all.
+11. **Hyphenation on** (decided; the browser's own, which can't be tuned as the iPhone's
+    0.3 factor), or off.
+12. **Offline recordings** (§W15.2 item 4): later, served from smoothbible.com, or never.
+13. **No reminders on the web** (decided; they'd need push messages from a server).
