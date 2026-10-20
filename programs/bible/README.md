@@ -237,7 +237,8 @@ about 27 when each group had a Mac of its own; see the workflow's header):
   something outside the app (plans' alert, more's share sheet) goes
   second. store and memory share a Mac, each on its own simulator; ios18
   follows ribbons and study on an iOS 18 iPhone of its own; languages
-  (Round 10) follows notes and listen on their iPhone, reset. Each group is uploaded (`shots-GROUP`) as it ends,
+  (Round 10, about 3 minutes) goes first on the versions job's iPhone,
+  more last. Each group is uploaded (`shots-GROUP`) as it ends,
   and `timing.txt` says when its boot, install, launch and settling came.
 - The groups are paired by their times so the jobs end together (a group
   takes 1 to 4 minutes once booted; `timing.txt`'s `total` minus its

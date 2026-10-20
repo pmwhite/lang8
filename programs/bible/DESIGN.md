@@ -7520,9 +7520,12 @@ names and Aramaic flagged, as §14.7 asks.
     (and its tiles made again) when it is popped.
 13. **Forms is not offered for names** (their forms are not what a learner reads for), nor
     where no parsing places in a grid or list (particles, prepositions, conjunctions).
-14. **The languages group runs third on the notes job's iPhone**, after listen, without a
-    second boot (the workflow shuts a simulator down after its second group only when the
-    third is not to run on it).
+14. **The languages group runs first on the versions job's iPhone** (about 3 minutes), versions
+    second and more third on the same simulator, reset, so the jobs stay balanced without a
+    sixth Mac (the workflow shuts a simulator down after its second group only when the third
+    is not to run on it).
+15. **Ὁ's first verse is Philippians 4:7**, not §14.9.2's 4:6: in 4:6 its article is not
+    translated (only occurrences where the word is translated count, §14.1.7).
 
 **What needs a real phone:** the Greek and Hebrew voices (CI has none, so nothing speaks and
 the Speak switches are disabled there); the letter names spoken by them, and whether the modern

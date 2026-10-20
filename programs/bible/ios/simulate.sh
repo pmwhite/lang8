@@ -1076,7 +1076,7 @@ languages)
   grep -h "bible: learn\|bible: interlinear tiles\|bible: practice\|bible: reminder\|bible: scheduled\|bible: toast\|bible: demo step\|bible: demo learn\|Next review\|Again tomorrow\|That’s" \
     "$out/console.txt" > "$out/languages.txt" 2>/dev/null
   for want in "learn added G:alpha from alphabet" "learn shown G:alpha new" "learn card G:alpha knew box 1→2" \
-      "learn preview most common, words 10" "10 words added" "learn added G3588 from freq" "learn shown G3588 new, context PHP 4:6" \
+      "learn preview most common, words 10" "toast 10 words added" "learn added G3588 from freq" "learn shown G3588 new, context PHP 4:7" \
       "learn known G3588 box 4" "learn hide JHN 3:16 known 21 of 25 translit hidden" "learn shown in the interlinear ēgapēsen" \
       "learn forms G25" "learn pronunciation 1" "learn readable" "learn hide PSA 23:1" "learn voice el-GR" \
       "learn practise reading, words 10" "reminder first:"; do
