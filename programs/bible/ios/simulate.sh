@@ -1027,7 +1027,7 @@ memory)
       "memory graded: PHP 4:6-7 mostly box 3" "due 2026-10-26" "practice warm-up ROM 8:28-39" \
       "memory echo verse ROM 8:32" "memory echo pause ROM 8:32" "memory part: ROM 8:28-39 5 of 12" "practice end" \
       "reminders 30 days from 2026-10-20 07:00" "reminder first:" \
-      "memory reminder opened" "opened Library on Memory" "reminders 0 pending" "esv pin refetched" "memory esv verses kept"; do
+      "memory reminder opened" "opened Library on Memory" "memory reminder off" "reminders 0 pending" "esv pin refetched" "memory esv verses kept"; do
     grep -qF "$want" "$out/memory.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/memory.txt"; failed=1; }
   done
   # (215 to 220: one layout.)

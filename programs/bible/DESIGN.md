@@ -6636,7 +6636,11 @@ segment, Add Passage and Passage; `ios_practice.l8` is Practice; `ios_demo8.l8` 
   until the reader is up, as the plan's day is, then opens the Library on Memory ("opened
   Library on Memory"; step 397).
 - **Major 8:** `daily_reschedule` always removes what is pending, then schedules nothing
-  when neither reason is on ("reminders 0 pending"; step 397).
+  when neither reason is on ("reminders 0 pending"; step 397, which turns the switch on
+  screen off through its own action: "memory reminder off", review r9-2).
+- **The judgement row (review r9-2):** after Check the toolbar's items are swapped at once
+  and the row fades in over 0.2 s; after a grade they are swapped back at once with the
+  toolbar cross-faded. The bar's own animation had left it empty for most of a second.
 - **Minors:**
   - 2: sequence 15 waits 1.6 s after each Check, so the judgement row is seen.
   - 3: the Library's rows (all four segments) are 15 pt grown as Subheadline is
