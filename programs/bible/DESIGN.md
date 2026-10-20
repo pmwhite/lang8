@@ -8497,6 +8497,50 @@ These are decided above; the owner may overrule:
 5. **The tips cycle forever** (decided: "always shown"), or stop after the last one until
    the next build adds new ones.
 
+### 15.10 Builder notes (§15, as built)
+1. **help.txt as §16 left it.** aefd76fb's edit inserted §16's Reading Plans page and, by
+   mistake, a broken `= versions	In every version` page and a second Ribbons page, so the
+   file had two `ribbons`, two `plans` and two `versions` pages (`test_help.l8` caught it).
+   The manual describes the app as built, so Round 10's Reading Plans page is the one shown
+   again, and §16's page is kept right under it as `#16 ` comment lines for §16's builder to
+   swap in. The `plan` tip's words are 6f0e2527's again ("…to a chapter a day", not "the order
+   events happened").
+2. **§16's three tips** (`plan-day`, `plan-mark`, `plan-listen`) have `UNLESS unbuilt`: a
+   condition added to §15.2.2's closed list that is always true, so they are never shown
+   until §16 is built. Their More points at parts that exist now (`plans#today`,
+   `plans#about`; `plan-miss` at `plans#today`); help.txt's comment says what §16's builder
+   changes back (`-`, `plans#mark`, `plans#listen`).
+3. **The Manual's search** matches as Search does (every word, whole, any case, ’ as ', a
+   word ending in `*` the start of one) and also takes a plural's s or es, so "ribbon" finds
+   Going Places' "your ribbons", as §15.7 asks. Quotation marks are not a phrase: the words
+   inside are matched as words.
+4. **Symbols' VoiceOver names** (help.l8's list): the button each draws ("the Search button",
+   "the bookmark button", "the Reading Settings button", "the pencil button", "the More Info
+   button" for ⓘ…). A page is read part by part: each heading is a header, each paragraph one
+   element with its symbols by name, its links as custom actions ("Open Memory").
+5. **The tip's columns** are Recent's row's: a copy of it (a `UIListContentView` with its
+   clock image) is laid out alone at the text size now, and the lightbulb is centred on its
+   image column, the words begin at its text column (at the accessibility sizes, where the
+   system puts a row's image above its text, the words begin after the lightbulb). The
+   lightbulb is centred on the first line. The buttons' titles sit 8 points under the words;
+   the first has no inset before it, Next none after it; they never compress (the space
+   between gives way); at the accessibility sizes they are one under another.
+6. **More and links** push the page in the sheet's own stack (Go To's, or Reading
+   settings', which grows to large for the Manual as for the acknowledgements). The page is a
+   TextKit 1 text view (`textViewUsingTextLayoutManager:NO`), laid out whole, so a part's
+   heading is put exactly 8 points under the bar before the push is seen. In the demo the
+   wash fades over 6 s rather than 1 s, so 406 shows it (as toasts last 6 s there).
+7. **Log:** "tip shown ID (level N, day YYYY-MM-DD)" at each Go To, and when a tip is chosen
+   anew "tips skipped ID (condition), …" (every tip skipped then, so 404's log names
+   tap-select and highlight); "tip next → ID", "tip more PAGE#PART", "tip action ID",
+   "manual page …", "manual washed …", "manual link …", "manual search Q: parts",
+   "help used NAME" the first time a feature is used. The demo's day is the demo clock's
+   (2026-10-19 on).
+8. **Shots:** 414 is Go To in Night and **414b** a page in Night (two shots for the row's
+   "Go To and a manual page"); 410 taps the Memory link in The actions (the page's last
+   paragraph is Selecting words, which has none). Steps 440–463 (the demo now listens to
+   479); later codes 800–824. `help` runs between `read` and `plans` on their iPhone.
+
 ---
 
 ## 16. Reading a plan's day in a reader of its own (owner request 2026-10-20; built after Round 10 and §15, before Round 11)

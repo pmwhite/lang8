@@ -102,6 +102,14 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   shows it. A word study gains Learn This Word and Forms (the lemma's
   forms as the Bible has them, a tap their concordance); Verses You Can
   Read lists the verses whose every word you know.
+- The manual and quick tips (§15): a tip at the top of Go To, one
+  sentence with More (the manual at its part), Next and sometimes an
+  action (New Ribbon…, Reading Plans, Open Memory…); the same tip all day,
+  basics first, skipping what you already do (your data, and first-use
+  flags in `helpUsed`), cycling. Reading settings → Help has the Manual (12
+  pages with search, symbols drawn inline, links between parts) and Show
+  Tips. The words are `data/help.txt`: every round that changes a feature,
+  a control's title or a place updates it (DESIGN.md §15.6).
 - A link opens a chapter: `bsb://JHN/3` (or a verse, `bsb://JHN/3/16`).
 
 ## Files
@@ -153,8 +161,13 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   portable part: vocab.bin and letters.txt, cards on `memory.l8`'s
   schedule, what is known, coverage, a passage's words, readable verses,
   a card's verse, cards.tsv; `lang.l8` a lemma's forms and Greek for the
-  voice; tested in `test_learn.l8`); `ios_demo.l8` (and `ios_demo3.l8` to
-  `ios_demo10.l8`) the demo CI runs.
+  voice; tested in `test_learn.l8`); `ios_help.l8` the tip in Go To,
+  the Manual and Reading settings' Help (`help.l8` their portable part:
+  `data/help.txt` read and checked, the tips' order and the rule that picks
+  one, the Manual's search; tested in `test_help.l8`, which fails on a
+  broken link or anchor, an unknown condition, action or symbol, or a tip
+  out of the house style); `ios_demo.l8` (and `ios_demo3.l8` to
+  `ios_demo15.l8`) the demo CI runs.
 - `audio.l8` is recorded readings' portable part (sources, addresses,
   timings, which source a chapter is heard from, the cache's rules), tested
   in `test_audio.l8`; `ios_audio.l8` the Voice screens, voices, the cache
@@ -238,7 +251,9 @@ about 27 when each group had a Mac of its own; see the workflow's header):
   second. store and memory share a Mac, each on its own simulator; ios18
   follows ribbons and study on an iOS 18 iPhone of its own; languages
   (Round 10, about 3 minutes) goes first on the versions job's iPhone,
-  more last. Each group is uploaded (`shots-GROUP`) as it ends,
+  more last; help (§15, about 3 minutes) between read and plans on
+  theirs. Every group but help turns Show Tips off before its first
+  launch, so its shots of Go To have no tip. Each group is uploaded (`shots-GROUP`) as it ends,
   and `timing.txt` says when its boot, install, launch and settling came.
 - The groups are paired by their times so the jobs end together (a group
   takes 1 to 4 minutes once booted; `timing.txt`'s `total` minus its
