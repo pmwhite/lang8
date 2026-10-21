@@ -183,7 +183,9 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   `data/lang/meanings.bin` and `meanings.txt` are each word's meaning in its
   verse and its semantic domain (`tools/ubs.py`, from the United Bible
   Societies' open dictionaries of Greek, after Louw and Nida, and Hebrew,
-  SDBH), CC BY-SA 4.0 as their source is (`meanings-LICENSE.txt`).
+  SDBH), CC BY-SA 4.0 as their source is (`meanings-LICENSE.txt`); their
+  markup is made plain (notes' marks dropped, verses named, Louw–Nida's
+  entries as "LN 25.43").
   `tools/fetch.sh DIR make` downloads the sources, checks
   their sha256, and makes them all again.
   `lang.l8` reads the study data for the study screens (`test_lang.l8`), and

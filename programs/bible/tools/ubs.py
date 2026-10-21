@@ -53,7 +53,7 @@ CREDIT = ("UBS Dictionary of the Greek New Testament, © United Bible Societies 
           "© United Bible Societies 1988, 1989); UBS Dictionary of Biblical Hebrew, © United Bible "
           "Societies 2023 (adapted from Semantic Dictionary of Biblical Hebrew © 2000-2023 United "
           "Bible Societies). CC BY-SA 4.0, https://github.com/ubsicap/ubs-open-license. Changed: "
-          "each meaning given to the words of the text it names, by Smooth Bible (tools/ubs.py); "
+          "each meaning given to the words of the text it names, its markup made plain, by Smooth Bible (tools/ubs.py); "
           "this file and meanings.bin are shared under the same licence.")
 
 
@@ -103,8 +103,30 @@ def hebrew_numbers(path):
     return out
 
 
+# The books' names in order (bsb.txt's), for a reference in a definition.
+BOOK_NAMES = []
+
+
+def ref_name(code):
+    """BBBCCCVVV… (UBS's books 1 to 66) as "Revelation 20:3"."""
+    b, c, v = int(code[0:3]), int(code[3:6]), int(code[6:9])
+    if not 1 <= b <= len(BOOK_NAMES):
+        return ""
+    name = "Psalm" if BOOK_NAMES[b - 1] == "Psalms" else BOOK_NAMES[b - 1]
+    return "%s %d:%d" % (name, c, v) if v else "%s %d" % (name, c)
+
+
 def clean(s):
-    s = re.sub(r"\{[A-Z]:([^<}]*)(<[^>]*>)?\}", r"\1", s or "")
+    """UBS's markup made plain: a note's mark ({N:001}) dropped, as the notes
+    aren't kept; a verse ({S:06602000300012}) named, Revelation 20:3; a
+    Louw–Nida entry ({D:11.55}) as LN 11.55; a word linked ({L:…<…>}, its
+    homograph's [a] after it) and the rest ({A:MT}) as their text."""
+    s = re.sub(r"\s*\{N:[^}]*\}", "", s or "")
+    s = re.sub(r"\{S:(\d{9,})\}", lambda m: ref_name(m.group(1)), s)
+    s = re.sub(r"\{D:([^}]*)\}", r"LN \1", s)
+    s = re.sub(r"\{L:([^<}]*)(<[^>]*>)?\}(\[[a-z]\])?", r"\1", s)
+    s = re.sub(r"\{[A-Z]:([^<}]*)(<[^>]*>)?\}", r"\1", s)
+    s = re.sub(r"(?<=[^\x00-\x7f])\[[a-z]\]", "", s)
     s = re.sub(r"^=\s*", "", s.strip())
     return " ".join(s.replace("\t", " ").split())
 
@@ -242,6 +264,8 @@ def orig_verses(data):
 
 def build(ubs_dir, data):
     books = book_codes(os.path.join(data, "bsb.txt"))
+    BOOK_NAMES[:] = [line[5:].strip() for line in open(os.path.join(data, "bsb.txt"), encoding="utf-8")
+                     if line[:1] == "B"]
     nw, key, vwords = load_words(data)
     hnum = hebrew_numbers(os.path.join(data, "orig.txt"))
     hdomains = domain_names(os.path.join(ubs_dir, "UBSHebrewDicLexicalDomains-v0.9.3-en.JSON"))

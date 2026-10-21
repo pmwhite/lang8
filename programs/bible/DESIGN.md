@@ -8226,16 +8226,60 @@ Deviations, each with its reason:
     forms' pages read cold; a Greek or Hebrew query about 90 ms): a word is passed over by its
     transliteration's first letter before it is folded. Measured on a phone, it may want a folded
     index made once.
-29. **The demo listens for steps up to 649** (it stopped at 599; Round 11's are 600 to 629), and
-    Round 11's later codes are 1100 to 1199, before §17's 1000s.
+29. **The demo listens for steps up to 649** (it stopped at 599; Round 11's are 600 to 635), and
+    Round 11's later codes are 1100 to 1199, before §17's 1000s. Every step the scripts send was
+    heard in run 39573776932 (600 to 629; 623 is not used).
 
-**CI.** The `original` group (shots 270–295, 291b, 294b, sequence 17's recording) runs third on the
+**After run 39573776932 (every job green at a4e4bb157), from its shots:**
+
+30. **Learn This Word's place, once tapped, is the card's line**, faint and wrapping, as the
+    popover shows it when the word already has a card ("Learning · in your next practice"), and
+    the popover grows to it: as the button's title it was cut to "Learning · in you…" beside
+    Word Study (274, and sequence 17's recording).
+31. **A toast shows over a popover:** it is put in the window of the view controller on top and
+    lifted above everything there (its layer's z 1000). 274's shot had no toast over the word's
+    popover (though the recording's showed one; the first toast of a launch is made then).
+32. **The Hebrew share card is set at the right**, its reference (still English) under it at the
+    right too: drawn as a string, natural alignment is the app's left whatever the paragraph's
+    direction, so 291b's Hebrew stood at the left. Right alignment is given outright.
+33. **Hebrew search results show a match semibold only, without the selection's background**:
+    289's backgrounds were drawn in pieces round the points (שָׁ apart from לוֹם). Greek keeps
+    the background, as English does.
+34. **270 is scrolled to Original Languages** (Versions' last section was below the sheet's
+    foot).
+35. **Shots added**, for what §14.11.9 leaves unseen: 295b (Psalm 23 in Hebrew, verse 1
+    highlighted in this version and verse 2 selected: the wash and the selection's line right to
+    left); 296 (§16: M'Cheyne's day 1, Genesis 1, Matthew 1, Ezra 1 and Acts 1, in the day's
+    reader in this version, Genesis 1's end and Matthew 1's start each with its apparatus) and
+    296b (an entry's popover there); in the ipad group, 503b (§17: the Hebrew and Greek in
+    landscape, John 3:16 selected and Study beside it) and 503c (an entry's popover on the iPad).
+    The ipad group's log checks gain "orig popover" and no "demo no apparatus entry".
+
+**After run 39578800974 (every job green at 101a5528d; 30 to 35 seen in its shots):**
+
+36. **UBS's markup is made plain** in `meanings.txt` (`ubs.py`'s `clean`): 503c showed ὥστε's
+    meaning as "…an intended or indirect purpose001", the digits of a note's mark (`{N:001}`,
+    1,017 of them; the notes aren't kept), and 165 definitions held a verse as fourteen digits
+    (`{S:06602000300012}`). Now a note's mark is dropped, a verse is named ("Revelation 20:3"),
+    a Louw–Nida entry reads "LN 11.55" (was a bare "11.55": "(derivative of ἀγαπάω 'to love,'
+    LN 25.43)"), and a homograph's [a] after a Greek or Hebrew word goes. 2,075 lines changed;
+    `meanings.bin` is byte for byte the same (no meaning merged or split).
+
+**CI.** The `original` group (shots 270–295, 291b, 294b, 295b, 296, 296b, sequence 17's recording;
+503b and 503c are the ipad group's) runs third on the
 read job's iPhone, reset after help, with plans fourth (still last, for its alert); the workflow
 shuts the third group's simulator only when the fourth isn't on it. Run 39569313518, with it third
 on the languages job, took: read/help/plans 14.0 minutes, languages/versions/original 21.2,
 store/memory/more 18.6, ribbons/study/ios18 13.4, notes/listen/ipad 29.8 (the iPad's group alone
 16.4); the original group itself 4.2 (251 s). Moved to the read job, that job should take about
-18, languages/versions about 17, so the longest stays the notes job's.
+18, languages/versions about 17, so the longest stays the notes job's. Run 39573776932 (a4e4bb157,
+the original third on the read job): read/help/original/plans 19.7 minutes, notes/listen/ipad
+21.8, languages/versions 13.1, ribbons/study/ios18 9.8, store/memory/more 10.6, frames 8.6. Run
+39578800974 (101a5528d, with 295b, 296, 296b, 503b and 503c): read/help/original/plans 22.6,
+notes/listen/ipad 24.1, languages/versions 18.2, ribbons/study/ios18 17.5, store/memory/more 18.5,
+frames 11.0; the original group 253 s, the ipad group 675 s. (The same groups took 13 to 18
+minutes on two jobs that changed nothing between the runs: the runners' speed varies by a third
+from run to run, more than these shots add.)
 
 **What needs a real phone:** the Hebrew's points and the dotted lines under them in SF Hebrew at
 every text size (the simulator's fonts are the phone's, but the eye should judge); the apparatus
@@ -8244,8 +8288,11 @@ in a Hebrew verse; the letter keyboard's feel, its clicks and its height beside 
 each iPhone and the iPad (and with a hardware keyboard, which bypasses it); VoiceOver on a Greek
 and a Hebrew verse with and without those voices installed, and on the apparatus; the first
 search by Latin letters (its time); the first switch to the version (17 ms to map its words on
-the simulator, the text indexed after); Share as Image's Hebrew card; Practice's hidden points in
-Hebrew at Letters.
+the simulator, the text indexed after); Share as Image's Hebrew card (now at the right); Practice's
+hidden points in Hebrew at Letters; a toast over the word's popover; a Hebrew search's semibold
+match without its background, whether it stands out enough; the popover on the iPad, from a
+pointer and a finger; the Louw–Nida references ("LN 25.43") in a definition, whether they help or
+should go.
 
 ### 14.12 Round 12: a Greek course
 
