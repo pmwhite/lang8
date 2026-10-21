@@ -1555,13 +1555,13 @@ original)
   # The log's checks (§14.11.9): the glosses by chapter and mode, the
   # popovers, a card learned and the reader laid out again, Show Accents,
   # no Listen for the original.
-  grep -h "bible: orig\|bible: toast\|bible: listen\|bible: demo step\|bible: demo learn\|bible: demo no\|bible: letter keyboard\|bible: learn read in\|bible: practice" \
+  grep -h "bible: orig\|bible: toast\|bible: listen\|bible: demo step\|bible: demo learn\|bible: demo no\|bible: letter keyboard\|bible: learn read in\|bible: learn card\|bible: practice" \
     "$out/console.txt" > "$out/original.txt" 2>/dev/null
   for want in "orig words mapped" "orig JHN 1 glossed" "(words I haven't learned)" "(rare words)" "orig popover" \
       "toast Added to Greek Words" "orig relaid after cards changed" "orig GEN 1 glossed" "orig PSA 23 glossed" \
       "orig accents on" "orig MAL 4 glossed" "orig DAN 2 glossed" "listen none for the original" \
       "toast Added to Memory" "letter keyboard hebrew" "letter keyboard greek" "orig search found" \
-      "learn read in greek"; do
+      "learn read in greek" "learn card G3439 knew" "orig popover"; do
     grep -qF "$want" "$out/original.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/original.txt"; failed=1; }
   done
   if grep -q "demo no apparatus entry" "$out/original.txt"; then echo "FAILED: an apparatus entry not found" | tee -a "$out/original.txt"; failed=1; fi
