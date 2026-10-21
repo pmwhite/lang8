@@ -125,7 +125,13 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   transliteration, gloss, meaning here and domain from UBS's dictionaries,
   parsing, a Qere's Ketiv, the Hebrew's own verse number, Word Study and
   Learn This Word). Reading settings has Glosses and Show Accents in it;
-  Listen has no recording of the original yet.
+  Listen has no recording of the original yet. Search finds its words by
+  Greek or Hebrew letters (accents and points not needed) or by Latin
+  letters as they sound ("agape", "shalom"); Compare, Copy and Share as
+  Image show it; Memory practises it, typed on a Greek or Hebrew keyboard
+  of the app's own; the language page's Read in Greek (Hebrew) opens it.
+  Word studies and cards give each word's meaning in its verse and its
+  semantic domain (UBS's), and words in the same domain.
 - The manual and quick tips (§15): a tip at the top of Go To, one
   sentence with More (the manual at its part), Next and sometimes an
   action (New Ribbon…, Reading Plans, Open Memory…); the same tip all day,
@@ -227,8 +233,11 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   kept through them, the floating controls over the column, form sheets
   and popovers, the keys and the menu bar, and hover; `ios_beside.l8`
   Study beside the text (`text.l8`'s `column_width` is the column, tested
-  in `test_text.l8`); `ios_demo.l8` (and `ios_demo3.l8` to
-  `ios_demo17.l8`) the demo CI runs.
+  in `test_text.l8`); `ios_orig.l8` the Hebrew and Greek's
+  screens (its data at first use, Glosses and Show Accents, the glossed
+  words' lines, a word's popover, the letter keyboard); `ios_demo.l8` (and
+  `ios_demo3.l8` to `ios_demo17.l8`) the demo CI runs (`ios_demo11.l8`
+  Round 11's).
 - The web (`WEB.md`): `html.l8` writes a chapter as HTML (tested in
   `test_html.l8`); `estimate.l8` estimates a chapter's height from its
   records (or counts its blocks for `tools/sizes.l8`'s sizes table, which

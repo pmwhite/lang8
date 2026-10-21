@@ -412,3 +412,328 @@ og_pick(b: int): bool {
     pick_vi = word_verse(pick_word);
     pick_word >= 0 && pick_vi >= 0
 }
+
+// ---- search by Greek, Hebrew or Latin letters (§14.11.7) ----
+// The words searched for, folded: Greek or Hebrew as letter_fold folds them
+// (accents, breathings, points and final forms gone); Latin letters as a
+// transliteration is folded (latin_fold), to be found in each word's;
+// each a run of osq (from osq_at, osq_len long), whether it is Latin, and
+// whether it may begin a longer word (* after it); and whether they are a
+// phrase (in quotes: together, in order).
+osq: []int = new int[512](0);
+
+osq_n: int = 0;
+
+osq_words: int = 0;
+
+osq_at: []int = new int[16](0);
+
+osq_len: []int = new int[16](0);
+
+osq_latin: []bool = new bool[16](false);
+
+osq_prefix: []bool = new bool[16](false);
+
+osq_phrase: bool = false;
+
+// A run of code points folded into fo_cp (fo_len), from a word's bytes.
+fo_cp: []int = new int[256](0);
+
+fo_len: int = 0;
+
+fo_put(cp: int) {
+    if (fo_len < len(fo_cp)) {
+        fo_cp[fo_len] = cp;
+        fo_len = fo_len + 1
+    }
+}
+
+// Latin Extended Additional (U+1E00 on): each pair's base letter, a to y.
+latin_ext_bases: str = "aabbbbbbccddddddddddeeeeeeeeeeffgghhhhhhhhhhiiiikkkkkkllllllllmmmmmmnnnnnnnnoooooooopppprrrrrrrrssssssssssttttttttuuuuuuuuuuvvvvwwwwwwwwwwxxxxyyzzzzzzhtwyasssd";
+
+// A transliteration's letter, folded: lower case, its marks gone (ā a, ə
+// e, š s, ḥ h); 0 for what is no letter (· ‘ ’ ʾ ʿ, marks, hyphens).
+latin_base(cp: int): int {
+    if (cp >= 65 && cp <= 90) return cp + 32;
+    if (cp >= 97 && cp <= 122) return cp;
+    if (cp == 601 || cp == 603 || cp == 477) return 101;
+    if (cp >= 7680 && cp < 7680 + len(latin_ext_bases)) return latin_ext_bases[cp - 7680] as int;
+    if (cp >= 7840 && cp <= 7929) return if (cp < 7864) 97 else if (cp < 7880) 101 else if (cp < 7884) 105 else if (cp < 7908) 111 else if (cp < 7922) 117 else 121;
+    if (cp >= 192 && cp <= 383) {
+        f: int = mem_fold(cp);
+        if (f >= 97 && f <= 122) return f
+    }
+    0
+}
+
+// Bytes b[p..e] of a transliteration (or a Latin query) folded into fo_cp: its
+// letters as latin_base folds them; a w after ō before a consonant (a
+// vowel's letter: lō·wm) left out; then sh s, ch h, kh k, th t, ph p (so
+// "shalom" is šā·lō·wm's "salom", "theos" θεός's "teos").
+latin_fold(b: []i8, p: int, e: int) {
+    fo_len = 0;
+    q: int = p;
+    prev_o: bool = false;
+    while (q < e) {
+        cp: int = utf8_at(b, q, e);
+        q = q + cp_n;
+        x: int = latin_base(cp);
+        if (x == 119 && prev_o) {
+            // (Its next letter: a consonant, or none.)
+            r: int = q;
+            nx: int = 0;
+            while (r < e && nx == 0) {
+                c2: int = utf8_at(b, r, e);
+                r = r + cp_n;
+                nx = latin_base(c2)
+            }
+            if (nx == 0 || !is_vowel_letter(nx)) x = 0
+        }
+        if (x != 0) {
+            prev_o = cp == 333;
+            if (x == 104 && fo_len > 0 && (fo_cp[fo_len - 1] == 115 || fo_cp[fo_len - 1] == 99 || fo_cp[fo_len - 1] == 107 || fo_cp[fo_len - 1] == 116 || fo_cp[fo_len - 1] == 112)) {
+                // (A digraph: its h dropped; ch as h.)
+                if (fo_cp[fo_len - 1] == 99) fo_cp[fo_len - 1] = 104
+            } else fo_put(x)
+        }
+    }
+}
+
+is_vowel_letter(k: int): bool {
+    k == 97 || k == 101 || k == 105 || k == 111 || k == 117 || k == 121
+}
+
+// Bytes b[p..e] of Greek or Hebrew folded into fo_cp: their letters, as
+// letter_fold folds them, marks and punctuation gone.
+script_fold(b: []i8, p: int, e: int) {
+    fo_len = 0;
+    q: int = p;
+    while (q < e) {
+        cp: int = utf8_at(b, q, e);
+        q = q + cp_n;
+        if (is_orig_letter(cp)) fo_put(letter_fold(cp))
+    }
+}
+
+// Whether bytes p..e hold a Greek or Hebrew letter.
+has_script(b: []i8, p: int, e: int): bool {
+    q: int = p;
+    while (q < e) {
+        cp: int = utf8_at(b, q, e);
+        q = q + cp_n;
+        if (is_orig_letter(cp)) return true
+    }
+    false
+}
+
+// The query (the first n bytes of s) as words to search for.
+og_search_words(s: []i8, n: int) {
+    osq_n = 0;
+    osq_words = 0;
+    osq_phrase = false;
+    i: int = 0;
+    while (i < n) {
+        k: int = s[i] as int & 255;
+        if (k == 34 || k == 226 && i + 2 < n && (s[i + 2] as int & 255) >= 156 && (s[i + 2] as int & 255) <= 157) osq_phrase = true;
+        sep: bool = k == 32 || k == 34 || k == 42 || k == 44 || k == 46 || k == 59 || k == 226 && i + 2 < n && (s[i + 1] as int & 255) == 128;
+        if (sep) {
+            if (k == 42 && osq_words > 0) osq_prefix[osq_words - 1] = true;
+            i = i + (if (k == 226) 3 else 1)
+        } else {
+            b: int = i;
+            while (i < n && !(s[i] as int == 32 || s[i] as int == 34 || s[i] as int == 42 || s[i] as int == 44 || (s[i] as int & 255) == 226 && i + 1 < n && (s[i + 1] as int & 255) == 128)) i = i + 1;
+            if (osq_words < len(osq_at)) {
+                latin: bool = !has_script(s, b, i);
+                if (latin) latin_fold(s, b, i) else script_fold(s, b, i);
+                if (fo_len > 0) {
+                    osq_at[osq_words] = osq_n;
+                    osq_len[osq_words] = fo_len;
+                    osq_latin[osq_words] = latin;
+                    osq_prefix[osq_words] = false;
+                    for x in 0..fo_len {
+                        if (osq_n < len(osq)) {
+                            osq[osq_n] = fo_cp[x];
+                            osq_n = osq_n + 1
+                        }
+                    }
+                    osq_words = osq_words + 1
+                }
+            }
+        }
+    }
+    if (osq_words < 2) osq_phrase = false
+}
+
+// Whether word w (its letters bsb's... b[p..e]) is search word k.
+og_word_is(
+    k: int,
+    w: int,
+    b: []i8,
+    p: int,
+    e: int
+): bool {
+    if (osq_latin[k]) {
+        j: int = og_join(w);
+        if (j < 0) return false;
+        form_of(j);
+        latin_fold(lforms, wt_b, wt_e)
+    } else script_fold(b, p, e);
+    n: int = osq_len[k];
+    if (fo_len < n || fo_len > n && !osq_prefix[k]) return false;
+    for i in 0..n
+        if (fo_cp[i] != osq[osq_at[k] + i]) return false;
+    true
+}
+
+// The verses of books from to last (inclusive) the query finds (every
+// word somewhere in the verse; a phrase's words together, in order), in
+// order: text.l8's hit_chapter and the rest. The text current is the
+// original's.
+og_search(
+    q: []i8,
+    n: int,
+    from: int,
+    last: int
+) {
+    hit_count = 0;
+    hit_more = false;
+    og_search_words(q, n);
+    if (osq_words == 0) return;
+    c: int = book_first[from];
+    e_c: int = book_first[last] + book_count[last];
+    while (c < e_c && !hit_more) {
+        og_search_chapter(c);
+        c = c + 1
+    }
+}
+
+// Per verse: the words found (a bit each), and the phrase's place in it.
+os_found: int = 0;
+
+os_run: int = 0;
+
+og_search_chapter(c: int) {
+    if (ch_start[c] < 0) return;
+    w: int = og_ch_first[c];
+    p: int = ch_start[c];
+    v: int = 0;
+    os_found = 0;
+    os_run = 0;
+    while (p < ch_end[c]) {
+        e: int = line_end(p);
+        k: int = bsb[p] as int;
+        if (k == 86) {
+            nv: int = key_at(p + 1);
+            if (nv != v) {
+                if (v > 0) og_search_verse(c, v);
+                v = nv;
+                os_found = 0;
+                os_run = 0
+            }
+        } else if (k == 68) {
+            // (A title: its words are its verse 1's, as words.bin has them.)
+            os_found = 0;
+            os_run = 0;
+            v = 1
+        }
+        if (og_words_line(k)) {
+            x: int = p + 1;
+            while (x < e) {
+                if (bsb[x] as int == 32) x = x + 1 else {
+                    we: int = x + og_len(w);
+                    le: int = og_letters_end(x, we);
+                    og_search_word(w, bsb, x, le);
+                    w = w + 1;
+                    x = we
+                }
+            }
+        }
+        p = e + 1
+    }
+    if (v > 0) og_search_verse(c, v)
+}
+
+// A word of the verse searched: the words it is (or the phrase's next).
+og_search_word(
+    w: int,
+    b: []i8,
+    p: int,
+    e: int
+) {
+    if (osq_phrase) {
+        if (os_run < osq_words && og_word_is(os_run, w, b, p, e)) os_run = os_run + 1 else if (os_run < osq_words) os_run = (if (og_word_is(0,
+            w, b, p, e)) 1 else 0);
+        if (os_run == osq_words) os_found = 1;
+        return
+    }
+    for k in 0..osq_words
+        if ((os_found & 1 << k) == 0 && og_word_is(k, w, b, p, e)) os_found = os_found | 1 << k
+}
+
+og_search_verse(c: int, v: int) {
+    all: bool = if (osq_phrase) os_found == 1 else os_found == (1 << osq_words) - 1;
+    // (A title's verse 1 is searched once more with its verse: the same
+    // verse, kept once.)
+    if (!all || hit_count > 0 && hit_chapter[hit_count - 1] == c && hit_verse[hit_count - 1] == v) return;
+    if (hit_count >= len(hit_chapter)) {
+        hit_more = true;
+        return
+    }
+    hit_chapter[hit_count] = c;
+    hit_verse[hit_count] = v;
+    hit_count = hit_count + 1
+}
+
+// Where the query is in verse v of chapter c: its text in vt (verse_text),
+// and each word it finds there in mr_begin to mr_end (text.l8's), its
+// letters.
+og_match_ranges(c: int, v: int) {
+    verse_text(c, v);
+    mr_count = 0;
+    og_verse(c, v);
+    w: int = og_vb;
+    x: int = 0;
+    while (x < vt_n && w < og_ve) {
+        if (vt[x] as int == 32) x = x + 1 else {
+            we: int = x + og_len(w);
+            if (we > vt_n) we = vt_n;
+            le: int = letters_end_of(vt, x, we);
+            hit: bool = false;
+            for k in 0..osq_words
+                if (!hit && og_word_is(k, w, vt, x, le)) hit = true;
+            if (hit) mr_add(x, le);
+            w = w + 1;
+            x = we
+        }
+    }
+}
+
+// ---- copied as shown (§14.11.7) ----
+// Verse v of chapter c into vt as the reader shows it: with its
+// cantillation when Show Accents is on (the Hebrew's), else its text.
+og_verse_text_shown(c: int, v: int): int {
+    if (!lay_accents || og_acc_n == 0 || c < 0 || ch_book[c] >= 39 || og_acc_ch[c] < 0) return verse_text(c,
+        v);
+    if (!og_verse(c, v)) return verse_text(c, v);
+    vt_n = 0;
+    // (Word og_vb's line: from the chapter's first word's.)
+    line: int = og_acc_ch[c];
+    w: int = og_ch_first[c];
+    while (w < og_vb && line < og_acc_n) {
+        while (line < og_acc_n && og_acc[line] as int != 10) line = line + 1;
+        line = line + 1;
+        w = w + 1
+    }
+    while (w < og_ve && line < og_acc_n) {
+        e: int = line;
+        while (e < og_acc_n && og_acc[e] as int != 10) e = e + 1;
+        for x in line..e vt_add(og_acc[x] as int);
+        if ((og_flags(w) & OG_MAQAF) != 0) {
+            vt_add(214);
+            vt_add(190)
+        } else if (w + 1 < og_ve) vt_add(32);
+        line = e + 1;
+        w = w + 1
+    }
+    vt_n
+}

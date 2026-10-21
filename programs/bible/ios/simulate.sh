@@ -1511,6 +1511,16 @@ original)
   step 611 281-daniel-aramaic 8
   step 612 282-listen-greek 10
   step 613 283-listen-hebrew 10
+  step_toast 614 284-memorize "Added to Memory"
+  step 615 285-practice-letters 12
+  step 616 286-type-hebrew 10
+  step 617 287-type-greek 14
+  step 618 288-search-agape 12
+  step 619 289-search-shalom 10
+  step 620 290-compare 12
+  step 627 291-share-hebrew 12
+  step 628 294-greek-page 12
+  step 629 294b-read-in-greek 10
   step 621 292-night-hebrew 10
   ui content_size accessibility-extra-extra-extra-large
   step 622 293-ax-greek 12
@@ -1541,11 +1551,13 @@ original)
   # The log's checks (§14.11.9): the glosses by chapter and mode, the
   # popovers, a card learned and the reader laid out again, Show Accents,
   # no Listen for the original.
-  grep -h "bible: orig\|bible: toast\|bible: listen\|bible: demo step\|bible: demo learn\|bible: demo no" \
+  grep -h "bible: orig\|bible: toast\|bible: listen\|bible: demo step\|bible: demo learn\|bible: demo no\|bible: letter keyboard\|bible: learn read in\|bible: practice" \
     "$out/console.txt" > "$out/original.txt" 2>/dev/null
   for want in "orig words mapped" "orig JHN 1 glossed" "(words I haven't learned)" "(rare words)" "orig popover" \
       "toast Added to Greek Words" "orig relaid after cards changed" "orig GEN 1 glossed" "orig PSA 23 glossed" \
-      "orig accents on" "orig MAL 4 glossed" "orig DAN 2 glossed" "listen none for the original"; do
+      "orig accents on" "orig MAL 4 glossed" "orig DAN 2 glossed" "listen none for the original" \
+      "toast Added to Memory" "letter keyboard hebrew" "letter keyboard greek" "orig search found" \
+      "learn read in greek"; do
     grep -qF "$want" "$out/original.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/original.txt"; failed=1; }
   done
   if grep -q "demo no apparatus entry" "$out/original.txt"; then echo "FAILED: an apparatus entry not found" | tee -a "$out/original.txt"; failed=1; fi

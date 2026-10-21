@@ -8168,6 +8168,58 @@ Deviations, each with its reason:
 16. **Listen** in this version is the Listen section's button, grey and disabled: "No recording of
     the original yet." (§14.10b.1); `listen_start` does nothing here, and logs so.
 
+**The rest (§14.11.5–§14.11.8, R11.0 in Study and cards).**
+
+17. **The letter keyboard is a `UIInputView`** (a `UIView` of the keyboard's own background),
+    `L8LetterKeyboard`, adopting `UIInputViewAudioFeedback`; Practice's key view returns it as its
+    `inputView` for a passage in this version (`reloadInputViews` as the keyboard comes up).
+    Letter keys are `systemBackgroundColor`, the others `systemGray3Color`, with the system
+    keys' one-point shadow. Its height is the system keyboard's as last seen (from
+    `UIKeyboardWillChangeFrameNotification`, less Practice's bar), else 216 points. The Israeli
+    row's / and ' type nothing a word begins with.
+18. **Practice in the original:** a word's key letter is its first letter as written, with its
+    points (the hidden part covers them); words joined by maqaf are two words, each its own key
+    letter (they are two for the data, as §14.11.1 says); sof pasuq and the Greek raised dot end
+    a clause. Typed letters are folded by `letter_fold` (accents, breathings, points, final
+    forms, ς). Listen and Echo are greyed for these passages (no recording or voice of the
+    original, §14.10b.1).
+19. **Search by Latin letters** folds both the query and each word's transliteration (the BSB
+    tables', through its join) alike: marks, syllable dots and the ʾ ʿ ‘ ’ go; ē e, ə e, š s, ḥ h
+    and the rest; a w after ō before a consonant (holem written with waw, lō·wm) goes; then sh,
+    ch, kh, th and ph lose their h (ch as h), so "shalom" is šā·lō·wm and "theos" θεός. Greek
+    and Hebrew typed are folded by `letter_fold`. Whole words, * for a beginning, quotes for a
+    phrase, as for English; a prefixed Hebrew form (בְּשָׁלוֹם) is a word of its own. The log
+    says how many verses and how long ("bible: orig search found, ms").
+20. **Compare** puts the Hebrew and Greek last (after the YLT), or first when it's the version read.
+    **Copy** gives the text as shown (cantillation with Show Accents on). **Share as Image** sets
+    Greek in New York and Hebrew in SF Hebrew, right to left, line height 1.5.
+21. **Where a single passage is named** (Memory's rows, Copy's and Share's reference) the version
+    is its language, "Psalm 23 · Hebrew", "John 3:16 Greek", as §14.11.2's own example has it;
+    where the version itself is named (Versions, Reading settings, Compare's header, Search's
+    count) it is "Hebrew and Greek".
+22. **Read in Greek (Hebrew)** is the Reading section's second row, after Verses You Can Read
+    (which stays first). "The carried ribbon's chapter" is read as the first ribbon whose place
+    is in that testament: a carried ribbon is always where the reader is. That ribbon is opened
+    (picked up) as Go To opens it. Its secondary text says where: "John 3, where you are",
+    "Romans 8, at your ribbon", "Matthew 1".
+23. **Verses You Can Read opens the verse in the reader**, in this version, with the capsule back;
+    so the languages group's 258 changes, and that group goes back to the BSB at 259.
+24. **R11.0 in Study and cards:** the word study's Meaning row has, under the gloss, "Here:" and
+    UBS's definition and subdomain; a section **In the Same Domain** (after Related Words and the
+    other testament's) lists the five commonest words with a meaning in the same domain here, not
+    already related above, footed "Words with a meaning in Love, Affection, Compassion, as here;
+    from the UBS dictionaries."; a lemma study (no verse) has neither. A word card's answer adds
+    the meaning here under its Here: line. So the languages group's word-study and card shots
+    change.
+25. **Accessibility:** the original's runs carry `UIAccessibilitySpeechAttributeLanguage` (he or
+    el) and the apparatus en, so an installed voice reads each; the apparatus is read as written
+    ("μονογενῆ one and only"), not as "Glossed: monogenē, one and only": a text view's string
+    can't carry other words for VoiceOver without an accessibility element of our own per entry.
+    The popover's form gives its transliteration as its hint.
+26. **Shots 282 and 283** are Reading settings in a Greek and a Hebrew chapter (the Listen row
+    disabled, Glosses and Show Accents under Version): §14.10b.1 took Listen for the original
+    away. **294 is two:** 294 the Greek page with Read in Greek, 294b the reader after it.
+
 ### 14.12 Round 12: a Greek course
 
 Round 12 adds what a course gives: a sequence of short lessons that teach the grammar as a
