@@ -9314,16 +9314,18 @@ Where the build differs from the text above, and why:
    1, as in the reader) but not its book's label or name: the passage's heading names it.
    The heading is a reference (`STYLE_PASSAGE`, `run_arg` as `STYLE_XREF`'s): a tap previews
    the passage (shot 440's "heading's reference").
-4. **The Chronological's balance** (`tools/chrono.py`): with each of Robertson's sections a
-   block, and at most 6 passages a day, the Gospels' 39 days of words need 69 days (the
-   Passion's sections are four short passages each); ending each day at the boundary nearest
-   `total·d/365` then falls behind through the Gospels and can't catch up (its last day 9.7
-   times the mean). So the 365 ends are chosen together, by dynamic programming over the
-   blocks, to make the days as even as they can be (the least sum of squares) within the 6
-   passages and 2.2 times the mean; where neither binds it is about the nearest-boundary
-   rule. The longest day is 1.78 of the mean, the shortest 0.14 (day 320, the burial and
-   the empty tomb); 38 Gospel days are under half the mean; ends run up to 24 days' mean
-   ahead of `total·d/365`. The tool's summary is in the commit (2a0186f18).
+4. **The Chronological's balance** (`tools/chrono.py`): the 365 ends are chosen together, by
+   dynamic programming over the blocks, each kept whole, for the least sum of the days'
+   squared lengths (each day's distance from the mean), within 6 passages and 2.2 times the
+   mean. A day of the Gospels reads its sections a Gospel at a time (Matthew's parts of the
+   day's sections, then Mark's, Luke's, John's, each in Robertson's order and run together
+   where they follow on), so several sections fit a day's six passages: the Gospels take 42
+   days (278–319) at 0.93 of the mean (review s16-1, Minor 1; read a section at a time they
+   took 69 short days). Longest day 113, 1.71 of the mean (2 Samuel 1:1–5:3 with its
+   Chronicles); shortest day 311, 0.27 (the foretelling of Peter's denial: Robertson sets it
+   between the supper's two parts, taking Matthew 26 and Luke 22 out of their own order, so
+   either neighbour would make 7 passages); three days under half the mean. Ends run at most
+   2.1 days' mean ahead of `total·d/365`.
 5. **The Chronological's departures** from Townsend and the skeleton are noted line by line
    in `data/plans/chrono-order.txt` (its header and each block's comment); the larger ones:
    Townsend's places kept for Psalm 90 (after Numbers 14), 88 (Exodus 2), the return psalms
@@ -9352,12 +9354,11 @@ Where the build differs from the text above, and why:
    shows 1.0's states (shot 448).
 9. **A day of a plan not followed** (opened from its days before Start Plan) is read, not
    marked: no Mark Read capsule, and no Mark Day in its end.
-10. **The demo's day is 114, not 32:** the Chronological's day 32 is Exodus 21–23, one
-    passage, so 434's crossing could not be shown. Day 114 is Psalms 22, 16, 118 and 110, 2
-    Samuel 8 and 1 Chronicles 18; day 115 (438 on) Psalms 60 and 108, 2 Samuel 9–10, 1
-    Chronicles 19, Psalms 20–21. The days before it are seeded read, so Go To's row has no
+10. **The demo's day is 122, not 32:** the Chronological's day 32 is one passage, so 434's
+    crossing could not be shown. Day 122 is Psalms 22, 16, 118 and 110, 2 Samuel 8 and 1
+    Chronicles 18; day 123 (438 on) Psalms 60 and 108, 2 Samuel 9–10, 1 Chronicles 19. The days before it are seeded read, so Go To's row has no
     "unfinished". 444 starts M'Cheyne's beside it (Start Plan: §16.11); 445's partial passage
-    is the Chronological's day 102's "1 Samuel 23:24–24:22"; 447 is M'Cheyne's day 1 under
+    is the Chronological's day 109's "1 Samuel 23:24–24:22"; 447 is M'Cheyne's day 1 under
     the ESV. 447 uses the ESV's fixture, now
     installed in the plans group too (Genesis 1 comes; Matthew 1, which the fixture has
     not, keeps its placeholder; the server stays off). 442–443 use the iPhone's voice with
@@ -9390,7 +9391,12 @@ Where the build differs from the text above, and why:
     - The plans group's 148 (the authorization alert, last) now shows the Chronological's
       days (the first plan followed then); 150 opens day 2 of Bible in a Year in the day's
       reader as the reminder did (a reminder now opens a plan's today).
-15. **Earlier plan shots:** 144 and 145 read Genesis in the reader by the demo's dwell hook,
+15. **A day's labels name a book once** for passages of it in a row (review s16-1, Minor 2):
+    "Genesis 8–9; 11:1–9; 10", "Psalms 22; 16; 118; 110; 2 Samuel 8; 1 Chronicles 18" (a lone
+    psalm before more psalms is "Psalms 22"), wherever a day is labelled (Go To, Reading
+    Plans, a plan's days, the end's Next, the reminder, VoiceOver's); a passage's own label
+    (the title, its heading, Mark Read) names it whole.
+16. **Earlier plan shots:** 144 and 145 read Genesis in the reader by the demo's dwell hook,
     which no longer marks a plan (decision 7): 144 shows no half circle and 145 no Day Done
     toast. Starting a plan (143, 149b, 182) brings up its day 1 in the day's reader.
 

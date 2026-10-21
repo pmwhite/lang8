@@ -39,7 +39,7 @@
 #           (plans-transitions.mp4); Versions and Acknowledgements
 #           popped before a theme's change (1.0 (11)'s crash), checked;
 #           and §16's day's reader (DESIGN.md §16.8, shots 430 to 454, the
-#           Chronological followed, day 114 today, with the ESV's fixture):
+#           Chronological followed, day 122 today, with the ESV's fixture):
 #           opened from Go To, its passages, Mark Read, its end, Next, the
 #           tray, a reference left and come back to, Listen through it,
 #           M'Cheyne's Calendar, a passage begun mid-chapter, the reminder,
@@ -786,7 +786,7 @@ plans)
   kill -INT "$recorder" 2>/dev/null
   wait "$recorder" 2>/dev/null
   # §16, the day's reader (DESIGN.md §16.8): shots 430 to 454, the
-  # Chronological followed from 113 days before (day 114 today).
+  # Chronological followed from 121 days before (day 122 today).
   step 480 "" 8
   step 481 430-plans-list 8
   step 482 431-chrono-detail 6
@@ -857,10 +857,10 @@ plans)
   # The day's reader's log, checked (days.txt).
   cat "$out/console.txt" "$out/console-again.txt" 2>/dev/null | grep -a "bible: day \|bible: demo chronological\|bible: left the day\|bible: ribbon \|bible: 1.0 day state\|bible: sequence 21\|bible: started\|bible: plans migrated\|bible: reminder first\|bible: also today\|bible: plan started\|bible: plan archived" > "$out/days.txt"
   cat "$out/days.txt"
-  for want in "bible: demo chronological, today day 114" "bible: day open 6 114" "bible: day title " \
-    "bible: day passage read .* (by hand)" "bible: day marked read 114" "bible: day replaced 6 115" \
+  for want in "bible: demo chronological, today day 122" "bible: day open 6 122" "bible: day title " \
+    "bible: day passage read .* (by hand)" "bible: day marked read 122" "bible: day replaced 6 123" \
     "bible: left the day for .*, the capsule to its day" "bible: day passage heard " "bible: day passage read .* (by itself)" \
-    "bible: day replaced 6 102" "bible: day esv rows filled" "bible: 1.0 day state x10 11" "bible: 1.0 day state x10 22" \
+    "bible: day replaced 6 109" "bible: day esv rows filled" "bible: 1.0 day state x10 11" "bible: 1.0 day state x10 22" \
     "bible: 1.0 day state x10 31" "bible: ribbon unmoved by the day, the reader where it was" "bible: day reopened at launch" \
     "bible: sequence 21 part 5" "bible: plans migrated 1" "bible: day also today, plan 5" \
     "bible: also today from the Chronological 1" "bible: reminder first: Today’s Reading | Chronological: "; do

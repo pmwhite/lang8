@@ -25,17 +25,17 @@ end at block boundaries. A day may read at most 6 passages (consecutive
 passages contiguous in one book are one) and at most 2.2 times the mean.
 
 Within those limits the days' ends are chosen together to make the days as
-even as they can be (the least sum of the squares of their lengths, by
-dynamic programming over the blocks). Without the limits that is about the
-same as ending day d at the block boundary nearest total*d/365, §16.4.4's
-rule; with them it differs, because the Gospels, read side by side, fill a
-day's 6 passages with a fraction of a day's reading (the Passion's sections
-are four short passages each), so their 39 days of text take nearly 70.
-Ending each day at the nearest boundary that keeps both limits falls behind
-through the Gospels and can't catch up: its days after them run near 2.2
-times the mean, and its last day is nearly ten. This spreads the difference
-over the year instead, every other day reading a little more. If no choice
-keeps every day within both limits, it says so and exits 1.
+even as they can be (each day's distance from the mean: the least sum of the
+squares of their lengths, by dynamic programming over the blocks, each block
+kept whole). A day of the Gospels reads its sections a Gospel at a time:
+Matthew's parts of them, then Mark's, Luke's and John's, each in the
+harmony's order and run together where they follow on (day_spans), so that a
+day of several sections is four passages or so rather than four a section,
+and the Gospels' 39 days' mean of words take about 40 days (review s16-1,
+Minor 1; read a section at a time, 6 passages a day held them to 69 short
+days). A day can still be short where the harmony takes two Gospels out of
+their own order, so that no neighbour joins it within 6 passages (day 311,
+the foretelling of Peter's denial, between the supper's two parts).
 
 It writes DATA/plans/chrono.txt (§16.4.2's format) and prints a summary
 (blocks, verses, characters, the mean day, the longest and shortest days,
@@ -155,6 +155,31 @@ def merge(spans, bible):
     return out
 
 
+GOSPELS = ("MAT", "MRK", "LUK", "JHN")
+
+
+def day_spans(blocks, bible):
+    """A day's passages from its blocks, in order: the Gospels' parallels of
+    its sections read a Gospel at a time (Matthew's parts of the day's
+    sections, then Mark's, Luke's, John's, each in the harmony's order, run
+    together where they follow on), then contiguous passages in one book
+    made one."""
+    out, run = [], []
+
+    def flush():
+        for book in GOSPELS:
+            out.extend(s for s in run if bible.refs[s[0]][0] == book)
+        run.clear()
+    for _, spans in blocks:
+        if all(bible.refs[a][0] in GOSPELS for a, b in spans):
+            run.extend(spans)
+        else:
+            flush()
+            out.extend(spans)
+    flush()
+    return merge(out, bible)
+
+
 def read_order(path, bible):
     """The order's blocks, each a list of spans, and a list of problems."""
     blocks, bad = [], []
@@ -220,17 +245,18 @@ def balance(blocks, bible, total):
     cum = [0]
     for _, spans in blocks:
         cum.append(cum[-1] + sum(bible.size(a, b) for a, b in spans))
-    # joins[k]: block k's first span continues block k-1's last (one passage).
-    joins = [False] + [len(merge([blocks[k - 1][1][-1], blocks[k][1][0]], bible)) == 1
-                       for k in range(1, nb)]
-    # reach[i]: the ends j > i a day starting at boundary i may have.
+    # reach[i]: the ends j > i a day starting at boundary i may have (its
+    # passages counted as day_spans reads them).
     reach = []
     for i in range(nb):
-        ends, count = [], 0
+        ends = []
         for j in range(i + 1, nb + 1):
-            count += len(blocks[j - 1][1]) - (1 if j - 1 > i and joins[j - 1] else 0)
-            if count > MOST or (cum[j] - cum[i] > LONGEST * mean and j > i + 1):
+            if cum[j] - cum[i] > LONGEST * mean and j > i + 1:
                 break
+            if len(day_spans(blocks[i:j], bible)) > MOST:
+                if j > i + 1 and len(day_spans(blocks[i:j], bible)) > MOST + 8:
+                    break
+                continue
             ends.append(j)
         reach.append(ends)
     # Each day's cost is its length squared (the total is fixed, so that is the
@@ -277,7 +303,7 @@ def make_days(data):
         return None, [why]
     days, start = [], 0
     for end in ends:
-        days.append(merge([s for _, spans in pieces[start:end] for s in spans], bible))
+        days.append(day_spans(pieces[start:end], bible))
         start = end
     sizes = [sum(bible.size(a, b) for a, b in day) for day in days]
     over = [d + 1 for d in range(DAYS) if sizes[d] > LONGEST * mean]
