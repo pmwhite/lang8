@@ -223,3 +223,20 @@ On a Mac in Safari and Firefox:
 - the same scroll;
 - the settings popover;
 - printing a chapter.
+
+## H. Addendum (2026-10-20): what the owner's two later decisions change here
+
+- **The scroll position is never written to make up for content** (§W3.3 rewritten as a
+  height table). M1's cause is gone. Its rule stays: the app's own writes never count as
+  reading.
+- **No prerendered pages** (§W1.8 rewritten; the shell for every path, the first paint
+  from the place's book):
+  - **Moot:** M2 (there's no book index page); the ruling on the divider above a
+    prerendered page's first chapter; the checks "adopted with no pixel changed" and
+    "the text without scripts"; the old-browser line at a chapter's end (now one line in
+    an empty page).
+  - **Still standing:** M3 (the opaque bar); m1 and m3–m8; m2 for print, where the notes'
+    list is still shown; the rulings on Psalm 1's order, footnote ids, slugs, the hidden
+    Search icon, the print check, the CI trigger and About.
+  - **Question 1 (the Worker):** §W2.1a now answers every reader path with the shell, its
+    title filled per path, and `noindex` on everything under `/read/`.

@@ -70,16 +70,14 @@ them.
    requests except the audio hosts while listening (§W7.1), no cookies.
 8. **Calm, not casino** (the owner's rule, everywhere): no streaks, badges, counts to
    chase, install nags, update banners, "rate us", or attention-seeking motion.
-9. **It works offline once visited** (phase f), and reads without JavaScript at all
-   (§W1.8), because a Bible page should never be blank.
+9. **It works offline once visited** (phase f).
 
 ### A visit, start to finish (what the design adds up to)
 
 A friend sends a link: `smoothbible.com/read/bsb/john/3#16`. On her phone the page shows
-John 3 at once, in the iPhone app's paper colour and serif type, verse 16 a third of the
-way down with a faint wash that fades; the bar above reads "John 3". It's an ordinary web
-page so far, and it would read the same with scripts off. A moment later, unseen, the app
-has taken the page over: she scrolls, and John 4 follows without a break, the bar tucking
+John 3 within a second, in the iPhone app's paper colour and serif type, verse 16 a third
+of the way down with a faint wash that fades; the bar above reads "John 3". She scrolls,
+and John 4 follows without a break, the bar tucking
 itself into a small "John 4" while the address bar says `/read/bsb/john/4`. She taps
 verse 24; it takes a dotted wash and a tray rises from the bottom with its reference,
 five colours and Copy, Share, Bookmark, Note, Study, Compare and Memorize. She picks
@@ -134,11 +132,9 @@ the point of a reading app on the web.
 **What the browser must support** (the floor): WebAssembly with the exception-handling
 proposal's `try_table` form (L8's wasm uses it), `DecompressionStream`, `<dialog>`, the
 `popover` attribute, IndexedDB, ES modules. That is **Safari 18.4** (iOS and macOS),
-**Chrome and Edge 137**, **Firefox 131**, or later. On an older browser the prerendered
-page still reads and its links work (§W1.8); the boot script tests support with
-`WebAssembly.validate` on a 30-byte module using `try_table` and, failing it, leaves the
-page as a plain website with one faint line at the end of the chapter: "This browser can
-show the text but not the reader's tools. A newer browser has them." No banner.
+**Chrome and Edge 137**, **Firefox 131**, or later. The boot script tests support with
+`WebAssembly.validate` on a 30-byte module using `try_table`; on an older browser the page
+says so in one plain line (§W1.8).
 
 ### W1.2 What is shared, and what is new
 
@@ -152,7 +148,7 @@ show the text but not the reader's tools. A newer browser has them." No banner.
 | The web UI | `programs/bible/web.l8` (begun) and `web_*.l8` | **New** (about the size of the iPhone's UI less UIKit's ceremony; an estimate of 12–18 thousand lines over all phases) |
 | The bridge | `programs/web/dom.l8` and `web/dom.js` | **Built** (9befcaab), general; small additions per phase (§W1.3) |
 | Styles, page template, Service Worker, manifest, icons | `web/bible/` | **New** |
-| The prerenderer | `programs/bible/prerender.l8` (native, build time) | **New** (§W1.8) |
+| The sizes table's tool | `programs/bible/tools/sizes.l8` (native, build time) | **New** (§W1.8); `prerender.l8` is deleted |
 | The Worker | `programs/bible/worker/` | Two small changes: serving `/read/` (§W2.1) and the web's share of the ESV budget (§W12.6) |
 
 **Moving shared screen logic.** When a web screen needs logic the iPhone keeps inside an
@@ -217,10 +213,8 @@ builder's to choose):
 ### W1.4 How screens are made: L8 writes the text as HTML; screens as the builder finds best
 
 - **The Bible's text is HTML written by `html.l8`** (§W1.5), set with `dom_set_html`
-  (or the `_of` form, straight from L8's buffer). It has to be a string because the
-  prerendered pages (§W1.8) are the same markup written to files, and the app must adopt
-  them unchanged. The same goes for anything else that is also a static page: the book
-  index, the manual (§W14.4), the About page.
+  (or the `_of` form, straight from L8's buffer): one string per chapter, which the
+  window (§W3.3) adds and removes whole.
 - **Screens may be built either way:** node by node with handles, or a list's HTML in one
   string. The builder chooses per screen. Where a screen's rows are written as HTML, their
   buttons say what they do in attributes (`data-act="goto.book" data-arg="43"`) and one
@@ -258,8 +252,7 @@ builder's to choose):
 `html.l8` turns what `text.l8` already produces into HTML: `layout_chapter(c)` fills `out`
 with runs (`run_style`, `run_para`, `run_arg`, `run_end`) and the verse table
 (`verse_num`, `verse_shown`, `verse_begin`, `verse_end`). `html_chapter(c)` writes one
-chapter as an `<article>`; the same function serves the browser and the prerenderer
-(§W1.8), so the two are byte-identical.
+chapter as an `<article>`.
 
 **The markup** (classes are short; this is the contract between `html.l8` and the CSS):
 
@@ -304,12 +297,11 @@ chapter as an `<article>`; the same function serves the browser and the prerende
   number reads as its number). Their visibility follows the settings by CSS (§W1.6),
   not by re-rendering.
 - **The footnotes** are also listed at the chapter's end in `ol.fns`, which CSS shows only
-  in print and when the app isn't running (§W1.8); a mark is a real link to its note, so
-  without JavaScript it still works.
+  in print, each led by its mark's letter and reference ("a  John 3:3 Or born from
+  above…"; REVIEW-web-a1 m2).
 - **Marks** are classes and two small inline elements. `html_chapter` takes the
-  chapter's marks and writes them into the HTML of every chapter the app adds; on an
-  adopted prerendered chapter the app adds them with `dom_class_all` in the same task as
-  it adopts it (§W3.3). They are: `hl-yellow` …
+  chapter's marks and writes them into the HTML of every chapter the app adds; a mark
+  made while reading is added with `dom_class_all`. They are: `hl-yellow` …
   `hl-purple` on a highlighted verse's spans; `hj` on a verse whose highlight runs on into
   the next one in the same colour (it paints the space between them, so a run of verses is
   one wash, §3.3.4); `bm` on a bookmarked verse (CSS puts the bookmark glyph before its
@@ -456,41 +448,77 @@ own (§11.2.6), its path redrawn as SVG. Each §2.6 row maps:
 `help.l8`'s `{sym:name}` takes the SF name; the web maps it with this table (a test fails on
 a name with no web icon, §W14.4).
 
-### W1.8 Prerendered pages, and adopting them
+### W1.8 No prerendered pages: one shell, and the place's book first (owner, 2026-10-20)
 
-**Every chapter of every bundled version is a static HTML page, made at build time by the
-same `html.l8`** (5 versions × 1,189 chapters = 5,945 files, about 12 KB each before
-compression), plus a book index per version (`/read/bsb/`). Decided because:
-1. **The first paint is the text.** A shared link to John 3 on a phone shows John 3 as soon
-   as about 15 KB of HTML and CSS arrive, before any wasm or Bible text loads (§W13).
-2. **Search engines and link previews** see real chapters with titles and descriptions.
-3. **It reads without JavaScript**, on an old browser, or while the app is still loading:
-   a plain, accessible, printable website with working links (each chapter's previous and
-   next chapter, and the book index).
-4. **It costs nothing at run time:** static files from the Worker's assets, no server
-   rendering, no CPU limits.
+The owner, 2026-10-20: "the static page thing isn't too important, and seems a little error
+prone. It's not like we need search engines to index the Bible one more time." So there
+are **no prerendered chapter pages, no takeover of a static page, and no reading without
+JavaScript.** (This replaces the first design's prerendered pages, prerenderer and
+adoption.)
 
-The ESV is never prerendered (§W12.6): its pages are the app's shell, drawn in the browser.
+**Every path under `/read/` is answered by the Worker with the same app shell**
+(`read/shell.html`), with the page's title filled in (§W2.1a). The only exception is the
+About page (`/read/about`), which is a hand-written static page with no Bible text in it
+(§W12.8). The shell holds:
+- the boot script (inline, §W3.2);
+- the stylesheet link;
+- the bar, with its title already set to the place's name by the Worker;
+- an empty `<main>`;
+- `<noscript>`, saying: "Smooth Bible needs JavaScript to show the Bible.";
+- the credit line.
 
-**The prerenderer** (`programs/bible/prerender.l8`) is a native L8 program run by `make bible-web`:
-it loads each version with `text_load`, calls `html_chapter` for each chapter, and fills
-the page template (`web/bible/page.html`) with the chapter's title, description, canonical
-link and neighbours' links. It writes `.build/bible-site/read/<v>/<book>/<n>.html`.
+On a browser below the floor (§W1.1), the boot script puts one plain line in `<main>`:
+"Smooth Bible needs a newer browser: Safari 18.4, Chrome 137 or Firefox 131, or later."
 
-**What a prerendered page holds:** the boot script (inline, about 1 KB, §W3.2), the
-stylesheet link, the bar as links (the title links to the book index, the search icon to
-`/read/search`, Library and Aa as buttons that do nothing until the app starts and are
-hidden until then), the chapter's `<article>` with every verse number, heading and
-footnote mark present (the settings hide them by CSS), a pager ("‹ John 2 · John 4 ›",
-real links), and the credit line ("Berean Standard Bible · Public Domain · About").
+**First paint: the place's book, not the whole version.** The whole version is 1.3–1.45 MB
+gzipped, too much to wait for. So each version is also served **book by book**:
+- **The files:**
+  - `read/data/<D>/<v>/<book>.gz`: exactly that book's lines of the version file. Psalms
+    is the largest at 88 KB gzipped, John is 37 KB and 2 John 1 KB.
+  - `read/data/<D>/<v>.sizes.gz`: a table of each chapter's measures (characters,
+    paragraphs, poetry and list lines, headings), about 6 KB, written at build time by a
+    small native L8 tool, `tools/sizes.l8`, from `layout_chapter`.
+  - `<D>` is the data's hash, given to the page in `<meta name="sb-data">`, so these
+    names are immutable without a manifest.
+- **What the boot script starts at once,** before any other script runs, all in
+  parallel:
+  - it reads the path and maps the book's slug to its code (a 66-entry table in
+    `boot.js`);
+  - it fetches that book's file, the sizes table, the CSS (already in the head) and the
+    wasm, and leaves the fetches on `window.sbFirst` for the app.
+- **`text.l8` gains `text_load_book(t, book, buf, n)`:**
+  - text t then holds one book, with **chapter keys that are global** (0–1,188, the same
+    as with the whole version) and every other book's chapters absent;
+  - the app lays out and shows the place's chapter from it, and the window (§W3.3) works
+    within that book;
+  - tested in `test_text.l8`: John 3's layout and keys are the same from the book as from
+    the whole version.
+- **The whole version is fetched next,** at low priority, as soon as the first chapter is
+  on screen.
+  - When it arrives, `text_load` replaces the single book. The keys don't change, and
+    nothing in the DOM is redrawn.
+  - Until then, the window may reach the book's end. The neighbouring book's file is
+    fetched when the reading line is within three screens of it. Search (b) and other
+    versions wait for the whole text, showing "Getting the Berean Standard Bible…".
+- **The height table before the whole text** (§W3.3 item 2) is estimated from the sizes
+  table. That is nearly as good as from the runs, because it carries the same measures.
+  - When the whole text arrives, the estimates are refined, and every refinement follows
+    §W3.3 item 3: the anchor never moves.
+  - `pos[0]`'s slack starts at 5% of the estimated height above the place, plus one
+    screen.
+- **The budget** (§W13), on the CI's 4G profile:
+  - First visit: **text on screen ≤ 1.5 s**. The worst first paint carries about 140 KB:
+    shell 3, CSS 5, scripts 10, wasm 26, Psalms 88, sizes 6.
+  - Slow 4G (report-only): ≤ 3 s.
+  - A second visit (HTTP cache) ≤ 0.8 s.
+  - The whole text's arrival is not budgeted. Nothing a reader starts with waits for it.
 
-**Adopting.** When the app starts on a prerendered page it doesn't redraw the chapter: it
-knows the markup is exactly what `html_chapter` would write for this chapter with the
-default layout, so it takes the `<article>` as its own, adds marks by class, hides the
-pager and the footnote list, and starts loading the neighbouring chapters (§W3.3). The
-only exception is verse-per-line, which re-renders the chapter at once, keeping the
-place (§W3.5). The `html` element gets class `app` when the app has taken over; the CSS
-shows Library, Aa and the reader's tools only under `.app`.
+**What a fragment does:** `#16` is applied by the app when it first places the chapter
+(verse 16 a third of the way down, flashed). There's no earlier placement to do.
+
+**Go To in (a).** Without book index pages, phase (a) needs a way to go to a chapter. The
+title opens a first Go To: the books with their chapters (§W5.2's list, without the
+field, Recent or the tip), which (b) completes.
 
 ### W1.9 Files and building
 
@@ -504,9 +532,10 @@ keeps those places:
 | `programs/bible/web.l8` | `main`: boot, routing, the events' dispatch, settings |
 | `programs/bible/web_reader.l8` | The page, the window of chapters, the bar, the place, footnotes |
 | `programs/bible/web_*.l8` | One per feature, as phases add them: `goto`, `search`, `tray`, `library`, `note`, `settings`, `versions`, `esv`, `compare`, `ribbons`, `plans`, `day`, `listen`, `study`, `memory`, `practice`, `learn`, `help`, `backup` |
-| `programs/bible/prerender.l8` | Build-time pages (§W1.8) |
+| `programs/bible/tools/sizes.l8` | The chapters' measures for first paint (§W1.8) |
 | `web/bible/bible.js` | Starts the module (begun) |
-| `web/bible/page.html` | The page template (prerendered chapters and the shell) |
+| `web/bible/page.html` | The shell (§W1.8) |
+| `web/bible/about.html` | The About page, static (§W12.8) |
 | `web/bible/read.css` | §W1.6 |
 | `web/bible/icons.svg` | The sprite (§W1.7) |
 | `web/bible/sw.js`, `manifest.webmanifest` | Phase f |
@@ -514,10 +543,10 @@ keeps those places:
 | `web/bible/test/` | The CDP driver and the shot list (§W14) |
 
 `make bible-web` (begun; it builds `.build/bible-web` today) grows to build the whole site to deploy, in `.build/bible-site/`: a copy of `programs/bible/site/` (the
-marketing pages, unchanged) plus `read/`: the shell (`read/shell.html`), the prerendered
-pages, `read/app.<hash>.wasm`, `read/bible.<hash>.js`, `read/dom.<hash>.js`, `read/read.<hash>.css`,
-`read/icons.<hash>.svg`, `read/data/<name>.<hash>.gz` (§W12.1), `read/sw.js`,
-`read/manifest.webmanifest`, `robots.txt` and `sitemap.xml`. Hashed names are cached
+marketing pages, unchanged) plus `read/`: the shell (`read/shell.html`), `read/about`,
+`read/app.<hash>.wasm`, `read/bible.<hash>.js`, `read/dom.<hash>.js`, `read/read.<hash>.css`,
+`read/icons.<hash>.svg`, `read/data/<D>/…` (§W1.8, §W12.1), `read/sw.js`,
+`read/manifest.webmanifest`, and `robots.txt`. Hashed names are cached
 forever (`Cache-Control: public, max-age=31536000, immutable`, set by the Worker); the
 HTML is revalidated. The Worker's `[assets] directory` becomes `../../../.build/bible-site`
 (deploying stays the owner's step, as README's).
@@ -554,13 +583,25 @@ the web builder; deploying it is the owner's step.
    - `/read` → `301` to `/read/`.
    - A path starting `/read/` → `read(request, env, url)`:
      1. `r = await env.ASSETS.fetch(request)`.
-     2. If `r.status === 404` and the path matches `READER`, answer
-        `env.ASSETS.fetch(new Request(new URL("/read/shell", url), request))` with
-        status 200 and `X-Robots-Tag: noindex`.
-     3. Otherwise `r` as it is (a page, a file, or the site's 404 page with status 404).
-   - `READER = /^\/read\/(?:(?:bsb|kjv|web|asv|ylt|esv)(?:\/[a-z0-9-]+(?:\/\d{1,3})?)?\/?|search|plans\/[a-z0-9-]+\/\d{1,3}|manual(?:\/[a-z0-9-]+)?|[A-Za-z0-9.:%-]{1,40})$/`:
-     a version's chapter or book, search, a plan's day, the manual, or one short
-     passage-like segment (`/read/jn3%3A16`) for the app to make canonical.
+     2. If `r.status === 404` and the path matches `READER`, answer the shell
+        (`env.ASSETS.fetch(new Request(new URL("/read/shell", url), request))`) with
+        status 200, its head filled for the path (below). After the amendment of
+        2026-10-20 (no prerendered pages, §W1.8) this is how **every** reader path is
+        answered; only files, the shell itself and `/read/about` exist as assets.
+     3. Otherwise `r` as it is (a file, the About page, or the site's 404 page with status
+        404).
+   - `READER = /^\/read\/(?:(?:bsb|kjv|web|asv|ylt|esv)(?:\/[a-z0-9-]+(?:\/\d{1,3})?)?\/?|search|plans\/[a-z0-9-]+\/\d{1,3}|manual(?:\/[a-z0-9-]+)?|[A-Za-z0-9.:%-]{1,40})?$/`:
+     `/read/` itself, a version's chapter or book, search, a plan's day, the manual, or
+     one short passage-like segment (`/read/jn3%3A16`) for the app to make canonical.
+   - **The shell's head, per path,** with `HTMLRewriter` (no Bible text, no other
+     reading of data): for `/read/<v>/<book>/<n>`, `<title>` "John 3 · BSB · Smooth
+     Bible", `og:title` "John 3 · Smooth Bible", `og:description` "John 3 in the Berean
+     Standard Bible.", `og:url` the address; and the bar's title text "John 3" (so the
+     first frame names the place). The names come from a table of the 66 slugs and names
+     and the six versions' names in `worker/books.js`, made from `versecounts.js`'s
+     `BOOKS` and the BSB's names. Anything else: "Smooth Bible", no description. Psalms'
+     chapters read "Psalm 23".
+   - **`X-Robots-Tag: noindex`** on every answer under `/read/` (§W2.5).
 2. **Headers** on every `/read/` answer (copied into a new `Response`; a 304 keeps them
    too):
    - All: `X-Content-Type-Options: nosniff`, `Referrer-Policy:
@@ -587,8 +628,10 @@ the web builder; deploying it is the owner's step.
    copies `programs/bible/site/` into it, leaving out `DESIGN.md`.
 5. **`test.mjs` cases** (with an `ASSETS` stand-in as `serve.mjs` has):
    - `/read` gives 301;
-   - `/read/bsb/john/3` gives the page with the CSP and `must-revalidate`;
-   - `/read/esv/john/3` and `/read/kjv/ps/23` give the shell, 200 and `noindex`;
+   - the shell carries the CSP and `must-revalidate`;
+   - `/read/bsb/john/3`, `/read/esv/john/3` and `/read/kjv/ps/23` give the shell, 200,
+     `noindex`, with the titles above (`kjv/ps/23`: "Smooth Bible", since `ps` isn't a
+     slug; the app makes it canonical);
    - `/read/a/b/c/d` gives 404;
    - a hashed `.wasm` is `immutable`;
    - `/` and `/api/v1/status` are unchanged.
@@ -611,17 +654,20 @@ the web builder; deploying it is the owner's step.
 
 | URL | What | Made by |
 |---|---|---|
-| `/read/` | Your place (or Genesis 1 in the BSB the first time): the boot script replaces the URL with the place's before the first paint | The shell; without JavaScript, the BSB's book index |
-| `/read/bsb/john/3` | John 3 in the BSB | Prerendered |
-| `/read/bsb/john/3#16` | John 3, scrolled to verse 16 one third down, flashed (§4.4) | Prerendered page; the boot script scrolls before the app starts |
-| `/read/bsb/john/3#16-18` | A range, the first verse placed, the range flashed | As above |
-| `/read/kjv/…`, `/read/web/…`, `/read/asv/…`, `/read/ylt/…` | The other bundled versions | Prerendered |
-| `/read/esv/john/3` | The ESV, drawn from the API | The shell, `noindex` (§W12.6) |
-| `/read/bsb/` | The version's books, each with its chapters as links | Prerendered |
-| `/read/search?q=born+again` | Search, its query in the URL so a search can be shared and Back returns to it | The shell (phase b) |
-| `/read/plans/mcheyne/32` | A plan's day in the day reader (§16, phase c) | The shell |
-| `/read/manual/`, `/read/manual/ribbons` | The manual (§15), as pages | Prerendered from `help.txt` (phase c) |
-| `/read/about` | Acknowledgements, the ESV's copyright page, credits, Privacy link (§W12.8) | Prerendered |
+Every one is the shell (§W1.8), with its title set by the Worker, except `/read/about`:
+
+| URL | What |
+|---|---|
+| `/read/` | Your place (or Genesis 1 in the BSB the first time): the boot script replaces the URL with the place's before the first paint |
+| `/read/bsb/john/3` | John 3 in the BSB |
+| `/read/bsb/john/3#16` | John 3, verse 16 one third down, flashed (§4.4) |
+| `/read/bsb/john/3#16-18` | A range, the first verse placed, the range flashed |
+| `/read/kjv/…`, `/read/web/…`, `/read/asv/…`, `/read/ylt/…`, `/read/esv/…` | The other versions |
+| `/read/bsb/` | Go To opened over the version's Genesis 1 (or the place, if in this version) |
+| `/read/search?q=born+again` | Search, its query in the URL so a search can be shared and Back returns to it (phase b) |
+| `/read/plans/mcheyne/32` | A plan's day in the day reader (§16, phase c) |
+| `/read/manual/`, `/read/manual/ribbons` | The manual (§15) opened in its dialog over the place (phase c) |
+| `/read/about` | Acknowledgements, the ESV's copyright page, credits, Privacy link (§W12.8): a static page |
 
 - **Book names** are the BSB's names in lower case with hyphens: `genesis`, `1-samuel`,
   `song-of-solomon`, `psalms`, `1-john`, `revelation` (REVIEW-web-a1). A one-chapter book still has `/1`
@@ -669,12 +715,10 @@ the web builder; deploying it is the owner's step.
 
 - The tray's Share and Copy (phase b) include the link: `https://smoothbible.com/read/bsb/john/3#16`
   after the text and reference (§3.3.6), on its own line.
-- **Each prerendered page's head:** `<title>`; `<meta name="description">` with the
-  chapter's first verse; `<link rel="canonical">`; Open Graph `og:title` ("John 3 ·
-  Berean Standard Bible"), `og:description` (its first verse), `og:url`, `og:image` (the
-  icon), `og:site_name` "Smooth Bible". A verse link's preview names the chapter. (A
-  preview with the verse itself would need the Worker to read the text: deferred,
-  §W15.2.)
+- **The shell's head, filled by the Worker per path** (§W2.1a): `<title>` "John 3 · BSB ·
+  Smooth Bible"; `og:title` "John 3 · Smooth Bible"; `og:description` "John 3 in the
+  Berean Standard Bible."; `og:url`; `og:image` the icon; `og:site_name` "Smooth Bible".
+  No verse text. A path that isn't a passage gets "Smooth Bible" and no description.
 
 ### W2.5 The marketing site
 
@@ -687,9 +731,10 @@ the web builder; deploying it is the owner's step.
   pages. The reading app is a separate thing that lives under `/read/`.
 - The privacy policy is broad and needs no change for the web (it already covers "the app
   and site"); §W16 question 7 asks the owner to confirm.
-- `robots.txt`: allow `/read/`; disallow `/read/esv/`, `/read/search` and `/api/`.
-  `sitemap.xml`: the home page, the five versions' book indexes and chapters, the manual.
-  The ESV is in neither.
+- **Nothing under `/read/` is indexed:** every answer there carries `X-Robots-Tag:
+  noindex`. `robots.txt` doesn't disallow `/read/`, because a crawler has to fetch a page
+  to see its `noindex`, and link previews need it. It disallows `/api/`. There's no
+  sitemap for the app.
 
 ---
 
@@ -697,14 +742,16 @@ the web builder; deploying it is the owner's step.
 
 **What it is:** the whole Bible in the five bundled versions as a continuous page with the
 iPhone's typography, themes and settings, at every width, with URLs, the place kept, the
-bar, footnotes, and the prerendered pages. **Worth having alone:** it is already a better
-way to read the Bible on the web than most, and links to it can be shared. Navigation in
-(a) is the book index pages and the chapter keys; Go To comes in (b).
+bar, footnotes, and the first paint from the place's book (§W1.8). **Worth having alone:**
+it is already a better way to read the Bible on the web than most, and links to it can be
+shared. Navigation in (a) is a first Go To (books and chapters, §W1.8) and the chapter
+keys; Go To is completed in (b).
 
 ### W3.1 In phase (a)
-1. The bridge and `web.l8`'s start (§W1.3); the boot script; adopting a prerendered page
-   (§W1.8).
-2. `html.l8` and `test_html.l8`; the prerenderer; the book index pages; `make bible-web`.
+1. The bridge and `web.l8`'s start (§W1.3); the boot script; the shell; the first paint
+   from the place's book (§W1.8).
+2. `html.l8` and `test_html.l8`; the per-book files, `tools/sizes.l8` and
+   `text_load_book`; the first Go To; `make bible-web`.
 3. The reader: the window of chapters and continuous scroll (§W3.3); the bar and its
    collapse (§W3.4); the title naming the chapter (§0.5 item 1); the place (§W3.5).
 4. Footnotes (§W3.6), with their references plain (previews are phase b).
@@ -774,9 +821,8 @@ way to read the Bible on the web than most, and links to it can be shared. Navig
 4. Tests WebAssembly support (§W1.1), then loads the app as a module, its hashed name read
    from `<meta name="sb-app">` so the script itself never changes between builds
    (§W2.1a).
-5. A fragment (`#16`): once the article is parsed, scrolls verse 16 to one third down the
-   space under the bar and adds `flash` (§2.7), so a shared verse link lands right even
-   before the app has started.
+5. Starts the first paint's fetches: the place's book, the sizes table and the wasm
+   (§W1.8).
 
 ### W3.3 Continuous scroll: the Bible laid out by a height table (amended 2026-10-20)
 
@@ -853,7 +899,7 @@ it is.**
      its text arrives over them.
 6. **When the scroll position is written,** and only then. Each time, the place
    (chapter, verse, fraction) is placed at the reading line in the same frame:
-   1. **Adoption**, once (below).
+   1. **The first placement** of the place's chapter, once (below).
    2. **A jump:** Go To, a link, `]` `[`, Back and Forward, Home.
    3. **A relayout** after a resize or rotation, a settings change, a version change, or
       fonts loading. The table is re-estimated, the anchor is kept, and the write waits
@@ -868,13 +914,10 @@ it is.**
 
    The bridge logs every write with its reason (`scroll write: jump`). Any write during a
    touch, a drag or momentum is a defect, and the CI fails on one.
-7. **Adopting the prerendered page without a pixel moving:**
-   - the app builds the table (the adopted chapter's height measured at once) and the
-     spacer;
-   - in one frame it moves the static article to `top: pos[c]` and sets the scroll so the
-     article stays exactly where it was on screen;
-   - it waits for true rest if the reader is touching or scrolling the static page when
-     the app arrives;
+7. **The first placement:**
+   - the app builds the table from the sizes table (§W1.8), writes the place's chapter,
+     measures it, and sets the scroll so the place sits at the reading line, before the
+     first paint of any text;
    - `pos[0]` starts with slack, 5% of the estimated height above the chapter plus one
      screen, so corrections above never push Genesis 1 below zero.
 8. **The size limit.** Browsers cap an element's height: Firefox about 17.9 million px,
@@ -921,7 +964,9 @@ it is.**
   directions, for 3 s): no frame shows the page's end, the pager or the credit line
   before Revelation, and none shows a strip with neither text nor placeholder.
   Placeholders may show; the shot list gains one mid-fling shot.
-- **Adoption:** no pixel of the text moves (as §W3.9 item 2).
+- **The first paint:** no pixel of the first chapter moves after it first appears (the
+  CI compares the first frame with text against one taken 3 s later, with the whole text
+  arrived in between).
 - **The estimates:** after calibration, the CI logs estimated against measured heights
   for all 1,189 BSB chapters at phone and desktop widths. The mean error must be at most
   2%, the largest at most 6%, and the sum of signed errors above John 3 at most 1.5% of
@@ -935,8 +980,8 @@ it is.**
 
 §3.1.4's behaviour, in CSS transforms:
 - **Expanded:** 44 px (plus the top safe area): Search on the left, the title in the
-  middle ("John 3" with a small chevron, linking to the book index in (a) and opening Go
-  To from (b)), Library and Aa on the right (Library from phase c). 17 px semibold title,
+  middle ("John 3" with a small chevron, opening Go To: its first form in (a), §W1.8,
+  complete from (b)), Library and Aa on the right (Library from phase c). 17 px semibold title,
   icons in ink at 85%, 44 × 44 px targets. A backdrop of the theme's `bg`, **opaque**,
   with no blur (amended in REVIEW-web-a1, M3: at 92% the lines under it stayed legible
   and fought the compact title), and an 18 px fade below it from `bg` to transparent; a
@@ -980,8 +1025,7 @@ it is.**
   the verse's spans' rects and scrolls so the same fraction of the same verse sits at the reading
   line. Restoring is one of §W3.3 item 6's writes, made only when no finger is down and
   nothing has scrolled for 300 ms.
-- On the first paint of a prerendered page the place is the fragment's verse, or the
-  chapter's top.
+- On the first paint the place is the fragment's verse, or the chapter's top.
 
 ### W3.6 Footnotes
 
@@ -1035,12 +1079,12 @@ hides the window's other chapters, and on `afterprint` shows them again. The cre
 prints at the end.
 
 ### W3.9 Phase (a) acceptance
-1. A prerendered John 3 shows its text, styled, with no JavaScript (scripts disabled in
-   the CDP session): headings, poetry indents, small caps, footnote marks linking to the
-   notes at the end, the pager's links working.
-2. With the app, for a reader with no marks: the same page is adopted with no change of any
-   pixel in the text (a screenshot before and after the app starts is identical below the
-   bar, scripted with a hold on the wasm's response).
+1. `/read/bsb/john/3` shows John 3 styled (headings, poetry indents, small caps, footnote
+   marks) from John's file alone, before the whole text arrives (the CI holds the whole
+   text's response); with JavaScript off, the `noscript` line; with WebAssembly off, the
+   newer-browser line.
+2. The first paint: no pixel of the first chapter moves after it appears, as the whole text
+   arrives and the window fills (§W3.3's check).
 3. Scrolling from John 3 to Acts 1 and back by script passes through every chapter with
    the title changing in place, the URL following with `replaceState`, the history length
    unchanged, and no frame where the text jumps (the CI records the verse at the reading
@@ -1071,7 +1115,7 @@ then notes, then language tools) with what a web reader needs first:
 
 | Phase | What | Needs | Specified |
 |---|---|---|---|
-| **(a) The reader alone** | The five bundled versions as a continuous page, prerendered, URLs, the bar, the place, footnotes, settings, print | The bridge, `html.l8` | §W3 |
+| **(a) The reader alone** | The five bundled versions as a continuous page, first paint from the place's book, URLs, the bar, the place, footnotes, settings, print, a first Go To | The bridge, `html.l8` | §W3 |
 | **(b) Navigation, search and versions** | Go To with Recent and the tip row's place reserved, the back capsule, passage previews, History, Search, verse selection and the tray (Copy, Share, Compare), version switching, the ESV, Compare | Storage of history (IndexedDB from here) | §W5 |
 | **(c) Marks, notes and the rest** | Highlights, bookmarks, notes and chapter notes, the Library, export and backup and restore, ribbons, plans and the day reader, the manual and tips, multi-tab safety | §W12.2–§W12.4 | §W6 |
 | **(d) Listen and Study** | Recordings with verse following, the device's voice, the ESV's audio, Media Session, the mini player; Study (Words, References, Commentary), word study, definition, concordance, Study beside the text | The language data (§W12.1) | §W7 |
@@ -1231,7 +1275,7 @@ under reduced motion) and falls when the selection empties.
 
 Everything §9.4 says about the reader under the ESV holds, through the same Worker, with
 these web specifics (the terms are §W12.6):
-- **Not prerendered.** `/read/esv/…` is the shell; the chapter is fetched
+- **Drawn in the browser** like every version; the chapter is fetched
   (`/api/v1/esv/chapters?book=JHN&chapter=3&count=2`, header `X-Smooth-Bible: web
   (<build>)`) and drawn by `html_chapter` as any version once its records are in
   `text.l8` (`esv_build`, as on the iPhone).
@@ -1391,11 +1435,10 @@ New Ribbon…:
 - **The tip** is Go To's first row as §15.1, with Next, More and its action. "Once a day"
   and "skipping what you already do" use the same `help_tip_for(today, state)`; the state
   is the web's own (a highlight made here, a ribbon here…).
-- **The manual** is prerendered as pages, `/read/manual/` (contents) and
-  `/read/manual/<page>` (each of the 12), written by `html.l8` from `help.txt` with the
-  web's paragraphs (§W14.4), searchable by the browser's Find and by search engines. Inside
-  the app, More and Help open the same page in a dialog (the contents, a page, its search
-  field, as §15.3) without leaving the reader; the page's address is shown as a link
+- **The manual** is a dialog (the contents, a page, its search field, as §15.3) written by
+  `html.l8` from `help.txt` with the web's paragraphs (§W14.4), opened by More and Help
+  without leaving the reader; each page has its address (`/read/manual/<page>`), which
+  opens the dialog over the place; the page's address is shown as a link
   "Open in a new tab".
 - **Reading settings' Help section:** Manual, Show Tips (on), Keyboard Shortcuts (the list,
   §W10.1).
@@ -1414,8 +1457,7 @@ New Ribbon…:
 6. A plan started, a day opened by its URL, Mark Read, the page's end, the day's ESV
    passages against the mock, Done and Back returning to the main reader's exact place.
 7. The tip changes once a day (the CI sets the date), skips what is done, and More opens
-   the right manual part; the manual's pages are prerendered and pass the accessibility
-   checks.
+   the right manual part; the manual's pages pass the accessibility checks.
 
 ---
 
@@ -1594,8 +1636,7 @@ the first paint).
   ever after. A version or the language data is never fetched twice.
 - **Navigations under `/read/`** are answered from the cache with the shell, which draws the
   chapter from the cached text: so after one visit every chapter of every version used
-  opens with no network. When the shell isn't cached yet, the network (the prerendered
-  page) answers.
+  opens with no network. When the shell isn't cached yet, the network answers.
 - **Never cached:** `/api/` (the ESV's text and audio addresses), and any recording.
 - **Updates are quiet.** A new build's Service Worker installs in the background and takes
   over the next time the app is opened with no tab of it open (the browser's default). No
@@ -1742,8 +1783,9 @@ kept in L8's memory as on the iPhone.
 |---|---|---|---|
 | The app (wasm), phase a / e | — | about 150 / 350 KB | Every visit (cached) |
 | CSS, scripts, icons | — | about 40 KB | Every visit (cached) |
-| A prerendered chapter page | 8–40 KB | 4–15 KB | The first page |
-| The reader's version text (`bsb.txt` and the others) | 4.4–4.6 MB | 1.3–1.45 MB | After the first paint, at low priority; the app is ready when it arrives |
+| The shell | 6 KB | 3 KB | Every page (revalidated) |
+| The place's book (`<v>/<book>.gz`) and the sizes table | 3 KB–280 KB; 15 KB | 1–88 KB; 6 KB | First paint (§W1.8) |
+| The reader's version text (`bsb.txt` and the others) | 4.4–4.6 MB | 1.3–1.45 MB | Right after the first paint, at low priority |
 | `refs.txt`, `help.txt` | 23 KB | 8 KB | With the text |
 | Other versions | 4.4 MB each | about 1.35 MB each | On choosing one, or the first Compare |
 | Language data (`data/lang/`, Study's Words, word study, Learn) | about 16 MB | about 6.2 MB | First use of Words, word study or a language page |
@@ -1752,10 +1794,8 @@ kept in L8's memory as on the iPhone.
 | Verse timings (`*.tim`, `henson.paths`) | 130 KB each | about 40 KB each | First Listen in that voice |
 | Fonts (only where the device lacks them) | — | 80–90 KB a face pair; Greek and Hebrew about 150 KB | When first drawn |
 
-**If the text makes the app late** on the CI's profile (§W13), the builder splits each
-version by book and loads the reader's book first, so the app is ready with the chapters
-around the place while the rest arrives; `text.l8` already builds a text from parts for
-the ESV (`text_begin`, `text_done`). The split is a measured fallback, not the plan.
+Each version is served both whole and book by book (§W1.8): the book for the first paint,
+the whole for everything after.
 
 ### W12.2 Storage
 
@@ -1863,8 +1903,8 @@ free of charge for non-commercial use"). What they require, and how the design m
 **Search engines and the budget.** The terms' 5,000 queries a day are shared by every
 reader of both apps through one key. The web must not spend them on crawlers or let a
 busy day on the web starve the iPhone:
-- ESV pages are never prerendered, carry `noindex`, are disallowed in `robots.txt` and
-  absent from the sitemap; `/api/` is disallowed.
+- Nothing under `/read/` is indexed (`X-Robots-Tag: noindex`), and `/api/` is disallowed
+  in `robots.txt`.
 - **The Worker gives the web a share** (its one budget change): requests whose
   `X-Smooth-Bible` begins `web ` count in the shared budget as now and also in a web count
   of their own, which stops at **1,500 a day** for text and **1,000** for audio, answering
@@ -1884,7 +1924,7 @@ busy day on the web starve the iPhone:
   `Permissions-Policy: screen-wake-lock=(self), camera=(), microphone=(), geolocation=()`.
 
 ### W12.8 The About page (`/read/about`)
-Prerendered; the web's Acknowledgements (§7.8, §9.8, §12.5):
+A static page, written by hand (`web/bible/about.html`), `noindex`; the web's Acknowledgements (§7.8, §9.8, §12.5):
 1. **Text:** each version's line and link (§9.8).
 2. **English Standard Version** (`#esv`): ESV.org and the notice, verbatim.
 3. **Original languages and lexicons:** STEP Bible's credit as its licence asks ("STEP
@@ -1907,8 +1947,8 @@ reasonable manner" allows.
 
 ## W13. Performance
 
-**Server rendering: yes**, as prerendered static pages (§W1.8): the fastest first paint
-there is, good for search engines, and free at run time.
+**Server rendering: no** (owner, 2026-10-20; §W1.8). The first paint comes from the place's
+book, about 140 KB in all at worst.
 
 **The CI's profile** for budgets: 9 Mbps down, 1.5 Mbps up, 150 ms round trips, the CPU
 slowed 4× (a mid-range phone on good 4G), a cold cache. A second, report-only profile:
@@ -1916,9 +1956,10 @@ slowed 4× (a mid-range phone on good 4G), a cold cache. A second, report-only p
 
 | Measure | Budget (first visit) | Second visit |
 |---|---|---|
-| The text on screen (Largest Contentful Paint: the first paragraph) | ≤ 1.5 s | ≤ 1.0 s (f: from the Service Worker, offline too) |
+| The text on screen (Largest Contentful Paint: the first paragraph) | ≤ 1.5 s (slow 4G, report-only: ≤ 3 s) | ≤ 0.8 s (f: from the Service Worker, offline too) |
 | Layout shift (CLS) | ≤ 0.01 (the text never moves) | the same |
-| The app ready (a verse tap shows the tray) | ≤ 3.5 s | ≤ 1.0 s |
+| The app ready (a verse tap shows the tray; the window works within the book) | ≤ 1.8 s | ≤ 1.0 s |
+| The whole version arrived (Search, other books) | reported, not budgeted | |
 | A chapter added to the window (main-thread task) | ≤ 16 ms; Psalm 119 ≤ 50 ms, at rest | |
 | A search over All | ≤ 50 ms or in a Worker (§W5.4) | |
 | Version switch (text cached) | ≤ 300 ms to the fade back in | |
@@ -1950,8 +1991,8 @@ Compare's five versions 22 MB more. All well inside a phone browser's limits.
   with a plain message.
 - All `test_*.l8` run natively and with `--wasm` (`make bible-test`,
   `make bible-wasm-test`, both in `make check`, as built).
-- The prerender's check: every page made; each parsed by a small checker (Python's
-  `html.parser`: balanced elements, unique ids, every `href` under `/read/` existing).
+- `test_text.l8`: a chapter laid out from its book's file alone has the same keys and
+  layout as from the whole version (§W1.8); `tools/sizes.l8`'s table matches the runs.
 
 ### W14.2 The driver
 `web/bible/test/drive.mjs`: Node, Chrome DevTools Protocol over the global WebSocket (no
@@ -1981,11 +2022,11 @@ Named `w<phase>-<nn>-<what>-<size>-<theme>.png`, pushed by CI to the branch
 to push), with a `RUN.txt` naming the run and commit, as `ci-bible-shots` has.
 
 Per phase, at least:
-- **(a)** John 3 without the app; John 3 adopted; Genesis 1; Psalm 23 and 119; Jude; a
-  chapter boundary mid-scroll with the bar half collapsed; the bar collapsed; the
-  footnote popover; Reading settings open (each section); every theme; verse-per-line;
-  320 px wide at 200% text; the print PDF's first page; the old-browser line (a page with
-  WebAssembly disabled).
+- **(a)** John 3 at its first paint (the whole text held back); Genesis 1; Psalm 23 and
+  119; Jude; a chapter boundary mid-scroll with the bar half collapsed; the bar
+  collapsed; mid-fling with placeholders; the footnote popover; the first Go To; Reading
+  settings open (each section); every theme; verse-per-line; 320 px wide at 200% text;
+  the print PDF's first page; the `noscript` and newer-browser lines.
 - **(b)** Go To empty, with a book open, with a query; the capsule; History; a preview
   (popover and sheet); Search with results, with no results, the ESV row and page; the
   tray with one and several verses; Copy's toast; Versions; the KJV, the ESV loading,
@@ -2020,7 +2061,7 @@ Per phase, at least:
 A job **`web`** in `.github/workflows/bible.yml`, on `ubuntu-latest` (cheap; no Mac),
 run when `programs/bible/**`, `programs/web/**`, `web/**` or the workflow changes:
 1. Build the compiler (as the other Linux job).
-2. `make bible-web` (prerendered site, wasm, data) and the prerender check.
+2. `make bible-web` (the shell, wasm, data whole and by book, the sizes tables).
 3. Unit tests natively and in wasm (already in `make check`; run again only if `check`
    isn't).
 4. `npm ci` in `web/bible/test/`, then the flows and shots of every built phase (about 5
@@ -2089,8 +2130,8 @@ Each is decided above; the owner may overrule.
 5. **Downloaded fonts** where the device lacks the iPhone's (§W1.6): Source Serif 4 and
    Charis SIL (decided), or system fonts only (the site's own rule, which would leave
    Windows and Android with Times-like serifs).
-6. **Prerendering all five versions** (decided) or the BSB alone (fewer files; other
-   versions drawn in the browser).
+6. ~~Prerendering all five versions~~ **Answered by the owner (2026-10-20): no prerendered
+   pages** (§W1.8).
 7. **The privacy policy** stays as it is, covering the web app (decided: it already speaks
    of "the app and site" broadly).
 8. **Restore merges** (decided) rather than replacing everything.
