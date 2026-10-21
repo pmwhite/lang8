@@ -1,0 +1,176 @@
+tag recipes;
+
+use_tag std, skate;
+
+// Fingers (or the mouse). The book follows one finger at a time. What it
+// does is settled once it has moved far enough to tell: up or down, it
+// scrolls the list under it; sideways, it slides between the tabs, or a
+// recipe's page away to the right. A finger that comes up without having
+// moved is a tap, on the button it came down on. A finger coming down on
+// a list that is gliding stops it (and presses nothing).
+const G_NONE: int = 0;
+
+// (Down, not yet moved far enough to tell.)
+const G_WAIT: int = 1;
+
+const G_SCROLL: int = 2;
+
+const G_TABS: int = 3;
+
+const G_PAGE: int = 4;
+
+g_finger: int = -1;
+
+g_mode: int = 0;
+
+g_view: int = 0;
+
+g_x0: f32 = 0.0;
+
+g_y0: f32 = 0.0;
+
+g_x: f32 = 0.0;
+
+g_y: f32 = 0.0;
+
+// How far it went this frame, and how fast it has been going (pixels a
+// second).
+g_dx: f32 = 0.0;
+
+g_dy: f32 = 0.0;
+
+g_vx: f32 = 0.0;
+
+g_vy: f32 = 0.0;
+
+g_last_t: f32 = 0.0;
+
+tabs_held: bool = false;
+
+slop(): f32 {
+    if (touch_ui) return 9.0;
+    4.0
+}
+
+// The list under the fingers: the page's, if it is open.
+view_now(): int {
+    if (page_open || page_t > 0.5) return V_RECIPE;
+    tab
+}
+
+finger_down(b: int, x: f32, y: f32) {
+    if (g_finger >= 0) return;
+    g_finger = b;
+    g_mode = G_WAIT;
+    g_x0 = x;
+    g_y0 = y;
+    g_x = x;
+    g_y = y;
+    g_vx = 0.0;
+    g_vy = 0.0;
+    g_view = view_now();
+    gliding: bool = absf(sc_vel[g_view]) > 160.0;
+    sc_vel[g_view] = 0.0;
+    sc_home[g_view] = false;
+    press_id = 0;
+    if (!gliding) {
+        press_id = button_at(x, y);
+        press_show = 0.0
+    }
+}
+
+finger_move(state: int, x: f32, y: f32) {
+    if (g_finger < 0 || (state & 1 << 7 + g_finger) == 0) return;
+    dx: f32 = x - g_x;
+    dy: f32 = y - g_y;
+    g_x = x;
+    g_y = y;
+    g_dx = g_dx + dx;
+    g_dy = g_dy + dy;
+    g_last_t = now_t;
+    if (g_mode == G_WAIT) {
+        ax: f32 = absf(x - g_x0);
+        ay: f32 = absf(y - g_y0);
+        if (ax + ay < slop()) return;
+        press_id = 0;
+        if (ax > ay * 1.3) {
+            if (g_view == V_RECIPE) {
+                g_mode = G_PAGE;
+                page_held = true
+            } else {
+                g_mode = G_TABS;
+                tabs_held = true
+            }
+        } else {
+            g_mode = G_SCROLL;
+            sc_held[g_view] = true;
+            field_blur()
+        }
+        return
+    }
+    if (g_mode == G_SCROLL) scroll_by(g_view, dy);
+    if (g_mode == G_TABS) {
+        // (Past the first or the last, reluctantly.)
+        k: f32 = 1.0;
+        if (tab_x < 0.0 || tab_x > (TABS - 1) as f32) k = 0.35;
+        tab_x = tab_x - dx / view_w() * k
+    }
+    if (g_mode == G_PAGE) page_t = clampf(page_t - dx / view_w(), 0.0, 1.0)
+}
+
+finger_up(b: int, x: f32, y: f32) {
+    if (b != g_finger) return;
+    g_finger = -1;
+    mode: int = g_mode;
+    g_mode = G_NONE;
+    // (Speed counts only if it was still moving when it let go.)
+    if (now_t - g_last_t > 0.08) {
+        g_vx = 0.0;
+        g_vy = 0.0
+    }
+    if (mode == G_WAIT) {
+        id: int = press_id;
+        press_id = 0;
+        if (id != 0 && button_at(x, y) == id) act(id) else if (id == 0) field_blur();
+        return
+    }
+    if (mode == G_SCROLL) {
+        sc_held[g_view] = false;
+        sc_vel[g_view] = -g_vy
+    }
+    if (mode == G_TABS) {
+        tabs_held = false;
+        // (Where it would come to, gliding on.)
+        to: f32 = tab_x - g_vx * 0.25 / view_w();
+        t: int = clampi((to + 0.5) as int, 0, TABS - 1);
+        if (to < 0.0) t = 0;
+        // (A flick goes at least one.)
+        if (g_vx < -300.0 && t <= tab && tab < TABS - 1) t = tab + 1;
+        if (g_vx > 300.0 && t >= tab && tab > 0) t = tab - 1;
+        if (t != tab) field_blur();
+        tab = t
+    }
+    if (mode == G_PAGE) {
+        page_held = false;
+        if (page_t < 0.55 || g_vx > 400.0) close_page()
+    }
+}
+
+// Once a frame: the finger's speed, from how far it went this frame.
+step_fingers(dt: f32) {
+    if (dt > 0.0 && g_finger >= 0) {
+        k: f32 = 0.5;
+        g_vx = lerpf(g_vx, g_dx / dt, k);
+        g_vy = lerpf(g_vy, g_dy / dt, k)
+    }
+    g_dx = 0.0;
+    g_dy = 0.0
+}
+
+// The wheel (or two fingers on a trackpad): scrolls the list under it.
+wheel(amount: f32) {
+    v: int = view_now();
+    sc_home[v] = false;
+    sc_pos[v] = clampf(sc_pos[v] + amount, 0.0, maxf(sc_most[v], 0.0));
+    sc_vel[v] = 0.0
+}

@@ -233,6 +233,22 @@ pixels), and the page lays unseen links over them; a file is read from the
 editor's memory when its link is tapped, and the editor is told which was
 tapped (key 6, the ID), to say what it did.
 
+## Recipes
+
+The site's `recipes/` page runs `programs/recipes` (see its README) on the
+same platform. Everything on it is drawn by the book, in the page's own
+(CSS) pixels: the page tells it how many window pixels make one, the
+phone's safe edges, and today's date, as keys (1000000000 + 1000 * what +
+number). The book writes the kitchen (what there is to eat where, and what
+was eaten) to `/kitchen.txt` after each change, and the page keeps it in
+`localStorage` and, with a personal link (`#me=SECRET`), in the worker in
+`recipe-book/` (Cloudflare D1 at `trailingwhite.space/recipes/api`); see
+`recipes.js` for how the two are kept the same (`?fresh` starts with an
+empty kitchen, kept nowhere; `?api=URL` uses another worker). A phone's keyboard needs a real
+text field under a finger, so the book says where its search field is
+(`L8FIELD`), the page lays an unseen `<input>` over it, and what is typed
+there reaches the book as keys.
+
 ## People
 
 The games share one set of people: the worker in `people-api/` (Cloudflare
