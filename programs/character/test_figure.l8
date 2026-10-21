@@ -1,0 +1,822 @@
+tag character_tests;
+
+use_tag std;
+
+use_tag skate, character;
+
+import "../../stdlib/print.l8";
+
+import "../skate/math.l8";
+
+import "figure.l8";
+
+import "field.l8";
+
+import "bake.l8";
+
+import "pose.l8";
+
+import "gait.l8";
+
+import "drive.l8";
+
+import "steer.l8";
+
+import "take.l8";
+
+import "match.l8";
+
+extern open(path: str, flags: int, mode: int): int;
+
+extern close(fd: int): int;
+
+// Layer l's mesh, all at once.
+bake_layer(l: int) {
+    begin_layer(l);
+    _done: bool = work_layer(0)
+}
+
+test_say(label: str, yes: bool) raises IoError {
+    write(1, label);
+    if (yes) write(1, ": yes\n") else write(1, ": no\n")
+}
+
+test_count(label: str, n: int) raises IoError {
+    write(1, label);
+    write(1, ": ");
+    write_int(1, n);
+    write(1, "\n")
+}
+
+// A trunk, an arm on each side, and a ball of skin with a shirt over it.
+SMALL: str = """
+figure Small
+cell 0.01
+material skin 0.8 0.6 0.5 skin
+material shirt 0.1 0.2 0.6 cloth
+bone trunk - 0 1 0
+bone arm.l trunk 0.2 1.4 0
+bone fore.l arm.l 0.5 1.4 0 hinge 0 1 0
+bone hand.l fore.l 0.8 1.4 0
+layer body skin
+  part trunk
+    ball trunk 0 1 0 0.1
+  part arms
+    cone arm.l 0.2 1.4 0 0.04  0.5 1.4 0 0.03
+    cone fore.l 0.5 1.4 0 0.03  0.8 1.4 0 0.025
+layer shirt_zone skin hidden
+  box trunk 0 1 0  0.2 0.2 0.2
+layer shirt shirt
+  grow body 0.005
+  clip shirt_zone
+pose rest
+pose reach_up
+  reach hand.l 0.4 1.8 0.2
+pose both_up
+  reach hand 0.4 1.8 0.2
+pose other_way
+  like reach_up mirror
+""";
+
+read_small() noregion: bool {
+    read_figure(bytes(SMALL))
+}
+
+test "a figure's text is read" {
+    test_say("the text is right", read_small());
+    test_count("bones, with the right side's", nbones);
+    test_count("layers", nlayers);
+    test_count("the body's shapes, with the right arm's", layer_nops[0]);
+    test_count("parts", nparts);
+    test_count("poses", nposes);
+    test_say("the right forearm hangs from the right arm", bone_parent[bone("fore.r")] == bone("arm.r"));
+    test_say("and rests across from the left", bone_rest[bone("fore.r") * 3] == -0.5);
+    expect {|
+        the text is right: yes
+        bones, with the right side's: 7
+        layers: 3
+        the body's shapes, with the right arm's: 5
+        parts: 3
+        poses: 4
+        the right forearm hangs from the right arm: yes
+        and rests across from the left: yes
+    |}
+}
+
+test "what is wrong with a text is said, with its line" {
+    ok: bool = read_figure(bytes("""
+figure Wrong
+material skin 1 1 1
+bone root - 0 1 0
+layer body skin
+  ball elbow 0 1 0 0.1
+"""));
+    test_say("the text is right", ok);
+    test_count(err_msg, err_line);
+    expect {|
+        the text is right: no
+        no such bone: 5
+    |}
+}
+
+bone(name: str): int {
+    find_in(bone_name, nbones, intern(bytes(name), 0, len(name)))
+}
+
+near(a: V3, b: V3): bool {
+    v_len(v_sub(a, b)) < 0.002
+}
+
+test "a reach brings a hand to its point" {
+    test_say("the text is right", read_small());
+    solve_poses();
+    place_bones(1);
+    hand: int = bone("hand.l");
+    test_say("the left hand is at its point", near(wp(hand), v3(0.4, 1.8, 0.2)));
+    test_say("the right hand is where it rests", near(wp(bone_twin[hand]), v3(-0.8,
+        1.4, 0.0)));
+    test_say("the forearm is as long as it was", absf(v_len(v_sub(wp(hand), wp(bone("fore.l")))) - 0.3) < 0.002);
+    place_bones(2);
+    test_say("named without a side, both hands reach", near(wp(hand), v3(0.4, 1.8,
+        0.2)) && near(wp(bone_twin[hand]), v3(-0.4, 1.8, 0.2)));
+    place_bones(3);
+    test_say("mirrored, the right hand reaches and the left rests", near(wp(bone_twin[hand]),
+        v3(-0.4, 1.8, 0.2)) && near(wp(hand), v3(0.8, 1.4, 0.0)));
+    expect {|
+        the text is right: yes
+        the left hand is at its point: yes
+        the right hand is where it rests: yes
+        the forearm is as long as it was: yes
+        named without a side, both hands reach: yes
+        mirrored, the right hand reaches and the left rests: yes
+    |}
+}
+
+test "shapes bake to a closed mesh on their surface" {
+    test_say("the text is right", read_small());
+    bake_begin();
+    for l in 0..nlayers bake_layer(l);
+    test_say("the body has a mesh", layer_vn[0] > 500);
+    // (Corners, less edges, plus faces is 2 for a closed surface: so
+    // corners less half the triangles is 2 for each, and here are three,
+    // the trunk and two arms.)
+    test_count("its corners less half its triangles", layer_vn[0] - layer_tn[0] / 2);
+    worst: f32 = 0.0;
+    covered: int = 0;
+    trunk: int = 0;
+    for v in layer_v0[0]..layer_v0[0] + layer_vn[0] {
+        p: V3 = vert_pos(v);
+        if (p.x > -0.09 && p.x < 0.09 && p.y < 1.09) {
+            trunk = trunk + 1;
+            worst = maxf(worst, absf(v_len(v_sub(p, v3(0.0, 1.0, 0.0))) - 0.1));
+            if ((vcover[v] >> 2 & 1) == 1) covered = covered + 1
+        }
+    }
+    test_say("the trunk's are within a tenth of a millimetre of its ball", worst < 0.0001);
+    test_say("and all under the shirt", covered == trunk);
+    ends: f32 = 1.0;
+    elbow: f32 = 1.0;
+    for v in layer_v0[0]..layer_v0[0] + layer_vn[0] {
+        at: int = v * VERT_FLOATS;
+        if (absf(verts[at]) > 0.7) ends = minf(ends, verts[at + V_WEIGHTS]);
+        if (absf(verts[at]) > 0.49 && absf(verts[at]) < 0.51) elbow = minf(elbow,
+            verts[at + V_WEIGHTS])
+    }
+    test_say("each forearm's end moves with its one bone", ends == 1.0);
+    test_say("and at the elbows two bones share the skin", elbow < 0.6);
+    grown: f32 = 0.0;
+    for v in layer_v0[2]..layer_v0[2] + layer_vn[2] {
+        p: V3 = vert_pos(v);
+        r: f32 = v_len(v_sub(p, v3(0.0, 1.0, 0.0)));
+        if (p.y < 1.05 && absf(p.x) < 0.05) grown = maxf(grown, absf(r - 0.105))
+    }
+    test_say("the shirt lies five millimetres over the trunk", layer_vn[2] > 0 && grown < 0.0002);
+    expect {|
+        the text is right: yes
+        the body has a mesh: yes
+        its corners less half its triangles: 6
+        the trunk's are within a tenth of a millimetre of its ball: yes
+        and all under the shirt: yes
+        each forearm's end moves with its one bone: yes
+        and at the elbows two bones share the skin: yes
+        the shirt lies five millimetres over the trunk: yes
+    |}
+}
+
+test "the running back reads, and every layer of him bakes" {
+    ok: bool = read_running_back();
+    test_say("the text is right", ok);
+    if (!ok) test_count(err_msg, err_line);
+    solve_poses();
+    // (Coarsely: this is about the text, not the mesh.)
+    detail = 3.0;
+    bake_begin();
+    empty: int = 0;
+    for l in 0..nlayers {
+        bake_layer(l);
+        if (!layer_hidden[l] && layer_tn[l] == 0) empty = empty + 1
+    }
+    detail = 1.0;
+    test_count("layers with no mesh", empty);
+    place_bones(find_in(pose_name, nposes, twin_name(intern(bytes("stance"), 0, 6))));
+    feet: f32 = absf(wp(find_in(bone_name, nbones, intern(bytes("foot.l"), 0, 6))).y - wp(find_in(bone_name,
+        nbones, intern(bytes("foot.r"), 0, 6))).y);
+    test_say("in his stance his feet are level with each other", feet < 0.001);
+    expect {|
+        the text is right: yes
+        layers with no mesh: 0
+        in his stance his feet are level with each other: yes
+    |}
+}
+
+// A file's bytes, appended to `into` from `at` (with a line break first);
+// how far it then reaches.
+append_file(path: str, into: []i8, at: int): int {
+    fd: int = open(path, 0, 0);
+    if (fd < 0) return at;
+    into[at] = '\n';
+    n: int = at + 1;
+    r: int = 1;
+    while (r > 0 && n < len(into)) {
+        r = read(fd, into, n, len(into) - n);
+        if (r > 0) n = n + r
+    }
+    close(fd);
+    n
+}
+
+// The running back, with the motion files it uses (as the viewer reads
+// them, after it).
+read_running_back() noregion: bool {
+    buf: []i8 = new i8[4000000](0i8);
+    n: int = append_file("programs/character/running-back.txt", buf, 0);
+    n = append_file("programs/character/motion/run-synth.txt", buf, n);
+    n = append_file("programs/character/motion/moves.txt", buf, n);
+    n = append_file("programs/character/motion/cycles.txt", buf, n);
+    n = append_file("programs/character/motion/steering.txt", buf, n);
+    text: []i8 = new i8[n](0i8);
+    memcpy(text, 0, buf, 0, n);
+    read_figure(text)
+}
+
+route(name: str): int {
+    find_in(route_name, nroutes, intern(bytes(name), 0, len(name)))
+}
+
+seen_at: []f32 = new f32[MAX_BONES * 3](0.0);
+
+// Run a route for some seconds, and say what was seen of it.
+// The joint (other than the fingers) that moved fastest last, and where.
+fastest_bone: int = 0;
+
+// Run a route for some seconds, and say what was seen of it.
+watch(name: str, seconds: f32) raises IoError {
+    r: int = route(name);
+    go_begin(r);
+    g: int = go_gait;
+    foot: int = gait_foot[g];
+    slowest: f32 = 99.0;
+    fastest: f32 = 0.0;
+    jump: f32 = 0.0;
+    slip: f32 = 0.0;
+    pinned: int = 0;
+    flying: int = 0;
+    lowest: f32 = 9.0;
+    highest: f32 = 0.0;
+    changes: int = 0;
+    ankle_least: f32 = 999.0;
+    ankle_most: f32 = 0.0;
+    over: int = 0;
+    width_sum: f32 = 0.0;
+    // All planes, measured on the posed figure: knee in from the hip-ankle line (cm, + toward his
+    // middle) while a foot is pinned; the hips' turn and tilt across, and the trunk's lean.
+    knee_in: f32 = 0.0;
+    knee_n: int = 0;
+    rot_lo: f32 = 99.0;
+    rot_hi: f32 = -99.0;
+    obl_lo: f32 = 99.0;
+    obl_hi: f32 = -99.0;
+    lean_sum: f32 = 0.0;
+    lean_n: int = 0;
+    thigh_hi: f32 = -99.0;
+    fold_hi: f32 = 0.0;
+    lands: int = 0;
+    widths: int = 0;
+    was_locked: []bool = new bool[2](false);
+    was_take: int = mm_take;
+    for t in 0..(seconds / TICK) as int {
+        go_tick();
+        go_pose();
+        place_bones(SHOWN);
+        if (mm_take != was_take) changes = changes + 1;
+        was_take = mm_take;
+        // (Once he is under way.)
+        if (t > 120) {
+            slowest = minf(slowest, v_len(go_v));
+            fastest = maxf(fastest, v_len(go_v));
+            if (!locked[0] && !locked[1]) flying = flying + 1;
+            for f in 0..2 {
+                fb: int = foot;
+                if (f == 1) fb = bone_twin[foot];
+                if (locked[f]) {
+                    pinned = pinned + 1;
+                    slip = maxf(slip, v_len(v_sub(wp(fb), getv(lock_at, f))))
+                }
+            }
+            for f in 0..2 {
+                fb: int = foot;
+                if (f == 1) fb = bone_twin[foot];
+                up_shin: V3 = v_norm(v_sub(wp(bone_parent[fb]), wp(fb)));
+                toe: V3 = q_turn(wq(fb), v3(0.0, 0.0, 1.0));
+                sole_up: V3 = q_turn(wq(fb), v3(0.0, 1.0, 0.0));
+                a: f32 = atan2f(v_len(v_cross(up_shin, toe)), v_dot(up_shin, toe)) * 180.0 / PI;
+                ankle_least = minf(ankle_least, a);
+                ankle_most = maxf(ankle_most, a);
+                // (Turned over on the leg: its top facing down the shin, which no ankle does.)
+                if (v_dot(sole_up, up_shin) < -0.2) over = over + 1
+            }
+            way: V3 = v_norm(v3(go_v.x, 0.0, go_v.z));
+            across: V3 = v_cross(v3(0.0, 1.0, 0.0), way);
+            hl: V3 = q_turn(wq(gait_root[g]), v3(1.0, 0.0, 0.0));
+            turn_deg: f32 = atan2f(-v_dot(hl, way), v_dot(hl, across)) * 180.0 / PI;
+            tilt_deg: f32 = asinf_(clampf(hl.y, -1.0, 1.0)) * 180.0 / PI;
+            if (t > 360) {
+                rot_lo = minf(rot_lo, turn_deg);
+                rot_hi = maxf(rot_hi, turn_deg);
+                obl_lo = minf(obl_lo, tilt_deg);
+                obl_hi = maxf(obl_hi, tilt_deg);
+                cu: V3 = q_turn(wq(bone_parent[gait_head[g]]), v3(0.0, 1.0, 0.0));
+                lean_sum = lean_sum + atan2f(v_dot(cu, way), cu.y) * 180.0 / PI;
+                lean_n = lean_n + 1
+            }
+            for f in 0..2 {
+                fb: int = foot;
+                if (f == 1) fb = bone_twin[foot];
+                kb: int = bone_parent[fb];
+                hb: int = bone_parent[kb];
+                th: V3 = v_sub(wp(kb), wp(hb));
+                if (t > 360) {
+                    thigh_hi = maxf(thigh_hi, atan2f(v_dot(th, way), -th.y) * 180.0 / PI);
+                    sh: V3 = v_sub(wp(fb), wp(kb));
+                    fold_hi = maxf(fold_hi, atan2f(v_len(v_cross(th, sh)), v_dot(th,
+                        sh)) * 180.0 / PI)
+                }
+                if (locked[f]) {
+                    side: f32 = 1.0 - 2.0 * f as f32;
+                    a: V3 = wp(hb);
+                    b: V3 = wp(fb);
+                    u: f32 = (wp(kb).y - a.y) / minf(b.y - a.y, -0.01);
+                    line: f32 = v_dot(v_lerp(a, b, u), across);
+                    knee_in = knee_in + (line - v_dot(wp(kb), across)) * side;
+                    knee_n = knee_n + 1
+                }
+            }
+            for f in 0..2 {
+                if (locked[f] && !was_locked[f]) lands = lands + 1;
+                if (locked[f] && !was_locked[f]) {
+                    side: f32 = 1.0 - 2.0 * f as f32;
+                    hips_left: V3 = q_turn(wq(gait_root[g]), v3(1.0, 0.0, 0.0));
+                    width_sum = width_sum + v_dot(v_sub(getv(lock_at, f), wp(gait_root[g])),
+                        hips_left) * side;
+                    widths = widths + 1
+                }
+                was_locked[f] = locked[f]
+            }
+            lowest = minf(lowest, wp(gait_root[g]).y);
+            highest = maxf(highest, wp(gait_root[g]).y);
+            for b in 0..nbones {
+                if (!is_finger(b)) {
+                    rb: int = gait_root[g];
+                    moved: V3 = v_sub(wp(b), v3(seen_at[b * 3], seen_at[b * 3 + 1],
+                        seen_at[b * 3 + 2]));
+                    hips: V3 = v_sub(wp(rb), v3(seen_at[rb * 3], seen_at[rb * 3 + 1],
+                        seen_at[rb * 3 + 2]));
+                    d: f32 = v_len(v_sub(moved, hips));
+                    if (d > jump) {
+                        jump = d;
+                        fastest_bone = b
+                    }
+                }
+            }
+        }
+        for b in 0..nbones {
+            seen_at[b * 3] = wp(b).x;
+            seen_at[b * 3 + 1] = wp(b).y;
+            seen_at[b * 3 + 2] = wp(b).z
+        }
+    }
+    write(1, name);
+    write(1, "\n");
+    test_count("  slowest, in tenths of a metre a second", (slowest * 10.0 + 0.5) as int);
+    test_count("  fastest", (fastest * 10.0 + 0.5) as int);
+    test_count("  clips it went over to, a second", (changes as f32 / (seconds - 1.0)) as int);
+    test_count("  a pinned foot slips from where it came down, at most, in millimetres",
+        (slip * 1000.0 + 0.5) as int);
+    test_count("  of a hundred moments, a foot is pinned for", pinned * 50 / maxi((seconds / TICK) as int - 121,
+        1));
+    test_say("  both feet are off the ground for part of the time", flying > 0);
+    test_count("  the fastest a joint moves past his hips, metres a second (a real runner's feet reach about 15)",
+        (jump / TICK + 0.5) as int);
+    test_count("  the ankle bends between, in degrees from up the shin", (ankle_least + 0.5) as int);
+    test_count("  and", (ankle_most + 0.5) as int);
+    test_count("  moments a foot is turned over on its shin", over);
+    test_count("  feet land, on average, this many centimetres to their side of his middle",
+        (width_sum * 100.0 / maxf(widths as f32, 1.0) + 0.5) as int);
+    test_count("  steps a second", (lands as f32 / (seconds - 1.0) + 0.5) as int);
+    test_count("  his knees are in from the line hip to ankle, in millimetres, while the foot is down",
+        (knee_in * 1000.0 / maxf(knee_n as f32, 1.0)) as int);
+    test_count("  his hips turn through, in degrees", (rot_hi - rot_lo + 0.5) as int);
+    test_count("  and tilt across through", (obl_hi - obl_lo + 0.5) as int);
+    test_count("  his trunk leans forward, on average, in degrees", (lean_sum / maxf(lean_n as f32,
+        1.0) + 0.5) as int);
+    test_count("  his thigh comes up to, in degrees from straight down", (thigh_hi + 0.5) as int);
+    test_count("  his knee folds to", (fold_hi + 0.5) as int);
+    test_count("  his hips are never lower than, in centimetres", (lowest * 100.0) as int);
+    test_count("  nor higher than", (highest * 100.0 + 0.99) as int)
+}
+
+asinf_(x: f32): f32 {
+    atan2f(x, sqrtf(maxf(1.0 - x * x, 0.0)))
+}
+
+// Whether bone b is a finger: below a hand, and not the hand.
+is_finger(b: int): bool {
+    p: int = bone_parent[b];
+    p >= 0 && bone_parent[p] >= 0 && name_len[bone_name[p]] > 0 && (name_starts(p,
+        "hand") || name_starts(bone_parent[p], "hand"))
+}
+
+name_starts(b: int, s: str): bool {
+    id: int = bone_name[b];
+    if (name_len[id] < len(s)) return false;
+    for i in 0..len(s) {
+        if (name_pool[name_at[id] + i] != s[i]) return false
+    }
+    true
+}
+
+test "a gait carries him over the ground" {
+    test_say("the text is right", read_running_back());
+    solve_poses();
+    watch("sprint", 6.0);
+    watch("burst", 10.0);
+    watch("jog", 6.0);
+    expect {|
+        the text is right: yes
+        sprint
+          slowest, in tenths of a metre a second: 93
+          fastest: 93
+          clips it went over to, a second: 1
+          a pinned foot slips from where it came down, at most, in millimetres: 6
+          of a hundred moments, a foot is pinned for: 11
+          both feet are off the ground for part of the time: yes
+          the fastest a joint moves past his hips, metres a second (a real runner's feet reach about 15): 16
+          the ankle bends between, in degrees from up the shin: 76
+          and: 147
+          moments a foot is turned over on its shin: 0
+          feet land, on average, this many centimetres to their side of his middle: 0
+          steps a second: 4
+          his knees are in from the line hip to ankle, in millimetres, while the foot is down: -17
+          his hips turn through, in degrees: 20
+          and tilt across through: 8
+          his trunk leans forward, on average, in degrees: 11
+          his thigh comes up to, in degrees from straight down: 69
+          his knee folds to: 124
+          his hips are never lower than, in centimetres: 90
+          nor higher than: 98
+        burst
+          slowest, in tenths of a metre a second: 22
+          fastest: 99
+          clips it went over to, a second: 1
+          a pinned foot slips from where it came down, at most, in millimetres: 10
+          of a hundred moments, a foot is pinned for: 12
+          both feet are off the ground for part of the time: yes
+          the fastest a joint moves past his hips, metres a second (a real runner's feet reach about 15): 14
+          the ankle bends between, in degrees from up the shin: 60
+          and: 139
+          moments a foot is turned over on its shin: 0
+          feet land, on average, this many centimetres to their side of his middle: 3
+          steps a second: 2
+          his knees are in from the line hip to ankle, in millimetres, while the foot is down: -12
+          his hips turn through, in degrees: 19
+          and tilt across through: 9
+          his trunk leans forward, on average, in degrees: 12
+          his thigh comes up to, in degrees from straight down: 72
+          his knee folds to: 129
+          his hips are never lower than, in centimetres: 90
+          nor higher than: 102
+        jog
+          slowest, in tenths of a metre a second: 35
+          fastest: 35
+          clips it went over to, a second: 0
+          a pinned foot slips from where it came down, at most, in millimetres: 8
+          of a hundred moments, a foot is pinned for: 23
+          both feet are off the ground for part of the time: yes
+          the fastest a joint moves past his hips, metres a second (a real runner's feet reach about 15): 8
+          the ankle bends between, in degrees from up the shin: 60
+          and: 113
+          moments a foot is turned over on its shin: 0
+          feet land, on average, this many centimetres to their side of his middle: 3
+          steps a second: 3
+          his knees are in from the line hip to ankle, in millimetres, while the foot is down: -6
+          his hips turn through, in degrees: 13
+          and tilt across through: 6
+          his trunk leans forward, on average, in degrees: 8
+          his thigh comes up to, in degrees from straight down: 34
+          his knee folds to: 103
+          his hips are never lower than, in centimetres: 92
+          nor higher than: 102
+    |}
+}
+
+test "a take sets his limbs the way its frames say" {
+    test_say("the text is right", read_running_back());
+    solve_poses();
+    test_count("takes", ntakes);
+    test_count("frames in the first", take_n[0]);
+    foot: int = gait_foot[take_gait[0]];
+    shin: int = bone_parent[foot];
+    thigh: int = bone_parent[shin];
+    worst: f32 = 1.0;
+    for f in 0..take_n[0] {
+        take_pose(0, f as f32 / take_fps[0]);
+        place_bones(SHOWN);
+        worst = minf(worst, v_dot(v_norm(v_sub(wp(shin), wp(thigh))), take_dir(0,
+            f as f32, 10)));
+        worst = minf(worst, v_dot(v_norm(v_sub(wp(foot), wp(shin))), take_dir(0, f as f32,
+            11)))
+    }
+    test_say("in every frame his left thigh and shin point within two degrees of where it says",
+        worst > 0.9994);
+    expect {|
+        the text is right: yes
+        takes: 34
+        frames in the first: 62
+        in every frame his left thigh and shin point within two degrees of where it says: yes
+    |}
+}
+
+// Steer the route `play` by a script for some seconds, and say, for each
+// step that is a cut's or turn's, and of every step how far a foot down
+// slides: the most its lower end (heel or ball) moves while down.
+steer_watch(name: str, seconds: f32) raises IoError {
+    go_begin(route("play"));
+    g: int = go_gait;
+    foot: int = gait_foot[g];
+    toe: int = gait_toe[g];
+    slide: f32 = 0.0;
+    was: []int = new int[2](-1);
+    from: []f32 = new f32[6](0.0);
+    heel_low: []bool = new bool[2](false);
+    seen: int = -1;
+    deepest: f32 = 0.0;
+    lowest: f32 = 9.0;
+    past: f32 = -9.0;
+    write(1, name);
+    write(1, "\n");
+    // (For his balance: where his centre of mass and the middle of his foot
+    // down were, the last 13 ticks.)
+    hist: []f32 = new f32[13 * 6](0.0);
+    hist_down: []bool = new bool[13](false);
+    off_sum: f32 = 0.0;
+    off_w: f32 = 0.0;
+    twist_most: f32 = 0.0;
+    off_most: f32 = 0.0;
+    turned_at: f32 = -1.0;
+    want_way: f32 = 0.0;
+    if (script_n > 1) want_way = script_deg[1] * PI / 180.0;
+    for tk in 0..(seconds / TICK) as int {
+        go_tick();
+        go_pose();
+        place_bones(SHOWN);
+        // The foot turned from the way its knee points (a knee is a hinge: the
+        // shin twists only some 30-40 degrees, and only with the knee bent).
+        for sd in 0..2 {
+            fb: int = foot;
+            if (sd == 1) fb = bone_twin[foot];
+            kn: int = bone_parent[fb];
+            hp: int = bone_parent[kn];
+            th: V3 = v_sub(wp(kn), wp(hp));
+            sh: V3 = v_sub(wp(fb), wp(kn));
+            bend: f32 = atan2f(v_len(v_cross(th, sh)), v_dot(th, sh)) * 180.0 / PI;
+            if (bend > 25.0) {
+                // (The knee's hinge, and the foot's side to side, both as seen
+                // across the shin: the shin's twist.)
+                shin: V3 = v_norm(sh);
+                hinge: V3 = v_norm(v_reject(v_cross(th, sh), shin));
+                side: V3 = v_norm(v_reject(q_turn(wq(fb), v3(1.0, 0.0, 0.0)), shin));
+                tw: f32 = atan2f(v_len(v_cross(hinge, side)), absf(v_dot(hinge, side))) * 180.0 / PI;
+                twist_most = maxf(twist_most, tw)
+            }
+        }
+        // How long, after the stick changes, until he goes the new way.
+        if (script_n > 1 && turned_at < 0.0 && s_now > script_secs[0] && s_speed > 1.0 && absf(turn_from(heading_or(go_v,
+            0.0), want_way)) < 10.0 * PI / 180.0) turned_at = s_now - script_secs[0];
+        // His balance: while a foot is down, the line from it to his centre of
+        // mass must lie along the push he is making, (a, g + a up) (or he would
+        // topple); by how many degrees it does not.
+        cm: V3 = body_com(g);
+        cop: V3 = v3(0.0, 0.0, 0.0);
+        nd: int = 0;
+        for sd in 0..2 {
+            if (down_step(sd) >= 0) {
+                fb: int = foot;
+                tb: int = toe;
+                if (sd == 1) {
+                    fb = bone_twin[foot];
+                    tb = bone_twin[toe]
+                }
+                // (Its pressure under the lower of the heel and the ball.)
+                a0: V3 = wp(fb);
+                ft: V3 = v_norm(v_sub(wp(tb), a0));
+                up: V3 = foot_up(ft);
+                heel: V3 = v_add(a0, v_add(v_scale(ft, SOLE_HEEL_A), v_scale(up, SOLE_HEEL_U)));
+                ball: V3 = wp(tb);
+                pt: V3 = ball;
+                if (heel.y < ball.y) pt = heel;
+                cop = v_add(cop, pt);
+                nd = nd + 1
+            }
+        }
+        for k in 0..12 {
+            for c in 0..6 hist[k * 6 + c] = hist[(k + 1) * 6 + c];
+            hist_down[k] = hist_down[k + 1]
+        }
+        hist[72] = cm.x;
+        hist[73] = cm.y;
+        hist[74] = cm.z;
+        if (nd > 0) {
+            cop = v_scale(cop, 1.0 / nd as f32);
+            hist[75] = cop.x;
+            hist[76] = cop.y;
+            hist[77] = cop.z
+        }
+        hist_down[12] = nd == 1 && st_kind[s_cur % NST] != K_STAND;
+        if (tk > 12 && hist_down[6] && hist_down[0] && hist_down[12]) {
+            dt: f32 = 6.0 * TICK;
+            a: V3 = v_scale(v3(hist[72] - 2.0 * hist[36] + hist[0], hist[73] - 2.0 * hist[37] + hist[1],
+                hist[74] - 2.0 * hist[38] + hist[2]), 1.0 / (dt * dt));
+            need: V3 = v_norm(v3(a.x, a.y + 9.81, a.z));
+            have: V3 = v_norm(v3(hist[36] - hist[39], hist[37] - hist[40], hist[38] - hist[41]));
+            off: f32 = atan2f(v_len(v_cross(need, have)), v_dot(need, have)) * 180.0 / PI;
+            // (Weighed by how hard the foot pushes then: a half sine over its
+            // time down, so a lean as it lands or leaves, carrying little,
+            // counts little.)
+            ws: f32 = 0.0;
+            for sd in 0..2 {
+                j: int = down_step(sd);
+                if (j >= 0) ws = sinf(PI * clampf((s_now - 6.0 * TICK - st_t[j]) / maxf(st_tc[j],
+                    0.01), 0.0, 1.0))
+            }
+            off_sum = off_sum + off * ws;
+            off_w = off_w + ws;
+            if (ws > 0.5) off_most = maxf(off_most, off)
+        }
+        for sd in 0..2 {
+            fb: int = foot;
+            tb: int = toe;
+            if (sd == 1) {
+                fb = bone_twin[foot];
+                tb = bone_twin[toe]
+            }
+            j: int = down_step(sd);
+            // (The lower of the heel's bottom and the ball, the sole's ends.)
+            a: V3 = wp(fb);
+            ft: V3 = v_norm(v_sub(wp(tb), a));
+            up: V3 = foot_up(ft);
+            heel: V3 = v_add(a, v_add(v_scale(ft, SOLE_HEEL_A), v_scale(up, SOLE_HEEL_U)));
+            ball: V3 = wp(tb);
+            low: bool = heel.y < ball.y;
+            pt: V3 = ball;
+            if (low) pt = heel;
+            // (Only while that end is on the ground: the ball rises as the toes
+            // bend, leaving.)
+            on: bool = pt.y < 0.02;
+            if (j >= 0 && j == was[sd] && low == heel_low[sd] && on) {
+                d: V3 = v_sub(pt, getv(from, sd));
+                slide = maxf(slide, sqrtf(d.x * d.x + d.z * d.z))
+            } else putv(from, sd, pt);
+            heel_low[sd] = low;
+            was[sd] = j
+        }
+        // A cut's or turn's plant: the knee at its deepest, the hips at their
+        // lowest, and the way he faces as it ends.
+        i: int = s_cur % NST;
+        k: int = st_kind[i];
+        if (k == K_PLANT || k == K_CROSS || k == K_PIVOT) {
+            if (seen != s_cur) {
+                seen = s_cur;
+                deepest = 0.0;
+                lowest = 9.0;
+                past = -9.0
+            }
+            sd: int = st_side[i];
+            fb: int = foot;
+            if (sd == 1) fb = bone_twin[foot];
+            kb: int = bone_parent[fb];
+            hb: int = bone_parent[kb];
+            th: V3 = v_sub(wp(kb), wp(hb));
+            sh: V3 = v_sub(wp(fb), wp(kb));
+            deepest = maxf(deepest, atan2f(v_len(v_cross(th, sh)), v_dot(th, sh)) * 180.0 / PI);
+            lowest = minf(lowest, wp(gait_root[g]).y);
+            // (How far his body carries on past the plant foot, the way he came.)
+            h0: f32 = heading_or(getv(st_vin, i), 0.0);
+            past = maxf(past, v_dot(v_sub(body_com(g), getv(st_spot, i)), ahead(h0)));
+            if (s_now + TICK >= st_t[i] + st_tc[i] && s_now < st_t[i] + st_tc[i]) {
+                if (k == K_PLANT) write(1, "  a plant") else if (k == K_CROSS) write(1,
+                    "  a crossover") else write(1, "  a pivot");
+                write(1, ": in at, tenths of a m/s ");
+                write_int(1, (v_len(getv(st_vin, i)) * 10.0 + 0.5) as int);
+                write(1, ", out at ");
+                write_int(1, (v_len(getv(st_vout, i)) * 10.0 + 0.5) as int);
+                write(1, "; knee bent to ");
+                write_int(1, (deepest + 0.5) as int);
+                write(1, "; hips down to, cm ");
+                write_int(1, (lowest * 100.0 + 0.5) as int);
+                write(1, "; past the foot, cm ");
+                write_int(1, (past * 100.0 + 0.5) as int);
+                write(1, "; facing, degrees ");
+                write_int(1, (s_face * 180.0 / PI + 0.5) as int);
+                write(1, "\n")
+            }
+        }
+    }
+    test_count("  a foot down slides at most, in centimetres", (slide * 100.0 + 0.5) as int);
+    test_count("  a foot turned from its knee, at most, in degrees", (twist_most + 0.5) as int);
+    test_count("  off balance, on average, in degrees", (off_sum / maxf(off_w, 0.001) + 0.5) as int);
+    test_count("  and at most, while it pushes hard", (off_most + 0.5) as int);
+    if (script_n > 1) test_count("  going the new way, in hundredths of a second after the stick",
+        (turned_at * 100.0 + 0.5) as int);
+    test_count("  he ends up heading, in degrees", (heading_or(go_v, s_face) * 180.0 / PI + 0.5) as int);
+    test_count("  at, in tenths of a m/s", (v_len(go_v) * 10.0 + 0.5) as int)
+}
+
+test "steering takes him where the stick says, cutting and turning as he must" {
+    test_say("the text is right", read_running_back());
+    solve_poses();
+    script_n = 0;
+    add_script(2.5, 0.0, 9.5);
+    add_script(2.5, 30.0, 9.5);
+    steer_watch("an arc", 5.0);
+    script_n = 0;
+    add_script(2.5, 0.0, 7.0);
+    add_script(2.5, 45.0, 7.0);
+    steer_watch("a cut of 45 degrees", 5.0);
+    script_n = 0;
+    add_script(2.5, 0.0, 9.5);
+    add_script(3.0, 90.0, 9.5);
+    steer_watch("a cut of 90 degrees", 5.5);
+    script_n = 0;
+    add_script(2.5, 0.0, 9.5);
+    add_script(3.5, 180.0, 9.5);
+    steer_watch("right round", 6.0);
+    script_n = 0;
+    add_script(2.5, 0.0, 9.5);
+    add_script(2.5, 0.0, 0.0);
+    steer_watch("a stop", 5.0);
+    expect {|
+        the text is right: yes
+        an arc
+          a foot down slides at most, in centimetres: 11
+          a foot turned from its knee, at most, in degrees: 56
+          off balance, on average, in degrees: 13
+          and at most, while it pushes hard: 47
+          going the new way, in hundredths of a second after the stick: 127
+          he ends up heading, in degrees: 30
+          at, in tenths of a m/s: 90
+        a cut of 45 degrees
+          a foot down slides at most, in centimetres: 8
+          a foot turned from its knee, at most, in degrees: 23
+          off balance, on average, in degrees: 12
+          and at most, while it pushes hard: 57
+          going the new way, in hundredths of a second after the stick: 143
+          he ends up heading, in degrees: 45
+          at, in tenths of a m/s: 60
+        a cut of 90 degrees
+          a plant: in at, tenths of a m/s 38, out at 33; knee bent to 88; hips down to, cm 61; past the foot, cm -2; facing, degrees 88
+          a foot down slides at most, in centimetres: 17
+          a foot turned from its knee, at most, in degrees: 40
+          off balance, on average, in degrees: 14
+          and at most, while it pushes hard: 47
+          going the new way, in hundredths of a second after the stick: 163
+          he ends up heading, in degrees: 90
+          at, in tenths of a m/s: 75
+        right round
+          a foot down slides at most, in centimetres: 8
+          a foot turned from its knee, at most, in degrees: 38
+          off balance, on average, in degrees: 14
+          and at most, while it pushes hard: 47
+          going the new way, in hundredths of a second after the stick: 174
+          he ends up heading, in degrees: -179
+          at, in tenths of a m/s: 70
+        a stop
+          a plant: in at, tenths of a m/s 11, out at 1; knee bent to 6; hips down to, cm 87; past the foot, cm -27; facing, degrees 1
+          a foot down slides at most, in centimetres: 7
+          a foot turned from its knee, at most, in degrees: 20
+          off balance, on average, in degrees: 12
+          and at most, while it pushes hard: 47
+          going the new way, in hundredths of a second after the stick: 0
+          he ends up heading, in degrees: 2
+          at, in tenths of a m/s: 0
+    |}
+}

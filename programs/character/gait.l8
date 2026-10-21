@@ -1,0 +1,812 @@
+tag character;
+
+use_tag skate;
+
+// Going over the ground. A route gives a path, and how fast and facing
+// which way; the figure's gait turns that into a pose, afresh every frame,
+// so the same gait runs straight, runs sideways, cuts, and spins.
+//
+// The body is a point that follows the path as fast as the route asks and
+// the gait's grip, burst, and brake allow. Each foot is down for a share of
+// every stride and in the air for the rest. A foot coming down is put where
+// the body will pass over it; and further out against a push, so that a cut
+// plants wide. A foot that is down stays where it was put, rolling up onto
+// its toe as the body leaves it. The hips ride over the feet, the back leans
+// the way he speeds up and turns against the hips, and the arms swing
+// against the legs. The legs then reach from hips to ankles (see reach in
+// pose.l8).
+//
+// A gait's numbers:
+//
+//   cadence a b most least   steps a second: a, and b more for each m/s,
+//                      to at most, and no fewer than least
+//   straight k         how near to straight a leg gets (1: quite straight)
+//   contact a b least  the share of a stride a foot is down, as cadence
+//   width w            how far to its side of his middle a foot lands
+//   kick a b most      how high the ankle comes behind, as cadence
+//   bounce h           how far the hips rise and fall with each step
+//   sink a b           how far the hips ride below standing: a, and b per m/s
+//   crouch k           and further for each m/s2 he pushes sideways
+//   lean a b most      degrees he leans forward: a, and b per m/s, to at most
+//   drive k            how much of speeding up he leans into (1: all of it)
+//   bank d             degrees his trunk leans into a turn, for each m/s2
+//   twist d            degrees the hips turn with the legs
+//   counter k          how far the chest turns back, in twists
+//   pump f b           degrees an arm swings forward and back
+//   elbow f b          degrees its elbow is bent at the front of its swing,
+//                      and at the back, where it opens
+//   spread f b         degrees it hangs out from his side, front and back
+//                      (less than 0: across him)
+//   cross d            degrees it turns in at the front, the hand to his face
+//   hunch k            how much more than the hips the chest leans
+//   sway d             degrees the chest tips over the foot that is down
+//   toes a b c         degrees the heel is up as a foot lands, in the middle
+//                      of its time down, and as it leaves
+//   top v              his top speed, m/s: he speeds up less the nearer it
+//   quick k            steps a second more, for each m/s2 he is speeding up
+//   grip a             the hardest he can push sideways, m/s2: sets how
+//                      much a corner slows him
+//   burst a, brake a   how fast he can speed up and slow down, m/s2
+//   plant k            how far ahead a foot lands, in the ground it will cover
+//   catch k            how far a foot lands against a push, m per m/s2
+//   sole h             what his shoe's sole adds under the ankle
+//   roll d             degrees the hips drop on the side of the foot in the air
+const PATH_STEP: f32 = 0.05;
+
+const MAX_PATH: int = 6000;
+
+// The path, a point every PATH_STEP: where, how fast he may go there, and
+// which leg of the route it belongs to.
+path_x: []f32 = new f32[MAX_PATH](0.0);
+
+path_z: []f32 = new f32[MAX_PATH](0.0);
+
+path_v: []f32 = new f32[MAX_PATH](0.0);
+
+path_leg: []int = new int[MAX_PATH](0);
+
+path_n: int = 0;
+
+// The path as first laid out, its points unevenly apart.
+raw_x: []f32 = new f32[MAX_PATH * 2](0.0);
+
+raw_z: []f32 = new f32[MAX_PATH * 2](0.0);
+
+raw_v: []f32 = new f32[MAX_PATH * 2](0.0);
+
+raw_leg: []int = new int[MAX_PATH * 2](0);
+
+raw_n: int = 0;
+
+// Where along the path each leg begins and ends, in points.
+leg_from: []int = new int[MAX_WAYS](0);
+
+leg_to: []int = new int[MAX_WAYS](0);
+
+put_raw(
+    x: f32,
+    z: f32,
+    v: f32,
+    leg: int
+) {
+    if (raw_n >= MAX_PATH * 2) return;
+    raw_x[raw_n] = x;
+    raw_z[raw_n] = z;
+    raw_v[raw_n] = v;
+    raw_leg[raw_n] = leg;
+    raw_n = raw_n + 1
+}
+
+gf(g: int, at: int): f32 {
+    gait_f[g * GAIT_FLOATS + at]
+}
+
+// a + b v, to at most (or, falling, at least) the third.
+ramp(g: int, at: int, v: f32): f32 {
+    x: f32 = gf(g, at) + gf(g, at + 1) * v;
+    if (gf(g, at + 1) >= 0.0) return minf(x, gf(g, at + 2));
+    maxf(x, gf(g, at + 2))
+}
+
+// Steps a second at a speed: no fewer than the gait's least (a slow run
+// is long slow steps, not short quick ones).
+steps(g: int, v: f32): f32 {
+    maxf(ramp(g, G_CADENCE, v), gf(g, G_STEPS_LEAST))
+}
+
+// And quicker while he is speeding up: a burst is short fast steps that
+// lengthen, not long slow ones.
+steps_now(g: int): f32 {
+    v: f32 = v_len(go_v);
+    push: f32 = 0.0;
+    if (v > 0.3) push = maxf(v_dot(go_a, go_v) / v, 0.0);
+    minf(steps(g, v) + gf(g, G_QUICK) * push, maxf(gf(g, G_CADENCE + 2), steps(g,
+        v)))
+}
+
+// Route r's path: its legs, with each corner rounded as wide as it asks
+// (and the legs allow); then how fast he may go at each point.
+build_path(r: int) {
+    g: int = route_gait[r];
+    first: int = route_first[r];
+    n: int = route_n[r];
+    raw_n = 0;
+    // Where the leg being laid starts: past the corner before it.
+    sx: f32 = way_x[first];
+    sz: f32 = way_z[first];
+    for i in 0..n - 1 {
+        a: int = first + i;
+        b: int = a + 1;
+        dx: f32 = way_x[b] - way_x[a];
+        dz: f32 = way_z[b] - way_z[a];
+        len0: f32 = maxf(sqrtf(dx * dx + dz * dz), 0.001);
+        dx = dx / len0;
+        dz = dz / len0;
+        // The corner at this leg's end, if another leg follows.
+        t: f32 = 0.0;
+        rad: f32 = 0.0;
+        ex: f32 = 0.0;
+        ez: f32 = 0.0;
+        phi: f32 = 0.0;
+        turn: f32 = 1.0;
+        if (i < n - 2) {
+            ex = way_x[b + 1] - way_x[b];
+            ez = way_z[b + 1] - way_z[b];
+            len1: f32 = maxf(sqrtf(ex * ex + ez * ez), 0.001);
+            ex = ex / len1;
+            ez = ez / len1;
+            cross: f32 = dx * ez - dz * ex;
+            phi = atan2f(absf(cross), dx * ex + dz * ez);
+            if (cross < 0.0) turn = -1.0;
+            if (phi > 0.02) {
+                half: f32 = sinf(phi * 0.5) / maxf(cosf(phi * 0.5), 0.05);
+                t = minf(way_corner[b] * half, 0.45 * minf(len0, len1));
+                rad = t / half
+            }
+        }
+        // The straight of it.
+        endx: f32 = way_x[b] - dx * t;
+        endz: f32 = way_z[b] - dz * t;
+        run: f32 = sqrtf((endx - sx) * (endx - sx) + (endz - sz) * (endz - sz));
+        steps: int = maxi((run / PATH_STEP) as int, 1);
+        for k in 0..steps {
+            u: f32 = k as f32 / steps as f32;
+            put_raw(lerpf(sx, endx, u), lerpf(sz, endz, u), way_speed[b], b)
+        }
+        sx = endx;
+        sz = endz;
+        // And the corner: an arc, taken no faster than his grip holds. Its
+        // first half is this leg's, its second the next's.
+        if (t > 0.0) {
+            cx: f32 = endx - dz * rad * turn;
+            cz: f32 = endz + dx * rad * turn;
+            vmax: f32 = sqrtf(gf(g, G_GRIP) * rad);
+            arcs: int = maxi((phi * rad / PATH_STEP) as int, 2);
+            for k in 0..arcs {
+                ang: f32 = phi * turn * k as f32 / arcs as f32;
+                ox: f32 = endx - cx;
+                oz: f32 = endz - cz;
+                leg: int = b;
+                if (k * 2 >= arcs) leg = b + 1;
+                put_raw(cx + ox * cosf(ang) - oz * sinf(ang), cz + ox * sinf(ang) + oz * cosf(ang),
+                    minf(vmax, minf(way_speed[b], way_speed[b + 1])), leg)
+            }
+            sx = way_x[b] + ex * t;
+            sz = way_z[b] + ez * t
+        }
+    }
+    put_raw(way_x[first + n - 1], way_z[first + n - 1], way_speed[first + n - 1],
+        first + n - 1);
+    // The same path with its points evenly apart.
+    path_n = 0;
+    k: int = 0;
+    along: f32 = 0.0;
+    want: f32 = 0.0;
+    while (k < raw_n - 1 && path_n < MAX_PATH) {
+        dx: f32 = raw_x[k + 1] - raw_x[k];
+        dz: f32 = raw_z[k + 1] - raw_z[k];
+        d: f32 = sqrtf(dx * dx + dz * dz);
+        if (want <= along + d && d > 0.000001) {
+            u: f32 = (want - along) / d;
+            path_x[path_n] = raw_x[k] + dx * u;
+            path_z[path_n] = raw_z[k] + dz * u;
+            path_v[path_n] = raw_v[k];
+            path_leg[path_n] = raw_leg[k];
+            path_n = path_n + 1;
+            want = want + PATH_STEP
+        } else {
+            along = along + d;
+            k = k + 1
+        }
+    }
+    for w in first..first + n {
+        leg_from[w] = path_n;
+        leg_to[w] = 0
+    }
+    for i in 0..path_n {
+        w: int = path_leg[i];
+        leg_from[w] = mini(leg_from[w], i);
+        leg_to[w] = maxi(leg_to[w], i + 1)
+    }
+    // No faster than he can slow for what is ahead, nor than he can have
+    // sped up from what is behind; and round again, since the path's end
+    // runs into its beginning.
+    brake: f32 = 2.0 * gf(g, G_BRAKE) * PATH_STEP;
+    burst: f32 = 2.0 * gf(g, G_BURST) * PATH_STEP;
+    top: f32 = maxf(gf(g, G_TOP), 1.0);
+    for _round in 0..2 {
+        for j in 0..path_n {
+            i: int = path_n - 1 - j;
+            next: f32 = path_v[(i + 1) % path_n];
+            path_v[i] = minf(path_v[i], sqrtf(next * next + brake))
+        }
+        for i in 0..path_n {
+            before: f32 = path_v[(i + path_n - 1) % path_n];
+            // (He speeds up hardest from slow, and less the nearer his
+            // top speed.)
+            path_v[i] = minf(path_v[i], sqrtf(before * before + burst * maxf(1.0 - before / top,
+                0.05)))
+        }
+    }
+}
+
+// ---- where he is ----
+// The fixed step everything moves by, so a route is the same every time.
+const TICK: f32 = 0.008333333;
+
+going: bool = false;
+
+go_route: int = 0;
+
+go_gait: int = 0;
+
+// How far along the path, and how many times round. Each time round starts
+// where the last ended, facing as it ended: go_ox, go_oz, and go_turn carry
+// the path there.
+go_s: f32 = 0.0;
+
+go_ox: f32 = 0.0;
+
+go_oz: f32 = 0.0;
+
+go_turn: f32 = 0.0;
+
+go_p: V3 = V3 { x: 0.0, y: 0.0, z: 0.0 };
+
+go_v: V3 = V3 { x: 0.0, y: 0.0, z: 0.0 };
+
+go_a: V3 = V3 { x: 0.0, y: 0.0, z: 0.0 };
+
+// The way he faces, before any spinning; and the spinning done.
+go_face: f32 = 0.0;
+
+go_spun: f32 = 0.0;
+
+go_spin: f32 = 0.0;
+
+// Where in the stride he is, 0 to 1: the left foot comes down at 0, the
+// right at a half.
+go_phase: f32 = 0.0;
+
+go_time: f32 = 0.0;
+
+// How hard he is speeding up, 0 to 1 or so, eased.
+go_effort: f32 = 0.0;
+
+go_left: f32 = 0.0;
+
+// Each foot (left, then right): whether it is down; where on the ground it
+// is planted, and facing which way; and in the air, where the ankle left
+// from and the ground it is making for.
+foot_down: []bool = new bool[2](true);
+
+foot_at: []f32 = new f32[6](0.0);
+
+foot_yaw: []f32 = new f32[2](0.0);
+
+foot_from: []f32 = new f32[6](0.0);
+
+foot_from_yaw: []f32 = new f32[2](0.0);
+
+foot_to: []f32 = new f32[6](0.0);
+
+// The heading it will land with: kept turning with him, so that it never
+// goes the long way round.
+foot_to_yaw: []f32 = new f32[2](0.0);
+
+// Where each ankle is now, how far the heel is raised, and its heading.
+ankle: []f32 = new f32[6](0.0);
+
+ankle_pitch: []f32 = new f32[2](0.0);
+
+ankle_yaw: []f32 = new f32[2](0.0);
+
+getv(a: []f32, i: int): V3 {
+    v3(a[i * 3], a[i * 3 + 1], a[i * 3 + 2])
+}
+
+putv(a: []f32, i: int, v: V3) {
+    a[i * 3] = v.x;
+    a[i * 3 + 1] = v.y;
+    a[i * 3 + 2] = v.z
+}
+
+// A heading as a direction over the ground, and the direction to its left.
+ahead(yaw: f32): V3 {
+    v3(sinf(yaw), 0.0, cosf(yaw))
+}
+
+leftward(yaw: f32): V3 {
+    v3(cosf(yaw), 0.0, -sinf(yaw))
+}
+
+// The path's point at s along it, carried to where this time round is.
+path_point(s: f32): V3 {
+    f: f32 = clampf(s / PATH_STEP, 0.0, (path_n - 1) as f32);
+    i: int = mini(f as int, path_n - 2);
+    u: f32 = f - i as f32;
+    w0: int = route_first[go_route];
+    x: f32 = lerpf(path_x[i], path_x[i + 1], u) - way_x[w0];
+    z: f32 = lerpf(path_z[i], path_z[i + 1], u) - way_z[w0];
+    c: f32 = cosf(go_turn);
+    sn: f32 = sinf(go_turn);
+    v3(go_ox + x * c + z * sn, 0.0, go_oz - x * sn + z * c)
+}
+
+// The heading of the path at s (past its end, its last).
+path_heading(s: f32): f32 {
+    i: int = clampf(s / PATH_STEP, 0.0, (path_n - 2) as f32) as int;
+    atan2f(path_x[i + 1] - path_x[i], path_z[i + 1] - path_z[i]) + go_turn
+}
+
+// The ankle's place over a point of the ground, the foot flat.
+flat_ankle(g: int, ground: V3): V3 {
+    v3(ground.x, bone_rest[gait_foot[g] * 3 + 1] + gf(g, G_SOLE), ground.z)
+}
+
+// From the toe's joint to the ankle, at rest: what the foot turns about as
+// the heel comes up.
+toe_to_ankle(g: int): V3 {
+    f: int = gait_foot[g];
+    t: int = gait_toe[g];
+    if (t < 0) return v3(0.0, bone_rest[f * 3 + 1] * 0.7, -0.12);
+    v3(0.0, bone_rest[f * 3 + 1] - bone_rest[t * 3 + 1], bone_rest[f * 3 + 2] - bone_rest[t * 3 + 2])
+}
+
+// The ankle of a foot planted at a point, heading yaw, its heel raised by
+// pitch about its toe.
+raised_ankle(
+    g: int,
+    ground: V3,
+    yaw: f32,
+    pitch: f32
+): V3 {
+    r: V3 = toe_to_ankle(g);
+    toe: V3 = v_sub(flat_ankle(g, ground), v_rotate(r, UP, yaw));
+    lifted: V3 = v_rotate(r, v3(1.0, 0.0, 0.0), pitch);
+    v_add(toe, v_rotate(lifted, UP, yaw))
+}
+
+UP: V3 = V3 { x: 0.0, y: 1.0, z: 0.0 };
+
+frac(x: f32): f32 {
+    x - floorf(x)
+}
+
+// Whether the route's gait matches its motion from takes (match.l8).
+go_matching: bool = false;
+
+// Begin route r: at its start, at the speed it has there, in stride.
+go_begin(r: int) {
+    go_route = r;
+    go_gait = route_gait[r];
+    steering = route_steered[r];
+    if (steering) {
+        // (Steered: a path of one point, where he stands.)
+        path_n = 0;
+        drive_begin();
+        going = true
+    } else {
+        build_path(r);
+        going = path_n > 2
+    }
+    if (!going) return;
+    w0: int = route_first[r];
+    go_s = 0.0;
+    go_ox = 0.0;
+    go_oz = 0.0;
+    if (!steering) {
+        go_ox = way_x[w0];
+        go_oz = way_z[w0]
+    }
+    go_turn = 0.0;
+    go_spun = 0.0;
+    go_spin = 0.0;
+    go_time = 0.0;
+    go_effort = 0.0;
+    go_left = 0.0;
+    go_phase = 0.0;
+    if (steering) {
+        go_p = v3(0.0, 0.0, 0.0);
+        go_face = 0.0;
+        go_v = v3(0.0, 0.0, 0.0)
+    } else {
+        go_p = path_point(0.0);
+        go_face = path_heading(0.0);
+        go_v = v_scale(ahead(go_face), path_v[0])
+    }
+    go_a = v3(0.0, 0.0, 0.0);
+    g: int = go_gait;
+    for i in 0..2 {
+        side: f32 = 1.0 - 2.0 * i as f32;
+        at: V3 = v_madd(go_p, leftward(go_face), side * gf(g, G_WIDTH));
+        // (The right foot starts in the air, half a stride behind.)
+        if (i == 1) at = v_madd(at, go_v, -0.12);
+        putv(foot_at, i, at);
+        putv(foot_to, i, at);
+        putv(foot_from, i, flat_ankle(g, at));
+        putv(ankle, i, flat_ankle(g, at));
+        foot_yaw[i] = go_face;
+        foot_from_yaw[i] = go_face;
+        foot_to_yaw[i] = go_face;
+        ankle_yaw[i] = go_face;
+        ankle_pitch[i] = 0.0;
+        foot_down[i] = i == 0
+    }
+    go_matching = matching(go_gait) && !steering;
+    if (go_matching) mm_begin()
+}
+
+// One tick on.
+go_tick() {
+    h: f32 = TICK;
+    if (steering) {
+        drive_tick(h);
+        go_time = go_time + h;
+        return
+    }
+    length: f32 = (path_n - 1) as f32 * PATH_STEP;
+    i: int = clampf(go_s / PATH_STEP, 0.0, (path_n - 1) as f32) as int;
+    go_s = go_s + path_v[i] * h;
+    if (go_s >= length) {
+        // Round again, from where this round ended.
+        end: V3 = path_point(length);
+        w0: int = route_first[go_route];
+        go_turn = go_turn + path_heading(length) - path_heading(0.0);
+        go_ox = end.x;
+        go_oz = end.z;
+        go_s = go_s - length;
+        for w in w0..w0 + route_n[go_route] go_spun = go_spun + way_spin[w] * PI / 180.0
+    }
+    p: V3 = path_point(go_s);
+    v: V3 = v_scale(v_sub(p, go_p), 1.0 / h);
+    go_a = v_lerp(go_a, v_scale(v_sub(v, go_v), 1.0 / h), 1.0 - expf(-h / 0.1));
+    go_v = v;
+    go_p = p;
+    go_time = go_time + h;
+    speed: f32 = v_len(v);
+    effort: f32 = 0.0;
+    if (speed > 0.3) effort = clampf(v_dot(go_a, go_v) / speed / 6.0, 0.0, 1.2);
+    go_effort = lerpf(go_effort, effort, ease(5.0, h));
+    // Facing: the way the path goes a little ahead (so he turns into a
+    // corner as he comes to it), or the way the leg says; and the leg's
+    // spin, as far through as he is through the leg.
+    i = clampf(go_s / PATH_STEP, 0.0, (path_n - 1) as f32) as int;
+    leg: int = path_leg[i];
+    want: f32 = path_heading(go_s + speed * 0.25);
+    if (way_face[leg] != FACE_PATH) want = go_turn + way_face[leg] * PI / 180.0;
+    go_face = approach_angle(go_face, want, ease(9.0, h));
+    through: f32 = clampf((i - leg_from[leg]) as f32 / maxf((leg_to[leg] - leg_from[leg]) as f32,
+        1.0), 0.0, 1.0);
+    done: f32 = 0.0;
+    for w in route_first[go_route]..leg done = done + way_spin[w];
+    go_spin = go_spun + (done + way_spin[leg] * smoothstepf(0.0, 1.0, through)) * PI / 180.0;
+    go_stride(h)
+}
+
+// The stride: each foot down or carried to where it will land.
+go_stride(h: f32) {
+    g: int = go_gait;
+    speed: f32 = v_len(go_v);
+    facing: f32 = go_face + go_spin;
+    period: f32 = 2.0 / steps_now(g);
+    duty: f32 = ramp(g, G_CONTACT, speed);
+    go_phase = frac(go_phase + h / period);
+    // (Which side of the stride the left leg is on, for the hips and arms.)
+    go_left = cosf(TAU * (go_phase + 0.06));
+    for f in 0..2 {
+        side: f32 = 1.0 - 2.0 * f as f32;
+        psi: f32 = frac(go_phase + 0.5 * f as f32);
+        down: bool = psi < duty;
+        if (down && !foot_down[f]) {
+            putv(foot_at, f, getv(foot_to, f));
+            foot_yaw[f] = ankle_yaw[f]
+        }
+        if (!down && foot_down[f]) {
+            putv(foot_from, f, getv(ankle, f));
+            foot_from_yaw[f] = foot_yaw[f];
+            foot_to_yaw[f] = foot_yaw[f];
+            putv(foot_to, f, getv(foot_at, f))
+        }
+        foot_down[f] = down;
+        if (down) {
+            sp: f32 = psi / duty;
+            // Down: on the ball of the foot, the heel a little up as it
+            // lands, nearly down in the middle, and high as he leaves it.
+            // (Only standing about is he flat on his feet.)
+            k: f32 = PI / 180.0 * clampf(speed / 1.5, 0.0, 1.0);
+            pitch: f32 = lerpf(gf(g, G_TOES), gf(g, G_TOES + 1), smoothstepf(0.0,
+                0.35, sp)) * k;
+            pitch = lerpf(pitch, gf(g, G_TOES + 2) * k, smoothstepf(0.4, 1.0, sp));
+            ankle_pitch[f] = pitch;
+            ankle_yaw[f] = foot_yaw[f];
+            putv(ankle, f, raised_ankle(g, getv(foot_at, f), foot_yaw[f], pitch))
+        } else {
+            u: f32 = (psi - duty) / (1.0 - duty);
+            // Where it will come down: under where he will be, ahead by
+            // some of the ground he will cover over it, out to its side,
+            // and against whatever push he is making.
+            if (u < 0.85) {
+                t_land: f32 = (1.0 - psi) * period;
+                on: f32 = duty * period;
+                body: V3 = v_add(go_p, v_add(v_scale(go_v, t_land), v_scale(go_a,
+                    0.25 * t_land * t_land)));
+                to: V3 = v_add(body, v_scale(go_v, on * gf(g, G_PLANT)));
+                push: V3 = go_a;
+                if (v_len(push) > 7.0) push = v_scale(push, 7.0 / v_len(push));
+                to = v_madd(to, push, -gf(g, G_CATCH));
+                to = v_madd(to, leftward(facing), side * gf(g, G_WIDTH));
+                // (Going more sideways than ahead he shuffles: his feet
+                // do not cross. Turning, they do: both land outside him.)
+                across: f32 = v_dot(v_sub(to, body), leftward(facing)) * side;
+                if (absf(v_dot(go_v, leftward(facing))) > absf(v_dot(go_v, ahead(facing))) && across < 0.03) to = v_madd(to,
+                    leftward(facing), side * (0.03 - across));
+                putv(foot_to, f, v_lerp(getv(foot_to, f), to, ease(60.0, h)))
+            }
+            w: f32 = carry(u);
+            from: V3 = getv(foot_from, f);
+            flat: V3 = flat_ankle(g, getv(foot_to, f));
+            at: V3 = v_lerp(from, flat, w);
+            // Up behind, soon; then carried through high and set down.
+            early: f32 = sinf(PI * powf(u, 0.7));
+            at.y = at.y + ramp(g, G_KICK, speed) * early * early;
+            putv(ankle, f, at);
+            // In the air: the toes pointed as it leaves, drawn up as it
+            // comes through, and let down to land on its ball again.
+            k: f32 = PI / 180.0 * clampf(speed / 1.5, 0.0, 1.0);
+            pitch: f32 = lerpf(gf(g, G_TOES + 2) * k, -0.25, smoothstepf(0.15, 0.7,
+                u));
+            pitch = lerpf(pitch, gf(g, G_TOES) * k, smoothstepf(0.8, 1.0, u));
+            ankle_pitch[f] = pitch;
+            foot_to_yaw[f] = foot_to_yaw[f] + wrap_angle(facing - foot_to_yaw[f]);
+            ankle_yaw[f] = lerpf(foot_from_yaw[f], foot_to_yaw[f], w)
+        }
+    }
+    if (go_matching) mm_tick()
+}
+
+// How far a foot in the air has got from where it left to where it will
+// land, u of the way through its time: it gathers speed, is carried
+// steadily, and is set down slowing.
+carry(u: f32): f32 {
+    r: f32 = 0.2;
+    if (u < r) return u * u / (2.0 * r * (1.0 - r));
+    if (u > 1.0 - r) return 1.0 - (1.0 - u) * (1.0 - u) / (2.0 * r * (1.0 - r));
+    (u - r * 0.5) / (1.0 - r)
+}
+
+// Go on by dt, in whole ticks.
+go_left_over: f32 = 0.0;
+
+go_on(dt: f32) {
+    if (!going) return;
+    go_left_over = go_left_over + dt;
+    n: int = 0;
+    while (go_left_over >= TICK && n < 40) {
+        go_tick();
+        go_left_over = go_left_over - TICK;
+        n = n + 1
+    }
+    if (go_left_over > TICK) go_left_over = 0.0
+}
+
+// Slide everything by whole lengths of the field (a hundred yards), to
+// keep near the middle of the world without the ground's marks jumping.
+go_recenter(): V3 {
+    if (absf(go_p.x) < 400.0 && absf(go_p.z) < 400.0) return v3(0.0, 0.0, 0.0);
+    by: V3 = v3(-floorf(go_p.x / 91.44 + 0.5) * 91.44, 0.0, -floorf(go_p.z / 91.44 + 0.5) * 91.44);
+    go_p = v_add(go_p, by);
+    go_ox = go_ox + by.x;
+    go_oz = go_oz + by.z;
+    for f in 0..2 {
+        putv(foot_at, f, v_add(getv(foot_at, f), by));
+        putv(foot_to, f, v_add(getv(foot_to, f), by));
+        putv(foot_from, f, v_add(getv(foot_from, f), by));
+        putv(ankle, f, v_add(getv(ankle, f), by))
+    }
+    by
+}
+
+// ---- the pose ----
+// The turn that takes one direction to another, the short way.
+q_between(a: V3, b: V3): Q {
+    c: V3 = v_cross(a, b);
+    q_unit(Q {
+        x: c.x,
+        y: c.y,
+        z: c.z,
+        w: 1.0 + v_dot(a, b)
+    })
+}
+
+// Bone b turned so that in the world it is turned as `want`, whatever the
+// bones above it are doing.
+turn_to(b: int, want: Q) {
+    par: int = bone_parent[b];
+    if (par < 0) {
+        set_q(WORK, b, want);
+        return
+    }
+    place_bones(WORK);
+    set_q(WORK, b, q_unit(q_mul(q_conj(wq(par)), want)))
+}
+
+// The pose he is in now, into the pose shown.
+go_pose() {
+    if (!going) return;
+    if (steering) {
+        steer_pose();
+        return
+    }
+    if (go_matching) {
+        mm_pose(1.0 / 60.0);
+        return
+    }
+    g: int = go_gait;
+    base: int = gait_base[g];
+    for b in 0..nbones {
+        if (base >= 0) {
+            set_q(WORK, b, get_q(base, b));
+            set_t(WORK, b, get_t(base, b))
+        } else {
+            set_q(WORK, b, q_ident());
+            set_t(WORK, b, v3(0.0, 0.0, 0.0))
+        }
+    }
+    speed: f32 = v_len(go_v);
+    facing: f32 = go_face + go_spin;
+    duty: f32 = ramp(g, G_CONTACT, speed);
+    // (His arms work as hard speeding up as they do at speed.)
+    fast: f32 = clampf(maxf(speed / 8.5, go_effort), 0.35, 1.1);
+    k: f32 = PI / 180.0;
+    // The lean: forward with speed, as far as he is going the way he
+    // faces; and into whatever push he is making.
+    tilt: V3 = v3(0.0, 0.0, 0.0);
+    if (speed > 0.3) {
+        along: f32 = maxf(v_dot(go_v, ahead(facing)) / speed, 0.0);
+        lean: f32 = ramp(g, G_LEAN, speed) * along * k;
+        tilt = v_scale(go_v, sinf(lean) / cosf(lean) / speed)
+    }
+    // Speeding up, he leans into it. Slowing, he sits back only a little
+    // (he brakes with his legs). Turning, his legs lean under him, the
+    // feet put out against the push, and his trunk hardly at all: a third
+    // of a degree for each m/s2, as people measured running a figure of
+    // eight do.
+    push_ahead: f32 = v_dot(go_a, ahead(facing));
+    push_aside: f32 = v_dot(go_a, leftward(facing));
+    if (push_ahead < 0.0) push_ahead = push_ahead * 0.25;
+    tilt = v_madd(tilt, ahead(facing), push_ahead * gf(g, G_DRIVE) / 9.81);
+    tilt = v_madd(tilt, leftward(facing), push_aside * gf(g, G_BANK) * k);
+    if (v_len(tilt) > 0.7) tilt = v_scale(tilt, 0.7 / v_len(tilt));
+    // The hips: turned with the legs, dropped a little on the side of the
+    // foot in the air; the chest turned back against them.
+    twist: f32 = gf(g, G_TWIST) * k * go_left * fast;
+    roll: Q = q_axis(v3(0.0, 0.0, 1.0), gf(g, G_ROLL) * k * sinf(TAU * (go_phase - duty * 0.5)) * fast);
+    hips: Q = q_mul(q_between(UP, v_norm(v_madd(UP, tilt, 0.55))), q_mul(q_axis(UP,
+        facing - twist), roll));
+    sway: Q = q_axis(v3(0.0, 0.0, 1.0), -gf(g, G_SWAY) * k * sinf(TAU * (go_phase - duty * 0.5)) * fast);
+    chest: Q = q_mul(q_between(UP, v_norm(v_madd(UP, tilt, gf(g, G_HUNCH)))), q_mul(q_axis(UP,
+        facing + twist * (gf(g, G_COUNTER) - 1.0)), sway));
+    root: int = gait_root[g];
+    // Their height: below standing by the gait's sink and a crouch into
+    // a push; lowest over each foot, highest between.
+    push: f32 = minf(v_len(go_a), 12.0);
+    y: f32 = bone_rest[root * 3 + 1] - gf(g, G_SINK) - gf(g, G_SINK + 1) * speed - gf(g,
+        G_CROUCH) * push;
+    y = y - gf(g, G_BOUNCE) * fast * cosf(2.0 * TAU * (go_phase - duty * 0.5));
+    set_q(WORK, root, hips);
+    set_t(WORK, root, v3(go_p.x - bone_rest[root * 3], y - bone_rest[root * 3 + 1],
+        go_p.z - bone_rest[root * 3 + 2]));
+    // No higher than the legs can reach to where the ankles are.
+    foot: int = gait_foot[g];
+    shin: int = bone_parent[foot];
+    thigh: int = bone_parent[shin];
+    leg: f32 = v_len(v_sub(bone_pos(shin), bone_pos(thigh))) + v_len(v_sub(bone_pos(foot),
+        bone_pos(shin)));
+    place_bones(WORK);
+    drop: f32 = 0.0;
+    for f in 0..2 {
+        hip: V3 = wp(thigh);
+        if (f == 1) hip = wp(bone_twin[thigh]);
+        a: V3 = getv(ankle, f);
+        flat: f32 = (hip.x - a.x) * (hip.x - a.x) + (hip.z - a.z) * (hip.z - a.z);
+        reachable: f32 = leg * gf(g, G_STRAIGHT);
+        need: f32 = 1.0;
+        if (flat < reachable * reachable) need = maxf(hip.y - a.y - sqrtf(reachable * reachable - flat),
+            0.0);
+        // (A foot counts from a little before it lands to a little before
+        // it leaves: one trailing behind does not pull him down.)
+        psi: f32 = frac(go_phase + 0.5 * f as f32);
+        if (foot_down[f]) need = need * (1.0 - smoothstepf(0.75, 1.0, psi / duty)) else need = need * smoothstepf(0.6,
+            0.95, (psi - duty) / (1.0 - duty));
+        drop = maxf(drop, need)
+    }
+    drop = minf(drop, 0.12);
+    set_t(WORK, root, v_sub(get_t(WORK, root), v3(0.0, drop, 0.0)));
+    // The back, the chest, and the head: which stays nearly level, looking
+    // where he faces.
+    if (gait_spine[g * 2] >= 0) {
+        mid: Q = q_unit(Q {
+            x: hips.x + chest.x,
+            y: hips.y + chest.y,
+            z: hips.z + chest.z,
+            w: hips.w + chest.w
+        });
+        if (hips.x * chest.x + hips.y * chest.y + hips.z * chest.z + hips.w * chest.w < 0.0) mid = chest;
+        turn_to(gait_spine[g * 2], mid)
+    }
+    if (gait_spine[g * 2 + 1] >= 0) turn_to(gait_spine[g * 2 + 1], chest);
+    if (gait_head[g] >= 0) turn_to(gait_head[g], q_mul(q_between(UP, v_norm(v_madd(UP,
+        tilt, 0.5))), q_axis(UP, facing)));
+    // The arms: each forward as the leg on its side goes back, the elbow
+    // closing in front.
+    for i in 0..gait_narm[g] {
+        upper: int = gait_arm[g * 4 + i * 2];
+        fore: int = gait_arm[g * 4 + i * 2 + 1];
+        side: f32 = 1.0;
+        if (name_side(bone_name[upper]) == 2) side = -1.0;
+        a: f32 = -go_left * side;
+        // (How far to the front of its swing it is, 0 to 1.)
+        front: f32 = smoothstepf(-1.0, 1.0, a);
+        swing: f32 = -a * gf(g, G_PUMP) * fast;
+        if (a < 0.0) swing = -a * gf(g, G_PUMP + 1) * fast;
+        out: f32 = lerpf(gf(g, G_SPREAD + 1), gf(g, G_SPREAD), front);
+        set_q(WORK, upper, q_degrees(v3(swing, -gf(g, G_CROSS) * front * side, (out - 38.0) * side)));
+        hinge: V3 = v3(bone_hinge[fore * 3], bone_hinge[fore * 3 + 1], bone_hinge[fore * 3 + 2]);
+        set_q(WORK, fore, q_axis(hinge, lerpf(gf(g, G_ELBOW + 1), gf(g, G_ELBOW),
+            front) * k))
+    }
+    // The legs: from the hips to where the ankles are, knees ahead; and
+    // the feet turned as they are planted or carried.
+    for f in 0..2 {
+        fb: int = foot;
+        if (f == 1) fb = bone_twin[foot];
+        place_bones(WORK);
+        hip: V3 = wp(bone_parent[bone_parent[fb]]);
+        // The knee bends one way round: ahead of a leg that hangs down,
+        // below one that trails behind, above one that reaches ahead.
+        way: f32 = facing;
+        down_leg: V3 = v_norm(v_sub(getv(ankle, f), hip));
+        knee: V3 = v_cross(down_leg, leftward(way));
+        if (v_len(knee) < 0.2) knee = ahead(way);
+        // (Never quite straight: an ankle too far to reach so is let go
+        // short, as a foot leaving the ground is.)
+        to: V3 = getv(ankle, f);
+        far: f32 = v_len(v_sub(to, hip));
+        most: f32 = leg * (gf(g, G_STRAIGHT) + 0.02);
+        if (far > most) to = v_madd(hip, v_sub(to, hip), most / far);
+        reach(fb, to, true, v_add(hip, v_norm(knee)));
+        turn_to(fb, q_mul(q_axis(UP, ankle_yaw[f]), q_axis(v3(1.0, 0.0, 0.0), ankle_pitch[f])));
+        if (gait_toe[g] >= 0) {
+            tb: int = gait_toe[g];
+            if (f == 1) tb = bone_twin[tb];
+            flat: f32 = 0.0;
+            if (foot_down[f]) flat = -minf(ankle_pitch[f], 1.1);
+            set_q(WORK, tb, q_axis(v3(1.0, 0.0, 0.0), flat))
+        }
+    }
+    for b in 0..nbones {
+        set_q(SHOWN, b, get_q(WORK, b));
+        set_t(SHOWN, b, get_t(WORK, b))
+    }
+}

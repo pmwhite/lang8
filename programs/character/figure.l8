@@ -1,0 +1,1831 @@
+tag character;
+
+use_tag std;
+
+use_tag skate;
+
+// A figure, as its text file describes it (see FORMAT.md): materials, a
+// skeleton, layers of shapes that blend into surfaces, stickers on them,
+// poses, and animations. This file holds the figure and reads the text.
+//
+// Everything is in metres in the rest pose: y up, the figure facing +z, its
+// left hand at +x. A bone, shape, or sticker named `.l` gets a mirrored twin
+// named `.r`.
+const MAX_NAMES: int = 1024;
+
+const MAX_NAME_BYTES: int = 16384;
+
+const MAX_MATS: int = 48;
+
+const MAX_BONES: int = 48;
+
+const MAX_LAYERS: int = 24;
+
+const MAX_OPS: int = 1024;
+
+const MAX_PARTS: int = 160;
+
+const MAX_STICKERS: int = 32;
+
+const MAX_MARKS: int = 320;
+
+const MAX_POSES: int = 32;
+
+const MAX_ENTRIES: int = 1536;
+
+const MAX_ANIMS: int = 8;
+
+const MAX_KEYS: int = 64;
+
+// ---- names ----
+name_pool: []i8 = new i8[MAX_NAME_BYTES](0i8);
+
+name_at: []int = new int[MAX_NAMES](0);
+
+name_len: []int = new int[MAX_NAMES](0);
+
+nnames: int = 0;
+
+name_bytes: int = 0;
+
+// The name spelled buf[a..b), added if it is new.
+intern(buf: []i8, a: int, b: int): int {
+    n: int = b - a;
+    for id in 0..nnames {
+        if (name_len[id] == n) {
+            same: bool = true;
+            for i in 0..n {
+                if (name_pool[name_at[id] + i] != buf[a + i]) same = false
+            }
+            if (same) return id
+        }
+    }
+    if (nnames >= MAX_NAMES || name_bytes + n > MAX_NAME_BYTES) return 0;
+    name_at[nnames] = name_bytes;
+    name_len[nnames] = n;
+    for i in 0..n name_pool[name_bytes + i] = buf[a + i];
+    name_bytes = name_bytes + n;
+    nnames = nnames + 1;
+    nnames - 1
+}
+
+name_tmp: []i8 = new i8[256](0i8);
+
+// 1 for a name ending `.l`, 2 for `.r`, 0 for any other.
+name_side(id: int): int {
+    n: int = name_len[id];
+    if (n < 2 || name_pool[name_at[id] + n - 2] != '.') return 0;
+    c: i8 = name_pool[name_at[id] + n - 1];
+    if (c == 'l') return 1;
+    if (c == 'r') return 2;
+    0
+}
+
+// The other side's name: `.l` for `.r` and the reverse; itself otherwise.
+twin_name(id: int): int {
+    side: int = name_side(id);
+    if (side == 0) return id;
+    n: int = mini(name_len[id], 255);
+    for i in 0..n name_tmp[i] = name_pool[name_at[id] + i];
+    if (side == 1) name_tmp[n - 1] = 'r' else name_tmp[n - 1] = 'l';
+    intern(name_tmp, 0, n)
+}
+
+// The name with `.l` after it.
+left_name(id: int): int {
+    n: int = mini(name_len[id], 253);
+    for i in 0..n name_tmp[i] = name_pool[name_at[id] + i];
+    name_tmp[n] = '.';
+    name_tmp[n + 1] = 'l';
+    intern(name_tmp, 0, n + 2)
+}
+
+mini(a: int, b: int): int {
+    if (a < b) return a;
+    b
+}
+
+maxi(a: int, b: int): int {
+    if (a > b) return a;
+    b
+}
+
+// ---- the figure ----
+title: []i8 = new i8[64](0i8);
+
+title_len: int = 0;
+
+// The mesher's cell, unless a layer names its own.
+fig_cell: f32 = 0.008;
+
+// Materials: a color and a finish.
+const FINISH_MATTE: int = 0;
+
+const FINISH_SKIN: int = 1;
+
+const FINISH_CLOTH: int = 2;
+
+const FINISH_GLOSS: int = 3;
+
+const FINISH_METAL: int = 4;
+
+const FINISH_LEATHER: int = 5;
+
+const FINISH_RUBBER: int = 6;
+
+mat_name: []int = new int[MAX_MATS](0);
+
+mat_rgb: []f32 = new f32[MAX_MATS * 3](0.0);
+
+mat_finish: []int = new int[MAX_MATS](0);
+
+nmats: int = 0;
+
+// Bones: each a joint, where it is at rest, and the bone it hangs from (-1
+// for the root). A hinge is the axis its `bend` turns about.
+bone_name: []int = new int[MAX_BONES](0);
+
+bone_parent: []int = new int[MAX_BONES](0);
+
+bone_rest: []f32 = new f32[MAX_BONES * 3](0.0);
+
+bone_hinge: []f32 = new f32[MAX_BONES * 3](0.0);
+
+bone_hinged: []bool = new bool[MAX_BONES](false);
+
+bone_twin: []int = new int[MAX_BONES](0);
+
+bone_line: []int = new int[MAX_BONES](0);
+
+nbones: int = 0;
+
+// Layers: each a surface, made by its ops in order.
+layer_name: []int = new int[MAX_LAYERS](0);
+
+layer_mat: []int = new int[MAX_LAYERS](0);
+
+layer_cell: []f32 = new f32[MAX_LAYERS](0.0);
+
+// A hidden layer is only for others to grow from, clip to, or carve by.
+layer_hidden: []bool = new bool[MAX_LAYERS](false);
+
+// How far apart two shapes' surfaces can be and still share a vertex's
+// weights, and the blend its shapes get unless they say.
+layer_skin: []f32 = new f32[MAX_LAYERS](0.0);
+
+layer_blend: []f32 = new f32[MAX_LAYERS](0.0);
+
+// A bone the whole layer moves with, or -1 for its shapes' own.
+layer_bind: []int = new int[MAX_LAYERS](0);
+
+// A layer whose inside this one is meshed finer in (or -1), and that finer
+// cell.
+layer_zone: []int = new int[MAX_LAYERS](0);
+
+layer_fine: []f32 = new f32[MAX_LAYERS](0.0);
+
+layer_first: []int = new int[MAX_LAYERS](0);
+
+layer_nops: []int = new int[MAX_LAYERS](0);
+
+layer_line: []int = new int[MAX_LAYERS](0);
+
+nlayers: int = 0;
+
+// Ops: shapes, and the other layers a layer is made from.
+const OP_CONE: int = 1;
+
+const OP_EGG: int = 2;
+
+const OP_BOX: int = 3;
+
+const OP_GROW: int = 10;
+
+const OP_CLIP: int = 11;
+
+const OP_CARVE: int = 12;
+
+const MODE_ADD: int = 0;
+
+const MODE_CUT: int = 1;
+
+const MODE_KEEP: int = 2;
+
+const OP_FLOATS: int = 24;
+
+// An op's numbers: a point and radius (or a center), a second point and
+// radius (or three radii or half sizes, and a rounding), the shape's own
+// axes, how flat it is squashed and along what, its blend, and how much a
+// layer is grown.
+const F_A: int = 0;
+
+const F_RA: int = 3;
+
+const F_B: int = 4;
+
+const F_RB: int = 7;
+
+const F_AXES: int = 8;
+
+const F_FLAT: int = 17;
+
+const F_FLAT_AXIS: int = 18;
+
+const F_BLEND: int = 21;
+
+const F_GROW: int = 22;
+
+op_kind: []int = new int[MAX_OPS](0);
+
+op_mode: []int = new int[MAX_OPS](0);
+
+op_layer: []int = new int[MAX_OPS](0);
+
+op_part: []int = new int[MAX_OPS](0);
+
+op_bone: []int = new int[MAX_OPS](0);
+
+// A cone's second end may move with another bone.
+op_bone2: []int = new int[MAX_OPS](0);
+
+// Its material, or -1 for the layer's.
+op_mat: []int = new int[MAX_OPS](0);
+
+op_ref: []int = new int[MAX_OPS](0);
+
+op_line: []int = new int[MAX_OPS](0);
+
+op_f: []f32 = new f32[MAX_OPS * OP_FLOATS](0.0);
+
+// A sphere that holds the shape.
+op_ball: []f32 = new f32[MAX_OPS * 4](0.0);
+
+nops: int = 0;
+
+// Parts: named groups of a layer's shapes, to look at one by one.
+part_name: []int = new int[MAX_PARTS](0);
+
+part_layer: []int = new int[MAX_PARTS](0);
+
+part_line: []int = new int[MAX_PARTS](0);
+
+nparts: int = 0;
+
+// Stickers: flat marks projected onto a layer's surface, moving with it.
+const ST_FLOATS: int = 16;
+
+const S_O: int = 0;
+
+const S_RIGHT: int = 3;
+
+const S_UP: int = 6;
+
+const S_FACING: int = 9;
+
+const S_W: int = 12;
+
+const S_H: int = 13;
+
+const S_DEPTH: int = 14;
+
+st_name: []int = new int[MAX_STICKERS](0);
+
+st_layer: []int = new int[MAX_STICKERS](0);
+
+st_f: []f32 = new f32[MAX_STICKERS * ST_FLOATS](0.0);
+
+st_first: []int = new int[MAX_STICKERS](0);
+
+st_n: []int = new int[MAX_STICKERS](0);
+
+st_line: []int = new int[MAX_STICKERS](0);
+
+nstickers: int = 0;
+
+const MARK_DISC: int = 0;
+
+const MARK_OVAL: int = 1;
+
+const MARK_LINE: int = 2;
+
+const MARK_RECT: int = 3;
+
+const MARK_DIGITS: int = 4;
+
+const MARK_FLOATS: int = 8;
+
+mk_kind: []int = new int[MAX_MARKS](0);
+
+mk_f: []f32 = new f32[MAX_MARKS * MARK_FLOATS](0.0);
+
+mk_mat: []int = new int[MAX_MARKS](0);
+
+// Digits: their text, and an edge's material (or -1).
+mk_text: []int = new int[MAX_MARKS](0);
+
+mk_edge: []int = new int[MAX_MARKS](0);
+
+nmarks: int = 0;
+
+// Poses: what each does to the rest pose, in order.
+const DO_MOVE: int = 0;
+
+const DO_TURN: int = 1;
+
+const DO_BEND: int = 2;
+
+const DO_CURL: int = 3;
+
+const DO_REACH: int = 4;
+
+const DO_LIKE: int = 5;
+
+const DO_LEVEL: int = 6;
+
+const DO_HIDE: int = 7;
+
+pose_name: []int = new int[MAX_POSES](0);
+
+pose_first: []int = new int[MAX_POSES](0);
+
+pose_n: []int = new int[MAX_POSES](0);
+
+pose_line: []int = new int[MAX_POSES](0);
+
+nposes: int = 0;
+
+pe_kind: []int = new int[MAX_ENTRIES](0);
+
+pe_bone: []int = new int[MAX_ENTRIES](0);
+
+pe_f: []f32 = new f32[MAX_ENTRIES * 6](0.0);
+
+// A reach with a pole: a point its middle joint bends toward. (For a
+// `like`, whether the pose is taken mirrored.)
+pe_pole: []bool = new bool[MAX_ENTRIES](false);
+
+// The bone a reach's points ride on, or -1 for points that stay put.
+pe_on: []int = new int[MAX_ENTRIES](0);
+
+nentries: int = 0;
+
+// Animations: poses at times through a loop.
+anim_name: []int = new int[MAX_ANIMS](0);
+
+anim_secs: []f32 = new f32[MAX_ANIMS](0.0);
+
+anim_first: []int = new int[MAX_ANIMS](0);
+
+anim_n: []int = new int[MAX_ANIMS](0);
+
+anim_line: []int = new int[MAX_ANIMS](0);
+
+nanims: int = 0;
+
+key_t: []f32 = new f32[MAX_KEYS](0.0);
+
+key_pose: []int = new int[MAX_KEYS](0);
+
+key_mirror: []bool = new bool[MAX_KEYS](false);
+
+nkeys: int = 0;
+
+// Gaits: how the figure carries itself over the ground, whichever way it
+// goes: the bones that take part, and numbers for the manner of it. (See
+// gait.l8 for what each number does.)
+const MAX_GAITS: int = 6;
+
+const GAIT_FLOATS: int = 48;
+
+const G_CADENCE: int = 0;
+
+const G_CONTACT: int = 3;
+
+const G_WIDTH: int = 6;
+
+const G_KICK: int = 7;
+
+const G_BOUNCE: int = 10;
+
+const G_SINK: int = 11;
+
+const G_CROUCH: int = 13;
+
+const G_LEAN: int = 14;
+
+const G_DRIVE: int = 17;
+
+const G_TWIST: int = 18;
+
+const G_COUNTER: int = 19;
+
+const G_PUMP: int = 20;
+
+const G_GRIP: int = 23;
+
+const G_BURST: int = 24;
+
+const G_BRAKE: int = 25;
+
+const G_PLANT: int = 26;
+
+const G_CATCH: int = 27;
+
+const G_SOLE: int = 28;
+
+const G_ROLL: int = 29;
+
+const G_ELBOW: int = 30;
+
+const G_SPREAD: int = 32;
+
+const G_CROSS: int = 34;
+
+const G_HUNCH: int = 35;
+
+const G_SWAY: int = 36;
+
+const G_STEPS_LEAST: int = 37;
+
+const G_STRAIGHT: int = 38;
+
+const G_BANK: int = 39;
+
+const G_TOP: int = 40;
+
+const G_QUICK: int = 41;
+
+const G_TOES: int = 42;
+
+gait_name: []int = new int[MAX_GAITS](0);
+
+// The pose it starts from, or -1 for the rest pose.
+gait_base: []int = new int[MAX_GAITS](0);
+
+// A gait's key poses for steering (see steer.l8), each struck with the right
+// foot down: braking, a cut's plant, driving out of it, a turn's pivot, and
+// standing ready; -1 for none.
+const NKEYS: int = 5;
+
+gait_keys: []int = new int[MAX_GAITS * NKEYS](-1);
+
+gait_root: []int = new int[MAX_GAITS](0);
+
+// The bones up the back that lean and turn against the hips (the first may
+// be -1), and the head.
+gait_spine: []int = new int[MAX_GAITS * 2](0);
+
+gait_head: []int = new int[MAX_GAITS](0);
+
+// The left foot and its toe (-1 for none): the right are their twins.
+gait_foot: []int = new int[MAX_GAITS](0);
+
+gait_toe: []int = new int[MAX_GAITS](0);
+
+// The arms that swing: for each, its upper bone and its forearm.
+gait_arm: []int = new int[MAX_GAITS * 4](0);
+
+gait_narm: []int = new int[MAX_GAITS](0);
+
+gait_line: []int = new int[MAX_GAITS](0);
+
+gait_f: []f32 = new f32[MAX_GAITS * GAIT_FLOATS](0.0);
+
+// The takes a gait matches its motion from (see match.l8): their names as
+// read, and once all is read, the takes; and the bones it holds as its pose
+// has them, whatever the takes do (the arm with the ball).
+const MAX_MATCH: int = 256;
+
+match_name: []int = new int[MAX_MATCH](0);
+
+match_take: []int = new int[MAX_MATCH](0);
+
+match_gait: []int = new int[MAX_MATCH](0);
+
+nmatch: int = 0;
+
+// The run cycles a gait is steered from (see steer.l8): one stride each, at
+// speeds from slow to flat out.
+const MAX_CYCLES: int = 32;
+
+cycle_name: []int = new int[MAX_CYCLES](0);
+
+cycle_take: []int = new int[MAX_CYCLES](0);
+
+cycle_gait: []int = new int[MAX_CYCLES](0);
+
+ncycles: int = 0;
+
+// A gait's steering values (see steer.l8 and motion/gen/dp2.py): for each
+// stick speed, which foot steps next (the outside of the turn, or the inside),
+// his speed, height, and fall as a foot lands, and how far round the stick's
+// way is, the solved time to going that way. `targets`, `speeds`,
+// `heights`, `falls` (each a list), `angles N STEP`, `drift SECONDS`, then
+// `value` lines of N numbers, target by target, foot by foot, speed by speed,
+// height by height, fall by fall.
+const MAX_STEER_VALUES: int = 120000;
+
+steer_val: []f32 = new f32[MAX_STEER_VALUES](0.0);
+
+steer_nval: int = 0;
+
+steer_gait: int = -1;
+
+steer_targets: []f32 = new f32[8](0.0);
+
+steer_ntarget: int = 0;
+
+steer_speeds: []f32 = new f32[40](0.0);
+
+steer_nspeed: int = 0;
+
+steer_heights: []f32 = new f32[12](0.0);
+
+steer_nheight: int = 0;
+
+steer_falls: []f32 = new f32[12](0.0);
+
+steer_nfall: int = 0;
+
+steer_nangle: int = 0;
+
+steer_dangle: f32 = 5.0;
+
+steer_drift: f32 = 0.4;
+
+const MAX_HOLD: int = 16;
+
+hold_bone: []int = new int[MAX_HOLD](0);
+
+hold_gait: []int = new int[MAX_HOLD](0);
+
+nhold: int = 0;
+
+ngaits: int = 0;
+
+// Routes: a path over the ground, run in a gait, round and round.
+const MAX_ROUTES: int = 12;
+
+const MAX_WAYS: int = 128;
+
+const FACE_PATH: f32 = 1000.0;
+
+route_name: []int = new int[MAX_ROUTES](0);
+
+route_gait: []int = new int[MAX_ROUTES](0);
+
+route_first: []int = new int[MAX_ROUTES](0);
+
+route_n: []int = new int[MAX_ROUTES](0);
+
+route_line: []int = new int[MAX_ROUTES](0);
+
+// Whether the viewer steers the route (`steered`), rather than its points.
+route_steered: []bool = new bool[MAX_ROUTES](false);
+
+nroutes: int = 0;
+
+// A route's points: where, and for the leg that arrives there its speed,
+// the turn made along it, and which way he faces (FACE_PATH for the way he
+// goes); and how wide the corner there is.
+way_x: []f32 = new f32[MAX_WAYS](0.0);
+
+way_z: []f32 = new f32[MAX_WAYS](0.0);
+
+way_speed: []f32 = new f32[MAX_WAYS](0.0);
+
+way_corner: []f32 = new f32[MAX_WAYS](0.0);
+
+way_spin: []f32 = new f32[MAX_WAYS](0.0);
+
+way_face: []f32 = new f32[MAX_WAYS](0.0);
+
+nways: int = 0;
+
+// Takes: a real movement, followed frame by frame from footage. Each frame
+// is sixteen directions, as the camera saw them (x to the picture's right,
+// y up, z toward the camera): the hips' left and up, the chest's, the
+// head's left and where its nose points; each upper arm and forearm, left
+// then right; each thigh and shin; and each foot from heel to toe. The
+// figure's bones are turned to match (see take.l8), so it takes the pose
+// whatever its own proportions.
+const MAX_TAKES: int = 96;
+
+const MAX_TAKE_FRAMES: int = 16000;
+
+const TAKE_FLOATS: int = 56;
+
+// After the sixteen directions, a frame may have where the figure was and
+// which feet were down: motion capture has them, footage does not.
+const TAKE_ROOT: int = 48;
+
+const TAKE_DOWN: int = 52;
+
+take_name: []int = new int[MAX_TAKES](0);
+
+// The gait whose bones it moves (its hips, back, head, and feet).
+take_gait: []int = new int[MAX_TAKES](0);
+
+take_fps: []f32 = new f32[MAX_TAKES](0.0);
+
+// The left hand: the arms are the two bones above each hand.
+take_hand: []int = new int[MAX_TAKES](0);
+
+// The pose for what it does not move (fingers, what is hidden), or -1 for
+// its gait's.
+take_base: []int = new int[MAX_TAKES](0);
+
+take_first: []int = new int[MAX_TAKES](0);
+
+take_n: []int = new int[MAX_TAKES](0);
+
+take_line: []int = new int[MAX_TAKES](0);
+
+// Whether its frames say where the figure was (and which feet were down).
+take_moves: []bool = new bool[MAX_TAKES](false);
+
+ntakes: int = 0;
+
+take_f: []f32 = new f32[MAX_TAKE_FRAMES * TAKE_FLOATS](0.0);
+
+ntake_frames: int = 0;
+
+find_in(names: []int, n: int, id: int): int {
+    for i in 0..n {
+        if (names[i] == id) return i
+    }
+    -1
+}
+
+bone_pos(b: int): V3 {
+    v3(bone_rest[b * 3], bone_rest[b * 3 + 1], bone_rest[b * 3 + 2])
+}
+
+opv(o: int, at: int): V3 {
+    i: int = o * OP_FLOATS + at;
+    v3(op_f[i], op_f[i + 1], op_f[i + 2])
+}
+
+set_opv(o: int, at: int, v: V3) {
+    i: int = o * OP_FLOATS + at;
+    op_f[i] = v.x;
+    op_f[i + 1] = v.y;
+    op_f[i + 2] = v.z
+}
+
+stv(s: int, at: int): V3 {
+    i: int = s * ST_FLOATS + at;
+    v3(st_f[i], st_f[i + 1], st_f[i + 2])
+}
+
+set_stv(s: int, at: int, v: V3) {
+    i: int = s * ST_FLOATS + at;
+    st_f[i] = v.x;
+    st_f[i + 1] = v.y;
+    st_f[i + 2] = v.z
+}
+
+mat_color(m: int): V3 {
+    v3(mat_rgb[m * 3], mat_rgb[m * 3 + 1], mat_rgb[m * 3 + 2])
+}
+
+// ---- reading ----
+src: []i8 = new i8[0](0i8);
+
+// The line being read, as tokens: where each starts and ends.
+const MAX_TOKENS: int = 64;
+
+tok_a: []int = new int[MAX_TOKENS](0);
+
+tok_b: []int = new int[MAX_TOKENS](0);
+
+ntok: int = 0;
+
+line_no: int = 0;
+
+// The first thing wrong with the text, and its line (0 for none).
+err_line: int = 0;
+
+err_msg: str = "";
+
+fail(msg: str@immortal) {
+    if (err_line == 0) {
+        err_line = maxi(line_no, 1);
+        err_msg = msg
+    }
+}
+
+tok_is(i: int, s: str): bool {
+    if (i >= ntok || tok_b[i] - tok_a[i] != len(s)) return false;
+    for k in 0..len(s) {
+        if (src[tok_a[i] + k] != s[k]) return false
+    }
+    true
+}
+
+is_number(i: int): bool {
+    if (i >= ntok) return false;
+    c: i8 = src[tok_a[i]];
+    if (c == '-' || c == '.') {
+        if (tok_b[i] - tok_a[i] < 2) return false;
+        c = src[tok_a[i] + 1]
+    }
+    c >= '0' && c <= '9'
+}
+
+num(i: int): f32 {
+    if (!is_number(i)) {
+        fail("a number is missing");
+        return 0.0
+    }
+    v: f64 = 0.0f64;
+    sign: f64 = 1.0f64;
+    scale: f64 = 0.0f64;
+    for k in tok_a[i]..tok_b[i] {
+        c: int = src[k] as int;
+        if (c == 45) sign = -1.0f64 else if (c == 46) scale = 1.0f64 else if (c >= 48 && c <= 57) {
+            v = v * 10.0f64 + (c - 48) as f64;
+            if (scale > 0.0f64) scale = scale * 10.0f64
+        } else fail("not a number")
+    }
+    if (scale > 0.0f64) v = v / scale;
+    (sign * v) as f32
+}
+
+vec(i: int): V3 {
+    v3(num(i), num(i + 1), num(i + 2))
+}
+
+name(i: int): int {
+    if (i >= ntok) {
+        fail("a name is missing");
+        return 0
+    }
+    intern(src, tok_a[i], tok_b[i])
+}
+
+// The bone token i names, or -1 with the fault noted.
+bone_at(i: int): int {
+    b: int = find_in(bone_name, nbones, name(i));
+    if (b < 0) fail("no such bone");
+    b
+}
+
+mat_at(i: int): int {
+    m: int = find_in(mat_name, nmats, name(i));
+    if (m < 0) {
+        fail("no such material");
+        return 0
+    }
+    m
+}
+
+layer_at(i: int): int {
+    l: int = find_in(layer_name, nlayers, name(i));
+    if (l < 0) {
+        fail("no such layer");
+        return 0
+    }
+    l
+}
+
+// What the lines being read belong to.
+const IN_NONE: int = 0;
+
+const IN_LAYER: int = 1;
+
+const IN_STICKER: int = 2;
+
+const IN_POSE: int = 3;
+
+const IN_ANIM: int = 4;
+
+const IN_GAIT: int = 5;
+
+const IN_ROUTE: int = 6;
+
+const IN_TAKE: int = 7;
+
+const IN_STEER: int = 8;
+
+context: int = 0;
+
+cur_part: int = -1;
+
+// Axes turned by angles in degrees about x, then z, then y... as columns:
+// the turn about y is made first, then z, then x.
+euler_axes(o: int, deg: V3) {
+    k: f32 = PI / 180.0;
+    x: V3 = v3(1.0, 0.0, 0.0);
+    y: V3 = v3(0.0, 1.0, 0.0);
+    z: V3 = v3(0.0, 0.0, 1.0);
+    x = turn_xyz(x, deg, k);
+    y = turn_xyz(y, deg, k);
+    z = turn_xyz(z, deg, k);
+    set_opv(o, F_AXES, x);
+    set_opv(o, F_AXES + 3, y);
+    set_opv(o, F_AXES + 6, z)
+}
+
+turn_xyz(v: V3, deg: V3, k: f32): V3 {
+    a: V3 = v_rotate(v, v3(0.0, 1.0, 0.0), deg.y * k);
+    b: V3 = v_rotate(a, v3(0.0, 0.0, 1.0), deg.z * k);
+    v_rotate(b, v3(1.0, 0.0, 0.0), deg.x * k)
+}
+
+flip_x(v: V3): V3 {
+    v3(-v.x, v.y, v.z)
+}
+
+new_op(kind: int): int {
+    if (nops >= MAX_OPS) {
+        fail("too many shapes");
+        return MAX_OPS - 1
+    }
+    o: int = nops;
+    nops = nops + 1;
+    l: int = nlayers - 1;
+    layer_nops[l] = layer_nops[l] + 1;
+    op_kind[o] = kind;
+    op_mode[o] = MODE_ADD;
+    op_layer[o] = l;
+    op_part[o] = cur_part;
+    op_bone[o] = 0;
+    op_bone2[o] = -1;
+    op_mat[o] = -1;
+    op_ref[o] = -1;
+    op_line[o] = line_no;
+    for i in 0..OP_FLOATS op_f[o * OP_FLOATS + i] = 0.0;
+    op_f[o * OP_FLOATS + F_AXES] = 1.0;
+    op_f[o * OP_FLOATS + F_AXES + 4] = 1.0;
+    op_f[o * OP_FLOATS + F_AXES + 8] = 1.0;
+    op_f[o * OP_FLOATS + F_FLAT] = 1.0;
+    op_f[o * OP_FLOATS + F_FLAT_AXIS + 2] = 1.0;
+    op_f[o * OP_FLOATS + F_BLEND] = layer_blend[l];
+    o
+}
+
+// A shape's part: the one named last, or one named for the layer.
+need_part() {
+    if (cur_part >= 0) return;
+    add_part(layer_name[nlayers - 1])
+}
+
+add_part(id: int) {
+    if (nparts >= MAX_PARTS) {
+        fail("too many parts");
+        return
+    }
+    part_name[nparts] = id;
+    part_layer[nparts] = nlayers - 1;
+    part_line[nparts] = line_no;
+    cur_part = nparts;
+    nparts = nparts + 1
+}
+
+// The shape o again on the other side, if it is on a `.l` bone or says
+// `both`.
+mirror_op(o: int, both: bool) {
+    b: int = op_bone[o];
+    twin: int = bone_twin[b];
+    if (twin == b && !both) return;
+    if (twin != b && name_side(bone_name[b]) != 1) return;
+    m: int = new_op(op_kind[o]);
+    op_mode[m] = op_mode[o];
+    op_part[m] = op_part[o];
+    op_bone[m] = twin;
+    if (op_bone2[o] >= 0) op_bone2[m] = bone_twin[op_bone2[o]];
+    op_mat[m] = op_mat[o];
+    for i in 0..OP_FLOATS op_f[m * OP_FLOATS + i] = op_f[o * OP_FLOATS + i];
+    set_opv(m, F_A, flip_x(opv(o, F_A)));
+    if (op_kind[o] == OP_CONE) set_opv(m, F_B, flip_x(opv(o, F_B)));
+    // (Mirrored axes: the x axis is turned back so the frame stays a
+    // right-handed one; the shapes are symmetric about their own axes.)
+    ax: V3 = flip_x(opv(o, F_AXES));
+    set_opv(m, F_AXES, v3(-ax.x, -ax.y, -ax.z));
+    set_opv(m, F_AXES + 3, flip_x(opv(o, F_AXES + 3)));
+    set_opv(m, F_AXES + 6, flip_x(opv(o, F_AXES + 6)));
+    set_opv(m, F_FLAT_AXIS, flip_x(opv(o, F_FLAT_AXIS)))
+}
+
+// A shape's options, from token i on.
+shape_options(o: int, i: int) {
+    both: bool = false;
+    while (i < ntok) {
+        if (tok_is(i, "to")) {
+            op_bone2[o] = bone_at(i + 1);
+            i = i + 2
+        } else if (tok_is(i, "flat")) {
+            op_f[o * OP_FLOATS + F_FLAT] = maxf(num(i + 1), 0.05);
+            i = i + 2;
+            if (is_number(i)) {
+                set_opv(o, F_FLAT_AXIS, v_norm(vec(i)));
+                i = i + 3
+            }
+        } else if (tok_is(i, "blend")) {
+            op_f[o * OP_FLOATS + F_BLEND] = num(i + 1);
+            i = i + 2
+        } else if (tok_is(i, "mat")) {
+            op_mat[o] = mat_at(i + 1);
+            i = i + 2
+        } else if (tok_is(i, "turn")) {
+            euler_axes(o, vec(i + 1));
+            i = i + 4
+        } else if (tok_is(i, "round")) {
+            op_f[o * OP_FLOATS + F_RB] = num(i + 1);
+            i = i + 2
+        } else if (tok_is(i, "cut")) {
+            op_mode[o] = MODE_CUT;
+            i = i + 1
+        } else if (tok_is(i, "keep")) {
+            op_mode[o] = MODE_KEEP;
+            i = i + 1
+        } else if (tok_is(i, "both")) {
+            both = true;
+            i = i + 1
+        } else {
+            fail("not a shape option");
+            i = ntok
+        }
+    }
+    if (err_line == 0) mirror_op(o, both)
+}
+
+read_shape(kind: int) {
+    if (context != IN_LAYER) {
+        fail("a shape outside a layer");
+        return
+    }
+    need_part();
+    o: int = new_op(kind);
+    b: int = bone_at(1);
+    if (b < 0) return;
+    op_bone[o] = b;
+    set_opv(o, F_A, vec(2));
+    if (tok_is(0, "ball")) {
+        op_f[o * OP_FLOATS + F_RA] = num(5);
+        set_opv(o, F_B, vec(2));
+        op_f[o * OP_FLOATS + F_RB] = num(5);
+        shape_options(o, 6)
+    } else if (kind == OP_CONE) {
+        op_f[o * OP_FLOATS + F_RA] = num(5);
+        set_opv(o, F_B, vec(6));
+        op_f[o * OP_FLOATS + F_RB] = num(9);
+        shape_options(o, 10)
+    } else {
+        set_opv(o, F_B, vec(5));
+        shape_options(o, 8)
+    }
+}
+
+// `grow`, `clip`, and `carve`: this layer made from another.
+read_ref(kind: int) {
+    if (context != IN_LAYER) {
+        fail("outside a layer");
+        return
+    }
+    o: int = new_op(kind);
+    op_ref[o] = layer_at(1);
+    if (op_ref[o] >= nlayers - 1) fail("a layer can only use those before it");
+    op_f[o * OP_FLOATS + F_BLEND] = 0.0;
+    i: int = 2;
+    if (is_number(i)) {
+        op_f[o * OP_FLOATS + F_GROW] = num(i);
+        i = i + 1
+    }
+    if (tok_is(i, "blend")) op_f[o * OP_FLOATS + F_BLEND] = num(i + 1)
+}
+
+read_material() {
+    if (nmats >= MAX_MATS) {
+        fail("too many materials");
+        return
+    }
+    m: int = nmats;
+    mat_name[m] = name(1);
+    c: V3 = vec(2);
+    mat_rgb[m * 3] = c.x;
+    mat_rgb[m * 3 + 1] = c.y;
+    mat_rgb[m * 3 + 2] = c.z;
+    f: int = FINISH_MATTE;
+    if (tok_is(5, "skin")) f = FINISH_SKIN else if (tok_is(5, "cloth")) f = FINISH_CLOTH else if (tok_is(5,
+        "gloss")) f = FINISH_GLOSS else if (tok_is(5, "metal")) f = FINISH_METAL else if (tok_is(5,
+        "leather")) f = FINISH_LEATHER else if (tok_is(5, "rubber")) f = FINISH_RUBBER else if (ntok > 5 && !tok_is(5,
+        "matte")) fail("no such finish");
+    mat_finish[m] = f;
+    nmats = nmats + 1
+}
+
+add_bone(
+    id: int,
+    parent: int,
+    at: V3,
+    hinged: bool,
+    hinge: V3
+): int {
+    if (nbones >= MAX_BONES) {
+        fail("too many bones");
+        return 0
+    }
+    b: int = nbones;
+    bone_name[b] = id;
+    bone_parent[b] = parent;
+    bone_rest[b * 3] = at.x;
+    bone_rest[b * 3 + 1] = at.y;
+    bone_rest[b * 3 + 2] = at.z;
+    bone_hinge[b * 3] = hinge.x;
+    bone_hinge[b * 3 + 1] = hinge.y;
+    bone_hinge[b * 3 + 2] = hinge.z;
+    bone_hinged[b] = hinged;
+    bone_twin[b] = b;
+    bone_line[b] = line_no;
+    nbones = nbones + 1;
+    b
+}
+
+read_bone() {
+    id: int = name(1);
+    if (find_in(bone_name, nbones, id) >= 0) {
+        fail("a bone of that name already");
+        return
+    }
+    parent: int = -1;
+    if (!tok_is(2, "-")) {
+        parent = bone_at(2);
+        if (parent < 0) return
+    } else if (nbones > 0) {
+        fail("only the first bone is the root");
+        return
+    }
+    at: V3 = vec(3);
+    hinged: bool = tok_is(6, "hinge");
+    hinge: V3 = v3(1.0, 0.0, 0.0);
+    if (hinged) hinge = v_norm(vec(7));
+    b: int = add_bone(id, parent, at, hinged, hinge);
+    if (name_side(id) == 1 && err_line == 0) {
+        tp: int = parent;
+        if (parent >= 0) tp = bone_twin[parent];
+        // (A turn about an axis, mirrored, is about the axis mirrored and
+        // reversed.)
+        t: int = add_bone(twin_name(id), tp, flip_x(at), hinged, v3(hinge.x, -hinge.y,
+            -hinge.z));
+        bone_twin[b] = t;
+        bone_twin[t] = b
+    }
+}
+
+read_layer() {
+    if (nlayers >= MAX_LAYERS) {
+        fail("too many layers");
+        return
+    }
+    l: int = nlayers;
+    layer_name[l] = name(1);
+    layer_mat[l] = mat_at(2);
+    layer_cell[l] = 0.0;
+    layer_hidden[l] = false;
+    layer_skin[l] = 0.04;
+    layer_blend[l] = 0.02;
+    layer_bind[l] = -1;
+    layer_zone[l] = -1;
+    layer_fine[l] = 0.0;
+    layer_first[l] = nops;
+    layer_nops[l] = 0;
+    layer_line[l] = line_no;
+    nlayers = nlayers + 1;
+    i: int = 3;
+    while (i < ntok) {
+        if (tok_is(i, "cell")) {
+            layer_cell[l] = num(i + 1);
+            i = i + 2
+        } else if (tok_is(i, "skin")) {
+            layer_skin[l] = maxf(num(i + 1), 0.001);
+            i = i + 2
+        } else if (tok_is(i, "blend")) {
+            layer_blend[l] = num(i + 1);
+            i = i + 2
+        } else if (tok_is(i, "bind")) {
+            layer_bind[l] = bone_at(i + 1);
+            i = i + 2
+        } else if (tok_is(i, "hidden")) {
+            layer_hidden[l] = true;
+            i = i + 1
+        } else {
+            fail("not a layer option");
+            i = ntok
+        }
+    }
+    context = IN_LAYER;
+    cur_part = -1
+}
+
+// sticker NAME LAYER  x y z  fx fy fz  width height [depth d] [roll deg]:
+// a rectangle centered at a point near the surface, facing a direction,
+// projected back onto the layer as far as its depth.
+read_sticker() {
+    if (nstickers >= MAX_STICKERS) {
+        fail("too many stickers");
+        return
+    }
+    s: int = nstickers;
+    st_name[s] = name(1);
+    st_layer[s] = layer_at(2);
+    o: V3 = vec(3);
+    facing: V3 = v_norm(vec(6));
+    w: f32 = num(9);
+    h: f32 = num(10);
+    depth: f32 = 0.06;
+    roll: f32 = 0.0;
+    i: int = 11;
+    while (i < ntok) {
+        if (tok_is(i, "depth")) depth = num(i + 1) else if (tok_is(i, "roll")) roll = num(i + 1) else fail("not a sticker option");
+        i = i + 2
+    }
+    // Up is the world's, as near as the facing allows; right follows, so
+    // that reading the sticker from in front, x runs left to right.
+    up: V3 = v3(0.0, 1.0, 0.0);
+    if (absf(facing.y) > 0.9) up = v3(0.0, 0.0, -1.0);
+    right: V3 = v_norm(v_cross(up, facing));
+    up = v_cross(facing, right);
+    right = v_rotate(right, facing, roll * PI / 180.0);
+    up = v_rotate(up, facing, roll * PI / 180.0);
+    put_sticker(s, o, right, up, facing, w, h, depth);
+    st_first[s] = nmarks;
+    st_n[s] = 0;
+    st_line[s] = line_no;
+    nstickers = nstickers + 1;
+    context = IN_STICKER
+}
+
+put_sticker(
+    s: int,
+    o: V3,
+    right: V3,
+    up: V3,
+    facing: V3,
+    w: f32,
+    h: f32,
+    depth: f32
+) {
+    set_stv(s, S_O, o);
+    set_stv(s, S_RIGHT, right);
+    set_stv(s, S_UP, up);
+    set_stv(s, S_FACING, facing);
+    st_f[s * ST_FLOATS + S_W] = w;
+    st_f[s * ST_FLOATS + S_H] = h;
+    st_f[s * ST_FLOATS + S_DEPTH] = depth
+}
+
+// The stickers named `.l`, again on the other side: their marks are shared,
+// drawn mirrored.
+mirror_stickers() {
+    n: int = nstickers;
+    for s in 0..n {
+        if (name_side(st_name[s]) == 1 && nstickers < MAX_STICKERS) {
+            m: int = nstickers;
+            st_name[m] = twin_name(st_name[s]);
+            st_layer[m] = st_layer[s];
+            // (Every axis mirrored, so its marks come out mirrored too.)
+            put_sticker(m, flip_x(stv(s, S_O)), flip_x(stv(s, S_RIGHT)), flip_x(stv(s,
+                S_UP)), flip_x(stv(s, S_FACING)), st_f[s * ST_FLOATS + S_W], st_f[s * ST_FLOATS + S_H],
+                st_f[s * ST_FLOATS + S_DEPTH]);
+            st_first[m] = st_first[s];
+            st_n[m] = st_n[s];
+            st_line[m] = st_line[s];
+            nstickers = nstickers + 1
+        }
+    }
+}
+
+read_mark(kind: int) {
+    if (context != IN_STICKER) {
+        fail("a mark outside a sticker");
+        return
+    }
+    if (nmarks >= MAX_MARKS) {
+        fail("too many marks");
+        return
+    }
+    m: int = nmarks;
+    mk_kind[m] = kind;
+    mk_edge[m] = -1;
+    mk_text[m] = 0;
+    for i in 0..MARK_FLOATS mk_f[m * MARK_FLOATS + i] = 0.0;
+    at: int = 1;
+    count: int = 3;
+    if (kind == MARK_OVAL || kind == MARK_RECT) count = 4;
+    if (kind == MARK_LINE) count = 5;
+    if (kind == MARK_DIGITS) {
+        mk_text[m] = name(1);
+        at = 2
+    }
+    for i in 0..count mk_f[m * MARK_FLOATS + i] = num(at + i);
+    mk_mat[m] = mat_at(at + count);
+    i: int = at + count + 1;
+    while (i < ntok) {
+        if (tok_is(i, "round")) {
+            mk_f[m * MARK_FLOATS + 4] = num(i + 1);
+            i = i + 2
+        } else if (tok_is(i, "edge")) {
+            mk_edge[m] = mat_at(i + 1);
+            mk_f[m * MARK_FLOATS + 5] = num(i + 2);
+            i = i + 3
+        } else {
+            fail("not a mark option");
+            i = ntok
+        }
+    }
+    nmarks = nmarks + 1;
+    st_n[nstickers - 1] = st_n[nstickers - 1] + 1
+}
+
+add_entry(
+    kind: int,
+    bone: int,
+    a: V3,
+    b: V3,
+    pole: bool
+) {
+    if (nentries >= MAX_ENTRIES) {
+        fail("too many pose lines");
+        return
+    }
+    e: int = nentries;
+    pe_kind[e] = kind;
+    pe_bone[e] = bone;
+    pe_f[e * 6] = a.x;
+    pe_f[e * 6 + 1] = a.y;
+    pe_f[e * 6 + 2] = a.z;
+    pe_f[e * 6 + 3] = b.x;
+    pe_f[e * 6 + 4] = b.y;
+    pe_f[e * 6 + 5] = b.z;
+    pe_pole[e] = pole;
+    pe_on[e] = -1;
+    nentries = nentries + 1;
+    pose_n[nposes - 1] = pose_n[nposes - 1] + 1
+}
+
+// The bone token i names; or, named without its `.l`, the left of a pair
+// (and then paired is set).
+paired: bool = false;
+
+side_bone(i: int): int {
+    id: int = name(i);
+    paired = false;
+    b: int = find_in(bone_name, nbones, id);
+    if (b < 0) {
+        b = find_in(bone_name, nbones, left_name(id));
+        paired = b >= 0
+    }
+    if (b < 0) fail("no such bone");
+    b
+}
+
+// A pose line: for the bone named, or for both sides of a pair named
+// without its `.l` or `.r` (the right side mirrored).
+read_entry(kind: int) {
+    if (context != IN_POSE) {
+        fail("a pose line outside a pose");
+        return
+    }
+    b: int = side_bone(1);
+    if (b < 0) return;
+    pair: bool = paired;
+    a: V3 = v3(0.0, 0.0, 0.0);
+    c: V3 = v3(0.0, 0.0, 0.0);
+    pole: bool = false;
+    on: int = -1;
+    on_pair: bool = false;
+    if (kind == DO_BEND || kind == DO_CURL) a.x = num(2) else if (kind != DO_LEVEL) a = vec(2);
+    if (kind == DO_REACH) {
+        i: int = 5;
+        while (i < ntok) {
+            if (tok_is(i, "pole")) {
+                pole = true;
+                c = vec(i + 1);
+                i = i + 4
+            } else if (tok_is(i, "on")) {
+                on = side_bone(i + 1);
+                on_pair = paired;
+                i = i + 2
+            } else {
+                fail("not a reach option");
+                i = ntok
+            }
+        }
+    }
+    add_entry(kind, b, a, c, pole);
+    pe_on[nentries - 1] = on;
+    if (pair) {
+        if (kind == DO_TURN) a = v3(a.x, -a.y, -a.z) else if (kind == DO_MOVE || kind == DO_REACH) a = flip_x(a);
+        add_entry(kind, bone_twin[b], a, flip_x(c), pole);
+        if (on >= 0 && on_pair) on = bone_twin[on];
+        pe_on[nentries - 1] = on
+    }
+}
+
+read_pose() {
+    if (nposes >= MAX_POSES) {
+        fail("too many poses");
+        return
+    }
+    pose_name[nposes] = name(1);
+    pose_first[nposes] = nentries;
+    pose_n[nposes] = 0;
+    pose_line[nposes] = line_no;
+    nposes = nposes + 1;
+    context = IN_POSE
+}
+
+read_anim() {
+    if (nanims >= MAX_ANIMS) {
+        fail("too many animations");
+        return
+    }
+    anim_name[nanims] = name(1);
+    anim_secs[nanims] = maxf(num(2), 0.05);
+    anim_first[nanims] = nkeys;
+    anim_n[nanims] = 0;
+    anim_line[nanims] = line_no;
+    nanims = nanims + 1;
+    context = IN_ANIM
+}
+
+read_key() {
+    if (context != IN_ANIM) {
+        fail("a key outside an animation");
+        return
+    }
+    if (nkeys >= MAX_KEYS) {
+        fail("too many keys");
+        return
+    }
+    key_t[nkeys] = num(1);
+    p: int = find_in(pose_name, nposes, name(2));
+    if (p < 0) {
+        fail("no such pose");
+        return
+    }
+    key_pose[nkeys] = p;
+    key_mirror[nkeys] = tok_is(3, "mirror");
+    nkeys = nkeys + 1;
+    anim_n[nanims - 1] = anim_n[nanims - 1] + 1
+}
+
+gait_defaults: []f32 = [2.5, 0.24, 4.7, 0.44, -0.024, 0.22, 0.06, 0.12, 0.055, 0.6,
+    0.035, 0.02, 0.004, 0.01, 3.0, 1.0, 14.0, 0.8, 7.0, 1.8, 45.0, 50.0, 85.0, 8.0,
+    6.0, 8.0, 0.40, 0.035, 0.006, 3.0, 110.0, 40.0, -8.0, 14.0, 30.0, 1.2, 4.0, 2.85,
+    0.97, 0.35, 10.5, 0.2, 12.0, 6.0, 66.0, 0.0, 0.0, 0.0];
+
+read_gait() {
+    if (ngaits >= MAX_GAITS) {
+        fail("too many gaits");
+        return
+    }
+    g: int = ngaits;
+    gait_name[g] = name(1);
+    gait_base[g] = -1;
+    gait_root[g] = 0;
+    gait_spine[g * 2] = -1;
+    gait_spine[g * 2 + 1] = -1;
+    gait_head[g] = -1;
+    gait_foot[g] = -1;
+    gait_toe[g] = -1;
+    gait_narm[g] = 0;
+    for k in 0..NKEYS gait_keys[g * NKEYS + k] = -1;
+    gait_line[g] = line_no;
+    for i in 0..GAIT_FLOATS gait_f[g * GAIT_FLOATS + i] = gait_defaults[i];
+    ngaits = ngaits + 1;
+    context = IN_GAIT
+}
+
+// A gait's number, or numbers: `count` of them into its floats from `at`.
+gait_numbers(at: int, count: int) {
+    for i in 0..count {
+        if (i == 0 || is_number(1 + i)) gait_f[(ngaits - 1) * GAIT_FLOATS + at + i] = num(1 + i)
+    }
+}
+
+read_gait_line() {
+    g: int = ngaits - 1;
+    if (tok_is(0, "like")) {
+        gait_base[g] = find_in(pose_name, nposes, name(1));
+        if (gait_base[g] < 0) fail("no such pose")
+    } else if (tok_is(0, "root")) gait_root[g] = maxi(bone_at(1), 0) else if (tok_is(0,
+        "spine")) {
+        if (ntok > 2) {
+            gait_spine[g * 2] = bone_at(1);
+            gait_spine[g * 2 + 1] = bone_at(2)
+        } else gait_spine[g * 2 + 1] = bone_at(1)
+    } else if (tok_is(0, "head")) gait_head[g] = bone_at(1) else if (tok_is(0, "feet")) {
+        gait_foot[g] = side_bone(1);
+        if (ntok > 2) gait_toe[g] = side_bone(2)
+    } else if (tok_is(0, "match")) {
+        for i in 1..ntok {
+            if (nmatch < MAX_MATCH) {
+                match_name[nmatch] = name(i);
+                match_gait[nmatch] = g;
+                nmatch = nmatch + 1
+            }
+        }
+    } else if (tok_is(0, "keys")) {
+        if (ntok != NKEYS + 1) fail("keys are five poses: braking, plant, drive, pivot, ready");
+        for k in 0..mini(ntok - 1, NKEYS) {
+            gait_keys[g * NKEYS + k] = find_in(pose_name, nposes, name(k + 1));
+            if (gait_keys[g * NKEYS + k] < 0) fail("no such pose")
+        }
+    } else if (tok_is(0, "cycles")) {
+        for i in 1..ntok {
+            if (ncycles < MAX_CYCLES) {
+                cycle_name[ncycles] = name(i);
+                cycle_gait[ncycles] = g;
+                ncycles = ncycles + 1
+            }
+        }
+    } else if (tok_is(0, "hold")) {
+        for i in 1..ntok {
+            b: int = bone_at(i);
+            if (nhold < MAX_HOLD && b >= 0) {
+                hold_bone[nhold] = b;
+                hold_gait[nhold] = g;
+                nhold = nhold + 1
+            }
+        }
+    } else if (tok_is(0, "arm")) {
+        if (gait_narm[g] >= 2) fail("a gait swings two arms at most") else {
+            gait_arm[g * 4 + gait_narm[g] * 2] = maxi(bone_at(1), 0);
+            gait_arm[g * 4 + gait_narm[g] * 2 + 1] = maxi(bone_at(2), 0);
+            gait_narm[g] = gait_narm[g] + 1
+        }
+    } else if (tok_is(0, "cadence")) {
+        gait_numbers(G_CADENCE, 3);
+        if (is_number(4)) gait_f[g * GAIT_FLOATS + G_STEPS_LEAST] = num(4)
+    } else if (tok_is(0, "straight")) gait_numbers(G_STRAIGHT, 1) else if (tok_is(0,
+        "bank")) gait_numbers(G_BANK, 1) else if (tok_is(0, "top")) gait_numbers(G_TOP,
+        1) else if (tok_is(0, "quick")) gait_numbers(G_QUICK, 1) else if (tok_is(0,
+        "toes")) gait_numbers(G_TOES, 3) else if (tok_is(0, "contact")) gait_numbers(G_CONTACT,
+        3) else if (tok_is(0, "width")) gait_numbers(G_WIDTH, 1) else if (tok_is(0,
+        "kick")) gait_numbers(G_KICK, 3) else if (tok_is(0, "bounce")) gait_numbers(G_BOUNCE,
+        1) else if (tok_is(0, "sink")) gait_numbers(G_SINK, 2) else if (tok_is(0,
+        "crouch")) gait_numbers(G_CROUCH, 1) else if (tok_is(0, "lean")) gait_numbers(G_LEAN,
+        3) else if (tok_is(0, "drive")) gait_numbers(G_DRIVE, 1) else if (tok_is(0,
+        "twist")) gait_numbers(G_TWIST, 1) else if (tok_is(0, "counter")) gait_numbers(G_COUNTER,
+        1) else if (tok_is(0, "pump")) gait_numbers(G_PUMP, 3) else if (tok_is(0,
+        "grip")) gait_numbers(G_GRIP, 1) else if (tok_is(0, "burst")) gait_numbers(G_BURST,
+        1) else if (tok_is(0, "brake")) gait_numbers(G_BRAKE, 1) else if (tok_is(0,
+        "plant")) gait_numbers(G_PLANT, 1) else if (tok_is(0, "catch")) gait_numbers(G_CATCH,
+        1) else if (tok_is(0, "sole")) gait_numbers(G_SOLE, 1) else if (tok_is(0,
+        "roll")) gait_numbers(G_ROLL, 1) else if (tok_is(0, "elbow")) gait_numbers(G_ELBOW,
+        2) else if (tok_is(0, "spread")) gait_numbers(G_SPREAD, 2) else if (tok_is(0,
+        "cross")) gait_numbers(G_CROSS, 1) else if (tok_is(0, "hunch")) gait_numbers(G_HUNCH,
+        1) else if (tok_is(0, "sway")) gait_numbers(G_SWAY, 1) else fail("not a line a gait knows")
+}
+
+// take NAME GAIT frames-a-second; then `hands PAIR`, and an `at` line of
+// 48 numbers for each frame.
+read_take() {
+    if (ntakes >= MAX_TAKES) {
+        fail("too many takes");
+        return
+    }
+    t: int = ntakes;
+    take_name[t] = name(1);
+    take_gait[t] = find_in(gait_name, ngaits, name(2));
+    if (take_gait[t] < 0) fail("no such gait");
+    take_fps[t] = clampf(num(3), 1.0, 240.0);
+    take_hand[t] = -1;
+    take_base[t] = -1;
+    take_first[t] = ntake_frames;
+    take_n[t] = 0;
+    take_line[t] = line_no;
+    ntakes = ntakes + 1;
+    context = IN_TAKE
+}
+
+read_steering() {
+    steer_gait = find_in(gait_name, ngaits, name(1));
+    if (steer_gait < 0) fail("no such gait");
+    steer_nval = 0;
+    context = IN_STEER
+}
+
+// A list of numbers after the line's word, into a, at most m; how many.
+read_list(a: []f32, m: int): int {
+    n: int = mini(ntok - 1, m);
+    for i in 0..n a[i] = num(i + 1);
+    n
+}
+
+read_steer_line() {
+    if (tok_is(0, "targets")) steer_ntarget = read_list(steer_targets, 8) else if (tok_is(0,
+        "speeds")) steer_nspeed = read_list(steer_speeds, 40) else if (tok_is(0, "heights")) steer_nheight = read_list(steer_heights,
+        12) else if (tok_is(0, "falls")) steer_nfall = read_list(steer_falls, 12) else if (tok_is(0,
+        "angles")) {
+        steer_nangle = num(1) as int;
+        steer_dangle = num(2)
+    } else if (tok_is(0, "drift")) steer_drift = num(1) else if (tok_is(0, "value")) {
+        if (ntok - 1 != steer_nangle) {
+            fail("a steering value line has one number for each angle");
+            return
+        }
+        if (steer_nval + steer_nangle > MAX_STEER_VALUES) {
+            fail("too many steering values");
+            return
+        }
+        for i in 1..ntok {
+            steer_val[steer_nval] = num(i);
+            steer_nval = steer_nval + 1
+        }
+    } else fail("not a line steering knows")
+}
+
+read_take_line() {
+    t: int = ntakes - 1;
+    if (tok_is(0, "hands")) {
+        take_hand[t] = side_bone(1);
+        return
+    }
+    if (tok_is(0, "like")) {
+        take_base[t] = find_in(pose_name, nposes, name(1));
+        if (take_base[t] < 0) fail("no such pose");
+        return
+    }
+    if (!tok_is(0, "at") || ntok != 49 && ntok != 55) {
+        fail("a take's frame is `at` and 48 numbers (or 54)");
+        return
+    }
+    if (ntake_frames >= MAX_TAKE_FRAMES) {
+        fail("too many frames");
+        return
+    }
+    if (take_n[t] == 0) take_moves[t] = ntok == 55;
+    if (take_moves[t] != (ntok == 55)) {
+        fail("a take's frames all say where it was, or none do");
+        return
+    }
+    for i in 0..TAKE_FLOATS take_f[ntake_frames * TAKE_FLOATS + i] = 0.0;
+    for i in 0..ntok - 1 take_f[ntake_frames * TAKE_FLOATS + i] = num(1 + i);
+    ntake_frames = ntake_frames + 1;
+    take_n[t] = take_n[t] + 1
+}
+
+read_route() {
+    if (nroutes >= MAX_ROUTES) {
+        fail("too many routes");
+        return
+    }
+    r: int = nroutes;
+    route_name[r] = name(1);
+    route_gait[r] = find_in(gait_name, ngaits, name(2));
+    if (route_gait[r] < 0) fail("no such gait");
+    route_first[r] = nways;
+    route_n[r] = 0;
+    route_line[r] = line_no;
+    route_steered[r] = false;
+    if (ntok > 4 || ntok == 4 && !tok_is(3, "steered")) fail("a route is `route NAME GAIT [steered]`");
+    if (ntok == 4 && tok_is(3, "steered")) route_steered[r] = true;
+    nroutes = nroutes + 1;
+    context = IN_ROUTE
+}
+
+// `from x z`, then `to x z [speed v] [corner r] [spin deg] [face deg|path]`.
+read_way() {
+    r: int = nroutes - 1;
+    if (nways >= MAX_WAYS) {
+        fail("too many points");
+        return
+    }
+    if (tok_is(0, "from") != (route_n[r] == 0)) {
+        fail("a route is one `from`, then `to`s");
+        return
+    }
+    w: int = nways;
+    way_x[w] = num(1);
+    way_z[w] = num(2);
+    way_speed[w] = 6.0;
+    if (route_n[r] > 0) way_speed[w] = way_speed[w - 1];
+    way_corner[w] = 1.0;
+    way_spin[w] = 0.0;
+    way_face[w] = FACE_PATH;
+    i: int = 3;
+    while (i < ntok) {
+        if (tok_is(i, "speed")) way_speed[w] = clampf(num(i + 1), 0.6, 12.0) else if (tok_is(i,
+            "corner")) way_corner[w] = maxf(num(i + 1), 0.05) else if (tok_is(i, "spin")) way_spin[w] = num(i + 1) else if (tok_is(i,
+            "face")) {
+            if (!tok_is(i + 1, "path")) way_face[w] = num(i + 1)
+        } else fail("not a route option");
+        i = i + 2
+    }
+    nways = nways + 1;
+    route_n[r] = route_n[r] + 1
+}
+
+starts_block(): bool {
+    tok_is(0, "figure") || tok_is(0, "cell") || tok_is(0, "material") || tok_is(0,
+        "bone") || tok_is(0, "layer") || tok_is(0, "sticker") || tok_is(0, "pose") || tok_is(0,
+        "anim") || tok_is(0, "gait") || tok_is(0, "route") || tok_is(0, "take") || tok_is(0,
+        "steering") || tok_is(0, "use")
+}
+
+read_line() {
+    if (!starts_block() && context == IN_GAIT) {
+        read_gait_line();
+        return
+    }
+    if (!starts_block() && context == IN_ROUTE) {
+        if (tok_is(0, "from") || tok_is(0, "to")) read_way() else fail("not a line a route knows");
+        return
+    }
+    if (tok_is(0, "use")) return;
+    if (tok_is(0, "gait")) {
+        read_gait();
+        return
+    }
+    if (!starts_block() && context == IN_STEER) {
+        read_steer_line();
+        return
+    }
+    if (tok_is(0, "steering")) {
+        read_steering();
+        return
+    }
+    if (!starts_block() && context == IN_TAKE) {
+        read_take_line();
+        return
+    }
+    if (tok_is(0, "take")) {
+        read_take();
+        return
+    }
+    if (tok_is(0, "route")) {
+        read_route();
+        return
+    }
+    if (tok_is(0, "figure")) {
+        title_len = 0;
+        if (ntok > 1) {
+            a: int = tok_a[1];
+            b: int = tok_b[ntok - 1];
+            for i in a..b {
+                if (title_len < len(title)) {
+                    title[title_len] = src[i];
+                    title_len = title_len + 1
+                }
+            }
+        }
+    } else if (tok_is(0, "cell")) fig_cell = clampf(num(1), 0.002, 0.05) else if (tok_is(0,
+        "material")) read_material() else if (tok_is(0, "bone")) read_bone() else if (tok_is(0,
+        "layer")) read_layer() else if (tok_is(0, "part")) {
+        if (context != IN_LAYER) fail("a part outside a layer") else add_part(name(1))
+    } else if (tok_is(0, "ball") || tok_is(0, "cone")) read_shape(OP_CONE) else if (tok_is(0,
+        "egg")) read_shape(OP_EGG) else if (tok_is(0, "box")) read_shape(OP_BOX) else if (tok_is(0,
+        "fine")) {
+        if (context != IN_LAYER) fail("outside a layer") else {
+            layer_zone[nlayers - 1] = layer_at(1);
+            layer_fine[nlayers - 1] = clampf(num(2), 0.001, 0.05);
+            if (layer_zone[nlayers - 1] >= nlayers - 1) fail("a layer can only use those before it")
+        }
+    } else if (tok_is(0, "grow")) read_ref(OP_GROW) else if (tok_is(0, "clip")) read_ref(OP_CLIP) else if (tok_is(0,
+        "carve")) read_ref(OP_CARVE) else if (tok_is(0, "sticker")) read_sticker() else if (tok_is(0,
+        "disc")) read_mark(MARK_DISC) else if (tok_is(0, "oval")) read_mark(MARK_OVAL) else if (tok_is(0,
+        "line")) read_mark(MARK_LINE) else if (tok_is(0, "rect")) read_mark(MARK_RECT) else if (tok_is(0,
+        "digits")) read_mark(MARK_DIGITS) else if (tok_is(0, "pose")) read_pose() else if (tok_is(0,
+        "move")) read_entry(DO_MOVE) else if (tok_is(0, "turn")) read_entry(DO_TURN) else if (tok_is(0,
+        "bend")) read_entry(DO_BEND) else if (tok_is(0, "curl")) read_entry(DO_CURL) else if (tok_is(0,
+        "reach")) read_entry(DO_REACH) else if (tok_is(0, "level")) read_entry(DO_LEVEL) else if (tok_is(0,
+        "hide")) {
+        if (context != IN_POSE) fail("outside a pose") else add_entry(DO_HIDE, layer_at(1),
+            v3(0.0, 0.0, 0.0), v3(0.0, 0.0, 0.0), false)
+    } else if (tok_is(0, "like")) {
+        if (context != IN_POSE) fail("outside a pose") else {
+            p: int = find_in(pose_name, nposes - 1, name(1));
+            if (p < 0) fail("no such pose") else add_entry(DO_LIKE, p, v3(0.0, 0.0,
+                0.0), v3(0.0, 0.0, 0.0), tok_is(2, "mirror"))
+        }
+    } else if (tok_is(0, "anim")) read_anim() else if (tok_is(0, "key")) read_key() else fail("not a line this format knows")
+}
+
+// A sphere around each shape, for leaving the far ones out.
+bound_ops() {
+    for o in 0..nops {
+        k: int = op_kind[o];
+        c: V3 = opv(o, F_A);
+        r: f32 = 0.0;
+        if (k == OP_CONE) {
+            b: V3 = opv(o, F_B);
+            c = v_lerp(c, b, 0.5);
+            flat: f32 = maxf(op_f[o * OP_FLOATS + F_FLAT], 1.0);
+            r = v_len(v_sub(b, c)) + maxf(op_f[o * OP_FLOATS + F_RA], op_f[o * OP_FLOATS + F_RB]) * flat
+        } else if (k == OP_EGG) {
+            h: V3 = opv(o, F_B);
+            r = maxf(h.x, maxf(h.y, h.z))
+        } else if (k == OP_BOX) r = v_len(opv(o, F_B));
+        op_ball[o * 4] = c.x;
+        op_ball[o * 4 + 1] = c.y;
+        op_ball[o * 4 + 2] = c.z;
+        op_ball[o * 4 + 3] = r
+    }
+}
+
+// Read a figure from its text. False, with err_line and err_msg, if the
+// text is wrong.
+read_figure(text: []i8@immortal): bool {
+    src = text;
+    nnames = 0;
+    name_bytes = 0;
+    nmats = 0;
+    nbones = 0;
+    nlayers = 0;
+    nops = 0;
+    nparts = 0;
+    nstickers = 0;
+    nmarks = 0;
+    nposes = 0;
+    nentries = 0;
+    nanims = 0;
+    nkeys = 0;
+    ngaits = 0;
+    nroutes = 0;
+    nways = 0;
+    nmatch = 0;
+    ncycles = 0;
+    steer_nval = 0;
+    steer_gait = -1;
+    nhold = 0;
+    ntakes = 0;
+    ntake_frames = 0;
+    title_len = 0;
+    fig_cell = 0.008;
+    err_line = 0;
+    err_msg = "";
+    context = IN_NONE;
+    cur_part = -1;
+    line_no = 0;
+    // (Name 0 is the empty one.)
+    _empty: int = intern(src, 0, 0);
+    n: int = len(src);
+    i: int = 0;
+    while (i < n && err_line == 0) {
+        line_no = line_no + 1;
+        ntok = 0;
+        comment: bool = false;
+        while (i < n && src[i] != '\n') {
+            c: i8 = src[i];
+            if (c == '#') comment = true;
+            if (comment || c == ' ' || c == '\t' || c == '\r') i = i + 1 else {
+                a: int = i;
+                while (i < n && src[i] != ' ' && src[i] != '\t' && src[i] != '\r' && src[i] != '\n' && src[i] != '#') i = i + 1;
+                if (ntok < MAX_TOKENS) {
+                    tok_a[ntok] = a;
+                    tok_b[ntok] = i;
+                    ntok = ntok + 1
+                }
+            }
+        }
+        i = i + 1;
+        if (ntok > 0) read_line()
+    }
+    if (err_line == 0) {
+        line_no = 0;
+        if (nbones == 0) fail("the figure has no bones");
+        if (nlayers == 0) fail("the figure has no layers");
+        for g in 0..ngaits {
+            if (gait_foot[g] < 0) {
+                line_no = gait_line[g];
+                fail("a gait needs its feet")
+            } else if (bone_parent[gait_foot[g]] < 0 || bone_parent[bone_parent[gait_foot[g]]] < 0) {
+                line_no = gait_line[g];
+                fail("a gait's feet need two bones above them")
+            }
+        }
+        for m in 0..nmatch {
+            match_take[m] = find_in(take_name, ntakes, match_name[m]);
+            if (match_take[m] < 0) {
+                line_no = gait_line[match_gait[m]];
+                fail("a gait matches a take there is none of")
+            } else if (!take_moves[match_take[m]]) {
+                line_no = gait_line[match_gait[m]];
+                fail("a gait can only match takes that say where the figure was")
+            }
+        }
+        for m in 0..ncycles {
+            cycle_take[m] = find_in(take_name, ntakes, cycle_name[m]);
+            if (cycle_take[m] < 0) {
+                line_no = gait_line[cycle_gait[m]];
+                fail("a gait's cycles name a take there is none of")
+            } else if (!take_moves[cycle_take[m]]) {
+                line_no = gait_line[cycle_gait[m]];
+                fail("a cycle must say where the figure was")
+            }
+        }
+        for r in 0..nroutes {
+            if (route_n[r] < 2 && !route_steered[r]) {
+                line_no = route_line[r];
+                fail("a route needs a `from` and a `to`")
+            }
+        }
+    }
+    mirror_stickers();
+    bound_ops();
+    err_line == 0
+}

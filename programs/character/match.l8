@@ -1,0 +1,526 @@
+tag character;
+
+use_tag skate;
+
+// Motion matching: a gait that names takes of motion capture (`match` in
+// its text) goes over the ground by playing them, rather than by working
+// its pose out by rule (gait.l8).
+//
+// Every frame of those takes is described by where its root goes over the
+// next half second (three points, and the way it faces at each, as seen from
+// the root then), and by where its feet are and how they move. A few times a
+// second the frame that best fits where the route takes him, and the pose
+// he is in, is looked for; if it is not the one already playing, the motion
+// goes over to it in a quarter of a second, blending. Played faster or
+// slower to cover the ground at his speed, and turned so that it goes the
+// way he goes, the frame gives the pose; feet the take has down are pinned
+// where they came down, the legs reaching to them.
+const FEATURES: int = 27;
+
+const MAX_DB: int = 16000;
+
+// The frames that can be matched: the take, and the frame in it.
+db_take: []int = new int[MAX_DB](0);
+
+db_frame: []int = new int[MAX_DB](0);
+
+// How fast each frame's take goes there, m/s.
+db_speed: []f32 = new f32[MAX_DB](0.0);
+
+// How fast he is asked to go (in the query), m/s.
+want_speed: f32 = 0.0;
+
+// Each frame's features, scaled so that each kind counts as it should.
+db_f: []f32 = new f32[MAX_DB * FEATURES](0.0);
+
+ndb: int = 0;
+
+feat_scale: []f32 = new f32[FEATURES](1.0);
+
+// The fastest the takes go, m/s: he is asked to go no faster in a query,
+// and is played faster than the take to go faster still.
+db_top: f32 = 6.5;
+
+// The gait the frames are for, or -1.
+db_gait: int = -1;
+
+// A frame's number k (see figure.l8).
+tf(t: int, i: int, k: int): f32 {
+    take_f[(take_first[t] + i) * TAKE_FLOATS + k]
+}
+
+root_at(t: int, i: int): V3 {
+    v3(tf(t, i, TAKE_ROOT), tf(t, i, TAKE_ROOT + 1), tf(t, i, TAKE_ROOT + 2))
+}
+
+frame_dir(t: int, i: int, k: int): V3 {
+    v3(tf(t, i, k * 3), tf(t, i, k * 3 + 1), tf(t, i, k * 3 + 2))
+}
+
+// Turned from the world to a frame facing `yaw`, where ahead is +z.
+local(v: V3, yaw: f32): V3 {
+    v_rotate(v, UP, -yaw)
+}
+
+// The lengths of a leg's two bones, and how far out from the root the hips
+// are, for gait g.
+leg_upper: f32 = 0.43;
+
+leg_lower: f32 = 0.42;
+
+hip_out: f32 = 0.1;
+
+measure_legs(g: int) {
+    foot: int = gait_foot[g];
+    shin: int = bone_parent[foot];
+    thigh: int = bone_parent[shin];
+    leg_upper = v_len(v_sub(bone_pos(shin), bone_pos(thigh)));
+    leg_lower = v_len(v_sub(bone_pos(foot), bone_pos(shin)));
+    hip_out = absf(bone_rest[thigh * 3] - bone_rest[gait_root[g] * 3])
+}
+
+// Where a foot (0 left, 1 right) is from the root, in frame i of take t.
+foot_from_root(t: int, i: int, f: int): V3 {
+    side: f32 = 1.0 - 2.0 * f as f32;
+    hip: V3 = v_scale(frame_dir(t, i, 0), hip_out * side);
+    v_add(hip, v_add(v_scale(frame_dir(t, i, 10 + 2 * f), leg_upper), v_scale(frame_dir(t,
+        i, 11 + 2 * f), leg_lower)))
+}
+
+// Frame i of take t's features into db_f at row d (unscaled).
+describe(t: int, i: int, d: int) {
+    at: int = d * FEATURES;
+    p: V3 = root_at(t, i);
+    yaw: f32 = tf(t, i, TAKE_ROOT + 3);
+    n: int = take_n[t];
+    for k in 0..3 {
+        j: int = mini(i + 5 * (k + 1), n - 1);
+        q: V3 = local(v_sub(root_at(t, j), p), yaw);
+        turn: f32 = tf(t, j, TAKE_ROOT + 3) - yaw;
+        db_f[at + k * 4] = q.x;
+        db_f[at + k * 4 + 1] = q.z;
+        db_f[at + k * 4 + 2] = sinf(turn);
+        db_f[at + k * 4 + 3] = cosf(turn)
+    }
+    j: int = mini(i + 1, n - 1);
+    i0: int = j - 1;
+    for f in 0..2 {
+        here: V3 = local(foot_from_root(t, i, f), yaw);
+        db_f[at + 12 + f * 3] = here.x;
+        db_f[at + 12 + f * 3 + 1] = here.y;
+        db_f[at + 12 + f * 3 + 2] = here.z;
+        moved: V3 = v_sub(v_add(root_at(t, j), foot_from_root(t, j, f)), v_add(root_at(t,
+            i0), foot_from_root(t, i0, f)));
+        v: V3 = local(v_scale(moved, 30.0), yaw);
+        db_f[at + 18 + f * 3] = v.x;
+        db_f[at + 18 + f * 3 + 1] = v.y;
+        db_f[at + 18 + f * 3 + 2] = v.z
+    }
+    v: V3 = local(v_scale(v_sub(root_at(t, j), root_at(t, i0)), 30.0), yaw);
+    db_f[at + 24] = v.x;
+    db_f[at + 25] = v.y;
+    db_f[at + 26] = v.z
+}
+
+// How much each kind of feature counts: where he will be, which way he
+// will face, where his feet are, how they move, how his hips move.
+feature_weight(k: int): f32 {
+    if (k < 12) {
+        if (k % 4 < 2) return 1.0;
+        return 1.2
+    }
+    if (k < 18) return 0.7;
+    if (k < 24) return 0.8;
+    0.6
+}
+
+// The least spread a feature is taken to have, so that one that hardly
+// varies in the takes (which way they face, mostly straight ahead; how
+// fast the hips go) does not count for more than it means.
+feature_floor(k: int): f32 {
+    if (k < 12) {
+        if (k % 4 < 2) return 0.15;
+        return 0.3
+    }
+    if (k < 18) return 0.05;
+    0.6
+}
+
+// The frames of gait g's takes (each frame but the last half second of a take,
+// whose future the take does not hold), described and scaled.
+build_db(g: int) {
+    measure_legs(g);
+    ndb = 0;
+    for m in 0..nmatch {
+        if (match_gait[m] == g && match_take[m] >= 0) {
+            t: int = match_take[m];
+            for i in 0..take_n[t] - 16 {
+                if (ndb < MAX_DB) {
+                    db_take[ndb] = t;
+                    db_frame[ndb] = i;
+                    db_speed[ndb] = take_speed(t, i as f32);
+                    describe(t, i, ndb);
+                    ndb = ndb + 1
+                }
+            }
+        }
+    }
+    db_top = 1.0;
+    for d in 0..ndb db_top = maxf(db_top, take_speed(db_take[d], db_frame[d] as f32));
+    for k in 0..FEATURES {
+        mean: f32 = 0.0;
+        for d in 0..ndb mean = mean + db_f[d * FEATURES + k];
+        mean = mean / maxf(ndb as f32, 1.0);
+        var: f32 = 0.0;
+        for d in 0..ndb {
+            e: f32 = db_f[d * FEATURES + k] - mean;
+            var = var + e * e
+        }
+        sd: f32 = sqrtf(var / maxf(ndb as f32, 1.0));
+        feat_scale[k] = feature_weight(k) / maxf(sd, feature_floor(k));
+        for d in 0..ndb db_f[d * FEATURES + k] = db_f[d * FEATURES + k] * feat_scale[k]
+    }
+    db_gait = g
+}
+
+// ---- playing ----
+// What is playing: a take and a place in it, in frames.
+mm_take: int = -1;
+
+mm_at: f32 = 0.0;
+
+// For going over smoothly: the pose last shown, how it differed from the
+// new frame when the motion went over, and how long ago that was.
+const BLEND_TIME: f32 = 0.3;
+
+switched: bool = false;
+
+shown_dirs: []f32 = new f32[48](0.0);
+
+shown_off: []f32 = new f32[48](0.0);
+
+shown_height: f32 = 0.0;
+
+height_off: f32 = 0.0;
+
+off_age: f32 = 1.0;
+
+// Feet pinned where they came down: whether, where, and how far through
+// letting go (1 just let go, 0 free).
+locked: []bool = new bool[2](false);
+
+lock_at: []f32 = new f32[6](0.0);
+
+let_go: []f32 = new f32[2](0.0);
+
+// Where each ankle was the frame before, to tell how fast it moves.
+ankle_was: []f32 = new f32[6](0.0);
+
+// The way the motion faces, in the world; and how long until it looks for
+// a better frame.
+mm_yaw: f32 = 0.0;
+
+mm_wait: f32 = 0.0;
+
+// How fast it is playing, as a share of the take's own pace.
+mm_rate: f32 = 1.0;
+
+matching(g: int): bool {
+    for m in 0..nmatch {
+        if (match_gait[m] == g) return true
+    }
+    false
+}
+
+take_root_yaw(t: int, at: f32): f32 {
+    i: int = clampf(at, 0.0, (take_n[t] - 2) as f32) as int;
+    u: f32 = clampf(at - i as f32, 0.0, 1.0);
+    lerpf(tf(t, i, TAKE_ROOT + 3), tf(t, i + 1, TAKE_ROOT + 3), u)
+}
+
+take_root_at(t: int, at: f32): V3 {
+    i: int = clampf(at, 0.0, (take_n[t] - 2) as f32) as int;
+    u: f32 = clampf(at - i as f32, 0.0, 1.0);
+    v_lerp(root_at(t, i), root_at(t, i + 1), u)
+}
+
+// How fast the take's root goes over the ground about there, m/s.
+take_speed(t: int, at: f32): f32 {
+    a: V3 = take_root_at(t, at - 2.0);
+    b: V3 = take_root_at(t, at + 2.0);
+    sqrtf((b.x - a.x) * (b.x - a.x) + (b.z - a.z) * (b.z - a.z)) * 30.0 / 4.0
+}
+
+query: []f32 = new f32[FEATURES](0.0);
+
+// What playing frame d at the wanted speed costs: nothing within a sixth
+// of the take's own pace, then more the further it must be sped up or
+// slowed (a jog played fast is not a sprint).
+pace_cost(d: int): f32 {
+    if (want_speed < 1.0 || db_speed[d] < 0.5) return 0.0;
+    r: f32 = want_speed / db_speed[d];
+    e: f32 = maxf(absf(r - 1.0) - 0.15, 0.0);
+    e * e * 120.0
+}
+
+// How far frame d is from the query.
+frame_cost(d: int): f32 {
+    c: f32 = pace_cost(d);
+    for k in 0..FEATURES {
+        e: f32 = db_f[d * FEATURES + k] - query[k];
+        c = c + e * e
+    }
+    c
+}
+
+// The cost of the best frame found last.
+best_cost: f32 = 0.0;
+
+// The frame that best fits where the route takes him and the pose he is
+// in now; -1 if there are none.
+best_frame(): int {
+    best: int = -1;
+    least: f32 = FAR;
+    for d in 0..ndb {
+        c: f32 = pace_cost(d);
+        at: int = d * FEATURES;
+        k: int = 0;
+        while (k < FEATURES && c < least) {
+            e: f32 = db_f[at + k] - query[k];
+            c = c + e * e;
+            k = k + 1
+        }
+        if (c < least) {
+            least = c;
+            best = d
+        }
+    }
+    best_cost = least;
+    best
+}
+
+// The row of take t's frame i, or -1 if it cannot be matched.
+row_of(t: int, i: int): int {
+    for d in 0..ndb {
+        if (db_take[d] == t && db_frame[d] == i) return d
+    }
+    -1
+}
+
+// Time since the motion last went over to another frame.
+mm_since: f32 = 0.0;
+
+// The features he wants: where the route will have him over the next half second
+// (no faster than the takes go), and the pose playing now.
+make_query() {
+    want_speed = v_len(go_v);
+    speed: f32 = minf(want_speed, db_top);
+    for k in 0..3 {
+        ahead_by: f32 = speed * 0.1667 * (k + 1) as f32;
+        p: V3 = local(v_sub(path_point(go_s + ahead_by), go_p), mm_yaw);
+        turn: f32 = mm_face_at(go_s + ahead_by) - mm_yaw;
+        query[k * 4] = p.x * feat_scale[k * 4];
+        query[k * 4 + 1] = p.z * feat_scale[k * 4 + 1];
+        query[k * 4 + 2] = sinf(turn) * feat_scale[k * 4 + 2];
+        query[k * 4 + 3] = cosf(turn) * feat_scale[k * 4 + 3]
+    }
+    i: int = clampf(mm_at, 0.0, (take_n[mm_take] - 1) as f32) as int;
+    describe(mm_take, i, MAX_DB - 1);
+    for k in 12..FEATURES query[k] = db_f[(MAX_DB - 1) * FEATURES + k] * feat_scale[k]
+}
+
+// Which way the route would have him face at s along it.
+mm_face_at(s: f32): f32 {
+    i: int = clampf(s / PATH_STEP, 0.0, (path_n - 1) as f32) as int;
+    leg: int = path_leg[i];
+    if (way_face[leg] != FACE_PATH) return go_turn + way_face[leg] * PI / 180.0 + go_spin;
+    path_heading(s) + go_spin
+}
+
+// Begin the motion for a route: the frame that best fits standing at its
+// start.
+mm_begin() {
+    g: int = go_gait;
+    if (db_gait != g) build_db(g);
+    mm_yaw = go_face;
+    if (ndb == 0) {
+        mm_take = -1;
+        return
+    }
+    mm_take = db_take[0];
+    mm_at = db_frame[0] as f32;
+    make_query();
+    d: int = best_frame();
+    mm_take = db_take[d];
+    mm_at = db_frame[d] as f32;
+    for i in 0..48 shown_off[i] = 0.0;
+    height_off = 0.0;
+    off_age = 1.0;
+    switched = false;
+    mm_wait = 0.0;
+    for f in 0..2 {
+        locked[f] = false;
+        let_go[f] = 0.0
+    }
+}
+
+// One tick on (TICK seconds), after the route's own.
+mm_tick() {
+    if (mm_take < 0) return;
+    h: f32 = TICK;
+    speed: f32 = v_len(go_v);
+    pace: f32 = take_speed(mm_take, mm_at);
+    // (Faster or slower, to cover his ground; within what still looks
+    // like the take.)
+    mm_rate = 1.0;
+    if (pace > 0.8) mm_rate = clampf(speed / pace, 0.7, 1.6);
+    step: f32 = mm_rate * 30.0 * h;
+    yaw0: f32 = take_root_yaw(mm_take, mm_at);
+    mm_at = mm_at + step;
+    mm_yaw = mm_yaw + take_root_yaw(mm_take, mm_at) - yaw0;
+    // Turned, gently, so that the way the take goes is the way he goes.
+    if (speed > 1.0 && pace > 0.8) {
+        a: V3 = take_root_at(mm_take, mm_at - 2.0);
+        b: V3 = take_root_at(mm_take, mm_at + 2.0);
+        goes: f32 = atan2f(b.x - a.x, b.z - a.z) - take_root_yaw(mm_take, mm_at);
+        want: f32 = atan2f(go_v.x, go_v.z) - goes;
+        mm_yaw = mm_yaw + wrap_angle(want - mm_yaw) * ease(5.0, h)
+    }
+    mm_wait = mm_wait - h;
+    mm_since = mm_since + h;
+    running_out: bool = mm_at >= (take_n[mm_take] - 17) as f32;
+    if (mm_wait <= 0.0 || running_out) {
+        mm_wait = 0.1;
+        make_query();
+        d: int = best_frame();
+        // Only for a frame clearly better than going on as it is, and not
+        // straight after the last change, unless the take is running out.
+        here: int = row_of(mm_take, mm_at as int);
+        better: bool = running_out || here < 0 || best_cost < frame_cost(here) * 0.7 && mm_since > 0.3;
+        if (d >= 0 && better) {
+            near: bool = db_take[d] == mm_take && absf(db_frame[d] as f32 - mm_at) < 8.0;
+            if (!near) {
+                mm_since = 0.0;
+                switched = true;
+                mm_take = db_take[d];
+                mm_at = db_frame[d] as f32
+            }
+        }
+    }
+}
+
+// ---- the pose ----
+// The directions of take t at a place in it, turned by `turn`, into
+// pose_dirs with weight w added.
+add_dirs(
+    t: int,
+    at: f32,
+    turn: f32,
+    w: f32
+) {
+    for k in 0..16 {
+        d: V3 = v_rotate(take_dir(t, at, k), UP, turn);
+        pose_dirs[k * 3] = pose_dirs[k * 3] + d.x * w;
+        pose_dirs[k * 3 + 1] = pose_dirs[k * 3 + 1] + d.y * w;
+        pose_dirs[k * 3 + 2] = pose_dirs[k * 3 + 2] + d.z * w
+    }
+}
+
+mm_pose(dt: f32) {
+    g: int = go_gait;
+    if (mm_take < 0) return;
+    for i in 0..48 pose_dirs[i] = 0.0;
+    turn: f32 = mm_yaw - take_root_yaw(mm_take, mm_at);
+    add_dirs(mm_take, mm_at, turn, 1.0);
+    height: f32 = take_root_at(mm_take, mm_at).y;
+    // Going over to another frame: the difference between the pose shown
+    // and the new one is kept, and dies away (so nothing jumps, and the
+    // old take need not go on).
+    if (switched) {
+        switched = false;
+        for i in 0..48 shown_off[i] = shown_dirs[i] - pose_dirs[i];
+        height_off = shown_height - height;
+        off_age = 0.0
+    }
+    off_age = off_age + dt;
+    w: f32 = 1.0 - smoothstepf(0.0, BLEND_TIME, off_age);
+    for i in 0..48 pose_dirs[i] = pose_dirs[i] + shown_off[i] * w;
+    height = height + height_off * w;
+    for k in 0..16 {
+        d: V3 = v_norm(pdir(k));
+        pose_dirs[k * 3] = d.x;
+        pose_dirs[k * 3 + 1] = d.y;
+        pose_dirs[k * 3 + 2] = d.z
+    }
+    for i in 0..48 shown_dirs[i] = pose_dirs[i];
+    shown_height = height;
+    root: int = gait_root[g];
+    base: int = gait_base[g];
+    pose_from_dirs(g, base, hand_of(g), v3(go_p.x - bone_rest[root * 3], height - bone_rest[root * 3 + 1],
+        go_p.z - bone_rest[root * 3 + 2]));
+    // The bones held as the gait's pose has them (the arm with the ball).
+    for i in 0..nhold {
+        if (hold_gait[i] == g && base >= 0) {
+            for b in 0..nbones {
+                if (is_under(b, hold_bone[i])) set_q(WORK, b, get_q(base, b))
+            }
+        }
+    }
+    // Feet the take has down: pinned where they came down.
+    foot: int = gait_foot[g];
+    for f in 0..2 {
+        fb: int = foot;
+        if (f == 1) fb = bone_twin[foot];
+        place_bones(WORK);
+        here: V3 = wp(fb);
+        knee: V3 = wp(bone_parent[fb]);
+        hip: V3 = wp(bone_parent[bone_parent[fb]]);
+        down: bool = tf(mm_take, clampf(mm_at + 0.5, 0.0, (take_n[mm_take] - 1) as f32) as int,
+            TAKE_DOWN + f) > 0.5;
+        // (Pinned only once it is nearly still and down near the ground,
+        // and not again straight after letting go.)
+        moving: f32 = v_len(v_sub(here, getv(ankle_was, f))) / maxf(dt, 0.001);
+        putv(ankle_was, f, here);
+        if (down && !locked[f] && let_go[f] <= 0.0 && moving < 6.0 && here.y < bone_rest[foot * 3 + 1] + gf(g,
+            G_SOLE) + 0.12) {
+            locked[f] = true;
+            // (Where the take has it: lowering it would put the ground out of
+            // a straightened leg's reach as it lands.)
+            putv(lock_at, f, here)
+        }
+        if (locked[f]) {
+            to: V3 = getv(lock_at, f);
+            // (And let go before the foot the take has drifts far from it.)
+            // (Not while going over to another frame: the new one's feet
+            // may not agree yet.)
+            if (!down && off_age > 0.15 || v_len(v_sub(to, hip)) > (leg_upper + leg_lower) * 1.01 || v_len(v_sub(to,
+                here)) > 0.25) {
+                locked[f] = false;
+                let_go[f] = 1.0
+            }
+        }
+        target: V3 = here;
+        if (locked[f]) target = getv(lock_at, f) else if (let_go[f] > 0.0) {
+            target = v_lerp(here, getv(lock_at, f), smoothstepf(0.0, 1.0, let_go[f]));
+            let_go[f] = maxf(let_go[f] - dt / 0.12, 0.0)
+        }
+        if (v_len(v_sub(target, here)) > 0.0005) {
+            toe_way: V3 = q_turn(wq(fb), v3(0.0, 0.0, 1.0));
+            reach(fb, target, true, knee);
+            place_bones(WORK);
+            set_foot(fb, toe_way)
+        }
+    }
+    for b in 0..nbones {
+        set_q(SHOWN, b, get_q(WORK, b));
+        set_t(SHOWN, b, get_t(WORK, b))
+    }
+}
+
+// The left hand of a gait's takes (the first that says).
+hand_of(g: int): int {
+    for m in 0..nmatch {
+        if (match_gait[m] == g && match_take[m] >= 0 && take_hand[match_take[m]] >= 0) return take_hand[match_take[m]]
+    }
+    -1
+}
