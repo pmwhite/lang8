@@ -2,24 +2,456 @@ tag bible_ios;
 
 use_tag std, ios, bible;
 
-// Study beside the text (DESIGN.md §17.3.8).
+// Study beside the text (DESIGN.md §17.3.8): on a wide window, Study opens
+// in a panel at the page's right instead of over it, and stays while you
+// read. The root (ios_ipad.l8's L8Root) holds it as a second child, its
+// navigation controller's view 390 points wide after a 1 point rule, the
+// page taking the rest; the page's place is kept as its width changes, as
+// for any width (§17.2.2). The panel is the Study sheet's screens (one
+// Study at a time: the interlinear's state is one set of globals), its bar
+// Show in Text and a close, its toolbar the sheet's chevrons. It shows the
+// verse chosen (the tray's Study, a word's Study, a verse selected while it
+// is open) and stays there as the page scrolls on. It is open or closed by
+// its bar button and ⌥⌘I, and remembered (studyBeside, its verse). Where
+// the window is too narrow for it, it goes and the page takes its width;
+// it comes back as it was when the window widens again.
 import "../ios/objc.l8";
 
 import "text.l8";
 
+// The panel's width (fixed: every Study screen is laid out for it, §17.10
+// question 7), and the least column the page keeps beside it.
 PANEL_W: f64 = 390.0f64;
 
-beside_wanted(_W: f64): bool {
-    false
+PAGE_LEAST_EM: f64 = 28.0f64;
+
+// Whether it is wanted open, and its verse (kept: studyBeside,
+// studyBesideChapter, studyBesideVerse).
+bs_open: bool = false;
+
+bs_c: int = 0;
+
+bs_v: int = 0;
+
+// Its navigation controller while it holds Study (kept while the window is
+// too narrow for it), whether it is in the root now, the rule, its class
+// and its bar's items.
+bs_nav: int = 0;
+
+bs_shown: bool = false;
+
+bs_rule: int = 0;
+
+bs_class: int = 0;
+
+bs_show_item: int = 0;
+
+// The demo's: no panel, whatever the width (its shots of the form sheet).
+bs_demo_off: bool = false;
+
+// Whether the panel fits beside the page in a window W wide: a wide window,
+// with the page beside 390 points still a column of 28 em with its margins.
+beside_fits_in(W: f64): bool {
+    if (bs_demo_off || !wide()) return false;
+    W >= PANEL_W + 1.0f64 + 2.0f64 * margins[set_margins] + PAGE_LEAST_EM * em
 }
 
+beside_fits(): bool {
+    if (root_vc == 0) return false;
+    beside_fits_in(view_width(msg(root_vc, sel("view"))))
+}
+
+// Whether the root lays the panel out now (a Study sheet of its own up
+// keeps it away, one Study at a time).
+beside_wanted(W: f64): bool {
+    bs_open && restored && beside_fits_in(W) && (bs_nav != 0 || sv_vc == 0)
+}
+
+// The root laid out again (the panel coming or going, the rule changing).
+root_relayout() {
+    if (root_vc == 0) return;
+    view: int = msg(root_vc, sel("view"));
+    msg(view, sel("setNeedsLayout"));
+    msg(view, sel("layoutIfNeeded"))
+}
+
+// The panel placed by the root: in, at the page's right, or out.
 beside_place(
-    _on: bool,
-    _pw: f64,
-    _W: f64,
-    _H: f64
-) { }
+    on: bool,
+    pw: f64,
+    W: f64,
+    H: f64
+) {
+    if (on) {
+        if (bs_nav == 0) beside_build();
+        if (bs_nav == 0) return;
+        if (!bs_shown) beside_attach();
+        msg_rect(bs_rule, sel("setFrame:"), pw, 0.0f64, 1.0f64, H);
+        msg_rect(msg(bs_nav, sel("view")), sel("setFrame:"), pw + 1.0f64, 0.0f64,
+            W - pw - 1.0f64, H)
+    } else if (bs_shown) {
+        beside_detach();
+        note(if (bs_open) "bible: study beside: hidden (width)" else "bible: study beside: closed")
+    }
+}
 
-make_beside_classes() { }
+// Study's screens made for the panel, at its verse.
+beside_build() {
+    lang_load();
+    if (!lang_ready) return;
+    vc: int = study_make(bs_c, bs_v);
+    item: int = msg(vc, sel("navigationItem"));
+    // (Its own close, not Done: it isn't modal; and Show in Text.)
+    close: int = msg(msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithImage:style:target:action:"),
+        symbol("xmark", 15.0f64, 5, 0), 0, app_obj, sel("besideClose:")), sel("autorelease"));
+    msg1(close, sel("setAccessibilityLabel:"), nsstring("Close Study"));
+    msg1(item, sel("setRightBarButtonItem:"), close);
+    show: int = msg(msg4(msg(cls("UIBarButtonItem"), sel("alloc")), sel("initWithImage:style:target:action:"),
+        symbol("text.magnifyingglass", 17.0f64, 4, 0), 0, app_obj, sel("besideShowInText:")),
+        sel("autorelease"));
+    msg1(show, sel("setAccessibilityLabel:"), nsstring("Show in Text"));
+    msg1(item, sel("setLeftBarButtonItem:"), show);
+    bs_show_item = show;
+    // (The segments fitted between them.)
+    msg_rect(sv_seg, sel("setFrame:"), 0.0f64, 0.0f64, 250.0f64, 32.0f64);
+    n: int = msg1(msg(bs_class, sel("alloc")), sel("initWithRootViewController:"),
+        vc);
+    bs_nav = n;
+    msg2(n, sel("setToolbarHidden:animated:"), 0, 0);
+    msg1(msg(n, sel("toolbar")), sel("setTintColor:"), c_icon);
+    view: int = msg(n, sel("view"));
+    msg1(view, sel("setAutoresizingMask:"), 0);
+    msg1(view, sel("setBackgroundColor:"), c_bg);
+    // (A group of its own for VoiceOver and the keyboard's focus: §17.3.8.)
+    msg1(view, sel("setShouldGroupAccessibilityChildren:"), 1);
+    if (responds(view, "setAccessibilityContainerType:")) msg1(view, sel("setAccessibilityContainerType:"),
+        4);
+    if (responds(view, "setFocusGroupIdentifier:")) {
+        msg1(view, sel("setFocusGroupIdentifier:"), nsstring("study"));
+        msg1(msg(nav, sel("view")), sel("setFocusGroupIdentifier:"), nsstring("page"))
+    }
+    beside_titles();
+    if (bs_rule == 0) {
+        bs_rule = keep(make("UIView"));
+        msg1(bs_rule, sel("setAutoresizingMask:"), 0)
+    }
+    msg1(bs_rule, sel("setBackgroundColor:"), c_rule);
+    note("bible: study beside: made")
+}
 
-add_beside_methods(_app: int) { }
+beside_attach() {
+    view: int = msg(root_vc, sel("view"));
+    msg1(root_vc, sel("addChildViewController:"), bs_nav);
+    msg1(view, sel("addSubview:"), bs_rule);
+    msg1(view, sel("addSubview:"), msg(bs_nav, sel("view")));
+    msg1(bs_nav, sel("didMoveToParentViewController:"), root_vc);
+    bs_shown = true;
+    beside_log("shown")
+}
+
+beside_detach() {
+    msg1(bs_nav, sel("willMoveToParentViewController:"), 0);
+    msg(msg(bs_nav, sel("view")), sel("removeFromSuperview"));
+    msg(bs_nav, sel("removeFromParentViewController"));
+    msg(bs_rule, sel("removeFromSuperview"));
+    bs_shown = false
+}
+
+// Its stack let go (closed, or a Study sheet opened in its place).
+beside_discard() {
+    if (bs_nav == 0) return;
+    if (bs_shown) beside_detach();
+    release(bs_nav);
+    bs_nav = 0;
+    bs_show_item = 0;
+    study_globals_gone();
+    learn_sheet_gone()
+}
+
+// "bible: study beside: shown John 3:16 (page 975, column 34.0 em)".
+beside_log(what: str) {
+    if (!diag_on) return;
+    fbuf_n = 0;
+    fput_str("bible: study beside: ");
+    fput_str(what);
+    fput(32);
+    one_verse[0] = bs_v;
+    put_ref(bs_c, one_verse, 1);
+    note_ns(fstring())
+}
+
+// The panel's title (the verse: the back button's, VoiceOver's group's
+// name "Study, John 3:16") and whether Show in Text can show it (a day's
+// reader: only a verse of the day).
+beside_titles() {
+    if (bs_nav == 0) return;
+    fbuf_n = 0;
+    one_verse[0] = bs_v;
+    put_ref(bs_c, one_verse, 1);
+    msg1(sv_vc, sel("setTitle:"), fstring());
+    fbuf_n = 0;
+    fput_str("Study, ");
+    one_verse[0] = bs_v;
+    put_ref(bs_c, one_verse, 1);
+    msg1(msg(bs_nav, sel("view")), sel("setAccessibilityLabel:"), fstring());
+    if (bs_show_item != 0) msg1(bs_show_item, sel("setEnabled:"), if (!day_on || day_row_of(bs_c,
+        bs_v) >= 0) 1 else 0)
+}
+
+beside_save() {
+    set_def_bool("studyBeside", bs_open);
+    set_def_int("studyBesideChapter", bs_c + 1);
+    set_def_int("studyBesideVerse", bs_v)
+}
+
+// At launch: open as it was left.
+beside_load() {
+    c: int = def_int("studyBesideChapter") - 1;
+    if (c < 0 || c >= chapters) return;
+    bs_c = c;
+    bs_v = def_int("studyBesideVerse");
+    bs_open = def_bool("studyBeside");
+    if (bs_open) root_relayout()
+}
+
+// ---- opening and closing ----
+// Open at verse v of chapter c (the tray's Study, a word's): the panel
+// slides in from the trailing edge (the page cross-fading to its new
+// width), or, open already, shows the verse.
+beside_open(c: int, v: int) {
+    if (bs_shown) {
+        beside_show_verse(c, v, true);
+        update_tray();
+        return
+    }
+    bs_open = true;
+    bs_c = c;
+    bs_v = v;
+    beside_save();
+    if (bs_nav != 0) beside_show_verse(c, v, false) else beside_build();
+    beside_motion(true);
+    root_relayout();
+    if (bs_shown) {
+        beside_motion_after(true);
+        _a: int = UIAccessibilityPostNotification(objc_const("UIAccessibilityScreenChangedNotification"),
+            msg(bs_nav, sel("view")))
+    }
+    layout_bar();
+    if (tray_shown) update_tray()
+}
+
+// Closed (its close, the bar's button, ⌥⌘I): it slides out, the page
+// taking its width, the verse at the top kept.
+beside_close() {
+    if (!bs_open) return;
+    bs_open = false;
+    beside_save();
+    if (!bs_shown) {
+        beside_discard();
+        layout_bar();
+        return
+    }
+    panel: int = msg(bs_nav, sel("view"));
+    beside_motion(false);
+    // (A picture of it slides away over the page; the stack is let go now.)
+    out: int = if (reduce_motion()) 0 else msg1(panel, sel("snapshotViewAfterScreenUpdates:"),
+        0);
+    if (out != 0) {
+        l8_msg_hfa(hfa, panel, sel("frame"), 0, 0, 0);
+        msg_rect(out, sel("setFrame:"), hfa[0], hfa[1], hfa[2], hfa[3])
+    }
+    beside_discard();
+    root_relayout();
+    if (out != 0) {
+        msg1(msg(root_vc, sel("view")), sel("addSubview:"), out);
+        layer: int = msg(out, sel("layer"));
+        msg2(layer, sel("setValue:forKeyPath:"), nsnumber_f(PANEL_W + 1.0f64), nsstring("transform.translation.x"));
+        animate(layer, "transform.translation.x", 0.0f64, PANEL_W + 1.0f64, false,
+            0.3f64);
+        beside_gone(0, 0, 0);
+        bs_leaving = keep(out);
+        _t: int = after_common(0.32f64, "besideGone:")
+    }
+    layout_bar();
+    if (tray_shown) update_tray();
+    note("bible: study beside: closed");
+    // (VoiceOver back to the verse it showed.)
+    tv: int = current_view();
+    if (tv != 0) _a: int = UIAccessibilityPostNotification(objc_const("UIAccessibilityScreenChangedNotification"),
+        tv)
+}
+
+bs_leaving: int = 0;
+
+beside_gone(_self: int, _cmd: int, _timer: int): int {
+    if (bs_leaving != 0) {
+        msg(bs_leaving, sel("removeFromSuperview"));
+        release(bs_leaving);
+        bs_leaving = 0
+    }
+    0
+}
+
+// The page's cross-fade as its width changes (0.2 s; 0.15 s, the panel's
+// too, with Reduce Motion), at the start, so no line visibly reflows.
+beside_motion(_opening: bool) {
+    if (nav == 0) return;
+    if (reduce_motion()) fade_layer(msg(msg(root_vc, sel("view")), sel("layer")),
+        0.15f64) else fade_layer(msg(msg(nav, sel("view")), sel("layer")), 0.2f64)
+}
+
+// The panel's slide in from the trailing edge (the panel spring, §0).
+beside_motion_after(_opening: bool) {
+    if (reduce_motion() || bs_nav == 0) return;
+    animate(msg(msg(bs_nav, sel("view")), sel("layer")), "transform.translation.x",
+        PANEL_W + 1.0f64, 0.0f64, true, 0.0f64)
+}
+
+beside_toggle() {
+    if (bs_open) {
+        beside_close();
+        return
+    }
+    if (!beside_fits()) return;
+    // (The verse selected, or the one it last showed, or the one at the top.)
+    c: int = bs_c;
+    v: int = bs_v;
+    if (sel_n > 0) {
+        c = sel_c;
+        v = sel_v[0]
+    } else if (def_int("studyBesideChapter") <= 0) {
+        measure_place();
+        c = cur;
+        v = (if (place_v > 0) place_v else 1)
+    }
+    help_used("study");
+    beside_open(c, v)
+}
+
+// The bar's Study button.
+beside_button(_self: int, _cmd: int, _b: int): int {
+    beside_toggle();
+    0
+}
+
+beside_close_tapped(_self: int, _cmd: int, _b: int): int {
+    beside_close();
+    0
+}
+
+// ---- its verse ----
+// Shown at verse v of chapter c: its stack back to Study's first screen,
+// the segment's view made again (cross-faded, 0.2 s).
+beside_show_verse(c: int, v: int, fade: bool) {
+    bs_c = c;
+    bs_v = v;
+    beside_save();
+    if (bs_nav == 0) return;
+    if (msg(msg(bs_nav, sel("viewControllers")), sel("count")) > 1) msg1(bs_nav, sel("popToRootViewControllerAnimated:"),
+        0);
+    sv_c = c;
+    sv_v = v;
+    origin_c = c;
+    origin_v = v;
+    sv_back_title();
+    if (fade && sv_box != 0) fade_layer(msg(sv_box, sel("layer")), 0.2f64);
+    sv_show(false);
+    beside_titles();
+    beside_log("verse")
+}
+
+// The panel's own chevrons moved it (the page stays where it is).
+beside_moved(c: int, v: int) {
+    if (bs_nav == 0 || sv_vc == 0) return;
+    bs_c = c;
+    bs_v = v;
+    beside_save();
+    beside_titles()
+}
+
+// A verse selected while it is open: the first selected shown there.
+beside_follow() {
+    if (!bs_shown || sel_n == 0) return;
+    if (sel_c == bs_c && sel_v[0] == bs_v) return;
+    beside_show_verse(sel_c, sel_v[0], true)
+}
+
+// Show in Text: the page to the panel's verse, flashed (a jump: history
+// and the capsule); in a day's reader, within the day.
+beside_show_in_text(_self: int, _cmd: int, _b: int): int {
+    note("bible: study beside: show in text");
+    if (day_on) {
+        if (day_row_of(bs_c, bs_v) < 0) return 0;
+        stop_moving();
+        go_verse(bs_c, bs_v);
+        flash(bs_c, bs_v);
+        return 0
+    }
+    jump(bs_c, bs_v);
+    0
+}
+
+// Where Study's screens are pushed: the sheet on top, or else the panel.
+study_host(): int {
+    top: int = top_presented();
+    if (top == 0 && bs_shown && bs_nav != 0) bs_nav else top
+}
+
+// ---- the panel's keys: ⌘↑ and ⌘↓ its verse ----
+bs_keys: int = 0;
+
+beside_key_commands(_self: int, _cmd: int): int {
+    if (bs_keys == 0) {
+        one[0] = key_command("Previous Verse", objc_const("UIKeyInputUpArrow"), K_CMD,
+            "besidePrevious:");
+        one[1] = key_command("Next Verse", objc_const("UIKeyInputDownArrow"), K_CMD,
+            "besideNext:");
+        bs_keys = keep(nsarray(one, 2))
+    }
+    bs_keys
+}
+
+beside_step(d: int) {
+    if (bs_nav == 0) return;
+    if (sv_segment == 0 && il_scroll != 0) il_step(d) else study_step(d)
+}
+
+beside_previous(_self: int, _cmd: int, _k: int): int {
+    beside_step(-1);
+    0
+}
+
+beside_next(_self: int, _cmd: int, _k: int): int {
+    beside_step(1);
+    0
+}
+
+// A push in the panel: its screen's edges as a sheet's (iOS 26).
+beside_pushed(
+    self: int,
+    cmd: int,
+    vc: int,
+    animated: int
+): int {
+    sup: ObjcSuper = ObjcSuper { receiver: self, super_class: class_getSuperclass(bs_class) };
+    msg_super2(&sup, cmd, vc, animated);
+    sheet_edges(vc);
+    0
+}
+
+make_beside_classes() {
+    bs_class = objc_allocateClassPair(cls("UINavigationController"), "L8StudyPanel",
+        0);
+    add_method2(bs_class, sel("pushViewController:animated:"), &beside_pushed, "v@:@B");
+    add_method0(bs_class, sel("keyCommands"), &beside_key_commands, "@@:");
+    objc_registerClassPair(bs_class)
+}
+
+add_beside_methods(app: int) {
+    add_method1(app, sel("besideClose:"), &beside_close_tapped, "v@:@");
+    add_method1(app, sel("besideButton:"), &beside_button, "v@:@");
+    add_method1(app, sel("besideShowInText:"), &beside_show_in_text, "v@:@");
+    add_method1(app, sel("besideGone:"), &beside_gone, "v@:@");
+    add_method1(app, sel("besidePrevious:"), &beside_previous, "v@:@");
+    add_method1(app, sel("besideNext:"), &beside_next, "v@:@")
+}

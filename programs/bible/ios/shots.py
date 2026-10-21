@@ -1,5 +1,5 @@
 # The CI's screenshots, finished (Python with Pillow and PyAV):
-#   shots.py DIR [collapse | transitions]
+#   shots.py DIR [collapse | transitions | upright]
 # DIR holds every group's screenshots, and the notes group's screen
 # recording (transitions.mp4, and transitions.txt: a line a sequence, its
 # number and its start and end in seconds). It writes:
@@ -11,6 +11,10 @@
 #   (JPEG, half size);
 # - transitions-sheet.png: a row a sequence, every 3rd frame, at a quarter
 #   size.
+# - with upright (only): the shots taken with the interface in landscape
+#   (named in each group's landscape.txt, published as GROUP-landscape.txt)
+#   turned upright, if the simulator wrote them in the device's portrait
+#   (DESIGN.md §17.8.2).
 # With collapse or transitions, only that one (CI makes the recording's
 # frames in a job of their own, while other groups still run).
 import os, re, sys
@@ -114,7 +118,25 @@ def transitions():
     sheet.save(os.path.join(d, "transitions-sheet.png"))
     return "%d sequences, %d decoded frames" % (len(rows), len(decoded))
 
+def upright():
+    turned = []
+    for name in sorted(os.listdir(d)):
+        if not name.endswith("landscape.txt"):
+            continue
+        for shot in open(os.path.join(d, name)).read().split():
+            p = os.path.join(d, shot + ".png")
+            if not os.path.exists(p):
+                continue
+            im = Image.open(p)
+            if im.height > im.width:
+                im.rotate(90, expand=True).save(p)
+                turned.append(shot)
+    return "upright: %d turned (%s)" % (len(turned), " ".join(turned))
+
 only = sys.argv[2] if len(sys.argv) > 2 else None
+if only == "upright":
+    print(upright())
+    sys.exit(0)
 if only != "transitions":
     with open(os.path.join(d, "collapse-diff.txt"), "w") as f:
         r = collapse_diff()

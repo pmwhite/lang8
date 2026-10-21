@@ -90,6 +90,18 @@
 #           and on, Night, the largest text, the Greek and Hebrew and Memory
 #           pages, every tip seen; and the recording of sequence 20
 #           (help-transitions.mp4); its log's checks in tips.txt
+#   ipad    §17 (DESIGN.md §17.8.2), on the 13-inch iPad Pro, tips on, a
+#           Memory passage written before the first launch: the reader in
+#           portrait and turned to landscape (the verse kept), at an
+#           accessibility size; the tray; the sheets as form sheets,
+#           Reading settings as a popover, Night seen live; Practice, a
+#           card, the Greek page, the day's reader, the capsule, the mini
+#           player; ⌘L; the narrow window's stand-in; the manual's keys;
+#           the share popover; Study beside the text (492 to 503); the
+#           recording of sequences 22 and 23 (ipad-transitions.mp4); the
+#           13-inch App Store screenshots (store-ipad-1.png to 5); its
+#           log's checks in ipad.txt. (Shots taken in landscape are
+#           turned upright: landscape.txt names them.)
 # Every group has the audio fixture (programs/bible/demo/audio, copied into
 # the app's Library and named by L8_AUDIO_FIXTURE), so no recording is
 # fetched from the network in CI.
@@ -130,12 +142,13 @@ for rt, ds in json.load(sys.stdin)["devices"].items():
 # group found it: the app and its defaults, permissions and keychain gone,
 # the pasteboard emptied, the status bar as it was, the app's notification
 # state cleared.)
+# (SIM_KEEP: simulators booted ahead for a later group, left booted.)
 xcrun simctl list devices booted -j | python3 -c '
 import json, sys
 for ds in json.load(sys.stdin)["devices"].values():
     for d in ds:
-        if d["udid"] != sys.argv[1]:
-            print(d["udid"])' "$dev" | while read -r other; do
+        if d["udid"] != sys.argv[1] and d["udid"] not in sys.argv[2].split():
+            print(d["udid"])' "$dev" "${SIM_KEEP:-}" | while read -r other; do
   xcrun simctl shutdown "$other" 2>/dev/null && echo "shut down $other"
 done
 # (Crash reports from here on are this group's: not the other simulator's,
@@ -265,9 +278,23 @@ PY
   xcrun simctl spawn "$dev" defaults write "$id" learnSeen -bool false 2>/dev/null || true
   xcrun simctl spawn "$dev" defaults write "$id" memorySeen -bool true 2>/dev/null || true
 fi
-# (Every group but help: no tip at the top of Go To, so that their shots
-# are as they were before §15. DESIGN.md §15.7.)
-[ "$group" = help ] || xcrun simctl spawn "$dev" defaults write "$id" showTips -bool false 2>/dev/null || true
+# (The ipad group's, before the first launch: Philippians 4:6–7 and Romans
+# 8:28–30 in Memory, for Practice; DESIGN.md §17.8.2.)
+if [ "$group" = ipad ]; then
+  data=$(xcrun simctl get_app_container "$dev" "$id" data 2>/dev/null)
+  if [ -n "$data" ]; then
+    mkdir -p "$data/Library/Application Support/SmoothBible"
+    t=$(python3 -c 'import time; print(int(time.time()) - 5 * 86400)')
+    printf 'PASSAGE\t1\tbsb\tPHP\t4\t6\t4\t7\t%s\treview\t0\t3\t2026-10-18\tletters\nPASSAGE\t2\tbsb\tROM\t8\t28\t8\t30\t%s\treview\t0\t2\t2026-10-18\tsome\nNEXT\t3\n' \
+      "$t" "$((t + 60))" > "$data/Library/Application Support/SmoothBible/memory.tsv"
+    echo "ipad group's passages written"
+  fi
+  xcrun simctl spawn "$dev" defaults write "$id" learnSeen -bool true 2>/dev/null || true
+  xcrun simctl spawn "$dev" defaults write "$id" memorySeen -bool true 2>/dev/null || true
+fi
+# (Every group but help and ipad: no tip at the top of Go To, so that their
+# shots are as they were before §15. DESIGN.md §15.7, §17.8.2.)
+[ "$group" = help ] || [ "$group" = ipad ] || xcrun simctl spawn "$dev" defaults write "$id" showTips -bool false 2>/dev/null || true
 # (Every other group: the server as if it were not there, L8_ESV_OFF, so
 # that no shot depends on the network or shows the ESV; review r5-1.)
 esv_off=1
@@ -400,7 +427,7 @@ step_toast() {
 step_at() {
   awk -v want="bible: demo step $1" '{ sub(/\r$/, "") } $0 == want { found = 1; next } found && /at unix ms/ { t = $NF; found = 0 } END { printf "%.3f", t / 1000 }' "$out/console.txt"
 }
-if [ "$group" = store ]; then
+if [ "$group" = store ] || [ "$group" = ipad ]; then
   # The status bar as the App Store's screenshots have it.
   xcrun simctl status_bar "$dev" override --time 9:41 --batteryState charged --batteryLevel 100 \
     --cellularMode active --cellularBars 4 --wifiMode active --wifiBars 3 2>/dev/null || \
@@ -467,6 +494,16 @@ read)
   launch console-again.txt
   shot 30-opened-again
   step 30 31-link-romans-8
+  # (DESIGN.md §17.8.3: the iPhone held sideways, John 3 in a column of 34
+  # em or less, centred; the tray; then upright again.)
+  step 590 "" 8
+  sleep 1
+  shot 490-iphone-landscape
+  echo 490-iphone-landscape >> "$out/landscape.txt"
+  step 591 491-iphone-landscape-tray
+  echo 491-iphone-landscape-tray >> "$out/landscape.txt"
+  step 592 "" 6
+  sleep 1
   ;;
 study)
   step 40 32-panel-study
@@ -1290,6 +1327,108 @@ help)
   grep -A3 "demo every tip seen" "$out/tips.txt" | grep -q "tip shown goto-type" || { echo "FAILED: no tip after every tip was seen" | tee -a "$out/tips.txt"; failed=1; }
   grep -q "help problems" "$out/tips.txt" && { echo "FAILED: help.txt has problems" | tee -a "$out/tips.txt"; failed=1; }
   tail -5 "$out/tips.txt"
+  ;;
+ipad)
+  # (DESIGN.md §17.8.2: shots 460 to 489 and 492 to 503, landscape unless
+  # in portrait; landscape.txt names those turned, to be set upright.)
+  land() { echo "$1" >> "$out/landscape.txt"; }
+  step 520 460-ipad-portrait 10
+  step 521 "" 8
+  sleep 1
+  shot 461-ipad-landscape; land 461-ipad-landscape
+  ui_size accessibility-extra-large
+  step 522 462-ipad-largest-text 8; land 462-ipad-largest-text
+  ui_size large
+  step 523 463-ipad-tray 8; land 463-ipad-tray
+  step 524 464-ipad-goto 10; land 464-ipad-goto
+  step 525 465-ipad-goto-grid 8; land 465-ipad-goto-grid
+  step 526 466-ipad-search 10; land 466-ipad-search
+  step 527 467-ipad-settings-popover 10; land 467-ipad-settings-popover
+  step 528 468-ipad-theme-live 8; land 468-ipad-theme-live
+  step 529 469-ipad-study 12; land 469-ipad-study
+  step 530 470-ipad-word-study 8; land 470-ipad-word-study
+  step 531 471-ipad-compare 10; land 471-ipad-compare
+  step 532 472-ipad-library-memory 10; land 472-ipad-library-memory
+  step 533 473-ipad-practice 10; land 473-ipad-practice
+  step 534 474-ipad-card 10; land 474-ipad-card
+  step 535 475-ipad-greek-page 12; land 475-ipad-greek-page
+  step 536 476-ipad-day-reader 12; land 476-ipad-day-reader
+  step 537 477-ipad-capsule 10; land 477-ipad-capsule
+  step 538 478-ipad-listen 10; land 478-ipad-listen
+  step 539 479-ipad-menu-bar 6; land 479-ipad-menu-bar
+  step 540 480-ipad-key-goto 10; land 480-ipad-key-goto
+  step 541 481-ipad-narrow 12; land 481-ipad-narrow
+  step 542 482-ipad-narrow-tray 8; land 482-ipad-narrow-tray
+  step 543 483-ipad-landscape-practice 12; land 483-ipad-landscape-practice
+  step 544 484-ipad-preview 10; land 484-ipad-preview
+  step 545 485-ipad-manual 12; land 485-ipad-manual
+  step 546 486-ipad-night 8; land 486-ipad-night
+  ui_size accessibility-medium
+  step 547 487-ipad-sepia-ax 8; land 487-ipad-sepia-ax
+  ui_size large
+  step 548 488-ipad-note 10; land 488-ipad-note
+  step 549 489-ipad-share 10; land 489-ipad-share
+  # Study beside the text.
+  step 550 492-beside-open 12; land 492-beside-open
+  step 551 493-beside-word 8; land 493-beside-word
+  step 552 494-beside-hidden 10; land 494-beside-hidden
+  step 553 495-beside-select 8; land 495-beside-select
+  step 554 496-beside-scroll 8; land 496-beside-scroll
+  step 555 497-beside-show-in-text 10; land 497-beside-show-in-text
+  step 556 498-beside-references 8; land 498-beside-references
+  step 557 "" 8
+  sleep 1
+  shot 499-beside-portrait
+  step 558 500-beside-narrowed 10
+  step 559 501-beside-back 10
+  step 560 "" 10
+  sleep 1.5
+  shot 502-beside-day; land 502-beside-day
+  step 561 503-beside-closed 10; land 503-beside-closed
+  # The 13-inch App Store screenshots (§17.8.4), from these.
+  for pair in 1:461-ipad-landscape 2:464-ipad-goto 3:492-beside-open 4:473-ipad-practice 5:475-ipad-greek-page; do
+    cp "$out/${pair#*:}.png" "$out/store-ipad-${pair%%:*}.png" 2>/dev/null && land "store-ipad-${pair%%:*}"
+  done
+  # The screen recording of sequences 22 and 23 (its setup before each mark).
+  step 565 "" 8
+  rec0=$(now)
+  xcrun simctl io "$dev" recordVideo --codec h264 --force "$out/transitions.mp4" > "$out/record.txt" 2>&1 &
+  recorder=$!
+  i=0
+  while ! grep -qi "started" "$out/record.txt" 2>/dev/null && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  rec1=$(now)
+  sleep 2
+  : > "$out/transitions.txt"
+  # (Each settles once its last move is made.)
+  step 562 "" 30
+  a=$(step_at 562)
+  sleep 1
+  b=$(now)
+  echo "22 $(python3 -c "print(round($a - $rec0, 2), round($b - $rec0, 2))")" >> "$out/transitions.txt"
+  step 563 "" 10
+  sleep 1
+  step 564 "" 30
+  a=$(step_at 564)
+  sleep 1
+  b=$(now)
+  echo "23 $(python3 -c "print(round($a - $rec0, 2), round($b - $rec0, 2))")" >> "$out/transitions.txt"
+  sleep 0.5
+  kill -INT "$recorder" 2>/dev/null
+  wait "$recorder" 2>/dev/null
+  # The log's checks (§17.8.2): the place kept at each turn, the forms of
+  # the sheets, the menu's commands, Study beside the text's states.
+  grep -h "bible: width\|bible: column\|bible: sheet as\|bible: menu\|bible: demo menu\|bible: study beside\|bible: demo rotate\|bible: demo narrow\|bible:   wide\|bible: key\|bible: go to field\|bible: demo step\|bible: demo sequence" \
+    "$out/console.txt" > "$out/ipad.txt" 2>/dev/null
+  for want in "kept JHN 3:16" "sheet as a form sheet 540 x 720" "sheet as a popover 375 x 640" "sheet as a form sheet 700 x 860" \
+      "demo menu Go: Go To…, Search…, Next Chapter, Previous Chapter, Back, Library" "key go to" "go to field active" \
+      "study beside: shown John 3:16" "study beside: verse John 3:17" "study beside: show in text" \
+      "study beside: hidden (width)" "study beside: closed" "demo sequence 22 done" "demo sequence 23 done"; do
+    grep -qF "$want" "$out/ipad.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/ipad.txt"; failed=1; }
+  done
+  tail -5 "$out/ipad.txt"
   ;;
 ios18)
   shot 01-genesis-1
