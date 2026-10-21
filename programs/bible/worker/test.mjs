@@ -393,6 +393,10 @@ const ASSETS = {
   async fetch(request) {
     const p = new URL(request.url).pathname;
     const hit = site[p.endsWith("/") ? p + "index.html" : p] || site[p + ".html"];
+    // (As Cloudflare's assets do: a file whose validator matches gets 304,
+    // no body.)
+    if (hit && (request.headers.get("if-none-match") || request.headers.get("if-modified-since")))
+      return new Response(null, { status: 304, headers: { etag: '"x"', "last-modified": "Tue, 20 Oct 2026 00:00:00 GMT" } });
     const [type, body] = hit || site["/404.html"];
     return new Response(body, { status: hit ? 200 : 404, headers: { "content-type": type } });
   },
@@ -465,4 +469,12 @@ test("/read: hashed files and data kept a year; the site and the API as they wer
   assert.equal(r.status, 200);
   assert.equal(r.headers.get("x-robots-tag"), null);
   assert.deepEqual(await r.json(), { ok: true, esv: true, esvAudio: true });
+});
+
+test("/read: the shell is whole even when the visitor's browser holds a copy (no 304 passed on)", async () => {
+  const r = await worker.fetch(new Request("https://smoothbible.com/read/bsb/john/3", { headers: { "if-none-match": '"x"', "if-modified-since": "Tue, 20 Oct 2026 00:00:00 GMT" } }), env({ ASSETS }));
+  assert.equal(r.status, 200);
+  assert.match(await r.text(), /<title>John 3 · BSB · Smooth Bible<\/title>/);
+  assert.equal(r.headers.get("etag"), null);
+  assert.equal(r.headers.get("last-modified"), null);
 });

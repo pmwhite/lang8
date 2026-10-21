@@ -334,11 +334,15 @@ export function fillShell(html, url) {
 async function read(request, env, url) {
   const r = await env.ASSETS.fetch(request);
   if (r.status === 404 && READER.test(url.pathname)) {
-    const shell = await env.ASSETS.fetch(new Request(new URL("/read/shell", url), request));
+    // (Asked for plainly: with the visitor's If-None-Match the assets would
+    // answer 304 with no body, which filled would be a blank page with 200.
+    // The page made here is new each time, so no validators go with it.)
+    const shell = await env.ASSETS.fetch(new Request(new URL("/read/shell", url)));
     const html = fillShell(await shell.text(), url);
     const h = new Headers(shell.headers);
     h.delete("content-length");
     h.delete("etag");
+    h.delete("last-modified");
     return readerHeaders(new Response(html, { status: 200, headers: h }), url.pathname);
   }
   return readerHeaders(r, url.pathname);
