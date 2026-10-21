@@ -115,6 +115,17 @@ read aloud by VoiceOver as it would be in the phone's own apps.
   forms as the Bible has them, each with the BSB's commonest rendering, a
   tap their concordance); Verses You Can Read lists the verses whose
   every word you know, first on the page once the alphabet is known.
+- The Hebrew and Greek (Round 11, §14.11): one more version, the Hebrew
+  Bible (the Leningrad Codex, the Qere read, right to left with its vowel
+  points) and the Greek New Testament (NA28's words), keyed by the BSB's
+  verses so marks, ribbons, plans and history work in it. Set like a
+  reader's edition: a word you haven't learned (or, as chosen, a rare one)
+  has a faint dotted line, and the paragraph's glosses follow it, the
+  BSB's words for each; a gloss tapped opens the word's popover (its
+  transliteration, gloss, meaning here and domain from UBS's dictionaries,
+  parsing, a Qere's Ketiv, the Hebrew's own verse number, Word Study and
+  Learn This Word). Reading settings has Glosses and Show Accents in it;
+  Listen has no recording of the original yet.
 - The manual and quick tips (§15): a tip at the top of Go To, one
   sentence with More (the manual at its part), Next and sometimes an
   action (New Ribbon…, Reading Plans, Open Memory…); the same tip all day,
@@ -316,7 +327,8 @@ about 27 when each group had a Mac of its own; see the workflow's header):
   last. store and memory share a Mac, each on its own simulator, more
   third on memory's; ios18 follows ribbons and study on an iOS 18 iPhone of
   its own; languages (Round 10) goes first on the versions job's iPhone;
-  help (§15) second on the read job's, before plans (grown by §16's day's
+  original (Round 11) third on it, after versions; help (§15) second on
+  the read job's, before plans (grown by §16's day's
   reader); ipad (§17, on the 13-inch iPad Pro) third on the notes job, its
   iPad booted when its turn comes (booted beside the others, it slowed them
   more than its boot costs; `simulate.sh`'s `SIM_KEEP` would leave one

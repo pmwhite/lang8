@@ -90,6 +90,15 @@
 #           and on, Night, the largest text, the Greek and Hebrew and Memory
 #           pages, every tip seen; and the recording of sequence 20
 #           (help-transitions.mp4); its log's checks in tips.txt
+#   original  Round 11 (DESIGN.md §14.11.9), on the demo clock: 120 Greek
+#           words known and 300 Hebrew; Versions' Hebrew and Greek, John 1
+#           glossed (words not learned, then rare words), a word's popover
+#           and Learn This Word, John 3 once it is known, Genesis 1 and
+#           Psalm 23 in Hebrew, Show Accents, a Qere's Ketiv, Malachi 4:1's
+#           Hebrew number, Daniel 2:4's Aramaic, Listen's row, Night, the
+#           largest text, a BSB highlight in Greek; the recording of
+#           sequence 17 (original-transitions.mp4); its log's checks in
+#           original.txt
 #   ipad    §17 (DESIGN.md §17.8.2), on the 13-inch iPad Pro, tips on, a
 #           Memory passage written before the first launch: the reader in
 #           portrait and turned to landscape (the verse kept), at an
@@ -289,6 +298,11 @@ if [ "$group" = ipad ]; then
       "$t" "$((t + 60))" > "$data/Library/Application Support/SmoothBible/memory.tsv"
     echo "ipad group's passages written"
   fi
+  xcrun simctl spawn "$dev" defaults write "$id" learnSeen -bool true 2>/dev/null || true
+  xcrun simctl spawn "$dev" defaults write "$id" memorySeen -bool true 2>/dev/null || true
+fi
+# (The original group's: the one-time lines of Memory and cards seen.)
+if [ "$group" = original ]; then
   xcrun simctl spawn "$dev" defaults write "$id" learnSeen -bool true 2>/dev/null || true
   xcrun simctl spawn "$dev" defaults write "$id" memorySeen -bool true 2>/dev/null || true
 fi
@@ -1480,6 +1494,62 @@ ios18)
   ui appearance light
   step 40
   step 41 33-interlinear 6
+  ;;
+original)
+  # (DESIGN.md §14.11.9: shots 270 to 295.)
+  step 600 270-versions 12
+  step 601 271-john-1-greek 12
+  step 602 272-rare-words 8
+  step 603 273-popover 10
+  step_toast 604 274-learn-toast "Added to Greek Words"
+  step 605 275-john-3-learned 12
+  step 606 276-genesis-1-hebrew 10
+  step 607 277-psalm-23 8
+  step 608 278-accents 10
+  step 609 279-qere 12
+  step 610 280-malachi-4 12
+  step 611 281-daniel-aramaic 8
+  step 612 282-listen-greek 10
+  step 613 283-listen-hebrew 10
+  step 621 292-night-hebrew 10
+  ui content_size accessibility-extra-extra-extra-large
+  step 622 293-ax-greek 12
+  ui content_size large
+  step 624 295-highlight-in-greek 12
+  # The screen recording of sequence 17 (its setup before the mark).
+  step 625 "" 8
+  rec0=$(now)
+  xcrun simctl io "$dev" recordVideo --codec h264 --force "$out/transitions.mp4" > "$out/record.txt" 2>&1 &
+  recorder=$!
+  i=0
+  while ! grep -qi "started" "$out/record.txt" 2>/dev/null && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  rec1=$(now)
+  sleep 2
+  : > "$out/transitions.txt"
+  step 626 "" 12
+  sleep 9
+  a=$(step_at 626)
+  b=$(now)
+  echo "17 $(python3 -c "print(round($a - $rec0, 2), round($b - $rec0, 2))")" >> "$out/transitions.txt"
+  echo "17 from-started $(python3 -c "print(round($a - $rec1, 2), round($b - $rec1, 2))")" >> "$out/transitions.txt"
+  sleep 0.5
+  kill -INT "$recorder" 2>/dev/null
+  wait "$recorder" 2>/dev/null
+  # The log's checks (§14.11.9): the glosses by chapter and mode, the
+  # popovers, a card learned and the reader laid out again, Show Accents,
+  # no Listen for the original.
+  grep -h "bible: orig\|bible: toast\|bible: listen\|bible: demo step\|bible: demo learn\|bible: demo no" \
+    "$out/console.txt" > "$out/original.txt" 2>/dev/null
+  for want in "orig words mapped" "orig JHN 1 glossed" "(words I haven't learned)" "(rare words)" "orig popover" \
+      "toast Added to Greek Words" "orig relaid after cards changed" "orig GEN 1 glossed" "orig PSA 23 glossed" \
+      "orig accents on" "orig MAL 4 glossed" "orig DAN 2 glossed" "listen none for the original"; do
+    grep -qF "$want" "$out/original.txt" || { echo "FAILED: no \"$want\"" | tee -a "$out/original.txt"; failed=1; }
+  done
+  if grep -q "demo no apparatus entry" "$out/original.txt"; then echo "FAILED: an apparatus entry not found" | tee -a "$out/original.txt"; failed=1; fi
+  tail -5 "$out/original.txt"
   ;;
 esac
 # (No path wrote the reader's offset while it moved: go and set_offset

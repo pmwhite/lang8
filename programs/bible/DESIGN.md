@@ -8130,6 +8130,44 @@ Deviations, each with its reason:
    for the round that makes those texts again, as §9.2.1 says; `orig.py` and `ubs.py` were run on
    their own on the checked STEP and UBS files.
 
+**The version in the reader, glosses and the popover (§14.11.2–§14.11.4).** Text id 6 is the
+Hebrew and Greek (`TEXT_ORIG`); the ESV's Memory pins moved to 7 (`TEXT_PIN`, never kept by
+number). `text.l8` lays its words out one by one from `orig-words.bin`'s lengths: each word's
+letters in `STYLE_ORIG` (or `STYLE_ORIG_GL`, glossed), its punctuation after, a Qere's faint °; a
+paragraph's apparatus after its line (`STYLE_APPARATUS`, each entry `STYLE_APP_ENTRY`, a link
+by `L8Gloss` to its word). `orig.l8` decides which words are glossed and makes their glosses
+before a chapter is laid out (`orig_prepare`, kept for the chapter until a card or the mode
+changes); `ios_orig.l8` is the screens (Reading settings' rows, Glosses, the popover);
+`ios_look.l8` keeps a set of paragraph styles and attributes for the original, and another for
+it right to left.
+
+Deviations, each with its reason:
+10. **Glosses and Show Accents are rows of the Version section** (under Version, in this version
+    only), not a section of their own: the version's own settings sit with it, and no other
+    section moves. Glosses pushes its checklist (Words I Haven't Learned, Rare Words, None, the
+    one in force checked) with a footer saying what each means; the row shows the mode in force
+    for the testament read.
+11. **A gloss is the BSB's words, lower case only where they begin a sentence** (not "I", God,
+    names): lowercasing every gloss would make "God" "god" and "Nicodemus" "nicodemus". An
+    untranslated word (the article, אֵת) is glossed with its lexicon gloss ("[Obj.]", "the").
+12. **The apparatus is a left-to-right line in a Hebrew chapter too**, each Hebrew form isolated
+    right to left (§14.8), so the English reads as English; its entries are in reading order.
+13. **The glossed word's dotted line is the rule's color at 0.32 (0.4 dark)**: the rule's own
+    alpha (0.12) is a hairline's and can't be seen under a word. It is painted after the washes
+    (which take every underline away) and not under a verse selected, whose own line is there.
+14. **Words are glossed by `og_wanted`:** a name only before the alphabet is known (in either
+    mode); Aramaic always in Words I Haven't Learned; a word the tables don't have is known by
+    its own number and parsing.
+15. **The popover** has, in order: the verse (and "Hebrew 3:19" where its number differs), the
+    form (New York 34 pt, SF Hebrew 40 pt), the transliteration, the gloss, the meaning here and
+    its domain (UBS's, R11.0), the parsing in plain words, a Qere's "written … (Ketiv)", then Word
+    Study (where the tables have the word) and Learn This Word, or "Learning · next review
+    Thursday" once it has a card. Word Study dismisses the popover and opens the word's study as
+    the edit menu's Study does. Long-press Study in this version studies the word picked
+    (`og_pick`).
+16. **Listen** in this version is the Listen section's button, grey and disabled: "No recording of
+    the original yet." (§14.10b.1); `listen_start` does nothing here, and logs so.
+
 ### 14.12 Round 12: a Greek course
 
 Round 12 adds what a course gives: a sequence of short lessons that teach the grammar as a

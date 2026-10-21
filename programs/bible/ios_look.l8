@@ -126,6 +126,10 @@ c_flash: int = 0;
 
 c_underline: int = 0;
 
+// A glossed word's dotted line (the rule's color, a little firmer: the
+// rule's own is a hairline's).
+c_gloss_line: int = 0;
+
 c_icon: int = 0;
 
 c_sheet: int = 0;
@@ -205,6 +209,7 @@ make_colors() {
     c_sel = swap_color(c_sel, color_hex(t_accent[t], t_sel_alpha[t]));
     c_flash = swap_color(c_flash, color_hex(t_ink[t], if (t >= 4) 0.14f64 else 0.09f64));
     c_underline = swap_color(c_underline, color_hex(t_accent[t], 0.7f64));
+    c_gloss_line = swap_color(c_gloss_line, color_hex(t_rule[t], if (t >= 4) 0.4f64 else 0.32f64));
     c_icon = swap_color(c_icon, color_hex(t_ink[t], 0.85f64));
     c_sheet = swap_color(c_sheet, if (len(t_sheet[t]) > 0) color_hex(t_sheet[t], 1.0f64) else msg(cls("UIColor"),
         sel("systemGroupedBackgroundColor")));
@@ -285,17 +290,54 @@ fonts: []int = new int[STYLES](0);
 // fonts without small capitals of their own.
 caps_by_hand: bool = false;
 
-// For each style and paragraph kind (with a stanza's break or not), its
-// paragraph style and attributes.
-paras: []int = new int[STYLES * 16](0);
+// For each style and paragraph kind (with a stanza's break or not, its
+// apparatus after it or not), its paragraph style and attributes; and the
+// same in the original's chapters (lay_orig) and right to left (the
+// Hebrew's, lay_rtl), past one and two ATTRS_SET.
+ATTRS_SET: int = STYLES * 32;
 
-attrs: []int = new int[STYLES * 16](0);
+paras: []int = new int[STYLES * 96](0);
+
+attrs: []int = new int[STYLES * 96](0);
+
+attrs_set(): int {
+    if (lay_rtl) 2 * ATTRS_SET else if (lay_orig) ATTRS_SET else 0
+}
+
+// The Hebrew and Greek's fonts (§14.11.3): Greek in New York at the
+// reader's size, Hebrew in the system's (SF Hebrew) at 1.15 times it; the
+// apparatus in SF at 0.78 em.
+orig_fonts: []int = new int[4](0);
+
+k_gloss: str = "L8Gloss";
 
 keys: []int = new int[12](0);
 
 values: []int = new int[12](0);
 
 one_object: []int = new int[1](0);
+
+// New York at size (the system's serif), whatever font is chosen: the
+// Greek's.
+new_york(size: f64): int {
+    d: int = msg1(cls("UIFontDescriptor"), sel("preferredFontDescriptorWithTextStyle:"),
+        objc_const("UIFontTextStyleBody"));
+    serif_d: int = msg1(d, sel("fontDescriptorWithDesign:"), objc_const("UIFontDescriptorSystemDesignSerif"));
+    msg1_f(cls("UIFont"), sel("fontWithDescriptor:size:"), if (serif_d != 0) serif_d else d,
+        size)
+}
+
+// A style's font: the Hebrew's own for the original's words in a Hebrew
+// chapter.
+font_of(style: int): int {
+    if (lay_rtl && (style == STYLE_ORIG || style == STYLE_ORIG_GL)) return orig_fonts[0];
+    if (lay_rtl && (style == STYLE_OTITLE || style == STYLE_OTITLE_GL)) return orig_fonts[1];
+    fonts[style]
+}
+
+is_orig_style(style: int): bool {
+    style == STYLE_ORIG || style == STYLE_ORIG_GL || style == STYLE_OTITLE || style == STYLE_OTITLE_GL || style == STYLE_QERE
+}
 
 // The font of the body at size (in the font chosen).
 body(size: f64): int {
@@ -437,6 +479,16 @@ make_look() {
     fonts[STYLE_SUPPLIED] = keep(italic(em));
     fonts[STYLE_JESUS_SUPPLIED] = keep(italic(em));
     fonts[STYLE_RULE] = keep(sans(em * 0.5f64, 0.0f64));
+    fonts[STYLE_ORIG] = keep(new_york(em));
+    fonts[STYLE_ORIG_GL] = keep(new_york(em));
+    fonts[STYLE_OTITLE] = keep(new_york(em * 0.92f64));
+    fonts[STYLE_OTITLE_GL] = keep(new_york(em * 0.92f64));
+    fonts[STYLE_QERE] = keep(sans(em * 0.6f64, 0.0f64));
+    fonts[STYLE_APPARATUS] = keep(sans(em * 0.78f64, 0.0f64));
+    fonts[STYLE_APP_ENTRY] = keep(sans(em * 0.78f64, 0.0f64));
+    for i in 0..len(orig_fonts) release(orig_fonts[i]);
+    orig_fonts[0] = keep(sans(em * 1.15f64, 0.0f64));
+    orig_fonts[1] = keep(sans(em * 1.15f64 * 0.92f64, 0.0f64));
     for i in 0..len(paras) {
         release(paras[i]);
         release(attrs[i]);
@@ -472,17 +524,31 @@ is_heading_style(style: int): bool {
     style == STYLE_XREF || style == STYLE_BOOK || style == STYLE_NUMERAL || style == STYLE_NUMERAL1 || style == STYLE_HEAD || style == STYLE_SUBHEAD || style == STYLE_REF || style == STYLE_TITLE || style == STYLE_MAJOR || style == STYLE_RANGE || style == STYLE_ACROSTIC || style == STYLE_BOOKLABEL || style == STYLE_RULE || style == STYLE_PASSAGE
 }
 
-// The paragraph style of a style's runs in a paragraph of kind para.
+// The paragraph style of a style's runs in a paragraph of kind para (right
+// to left, in a Hebrew chapter: lay_rtl; the apparatus always left to
+// right, its Hebrew isolated).
 para_for(style_in: int, para: int): int {
     // (A heading's reference is set as the rest of its line.)
     style: int = if (style_in == STYLE_XREF) STYLE_REF else style_in;
-    at: int = (if (is_heading_style(style)) style else STYLE_BODY) * 16 + para;
+    app: bool = style == STYLE_APPARATUS || style == STYLE_APP_ENTRY;
+    rtl: bool = lay_rtl && !app;
+    // (The original's paragraphs one style whatever their runs: a
+    // paragraph takes its first character's, often a verse's number.)
+    base: int = if (is_heading_style(style)) style else if (app) STYLE_APPARATUS else if (style == STYLE_OTITLE || style == STYLE_OTITLE_GL) STYLE_OTITLE else if (is_orig_style(style) || lay_orig) STYLE_ORIG else STYLE_BODY;
+    at: int = base * 32 + para % 32 + attrs_set();
     if (paras[at] != 0) return paras[at];
     kind: int = para % KINDS;
-    gap: f64 = if (para >= KINDS) em * 0.8f64 else 0.0f64;
-    lh: f64 = spacings[set_spacing];
+    gap: f64 = if ((para & KINDS) != 0) em * 0.8f64 else 0.0f64;
+    // (Hebrew's points need room: 1.5, whatever the spacing.)
+    lh: f64 = if (lay_rtl && !is_heading_style(style) && !app) 1.5f64 else spacings[set_spacing];
     p: int = 0;
-    if (style == STYLE_RULE) {
+    if (app) {
+        // (The apparatus: 6 pt below its paragraph, faint, a paragraph's
+        // space after it.)
+        p = para_style(0, 0.0f64, 0.0f64, 0.0f64, em * 0.55f64, 1.15f64);
+        msg_set_f32(p, sel("setHyphenationFactor:"), 0.0f64 as f32)
+    } else if (base == STYLE_OTITLE) p = para_style(0, 0.0f64, 0.0f64, em * 0.2f64,
+        em * 0.6f64, lh) else if (style == STYLE_RULE) {
         // (A line no taller than the hairline: 2.0 em to the label's
         // capitals below it, less the space above their tops.)
         p = para_style(1, 0.0f64, 0.0f64, 0.0f64, em * 1.85f64, 1.0f64);
@@ -522,12 +588,25 @@ para_for(style_in: int, para: int): int {
         0.0f64, 0.0f64, gap, em * 0.55f64, lh) else if (kind == PARA_RIGHT) p = para_style(2,
         0.0f64, 0.0f64, gap, em * 0.55f64, lh) else p = para_style(0, 0.0f64, 0.0f64,
         gap, em * 0.55f64, lh);
+    // (No hyphens in the original: Koine isn't modern Greek.)
+    if (base == STYLE_ORIG || base == STYLE_OTITLE) msg_set_f32(p, sel("setHyphenationFactor:"),
+        0.0f64 as f32);
+    // (Its apparatus after it: 6 pt between them.)
+    if ((para & TIGHT) != 0 && !app) msg_set_f(p, sel("setParagraphSpacing:"), 6.0f64);
+    if (rtl) {
+        // (Right to left: NSWritingDirectionRightToLeft, aligned naturally
+        // but for what is centred.)
+        msg1(p, sel("setBaseWritingDirection:"), 1);
+        if (kind != PARA_CENTER && kind != PARA_RIGHT && !is_heading_style(style)) msg1(p,
+            sel("setAlignment:"), 4)
+    }
     paras[at] = p;
     p
 }
 
 color_for(style: int): int {
-    if (style == STYLE_BODY || style == STYLE_CAPS || style == STYLE_BOOK || style == STYLE_SUPPLIED) return c_ink;
+    if (style == STYLE_BODY || style == STYLE_CAPS || style == STYLE_BOOK || style == STYLE_SUPPLIED || style == STYLE_ORIG || style == STYLE_ORIG_GL) return c_ink;
+    if (style == STYLE_OTITLE || style == STYLE_OTITLE_GL) return c_heading;
     if (style == STYLE_JESUS || style == STYLE_JESUS_CAPS || style == STYLE_JESUS_SUPPLIED) return if (red_letter) c_accent else c_ink;
     if (style == STYLE_XREF) return c_accent;
     if (style == STYLE_HEAD || style == STYLE_SUBHEAD || style == STYLE_PASSAGE) return c_heading;
@@ -544,12 +623,12 @@ attrs_for(r: int): int {
 // The attributes of a style in a paragraph of kind para (r the run, for a
 // link's place; Memory's own runs are never links).
 attrs_sp(style: int, para: int, r: int): int {
-    link: bool = style == STYLE_NOTE || style == STYLE_XREF || style == STYLE_PASSAGE;
-    at: int = style * 16 + para;
+    link: bool = style == STYLE_NOTE || style == STYLE_XREF || style == STYLE_PASSAGE || style == STYLE_APP_ENTRY;
+    at: int = style * 32 + para % 32 + attrs_set();
     if (!link && attrs[at] != 0) return attrs[at];
     n: int = 0;
     keys[n] = k_font;
-    values[n] = fonts[style];
+    values[n] = font_of(style);
     n = n + 1;
     keys[n] = k_color;
     values[n] = color_for(style);
@@ -568,9 +647,24 @@ attrs_sp(style: int, para: int, r: int): int {
         values[n] = nsnumber_f(em * kern);
         n = n + 1
     }
+    if (style == STYLE_ORIG_GL || style == STYLE_OTITLE_GL) {
+        // (A word glossed: a dotted underline in the rule's color, thin.)
+        keys[n] = k_underline;
+        values[n] = nsnumber_int(257);
+        n = n + 1;
+        keys[n] = k_underline_color;
+        values[n] = c_gloss_line;
+        n = n + 1
+    }
+    if (is_orig_style(style) || style == STYLE_APP_ENTRY) {
+        // (Read by VoiceOver in Hebrew or Greek: an installed voice.)
+        keys[n] = objc_const("UIAccessibilitySpeechAttributeLanguage");
+        values[n] = nsstring(if (style == STYLE_APP_ENTRY) "en" else if (lay_rtl) "he" else "el");
+        n = n + 1
+    }
     if (link) {
         xr: bool = style == STYLE_XREF || style == STYLE_PASSAGE;
-        keys[n] = nsstring(if (xr) k_xref else k_link);
+        keys[n] = nsstring(if (xr) k_xref else if (style == STYLE_APP_ENTRY) k_gloss else k_link);
         values[n] = msg1(cls("NSNumber"), sel("numberWithLong:"), if (xr) run_arg[r] * 16777216 + run_arg2[r] else run_arg[r]);
         n = n + 1
     }
